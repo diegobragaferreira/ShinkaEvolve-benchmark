@@ -1,0 +1,269 @@
+<NAME>
+enable_numba_jit_for_geometric_operations
+</NAME>
+
+<DESCRIPTION>
+This change implements Numba JIT compilation for all geometric operations that are called frequently during optimization. I've identified that the actual class name is `SymmetricHexagonGrid` instead of `SpatialHashGrid` in the current code. The key improvements include:
+
+1. Adding @njit decorators to all critical geometric functions including:
+   - vertices_jit (already present but needs updated decoration)
+   - _get_edges (already present but needs updated decoration)
+   - _project_polygon_onto_axis (already present but needs updated decoration)
+   - _hexagon_overlap_sat_jit (already present but needs updated decoration)
+   - _hash_cell_numba (newly added for spatial hashing)
+
+2. Adding proper imports for numba's njit decorator
+
+3. Updating the SymmetricHexagonGrid class to use numba-compiled functions for better performance
+
+These changes will dramatically reduce computation time for constraint checking, allowing for more iterations within the time budget and potentially finding better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+from numba import jit
+import warnings
+from collections import defaultdict
+=======
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+from numba import jit, njit
+import warnings
+from collections import defaultdict
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    @jit(nopython=True)
+    def vertices_jit(center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """JIT compiled hexagon vertex calculation."""
+        angle_rad = np.radians(rotation_deg)
+        # Unit hexagon vertices centered at origin
+        base_vertices = np.array([
+            [1.0, 0.0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1.0, 0.0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+        # Rotate and translate
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+
+    def vertices(self, center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """Get hexagon vertices."""
+        return self.vertices_jit(center_x, center_y, rotation_deg)
+=======
+    @staticmethod
+    @njit
+    def vertices_jit(center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """JIT compiled hexagon vertex calculation."""
+        angle_rad = np.radians(rotation_deg)
+        # Unit hexagon vertices centered at origin
+        base_vertices = np.array([
+            [1.0, 0.0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1.0, 0.0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+        # Rotate and translate
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+
+    def vertices(self, center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """Get hexagon vertices."""
+        return self.vertices_jit(center_x, center_y, rotation_deg)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def _get_edges(vertices: np.ndarray) -> np.ndarray:
+    """Get edges from vertices."""
+    edges = np.empty((len(vertices), 2))
+    for i in range(len(vertices)):
+        edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+    return edges
+
+@jit(nopython=True)
+def _project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+    """Project polygon vertices onto an axis."""
+    projections = np.empty(len(vertices))
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@jit(nopython=True)
+def _hexagon_overlap_sat_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """Separating Axis Theorem for hexagon overlap detection."""
+    # Get edges of both hexagons
+    edges1 = _get_edges(hex1_vertices)
+    edges2 = _get_edges(hex2_vertices)
+
+    # Combine all axes (edges perpendicular to edges)
+    all_axes = np.empty((len(edges1) + len(edges2), 2))
+    for i in range(len(edges1)):
+        # Normal vector to edge (perpendicular)
+        all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+        if norm > 1e-10:
+            all_axes[i] /= norm
+    for i in range(len(edges2)):
+        # Normal vector to edge (perpendicular)
+        all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+        if norm > 1e-10:
+            all_axes[len(edges1) + i] /= norm
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = _project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = _project_polygon_onto_axis(hex2_vertices, axis)
+
+        # If no overlap on this axis, polygons don't overlap
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+=======
+@njit
+def _get_edges(vertices: np.ndarray) -> np.ndarray:
+    """Get edges from vertices."""
+    edges = np.empty((len(vertices), 2))
+    for i in range(len(vertices)):
+        edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+    return edges
+
+@njit
+def _project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+    """Project polygon vertices onto an axis."""
+    projections = np.empty(len(vertices))
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@njit
+def _hexagon_overlap_sat_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """Separating Axis Theorem for hexagon overlap detection."""
+    # Get edges of both hexagons
+    edges1 = _get_edges(hex1_vertices)
+    edges2 = _get_edges(hex2_vertices)
+
+    # Combine all axes (edges perpendicular to edges)
+    all_axes = np.empty((len(edges1) + len(edges2), 2))
+    for i in range(len(edges1)):
+        # Normal vector to edge (perpendicular)
+        all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+        if norm > 1e-10:
+            all_axes[i] /= norm
+    for i in range(len(edges2)):
+        # Normal vector to edge (perpendicular)
+        all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+        if norm > 1e-10:
+            all_axes[len(edges1) + i] /= norm
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = _project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = _project_polygon_onto_axis(hex2_vertices, axis)
+
+        # If no overlap on this axis, polygons don't overlap
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class SymmetricHexagonGrid:
+    """Symmetry-aware spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        cell = self._hash_cell(center_x, center_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        cell = self._hash_cell(center_x, center_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+=======
+class SymmetricHexagonGrid:
+    """Symmetry-aware spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    @staticmethod
+    @njit
+    def _hash_cell_numba(x: float, y: float, cell_size: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // cell_size), int(y // cell_size))
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return self._hash_cell_numba(x, y, self.cell_size)
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        cell = self._hash_cell(center_x, center_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        cell = self._hash_cell(center_x, center_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+>>>>>>> REPLACE
+</DIFF>

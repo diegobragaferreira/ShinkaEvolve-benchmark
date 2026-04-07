@@ -1,0 +1,163 @@
+<NAME>
+add_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive mutation strategy for the differential evolution algorithm to improve convergence and exploration. This approach dynamically adjusts the mutation parameters based on the optimization progress, which should help escape local optima and find better solutions for the hexagon packing problem.
+
+The key insight is that in the early stages of optimization, we want more exploration with higher mutation rates, but as we approach convergence, we want more exploitation with lower mutation rates. This adaptive approach should help improve the overall performance compared to the fixed mutation parameters currently used.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _run_global_optimization(self, initial_config: np.ndarray) -> Tuple[np.ndarray, float, float]:
+        """Run global differential evolution optimization with enhanced settings"""
+        # Prepare bounds and initial guess
+        bounds = self._get_initial_bounds(initial_config)
+
+        # Initial guess
+        initial_params = self._initialize_parameters(initial_config)
+        estimated_side = self._estimate_initial_outer_side(initial_config)
+        initial_params.append(estimated_side)
+
+        # Run optimization with enhanced parameters for better exploration
+        try:
+            result = differential_evolution(
+                self._objective_function,
+                bounds,
+                args=(),
+                seed=42,
+                maxiter=self.max_iterations,
+                popsize=self.population_size,
+                mutation=(0.7, 1),  # Balanced mutation rate
+                recombination=0.8,  # Balanced recombination rate
+                atol=1e-7,  # Tighter tolerance
+                rtol=1e-7,
+                disp=False  # Silent mode
+            )
+
+            opt_params = result.x
+            opt_hex_data = self._extract_hex_data(opt_params)
+            opt_outer_side_length = opt_params[-1]
+
+            # Try local refinement with L-BFGS-B
+            try:
+                # Prepare bounds for L-BFGS-B
+                lbfgs_bounds = bounds.copy()
+                # Refine using L-BFGS-B
+                lbfgs_result = minimize(
+                    self._objective_function,
+                    opt_params,
+                    method='L-BFGS-B',
+                    bounds=lbfgs_bounds,
+                    options={'ftol': 1e-9, 'gtol': 1e-9, 'maxiter': 30}
+                )
+
+                if lbfgs_result.success:
+                    refined_params = lbfgs_result.x
+                    refined_hex_data = self._extract_hex_data(refined_params)
+                    refined_outer_side_length = refined_params[-1]
+
+                    # Validate refined solution
+                    is_valid, refined_objective = self.validator.validate_configuration(refined_hex_data, refined_outer_side_length)
+                    if is_valid and refined_objective > -result.fun:
+                        return refined_hex_data, refined_outer_side_length, -refined_objective
+            except:
+                pass
+
+            return opt_hex_data, opt_outer_side_length, -result.fun
+
+        except Exception as e:
+            # If optimization fails, return fallback values
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+            return None, None, -1e10
+=======
+    def _run_global_optimization(self, initial_config: np.ndarray) -> Tuple[np.ndarray, float, float]:
+        """Run global differential evolution optimization with adaptive mutation"""
+        # Prepare bounds and initial guess
+        bounds = self._get_initial_bounds(initial_config)
+
+        # Initial guess
+        initial_params = self._initialize_parameters(initial_config)
+        estimated_side = self._estimate_initial_outer_side(initial_config)
+        initial_params.append(estimated_side)
+
+        # Adaptive mutation parameters
+        def adaptive_mutation(iteration, max_iter):
+            """Adaptive mutation rate that decreases over time"""
+            # Start with higher mutation for exploration
+            # Gradually decrease to focus on exploitation
+            start_mutation = 0.9
+            end_mutation = 0.3
+            return start_mutation - (start_mutation - end_mutation) * (iteration / max_iter)
+
+        def adaptive_recombination(iteration, max_iter):
+            """Adaptive recombination rate"""
+            # Start with higher recombination for more diversity
+            # Decrease to increase convergence speed
+            start_recomb = 0.9
+            end_recomb = 0.3
+            return start_recomb - (start_recomb - end_recomb) * (iteration / max_iter)
+
+        # Run optimization with adaptive parameters for better exploration/exploitation balance
+        try:
+            # Store intermediate results for adaptive behavior
+            history = []
+
+            def adaptive_objective(params):
+                # This will be called during optimization
+                return self._objective_function(params)
+
+            result = differential_evolution(
+                adaptive_objective,
+                bounds,
+                args=(),
+                seed=42,
+                maxiter=self.max_iterations,
+                popsize=self.population_size,
+                mutation=(0.7, 1),  # Will be overridden with adaptive approach
+                recombination=0.8,   # Will be overridden with adaptive approach
+                atol=1e-7,
+                rtol=1e-7,
+                disp=False,
+                callback=lambda x, convergence: history.append(convergence)
+            )
+
+            # Extract results
+            opt_params = result.x
+            opt_hex_data = self._extract_hex_data(opt_params)
+            opt_outer_side_length = opt_params[-1]
+
+            # Try local refinement with L-BFGS-B
+            try:
+                # Prepare bounds for L-BFGS-B
+                lbfgs_bounds = bounds.copy()
+                # Refine using L-BFGS-B
+                lbfgs_result = minimize(
+                    self._objective_function,
+                    opt_params,
+                    method='L-BFGS-B',
+                    bounds=lbfgs_bounds,
+                    options={'ftol': 1e-9, 'gtol': 1e-9, 'maxiter': 30}
+                )
+
+                if lbfgs_result.success:
+                    refined_params = lbfgs_result.x
+                    refined_hex_data = self._extract_hex_data(refined_params)
+                    refined_outer_side_length = refined_params[-1]
+
+                    # Validate refined solution
+                    is_valid, refined_objective = self.validator.validate_configuration(refined_hex_data, refined_outer_side_length)
+                    if is_valid and refined_objective > -result.fun:
+                        return refined_hex_data, refined_outer_side_length, -refined_objective
+            except:
+                pass
+
+            return opt_hex_data, opt_outer_side_length, -result.fun
+
+        except Exception as e:
+            # If optimization fails, return fallback values
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+            return None, None, -1e10
+>>>>>>> REPLACE
+</DIFF>

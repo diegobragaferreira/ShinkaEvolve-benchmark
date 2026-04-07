@@ -1,0 +1,197 @@
+<NAME>
+enhanced_density_adaptive_initialization
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the density-adaptive initialization by incorporating a more sophisticated approach to determine initial radii. Instead of simply using a factor based on density, we now:
+1. First create a coarse hexagonal grid pattern
+2. Then compute a density map across the entire domain
+3. Use this density information to assign initial radii that are inversely proportional to local density
+4. Add a final refinement step that ensures no overlaps exist in the initial configuration
+This approach improves upon the previous version by being more systematic in its density assessment and better distributing circles across the space.
+
+The key insight is that we want circles to be larger in sparser regions and smaller in denser regions, but we also want to ensure good distribution patterns. The enhanced approach uses a multi-step process that creates a better starting configuration for optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions using a density-adaptive heuristic approach."""
+    circles = []
+
+    # Start with a coarse grid and then refine
+    # Try to place circles in a hexagonal-like pattern
+    grid_size = int(np.ceil(np.sqrt(n)))
+    spacing = 1.0 / (grid_size + 1)
+
+    # Create initial placements with varying radii based on density
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(circles) >= n:
+                break
+            x = (i + 1) * spacing
+            y = (j + 1) * spacing
+
+            # Initial radius estimate based on available space
+            r_min = min(x, y, 1-x, 1-y)
+
+            # Density-based adjustment: circles in denser regions get smaller radii
+            point = np.array([x, y])
+            density = compute_local_density(circles, point)
+            # Adjust radius based on how dense the area is (lower density = larger radius)
+            r_factor = max(0.2, 1.0 / (1.0 + density * 5))
+            r = min(r_min * r_factor, 0.15)
+
+            # Only add if valid
+            if is_valid_placement(circles, x, y, r):
+                circles.append([x, y, r])
+
+    # Fill remaining spots with smaller circles
+    while len(circles) < n:
+        best_r = 0
+        best_x, best_y = 0, 0
+
+        # Sample potential positions
+        for _ in range(1000):  # Sample many points
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+
+            # Estimate max radius at this location
+            r_max = min(x, y, 1-x, 1-y)
+            if r_max <= 0:
+                continue
+
+            # Density-based radius estimation
+            point = np.array([x, y])
+            density = compute_local_density(circles, point)
+            # Adjust radius based on how dense the area is
+            r_factor = max(0.1, 1.0 / (1.0 + density * 5))
+            adjusted_r_max = r_max * r_factor
+
+            # Try different radii
+            test_radii = np.linspace(0.005, adjusted_r_max * 0.4, 10)
+            for r in test_radii:
+                if is_valid_placement(circles, x, y, r):
+                    if r > best_r:
+                        best_r = r
+                        best_x, best_y = x, y
+                        break
+
+        if best_r > 0:
+            circles.append([best_x, best_y, best_r])
+
+    return np.array(circles)
+=======
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions using a density-adaptive heuristic approach."""
+    circles = []
+
+    # Step 1: Create a hexagonal grid pattern for initial distribution
+    # Calculate grid size to fit approximately n circles
+    grid_size = int(np.ceil(np.sqrt(n * 1.5)))  # Slightly more to account for irregularities
+    spacing = 1.0 / (grid_size + 1)
+
+    # Fill the grid with circles
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(circles) >= n:
+                break
+            # Create a hexagonal offset pattern
+            x = (i + 1) * spacing
+            y = (j + 1) * spacing
+            if i % 2 == 1:  # Offset every other row
+                x += spacing * 0.5
+
+            # Initial radius estimate based on available space
+            r_min = min(x, y, 1-x, 1-y)
+
+            # Very conservative initial radius to ensure validity
+            r = min(r_min * 0.4, 0.15)
+
+            # Only add if valid
+            if is_valid_placement(circles, x, y, r):
+                circles.append([x, y, r])
+
+    # Step 2: Fill remaining spots with additional circles using density-aware sampling
+    while len(circles) < n:
+        best_r = 0
+        best_x, best_y = 0, 0
+
+        # Sample potential positions using better distribution
+        for _ in range(2000):  # Increase samples for better chance
+            # Better sampling strategy: distribute samples more evenly
+            if np.random.random() < 0.7:  # 70% regular sampling
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+            else:  # 30% more concentrated in promising areas
+                # Sample from corners and center areas
+                corner_probs = [0.25, 0.25, 0.25, 0.25]
+                corner_idx = np.random.choice(4, p=corner_probs)
+                if corner_idx == 0:
+                    x = np.random.uniform(0.05, 0.3)
+                    y = np.random.uniform(0.05, 0.3)
+                elif corner_idx == 1:
+                    x = np.random.uniform(0.7, 0.95)
+                    y = np.random.uniform(0.05, 0.3)
+                elif corner_idx == 2:
+                    x = np.random.uniform(0.05, 0.3)
+                    y = np.random.uniform(0.7, 0.95)
+                else:
+                    x = np.random.uniform(0.7, 0.95)
+                    y = np.random.uniform(0.7, 0.95)
+
+            # Estimate max radius at this location
+            r_max = min(x, y, 1-x, 1-y)
+            if r_max <= 0:
+                continue
+
+            # For better density estimation, sample a few nearby points
+            sample_density = 0
+            sample_count = 10
+            for _ in range(sample_count):
+                px = np.random.uniform(max(0.05, x-0.1), min(0.95, x+0.1))
+                py = np.random.uniform(max(0.05, y-0.1), min(0.95, y+0.1))
+                point = np.array([px, py])
+                density = compute_local_density(circles, point)
+                sample_density += density
+            avg_density = sample_density / sample_count if sample_count > 0 else 0
+
+            # Adjust radius based on how dense the area is
+            # In sparse areas, allow larger radii; in dense areas, smaller
+            r_factor = max(0.1, 1.0 / (1.0 + avg_density * 10))
+            adjusted_r_max = r_max * r_factor
+
+            # Try different radii with better spacing
+            test_radii = np.linspace(0.005, adjusted_r_max * 0.7, 15)
+            for r in test_radii:
+                if is_valid_placement(circles, x, y, r):
+                    if r > best_r:
+                        best_r = r
+                        best_x, best_y = x, y
+                        break
+
+        if best_r > 0:
+            circles.append([best_x, best_y, best_r])
+        else:
+            # If we couldn't place another circle, try again with slightly smaller target
+            if len(circles) > 0:
+                # Remove last circle and retry with reduced radius
+                circles = circles[:-1]
+            else:
+                break
+
+    # Step 3: Final refinement to eliminate any overlaps
+    # Use a simple greedy approach to remove overlaps
+    refined_circles = []
+    for i in range(len(circles)):
+        cx, cy, cr = circles[i]
+        if is_valid_placement(refined_circles, cx, cy, cr):
+            refined_circles.append([cx, cy, cr])
+
+    # If we lost too many circles, keep the original
+    if len(refined_circles) < n * 0.8:  # Keep at least 80%
+        refined_circles = circles[:n]
+
+    return np.array(refined_circles)
+>>>>>>> REPLACE
+</DIFF>

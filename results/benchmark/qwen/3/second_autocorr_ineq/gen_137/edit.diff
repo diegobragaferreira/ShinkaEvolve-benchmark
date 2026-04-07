@@ -1,0 +1,532 @@
+--- a/original.py
++++ b/original.py
+@@ -1,333 +1,240 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from deap import base, creator, tools, algorithms
+-import random
++from scipy import signal
++from scipy.fft import fft, ifft
++from typing import List
+ import time
+-from scipy import signal
+-from typing import List
+-from numba import jit
+-
+-# Set random seeds for reproducibility
+-random.seed(42)
+-np.random.seed(42)
+-
+-@jit(nopython=True)
+-def compute_autoconvolution_numba(f_vals):
+-    """
+-    Compute autoconvolution using numba for speed
+-    """
+-    n = len(f_vals)
+-    # Autoconvolution size is 2*n - 1
+-    g_size = 2 * n - 1
+-    g_vals = np.zeros(g_size)
+-
+-    # Compute convolution directly with numba optimization
+-    for i in range(n):
+-        for j in range(n):
+-            idx = i + j
+-            if 0 <= idx < g_size:
+-                g_vals[idx] += f_vals[i] * f_vals[j]
+-
+-    return g_vals
+-
+-@jit(nopython=True)
+-def compute_norms_numba(g_vals, dx):
+-    """
+-    Compute norms efficiently with numba
+-    """
+-    n = len(g_vals)
+-
+-    # Compute L1 norm (sum of absolute values)
+-    l1_norm = 0.0
+-    for i in range(n):
+-        l1_norm += abs(g_vals[i])
+-
+-    # Compute L2 norm squared
+-    l2_norm_sq = 0.0
+-    for i in range(n):
+-        l2_norm_sq += g_vals[i] * g_vals[i]
+-
+-    # Compute infinity norm
+-    linf_norm = 0.0
+-    for i in range(n):
+-        val = abs(g_vals[i])
+-        if val > linf_norm:
+-            linf_norm = val
+-
+-    return l1_norm, l2_norm_sq, linf_norm
++import math
+ 
+ def compute_autoconvolution_norms(f_values: List[float]):
+     """
+     Compute the three norms needed for C₂ calculation:
+     ||g||₂², ||g||₁, ||g||∞ where g = f*f
+     """
+     if not f_values:
+         return 0.0, 0.0, 0.0
+ 
+     # Create step function on [-1/4, 1/4]
+     n_steps = len(f_values)
+     if n_steps == 0:
+         return 0.0, 0.0, 0.0
+ 
+     dx = 0.5 / n_steps  # Step size
+ 
+     # Create piecewise constant function from step heights
+     f = np.array(f_values)
+-
+-    # Compute autoconvolution g = f * f using numba optimized version
+-    g = compute_autoconvolution_numba(f)
+-
+-    # Adjust indices for the correct domain
+-    # Result has length 2*n_steps - 1
+-    g_len = len(g)
+-
++    
++    # Use FFT-based convolution for efficiency
++    # Pad to appropriate size for full convolution
++    pad_size = 2 * n_steps - 1
++    f_padded = np.pad(f, (0, pad_size - n_steps), mode='constant')
++    
++    # FFT-based convolution
++    f_fft = fft(f_padded)
++    g_fft = f_fft * f_fft.conj()  # Autoconvolution in frequency domain
++    g = np.real(ifft(g_fft))[:pad_size]
++    
+     # Extract the central region corresponding to [-1/4, 1/4]
+-    # This takes the middle n_steps elements of the full convolution
+-    central_start = (g_len - n_steps) // 2
++    central_start = (pad_size - n_steps) // 2
+     central_end = central_start + n_steps
+     g_centered = g[central_start:central_end]
+ 
+-    # Compute norms using numba optimized version
++    # Compute norms
+     g_abs = np.abs(g_centered)
+-
+-    # Compute norms using numba
+-    norm_1, norm_2_sq, norm_inf = compute_norms_numba(g_abs, dx)
+-
+-    # Normalize for the trapezoidal integration that will happen below
+-    # The actual integral should be scaled properly
+-    # Since we're using trapezoidal integration, and we have dx spacing,
+-    # we multiply by dx the norms that represent integrals
+-    norm_1 *= dx
+-    norm_2_sq *= dx
+-
++    
++    # L2 norm squared
++    norm_2_sq = np.sum(g_abs * g_abs) * dx
++    
++    # L1 norm
++    norm_1 = np.sum(g_abs) * dx
++    
++    # L-infinity norm
++    norm_inf = np.max(g_abs)
++    
+     return norm_2_sq, norm_1, norm_inf
+ 
+-def evaluate_c2(individual):
+-    """Evaluate fitness for individual (step function heights)"""
++def calculate_c2(f_values: List[float]) -> float:
++    """
++    Calculate the C2 constant from the step function values.
++    """
+     try:
+-        # Convert individual to list of floats
+-        f_values = [max(0.0, float(x)) for x in individual]  # Ensure non-negative
+-
+-        # Compute the norms
+-        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+-
++        g_norm_2_sq, g_norm_1, g_norm_inf = compute_autoconvolution_norms(f_values)
++        
+         # Avoid division by zero
+-        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+-            return (0.0,)
+-
+-        # Calculate C₂
+-        c2 = norm_2_sq / (norm_1 * norm_inf)
+-        return (c2,)
+-    except Exception as e:
+-        return (0.0,)
++        if g_norm_1 <= 1e-15 or g_norm_inf <= 1e-15:
++            return 0.0
++            
++        c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
++        return c2
++    except:
++        return 0.0
++
++def generate_geometric_pattern(n: int, base_rate: float = 0.8, decay: float = 0.9) -> List[float]:
++    """Generate a geometrically decaying pattern that enhances convolution properties"""
++    pattern = []
++    for i in range(n):
++        # Create a pattern that starts high and decays
++        pos = i / (n - 1) if n > 1 else 0.5
++        # Geometric decay with some oscillation
++        amplitude = base_rate * (decay ** i)
++        oscillation = 0.1 * math.sin(8 * math.pi * pos)
++        value = max(0.0, amplitude + oscillation + 0.05)
++        pattern.append(value)
++    return pattern
++
++def generate_sine_pattern(n: int, frequency: float = 4.0) -> List[float]:
++    """Generate a sine-based modulation pattern"""
++    pattern = []
++    for i in range(n):
++        pos = i / (n - 1) if n > 1 else 0.5
++        # Sine wave with varying amplitude
++        amplitude = 0.5 + 0.3 * math.sin(frequency * math.pi * pos)
++        # Add some high-frequency noise for complexity
++        noise = 0.05 * math.sin(20 * math.pi * pos) * math.cos(15 * math.pi * pos)
++        value = max(0.0, amplitude + noise)
++        pattern.append(value)
++    return pattern
++
++def generate_peak_pattern(n: int, num_peaks: int = 8) -> List[float]:
++    """Generate a pattern with strategically placed peaks"""
++    pattern = [0.0] * n
++    
++    # Place peaks at regular intervals
++    peak_positions = []
++    for i in range(num_peaks):
++        pos = (i + 0.5) / num_peaks
++        peak_positions.append(int(pos * n))
++    
++    # Create peak shapes using Gaussian-like functions
++    for pos in peak_positions:
++        if pos < n:
++            # Create a bell-shaped peak
++            for i in range(max(0, pos-10), min(n, pos+11)):
++                distance = abs(i - pos)
++                # Gaussian-like decay
++                value = 1.0 * math.exp(-0.5 * (distance**2) / 25.0)
++                pattern[i] = max(pattern[i], value)
++    
++    # Add some randomness to make it more interesting
++    for i in range(n):
++        if i % 3 == 0:  # Every third position
++            pattern[i] = max(0.0, pattern[i] + 0.1 * (np.random.random() - 0.5))
++    
++    # Normalize and ensure minimum values
++    max_val = max(pattern) if pattern else 1.0
++    if max_val > 0:
++        pattern = [val / max_val * 0.8 for val in pattern]
++    
++    # Add some base level
++    for i in range(len(pattern)):
++        pattern[i] = max(0.0, pattern[i] + 0.1)
++    
++    return pattern
++
++def refine_pattern(pattern: List[float], iterations: int = 3) -> List[float]:
++    """Refine pattern through iterative improvement heuristics"""
++    refined = pattern.copy()
++    
++    for iter_num in range(iterations):
++        # Try to improve by adjusting adjacent elements
++        improved = refined.copy()
++        
++        for i in range(len(improved)):
++            # Try small adjustments
++            current_value = improved[i]
++            best_value = current_value
++            best_c2 = calculate_c2(improved)
++            
++            # Try small positive adjustment
++            test_value = max(0.0, current_value + 0.02)
++            if test_value != current_value:
++                test_pattern = improved.copy()
++                test_pattern[i] = test_value
++                test_c2 = calculate_c2(test_pattern)
++                if test_c2 > best_c2:
++                    best_c2 = test_c2
++                    best_value = test_value
++            
++            # Try small negative adjustment  
++            test_value = max(0.0, current_value - 0.02)
++            if test_value != current_value:
++                test_pattern = improved.copy()
++                test_pattern[i] = test_value
++                test_c2 = calculate_c2(test_pattern)
++                if test_c2 > best_c2:
++                    best_c2 = test_c2
++                    best_value = test_value
++            
++            improved[i] = best_value
++        
++        refined = improved
++    
++    return refined
+ 
+ def construct_function() -> List[float]:
+-    """Function to construct step-function with high C₂ value using enhanced evolutionary optimization."""
+-
+-    # Algorithm parameters
+-    INITIAL_POPSIZE = 30
+-    MAX_POPSIZE = 100
+-    NGEN = 200
+-    INITIAL_MUTPB = 0.3
+-    INITIAL_CXPB = 0.5
+-    TOURNAMENT_SIZE = 3
+-    TIME_LIMIT = 85  # seconds
+-    DIVERSITY_THRESHOLD = 0.01
+-    STAGNATION_LIMIT = 20
+-
++    """
++    Function to construct step-function with high C₂ value using pattern-based optimization.
++    Uses deterministic construction with mathematical patterns and refinement.
++    """
+     start_time = time.time()
+-
+-    # Define problem
+-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+-    creator.create("Individual", list, fitness=creator.FitnessMax)
+-
+-    toolbox = base.Toolbox()
+-
+-    # Multiple initialization strategies to increase diversity
+-    def create_uniform_individual():
+-        n_steps = random.randint(100, 1000)
+-        return creator.Individual([random.uniform(0.5, 1.0) for _ in range(n_steps)])
+-
+-    def create_alternating_individual():
+-        n_steps = random.randint(100, 1000)
+-        individual = []
+-        for i in range(n_steps):
+-            if i % 2 == 0:
+-                individual.append(random.uniform(0.7, 1.0))
+-            else:
+-                individual.append(random.uniform(0.1, 0.3))
+-        return creator.Individual(individual)
+-
+-    def create_gaussian_individual():
+-        n_steps = random.randint(100, 1000)
+-        # Create normally distributed peaks
+-        individual = [random.gauss(0.5, 0.2) for _ in range(n_steps)]
+-        return creator.Individual(individual)
+-
+-    def create_sine_individual():
+-        n_steps = random.randint(100, 1000)
+-        individual = []
+-        for i in range(n_steps):
+-            # Sine-based pattern with some noise
+-            val = 0.5 + 0.3 * np.sin(i * 2 * np.pi / n_steps) + random.gauss(0, 0.05)
+-            individual.append(max(0.0, val))
+-        return creator.Individual(individual)
+-
+-    def create_structured_individual():
+-        """Create a structured pattern with high peaks and low valleys."""
+-        n_steps = random.randint(100, 1000)
+-        individual = []
+-        for i in range(n_steps):
+-            # Create structured pattern: high, medium, low, low, high, etc.
+-            pattern_pos = i % 8
+-            if pattern_pos < 2:
+-                individual.append(random.uniform(0.8, 1.0))
+-            elif pattern_pos < 5:
+-                individual.append(random.uniform(0.3, 0.7))
+-            else:
+-                individual.append(random.uniform(0.0, 0.3))
+-        # Add structured noise to make it more diverse
+-        for i in range(len(individual)):
+-            if random.random() < 0.4:  # 40% chance to modify
+-                individual[i] = max(0.0, individual[i] + random.gauss(0, 0.1))
+-        return creator.Individual(individual)
+-
+-    # Create multiple initialization strategies
+-    init_strategies = [
+-        create_uniform_individual, 
+-        create_alternating_individual,
+-        create_gaussian_individual, 
+-        create_sine_individual,
+-        create_structured_individual
++    best_c2 = 0.0
++    best_pattern = []
++    
++    # Different pattern types to try
++    pattern_types = [
++        ("geometric", lambda n: generate_geometric_pattern(n, 0.9, 0.85)),
++        ("sine", lambda n: generate_sine_pattern(n, 6.0)),
++        ("peaks", lambda n: generate_peak_pattern(n, 12)),
+     ]
+-
+-    best_overall_fitness = 0.0
+-    best_overall_individual = None
+-
+-    # Run multiple parallel optimizations with different initialization strategies
+-    for strategy_idx, init_func in enumerate(init_strategies):
+-        if time.time() - start_time > TIME_LIMIT - 5:  # Leave margin for cleanup
++    
++    # Try different sizes to find optimal resolution
++    sizes = [200, 300, 400, 500, 600, 700, 800]
++    
++    for size in sizes:
++        if time.time() - start_time > 85:  # Leave 5 seconds for final processing
+             break
+             
+-        print(f"Running optimization with strategy {strategy_idx + 1}")
+-
+-        # Use a fresh toolbox for each strategy to avoid interference
+-        local_toolbox = base.Toolbox()
+-        local_toolbox.register("individual", init_func)
+-        local_toolbox.register("population", tools.initRepeat, list, local_toolbox.individual)
+-        local_toolbox.register("evaluate", evaluate_c2)
+-        local_toolbox.register("mate", tools.cxUniform, indpb=0.05)
+-        local_toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+-        local_toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+-
+-        # Initialize population with dynamic sizing
+-        current_popsize = INITIAL_POPSIZE
+-        pop = local_toolbox.population(n=current_popsize)
+-
+-        # Evaluate initial population
+-        fitnesses = list(map(local_toolbox.evaluate, pop))
+-        for ind, fit in zip(pop, fitnesses):
+-            ind.fitness.values = fit
+-
+-        # Main evolution loop with enhanced diversity management
+-        best_fitness = 0.0
+-        best_individual = None
+-        generation_counter = 0
+-        stagnation_count = 0
+-        prev_best_fitness = 0.0
+-
+-        for gen in range(NGEN):
+-            if time.time() - start_time > TIME_LIMIT:
++        for pattern_name, pattern_func in pattern_types:
++            if time.time() - start_time > 85:
+                 break
+-
+-            generation_counter += 1
+-
+-            # Adaptive population size: grow if early generations and slow down
+-            if gen < NGEN//3 and current_popsize < MAX_POPSIZE:
+-                current_popsize = min(MAX_POPSIZE, current_popsize + 2)
+-                # Grow population by adding random individuals
+-                extra_individuals = local_toolbox.population(n=current_popsize - len(pop))
+-                pop.extend(extra_individuals)
+-
+-            # Adaptive mutation rate: decrease over generations
+-            adaptive_mutpb = INITIAL_MUTPB * (1.0 - gen / NGEN)
+-            adaptive_cxpb = INITIAL_CXPB * (1.0 - gen / NGEN)
+-
+-            # Select the next generation individuals
+-            offspring = local_toolbox.select(pop, len(pop))
+-            offspring = list(map(local_toolbox.clone, offspring))
+-
+-            # Apply crossover and mutation
+-            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+-                if random.random() < adaptive_cxpb:
+-                    local_toolbox.mate(child1, child2)
+-                    del child1.fitness.values
+-                    del child2.fitness.values
+-
+-            for mutant in offspring:
+-                if random.random() < adaptive_mutpb:
+-                    local_toolbox.mutate(mutant)
+-                    del mutant.fitness.values
+-
+-            # Evaluate the individuals with an invalid fitness
+-            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+-            fitnesses = list(map(local_toolbox.evaluate, invalid_ind))
+-            for ind, fit in zip(invalid_ind, fitnesses):
+-                ind.fitness.values = fit
+-
+-            # Replace population
+-            pop[:] = offspring
+-
+-            # Track best solution
+-            best_in_gen = max(pop, key=lambda x: x.fitness.values[0])
+-            if best_in_gen.fitness.values[0] > best_fitness:
+-                best_fitness = best_in_gen.fitness.values[0]
+-                best_individual = list(best_in_gen)
+-                stagnation_count = 0
+-            else:
+-                stagnation_count += 1
+-
+-            # Check for stagnation and introduce diversity
+-            if stagnation_count >= STAGNATION_LIMIT:
+-                # Introduce some randomness to escape local optima
+-                for i in range(len(pop) // 5):  # Perturb 20% of population
+-                    if random.random() < 0.5:
+-                        ind_idx = random.randint(0, len(pop)-1)
+-                        ind = pop[ind_idx]
+-                        for j in range(len(ind)):
+-                            if random.random() < 0.1:
+-                                ind[j] = max(0.0, ind[j] + random.gauss(0, 0.05))
+-                stagnation_count = 0
+-
+-            # Check diversity periodically
+-            if gen % 10 == 0 and len(pop) > 1:
+-                # Compute diversity metric - variance of fitness values
+-                fitness_values = [ind.fitness.values[0] for ind in pop if ind.fitness.values[0] > 0]
+-                if len(fitness_values) >= 2:
+-                    diversity = np.var(fitness_values)
+-                    # If diversity is too low, add some new random individuals
+-                    if diversity < DIVERSITY_THRESHOLD:
+-                        additional_individuals = local_toolbox.population(n=len(pop)//4)
+-                        pop.extend(additional_individuals)
+-
+-        # Final evaluation of best individual from this run
+-        if best_individual is not None:
+-            final_fitness = evaluate_c2(best_individual)[0]
+-            if final_fitness > 0.0 and final_fitness > best_overall_fitness:
+-                best_overall_fitness = final_fitness
+-                best_overall_individual = list(best_individual)
+-
+-    # Return the best individual found across all strategies
+-    if best_overall_individual is not None:
+-        return [max(0.0, float(x)) for x in best_overall_individual]
+-
+-    # Fallback: return reasonable random solution
+-    fallback_size = random.randint(100, 1000)
+-    return [abs(random.gauss(0.5, 0.3)) for _ in range(fallback_size)]
++                
++            # Generate pattern
++            pattern = pattern_func(size)
++            
++            # Refine the pattern
++            refined_pattern = refine_pattern(pattern, 5)
++            
++            # Evaluate
++            current_c2 = calculate_c2(refined_pattern)
++            
++            if current_c2 > best_c2:
++                best_c2 = current_c2
++                best_pattern = refined_pattern.copy()
++    
++    # Additional local search refinement on the best pattern found
++    if best_pattern and time.time() - start_time < 85:
++        # Try a more aggressive refinement step
++        final_pattern = refine_pattern(best_pattern, 10)
++        final_c2 = calculate_c2(final_pattern)
++        
++        if final_c2 > best_c2:
++            best_pattern = final_pattern
++            best_c2 = final_c2
++    
++    # Final validation check
++    if not best_pattern:
++        # Fallback to a simple geometric pattern
++        best_pattern = generate_geometric_pattern(500, 0.8, 0.9)
++    
++    # Ensure pattern length is reasonable and has good properties
++    if len(best_pattern) < 100:
++        best_pattern = generate_geometric_pattern(500, 0.8, 0.9)
++    
++    return best_pattern
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

@@ -1,0 +1,352 @@
+<NAME>
+enhanced_convolution_strategy
+</NAME>
+
+<DESCRIPTION>
+I'll implement an enhanced strategy for convolution computation that uses a more sophisticated approach to balance between accuracy and efficiency. The key insight is to dynamically select the most appropriate convolution method based on sequence characteristics and problem-specific conditions.
+
+The main improvements include:
+1. Using FFT for small sequences when it provides better performance
+2. Implementing adaptive convolution window selection
+3. Adding error handling for numerical instability in FFT operations
+4. Improving the boundary handling for convolution operations
+
+This approach should help achieve better performance by making smarter choices about computational methods based on the input characteristics.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')[:2*len(a)-1]
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')[:2*len(a)-1]
+=======
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    try:
+        result = fftconvolve(a, b, mode='full')[:2*len(a)-1]
+        # Check for numerical instability
+        if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+            # Fall back to direct convolution if FFT introduces instability
+            return np.convolve(a, b, mode='full')[:2*len(a)-1]
+        return result
+    except:
+        # Fall back to direct convolution if FFT fails
+        return np.convolve(a, b, mode='full')[:2*len(a)-1]
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')[:2*len(a)-1]
+
+def adaptive_convolve(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Adaptive convolution that chooses the best method based on sequence properties."""
+    n = len(a)
+
+    # For very small sequences, direct convolution is often faster and more stable
+    if n <= 20:
+        return convolve_direct(a, b)
+
+    # For medium-sized sequences, compare performance and stability
+    elif n <= 100:
+        # Try FFT first but fall back if unstable
+        fft_result = convolve_fft(a, b)
+        # If FFT gives reasonable results, use it; otherwise fall back to direct
+        if not (np.any(np.isnan(fft_result)) or np.any(np.isinf(fft_result))):
+            return fft_result
+        else:
+            return convolve_direct(a, b)
+
+    # For large sequences, use FFT with error checking
+    else:
+        return convolve_fft(a, b)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimized_c1_computation
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the C1 constant computation to be more numerically stable and efficient. The main improvements involve:
+1. Better handling of edge cases like very small sums
+2. More robust calculation of the maximum convolution value
+3. Improved memory management for large sequences
+4. Early termination conditions to avoid unnecessary computation
+
+These changes should lead to more reliable and faster computation of the C1 constant, which is fundamental to our optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence."""
+    a = np.array(sequence)
+    n = len(a)
+
+    # Use FFT for efficiency when sequence is large
+    if n > 100:
+        b = convolve_fft(a, a)
+    else:
+        b = convolve_direct(a, a)
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+=======
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence."""
+    a = np.array(sequence)
+    n = len(a)
+
+    # Early exit for empty or invalid sequences
+    if n == 0:
+        return float('inf'), 0.0
+
+    # Use adaptive convolution method
+    b = adaptive_convolve(a, a)
+
+    # Handle potential numerical issues
+    if np.any(np.isnan(b)) or np.any(np.isinf(b)):
+        return float('inf'), 0.0
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    # Very small sums can cause numerical instability
+    if sum_a < 1e-12:
+        return float('inf'), 0.0
+
+    # Avoid division by zero or extremely small numbers
+    if max_conv < 1e-12:
+        return float('inf'), 0.0
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+
+    # Prevent overflow
+    if c1 > 1e10:
+        return float('inf'), 0.0
+
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_curvature_calculation
+</NAME>
+
+<DESCRIPTION>
+I'll improve the curvature-aware direction finding algorithm by implementing a more stable and accurate calculation of the Hessian approximation. The main enhancements include:
+
+1. Better numerical differentiation with proper epsilon handling
+2. More robust Hessian estimation that avoids instability
+3. Improved scaling and normalization of curvature corrections
+4. Added checks to prevent extreme curvature corrections that could destabilize optimization
+
+These changes should lead to more reliable curvature-aware optimization that actually improves convergence rather than causing oscillations or instability.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def curvature_aware_direction_finder(
+    sequence: List[float],
+    max_iterations: int = 10,
+    curvature_weight: float = 0.1
+) -> Optional[List[float]]:
+    """Find improved direction using curvature-aware optimization."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware correction for better convergence
+    if n > 20:  # Only apply curvature correction for sufficiently large sequences
+        # Estimate curvature using finite differences
+        epsilon = 1e-4
+        hessian_approx = np.zeros((n, n))
+
+        # Approximate second derivative for each dimension
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += epsilon
+
+            # Recompute convolution with perturbed sequence
+            if n > 100:
+                b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+            else:
+                b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+            second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon ** 2)
+            hessian_approx[i, i] = max(0, second_derivative)
+
+        # Apply curvature correction to the direction
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+
+        # Adjust direction with curvature bias
+        corrected_direction = np.array(normalized_g_fun) + curvature_weight * curvature_correction
+        normalized_g_fun = corrected_direction.tolist()
+
+    # Apply adaptive perturbation based on convergence rate
+    current_c1, _ = compute_c1_constant(sequence)
+    t = min(0.1, max(0.01, 0.05 * (1.0 - min(1.0, current_c1 / 1.5))))
+
+    # Add diversity with Gaussian noise
+    noise = [np.random.normal(0, 0.01) for _ in range(n)]
+    new_sequence = [
+        (1 - t) * x + t * y + noise[i] for i, (x, y) in enumerate(zip(sequence, normalized_g_fun))
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def curvature_aware_direction_finder(
+    sequence: List[float],
+    max_iterations: int = 10,
+    curvature_weight: float = 0.1
+) -> Optional[List[float]]:
+    """Find improved direction using curvature-aware optimization."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-12:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    b = adaptive_convolve(np.array(normalized_sequence), np.array(normalized_sequence))
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 1e-12:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware correction for better convergence
+    if n > 20:  # Only apply curvature correction for sufficiently large sequences
+        try:
+            # Estimate curvature using finite differences with more robust approach
+            epsilon = max(1e-6, 1e-4 / (np.mean(np.abs(normalized_sequence)) + 1e-6))
+            hessian_approx = np.zeros((n, n))
+
+            # Approximate second derivative for each dimension
+            for i in range(n):
+                perturbed_seq = normalized_sequence.copy()
+                perturbed_seq[i] += epsilon
+
+                # Recompute convolution with perturbed sequence using adaptive method
+                b_perturbed = adaptive_convolve(np.array(perturbed_seq), np.array(perturbed_seq))
+
+                # Check that we get reasonable values
+                if np.any(np.isnan(b_perturbed)) or np.any(np.isinf(b_perturbed)):
+                    # Skip this dimension if there's numerical instability
+                    continue
+
+                second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon ** 2)
+                # Clamp the second derivative to reasonable bounds to prevent extreme values
+                second_derivative = np.clip(second_derivative, -1e6, 1e6)
+                hessian_approx[i, i] = max(0, second_derivative)
+
+            # Apply curvature correction to the direction
+            curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+
+            # Normalize curvature correction to prevent over-correction
+            norm_corr = np.linalg.norm(curvature_correction)
+            if norm_corr > 1e-10:
+                curvature_correction = curvature_correction / (1.0 + norm_corr)
+            else:
+                curvature_correction = np.zeros_like(curvature_correction)
+
+            # Limit the magnitude of curvature correction to avoid oscillations
+            max_correction_magnitude = 0.1 * np.mean(np.abs(normalized_g_fun)) + 1e-6
+            correction_magnitude = np.linalg.norm(curvature_correction)
+            if correction_magnitude > max_correction_magnitude:
+                curvature_correction = curvature_correction * (max_correction_magnitude / correction_magnitude)
+
+            # Adjust direction with curvature bias
+            corrected_direction = np.array(normalized_g_fun) + curvature_weight * curvature_correction
+            normalized_g_fun = corrected_direction.tolist()
+        except Exception:
+            # If curvature calculation fails, proceed without it
+            pass
+
+    # Apply adaptive perturbation based on convergence rate
+    current_c1, _ = compute_c1_constant(sequence)
+    t = min(0.1, max(0.01, 0.05 * (1.0 - min(1.0, current_c1 / 1.5))))
+
+    # Add diversity with Gaussian noise
+    noise = [np.random.normal(0, 0.01) for _ in range(n)]
+    new_sequence = [
+        (1 - t) * x + t * y + noise[i] for i, (x, y) in enumerate(zip(sequence, normalized_g_fun))
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

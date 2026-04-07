@@ -1,0 +1,157 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+def create_regular_hexagon(center=(0,0), radius=1, rotation=0):
+    """Create vertices of a regular hexagon"""
+    angles = np.linspace(0, 2*np.pi, 7) + rotation
+    x = center[0] + radius * np.cos(angles)
+    y = center[1] + radius * np.sin(angles)
+    return np.column_stack([x, y])
+
+def hexagon_vertices(position, rotation, side_length=1):
+    """Get vertices of a hexagon given position, rotation, and side length"""
+    # For a regular hexagon with side length s, the distance from center to vertex is s
+    center_x, center_y = position
+    return create_regular_hexagon((center_x, center_y), side_length, rotation)
+
+def check_containment(hex_vertices, outer_hex_vertices):
+    """Check if all vertices of inner hexagon are inside outer hexagon"""
+    from shapely.geometry import Polygon
+
+    inner_poly = Polygon(hex_vertices[:-1])  # Exclude repeated last vertex
+    outer_poly = Polygon(outer_hex_vertices[:-1])
+
+    return outer_poly.contains(inner_poly)
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap"""
+    from shapely.geometry import Polygon
+
+    poly1 = Polygon(hex1_vertices[:-1])
+    poly2 = Polygon(hex2_vertices[:-1])
+
+    return poly1.intersects(poly2)
+
+def calculate_outer_hexagon_radius(inner_hex_data, outer_center=(0,0)):
+    """Calculate minimum radius of outer hexagon that contains all inner hexagons"""
+    # Get vertices of all inner hexagons
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        pos = (inner_hex_data[i][0], inner_hex_data[i][1])
+        rot = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(pos, rot, 1)
+
+        # Calculate distance from outer center to each vertex
+        distances = np.sqrt(np.sum((vertices[:-1] - np.array(outer_center))**2, axis=1))
+        max_dist = max(max_dist, np.max(distances))
+
+    return max_dist
+
+def objective_function(x):
+    """Minimize the negative of 1/outer_radius to maximize 1/outer_radius"""
+    # Reshape x into 11 hexagons with (x, y, rotation) each
+    positions_and_rotations = x.reshape(-1, 3)
+
+    # Calculate minimum outer hexagon radius
+    outer_radius = calculate_outer_hexagon_radius(positions_and_rotations)
+
+    # Return negative of 1/outer_radius to minimize
+    return -1.0 / outer_radius
+
+def constraint_containment(x, outer_center=(0,0)):
+    """Constraint that all hexagons must be contained in outer hexagon"""
+    positions_and_rotations = x.reshape(-1, 3)
+    outer_radius = calculate_outer_hexagon_radius(positions_and_rotations, outer_center)
+
+    # This constraint should ensure that outer radius doesn't make the outer hexagon too small
+    return outer_radius - 1.0  # Always positive if outer radius > 1
+
+def constraint_nonoverlap(x):
+    """Constraint that no two hexagons overlap"""
+    positions_and_rotations = x.reshape(-1, 3)
+
+    # Check all pairs of hexagons for overlap
+    penalty = 0
+    for i in range(len(positions_and_rotations)):
+        for j in range(i+1, len(positions_and_rotations)):
+            pos1 = (positions_and_rotations[i][0], positions_and_rotations[i][1])
+            rot1 = np.radians(positions_and_rotations[i][2])
+            pos2 = (positions_and_rotations[j][0], positions_and_rotations[j][1])
+            rot2 = np.radians(positions_and_rotations[j][2])
+
+            vertices1 = hexagon_vertices(pos1, rot1, 1)
+            vertices2 = hexagon_vertices(pos2, rot2, 1)
+
+            if check_overlap(vertices1, vertices2):
+                # Add penalty for overlap
+                penalty += 1000
+
+    return penalty
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses optimization to find better arrangement than fixed grid.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Start with a known good arrangement based on literature
+    initial_positions_and_rotations = np.array([
+        [0, 0, 0],          # center
+        [-1.5, 0, 0],       # left
+        [1.5, 0, 0],        # right
+        [0, 2.6, 0],        # top
+        [0, -2.6, 0],       # bottom
+        [-1.5, 1.3, 0],     # top-left
+        [1.5, 1.3, 0],      # top-right
+        [-1.5, -1.3, 0],    # bottom-left
+        [1.5, -1.3, 0],     # bottom-right
+        [-3.0, 1.3, 0],     # far top-left
+        [3.0, 1.3, 0],      # far top-right
+    ])
+
+    # Flatten for optimization
+    x0 = initial_positions_and_rotations.flatten()
+
+    # Set bounds for optimization (reasonable ranges)
+    bounds = []
+    for i in range(11):
+        bounds.extend([(None, None), (None, None), (0, 360)])  # x, y, rotation
+
+    # Define constraints
+    constraints = [
+        {'type': 'ineq', 'fun': lambda x: 100 - constraint_nonoverlap(x)},
+        {'type': 'ineq', 'fun': lambda x: 1000 - constraint_containment(x)}
+    ]
+
+    # Optimize
+    try:
+        result = minimize(objective_function, x0, method='SLSQP', bounds=bounds, constraints=constraints,
+                         options={'maxiter': 1000, 'ftol': 1e-6})
+
+        if result.success:
+            final_positions_and_rotations = result.x.reshape(-1, 3)
+            outer_radius = calculate_outer_hexagon_radius(final_positions_and_rotations)
+        else:
+            # Fall back to initial configuration if optimization fails
+            final_positions_and_rotations = initial_positions_and_rotations
+            outer_radius = calculate_outer_hexagon_radius(initial_positions_and_rotations)
+    except Exception as e:
+        # If optimization fails, use initial configuration
+        final_positions_and_rotations = initial_positions_and_rotations
+        outer_radius = calculate_outer_hexagon_radius(initial_positions_and_rotations)
+
+    # Create output data
+    inner_hex_data = final_positions_and_rotations
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = outer_radius
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

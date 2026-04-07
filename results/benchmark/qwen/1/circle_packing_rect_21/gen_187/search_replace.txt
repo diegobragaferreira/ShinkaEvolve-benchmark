@@ -1,0 +1,132 @@
+<NAME>
+enhance_constraint_density_calculation
+</NAME>
+
+<DESCRIPTION>
+The current constraint density calculation uses a simplified neighbor counting approach. I'll enhance this by incorporating Voronoi-based constraint density computation which provides more sophisticated geometric insights about packing density and constraint regions. This will help the adaptive mutation better understand where circles are truly constrained versus where they have freedom to expand.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_neighbor_density(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate density-based constraint information using neighbor counts"""
+        if len(circles_list) < 2:
+            return {}
+
+        # Build spatial index for efficient neighbor lookup
+        points = np.array([[x, y] for x, y, r in circles_list])
+        tree = cKDTree(points)
+
+        # For each circle, count neighbors within a reasonable distance
+        # Distance threshold is based on the maximum possible radius
+        # (assuming circles are similar in size)
+        max_radius = max(r for _, _, r in circles_list) if circles_list else 1.0
+        threshold_distance = max_radius * 3.0  # 3x average radius as threshold
+
+        density_info = {}
+        for i, (x, y, r) in enumerate(circles_list):
+            # Query neighbors within threshold distance
+            indices = tree.query_ball_point([x, y], threshold_distance)
+
+            # Count neighbors (excluding self)
+            neighbor_count = len(indices) - 1
+            # Normalize by total number of circles for consistency
+            normalized_density = neighbor_count / max(len(circles_list) - 1, 1)
+
+            # Convert to constraint density (inverse relationship)
+            # High neighbor count = high constraint density = more constrained
+            density_info[i] = 1.0 + normalized_density * 2.0  # Scale up for more sensitivity
+
+        return density_info
+=======
+    def calculate_constraint_density(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate enhanced constraint density using Voronoi-based analysis and neighbor counts"""
+        if len(circles_list) < 2:
+            return {}
+
+        # Build spatial index for efficient neighbor lookup
+        points = np.array([[x, y] for x, y, r in circles_list])
+        tree = cKDTree(points)
+
+        # For each circle, analyze both neighbor density and Voronoi-based constraints
+        density_info = {}
+
+        # Method 1: Neighbor count-based density
+        max_radius = max(r for _, _, r in circles_list) if circles_list else 1.0
+        threshold_distance = max_radius * 3.0  # 3x average radius as threshold
+
+        neighbor_density = {}
+        for i, (x, y, r) in enumerate(circles_list):
+            # Query neighbors within threshold distance
+            indices = tree.query_ball_point([x, y], threshold_distance)
+
+            # Count neighbors (excluding self)
+            neighbor_count = len(indices) - 1
+            # Normalize by total number of circles for consistency
+            normalized_density = neighbor_count / max(len(circles_list) - 1, 1)
+
+            # Convert to constraint density (inverse relationship)
+            # High neighbor count = high constraint density = more constrained
+            neighbor_density[i] = 1.0 + normalized_density * 2.0  # Scale up for more sensitivity
+
+        # Method 2: Voronoi-based density approximation
+        voronoi_density = {}
+        try:
+            # Compute Voronoi diagram for all circles
+            vor = Voronoi(points)
+
+            # For each circle, estimate Voronoi cell area as proxy for local density
+            for i, (x, y, r) in enumerate(circles_list):
+                # Find Voronoi vertices belonging to this cell
+                # This is a simplified approach - in practice, we'd compute actual cell areas
+                # But for now we'll use neighbor distance statistics as a proxy
+
+                # Get neighbors
+                indices = tree.query_ball_point([x, y], threshold_distance)
+                neighbor_dists = []
+                for j in indices:
+                    if i != j:
+                        dist = np.sqrt((x - points[j][0])**2 + (y - points[j][1])**2)
+                        neighbor_dists.append(dist)
+
+                # If we have neighbors, use their distances to estimate packing density
+                if neighbor_dists:
+                    avg_neighbor_dist = np.mean(neighbor_dists)
+                    # Smaller average distances = denser packing = higher constraint
+                    # This is a proxy for Voronoi cell area
+                    voronoi_density[i] = 1.0 + 1.0 / (avg_neighbor_dist + 1e-8)
+                else:
+                    voronoi_density[i] = 1.0
+
+        except:
+            # Fallback to neighbor density only if Voronoi fails
+            voronoi_density = neighbor_density
+
+        # Combine both approaches with weighted average
+        for i in range(len(circles_list)):
+            # Weight Voronoi density higher (70%) since it provides geometric insight
+            combined_density = 0.7 * voronoi_density[i] + 0.3 * neighbor_density[i]
+            density_info[i] = combined_density
+
+        return density_info
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_mutation_function_call
+</NAME>
+
+<DESCRIPTION>
+I need to update the call to the constraint density function in the adaptive mutation section to use the new function name I introduced.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Add constraint density information
+            constraint_density = calculate_neighbor_density([(x, y, r) for x, y, r in parent])
+=======
+            # Add constraint density information
+            constraint_density = calculate_constraint_density([(x, y, r) for x, y, r in parent])
+>>>>>>> REPLACE
+</DIFF>

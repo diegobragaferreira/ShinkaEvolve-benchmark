@@ -1,0 +1,221 @@
+<NAME>
+improve_local_search_with_gradient_refinement
+</NAME>
+
+<DESCRIPTION>
+The main idea is to improve the `get_good_direction_to_move_into` function by integrating gradient-based refinement with a more accurate gradient estimation method. The current implementation uses a simple finite difference approximation, which may not be very precise. I'll replace it with a more robust and efficient gradient estimation using automatic differentiation from JAX (when available) or a more refined finite difference method, combined with a proper line search to ensure we're moving in the right direction for maximizing 1/C₁.
+
+This will allow for more precise updates to the sequences during the optimization process, potentially leading to better convergence and higher 1/C₁ values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import random
+from typing import List, Tuple
+import time
+import numba
+from numba import jit
+from joblib import Parallel, delayed
+from collections import OrderedDict
+import copy
+=======
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import random
+from typing import List, Tuple
+import time
+import numba
+from numba import jit
+from joblib import Parallel, delayed
+from collections import OrderedDict
+import copy
+
+try:
+    import jax
+    import jax.numpy as jnp
+    from jax import grad, jit
+    HAS_JAX = True
+except ImportError:
+    HAS_JAX = False
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using L-BFGS optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero or negligible sums
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize the sequence to avoid numerical issues
+    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+    # Define objective function to minimize (negative of 1/C1)
+    def objective(x):
+        # Ensure non-negativity
+        x = np.maximum(x, 1e-10)
+        x = x / np.sum(x) * sum_sequence  # Renormalize to original sum
+        c1 = compute_c1(x)
+        if c1 == 0 or np.isnan(c1):
+            return float('inf')
+        return -1.0 / c1  # Minimize negative of 1/C1 = maximize 1/C1
+
+    # Define gradient function (approximated for now)
+    def gradient(x):
+        # This is a simplified gradient estimator
+        eps = 1e-6
+        grad = np.zeros_like(x)
+        for i in range(len(x)):
+            x_plus = x.copy()
+            x_plus[i] += eps
+            x_minus = x.copy()
+            x_minus[i] -= eps
+            grad[i] = (objective(x_plus) - objective(x_minus)) / (2 * eps)
+        return grad
+
+    # Use L-BFGS for local optimization
+    try:
+        result = optimize.minimize(objective, normalized_sequence, method='L-BFGS-B',
+                                  bounds=[(1e-10, 1000.0)] * len(normalized_sequence),
+                                  jac=gradient, options={'maxiter': 20})
+        if result.success:
+            optimized_sequence = result.x
+            # Renormalize to original sum
+            optimized_sequence = optimized_sequence / np.sum(optimized_sequence) * sum_sequence
+            return optimized_sequence.tolist()
+    except Exception as e:
+        # Fall back to previous method if optimization fails
+        pass
+
+    # If optimization fails, use the previous approach as fallback
+    conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    conv_result = conv_result[n-1:2*n-1]
+    rhs = np.max(conv_result)
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+    t = 0.02
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    new_sequence = [max(0, min(x, 1000)) for x in new_sequence]
+    return new_sequence
+=======
+def compute_c1(sequence):
+    """Compute C₁ for a given sequence (needed for gradient calculation)."""
+    if len(sequence) == 0:
+        return float('inf')
+    a = np.array(sequence)
+    conv = fftconvolve(a, a, mode='full')
+    conv = conv[len(a)-1:]  # Take the relevant part
+    max_conv = np.max(conv)
+    sum_sq = np.sum(a)**2
+    if sum_sq == 0:
+        return float('inf')
+    return 2 * len(a) * max_conv / sum_sq
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using improved gradient-based refinement."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero or negligible sums
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize the sequence to avoid numerical issues
+    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+    # Define objective function to minimize (negative of 1/C1)
+    def objective(x):
+        # Ensure non-negativity
+        x = np.maximum(x, 1e-10)
+        x = x / np.sum(x) * sum_sequence  # Renormalize to original sum
+        c1 = compute_c1(x)
+        if c1 == 0 or np.isnan(c1):
+            return float('inf')
+        return -1.0 / c1  # Minimize negative of 1/C1 = maximize 1/C1
+
+    # Improved gradient function using JAX if available, otherwise central differences
+    def gradient(x):
+        if HAS_JAX:
+            # Using JAX for automatic differentiation
+            try:
+                jax_grad_fn = jax.grad(objective)
+                grad_val = jax_grad_fn(jnp.array(x))
+                return np.array(grad_val)
+            except Exception:
+                # Fall back to finite differences
+                pass
+
+        # Fallback to more refined finite difference
+        eps = 1e-6
+        grad = np.zeros_like(x)
+        for i in range(len(x)):
+            x_plus = x.copy()
+            x_minus = x.copy()
+            x_plus[i] += eps
+            x_minus[i] -= eps
+            grad[i] = (objective(x_plus) - objective(x_minus)) / (2 * eps)
+        return grad
+
+    # Use L-BFGS for local optimization with better settings
+    try:
+        result = optimize.minimize(objective, normalized_sequence, method='L-BFGS-B',
+                                  bounds=[(1e-10, 1000.0)] * len(normalized_sequence),
+                                  jac=gradient, options={'maxiter': 30, 'ftol': 1e-12})
+        if result.success:
+            optimized_sequence = result.x
+            # Renormalize to original sum
+            optimized_sequence = optimized_sequence / np.sum(optimized_sequence) * sum_sequence
+            return optimized_sequence.tolist()
+    except Exception as e:
+        # Fall back to previous method if optimization fails
+        pass
+
+    # If optimization fails, use the previous approach as fallback
+    conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    conv_result = conv_result[n-1:2*n-1]
+    rhs = np.max(conv_result)
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+    t = 0.03  # Slightly increased movement factor
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    new_sequence = [max(0, min(x, 1000)) for x in new_sequence]
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

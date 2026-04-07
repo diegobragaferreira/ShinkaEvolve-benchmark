@@ -1,0 +1,276 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, cdist
+from scipy.spatial import SphericalVoronoi
+from scipy.stats import qmc
+import warnings
+from typing import Tuple, Optional
+
+class SphericalVoronoiEvolutionOptimizer:
+    """Novel optimizer using Spherical Voronoi diagrams and progressive refinement for 14-point distribution."""
+    
+    def __init__(self, num_points: int = 14):
+        self.n = num_points
+        self.best_solution = None
+        self.best_ratio = -np.inf
+
+    def _calculate_ratio(self, points: np.ndarray) -> Tuple[float, float]:
+        """Calculate min/max distance ratio for given points."""
+        distances = pdist(points)
+        np.fill_diagonal(pdist(points), np.inf)
+        distances = distances[distances > 1e-12]  # Filter out near-zero distances
+        if len(distances) == 0:
+            return 0.0, 0.0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        return min_dist, max_dist
+
+    def _objective_with_regularization(self, points: np.ndarray, reg_weight: float = 0.1) -> float:
+        """Objective function with distance variance regularization."""
+        distances = pdist(points)
+        distances = distances[distances > 1e-12]
+        if len(distances) == 0:
+            return 0.0
+            
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0:
+            return 0.0
+            
+        # Regularization term to penalize distance variance
+        distance_variance = max_dist - min_dist
+        regularized_ratio = min_dist / max_dist - reg_weight * distance_variance
+        
+        return -regularized_ratio  # Negative because we minimize
+
+    def _constraint_func(self, x: np.ndarray) -> np.ndarray:
+        """Constraint function ensuring points lie on unit sphere."""
+        points = x.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0
+
+    def _generate_voronoi_based_initial(self) -> np.ndarray:
+        """Generate initial points using Spherical Voronoi principles."""
+        # Start with a basic icosahedral configuration
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+        ])
+        
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+        
+        # Add two additional points at poles
+        additional_points = np.array([[0, 0, 1], [0, 0, -1]])
+        points = np.vstack([vertices, additional_points])
+        
+        # Apply small randomized perturbations to break symmetry
+        np.random.seed(42)
+        noise_magnitude = 0.015
+        points += np.random.normal(0, noise_magnitude, points.shape)
+        points = points / np.linalg.norm(points, axis=1, keepdims=True)
+        
+        return points
+
+    def _generate_sobol_initial(self) -> np.ndarray:
+        """Initialize points using Sobol sequence for better space-filling properties."""
+        sampler = qmc.Sobol(d=3, seed=42)
+        points = sampler.random(n=self.n)
+        # Scale to unit sphere
+        points = points * 2 - 1  # Map to [-1, 1]^3
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        points = points / norms
+        return points
+
+    def _generate_fibonacci_initial(self) -> np.ndarray:
+        """Generate points using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(self.n):
+            y = 1 - (i / float(self.n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def _adaptive_initialization(self) -> np.ndarray:
+        """Create diverse initial point configurations."""
+        # Try multiple initialization strategies and select best
+        strategies = [
+            self._generate_voronoi_based_initial,
+            self._generate_sobol_initial,
+            self._generate_fibonacci_initial
+        ]
+        
+        best_ratio = -np.inf
+        best_points = None
+        
+        for strategy in strategies:
+            try:
+                points = strategy()
+                min_dist, max_dist = self._calculate_ratio(points)
+                if max_dist > 0:
+                    ratio = min_dist / max_dist
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = points.copy()
+            except Exception:
+                continue
+                
+        if best_points is not None:
+            return best_points
+        else:
+            # Fallback to fibonacci
+            return self._generate_fibonacci_initial()
+
+    def _perturb_points(self, points: np.ndarray, noise_level: float = 0.01) -> np.ndarray:
+        """Add controlled noise to points and normalize them."""
+        noisy_points = points + np.random.normal(0, noise_level, points.shape)
+        return noisy_points / np.linalg.norm(noisy_points, axis=1, keepdims=True)
+
+    def _optimize_with_method(self, x0: np.ndarray, method: str,
+                            options: dict, reg_weight: float = 0.1) -> Optional[np.ndarray]:
+        """Optimize using specified method with error handling."""
+        try:
+            cons = {'type': 'eq', 'fun': self._constraint_func}
+            
+            def objective_wrapper(x_flat):
+                points = x_flat.reshape(-1, 3)
+                return self._objective_with_regularization(points, reg_weight)
+                
+            result = minimize(objective_wrapper, x0, method=method, constraints=cons,
+                            options=options)
+
+            if result.success:
+                optimized_points = result.x.reshape(-1, 3)
+                # Ensure normalization
+                optimized_points = optimized_points / np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                return optimized_points
+        except Exception as e:
+            warnings.warn(f"Optimization with {method} failed: {e}")
+        return None
+
+    def _evaluate_and_update_best(self, points: np.ndarray) -> bool:
+        """Evaluate solution and update best if better."""
+        min_dist, max_dist = self._calculate_ratio(points)
+        if max_dist > 0:
+            ratio = min_dist / max_dist
+            if ratio > self.best_ratio:
+                self.best_ratio = ratio
+                self.best_solution = points.copy()
+                return True
+        return False
+
+    def _progressive_refinement_strategy(self) -> np.ndarray:
+        """Execute progressive refinement with multi-stage optimization."""
+        
+        # Phase 1: Coarse initialization and first optimization
+        initial_points = self._adaptive_initialization()
+        self._evaluate_and_update_best(initial_points)
+        
+        # Create diverse initial population
+        population = [initial_points]
+        for i in range(5):  # Create 5 additional variants
+            np.random.seed(i)
+            perturbed = self._perturb_points(initial_points, 0.02)
+            population.append(perturbed)
+            
+        # Phase 2: Multi-stage optimization with increasing precision and regularization
+        optimization_phases = [
+            # Phase 1: Coarse optimization with moderate regularization
+            {
+                'methods': ['L-BFGS-B', 'SLSQP'],
+                'options': {'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': 150},
+                'reg_weight': 0.05
+            },
+            # Phase 2: Medium precision with stronger regularization  
+            {
+                'methods': ['L-BFGS-B', 'SLSQP'],
+                'options': {'ftol': 1e-10, 'gtol': 1e-10, 'maxiter': 300},
+                'reg_weight': 0.1
+            },
+            # Phase 3: Fine optimization with minimal regularization
+            {
+                'methods': ['L-BFGS-B'],
+                'options': {'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500},
+                'reg_weight': 0.05
+            }
+        ]
+
+        # Execute optimization phases
+        for phase_idx, phase in enumerate(optimization_phases):
+            for method in phase['methods']:
+                for pop_idx, individual in enumerate(population):
+                    np.random.seed(phase_idx * 100 + pop_idx * 10)
+                    x0 = individual.flatten()
+
+                    optimized = self._optimize_with_method(
+                        x0, method, phase['options'], phase['reg_weight']
+                    )
+                    if optimized is not None:
+                        self._evaluate_and_update_best(optimized)
+
+        # Phase 3: Final aggressive refinement with adaptive strategies
+        if self.best_solution is not None:
+            final_refinement_options = {
+                'ftol': 1e-14,
+                'gtol': 1e-14,
+                'maxiter': 800
+            }
+            
+            # Try multiple refinement attempts with different strategies
+            for attempt in range(4):
+                np.random.seed(1000 + attempt)
+                
+                # Create refined starting points with different perturbations
+                refined_x0 = self.best_solution.copy()
+                if attempt < 2:
+                    # Perturb with smaller noise for focused refinement
+                    refined_x0 += np.random.normal(0, 0.003, refined_x0.shape)
+                else:
+                    # Use a completely different perturbation  
+                    refined_x0 = self._perturb_points(self.best_solution, 0.005)
+                    
+                refined_x0 = refined_x0 / np.linalg.norm(refined_x0, axis=1, keepdims=True)
+
+                refined = self._optimize_with_method(
+                    refined_x0.flatten(), 'L-BFGS-B', final_refinement_options, 0.02
+                )
+                if refined is not None:
+                    self._evaluate_and_update_best(refined)
+
+        return self.best_solution if self.best_solution is not None else self._adaptive_initialization()
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    # Set fixed seed for reproducibility
+    np.random.seed(42)
+    
+    # Create optimizer instance
+    optimizer = SphericalVoronoiEvolutionOptimizer(14)
+    
+    # Execute optimization
+    result = optimizer._progressive_refinement_strategy()
+    
+    return result
+
+# EVOLVE-BLOCK-END

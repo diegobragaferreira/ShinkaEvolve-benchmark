@@ -1,0 +1,395 @@
+--- a/original.py
++++ b/original.py
+@@ -1,260 +1,186 @@
+ # EVOLVE-BLOCK-START
++import numpy as np
++from scipy.signal import fftconvolve
++import time
++import random
++from typing import List, Tuple
+ 
+-import numpy as np
+-from scipy import optimize
+-from scipy.signal import fftconvolve
+-import random
+-import time
+-
+-# Set seed for reproducibility
++# Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+ def compute_c1(sequence):
+     """Compute the C1 constant for a given sequence."""
+     if len(sequence) == 0:
+         return float('inf')
+-
+     # Use FFT-based convolution for efficiency
+     conv = fftconvolve(sequence, sequence, mode='full')
+-    # Take only the relevant part of convolution
++    # Take only the relevant part of convolution (the peak)
+     max_conv = np.max(conv[len(sequence)-1:])  # From index n-1 onwards
+-
+     # Normalize and compute C1
+     sum_sq = np.sum(sequence)**2
+     if sum_sq == 0:
+         return float('inf')
+-
+     c1 = (2 * len(sequence) * max_conv) / sum_sq
+     return c1
+ 
+ def compute_inv_c1(sequence):
+     """Compute inverse of C1 (what we want to maximize)."""
+     c1 = compute_c1(sequence)
+     if c1 == 0 or np.isinf(c1):
+         return 0
+     return 1.0 / c1
+ 
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
+-    try:
+-        n = len(sequence)
+-        if n < 1:
+-            return None
++def fft_mutation(freq_domain: np.ndarray, mutation_strength: float = 0.1) -> np.ndarray:
++    """
++    Mutate a frequency domain representation by adding noise.
++    This preserves the structural properties of the frequency domain.
++    """
++    # Add complex noise to frequency components
++    noise_real = np.random.normal(0, mutation_strength, len(freq_domain))
++    noise_imag = np.random.normal(0, mutation_strength, len(freq_domain))
++    mutated_freq = freq_domain + noise_real + 1j * noise_imag
++    
++    # Transform back to time domain
++    mutated_time = np.fft.ifft(mutated_freq).real
++    return np.abs(mutated_time)  # Ensure non-negative
+ 
+-        sum_sequence = np.sum(sequence)
+-        if sum_sequence < 1e-10:
+-            return None
++def fft_crossover(parent1: np.ndarray, parent2: np.ndarray, crossover_rate: float = 0.8) -> np.ndarray:
++    """Perform crossover in frequency domain."""
++    if random.random() > crossover_rate:
++        return parent1.copy()
++    
++    # Convert to frequency domain
++    freq1 = np.fft.fft(parent1)
++    freq2 = np.fft.fft(parent2)
++    
++    # Blend in frequency domain
++    blend_factor = random.uniform(0.3, 0.7)
++    crossed_freq = blend_factor * freq1 + (1 - blend_factor) * freq2
++    
++    # Transform back to time domain
++    crossed_time = np.fft.ifft(crossed_freq).real
++    return np.abs(crossed_time)  # Ensure non-negative
+ 
+-        # Normalize sequence with sqrt(2*n) scaling factor
+-        normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
++def evaluate_population(population: List[np.ndarray]) -> List[float]:
++    """Evaluate the fitness (inverse C1) of a population."""
++    return [compute_inv_c1(seq.tolist()) for seq in population]
+ 
+-        # Compute convolution using FFT for efficiency
+-        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+-        rhs = np.max(conv_result)
++def select_parents(population: List[np.ndarray], fitnesses: List[float], num_parents: int = 5) -> List[np.ndarray]:
++    """Select top performers as parents for reproduction."""
++    sorted_indices = np.argsort(fitnesses)[::-1][:num_parents]
++    return [population[i] for i in sorted_indices]
+ 
+-        # Solve the LP problem
+-        g_fun = solve_convolution_lp(normalized_sequence, rhs)
++def evolve_sequence(population_size: int = 20, generations: int = 50, mutation_strength: float = 0.1) -> np.ndarray:
++    """Evolve a sequence using a population-based approach in frequency domain."""
++    # Initialize population with diverse sequences
++    population = []
++    for _ in range(population_size):
++        length = random.randint(100, 500)
++        # Use exponential decay pattern as base
++        decay_factor = 0.95
++        seq = [1.0 * (decay_factor ** i) for i in range(length)]
++        # Ensure minimum values
++        seq = [max(x, 0.01) for x in seq]
++        # Add slight noise
++        noise_factor = 0.05
++        seq = [x * (1 + random.uniform(-noise_factor, noise_factor)) for x in seq]
++        seq = [max(x, 0.01) for x in seq]
++        population.append(np.array(seq))
++    
++    # Memory to store best sequences
++    memory = []
++    best_fitness = float('-inf')
++    best_sequence = None
++    
++    for gen in range(generations):
++        # Evaluate fitness
++        fitnesses = evaluate_population(population)
++        
++        # Update memory and best sequence
++        for i, (seq, fit) in enumerate(zip(population, fitnesses)):
++            if fit > best_fitness:
++                best_fitness = fit
++                best_sequence = seq.copy()
++            if len(memory) < 10:
++                memory.append((seq.copy(), fit))
++            else:
++                # Replace worst in memory
++                worst_mem_idx = np.argmin([f for _, f in memory])
++                if fit > memory[worst_mem_idx][1]:
++                    memory[worst_mem_idx] = (seq.copy(), fit)
++        
++        # Selection
++        parents = select_parents(population, fitnesses)
++        
++        # Generate new population
++        new_population = parents[:]  # Elitism
++        
++        while len(new_population) < population_size:
++            parent1, parent2 = random.sample(parents, 2)
++            child = fft_crossover(parent1, parent2)
++            
++            # Mutate in frequency domain
++            mutated_child = fft_mutation(child, mutation_strength)
++            
++            # Project onto feasible set
++            mutated_child = np.clip(mutated_child, 0, 1000)
++            if np.sum(mutated_child) < 0.01:
++                mutated_child[0] = 0.1
++            
++            new_population.append(mutated_child)
++        
++        population = new_population
++    
++    return best_sequence
+ 
+-        if g_fun is None:
+-            return None
+-
+-        sum_g = np.sum(g_fun)
+-        if sum_g < 1e-10:
+-            return None
+-
+-        normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g
+-
+-        return normalized_g_fun.tolist()
+-    except Exception:
+-        return None
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    try:
+-        n = len(f_sequence)
+-        if n < 1:
+-            return None
+-
+-        # Sample key convolution indices instead of generating all 2*n-1 constraints
+-        # This dramatically reduces memory usage and computation time
+-        max_constraints = min(5000, 2 * n)  # Cap at reasonable number
+-        constraint_indices = np.linspace(0, 2 * n - 2, min(max_constraints, 2 * n - 1), dtype=int)
+-
+-        # Sort indices to help with memory access patterns
+-        constraint_indices = np.sort(constraint_indices)
+-
+-        # Precompute convolution constraints efficiently
+-        a_ub = np.zeros((len(constraint_indices), n))
+-        b_ub = np.zeros(len(constraint_indices))
+-
+-        for idx, k in enumerate(constraint_indices):
+-            for i in range(n):
+-                j = k - i
+-                if 0 <= j < n:
+-                    a_ub[idx, j] = f_sequence[i]
+-            b_ub[idx] = rhs
+-
+-        # Add non-negativity constraints
+-        a_ub_nonneg = -np.eye(n)
+-        b_ub_nonneg = np.zeros(n)
+-
+-        a_ub = np.vstack([a_ub, a_ub_nonneg])
+-        b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-        # Define objective function (minimize -sum x)
+-        c = -np.ones(n)
+-
+-        # Solve with error handling
+-        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+-
+-        if result.success:
+-            return result.x
+-        else:
+-            # Try alternative solver
+-            try:
+-                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+-                if result.success:
+-                    return result.x
+-            except:
+-                pass
+-            return None
+-
+-    except Exception:
+-        return None
+-
+-def create_structured_sequence(n):
+-    """Create a structured sequence for better starting points."""
+-    # Combines exponential decay, uniform, and random components
+-    exp_decay = np.exp(-np.linspace(0, 3, n))
+-    uniform = np.ones(n)
+-    random_part = np.random.rand(n)
+-
+-    # Blend patterns with weights
+-    base_seq = 0.5 * exp_decay + 0.3 * uniform + 0.2 * random_part
+-
+-    # Scale and normalize
+-    base_seq = base_seq / np.sum(base_seq) * 10
+-
+-    # Clip to valid range
+-    base_seq = np.clip(base_seq, 0, 1000)
+-
+-    return base_seq.tolist()
+-
+-def refine_with_convolution_analysis(sequence, max_iterations=10):
+-    """Refine sequence by analyzing convolution peaks and adjusting accordingly."""
+-    seq = np.array(sequence)
+-    n = len(seq)
+-
++def adaptive_refinement(sequence: np.ndarray, max_iterations: int = 10) -> np.ndarray:
++    """Refine the sequence by analyzing convolution properties."""
++    seq = sequence.copy()
++    
+     for _ in range(max_iterations):
+         # Compute convolution
+         conv = fftconvolve(seq, seq, mode='full')
+-        conv_part = conv[n-1:]
++        conv_part = conv[len(seq)-1:]
+         max_conv = np.max(conv_part)
+-
++        
+         # Find indices where convolution peaks
+         max_indices = np.where(conv_part >= 0.9 * max_conv)[0]
+-
++        
+         # Adjust elements that contribute to peaks
+         new_seq = seq.copy()
+         for idx in max_indices[:min(3, len(max_indices))]:
+             for offset in [-2, -1, 0, 1, 2]:
+                 pos = idx + offset
+-                if 0 <= pos < n:
+-                    new_seq[pos] *= 0.98  # Slight reduction
+-
+-        seq = np.maximum(new_seq, 0)
+-
++                if 0 <= pos < len(seq):
++                    new_seq[pos] *= 0.995  # Fine adjustment
++                    
++        seq = np.clip(new_seq, 0, 1000)
++        
+         # Early stopping if sequence stabilizes
+         if np.allclose(seq, new_seq, rtol=1e-6):
+             break
+-
+-    return seq.tolist()
+-
+-def adaptive_gradient_update(sequence, iteration, max_iter):
+-    """Perform gradient update with adaptive step size."""
+-    # Improved adaptive learning rate with more aggressive decay
+-    t = 0.05 * np.exp(-iteration / max_iter * 10)
+-
+-    # Get direction
+-    direction = get_good_direction_to_move_into(sequence)
+-    if direction is None:
+-        # Fallback to small random perturbation if direction fails
+-        return np.maximum(np.array(sequence) + np.random.normal(0, 0.001, len(sequence)), 0).tolist()
+-
+-    # Mix with current sequence
+-    new_sequence = (1 - t) * np.array(sequence) + t * np.array(direction)
+-    return new_sequence.tolist()
++    
++    return seq
+ 
+ def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_inv_c1 = 0
+-    best_sequence = None
+-
+-    # Time tracking for budget management
++    """Main search function using the frequency-domain evolutionary optimizer."""
+     start_time = time.time()
+-    max_time = 170  # Leave 10 seconds for cleanup
+-
+-    # Multiple attempts to find good sequences
+-    for attempt in range(20):
+-        if time.time() - start_time > max_time:
+-            break
+-
+-        # Create diverse initial sequences
+-        n = random.randint(100, 1000)
+-        initial_seq = create_structured_sequence(n)
+-
+-        # Apply adaptive optimization
+-        current_sequence = initial_seq.copy()
+-        current_inv_c1 = compute_inv_c1(current_sequence)
+-
+-        # Optimization loop
+-        for iter_num in range(50):  # Reduced iterations to save time
+-            if time.time() - start_time > max_time:
+-                break
+-
+-            # Adaptive gradient update
+-            updated_sequence = adaptive_gradient_update(current_sequence, iter_num, 50)
+-
+-            # Ensure valid sequence
+-            updated_sequence = np.clip(updated_sequence, 0, 1000)
+-            if np.sum(updated_sequence) < 0.01:
+-                updated_sequence[0] = 0.1
+-
+-            # Refine with convolution analysis
+-            refined_sequence = refine_with_convolution_analysis(updated_sequence)
+-
+-            # Evaluate
+-            new_inv_c1 = compute_inv_c1(refined_sequence)
+-
+-            # Update best if improved
+-            if new_inv_c1 > current_inv_c1:
+-                current_sequence = refined_sequence
+-                current_inv_c1 = new_inv_c1
+-
+-                if current_inv_c1 > best_inv_c1:
+-                    best_inv_c1 = current_inv_c1
+-                    best_sequence = current_sequence[:]
+-
+-        # Final refinement round
+-        if best_sequence is not None:
+-            final_refinement = refine_with_convolution_analysis(best_sequence)
+-            final_inv_c1 = compute_inv_c1(final_refinement)
+-            if final_inv_c1 > best_inv_c1:
+-                best_sequence = final_refinement
+-
+-    # Fallback if nothing found
+-    if best_sequence is None:
+-        # Return a random good initial sequence
+-        n = random.randint(100, 500)
+-        best_sequence = create_structured_sequence(n)
+-
+-    return best_sequence
++    
++    # Evolve a sequence
++    evolved_sequence = evolve_sequence(population_size=15, generations=30, mutation_strength=0.05)
++    
++    # Final refinement using adaptive methods
++    refined_sequence = adaptive_refinement(evolved_sequence)
++    
++    # Final evaluation
++    final_inv_c1 = compute_inv_c1(refined_sequence.tolist())
++    
++    # Return the best performing sequence
++    return refined_sequence.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

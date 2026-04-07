@@ -1,0 +1,153 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def objective(x):
+        # Reshape x into 16 points
+        points = x.reshape(-1, 2)
+        # Calculate pairwise distances
+        distances = pdist(points)
+        # Avoid division by zero
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        # Minimize negative of min/max ratio (equivalent to maximizing min/max ratio)
+        return -min_dist / max_dist
+    
+    def generate_hexagonal_initial():
+        """Generate initial configuration based on hexagonal lattice for better spacing"""
+        # For 16 points, create a 4x4 hexagonal pattern
+        points = []
+        
+        # Create hexagonal grid with appropriate spacing
+        rows = 4
+        cols = 4
+        spacing_x = 1.0 / (cols - 1)
+        spacing_y = 1.0 / (rows - 1)
+        
+        for i in range(rows):
+            for j in range(cols):
+                # Offset every other row for hexagonal packing
+                x_offset = 0.0 if i % 2 == 0 else spacing_x * 0.5
+                x = (j * spacing_x) + x_offset
+                y = i * spacing_y
+                
+                # Ensure points are within bounds
+                x = max(0.001, min(0.999, x))
+                y = max(0.001, min(0.999, y))
+                
+                points.append([x, y])
+        
+        return np.array(points)
+    
+    def generate_fibonacci_spiral():
+        """Generate points using Fibonacci spiral for good distribution"""
+        points = []
+        phi = (1 + math.sqrt(5)) / 2  # golden ratio
+        for i in range(16):
+            theta = math.acos(-1 + (2 * i) / 15)  # elevation angle
+            phi_angle = (i * 2 * math.pi) / (phi * phi)  # azimuthal angle
+            
+            # Convert to cartesian coordinates
+            x = math.sin(theta) * math.cos(phi_angle)
+            y = math.sin(theta) * math.sin(phi_angle)
+            
+            # Map to [0.05, 0.95] range to avoid boundaries
+            x = 0.05 + 0.9 * (x + 1) / 2
+            y = 0.05 + 0.9 * (y + 1) / 2
+            
+            points.append([x, y])
+        
+        return np.array(points)
+    
+    def generate_grid_initial():
+        """Generate regular grid initial configuration"""
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                points.append([x, y])
+        return np.array(points)
+    
+    # Generate multiple initial configurations
+    initial_configs = [
+        generate_hexagonal_initial(),
+        generate_fibonacci_spiral(),
+        generate_grid_initial()
+    ]
+    
+    # Add some random perturbations to each
+    np.random.seed(42)
+    perturbed_configs = []
+    for config in initial_configs:
+        perturbed = config + np.random.normal(0, 0.02, config.shape)
+        # Clip to valid range
+        perturbed = np.clip(perturbed, 0.001, 0.999)
+        perturbed_configs.append(perturbed)
+    
+    # Try optimization from different starting points
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Define bounds for coordinates
+    bounds = [(0.001, 0.999) for _ in range(32)]
+    
+    for initial_config in perturbed_configs:
+        # Flatten for optimization
+        x0 = initial_config.flatten()
+        
+        try:
+            # Use L-BFGS-B for better convergence properties
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-5}
+            )
+            
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                distances = pdist(final_points)
+                
+                if len(distances) > 0:
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+                    
+                    if max_dist > 0:
+                        ratio = min_dist / max_dist
+                        
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = final_points.copy()
+                            
+        except Exception as e:
+            # If optimization fails, continue to next initial config
+            continue
+    
+    # If no good solution was found, return the last attempted configuration
+    if best_points is None:
+        # Fallback to the most structured grid
+        fallback_points = generate_grid_initial()
+        # Add small random noise to break symmetry
+        fallback_points += np.random.normal(0, 0.01, fallback_points.shape)
+        fallback_points = np.clip(fallback_points, 0.001, 0.999)
+        best_points = fallback_points
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

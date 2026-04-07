@@ -1,0 +1,96 @@
+<NAME>
+optimize_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a dense pairwise distance matrix computation which is O(n²) and becomes very slow as the number of circles increases. This change introduces a spatial indexing approach using KDTree to efficiently detect collisions, reducing the complexity from O(n²) to approximately O(n log n) for collision detection. This will enable faster evaluation of individuals in the evolutionary algorithm and allow more generations to be run within the time constraint.
+
+The key insight is that we don't need to check every pair of circles for overlap - we only need to check nearby circles based on their spatial proximity.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Check constraints
+        total_radius = np.sum(circles[:, 2])
+
+        # Penalty for invalid positions
+        penalty = 0
+
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < x_min or x + r > x_max or y - r < y_min or y + r > y_max:
+                penalty += 1000000  # Large penalty for boundary violation
+
+        # Check overlap constraints using vectorized operations for efficiency
+        if len(circles) > 1:
+            # Create distance matrix for all pairs
+            centers = circles[:, :2]
+            distances = cdist(centers, centers)
+
+            # Get upper triangle indices (avoid double counting)
+            upper_triangle = np.triu_indices_from(distances, k=1)
+
+            # Check overlaps
+            overlap_distances = distances[upper_triangle]
+            overlap_radii = (circles[upper_triangle[0], 2] + circles[upper_triangle[1], 2])
+
+            # Find overlapping pairs
+            overlaps = overlap_distances < overlap_radii
+            if np.any(overlaps):
+                # Penalty proportional to overlap amount
+                overlap_amounts = overlap_radii[overlaps] - overlap_distances[overlaps]
+                penalty += np.sum(100000 * overlap_amounts)
+
+        # Return fitness (negative because we want to maximize, but DEAP minimizes)
+        return (total_radius - penalty,),
+=======
+    def evaluate(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Check constraints
+        total_radius = np.sum(circles[:, 2])
+
+        # Penalty for invalid positions
+        penalty = 0
+
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < x_min or x + r > x_max or y - r < y_min or y + r > y_max:
+                penalty += 1000000  # Large penalty for boundary violation
+
+        # Check overlap constraints using spatial indexing for efficiency
+        if len(circles) > 1:
+            # Build KDTree for efficient neighbor search
+            centers = circles[:, :2]
+            tree = cKDTree(centers)
+
+            # Find neighbors within distance of (r1 + r2) for each circle
+            # This is more efficient than checking all pairs
+            max_dist = 2 * max_radius  # Upper bound on possible interaction distance
+            pairs = tree.query_pairs(max_dist)
+
+            # Check overlaps for neighboring pairs
+            for i, j in pairs:
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+
+                # Distance between centers
+                dist = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+                # If circles overlap, add penalty
+                if dist < (r1 + r2):
+                    # Penalty proportional to overlap amount
+                    overlap = (r1 + r2) - dist
+                    penalty += 100000 * overlap
+
+        # Return fitness (negative because we want to maximize, but DEAP minimizes)
+        return (total_radius - penalty,),
+>>>>>>> REPLACE
+</DIFF>

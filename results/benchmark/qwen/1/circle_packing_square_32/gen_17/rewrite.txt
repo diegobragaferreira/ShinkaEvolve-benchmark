@@ -1,0 +1,292 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.optimize import minimize
+import random
+from typing import Tuple, List
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+    
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+    
+    def check_constraints(circles):
+        """Check if all constraints are satisfied"""
+        n = len(circles)
+        # Check containment constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+        
+        # Check overlap constraints
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if dist < r1 + r2:
+                    return False
+        return True
+    
+    def calculate_sum_radii(circles):
+        """Calculate sum of radii"""
+        return sum(circle[2] for circle in circles)
+    
+    def voronoi_initialization(n_points: int) -> np.ndarray:
+        """Initialize circles using Voronoi diagram approach"""
+        # Generate random points
+        points = np.random.rand(n_points, 2)
+        
+        # Add boundary points to ensure better coverage
+        boundary_points = []
+        for i in range(4):
+            for j in range(4):
+                boundary_points.append([i/3, j/3])
+        points = np.vstack([points, boundary_points])
+        
+        # Compute Voronoi diagram
+        vor = Voronoi(points)
+        
+        # Extract centroids of Voronoi cells inside unit square
+        centroids = []
+        for region in vor.regions:
+            if len(region) > 0 and -1 not in region:
+                # Calculate centroid of this region
+                coords = np.array([vor.vertices[i] for i in region])
+                if np.all(coords >= 0) and np.all(coords <= 1):
+                    centroid = np.mean(coords, axis=0)
+                    if 0 <= centroid[0] <= 1 and 0 <= centroid[1] <= 1:
+                        centroids.append(centroid)
+        
+        # Select n_points centroids
+        selected_centroids = centroids[:n_points]
+        if len(selected_centroids) < n_points:
+            # Fill remaining with random points
+            remaining = n_points - len(selected_centroids)
+            for _ in range(remaining):
+                selected_centroids.append(np.random.rand(2))
+        
+        # Initialize with largest possible radii
+        circles = []
+        for i, centroid in enumerate(selected_centroids[:n_points]):
+            x, y = centroid
+            # Find minimum distance to other points to determine max radius
+            min_dist = float('inf')
+            for j, other_point in enumerate(selected_centroids[:n_points]):
+                if i != j:
+                    dist = np.sqrt((x-other_point[0])**2 + (y-other_point[1])**2)
+                    min_dist = min(min_dist, dist)
+            
+            # Set radius to half the minimum distance or 0.1, whichever is smaller
+            max_radius = min(min_dist/2.0, 0.1)
+            if max_radius < 0.001:
+                max_radius = 0.01
+            
+            circles.append([x, y, max_radius])
+        
+        return np.array(circles)
+    
+    def optimize_circles(circles: np.ndarray) -> np.ndarray:
+        """Refine circle positions using constrained optimization"""
+        n = len(circles)
+        
+        # Flatten for optimization
+        initial_params = []
+        bounds = []
+        
+        for i in range(n):
+            x, y, r = circles[i]
+            initial_params.extend([x, y, r])
+            bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.4)])
+        
+        def objective(params):
+            # Reconstruct circles
+            new_circles = []
+            for i in range(n):
+                x = params[3*i]
+                y = params[3*i+1]
+                r = params[3*i+2]
+                new_circles.append([x, y, r])
+            
+            # Calculate negative sum of radii (we want to maximize)
+            return -calculate_sum_radii(new_circles)
+        
+        def constraint_func(params):
+            # Reconstruct circles
+            new_circles = []
+            for i in range(n):
+                x = params[3*i]
+                y = params[3*i+1]
+                r = params[3*i+2]
+                new_circles.append([x, y, r])
+            
+            # Constraint: no overlap
+            penalty = 0
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = new_circles[i]
+                    x2, y2, r2 = new_circles[j]
+                    dist = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if dist < r1 + r2:
+                        penalty += (r1 + r2 - dist)**2
+                
+            # Penalty for boundary violations
+            for i in range(n):
+                x, y, r = new_circles[i]
+                if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                    penalty += 1000000
+            
+            return penalty
+        
+        # Use scipy minimize with SLSQP method
+        try:
+            result = minimize(objective, initial_params, 
+                            method='SLSQP', 
+                            bounds=bounds,
+                            constraints={'type': 'ineq', 'fun': lambda x: 1000000 - constraint_func(x)},
+                            options={'maxiter': 100})
+            
+            if result.success:
+                # Reconstruct circles
+                final_circles = []
+                for i in range(n):
+                    x = result.x[3*i]
+                    y = result.x[3*i+1]
+                    r = result.x[3*i+2]
+                    final_circles.append([x, y, r])
+                return np.array(final_circles)
+        except:
+            pass
+        
+        return circles
+    
+    def mutate_individual(circles: np.ndarray) -> np.ndarray:
+        """Create a mutated version of circles"""
+        mutated = circles.copy()
+        n = len(circles)
+        
+        # Select random circle to mutate
+        idx = random.randint(0, n-1)
+        x, y, r = mutated[idx]
+        
+        # Mutate position and radius
+        mutation_strength = 0.02
+        mutated[idx] = [
+            max(0.001, min(0.999, x + random.uniform(-mutation_strength, mutation_strength))),
+            max(0.001, min(0.999, y + random.uniform(-mutation_strength, mutation_strength))),
+            max(0.001, min(0.4, r + random.uniform(-mutation_strength/2, mutation_strength/2)))
+        ]
+        
+        return mutated
+    
+    def crossover(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """Perform crossover between two parents"""
+        child = parent1.copy()
+        n = len(parent1)
+        
+        # Single point crossover
+        crossover_point = random.randint(1, n-1)
+        
+        for i in range(crossover_point, n):
+            child[i] = parent2[i].copy()
+        
+        return child
+    
+    def evaluate_fitness(circles: np.ndarray) -> float:
+        """Evaluate fitness of a solution (sum of radii)"""
+        return calculate_sum_radii(circles)
+    
+    # Main evolutionary algorithm
+    population_size = 20
+    generations = 50
+    mutation_rate = 0.3
+    
+    # Initialize population
+    population = []
+    for _ in range(population_size):
+        # Start with Voronoi initialization
+        initial_solution = voronoi_initialization(32)
+        # Refine with optimization
+        refined = optimize_circles(initial_solution)
+        population.append(refined)
+    
+    best_solution = None
+    best_fitness = -float('inf')
+    
+    # Evolution loop
+    for generation in range(generations):
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            if check_constraints(individual):
+                fitness = evaluate_fitness(individual)
+                fitness_scores.append((individual, fitness))
+            else:
+                fitness_scores.append((individual, -1000000))
+        
+        # Sort by fitness
+        fitness_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Track best solution
+        if fitness_scores[0][1] > best_fitness:
+            best_fitness = fitness_scores[0][1]
+            best_solution = fitness_scores[0][0].copy()
+        
+        # Create new population
+        new_population = []
+        
+        # Keep top 20% (elitism)
+        elite_count = population_size // 5
+        for i in range(elite_count):
+            new_population.append(fitness_scores[i][0].copy())
+        
+        # Fill rest with offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, fitness_scores, 3)
+            parent2 = tournament_selection(population, fitness_scores, 3)
+            
+            # Crossover
+            child = crossover(parent1, parent2)
+            
+            # Mutation
+            if random.random() < mutation_rate:
+                child = mutate_individual(child)
+            
+            # Optimize child
+            child_optimized = optimize_circles(child)
+            
+            new_population.append(child_optimized)
+        
+        population = new_population[:population_size]
+    
+    # Final optimization of best solution
+    if best_solution is not None:
+        final_solution = optimize_circles(best_solution)
+        if check_constraints(final_solution):
+            return final_solution
+        else:
+            # If final optimization failed, return the best valid solution found
+            return best_solution
+    else:
+        # Return first valid solution from population
+        for individual in population:
+            if check_constraints(individual):
+                return individual
+    
+    return population[0] if len(population) > 0 else np.zeros((32, 3))
+
+def tournament_selection(population, fitness_scores, k):
+    """Select individual using tournament selection"""
+    tournament_indices = random.sample(range(len(population)), k)
+    tournament_fitness = [(i, fitness_scores[i][1]) for i in tournament_indices]
+    winner_index = max(tournament_fitness, key=lambda x: x[1])[0]
+    return population[winner_index]
+
+# EVOLVE-BLOCK-END

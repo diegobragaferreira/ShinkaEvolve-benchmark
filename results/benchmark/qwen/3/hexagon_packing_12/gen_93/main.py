@@ -1,0 +1,59 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses a more sophisticated symmetric arrangement inspired by optimal hexagon packings.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Define the radius of a unit hexagon (distance from center to corner)
+    unit_radius = 1.0
+
+    # For 12 hexagons arranged in a ring around a central hexagon,
+    # the distance between centers should be 2 * unit_radius = 2
+    # The optimal arrangement places 12 hexagons at equal angles around a circle
+    # Center hexagon at (0,0), surrounding hexagons at radius 2 from center
+
+    # Calculate positions in a circular arrangement
+    angles = np.linspace(0, 2*np.pi, 13)[:-1]  # 12 angles, excluding last to avoid duplication
+
+    # Positions for 12 surrounding hexagons (radius = 2)
+    positions = np.array([
+        [2 * np.cos(angle), 2 * np.sin(angle)]
+        for angle in angles
+    ])
+
+    # Central hexagon
+    positions = np.vstack([[0, 0], positions])
+
+    # All hexagons have 0 rotation since they're aligned with their natural orientation
+    rotations = np.zeros(13)
+
+    # Create the data array (13 hexagons total: 1 center + 12 surround)
+    inner_hex_data = np.column_stack([positions, rotations])
+
+    # Extract just the 12 surrounding hexagons for the output
+    inner_hex_data = inner_hex_data[1:]
+
+    # Compute the outer hexagon dimensions
+    # The outer hexagon needs to contain all hexagon vertices
+    # Maximum distance from center to any vertex of the surrounding hexagons
+    max_distance = 2 + unit_radius  # center-to-center distance + hexagon radius
+
+    # For a regular hexagon with side length s, the circumradius is s
+    # So we need outer_hex_side_length such that its circumradius >= max_distance
+    outer_hex_side_length = max_distance
+
+    # Outer hexagon centered at origin
+    outer_hex_data = np.array([0, 0, 0])
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

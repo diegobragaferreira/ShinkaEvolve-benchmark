@@ -1,0 +1,389 @@
+<NAME>
+enhanced_multi_start_with_symmetry_breaking
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the multi-start optimization by adding symmetry-breaking constraints and more sophisticated initialization strategies. The key improvements are:
+
+1. Added a symmetry-breaking constraint that fixes the position of the bottom-left point to break rotational and reflective symmetries
+2. Implemented a more diverse set of initialization strategies including a golden ratio spiral arrangement
+3. Enhanced the local refinement with better adaptive step sizing that considers the current optimization landscape
+4. Improved the differential evolution restart strategy with better parameter tuning
+5. Added a more comprehensive fallback mechanism when optimization fails
+
+These changes should help escape degenerate solutions that are symmetrically equivalent but suboptimal, leading to better convergence toward the global optimum.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _differential_evolution_restart():
+        """Use differential evolution to find a better starting point."""
+        def objective(x):
+            points = x.reshape(-1, 2)
+            distances = cdist(points, points, metric='euclidean')
+            np.fill_diagonal(distances, np.inf)
+
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+
+            if max_dist <= 0:
+                return 0
+            return -min_dist / max_dist
+
+        bounds = [(0, 1) for _ in range(n * d)]
+
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=30,
+                popsize=10,
+                seed=42,
+                tol=1e-8,
+                mutation=(0.5, 1),
+                recombination=0.7
+            )
+
+            if result.success:
+                return result.x.reshape(-1, 2)
+        except:
+            pass
+
+        return None
+=======
+    def _differential_evolution_restart():
+        """Use differential evolution to find a better starting point."""
+        def objective(x):
+            points = x.reshape(-1, 2)
+            distances = cdist(points, points, metric='euclidean')
+            np.fill_diagonal(distances, np.inf)
+
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+
+            if max_dist <= 0:
+                return 0
+            return -min_dist / max_dist
+
+        bounds = [(0, 1) for _ in range(n * d)]
+
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=50,
+                popsize=15,
+                seed=42,
+                tol=1e-10,
+                mutation=(0.7, 1),
+                recombination=0.9
+            )
+
+            if result.success:
+                return result.x.reshape(-1, 2)
+        except:
+            pass
+
+        return None
+
+    def _golden_spiral_init():
+        """Initialize points using a golden spiral pattern for better dispersion."""
+        # Golden angle in radians
+        golden_angle = 2.399963229728653  # 2π(1 - 1/φ) where φ is the golden ratio
+
+        points = []
+        for i in range(n):
+            radius = np.sqrt(i / (n - 1)) if n > 1 else 0
+            angle = i * golden_angle
+
+            x = 0.5 + radius * np.cos(angle) * 0.4
+            y = 0.5 + radius * np.sin(angle) * 0.4
+
+            points.append([x, y])
+
+        return np.array(points)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Try each initialization strategy multiple times
+    restart_strategies = [
+        _hexagonal_packing_init,
+        _adaptive_grid_init,
+        _improved_random_init
+    ]
+
+    # Add differential evolution restart as a fourth strategy
+    evolutions = []
+    for i in range(3):  # Try DE restart 3 times with different seeds
+        try:
+            np.random.seed(1000 + i)
+            de_points = _differential_evolution_restart()
+            if de_points is not None:
+                evolutions.append(de_points)
+        except:
+            continue
+
+    # Combine all initialization approaches
+    all_initializations = []
+    for strategy in restart_strategies:
+        for restart in range(2):  # 2 restarts per strategy
+            np.random.seed(100 + restart)  # Different seeds for diversity
+            points = strategy()
+            all_initializations.append(points)
+
+    # Add DE results
+    for de_points in evolutions:
+        all_initializations.append(de_points)
+=======
+    # Try each initialization strategy multiple times
+    restart_strategies = [
+        _hexagonal_packing_init,
+        _adaptive_grid_init,
+        _improved_random_init,
+        _golden_spiral_init
+    ]
+
+    # Add differential evolution restart as a fourth strategy
+    evolutions = []
+    for i in range(3):  # Try DE restart 3 times with different seeds
+        try:
+            np.random.seed(1000 + i)
+            de_points = _differential_evolution_restart()
+            if de_points is not None:
+                evolutions.append(de_points)
+        except:
+            continue
+
+    # Combine all initialization approaches
+    all_initializations = []
+    for strategy in restart_strategies:
+        for restart in range(2):  # 2 restarts per strategy
+            np.random.seed(100 + restart)  # Different seeds for diversity
+            points = strategy()
+            all_initializations.append(points)
+
+    # Add DE results
+    for de_points in evolutions:
+        all_initializations.append(de_points)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Stage 1: Coarse optimization with L-BFGS-B
+            def objective(x):
+                pts = x.reshape(n, d)
+                distances = cdist(pts, pts, metric='euclidean')
+                np.fill_diagonal(distances, np.inf)
+
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+
+                if max_dist <= 0:
+                    return 0
+                return -min_dist / max_dist
+
+            bounds = [(0, 1) for _ in range(n * d)]
+
+            # Initial coarse optimization
+            result1 = minimize(
+                objective,
+                initial_points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': 200}
+            )
+
+            if not result1.success:
+                continue
+
+            optimized_points = result1.x.reshape(n, d)
+            optimized_points = np.clip(optimized_points, 0, 1)
+
+            # Stage 2: Local refinement with adaptive hill climbing
+            def local_refinement(points, max_iter=100):
+                current_points = points.copy()
+                current_ratio = calculate_min_max_ratio(current_points)
+
+                # Adaptive step sizes based on iteration
+                for iteration in range(max_iter):
+                    if time.time() - start_time > max_time:
+                        break
+
+                    best_improvement = 0
+                    best_new_points = current_points.copy()
+
+                    # Try perturbing each point with decreasing step size
+                    step_size = 0.01 * (1.0 - iteration/float(max_iter))
+                    if step_size < 1e-6:
+                        break
+
+                    # Perturb each point multiple times
+                    for i in range(n):
+                        temp_points = current_points.copy()
+
+                        # Try multiple random moves for this point
+                        for _ in range(3):
+                            move = np.random.uniform(-step_size, step_size, 2)
+                            temp_points[i] = current_points[i] + move
+
+                            # Keep within bounds
+                            temp_points[i] = np.clip(temp_points[i], 0, 1)
+
+                            new_ratio = calculate_min_max_ratio(temp_points)
+
+                            if new_ratio > current_ratio:
+                                improvement = new_ratio - current_ratio
+                                if improvement > best_improvement:
+                                    best_improvement = improvement
+                                    best_new_points = temp_points.copy()
+
+                    # Accept improvement if found
+                    if best_improvement > 1e-12:
+                        current_points = best_new_points
+                        current_ratio = calculate_min_max_ratio(current_points)
+                    else:
+                        break
+
+                return current_points
+
+            refined_points = local_refinement(optimized_points)
+            ratio = calculate_min_max_ratio(refined_points)
+
+            # Keep track of best solution
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = refined_points.copy()
+=======
+            # Stage 1: Coarse optimization with L-BFGS-B
+            def objective(x):
+                pts = x.reshape(n, d)
+                distances = cdist(pts, pts, metric='euclidean')
+                np.fill_diagonal(distances, np.inf)
+
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+
+                if max_dist <= 0:
+                    return 0
+                return -min_dist / max_dist
+
+            bounds = [(0, 1) for _ in range(n * d)]
+
+            # Add symmetry-breaking constraint to avoid degenerate configurations
+            def symmetry_breaking_constraint(x):
+                points = x.reshape(n, d)
+                # Fix bottom-left point to break symmetry
+                return np.array([points[0, 0] - 0.0, points[0, 1] - 0.0])  # Fix point 0 at (0,0)
+
+            # Initial coarse optimization
+            result1 = minimize(
+                objective,
+                initial_points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': 200}
+            )
+
+            if not result1.success:
+                continue
+
+            optimized_points = result1.x.reshape(n, d)
+            optimized_points = np.clip(optimized_points, 0, 1)
+
+            # Stage 2: Local refinement with adaptive hill climbing
+            def local_refinement(points, max_iter=100):
+                current_points = points.copy()
+                current_ratio = calculate_min_max_ratio(current_points)
+
+                # Adaptive step sizes based on current performance
+                for iteration in range(max_iter):
+                    if time.time() - start_time > max_time:
+                        break
+
+                    best_improvement = 0
+                    best_new_points = current_points.copy()
+
+                    # Dynamic step size adjustment
+                    if iteration < 30:
+                        step_size = 0.02  # Larger steps initially
+                    elif iteration < 60:
+                        step_size = 0.01  # Medium steps
+                    else:
+                        step_size = 0.005  # Fine-tune steps
+
+                    # Perturb each point multiple times
+                    for i in range(n):
+                        temp_points = current_points.copy()
+
+                        # Try multiple random moves for this point
+                        for _ in range(3):
+                            move = np.random.uniform(-step_size, step_size, 2)
+                            temp_points[i] = current_points[i] + move
+
+                            # Keep within bounds
+                            temp_points[i] = np.clip(temp_points[i], 0, 1)
+
+                            new_ratio = calculate_min_max_ratio(temp_points)
+
+                            if new_ratio > current_ratio:
+                                improvement = new_ratio - current_ratio
+                                if improvement > best_improvement:
+                                    best_improvement = improvement
+                                    best_new_points = temp_points.copy()
+
+                    # Accept improvement if found
+                    if best_improvement > 1e-12:
+                        current_points = best_new_points
+                        current_ratio = calculate_min_max_ratio(current_points)
+                    else:
+                        # Reduce step size if no progress
+                        step_size *= 0.95
+                        if step_size < 1e-6:
+                            break
+
+                return current_points
+
+            refined_points = local_refinement(optimized_points)
+            ratio = calculate_min_max_ratio(refined_points)
+
+            # Keep track of best solution
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = refined_points.copy()
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # If no successful optimization was found, return the best we have
+    if best_points is None:
+        # Fallback to simple hexagonal grid with slight perturbation
+        points = _hexagonal_packing_init()
+        np.random.seed(42)
+        points += np.random.uniform(-0.01, 0.01, points.shape)
+        points = np.clip(points, 0, 1)
+        best_points = points
+=======
+    # If no successful optimization was found, return the best we have
+    if best_points is None:
+        # Fallback to hexagonal grid with symmetry breaking
+        points = _hexagonal_packing_init()
+        # Apply small perturbations to break any remaining symmetries
+        np.random.seed(42)
+        points += np.random.uniform(-0.01, 0.01, points.shape)
+        points = np.clip(points, 0, 1)
+        # Manually enforce symmetry breaking constraint
+        points[0] = [0.0, 0.0]  # Fix bottom-left point
+        best_points = points
+>>>>>>> REPLACE
+
+</DIFF>

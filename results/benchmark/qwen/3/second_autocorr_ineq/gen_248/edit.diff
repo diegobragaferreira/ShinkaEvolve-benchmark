@@ -1,0 +1,684 @@
+--- a/original.py
++++ b/original.py
+@@ -1,331 +1,370 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from numba import jit
++from scipy import signal, fftpack
++from numba import jit, prange
++import random
+ import time
++from typing import List, Tuple
+ from joblib import Parallel, delayed
+-import random
+-from deap import base, creator, tools, algorithms
+-import copy
+-
+-# Core computation module
++import warnings
++
++warnings.filterwarnings('ignore')
++
++# Core computation with numba JIT for performance
+ @jit(nopython=True)
+-def compute_autoconvolution_jit(f_vals, step_width):
+-    """
+-    Compute autoconvolution using numba for speed
+-    """
++def compute_autoconvolution_fast(f_vals):
++    """Fast numba-based autoconvolution computation"""
+     n = len(f_vals)
+-    # Autoconvolution size is 2*n - 1
+-    g_size = 2 * n - 1
+-    g_vals = np.zeros(g_size)
+-    
+-    # Compute convolution directly
++    g = np.zeros(2*n - 1)
++    
+     for i in range(n):
+         for j in range(n):
+-            idx = i + j
+-            if 0 <= idx < g_size:
+-                g_vals[idx] += f_vals[i] * f_vals[j]
+-    
+-    return g_vals
+-
+-@jit(nopython=True)
+-def compute_norms_jit(g_vals):
+-    """
+-    Compute norms efficiently with numba
+-    """
++            g[i + j] += f_vals[i] * f_vals[j]
++    
++    return g
++
++@jit(nopython=True) 
++def compute_convolution_norms_fast(g_vals):
++    """Fast computation of convolution norms"""
+     n = len(g_vals)
+-    
+-    # Compute L1 norm (sum of absolute values)
+-    l1_norm = 0.0
++    l2_sq = 0.0
++    l1 = 0.0
++    l_inf = 0.0
++    
+     for i in range(n):
+-        l1_norm += abs(g_vals[i])
+-    
+-    # Compute L2 norm squared
+-    l2_norm_sq = 0.0
++        val = g_vals[i]
++        l2_sq += val * val
++        l1 += abs(val)
++        if abs(val) > l_inf:
++            l_inf = abs(val)
++    
++    return l2_sq, l1, l_inf
++
++def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
++    """
++    Compute the three norms needed for C2 calculation with proper numerical handling
++    Uses FFT-based convolution for efficiency and correct scaling
++    """
++    n = len(f_values)
++    if n == 0:
++        return 0.0, 0.0, 0.0
++    
++    # Ensure non-negative values and convert to numpy for efficiency
++    f_array = np.array(f_values)
++    f_array = np.maximum(f_array, 0.0)
++    
++    # Compute autoconvolution using FFT for efficiency
++    # Pad to power of 2 for efficient FFT
++    padded_n = 1
++    while padded_n < 2*n - 1:
++        padded_n <<= 1
++    
++    # Zero-padding
++    f_padded = np.zeros(padded_n)
++    f_padded[:n] = f_array
++    
++    # FFT-based convolution
++    f_fft = fftpack.fft(f_padded)
++    g_fft = f_fft * np.conj(f_fft)  # Element-wise multiplication
++    g_padded = fftpack.ifft(g_fft).real
++    
++    # Extract the valid convolution part
++    g = g_padded[n-1:n-1+(2*n-1)]
++    
++    # Apply proper scaling for step function integration
++    dx = 0.5 / n  # Width of each step on interval [-1/4, 1/4]
++    g = g * dx  # Scale by step width
++    
++    # Compute norms using the piecewise linear integration approach
++    g_abs = np.abs(g)
++    
++    # L2 norm squared using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
++    g2_sq = 0.0
++    for i in range(len(g_abs)-1):
++        g2_sq += (dx/3) * (g_abs[i]**2 + g_abs[i]*g_abs[i+1] + g_abs[i+1]**2)
++    
++    # L1 norm (sum of absolute values times dx)
++    g1 = np.sum(g_abs) * dx
++    
++    # L-infinity norm
++    g_inf = np.max(g_abs)
++    
++    # Handle edge cases
++    if g1 <= 1e-15:
++        g1 = 1e-15
++    if g_inf <= 1e-15:
++        g_inf = 1e-15
++        
++    return g2_sq, g1, g_inf
++
++def calculate_c2(f_values: List[float]) -> float:
++    """
++    Calculate the C2 constant from the step function values.
++    """
++    try:
++        g_norm_2_sq, g_norm_1, g_norm_inf = compute_autoconvolution_norms(f_values)
++        c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
++        return c2
++    except:
++        return 0.0
++
++def compute_frequency_spectrum(f_values: List[float]) -> np.ndarray:
++    """Compute the frequency spectrum of the step function"""
++    f_array = np.array(f_values)
++    # Zero-pad to improve FFT accuracy
++    padded = np.pad(f_array, (0, len(f_array)), mode='constant')
++    spectrum = fftpack.fft(padded)
++    return spectrum
++
++def estimate_convolution_properties(f_values: List[float]) -> Tuple[float, float]:
++    """Estimate key convolution properties from frequency domain"""
++    spectrum = compute_frequency_spectrum(f_values)
++    # Power spectrum
++    power_spectrum = np.abs(spectrum)**2
++    
++    # Estimate how spread out the convolution will be
++    # High frequency components lead to more oscillatory convolution
++    # Low frequency dominance leads to flatter convolution
++    total_power = np.sum(power_spectrum)
++    if total_power > 0:
++        # Ratio of low frequency energy (first 10%) to total
++        low_freq_energy = np.sum(power_spectrum[:len(power_spectrum)//10])
++        low_freq_ratio = low_freq_energy / total_power
++    else:
++        low_freq_ratio = 0.0
++    
++    # Estimate peakiness of convolution (inverse of variance of spectrum)
++    if len(power_spectrum) > 1:
++        variance = np.var(power_spectrum)
++        peakiness = 1.0 / (1e-12 + variance) if variance > 0 else 1e12
++    else:
++        peakiness = 0.0
++    
++    return low_freq_ratio, peakiness
++
++def generate_spectral_initial_function(n: int) -> List[float]:
++    """
++    Create initial function based on spectral properties that should yield good C2 values.
++    """
++    # Create a function that should yield relatively flat convolution
++    # This starts with a low-pass filtered approach
++    
++    # Base: sine wave with controlled harmonics
++    x = np.linspace(0, 2*np.pi, n)
++    
++    # Primary component (fundamental)
++    fundamental = 0.5 + 0.3 * np.sin(x)
++    
++    # Add some mid-frequency components to avoid overly simple patterns
++    harmonic1 = 0.1 * np.sin(3*x)
++    harmonic2 = 0.1 * np.cos(5*x)
++    
++    # Combine
++    combined = fundamental + harmonic1 + harmonic2
++    
++    # Add some localized peaks for better convolution mixing
++    num_peaks = max(1, n // 20)
++    for _ in range(num_peaks):
++        peak_pos = random.randint(0, n-1)
++        combined[peak_pos] += random.uniform(0.3, 0.8)
++    
++    # Ensure non-negativity and reasonable scale
++    combined = np.maximum(combined, 0)
++    combined = combined / (np.max(combined) + 1e-10) * 2.0
++    
++    return combined.tolist()
++
++def generate_broadband_initial_function(n: int) -> List[float]:
++    """
++    Generate broadband initial function that should create diverse convolution patterns
++    """
++    # Start with a base shaped function
++    x = np.linspace(0, 1, n)
++    
++    # Create a multi-scale pattern that should lead to favorable convolution
++    pattern = (
++        0.3 * np.exp(-((x - 0.2)**2) / (2 * 0.1**2)) +
++        0.4 * np.exp(-((x - 0.6)**2) / (2 * 0.1**2)) +
++        0.3 * np.exp(-((x - 0.8)**2) / (2 * 0.1**2))
++    )
++    
++    # Add some noise to prevent too perfect patterns
++    noise = np.random.normal(0, 0.05, n)
++    pattern += noise
++    
++    # Ensure non-negativity
++    pattern = np.maximum(pattern, 0)
++    
++    # Normalize to reasonable values
++    pattern = pattern / (np.max(pattern) + 1e-10) * 1.5
++    
++    return pattern.tolist()
++
++def adaptive_frequency_guided_mutation(individual: List[float], 
++                                     generation: int, 
++                                     max_generations: int,
++                                     spec_properties: Tuple[float, float]) -> List[float]:
++    """
++    Mutate using frequency-domain information to guide the process
++    """
++    mutated = individual.copy()
++    n = len(mutated)
++    
++    # Adaptive mutation rate based on generation and spectral properties
++    base_rate = 0.1 * (1.0 - generation/max_generations)
++    # If we have high low-frequency content, be more conservative
++    if spec_properties[0] > 0.7:
++        base_rate *= 0.5
++        
++    # Mutate each element
+     for i in range(n):
+-        l2_norm_sq += g_vals[i] * g_vals[i]
+-    
+-    # Compute infinity norm
+-    linf_norm = 0.0
+-    for i in range(n):
+-        val = abs(g_vals[i])
+-        if val > linf_norm:
+-            linf_norm = val
+-    
+-    return l1_norm, l2_norm_sq, linf_norm
+-
+-def compute_convolution_norms(f_values, domain_length=0.5):
+-    """
+-    Compute the three norms needed for C2 calculation using the provided step function.
+-    """
+-    n_steps = len(f_values)
+-    if n_steps == 0:
+-        return 0.0, 0.0, 0.0
+-
+-    # Step size
+-    dx = domain_length / n_steps
+-
+-    # Compute autoconvolution g = f * f using direct computation
+-    g_size = 2 * n_steps - 1
+-    g = np.zeros(g_size)
+-
+-    # Compute autoconvolution using direct convolution sum
+-    for i in range(n_steps):
+-        for j in range(n_steps):
+-            k = i + j
+-            if 0 <= k < g_size:
+-                g[k] += f_values[i] * f_values[j] * dx
+-
+-    # Compute norms using piecewise linear integration approach
+-    # For ||g||₂² using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
+-    g2_sq = 0.0
+-    for i in range(len(g)-1):
+-        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+-
+-    # ||g||₁ = sum(|g_i| * dx)
+-    g1 = np.sum(np.abs(g)) * dx
+-
+-    # ||g||∞ = max(|g_i|)
+-    ginf = np.max(np.abs(g))
+-
+-    return g2_sq, g1, ginf
+-
+-def compute_c2(f_values):
+-    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞)"""
+-    g2_sq, g1, ginf = compute_convolution_norms(f_values)
+-
+-    if g1 == 0 or ginf == 0:
+-        return 0.0
+-
+-    return g2_sq / (g1 * ginf)
+-
+-# Optimization module
+-def evaluate_individual(individual):
+-    """Evaluate fitness of individual - returns negative C2 for maximization"""
++        if random.random() < base_rate:
++            # Apply mutation with adaptive strength
++            strength = 0.2 * mutated[i] if mutated[i] > 0 else 0.2
++            # Use asymmetric mutation to preserve non-negativity
++            mutation = random.gauss(0, strength)
++            mutated[i] = max(0, mutated[i] + mutation)
++    
++    return mutated
++
++def evaluate_population_parallel(population: List[List[float]]) -> List[float]:
++    """Evaluate population in parallel"""
++    return Parallel(n_jobs=-1, backend='threading')(
++        delayed(calculate_c2)(individual) for individual in population
++    )
++
++def frequency_domain_evolutionary_optimization(max_generations: int = 30, 
++                                             pop_size: int = 25) -> Tuple[List[float], float]:
++    """
++    Evolutionary optimization guided by frequency domain analysis
++    """
++    # Initialize population
++    population = []
++    
++    # Generate diverse initial population using different strategies
++    for i in range(pop_size):
++        if i < pop_size // 3:
++            # Broadband functions
++            n = random.randint(200, 1000)
++            individual = generate_broadband_initial_function(n)
++        elif i < 2 * pop_size // 3:
++            # Spectral-initial functions
++            n = random.randint(200, 1000)
++            individual = generate_spectral_initial_function(n)
++        else:
++            # Simple random
++            n = random.randint(200, 1000)
++            individual = [random.uniform(0.1, 1.5) for _ in range(n)]
++        
++        population.append(individual)
++    
++    best_overall_c2 = 0.0
++    best_overall_solution = None
++    
++    for gen in range(max_generations):
++        # Evaluate population in parallel
++        fitnesses = evaluate_population_parallel(population)
++        
++        # Track best solution
++        max_fitness_idx = np.argmax(fitnesses)
++        current_best_c2 = fitnesses[max_fitness_idx]
++        
++        if current_best_c2 > best_overall_c2:
++            best_overall_c2 = current_best_c2
++            best_overall_solution = population[max_fitness_idx].copy()
++        
++        # Sort by fitness descending
++        sorted_indices = np.argsort(fitnesses)[::-1]
++        sorted_population = [population[i] for i in sorted_indices]
++        sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
++        
++        # Elitism: keep top 2
++        elite = sorted_population[:2]
++        
++        # Create new population
++        new_population = elite.copy()
++        
++        # Generate offspring through crossover and mutation with frequency guidance
++        while len(new_population) < pop_size:
++            # Tournament selection based on fitness
++            tournament_size = 3
++            tournament_indices = random.sample(range(len(sorted_population)), tournament_size)
++            tournament_fitnesses = [sorted_fitnesses[i] for i in tournament_indices]
++            parent_idx = tournament_indices[np.argmax(tournament_fitnesses)]
++            
++            parent = sorted_population[parent_idx].copy()
++            
++            # Some crossover with another random parent
++            if random.random() < 0.7:
++                other_parent = random.choice(sorted_population)
++                # Uniform crossover
++                child = []
++                for i in range(len(parent)):
++                    if random.random() < 0.5:
++                        child.append(parent[i])
++                    else:
++                        child.append(other_parent[i] if i < len(other_parent) else parent[i])
++                child = child[:len(parent)]  # Trim to correct length
++            else:
++                child = parent
++            
++            # Frequency-guided mutation
++            spec_props = estimate_convolution_properties(child)
++            mutated_child = adaptive_frequency_guided_mutation(
++                child, gen, max_generations, spec_props
++            )
++            
++            new_population.append(mutated_child)
++        
++        population = new_population[:pop_size]
++    
++    return best_overall_solution, best_overall_c2
++
++def construct_function() -> List[float]:
++    """
++    Function to construct step-function with high C2 value.
++    Uses frequency-domain guided evolutionary optimization with FFT acceleration.
++    """
++    start_time = time.time()
++    
++    # Set seeds for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
++    # Use frequency domain evolutionary optimization with FFT acceleration
+     try:
+-        # Ensure non-negative values
+-        individual = np.maximum(0.0, individual)
+-        c2 = compute_c2(individual.tolist())
+-        return -c2  # Negative because we want to maximize C2
++        final_solution, final_c2 = frequency_domain_evolutionary_optimization(
++            max_generations=25, 
++            pop_size=25
++        )
++        
++        # Ensure we return a valid solution
++        if final_solution is not None:
++            # Final validation check
++            validate_c2 = calculate_c2(final_solution)
++            if validate_c2 > final_c2:
++                final_c2 = validate_c2
++        else:
++            # Fallback to simple function
++            final_solution = generate_spectral_initial_function(500)
++            final_c2 = calculate_c2(final_solution)
++            
++        # Make sure we have a reasonable minimum
++        if final_c2 < 0.1:
++            final_solution = generate_spectral_initial_function(500)
++            final_c2 = calculate_c2(final_solution)
++            
++        end_time = time.time()
++        return final_solution
++        
+     except Exception as e:
+-        return 1e10  # Penalty for invalid solutions
+-
+-def initialize_population(pop_size, n_steps, init_strategy='mixed'):
+-    """Initialize population with different strategies"""
+-    population = []
+-    
+-    if init_strategy == 'random':
+-        for _ in range(pop_size):
+-            individual = np.random.uniform(0, 1, n_steps)
+-            population.append(individual)
+-    
+-    elif init_strategy == 'pattern':
+-        # Create patterned individuals
+-        for _ in range(pop_size):
+-            individual = np.zeros(n_steps)
+-            # Create a symmetric pattern
+-            half = n_steps // 2
+-            for i in range(n_steps):
+-                if i < half:
+-                    individual[i] = i / half
+-                else:
+-                    individual[i] = (n_steps - i) / half
+-            population.append(individual)
+-    
+-    elif init_strategy == 'geometric':
+-        # Create geometrically shaped individuals
+-        for _ in range(pop_size):
+-            individual = np.zeros(n_steps)
+-            x = np.linspace(-0.25, 0.25, n_steps)
+-            # Create a bell curve
+-            individual = np.exp(-0.5 * (x / 0.1) ** 2)
+-            population.append(individual)
+-    
+-    else:  # mixed strategy
+-        # Combine different initialization approaches
+-        strategies = ['random', 'pattern', 'geometric']
+-        for i in range(pop_size):
+-            strategy = strategies[i % len(strategies)]
+-            if strategy == 'random':
+-                individual = np.random.uniform(0, 1, n_steps)
+-            elif strategy == 'pattern':
+-                individual = np.zeros(n_steps)
+-                half = n_steps // 2
+-                for j in range(n_steps):
+-                    if j < half:
+-                        individual[j] = j / half
+-                    else:
+-                        individual[j] = (n_steps - j) / half
+-            else:  # geometric
+-                individual = np.zeros(n_steps)
+-                x = np.linspace(-0.25, 0.25, n_steps)
+-                individual = np.exp(-0.5 * (x / 0.1) ** 2)
+-            population.append(individual)
+-    
+-    return population
+-
+-def mutate_individual(individual, mut_rate=0.1, gen_num=0):
+-    """Mutate an individual with adaptive rate"""
+-    # Decrease mutation rate over generations
+-    adaptive_mut_rate = mut_rate * (1.0 - 0.05 * gen_num / 100)
+-    adaptive_mut_rate = max(adaptive_mut_rate, 0.01)
+-    
+-    mutated = individual.copy()
+-    for i in range(len(mutated)):
+-        if np.random.random() < adaptive_mut_rate:
+-            # Apply small Gaussian perturbation
+-            change = np.random.normal(0, 0.1 * mutated[i])
+-            mutated[i] = max(0, mutated[i] + change)
+-    return mutated
+-
+-def crossover_individuals(parent1, parent2):
+-    """Uniform crossover between two individuals"""
+-    child1 = parent1.copy()
+-    child2 = parent2.copy()
+-    
+-    for i in range(len(child1)):
+-        if np.random.random() < 0.5:
+-            child1[i], child2[i] = child2[i], child1[i]
+-    
+-    return child1, child2
+-
+-def evolutionary_optimization(n_steps, pop_size=50, generations=50):
+-    """Perform evolutionary optimization"""
+-    # Create toolbox
+-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+-    creator.create("Individual", list, fitness=creator.FitnessMax)
+-    
+-    toolbox = base.Toolbox()
+-    toolbox.register("individual", tools.initRepeat, creator.Individual, 
+-                     lambda: np.random.uniform(0, 1), n_steps)
+-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+-    
+-    # Register genetic operators
+-    toolbox.register("evaluate", evaluate_individual)
+-    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+-    toolbox.register("mutate", mutate_individual)
+-    toolbox.register("select", tools.selTournament, tournsize=3)
+-    
+-    # Create initial population
+-    pop = toolbox.population(n=pop_size)
+-    
+-    # Evaluate initial population
+-    fitnesses = list(map(toolbox.evaluate, pop))
+-    for ind, fit in zip(pop, fitnesses):
+-        ind.fitness.values = (fit,)
+-    
+-    # Evolution loop
+-    for gen in range(generations):
+-        # Select the next generation individuals
+-        offspring = toolbox.select(pop, len(pop))
+-        offspring = list(map(toolbox.clone, offspring))
+-        
+-        # Apply crossover and mutation
+-        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+-            if np.random.random() < 0.5:
+-                toolbox.mate(child1, child2)
+-                del child1.fitness.values
+-                del child2.fitness.values
+-        
+-        for mutant in offspring:
+-            if np.random.random() < 0.1:  # Mutation probability
+-                toolbox.mutate(mutant, gen_num=gen)
+-                del mutant.fitness.values
+-        
+-        # Evaluate the individuals with an invalid fitness
+-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+-        fitnesses = map(toolbox.evaluate, invalid_ind)
+-        for ind, fit in zip(invalid_ind, fitnesses):
+-            ind.fitness.values = (fit,)
+-        
+-        # Replace the old population with the new one
+-        pop[:] = offspring
+-    
+-    # Return best individual
+-    best_ind = tools.selBest(pop, 1)[0]
+-    return np.array(best_ind)
+-
+-# Main optimization function
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value using evolutionary approach."""
+-    # Set parameters
+-    n_steps = 200
+-    max_time = 85  # seconds
+-    start_time = time.time()
+-    
+-    # Initialize with diverse strategies
+-    population = initialize_population(20, n_steps, 'mixed')
+-    
+-    # Evaluate initial population
+-    fitnesses = Parallel(n_jobs=-1)(delayed(evaluate_individual)(ind) for ind in population)
+-    
+-    # Find best initial solution
+-    best_idx = np.argmin(fitnesses)  # Minimizing negative C2
+-    best_individual = population[best_idx].copy()
+-    best_c2 = -fitnesses[best_idx]
+-    
+-    # Perform evolutionary optimization
+-    try:
+-        # Use evolutionary optimization for the main search
+-        evolved_population = evolutionary_optimization(n_steps, pop_size=30, generations=30)
+-        
+-        # Evaluate evolved solution
+-        evolved_c2 = compute_c2(evolved_population.tolist())
+-        
+-        if evolved_c2 > best_c2:
+-            best_individual = evolved_population
+-            best_c2 = evolved_c2
+-            
+-    except Exception as e:
+-        pass
+-    
+-    # Local refinement using coordinate-wise improvements
+-    refined_individual = best_individual.copy()
+-    old_c2 = best_c2
+-    
+-    # Refinement loop
+-    for coord_iter in range(20):
+-        if time.time() - start_time > max_time:
+-            break
+-            
+-        improved = False
+-        for i in range(len(refined_individual)):
+-            if time.time() - start_time > max_time:
+-                break
+-                
+-            # Try small perturbations
+-            original_value = refined_individual[i]
+-            step_sizes = [0.01, 0.05, 0.1]
+-            
+-            for step in step_sizes:
+-                # Try increasing and decreasing
+-                for direction in [1, -1]:
+-                    if time.time() - start_time > max_time:
+-                        break
+-                    test_individual = refined_individual.copy()
+-                    new_val = original_value + direction * step
+-                    test_individual[i] = max(0, new_val)
+-                    
+-                    new_c2 = compute_c2(test_individual.tolist())
+-                    if new_c2 > old_c2:
+-                        refined_individual = test_individual
+-                        old_c2 = new_c2
+-                        improved = True
+-                        
+-        if not improved:
+-            break
+-    
+-    # Ensure final solution is properly formatted
+-    final_solution = np.maximum(0.0, refined_individual)
+-    
+-    # Normalize for better numerical behavior
+-    if np.sum(final_solution) > 0:
+-        final_solution = final_solution / np.sum(final_solution) * 10
+-    
+-    return final_solution.tolist()
++        # Final fallback
++        print(f"Error occurred: {e}")
++        return generate_spectral_initial_function(500)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

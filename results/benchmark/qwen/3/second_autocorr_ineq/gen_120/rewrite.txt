@@ -1,0 +1,302 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import njit
+import random
+import time
+from collections import namedtuple
+import copy
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+# Configuration object for evolutionary parameters
+EvolutionConfig = namedtuple('EvolutionConfig', [
+    'pop_size', 'max_generations', 'mutation_rate', 'crossover_rate',
+    'elitism_rate', 'selection_pressure', 'min_length', 'max_length'
+])
+
+class AutoconvolutionEvaluator:
+    """Handles computation of autoconvolution norms and C2 values."""
+    
+    @staticmethod
+    @njit
+    def compute_autoconvolution_norms(f_values):
+        """
+        Compute the autoconvolution g = f*f and return its L2, L1, and L-infinity norms.
+        Uses piecewise linear integration for L2 norm.
+        """
+        n = len(f_values)
+        if n == 0:
+            return 0.0, 0.0, 0.0
+
+        # Create convolution using discrete convolution (equivalent to autoconvolution)
+        # The convolution will have length 2*n - 1
+        g = np.zeros(2 * n - 1)
+
+        # Compute autoconvolution manually for efficiency
+        for i in range(n):
+            for j in range(n):
+                g[i + j] += f_values[i] * f_values[j]
+
+        # Compute norms
+        # L2 norm squared
+        l2_norm_squared = 0.0
+        if len(g) >= 2:
+            # Piecewise linear integration using trapezoidal rule approximation
+            # For intervals, we use (h/3)(y1^2 + y1*y2 + y2^2) for each adjacent pair
+            h = 1.0  # Since step size is normalized to 1 for simplicity
+            for i in range(len(g) - 1):
+                y1 = g[i]
+                y2 = g[i+1]
+                l2_norm_squared += (h/3.0) * (y1*y1 + y1*y2 + y2*y2)
+
+        # L1 norm
+        l1_norm = np.sum(np.abs(g)) / (len(g) + 1)  # Normalize by number of intervals
+
+        # L-infinity norm
+        l_inf_norm = np.max(np.abs(g))
+
+        return l2_norm_squared, l1_norm, l_inf_norm
+
+    @staticmethod
+    @njit
+    def calculate_c2(l2_norm_squared, l1_norm, l_inf_norm):
+        """Calculate C2 = ||g||₂² / (||g||₁ · ||g||∞)"""
+        if l1_norm <= 1e-15 or l_inf_norm <= 1e-15:
+            return 0.0
+        return l2_norm_squared / (l1_norm * l_inf_norm)
+
+class Individual:
+    """Represents a candidate solution (step function) with associated fitness."""
+    
+    def __init__(self, values, fitness=None):
+        self.values = values
+        self.fitness = fitness
+    
+    def clone(self):
+        return Individual(copy.deepcopy(self.values), self.fitness)
+    
+    def __len__(self):
+        return len(self.values)
+
+class PopulationManager:
+    """Manages population operations and evolution logic."""
+    
+    def __init__(self, config):
+        self.config = config
+        self.evaluator = AutoconvolutionEvaluator()
+    
+    def initialize_population(self):
+        """Initialize population with diverse step functions."""
+        population = []
+        for _ in range(self.config.pop_size):
+            # Random number of steps
+            n_steps = np.random.randint(self.config.min_length, self.config.max_length + 1)
+            
+            # Generate heights with structured pattern
+            heights = []
+            for i in range(n_steps):
+                # Create structured variation to encourage good convolution behavior
+                if i % 4 == 0:
+                    heights.append(np.random.uniform(0.8, 1.0))  # Peaks
+                elif i % 4 == 1:
+                    heights.append(np.random.uniform(0.4, 0.8))  # Moderate
+                elif i % 4 == 2:
+                    heights.append(np.random.uniform(0.1, 0.4))  # Low
+                else:  # i % 4 == 3
+                    heights.append(np.random.uniform(0.0, 0.2))  # Very low
+            
+            # Add some structured noise to encourage diversity
+            for i in range(len(heights)):
+                if np.random.random() < 0.3:  # 30% chance to modify
+                    heights[i] = max(0.0, heights[i] + np.random.normal(0, 0.05))
+            
+            population.append(Individual(heights))
+        return population
+    
+    def evaluate_fitness(self, population):
+        """Evaluate fitness of entire population."""
+        for individual in population:
+            if individual.fitness is None:
+                try:
+                    l2, l1, l_inf = self.evaluator.compute_autoconvolution_norms(individual.values)
+                    individual.fitness = self.evaluator.calculate_c2(l2, l1, l_inf)
+                except Exception:
+                    individual.fitness = 0.0
+        return population
+    
+    def select_parents(self, population):
+        """Tournament selection with varying tournament sizes."""
+        selected = []
+        tournament_size = max(2, int(len(population) * self.config.selection_pressure))
+        
+        for _ in range(len(population)):
+            # Tournament selection with adaptive size
+            actual_tournament_size = np.random.choice([
+                tournament_size, 
+                max(2, tournament_size - 1), 
+                min(len(population), tournament_size + 1)
+            ])
+            
+            tournament_indices = np.random.choice(
+                len(population), 
+                min(actual_tournament_size, len(population)), 
+                replace=False
+            )
+            
+            tournament_individuals = [population[i] for i in tournament_indices]
+            tournament_individuals.sort(key=lambda x: x.fitness, reverse=True)
+            selected.append(tournament_individuals[0].clone())
+        
+        return selected
+    
+    def crossover(self, parent1, parent2):
+        """Perform crossover between two parents."""
+        # Ensure both parents have same length by truncating or padding
+        min_len = min(len(parent1), len(parent2))
+        
+        if np.random.random() < self.config.crossover_rate:
+            # Uniform crossover with bias towards preserving good features
+            child1, child2 = [], []
+            for i in range(min_len):
+                if np.random.random() < 0.6:  # Favor parent1 with 60% probability
+                    child1.append(parent1.values[i])
+                    child2.append(parent2.values[i])
+                else:
+                    child1.append(parent2.values[i])
+                    child2.append(parent1.values[i])
+            
+            # Handle different lengths
+            if len(parent1) > min_len:
+                child1.extend(parent1.values[min_len:])
+            elif len(parent2) > min_len:
+                child1.extend(parent2.values[min_len:])
+                
+            if len(parent2) > min_len:
+                child2.extend(parent2.values[min_len:])
+            elif len(parent1) > min_len:
+                child2.extend(parent1.values[min_len:])
+        else:
+            child1, child2 = parent1.values.copy(), parent2.values.copy()
+        
+        return Individual(child1), Individual(child2)
+    
+    def mutate(self, individual, generation):
+        """Mutate individual with adaptive scaling."""
+        mutated = individual.clone()
+        mutation_rate = self.config.mutation_rate * (1.0 - generation / self.config.max_generations)
+        
+        for i in range(len(mutated.values)):
+            if np.random.random() < mutation_rate:
+                # Adaptive noise based on current value and generation
+                noise_scale = 0.1 * mutated.values[i] + 0.01 * (1.0 - generation/self.config.max_generations)
+                mutated.values[i] = max(0.0, mutated.values[i] + np.random.normal(0, noise_scale))
+        
+        return mutated
+    
+    def elitism(self, population):
+        """Keep best individuals."""
+        sorted_pop = sorted(population, key=lambda x: x.fitness, reverse=True)
+        elite_count = max(1, int(self.config.pop_size * self.config.elitism_rate))
+        return [ind.clone() for ind in sorted_pop[:elite_count]]
+
+class EvolutionaryOptimizer:
+    """Main evolutionary optimization controller."""
+    
+    def __init__(self, config):
+        self.config = config
+        self.population_manager = PopulationManager(config)
+    
+    def optimize(self):
+        """Main evolutionary optimization loop."""
+        # Initialize population
+        population = self.population_manager.initialize_population()
+        best_individual = None
+        best_fitness = -np.inf
+        previous_best = -np.inf
+        stagnant_count = 0
+        
+        # Evolutionary process
+        for generation in range(self.config.max_generations):
+            # Evaluate fitness
+            population = self.population_manager.evaluate_fitness(population)
+            
+            # Track best individual
+            max_fitness_idx = np.argmax([ind.fitness for ind in population])
+            if population[max_fitness_idx].fitness > best_fitness:
+                best_fitness = population[max_fitness_idx].fitness
+                best_individual = population[max_fitness_idx].clone()
+                stagnant_count = 0
+            else:
+                stagnant_count += 1
+            
+            # Early stopping if we're stalling
+            if stagnant_count > 5 and best_fitness > 0.9:
+                break
+            
+            # Print progress every 5 generations
+            if generation % 5 == 0:
+                print(f"Generation {generation}: Best C2 = {best_fitness:.6f}")
+            
+            # Elitism - preserve best individuals
+            elite = self.population_manager.elitism(population)
+            
+            # Selection
+            parents = self.population_manager.select_parents(population)
+            
+            # Crossover and mutation
+            new_population = elite.copy()
+            while len(new_population) < self.config.pop_size:
+                # Selection (tournament selection)
+                parent1 = random.choice(parents)
+                parent2 = random.choice(parents)
+                
+                # Crossover
+                child1, child2 = self.population_manager.crossover(parent1, parent2)
+                
+                # Mutation
+                child1 = self.population_manager.mutate(child1, generation)
+                child2 = self.population_manager.mutate(child2, generation)
+                
+                new_population.extend([child1, child2])
+            
+            # Trim to exact population size
+            population = new_population[:self.config.pop_size]
+        
+        return best_individual
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Configure evolutionary algorithm
+    config = EvolutionConfig(
+        pop_size=70,
+        max_generations=40,
+        mutation_rate=0.3,
+        crossover_rate=0.8,
+        elitism_rate=0.15,
+        selection_pressure=0.25,
+        min_length=500,
+        max_length=2000
+    )
+    
+    # Run evolutionary optimization
+    optimizer = EvolutionaryOptimizer(config)
+    result = optimizer.optimize()
+    
+    # Ensure we don't exceed time limits
+    elapsed = time.time() - start_time
+    if elapsed > 85:  # Leave buffer for final processing
+        # If we're near time limit, return a good heuristic solution
+        return [np.random.random() for _ in range(500)]
+    
+    return result.values if result is not None else [0.5]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,174 @@
+<NAME>
+add_adaptive_population_sizing_to_de
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed population size in differential evolution. I'll enhance the adaptive differential evolution to better handle convergence by implementing a more sophisticated adaptive population sizing strategy that monitors improvement rates and adjusts population size accordingly. This should help escape local optima more effectively and find better solutions.
+
+The change involves modifying the `adaptive_differential_evolution` method to:
+1. Better track improvement trends over multiple generations
+2. More intelligently adjust population size based on convergence behavior
+3. Add proper early stopping conditions
+4. Include a minimum population size to maintain diversity
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_differential_evolution(self, initial_points, maxiter=50):
+        """Enhanced differential evolution with adaptive population sizing."""
+        points = initial_points.copy()
+        history = []
+        stagnation_count = 0
+        max_stagnation = 10
+        min_popsize = 10
+        max_popsize = 30
+        popsize = 15
+
+        bounds = [(-1, 1)] * (14 * 3)
+
+        def adaptive_objective(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = self.optimizer.spherical_constraint(points)
+            ratio = self.optimizer.compute_min_max_ratio(points)
+            return -ratio
+
+        try:
+            for iteration in range(3):
+                current_popsize = popsize
+
+                # Adaptive population sizing logic
+                if len(history) >= 2:
+                    improvement = -history[-1] - (-history[-2])
+                    if improvement < 1e-6:
+                        stagnation_count += 1
+                        if stagnation_count >= 3 and current_popsize < max_popsize:
+                            current_popsize = min(current_popsize + 5, max_popsize)
+                    else:
+                        stagnation_count = 0
+                        if current_popsize > min_popsize and iteration > 0:
+                            current_popsize = max(current_popsize - 3, min_popsize)
+
+                result = differential_evolution(
+                    adaptive_objective,
+                    bounds,
+                    maxiter=maxiter//3,
+                    popsize=current_popsize,
+                    seed=self.optimizer.seed + iteration,
+                    disp=False,
+                    polish=True,
+                    strategy='best1bin'
+                )
+
+                if result.success:
+                    temp_points = result.x.reshape(-1, 3)
+                    temp_points = self.optimizer.spherical_constraint(temp_points)
+                    current_ratio = self.optimizer.compute_min_max_ratio(temp_points)
+                    history.append(current_ratio)
+
+                    if len(history) == 1 or current_ratio > history[-2]:
+                        points = temp_points.copy()
+
+                    if len(history) >= 2:
+                        improvement = current_ratio - history[-2]
+                        if improvement < 1e-8:
+                            stagnation_count += 1
+                            if stagnation_count >= max_stagnation:
+                                break
+                        else:
+                            stagnation_count = 0
+                else:
+                    break
+
+        except Exception:
+            pass
+
+        return points
+=======
+    def adaptive_differential_evolution(self, initial_points, maxiter=50):
+        """Enhanced differential evolution with adaptive population sizing."""
+        points = initial_points.copy()
+        history = []
+        stagnation_count = 0
+        max_stagnation = 15
+        min_popsize = 10
+        max_popsize = 40
+        popsize = 20  # Start with a more balanced population size
+
+        bounds = [(-1, 1)] * (14 * 3)
+
+        def adaptive_objective(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = self.optimizer.spherical_constraint(points)
+            ratio = self.optimizer.compute_min_max_ratio(points)
+            return -ratio
+
+        try:
+            # Run multiple rounds with adaptive population sizing
+            for iteration in range(4):  # Increase iterations for better exploration
+                current_popsize = popsize
+
+                # Adaptive population sizing logic based on convergence behavior
+                if len(history) >= 3:
+                    # Calculate improvement rate over last few generations
+                    recent_improvements = [history[i] - history[i-1] for i in range(len(history)-1, max(0, len(history)-4), -1)]
+                    avg_improvement = np.mean(recent_improvements) if recent_improvements else 0
+
+                    if avg_improvement < 1e-7:  # Slow improvement - increase population for more exploration
+                        stagnation_count += 1
+                        if stagnation_count >= 2 and current_popsize < max_popsize:
+                            current_popsize = min(current_popsize + 5, max_popsize)
+                    elif avg_improvement > 1e-5:  # Fast improvement - reduce population for faster convergence
+                        stagnation_count = max(0, stagnation_count - 1)
+                        if current_popsize > min_popsize:
+                            current_popsize = max(current_popsize - 3, min_popsize)
+                    else:  # Moderate improvement
+                        stagnation_count = max(0, stagnation_count - 1)
+                else:
+                    # In early stages, maintain moderate population size
+                    if stagnation_count > 0:
+                        stagnation_count = max(0, stagnation_count - 1)
+
+                # Run differential evolution with current parameters
+                result = differential_evolution(
+                    adaptive_objective,
+                    bounds,
+                    maxiter=maxiter//4,  # Distribute iterations across rounds
+                    popsize=current_popsize,
+                    seed=self.optimizer.seed + iteration,
+                    disp=False,
+                    polish=True,
+                    strategy='best1bin'
+                )
+
+                if result.success:
+                    temp_points = result.x.reshape(-1, 3)
+                    temp_points = self.optimizer.spherical_constraint(temp_points)
+                    current_ratio = self.optimizer.compute_min_max_ratio(temp_points)
+                    history.append(current_ratio)
+
+                    # Update best solution found so far
+                    if len(history) == 1 or current_ratio > history[-2]:
+                        points = temp_points.copy()
+                        stagnation_count = 0  # Reset stagnation when improving
+                    else:
+                        stagnation_count += 1
+
+                    # Early stopping based on convergence
+                    if len(history) >= 2:
+                        improvement = current_ratio - history[-2]
+                        if improvement < 1e-9:  # Very small improvement
+                            stagnation_count += 1
+                            if stagnation_count >= max_stagnation:
+                                break
+                        else:
+                            stagnation_count = 0
+                else:
+                    # If optimization fails, continue with current points
+                    break
+
+        except Exception:
+            pass
+
+        return points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,206 @@
+<NAME>
+add_progressive_constraint_relaxation
+</NAME>
+
+<DESCRIPTION>
+Adding progressive constraint relaxation during early generations with targeted penalty reduction. This approach gradually reduces the weight of constraint penalties in early generations (0-50) while increasing emphasis on fitness maximization, then progressively tightens constraints in later generations (50-200). This temporal constraint management helps maintain diversity early while enforcing strict constraints later, preventing premature convergence and supporting better exploration of the search space.
+
+The key insight is to implement a time-varying penalty system where early generations use lighter penalties to allow aggressive exploration, while later generations apply stricter penalties to ensure solution feasibility.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class FitnessEvaluator:
+    """Evaluates fitness with adaptive penalty system"""
+
+    def __init__(self, boundary_weight: float = 1000.0, overlap_weight: float = 100000.0):
+        self.boundary_weight = boundary_weight
+        self.overlap_weight = overlap_weight
+        self.penalty_weights = [boundary_weight, overlap_weight]
+
+    def evaluate(self, circles: np.ndarray, spatial_indexer: Optional[SpatialIndexer] = None) -> float:
+        """Evaluate fitness with constraint penalties"""
+        # Check constraints
+        if not ConstraintValidator.validate_containment(circles):
+            penalty = self._compute_boundary_penalty(circles)
+            return -penalty
+
+        if not ConstraintValidator.validate_overlap(circles, spatial_indexer):
+            penalty = self._compute_overlap_penalty(circles)
+            return -penalty
+
+        # Valid solution - return sum of radii
+        return float(np.sum(circles[:, 2]))
+
+    def _compute_boundary_penalty(self, circles: np.ndarray) -> float:
+        """Compute penalty based on boundary violations"""
+        penalty = 0.0
+
+        for x, y, r in circles:
+            # Calculate boundary violations
+            if x - r < 0:
+                penalty += abs(x - r) * self.boundary_weight
+            elif x + r > 1:
+                penalty += abs(x + r - 1) * self.boundary_weight
+            if y - r < 0:
+                penalty += abs(y - r) * self.boundary_weight
+            elif y + r > 1:
+                penalty += abs(y + r - 1) * self.boundary_weight
+
+        return penalty
+
+    def _compute_overlap_penalty(self, circles: np.ndarray) -> float:
+        """Compute penalty based on overlap violations"""
+        penalty = 0.0
+
+        # Compute actual overlap amounts for more accurate penalty
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
+                if distance < (r1 + r2):
+                    overlap = (r1 + r2 - distance)
+                    penalty += overlap * self.overlap_weight
+
+        return penalty
+=======
+class FitnessEvaluator:
+    """Evaluates fitness with adaptive penalty system"""
+
+    def __init__(self, boundary_weight: float = 1000.0, overlap_weight: float = 100000.0):
+        self.boundary_weight = boundary_weight
+        self.overlap_weight = overlap_weight
+        self.penalty_weights = [boundary_weight, overlap_weight]
+
+    def evaluate(self, circles: np.ndarray, spatial_indexer: Optional[SpatialIndexer] = None,
+                generation: int = 0, total_generations: int = 1000) -> float:
+        """Evaluate fitness with constraint penalties and progressive constraint relaxation"""
+        # Progressive constraint relaxation scheme
+        # Early generations: light penalties for exploration
+        # Later generations: strict penalties for feasibility
+        progress = min(1.0, generation / total_generations)
+
+        # Use different penalty weights based on progress
+        if progress < 0.25:  # First 25% of generations - very light penalties
+            current_boundary_weight = self.boundary_weight * 0.1
+            current_overlap_weight = self.overlap_weight * 0.2
+        elif progress < 0.5:  # Next 25% - moderate penalties
+            current_boundary_weight = self.boundary_weight * 0.3
+            current_overlap_weight = self.overlap_weight * 0.5
+        elif progress < 0.75:  # Next 25% - standard penalties
+            current_boundary_weight = self.boundary_weight * 0.7
+            current_overlap_weight = self.overlap_weight * 0.8
+        else:  # Last 25% - full penalties
+            current_boundary_weight = self.boundary_weight
+            current_overlap_weight = self.overlap_weight
+
+        # Check constraints
+        if not ConstraintValidator.validate_containment(circles):
+            penalty = self._compute_boundary_penalty(circles, current_boundary_weight)
+            return -penalty
+
+        if not ConstraintValidator.validate_overlap(circles, spatial_indexer):
+            penalty = self._compute_overlap_penalty(circles, current_overlap_weight)
+            return -penalty
+
+        # Valid solution - return sum of radii
+        return float(np.sum(circles[:, 2]))
+
+    def _compute_boundary_penalty(self, circles: np.ndarray, weight: float) -> float:
+        """Compute penalty based on boundary violations"""
+        penalty = 0.0
+
+        for x, y, r in circles:
+            # Calculate boundary violations
+            if x - r < 0:
+                penalty += abs(x - r) * weight
+            elif x + r > 1:
+                penalty += abs(x + r - 1) * weight
+            if y - r < 0:
+                penalty += abs(y - r) * weight
+            elif y + r > 1:
+                penalty += abs(y + r - 1) * weight
+
+        return penalty
+
+    def _compute_overlap_penalty(self, circles: np.ndarray, weight: float) -> float:
+        """Compute penalty based on overlap violations"""
+        penalty = 0.0
+
+        # Compute actual overlap amounts for more accurate penalty
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
+                if distance < (r1 + r2):
+                    overlap = (r1 + r2 - distance)
+                    penalty += overlap * weight
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def evolve(self, n: int) -> np.ndarray:
+        """Main evolution loop with improvements"""
+        # Initialize population
+        population = self.initialize_population(n)
+
+        # Track best fitness
+        best_fitness_history = []
+=======
+    def evolve(self, n: int) -> np.ndarray:
+        """Main evolution loop with improvements"""
+        # Initialize population
+        population = self.initialize_population(n)
+
+        # Track best fitness
+        best_fitness_history = []
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Evolution loop
+        for gen in range(self.generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluator.evaluate(individual, self.spatial_indexer)
+                fitnesses.append(fitness)
+=======
+        # Evolution loop
+        for gen in range(self.generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluator.evaluate(individual, self.spatial_indexer, gen, self.generations)
+                fitnesses.append(fitness)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Return the best individual
+        final_fitnesses = []
+        for individual in population:
+            fitness = self.evaluator.evaluate(individual, self.spatial_indexer)
+            final_fitnesses.append(fitness)
+=======
+        # Return the best individual
+        final_fitnesses = []
+        for individual in population:
+            fitness = self.evaluator.evaluate(individual, self.spatial_indexer, self.generations-1, self.generations)
+            final_fitnesses.append(fitness)
+>>>>>>> REPLACE
+</DIFF>

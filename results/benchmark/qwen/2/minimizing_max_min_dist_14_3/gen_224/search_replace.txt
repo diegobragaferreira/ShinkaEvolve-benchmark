@@ -1,0 +1,232 @@
+<NAME>
+enhance_perturbation_strategy
+</NAME>
+
+<DESCRIPTION>
+The current perturbation strategy uses a simple Gaussian perturbation in the tangent plane with a fixed scaling factor. This can be improved by implementing a more sophisticated perturbation mechanism that considers the local geometry and distance distribution. I'll implement a multi-scale perturbation approach that adapts based on whether points are too close or too far apart, and add a more intelligent point selection strategy that focuses on problematic distance pairs.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_simulated_annealing(initial_points, max_iterations=100000):
+        """Optimize point placement using enhanced simulated annealing with adaptive strategies."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+
+        # Enhanced adaptive cooling parameters
+        current_temp = 1.0
+        min_temp = 1e-8
+        cooling_rate = 0.9995
+        max_stagnation = 500
+        stagnation_counter = 0
+
+        # Track recent ratios for adaptive cooling
+        recent_ratios = []
+        last_improvement_iter = 0
+
+        start_time = time.time()
+
+        for iteration in range(max_iterations):
+            # Adaptive temperature cooling based on convergence
+            if stagnation_counter > max_stagnation and current_temp > min_temp:
+                current_temp *= 0.95  # Faster cooling when stagnating
+                stagnation_counter = 0
+
+            if current_temp < min_temp:
+                break
+
+            # Adaptive perturbation based on current distribution quality
+            distances = pdist(current_points)
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            mean_dist = np.mean(distances) if len(distances) > 0 else 1.0
+
+            # Choose perturbation size adaptively
+            if len(recent_ratios) > 10:
+                recent_improved = np.mean(np.array(recent_ratios[-10:]) > recent_ratios[-11]) if len(recent_ratios) >= 11 else 0
+                if recent_improved > 0.5 and np.random.rand() < 0.3:
+                    # More aggressive perturbations when recently improved
+                    perturbation_scale = current_temp * 0.02
+                else:
+                    perturbation_scale = current_temp * 0.01
+            else:
+                perturbation_scale = current_temp * 0.01
+
+            # Make a small random perturbation to one random point
+            test_points = current_points.copy()
+            point_idx = np.random.randint(0, 14)
+
+            # Create perturbation vector with adaptive scale
+            delta = np.random.normal(0, perturbation_scale, 3)
+            test_points[point_idx] += delta
+
+            # Project back to sphere
+            test_points = project_to_sphere(test_points)
+
+            # Compute new ratio
+            test_ratio = compute_min_max_ratio(test_points)
+
+            # Accept or reject based on Metropolis criterion
+            if test_ratio > best_ratio or np.random.random() < math.exp((test_ratio - best_ratio) / current_temp):
+                current_points = test_points.copy()
+                if test_ratio > best_ratio:
+                    best_ratio = test_ratio
+                    best_points = test_points.copy()
+                    last_improvement_iter = iteration
+                    stagnation_counter = 0
+                else:
+                    stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+
+            # Track recent ratios for adaptive cooling
+            recent_ratios.append(test_ratio)
+            if len(recent_ratios) > 20:
+                recent_ratios.pop(0)
+
+            # Occasionally print progress
+            if iteration % 10000 == 0:
+                elapsed = time.time() - start_time
+                #print(f"Iteration {iteration}, Ratio: {best_ratio:.6f}, Temp: {current_temp:.6f}, Time: {elapsed:.2f}s")
+
+        return best_points, best_ratio
+=======
+    def adaptive_simulated_annealing(initial_points, max_iterations=100000):
+        """Optimize point placement using enhanced simulated annealing with adaptive strategies."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+
+        # Enhanced adaptive cooling parameters
+        current_temp = 1.0
+        min_temp = 1e-8
+        cooling_rate = 0.9995
+        max_stagnation = 500
+        stagnation_counter = 0
+
+        # Track recent ratios for adaptive cooling
+        recent_ratios = []
+        last_improvement_iter = 0
+
+        start_time = time.time()
+
+        def adaptive_perturb_point(points, point_idx, temp):
+            """More sophisticated perturbation that adapts based on local configuration."""
+            # Get distances to all other points
+            distances = []
+            for i in range(14):
+                if i != point_idx:
+                    dist = np.linalg.norm(points[point_idx] - points[i])
+                    distances.append(dist)
+
+            # Determine if point is part of a small-distance pair
+            if len(distances) > 0:
+                avg_dist = np.mean(distances)
+                min_dist = np.min(distances)
+
+                # If point is too close to others, make more aggressive perturbations
+                if min_dist < avg_dist * 0.3:
+                    perturbation_scale = temp * 0.03
+                elif min_dist > avg_dist * 1.5:
+                    # If point is too far from others, make smaller perturbations
+                    perturbation_scale = temp * 0.005
+                else:
+                    # Normal case
+                    perturbation_scale = temp * 0.015
+            else:
+                perturbation_scale = temp * 0.01
+
+            # Generate perturbation in tangent plane
+            delta = np.random.randn(3)
+            # Project to tangent plane (orthogonal to point)
+            delta = delta - np.dot(delta, points[point_idx]) * points[point_idx]
+            # Normalize the tangent vector
+            delta_norm = np.linalg.norm(delta)
+            if delta_norm > 1e-10:
+                delta = delta / delta_norm
+            else:
+                # Fallback to orthogonal vector if needed
+                perpendicular = np.array([1, 0, 0]) if abs(points[point_idx][0]) < 0.9 else np.array([0, 1, 0])
+                delta = np.cross(perpendicular, points[point_idx])
+                delta = delta / np.linalg.norm(delta)
+
+            # Apply perturbation
+            new_point = points[point_idx] + perturbation_scale * delta
+            # Project back to sphere
+            new_point = new_point / np.linalg.norm(new_point)
+            return new_point
+
+        def select_point_to_perturb(points):
+            """Select which point to perturb based on configuration analysis."""
+            distances = pdist(points)
+            if len(distances) == 0:
+                return np.random.randint(0, 14)
+
+            # Find points that are part of extreme distance pairs
+            dist_matrix = squareform(distances)
+            min_distances = np.min(dist_matrix, axis=0)
+            max_distances = np.max(dist_matrix, axis=0)
+
+            # Select based on distance statistics
+            # Prefer points with extreme distances (either very close or very far)
+            # This helps in expanding small distances or contracting large ones
+            avg_distances = np.mean(dist_matrix, axis=0)
+
+            # Probability of selection based on how much the point deviates from average
+            deviations = np.abs(min_distances - avg_distances) + np.abs(max_distances - avg_distances)
+            probabilities = deviations / np.sum(deviations) if np.sum(deviations) > 0 else None
+
+            if probabilities is not None:
+                # Select point based on weighted probability
+                point_idx = np.random.choice(14, p=probabilities/np.sum(probabilities))
+            else:
+                point_idx = np.random.randint(0, 14)
+
+            return point_idx
+
+        for iteration in range(max_iterations):
+            # Adaptive temperature cooling based on convergence
+            if stagnation_counter > max_stagnation and current_temp > min_temp:
+                current_temp *= 0.95  # Faster cooling when stagnating
+                stagnation_counter = 0
+
+            if current_temp < min_temp:
+                break
+
+            # Select point to perturb with improved strategy
+            point_idx = select_point_to_perturb(current_points)
+
+            # Make adaptive perturbation
+            test_points = current_points.copy()
+            test_points[point_idx] = adaptive_perturb_point(current_points, point_idx, current_temp)
+
+            # Compute new ratio
+            test_ratio = compute_min_max_ratio(test_points)
+
+            # Accept or reject based on Metropolis criterion
+            if test_ratio > best_ratio or np.random.random() < math.exp((test_ratio - best_ratio) / current_temp):
+                current_points = test_points.copy()
+                if test_ratio > best_ratio:
+                    best_ratio = test_ratio
+                    best_points = test_points.copy()
+                    last_improvement_iter = iteration
+                    stagnation_counter = 0
+                else:
+                    stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+
+            # Track recent ratios for adaptive cooling
+            recent_ratios.append(test_ratio)
+            if len(recent_ratios) > 20:
+                recent_ratios.pop(0)
+
+            # Occasionally print progress
+            if iteration % 10000 == 0:
+                elapsed = time.time() - start_time
+                #print(f"Iteration {iteration}, Ratio: {best_ratio:.6f}, Temp: {current_temp:.6f}, Time: {elapsed:.2f}s")
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

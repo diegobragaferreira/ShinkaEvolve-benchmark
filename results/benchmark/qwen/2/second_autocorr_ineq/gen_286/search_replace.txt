@@ -1,0 +1,264 @@
+<NAME>
+enhanced_peak_positioning
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses logarithmic spacing for peak positions but doesn't fully exploit the mathematical structure that maximizes C₂. I'll enhance the peak positioning algorithm to use more sophisticated spacing that considers both the distribution of peaks and their interaction in autoconvolution. This involves implementing a custom peak spacing algorithm that places peaks to minimize interference while maximizing the desired convolution properties.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_initial_population(self, min_length: int = 300, max_length: int = 1500) -> List[List[float]]:
+        """Create diverse initial population using enhanced Gaussian-based strategies"""
+        population = []
+
+        # Strategy 1: Enhanced Gaussian-based approach with improved peak construction
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+
+            # Use logarithmic spacing for peak positions but with improved distribution algorithm
+            num_peaks = max(3, min(20, length // 50))  # Adaptive peak count based on length
+
+            # Create peaks with more intelligent spacing to avoid interference
+            # Use a modified logarithmic distribution that prevents clustering
+            peak_positions = []
+            base_positions = np.logspace(np.log10(0.05), np.log10(0.45), num_peaks, endpoint=True)
+
+            # Add slight jitter with a pattern to prevent perfect alignment
+            for i, pos in enumerate(base_positions):
+                # Jitter based on position to avoid regular patterns
+                jitter = np.random.uniform(-0.003, 0.003) * pos
+                # Also consider nearby peaks to avoid conflicts
+                if i > 0:
+                    # Adjust position to avoid overlap with previous peak
+                    prev_pos = peak_positions[-1]
+                    min_dist = 0.02  # Minimum distance between peaks
+                    if abs(pos + jitter - prev_pos) < min_dist:
+                        jitter += (min_dist - abs(pos + jitter - prev_pos)) * np.sign(pos - prev_pos)
+                peak_positions.append(pos + jitter)
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Initialize function
+            individual = np.zeros(length)
+
+            # Add peaks with improved parameter selection based on position analysis
+            for i, peak_pos in enumerate(peak_positions):
+                # Alternate sides for better domain coverage
+                side = (-1) ** i  # Alternate signs to distribute evenly
+                true_peak_pos = side * peak_pos
+
+                # Ensure peak stays within reasonable domain bounds to prevent edge artifacts
+                if abs(true_peak_pos) <= 0.24:
+                    # Distance from center determines behavior
+                    center_distance = abs(true_peak_pos)
+
+                    # Improved amplitude calculation that considers peak interaction
+                    # Peaks closer to center benefit from higher amplitudes for strong convolution
+                    # But they also risk creating sharper autoconvolution spikes
+                    if center_distance < 0.03:  # Very near center
+                        peak_amplitude = np.random.uniform(2.0, 3.0)
+                    elif center_distance < 0.08:  # Near center
+                        peak_amplitude = np.random.uniform(1.8, 2.5)
+                    elif center_distance < 0.15:  # Middle area
+                        peak_amplitude = np.random.uniform(1.2, 2.0)
+                    else:  # Outer areas
+                        peak_amplitude = np.random.uniform(0.8, 1.5)
+
+                    # Width adaptation based on position and expected autoconvolution behavior
+                    # Peaks near center: moderate width to balance amplitude
+                    # Peaks farther: wider to reduce sharpness in autoconvolution
+                    if center_distance < 0.05:  # Very near center
+                        peak_width = np.random.uniform(0.008, 0.025)
+                    elif center_distance < 0.1:  # Near center
+                        peak_width = np.random.uniform(0.012, 0.03)
+                    elif center_distance < 0.2:  # Middle area
+                        peak_width = np.random.uniform(0.015, 0.035)
+                    else:  # Far from center
+                        peak_width = np.random.uniform(0.02, 0.045)
+
+                    # Clamp width to reasonable range
+                    peak_width = np.clip(peak_width, 0.005, 0.05)
+
+                    # Create Gaussian peak with adaptive parameters
+                    gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - true_peak_pos) / peak_width)**2)
+                    individual += gaussian_peak
+
+            # Ensure non-negative values and add boundary handling
+            individual = np.clip(individual, 0, None)
+
+            # Apply boundary-preserving smoothing to reduce sharp transitions
+            if length > 50:
+                # Use Gaussian smoothing with adaptive sigma
+                sigma = max(0.5, length / 200.0)
+                individual = gaussian_filter1d(individual, sigma=sigma)
+
+            # Normalize to maintain reasonable magnitudes while preserving shape
+            # Use percentile-based normalization to handle outliers
+            if np.max(individual) > 1e-6:
+                # Cap at 95th percentile to avoid extreme values that harm stability
+                cap_value = np.percentile(individual, 95)
+                individual = np.clip(individual, 0, cap_value * 2.0)
+                # Scale to reasonable range
+                individual = individual / np.max(individual) * 2.5
+
+            population.append(individual.tolist())
+
+        # Strategy 2: Random exponential approach with more diversity
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+            individual = np.clip(np.random.exponential(scale=0.5, size=length), 0, 10.0)
+            population.append(individual.tolist())
+
+        return population
+=======
+    def generate_initial_population(self, min_length: int = 300, max_length: int = 1500) -> List[List[float]]:
+        """Create diverse initial population using enhanced Gaussian-based strategies"""
+        population = []
+
+        # Strategy 1: Enhanced Gaussian-based approach with improved peak construction
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+
+            # Use an enhanced peak positioning algorithm specifically designed to maximize C₂
+            num_peaks = max(3, min(20, length // 50))  # Adaptive peak count based on length
+
+            # Enhanced peak positioning algorithm using a spacing strategy that considers
+            # both uniformity and the optimal distribution for autoconvolution properties
+            peak_positions = self._generate_optimal_peak_positions(num_peaks, length)
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Initialize function
+            individual = np.zeros(length)
+
+            # Add peaks with improved parameter selection based on position analysis
+            for i, peak_pos in enumerate(peak_positions):
+                # Alternate sides for better domain coverage
+                side = (-1) ** i  # Alternate signs to distribute evenly
+                true_peak_pos = side * peak_pos
+
+                # Ensure peak stays within reasonable domain bounds to prevent edge artifacts
+                if abs(true_peak_pos) <= 0.24:
+                    # Distance from center determines behavior
+                    center_distance = abs(true_peak_pos)
+
+                    # Improved amplitude calculation focused on creating favorable autoconvolution
+                    # Peaks near center should have sufficient amplitude to create strong convolution
+                    # but not so much as to create overly sharp peaks
+                    if center_distance < 0.03:  # Very near center
+                        peak_amplitude = np.random.uniform(2.0, 3.0)
+                    elif center_distance < 0.08:  # Near center
+                        peak_amplitude = np.random.uniform(1.8, 2.5)
+                    elif center_distance < 0.15:  # Middle area
+                        peak_amplitude = np.random.uniform(1.2, 2.0)
+                    else:  # Outer areas
+                        peak_amplitude = np.random.uniform(0.8, 1.5)
+
+                    # Width adaptation based on position and expected autoconvolution behavior
+                    # For maximizing C₂, we want flatter autoconvolutions, so wider peaks
+                    # in outer regions and narrower ones in center regions work well
+                    if center_distance < 0.05:  # Very near center
+                        peak_width = np.random.uniform(0.008, 0.025)
+                    elif center_distance < 0.1:  # Near center
+                        peak_width = np.random.uniform(0.012, 0.03)
+                    elif center_distance < 0.2:  # Middle area
+                        peak_width = np.random.uniform(0.015, 0.035)
+                    else:  # Far from center
+                        peak_width = np.random.uniform(0.02, 0.045)
+
+                    # Clamp width to reasonable range
+                    peak_width = np.clip(peak_width, 0.005, 0.05)
+
+                    # Create Gaussian peak with adaptive parameters
+                    gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - true_peak_pos) / peak_width)**2)
+                    individual += gaussian_peak
+
+            # Ensure non-negative values and add boundary handling
+            individual = np.clip(individual, 0, None)
+
+            # Apply boundary-preserving smoothing to reduce sharp transitions
+            if length > 50:
+                # Use Gaussian smoothing with adaptive sigma
+                sigma = max(0.5, length / 200.0)
+                individual = gaussian_filter1d(individual, sigma=sigma)
+
+            # Normalize to maintain reasonable magnitudes while preserving shape
+            # Use percentile-based normalization to handle outliers
+            if np.max(individual) > 1e-6:
+                # Cap at 95th percentile to avoid extreme values that harm stability
+                cap_value = np.percentile(individual, 95)
+                individual = np.clip(individual, 0, cap_value * 2.0)
+                # Scale to reasonable range
+                individual = individual / np.max(individual) * 2.5
+
+            population.append(individual.tolist())
+
+        # Strategy 2: Random exponential approach with more diversity
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+            individual = np.clip(np.random.exponential(scale=0.5, size=length), 0, 10.0)
+            population.append(individual.tolist())
+
+        return population
+
+    def _generate_optimal_peak_positions(self, num_peaks: int, length: int) -> List[float]:
+        """
+        Generate peak positions optimized for maximizing C₂ in the resulting autoconvolution.
+        Uses a combination of logarithmic and uniform spacing with interference minimization.
+        """
+        # Base positions using a more sophisticated spacing scheme
+        # We use a hybrid approach: starting with logarithmic spacing but adjusting
+        # to avoid clustering and ensure good distribution
+
+        if num_peaks <= 1:
+            return [0.25 * np.random.random()]
+
+        # Start with logarithmic distribution across the domain
+        base_positions = np.logspace(np.log10(0.05), np.log10(0.45), num_peaks, endpoint=True)
+
+        # Apply a more sophisticated adjustment to prevent clustering while maintaining spread
+        adjusted_positions = []
+        for i, pos in enumerate(base_positions):
+            # Add jitter that depends on position and intended spacing
+            base_jitter = np.random.uniform(-0.001, 0.001) * pos
+
+            # Additional constraint: avoid placing peaks too close together
+            if adjusted_positions:
+                # Check minimum distance to existing peaks
+                min_dist = min(abs(pos + base_jitter - p) for p in adjusted_positions)
+                # If too close, adjust the placement
+                if min_dist < 0.01:
+                    # Push away from conflicting peaks
+                    adjustment = 0.005 * np.sign(pos - np.mean(adjusted_positions))
+                    base_jitter += adjustment
+
+            adjusted_positions.append(pos + base_jitter)
+
+        # Ensure all positions are within bounds and properly ordered
+        adjusted_positions = [max(0.05, min(0.45, p)) for p in adjusted_positions]
+
+        # Sort positions to ensure proper ordering
+        adjusted_positions.sort()
+
+        # Apply final fine-tuning based on the number of peaks and domain size
+        # This creates a more balanced distribution that works well for autoconvolution
+        if num_peaks >= 4:
+            # For multiple peaks, we want to avoid having too many near the same location
+            # So we slightly reposition to create more uniform distribution
+            for i in range(len(adjusted_positions)):
+                # Adjust based on neighbor positions to improve spread
+                if i > 0 and i < len(adjusted_positions) - 1:
+                    # Move peaks inward to improve spacing
+                    prev_dist = adjusted_positions[i] - adjusted_positions[i-1]
+                    next_dist = adjusted_positions[i+1] - adjusted_positions[i]
+                    if prev_dist > 0.02 and next_dist > 0.02:
+                        # Apply small adjustments to improve spacing
+                        adjustment = 0.001 * (next_dist - prev_dist)
+                        adjusted_positions[i] = max(0.05, min(0.45, adjusted_positions[i] + adjustment))
+
+        return adjusted_positions
+>>>>>>> REPLACE
+</DIFF>

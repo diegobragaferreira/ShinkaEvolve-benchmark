@@ -1,0 +1,151 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance_matrix
+from scipy.optimize import minimize
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+    
+    # Rectangle dimensions - optimized to be 1x1 (perimeter=4)
+    width, height = 1.0, 1.0
+    
+    def max_radius_at_point(x, y, existing_circles):
+        """Calculate maximum possible radius at point (x,y) considering existing circles"""
+        min_dist = float('inf')
+        
+        # Check boundary constraints
+        dist_to_left = x
+        dist_to_right = width - x
+        dist_to_bottom = y
+        dist_to_top = height - y
+        
+        min_dist = min(min_dist, dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+        
+        # Check distance to existing circles
+        for cx, cy, r in existing_circles:
+            dist = math.sqrt((x - cx)**2 + (y - cy)**2)
+            min_dist = min(min_dist, dist - r)
+            
+        return max(0, min_dist)
+    
+    def total_radius_sum(circles_array):
+        """Calculate sum of all radii"""
+        return np.sum(circles_array[:, 2])
+    
+    def objective_function(params):
+        """Objective function to minimize (negative of sum of radii)"""
+        circles = params.reshape(-1, 3)
+        return -total_radius_sum(circles)
+    
+    def constraint_func(params):
+        """Constraint function ensuring no overlap"""
+        circles = params.reshape(-1, 3)
+        n = len(circles)
+        
+        # Ensure all centers are within bounds
+        for i in range(n):
+            x, y, r = circles[i]
+            if x <= 0 or x >= width or y <= 0 or y >= height or r <= 0:
+                return 1e6  # Violation penalty
+        
+        # Check circle-to-circle distances
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    return 1e6  # Violation penalty
+                    
+        return 0
+    
+    # Phase 1: Initialize with heuristic seed placement
+    n = 21
+    circles = np.zeros((n, 3))
+    
+    # Use a grid-like pattern with some randomness for initial placement
+    grid_size = int(math.ceil(math.sqrt(n)))
+    spacing_x = width / (grid_size + 1)
+    spacing_y = height / (grid_size + 1)
+    
+    idx = 0
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if idx >= n:
+                break
+            x = (i + 1) * spacing_x + np.random.uniform(-spacing_x/4, spacing_x/4)
+            y = (j + 1) * spacing_y + np.random.uniform(-spacing_y/4, spacing_y/4)
+            # Initial radius estimate - try to place as large as possible
+            max_r = max_radius_at_point(x, y, circles[:idx])
+            circles[idx] = [x, y, max_r * 0.8]  # Slightly smaller to ensure feasibility
+            idx += 1
+        if idx >= n:
+            break
+    
+    # Phase 2: Adaptive optimization using local search
+    # Convert to flattened array for optimization
+    initial_params = circles.flatten()
+    
+    # Define bounds for optimization (x, y, radius)
+    bounds = []
+    for i in range(n):
+        bounds.extend([(0.001, width - 0.001), (0.001, height - 0.001), (0.001, min(width, height)/2)])
+    
+    # Use a simple local optimization approach that iteratively improves
+    best_params = initial_params.copy()
+    best_value = -objective_function(best_params)
+    
+    # Local optimization iterations
+    for iteration in range(100):
+        current_circles = best_params.reshape(-1, 3)
+        
+        # Try small adjustments to each circle
+        for ci in range(n):
+            temp_params = best_params.copy()
+            # Try small perturbations
+            for _ in range(10):
+                # Perturb position slightly
+                dx = np.random.uniform(-0.02, 0.02)
+                dy = np.random.uniform(-0.02, 0.02)
+                dr = np.random.uniform(-0.01, 0.01)
+                
+                # Update parameters
+                temp_params[3*ci] += dx
+                temp_params[3*ci + 1] += dy
+                temp_params[3*ci + 2] += dr
+                
+                # Enforce bounds
+                temp_params[3*ci] = np.clip(temp_params[3*ci], 0.001, width - 0.001)
+                temp_params[3*ci + 1] = np.clip(temp_params[3*ci + 1], 0.001, height - 0.001)
+                temp_params[3*ci + 2] = np.clip(temp_params[3*ci + 2], 0.001, min(width, height)/2)
+                
+                # Check constraint validity
+                if constraint_func(temp_params) < 1e5:
+                    temp_value = -objective_function(temp_params)
+                    if temp_value > best_value:
+                        best_params = temp_params.copy()
+                        best_value = temp_value
+                else:
+                    # If invalid, revert to previous good solution
+                    temp_params = best_params.copy()
+    
+    # Final refinement
+    final_circles = best_params.reshape(-1, 3)
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

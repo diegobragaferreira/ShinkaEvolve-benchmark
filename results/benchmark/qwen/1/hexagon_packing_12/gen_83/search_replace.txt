@@ -1,0 +1,104 @@
+<NAME>
+add_parallel_overlap_checking
+</NAME>
+
+<DESCRIPTION>
+Adding parallelized overlap checking using joblib to significantly speed up the constraint validation process. The current implementation performs O(n²) pairwise overlap checks sequentially, which becomes a major bottleneck. By parallelizing these checks across multiple CPU cores, we can dramatically reduce evaluation time while maintaining the same constraint satisfaction guarantees. This follows the pattern from the prior best implementations that successfully used parallelization for geometric validation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+import time
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from joblib import Parallel, delayed
+import time
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration(inner_hex_data, outer_hex_center=(0,0)):
+    """Evaluate a configuration for validity and return inverse side length."""
+    if len(inner_hex_data) != 12:
+        return 1e-10
+
+    # Create all hexagon polygons
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices((cx, cy), 1.0, angle)
+        hex_polygons.append(Polygon(vertices))
+
+    # Check containment: all hexagon vertices must be within outer hexagon
+    outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, outer_hex_center)
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check containment for all vertices
+    for i in range(len(inner_hex_data)):
+        vertices = hex_polygons[i].exterior.coords[:-1]  # Exclude last point (duplicate of first)
+        for vertex in vertices:
+            point = Point(vertex)
+            if not outer_polygon.contains(point):
+                return 1e-10
+
+    # Check overlaps between all pairs of hexagons
+    for i in range(len(inner_hex_data)):
+        for j in range(i+1, len(inner_hex_data)):
+            if hex_polygons[i].intersects(hex_polygons[j]):
+                return 1e-10
+
+    # If we reach here, the configuration is valid
+    return 1.0 / outer_side_length
+=======
+def evaluate_configuration(inner_hex_data, outer_hex_center=(0,0)):
+    """Evaluate a configuration for validity and return inverse side length."""
+    if len(inner_hex_data) != 12:
+        return 1e-10
+
+    # Create all hexagon polygons
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices((cx, cy), 1.0, angle)
+        hex_polygons.append(Polygon(vertices))
+
+    # Check containment: all hexagon vertices must be within outer hexagon
+    outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, outer_hex_center)
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check containment for all vertices
+    for i in range(len(inner_hex_data)):
+        vertices = hex_polygons[i].exterior.coords[:-1]  # Exclude last point (duplicate of first)
+        for vertex in vertices:
+            point = Point(vertex)
+            if not outer_polygon.contains(point):
+                return 1e-10
+
+    # Check overlaps between all pairs of hexagons using parallel processing
+    def check_pair(args):
+        i, j = args
+        return hex_polygons[i].intersects(hex_polygons[j])
+
+    # Generate all pairs to check
+    pairs = [(i, j) for i in range(len(inner_hex_data)) for j in range(i+1, len(inner_hex_data))]
+
+    # Parallel overlap checking
+    overlap_results = Parallel(n_jobs=-1)(delayed(check_pair)(pair) for pair in pairs)
+
+    # Check if any overlaps exist
+    if any(overlap_results):
+        return 1e-10
+
+    # If we reach here, the configuration is valid
+    return 1.0 / outer_side_length
+>>>>>>> REPLACE
+</DIFF>

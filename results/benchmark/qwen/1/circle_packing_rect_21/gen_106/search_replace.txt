@@ -1,0 +1,213 @@
+<NAME>
+adaptive_voronoi_constraint_density
+</NAME>
+
+<DESCRIPTION>
+The current implementation has several issues with Voronoi constraint calculation:
+1. The Voronoi computation is overly complex and error-prone
+2. The constraint density calculation uses a simplified and unreliable method
+3. The adaptive mutation doesn't properly leverage meaningful density information
+
+I'll simplify the Voronoi-based approach by using a more reliable spatial grid-based density estimation that directly measures local circle density around each circle, which will provide better guidance for adaptive mutation steps and help avoid overcrowded regions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_voronoi_constraints(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate Voronoi-based constraint information"""
+        if len(circles_list) < 2:
+            return {}
+
+        points = np.array([[x, y] for x, y, r in circles_list])
+        try:
+            vor = Voronoi(points)
+            # For each circle, compute its Voronoi cell area as a measure of local density
+            cell_areas = {}
+            for i, (x, y, r) in enumerate(circles_list):
+                # Find which Voronoi region this point belongs to
+                region_idx = None
+                for j, region in enumerate(vor.regions):
+                    if len(region) > 0 and -1 not in region:
+                        # Simple check if point is inside this region
+                        region_points = [vor.vertices[k] for k in region if k < len(vor.vertices)]
+                        if len(region_points) >= 3:
+                            # Check if point is inside the polygon (simplified)
+                            cx, cy = np.mean(region_points, axis=0)
+                            dist_to_center = np.sqrt((x - cx)**2 + (y - cy)**2)
+                            if dist_to_center < 2:  # Simplified test
+                                region_idx = j
+                                break
+                # Area inverse gives us a constraint density indicator
+                if region_idx is not None and len(vor.regions[region_idx]) > 0:
+                    area = np.sum(np.abs(np.diff(vor.regions[region_idx])))  # Simplified area calc
+                    cell_areas[i] = 1.0 / max(area, 1e-6)
+                else:
+                    cell_areas[i] = 1.0  # Default to high constraint
+            return cell_areas
+        except:
+            return {i: 1.0 for i in range(len(circles_list))}
+=======
+    def calculate_density_constraints(circles_list: List[Tuple[float, float, float]],
+                                    grid_resolution: float = 0.2) -> dict:
+        """Calculate density-based constraint information using grid-based approach"""
+        if len(circles_list) < 2:
+            return {}
+
+        # Create a grid covering the container
+        grid_width = int(width / grid_resolution) + 1
+        grid_height = int(height / grid_resolution) + 1
+
+        # Count circles per grid cell
+        grid_counts = defaultdict(int)
+        grid_centers = {}  # Store center of each grid cell
+
+        for x, y, r in circles_list:
+            grid_x = int(x / grid_resolution)
+            grid_y = int(y / grid_resolution)
+            grid_counts[(grid_x, grid_y)] += 1
+            if (grid_x, grid_y) not in grid_centers:
+                grid_centers[(grid_x, grid_y)] = (
+                    (grid_x + 0.5) * grid_resolution,
+                    (grid_y + 0.5) * grid_resolution
+                )
+
+        # For each circle, compute density in surrounding cells
+        density_info = {}
+        for i, (x, y, r) in enumerate(circles_list):
+            # Define neighborhood around the circle based on its radius
+            neighborhood_radius = r * 2.0  # Consider 2x circle radius for neighbor consideration
+            neighbors = 0
+
+            # Check nearby grid cells
+            grid_x = int(x / grid_resolution)
+            grid_y = int(y / grid_resolution)
+
+            # Check a 5x5 grid around this circle (centered at grid_x, grid_y)
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    nx, ny = grid_x + dx, grid_y + dy
+                    if (nx, ny) in grid_counts:
+                        # Check if the grid cell's center is in the neighborhood
+                        gx, gy = grid_centers[(nx, ny)]
+                        dist = np.sqrt((x - gx)**2 + (y - gy)**2)
+                        if dist <= neighborhood_radius:
+                            neighbors += grid_counts[(nx, ny)]
+
+            # Normalize by the circle's own contribution (subtract 1 to exclude itself)
+            effective_neighbors = max(0, neighbors - 1)
+            # Higher density = higher constraint value
+            density_info[i] = 1.0 + effective_neighbors * 0.5
+
+        return density_info
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_voronoi_with_density_calc
+</NAME>
+
+<DESCRIPTION>
+Replace the problematic Voronoi-based constraint calculation with the newly implemented density-based approach. This will provide more accurate and reliable constraint information for the adaptive mutation strategy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Add constraint density information
+            constraint_density = calculate_voronoi_constraints([(x, y, r) for x, y, r in parent])
+=======
+            # Add constraint density information
+            constraint_density = calculate_density_constraints([(x, y, r) for x, y, r in parent])
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_mutation_strategy
+</NAME>
+
+<DESCRIPTION>
+Improve the adaptive mutation strategy by:
+1. Making the step sizes more principled based on density
+2. Adding better boundary handling
+3. Ensuring mutations don't create impossible configurations
+4. Using a more sophisticated approach to radius adjustments based on density
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_mutation(circles: np.ndarray, constraint_density: dict, generation: int) -> np.ndarray:
+        """Mutate circles with adaptive step sizes based on density"""
+        mutated = circles.copy()
+        mutation_rate = 0.2 + 0.1 * np.exp(-generation/50)  # Decrease over generations
+
+        for i in range(len(mutated)):
+            # Get constraint density for this circle (higher means tighter constraints)
+            density = constraint_density.get(i, 1.0)
+            # Adaptive step size based on density and generation
+            step_size = 0.02 * np.exp(-density) * (0.5 + 0.5 * np.exp(-generation/100))
+
+            if random.random() < mutation_rate:
+                # Mutate position
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+
+                # Mutate radius with different behavior based on density
+                if density > 2.0:  # High constraint area
+                    radius_step = np.random.normal(0, step_size * 0.5)
+                else:  # Low constraint area
+                    radius_step = np.random.normal(0, step_size * 2.0)
+
+                mutated[i, 2] = max(0.001, mutated[i, 2] + radius_step)
+
+                # Fix bounds
+                if not is_valid_position(mutated[i, 0], mutated[i, 1], mutated[i, 2]):
+                    # Revert to valid position and recompute
+                    mutated[i, 0] = max(mutated[i, 2], min(width - mutated[i, 2], mutated[i, 0]))
+                    mutated[i, 1] = max(mutated[i, 2], min(height - mutated[i, 2], mutated[i, 1]))
+
+        return mutated
+=======
+    def adaptive_mutation(circles: np.ndarray, constraint_density: dict, generation: int) -> np.ndarray:
+        """Mutate circles with adaptive step sizes based on density"""
+        mutated = circles.copy()
+        mutation_rate = 0.2 + 0.1 * np.exp(-generation/50)  # Decrease over generations
+
+        for i in range(len(mutated)):
+            # Get constraint density for this circle (higher means tighter constraints)
+            density = constraint_density.get(i, 1.0)
+
+            # Adaptive step size based on density and generation
+            # Lower density (sparse regions) allow larger steps
+            # Higher density (crowded regions) require smaller steps
+            base_step = 0.02
+            density_factor = 1.0 / (1.0 + density * 0.5)
+            step_size = base_step * density_factor * (0.5 + 0.5 * np.exp(-generation/100))
+
+            if random.random() < mutation_rate:
+                # Mutate position
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+
+                # Mutate radius with different behavior based on density
+                if density > 2.0:  # High constraint area - be more conservative
+                    radius_step = np.random.normal(0, step_size * 0.3)
+                elif density < 1.0:  # Low constraint area - be more aggressive
+                    radius_step = np.random.normal(0, step_size * 1.5)
+                else:  # Medium constraint area
+                    radius_step = np.random.normal(0, step_size * 0.8)
+
+                mutated[i, 2] = max(0.001, mutated[i, 2] + radius_step)
+
+                # Boundary checking and correction
+                mutated[i, 0] = max(mutated[i, 2], min(width - mutated[i, 2], mutated[i, 0]))
+                mutated[i, 1] = max(mutated[i, 2], min(height - mutated[i, 2], mutated[i, 1]))
+
+                # Ensure radius remains feasible given position
+                max_radius_x = min(mutated[i, 0], width - mutated[i, 0])
+                max_radius_y = min(mutated[i, 1], height - mutated[i, 1])
+                mutated[i, 2] = min(mutated[i, 2], max_radius_x, max_radius_y)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

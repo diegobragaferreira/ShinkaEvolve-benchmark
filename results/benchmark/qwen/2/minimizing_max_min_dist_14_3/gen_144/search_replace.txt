@@ -1,0 +1,288 @@
+<NAME>
+enhanced_simulated_annealing_with_adaptive_cooling
+</NAME>
+
+<DESCRIPTION>
+The main improvement involves enhancing the simulated annealing algorithm with adaptive cooling schedules and more sophisticated perturbation strategies. The key changes include:
+1. Adding an adaptive cooling schedule that adjusts based on convergence behavior
+2. Implementing a farthest-point perturbation strategy to better balance point distributions
+3. Adding checkpointing to save the best solution found during optimization
+4. Including early stopping mechanisms to prevent unnecessary computation
+5. Improving the initialization with better starting configurations
+These changes aim to escape local optima more effectively and converge towards better solutions that can beat the benchmark of 0.4898.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+
+
+def fibonacci_sphere(n):
+    """Generate n points on a sphere using Fibonacci spiral method"""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n):
+        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+
+def compute_min_max_ratio(points):
+    """Compute the ratio of minimum to maximum pairwise distances"""
+    # Compute pairwise distances
+    distances = pdist(points)
+
+    # Get minimum and maximum distances
+    d_min = np.min(distances)
+    d_max = np.max(distances)
+
+    # Return ratio (avoid division by zero)
+    if d_max == 0:
+        return 0
+    return d_min / d_max
+
+
+def perturb_points(points, temperature, perturbation_scale=0.01):
+    """Perturb points with temperature-dependent magnitude"""
+    n_points = points.shape[0]
+
+    # Select random point to perturb
+    idx = np.random.randint(0, n_points)
+
+    # Generate perturbation vector
+    perturbation = np.random.randn(3) * perturbation_scale * temperature
+
+    # Apply perturbation
+    new_points = points.copy()
+    new_points[idx] += perturbation
+
+    # Project back to unit sphere
+    norm = np.linalg.norm(new_points[idx])
+    if norm > 0:
+        new_points[idx] = new_points[idx] / norm
+
+    return new_points
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    np.random.seed(42)
+
+    n = 14
+    d = 3
+
+    # Initialize points using Fibonacci sphere distribution for better spread
+    points = fibonacci_sphere(n)
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(points, axis=1)
+    points = points / np.max(norms)  # Scale to unit sphere
+
+    # Simulated Annealing parameters
+    initial_temperature = 0.1
+    final_temperature = 1e-6
+    cooling_rate = 0.9995
+    max_iterations = 100000
+
+    # Track best solution
+    current_points = points.copy()
+    best_points = points.copy()
+    best_ratio = compute_min_max_ratio(current_points)
+
+    temperature = initial_temperature
+
+    # Optimization loop
+    for iteration in range(max_iterations):
+        # Perturb points
+        new_points = perturb_points(current_points, temperature)
+
+        # Compute new ratio
+        new_ratio = compute_min_max_ratio(new_points)
+
+        # Accept or reject the new configuration
+        if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temperature):
+            current_points = new_points
+
+            # Update best solution if improved
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = new_points.copy()
+
+        # Cool down
+        temperature *= cooling_rate
+
+        # Early stopping if temperature gets too low
+        if temperature < final_temperature:
+            break
+
+    return best_points
+=======
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+
+
+def fibonacci_sphere(n):
+    """Generate n points on a sphere using Fibonacci spiral method"""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n):
+        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+
+def compute_min_max_ratio(points):
+    """Compute the ratio of minimum to maximum pairwise distances"""
+    # Compute pairwise distances
+    distances = pdist(points)
+
+    # Get minimum and maximum distances
+    d_min = np.min(distances)
+    d_max = np.max(distances)
+
+    # Return ratio (avoid division by zero)
+    if d_max == 0:
+        return 0
+    return d_min / d_max
+
+
+def perturb_points(points, temperature, strategy='random', perturbation_scale=0.01):
+    """Perturb points with temperature-dependent magnitude using different strategies"""
+    n_points = points.shape[0]
+
+    if strategy == 'farthest':
+        # Choose point that is farthest from its nearest neighbor to perturb
+        distances = pdist(points)
+        distance_matrix = squareform(distances)
+        # Find the point with minimum distance to its nearest neighbor
+        min_distances = np.min(distance_matrix + np.eye(n_points) * np.inf, axis=1)
+        idx = np.argmax(min_distances)  # Perturb the farthest from nearest neighbor
+    else:  # random strategy
+        # Select random point to perturb
+        idx = np.random.randint(0, n_points)
+
+    # Generate perturbation vector
+    perturbation = np.random.randn(3) * perturbation_scale * temperature
+
+    # Apply perturbation
+    new_points = points.copy()
+    new_points[idx] += perturbation
+
+    # Project back to unit sphere
+    norm = np.linalg.norm(new_points[idx])
+    if norm > 0:
+        new_points[idx] = new_points[idx] / norm
+
+    return new_points
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    np.random.seed(42)
+
+    n = 14
+    d = 3
+
+    # Initialize points using Fibonacci sphere distribution for better spread
+    points = fibonacci_sphere(n)
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(points, axis=1)
+    points = points / np.max(norms)  # Scale to unit sphere
+
+    # Enhanced Simulated Annealing parameters
+    initial_temperature = 0.1
+    final_temperature = 1e-6
+    max_iterations = 100000
+    stagnation_threshold = 5000  # Number of iterations without improvement before cooling
+
+    # Track best solution
+    current_points = points.copy()
+    best_points = points.copy()
+    best_ratio = compute_min_max_ratio(current_points)
+
+    # Checkpoint variables
+    best_checkpoint = best_points.copy()
+    best_checkpoint_ratio = best_ratio
+    last_improvement_iteration = 0
+
+    temperature = initial_temperature
+    iteration = 0
+
+    # Optimization loop
+    while iteration < max_iterations and temperature > final_temperature:
+        # Adaptive perturbation strategy
+        if iteration % 1000 == 0:
+            # Occasionally switch to perturbing the farthest point to encourage expansion
+            strategy = 'farthest' if np.random.random() < 0.3 else 'random'
+        else:
+            strategy = 'random'
+
+        # Perturb points
+        new_points = perturb_points(current_points, temperature, strategy=strategy)
+
+        # Compute new ratio
+        new_ratio = compute_min_max_ratio(new_points)
+
+        # Accept or reject the new configuration
+        if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temperature):
+            current_points = new_points
+
+            # Update best solution if improved
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = new_points.copy()
+                last_improvement_iteration = iteration
+                # Update checkpoint
+                if new_ratio > best_checkpoint_ratio:
+                    best_checkpoint = new_points.copy()
+                    best_checkpoint_ratio = new_ratio
+
+        # Adaptive cooling schedule
+        if iteration % 1000 == 0:
+            # If we haven't improved in a while, cool faster
+            if iteration - last_improvement_iteration > stagnation_threshold:
+                temperature *= 0.95  # Aggressive cooling when stuck
+            else:
+                temperature *= 0.999  # Normal cooling
+        else:
+            temperature *= 0.9995  # Standard cooling
+
+        iteration += 1
+
+    return best_checkpoint
+>>>>>>> REPLACE
+</DIFF>

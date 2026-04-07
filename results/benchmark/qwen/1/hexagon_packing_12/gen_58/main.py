@@ -1,0 +1,215 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import time
+
+# Constants
+HEX_RADIUS = 1.0
+HEX_WIDTH = HEX_RADIUS * 2 * np.sqrt(3) / 3
+HEX_HEIGHT = HEX_RADIUS * 2
+HEX_DIAGONAL = HEX_RADIUS * np.sqrt(3)
+
+def create_hexagon(center=(0, 0), rotation=0):
+    """Create a unit regular hexagon as a list of vertices"""
+    angle_step = np.pi / 3
+    points = []
+    for i in range(6):
+        angle = rotation + i * angle_step
+        x = center[0] + HEX_RADIUS * np.cos(angle)
+        y = center[1] + HEX_RADIUS * np.sin(angle)
+        points.append((x, y))
+    return np.array(points)
+
+def hexagon_vertices_to_polygon(vertices):
+    """Convert hexagon vertices to shapely polygon for containment checking"""
+    from shapely.geometry import Polygon
+    return Polygon(vertices)
+
+def check_containment(hex_vertices, outer_radius):
+    """Check if all hexagon vertices are within the outer hexagon"""
+    # Create outer hexagon vertices
+    outer_vertices = create_hexagon((0, 0), 0)
+    outer_polygon = hexagon_vertices_to_polygon(outer_vertices)
+    
+    # Create inner hexagon polygon
+    inner_polygon = hexagon_vertices_to_polygon(hex_vertices)
+    
+    # Check containment
+    return outer_polygon.contains(inner_polygon)
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using shapely"""
+    from shapely.geometry import Polygon
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def get_outer_hex_radius(inner_hex_data):
+    """Calculate minimum outer hexagon radius"""
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, _ = inner_hex_data[i]
+        dist_to_center = np.sqrt(center_x**2 + center_y**2)
+        max_dist = max(max_dist, dist_to_center + HEX_DIAGONAL)
+    return max_dist
+
+def calculate_objective(params):
+    """
+    Calculate objective function: -1/R where R is outer hexagon side length
+    params: [r1, theta1, r2, theta2, r3, theta3, ...] - symmetric parameters
+    """
+    # Reshape params to get symmetric groups
+    n_groups = 4  # 3 central + 6 radial + 3 outer
+    params = params.reshape(n_groups, 2)
+    
+    # Reconstruct all hexagon positions
+    inner_hex_data = []
+    
+    # Central group (1 hexagon at center)
+    inner_hex_data.append([0, 0, params[0, 1]])  # center
+    
+    # Radial group (6 hexagons around center)
+    for i in range(6):
+        angle = i * np.pi/3 + params[1, 1]
+        radius = params[1, 0]
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        inner_hex_data.append([x, y, params[1, 1]])
+    
+    # Outer group (3 hexagons further out)
+    for i in range(3):
+        angle = i * 2*np.pi/3 + params[2, 1] 
+        radius = params[2, 0]
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        inner_hex_data.append([x, y, params[2, 1]])
+        
+    # Final group (3 more hexagons)
+    for i in range(3):
+        angle = i * 2*np.pi/3 + params[3, 1]
+        radius = params[3, 0]
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        inner_hex_data.append([x, y, params[3, 1]])
+    
+    # Calculate outer hexagon radius
+    outer_radius = get_outer_hex_radius(inner_hex_data)
+    
+    # Check constraints
+    penalties = 0
+    
+    # Check containment
+    for i, hex_data in enumerate(inner_hex_data):
+        center_x, center_y, _ = hex_data
+        dist_from_origin = np.sqrt(center_x**2 + center_y**2)
+        if dist_from_origin + HEX_DIAGONAL > outer_radius:
+            penalties += 10000
+    
+    # Check overlaps
+    for i in range(len(inner_hex_data)):
+        hex1_vertices = create_hexagon(inner_hex_data[i][:2], inner_hex_data[i][2])
+        for j in range(i+1, len(inner_hex_data)):
+            hex2_vertices = create_hexagon(inner_hex_data[j][:2], inner_hex_data[j][2])
+            if check_overlap(hex1_vertices, hex2_vertices):
+                penalties += 10000
+    
+    # Objective function: -1/outer_radius with penalty
+    obj_value = -1.0 / outer_radius + penalties
+    
+    return obj_value
+
+def optimize_symmetric_configuration():
+    """Optimize using symmetric approach"""
+    # Initial symmetric guess
+    # Groups: [radius, angle] for each cluster
+    initial_guess = np.array([
+        [0.0, 0.0],     # central hexagon (radius, angle)
+        [2.0, 0.0],     # radial hexagons 
+        [3.0, 0.0],     # outer hexagons
+        [4.0, 0.0]      # final group
+    ]).flatten()
+    
+    # Bounds for optimization
+    bounds = [(0.1, 10.0), (0, 2*np.pi)] * 4  # [r1, theta1, r2, theta2, r3, theta3, r4, theta4]
+    
+    # Optimization
+    result = minimize(
+        calculate_objective,
+        initial_guess,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 1000},
+        tol=1e-8
+    )
+    
+    # Reconstruct final configuration from optimized parameters
+    final_params = result.x.reshape(4, 2)
+    
+    # Generate final hexagon data
+    inner_hex_data = []
+    
+    # Central hexagon
+    inner_hex_data.append([0, 0, 0])
+    
+    # Radial hexagons  
+    for i in range(6):
+        angle = i * np.pi/3 + final_params[1, 1]
+        radius = final_params[1, 0]
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        inner_hex_data.append([x, y, 0])  # No rotation for radial
+        
+    # Outer hexagons
+    for i in range(3):
+        angle = i * 2*np.pi/3 + final_params[2, 1] 
+        radius = final_params[2, 0]
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        inner_hex_data.append([x, y, 0])
+        
+    # Final group
+    for i in range(3):
+        angle = i * 2*np.pi/3 + final_params[3, 1]
+        radius = final_params[3, 0]
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        inner_hex_data.append([x, y, 0])
+    
+    return np.array(inner_hex_data)
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Use symmetric optimization approach
+    inner_hex_data = optimize_symmetric_configuration()
+    
+    # Calculate outer hexagon side length
+    outer_radius = get_outer_hex_radius(inner_hex_data)
+    # Side length of hexagon = radius * sqrt(3)
+    outer_hex_side_length = outer_radius * np.sqrt(3)
+    
+    # Outer hexagon at origin with 0 rotation
+    outer_hex_data = np.array([0, 0, 0])
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    # Calculate performance metrics
+    inv_outer_side_length = 1.0 / outer_hex_side_length
+    benchmark_ratio = inv_outer_side_length / 0.2537
+    
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Inv outer side length: {inv_outer_side_length:.6f}")
+    print(f"Benchmark ratio: {benchmark_ratio:.6f}")
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

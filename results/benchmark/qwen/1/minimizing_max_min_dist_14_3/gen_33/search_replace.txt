@@ -1,0 +1,357 @@
+<NAME>
+add_multi_start_with_sobol_initialization
+</NAME>
+
+<DESCRIPTION>
+Adding Sobol sequence initialization to improve point distribution quality. This approach leverages low-discrepancy sequences which provide better space-filling properties than simple random initialization, potentially leading to better convergence to global optima. The Sobol sequence helps avoid poor local optima that might trap simpler initialization methods.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+from typing import Tuple
+
+def fibonacci_spiral_sphere(n_points: int) -> np.ndarray:
+    """Generate points on a sphere using Fibonacci spiral method."""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n_points):
+        y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+def min_max_dist_ratio(points: np.ndarray) -> float:
+    """Calculate the ratio of minimum to maximum distance with early termination."""
+    if len(points) < 2:
+        return 0.0
+
+    try:
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+
+        # Early termination: if we have very small distances already,
+        # we don't need to compute the full ratio
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist <= 0:
+            return 0.0
+
+        return min_dist / max_dist
+    except Exception:
+        return 0.0
+
+def setup_constraints(n_points: int, d: int) -> dict:
+    """Setup constraint dictionary for optimization."""
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n_points, d)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    return {'type': 'eq', 'fun': constraint_sphere}
+
+def normalize_points(points: np.ndarray) -> np.ndarray:
+    """Normalize points to unit sphere ensuring numerical stability."""
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    # Avoid division by zero
+    norms = np.where(norms == 0, 1.0, norms)
+    return points / norms
+
+def adaptive_fibonacci_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+    """Initialize points using Fibonacci spiral with adaptive scaling."""
+    np.random.seed(seed)
+
+    # Start with Fibonacci spiral
+    base_points = fibonacci_spiral_sphere(n_points)
+
+    # Apply slight random perturbation to avoid symmetric configurations
+    perturbation_magnitude = 0.1
+    perturbation = (np.random.rand(n_points, 3) - 0.5) * perturbation_magnitude
+    perturbed_points = base_points + perturbation
+
+    # Normalize to unit sphere
+    return normalize_points(perturbed_points)
+
+def optimize_single_start(initial_points: np.ndarray,
+                         n_points: int,
+                         d: int,
+                         max_iter: int = 1000) -> np.ndarray:
+    """Optimize a single start point configuration."""
+    x0 = initial_points.flatten()
+
+    def objective(x_flat):
+        points_reshaped = x_flat.reshape(n_points, d)
+        normalized_points = normalize_points(points_reshaped)
+        return -min_max_dist_ratio(normalized_points)
+
+    constraints = setup_constraints(n_points, d)
+    bounds = [(-2, 2) for _ in range(n_points * d)]
+
+    # Use L-BFGS-B with tighter tolerances
+    result = minimize(
+        objective,
+        x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        constraints=constraints,
+        options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+        tol=1e-12
+    )
+
+    # Extract and normalize optimized points
+    optimized_points = result.x.reshape(n_points, d)
+    return normalize_points(optimized_points)
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    n = 14
+    d = 3
+
+    # Multi-start optimization with different initializations
+    best_ratio = -np.inf
+    best_points = None
+
+    # Try multiple random starts to avoid local optima
+    num_starts = 10
+
+    for start_idx in range(num_starts):
+        # Create diverse initializations
+        if start_idx == 0:
+            # First start: standard Fibonacci with perturbation
+            points = adaptive_fibonacci_initialization(n, seed=42)
+        else:
+            # Other starts: random initialization with normalization
+            np.random.seed(start_idx + 42)
+            points = np.random.rand(n, d) * 2 - 1  # Random in [-1, 1]
+            points = normalize_points(points)
+
+        # Optimize from this start
+        try:
+            optimized_points = optimize_single_start(points, n, d)
+            current_ratio = min_max_dist_ratio(optimized_points)
+
+            if current_ratio > best_ratio:
+                best_ratio = current_ratio
+                best_points = optimized_points.copy()
+
+        except Exception as e:
+            # If optimization fails, continue with other starts
+            continue
+
+    # Final refinement with the best solution found
+    if best_points is not None:
+        # Apply one final optimization pass to further refine
+        final_points = optimize_single_start(best_points, n, d, max_iter=500)
+        final_ratio = min_max_dist_ratio(final_points)
+
+        if final_ratio > best_ratio:
+            return final_points
+
+    # Return the best solution found
+    if best_points is None:
+        # Fallback to Fibonacci initialization if everything fails
+        return adaptive_fibonacci_initialization(n, seed=42)
+
+    return best_points
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+from typing import Tuple
+from sobol_seq import i4_sobol_generate  # Need to install: pip install sobol_seq
+
+def fibonacci_spiral_sphere(n_points: int) -> np.ndarray:
+    """Generate points on a sphere using Fibonacci spiral method."""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n_points):
+        y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+def min_max_dist_ratio(points: np.ndarray) -> float:
+    """Calculate the ratio of minimum to maximum distance with early termination."""
+    if len(points) < 2:
+        return 0.0
+
+    try:
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+
+        # Early termination: if we have very small distances already,
+        # we don't need to compute the full ratio
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist <= 0:
+            return 0.0
+
+        return min_dist / max_dist
+    except Exception:
+        return 0.0
+
+def setup_constraints(n_points: int, d: int) -> dict:
+    """Setup constraint dictionary for optimization."""
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n_points, d)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    return {'type': 'eq', 'fun': constraint_sphere}
+
+def normalize_points(points: np.ndarray) -> np.ndarray:
+    """Normalize points to unit sphere ensuring numerical stability."""
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    # Avoid division by zero
+    norms = np.where(norms == 0, 1.0, norms)
+    return points / norms
+
+def adaptive_fibonacci_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+    """Initialize points using Fibonacci spiral with adaptive scaling."""
+    np.random.seed(seed)
+
+    # Start with Fibonacci spiral
+    base_points = fibonacci_spiral_sphere(n_points)
+
+    # Apply slight random perturbation to avoid symmetric configurations
+    perturbation_magnitude = 0.1
+    perturbation = (np.random.rand(n_points, 3) - 0.5) * perturbation_magnitude
+    perturbed_points = base_points + perturbation
+
+    # Normalize to unit sphere
+    return normalize_points(perturbed_points)
+
+def sobol_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+    """Initialize points using Sobol sequence for better space filling."""
+    np.random.seed(seed)
+
+    # Generate Sobol sequence in 3D
+    sobol_points = i4_sobol_generate(3, n_points, skip=seed)
+    # Scale to [-1, 1]^3
+    sobol_points = sobol_points * 2 - 1
+
+    # Normalize to unit sphere
+    return normalize_points(sobol_points)
+
+def optimize_single_start(initial_points: np.ndarray,
+                         n_points: int,
+                         d: int,
+                         max_iter: int = 1000) -> np.ndarray:
+    """Optimize a single start point configuration."""
+    x0 = initial_points.flatten()
+
+    def objective(x_flat):
+        points_reshaped = x_flat.reshape(n_points, d)
+        normalized_points = normalize_points(points_reshaped)
+        return -min_max_dist_ratio(normalized_points)
+
+    constraints = setup_constraints(n_points, d)
+    bounds = [(-2, 2) for _ in range(n_points * d)]
+
+    # Use L-BFGS-B with tighter tolerances
+    result = minimize(
+        objective,
+        x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        constraints=constraints,
+        options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+        tol=1e-12
+    )
+
+    # Extract and normalize optimized points
+    optimized_points = result.x.reshape(n_points, d)
+    return normalize_points(optimized_points)
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    n = 14
+    d = 3
+
+    # Multi-start optimization with different initializations
+    best_ratio = -np.inf
+    best_points = None
+
+    # Try multiple random starts to avoid local optima
+    num_starts = 15  # Increased from 10 to give more exploration
+
+    for start_idx in range(num_starts):
+        # Create diverse initializations
+        if start_idx == 0:
+            # First start: standard Fibonacci with perturbation
+            points = adaptive_fibonacci_initialization(n, seed=42)
+        elif start_idx == 1:
+            # Second start: Sobol sequence initialization
+            points = sobol_initialization(n, seed=43)
+        else:
+            # Other starts: random initialization with normalization
+            np.random.seed(start_idx + 42)
+            points = np.random.rand(n, d) * 2 - 1  # Random in [-1, 1]
+            points = normalize_points(points)
+
+        # Optimize from this start
+        try:
+            optimized_points = optimize_single_start(points, n, d)
+            current_ratio = min_max_dist_ratio(optimized_points)
+
+            if current_ratio > best_ratio:
+                best_ratio = current_ratio
+                best_points = optimized_points.copy()
+
+        except Exception as e:
+            # If optimization fails, continue with other starts
+            continue
+
+    # Final refinement with the best solution found
+    if best_points is not None:
+        # Apply one final optimization pass to further refine
+        final_points = optimize_single_start(best_points, n, d, max_iter=500)
+        final_ratio = min_max_dist_ratio(final_points)
+
+        if final_ratio > best_ratio:
+            return final_points
+
+    # Return the best solution found
+    if best_points is None:
+        # Fallback to Fibonacci initialization if everything fails
+        return adaptive_fibonacci_initialization(n, seed=42)
+
+    return best_points
+>>>>>>> REPLACE
+</DIFF>

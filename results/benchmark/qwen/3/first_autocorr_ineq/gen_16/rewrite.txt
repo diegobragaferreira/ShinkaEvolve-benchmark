@@ -1,0 +1,133 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax import grad, jit
+from scipy.optimize import minimize
+from functools import partial
+
+# Set random seed for reproducibility
+np.random.seed(42)
+jax.config.update("jax_enable_x64", True)
+
+@jax.jit
+def compute_convolution_fft(a):
+    """Compute convolution using FFT for efficiency."""
+    n = len(a)
+    # Pad to length 2*n-1 for full convolution
+    padded_a = jnp.pad(a, (0, n-1), mode='constant')
+    # Use FFT for convolution
+    fft_a = jnp.fft.fft(padded_a)
+    conv_result = jnp.fft.ifft(fft_a * jnp.conj(fft_a)).real
+    return conv_result[:n]
+
+@jax.jit
+def compute_c1_value(a):
+    """Compute C1 value for given sequence."""
+    n = len(a)
+    if n == 0:
+        return float('inf')
+    
+    # Compute convolution
+    conv = compute_convolution_fft(a)
+    max_conv = jnp.max(conv)
+    sum_a = jnp.sum(a)
+    
+    # Avoid division by zero
+    if sum_a <= 1e-12:
+        return float('inf')
+    
+    # Return C1 = 2*n*max(conv) / (sum(a))^2
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+@jax.jit
+def compute_inv_c1(a):
+    """Compute inverse of C1 (the objective to maximize)."""
+    c1 = compute_c1_value(a)
+    return 1.0 / c1 if c1 > 0 else 0.0
+
+@jax.jit
+def compute_objective_and_grad(a):
+    """Compute objective (inverse C1) and its gradient."""
+    # Since we're using L-BFGS which requires both value and gradient,
+    # we compute them together for efficiency
+    inv_c1 = compute_inv_c1(a)
+    return inv_c1
+
+# Create a wrapper for scipy's minimize function
+@partial(jit, static_argnums=(1,))
+def wrapped_objective_and_grad(a, use_grad=True):
+    """Wrapper for objective and gradient computation."""
+    if use_grad:
+        # Compute gradient using JAX
+        grad_func = grad(compute_inv_c1)
+        gradient = grad_func(a)
+        return compute_inv_c1(a), gradient
+    else:
+        return compute_inv_c1(a), None
+
+def solve_optimization_step(initial_sequence):
+    """
+    Solve the optimization problem using gradient-based method.
+    """
+    n = len(initial_sequence)
+    # Clip values to [0, 1000]
+    clipped_initial = np.clip(initial_sequence, 0, 1000)
+    # Ensure minimum sum constraint
+    if np.sum(clipped_initial) < 0.01:
+        clipped_initial = np.maximum(clipped_initial, 0.01 / n) 
+    
+    # Define bounds: [0, 1000] for each element
+    bounds = [(0, 1000) for _ in range(n)]
+    
+    # Define objective function with gradient
+    def objective_with_grad(x):
+        val, grad_val = wrapped_objective_and_grad(x, use_grad=True)
+        return -val, -grad_val  # Negate since we want to maximize
+    
+    try:
+        # Use L-BFGS optimizer
+        result = minimize(
+            objective_with_grad,
+            clipped_initial,
+            method='L-BFGS-B',
+            bounds=bounds,
+            jac=True,
+            options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+        
+        if result.success:
+            optimized_sequence = result.x
+            # Clip again to ensure bounds
+            optimized_sequence = np.clip(optimized_sequence, 0, 1000)
+            # Ensure minimum sum constraint
+            if np.sum(optimized_sequence) < 0.01:
+                optimized_sequence = np.maximum(optimized_sequence, 0.01 / n)
+            return optimized_sequence.tolist()
+        else:
+            return initial_sequence
+        
+    except Exception as e:
+        # Fallback to initial sequence if optimization fails
+        return initial_sequence
+
+def search_for_best_sequence():
+    """
+    Main function to find the best sequence.
+    """
+    # Generate a random initial sequence
+    n = np.random.randint(100, 1000)
+    initial_sequence = np.random.rand(n)
+    
+    # Apply optimization step
+    optimized_sequence = solve_optimization_step(initial_sequence)
+    
+    return optimized_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

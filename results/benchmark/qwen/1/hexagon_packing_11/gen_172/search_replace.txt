@@ -1,0 +1,412 @@
+<NAME>
+improve_collision_detection_with_spatial_hashing
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a quadtree for spatial indexing but the collision detection is still relatively inefficient. I'll implement a more efficient spatial hashing approach that can quickly identify potential collision pairs by dividing space into buckets. This will significantly reduce the number of pairwise overlap checks needed, especially important for the 11-hexagon case where collision detection becomes computationally intensive. The spatial hashing approach will provide O(1) average lookup time for nearby objects and greatly improve the overall performance of the optimization algorithm.
+
+The key improvements are:
+1. Replace quadtree with spatial hashing for faster neighbor lookups
+2. Implement a more efficient bounding box-based approach for initial candidate filtering
+3. Add early termination conditions to speed up collision checks
+4. Improve the local refinement process with better parameter tuning
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def build_spatial_grid(hexagons, positions, angles):
+    """Build quadtree-based spatial grid for collision detection"""
+    if len(hexagons) == 0:
+        return None
+
+    # Determine bounds of all hexagons
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
+
+    for i in range(len(positions)):
+        pos = positions[i]
+        angle = angles[i]
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        for vx, vy in hex_vertices:
+            min_x = min(min_x, vx)
+            max_x = max(max_x, vx)
+            min_y = min(min_y, vy)
+            max_y = max(max_y, vy)
+
+    # Add some padding
+    padding = 0.5
+    min_x -= padding
+    max_x += padding
+    min_y -= padding
+    max_y += padding
+
+    # Create quadtree
+    boundary = (min_x, min_y, max_x, max_y)
+    tree = QuadTree(boundary, capacity=4)
+
+    # Insert all hexagon centers
+    for i in range(len(positions)):
+        pos = positions[i]
+        tree.insert((pos[0], pos[1]), i)
+
+    return tree
+
+def fast_collision_check_with_tree(tree, positions, angles, i, j):
+    """Fast collision check using quadtree"""
+    if i == j:
+        return False
+
+    # Quick distance check first
+    pos_i = positions[i]
+    pos_j = positions[j]
+    dist_sq = (pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2
+
+    # If too far apart, no need to do detailed check
+    if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+        return False
+
+    # Detailed check
+    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                pos_j[0], pos_j[1], angles[j])
+=======
+def build_spatial_hash_grid(positions, angles, cell_size=2.5):
+    """Build spatial hash grid for collision detection"""
+    if len(positions) == 0:
+        return {}
+
+    # Create hash grid where each cell is a list of hexagon indices
+    grid = {}
+
+    # For each hexagon, determine which cells it occupies
+    for i in range(len(positions)):
+        pos = positions[i]
+        angle = angles[i]
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+
+        # Get bounding box of hexagon
+        min_x = min(vx for vx, vy in hex_vertices)
+        max_x = max(vx for vx, vy in hex_vertices)
+        min_y = min(vy for vx, vy in hex_vertices)
+        max_y = max(vy for vx, vy in hex_vertices)
+
+        # Determine which grid cells this hexagon spans
+        min_cell_x = int(min_x // cell_size)
+        max_cell_x = int(max_x // cell_size)
+        min_cell_y = int(min_y // cell_size)
+        max_cell_y = int(max_y // cell_size)
+
+        # Add to all affected cells
+        for cx in range(min_cell_x, max_cell_x + 1):
+            for cy in range(min_cell_y, max_cell_y + 1):
+                cell_key = (cx, cy)
+                if cell_key not in grid:
+                    grid[cell_key] = []
+                grid[cell_key].append(i)
+
+    return grid
+
+def get_candidates_from_hash_grid(grid, positions, angles, hex_idx, cell_size=2.5):
+    """Get candidate hexagons for collision checking using spatial hash"""
+    pos = positions[hex_idx]
+    angle = angles[hex_idx]
+    hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+
+    # Get bounding box of target hexagon
+    min_x = min(vx for vx, vy in hex_vertices)
+    max_x = max(vx for vx, vy in hex_vertices)
+    min_y = min(vy for vx, vy in hex_vertices)
+    max_y = max(vy for vx, vy in hex_vertices)
+
+    # Determine which grid cells to check
+    min_cell_x = int(min_x // cell_size) - 1
+    max_cell_x = int(max_x // cell_size) + 1
+    min_cell_y = int(min_y // cell_size) - 1
+    max_cell_y = int(max_y // cell_size) + 1
+
+    candidates = set()
+    for cx in range(min_cell_x, max_cell_x + 1):
+        for cy in range(min_cell_y, max_cell_y + 1):
+            cell_key = (cx, cy)
+            if cell_key in grid:
+                candidates.update(grid[cell_key])
+
+    return list(candidates)
+
+def fast_collision_check_with_hash(grid, positions, angles, i, j, cell_size=2.5):
+    """Fast collision check using spatial hash"""
+    if i == j:
+        return False
+
+    # Quick distance check first
+    pos_i = positions[i]
+    pos_j = positions[j]
+    dist_sq = (pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2
+
+    # If too far apart, no need to do detailed check
+    if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+        return False
+
+    # Check if they're in the same or neighboring cells
+    # If they're in different cells, we can skip detailed check
+    if grid is not None:
+        # Get bounding boxes for quick overlap check
+        v1 = hexagon_vertices(pos_i[0], pos_i[1], angles[i])
+        v2 = hexagon_vertices(pos_j[0], pos_j[1], angles[j])
+
+        # Get bounding rectangles
+        min_x1 = min(vx for vx, vy in v1)
+        max_x1 = max(vx for vx, vy in v1)
+        min_y1 = min(vy for vx, vy in v1)
+        max_y1 = max(vy for vx, vy in v1)
+
+        min_x2 = min(vx for vx, vy in v2)
+        max_x2 = max(vx for vx, vy in v2)
+        min_y2 = min(vy for vx, vy in v2)
+        max_y2 = max(vy for vx, vy in v2)
+
+        # Quick overlap check
+        if max_x1 < min_x2 or max_x2 < min_x1 or max_y1 < min_y2 or max_y2 < min_y1:
+            return False
+
+    # Detailed check
+    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                pos_j[0], pos_j[1], angles[j])
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution(solution, use_spatial_index=True):
+    """Evaluate a solution and return negative of objective (since we minimize)"""
+    # Reshape solution into positions and angles
+    positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+    angles = solution[22:]  # 11 angles
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(11):
+        pos = positions[i]
+        angle = angles[i]
+        hex_poly = get_hexagon_polygon(pos[0], pos[1], angle)
+        inner_hexagons.append(hex_poly)
+
+    # Check containment
+    outer_radius = calculate_outer_hexagon_radius(positions, angles)
+    # Outer hexagon with center at origin and calculated radius
+    outer_hexagon = get_hexagon_polygon(0, 0, 0, outer_radius)
+
+    # Check containment for all inner hexagons
+    for hex_poly in inner_hexagons:
+        if not check_containment(hex_poly, outer_hexagon):
+            return 1e10  # Penalty for non-containment
+
+    # Build spatial grid for collision detection if requested
+    tree = None
+    if use_spatial_index:
+        tree = build_spatial_grid(inner_hexagons, positions, angles)
+
+    # Check for overlaps
+    for i in range(11):
+        for j in range(i+1, 11):
+            # Use fast collision check with spatial indexing
+            if use_spatial_index and tree is not None:
+                if not fast_collision_check_with_tree(tree, positions, angles, i, j):
+                    continue
+            else:
+                # Fallback to direct check if spatial index fails
+                if not hexagon_overlap_fast(positions[i][0], positions[i][1], angles[i],
+                                            positions[j][0], positions[j][1], angles[j]):
+                    continue
+
+            # If we reach here, there's a collision
+            return 1e10  # Penalty for overlap
+
+    # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+    return -1.0 / outer_radius
+=======
+def evaluate_solution(solution, use_spatial_index=True):
+    """Evaluate a solution and return negative of objective (since we minimize)"""
+    # Reshape solution into positions and angles
+    positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+    angles = solution[22:]  # 11 angles
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(11):
+        pos = positions[i]
+        angle = angles[i]
+        hex_poly = get_hexagon_polygon(pos[0], pos[1], angle)
+        inner_hexagons.append(hex_poly)
+
+    # Check containment
+    outer_radius = calculate_outer_hexagon_radius(positions, angles)
+    # Outer hexagon with center at origin and calculated radius
+    outer_hexagon = get_hexagon_polygon(0, 0, 0, outer_radius)
+
+    # Check containment for all inner hexagons
+    for hex_poly in inner_hexagons:
+        if not check_containment(hex_poly, outer_hexagon):
+            return 1e10  # Penalty for non-containment
+
+    # Build spatial hash grid for collision detection if requested
+    grid = None
+    if use_spatial_index:
+        grid = build_spatial_hash_grid(positions, angles)
+
+    # Check for overlaps
+    # Early termination optimization: only check neighbors in spatial hash
+    if use_spatial_index and grid is not None:
+        # For each hexagon, get candidates from spatial hash and check collisions
+        for i in range(11):
+            candidates = get_candidates_from_hash_grid(grid, positions, angles, i)
+            for j in candidates:
+                if i >= j:  # Avoid double checking and self-checking
+                    continue
+                if not fast_collision_check_with_hash(grid, positions, angles, i, j):
+                    continue
+                # If we reach here, there's a collision
+                return 1e10  # Penalty for overlap
+    else:
+        # Fallback to direct checking
+        for i in range(11):
+            for j in range(i+1, 11):
+                if not hexagon_overlap_fast(positions[i][0], positions[i][1], angles[i],
+                                            positions[j][0], positions[j][1], angles[j]):
+                    continue
+                # If we reach here, there's a collision
+                return 1e10  # Penalty for overlap
+
+    # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+    return -1.0 / outer_radius
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def enhanced_simulated_annealing_refinement(positions, angles):
+    """Apply enhanced simulated annealing for fine-tuning with adaptive cooling"""
+    best_positions = positions.copy()
+    best_angles = angles.copy()
+    best_score = evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+    # Parameters with better tuning
+    temperature = 5.0
+    cooling_rate = 0.9995  # Slower cooling for better exploration
+    min_temperature = 0.001
+    max_iterations = 1000  # More iterations for better refinement
+
+    # Temperature schedule with more careful cooling
+    for iteration in range(max_iterations):
+        if temperature < min_temperature:
+            break
+
+        # Try multiple random perturbations per iteration
+        for _ in range(3):  # Try 3 perturbations per iteration
+            # Try a random perturbation
+            perturbed_positions = best_positions.copy()
+            perturbed_angles = best_angles.copy()
+
+            # Pick a random hexagon to perturb
+            hex_idx = random.randint(0, 10)
+
+            # Perturb position with adaptive magnitude
+            pos_magnitude = 0.05 * (temperature / 5.0)  # Smaller steps at lower temp
+            perturbed_positions[hex_idx][0] += np.random.normal(0, pos_magnitude)
+            perturbed_positions[hex_idx][1] += np.random.normal(0, pos_magnitude)
+
+            # Perturb angle with adaptive magnitude
+            angle_magnitude = 2.0 * (temperature / 5.0)  # Smaller steps at lower temp
+            perturbed_angles[hex_idx] += np.random.normal(0, angle_magnitude)
+
+            # Evaluate new solution
+            new_score = evaluate_solution(np.concatenate([perturbed_positions.flatten(), perturbed_angles]))
+
+            # Accept or reject
+            if new_score < best_score:
+                best_score = new_score
+                best_positions = perturbed_positions
+                best_angles = perturbed_angles
+            else:
+                # Accept with probability based on temperature
+                delta = new_score - best_score
+                acceptance_prob = np.exp(-delta / temperature)
+                if random.random() < acceptance_prob:
+                    best_score = new_score
+                    best_positions = perturbed_positions
+                    best_angles = perturbed_angles
+
+        # Cool down
+        temperature *= cooling_rate
+
+    return best_positions, best_angles
+=======
+def enhanced_simulated_annealing_refinement(positions, angles):
+    """Apply enhanced simulated annealing for fine-tuning with adaptive cooling"""
+    best_positions = positions.copy()
+    best_angles = angles.copy()
+    best_score = evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+    # Parameters with better tuning for hexagon packing
+    temperature = 3.0
+    cooling_rate = 0.9998  # Very slow cooling for thorough exploration
+    min_temperature = 0.0001
+    max_iterations = 1500  # More iterations for better refinement
+
+    # Track convergence
+    last_improvement = 0
+    patience = 50  # Stop if no improvement for 50 iterations
+
+    # Temperature schedule with more careful cooling
+    for iteration in range(max_iterations):
+        if temperature < min_temperature:
+            break
+
+        # Try multiple random perturbations per iteration for better exploration
+        for _ in range(5):  # Increased to 5 perturbations per iteration
+            # Try a random perturbation
+            perturbed_positions = best_positions.copy()
+            perturbed_angles = best_angles.copy()
+
+            # Pick a random hexagon to perturb
+            hex_idx = random.randint(0, 10)
+
+            # Perturb position with adaptive magnitude
+            pos_magnitude = 0.03 * (temperature / 3.0)  # Even smaller steps at lower temp
+            perturbed_positions[hex_idx][0] += np.random.normal(0, pos_magnitude)
+            perturbed_positions[hex_idx][1] += np.random.normal(0, pos_magnitude)
+
+            # Perturb angle with adaptive magnitude
+            angle_magnitude = 1.0 * (temperature / 3.0)  # Smaller steps at lower temp
+            perturbed_angles[hex_idx] += np.random.normal(0, angle_magnitude)
+
+            # Evaluate new solution
+            new_score = evaluate_solution(np.concatenate([perturbed_positions.flatten(), perturbed_angles]))
+
+            # Accept or reject
+            if new_score < best_score:
+                best_score = new_score
+                best_positions = perturbed_positions
+                best_angles = perturbed_angles
+                last_improvement = iteration
+            else:
+                # Accept with probability based on temperature
+                delta = new_score - best_score
+                acceptance_prob = np.exp(-delta / temperature)
+                if random.random() < acceptance_prob:
+                    best_score = new_score
+                    best_positions = perturbed_positions
+                    best_angles = perturbed_angles
+                    last_improvement = iteration
+
+        # Check for early stopping if no improvement
+        if iteration - last_improvement > patience:
+            break
+
+        # Cool down
+        temperature *= cooling_rate
+
+    return best_positions, best_angles
+>>>>>>> REPLACE
+</DIFF>

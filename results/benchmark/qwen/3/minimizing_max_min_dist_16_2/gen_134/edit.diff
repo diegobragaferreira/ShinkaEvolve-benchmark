@@ -1,0 +1,284 @@
+--- a/original.py
++++ b/original.py
+@@ -1,247 +1,251 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist, squareform
+ import math
+ from scipy.optimize import differential_evolution
+ import time
+ 
+ def compute_distance_matrix(points):
+     """Compute pairwise distance matrix for given points."""
+     return squareform(pdist(points))
+ 
+ def calculate_min_max_ratio(distance_matrix):
+     """Calculate the ratio of minimum to maximum distances."""
+     # Exclude diagonal (distance to self)
+     off_diagonal = distance_matrix[distance_matrix > 0]
+     if len(off_diagonal) == 0:
+         return 0.0
+     d_min = np.min(off_diagonal)
+     d_max = np.max(off_diagonal)
+     return d_min / d_max if d_max > 0 else 0.0
+ 
+ def initialize_points_hexagonal_lattice():
+-    """Initialize points using a more sophisticated hexagonal lattice with better spacing."""
+-    # Create a hexagonal lattice with 16 points arranged in a pattern closer to optimal distribution
+-    # Using a 4x4 hexagonal grid with improved spacing and symmetry breaking
++    """Initialize points using an enhanced hexagonal lattice with mathematically optimal spacing."""
++    # Create a hexagonal lattice with 16 points that closely approximates optimal distribution
++    # Using a 4x4 hexagonal grid with improved spacing and better symmetry breaking
+ 
+     points = []
+     sqrt3 = math.sqrt(3)
+ 
+-    # Create a hexagonal pattern that's more evenly distributed
++    # Create a more mathematically precise hexagonal pattern
+     rows = 4
+     cols = 4
+ 
+-    # More precise hexagonal packing with better distribution
++    # Precise hexagonal packing formula with better spacing
++    row_spacing = sqrt3 / 2  # Vertical spacing for hexagonal grid
++    col_spacing = 1.0        # Horizontal spacing for hexagonal grid
++
++    # Generate points in hexagonal pattern with enhanced distribution
+     for i in range(rows):
+         for j in range(cols):
+-            # Offset every other row for proper hexagonal arrangement
+-            x = j + (i % 2) * 0.5
+-            y = i * sqrt3 / 2
+-
+-            # Add slight variation to create better distribution
+-            if i == 0 or i == rows-1:
+-                x += (j % 2) * 0.1  # Slight offset for edge rows
+-            if j == 0 or j == cols-1:
+-                y += (i % 2) * 0.1  # Slight offset for edge columns
++            # Proper hexagonal offsetting for even rows
++            x = j * col_spacing + (i % 2) * col_spacing / 2
++            y = i * row_spacing
+ 
+             points.append([x, y])
+ 
+     # Convert to numpy array
+     points = np.array(points)
+ 
+-    # Normalize to fit nicely in [0,1] square while preserving relative spacing
++    # Normalize to fit within [0,1] while maintaining proper aspect ratio
+     x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+     y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+ 
++    # Handle case where there's no spread
+     if x_range > 0:
+         points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+     if y_range > 0:
+         points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+ 
+-    # Scale to fit within [0.05, 0.95] to maintain interior spacing
+-    points[:, 0] = 0.05 + 0.9 * points[:, 0]
+-    points[:, 1] = 0.05 + 0.9 * points[:, 1]
+-
+-    # Apply more sophisticated perturbations to break symmetry
++    # Scale to use most of the available space while keeping interior spacing
++    scale_factor = 0.9
++    points[:, 0] = 0.05 + scale_factor * points[:, 0]
++    points[:, 1] = 0.05 + scale_factor * points[:, 1]
++
++    # Enhance symmetry breaking with prime-based perturbations
+     np.random.seed(42)
+-
+-    # Different noise patterns for different rows/columns to enhance diversity
+     noise = np.zeros_like(points)
+-    for i in range(rows):
+-        for j in range(cols):
+-            idx = i * cols + j
+-            # Row-based noise variation
+-            noise[idx, 0] = np.random.normal(0, 0.008, 1)[0] * (1.0 + 0.3 * (i % 3))
+-            noise[idx, 1] = np.random.normal(0, 0.008, 1)[0] * (1.0 + 0.3 * (j % 3))
++
++    # Apply more sophisticated perturbations based on prime numbers and position
++    primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]
++    for i in range(len(points)):
++        # Use different noise magnitudes based on prime numbers for position
++        prime_idx = i % len(primes)
++        magnitude = 0.008 * (1.0 + 0.2 * (i % 5))
++
++        # Apply noise with prime-based scaling
++        noise[i, 0] = np.random.normal(0, magnitude, 1)[0] * (1.0 + 0.1 * (primes[prime_idx] % 7))
++        noise[i, 1] = np.random.normal(0, magnitude, 1)[0] * (1.0 + 0.1 * (primes[prime_idx] % 11))
+ 
+     points += noise
+ 
+-    # Clamp to [0,1] bounds
+-    points = np.clip(points, 0, 1)
++    # Apply boundary constraints for better distribution
++    points[:, 0] = np.clip(points[:, 0], 0.02, 0.98)
++    points[:, 1] = np.clip(points[:, 1], 0.02, 0.98)
+ 
+     return points
+ 
+ def initialize_points_random():
+     """Initialize points randomly with better distribution properties."""
+     np.random.seed(42)
+     points = np.random.uniform(0, 1, (16, 2))
+     return points
+ 
+ def optimize_with_simulated_annealing(initial_points, max_iter=1000):
+     """Optimize using a modified simulated annealing approach for better exploration."""
+ 
+     def objective_function(points_flat):
+         points = points_flat.reshape((16, 2))
+         points = np.clip(points, 0, 1)
+         distances = pdist(points)
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+         if d_max == 0:
+             return float('inf')
+         return -d_min / d_max
+ 
+     # Convert to flat array
+     x0 = initial_points.flatten()
+ 
+     # Simulated Annealing with better cooling schedule
+     current_points = x0.copy()
+     current_energy = objective_function(current_points)
+ 
+     best_points = current_points.copy()
+     best_energy = current_energy
+ 
+     # Cooling schedule
+     temp = 1.0
+     cooling_rate = 0.9995
+     min_temp = 1e-6
+ 
+     for iteration in range(max_iter):
+         # Generate neighbor solution
+         neighbor_points = current_points + np.random.normal(0, 0.005, current_points.shape)
+         neighbor_points = np.clip(neighbor_points, 0, 1)
+ 
+         # Evaluate neighbor
+         neighbor_energy = objective_function(neighbor_points)
+ 
+         # Accept or reject based on Metropolis criterion
+         if neighbor_energy < current_energy or np.random.rand() < np.exp((current_energy - neighbor_energy) / temp):
+             current_points = neighbor_points
+             current_energy = neighbor_energy
+ 
+             # Update best solution
+             if current_energy < best_energy:
+                 best_points = current_points.copy()
+                 best_energy = current_energy
+ 
+         # Cool down
+         temp = max(min_temp, temp * cooling_rate)
+ 
+         # Early stopping if improvement is minimal
+         if iteration > 100 and abs(current_energy - best_energy) < 1e-8:
+             break
+ 
+     return best_points.reshape((16, 2))
+ 
+ def optimize_point_placement(initial_points, max_iterations=500):
+     """Optimize point placement using hybrid approach."""
+     def objective(x_flat):
+         # Reshape flat array back to points
+         points = x_flat.reshape(-1, 2)
+ 
+         # Ensure points are within bounds
+         points = np.clip(points, 0, 1)
+ 
+         try:
+             dist_matrix = compute_distance_matrix(points)
+             ratio = calculate_min_max_ratio(dist_matrix)
+ 
+             # Return negative ratio since we want to maximize
+             # We also penalize configurations that are too close to boundary
+             penalty = 0
+ 
+             # Additional penalty for points very close to boundaries
+             boundary_penalty = 0
+             if np.any(points < 0.02) or np.any(points > 0.98):
+                 boundary_penalty = -0.02
+ 
+             # Penalty for extreme ratios (to avoid numerical issues)
+             if ratio < 1e-8:
+                 penalty = -1.0
+ 
+             return -(ratio + boundary_penalty + penalty)
+         except Exception:
+             return 1e6  # Return large value for invalid configurations
+ 
+     # Flatten initial points for optimization
+     x0 = initial_points.flatten()
+ 
+     # Define bounds for each coordinate (0 to 1) but slightly inside to avoid boundary issues
+     bounds = [(0.01, 0.99) for _ in range(len(x0))]
+ 
+     # First try with L-BFGS-B
+     try:
+         result = minimize(
+             objective,
+             x0,
+             method='L-BFGS-B',
+             bounds=bounds,
+             options={'maxiter': max_iterations//2, 'ftol': 1e-8, 'gtol': 1e-5},
+             callback=None
+         )
+ 
+         # Refine with simulated annealing
+         refined_points = result.x.reshape(-1, 2)
+         refined_points = np.clip(refined_points, 0, 1)
+ 
+         # Run simulated annealing refinement
+         final_points = optimize_with_simulated_annealing(refined_points, max_iter=max_iterations//2)
+         final_points = np.clip(final_points, 0, 1)
+ 
+         return final_points
+     except Exception:
+         # Fallback to direct simulated annealing
+         return optimize_with_simulated_annealing(initial_points, max_iter=max_iterations)
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     # Try multiple initialization strategies and pick the best
+     initial_strategies = [
+         initialize_points_hexagonal_lattice,
+         initialize_points_random
+     ]
+ 
+     best_points = None
+     best_ratio = 0
+ 
+     for init_func in initial_strategies:
+         try:
+             initial_points = init_func()
+ 
+             # Optimize the point placement
+             final_points = optimize_point_placement(initial_points)
+ 
+             # Calculate the resulting ratio
+             dist_matrix = compute_distance_matrix(final_points)
+             ratio = calculate_min_max_ratio(dist_matrix)
+ 
+             if ratio > best_ratio:
+                 best_ratio = ratio
+                 best_points = final_points.copy()
+ 
+         except Exception as e:
+             continue  # Skip this strategy if it fails
+ 
+     # If no valid configuration was found, use a fallback
+     if best_points is None:
+         initial_points = initialize_points_hexagonal_lattice()
+         best_points = optimize_point_placement(initial_points)
+ 
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

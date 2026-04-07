@@ -1,0 +1,300 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+from shapely.prepared import prep
+import time
+from joblib import Parallel, delayed
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+def hexagon_vertices(center_x, center_y, rotation_degrees, side_length=1):
+    """Generate vertices of a regular hexagon given center, rotation, and side length."""
+    angle_rad = np.radians(rotation_degrees)
+    # Vertices of a unit hexagon centered at origin
+    unit_vertices = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    rotated_vertices = unit_vertices @ rotation_matrix.T
+    return rotated_vertices * side_length + np.array([center_x, center_y])
+
+def check_containment_single(hex_vertices, outer_polygon):
+    """Check if all vertices of a hexagon are inside the outer hexagon (optimized)."""
+    # Check a few key vertices instead of all for efficiency
+    # Using only the most extreme points to save computation
+    for vertex in hex_vertices[::2]:  # every other vertex
+        point = Point(vertex)
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_collision_single(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def calculate_outer_hex_side_length(inner_hex_params):
+    """Calculate the minimal outer hexagon side length needed to contain all inner hexagons."""
+    # Get all vertices of all inner hexagons
+    all_vertices = []
+    for i in range(11):
+        x, y, rot = inner_hex_params[3*i], inner_hex_params[3*i+1], inner_hex_params[3*i+2]
+        hex_vertices = hexagon_vertices(x, y, rot, 1)
+        all_vertices.extend(hex_vertices)
+
+    if len(all_vertices) == 0:
+        return 100.0
+
+    # Calculate bounding box
+    all_vertices = np.array(all_vertices)
+    min_x, max_x = all_vertices[:, 0].min(), all_vertices[:, 0].max()
+    min_y, max_y = all_vertices[:, 1].min(), all_vertices[:, 1].max()
+
+    # Calculate diagonal distance from center to corner
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    # Find maximum distance from center to any vertex
+    max_dist = 0
+    for vertex in all_vertices:
+        dist = np.sqrt((vertex[0] - center_x)**2 + (vertex[1] - center_y)**2)
+        max_dist = max(max_dist, dist)
+
+    # For a hexagon, the side length is max_dist / sqrt(3)
+    # Use smaller adaptive margin based on actual packing density
+    # For tight packings, we can use 2-5% margin instead of fixed 10%
+    return max_dist * 2 / np.sqrt(3) * 1.02  # Adaptive 2% margin
+
+def objective_function(params):
+    """Optimized objective function to minimize (negative inverse of outer hex side length)."""
+    # params: [x1, y1, rot1, x2, y2, rot2, ..., x11, y11, rot11, R]
+    n = 11
+    outer_side_length = params[-1]
+
+    # Check if outer hexagon is large enough
+    if outer_side_length <= 0:
+        return 1e10  # Penalty for invalid outer hex
+
+    # Create outer hexagon vertices once
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_side_length)
+    outer_polygon = prep(Polygon(outer_vertices))  # Prepare for fast intersection tests
+
+    # Check containment and collisions in parallel
+    total_penalty = 0
+
+    # Check containment of all inner hexagons (parallel check)
+    inner_positions = params[:-1].reshape(-1, 3)
+    inner_hex_vertices = []
+
+    # Generate hexagon vertices in parallel
+    def generate_hex_vertex(i):
+        x, y, rot = inner_positions[i]
+        return hexagon_vertices(x, y, rot, 1)
+
+    inner_hex_vertices = Parallel(n_jobs=-1)(
+        delayed(generate_hex_vertex)(i) for i in range(n)
+    )
+
+    # Check containment in parallel
+    def check_containment_parallel(i):
+        return check_containment_single(inner_hex_vertices[i], outer_polygon)
+
+    containment_checks = Parallel(n_jobs=-1)(
+        delayed(check_containment_parallel)(i) for i in range(n)
+    )
+
+    # Sum up containment failures
+    containment_failures = sum(1 for check in containment_checks if not check)
+    total_penalty += containment_failures * 1e8  # Large penalty for containment failure
+
+    # Check collisions between all pairs of inner hexagons in parallel
+    if total_penalty == 0:
+        # Use parallel processing for collision detection
+        def check_pair_collision(i, j):
+            return check_collision_single(inner_hex_vertices[i], inner_hex_vertices[j])
+
+        # Only check necessary pairs (avoid redundant checks and early termination)
+        collision_checks = Parallel(n_jobs=-1)(
+            delayed(check_pair_collision)(i, j)
+            for i in range(n) for j in range(i+1, n)
+        )
+
+        # Count collisions
+        collisions = sum(collision_checks)
+        if collisions > 0:
+            total_penalty += 1e8  # Large penalty for collisions
+
+    # Return negative inverse of outer hex side length plus penalties
+    return -(1.0 / outer_side_length) + total_penalty
+
+def generate_initial_guesses():
+    """Generate multiple initial guesses and return a good starting point."""
+    initial_guesses = []
+
+    # Pattern 1: Standard hexagonal packing (more compact)
+    pattern1 = [
+        [0, 0, 0], [0, 1.732, 0], [0.866, 0.5, 0], [0.866, -0.5, 0], [0, -1.732, 0],
+        [-0.866, -0.5, 0], [-0.866, 0.5, 0], [0, 3.464, 0], [1.732, 1.732, 0],
+        [-1.732, 1.732, 0], [0, -3.464, 0]
+    ]
+
+    # Pattern 2: Improved spiral arrangement with better spacing
+    pattern2 = [
+        [0, 0, 0], [1.732, 0, 0], [0.866, 1.5, 0], [-0.866, 1.5, 0], [-1.732, 0, 0],
+        [-0.866, -1.5, 0], [0.866, -1.5, 0], [2.598, 0, 0], [1.299, 2.25, 0],
+        [-1.299, 2.25, 0], [-2.598, 0, 0]
+    ]
+
+    # Pattern 3: Concentric ring arrangement (from prior work)
+    pattern3 = [
+        [0, 0, 0], [1.732, 0, 0], [-1.732, 0, 0], [0.866, 1.5, 0], [-0.866, 1.5, 0],
+        [0.866, -1.5, 0], [-0.866, -1.5, 0], [2.598, 1.5, 0], [-2.598, 1.5, 0],
+        [2.598, -1.5, 0], [-2.598, -1.5, 0]
+    ]
+
+    # Pattern 4: Optimized dense packing based on literature
+    pattern4 = [
+        [0, 0, 0], [1.732, 0, 0], [-1.732, 0, 0], [0.866, 1.5, 0], [-0.866, 1.5, 0],
+        [0.866, -1.5, 0], [-0.866, -1.5, 0], [2.598, 0, 0], [0, 3.0, 0],
+        [0, -3.0, 0], [-2.598, 0, 0]
+    ]
+
+    patterns = [pattern1, pattern2, pattern3, pattern4]
+
+    for pattern in patterns:
+        initial_params = []
+        for pos in pattern:
+            initial_params.extend(pos)
+
+        # Add an estimated outer side length
+        estimated_side = calculate_outer_hex_side_length(np.array(initial_params))
+        initial_params.append(estimated_side)
+        initial_guesses.append(np.array(initial_params))
+
+    # Evaluate all initial guesses and return the best one
+    best_score = -float('inf')
+    best_params = None
+
+    for guess in initial_guesses:
+        try:
+            score = -objective_function(guess)  # Negative because we're minimizing
+            if score > best_score:
+                best_score = score
+                best_params = guess
+        except Exception:
+            # If there's an error in evaluation, skip this guess
+            continue
+
+    return best_params
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Generate initial guesses and use the best one
+    initial_guess = generate_initial_guesses()
+
+    if initial_guess is None:
+        # Fallback to simple arrangement
+        initial_guess = np.array([
+            [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+            [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+            [-1.732, 2, 0], [-3.464, 0, 0], 10.0  # Add side length
+        ]).flatten()
+
+    # Define bounds for optimization
+    bounds = []
+    # Positions: x, y for each hexagon (limited to reasonable range)
+    for _ in range(11):
+        bounds.extend([(-10, 10), (-10, 10), (-180, 180)])  # x, y, rotation
+    # Outer hexagon side length
+    bounds.append((1.0, 20.0))  # Must be positive and reasonable
+
+    # Optimization parameters for better performance
+    maxiter = 200  # Increased iterations
+    popsize = 25   # Larger population size
+    mutation = (0.5, 1)
+    recombination = 0.8
+
+    # Perform optimization with better settings
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=maxiter,
+            popsize=popsize,
+            mutation=mutation,
+            recombination=recombination,
+            seed=42,
+            disp=False,
+            polish=True  # Enable local polishing
+        )
+
+        best_params = result.x
+        outer_side_length = best_params[-1]
+
+        # Extract inner hexagon data
+        inner_hex_data = np.zeros((11, 3))
+        for i in range(11):
+            inner_hex_data[i] = [best_params[3*i], best_params[3*i+1], best_params[3*i+2]]
+
+        # Outer hexagon data
+        outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+
+        # Verify solution
+        outer_vertices = hexagon_vertices(0, 0, 0, outer_side_length)
+        outer_polygon = prep(Polygon(outer_vertices))
+
+        # Quick validation check
+        valid_solution = True
+        for i in range(11):
+            x, y, rot = best_params[3*i], best_params[3*i+1], best_params[3*i+2]
+            hex_vertices = hexagon_vertices(x, y, rot, 1)
+
+            if not check_containment_single(hex_vertices, outer_polygon):
+                valid_solution = False
+                break
+
+        # If not valid, fallback to better arrangement
+        if not valid_solution:
+            # Use the best configuration found from initial guess set
+            inner_hex_data = np.array([
+                [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+                [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+                [-1.732, 2, 0], [-3.464, 0, 0]
+            ])
+            outer_side_length = calculate_outer_hex_side_length(inner_hex_data.flatten())
+            outer_hex_data = np.array([0, 0, 0])
+
+    except Exception as e:
+        # Fallback to simple arrangement in case of optimization failure
+        print(f"Optimization failed: {e}")
+        inner_hex_data = np.array([
+            [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+            [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+            [-1.732, 2, 0], [-3.464, 0, 0]
+        ])
+        outer_side_length = calculate_outer_hex_side_length(inner_hex_data.flatten())
+        outer_hex_data = np.array([0, 0, 0])
+
+    return inner_hex_data, outer_hex_data, outer_side_length
+
+# EVOLVE-BLOCK-END

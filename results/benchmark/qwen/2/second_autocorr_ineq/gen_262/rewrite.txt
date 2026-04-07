@@ -1,0 +1,333 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import minimize
+from scipy.fft import fft, ifft
+import warnings
+from numba import jit
+import time
+import random
+from typing import List, Tuple
+import math
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values):
+    """
+    Fast computation of autoconvolution norms using Numba JIT compilation.
+    """
+    n = len(f_values)
+    if n < 1:
+        return 0.0, 0.0, 0.0
+
+    # Convert to numpy array for fast operations
+    f = np.array(f_values, dtype=np.float64)
+    
+    # Create the step function on [-1/4, 1/4] with equal spacing
+    dx = 0.5 / (n - 1) if n > 1 else 0.5
+    
+    # Precompute convolution manually for efficiency
+    # Autoconvolution g[k] = sum f[i] * f[k-i] for valid indices
+    g = np.zeros(2 * n - 1)
+    
+    # Manual convolution loop (optimized for autoconvolution)
+    for i in range(n):
+        for j in range(n):
+            k = i + j
+            if 0 <= k < len(g):
+                g[k] += f[i] * f[j]
+    
+    # Keep only the middle part (proper autoconvolution)
+    g_middle = g[n-1:2*n-1]
+    
+    # Create x-axis for g (interval [-0.5, 0.5])
+    g_x = np.linspace(-0.5, 0.5, len(g_middle))
+    
+    # Compute the required norms
+    # ||g||₂² (L2 norm squared)
+    # Using trapezoidal integration approximation 
+    g_sq = g_middle * g_middle
+    area = 0.0
+    for i in range(len(g_middle) - 1):
+        h = g_x[i+1] - g_x[i]
+        area += h * (g_sq[i] + g_sq[i+1]) / 2
+    
+    norm_2_sq = area
+
+    # ||g||₁ (L1 norm) - approximate via summation
+    norm_1 = np.sum(np.abs(g_middle)) * dx  # dx is the step size
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(np.abs(g_middle))
+
+    return norm_2_sq, norm_1, norm_inf
+
+class SpectralPeakOptimizer:
+    """Optimizes step functions by directly optimizing spectral peaks in frequency domain"""
+    
+    def __init__(self, n_points: int = 2000):
+        self.n_points = n_points
+        self.dx = 0.5 / (n_points - 1) if n_points > 1 else 0.5
+        
+    def generate_initial_spectrum(self, n_peaks: int = 12) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate initial spectral representation with strategically placed peaks"""
+        
+        # Create empty spectrum
+        magnitudes = np.zeros(self.n_points)
+        phases = np.zeros(self.n_points)
+        
+        # Define frequency bands to target different autoconvolution properties
+        # Low frequencies for smoothness, mid frequencies for structure, high for detail
+        bandwidths = [0.1, 0.4, 0.5]  # Proportions of frequency spectrum
+        n_per_band = [max(1, n_peaks // 3)] * 3
+        n_per_band[0] = n_peaks - sum(n_per_band[1:])  # Adjust first band
+        
+        band_starts = [0, int(self.n_points * bandwidths[0]), int(self.n_points * (bandwidths[0] + bandwidths[1]))]
+        band_ends = [int(self.n_points * bandwidths[0]), int(self.n_points * (bandwidths[0] + bandwidths[1])), self.n_points//2]
+        
+        # Place peaks in each band
+        for band_idx in range(3):
+            n_current = n_per_band[band_idx]
+            if n_current <= 0:
+                continue
+                
+            for _ in range(n_current):
+                # Place peak in band with some randomness
+                start_freq = band_starts[band_idx]
+                end_freq = band_ends[band_idx]
+                if end_freq > start_freq:
+                    # Use beta distribution to cluster peaks in preferred regions
+                    freq_pos = start_freq + int(
+                        (end_freq - start_freq) * 
+                        np.random.beta(2, 2)
+                    )
+                    
+                    # Ensure valid index
+                    if freq_pos >= 0 and freq_pos < self.n_points // 2:
+                        # Add energy with gamma distribution for varied strengths
+                        strength = np.random.gamma(2.0, 1.5)
+                        magnitudes[freq_pos] = strength
+                        if freq_pos > 0:
+                            magnitudes[self.n_points - freq_pos] = strength  # Conjugate symmetry
+                        
+                        # Add random phase
+                        phases[freq_pos] = np.random.uniform(0, 2 * np.pi)
+                        phases[self.n_points - freq_pos] = phases[freq_pos] + np.pi if freq_pos > 0 else 0
+                        
+        # Add DC component
+        magnitudes[0] = np.random.gamma(1.5, 2.0)
+        phases[0] = 0.0
+        
+        return magnitudes, phases
+    
+    def compute_autoconvolution_from_spectrum(self, magnitudes: np.ndarray, phases: np.ndarray) -> Tuple[np.ndarray, float, float, float]:
+        """Compute autoconvolution directly from spectral representation"""
+        # Create complex spectrum
+        spectrum = magnitudes * np.exp(1j * phases)
+        
+        # Convert back to time domain
+        f_real = np.real(ifft(spectrum))
+        
+        # Ensure non-negativity
+        f_real = np.maximum(f_real, 0.0)
+        
+        # Normalize to prevent extreme values
+        max_val = np.max(f_real)
+        if max_val > 0:
+            f_real = f_real / (max_val * 2.0)
+        
+        # Compute autoconvolution
+        g = np.convolve(f_real, f_real, mode='full')
+        
+        # Extract central portion for proper [-0.5, 0.5] range
+        center_start = len(g) // 2 - (self.n_points - 1)
+        center_end = center_start + (2 * self.n_points - 1)
+        g = g[center_start:center_end]
+        
+        # Compute norms
+        norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+        norm_1 = np.sum(np.abs(g)) * self.dx if len(g) > 1 else 0.0
+        
+        # Compute L2 norm squared using piecewise integration
+        if len(g) <= 1:
+            norm_2_squared = 0.0
+        else:
+            norm_2_squared = 0.0
+            for i in range(len(g)-1):
+                y1, y2 = g[i], g[i+1]
+                norm_2_squared += (self.dx / 3.0) * (y1**2 + y1*y2 + y2**2)
+        
+        return g, norm_2_squared, norm_1, norm_inf
+
+    def compute_c2_from_spectrum(self, magnitudes: np.ndarray, phases: np.ndarray) -> float:
+        """Compute C2 directly from spectral representation"""
+        try:
+            _, norm_2_sq, norm_1, norm_inf = self.compute_autoconvolution_from_spectrum(magnitudes, phases)
+            
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                return 0.0
+                
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            return c2
+        except Exception:
+            return 0.0
+
+    def spectral_objective(self, params: np.ndarray) -> float:
+        """
+        Objective function for spectral optimization.
+        Minimizes negative C2 to maximize C2.
+        """
+        # Parse parameters
+        # First n_peaks magnitudes, then n_peaks phases
+        n_peaks = self.n_points // 4  # Approximate number of peaks
+        
+        if len(params) < 2 * n_peaks:
+            return 1e10  # Invalid parameters
+            
+        magnitudes = params[:n_peaks]
+        phases = params[n_peaks:2*n_peaks]
+        
+        # Ensure magnitudes are non-negative
+        magnitudes = np.maximum(magnitudes, 0.0)
+        
+        # Ensure phases are in [0, 2π]
+        phases = phases % (2 * np.pi)
+        
+        # Create full spectrum
+        full_magnitudes = np.zeros(self.n_points)
+        full_phases = np.zeros(self.n_points)
+        
+        # Place peaks at fixed positions for consistent optimization
+        peak_positions = np.linspace(1, self.n_points//2 - 1, n_peaks, dtype=int)
+        for i, (pos, mag) in enumerate(zip(peak_positions, magnitudes)):
+            if pos < self.n_points//2:
+                full_magnitudes[pos] = mag
+                full_magnitudes[self.n_points - pos] = mag
+                full_phases[pos] = phases[i]
+                full_phases[self.n_points - pos] = phases[i] + np.pi if pos > 0 else 0
+        
+        # DC component
+        full_magnitudes[0] = magnitudes[-1] if len(magnitudes) > 0 else 1.0
+        
+        # Compute C2
+        c2 = self.compute_c2_from_spectrum(full_magnitudes, full_phases)
+        return -c2  # Negative because we minimize
+
+    def optimize_spectrum(self, max_iter: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+        """Optimize the spectral representation to maximize C2"""
+        n_peaks = self.n_points // 4
+        
+        # Start with initial guess
+        initial_magnitudes = np.random.gamma(2.0, 1.0, n_peaks) * 2.0
+        initial_phases = np.random.uniform(0, 2*np.pi, n_peaks)
+        
+        # Combine into single parameter vector
+        initial_params = np.concatenate([initial_magnitudes, initial_phases])
+        
+        # Optimization bounds for magnitudes (non-negative)
+        bounds = [(0.0, 100.0) for _ in range(n_peaks)] + [(0.0, 2*np.pi) for _ in range(n_peaks)]
+        
+        # Optimization with bounds
+        try:
+            result = minimize(
+                self.spectral_objective,
+                initial_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-8},
+                callback=None
+            )
+            
+            if result.success:
+                # Extract optimized parameters
+                opt_magnitudes = result.x[:n_peaks]
+                opt_phases = result.x[n_peaks:2*n_peaks]
+                
+                # Ensure non-negative magnitudes
+                opt_magnitudes = np.maximum(opt_magnitudes, 0.0)
+                
+                return opt_magnitudes, opt_phases
+        except Exception:
+            pass
+            
+        # If optimization fails, return initial guess
+        return initial_magnitudes, initial_phases
+
+    def generate_final_function(self, magnitudes: np.ndarray, phases: np.ndarray) -> List[float]:
+        """Generate final step function from optimized spectral parameters"""
+        # Create full spectrum
+        full_magnitudes = np.zeros(self.n_points)
+        full_phases = np.zeros(self.n_points)
+        
+        # Place peaks at specific positions
+        n_peaks = len(magnitudes)
+        peak_positions = np.linspace(1, self.n_points//2 - 1, n_peaks, dtype=int)
+        
+        for i, (pos, mag) in enumerate(zip(peak_positions, magnitudes)):
+            if pos < self.n_points//2:
+                full_magnitudes[pos] = mag
+                full_magnitudes[self.n_points - pos] = mag
+                full_phases[pos] = phases[i]
+                full_phases[self.n_points - pos] = phases[i] + np.pi if pos > 0 else 0
+        
+        # DC component
+        full_magnitudes[0] = magnitudes[-1] if len(magnitudes) > 0 else 1.0
+        full_phases[0] = 0.0
+        
+        # Convert back to time domain
+        spectrum = full_magnitudes * np.exp(1j * full_phases)
+        f_real = np.real(ifft(spectrum))
+        
+        # Ensure non-negativity
+        f_real = np.maximum(f_real, 0.0)
+        
+        # Normalize
+        max_val = np.max(f_real)
+        if max_val > 0:
+            f_real = f_real / (max_val * 2.0)
+        
+        # Apply final smoothing
+        window_size = min(51, self.n_points // 10)
+        if window_size % 2 == 0:
+            window_size += 1
+        if window_size > 1:
+            kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/4)**2)
+            kernel = kernel / np.sum(kernel)
+            f_smooth = np.convolve(f_real, kernel, mode='same')
+            f_real = f_smooth
+        
+        # Final clip
+        f_real = np.maximum(f_real, 0.0)
+        
+        return f_real.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Main function to construct step-function with high C2 value using spectral peak optimization.
+    """
+    try:
+        # Use spectral peak optimization approach
+        optimizer = SpectralPeakOptimizer(n_points=2000)
+        
+        # Optimize spectral representation
+        magnitudes, phases = optimizer.optimize_spectrum(max_iter=40)
+        
+        # Generate final function
+        f_values = optimizer.generate_final_function(magnitudes, phases)
+        
+        return f_values
+        
+    except Exception as e:
+        # Fallback to simple uniform distribution
+        warnings.warn(f"Spectral peak optimization failed: {str(e)}")
+        return [0.5] * 1000
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

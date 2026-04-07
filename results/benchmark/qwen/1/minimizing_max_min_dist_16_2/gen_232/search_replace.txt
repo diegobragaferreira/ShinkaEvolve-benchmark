@@ -1,0 +1,210 @@
+<NAME>
+add_simulated_annealing_fallback
+</NAME>
+
+<DESCRIPTION>
+Adding a simulated annealing fallback mechanism to enhance optimization robustness. This approach addresses the limitation that gradient-based methods like L-BFGS-B can get trapped in local optima, especially in complex geometric landscapes where the objective function has many local maxima. The simulated annealing algorithm will serve as a secondary optimization method when the primary L-BFGS-B optimization fails to converge properly or gets stuck. This is particularly important given that our target is to beat the benchmark of 0.2786, which requires finding highly optimized configurations that may lie in narrow regions of the search space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+=======
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import time
+import random
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_lbfgs_optimization(initial_points, max_iter=300):
+        """Enhanced L-BFGS optimization with adaptive early stopping"""
+        def objective_with_callbacks(x):
+            # Track objective values for early stopping
+            return -fitness_function(x)  # Negative because minimize function
+
+        # Add callback for tracking progress
+        objective_values = []
+        def callback(xk):
+            obj_val = fitness_function(xk)
+            objective_values.append(obj_val)
+            # Early stopping if improvement is minimal
+            if len(objective_values) > 10:
+                recent_improvement = abs(objective_values[-1] - objective_values[-10])
+                if recent_improvement < 1e-12:
+                    return True  # Stop optimization
+            return False
+
+        bounds_list = [(bounds[0], bounds[1]) for _ in range(n_points * dimension)]
+
+        # Use L-BFGS-B with improved settings
+        result = minimize(
+            objective_with_callbacks,
+            initial_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds_list,
+            options={
+                'maxiter': max_iter,
+                'ftol': 1e-12,
+                'gtol': 1e-12,
+                'maxcor': 20  # Number of corrections to store
+            },
+            callback=callback if max_iter > 50 else None
+        )
+
+        return result.x.reshape(-1, 2) if result.success else initial_points
+=======
+    def adaptive_lbfgs_optimization(initial_points, max_iter=300):
+        """Enhanced L-BFGS optimization with adaptive early stopping"""
+        def objective_with_callbacks(x):
+            # Track objective values for early stopping
+            return -fitness_function(x)  # Negative because minimize function
+
+        # Add callback for tracking progress
+        objective_values = []
+        def callback(xk):
+            obj_val = fitness_function(xk)
+            objective_values.append(obj_val)
+            # Early stopping if improvement is minimal
+            if len(objective_values) > 10:
+                recent_improvement = abs(objective_values[-1] - objective_values[-10])
+                if recent_improvement < 1e-12:
+                    return True  # Stop optimization
+            return False
+
+        bounds_list = [(bounds[0], bounds[1]) for _ in range(n_points * dimension)]
+
+        # Use L-BFGS-B with improved settings
+        result = minimize(
+            objective_with_callbacks,
+            initial_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds_list,
+            options={
+                'maxiter': max_iter,
+                'ftol': 1e-12,
+                'gtol': 1e-12,
+                'maxcor': 20  # Number of corrections to store
+            },
+            callback=callback if max_iter > 50 else None
+        )
+
+        return result.x.reshape(-1, 2) if result.success else initial_points
+
+    def simulated_annealing_optimization(initial_points, max_iter=1000, temp_start=1.0, temp_end=1e-6):
+        """Simulated Annealing optimization as fallback mechanism"""
+        current_points = initial_points.copy()
+        current_fitness = fitness_function(current_points.flatten())
+
+        best_points = current_points.copy()
+        best_fitness = current_fitness
+
+        # Temperature schedule
+        temp = temp_start
+        alpha = 0.95  # Cooling rate
+
+        for iteration in range(max_iter):
+            # Generate neighbor solution by perturbing current points
+            neighbor_points = current_points.copy()
+            # Perturb each point slightly
+            for i in range(len(neighbor_points)):
+                for j in range(len(neighbor_points[i])):
+                    neighbor_points[i][j] += np.random.normal(0, 0.01)
+
+            # Ensure neighbor points remain within bounds
+            neighbor_points = np.clip(neighbor_points, 0, 1)
+
+            neighbor_fitness = fitness_function(neighbor_points.flatten())
+
+            # Accept or reject the neighbor
+            if neighbor_fitness > current_fitness:
+                # Always accept better solutions
+                current_points = neighbor_points
+                current_fitness = neighbor_fitness
+            else:
+                # Accept worse solutions with probability based on temperature
+                delta = neighbor_fitness - current_fitness
+                if np.random.random() < np.exp(delta / temp):
+                    current_points = neighbor_points
+                    current_fitness = neighbor_fitness
+
+            # Update best solution found so far
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_points = current_points.copy()
+
+            # Cool down temperature
+            temp = max(temp_end, temp * alpha)
+
+            # Early stopping if temperature gets too low
+            if temp <= temp_end:
+                break
+
+        return best_points, best_fitness
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Local refinement with enhanced L-BFGS-B
+            refined_points = adaptive_lbfgs_optimization(de_result.x, max_iter=500)
+
+            # Reshape result
+            final_points = refined_points
+            final_ratio = fitness_function(final_points.flatten())
+
+            # Keep the best solution found so far
+            if final_ratio > best_final_ratio:
+                best_final_ratio = final_ratio
+                best_final_points = final_points.copy()
+                previous_solutions.append(final_points.copy())
+
+        except Exception as e:
+            # Fallback to current points if optimization fails
+            print(f"Optimization failed on restart {restart}: {e}")
+            continue
+=======
+            # Local refinement with enhanced L-BFGS-B
+            refined_points = adaptive_lbfgs_optimization(de_result.x, max_iter=500)
+
+            # Reshape result
+            final_points = refined_points
+            final_ratio = fitness_function(final_points.flatten())
+
+            # If L-BFGS didn't converge well, try simulated annealing fallback
+            if final_ratio < 0.001:  # Very poor ratio suggests local optimum issue
+                try:
+                    sa_points, sa_ratio = simulated_annealing_optimization(refined_points, max_iter=500)
+                    if sa_ratio > final_ratio:
+                        final_points = sa_points
+                        final_ratio = sa_ratio
+                except Exception as sa_e:
+                    pass  # Continue with L-BFGS result if SA fails
+
+            # Keep the best solution found so far
+            if final_ratio > best_final_ratio:
+                best_final_ratio = final_ratio
+                best_final_points = final_points.copy()
+                previous_solutions.append(final_points.copy())
+
+        except Exception as e:
+            # Fallback to current points if optimization fails
+            print(f"Optimization failed on restart {restart}: {e}")
+            continue
+>>>>>>> REPLACE

@@ -1,0 +1,396 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+from numba import jit
+import time
+
+@jit(nopython=True)
+def compute_min_max_ratio_numba(points_flat, n=14, d=3):
+    """Fast computation of min/max distance ratio using numba"""
+    # Reshape flat array to 2D points array
+    points = points_flat.reshape(n, d)
+    
+    # Compute pairwise distances using squared distances for efficiency
+    min_dist_sq = np.inf
+    max_dist_sq = 0.0
+    
+    for i in range(n):
+        for j in range(i+1, n):
+            dist_sq = 0.0
+            for k in range(d):
+                diff = points[i, k] - points[j, k]
+                dist_sq += diff * diff
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+            if dist_sq > max_dist_sq:
+                max_dist_sq = dist_sq
+    
+    # Avoid division by zero and return ratio
+    if max_dist_sq <= 0:
+        return 0.0
+    return np.sqrt(min_dist_sq) / np.sqrt(max_dist_sq) if min_dist_sq > 0 else 0.0
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    np.random.seed(42)
+    
+    class Optimizer:
+        def __init__(self):
+            self.best_solution = None
+            self.best_ratio = 0.0
+            
+        def compute_min_max_ratio(self, points):
+            """Compute the min/max distance ratio for given points."""
+            if len(points) < 2:
+                return 0.0
+
+            # Compute pairwise distances efficiently
+            distances = pdist(points)
+
+            # Get min and max distances
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+
+            # Avoid division by zero
+            if d_max == 0:
+                return 0.0
+
+            return d_min / d_max
+            
+        def spherical_constraint(self, points):
+            """Normalize points to lie on the unit sphere."""
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            # Avoid division by zero
+            norms = np.where(norms == 0, 1, norms)
+            return points / norms
+
+        def fibonacci_sphere(self, n):
+            """Generate points on sphere using Fibonacci spiral."""
+            points = []
+            golden_angle = np.pi * (3 - np.sqrt(5))
+
+            for i in range(n):
+                y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+                radius = np.sqrt(1 - y * y)  # radius at y
+
+                theta = golden_angle * i  # Golden angle increment
+
+                x = np.cos(theta) * radius
+                z = np.sin(theta) * radius
+
+                points.append([x, y, z])
+
+            return np.array(points)
+
+        def generate_initializations(self):
+            """Generate multiple diverse initial point sets."""
+            initial_sets = []
+
+            # Strategy 1: Fibonacci sphere distribution with small perturbation
+            fib_points = self.fibonacci_sphere(14)
+            perturbed = fib_points + np.random.normal(0, 0.02, fib_points.shape)
+            initial_sets.append(self.spherical_constraint(perturbed))
+
+            # Strategy 2: Random points on sphere with structured distribution
+            random_points = np.random.randn(14, 3)
+            initial_sets.append(self.spherical_constraint(random_points))
+
+            # Strategy 3: Pseudo-random distribution with some structure
+            struct_points = np.zeros((14, 3))
+            for i in range(14):
+                if i < 3:
+                    # Along axes
+                    struct_points[i] = [1 if j==i else 0 for j in range(3)]
+                elif i < 6:
+                    # Opposite axes
+                    struct_points[i] = [-1 if j==i-3 else 0 for j in range(3)]
+                elif i < 9:
+                    # Diagonal combinations
+                    j = i - 6
+                    struct_points[i] = [1 if k==j else -1 if k==(j+1)%3 else 0 for k in range(3)]
+                else:
+                    # Random points on sphere  
+                    struct_points[i] = np.random.randn(3)
+            initial_sets.append(self.spherical_constraint(struct_points))
+
+            # Strategy 4: Slightly perturbed Fibonacci with larger variance
+            fib_perturbed = fib_points + np.random.normal(0, 0.08, fib_points.shape)
+            initial_sets.append(self.spherical_constraint(fib_perturbed))
+
+            # Strategy 5: Multiple Fibonacci configurations with different scalings
+            for scale in [0.8, 1.2, 0.9]:
+                scaled_fib = fib_points * scale
+                scaled_perturbed = scaled_fib + np.random.normal(0, 0.03, scaled_fib.shape)
+                initial_sets.append(self.spherical_constraint(scaled_perturbed))
+            
+            # Strategy 6: Regular polyhedron-based initialization - Cube vertices
+            cube_vertices = np.array([
+                [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+                [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1],
+                [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0],
+                [1, 0, 0], [-1, 0, 0]
+            ])
+            cube_points = cube_vertices[:14].astype(float)
+            norms = np.linalg.norm(cube_points, axis=1, keepdims=True)
+            cube_points = cube_points / np.maximum(norms, 1e-10) * 0.95
+            initial_sets.append(cube_points)
+            
+            # Strategy 7: Perturbed regular structure
+            regular_struct = np.zeros((14, 3))
+            base_points = self.fibonacci_sphere(14)
+            for i in range(14):
+                if i < 7:
+                    regular_struct[i] = base_points[i] * 0.9
+                else:
+                    regular_struct[i] = np.random.randn(3) * 0.8
+            initial_sets.append(self.spherical_constraint(regular_struct))
+            
+            return initial_sets
+
+        def adaptive_differential_evolution(self, initial_points, maxiter=50):
+            """Enhanced differential evolution with adaptive population sizing."""
+            points = initial_points.copy()
+            
+            # Track convergence for adaptive population sizing
+            history = []
+            stagnation_count = 0
+            max_stagnation = 10
+            min_popsize = 10
+            max_popsize = 40
+            popsize = 20  # Start with medium population size
+            
+            bounds = [(-1, 1)] * (14 * 3)
+            
+            def adaptive_objective(x_flat):
+                points = x_flat.reshape(-1, 3)
+                points = self.spherical_constraint(points)
+                ratio = self.compute_min_max_ratio(points)
+                return -ratio
+
+            try:
+                # Run multiple rounds of DE with adaptive population sizing
+                for iteration in range(5):  # Increased iterations for better exploration
+                    # Adjust population size based on convergence history
+                    current_popsize = popsize
+                    
+                    # If we've seen improvement recently, reduce population size for faster convergence
+                    if len(history) >= 2:
+                        improvement = -history[-1] - (-history[-2])
+                        if improvement < 1e-6:
+                            stagnation_count += 1
+                            if stagnation_count >= 3 and current_popsize < max_popsize:
+                                current_popsize = min(current_popsize + 5, max_popsize)
+                        else:
+                            stagnation_count = 0
+                            if current_popsize > min_popsize and iteration > 0:
+                                current_popsize = max(current_popsize - 3, min_popsize)
+                    
+                    # Run differential evolution with current parameters
+                    result = differential_evolution(
+                        adaptive_objective,
+                        bounds,
+                        maxiter=maxiter//5,
+                        popsize=current_popsize,
+                        seed=42 + iteration,
+                        disp=False,
+                        polish=True,
+                        strategy='best1bin'
+                    )
+
+                    if result.success:
+                        temp_points = result.x.reshape(-1, 3)
+                        temp_points = self.spherical_constraint(temp_points)
+                        current_ratio = self.compute_min_max_ratio(temp_points)
+                        history.append(current_ratio)
+                        
+                        # Update best solution
+                        if len(history) == 1 or current_ratio > history[-2]:
+                            points = temp_points.copy()
+                            
+                        # Check for stagnation and early stopping
+                        if len(history) >= 2:
+                            improvement = current_ratio - history[-2]
+                            if improvement < 1e-8:
+                                stagnation_count += 1
+                                if stagnation_count >= max_stagnation:
+                                    break
+                            else:
+                                stagnation_count = 0
+                    else:
+                        # If optimization fails, continue with current points
+                        break
+                        
+            except Exception:
+                pass
+                
+            return points
+
+        def adaptive_hill_climbing(self, initial_points, maxiter=200):
+            """Adaptive hill climbing with dynamic step sizes and smarter search."""
+            points = initial_points.copy()
+            last_ratio = self.compute_min_max_ratio(points)
+            patience = 0
+            max_patience = 20  # Increased patience for more thorough search
+            step_size = 0.01
+            
+            # Track improvement history for dynamic adjustment
+            improvement_history = []
+            max_history_length = 10
+            
+            for iteration in range(maxiter):
+                current_ratio = self.compute_min_max_ratio(points)
+                best_points = points.copy()
+                best_ratio = current_ratio
+                
+                # Adaptive step size based on recent improvement trend
+                if len(improvement_history) >= 3:
+                    recent_improvements = improvement_history[-3:]
+                    avg_improvement = np.mean(recent_improvements)
+                    if avg_improvement > 1e-6:
+                        step_size = min(0.03, step_size * 1.15)  # Aggressive increase when improving
+                    elif avg_improvement < 1e-8:
+                        step_size = max(0.0001, step_size * 0.7)  # Conservative decrease when stuck
+                    elif avg_improvement < 1e-6:
+                        step_size = min(0.02, step_size * 1.05)  # Slow increase when slow improvement
+                else:
+                    # Initial phase - use conservative steps
+                    step_size = min(0.02, step_size * 1.05)
+                
+                # Keep track of improvement for adaptive behavior
+                improvement = current_ratio - last_ratio
+                improvement_history.append(improvement)
+                if len(improvement_history) > max_history_length:
+                    improvement_history.pop(0)
+                
+                last_ratio = current_ratio
+                
+                # Try perturbations with adaptive step sizes - more comprehensive search
+                for i in range(14):
+                    for dim in range(3):
+                        # Try moving in positive direction
+                        test_points = points.copy()
+                        test_points[i, dim] += step_size
+                        test_points = self.spherical_constraint(test_points)
+                        test_ratio = self.compute_min_max_ratio(test_points)
+                        
+                        if test_ratio > best_ratio:
+                            best_ratio = test_ratio
+                            best_points = test_points.copy()
+                        
+                        # Try moving in negative direction
+                        test_points = points.copy()
+                        test_points[i, dim] -= step_size
+                        test_points = self.spherical_constraint(test_points)
+                        test_ratio = self.compute_min_max_ratio(test_points)
+                        
+                        if test_ratio > best_ratio:
+                            best_ratio = test_ratio
+                            best_points = test_points.copy()
+                
+                # Early stopping condition with improved criteria
+                if best_ratio <= current_ratio:
+                    patience += 1
+                    if patience > max_patience:
+                        break
+                else:
+                    points = best_points
+                    patience = 0  # Reset patience when improvement occurs
+                    
+            return points
+
+        def hybrid_optimization(self, initial_points, maxiter=150):
+            """Perform hybrid optimization combining global and local methods."""
+            points = initial_points.copy()
+            
+            # Stage 1: Adaptive global optimization with differential evolution
+            points = self.adaptive_differential_evolution(points, maxiter=maxiter//3)
+            
+            # Stage 2: Local refinement with L-BFGS-B with tighter tolerances
+            def local_obj(x_flat):
+                points = x_flat.reshape(-1, 3)
+                points = self.spherical_constraint(points)
+                ratio = self.compute_min_max_ratio(points)
+                return -ratio  # Negative for minimization
+
+            try:
+                x0 = points.flatten()
+                bounds = [(-1, 1)] * (14 * 3)
+                result = minimize(
+                    local_obj,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 100, 'ftol': 1e-12, 'gtol': 1e-12, 'disp': False}
+                )
+                if result.success:
+                    points = result.x.reshape(-1, 3)
+                    points = self.spherical_constraint(points)
+            except:
+                pass
+                
+            # Stage 3: Adaptive hill climbing for additional refinement
+            points = self.adaptive_hill_climbing(points, maxiter=maxiter//2)
+            
+            # Stage 4: Final local optimization for polishing
+            try:
+                x0 = points.flatten()
+                bounds = [(-1, 1)] * (14 * 3)
+                result = minimize(
+                    local_obj,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 50, 'ftol': 1e-14, 'gtol': 1e-14, 'disp': False}
+                )
+                if result.success:
+                    points = result.x.reshape(-1, 3)
+                    points = self.spherical_constraint(points)
+            except:
+                pass
+                
+            return points
+
+        def optimize(self):
+            """Main optimization pipeline."""
+            # Generate multiple initial sets
+            initial_sets = self.generate_initializations()
+            
+            # Try each initialization with enhanced optimization
+            for i, initial_points in enumerate(initial_sets):
+                # Perform hybrid optimization
+                optimized_points = self.hybrid_optimization(initial_points, maxiter=80)
+                ratio = self.compute_min_max_ratio(optimized_points)
+
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_solution = optimized_points.copy()
+                    
+            # Additional refinement with focused optimization
+            if self.best_solution is not None:
+                # Try more focused optimization from the best solution with increased iterations
+                refined_points = self.hybrid_optimization(self.best_solution, maxiter=60)
+                ratio = self.compute_min_max_ratio(refined_points)
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_solution = refined_points.copy()
+
+            # If nothing worked, return the best initialization
+            if self.best_solution is None:
+                # Fallback to Fibonacci with small perturbation
+                fib_points = self.fibonacci_sphere(14)
+                fib_points = fib_points + np.random.normal(0, 0.05, fib_points.shape)
+                self.best_solution = self.spherical_constraint(fib_points)
+                
+            return self.best_solution
+
+    # Execute the optimization pipeline
+    optimizer = Optimizer()
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

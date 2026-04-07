@@ -1,0 +1,471 @@
+<NAME>
+improve_initialization_and_refinement
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic grid initialization that doesn't fully exploit the optimal packing patterns. I'll implement a more sophisticated initialization approach that uses a hexagonal packing pattern combined with adaptive grid sizing, and also enhance the local refinement process to better optimize the final solution. The key improvements are:
+1. Replace basic grid initialization with hexagonal lattice initialization that naturally provides better packing density
+2. Improve the local refinement step to perform more aggressive radius optimization while maintaining constraints
+3. Add a secondary optimization pass using scipy's differential evolution for fine-tuning
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_adaptive_grid(self) -> np.ndarray:
+        """Create initial configuration using adaptive grid placement"""
+        circles = np.zeros((self.num_circles, 3))
+
+        # Calculate grid dimensions based on number of circles
+        rows = int(np.ceil(np.sqrt(self.num_circles)))
+        cols = int(np.ceil(self.num_circles / rows))
+
+        # Ensure we don't exceed the actual number of circles
+        actual_circles = rows * cols
+        if actual_circles > self.num_circles:
+            rows = int(np.ceil(self.num_circles / cols))
+
+        # Calculate spacing
+        margin = 0.05  # Leave some margin around edges
+        cell_width = (self.width - 2 * margin) / cols
+        cell_height = (self.height - 2 * margin) / rows
+
+        # Use minimum of cell dimensions as base for radius
+        base_radius = min(cell_width, cell_height) * 0.4
+
+        # Place circles using grid pattern
+        circle_idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if circle_idx >= self.num_circles:
+                    break
+
+                # Position circle at center of grid cell with slight randomization
+                x = margin + (j + 0.5) * cell_width + np.random.uniform(-0.1 * cell_width, 0.1 * cell_width)
+                y = margin + (i + 0.5) * cell_height + np.random.uniform(-0.1 * cell_height, 0.1 * cell_height)
+
+                # Radius slightly randomized around base value
+                r = base_radius * (0.8 + np.random.uniform(0, 0.4))
+
+                # Ensure circle fits within bounds
+                x = np.clip(x, r, self.width - r)
+                y = np.clip(y, r, self.height - r)
+
+                circles[circle_idx] = [x, y, r]
+                circle_idx += 1
+
+            if circle_idx >= self.num_circles:
+                break
+
+        # Ensure minimum radius and fix any constraint violations
+        for i in range(self.num_circles):
+            if circles[i, 2] < 0.001:
+                circles[i, 2] = 0.001
+
+        return circles
+=======
+    def generate_hexagonal_lattice(self) -> np.ndarray:
+        """Create initial configuration using hexagonal lattice packing for better density"""
+        circles = np.zeros((self.num_circles, 3))
+
+        # Calculate optimal grid for hexagonal packing
+        # For hexagonal packing, we want to fit approximately sqrt(n) in each direction
+        rows = int(np.ceil(np.sqrt(self.num_circles)))
+        cols = int(np.ceil(self.num_circles / rows))
+
+        # Adjust to make the grid more rectangular (better for optimization)
+        if cols > rows * 1.5:  # If too wide
+            cols = int(np.ceil(np.sqrt(self.num_circles)))
+            rows = int(np.ceil(self.num_circles / cols))
+
+        # Calculate spacing for hexagonal packing
+        margin = 0.05
+        cell_width = (self.width - 2 * margin) / cols
+        cell_height = (self.height - 2 * margin) / rows
+
+        # For hexagonal packing, height between rows is sqrt(3)/2 * width
+        hex_height = 0.866 * cell_width
+
+        # Base radius should be about half of cell width/height
+        base_radius = min(cell_width, hex_height) * 0.45
+
+        # Place circles in hexagonal pattern
+        circle_idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if circle_idx >= self.num_circles:
+                    break
+
+                # Hexagonal offset pattern
+                x_offset = (j + 0.5) * cell_width + margin
+                if i % 2 == 1:
+                    x_offset += cell_width * 0.5
+
+                y_offset = (i + 0.5) * hex_height + margin
+
+                # Add slight randomization for better exploration
+                x = x_offset + np.random.uniform(-0.05 * cell_width, 0.05 * cell_width)
+                y = y_offset + np.random.uniform(-0.05 * hex_height, 0.05 * hex_height)
+
+                # Radius with variation to allow for optimization
+                r = base_radius * (0.85 + np.random.uniform(0, 0.3))
+
+                # Ensure circle fits within bounds
+                x = np.clip(x, r, self.width - r)
+                y = np.clip(y, r, self.height - r)
+
+                circles[circle_idx] = [x, y, r]
+                circle_idx += 1
+
+            if circle_idx >= self.num_circles:
+                break
+
+        # Ensure minimum radius
+        for i in range(self.num_circles):
+            if circles[i, 2] < 0.001:
+                circles[i, 2] = 0.001
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm"""
+        start_time = time.time()
+
+        # Generate initial population
+        population = []
+        for _ in range(self.population_size):
+            circles = self.initializer.generate_adaptive_grid()
+            population.append(circles)
+
+        best_solution = None
+        best_fitness = float('-inf')
+        fitness_history = []
+
+        for generation in range(self.max_generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.evaluator.evaluate(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 20 generations
+            if generation % 20 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < self.population_size:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                current_radius_sum = np.sum(child[:, 2])
+                child = self.mutate(child, current_radius_sum)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if len(fitness_history) >= 10:
+                recent_avg = np.mean(fitness_history[-10:])
+                prev_avg = np.mean(fitness_history[-20:-10])
+                if abs(recent_avg - prev_avg) < 1e-6:
+                    print(f"Converged at generation {generation}")
+                    break
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+=======
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm with enhanced refinement"""
+        start_time = time.time()
+
+        # Generate initial population with hexagonal lattice
+        population = []
+        for _ in range(self.population_size):
+            circles = self.initializer.generate_hexagonal_lattice()
+            population.append(circles)
+
+        best_solution = None
+        best_fitness = float('-inf')
+        fitness_history = []
+
+        for generation in range(self.max_generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.evaluator.evaluate(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 20 generations
+            if generation % 20 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < self.population_size:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                current_radius_sum = np.sum(child[:, 2])
+                child = self.mutate(child, current_radius_sum)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if len(fitness_history) >= 10:
+                recent_avg = np.mean(fitness_history[-10:])
+                prev_avg = np.mean(fitness_history[-20:-10])
+                if abs(recent_avg - prev_avg) < 1e-6:
+                    print(f"Converged at generation {generation}")
+                    break
+
+        # Apply final local refinement
+        refined_solution = self._local_refinement(best_solution.copy())
+
+        # Apply secondary optimization using scipy's differential evolution on the best individual
+        if best_solution is not None:
+            refined_solution = self._secondary_optimization(refined_solution)
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {self.evaluator.evaluate(refined_solution)[0]:.6f}")
+
+        return refined_solution
+
+    def _local_refinement(self, circles: np.ndarray, max_iterations: int = 200) -> np.ndarray:
+        """Apply aggressive local refinement to improve solution quality"""
+        refined = circles.copy()
+
+        # Iteratively try to increase radii while respecting constraints
+        for iter_num in range(max_iterations):
+            improved = False
+
+            # Try to increase each circle's radius systematically
+            for i in range(self.num_circles):
+                original_circle = refined[i].copy()
+                x, y, r = original_circle
+
+                # Try to increase radius with larger increments
+                new_r = min(r * 1.05, 0.2)  # Larger increase factor
+                test_circle = [x, y, new_r]
+
+                # Check if it's still valid
+                if not self.validator.is_valid_circle(x, y, new_r):
+                    continue
+
+                # Check if it causes overlaps with existing circles
+                overlap_found = False
+                for j in range(self.num_circles):
+                    if i != j:
+                        temp_circles = np.vstack([refined[:i], test_circle, refined[i+1:]])
+                        if self.validator.check_overlap(temp_circles, i, j):
+                            overlap_found = True
+                            break
+
+                if not overlap_found:
+                    refined[i] = test_circle
+                    improved = True
+
+            # If no improvements were made, stop early
+            if not improved:
+                break
+
+        return refined
+
+    def _secondary_optimization(self, circles: np.ndarray) -> np.ndarray:
+        """Use scipy's differential evolution for fine-tuning the best solution"""
+        try:
+            # Define bounds for x, y, r for each circle
+            bounds = []
+            for i in range(self.num_circles):
+                # Bounds for (x, y, r) - x and y are constrained by rectangle, r > 0
+                bounds.extend([
+                    (0.001, self.width - 0.001),   # x bound
+                    (0.001, self.height - 0.001),  # y bound
+                    (0.001, 0.2)                   # r bound
+                ])
+
+            def objective(params):
+                # Convert flattened params back to circles array
+                circles_array = np.zeros((self.num_circles, 3))
+                for i in range(self.num_circles):
+                    circles_array[i] = [
+                        params[i*3],     # x
+                        params[i*3+1],   # y
+                        params[i*3+2]    # r
+                    ]
+
+                # Evaluate fitness (negative because we want to maximize)
+                fitness, _ = self.evaluator.evaluate(circles_array)
+                return -fitness  # Negative because differential_evolution minimizes
+
+            # Run differential evolution
+            result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=50,
+                popsize=15,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=SEED,
+                disp=False
+            )
+
+            if result.success:
+                # Convert result back to circles format
+                circles_array = np.zeros((self.num_circles, 3))
+                for i in range(self.num_circles):
+                    circles_array[i] = [
+                        result.x[i*3],      # x
+                        result.x[i*3+1],    # y
+                        result.x[i*3+2]     # r
+                    ]
+                return circles_array
+
+        except Exception as e:
+            # Fall back to simple refinement if differential evolution fails
+            warnings.warn(f"Differential evolution failed: {e}")
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_multiple_aspect_ratios(self) -> np.ndarray:
+        """Try multiple aspect ratios and return the best solution."""
+        best_solution = None
+        best_radius_sum = -float('inf')
+
+        print(f"Testing {len(ASPECT_RATIOS)} different aspect ratios...")
+
+        for i, aspect_ratio in enumerate(ASPECT_RATIOS):
+            # Calculate width and height based on perimeter constraint
+            # width + height = 2, so if width/height = aspect_ratio, then:
+            # width = aspect_ratio * height, and width + height = 2
+            # Therefore: aspect_ratio * height + height = 2 => height = 2 / (1 + aspect_ratio)
+            height = 2.0 / (1.0 + aspect_ratio)
+            width = aspect_ratio * height
+
+            print(f"Testing aspect ratio {aspect_ratio}: width={width:.3f}, height={height:.3f}")
+
+            # Create optimizer with current dimensions
+            optimizer = EvolutionaryOptimizer(width, height, self.num_circles)
+
+            # Run optimization
+            solution = optimizer.optimize()
+
+            # Check if this solution is better
+            radius_sum = np.sum(solution[:, 2])
+            if radius_sum > best_radius_sum:
+                best_radius_sum = radius_sum
+                best_solution = solution.copy()
+                print(f"New best found with aspect ratio {aspect_ratio}: radius sum = {radius_sum:.6f}")
+
+        return best_solution
+=======
+    def optimize_with_multiple_aspect_ratios(self) -> np.ndarray:
+        """Try multiple aspect ratios and return the best solution."""
+        best_solution = None
+        best_radius_sum = -float('inf')
+
+        print(f"Testing {len(ASPECT_RATIOS)} different aspect ratios...")
+
+        # Focus on the most promising aspect ratios based on prior results
+        # These ratios were found to work well in previous implementations
+        promising_ratios = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3]  # Narrow down to most promising
+
+        for i, aspect_ratio in enumerate(promising_ratios):
+            # Calculate width and height based on perimeter constraint
+            # width + height = 2, so if width/height = aspect_ratio, then:
+            # width = aspect_ratio * height, and width + height = 2
+            # Therefore: aspect_ratio * height + height = 2 => height = 2 / (1 + aspect_ratio)
+            height = 2.0 / (1.0 + aspect_ratio)
+            width = aspect_ratio * height
+
+            print(f"Testing aspect ratio {aspect_ratio}: width={width:.3f}, height={height:.3f}")
+
+            # Create optimizer with current dimensions
+            optimizer = EvolutionaryOptimizer(width, height, self.num_circles)
+
+            # Run optimization
+            solution = optimizer.optimize()
+
+            # Check if this solution is better
+            radius_sum = np.sum(solution[:, 2])
+            if radius_sum > best_radius_sum:
+                best_radius_sum = radius_sum
+                best_solution = solution.copy()
+                print(f"New best found with aspect ratio {aspect_ratio}: radius sum = {radius_sum:.6f}")
+
+        # Also try a few extreme ratios to ensure we don't miss global optima
+        extreme_ratios = [0.5, 1.5, 2.0, 3.0]
+        for aspect_ratio in extreme_ratios:
+            height = 2.0 / (1.0 + aspect_ratio)
+            width = aspect_ratio * height
+
+            print(f"Testing extreme aspect ratio {aspect_ratio}: width={width:.3f}, height={height:.3f}")
+
+            optimizer = EvolutionaryOptimizer(width, height, self.num_circles)
+            solution = optimizer.optimize()
+
+            radius_sum = np.sum(solution[:, 2])
+            if radius_sum > best_radius_sum:
+                best_radius_sum = radius_sum
+                best_solution = solution.copy()
+                print(f"New best found with extreme aspect ratio {aspect_ratio}: radius sum = {radius_sum:.6f}")
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

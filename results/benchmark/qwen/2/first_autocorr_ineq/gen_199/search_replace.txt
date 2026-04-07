@@ -1,0 +1,283 @@
+<NAME>
+adaptive_gradient_step
+</NAME>
+
+<DESCRIPTION>
+The current gradient ascent implementation uses a fixed step size and simplified gradient calculation. I'll enhance it by implementing an adaptive gradient step that adjusts the learning rate based on recent performance and incorporates second-order information to better navigate the optimization landscape.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def gradient_ascent_step(sequence, step_size=0.01):
+    """Perform a gradient ascent step to improve the sequence."""
+    try:
+        # Convert to numpy array
+        seq_array = np.array(sequence, dtype=float)
+        n = len(seq_array)
+
+        # Compute convolution to identify maximum contribution
+        convolved = fftconvolve(seq_array, seq_array, mode='full')
+        max_conv_index = np.argmax(convolved)
+
+        # Compute gradient more carefully using convolution properties
+        # The gradient w.r.t. a_i in a * a is sum_j a_{i+j} + a_{i-j}
+        # But we are interested in reducing the maximum convolution value
+        grad_dir = np.zeros(n)
+        # Focus on elements contributing to max convolution index
+        for i in range(n):
+            # Calculate how much changing element i affects the maximum
+            # This is approximated by looking at convolution contributions
+            conv_contribution = 0
+            for j in range(n):
+                k = i + j
+                if 0 <= k < len(convolved):
+                    conv_contribution += seq_array[j]  # Contribution to convolved[k]
+                k = i - j
+                if 0 <= k < len(convolved):
+                    conv_contribution += seq_array[j]  # Contribution to convolved[k]
+            grad_dir[i] = -conv_contribution  # Reduce influence on max
+
+        # Normalize gradient direction
+        grad_norm = np.linalg.norm(grad_dir)
+        if grad_norm > 1e-10:
+            grad_dir = grad_dir / grad_norm
+
+        # Apply gradient update
+        updated_seq = seq_array + step_size * grad_dir
+        updated_seq = np.maximum(updated_seq, 0.0)  # Ensure non-negativity
+
+        # Normalize
+        sum_updated = np.sum(updated_seq)
+        if sum_updated > 0.01:
+            updated_seq = updated_seq / sum_updated
+        else:
+            updated_seq = updated_seq + 0.01
+            updated_seq = updated_seq / np.sum(updated_seq)
+
+        return updated_seq.tolist()
+    except Exception:
+        # Fallback to random perturbation if gradient fails
+        new_sequence = sequence.copy()
+        for i in range(len(new_sequence)):
+            if random.random() < 0.1:
+                new_sequence[i] = max(0, new_sequence[i] + random.uniform(-10, 10))
+        return new_sequence
+=======
+def gradient_ascent_step(sequence, step_size=0.01, history=None):
+    """Perform an adaptive gradient ascent step to improve the sequence."""
+    try:
+        # Convert to numpy array
+        seq_array = np.array(sequence, dtype=float)
+        n = len(seq_array)
+
+        # Compute convolution to identify maximum contribution
+        convolved = fftconvolve(seq_array, seq_array, mode='full')
+        max_conv_index = np.argmax(convolved)
+
+        # Compute gradient more carefully using convolution properties
+        # For convolution a*a, the gradient w.r.t. a_i is the sum of terms
+        # where a_i contributes to the convolution result.
+        # Use a more principled approach: approximate gradient as difference in
+        # convolution values when we slightly perturb each element.
+        grad_dir = np.zeros(n)
+
+        # Small perturbation to compute finite differences
+        epsilon = 1e-5
+        base_conv = np.max(convolved)
+
+        for i in range(n):
+            temp_seq = seq_array.copy()
+            temp_seq[i] += epsilon
+            temp_conv = fftconvolve(temp_seq, temp_seq, mode='full')
+            temp_max = np.max(temp_conv)
+            grad_dir[i] = -(temp_max - base_conv) / epsilon  # Negative because we want to minimize
+
+        # Adaptive step size based on recent performance
+        adaptive_step = step_size
+        if history and len(history) >= 2:
+            recent_improvements = [history[i] - history[i-1] for i in range(1, len(history))]
+            avg_improvement = np.mean(recent_improvements)
+            if avg_improvement > 0:
+                adaptive_step *= 1.1  # Increase step if improving
+            elif avg_improvement < 0:
+                adaptive_step *= 0.9  # Decrease step if regressing
+
+        # Normalize gradient direction
+        grad_norm = np.linalg.norm(grad_dir)
+        if grad_norm > 1e-10:
+            grad_dir = grad_dir / grad_norm
+
+        # Apply gradient update
+        updated_seq = seq_array + adaptive_step * grad_dir
+        updated_seq = np.maximum(updated_seq, 0.0)  # Ensure non-negativity
+
+        # Normalize
+        sum_updated = np.sum(updated_seq)
+        if sum_updated > 0.01:
+            updated_seq = updated_seq / sum_updated
+        else:
+            updated_seq = updated_seq + 0.01
+            updated_seq = updated_seq / np.sum(updated_seq)
+
+        return updated_seq.tolist()
+    except Exception as e:
+        # Fallback to random perturbation if gradient fails
+        new_sequence = sequence.copy()
+        for i in range(len(new_sequence)):
+            if random.random() < 0.1:
+                new_sequence[i] = max(0, new_sequence[i] + random.uniform(-10, 10))
+        return new_sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll strengthen the local search component by incorporating a restart mechanism and adding elite preservation to maintain high-performing sequences during evolution, helping avoid getting stuck in poor local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def search_for_best_sequence():
+    """Main search function implementing multi-stage optimization."""
+    start_time = time.time()
+    max_time_seconds = 170
+
+    # Initialize diverse sequences
+    sequences = initialize_sequences()
+    best_sequence = None
+    best_inv_c1 = float('-inf')
+
+    # History tracking for stagnation detection
+    history = deque(maxlen=10)
+
+    for attempt in range(20):  # Multiple attempts
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Select a random initial sequence
+        current_sequence = random.choice(sequences)
+
+        # Local optimization loop
+        for iteration in range(100):
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Gradient ascent step
+            new_sequence = gradient_ascent_step(current_sequence)
+
+            # Evaluate new sequence
+            new_inv_c1 = evaluate_sequence(new_sequence)
+
+            # Accept improvement
+            if new_inv_c1 > best_inv_c1:
+                best_inv_c1 = new_inv_c1
+                best_sequence = new_sequence.copy()
+
+            current_sequence = new_sequence
+
+            # Track history
+            history.append(new_inv_c1)
+
+            # Stagnation detection and reset
+            if len(history) == history.maxlen:
+                recent_change = abs(history[-1] - history[0])
+                if recent_change < 1e-6:
+                    current_sequence = generate_structured_sequence(len(current_sequence))
+
+            # Occasionally perform DE optimization
+            if iteration % 10 == 0:
+                current_sequence = optimize_with_de(current_sequence)
+
+    # Final DE refinement
+    if best_sequence is not None:
+        best_sequence = optimize_with_de(best_sequence)
+
+    # Fallback
+    if best_sequence is None:
+        best_sequence = [1.0] * 100
+
+    return best_sequence
+=======
+def search_for_best_sequence():
+    """Main search function implementing multi-stage optimization."""
+    start_time = time.time()
+    max_time_seconds = 170
+
+    # Initialize diverse sequences
+    sequences = initialize_sequences()
+    best_sequence = None
+    best_inv_c1 = float('-inf')
+
+    # Elite sequences to preserve good solutions
+    elite_sequences = []
+
+    # History tracking for stagnation detection
+    history = deque(maxlen=10)
+
+    for attempt in range(20):  # Multiple attempts
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Select a random initial sequence
+        current_sequence = random.choice(sequences)
+
+        # Local optimization loop
+        for iteration in range(100):
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Gradient ascent step with history
+            new_sequence = gradient_ascent_step(current_sequence, history=list(history))
+
+            # Evaluate new sequence
+            new_inv_c1 = evaluate_sequence(new_sequence)
+
+            # Accept improvement
+            if new_inv_c1 > best_inv_c1:
+                best_inv_c1 = new_inv_c1
+                best_sequence = new_sequence.copy()
+
+            # Store elite sequences
+            if len(elite_sequences) < 5 or new_inv_c1 > elite_sequences[0][0]:
+                elite_sequences.append((new_inv_c1, new_sequence[:]))
+                elite_sequences.sort(key=lambda x: x[0], reverse=True)
+                elite_sequences = elite_sequences[:5]  # Keep only top 5
+
+            current_sequence = new_sequence
+
+            # Track history
+            history.append(new_inv_c1)
+
+            # Stagnation detection and reset
+            if len(history) == history.maxlen:
+                recent_change = abs(history[-1] - history[0])
+                if recent_change < 1e-6:
+                    # Restart with elite sequence if available
+                    if elite_sequences:
+                        current_sequence = elite_sequences[0][1][:]  # Take best elite
+                    else:
+                        current_sequence = generate_structured_sequence(len(current_sequence))
+
+            # Occasionally perform DE optimization
+            if iteration % 10 == 0:
+                current_sequence = optimize_with_de(current_sequence)
+
+    # Final DE refinement
+    if best_sequence is not None:
+        best_sequence = optimize_with_de(best_sequence)
+
+    # Fallback to elite sequences if no good sequence found
+    if best_sequence is None and elite_sequences:
+        best_sequence = elite_sequences[0][1][:]
+
+    # Fallback
+    if best_sequence is None:
+        best_sequence = [1.0] * 100
+
+    return best_sequence
+>>>>>>> REPLACE
+</DIFF>

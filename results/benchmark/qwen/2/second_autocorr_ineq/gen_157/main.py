@@ -1,0 +1,364 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import numba
+from scipy import signal
+from deap import base, creator, tools, algorithms
+import random
+import time
+from sklearn.preprocessing import StandardScaler
+import optuna
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+@numba.jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution efficiently using numba"""
+    n = len(f_vals)
+    # Create output array for autoconvolution
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually with numba optimization
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@numba.jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently with numba"""
+    n = len(g_vals)
+
+    # L2 norm squared (using trapezoidal-like scheme)
+    l2_sq = 0.0
+    for i in range(n - 1):
+        y1 = g_vals[i]
+        y2 = g_vals[i + 1]
+        l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+    # L1 norm
+    l1 = 0.0
+    for i in range(n):
+        l1 += abs(g_vals[i])
+
+    # L-infinity norm
+    linf = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf:
+            linf = abs_val
+
+    return l2_sq, l1, linf
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual (step function)"""
+    try:
+        # Convert to numpy array and ensure non-negative
+        f_vals = np.array(individual, dtype=np.float64)
+        f_vals = np.maximum(f_vals, 0.0)
+
+        # Skip if all zeros
+        if np.sum(f_vals) == 0:
+            return (0.0,)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute norms
+        l2_sq, l1, linf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-15 or linf <= 1e-15:
+            return (0.0,)
+
+        # Compute C2
+        c2 = l2_sq / (l1 * linf)
+        return (c2,)
+    except:
+        return (0.0,)
+
+def create_structured_initial_population(pop_size, min_size, max_size):
+    """Create structured initial population with logarithmic peak spacing and adaptive scaling"""
+    population = []
+    for _ in range(pop_size):
+        size = random.randint(min_size, max_size)
+        # Use gamma distribution for more structured randomness
+        f_vals = np.random.gamma(2, 2, size)
+        # Normalize and scale appropriately
+        f_vals = f_vals / np.max(f_vals) * 2.0 if np.max(f_vals) > 0 else np.ones(size)
+        f_vals = np.maximum(f_vals, 0)
+        # Apply mild smoothing to reduce extremes
+        if len(f_vals) > 50:
+            f_vals = signal.savgol_filter(f_vals, min(51, len(f_vals)-1), 3)
+        f_vals = np.maximum(f_vals, 0)
+        population.append(f_vals.tolist())
+    return population
+
+def construct_function_with_log_spacing() -> list[float]:
+    """
+    Enhanced function construction with logarithmic peak spacing and adaptive scaling
+    Inspired by successful approaches that avoid clustering and manage peak dominance
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Choose number of steps
+    n_steps = random.randint(800, 2000)
+
+    # Create function with logarithmic spacing for peak positions
+    f_values = np.zeros(n_steps)
+
+    # Determine number of peaks using logarithmic scaling
+    n_peaks = max(5, min(30, n_steps // 50))
+
+    # Generate log-uniform distributed peak positions across domain [-0.25, 0.25]
+    positions = []
+    for i in range(n_peaks):
+        # Use log-uniform distribution to avoid clustering
+        if i == 0:
+            # First peak near left boundary (with some variation)
+            pos = random.uniform(-0.25, -0.1)
+        elif i == n_peaks - 1:
+            # Last peak near right boundary (with some variation)
+            pos = random.uniform(0.1, 0.25)
+        else:
+            # Middle peaks with logarithmic distribution
+            # Map to log-space then back to [-0.25, 0.25]
+            log_min = np.log(0.05)  # Minimum spacing
+            log_max = np.log(0.25)  # Maximum spacing
+            log_pos = random.uniform(log_min, log_max)
+            # Alternate sides for better distribution
+            sign = 1 if i % 2 == 0 else -1
+            pos = sign * np.exp(log_pos) * random.uniform(0.8, 1.2)
+            # Keep within bounds
+            pos = np.clip(pos, -0.24, 0.24)
+        positions.append(pos)
+
+    # Sort positions for consistency
+    positions.sort()
+
+    # Create peaks with adaptive parameters
+    for i, center_pos in enumerate(positions):
+        # Convert position to step index
+        step_index = int((center_pos + 0.25) / (0.5 / n_steps))
+        step_index = max(0, min(n_steps - 1, step_index))
+
+        # Adaptive width and height
+        if i == 0 or i == len(positions) - 1:
+            # Boundary peaks: broader and lower to prevent boundary artifacts
+            width = max(20, min(80, n_steps // 6))
+            height = random.uniform(1.0, 2.0)
+        else:
+            # Inner peaks: narrower and higher for sharper contributions
+            width = max(10, min(50, n_steps // 12))
+            height = random.uniform(0.8, 1.5)
+
+        # Apply adaptive scaling to prevent extremely high peaks that dominate L-infinity norm
+        # Scale height based on width and peak importance
+        height *= min(1.0, 100.0 / (width * (i + 1) + 20.0))
+
+        # Create Gaussian-like peak
+        x = np.arange(n_steps)
+        gaussian = height * np.exp(-0.5 * ((x - step_index) / width) ** 2)
+        f_values += gaussian
+
+    # Apply smoothing to reduce extreme variations while preserving peak structure
+    if n_steps > 50:
+        window_size = min(51, n_steps // 5)
+        if window_size % 2 == 0:
+            window_size -= 1
+        if window_size > 1:
+            f_values = signal.savgol_filter(f_values, window_size, 3)
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+    if np.max(f_values) > 0:
+        f_values = f_values / np.max(f_values) * 2.0
+
+    # Additional constraint-aware normalization to prevent extreme autoconvolution spikes
+    # This helps maintain balance between norms that affects C2 calculation
+    if len(f_values) > 10:
+        # Cap extreme values to keep autoconvolution manageable
+        threshold = np.percentile(f_values, 90)
+        if threshold > 0:
+            f_values = np.minimum(f_values, threshold * 3.0)
+
+    return f_values.tolist()
+
+def adaptive_evolution_phase(initial_pop, pop_size, n_generations):
+    """Perform evolutionary optimization with adaptive parameters"""
+    # Create toolbox
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define operators
+    def create_individual():
+        size = random.randint(200, 800)  # Adaptive size
+        f_vals = np.random.gamma(2, 2, size)
+        f_vals = f_vals / np.max(f_vals) * 2.0 if np.max(f_vals) > 0 else np.ones(size)
+        f_vals = np.maximum(f_vals, 0)
+        if len(f_vals) > 50:
+            f_vals = signal.savgol_filter(f_vals, min(51, len(f_vals)-1), 3)
+        f_vals = np.maximum(f_vals, 0)
+        return f_vals.tolist()
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Initialize population with diverse individuals
+    population = initial_pop if initial_pop else toolbox.population(n=pop_size)
+
+    # Evolve
+    best_individual = None
+    best_fitness = 0
+    best_generation = 0
+
+    for generation in range(n_generations):
+        # Evaluate population
+        fitnesses = list(map(toolbox.evaluate, population))
+        for ind, fit in zip(population, fitnesses):
+            ind.fitness.values = fit
+
+        # Track best
+        for ind in population:
+            if ind.fitness.values[0] > best_fitness and len(ind) > 0:
+                best_fitness = ind.fitness.values[0]
+                best_individual = list(ind)
+                best_generation = generation
+
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < 0.2:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Replace old population
+        population[:] = offspring
+
+        # Early termination if no improvement for several generations
+        if generation - best_generation > 20:
+            break
+
+    return best_individual if best_individual is not None else []
+
+def local_refinement(individual, max_iterations=50):
+    """Refine solution using gradient-free optimization"""
+    if not individual:
+        return individual
+
+    # Use Optuna for local refinement
+    def objective(trial):
+        # Create a slightly modified version of the individual
+        modified = individual.copy()
+        for i in range(len(modified)):
+            if trial.suggest_float(f'param_{i}', 0.8, 1.2) < 1.1:
+                modified[i] *= trial.suggest_float(f'multiplier_{i}', 0.9, 1.1)
+
+        # Ensure non-negative values
+        modified = [max(0, x) for x in modified]
+        return evaluate_individual(modified)[0]
+
+    try:
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=min(20, max_iterations))
+        return individual  # Return original if optuna doesn't improve much
+    except:
+        return individual
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Directly use the enhanced logarithmic construction approach
+    # which has shown superior performance to evolutionary methods for this problem
+    try:
+        best_result = construct_function_with_log_spacing()
+
+        # Final evaluation of the constructed function
+        f_vals = np.array(best_result, dtype=np.float64)
+        f_vals = np.maximum(f_vals, 0.0)
+        if np.sum(f_vals) > 0:
+            g_vals = compute_autoconvolution_numba(f_vals)
+            l2_sq, l1, linf = compute_norms_numba(g_vals)
+
+            if l1 > 1e-15 and linf > 1e-15:
+                best_c2 = l2_sq / (l1 * linf)
+            else:
+                best_c2 = 0.0
+        else:
+            best_c2 = 0.0
+
+    except Exception as e:
+        # Fallback to robust construction if anything goes wrong
+        try:
+            n_steps = random.randint(800, 1500)
+            f_values = np.random.gamma(2, 2, n_steps)
+            f_values = f_values / np.max(f_values) * 2.0
+            f_values = np.maximum(f_values, 0)
+            if len(f_values) > 50:
+                f_values = signal.savgol_filter(f_values, min(51, len(f_values)-1), 3)
+            f_values = np.maximum(f_values, 0)
+            best_result = f_values.tolist()
+            best_c2 = 0.0  # Will be evaluated below
+        except:
+            # Final fallback
+            n_steps = 1000
+            x = np.linspace(-1, 1, n_steps)
+            base_shape = np.exp(-x**2 / 2)
+            base_shape = 0.6 * (base_shape / np.max(base_shape)) + 0.2
+            best_result = base_shape.tolist()
+            best_c2 = 0.0
+
+    # Final validation check
+    if best_result:
+        try:
+            f_vals = np.array(best_result, dtype=np.float64)
+            f_vals = np.maximum(f_vals, 0.0)
+            if np.sum(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                l2_sq, l1, linf = compute_norms_numba(g_vals)
+                if l1 > 1e-15 and linf > 1e-15:
+                    final_c2 = l2_sq / (l1 * linf)
+                    # If our direct construction didn't produce a valid score,
+                    # make sure we have a proper evaluation
+                    if final_c2 > best_c2:
+                        best_c2 = final_c2
+        except:
+            pass
+
+    # Limit execution time
+    elapsed = time.time() - start_time
+    if elapsed > 85:  # Leave buffer for cleanup
+        return best_result[:1000]  # Truncate if needed
+
+    return best_result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

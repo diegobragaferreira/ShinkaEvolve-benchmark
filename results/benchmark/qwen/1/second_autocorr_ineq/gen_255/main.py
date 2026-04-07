@@ -1,0 +1,417 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.stats import qmc
+import time
+from numba import jit, prange
+import numba
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit, vmap
+from jax.scipy.signal import convolve as jax_convolve
+import random
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+# Numba implementations for fast computation
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm using trapezoidal integration
+    if len(g_vals) >= 2:
+        # Trapezoidal rule with quadratic approximation for piecewise integration
+        # Each segment contributes (width/3)*(y1^2 + y1*y2 + y2^2)
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 1.0
+        for i in range(len(g_vals) - 1):
+            y1 = g_vals[i]
+            y2 = g_vals[i+1]
+            g_l2_sq += (h/3) * (y1*y1 + y1*y2 + y2*y2)
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+# JAX implementations for accurate gradient computation
+@jax_jit
+def compute_autoconvolution_jax(f_vals):
+    """JAX version for autoconvolution computation"""
+    # Convert to JAX array
+    f = jnp.array(f_vals)
+    
+    # Ensure non-negative values
+    f = jnp.clip(f, 0, None)
+
+    # Use JAX's convolution operator
+    g_full = jax_convolve(f, f, mode='full')
+
+    # Trim to center portion (autoconvolution)
+    n = len(f_vals)
+    center_start = len(g_full) // 2 - n + 1
+    center_end = len(g_full) // 2 + n - 1
+    g_trimmed = g_full[center_start:center_end]
+
+    return g_trimmed
+
+@jax_jit
+def compute_autoconvolution_norms_jax(f_vals):
+    """JAX version of computing all norms for autoconvolution"""
+    # Convert to JAX array and clip negatives
+    f = jnp.clip(jnp.array(f_vals), 0, None)
+    
+    # Compute autoconvolution
+    g = compute_autoconvolution_jax(f)
+    
+    # Compute norms
+    g_abs = jnp.abs(g)
+    
+    # L2 squared using trapezoidal rule with quadratic approximation
+    # We assume equal spacing
+    g_diffs = g_abs[1:] - g_abs[:-1]
+    g_squares = g_abs[:-1]**2 + g_abs[:-1]*g_abs[1:] + g_abs[1:]**2
+    norm_l2_sq = jnp.sum(STEP_WIDTH * g_squares / 3.0)
+    
+    # L1 norm
+    norm_l1 = jnp.sum(g_abs) / (len(g) + 1)
+    
+    # L-infinity norm
+    norm_inf = jnp.max(g_abs)
+    
+    return norm_l2_sq, norm_l1, norm_inf
+
+@jax_jit
+def compute_c2_jax(f_vals):
+    """JAX version of C2 computation for better gradient calculation"""
+    norm_l2_sq, norm_l1, norm_inf = compute_autoconvolution_norms_jax(f_vals)
+    
+    # Avoid division by zero
+    safe_l1 = jnp.where(norm_l1 <= 1e-15, 1e-15, norm_l1)
+    safe_inf = jnp.where(norm_inf <= 1e-15, 1e-15, norm_inf)
+    
+    return norm_l2_sq / (safe_l1 * safe_inf)
+
+# Vectorized versions for batch processing
+compute_autoconvolution_norms_batch = vmap(compute_autoconvolution_norms_jax)
+compute_c2_batch = vmap(compute_c2_jax)
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 using JAX automatic differentiation"""
+    try:
+        # Clip negative values first
+        f_vals = np.clip(f_vals, 0, None)
+
+        # Convert to JAX array
+        f_array = jnp.array(f_vals)
+
+        # Compute gradient using exact automatic differentiation
+        grad_func = grad(compute_c2_jax)
+        gradients = grad_func(f_array)
+
+        return np.array(gradients)
+    except Exception as e:
+        # Return zero gradients if computation fails
+        return np.zeros_like(f_vals)
+
+def objective_function(params):
+    """Objective function to minimize (negative C2)"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        # Return negative because we're minimizing
+        return -c2
+    except Exception as e:
+        return 1e10  # Large penalty for invalid results
+
+def sophisticated_initialization(dim):
+    """Create a sophisticated initial step function with multi-scale patterns"""
+    # Create several different patterns and select the best
+    patterns = []
+    
+    # Pattern 1: Multi-peak Gaussian structure with varying controls
+    x = np.linspace(0, 1, dim)
+    pattern1 = np.zeros(dim)
+    n_peaks = 3 + np.random.randint(0, 2)
+    for peak_idx in range(n_peaks):
+        center = 0.1 + 0.8 * np.random.random()  # Spread peaks across domain
+        width = 0.05 + 0.1 * np.random.random()  # Vary widths
+        height = 0.5 + 0.7 * np.random.random()  # Vary heights
+        pattern1 += height * np.exp(-((x - center)**2) / (2 * width**2))
+    patterns.append(pattern1.tolist())
+    
+    # Pattern 2: Alternating high/low pattern with more structure
+    pattern2 = []
+    pattern2.extend([1.2 + 0.4 * np.random.random() for _ in range(dim//3)])
+    pattern2.extend([0.2 + 0.3 * np.random.random() for _ in range(dim//3)])
+    pattern2.extend([0.8 + 0.3 * np.random.random() for _ in range(dim - len(pattern2))])
+    patterns.append(pattern2)
+    
+    # Pattern 3: Geometric pattern with exponential decay and random variation
+    pattern3 = []
+    for i in range(dim):
+        pos = i / (dim - 1) if dim > 1 else 0.5
+        val = np.exp(-4 * pos) * (0.4 + 0.6 * np.sin(8 * np.pi * pos))
+        pattern3.append(max(0.0, val + 0.1 * np.random.random()))
+    patterns.append(pattern3)
+    
+    # Pattern 4: Sine wave modulation with random amplitude and phase
+    pattern4 = []
+    freq = 8 + np.random.randint(0, 6)  # Random frequency
+    phase = np.random.random() * np.pi  # Random phase
+    for i in range(dim):
+        pos = i / (dim - 1) if dim > 1 else 0.5
+        val = 0.5 + 0.5 * np.sin(freq * np.pi * pos + phase) + 0.1 * np.random.random()
+        pattern4.append(max(0.0, val))
+    patterns.append(pattern4)
+    
+    # Pattern 5: Random with heavy-tailed distribution and structure
+    pattern5 = []
+    for i in range(dim):
+        # Heavy-tailed distribution
+        r = np.random.random()
+        if r < 0.6:
+            pattern5.append(0.1 + 0.3 * np.random.random())
+        else:
+            pattern5.append(1.0 + 1.5 * np.random.random())
+    # Add some structure
+    structure_points = np.random.choice(dim, size=min(5, dim//5), replace=False)
+    for point in structure_points:
+        pattern5[point] = max(0.0, 2.0 * np.random.random() + 1.0)
+    patterns.append(pattern5)
+    
+    # Select the best pattern by evaluating it
+    best_pattern = patterns[0]
+    best_score = -1e10
+    
+    for pattern in patterns:
+        try:
+            # Evaluate the pattern quickly using fast numba version
+            f_vals = np.clip(pattern, 0, None)
+            g_vals = compute_autoconvolution_numba(f_vals)
+            c2 = compute_c2_numba(g_vals)
+            if c2 > best_score:
+                best_score = c2
+                best_pattern = pattern
+        except:
+            continue
+    
+    return best_pattern
+
+def adaptive_gradient_refinement(initial_params, max_iter=100):
+    """Apply adaptive gradient-based refinement to improve solution"""
+    # Convert to JAX arrays for gradient computation
+    x0 = jnp.array(initial_params, dtype=jnp.float64)
+    
+    # Convert to numpy for numba computations
+    current_params = np.array(initial_params, dtype=float)
+    current_c2 = compute_c2_numba(compute_autoconvolution_numba(current_params))
+    
+    # Initialize adaptive parameters
+    learning_rate = 0.01
+    momentum = 0.9
+    velocity = jnp.zeros_like(x0)
+    
+    # Adaptive learning rate schedule
+    lr_schedule = [0.02, 0.01, 0.005, 0.001, 0.0005]  # Different learning rates
+    lr_idx = 0  # Index for learning rate selection
+    
+    for iteration in range(max_iter):
+        try:
+            # Compute gradient using JAX for accuracy
+            grad_vals = compute_gradient_jax(current_params)
+            
+            # Update with momentum
+            velocity = momentum * velocity - learning_rate * jnp.array(grad_vals)
+            new_params = x0 + velocity
+            
+            # Maintain non-negativity
+            new_params = jnp.maximum(new_params, 0)
+            
+            # Convert back to numpy for numba evaluation
+            new_params_np = np.array(new_params)
+            
+            # Evaluate new solution
+            new_g_vals = compute_autoconvolution_numba(new_params_np)
+            new_c2 = compute_c2_numba(new_g_vals)
+            
+            if new_c2 > current_c2:
+                current_params = new_params_np
+                current_c2 = new_c2
+                # Reduce learning rate for stability
+                if lr_idx < len(lr_schedule) - 1:
+                    lr_idx += 1
+                learning_rate = lr_schedule[lr_idx]
+            else:
+                # If no improvement, reduce learning rate
+                learning_rate *= 0.9
+                if learning_rate < 1e-6:
+                    break
+                    
+        except Exception as e:
+            break  # Stop if there's an issue
+
+    return current_params
+
+def evolutionary_optimization_with_adaptation(initial_dim):
+    """Perform evolutionary optimization with adaptive parameters and better initialization"""
+    # Create multiple diverse initial populations
+    initial_populations = []
+    
+    # Generate several different initializations
+    for i in range(5):
+        # Vary the dimensionality slightly for diversity
+        dim = max(100, initial_dim + np.random.randint(-100, 100))
+        initial_population = sophisticated_initialization(dim)
+        initial_populations.append(initial_population)
+    
+    best_solution = None
+    best_c2 = -np.inf
+    
+    # Try each initialization with differential evolution
+    for i, initial_pop in enumerate(initial_populations):
+        try:
+            # Set bounds for optimization
+            bounds = [(0, 10)] * len(initial_pop)
+            
+            # Parameters for differential evolution with adaptive settings
+            de_params = {
+                'mutation': (0.5, 1),
+                'recombination': 0.7,
+                'popsize': 20,  # Increased population size for better exploration
+                'maxiter': 150,  # More iterations for better convergence
+                'seed': 42 + i,
+                'tol': 1e-6,
+                'init': 'latinhypercube',
+                'disp': False
+            }
+            
+            # Run optimization
+            result = differential_evolution(
+                objective_function,
+                bounds,
+                **de_params
+            )
+            
+            # Apply gradient refinement to improve the result
+            refined_params = adaptive_gradient_refinement(result.x, max_iter=50)
+            
+            # Evaluate refined solution
+            f_vals = np.clip(refined_params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+                
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_solution = refined_params.copy()
+                    
+        except Exception as e:
+            continue
+    
+    return best_solution if best_solution is not None else sophisticated_initialization(initial_dim)
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Multi-start approach with different initialization strategies
+    best_c2 = -np.inf
+    best_params = None
+
+    # Try multiple optimizations with different configurations
+    configs = [
+        (500, 42),
+        (700, 123),
+        (900, 456),
+        (1100, 789),
+        (1300, 234)
+    ]
+
+    # Also try a few random configurations for better exploration
+    for _ in range(5):
+        dim = np.random.randint(500, 1500)
+        seed = np.random.randint(1000, 9999)
+        configs.append((dim, seed))
+
+    for dim, seed in configs:
+        if time.time() - start_time > 85:  # Leave buffer for cleanup
+            break
+
+        try:
+            np.random.seed(seed)
+            params = evolutionary_optimization_with_adaptation(dim)
+
+            # Compute actual C2 value
+            f_vals = np.clip(params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = params.copy()
+        except Exception as e:
+            continue
+
+    # If no valid parameters found, return default
+    if best_params is None:
+        return [0.5] * 100
+
+    # Final check and conversion to list
+    final_f_vals = np.clip(best_params, 0, None)
+    return final_f_vals.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

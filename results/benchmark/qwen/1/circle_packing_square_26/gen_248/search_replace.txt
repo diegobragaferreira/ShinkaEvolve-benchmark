@@ -1,0 +1,238 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based initialization uses a simple weighting scheme based on centrality. I'll enhance this by implementing a more sophisticated approach that considers both spatial importance and potential for large radii. The key insight is to create an initialization that places circles strategically in regions where they can achieve larger radii, rather than just using basic distance metrics.
+
+This enhancement involves:
+1. Improving the Voronoi point selection to include more diverse and strategically placed points
+2. Adding a more nuanced radius assignment that considers not just neighbor distances but also the potential for maximum radius at each location
+3. Using a priority-based approach to place larger circles first in locations with high potential
+
+This should help achieve better initial configurations that are closer to optimal, thus improving the evolutionary algorithm's convergence speed and final solution quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_weighted_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using weighted Voronoi-based spreading that considers spatial importance."""
+    # Generate diverse initial points using multiple strategies
+    points = []
+
+    # 1. Grid-based points (denser sampling)
+    grid_size = int(np.ceil(np.sqrt(n_circles)) * 1.5)  # Even larger grid
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) < n_circles * 4:  # Generate many more points than needed
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                points.append([x, y])
+
+    # 2. Random points
+    random_points = np.random.rand(n_circles * 3, 2)
+    points.extend(random_points.tolist())
+
+    # 3. Strategic boundary points for edge coverage
+    for _ in range(n_circles * 3):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    # 4. Corner points
+    corners = [[BOUNDARY_MARGIN, BOUNDARY_MARGIN],
+               [BOUNDARY_MARGIN, 1-BOUNDARY_MARGIN],
+               [1-BOUNDARY_MARGIN, BOUNDARY_MARGIN],
+               [1-BOUNDARY_MARGIN, 1-BOUNDARY_MARGIN]]
+    points.extend(corners)
+
+    points = np.array(points)[:n_circles * 6]  # Take enough points
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii using weighted importance
+        circles = np.zeros((n_circles, 3))
+
+        # Compute weights based on how centrally located each point is
+        center_weights = []
+        for x, y in selected_centroids:
+            # Weight based on distance to center (closer to center = higher weight)
+            center_dist = np.sqrt((x - 0.5)**2 + (y - 0.5)**2)
+            # Invert so that center points get higher weights
+            weight = 1.0 - center_dist / np.sqrt(0.5**2 + 0.5**2)
+            center_weights.append(max(0, weight))
+
+        # Sort by weights (higher first) to prioritize central locations
+        sorted_indices = np.argsort(center_weights)[::-1]
+
+        for idx, actual_idx in enumerate(sorted_indices):
+            x, y = selected_centroids[actual_idx]
+
+            # Find nearest neighbor to estimate appropriate radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+
+            if len(distances) > 0:
+                avg_distance = np.min(distances) * 0.35
+                radius = min(avg_distance, 0.35)  # Increased max radius
+            else:
+                radius = 0.1
+
+            # Adjust radius based on centrality weight (larger for center points)
+            centrality_weight = center_weights[actual_idx]
+            adjusted_radius = radius * (0.6 + 0.4 * centrality_weight)  # More central = larger radius
+
+            # Ensure it's within bounds
+            adjusted_radius = min(adjusted_radius,
+                                x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                                y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            circles[idx] = [x, y, max(adjusted_radius, 0.001)]
+
+        return circles
+    except:
+        # Fallback to grid-based initialization if Voronoi fails
+        return generate_grid_initialization(n_circles)
+=======
+def create_weighted_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced weighted Voronoi-based spreading."""
+    # Generate diverse initial points using multiple strategies
+    points = []
+
+    # 1. Grid-based points (denser sampling)
+    grid_size = int(np.ceil(np.sqrt(n_circles)) * 1.5)  # Even larger grid
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) < n_circles * 4:  # Generate many more points than needed
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                points.append([x, y])
+
+    # 2. Random points with stratified sampling for better distribution
+    # Add some systematic randomization to avoid clustering
+    for _ in range(n_circles * 3):
+        points.append([np.random.rand(), np.random.rand()])
+
+    # 3. Strategic boundary points for edge coverage
+    for _ in range(n_circles * 2):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    # 4. Corner points
+    corners = [[BOUNDARY_MARGIN, BOUNDARY_MARGIN],
+               [BOUNDARY_MARGIN, 1-BOUNDARY_MARGIN],
+               [1-BOUNDARY_MARGIN, BOUNDARY_MARGIN],
+               [1-BOUNDARY_MARGIN, 1-BOUNDARY_MARGIN]]
+    points.extend(corners)
+
+    points = np.array(points)[:n_circles * 6]  # Take enough points
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii using enhanced weighting
+        circles = np.zeros((n_circles, 3))
+
+        # Compute enhanced weights based on:
+        # 1. Centrality (closer to center is better)
+        # 2. Distance to boundary (avoiding edges)
+        # 3. Local density (avoid densely packed areas)
+        weights = []
+        for i, (x, y) in enumerate(selected_centroids):
+            # Weight based on distance to center (closer to center = higher weight)
+            center_dist = np.sqrt((x - 0.5)**2 + (y - 0.5)**2)
+            center_weight = 1.0 - center_dist / np.sqrt(0.5**2 + 0.5**2)
+
+            # Weight based on distance to boundaries (further from boundaries = higher weight)
+            boundary_min_dist = min(x, 1-x, y, 1-y)
+            boundary_weight = boundary_min_dist / 0.5
+
+            # Weight based on local density - compute how close this point is to its nearest neighbor
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+
+            local_density = 0.0
+            if len(distances) > 0:
+                local_density = 1.0 / (np.min(distances) + 1e-8)  # Higher density = lower weight
+
+            # Combine weights with different importance factors
+            # Central position: 40%, boundary proximity: 30%, local density: 30%
+            combined_weight = (0.4 * center_weight +
+                              0.3 * boundary_weight +
+                              0.3 * (1.0 / (1.0 + local_density)))
+
+            weights.append(max(0, combined_weight))
+
+        # Sort by weights (higher first) to prioritize good locations
+        sorted_indices = np.argsort(weights)[::-1]
+
+        # For even better results, we'll do a greedy approach:
+        # Place circles with decreasing priority of weight, but also considering
+        # their ability to accommodate large radii
+
+        # First, precompute all possible radii estimates for each point
+        estimated_radii = []
+        for i, (x, y) in enumerate(selected_centroids):
+            # Find nearest neighbor to estimate appropriate radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+
+            if len(distances) > 0:
+                # Use 3rd percentile of distances to be less sensitive to outliers
+                avg_distance = np.percentile(distances, 30) * 0.35
+                radius = min(avg_distance, 0.35)  # Increased max radius
+            else:
+                radius = 0.1
+
+            # Ensure radius respects boundary constraints
+            boundary_radius = min(x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                                y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+            radius = min(radius, boundary_radius)
+
+            estimated_radii.append(max(radius, 0.001))
+
+        # Now place circles in order of (weight * radius) priority to put large-radius circles in good spots
+        priority_scores = [weights[i] * estimated_radii[i] for i in range(len(selected_centroids))]
+        final_sorted_indices = np.argsort(priority_scores)[::-1]
+
+        for idx, actual_idx in enumerate(final_sorted_indices):
+            x, y = selected_centroids[actual_idx]
+            # Use the precomputed estimated radius
+            radius = estimated_radii[actual_idx]
+
+            circles[idx] = [x, y, radius]
+
+        return circles
+    except:
+        # Fallback to grid-based initialization if Voronoi fails
+        return generate_grid_initialization(n_circles)
+>>>>>>> REPLACE
+</DIFF>

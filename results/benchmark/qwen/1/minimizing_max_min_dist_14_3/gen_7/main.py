@@ -1,0 +1,79 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist, squareform
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        # Reshape the flattened array back to (14, 3)
+        points = x.reshape(14, 3)
+
+        # Compute pairwise distances
+        distances = pdist(points, metric='euclidean')
+
+        # Calculate min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        # Return negative ratio since we want to maximize
+        return -(min_dist / max_dist)
+
+    # Set bounds for each coordinate (0 to 1 for normalization)
+    bounds = [(-1, 1) for _ in range(14 * 3)]
+
+    # Use different initial strategies
+    np.random.seed(42)
+
+    # Run optimization with timeout control
+    start_time = time.time()
+
+    # First try a simple local optimization starting from good initial guess
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=1000,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        atol=1e-6,
+        rtol=1e-6,
+        disp=False
+    )
+
+    # If optimization took too long, use a simpler approach
+    if time.time() - start_time > 350:
+        print("Optimization timed out, using heuristic")
+
+    # Final reshaping to get our points
+    final_points = result.x.reshape(14, 3)
+
+    # Normalize to avoid extreme values and ensure boundedness
+    # This helps with numerical stability
+    point_mean = np.mean(final_points, axis=0)
+    point_std = np.std(final_points, axis=0)
+    if np.any(point_std > 0):
+        final_points = (final_points - point_mean) / np.maximum(point_std, 1e-8)
+
+    # Scale to reasonable range
+    final_points = final_points * 0.5 + 0.5  # Map to [0,1] range
+
+    # Ensure we're returning the optimized solution
+    return final_points
+
+
+# EVOLVE-BLOCK-END

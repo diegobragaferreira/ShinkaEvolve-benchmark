@@ -1,0 +1,258 @@
+--- a/original.py
++++ b/original.py
+@@ -1,25 +1,250 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from scipy.optimize import differential_evolution
++from deap import base, creator, tools, algorithms
++import random
++import time
++from typing import Tuple, List
++import warnings
++warnings.filterwarnings('ignore')
++
++# Global constants
++RECT_PERIMETER = 4.0
++RECT_WIDTH_HEIGHT_RATIO = 1.0  # Square rectangle for simplicity
++RECT_WIDTH = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
++RECT_HEIGHT = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
++NUM_CIRCLES = 21
++MAX_EVALUATIONS = 10000
++POPULATION_SIZE = 50
++TOURNAMENT_SIZE = 3
++MUTATION_RATE = 0.1
++CROSSOVER_RATE = 0.8
++MAX_GENERATIONS = 200
++
++def initialize_population(pop_size: int, n_circles: int) -> np.ndarray:
++    """Initialize population with random valid circle configurations"""
++    population = []
++    for _ in range(pop_size):
++        circles = []
++        for _ in range(n_circles):
++            # Generate random valid position and radius
++            x = random.uniform(0.01, RECT_WIDTH - 0.01)
++            y = random.uniform(0.01, RECT_HEIGHT - 0.01)
++            max_radius = min(x, RECT_WIDTH - x, y, RECT_HEIGHT - y)
++            radius = random.uniform(0.01, max_radius * 0.8)
++            circles.append([x, y, radius])
++        population.append(np.array(circles).flatten())
++    return np.array(population)
++
++def check_constraints(circles: np.ndarray) -> bool:
++    """Check if all circles are within bounds and non-overlapping"""
++    n_circles = len(circles) // 3
++    circles_reshaped = circles.reshape(n_circles, 3)
++    
++    # Check boundary constraints
++    for i in range(n_circles):
++        x, y, r = circles_reshaped[i]
++        if (x - r < 0 or x + r > RECT_WIDTH or 
++            y - r < 0 or y + r > RECT_HEIGHT):
++            return False
++    
++    # Check overlap constraints using distance matrix
++    positions = circles_reshaped[:, :2]
++    radii = circles_reshaped[:, 2]
++    
++    # Compute pairwise distances
++    distance_matrix = cdist(positions, positions)
++    
++    # Check for overlaps
++    for i in range(n_circles):
++        for j in range(i+1, n_circles):
++            dist = distance_matrix[i, j]
++            min_dist = radii[i] + radii[j]
++            if dist < min_dist:
++                return False
++    
++    return True
++
++def evaluate_fitness(circles: np.ndarray) -> float:
++    """Evaluate fitness as sum of radii, penalizing constraint violations"""
++    if not check_constraints(circles):
++        # Return very low fitness for invalid solutions
++        return -1000000.0
++    
++    # Sum of all radii
++    return np.sum(circles[2::3])
++
++def get_circle_positions(circles: np.ndarray) -> np.ndarray:
++    """Convert flattened array back to circle positions"""
++    n_circles = len(circles) // 3
++    return circles.reshape(n_circles, 3)
++
++def mutate_individual(individual: np.ndarray, mut_rate: float = MUTATION_RATE) -> np.ndarray:
++    """Apply mutation to individual"""
++    mutated = individual.copy()
++    n_circles = len(individual) // 3
++    
++    for i in range(n_circles):
++        if random.random() < mut_rate:
++            # Mutate either position or radius
++            gene_type = random.randint(0, 2)
++            if gene_type == 0:  # Mutate X
++                mutated[i*3] = max(0.01, min(RECT_WIDTH - 0.01, mutated[i*3] + random.gauss(0, 0.02)))
++            elif gene_type == 1:  # Mutate Y
++                mutated[i*3 + 1] = max(0.01, min(RECT_HEIGHT - 0.01, mutated[i*3 + 1] + random.gauss(0, 0.02)))
++            else:  # Mutate Radius
++                old_r = mutated[i*3 + 2]
++                mutated[i*3 + 2] = max(0.001, min(old_r * 3, old_r + random.gauss(0, 0.01)))
++    
++    return mutated
++
++def crossover_individuals(parent1: np.ndarray, parent2: np.ndarray, cx_rate: float = CROSSOVER_RATE) -> Tuple[np.ndarray, np.ndarray]:
++    """Single-point crossover between two individuals"""
++    if random.random() > cx_rate:
++        return parent1.copy(), parent2.copy()
++    
++    n_circles = len(parent1) // 3
++    crossover_point = random.randint(1, n_circles - 1)
++    
++    child1 = np.concatenate([parent1[:crossover_point*3], parent2[crossover_point*3:]])
++    child2 = np.concatenate([parent2[:crossover_point*3], parent1[crossover_point*3:]])
++    
++    return child1, child2
++
++def optimize_with_de(circles_init: np.ndarray) -> np.ndarray:
++    """Use differential evolution for local optimization"""
++    def objective(x):
++        # Convert flat array back to circles format
++        circles = x.copy()
++        if check_constraints(circles):
++            return -np.sum(circles[2::3])  # Negative because we want to maximize
++        else:
++            return 1000000  # High penalty for invalid solutions
++    
++    # Run differential evolution with bounds
++    bounds = [(0.01, RECT_WIDTH - 0.01) if i % 3 == 0 else 
++              (0.01, RECT_HEIGHT - 0.01) if i % 3 == 1 else
++              (0.001, min(RECT_WIDTH/3, RECT_HEIGHT/3)) 
++              for i in range(NUM_CIRCLES * 3)]
++    
++    try:
++        result = differential_evolution(objective, bounds, maxiter=100, popsize=10, 
++                                      disp=False, seed=42, polish=True)
++        if result.success and check_constraints(result.x):
++            return result.x
++    except:
++        pass
++    
++    return circles_init
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 21
+-    circles = np.zeros((n, 3))
+-
++    # Initialize global variables for DEAP
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    toolbox.register("individual", tools.initRepeat, creator.Individual, 
++                     lambda: random.uniform(0.01, RECT_WIDTH - 0.01), 
++                     NUM_CIRCLES * 3)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    
++    def evaluate(individual):
++        return evaluate_fitness(np.array(individual)),
++    
++    def mutate(individual):
++        return mutate_individual(np.array(individual)),
++    
++    def crossover(ind1, ind2):
++        child1, child2 = crossover_individuals(np.array(ind1), np.array(ind2))
++        return child1.tolist(), child2.tolist()
++    
++    toolbox.register("evaluate", evaluate)
++    toolbox.register("mate", crossover)
++    toolbox.register("mutate", mutate)
++    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
++    
++    # Initialize population
++    pop = toolbox.population(n=POPULATION_SIZE)
++    
++    # Evaluate initial population
++    fitnesses = list(map(toolbox.evaluate, pop))
++    for ind, fit in zip(pop, fitnesses):
++        ind.fitness.values = fit
++    
++    # Track best solution
++    best_solution = None
++    best_fitness = float('-inf')
++    
++    # Evolution loop
++    for generation in range(MAX_GENERATIONS):
++        # Select the next generation individuals
++        offspring = toolbox.select(pop, len(pop))
++        
++        # Clone the selected individuals
++        offspring = list(map(toolbox.clone, offspring))
++        
++        # Apply crossover and mutation
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < CROSSOVER_RATE:
++                child1[:], child2[:] = toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++        
++        for mutant in offspring:
++            if random.random() < MUTATION_RATE:
++                mutant[:], = toolbox.mutate(mutant)
++                del mutant.fitness.values
++        
++        # Evaluate the individuals with an invalid fitness
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = map(toolbox.evaluate, invalid_ind)
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++        
++        # Replace population with offspring
++        pop[:] = offspring
++        
++        # Find best individual in this generation
++        current_best = max(pop, key=lambda ind: ind.fitness.values[0])
++        if current_best.fitness.values[0] > best_fitness:
++            best_fitness = current_best.fitness.values[0]
++            best_solution = current_best[:]
++    
++    # Final optimization using differential evolution
++    if best_solution is not None:
++        final_solution = optimize_with_de(np.array(best_solution))
++        final_fitness = evaluate_fitness(final_solution)
++        
++        # If DE improved the solution, use it
++        if final_fitness > best_fitness:
++            best_solution = final_solution
++    
++    # Convert back to required format
++    circles = np.array(best_solution).reshape(-1, 3)
++    
++    # Ensure we have exactly 21 circles
++    if circles.shape[0] != 21:
++        # Fallback to simple initialization if needed
++        circles = np.zeros((21, 3))
++        for i in range(21):
++            circles[i] = [random.uniform(0.1, RECT_WIDTH - 0.1),
++                         random.uniform(0.1, RECT_HEIGHT - 0.1),
++                         random.uniform(0.05, 0.2)]
++    
+     return circles
+-
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

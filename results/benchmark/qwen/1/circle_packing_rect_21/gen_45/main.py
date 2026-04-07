@@ -1,0 +1,424 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from scipy.spatial import Voronoi
+from typing import Tuple, List
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_voronoi_cells(points, rect_width, rect_height):
+    """Compute Voronoi cells for the given points within the rectangle."""
+    # Extend points to include boundary points to handle edge cases
+    extended_points = points.copy()
+
+    # Add boundary points to ensure bounded Voronoi cells
+    boundary_points = [
+        [-1, -1], [rect_width + 1, -1],
+        [-1, rect_height + 1], [rect_width + 1, rect_height + 1]
+    ]
+    extended_points = np.vstack([extended_points, boundary_points])
+
+    try:
+        vor = Voronoi(extended_points)
+        return vor
+    except:
+        # Fallback to simple approach if Voronoi fails
+        return None
+
+def get_closest_pairs(vor, points):
+    """Get pairs of points that are close to each other based on Voronoi structure."""
+    if vor is None:
+        return []
+
+    # Create list to store pairs that might be overlapping
+    pairs = []
+
+    # For each point, look at its neighboring sites in Voronoi diagram
+    for i in range(len(points)):
+        neighbors = []
+        # Find Voronoi region for point i
+        for j, region in enumerate(vor.regions):
+            if i in region and len(region) > 0:
+                # Collect neighboring points in the Voronoi diagram
+                try:
+                    for vertex_idx in region:
+                        if vertex_idx >= 0 and vertex_idx < len(vor.vertices):
+                            for k, point in enumerate(points):
+                                if k != i and np.allclose(vor.vertices[vertex_idx], point, atol=1e-5):
+                                    neighbors.append(k)
+                except:
+                    pass
+        # Add pairs for immediate neighbors
+        for neighbor in neighbors[:3]:  # Limit to first few neighbors
+            if neighbor > i:
+                pairs.append((i, neighbor))
+
+    return pairs
+
+def initialize_hexagonal_lattice(n_circles: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Initialize circle positions using a hexagonal lattice pattern for better initial distribution.
+    """
+    # Calculate hexagonal grid parameters based on target number of circles
+    # Estimate circle diameter from available space
+    estimated_diameter = min(rect_width, rect_height) * 0.1
+
+    if estimated_diameter <= 0:
+        estimated_diameter = 0.1
+
+    # Hexagonal packing parameters
+    hex_radius = estimated_diameter / 2.0
+    horizontal_spacing = estimated_diameter
+    vertical_spacing = estimated_diameter * np.sqrt(3) / 2.0
+
+    # Determine grid dimensions
+    cols = max(1, int(rect_width / horizontal_spacing))
+    rows = max(1, int(rect_height / vertical_spacing))
+
+    # Generate hexagonal grid points
+    points = []
+
+    for i in range(rows):
+        for j in range(cols):
+            # Offset every other row
+            x_offset = (i % 2) * horizontal_spacing / 2.0
+            x = x_offset + j * horizontal_spacing
+            y = i * vertical_spacing
+
+            # Only include points within bounds
+            if x >= hex_radius and x <= rect_width - hex_radius and \
+               y >= hex_radius and y <= rect_height - hex_radius:
+                points.append([x, y])
+
+    # If we don't have enough points, fill with additional points
+    while len(points) < n_circles:
+        # Add points in a systematic way to fill gaps
+        for i in range(len(points), n_circles):
+            x = rect_width * (i + 1) / (n_circles + 1)
+            y = rect_height * (i + 1) / (n_circles + 1)
+            points.append([x, y])
+
+    # Trim to exact number needed
+    points = points[:n_circles]
+
+    # Create initial circles with appropriate radii
+    circles = np.zeros((n_circles, 3))
+    for i, (x, y) in enumerate(points):
+        # Set initial radius to be small but reasonable
+        r = min(0.05, rect_width/8, rect_height/8)
+        circles[i] = [x, y, r]
+
+    return circles
+
+def calculate_fitness_with_voronoi(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> Tuple[float, float]:
+    """
+    Calculate fitness with improved constraint handling using Voronoi diagrams for better efficiency.
+    """
+    n = len(circles)
+
+    # Check boundary constraints with penalty
+    penalty = 0.0
+    for i in range(n):
+        x, y, r = circles[i]
+        # Circle must be fully contained within rectangle
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            # Apply penalty based on violation amount
+            violations = 0.0
+            if x - r < 0:
+                violations += abs(x - r)
+            if x + r > rect_width:
+                violations += abs(x + r - rect_width)
+            if y - r < 0:
+                violations += abs(y - r)
+            if y + r > rect_height:
+                violations += abs(y + r - rect_height)
+            penalty += violations * 10000
+
+    # Check overlap constraints more efficiently using Voronoi-based approach
+    overlap_penalty = 0.0
+    if n > 1:
+        try:
+            # Create Voronoi diagram to identify nearby points
+            coords = circles[:, :2]
+            vor = compute_voronoi_cells(coords, rect_width, rect_height)
+
+            # Find close pairs using Voronoi
+            close_pairs = get_closest_pairs(vor, coords) if vor else []
+
+            # Also do direct checks for remaining cases
+            # For efficiency, prioritize checking close pairs from Voronoi
+            checked_pairs = set()
+
+            # Check all pairs with Voronoi-based prioritization
+            if close_pairs:
+                # Focus on close pairs identified by Voronoi
+                for i, j in close_pairs:
+                    if (i,j) not in checked_pairs and (j,i) not in checked_pairs:
+                        x1, y1, r1 = circles[i]
+                        x2, y2, r2 = circles[j]
+                        distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                        min_distance = r1 + r2
+
+                        if distance < min_distance:
+                            overlap_amount = min_distance - distance
+                            overlap_penalty += overlap_amount * 10000  # Heavy penalty for overlaps
+                            checked_pairs.add((i,j))
+            else:
+                # Fallback to full pairwise check if Voronoi doesn't work well
+                for i in range(n):
+                    for j in range(i+1, n):
+                        x1, y1, r1 = circles[i]
+                        x2, y2, r2 = circles[j]
+                        distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                        min_distance = r1 + r2
+
+                        if distance < min_distance:
+                            overlap_amount = min_distance - distance
+                            overlap_penalty += overlap_amount * 10000  # Heavy penalty for overlaps
+
+        except Exception as e:
+            # Fallback to direct computation if anything fails
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                    min_distance = r1 + r2
+
+                    if distance < min_distance:
+                        overlap_amount = min_distance - distance
+                        overlap_penalty += overlap_amount * 10000
+
+    # Fitness is sum of radii minus penalties
+    total_radius = np.sum(circles[:, 2])
+    fitness = total_radius - penalty - overlap_penalty
+
+    return fitness, overlap_penalty
+
+def mutate_circles_voronoi_aware(circles: np.ndarray, mutation_rate: float = 0.1,
+                                 rect_width: float = 1.0, rect_height: float = 1.0,
+                                 voronoi_info=None) -> np.ndarray:
+    """
+    Mutate circle positions and radii with Voronoi-based awareness for more intelligent mutations.
+    """
+    mutated = circles.copy()
+
+    n = len(mutated)
+
+    # Mutation parameters
+    pos_mutation_strength = 0.01
+    rad_mutation_strength = 0.005
+
+    # Get Voronoi info for this generation if available
+    coords = circles[:, :2]
+    vor = compute_voronoi_cells(coords, rect_width, rect_height) if voronoi_info is None else voronoi_info
+
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        # Check local density using Voronoi information
+        local_density_factor = 1.0  # Default factor
+        if vor is not None and i < len(vor.points):
+            # Estimate local density from Voronoi cell size
+            try:
+                # Get the Voronoi region for this point
+                region_idx = i
+                # Simple heuristic: smaller Voronoi cells mean higher density
+                # This would require more complex Voronoi processing, so we simplify
+                pass
+            except:
+                pass
+
+        # Adjust mutation strength based on local context
+        adj_pos_mutation = pos_mutation_strength * local_density_factor
+        adj_rad_mutation = rad_mutation_strength * local_density_factor
+
+        # Mutate position
+        if random.random() < mutation_rate:
+            x += np.random.normal(0, adj_pos_mutation)
+            y += np.random.normal(0, adj_pos_mutation)
+
+            # Ensure position stays within bounds
+            x = np.clip(x, r, rect_width - r)
+            y = np.clip(y, r, rect_height - r)
+
+        # Mutate radius
+        if random.random() < mutation_rate:
+            r += np.random.normal(0, adj_rad_mutation)
+            # Ensure radius remains positive and reasonable
+            r = max(0.001, min(r, min(rect_width, rect_height)/2.0))
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+
+def crossover_circles(parent1: np.ndarray, parent2: np.ndarray,
+                     crossover_rate: float = 0.8) -> np.ndarray:
+    """
+    Perform uniform crossover between two circle configurations.
+    """
+    if random.random() > crossover_rate:
+        return parent1.copy()  # Return first parent if no crossover
+
+    offspring = parent1.copy()
+    n = len(parent1)
+
+    # Uniform crossover
+    for i in range(n):
+        if random.random() < 0.5:
+            offspring[i] = parent2[i].copy()
+
+    return offspring
+
+def optimize_circle_packing(n_circles: int = 21, rect_width: float = 1.0, rect_height: float = 1.0,
+                           population_size: int = 50, generations: int = 100) -> np.ndarray:
+    """
+    Optimize circle packing using evolutionary algorithm with better constraints.
+    """
+    # Initialize population
+    population = []
+    for _ in range(population_size):
+        circles = initialize_hexagonal_lattice(n_circles, rect_width, rect_height)
+        # Add some randomness to initial positions
+        for i in range(n_circles):
+            circles[i][0] += random.uniform(-0.02, 0.02)
+            circles[i][1] += random.uniform(-0.02, 0.02)
+            # Ensure bounds
+            circles[i][0] = np.clip(circles[i][0], circles[i][2], rect_width - circles[i][2])
+            circles[i][1] = np.clip(circles[i][1], circles[i][2], rect_height - circles[i][2])
+        population.append(circles)
+
+    # Evolutionary loop
+    for gen in range(generations):
+        # Evaluate fitness of population
+        fitness_scores = []
+        for circles in population:
+            fitness, _ = calculate_fitness_with_voronoi(circles, rect_width, rect_height)
+            fitness_scores.append(fitness)
+
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]  # Descending order
+        population = [population[i] for i in sorted_indices]
+        fitness_scores.sort(reverse=True)
+
+        # Print progress
+        if gen % 20 == 0:
+            print(f"Generation {gen}, Best fitness: {fitness_scores[0]:.6f}")
+
+        # Create new generation
+        new_population = [population[0]]  # Elitism - keep best individual
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            tournament_size = 5
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+
+            # Select parent
+            parent1 = population[winner_index]
+
+            # Select second parent
+            tournament_indices.remove(winner_index)
+            tournament_fitness.remove(max(tournament_fitness))
+            winner_index2 = tournament_indices[np.argmax(tournament_fitness)]
+            parent2 = population[winner_index2]
+
+            # Crossover
+            offspring = crossover_circles(parent1, parent2)
+
+            # Mutation with Voronoi awareness
+            offspring = mutate_circles_voronoi_aware(offspring)
+
+            new_population.append(offspring)
+
+        population = new_population[:population_size]
+
+    # Return best solution
+    best_index = np.argmax([calculate_fitness_with_voronoi(ind, rect_width, rect_height)[0] for ind in population])
+    return population[best_index]
+
+def refine_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                   iterations: int = 100) -> np.ndarray:
+    """
+    Apply local refinement to improve final solution with more iterations.
+    """
+    refined = circles.copy()
+
+    # Store best solution so far
+    best_solution = refined.copy()
+    best_fitness, _ = calculate_fitness_with_voronoi(refined, rect_width, rect_height)
+
+    for iteration in range(iterations):
+        # Try small perturbations
+        for i in range(len(refined)):
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Try small random moves
+            new_x = old_x + np.random.normal(0, 0.002)
+            new_y = old_y + np.random.normal(0, 0.002)
+            new_r = old_r + np.random.normal(0, 0.0005)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            new_r = max(0.001, min(new_r, min(rect_width, rect_height)/2.0))
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness_with_voronoi(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness_with_voronoi(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+        # Update best solution
+        current_fitness, _ = calculate_fitness_with_voronoi(refined, rect_width, rect_height)
+        if current_fitness > best_fitness:
+            best_fitness = current_fitness
+            best_solution = refined.copy()
+
+    return best_solution
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: perimeter = 4 => width + height = 2
+    # Using square rectangle for simplicity
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Run optimization
+    best_solution = optimize_circle_packing(
+        n_circles=21,
+        rect_width=rect_width,
+        rect_height=rect_height,
+        population_size=50,
+        generations=100
+    )
+
+    # Apply local refinement
+    refined_solution = refine_solution(best_solution, rect_width, rect_height, iterations=150)
+
+    return refined_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

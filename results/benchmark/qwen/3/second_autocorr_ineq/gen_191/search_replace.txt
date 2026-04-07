@@ -1,0 +1,100 @@
+<NAME>
+enhance_convolution_computation_with_jit
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses scipy.signal.convolve which is not optimized for the specific case of computing autoconvolution norms. I'll enhance the convolution computation by implementing a more efficient JIT-compiled version that directly handles the piecewise linear integration as specified in the problem requirements. This should significantly speed up the computation and allow for more iterations within the time constraint.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class AutoconvolutionCalculator:
+    """Efficient computation of autoconvolution norms"""
+
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the three norms needed for C2 calculation:
+        ||g||₂², ||g||₁, ||g||∞ where g = f*f
+        """
+        # Convert to numpy array for efficient computation
+        f = np.array(f_values)
+
+        # Compute autoconvolution g = f * f using fast convolution
+        g = signal.convolve(f, f, mode='full')
+
+        # Only keep the middle portion corresponding to valid convolution
+        center_idx = len(g) // 2
+        half_len = len(f)
+        g = g[center_idx - half_len + 1:center_idx + half_len]
+
+        # Compute norms
+        g_squared = g * g
+        norm_l2_sq = np.sum(g_squared)
+
+        norm_l1 = np.sum(np.abs(g))
+        norm_linf = np.max(np.abs(g))
+
+        return norm_l2_sq, norm_l1, norm_linf
+=======
+class AutoconvolutionCalculator:
+    """Efficient computation of autoconvolution norms"""
+
+    @staticmethod
+    @njit
+    def compute_autoconvolution_numba(f_values):
+        """
+        Compute autoconvolution using JIT compiled function for efficiency.
+        This implements the correct piecewise linear integration approach.
+        """
+        n_steps = len(f_values)
+        if n_steps == 0:
+            return np.array([])
+
+        # Create the full convolution grid with 2*n_steps-1 points
+        g_size = 2 * n_steps - 1
+        g = np.zeros(g_size)
+
+        # Compute autoconvolution using direct summation
+        # g[k] = sum_{i+j=k} f[i] * f[j]
+        for i in range(n_steps):
+            for j in range(n_steps):
+                k = i + j
+                if 0 <= k < g_size:
+                    g[k] += f_values[i] * f_values[j]
+
+        return g
+
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the three norms needed for C2 calculation:
+        ||g||₂², ||g||₁, ||g||∞ where g = f*f
+        """
+        # Convert to numpy array for efficient computation
+        f = np.array(f_values)
+
+        # Compute autoconvolution using JIT compiled function
+        g = AutoconvolutionCalculator.compute_autoconvolution_numba(f_values)
+
+        # Compute norms using the piecewise linear integration method
+        # For ||g||₂² we use trapezoidal-like integration:
+        # ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + (dx/3)(g₁² + g₁g₂ + g₂²) + ...
+        dx = 0.5 / len(f_values)  # Step width
+
+        if len(g) <= 1:
+            g2_sq = 0.0
+        else:
+            g2_sq = 0.0
+            for i in range(len(g)-1):
+                g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+        # ||g||₁ = sum(|g_i| * dx)
+        g1 = np.sum(np.abs(g)) * dx
+
+        # ||g||∞ = max(|g_i|)
+        ginf = np.max(np.abs(g))
+
+        return g2_sq, g1, ginf
+>>>>>>> REPLACE
+</DIFF>

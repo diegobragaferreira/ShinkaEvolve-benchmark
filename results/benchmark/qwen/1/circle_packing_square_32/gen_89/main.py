@@ -1,0 +1,348 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import random
+from collections import defaultdict
+import time
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+    
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Parameters
+    N_CIRCLES = 32
+    MAX_ITERATIONS = 5000
+    POPULATION_SIZE = 50
+    TOURNAMENT_SIZE = 5
+    ELITISM_COUNT = 3
+    MUTATION_RATE_START = 0.3
+    MUTATION_RATE_DECAY = 0.995
+    GRID_RESOLUTION = 10
+    
+    # Initialize population with enhanced Voronoi-based approach
+    def initialize_population(size):
+        population = []
+        for _ in range(size):
+            circles = generate_initial_configuration()
+            population.append(circles)
+        return population
+    
+    # Enhanced Voronoi initialization with boundary-weighted vertex selection
+    def generate_initial_configuration():
+        # Generate points with varying density and bias towards boundaries
+        points = []
+        
+        # Add corner points with high weight
+        corners = [(0.05, 0.05), (0.95, 0.05), (0.05, 0.95), (0.95, 0.95)]
+        for x, y in corners:
+            points.extend([(x, y)] * 3)  # Add multiple times for higher weight
+            
+        # Add edge points
+        for _ in range(10):
+            if random.random() < 0.5:
+                x = random.uniform(0.05, 0.95)
+                y = random.choice([0.05, 0.95])
+            else:
+                x = random.choice([0.05, 0.95])
+                y = random.uniform(0.05, 0.95)
+            points.append((x, y))
+        
+        # Add interior points
+        for _ in range(20):
+            points.append((random.uniform(0.05, 0.95), random.uniform(0.05, 0.95)))
+        
+        # Create Voronoi diagram
+        vor = Voronoi(points)
+        
+        # Score vertices based on boundary proximity and spacing
+        scored_vertices = []
+        for i, (vx, vy) in enumerate(vor.vertices):
+            # Skip vertices outside the unit square
+            if vx < 0 or vx > 1 or vy < 0 or vy > 1:
+                continue
+                
+            # Calculate boundary score (favoring closer to edges/corners)
+            boundary_score = 1.0 / (min(vx, 1-vx, vy, 1-vy) + 0.001)
+            
+            # Calculate spacing score (favoring well-separated vertices)
+            spacing_score = 0
+            for j, (other_vx, other_vy) in enumerate(vor.vertices):
+                if i != j:
+                    dist = np.sqrt((vx - other_vx)**2 + (vy - other_vy)**2)
+                    spacing_score += 1.0 / (dist + 0.001)
+                    
+            score = boundary_score * (spacing_score + 1.0)
+            scored_vertices.append((score, i, (vx, vy)))
+        
+        # Sort by score and select top candidates
+        scored_vertices.sort(reverse=True)
+        selected_vertices = scored_vertices[:N_CIRCLES]
+        
+        # For each selected vertex, compute maximum safe radius
+        circles = []
+        for _, _, (cx, cy) in selected_vertices:
+            # Calculate max radius for this circle
+            min_dist_to_boundary = min(cx, 1-cx, cy, 1-cy)
+            
+            # Initialize radius as maximum possible
+            radius = min_dist_to_boundary
+            
+            # Check for overlap with other selected circles
+            for other_cx, other_cy, other_r in circles:
+                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                if dist < (radius + other_r):
+                    # Reduce radius to prevent overlap
+                    radius = min(radius, dist - other_r)
+            
+            # Ensure positive radius
+            radius = max(radius, 0.001)
+            
+            circles.append([cx, cy, radius])
+            
+        # If we don't have enough circles, fill with random ones
+        while len(circles) < N_CIRCLES:
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            
+            # Find minimum distance to existing circles
+            min_dist = float('inf')
+            for cx, cy, r in circles:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                min_dist = min(min_dist, dist)
+                
+            # Calculate maximum safe radius
+            radius = min(min_dist/2.0, 1-x, x, 1-y, y)
+            radius = max(radius, 0.001)
+            circles.append([x, y, radius])
+            
+        return np.array(circles[:N_CIRCLES])
+    
+    # Spatial grid for fast collision detection
+    class SpatialGrid:
+        def __init__(self, resolution=GRID_RESOLUTION):
+            self.resolution = resolution
+            self.grid = defaultdict(list)
+            
+        def clear(self):
+            self.grid.clear()
+            
+        def add_circle(self, x, y, r, index):
+            # Get grid cell indices
+            grid_x = int(x * self.resolution)
+            grid_y = int(y * self.resolution)
+            self.grid[(grid_x, grid_y)].append((index, x, y, r))
+            
+        def get_candidates(self, x, y, r):
+            candidates = []
+            grid_x = int(x * self.resolution)
+            grid_y = int(y * self.resolution)
+            
+            # Check nearby cells
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    cell = (grid_x + dx, grid_y + dy)
+                    if cell in self.grid:
+                        candidates.extend(self.grid[cell])
+                        
+            return candidates
+    
+    # Calculate fitness with multi-tier constraints
+    def calculate_fitness(circles):
+        total_radius = np.sum(circles[:, 2])
+        
+        # Apply penalties for constraint violations
+        penalty = 0.0
+        
+        # Boundary violations (quadratic penalties)
+        boundary_violations = 0
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or y - r < 0 or x + r > 1 or y + r > 1:
+                boundary_violations += 1
+                penalty += 1000 * (r**2)  # Strong quadratic penalty
+                
+        # Overlap violations (linear penalties)
+        grid = SpatialGrid(GRID_RESOLUTION)
+        for i in range(len(circles)):
+            grid.add_circle(*circles[i], i)
+            
+        overlap_violations = 0
+        for i in range(len(circles)):
+            x1, y1, r1 = circles[i]
+            candidates = grid.get_candidates(x1, y1, r1)
+            
+            for j, x2, y2, r2 in candidates:
+                if i != j:
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < (r1 + r2):
+                        overlap_violations += 1
+                        # Linear penalty based on overlap amount
+                        overlap_amount = (r1 + r2 - distance)
+                        penalty += overlap_amount * 50
+                        
+        # Diversity penalty to avoid getting stuck in local optima
+        if boundary_violations > 0 or overlap_violations > 0:
+            penalty += 1000 * (boundary_violations + overlap_violations)
+            
+        return total_radius - penalty
+    
+    # Local optimization using L-BFGS for each circle
+    def local_optimize(circles, max_iter=100):
+        circles = circles.copy()
+        
+        def objective(params):
+            # Update circles with new parameters
+            for i in range(N_CIRCLES):
+                if i < len(params) // 3:
+                    circles[i][0] = params[3*i]
+                    circles[i][1] = params[3*i+1]
+                    circles[i][2] = params[3*i+2]
+            
+            return -calculate_fitness(circles)  # Negative because we maximize
+            
+        def gradient(params):
+            # Simple finite difference gradient approximation
+            eps = 1e-6
+            grad = np.zeros_like(params)
+            base_obj = objective(params)
+            
+            for i in range(len(params)):
+                test_params = params.copy()
+                test_params[i] += eps
+                grad[i] = (objective(test_params) - base_obj) / eps
+                
+            return grad
+            
+        # Flatten the circles array
+        initial_params = []
+        for i in range(N_CIRCLES):
+            initial_params.extend([circles[i][0], circles[i][1], circles[i][2]])
+            
+        # Optimize using L-BFGS
+        try:
+            result = minimize(objective, initial_params, method='L-BFGS-B', 
+                            bounds=[(0.01, 0.99)] * (3*N_CIRCLES),
+                            options={'maxiter': max_iter})
+            if result.success:
+                # Update circles with optimized values
+                for i in range(N_CIRCLES):
+                    circles[i][0] = result.x[3*i]
+                    circles[i][1] = result.x[3*i+1]
+                    circles[i][2] = result.x[3*i+2]
+        except Exception:
+            pass  # Fall back to original if optimization fails
+            
+        return circles
+    
+    # Mutate a solution with better control
+    def mutate(circles, mutation_rate):
+        new_circles = circles.copy()
+        for i in range(len(new_circles)):
+            if random.random() < mutation_rate:
+                # Randomly modify one circle
+                x, y, r = new_circles[i]
+                
+                # Apply small perturbations
+                x += random.gauss(0, 0.005)
+                y += random.gauss(0, 0.005)
+                
+                # Clamp to valid range
+                x = max(0.01, min(0.99, x))
+                y = max(0.01, min(0.99, y))
+                
+                # Adjust radius to respect constraints
+                min_dist_to_boundary = min(x, 1-x, y, 1-y)
+                r = min(r + random.gauss(0, 0.002), min_dist_to_boundary)
+                r = max(0.001, r)
+                
+                new_circles[i] = [x, y, r]
+                
+        return new_circles
+    
+    # Crossover two solutions
+    def crossover(parent1, parent2):
+        # Uniform crossover with preference for better parents
+        child = parent1.copy()
+        for i in range(len(child)):
+            if random.random() < 0.5:
+                child[i] = parent2[i].copy()
+        return child
+    
+    # Tournament selection
+    def tournament_selection(population, fitnesses, k=TOURNAMENT_SIZE):
+        selected_indices = random.sample(range(len(population)), k)
+        best_idx = selected_indices[0]
+        for idx in selected_indices[1:]:
+            if fitnesses[idx] > fitnesses[best_idx]:
+                best_idx = idx
+        return population[best_idx].copy()
+    
+    # Main evolutionary algorithm with alternating phases
+    population = initialize_population(POPULATION_SIZE)
+    
+    best_fitness = -float('inf')
+    best_individual = None
+    
+    # Track diversity to avoid stagnation
+    last_improvement = 0
+    stagnation_counter = 0
+    
+    for generation in range(MAX_ITERATIONS):
+        # Calculate fitness for all individuals
+        fitnesses = []
+        for i, individual in enumerate(population):
+            # Apply local optimization to each individual
+            optimized_individual = local_optimize(individual)
+            fitness = calculate_fitness(optimized_individual)
+            fitnesses.append(fitness)
+            
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = optimized_individual.copy()
+                last_improvement = generation
+                stagnation_counter = 0
+            else:
+                stagnation_counter += 1
+                
+        # Adaptive mutation rate
+        mutation_rate = MUTATION_RATE_START * (MUTATION_RATE_DECAY ** generation)
+        
+        # Check for stagnation and restart if needed
+        if stagnation_counter > 300:
+            print(f"Stagnation detected at generation {generation}, restarting...")
+            population = initialize_population(POPULATION_SIZE)
+            stagnation_counter = 0
+            continue
+            
+        # Selection and reproduction
+        new_population = []
+        
+        # Elitism - keep best individuals
+        sorted_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
+        for i in range(min(ELITISM_COUNT, len(population))):
+            new_population.append(population[sorted_indices[i]].copy())
+            
+        # Generate offspring
+        while len(new_population) < POPULATION_SIZE:
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+            
+            child = crossover(parent1, parent2)
+            child = mutate(child, mutation_rate)
+            
+            new_population.append(child)
+            
+        population = new_population[:POPULATION_SIZE]
+        
+        # Print progress
+        if generation % 500 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+            
+    return best_individual
+
+# EVOLVE-BLOCK-END

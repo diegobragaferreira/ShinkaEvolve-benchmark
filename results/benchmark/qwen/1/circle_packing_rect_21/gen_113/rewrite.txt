@@ -1,0 +1,268 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle with perimeter = 4, so width + height = 2
+    # Optimal rectangle: 1.5 x 0.5 (width x height) for better packing efficiency
+    rect_width = 1.5
+    rect_height = 0.5
+    
+    # Phase 1: Initial placement using grid-based pattern with adaptive spacing
+    circles = np.zeros((n, 3))
+    
+    # Grid-based arrangement for better initial distribution
+    rows = 4
+    cols = 6
+    
+    # Calculate spacing based on rectangle dimensions
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    # Place circles in grid pattern with slight randomness
+    idx = 0
+    for i in range(rows):
+        offset = spacing_x * (i % 2) * 0.3  # Offset every other row with less shift
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x + offset + np.random.uniform(-spacing_x*0.1, spacing_x*0.1)
+            y = (i + 1) * spacing_y + np.random.uniform(-spacing_y*0.1, spacing_y*0.1)
+            
+            # Ensure position is within bounds
+            x = max(0.01, min(rect_width - 0.01, x))
+            y = max(0.01, min(rect_height - 0.01, y))
+            
+            # Set initial radius to a small value
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+            
+        if idx >= n:
+            break
+    
+    # Fill remaining circles if needed with random placement
+    while idx < n:
+        x = np.random.uniform(0.01, rect_width - 0.01)
+        y = np.random.uniform(0.01, rect_height - 0.01)
+        circles[idx] = [x, y, 0.05]
+        idx += 1
+    
+    # Phase 2: Voronoi-based optimization with refined energy calculation
+    max_iterations = 150
+    prev_sum = 0.0
+    
+    for iteration in range(max_iterations):
+        # Calculate sum before optimization
+        current_sum = np.sum(circles[:, 2])
+        
+        # Compute Voronoi diagram for current configuration
+        points = circles[:, :2]  # x, y coordinates only
+        try:
+            vor = Voronoi(points)
+        except:
+            # Fallback to basic optimization if Voronoi fails
+            pass
+        
+        # Calculate energy based on Voronoi cell properties and neighbor constraints
+        energies = np.zeros(n)
+        
+        # For each circle, calculate how much space it would lose due to collisions
+        for i in range(n):
+            # Find all neighboring circles within reasonable distance
+            neighbor_indices = []
+            for j in range(n):
+                if i != j:
+                    dx = circles[i, 0] - circles[j, 0]
+                    dy = circles[i, 1] - circles[j, 1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    if distance < (circles[i, 2] + circles[j, 2] + 0.005):
+                        neighbor_indices.append(j)
+            
+            # Energy is based on constraint violations and proximity
+            energy = 0.0
+            if neighbor_indices:
+                for j in neighbor_indices:
+                    dx = circles[i, 0] - circles[j, 0]
+                    dy = circles[i, 1] - circles[j, 1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    overlap = (circles[i, 2] + circles[j, 2]) - distance
+                    if overlap > 0:
+                        energy += overlap * 2000  # Scale up constraint penalties
+            
+            # Add boundary constraints to energy
+            boundary_energy = (
+                circles[i, 0] - circles[i, 2] +  # Left boundary
+                (rect_width - circles[i, 0]) - circles[i, 2] +  # Right boundary
+                circles[i, 1] - circles[i, 2] +  # Bottom boundary
+                (rect_height - circles[i, 1]) - circles[i, 2]    # Top boundary
+            )
+            
+            # Only penalize negative boundaries (violations)
+            if boundary_energy < 0:
+                energy += abs(boundary_energy) * 1000
+            
+            energies[i] = energy
+        
+        # Phase 3: Optimized expansion based on energy analysis
+        improved = False
+        
+        # Sort circles by energy (ascending - least constrained first)
+        sorted_indices = np.argsort(energies)
+        
+        # Try to expand circles that have room to grow
+        for i in sorted_indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+            
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+            
+            # If we can expand and there's significant improvement
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Adaptive expansion: dynamic factor based on energy level and local density
+                expansion_factor = 0.1
+                
+                # Higher expansion for less constrained circles
+                if energies[i] < 10:  # Very unconstrained
+                    expansion_factor = 0.8
+                elif energies[i] < 50:  # Moderately constrained
+                    expansion_factor = 0.5
+                elif energies[i] < 100:  # Fairly constrained
+                    expansion_factor = 0.3
+                else:  # Highly constrained
+                    expansion_factor = 0.1
+                
+                # Also consider local density (fewer neighbors = more room to grow)
+                neighbor_count = sum(1 for j in range(n) if i != j and 
+                                   np.sqrt((circles[i][0] - circles[j][0])**2 + 
+                                          (circles[i][1] - circles[j][1])**2) < 
+                                   (circles[i][2] + circles[j][2] + 0.005))
+                
+                # Reduce expansion if surrounded by many neighbors
+                if neighbor_count > 5:
+                    expansion_factor *= 0.6
+                elif neighbor_count > 3:
+                    expansion_factor *= 0.8
+                
+                # Try to expand by adaptive amount
+                delta = min(0.03, max_radius - circles[i][2]) * expansion_factor
+                if delta > 0.0005:
+                    circles[i][2] += delta
+                    improved = True
+        
+        # Early stopping if minimal improvement
+        if not improved or abs(current_sum - prev_sum) < 0.0005:
+            break
+        
+        prev_sum = current_sum
+    
+    # Phase 4: Final refinement using iterative local optimization with boundary awareness
+    for _ in range(100):
+        improved = False
+        for i in range(n):
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+            
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+            
+            # Increase radius if beneficial
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Try to increase by a small amount
+                new_radius = min(max_radius, circles[i][2] + 0.01)
+                if new_radius > circles[i][2]:
+                    circles[i][2] = new_radius
+                    improved = True
+        
+        # Stop if no improvement made
+        if not improved:
+            break
+    
+    # Phase 5: Boundary-aware refinement - special attention to edge circles
+    # Identify circles near edges and give them extra optimization opportunities
+    edge_threshold = 0.1  # Distance from edge to be considered 'near edge'
+    
+    for _ in range(50):
+        improved = False
+        for i in range(n):
+            # Check if circle is near an edge
+            near_edge = (circles[i][0] < edge_threshold or 
+                        circles[i][0] > rect_width - edge_threshold or
+                        circles[i][1] < edge_threshold or 
+                        circles[i][1] > rect_height - edge_threshold)
+            
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+            
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+            
+            # Increase radius if beneficial
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Extra boost for edge circles
+                multiplier = 1.0
+                if near_edge:
+                    multiplier = 1.2  # Extra boost for edge positions
+                
+                # Try to increase by a small amount
+                delta = min(0.01, max_radius - circles[i][2]) * multiplier
+                if delta > 0.0005:
+                    circles[i][2] = min(max_radius, circles[i][2] + delta)
+                    improved = True
+        
+        # Stop if no improvement made
+        if not improved:
+            break
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,242 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+from scipy.optimize import differential_evolution
+import random
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2
+    # Using width=1.2, height=0.8 for a reasonable aspect ratio
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Fixed seed for reproducibility
+    np.random.seed(42)
+    
+    # Physics-based evolution parameters
+    num_circles = 21
+    max_iterations = 1000
+    population_size = 50
+    inertia_weight = 0.7
+    cognitive_weight = 1.5
+    social_weight = 1.5
+    
+    # Initialize circles with random positions and small radii
+    circles = np.zeros((num_circles, 3))
+    
+    # Initialize positions randomly within bounds
+    for i in range(num_circles):
+        circles[i, 0] = np.random.uniform(0.01, rect_width - 0.01)
+        circles[i, 1] = np.random.uniform(0.01, rect_height - 0.01)
+        circles[i, 2] = 0.01  # Small initial radius
+    
+    # Function to compute fitness (negative of sum of radii for minimization)
+    def compute_fitness(circles_array):
+        # Calculate total radius sum (we want to maximize this)
+        total_radius = np.sum(circles_array[:, 2])
+        return -total_radius  # Negative because we're minimizing
+    
+    # Function to check if configuration is valid (no overlaps)
+    def is_valid_configuration(circles_array):
+        positions = circles_array[:, :2]
+        radii = circles_array[:, 2]
+        
+        # Check overlaps
+        distances = cdist(positions, positions)
+        for i in range(len(circles_array)):
+            for j in range(i+1, len(circles_array)):
+                if distances[i, j] < (radii[i] + radii[j]):
+                    return False
+        return True
+    
+    # Function to calculate max radius at position without overlap
+    def calculate_max_radius_at_position(pos, circles_array, rect_width, rect_height):
+        x, y = pos
+        # Distance to boundaries
+        dist_to_edges = [x, rect_width - x, y, rect_height - y]
+        
+        # Distance to other circles (minimum)
+        min_dist_to_others = float('inf')
+        for i in range(len(circles_array)):
+            if not np.allclose(circles_array[i, :2], pos):
+                dist = np.sqrt((x - circles_array[i, 0])**2 + (y - circles_array[i, 1])**2)
+                min_dist_to_others = min(min_dist_to_others, dist)
+        
+        # Maximum radius is limited by both boundaries and other circles
+        if min_dist_to_others == float('inf'):
+            max_radius = min(dist_to_edges)
+        else:
+            # Can't overlap with other circles, so max radius is limited by distance to closest circle minus their radius
+            max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+        
+        return max(0.001, max_radius)
+    
+    # Function to update circle radii to maximum possible values
+    def update_radii(circles_array, rect_width, rect_height):
+        updated_circles = circles_array.copy()
+        for i in range(len(updated_circles)):
+            pos = updated_circles[i, :2]
+            new_radius = calculate_max_radius_at_position(pos, updated_circles, rect_width, rect_height)
+            updated_circles[i, 2] = new_radius
+        return updated_circles
+    
+    # Physics-based evolution using particle swarm optimization approach
+    best_fitness = float('inf')
+    best_circles = circles.copy()
+    
+    # Initialize swarm particles
+    particles = []
+    velocities = []
+    
+    for _ in range(population_size):
+        # Random initial configuration
+        particle_circles = np.zeros((num_circles, 3))
+        for i in range(num_circles):
+            particle_circles[i, 0] = np.random.uniform(0.01, rect_width - 0.01)
+            particle_circles[i, 1] = np.random.uniform(0.01, rect_height - 0.01)
+            particle_circles[i, 2] = 0.01
+        
+        particle_circles = update_radii(particle_circles, rect_width, rect_height)
+        particles.append(particle_circles.copy())
+        velocities.append(np.zeros((num_circles, 3)))
+    
+    # Global best particle
+    global_best_particle = particles[0].copy()
+    global_best_fitness = compute_fitness(global_best_particle)
+    
+    # PSO-style evolution
+    for iteration in range(max_iterations):
+        # Evaluate all particles
+        for i, particle in enumerate(particles):
+            # Update radii to maximize them
+            particle = update_radii(particle, rect_width, rect_height)
+            particles[i] = particle
+            
+            # Check if valid configuration
+            if not is_valid_configuration(particle):
+                # Skip invalid particles
+                continue
+                
+            fit = compute_fitness(particle)
+            if fit < global_best_fitness:
+                global_best_fitness = fit
+                global_best_particle = particle.copy()
+        
+        # Update particles if we found a better configuration
+        if global_best_fitness < best_fitness:
+            best_fitness = global_best_fitness
+            best_circles = global_best_particle.copy()
+        
+        # Update swarm velocities and positions (PSO-style)
+        for i in range(population_size):
+            particle = particles[i]
+            velocity = velocities[i]
+            
+            # Update velocity
+            r1, r2 = np.random.random(2), np.random.random(2)
+            
+            for j in range(num_circles):
+                # Update position components separately
+                for d in range(3):  # x, y, radius
+                    if d < 2:  # Position coordinates
+                        # For position, update based on personal best and global best
+                        personal_best = global_best_particle[j, d]
+                        new_velocity = (inertia_weight * velocity[j, d] + 
+                                      cognitive_weight * r1[d] * (personal_best - particle[j, d]))
+                        
+                        # Apply velocity to position
+                        new_pos = particle[j, d] + new_velocity
+                        
+                        # Keep within bounds
+                        if d == 0:  # x coordinate
+                            new_pos = np.clip(new_pos, 0.01, rect_width - 0.01)
+                        else:  # y coordinate  
+                            new_pos = np.clip(new_pos, 0.01, rect_height - 0.01)
+                            
+                        particle[j, d] = new_pos
+                        velocity[j, d] = new_velocity
+                        
+                    else:  # radius component
+                        # Apply similar logic for radius
+                        personal_best = global_best_particle[j, d]
+                        new_velocity = (inertia_weight * velocity[j, d] + 
+                                      cognitive_weight * r1[d] * (personal_best - particle[j, d]))
+                        
+                        # Apply velocity to radius
+                        new_radius = particle[j, d] + new_velocity
+                        
+                        # Keep radius positive
+                        if new_radius < 0.001:
+                            new_radius = 0.001
+                            
+                        particle[j, d] = new_radius
+                        velocity[j, d] = new_velocity
+            
+            particles[i] = particle
+            velocities[i] = velocity
+            
+            # Ensure valid configuration after updates
+            if is_valid_configuration(particles[i]):
+                particles[i] = update_radii(particles[i], rect_width, rect_height)
+    
+    # Final local refinement with gradient-free optimization
+    # Use differential evolution to refine the best solution
+    try:
+        def objective(params):
+            # Reshape params back to circles array
+            circles_copy = best_circles.copy()
+            for i in range(num_circles):
+                circles_copy[i, 0] = params[i*3]
+                circles_copy[i, 1] = params[i*3+1]
+                circles_copy[i, 2] = params[i*3+2]
+            
+            # Ensure valid configuration
+            if not is_valid_configuration(circles_copy):
+                return 1e10  # Large penalty for invalid configurations
+            
+            # Return negative sum of radii (since we're minimizing)
+            return -np.sum(circles_copy[:, 2])
+        
+        # Flatten current best solution
+        initial_params = best_circles.flatten()
+        
+        # Run differential evolution for local optimization
+        bounds = []
+        for i in range(num_circles):
+            bounds.extend([(0.01, rect_width - 0.01), (0.01, rect_height - 0.01), (0.001, min(0.5, rect_width/2, rect_height/2))])
+        
+        result = differential_evolution(objective, bounds, maxiter=200, popsize=15, seed=42)
+        
+        # Update best solution with optimized result
+        if result.success:
+            for i in range(num_circles):
+                best_circles[i, 0] = result.x[i*3]
+                best_circles[i, 1] = result.x[i*3+1]
+                best_circles[i, 2] = result.x[i*3+2]
+                
+    except Exception as e:
+        # If optimization fails, keep the previous best
+        pass
+    
+    # Final validation and cleanup
+    if not is_valid_configuration(best_circles):
+        # Revert to last valid configuration
+        pass
+    
+    return best_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

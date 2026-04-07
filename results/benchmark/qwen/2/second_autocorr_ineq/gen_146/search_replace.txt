@@ -1,0 +1,177 @@
+<NAME>
+enhanced_gaussian_construction
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the Gaussian-based peak construction by implementing multi-scale peak generation with logarithmic spacing and adaptive amplitude scaling. The key insights are:
+1. Using logarithmic spacing prevents clustering of peaks in narrow regions
+2. Multi-scale approach ensures good coverage across different frequency ranges
+3. Adaptive amplitude scaling based on peak positions avoids excessive L-infinity norm growth
+4. Better constraint enforcement prevents autoconvolution spikes that degrade C2 performance
+
+The changes focus on improving the `adaptive_gaussian_construction` function to generate more sophisticated peak distributions that should yield higher C2 values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_gaussian_construction(n_steps: int) -> list[float]:
+    """
+    Construct a step function with adaptive Gaussian-based peak placement.
+    """
+    # Generate positions using Gaussian distribution around center
+    # This creates a bell-curve shaped distribution of peak heights
+    positions = np.random.normal(0, 0.15, n_steps)
+    # Clip to [-0.25, 0.25] to stay within domain
+    positions = np.clip(positions, -0.25, 0.25)
+
+    # Sort positions for proper step function construction
+    positions = np.sort(positions)
+
+    # Generate amplitudes based on distance from center
+    # Peaks closer to center get higher amplitude
+    amplitudes = np.exp(-20 * positions**2)
+
+    # Add adaptive noise to break symmetry but preserve structure
+    initial_noise_level = 0.1
+    amplitudes += np.random.normal(0, initial_noise_level, n_steps)
+
+    # Ensure non-negative amplitudes
+    amplitudes = np.maximum(amplitudes, 0)
+
+    # Apply constraint-aware normalization to prevent extreme autoconvolution spikes
+    # We do a quick check first
+    test_f = amplitudes.copy()
+    if np.sum(test_f) > 0:
+        test_f = test_f / np.sum(test_f) * 10
+
+        # Quick norm computation to check quality
+        test_g = np.convolve(test_f, test_f, mode='full')
+        test_g = test_g[len(test_f)-1:2*len(test_f)-1]
+        test_norm_1 = np.sum(np.abs(test_g))
+        test_norm_inf = np.max(np.abs(test_g)) if np.max(np.abs(test_g)) > 0 else 1e-15
+
+        # If the peak is too dominant (which would hurt C2), reduce noise
+        if test_norm_inf > 10 * test_norm_1:
+            # Reduce noise level significantly to prevent overly dominant peaks
+            noise_level = max(0.01, initial_noise_level * 0.5)
+            amplitudes = np.random.normal(0, noise_level, n_steps)
+            amplitudes += np.exp(-20 * positions**2)
+            amplitudes = np.maximum(amplitudes, 0)
+
+    # Normalize amplitudes to make them reasonable
+    if np.sum(amplitudes) > 0:
+        amplitudes = amplitudes / np.sum(amplitudes) * 10
+
+    return amplitudes.tolist()
+=======
+def adaptive_gaussian_construction(n_steps: int) -> list[float]:
+    """
+    Construct a step function with enhanced Gaussian-based peak placement using logarithmic spacing
+    and multi-scale peak distribution to improve C2 values.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Multi-scale approach: create peaks at different scales to cover various frequency ranges
+    domain_width = 0.5
+
+    # Determine number of peaks based on resolution
+    n_peaks = max(20, min(200, n_steps // 25))
+
+    # Use logarithmic distribution to avoid clustering in narrow regions
+    # Create multiple scales of peaks
+    scales = np.logspace(np.log10(0.01), np.log10(0.25), 5)  # 5 different scales
+
+    all_positions = []
+
+    for scale in scales:
+        # Determine how many peaks per scale (more peaks at smaller scales)
+        n_per_scale = max(2, int(n_peaks * scale / 0.25))
+        # Generate positions with logarithmic spacing within this scale
+        positions = np.logspace(np.log10(scale * 0.1), np.log10(scale), n_per_scale)
+        # Mirror to create symmetric distribution
+        positions = np.concatenate([-positions[::-1], positions])
+        # Filter to domain
+        positions = positions[(positions >= -0.25) & (positions <= 0.25)]
+        all_positions.extend(positions)
+
+    # Remove duplicates and sort
+    all_positions = np.unique(all_positions)
+
+    # Ensure we don't exceed our target number of peaks
+    if len(all_positions) > n_peaks:
+        # Select a subset using weighted sampling toward center
+        weights = np.exp(-10 * all_positions**2)  # Higher weight for center positions
+        weights = weights / np.sum(weights)
+        selected_indices = np.random.choice(len(all_positions), size=n_peaks, p=weights, replace=False)
+        all_positions = all_positions[selected_indices]
+
+    # Ensure minimum spacing to prevent narrow autoconvolution interference
+    if len(all_positions) > 1:
+        min_spacing = 0.02 * domain_width  # 2% of domain width
+        sorted_positions = np.sort(all_positions)
+        filtered_positions = [sorted_positions[0]]
+
+        for i in range(1, len(sorted_positions)):
+            if sorted_positions[i] - filtered_positions[-1] >= min_spacing:
+                filtered_positions.append(sorted_positions[i])
+
+        all_positions = np.array(filtered_positions)
+
+    # Generate amplitudes that decay based on distance from center but with adaptive scaling
+    amplitudes = np.exp(-15 * all_positions**2)  # Stronger center concentration
+
+    # Add structured noise to break symmetry while maintaining overall structure
+    # Use a combination of Gaussian noise and sinusoidal modulation
+    noise = np.random.normal(0, 0.2, len(all_positions))
+    # Add sinusoidal modulation to avoid degenerate cases
+    modulation = 0.1 * np.sin(10 * np.pi * all_positions) * np.exp(-all_positions**2/0.05)
+    amplitudes += noise + modulation
+
+    # Ensure non-negative amplitudes
+    amplitudes = np.maximum(amplitudes, 0)
+
+    # Apply adaptive amplitude scaling to prevent autoconvolution spikes
+    # Generate test function and check autoconvolution quality
+    test_amplitudes = amplitudes.copy()
+    if np.sum(test_amplitudes) > 0:
+        test_amplitudes = test_amplitudes / np.sum(test_amplitudes) * 10
+
+        # Quick test of autoconvolution
+        test_g = np.convolve(test_amplitudes, test_amplitudes, mode='full')
+        test_g = test_g[len(test_amplitudes)-1:2*len(test_amplitudes)-1]
+        test_norm_1 = np.sum(np.abs(test_g))
+        test_norm_inf = np.max(np.abs(test_g)) if np.max(np.abs(test_g)) > 0 else 1e-15
+
+        # If the autoconvolution shows signs of being too spiked, reduce amplitudes
+        if test_norm_inf > 5 * test_norm_1 and test_norm_1 > 0:
+            # Scale down amplitudes to reduce peakiness
+            amplitudes = amplitudes * 0.7
+
+    # Final normalization with additional care to preserve structure
+    if np.sum(amplitudes) > 0:
+        amplitudes = amplitudes / np.sum(amplitudes) * 10
+
+    # Convert to step function by interpolating to desired resolution
+    x_domain = np.linspace(-0.25, 0.25, n_steps)
+    peak_x = np.linspace(-0.25, 0.25, len(all_positions))
+
+    # Create step function using Gaussian interpolation
+    step_function = np.zeros(n_steps)
+    for i, (pos, amp) in enumerate(zip(all_positions, amplitudes)):
+        # Use a wider Gaussian to spread the influence
+        width = 0.03  # Fixed width for smoother transitions
+        step_function += amp * np.exp(-0.5 * ((x_domain - pos) / width)**2)
+
+    # Add fine-grained modulation to break any remaining symmetries
+    fine_modulation = 0.05 * np.sin(30 * np.pi * x_domain) * np.exp(-x_domain**2/0.05)
+    step_function += fine_modulation
+
+    # Ensure non-negativity and normalize
+    step_function = np.maximum(step_function, 0)
+    if np.sum(step_function) > 0:
+        step_function = step_function / np.sum(step_function) * 10
+
+    return step_function.tolist()
+>>>>>>> REPLACE
+</DIFF>

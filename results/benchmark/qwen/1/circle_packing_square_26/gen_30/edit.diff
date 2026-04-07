@@ -1,0 +1,288 @@
+--- a/original.py
++++ b/original.py
+@@ -1,192 +1,263 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial import cKDTree
++from scipy.spatial import Voronoi, distance
+ from deap import base, creator, tools, algorithms
+ import random
+ import time
++from scipy.spatial import cKDTree
+ 
+ # Fixed seed for reproducibility
+ random.seed(42)
+ np.random.seed(42)
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n_circles = 26
+     max_radius = 0.5
+     min_radius = 0.001
+     
+     # Helper function to check if a circle is valid
+     def is_valid_circle(x, y, r):
+         return (r >= min_radius and 
+                 r <= x <= 1 - r and 
+                 r <= y <= 1 - r)
+     
+     # Helper function to compute distance between two circles
+     def circle_distance(c1, c2):
+         x1, y1, r1 = c1
+         x2, y2, r2 = c2
+         return np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+     
+     # Constraint checking function
+     def is_valid_configuration(circles_array):
+         # Check containment constraints
+         for x, y, r in circles_array:
+             if not is_valid_circle(x, y, r):
+                 return False
+         
+         # Check overlap constraints using KDTree for efficiency
+-        tree = cKDTree(circles_array[:, :2])
+-        pairs = tree.query_pairs(2 * max_radius)  # Only check nearby pairs
+-        
+-        for i, j in pairs:
+-            c1 = circles_array[i]
+-            c2 = circles_array[j]
+-            dist = circle_distance(c1, c2)
+-            if dist < c1[2] + c2[2]:  # Overlapping
+-                return False
+-                
++        if len(circles_array) > 1:
++            tree = cKDTree(circles_array[:, :2])
++            pairs = tree.query_pairs(2 * max_radius)  # Only check nearby pairs
++            
++            for i, j in pairs:
++                c1 = circles_array[i]
++                c2 = circles_array[j]
++                dist = circle_distance(c1, c2)
++                if dist < c1[2] + c2[2]:  # Overlapping
++                    return False
++                    
+         return True
+     
+     # Fitness function
+     def evaluate(individual):
+         circles_array = np.array(individual).reshape(-1, 3)
+         if not is_valid_configuration(circles_array):
+             return (0,)  # Invalid configuration gets zero fitness
+         total_radius = np.sum(circles_array[:, 2])
+         return (total_radius,)
+     
+     # Create types
+     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+     creator.create("Individual", list, fitness=creator.FitnessMax)
+     
+     toolbox = base.Toolbox()
+     
++    # Voronoi-based initialization helper
++    def initialize_voronoi():
++        # Generate points that are likely to form a good Voronoi diagram
++        # More points than needed to ensure good coverage
++        n_points = n_circles * 2
++        points = np.random.rand(n_points, 2) * 0.8 + 0.1  # Keep away from edges
++        
++        # Add some boundary points to influence the Voronoi cells near boundaries
++        boundary_points = []
++        # Corners
++        boundary_points.extend([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]])
++        # Edges (avoiding corners)
++        for i in range(5):
++            boundary_points.append([0.1 + 0.18 * i, 0.1])      # Bottom edge
++            boundary_points.append([0.1 + 0.18 * i, 0.9])     # Top edge
++            boundary_points.append([0.1, 0.1 + 0.18 * i])     # Left edge
++            boundary_points.append([0.9, 0.1 + 0.18 * i])     # Right edge
++        
++        points = np.vstack([points, boundary_points[:n_points - len(points)]])
++        
++        try:
++            vor = Voronoi(points)
++            
++            # Find centroids of Voronoi regions that are inside the unit square
++            centroids = []
++            for region in vor.regions:
++                if not region or -1 in region:
++                    continue
++                polygon = [vor.vertices[i] for i in region]
++                if len(polygon) < 3:
++                    continue
++                    
++                # Compute centroid
++                polygon = np.array(polygon)
++                centroid_x = np.mean(polygon[:, 0])
++                centroid_y = np.mean(polygon[:, 1])
++                
++                # Ensure point is inside unit square
++                if 0 <= centroid_x <= 1 and 0 <= centroid_y <= 1:
++                    centroids.append([centroid_x, centroid_y])
++                    
++            # Select the first n_circles centroids
++            centroids = np.array(centroids[:n_circles])
++            
++            individual = []
++            for i, (cx, cy) in enumerate(centroids):
++                # Set radius based on Voronoi cell area approximation
++                # For rough estimation, use distance to nearest neighbor
++                if len(centroids) > 1:
++                    distances = distance.cdist([[cx, cy]], centroids)[0]
++                    distances = distances[distances > 0]  # Exclude self-distance
++                    if len(distances) > 0:
++                        avg_dist = np.min(distances) / 2.0
++                        r = min(avg_dist * 0.8, max_radius)
++                    else:
++                        r = max_radius * 0.2
++                else:
++                    r = max_radius * 0.2
++                    
++                # Ensure radius is valid
++                r = max(min_radius, min(max_radius, r))
++                individual.extend([cx, cy, r])
++                
++            return creator.Individual(individual)
++            
++        except Exception:
++            # Fallback to regular initialization if Voronoi fails
++            individual = []
++            for _ in range(n_circles):
++                x = np.random.uniform(min_radius, 1 - min_radius)
++                y = np.random.uniform(min_radius, 1 - min_radius)
++                r = np.random.uniform(min_radius, max_radius)
++                individual.extend([x, y, r])
++            return creator.Individual(individual)
++    
+     # Attribute generator
+     def create_individual():
+-        # Start with a reasonable initial configuration
+-        individual = []
+-        for _ in range(n_circles):
+-            # Initialize with uniform random positions and small radii
+-            x = np.random.uniform(min_radius, 1 - min_radius)
+-            y = np.random.uniform(min_radius, 1 - min_radius)
+-            r = np.random.uniform(min_radius, max_radius)
+-            individual.extend([x, y, r])
+-        return creator.Individual(individual)
++        # Try Voronoi-based initialization first
++        individual = initialize_voronoi()
++        return individual
+     
+     toolbox.register("individual", create_individual)
+     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+     
+     # Register operators
+     toolbox.register("evaluate", evaluate)
+     toolbox.register("mate", tools.cxUniform, indpb=0.5)
+     toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.02, indpb=0.3)
+     toolbox.register("select", tools.selTournament, tournsize=3)
+     
+     # Initial population generation
+-    population = toolbox.population(n=50)
++    population = toolbox.population(n=100)
+     
+     # Statistics
+     stats = tools.Statistics(lambda ind: ind.fitness.values)
+     stats.register("avg", np.mean)
+     stats.register("min", np.min)
+     stats.register("max", np.max)
+     
+     # Run evolution
+     try:
+         hof = tools.ParetoFront()
+         population, logbook = algorithms.eaSimple(
+-            population, toolbox, cxpb=0.7, mutpb=0.3, ngen=50,
++            population, toolbox, cxpb=0.7, mutpb=0.3, ngen=30,
+             stats=stats, halloffame=hof, verbose=False
+         )
+         
+         # Get best individual
+         best_individual = hof[0] if hof else population[0]
+         final_circles = np.array(best_individual).reshape(-1, 3)
+         
+         # Final validation
+         if is_valid_configuration(final_circles):
+             # Refine if needed
+             refined_circles = refine_solution(final_circles.copy())
+             return refined_circles
+         else:
+             # Fall back to a greedy solution if evolution failed
+             return generate_greedy_solution()
+             
+     except Exception as e:
+         # Fallback to greedy approach if anything goes wrong
+         return generate_greedy_solution()
+ 
+ def generate_greedy_solution():
+     """Generate a simple greedy solution as fallback"""
+     n_circles = 26
+     circles = np.zeros((n_circles, 3))
+     
+     # Simple grid-based approach first
+     grid_size = int(np.ceil(np.sqrt(n_circles)))
+     spacing_x = 1.0 / (grid_size + 1)
+     spacing_y = 1.0 / (grid_size + 1)
+     
+     idx = 0
+     for i in range(grid_size):
+         for j in range(grid_size):
+             if idx >= n_circles:
+                 break
+             x = (i + 1) * spacing_x
+             y = (j + 1) * spacing_y
+             # Set radius to be proportional to available space
+             r = min(spacing_x, spacing_y) * 0.4
+             circles[idx] = [x, y, r]
+             idx += 1
+             
+     # If we don't have enough circles, fill with random ones
+     for i in range(idx, n_circles):
+         x = np.random.uniform(0.05, 0.95)
+         y = np.random.uniform(0.05, 0.95)
+         r = np.random.uniform(0.01, 0.1)
+         circles[i] = [x, y, r]
+         
+     return circles
+ 
+ def refine_solution(circles):
+     """Apply local refinement to improve solution quality"""
+     # Simple refinement: try to increase radii slightly if possible
+     for _ in range(20):  # Limited iterations
+         improved = False
+         for i in range(len(circles)):
+             # Try to increase radius slightly
+             old_r = circles[i][2]
+             new_r = min(old_r * 1.05, 0.5)
+             
+             # Check if we can increase radius without violating constraints
+             temp_circles = circles.copy()
+             temp_circles[i][2] = new_r
+             
+             # Basic containment check
+             x, y, r = temp_circles[i]
+             if r <= x <= 1 - r and r <= y <= 1 - r:
+                 # Check overlap with others
+                 valid = True
+                 for j in range(len(temp_circles)):
+                     if i != j:
+                         x1, y1, r1 = temp_circles[i]
+                         x2, y2, r2 = temp_circles[j]
+                         dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                         if dist < r1 + r2:
+                             valid = False
+                             break
+                 
+                 if valid:
+                     circles[i][2] = new_r
+                     improved = True
+                     
+         if not improved:
+             break
+             
+     return circles
+ 
+ # EVOLVE-BLOCK-END

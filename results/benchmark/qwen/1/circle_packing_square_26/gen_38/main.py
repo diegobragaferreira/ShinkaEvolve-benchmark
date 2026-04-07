@@ -1,0 +1,232 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+from deap import base, creator, tools, algorithms
+import random
+import math
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Problem parameters
+    n_circles = 26
+    max_iterations = 1000
+    population_size = 50
+    
+    # Create fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    def eval_individual(individual):
+        """Evaluate fitness of an individual (set of circles)"""
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+        
+        # Check containment constraints (radius must be <= x, y and 1-x, 1-y)
+        containment_ok = True
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if r > x or r > y or r > (1 - x) or r > (1 - y):
+                containment_ok = False
+                break
+        
+        if not containment_ok:
+            return (0,)
+        
+        # Check overlap constraints
+        overlap_ok = True
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < (r1 + r2):
+                    overlap_ok = False
+                    break
+            if not overlap_ok:
+                break
+        
+        if not overlap_ok:
+            return (0,)
+        
+        # Return sum of radii as fitness
+        return (np.sum(circles[:, 2]),)
+    
+    def mutate_circle(individual, indpb=0.1):
+        """Mutate a circle in the individual"""
+        mutated = individual[:]
+        for i in range(0, len(mutated), 3):
+            # Mutate radius with small Gaussian noise
+            if random.random() < indpb:
+                r = mutated[i+2]
+                # Add normally distributed noise with small std
+                new_r = r + random.gauss(0, 0.01)
+                # Ensure radius stays positive
+                mutated[i+2] = max(0.001, new_r)
+            
+            # Mutate position with small Gaussian noise
+            if random.random() < indpb:
+                x = mutated[i]
+                y = mutated[i+1]
+                new_x = x + random.gauss(0, 0.01)
+                new_y = y + random.gauss(0, 0.01)
+                # Keep within bounds
+                mutated[i] = max(0.001, min(0.999, new_x))
+                mutated[i+1] = max(0.001, min(0.999, new_y))
+        return tuple(mutated),
+    
+    def create_voronoi_initialization():
+        """Create initial population using Voronoi-based seeding"""
+        # Generate many points for Voronoi
+        n_points = 1000
+        points = np.random.rand(n_points, 2)
+        
+        # Create Voronoi diagram
+        vor = Voronoi(points)
+        
+        # Get Voronoi vertices and centroids of cells
+        # Use a subset of Voronoi points that are inside the unit square
+        valid_vertices = []
+        for vertex in vor.vertices:
+            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                valid_vertices.append(vertex)
+        
+        # Select the best n_circles centroids from these Voronoi vertices
+        if len(valid_vertices) >= n_circles:
+            selected_vertices = valid_vertices[:n_circles]
+        else:
+            # Fallback to random points
+            selected_vertices = np.random.rand(n_circles, 2)
+        
+        # Create initial circles with small radii
+        initial_population = []
+        for vertex in selected_vertices:
+            x, y = vertex[0], vertex[1]
+            # Start with small radius (will be optimized)
+            r = 0.01
+            individual = [x, y, r] * n_circles
+            initial_population.append(tuple(individual))
+        
+        return initial_population
+    
+    # Initialize toolbox
+    toolbox = base.Toolbox()
+    toolbox.register("evaluate", eval_individual)
+    toolbox.register("mutate", mutate_circle)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population using Voronoi seeding
+    initial_pop = create_voronoi_initialization()
+    
+    # Create initial population with proper individual structure
+    population = []
+    for individual in initial_pop:
+        # Ensure it's a list with correct number of elements
+        if len(individual) != 3 * n_circles:
+            # Pad with default values or truncate
+            individual = list(individual)[:3 * n_circles]
+            # Pad if necessary
+            while len(individual) < 3 * n_circles:
+                individual.extend([0.5, 0.5, 0.01])
+        population.append(creator.Individual(individual))
+    
+    # If we don't have enough individuals, fill with random ones
+    while len(population) < population_size:
+        individual = []
+        for _ in range(n_circles):
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            r = random.uniform(0.01, 0.2)
+            individual.extend([x, y, r])
+        population.append(creator.Individual(individual))
+    
+    # Run evolution
+    try:
+        hof = tools.ParetoFront()
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats.register("avg", np.mean)
+        stats.register("min", np.min)
+        stats.register("max", np.max)
+        
+        # Run the evolutionary algorithm
+        population, logbook = algorithms.eaSimple(
+            population, toolbox, cxpb=0.5, mutpb=0.2,
+            ngen=50, stats=stats, halloffame=hof, verbose=False
+        )
+        
+        # Get the best solution
+        best_individual = hof[0] if hof else population[0]
+        result = np.array(best_individual).reshape(-1, 3)
+        
+    except Exception as e:
+        # Fallback to a simple greedy approach if evolution fails
+        result = np.zeros((n_circles, 3))
+        # Place circles greedily using a simplified approach
+        # This is a basic fallback that places circles in a grid-like pattern  
+        spacing = 0.25
+        count = 0
+        for i in range(4):
+            for j in range(4):
+                if count >= n_circles:
+                    break
+                x = 0.125 + i * spacing
+                y = 0.125 + j * spacing
+                r = 0.05
+                # Adjust for boundaries
+                if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                    continue
+                result[count] = [x, y, r]
+                count += 1
+            if count >= n_circles:
+                break
+                
+        # If we still don't have enough circles, add more using a simpler approach
+        if count < n_circles:
+            for i in range(count, n_circles):
+                x = 0.5
+                y = 0.5
+                r = 0.02
+                result[i] = [x, y, r]
+    
+    # Final validation and cleanup
+    # Ensure all circles are valid (within bounds and non-overlapping)
+    circles = result.copy()
+    
+    # Apply local improvements to ensure constraints are satisfied
+    for iteration in range(100):
+        # Try to improve by adjusting radii and positions slightly
+        improved = False
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Try to increase radius if possible
+            if r < 0.2:  # Only try to increase if not already large
+                new_r = min(r + 0.005, 0.2)
+                # Check if increasing radius helps
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = math.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < (new_r + r2):
+                            valid = False
+                            break
+                if valid and (1 - x) > new_r and x > new_r and (1 - y) > new_r and y > new_r:
+                    circles[i][2] = new_r
+                    improved = True
+                    
+        if not improved:
+            break
+            
+    return circles
+
+# EVOLVE-BLOCK-END

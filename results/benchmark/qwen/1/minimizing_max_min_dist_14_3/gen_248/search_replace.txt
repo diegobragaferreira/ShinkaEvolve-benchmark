@@ -1,0 +1,219 @@
+<NAME>
+add_adaptive_constraint_tightening
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def objective(x_flat):
+        points_reshaped = x_flat.reshape(n, d)
+        # Ensure points are on unit sphere
+        norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+        normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+        return -min_max_dist_ratio(normalized_points)
+
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n, d)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    # Define constraints and bounds
+    constraints = {'type': 'eq', 'fun': constraint_sphere}
+    bounds = [(-2, 2) for _ in range(n * d)]
+=======
+    def objective(x_flat):
+        points_reshaped = x_flat.reshape(n, d)
+        # Ensure points are on unit sphere
+        norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+        normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+        return -min_max_dist_ratio(normalized_points)
+
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n, d)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    def adaptive_bounds(iteration, max_iterations):
+        """Dynamically adjust bounds based on optimization progress"""
+        # Start with wider bounds for exploration
+        if iteration < max_iterations * 0.3:
+            return [(-2.0, 2.0) for _ in range(n * d)]
+        # Middle phase - moderate bounds
+        elif iteration < max_iterations * 0.7:
+            return [(-1.5, 1.5) for _ in range(n * d)]
+        # Final phase - tight bounds for precision
+        else:
+            return [(-1.1, 1.1) for _ in range(n * d)]
+
+    # Define constraints and bounds
+    constraints = {'type': 'eq', 'fun': constraint_sphere}
+    bounds = [(-2, 2) for _ in range(n * d)]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+implement_progressive_optimization_stages
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Try each initial configuration with multiple restarts
+    for config_name, initial_points in initial_configs:
+        # Add slight random noise to break symmetry
+        np.random.seed(42)
+        noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
+
+        # Ensure all points are on unit sphere
+        norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+        normalized_points = noisy_points / np.maximum(norms, 1e-12)
+
+        # Flatten for optimization
+        x0 = normalized_points.flatten()
+
+        # First optimization with SLSQP for global convergence
+        try:
+            result_slsqp = minimize(
+                objective,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9},
+                tol=1e-9
+            )
+
+            if result_slsqp.success:
+                points_slsqp = result_slsqp.x.reshape(n, d)
+                # Ensure points are on unit sphere
+                norms_slsqp = np.linalg.norm(points_slsqp, axis=1, keepdims=True)
+                normalized_slsqp = points_slsqp / np.maximum(norms_slsqp, 1e-12)
+
+                # Calculate ratio
+                ratio = min_max_dist_ratio(normalized_slsqp)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = normalized_slsqp.copy()
+
+        except Exception:
+            pass
+
+        # Second optimization with L-BFGS-B for local refinement
+        try:
+            result_lbfgsb = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+
+            if result_lbfgsb.success:
+                points_lbfgsb = result_lbfgsb.x.reshape(n, d)
+                # Ensure points are on unit sphere
+                norms_lbfgsb = np.linalg.norm(points_lbfgsb, axis=1, keepdims=True)
+                normalized_lbfgsb = points_lbfgsb / np.maximum(norms_lbfgsb, 1e-12)
+
+                # Calculate ratio
+                ratio = min_max_dist_ratio(normalized_lbfgsb)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = normalized_lbfgsb.copy()
+
+        except Exception:
+            pass
+=======
+    # Try each initial configuration with multiple restarts
+    for config_name, initial_points in initial_configs:
+        # Add slight random noise to break symmetry
+        np.random.seed(42)
+        noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
+
+        # Ensure all points are on unit sphere
+        norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+        normalized_points = noisy_points / np.maximum(norms, 1e-12)
+
+        # Flatten for optimization
+        x0 = normalized_points.flatten()
+
+        # Progressive optimization with adaptive parameters
+        current_x = x0.copy()
+        current_best_ratio = -np.inf
+        current_best_points = None
+
+        # Stage 1: Coarse optimization with relaxed tolerances
+        try:
+            result = minimize(
+                objective,
+                current_x,
+                method='SLSQP',
+                bounds=[(-2.0, 2.0) for _ in range(n * d)],
+                constraints=constraints,
+                options={'maxiter': 200, 'ftol': 1e-4, 'gtol': 1e-4},
+                tol=1e-4
+            )
+
+            if result.success:
+                current_x = result.x
+                points = current_x.reshape(n, d)
+                norms = np.linalg.norm(points, axis=1, keepdims=True)
+                normalized = points / np.maximum(norms, 1e-12)
+                ratio = min_max_dist_ratio(normalized)
+                if ratio > current_best_ratio:
+                    current_best_ratio = ratio
+                    current_best_points = normalized.copy()
+        except Exception:
+            pass
+
+        # Stage 2: Medium optimization with moderate tolerances
+        try:
+            result = minimize(
+                objective,
+                current_x,
+                method='SLSQP',
+                bounds=[(-1.5, 1.5) for _ in range(n * d)],
+                constraints=constraints,
+                options={'maxiter': 300, 'ftol': 1e-6, 'gtol': 1e-6},
+                tol=1e-6
+            )
+
+            if result.success:
+                current_x = result.x
+                points = current_x.reshape(n, d)
+                norms = np.linalg.norm(points, axis=1, keepdims=True)
+                normalized = points / np.maximum(norms, 1e-12)
+                ratio = min_max_dist_ratio(normalized)
+                if ratio > current_best_ratio:
+                    current_best_ratio = ratio
+                    current_best_points = normalized.copy()
+        except Exception:
+            pass
+
+        # Stage 3: Fine optimization with tight tolerances
+        try:
+            result = minimize(
+                objective,
+                current_x,
+                method='L-BFGS-B',
+                bounds=[(-1.1, 1.1) for _ in range(n * d)],
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+
+            if result.success:
+                points = result.x.reshape(n, d)
+                norms = np.linalg.norm(points, axis=1, keepdims=True)
+                normalized = points / np.maximum(norms, 1e-12)
+                ratio = min_max_dist_ratio(normalized)
+                if ratio > current_best_ratio:
+                    current_best_ratio = ratio
+                    current_best_points = normalized.copy()
+        except Exception:
+            pass
+
+        # Update global best
+        if current_best_points is not None and current_best_ratio > best_ratio:
+            best_ratio = current_best_ratio
+            best_points = current_best_points.copy()
+>>>>>>> REPLACE
+</DIFF>

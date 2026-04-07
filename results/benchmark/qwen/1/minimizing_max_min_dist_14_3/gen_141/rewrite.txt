@@ -1,0 +1,159 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import warnings
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    def fibonacci_spiral_on_sphere(n_points: int) -> np.ndarray:
+        """Generate points on sphere using Fibonacci spiral with golden angle."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+        
+        for i in range(n_points):
+            y = 1 - (i / (n_points - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = phi * i  # golden angle increment
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+    
+    def initialize_multiple_strategies(n_points: int) -> list:
+        """Generate multiple initial point configurations."""
+        strategies = []
+        
+        # Strategy 1: Fibonacci spiral
+        fib_points = fibonacci_spiral_on_sphere(n_points)
+        strategies.append(fib_points)
+        
+        # Strategy 2: Perturbed Fibonacci points
+        perturbed_fib = fib_points + np.random.normal(0, 0.05, (n_points, 3))
+        # Normalize to unit sphere
+        norms = np.linalg.norm(perturbed_fib, axis=1, keepdims=True)
+        normalized_perturbed = perturbed_fib / np.where(norms > 0, norms, 1)
+        strategies.append(normalized_perturbed)
+        
+        # Strategy 3: Random points on unit sphere
+        random_points = np.random.randn(n_points, 3)
+        norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+        normalized_random = random_points / np.where(norms > 0, norms, 1)
+        strategies.append(normalized_random)
+        
+        return strategies
+    
+    def distance_ratio_objective(points_flat: np.ndarray) -> float:
+        """Calculate negative of min/max distance ratio to minimize."""
+        points = points_flat.reshape(-1, 3)
+        
+        # Ensure points are on unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points_normalized = points / np.where(norms > 0, norms, 1)
+        
+        # Calculate pairwise distances
+        distances = pdist(points_normalized)
+        
+        if len(distances) == 0:
+            return -1.0
+            
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Avoid division by zero
+        if max_dist <= 0:
+            return -1.0
+            
+        # Return negative ratio to convert maximization to minimization
+        return -min_dist / max_dist
+    
+    def spherical_constraint(points_flat: np.ndarray) -> float:
+        """Constraint function ensuring all points lie on unit sphere."""
+        points = points_flat.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        # Return mean squared deviation from unit radius
+        return np.mean((norms - 1.0) ** 2)
+    
+    def enforce_unit_sphere(points: np.ndarray) -> np.ndarray:
+        """Ensure all points are on the unit sphere."""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Handle zero norm cases
+        norms = np.where(norms > 0, norms, 1.0)
+        return points / norms
+    
+    # Initialize multiple strategies
+    initial_strategies = initialize_multiple_strategies(14)
+    
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Time tracking
+    start_time = time.time()
+    time_limit = 350  # Leave some buffer for final processing
+    
+    # Try each initial strategy with two-stage optimization
+    for idx, initial_points in enumerate(initial_strategies):
+        if time.time() - start_time > time_limit:
+            break
+            
+        try:
+            # Stage 1: Global optimization with differential evolution
+            x0 = initial_points.flatten()
+            
+            # Use a simple but robust optimization approach
+            # First make sure points are on unit sphere
+            initial_points = enforce_unit_sphere(initial_points)
+            x0 = initial_points.flatten()
+            
+            # Optimization with L-BFGS-B for local refinement
+            # Note: SLSQP can also work well for this constrained problem
+            result = minimize(
+                distance_ratio_objective,
+                x0,
+                method='L-BFGS-B',
+                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500}
+            )
+            
+            if result.success:
+                # Extract optimized points
+                optimized_points = result.x.reshape(-1, 3)
+                # Enforce unit sphere constraint
+                optimized_points = enforce_unit_sphere(optimized_points)
+                
+                # Calculate final ratio
+                distances = pdist(optimized_points)
+                if len(distances) > 0:
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+                    if max_dist > 0:
+                        ratio = min_dist / max_dist
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = optimized_points.copy()
+                            
+        except Exception as e:
+            warnings.warn(f"Strategy {idx} failed: {str(e)}")
+            continue
+    
+    # Fallback to best available result or initial configuration
+    if best_points is None:
+        # Use the best strategy from initialization
+        best_points = initial_strategies[0]
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

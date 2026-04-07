@@ -1,0 +1,202 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import linprog
+import random
+import math
+
+def compute_autocorrelation(sequence):
+    """Compute the autocorrelation using FFT for efficiency."""
+    n = len(sequence)
+    # Pad with zeros to avoid circular convolution effects
+    padded_seq = np.pad(sequence, (0, n-1), mode='constant')
+    # Compute autocorrelation using FFT convolution
+    autocorr = signal.fftconvolve(padded_seq, sequence[::-1], mode='valid')
+    return autocorr[:n]
+
+def compute_c1_constant(sequence):
+    """Compute C1 constant for a given sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+    autocorr = compute_autocorrelation(sequence)
+    max_autocorr = np.max(autocorr)
+    sum_sq = np.sum(sequence)**2
+    
+    if sum_sq == 0:
+        return float('inf')
+    
+    c1 = (2 * n * max_autocorr) / sum_sq
+    return c1
+
+def evaluate_fitness(sequence):
+    """Evaluate the inverse of C1 (higher is better)."""
+    c1 = compute_c1_constant(sequence)
+    if c1 == 0:
+        return 0
+    return 1 / c1
+
+def initialize_population(pop_size, min_length=10, max_length=1000):
+    """Initialize diverse population with varying lengths."""
+    population = []
+    for _ in range(pop_size):
+        length = random.randint(min_length, max_length)
+        # Create sequence with exponentially decaying heights to encourage low autocorrelation
+        sequence = np.random.exponential(scale=1.0, size=length)
+        # Normalize to have reasonable sum
+        sequence = sequence / np.sum(sequence) * 10
+        population.append(sequence.tolist())
+    return population
+
+def mutate_individual(individual, mutation_rate=0.1, max_height=1000):
+    """Apply mutation to an individual."""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Add small perturbation
+            mutated[i] += random.gauss(0, 0.1 * mutated[i]) if mutated[i] != 0 else random.uniform(-1, 1)
+            mutated[i] = max(0, min(max_height, mutated[i]))  # Clamp between 0 and max_height
+    return mutated
+
+def crossover_individuals(parent1, parent2):
+    """Perform uniform crossover between two parents."""
+    len1, len2 = len(parent1), len(parent2)
+    min_len = min(len1, len2)
+    max_len = max(len1, len2)
+    
+    offspring = []
+    for i in range(max_len):
+        if i < min_len:
+            # Uniform crossover
+            if random.random() < 0.5:
+                offspring.append(parent1[i])
+            else:
+                offspring.append(parent2[i])
+        elif len1 > len2:
+            # Inherit from longer parent
+            offspring.append(parent1[i])
+        else:
+            offspring.append(parent2[i])
+            
+    return offspring
+
+def fitness_sharing(population, fitnesses, sharing_radius=0.1):
+    """Apply fitness sharing to maintain diversity."""
+    shared_fitness = fitnesses.copy()
+    n = len(population)
+    
+    for i in range(n):
+        for j in range(i+1, n):
+            dist = np.linalg.norm(np.array(population[i]) - np.array(population[j]))
+            if dist < sharing_radius:
+                shared_fitness[i] += 0.1  # Share fitness
+                shared_fitness[j] += 0.1
+                
+    return shared_fitness
+
+def select_parents(population, fitnesses, num_parents):
+    """Tournament selection with diversity consideration."""
+    selected = []
+    for _ in range(num_parents):
+        tournament_size = 3
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        selected.append(population[winner_index].copy())
+    return selected
+
+def evolve_generation(population, fitnesses):
+    """Evolve one generation of the population."""
+    num_parents = len(population) // 2
+    parents = select_parents(population, fitnesses, num_parents)
+    
+    new_population = []
+    
+    # Elitism: keep best individuals
+    sorted_indices = np.argsort(fitnesses)[::-1][:num_parents//4]
+    for idx in sorted_indices:
+        new_population.append(population[idx].copy())
+        
+    # Generate offspring through crossover and mutation
+    while len(new_population) < len(population):
+        parent1, parent2 = random.sample(parents, 2)
+        offspring = crossover_individuals(parent1, parent2)
+        offspring = mutate_individual(offspring)
+        new_population.append(offspring)
+        
+    return new_population[:len(population)]
+
+def search_for_best_sequence():
+    """Main evolutionary optimization loop."""
+    pop_size = 50
+    generations = 100
+    min_length = 10
+    max_length = 1000
+    
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Initialize population
+    population = initialize_population(pop_size, min_length, max_length)
+    
+    best_sequence = None
+    best_fitness = -float('inf')
+    
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(seq) for seq in population]
+        
+        # Track best individual
+        max_fitness_idx = np.argmax(fitnesses)
+        if fitnesses[max_fitness_idx] > best_fitness:
+            best_fitness = fitnesses[max_fitness_idx]
+            best_sequence = population[max_fitness_idx].copy()
+        
+        # Apply fitness sharing for diversity
+        shared_fitnesses = fitness_sharing(population, fitnesses)
+        
+        # Evolve to next generation
+        population = evolve_generation(population, shared_fitnesses)
+        
+        # Occasionally add some randomness
+        if gen % 20 == 0:
+            for i in range(len(population)):
+                if random.random() < 0.1:
+                    population[i] = mutate_individual(population[i])
+                    
+        # Adaptively adjust parameters based on progress
+        if gen > 50 and gen % 10 == 0:
+            if best_fitness > 0.7:
+                pop_size = max(30, pop_size - 5)
+            elif best_fitness < 0.6:
+                pop_size = min(100, pop_size + 5)
+    
+    # Final refinement using local search
+    if best_sequence is not None:
+        refined_sequence = best_sequence.copy()
+        for _ in range(50):  # Local search iterations
+            # Slightly perturb the sequence
+            perturbed = refined_sequence.copy()
+            for i in range(len(perturbed)):
+                if random.random() < 0.3:
+                    perturbed[i] += random.gauss(0, 0.01 * perturbed[i] if perturbed[i] != 0 else 0.1)
+                    perturbed[i] = max(0, min(1000, perturbed[i]))
+            
+            # Accept if improvement
+            current_fitness = evaluate_fitness(refined_sequence)
+            new_fitness = evaluate_fitness(perturbed)
+            
+            if new_fitness > current_fitness:
+                refined_sequence = perturbed
+            
+        return refined_sequence
+    else:
+        # Return default if something went wrong
+        return [random.random() * 10 for _ in range(random.randint(100, 1000))]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

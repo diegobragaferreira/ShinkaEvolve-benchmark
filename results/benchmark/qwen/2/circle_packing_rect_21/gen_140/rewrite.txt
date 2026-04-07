@@ -1,0 +1,246 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import math
+import random
+from typing import Tuple, List
+import time
+
+def _initialize_grid_placement(n_circles: int, container_width: float, container_height: float) -> np.ndarray:
+    """Initialize circles using adaptive grid-based approach with random perturbations"""
+    circles = np.zeros((n_circles, 3))
+    
+    # Adaptive grid sizing based on circle count and container dimensions
+    grid_size = int(math.ceil(math.sqrt(n_circles)))
+    
+    # Adjust grid size based on container aspect ratio for better packing
+    aspect_ratio = container_width / container_height
+    if aspect_ratio > 1:
+        # Wide container - more columns
+        grid_cols = max(1, int(math.ceil(math.sqrt(n_circles * aspect_ratio))))
+        grid_rows = max(1, int(math.ceil(n_circles / grid_cols)))
+    else:
+        # Tall container - more rows
+        grid_rows = max(1, int(math.ceil(math.sqrt(n_circles / aspect_ratio))))
+        grid_cols = max(1, int(math.ceil(n_circles / grid_rows)))
+    
+    # Ensure we have enough space for all circles
+    grid_size = max(grid_rows, grid_cols)
+    
+    # Place circles in a grid pattern with small random offsets
+    idx = 0
+    for i in range(grid_rows):
+        for j in range(grid_cols):
+            if idx >= n_circles:
+                break
+            # Position within grid cell with some randomness
+            x = (j + 0.5) * container_width / grid_cols
+            y = (i + 0.5) * container_height / grid_rows
+            # Add slight randomness to avoid perfect grid alignment
+            x += random.uniform(-0.005, 0.005) * container_width
+            y += random.uniform(-0.005, 0.005) * container_height
+            # Ensure they're within bounds
+            x = max(0.01, min(container_width - 0.01, x))
+            y = max(0.01, min(container_height - 0.01, y))
+            
+            # Initial radius - adapt to container dimensions and grid size
+            base_radius = min(0.1, container_width / (grid_cols * 3), container_height / (grid_rows * 3))
+            # Add some randomness to initial radii to break symmetry
+            r = base_radius * random.uniform(0.7, 1.0)
+            circles[idx] = [x, y, r]
+            idx += 1
+    
+    # If we didn't place enough circles, fill with additional ones in random positions
+    if idx < n_circles:
+        for i in range(idx, n_circles):
+            x = random.uniform(0.01, container_width - 0.01)
+            y = random.uniform(0.01, container_height - 0.01)
+            # Random initial radius
+            r = random.uniform(0.01, min(0.1, container_width/10, container_height/10))
+            circles[i] = [x, y, r]
+    
+    return circles
+
+def _update_spatial_tree(circles: np.ndarray) -> cKDTree:
+    """Update the spatial tree for efficient neighbor queries"""
+    return cKDTree(circles[:, :2])
+
+def _calculate_distance(point1: Tuple[float, float], point2: Tuple[float, float]) -> float:
+    """Calculate Euclidean distance between two points"""
+    return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+
+def _is_valid_position(x: float, y: float, r: float, existing_circles: np.ndarray, 
+                      spatial_tree: cKDTree, container_width: float, container_height: float) -> bool:
+    """Check if a circle position is valid (boundary and overlap constraints)"""
+    # Check boundary constraints
+    if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
+        return False
+        
+    # Use spatial tree for efficient neighbor checking
+    nearby_indices = spatial_tree.query_ball_point([x, y], r * 2)
+    
+    # Check overlap with nearby circles
+    for i in nearby_indices:
+        existing_x, existing_y, existing_r = existing_circles[i]
+        distance = _calculate_distance([x, y], [existing_x, existing_y])
+        if distance < (r + existing_r):
+            return False
+    return True
+
+def _optimize_single_circle(circles: np.ndarray, idx: int, spatial_tree: cKDTree, 
+                           container_width: float, container_height: float) -> bool:
+    """Optimize a single circle by trying various positions and radii"""
+    current_x, current_y, current_r = circles[idx]
+    best_radius = current_r
+    best_position = [current_x, current_y]
+    best_valid = False
+    
+    # Try several radius values
+    max_radius = min(0.2, container_width/4, container_height/4)
+    for r_trial in np.linspace(current_r, max_radius, 10):
+        # Try several positions near current location
+        for dx in [-0.05, -0.025, 0, 0.025, 0.05]:
+            for dy in [-0.05, -0.025, 0, 0.025, 0.05]:
+                trial_x = current_x + dx
+                trial_y = current_y + dy
+                
+                # Ensure within bounds
+                trial_x = max(r_trial, min(container_width - r_trial, trial_x))
+                trial_y = max(r_trial, min(container_height - r_trial, trial_y))
+                
+                # Test if this placement works
+                test_circles = circles.copy()
+                test_circles[idx] = [trial_x, trial_y, r_trial]
+                
+                # Check validity using spatial tree for efficiency
+                if _is_valid_position(trial_x, trial_y, r_trial, test_circles, spatial_tree, 
+                                    container_width, container_height):
+                    if r_trial > best_radius:
+                        best_radius = r_trial
+                        best_position = [trial_x, trial_y]
+                        best_valid = True
+    
+    if best_valid:
+        circles[idx] = [best_position[0], best_position[1], best_radius]
+    
+    return best_valid
+
+def _refine_configuration(circles: np.ndarray, container_width: float, container_height: float) -> np.ndarray:
+    """Apply final refinement to resolve any remaining issues"""
+    # Apply boundary corrections
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # Correct boundary violations
+        if x - r < 0:
+            circles[i, 0] = r
+        elif x + r > container_width:
+            circles[i, 0] = container_width - r
+            
+        if y - r < 0:
+            circles[i, 1] = r
+        elif y + r > container_height:
+            circles[i, 1] = container_height - r
+    
+    # Resolve overlaps through iterative adjustment
+    for _ in range(100):  # Limited iterations to prevent infinite loop
+        improved = False
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Try to reduce radius if overlapping
+            for j in range(len(circles)):
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    distance = _calculate_distance([x, y], [x2, y2])
+                    if distance < (r + r2):
+                        new_r = max(1e-6, (distance - 0.001) / 2)
+                        if new_r < r:
+                            circles[i, 2] = new_r
+                            improved = True
+                            break
+        
+        if not improved:
+            break
+    
+    return circles
+
+def _multi_phase_optimization(circles: np.ndarray, container_width: float, 
+                             container_height: float, max_iterations: int = 1000) -> np.ndarray:
+    """Perform multi-phase optimization with progressive refinement"""
+    # Initialize spatial tree
+    spatial_tree = _update_spatial_tree(circles)
+    
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+    
+    # Phase 1: Aggressive exploration (first 50% of iterations)
+    phase_1_end = max_iterations // 2
+    for iteration in range(phase_1_end):
+        # More random early on to explore
+        selected_idx = random.randint(0, len(circles) - 1)
+        
+        # Optimize the selected circle
+        improved = _optimize_single_circle(circles, selected_idx, spatial_tree, 
+                                          container_width, container_height)
+        
+        # Update spatial tree after modification
+        if improved:
+            spatial_tree = _update_spatial_tree(circles)
+        
+        # Periodic evaluation
+        if iteration % max(10, phase_1_end // 20) == 0:
+            current_sum = np.sum(circles[:, 2])
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_circles = circles.copy()
+    
+    # Phase 2: Targeted refinement (last 50% of iterations)
+    for iteration in range(phase_1_end, max_iterations):
+        # More targeted later on
+        selected_idx = random.randint(0, len(circles) - 1)
+        
+        # Optimize the selected circle
+        improved = _optimize_single_circle(circles, selected_idx, spatial_tree, 
+                                          container_width, container_height)
+        
+        # Update spatial tree after modification
+        if improved:
+            spatial_tree = _update_spatial_tree(circles)
+        
+        # Periodic evaluation with higher frequency in later stages
+        if iteration % max(5, max_iterations // 100) == 0:
+            current_sum = np.sum(circles[:, 2])
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_circles = circles.copy()
+    
+    return best_circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set up container dimensions (perimeter = 4, so width + height = 2)
+    # Use adaptive aspect ratio based on circle count for better packing efficiency
+    # For 21 circles, a ratio of ~1.5:1 often works well for circle packing
+    container_width = 1.2
+    container_height = 0.8
+    
+    # Initialize with grid placement
+    circles = _initialize_grid_placement(21, container_width, container_height)
+    
+    # Multi-phase optimization
+    optimized_circles = _multi_phase_optimization(circles, container_width, container_height)
+    
+    # Final refinement
+    final_circles = _refine_configuration(optimized_circles, container_width, container_height)
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

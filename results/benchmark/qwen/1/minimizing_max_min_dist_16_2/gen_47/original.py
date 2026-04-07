@@ -1,0 +1,77 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Return negative ratio (since we want to maximize ratio, we minimize its negative)
+        if len(distances) == 0:
+            return 0
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return float('inf')
+
+        return -min_dist / max_dist
+
+    def constraint_func(x):
+        # Ensure points are within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        constraints = []
+
+        # x coordinates in [0,1]
+        constraints.extend([points[:, 0].min() - 0])  # x_min >= 0
+        constraints.extend([1 - points[:, 0].max()])  # x_max <= 1
+
+        # y coordinates in [0,1]
+        constraints.extend([points[:, 1].min() - 0])  # y_min >= 0
+        constraints.extend([1 - points[:, 1].max()])  # y_max <= 1
+
+        return np.array(constraints)
+
+    # Initialize points randomly but within bounds
+    np.random.seed(42)
+    initial_points = np.random.rand(16, 2)
+
+    # Flatten for optimization
+    x0 = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Use SLSQP optimizer which handles constraints well
+    result = minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        constraints={'type': 'ineq', 'fun': constraint_func},
+        options={'maxiter': 1000, 'ftol': 1e-8}
+    )
+
+    # Extract optimized points
+    optimized_points = result.x.reshape(-1, 2)
+
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

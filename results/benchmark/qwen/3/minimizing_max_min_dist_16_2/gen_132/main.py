@@ -1,0 +1,268 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    np.random.seed(42)
+    
+    # Create structured initial hexagonal configuration
+    def create_hex_initialization():
+        points = []
+        sqrt3 = np.sqrt(3)
+        
+        # Hexagonal grid parameters optimized for unit square
+        spacing_x = 1.0 / 3.0
+        spacing_y = sqrt3 / 4.0
+        
+        # Generate hexagonal pattern with slight randomization
+        for i in range(4):
+            for j in range(4):
+                x = j * spacing_x
+                y = i * spacing_y
+                
+                # Offset odd rows for hexagonal pattern
+                if i % 2 == 1:
+                    x += spacing_x / 2
+                
+                # Add small random perturbation to break symmetry
+                x += np.random.normal(0, 0.008)
+                y += np.random.normal(0, 0.008)
+                
+                points.append([x, y])
+        
+        points = np.array(points)
+        
+        # Normalize to [0,1] x [0,1]
+        max_x = 1.0
+        max_y = 3 * spacing_y
+        
+        points[:, 0] = points[:, 0] / max_x
+        points[:, 1] = points[:, 1] / max_y
+        
+        # Apply boundary handling with reflection
+        for i in range(len(points)):
+            if points[i, 0] < 0:
+                points[i, 0] = -points[i, 0]
+            elif points[i, 0] > 1:
+                points[i, 0] = 2 - points[i, 0]
+                
+            if points[i, 1] < 0:
+                points[i, 1] = -points[i, 1]
+            elif points[i, 1] > 1:
+                points[i, 1] = 2 - points[i, 1]
+        
+        # Ensure points stay within bounds
+        points[:, 0] = np.clip(points[:, 0], 0, 1)
+        points[:, 1] = np.clip(points[:, 1], 0, 1)
+        
+        return points
+    
+    # Calculate min/max distance ratio efficiently
+    def calculate_ratio(points):
+        if len(points) < 2:
+            return 0
+        
+        # Compute pairwise distances
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+        
+        if distances.size == 0:
+            return 0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        if d_max <= 0:
+            return 0
+            
+        return d_min / d_max
+    
+    # Enhanced optimization using Voronoi-based gradient descent
+    def optimize_points(initial_points, max_iter=8000):
+        current_points = initial_points.copy()
+        current_ratio = calculate_ratio(current_points)
+        
+        # Parameters
+        learning_rate = 0.05
+        min_temp = 1e-6
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        # Track improvement for early stopping
+        last_improvement = 0
+        improvement_threshold = 500
+        
+        # Precompute Voronoi info
+        def compute_voronoi_info(points):
+            try:
+                vor = Voronoi(points)
+                return vor
+            except:
+                return None
+        
+        # Estimate optimal movement for a point based on Voronoi geometry
+        def estimate_optimal_movement(point_idx, points, vor):
+            # Get Voronoi cell for this point
+            cell_vertices = []
+            try:
+                region = vor.regions[vor.point_region[point_idx]]
+                if -1 not in region and len(region) > 0:
+                    cell_vertices = [vor.vertices[j] for j in region if j >= 0]
+            except:
+                pass
+            
+            # If we have no Voronoi info or vertices, return random movement
+            if len(cell_vertices) < 3:
+                return np.random.normal(0, 0.01, 2)
+            
+            # Calculate centroid of Voronoi cell
+            cell_centroid = np.mean(cell_vertices, axis=0)
+            
+            # Calculate center of mass of other points
+            other_points = np.delete(points, point_idx, axis=0)
+            com_other = np.mean(other_points, axis=0)
+            
+            # Movement direction: away from cluster center, towards cell centroid
+            # But also consider point-to-point distances
+            point = points[point_idx]
+            dir_to_com = com_other - point
+            dir_to_cell = cell_centroid - point
+            
+            # Normalize directions
+            norm_dir_to_com = np.linalg.norm(dir_to_com)
+            norm_dir_to_cell = np.linalg.norm(dir_to_cell)
+            
+            if norm_dir_to_com > 0:
+                dir_to_com /= norm_dir_to_com
+            if norm_dir_to_cell > 0:
+                dir_to_cell /= norm_dir_to_cell
+            
+            # Combined movement direction
+            # Prefer movement towards cell centroid but also consider avoiding clustering
+            movement = 0.3 * dir_to_cell + 0.7 * dir_to_com
+            
+            # Normalize and scale
+            norm_movement = np.linalg.norm(movement)
+            if norm_movement > 0:
+                movement = movement / norm_movement * 0.02
+            
+            return movement
+        
+        # Vortex-based movement pattern to explore systematically
+        def vortex_movement(points, iteration, max_iter):
+            new_points = points.copy()
+            
+            # Create a spiral-like pattern for movement
+            for i in range(len(points)):
+                # Use position in sequence and iteration to create vortex pattern
+                angle = (i * 0.7 + iteration * 0.3) % (2 * np.pi)
+                radius = 0.01 * (1.0 - iteration / max_iter)
+                
+                # Apply vortex movement
+                dx = radius * np.cos(angle)
+                dy = radius * np.sin(angle)
+                
+                new_points[i, 0] += dx
+                new_points[i, 1] += dy
+            
+            return new_points
+        
+        # Main optimization loop
+        for iteration in range(max_iter):
+            # Adaptive learning rate
+            adaptive_lr = learning_rate * (1.0 - iteration / max_iter * 0.8)
+            
+            # Every 200 iterations, do a vortex pattern to escape local minima
+            if iteration % 200 == 0:
+                current_points = vortex_movement(current_points, iteration, max_iter)
+            else:
+                # Use Voronoi-based gradient descent for most steps
+                vor = compute_voronoi_info(current_points)
+                
+                if vor is not None:
+                    # Move each point based on Voronoi analysis
+                    for i in range(len(current_points)):
+                        movement = estimate_optimal_movement(i, current_points, vor)
+                        
+                        # Apply movement with adaptive learning rate
+                        new_x = current_points[i, 0] + movement[0] * adaptive_lr
+                        new_y = current_points[i, 1] + movement[1] * adaptive_lr
+                        
+                        # Apply boundary conditions
+                        new_x = np.clip(new_x, 0, 1)
+                        new_y = np.clip(new_y, 0, 1)
+                        
+                        current_points[i, 0] = new_x
+                        current_points[i, 1] = new_y
+            
+            # Calculate new ratio
+            new_ratio = calculate_ratio(current_points)
+            
+            # Accept the change if it improves the ratio
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if current_ratio > best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+                    last_improvement = iteration
+            else:
+                # Occasionally accept worse solutions to escape local minima
+                if np.random.random() < 0.01 * (1.0 - iteration / max_iter):
+                    current_ratio = new_ratio
+            
+            # Early stopping if no improvement for a while
+            if iteration - last_improvement > improvement_threshold:
+                break
+        
+        return best_points, best_ratio
+    
+    # Multiple diverse initializations to ensure good global search
+    initial_configs = []
+    
+    # 1. Standard hexagonal
+    initial_configs.append(create_hex_initialization())
+    
+    # 2. Random initialization
+    initial_configs.append(np.random.rand(16, 2))
+    
+    # 3. Grid with noise
+    grid_points = []
+    for i in range(4):
+        for j in range(4):
+            x = i * 0.25 + np.random.normal(0, 0.01)
+            y = j * 0.25 + np.random.normal(0, 0.01)
+            x = np.clip(x, 0, 1)
+            y = np.clip(y, 0, 1)
+            grid_points.append([x, y])
+    initial_configs.append(np.array(grid_points))
+    
+    # 4. Perturbed hexagonal
+    hex_points = create_hex_initialization()
+    hex_points += np.random.normal(0, 0.01, hex_points.shape)
+    hex_points[:, 0] = np.clip(hex_points[:, 0], 0, 1)
+    hex_points[:, 1] = np.clip(hex_points[:, 1], 0, 1)
+    initial_configs.append(hex_points)
+    
+    # Run optimization from each initial configuration
+    best_final_points = None
+    best_ratio = -np.inf
+    
+    for i, initial_config in enumerate(initial_configs):
+        final_points, ratio = optimize_points(initial_config, max_iter=5000)
+        
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_final_points = final_points
+    
+    return best_final_points
+
+# EVOLVE-BLOCK-END

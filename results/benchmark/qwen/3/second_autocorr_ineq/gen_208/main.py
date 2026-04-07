@@ -1,0 +1,357 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+import time
+from scipy import signal
+from typing import List, Tuple, Optional
+from numba import jit
+import logging
+from collections import deque
+
+# Set random seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class AutoconvolutionComputer:
+    """Handles all autoconvolution computations with numba optimizations"""
+    
+    @staticmethod
+    @jit(nopython=True)
+    def compute_autoconvolution(f_vals):
+        """Compute autoconvolution using numba for speed"""
+        n = len(f_vals)
+        g = np.zeros(2*n - 1)
+        
+        for i in range(n):
+            for j in range(n):
+                g[i + j] += f_vals[i] * f_vals[j]
+        
+        return g
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_norms(g_vals, dx):
+        """Compute norms efficiently with numba"""
+        n = len(g_vals)
+        
+        l1_norm = 0.0
+        l2_norm_sq = 0.0
+        linf_norm = 0.0
+        
+        for i in range(n):
+            val = abs(g_vals[i])
+            l1_norm += val
+            l2_norm_sq += val * val
+            if val > linf_norm:
+                linf_norm = val
+                
+        return l1_norm, l2_norm_sq, linf_norm
+
+class C2Evaluator:
+    """Handles C2 calculation and evaluation with proper error handling"""
+    
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the three norms needed for C₂ calculation:
+        ||g||₂², ||g||₁, ||g||∞ where g = f*f
+        """
+        if not f_values:
+            return 0.0, 0.0, 0.0
+
+        n_steps = len(f_values)
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        dx = 0.5 / n_steps  # Step size
+        f = np.array(f_values)
+        f = np.maximum(f, 0.0)  # Ensure non-negative
+
+        # Compute autoconvolution
+        g = AutoconvolutionComputer.compute_autoconvolution(f)
+        
+        # Extract central region
+        g_len = len(g)
+        central_start = (g_len - n_steps) // 2
+        central_end = central_start + n_steps
+        g_centered = g[central_start:central_end]
+
+        # Compute norms
+        norm_1, norm_2_sq, norm_inf = AutoconvolutionComputer.compute_norms(g_centered, dx)
+        norm_1 *= dx
+        norm_2_sq *= dx
+
+        return norm_2_sq, norm_1, norm_inf
+
+    @classmethod
+    def calculate_c2(cls, f_values: List[float]) -> float:
+        """Calculate the C2 constant from the step function values."""
+        try:
+            g_norm_2_sq, g_norm_1, g_norm_inf = cls.compute_autoconvolution_norms(f_values)
+            
+            # Handle edge cases
+            if g_norm_1 <= 1e-12 or g_norm_inf <= 1e-12:
+                return 0.0
+                
+            c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
+            return c2
+        except Exception as e:
+            logger.error(f"Error calculating C2: {e}")
+            return 0.0
+
+class InitializationStrategy:
+    """Handles different initialization strategies for creating individuals"""
+    
+    @staticmethod
+    def create_gaussian_individual(n_steps: int) -> List[float]:
+        """Create individual with multi-scale Gaussian bumps"""
+        individual = np.zeros(n_steps)
+        num_bumps = random.randint(3, 8)
+        for _ in range(num_bumps):
+            center = random.random()
+            scale = random.uniform(0.05, 0.2)
+            height = random.uniform(0.5, 1.5)
+            x = np.linspace(0, 1, n_steps)
+            gaussian = height * np.exp(-0.5 * ((x - center) / scale) ** 2)
+            individual += gaussian
+        individual = np.maximum(individual, 0.0)
+        return individual.tolist()
+    
+    @staticmethod
+    def create_geometric_individual(n_steps: int) -> List[float]:
+        """Create geometric pattern individual"""
+        individual = np.zeros(n_steps)
+        for i in range(n_steps):
+            pos = i / (n_steps - 1) if n_steps > 1 else 0.5
+            amplitude = 0.8 * (0.9 ** i)
+            oscillation = 0.1 * np.sin(8 * np.pi * pos)
+            value = max(0.0, amplitude + oscillation + 0.05)
+            individual[i] = value
+        return individual.tolist()
+    
+    @staticmethod
+    def create_uniform_individual(n_steps: int) -> List[float]:
+        """Create uniform distribution individual"""
+        return np.ones(n_steps) * random.uniform(0.5, 1.5).tolist()
+    
+    @classmethod
+    def create_hybrid_individual(cls) -> List[float]:
+        """Create an individual with hybrid initialization strategies"""
+        n_steps = random.randint(100, 1000)
+        
+        # Choose initialization strategy
+        strategy = random.choice(['gaussian', 'geometric', 'uniform'])
+        
+        if strategy == 'gaussian':
+            individual = cls.create_gaussian_individual(n_steps)
+        elif strategy == 'geometric':
+            individual = cls.create_geometric_individual(n_steps)
+        else:  # uniform
+            individual = cls.create_uniform_individual(n_steps)
+        
+        # Add some random perturbations for diversity
+        for i in range(len(individual)):
+            if random.random() < 0.05:  # 5% chance to perturb
+                individual[i] = max(0.0, individual[i] + random.gauss(0, 0.05))
+        
+        return individual
+
+class LocalSearchOptimizer:
+    """Handles local search optimization strategies"""
+    
+    @staticmethod
+    def adaptive_local_search(individual: List[float], max_iterations: int = 50) -> Tuple[List[float], float]:
+        """Apply adaptive local search to improve individual"""
+        best_individual = individual.copy()
+        best_c2 = C2Evaluator.calculate_c2(best_individual)
+        
+        # Try different perturbation strategies
+        for _ in range(max_iterations):
+            # Create candidate by perturbing randomly selected elements
+            candidate = individual.copy()
+            
+            # Pick random elements to modify
+            num_changes = random.randint(1, max(1, len(individual) // 10))
+            indices = random.sample(range(len(candidate)), num_changes)
+            
+            for i in indices:
+                # Apply adaptive change based on current value
+                current_val = candidate[i]
+                # Small perturbation
+                perturbation = random.gauss(0, 0.05 * current_val if current_val > 0 else 0.05)
+                candidate[i] = max(0.0, current_val + perturbation)
+            
+            # Evaluate candidate
+            candidate_c2 = C2Evaluator.calculate_c2(candidate)
+            
+            if candidate_c2 > best_c2:
+                best_c2 = candidate_c2
+                best_individual = candidate.copy()
+        
+        return best_individual, best_c2
+
+class OptimizerPipeline:
+    """Main optimization pipeline orchestrator"""
+    
+    def __init__(self):
+        self.best_fitness = 0.0
+        self.best_individual = None
+        self.start_time = None
+        self.generation_counter = 0
+        
+    def setup_deap_environment(self):
+        """Setup DEAP environment"""
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        creator.create("Individual", list, fitness=creator.FitnessMax)
+        
+        toolbox = base.Toolbox()
+        toolbox.register("individual", InitializationStrategy.create_hybrid_individual)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+        toolbox.register("evaluate", self._evaluate_individual)
+        toolbox.register("mate", tools.cxUniform, indpb=0.05)
+        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+        toolbox.register("select", tools.selTournament, tournsize=4)
+        
+        return toolbox
+    
+    def _evaluate_individual(self, individual):
+        """Evaluate fitness for individual"""
+        try:
+            # Convert to list of floats and ensure non-negative
+            f_values = [max(0.0, float(x)) for x in individual]
+            c2 = C2Evaluator.calculate_c2(f_values)
+            return (c2,)
+        except Exception as e:
+            logger.error(f"Evaluation error: {e}")
+            return (0.0,)
+    
+    def adaptive_evolution_loop(self, toolbox, ngen: int = 250, time_limit: int = 85):
+        """Main evolutionary optimization loop with adaptive parameters"""
+        self.start_time = time.time()
+        
+        # Initialize population
+        pop = toolbox.population(n=40)
+        
+        # Evaluate initial population
+        fitnesses = list(map(toolbox.evaluate, pop))
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = fit
+
+        # Evolution history for early stopping
+        fitness_history = deque(maxlen=30)
+        stagnant_generations = 0
+        max_stagnant = 20
+
+        for gen in range(ngen):
+            if time.time() - self.start_time > time_limit:
+                break
+
+            self.generation_counter = gen
+            
+            # Adaptive parameters
+            adaptive_mutpb = 0.35 * (1.0 - gen / ngen)
+            adaptive_cxpb = 0.6 * (1.0 - gen / ngen)
+            adaptive_popsize = max(40, int(40 * (1.0 + gen / ngen * 0.5)))
+
+            # Selection
+            offspring = toolbox.select(pop, len(pop))
+            offspring = list(map(toolbox.clone, offspring))
+
+            # Crossover and mutation
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < adaptive_cxpb:
+                    toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if random.random() < adaptive_mutpb:
+                    toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            # Evaluate new individuals
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = list(map(toolbox.evaluate, invalid_ind))
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            # Local search on top individuals
+            sorted_pop = sorted(pop, key=lambda x: x.fitness.values[0], reverse=True)
+            top_count = max(1, len(pop) // 7)
+            top_individuals = sorted_pop[:top_count]
+
+            # Apply local search to top individuals
+            for ind in top_individuals:
+                if random.random() < 0.4:  # Apply to 40% of top individuals
+                    improved_ind, improved_fitness = LocalSearchOptimizer.adaptive_local_search(ind)
+                    if improved_fitness > ind.fitness.values[0]:
+                        ind[:] = improved_ind
+                        ind.fitness.values = (improved_fitness,)
+
+            # Replace population
+            pop[:] = offspring[:adaptive_popsize]
+
+            # Track best solution
+            best_in_gen = max(pop, key=lambda x: x.fitness.values[0])
+            current_fitness = best_in_gen.fitness.values[0]
+            
+            # Update best if improved
+            if current_fitness > self.best_fitness:
+                self.best_fitness = current_fitness
+                self.best_individual = list(best_in_gen)
+                stagnant_generations = 0
+            else:
+                stagnant_generations += 1
+            
+            # Add to history for early stopping
+            fitness_history.append(current_fitness)
+            
+            # Early stopping if no improvement
+            if stagnant_generations > max_stagnant:
+                break
+            
+            # Log progress every 20 generations
+            if gen % 20 == 0 and gen > 0:
+                logger.info(f"Gen {gen}: Best C2 = {self.best_fitness:.6f}")
+
+        return self.best_individual
+
+    def run_optimization(self) -> List[float]:
+        """Run complete optimization pipeline"""
+        try:
+            toolbox = self.setup_deap_environment()
+            best_individual = self.adaptive_evolution_loop(toolbox)
+            
+            # Final validation
+            if best_individual is not None:
+                final_score = C2Evaluator.calculate_c2(best_individual)
+                if final_score > 0.0:
+                    return [max(0.0, float(x)) for x in best_individual]
+            
+            # Fallback
+            logger.warning("Fallback to random initialization")
+            fallback_size = random.randint(100, 1000)
+            return [abs(random.gauss(0.5, 0.3)) for _ in range(fallback_size)]
+            
+        except Exception as e:
+            logger.error(f"Optimization failed: {e}")
+            # Last resort fallback
+            fallback_size = random.randint(100, 1000)
+            return [abs(random.gauss(0.5, 0.3)) for _ in range(fallback_size)]
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value using restructured optimization."""
+    optimizer = OptimizerPipeline()
+    return optimizer.run_optimization()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

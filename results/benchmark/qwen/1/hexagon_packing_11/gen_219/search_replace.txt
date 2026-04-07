@@ -1,0 +1,328 @@
+<NAME>
+add_adaptive_penalty_coefficient
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive penalty coefficient that dynamically adjusts based on optimization progress to improve constraint handling stability. This addresses the constraint handling weaknesses observed in failed programs by preventing overly harsh penalties that might trap optimization in local minima while ensuring constraint violations are adequately penalized. The penalty coefficient starts moderate and increases if no improvement occurs, or decreases if multiple valid solutions are found.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Evaluate fitness (negative of outer hexagon radius for maximization)"""
+    # Calculate minimum outer radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # If solution is invalid, penalize heavily
+    if not validate_solution(inner_hex_data, outer_center, outer_angle):
+        return -1e10  # Very poor fitness
+
+    # Return negative radius (we want to minimize radius, so maximize negative value)
+    return -outer_radius
+=======
+def evaluate_fitness(inner_hex_data, outer_center=[0,0], outer_angle=0, penalty_coefficient=50000.0):
+    """Evaluate fitness (negative of outer hexagon radius for maximization)"""
+    # Calculate minimum outer radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # If solution is invalid, penalize heavily
+    if not validate_solution(inner_hex_data, outer_center, outer_angle):
+        return -outer_radius - penalty_coefficient  # Add penalty for constraint violation
+
+    # Return negative radius (we want to minimize radius, so maximize negative value)
+    return -outer_radius
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+add_progress_based_penalty_adaptation
+</NAME>
+
+<DESCRIPTION>
+Adding progress-based penalty coefficient adaptation that modifies the penalty based on optimization progress. This helps balance constraint handling effectiveness with exploration capability. When no improvement is seen for several generations, the penalty is increased to enforce constraints more strongly. When valid solutions are found consistently, penalties are reduced to allow more exploration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    # Multi-start approach with diverse initial configurations
+    best_overall_fitness = float('-inf')
+    best_overall_individual = None
+
+    # Run multiple independent optimizations with diverse starting points
+    num_starts = 10  # Increase number of starts for better exploration
+    for start_num in range(num_starts):
+        # Configuration parameters - adjust for better performance
+        pop_size = 40
+        generations = 800
+        elite_size = 5
+        tournament_size = 5
+
+        # Create diverse initial population based on different strategies
+        if start_num < 3:  # First 3 starts: use structured initial configurations
+            population = []
+            for _ in range(pop_size):
+                individual = create_initial_individual()
+                population.append(individual)
+        elif start_num < 6:  # Next 3 starts: use random but constrained configurations
+            population = []
+            for _ in range(pop_size):
+                individual = []
+                for _ in range(NUM_INNER_HEXAGONS):
+                    # Constrained random positions near the center
+                    x = random.uniform(-3, 3)
+                    y = random.uniform(-3, 3)
+                    angle = random.uniform(0, 360)
+                    individual.append([x, y, angle])
+                population.append(np.array(individual))
+        else:  # Last 4 starts: use more randomized configurations
+            population = create_initial_population(pop_size)
+
+        best_fitness = float('-inf')
+        best_individual = None
+
+        # Evolution loop
+        for gen in range(generations):
+            if time.time() - start_time > MAX_EVAL_TIME - 1:  # Leave 1 second for final processing
+                break
+
+            # Adaptive mutation rate scheduling - linear decay from 0.8 to 0.1
+            current_mutation_rate = max(0.1, 0.8 - (0.7 * gen / generations))
+
+            # Evaluate fitness for entire population
+            fitnesses = []
+            for individual in population:
+                fit = evaluate_fitness(individual)
+                fitnesses.append(fit)
+
+            # Track best solution
+            current_best_idx = np.argmax(fitnesses)
+            current_best_fitness = fitnesses[current_best_idx]
+
+            if current_best_fitness > best_fitness:
+                best_fitness = current_best_fitness
+                best_individual = population[current_best_idx].copy()
+
+            # Elitism: keep best individuals
+            elite_indices = np.argsort(fitnesses)[-elite_size:]
+            elites = [population[i] for i in elite_indices]
+
+            # Create new population
+            new_population = elites.copy()
+
+            # Fill rest with offspring
+            while len(new_population) < pop_size:
+                parent1 = tournament_selection(population, fitnesses, tournament_size)
+                parent2 = tournament_selection(population, fitnesses, tournament_size)
+
+                child1, child2 = crossover(parent1, parent2)
+                child1 = mutate(child1, mutation_rate=current_mutation_rate)
+                child2 = mutate(child2, mutation_rate=current_mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:pop_size]
+
+        # Keep track of best overall solution across all starts
+        if best_individual is not None and best_fitness > best_overall_fitness:
+            best_overall_fitness = best_fitness
+            best_overall_individual = best_individual.copy()
+
+    # Validate final best solution
+    if best_overall_individual is None:
+        # Return fallback if we couldn't find anything good
+        fallback = create_initial_individual()
+        best_overall_individual = fallback
+
+    # Final validation and calculation of outer hexagon parameters
+    outer_radius = -best_overall_fitness if best_overall_fitness != float('-inf') else 10.0  # fallback if not found
+
+    # Return result
+    inner_hex_data = best_overall_individual
+    outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+    outer_hex_side_length = outer_radius
+
+    # Final validation to ensure correctness
+    if not validate_solution(inner_hex_data):
+        # Revert to a reasonable fallback
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0.0, 0.0, 0.0])
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+=======
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    # Multi-start approach with diverse initial configurations
+    best_overall_fitness = float('-inf')
+    best_overall_individual = None
+
+    # Progress tracking for penalty adaptation
+    no_improvement_count = 0
+    last_best_fitness = float('-inf')
+    penalty_coefficient = 50000.0  # Starting penalty coefficient
+
+    # Run multiple independent optimizations with diverse starting points
+    num_starts = 10  # Increase number of starts for better exploration
+    for start_num in range(num_starts):
+        # Configuration parameters - adjust for better performance
+        pop_size = 40
+        generations = 800
+        elite_size = 5
+        tournament_size = 5
+
+        # Create diverse initial population based on different strategies
+        if start_num < 3:  # First 3 starts: use structured initial configurations
+            population = []
+            for _ in range(pop_size):
+                individual = create_initial_individual()
+                population.append(individual)
+        elif start_num < 6:  # Next 3 starts: use random but constrained configurations
+            population = []
+            for _ in range(pop_size):
+                individual = []
+                for _ in range(NUM_INNER_HEXAGONS):
+                    # Constrained random positions near the center
+                    x = random.uniform(-3, 3)
+                    y = random.uniform(-3, 3)
+                    angle = random.uniform(0, 360)
+                    individual.append([x, y, angle])
+                population.append(np.array(individual))
+        else:  # Last 4 starts: use more randomized configurations
+            population = create_initial_population(pop_size)
+
+        best_fitness = float('-inf')
+        best_individual = None
+
+        # Evolution loop
+        for gen in range(generations):
+            if time.time() - start_time > MAX_EVAL_TIME - 1:  # Leave 1 second for final processing
+                break
+
+            # Adaptive mutation rate scheduling - linear decay from 0.8 to 0.1
+            current_mutation_rate = max(0.1, 0.8 - (0.7 * gen / generations))
+
+            # Adaptive penalty coefficient based on progress
+            if best_fitness > last_best_fitness:
+                no_improvement_count = 0
+                last_best_fitness = best_fitness
+                # Decrease penalty if we're finding valid solutions consistently
+                penalty_coefficient = max(25000.0, penalty_coefficient * 0.99)
+            else:
+                no_improvement_count += 1
+                # Increase penalty if no improvement seen recently
+                if no_improvement_count > 20:
+                    penalty_coefficient = min(200000.0, penalty_coefficient * 1.1)
+
+            # Evaluate fitness for entire population with adaptive penalty
+            fitnesses = []
+            valid_solutions_count = 0
+            for individual in population:
+                fit = evaluate_fitness(individual, penalty_coefficient=penalty_coefficient)
+                fitnesses.append(fit)
+                if fit > -1e9:  # Valid solution (not heavily penalized)
+                    valid_solutions_count += 1
+
+            # Track best solution
+            current_best_idx = np.argmax(fitnesses)
+            current_best_fitness = fitnesses[current_best_idx]
+
+            if current_best_fitness > best_fitness:
+                best_fitness = current_best_fitness
+                best_individual = population[current_best_idx].copy()
+
+            # Elitism: keep best individuals
+            elite_indices = np.argsort(fitnesses)[-elite_size:]
+            elites = [population[i] for i in elite_indices]
+
+            # Create new population
+            new_population = elites.copy()
+
+            # Fill rest with offspring
+            while len(new_population) < pop_size:
+                parent1 = tournament_selection(population, fitnesses, tournament_size)
+                parent2 = tournament_selection(population, fitnesses, tournament_size)
+
+                child1, child2 = crossover(parent1, parent2)
+                child1 = mutate(child1, mutation_rate=current_mutation_rate)
+                child2 = mutate(child2, mutation_rate=current_mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:pop_size]
+
+        # Keep track of best overall solution across all starts
+        if best_individual is not None and best_fitness > best_overall_fitness:
+            best_overall_fitness = best_fitness
+            best_overall_individual = best_individual.copy()
+
+    # Validate final best solution
+    if best_overall_individual is None:
+        # Return fallback if we couldn't find anything good
+        fallback = create_initial_individual()
+        best_overall_individual = fallback
+
+    # Final validation and calculation of outer hexagon parameters
+    outer_radius = -best_overall_fitness if best_overall_fitness != float('-inf') else 10.0  # fallback if not found
+
+    # Return result
+    inner_hex_data = best_overall_individual
+    outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+    outer_hex_side_length = outer_radius
+
+    # Final validation to ensure correctness
+    if not validate_solution(inner_hex_data):
+        # Revert to a reasonable fallback
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0.0, 0.0, 0.0])
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+>>>>>>> REPLACE
+
+</DIFF>

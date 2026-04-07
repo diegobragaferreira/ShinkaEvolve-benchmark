@@ -285,6 +285,7 @@ def generate_report(exp_name=None, round_num=None):
     print(f"{'Exp':<12} | {'Task Name (Variant)':<37} | {'Rnd':<4} | {'Gen':<4} | {'Best Score':<12} | {'Const':<17} | {'Time':<8} | {'API':<18} | {'Status'}")
     print("-" * 171)
 
+    summary_data = []
     for res in parsed_results:
         display_name = f"{res['task']} ({res['variant']})"
         
@@ -316,27 +317,72 @@ def generate_report(exp_name=None, round_num=None):
             best_score = best_row['combined_score']
             
             derived_val_str = "-"
+            derived_val = None
+            prefix = ""
             if "first_autocorr" in res['task']:
                 val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
                 derived_val_str = f"c1={val:.6f} ↓"
+                derived_val = val
+                prefix = "c1"
             elif "second_autocorr" in res['task']:
                 derived_val_str = f"c2={best_score:.6f} ↑"
+                derived_val = best_score
+                prefix = "c2"
             elif "third_autocorr" in res['task']:
                 val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
                 derived_val_str = f"c3={val:.6f} ↓"
+                derived_val = val
+                prefix = "c3"
             elif "hexagon_packing" in res['task']:
                 val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
                 derived_val_str = f"s={val:.6f} ↓"
+                derived_val = val
+                prefix = "s"
             elif "minimizing_max_min_dist" in res['task']:
                 val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
                 derived_val_str = f"r={val:.6f} ↓"
+                derived_val = val
+                prefix = "r"
             elif "circle_packing" in res['task']:
                 derived_val_str = f"sum={best_score:.6f} ↑"
+                derived_val = best_score
+                prefix = "sum"
             
             print(f"{res['exp']:<12} | {display_name:<37} | {res['round']:<4} | {total_gens:<4} | {best_score:<12.6f} | {derived_val_str:<17} | {duration:<8} | {api_status:<18} | OK")
 
+            summary_data.append({
+                "task": res['task'],
+                "variant": res['variant'],
+                "round": res['round'],
+                "score": best_score,
+                "const": derived_val,
+                "prefix": prefix
+            })
+
         except Exception as e:
             print(f"{res['exp']:<12} | {display_name:<37} | {res['round']:<4} | {'-':<4} | {'Error':<12} | {'-':<17} | {duration:<8} | {api_status:<18} | Error")
+
+    if summary_data:
+        print("\n" + "="*95)
+        print(f"{'Summary per Task (Variant)':<45} | {'Best Const':<30} | {'Mean Const':<12}")
+        print("-" * 95)
+        
+        df_summary = pd.DataFrame(summary_data)
+        for (task, variant), group in df_summary.groupby(['task', 'variant']):
+            display_name = f"{task} ({variant})"
+            best_idx = group['score'].idxmax()
+            best_row = group.loc[best_idx]
+            
+            # Use constant values if available
+            if best_row['const'] is not None:
+                mean_const = group['const'].mean()
+                prefix = best_row['prefix']
+                best_val_str = f"{prefix:>3} = {best_row['const']:<10.6f} (R{best_row['round']})"
+                print(f"{display_name:<45} | {best_val_str:<30} | {mean_const:<12.6f}")
+            else:
+                mean_score = group['score'].mean()
+                best_val_str = f"{best_row['score']:<10.6f} (R{best_row['round']})"
+                print(f"{display_name:<45} | {best_val_str:<30} | {mean_score:<12.6f}")
 
 
 if __name__ == "__main__":

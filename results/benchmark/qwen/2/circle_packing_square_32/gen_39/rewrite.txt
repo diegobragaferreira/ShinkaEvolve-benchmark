@@ -1,0 +1,213 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import math
+from scipy.optimize import minimize_scalar, minimize
+
+def generate_initial_hex_grid(n_circles):
+    """Generate initial circle positions using hexagonal grid"""
+    sqrt_n = math.ceil(math.sqrt(n_circles))
+    rows = math.ceil(n_circles / sqrt_n)
+    cols = math.ceil(n_circles / rows)
+    
+    positions = []
+    spacing = 0.12
+    
+    for i in range(rows):
+        for j in range(cols):
+            x_offset = 0.5 * (i % 2)
+            x = (j + x_offset) * spacing
+            y = i * spacing * math.sqrt(3) / 2
+            
+            if x <= 1 - spacing/2 and y <= 1 - spacing/2:
+                positions.append([x, y])
+            
+            if len(positions) >= n_circles:
+                break
+        if len(positions) >= n_circles:
+            break
+    
+    positions = positions[:n_circles]
+    
+    # Ensure positions are within bounds
+    for pos in positions:
+        pos[0] = max(spacing/2, min(1 - spacing/2, pos[0]))
+        pos[1] = max(spacing/2, min(1 - spacing/2, pos[1]))
+    
+    return np.array(positions)
+
+def voronoi_based_placement(circles, max_attempts=5):
+    """Find improved positions using Voronoi-based approach"""
+    # Create Voronoi diagram from current circle centers
+    positions = circles[:, :2]
+    
+    try:
+        vor = Voronoi(positions)
+    except:
+        # Fallback to basic approach if Voronoi fails
+        return circles.copy()
+    
+    # Get Voronoi vertices and regions
+    new_circles = circles.copy()
+    
+    # For each circle, find the best position based on Voronoi properties
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        
+        # Simple heuristic: place at centroid of Voronoi region if it's valid
+        # But prioritize placing near the center of maximum free space
+        
+        # Instead, use a more direct approach: move to a safe position with max radius
+        safe_radius = r
+        best_x, best_y = x, y
+        
+        # Try to increase radius while staying within bounds and avoiding overlaps
+        max_radius = min(x, 1-x, y, 1-y)
+        
+        # Check if we can safely increase radius
+        if max_radius > r:
+            # Check for overlaps with neighbors
+            valid_radius = max_radius
+            for j in range(len(circles)):
+                if i != j:
+                    x2, y2, r2 = circles[j] 
+                    dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+                    if dist < r2 + valid_radius:
+                        valid_radius = max(0.001, dist - r2)
+            safe_radius = min(safe_radius, valid_radius)
+        
+        # Now try to find a better location with same or better radius
+        best_radius = safe_radius
+        
+        # Test several candidate positions near the current one
+        best_pos = [x, y]
+        best_score = -float('inf')
+        
+        # Sample around current position
+        candidates = []
+        for dx in [-0.05, -0.025, 0, 0.025, 0.05]:
+            for dy in [-0.05, -0.025, 0, 0.025, 0.05]:
+                candidates.append([x + dx, y + dy])
+        
+        for cx, cy in candidates:
+            if cx < r or cx > 1-r or cy < r or cy > 1-r:
+                continue
+            
+            # Check overlap with others
+            valid = True
+            max_rad = min(cx, 1-cx, cy, 1-cy)
+            for j in range(len(circles)):
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((cx-x2)**2 + (cy-y2)**2)
+                    if dist < r2 + max_rad:
+                        valid = False
+                        break
+            
+            if valid:
+                # Score based on min distance to neighbors (higher is better)
+                min_dist = float('inf')
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((cx-x2)**2 + (cy-y2)**2)
+                        min_dist = min(min_dist, dist)
+                
+                # Prefer larger radii and better spacing
+                score = min_dist + (max_rad * 0.5)
+                if score > best_score:
+                    best_score = score
+                    best_pos = [cx, cy]
+                    best_radius = max_rad
+        
+        new_circles[i] = [best_pos[0], best_pos[1], best_radius]
+    
+    return new_circles
+
+def improved_circle_packing():
+    """Improved circle packing algorithm using Voronoi-based approach"""
+    n = 32
+    
+    # Phase 1: Initial placement with hexagonal grid
+    initial_positions = generate_initial_hex_grid(n)
+    initial_radii = np.full(n, 0.05)
+    circles = np.column_stack([initial_positions, initial_radii])
+    
+    # Phase 2: Iterative refinement using Voronoi and local optimization
+    best_circles = circles.copy()
+    best_sum = np.sum(circles[:, 2])
+    
+    # Multiple refinement rounds
+    for round_num in range(10):
+        # Voronoi-based repositioning
+        circles = voronoi_based_placement(circles)
+        
+        # Local optimization for each circle individually
+        for i in range(n):
+            # Define optimization function for single circle
+            def optimize_single_circle(params):
+                x, y, r = params
+                # Boundary constraints
+                if x < r or x > 1-r or y < r or y > 1-r:
+                    return 1e10
+                
+                # Overlap penalties
+                penalty = 0
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+                        if dist < r + r2:
+                            penalty += 1000 * (r + r2 - dist)
+                
+                # Objective: maximize radius (minimize negative radius)
+                return -r + penalty
+            
+            # Optimize just this circle
+            try:
+                # Start with current values
+                current = circles[i].copy()
+                x0, y0, r0 = current
+                
+                # Optimize radius first
+                def radius_obj(r):
+                    return optimize_single_circle([x0, y0, r])
+                
+                # Find optimal radius
+                res = minimize_scalar(radius_obj, bounds=(0.001, min(0.5, 1-x0, x0, 1-y0, y0)), method='bounded')
+                new_r = max(0.001, min(0.5, 1-x0, x0, 1-y0, y0, res.x))
+                
+                # Update position and radius
+                circles[i] = [x0, y0, new_r]
+            except:
+                pass  # Skip if optimization fails
+        
+        # Evaluate current solution
+        current_sum = np.sum(circles[:, 2])
+        if current_sum > best_sum:
+            best_sum = current_sum
+            best_circles = circles.copy()
+    
+    # Final cleanup
+    final_circles = best_circles.copy()
+    for i in range(n):
+        x, y, r = final_circles[i]
+        # Ensure validity
+        r = max(0.001, min(0.45, r))
+        x = max(r, min(1-r, x))
+        y = max(r, min(1-r, y))
+        final_circles[i] = [x, y, r]
+    
+    return final_circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    return improved_circle_packing()
+
+# EVOLVE-BLOCK-END

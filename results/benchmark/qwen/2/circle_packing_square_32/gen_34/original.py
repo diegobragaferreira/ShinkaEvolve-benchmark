@@ -1,0 +1,175 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions with a hexagonal grid based approach."""
+    # Use a hexagonal grid pattern for better initial spacing
+    # Calculate grid dimensions for approximate hexagonal packing
+    rows = int(np.ceil(np.sqrt(n / 0.866)))  # 0.866 is hex packing density
+    cols = int(np.ceil(n / rows))
+
+    # Create hexagonal grid with proper spacing
+    positions = []
+    hex_spacing_x = 1.0 / cols
+    hex_spacing_y = hex_spacing_x * 0.866  # sqrt(3)/2
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            # Offset every other row for hexagonal packing
+            x_offset = (i % 2) * (hex_spacing_x / 2)
+            x = (j + 0.5 + x_offset) * hex_spacing_x
+            y = (i + 0.5) * hex_spacing_y
+
+            # Clamp to valid range with small margin
+            x = np.clip(x, 0.01, 0.99)
+            y = np.clip(y, 0.01, 0.99)
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Assign initial radii based on local density
+    initial_radii = []
+    positions_array = np.array(positions)
+
+    for i in range(n):
+        x, y = positions[i]
+
+        # Calculate distance to boundaries
+        dist_to_boundaries = min(x, 1-x, y, 1-y)
+
+        # Find distances to nearest neighbors using vectorized operations
+        distances = np.sqrt(np.sum((positions_array - [x, y])**2, axis=1))
+        # Exclude self-distance
+        distances = distances[distances > 0]
+
+        # Get the minimum distance to neighbors (density indicator)
+        min_neighbor_dist = np.min(distances) if len(distances) > 0 else 0.1
+
+        # Calculate appropriate radius based on available space
+        # Larger radius in sparse regions, smaller in dense regions
+        # Balance between boundary constraints and neighbor constraints
+        radius_based_on_boundaries = dist_to_boundaries * 0.4
+        radius_based_on_density = min_neighbor_dist * 0.3
+
+        # Take the minimum of both constraints to ensure feasibility
+        base_radius = min(radius_based_on_boundaries, radius_based_on_density)
+
+        # Ensure minimum radius and reasonable upper limit
+        final_radius = max(0.005, min(0.15, base_radius))
+
+        initial_radii.append(final_radius)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+
+def evaluate_fitness(circles):
+    """Evaluate fitness of circle configuration."""
+    n = len(circles)
+    total_radius = np.sum(circles[:, 2])
+
+    # Penalty for overlaps and containment violations
+    penalty = 0
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            penalty += 1000  # Large penalty for containment violation
+
+    # Check overlap constraints
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+            if distance < r1 + r2:
+                penalty += 1000 * (r1 + r2 - distance)
+
+    return total_radius - penalty
+
+def optimize_circles(circles):
+    """Optimize circle positions using scipy optimization."""
+    def objective(params):
+        # Reshape params back to circles array
+        circles_flat = params.reshape(-1, 3)
+        return -evaluate_fitness(circles_flat)  # Negative because we maximize
+
+    def constraint_func(params):
+        # Constraints for non-overlap and containment
+        circles_flat = params.reshape(-1, 3)
+        n = len(circles_flat)
+
+        # Containment constraints (should be within [r, 1-r] for x and y)
+        bounds_violation = 0
+
+        for i in range(n):
+            x, y, r = circles_flat[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                bounds_violation += 1000
+
+        # Overlap constraints
+        overlap_violation = 0
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles_flat[i]
+                x2, y2, r2 = circles_flat[j]
+                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if distance < r1 + r2:
+                    overlap_violation += 1000 * (r1 + r2 - distance)
+
+        return bounds_violation + overlap_violation
+
+    # Flatten the circles array for optimization
+    initial_params = circles.flatten()
+
+    # Define bounds for optimization
+    bounds = []
+    for i in range(len(initial_params)):
+        if i % 3 == 2:  # radius parameter
+            bounds.append((0.001, 0.5))  # Radius between 0.001 and 0.5
+        else:  # x and y parameters
+            bounds.append((0.001, 0.999))  # Position within the unit square
+
+    try:
+        # Use L-BFGS-B which handles bounds well
+        result = minimize(objective, initial_params, method='L-BFGS-B',
+                         bounds=bounds, options={'maxiter': 1000})
+
+        if result.success:
+            optimized_circles = result.x.reshape(-1, 3)
+            return optimized_circles
+    except Exception as e:
+        print(f"Optimization error: {e}")
+
+    # Return original if optimization failed
+    return circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Initialize with heuristic approach
+    circles = initialize_circles_heuristic(n)
+
+    # Optimize the configuration
+    circles = optimize_circles(circles)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

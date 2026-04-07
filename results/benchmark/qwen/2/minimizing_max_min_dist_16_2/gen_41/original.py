@@ -1,0 +1,131 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -np.inf
+
+        # Return negative ratio (since we want to maximize)
+        return -d_min / d_max
+
+    def constraint(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        return np.concatenate([
+            points[:, 0],           # x coordinates >= 0
+            1 - points[:, 0],       # x coordinates <= 1
+            points[:, 1],           # y coordinates >= 0
+            1 - points[:, 1]        # y coordinates <= 1
+        ])
+
+    # Multi-start optimization with improved initializations
+    best_ratio = -np.inf
+    best_points = None
+
+    # Try multiple sophisticated initializations
+    initial_configs = []
+
+    # Configuration 1: Optimized grid-based arrangement
+    np.random.seed(42)
+    grid_x = np.linspace(0.1, 0.9, 4)
+    grid_y = np.linspace(0.1, 0.9, 4)
+    grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+
+    # Add structured perturbations to break symmetry
+    perturbation_magnitude = 0.08
+    noise = np.random.normal(0, perturbation_magnitude/3, (16, 2))
+    initial_points1 = np.clip(grid_points + noise, 0, 1)
+    initial_configs.append(initial_points1)
+
+    # Configuration 2: More evenly distributed points
+    np.random.seed(123)
+    initial_points2 = np.random.uniform(0.05, 0.95, (16, 2))
+    initial_configs.append(initial_points2)
+
+    # Configuration 3: Fibonacci spiral-like arrangement (more uniform)
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    radii = np.sqrt(np.linspace(0.05, 0.45, 16))  # Square root for uniform distribution
+    fib_points = np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
+    fib_points = np.clip((fib_points + 1) / 2, 0, 1)  # Normalize to [0,1]
+    initial_configs.append(fib_points)
+
+    # Run optimizations with different initial configurations
+    for i, initial_points in enumerate(initial_configs):
+        try:
+            # Flatten for optimization
+            x0 = initial_points.flatten()
+
+            # Define bounds (points must stay in [0,1] x [0,1])
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Define constraints
+            cons = {'type': 'ineq', 'fun': constraint}
+
+            # First attempt with L-BFGS-B for faster initial optimization
+            result1 = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6}
+            )
+
+            # If successful, do a more thorough optimization with SLSQP
+            if result1.success:
+                refined_x0 = result1.x
+                result2 = minimize(
+                    objective,
+                    refined_x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints=cons,
+                    options={'maxiter': 1000, 'ftol': 1e-8, 'gtol': 1e-8}
+                )
+
+                if result2.success:
+                    # Extract points and calculate final ratio
+                    optimized_points = result2.x.reshape(-1, 2)
+                    distances = pdist(optimized_points)
+
+                    if len(distances) > 0:
+                        d_min = np.min(distances)
+                        d_max = np.max(distances)
+
+                        if d_max > 0:
+                            ratio = d_min / d_max
+                            if ratio > best_ratio:
+                                best_ratio = ratio
+                                best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If no successful optimization, return the best initial configuration
+    if best_points is None:
+        best_points = initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+
+    return best_points
+
+# EVOLVE-BLOCK-END

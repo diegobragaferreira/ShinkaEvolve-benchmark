@@ -1,0 +1,212 @@
+<NAME>
+simple_improvement
+</NAME>
+
+<DESCRIPTION>
+I'll implement a much simpler but effective improvement to the existing code. Since we're looking to maximize the sum of radii for 21 non-overlapping circles in a rectangle with perimeter 4, I'll create a heuristic approach that places circles in a structured grid pattern and then fine-tunes their positions to maximize the sum.
+
+The approach:
+1. Start with a structured grid placement that ensures no overlaps
+2. Apply local optimization to increase radii while maintaining constraints
+3. Use a more sophisticated initialization strategy than pure randomness
+
+This should beat the benchmark while staying within the time constraints.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: perimeter = 4 => width + height = 2
+    # Using 1x1 rectangle for simplicity, which is reasonable
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Number of circles
+    n = 21
+
+    # Initialize circles array
+    circles = np.zeros((n, 3))
+
+    # Create a structured initial arrangement
+    # Try to place circles in a hexagonal pattern for high density
+    rows = 5
+    cols = 5
+
+    # Adjust the grid size to fit 21 circles
+    # We'll use a rectangular grid approach
+    if n <= 9:
+        rows, cols = 3, 3
+    elif n <= 16:
+        rows, cols = 4, 4
+    else:
+        rows, cols = 5, 5
+
+    # Reduce grid slightly to allow for optimization
+    grid_width = rect_width * 0.9
+    grid_height = rect_height * 0.9
+
+    # Calculate spacing
+    if cols > 0:
+        dx = grid_width / cols
+    else:
+        dx = grid_width
+
+    if rows > 0:
+        dy = grid_height / rows
+    else:
+        dy = grid_height
+
+    # Place circles in structured grid
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 0.5) * dx
+            y = (i + 0.5) * dy
+            # Initial radius - small to start with
+            r = min(dx, dy) * 0.2
+            circles[idx] = [x, y, r]
+            idx += 1
+        if idx >= n:
+            break
+
+    # Fill remaining circles with random valid positions
+    for i in range(idx, n):
+        # Keep trying until we find a valid position
+        attempts = 0
+        while attempts < 1000:
+            x = np.random.uniform(0.05, rect_width - 0.05)
+            y = np.random.uniform(0.05, rect_height - 0.05)
+
+            # Initial small radius
+            r = np.random.uniform(0.02, 0.15)
+
+            # Check if this circle would overlap with others
+            valid = True
+            test_circle = np.array([[x, y, r]])
+
+            # Calculate distances to existing circles
+            if idx > 0:
+                existing_centers = circles[:idx, :2]
+                test_centers = test_circle[:, :2]
+                distances = cdist(existing_centers, test_centers)
+
+                for k in range(distances.shape[0]):
+                    if distances[k, 0] < (circles[k, 2] + r):
+                        valid = False
+                        break
+
+            if valid:
+                circles[i] = [x, y, r]
+                break
+
+            attempts += 1
+
+    # Perform iterative refinement to maximize sum of radii
+    # Simple greedy local search
+    max_iter = 5000
+    start_time = time.time()
+
+    # Keep track of best solution
+    best_sum_radius = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    for iteration in range(max_iter):
+        if time.time() - start_time > 55:  # Leave some buffer for cleanup
+            break
+
+        # Choose a random circle to adjust
+        circle_idx = np.random.randint(0, n)
+
+        # Save original values
+        old_x, old_y, old_r = circles[circle_idx]
+
+        # Try to slightly increase radius while maintaining constraints
+        new_r = old_r + np.random.normal(0, 0.005)
+        new_r = np.clip(new_r, 0.01, min(0.25, rect_width/4, rect_height/4))
+
+        # Try to adjust position slightly
+        new_x = old_x + np.random.normal(0, 0.01)
+        new_y = old_y + np.random.normal(0, 0.01)
+
+        # Keep within bounds
+        new_x = np.clip(new_x, 0.05, rect_width - 0.05)
+        new_y = np.clip(new_y, 0.05, rect_height - 0.05)
+
+        # Check constraint violations
+        violation = False
+        test_circle = np.array([[new_x, new_y, new_r]])
+        existing_circles = np.delete(circles, circle_idx, axis=0)
+
+        if len(existing_circles) > 0:
+            existing_centers = existing_circles[:, :2]
+            test_centers = test_circle[:, :2]
+            distances = cdist(existing_centers, test_centers)
+
+            # Check for overlap with all other circles
+            for k in range(len(distances)):
+                if distances[k, 0] < (existing_circles[k, 2] + new_r):
+                    violation = True
+                    break
+
+        # Check boundary constraints
+        if new_x - new_r < 0 or new_x + new_r > rect_width or \
+           new_y - new_r < 0 or new_y + new_r > rect_height:
+            violation = True
+
+        if not violation:
+            # Accept the change
+            circles[circle_idx] = [new_x, new_y, new_r]
+
+            # Update best solution if improved
+            current_sum = np.sum(circles[:, 2])
+            if current_sum > best_sum_radius:
+                best_sum_radius = current_sum
+                best_circles = circles.copy()
+        else:
+            # Restore original values
+            circles[circle_idx] = [old_x, old_y, old_r]
+
+    # Return the best solution found
+    return best_circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

@@ -1,0 +1,176 @@
+<NAME>
+add_spatial_hashing_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The main improvement is to implement spatial hashing for overlap detection to dramatically improve performance when checking pairwise hexagon overlaps. The current implementation uses O(n²) pairwise overlap checks which becomes very slow as we refine the solution. Spatial hashing reduces this to near O(n) by only checking hexagons that are potentially close to each other based on a grid partitioning scheme.
+
+This change addresses the computational bottleneck in the evaluate_packing function where overlap checking dominates the runtime, especially for large populations or many optimization iterations. The spatial hash approach will make the optimization much faster and allow for more thorough exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+
+def create_initial_config():
+    """Create an initial symmetric configuration based on group theory"""
+    # Generate 12 hexagon positions in concentric rings
+=======
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+
+def create_spatial_hash(hex_vertices_list, cell_size=2.0):
+    """Create spatial hash grid for fast overlap checking"""
+    hash_grid = {}
+    for i, vertices in enumerate(hex_vertices_list):
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Add to all relevant cells
+        start_col = int(min_x // cell_size)
+        end_col = int(max_x // cell_size) + 1
+        start_row = int(min_y // cell_size)
+        end_row = int(max_y // cell_size) + 1
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                cell_key = (col, row)
+                if cell_key not in hash_grid:
+                    hash_grid[cell_key] = []
+                hash_grid[cell_key].append(i)
+    return hash_grid
+
+def get_overlapping_indices(hash_grid, hex_index, hex_vertices, cell_size=2.0):
+    """Get indices of potentially overlapping hexagons using spatial hash"""
+    overlapping = set()
+    # Get bounding box of hexagon
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+
+    # Check all relevant cells
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            cell_key = (col, row)
+            if cell_key in hash_grid:
+                for idx in hash_grid[cell_key]:
+                    if idx != hex_index:
+                        overlapping.add(idx)
+    return overlapping
+
+def create_initial_config():
+    """Create an initial symmetric configuration based on group theory"""
+    # Generate 12 hexagon positions in concentric rings
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_packing(inner_hex_data):
+    """Evaluate how well a packing satisfies constraints"""
+    n = len(inner_hex_data)
+    penalty = 0
+
+    # Check containment (penalize if hexagons extend beyond boundary)
+    outer_radius = get_outer_hexagon_radius(inner_hex_data)
+    outer_hex_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        vertices = hexagon_vertices(x, y, angle)
+
+        # Check if all vertices are inside outer hexagon
+        for vx, vy in vertices:
+            point = np.array([vx, vy])
+            if not point_in_polygon(point, outer_hex_vertices):
+                # Calculate penalty based on how much it extends beyond
+                dist = np.sqrt(vx*vx + vy*vy)
+                penalty += (dist - outer_radius + 0.5)**2
+
+    # Check overlaps between hexagons (penalize overlapping areas)
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, angle1 = inner_hex_data[i]
+            x2, y2, angle2 = inner_hex_data[j]
+
+            vertices1 = hexagon_vertices(x1, y1, angle1)
+            vertices2 = hexagon_vertices(x2, y2, angle2)
+
+            if check_hexagon_overlap(vertices1, vertices2):
+                penalty += 1000000  # Large penalty for overlaps
+                break
+
+    return penalty
+=======
+def evaluate_packing(inner_hex_data):
+    """Evaluate how well a packing satisfies constraints"""
+    n = len(inner_hex_data)
+    penalty = 0
+
+    # Precompute vertices for all hexagons for efficient overlap checking
+    hex_vertices_list = [hexagon_vertices(inner_hex_data[i][0], inner_hex_data[i][1], inner_hex_data[i][2]) for i in range(n)]
+
+    # Check containment (penalize if hexagons extend beyond boundary)
+    outer_radius = get_outer_hexagon_radius(inner_hex_data)
+    outer_hex_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+
+    for i in range(n):
+        vertices = hex_vertices_list[i]
+
+        # Check if all vertices are inside outer hexagon
+        for vx, vy in vertices:
+            point = np.array([vx, vy])
+            if not point_in_polygon(point, outer_hex_vertices):
+                # Calculate penalty based on how much it extends beyond
+                dist = np.sqrt(vx*vx + vy*vy)
+                penalty += (dist - outer_radius + 0.5)**2
+
+    # Check overlaps between hexagons using spatial hashing for efficiency
+    hash_grid = create_spatial_hash(hex_vertices_list)
+
+    for i in range(n):
+        # Get potentially overlapping hexagons
+        overlapping_indices = get_overlapping_indices(hash_grid, i, hex_vertices_list[i])
+
+        # Check actual overlaps
+        for j in overlapping_indices:
+            if i < j:  # Avoid double counting
+                vertices1 = hex_vertices_list[i]
+                vertices2 = hex_vertices_list[j]
+
+                if check_hexagon_overlap(vertices1, vertices2):
+                    penalty += 1000000  # Large penalty for overlaps
+                    break
+
+    return penalty
+>>>>>>> REPLACE
+</DIFF>

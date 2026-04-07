@@ -1,0 +1,123 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,118 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial import Voronoi
++from scipy.spatial.distance import cdist
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
++
++def _generate_voronoi_candidates(n_points=100):
++    """Generate candidate points using Voronoi diagram."""
++    # Generate random points
++    points = np.random.rand(n_points, 2)
++
++    # Add boundary points to encourage corner placements
++    boundary_points = np.array([
++        [0, 0], [0, 1], [1, 0], [1, 1],  # corners
++        [0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]  # midpoints
++    ])
++    points = np.vstack([points, boundary_points])
++
++    # Generate Voronoi diagram
++    vor = Voronoi(points)
++
++    # Filter out points that are too close to the boundary
++    candidates = []
++    for vertex in vor.vertices:
++        x, y = vertex
++        if 0.01 <= x <= 0.99 and 0.01 <= y <= 0.99:
++            candidates.append([x, y])
++
++    return np.array(candidates)
++
++def _compute_radius_at_position(pos, existing_circles, min_radius=0.001):
++    """Compute maximum possible radius at given position without overlapping existing circles."""
++    x, y = pos
++    max_radius = min(x, 1-x, y, 1-y)  # Boundary constraints
++
++    # Check overlap with existing circles
++    for ex_x, ex_y, ex_r in existing_circles:
++        dist = np.sqrt((x - ex_x)**2 + (y - ex_y)**2)
++        max_radius = min(max_radius, dist - ex_r)
++
++        # Early termination if impossible to place
++        if max_radius < min_radius:
++            return 0
++
++    return max_radius
++
++def _initialize_with_voronoi(n_circles=32):
++    """Initialize circle positions using Voronoi-based approach."""
++    # Generate candidate positions
++    candidates = _generate_voronoi_candidates(100)
++
++    # Sort candidates by distance from corners to encourage filling
++    corner_distances = np.min(np.stack([np.linalg.norm(cand - np.array([0,0])),
++                                       np.linalg.norm(cand - np.array([1,0])),
++                                       np.linalg.norm(cand - np.array([0,1])),
++                                       np.linalg.norm(cand - np.array([1,1]))]), axis=0)
++    sorted_indices = np.argsort(corner_distances)
++
++    circles = []
++    used_positions = []
++
++    # Place circles one by one
++    for idx in sorted_indices[:n_circles]:
++        pos = candidates[idx]
++        radius = _compute_radius_at_position(pos, circles)
++
++        if radius > 0:
++            circles.append([pos[0], pos[1], radius])
++            used_positions.append(pos)
++
++        if len(circles) >= n_circles:
++            break
++
++    # Fill remaining slots with better positions if needed
++    while len(circles) < n_circles:
++        # Try to place in unoccupied areas
++        best_pos = None
++        best_radius = 0
++
++        # Sample random positions
++        for _ in range(1000):
++            x = np.random.uniform(0.01, 0.99)
++            y = np.random.uniform(0.01, 0.99)
++            pos = np.array([x, y])
++
++            radius = _compute_radius_at_position(pos, circles)
++            if radius > best_radius:
++                best_radius = radius
++                best_pos = pos
++
++        if best_pos is not None and best_radius > 0:
++            circles.append([best_pos[0], best_pos[1], best_radius])
++
++    return np.array(circles)
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
+-    circles = np.zeros((n, 3))
++    # Initialize with Voronoi-based method
++    circles = _initialize_with_voronoi(32)
++
++    # Ensure all circles are valid
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        # Make sure radius is positive and within bounds
++        if r <= 0 or x <= 0 or x >= 1 or y <= 0 or y >= 1:
++            circles[i] = [0.5, 0.5, 0.01]
+ 
+     return circles
+ 
+ 
+ # EVOLVE-BLOCK-END

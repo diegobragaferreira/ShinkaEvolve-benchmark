@@ -1,0 +1,102 @@
+<NAME>
+improved_constraint_density
+</NAME>
+
+<DESCRIPTION>
+This improvement refactors the constraint density computation to be more accurate and efficient. The original Voronoi-based approach was complex and not working as intended. I'm replacing it with a simpler but more effective neighbor-counting approach that:
+
+1. Directly counts actual neighboring circles within a reasonable distance threshold
+2. Incorporates boundary effects to better reflect real constraints
+3. Uses a more robust formula for constraint density calculation
+4. Is more computationally efficient for the population sizes we're dealing with
+
+This should provide better feedback to the adaptive mutation system, leading to more effective exploration of the search space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi neighbors.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Create Voronoi diagram
+    try:
+        vor = Voronoi(centers)
+    except:
+        # Fallback to simpler constraint calculation
+        return np.ones(n) * 0.5
+
+    # Count neighbors for each region using direct computation
+    constraint_density = np.zeros(n)
+
+    # For each circle, count how many others are close enough to potentially collide
+    for i in range(n):
+        center_i = centers[i]
+        nearby_count = 0
+
+        # Check nearby circles (within 3x max radius)
+        max_radius = np.max(circles[:, 2])
+        threshold = 3 * max_radius
+
+        for j in range(n):
+            if i != j:
+                dist = np.linalg.norm(center_i - centers[j])
+                if dist < threshold:
+                    nearby_count += 1
+
+        constraint_density[i] = nearby_count / max(1, n - 1)
+
+    return constraint_density
+=======
+def compute_constraint_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute actual constraint density for each circle based on neighbor count and boundary distance.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    constraint_density = np.zeros(n)
+
+    # For each circle, count how many others are close enough to potentially collide
+    # Also consider boundary effects
+    max_radius = np.max(circles[:, 2])
+
+    for i in range(n):
+        center_i = circles[i, :2]
+        radius_i = circles[i, 2]
+        nearby_count = 0
+
+        # Check nearby circles (within 2x max radius for efficiency)
+        threshold = 2 * max_radius
+
+        for j in range(n):
+            if i != j:
+                center_j = circles[j, :2]
+                radius_j = circles[j, 2]
+
+                # Check if circles could potentially collide
+                dist = np.linalg.norm(center_i - center_j)
+                min_distance = radius_i + radius_j
+
+                if dist < min_distance * 2:  # Allow some buffer for close neighbors
+                    nearby_count += 1
+
+        # Normalize by total possible neighbors and add boundary effect
+        # Circles near boundaries contribute to higher constraint density
+        boundary_distance = min(center_i[0], rect_width - center_i[0],
+                               center_i[1], rect_height - center_i[1])
+        boundary_factor = max(0, 1.0 - boundary_distance / (radius_i * 2.0))
+
+        constraint_density[i] = (nearby_count / max(1, n - 1)) * (1.0 + boundary_factor * 0.5)
+
+    return constraint_density
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,321 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon, Point
+from scipy.spatial.distance import cdist
+import time
+from itertools import product
+import math
+
+class HexagonGeometry:
+    """Handles all geometric computations for hexagons"""
+    
+    @staticmethod
+    def hexagon_vertices(center_x, center_y, size=1, angle_deg=0):
+        """Generate vertices of a regular hexagon given center, size, and rotation."""
+        angle_rad = np.radians(angle_deg)
+        vertices = []
+        for i in range(6):
+            angle = angle_rad + i * np.pi / 3
+            x = center_x + size * np.cos(angle)
+            y = center_y + size * np.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+    
+    @staticmethod
+    def hexagon_area(size):
+        """Calculate area of regular hexagon with given size."""
+        return (3 * np.sqrt(3) / 2) * size ** 2
+
+class ConstraintValidator:
+    """Validates packing constraints efficiently"""
+    
+    def __init__(self, outer_center_x=0, outer_center_y=0):
+        self.outer_center = np.array([outer_center_x, outer_center_y])
+        
+    def check_overlap(self, hex1_vertices, hex2_vertices):
+        """Check if two hexagons overlap using Shapely."""
+        try:
+            poly1 = Polygon(hex1_vertices)
+            poly2 = Polygon(hex2_vertices)
+            return poly1.intersects(poly2)
+        except:
+            return self._simple_overlap_check(hex1_vertices, hex2_vertices)
+    
+    def _simple_overlap_check(self, hex1_vertices, hex2_vertices):
+        """Simple fallback overlap check using distance."""
+        centroid1 = np.mean(hex1_vertices, axis=0)
+        centroid2 = np.mean(hex2_vertices, axis=0)
+        distance = np.linalg.norm(centroid1 - centroid2)
+        return distance < 2.0
+    
+    def check_containment(self, hex_vertices, outer_radius):
+        """Check if all vertices of a hexagon are inside the outer hexagon."""
+        try:
+            outer_vertices = HexagonGeometry.hexagon_vertices(
+                self.outer_center[0], self.outer_center[1], outer_radius, 0
+            )
+            outer_polygon = Polygon(outer_vertices)
+            
+            for vertex in hex_vertices:
+                point = Point(vertex[0], vertex[1])
+                if not outer_polygon.contains(point):
+                    return False
+            return True
+        except:
+            return self._simple_containment_check(hex_vertices, outer_radius)
+    
+    def _simple_containment_check(self, hex_vertices, outer_radius):
+        """Simple fallback containment check."""
+        center = self.outer_center
+        for vertex in hex_vertices:
+            dist = np.linalg.norm(np.array(vertex) - center)
+            if dist > outer_radius:
+                return False
+        return True
+
+class GridBasedOptimizer:
+    """Grid-based approach to hexagon packing optimization"""
+    
+    def __init__(self, validator):
+        self.validator = validator
+        self.grid_resolution = 0.1  # Grid cell size
+        self.search_range = 5.0     # Search range around initial configuration
+        self.max_attempts = 1000    # Maximum attempts to find valid configuration
+        
+    def compute_outer_radius(self, hex_data):
+        """Calculate minimum outer radius that can contain all hexagons."""
+        max_distance = 0
+        for i in range(len(hex_data)):
+            cx, cy, _ = hex_data[i]
+            # Distance from center plus hexagon radius (1)
+            distance = np.sqrt(cx**2 + cy**2) + 1
+            max_distance = max(max_distance, distance)
+        return max_distance
+    
+    def get_bounding_box(self, hex_data):
+        """Get bounding box of all hexagons to optimize spatial queries."""
+        if len(hex_data) == 0:
+            return None, None, None, None
+        
+        min_x, max_x = float('inf'), float('-inf')
+        min_y, max_y = float('inf'), float('-inf')
+        
+        for i in range(len(hex_data)):
+            cx, cy, _ = hex_data[i]
+            # We'll check all 6 corners for bounding box
+            hex_vertices = HexagonGeometry.hexagon_vertices(cx, cy, 1, 0)
+            for vx, vy in hex_vertices:
+                min_x = min(min_x, vx)
+                max_x = max(max_x, vx)
+                min_y = min(min_y, vy)
+                max_y = max(max_y, vy)
+        
+        return min_x, max_x, min_y, max_y
+    
+    def is_valid_configuration(self, hex_data, outer_radius, debug=False):
+        """Fast validation of configuration with early exit on violation."""
+        # Check containment first (quicker than overlap checking)
+        for i in range(len(hex_data)):
+            hex_vertices = HexagonGeometry.hexagon_vertices(
+                hex_data[i][0], hex_data[i][1], 1, hex_data[i][2]
+            )
+            if not self.validator.check_containment(hex_vertices, outer_radius):
+                if debug:
+                    print(f"Containment failure for hex {i}")
+                return False, 0.0
+        
+        # Check overlaps between pairs (this is the expensive part)
+        for i in range(len(hex_data)):
+            hex1_vertices = HexagonGeometry.hexagon_vertices(
+                hex_data[i][0], hex_data[i][1], 1, hex_data[i][2]
+            )
+            for j in range(i+1, len(hex_data)):
+                hex2_vertices = HexagonGeometry.hexagon_vertices(
+                    hex_data[j][0], hex_data[j][1], 1, hex_data[j][2]
+                )
+                if self.validator.check_overlap(hex1_vertices, hex2_vertices):
+                    if debug:
+                        print(f"Overlap failure between hex {i} and {j}")
+                    return False, 0.0
+        
+        return True, 1.0 / outer_radius
+    
+    def generate_grid_search_positions(self, base_config, grid_size=10):
+        """Generate sampling positions around base configuration in a grid."""
+        positions = []
+        # Get the bounding box to focus the search
+        min_x, max_x, min_y, max_y = self.get_bounding_box(base_config)
+        
+        # Expand slightly to ensure coverage
+        margin = 1.0
+        search_min_x = max(-10, min_x - margin)
+        search_max_x = min(10, max_x + margin)
+        search_min_y = max(-10, min_y - margin)
+        search_max_y = min(10, max_y + margin)
+        
+        # Create a grid of sample positions
+        sample_range_x = np.linspace(search_min_x, search_max_x, grid_size)
+        sample_range_y = np.linspace(search_min_y, search_max_y, grid_size)
+        
+        # For each position, try several small variations
+        for x in sample_range_x:
+            for y in sample_range_y:
+                # Add multiple variations per grid point
+                for dx in [-0.2, 0.0, 0.2]:
+                    for dy in [-0.2, 0.0, 0.2]:
+                        positions.append((x + dx, y + dy))
+        
+        return positions
+    
+    def optimize_with_grid_search(self, initial_config):
+        """Perform grid search optimization."""
+        best_config = initial_config.copy()
+        best_inv_radius = 0.0
+        best_radius = float('inf')
+        
+        # Generate search space - start with grid around initial config
+        search_positions = self.generate_grid_search_positions(initial_config, 8)
+        
+        # Try different rotations too
+        rotations = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
+        
+        # Sample search space using a smaller subset for efficiency
+        num_samples = min(200, len(search_positions) * len(rotations))
+        indices = np.random.choice(len(search_positions) * len(rotations), num_samples, replace=False)
+        
+        attempts = 0
+        for idx in indices:
+            attempts += 1
+            if attempts > self.max_attempts:
+                break
+                
+            pos_idx = idx // len(rotations)
+            rot_idx = idx % len(rotations)
+            
+            # Get the position and rotation
+            base_pos = search_positions[pos_idx]
+            rot = rotations[rot_idx]
+            
+            # Try to construct a valid configuration by modifying the central hexagon
+            new_config = initial_config.copy()
+            
+            # Modify first hexagon (central one) and see if we can improve
+            new_config[0][0] = base_pos[0]
+            new_config[0][1] = base_pos[1]
+            new_config[0][2] = rot
+            
+            # Try to fine-tune surrounding positions to accommodate
+            valid, inv_radius = self.is_valid_configuration(new_config, 
+                                                           self.compute_outer_radius(new_config))
+            
+            if valid and inv_radius > best_inv_radius:
+                best_inv_radius = inv_radius
+                best_config = new_config.copy()
+                best_radius = 1.0 / inv_radius if inv_radius > 0 else float('inf')
+                # Early stopping if we've found a very good solution
+                if inv_radius > 0.25:  # If we're close to target
+                    break
+        
+        return best_config, best_inv_radius
+    
+    def local_refinement(self, config, outer_radius):
+        """Apply local refinement to improve a good configuration."""
+        # Try small adjustments to each position to improve packing
+        best_config = config.copy()
+        best_inv_radius = 0.0
+        
+        # For each hexagon, try small moves in 8 directions
+        directions = [(0, 0), (0.1, 0), (-0.1, 0), (0, 0.1), (0, -0.1), 
+                     (0.1, 0.1), (-0.1, 0.1), (0.1, -0.1), (-0.1, -0.1)]
+        
+        for i in range(len(config)):
+            for dx, dy in directions:
+                # Create modified config
+                test_config = config.copy()
+                test_config[i][0] += dx
+                test_config[i][1] += dy
+                
+                # Check validity
+                valid, inv_radius = self.is_valid_configuration(test_config, outer_radius)
+                if valid and inv_radius > best_inv_radius:
+                    best_inv_radius = inv_radius
+                    best_config = test_config.copy()
+        
+        return best_config, best_inv_radius
+
+def generate_initial_config():
+    """Generate a good initial configuration for 12 hexagons."""
+    # Use a known good symmetric configuration that's reasonably close to optimal
+    config = np.array([
+        [0, 0, 0],           # center
+        [-2.0, 0, 0],        # left
+        [2.0, 0, 0],         # right
+        [-1.0, 1.732, 0],    # top-left
+        [1.0, 1.732, 0],     # top-right
+        [-1.0, -1.732, 0],   # bottom-left
+        [1.0, -1.732, 0],    # bottom-right
+        [-3.0, 1.732, 0],    # far top-left
+        [3.0, 1.732, 0],     # far top-right
+        [-3.0, -1.732, 0],   # far bottom-left
+        [3.0, -1.732, 0],    # far bottom-right
+        [0, -3.464, 0]       # far bottom-center
+    ])
+    return config
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Initialize components
+    validator = ConstraintValidator()
+    optimizer = GridBasedOptimizer(validator)
+    
+    # Generate initial configuration
+    initial_config = generate_initial_config()
+    
+    # Initial optimization using grid search
+    best_config, best_inv_radius = optimizer.optimize_with_grid_search(initial_config)
+    
+    # Further refinement using local search
+    if best_inv_radius > 0:
+        refined_config, refined_inv_radius = optimizer.local_refinement(best_config, 
+                                                                      1.0/best_inv_radius if best_inv_radius > 0 else 10)
+        if refined_inv_radius > best_inv_radius:
+            best_config = refined_config
+            best_inv_radius = refined_inv_radius
+    
+    # Final validation
+    outer_radius = 1.0 / best_inv_radius if best_inv_radius > 0 else 10.0
+    validity, final_inv_radius = optimizer.is_valid_configuration(best_config, outer_radius)
+    
+    if not validity:
+        # Fall back to a known working configuration with reasonable parameters
+        best_config = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        final_inv_radius = 1.0 / 8.0  # Conservative estimate
+        outer_radius = 8.0
+    
+    # Prepare return values
+    inner_hex_data = np.array(best_config)
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    outer_hex_side_length = outer_radius * 2  # Side length calculation
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

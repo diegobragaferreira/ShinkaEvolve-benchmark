@@ -1,0 +1,597 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+from itertools import combinations
+import random
+from copy import deepcopy
+import math
+from numba import jit
+
+class HexagonPacker:
+    """Manages hexagon packing operations with geometric validation"""
+    
+    def __init__(self):
+        self.hex_side_length = 1.0
+        self.outer_center = np.array([0.0, 0.0])
+        self.max_eval_time = 180.0
+
+    def hexagon_vertices(self, center_x, center_y, size=1, angle_deg=0):
+        """Generate vertices of a regular hexagon given center, size, and rotation."""
+        angle_rad = np.radians(angle_deg)
+        vertices = []
+        for i in range(6):
+            angle = angle_rad + i * np.pi / 3
+            x = center_x + size * np.cos(angle)
+            y = center_y + size * np.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+
+    def get_outer_hexagon(self, outer_radius):
+        """Get vertices of the outer hexagon with given radius."""
+        return self.hexagon_vertices(self.outer_center[0], self.outer_center[1], outer_radius, 0)
+
+    def fast_containment_check(self, hex_vertices, outer_radius):
+        """Fast bounding box containment check before detailed validation."""
+        outer_vertices = self.get_outer_hexagon(outer_radius)
+        outer_polygon = Polygon(outer_vertices)
+        
+        # Quick bounding box test
+        min_x = min(v[0] for v in hex_vertices)
+        max_x = max(v[0] for v in hex_vertices)
+        min_y = min(v[1] for v in hex_vertices)
+        max_y = max(v[1] for v in hex_vertices)
+        
+        outer_min_x = min(v[0] for v in outer_vertices)
+        outer_max_x = max(v[0] for v in outer_vertices)
+        outer_min_y = min(v[1] for v in outer_vertices)
+        outer_max_y = max(v[1] for v in outer_vertices)
+        
+        if (min_x >= outer_min_x and max_x <= outer_max_x and 
+            min_y >= outer_min_y and max_y <= outer_max_y):
+            return True
+        return False
+
+    def validate_containment(self, hex_vertices, outer_radius):
+        """Check if all vertices of a hexagon are inside the outer hexagon with buffer."""
+        if not self.fast_containment_check(hex_vertices, outer_radius):
+            return False
+            
+        outer_vertices = self.get_outer_hexagon(outer_radius)
+        outer_polygon = Polygon(outer_vertices).buffer(1e-10)
+
+        for vertex in hex_vertices:
+            point = Point(vertex[0], vertex[1])
+            if not outer_polygon.contains(point):
+                return False
+        return True
+
+    def fast_overlap_check(self, hex1_vertices, hex2_vertices):
+        """Fast bounding box overlap check before detailed validation."""
+        # Quick bounding box test
+        min_x1 = min(v[0] for v in hex1_vertices)
+        max_x1 = max(v[0] for v in hex1_vertices)
+        min_y1 = min(v[1] for v in hex1_vertices)
+        max_y1 = max(v[1] for v in hex1_vertices)
+        
+        min_x2 = min(v[0] for v in hex2_vertices)
+        max_x2 = max(v[0] for v in hex2_vertices)
+        min_y2 = min(v[1] for v in hex2_vertices)
+        max_y2 = max(v[1] for v in hex2_vertices)
+        
+        if (max_x1 < min_x2 or max_x2 < min_x1 or 
+            max_y1 < min_y2 or max_y2 < min_y1):
+            return False
+        return True
+
+    def validate_overlap(self, hex1_vertices, hex2_vertices):
+        """Check if two hexagons overlap using Shapely with buffer for precision."""
+        if not self.fast_overlap_check(hex1_vertices, hex2_vertices):
+            return False
+            
+        poly1 = Polygon(hex1_vertices).buffer(1e-10)
+        poly2 = Polygon(hex2_vertices).buffer(1e-10)
+        return poly1.intersects(poly2)
+
+    def calculate_max_distance_from_center(self, hex_data):
+        """Calculate maximum distance from center to any hexagon vertex."""
+        max_dist = 0
+        for i in range(len(hex_data)):
+            cx, cy, _ = hex_data[i]
+            # Calculate distance to center plus hexagon radius
+            dist = np.sqrt(cx**2 + cy**2) + self.hex_side_length
+            max_dist = max(max_dist, dist)
+        return max_dist
+
+    def evaluate_configuration(self, hex_data, outer_radius):
+        """Evaluate current configuration: returns (validity, inv_radius)."""
+        # Fast geometric validation - check containment first
+        for i in range(len(hex_data)):
+            hex_vertices = self.hexagon_vertices(hex_data[i][0], hex_data[i][1],
+                                               self.hex_side_length, hex_data[i][2])
+            if not self.validate_containment(hex_vertices, outer_radius):
+                return False, 0
+
+        # Then check overlaps
+        for i in range(len(hex_data)):
+            hex1_vertices = self.hexagon_vertices(hex_data[i][0], hex_data[i][1],
+                                                self.hex_side_length, hex_data[i][2])
+            for j in range(i+1, len(hex_data)):
+                hex2_vertices = self.hexagon_vertices(hex_data[j][0], hex_data[j][1],
+                                                    self.hex_side_length, hex_data[j][2])
+                if self.validate_overlap(hex1_vertices, hex2_vertices):
+                    return False, 0
+
+        # Return inverse of outer radius
+        return True, 1.0 / outer_radius
+
+class SymmetryAwareMutation:
+    """Handles symmetry-aware mutation operations for evolutionary optimization"""
+    
+    @staticmethod
+    def create_lattice_config():
+        """Create a configuration based on mathematical lattice structures"""
+        # Inspired by hexagonal close-packed structures
+        sqrt3 = np.sqrt(3)
+        config = []
+        
+        # Center hexagon
+        config.append([0, 0, 0])
+        
+        # First ring around center
+        for i in range(6):
+            angle = i * 60
+            radius = 2.0
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            config.append([x, y, 0])
+            
+        # Second ring (using triangular lattice pattern)
+        angle_offset = 30  # Half of 60 degree spacing
+        for i in range(6):
+            angle = angle_offset + i * 60
+            radius = 3.464  # Approximately sqrt(12) 
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            config.append([x, y, 0])
+            
+        return np.array(config)
+
+    @staticmethod
+    def create_dihedral_symmetry_config():
+        """Create a configuration with D6 dihedral symmetry - the highest symmetry possible"""
+        # This creates a highly symmetric configuration with 6-fold rotational symmetry
+        sqrt3 = np.sqrt(3)
+        config = []
+        
+        # Central hexagon 
+        config.append([0, 0, 0])
+        
+        # First ring - 6 hexagons arranged in a circle
+        for i in range(6):
+            angle = i * 60
+            radius = 2.0
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            config.append([x, y, 0])
+            
+        # Second ring - 6 hexagons arranged in another circle
+        for i in range(6):
+            angle = 30 + i * 60
+            radius = 3.464
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            config.append([x, y, 0])
+            
+        return np.array(config)
+
+    @staticmethod
+    def create_asymmetric_config():
+        """Create a configuration that breaks perfect symmetry for exploration"""
+        # Start with symmetric base
+        sqrt3 = np.sqrt(3)
+        config = []
+        
+        # Center hexagon
+        config.append([0, 0, 0])
+        
+        # First ring - slightly perturbed from perfect symmetry
+        for i in range(6):
+            angle = i * 60 + (np.random.rand() - 0.5) * 5  # Small random perturbations
+            radius = 2.0 + (np.random.rand() - 0.5) * 0.2  # Slight variation in radius
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            config.append([x, y, 0])
+            
+        # Second ring - similarly perturbed 
+        for i in range(6):
+            angle = 30 + i * 60 + (np.random.rand() - 0.5) * 5
+            radius = 3.464 + (np.random.rand() - 0.5) * 0.3
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            config.append([x, y, 0])
+            
+        return np.array(config)
+
+    @staticmethod
+    def mutate_symmetrically(parent_config, mutation_rate=0.1, stage=1, use_group_theory=True):
+        """Apply symmetry-aware mutation that preserves core geometric properties"""
+        child_config = parent_config.copy()
+        
+        # Adjust mutation rate based on optimization stage
+        actual_mutation_rate = mutation_rate * (0.8 ** (stage - 1))  # Decreasing mutation rate
+        
+        # Apply position mutations with some correlation for symmetry preservation  
+        for i in range(len(child_config)):
+            if random.random() < actual_mutation_rate:
+                # Mutate x coordinate
+                child_config[i][0] += np.random.normal(0, 0.15)
+                
+                # Mutate y coordinate  
+                child_config[i][1] += np.random.normal(0, 0.15)
+            
+            # Apply rotation mutations (lower frequency)
+            if random.random() < actual_mutation_rate * 0.3:
+                child_config[i][2] += np.random.normal(0, 15)
+                child_config[i][2] = child_config[i][2] % 360
+
+        # Apply group theory symmetry corrections if requested
+        if use_group_theory and len(child_config) == 12:
+            # Apply D6 symmetry corrections
+            # Group hexagons into pairs that should respect dihedral symmetry
+            # (center, 6-ring1, 6-ring2) 
+            # Keep center fixed
+            # Pair up corresponding positions in ring1 and ring2
+            ring1_indices = [1,2,3,4,5,6]
+            ring2_indices = [7,8,9,10,11,12]
+            
+            # Apply symmetric corrections to maintain D6 group properties
+            for i in range(3):  # Just correct three pairs to maintain symmetry
+                idx1 = ring1_indices[i]
+                idx2 = ring2_indices[i]
+                
+                # Make the second pair a reflection of first with respect to line
+                # For simplicity, we'll make them mirror symmetric about vertical axis
+                x1, y1 = child_config[idx1][0], child_config[idx1][1]
+                x2, y2 = child_config[idx2][0], child_config[idx2][1]
+                
+                # Symmetric about y-axis
+                child_config[idx2][0] = -x1
+                child_config[idx2][1] = y1
+                
+        return child_config
+
+class EvolutionaryOptimizer:
+    """Evolutionary optimization with symmetry awareness and progressive refinement"""
+    
+    def __init__(self, packer, max_generations=100, population_size=30):
+        self.packer = packer
+        self.max_generations = max_generations
+        self.population_size = population_size
+        self.initial_mutation_rate = 0.15
+        
+    def evaluate_individual(self, individual, outer_radius):
+        """Evaluate fitness of individual with early rejection for invalid configurations"""
+        valid, fitness = self.packer.evaluate_configuration(individual, outer_radius)
+        if not valid:
+            fitness = 0  # Invalid individuals get low fitness
+        return fitness
+    
+    def selection(self, population, fitnesses, tournament_size=5):
+        """Tournament selection with elitism"""
+        selected = []
+        elite_size = max(2, self.population_size // 6)  # Keep top 1/6
+        
+        # Select elite
+        elite_indices = np.argsort(fitnesses)[-elite_size:]
+        for idx in elite_indices:
+            selected.append(population[idx].copy())
+        
+        # Tournament selection for rest
+        while len(selected) < self.population_size:
+            tournament = random.sample(list(range(len(population))), tournament_size)
+            winner_idx = max(tournament, key=lambda i: fitnesses[i])
+            selected.append(population[winner_idx].copy())
+            
+        return selected
+    
+    def crossover(self, parent1, parent2, crossover_rate=0.7):
+        """Advanced crossover that maintains geometric properties"""
+        if random.random() < crossover_rate:
+            # Uniform crossover with preference for maintaining symmetry
+            child1 = parent1.copy()
+            child2 = parent2.copy()
+            
+            # Cross over each element with 50% probability
+            for i in range(len(parent1)):
+                if random.random() < 0.5:
+                    child1[i] = parent2[i].copy()
+                if random.random() < 0.5:
+                    child2[i] = parent1[i].copy()
+                    
+            return child1, child2
+        else:
+            return parent1.copy(), parent2.copy()
+    
+    def adaptive_mutate(self, individual, generation, max_generations, stage):
+        """Apply adaptive mutation with progressive refinement"""
+        # Decrease mutation rate over time and stages
+        current_mutation_rate = self.initial_mutation_rate * (1 - generation / max_generations) * (0.8 ** (stage - 1))
+        current_mutation_rate = max(current_mutation_rate, 0.01)  # Minimum mutation rate
+
+        mutated_individual = individual.copy()
+
+        # Apply mutations with adapted rates
+        for i in range(len(mutated_individual)):
+            if random.random() < current_mutation_rate:
+                # Mutate positions more frequently
+                mutated_individual[i][0] += np.random.normal(0, 0.15)
+                mutated_individual[i][1] += np.random.normal(0, 0.15)
+            
+            if random.random() < current_mutation_rate * 0.3:  # Rotation mutations less frequent
+                mutated_individual[i][2] += np.random.normal(0, 10)
+                mutated_individual[i][2] = mutated_individual[i][2] % 360
+
+        return mutated_individual
+
+    def optimize_population(self, initial_config, outer_radius, stage=1):
+        """Run evolutionary optimization on population with progressive refinement"""
+        # Initialize population with diverse configurations
+        population = []
+        population.append(initial_config)
+        
+        # Add diverse starting configurations
+        for _ in range(self.population_size // 3):
+            # Add lattice-based configurations
+            lattice_config = SymmetryAwareMutation.create_lattice_config()
+            mutated = SymmetryAwareMutation.mutate_symmetrically(lattice_config, 0.1, stage)
+            population.append(mutated)
+            
+        for _ in range(self.population_size // 3):
+            # Add asymmetric configurations
+            asym_config = SymmetryAwareMutation.create_asymmetric_config()
+            mutated = SymmetryAwareMutation.mutate_symmetrically(asym_config, 0.1, stage)
+            population.append(mutated)
+            
+        # Add remaining as mutated versions of initial
+        for _ in range(self.population_size - len(population)):
+            mutated = SymmetryAwareMutation.mutate_symmetrically(initial_config, 0.1, stage)
+            population.append(mutated)
+        
+        best_fitness = 0
+        best_individual = initial_config.copy()
+        
+        # Evolutionary loop with progressive refinement
+        for generation in range(self.max_generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluate_individual(individual, outer_radius)
+                fitnesses.append(fitness)
+                
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = individual.copy()
+            
+            # Selection
+            selected = self.selection(population, fitnesses)
+            
+            # Create new population through crossover and mutation
+            new_population = []
+            
+            # Elitism - keep best individuals
+            elite_size = max(2, self.population_size // 6)
+            elite_indices = np.argsort(fitnesses)[-elite_size:]
+            for idx in elite_indices:
+                new_population.append(population[idx].copy())
+            
+            # Crossover and mutation
+            while len(new_population) < self.population_size:
+                parent1 = random.choice(selected)
+                parent2 = random.choice(selected)
+                
+                if random.random() < 0.7:  # 70% crossover
+                    child1, child2 = self.crossover(parent1, parent2)
+                    new_population.append(child1)
+                    if len(new_population) < self.population_size:
+                        new_population.append(child2)
+                else:  # Mutation only
+                    mutated1 = self.adaptive_mutate(parent1, generation, self.max_generations, stage)
+                    mutated2 = self.adaptive_mutate(parent2, generation, self.max_generations, stage)
+                    new_population.append(mutated1)
+                    if len(new_population) < self.population_size:
+                        new_population.append(mutated2)
+            
+            population = new_population
+            
+        return best_individual, best_fitness
+
+class MultiStageHybridOptimizer:
+    """Combines evolutionary and local search with multi-stage approach"""
+    
+    def __init__(self, packer):
+        self.packer = packer
+        self.history = []  # Stores good configurations found
+        
+    def optimize_positions_only(self, initial_config, outer_radius, stage=1):
+        """Phase 1: Focus on position optimization with fixed rotations"""
+        # Create configuration with fixed rotations (0 degrees)
+        config_fixed_angles = initial_config.copy()
+        
+        # Set all rotations to 0 to focus entirely on positions
+        for i in range(len(config_fixed_angles)):
+            config_fixed_angles[i][2] = 0
+            
+        # Apply evolutionary optimization focused on positions
+        evolutionary = EvolutionaryOptimizer(self.packer, max_generations=40, population_size=25)
+        pos_only_config, _ = evolutionary.optimize_population(config_fixed_angles, outer_radius, stage)
+        
+        # Store in history for later reference
+        self.history.append((pos_only_config.copy(), 1.0 / outer_radius))
+        
+        return pos_only_config
+    
+    def optimize_with_rotation_refinement(self, initial_config, outer_radius, stage=1):
+        """Phase 2: Full optimization including rotations"""
+        # Apply evolutionary optimization with full parameters
+        evolutionary = EvolutionaryOptimizer(self.packer, max_generations=60, population_size=30)
+        full_config, _ = evolutionary.optimize_population(initial_config, outer_radius, stage)
+        
+        # Store in history for later reference
+        self.history.append((full_config.copy(), 1.0 / outer_radius))
+        
+        return full_config
+
+    def explore_parameter_space(self, initial_config, outer_radius):
+        """Use grid-based exploration to identify promising regions"""
+        best_config = initial_config.copy()
+        best_score = 0
+        
+        # Sample around the initial configuration with different rotation patterns
+        for rotation_mod in [0, 30, 60, 90]:  # Different rotation schemes
+            sample_config = initial_config.copy()
+            for i in range(len(sample_config)):
+                sample_config[i][2] = (sample_config[i][2] + rotation_mod) % 360
+            
+            # Evaluate this configuration
+            validity, inv_radius = self.packer.evaluate_configuration(sample_config, outer_radius)
+            if validity and inv_radius > best_score:
+                best_score = inv_radius
+                best_config = sample_config.copy()
+        
+        return best_config
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Initialize components
+    packer = HexagonPacker()
+    hybrid_optimizer = MultiStageHybridOptimizer(packer)
+    
+    # Generate diverse initial configurations
+    initial_configs = []
+    
+    # Try multiple different starting configurations
+    initial_configs.append(SymmetryAwareMutation.create_lattice_config())
+    initial_configs.append(SymmetryAwareMutation.create_dihedral_symmetry_config()) 
+    initial_configs.append(SymmetryAwareMutation.create_asymmetric_config())
+    
+    # Create a few more random variations
+    for _ in range(3):
+        initial_configs.append(SymmetryAwareMutation.create_asymmetric_config())
+    
+    best_config = None
+    best_fitness = 0
+    best_outer_radius = float('inf')
+    
+    # Try multiple starting points to find the best
+    for i, initial_config in enumerate(initial_configs):
+        # Estimate outer radius from initial configuration
+        estimated_outer_radius = packer.calculate_max_distance_from_center(initial_config)
+        
+        # First, use grid-based exploration to find promising regions
+        explored_config = hybrid_optimizer.explore_parameter_space(initial_config, estimated_outer_radius)
+        
+        # Stage 1: Optimize positions only with fixed rotations
+        pos_only_config = hybrid_optimizer.optimize_positions_only(explored_config, estimated_outer_radius, stage=1)
+        
+        # Stage 2: Full optimization with rotations
+        optimized_config = hybrid_optimizer.optimize_with_rotation_refinement(pos_only_config, estimated_outer_radius, stage=2)
+        
+        # Validate the optimized configuration
+        validity, inv_radius = packer.evaluate_configuration(optimized_config, estimated_outer_radius)
+        
+        # If not valid, try a more conservative approach
+        if not validity:
+            # Add some random perturbations to encourage exploration
+            for i in range(len(optimized_config)):
+                optimized_config[i][0] += np.random.normal(0, 0.1)
+                optimized_config[i][1] += np.random.normal(0, 0.1)
+                optimized_config[i][2] = optimized_config[i][2] % 360
+                
+            # Re-optimize
+            pos_only_config = hybrid_optimizer.optimize_positions_only(optimized_config, estimated_outer_radius, stage=1)
+            optimized_config = hybrid_optimizer.optimize_with_rotation_refinement(pos_only_config, estimated_outer_radius, stage=2)
+            validity, inv_radius = packer.evaluate_configuration(optimized_config, estimated_outer_radius)
+        
+        # Store best result so far
+        if validity and inv_radius > best_fitness:
+            best_fitness = inv_radius
+            best_config = optimized_config.copy()
+            best_outer_radius = 1.0 / inv_radius if inv_radius > 0 else estimated_outer_radius
+    
+    # If we have a good configuration from history, try to further enhance it
+    if best_config is not None and len(hybrid_optimizer.history) > 0:
+        # Sort history by score and take the best 3 for refinement
+        sorted_history = sorted(hybrid_optimizer.history, key=lambda x: x[1], reverse=True)
+        top_configs = sorted_history[:3]
+        
+        # Try to optimize these top configurations further
+        for config, score in top_configs:
+            if score > best_fitness:
+                # Run one final focused optimization on this configuration
+                validity, inv_radius = packer.evaluate_configuration(config, best_outer_radius)
+                if validity and inv_radius > best_fitness:
+                    best_fitness = inv_radius
+                    best_config = config.copy()
+    
+    # If no good configuration found, fallback to a known valid configuration
+    if best_config is None:
+        # Use a well-known valid configuration with symmetry
+        best_config = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        best_outer_radius = 8.0
+    
+    # Prepare return values
+    inner_hex_data = best_config.copy()
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    outer_hex_side_length = best_outer_radius
+    
+    # Final validation
+    validity, final_inv_radius = packer.evaluate_configuration(inner_hex_data, outer_hex_side_length)
+    if not validity:
+        # Last resort fallback
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0, 0, 0])
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

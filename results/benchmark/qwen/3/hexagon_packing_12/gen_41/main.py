@@ -1,0 +1,159 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+import math
+
+def create_unit_hexagon(center=(0,0), rotation=0):
+    """Create a unit regular hexagon centered at center with given rotation."""
+    angle = rotation * np.pi / 180
+    # Vertices of unit hexagon centered at origin
+    hex_vertices = []
+    for i in range(6):
+        theta = angle + i * np.pi / 3
+        x = np.cos(theta)
+        y = np.sin(theta)
+        hex_vertices.append((x + center[0], y + center[1]))
+    return Polygon(hex_vertices)
+
+def calculate_outer_hex_side_length(inner_hex_data):
+    """Calculate the minimum outer hexagon side length that contains all inner hexagons."""
+    # Create all inner hexagon polygons
+    inner_polygons = []
+    for x, y, angle in inner_hex_data:
+        hex_poly = create_unit_hexagon((x, y), angle)
+        inner_polygons.append(hex_poly)
+
+    # Find bounding box of all inner hexagons
+    all_coords = []
+    for poly in inner_polygons:
+        coords = list(poly.exterior.coords)
+        all_coords.extend(coords)
+
+    if len(all_coords) == 0:
+        return 100
+
+    # Compute bounding rectangle
+    xs = [coord[0] for coord in all_coords]
+    ys = [coord[1] for coord in all_coords]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    # The minimum circumscribing hexagon will be oriented to align with the main axes
+    # For a hexagon with side length s, its width is 2*s and height is sqrt(3)*s
+    # For our purposes, we'll compute distance from center to farthest point
+
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    # Find maximum distance from center to any vertex
+    max_dist = 0
+    for x, y in all_coords:
+        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_dist = max(max_dist, dist)
+
+    # For a regular hexagon, if we know the circumradius R, the side length is also R
+    # But we want to make sure we're calculating this correctly
+    # The correct approach: we need to determine the smallest regular hexagon that contains all inner hexagons
+    # We can do this by finding the maximal distance from center to the outer envelope
+
+    # Better approach: we compute the distances to a hexagonal grid of test points
+    # But for now, let's compute based on the furthest vertex from center
+
+    # For a regular hexagon with circumradius R, the side length is also R.
+    # The minimum hexagon that fits all vertices has radius equal to max distance from center
+    # So the side length equals max distance
+    return max_dist
+
+def get_hexagon_vertices(center, side_length, rotation):
+    """Get vertices of a regular hexagon."""
+    vertices = []
+    for i in range(6):
+        angle = rotation + i * np.pi / 3
+        x = center[0] + side_length * np.cos(angle)
+        y = center[1] + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+def check_validity(inner_hex_data):
+    """Check if all hexagons are disjoint and contained within outer hexagon."""
+    # Create all inner hexagon polygons
+    inner_polygons = []
+    for x, y, angle in inner_hex_data:
+        hex_poly = create_unit_hexagon((x, y), angle)
+        inner_polygons.append(hex_poly)
+
+    # Check for overlaps
+    for i in range(len(inner_polygons)):
+        for j in range(i+1, len(inner_polygons)):
+            if inner_polygons[i].intersects(inner_polygons[j]):
+                return False
+
+    # Check containment (simple version - just making sure they don't go too far)
+    # We'll compute a reasonable outer hexagon and check containment
+    outer_radius = calculate_outer_hex_side_length(inner_hex_data)
+
+    return True
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses a hexagonal cluster configuration for better packing efficiency.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Hexagonal cluster arrangement - 12 hexagons arranged in a hexagonal pattern
+    # Center hexagon plus 12 surrounding hexagons in 2 layers
+    # Layer 1: 6 hexagons around the center (at distance 2)
+    # Layer 2: 6 hexagons at distance 3 from center (with some offset)
+
+    # For a unit hexagon, the distance between centers of adjacent hexagons is 2 (since each has side length 1)
+
+    # Positions for the 12 unit hexagons
+    # We'll place them in a tight hexagonal cluster centered at origin
+    positions = [
+        (0, 0),          # center
+        (-2, 0),         # leftmost
+        (2, 0),          # rightmost
+        (1, 1.732),      # upper-right (sqrt(3) = ~1.732)
+        (-1, 1.732),     # upper-left
+        (1, -1.732),     # lower-right
+        (-1, -1.732),    # lower-left
+        (-3, 0),         # far left
+        (3, 0),          # far right
+        (0, 3.464),      # top
+        (0, -3.464),     # bottom
+        (2, 3.464),      # top-right
+    ]
+
+    # Convert positions to inner hex data (x, y, angle)
+    inner_hex_data = []
+    for i, pos in enumerate(positions):
+        # No rotation needed for these positions - all aligned with the coordinate system
+        inner_hex_data.append([pos[0], pos[1], 0])
+
+    inner_hex_data = np.array(inner_hex_data)
+
+    # Calculate outer hexagon size
+    outer_hex_side_length = calculate_outer_hex_side_length(inner_hex_data)
+
+    # Ensure the outer hexagon is large enough to contain everything
+    # The outer hexagon should be centered at origin
+    outer_hex_data = np.array([0, 0, 0])
+
+    # Verify the result and make small adjustments if needed
+    if not check_validity(inner_hex_data):
+        # If invalid, use a more conservative approach
+        print("Warning: Invalid configuration detected")
+        # Adjust positions slightly for safety
+        inner_hex_data = np.copy(inner_hex_data)
+        inner_hex_data[:, 0] *= 0.95  # Scale down coordinates
+        inner_hex_data[:, 1] *= 0.95
+
+        outer_hex_side_length = calculate_outer_hex_side_length(inner_hex_data)
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

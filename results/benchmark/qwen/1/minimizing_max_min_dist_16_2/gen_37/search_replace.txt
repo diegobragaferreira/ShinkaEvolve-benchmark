@@ -1,0 +1,393 @@
+<NAME>
+hybrid_optimization_with_multi_start
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a simple single-start L-BFGS-B optimization which is prone to getting stuck in local optima. I'll implement a hybrid approach that combines global exploration with local refinement, similar to what worked well in previous generations. This involves using differential evolution for global search followed by L-BFGS-B for local refinement, and implementing multi-start sampling with different initialization strategies to increase the chance of finding better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+
+def _initialize_points(n_points: int = 16) -> np.ndarray:
+    """Initialize points with a structured pattern that provides good starting configuration."""
+    # Use a hexagonal grid pattern as initial guess
+    np.random.seed(42)
+
+    # Create a roughly hexagonal arrangement with some randomness
+    points = []
+    rows = 4
+    cols = 4
+
+    for i in range(rows):
+        for j in range(cols):
+            x = j * 0.25 + (i % 2) * 0.125
+            y = i * 0.25
+
+            # Add small random perturbation
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+
+            points.append([x, y])
+
+    # Ensure we have exactly n_points
+    points = np.array(points[:n_points])
+
+    # Normalize to [0,1] bounds
+    x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+    y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+
+    if x_range > 0:
+        points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+    if y_range > 0:
+        points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+
+    # Scale to fit in [0,1] x [0,1]
+    points[:, 0] *= 0.95
+    points[:, 1] *= 0.95
+    points[:, 0] += 0.025
+    points[:, 1] += 0.025
+
+    return points
+
+
+def _compute_distance_ratio(points: np.ndarray) -> float:
+    """Compute the ratio of minimum to maximum distance between all point pairs."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = pdist(points)
+
+    # Get min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Handle case where all points might be coincident
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+
+def _objective_function(points: np.ndarray) -> float:
+    """Objective function to maximize (negative because scipy minimizes)."""
+    # Reshape points array to (n, 2) format if needed
+    if points.ndim == 1:
+        points = points.reshape(-1, 2)
+
+    # Compute negative of distance ratio (since we want to maximize)
+    return -_compute_distance_ratio(points)
+
+
+def _constraint_function(points: np.ndarray) -> float:
+    """
+    Constraint function to ensure points stay within bounds [0,1] x [0,1].
+    Returns positive value when constraint is satisfied.
+    """
+    if points.ndim == 1:
+        points = points.reshape(-1, 2)
+
+    # Check if any point is outside [0,1] bounds
+    violations = 0
+
+    # Check x bounds
+    violations += np.sum(points[:, 0] < 0)
+    violations += np.sum(points[:, 0] > 1)
+
+    # Check y bounds
+    violations += np.sum(points[:, 1] < 0)
+    violations += np.sum(points[:, 1] > 1)
+
+    # Return negative of violations (positive if all constraints satisfied)
+    return -violations
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    n = 16
+    d = 2
+
+    # Initialize points with structured configuration
+    initial_points = _initialize_points(n)
+
+    # Flatten points for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds for each coordinate [0, 1]
+    bounds = [(0, 1) for _ in range(n * d)]
+
+    # Optimization options
+    options = {
+        'maxiter': 500,
+        'ftol': 1e-8,
+        'gtol': 1e-8
+    }
+
+    # Optimize using L-BFGS-B solver which handles bounds well
+    try:
+        result = minimize(
+            fun=_objective_function,
+            x0=initial_flat,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options=options,
+            tol=1e-8
+        )
+
+        # Extract optimized points
+        if result.success:
+            optimized_points = result.x.reshape(n, d)
+        else:
+            # If optimization fails, return initial points
+            optimized_points = initial_points.copy()
+
+    except Exception as e:
+        # Fallback to initial points if optimization fails
+        print(f"Optimization failed with error: {e}")
+        optimized_points = initial_points.copy()
+
+    return optimized_points
+=======
+import numpy as np
+from scipy.optimize import minimize, differential_evolution
+from scipy.spatial.distance import pdist, squareform
+import time
+
+
+def _initialize_points(n_points: int = 16, method='hexagonal') -> np.ndarray:
+    """Initialize points with various structured patterns that provide good starting configurations."""
+    np.random.seed(42)
+
+    if method == 'hexagonal':
+        # Create a roughly hexagonal arrangement with some randomness
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+
+                # Add small random perturbation
+                x += np.random.normal(0, 0.01)
+                y += np.random.normal(0, 0.01)
+
+                points.append([x, y])
+
+        # Ensure we have exactly n_points
+        points = np.array(points[:n_points])
+
+        # Normalize to [0,1] bounds
+        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+
+        if x_range > 0:
+            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+        if y_range > 0:
+            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+
+        # Scale to fit in [0,1] x [0,1]
+        points[:, 0] *= 0.95
+        points[:, 1] *= 0.95
+        points[:, 0] += 0.025
+        points[:, 1] += 0.025
+
+    elif method == 'spiral':
+        # Create a spiral arrangement
+        points = []
+        for i in range(n_points):
+            angle = 2 * np.pi * i / n_points
+            radius = 0.4 * (i / n_points)
+            x = 0.5 + radius * np.cos(angle)
+            y = 0.5 + radius * np.sin(angle)
+            # Add small random perturbation
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+            points.append([x, y])
+        points = np.array(points)
+
+    elif method == 'random':
+        # Purely random initialization
+        points = np.random.rand(n_points, 2)
+
+    else:
+        # Default hexagonal
+        points = _initialize_points(n_points, 'hexagonal')
+
+    return points
+
+
+def _compute_distance_ratio(points: np.ndarray) -> float:
+    """Compute the ratio of minimum to maximum distance between all point pairs."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances using squareform for numerical stability
+    distances = squareform(pdist(points))
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Get min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Handle case where all points might be coincident
+    if max_dist == 0 or np.isinf(min_dist):
+        return 0.0
+
+    return min_dist / max_dist
+
+
+def _objective_function(points: np.ndarray) -> float:
+    """Objective function to maximize (negative because scipy minimizes)."""
+    # Reshape points array to (n, 2) format if needed
+    if points.ndim == 1:
+        points = points.reshape(-1, 2)
+
+    # Compute negative of distance ratio (since we want to maximize)
+    return -_compute_distance_ratio(points)
+
+
+def _constraint_function(points: np.ndarray) -> float:
+    """
+    Constraint function to ensure points stay within bounds [0,1] x [0,1].
+    Returns positive value when constraint is satisfied.
+    """
+    if points.ndim == 1:
+        points = points.reshape(-1, 2)
+
+    # Check if any point is outside [0,1] bounds
+    violations = 0
+
+    # Check x bounds
+    violations += np.sum(points[:, 0] < 0)
+    violations += np.sum(points[:, 0] > 1)
+
+    # Check y bounds
+    violations += np.sum(points[:, 1] < 0)
+    violations += np.sum(points[:, 1] > 1)
+
+    # Return negative of violations (positive if all constraints satisfied)
+    return -violations
+
+
+def _optimize_single_start(initial_points: np.ndarray, maxiter: int = 500) -> tuple:
+    """Perform optimization from a single starting point using hybrid approach."""
+    # Flatten points for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds for each coordinate [0, 1]
+    bounds = [(0, 1) for _ in range(len(initial_flat))]
+
+    # First, use differential evolution for global exploration
+    try:
+        de_result = differential_evolution(
+            func=_objective_function,
+            bounds=bounds,
+            maxiter=100,
+            popsize=15,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+
+        # Then refine with L-BFGS-B for local optimization
+        if de_result.success:
+            refined_initial = de_result.x
+
+            # Refinement with L-BFGS-B
+            lbfgsb_result = minimize(
+                fun=_objective_function,
+                x0=refined_initial,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': maxiter, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+
+            # Check final result
+            if lbfgsb_result.success:
+                final_points = lbfgsb_result.x.reshape(-1, 2)
+                objective_value = -lbfgsb_result.fun
+                return final_points, objective_value
+    except Exception as e:
+        pass
+
+    # If hybrid approach fails, fallback to single L-BFGS-B optimization
+    try:
+        result = minimize(
+            fun=_objective_function,
+            x0=initial_flat,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': maxiter, 'ftol': 1e-10, 'gtol': 1e-10},
+            tol=1e-10
+        )
+
+        if result.success:
+            optimized_points = result.x.reshape(-1, 2)
+            objective_value = -result.fun
+            return optimized_points, objective_value
+    except Exception as e:
+        pass
+
+    # Return initial points if all optimization attempts fail
+    return initial_points, _compute_distance_ratio(initial_points)
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    n = 16
+    d = 2
+
+    # Test multiple initialization methods for better exploration
+    init_methods = ['hexagonal', 'spiral', 'random']
+    best_points = None
+    best_ratio = -np.inf
+
+    # Multi-start optimization with different initial configurations
+    for method in init_methods:
+        # Create multiple random restarts for each method
+        for restart in range(3):  # 3 restarts per method
+            np.random.seed(42 + restart)  # Different seed for each restart
+            initial_points = _initialize_points(n, method)
+
+            # Perform optimization from this starting point
+            optimized_points, ratio = _optimize_single_start(initial_points, maxiter=500)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+    # Final refinement with more iterations if we found a good solution
+    if best_points is not None:
+        final_points, final_ratio = _optimize_single_start(best_points, maxiter=1000)
+        if final_ratio > best_ratio:
+            best_points = final_points
+
+    # Return the best solution found
+    if best_points is None:
+        # Fallback to default initialization
+        best_points = _initialize_points(n, 'hexagonal')
+
+    return best_points
+>>>>>>> REPLACE

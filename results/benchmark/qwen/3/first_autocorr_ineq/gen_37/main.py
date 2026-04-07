@@ -1,0 +1,265 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+import time
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing as mp
+
+def compute_convolution_fft(seq):
+    """Compute convolution using FFT for better performance."""
+    n = len(seq)
+    if n == 0:
+        return np.array([])
+    
+    # Pad to next power of 2 for efficient FFT
+    padded_len = 1 << (n - 1).bit_length()
+    padded_seq = np.pad(seq, (0, padded_len - n), 'constant')
+
+    # FFT-based convolution
+    fft_seq = fft(padded_seq)
+    conv_fft = fft_seq * fft_seq.conj()
+    conv_result = ifft(conv_fft).real[:2*n-1]
+
+    return conv_result
+
+def compute_c1_constant(sequence):
+    """Compute C1 constant for the given sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+    
+    # Compute convolution
+    conv = compute_convolution_fft(sequence)
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence)**2
+
+    if sum_sq < 1e-12:  # Avoid division by zero
+        return float('inf')
+
+    c1 = 2 * len(sequence) * max_conv / sum_sq
+    return c1
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with improved optimization."""
+    if len(sequence) == 0:
+        return None
+
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Skip if sum is too small
+    if sum_sequence < 1e-8:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+    try:
+        # Compute maximum convolution value
+        conv = compute_convolution_fft(normalized_sequence)
+        rhs = np.max(conv)
+
+        # Solve LP with better constraint handling
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+
+        if g_fun is None or np.any(np.isnan(g_fun)):
+            return None
+
+        # Normalize the resulting sequence
+        sum_g = np.sum(g_fun)
+        if sum_g < 1e-8:
+            return None
+
+        normalized_g_fun = g_fun * np.sqrt(2 * n) / sum_g
+
+        # Apply small perturbation to maintain diversity
+        t = 0.01
+        new_sequence = [
+            (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+        ]
+
+        # Ensure non-negativity
+        new_sequence = [max(0, x) for x in new_sequence]
+
+        return new_sequence
+
+    except Exception as e:
+        # Return None on any error
+        return None
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP with improved numerical stability."""
+    n = len(f_sequence)
+    if n == 0:
+        return None
+
+    try:
+        # Create constraint matrix efficiently
+        # For each convolution index k, create constraint: sum_{i+j=k} f[i] * x[j] <= rhs
+        # We'll build a sparse constraint matrix
+
+        # Using a more stable approach with explicit constraint generation
+        a_ub = []
+        b_ub = []
+
+        # Generate convolution constraints
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_sequence[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Objective: minimize sum of variables (which corresponds to maximizing 1/C1)
+        c = np.ones(n)  # Minimize sum(x) to maximize 1/C1
+
+        # Add small regularization term to prevent numerical issues
+        c = c + 1e-10
+
+        # Solve with bounds
+        bounds = [(0, None) for _ in range(n)]
+
+        result = optimize.linprog(
+            c,
+            A_ub=a_ub,
+            b_ub=b_ub,
+            bounds=bounds,
+            method='highs',
+            options={'disp': False}
+        )
+
+        if result.success:
+            return result.x
+        else:
+            return None
+
+    except Exception as e:
+        return None
+
+def evaluate_sequence(n):
+    """Evaluate a single sequence of given length."""
+    np.random.seed(int(time.time() * n) % 1000000)
+    
+    # Initialize with diverse weights
+    sequence = np.zeros(n)
+    if np.random.rand() < 0.5:
+        # Peak at certain positions
+        peak_positions = np.random.choice(n, size=min(5, n//2), replace=False)
+        for pos in peak_positions:
+            sequence[pos] = np.random.uniform(0.1, 10.0)
+    else:
+        # Random initialization
+        sequence = np.random.exponential(1.0, n)
+    
+    # Add some structure to avoid trivial solutions
+    sequence = sequence * np.random.uniform(0.1, 10.0)
+    
+    # Perform several iterations of optimization
+    current_seq = sequence.tolist()
+    best_seq = current_seq[:]
+    best_c1 = float('inf')
+    
+    for iter_num in range(50):  # Reduced iterations to save time
+        new_seq = get_good_direction_to_move_into(current_seq)
+        if new_seq is None:
+            break
+
+        # Check for improvement
+        current_c1 = compute_c1_constant(current_seq)
+        new_c1 = compute_c1_constant(new_seq)
+        
+        if new_c1 < current_c1:
+            current_seq = new_seq
+            if new_c1 < best_c1:
+                best_c1 = new_c1
+                best_seq = new_seq[:]
+        else:
+            # Add a small random perturbation occasionally
+            if np.random.rand() < 0.1:
+                perturbation = [np.random.normal(0, 0.01) for _ in current_seq]
+                current_seq = [max(0, x + dx) for x, dx in zip(current_seq, perturbation)]
+    
+    return best_seq, best_c1
+
+def search_for_best_sequence_parallel(n_list, num_workers=4):
+    """Search for best sequence using parallel evaluation."""
+    best_sequences = []
+    best_c1s = []
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(evaluate_sequence, n) for n in n_list]
+        for future in futures:
+            seq, c1 = future.result()
+            best_sequences.append(seq)
+            best_c1s.append(c1)
+    
+    # Return the sequence with lowest C1
+    min_idx = np.argmin(best_c1s)
+    return best_sequences[min_idx]
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence with improved algorithm."""
+    np.random.seed(int(time.time()) % 1000000)
+    
+    # Try different sequence lengths to find good starting points
+    best_c1 = float('inf')
+    best_sequence = []
+    
+    # Try multiple configurations to avoid local minima
+    n_candidates = [50, 100, 200, 500, 1000]
+    
+    # Parallel search for sequences of varying lengths
+    best_sequence = search_for_best_sequence_parallel(n_candidates)
+    
+    # Fine-tune the best sequence found
+    current_seq = best_sequence[:]
+    for iter_num in range(100):
+        new_seq = get_good_direction_to_move_into(current_seq)
+        if new_seq is None:
+            break
+        
+        # Check for improvement
+        current_c1 = compute_c1_constant(current_seq)
+        new_c1 = compute_c1_constant(new_seq)
+        
+        if new_c1 < current_c1:
+            current_seq = new_seq
+        else:
+            # Add a small random perturbation occasionally
+            if np.random.rand() < 0.1:
+                perturbation = [np.random.normal(0, 0.01) for _ in current_seq]
+                current_seq = [max(0, x + dx) for x, dx in zip(current_seq, perturbation)]
+        
+        # Early stopping condition
+        if abs(current_c1 - new_c1) < 1e-6:
+            break
+    
+    final_c1 = compute_c1_constant(current_seq)
+    if final_c1 < best_c1 and final_c1 < 100:  # Filter out bad candidates
+        best_c1 = final_c1
+        best_sequence = current_seq
+    
+    # Final validation
+    if len(best_sequence) == 0:
+        # Fall back to a reasonable default
+        best_sequence = [1.0] * 100
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

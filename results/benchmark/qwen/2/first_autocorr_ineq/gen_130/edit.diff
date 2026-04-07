@@ -1,0 +1,256 @@
+--- a/original.py
++++ b/original.py
+@@ -1,158 +1,236 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.signal import fftconvolve
+ import random
+ import time
+ import math
++from collections import defaultdict
+ 
+ def compute_c1_constant(sequence):
+     """Computes the C1 constant for a given sequence."""
+     a = np.array(sequence)
+     sum_a = np.sum(a)
+     if sum_a < 0.01:
+         return float('inf')
+ 
+     conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+     max_conv = np.max(conv)
+     n = len(a)
+     c1 = (2 * n * max_conv) / (sum_a ** 2)
+     return c1
+ 
+ def evaluate_sequence(sequence):
+     """Evaluates a sequence and returns 1/C1 (the objective to maximize)."""
+     try:
+         c1 = compute_c1_constant(sequence)
+         if c1 == float('inf'):
+             return 0.0
+         return 1.0 / c1
+     except Exception:
+         return 0.0
+ 
+-def generate_random_sequence(length=None, min_length=10, max_length=1000):
+-    """Generate a random sequence with specified or random length."""
+-    if length is None:
+-        length = random.randint(min_length, max_length)
+-
+-    sequence = [random.uniform(0, 1000) for _ in range(length)]
+-    if all(x == 0 for x in sequence):
+-        sequence[0] = 1.0
++def generate_step_function(n_steps, heights=None, max_height=1000):
++    """Generate a step function with n_steps and optional specific heights."""
++    if heights is None:
++        # Generate random heights
++        heights = [random.uniform(0, max_height) for _ in range(n_steps)]
++    else:
++        # Ensure we have exactly n_steps heights
++        heights = heights[:n_steps] + [0] * (n_steps - len(heights))
++        heights = heights[:n_steps]
++
++    # Create step function - evenly distribute heights across the sequence
++    total_length = 1000  # Fixed length for step function
++    step_sizes = [total_length // n_steps] * n_steps
++    # Distribute remaining positions
++    remainder = total_length % n_steps
++    for i in range(remainder):
++        step_sizes[i] += 1
++
++    # Build the sequence
++    sequence = []
++    for i, (height, size) in enumerate(zip(heights, step_sizes)):
++        sequence.extend([height] * size)
++
++    # Trim if necessary
++    if len(sequence) > total_length:
++        sequence = sequence[:total_length]
++    elif len(sequence) < total_length:
++        sequence.extend([0.0] * (total_length - len(sequence)))
++
+     return sequence
+ 
+ def create_step_function_from_convolution(sequence):
+     """Create a step function representation that approximates the convolution behavior."""
+     a = np.array(sequence)
+     sum_a = np.sum(a)
+     if sum_a < 0.01:
+         return None
+ 
+     conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+     max_conv = np.max(conv)
+ 
+     # Normalize the convolution to approximate a step function
+     normalized_conv = conv / max_conv if max_conv != 0 else conv
+     return normalized_conv.tolist()
+ 
+ def quadratic_optimization_approach(initial_sequence, max_iter=1000):
+     """Use quadratic programming to directly optimize the 1/C1 objective."""
+     # Set up initial parameters
+     n = len(initial_sequence)
+     x0 = np.array(initial_sequence)
+ 
+     # Define the objective function to minimize (negative of 1/C1)
+     def objective(x):
+         # Ensure non-negativity
+         x = np.maximum(x, 0)
+ 
+         # Compute the convolution
+         conv = fftconvolve(x, x, mode='full')[:len(x)*2-1]
+ 
+         max_conv = np.max(conv)
+         sum_x = np.sum(x)
+ 
+         if sum_x < 0.01:
+             return 1e6  # Penalize invalid sequences
+ 
+         c1 = (2 * len(x) * max_conv) / (sum_x ** 2)
+         return -1.0 / c1  # Negative because we want to maximize 1/C1
+ 
+-    # Define the constraints
+-    def constraint_positive(x):
+-        return x
+-
+     # Use L-BFGS-B optimizer which handles bounds well
+     bounds = [(0, 1000) for _ in range(n)]
+ 
+     result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds,
+                       options={'maxiter': max_iter, 'ftol': 1e-9})
+ 
+     if result.success:
+         return result.x.tolist()
+     else:
+         return initial_sequence
++
++def step_function_optimization_approach(max_time_seconds=180):
++    """
++    Specialized approach for step function optimization.
++    Tries different step configurations and optimizes them.
++    """
++    start_time = time.time()
++    best_sequence = None
++    best_inv_c1 = 0.0
++
++    # Try different numbers of steps
++    step_counts = [2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150]
++
++    # Try different initial configurations
++    for attempt in range(10):
++        if time.time() - start_time > max_time_seconds:
++            break
++
++        # Randomly select number of steps
++        n_steps = random.choice(step_counts)
++
++        # Try to generate a good step function
++        # Two approaches: random heights or specific patterns
++        if random.random() < 0.5:
++            # Approach 1: random heights
++            sequence = generate_step_function(n_steps, max_height=1000)
++        else:
++            # Approach 2: simple decreasing pattern (often effective)
++            heights = [1000 * (0.9 ** i) for i in range(n_steps)]
++            sequence = generate_step_function(n_steps, heights=heights)
++
++        # Optimize this step function
++        optimized_sequence = quadratic_optimization_approach(sequence, 200)
++
++        # Evaluate
++        inv_c1 = evaluate_sequence(optimized_sequence)
++        if inv_c1 > best_inv_c1:
++            best_inv_c1 = inv_c1
++            best_sequence = optimized_sequence
++
++        # Try a few more optimizations with different random starts
++        for _ in range(3):
++            if time.time() - start_time > max_time_seconds:
++                break
++            # Perturb slightly and try again
++            perturbed = [x * random.uniform(0.9, 1.1) for x in optimized_sequence]
++            perturbed = [max(0, min(1000, x)) for x in perturbed]
++            optimized_again = quadratic_optimization_approach(perturbed, 100)
++            inv_c1_again = evaluate_sequence(optimized_again)
++            if inv_c1_again > best_inv_c1:
++                best_inv_c1 = inv_c1_again
++                best_sequence = optimized_again
++
++    return best_sequence, best_inv_c1
+ 
+ def local_improvement_search(initial_sequence, max_iter=100):
+     """Improve a sequence using local search around it."""
+     current_sequence = initial_sequence.copy()
+     current_fitness = evaluate_sequence(current_sequence)
+ 
+     for _ in range(max_iter):
+         # Try mutating the current sequence
+         mutated = [x * random.uniform(0.8, 1.2) for x in current_sequence]
+         # Clip to valid range [0, 1000]
+         mutated = [max(0, min(1000, x)) for x in mutated]
+         mutated_fitness = evaluate_sequence(mutated)
+ 
+         if mutated_fitness > current_fitness:
+             current_sequence = mutated
+             current_fitness = mutated_fitness
+ 
+         # Try quadratic optimization
+         optimized = quadratic_optimization_approach(current_sequence, 100)
+         optimized_fitness = evaluate_sequence(optimized)
+ 
+         if optimized_fitness > current_fitness:
+             current_sequence = optimized
+             current_fitness = optimized_fitness
+ 
+     return current_sequence, current_fitness
+ 
+ def search_for_best_sequence():
+     """Main search function to find the best sequence."""
+     best_sequence = None
+     best_inv_c1 = 0.0
+ 
+-    # Try multiple random starting points
+-    for attempt in range(5):
++    # First, try specialized step function optimization
++    step_seq, step_fitness = step_function_optimization_approach(150)
++    if step_fitness > best_inv_c1:
++        best_inv_c1 = step_fitness
++        best_sequence = step_seq
++
++    # Then, try more general approaches
++    for attempt in range(3):
+         # Random initialization
+-        initial_sequence = generate_random_sequence()
++        initial_sequence = generate_step_function(random.randint(10, 100))
+ 
+         # Quadratic optimization approach
+         optimized_seq = quadratic_optimization_approach(initial_sequence)
+         optimized_fitness = evaluate_sequence(optimized_seq)
+ 
+         if optimized_fitness > best_inv_c1:
+             best_inv_c1 = optimized_fitness
+             best_sequence = optimized_seq
+ 
+         # Also try local improvement
+         improved_seq, improved_fitness = local_improvement_search(initial_sequence, 100)
+         if improved_fitness > best_inv_c1:
+             best_inv_c1 = improved_fitness
+             best_sequence = improved_seq
+ 
+     # Final local optimization on the best found sequence
+     if best_sequence is not None:
+-        final_seq, final_fitness = local_improvement_search(best_sequence, 500)
++        final_seq, final_fitness = local_improvement_search(best_sequence, 200)
+         if final_fitness > best_inv_c1:
+             best_inv_c1 = final_fitness
+             best_sequence = final_seq
+ 
+-    return best_sequence if best_sequence is not None else generate_random_sequence()
++    return best_sequence if best_sequence is not None else generate_step_function(50)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

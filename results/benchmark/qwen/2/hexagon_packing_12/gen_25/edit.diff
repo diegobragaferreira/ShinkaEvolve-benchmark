@@ -1,0 +1,356 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,329 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++import time
++import random
++from typing import Tuple, List, Optional
++import numba
++from numba import jit
++
++# NUMBA JIT COMPILED FUNCTIONS FOR PERFORMANCE
++@jit(nopython=True)
++def hexagon_vertices_jit(center_x: float, center_y: float, side_length: float, angle_deg: float) -> np.ndarray:
++    """Generate vertices of a hexagon using numba for speed."""
++    angle_rad = np.radians(angle_deg)
++    vertices = np.empty((6, 2))
++    for i in range(6):
++        theta = angle_rad + i * np.pi / 3
++        vertices[i, 0] = center_x + side_length * np.cos(theta)
++        vertices[i, 1] = center_y + side_length * np.sin(theta)
++    return vertices
++
++@jit(nopython=True)
++def distance_point_to_segment(point_x: float, point_y: float, seg_start_x: float, seg_start_y: float, 
++                             seg_end_x: float, seg_end_y: float) -> float:
++    """Calculate distance from point to line segment."""
++    # Vector from start to end of segment
++    dx = seg_end_x - seg_start_x
++    dy = seg_end_y - seg_start_y
++    
++    # If segment is degenerate
++    if dx == 0 and dy == 0:
++        return np.sqrt((point_x - seg_start_x)**2 + (point_y - seg_start_y)**2)
++    
++    # Project point onto line
++    t = ((point_x - seg_start_x) * dx + (point_y - seg_start_y) * dy) / (dx*dx + dy*dy)
++    t = max(0, min(1, t))  # Clamp to segment bounds
++    
++    # Closest point on segment
++    closest_x = seg_start_x + t * dx
++    closest_y = seg_start_y + t * dy
++    
++    return np.sqrt((point_x - closest_x)**2 + (point_y - closest_y)**2)
++
++# GEOMETRY HELPER CLASSES AND FUNCTIONS
++class Hexagon:
++    def __init__(self, center_x: float, center_y: float, side_length: float, angle_deg: float):
++        self.center_x = center_x
++        self.center_y = center_y
++        self.side_length = side_length
++        self.angle_deg = angle_deg
++        
++    def get_vertices(self) -> np.ndarray:
++        return hexagon_vertices_jit(self.center_x, self.center_y, self.side_length, self.angle_deg)
++    
++    def get_bounding_box(self) -> Tuple[float, float, float, float]:
++        vertices = self.get_vertices()
++        return (vertices[:, 0].min(), vertices[:, 0].max(), 
++                vertices[:, 1].min(), vertices[:, 1].max())
++
++class OuterHexagon(Hexagon):
++    def __init__(self, center_x: float, center_y: float, side_length: float, angle_deg: float):
++        super().__init__(center_x, center_y, side_length, angle_deg)
++        
++    def get_vertices(self) -> np.ndarray:
++        return hexagon_vertices_jit(self.center_x, self.center_y, self.side_length, self.angle_deg)
++    
++    def contains_point(self, x: float, y: float) -> bool:
++        vertices = self.get_vertices()
++        polygon = Polygon(vertices)
++        point = Point(x, y)
++        return polygon.contains(point)
++    
++    def get_edges(self) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
++        vertices = self.get_vertices()
++        edges = []
++        n = len(vertices)
++        for i in range(n):
++            edges.append((tuple(vertices[i]), tuple(vertices[(i+1)%n])))
++        return edges
++
++class Point:
++    def __init__(self, x: float, y: float):
++        self.x = x
++        self.y = y
++
++# CONSTRAINT VALIDATION FUNCTIONS
++def check_containment(hexagons: List[Hexagon], outer_hex: OuterHexagon) -> bool:
++    """Check if all inner hexagons are fully contained within the outer hexagon."""
++    outer_vertices = outer_hex.get_vertices()
++    outer_polygon = Polygon(outer_vertices)
++    
++    for hexagon in hexagons:
++        vertices = hexagon.get_vertices()
++        for vertex in vertices:
++            point = Point(vertex[0], vertex[1])
++            if not outer_polygon.contains(point):
++                return False
++    return True
++
++def calculate_min_distance(hexagons: List[Hexagon]) -> float:
++    """Calculate minimum distance between any two hexagons."""
++    min_dist = float('inf')
++    vertices_list = [hexagon.get_vertices() for hexagon in hexagons]
++    
++    for i in range(len(vertices_list)):
++        for j in range(i+1, len(vertices_list)):
++            vertices_i = vertices_list[i]
++            vertices_j = vertices_list[j]
++            
++            # Check distance between all pairs of vertices
++            distances = cdist(vertices_i, vertices_j)
++            min_dist = min(min_dist, distances.min())
++    
++    return min_dist
++
++def check_overlap(hexagons: List[Hexagon]) -> bool:
++    """Check if any two hexagons overlap."""
++    # Create polygons for each hexagon
++    polygons = []
++    for hexagon in hexagons:
++        vertices = hexagon.get_vertices()
++        polygon = Polygon(vertices)
++        polygons.append(polygon)
++    
++    # Check pairwise intersections
++    for i in range(len(polygons)):
++        for j in range(i+1, len(polygons)):
++            if polygons[i].intersects(polygons[j]):
++                return True
++    return False
++
++# OPTIMIZATION HELPER FUNCTIONS
++def generate_symmetric_initial_population(n_inner: int, outer_radius: float) -> List[np.ndarray]:
++    """Generate an initial population with symmetric properties."""
++    # Generate points arranged in concentric rings
++    positions = []
++    
++    # Center hexagon
++    positions.append([0, 0, 0])
++    
++    # First ring
++    for i in range(6):
++        angle = i * 60
++        radius = 2.0  # Adjusted spacing
++        x = radius * np.cos(np.radians(angle))
++        y = radius * np.sin(np.radians(angle))
++        positions.append([x, y, angle])
++    
++    # Second ring
++    for i in range(6):
++        angle = i * 60 + 30  # Offset to create pattern
++        radius = 3.5
++        x = radius * np.cos(np.radians(angle))
++        y = radius * np.sin(np.radians(angle))
++        positions.append([x, y, angle])
++    
++    # Fill remaining positions
++    while len(positions) < n_inner:
++        positions.append([random.uniform(-3, 3), random.uniform(-3, 3), random.uniform(0, 360)])
++    
++    return [np.array(positions[:n_inner])]
++
++def evaluate_solution(config: np.ndarray, outer_radius: float) -> Tuple[float, bool, bool]:
++    """Evaluate a solution configuration: returns (penalty_score, is_valid, is_feasible)."""
++    # Convert config to list of hexagon objects
++    inner_hexagons = []
++    for i in range(len(config)):
++        center_x, center_y, angle_deg = config[i]
++        inner_hexagons.append(Hexagon(center_x, center_y, 1.0, angle_deg))
++    
++    outer_hex = OuterHexagon(0, 0, outer_radius, 0)
++    
++    # Check constraints
++    is_feasible = True
++    penalty = 0.0
++    
++    # Check containment
++    if not check_containment(inner_hexagons, outer_hex):
++        penalty += 1000.0
++        is_feasible = False
++    
++    # Check overlap
++    if check_overlap(inner_hexagons):
++        penalty += 1000.0
++        is_feasible = False
++    
++    # Calculate minimum distance for additional penalty
++    min_dist = calculate_min_distance(inner_hexagons)
++    if min_dist <= 0:  # Overlapping
++        penalty += 1000.0
++        is_feasible = False
++    else:
++        # Add penalty based on how much they're packed
++        penalty += 1.0 / (min_dist + 1e-8)  # Avoid division by zero
++    
++    return penalty, is_feasible, is_feasible
++
++def optimize_packing(initial_config: np.ndarray, max_evaluations: int = 1000) -> Tuple[np.ndarray, float]:
++    """Use a simple evolutionary algorithm to optimize the packing."""
++    # Parameters
++    population_size = 20
++    mutation_rate = 0.1
++    elite_count = 2
++    
++    # Initialize population
++    population = [initial_config.copy()]
++    for _ in range(population_size - 1):
++        # Mutate the initial configuration slightly
++        mutated = initial_config.copy()
++        for i in range(len(mutated)):
++            if random.random() < mutation_rate:
++                mutated[i] = mutated[i] + np.random.normal(0, 0.5, 3)
++        population.append(mutated)
++    
++    best_config = None
++    best_fitness = float('inf')
++    best_outer_radius = 10.0  # Start with large outer hexagon
++    
++    for gen in range(max_evaluations // population_size):
++        # Evaluate population
++        fitness_scores = []
++        for config in population:
++            penalty, valid, feasible = evaluate_solution(config, best_outer_radius)
++            # Try to shrink outer hexagon if valid
++            if feasible:
++                test_outer_radius = best_outer_radius - 0.1
++                _, _, test_feasible = evaluate_solution(config, test_outer_radius)
++                if test_feasible:
++                    penalty -= 100  # Reward good configurations
++                else:
++                    penalty += 100  # Penalty for bad configurations
++            
++            fitness_scores.append((penalty, config))
++        
++        # Sort by fitness (lower is better)
++        fitness_scores.sort(key=lambda x: x[0])
++        
++        # Update best
++        current_best_penalty, current_best_config = fitness_scores[0]
++        if current_best_penalty < best_fitness:
++            best_fitness = current_best_penalty
++            best_config = current_best_config.copy()
++        
++        # Create new population
++        new_population = [current_best_config]  # Elitism
++        for _ in range(population_size - 1):
++            # Tournament selection
++            tournament_size = 3
++            tournament_indices = random.sample(range(population_size), tournament_size)
++            tournament = [fitness_scores[i] for i in tournament_indices]
++            winner = min(tournament, key=lambda x: x[0])[1]
++            
++            # Mutate
++            mutated = winner.copy()
++            for i in range(len(mutated)):
++                if random.random() < mutation_rate:
++                    mutated[i] = mutated[i] + np.random.normal(0, 0.2, 3)
++            new_population.append(mutated)
++        
++        population = new_population
++    
++    return best_config, best_fitness
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++    # Set up initial configuration with known good values
++    initial_config = np.array([
++        [0, 0, 0],      # center
++        [-2.5, 0, 0],   # left
++        [2.5, 0, 0],    # right
++        [-1.25, 2.17, 0],  # top-left
++        [1.25, 2.17, 0],   # top-right
++        [-1.25, -2.17, 0], # bottom-left
++        [1.25, -2.17, 0],  # bottom-right
++        [-3.75, 2.17, 0],  # far top-left
++        [3.75, 2.17, 0],   # far top-right
++        [-3.75, -2.17, 0], # far bottom-left
++        [3.75, -2.17, 0],  # far bottom-right
++        [0, -4, 0],       # far bottom-center
++    ])
++    
++    # Run optimization
++    optimized_config, fitness = optimize_packing(initial_config, max_evaluations=1000)
++    
++    # Calculate final outer hexagon size needed
++    inner_hexagons = []
++    for i in range(len(optimized_config)):
++        center_x, center_y, angle_deg = optimized_config[i]
++        inner_hexagons.append(Hexagon(center_x, center_y, 1.0, angle_deg))
++    
++    # Estimate required outer hexagon radius
++    max_distance = 0
++    for hexagon in inner_hexagons:
++        vertices = hexagon.get_vertices()
++        for vertex in vertices:
++            dist = np.sqrt(vertex[0]**2 + vertex[1]**2)
++            max_distance = max(max_distance, dist)
++    
++    # Add some buffer to ensure complete containment
++    outer_hex_side_length = max_distance + 1.5
++    
++    # Validate final configuration
++    outer_hex = OuterHexagon(0, 0, outer_hex_side_length, 0)
++    if not check_containment(inner_hexagons, outer_hex):
++        outer_hex_side_length *= 1.1  # Increase if needed
++    
++    # Final validation
++    final_valid = check_containment(inner_hexagons, outer_hex) and not check_overlap(inner_hexagons)
++    
++    if not final_valid:
++        # Fallback to safe configuration if validation fails
++        outer_hex_side_length = 4.0
++        optimized_config = initial_config.copy()
++    
++    # Return results
++    inner_hex_data = optimized_config
++    outer_hex_data = np.array([0, 0, 0])
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

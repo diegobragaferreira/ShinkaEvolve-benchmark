@@ -1,0 +1,231 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,223 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial import cKDTree
++import math
++from typing import Tuple, List
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
++    np.random.seed(42)  # For deterministic results
++    
++    # Parameters
++    n_circles = 32
++    max_iterations = 5000
++    min_radius = 0.001
++    
++    # Initialize circles with hexagonal grid
++    circles = _initialize_hexagonal_grid(n_circles)
++    
++    # Validate initial configuration
++    if not _validate_config(circles):
++        # Fall back to random initialization if hexagonal fails
++        circles = _initialize_random(n_circles)
++    
++    # Optimize using iterative refinement
++    best_sum_radii = _calculate_sum_radii(circles)
++    best_circles = circles.copy()
++    
++    for iteration in range(max_iterations):
++        # Try to increase radii while maintaining constraints
++        new_circles = _optimize_radii(circles, min_radius)
++        
++        # If we couldn't improve radii, try positional adjustments
++        if _calculate_sum_radii(new_circles) <= best_sum_radii:
++            new_circles = _optimize_positions(circles, min_radius)
++            
++        # Update best solution
++        current_sum = _calculate_sum_radii(new_circles)
++        if current_sum > best_sum_radii:
++            best_sum_radii = current_sum
++            best_circles = new_circles.copy()
++            
++        # Update circles for next iteration
++        circles = new_circles
++        
++        # Early stopping if improvement is minimal
++        if iteration > 100 and abs(current_sum - best_sum_radii) < 1e-6:
++            break
++            
++    return best_circles
++
++def _initialize_hexagonal_grid(n: int) -> np.ndarray:
++    """Initialize circles in a hexagonal grid pattern."""
+     circles = np.zeros((n, 3))
+-
++    
++    # Hexagonal lattice parameters
++    sqrt3 = math.sqrt(3)
++    spacing_x = 0.2
++    spacing_y = 0.1732  # sqrt(3)/2 * spacing_x
++    
++    # Place circles in hexagonal pattern, ensuring they fit in unit square
++    idx = 0
++    for i in range(int(1/spacing_x) + 2):
++        for j in range(int(1/spacing_y) + 2):
++            if idx >= n:
++                break
++                
++            x = i * spacing_x + (j % 2) * spacing_x * 0.5
++            y = j * spacing_y
++            
++            # Only place if it fits within the unit square
++            if x >= 0.05 and x <= 0.95 and y >= 0.05 and y <= 0.95:
++                # Start with small radius
++                r = min(0.03, 0.5 * min(x, 1-x, y, 1-y))
++                circles[idx] = [x, y, r]
++                idx += 1
++                
++        if idx >= n:
++            break
++    
++    # Fill remaining positions with random placements if needed
++    while idx < n:
++        x = np.random.uniform(0.05, 0.95)
++        y = np.random.uniform(0.05, 0.95)
++        r = min(0.03, 0.5 * min(x, 1-x, y, 1-y))
++        circles[idx] = [x, y, r]
++        idx += 1
++        
+     return circles
+ 
++def _initialize_random(n: int) -> np.ndarray:
++    """Fallback random initialization."""
++    circles = np.zeros((n, 3))
++    for i in range(n):
++        x = np.random.uniform(0.05, 0.95)
++        y = np.random.uniform(0.05, 0.95)
++        r = min(0.03, 0.5 * min(x, 1-x, y, 1-y))
++        circles[i] = [x, y, r]
++    return circles
++
++def _validate_config(circles: np.ndarray) -> bool:
++    """Validate that all circles are within bounds and don't overlap."""
++    # Check bounds
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++            return False
++    
++    # Check overlaps using kdtree for efficiency
++    points = circles[:, :2]
++    tree = cKDTree(points)
++    pairs = tree.query_pairs(r=0.001, output_type='ndarray')
++    
++    # Check if any pairs have overlapping circles
++    for i, j in pairs:
++        x1, y1, r1 = circles[i]
++        x2, y2, r2 = circles[j]
++        dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++        if dist < r1 + r2:
++            return False
++            
++    return True
++
++def _calculate_sum_radii(circles: np.ndarray) -> float:
++    """Calculate sum of all circle radii."""
++    return np.sum(circles[:, 2])
++
++def _optimize_radii(circles: np.ndarray, min_radius: float) -> np.ndarray:
++    """Try to increase radii of circles while maintaining constraints."""
++    new_circles = circles.copy()
++    n = len(new_circles)
++    
++    # Create a copy for validation
++    test_circles = new_circles.copy()
++    
++    # Try increasing radii
++    for i in range(n):
++        x, y, r_old = test_circles[i]
++        
++        # Calculate maximum possible radius
++        max_r = min(x, 1-x, y, 1-y)
++        
++        # Try to increase radius up to max possible
++        r_new = min(max_r, r_old + 0.005)
++        
++        # Update radius
++        test_circles[i, 2] = r_new
++        
++        # Check constraints
++        if _check_constraints(test_circles, i):
++            new_circles[i, 2] = r_new
++        else:
++            # Revert if constraint violated
++            test_circles[i, 2] = r_old
++            
++    return new_circles
++
++def _optimize_positions(circles: np.ndarray, min_radius: float) -> np.ndarray:
++    """Attempt to slightly adjust circle positions to improve packing."""
++    new_circles = circles.copy()
++    
++    # For each circle, try small adjustments
++    for i in range(len(new_circles)):
++        x, y, r = new_circles[i]
++        
++        # Try small displacements
++        best_x, best_y = x, y
++        best_r = r
++        best_valid = True
++        
++        # Sample small displacements around current position
++        for dx in [-0.005, -0.0025, 0, 0.0025, 0.005]:
++            for dy in [-0.005, -0.0025, 0, 0.0025, 0.005]:
++                new_x = x + dx
++                new_y = y + dy
++                
++                # Check boundary constraints
++                if new_x - r < 0 or new_x + r > 1 or new_y - r < 0 or new_y + r > 1:
++                    continue
++                
++                # Create temporary config to check overlaps
++                test_circles = new_circles.copy()
++                test_circles[i, 0] = new_x
++                test_circles[i, 1] = new_y
++                
++                if _check_constraints(test_circles, i):
++                    best_x, best_y = new_x, new_y
++                    break
++                    
++            else:
++                continue
++            break
++            
++        new_circles[i, 0] = best_x
++        new_circles[i, 1] = best_y
++        
++    return new_circles
++
++def _check_constraints(circles: np.ndarray, target_idx: int) -> bool:
++    """Check if circle at target_idx satisfies all constraints with other circles."""
++    # Check boundary constraints
++    x, y, r = circles[target_idx]
++    if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++        return False
++    
++    # Check overlap constraints against all other circles
++    for i in range(len(circles)):
++        if i == target_idx:
++            continue
++            
++        x_i, y_i, r_i = circles[i]
++        dist = math.sqrt((x - x_i)**2 + (y - y_i)**2)
++        
++        if dist < r + r_i:
++            return False
++            
++    return True
+ 
+ # EVOLVE-BLOCK-END

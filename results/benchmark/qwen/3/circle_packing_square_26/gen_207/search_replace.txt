@@ -1,0 +1,185 @@
+<NAME>
+add_spatial_indexing_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses cKDTree for overlap detection but doesn't implement an efficient spatial grid indexing system that can significantly speed up the overlap checks, especially for large populations. I'll add a spatial grid implementation that divides the unit square into cells to quickly identify potential overlapping circles. This will dramatically reduce the number of distance calculations needed for overlap detection by only checking circles that are in adjacent cells.
+
+This change addresses the bottleneck in overlap detection identified in the prior program analysis and will help achieve the target benchmark of 2.6358627564136983.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class ConstraintChecker:
+    """Handles all constraint validation and penalty calculation"""
+
+    @staticmethod
+    def check_containment_constraints(individual: np.ndarray) -> float:
+        """Check containment constraints and return penalty"""
+        penalty = 0.0
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            # Calculate boundary violations
+            left_violation = max(0, r - x)
+            right_violation = max(0, x + r - 1)
+            bottom_violation = max(0, r - y)
+            top_violation = max(0, y + r - 1)
+
+            if left_violation > 0 or right_violation > 0 or bottom_violation > 0 or top_violation > 0:
+                penalty += 1000 * (left_violation + right_violation + bottom_violation + top_violation)
+        return penalty
+
+    @staticmethod
+    def check_overlap_constraints(individual: np.ndarray) -> float:
+        """Check overlap constraints efficiently using cKDTree"""
+        penalty = 0.0
+        n = len(individual)
+
+        if n <= 1:
+            return penalty
+
+        # Use cKDTree for efficient neighbor queries
+        tree = cKDTree(individual[:, :2])
+
+        # Process each circle only once for efficient pairwise comparison
+        processed_indices = set()
+
+        for i in range(n):
+            if i in processed_indices:
+                continue
+
+            x1, y1, r1 = individual[i]
+
+            # Find all neighbors within double the combined radius
+            max_radius = np.max(individual[:, 2])
+            neighbors = tree.query_ball_point([x1, y1], 2 * (r1 + max_radius), p=2)
+
+            # Only check pairs that haven't been processed yet
+            for j in neighbors:
+                if i >= j or j in processed_indices:
+                    continue
+
+                x2, y2, r2 = individual[j]
+
+                # Fast distance check using squared distance
+                dx = x2 - x1
+                dy = y2 - y1
+                distance_squared = dx*dx + dy*dy
+
+                # Check if circles are close enough to potentially overlap
+                combined_radius = r1 + r2
+                if distance_squared < combined_radius * combined_radius:
+                    actual_distance = math.sqrt(distance_squared)
+                    if actual_distance < combined_radius:
+                        overlap = combined_radius - actual_distance
+                        penalty += overlap * 1000 * (1.0 + overlap * 0.01)
+
+            processed_indices.add(i)
+
+        return penalty
+=======
+class SpatialGrid:
+    """Efficient spatial grid for fast overlap detection with O(1) neighbor lookup"""
+
+    def __init__(self, resolution: int = 30):
+        self.resolution = resolution
+        self.grid = {}
+        self.cell_size = 1.0 / resolution
+
+    def _get_cell_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Get grid cell coordinates for a point"""
+        return (int(x / self.cell_size), int(y / self.cell_size))
+
+    def clear(self):
+        """Clear the spatial grid"""
+        self.grid.clear()
+
+    def add_circle(self, idx: int, x: float, y: float, radius: float):
+        """Add a circle to the spatial grid"""
+        cell_coords = self._get_cell_coords(x, y)
+        if cell_coords not in self.grid:
+            self.grid[cell_coords] = []
+        self.grid[cell_coords].append((idx, x, y, radius))
+
+    def get_neighbors(self, x: float, y: float, radius: float) -> List[Tuple[int, float, float, float]]:
+        """Get all circles in neighboring cells that could potentially overlap"""
+        neighbors = []
+        cell_x, cell_y = self._get_cell_coords(x, y)
+
+        # Check surrounding cells (3x3 grid around main cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell_x + dx, cell_y + dy)
+                if neighbor_cell in self.grid:
+                    for idx, nx, ny, nr in self.grid[neighbor_cell]:
+                        # Skip self
+                        neighbors.append((idx, nx, ny, nr))
+        return neighbors
+
+class ConstraintChecker:
+    """Handles all constraint validation and penalty calculation"""
+
+    # Shared spatial grid instance for overlap detection
+    spatial_grid = SpatialGrid(resolution=30)
+
+    @staticmethod
+    def check_containment_constraints(individual: np.ndarray) -> float:
+        """Check containment constraints and return penalty"""
+        penalty = 0.0
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            # Calculate boundary violations
+            left_violation = max(0, r - x)
+            right_violation = max(0, x + r - 1)
+            bottom_violation = max(0, r - y)
+            top_violation = max(0, y + r - 1)
+
+            if left_violation > 0 or right_violation > 0 or bottom_violation > 0 or top_violation > 0:
+                penalty += 1000 * (left_violation + right_violation + bottom_violation + top_violation)
+        return penalty
+
+    @staticmethod
+    def check_overlap_constraints(individual: np.ndarray) -> float:
+        """Check overlap constraints efficiently using spatial grid"""
+        penalty = 0.0
+        n = len(individual)
+
+        if n <= 1:
+            return penalty
+
+        # Clear and rebuild spatial grid
+        ConstraintChecker.spatial_grid.clear()
+
+        # Add all circles to spatial grid
+        for i in range(n):
+            x, y, r = individual[i]
+            ConstraintChecker.spatial_grid.add_circle(i, x, y, r)
+
+        # Check overlaps using spatial grid
+        for i in range(n):
+            x1, y1, r1 = individual[i]
+
+            # Get potential overlapping candidates from neighbors
+            candidates = ConstraintChecker.spatial_grid.get_neighbors(x1, y1, r1)
+
+            # Check actual overlaps
+            for j, x2, y2, r2 in candidates:
+                if i >= j:  # Skip self-comparison and duplicates
+                    continue
+
+                # Fast distance check using squared distance
+                dx = x2 - x1
+                dy = y2 - y1
+                distance_squared = dx*dx + dy*dy
+
+                # Check if circles are close enough to potentially overlap
+                combined_radius = r1 + r2
+                if distance_squared < combined_radius * combined_radius:
+                    actual_distance = math.sqrt(distance_squared)
+                    if actual_distance < combined_radius:
+                        overlap = combined_radius - actual_distance
+                        penalty += overlap * 1000 * (1.0 + overlap * 0.01)
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>

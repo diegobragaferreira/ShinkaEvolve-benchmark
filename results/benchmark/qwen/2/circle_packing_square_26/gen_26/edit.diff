@@ -1,0 +1,238 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,230 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from deap import base, creator, tools, algorithms
++import random
++from typing import Tuple
++
++# Global constants
++POP_SIZE = 100
++NGEN = 200
++CXPB = 0.8
++MUTPB = 0.2
++SEED = 42
++
++# Initialize the random seed for reproducibility
++random.seed(SEED)
++np.random.seed(SEED)
++
++def evaluate_circles(individual):
++    """Evaluate the fitness of a circle configuration."""
++    # Convert individual to circles array (x, y, r)
++    circles = np.array(individual).reshape(-1, 3)
++
++    # Calculate total radius sum
++    total_radius = np.sum(circles[:, 2])
++
++    # Check constraints
++    penalty = 0
++
++    # Check containment constraints
++    for x, y, r in circles:
++        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++            penalty += 10000  # Heavy penalty for containment violation
++
++    # Check overlap constraints
++    n = len(circles)
++    for i in range(n):
++        for j in range(i+1, n):
++            x1, y1, r1 = circles[i]
++            x2, y2, r2 = circles[j]
++            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++            if distance < r1 + r2:
++                penalty += 10000  # Heavy penalty for overlap
++
++    return (total_radius - penalty,)
++
++def check_validity(circles):
++    """Check if a circle configuration is valid."""
++    # Check containment
++    for x, y, r in circles:
++        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++            return False
++
++    # Check overlap
++    n = len(circles)
++    for i in range(n):
++        for j in range(i+1, n):
++            x1, y1, r1 = circles[i]
++            x2, y2, r2 = circles[j]
++            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++            if distance < r1 + r2:
++                return False
++    return True
++
++def create_individual():
++    """Create a valid individual (configuration of 26 circles)."""
++    # Start with a simple placement strategy then refine
++    circles = []
++
++    # Place circles in a grid pattern first
++    n = 26
++    grid_size = int(np.ceil(np.sqrt(n)))
++    spacing_x = 1.0 / (grid_size + 1)
++    spacing_y = 1.0 / (grid_size + 1)
++
++    placed = 0
++    for i in range(grid_size):
++        for j in range(grid_size):
++            if placed >= n:
++                break
++            x = (i + 1) * spacing_x
++            y = (j + 1) * spacing_y
++            # Set initial radius to small value
++            r = min(spacing_x, spacing_y) * 0.4
++            circles.append((x, y, r))
++            placed += 1
++
++    # Adjust the last few circles to make room for larger radii
++    for i in range(4):  # Adjust last 4 circles
++        if len(circles) > 26 - 4 + i:
++            x, y, r = circles[26 - 4 + i]
++            # Increase radius to be slightly smaller than half of grid spacing
++            r = min(0.1, min(x, 1-x, y, 1-y) * 0.9)
++            circles[26 - 4 + i] = (x, y, r)
++
++    # Add some randomness to avoid local minima
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        noise_factor = 0.05
++        x = max(0.01, min(0.99, x + np.random.normal(0, noise_factor * r)))
++        y = max(0.01, min(0.99, y + np.random.normal(0, noise_factor * r)))
++        r = max(0.001, min(0.4, r + np.random.normal(0, noise_factor * r)))
++        circles[i] = (x, y, r)
++
++    # Ensure all circles fit in the unit square
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        # Adjust radius to respect boundaries
++        max_r = min(x, 1-x, y, 1-y)
++        r = min(r, max_r * 0.99)
++        circles[i] = (x, y, r)
++
++    return circles
++
++def mutate_individual(individual):
++    """Mutate an individual by slightly adjusting circle positions and radii."""
++    mutated = individual.copy()
++    n = len(mutated) // 3  # Number of circles
++
++    for i in range(n):
++        # Randomly decide what to mutate
++        if random.random() < 0.3:  # Mutate position
++            idx = i * 3
++            # Slightly adjust x
++            mutated[idx] += np.random.normal(0, 0.01)
++            mutated[idx] = max(0.01, min(0.99, mutated[idx]))
++            # Slightly adjust y
++            mutated[idx+1] += np.random.normal(0, 0.01)
++            mutated[idx+1] = max(0.01, min(0.99, mutated[idx+1]))
++        if random.random() < 0.3:  # Mutate radius
++            idx = i * 3 + 2
++            mutated[idx] += np.random.normal(0, 0.005)
++            mutated[idx] = max(0.001, min(0.4, mutated[idx]))
++
++    return mutated
++
++def crossover_individuals(ind1, ind2):
++    """Cross two individuals using uniform crossover."""
++    size = min(len(ind1), len(ind2))
++    cxpoint1 = random.randint(1, size//2)
++    cxpoint2 = random.randint(cxpoint1, size)
++
++    # Create offspring
++    child1 = ind1[:]
++    child2 = ind2[:]
++
++    # Swap sections
++    child1[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2]
++    child2[cxpoint1:cxpoint2] = ind1[cxpoint1:cxpoint2]
++
++    return child1, child2
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
++    # Setup DEAP framework
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++
++    toolbox = base.Toolbox()
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate_circles)
++    toolbox.register("mate", crossover_individuals)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++
++    # Create initial population
++    population = toolbox.population(n=POP_SIZE)
++
++    # Evaluate initial population
++    invalid_ind = [ind for ind in population if not ind.fitness.valid]
++    fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
++    for ind, fit in zip(invalid_ind, fitnesses):
++        ind.fitness.values = fit
++
++    # Begin evolution
++    for gen in range(NGEN):
++        # Select the next generation individuals
++        offspring = toolbox.select(population, len(population))
++        offspring = list(map(toolbox.clone, offspring))
++
++        # Apply crossover and mutation on the offspring
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < CXPB:
++                child1, child2 = toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++
++        for mutant in offspring:
++            if random.random() < MUTPB:
++                mutant = toolbox.mutate(mutant)
++                del mutant.fitness.values
++
++        # Evaluate the individuals with an invalid fitness
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++
++        # Replace the old population with the new one
++        population[:] = offspring
++
++        # Print statistics
++        fits = [ind.fitness.values[0] for ind in population]
++        length = len(population)
++        mean = sum(fits) / length
++        sum2 = sum(x*x for x in fits)
++        std = abs(sum2 / length - mean**2)**0.5
++        if gen % 20 == 0:
++            print(f"Gen {gen}: Min {min(fits):.3f}, Max {max(fits):.3f}, Avg {mean:.3f}")
++
++    # Get best individual
++    best_ind = tools.selBest(population, 1)[0]
++    circles = np.array(best_ind).reshape(-1, 3)
++
++    # Ensure we have exactly 26 circles
++    circles = circles[:26]
++    if len(circles) < 26:
++        # Fill remaining circles with zeros
++        padding = np.zeros((26 - len(circles), 3))
++        circles = np.vstack([circles, padding])
+ 
+     return circles
+ 
+ 
+ # EVOLVE-BLOCK-END

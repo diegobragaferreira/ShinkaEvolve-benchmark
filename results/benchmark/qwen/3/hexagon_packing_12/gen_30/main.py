@@ -1,0 +1,270 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import matplotlib.pyplot as plt
+from numba import jit
+import time
+from copy import deepcopy
+
+# Numba JIT compiled utility functions for speed
+@jit(nopython=True)
+def distance_point_to_hexagon(point, hex_center, hex_radius, hex_angle):
+    """Compute minimum distance from point to hexagon boundary"""
+    x, y = point
+    cx, cy = hex_center
+    # Translate point to hexagon center
+    px = x - cx
+    py = y - cy
+    
+    # Rotate point to hexagon reference frame (angle=0)
+    cos_a = np.cos(-hex_angle)
+    sin_a = np.sin(-hex_angle)
+    px_rot = px * cos_a - py * sin_a
+    py_rot = px * sin_a + py * cos_a
+    
+    # Hexagon vertices in rotated coordinate system
+    hex_vertices = []
+    for i in range(6):
+        angle = np.pi/3 * i
+        vx = hex_radius * np.cos(angle)
+        vy = hex_radius * np.sin(angle)
+        hex_vertices.append((vx, vy))
+    
+    # Find closest point on hexagon boundary
+    min_dist = float('inf')
+    for i in range(6):
+        p1 = hex_vertices[i]
+        p2 = hex_vertices[(i+1)%6]
+        
+        # Line segment from p1 to p2
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        length_sq = dx*dx + dy*dy
+        
+        if length_sq == 0:
+            dist = np.sqrt((px_rot - p1[0])**2 + (py_rot - p1[1])**2)
+        else:
+            t = max(0, min(1, ((px_rot - p1[0]) * dx + (py_rot - p1[1]) * dy) / length_sq))
+            proj_x = p1[0] + t * dx
+            proj_y = p1[1] + t * dy
+            dist = np.sqrt((px_rot - proj_x)**2 + (py_rot - proj_y)**2)
+            
+        min_dist = min(min_dist, dist)
+    
+    return min_dist
+
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_center, hex1_radius, hex1_angle, hex2_center, hex2_radius, hex2_angle):
+    """Check if two hexagons overlap using distance-based method"""
+    # Calculate centers
+    c1x, c1y = hex1_center
+    c2x, c2y = hex2_center
+    
+    # Distance between centers
+    dx = c2x - c1x
+    dy = c2y - c1y
+    dist_centers = np.sqrt(dx*dx + dy*dy)
+    
+    # If distance is less than sum of radii, they may overlap
+    if dist_centers < 2 * hex1_radius:
+        # Do more precise check using distance to boundary
+        # For now, if centers are close, assume overlap to be safe
+        return True
+    
+    return False
+
+def create_hexagon_vertices(center, radius, angle_degrees):
+    """Create vertices of a regular hexagon given center, radius, and angle"""
+    angle_rad = np.radians(angle_degrees)
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * np.pi/3
+        x = center[0] + radius * np.cos(theta)
+        y = center[1] + radius * np.sin(theta)
+        vertices.append((x, y))
+    return vertices
+
+def validate_hexagon_arrangement(inner_hex_data, outer_hex_side_length):
+    """Validate that all inner hexagons are contained in outer hexagon and don't overlap"""
+    # Create outer hexagon as polygon
+    outer_center = (0, 0)
+    outer_vertices = create_hexagon_vertices(outer_center, outer_hex_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+    
+    # Check containment and overlap for each hexagon
+    for i in range(len(inner_hex_data)):
+        center = (inner_hex_data[i][0], inner_hex_data[i][1])
+        angle = inner_hex_data[i][2]
+        # Use a smaller radius to account for vertex precision issues
+        # Inner hexagons have unit radius, so check against outer hexagon
+        inner_vertices = create_hexagon_vertices(center, 1.0, angle)
+        inner_polygon = Polygon(inner_vertices)
+        
+        # Check containment
+        if not outer_polygon.contains(inner_polygon):
+            return False
+        
+        # Check overlap with other hexagons
+        for j in range(i + 1, len(inner_hex_data)):
+            center2 = (inner_hex_data[j][0], inner_hex_data[j][1])
+            angle2 = inner_hex_data[j][2]
+            inner_vertices2 = create_hexagon_vertices(center2, 1.0, angle2)
+            inner_polygon2 = Polygon(inner_vertices2)
+            
+            # Check if polygons intersect
+            if inner_polygon.intersects(inner_polygon2):
+                return False
+    
+    return True
+
+def calculate_objective(inner_hex_data, outer_hex_side_length):
+    """Calculate objective value: 1/outer_hex_side_length"""
+    # Return negative because we want to maximize 1/outer_hex_side_length, which means minimize outer_hex_side_length
+    return 1.0 / outer_hex_side_length
+
+def calculate_outer_hex_side_length_from_inner(inner_hex_data):
+    """Estimate required outer hexagon side length based on inner hexagon positions"""
+    if len(inner_hex_data) == 0:
+        return 100.0
+    
+    # Get the furthest corner from origin
+    max_distance = 0
+    
+    for i in range(len(inner_hex_data)):
+        center = (inner_hex_data[i][0], inner_hex_data[i][1])
+        angle = inner_hex_data[i][2]
+        
+        # Get all 6 vertices of this hexagon
+        vertices = create_hexagon_vertices(center, 1.0, angle)
+        
+        # Find maximum distance from origin to any vertex
+        for vertex in vertices:
+            distance = np.sqrt(vertex[0]**2 + vertex[1]**2)
+            max_distance = max(max_distance, distance)
+    
+    # Add some margin to ensure containment
+    return max_distance * 1.1
+
+def initialize_symmetric_arrangement():
+    """Initialize with a symmetric configuration that is likely to be valid"""
+    # Start with a known valid symmetric arrangement
+    inner_hex_data = np.array([
+        [0, 0, 0],             # center
+        [2, 0, 0],             # right
+        [-2, 0, 0],            # left
+        [0, 2, 0],             # top
+        [0, -2, 0],            # bottom
+        [1, 1, 0],             # top-right
+        [-1, -1, 0],           # bottom-left
+        [-1, 1, 0],            # top-left
+        [1, -1, 0],            # bottom-right
+        [2, 2, 0],             # far top-right
+        [-2, -2, 0],           # far bottom-left
+        [2, -2, 0],            # bottom-right
+    ])
+    
+    return inner_hex_data
+
+def mutate_individual(individual, mutation_rate=0.1, max_mutation=0.5):
+    """Mutate individual by changing positions and angles"""
+    mutated = individual.copy()
+    
+    for i in range(len(mutated)):
+        if np.random.rand() < mutation_rate:
+            # Mutate position
+            mutated[i][0] += np.random.normal(0, max_mutation)
+            mutated[i][1] += np.random.normal(0, max_mutation)
+        if np.random.rand() < mutation_rate:
+            # Mutate angle
+            mutated[i][2] += np.random.normal(0, 30)  # degrees
+            # Normalize angle to [0, 360)
+            mutated[i][2] = mutated[i][2] % 360
+    
+    return mutated
+
+def crossover(parent1, parent2):
+    """Perform uniform crossover between two parents"""
+    child = parent1.copy()
+    for i in range(len(parent1)):
+        if np.random.rand() < 0.5:
+            child[i] = parent2[i].copy()
+    return child
+
+def evaluate_fitness(individual, outer_hex_side_length):
+    """Evaluate fitness of individual arrangement"""
+    # Validate the arrangement
+    if not validate_hexagon_arrangement(individual, outer_hex_side_length):
+        return -1e10  # Invalid arrangement gets very low fitness
+    
+    # Return 1/outer_hex_side_length as fitness
+    return calculate_objective(individual, outer_hex_side_length)
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Start with symmetric arrangement
+    inner_hex_data = initialize_symmetric_arrangement()
+    
+    # Initial estimate for outer hexagon size
+    outer_hex_side_length = calculate_outer_hex_side_length_from_inner(inner_hex_data)
+    
+    # Apply refinement to get closer to optimal
+    for _ in range(50):  # Local optimization
+        # Adjust positions and angles to improve fit
+        for i in range(len(inner_hex_data)):
+            # Try small adjustments
+            orig_pos = inner_hex_data[i][:2].copy()
+            orig_angle = inner_hex_data[i][2]
+            
+            # Try to move hexagon slightly without breaking constraints
+            best_fitness = evaluate_fitness(inner_hex_data, outer_hex_side_length)
+            best_pos = orig_pos.copy()
+            best_angle = orig_angle
+            
+            # Test small movements
+            for dx in [-0.1, -0.05, 0, 0.05, 0.1]:
+                for dy in [-0.1, -0.05, 0, 0.05, 0.1]:
+                    for dangle in [-10, -5, 0, 5, 10]:
+                        test_data = inner_hex_data.copy()
+                        test_data[i][0] = orig_pos[0] + dx
+                        test_data[i][1] = orig_pos[1] + dy
+                        test_data[i][2] = (orig_angle + dangle) % 360
+                        
+                        fitness = evaluate_fitness(test_data, outer_hex_side_length)
+                        if fitness > best_fitness:
+                            best_fitness = fitness
+                            best_pos = [test_data[i][0], test_data[i][1]]
+                            best_angle = test_data[i][2]
+                            
+            # Update to best found
+            inner_hex_data[i][0] = best_pos[0]
+            inner_hex_data[i][1] = best_pos[1]
+            inner_hex_data[i][2] = best_angle
+            
+        # Recalculate outer size after adjustment
+        outer_hex_side_length = calculate_outer_hex_side_length_from_inner(inner_hex_data)
+        
+        # If we're getting better, continue
+        # Otherwise, we've likely reached local optimum
+    
+    # Final validation
+    if not validate_hexagon_arrangement(inner_hex_data, outer_hex_side_length):
+        # Reinitialize if needed
+        inner_hex_data = initialize_symmetric_arrangement()
+        outer_hex_side_length = calculate_outer_hex_side_length_from_inner(inner_hex_data)
+        
+    # Ensure outer_hex_side_length is reasonable
+    outer_hex_side_length = max(2.0, outer_hex_side_length)
+    
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

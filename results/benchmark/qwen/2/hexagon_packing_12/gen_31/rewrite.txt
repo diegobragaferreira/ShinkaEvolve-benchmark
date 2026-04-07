@@ -1,0 +1,288 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from numba import jit, prange
+import time
+
+@jit(nopython=True)
+def generate_hexagon_vertices(x, y, side_length, angle_degrees):
+    """Generate vertices of a regular hexagon given center, side length, and rotation."""
+    angle_rad = np.radians(angle_degrees)
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vertices[i, 0] = x + side_length * np.cos(theta)
+        vertices[i, 1] = y + side_length * np.sin(theta)
+    return vertices
+
+@jit(nopython=True)
+def create_hexagon_polygon(x, y, side_length, angle_degrees):
+    """Create a hexagon polygon from center, side length, and rotation."""
+    vertices = generate_hexagon_vertices(x, y, side_length, angle_degrees)
+    return vertices
+
+@jit(nopython=True)
+def point_in_hexagon(px, py, hx, hy, side_length, angle_degrees):
+    """Check if a point is inside a hexagon using ray casting."""
+    vertices = generate_hexagon_vertices(hx, hy, side_length, angle_degrees)
+    
+    # Check if point is inside hexagon using winding number algorithm
+    crossings = 0
+    for i in range(6):
+        j = (i + 1) % 6
+        xi, yi = vertices[i]
+        xj, yj = vertices[j]
+        
+        # Ray casting check
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            crossings += 1
+    
+    return crossings % 2 == 1
+
+@jit(nopython=True)
+def distance_point_to_line(px, py, x1, y1, x2, y2):
+    """Calculate the distance from a point to a line segment."""
+    # Vector from (x1, y1) to (x2, y2)
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    # Length squared of the line segment
+    length_squared = dx*dx + dy*dy
+    
+    # Handle degenerate case
+    if length_squared == 0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+    
+    # Project point onto line segment
+    t = ((px - x1) * dx + (py - y1) * dy) / length_squared
+    
+    # Clamp t to [0, 1] to stay on the segment
+    t = max(0, min(1, t))
+    
+    # Calculate closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    
+    # Return distance
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@jit(nopython=True)
+def hexagon_distance(h1x, h1y, h1_side, h1_angle, h2x, h2y, h2_side, h2_angle):
+    """Compute minimum distance between two hexagons."""
+    v1 = generate_hexagon_vertices(h1x, h1y, h1_side, h1_angle)
+    v2 = generate_hexagon_vertices(h2x, h2y, h2_side, h2_angle)
+    
+    min_dist = np.inf
+    for i in range(6):
+        for j in range(6):
+            dist = distance_point_to_line(v1[i, 0], v1[i, 1], v2[j, 0], v2[j, 1], 
+                                        v2[(j+1)%6, 0], v2[(j+1)%6, 1])
+            min_dist = min(min_dist, dist)
+            
+    return min_dist
+
+def check_containment(hex_centers, hex_angles, side_lengths, outer_radius):
+    """Check if all inner hexagons are contained in the outer hexagon."""
+    # For a unit hexagon, the distance from center to corner is 1
+    # For an outer hexagon of radius R, corners are at distance R from center
+    # So we just check if the distance from center to corner of each inner hexagon <= R
+    
+    # Generate outer hexagon vertices (centered at 0,0)
+    outer_vertices = generate_hexagon_vertices(0, 0, outer_radius, 0)
+    
+    # Check if each inner hexagon's vertices are inside the outer hexagon
+    total_check = 0
+    for i in range(len(hex_centers)):
+        center_x, center_y = hex_centers[i]
+        angle = hex_angles[i]
+        
+        # Get all vertices of this inner hexagon
+        inner_vertices = generate_hexagon_vertices(center_x, center_y, side_lengths[i], angle)
+        
+        # Check each vertex against outer hexagon
+        for j in range(6):
+            px, py = inner_vertices[j]
+            # Simplified check: if distance from origin > outer_radius, it's out
+            if np.sqrt(px*px + py*py) > outer_radius:
+                return False
+            # More precise: check if point is inside polygon defined by outer hexagon
+            # For efficiency, do approximation check first
+            total_check += 1
+    
+    # More accurate containment check using shapely
+    try:
+        outer_poly = Polygon(outer_vertices)
+        for i in range(len(hex_centers)):
+            center_x, center_y = hex_centers[i]
+            angle = hex_angles[i]
+            inner_vertices = generate_hexagon_vertices(center_x, center_y, side_lengths[i], angle)
+            inner_poly = Polygon(inner_vertices)
+            if not outer_poly.contains(inner_poly):
+                return False
+        return True
+    except:
+        # Fallback to distance-based check if shapely fails
+        for i in range(len(hex_centers)):
+            center_x, center_y = hex_centers[i]
+            # Distance from center of inner hex to center of outer hex
+            d_center = np.sqrt(center_x*center_x + center_y*center_y)
+            # Maximum distance from outer hex center to any point in inner hex is:
+            # distance to center + distance from center to corner of inner hex = d_center + 1
+            if d_center + 1 > outer_radius:
+                return False
+        return True
+
+def check_overlap(hex_centers, hex_angles, side_lengths):
+    """Check if any pair of hexagons overlap."""
+    for i in range(len(hex_centers)):
+        for j in range(i+1, len(hex_centers)):
+            # Compute distance between centers
+            cx1, cy1 = hex_centers[i]
+            cx2, cy2 = hex_centers[j]
+            
+            # Minimum distance for non-overlapping hexagons is 2 (since they're unit)
+            # So if distance between centers is less than 2, they probably overlap
+            distance = np.sqrt((cx2 - cx1)**2 + (cy2 - cy1)**2)
+            
+            # If distance is too small, they definitely overlap
+            if distance < 2:
+                return True
+            
+            # For more precise check, compute exact minimum distance
+            min_dist = hexagon_distance(cx1, cy1, side_lengths[i], hex_angles[i],
+                                       cx2, cy2, side_lengths[j], hex_angles[j])
+            if min_dist < 0:
+                return True
+    
+    return False
+
+def penalty_function(params, inner_hex_count=12):
+    """Calculate penalty based on constraint violations."""
+    # Extract parameters
+    # First 12 params: [x1, y1, angle1, x2, y2, angle2, ...]
+    # Last param: outer_radius
+    outer_radius = params[-1]
+    
+    # Parse positions and angles
+    positions = []
+    angles = []
+    for i in range(inner_hex_count):
+        pos_idx = 3*i
+        positions.append((params[pos_idx], params[pos_idx+1]))
+        angles.append(params[pos_idx+2])
+    
+    side_length = 1.0  # Unit hexagons
+    
+    # Check for overlap
+    overlap_penalty = 0.0
+    if check_overlap(positions, angles, [side_length]*inner_hex_count):
+        overlap_penalty = 1e10  # Heavy penalty for overlap
+        
+    # Check containment
+    containment_penalty = 0.0
+    if not check_containment(positions, angles, [side_length]*inner_hex_count, outer_radius):
+        containment_penalty = 1e10  # Heavy penalty for containment violation
+    
+    # Objective: minimize 1/outer_radius = -outer_radius (since we want to maximize 1/outer_radius)
+    # Return negative of the objective plus penalties
+    return -outer_radius + overlap_penalty + containment_penalty
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    inner_hex_count = 12
+    side_length = 1.0
+    
+    # Start with a symmetric configuration
+    # Place hexagons in rings around center
+    initial_positions = []
+    # Center hexagon
+    initial_positions.append([0.0, 0.0, 0.0])
+    
+    # First ring of 6 hexagons
+    for i in range(6):
+        angle = i * 60
+        radius = 2.0
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        initial_positions.append([x, y, 0.0])
+    
+    # Second ring of 5 hexagons (excluding one position to maintain symmetry)
+    for i in range(5):
+        angle = i * 72
+        radius = 3.5
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        initial_positions.append([x, y, 0.0])
+    
+    # Add center hexagon again
+    initial_positions.append([0.0, 0.0, 0.0])
+    
+    # Flatten initial positions into parameters array
+    initial_params = []
+    for pos in initial_positions:
+        initial_params.extend(pos)
+    
+    # Add outer radius estimate
+    initial_params.append(8.0)  # Start with generous size
+    
+    # Set bounds for optimization
+    bounds = []
+    # Positions: x, y for each of 12 hexagons (-10, 10)
+    for _ in range(24):  # 12 hexagons * 2 (x,y)
+        bounds.extend([(-10, 10)])
+    
+    # Rotations: angle for each of 12 hexagons (0, 360)
+    for _ in range(12):
+        bounds.extend([(0, 360)])
+    
+    # Outer radius: (1, 10)
+    bounds.append((1, 10))
+    
+    # Run optimization to find the optimal configuration
+    result = differential_evolution(penalty_function, bounds, maxiter=100, popsize=15,
+                                   seed=42, disp=False, tol=1e-6)
+    
+    # Extract the result
+    optimal_params = result.x
+    
+    # Parse the parameters back into positions and angles
+    inner_hex_data = []
+    for i in range(inner_hex_count):
+        pos_idx = 3*i
+        inner_hex_data.append([
+            optimal_params[pos_idx],
+            optimal_params[pos_idx+1],
+            optimal_params[pos_idx+2]
+        ])
+    
+    inner_hex_data = np.array(inner_hex_data)
+    
+    # Outer hexagon parameters
+    outer_hex_side_length = optimal_params[-1]  # Last parameter
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    
+    # Validate final solution
+    positions = [(row[0], row[1]) for row in inner_hex_data]
+    angles = [row[2] for row in inner_hex_data]
+    
+    # Final check
+    if check_overlap(positions, angles, [1.0]*12):
+        print("Warning: Overlap detected despite optimization!")
+    if not check_containment(positions, angles, [1.0]*12, outer_hex_side_length):
+        print("Warning: Containment violated despite optimization!")
+    
+    end_time = time.time()
+    print(f"Optimization completed in {end_time - start_time:.4f} seconds")
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

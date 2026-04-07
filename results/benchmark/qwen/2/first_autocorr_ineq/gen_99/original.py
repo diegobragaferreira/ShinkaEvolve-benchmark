@@ -1,0 +1,134 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.signal import fftconvolve
+import time
+
+def compute_c1(sequence):
+    """
+    Compute C1 for a given sequence.
+    C1 = 2*n*max(convolution) / (sum(sequence))^2
+    We want to maximize 1/C1, which means minimizing C1.
+    """
+    if len(sequence) == 0 or abs(sum(sequence)) < 1e-10:
+        return float('inf')
+
+    # Use FFT-based convolution for efficiency
+    convolved = fftconvolve(sequence, sequence, mode='full')
+    max_conv = np.max(convolved)
+    sum_seq = sum(sequence)
+
+    # Return C1 value
+    return (2 * len(sequence) * max_conv) / (sum_seq * sum_seq)
+
+def evaluate_sequence(sequence):
+    """
+    Evaluate a sequence by computing 1/C1.
+    Returns negative because differential_evolution minimizes.
+    """
+    c1 = compute_c1(sequence)
+    if c1 == float('inf'):
+        return float('inf')
+    return -1.0 / c1  # We want to maximize 1/C1, so minimize -1/C1
+
+def create_initial_sequences(n_samples=10):
+    """
+    Create diverse initial sequences for optimization.
+    """
+    sequences = []
+    # Random sequences with different configurations
+    for _ in range(n_samples):
+        n = np.random.randint(50, 500)
+        seq = np.random.uniform(0, 100, n)
+        # Add some structure
+        if np.random.random() < 0.3:
+            # Add a few large values
+            idxs = np.random.choice(n, size=min(5, n//2), replace=False)
+            seq[idxs] *= np.random.uniform(5, 20)
+        sequences.append(seq)
+
+    # Include some known good structures
+    sequences.append(np.array([1.0] * 100))  # Uniform
+    sequences.append(np.array([1.0] * 50 + [0.0] * 50))  # Step function
+
+    return sequences
+
+def optimize_sequence():
+    """
+    Optimize a sequence using differential evolution.
+    """
+    # Define bounds (heights between 0 and 1000)
+    bounds = [(0.0, 1000.0)] * 200  # Limit to reasonable size
+
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        evaluate_sequence,
+        bounds,
+        maxiter=100,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        polish=True
+    )
+
+    return result.x
+
+def search_for_best_sequence():
+    """
+    Function to search for the best coefficient sequence.
+    Uses multiple starting points to avoid local minima.
+    """
+    best_score = float('-inf')
+    best_sequence = None
+
+    # Try several random start points
+    start_time = time.time()
+
+    for attempt in range(5):
+        if time.time() - start_time > 170:  # Leave 10 seconds for final processing
+            break
+
+        try:
+            # Create a random initial sequence
+            n = np.random.randint(100, 300)
+            initial_seq = np.random.uniform(0, 100, n)
+            # Some structured sequences
+            if np.random.random() < 0.5:
+                initial_seq[:n//4] = np.random.uniform(100, 1000, n//4)
+
+            # Optimize from this point
+            bounds = [(0.0, 1000.0)] * len(initial_seq)
+            result = differential_evolution(
+                evaluate_sequence,
+                bounds,
+                maxiter=50,
+                popsize=10,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42+attempt,
+                polish=True
+            )
+
+            if result.success:
+                score = evaluate_sequence(result.x)
+                if score > best_score:
+                    best_score = score
+                    best_sequence = result.x
+
+        except Exception as e:
+            print(f"Attempt {attempt} failed: {e}")
+            continue
+
+    if best_sequence is None:
+        # Fallback to simple uniform sequence
+        best_sequence = np.array([1.0] * 100)
+
+    return best_sequence.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

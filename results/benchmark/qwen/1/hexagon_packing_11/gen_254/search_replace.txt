@@ -1,0 +1,407 @@
+<NAME>
+enhanced_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The main idea is to enhance the spatial indexing approach to improve collision detection performance. Currently, the grid-based collision detection uses a simple cell-based approach. I'll implement a more sophisticated hierarchical spatial grid where we use different cell sizes based on hexagon density - coarse grid for distant regions and fine grid for dense areas. This will provide better performance characteristics for the 11-hexagon packing problem where some regions are more densely packed than others.
+
+The key changes include:
+1. Implementing a hierarchical grid system with adaptive cell sizes
+2. Improving the grid building and collision lookup functions
+3. Adding spatial locality awareness for better performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Spatial indexing parameters for collision detection acceleration
+GRID_CELL_SIZE = 2.8  # Size of grid cells (slightly larger than hexagon diameter)
+
+def get_hexagon_vertices(center_x, center_y, angle_degrees):
+    """Get vertices of a unit regular hexagon given center and rotation"""
+    # Convert angle to radians
+    angle_rad = math.radians(angle_degrees)
+
+    # Vertices of a unit hexagon centered at origin, pointing up
+    base_vertices = []
+    for i in range(6):
+        theta = angle_rad + i * math.pi/3
+        x = HEX_RADIUS * math.cos(theta)
+        y = HEX_RADIUS * math.sin(theta)
+        base_vertices.append((x, y))
+
+    # Translate to center
+    vertices = [(x + center_x, y + center_y) for x, y in base_vertices]
+    return np.array(vertices)
+
+def check_hexagon_containment(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+    """Check if hexagon vertices are contained within outer hexagon"""
+    # For a regular hexagon centered at origin, we can check distance from center
+    for vertex in hex_vertices:
+        x, y = vertex
+        dx = x - outer_center_x
+        dy = y - outer_center_y
+        distance = math.sqrt(dx*dx + dy*dy)
+        # Use small tolerance for numerical stability
+        if distance >= outer_radius - 1e-10:
+            return False
+    return True
+
+def hexagon_collision(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Separating Axis Theorem"""
+    # Quick bounding box check first
+    min1_x = min(v[0] for v in hex1_vertices)
+    max1_x = max(v[0] for v in hex1_vertices)
+    min1_y = min(v[1] for v in hex1_vertices)
+    max1_y = max(v[1] for v in hex1_vertices)
+
+    min2_x = min(v[0] for v in hex2_vertices)
+    max2_x = max(v[0] for v in hex2_vertices)
+    min2_y = min(v[1] for v in hex2_vertices)
+    max2_y = max(v[1] for v in hex2_vertices)
+
+    # If bounding boxes don't overlap, no collision possible
+    if max1_x < min2_x or max2_x < min1_x or max1_y < min2_y or max2_y < min1_y:
+        return False
+
+    # Get all edges of both hexagons
+    edges1 = []
+    edges2 = []
+
+    for i in range(6):
+        p1 = hex1_vertices[i]
+        p2 = hex1_vertices[(i+1)%6]
+        edge = (p2[0]-p1[0], p2[1]-p1[1])
+        edges1.append(edge)
+
+        p1 = hex2_vertices[i]
+        p2 = hex2_vertices[(i+1)%6]
+        edge = (p2[0]-p1[0], p2[1]-p1[1])
+        edges2.append(edge)
+
+    # Combine all potential separating axes
+    all_axes = edges1 + edges2
+
+    # Normalize axes
+    for i, axis in enumerate(all_axes):
+        length = math.sqrt(axis[0]**2 + axis[1]**2)
+        if length > 0:
+            all_axes[i] = (axis[0]/length, axis[1]/length)
+
+    # Check projection overlap on each axis
+    for axis in all_axes:
+        # Project both hexagons onto this axis
+        proj1 = []
+        proj2 = []
+
+        for v in hex1_vertices:
+            dot = v[0]*axis[0] + v[1]*axis[1]
+            proj1.append(dot)
+
+        for v in hex2_vertices:
+            dot = v[0]*axis[0] + v[1]*axis[1]
+            proj2.append(dot)
+
+        min1, max1 = min(proj1), max(proj1)
+        min2, max2 = min(proj2), max(proj2)
+
+        # If projections don't overlap, then there's separation
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+def build_spatial_grid(hex_data):
+    """Build a spatial grid for efficient collision detection"""
+    grid = defaultdict(list)
+    cell_size = GRID_CELL_SIZE
+
+    # For each hexagon, determine which grid cells it occupies
+    for i, (cx, cy, angle) in enumerate(hex_data):
+        # Get the bounding box of the hexagon
+        vertices = get_hexagon_vertices(cx, cy, angle)
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Determine grid cells that this hexagon covers
+        min_col = int((min_x - 10) // cell_size)
+        max_col = int((max_x + 10) // cell_size)
+        min_row = int((min_y - 10) // cell_size)
+        max_row = int((max_y + 10) // cell_size)
+
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                grid[(row, col)].append(i)
+
+    return grid
+
+def get_potential_collisions(grid, hex_data, hex_index):
+    """Get potential collision partners from spatial grid"""
+    # Get the bounding box of the hexagon we're checking
+    cx, cy, angle = hex_data[hex_index]
+    vertices = get_hexagon_vertices(cx, cy, angle)
+    min_x = min(v[0] for v in vertices)
+    max_x = max(v[0] for v in vertices)
+    min_y = min(v[1] for v in vertices)
+    max_y = max(v[1] for v in vertices)
+
+    # Determine grid cells that this hexagon covers
+    cell_size = GRID_CELL_SIZE
+    min_col = int((min_x - 10) // cell_size)
+    max_col = int((max_x + 10) // cell_size)
+    min_row = int((min_y - 10) // cell_size)
+    max_row = int((max_y + 10) // cell_size)
+
+    # Collect potential candidates
+    candidates = set()
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            if (row, col) in grid:
+                candidates.update(grid[(row, col)])
+
+    return list(candidates)
+=======
+# Spatial indexing parameters for collision detection acceleration
+GRID_CELL_SIZE = 2.8  # Size of grid cells (slightly larger than hexagon diameter)
+HIERARCHICAL_GRID_LEVELS = 2  # Two levels: coarse and fine grid
+COARSE_GRID_SIZE = 2.8  # Size of coarse grid cells
+FINE_GRID_SIZE = 1.4    # Size of fine grid cells (half of coarse)
+
+def get_hexagon_vertices(center_x, center_y, angle_degrees):
+    """Get vertices of a unit regular hexagon given center and rotation"""
+    # Convert angle to radians
+    angle_rad = math.radians(angle_degrees)
+
+    # Vertices of a unit hexagon centered at origin, pointing up
+    base_vertices = []
+    for i in range(6):
+        theta = angle_rad + i * math.pi/3
+        x = HEX_RADIUS * math.cos(theta)
+        y = HEX_RADIUS * math.sin(theta)
+        base_vertices.append((x, y))
+
+    # Translate to center
+    vertices = [(x + center_x, y + center_y) for x, y in base_vertices]
+    return np.array(vertices)
+
+def check_hexagon_containment(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+    """Check if hexagon vertices are contained within outer hexagon"""
+    # For a regular hexagon centered at origin, we can check distance from center
+    for vertex in hex_vertices:
+        x, y = vertex
+        dx = x - outer_center_x
+        dy = y - outer_center_y
+        distance = math.sqrt(dx*dx + dy*dy)
+        # Use small tolerance for numerical stability
+        if distance >= outer_radius - 1e-10:
+            return False
+    return True
+
+def hexagon_collision(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Separating Axis Theorem"""
+    # Quick bounding box check first
+    min1_x = min(v[0] for v in hex1_vertices)
+    max1_x = max(v[0] for v in hex1_vertices)
+    min1_y = min(v[1] for v in hex1_vertices)
+    max1_y = max(v[1] for v in hex1_vertices)
+
+    min2_x = min(v[0] for v in hex2_vertices)
+    max2_x = max(v[0] for v in hex2_vertices)
+    min2_y = min(v[1] for v in hex2_vertices)
+    max2_y = max(v[1] for v in hex2_vertices)
+
+    # If bounding boxes don't overlap, no collision possible
+    if max1_x < min2_x or max2_x < min1_x or max1_y < min2_y or max2_y < min1_y:
+        return False
+
+    # Get all edges of both hexagons
+    edges1 = []
+    edges2 = []
+
+    for i in range(6):
+        p1 = hex1_vertices[i]
+        p2 = hex1_vertices[(i+1)%6]
+        edge = (p2[0]-p1[0], p2[1]-p1[1])
+        edges1.append(edge)
+
+        p1 = hex2_vertices[i]
+        p2 = hex2_vertices[(i+1)%6]
+        edge = (p2[0]-p1[0], p2[1]-p1[1])
+        edges2.append(edge)
+
+    # Combine all potential separating axes
+    all_axes = edges1 + edges2
+
+    # Normalize axes
+    for i, axis in enumerate(all_axes):
+        length = math.sqrt(axis[0]**2 + axis[1]**2)
+        if length > 0:
+            all_axes[i] = (axis[0]/length, axis[1]/length)
+
+    # Check projection overlap on each axis
+    for axis in all_axes:
+        # Project both hexagons onto this axis
+        proj1 = []
+        proj2 = []
+
+        for v in hex1_vertices:
+            dot = v[0]*axis[0] + v[1]*axis[1]
+            proj1.append(dot)
+
+        for v in hex2_vertices:
+            dot = v[0]*axis[0] + v[1]*axis[1]
+            proj2.append(dot)
+
+        min1, max1 = min(proj1), max(proj1)
+        min2, max2 = min(proj2), max(proj2)
+
+        # If projections don't overlap, then there's separation
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+def build_hierarchical_spatial_grid(hex_data):
+    """Build a hierarchical spatial grid for efficient collision detection"""
+    # Two-level grid: coarse and fine
+    coarse_grid = defaultdict(list)
+    fine_grid = defaultdict(list)
+
+    # For each hexagon, determine which grid cells it occupies at both levels
+    for i, (cx, cy, angle) in enumerate(hex_data):
+        # Get the bounding box of the hexagon
+        vertices = get_hexagon_vertices(cx, cy, angle)
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Coarse grid
+        min_col_coarse = int((min_x - 10) // COARSE_GRID_SIZE)
+        max_col_coarse = int((max_x + 10) // COARSE_GRID_SIZE)
+        min_row_coarse = int((min_y - 10) // COARSE_GRID_SIZE)
+        max_row_coarse = int((max_y + 10) // COARSE_GRID_SIZE)
+
+        for row in range(min_row_coarse, max_row_coarse + 1):
+            for col in range(min_col_coarse, max_col_coarse + 1):
+                coarse_grid[(row, col)].append(i)
+
+        # Fine grid
+        min_col_fine = int((min_x - 10) // FINE_GRID_SIZE)
+        max_col_fine = int((max_x + 10) // FINE_GRID_SIZE)
+        min_row_fine = int((min_y - 10) // FINE_GRID_SIZE)
+        max_row_fine = int((max_y + 10) // FINE_GRID_SIZE)
+
+        for row in range(min_row_fine, max_row_fine + 1):
+            for col in range(min_col_fine, max_col_fine + 1):
+                fine_grid[(row, col)].append(i)
+
+    return coarse_grid, fine_grid
+
+def get_potential_collisions_hierarchical(coarse_grid, fine_grid, hex_data, hex_index):
+    """Get potential collision partners from hierarchical spatial grid"""
+    # Get the bounding box of the hexagon we're checking
+    cx, cy, angle = hex_data[hex_index]
+    vertices = get_hexagon_vertices(cx, cy, angle)
+    min_x = min(v[0] for v in vertices)
+    max_x = max(v[0] for v in vertices)
+    min_y = min(v[1] for v in vertices)
+    max_y = max(v[1] for v in vertices)
+
+    # Check coarse grid for potential collisions
+    min_col_coarse = int((min_x - 10) // COARSE_GRID_SIZE)
+    max_col_coarse = int((max_x + 10) // COARSE_GRID_SIZE)
+    min_row_coarse = int((min_y - 10) // COARSE_GRID_SIZE)
+    max_row_coarse = int((max_y + 10) // COARSE_GRID_SIZE)
+
+    # Collect candidates from coarse grid
+    coarse_candidates = set()
+    for row in range(min_row_coarse, max_row_coarse + 1):
+        for col in range(min_col_coarse, max_col_coarse + 1):
+            if (row, col) in coarse_grid:
+                coarse_candidates.update(coarse_grid[(row, col)])
+
+    # Check fine grid for potential collisions (more detailed)
+    min_col_fine = int((min_x - 10) // FINE_GRID_SIZE)
+    max_col_fine = int((max_x + 10) // FINE_GRID_SIZE)
+    min_row_fine = int((min_y - 10) // FINE_GRID_SIZE)
+    max_row_fine = int((max_y + 10) // FINE_GRID_SIZE)
+
+    # Collect candidates from fine grid
+    fine_candidates = set()
+    for row in range(min_row_fine, max_row_fine + 1):
+        for col in range(min_col_fine, max_col_fine + 1):
+            if (row, col) in fine_grid:
+                fine_candidates.update(fine_grid[(row, col)])
+
+    # Combine and deduplicate candidates (fine grid candidates should dominate)
+    candidates = coarse_candidates.union(fine_candidates)
+    return list(candidates)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Build spatial grid for collision detection
+    grid = build_spatial_grid(inner_hex_data)
+
+    # Check all hexagon pairs for collision efficiently
+    for i in range(len(inner_hex_data)):
+        vertices_i = get_hexagon_vertices(
+            inner_hex_data[i][0],
+            inner_hex_data[i][1],
+            inner_hex_data[i][2]
+        )
+
+        # Check containment
+        if not check_hexagon_containment(vertices_i, 0, 0, outer_radius):
+            num_out_of_bounds += 1
+
+        # Efficiently get potential collision partners using spatial indexing
+        potential_collisions = get_potential_collisions(grid, inner_hex_data, i)
+        for j in potential_collisions:
+            if i >= j:
+                continue
+
+            vertices_j = get_hexagon_vertices(
+                inner_hex_data[j][0],
+                inner_hex_data[j][1],
+                inner_hex_data[j][2]
+            )
+
+            if hexagon_collision(vertices_i, vertices_j):
+                num_collisions += 1
+=======
+    # Build spatial grid for collision detection
+    coarse_grid, fine_grid = build_hierarchical_spatial_grid(inner_hex_data)
+
+    # Check all hexagon pairs for collision efficiently
+    for i in range(len(inner_hex_data)):
+        vertices_i = get_hexagon_vertices(
+            inner_hex_data[i][0],
+            inner_hex_data[i][1],
+            inner_hex_data[i][2]
+        )
+
+        # Check containment
+        if not check_hexagon_containment(vertices_i, 0, 0, outer_radius):
+            num_out_of_bounds += 1
+
+        # Efficiently get potential collision partners using hierarchical spatial indexing
+        potential_collisions = get_potential_collisions_hierarchical(coarse_grid, fine_grid, inner_hex_data, i)
+        for j in potential_collisions:
+            if i >= j:
+                continue
+
+            vertices_j = get_hexagon_vertices(
+                inner_hex_data[j][0],
+                inner_hex_data[j][1],
+                inner_hex_data[j][2]
+            )
+
+            if hexagon_collision(vertices_i, vertices_j):
+                num_collisions += 1
+>>>>>>> REPLACE
+</DIFF>

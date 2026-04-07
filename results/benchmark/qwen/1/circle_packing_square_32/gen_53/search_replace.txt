@@ -1,0 +1,159 @@
+<NAME>
+enhanced_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current initialization uses a simple greedy approach with predefined corner and edge placements. This enhancement replaces it with a Voronoi-based initialization that creates a more systematic and efficient starting configuration. The Voronoi diagram naturally distributes points to avoid clustering and provides better coverage of the space, which should lead to improved convergence and higher sum of radii.
+
+The key changes:
+1. Replace the simple greedy initialization with Voronoi-based point generation
+2. Use scipy's Voronoi to create well-distributed initial points
+3. Apply a refinement step to ensure proper circle placement
+4. Maintain the existing evolutionary framework for optimization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from deap import base, creator, tools, algorithms
+import time
+=======
+import numpy as np
+from scipy.spatial import cKDTree, Voronoi
+import random
+from deap import base, creator, tools, algorithms
+import time
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def create_initial_placement(n):
+    """Create initial placement using a greedy approach"""
+    circles = []
+
+    # Start with a few large circles in corners and edges
+    # Corner positions
+    corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+    edge_centers = [(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)]
+
+    # Place some initial circles
+    initial_positions = corners + edge_centers
+    initial_radii = [0.08, 0.08, 0.08, 0.08, 0.06, 0.06, 0.06, 0.06]
+
+    for pos, r in zip(initial_positions[:min(len(initial_positions), n)], initial_radii[:min(len(initial_radii), n)]):
+        circles.append([pos[0], pos[1], r])
+
+    # Fill remaining spots with small circles
+    while len(circles) < n:
+        best_radius = 0
+        best_pos = None
+
+        # Try to place a circle in a random location
+        for _ in range(100):  # Try 100 times for each new circle
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            max_radius = min(x, 1-x, y, 1-y)
+
+            if max_radius <= 0:
+                continue
+
+            # Check if we can place a reasonable-sized circle here
+            test_circle = [x, y, max_radius]
+            temp_circles = circles + [test_circle]
+
+            if check_containment(temp_circles) and check_overlap(temp_circles):
+                if max_radius > best_radius:
+                    best_radius = max_radius
+                    best_pos = (x, y)
+
+        if best_pos is not None:
+            circles.append([best_pos[0], best_pos[1], min(best_radius, 0.1)])
+        else:
+            # If we can't find a good spot, try with smaller radius
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            r = min(0.02, 0.1)
+            circles.append([x, y, r])
+
+    return circles[:n]
+=======
+def create_initial_placement(n):
+    """Create initial placement using a Voronoi-based approach"""
+    # Generate initial points using a structured grid approach
+    # Create a grid of points to sample from
+    grid_size = int(np.ceil(np.sqrt(n)))
+    grid_points = []
+
+    # Generate points in a structured grid pattern
+    for i in range(grid_size):
+        for j in range(grid_size):
+            x = 0.1 + 0.8 * i / (grid_size - 1) if grid_size > 1 else 0.5
+            y = 0.1 + 0.8 * j / (grid_size - 1) if grid_size > 1 else 0.5
+            grid_points.append([x, y])
+
+    # Add some random points to ensure good spread
+    for _ in range(n // 2):
+        grid_points.append([random.uniform(0.1, 0.9), random.uniform(0.1, 0.9)])
+
+    # Use Voronoi to get well-distributed points
+    if len(grid_points) >= 3:
+        try:
+            vor = Voronoi(np.array(grid_points))
+            # Use Voronoi vertices as initial positions
+            initial_positions = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    initial_positions.append((vertex[0], vertex[1]))
+
+            # If we don't get enough vertices, use the original grid points
+            if len(initial_positions) < n:
+                initial_positions = grid_points[:n]
+        except:
+            # Fallback to grid points if Voronoi fails
+            initial_positions = grid_points[:n]
+    else:
+        initial_positions = grid_points[:n]
+
+    # Create circles with initial positions and radii
+    circles = []
+
+    # Start with some large circles in strategic positions
+    # Use positions that are likely to support large circles
+    strategic_positions = []
+
+    # Corners and center
+    strategic_positions.extend([(0.2, 0.2), (0.8, 0.2), (0.2, 0.8), (0.8, 0.8), (0.5, 0.5)])
+
+    # Add some edge centers
+    strategic_positions.extend([(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)])
+
+    # Fill with strategic positions first
+    for i, pos in enumerate(strategic_positions[:min(len(strategic_positions), n)]):
+        # Initial radius based on distance to boundaries
+        r = min(pos[0], 1-pos[0], pos[1], 1-pos[1]) * 0.3
+        r = max(0.02, min(r, 0.15))  # Clamp to reasonable values
+        circles.append([pos[0], pos[1], r])
+
+    # Fill remaining spots with remaining positions
+    remaining_indices = [i for i in range(len(initial_positions)) if i >= len(strategic_positions)]
+    for i in range(len(circles), n):
+        if i < len(initial_positions):
+            pos = initial_positions[i]
+            # Compute maximum possible radius at this position
+            r = min(pos[0], 1-pos[0], pos[1], 1-pos[1]) * 0.3
+            r = max(0.01, min(r, 0.1))  # Clamp to reasonable values
+            circles.append([pos[0], pos[1], r])
+        else:
+            # Fallback to random positions
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            r = random.uniform(0.01, 0.08)
+            circles.append([x, y, r])
+
+    return circles[:n]
+>>>>>>> REPLACE
+</DIFF>

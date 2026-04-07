@@ -1,0 +1,344 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial import cKDTree, Voronoi
+from scipy.spatial.distance import cdist
+import time
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def check_collision(circle1, circle2):
+    """Check if two circles collide"""
+    x1, y1, r1 = circle1
+    x2, y2, r2 = circle2
+    distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+    return distance_squared < (r1 + r2)**2
+
+def is_valid_position(circle, circles):
+    """Check if a circle position is valid (within bounds and no collisions)"""
+    x, y, r = circle
+
+    # Check boundary constraints
+    if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+        return False
+
+    # Check collision with existing circles
+    for existing_circle in circles:
+        if check_collision(circle, existing_circle):
+            return False
+
+    return True
+
+def compute_max_radius(x, y, circles, tree=None):
+    """Compute the maximum radius for a circle at position (x,y) without overlapping existing circles"""
+    if len(circles) == 0:
+        return min(x, 1-x, y, 1-y)
+    
+    # Use spatial indexing for faster nearest neighbor search
+    if tree is None:
+        points = np.array([[cx, cy] for cx, cy, cr in circles])
+        tree = cKDTree(points)
+    
+    # Find nearest neighbors efficiently
+    distances, indices = tree.query([[x, y]], k=min(10, len(circles)))
+    
+    # Get the minimum distance to any existing circle center
+    min_distance = float('inf')
+    for dist, idx in zip(distances[0], indices[0]):
+        if dist > 0:  # Avoid self-distance
+            min_distance = min(min_distance, dist)
+    
+    # Maximum radius is limited by boundaries and distance to other circles
+    boundary_radius = min(x, 1-x, y, 1-y)
+    collision_radius = min_distance - 1e-8  # Very small epsilon to avoid numerical issues
+    
+    return min(boundary_radius, collision_radius) if collision_radius > 0 else 0
+
+def generate_voronoi_candidates(circles, num_candidates=1000):
+    """Generate candidate positions using Voronoi diagram of existing circles with enhanced boundary weighting"""
+    if len(circles) == 0:
+        # Return random points if no circles exist yet
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+    
+    # Get circle centers
+    points = np.array([[cx, cy] for cx, cy, cr in circles])
+    
+    try:
+        # Compute Voronoi diagram
+        vor = Voronoi(points)
+        
+        candidates = []
+        # Add Voronoi vertices with boundary weighting
+        for vertex in vor.vertices:
+            x, y = vertex
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                # Weight candidates near boundaries higher (they're more promising for large circles)
+                boundary_distance = min(x, 1-x, y, 1-y)
+                # Use more aggressive weighting: exponential decay
+                weight = 1.0 + 5.0 * np.exp(-10.0 * boundary_distance)  # Very strong bias towards boundaries
+                candidates.append((float(x), float(y), weight))
+        
+        # Add some random points around existing circles
+        for i, (cx, cy, cr) in enumerate(circles):
+            for _ in range(5):
+                angle = random.uniform(0, 2*np.pi)
+                distance = random.uniform(0.05, 0.2)
+                x = cx + distance * np.cos(angle)
+                y = cy + distance * np.sin(angle)
+                if 0 <= x <= 1 and 0 <= y <= 1:
+                    # Weight these based on proximity to boundary
+                    boundary_distance = min(x, 1-x, y, 1-y)
+                    weight = 1.0 + 2.0 * np.exp(-5.0 * boundary_distance)  # Moderate weight
+                    candidates.append((float(x), float(y), weight))
+        
+        # Add corner/edge points for better boundary coverage with high weight
+        edge_points = [
+            (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),
+            (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),
+            (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75)
+        ]
+        for x, y in edge_points:
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                boundary_distance = min(x, 1-x, y, 1-y)
+                # Even higher weight for strategic corner/edge positions
+                weight = 2.0 + 10.0 * np.exp(-15.0 * boundary_distance)  # Strongest bias for corners/edges
+                candidates.append((x, y, weight))
+        
+        # If we don't have enough candidates, fill with random ones
+        if len(candidates) < num_candidates:
+            additional = num_candidates - len(candidates)
+            for _ in range(additional):
+                x = random.uniform(0.01, 0.99)
+                y = random.uniform(0.01, 0.99)
+                # Random candidates get low weight
+                candidates.append((x, y, 0.1))
+        
+        # Sort by weight descending and select top candidates
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        selected_candidates = [(x, y) for x, y, w in candidates[:num_candidates]]
+        
+        return selected_candidates
+    
+    except:
+        # Fallback to random sampling if Voronoi fails
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+
+def place_circle_enhanced_voronoi(circles, max_circles):
+    """Place circles using enhanced Voronoi-based approach with better boundary prioritization"""
+    new_circles = circles.copy()
+    placed = 0
+    
+    # Create a more strategic initial placement pattern
+    strategic_positions = [
+        (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),  # corners
+        (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),  # edges
+        (0.5, 0.5),  # center
+        (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75),  # diagonals
+        (0.33, 0.33), (0.33, 0.67), (0.67, 0.33), (0.67, 0.67),  # quarter diagonal
+        (0.15, 0.15), (0.15, 0.85), (0.85, 0.15), (0.85, 0.85),  # inner corners
+    ]
+
+    # Place initial strategic circles
+    for i, (x, y) in enumerate(strategic_positions[:min(16, max_circles)]):
+        if placed >= max_circles:
+            break
+        # Try to place with maximum possible radius
+        max_radius = compute_max_radius(x, y, new_circles[:placed])
+        if max_radius > 0:
+            new_circle = (x, y, max_radius)
+            if is_valid_position(new_circle, new_circles[:placed]):
+                new_circles[placed] = new_circle
+                placed += 1
+
+    # Build spatial tree for efficient neighbor searches
+    if placed > 0:
+        points = np.array([[cx, cy] for cx, cy, cr in new_circles[:placed]])
+        tree = cKDTree(points)
+    else:
+        tree = None
+
+    # Fill remaining spots with enhanced Voronoi-based approach
+    remaining = max_circles - placed
+    attempt_count = 0
+    max_attempts = remaining * 100  # Allow more attempts for better convergence
+    
+    while placed < max_circles and attempt_count < max_attempts:
+        # Generate candidates based on current state
+        if placed < 10:
+            # Early stages: more random exploration
+            candidates = [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(200)]
+        elif placed < 20:
+            # Mid stages: mix of Voronoi and random
+            candidates = generate_voronoi_candidates(new_circles[:placed], 300)
+        else:
+            # Later stages: more focused Voronoi sampling
+            candidates = generate_voronoi_candidates(new_circles[:placed], 500)
+        
+        # Find the best valid circle among candidates
+        best_circle = None
+        best_radius = 0
+        
+        # Sample fewer candidates as we place more circles to focus on better areas
+        sample_size = min(100, max(20, len(candidates) // 2))
+        
+        # Use weighted sampling if candidates have weights (boundary prioritization)
+        if len(candidates) > 0 and isinstance(candidates[0], tuple) and len(candidates[0]) == 3:
+            # Candidates are weighted tuples (x, y, weight)
+            # Extract coordinates and weights
+            coords = [(x, y) for x, y, w in candidates[:sample_size*3]]
+            weights = [w for x, y, w in candidates[:sample_size*3]]
+            # Normalize weights
+            total_weight = sum(weights)
+            if total_weight > 0:
+                weights = [w/total_weight for w in weights]
+                # Sample with replacement based on weights
+                sampled_indices = random.choices(range(len(coords)), weights=weights, k=sample_size)
+                sampled_candidates = [coords[i] for i in sampled_indices]
+            else:
+                sampled_candidates = random.sample(coords, min(sample_size, len(coords)))
+        else:
+            # Standard uniform sampling
+            sampled_candidates = random.sample(candidates, min(sample_size, len(candidates)))
+        
+        for x, y in sampled_candidates:
+            # Compute maximum possible radius for this position
+            max_radius = compute_max_radius(x, y, new_circles[:placed], tree)
+            if max_radius <= best_radius:
+                continue
+            test_circle = (x, y, max_radius)
+            if is_valid_position(test_circle, new_circles[:placed]):
+                best_circle = test_circle
+                best_radius = max_radius
+        
+        if best_circle is not None:
+            new_circles[placed] = best_circle
+            placed += 1
+            
+            # Update spatial tree after each successful placement
+            if placed > 0:
+                points = np.array([[cx, cy] for cx, cy, cr in new_circles[:placed]])
+                tree = cKDTree(points)
+        else:
+            # If we can't find a valid circle, add a tiny circle and continue
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            test_circle = (x, y, 0.0001)
+            if is_valid_position(test_circle, new_circles[:placed]):
+                new_circles[placed] = test_circle
+                placed += 1
+                
+        attempt_count += 1
+
+    return new_circles
+
+def optimize_positions_enhanced(circles, iterations=150):
+    """Improve circle positions through enhanced local optimization"""
+    circles = circles.copy()
+    
+    # Build spatial tree for efficient neighbor searches
+    if len(circles) > 0:
+        points = np.array([[cx, cy] for cx, cy, cr in circles])
+        tree = cKDTree(points)
+    else:
+        tree = None
+    
+    # Enhanced iteration strategy
+    adaptive_iterations = max(100, iterations)
+    
+    for iter_num in range(adaptive_iterations):
+        improved = False
+        
+        # More aggressive optimization in early iterations, slower in later ones
+        if iter_num < 30:
+            moves_per_circle = 30
+            step_size = 0.04
+        elif iter_num < 70:
+            moves_per_circle = 25
+            step_size = 0.025
+        else:
+            moves_per_circle = 20
+            step_size = 0.01
+            
+        # Try to move each circle slightly to improve the total sum
+        for i in range(len(circles)):
+            old_x, old_y, old_r = circles[i]
+            
+            # Store original values
+            orig_circle = circles[i].copy()
+            
+            # Try random moves
+            best_circle = orig_circle.copy()
+            best_sum = sum(circle[2] for circle in circles)
+            
+            for _ in range(moves_per_circle):
+                # Perturb the position
+                new_x = old_x + random.uniform(-step_size, step_size)
+                new_y = old_y + random.uniform(-step_size, step_size)
+                
+                # Ensure new position is within bounds
+                new_x = max(0.01, min(0.99, new_x))
+                new_y = max(0.01, min(0.99, new_y))
+                
+                # Compute new radius using spatial tree for efficiency
+                new_r = compute_max_radius(new_x, new_y, np.concatenate([circles[:i], circles[i+1:]]), tree)
+                
+                if new_r > 0:
+                    # Create a temporary circle array to test this change
+                    temp_circles = circles.copy()
+                    temp_circles[i] = (new_x, new_y, new_r)
+                    
+                    # Check if valid (no overlap)
+                    valid = True
+                    for j in range(len(temp_circles)):
+                        if j != i and not is_valid_position(temp_circles[j], np.concatenate([temp_circles[:j], temp_circles[j+1:]])):
+                            valid = False
+                            break
+                    
+                    if valid:
+                        # Calculate new sum
+                        new_sum = sum(circle[2] for circle in temp_circles)
+                        
+                        if new_sum > best_sum:
+                            best_sum = new_sum
+                            best_circle = (new_x, new_y, new_r)
+            
+            # Update if improvement found
+            if not np.allclose(best_circle, orig_circle):
+                circles[i] = best_circle
+                improved = True
+        
+        # Update spatial tree after optimization pass
+        if len(circles) > 0:
+            points = np.array([[cx, cy] for cx, cy, cr in circles])
+            tree = cKDTree(points)
+            
+        # Break early if no significant improvement was made
+        if not improved and iter_num > 50:
+            break
+            
+    return circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+    
+    # Use enhanced Voronoi-based initialization to get a good starting point
+    circles = place_circle_enhanced_voronoi(circles, n)
+    
+    # Apply enhanced local optimization to refine positions
+    circles = optimize_positions_enhanced(circles)
+    
+    # Final refinement with more aggressive optimization
+    circles = optimize_positions_enhanced(circles, 100)
+    
+    return circles
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,280 @@
+<NAME>
+enhanced_step_function_optimization
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the step function optimization by implementing a multi-scale initialization strategy that combines different mathematical patterns to better exploit the structure of the autoconvolution problem. The key insight is that the optimal step function likely has a multi-scale nature with both broad and narrow features that contribute to maximizing C₂. The improvement adds:
+1. A new multi-scale initialization that creates patterns with varying frequency content
+2. Enhanced adaptive optimization with better population sizing
+3. Improved numerical stability handling
+4. More aggressive exploration strategies
+
+This approach should outperform the current implementation by finding more promising regions of the search space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def sophisticated_initialization(n):
+        """
+        Create sophisticated initial step function with alternating segments
+        and Gaussian weighting to balance flatness and energy concentration
+        """
+        # Create alternating high/low segments
+        f = []
+        segment_length = max(1, n // 8)  # Variable segment size
+
+        for i in range(0, n, segment_length):
+            if i // segment_length % 2 == 0:
+                # High segment
+                f.extend([1.0] * min(segment_length, n - i))
+            else:
+                # Low segment
+                f.extend([0.1] * min(segment_length, n - i))
+
+        # Apply Gaussian weighting to smooth transitions
+        if len(f) > 0:
+            # Normalize to avoid extreme values
+            f = np.array(f)
+            f = np.clip(f, 0, 10.0)
+            # Apply Gaussian smoothing kernel
+            kernel_size = min(5, len(f)//4)
+            if kernel_size > 1:
+                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+                kernel = kernel / np.sum(kernel)
+                f = np.convolve(f, kernel, mode='same')
+
+            # Ensure all values are non-negative
+            f = np.maximum(f, 0)
+
+        return f.tolist()
+=======
+    @staticmethod
+    def multi_scale_initialization(n):
+        """
+        Create multi-scale initial step function combining different patterns
+        to better explore the structure of optimal autoconvolution profiles
+        """
+        f = np.zeros(n)
+
+        # Pattern 1: Base alternating structure
+        segment_size = max(1, n // 12)
+        for i in range(0, n, segment_size):
+            if (i // segment_size) % 2 == 0:
+                f[i:i+min(segment_size, n-i)] = 1.0
+            else:
+                f[i:i+min(segment_size, n-i)] = 0.2
+
+        # Pattern 2: Superimposed Gaussian peaks for fine structure
+        x = np.linspace(-1, 1, n)
+        for _ in range(3):  # Add 3 Gaussian peaks
+            center = np.random.uniform(-0.25, 0.25)
+            width = np.random.uniform(0.05, 0.2)
+            amplitude = np.random.uniform(0.3, 0.8)
+            gauss_peak = amplitude * np.exp(-0.5 * ((x - center) / width)**2)
+            f += gauss_peak
+
+        # Pattern 3: Sparse high-amplitude regions
+        num_peaks = max(1, n // 50)
+        for _ in range(num_peaks):
+            pos = np.random.randint(0, n)
+            width = max(1, n // 20)
+            f[max(0, pos-width//2):min(n, pos+width//2)] += 0.5
+
+        # Apply smoothing
+        if n > 10:
+            # Apply multiple smoothing passes for different scales
+            kernel_size = min(7, n // 8)
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            if kernel_size > 1:
+                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/4)**2))
+                kernel = kernel / np.sum(kernel)
+                f = np.convolve(f, kernel, mode='same')
+
+        # Normalize and clip
+        f = np.clip(f, 0, None)
+        if np.sum(f) > 0:
+            f = f / np.sum(f) * n * 0.5
+
+        return f.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_stage_optimization(self, n):
+        """Perform multi-stage optimization with fallbacks and adaptive parameters"""
+        current_best_c2 = 0.0
+        current_best_f = None
+
+        # Stage 1: Differential Evolution with adaptive parameters
+        try:
+            # Determine adaptive parameters
+            popsize = self.adaptive_population_size(n)
+            maxiter = self.adaptive_maxiter(n)
+
+            # Generate initial population using sophisticated approach
+            initial_population = []
+            for _ in range(min(15, popsize)):  # Limit initial population size
+                f_init = self.sophisticated_initialization(n)
+                # Add some noise to break symmetry
+                noise = np.random.normal(0, 0.1, len(f_init))
+                f_noisy = np.maximum(np.array(f_init) + noise, 0)
+                initial_population.append(f_noisy.tolist())
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Run differential evolution with adaptive parameters
+            de_result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False
+            )
+
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -self.objective_function(f_opt)
+
+                if c2_value > current_best_c2:
+                    current_best_c2 = c2_value
+                    current_best_f = f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+
+        # Stage 2: Local optimization (L-BFGS) if we have a good candidate
+        if current_best_f is not None and current_best_c2 > 0.1:
+            try:
+                # Use L-BFGS for local refinement
+                lbfgs_result = minimize(
+                    self.objective_function,
+                    current_best_f,
+                    method='L-BFGS-B',
+                    bounds=[(0, 10) for _ in range(n)],
+                    options={'maxiter': min(50, max(20, n // 10)), 'disp': False}
+                )
+
+                if lbfgs_result.success:
+                    f_refined = np.maximum(lbfgs_result.x, 0)
+                    c2_refined = -self.objective_function(f_refined)
+
+                    if c2_refined > current_best_c2:
+                        current_best_c2 = c2_refined
+                        current_best_f = f_refined.tolist()
+
+            except Exception as e:
+                warnings.warn(f"L-BFGS refinement failed: {str(e)}")
+
+        return current_best_c2, current_best_f
+=======
+    def multi_stage_optimization(self, n):
+        """Perform multi-stage optimization with fallbacks and adaptive parameters"""
+        current_best_c2 = 0.0
+        current_best_f = None
+
+        # Stage 1: Differential Evolution with multi-scale initialization
+        try:
+            # Determine adaptive parameters
+            popsize = self.adaptive_population_size(n)
+            maxiter = self.adaptive_maxiter(n)
+
+            # Generate initial population using multi-scale approach
+            initial_population = []
+            for _ in range(min(20, popsize)):  # Larger initial population for better exploration
+                f_init = self.multi_scale_initialization(n)
+                # Add noise to break symmetry
+                noise = np.random.normal(0, 0.05, len(f_init))  # Reduced noise for stability
+                f_noisy = np.maximum(np.array(f_init) + noise, 0)
+                initial_population.append(f_noisy.tolist())
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Run differential evolution with adaptive parameters
+            de_result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False
+            )
+
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -self.objective_function(f_opt)
+
+                if c2_value > current_best_c2:
+                    current_best_c2 = c2_value
+                    current_best_f = f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+
+        # Stage 2: Multi-start local optimization with different strategies
+        if current_best_f is not None and current_best_c2 > 0.1:
+            try:
+                # Try multiple local optimization strategies
+                local_results = []
+
+                # Strategy 1: L-BFGS with different initial points
+                for _ in range(3):
+                    # Perturb current best solution
+                    perturbed = np.array(current_best_f) * (1 + np.random.normal(0, 0.05, len(current_best_f)))
+                    perturbed = np.maximum(perturbed, 0)
+
+                    lbfgs_result = minimize(
+                        self.objective_function,
+                        perturbed,
+                        method='L-BFGS-B',
+                        bounds=[(0, 10) for _ in range(n)],
+                        options={'maxiter': min(30, max(15, n // 15)), 'disp': False}
+                    )
+
+                    if lbfgs_result.success:
+                        f_refined = np.maximum(lbfgs_result.x, 0)
+                        c2_refined = -self.objective_function(f_refined)
+                        local_results.append((c2_refined, f_refined.tolist()))
+
+                # Select best local result
+                if local_results:
+                    best_local_c2, best_local_f = max(local_results, key=lambda x: x[0])
+                    if best_local_c2 > current_best_c2:
+                        current_best_c2 = best_local_c2
+                        current_best_f = best_local_f
+
+            except Exception as e:
+                warnings.warn(f"Local optimization failed: {str(e)}")
+
+        return current_best_c2, current_best_f
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Try different configurations to find the best one
+        configurations = [
+            100,  # Small configuration for quick testing
+            500,  # Medium configuration
+            1000, # Large configuration
+        ]
+=======
+        # Try different configurations to find the best one
+        configurations = [
+            200,  # Smaller for faster exploration
+            500,  # Medium configuration
+            1000, # Large configuration
+        ]
+>>>>>>> REPLACE
+</DIFF>

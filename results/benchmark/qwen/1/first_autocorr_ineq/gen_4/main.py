@@ -1,0 +1,143 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import convolve as fft_convolve
+import random
+import time
+import math
+
+def compute_c1_constant(sequence):
+    """Compute the C₁ constant for a given sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+    
+    # Normalize the sequence
+    total_sum = sum(sequence)
+    if total_sum < 0.01:
+        return float('inf')  # Reject sequences with very small sums
+    
+    # Compute convolution using FFT for efficiency
+    # Convolution of sequence with itself (auto-correlation)
+    auto_corr = fft_convolve(sequence, sequence, mode='full')
+    # Take only the relevant part (the middle section)
+    auto_corr = auto_corr[len(sequence)-1:2*len(sequence)-1]
+    
+    max_corr = max(auto_corr)
+    n = len(sequence)
+    
+    # Compute C₁: 2n * max(b) / (sum(a))^2
+    c1 = 2 * n * max_corr / (total_sum ** 2)
+    return c1
+
+def compute_inv_c1(sequence):
+    """Compute 1/C₁ for a given sequence."""
+    c1 = compute_c1_constant(sequence)
+    if c1 == float('inf'):
+        return 0.0
+    return 1.0 / c1
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Improve the sequence by moving in a good direction based on optimization."""
+    try:
+        n = len(sequence)
+        if n < 1:
+            return None
+            
+        # Normalize to avoid numerical issues
+        total_sum = sum(sequence)
+        if total_sum < 0.01:
+            return None
+            
+        # Scale sequence to have the right magnitude
+        scaled_seq = [x * np.sqrt(2 * n) / total_sum for x in sequence]
+        
+        # Compute target max convolution value
+        conv_result = fft_convolve(scaled_seq, scaled_seq, mode='full')
+        conv_result = conv_result[n-1:2*n-1]
+        target_max = max(conv_result)
+        
+        # Create an optimization problem to find a better sequence
+        # We'll use a gradient-based approach with bounds
+        bounds = [(0, 1000) for _ in range(n)]
+        
+        # Simple heuristic: try to increase the sum while decreasing max convolution
+        # Start from current sequence
+        current_seq = np.array(scaled_seq)
+        
+        # Try a simple perturbation in the direction that improves inv_c1
+        # Generate a random direction
+        direction = np.random.randn(n)
+        direction = direction / np.linalg.norm(direction)
+        
+        # Binary search along this direction to find an improvement
+        step_size = 0.01
+        best_seq = current_seq.copy()
+        best_inv_c1 = compute_inv_c1(best_seq * total_sum / np.sqrt(2 * n))
+        
+        # Try several directions
+        for _ in range(20):
+            candidate_seq = current_seq + step_size * direction
+            candidate_seq = np.maximum(candidate_seq, 0)  # Ensure non-negativity
+            
+            # Rescale back to original scale
+            rescaled_seq = candidate_seq * total_sum / np.sqrt(2 * n)
+            
+            # Check if it's valid and compute improvement
+            inv_c1 = compute_inv_c1(rescaled_seq)
+            if inv_c1 > best_inv_c1:
+                best_inv_c1 = inv_c1
+                best_seq = candidate_seq
+        
+        # Return best sequence found
+        if np.allclose(best_seq, current_seq, atol=1e-8):
+            return sequence
+        else:
+            # Return the optimized sequence
+            return (best_seq * total_sum / np.sqrt(2 * n)).tolist()
+            
+    except Exception as e:
+        return None
+
+def search_for_best_sequence() -> list[float]:
+    """Search for the best coefficient sequence by evolving it."""
+    # Start with a random sequence of reasonable size
+    n = random.randint(100, 1000)
+    sequence = [random.uniform(0.1, 100.0) for _ in range(n)]
+    
+    # Early stopping threshold
+    max_iterations = 100
+    start_time = time.time()
+    
+    # Evolutionary refinement
+    best_sequence = sequence[:]
+    best_inv_c1 = compute_inv_c1(best_sequence)
+    
+    for iteration in range(max_iterations):
+        if time.time() - start_time > 175:  # Leave some buffer for finalization
+            break
+            
+        # Get a potentially improved direction
+        improved_seq = get_good_direction_to_move_into(best_sequence)
+        
+        if improved_seq is not None:
+            new_inv_c1 = compute_inv_c1(improved_seq)
+            if new_inv_c1 > best_inv_c1:
+                best_sequence = improved_seq
+                best_inv_c1 = new_inv_c1
+                
+        # Occasionally introduce diversity
+        if iteration % 10 == 0 and iteration > 0:
+            # Randomly perturb a few elements to maintain exploration
+            for _ in range(min(10, len(best_sequence))):
+                idx = random.randint(0, len(best_sequence) - 1)
+                change = random.uniform(-10, 10)
+                best_sequence[idx] = max(0, best_sequence[idx] + change)
+                
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

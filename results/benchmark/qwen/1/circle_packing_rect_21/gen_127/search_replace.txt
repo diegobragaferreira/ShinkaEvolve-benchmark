@@ -1,0 +1,303 @@
+<NAME>
+improve_voronoi_constraint_density
+</NAME>
+
+<DESCRIPTION>
+The current implementation has a basic Voronoi constraint calculation that doesn't properly compute local constraint density. I'll enhance this by implementing a more accurate Voronoi-based constraint density measurement that will guide adaptive mutation rates more effectively. This will help the algorithm better understand where circles are most constrained and adjust mutation strategies accordingly.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Efficiently check if all circles satisfy the constraints with early termination."""
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    # Check overlap constraints efficiently using distance matrix
+    if n > 1:
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute distance matrix
+        distances = cdist(positions, positions)
+
+        # Check for overlaps
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = distances[i, j]
+                overlap_distance = radii[i] + radii[j]
+                if distance < overlap_distance:
+                    return False
+
+    return True
+=======
+def check_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Efficiently check if all circles satisfy the constraints with early termination."""
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    # Check overlap constraints efficiently using distance matrix
+    if n > 1:
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute distance matrix
+        distances = cdist(positions, positions)
+
+        # Check for overlaps
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = distances[i, j]
+                overlap_distance = radii[i] + radii[j]
+                if distance < overlap_distance:
+                    return False
+
+    return True
+
+def calculate_voronoi_constraint_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Calculate constraint density for each circle based on Voronoi diagram."""
+    try:
+        from scipy.spatial import Voronoi
+        n = len(circles)
+        if n < 2:
+            return np.ones(n)
+
+        points = circles[:, :2]
+        vor = Voronoi(points)
+
+        # Calculate Voronoi cell areas for each circle
+        constraint_densities = np.zeros(n)
+
+        for i in range(n):
+            # Get Voronoi region for circle i
+            region = []
+            # Find region vertices associated with this point
+            for j, point in enumerate(vor.points):
+                if np.allclose(point, points[i], atol=1e-10):
+                    # This is the correct point index
+                    region_idx = j
+                    break
+            else:
+                # Point not found, fallback to simple density calculation
+                constraint_densities[i] = 1.0
+                continue
+
+            # We need to find the actual Voronoi cell for this point
+            # For now, let's compute a simpler constraint density based on neighbors
+            distances = np.sqrt(np.sum((points - points[i])**2, axis=1))
+            distances[i] = np.inf  # Remove self-distance
+            nearest_distances = np.sort(distances)[:min(5, len(distances))]  # Top 5 nearest
+
+            # Constraint density is inversely proportional to average distance to neighbors
+            if len(nearest_distances) > 0:
+                avg_dist = np.mean(nearest_distances)
+                # Higher density = closer neighbors, more constrained
+                constraint_densities[i] = 1.0 / max(avg_dist, 1e-6)
+            else:
+                constraint_densities[i] = 1.0
+
+        return constraint_densities
+
+    except Exception:
+        # Fallback to simple distance-based density calculation
+        n = len(circles)
+        constraint_densities = np.ones(n)
+        if n <= 1:
+            return constraint_densities
+
+        positions = circles[:, :2]
+        distances = cdist(positions, positions)
+
+        # For each circle, count how many other circles are within a certain distance
+        # This creates a sense of local crowding
+        for i in range(n):
+            # Count neighbors within a threshold distance (based on radius)
+            neighbor_count = 0
+            radius_i = circles[i, 2]
+            for j in range(n):
+                if i != j and distances[i, j] < radius_i * 3:  # Threshold
+                    neighbor_count += 1
+            # Normalize by number of circles
+            constraint_densities[i] = neighbor_count / max(n - 1, 1)
+
+        return constraint_densities
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_mutation_with_voronoi_adaptation
+</NAME>
+
+<DESCRIPTION>
+I'll modify the mutation function to use the improved constraint density information, making mutation steps more adaptive to local constraint conditions. Circles in dense regions should have smaller mutation steps to maintain feasibility, while circles in sparse regions can have larger steps for exploration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(circles: np.ndarray, mutation_rate: float = 0.3) -> np.ndarray:
+    """Improved mutation operator with adaptive parameters."""
+    mutated = circles.copy()
+
+    for i in range(21):
+        if np.random.random() < mutation_rate:
+            # Choose mutation type with bias towards position
+            mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+            if mutation_type == 'position':
+                # Mutate position (x, y) with adaptive step size
+                step_size = 0.05 + np.random.random() * 0.05
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+            else:
+                # Mutate radius with log-normal distribution to avoid negative values
+                # Only scale up/down with small variations
+                scale_factor = np.exp(np.random.normal(0, 0.2))
+                mutated[i, 2] *= scale_factor
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+
+    return mutated
+=======
+def mutate(circles: np.ndarray, mutation_rate: float = 0.3, constraint_densities: np.ndarray = None) -> np.ndarray:
+    """Improved mutation operator with adaptive parameters based on constraint density."""
+    mutated = circles.copy()
+
+    # If constraint densities not provided, calculate them
+    if constraint_densities is None:
+        constraint_densities = calculate_voronoi_constraint_density(circles)
+
+    for i in range(21):
+        if np.random.random() < mutation_rate:
+            # Choose mutation type with bias towards position
+            mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+            # Get density for this circle (higher density = more constrained)
+            density = constraint_densities[i]
+
+            if mutation_type == 'position':
+                # Mutate position (x, y) with adaptive step size based on density
+                # More constrained areas get smaller steps
+                base_step = 0.05 + np.random.random() * 0.05
+                # Reduce step size for denser regions
+                step_size = base_step * (1.0 / (1.0 + density * 0.5))
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+            else:
+                # Mutate radius with adaptive scaling based on density
+                # In dense regions, be more conservative
+                base_scale = 0.2
+                scale_factor = np.exp(np.random.normal(0, base_scale / (1.0 + density * 0.3)))
+                mutated[i, 2] *= scale_factor
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_evolutionary_algorithm_with_voronoi_adaptation
+</NAME>
+
+<DESCRIPTION>
+Now I'll modify the main evolutionary algorithm to incorporate the Voronoi-based constraint density calculations and use them in both mutation and selection processes. This will make the evolution more intelligent by adapting to local constraint conditions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Evolutionary algorithm
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = [evaluate_fitness(individual) for individual in population]
+
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        population = [population[i] for i in sorted_indices]
+        fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+        # Keep elite
+        elite = population[:elite_size]
+
+        # Generate new population
+        new_population = elite[:]
+
+        # Create offspring using tournament selection and crossover
+        while len(new_population) < population_size:
+            # Tournament selection - select two parents
+            parent1_idx = sorted_indices[np.random.choice(min(tournament_size, len(sorted_indices)))]
+            parent2_idx = sorted_indices[np.random.choice(min(tournament_size, len(sorted_indices)))]
+
+            parent1 = population[parent1_idx].copy()
+            parent2 = population[parent2_idx].copy()
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutate
+            child1 = mutate(child1)
+            child2 = mutate(child2)
+
+            # Repair
+            child1 = repair_solution(child1, rect_width, rect_height)
+            child2 = repair_solution(child2, rect_width, rect_height)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:population_size]
+=======
+    # Evolutionary algorithm
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = [evaluate_fitness(individual) for individual in population]
+
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        population = [population[i] for i in sorted_indices]
+        fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+        # Keep elite
+        elite = population[:elite_size]
+
+        # Generate new population
+        new_population = elite[:]
+
+        # Create offspring using tournament selection and crossover
+        while len(new_population) < population_size:
+            # Tournament selection - select two parents
+            parent1_idx = sorted_indices[np.random.choice(min(tournament_size, len(sorted_indices)))]
+            parent2_idx = sorted_indices[np.random.choice(min(tournament_size, len(sorted_indices)))]
+
+            parent1 = population[parent1_idx].copy()
+            parent2 = population[parent2_idx].copy()
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Calculate constraint densities for these individuals before mutation
+            # This helps guide more informed mutations
+            parent1_densities = calculate_voronoi_constraint_density(parent1, rect_width, rect_height)
+            parent2_densities = calculate_voronoi_constraint_density(parent2, rect_width, rect_height)
+
+            # Mutate with adaptive constraint density information
+            child1 = mutate(child1, constraint_densities=parent1_densities)
+            child2 = mutate(child2, constraint_densities=parent2_densities)
+
+            # Repair
+            child1 = repair_solution(child1, rect_width, rect_height)
+            child2 = repair_solution(child2, rect_width, rect_height)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:population_size]
+>>>>>>> REPLACE
+</DIFF>

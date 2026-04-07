@@ -1,0 +1,196 @@
+<NAME>
+add_boundary_aware_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll implement a boundary-aware local refinement strategy that specifically targets circles near rectangle boundaries. This approach will enhance the current optimization by applying specialized update rules for edge-constrained circles, which were underexplored in previous implementations but are crucial for maximizing sum_radii.
+
+The key insight is that circles near boundaries have unique constraint characteristics that require different treatment than interior circles. By implementing targeted boundary refinement, we can better preserve and exploit the available space near edges while maintaining overall constraint satisfaction.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def refine_solution_fast(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                        iterations: int = 100) -> np.ndarray:
+    """
+    Fast local refinement using gradient-like approach and constraint-aware moves.
+    """
+    refined = circles.copy()
+    n = len(refined)
+
+    if n <= 1:
+        return refined
+
+    # Precompute constraint information
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+
+    # Iterative refinement
+    for iter_num in range(iterations):
+        # Work on one circle at a time
+        for i in range(n):
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Adaptive mutation based on constraint density
+            density_weight = 1.0 + constraint_densities[i] * 2.0
+            pos_strength = 0.01 / density_weight
+            rad_strength = 0.005 / density_weight
+
+            # Try small random moves
+            new_x = old_x + np.random.normal(0, pos_strength)
+            new_y = old_y + np.random.normal(0, pos_strength)
+            new_r = old_r + np.random.normal(0, rad_strength)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Quick constraint check before full fitness evaluation
+            if not is_valid_solution(test_config, rect_width, rect_height):
+                continue
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+            # Occasionally do larger moves to escape local optima
+            elif random.random() < 0.05 and iter_num > iterations // 2:
+                # Do bigger perturbation
+                new_x = old_x + np.random.normal(0, pos_strength * 3)
+                new_y = old_y + np.random.normal(0, pos_strength * 3)
+                new_r = old_r + np.random.normal(0, rad_strength * 3)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+                if is_valid_solution(test_config, rect_width, rect_height):
+                    test_config[i] = [new_x, new_y, new_r]
+                    test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+                    if test_fitness > current_fitness:
+                        refined = test_config
+
+    return refined
+=======
+def refine_solution_fast(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                        iterations: int = 100) -> np.ndarray:
+    """
+    Fast local refinement using gradient-like approach and constraint-aware moves.
+    """
+    refined = circles.copy()
+    n = len(refined)
+
+    if n <= 1:
+        return refined
+
+    # Precompute constraint information
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+
+    # Iterative refinement
+    for iter_num in range(iterations):
+        # Work on one circle at a time
+        for i in range(n):
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Determine if this circle is near boundary
+            near_boundary = (
+                old_x < old_r + 0.05 or
+                old_x > rect_width - old_r - 0.05 or
+                old_y < old_r + 0.05 or
+                old_y > rect_height - old_r - 0.05
+            )
+
+            # Adaptive mutation based on constraint density
+            density_weight = 1.0 + constraint_densities[i] * 2.0
+            pos_strength = 0.01 / density_weight
+            rad_strength = 0.005 / density_weight
+
+            # Apply different refinement strategies based on boundary proximity
+            if near_boundary:
+                # Boundary-aware refinement for edge circles
+                # These circles need special attention to maintain containment
+                new_x = old_x
+                new_y = old_y
+                new_r = old_r
+
+                # For boundary circles, prioritize radius expansion along boundary direction
+                if old_x < old_r + 0.05:  # Near left edge
+                    new_x = old_x + np.random.uniform(0, pos_strength * 0.5)
+                elif old_x > rect_width - old_r - 0.05:  # Near right edge
+                    new_x = old_x - np.random.uniform(0, pos_strength * 0.5)
+                else:
+                    new_x = old_x + np.random.normal(0, pos_strength * 0.5)
+
+                if old_y < old_r + 0.05:  # Near bottom edge
+                    new_y = old_y + np.random.uniform(0, pos_strength * 0.5)
+                elif old_y > rect_height - old_r - 0.05:  # Near top edge
+                    new_y = old_y - np.random.uniform(0, pos_strength * 0.5)
+                else:
+                    new_y = old_y + np.random.normal(0, pos_strength * 0.5)
+
+                # For boundary circles, be more aggressive with radius changes
+                # to take advantage of boundary space
+                new_r = old_r + np.random.normal(0, rad_strength * 2.0)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+            else:
+                # Regular refinement for interior circles
+                # Try small random moves
+                new_x = old_x + np.random.normal(0, pos_strength)
+                new_y = old_y + np.random.normal(0, pos_strength)
+                new_r = old_r + np.random.normal(0, rad_strength)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Quick constraint check before full fitness evaluation
+            if not is_valid_solution(test_config, rect_width, rect_height):
+                continue
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+            # Occasionally do larger moves to escape local optima
+            elif random.random() < 0.05 and iter_num > iterations // 2:
+                # Do bigger perturbation
+                new_x = old_x + np.random.normal(0, pos_strength * 3)
+                new_y = old_y + np.random.normal(0, pos_strength * 3)
+                new_r = old_r + np.random.normal(0, rad_strength * 3)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+                if is_valid_solution(test_config, rect_width, rect_height):
+                    test_config[i] = [new_x, new_y, new_r]
+                    test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+                    if test_fitness > current_fitness:
+                        refined = test_config
+
+    return refined
+>>>>>>> REPLACE
+</DIFF>

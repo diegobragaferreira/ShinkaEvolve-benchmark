@@ -1,0 +1,600 @@
+<NAME>
+improve_initialization_and_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current implementation has several areas for improvement:
+1. The initialization strategy is still basic and doesn't fully exploit the rectangle's aspect ratio
+2. The constraint checking in the fitness function could be made more efficient
+3. The local optimization approach needs refinement to better handle overlaps and boundary constraints
+
+I'll implement these improvements:
+1. Enhance the grid-based initialization to better distribute circles across the rectangle
+2. Improve the fitness evaluation to be more robust against constraint violations
+3. Refine local optimization to better handle simultaneous constraint satisfaction
+4. Add smarter early stopping and dynamic parameter adjustments
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_initial_population(self, pop_size: int) -> List[np.ndarray]:
+        """Generate initial population with improved initialization strategies"""
+        population = []
+
+        # Strategy: Adaptive grid initialization that better fits the rectangle dimensions
+        # Calculate optimal grid spacing based on rectangle area and circle count
+        total_area = self.width * self.height
+        avg_area_per_circle = total_area / self.num_circles
+        # Use square root of average area to determine base spacing
+        base_spacing = np.sqrt(avg_area_per_circle)
+
+        # Ensure we have a good grid structure for 21 circles (similar to successful programs)
+        # Try multiple grid configurations to find best fit
+        grid_configs = []
+        for rows in range(1, int(np.sqrt(self.num_circles)) + 5):
+            cols = int(np.ceil(self.num_circles / rows))
+            if rows * cols >= self.num_circles:
+                grid_configs.append((rows, cols))
+
+        # Select the most balanced configuration
+        best_config = min(grid_configs, key=lambda x: max(x) / min(x) if min(x) > 0 else float('inf'))
+        grid_rows, grid_cols = best_config
+
+        # Calculate actual spacing
+        cell_width = self.width / (grid_cols + 1)
+        cell_height = self.height / (grid_rows + 1)
+
+        # Use a more informed approach based on the available space
+        # Calculate a reasonable hexagonal-like spacing
+        hex_radius = min(cell_width, cell_height) * 0.35  # Slightly larger for better spread
+
+        for _ in range(pop_size):
+            circles = np.zeros((self.num_circles, 3))
+
+            # Create a more systematic initial configuration
+            idx = 0
+            for i in range(grid_rows):
+                for j in range(grid_cols):
+                    if idx >= self.num_circles:
+                        break
+                    # Systematic placement with small randomization
+                    x = (j + 1) * cell_width + np.random.uniform(-cell_width * 0.1, cell_width * 0.1)
+                    y = (i + 1) * cell_height + np.random.uniform(-cell_height * 0.1, cell_height * 0.1)
+                    # Radius based on available space but with some variation
+                    r = hex_radius + np.random.uniform(-hex_radius * 0.1, hex_radius * 0.1)
+                    r = max(0.01, min(0.2, r))  # Keep in reasonable bounds
+
+                    # Clamp to valid bounds
+                    x = max(r, min(self.width - r, x))
+                    y = max(r, min(self.height - r, y))
+
+                    circles[idx] = [x, y, r]
+                    idx += 1
+
+            # Fill remaining slots with better placement strategy
+            for i in range(idx, self.num_circles):
+                # Start with a grid-based approach for better distribution
+                attempts = 0
+                max_attempts = 100
+
+                while attempts < max_attempts:
+                    # Try to place in a grid-like pattern with some randomness
+                    row = attempts // 10
+                    col = attempts % 10
+
+                    # Place in a more distributed way rather than purely random
+                    x = (col + 1) * (self.width / 11) + np.random.uniform(-0.05, 0.05)
+                    y = (row + 1) * (self.height / 11) + np.random.uniform(-0.05, 0.05)
+
+                    # Estimate good radius based on available space
+                    min_dist_to_edge = min(x, self.width - x, y, self.height - y)
+                    min_dist_to_others = float('inf')
+
+                    # Check distance to existing circles
+                    for circ in circles[:idx]:
+                        dx = x - circ[0]
+                        dy = y - circ[1]
+                        dist = np.sqrt(dx*dx + dy*dy)
+                        min_dist_to_others = min(min_dist_to_others, dist)
+
+                    # Base radius estimation with safety margin
+                    estimated_radius = min(0.15, min_dist_to_edge * 0.3, min_dist_to_others * 0.2)
+                    r = max(0.01, min(0.2, estimated_radius + np.random.uniform(-estimated_radius * 0.15, estimated_radius * 0.15)))
+
+                    # Check if position is valid and reasonably spaced
+                    if self.is_valid_circle(x, y, r):
+                        # Quick conflict check with existing circles
+                        conflict = False
+                        for circ in circles[:idx]:
+                            dx = x - circ[0]
+                            dy = y - circ[1]
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            if dist < (r + circ[2]) * 0.9:  # Slight buffer
+                                conflict = True
+                                break
+
+                        if not conflict:
+                            circles[i] = [x, y, r]
+                            break
+
+                    attempts += 1
+
+                # If we still haven't placed it, use a fallback
+                if attempts >= max_attempts:
+                    x = np.random.uniform(0.05, self.width - 0.05)
+                    y = np.random.uniform(0.05, self.height - 0.05)
+                    r = np.random.uniform(0.01, 0.15)
+                    circles[i] = [x, y, r]
+
+            population.append(circles)
+
+        return population
+=======
+    def generate_initial_population(self, pop_size: int) -> List[np.ndarray]:
+        """Generate initial population with enhanced initialization strategies"""
+        population = []
+
+        # Strategy: Better grid-based initialization with consideration of aspect ratio
+        # Calculate optimal grid based on rectangle dimensions
+        aspect_ratio = self.width / self.height
+
+        # Use a more sophisticated approach for grid sizing
+        sqrt_n = np.sqrt(self.num_circles)
+        ideal_cols = max(1, int(np.round(sqrt_n * np.sqrt(aspect_ratio))))
+        ideal_rows = max(1, int(np.ceil(self.num_circles / ideal_cols)))
+
+        # Ensure we have enough cells
+        while ideal_cols * ideal_rows < self.num_circles:
+            if ideal_cols < ideal_rows:
+                ideal_cols += 1
+            else:
+                ideal_rows += 1
+
+        # Calculate spacing with padding and aspect ratio consideration
+        cell_width = self.width / (ideal_cols + 1)
+        cell_height = self.height / (ideal_rows + 1)
+
+        # Base radius calculation that accounts for spacing
+        base_radius = min(cell_width, cell_height) * 0.35
+
+        for _ in range(pop_size):
+            circles = np.zeros((self.num_circles, 3))
+
+            # Create better distributed initial configuration using hexagonal-like packing
+            idx = 0
+
+            # Alternate rows for honeycomb pattern
+            for i in range(ideal_rows):
+                for j in range(ideal_cols):
+                    if idx >= self.num_circles:
+                        break
+
+                    # Alternate horizontal offset for better packing
+                    offset = (i % 2) * (cell_width / 2) if ideal_cols > 1 else 0
+
+                    # Position with more controlled randomness
+                    x = (j + 1) * cell_width + offset + np.random.uniform(-cell_width * 0.15, cell_width * 0.15)
+                    y = (i + 1) * cell_height + np.random.uniform(-cell_height * 0.15, cell_height * 0.15)
+
+                    # Radius with more variance but bounded
+                    r = base_radius * (0.8 + np.random.uniform(-0.2, 0.2))
+                    r = max(0.01, min(0.2, r))
+
+                    # Clamp to valid bounds
+                    x = max(r, min(self.width - r, x))
+                    y = max(r, min(self.height - r, y))
+
+                    circles[idx] = [x, y, r]
+                    idx += 1
+
+                if idx >= self.num_circles:
+                    break
+
+            # Fill remaining slots with more intelligent placement based on existing circles
+            for i in range(idx, self.num_circles):
+                attempts = 0
+                max_attempts = 50
+
+                while attempts < max_attempts:
+                    # Try to place in a more strategic way
+                    # Use a systematic approach to spread out remaining circles
+                    grid_row = attempts // 5
+                    grid_col = attempts % 5
+
+                    # Distribute in a 5x5 grid pattern, but with randomness
+                    x = (grid_col + 1) * (self.width / 6) + np.random.uniform(-self.width * 0.08, self.width * 0.08)
+                    y = (grid_row + 1) * (self.height / 6) + np.random.uniform(-self.height * 0.08, self.height * 0.08)
+
+                    # Estimate radius based on proximity to existing circles and boundaries
+                    min_dist_to_edge = min(x, self.width - x, y, self.height - y)
+                    min_dist_to_others = float('inf')
+
+                    # Check distance to existing circles
+                    for circ in circles[:idx]:
+                        dx = x - circ[0]
+                        dy = y - circ[1]
+                        dist = np.sqrt(dx*dx + dy*dy)
+                        min_dist_to_others = min(min_dist_to_others, dist)
+
+                    # Base radius estimation with better heuristics
+                    if min_dist_to_others < 0.5:  # If close to others
+                        estimated_radius = min(0.15, min_dist_to_edge * 0.25, min_dist_to_others * 0.3)
+                    else:  # If far from others
+                        estimated_radius = min(0.15, min_dist_to_edge * 0.3, min_dist_to_others * 0.2)
+
+                    r = max(0.01, min(0.2, estimated_radius + np.random.uniform(-estimated_radius * 0.2, estimated_radius * 0.2)))
+
+                    # Check if valid and not too close to others
+                    if self.is_valid_circle(x, y, r):
+                        # More thorough conflict check
+                        conflict = False
+                        for circ in circles[:idx]:
+                            dx = x - circ[0]
+                            dy = y - circ[1]
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            # Be stricter about minimum separation
+                            if dist < (r + circ[2]) * 0.85:
+                                conflict = True
+                                break
+
+                        if not conflict:
+                            circles[i] = [x, y, r]
+                            break
+
+                    attempts += 1
+
+                # Fallback to completely random placement
+                if attempts >= max_attempts:
+                    x = np.random.uniform(0.05, self.width - 0.05)
+                    y = np.random.uniform(0.05, self.height - 0.05)
+                    r = np.random.uniform(0.01, 0.15)
+                    circles[i] = [x, y, r]
+
+            population.append(circles)
+
+        return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 1000  # Heavy penalty for boundary violations
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance - make it more forgiving for minor violations
+        penalty_weight = 5000.0
+        return total_radius - (penalty_weight * violations), violations
+=======
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        # Quick boundary check first to avoid expensive overlap calculations
+        boundary_violations = 0
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                boundary_violations += 1000  # Heavy penalty for boundary violations
+
+        if boundary_violations > 0:
+            return -1.0, boundary_violations
+
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count overlap violations
+        violations = 0
+
+        # Use a more robust approach to overlap detection
+        try:
+            # Build KDTree for efficient neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (better optimization)
+            max_radius = max(1e-6, np.max(circles[:, 2]))  # Avoid zero max radius
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            # Filter out duplicate pairs and check overlaps properly
+            checked_pairs = set()
+            for i, j in pairs:
+                if i < j and (i, j) not in checked_pairs:
+                    checked_pairs.add((i, j))
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return fitness with better penalty structure
+        # Use different penalty weights for different types of violations
+        boundary_penalty = boundary_violations
+        overlap_penalty = violations * 10000  # Heavy penalty for overlaps
+
+        # More forgiving penalty structure to allow some relaxation for complex scenarios
+        penalty_weight = boundary_penalty + overlap_penalty
+        return total_radius - penalty_weight, violations
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_optimization(self, circles: np.ndarray) -> np.ndarray:
+        """Apply advanced local optimization to improve solution quality"""
+        # Create a copy to avoid modifying original
+        optimized_circles = circles.copy()
+
+        # Use a hybrid approach: simultaneous optimization with better constraint handling
+        for iteration in range(LOCAL_OPTIMIZATION_ITERATIONS):
+            improved = False
+
+            # Collect violations before optimization
+            old_violations = 0
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(optimized_circles, i, j):
+                        old_violations += 1
+
+            # Group similar operations together for better efficiency
+            # First, try to maximize radii in a batch manner
+            radius_changes = []
+            for i in range(self.num_circles):
+                current_x, current_y, current_r = optimized_circles[i]
+
+                # Objective function for radius maximization
+                def radius_objective(r):
+                    temp_circles = optimized_circles.copy()
+                    temp_circles[i, 2] = r[0]
+
+                    # Check constraint validity
+                    if not self.is_valid_circle(temp_circles[i, 0], temp_circles[i, 1], r[0]):
+                        return 1e10  # Penalty for invalid configuration
+
+                    # Check overlap constraints
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+
+                    # Return negative radius (we minimize to maximize) plus penalty
+                    return -r[0] + 1000 * violations
+
+                # Try to maximize this circle's radius
+                bounds = [(1e-6, min(self.width/2, self.height/2, current_r * 2))]
+                new_r = current_r
+                try:
+                    result = minimize(radius_objective, [current_r], bounds=bounds, method='L-BFGS-B')
+                    if result.success:
+                        new_r = max(1e-6, result.x[0])
+                except:
+                    pass  # If optimization fails, keep current value
+
+                # Record possible change
+                if new_r > current_r:
+                    radius_changes.append((i, new_r))
+
+            # Apply all radius changes at once
+            for i, new_r in radius_changes:
+                optimized_circles[i, 2] = new_r
+                improved = True
+
+            # Then try to improve positions
+            position_changes = []
+            for i in range(self.num_circles):
+                current_x, current_y, current_r = optimized_circles[i]
+
+                # Objective function for position adjustment
+                def position_objective(pos):
+                    temp_circles = optimized_circles.copy()
+                    temp_circles[i, :2] = pos
+
+                    # Check constraint validity
+                    if not self.is_valid_circle(temp_circles[i, 0], temp_circles[i, 1], current_r):
+                        return 1e10
+
+                    # Check overlap constraints
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+
+                    # Return penalty based on overlap violations
+                    return 1000 * violations
+
+                # Try to improve position
+                bounds = [(current_x - 0.05, current_x + 0.05),
+                          (current_y - 0.05, current_y + 0.05)]
+                new_pos = [current_x, current_y]
+
+                try:
+                    result = minimize(position_objective, [current_x, current_y],
+                                    bounds=bounds, method='L-BFGS-B')
+                    if result.success:
+                        new_pos = result.x
+                        # Clamp to valid bounds
+                        new_pos[0] = max(current_r, min(self.width - current_r, new_pos[0]))
+                        new_pos[1] = max(current_r, min(self.height - current_r, new_pos[1]))
+
+                        position_changes.append((i, new_pos))
+                        improved = True
+
+                except:
+                    pass  # If optimization fails, keep current value
+
+            # Apply all position changes at once
+            for i, new_pos in position_changes:
+                optimized_circles[i, :2] = new_pos
+
+            # Early exit if no improvement
+            if not improved:
+                break
+
+        return optimized_circles
+=======
+    def local_optimization(self, circles: np.ndarray) -> np.ndarray:
+        """Apply advanced local optimization to improve solution quality"""
+        # Create a copy to avoid modifying original
+        optimized_circles = circles.copy()
+
+        # Use a more effective sequential optimization approach
+        for iteration in range(LOCAL_OPTIMIZATION_ITERATIONS):
+            improved = False
+
+            # First, try to maximize radii one at a time with better constraints
+            for i in range(self.num_circles):
+                current_x, current_y, current_r = optimized_circles[i]
+
+                # Simple heuristic to determine max radius at current position
+                max_radius_at_pos = min(current_x, self.width - current_x,
+                                      current_y, self.height - current_y)
+
+                # Objective function for radius maximization
+                def radius_objective(r):
+                    temp_circles = optimized_circles.copy()
+                    temp_circles[i, 2] = r[0]
+
+                    # Check constraint validity
+                    if not self.is_valid_circle(temp_circles[i, 0], temp_circles[i, 1], r[0]):
+                        return 1e10  # Penalty for invalid configuration
+
+                    # Check overlap constraints with stricter criteria
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+
+                    # Return negative radius (we minimize to maximize) plus penalty
+                    return -r[0] + 1000 * violations
+
+                # Try to maximize this circle's radius
+                bounds = [(1e-6, min(max_radius_at_pos, current_r * 2))]
+                new_r = current_r
+
+                try:
+                    # Try both L-BFGS-B and Nelder-Mead for robustness
+                    result = minimize(radius_objective, [current_r], bounds=bounds, method='L-BFGS-B')
+                    if not result.success:
+                        # Fallback to Nelder-Mead if L-BFGS-B fails
+                        result = minimize(radius_objective, [current_r], method='Nelder-Mead')
+                    if result.success:
+                        new_r = max(1e-6, result.x[0])
+                except:
+                    pass  # If optimization fails, keep current value
+
+                # Apply improvement if beneficial
+                if new_r > current_r:
+                    optimized_circles[i, 2] = new_r
+                    improved = True
+
+            # Then try to improve positions for better overlap resolution
+            for i in range(self.num_circles):
+                current_x, current_y, current_r = optimized_circles[i]
+
+                # Objective function for position adjustment
+                def position_objective(pos):
+                    temp_circles = optimized_circles.copy()
+                    temp_circles[i, :2] = pos
+
+                    # Check constraint validity
+                    if not self.is_valid_circle(temp_circles[i, 0], temp_circles[i, 1], current_r):
+                        return 1e10
+
+                    # Check overlap constraints
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+
+                    # Return penalty based on overlap violations
+                    # Also penalize if position moves too far from current
+                    distance_penalty = 0.1 * ((pos[0] - current_x)**2 + (pos[1] - current_y)**2)
+                    return 1000 * violations + distance_penalty
+
+                # Try to improve position
+                bounds = [(current_x - 0.08, current_x + 0.08),
+                          (current_y - 0.08, current_y + 0.08)]
+                new_pos = [current_x, current_y]
+
+                try:
+                    # Try multiple optimizers for robustness
+                    result = minimize(position_objective, [current_x, current_y],
+                                    bounds=bounds, method='L-BFGS-B')
+                    if not result.success:
+                        result = minimize(position_objective, [current_x, current_y],
+                                        method='Nelder-Mead')
+                    if result.success:
+                        new_pos = result.x
+                        # Clamp to valid bounds
+                        new_pos[0] = max(current_r, min(self.width - current_r, new_pos[0]))
+                        new_pos[1] = max(current_r, min(self.height - current_r, new_pos[1]))
+
+                        # Apply if position improves layout
+                        optimized_circles[i, :2] = new_pos
+                        improved = True
+
+                except:
+                    pass  # If optimization fails, keep current value
+
+            # Early exit if no significant improvement
+            if not improved:
+                break
+
+        # Final cleanup: ensure all circles stay within bounds
+        for i in range(self.num_circles):
+            x, y, r = optimized_circles[i]
+            optimized_circles[i] = [
+                max(r, min(self.width - r, x)),
+                max(r, min(self.height - r, y)),
+                r
+            ]
+
+        return optimized_circles
+>>>>>>> REPLACE
+</DIFF>

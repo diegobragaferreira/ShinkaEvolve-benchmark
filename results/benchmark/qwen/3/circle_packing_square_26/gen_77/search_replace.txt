@@ -1,0 +1,281 @@
+<NAME>
+optimize_spatial_indexing_and_mutation
+</NAME>
+
+<DESCRIPTION>
+The key insight here is to enhance the spatial indexing efficiency and mutation strategy. The current implementation uses cKDTree for overlap checking, but we can make it more efficient by implementing a custom spatial grid that's optimized for our specific problem size and by refining the mutation strategy to better balance exploration and exploitation.
+
+1. For spatial indexing: Replace the general cKDTree with a more efficient grid-based approach that's specifically tuned for the 26-circle case, and improve the overlap checking logic to be faster.
+
+2. For mutation: Implement a more sophisticated adaptive mutation that considers not just generation progress, but also the current fitness landscape and diversity in the population.
+
+This approach builds on the existing successful elements while making targeted improvements to bottlenecks.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap(circles: np.ndarray) -> bool:
+    """Check if any circles overlap using efficient spatial indexing."""
+    n = len(circles)
+    if n < 2:
+        return True
+
+    # Use cKDTree for efficient nearest neighbor search
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+
+    try:
+        # Build spatial tree once
+        tree = cKDTree(positions)
+
+        # Query pairs within sum of radii distance
+        pairs = tree.query_pairs(r=2.0, output_type='ndarray')
+
+        # Check each potential overlapping pair
+        for i, j in pairs:
+            if i < j:  # Avoid duplicate checking
+                dist = np.linalg.norm(positions[i] - positions[j])
+                if dist < radii[i] + radii[j]:
+                    return False
+
+    except Exception:
+        # Fallback to original method if tree fails
+        # Calculate pairwise distances
+        distances = cdist(positions, positions)
+
+        # Check for overlaps
+        for i in range(n):
+            for j in range(i+1, n):
+                dist = distances[i, j]
+                if dist < radii[i] + radii[j]:
+                    return False
+
+    return True
+=======
+def check_overlap(circles: np.ndarray) -> bool:
+    """Check if any circles overlap using efficient spatial indexing."""
+    n = len(circles)
+    if n < 2:
+        return True
+
+    # Use spatial grid for O(n) complexity instead of O(n^2)
+    GRID_SIZE = 20
+    grid = {}
+
+    # Create spatial grid
+    for i, (x, y, r) in enumerate(circles):
+        # Determine which grid cells this circle touches
+        min_x_cell = max(0, int((x - r) * GRID_SIZE))
+        max_x_cell = min(GRID_SIZE - 1, int((x + r) * GRID_SIZE))
+        min_y_cell = max(0, int((y - r) * GRID_SIZE))
+        max_y_cell = min(GRID_SIZE - 1, int((y + r) * GRID_SIZE))
+
+        for gx in range(min_x_cell, max_x_cell + 1):
+            for gy in range(min_y_cell, max_y_cell + 1):
+                if (gx, gy) not in grid:
+                    grid[(gx, gy)] = []
+                grid[(gx, gy)].append(i)
+
+    # Check overlaps within each grid cell
+    for cell, circle_indices in grid.items():
+        # Only check pairs within the same grid cell
+        for i in range(len(circle_indices)):
+            idx1 = circle_indices[i]
+            x1, y1, r1 = circles[idx1]
+
+            for j in range(i + 1, len(circle_indices)):
+                idx2 = circle_indices[j]
+                x2, y2, r2 = circles[idx2]
+
+                # Calculate distance between circle centers
+                dx = x1 - x2
+                dy = y1 - y2
+                distance_squared = dx*dx + dy*dy
+
+                # Check if circles overlap
+                if distance_squared < (r1 + r2)**2:
+                    return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(circles: np.ndarray, generation: int = 0, max_generations: int = 1000) -> np.ndarray:
+    """Mutate a circle configuration with adaptive mutation rate and dual mutation strategy."""
+    # Adaptive mutation rate that decreases over generations
+    mutation_rate_start = 0.20
+    mutation_rate_end = 0.02
+
+    # Sigmoidal decay function
+    mutation_rate = mutation_rate_end + (mutation_rate_start - mutation_rate_end) * (
+        1 / (1 + np.exp(10 * (generation / max_generations - 0.5)))
+    )
+
+    mutated = circles.copy()
+    n = len(mutated)
+
+    # Two-stage mutation:
+    # Stage 1: Large-scale mutations for exploration (higher variance)
+    # Stage 2: Fine-tuning mutations for exploitation (lower variance)
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            # Determine mutation type based on generation progress
+            # Early generations: favor larger changes for exploration
+            # Later generations: favor smaller changes for exploitation
+            if generation < max_generations * 0.3:
+                # Exploration phase - larger mutations
+                mutation_strength = 0.05
+                mutation_type = "large"
+            else:
+                # Exploitation phase - smaller mutations
+                mutation_strength = 0.01
+                mutation_type = "small"
+
+            # Randomly choose what to mutate with bias towards position for early stages
+            if generation < max_generations * 0.5:
+                # Prioritize position changes in early stages
+                choice = random.choices([0, 1, 2], weights=[0.5, 0.5, 0.1])[0]
+            else:
+                # Equal weights in later stages
+                choice = random.randint(0, 2)
+
+            if choice == 0:  # Mutate x position
+                mutated[i, 0] = np.clip(mutated[i, 0] + np.random.normal(0, mutation_strength),
+                                      mutated[i, 2], 1 - mutated[i, 2])
+            elif choice == 1:  # Mutate y position
+                mutated[i, 1] = np.clip(mutated[i, 1] + np.random.normal(0, mutation_strength),
+                                      mutated[i, 2], 1 - mutated[i, 2])
+            else:  # Mutate radius
+                # Apply bounded mutation to radius
+                mutated[i, 2] = np.clip(mutated[i, 2] * np.random.normal(1, 0.1), 0.001, 0.4)
+
+    return mutated
+=======
+def mutate(circles: np.ndarray, generation: int = 0, max_generations: int = 1000,
+           population_fitnesses: List[float] = None) -> np.ndarray:
+    """Mutate a circle configuration with adaptive mutation rate and smart mutation strategy."""
+    # Adaptive mutation rate with better scaling
+    mutation_rate_start = 0.25
+    mutation_rate_end = 0.01
+    mutation_rate = mutation_rate_end + (mutation_rate_start - mutation_rate_end) * (
+        1 / (1 + np.exp(15 * (generation / max_generations - 0.5)))
+    )
+
+    # If we have population fitness info, adjust mutation rate based on diversity
+    if population_fitnesses is not None and len(population_fitnesses) > 1:
+        # Calculate population variance to detect stagnation
+        fitness_variance = np.var(population_fitnesses)
+        if fitness_variance < 1e-6:  # Low diversity - increase mutation rate
+            mutation_rate *= 1.5
+
+    mutated = circles.copy()
+    n = len(mutated)
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            # Choose mutation type based on position in evolution and individual fitness
+            # Higher chance of position mutations early, radius mutations later
+            if generation < max_generations * 0.4:
+                # Early stages: prioritize position changes with higher probability
+                choice = random.choices([0, 1, 2], weights=[0.6, 0.6, 0.2])[0]
+                strength = 0.06
+            elif generation < max_generations * 0.7:
+                # Mid stages: balanced
+                choice = random.choices([0, 1, 2], weights=[0.4, 0.4, 0.4])[0]
+                strength = 0.03
+            else:
+                # Late stages: prioritize radius fine-tuning
+                choice = random.choices([0, 1, 2], weights=[0.2, 0.2, 0.8])[0]
+                strength = 0.015
+
+            if choice == 0:  # Mutate x position
+                mutated[i, 0] = np.clip(mutated[i, 0] + np.random.normal(0, strength),
+                                      mutated[i, 2], 1 - mutated[i, 2])
+            elif choice == 1:  # Mutate y position
+                mutated[i, 1] = np.clip(mutated[i, 1] + np.random.normal(0, strength),
+                                      mutated[i, 2], 1 - mutated[i, 2])
+            else:  # Mutate radius
+                # Use log-normal for radius mutations to avoid extreme values
+                log_factor = np.random.normal(0, 0.15)
+                mutated[i, 2] = np.clip(mutated[i, 2] * np.exp(log_factor), 0.001, 0.4)
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Generate offspring
+        while len(new_population) < pop_size:
+            # Selection
+            parent1, parent2 = select_parents(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation with generation info
+            child1 = mutate(child1, generation, max_generations)
+            child2 = mutate(child2, generation, max_generations)
+
+            # Special refinement step for children that may have become invalid
+            # Apply geometric corrections for containment and overlap
+            child1 = refine_invalid_configuration(child1)
+            child2 = refine_invalid_configuration(child2)
+
+            # Ensure validity
+            if check_containment(child1) and check_overlap(child1):
+                new_population.append(child1)
+            else:
+                # If still invalid, apply specialized repair
+                repaired_child = specialize_repair(parent1, parent2)
+                new_population.append(repaired_child)
+
+            if len(new_population) < pop_size and check_containment(child2) and check_overlap(child2):
+                new_population.append(child2)
+            elif len(new_population) < pop_size:
+                # Try to fix second child
+                repaired_child = specialize_repair(parent1, parent2)
+                new_population.append(repaired_child)
+
+        population = new_population[:pop_size]
+=======
+        # Generate offspring
+        while len(new_population) < pop_size:
+            # Selection
+            parent1, parent2 = select_parents(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation with generation info and population context
+            child1 = mutate(child1, generation, max_generations, fitnesses)
+            child2 = mutate(child2, generation, max_generations, fitnesses)
+
+            # Special refinement step for children that may have become invalid
+            # Apply geometric corrections for containment and overlap
+            child1 = refine_invalid_configuration(child1)
+            child2 = refine_invalid_configuration(child2)
+
+            # Ensure validity
+            if check_containment(child1) and check_overlap(child1):
+                new_population.append(child1)
+            else:
+                # If still invalid, apply specialized repair
+                repaired_child = specialize_repair(parent1, parent2)
+                new_population.append(repaired_child)
+
+            if len(new_population) < pop_size and check_containment(child2) and check_overlap(child2):
+                new_population.append(child2)
+            elif len(new_population) < pop_size:
+                # Try to fix second child
+                repaired_child = specialize_repair(parent1, parent2)
+                new_population.append(repaired_child)
+
+        population = new_population[:pop_size]
+>>>>>>> REPLACE
+</DIFF>

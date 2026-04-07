@@ -1,0 +1,296 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from typing import Tuple
+import time
+from scipy.spatial import Voronoi, voronoi_plot_2d
+import matplotlib.pyplot as plt
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def initialize_circles_voronoi(n: int) -> np.ndarray:
+    """Initialize circles using a Voronoi-based approach for better distribution."""
+    circles = np.zeros((n, 3))
+
+    # Generate more initial points for Voronoi diagram
+    # Use a combination of strategic points and random points
+    initial_points = []
+
+    # Corner points
+    initial_points.extend([(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)])
+
+    # Edge midpoints with some offset to avoid perfect symmetry
+    initial_points.extend([(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)])
+
+    # Center points with slight variations
+    initial_points.extend([(0.3, 0.3), (0.7, 0.3), (0.3, 0.7), (0.7, 0.7)])
+
+    # Additional random points to increase diversity
+    for _ in range(n - len(initial_points)):
+        initial_points.append((np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)))
+
+    # Ensure we have exactly n points
+    if len(initial_points) < n:
+        for _ in range(n - len(initial_points)):
+            initial_points.append((np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)))
+    elif len(initial_points) > n:
+        initial_points = initial_points[:n]
+
+    # Create Voronoi diagram
+    vor = Voronoi(np.array(initial_points))
+
+    # Get Voronoi vertices that are inside the unit square
+    valid_vertices = []
+    for vertex in vor.vertices:
+        if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+            valid_vertices.append(vertex)
+
+    # If we don't have enough vertices, add random points
+    while len(valid_vertices) < n:
+        valid_vertices.append([np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)])
+
+    # Sample the first n vertices as circle centers
+    sample_vertices = np.array(valid_vertices[:n])
+
+    # For each Voronoi vertex, calculate the maximum possible radius
+    for i in range(n):
+        x, y = sample_vertices[i]
+
+        # Calculate the minimum distance to any other point (not just vertices)
+        # This gives us a good estimate of how large a circle can be at this location
+        min_distance = float('inf')
+
+        # Check distance to all original points
+        for j, point in enumerate(initial_points):
+            if i != j:
+                dist = np.sqrt((x - point[0])**2 + (y - point[1])**2)
+                min_distance = min(min_distance, dist)
+
+        # Calculate maximum radius that fits in the unit square
+        max_square_radius = min(x, 1-x, y, 1-y)
+
+        # Take the minimum of both constraints
+        max_radius = min(min_distance/2, max_square_radius)
+        max_radius = max(0.001, max_radius)  # Ensure positive radius
+
+        circles[i] = [x, y, max_radius]
+
+    # Refine the initial configuration with a local search
+    # This helps to slightly improve the initial configuration
+    for _ in range(5):
+        improved = False
+        for i in range(n):
+            # Try small adjustments to position
+            old_x, old_y, old_r = circles[i]
+
+            # Try small perturbations
+            for dx, dy in [(-0.02, -0.02), (-0.02, 0.02), (0.02, -0.02), (0.02, 0.02)]:
+                new_x = old_x + dx
+                new_y = old_y + dy
+
+                # Check if new position is valid
+                if 0.001 <= new_x <= 0.999 and 0.001 <= new_y <= 0.999:
+                    new_r = min(new_x, 1-new_x, new_y, 1-new_y)
+
+                    # Check overlap with neighbors
+                    valid = True
+                    for j in range(n):
+                        if i != j:
+                            cx, cy, cr = circles[j]
+                            dist_sq = (new_x - cx)**2 + (new_y - cy)**2
+                            if dist_sq < (new_r + cr)**2:
+                                valid = False
+                                break
+
+                    if valid and new_r > old_r:
+                        circles[i] = [new_x, new_y, new_r]
+                        improved = True
+
+        if not improved:
+            break
+
+    return circles
+
+def is_valid_configuration(circles: np.ndarray) -> bool:
+    """Check if the configuration satisfies all constraints."""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if r > x or r > 1-x or r > y or r > 1-y:
+            return False
+
+    # Check non-overlap constraints
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+            if distance_sq < (r1 + r2)**2:
+                return False
+
+    return True
+
+def calculate_fitness(circles: np.ndarray) -> float:
+    """Calculate fitness with penalty for constraint violations."""
+    total_radius = np.sum(circles[:, 2])
+
+    # Penalty for constraint violations
+    penalty = 0
+
+    # Containment penalty - stronger penalty for severe violations
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        violation_penalty = 0
+        if r > x:
+            violation_penalty += 5000 * (r - x)**2
+        if r > 1-x:
+            violation_penalty += 5000 * (r - (1-x))**2
+        if r > y:
+            violation_penalty += 5000 * (r - y)**2
+        if r > 1-y:
+            violation_penalty += 5000 * (r - (1-y))**2
+        penalty += violation_penalty
+
+    # Overlap penalty - linear penalty scaled by overlap amount
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+            if distance_sq < (r1 + r2)**2:
+                overlap = (r1 + r2)**2 - distance_sq
+                penalty += 5000 * overlap  # Stronger penalty for overlaps
+
+    # Add a bonus for well-distributed circles (encourage spread)
+    bonus = 0
+    if len(circles) > 1:
+        # Calculate average distance between centers to encourage spreading
+        distances = []
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                distances.append(dist)
+
+        if distances:
+            avg_dist = np.mean(distances)
+            # Bonus for having larger average distances between centers
+            bonus = avg_dist * 0.1
+
+    return total_radius - penalty + bonus
+
+def mutate_circles(circles: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+    """Apply mutation to circle configuration."""
+    new_circles = circles.copy()
+
+    for i in range(len(circles)):
+        if np.random.random() < mutation_rate:
+            # Mutate position
+            new_circles[i, 0] += np.random.normal(0, 0.01)
+            new_circles[i, 1] += np.random.normal(0, 0.01)
+
+            # Ensure validity of new position
+            new_circles[i, 0] = np.clip(new_circles[i, 0], 0.01, 0.99)
+            new_circles[i, 1] = np.clip(new_circles[i, 1], 0.01, 0.99)
+
+            # Mutate radius
+            new_circles[i, 2] += np.random.normal(0, 0.005)
+            new_circles[i, 2] = max(0.001, new_circles[i, 2])  # Ensure positive radius
+
+    return new_circles
+
+def crossover_circles(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+    """Perform crossover between two circle configurations."""
+    child = parent1.copy()
+    n = len(parent1)
+
+    # Single point crossover for positions and radii
+    crossover_point = np.random.randint(1, n)
+
+    # Crossover for positions and radii
+    for i in range(crossover_point, n):
+        child[i] = parent2[i]
+
+    return child
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+
+    n = 32
+    max_generations = 1000
+    population_size = 50
+    elite_size = 5
+
+    # Initialize population with Voronoi-based starting points
+    population = []
+    for _ in range(population_size):
+        individual = initialize_circles_voronoi(n)
+        population.append(individual)
+
+    best_fitness = -np.inf
+    best_individual = None
+
+    # Evolutionary algorithm
+    for generation in range(max_generations):
+        # Calculate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = calculate_fitness(individual)
+            fitness_scores.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = individual.copy()
+
+        # Print progress every 100 generations
+        if generation % 100 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness}")
+
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        population = [population[i] for i in sorted_indices]
+
+        # Keep elite individuals
+        new_population = population[:elite_size]
+
+        # Generate offspring through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1_idx = np.random.randint(0, population_size//2)
+            parent2_idx = np.random.randint(0, population_size//2)
+
+            parent1 = population[parent1_idx]
+            parent2 = population[parent2_idx]
+
+            # Crossover
+            child = crossover_circles(parent1, parent2)
+
+            # Mutation
+            child = mutate_circles(child)
+
+            new_population.append(child)
+
+        population = new_population
+
+    # Final validation and return
+    if best_individual is not None and is_valid_configuration(best_individual):
+        return best_individual
+    else:
+        # Return the best valid configuration found during evolution
+        for individual in population:
+            if is_valid_configuration(individual):
+                return individual
+        # If no valid configuration was found, return a default greedy configuration
+        return initialize_circles_greedy(n)
+
+
+# EVOLVE-BLOCK-END

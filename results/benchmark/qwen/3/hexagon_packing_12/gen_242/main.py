@@ -1,0 +1,397 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+import random
+from numba import jit
+import math
+
+@jit(nopython=True)
+def hexagon_vertices_numba(center_x, center_y, side_length=1, angle_deg=0):
+    """Generate vertices of a regular hexagon using numba-optimized computation."""
+    angle_rad = angle_deg * math.pi / 180.0
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        angle = angle_rad + i * math.pi / 3
+        vertices[i, 0] = center_x + side_length * math.cos(angle)
+        vertices[i, 1] = center_y + side_length * math.sin(angle)
+    return vertices
+
+def hexagon_vertices(center_x, center_y, side_length=1, angle_deg=0):
+    """Generate vertices of a regular hexagon."""
+    return hexagon_vertices_numba(center_x, center_y, side_length, angle_deg)
+
+def check_containment_fast(hex_vertices, outer_hex_side_length):
+    """Fast containment check using bounding box approximation."""
+    outer_radius = outer_hex_side_length
+    # Simple bounding box check for initial filtering
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+    
+    # Check if bounding box fits in outer hexagon
+    if max(abs(min_x), abs(max_x)) > outer_radius or max(abs(min_y), abs(max_y)) > outer_radius:
+        return False
+    return True
+
+def check_containment(hex_vertices, outer_hex_center, outer_hex_side_length):
+    """Check if all vertices of a hexagon are inside the outer hexagon."""
+    outer_vertices = hexagon_vertices(outer_hex_center[0], outer_hex_center[1], outer_hex_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    for vertex in hex_vertices:
+        point = Point(vertex[0], vertex[1])
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap_fast(hex1_vertices, hex2_vertices):
+    """Fast overlap check using bounding boxes."""
+    # Quick bounding box check first
+    min1_x = min(v[0] for v in hex1_vertices)
+    max1_x = max(v[0] for v in hex1_vertices)
+    min1_y = min(v[1] for v in hex1_vertices)
+    max1_y = max(v[1] for v in hex1_vertices)
+    
+    min2_x = min(v[0] for v in hex2_vertices)
+    max2_x = max(v[0] for v in hex2_vertices)
+    min2_y = min(v[1] for v in hex2_vertices)
+    max2_y = max(v[1] for v in hex2_vertices)
+    
+    if (max1_x < min2_x or max2_x < min1_x or 
+        max1_y < min2_y or max2_y < min1_y):
+        return False
+    
+    # Detailed overlap check
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    return check_overlap_fast(hex1_vertices, hex2_vertices)
+
+def evaluate_packing(inner_hex_data, outer_hex_side_length):
+    """Evaluate if the packing meets constraints and compute objective."""
+    try:
+        # Generate vertices for all inner hexagons
+        hex_polygons = []
+        for i in range(12):
+            x, y, angle = inner_hex_data[i]
+            vertices = hexagon_vertices(x, y, 1.0, angle)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check for overlaps between hexagons using fast overlap check
+        for i in range(12):
+            for j in range(i+1, 12):
+                if check_overlap_fast(hex_polygons[i].exterior.coords[:-1], hex_polygons[j].exterior.coords[:-1]):
+                    if check_overlap(hex_polygons[i].exterior.coords[:-1], hex_polygons[j].exterior.coords[:-1]):
+                        return False, 0
+
+        # Create outer hexagon
+        outer_vertices = hexagon_vertices(0, 0, outer_hex_side_length, 0)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment
+        for i in range(12):
+            for vertex in hex_polygons[i].exterior.coords:
+                point = Point(vertex[0], vertex[1])
+                if not outer_polygon.contains(point):
+                    return False, 0
+
+        # If we reach here, packing is valid
+        # Calculate objective (1/outer_radius)
+        return True, 1.0 / outer_hex_side_length
+
+    except Exception as e:
+        return False, 0
+
+def create_kagome_initial_guess():
+    """Create an initial configuration based on Kagome lattice structure."""
+    # Kagome lattice uses triangular arrangement with hexagonal symmetry
+    sqrt3 = np.sqrt(3)
+    
+    # Center hexagon
+    center_hex = [[0.0, 0.0, 0.0]]
+    
+    # First ring of 6 hexagons (at distance 2)
+    ring1_angles = [0, 60, 120, 180, 240, 300]
+    ring1_positions = []
+    for angle in ring1_angles:
+        rad = np.radians(angle)
+        x = 2.0 * np.cos(rad)
+        y = 2.0 * np.sin(rad)
+        ring1_positions.append([x, y, 0.0])
+    
+    # Second ring of 6 hexagons (at distance 3.464 = 2*sqrt(3))
+    ring2_angles = [30, 90, 150, 210, 270, 330]
+    ring2_positions = []
+    for angle in ring2_angles:
+        rad = np.radians(angle)
+        x = 3.464 * np.cos(rad)
+        y = 3.464 * np.sin(rad)
+        ring2_positions.append([x, y, 0.0])
+    
+    # Combine all positions
+    positions = center_hex + ring1_positions + ring2_positions
+    return np.array(positions)
+
+def create_hcp_initial_guess():
+    """Create an initial configuration based on Hexagonal Close Packed (HCP) structure."""
+    sqrt3 = np.sqrt(3)
+    
+    # Center hexagon
+    center_hex = [[0.0, 0.0, 0.0]]
+    
+    # First shell (6 hexagons)
+    shell1_angles = [0, 60, 120, 180, 240, 300]
+    shell1_positions = []
+    for angle in shell1_angles:
+        rad = np.radians(angle)
+        x = 2.0 * np.cos(rad)
+        y = 2.0 * np.sin(rad)
+        shell1_positions.append([x, y, 0.0])
+    
+    # Second shell (6 hexagons) - offset
+    shell2_angles = [30, 90, 150, 210, 270, 330]
+    shell2_positions = []
+    for angle in shell2_angles:
+        rad = np.radians(angle)
+        x = 3.464 * np.cos(rad)
+        y = 3.464 * np.sin(rad)
+        shell2_positions.append([x, y, 0.0])
+    
+    # Combine all positions
+    positions = center_hex + shell1_positions + shell2_positions
+    return np.array(positions)
+
+def create_symmetric_initial_guesses():
+    """Create multiple symmetric initial guesses."""
+    configs = []
+    
+    # Add several different symmetric configurations
+    configs.append(create_kagome_initial_guess())
+    configs.append(create_hcp_initial_guess())
+    
+    # Add a perturbed version of kagome
+    kagome_perturbed = create_kagome_initial_guess().copy()
+    for i in range(len(kagome_perturbed)):
+        kagome_perturbed[i][0] += random.uniform(-0.1, 0.1)
+        kagome_perturbed[i][1] += random.uniform(-0.1, 0.1)
+    configs.append(kagome_perturbed)
+    
+    # Add a simple ring configuration
+    ring_config = np.array([
+        [0.0, 0.0, 0],
+        [0.0, 2.0, 0],
+        [1.732050808, 1.0, 0],
+        [1.732050808, -1.0, 0],
+        [0.0, -2.0, 0],
+        [-1.732050808, -1.0, 0],
+        [-1.732050808, 1.0, 0],
+        [3.464101616, 2.0, 0],
+        [3.464101616, -2.0, 0],
+        [-3.464101616, -2.0, 0],
+        [-3.464101616, 2.0, 0],
+        [0.0, -4.0, 0],
+    ], dtype=float)
+    configs.append(ring_config)
+    
+    return configs
+
+def adaptive_mutation(individual, generation, max_generations, stage, temperature):
+    """Apply adaptive mutation with temperature control."""
+    mutated = individual.copy()
+    
+    # Mutation rate decreases with generation and increases with temperature
+    mutation_rate = 0.2 * temperature * (1 - generation / max_generations)
+    
+    # Adjust mutation strength based on stage
+    if stage == 1:
+        mutation_strength = 0.3
+    elif stage == 2:
+        mutation_strength = 0.15
+    else:
+        mutation_strength = 0.05
+    
+    # Apply position mutations
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            mutated[i][0] += np.random.normal(0, mutation_strength)
+            mutated[i][1] += np.random.normal(0, mutation_strength)
+        
+        # Apply rotation mutations less frequently
+        if random.random() < mutation_rate * 0.3:
+            mutated[i][2] += np.random.normal(0, 10)
+            mutated[i][2] = mutated[i][2] % 360
+    
+    return mutated
+
+def evolutionary_optimization(initial_configs, max_generations=60):
+    """Perform evolutionary optimization with multiple starting points."""
+    best_score = 0
+    best_config = None
+    
+    # Try each initial configuration
+    for initial_config in initial_configs:
+        # Simple evolutionary approach
+        population = [initial_config.copy()]
+        
+        # Add diversified variants
+        for _ in range(2):
+            variant = initial_config.copy()
+            for i in range(len(variant)):
+                variant[i][0] += np.random.normal(0, 0.1)
+                variant[i][1] += np.random.normal(0, 0.1)
+                variant[i][2] += np.random.normal(0, 5)
+            population.append(variant)
+        
+        # Evolutionary loop with temperature schedule
+        for gen in range(max_generations):
+            # Temperature schedule
+            temperature = 0.8 * (1 - gen / max_generations) + 0.01
+            
+            # Evaluate fitness
+            fitness_scores = []
+            for individual in population:
+                # Estimate outer radius (conservative estimation)
+                max_dist = 0
+                for i in range(len(individual)):
+                    x, y, _ = individual[i]
+                    dist = np.sqrt(x**2 + y**2)
+                    max_dist = max(max_dist, dist)
+                estimated_radius = max_dist + 1.0  # Add buffer
+                
+                valid, score = evaluate_packing(individual, estimated_radius)
+                fitness_scores.append(score if valid else 0)
+            
+            # Find best in current population
+            current_best_idx = np.argmax(fitness_scores)
+            current_best_score = fitness_scores[current_best_idx]
+            if current_best_score > best_score:
+                best_score = current_best_score
+                best_config = population[current_best_idx].copy()
+            
+            # Early termination if we've reached SOTA
+            if best_score > 0.2536:  # Close to target
+                break
+            
+            # Selection (tournament style)
+            selected = []
+            tournament_size = 3
+            for _ in range(len(population)):
+                tournament = random.sample(list(range(len(population))), tournament_size)
+                winner_idx = max(tournament, key=lambda i: fitness_scores[i])
+                selected.append(population[winner_idx].copy())
+            
+            # Create new population through mutation
+            new_population = []
+            for individual in selected:
+                mutated = adaptive_mutation(individual, gen, max_generations, 
+                                          1 if gen < max_generations//2 else 2 if gen < 3*max_generations//4 else 3, 
+                                          temperature)
+                new_population.append(mutated)
+            
+            population = new_population
+    
+    return best_config, best_score
+
+def optimize_with_enhanced_symmetry():
+    """Enhanced optimization that uses evolutionary approach with better symmetric structures."""
+    # Generate multiple initial configurations
+    initial_configs = create_symmetric_initial_guesses()
+    
+    # Run evolutionary optimization
+    best_config, best_score = evolutionary_optimization(initial_configs, max_generations=40)
+    
+    if best_config is not None:
+        # Refine the best configuration by evaluating with actual outer radius
+        max_dist = 0
+        for i in range(len(best_config)):
+            x, y, _ = best_config[i]
+            dist = np.sqrt(x**2 + y**2)
+            max_dist = max(max_dist, dist)
+        estimated_radius = max_dist + 1.5  # Add safe buffer
+        
+        # Final validation
+        valid, final_score = evaluate_packing(best_config, estimated_radius)
+        if valid:
+            return best_config, estimated_radius
+    
+    # Fallback to a known good configuration
+    return create_kagome_initial_guess(), 3.9419123
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    try:
+        inner_hex_data, outer_hex_side_length = optimize_with_enhanced_symmetry()
+        
+        # Validate the configuration
+        is_valid, objective_value = evaluate_packing(inner_hex_data, outer_hex_side_length)
+        
+        # If still valid, return the optimized result
+        if is_valid:
+            # Outer hexagon centered at origin with no rotation
+            outer_hex_data = np.array([0, 0, 0])
+            return inner_hex_data, outer_hex_data, outer_hex_side_length
+    except:
+        pass
+    
+    # Fallback to original approach if optimization fails
+    # Start with a good symmetric configuration based on known solutions
+    inner_hex_data = np.array([
+        [0.0, 0.0, 0],      # Center
+        [0.0, 2.0, 0],      # Top
+        [1.732050808, 1.0, 0],   # Top right
+        [1.732050808, -1.0, 0],  # Bottom right
+        [0.0, -2.0, 0],     # Bottom
+        [-1.732050808, -1.0, 0],  # Bottom left
+        [-1.732050808, 1.0, 0],   # Top left
+        [3.464101616, 2.0, 0],    # Far top right
+        [3.464101616, -2.0, 0],   # Far bottom right
+        [-3.464101616, -2.0, 0],  # Far bottom left
+        [-3.464101616, 2.0, 0],   # Far top left
+        [0.0, -4.0, 0],     # Far bottom
+    ], dtype=float)
+    
+    # Initial estimate for outer radius based on known good values
+    outer_hex_side_length = 3.9419123
+    
+    # Outer hexagon centered at origin with no rotation
+    outer_hex_data = np.array([0, 0, 0])
+    
+    # Validate the configuration
+    is_valid, objective_value = evaluate_packing(inner_hex_data, outer_hex_side_length)
+    
+    # If not valid, adjust to a working configuration
+    if not is_valid:
+        # Use a simpler but valid configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0],
+        ])
+        outer_hex_side_length = 8.0
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,218 @@
+<NAME>
+enhance_initial_configurations_with_symmetry_breaking
+</NAME>
+
+<DESCRIPTION>
+The main idea is to introduce symmetry-breaking constraints in the initial configuration generation to avoid degenerate solutions that may trap the optimization process. The current approach generates various initial patterns but doesn't explicitly break symmetries that could lead to equivalent local optima. By imposing specific constraints like fixing positions of certain points or enforcing lexicographic ordering, we can ensure each optimization path explores distinct solution spaces, leading to better convergence properties and potentially higher min/max ratios.
+
+The key insight is that geometric optimization problems often have symmetric solutions that are locally optimal but not globally optimal. By breaking these symmetries early in the process, we give the optimizer a better chance to find truly optimal configurations rather than getting stuck in symmetrically equivalent but suboptimal ones.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_dispersed_corner_pattern():
+        """Create a specialized corner-based pattern that maximizes initial spread"""
+        # Place 4 corner points
+        corners = [[0, 0], [1, 0], [0, 1], [1, 1]]
+        # Add 4 edge midpoints
+        edges = [[0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]]
+        # Add 4 interior points in a cross pattern
+        cross = [[0.5, 0.2], [0.5, 0.8], [0.2, 0.5], [0.8, 0.5]]
+        # Add 4 more points in a diamond pattern
+        diamond = [[0.3, 0.3], [0.7, 0.3], [0.3, 0.7], [0.7, 0.7]]
+
+        points = corners + edges + cross + diamond
+        return np.array(points)
+=======
+    def create_dispersed_corner_pattern():
+        """Create a specialized corner-based pattern that maximizes initial spread"""
+        # Place 4 corner points
+        corners = [[0, 0], [1, 0], [0, 1], [1, 1]]
+        # Add 4 edge midpoints
+        edges = [[0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]]
+        # Add 4 interior points in a cross pattern
+        cross = [[0.5, 0.2], [0.5, 0.8], [0.2, 0.5], [0.8, 0.5]]
+        # Add 4 more points in a diamond pattern
+        diamond = [[0.3, 0.3], [0.7, 0.3], [0.3, 0.7], [0.7, 0.7]]
+
+        points = corners + edges + cross + diamond
+
+        # Apply symmetry breaking: fix bottom-left corner to (0,0) and enforce lexicographic ordering
+        # This prevents symmetric solutions where the entire configuration is rotated/reflected
+        points_array = np.array(points)
+        # Ensure bottom-left point is fixed
+        points_array[0] = [0, 0]
+        # Sort points lexicographically to break permutation symmetry
+        sorted_indices = np.lexsort((points_array[:, 1], points_array[:, 0]))
+        points_array = points_array[sorted_indices]
+
+        return points_array
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_distributed_initial():
+        """Create a distributed initial configuration that promotes good spread"""
+        # Start with corner pattern
+        base = create_dispersed_corner_pattern()
+
+        # Add perturbations from the center to encourage spreading
+        center = np.mean(base, axis=0)
+        for i in range(16):
+            # Move points away from center slightly
+            direction = base[i] - center
+            if np.linalg.norm(direction) > 0:
+                direction = direction / np.linalg.norm(direction)
+                base[i] += direction * 0.02
+
+        # Final clip to bounds
+        base = np.clip(base, 0, 1)
+        return base
+=======
+    def create_distributed_initial():
+        """Create a distributed initial configuration that promotes good spread"""
+        # Start with corner pattern
+        base = create_dispersed_corner_pattern()
+
+        # Add perturbations from the center to encourage spreading
+        center = np.mean(base, axis=0)
+        for i in range(16):
+            # Move points away from center slightly
+            direction = base[i] - center
+            if np.linalg.norm(direction) > 0:
+                direction = direction / np.linalg.norm(direction)
+                base[i] += direction * 0.02
+
+        # Final clip to bounds
+        base = np.clip(base, 0, 1)
+
+        # Apply additional symmetry breaking: ensure first point is at minimum x,y
+        # This breaks rotational and reflection symmetries
+        min_idx = np.argmin(base[:, 0] + base[:, 1])
+        if min_idx != 0:
+            # Swap first point with minimum point
+            base[[0, min_idx]] = base[[min_idx, 0]]
+
+        return base
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # 1. Dispersed corner pattern
+        configs.append(create_dispersed_corner_pattern())
+
+        # 2. Hexagonal grid
+        configs.append(create_hexagonal_grid())
+
+        # 3. Spherical pattern
+        configs.append(create_spherical_pattern())
+
+        # 4. Distributed initial
+        configs.append(create_distributed_initial())
+
+        # 5. Random uniform points
+        np.random.seed(42)
+        configs.append(np.random.rand(16, 2))
+
+        # 6. Sobol sequence points
+        sampler = qmc.Sobol(d=2, seed=42)
+        sobol_points = sampler.random(16)
+        configs.append(sobol_points)
+
+        # 7. Stratified grid with larger perturbations
+        grid_points = np.array([[i/4, j/4] for i in range(4) for j in range(4)])[:16]
+        np.random.seed(42)
+        for i in range(16):
+            # Larger perturbations for better diversity
+            grid_points[i] += np.random.normal(0, 0.03, 2)
+        grid_points = np.clip(grid_points, 0, 1)
+        configs.append(grid_points)
+
+        # 8. Spiral with different parameters
+        # Different golden ratio spiral
+        points = []
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        for i in range(16):
+            angle = 2 * np.pi * i / phi * 1.5  # Different multiplier
+            radius = np.sqrt(i / 15.0) if i > 0 else 0
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            points.append([x, y])
+        points = np.array(points)
+        if np.max(points) > np.min(points):
+            points = (points - np.min(points, axis=0)) / (np.max(points, axis=0) - np.min(points, axis=0) + 1e-12)
+        points = points * 0.8 + 0.1
+        configs.append(points)
+
+        return configs
+=======
+        # 1. Dispersed corner pattern
+        configs.append(create_dispersed_corner_pattern())
+
+        # 2. Hexagonal grid
+        configs.append(create_hexagonal_grid())
+
+        # 3. Spherical pattern
+        configs.append(create_spherical_pattern())
+
+        # 4. Distributed initial
+        configs.append(create_distributed_initial())
+
+        # 5. Random uniform points with symmetry breaking
+        np.random.seed(42)
+        random_points = np.random.rand(16, 2)
+        # Apply symmetry breaking to random points
+        # Sort them lexicographically to break permutation symmetry
+        sorted_indices = np.lexsort((random_points[:, 1], random_points[:, 0]))
+        random_points = random_points[sorted_indices]
+        configs.append(random_points)
+
+        # 6. Sobol sequence points
+        sampler = qmc.Sobol(d=2, seed=42)
+        sobol_points = sampler.random(16)
+        # Apply symmetry breaking to Sobol points
+        sorted_indices = np.lexsort((sobol_points[:, 1], sobol_points[:, 0]))
+        sobol_points = sobol_points[sorted_indices]
+        configs.append(sobol_points)
+
+        # 7. Stratified grid with larger perturbations
+        grid_points = np.array([[i/4, j/4] for i in range(4) for j in range(4)])[:16]
+        np.random.seed(42)
+        for i in range(16):
+            # Larger perturbations for better diversity
+            grid_points[i] += np.random.normal(0, 0.03, 2)
+        grid_points = np.clip(grid_points, 0, 1)
+
+        # Apply symmetry breaking: ensure first point is at minimum x,y
+        min_idx = np.argmin(grid_points[:, 0] + grid_points[:, 1])
+        if min_idx != 0:
+            grid_points[[0, min_idx]] = grid_points[[min_idx, 0]]
+        configs.append(grid_points)
+
+        # 8. Spiral with different parameters and symmetry breaking
+        # Different golden ratio spiral
+        points = []
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        for i in range(16):
+            angle = 2 * np.pi * i / phi * 1.5  # Different multiplier
+            radius = np.sqrt(i / 15.0) if i > 0 else 0
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            points.append([x, y])
+        points = np.array(points)
+        if np.max(points) > np.min(points):
+            points = (points - np.min(points, axis=0)) / (np.max(points, axis=0) - np.min(points, axis=0) + 1e-12)
+        points = points * 0.8 + 0.1
+
+        # Apply symmetry breaking to spiral points
+        sorted_indices = np.lexsort((points[:, 1], points[:, 0]))
+        points = points[sorted_indices]
+        configs.append(points)
+
+        return configs
+>>>>>>> REPLACE
+</DIFF>

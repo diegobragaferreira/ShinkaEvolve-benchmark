@@ -1,0 +1,319 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.validation import make_valid
+from joblib import Parallel, delayed
+import time
+from itertools import combinations
+
+def create_regular_hexagon(center=(0, 0), side_length=1, rotation=0):
+    """Create a regular hexagon as a shapely polygon"""
+    angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation)
+    points = [(center[0] + side_length * np.cos(a),
+               center[1] + side_length * np.sin(a)) for a in angles]
+    return Polygon(points)
+
+def get_hexagon_vertices(center, side_length, rotation):
+    """Get all vertices of a hexagon"""
+    angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation)
+    return [(center[0] + side_length * np.cos(a),
+             center[1] + side_length * np.sin(a)) for a in angles]
+
+def check_containment(hexagon_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon"""
+    try:
+        return outer_hex_poly.contains(hexagon_poly)
+    except:
+        try:
+            valid_outer = make_valid(outer_hex_poly)
+            valid_hex = make_valid(hexagon_poly)
+            return valid_outer.contains(valid_hex)
+        except:
+            return False
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap using Shapely"""
+    try:
+        poly1 = Polygon(hex1)
+        poly2 = Polygon(hex2)
+        return poly1.intersects(poly2)
+    except:
+        try:
+            valid_poly1 = make_valid(Polygon(hex1))
+            valid_poly2 = make_valid(Polygon(hex2))
+            return valid_poly1.intersects(valid_poly2)
+        except:
+            return True  # if we can't validate, assume they overlap
+
+def compute_hexagon_bounding_box(vertices):
+    """Compute axis-aligned bounding box for a hexagon"""
+    xs = [v[0] for v in vertices]
+    ys = [v[1] for v in vertices]
+    return min(xs), max(xs), min(ys), max(ys)
+
+def compute_outer_hex_radius_from_positions(positions, rotations):
+    """Compute minimum outer hexagon radius needed for given positions"""
+    max_dist = 0
+    for i, (pos, rot) in enumerate(zip(positions, rotations)):
+        vertices = get_hexagon_vertices(pos[0], pos[1], 1, rot)
+        for vx, vy in vertices:
+            dist = np.sqrt(vx**2 + vy**2)
+            max_dist = max(max_dist, dist)
+    return max_dist
+
+def generate_geometric_initial_guess():
+    """Generate initial guess based on geometric insights"""
+    # First, let's place hexagons in a pattern that maximizes space utilization
+    # We'll use a systematic approach inspired by hexagonal close packing
+    
+    # Base positions in a hexagonal lattice pattern
+    positions = []
+    rotations = []
+    
+    # Central hexagon
+    positions.append([0.0, 0.0])
+    rotations.append(0.0)
+    
+    # First ring - 6 hexagons around the center
+    ring_1_angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 angles
+    for angle in ring_1_angles:
+        x = 2.0 * np.cos(angle)
+        y = 2.0 * np.sin(angle)
+        positions.append([x, y])
+        rotations.append(0.0)
+    
+    # Second ring - additional hexagons
+    ring_2_angles = np.linspace(np.pi/6, 2*np.pi + np.pi/6, 6)  # 6 more angles
+    for angle in ring_2_angles:
+        x = 3.5 * np.cos(angle)
+        y = 3.5 * np.sin(angle)
+        positions.append([x, y])
+        rotations.append(0.0)
+    
+    # Third ring - fill remaining spots
+    ring_3_angles = np.linspace(0, 2*np.pi, 5)  # 5 more
+    for angle in ring_3_angles:
+        x = 4.5 * np.cos(angle)
+        y = 4.5 * np.sin(angle)
+        positions.append([x, y])
+        rotations.append(0.0)
+    
+    # Trim to exactly 11 positions
+    positions = positions[:11]
+    rotations = rotations[:11]
+    
+    # Add slight randomness for variation
+    for i in range(len(positions)):
+        positions[i][0] += np.random.normal(0, 0.1)
+        positions[i][1] += np.random.normal(0, 0.1)
+        rotations[i] += np.random.normal(0, 10)
+        rotations[i] = rotations[i] % 360
+    
+    # Flatten for parameter vector
+    flat_params = []
+    for pos in positions:
+        flat_params.extend(pos)
+    flat_params.extend(rotations)
+    flat_params.append(6.0)  # Initial outer radius guess
+    
+    return np.array(flat_params)
+
+def evaluate_single_solution(params, outer_radius_estimate=None):
+    """Fast evaluation for single solution with geometric shortcuts"""
+    # Parse parameters
+    inner_positions = params[:22].reshape(-1, 2)  # x,y pairs
+    inner_rotations = params[22:33]  # 11 rotations
+    if outer_radius_estimate is None:
+        outer_radius = params[33]  # outer hex radius
+    else:
+        outer_radius = outer_radius_estimate
+
+    # Create outer hexagon
+    outer_hex = create_regular_hexagon((0, 0), outer_radius, 0)
+
+    # Fast estimate of outer hexagon size needed
+    estimated_outer_radius = compute_outer_hex_radius_from_positions(inner_positions, inner_rotations)
+    
+    # If the estimated radius is already much larger than our current one,
+    # we can quickly reject this configuration
+    if estimated_outer_radius > outer_radius * 1.5:
+        return -1000000  # Reject immediately
+    
+    # Check all containment and overlaps
+    total_penalty = 0
+    
+    # Early exit if radius is too small for containment
+    for i, pos in enumerate(inner_positions):
+        rot = inner_rotations[i]
+        vertices = get_hexagon_vertices(pos[0], pos[1], 1, rot)
+        hex_poly = Polygon(vertices)
+        if not check_containment(hex_poly, outer_hex):
+            total_penalty += 10000  # Large penalty for containment violations
+            if total_penalty > 10000:
+                return -total_penalty  # Early exit for very bad config
+
+    # Check overlaps using Shapely
+    for i in range(len(inner_positions)):
+        for j in range(i+1, len(inner_positions)):
+            pos1 = tuple(inner_positions[i])
+            pos2 = tuple(inner_positions[j])
+            rot1 = inner_rotations[i]
+            rot2 = inner_rotations[j]
+            
+            vertices1 = get_hexagon_vertices(pos1[0], pos1[1], 1, rot1)
+            vertices2 = get_hexagon_vertices(pos2[0], pos2[1], 1, rot2)
+            
+            if check_overlap(vertices1, vertices2):
+                total_penalty += 100000  # Very large penalty for overlaps
+                if total_penalty > 100000:
+                    return -total_penalty  # Early exit
+
+    # If we passed all checks, return the inverse radius
+    inv_radius = 1.0 / outer_radius if outer_radius > 0 else 0
+    return -inv_radius + total_penalty
+
+def parallel_evaluate_solutions(solutions, outer_radius_estimate=None):
+    """Evaluate multiple solutions in parallel"""
+    results = Parallel(n_jobs=-1)(delayed(evaluate_single_solution)(sol, outer_radius_estimate) 
+                                  for sol in solutions)
+    return results
+
+def smart_initial_population():
+    """Generate a smarter initial population with better diversity"""
+    populations = []
+    
+    # Population 1: Regular hexagonal pattern
+    base_positions = []
+    base_rotations = []
+    
+    # Central hexagon
+    base_positions.append([0.0, 0.0])
+    base_rotations.append(0.0)
+    
+    # Ring 1
+    ring1_angles = np.linspace(0, 2*np.pi, 7)[:-1]
+    for angle in ring1_angles:
+        base_positions.append([2.0 * np.cos(angle), 2.0 * np.sin(angle)])
+        base_rotations.append(0.0)
+    
+    # Ring 2
+    ring2_angles = np.linspace(np.pi/6, 2*np.pi + np.pi/6, 6)
+    for angle in ring2_angles:
+        base_positions.append([3.5 * np.cos(angle), 3.5 * np.sin(angle)])
+        base_rotations.append(0.0)
+    
+    # Trim to 11
+    base_positions = base_positions[:11]
+    base_rotations = base_rotations[:11]
+    
+    # Create variations
+    for i in range(5):
+        variation = base_positions.copy()
+        rotations = base_rotations.copy()
+        
+        # Add some randomness
+        for j in range(len(variation)):
+            variation[j][0] += np.random.normal(0, 0.2)
+            variation[j][1] += np.random.normal(0, 0.2)
+            rotations[j] += np.random.normal(0, 15)
+            rotations[j] = rotations[j] % 360
+        
+        # Flatten and add radius
+        flat_params = []
+        for pos in variation:
+            flat_params.extend(pos)
+        flat_params.extend(rotations)
+        flat_params.append(6.0 + np.random.uniform(-1, 1))  # Vary radius
+        
+        populations.append(np.array(flat_params))
+    
+    return populations
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses a hybrid geometric and evolutionary approach to find an optimal solution.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Step 1: Generate diverse initial configurations
+    initial_populations = smart_initial_population()
+    
+    best_result = None
+    best_score = float('-inf')
+    
+    # Step 2: Multi-stage optimization
+    # Stage 1: Coarse optimization with reduced population
+    bounds = []
+    for _ in range(11):
+        bounds.extend([(-10, 10), (-10, 10)])
+    for _ in range(11):
+        bounds.append((0, 360))
+    bounds.append((1, 20))
+    
+    # Evaluate initial population and pick the best
+    initial_scores = parallel_evaluate_solutions(initial_populations)
+    best_initial_idx = np.argmax(initial_scores)
+    best_initial = initial_populations[best_initial_idx]
+    
+    # Run local optimization around the best initial solution
+    result = differential_evolution(
+        evaluate_single_solution,
+        bounds,
+        maxiter=80,
+        popsize=15,
+        seed=42,
+        disp=False
+    )
+    
+    # Update best if we found something better
+    final_score = evaluate_single_solution(result.x)
+    if final_score > best_score:
+        best_score = final_score
+        best_result = result
+    
+    # Stage 2: Restart with the geometric initial guess for fine-tuning
+    geometric_initial = generate_geometric_initial_guess()
+    result2 = differential_evolution(
+        evaluate_single_solution,
+        bounds,
+        maxiter=60,
+        popsize=15,
+        seed=123,
+        disp=False
+    )
+    
+    # Check if this gives us a better solution
+    final_score2 = evaluate_single_solution(result2.x)
+    if final_score2 > best_score:
+        best_score = final_score2
+        best_result = result2
+    
+    # Extract results
+    if best_result is None:
+        # Fallback to geometric initial guess
+        params = geometric_initial
+    else:
+        params = best_result.x
+    
+    inner_positions = params[:22].reshape(-1, 2)
+    inner_rotations = params[22:33]
+    outer_radius = params[33]
+
+    # Create final data arrays
+    inner_hex_data = np.column_stack([
+        inner_positions[:, 0],
+        inner_positions[:, 1],
+        inner_rotations
+    ])
+
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+
+    return inner_hex_data, outer_hex_data, outer_radius
+
+# EVOLVE-BLOCK-END

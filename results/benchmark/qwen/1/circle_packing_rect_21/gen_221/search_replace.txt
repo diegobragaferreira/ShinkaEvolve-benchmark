@@ -1,0 +1,114 @@
+<NAME>
+add_voronoi_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Voronoi diagrams for constraint density estimation but doesn't fully leverage Voronoi-based adaptive mutation. The idea is to enhance the mutation operator by making it more sophisticated: instead of just using Voronoi cell areas for scaling mutation rates, we'll make the mutation parameters (step sizes, scale factors) directly dependent on the Voronoi cell area - smaller cells (higher constraint density) should get more careful, smaller mutations while larger cells (lower constraint density) can handle more aggressive changes.
+
+This approach will help the algorithm better navigate the constraint landscape by:
+1. Making mutations adaptive to local geometry
+2. Increasing precision in dense regions where small changes matter more
+3. Being more exploratory in sparse regions where larger changes are safe
+4. Improving convergence by reducing unnecessary large jumps in constrained areas
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate(self, circles: np.ndarray) -> np.ndarray:
+        """Improved mutation operator with adaptive parameters based on constraint density."""
+        mutated = circles.copy()
+
+        # First compute constraint density for adaptive mutation
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute Voronoi cells to estimate constraint density
+        voronoi_densities = self.compute_voronoi_density(circles)
+        constraint_densities = self.compute_constraint_density(circles)
+
+        # Adaptive mutation rate based on generation and constraint density
+        for i in range(self.n_circles):
+            # Base mutation rate
+            mutation_rate = 0.3
+
+            # Density-based adjustment: higher density = lower mutation rate
+            voronoi_factor = max(0.1, 1.0 / (1.0 + np.log(1.0 + voronoi_densities[i])))
+            constraint_factor = 1.0 / (1.0 + constraint_densities[i] * 0.5)
+            adjusted_mutation_rate = mutation_rate * voronoi_factor * constraint_factor
+
+            if np.random.random() < adjusted_mutation_rate:
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    # Mutate position (x, y) with adaptive step size based on density
+                    # High density = small step, low density = large step
+                    base_step = 0.05 + np.random.random() * 0.05
+                    density_factor = 1.0 / (1.0 + voronoi_densities[i]/np.mean(voronoi_densities))
+                    step_size = base_step * density_factor
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+                else:
+                    # Mutate radius with adaptive scale factor
+                    # Adapted based on density - more conservative in dense regions
+                    density_factor = 1.0 / (1.0 + voronoi_densities[i]/np.mean(voronoi_densities))
+                    scale_factor = np.exp(np.random.normal(0, 0.2 * density_factor))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+        return mutated
+=======
+    def mutate(self, circles: np.ndarray) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based adaptive mutation parameters."""
+        mutated = circles.copy()
+
+        # Compute Voronoi cells to estimate constraint density
+        voronoi_densities = self.compute_voronoi_density(circles)
+
+        # Better normalization for Voronoi densities
+        voronoi_normalized = voronoi_densities / (np.mean(voronoi_densities) + 1e-8)
+
+        # Normalize to get constraint levels (smaller areas = higher constraint)
+        constraint_levels = 1.0 / (voronoi_normalized + 1e-8)
+
+        for i in range(self.n_circles):
+            # Base mutation rate
+            mutation_rate = 0.3
+
+            # Enhanced density-based adjustment using Voronoi information
+            # Lower Voronoi area means higher constraint density = smaller mutations
+            constraint_level = constraint_levels[i]
+            # Scale mutation rate inversely to constraint level
+            adjusted_mutation_rate = mutation_rate * (1.0 / (1.0 + constraint_level * 0.5))
+
+            if np.random.random() < adjusted_mutation_rate:
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    # Mutate position (x, y) with Voronoi-adaptive step size
+                    # Smaller Voronoi cells (high constraint) = smaller step size
+                    # Larger Voronoi cells (low constraint) = larger step size
+                    base_step = 0.05
+                    step_size = base_step / (1.0 + constraint_level * 0.3)
+
+                    # Add some randomness to step size
+                    step_size *= (0.8 + np.random.random() * 0.4)
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+                else:
+                    # Mutate radius with Voronoi-adaptive scale factor
+                    # Higher constraint density = more conservative radius changes
+                    base_scale = 0.2
+                    scale_factor = base_scale / (1.0 + constraint_level * 0.2)
+
+                    # Random component for exploration
+                    random_component = np.random.normal(0, scale_factor * 0.5)
+                    mutated[i, 2] *= np.exp(random_component)
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

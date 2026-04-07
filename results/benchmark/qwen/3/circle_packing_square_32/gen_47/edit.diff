@@ -1,0 +1,105 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,102 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+     circles = np.zeros((n, 3))
+ 
++    # Hexagonal grid parameters
++    # For 32 circles, we want to arrange them in roughly a 6x6 grid (36 cells)
++    # but only use 32 of them
++
++    # Calculate approximate grid dimensions
++    rows = 6
++    cols = 6
++
++    # Hexagonal lattice spacing (based on circle diameter)
++    hex_spacing_x = 1.0  # This will be adjusted
++    hex_spacing_y = np.sqrt(3)/2  # Height of equilateral triangle
++
++    # Initialize grid points
++    grid_points = []
++    for i in range(rows):
++        for j in range(cols):
++            # Offset every other row
++            x_offset = (j if i % 2 == 0 else j + 0.5)
++            y_offset = i * hex_spacing_y
++            grid_points.append([x_offset, y_offset])
++
++    # Trim to exactly 32 points
++    grid_points = np.array(grid_points[:n])
++
++    # Normalize to fit in unit square [0,1] x [0,1]
++    max_x = max(grid_points[:, 0]) if len(grid_points) > 0 else 1
++    max_y = max(grid_points[:, 1]) if len(grid_points) > 0 else 1
++
++    # Scale down to fit in unit square
++    if max_x > 0:
++        grid_points[:, 0] /= max_x
++    if max_y > 0:
++        grid_points[:, 1] /= max_y
++
++    # Adjust to prevent scaling issues
++    # Ensure we're actually in [0,1] range
++    grid_points[:, 0] = np.clip(grid_points[:, 0], 0, 1)
++    grid_points[:, 1] = np.clip(grid_points[:, 1], 0, 1)
++
++    # Initial placement with equal radius
++    # Try to make each circle just fit in its grid cell
++    cell_size_x = 1.0 / cols
++    cell_size_y = 1.0 / rows
++
++    # Use average cell size for initial radius
++    avg_cell_size = min(cell_size_x, cell_size_y)
++    initial_radius = avg_cell_size / 2 * 0.9  # Leave some margin
++
++    # Fill circles array with initial positions and radii
++    for i in range(n):
++        circles[i] = [grid_points[i, 0], grid_points[i, 1], initial_radius]
++
++    # Simple optimization step: increase radii while maintaining constraints
++    # We'll do a greedy approach - try to increase each radius
++    for _ in range(100):  # Limited iterations to avoid infinite loop
++        improved = False
++        for i in range(n):
++            # Try increasing the radius of circle i
++            original_r = circles[i, 2]
++            test_r = original_r + 0.001
++
++            # Check if this radius would cause conflicts
++            conflict = False
++            for j in range(n):
++                if i != j:
++                    dx = circles[i, 0] - circles[j, 0]
++                    dy = circles[i, 1] - circles[j, 1]
++                    distance = np.sqrt(dx*dx + dy*dy)
++                    min_distance = test_r + circles[j, 2]
++                    if distance < min_distance:
++                        conflict = True
++                        break
++
++            # Check boundary constraints
++            if not conflict and (test_r <= circles[i, 0] and test_r <= circles[i, 1] and
++                               test_r <= 1-circles[i, 0] and test_r <= 1-circles[i, 1]):
++                circles[i, 2] = test_r
++                improved = True
++
++        if not improved:
++            break
++
+     return circles
+ 
+ 
+ # EVOLVE-BLOCK-END

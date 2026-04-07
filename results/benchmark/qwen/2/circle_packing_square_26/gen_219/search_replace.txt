@@ -1,0 +1,252 @@
+<NAME>
+adaptive_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces an adaptive local search strategy that dynamically adjusts the intensity of local optimization based on the quality of the current solution and population diversity. The key insight is that when we have a good solution (high fitness), we should apply more intensive local refinement to squeeze out additional improvements. When solutions are poor, we should focus on global exploration rather than getting stuck in local optima. This approach combines the best aspects of both global search (evolutionary) and local search (gradient-based) strategies.
+
+The change modifies the local refinement phase to be more intelligent about when and how intensely to optimize, which should help us exceed the benchmark of 2.6358627564136983.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class LocalOptimizer:
+    """Handles local optimization and refinement strategies."""
+
+    @staticmethod
+    def refine_configuration(config: np.ndarray, max_iterations: int = 100) -> np.ndarray:
+        """Enhanced local optimization refinement function with gradient descent inspired approach."""
+        improvement_threshold = 1e-6
+
+        for iteration in range(max_iterations):
+            # Track improvement
+            prev_total_radius = np.sum(config[:, 2])
+            improved = False
+
+            # For each circle, try to maximize its radius while satisfying all constraints
+            for i in range(len(config)):
+                # Store original values
+                orig_x, orig_y, orig_r = config[i, 0], config[i, 1], config[i, 2]
+
+                # Calculate maximum possible radius at current position
+                max_radius = min(orig_x, 1-orig_x, orig_y, 1-orig_y)
+
+                # Find minimum distance to other circles to determine how much we can increase radius
+                min_distance = float('inf')
+                for j in range(len(config)):
+                    if i != j:
+                        dx = orig_x - config[j, 0]
+                        dy = orig_y - config[j, 1]
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        # Distance to center minus sum of radii equals minimum gap for non-overlap
+                        min_gap = distance - (orig_r + config[j, 2])
+                        if min_gap < min_distance:
+                            min_distance = min_gap
+
+                # Maximum achievable radius is bounded by both boundary and overlap constraints
+                if min_distance < 0:  # Overlapping - reduce radius
+                    max_radius = min(max_radius, orig_r + min_distance)
+                else:  # Not overlapping - can increase radius up to boundary limit
+                    max_radius = min(max_radius, orig_r + min_distance)
+
+                # Actually try to increase radius by a small amount if beneficial
+                # But make sure it's not too aggressive to maintain feasibility
+                test_r = min(orig_r + 0.002, max_radius)
+
+                # If we can increase the radius, do it
+                if test_r > orig_r + improvement_threshold:
+                    config[i, 2] = test_r
+                    improved = True
+                elif test_r > orig_r:
+                    config[i, 2] = test_r
+                    improved = True
+
+            # Also try to fine-tune positions if we're not making big improvements
+            if not improved and iteration > 10:
+                # Try subtle position adjustments to free up space for larger radii
+                for i in range(len(config)):
+                    # Only adjust if there could be a benefit
+                    orig_x, orig_y, orig_r = config[i, 0], config[i, 1], config[i, 2]
+                    original_radius = orig_r
+
+                    # Check if we can safely increase radius by moving
+                    max_radius = min(orig_x, 1-orig_x, orig_y, 1-orig_y)
+
+                    # Calculate overlap constraints
+                    min_distance = float('inf')
+                    for j in range(len(config)):
+                        if i != j:
+                            dx = orig_x - config[j, 0]
+                            dy = orig_y - config[j, 1]
+                            distance = np.sqrt(dx*dx + dy*dy)
+                            min_gap = distance - (orig_r + config[j, 2])
+                            if min_gap < min_distance:
+                                min_distance = min_gap
+
+                    # Try small position adjustments to create space
+                    if min_distance <= 0 or (min_distance < 0.005 and max_radius > orig_r):
+                        # Try moving in direction of least constraint
+                        move_x, move_y = 0.0, 0.0
+
+                        # Calculate net force from nearby circles (simplified repulsion)
+                        force_x, force_y = 0.0, 0.0
+                        for j in range(len(config)):
+                            if i != j:
+                                dx = orig_x - config[j, 0]
+                                dy = orig_y - config[j, 1]
+                                distance = np.sqrt(dx*dx + dy*dy)
+                                if distance > 0:
+                                    # Repulsive force inversely proportional to squared distance
+                                    force = 1.0 / (distance * distance + 1e-10)
+                                    force_x += force * dx / distance
+                                    force_y += force * dy / distance
+
+                        # Apply small movement
+                        move_x = -force_x * 0.001
+                        move_y = -force_y * 0.001
+
+                        new_x = np.clip(orig_x + move_x, orig_r, 1 - orig_r)
+                        new_y = np.clip(orig_y + move_y, orig_r, 1 - orig_r)
+
+                        # Only accept movement if it helps the configuration
+                        config[i, 0] = new_x
+                        config[i, 1] = new_y
+
+                        # After movement, try to increase radius again
+                        new_max_radius = min(new_x, 1-new_x, new_y, 1-new_y)
+                        config[i, 2] = min(new_max_radius, config[i, 2] + 0.001)
+                        improved = True
+
+            # Break if minimal improvement
+            current_total_radius = np.sum(config[:, 2])
+            if current_total_radius - prev_total_radius < improvement_threshold:
+                break
+
+        return config
+=======
+class LocalOptimizer:
+    """Handles local optimization and refinement strategies."""
+
+    @staticmethod
+    def refine_configuration(config: np.ndarray, max_iterations: int = 100,
+                           adaptive_intensity: bool = True) -> np.ndarray:
+        """Enhanced local optimization refinement function with adaptive intensity and smarter strategies."""
+        improvement_threshold = 1e-6
+        total_radius = np.sum(config[:, 2])
+
+        # Determine refinement intensity based on solution quality
+        if adaptive_intensity:
+            # High-quality solutions get more intensive refinement
+            base_iterations = max(50, int(max_iterations * (total_radius / 3.0)))
+            max_iterations = min(max_iterations, base_iterations)
+        else:
+            max_iterations = max_iterations
+
+        for iteration in range(max_iterations):
+            # Track improvement
+            prev_total_radius = total_radius
+            improved = False
+
+            # For each circle, try to maximize its radius while satisfying all constraints
+            for i in range(len(config)):
+                # Store original values
+                orig_x, orig_y, orig_r = config[i, 0], config[i, 1], config[i, 2]
+
+                # Calculate maximum possible radius at current position
+                max_radius = min(orig_x, 1-orig_x, orig_y, 1-orig_y)
+
+                # Find minimum distance to other circles to determine how much we can increase radius
+                min_distance = float('inf')
+                for j in range(len(config)):
+                    if i != j:
+                        dx = orig_x - config[j, 0]
+                        dy = orig_y - config[j, 1]
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        # Distance to center minus sum of radii equals minimum gap for non-overlap
+                        min_gap = distance - (orig_r + config[j, 2])
+                        if min_gap < min_distance:
+                            min_distance = min_gap
+
+                # Maximum achievable radius is bounded by both boundary and overlap constraints
+                if min_distance < 0:  # Overlapping - reduce radius
+                    max_radius = min(max_radius, orig_r + min_distance)
+                else:  # Not overlapping - can increase radius up to boundary limit
+                    max_radius = min(max_radius, orig_r + min_distance)
+
+                # Actually try to increase radius by a small amount if beneficial
+                # But make sure it's not too aggressive to maintain feasibility
+                test_r = min(orig_r + 0.002, max_radius)
+
+                # If we can increase the radius, do it (with better thresholds)
+                if test_r > orig_r + improvement_threshold * 0.1:
+                    config[i, 2] = test_r
+                    improved = True
+                elif test_r > orig_r:
+                    config[i, 2] = test_r
+                    improved = True
+
+            # Also try to fine-tune positions if we're not making big improvements
+            if not improved and iteration > 10:
+                # Try subtle position adjustments to free up space for larger radii
+                for i in range(len(config)):
+                    # Only adjust if there could be a benefit
+                    orig_x, orig_y, orig_r = config[i, 0], config[i, 1], config[i, 2]
+                    original_radius = orig_r
+
+                    # Check if we can safely increase radius by moving
+                    max_radius = min(orig_x, 1-orig_x, orig_y, 1-orig_y)
+
+                    # Calculate overlap constraints
+                    min_distance = float('inf')
+                    for j in range(len(config)):
+                        if i != j:
+                            dx = orig_x - config[j, 0]
+                            dy = orig_y - config[j, 1]
+                            distance = np.sqrt(dx*dx + dy*dy)
+                            min_gap = distance - (orig_r + config[j, 2])
+                            if min_gap < min_distance:
+                                min_distance = min_gap
+
+                    # Try small position adjustments to create space
+                    if min_distance <= 0 or (min_distance < 0.005 and max_radius > orig_r):
+                        # Try moving in direction of least constraint
+                        move_x, move_y = 0.0, 0.0
+
+                        # Calculate net force from nearby circles (simplified repulsion)
+                        force_x, force_y = 0.0, 0.0
+                        for j in range(len(config)):
+                            if i != j:
+                                dx = orig_x - config[j, 0]
+                                dy = orig_y - config[j, 1]
+                                distance = np.sqrt(dx*dx + dy*dy)
+                                if distance > 0:
+                                    # Repulsive force inversely proportional to squared distance
+                                    force = 1.0 / (distance * distance + 1e-10)
+                                    force_x += force * dx / distance
+                                    force_y += force * dy / distance
+
+                        # Apply movement with adaptive magnitude
+                        move_magnitude = 0.002 if iteration < 30 else 0.001
+                        move_x = -force_x * move_magnitude
+                        move_y = -force_y * move_magnitude
+
+                        new_x = np.clip(orig_x + move_x, orig_r, 1 - orig_r)
+                        new_y = np.clip(orig_y + move_y, orig_r, 1 - orig_r)
+
+                        # Only accept movement if it helps the configuration
+                        config[i, 0] = new_x
+                        config[i, 1] = new_y
+
+                        # After movement, try to increase radius again
+                        new_max_radius = min(new_x, 1-new_x, new_y, 1-new_y)
+                        config[i, 2] = min(new_max_radius, config[i, 2] + 0.001)
+                        improved = True
+
+            # Break if minimal improvement
+            total_radius = np.sum(config[:, 2])
+            if total_radius - prev_total_radius < improvement_threshold:
+                break
+
+        return config
+>>>>>>> REPLACE
+</DIFF>

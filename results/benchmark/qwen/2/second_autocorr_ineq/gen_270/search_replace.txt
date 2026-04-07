@@ -1,0 +1,202 @@
+<NAME>
+enhanced_gaussian_peak_construction
+</NAME>
+
+<DESCRIPTION>
+This improvement focuses on enhancing the Gaussian peak construction in the initial population generation. The key insight is to implement a more sophisticated peak placement strategy that ensures better distribution and avoids clustering while also optimizing peak parameters for maximal C₂ value. Specifically, I'll modify the peak positioning to use a more intelligent spacing algorithm that prevents overlapping and creates more uniform autoconvolution profiles.
+
+The main changes include:
+1. Improving the logarithmic spacing to be more adaptive and avoid clustering
+2. Adding more sophisticated peak amplitude and width calculations based on position
+3. Introducing better peak separation constraints
+4. Using a more systematic approach to determine peak characteristics that promote flatter autoconvolution profiles
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_initial_population(self, min_length: int = 100, max_length: int = 1000) -> List[List[float]]:
+        """Create diverse initial population using enhanced Gaussian-based strategies"""
+        population = []
+
+        # Strategy 1: Enhanced Gaussian-based approach with logarithmic spacing and adaptive parameters
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+
+            # Use logarithmic spacing for peak positions to avoid clustering and ensure good spectral coverage
+            num_peaks = max(3, min(20, length // 50))  # Adaptive peak count based on length
+
+            # Generate logarithmically spaced positions across the domain
+            # Using logspace from 0.05 to 0.45 (middle 90%) to avoid edge effects
+            log_positions = np.logspace(np.log10(0.05), np.log10(0.45), num_peaks, endpoint=True)
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Initialize function
+            individual = np.zeros(length)
+
+            # Add peaks with carefully designed parameters for optimal autoconvolution
+            for i, log_pos in enumerate(log_positions):
+                # Alternate sides for better distribution across the domain
+                side = (-1) ** i  # Alternate signs to distribute evenly
+                base_pos = side * log_pos
+
+                # Add small random variation to positions for diversity
+                position_variation = np.random.uniform(-0.005, 0.005) * log_pos
+                peak_pos = base_pos + position_variation
+
+                # Ensure peak stays within reasonable domain bounds to prevent edge artifacts
+                if abs(peak_pos) <= 0.24:
+                    # Distance from center determines behavior
+                    center_distance = abs(peak_pos)
+
+                    # Adaptive amplitude scaling based on position
+                    # Peaks near center: higher amplitude to create strong convolution
+                    # Peaks at edges: lower amplitude to avoid oversaturation
+                    if center_distance < 0.05:  # Very near center
+                        peak_amplitude = np.random.uniform(1.5, 2.5)
+                    elif center_distance < 0.15:  # Near center
+                        peak_amplitude = np.random.uniform(1.2, 2.0)
+                    elif center_distance < 0.20:  # Middle area
+                        peak_amplitude = np.random.uniform(0.8, 1.5)
+                    else:  # Outer areas
+                        peak_amplitude = np.random.uniform(0.5, 1.2)
+
+                    # Width varies systematically - wider near edges, narrower near center
+                    # This helps create flatter autoconvolution profiles needed for high C₂
+                    if center_distance < 0.1:  # Near center - narrower peaks
+                        peak_width = np.random.uniform(0.01, 0.025)
+                    elif center_distance < 0.2:  # Middle - medium peaks
+                        peak_width = np.random.uniform(0.015, 0.035)
+                    else:  # Far from center - wider peaks
+                        peak_width = np.random.uniform(0.02, 0.04)
+
+                    # Clamp width to reasonable range
+                    peak_width = np.clip(peak_width, 0.005, 0.05)
+
+                    # Create Gaussian peak with adaptive parameters
+                    gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - peak_pos) / peak_width)**2)
+                    individual += gaussian_peak
+
+            # Ensure non-negative values and add boundary handling
+            individual = np.clip(individual, 0, None)
+
+            # Apply boundary-preserving smoothing to reduce sharp transitions
+            if length > 50:
+                # Use Gaussian smoothing with adaptive sigma
+                sigma = max(0.5, length / 200.0)
+                individual = signal.savgol_filter(individual, max(3, int(length/100)), 1)
+
+            # Normalize to maintain reasonable magnitudes while preserving shape
+            # Use percentile-based normalization to handle outliers
+            if np.max(individual) > 1e-6:
+                # Cap at 95th percentile to avoid extreme values that harm stability
+                cap_value = np.percentile(individual, 95)
+                individual = np.clip(individual, 0, cap_value * 2.0)
+                # Scale to reasonable range
+                individual = individual / np.max(individual) * 2.5
+
+            population.append(individual.tolist())
+=======
+    def generate_initial_population(self, min_length: int = 100, max_length: int = 1000) -> List[List[float]]:
+        """Create diverse initial population using enhanced Gaussian-based strategies"""
+        population = []
+
+        # Strategy 1: Enhanced Gaussian-based approach with improved peak construction
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+
+            # Use adaptive peak count based on length but with more intelligent spacing
+            num_peaks = max(3, min(25, length // 40))  # Increased peak density for better optimization
+
+            # Create more evenly spaced peaks avoiding clustering
+            # Use a modified logarithmic distribution that ensures minimum separation
+            peak_positions = []
+            if num_peaks > 1:
+                # Generate base positions with improved spacing
+                base_positions = np.logspace(np.log10(0.05), np.log10(0.45), num_peaks, endpoint=True)
+
+                # Add jitter with intelligent spacing enforcement
+                for i, pos in enumerate(base_positions):
+                    # Add position jitter with dependence on neighboring positions
+                    jitter = np.random.uniform(-0.003, 0.003) * pos
+
+                    # Ensure minimal separation from neighbors
+                    if i > 0:
+                        # Prevent overlap with previous peak
+                        min_prev_dist = 0.02  # Minimum distance between peaks
+                        prev_pos = peak_positions[-1]
+                        if abs(pos + jitter - prev_pos) < min_prev_dist:
+                            jitter += (min_prev_dist - abs(pos + jitter - prev_pos)) * np.sign(pos - prev_pos)
+                    peak_positions.append(pos + jitter)
+            else:
+                peak_positions = [0.2]  # Default single peak
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Initialize function
+            individual = np.zeros(length)
+
+            # Add peaks with improved parameter selection
+            for i, peak_pos in enumerate(peak_positions):
+                # Alternate sides for better distribution
+                side = (-1) ** i  # Alternate signs to distribute evenly
+                true_peak_pos = side * peak_pos
+
+                # Ensure peak stays within reasonable domain bounds
+                if abs(true_peak_pos) <= 0.24:
+                    # Distance from center determines behavior
+                    center_distance = abs(true_peak_pos)
+
+                    # Improved amplitude calculation - more structured approach
+                    if center_distance < 0.03:  # Very near center
+                        peak_amplitude = np.random.uniform(2.0, 3.0)
+                    elif center_distance < 0.08:  # Near center
+                        peak_amplitude = np.random.uniform(1.8, 2.5)
+                    elif center_distance < 0.15:  # Middle area
+                        peak_amplitude = np.random.uniform(1.2, 2.0)
+                    else:  # Outer areas
+                        peak_amplitude = np.random.uniform(0.8, 1.5)
+
+                    # Width that promotes flatter autoconvolution profiles
+                    # Weaker dependence on center distance but add more structure
+                    if center_distance < 0.05:  # Very near center
+                        peak_width = np.random.uniform(0.008, 0.025)
+                    elif center_distance < 0.1:  # Near center
+                        peak_width = np.random.uniform(0.012, 0.03)
+                    elif center_distance < 0.2:  # Middle area
+                        peak_width = np.random.uniform(0.015, 0.035)
+                    else:  # Far from center
+                        peak_width = np.random.uniform(0.02, 0.045)
+
+                    # Clamp width to reasonable range
+                    peak_width = np.clip(peak_width, 0.005, 0.05)
+
+                    # Create Gaussian peak with adaptive parameters
+                    gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - true_peak_pos) / peak_width)**2)
+                    individual += gaussian_peak
+
+            # Ensure non-negative values and add boundary handling
+            individual = np.clip(individual, 0, None)
+
+            # Apply boundary-preserving smoothing with more sophisticated approach
+            if length > 50:
+                # Use Savitzky-Golay filter with adaptive parameters
+                window_length = max(3, min(21, int(length / 50)))
+                if window_length % 2 == 0:
+                    window_length += 1  # Must be odd
+                poly_order = min(3, window_length - 1)
+                individual = signal.savgol_filter(individual, window_length, poly_order)
+
+            # Normalize to maintain reasonable magnitudes while preserving shape
+            if np.max(individual) > 1e-6:
+                # Use percentile-based normalization to handle outliers
+                cap_value = np.percentile(individual, 95)
+                individual = np.clip(individual, 0, cap_value * 2.0)
+                # Scale to reasonable range
+                individual = individual / np.max(individual) * 2.5
+
+            population.append(individual.tolist())
+>>>>>>> REPLACE
+</DIFF>

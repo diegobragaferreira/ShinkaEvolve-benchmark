@@ -1,0 +1,357 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,293 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import optimize
+-
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
+-    n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
+-
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
+-     
+-
+-def search_for_best_sequence() -> list[float]:
++from scipy.fft import fft, ifft
++import random
++import time
++import copy
++from typing import List, Tuple, Optional, Dict, Any
++from functools import lru_cache
++
++# Fixed seed for reproducibility
++random.seed(42)
++np.random.seed(42)
++
++class AutocorrelationOptimizer:
++    """
++    An evolutionary optimizer for finding step functions that maximize 1/C₁.
++    """
++
++    def __init__(self, max_evaluations: int = 10000, population_size: int = 50):
++        self.max_evaluations = max_evaluations
++        self.population_size = population_size
++        self.evaluation_count = 0
++        self.best_fitness = 0.0
++        self.best_sequence = None
++        self.fitness_cache: Dict[tuple, float] = {}
++        self.stagnation_counter = 0
++        self.max_stagnation = 20
++
++    def compute_autocorrelation_constant(self, sequence: List[float]) -> Tuple[float, float]:
++        """
++        Compute the autocorrelation constant C₁ and its inverse 1/C₁ for a sequence.
++        
++        Returns:
++            Tuple of (C₁, 1/C₁)
++        """
++        # Check cache first
++        seq_tuple = tuple(sequence)
++        if seq_tuple in self.fitness_cache:
++            return self.fitness_cache[seq_tuple], 1.0 / self.fitness_cache[seq_tuple]
++
++        n = len(sequence)
++        if n == 0:
++            return float('inf'), 0.0
++
++        sum_seq = np.sum(sequence)
++        if sum_seq < 1e-10:
++            return float('inf'), 0.0
++
++        # Use FFT for fast convolution
++        padded_seq = np.pad(sequence, (0, n-1), 'constant', constant_values=0)
++        conv_result = np.real(ifft(fft(padded_seq) * np.conj(fft(padded_seq))))
++        max_conv = np.max(conv_result[:2*n-1])
++
++        # Compute C₁ = 2n * max(b) / (sum(a))^2
++        c1 = 2 * n * max_conv / (sum_seq ** 2)
++        
++        # Store in cache
++        self.fitness_cache[seq_tuple] = c1
++        return c1, 1.0 / c1
++
++    def generate_initial_population(self) -> List[List[float]]:
++        """Generate diverse initial population of sequences."""
++        population = []
++        for _ in range(self.population_size):
++            # Use mixed initialization strategies
++            if random.random() < 0.5:
++                # Random initialization
++                n = random.randint(100, 1000)
++                seq = [random.uniform(0.01, 1000.0) for _ in range(n)]
++            else:
++                # Structured initialization (gaussian-like)
++                n = random.randint(100, 1000)
++                # Generate a bell-curve shaped sequence
++                center = n // 2
++                std_dev = n / 6.0
++                seq = [max(0.01, 1000 * np.exp(-0.5 * ((i - center) / std_dev) ** 2)) 
++                       for i in range(n)]
++                # Add some randomness
++                seq = [x * random.uniform(0.9, 1.1) for x in seq]
++            
++            # Ensure sum is meaningful
++            if np.sum(seq) < 0.01:
++                seq[random.randint(0, len(seq)-1)] += 0.01
++                
++            population.append(seq)
++        return population
++
++    def tournament_selection(self, population: List[List[float]], 
++                           fitnesses: List[float], tournament_size: int = 5) -> List[float]:
++        """Select an individual using tournament selection."""
++        tournament_indices = random.sample(range(len(population)), tournament_size)
++        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
++        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
++        return copy.deepcopy(population[winner_index])
++
++    def crossover(self, parent1: List[float], parent2: List[float]) -> List[float]:
++        """Perform uniform crossover between two parents."""
++        child = []
++        min_len = min(len(parent1), len(parent2))
++        
++        # Uniform crossover for overlapping parts
++        for i in range(min_len):
++            if random.random() < 0.5:
++                child.append(parent1[i])
++            else:
++                child.append(parent2[i])
++        
++        # Append remaining elements from longer parent
++        if len(parent1) > len(parent2):
++            child.extend(parent1[min_len:])
++        elif len(parent2) > len(parent1):
++            child.extend(parent2[min_len:])
++            
++        return child
++
++    def mutate(self, sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
++        """Apply Gaussian mutation to a sequence."""
++        mutated = copy.deepcopy(sequence)
++        for i in range(len(mutated)):
++            if random.random() < mutation_rate:
++                # Apply Gaussian mutation
++                mutated[i] = max(0.01, mutated[i] + np.random.normal(scale=mutated[i]*0.1))
++                # Clip to reasonable bounds
++                mutated[i] = min(1000.0, mutated[i])
++        return mutated
++
++    def get_good_direction_to_move_into(self, sequence: List[float]) -> Optional[List[float]]:
++        """Returns a direction vector to move toward improving the sequence."""
++        try:
++            n = len(sequence)
++            sum_sequence = np.sum(sequence)
++            
++            # Avoid division by zero
++            if sum_sequence < 1e-10:
++                return None
++                
++            # Normalize the sequence
++            normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
++            
++            # Compute the convolution using FFT for efficiency
++            padded_seq = np.pad(normalized_sequence, (0, n-1), 'constant', constant_values=0)
++            conv_result = np.real(ifft(fft(padded_seq) * np.conj(fft(padded_seq))))
++            max_conv = np.max(conv_result[:2*n-1])
++            
++            # Solve the linear program for direction
++            g_fun = self.solve_convolution_lp(normalized_sequence, max_conv)
++            if g_fun is None:
++                return None
++                
++            sum_g_fun = np.sum(g_fun)
++            if sum_g_fun < 1e-10:
++                return None
++                
++            # Normalize the result
++            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
++            
++            # Move in the direction of improvement
++            t = 0.01
++            new_sequence = [
++                (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
++            ]
++            
++            # Clip to prevent extreme values
++            new_sequence = [max(0.01, min(x, 1000.0)) for x in new_sequence]
++            return new_sequence
++            
++        except Exception as e:
++            return None
++
++    def solve_convolution_lp(self, f_sequence: List[float], rhs: float) -> Optional[List[float]]:
++        """Solves the convolution LP for a given sequence and RHS."""
++        n = len(f_sequence)
++        c = -np.ones(n)
++        a_ub = []
++        b_ub = []
++
++        # Precompute the convolution constraint matrix
++        for k in range(2 * n - 1):
++            row = np.zeros(n)
++            for i in range(n):
++                j = k - i
++                if 0 <= j < n:
++                    row[j] = f_sequence[i]
++            a_ub.append(row)
++            b_ub.append(rhs)
++
++        # Non-negativity constraints: b_i >= 0
++        a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
++        b_ub_nonneg = np.zeros(n)  # Zero vector
++
++        a_ub = np.vstack([a_ub, a_ub_nonneg])
++        b_ub = np.hstack([b_ub, b_ub_nonneg])
++
++        try:
++            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
++            if result.success:
++                g_sequence = result.x
++                return g_sequence.tolist()
++            else:
++                return None
++        except Exception as e:
++            return None
++
++    def evolutionary_step(self, population: List[List[float]]) -> List[List[float]]:
++        """Perform one step of evolutionary optimization."""
++        # Evaluate fitness for population
++        fitnesses = []
++        for individual in population:
++            c1, inv_c1 = self.compute_autocorrelation_constant(individual)
++            fitnesses.append(inv_c1)
++            self.evaluation_count += 1
++            
++        # Track best individual
++        max_fitness_idx = np.argmax(fitnesses)
++        if fitnesses[max_fitness_idx] > self.best_fitness:
++            self.best_fitness = fitnesses[max_fitness_idx]
++            self.best_sequence = copy.deepcopy(population[max_fitness_idx])
++            self.stagnation_counter = 0
++        else:
++            self.stagnation_counter += 1
++            
++        # Create new population
++        new_population = []
++        
++        # Elitism: keep best individuals
++        sorted_indices = np.argsort(fitnesses)[::-1][:self.population_size//2]
++        for idx in sorted_indices:
++            new_population.append(copy.deepcopy(population[idx]))
++        
++        # Generate offspring
++        while len(new_population) < self.population_size:
++            # Tournament selection
++            parent1 = self.tournament_selection(population, fitnesses)
++            parent2 = self.tournament_selection(population, fitnesses)
++            
++            # Crossover
++            child = self.crossover(parent1, parent2)
++            
++            # Mutation
++            mutation_rate = max(0.05, 0.1 - (self.evaluation_count / self.max_evaluations) * 0.05)
++            child = self.mutate(child, mutation_rate)
++            
++            # Ensure non-negative values and reasonable sum
++            child = [max(0.01, x) for x in child]
++            if np.sum(child) > 0.01:
++                new_population.append(child)
++        
++        return new_population
++
++    def optimize(self) -> List[float]:
++        """Main optimization loop."""
++        # Initialize population
++        population = self.generate_initial_population()
++        start_time = time.time()
++        
++        # Evolutionary loop
++        for generation in range(self.max_evaluations // self.population_size):
++            if self.stagnation_counter > self.max_stagnation:
++                break
++            if time.time() - start_time > 170:
++                break
++                
++            population = self.evolutionary_step(population)
++            
++        # Final refinement using the good direction technique
++        if self.best_sequence is not None:
++            refined = self.get_good_direction_to_move_into(self.best_sequence)
++            if refined is not None:
++                c1, inv_c1 = self.compute_autocorrelation_constant(refined)
++                if inv_c1 > self.best_fitness:
++                    self.best_sequence = refined
++                    self.best_fitness = inv_c1
++                    
++        return self.best_sequence or [1.0] * 100
++
++def search_for_best_sequence() -> List[float]:
+     """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
+-
+-    return best_sequence
++    optimizer = AutocorrelationOptimizer(max_evaluations=10000, population_size=50)
++    try:
++        sequence = optimizer.optimize()
++        return sequence
++    except Exception as e:
++        print(f"Optimization failed: {e}")
++        # Fallback
++        return [random.uniform(0.01, 1000.0) for _ in range(100)]
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

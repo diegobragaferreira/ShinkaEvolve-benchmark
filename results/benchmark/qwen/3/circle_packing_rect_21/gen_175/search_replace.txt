@@ -1,0 +1,220 @@
+<NAME>
+enhance_multi_scale_local_search
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a multi-scale approach but lacks adaptive refinement that adjusts based on convergence behavior. I'll enhance the local refinement step to implement adaptive multi-scale local search with dynamic step size adjustment based on convergence gradients. This will allow the algorithm to:
+1. Dynamically adjust step sizes based on how quickly improvements are being made
+2. Reduce step sizes when convergence slows down to enable fine-tuning
+3. Allow larger perturbations when rapid gains occur to accelerate exploration
+4. Improve overall optimization efficiency and solution quality
+
+This approach builds directly upon the current program's progressive refinement pattern while adding intelligent parameter adaptation that has proven effective in high-scoring implementations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement to improve circle configuration with enhanced strategies"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes with dynamic adjustments
+        initial_step_size = 0.05
+
+        for iter_num in range(iterations):
+            # Gradually tighten overlap constraints over time
+            overlap_tolerance_factor = 1.0 if not relax_overlap else max(0.1, 1.0 - (iter_num / iterations) * 0.8)
+
+            # Dynamic step size based on iteration count
+            step_size = initial_step_size * (1.0 - (iter_num / iterations) * 0.7)
+            step_size = max(0.001, step_size)
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Try several moves with random directions
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Enhanced perturbation strategy with multiple directions
+                test_moves = [
+                    # Standard Gaussian perturbations
+                    (step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)),
+                    (step_size * random.gauss(0, 1), 0),
+                    (0, step_size * random.gauss(0, 1)),
+                    # Coordinate-specific perturbations
+                    (step_size * random.uniform(-1, 1), 0),
+                    (0, step_size * random.uniform(-1, 1)),
+                    # Small random moves
+                    (random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)),
+                    # No move (for baseline)
+                    (0, 0)
+                ]
+
+                # Add directional bias for strategic improvement in later iterations
+                if iter_num > iterations // 3:  # Later iterations
+                    # Add more systematic searches
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                    ])
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+        return current
+=======
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement to improve circle configuration with enhanced strategies"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Store recent improvements for adaptive step sizing
+        recent_improvements = []
+        adaptive_threshold = 0.001  # Threshold to detect slow convergence
+
+        # Initial step size and parameters
+        initial_step_size = 0.05
+        min_step_size = 0.001
+        step_reduction_factor = 0.95
+        step_increase_factor = 1.1
+
+        for iter_num in range(iterations):
+            # Dynamic step size adjustment based on convergence behavior
+            step_size = initial_step_size
+
+            # Adjust based on recent improvement history
+            if len(recent_improvements) > 10:
+                avg_improvement = np.mean(recent_improvements[-10:])
+                if avg_improvement < adaptive_threshold:
+                    # Slow improvement - reduce step size for fine-tuning
+                    step_size *= step_reduction_factor
+                elif avg_improvement > adaptive_threshold * 2:
+                    # Fast improvement - increase step size for exploration
+                    step_size *= step_increase_factor
+
+            step_size = max(min_step_size, step_size)
+
+            # Gradually tighten overlap constraints over time
+            overlap_tolerance_factor = 1.0 if not relax_overlap else max(0.1, 1.0 - (iter_num / iterations) * 0.8)
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Try several moves with random directions
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Enhanced perturbation strategy with multiple directions
+                test_moves = [
+                    # Standard Gaussian perturbations
+                    (step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)),
+                    (step_size * random.gauss(0, 1), 0),
+                    (0, step_size * random.gauss(0, 1)),
+                    # Coordinate-specific perturbations
+                    (step_size * random.uniform(-1, 1), 0),
+                    (0, step_size * random.uniform(-1, 1)),
+                    # Small random moves
+                    (random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)),
+                    # No move (for baseline)
+                    (0, 0)
+                ]
+
+                # Add directional bias for strategic improvement in later iterations
+                if iter_num > iterations // 3:  # Later iterations
+                    # Add more systematic searches
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                    ])
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+            # Track recent improvements for adaptive step sizing
+            recent_improvements.append(current_sum - calculate_radius_sum(current))
+            if len(recent_improvements) > 20:
+                recent_improvements.pop(0)
+
+        return current
+>>>>>>> REPLACE
+</DIFF>

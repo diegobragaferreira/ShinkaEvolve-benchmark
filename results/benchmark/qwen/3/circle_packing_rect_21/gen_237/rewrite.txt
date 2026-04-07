@@ -1,0 +1,268 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+import math
+import random
+from typing import Tuple, List, Optional
+import time
+
+class CirclePackOptimizer:
+    def __init__(self, rect_width: float = 1.2, rect_height: float = 0.8, seed: int = 42):
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+        self.seed = seed
+        np.random.seed(seed)
+        random.seed(seed)
+        
+        # Physics simulation parameters
+        self.damping_factor = 0.8
+        self.force_multiplier = 1.0
+        self.max_iterations = 1000
+        self.min_improvement = 1e-6
+
+    def compute_circle_radius(self, point: np.ndarray, points: np.ndarray) -> float:
+        """Compute maximum possible radius for a circle centered at 'point' using cKDTree for efficiency"""
+        center_x, center_y = point
+        # Distance to rectangle edges
+        dist_to_edges = [
+            center_x,                    # distance to left edge
+            self.rect_width - center_x,  # distance to right edge
+            center_y,                    # distance to bottom edge
+            self.rect_height - center_y  # distance to top edge
+        ]
+
+        # Distance to other circles (excluding self) using cKDTree for efficiency
+        min_dist_to_others = float('inf')
+        if len(points) > 1:
+            tree = cKDTree(points)
+            distances, _ = tree.query(point, k=2)  # Get 2 nearest (including self)
+            if len(distances) >= 2:
+                min_dist_to_others = distances[1]  # Exclude self-distance
+
+        # Maximum radius is limited by both edges and other circles
+        max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+        return max(0.001, max_radius)
+
+    def evaluate_configuration(self, points: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Evaluate a configuration by computing sum of radii"""
+        total_radius = 0.0
+        circles = []
+        for point in points:
+            radius = self.compute_circle_radius(point, points)
+            circles.append([point[0], point[1], radius])
+            total_radius += radius
+        return total_radius, np.array(circles)
+
+    def generate_voronoi_initialization(self) -> np.ndarray:
+        """Generate initial points using Voronoi-based seeding with strategic placement"""
+        points = []
+
+        # Strategy 1: Corner placements with strategic perturbation
+        corner_positions = [
+            (self.rect_width * 0.1, self.rect_height * 0.1),
+            (self.rect_width * 0.9, self.rect_height * 0.1),
+            (self.rect_width * 0.1, self.rect_height * 0.9),
+            (self.rect_width * 0.9, self.rect_height * 0.9),
+            (self.rect_width / 2, self.rect_height / 2)
+        ]
+
+        for x, y in corner_positions:
+            pert_x = np.random.normal(0, 0.03)
+            pert_y = np.random.normal(0, 0.03)
+            points.append([x + pert_x, y + pert_y])
+
+        # Strategy 2: More evenly distributed edge positions
+        edge_positions = [
+            (self.rect_width/2, self.rect_height * 0.1),  # top center
+            (self.rect_width/2, self.rect_height * 0.9),  # bottom center
+            (self.rect_width * 0.1, self.rect_height/2),  # left center
+            (self.rect_width * 0.9, self.rect_height/2),  # right center
+            (self.rect_width * 0.3, self.rect_height * 0.3),  # diagonal
+            (self.rect_width * 0.7, self.rect_height * 0.7),  # diagonal
+            (self.rect_width * 0.3, self.rect_height * 0.7),  # diagonal
+            (self.rect_width * 0.7, self.rect_height * 0.3),  # diagonal
+        ]
+
+        for x, y in edge_positions:
+            pert_x = np.random.normal(0, 0.02)
+            pert_y = np.random.normal(0, 0.02)
+            points.append([x + pert_x, y + pert_y])
+
+        # Strategy 3: Grid placements in interior with better spacing
+        grid_x = np.linspace(self.rect_width * 0.15, self.rect_width * 0.85, 4)
+        grid_y = np.linspace(self.rect_height * 0.15, self.rect_height * 0.85, 4)
+
+        for x in grid_x:
+            for y in grid_y:
+                if len(points) < 21:
+                    pert_x = np.random.normal(0, 0.02)
+                    pert_y = np.random.normal(0, 0.02)
+                    points.append([x + pert_x, y + pert_y])
+
+        # Strategy 4: Fill remaining with triangular distribution to avoid clustering
+        while len(points) < 21:
+            x = np.random.triangular(0.05, self.rect_width/2, self.rect_width - 0.05)
+            y = np.random.triangular(0.05, self.rect_height/2, self.rect_height - 0.05)
+            points.append([x, y])
+
+        return np.array(points[:21])
+
+    def compute_forces(self, points: np.ndarray, radii: np.ndarray) -> np.ndarray:
+        """Compute net forces on each point based on circle interactions"""
+        num_points = len(points)
+        forces = np.zeros_like(points)
+        
+        # Repulsive forces between circles based on proximity
+        for i in range(num_points):
+            pos_i = points[i]
+            radius_i = radii[i]
+            
+            # Boundary forces (strong repulsion near walls)
+            boundary_force = np.zeros(2)
+            # Left boundary
+            if pos_i[0] - radius_i < 0.05:
+                boundary_force[0] += (0.05 - (pos_i[0] - radius_i)) * 500
+            # Right boundary
+            if pos_i[0] + radius_i > self.rect_width - 0.05:
+                boundary_force[0] -= ((pos_i[0] + radius_i) - (self.rect_width - 0.05)) * 500
+            # Bottom boundary
+            if pos_i[1] - radius_i < 0.05:
+                boundary_force[1] += (0.05 - (pos_i[1] - radius_i)) * 500
+            # Top boundary
+            if pos_i[1] + radius_i > self.rect_height - 0.05:
+                boundary_force[1] -= ((pos_i[1] + radius_i) - (self.rect_height - 0.05)) * 500
+            
+            forces[i] += boundary_force * 0.01  # Scale boundary forces
+            
+            # Forces from other circles
+            for j in range(num_points):
+                if i != j:
+                    pos_j = points[j]
+                    radius_j = radii[j]
+                    
+                    # Vector from j to i
+                    diff = pos_i - pos_j
+                    distance = np.linalg.norm(diff)
+                    
+                    # If circles overlap
+                    min_distance = radius_i + radius_j
+                    if distance < min_distance:
+                        # Strong repulsive force based on overlap amount
+                        overlap = min_distance - distance
+                        force_magnitude = overlap * 2000
+                        
+                        # Direction from j to i (repulsive)
+                        if distance > 1e-8:
+                            direction = diff / distance
+                            forces[i] += force_magnitude * direction
+                    
+                    # If circles are close but not overlapping, create slight attraction
+                    elif distance < (radius_i + radius_j) * 1.5:  # Within 1.5x sum of radii
+                        # Attractive force to maintain natural spacing
+                        target_distance = (radius_i + radius_j) * 1.1  # Slightly more than touching
+                        if distance > target_distance:
+                            force_magnitude = (distance - target_distance) * 2
+                            if distance > 1e-8:
+                                direction = diff / distance
+                                forces[i] -= force_magnitude * direction
+        
+        return forces
+
+    def gravity_simulation(self, points: np.ndarray, max_iterations: int = 200, 
+                          initial_damping: float = 0.95, final_damping: float = 0.99) -> np.ndarray:
+        """Perform physics-based gravity simulation for optimization"""
+        current_points = points.copy()
+        
+        # Precompute initial radii
+        radii = np.array([self.compute_circle_radius(point, current_points) for point in current_points])
+        
+        # Track improvement for early stopping
+        previous_total_radius = 0.0
+        improvement_count = 0
+        
+        for iteration in range(max_iterations):
+            # Adaptive damping based on iteration number
+            damping = initial_damping + (final_damping - initial_damping) * (iteration / max_iterations)
+            
+            # Compute forces
+            forces = self.compute_forces(current_points, radii)
+            
+            # Update positions using simple verlet integration
+            new_points = current_points.copy()
+            for i in range(len(current_points)):
+                # Apply force to move point (scaled by force multiplier)
+                velocity = forces[i] * 0.005 * self.force_multiplier
+                new_points[i] += velocity
+                
+                # Enforce boundary constraints to keep within rectangle
+                new_points[i][0] = np.clip(new_points[i][0], 0.05 + radii[i], self.rect_width - 0.05 - radii[i])
+                new_points[i][1] = np.clip(new_points[i][1], 0.05 + radii[i], self.rect_height - 0.05 - radii[i])
+            
+            # Recompute radii after position update
+            old_radii = radii.copy()
+            radii = np.array([self.compute_circle_radius(point, new_points) for point in new_points])
+            
+            # Apply damping to smooth the motion
+            current_points = current_points * damping + new_points * (1 - damping)
+            
+            # Update radii after damping
+            radii = np.array([self.compute_circle_radius(point, current_points) for point in current_points])
+            
+            # Check improvement
+            current_total_radius = np.sum(radii)
+            if abs(current_total_radius - previous_total_radius) < self.min_improvement:
+                improvement_count += 1
+                if improvement_count > 5:
+                    break
+            else:
+                improvement_count = 0
+                previous_total_radius = current_total_radius
+        
+        return current_points
+
+    def multi_resolution_gravity(self, points: np.ndarray) -> np.ndarray:
+        """Multi-resolution gravity optimization with progressive refinement"""
+        current_points = points.copy()
+        
+        # Very coarse resolution (few iterations, large steps)
+        coarse_points = self.gravity_simulation(current_points, max_iterations=30, 
+                                               initial_damping=0.9, final_damping=0.97)
+        
+        # Medium resolution (moderate iterations)
+        medium_points = self.gravity_simulation(coarse_points, max_iterations=50, 
+                                               initial_damping=0.92, final_damping=0.98)
+        
+        # Fine resolution (many iterations, small steps)
+        fine_points = self.gravity_simulation(medium_points, max_iterations=100,
+                                             initial_damping=0.95, final_damping=0.99)
+        
+        return fine_points
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Initialize optimizer
+    optimizer = CirclePackOptimizer()
+    
+    # Stage 1: Voronoi-based initial seeding 
+    points = optimizer.generate_voronoi_initialization()
+    
+    # Stage 2: Evaluate initial configuration
+    initial_fitness, initial_circles = optimizer.evaluate_configuration(points)
+    
+    # Stage 3: Multi-resolution gravity optimization
+    refined_points = optimizer.multi_resolution_gravity(points)
+    
+    # Stage 4: Final fine-tuning
+    final_points = optimizer.gravity_simulation(refined_points, max_iterations=80)
+    
+    # Final evaluation
+    _, final_circles = optimizer.evaluate_configuration(final_points)
+    return final_circles
+
+# EVOLVE-BLOCK-END

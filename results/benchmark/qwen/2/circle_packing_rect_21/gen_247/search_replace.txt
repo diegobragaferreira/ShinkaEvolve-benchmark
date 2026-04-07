@@ -1,0 +1,107 @@
+<NAME>
+improve_constraint_handling_with_penalty_scaling
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed penalty weight of 10000.0 which might not be optimal for balancing radius maximization against constraint violations. I'll implement a dynamic penalty scaling system that adjusts based on the severity of violations and solution quality, which should help the optimizer navigate the search space more effectively and avoid getting stuck in poor local optima caused by overly harsh penalties.
+
+This change addresses the optimization challenge identified in the prior programs where penalty systems needed refinement to better guide the evolutionary process toward valid solutions while still encouraging radius maximization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 1000  # Heavy penalty for boundary violations
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance
+        penalty_weight = 10000.0
+        return total_radius - (penalty_weight * violations), violations
+=======
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 1000  # Heavy penalty for boundary violations
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Implement adaptive penalty scaling based on solution quality
+        if total_radius > 1.0:  # If we're getting decent radii, be stricter about violations
+            penalty_weight = 15000.0
+        else:  # If we're struggling, be more forgiving to allow exploration
+            penalty_weight = 8000.0
+
+        return total_radius - (penalty_weight * violations), violations
+>>>>>>> REPLACE
+</DIFF>

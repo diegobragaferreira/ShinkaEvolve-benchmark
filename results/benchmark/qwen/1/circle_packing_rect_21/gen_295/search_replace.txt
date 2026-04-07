@@ -1,0 +1,510 @@
+<NAME>
+adaptive_constraint_aware_mutation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Voronoi-based density calculations but doesn't fully leverage the geometric constraints for adaptive mutation. I'll enhance the mutation strategy to better incorporate local constraint information, particularly by computing actual constraint distances (minimum distance to nearest neighbor or boundary) rather than just Voronoi cell areas. This will allow for more precise adaptive mutation steps that respect the actual geometric constraints in each region.
+
+The key improvements are:
+1. Replace Voronoi area-based mutation adaptation with actual constraint distance-based adaptation
+2. Implement a more sophisticated constraint distance calculation that considers both neighbor distances and boundary distances
+3. Use these constraint distances to dynamically adjust mutation step sizes for both position and radius changes
+4. This should lead to more efficient exploration of the search space while respecting constraints more effectively
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def compute_voronoi_density(self, circles: np.ndarray) -> np.ndarray:
+        """Compute Voronoi cell areas for each circle to estimate constraint density."""
+        # Add boundary points for proper Voronoi calculation
+        points = circles[:, :2].copy()
+
+        # Add boundary points to make Voronoi more meaningful
+        boundary_points = [
+            [0, 0], [self.rect_width, 0], [0, self.rect_height], [self.rect_width, self.rect_height],
+            [self.rect_width/2, 0], [self.rect_width/2, self.rect_height],
+            [0, self.rect_height/2], [self.rect_width, self.rect_height/2]
+        ]
+        points = np.vstack([points, boundary_points])
+
+        try:
+            vor = Voronoi(points)
+
+            # For each original point, compute Voronoi cell area
+            areas = []
+            for i in range(len(circles)):
+                region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+                if region_idx != -1 and region_idx < len(vor.regions):
+                    region = vor.regions[region_idx]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute area of polygon using shoelace formula
+                        vertices = np.array([vor.vertices[i] for i in region])
+                        if len(vertices) >= 3:
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            areas.append(area)
+                        else:
+                            areas.append(1.0)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+
+            return np.array(areas)
+        except:
+            # Fallback to uniform distribution if Voronoi fails
+            return np.ones(len(circles))
+=======
+    def compute_constraint_distances(self, circles: np.ndarray) -> np.ndarray:
+        """Compute minimum constraint distance for each circle (distance to nearest neighbor or boundary).
+
+        This provides better insight into local constraint density than Voronoi areas alone.
+        """
+        n = len(circles)
+        if n == 0:
+            return np.array([])
+
+        # Initialize constraint distances array
+        constraint_distances = np.full(n, float('inf'))
+
+        # Calculate distances to all other circles
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+
+        # For each circle, find minimum distance to any other circle
+        for i in range(n):
+            min_neighbor_dist = float('inf')
+
+            # Check distance to all other circles
+            for j in range(n):
+                if i != j:
+                    dx = x_coords[i] - x_coords[j]
+                    dy = y_coords[i] - y_coords[j]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    min_neighbor_dist = min(min_neighbor_dist, distance)
+
+            # Also consider boundary constraints
+            boundary_dists = [
+                x_coords[i],  # distance to left boundary
+                self.rect_width - x_coords[i],  # distance to right boundary
+                y_coords[i],  # distance to bottom boundary
+                self.rect_height - y_coords[i]  # distance to top boundary
+            ]
+
+            # Minimum boundary distance
+            min_boundary_dist = min(boundary_dists)
+
+            # The constraint distance is the minimum of neighbor distance and boundary distance
+            # But only consider it if it's actually constraining (smaller than current radius)
+            min_constraint_dist = min(min_neighbor_dist, min_boundary_dist)
+
+            # Ensure we don't consider distances that are larger than what would constrain the circle
+            constraint_distances[i] = min_constraint_dist
+
+        return constraint_distances
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_radius(self, circles: np.ndarray, idx: int, voronoi_areas: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on Voronoi cell area."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on Voronoi cell area - more sophisticated
+        max_delta = 0.01
+        delta = max_delta
+
+        if voronoi_areas is not None and len(voronoi_areas) > idx:
+            # Smaller Voronoi areas mean more constrained regions, use smaller deltas
+            # Larger Voronoi areas mean more relaxed regions, use larger deltas
+            # Normalize area relative to average area for stability
+            avg_area = np.mean(voronoi_areas) if len(voronoi_areas) > 0 else 1.0
+            normalized_area = voronoi_areas[idx] / max(avg_area, 1e-8)  # Avoid division by zero
+            # Invert relationship: smaller areas = smaller deltas (more constraint)
+            delta_factor = max(0.1, min(1.0, 1.0 / (normalized_area + 0.1)))  # Prevent extreme values
+            delta = max_delta * delta_factor
+        else:
+            delta = max_delta
+
+        # Random small perturbation with better distribution
+        if np.random.random() < 0.7:  # 70% chance of small change
+            delta_r = np.random.uniform(-delta*0.5, delta*0.5)
+        else:  # 30% chance of larger change
+            delta_r = np.random.uniform(-delta, delta)
+
+        new_r = old_r + delta_r
+
+        # Ensure positive radius with better clamping
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+=======
+    def mutate_radius(self, circles: np.ndarray, idx: int, constraint_distances: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on actual constraint distances."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on constraint distances
+        # Circles with smaller constraint distances (tighter constraints) get smaller deltas
+        max_delta = 0.01
+        delta = max_delta
+
+        if constraint_distances is not None and len(constraint_distances) > idx:
+            # Use constraint distance as proxy for how much we can safely change
+            # Constraint distance of 0.05 suggests we're at tight constraint, so use very small delta
+            # Constraint distance of 0.2 suggests more room, so larger delta
+            constraint_factor = np.clip(constraint_distances[idx] / 0.2, 0.1, 1.0)
+            delta = max_delta * constraint_factor
+        else:
+            delta = max_delta
+
+        # Random small perturbation with better distribution
+        if np.random.random() < 0.7:  # 70% chance of small change
+            delta_r = np.random.uniform(-delta*0.5, delta*0.5)
+        else:  # 30% chance of larger change
+            delta_r = np.random.uniform(-delta, delta)
+
+        new_r = old_r + delta_r
+
+        # Ensure positive radius with better clamping
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_position(self, circles: np.ndarray, idx: int, voronoi_areas: np.ndarray = None) -> np.ndarray:
+        """Mutate position with small random perturbation."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Adaptive step size based on Voronoi cell area and boundary proximity
+        max_delta = 0.05
+        delta = max_delta
+
+        if voronoi_areas is not None and len(voronoi_areas) > idx:
+            # Smaller Voronoi areas mean more constrained regions, use smaller deltas
+            avg_area = np.mean(voronoi_areas) if len(voronoi_areas) > 0 else 1.0
+            normalized_area = voronoi_areas[idx] / max(avg_area, 1e-8)
+            delta_factor = max(0.1, min(1.0, 1.0 / (normalized_area + 0.1)))
+            delta = max_delta * delta_factor
+
+        # Consider proximity to boundary
+        x, y, r = new_circles[idx]
+        boundary_distance = min(x, self.rect_width - x, y, self.rect_height - y)
+        boundary_factor = min(1.0, boundary_distance / (r * 2.0))  # Scale based on radius
+        boundary_delta = delta * boundary_factor
+
+        # Use minimum of adaptive and boundary delta
+        actual_delta = min(delta, boundary_delta)
+
+        # Small random perturbation
+        delta_x = np.random.uniform(-actual_delta, actual_delta)
+        delta_y = np.random.uniform(-actual_delta, actual_delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds with margin
+        margin = 0.01
+        new_x = np.clip(new_x, r + margin, self.rect_width - r - margin)
+        new_y = np.clip(new_y, r + margin, self.rect_height - r - margin)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+=======
+    def mutate_position(self, circles: np.ndarray, idx: int, constraint_distances: np.ndarray = None) -> np.ndarray:
+        """Mutate position with small random perturbation."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Adaptive step size based on constraint distances and boundary proximity
+        max_delta = 0.05
+        delta = max_delta
+
+        if constraint_distances is not None and len(constraint_distances) > idx:
+            # Based on constraint distance, adapt step size
+            # Smaller constraint distance means tighter constraints, so smaller steps
+            constraint_factor = np.clip(constraint_distances[idx] / 0.2, 0.1, 1.0)
+            delta = max_delta * constraint_factor
+
+        # Consider proximity to boundary
+        x, y, r = new_circles[idx]
+        boundary_distance = min(x, self.rect_width - x, y, self.rect_height - y)
+        boundary_factor = min(1.0, boundary_distance / (r * 2.0))  # Scale based on radius
+        boundary_delta = delta * boundary_factor
+
+        # Use minimum of adaptive and boundary delta
+        actual_delta = min(delta, boundary_delta)
+
+        # Small random perturbation
+        delta_x = np.random.uniform(-actual_delta, actual_delta)
+        delta_y = np.random.uniform(-actual_delta, actual_delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds with margin
+        margin = 0.01
+        new_x = np.clip(new_x, r + margin, self.rect_width - r - margin)
+        new_y = np.clip(new_y, r + margin, self.rect_height - r - margin)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def enhanced_local_optimization(self, circles: np.ndarray, max_iter: int = 50, patience: int = 10) -> np.ndarray:
+        """Enhanced local optimization with Voronoi-aware mutation."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.evaluate_fitness(current_circles)
+
+        patience_counter = 0
+        last_improvement = 0
+
+        # Get Voronoi cell areas for adaptive mutation
+        voronoi_areas = self.compute_voronoi_density(current_circles)
+
+        # Identify boundary circles for special treatment
+        boundary_indices = []
+        for i in range(len(current_circles)):
+            x, y, r = current_circles[i]
+            # Check if circle is near boundary
+            if (x <= r + 0.05 or x >= self.rect_width - r - 0.05 or
+                y <= r + 0.05 or y >= self.rect_height - r - 0.05):
+                boundary_indices.append(i)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Process boundary circles first (they're more constrained)
+            if boundary_indices:
+                for i in boundary_indices:
+                    # Special handling for boundary circles with smaller deltas
+                    mutated_rad = self.mutate_radius(current_circles, i, voronoi_areas)
+                    mutated_pos = self.mutate_position(current_circles, i, voronoi_areas)
+
+                    # Test both mutations
+                    rad_fitness = self.evaluate_fitness(mutated_rad)
+                    pos_fitness = self.evaluate_fitness(mutated_pos)
+
+                    # Choose better mutation
+                    if rad_fitness > pos_fitness:
+                        if self.is_valid_solution(mutated_rad):
+                            current_circles = mutated_rad
+                            improved = True
+                    else:
+                        if self.is_valid_solution(mutated_pos):
+                            current_circles = mutated_pos
+                            improved = True
+
+            # Process remaining circles
+            remaining_indices = [i for i in range(len(current_circles)) if i not in boundary_indices]
+            for i in remaining_indices:
+                # Try position mutation with adaptive parameter
+                mutated_pos = self.mutate_position(current_circles, i, voronoi_areas)
+
+                # Try radius mutation with adaptive delta
+                mutated_rad = self.mutate_radius(current_circles, i, voronoi_areas)
+
+                # Evaluate both mutations
+                pos_fitness = self.evaluate_fitness(mutated_pos)
+                rad_fitness = self.evaluate_fitness(mutated_rad)
+
+                # Choose the better one
+                if pos_fitness > rad_fitness:
+                    if self.is_valid_solution(mutated_pos):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.is_valid_solution(mutated_rad):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution and Voronoi areas for next iteration
+            current_fitness = self.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+                patience_counter = 0
+                last_improvement = iteration
+                # Recompute Voronoi areas after significant improvement
+                voronoi_areas = self.compute_voronoi_density(current_circles)
+            else:
+                patience_counter += 1
+
+            # Early stopping if no improvement for too long
+            if patience_counter >= patience or (iteration - last_improvement > max_iter // 2):
+                break
+
+        # Final boundary check and adjustment
+        if not self.is_valid_solution(best_circles):
+            # Try to fix boundary violations
+            for i in range(len(best_circles)):
+                x, y, r = best_circles[i]
+                # Reposition to safe zone if needed
+                if x - r < 0:
+                    x = r + 0.01
+                elif x + r > self.rect_width:
+                    x = self.rect_width - r - 0.01
+                if y - r < 0:
+                    y = r + 0.01
+                elif y + r > self.rect_height:
+                    y = self.rect_height - r - 0.01
+                best_circles[i] = [x, y, r]
+
+        return best_circles
+=======
+    def enhanced_local_optimization(self, circles: np.ndarray, max_iter: int = 50, patience: int = 10) -> np.ndarray:
+        """Enhanced local optimization with constraint-distance-aware mutation."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.evaluate_fitness(current_circles)
+
+        patience_counter = 0
+        last_improvement = 0
+
+        # Get constraint distances for adaptive mutation
+        constraint_distances = self.compute_constraint_distances(current_circles)
+
+        # Identify boundary circles for special treatment
+        boundary_indices = []
+        for i in range(len(current_circles)):
+            x, y, r = current_circles[i]
+            # Check if circle is near boundary
+            if (x <= r + 0.05 or x >= self.rect_width - r - 0.05 or
+                y <= r + 0.05 or y >= self.rect_height - r - 0.05):
+                boundary_indices.append(i)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Process boundary circles first (they're more constrained)
+            if boundary_indices:
+                for i in boundary_indices:
+                    # Special handling for boundary circles with smaller deltas
+                    mutated_rad = self.mutate_radius(current_circles, i, constraint_distances)
+                    mutated_pos = self.mutate_position(current_circles, i, constraint_distances)
+
+                    # Test both mutations
+                    rad_fitness = self.evaluate_fitness(mutated_rad)
+                    pos_fitness = self.evaluate_fitness(mutated_pos)
+
+                    # Choose better mutation
+                    if rad_fitness > pos_fitness:
+                        if self.is_valid_solution(mutated_rad):
+                            current_circles = mutated_rad
+                            improved = True
+                    else:
+                        if self.is_valid_solution(mutated_pos):
+                            current_circles = mutated_pos
+                            improved = True
+
+            # Process remaining circles
+            remaining_indices = [i for i in range(len(current_circles)) if i not in boundary_indices]
+            for i in remaining_indices:
+                # Try position mutation with adaptive parameter
+                mutated_pos = self.mutate_position(current_circles, i, constraint_distances)
+
+                # Try radius mutation with adaptive delta
+                mutated_rad = self.mutate_radius(current_circles, i, constraint_distances)
+
+                # Evaluate both mutations
+                pos_fitness = self.evaluate_fitness(mutated_pos)
+                rad_fitness = self.evaluate_fitness(mutated_rad)
+
+                # Choose the better one
+                if pos_fitness > rad_fitness:
+                    if self.is_valid_solution(mutated_pos):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.is_valid_solution(mutated_rad):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution and constraint distances for next iteration
+            current_fitness = self.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+                patience_counter = 0
+                last_improvement = iteration
+                # Recompute constraint distances after significant improvement
+                constraint_distances = self.compute_constraint_distances(current_circles)
+            else:
+                patience_counter += 1
+
+            # Early stopping if no improvement for too long
+            if patience_counter >= patience or (iteration - last_improvement > max_iter // 2):
+                break
+
+        # Final boundary check and adjustment
+        if not self.is_valid_solution(best_circles):
+            # Try to fix boundary violations
+            for i in range(len(best_circles)):
+                x, y, r = best_circles[i]
+                # Reposition to safe zone if needed
+                if x - r < 0:
+                    x = r + 0.01
+                elif x + r > self.rect_width:
+                    x = self.rect_width - r - 0.01
+                if y - r < 0:
+                    y = r + 0.01
+                elif y + r > self.rect_height:
+                    y = self.rect_height - r - 0.01
+                best_circles[i] = [x, y, r]
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Multi-start optimization with improved refinement
+        for seed_pattern in initial_patterns:
+            # Apply local optimization to get better starting points
+            optimized_pattern = self.enhanced_local_optimization(seed_pattern, max_iter=25)
+
+            # Further refine with more iterations for better quality
+            final_circles = self.enhanced_local_optimization(optimized_pattern, max_iter=30)
+
+            score = self.evaluate_fitness(final_circles)
+            if score > self.best_score and self.is_valid_solution(final_circles):
+                self.best_score = score
+                self.best_solution = final_circles.copy()
+=======
+        # Multi-start optimization with improved refinement
+        for seed_pattern in initial_patterns:
+            # Apply local optimization to get better starting points
+            optimized_pattern = self.enhanced_local_optimization(seed_pattern, max_iter=25)
+
+            # Further refine with more iterations for better quality
+            final_circles = self.enhanced_local_optimization(optimized_pattern, max_iter=30)
+
+            score = self.evaluate_fitness(final_circles)
+            if score > self.best_score and self.is_valid_solution(final_circles):
+                self.best_score = score
+                self.best_solution = final_circles.copy()
+>>>>>>> REPLACE
+</DIFF>

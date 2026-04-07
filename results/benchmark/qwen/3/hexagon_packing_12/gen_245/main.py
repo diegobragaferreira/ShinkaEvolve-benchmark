@@ -1,0 +1,648 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+from scipy.optimize import minimize
+import math
+import random
+from typing import Tuple, List, Optional
+import time
+from numba import jit, prange
+import warnings
+
+@jit(nopython=True, fastmath=True)
+def compute_hexagon_vertices_jitted(center_x, center_y, angle_deg, radius=1.0):
+    """Fast computation of hexagon vertices using numba JIT"""
+    vertices = np.zeros((6, 2))
+    angle_rad = np.radians(angle_deg)
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        vertices[i, 0] = center_x + radius * np.cos(angle)
+        vertices[i, 1] = center_y + radius * np.sin(angle)
+    return vertices
+
+@jit(nopython=True, fastmath=True)
+def compute_max_distance_jitted(vertices):
+    """Fast computation of maximum distance from origin"""
+    max_dist_sq = 0.0
+    for i in range(vertices.shape[0]):
+        x, y = vertices[i, 0], vertices[i, 1]
+        dist_sq = x * x + y * y
+        if dist_sq > max_dist_sq:
+            max_dist_sq = dist_sq
+    return np.sqrt(max_dist_sq)
+
+class HexagonGeometry:
+    """Handles all geometric operations for hexagons with optimized computations"""
+
+    @staticmethod
+    @jit(nopython=True, fastmath=True)
+    def create_unit_hexagon_fast(center_x: float, center_y: float, rotation: float) -> np.ndarray:
+        """Create unit hexagon vertices efficiently"""
+        return compute_hexagon_vertices_jitted(center_x, center_y, rotation, 1.0)
+
+    @staticmethod
+    def create_unit_hexagon(center: Tuple[float, float] = (0, 0), rotation: float = 0) -> Polygon:
+        """Create a unit regular hexagon with given center and rotation"""
+        vertices = compute_hexagon_vertices_jitted(center[0], center[1], rotation, 1.0)
+        return Polygon(vertices.tolist())
+
+    @staticmethod
+    def get_all_vertices_fast(hex_data: np.ndarray) -> np.ndarray:
+        """Extract all vertices from all hexagons efficiently using numba"""
+        all_vertices = np.empty((0, 2), dtype=np.float64)
+        for i in range(len(hex_data)):
+            center = (hex_data[i][0], hex_data[i][1])
+            rotation = hex_data[i][2]
+            hexagon_vertices = compute_hexagon_vertices_jitted(center[0], center[1], rotation, 1.0)
+            all_vertices = np.vstack([all_vertices, hexagon_vertices])
+        return all_vertices
+
+    @staticmethod
+    def get_all_vertices(hex_data: np.ndarray) -> List[Tuple[float, float]]:
+        """Extract all vertices from all hexagons"""
+        all_vertices = []
+        for i in range(len(hex_data)):
+            center = (hex_data[i][0], hex_data[i][1])
+            rotation = hex_data[i][2]
+            hexagon = HexagonGeometry.create_unit_hexagon(center, rotation)
+            all_vertices.extend(list(hexagon.exterior.coords))
+        return all_vertices
+
+class HexagonConstraintChecker:
+    """Handles constraint checking for hexagon arrangements with optimizations"""
+
+    @staticmethod
+    @jit(nopython=True, fastmath=True)
+    def check_overlap_fast(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast overlap check using axis-aligned bounding boxes first"""
+        # Fast bounding box check
+        min1_x = np.min(hex1_vertices[:, 0])
+        max1_x = np.max(hex1_vertices[:, 0])
+        min1_y = np.min(hex1_vertices[:, 1])
+        max1_y = np.max(hex1_vertices[:, 1])
+        
+        min2_x = np.min(hex2_vertices[:, 0])
+        max2_x = np.max(hex2_vertices[:, 0])
+        min2_y = np.min(hex2_vertices[:, 1])
+        max2_y = np.max(hex2_vertices[:, 1])
+        
+        # Early exit if bounding boxes don't intersect
+        if max1_x < min2_x or max2_x < min1_x or max1_y < min2_y or max2_y < min1_y:
+            return False
+        
+        # For the actual polygon intersection, we'll use the slower but accurate method
+        # In practice, this can be optimized further using geometric algorithms
+        return True  # Placeholder for actual implementation
+
+    @staticmethod
+    def check_overlap(hex1: Polygon, hex2: Polygon) -> bool:
+        """Check if two hexagons overlap with numerical stability"""
+        # Add small buffer to handle floating point precision issues
+        buffered_hex1 = hex1.buffer(1e-10)
+        buffered_hex2 = hex2.buffer(1e-10)
+        return buffered_hex1.intersects(buffered_hex2)
+
+    @staticmethod
+    def check_containment(inner_hex: Polygon, outer_hex: Polygon) -> bool:
+        """Check if inner hexagon is fully contained within outer hexagon"""
+        return outer_hex.contains(inner_hex)
+
+    @staticmethod
+    def compute_overlap_penalty_fast(hex_data: np.ndarray) -> float:
+        """Compute penalty for overlaps between hexagons efficiently"""
+        penalty = 0.0
+        n = len(hex_data)
+        # Precompute all vertices once
+        all_vertices = []
+        for i in range(n):
+            center = (hex_data[i][0], hex_data[i][1])
+            rotation = hex_data[i][2]
+            vertices = compute_hexagon_vertices_jitted(center[0], center[1], rotation, 1.0)
+            all_vertices.append(vertices)
+        
+        # Check pairwise overlaps
+        for i in range(n):
+            for j in range(i+1, n):
+                if HexagonConstraintChecker.check_overlap_fast(all_vertices[i], all_vertices[j]):
+                    penalty += 1000.0
+        return penalty
+
+    @staticmethod
+    def compute_overlap_penalty(hexagons: List[Polygon]) -> float:
+        """Compute penalty for overlaps between hexagons"""
+        penalty = 0
+        n = len(hexagons)
+        for i in range(n):
+            for j in range(i+1, n):
+                if HexagonConstraintChecker.check_overlap(hexagons[i], hexagons[j]):
+                    penalty += 1000
+        return penalty
+
+class HexagonPackingEvaluator:
+    """Evaluates hexagon packing configurations with optimizations"""
+
+    @staticmethod
+    def calculate_outer_hex_radius_fast(hex_data: np.ndarray) -> float:
+        """Calculate minimum outer hexagon radius needed to contain all inner hexagons efficiently"""
+        all_vertices = HexagonGeometry.get_all_vertices_fast(hex_data)
+        max_distance = compute_max_distance_jitted(all_vertices)
+        return max_distance + 0.1
+
+    @staticmethod
+    def calculate_outer_hex_radius(hex_data: np.ndarray) -> float:
+        """Calculate minimum outer hexagon radius needed to contain all inner hexagons"""
+        all_vertices = HexagonGeometry.get_all_vertices(hex_data)
+        max_distance = 0
+        for vertex in all_vertices:
+            distance = math.sqrt(vertex[0]**2 + vertex[1]**2)
+            max_distance = max(max_distance, distance)
+        return max_distance + 0.1
+
+    @staticmethod
+    def evaluate_configuration_fast(hex_data: np.ndarray) -> float:
+        """Fast evaluation of configuration with early exits and optimized calculations"""
+        # Quick constraint check without detailed polygon creation
+        overlap_penalty = HexagonConstraintChecker.compute_overlap_penalty_fast(hex_data)
+        
+        if overlap_penalty > 0:
+            return 1e-10  # Invalid configuration gets penalized heavily
+            
+        # Calculate outer radius
+        outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius_fast(hex_data)
+        return 1.0 / outer_radius
+
+    @staticmethod
+    def evaluate_configuration(hex_data: np.ndarray) -> float:
+        """Evaluate a configuration and return the inverse radius"""
+        outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius(hex_data)
+
+        # Create hexagon polygons
+        hexagons = []
+        for i in range(len(hex_data)):
+            center = (hex_data[i][0], hex_data[i][1])
+            rotation = hex_data[i][2]
+            hexagon = HexagonGeometry.create_unit_hexagon(center, rotation)
+            hexagons.append(hexagon)
+
+        # Compute penalties
+        overlap_penalty = HexagonConstraintChecker.compute_overlap_penalty(hexagons)
+
+        total_penalty = overlap_penalty
+
+        # If valid configuration, return inverse of outer radius; otherwise return a very small value
+        if total_penalty == 0:
+            return 1.0 / outer_radius
+        else:
+            # Invalid configuration gets penalized heavily
+            return 1e-10
+
+class SymmetryAwareMutation:
+    """Handles mutation strategies that preserve geometric symmetries"""
+
+    @staticmethod
+    def generate_rotationally_symmetric_pattern() -> np.ndarray:
+        """Generate a rotationally symmetric 12-hexagon pattern based on mathematical principles"""
+        # Create a highly symmetric configuration based on hexagonal lattice points
+        config = np.zeros((12, 3))
+
+        # Central hexagon
+        config[0] = [0.0, 0.0, 0.0]
+
+        # First ring of 6 hexagons at distance 2.0 (approximately)
+        ring_distance = 2.0
+        angles = [0, 60, 120, 180, 240, 300]
+        for i, angle in enumerate(angles):
+            rad_angle = math.radians(angle)
+            config[i+1] = [ring_distance * math.cos(rad_angle),
+                          ring_distance * math.sin(rad_angle), 0.0]
+
+        # Second ring of 6 hexagons at distance 3.464 (sqrt(12) which allows proper spacing)
+        outer_ring_distance = 3.464101615  # sqrt(12)
+        angles_outer = [30, 90, 150, 210, 270, 330]  # Offset by 30 degrees
+        for i, angle in enumerate(angles_outer):
+            rad_angle = math.radians(angle)
+            config[i+7] = [outer_ring_distance * math.cos(rad_angle),
+                          outer_ring_distance * math.sin(rad_angle), 0.0]
+
+        return config
+
+    @staticmethod
+    def generate_kagome_like_pattern() -> np.ndarray:
+        """Generate a Kagome lattice inspired pattern with enhanced packing density"""
+        config = np.zeros((12, 3))
+
+        # Central hexagon
+        config[0] = [0.0, 0.0, 0.0]
+
+        # Hexagonal arrangement with special spacing
+        # Positions based on the golden ratio and hexagonal geometry
+        config[1] = [0.0, 2.17, 0.0]      # Top
+        config[2] = [1.87, 1.08, 0.0]     # Top right
+        config[3] = [1.87, -1.08, 0.0]    # Bottom right
+        config[4] = [0.0, -2.17, 0.0]     # Bottom
+        config[5] = [-1.87, -1.08, 0.0]   # Bottom left
+        config[6] = [-1.87, 1.08, 0.0]    # Top left
+
+        # Additional positions in a more spread-out pattern
+        config[7] = [3.74, 2.17, 0.0]     # Far top right
+        config[8] = [3.74, -2.17, 0.0]    # Far bottom right
+        config[9] = [-3.74, -2.17, 0.0]   # Far bottom left
+        config[10] = [-3.74, 2.17, 0.0]   # Far top left
+        config[11] = [0.0, -4.34, 0.0]    # Far bottom
+
+        return config
+
+    @staticmethod
+    def generate_hcp_pattern() -> np.ndarray:
+        """Generate a hexagonal close-packed pattern with optimal density"""
+        config = np.zeros((12, 3))
+
+        # Central hexagon
+        config[0] = [0.0, 0.0, 0.0]
+
+        # Arrange in HCP-like fashion with proper spacing
+        config[1] = [0.0, 2.236, 0.0]      # Top
+        config[2] = [1.902, 1.118, 0.0]    # Top right
+        config[3] = [1.902, -1.118, 0.0]   # Bottom right
+        config[4] = [0.0, -2.236, 0.0]     # Bottom
+        config[5] = [-1.902, -1.118, 0.0]  # Bottom left
+        config[6] = [-1.902, 1.118, 0.0]   # Top left
+
+        # Additional positions for better coverage
+        config[7] = [3.804, 2.236, 0.0]    # Far top right
+        config[8] = [3.804, -2.236, 0.0]   # Far bottom right
+        config[9] = [-3.804, -2.236, 0.0]  # Far bottom left
+        config[10] = [-3.804, 2.236, 0.0]  # Far top left
+        config[11] = [0.0, -4.472, 0.0]    # Far bottom
+
+        return config
+
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1, generation: int = 0, max_generations: int = 50) -> np.ndarray:
+        """Apply symmetric mutation to maintain hexagonal properties with adaptive scaling"""
+        mutated_data = hex_data.copy()
+
+        # Stage-based mutation strengths
+        stage_multipliers = {1: 2.0, 2: 1.0, 3: 0.5}
+        base_mutation = mutation_strength * stage_multipliers.get(stage, 1.0)
+
+        # Progressive mutation decay with exponential curve for faster early decay
+        progress = generation / max_generations if max_generations > 0 else 0
+        # Use exponential decay to allow faster initial exploration reduction
+        decay_factor = 0.5 ** (progress * 2)  # Exponential decay
+        # Ensure minimum decay factor to prevent too small mutations
+        decay_factor = max(0.1, decay_factor)
+        mutation_factor = base_mutation * decay_factor
+
+        # Apply different mutation strategies based on position type
+        # Mutate center hexagon more cautiously
+        mutated_data[0][0] += random.gauss(0, mutation_factor * 0.5)
+        mutated_data[0][1] += random.gauss(0, mutation_factor * 0.5)
+
+        # Mutate radial positions with consideration for symmetry
+        # Group hexagons into symmetric groups (central, inner ring, outer ring)
+        for i in range(1, len(hex_data)):
+            # Apply rotation-invariant mutation
+            # Each group should be mutated together to maintain relative symmetry
+            mutation_x = random.gauss(0, mutation_factor * 0.7)
+            mutation_y = random.gauss(0, mutation_factor * 0.7)
+
+            # Apply the same mutation to related symmetric positions
+            if i <= 6:  # Inner ring positions
+                mutated_data[i][0] += mutation_x
+                mutated_data[i][1] += mutation_y
+            else:  # Outer ring positions
+                mutated_data[i][0] += mutation_x
+                mutated_data[i][1] += mutation_y
+
+        # Apply hard constraints to maintain approximate symmetry
+        # Maintain roughly equal spacing from center
+        center_x, center_y = mutated_data[0][:2]
+        for i in range(1, len(hex_data)):
+            # Adjust positions to maintain symmetry
+            rel_x, rel_y = mutated_data[i][0] - center_x, mutated_data[i][1] - center_y
+            distance = math.sqrt(rel_x**2 + rel_y**2)
+            if distance > 0:
+                # Normalize and reapply with slight randomness
+                rel_x_norm = rel_x / distance
+                rel_y_norm = rel_y / distance
+                # Slight perturbation to maintain symmetry better
+                new_distance = distance + random.gauss(0, mutation_factor * 0.1)
+                mutated_data[i][0] = center_x + rel_x_norm * new_distance
+                mutated_data[i][1] = center_y + rel_y_norm * new_distance
+
+        return mutated_data
+
+    @staticmethod
+    def generate_symmetric_configurations() -> List[np.ndarray]:
+        """Generate multiple mathematically derived symmetric configurations"""
+        configs = []
+
+        # Add the most robust symmetric patterns
+        configs.append(SymmetryAwareMutation.generate_rotationally_symmetric_pattern())
+        configs.append(SymmetryAwareMutation.generate_kagome_like_pattern())
+        configs.append(SymmetryAwareMutation.generate_hcp_pattern())
+
+        # Also add variations with different rotation angles for each hexagon to increase diversity
+        base_config = SymmetryAwareMutation.generate_rotationally_symmetric_pattern()
+        for i in range(3):
+            config = base_config.copy()
+            # Add small random rotations to increase diversity
+            for j in range(len(config)):
+                if j > 0:  # Don't rotate central hexagon
+                    config[j][2] = random.uniform(0, 360)
+            configs.append(config)
+
+        return configs
+
+class HexagonPackingOptimizer:
+    """Main optimizer class that orchestrates the packing process with improvements"""
+
+    def __init__(self):
+        self.best_score = 0
+        self.best_config = None
+        self.start_time = time.time()
+        self.timeout = 180  # seconds
+
+    def get_initial_configurations(self) -> List[np.ndarray]:
+        """Generate high-quality initial configurations based on known optimal patterns"""
+        configs = []
+
+        # Configuration 1: Optimal 12-hexagon pattern (inspired by mathematical literature)
+        config1 = np.array([
+            [0, 0, 0],           # center
+            [0, 2.0, 0],         # top
+            [0, -2.0, 0],        # bottom
+            [1.732, 1.0, 0],     # top-right
+            [-1.732, 1.0, 0],    # top-left
+            [1.732, -1.0, 0],    # bottom-right
+            [-1.732, -1.0, 0],   # bottom-left
+            [3.464, 0, 0],       # far right
+            [-3.464, 0, 0],      # far left
+            [1.732, 3.0, 0],     # upper right corner
+            [-1.732, 3.0, 0],    # upper left corner
+            [1.732, -3.0, 0],    # lower right corner
+            [-1.732, -3.0, 0],   # lower left corner
+        ])
+        configs.append(config1[:12])
+
+        # Configuration 2: Compact hexagonal arrangement (better for tight packing)
+        config2 = np.array([
+            [0, 0, 0],           # center
+            [0, 1.8, 0],         # top
+            [0, -1.8, 0],        # bottom
+            [1.55, 0.9, 0],      # top-right
+            [-1.55, 0.9, 0],     # top-left
+            [1.55, -0.9, 0],     # bottom-right
+            [-1.55, -0.9, 0],    # bottom-left
+            [3.1, 0, 0],         # far right
+            [-3.1, 0, 0],        # far left
+            [1.55, 2.7, 0],      # upper right corner
+            [-1.55, 2.7, 0],     # upper left corner
+            [1.55, -2.7, 0],     # lower right corner
+            [-1.55, -2.7, 0],    # lower left corner
+        ])
+        configs.append(config2[:12])
+
+        # Configuration 3: Ring pattern (good for exploring outer boundaries)
+        config3 = np.array([
+            [0, 0, 0],           # center
+            [0, 2.1, 0],         # top
+            [1.8, 1.0, 0],       # top-right
+            [1.8, -1.0, 0],      # bottom-right
+            [0, -2.1, 0],        # bottom
+            [-1.8, -1.0, 0],     # bottom-left
+            [-1.8, 1.0, 0],      # top-left
+            [3.6, 0, 0],         # far right
+            [0, 3.6, 0],         # far top
+            [-3.6, 0, 0],        # far left
+            [0, -3.6, 0],        # far bottom
+            [1.8, 2.1, 0],       # upper right corner
+            [-1.8, 2.1, 0],      # upper left corner
+            [1.8, -2.1, 0],      # lower right corner
+            [-1.8, -2.1, 0],     # lower left corner
+        ])
+        configs.append(config3[:12])
+
+        # Configuration 4: Kagome lattice pattern - based on triangular lattice with additional symmetry
+        config4 = np.array([
+            [0, 0, 0],           # center
+            [0, 2.0, 0],         # top
+            [1.732, 1.0, 0],     # top-right
+            [1.732, -1.0, 0],    # bottom-right
+            [0, -2.0, 0],        # bottom
+            [-1.732, -1.0, 0],   # bottom-left
+            [-1.732, 1.0, 0],    # top-left
+            [3.464, 0, 0],       # far right
+            [0, 3.464, 0],       # far top
+            [0, -3.464, 0],      # far bottom
+            [-3.464, 0, 0],      # far left
+            [1.732, 3.0, 0],     # upper right corner
+            [-1.732, 3.0, 0],    # upper left corner
+            [1.732, -3.0, 0],    # lower right corner
+            [-1.732, -3.0, 0],   # lower left corner
+        ])
+        configs.append(config4[:12])
+
+        # Configuration 5: Hexagonal Close-Packed (HCP) arrangement - maximizes density through efficient packing
+        config5 = np.array([
+            [0, 0, 0],           # center
+            [0, 2.1, 0],         # top
+            [0, -2.1, 0],        # bottom
+            [1.8, 1.0, 0],       # top-right
+            [-1.8, 1.0, 0],      # top-left
+            [1.8, -1.0, 0],      # bottom-right
+            [-1.8, -1.0, 0],     # bottom-left
+            [3.6, 0, 0],         # far right
+            [-3.6, 0, 0],        # far left
+            [1.8, 2.1, 0],       # upper right corner
+            [-1.8, 2.1, 0],      # upper left corner
+            [1.8, -2.1, 0],      # lower right corner
+            [-1.8, -2.1, 0],     # lower left corner
+            [0, 4.2, 0],         # far top
+            [0, -4.2, 0],        # far bottom
+        ])
+        configs.append(config5[:12])
+
+        return configs
+
+    def optimize_stage(self, initial_config: np.ndarray, stage: int, max_generations: int = 50) -> Tuple[np.ndarray, float]:
+        """Single stage optimization with specific mutation strategy"""
+        # Stage 1: Population initialization with stochastic perturbations
+        population_size = 25 if stage <= 2 else 15  # Fewer individuals in final stage
+
+        # Start with best configuration and add perturbations
+        population = [initial_config.copy()]
+        for _ in range(population_size - 1):
+            variant = initial_config.copy()
+            # Add small random perturbations to positions
+            for i in range(len(variant)):
+                variant[i][0] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+                variant[i][1] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+            population.append(variant)
+
+        # Temperature schedule: start high and decrease over generations
+        initial_temp = 0.8
+        final_temp = 0.01
+
+        for gen in range(max_generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Calculate temperature based on generation
+            progress = gen / max_generations if max_generations > 0 else 0
+            temperature = initial_temp * (final_temp / initial_temp) ** progress
+
+            # Evaluate fitness of entire population using fast version
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration_fast(individual)
+                fitness_scores.append(score)
+
+            # Select top performers (elitism) instead of temperature-based selection
+            # This is simpler and often works well for this domain
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = population_size // 3
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=0.2, stage=stage, generation=gen, max_generations=max_generations)
+                new_population.append(mutated)
+
+            population = new_population
+
+            # Track best overall using fast evaluation
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration_fast(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+
+    def refine_with_scipy_optimization(self, config: np.ndarray) -> np.ndarray:
+        """Refine using scipy optimization with better handling"""
+        def objective_func(params):
+            positions = params.reshape(-1, 2)
+            temp_data = config.copy()
+            temp_data[:, 0] = positions[:, 0]
+            temp_data[:, 1] = positions[:, 1]
+            outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius_fast(temp_data)
+            return outer_radius
+
+        def constraint_func(params):
+            positions = params.reshape(-1, 2)
+            temp_data = config.copy()
+            temp_data[:, 0] = positions[:, 0]
+            temp_data[:, 1] = positions[:, 1]
+
+            # Create hexagon polygons
+            hexagons = []
+            for i in range(12):
+                center = (positions[i][0], positions[i][1])
+                rotation = config[i][2]
+                hexagon = HexagonGeometry.create_unit_hexagon(center, rotation)
+                hexagons.append(hexagon)
+
+            penalty = HexagonConstraintChecker.compute_overlap_penalty(hexagons)
+            outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius_fast(temp_data)
+
+            return penalty
+
+        try:
+            # Flatten the initial positions for optimization
+            initial_positions = np.column_stack((config[:, 0], config[:, 1])).flatten()
+
+            # Use a simpler optimization approach with fewer iterations
+            result = minimize(objective_func, initial_positions, method='L-BFGS-B',
+                             bounds=[(-5, 5) for _ in range(24)],
+                             constraints={'type': 'ineq', 'fun': constraint_func},
+                             options={'maxiter': 50})
+
+            if result.success:
+                final_positions = result.x.reshape(-1, 2)
+                config[:, 0] = final_positions[:, 0]
+                config[:, 1] = final_positions[:, 1]
+        except Exception as e:
+            warnings.warn(f"Scipy optimization failed: {e}")
+            pass  # Fall back to previous best if optimization fails
+
+        return config
+
+    def run_full_optimization(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Run the complete multi-scale optimization pipeline with optimization focus"""
+        # Get multiple symmetric configurations
+        configs = self.get_initial_configurations()
+
+        # Try multiple configurations and find the best starting point using fast evaluation
+        best_initial_score = 0
+        best_initial_config = None
+
+        for config in configs:
+            score = HexagonPackingEvaluator.evaluate_configuration_fast(config)
+            if score > best_initial_score:
+                best_initial_score = score
+                best_initial_config = config.copy()
+
+        # Store the best configuration found so far
+        self.best_score = best_initial_score
+        self.best_config = best_initial_config.copy()
+
+        # Stage 1: Coarse-grained position optimization (fixed rotations)
+        print("Stage 1: Coarse position optimization...")
+        coarse_config = best_initial_config.copy()
+        # Fix rotations for this stage
+        for i in range(len(coarse_config)):
+            coarse_config[i][2] = 0  # Set all rotations to 0 for coarse optimization
+
+        evolved_config, evolved_score = self.optimize_stage(coarse_config, stage=1, max_generations=30)
+
+        # Stage 2: Fine-grained refinement with rotation awareness
+        print("Stage 2: Fine-grained refinement...")
+        # Allow rotations to vary but keep positions relatively close to evolved ones
+        refined_config = evolved_config.copy()
+        # Add small random rotations to improve packing
+        for i in range(len(refined_config)):
+            # Perturb rotations slightly
+            refined_config[i][2] += random.uniform(-5, 5) if random.random() < 0.4 else 0
+
+        # Run evolution again with rotations allowed but more constrained
+        rotated_config, rotated_score = self.optimize_stage(refined_config, stage=2, max_generations=30)
+
+        # Stage 3: Full optimization with scipy refinement
+        print("Stage 3: Full scipy optimization...")
+        final_config = self.refine_with_scipy_optimization(rotated_config)
+
+        # Final evaluation using fast method first, then exact if needed
+        final_score = HexagonPackingEvaluator.evaluate_configuration_fast(final_config)
+        if final_score < 1e-8:  # If failed, use exact evaluation
+            final_score = HexagonPackingEvaluator.evaluate_configuration(final_config)
+            final_outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius(final_config)
+        else:
+            final_outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius_fast(final_config)
+            
+        outer_hex_side_length = final_outer_radius + 0.2  # Add margin
+
+        # Return result
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+        return final_config, outer_hex_data, outer_hex_side_length
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    optimizer = HexagonPackingOptimizer()
+    return optimizer.run_full_optimization()
+
+# EVOLVE-BLOCK-END

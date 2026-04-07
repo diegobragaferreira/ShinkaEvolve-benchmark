@@ -1,0 +1,538 @@
+--- a/original.py
++++ b/original.py
+@@ -1,366 +1,492 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial import Voronoi, voronoi_plot_2d
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist
+ import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+-    Uses a Voronoi-based geometric optimization approach.
++    Uses a Voronoi-based geometric optimization approach with enhanced multi-start strategy.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+ 
+     np.random.seed(42)
+ 
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum pairwise distances"""
+         if len(points) < 2:
+             return 0
+         distances = pdist(points)
+         if len(distances) == 0:
+             return 0
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+         if d_max <= 0:
+             return 0
+         return d_min / d_max
+ 
++    def compute_boundary_penalty(points, threshold=0.02):
++        """Compute penalty for points near boundaries"""
++        penalty = 0
++        for point in points:
++            # Check distance to each boundary
++            dist_to_left = point[0]
++            dist_to_right = 1 - point[0]
++            dist_to_bottom = point[1]
++            dist_to_top = 1 - point[1]
++
++            min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
++
++            # Apply quadratic penalty for being too close to boundary
++            if min_dist < threshold:
++                penalty += (threshold - min_dist)**2
++
++        return penalty
++
+     def create_initial_voronoi_configuration():
+         """Create initial configuration based on Voronoi-friendly layout"""
+         # Start with hexagonal grid pattern
+         points = []
+         rows = 4
+         cols = 4
+ 
+         spacing_x = 1.0
+         spacing_y = np.sqrt(3) / 2
+ 
+         for i in range(rows):
+             for j in range(cols):
+                 x = j * spacing_x + (i % 2) * spacing_x * 0.5
+                 y = i * spacing_y
+                 points.append([x, y])
+ 
+         points = np.array(points)
+ 
+         # Normalize to [0,1] x [0,1]
+         max_x = (cols - 1) + 0.5
+         max_y = (rows - 1) * spacing_y
+ 
+         points[:, 0] = points[:, 0] / max_x
+         points[:, 1] = points[:, 1] / max_y
+ 
+         # Add strategic perturbations to break symmetry and improve Voronoi quality
+         noise = np.random.normal(0, 0.01, points.shape)
+ 
+         # Emphasize perturbation on edge points
+         edge_indices = [0, 1, 2, 3, 4, 7, 8, 11, 12, 13, 14, 15]  # Edge points of 4x4 grid
+         noise[edge_indices] *= 1.5
+ 
+         points += noise
+         points = np.clip(points, 0, 1)
++
++        return points
++
++    def create_golden_spiral_configuration():
++        """Create configuration using golden spiral pattern"""
++        points = []
++        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
++
++        for i in range(16):
++            angle = i * 2 * np.pi / 16 * phi
++            radius = i / 16 * 0.4 + 0.1  # From 0.1 to 0.5
++            x = 0.5 + radius * np.cos(angle)
++            y = 0.5 + radius * np.sin(angle)
++            points.append([x, y])
++
++        points = np.array(points)
++        # Add some noise
++        noise = np.random.normal(0, 0.01, points.shape)
++        points += noise
++        points = np.clip(points, 0, 1)
++
++        return points
++
++    def create_circle_pack_configuration():
++        """Create configuration using circle packing pattern"""
++        points = []
++        # Place points in a circular arrangement with some randomness
++        for i in range(16):
++            angle = 2 * np.pi * i / 16
++            # Add some radial noise
++            radius = 0.4 + 0.1 * np.random.random()
++            x = 0.5 + radius * np.cos(angle)
++            y = 0.5 + radius * np.sin(angle)
++            points.append([x, y])
++
++        points = np.array(points)
++        return points
++
++    def create_uniform_random_configuration():
++        """Create uniformly distributed random configuration"""
++        points = []
++        for _ in range(16):
++            points.append([np.random.random(), np.random.random()])
++        return np.array(points)
++
++    def create_deterministic_pattern_configuration():
++        """Create configuration with deterministic pattern"""
++        points = []
++        # Arrange points in a grid pattern with deterministic offsets
++        index = 0
++        for i in range(4):
++            for j in range(4):
++                x = i / 3.0 + 0.01 * np.sin(i * j)
++                y = j / 3.0 + 0.01 * np.cos(i * j)
++                points.append([x, y])
++                index += 1
++
++        points = np.array(points)
++        # Normalize carefully to fit in [0,1]
++        points[:, 0] = np.clip(points[:, 0], 0, 1)
++        points[:, 1] = np.clip(points[:, 1], 0, 1)
+ 
+         return points
+ 
+     def voronoi_energy_penalty(points):
+         """Calculate energy penalty based on Voronoi cell properties"""
+         if len(points) < 3:
+             return 0
+ 
+         try:
+             # Compute Voronoi diagram
+             vor = Voronoi(points)
+ 
+             # Calculate area variance penalty (more uniform cells are better)
+             areas = []
+             for region in vor.regions:
+                 if len(region) > 0 and -1 not in region:
+                     # Compute polygon area
+                     vertices = [vor.vertices[i] for i in region if i >= 0]
+                     if len(vertices) >= 3:
+-                        # Simple polygon area calculation
++                        # Simple polygon area calculation using shoelace formula
+                         polygon_area = 0
+                         n = len(vertices)
+                         for i in range(n):
+                             j = (i + 1) % n
+                             polygon_area += vertices[i][0] * vertices[j][1]
+                             polygon_area -= vertices[j][0] * vertices[i][1]
+                         areas.append(abs(polygon_area) / 2)
+ 
+             if len(areas) == 0:
+                 return 0
+ 
+             # Penalize high variance in cell areas
+             mean_area = np.mean(areas)
+             if mean_area == 0:
+                 return 0
+ 
+             area_variance = np.var(areas)
+             area_penalty = area_variance / (mean_area + 1e-8)
+ 
+             return area_penalty
+ 
+         except:
+             return 0
+ 
+     def objective_with_voronoi(points_flat):
+-        """Combined objective: maximize min/max ratio with Voronoi regularization"""
++        """Combined objective: maximize min/max ratio with Voronoi regularization and boundary penalties"""
+         points = points_flat.reshape(-1, 2)
+ 
+         # Compute distance ratio
+         ratio = compute_min_max_ratio(points)
+ 
+         # Add Voronoi-based penalty to encourage uniform distribution
+         voronoi_penalty = voronoi_energy_penalty(points)
+ 
+-        # We want to maximize ratio while minimizing Voronoi penalty
++        # Add boundary penalty to keep points away from edges
++        boundary_penalty = compute_boundary_penalty(points)
++
++        # We want to maximize ratio while minimizing penalties
+         # Return negative since we minimize in scipy.optimize
+-        return -(ratio - 0.1 * voronoi_penalty)
++        return -(ratio - 0.1 * voronoi_penalty - 0.01 * boundary_penalty)
+ 
+     def generate_voronoi_guided_perturbations(points, num_perturbations=8):
+         """Generate perturbations that respect Voronoi geometry"""
+         # Get Voronoi structure
+         try:
+             vor = Voronoi(points)
+         except:
+             return points.copy()
+ 
+         new_points = points.copy()
+ 
+         # For each point, adjust based on its Voronoi cell properties
+         for i in range(len(points)):
+             # Get neighbors based on Voronoi connectivity
+             neighbors = []
+ 
+             # Find neighboring points via Voronoi relationships
+             for j in range(len(points)):
+                 if i != j:
+                     neighbors.append(j)
+ 
+             # If we have neighbors, move towards more uniform distribution
+             if len(neighbors) > 0 and np.random.rand() < 0.3:
+                 # Move point to increase average Voronoi cell area
+                 # Simple heuristic: move towards center of mass of neighbors
+                 neighbor_points = points[neighbors]
+                 center_of_mass = np.mean(neighbor_points, axis=0)
+ 
+                 # Move point slightly towards center of mass
+                 direction = center_of_mass - points[i]
+                 magnitude = 0.01 * np.linalg.norm(direction)
+                 if magnitude > 0:
+                     direction = direction / magnitude
+ 
+                 # Apply perturbation with reduced magnitude for stability
+                 new_points[i] += direction * 0.005
+ 
+         return new_points
+ 
+     def voronoi_based_optimization(initial_points, max_iter=2000):
+-        """Optimize using Voronoi-guided approach"""
++        """Optimize using Voronoi-guided approach with enhanced cooling"""
+         current_points = initial_points.copy()
+         current_ratio = compute_min_max_ratio(current_points)
+ 
+-        # Better cooling schedule
+-        T = 0.3
+-        cooling_rate = 0.999
++        # Enhanced adaptive cooling schedule
++        T = 0.5  # Higher initial temperature for thorough exploration
++        cooling_rate = 0.9992  # Slightly faster cooling
+         min_temp = 1e-6
+ 
+         best_points = current_points.copy()
+         best_ratio = current_ratio
+ 
+-        # Store recent improvements
++        # Store recent improvements for adaptive cooling
+         recent_improvements = []
+-        improvement_window = 30
++        improvement_window = 25
++
++        # Track stagnation for early stopping
++        stagnant_iterations = 0
++        max_stagnant = 400
+ 
+         for iteration in range(max_iter):
+-            # Adaptive cooling
++            # Adaptive cooling based on recent progress
+             if len(recent_improvements) >= improvement_window:
+                 avg_improvement = np.mean(recent_improvements[-improvement_window:])
+-                if avg_improvement < 1e-6:
+-                    T *= 0.95
+-                elif avg_improvement > 1e-4:
+-                    T = min(T * 1.02, 0.5)  # Warm up occasionally
++                if avg_improvement < 1e-5:
++                    T *= 0.96  # Cool faster when stuck
++                    stagnant_iterations += 1
++                elif avg_improvement > 1e-3:
++                    T = min(T * 1.01, 0.8)  # Warm up occasionally if improving fast
++                    stagnant_iterations = 0  # Reset stagnation counter
++                else:
++                    stagnant_iterations = 0  # Reset stagnation counter
++
++            # Early stopping if too stagnant
++            if stagnant_iterations > max_stagnant:
++                break
+ 
+             T *= cooling_rate
+ 
+             if T < min_temp:
+                 break
+ 
+             # Generate multiple perturbations and select the best
+             best_new_points = current_points.copy()
+             best_new_ratio = current_ratio
+ 
+             # Try several perturbation strategies
+-            for _ in range(5):
++            for _ in range(6):  # Increased number of attempts
+                 new_points = current_points.copy()
+ 
+-                # Strategy 1: Random perturbation
+-                if np.random.rand() < 0.5:
++                # Strategy 1: Random perturbation (70% chance)
++                if np.random.rand() < 0.7:
+                     idx = np.random.randint(len(current_points))
+-                    perturbation_magnitude = T * 0.05
++                    perturbation_magnitude = T * 0.08  # Larger magnitude with higher T
+                     new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
+                     new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
+                 else:
+-                    # Strategy 2: Voronoi-guided perturbation
+-                    new_points = generate_voronoi_guided_perturbations(current_points, 2)
+-
+-                # Enforce boundaries
++                    # Strategy 2: Voronoi-guided perturbation (30% chance)
++                    new_points = generate_voronoi_guided_perturbations(current_points, 3)
++
++                # Enforce boundaries with better handling
++                for i in range(len(new_points)):
++                    for j in range(2):
++                        # Soft boundary correction to prevent getting stuck
++                        if new_points[i, j] < 0:
++                            # Reflect and add some noise
++                            new_points[i, j] = 0.005 + np.random.rand() * 0.01
++                        elif new_points[i, j] > 1:
++                            new_points[i, j] = 0.995 - np.random.rand() * 0.01
++
++                # Apply hard clipping to ensure within bounds
+                 new_points[:, 0] = np.clip(new_points[:, 0], 0, 1)
+                 new_points[:, 1] = np.clip(new_points[:, 1], 0, 1)
+ 
+                 # Evaluate
+                 new_ratio = compute_min_max_ratio(new_points)
+ 
+                 if new_ratio > best_new_ratio:
+                     best_new_ratio = new_ratio
+                     best_new_points = new_points.copy()
+ 
+             # Accept or reject with Metropolis criterion
+             if best_new_ratio > current_ratio or np.random.rand() < np.exp((best_new_ratio - current_ratio) / T):
+                 current_points = best_new_points
+                 current_ratio = best_new_ratio
+ 
+                 if current_ratio > best_ratio:
+                     best_ratio = current_ratio
+                     best_points = current_points.copy()
++                    stagnant_iterations = 0  # Reset stagnation on improvement
++                else:
++                    stagnant_iterations += 1  # Increment if no improvement
+ 
+             # Track improvements
+             if best_new_ratio > current_ratio:
+                 recent_improvements.append(best_new_ratio - current_ratio)
+                 if len(recent_improvements) > improvement_window * 2:
+                     recent_improvements.pop(0)
+ 
+         return best_points, best_ratio
+ 
+     def hybrid_optimization(initial_points):
+         """Combine different optimization strategies"""
+         best_points = initial_points.copy()
+         best_ratio = compute_min_max_ratio(best_points)
+ 
+-        # Strategy 1: Voronoi-based optimization
++        # Strategy 1: Voronoi-based optimization (longer run for better exploration)
+         try:
+-            voronoi_points, voronoi_ratio = voronoi_based_optimization(initial_points, max_iter=1500)
++            voronoi_points, voronoi_ratio = voronoi_based_optimization(initial_points, max_iter=2000)
+             if voronoi_ratio > best_ratio:
+                 best_ratio = voronoi_ratio
+                 best_points = voronoi_points.copy()
+         except:
+             pass
+ 
+         # Strategy 2: Gradient-based refinement with scipy
+         try:
+             # Flatten points for scipy optimization
+             x0 = best_points.flatten()
+ 
+             # Use L-BFGS-B for constrained optimization
+             result = minimize(
+                 objective_with_voronoi,
+                 x0,
+                 method='L-BFGS-B',
+                 bounds=[(0, 1) for _ in range(32)],
+-                options={'maxiter': 500, 'ftol': 1e-8}
++                options={'maxiter': 800, 'ftol': 1e-8}  # Increased iterations
+             )
+ 
+             # Extract result
+             refined_points = result.x.reshape(-1, 2)
+             refined_points = np.clip(refined_points, 0, 1)
+             refined_ratio = compute_min_max_ratio(refined_points)
+ 
+             if refined_ratio > best_ratio:
+                 best_ratio = refined_ratio
+                 best_points = refined_points.copy()
+         except:
+             pass
+ 
+         return best_points, best_ratio
+ 
+     # Generate multiple diverse initial configurations
+     initial_configs = []
+ 
+     # Configuration 1: Enhanced hexagonal grid (base case)
+     initial_configs.append(create_initial_voronoi_configuration())
+ 
+     # Configuration 2: Random with constraints
+     np.random.seed(42)
+     initial_configs.append(np.random.rand(16, 2))
+ 
+     # Configuration 3: Perturbed grid
+     grid_points = create_initial_voronoi_configuration()
+     np.random.seed(43)
+     perturbations = np.random.normal(0, 0.005, (16, 2))
+     initial_configs.append(np.clip(grid_points + perturbations, 0, 1))
+ 
+     # Configuration 4: Triangular lattice
+     triangular_points = []
+     rows = 4
+     cols = 4
+     spacing_x = 1.0
+     spacing_y = np.sqrt(3)/2
+ 
+     for i in range(rows):
+         for j in range(cols):
+             x = j * spacing_x + (i % 2) * spacing_x * 0.5
+             y = i * spacing_y
+             triangular_points.append([x, y])
+ 
+     triangular_points = np.array(triangular_points)
+     # Normalize triangular lattice
+     max_x = (cols - 1) + 0.5
+     max_y = (rows - 1) * spacing_y
+     triangular_points[:, 0] = triangular_points[:, 0] / max_x
+     triangular_points[:, 1] = triangular_points[:, 1] / max_y
+     initial_configs.append(np.clip(triangular_points[:16], 0, 1))
+ 
+-    # Run optimization from each configuration
++    # Configuration 5: Golden spiral pattern
++    initial_configs.append(create_golden_spiral_configuration())
++
++    # Configuration 6: Circle packing pattern
++    initial_configs.append(create_circle_pack_configuration())
++
++    # Configuration 7: Uniform random
++    initial_configs.append(create_uniform_random_configuration())
++
++    # Configuration 8: Deterministic pattern
++    initial_configs.append(create_deterministic_pattern_configuration())
++
++    # Run optimization from each configuration with enhanced multi-start
+     best_ratio = -np.inf
+     best_points = None
+ 
+-    for i, initial_config in enumerate(initial_configs):
+-        try:
+-            # Clip initial points
+-            initial_config = np.clip(initial_config, 0, 1)
+-
+-            # Hybrid optimization
+-            optimized_points, ratio = hybrid_optimization(initial_config)
+-
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = optimized_points.copy()
+-
+-        except Exception as e:
+-            continue
++    # Try different seeds for more diversity in random components
++    seeds = [42, 123, 456, 789, 999, 111, 222]
++
++    for seed_idx, seed in enumerate(seeds):
++        for i, initial_config in enumerate(initial_configs):
++            try:
++                # Set specific seed for reproducibility
++                np.random.seed(seed)
++
++                # Clip initial points
++                initial_config = np.clip(initial_config, 0, 1)
++
++                # Hybrid optimization with increased iterations for better tuning
++                optimized_points, ratio = hybrid_optimization(initial_config)
++
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_points = optimized_points.copy()
++
++            except Exception as e:
++                continue
+ 
+     # Final refinement if needed
+     if best_points is not None:
+         # Do one final optimization with gradient descent
+         try:
+             x0 = best_points.flatten()
+             result = minimize(
+                 objective_with_voronoi,
+                 x0,
+                 method='L-BFGS-B',
+                 bounds=[(0, 1) for _ in range(32)],
+-                options={'maxiter': 300, 'ftol': 1e-9}
++                options={'maxiter': 500, 'ftol': 1e-9}
+             )
+ 
+             final_points = result.x.reshape(-1, 2)
+             final_points = np.clip(final_points, 0, 1)
+             final_ratio = compute_min_max_ratio(final_points)
+ 
+             if final_ratio > best_ratio:
+                 best_ratio = final_ratio
+                 best_points = final_points.copy()
+ 
+         except:
+             pass
+ 
+     # Fallback to initial configuration if nothing works
+     if best_points is None:
+         best_points = create_initial_voronoi_configuration()
+ 
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

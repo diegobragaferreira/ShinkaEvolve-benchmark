@@ -1,0 +1,190 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+import time
+
+# Global constants
+HEX_RADIUS = 1.0
+HEX_APO = HEX_RADIUS * np.sqrt(3) / 2  # Apothem of unit hexagon
+
+def generate_hexagon_vertices(center_x, center_y, angle_degrees):
+    """Generate vertices of a unit regular hexagon given center and rotation."""
+    angle_rad = np.radians(angle_degrees)
+    # Hexagon vertices in local coordinates (unit radius)
+    local_verts = []
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        x = HEX_RADIUS * np.cos(theta)
+        y = HEX_RADIUS * np.sin(theta)
+        local_verts.append((x, y))
+
+    # Transform to global coordinates
+    global_verts = []
+    for x, y in local_verts:
+        # Rotate
+        rot_x = x * np.cos(angle_rad) - y * np.sin(angle_rad)
+        rot_y = x * np.sin(angle_rad) + y * np.cos(angle_rad)
+        # Translate
+        global_verts.append((rot_x + center_x, rot_y + center_y))
+
+    return np.array(global_verts)
+
+def create_hexagon_polygon(center_x, center_y, angle_degrees):
+    """Create Shapely polygon representation of a hexagon."""
+    vertices = generate_hexagon_vertices(center_x, center_y, angle_degrees)
+    return Polygon(vertices)
+
+def check_containment(hex_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hex_poly.contains(hex_poly)
+
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap."""
+    return hex1_poly.intersects(hex2_poly) and not hex1_poly.touches(hex2_poly)
+
+def compute_outer_hexagon_side_length(inner_hex_data):
+    """Compute the minimal side length needed for the outer hexagon to contain all inner hexagons."""
+    # Find the bounding box of all hexagon vertices
+    all_vertices = []
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle_degrees = inner_hex_data[i]
+        vertices = generate_hexagon_vertices(center_x, center_y, angle_degrees)
+        all_vertices.extend(vertices)
+
+    if len(all_vertices) == 0:
+        return 1e6
+
+    # Calculate bounding rectangle
+    min_x = min(v[0] for v in all_vertices)
+    max_x = max(v[0] for v in all_vertices)
+    min_y = min(v[1] for v in all_vertices)
+    max_y = max(v[1] for v in all_vertices)
+
+    # Compute required side length for outer hexagon
+    # Outer hexagon's circumradius = distance from center to farthest vertex
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    max_dist = 0
+    for x, y in all_vertices:
+        dist_sq = (x - center_x)**2 + (y - center_y)**2
+        max_dist = max(max_dist, dist_sq)
+
+    # Side length = sqrt(max_dist) * 2 / sqrt(3)
+    return np.sqrt(max_dist) * 2 / np.sqrt(3)
+
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution: higher is better."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Create polygons for all inner hexagons
+    inner_polygons = []
+    for i in range(len(positions)):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        inner_polygons.append(poly)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length(positions)
+
+    # Check containment and overlaps
+    total_penalty = 0
+    num_inner = len(inner_polygons)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Check containment
+    for i in range(num_inner):
+        if not check_containment(inner_polygons[i], outer_poly):
+            # Large penalty for containment violations
+            total_penalty += 1e6
+
+    # Check overlaps
+    for i in range(num_inner):
+        for j in range(i+1, num_inner):
+            if check_overlap(inner_polygons[i], inner_polygons[j]):
+                # Penalize overlap more heavily
+                total_penalty += 1e5
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+
+def get_symmetric_initial_config():
+    """Generate initial configuration with symmetry properties based on known good patterns."""
+    # This configuration is based on known efficient packing patterns
+    # Center hexagon + surrounding hexagons in 3 rings
+    positions = [
+        [0, 0, 0],           # center
+        [2.0, 0, 0],         # right
+        [-2.0, 0, 0],        # left
+        [0, 2.0, 0],         # top
+        [0, -2.0, 0],        # bottom
+        [1.0, 1.732, 0],     # top-right
+        [-1.0, 1.732, 0],    # top-left
+        [1.0, -1.732, 0],    # bottom-right
+        [-1.0, -1.732, 0],   # bottom-left
+        [3.0, 0, 0],         # far right
+        [-3.0, 0, 0],        # far left
+        [0, 3.0, 0],         # far top
+    ]
+
+    return np.array(positions).flatten()
+
+def optimize_hexagon_packing():
+    """Main optimization function using differential evolution."""
+    # Generate initial configuration with symmetry
+    initial_positions = get_symmetric_initial_config()
+
+    # Run differential evolution for global optimization
+    bounds = [(-10, 10)] * len(initial_positions)  # reasonable bounds for hexagon positions
+
+    def de_objective(x):
+        _, side_length = evaluate_fitness(x)
+        return -np.log(side_length)  # Minimize negative log side length
+
+    try:
+        result = differential_evolution(de_objective, bounds,
+                                      maxiter=50, popsize=10,
+                                      seed=None, disp=False)
+
+        if result.success:
+            positions = result.x.reshape(-1, 3)
+            _, side_length = evaluate_fitness(result.x)
+            return positions, side_length
+    except Exception as e:
+        print(f"Differential evolution error: {e}")
+
+    # Fallback to initial configuration if optimization fails
+    positions = initial_positions.reshape(-1, 3)
+    _, side_length = evaluate_fitness(initial_positions)
+    return positions, side_length
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    # Optimize
+    inner_hex_data, outer_hex_side_length = optimize_hexagon_packing()
+
+    # Set outer hexagon parameters (centered at origin, no rotation)
+    outer_hex_data = np.array([0, 0, 0])
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

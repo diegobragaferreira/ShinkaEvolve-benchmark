@@ -1,0 +1,165 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+import time
+
+def compute_voronoi_quality(points):
+    """Compute Voronoi quality metric for point distribution."""
+    try:
+        vor = Voronoi(points)
+        # Calculate minimum Voronoi cell area
+        min_area = float('inf')
+        for region in vor.filtered_regions:
+            if len(region) > 0:
+                # Compute area of Voronoi cell
+                vertices = vor.vertices[region]
+                if len(vertices) >= 3:
+                    # Simple polygon area calculation
+                    area = 0.5 * abs(sum(vertices[i][0] * vertices[(i+1)%len(vertices)][1] - 
+                                       vertices[(i+1)%len(vertices)][0] * vertices[i][1] 
+                                       for i in range(len(vertices))))
+                    min_area = min(min_area, area)
+        
+        if min_area == float('inf'):
+            return 0.0
+        return min_area
+    except:
+        return 0.0
+
+def compute_min_max_ratio(points):
+    """Compute min/max distance ratio."""
+    if len(points) < 2:
+        return 0.0
+    
+    try:
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+            
+        dmin = np.min(distances)
+        dmax = np.max(distances)
+        
+        if dmax <= 1e-12:
+            return 0.0
+            
+        return dmin / dmax
+    except:
+        return 0.0
+
+def initialize_voronoi_based_points():
+    """Initialize points using Voronoi-based geometric constraints."""
+    # Start with a regular hexagonal grid pattern
+    points = []
+    
+    # Create points in a hexagonal lattice pattern
+    sqrt3 = np.sqrt(3)
+    row_spacing = sqrt3 / 2
+    col_spacing = 1.0
+    
+    # Generate points in a 4x4 grid
+    for i in range(4):
+        for j in range(4):
+            x_offset = (i % 2) * 0.5
+            x = j * col_spacing + x_offset
+            y = i * row_spacing
+            points.append([x, y])
+    
+    points = np.array(points[:16])
+    
+    # Normalize to [0,1] bounds
+    if len(points) > 0:
+        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+        
+        if x_range > 0:
+            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+        if y_range > 0:
+            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+    
+    # Add structured perturbations to break symmetry while maintaining structure
+    np.random.seed(42)
+    for i in range(16):
+        noise_intensity = 0.008 + 0.002 * np.sin(i * 0.785398)  # pi/4 increments
+        noise_x = np.random.normal(0, noise_intensity, 1)[0]
+        noise_y = np.random.normal(0, noise_intensity, 1)[0]
+        points[i] += [noise_x, noise_y]
+    
+    # Clip to valid bounds
+    points = np.clip(points, 0, 1)
+    
+    return points
+
+def voronoi_fitness_function(x_flat, target_points=16):
+    """Fitness function combining min/max ratio with Voronoi quality."""
+    points = x_flat.reshape(-1, 2)
+    
+    # Ensure points are within bounds
+    points = np.clip(points, 0, 1)
+    
+    # Calculate min/max distance ratio
+    min_max_ratio = compute_min_max_ratio(points)
+    
+    # Calculate Voronoi quality
+    voronoi_quality = compute_voronoi_quality(points)
+    
+    # Combine objectives - prioritize min/max ratio but penalize poor Voronoi structure
+    # We want high min/max ratio AND good Voronoi cell quality
+    combined_score = min_max_ratio + 0.2 * voronoi_quality
+    
+    # Return negative for minimization (since differential evolution minimizes)
+    return -combined_score
+
+def optimize_with_global_search(initial_points):
+    """Optimize using differential evolution with custom fitness."""
+    # Flatten the initial points for optimization
+    x0 = initial_points.flatten()
+    
+    # Define bounds for each coordinate [0,1]
+    bounds = [(0, 1) for _ in range(len(x0))]
+    
+    # Custom bounds checking function
+    def constraint_check(x):
+        points = x.reshape(-1, 2)
+        return np.all((points >= 0) & (points <= 1))
+    
+    # Run differential evolution optimization
+    result = differential_evolution(
+        voronoi_fitness_function,
+        bounds,
+        args=(16,),
+        maxiter=1000,
+        popsize=20,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        disp=False,
+        atol=1e-8,
+        rtol=1e-8
+    )
+    
+    # Reshape optimized points
+    optimized_points = result.x.reshape(-1, 2)
+    
+    # Ensure final bounds
+    optimized_points = np.clip(optimized_points, 0, 1)
+    
+    return optimized_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    # Initialize points using Voronoi-based approach
+    initial_points = initialize_voronoi_based_points()
+    
+    # Optimize using global optimization
+    optimized_points = optimize_with_global_search(initial_points)
+    
+    return optimized_points
+
+# EVOLVE-BLOCK-END

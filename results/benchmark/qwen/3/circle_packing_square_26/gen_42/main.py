@@ -1,0 +1,254 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial.distance import cdist
+from typing import Tuple
+
+# Global constants for the evolutionary algorithm
+POPULATION_SIZE = 100
+GENERATIONS = 500
+TOURNAMENT_SIZE = 5
+MUTATION_RATE = 0.15
+CROSSOVER_RATE = 0.8
+BOUNDARY_PENALTY = 10000.0
+OVERLAP_PENALTY = 10000.0
+
+def initialize_individual(n: int) -> np.ndarray:
+    """Initialize a single individual with 26 circles"""
+    # Create Voronoi-like distribution for better initial spread
+    circles = np.zeros((n, 3))
+
+    # Place circles in a grid pattern but with some randomness
+    grid_size = int(np.ceil(np.sqrt(n)))
+    spacing_x = 1.0 / (grid_size + 1)
+    spacing_y = 1.0 / (grid_size + 1)
+
+    idx = 0
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if idx >= n:
+                break
+            x = (i + 1) * spacing_x + random.uniform(-spacing_x/4, spacing_x/4)
+            y = (j + 1) * spacing_y + random.uniform(-spacing_y/4, spacing_y/4)
+
+            # Initial radius estimation based on available space
+            min_dist = min(x, 1-x, y, 1-y)
+            r = min(min_dist / 2.0, 0.15)
+
+            # Add small random perturbation
+            r *= random.uniform(0.8, 1.2)
+            r = max(0.001, min(r, 0.5))
+
+            circles[idx] = [x, y, r]
+            idx += 1
+
+    # Ensure we have exactly n circles
+    while len(circles) > n:
+        circles = circles[:-1]
+
+    return circles
+
+def initialize_population(n: int, pop_size: int) -> list:
+    """Initialize a population of individuals"""
+    return [initialize_individual(n) for _ in range(pop_size)]
+
+def calculate_sum_radii(circles: np.ndarray) -> float:
+    """Calculate sum of radii for given circles"""
+    return np.sum(circles[:, 2])
+
+def is_valid(circles: np.ndarray) -> bool:
+    """Check if circles are within bounds and non-overlapping"""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check overlap constraints using spatial indexing for efficiency
+    # Simple brute force for small number of circles (n=26)
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+            if dist_sq < (r1 + r2)**2:
+                return False
+
+    return True
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness of an individual"""
+    if not is_valid(circles):
+        return -1000000.0  # Large penalty for invalid solutions
+
+    sum_radii = calculate_sum_radii(circles)
+    return sum_radii
+
+def tournament_selection(population: list, fitnesses: list, tournament_size: int) -> np.ndarray:
+    """Select parent using tournament selection"""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_idx].copy()
+
+def crossover(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+    """Perform crossover between two parents"""
+    if random.random() > CROSSOVER_RATE:
+        return parent1.copy()
+
+    n = len(parent1)
+    child = np.zeros_like(parent1)
+
+    # Uniform crossover
+    for i in range(n):
+        if random.random() < 0.5:
+            child[i] = parent1[i].copy()
+        else:
+            child[i] = parent2[i].copy()
+
+    # Local refinement to fix any constraint violations
+    return refine_individual(child)
+
+def mutate(individual: np.ndarray, mutation_rate: float = MUTATION_RATE) -> np.ndarray:
+    """Mutate an individual"""
+    mutated = individual.copy()
+    n = len(mutated)
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            # Mutate position and radius
+            mutated[i][0] += random.uniform(-0.05, 0.05)  # x
+            mutated[i][1] += random.uniform(-0.05, 0.05)  # y
+            mutated[i][2] *= random.uniform(0.8, 1.2)     # radius
+
+            # Keep within bounds
+            mutated[i][0] = max(0.001, min(0.999, mutated[i][0]))
+            mutated[i][1] = max(0.001, min(0.999, mutated[i][1]))
+            mutated[i][2] = max(0.001, min(0.5, mutated[i][2]))
+
+    return mutated
+
+def refine_individual(circles: np.ndarray) -> np.ndarray:
+    """Refine individual to satisfy constraints"""
+    refined = circles.copy()
+    n = len(refined)
+
+    # Apply boundary corrections first
+    for i in range(n):
+        x, y, r = refined[i]
+
+        # Fix boundary violations
+        if x - r < 0:
+            x = r
+        elif x + r > 1:
+            x = 1 - r
+
+        if y - r < 0:
+            y = r
+        elif y + r > 1:
+            y = 1 - r
+
+        refined[i] = [x, y, r]
+
+    # Resolve overlaps through iterative improvement
+    max_iter = 100
+    for _ in range(max_iter):
+        changed = False
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = refined[i]
+                x2, y2, r2 = refined[j]
+
+                dx = x2 - x1
+                dy = y2 - y1
+                dist = np.sqrt(dx*dx + dy*dy)
+
+                if dist < r1 + r2:
+                    # Move circles apart
+                    if dist > 0.001:  # Avoid division by zero
+                        move_distance = (r1 + r2 - dist) / 2.0
+                        dx_norm = dx / dist
+                        dy_norm = dy / dist
+
+                        # Move circles away from each other
+                        refined[i][0] -= dx_norm * move_distance * 0.5
+                        refined[i][1] -= dy_norm * move_distance * 0.5
+                        refined[j][0] += dx_norm * move_distance * 0.5
+                        refined[j][1] += dy_norm * move_distance * 0.5
+
+                        # Adjust radii to maintain contact while staying within bounds
+                        new_r1 = min(r1, x1, 1-x1, y1, 1-y1)
+                        new_r2 = min(r2, x2, 1-x2, y2, 1-y2)
+
+                        refined[i][2] = new_r1
+                        refined[j][2] = new_r2
+
+                    changed = True
+
+        if not changed:
+            break
+
+    return refined
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    random.seed(42)
+    np.random.seed(42)
+
+    n = 26
+    population = initialize_population(n, POPULATION_SIZE)
+    best_fitness = float('-inf')
+    best_individual = None
+
+    for generation in range(GENERATIONS):
+        # Evaluate fitness for all individuals
+        fitnesses = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitnesses.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = individual.copy()
+
+        # Print progress
+        if generation % 50 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness}")
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best individual
+        if best_individual is not None:
+            new_population.append(best_individual)
+
+        # Generate offspring
+        while len(new_population) < POPULATION_SIZE:
+            parent1 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+            parent2 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+
+            child = crossover(parent1, parent2)
+            child = mutate(child)
+
+            # Ensure child is valid
+            child = refine_individual(child)
+            new_population.append(child)
+
+        population = new_population[:POPULATION_SIZE]
+
+    # Return the best solution found
+    if best_individual is not None:
+        return best_individual
+    else:
+        # Fallback to initialized individual if nothing was found
+        return initialize_individual(n)
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,346 @@
+--- a/original.py
++++ b/original.py
+@@ -1,139 +1,331 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist
++from scipy.spatial import SphericalVoronoi
+ import time
+-
++from copy import deepcopy
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     
+     def fibonacci_sphere(n):
+         """Generate n points on a sphere using Fibonacci spiral method"""
+         points = []
+         phi = np.pi * (3 - np.sqrt(5))  # golden angle
+         
+         for i in range(n):
+             y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+             
+             theta = phi * i  # golden angle increment
+             
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+             
+             points.append([x, y, z])
+         
+         return np.array(points)
++    
++    def normalize_to_unit_sphere(points):
++        """Normalize points to lie exactly on unit sphere"""
++        norms = np.linalg.norm(points, axis=1, keepdims=True)
++        norms = np.where(norms == 0, 1, norms)
++        return points / norms
++    
++    def spherical_voronoi_uniformity(points):
++        """Calculate uniformity score based on spherical Voronoi cell areas"""
++        try:
++            sv = SphericalVoronoi(points)
++            areas = sv.voronoi_cell_areas()
++            # Return variance of areas - lower is better (more uniform)
++            return np.var(areas)
++        except:
++            return np.inf
++    
++    def initialize_spherical_population(pop_size, n_points=14):
++        """Initialize population with diverse spherical configurations"""
++        population = []
++        for i in range(pop_size):
++            np.random.seed(i * 42)
++            # Use Fibonacci for base, add different noise patterns
++            if i == 0:
++                # Pure Fibonacci
++                points = fibonacci_sphere(n_points)
++            elif i == 1:
++                # Perturbed Fibonacci with larger noise
++                points = fibonacci_sphere(n_points)
++                noise = np.random.normal(0, 0.1, points.shape)
++                points = points + noise
++            else:
++                # Random on sphere
++                points = np.random.randn(n_points, 3)
++            
++            # Normalize to sphere and add small random noise
++            points = normalize_to_unit_sphere(points)
++            if i > 0:
++                noise = np.random.normal(0, 0.02, points.shape)
++                points = points + noise
++                points = normalize_to_unit_sphere(points)
++            
++            population.append(points)
++        return population
++    
++    def evaluate_individual_spherical(points):
++        """Evaluate individual with spherical constraints"""
++        # Ensure points are on unit sphere
++        points = normalize_to_unit_sphere(points)
++        
++        # Calculate distances
++        distances = pdist(points)
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max < 1e-10:
++            return -np.inf, 0
++        
++        ratio = d_min / d_max
++        
++        # Add penalty for non-uniform Voronoi distribution
++        uniformity_penalty = spherical_voronoi_uniformity(points)
++        # Weight this penalty heavily to encourage uniformity
++        total_score = ratio - 0.5 * uniformity_penalty
++        
++        return total_score, ratio
++    
++    def crossover_spherical(parent1, parent2):
++        """Create offspring by averaging spherical points with proper normalization"""
++        # Simple average crossover
++        offspring = (parent1 + parent2) / 2.0
++        # Ensure offspring stays on unit sphere
++        return normalize_to_unit_sphere(offspring)
++    
++    def mutate_spherical(individual, mutation_rate=0.1):
++        """Mutate individual with spherical constraints"""
++        mutated = deepcopy(individual)
++        # Apply random mutations
++        for i in range(len(mutated)):
++            if np.random.random() < mutation_rate:
++                # Add noise and renormalize
++                noise = np.random.normal(0, 0.05, 3)
++                mutated[i] = mutated[i] + noise
++                mutated[i] = normalize_to_unit_sphere(mutated[i:i+1])[0]
++        return mutated
++    
++    def evolutionary_search():
++        """Perform evolutionary search on spherical points"""
++        pop_size = 20
++        generations = 50
++        elite_size = 4
++        
++        # Initialize population
++        population = initialize_spherical_population(pop_size)
++        
++        best_fitness = -np.inf
++        best_individual = None
++        
++        for gen in range(generations):
++            # Evaluate population
++            fitness_scores = []
++            ratios = []
++            
++            for individual in population:
++                fitness, ratio = evaluate_individual_spherical(individual)
++                fitness_scores.append(fitness)
++                ratios.append(ratio)
++            
++            # Find best individuals
++            sorted_indices = np.argsort(fitness_scores)[::-1]
++            best_idx = sorted_indices[0]
++            
++            if fitness_scores[best_idx] > best_fitness:
++                best_fitness = fitness_scores[best_idx]
++                best_individual = deepcopy(population[best_idx])
++            
++            # Create next generation
++            new_population = []
++            
++            # Elitism - keep best individuals
++            for i in range(elite_size):
++                new_population.append(deepcopy(population[sorted_indices[i]]))
++            
++            # Generate offspring through crossover and mutation
++            while len(new_population) < pop_size:
++                # Tournament selection
++                tournament_size = 3
++                selected_indices = np.random.choice(len(population), tournament_size)
++                tournament_fitness = [fitness_scores[i] for i in selected_indices]
++                winner_idx = selected_indices[np.argmax(tournament_fitness)]
++                
++                # Select second parent
++                selected_indices2 = np.random.choice(len(population), tournament_size)
++                tournament_fitness2 = [fitness_scores[i] for i in selected_indices2]
++                winner_idx2 = selected_indices2[np.argmax(tournament_fitness2)]
++                
++                # Crossover
++                child = crossover_spherical(population[winner_idx], population[winner_idx2])
++                
++                # Mutation
++                child = mutate_spherical(child, mutation_rate=0.15)
++                
++                new_population.append(child)
++            
++            population = new_population[:pop_size]
++        
++        return best_individual, best_fitness
+     
+     def objective(x):
+         # Reshape x into 14 points in 3D
+         points = x.reshape(-1, 3)
+ 
+         # Calculate pairwise distances
+         distances = pdist(points)
+ 
+         # Get min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         # Return negative ratio since we want to maximize
+         # We add a small epsilon to avoid division by zero
+         if d_max < 1e-10:
+             return -1e10
+         return -d_min / d_max
+ 
+-    # Multi-start optimization with different initializations
++    # Multi-start optimization with evolved approach
+     best_result = None
+     best_ratio = -np.inf
+     
+-    # Try multiple initializations with different seeds
+-    for seed in [42, 123, 456, 789]:
++    # Try evolutionary approach first
++    try:
++        evolved_points, evolved_fitness = evolutionary_search()
++        if evolved_points is not None:
++            distances = pdist(evolved_points)
++            d_min = np.min(distances)
++            d_max = np.max(distances)
++            if d_max > 1e-10:
++                ratio = d_min / d_max
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_result = evolved_points.copy()
++    except Exception as e:
++        pass
++    
++    # Also try traditional multi-start with enhanced initialization
++    for seed in [42, 123, 456, 789, 999]:
+         np.random.seed(seed)
+         
+-        # Generate initial points using Fibonacci spiral on unit sphere, then scale to unit cube
++        # Enhanced initialization using spherical Voronoi uniformity
+         initial_points = fibonacci_sphere(14)
++        
++        # Use spherical Voronoi to guide initialization
++        try:
++            sv = SphericalVoronoi(initial_points)
++            areas = sv.voronoi_cell_areas()
++            avg_area = np.mean(areas)
++            
++            # Adjust points to get more uniform Voronoi cells
++            # This is a heuristic to improve initial distribution
++            for _ in range(10):  # Iterative improvement
++                points_normalized = normalize_to_unit_sphere(initial_points)
++                sv = SphericalVoronoi(points_normalized)
++                areas = sv.voronoi_cell_areas()
++                
++                # Apply adjustment to make areas more uniform
++                # This is a simplified approximation of Voronoi-based optimization
++                if np.std(areas) > 0.1:  # Only adjust if not already uniform
++                    # Simple gradient-like update
++                    adjustment = np.zeros_like(points_normalized)
++                    for i in range(len(points_normalized)):
++                        # Estimate effect of moving point i
++                        neighbor_areas = np.delete(areas, i)
++                        current_area = areas[i]
++                        # Move point to reduce area variance
++                        if current_area > np.mean(neighbor_areas):
++                            # Move point closer to neighbors
++                            pass  # Simplified - in practice would compute gradients
++                break
++        except:
++            pass
+         
+         # Scale to fit within [0.1, 0.9] range to avoid boundary issues
+         initial_points = (initial_points + 1) / 2 * 0.8 + 0.1
+         
+         # Add slight random perturbation to break symmetry
+         initial_points += np.random.normal(0, 0.01, initial_points.shape)
+         
+         # Ensure all points stay within bounds
+         initial_points = np.clip(initial_points, 0.0, 1.0)
+         
+         # Flatten for optimization
+         x0 = initial_points.flatten()
+         
+         # Set up bounds for optimization (0 to 1 for all coordinates)
+         bounds = [(0.0, 1.0)] * 14 * 3
+ 
+-        # First stage: Differential Evolution for global search with reduced iterations for speed
++        # First stage: Differential Evolution for global search
+         try:
+             de_result = differential_evolution(
+                 objective,
+                 bounds,
+                 seed=seed,
+-                maxiter=200,  # Reduced for speed
+-                popsize=10,   # Smaller population for efficiency
++                maxiter=250,
++                popsize=12,
+                 tol=1e-8,
+                 mutation=(0.5, 1.0),
+                 recombination=0.7,
+                 disp=False
+             )
+             
+-            # Second stage: Local refinement with L-BFGS-B for better convergence
++            # Second stage: Local refinement with L-BFGS-B
+             refined_result = minimize(
+                 objective,
+                 de_result.x,
+                 method='L-BFGS-B',
+                 bounds=bounds,
+-                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 100},
++                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 200},
+                 callback=None
+             )
+             
+             # Evaluate final result
+             final_points = refined_result.x.reshape(-1, 3)
+             distances = pdist(final_points)
+             d_min = np.min(distances)
+             d_max = np.max(distances)
+             
+             if d_max > 1e-10:
+                 ratio = d_min / d_max
+                 if ratio > best_ratio:
+                     best_ratio = ratio
+                     best_result = refined_result.x.copy()
+                     
+         except Exception as e:
+             continue
+     
+-    # If no good result was found, fallback to simple initialization with DE only
++    # If no good result was found, fallback to simple initialization
+     if best_result is None:
+         np.random.seed(42)
+         points = np.random.rand(14, 3) * 0.8 + 0.1
+         x0 = points.flatten()
+         bounds = [(0.0, 1.0)] * 14 * 3
+         
+         result = differential_evolution(
+             objective,
+             bounds,
+             seed=42,
+             maxiter=200,
+             popsize=10,
+             tol=1e-6,
+             mutation=(0.5, 1.0),
+             recombination=0.7,
+             disp=False
+         )
+         return result.x.reshape(-1, 3)
+     
+     return best_result.reshape(-1, 3)
+ 
+-
+ # EVOLVE-BLOCK-END

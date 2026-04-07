@@ -1,0 +1,124 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    np.random.seed(42)
+    n = 16
+    d = 2
+
+    # Create initial hexagonal grid configuration
+    def create_hexagonal_grid():
+        # Arrange points in a roughly hexagonal pattern
+        rows = 4
+        cols = 4
+
+        points = []
+        for i in range(rows):
+            for j in range(cols):
+                # Offset every other row
+                x = j + 0.5 * (i % 2)
+                y = i * np.sqrt(3)/2
+                points.append([x, y])
+
+        # Normalize to fit in [0,1] x [0,1] and add small random noise
+        points = np.array(points)
+        points[:, 0] = points[:, 0] / (cols - 0.5)
+        points[:, 1] = points[:, 1] / (rows * np.sqrt(3)/2)
+
+        # Add small random perturbation to break symmetry
+        points += np.random.normal(0, 0.01, points.shape)
+
+        # Ensure points stay within bounds
+        points[:, 0] = np.clip(points[:, 0], 0, 1)
+        points[:, 1] = np.clip(points[:, 1], 0, 1)
+
+        return points
+
+    # Calculate min/max distance ratio
+    def calculate_ratio(points):
+        if len(points) < 2:
+            return 0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        if len(distances) == 0:
+            return 0
+
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        if d_max <= 0:
+            return 0
+
+        return d_min / d_max
+
+    # Simulated annealing optimization
+    def optimize_points(initial_points, max_iter=10000):
+        current_points = initial_points.copy()
+        current_ratio = calculate_ratio(current_points)
+
+        # Adaptive cooling schedule
+        T = 0.1  # Initial temperature
+        cooling_rate = 0.9995
+        min_temp = 1e-6
+
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        for iteration in range(max_iter):
+            # Reduce temperature
+            T *= cooling_rate
+
+            if T < min_temp:
+                break
+
+            # Create neighbor solution by perturbing one point
+            # Use a more sophisticated approach: select a random point and move it
+            idx = np.random.randint(len(current_points))
+
+            # Create perturbation
+            new_points = current_points.copy()
+            # Small perturbation with adaptive magnitude based on temperature
+            perturbation_magnitude = T * 0.1
+
+            new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
+            new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
+
+            # Enforce boundaries
+            new_points[idx, 0] = np.clip(new_points[idx, 0], 0, 1)
+            new_points[idx, 1] = np.clip(new_points[idx, 1], 0, 1)
+
+            # Accept or reject the new solution
+            new_ratio = calculate_ratio(new_points)
+
+            # Metropolis criterion
+            if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
+                current_points = new_points
+                current_ratio = new_ratio
+
+                if current_ratio > best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+
+        return best_points, best_ratio
+
+    # Generate initial configuration
+    initial_points = create_hexagonal_grid()
+
+    # Optimize using simulated annealing
+    optimized_points, final_ratio = optimize_points(initial_points)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

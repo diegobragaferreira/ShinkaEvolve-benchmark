@@ -1,0 +1,222 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi initialization relies on a spiral pattern with some randomness, but we can significantly improve the quality of initial solutions by using a more sophisticated approach that better distributes circles with appropriate radii. I'll enhance the Voronoi initialization to use a combination of:
+1. More systematic grid patterns
+2. Better radius estimation based on local density
+3. Improved sampling strategies to avoid poor initial configurations
+
+This should lead to better starting solutions that are closer to optimal, which will help the evolutionary algorithm converge faster and reach higher-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_population(pop_size, n_circles=26):
+    """Initialize population with better starting solutions using enhanced Voronoi-inspired placement"""
+    def create_enhanced_voronoi_initialization():
+        # Create a more structured initial distribution using spiral pattern + Voronoi approach
+        circles = []
+
+        # Generate points in a spiral pattern to get better coverage
+        n_points = max(100, n_circles * 5)  # More points for better sampling
+        angles = np.linspace(0, 4*np.pi, n_points)  # Spiral pattern
+        radii = np.linspace(0.1, 0.9, n_points)
+
+        # Convert to Cartesian coordinates
+        points = np.column_stack([
+            0.5 + radii * np.cos(angles) * 0.4,
+            0.5 + radii * np.sin(angles) * 0.4
+        ])
+
+        # Filter points that are within the unit square
+        valid_mask = (
+            (points[:, 0] >= 0.05) & (points[:, 0] <= 0.95) &
+            (points[:, 1] >= 0.05) & (points[:, 1] <= 0.95)
+        )
+        valid_points = points[valid_mask]
+
+        # Sample points for circle centers
+        if len(valid_points) >= n_circles:
+            selected_indices = np.random.choice(len(valid_points), n_circles, replace=False)
+            sample_points = valid_points[selected_indices]
+        else:
+            # If not enough points, use some original points plus random ones
+            sample_points = valid_points
+            while len(sample_points) < n_circles:
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+                sample_points = np.vstack([sample_points, [x, y]])
+            sample_points = sample_points[:n_circles]
+
+        # Calculate appropriate radii for each point based on local density
+        for i, (cx, cy) in enumerate(sample_points):
+            # Compute max radius at this position (distance to nearest boundary)
+            max_r = min(cx, cy, 1-cx, 1-cy)
+
+            # If too close to boundary, skip or reduce radius
+            if max_r < 0.02:
+                continue
+
+            # Use a more strategic radius calculation based on local distribution
+            # Calculate average distance to neighboring points
+            distances = np.sqrt(np.sum((sample_points - [cx, cy])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+
+            if len(distances) > 0:
+                avg_distance = np.mean(distances)
+                # Use a fraction of the average distance as radius constraint
+                r = min(max_r, avg_distance * 0.3)
+            else:
+                # If no neighbors, just use max possible radius
+                r = max_r * 0.3
+
+            # Ensure reasonable minimum radius
+            r = max(0.01, min(0.2, r))
+            circles.append((cx, cy, r))
+
+        # If we don't have enough circles due to boundary constraints,
+        # fill in with additional random positions
+        while len(circles) < n_circles:
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+
+            # Check distance to all existing circles
+            valid_pos = True
+            for cx, cy, cr in circles:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                if dist < cr + 0.02:  # Minimum spacing requirement
+                    valid_pos = False
+                    break
+
+            if valid_pos:
+                max_r = min(x, y, 1-x, 1-y)
+                if max_r > 0.01:
+                    r = np.random.uniform(max_r/4, max_r/2)
+                    circles.append((x, y, r))
+
+        # Trim to exact number needed
+        circles = circles[:n_circles]
+
+        return circles
+
+    population = []
+    for _ in range(pop_size):
+        circles = create_enhanced_voronoi_initialization()
+        individual = []
+        for x, y, r in circles:
+            individual.extend([x, y, r])
+        population.append(individual)
+
+    return population
+=======
+def initialize_population(pop_size, n_circles=26):
+    """Initialize population with better starting solutions using enhanced Voronoi-inspired placement"""
+    def create_enhanced_voronoi_initialization():
+        # Use a hybrid approach: grid-based initialization combined with strategic radius assignment
+        circles = []
+
+        # Method 1: Start with grid-based sampling for good spatial distribution
+        grid_size = int(np.ceil(np.sqrt(n_circles)))
+        spacing_x = 1.0 / (grid_size + 1)
+        spacing_y = 1.0 / (grid_size + 1)
+
+        # Create a more structured grid with some jitter for better spread
+        grid_points = []
+        for i in range(1, grid_size + 1):
+            for j in range(1, grid_size + 1):
+                if len(grid_points) < n_circles:
+                    x = (i * spacing_x) + np.random.uniform(-spacing_x/6, spacing_x/6)
+                    y = (j * spacing_y) + np.random.uniform(-spacing_y/6, spacing_y/6)
+                    grid_points.append([x, y])
+
+        # Method 2: For remaining circles, use a better sampling strategy
+        additional_points = []
+        if len(grid_points) < n_circles:
+            # Sample additional points using Poisson disk sampling concept
+            points = []
+            # Use stratified sampling in a grid for better coverage
+            cells = []
+            cell_size = 0.2
+            for i in range(5):
+                for j in range(5):
+                    x_start = i * cell_size + 0.05
+                    y_start = j * cell_size + 0.05
+                    if x_start < 0.95 and y_start < 0.95:
+                        x = x_start + np.random.uniform(0, cell_size - 0.1)
+                        y = y_start + np.random.uniform(0, cell_size - 0.1)
+                        if 0.05 <= x <= 0.95 and 0.05 <= y <= 0.95:
+                            points.append([x, y])
+
+            # Take the first n_circles points that fit our criteria
+            points = points[:n_circles - len(grid_points)]
+            grid_points.extend(points)
+
+        # Now assign radii based on spatial density and boundary conditions
+        sample_points = np.array(grid_points[:n_circles])
+
+        # Calculate radii using a more sophisticated approach
+        for i, (cx, cy) in enumerate(sample_points):
+            # Compute max radius at this position (distance to nearest boundary)
+            max_r = min(cx, cy, 1-cx, 1-cy)
+
+            # If too close to boundary, reduce radius significantly
+            if max_r < 0.03:
+                r = max_r * 0.5
+            else:
+                # Calculate distances to all other points to estimate local density
+                distances = np.sqrt(np.sum((sample_points - [cx, cy])**2, axis=1))
+                distances = distances[distances > 0]  # Exclude self-distance
+
+                if len(distances) > 0:
+                    # Use the minimum distance to determine appropriate radius
+                    min_dist = np.min(distances)
+                    # Radius should be about 1/3 of the minimum distance to neighbors
+                    r = min(max_r, min_dist * 0.3)
+                else:
+                    # If no neighbors, use boundary constraint
+                    r = max_r * 0.3
+
+                # Ensure we don't make circles too small
+                r = max(0.01, min(0.3, r))
+
+            # Ensure reasonable minimum radius
+            r = max(0.01, min(0.3, r))
+            circles.append((cx, cy, r))
+
+        # If for some reason we don't have enough circles, add random ones
+        while len(circles) < n_circles:
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+
+            # Check distance to all existing circles
+            valid_pos = True
+            for cx, cy, cr in circles:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                if dist < cr + 0.02:
+                    valid_pos = False
+                    break
+
+            if valid_pos:
+                max_r = min(x, y, 1-x, 1-y)
+                if max_r > 0.01:
+                    # Use a more conservative approach for random circles
+                    r = min(max_r * 0.2, 0.2)
+                    circles.append((x, y, r))
+
+        # Trim to exact number needed
+        circles = circles[:n_circles]
+        return circles
+
+    population = []
+    for _ in range(pop_size):
+        circles = create_enhanced_voronoi_initialization()
+        individual = []
+        for x, y, r in circles:
+            individual.extend([x, y, r])
+        population.append(individual)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>

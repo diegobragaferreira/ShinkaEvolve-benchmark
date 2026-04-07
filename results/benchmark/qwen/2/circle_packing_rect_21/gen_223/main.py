@@ -1,0 +1,238 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2
+    # Using optimized rectangle dimensions for better packing efficiency
+    # Based on mathematical analysis of circle packing in rectangles
+    rect_width = 1.3333333333333333  # 2/3
+    rect_height = 0.6666666666666666  # 1/3
+
+    # Number of circles
+    n = 21
+
+    def objective(x):
+        # x contains [cx1, cy1, r1, cx2, cy2, r2, ..., cxn, cyn, rn]
+        circles = x.reshape(-1, 3)
+        # Calculate sum of radii (we want to maximize this)
+        total_radius = np.sum(circles[:, 2])
+        # Return negative because we're minimizing in scipy
+        return -total_radius
+
+    def penalty_function(x):
+        """Calculate penalty for constraint violations with improved weighting"""
+        circles = x.reshape(-1, 3)
+
+        penalty = 0
+
+        # Boundary penalties with increased penalty for severe violations
+        for i in range(n):
+            cx, cy, r = circles[i]
+            # Penalty for going outside with stronger weights for severe violations
+            if cx - r < 0:
+                penalty += 5000 * (r - cx)**2
+            if cx + r > rect_width:
+                penalty += 5000 * (cx + r - rect_width)**2
+            if cy - r < 0:
+                penalty += 5000 * (r - cy)**2
+            if cy + r > rect_height:
+                penalty += 5000 * (cy + r - rect_height)**2
+
+        # Overlap penalties with quadratic scaling for severe overlaps
+        for i in range(n):
+            for j in range(i+1, n):
+                cx1, cy1, r1 = circles[i]
+                cx2, cy2, r2 = circles[j]
+
+                dist = np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+                overlap = (r1 + r2) - dist
+
+                if overlap > 0:  # Overlapping
+                    penalty += 50000 * overlap**2
+
+        return penalty
+
+    # Generate initial guess with improved hexagonal arrangement
+    def generate_initial_guess():
+        # Place circles in a more sophisticated hexagonal pattern for better initial distribution
+        circles = np.zeros((n, 3))
+
+        # Calculate optimal grid dimensions for hexagonal packing
+        # Using the relationship between circle count and optimal grid size
+        rows = int(np.ceil(np.sqrt(n * 1.5)))
+        cols = int(np.ceil(n / rows))
+
+        # Ensure minimum grid size
+        rows = max(rows, 3)
+        cols = max(cols, 3)
+
+        # Hexagonal grid spacing
+        spacing_x = rect_width / (cols + 1)
+        spacing_y = rect_height / (rows + 1)
+
+        # Hexagon packing factor (more accurate than simple rectangular)
+        hex_spacing_x = spacing_x * 0.75
+        hex_spacing_y = spacing_y * 0.866  # sqrt(3)/2
+
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                # Hexagonal offset for odd rows (proper hexagonal packing)
+                x_offset = (i % 2) * (hex_spacing_x / 2)
+                x = hex_spacing_x * j + x_offset + hex_spacing_x
+                y = hex_spacing_y * i + hex_spacing_y
+
+                # Ensure within bounds with safety margin
+                x = max(hex_spacing_x, min(rect_width - hex_spacing_x, x))
+                y = max(hex_spacing_y, min(rect_height - hex_spacing_y, y))
+
+                # Initialize with a reasonable starting radius based on spacing
+                r = min(hex_spacing_x, hex_spacing_y) * 0.35
+
+                circles[idx] = [x, y, r]
+                idx += 1
+                if idx >= n:
+                    break
+
+        # Fill remaining slots if needed with strategic random positions
+        if idx < n:
+            for i in range(idx, n):
+                # Use more strategic random placement with better distribution
+                x = np.random.uniform(hex_spacing_x * 1.2, rect_width - hex_spacing_x * 1.2)
+                y = np.random.uniform(hex_spacing_y * 1.2, rect_height - hex_spacing_y * 1.2)
+                r = min(hex_spacing_x, hex_spacing_y) * 0.25
+                circles[i] = [x, y, r]
+
+        return circles.flatten()
+
+    # Start with a good initial configuration
+    initial_guess = generate_initial_guess()
+
+    # Run optimization using L-BFGS-B method for better convergence
+    try:
+        # Combine objective and penalty function
+        combined_objective = lambda x: objective(x) + penalty_function(x)
+
+        result = minimize(
+            combined_objective,
+            initial_guess,
+            method='L-BFGS-B',
+            options={'maxiter': 3000, 'disp': False, 'ftol': 1e-9, 'gtol': 1e-6}
+        )
+
+        if result.success:
+            final_circles = result.x.reshape(-1, 3)
+        else:
+            # If optimization fails, fall back to just the initial solution
+            final_circles = initial_guess.reshape(-1, 3)
+
+    except Exception as e:
+        # Fallback to initial guess if anything goes wrong
+        final_circles = initial_guess.reshape(-1, 3)
+
+    # Final adjustment to ensure all constraints hold and maximize radii
+    # Apply an improved greedy refinement step with better radius optimization
+    refined_circles = final_circles.copy()
+
+    # Local refinement to maximize radii while respecting constraints
+    max_iter = 1000
+    improvement_threshold = 1e-6
+
+    for iteration in range(max_iter):
+        improved = False
+        total_improvement = 0
+
+        # Shuffle circle indices for better exploration
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        for i in indices:
+            current_cx, current_cy, current_r = refined_circles[i]
+
+            # Find maximum allowable radius more carefully
+            max_radius = float('inf')
+
+            # Check boundary constraints
+            boundary_radius = min([
+                current_cx,  # left
+                rect_width - current_cx,  # right
+                current_cy,  # bottom
+                rect_height - current_cy   # top
+            ])
+            max_radius = min(max_radius, boundary_radius)
+
+            # Check overlap constraints with other circles more efficiently
+            # Only check nearby circles for better performance
+            nearby_circles = []
+            for j in range(n):
+                if i != j:
+                    other_cx, other_cy, other_r = refined_circles[j]
+                    dist = np.sqrt((current_cx - other_cx)**2 + (current_cy - other_cy)**2)
+                    # Consider only circles that could possibly cause overlap
+                    if dist < (current_r + other_r + 0.1):  # Safety margin
+                        nearby_circles.append((j, other_cx, other_cy, other_r, dist))
+
+            # Check overlap with nearby circles
+            for j, other_cx, other_cy, other_r, dist in nearby_circles:
+                # Max radius to prevent overlap
+                max_allowed_radius = dist - other_r
+                if max_allowed_radius > 0:
+                    max_radius = min(max_radius, max_allowed_radius)
+
+            # Try to increase radius with adaptive step sizes
+            if max_radius > current_r and max_radius > 0:
+                # Try multiple step sizes to balance exploration/exploitation
+                step_sizes = [0.005, 0.01, 0.015, 0.02]
+                best_new_r = current_r
+                best_valid = False
+
+                for step in step_sizes:
+                    new_r = min(current_r + step, max_radius)
+                    if new_r <= current_r:
+                        continue
+
+                    # Validate with full constraint check
+                    valid = True
+                    for j in range(n):
+                        if i != j:
+                            other_cx, other_cy, other_r = refined_circles[j]
+                            dist = np.sqrt((current_cx - other_cx)**2 + (current_cy - other_cy)**2)
+                            if dist < new_r + other_r:
+                                valid = False
+                                break
+
+                    if valid:
+                        best_new_r = new_r
+                        best_valid = True
+                        break
+
+                if best_valid:
+                    refined_circles[i, 2] = best_new_r
+                    improved = True
+                    total_improvement += (best_new_r - current_r)
+
+        # Stop if no significant improvement
+        if not improved or total_improvement < improvement_threshold:
+            break
+
+    return refined_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

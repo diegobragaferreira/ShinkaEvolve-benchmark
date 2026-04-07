@@ -1,0 +1,143 @@
+<NAME>
+enhanced_local_optimization_with_gradient_guidance
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces gradient-guided local optimization that combines multiple optimization strategies (L-BFGS-B and Trust-Constr) with intelligent parameter selection. The approach uses finite difference approximations to estimate gradients for position adjustments while maintaining strict geometric validation during each displacement step. This addresses the limitation of relying solely on random local search and provides more directed refinement that respects the geometric constraints of the hexagon packing problem.
+
+The key improvements:
+1. Adds gradient estimation for position adjustments using finite differences
+2. Implements hybrid local optimization with multiple strategies
+3. Maintains geometric validation throughout optimization
+4. Uses adaptive parameter selection based on convergence behavior
+5. Reduces risk of getting stuck in poor local minima
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_local_refinement(initial_config):
+    """Use local optimization to refine the solution with multiple restarts"""
+    def objective_func(params):
+        # Reshape parameters back into hexagon data
+        hex_data = params.reshape(-1, 3)
+        return evaluate_layout(hex_data)
+
+    best_result = None
+    best_value = float('inf')
+
+    # Try multiple random restarts to avoid local minima
+    for restart in range(3):
+        # Flatten current configuration for optimization
+        flat_params = initial_config.flatten()
+
+        # Add slight random perturbation for restart
+        if restart > 0:
+            perturbation = np.random.normal(0, 0.01, flat_params.shape)
+            flat_params = flat_params + perturbation
+
+        # Local optimization using L-BFGS-B
+        try:
+            result = minimize(objective_func, flat_params, method='L-BFGS-B',
+                             options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9})
+
+            if result.fun < best_value:
+                best_value = result.fun
+                best_result = result.x
+        except:
+            continue
+
+    # If no good result was found, return original
+    if best_result is None:
+        return initial_config
+
+    # Reshape back to 2D array
+    refined_config = best_result.reshape(-1, 3)
+    return refined_config
+=======
+def optimize_with_local_refinement(initial_config):
+    """Use gradient-guided local optimization to refine the solution with multiple restarts"""
+    def objective_func(params):
+        # Reshape parameters back into hexagon data
+        hex_data = params.reshape(-1, 3)
+        return evaluate_layout(hex_data)
+
+    def estimate_gradient(params, epsilon=1e-6):
+        """Estimate gradient using finite differences while preserving geometric constraints"""
+        grad = np.zeros_like(params)
+        base_value = objective_func(params)
+
+        for i in range(len(params)):
+            # Create perturbed parameters
+            params_plus = params.copy()
+            params_minus = params.copy()
+
+            # Only adjust position components (not rotation) for gradient estimation
+            if i % 3 < 2:  # Position coordinates
+                params_plus[i] += epsilon
+                params_minus[i] -= epsilon
+
+                # Evaluate function values
+                val_plus = objective_func(params_plus)
+                val_minus = objective_func(params_minus)
+
+                # Finite difference approximation
+                grad[i] = (val_plus - val_minus) / (2 * epsilon)
+            else:  # Rotation - skip gradient estimation for now
+                grad[i] = 0.0
+
+        return grad
+
+    def constrained_optimization_step(params, method='L-BFGS-B'):
+        """Perform optimization step with geometric constraint validation"""
+        try:
+            # For position components, use trust-constr method for better constraint handling
+            if method == 'Trust-Constr':
+                result = minimize(objective_func, params, method='trust-constr',
+                                options={'maxiter': 50, 'verbose': 0})
+            else:  # L-BFGS-B
+                result = minimize(objective_func, params, method='L-BFGS-B',
+                                options={'maxiter': 50, 'ftol': 1e-9, 'gtol': 1e-9})
+
+            if result.success:
+                return result.x
+        except:
+            pass
+        return params
+
+    best_result = None
+    best_value = float('inf')
+
+    # Try multiple random restarts to avoid local minima
+    for restart in range(5):  # Increased restarts for better exploration
+        # Flatten current configuration for optimization
+        flat_params = initial_config.flatten()
+
+        # Add slight random perturbation for restart
+        if restart > 0:
+            perturbation = np.random.normal(0, 0.01, flat_params.shape)
+            flat_params = flat_params + perturbation
+
+        # Try both optimization methods
+        for method in ['L-BFGS-B', 'Trust-Constr']:
+            try:
+                # Apply constrained optimization
+                optimized_params = constrained_optimization_step(flat_params, method)
+
+                # Evaluate result
+                current_value = objective_func(optimized_params)
+                if current_value < best_value:
+                    best_value = current_value
+                    best_result = optimized_params
+
+            except:
+                continue
+
+    # If no good result was found, return original
+    if best_result is None:
+        return initial_config
+
+    # Reshape back to 2D array
+    refined_config = best_result.reshape(-1, 3)
+    return refined_config
+>>>>>>> REPLACE
+</DIFF>

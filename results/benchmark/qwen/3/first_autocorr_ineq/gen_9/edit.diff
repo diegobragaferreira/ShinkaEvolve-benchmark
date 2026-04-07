@@ -1,0 +1,189 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,133 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import optimize
++import random
++from deap import base, creator, tools, algorithms
++from scipy import signal
++import time
+ 
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
++# Global constants for optimization
++MAX_SEQUENCE_LENGTH = 1000
++MIN_SEQUENCE_LENGTH = 50
++POPULATION_SIZE = 100
++GENERATIONS = 50
++MUTATION_RATE = 0.1
++TOURNAMENT_SIZE = 3
++BENCHMARK_THRESHOLD = 1.5031
++
++# Set random seed for reproducibility
++random.seed(42)
++np.random.seed(42)
++
++def calculate_c1(sequence):
++    """
++    Calculate C1 for a given sequence.
++    C1 = 2n * max(convolution) / (sum(sequence))^2
++    """
++    if len(sequence) == 0:
++        return float('inf')
++
++    sequence = np.array(sequence)
++    total_sum = np.sum(sequence)
++
++    if total_sum < 0.01:
++        return float('inf')
++
++    # Use FFT-based convolution for efficiency
++    conv_result = signal.convolve(sequence, sequence, mode='full')
++    max_conv = np.max(conv_result)
++
+     n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
++    c1 = (2 * n * max_conv) / (total_sum ** 2)
++    return c1
+ 
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
++def evaluate_individual(individual):
++    """
++    Evaluate fitness of an individual (sequence).
++    Returns (1/C1,) - we maximize 1/C1 to minimize C1.
++    """
++    c1_value = calculate_c1(individual)
++    if c1_value == float('inf'):
++        return (0,)  # Invalid solution
++    return (1.0 / c1_value,)
+ 
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
++def create_individual():
++    """Create a random individual (sequence)"""
++    length = random.randint(MIN_SEQUENCE_LENGTH, MAX_SEQUENCE_LENGTH)
++    # Create sequence with values in [0, 1000]
++    individual = [random.uniform(0, 1000) for _ in range(length)]
++    return individual
+ 
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
++def mutate_individual(individual):
++    """Mutate an individual"""
++    for i in range(len(individual)):
++        if random.random() < MUTATION_RATE:
++            # Apply small perturbation
++            individual[i] *= random.uniform(0.9, 1.1)
++            individual[i] = max(0, min(1000, individual[i]))
++    return individual,
+ 
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
++def crossover_individuals(ind1, ind2):
++    """Crossover two individuals"""
++    size = min(len(ind1), len(ind2))
++    cxpoint1 = random.randint(1, size)
++    cxpoint2 = random.randint(1, size - 1)
++    if cxpoint2 >= cxpoint1:
++        ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2], ind1[cxpoint1:cxpoint2]
++    return ind1, ind2
+ 
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
++def search_for_best_sequence():
++    """Main optimization function using evolutionary algorithm"""
+ 
++    # Setup DEAP framework
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
+ 
+-def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
++    toolbox = base.Toolbox()
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate_individual)
++    toolbox.register("mate", crossover_individuals)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+ 
+-    return best_sequence
++    # Initialize population
++    population = toolbox.population(n=POPULATION_SIZE)
++
++    # Statistics tracking
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++
++    # Run evolution
++    start_time = time.time()
++    try:
++        algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2,
++                           ngen=GENERATIONS, stats=stats, verbose=False)
++    except Exception as e:
++        print(f"Evolution error: {e}")
++
++    # Get best individual
++    best_individual = tools.selBest(population, 1)[0]
++    return best_individual
++
++def get_performance_metrics(sequence):
++    """Calculate performance metrics for the solution"""
++    c1 = calculate_c1(sequence)
++    inv_c1 = 1.0 / c1 if c1 != float('inf') else 0
++    benchmark_ratio = c1 / BENCHMARK_THRESHOLD if c1 != float('inf') else 0
++    eval_time = 0  # Placeholder - actual timing would be more complex
++
++    return {
++        'inv_c1': inv_c1,
++        'benchmark_ratio': benchmark_ratio,
++        'eval_time': eval_time,
++        'c1': c1
++    }
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

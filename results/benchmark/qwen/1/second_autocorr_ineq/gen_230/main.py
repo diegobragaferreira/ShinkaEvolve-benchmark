@@ -1,0 +1,319 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+import time
+import jax
+import jax.numpy as jnp
+from jax import grad, jit, vmap
+import warnings
+
+@jit
+def compute_autoconvolution_norms_jax(f_vals):
+    """
+    Compute the three norms needed for C2 calculation using JAX for efficiency:
+    ||g||₂² (L2 norm squared), ||g||₁ (L1 norm), ||g||∞ (L-infinity norm)
+
+    Args:
+        f_vals: JAX array of step function heights
+
+    Returns:
+        tuple: (norm_g2_sq, norm_g1, norm_ginf)
+    """
+    # Ensure non-negative values
+    f_vals = jnp.maximum(f_vals, 0.0)
+
+    # Convert to numpy for convolution (since jax doesn't have full convolve support)
+    f_np = np.array(f_vals)
+    g = convolve(f_np, f_np, mode='full')
+
+    # Extract the central portion that represents the main interval
+    n = len(f_np)
+    middle_idx = n - 1
+    half_width = n
+
+    # Take the central part of the convolution
+    g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+
+    # Compute the norms using jax operations where possible
+    g_squared = g_centered ** 2
+    g_abs = jnp.abs(g_centered)
+
+    # ||g||₂² - sum of squares
+    norm_g2_sq = jnp.sum(g_squared)
+
+    # ||g||₁ - sum of absolute values
+    norm_g1 = jnp.sum(g_abs)
+
+    # ||g||∞ - maximum absolute value
+    norm_ginf = jnp.max(g_abs)
+
+    return norm_g2_sq, norm_g1, norm_ginf
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂² (L2 norm squared), ||g||₁ (L1 norm), ||g||∞ (L-infinity norm)
+
+    Args:
+        f_values: list of step function heights
+
+    Returns:
+        tuple: (norm_g2_sq, norm_g1, norm_ginf)
+    """
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values)
+
+    # Ensure non-negative values
+    f = np.maximum(f, 0)
+
+    # Compute autoconvolution g = f * f (discrete convolution)
+    g = convolve(f, f, mode='full')
+
+    # Extract the central portion that represents the main interval
+    n = len(f)
+    middle_idx = n - 1
+    half_width = n
+
+    # Take the central part of the convolution
+    g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+
+    # Compute the norms
+    g_squared = g_centered ** 2
+    g_abs = np.abs(g_centered)
+
+    # ||g||₂² - sum of squares
+    norm_g2_sq = np.sum(g_squared)
+
+    # ||g||₁ - sum of absolute values
+    norm_g1 = np.sum(g_abs)
+
+    # ||g||∞ - maximum absolute value
+    norm_ginf = np.max(g_abs)
+
+    return norm_g2_sq, norm_g1, norm_ginf
+
+def evaluate_c2(f_values):
+    """Evaluate C2 = ||g||₂² / (||g||₁ · ||g||∞) for a given set of step heights"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_values, 0.0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Compute autoconvolution norms
+        norm_g2_sq, norm_g1, norm_ginf = compute_autoconvolution_norms(f_vals)
+
+        # Avoid division by zero
+        if norm_g1 <= 1e-15 or norm_ginf <= 1e-15:
+            return 0.0
+
+        # Compute C2
+        c2 = norm_g2_sq / (norm_g1 * norm_ginf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def generate_mathematical_pattern(n_steps):
+    """Generate a mathematically motivated pattern for step function"""
+    # Create a combination of peak and plateau regions
+    f_values = []
+
+    # Use alternating high/low pattern with some randomness
+    for i in range(n_steps):
+        if i % 3 == 0:
+            # Peak region
+            f_values.append(np.random.uniform(0.8, 1.0))
+        elif i % 3 == 1:
+            # Medium region
+            f_values.append(np.random.uniform(0.3, 0.7))
+        else:
+            # Low region
+            f_values.append(np.random.uniform(0.0, 0.2))
+
+    # Apply Gaussian smoothing for better transitions
+    if n_steps >= 5:
+        kernel_size = min(11, n_steps // 10)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        sigma = kernel_size / 6.0
+        x = np.arange(kernel_size) - kernel_size // 2
+        gaussian_kernel = np.exp(-x**2 / (2 * sigma**2))
+        gaussian_kernel /= np.sum(gaussian_kernel)
+        f_values = np.convolve(f_values, gaussian_kernel, mode='same')
+
+    # Ensure non-negative values
+    f_values = np.maximum(f_values, 0.0)
+
+    # Normalize to prevent extreme values
+    max_val = np.max(f_values)
+    if max_val > 0:
+        f_values = f_values / max_val * 2.0
+
+    return f_values.tolist()
+
+def adaptive_gradient_optimization(initial_f_values, max_iter=50):
+    """
+    Adaptive gradient-based optimization using JAX for high accuracy
+    """
+    # Convert to JAX array for gradient computation
+    f_init = jnp.array(initial_f_values, dtype=jnp.float64)
+
+    def compute_c2_jax(f_vals):
+        """JAX version of C2 computation for gradient calculation"""
+        # Ensure non-negative
+        f_vals = jnp.maximum(f_vals, 0.0)
+
+        # Convert to numpy for convolution
+        f_np = np.array(f_vals)
+        g = convolve(f_np, f_np, mode='full')
+
+        n = len(f_np)
+        middle_idx = n - 1
+        half_width = n
+        g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+
+        # Compute norms using jax operations where possible
+        g_squared = g_centered ** 2
+        g_abs = jnp.abs(g_centered)
+
+        norm_g2_sq = jnp.sum(g_squared)
+        norm_g1 = jnp.sum(g_abs)
+        norm_ginf = jnp.max(g_abs)
+
+        # Avoid division by zero
+        eps = 1e-15
+        norm_g1 = jnp.where(norm_g1 < eps, eps, norm_g1)
+        norm_ginf = jnp.where(norm_ginf < eps, eps, norm_ginf)
+
+        c2 = norm_g2_sq / (norm_g1 * norm_ginf)
+        return c2
+
+    # Vectorize the gradient computation for batch processing
+    vectorized_grad_fn = vmap(grad(compute_c2_jax))
+
+    # Create loss function (negative C2 for minimization)
+    def loss_fn(f_vals):
+        return -compute_c2_jax(f_vals)
+
+    # Compute gradient
+    grad_fn = grad(loss_fn)
+
+    # Optimization loop
+    f_current = f_init
+    best_c2 = -np.inf
+    best_f = f_init
+
+    try:
+        # Use L-BFGS-B with gradient information for optimization
+        from scipy.optimize import minimize
+
+        def loss_wrapper(f_vals):
+            return float(loss_fn(jnp.array(f_vals)))
+
+        def grad_wrapper(f_vals):
+            # Use vectorized gradient for better performance
+            grad_val = grad_fn(jnp.array(f_vals))
+            return np.array(grad_val)
+
+        # Run optimization with gradient information
+        result = minimize(
+            loss_wrapper,
+            np.array(f_current),
+            method='L-BFGS-B',
+            jac=grad_wrapper,
+            options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+
+        if result.success:
+            f_final = result.x
+        else:
+            f_final = np.array(f_current)
+
+    except Exception as e:
+        # Fallback to simple approach if gradient optimization fails
+        warnings.warn(f"Gradient optimization failed: {e}")
+        f_final = np.array(f_current)
+
+    # Ensure non-negative values
+    f_final = np.maximum(f_final, 0.0)
+
+    # Normalize to maintain reasonable scale
+    total = np.sum(f_final)
+    if total > 0:
+        f_final = f_final / total * len(f_final) * 0.5
+
+    return f_final.tolist()
+
+def advanced_refinement_strategy(initial_f_values, max_refinements=3):
+    """Apply multiple rounds of refinement to improve results"""
+    current_f = initial_f_values.copy()
+
+    # Start with a mathematical pattern
+    n_steps = len(current_f)
+    if n_steps < 100:
+        n_steps = np.random.randint(500, 2000)
+    pattern = generate_mathematical_pattern(n_steps)
+
+    # First round of optimization
+    refined_f = adaptive_gradient_optimization(pattern, max_iter=30)
+    best_c2 = evaluate_c2(refined_f)
+
+    # Multiple rounds of refinement
+    for i in range(max_refinements):
+        # Add small noise to break symmetry and explore more
+        noise_level = 0.02
+        noisy_pattern = [max(0, val + np.random.normal(0, noise_level)) for val in refined_f]
+
+        # Optimize the noisy version
+        new_f = adaptive_gradient_optimization(noisy_pattern, max_iter=20)
+        new_c2 = evaluate_c2(new_f)
+
+        if new_c2 > best_c2:
+            refined_f = new_f
+            best_c2 = new_c2
+        else:
+            # If no improvement, add more noise and try again
+            noise_level *= 2
+            noisy_pattern = [max(0, val + np.random.normal(0, noise_level)) for val in refined_f]
+            new_f = adaptive_gradient_optimization(noisy_pattern, max_iter=15)
+            new_c2 = evaluate_c2(new_f)
+            if new_c2 > best_c2:
+                refined_f = new_f
+                best_c2 = new_c2
+
+    return refined_f
+
+def construct_function() -> list[float]:
+    """
+    Main entry point for constructing step-function with high C2 value.
+    Uses advanced mathematical patterns and adaptive optimization.
+    """
+    # Set seeds for reproducibility
+    np.random.seed(42)
+
+    # Generate initial sophisticated pattern
+    n_steps = np.random.randint(500, 3000)
+    initial_pattern = generate_mathematical_pattern(n_steps)
+
+    # Apply advanced refinement strategy
+    try:
+        optimized_f = advanced_refinement_strategy(initial_pattern, max_refinements=2)
+    except Exception as e:
+        # Fallback to basic pattern if optimization fails
+        print(f"Optimization failed: {e}. Using fallback pattern.")
+        optimized_f = generate_mathematical_pattern(n_steps)
+
+    # Ensure final result has reasonable values
+    optimized_f = [max(0.0, val) for val in optimized_f]
+
+    return optimized_f
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

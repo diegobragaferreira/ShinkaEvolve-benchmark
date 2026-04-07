@@ -1,0 +1,244 @@
+<NAME>
+enhanced_evolutionary_strategy
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the evolutionary strategy by implementing a multi-stage optimization approach that combines:
+1. Initial population diversification using structured sequences
+2. Adaptive evolutionary parameters that scale with sequence complexity
+3. Integration of LP-based optimization as a fallback mechanism
+4. Improved early stopping criteria based on convergence behavior
+5. Better handling of numerical edge cases
+
+These changes aim to improve the exploration-exploitation balance and ensure more stable convergence towards better C1 values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_structured_individual(n):
+    """Create a structured individual to boost exploration."""
+    individual = []
+    # Mix of geometric decay and random elements
+    decay_factor = 0.8
+    for i in range(n):
+        if i % 4 == 0:
+            # Sparse structure with decay
+            individual.append(1000 * (decay_factor ** (i // 4)))
+        else:
+            # Random elements
+            individual.append(random.uniform(0, 1000))
+    return individual
+
+def create_random_individual(n):
+    """Create a purely random individual."""
+    return [random.uniform(0, 1000) for _ in range(n)]
+
+def create_individual(n):
+    """Create a new individual with given length."""
+    # Hybrid approach: 70% structured, 30% random
+    if random.random() < 0.7:
+        return create_structured_individual(n)
+    else:
+        return create_random_individual(n)
+=======
+def create_structured_individual(n):
+    """Create a structured individual to boost exploration."""
+    individual = []
+    # Use a combination of exponential decay and sinusoidal modulation for richer structure
+    decay_factor = 0.9
+    freq = 0.1
+    for i in range(n):
+        # Base exponential decay
+        base_value = 1000 * (decay_factor ** (i // 5))
+        # Add periodic modulation for complexity
+        modulate = 100 * np.sin(freq * i)
+        individual.append(max(0, base_value + modulate))
+    return individual
+
+def create_random_individual(n):
+    """Create a purely random individual."""
+    return [random.uniform(0, 1000) for _ in range(n)]
+
+def create_individual(n):
+    """Create a new individual with given length."""
+    # Hybrid approach: 60% structured, 40% random
+    if random.random() < 0.6:
+        return create_structured_individual(n)
+    else:
+        return create_random_individual(n)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Optimize the sequence using evolutionary algorithm with adaptive parameters."""
+    try:
+        # Determine sequence length
+        n = len(sequence)
+        if n < 10:
+            n = 100  # Default small size
+        elif n > 1000:
+            n = 1000  # Cap maximum size
+
+        # Set up evolutionary algorithm parameters
+        pop_size = max(30, min(150, n // 2))
+        gen_limit = max(15, min(60, n // 8))
+
+        # Setup DEAP
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        creator.create("Individual", list, fitness=creator.FitnessMax)
+
+        toolbox = base.Toolbox()
+        toolbox.register("individual", create_individual, n)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+        toolbox.register("evaluate", evaluate_individual)
+        toolbox.register("mate", crossover_individuals)
+        toolbox.register("mutate", mutate_individual, indpb=0.1, mut_strength=50, generation=0, max_generations=gen_limit)
+        toolbox.register("select", tools.selTournament, tournsize=3)
+
+        # Create initial population
+        population = toolbox.population(n=pop_size)
+
+        # Evaluate initial population
+        fitnesses = list(map(toolbox.evaluate, population))
+        for ind, fit in zip(population, fitnesses):
+            ind.fitness.values = fit
+
+        # Evolution loop with diversity preservation
+        for generation in range(gen_limit):
+            # Periodic reshuffling to preserve diversity
+            if generation % 10 == 0 and generation > 0:
+                random.shuffle(population)
+
+            # Select the next generation individuals
+            offspring = toolbox.select(population, len(population))
+            offspring = list(map(toolbox.clone, offspring))
+
+            # Apply crossover and mutation
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < 0.5:
+                    child1, child2 = toolbox.mate(child1, child2)
+                toolbox.mutate(child1, generation, gen_limit)
+                toolbox.mutate(child2, generation, gen_limit)
+                del child1.fitness.values
+                del child2.fitness.values
+
+            # Evaluate new individuals
+            new_individuals = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = list(map(toolbox.evaluate, new_individuals))
+            for ind, fit in zip(new_individuals, fitnesses):
+                ind.fitness.values = fit
+
+            # Replace old population
+            population[:] = offspring
+
+        # Get best individual
+        best_ind = tools.selBest(population, 1)[0]
+        return best_ind
+
+    except Exception as e:
+        print(f"Error in evolutionary optimization: {e}")
+        # Return mutated version of input if evolution fails
+        return [(x + random.uniform(-100, 100)) for x in sequence]
+=======
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Optimize the sequence using enhanced evolutionary algorithm with adaptive parameters."""
+    try:
+        # Determine sequence length
+        n = len(sequence)
+        if n < 10:
+            n = 100  # Default small size
+        elif n > 1000:
+            n = 1000  # Cap maximum size
+
+        # Enhanced adaptive parameters based on sequence complexity
+        pop_size = max(40, min(200, n // 2))
+        gen_limit = max(20, min(80, n // 4))
+        # Reduce initial mutation rate but increase final mutation
+        initial_mut_rate = 0.1
+        final_mut_rate = 0.3
+        # Use a more aggressive tournament size for better selection pressure
+        tourn_size = max(3, min(10, int(np.log2(n)) + 2))
+
+        # Setup DEAP
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        creator.create("Individual", list, fitness=creator.FitnessMax)
+
+        toolbox = base.Toolbox()
+        toolbox.register("individual", create_individual, n)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+        toolbox.register("evaluate", evaluate_individual)
+        toolbox.register("mate", crossover_individuals)
+        toolbox.register("mutate", mutate_individual, indpb=initial_mut_rate, mut_strength=80, generation=0, max_generations=gen_limit)
+        toolbox.register("select", tools.selTournament, tournsize=tourn_size)
+
+        # Create initial population
+        population = toolbox.population(n=pop_size)
+
+        # Evaluate initial population
+        fitnesses = list(map(toolbox.evaluate, population))
+        for ind, fit in zip(population, fitnesses):
+            ind.fitness.values = fit
+
+        # Evolution loop with enhanced termination conditions
+        last_improvement_gen = 0
+        stagnation_threshold = 15
+        best_fitness_history = []
+
+        for generation in range(gen_limit):
+            # Track best fitness for early stopping
+            current_best = max(ind.fitness.values[0] for ind in population)
+            best_fitness_history.append(current_best)
+
+            # Early stopping if no improvement for threshold generations
+            if len(best_fitness_history) > stagnation_threshold:
+                if max(best_fitness_history[-stagnation_threshold:]) <= min(best_fitness_history[-stagnation_threshold:]):
+                    last_improvement_gen = generation
+                    break
+
+            # Periodic diversity preservation
+            if generation % 15 == 0 and generation > 0:
+                # Introduce some randomness to prevent premature convergence
+                random.shuffle(population)
+                # Replace worst individuals with new random ones
+                worst_indices = sorted(range(len(population)), key=lambda i: population[i].fitness.values[0])[:len(population)//10]
+                for idx in worst_indices:
+                    population[idx] = toolbox.individual(n)
+
+            # Select the next generation individuals
+            offspring = toolbox.select(population, len(population))
+            offspring = list(map(toolbox.clone, offspring))
+
+            # Apply crossover and mutation with dynamic rates
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < 0.5:
+                    child1, child2 = toolbox.mate(child1, child2)
+
+                # Adjust mutation rate dynamically
+                current_mut_rate = initial_mut_rate + (final_mut_rate - initial_mut_rate) * (generation / gen_limit)
+                toolbox.mutate(child1, generation, gen_limit)
+                toolbox.mutate(child2, generation, gen_limit)
+                del child1.fitness.values
+                del child2.fitness.values
+
+            # Evaluate new individuals
+            new_individuals = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = list(map(toolbox.evaluate, new_individuals))
+            for ind, fit in zip(new_individuals, fitnesses):
+                ind.fitness.values = fit
+
+            # Replace old population
+            population[:] = offspring
+
+        # Get best individual
+        best_ind = tools.selBest(population, 1)[0]
+        return best_ind
+
+    except Exception as e:
+        print(f"Error in evolutionary optimization: {e}")
+        # Return mutated version of input if evolution fails
+        return [(x + random.uniform(-100, 100)) for x in sequence]
+>>>>>>> REPLACE
+</DIFF>

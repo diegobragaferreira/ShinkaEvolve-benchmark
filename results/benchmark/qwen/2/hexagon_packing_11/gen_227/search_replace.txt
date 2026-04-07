@@ -1,0 +1,262 @@
+<NAME>
+add_parallel_de_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding parallel differential evolution optimization to explore multiple regions of the search space simultaneously. This approach leverages multiple cores to run several DE instances with different initializations and parameters, increasing the chances of finding a better global optimum. The key insight is that the previous implementation only ran one optimization attempt, while parallel execution allows for more thorough exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Generate multiple initial guesses
+    initial_guesses = generate_initial_guesses()
+
+    best_result = None
+    best_score = float('inf')
+
+    # Try each initial guess with local optimization
+    for i, initial_guess in enumerate(initial_guesses):
+        try:
+            # First, make a quick local optimization with a smaller search space
+            # Use L-BFGS-B on a subset of variables for fast improvement
+            bounds = []
+            # We fix outer radius and optimize positions/rotations
+            for _ in range(11):
+                bounds.extend([(-10, 10), (-10, 10), (-180, 180)])
+            bounds.append((1.0, 20.0))  # Outer hex side length
+
+            # Run local optimization
+            result = minimize(
+                compute_objective_with_penalties,
+                initial_guess,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50, 'ftol': 1e-6, 'gtol': 1e-6},
+                args=(True,)
+            )
+
+            # Evaluate final score
+            final_score = compute_objective_with_penalties(result.x, use_distance_penalties=True)
+
+            if final_score < best_score and result.success:
+                best_score = final_score
+                best_result = result
+
+        except Exception as e:
+            continue
+
+    # If we still haven't found a good solution, fall back to one of our initial guesses
+    if best_result is None or best_score >= 1e9:
+        # Just pick the best initial guess directly
+        best_result = None
+        best_score = float('inf')
+        for i, guess in enumerate(initial_guesses):
+            try:
+                score = compute_objective_with_penalties(guess, use_distance_penalties=True)
+                if score < best_score:
+                    best_score = score
+                    best_result = type('obj', (object,), {'x': guess})
+            except:
+                continue
+
+    # Extract the best solution
+    if best_result is None:
+        # Fallback to a simple symmetric arrangement
+        inner_hex_data = np.array([
+            [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+            [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+            [-1.732, 2, 0], [-3.464, 0, 0]
+        ])
+        outer_side_length = estimate_min_outer_radius(inner_hex_data.flatten())
+        outer_hex_data = np.array([0, 0, 0])
+        return inner_hex_data, outer_hex_data, outer_side_length
+
+    # Extract final parameters
+    best_params = best_result.x
+    outer_side_length = best_params[-1]
+
+    # Extract inner hexagon data
+    inner_hex_data = np.zeros((11, 3))
+    for i in range(11):
+        inner_hex_data[i] = [best_params[3*i], best_params[3*i+1], best_params[3*i+2]]
+
+    # Outer hexagon data
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+
+    # Verify solution
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_side_length)
+    outer_polygon = prep(Polygon(outer_vertices))
+
+    valid_solution = True
+    for i in range(11):
+        x, y, rot = best_params[3*i], best_params[3*i+1], best_params[3*i+2]
+        hex_vertices = hexagon_vertices(x, y, rot, 1)
+
+        if not check_containment_single(hex_vertices, outer_polygon):
+            valid_solution = False
+            break
+
+    if not valid_solution:
+        # Revert to simple arrangement
+        inner_hex_data = np.array([
+            [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+            [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+            [-1.732, 2, 0], [-3.464, 0, 0]
+        ])
+        outer_side_length = estimate_min_outer_radius(inner_hex_data.flatten())
+        outer_hex_data = np.array([0, 0, 0])
+
+    return inner_hex_data, outer_hex_data, outer_side_length
+=======
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Generate multiple initial guesses
+    initial_guesses = generate_initial_guesses()
+
+    # Try multiple approaches in parallel using differential evolution
+    def run_de_optimization(initial_guess, seed):
+        try:
+            bounds = []
+            for _ in range(11):
+                bounds.extend([(-10, 10), (-10, 10), (-180, 180)])
+            bounds.append((1.0, 20.0))  # Outer hex side length
+
+            # Use differential evolution with aggressive settings
+            de_result = differential_evolution(
+                compute_objective_with_penalties,
+                bounds,
+                maxiter=80,
+                popsize=20,
+                mutation=(0.8, 1),
+                recombination=0.9,
+                seed=seed,
+                disp=False,
+                polish=False
+            )
+
+            # Refine with L-BFGS-B
+            refined_result = minimize(
+                compute_objective_with_penalties,
+                de_result.x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 40, 'ftol': 1e-8, 'gtol': 1e-8},
+                args=(True,)
+            )
+
+            return refined_result.x if refined_result.success else None
+        except Exception:
+            return None
+
+    # Run multiple DE optimizations in parallel
+    from joblib import Parallel, delayed
+    parallel_results = Parallel(n_jobs=-1, backend='threading')(
+        delayed(run_de_optimization)(initial_guess, i)
+        for i, initial_guess in enumerate(initial_guesses)
+    )
+
+    # Process results to find best solution
+    best_result = None
+    best_score = float('inf')
+
+    # Check direct initial guesses first
+    for i, guess in enumerate(initial_guesses):
+        try:
+            score = compute_objective_with_penalties(guess, use_distance_penalties=True)
+            if score < best_score:
+                best_score = score
+                best_result = type('obj', (object,), {'x': guess})
+        except:
+            continue
+
+    # Check parallel DE results
+    for result in parallel_results:
+        if result is not None:
+            try:
+                score = compute_objective_with_penalties(result, use_distance_penalties=True)
+                if score < best_score:
+                    best_score = score
+                    best_result = type('obj', (object,), {'x': result})
+            except:
+                continue
+
+    # If we still haven't found a good solution, fall back to one of our initial guesses
+    if best_result is None or best_score >= 1e9:
+        # Just pick the best initial guess directly
+        best_result = None
+        best_score = float('inf')
+        for i, guess in enumerate(initial_guesses):
+            try:
+                score = compute_objective_with_penalties(guess, use_distance_penalties=True)
+                if score < best_score:
+                    best_score = score
+                    best_result = type('obj', (object,), {'x': guess})
+            except:
+                continue
+
+    # Extract the best solution
+    if best_result is None:
+        # Fallback to a simple symmetric arrangement
+        inner_hex_data = np.array([
+            [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+            [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+            [-1.732, 2, 0], [-3.464, 0, 0]
+        ])
+        outer_side_length = estimate_min_outer_radius(inner_hex_data.flatten())
+        outer_hex_data = np.array([0, 0, 0])
+        return inner_hex_data, outer_hex_data, outer_side_length
+
+    # Extract final parameters
+    best_params = best_result.x
+    outer_side_length = best_params[-1]
+
+    # Extract inner hexagon data
+    inner_hex_data = np.zeros((11, 3))
+    for i in range(11):
+        inner_hex_data[i] = [best_params[3*i], best_params[3*i+1], best_params[3*i+2]]
+
+    # Outer hexagon data
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+
+    # Verify solution
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_side_length)
+    outer_polygon = prep(Polygon(outer_vertices))
+
+    valid_solution = True
+    for i in range(11):
+        x, y, rot = best_params[3*i], best_params[3*i+1], best_params[3*i+2]
+        hex_vertices = hexagon_vertices(x, y, rot, 1)
+
+        if not check_containment_single(hex_vertices, outer_polygon):
+            valid_solution = False
+            break
+
+    if not valid_solution:
+        # Revert to simple arrangement
+        inner_hex_data = np.array([
+            [0, 0, 0], [0, 2, 0], [1.732, 1, 0], [1.732, -1, 0], [0, -2, 0],
+            [-1.732, -1, 0], [-1.732, 1, 0], [3.464, 0, 0], [1.732, 2, 0],
+            [-1.732, 2, 0], [-3.464, 0, 0]
+        ])
+        outer_side_length = estimate_min_outer_radius(inner_hex_data.flatten())
+        outer_hex_data = np.array([0, 0, 0])
+
+    return inner_hex_data, outer_hex_data, outer_side_length
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,258 @@
+<NAME>
+add_multi_objective_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding multi-objective optimization to enhance the solution quality by simultaneously optimizing both the minimum/maximum distance ratio and the uniformity of point distribution. This approach uses the SphericalVoronoi entropy score as a secondary objective to ensure not just good distance ratios but also well-distributed points on the sphere, which should help achieve better results than single-objective approaches.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_points_on_sphere(n):
+        """Initialize points on a unit sphere using fibonacci spiral method."""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            theta = np.arccos(1 - 2 * (i / (n - 1)))
+            phi = np.arctan2(np.sin(i * 2 * np.pi / golden_ratio), np.cos(i * 2 * np.pi / golden_ratio))
+            x = np.sin(theta) * np.cos(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(theta)
+            points.append([x, y, z])
+        return np.array(points)
+=======
+    def initialize_points_on_sphere(n):
+        """Initialize points on a unit sphere using fibonacci spiral method."""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            theta = np.arccos(1 - 2 * (i / (n - 1)))
+            phi = np.arctan2(np.sin(i * 2 * np.pi / golden_ratio), np.cos(i * 2 * np.pi / golden_ratio))
+            x = np.sin(theta) * np.cos(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def voronoi_entropy_score(points):
+        """
+        Calculate entropy-based score of Voronoi cell distribution.
+        High entropy indicates more uniform cell distribution.
+        """
+        from scipy.spatial import SphericalVoronoi
+        sv = SphericalVoronoi(points)
+        areas = sv.calculate_areas()
+        # Normalize areas
+        areas = areas / np.sum(areas)
+        # Entropy calculation
+        entropy = -np.sum(areas * np.log(areas + 1e-10))
+        return entropy
+
+    def spherical_voronoi_fitness(points):
+        """Fitness function based on Voronoi structure and distance ratio."""
+        ratio = calculate_min_max_ratio(points)
+        entropy = voronoi_entropy_score(points)
+        # Combine fitness: prioritize both uniformity and distance ratio
+        return ratio * (1.0 + 0.1 * entropy)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        return np.clip(normalized, 0, 1)
+
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Distance-based perturbation - perturb more aggressively for points that are too close
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+
+            # Use adaptive perturbation size based on how close points are
+            perturbation_magnitude = min(0.1, max(0.001, temperature * 0.05))
+
+            # More aggressive perturbation for points that are too close
+            if min_dist < 0.3:  # If points are very close, perturb more
+                perturbation_magnitude *= 2
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temperature):
+                current_points = neighbor_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+=======
+        return np.clip(normalized, 0, 1)
+
+    def adaptive_simulated_annealing_voronoi(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and Voronoi-based fitness"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        current_fitness = spherical_voronoi_fitness(current_points)
+        best_fitness = current_fitness
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Distance-based perturbation - perturb more aggressively for points that are too close
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+
+            # Use adaptive perturbation size based on how close points are
+            perturbation_magnitude = min(0.1, max(0.001, temperature * 0.05))
+
+            # More aggressive perturbation for points that are too close
+            if min_dist < 0.3:  # If points are very close, perturb more
+                perturbation_magnitude *= 2
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new fitness using Voronoi-based metric
+            new_fitness = spherical_voronoi_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_fitness
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_start_optimization(initial_points_list, max_iterations=5000):
+        """Run optimization from multiple starting points and return the best result"""
+        best_points = None
+        best_ratio = 0.0
+
+        for i, initial_points in enumerate(initial_points_list):
+            # Run adaptive SA from this starting point
+            optimized_points, ratio = adaptive_simulated_annealing(initial_points, max_iterations)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+        return best_points, best_ratio
+=======
+    def multi_start_optimization(initial_points_list, max_iterations=5000):
+        """Run optimization from multiple starting points and return the best result"""
+        best_points = None
+        best_fitness = -np.inf
+
+        for i, initial_points in enumerate(initial_points_list):
+            # Run adaptive SA with Voronoi fitness from this starting point
+            optimized_points, fitness = adaptive_simulated_annealing_voronoi(initial_points, max_iterations)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_points = optimized_points.copy()
+
+        return best_points, best_fitness
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Run multi-start optimization on all strategies
+    best_points, best_ratio = multi_start_optimization(
+        [strategy[1] for strategy in initial_strategies],
+        max_iterations=8000
+    )
+
+    # Do final local refinement with higher iterations
+    final_points, final_ratio = local_refinement(best_points, iterations=1000)
+=======
+    # Run multi-start optimization on all strategies
+    best_points, _ = multi_start_optimization(
+        [strategy[1] for strategy in initial_strategies],
+        max_iterations=8000
+    )
+
+    # Do final local refinement with higher iterations
+    final_points, _ = local_refinement(best_points, iterations=1000)
+>>>>>>> REPLACE
+</DIFF>

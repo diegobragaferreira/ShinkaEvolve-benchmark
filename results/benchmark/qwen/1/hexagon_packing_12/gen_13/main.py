@@ -1,0 +1,203 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from joblib import Parallel, delayed
+import time
+from numba import jit
+
+# Constants
+UNIT_HEX_RADIUS = 1.0
+INNER_HEX_COUNT = 12
+ANGLE_STEP = 30  # degrees between hexagon orientations
+MAX_EVAL_TIME = 170  # seconds
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, radius=1.0):
+    """Generate vertices of a regular hexagon with given center, angle, and radius."""
+    vertices = np.zeros((6, 2))
+    angle_rad = np.radians(angle_deg)
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vertices[i] = [x + radius * np.cos(theta), y + radius * np.sin(theta)]
+    return vertices
+
+@jit(nopython=True)
+def distance_point_to_line(point, line_start, line_end):
+    """Calculate minimum distance from point to line segment."""
+    px, py = point
+    x1, y1 = line_start
+    x2, y2 = line_end
+    
+    # Vector from line_start to line_end
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx*dx + dy*dy
+    
+    if length_sq == 0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+    
+    # Project point onto line
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    
+    # Closest point on line segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@jit(nopython=True)
+def point_in_polygon(point, polygon_vertices):
+    """Check if point is inside polygon using ray casting."""
+    x, y = point
+    n = len(polygon_vertices)
+    inside = False
+    
+    p1x, p1y = polygon_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon_vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    
+    return inside
+
+def hexagon_overlap(h1_vertices, h2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    try:
+        poly1 = Polygon(h1_vertices)
+        poly2 = Polygon(h2_vertices)
+        return poly1.intersects(poly2)
+    except:
+        # Fallback for numerical issues
+        return False
+
+def check_containment(hex_vertices, outer_hex_vertices):
+    """Check if all hexagon vertices are inside outer hexagon."""
+    for vertex in hex_vertices:
+        if not point_in_polygon(vertex, outer_hex_vertices):
+            return False
+    return True
+
+def evaluate_packing(params):
+    """
+    Evaluate a packing configuration and return inverse outer hex side length.
+    params: [x1,y1,a1, x2,y2,a2, ..., x12,y12,a12, R]
+    """
+    # Extract inner hexagon data
+    inner_positions_angles = params[:-1].reshape(-1, 3)
+    outer_radius = params[-1]
+    
+    # Generate hexagon vertices
+    inner_hexagons = []
+    for i in range(INNER_HEX_COUNT):
+        x, y, angle = inner_positions_angles[i]
+        vertices = hexagon_vertices(x, y, angle)
+        inner_hexagons.append(vertices)
+    
+    # Check for overlaps
+    for i in range(INNER_HEX_COUNT):
+        for j in range(i + 1, INNER_HEX_COUNT):
+            if hexagon_overlap(inner_hexagons[i], inner_hexagons[j]):
+                return 1e10  # Penalty for overlap
+    
+    # Generate outer hexagon vertices
+    outer_hex_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+    
+    # Check containment
+    for hex_vertices in inner_hexagons:
+        if not check_containment(hex_vertices, outer_hex_vertices):
+            return 1e10  # Penalty for containment violation
+    
+    # Return inverse of outer radius (to maximize 1/outer_radius)
+    return 1.0 / outer_radius
+
+def create_initial_guess():
+    """Create an informed initial configuration based on hexagonal packing."""
+    # Start with a known good symmetric pattern
+    # Arrange in concentric rings: center, ring 1, ring 2
+    initial_params = []
+    
+    # Center hexagon
+    initial_params.extend([0.0, 0.0, 0.0])
+    
+    # First ring - 6 hexagons around center
+    for i in range(6):
+        angle = i * 60
+        radius = 2.0  # Distance from center
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        initial_params.extend([x, y, angle])
+    
+    # Second ring - 5 hexagons (not perfect hexagonal packing)
+    for i in range(5):
+        angle = i * 72  # 72 degree increments
+        radius = 3.5
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        initial_params.extend([x, y, angle])
+    
+    # Add outer radius - guess based on configuration
+    initial_params.append(5.0)
+    
+    return np.array(initial_params)
+
+def optimize_packing():
+    """Optimize the packing using differential evolution."""
+    # Create bounds for each parameter
+    bounds = []
+    
+    # Inner hexagons positions (x, y) - allow reasonable spread
+    for _ in range(INNER_HEX_COUNT):
+        bounds.extend([(-10.0, 10.0), (-10.0, 10.0), (0.0, 360.0)])
+    
+    # Outer hexagon radius - reasonable bounds
+    bounds.append((2.0, 10.0))
+    
+    # Initial guess
+    x0 = create_initial_guess()
+    
+    # Optimize using differential evolution with constraints
+    result = differential_evolution(
+        evaluate_packing,
+        bounds,
+        maxiter=500,
+        popsize=15,
+        mutation=(0.5, 1.0),
+        recombination=0.7,
+        seed=42,
+        disp=False
+    )
+    
+    return result
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Optimize the packing
+    result = optimize_packing()
+    
+    # Extract results
+    best_params = result.x
+    inner_positions_angles = best_params[:-1].reshape(-1, 3)
+    outer_hex_side_length = best_params[-1]
+    
+    # Format output as required
+    inner_hex_data = inner_positions_angles.copy()
+    outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

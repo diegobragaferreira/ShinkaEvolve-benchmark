@@ -1,0 +1,271 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import jit
+import time
+from deap import base, creator, tools, algorithms
+import random
+from typing import List, Tuple
+
+# Constants
+DOMAIN = [-0.25, 0.25]
+N_MIN, N_MAX = 100, 2000
+MAX_TIME_SECONDS = 85
+
+@jit(nopython=True)
+def compute_autoconvolution_jit(f_vals):
+    """Numba-compiled autoconvolution for speed"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_norms_jit(g_vals):
+    """Numba-compiled norm computation"""
+    n = len(g_vals)
+
+    l1_norm = 0.0
+    l2_norm_sq = 0.0
+    linf_norm = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l1_norm += abs(val)
+        l2_norm_sq += val * val
+        if abs(val) > linf_norm:
+            linf_norm = abs(val)
+
+    return l1_norm, l2_norm_sq, linf_norm
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """Compute the three norms needed for C2 calculation"""
+    # Convert to numpy array
+    f_array = np.array(f_values, dtype=np.float64)
+
+    # Ensure non-negative values
+    f_array = np.maximum(f_array, 0.0)
+
+    # Compute autoconvolution
+    g = compute_autoconvolution_jit(f_array)
+
+    # Compute norms
+    l1_norm, l2_norm_sq, linf_norm = compute_norms_jit(g)
+
+    return l2_norm_sq, l1_norm, linf_norm
+
+def calculate_c2(f_values: List[float]) -> float:
+    """Calculate C2 value for given step function"""
+    try:
+        g2_sq, g1, ginf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if g1 <= 1e-15 or ginf <= 1e-15:
+            return 0.0
+
+        c2 = g2_sq / (g1 * ginf)
+        return c2
+    except Exception:
+        return 0.0
+
+def initialize_population(pop_size: int, n_steps: int) -> List[List[float]]:
+    """Initialize population with various strategies"""
+    population = []
+
+    # Strategy 1: Random uniform
+    for _ in range(pop_size // 3):
+        individual = [random.uniform(0, 1) for _ in range(n_steps)]
+        population.append(individual)
+
+    # Strategy 2: Pattern-based (peaks and valleys)
+    for _ in range(pop_size // 3):
+        individual = [0.0] * n_steps
+        # Create some peaks in the middle
+        peak_start = n_steps // 4
+        peak_end = 3 * n_steps // 4
+        for i in range(n_steps):
+            if peak_start <= i <= peak_end:
+                individual[i] = 1.0 - abs(i - n_steps // 2) / (n_steps // 2)
+            else:
+                individual[i] = random.uniform(0, 0.3)
+        population.append(individual)
+
+    # Strategy 3: Gaussian-inspired
+    for _ in range(pop_size - 2 * pop_size // 3):
+        individual = [0.0] * n_steps
+        x = np.linspace(DOMAIN[0], DOMAIN[1], n_steps)
+        # Create a bell-shaped pattern
+        for i in range(n_steps):
+            individual[i] = np.exp(-0.5 * ((x[i] - 0.0) / 0.1) ** 2)
+        population.append(individual)
+
+    return population
+
+def evaluate_individual(individual: List[float]) -> float:
+    """Evaluate fitness of individual - returns negative C2 for maximization"""
+    try:
+        # Ensure non-negative values
+        individual = [max(0.0, x) for x in individual]
+        c2 = calculate_c2(individual)
+        return c2  # Return positive C2 for maximization
+    except Exception:
+        return 0.0
+
+def adaptive_evolutionary_search() -> List[float]:
+    """Perform advanced evolutionary optimization"""
+    # Set random seeds for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Create fitness classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define the problem dimensions
+    n_steps = random.randint(N_MIN, N_MAX)
+
+    # Initialize population
+    pop_size = 30
+    population = initialize_population(pop_size, n_steps)
+
+    # Register genetic operators
+    toolbox.register("evaluate", evaluate_individual)
+
+    # Use tournament selection
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Use uniform crossover
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+
+    # Use gaussian mutation with adaptive rates
+    def mutate_individual(individual, indpb=0.1):
+        # Adaptive mutation rate
+        adaptive_indpb = indpb * (1.0 - 0.02 * (len(individual) / 1000))
+        for i in range(len(individual)):
+            if random.random() < adaptive_indpb:
+                # Gaussian perturbation
+                noise = random.gauss(0, 0.1 * max(1e-6, individual[i]))
+                individual[i] = max(0, individual[i] + noise)
+        return individual,
+
+    toolbox.register("mutate", mutate_individual)
+
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, population))
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = (fit,)
+
+    # Track best solution
+    best_ind = max(population, key=lambda x: x.fitness.values[0])
+    best_c2 = best_ind.fitness.values[0]
+
+    # Evolution loop with early stopping
+    max_generations = 50
+    stagnation_count = 0
+    prev_best_c2 = 0.0
+
+    start_time = time.time()
+
+    for gen in range(max_generations):
+        if time.time() - start_time > MAX_TIME_SECONDS - 5:
+            break
+
+        # Check for stagnation
+        if abs(best_c2 - prev_best_c2) < 1e-8:
+            stagnation_count += 1
+        else:
+            stagnation_count = 0
+            prev_best_c2 = best_c2
+
+        if stagnation_count > 10:
+            break
+
+        # Select the next generation individuals
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < 0.2:  # Mutation probability
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = (fit,)
+
+        # Replace the old population with the new one
+        population[:] = offspring
+
+        # Update best solution
+        current_best = max(population, key=lambda x: x.fitness.values[0])
+        current_c2 = current_best.fitness.values[0]
+        if current_c2 > best_c2:
+            best_c2 = current_c2
+            best_ind = current_best.copy()
+
+    # Coordinate-wise refinement
+    refined_individual = best_ind.copy()
+    old_c2 = best_c2
+
+    for ref_iter in range(20):
+        if time.time() - start_time > MAX_TIME_SECONDS - 5:
+            break
+
+        improved = False
+        for i in range(len(refined_individual)):
+            if time.time() - start_time > MAX_TIME_SECONDS - 5:
+                break
+
+            original_value = refined_individual[i]
+            step_sizes = [0.01, 0.05, 0.1]
+
+            for step in step_sizes:
+                for direction in [1, -1]:
+                    if time.time() - start_time > MAX_TIME_SECONDS - 5:
+                        break
+                    test_individual = refined_individual.copy()
+                    new_val = original_value + direction * step
+                    test_individual[i] = max(0, new_val)
+
+                    new_c2 = calculate_c2(test_individual)
+                    if new_c2 > old_c2:
+                        refined_individual = test_individual
+                        old_c2 = new_c2
+                        improved = True
+
+        if not improved:
+            break
+
+    return refined_individual
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value."""
+    try:
+        # Use advanced evolutionary optimization
+        result = adaptive_evolutionary_search()
+        return result
+    except Exception:
+        # Fallback to simple approach
+        n_steps = random.randint(N_MIN, N_MAX)
+        return [random.uniform(0, 1) for _ in range(n_steps)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

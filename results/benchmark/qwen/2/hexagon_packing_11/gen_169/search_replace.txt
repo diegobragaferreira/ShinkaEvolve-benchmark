@@ -1,0 +1,110 @@
+<NAME>
+adaptive_margin_calculation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed adaptive margin calculation in the radius estimation that may not be optimal for all configurations. By making the margin calculation more sophisticated and context-aware, we can improve the accuracy of outer hexagon size estimation, which directly impacts the objective function value. This change modifies the `calculate_tight_outer_radius` method in `RadiusCalculator` to use a more refined approach that considers both the distribution of hexagons and their geometric relationships.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def calculate_tight_outer_radius(inner_params, n_inner=11):
+        """Calculate tightest possible outer hexagon radius using actual vertex positions."""
+        # Get all hexagon vertices and find bounding circle
+        all_vertices = []
+
+        for i in range(n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = HexagonGeometry.create_unit_hexagon((x, y), angle)
+            # Get all vertices of this hexagon
+            for point in HexagonGeometry.get_all_vertices(hexagon):
+                all_vertices.append(point)
+
+        if not all_vertices:
+            return 1.0
+
+        # Convert to numpy array for easier computation
+        vertices_array = np.array(all_vertices)
+
+        # Find centroid of all vertices
+        centroid = np.mean(vertices_array, axis=0)
+
+        # Calculate distances from centroid to all vertices
+        distances = np.sqrt(np.sum((vertices_array - centroid)**2, axis=1))
+
+        # Use adaptive margin based on the average distance and number of hexagons
+        avg_distance = np.mean(distances)
+        max_distance = np.max(distances)
+
+        # Adaptive margin: smaller for tightly packed arrangements, larger for scattered ones
+        # Scale margin based on how much the distribution deviates from uniform
+        deviation_ratio = max_distance / (avg_distance + 1e-10)  # Avoid division by zero
+        adaptive_margin = 1e-6 + (0.01 * deviation_ratio)  # Dynamic margin
+
+        # Outer radius is the maximum distance plus adaptive margin for numerical stability
+        outer_radius = max_distance + adaptive_margin
+
+        return outer_radius
+=======
+    @staticmethod
+    def calculate_tight_outer_radius(inner_params, n_inner=11):
+        """Calculate tightest possible outer hexagon radius using actual vertex positions."""
+        # Get all hexagon vertices and find bounding circle
+        all_vertices = []
+
+        for i in range(n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = HexagonGeometry.create_unit_hexagon((x, y), angle)
+            # Get all vertices of this hexagon
+            for point in HexagonGeometry.get_all_vertices(hexagon):
+                all_vertices.append(point)
+
+        if not all_vertices:
+            return 1.0
+
+        # Convert to numpy array for easier computation
+        vertices_array = np.array(all_vertices)
+
+        # Find centroid of all vertices
+        centroid = np.mean(vertices_array, axis=0)
+
+        # Calculate distances from centroid to all vertices
+        distances = np.sqrt(np.sum((vertices_array - centroid)**2, axis=1))
+
+        # Use adaptive margin calculation that considers both geometric density and distribution
+        max_distance = np.max(distances)
+        avg_distance = np.mean(distances)
+
+        # Calculate geometric density factor - how packed the arrangement is
+        density_factor = avg_distance / (max_distance + 1e-10)
+
+        # Calculate distribution variance to understand spread
+        std_distance = np.std(distances)
+
+        # More sophisticated adaptive margin:
+        # - When hexagons are tightly packed (density_factor close to 1), use smaller margin
+        # - When hexagons are spread out (density_factor small), use larger margin
+        # - Consider standard deviation for irregular distributions
+        if density_factor > 0.8:  # Tightly packed
+            base_margin = 1e-6
+            spacing_adjustment = 0.005 * (1 - density_factor)  # Less margin for tight packing
+        elif density_factor < 0.5:  # Spread out
+            base_margin = 1e-5
+            spacing_adjustment = 0.01 * (0.5 - density_factor)  # More margin for scattered
+        else:  # Moderately packed
+            base_margin = 5e-6
+            spacing_adjustment = 0.001 * (1 - density_factor)  # Moderate margin
+
+        # Add variance-based adjustment
+        variance_adjustment = 0.002 * (std_distance / (avg_distance + 1e-10))
+
+        # Final adaptive margin
+        adaptive_margin = base_margin + spacing_adjustment + variance_adjustment
+
+        # Outer radius is the maximum distance plus adaptive margin for numerical stability
+        outer_radius = max_distance + adaptive_margin
+
+        return outer_radius
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,231 @@
+<NAME>
+replace_fast_overlap_check_with_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The main improvement I'm proposing is to replace the inefficient overlap checking mechanism with a proper spatial indexing approach using cKDTree. The current implementation does duplicate overlap checking and doesn't efficiently limit the pairs that need to be checked.
+
+I'll implement a cKDTree-based spatial acceleration system that:
+1. Uses spatial indexing to quickly identify candidate pairs that might overlap
+2. Only performs expensive Shapely intersection tests on potentially overlapping pairs
+3. Eliminates duplicate pairwise checks
+4. Reduces overlap detection from O(n²) to O(n log n) average case
+
+This directly addresses the performance bottleneck mentioned in the recommendations and should dramatically improve the overlap detection performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit, prange
+from joblib import Parallel, delayed
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit, prange
+from joblib import Parallel, delayed
+from scipy.spatial import cKDTree
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration_parallel(params):
+    """Parallelized evaluation using joblib for overlap/containment checks."""
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Check containment and overlaps
+    valid = True
+    total_penalty = 0.0
+
+    n = len(inner_hex_data)
+    inner_polys = []
+
+    # Compute all inner hexagon polygons
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        inner_poly = compute_hexagon_polygon(x, y, angle)
+        inner_polys.append(inner_poly)
+
+        # Check containment
+        if not outer_hex_poly.contains(inner_poly):
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_poly)
+                if hasattr(diff, 'area'):
+                    total_penalty += diff.area
+            except:
+                total_penalty += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penalty * 10000 if total_penalty > 0 else 1000000
+        return penalty
+
+    # Check overlaps using spatial indexing for efficiency
+    overlap_area_total = 0.0
+
+    # Create spatial index using centroids for fast proximity checking
+    centroids = []
+    for i in range(n):
+        x, y, _ = inner_hex_data[i]
+        centroids.append([x, y])
+
+    # Use scipy's cKDTree for nearest neighbor search
+    tree = cKDTree(centroids)
+
+    # Find neighbors within a reasonable distance (2 units apart for unit hexagons)
+    # This avoids checking all pairs while being conservative about false positives
+    pairs_to_check = tree.query_pairs(r=3.0, output_type='ndarray')
+
+    # Check overlaps only for pairs that are close enough
+    overlap_pairs = []
+    for i, j in pairs_to_check:
+        if i < j:  # Avoid duplicates
+            overlap_pairs.append((inner_polys[i], inner_polys[j]))
+
+    # Also check pairs that are likely to be close based on distance thresholds
+    for i in range(n):
+        for j in range(i+1, n):
+            # Skip pairs that are definitely too far apart
+            dist = np.sqrt((inner_hex_data[i][0] - inner_hex_data[j][0])**2 +
+                          (inner_hex_data[i][1] - inner_hex_data[j][1])**2)
+            if dist < 5.0:  # Only check pairs that could reasonably overlap
+                overlap_pairs.append((inner_polys[i], inner_polys[j]))
+
+    # Remove duplicates if any
+    unique_pairs = list(set(tuple(pair) for pair in overlap_pairs))
+
+    # Check overlaps in parallel
+    def check_single_overlap(pair):
+        poly1, poly2 = pair
+        if poly1.intersects(poly2) and not poly1.touches(poly2):
+            try:
+                overlap = poly1.intersection(poly2)
+                return overlap.area
+            except:
+                return 1000  # Large penalty
+        return 0.0
+
+    overlap_results = Parallel(n_jobs=-1)(
+        delayed(check_single_overlap)(pair) for pair in unique_pairs
+    )
+
+    # Sum all overlap areas
+    for area in overlap_results:
+        if area > 0:
+            overlap_area_total += area
+
+    if overlap_area_total > 0:
+        total_penalty += overlap_area_total * 10000  # Apply penalty for overlaps
+        valid = False
+
+    if not valid:
+        return total_penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+=======
+def evaluate_configuration_parallel(params):
+    """Parallelized evaluation using joblib for overlap/containment checks."""
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Check containment and overlaps
+    valid = True
+    total_penalty = 0.0
+
+    n = len(inner_hex_data)
+    inner_polys = []
+
+    # Compute all inner hexagon polygons
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        inner_poly = compute_hexagon_polygon(x, y, angle)
+        inner_polys.append(inner_poly)
+
+        # Check containment
+        if not outer_hex_poly.contains(inner_poly):
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_poly)
+                if hasattr(diff, 'area'):
+                    total_penalty += diff.area
+            except:
+                total_penalty += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penalty * 10000 if total_penalty > 0 else 1000000
+        return penalty
+
+    # Efficient spatial overlap checking using cKDTree
+    overlap_area_total = 0.0
+
+    # Build cKDTree from hexagon centers for efficient neighborhood queries
+    centers = np.array([[inner_hex_data[i][0], inner_hex_data[i][1]] for i in range(n)])
+    tree = cKDTree(centers)
+
+    # Query pairs within a reasonable distance (approximately 2 * hexagon diameter)
+    # This is more efficient than checking all pairs and avoids false positives
+    pairs = tree.query_pairs(r=2.5, output_type='ndarray')
+
+    # Filter pairs to avoid checking same pair twice and only check for actual overlaps
+    overlap_pairs = []
+    for i, j in pairs:
+        if i < j:  # Ensure we only check each pair once
+            overlap_pairs.append((i, j))
+
+    # Check overlaps for candidate pairs in parallel
+    def check_single_overlap(indices):
+        i, j = indices
+        poly1 = inner_polys[i]
+        poly2 = inner_polys[j]
+        if poly1.intersects(poly2) and not poly1.touches(poly2):
+            try:
+                overlap = poly1.intersection(poly2)
+                return overlap.area
+            except:
+                return 1000  # Large penalty for calculation errors
+        return 0.0
+
+    # Process pairs in parallel - this is much more efficient than the previous approach
+    overlap_results = Parallel(n_jobs=-1)(
+        delayed(check_single_overlap)(pair) for pair in overlap_pairs
+    )
+
+    # Sum all overlap areas
+    for area in overlap_results:
+        if area > 0:
+            overlap_area_total += area
+
+    if overlap_area_total > 0:
+        total_penalty += overlap_area_total * 10000  # Apply penalty for overlaps
+        valid = False
+
+    if not valid:
+        return total_penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,120 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Phase 1: Initialize points using hexagonal grid pattern for better starting configuration
+    n_points = 16
+    points = np.zeros((n_points, 2))
+    
+    # Create hexagonal grid pattern (4x4 grid)
+    rows = 4
+    cols = 4
+    spacing = 0.25
+    
+    row_offset = 0.0
+    idx = 0
+    for row in range(rows):
+        for col in range(cols):
+            if idx < n_points:
+                x = col * spacing + (row % 2) * spacing * 0.5
+                y = row * spacing * np.sqrt(3) / 2
+                points[idx] = [x, y]
+                idx += 1
+    
+    # Adjust points to fit within [0,1]x[0,1] and add some randomness
+    points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
+    points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
+    
+    # Add small random perturbations to escape local optima
+    points += np.random.normal(0, 0.01, points.shape)
+    
+    # Ensure points are within bounds
+    points = np.clip(points, 0, 1)
+    
+    # Phase 2: Hybrid Optimization 
+    def fitness_function(points_flat):
+        """Calculate fitness as min/max distance ratio"""
+        # Reshape flat array back to points
+        points = points_flat.reshape(-1, 2)
+        
+        # Ensure points are within bounds
+        points = np.clip(points, 0, 1)
+        
+        # Calculate distance matrix
+        try:
+            dist_matrix = squareform(pdist(points))
+            
+            # Set diagonal to large value to avoid zero distances
+            np.fill_diagonal(dist_matrix, np.inf)
+            
+            # Calculate min and max distances
+            min_dist = np.min(dist_matrix)
+            max_dist = np.max(dist_matrix)
+            
+            # Avoid division by zero
+            if max_dist == 0:
+                return 0
+            
+            # Return ratio (we want to maximize this)
+            ratio = min_dist / max_dist
+            
+            return ratio
+            
+        except Exception:
+            return 0
+    
+    # Method 1: Try differential evolution for global search
+    try:
+        # Flatten bounds for scipy
+        flat_bounds = [(0, 1) for _ in range(n_points * 2)]
+        
+        # Use differential evolution for global search with improved parameters
+        de_result = differential_evolution(
+            fitness_function,
+            flat_bounds,
+            maxiter=500,
+            popsize=20,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+        
+        # Local refinement with L-BFGS-B
+        bounds_list = [(0, 1) for _ in range(n_points * 2)]
+        lbfgs_result = minimize(
+            fitness_function,
+            de_result.x,
+            method='L-BFGS-B',
+            bounds=bounds_list,
+            options={'maxiter': 100, 'ftol': 1e-8}
+        )
+        
+        # Reshape result
+        points = lbfgs_result.x.reshape(-1, 2)
+        
+    except Exception as e:
+        # Fallback to current points if optimization fails
+        print(f"Optimization failed: {e}")
+    
+    # Ensure points are within bounds
+    points = np.clip(points, 0, 1)
+    
+    return points
+
+# EVOLVE-BLOCK-END

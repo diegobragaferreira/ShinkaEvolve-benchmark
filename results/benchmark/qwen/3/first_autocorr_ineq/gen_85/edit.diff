@@ -1,0 +1,378 @@
+--- a/original.py
++++ b/original.py
+@@ -1,134 +1,311 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy import optimize
+ from scipy.signal import fftconvolve
+ import math
+-
+-def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+-    """Returns the direction to move into the sequence with adaptive parameters."""
+-    n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    
+-    # Prevent division by zero
+-    if sum_sequence < 1e-10:
+-        return None
+-    
+-    # Normalize with adaptive factor
+-    adaptive_factor = np.sqrt(2 * n)
+-    normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
+-    
+-    # Use FFT for large sequences, direct convolution for small ones
++import random
++from deap import base, creator, tools, algorithms
++import warnings
++warnings.filterwarnings('ignore')
++
++def convolve_fft(seq):
++    """Compute convolution using FFT for better performance."""
++    n = len(seq)
++    # Use scipy's fftconvolve for better numerical stability
++    conv = fftconvolve(seq, seq, mode='full')
++    return conv[:2*n - 1]
++
++def compute_c1_value(seq):
++    """Compute the C1 constant from the sequence."""
++    n = len(seq)
++    if n == 0:
++        return float('inf')
++
++    # Use FFT for efficiency when possible
+     if n > 100:
+-        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+-    else:
+-        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+-        
+-    rhs = np.max(conv_result)
+-    
+-    # Try solving LP with adaptive constraints
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+-    
+-    if g_fun is None:
+-        # Fallback: try with modified RHS
+-        rhs_fallback = rhs * 1.1
+-        g_fun = solve_convolution_lp(normalized_sequence, rhs_fallback, n)
+-        
+-    if g_fun is None:
+-        # Final fallback: simple gradient ascent
+-        t = 0.01
+-        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+-        return new_sequence
+-
+-    # Normalize g_fun
+-    sum_g_fun = np.sum(g_fun)
+-    if sum_g_fun < 1e-10:
+-        return None
+-        
+-    normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
+-    
+-    # Adaptive step-size
+-    t = min(0.05, 0.01 + 0.005 * np.log(n + 1))
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
++        conv = convolve_fft(seq)
++    else:
++        conv = np.convolve(seq, seq, mode='full')
++
++    max_conv = np.max(conv)
++    sum_seq = np.sum(seq)
++
++    if sum_seq < 1e-10:
++        return float('inf')
++
++    c1 = 2 * n * max_conv / (sum_seq ** 2)
++    return c1
++
++def evaluate_individual(individual):
++    """Evaluate the fitness of an individual (sequence)."""
++    # Clip values to [0, 1000]
++    seq = np.clip(individual, 0, 1000)
++
++    # Compute C1
++    c1 = compute_c1_value(seq)
++
++    # Return negative inverse C1 as fitness (maximize inverse C1)
++    if c1 < 1e-10:
++        return (float('inf'),)  # Penalize invalid solutions
++
++    inv_c1 = 1.0 / c1
++    return (inv_c1,)
++
++def create_structured_individual(n):
++    """Create a structured individual to boost exploration."""
++    individual = []
++    # Mix of geometric decay and random elements
++    decay_factor = 0.8
++    for i in range(n):
++        if i % 4 == 0:
++            # Sparse structure with decay
++            individual.append(1000 * (decay_factor ** (i // 4)))
++        else:
++            # Random elements
++            individual.append(random.uniform(0, 1000))
++    return individual
++
++def create_random_individual(n):
++    """Create a purely random individual."""
++    return [random.uniform(0, 1000) for _ in range(n)]
++
++def create_individual(n):
++    """Create a new individual with given length."""
++    # Hybrid approach: 70% structured, 30% random
++    if random.random() < 0.7:
++        return create_structured_individual(n)
++    else:
++        return create_random_individual(n)
++
++def mutate_individual(individual, indpb, mut_strength, generation, max_generations):
++    """Mutate an individual with adaptive parameters."""
++    # Adaptive mutation rate that decreases with generations
++    adaptive_indpb = indpb * (1.0 - generation / max_generations)
++
++    for i in range(len(individual)):
++        if random.random() < adaptive_indpb:
++            # Gaussian mutation with adaptive strength
++            individual[i] += random.gauss(0, mut_strength)
++            individual[i] = max(0, individual[i])  # Ensure non-negativity
++    return individual,
++
++def crossover_individuals(ind1, ind2, cxpb):
++    """Crossover two individuals."""
++    if random.random() < cxpb:
++        # Uniform crossover
++        for i in range(len(ind1)):
++            if random.random() < 0.5:
++                ind1[i], ind2[i] = ind2[i], ind1[i]
++    return ind1, ind2
++
++def adaptively_get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
++    """Optimize the sequence using adaptive evolutionary algorithm."""
++    try:
++        # Determine sequence length
++        n = len(sequence)
++        if n < 10:
++            n = 100  # Default small size
++        elif n > 1000:
++            n = 1000  # Cap maximum size
++
++        # Set up evolutionary algorithm parameters
++        pop_size = max(30, min(150, n // 2))
++        gen_limit = max(15, min(60, n // 8))
++
++        # Setup DEAP
++        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++        creator.create("Individual", list, fitness=creator.FitnessMax)
++
++        toolbox = base.Toolbox()
++        toolbox.register("individual", create_individual, n)
++        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++        toolbox.register("evaluate", evaluate_individual)
++        toolbox.register("mate", crossover_individuals)
++        toolbox.register("mutate", mutate_individual, indpb=0.1, mut_strength=50, generation=0, max_generations=gen_limit)
++        toolbox.register("select", tools.selTournament, tournsize=3)
++
++        # Create initial population
++        population = toolbox.population(n=pop_size)
++
++        # Evaluate initial population
++        fitnesses = list(map(toolbox.evaluate, population))
++        for ind, fit in zip(population, fitnesses):
++            ind.fitness.values = fit
++
++        # Evolution loop with diversity preservation
++        for generation in range(gen_limit):
++            # Periodic reshuffling to preserve diversity
++            if generation % 10 == 0 and generation > 0:
++                random.shuffle(population)
++
++            # Select the next generation individuals
++            offspring = toolbox.select(population, len(population))
++            offspring = list(map(toolbox.clone, offspring))
++
++            # Apply crossover and mutation
++            for child1, child2 in zip(offspring[::2], offspring[1::2]):
++                if random.random() < 0.5:
++                    child1, child2 = toolbox.mate(child1, child2)
++                toolbox.mutate(child1, generation, gen_limit)
++                toolbox.mutate(child2, generation, gen_limit)
++                del child1.fitness.values
++                del child2.fitness.values
++
++            # Evaluate new individuals
++            new_individuals = [ind for ind in offspring if not ind.fitness.valid]
++            fitnesses = list(map(toolbox.evaluate, new_individuals))
++            for ind, fit in zip(new_individuals, fitnesses):
++                ind.fitness.values = fit
++
++            # Replace old population
++            population[:] = offspring
++
++        # Get best individual
++        best_ind = tools.selBest(population, 1)[0]
++        return best_ind
++
++    except Exception as e:
++        print(f"Error in evolutionary optimization: {e}")
++        # Return mutated version of input if evolution fails
++        return [(x + random.uniform(-100, 100)) for x in sequence]
+ 
+ def solve_convolution_lp(f_sequence, rhs, n):
+     """Solves the convolution LP for a given sequence and RHS with adaptive constraints."""
+     c = -np.ones(n)
+     a_ub = []
+     b_ub = []
+-    
++
+     # Generate convolution constraints with adaptive handling
+     if n > 100:
+-        # For large sequences, use FFT to get convolution constraints efficiently
++        # Use FFT for large sequences to get convolution constraints efficiently
+         f_conv = fftconvolve(f_sequence, f_sequence, mode='full')
+         f_conv = f_conv[:2*n-1]
+     else:
+         f_conv = np.convolve(f_sequence, f_sequence)
+-    
++
+     # Create constraint matrix
+     for k in range(2 * n - 1):
+         row = np.zeros(n)
+         for i in range(n):
+             j = k - i
+             if 0 <= j < n:
+                 row[j] = f_sequence[i]
+         a_ub.append(row)
+         b_ub.append(rhs)
+-    
++
+     # Non-negativity constraints
+     a_ub_nonneg = -np.eye(n)
+     b_ub_nonneg = np.zeros(n)
+-    
++
+     a_ub = np.vstack([a_ub, a_ub_nonneg])
+     b_ub = np.hstack([b_ub, b_ub_nonneg])
+ 
+     # Adaptive tolerance for optimization
+     try:
+-        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
++        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', options={'presolve': True})
+     except:
+         # Fallback to 'simplex' method if 'highs' fails
+         try:
+             result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='simplex')
+         except:
+             return None
+ 
+     if result.success:
+         g_sequence = result.x
+         # Ensure non-negativity and reasonable values
+         g_sequence = np.maximum(g_sequence, 0)
+         if np.sum(g_sequence) < 1e-10:
+             return None
+         return g_sequence
+     else:
++        # Try with relaxed constraints if original fails
++        try:
++            b_ub_relaxed = [val * 1.1 for val in b_ub[:-n]] + b_ub[-n:].tolist()  # Relax main constraints
++            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub_relaxed, method='highs')
++            if result.success:
++                g_sequence = result.x
++                g_sequence = np.maximum(g_sequence, 0)
++                if np.sum(g_sequence) < 1e-10:
++                    return None
++                return g_sequence
++        except:
++            pass
+         return None
++
++def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
++    """Returns the direction to move into the sequence with adaptive parameters."""
++    n = len(sequence)
++    sum_sequence = np.sum(sequence)
++    
++    # Prevent division by zero
++    if sum_sequence < 1e-10:
++        return None
++    
++    # Normalize with adaptive factor
++    adaptive_factor = np.sqrt(2 * n)
++    normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
++    
++    # Use FFT for large sequences, direct convolution for small ones
++    if n > 100:
++        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
++    else:
++        conv_result = np.convolve(normalized_sequence, normalized_sequence)
++        
++    rhs = np.max(conv_result)
++    
++    # Try solving LP with adaptive constraints
++    g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
++    
++    if g_fun is None:
++        # Fallback: try with modified RHS
++        rhs_fallback = rhs * 1.1
++        g_fun = solve_convolution_lp(normalized_sequence, rhs_fallback, n)
++        
++    if g_fun is None:
++        # Final fallback: use evolutionary algorithm
++        evolved_sequence = adaptively_get_good_direction_to_move_into(sequence)
++        return evolved_sequence
++
++    # Normalize g_fun
++    sum_g_fun = np.sum(g_fun)
++    if sum_g_fun < 1e-10:
++        return None
++        
++    normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
++    
++    # Adaptive step-size
++    t = min(0.05, 0.01 + 0.005 * np.log(n + 1))
++    new_sequence = [
++        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
++    ]
++    return new_sequence
+ 
+ def search_for_best_sequence() -> list[float]:
+     """Function to search for the best coefficient sequence with adaptive search."""
+-    # Adaptive initialization with log scaling
++    # Adaptive initialization with log scaling and diversity
+     n_init = max(10, int(math.log(1000) * 50))
+-    best_sequence = np.random.rand(n_init).tolist()
+-    
+-    # Add some diversity with small positive values
+-    for i in range(len(best_sequence)):
+-        if best_sequence[i] < 0.01:
+-            best_sequence[i] = 0.01
+-    
+-    # Evolve for a few iterations with adaptive strategy
+-    for _ in range(20):  # Reduced iterations to save time
++    # Create diverse initial sequence
++    best_sequence = []
++    for i in range(n_init):
++        if i % 3 == 0:
++            best_sequence.append(random.uniform(100, 1000))
++        else:
++            best_sequence.append(random.uniform(0, 1000))
++    
++    # Evolve for several iterations with adaptive strategy
++    for _ in range(30):  # Increased iterations to improve convergence
+         h_function = get_good_direction_to_move_into(best_sequence)
+         if h_function is not None:
+             best_sequence = h_function
+         else:
+             # If evolution fails, try to recover with a simple mutation
+             index = np.random.randint(len(best_sequence))
+             best_sequence[index] = max(0.01, best_sequence[index] * (1 + np.random.normal(0, 0.1)))
+             
+     return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

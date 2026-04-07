@@ -1,0 +1,852 @@
+--- a/original.py
++++ b/original.py
+@@ -1,591 +1,270 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy.optimize import differential_evolution, minimize
+-from numba import njit
++from scipy.optimize import minimize
++from scipy.fftpack import fft, ifft
++from scipy.linalg import svd
++from typing import List
+ import time
+ import warnings
+-from concurrent.futures import ProcessPoolExecutor
+-import random
+-from typing import List, Tuple, Optional
+-import multiprocessing as mp
+-from functools import partial
+-import jax
+-import jax.numpy as jnp
+-from jax import grad, jit as jax_jit
+-
+-@njit
+-def compute_autoconvolution_numba(f):
+-    """Compute autoconvolution g = f * f using numba JIT"""
+-    n = len(f)
+-    # Autoconvolution using discrete convolution
+-    g = np.zeros(2*n - 1)
+-    for i in range(n):
+-        for j in range(n):
+-            g[i + j] += f[i] * f[j]
+-
+-    # Trim to center portion (length n-1)
+-    offset = (n - 1) // 2
+-    g_trimmed = g[offset:(2*n-1)-offset]
+-    return g_trimmed
+-
+-@njit
+-def compute_c2_numba(f):
+-    """Compute C2 value for given step function f using numba JIT"""
+-    if len(f) < 2:
++warnings.filterwarnings('ignore')
++
++def construct_function() -> List[float]:
++    """
++    Construct step-function with high C2 value using multiscale convex optimization approach.
++    
++    This approach fundamentally differs from evolutionary methods by:
++    1. Using spectral analysis to identify important basis functions
++    2. Formulating the problem as convex optimization over sparse coefficients  
++    3. Leveraging FFT for fast convolution computation
++    4. Building multi-scale representations to avoid local optima
++    """
++    
++    # Set timing constraints
++    start_time = time.time()
++    max_time = 85.0
++    
++    # Determine problem size using a strategic approach
++    # Use smaller size for initial exploration, larger for exploitation
++    n_steps = np.random.randint(500, 3000)
++    
++    # Generate a rich dictionary of basis functions using multiscale approach
++    # Create radial basis functions with multiple scales and positions
++    basis_functions = []
++    
++    # Generate multiple scale levels for better coverage
++    scale_params = np.logspace(-2.5, -0.5, 25)  # Different scales from ~0.003 to ~0.3
++    position_params = np.linspace(0.05, 0.95, 30)  # Different positions
++    
++    # Add multiple types of basis functions to enrich the dictionary
++    for scale in scale_params:
++        for pos in position_params:
++            # Create Gaussian-like basis functions with varying width and position
++            x = np.linspace(0, 1, n_steps)
++            basis = np.exp(-((x - pos) / scale) ** 2) * 0.7 + 0.3
++            basis_functions.append(basis)
++    
++    # Add some additional structured basis functions for complexity
++    for i in range(15):
++        # Sine wave basis functions with varying frequencies
++        freq = 2 + np.random.randint(1, 5) * 2
++        x = np.linspace(0, 1, n_steps)
++        basis = np.sin(freq * np.pi * x) * 0.5 + 0.5
++        basis_functions.append(basis)
++    
++    # Use SVD to compress the basis functions space efficiently
++    # This identifies the most important combinations that can generate high C2 functions
++    basis_matrix = np.array(basis_functions).T
++    
++    try:
++        # If matrix is too large, subsample to manage memory
++        if basis_matrix.shape[0] > 2000:
++            indices = np.random.choice(basis_matrix.shape[0], 2000, replace=False)
++            basis_matrix = basis_matrix[indices]
++        
++        # Perform SVD to find principal components - more efficient than full SVD
++        U, s, Vt = svd(basis_matrix, full_matrices=False)
++        
++        # Keep significant components only (98% of variance)
++        cumulative = np.cumsum(s)
++        total_variance = cumulative[-1]
++        threshold = total_variance * 0.98
++        n_components = np.argmax(cumulative >= threshold) + 1
++        
++        # Limit to reasonable number of components to avoid overfitting
++        n_components = min(n_components, 50)
++        
++        # Use compressed representation
++        compressed_basis = U[:, :n_components]
++        compressed_weights = Vt[:n_components, :]
++        
++    except Exception:
++        # Fallback to simpler approach if SVD fails
++        n_components = min(30, len(basis_functions))
++        compressed_basis = basis_matrix.T[:, :n_components]
++        compressed_weights = np.eye(n_components)
++    
++    # Generate diverse candidate solutions by sampling from the compressed space
++    candidates = []
++    num_candidates = min(15, n_components)
++    
++    for _ in range(num_candidates):
++        # Sample random weights for the compressed basis
++        weights = np.random.randn(n_components) * 1.0  # Use normal distribution
++        # Apply inverse transform to get actual function
++        candidate_func = np.dot(compressed_basis, weights)
++        # Ensure non-negative values
++        candidate_func = np.clip(candidate_func, 0, None)
++        # Normalize to control magnitude (but preserve distribution shape)
++        total = np.sum(candidate_func)
++        if total > 0:
++            candidate_func = candidate_func / total * n_steps
++        candidates.append(candidate_func)
++    
++    # Select the best candidate to optimize further using convex approach
++    best_candidate = None
++    best_c2 = -1.0
++    
++    for candidate in candidates:
++        if time.time() - start_time > max_time - 2:
++            break
++        try:
++            # Fast compute C2 using FFT-based approach
++            c2 = compute_c2_fast(candidate)
++            if c2 > best_c2:
++                best_c2 = c2
++                best_candidate = candidate.copy()
++        except Exception:
++            continue
++    
++    # If no good candidates, create a reasonable default pattern
++    if best_candidate is None:
++        # Create a good baseline pattern using multi-peaked structure
++        best_candidate = np.zeros(n_steps)
++        # Place multiple peaks strategically
++        peak_positions = [n_steps // 4, n_steps // 2, 3*n_steps // 4]
++        peak_heights = [1.0, 1.5, 1.0]
++        for pos, height in zip(peak_positions, peak_heights):
++            if pos < n_steps:
++                # Gaussian around peak location
++                x = np.arange(n_steps)
++                sigma = n_steps // 20
++                best_candidate += height * np.exp(-((x - pos) / sigma) ** 2)
++        
++        # Add some random variation
++        noise = np.random.normal(0, 0.02, n_steps)
++        best_candidate += noise
++        best_candidate = np.clip(best_candidate, 0, None)
++        
++        total = np.sum(best_candidate)
++        if total > 0:
++            best_candidate = best_candidate / total * n_steps
++    
++    # Refine using convex optimization approach
++    if time.time() - start_time < max_time - 3:
++        try:
++            # Define objective function that we want to maximize
++            def objective(weights):
++                # Reconstruct function from weights
++                func = np.dot(compressed_basis, weights)
++                func = np.clip(func, 0, None)
++                total = np.sum(func)
++                if total > 0:
++                    func = func / total * n_steps
++                
++                # Compute C2 (minimize negative)
++                return -compute_c2_fast(func)
++            
++            # Bounds for weights - keep them reasonable to avoid extreme values
++            bounds = [(-5.0, 5.0) for _ in range(n_components)]
++            
++            # Initial guess from best candidate's projection
++            initial_weights = np.dot(compressed_weights, best_candidate)
++            
++            # Optimize using L-BFGS-B - efficient for large-scale problems
++            result = minimize(
++                objective,
++                initial_weights,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 150, 'ftol': 1e-8},
++                tol=1e-8
++            )
++            
++            # Reconstruct final function
++            if result.success:
++                final_func = np.dot(compressed_basis, result.x)
++                final_func = np.clip(final_func, 0, None)
++                total = np.sum(final_func)
++                if total > 0:
++                    final_func = final_func / total * n_steps
++                    
++                # Verify and compute final C2
++                final_c2 = compute_c2_fast(final_func)
++                if final_c2 > best_c2:
++                    best_candidate = final_func
++                else:
++                    # Even if not better, still use refined approach
++                    pass  # Keep the previous best
++                    
++        except Exception:
++            # If optimization fails, keep the best candidate
++            pass
++    
++    # Ensure we have valid output within time limits
++    if time.time() - start_time > max_time - 1:
++        # Truncate to manageable size if needed
++        best_candidate = best_candidate[:1500] if len(best_candidate) > 1500 else best_candidate
++    
++    # Convert to list of floats (ensure proper conversion to avoid any type issues)
++    return [float(x) for x in best_candidate]
++
++def compute_c2_fast(f_values: np.ndarray) -> float:
++    """
++    Fast computation of C2 using FFT-based convolution and optimized norm computation.
++    
++    This uses a more sophisticated approach to compute the norms to ensure numerical stability
++    and efficiency, especially for large arrays.
++    """
++    try:
++        # Ensure non-negative values with more careful clipping
++        f = np.clip(f_values, 0, None)
++        
++        if len(f) == 0:
++            return 0.0
++        
++        # Use FFT-based convolution for speed - more efficient than brute force
++        # Pad to appropriate size for FFT - use power of 2 for efficiency
++        n = len(f)
++        # Pad to next power of 2 for optimal FFT performance
++        padded_size = 2**int(np.ceil(np.log2(2*n - 1)))
++        
++        f_padded = np.pad(f, (0, padded_size - n), mode='constant')
++        
++        # FFT convolution: g = f * f using frequency domain multiplication
++        f_fft = fft(f_padded)
++        g_fft = f_fft * np.conj(f_fft)  # conjugate for autoconvolution
++        g = ifft(g_fft).real
++        
++        # Trim to the valid convolution range
++        # Autoconvolution result length is 2*n - 1
++        g_trimmed = g[:2*n - 1]
++        
++        # Center the convolution (this is what we actually want)
++        center_start = n - 1
++        g_center = g_trimmed[center_start:center_start + n]
++        
++        # Compute norms efficiently using numpy functions
++        g_abs = np.abs(g_center)
++        
++        # ||g||_2^2 using optimized computation
++        norm_2_squared = np.sum(g_abs**2)
++        
++        # ||g||_1 - normalize properly
++        norm_1 = np.sum(g_abs) / (len(g_abs) + 1) if len(g_abs) > 0 else 1e-12
++        
++        # ||g||_inf
++        norm_inf = np.max(g_abs) if len(g_abs) > 0 else 1e-12
++        
++        # Prevent division by zero with more robust checks
++        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++            # If too close to zero, return a small value instead of inf/NaN
++            return 0.0
++            
++        # Return C2 value
++        c2 = norm_2_squared / (norm_1 * norm_inf)
++        
++        # Ensure reasonable values (handle numerical artifacts)
++        if np.isnan(c2) or np.isinf(c2):
++            return 0.0
++            
++        return c2
++        
++    except Exception:
+         return 0.0
+-
+-    # Compute autoconvolution
+-    g = compute_autoconvolution_numba(f)
+-
+-    if len(g) == 0:
+-        return 0.0
+-
+-    # Compute norms
+-    norm_l2_sq = 0.0
+-    norm_l1 = 0.0
+-    norm_inf = 0.0
+-
+-    for i in range(len(g)):
+-        abs_g = abs(g[i])
+-        norm_l2_sq += abs_g * abs_g
+-        norm_l1 += abs_g
+-        if abs_g > norm_inf:
+-            norm_inf = abs_g
+-
+-    # Avoid division by zero
+-    if norm_l1 < 1e-12 or norm_inf < 1e-12:
+-        return 0.0
+-
+-    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+-    return c2
+-
+-def compute_c2_jax(f_vals):
+-    """JAX version for automatic differentiation"""
+-    # Convert to JAX array
+-    f = jnp.array(f_vals, dtype=jnp.float32)
+-
+-    # Compute autoconvolution using JAX operations
+-    g = jnp.convolve(f, f, mode='full')
+-    n = len(f)
+-    offset = (n - 1) // 2
+-    g = g[offset:-offset]
+-
+-    # Compute norms
+-    g_abs = jnp.abs(g)
+-    norm_l2_sq = jnp.sum(g_abs**2)
+-    norm_l1 = jnp.sum(g_abs)
+-    norm_inf = jnp.max(g_abs)
+-
+-    # Avoid division by zero
+-    eps = 1e-12
+-    norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+-    norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+-
+-    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+-    return c2
+-
+-@jax_jit
+-def compute_c2_jax_vectorized(f_vals):
+-    """Vectorized JAX version for computing C2"""
+-    return compute_c2_jax(f_vals)
+-
+-def compute_gradient_jax(f_vals):
+-    """Compute gradient of C2 with respect to f_vals using JAX"""
+-    try:
+-        f = jnp.array(f_vals, dtype=jnp.float32)
+-        grad_fn = grad(compute_c2_jax)
+-        grad_val = grad_fn(f)
+-        return np.array(grad_val)
+-    except Exception:
+-        return np.zeros_like(f_vals)
+-
+-class StepFunctionOptimizer:
+-    def __init__(self, max_time=90):
+-        self.max_time = max_time
+-        self.seed = 42
+-        self._set_random_seed()
+-
+-    def _set_random_seed(self):
+-        """Set random seeds for reproducibility"""
+-        np.random.seed(self.seed)
+-        random.seed(self.seed)
+-
+-    def _create_initial_patterns(self, n: int) -> List[List[float]]:
+-        """Create diverse initial patterns for population"""
+-        patterns = []
+-
+-        # Uniform pattern
+-        patterns.append([1.0] * n)
+-
+-        # Alternating pattern
+-        pattern = []
+-        segment_length = max(1, n // 8)
+-        for i in range(0, n, segment_length):
+-            if i // segment_length % 2 == 0:
+-                pattern.extend([1.0] * min(segment_length, n - i))
+-            else:
+-                pattern.extend([0.1] * min(segment_length, n - i))
+-        patterns.append(pattern)
+-
+-        # Gaussian weighted pattern
+-        pattern = []
+-        segment_length = max(1, n // 8)
+-        for i in range(0, n, segment_length):
+-            if i // segment_length % 2 == 0:
+-                pattern.extend([1.0] * min(segment_length, n - i))
+-            else:
+-                pattern.extend([0.1] * min(segment_length, n - i))
+-
+-        # Apply Gaussian smoothing
+-        if len(pattern) > 0:
+-            pattern_arr = np.array(pattern)
+-            pattern_arr = np.clip(pattern_arr, 0, 10.0)
+-            kernel_size = min(5, len(pattern_arr)//4)
+-            if kernel_size > 1:
+-                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+-                kernel = kernel / np.sum(kernel)
+-                pattern_arr = np.convolve(pattern_arr, kernel, mode='same')
+-            pattern = np.maximum(pattern_arr, 0).tolist()
+-        patterns.append(pattern)
+-
+-        # Mixed pattern
+-        half_n = n // 2
+-        pattern = [1.0] * half_n
+-        remaining = n - half_n
+-        if remaining > 0:
+-            alt_pattern = []
+-            segment_length = max(1, remaining // 8)
+-            for i in range(0, remaining, segment_length):
+-                if i // segment_length % 2 == 0:
+-                    alt_pattern.extend([1.0] * min(segment_length, remaining - i))
+-                else:
+-                    alt_pattern.extend([0.1] * min(segment_length, remaining - i))
+-            pattern.extend(alt_pattern)
+-
+-        # Apply Gaussian smoothing to mixed pattern
+-        if len(pattern) > 0:
+-            pattern_arr = np.array(pattern)
+-            pattern_arr = np.clip(pattern_arr, 0, 10.0)
+-            kernel_size = min(5, len(pattern_arr)//4)
+-            if kernel_size > 1:
+-                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+-                kernel = kernel / np.sum(kernel)
+-                pattern_arr = np.convolve(pattern_arr, kernel, mode='same')
+-            pattern = np.maximum(pattern_arr, 0).tolist()
+-        patterns.append(pattern)
+-
+-        # Advanced pattern
+-        pattern = []
+-        segment_length = max(1, n // 12)
+-        heights = [1.0, 0.7, 0.4, 0.2]
+-        for i in range(0, n, segment_length):
+-            height_idx = (i // segment_length) % len(heights)
+-            height = heights[height_idx]
+-            pattern.extend([height] * min(segment_length, n - i))
+-
+-        # Apply Gaussian smoothing
+-        if len(pattern) > 0:
+-            pattern_arr = np.array(pattern)
+-            pattern_arr = np.clip(pattern_arr, 0, 10.0)
+-            kernel_size = min(7, max(3, len(pattern_arr) // 10))
+-            if kernel_size > 1:
+-                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/4)**2))
+-                kernel = kernel / np.sum(kernel)
+-                pattern_arr = np.convolve(pattern_arr, kernel, mode='same')
+-            pattern = np.maximum(pattern_arr, 0).tolist()
+-        patterns.append(pattern)
+-
+-        return patterns
+-
+-    def _evaluate_population(self, population: List[List[float]]) -> List[Tuple[float, List[float]]]:
+-        """Evaluate all individuals in population efficiently"""
+-        results = []
+-        for individual in population:
+-            try:
+-                if len(individual) < 2:
+-                    results.append((0.0, individual))
+-                else:
+-                    # Convert to numpy array and ensure non-negativity
+-                    f_array = np.array(individual)
+-                    f_array = np.maximum(f_array, 0)
+-
+-                    # Compute C2
+-                    c2_value = compute_c2_numba(f_array)
+-                    results.append((c2_value, individual))
+-            except Exception as e:
+-                warnings.warn(f"Evaluation failed: {str(e)}")
+-                results.append((0.0, individual))
+-        return results
+-
+-    def _adaptive_parameters(self, n: int) -> Tuple[int, int]:
+-        """Dynamically determine optimization parameters based on problem size"""
+-        # Population size scales with problem size but with bounds
+-        popsize = min(max(10, n // 20), 30)
+-
+-        # Iterations also scale but with bounds
+-        maxiter = min(max(20, n // 15), 60)
+-
+-        return popsize, maxiter
+-
+-    def _single_optimization_run(self, n: int, seed_offset: int,
+-                               initial_population: List[List[float]] = None) -> Tuple[Optional[float], Optional[List[float]]]:
+-        """Perform a single optimization run with given parameters"""
+-        try:
+-            # Set seed for reproducibility
+-            np.random.seed(self.seed + seed_offset)
+-
+-            # Get adaptive parameters
+-            popsize, maxiter = self._adaptive_parameters(n)
+-
+-            # Generate initial population if not provided
+-            if initial_population is None:
+-                initial_patterns = self._create_initial_patterns(n)
+-                initial_population = []
+-                for i, pattern in enumerate(initial_patterns):
+-                    # Add noise to break symmetry
+-                    noise = np.random.normal(0, 0.05, len(pattern))
+-                    individual = np.maximum(np.array(pattern) + noise, 0).tolist()
+-                    initial_population.append(individual)
+-
+-            # Define bounds for each parameter (step height)
+-            bounds = [(0, 10) for _ in range(n)]
+-
+-            # Helper function for differential evolution
+-            def objective_function(x):
+-                # x contains the step heights
+-                # Need to ensure non-negativity
+-                f = np.maximum(x, 0)
+-                c2 = compute_c2_numba(f)
+-                return -c2  # Negative because we want to maximize
+-
+-            # Run differential evolution
+-            de_result = differential_evolution(
+-                objective_function,
+-                bounds,
+-                maxiter=maxiter,
+-                popsize=popsize,
+-                seed=self.seed + seed_offset,
+-                strategy='best1bin',
+-                init=initial_population,
+-                disp=False
+-            )
+-
+-            if de_result.success:
+-                f_opt = np.maximum(de_result.x, 0)
+-                c2_value = -objective_function(f_opt)
+-
+-                # If we have a good solution, also try local refinement
+-                if c2_value > 0.1:
+-                    try:
+-                        # First use L-BFGS for local refinement
+-                        lbfgs_result = minimize(
+-                            objective_function,
+-                            f_opt,
+-                            method='L-BFGS-B',
+-                            bounds=[(0, 10) for _ in range(n)],
+-                            options={'maxiter': min(50, max(20, n // 10)), 'disp': False}
+-                        )
+-
+-                        if lbfgs_result.success:
+-                            f_refined = np.maximum(lbfgs_result.x, 0)
+-                            c2_refined = -objective_function(f_refined)
+-
+-                            if c2_refined > c2_value:
+-                                c2_value = c2_refined
+-                                f_opt = f_refined.tolist()
+-
+-                        # Then try gradient ascent refinement using JAX gradients
+-                        try:
+-                            # Use gradient ascent with JAX gradients
+-                            f_jax_refined = np.array(f_opt, dtype=np.float32)
+-                            max_grad_iter = min(30, max(10, n // 50))
+-                            step_size = 0.01
+-
+-                            for _ in range(max_grad_iter):
+-                                grad_val = compute_gradient_jax(f_jax_refined)
+-                                f_new = f_jax_refined + step_size * grad_val
+-                                f_new = np.maximum(f_new, 0)
+-
+-                                # Check improvement
+-                                old_c2 = compute_c2_numba(f_jax_refined)
+-                                new_c2 = compute_c2_numba(f_new)
+-
+-                                if new_c2 > old_c2:
+-                                    f_jax_refined = f_new
+-                                else:
+-                                    step_size *= 0.5
+-                                    if step_size < 1e-6:
+-                                        break
+-
+-                            # Final evaluation
+-                            final_c2 = compute_c2_numba(f_jax_refined)
+-                            if final_c2 > c2_value:
+-                                c2_value = final_c2
+-                                f_opt = f_jax_refined.tolist()
+-
+-                        except Exception:
+-                            pass  # Continue with previous result if gradient refinement fails
+-
+-                    except Exception:
+-                        pass  # Continue with original result if refinement fails
+-
+-                return c2_value, f_opt.tolist()
+-
+-        except Exception as e:
+-            warnings.warn(f"Optimization run failed: {str(e)}")
+-
+-        return None, None
+-
+-    def _multi_start_optimization(self, n: int) -> Tuple[Optional[float], Optional[List[float]]]:
+-        """Perform multi-start optimization with parallel execution"""
+-        current_best_c2 = 0.0
+-        current_best_f = None
+-
+-        # Calculate number of parallel runs based on problem size
+-        num_runs = min(8, max(3, n // 200))
+-
+-        # Set timeout for this optimization block
+-        start_time = time.time()
+-        timeout_per_run = min(15, max(5, self.max_time // (num_runs * 2)))
+-
+-        # Create partial functions for parallel execution
+-        partial_func = partial(self._single_optimization_run, n)
+-
+-        # Generate initial population for first run
+-        initial_patterns = self._create_initial_patterns(n)
+-        initial_population = []
+-        for i, pattern in enumerate(initial_patterns):
+-            # Add noise to break symmetry
+-            noise = np.random.normal(0, 0.05, len(pattern))
+-            individual = np.maximum(np.array(pattern) + noise, 0).tolist()
+-            initial_population.append(individual)
+-
+-        # Execute in parallel using processes
+-        try:
+-            with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), num_runs)) as executor:
+-                futures = [executor.submit(partial_func, seed_offset=i,
+-                                         initial_population=initial_population if i == 0 else None)
+-                          for i in range(num_runs)]
+-
+-                # Collect results
+-                for future in futures:
+-                    try:
+-                        c2, f = future.result(timeout=timeout_per_run + 5)
+-                        if c2 is not None and c2 > current_best_c2:
+-                            current_best_c2 = c2
+-                            current_best_f = f
+-                    except Exception:
+-                        continue
+-
+-        except Exception:
+-            # Fallback to sequential if parallel fails
+-            for i in range(num_runs):
+-                try:
+-                    c2, f = self._single_optimization_run(n, i,
+-                                                        initial_population=initial_population if i == 0 else None)
+-                    if c2 is not None and c2 > current_best_c2:
+-                        current_best_c2 = c2
+-                        current_best_f = f
+-                except Exception:
+-                    continue
+-
+-        return current_best_c2, current_best_f
+-
+-    def _fallback_initialization(self, n: int) -> Tuple[float, List[float]]:
+-        """Fallback initialization strategies"""
+-        strategies = [
+-            self._uniform_initialization,
+-            self._alternating_initialization,
+-            self._gaussian_weighted_initialization,
+-            self._mixed_initialization,
+-            self._advanced_initialization
+-        ]
+-
+-        best_strategy_c2 = 0.0
+-        best_strategy_f = None
+-
+-        for strategy in strategies:
+-            try:
+-                f_strategy = strategy(n)
+-                c2_strategy = compute_c2_numba(np.array(f_strategy))
+-                if c2_strategy > best_strategy_c2:
+-                    best_strategy_c2 = c2_strategy
+-                    best_strategy_f = f_strategy
+-            except Exception as e:
+-                warnings.warn(f"Fallback strategy failed: {str(e)}")
+-                continue
+-
+-        return best_strategy_c2, best_strategy_f
+-
+-    def _uniform_initialization(self, n):
+-        """Initialize with uniform step heights"""
+-        return [1.0] * n
+-
+-    def _alternating_initialization(self, n):
+-        """Initialize with alternating high/low segments"""
+-        f = []
+-        segment_length = max(1, n // 8)
+-        for i in range(0, n, segment_length):
+-            if i // segment_length % 2 == 0:
+-                f.extend([1.0] * min(segment_length, n - i))
+-            else:
+-                f.extend([0.1] * min(segment_length, n - i))
+-        return f
+-
+-    def _gaussian_weighted_initialization(self, n):
+-        """Initialize with Gaussian-weighted alternating pattern"""
+-        # Create alternating high/low segments
+-        f = []
+-        segment_length = max(1, n // 8)
+-
+-        for i in range(0, n, segment_length):
+-            if i // segment_length % 2 == 0:
+-                f.extend([1.0] * min(segment_length, n - i))
+-            else:
+-                f.extend([0.1] * min(segment_length, n - i))
+-
+-        # Apply Gaussian weighting to smooth transitions
+-        if len(f) > 0:
+-            f = np.array(f)
+-            f = np.clip(f, 0, 10.0)
+-
+-            # Apply Gaussian smoothing kernel
+-            kernel_size = min(5, len(f)//4)
+-            if kernel_size > 1:
+-                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+-                kernel = kernel / np.sum(kernel)
+-                f = np.convolve(f, kernel, mode='same')
+-
+-            # Ensure all values are non-negative
+-            f = np.maximum(f, 0)
+-
+-        return f.tolist()
+-
+-    def _mixed_initialization(self, n):
+-        """Mix of different initialization strategies"""
+-        # Use uniform initialization for half the elements
+-        half_n = n // 2
+-        f = [1.0] * half_n
+-
+-        # Add alternating pattern for the rest
+-        remaining = n - half_n
+-        if remaining > 0:
+-            alt_pattern = self._alternating_initialization(remaining)
+-            f.extend(alt_pattern)
+-
+-        # Apply Gaussian weighting
+-        f = np.array(f)
+-        f = np.clip(f, 0, 10.0)
+-
+-        # Apply Gaussian smoothing kernel
+-        kernel_size = min(5, len(f)//4)
+-        if kernel_size > 1:
+-            kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+-            kernel = kernel / np.sum(kernel)
+-            f = np.convolve(f, kernel, mode='same')
+-
+-        # Ensure all values are non-negative
+-        f = np.maximum(f, 0)
+-
+-        return f.tolist()
+-
+-    def _advanced_initialization(self, n):
+-        """
+-        Create advanced initial step function with multiple pattern combinations
+-        """
+-        # Create a more complex alternating pattern
+-        f = []
+-        segment_length = max(1, n // 12)
+-
+-        # Alternate between multiple heights
+-        heights = [1.0, 0.7, 0.4, 0.2]
+-        for i in range(0, n, segment_length):
+-            height_idx = (i // segment_length) % len(heights)
+-            height = heights[height_idx]
+-            f.extend([height] * min(segment_length, n - i))
+-
+-        # Apply Gaussian smoothing to create smoother transitions
+-        if len(f) > 0:
+-            f = np.array(f)
+-            f = np.clip(f, 0, 10.0)
+-
+-            # Apply Gaussian smoothing kernel with variable size
+-            kernel_size = min(7, max(3, len(f) // 10))
+-            if kernel_size > 1:
+-                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/4)**2))
+-                kernel = kernel / np.sum(kernel)
+-                f = np.convolve(f, kernel, mode='same')
+-
+-            # Ensure all values are non-negative
+-            f = np.maximum(f, 0)
+-
+-        return f.tolist()
+-
+-    def construct_function(self) -> List[float]:
+-        """Main function to construct step-function with high C2 value"""
+-        # Set seed for reproducibility
+-        self._set_random_seed()
+-
+-        # Initialize tracking variables
+-        best_c2 = 0.0
+-        best_f = []
+-
+-        # Try different configurations to find the best one
+-        configurations = [
+-            200,  # Smaller for faster exploration
+-            500,  # Medium configuration
+-            1000, # Large configuration
+-            2000, # Extra large configuration
+-        ]
+-
+-        start_time = time.time()
+-
+-        for n in configurations:
+-            if time.time() - start_time > self.max_time * 0.9:
+-                break
+-
+-            try:
+-                # Perform multi-start optimization
+-                c2_value, f_opt = self._multi_start_optimization(n)
+-
+-                if c2_value is not None and c2_value > best_c2:
+-                    best_c2 = c2_value
+-                    best_f = f_opt
+-
+-            except Exception as e:
+-                warnings.warn(f"Configuration {n} failed: {str(e)}")
+-                continue
+-
+-        # If nothing worked, fallback to sophisticated initialization
+-        if len(best_f) == 0:
+-            # Try multiple sizes with advanced initialization
+-            for n in [1000, 2000]:
+-                try:
+-                    c2_val, f_opt = self._fallback_initialization(n)
+-                    if c2_val > best_c2:
+-                        best_c2 = c2_val
+-                        best_f = f_opt
+-                except Exception as e:
+-                    warnings.warn(f"Fallback initialization {n} failed: {str(e)}")
+-                    continue
+-
+-        # Final safety check - if still no good solution, use uniform distribution
+-        if len(best_f) == 0:
+-            n = 500
+-            best_f = [1.0] * n
+-            best_c2 = compute_c2_numba(np.array(best_f))
+-
+-        return best_f
+-
+-# Main execution function
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value using optimization."""
+-    optimizer = StepFunctionOptimizer(max_time=90)
+-    return optimizer.construct_function()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

@@ -1,0 +1,444 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from numba import jit
+import time
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+from typing import Tuple, List, Optional
+import random
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
+
+# Enable JAX to use CPU
+jax.config.update('jax_platform_name', 'cpu')
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using Numba for speed"""
+    n = len(f_vals)
+    # Create convolution result array
+    g = np.zeros(2*n - 1)
+
+    # Compute autoconvolution: g[k] = sum(f[i]*f[k-i])
+    for i in range(n):
+        for j in range(n):
+            k = i + j
+            g[k] += f_vals[i] * f_vals[j]
+
+    # Trim to center portion (length n-1)
+    offset = (n - 1) // 2
+    g_trimmed = g[offset:(2*n-1)-offset]
+    return g_trimmed
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently with Numba"""
+    n = len(g_vals)
+
+    # L2 norm squared (using trapezoidal approximation for piecewise linear)
+    l2_sq = 0.0
+    for i in range(n-1):
+        h = 1.0  # assuming unit spacing
+        y1 = g_vals[i]
+        y2 = g_vals[i+1]
+        l2_sq += (h/3.0) * (y1*y1 + y1*y2 + y2*y2)
+
+    # L1 norm
+    l1 = 0.0
+    for i in range(n):
+        l1 += abs(g_vals[i])
+
+    # L-infinity norm
+    linf = 0.0
+    for i in range(n):
+        if abs(g_vals[i]) > linf:
+            linf = abs(g_vals[i])
+
+    return l2_sq, l1, linf
+
+def compute_c2_score(f_vals):
+    """Compute C2 score for given step function values"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute norms
+        l2_sq, l1, linf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 < 1e-12 or linf < 1e-12:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_sq / (l1 * linf)
+        return c2
+
+    except Exception:
+        return 0.0
+
+# JAX-based computation for gradients and optimization
+@jax_jit
+def compute_c2_jax(f_vals):
+    """JAX version for automatic differentiation"""
+    # Convert to JAX array
+    f = jnp.array(f_vals, dtype=jnp.float32)
+
+    # Compute autoconvolution using JAX operations  
+    g = jnp.convolve(f, f, mode='full')
+    n = len(f)
+    offset = (n - 1) // 2
+    g = g[offset:-offset]
+
+    # Compute norms
+    g_abs = jnp.abs(g)
+    norm_l2_sq = jnp.sum(g_abs**2)
+    norm_l1 = jnp.sum(g_abs)
+    norm_inf = jnp.max(g_abs)
+
+    # Avoid division by zero
+    eps = 1e-12
+    norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+    norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+    return c2
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 with respect to f_vals using JAX"""
+    try:
+        f = jnp.array(f_vals, dtype=jnp.float32)
+        grad_fn = grad(compute_c2_jax)
+        grad_val = grad_fn(f)
+        return np.array(grad_val)
+    except Exception:
+        return np.zeros_like(f_vals, dtype=np.float32)
+
+def generate_adaptive_initialization(n: int) -> np.ndarray:
+    """
+    Create intelligent initial candidates using mathematical insights:
+    - Mix of high and low values to encourage diverse convolution properties
+    - Smooth transitions to avoid numerical issues
+    - Concentrated mass in center to promote good C2 behavior
+    """
+    # Create base pattern with alternating regions
+    f_vals = np.zeros(n)
+    
+    # Divide into segments
+    segment_size = max(1, n // 12)
+    
+    # Create alternating high/low pattern with some smoothness
+    for i in range(0, n, segment_size):
+        end_idx = min(i + segment_size, n)
+        segment_idx = i // segment_size
+        
+        if segment_idx % 3 == 0:
+            # High region
+            f_vals[i:end_idx] = 1.0 + np.random.random(end_idx - i) * 0.5
+        elif segment_idx % 3 == 1:
+            # Medium region
+            f_vals[i:end_idx] = 0.5 + np.random.random(end_idx - i) * 0.3
+        else:
+            # Low region
+            f_vals[i:end_idx] = 0.1 + np.random.random(end_idx - i) * 0.2
+    
+    # Add central concentration to promote better convolution
+    center = n // 2
+    width = max(1, n // 8)
+    for i in range(max(0, center - width // 2), min(n, center + width // 2)):
+        # Gradually increase values towards center
+        dist_from_center = abs(i - center)
+        f_vals[i] *= (1.0 - 0.5 * (dist_from_center / (width // 2)))
+    
+    # Apply Gaussian smoothing for better transitions
+    if n > 10:
+        kernel_size = max(3, min(7, n // 20))
+        if kernel_size > 1:
+            kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+            kernel = kernel / np.sum(kernel)
+            f_vals = np.convolve(f_vals, kernel, mode='same')
+    
+    # Ensure non-negativity and normalize slightly
+    f_vals = np.maximum(f_vals, 0)
+    if np.sum(f_vals) > 0:
+        f_vals = f_vals / np.sum(f_vals) * 2.0
+    
+    return f_vals
+
+def adaptive_gradient_optimization(initial_f: np.ndarray, 
+                                 max_iterations: int = 100,
+                                 learning_rate: float = 0.01) -> Tuple[np.ndarray, float]:
+    """
+    Apply adaptive gradient-based refinement on an initial solution
+    """
+    f_current = np.array(initial_f, dtype=np.float32)
+    
+    # Adaptive learning rate schedule
+    initial_lr = learning_rate
+    for iteration in range(max_iterations):
+        try:
+            # Compute gradient
+            grad_val = compute_gradient_jax(f_current)
+            
+            # Adaptive learning rate based on gradient magnitude
+            grad_mag = np.linalg.norm(grad_val)
+            adaptive_lr = initial_lr / (1.0 + grad_mag * 0.1)
+            
+            # Update with gradient ascent
+            f_new = f_current + adaptive_lr * grad_val
+            
+            # Ensure non-negativity
+            f_new = np.maximum(f_new, 0)
+            
+            # Check improvement
+            old_c2 = compute_c2_score(f_current)
+            new_c2 = compute_c2_score(f_new)
+            
+            if new_c2 > old_c2:
+                f_current = f_new
+            else:
+                # Reduce learning rate if no improvement
+                adaptive_lr *= 0.5
+                if adaptive_lr < 1e-6:
+                    break
+                    
+        except Exception:
+            # If gradient computation fails, break gracefully
+            break
+    
+    return f_current, compute_c2_score(f_current)
+
+def multi_scale_optimization(n: int, max_time: float) -> Tuple[List[float], float]:
+    """
+    Perform multi-scale optimization - coarse to fine resolution search
+    """
+    start_time = time.time()
+    
+    # Scale factors for resolution hierarchy
+    scales = [1.0, 0.75, 0.5, 0.25]
+    best_solution = None
+    best_score = 0.0
+    
+    # Start with coarse resolution for faster exploration
+    for scale in scales:
+        if time.time() - start_time > max_time * 0.9:
+            break
+            
+        current_n = max(50, int(n * scale))
+        
+        # Generate initial population with adaptive initialization
+        population_size = min(20, max(5, int(30 * scale)))
+        population = []
+        
+        # Use multiple initialization strategies for diversity
+        strategies = [
+            generate_adaptive_initialization,
+            lambda x: [1.0/x] * x,  # Uniform initialization
+            lambda x: [0.5 + 0.5 * np.random.random() for _ in range(x)],  # Random
+        ]
+        
+        for i in range(population_size):
+            # Select random strategy
+            strategy = strategies[i % len(strategies)]
+            try:
+                initial_f = strategy(current_n)
+                
+                # Add some randomization
+                noise = np.random.normal(0, 0.05, current_n)
+                initial_f = np.maximum(np.array(initial_f) + noise, 0)
+                if np.sum(initial_f) > 0:
+                    initial_f = initial_f / np.sum(initial_f)
+                population.append(initial_f.tolist())
+            except Exception:
+                # Fallback to uniform
+                initial_f = [1.0/current_n] * current_n
+                population.append(initial_f)
+        
+        # Evolve population with differential evolution
+        bounds = [(0.0, 2.0) for _ in range(current_n)]
+        
+        def objective(x):
+            score = compute_c2_score(x)
+            return -score  # Minimize negative to maximize original score
+            
+        # Run differential evolution
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=random.randint(0, 1000),
+                maxiter=min(50, int(100 * scale)),
+                popsize=min(15, max(5, int(30 * scale))),
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                disp=False
+            )
+            
+            if result.success and -result.fun > best_score:
+                best_score = -result.fun
+                best_solution = result.x.copy()
+                
+        except Exception:
+            continue  # Skip this scale if optimization fails
+    
+    # If we found a solution, refine it with gradient-based optimization
+    if best_solution is not None:
+        try:
+            refined_solution, refined_score = adaptive_gradient_optimization(
+                best_solution, 
+                max_iterations=min(50, max(10, n // 10))
+            )
+            
+            if refined_score > best_score:
+                best_score = refined_score
+                best_solution = refined_solution
+        except Exception:
+            pass  # Continue with previous solution if refinement fails
+    
+    return best_solution.tolist() if best_solution is not None else [], best_score
+
+def multi_start_optimization(n_starts: int = 6, max_time: float = 85.0) -> List[float]:
+    """
+    Run multiple optimization attempts with different strategies to find the best solution
+    """
+    n_steps = 500
+    best_solution = None
+    best_c2 = -np.inf
+    
+    # Set the time limit appropriately
+    start_time = time.time()
+    
+    # Try different starting strategies
+    strategies = [
+        ("adaptive", lambda n: generate_adaptive_initialization(n).tolist()),
+        ("uniform", lambda n: [1.0/n] * n),
+        ("random", lambda n: np.random.random(n).tolist()),
+    ]
+    
+    # Use parallel processing for faster exploration
+    def run_single_optimization(strategy_name, strategy_func, n_steps, start_idx):
+        try:
+            # Get initial solution
+            initial_f = strategy_func(n_steps)
+            
+            # Run optimization with appropriate timeout
+            current_n = n_steps
+            if start_idx < 2:  # Coarse resolution for first few
+                current_n = max(200, n_steps // 2)
+                
+            # Use multi-scale optimization approach for this run
+            solution, score = multi_scale_optimization(current_n, max_time / (n_starts * 2))
+            
+            if len(solution) == 0:
+                solution = initial_f
+                
+            # Final evaluation
+            c2 = compute_c2_score(solution)
+            return c2, solution
+        except Exception:
+            return -np.inf, [1.0/n_steps] * n_steps
+    
+    # Run optimizations in parallel
+    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), n_starts)) as executor:
+        futures = []
+        for start in range(n_starts):
+            strategy_name, strategy_func = strategies[start % len(strategies)]
+            future = executor.submit(run_single_optimization, strategy_name, strategy_func, n_steps, start)
+            futures.append(future)
+            
+        # Collect results
+        for future in futures:
+            try:
+                c2, solution = future.result(timeout=max_time / 2)
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_solution = solution
+            except Exception:
+                continue
+    
+    # If no valid solution found, return default
+    if best_solution is None:
+        return [1.0/n_steps] * n_steps
+    
+    return best_solution
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using adaptive methods"""
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Time limit enforcement
+    start_time = time.time()
+    
+    # Try different configurations to find the best one
+    best_c2 = 0.0
+    best_f = []
+    
+    # Try different sizes with multi-scale refinement
+    configurations = [200, 500, 1000, 2000]
+    
+    for n in configurations:
+        if time.time() - start_time > 85:  # Leave 5 seconds buffer
+            break
+            
+        try:
+            # Use multi-scale optimization approach
+            solution, score = multi_scale_optimization(n, 85 - (time.time() - start_time))
+            
+            if score > best_c2:
+                best_c2 = score
+                best_f = solution
+                
+        except Exception as e:
+            continue
+    
+    # If no good solution found, fallback to sophisticated initialization
+    if len(best_f) == 0:
+        try:
+            n = 1000
+            best_f = generate_adaptive_initialization(n).tolist()
+            best_c2 = compute_c2_score(best_f)
+        except Exception:
+            # Last resort - uniform distribution
+            best_f = [1.0/n] * n
+            best_c2 = compute_c2_score(best_f)
+    
+    # Additional refinement using local optimization
+    try:
+        n_steps = len(best_f)
+        def local_objective(f_vals):
+            return -compute_c2_score(f_vals)
+        
+        bounds_local = [(0, 10.0) for _ in range(n_steps)]
+        local_result = minimize(
+            local_objective,
+            best_f,
+            method='L-BFGS-B',
+            bounds=bounds_local,
+            options={'maxiter': 20}
+        )
+        
+        if local_result.success:
+            refined_f = np.maximum(local_result.x, 0)
+            if np.sum(refined_f) > 0:
+                refined_f = refined_f / np.sum(refined_f)
+            refined_c2 = compute_c2_score(refined_f)
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_f = refined_f.tolist()
+    except Exception:
+        pass  # Continue with existing solution if refinement fails
+    
+    return best_f
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

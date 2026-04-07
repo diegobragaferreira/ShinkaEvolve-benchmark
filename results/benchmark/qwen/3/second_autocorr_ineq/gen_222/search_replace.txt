@@ -1,0 +1,380 @@
+<NAME>
+enhanced_convolution_computation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses scipy.signal.convolve which is not optimized for our specific case. I'll replace it with a more efficient custom convolution implementation that's tailored to our step function structure and can leverage numba JIT compilation for better performance. This directly addresses the computational bottleneck in the autoconvolution calculation which is the core of the C2 computation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import signal
+import random
+from typing import List, Tuple, Optional
+import time
+import nevergrad as ng
+from functools import wraps
+=======
+import numpy as np
+from scipy import signal
+import random
+from typing import List, Tuple, Optional
+import time
+import nevergrad as ng
+from functools import wraps
+from numba import jit
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+optimized_convolution_numba
+</NAME>
+
+<DESCRIPTION>
+I'll implement a numba-compiled convolution function that's optimized specifically for our step function case. This will replace the scipy.signal.convolve call and provide much faster computation of the autoconvolution, which is the bottleneck in calculating C2 values. The new implementation will be significantly faster for large arrays.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class AutoconvolutionCalculator:
+    """Efficient computation of autoconvolution norms"""
+
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the three norms needed for C2 calculation:
+        ||g||₂², ||g||₁, ||g||∞ where g = f*f
+        """
+        # Convert to numpy array for efficient computation
+        f = np.array(f_values)
+
+        # Compute autoconvolution g = f * f using fast convolution
+        g = signal.convolve(f, f, mode='full')
+
+        # Only keep the middle portion corresponding to valid convolution
+        center_idx = len(g) // 2
+        half_len = len(f)
+        g = g[center_idx - half_len + 1:center_idx + half_len]
+
+        # Compute norms
+        g_squared = g * g
+        norm_l2_sq = np.sum(g_squared)
+
+        norm_l1 = np.sum(np.abs(g))
+        norm_linf = np.max(np.abs(g))
+
+        return norm_l2_sq, norm_l1, norm_linf
+
+    @staticmethod
+    def calculate_c2(f_values: List[float]) -> float:
+        """Calculate C2 value for given step function"""
+        try:
+            norm_l2_sq, norm_l1, norm_linf = AutoconvolutionCalculator.compute_autoconvolution_norms(f_values)
+
+            # Avoid division by zero
+            if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+                return 0.0
+
+            c2 = norm_l2_sq / (norm_l1 * norm_linf)
+            return c2
+        except Exception:
+            return 0.0
+=======
+class AutoconvolutionCalculator:
+    """Efficient computation of autoconvolution norms"""
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_autoconvolution_fast(f_vals):
+        """Fast numba-based autoconvolution computation for step functions"""
+        n = len(f_vals)
+        # Result has length 2*n-1
+        g = np.zeros(2*n - 1)
+
+        # Manual computation of the convolution sum for step functions
+        for i in range(n):
+            for j in range(n):
+                # In convolution, the value at index i+j comes from f[i] * f[j]
+                g[i + j] += f_vals[i] * f_vals[j]
+
+        return g
+
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the three norms needed for C2 calculation:
+        ||g||₂², ||g||₁, ||g||∞ where g = f*f
+        """
+        # Convert to numpy array for efficient computation
+        f = np.array(f_values)
+
+        # Compute autoconvolution g = f * f using fast numba implementation
+        g = AutoconvolutionCalculator.compute_autoconvolution_fast(f)
+
+        # Only keep the middle portion corresponding to valid convolution
+        center_idx = len(g) // 2
+        half_len = len(f)
+        g = g[center_idx - half_len + 1:center_idx + half_len]
+
+        # Compute norms
+        g_squared = g * g
+        norm_l2_sq = np.sum(g_squared)
+
+        norm_l1 = np.sum(np.abs(g))
+        norm_linf = np.max(np.abs(g))
+
+        return norm_l2_sq, norm_l1, norm_linf
+
+    @staticmethod
+    def calculate_c2(f_values: List[float]) -> float:
+        """Calculate C2 value for given step function"""
+        try:
+            norm_l2_sq, norm_l1, norm_linf = AutoconvolutionCalculator.compute_autoconvolution_norms(f_values)
+
+            # Avoid division by zero
+            if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+                return 0.0
+
+            c2 = norm_l2_sq / (norm_l1 * norm_linf)
+            return c2
+        except Exception:
+            return 0.0
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+improved_initialization_strategy
+</NAME>
+
+<DESCRIPTION>
+The current geometric initialization creates a pattern that may not be optimal for maximizing C2. I'll enhance the initialization by creating a more sophisticated pattern that specifically aims to produce flatter convolution results, which leads to higher C2 values. This involves creating a function with multiple peaks and valleys arranged to encourage the convolution to have a flatter profile.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def generate_geometric_initial_function(size: int) -> List[float]:
+        """
+        Generate an initial function using geometric patterns that encourage good C2 values.
+        Creates a function with multiple scales and controlled variations to promote flat convolution.
+        """
+        # Create a multi-scale geometric pattern
+        f_values = np.zeros(size)
+
+        # Scale 1: Main body with smooth transitions
+        x = np.linspace(0, 1, size)
+
+        # Create a bell-shaped pattern with multiple peaks to encourage uniform convolution
+        # This pattern helps avoid sharp peaks that would decrease C2
+        pattern1 = 0.3 * np.exp(-((x - 0.3)**2) / (2 * 0.1**2)) + \
+                   0.4 * np.exp(-((x - 0.7)**2) / (2 * 0.1**2)) + \
+                   0.3 * np.exp(-((x - 0.5)**2) / (2 * 0.15**2))
+
+        # Add some sinusoidal component for additional variation
+        pattern2 = 0.1 * np.sin(6 * np.pi * x) + 0.05 * np.cos(12 * np.pi * x)
+
+        # Combine patterns
+        combined = pattern1 + pattern2
+
+        # Normalize and clip to [0, 1]
+        combined = np.clip(combined, 0, 1)
+
+        # Ensure sum is reasonable to prevent extreme values
+        f_values = combined
+
+        return f_values.tolist()
+=======
+    @staticmethod
+    def generate_geometric_initial_function(size: int) -> List[float]:
+        """
+        Generate an initial function using enhanced geometric patterns that encourage good C2 values.
+        Creates a function with strategic peaks and valleys to promote flat convolution profiles.
+        """
+        # Create a more sophisticated multi-scale pattern
+        f_values = np.zeros(size)
+
+        # Main pattern with multiple strategically placed peaks
+        x = np.linspace(0, 1, size)
+
+        # Multiple peaks that create constructive interference in convolution
+        pattern1 = 0.5 * np.exp(-((x - 0.2)**2) / (2 * 0.08**2)) + \
+                   0.3 * np.exp(-((x - 0.5)**2) / (2 * 0.06**2)) + \
+                   0.4 * np.exp(-((x - 0.8)**2) / (2 * 0.07**2))
+
+        # Add complementary pattern to create more balanced distribution
+        pattern2 = 0.2 * np.sin(10 * np.pi * x) + 0.1 * np.cos(20 * np.pi * x)
+
+        # Add some structured variation to avoid overly regular patterns
+        pattern3 = 0.1 * np.sin(3 * np.pi * x) * np.cos(6 * np.pi * x)
+
+        # Combine patterns
+        combined = pattern1 + pattern2 + pattern3 + 0.1  # Add offset to ensure positivity
+
+        # Normalize and clip to [0, 1]
+        combined = np.clip(combined, 0, 1)
+
+        # Apply a more aggressive smoothing to reduce extreme variations
+        # This helps prevent sharp peaks that would hurt C2
+        smoothed = np.convolve(combined, np.ones(5)/5, mode='same')
+
+        # Ensure non-negativity and reasonable distribution
+        f_values = np.clip(smoothed, 0, 1)
+
+        return f_values.tolist()
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+adaptive_mutation_rate
+</NAME>
+
+<DESCRIPTION>
+The current mutation strategy uses a fixed rate which may not be optimal throughout the evolutionary process. I'll implement an adaptive mutation rate that decreases as the optimization progresses, allowing for broader exploration in early stages and finer tuning in later stages. This should help balance global search and local refinement.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate_individual(individual: List[float], mutation_rate: float = 0.1) -> List[float]:
+        """Mutate an individual with given mutation rate"""
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                mutated[i] = max(0, mutated[i] + random.gauss(0, 0.1))  # Non-negative constraint
+        return mutated
+=======
+    @staticmethod
+    def mutate_individual(individual: List[float], mutation_rate: float = 0.1, generation: int = 0, max_gens: int = 100) -> List[float]:
+        """Mutate an individual with adaptive mutation rate"""
+        # Adapt mutation rate: start high, decrease over time
+        adapted_rate = mutation_rate * (1.0 - (generation / max_gens) * 0.8)
+        adapted_rate = max(0.01, adapted_rate)  # Minimum mutation rate
+
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if random.random() < adapted_rate:
+                # Use smaller mutation step for smaller values to maintain proportionality
+                mutation_strength = 0.1 * mutated[i] if mutated[i] > 0 else 0.1
+                mutated[i] = max(0, mutated[i] + random.gauss(0, mutation_strength))  # Non-negative constraint
+        return mutated
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhanced_evolutionary_optimizer
+</NAME>
+
+<DESCRIPTION>
+The current evolutionary optimizer doesn't take full advantage of the population diversity and could benefit from a more sophisticated selection and reproduction strategy. I'll enhance it to include elitism, better tournament selection, and adaptive parameters that respond to the optimization progress.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class EvolutionaryOptimizer:
+    """Evolutionary optimization engine"""
+
+    @staticmethod
+    def optimize_population(population: List[List[float]],
+                          fitness: List[float],
+                          max_generations: int,
+                          population_size: int) -> Tuple[float, List[float]]:
+        """Perform evolutionary optimization"""
+        best_c2 = 0.0
+        best_individual = None
+
+        for gen in range(max_generations):
+            # Track best solution
+            max_fitness_idx = np.argmax(fitness)
+            current_best_c2 = fitness[max_fitness_idx]
+
+            if current_best_c2 > best_c2:
+                best_c2 = current_best_c2
+                best_individual = population[max_fitness_idx].copy()
+
+            # Evolve population
+            # Sort by fitness (descending)
+            sorted_pairs = sorted(zip(population, fitness), key=lambda x: x[1], reverse=True)
+            elite = [pair[0] for pair in sorted_pairs[:population_size//4]]
+
+            # Generate new population
+            new_population = elite.copy()
+            while len(new_population) < population_size:
+                # Tournament selection
+                parent1 = PopulationManager.tournament_selection(population, fitness)
+                parent2 = PopulationManager.tournament_selection(population, fitness)
+                child = PopulationManager.crossover(parent1, parent2)
+                child = PopulationManager.mutate_individual(child)
+                new_population.append(child)
+
+            population = new_population
+
+            # Evaluate new population
+            fitness = [AutoconvolutionCalculator.calculate_c2(individual)
+                      for individual in population]
+
+        return best_c2, best_individual
+=======
+class EvolutionaryOptimizer:
+    """Evolutionary optimization engine"""
+
+    @staticmethod
+    def optimize_population(population: List[List[float]],
+                          fitness: List[float],
+                          max_generations: int,
+                          population_size: int) -> Tuple[float, List[float]]:
+        """Perform evolutionary optimization with enhanced strategies"""
+        best_c2 = 0.0
+        best_individual = None
+
+        for gen in range(max_generations):
+            # Track best solution
+            max_fitness_idx = np.argmax(fitness)
+            current_best_c2 = fitness[max_fitness_idx]
+
+            if current_best_c2 > best_c2:
+                best_c2 = current_best_c2
+                best_individual = population[max_fitness_idx].copy()
+
+            # Evolve population with enhanced strategy
+            # Sort by fitness (descending)
+            sorted_pairs = sorted(zip(population, fitness), key=lambda x: x[1], reverse=True)
+            elite_count = max(2, population_size // 8)  # Smaller elite in early generations
+            elite = [pair[0] for pair in sorted_pairs[:elite_count]]
+
+            # Generate new population with adaptive parameters
+            new_population = elite.copy()
+
+            # Additional diversity mechanism: introduce some random individuals occasionally
+            if gen % 10 == 0 and gen > 0:
+                # Add some fresh individuals to maintain diversity
+                for _ in range(2):
+                    new_population.append(PopulationManager.generate_individual(len(population[0])))
+
+            while len(new_population) < population_size:
+                # Tournament selection with adaptive size
+                tournament_size = max(3, min(8, population_size // 4 + gen // 5))
+                parent1 = PopulationManager.tournament_selection(population, fitness, tournament_size)
+                parent2 = PopulationManager.tournament_selection(population, fitness, tournament_size)
+                child = PopulationManager.crossover(parent1, parent2)
+                child = PopulationManager.mutate_individual(child, generation=gen, max_gens=max_generations)
+                new_population.append(child)
+
+            population = new_population[:population_size]
+
+            # Evaluate new population
+            fitness = [AutoconvolutionCalculator.calculate_c2(individual)
+                      for individual in population]
+
+        return best_c2, best_individual
+>>>>>>> REPLACE
+
+</DIFF>

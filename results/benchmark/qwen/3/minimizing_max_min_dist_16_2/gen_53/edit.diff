@@ -1,0 +1,262 @@
+--- a/original.py
++++ b/original.py
+@@ -1,159 +1,177 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import minimize
++from scipy.spatial import Voronoi, Delaunay
++from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist, squareform
+ import math
+ 
+ def compute_distance_matrix(points):
+     """Compute pairwise distance matrix for given points."""
+     return squareform(pdist(points))
+ 
+ def calculate_min_max_ratio(distance_matrix):
+     """Calculate the ratio of minimum to maximum distances."""
+     # Exclude diagonal (distance to self)
+     off_diagonal = distance_matrix[distance_matrix > 0]
+     if len(off_diagonal) == 0:
+         return 0.0
+     d_min = np.min(off_diagonal)
+     d_max = np.max(off_diagonal)
+     return d_min / d_max if d_max > 0 else 0.0
+ 
+-def initialize_points_hexagonal_packing():
+-    """Initialize points using hexagonal packing principles for better distribution."""
+-    # Create a 4x4 grid with hexagonal offset pattern
++def initialize_points_voronoi_based():
++    """Initialize points using Voronoi-based approach with constrained Delaunay triangulation."""
++    # Generate initial points using a combination of regular grid and perturbation
++    # Create a 4x4 grid and then apply Voronoi-inspired constraints
+     points = []
+     rows = 4
+     cols = 4
+     
+-    # Hexagonal offset pattern
++    # Create regular grid with slight perturbations
+     for i in range(rows):
+         for j in range(cols):
+-            x = j + 0.5 * (i % 2)
+-            y = i * math.sqrt(3)/2
++            # Add some randomness to avoid perfect symmetry
++            x = j + np.random.normal(0, 0.02)
++            y = i + np.random.normal(0, 0.02)
+             points.append([x, y])
+     
+-    # Normalize to [0,1] range
+     points = np.array(points)
+     
+-    # Scale and shift to fit in unit square
++    # Normalize to [0,1] range
+     x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+     y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+     
+     if x_range > 0:
+         points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+     if y_range > 0:
+         points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+         
+-    # Add some randomization to break symmetry
+-    np.random.seed(42)
+-    points += np.random.normal(0, 0.01, points.shape)
+-    
+-    # Keep within bounds
+-    points[:, 0] = np.clip(points[:, 0], 0, 1)
+-    points[:, 1] = np.clip(points[:, 1], 0, 1)
++    # Apply boundary constraints
++    points[:, 0] = np.clip(points[:, 0], 0.01, 0.99)
++    points[:, 1] = np.clip(points[:, 1], 0.01, 0.99)
+     
+     return points
+ 
+-def initialize_points_regular_grid():
+-    """Initialize points using regular grid with slight perturbations."""
+-    # Create a 4x4 grid
+-    grid_size = 4
+-    points = np.array([[i/(grid_size-1), j/(grid_size-1)] for i in range(grid_size) for j in range(grid_size)])
++def voronoi_volume_objective(points):
++    """Objective function based on Voronoi cell volumes to encourage uniform distribution."""
++    try:
++        vor = Voronoi(points)
++        volumes = []
++        
++        # Calculate Voronoi cell areas (approximate)
++        for region in vor.regions:
++            if not region or -1 in region:
++                continue
++            vertices = [vor.vertices[i] for i in region]
++            if len(vertices) >= 3:
++                # Simple polygon area calculation
++                vertices = np.array(vertices)
++                area = 0.5 * np.abs(np.dot(vertices[:, 0], np.roll(vertices[:, 1], 1)) - 
++                                   np.dot(vertices[:, 1], np.roll(vertices[:, 0], 1)))
++                volumes.append(area)
++        
++        if volumes:
++            return -np.mean(volumes)  # Negative because we want to maximize volume
++        else:
++            return 0
++    except:
++        return 0
+ 
+-    # Add slight random perturbations to avoid symmetric solutions
+-    np.random.seed(42)
+-    noise = np.random.normal(0, 0.02, points.shape)
+-    points += noise
+-    points = np.clip(points, 0, 1)
+-
+-    return points
+-
+-def optimize_point_placement(initial_points, max_iterations=500):
+-    """Optimize point placement using L-BFGS-B for faster convergence."""
+-    def objective(x_flat):
+-        # Reshape flat array back to points
++def optimize_with_voronoi_refinement(initial_points, max_iterations=300):
++    """Refine points using Voronoi-based local optimization."""
++    
++    def objective_voronoi_ratio(x_flat):
+         points = x_flat.reshape(-1, 2)
+-
+-        # Ensure points are within bounds
+         points = np.clip(points, 0, 1)
+-
++        
+         try:
+             dist_matrix = compute_distance_matrix(points)
+             ratio = calculate_min_max_ratio(dist_matrix)
+-
+-            # Return negative ratio since we want to maximize
+-            # We also penalize configurations that are too close to boundary
++            
++            # Add penalty for points too close to boundary
+             penalty = 0
+-            if np.any(points < 0.01) or np.any(points > 0.99):
++            if np.any(points < 0.02) or np.any(points > 0.98):
+                 penalty = -0.01
+-
++                
+             return -(ratio + penalty)
+         except Exception:
+-            return 1e6  # Return large value for invalid configurations
+-
+-    # Flatten initial points for optimization
+-    x0 = initial_points.flatten()
+-
+-    # Define bounds for each coordinate (0 to 1) but slightly inside to avoid boundary issues
+-    bounds = [(0.01, 0.99) for _ in range(len(x0))]
+-
+-    # Use L-BFGS-B which is more efficient for this problem
+-    result = minimize(
+-        objective,
+-        x0,
+-        method='L-BFGS-B',
+-        bounds=bounds,
+-        options={'maxiter': max_iterations, 'ftol': 1e-8, 'gtol': 1e-5},
+-        callback=None
+-    )
+-
+-    # Reshape optimized points
+-    optimized_points = result.x.reshape(-1, 2)
+-
+-    # Ensure final points are within bounds
++            return 1e6
++    
++    # First, try differential evolution for global search
++    bounds = [(0.01, 0.99) for _ in range(len(initial_points.flatten()))]
++    
++    try:
++        de_result = differential_evolution(
++            objective_voronoi_ratio,
++            bounds,
++            maxiter=50,
++            popsize=10,
++            seed=42,
++            disp=False
++        )
++        x0 = de_result.x
++    except:
++        x0 = initial_points.flatten()
++    
++    # Then refine with local optimization
++    try:
++        result = minimize(
++            objective_voronoi_ratio,
++            x0,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': max_iterations//2, 'ftol': 1e-8, 'gtol': 1e-5}
++        )
++        optimized_points = result.x.reshape(-1, 2)
++    except:
++        optimized_points = initial_points
++    
++    # Final boundary check
+     optimized_points = np.clip(optimized_points, 0, 1)
+-
++    
+     return optimized_points
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+-    # Try multiple initialization strategies and pick the best
++    
++    # Multiple initialization strategies based on Voronoi principles
+     initial_strategies = [
+-        initialize_points_hexagonal_packing,
+-        initialize_points_regular_grid
++        lambda: initialize_points_voronoi_based(),
++        lambda: np.random.uniform(0.05, 0.95, (16, 2)),
++        lambda: np.random.uniform(0, 1, (16, 2))
+     ]
+-
++    
+     best_points = None
+     best_ratio = 0
+-
+-    for init_func in initial_strategies:
++    
++    for i, init_func in enumerate(initial_strategies):
+         try:
+             initial_points = init_func()
+-
+-            # Optimize the point placement
+-            final_points = optimize_point_placement(initial_points)
+-
++            
++            # Apply Voronoi refinement
++            final_points = optimize_with_voronoi_refinement(initial_points, max_iterations=300)
++            
+             # Calculate the resulting ratio
+             dist_matrix = compute_distance_matrix(final_points)
+             ratio = calculate_min_max_ratio(dist_matrix)
+-
++            
+             if ratio > best_ratio:
+                 best_ratio = ratio
+                 best_points = final_points.copy()
+-
++                
+         except Exception as e:
+-            continue  # Skip this strategy if it fails
+-
+-    # If no valid configuration was found, use a fallback
++            continue
++    
++    # Fallback to simple random initialization if nothing works
+     if best_points is None:
+-        initial_points = initialize_points_regular_grid()
+-        best_points = optimize_point_placement(initial_points)
+-
++        initial_points = np.random.uniform(0.05, 0.95, (16, 2))
++        best_points = optimize_with_voronoi_refinement(initial_points)
++    
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

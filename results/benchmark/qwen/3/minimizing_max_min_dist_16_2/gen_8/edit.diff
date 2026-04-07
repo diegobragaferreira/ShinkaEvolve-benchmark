@@ -1,0 +1,200 @@
+--- a/original.py
++++ b/original.py
+@@ -1,92 +1,141 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist
+ import time
++from scipy.optimize import differential_evolution
++import random
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+-
++    
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum distances between all point pairs."""
+         if len(points) < 2:
+             return 0.0
+-
++        
+         # Compute pairwise distances
+         distances = pdist(points)
+-
++        
+         # Get min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+-
++        
+         # Avoid division by zero
+         if max_dist == 0:
+             return 0.0
+-
++            
+         return min_dist / max_dist
+-
++    
+     def objective_function(params):
+         """Objective function to minimize (negative of min/max ratio)."""
+         # Reshape parameters back to points array
+         points = params.reshape(-1, 2)
+         ratio = compute_min_max_ratio(points)
+         # Return negative because we want to maximize the ratio
+         return -ratio
+-
+-    # Generate initial points using a better structured approach for improved starting configuration
+-    np.random.seed(42)
+-
+-    # Create a more optimized initial configuration
+-    # Use a combination of hexagonal and perturbed grid arrangement
+-    points = []
+-
+-    # Arrange in a 4x4 grid (16 points total) with appropriate spacing
+-    for i in range(4):
+-        for j in range(4):
+-            x = j * 0.25 + (i % 2) * 0.125  # Offset every other row for hexagonal packing
+-            y = i * 0.25
+-            points.append([x, y])
+-
+-    # Convert to numpy array and add small random noise
+-    points = np.array(points) + np.random.normal(0, 0.005, (16, 2))
+-
+-    # Ensure all points are within [0,1] bounds and normalize properly
+-    points = np.clip(points, 0, 1)
+-
+-    # Flatten for optimization
+-    initial_params = points.flatten()
+-
+-    # Set up bounds for each coordinate (0 to 1 for both x and y)
+-    bounds = [(0, 1)] * 32  # 16 points * 2 coordinates each
+-
+-    # Optimize using L-BFGS-B which is well-suited for this type of problem
+-    try:
+-        result = minimize(
+-            objective_function,
+-            initial_params,
+-            method='L-BFGS-B',
+-            bounds=bounds,
+-            options={'maxiter': 10000, 'ftol': 1e-12, 'gtol': 1e-12},
+-            callback=None
+-        )
+-
+-        # Extract optimized points
+-        optimized_points = result.x.reshape(-1, 2)
+-
+-        # Make sure they're within bounds
+-        optimized_points = np.clip(optimized_points, 0, 1)
+-
+-        return optimized_points
+-
+-    except Exception as e:
+-        # Fallback to initial points if optimization fails
+-        print(f"Optimization failed: {e}")
++    
++    def generate_initial_config():
++        """Generate a better initial configuration for the points."""
++        # Start with a more informed initial configuration
++        # Using a quasi-uniform distribution pattern
++        
++        # Phase 1: Create a structured base pattern
++        points = []
++        
++        # Create a 4x4 grid but make it more optimal with strategic spacing
++        for i in range(4):
++            for j in range(4):
++                # Create slightly irregular pattern to avoid degeneracies
++                x = j * 0.25 + (i % 2) * 0.125 + random.uniform(-0.01, 0.01)
++                y = i * 0.25 + random.uniform(-0.01, 0.01)
++                points.append([x, y])
++        
++        # Convert to numpy and add noise
++        points = np.array(points)
++        points += np.random.normal(0, 0.005, (16, 2))
++        
++        # Ensure all points are within [0,1] bounds
++        points = np.clip(points, 0, 1)
+         return points
++    
++    def optimize_with_restarts(max_time=175):
++        """Run optimization with multiple restarts to find better solutions."""
++        start_time = time.time()
++        best_ratio = -np.inf
++        best_points = None
++        num_restarts = 5
++        
++        for restart in range(num_restarts):
++            if time.time() - start_time > max_time - 5:  # Leave buffer time
++                break
++                
++            # Generate new initial configuration for each restart
++            initial_points = generate_initial_config()
++            initial_params = initial_points.flatten()
++            
++            # Define bounds for coordinates (0 to 1)
++            bounds = [(0, 1)] * 32
++            
++            # Use differential evolution for global search
++            try:
++                # For first few restarts, use a more thorough search
++                if restart < 3:
++                    result = differential_evolution(
++                        objective_function,
++                        bounds,
++                        maxiter=500,
++                        popsize=15,
++                        tol=1e-8,
++                        seed=42+restart,
++                        callback=None
++                    )
++                else:
++                    # For later restarts, use less intensive search
++                    result = differential_evolution(
++                        objective_function,
++                        bounds,
++                        maxiter=200,
++                        popsize=10,
++                        tol=1e-6,
++                        seed=42+restart,
++                        callback=None
++                    )
++                
++                if result.success:
++                    optimized_points = result.x.reshape(-1, 2)
++                    optimized_points = np.clip(optimized_points, 0, 1)
++                    current_ratio = compute_min_max_ratio(optimized_points)
++                    
++                    if current_ratio > best_ratio:
++                        best_ratio = current_ratio
++                        best_points = optimized_points.copy()
++                        
++            except Exception:
++                continue  # Continue with other restarts if one fails
++        
++        # If we didn't find any good solution, fall back to the structured initial config
++        if best_points is None:
++            initial_points = generate_initial_config()
++            return initial_points
++        
++        return best_points
++    
++    # Run the optimization process
++    final_points = optimize_with_restarts(max_time=175)
++    
++    # Final validation and clean up
++    if final_points is None:
++        final_points = np.random.rand(16, 2)
++    else:
++        # Ensure final points are within bounds
++        final_points = np.clip(final_points, 0, 1)
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

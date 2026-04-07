@@ -1,0 +1,328 @@
+--- a/original.py
++++ b/original.py
+@@ -1,193 +1,274 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import cdist
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial import SphericalVoronoi
+ import time
+ 
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+     Uses hybrid approach combining spherical initialization with advanced optimization techniques.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+ 
+     n = 14
+     d = 3
+ 
+     def generate_fibonacci_sphere_points():
+         """Generate initial points on unit sphere using Fibonacci method"""
+         points = []
+         phi = np.pi * (3 - np.sqrt(5))  # golden angle
+ 
+         for i in range(n):
+             y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = phi * i  # golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         return np.array(points)
+ 
+     def project_to_cube(points):
+         """Project points from unit sphere to unit cube"""
+         # Normalize to unit sphere first
+         norms = np.linalg.norm(points, axis=1, keepdims=True)
+         points_normalized = points / np.maximum(norms, 1e-10)
+ 
+         # Project to cube: map to [0,1]^3
+         points_cube = (points_normalized + 1) / 2
+         return np.clip(points_cube, 0, 1)
+ 
+     def compute_min_max_ratio(points):
+         """Compute negative of min/max distance ratio for optimization"""
+         distances = cdist(points, points, 'euclidean')
+         np.fill_diagonal(distances, np.inf)
+ 
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+ 
+         if max_dist == 0:
+             return -np.inf
+ 
+         return -min_dist / max_dist
+ 
+     def objective_with_penalty(x):
+         """Objective function with penalty for boundary violations"""
+         points = x.reshape(n, d)
+ 
+         # Apply soft penalty for boundary violations
+         penalty = 0
+         for i in range(n):
+             for j in range(d):
+                 if points[i,j] < 0:
+-                    penalty += 1e6 * (0 - points[i,j])**2
++                    penalty += 1e8 * (0 - points[i,j])**2
+                 elif points[i,j] > 1:
+-                    penalty += 1e6 * (points[i,j] - 1)**2
++                    penalty += 1e8 * (points[i,j] - 1)**2
+ 
+         # Calculate distance matrix
+         distances = cdist(points, points, 'euclidean')
+         np.fill_diagonal(distances, np.inf)
+ 
+         # Find min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+ 
+         # Avoid division by zero
+         if max_dist == 0:
+             return -np.inf + penalty
+ 
+         # Return negative ratio plus penalty (to minimize)
+         return -(min_dist / max_dist) + penalty
+ 
+-    def local_refinement(points):
+-        """Refine using multiple local optimization approaches"""
++    def enhanced_local_refinement(points):
++        """Enhanced local refinement with multiple strategies and better convergence checking"""
+         def obj(x):
+             points_temp = x.reshape(n, d)
+             distances = cdist(points_temp, points_temp, 'euclidean')
+             np.fill_diagonal(distances, np.inf)
+             min_dist = np.min(distances)
+             max_dist = np.max(distances)
+             if max_dist == 0:
+                 return 1e10
+             return -min_dist / max_dist  # Negative for maximization
+ 
+-        # Strategy 1: L-BFGS-B with bounds
++        # Strategy 1: L-BFGS-B with bounds - aggressive tolerances
+         bounds = [(0, 1) for _ in range(n * d)]
+         try:
+             res = minimize(obj, points.flatten(), method='L-BFGS-B', bounds=bounds,
+-                         options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9})
++                         options={'maxiter': 1500, 'ftol': 1e-10, 'gtol': 1e-10})
+             if res.success:
+-                return res.x.reshape(n, d)
++                refined = res.x.reshape(n, d)
++                # Additional check to ensure we're not getting worse
++                if compute_min_max_ratio(refined) < compute_min_max_ratio(points):
++                    return refined
+         except:
+             pass
+ 
+-        # Strategy 2: Nelder-Mead as fallback
++        # Strategy 2: Nelder-Mead as fallback with smaller tolerance
+         try:
+             res = minimize(obj, points.flatten(), method='Nelder-Mead',
+-                         options={'maxiter': 500, 'disp': False})
++                         options={'maxiter': 800, 'disp': False, 'xtol': 1e-8, 'ftol': 1e-8})
+             if res.success:
+-                return res.x.reshape(n, d)
++                refined = res.x.reshape(n, d)
++                # Additional check to ensure we're not getting worse
++                if compute_min_max_ratio(refined) < compute_min_max_ratio(points):
++                    return refined
+         except:
+             pass
+ 
++        # Strategy 3: Gradient descent using a simpler approach if others fail
++        try:
++            # Simple gradient descent with small steps
++            current_points = points.copy()
++            learning_rate = 0.01
++
++            for _ in range(200):  # Limited iterations
++                # Calculate gradient approximation via finite differences
++                grad = np.zeros_like(current_points)
++                eps = 1e-6
++                base_ratio = compute_min_max_ratio(current_points)
++
++                for i in range(n):
++                    for j in range(d):
++                        # Perturb point
++                        test_points = current_points.copy()
++                        test_points[i, j] += eps
++                        test_points = np.clip(test_points, 0, 1)
++
++                        new_ratio = compute_min_max_ratio(test_points)
++
++                        # Approximate gradient
++                        grad[i, j] = (base_ratio - new_ratio) / eps  # Note: we want to minimize so negative gradient
++
++                # Update
++                current_points -= learning_rate * grad
++                current_points = np.clip(current_points, 0, 1)
++
++                # Check convergence
++                if np.allclose(grad, 0, atol=1e-8):
++                    break
++
++            if compute_min_max_ratio(current_points) < compute_min_max_ratio(points):
++                return current_points
++        except:
++            pass
++
+         return points
+ 
+-    # Phase 1: Generate initial configuration using spherical approach
+-    np.random.seed(42)
+-
+-    # Generate points on sphere
+-    sphere_points = generate_fibonacci_sphere_points()
+-
+-    # Project to cube
+-    cube_points = project_to_cube(sphere_points)
+-
+-    # Add structured perturbation to avoid symmetric solutions
+-    cube_points += np.random.normal(0, 0.01, cube_points.shape)
+-    cube_points = np.clip(cube_points, 0, 1)
+-
+-    # Phase 2: Global optimization with differential evolution
++    # Enhanced initialization with multiple strategies
++    def generate_enhanced_initialization():
++        """Create better initial configuration using multiple approaches"""
++        np.random.seed(42)
++
++        # Strategy 1: Fibonacci sphere points
++        sphere_points = generate_fibonacci_sphere_points()
++        cube_points1 = project_to_cube(sphere_points)
++
++        # Strategy 2: Random points with structured perturbation
++        cube_points2 = np.random.rand(n, d)
++
++        # Strategy 3: Grid-based points
++        grid_points = []
++        grid_size = int(np.ceil(n**(1/3)))
++        for i in range(grid_size):
++            for j in range(grid_size):
++                for k in range(grid_size):
++                    if len(grid_points) < n:
++                        grid_points.append([i/grid_size, j/grid_size, k/grid_size])
++        cube_points3 = np.array(grid_points[:n])
++
++        # Combine strategies - take the best among these three
++        points_list = [cube_points1, cube_points2, cube_points3]
++        ratios = [compute_min_max_ratio(points) for points in points_list]
++
++        # Return the best initialization
++        return points_list[np.argmin(ratios)]
++
++    # Phase 1: Generate enhanced initial configuration
++    initial_points = generate_enhanced_initialization()
++
++    # Add systematic perturbation to avoid symmetric solutions
++    initial_points += np.random.normal(0, 0.015, initial_points.shape)
++    initial_points = np.clip(initial_points, 0, 1)
++
++    # Phase 2: Enhanced global optimization with better parameters
+     bounds = [(0, 1) for _ in range(n * d)]
+-    max_time = 280  # Leave some time for final refinement
++    max_time = 250  # Leave more time for final refinement
+     start_time = time.time()
+ 
+-    # Use differential evolution with proper timeout management
++    # Use differential evolution with better parameters and early stopping
++    def timeout_callback(x, convergence):
++        # Check if timeout exceeded
++        if time.time() - start_time > max_time:
++            return True
++        # Also check for convergence - stop if improvement is minimal
++        return False
++
++    # Enhanced DE parameters for better exploration
+     result = differential_evolution(
+         objective_with_penalty,
+         bounds,
+         seed=42,
+-        maxiter=500,
+-        popsize=20,
+-        mutation=(0.5, 1),
+-        recombination=0.7,
++        maxiter=800,      # Increased iterations
++        popsize=30,       # Larger population for better exploration
++        mutation=(0.7, 1), # Higher mutation rate for more exploration
++        recombination=0.9, # Higher recombination for more mixing
+         disp=False,
+-        tol=1e-6,
+-        callback=lambda x, convergence: time.time() - start_time > max_time
++        tol=1e-8,         # Tighter tolerance
++        callback=timeout_callback
+     )
+ 
+     # Extract best solution
+     best_points = result.x.reshape(n, d)
+ 
+-    # Phase 3: Local refinement with multiple strategies
+-    refined_points = local_refinement(best_points)
+-
+-    # Phase 4: Multiple restarts for better exploration
++    # Phase 3: Enhanced local refinement with better convergence detection
++    refined_points = enhanced_local_refinement(best_points)
++
++    # Phase 4: More comprehensive restarts with adaptive perturbation
+     best_final_points = refined_points.copy()
+     best_final_ratio = compute_min_max_ratio(refined_points)
+ 
+-    # Try several random restarts
+-    for restart in range(3):
+-        np.random.seed(restart * 1000 + 42)
+-
+-        # Create slightly perturbed starting point
+-        perturbed = refined_points + np.random.normal(0, 0.005, refined_points.shape)
+-        perturbed = np.clip(perturbed, 0, 1)
+-
+-        # Refine the perturbed point
+-        restarted_points = local_refinement(perturbed)
+-        restarted_ratio = compute_min_max_ratio(restarted_points)
+-
+-        if restarted_ratio < best_final_ratio:  # Better ratio
+-            best_final_ratio = restarted_ratio
+-            best_final_points = restarted_points.copy()
++    # Try multiple restart strategies with different perturbations
++    restart_strategies = [
++        (0.005, 1),   # Small perturbation, fewer restarts
++        (0.01, 2),    # Medium perturbation
++        (0.02, 2),    # Large perturbation
++    ]
++
++    for strategy_idx, (perturbation_scale, num_restarts) in enumerate(restart_strategies):
++        for restart in range(num_restarts):
++            np.random.seed(strategy_idx * 1000 + restart * 100 + 42)
++
++            # Create perturbed starting point with appropriate scale
++            perturbed = refined_points + np.random.normal(0, perturbation_scale, refined_points.shape)
++            perturbed = np.clip(perturbed, 0, 1)
++
++            # Refine the perturbed point
++            restarted_points = enhanced_local_refinement(perturbed)
++            restarted_ratio = compute_min_max_ratio(restarted_points)
++
++            if restarted_ratio < best_final_ratio:  # Better ratio (more negative means better)
++                best_final_ratio = restarted_ratio
++                best_final_points = restarted_points.copy()
+ 
+     # Final verification
+     final_points = best_final_points
+ 
+     # Ensure bounds are respected
+     final_points = np.clip(final_points, 0, 1)
+ 
+     # Verify we have correct shape
+     assert final_points.shape == (14, 3), f"Expected shape (14, 3), got {final_points.shape}"
+ 
+     return final_points
+ 
+ 
+ # EVOLVE-BLOCK-END

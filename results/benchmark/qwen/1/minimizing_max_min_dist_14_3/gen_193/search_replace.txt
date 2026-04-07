@@ -1,0 +1,279 @@
+<NAME>
+add_adaptive_constraint_tightening
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive constraint tightening during optimization iterations to allow more flexible exploration in early phases while enforcing stricter feasibility conditions later. This builds upon successful coarse-to-fine optimization approaches that have been validated in high-performing programs, enabling more aggressive exploration early while ensuring final feasibility and convergence stability.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def enhanced_objective_function(x_flat, points_count=14):
+    """Enhanced objective function incorporating multiple optimization criteria."""
+    points_reshaped = x_flat.reshape(points_count, 3)
+
+    # Ensure points are on unit sphere
+    norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+    normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+
+    # Calculate pairwise distances
+    distances = cdist(normalized_points, normalized_points)
+    np.fill_diagonal(distances, np.inf)
+
+    if distances.size == 0:
+        return 1e10
+
+    # Get min and max distances
+    d_min = np.min(distances)
+    d_max = np.max(distances)
+
+    if d_max < 1e-12:
+        return 1e10
+
+    # Calculate ratio
+    ratio = d_min / d_max
+
+    # Add regularization penalty for distance variance
+    # This encourages more uniform spacing
+    distance_var = np.var(distances[distances != np.inf])
+    dist_mean = np.mean(distances[distances != np.inf])
+
+    if dist_mean > 1e-12:
+        variance_penalty = distance_var / (dist_mean ** 2)
+        # Penalize high variance while maximizing ratio
+        # Higher lambda means stronger emphasis on uniformity
+        lambda_reg = 0.15
+        adjusted_ratio = ratio - lambda_reg * variance_penalty
+    else:
+        adjusted_ratio = ratio
+
+    # Return negative for minimization (since we want to maximize ratio)
+    return -adjusted_ratio
+=======
+def enhanced_objective_function(x_flat, points_count=14, iteration_step=0, max_steps=1000):
+    """Enhanced objective function incorporating multiple optimization criteria."""
+    points_reshaped = x_flat.reshape(points_count, 3)
+
+    # Ensure points are on unit sphere
+    norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+    normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+
+    # Calculate pairwise distances
+    distances = cdist(normalized_points, normalized_points)
+    np.fill_diagonal(distances, np.inf)
+
+    if distances.size == 0:
+        return 1e10
+
+    # Get min and max distances
+    d_min = np.min(distances)
+    d_max = np.max(distances)
+
+    if d_max < 1e-12:
+        return 1e10
+
+    # Calculate ratio
+    ratio = d_min / d_max
+
+    # Add regularization penalty for distance variance
+    # This encourages more uniform spacing
+    distance_var = np.var(distances[distances != np.inf])
+    dist_mean = np.mean(distances[distances != np.inf])
+
+    if dist_mean > 1e-12:
+        variance_penalty = distance_var / (dist_mean ** 2)
+        # Penalize high variance while maximizing ratio
+        # Higher lambda means stronger emphasis on uniformity
+        lambda_reg = 0.15
+        adjusted_ratio = ratio - lambda_reg * variance_penalty
+    else:
+        adjusted_ratio = ratio
+
+    # Adaptive constraint tightening - gradually move toward tighter constraints
+    # Start with looser bounds (allowing larger diameters) and tighten over time
+    if iteration_step < max_steps:
+        # Linear decay from 2.8 to 2.0 diameter constraint
+        max_diameter = 2.8 - (iteration_step / max_steps) * 0.8
+        # Only apply the constraint if the current max distance exceeds the target
+        if d_max > max_diameter:
+            # Penalize solutions that exceed the constraint
+            penalty = (d_max - max_diameter) * 1000
+            adjusted_ratio -= penalty
+
+    # Return negative for minimization (since we want to maximize ratio)
+    return -adjusted_ratio
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_optimization_stage(points, max_iter=500, stage=1):
+    """Perform adaptive optimization stage with varying parameters."""
+    n = len(points)
+
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n, 3)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    constraints = {'type': 'eq', 'fun': constraint_sphere}
+    bounds = [(-2, 2) for _ in range(n * 3)]
+
+    # Adaptive parameters based on stage
+    if stage == 1:  # Coarse optimization
+        method = 'SLSQP'
+        options = {'maxiter': max_iter//3, 'ftol': 1e-6, 'gtol': 1e-6}
+        tol = 1e-6
+    elif stage == 2:  # Medium optimization
+        method = 'trust-constr'
+        options = {'maxiter': max_iter//3, 'xtol': 1e-9, 'gtol': 1e-9}
+        tol = 1e-9
+    else:  # Fine optimization
+        method = 'L-BFGS-B'
+        options = {'maxiter': max_iter//3, 'ftol': 1e-12, 'gtol': 1e-12}
+        tol = 1e-12
+
+    try:
+        result = minimize(
+            enhanced_objective_function,
+            points.flatten(),
+            method=method,
+            bounds=bounds,
+            constraints=constraints,
+            options=options,
+            tol=tol
+        )
+
+        if result.success:
+            optimized_points = result.x.reshape(n, 3)
+            # Ensure points are on unit sphere
+            norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+            normalized_points = optimized_points / np.maximum(norms, 1e-12)
+            return normalized_points
+    except Exception:
+        pass
+
+    return points
+=======
+def adaptive_optimization_stage(points, max_iter=500, stage=1, iteration_offset=0):
+    """Perform adaptive optimization stage with varying parameters."""
+    n = len(points)
+
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n, 3)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    constraints = {'type': 'eq', 'fun': constraint_sphere}
+    bounds = [(-2, 2) for _ in range(n * 3)]
+
+    # Adaptive parameters based on stage
+    if stage == 1:  # Coarse optimization
+        method = 'SLSQP'
+        options = {'maxiter': max_iter//3, 'ftol': 1e-6, 'gtol': 1e-6}
+        tol = 1e-6
+    elif stage == 2:  # Medium optimization
+        method = 'trust-constr'
+        options = {'maxiter': max_iter//3, 'xtol': 1e-9, 'gtol': 1e-9}
+        tol = 1e-9
+    else:  # Fine optimization
+        method = 'L-BFGS-B'
+        options = {'maxiter': max_iter//3, 'ftol': 1e-12, 'gtol': 1e-12}
+        tol = 1e-12
+
+    try:
+        # Create wrapper to pass iteration info
+        def objective_wrapper(x_flat):
+            return enhanced_objective_function(x_flat, n, iteration_offset, max_iter)
+
+        result = minimize(
+            objective_wrapper,
+            points.flatten(),
+            method=method,
+            bounds=bounds,
+            constraints=constraints,
+            options=options,
+            tol=tol
+        )
+
+        if result.success:
+            optimized_points = result.x.reshape(n, 3)
+            # Ensure points are on unit sphere
+            norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+            normalized_points = optimized_points / np.maximum(norms, 1e-12)
+            return normalized_points
+    except Exception:
+        pass
+
+    return points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Try each strategy with optimized multi-stage approach
+    for strategy_name, initial_points in strategies:
+        # Add slight random noise to break symmetry
+        np.random.seed(42)
+        noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
+
+        # Ensure all points are on unit sphere
+        norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+        normalized_points = noisy_points / np.maximum(norms, 1e-12)
+
+        # Multi-stage optimization
+        optimized_points = adaptive_optimization_stage(normalized_points, max_iter=500, stage=1)
+        optimized_points = adaptive_optimization_stage(optimized_points, max_iter=500, stage=2)
+        optimized_points = adaptive_optimization_stage(optimized_points, max_iter=500, stage=3)
+
+        # Evaluate solution
+        ratio = min_max_dist_ratio(optimized_points)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = optimized_points.copy()
+=======
+    # Try each strategy with optimized multi-stage approach
+    for strategy_name, initial_points in strategies:
+        # Add slight random noise to break symmetry
+        np.random.seed(42)
+        noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
+
+        # Ensure all points are on unit sphere
+        norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+        normalized_points = noisy_points / np.maximum(norms, 1e-12)
+
+        # Multi-stage optimization with iteration tracking
+        iteration_counter = 0
+        max_total_iterations = 1500  # 500 per stage
+        optimized_points = adaptive_optimization_stage(
+            normalized_points,
+            max_iter=500,
+            stage=1,
+            iteration_offset=iteration_counter
+        )
+        iteration_counter += 500
+        optimized_points = adaptive_optimization_stage(
+            optimized_points,
+            max_iter=500,
+            stage=2,
+            iteration_offset=iteration_counter
+        )
+        iteration_counter += 500
+        optimized_points = adaptive_optimization_stage(
+            optimized_points,
+            max_iter=500,
+            stage=3,
+            iteration_offset=iteration_counter
+        )
+
+        # Evaluate solution
+        ratio = min_max_dist_ratio(optimized_points)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = optimized_points.copy()
+>>>>>>> REPLACE
+</DIFF>

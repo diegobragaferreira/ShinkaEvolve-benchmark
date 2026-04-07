@@ -1,0 +1,506 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import minimize
+from scipy.spatial import SphericalVoronoi
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Optimized version using advanced evolutionary and refinement techniques.
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum pairwise distances."""
+        if len(points) < 2:
+            return 0.0
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max == 0:
+            return 0.0
+        return d_min / d_max
+
+    def initialize_points_on_sphere(n):
+        """Initialize points on a unit sphere using fibonacci spiral method."""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            theta = np.arccos(1 - 2 * (i / (n - 1)))
+            phi = np.arctan2(np.sin(i * 2 * np.pi / golden_ratio), np.cos(i * 2 * np.pi / golden_ratio))
+            x = np.sin(theta) * np.cos(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def initialize_fibonacci_sphere(n):
+        """Better fibonacci-based sphere initialization"""
+        points = []
+        phi = np.pi * (3.0 - np.sqrt(5.0))  # golden angle
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            theta = phi * i  # golden angle increment
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            points.append([x, y, z])
+        return np.array(points)
+
+    def initialize_regular_polyhedron():
+        """Initialize points based on regular icosahedron vertices"""
+        # Regular icosahedron vertices (normalized)
+        phi = (1 + np.sqrt(5)) / 2
+        vertices = [
+            (-1, 0, phi), (1, 0, phi), (-1, 0, -phi), (1, 0, -phi),
+            (0, phi, 1), (0, phi, -1), (0, -phi, 1), (0, -phi, -1),
+            (phi, 1, 0), (-phi, 1, 0), (phi, -1, 0), (-phi, -1, 0)
+        ]
+        vertices = np.array(vertices)
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices[0])
+        # Add more points by taking edge midpoints for better distribution
+        edges = []
+        for i in range(len(vertices)):
+            for j in range(i+1, len(vertices)):
+                dist = np.linalg.norm(vertices[i] - vertices[j])
+                if abs(dist - 2) < 0.1:  # approximately the edge length of our icosahedron
+                    edges.append((i, j))
+
+        # Add midpoints of edges
+        additional_points = []
+        for i, j in edges[:2]:  # Take first 2 edges for simplicity
+            midpoint = (vertices[i] + vertices[j]) / 2
+            midpoint = midpoint / np.linalg.norm(midpoint)  # normalize
+            additional_points.append(midpoint)
+
+        # Combine and ensure we have proper number of points
+        all_points = np.vstack([vertices, additional_points])
+        if len(all_points) > 14:
+            # Select 14 points that are well spread
+            return all_points[:14]
+        elif len(all_points) < 14:
+            # Fill with fibonacci points
+            fib_points = initialize_fibonacci_sphere(14 - len(all_points))
+            return np.vstack([all_points, fib_points])
+        else:
+            return all_points
+
+    def voronoi_entropy_score(points):
+        """
+        Calculate entropy-based score of Voronoi cell distribution.
+        High entropy indicates more uniform cell distribution.
+        """
+        try:
+            sv = SphericalVoronoi(points)
+            areas = sv.calculate_areas()
+            # Normalize areas
+            areas = areas / np.sum(areas)
+            # Entropy calculation
+            entropy = -np.sum(areas * np.log(areas + 1e-10))
+            return entropy
+        except:
+            # Fallback for cases where SphericalVoronoi fails
+            return 0.0
+
+    def multi_objective_fitness(points, ratio_weight=1.0, uniformity_weight=0.1):
+        """Fitness function combining distance ratio and uniformity."""
+        ratio = calculate_min_max_ratio(points)
+        uniformity = voronoi_entropy_score(points)
+        # Combined fitness: prioritize both uniformity and distance ratio
+        return ratio_weight * ratio + uniformity_weight * uniformity
+
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_fitness = multi_objective_fitness(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        # Track statistics for adaptive perturbation scaling
+        recent_distances = []
+        distance_window_size = 50
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Compute current distance statistics for adaptive perturbation
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+            max_dist = np.max(distances) if len(distances) > 0 else 1.0
+            avg_dist = np.mean(distances) if len(distances) > 0 else 1.0
+
+            # Store recent distances for adaptive scaling
+            recent_distances.append(min_dist)
+            if len(recent_distances) > distance_window_size:
+                recent_distances.pop(0)
+
+            # Enhanced adaptive perturbation with more sophisticated metrics
+            base_perturbation = temperature * 0.05
+
+            # Get comprehensive distance statistics
+            distances = pdist(current_points)
+            if len(distances) > 0:
+                d_min = np.min(distances)
+                d_max = np.max(distances)
+                d_mean = np.mean(distances)
+                d_std = np.std(distances)
+
+                # Calculate distance distribution metrics
+                spread_ratio = d_min / (d_mean + 1e-10)  # Ratio of min to mean
+                std_ratio = d_std / (d_mean + 1e-10)     # Standard deviation ratio
+
+                # Enhanced scaling based on multiple factors
+                # 1. Cluster tightness
+                if spread_ratio < 0.25:
+                    # Very tight clusters - aggressive perturbation
+                    cluster_factor = 3.0
+                elif spread_ratio < 0.5:
+                    # Moderate clustering - strong perturbation
+                    cluster_factor = 2.0
+                elif spread_ratio < 0.75:
+                    # Reasonable spacing - moderate perturbation
+                    cluster_factor = 1.0
+                else:
+                    # Well-spaced - fine-tuning perturbation
+                    cluster_factor = 0.5
+
+                # 2. Distance variability
+                if std_ratio > 0.4:
+                    # High variability - encourage exploration
+                    variability_factor = 1.2
+                elif std_ratio < 0.2:
+                    # Low variability - encourage exploitation
+                    variability_factor = 0.8
+                else:
+                    variability_factor = 1.0
+
+                # 3. Overall configuration quality via Voronoi entropy
+                voronoi_entropy = voronoi_entropy_score(current_points)
+                entropy_factor = 1.0 + 0.3 * voronoi_entropy  # Higher entropy = more uniform
+
+                # Combine factors
+                perturbation_magnitude = base_perturbation * cluster_factor * variability_factor * entropy_factor
+
+                # 4. Dynamic adjustment based on recent performance trends
+                if len(recent_distances) > 5:
+                    recent_avg = np.mean(recent_distances[-5:])
+                    recent_var = np.var(recent_distances[-5:])
+                    # If recent trends suggest stagnation, increase perturbation
+                    if recent_var < 0.01 and recent_avg > 0.3:
+                        perturbation_magnitude *= 1.2
+                    # If recent trends show rapid improvement, reduce perturbation slightly
+                    elif recent_var > 0.05:
+                        perturbation_magnitude *= 0.9
+            else:
+                perturbation_magnitude = base_perturbation
+
+            # Additional adaptive factors for better convergence
+            # Reduce perturbation if we're in late stages of optimization
+            stage_factor = 1.0 - (iteration / max_iterations) * 0.7
+            perturbation_magnitude *= stage_factor
+
+            # Cap the perturbation magnitude with more conservative bounds
+            perturbation_magnitude = min(0.2, max(0.005, perturbation_magnitude))
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+            new_fitness = multi_objective_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+
+    def multi_start_optimization(initial_points_list, max_iterations=5000):
+        """Run optimization from multiple starting points and return the best result"""
+        best_points = None
+        best_ratio = 0.0
+
+        for i, initial_points in enumerate(initial_points_list):
+            # Run adaptive SA from this starting point
+            optimized_points, ratio = adaptive_simulated_annealing(initial_points, max_iterations)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+        return best_points, best_ratio
+
+    def local_refinement(points, iterations=500):
+        """Improved local refinement with better convergence handling"""
+        # Convert points to flat array for optimization
+        initial_flat = points.flatten()
+
+        def objective(flat_points):
+            points_local = flat_points.reshape(-1, 3)
+            # Keep points on unit sphere
+            for i in range(len(points_local)):
+                norm = np.linalg.norm(points_local[i])
+                if norm > 0:
+                    points_local[i] = points_local[i] / norm
+            return -calculate_min_max_ratio(points_local)  # negative for maximization
+
+        # Use L-BFGS-B for local refinement
+        try:
+            result = minimize(
+                objective,
+                initial_flat,
+                method='L-BFGS-B',
+                options={'maxiter': iterations, 'ftol': 1e-8, 'gtol': 1e-8},
+                tol=1e-6
+            )
+            refined_points = result.x.reshape(-1, 3)
+            # Project back to sphere
+            for i in range(len(refined_points)):
+                norm = np.linalg.norm(refined_points[i])
+                if norm > 0:
+                    refined_points[i] = refined_points[i] / norm
+            return refined_points, -result.fun
+        except Exception as e:
+            # If optimization fails, fall back to simple local search
+            current_points = points.copy()
+            best_ratio = calculate_min_max_ratio(current_points)
+            best_points = current_points.copy()
+
+            for _ in range(iterations):
+                neighbor_points = current_points.copy()
+                point_idx = np.random.randint(len(neighbor_points))
+                perturbation = np.random.normal(0, 0.001, 3)
+                neighbor_points[point_idx] += perturbation
+
+                # Project back to sphere
+                norm = np.linalg.norm(neighbor_points[point_idx])
+                if norm > 0:
+                    neighbor_points[point_idx] /= norm
+
+                new_ratio = calculate_min_max_ratio(neighbor_points)
+
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    current_points = neighbor_points.copy()
+
+            return best_points, best_ratio
+
+    def project_to_unit_cube(points):
+        """Project points to unit cube [0,1]^3"""
+        # Find min/max along each axis
+        min_coords = np.min(points, axis=0)
+        max_coords = np.max(points, axis=0)
+
+        # Handle case where there's no variation
+        ranges = max_coords - min_coords
+        if np.any(ranges == 0):
+            # If any dimension has no variation, return points centered at 0.5
+            return np.full_like(points, 0.5)
+
+        # Scale to [0,1] range
+        normalized = (points - min_coords) / ranges
+
+        # Ensure they're clipped to [0,1]
+        return np.clip(normalized, 0, 1)
+
+    def generate_neighbor_config(current_points, perturbation_strength=0.05):
+        """Generate neighbor configuration with better spherical constraint handling"""
+        neighbor_points = current_points.copy()
+
+        # Select random points to modify
+        num_modify = max(1, len(current_points) // 4)
+        indices_to_modify = np.random.choice(len(current_points), num_modify, replace=False)
+
+        for idx in indices_to_modify:
+            # Generate perturbation that preserves spherical nature
+            random_vec = np.random.randn(3)
+            # Project onto sphere surface normal (tangent plane)
+            normal_vec = current_points[idx]
+            tangent_vec = random_vec - np.dot(random_vec, normal_vec) * normal_vec
+            # Normalize tangent vector
+            tangent_norm = np.linalg.norm(tangent_vec)
+            if tangent_norm > 1e-10:
+                tangent_vec = tangent_vec / tangent_norm
+            # Apply perturbation
+            perturbation = tangent_vec * np.random.normal(0, perturbation_strength)
+            neighbor_points[idx] += perturbation
+            # Project back to sphere
+            norm = np.linalg.norm(neighbor_points[idx])
+            if norm > 0:
+                neighbor_points[idx] = neighbor_points[idx] / norm
+
+        return neighbor_points
+
+    def evolutionary_optimize(initial_points, max_generations=2000, population_size=20):
+        """
+        Evolutionary optimization with improved operators.
+        """
+        # Initialize population with diverse individuals
+        population = [initial_points.copy()]
+        for i in range(population_size - 1):
+            individual = generate_neighbor_config(initial_points, 0.1)
+            population.append(individual)
+
+        best_individual = None
+        best_fitness = -np.inf
+
+        for generation in range(max_generations):
+            # Evaluate fitness for all individuals
+            fitness_scores = []
+            for individual in population:
+                fitness = multi_objective_fitness(individual)
+                fitness_scores.append(fitness)
+
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = individual.copy()
+
+            # Selection: tournament selection with elitism
+            selected_population = []
+
+            # Elitism: keep best individual
+            best_idx = np.argmax(fitness_scores)
+            selected_population.append(population[best_idx].copy())
+
+            # Tournament selection for rest
+            for _ in range(population_size - 1):
+                tournament_size = 3
+                tournament_indices = np.random.choice(len(population), tournament_size)
+                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                winner_index = tournament_indices[np.argmax(tournament_fitness)]
+                selected_population.append(population[winner_index].copy())
+
+            # Crossover and mutation
+            new_population = []
+            for i in range(0, len(selected_population), 2):
+                parent1 = selected_population[i]
+                parent2 = selected_population[min(i+1, len(selected_population)-1)]
+
+                # Blend crossover
+                alpha = np.random.random()
+                child1 = parent1 * alpha + parent2 * (1 - alpha)
+                child2 = parent2 * alpha + parent1 * (1 - alpha)
+
+                # Project children back to sphere
+                for j in range(len(child1)):
+                    norm = np.linalg.norm(child1[j])
+                    if norm > 0:
+                        child1[j] = child1[j] / norm
+                    norm = np.linalg.norm(child2[j])
+                    if norm > 0:
+                        child2[j] = child2[j] / norm
+
+                # Mutation with adaptive strength
+                mutation_strength = max(0.01, 0.1 * (1 - generation / max_generations))
+                child1 = generate_neighbor_config(child1, mutation_strength)
+                child2 = generate_neighbor_config(child2, mutation_strength)
+
+                new_population.extend([child1, child2])
+
+            # Trim population to exact size
+            population = new_population[:population_size]
+
+            # Occasionally introduce diversity
+            if generation % 100 == 0 and generation > 0:
+                # Add some random individuals to prevent stagnation
+                for i in range(2):
+                    random_individual = generate_neighbor_config(initial_points, 0.2)
+                    population.append(random_individual)
+                    population.pop(0)  # Remove oldest
+
+        return best_individual, best_fitness
+
+    # Main execution flow
+    np.random.seed(42)
+
+    # Try multiple initialization strategies
+    initial_strategies = []
+
+    # Strategy 1: Fibonacci sphere initialization (multiple seeds)
+    for seed in [42, 123, 456]:
+        np.random.seed(seed)
+        init1 = initialize_fibonacci_sphere(14)
+        initial_strategies.append(("fibonacci", init1))
+
+    # Strategy 2: Icosahedron-based initialization
+    try:
+        init2 = initialize_regular_polyhedron()
+        initial_strategies.append(("icosahedron", init2))
+    except:
+        pass
+
+    # Strategy 3: Random initialization with different seeds
+    for seed in [789, 999, 111]:
+        np.random.seed(seed)
+        init3 = np.random.uniform(-1, 1, (14, 3))
+        # Normalize to unit sphere
+        for i in range(len(init3)):
+            norm = np.linalg.norm(init3[i])
+            if norm > 0:
+                init3[i] = init3[i] / norm
+        initial_strategies.append(("random", init3))
+
+    # Strategy 4: Hybrid strategy - start with Voronoi evolution then refine
+    try:
+        initial_points = initialize_points_on_sphere(14)
+        evolved_points, _ = evolutionary_optimize(initial_points, max_generations=1000)
+        initial_strategies.append(("evolved_voronoi", evolved_points))
+    except:
+        pass
+
+    # Run multi-start optimization on all strategies
+    best_points, best_ratio = multi_start_optimization(
+        [strategy[1] for strategy in initial_strategies],
+        max_iterations=8000
+    )
+
+    # Do final local refinement with higher iterations
+    final_points, final_ratio = local_refinement(best_points, iterations=1000)
+
+    # Normalize to unit cube [0,1]^3
+    points_in_cube = project_to_unit_cube(final_points)
+
+    return points_in_cube
+
+# EVOLVE-BLOCK-END

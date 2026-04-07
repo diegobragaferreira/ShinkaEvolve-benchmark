@@ -1,0 +1,311 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    
+    class PointDispersionOptimizer:
+        """Optimizes point placement to maximize min/max distance ratio using simulated annealing."""
+        
+        def __init__(self, num_points=16, dimension=2):
+            self.num_points = num_points
+            self.dimension = dimension
+            self.best_points = None
+            self.best_ratio = 0.0
+            self.iteration_count = 0
+            
+        def _compute_min_max_ratio(self, points):
+            """Compute the ratio of minimum to maximum distance between all point pairs."""
+            if len(points) < 2:
+                return 0.0
+            
+            # Use cKDTree for efficient nearest neighbor search
+            tree = cKDTree(points)
+            distances, indices = tree.query(points, k=2)
+            d_min = np.min(distances[:, 1])
+            
+            # For maximum distance, use direct computation for small sets
+            distances_matrix = cdist(points, points)
+            np.fill_diagonal(distances_matrix, 0)
+            d_max = np.max(distances_matrix)
+            
+            # Avoid division by zero
+            if d_max <= 0:
+                return 0.0
+                
+            return d_min / d_max
+        
+        def _compute_min_max_ratio_with_boundary_penalty(self, points, penalty_factor=1e6):
+            """Compute ratio with penalty for points near boundaries."""
+            # Vectorized boundary checking
+            boundary_distances = np.minimum(
+                points[:, 0], 
+                1 - points[:, 0]
+            )
+            boundary_distances = np.minimum(
+                boundary_distances,
+                np.minimum(points[:, 1], 1 - points[:, 1])
+            )
+            
+            # Identify points near boundaries
+            near_boundary_mask = boundary_distances < 0.01
+            if np.any(near_boundary_mask):
+                # Apply penalty
+                boundary_penalty = penalty_factor * np.sum(boundary_distances[near_boundary_mask])
+                base_ratio = self._compute_min_max_ratio(points)
+                return base_ratio - boundary_penalty
+            else:
+                return self._compute_min_max_ratio(points)
+        
+        def _initialize_hexagonal_points(self):
+            """Initialize points using a controlled hexagonal arrangement with deliberate asymmetry."""
+            points = np.zeros((self.num_points, self.dimension))
+            
+            # Create a hexagonal-like grid with irregularities
+            rows, cols = 4, 4
+            row_spacing = 1.0 / (rows - 1) if rows > 1 else 0.25
+            col_spacing = np.sqrt(3) / 2.0 * row_spacing
+            
+            # Generate base hexagonal pattern
+            idx = 0
+            for row in range(rows):
+                for col in range(cols):
+                    if idx >= self.num_points:
+                        break
+                        
+                    # Base position with alternating offset
+                    x = col * row_spacing + (row % 2) * row_spacing * 0.5
+                    y = row * col_spacing
+                    
+                    # Add controlled noise to break symmetry
+                    noise_strength = 0.01
+                    x += np.random.normal(0, noise_strength * 0.5)
+                    y += np.random.normal(0, noise_strength * 0.5)
+                    
+                    points[idx, 0] = x
+                    points[idx, 1] = y
+                    idx += 1
+                    
+            # Normalize to [0,1] x [0,1] while preserving relative positions
+            x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
+            y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
+            
+            if x_max > x_min:
+                points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
+            if y_max > y_min:
+                points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
+                
+            # Ensure all points are within bounds
+            points = np.clip(points, 0, 1)
+            
+            # Apply additional asymmetric perturbations to key points
+            asymmetry_indices = [0, 3, 5, 9, 12, 15]  # Corner and center points
+            for idx in asymmetry_indices:
+                if idx < len(points):
+                    points[idx] += np.random.uniform(-0.015, 0.015, 2)
+                    points[idx] = np.clip(points[idx], 0, 1)
+            
+            return points
+        
+        def _initialize_random_points(self):
+            """Initialize points with completely random distribution."""
+            return np.random.rand(self.num_points, self.dimension)
+        
+        def _initialize_triangular_points(self):
+            """Initialize points using a triangular lattice arrangement."""
+            points = []
+            # Create triangular lattice with approximately 16 points
+            rows = 5
+            cols = 4
+
+            for i in range(rows):
+                for j in range(cols):
+                    if len(points) >= self.num_points:
+                        break
+                    # Triangular offset pattern
+                    x = j + (i % 2) * 0.5
+                    y = i * np.sqrt(3) / 2
+                    points.append([x, y])
+
+            points = np.array(points[:self.num_points])
+
+            # Normalize to [0,1] x [0,1]
+            x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
+            y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
+
+            if x_max > x_min:
+                points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
+            if y_max > y_min:
+                points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
+
+            # Add small noise to break symmetry
+            points += np.random.normal(0, 0.01, points.shape)
+            points = np.clip(points, 0, 1)
+
+            return points
+        
+        def _generate_neighbor(self, points, step_size=0.02):
+            """Generate a neighboring solution with adaptive move strategies."""
+            new_points = points.copy()
+            
+            # Choose move type: single point, pair move, or cluster move
+            move_type = np.random.choice(['single', 'pair', 'cluster'], p=[0.6, 0.3, 0.1])
+            
+            if move_type == 'single':
+                # Single point move
+                idx = np.random.randint(len(points))
+                movement = np.random.normal(0, step_size, 2)
+                new_points[idx] += movement
+                
+            elif move_type == 'pair':
+                # Move two nearby points together
+                # Find two close points using KDTree
+                tree = cKDTree(points)
+                _, indices = tree.query(points, k=3)  # Get 2 nearest neighbors + self
+                # Select two different points that are close
+                pair_indices = indices[np.random.randint(len(indices)), 1:3]  # Skip self
+                # Move both points together
+                movement = np.random.normal(0, step_size, 2)
+                new_points[pair_indices[0]] += movement
+                new_points[pair_indices[1]] += movement
+                
+            else:  # cluster
+                # Move a small cluster of points together
+                num_cluster = min(3, max(2, self.num_points // 5))
+                cluster_indices = np.random.choice(len(points), num_cluster, replace=False)
+                # Move them with adaptive step
+                movement = np.random.normal(0, step_size * 0.7, 2)
+                for idx in cluster_indices:
+                    new_points[idx] += movement
+                    
+            # Apply boundary constraints
+            new_points = np.clip(new_points, 0, 1)
+            
+            return new_points
+        
+        def _adaptive_cooling_schedule(self, iteration, max_iterations, base_cooling_rate=0.9995):
+            """Provide adaptive cooling based on progress."""
+            # Start with a high temperature and cool based on iteration
+            temperature = 0.1 * (base_cooling_rate ** iteration)
+            
+            # Accelerate cooling if we've made significant progress recently
+            if iteration > max_iterations * 0.7:
+                temperature *= (0.999 ** (iteration - max_iterations * 0.7))
+                
+            return max(temperature, 1e-6)
+        
+        def _optimize_single_start(self, max_iterations=5000):
+            """Run the simulated annealing optimization from one starting point."""
+            # Initialize points
+            current_points = self._initialize_hexagonal_points()
+            current_ratio = self._compute_min_max_ratio_with_boundary_penalty(current_points)
+            
+            self.best_points = current_points.copy()
+            self.best_ratio = current_ratio
+            
+            # Tracking variables for adaptive cooling
+            recent_improvements = []
+            max_recent = 50
+            
+            # Optimization loop
+            for iteration in range(max_iterations):
+                # Adaptive step size based on temperature
+                temperature = self._adaptive_cooling_schedule(iteration, max_iterations)
+                step_size = temperature * 0.5
+                
+                # Generate neighbor solution
+                new_points = self._generate_neighbor(current_points, step_size=step_size)
+                
+                # Evaluate new configuration
+                new_ratio = self._compute_min_max_ratio_with_boundary_penalty(new_points)
+                
+                # Accept or reject based on Metropolis criterion
+                if new_ratio > current_ratio or np.random.random() < np.exp((new_ratio - current_ratio) / temperature):
+                    current_points = new_points
+                    current_ratio = new_ratio
+                    
+                    # Update best solution
+                    if current_ratio > self.best_ratio:
+                        self.best_points = current_points.copy()
+                        self.best_ratio = current_ratio
+                        recent_improvements = []  # Reset improvement tracking
+                    else:
+                        # Track recent improvements
+                        if len(recent_improvements) < max_recent:
+                            recent_improvements.append(current_ratio)
+                        else:
+                            recent_improvements.pop(0)
+                            recent_improvements.append(current_ratio)
+                
+                # Adaptive cooling based on recent improvement variance
+                if len(recent_improvements) >= 10:
+                    recent_std = np.std(recent_improvements[-10:])
+                    if recent_std < 0.001 * self.best_ratio:  # Very little variation
+                        pass  # Already handled by cooling schedule
+                
+                self.iteration_count = iteration
+                
+                # Early stopping if we're getting very good results
+                if self.best_ratio > 0.3:  # Early exit threshold
+                    break
+                    
+            return self.best_points
+        
+        def optimize(self, max_iterations=5000, num_starts=3):
+            """Run optimization from multiple starting points."""
+            best_overall_ratio = 0.0
+            best_overall_points = None
+            
+            # Multiple restarts with different initialization strategies
+            initializers = [
+                self._initialize_hexagonal_points,
+                self._initialize_random_points,
+                self._initialize_triangular_points
+            ]
+            
+            # Run optimization from different starting points
+            for i, init_func in enumerate(initializers[:num_starts]):
+                np.random.seed(42 + i)  # Different seed for each restart
+                
+                # Initialize from different starting points
+                current_points = init_func()
+                current_ratio = self._compute_min_max_ratio_with_boundary_penalty(current_points)
+                
+                # Local optimization
+                local_best_points = current_points.copy()
+                local_best_ratio = current_ratio
+                
+                # Run local optimization
+                local_best_points = self._optimize_single_start(max_iterations)
+                local_best_ratio = self._compute_min_max_ratio_with_boundary_penalty(local_best_points)
+                
+                # Update global best
+                if local_best_ratio > best_overall_ratio:
+                    best_overall_ratio = local_best_ratio
+                    best_overall_points = local_best_points.copy()
+                    
+            self.best_points = best_overall_points
+            self.best_ratio = best_overall_ratio
+            
+            return self.best_points
+    
+    # Create optimizer instance
+    optimizer = PointDispersionOptimizer(num_points=16, dimension=2)
+    
+    # Run optimization
+    result = optimizer.optimize(max_iterations=5000, num_starts=3)
+    
+    return result
+
+
+# EVOLVE-BLOCK-END

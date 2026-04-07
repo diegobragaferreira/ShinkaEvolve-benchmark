@@ -1,0 +1,308 @@
+<NAME>
+improve_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current collision detection uses a brute force O(n²) approach which becomes inefficient for larger populations. I'll implement a spatial grid-based collision detection system that reduces complexity from O(n²) to near O(n) by only checking nearby hexagons instead of all pairs. This will significantly speed up the evaluation process, especially in later generations when solutions become more complex.
+
+The key insight is to use a uniform grid where each cell contains a list of hexagons that intersect with that grid cell. When checking for collisions, we only need to check hexagons in the same or adjacent cells rather than all pairs.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class ConstraintChecker:
+    """Handles constraint checking for hexagon packing"""
+
+    @staticmethod
+    def contains(hex_poly, outer_poly):
+        """Check if hexagon is completely contained within outer hexagon"""
+        return outer_poly.contains(hex_poly) or outer_poly.intersection(hex_poly).area == hex_poly.area
+
+    @staticmethod
+    def overlaps(hex1_poly, hex2_poly):
+        """Check if two hexagons overlap"""
+        return hex1_poly.intersects(hex2_poly)
+=======
+class ConstraintChecker:
+    """Handles constraint checking for hexagon packing"""
+
+    @staticmethod
+    def contains(hex_poly, outer_poly):
+        """Check if hexagon is completely contained within outer hexagon"""
+        return outer_poly.contains(hex_poly) or outer_poly.intersection(hex_poly).area == hex_poly.area
+
+    @staticmethod
+    def overlaps(hex1_poly, hex2_poly):
+        """Check if two hexagons overlap"""
+        return hex1_poly.intersects(hex2_poly)
+
+class SpatialGrid:
+    """Spatial grid for efficient collision detection"""
+
+    def __init__(self, grid_size=2.8):
+        self.grid_size = grid_size
+        self.grid = {}
+
+    def clear(self):
+        """Clear the grid"""
+        self.grid.clear()
+
+    def add_hexagon(self, hex_id, hex_poly):
+        """Add a hexagon to the spatial grid"""
+        bbox = hex_poly.bounds
+        min_x, min_y, max_x, max_y = bbox
+
+        # Determine grid cells this hexagon occupies
+        min_col = int(min_x // self.grid_size)
+        max_col = int(max_x // self.grid_size)
+        min_row = int(min_y // self.grid_size)
+        max_row = int(max_y // self.grid_size)
+
+        for col in range(min_col, max_col + 1):
+            for row in range(min_row, max_row + 1):
+                if (col, row) not in self.grid:
+                    self.grid[(col, row)] = []
+                self.grid[(col, row)].append(hex_id)
+
+    def get_neighbors(self, hex_id, hex_poly):
+        """Get potential neighbor hexagons that might collide"""
+        neighbors = []
+        bbox = hex_poly.bounds
+        min_x, min_y, max_x, max_y = bbox
+
+        # Determine grid cells this hexagon occupies
+        min_col = int(min_x // self.grid_size)
+        max_col = int(max_x // self.grid_size)
+        min_row = int(min_y // self.grid_size)
+        max_row = int(max_y // self.grid_size)
+
+        # Check neighboring cells
+        for col in range(min_col - 1, max_col + 2):
+            for row in range(min_row - 1, max_row + 2):
+                if (col, row) in self.grid:
+                    neighbors.extend(self.grid[(col, row)])
+
+        return [h_id for h_id in neighbors if h_id != hex_id]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_evaluation_with_spatial_grid
+</NAME>
+
+<DESCRIPTION>
+Modify the SolutionEvaluator to use the spatial grid for collision detection instead of checking every pair of hexagons. This dramatically improves performance by reducing collision checking complexity from O(n²) to near O(n) for well-distributed hexagons. The spatial grid approach significantly reduces the number of overlap checks needed during evaluation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SolutionEvaluator:
+    """Evaluates solution quality and feasibility"""
+
+    @staticmethod
+    def calculate_outer_radius(inner_positions, inner_angles):
+        """Calculate minimum radius needed to contain all inner hexagons"""
+        max_dist = 0
+        outer_center = (0, 0)
+
+        # Get all vertices of all inner hexagons
+        all_vertices = []
+        for i in range(len(inner_positions)):
+            pos = inner_positions[i]
+            angle = inner_angles[i]
+            hex_vertices = HexagonGeometry.vertices(pos[0], pos[1], angle)
+            all_vertices.extend(hex_vertices)
+
+        # Find maximum distance from center
+        for vertex in all_vertices:
+            dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+            max_dist = max(max_dist, dist)
+
+        # Add buffer for safety and account for hexagon shape
+        return max_dist * 1.1  # Safety factor
+
+    @staticmethod
+    def evaluate(solution):
+        """Evaluate a solution and return negative of objective (since we minimize)"""
+        # Reshape solution into positions and angles
+        positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+        angles = solution[22:]  # 11 angles
+
+        # Create inner hexagons
+        inner_hexagons = []
+        for i in range(11):
+            pos = positions[i]
+            angle = angles[i]
+            hex_poly = HexagonGeometry.polygon(pos[0], pos[1], angle)
+            inner_hexagons.append(hex_poly)
+
+        # Check containment
+        outer_radius = SolutionEvaluator.calculate_outer_radius(positions, angles)
+        # Outer hexagon with center at origin and calculated radius
+        outer_hexagon = HexagonGeometry.polygon(0, 0, 0, outer_radius)
+
+        # Check containment for all inner hexagons
+        for hex_poly in inner_hexagons:
+            if not ConstraintChecker.contains(hex_poly, outer_hexagon):
+                return 1e10  # Penalty for non-containment
+
+        # Check for overlaps
+        for i in range(11):
+            for j in range(i+1, 11):
+                if ConstraintChecker.overlaps(inner_hexagons[i], inner_hexagons[j]):
+                    return 1e10  # Penalty for overlap
+
+        # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+        return -1.0 / outer_radius
+=======
+class SolutionEvaluator:
+    """Evaluates solution quality and feasibility"""
+
+    @staticmethod
+    def calculate_outer_radius(inner_positions, inner_angles):
+        """Calculate minimum radius needed to contain all inner hexagons"""
+        max_dist = 0
+        outer_center = (0, 0)
+
+        # Get all vertices of all inner hexagons
+        all_vertices = []
+        for i in range(len(inner_positions)):
+            pos = inner_positions[i]
+            angle = inner_angles[i]
+            hex_vertices = HexagonGeometry.vertices(pos[0], pos[1], angle)
+            all_vertices.extend(hex_vertices)
+
+        # Find maximum distance from center
+        for vertex in all_vertices:
+            dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+            max_dist = max(max_dist, dist)
+
+        # Add buffer for safety and account for hexagon shape
+        return max_dist * 1.1  # Safety factor
+
+    @staticmethod
+    def evaluate(solution):
+        """Evaluate a solution and return negative of objective (since we minimize)"""
+        # Reshape solution into positions and angles
+        positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+        angles = solution[22:]  # 11 angles
+
+        # Create inner hexagons
+        inner_hexagons = []
+        for i in range(11):
+            pos = positions[i]
+            angle = angles[i]
+            hex_poly = HexagonGeometry.polygon(pos[0], pos[1], angle)
+            inner_hexagons.append(hex_poly)
+
+        # Check containment
+        outer_radius = SolutionEvaluator.calculate_outer_radius(positions, angles)
+        # Outer hexagon with center at origin and calculated radius
+        outer_hexagon = HexagonGeometry.polygon(0, 0, 0, outer_radius)
+
+        # Check containment for all inner hexagons
+        for hex_poly in inner_hexagons:
+            if not ConstraintChecker.contains(hex_poly, outer_hexagon):
+                return 1e10  # Penalty for non-containment
+
+        # Check for overlaps using spatial grid for efficiency
+        spatial_grid = SpatialGrid()
+
+        # Add all hexagons to spatial grid
+        for i, hex_poly in enumerate(inner_hexagons):
+            spatial_grid.add_hexagon(i, hex_poly)
+
+        # Check overlaps efficiently
+        for i, hex_poly in enumerate(inner_hexagons):
+            neighbors = spatial_grid.get_neighbors(i, hex_poly)
+            for j in neighbors:
+                if i < j and ConstraintChecker.overlaps(inner_hexagons[i], inner_hexagons[j]):
+                    return 1e10  # Penalty for overlap
+
+        # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+        return -1.0 / outer_radius
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_local_refinement
+</NAME>
+
+<DESCRIPTION>
+Optimize the local refinement process by using a more efficient coordinate descent approach. Instead of trying all possible steps for each parameter, we'll use a single step size and only update parameters that actually improve the fitness. This reduces the number of evaluations while maintaining effectiveness in finding better local solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, individual, max_iter=50):
+        """Apply local refinement to improve individual quality"""
+        # Simple gradient-free local search using coordinate descent
+        best_individual = individual.copy()
+        best_fitness = self.evaluate_individual(best_individual)
+
+        for _ in range(max_iter):
+            improved = False
+            # Try small perturbations to each parameter
+            for i in range(len(best_individual)):
+                for j in range(3):  # x, y, angle
+                    original_value = best_individual[i][j]
+                    # Try small positive and negative steps
+                    steps = [-0.05, 0.05]
+                    for step in steps:
+                        test_individual = best_individual.copy()
+                        if j < 2:  # x or y
+                            test_individual[i][j] = original_value + step
+                        else:  # angle
+                            test_individual[i][j] = (original_value + step) % 360
+
+                        fitness = self.evaluate_individual(test_individual)
+                        if fitness > best_fitness:
+                            best_fitness = fitness
+                            best_individual = test_individual
+                            improved = True
+
+            if not improved:
+                break
+
+        return best_individual
+=======
+    def local_refinement(self, individual, max_iter=50):
+        """Apply local refinement to improve individual quality"""
+        # More efficient local search using coordinate descent with step size adjustment
+        best_individual = individual.copy()
+        best_fitness = self.evaluate_individual(best_individual)
+
+        step_size = 0.1
+        for _ in range(max_iter):
+            improved = False
+            # Try small perturbations to each parameter
+            for i in range(len(best_individual)):
+                for j in range(3):  # x, y, angle
+                    original_value = best_individual[i][j]
+                    test_individual = best_individual.copy()
+
+                    # Try both positive and negative steps
+                    for step in [-step_size, step_size]:
+                        if j < 2:  # x or y
+                            test_individual[i][j] = original_value + step
+                        else:  # angle
+                            test_individual[i][j] = (original_value + step) % 360
+
+                        fitness = self.evaluate_individual(test_individual)
+                        if fitness > best_fitness:  # Since we maximize, higher fitness is better
+                            best_fitness = fitness
+                            best_individual = test_individual
+                            improved = True
+                            break  # Found improvement, move to next parameter
+
+            if not improved:
+                # Reduce step size if no improvement was found
+                step_size *= 0.5
+                if step_size < 1e-6:  # Stop if step size gets too small
+                    break
+
+        return best_individual
+>>>>>>> REPLACE
+</DIFF>

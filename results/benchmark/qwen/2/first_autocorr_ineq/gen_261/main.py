@@ -1,0 +1,258 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy import optimize, signal
+from scipy.fft import fft, ifft
+import time
+from typing import List, Optional
+import random
+
+# Constants
+MAX_TIME_SECONDS = 180
+FFT_THRESHOLD = 100  # Use FFT for sequences longer than this
+MAX_STAGNATION = 50
+ELITE_COUNT = 5
+
+def autocorrelation_constant(sequence: List[float]) -> float:
+    """
+    Calculates C₁ = 2n * max(b) / (sum(a))^2 where b = a * a (autoconvolution).
+    Returns the inverse 1/C₁ which we want to maximize.
+    """
+    n = len(sequence)
+    if n == 0:
+        return 0.0
+
+    sum_a = sum(sequence)
+    if sum_a < 0.01:
+        return 0.0
+
+    # Compute autoconvolution using FFT for efficiency
+    if n > FFT_THRESHOLD:
+        # Use FFT for fast convolution
+        padded_len = 2 * n - 1
+        seq_fft = fft(sequence, padded_len)
+        conv_fft = seq_fft * seq_fft.conj()  # Element-wise multiplication
+        autoconv = ifft(conv_fft).real
+        max_conv = max(autoconv)
+    else:
+        # Direct convolution for small sequences
+        autoconv = signal.convolve(sequence, sequence, mode='full')
+        max_conv = max(autoconv)
+
+    # Calculate C₁
+    c1 = (2 * n * max_conv) / (sum_a ** 2)
+    if c1 == 0:
+        return 0.0
+    return 1.0 / c1
+
+def compute_autocorr_gradient(sequence: List[float], epsilon_base: float = 1e-4) -> List[float]:
+    """
+    Approximate gradient using finite differences with adaptive epsilon.
+    Epsilon is scaled adaptively based on the magnitude of the sequence elements.
+    """
+    n = len(sequence)
+    grad = []
+    for i in range(n):
+        # Determine adaptive epsilon based on element magnitude
+        elem_mag = abs(sequence[i])
+        if elem_mag < 1e-6:
+            epsilon = epsilon_base
+        else:
+            epsilon = epsilon_base * elem_mag
+
+        # Perturb dimension i
+        perturbed_plus = sequence[:]
+        perturbed_minus = sequence[:]
+        perturbed_plus[i] += epsilon
+        perturbed_minus[i] -= epsilon
+
+        # Ensure non-negativity
+        perturbed_plus[i] = max(0, perturbed_plus[i])
+        perturbed_minus[i] = max(0, perturbed_minus[i])
+
+        # Evaluate function
+        f_plus = autocorrelation_constant(perturbed_plus)
+        f_minus = autocorrelation_constant(perturbed_minus)
+
+        grad_i = (f_plus - f_minus) / (2 * epsilon)
+        grad.append(grad_i)
+    
+    return grad
+
+def solve_convolution_lp(f_sequence: list[float], rhs: float) -> list[float] | None:
+    """Solves the convolution LP for a given sequence and RHS with better numerical stability."""
+    try:
+        n = len(f_sequence)
+        c = -np.ones(n)
+        a_ub = []
+        b_ub = []
+        
+        # Efficient constraint generation using precomputed data
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_sequence[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Non-negativity constraints: b_i >= 0
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Attempt to solve with multiple methods for robustness
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', options={'presolve': False})
+        
+        if not result.success:
+            # Try alternative method if highs fails
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+            except:
+                pass
+        
+        if result.success:
+            g_sequence = result.x
+            return g_sequence.tolist()
+        else:
+            return None
+            
+    except Exception:
+        # Return None on any exception for safety
+        return None
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using enhanced optimization strategies."""
+    start_time = time.time()
+    
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    # Normalize the input sequence
+    sum_sequence = sum(sequence)
+    if sum_sequence < 0.01:
+        sum_sequence = 0.01
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute the right-hand side for convolution constraints
+    autoconv_full = signal.convolve(normalized_sequence, normalized_sequence, mode='full')
+    max_conv_value = max(autoconv_full[n-1:])
+    rhs = max_conv_value
+
+    # Solve the LP to get the direction vector g
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    
+    if g_fun is None:
+        # Fallback: try simple gradient ascent
+        try:
+            # Estimate gradient and perform simple ascent
+            gradient = compute_autocorr_gradient(normalized_sequence)
+            step_size = 0.01
+            new_sequence = [(1 - step_size) * x + step_size * g for x, g in zip(normalized_sequence, gradient)]
+            # Ensure non-negativity
+            new_sequence = [max(0, x) for x in new_sequence]
+            return new_sequence
+        except:
+            # Fallback to identity
+            return sequence
+
+    # Normalize g_fun similarly
+    sum_g_fun = sum(g_fun)
+    if sum_g_fun < 0.01:
+        sum_g_fun = 0.01
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+    # Update sequence using a fixed step size (t=0.01)
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    return new_sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Main search function to find the best coefficient sequence."""
+    start_time = time.time()
+    
+    # Initialize a random sequence with varying length
+    n = np.random.randint(100, 1000)
+    best_sequence = [np.random.random() for _ in range(n)]
+    
+    # Track best sequence and stagnation
+    best_inv_c1 = autocorrelation_constant(best_sequence)
+    stagnation_count = 0
+    elite_sequences = []
+    elite_scores = []
+
+    # Main optimization loop
+    for iteration in range(1000):  # Increase iterations
+        if time.time() - start_time > MAX_TIME_SECONDS - 2:
+            break
+            
+        improved_seq = get_good_direction_to_move_into(best_sequence)
+        if improved_seq is not None:
+            improved_inv_c1 = autocorrelation_constant(improved_seq)
+            if improved_inv_c1 > best_inv_c1:
+                best_sequence = improved_seq
+                best_inv_c1 = improved_inv_c1
+                stagnation_count = 0
+                
+                # Store elite sequences
+                if len(elite_sequences) < ELITE_COUNT:
+                    elite_sequences.append(best_sequence[:])
+                    elite_scores.append(best_inv_c1)
+                else:
+                    # Replace worst elite
+                    worst_idx = np.argmin(elite_scores)
+                    if best_inv_c1 > elite_scores[worst_idx]:
+                        elite_sequences[worst_idx] = best_sequence[:]
+                        elite_scores[worst_idx] = best_inv_c1
+            else:
+                stagnation_count += 1
+                if stagnation_count > MAX_STAGNATION:
+                    # Restart from elite if stuck
+                    if elite_sequences:
+                        restart_idx = np.argmax(elite_scores)
+                        best_sequence = elite_sequences[restart_idx][:]
+                        best_inv_c1 = elite_scores[restart_idx]
+                        stagnation_count = 0
+        else:
+            # Fallback: modify the sequence slightly
+            idx = np.random.randint(0, len(best_sequence))
+            best_sequence[idx] = (best_sequence[idx] + np.random.rand()) % 1
+    
+    # Final refinement
+    try:
+        # Try local optimization
+        def objective_func(seq_array):
+            return -autocorrelation_constant(seq_array.tolist())
+        
+        x0 = np.array(best_sequence, dtype=float)
+        result = optimize.minimize(
+            objective_func,
+            x0,
+            method='Nelder-Mead',
+            options={'maxiter': 100, 'adaptive': True}
+        )
+        
+        if result.success:
+            refined_seq = np.maximum(result.x, 0)
+            if np.sum(refined_seq) > 0.01:
+                refined_inv_c1 = autocorrelation_constant(refined_seq.tolist())
+                if refined_inv_c1 > best_inv_c1:
+                    best_sequence = refined_seq.tolist()
+    except:
+        pass
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

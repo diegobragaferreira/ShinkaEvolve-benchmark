@@ -1,0 +1,140 @@
+<NAME>
+enhance_perturbation_mechanism
+</NAME>
+
+<DESCRIPTION>
+The current perturbation mechanism uses simple repulsion forces based on inverse squared distances, which may not be optimal for escaping local optima. I'll enhance this by implementing a more sophisticated perturbation strategy that combines:
+1. Distance-based repulsion with proper scaling
+2. Directional bias towards expanding the configuration
+3. Adaptive perturbation magnitudes based on local density and constraint violations
+4. Better handling of edge cases
+
+This should improve the optimization's ability to find better configurations and escape local optima more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _compute_targeted_perturbation(self, points: np.ndarray, point_idx: int) -> np.ndarray:
+        """Compute a targeted perturbation that should improve the configuration"""
+        try:
+            # Analyze local geometry around the selected point
+            distances = cdist([points[point_idx]], points)[0]
+            # Remove self-distance and ensure we have valid distances
+            valid_distances = distances[distances > 0]
+
+            if len(valid_distances) == 0:
+                # No neighbors, random perturb with small magnitude
+                return np.random.normal(0, 0.01, 3)
+
+            avg_distance = np.mean(valid_distances)
+            min_distance = np.min(valid_distances)
+
+            # Determine perturbation type based on local density
+            if min_distance < avg_distance * 0.4:
+                # Point is too close to neighbors - repel it strongly
+                repulsion = np.zeros(3)
+                for i in range(len(points)):
+                    if i != point_idx and distances[i] < avg_distance * 0.7:
+                        diff = points[point_idx] - points[i]
+                        dist = np.linalg.norm(diff)
+                        if dist > 0:
+                            repulsion += diff / dist * (1.0/(dist * dist + 1e-8))
+
+                if np.linalg.norm(repulsion) > 0:
+                    repulsion = repulsion / np.linalg.norm(repulsion)
+                    # Scale by how close we are to ideal spacing
+                    proximity_factor = min_distance / avg_distance
+                    magnitude = 0.03 * (1.0 + proximity_factor * 2.0)
+                    return repulsion * magnitude
+                else:
+                    # Fallback to random perturbation
+                    return np.random.normal(0, 0.015, 3)
+            else:
+                # Point is relatively well-spaced - make small adjustment
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+                # Magnitude inversely proportional to distance from center
+                center_dist = np.linalg.norm(points[point_idx])
+                distance_factor = 1.0 - min(abs(center_dist - 0.5), 0.5)
+                magnitude = 0.01 * distance_factor
+                return direction * magnitude
+
+        except Exception:
+            # Fallback to simple random perturbation
+            direction = np.random.randn(3)
+            direction /= np.linalg.norm(direction)
+            return direction * 0.015
+=======
+    def _compute_targeted_perturbation(self, points: np.ndarray, point_idx: int) -> np.ndarray:
+        """Compute a targeted perturbation that should improve the configuration"""
+        try:
+            # Analyze local geometry around the selected point
+            distances = cdist([points[point_idx]], points)[0]
+            # Remove self-distance and ensure we have valid distances
+            valid_distances = distances[distances > 0]
+
+            if len(valid_distances) == 0:
+                # No neighbors, random perturb with small magnitude
+                return np.random.normal(0, 0.01, 3)
+
+            avg_distance = np.mean(valid_distances)
+            min_distance = np.min(valid_distances)
+            max_distance = np.max(valid_distances)
+
+            # More sophisticated perturbation based on local configuration analysis
+            if min_distance < avg_distance * 0.35:
+                # Point is too close to neighbors - strong repulsion needed
+                repulsion = np.zeros(3)
+                repulsion_strength = 0.0
+                for i in range(len(points)):
+                    if i != point_idx and distances[i] < avg_distance * 0.7:
+                        diff = points[point_idx] - points[i]
+                        dist = np.linalg.norm(diff)
+                        if dist > 0:
+                            # Use softer repulsion with proper normalization
+                            repulsion += diff / dist * (1.0 / (dist + 1e-8))
+                            repulsion_strength += 1.0 / (dist + 1e-8)
+
+                if repulsion_strength > 0:
+                    repulsion = repulsion / repulsion_strength  # Average repulsion direction
+                    repulsion = repulsion / np.linalg.norm(repulsion)  # Normalize
+
+                    # Enhanced scaling with better proximity factor
+                    proximity_factor = min_distance / avg_distance
+                    # Improved scaling that considers both closeness and spread
+                    magnitude = 0.05 * (1.0 + proximity_factor * 3.0) * (max_distance / avg_distance)
+                    return repulsion * magnitude
+                else:
+                    # Fallback to random perturbation
+                    direction = np.random.randn(3)
+                    direction /= np.linalg.norm(direction)
+                    magnitude = 0.02 * (max_distance / avg_distance)
+                    return direction * magnitude
+            else:
+                # Point is relatively well-spaced - make small adjustment with better strategy
+                # Consider directional bias based on neighbor distribution
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+
+                # Magnitude based on multiple factors:
+                # 1. Distance from center (prefer middle region)
+                center_dist = np.linalg.norm(points[point_idx])
+                distance_factor = 1.0 - min(abs(center_dist - 0.5), 0.5)
+
+                # 2. Local cluster tendency (avoid very clustered areas)
+                local_spread = np.std(valid_distances) / (avg_distance + 1e-8)
+                spread_factor = 1.0 + min(local_spread, 1.0)  # Encourage spread
+
+                # 3. Overall configuration balance
+                balance_factor = 1.0 + (1.0 - min_distance / avg_distance) * 0.5
+
+                magnitude = 0.015 * distance_factor * spread_factor * balance_factor
+                return direction * magnitude
+
+        except Exception:
+            # Fallback to simple random perturbation with better scaling
+            direction = np.random.randn(3)
+            direction /= np.linalg.norm(direction)
+            return direction * 0.02
+>>>>>>> REPLACE
+</DIFF>

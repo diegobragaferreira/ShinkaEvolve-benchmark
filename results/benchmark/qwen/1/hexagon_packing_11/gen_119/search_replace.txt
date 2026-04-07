@@ -1,0 +1,178 @@
+<NAME>
+enhance_geometric_validation_with_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The key insight is to implement spatial indexing to significantly speed up collision detection in the hexagon packing optimization. The current implementation performs O(n²) pairwise overlap checks between all hexagons, which becomes computationally expensive as the search space grows. By implementing a simple grid-based spatial partitioning scheme, we can reduce the average complexity from O(n²) to approximately O(n) for collision detection, allowing for more efficient exploration of the optimization landscape. This will enable the optimizer to perform more evaluations within the 180-second time limit and potentially discover better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap using Shapely"""
+    try:
+        poly1 = Polygon(hex1)
+        poly2 = Polygon(hex2)
+        return poly1.intersects(poly2)
+    except:
+        try:
+            valid_poly1 = make_valid(Polygon(hex1))
+            valid_poly2 = make_valid(Polygon(hex2))
+            return valid_poly1.intersects(valid_poly2)
+        except:
+            return True  # if we can't validate, assume they overlap
+=======
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap using Shapely"""
+    try:
+        poly1 = Polygon(hex1)
+        poly2 = Polygon(hex2)
+        return poly1.intersects(poly2)
+    except:
+        try:
+            valid_poly1 = make_valid(Polygon(hex1))
+            valid_poly2 = make_valid(Polygon(hex2))
+            return valid_poly1.intersects(valid_poly2)
+        except:
+            return True  # if we can't validate, assume they overlap
+
+
+def build_spatial_grid(hexagons, cell_size=3.0):
+    """Build a simple spatial grid for fast collision detection"""
+    grid = {}
+    for i, hex_vertices in enumerate(hexagons):
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in hex_vertices)
+        max_x = max(v[0] for v in hex_vertices)
+        min_y = min(v[1] for v in hex_vertices)
+        max_y = max(v[1] for v in hex_vertices)
+
+        # Grid cells that this hexagon touches
+        start_col = int(min_x // cell_size)
+        end_col = int(max_x // cell_size)
+        start_row = int(min_y // cell_size)
+        end_row = int(max_y // cell_size)
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                if (row, col) not in grid:
+                    grid[(row, col)] = []
+                grid[(row, col)].append(i)
+
+    return grid
+
+
+def get_candidate_overlaps(hexagons, spatial_grid, hex_idx, cell_size=3.0):
+    """Get candidate hexagon indices that might overlap with hex_idx"""
+    # Get the bounding box of the hexagon we're checking
+    hex_vertices = hexagons[hex_idx]
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+
+    # Get grid cells this hexagon touches
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size)
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size)
+
+    candidates = set()
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            if (row, col) in spatial_grid:
+                candidates.update(spatial_grid[(row, col)])
+
+    return candidates
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution(params, outer_hex_radius=None):
+    """Evaluate a solution and return negative combined score (for minimization)"""
+    # Parse parameters
+    inner_positions = params[:22].reshape(-1, 2)  # x,y pairs
+    inner_rotations = params[22:33]  # 11 rotations
+    if outer_hex_radius is None:
+        outer_radius = params[33]  # outer hex radius
+    else:
+        outer_radius = outer_hex_radius
+
+    # Create outer hexagon
+    outer_hex = create_regular_hexagon((0, 0), outer_radius, 0)
+
+    # Check if all inner hexagons fit inside outer hexagon
+    num_inner_hexes = len(inner_positions)
+
+    # Create all inner hexagon polygons
+    inner_hexes = []
+    for i in range(num_inner_hexes):
+        pos = tuple(inner_positions[i])
+        rot = inner_rotations[i]
+        vertices = get_hexagon_vertices(pos, 1, rot)
+        inner_hexes.append(vertices)
+
+    # Check containment and overlaps
+    total_penalty = 0
+    for i, hex_vertices in enumerate(inner_hexes):
+        hex_poly = Polygon(hex_vertices)
+        if not check_containment(hex_poly, outer_hex):
+            total_penalty += 1000  # Large penalty for containment violations
+
+        # Check overlap with other hexes
+        for j in range(i+1, len(inner_hexes)):
+            if check_overlap(hex_vertices, inner_hexes[j]):
+                total_penalty += 10000  # Large penalty for overlaps
+
+    # Calculate combined score (negative since we want to minimize)
+    inv_radius = 1.0 / outer_radius if outer_radius > 0 else 0
+    return -inv_radius + total_penalty
+=======
+def evaluate_solution(params, outer_hex_radius=None):
+    """Evaluate a solution and return negative combined score (for minimization)"""
+    # Parse parameters
+    inner_positions = params[:22].reshape(-1, 2)  # x,y pairs
+    inner_rotations = params[22:33]  # 11 rotations
+    if outer_hex_radius is None:
+        outer_radius = params[33]  # outer hex radius
+    else:
+        outer_radius = outer_hex_radius
+
+    # Create outer hexagon
+    outer_hex = create_regular_hexagon((0, 0), outer_radius, 0)
+
+    # Check if all inner hexagons fit inside outer hexagon
+    num_inner_hexes = len(inner_positions)
+
+    # Create all inner hexagon polygons
+    inner_hexes = []
+    for i in range(num_inner_hexes):
+        pos = tuple(inner_positions[i])
+        rot = inner_rotations[i]
+        vertices = get_hexagon_vertices(pos, 1, rot)
+        inner_hexes.append(vertices)
+
+    # Build spatial grid for faster overlap detection
+    spatial_grid = build_spatial_grid(inner_hexes, cell_size=3.0)
+
+    # Check containment and overlaps
+    total_penalty = 0
+    for i, hex_vertices in enumerate(inner_hexes):
+        hex_poly = Polygon(hex_vertices)
+        if not check_containment(hex_poly, outer_hex):
+            total_penalty += 1000  # Large penalty for containment violations
+
+        # Check overlap with other hexes using spatial grid
+        candidates = get_candidate_overlaps(inner_hexes, spatial_grid, i, cell_size=3.0)
+        for j in candidates:
+            if i < j:  # Only check each pair once
+                if check_overlap(hex_vertices, inner_hexes[j]):
+                    total_penalty += 10000  # Large penalty for overlaps
+
+    # Calculate combined score (negative since we want to minimize)
+    inv_radius = 1.0 / outer_radius if outer_radius > 0 else 0
+    return -inv_radius + total_penalty
+>>>>>>> REPLACE
+</DIFF>

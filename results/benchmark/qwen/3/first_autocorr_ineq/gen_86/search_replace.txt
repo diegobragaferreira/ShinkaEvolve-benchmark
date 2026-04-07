@@ -1,0 +1,240 @@
+<NAME>
+enhanced_convolution_method
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces a more sophisticated convolution computation method that dynamically switches between FFT and direct computation based on numerical stability metrics. It also adds a curvature-aware gradient correction to improve convergence behavior.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import math
+import random
+import time
+from typing import List, Tuple
+
+# Constants
+MAX_TIME_SECONDS = 180
+MAX_MEMORY_GB = 5
+MIN_SEQUENCE_LENGTH = 10
+MAX_SEQUENCE_LENGTH = 1000
+BENCHMARK_THRESHOLD = 1.5031
+POPULATION_SIZE = 100
+GENERATIONS = 100
+MUTATION_RATE_START = 0.1
+MUTATION_RATE_END = 0.01
+CROSSOVER_RATE = 0.8
+ELITISM_COUNT = 5
+CONVERGENCE_THRESHOLD = 0.001
+STAGNATION_LIMIT = 20
+=======
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+from scipy.linalg import cond
+import math
+import random
+import time
+from typing import List, Tuple
+
+# Constants
+MAX_TIME_SECONDS = 180
+MAX_MEMORY_GB = 5
+MIN_SEQUENCE_LENGTH = 10
+MAX_SEQUENCE_LENGTH = 1000
+BENCHMARK_THRESHOLD = 1.5031
+POPULATION_SIZE = 100
+GENERATIONS = 100
+MUTATION_RATE_START = 0.1
+MUTATION_RATE_END = 0.01
+CROSSOVER_RATE = 0.8
+ELITISM_COUNT = 5
+CONVERGENCE_THRESHOLD = 0.001
+STAGNATION_LIMIT = 20
+NUMERICAL_STABILITY_THRESHOLD = 1e6
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_c1(sequence):
+    """Computes the C1 autocorrelation constant for a sequence."""
+    n = len(sequence)
+    if n < 1:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+
+    # Use FFT for large sequences, direct for small ones
+    if n > 100:
+        conv = fftconvolve(sequence, sequence, mode='full')
+    else:
+        conv = np.convolve(sequence, sequence)
+
+    max_conv = np.max(conv)
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+=======
+def compute_c1(sequence):
+    """Computes the C1 autocorrelation constant for a sequence."""
+    n = len(sequence)
+    if n < 1:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+
+    # Use dynamic convolution method based on numerical stability
+    conv = compute_convolution_stable(sequence)
+
+    max_conv = np.max(conv)
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+def compute_convolution_stable(sequence):
+    """
+    Computes convolution with automatic method switching based on numerical stability.
+    """
+    n = len(sequence)
+    # Try FFT first for efficiency
+    if n > 100:
+        try:
+            conv = fftconvolve(sequence, sequence, mode='full')
+            conv = conv[:2*n - 1]
+            # Check numerical stability
+            if n > 1000:  # Only check for very large sequences
+                # Compute condition number of the convolution kernel (approximate)
+                kernel = np.array([sequence[i] for i in range(n)])
+                # If condition number is too high, fall back to direct computation
+                if cond(np.eye(n) * kernel) > NUMERICAL_STABILITY_THRESHOLD:
+                    conv = np.convolve(sequence, sequence)
+            return conv
+        except:
+            pass
+    # Fall back to direct computation
+    return np.convolve(sequence, sequence)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence using adaptive gradient."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = [x / sum_sequence for x in sequence]
+
+    # Compute convolution
+    if n > 100:
+        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+        conv_result = conv_result[:2*n - 1]
+    else:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+
+    rhs = np.max(conv_result)
+
+    # Attempt to solve constrained optimization problem
+    try:
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+    except Exception:
+        g_fun = None
+
+    if g_fun is None:
+        # Fallback: simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x / sum_g_fun for x in g_fun]
+
+    # Adaptive step-size based on sequence size
+    t = min(0.05, 0.01 + 0.005 * math.log(n + 1))
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence using adaptive gradient."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = [x / sum_sequence for x in sequence]
+
+    # Compute convolution with improved stability
+    conv_result = compute_convolution_stable(normalized_sequence)
+    rhs = np.max(conv_result)
+
+    # Attempt to solve constrained optimization problem
+    try:
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+    except Exception:
+        g_fun = None
+
+    if g_fun is None:
+        # Fallback: simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x / sum_g_fun for x in g_fun]
+
+    # Adaptive step-size based on sequence size
+    t = min(0.05, 0.01 + 0.005 * math.log(n + 1))
+
+    # Apply curvature-aware correction to improve convergence
+    curvature_correction = compute_curvature_correction(sequence, normalized_sequence, conv_result)
+    new_sequence = [
+        (1 - t) * x + t * (y + curvature_correction[i])
+        for i, (x, y) in enumerate(zip(sequence, normalized_g_fun))
+    ]
+    return new_sequence
+
+def compute_curvature_correction(sequence, normalized_sequence, conv_result):
+    """
+    Compute curvature correction based on second-order information to improve convergence.
+    """
+    n = len(sequence)
+    correction = np.zeros(n)
+    try:
+        # Simple estimate of curvature effect on gradients
+        # This is an approximation and could be expanded with more detailed Hessian estimation
+        for i in range(n):
+            # Estimate how much the gradient at position i deviates from ideal
+            # This helps avoid getting trapped in flat regions
+            if i > 0 and i < n-1:
+                # Second difference approximation
+                diff_second = normalized_sequence[i+1] - 2*normalized_sequence[i] + normalized_sequence[i-1]
+                correction[i] = diff_second * 0.01
+    except:
+        pass
+    return correction.tolist()
+>>>>>>> REPLACE
+</DIFF>

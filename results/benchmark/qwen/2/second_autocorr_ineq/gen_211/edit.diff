@@ -1,0 +1,208 @@
+--- a/original.py
++++ b/original.py
+@@ -1,46 +1,176 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
++from scipy import signal
++import time
++
++def compute_autoconvolution_norms(f_values):
++    """Compute the three norms for autoconvolution g = f*f"""
++    if len(f_values) < 2:
++        return 0.0, 0.0, 0.0
++
++    # Compute autoconvolution
++    g = signal.convolve(f_values, f_values, mode='full')
++
++    # Get the central portion corresponding to the actual convolution support
++    center_start = len(g) // 2
++    center_end = center_start + len(f_values) * 2 - 1
++    g_center = g[center_start:center_end]
++
++    # Compute the three norms correctly
++    # ||g||₂² computed via trapezoidal integration of g²
++    g_squared = g_center**2
++    norm_2_squared = np.sum(g_squared)
++
++    # ||g||₁ = sum(|g|) * dx where dx is the step size
++    dx = 0.5 / (len(f_values) - 1) if len(f_values) > 1 else 0.5
++    norm_1 = np.sum(np.abs(g_center)) * dx
++
++    # ||g||∞ = max(|g|)
++    norm_inf = np.max(np.abs(g_center)) if len(g_center) > 0 else 0.0
++
++    return norm_2_squared, norm_1, norm_inf
++
++def compute_c2(f_values):
++    """Compute C2 value for given step function"""
++    norm_2_squared, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
++
++    # Avoid division by zero
++    if norm_1 == 0 or norm_inf == 0:
++        return 0.0
++
++    c2 = norm_2_squared / (norm_1 * norm_inf)
++    return c2
++
++def adaptive_gaussian_construction(n_points=None):
++    """Construct step function using adaptive Gaussian shaping with logarithmic peak spacing"""
++    if n_points is None:
++        n_points = np.random.randint(1000, 5000)
++
++    # Create a smooth Gaussian-like structure with controlled amplitude
++    # This builds upon the insight that flatter autoconvolution profiles
++    # lead to higher C₂ values
++
++    # Generate x coordinates from -1/4 to 1/4
++    x = np.linspace(-0.25, 0.25, n_points)
++
++    # Create multiple Gaussian peaks with varying positions and amplitudes
++    f_values = np.zeros(n_points)
++
++    # Add several peaks at strategically spaced locations using logarithmic distribution
++    num_peaks = 5 + np.random.randint(0, 5)  # 5-9 peaks
++    peak_width = 0.03 + np.random.random() * 0.02  # More consistent width
++
++    # Use logarithmic spacing to distribute peaks more evenly
++    log_min = np.log(0.02)
++    log_max = np.log(0.2)  # Max distance from center
++    log_spaced_distances = np.logspace(log_min, log_max, num_peaks)
++
++    # Distribute peaks around center with some randomness to avoid perfect symmetry
++    peak_positions = []
++    for i, dist in enumerate(log_spaced_distances):
++        # Alternate sides and add some randomness
++        side = (-1)**i  # Alternate left/right
++        base_pos = side * dist * 0.7  # Scale to fit within domain
++        # Add slight variation to avoid perfect symmetry
++        peak_pos = base_pos + np.random.uniform(-0.015, 0.015)
++        peak_positions.append(peak_pos)
++
++    # Determine peak amplitudes based on strategic placement
++    for i, peak_position in enumerate(peak_positions):
++        # Calculate distance from center
++        center_distance = abs(peak_position)
++
++        # Assign amplitudes that promote flatter autoconvolution
++        if center_distance < 0.05:  # Near center
++            amplitude_factor = 1.8 + np.random.random() * 0.5
++        elif center_distance < 0.1:  # Middle area
++            amplitude_factor = 1.3 + np.random.random() * 0.4
++        else:  # Outer areas
++            amplitude_factor = 0.9 + np.random.random() * 0.3
++
++        peak_amplitude = 10.0 + np.random.random() * 10.0 * amplitude_factor
++
++        # Create Gaussian peak
++        gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - peak_position) / peak_width)**2)
++        f_values += gaussian_peak
++
++    # Normalize and ensure non-negative
++    f_values = np.clip(f_values, 0, None)  # Ensure non-negative
++
++    # Apply smoothing to prevent sharp transitions
++    if len(f_values) > 20:
++        # Simple moving average smoothing
++        window_size = min(10, len(f_values) // 20)
++        if window_size > 1:
++            smoothed = np.convolve(f_values, np.ones(window_size)/window_size, mode='same')
++            f_values = smoothed
++
++    return f_values.tolist()
++
++def diverse_population_search(n_populations=30):
++    """Use diverse population approach to find high C2 solutions"""
++    best_c2 = 0.0
++    best_f_values = None
++
++    # Try multiple constructions with different parameters
++    for i in range(n_populations):
++        try:
++            # Vary the number of points for diversity
++            n_points = 1000 + np.random.randint(0, 4000)
++
++            f_values = adaptive_gaussian_construction(n_points)
++
++            # Evaluate C2
++            c2 = compute_c2(f_values)
++
++            if c2 > best_c2:
++                best_c2 = c2
++                best_f_values = f_values.copy()
++
++            # Early stopping if we find something very good
++            if c2 > 0.95:
++                break
++
++        except Exception:
++            continue
++
++    return best_f_values if best_f_values is not None else [1.0] * 100
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value."""
+-    # Generate a more structured function with Gaussian-like peaks
+-    n_steps = np.random.randint(100, 1000)
++    # Set seed for reproducibility
++    np.random.seed(42)
+ 
+-    # Create a base function with a Gaussian-like profile
+-    x = np.linspace(-0.25, 0.25, n_steps)
++    # Try several constructions and pick the best one
++    best_c2 = 0.0
++    best_f_values = None
++    start_time = time.time()
+ 
+-    # Generate a peak at center with decreasing tails
+-    # This creates a function that has the right shape for good autoconvolution
+-    sigma = 0.05 + np.random.random() * 0.05  # Random spread
+-    center = np.random.uniform(-0.1, 0.1)     # Random center position
++    # Use population-based search for better exploration
++    try:
++        f_values = diverse_population_search(50)
++        c2 = compute_c2(f_values)
+ 
+-    # Create Gaussian-like function with some randomization
+-    gaussian_profile = np.exp(-0.5 * ((x - center) / sigma)**2)
++        if c2 > best_c2:
++            best_c2 = c2
++            best_f_values = f_values
++    except:
++        pass
+ 
+-    # Add some additional structure with random peaks
+-    num_peaks = np.random.randint(1, 5)
+-    for _ in range(num_peaks):
+-        peak_center = np.random.uniform(-0.2, 0.2)
+-        peak_height = np.random.uniform(0.5, 1.5)
+-        peak_sigma = np.random.uniform(0.02, 0.08)
+-        gaussian_profile += peak_height * np.exp(-0.5 * ((x - peak_center) / peak_sigma)**2)
++    # If we couldn't construct anything decent, fall back to a simple approach
++    if best_c2 < 0.1 or best_f_values is None:
++        n_points = 1000
++        # Simple Gaussian peak in center
++        x = np.linspace(-0.25, 0.25, n_points)
++        f_values = np.exp(-0.5 * (x / 0.05)**2)
++        f_values = np.clip(f_values, 0, None)
++        best_f_values = f_values.tolist()
+ 
+-    # Normalize and ensure non-negative values
+-    gaussian_profile = np.maximum(gaussian_profile, 0)
+-    gaussian_profile = gaussian_profile / np.max(gaussian_profile) * 2.0  # Scale appropriately
+-
+-    # Convert to step function values
+-    step_values = gaussian_profile.tolist()
+-
+-    # Add some random variation to make it more robust
+-    noise_level = 0.05
+-    step_values = [max(0, val + np.random.normal(0, noise_level)) for val in step_values]
+-
+-    return step_values
++    return best_f_values
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

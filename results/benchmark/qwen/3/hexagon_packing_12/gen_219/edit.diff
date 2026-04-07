@@ -1,0 +1,705 @@
+--- a/original.py
++++ b/original.py
+@@ -1,336 +1,436 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
+ from shapely.geometry import Polygon
+-from scipy.optimize import minimize
++import time
++import random
++from numba import jit
+ import math
+-import random
+-from itertools import combinations
+-from typing import Tuple, List, Optional
+-import time
+-from scipy.spatial.distance import cdist
+-
+-class DirectHexagonPackingOptimizer:
+-    """Direct geometric optimization approach for hexagon packing"""
++
++# Constants
++UNIT_HEX_RADIUS = 1.0
++MAX_EVAL_TIME = 180.0
++TARGET_RATIO = 0.2537
++
++@jit(nopython=True)
++def get_hexagon_vertices_fast(x, y, angle_deg, radius=1.0):
++    """Fast hexagon vertex computation using numba."""
++    vertices = np.empty((6, 2))
++    angle_rad = np.radians(angle_deg)
++    for i in range(6):
++        theta = angle_rad + i * np.pi / 3
++        vertices[i, 0] = x + radius * np.cos(theta)
++        vertices[i, 1] = y + radius * np.sin(theta)
++    return vertices
++
++@jit(nopython=True) 
++def point_in_hexagon_fast(px, py, hx, hy, angle_deg, radius=1.0):
++    """Fast point-in-hexagon test."""
++    angle_rad = np.radians(angle_deg)
++    # Transform point to hexagon coordinate system
++    dx = px - hx
++    dy = py - hy
++    # Rotate point by negative angle
++    cos_a = np.cos(-angle_rad)
++    sin_a = np.sin(-angle_rad)
++    rx = dx * cos_a - dy * sin_a
++    ry = dx * sin_a + dy * cos_a
++
++    # Check against hexagon boundaries
++    abs_rx = np.abs(rx)
++    abs_ry = np.abs(ry)
++    
++    # Simple boundary checks for unit hexagon
++    return abs_rx <= radius and abs_ry <= radius * np.sqrt(3)/2 and abs_rx + abs_ry <= radius * (1 + np.sqrt(3)/2)
++
++@jit(nopython=True)
++def distance_squared_point_to_hexagon_fast(px, py, hx, hy, angle_deg, radius=1.0):
++    """Fast distance squared from point to hexagon boundary."""
++    angle_rad = np.radians(angle_deg)
++    # Transform point to hexagon coordinate system
++    dx = px - hx
++    dy = py - hy
++    # Rotate point by negative angle
++    cos_a = np.cos(-angle_rad)
++    sin_a = np.sin(-angle_rad)
++    rx = dx * cos_a - dy * sin_a
++    ry = dx * sin_a + dy * cos_a
++
++    # Distance to center minus radius (simplified)
++    dist_center_sq = rx * rx + ry * ry
++    return dist_center_sq - radius * radius
++
++@jit(nopython=True)
++def hexagon_overlap_fast(h1_center_x, h1_center_y, h1_angle, h2_center_x, h2_center_y, h2_angle, radius=1.0):
++    """Fast overlap detection between two hexagons."""
++    # Simple distance-based check first
++    dx = h1_center_x - h2_center_x
++    dy = h1_center_y - h2_center_y
++    dist_sq = dx*dx + dy*dy
++
++    # If centers too far apart, no overlap
++    if dist_sq > 4 * radius * radius:
++        return False
++
++    # If centers too close, definitely overlap 
++    if dist_sq < 0.1:
++        return True
++
++    # Conservative overlap check for unit hexagons
++    return dist_sq < 4.0 * radius * radius
++
++class HexagonPackingEvolutionary:
++    """High-performance hexagon packing optimizer using evolutionary principles"""
+     
+     def __init__(self):
+-        self.best_score = 0
++        self.start_time = time.time()
++        self.best_score = 0.0
+         self.best_config = None
+-        self.start_time = time.time()
+-        self.timeout = 180  # seconds
++        self.target_ratio = TARGET_RATIO
++        
++    def get_elapsed_time(self):
++        return time.time() - self.start_time
+         
+     @staticmethod
+-    def create_unit_hexagon(center: Tuple[float, float], rotation: float = 0) -> Polygon:
+-        """Create a unit regular hexagon with given center and rotation"""
+-        angle_offset = math.radians(rotation)
+-        radius = 1
+-        vertices = []
+-        for i in range(6):
+-            angle = angle_offset + i * math.pi / 3
+-            x = center[0] + radius * math.cos(angle)
+-            y = center[1] + radius * math.sin(angle)
+-            vertices.append((x, y))
+-        return Polygon(vertices)
+-    
+-    @staticmethod
+-    def get_all_vertices(hex_data: np.ndarray) -> List[Tuple[float, float]]:
+-        """Extract all vertices from all hexagons"""
+-        all_vertices = []
+-        for i in range(len(hex_data)):
+-            center = (hex_data[i][0], hex_data[i][1])
+-            rotation = hex_data[i][2]
+-            hexagon = DirectHexagonPackingOptimizer.create_unit_hexagon(center, rotation)
+-            all_vertices.extend(list(hexagon.exterior.coords))
+-        return all_vertices
+-    
+-    @staticmethod
+-    def check_overlap(hex1: Polygon, hex2: Polygon) -> bool:
+-        """Check if two hexagons overlap with numerical stability"""
+-        # Add small buffer to handle floating point precision issues
+-        buffered_hex1 = hex1.buffer(1e-10)
+-        buffered_hex2 = hex2.buffer(1e-10)
+-        return buffered_hex1.intersects(buffered_hex2)
+-    
+-    @staticmethod
+-    def check_containment(inner_hex: Polygon, outer_hex: Polygon) -> bool:
+-        """Check if inner hexagon is fully contained within outer hexagon"""
+-        return outer_hex.contains(inner_hex)
+-    
+-    @staticmethod
+-    def calculate_outer_hex_radius(hex_data: np.ndarray) -> float:
+-        """Calculate minimum outer hexagon radius needed to contain all inner hexagons"""
+-        all_vertices = DirectHexagonPackingOptimizer.get_all_vertices(hex_data)
+-        max_distance = 0
+-        for vertex in all_vertices:
+-            distance = math.sqrt(vertex[0]**2 + vertex[1]**2)
+-            max_distance = max(max_distance, distance)
+-        return max_distance + 0.1
+-    
+-    @staticmethod
+-    def compute_feasibility_score(hex_data: np.ndarray) -> float:
+-        """Compute a feasibility score based on geometric constraints"""
+-        # Create hexagon polygons
+-        hexagons = []
+-        for i in range(len(hex_data)):
+-            center = (hex_data[i][0], hex_data[i][1])
+-            rotation = hex_data[i][2]
+-            hexagon = DirectHexagonPackingOptimizer.create_unit_hexagon(center, rotation)
+-            hexagons.append(hexagon)
+-        
+-        # Check overlap penalty
+-        overlap_penalty = 0
+-        n = len(hexagons)
+-        for i in range(n):
+-            for j in range(i+1, n):
+-                if DirectHexagonPackingOptimizer.check_overlap(hexagons[i], hexagons[j]):
+-                    overlap_penalty += 1000
+-                    
+-        # Check containment penalty using bounding circle
+-        containment_penalty = 0
+-        outer_radius = DirectHexagonPackingOptimizer.calculate_outer_hex_radius(hex_data)
+-        for hexagon in hexagons:
+-            for point in list(hexagon.exterior.coords):
+-                distance = math.sqrt(point[0]**2 + point[1]**2)
+-                if distance > outer_radius - 0.05:  # Small buffer
+-                    containment_penalty += 1000
+-        
+-        total_penalty = overlap_penalty + containment_penalty
+-        
+-        # If valid configuration, return inverse of outer radius; otherwise return a very small value
+-        if total_penalty == 0:
+-            return 1.0 / outer_radius
+-        else:
+-            return 1e-10
+-    
+-    @staticmethod
+-    def generate_initial_configurations() -> List[np.ndarray]:
+-        """Generate high-quality initial configurations using geometric intuition"""
++    def create_lattice_configurations():
++        """Generate multiple lattice-based configurations using mathematical principles"""
+         configs = []
+         
+-        # Configuration 1: Optimized hexagonal arrangement
+-        # Based on mathematical packing theory and known optimal arrangements
++        # Kagome lattice-inspired arrangement
+         config1 = np.array([
+-            [0, 0, 0],           # center
+-            [0, 2.0, 0],         # top
+-            [0, -2.0, 0],        # bottom
+-            [1.732, 1.0, 0],     # top-right
+-            [-1.732, 1.0, 0],    # top-left
+-            [1.732, -1.0, 0],    # bottom-right
+-            [-1.732, -1.0, 0],   # bottom-left
+-            [3.464, 0, 0],       # far right
+-            [-3.464, 0, 0],      # far left
+-            [1.732, 3.0, 0],     # upper right corner
+-            [-1.732, 3.0, 0],    # upper left corner
+-            [1.732, -3.0, 0],    # lower right corner
+-            [-1.732, -3.0, 0],   # lower left corner
++            [0, 0, 0],        # center
++            [0, 2.0, 0],      # top
++            [0, -2.0, 0],     # bottom
++            [1.732, 1.0, 0],  # top-right
++            [-1.732, 1.0, 0], # top-left
++            [1.732, -1.0, 0], # bottom-right
++            [-1.732, -1.0, 0],# bottom-left
++            [3.464, 0, 0],    # far right
++            [-3.464, 0, 0],   # far left
++            [1.732, 3.0, 0],  # upper right corner
++            [-1.732, 3.0, 0], # upper left corner
++            [1.732, -3.0, 0], # lower right corner
++            [-1.732, -3.0, 0] # lower left corner
+         ])
+         configs.append(config1[:12])
+         
+-        # Configuration 2: More compact arrangement
++        # Hexagonal close-packed (HCP) inspired arrangement
+         config2 = np.array([
+             [0, 0, 0],           # center
+-            [0, 1.8, 0],         # top
+-            [0, -1.8, 0],        # bottom
+-            [1.55, 0.9, 0],      # top-right
+-            [-1.55, 0.9, 0],     # top-left
+-            [1.55, -0.9, 0],     # bottom-right
+-            [-1.55, -0.9, 0],    # bottom-left
+-            [3.1, 0, 0],         # far right
+-            [-3.1, 0, 0],        # far left
+-            [1.55, 2.7, 0],      # upper right corner
+-            [-1.55, 2.7, 0],     # upper left corner
+-            [1.55, -2.7, 0],     # lower right corner
+-            [-1.55, -2.7, 0],    # lower left corner
++            [0, 1.9, 0],         # top
++            [0, -1.9, 0],        # bottom
++            [1.65, 0.95, 0],     # top-right
++            [-1.65, 0.95, 0],    # top-left
++            [1.65, -0.95, 0],    # bottom-right
++            [-1.65, -0.95, 0],   # bottom-left
++            [3.3, 0, 0],         # far right
++            [-3.3, 0, 0],        # far left
++            [1.65, 2.85, 0],     # upper right corner
++            [-1.65, 2.85, 0],    # upper left corner
++            [1.65, -2.85, 0],    # lower right corner
++            [-1.65, -2.85, 0]    # lower left corner
+         ])
+         configs.append(config2[:12])
+         
+-        # Configuration 3: Ring pattern with strategic spacing
++        # Compact ring arrangement
+         config3 = np.array([
+             [0, 0, 0],           # center
+             [0, 2.1, 0],         # top
+             [1.8, 1.0, 0],       # top-right
+             [1.8, -1.0, 0],      # bottom-right
+             [0, -2.1, 0],        # bottom
+             [-1.8, -1.0, 0],     # bottom-left
+             [-1.8, 1.0, 0],      # top-left
+             [3.6, 0, 0],         # far right
+             [0, 3.6, 0],         # far top
+             [-3.6, 0, 0],        # far left
+             [0, -3.6, 0],        # far bottom
+             [1.8, 2.1, 0],       # upper right corner
+             [-1.8, 2.1, 0],      # upper left corner
+             [1.8, -2.1, 0],      # lower right corner
+-            [-1.8, -2.1, 0],     # lower left corner
++            [-1.8, -2.1, 0]      # lower left corner
+         ])
+         configs.append(config3[:12])
+         
+-        # Configuration 4: Optimized radial arrangement (based on packing literature)
++        # Optimized geometric arrangement
+         config4 = np.array([
+             [0, 0, 0],           # center
+-            [0, 1.9, 0],         # top
+-            [0, -1.9, 0],        # bottom
+-            [1.65, 0.95, 0],     # top-right
+-            [-1.65, 0.95, 0],    # top-left
+-            [1.65, -0.95, 0],    # bottom-right
+-            [-1.65, -0.95, 0],   # bottom-left
+-            [3.3, 0, 0],         # far right
+-            [-3.3, 0, 0],        # far left
+-            [1.65, 2.85, 0],     # upper right corner
+-            [-1.65, 2.85, 0],    # upper left corner
+-            [1.65, -2.85, 0],    # lower right corner
+-            [-1.65, -2.85, 0],   # lower left corner
++            [0, 1.8, 0],         # top
++            [0, -1.8, 0],        # bottom
++            [1.55, 0.9, 0],      # top-right
++            [-1.55, 0.9, 0],     # top-left
++            [1.55, -0.9, 0],     # bottom-right
++            [-1.55, -0.9, 0],    # bottom-left
++            [3.1, 0, 0],         # far right
++            [-3.1, 0, 0],        # far left
++            [1.55, 2.7, 0],      # upper right corner
++            [-1.55, 2.7, 0],     # upper left corner
++            [1.55, -2.7, 0],     # lower right corner
++            [-1.55, -2.7, 0]     # lower left corner
+         ])
+         configs.append(config4[:12])
+         
+         return configs
+-    
++        
+     @staticmethod
+-    def build_geometry_constraints(hex_data: np.ndarray) -> tuple:
+-        """Build geometric constraint matrices for efficient computation"""
+-        # Extract positions (ignoring rotation for constraint building)
+-        positions = hex_data[:, :2]
+-        
+-        # Compute pairwise distances between centers
+-        dist_matrix = cdist(positions, positions)
+-        
+-        # Define minimum distance constraint (centers should be at least 2 units apart for non-overlapping)
+-        min_dist = 2.0
+-        # Define maximum distance constraint (all hexagons should fit in reasonable region)
+-        max_dist = 10.0
+-        
+-        return dist_matrix, min_dist, max_dist
+-    
++    def compute_outer_hex_radius_fast(hex_data):
++        """Fast computation of outer hexagon radius."""
++        if len(hex_data) == 0:
++            return 0.0
++            
++        max_distance = 0.0
++        for i in range(len(hex_data)):
++            x, y, _ = hex_data[i]
++            distance = np.sqrt(x*x + y*y)
++            max_distance = max(max_distance, distance + UNIT_HEX_RADIUS)
++        return max_distance + 0.1
++
+     @staticmethod
+-    def optimize_positions_directly(initial_config: np.ndarray, max_iterations: int = 100) -> np.ndarray:
+-        """Direct geometric optimization using constrained optimization"""
+-        # Convert to flattened format for scipy
+-        initial_positions = np.column_stack((initial_config[:, 0], initial_config[:, 1])).flatten()
+-        
+-        def objective_func(params):
+-            # Reconstruct positions from flattened array
++    def evaluate_feasibility_fast(hex_data):
++        """Fast feasibility evaluation with early termination."""
++        # Early time check
++        if time.time() - self.start_time > MAX_EVAL_TIME * 0.95:
++            return 0.0
++            
++        # Check overlaps using fast method
++        n = len(hex_data)
++        for i in range(n):
++            if time.time() - self.start_time > MAX_EVAL_TIME * 0.95:
++                return 0.0
++                
++            for j in range(i+1, n):
++                if time.time() - self.start_time > MAX_EVAL_TIME * 0.95:
++                    return 0.0
++                    
++                # Fast overlap check
++                if hexagon_overlap_fast(
++                    hex_data[i][0], hex_data[i][1], hex_data[i][2],
++                    hex_data[j][0], hex_data[j][1], hex_data[j][2]
++                ):
++                    # Verify with precise check
++                    try:
++                        v1 = get_hexagon_vertices_fast(hex_data[i][0], hex_data[i][1], hex_data[i][2])
++                        v2 = get_hexagon_vertices_fast(hex_data[j][0], hex_data[j][1], hex_data[j][2])
++                        p1 = Polygon(v1)
++                        p2 = Polygon(v2)
++                        if p1.intersects(p2):
++                            return 0.0  # Invalid due to overlap
++                    except:
++                        return 0.0
++                        
++        # Check containment using fast method
++        outer_radius = HexagonPackingEvolutionary.compute_outer_hex_radius_fast(hex_data)
++        center_x, center_y = 0.0, 0.0
++        
++        for i in range(n):
++            if time.time() - self.start_time > MAX_EVAL_TIME * 0.95:
++                return 0.0
++                
++            # Fast containment check
++            x, y, _ = hex_data[i]
++            distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
++            if distance + UNIT_HEX_RADIUS > outer_radius:
++                return 0.0  # Not contained
++                
++        # Return inverse of outer radius when valid
++        return 1.0 / outer_radius if outer_radius > 0 else 0.0
++
++    def optimize_layered(self, initial_config):
++        """Multi-layered optimization approach"""
++        # Layer 1: Global structure optimization
++        print("Optimizing global structure...")
++        layer1_config = self.global_structure_optimize(initial_config)
++        
++        # Layer 2: Position refinement  
++        print("Refining positions...")
++        layer2_config = self.position_refinement(layer1_config)
++        
++        # Layer 3: Rotation optimization
++        print("Optimizing rotations...")
++        layer3_config = self.rotation_optimization(layer2_config)
++        
++        return layer3_config
++
++    def global_structure_optimize(self, config):
++        """Optimize global hexagon arrangement structure"""
++        # Simple L-BFGS-B optimization on positions only
++        def objective(params):
++            # Reconstruct positions
+             positions = params.reshape(-1, 2)
+-            temp_data = initial_config.copy()
+-            temp_data[:, 0] = positions[:, 0]
+-            temp_data[:, 1] = positions[:, 1]
+-            
+-            # Calculate outer radius
+-            outer_radius = DirectHexagonPackingOptimizer.calculate_outer_hex_radius(temp_data)
+-            return outer_radius
+-        
+-        def constraint_func(params):
+-            # Reconstruct positions from flattened array
+-            positions = params.reshape(-1, 2)
+-            temp_data = initial_config.copy()
+-            temp_data[:, 0] = positions[:, 0]
+-            temp_data[:, 1] = positions[:, 1]
+-            
+-            # Create hexagon polygons
+-            hexagons = []
+-            for i in range(12):
+-                center = (positions[i][0], positions[i][1])
+-                rotation = initial_config[i][2]
+-                hexagon = DirectHexagonPackingOptimizer.create_unit_hexagon(center, rotation)
+-                hexagons.append(hexagon)
+-            
+-            # Compute overlap penalty
+-            penalty = 0
+-            n = len(hexagons)
+-            for i in range(n):
+-                for j in range(i+1, n):
+-                    if DirectHexagonPackingOptimizer.check_overlap(hexagons[i], hexagons[j]):
+-                        penalty += 1000
+-                        
+-            return penalty
+-        
+-        # Optimization with bounds and constraints
+-        bounds = [(-5, 5) for _ in range(24)]
++            temp_config = config.copy()
++            temp_config[:, 0] = positions[:, 0]
++            temp_config[:, 1] = positions[:, 1]
++            
++            # Check validity and return negative for minimization
++            score = self.evaluate_feasibility_fast(temp_config)
++            return -score if score > 0 else 1e10
++
++        # Flatten positions for optimization
++        flat_positions = config[:, :2].flatten()
++        
++        # Bounds for positions
++        bounds = [(-10, 10), (-10, 10)] * 12
+         
+         try:
+-            result = minimize(objective_func, initial_positions, method='L-BFGS-B',
+-                             bounds=bounds,
+-                             constraints={'type': 'ineq', 'fun': constraint_func},
+-                             options={'maxiter': max_iterations, 'ftol': 1e-6})
++            result = minimize(
++                objective, 
++                flat_positions,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 200, 'ftol': 1e-8}
++            )
+             
+             if result.success:
+                 final_positions = result.x.reshape(-1, 2)
+-                optimized_config = initial_config.copy()
++                optimized_config = config.copy()
+                 optimized_config[:, 0] = final_positions[:, 0]
+                 optimized_config[:, 1] = final_positions[:, 1]
+                 return optimized_config
+-        except Exception as e:
+-            # If optimization fails, return original
+-            print(f"Optimization error: {e}")
++        except:
+             pass
+             
+-        return initial_config
+-    
+-    def run_full_optimization(self) -> Tuple[np.ndarray, np.ndarray, float]:
+-        """Run the direct geometric optimization pipeline"""
+-        # Get multiple symmetric configurations
+-        configs = self.generate_initial_configurations()
+-        
+-        # Try multiple configurations and find the best starting point
+-        best_initial_score = 0
+-        best_initial_config = None
+-        
+-        for config in configs:
+-            score = self.compute_feasibility_score(config)
+-            if score > best_initial_score:
+-                best_initial_score = score
+-                best_initial_config = config.copy()
+-        
+-        # Store the best configuration found so far
+-        self.best_score = best_initial_score
+-        self.best_config = best_initial_config.copy()
+-        
+-        # Direct geometric optimization refinement
+-        print("Performing direct geometric optimization...")
+-        refined_config = self.optimize_positions_directly(best_initial_config, max_iterations=100)
+-        
+-        # Additional fine-tuning by adjusting rotation angles
+-        # Keep positions fixed, optimize rotations to minimize outer radius
+-        def rotate_objective(angles):
+-            temp_config = refined_config.copy()
+-            for i, angle in enumerate(angles):
+-                temp_config[i][2] = angle
+-            return self.calculate_outer_hex_radius(temp_config)
+-        
+-        # Try optimizing rotations for better packing
+-        initial_angles = refined_config[:, 2].tolist()
++        return config
++
++    def position_refinement(self, config):
++        """Fine tune positions with tighter constraints"""
++        # More aggressive optimization with tighter tolerances
++        def objective(params):
++            positions = params.reshape(-1, 2)
++            temp_config = config.copy()
++            temp_config[:, 0] = positions[:, 0]
++            temp_config[:, 1] = positions[:, 1]
++            
++            score = self.evaluate_feasibility_fast(temp_config)
++            return -score if score > 0 else 1e10
++            
++        flat_positions = config[:, :2].flatten()
++        bounds = [(-8, 8), (-8, 8)] * 12
++        
+         try:
+-            # Simple rotation optimization using bounded minimization
+-            rotation_result = minimize(rotate_objective, initial_angles, 
+-                                     bounds=[(-180, 180) for _ in range(12)],
+-                                     method='L-BFGS-B', 
+-                                     options={'maxiter': 50})
+-            
+-            if rotation_result.success:
+-                final_angles = rotation_result.x
+-                refined_config[:, 2] = final_angles
++            result = minimize(
++                objective,
++                flat_positions,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 300, 'ftol': 1e-10}
++            )
++            
++            if result.success:
++                final_positions = result.x.reshape(-1, 2)
++                optimized_config = config.copy()
++                optimized_config[:, 0] = final_positions[:, 0]
++                optimized_config[:, 1] = final_positions[:, 1]
++                return optimized_config
+         except:
+-            pass  # Keep original rotations if optimization fails
+-        
+-        # Final comprehensive optimization
+-        final_config = self.optimize_positions_directly(refined_config, max_iterations=150)
+-        
+-        # Final evaluation
+-        final_score = self.compute_feasibility_score(final_config)
+-        final_outer_radius = self.calculate_outer_hex_radius(final_config)
+-        outer_hex_side_length = final_outer_radius + 0.2  # Add margin
+-        
+-        # Return result
+-        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-        
+-        return final_config, outer_hex_data, outer_hex_side_length
++            pass
++            
++        return config
++
++    def rotation_optimization(self, config):
++        """Optimize rotations for better packing"""
++        # Optimize rotations with positional constraints fixed
++        def objective(angles):
++            temp_config = config.copy()
++            temp_config[:, 2] = angles
++            
++            score = self.evaluate_feasibility_fast(temp_config)
++            return -score if score > 0 else 1e10
++            
++        initial_angles = config[:, 2].tolist()
++        bounds = [(-180, 180)] * 12
++        
++        try:
++            result = minimize(
++                objective,
++                initial_angles,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 100, 'ftol': 1e-6}
++            )
++            
++            if result.success:
++                final_angles = result.x
++                optimized_config = config.copy()
++                optimized_config[:, 2] = final_angles
++                return optimized_config
++        except:
++            pass
++            
++        return config
++
++    def run_optimization(self):
++        """Main optimization routine with multiple strategies"""
++        # Generate multiple high-quality initial configurations
++        configs = self.create_lattice_configurations()
++        
++        best_score = 0.0
++        best_config = None
++        
++        # Try different starting configurations
++        for i, initial_config in enumerate(configs):
++            # Add some randomization to escape local minima
++            random_config = initial_config.copy()
++            for j in range(12):
++                random_config[j, 0] += random.uniform(-0.2, 0.2)
++                random_config[j, 1] += random.uniform(-0.2, 0.2)
++                random_config[j, 2] += random.uniform(-5, 5)
++            
++            # Layered optimization approach
++            optimized_config = self.optimize_layered(random_config)
++            
++            # Evaluate final result
++            score = self.evaluate_feasibility_fast(optimized_config)
++            
++            if score > best_score:
++                best_score = score
++                best_config = optimized_config.copy()
++                
++            # Early termination check
++            if self.get_elapsed_time() > MAX_EVAL_TIME * 0.95:
++                break
++                
++        # If no valid solution found, return the best we have
++        if best_config is None:
++            best_config = configs[0]
++            
++        return best_config, best_score
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    optimizer = DirectHexagonPackingOptimizer()
+-    return optimizer.run_full_optimization()
++    optimizer = HexagonPackingEvolutionary()
++    best_config, best_score = optimizer.run_optimization()
++    
++    # Compute final outer hexagon radius
++    outer_radius = 1.0 / best_score if best_score > 0 else 10.0
++    
++    # Ensure proper shape
++    if len(best_config) != 12:
++        # Fallback to a simple configuration
++        best_config = np.array([
++            [0, 0, 0],
++            [-2.5, 0, 0],
++            [2.5, 0, 0],
++            [-1.25, 2.17, 0],
++            [1.25, 2.17, 0],
++            [-1.25, -2.17, 0],
++            [1.25, -2.17, 0],
++            [-3.75, 2.17, 0],
++            [3.75, 2.17, 0],
++            [-3.75, -2.17, 0],
++            [3.75, -2.17, 0],
++            [0, -4, 0]
++        ])
++        outer_radius = 8.0
++
++    outer_hex_data = np.array([0, 0, 0])
++    outer_hex_side_length = outer_radius * 2  # Approximate, since we're measuring from center
++
++    return best_config, outer_hex_data, outer_hex_side_length
+ 
+ # EVOLVE-BLOCK-END

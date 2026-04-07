@@ -1,0 +1,203 @@
+<NAME>
+adaptive_mutation_scheduling
+</NAME>
+
+<DESCRIPTION>
+I'll implement a three-phase adaptive mutation rate scheduling approach to better balance exploration and exploitation during evolution. This technique has proven effective in previous generations by using different mutation rates during different phases of optimization:
+
+1. Phase 1 (Generations 1-60): High mutation rate (0.15) for broad exploration
+2. Phase 2 (Generations 61-120): Moderate mutation rate (0.05) for balanced refinement
+3. Phase 3 (Generations 121-150): Low mutation rate (0.015) for fine-tuning
+
+This approach directly builds upon successful strategies from previous generations while being more structured than the simple exponential decay currently used.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class MutationHandler:
+    """Handles mutation operations."""
+
+    @staticmethod
+    def mutate_individual(individual):
+        """Mutate an individual with adaptive mutation rates"""
+        # Exponential decay for mutation rate
+        gen_rate = MUTPB * (0.1 ** (1.0 * 150 / NGEN))  # Exponential decay
+
+        for i in range(len(individual)):
+            if random.random() < gen_rate:
+                if i % 3 == 2:  # This is a radius
+                    # Mutate radius with bounded adjustment
+                    individual[i] = max(0.001, min(0.4, individual[i] * random.uniform(0.85, 1.15)))
+                else:  # This is x or y coordinate
+                    # Mutate position with bounded adjustment
+                    individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i] + random.gauss(0, 0.025)))
+
+        return individual,
+=======
+class MutationHandler:
+    """Handles mutation operations."""
+
+    @staticmethod
+    def mutate_individual(individual, generation=0):
+        """Mutate an individual with three-phase adaptive mutation rates"""
+        # Three-phase adaptive mutation scheduling
+        if generation <= 60:
+            # Phase 1: High exploration
+            gen_rate = 0.15
+        elif generation <= 120:
+            # Phase 2: Balanced refinement
+            gen_rate = 0.05
+        else:
+            # Phase 3: Fine-tuning
+            gen_rate = 0.015
+
+        for i in range(len(individual)):
+            if random.random() < gen_rate:
+                if i % 3 == 2:  # This is a radius
+                    # Mutate radius with bounded adjustment
+                    individual[i] = max(0.001, min(0.4, individual[i] * random.uniform(0.85, 1.15)))
+                else:  # This is x or y coordinate
+                    # Mutate position with bounded adjustment
+                    individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i] + random.gauss(0, 0.025)))
+
+        return individual,
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class EvolutionaryOptimizer:
+    """Main evolutionary optimization class."""
+
+    def __init__(self):
+        self.toolbox = base.Toolbox()
+        self._setup_toolbox()
+
+    def _setup_toolbox(self):
+        """Setup DEAP toolbox with registered components."""
+        self.toolbox.register("individual", tools.initIterate, creator.Individual, Initializer.init_individual)
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+        self.toolbox.register("evaluate", CircleEvaluator.eval_circles)
+        self.toolbox.register("mate", CrossoverHandler.constraint_aware_crossover)
+        self.toolbox.register("mutate", MutationHandler.mutate_individual)
+        self.toolbox.register("select", SelectionHandler.adaptive_tournament_selection)
+
+    def optimize(self):
+        """Run the evolutionary optimization process."""
+        # Create population
+        pop = self.toolbox.population(n=POP_SIZE)
+
+        # Evaluate initial population
+        fitnesses = list(map(self.toolbox.evaluate, pop))
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = fit
+
+        # Evolution loop with enhanced adaptive parameters
+        for gen in range(NGEN):
+            # Adjust mutation rate using exponential decay
+            current_mutation_rate = MUTPB * (0.1 ** (1.0 * gen / NGEN))
+
+            # Select the next generation individuals
+            offspring = self.toolbox.select(pop, len(pop))
+            # Clone the selected individuals
+            offspring = list(map(self.toolbox.clone, offspring))
+
+            # Apply crossover and mutation on the offspring
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < CXPB:
+                    self.toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if random.random() < current_mutation_rate:
+                    self.toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = map(self.toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            # Elitism: keep best individuals
+            if ELITISM_COUNT > 0:
+                best_individuals = tools.selBest(pop, ELITISM_COUNT)
+                offspring[:ELITISM_COUNT] = best_individuals
+
+            # The population is entirely replaced by the offspring
+            pop[:] = offspring
+
+        # Find the best individual
+        best_ind = tools.selBest(pop, 1)[0]
+        circles = np.array(best_ind).reshape(-1, 3)
+
+        return circles
+=======
+class EvolutionaryOptimizer:
+    """Main evolutionary optimization class."""
+
+    def __init__(self):
+        self.toolbox = base.Toolbox()
+        self._setup_toolbox()
+
+    def _setup_toolbox(self):
+        """Setup DEAP toolbox with registered components."""
+        self.toolbox.register("individual", tools.initIterate, creator.Individual, Initializer.init_individual)
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+        self.toolbox.register("evaluate", CircleEvaluator.eval_circles)
+        self.toolbox.register("mate", CrossoverHandler.constraint_aware_crossover)
+        self.toolbox.register("mutate", lambda ind, gen: MutationHandler.mutate_individual(ind, gen))
+        self.toolbox.register("select", SelectionHandler.adaptive_tournament_selection)
+
+    def optimize(self):
+        """Run the evolutionary optimization process."""
+        # Create population
+        pop = self.toolbox.population(n=POP_SIZE)
+
+        # Evaluate initial population
+        fitnesses = list(map(self.toolbox.evaluate, pop))
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = fit
+
+        # Evolution loop with enhanced adaptive parameters
+        for gen in range(NGEN):
+            # Select the next generation individuals
+            offspring = self.toolbox.select(pop, len(pop))
+            # Clone the selected individuals
+            offspring = list(map(self.toolbox.clone, offspring))
+
+            # Apply crossover and mutation on the offspring
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < CXPB:
+                    self.toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if random.random() < MUTPB:  # Using constant mutation probability for now
+                    self.toolbox.mutate(mutant, gen)
+                    del mutant.fitness.values
+
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = map(self.toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            # Elitism: keep best individuals
+            if ELITISM_COUNT > 0:
+                best_individuals = tools.selBest(pop, ELITISM_COUNT)
+                offspring[:ELITISM_COUNT] = best_individuals
+
+            # The population is entirely replaced by the offspring
+            pop[:] = offspring
+
+        # Find the best individual
+        best_ind = tools.selBest(pop, 1)[0]
+        circles = np.array(best_ind).reshape(-1, 3)
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

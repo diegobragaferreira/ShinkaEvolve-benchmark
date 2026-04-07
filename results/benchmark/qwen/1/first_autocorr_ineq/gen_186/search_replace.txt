@@ -1,0 +1,154 @@
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+This edit focuses on enhancing the local search capability to improve convergence to better solutions. The main idea is to replace the current local search with a more sophisticated multi-start optimization approach that employs both gradient-based and evolutionary strategies. This will help escape local optima and explore the solution space more effectively, potentially leading to higher 1/C1 values and thus better combined scores.
+
+The changes include:
+1. Replacing the current `get_good_direction_to_move_into` function with a more robust multi-start optimization
+2. Adding a new function for multi-start L-BFGS optimization
+3. Improving parameter handling for more adaptive behavior
+4. Modifying how local search is applied within the evolution loop
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced local search."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+
+    if g_fun is None:
+        # Fallback to a simple gradient-based approach
+        return gradient_improve_sequence(sequence)
+
+    sum_sequence = np.sum(g_fun)
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def gradient_improve_sequence(sequence: list[float], step_size: float = 0.01) -> list[float]:
+    """Apply simple gradient-like improvement to sequence."""
+    improved = sequence.copy()
+
+    # Simple smoothing: adjust towards local average
+    for i in range(len(improved)):
+        neighbors = []
+        if i > 0:
+            neighbors.append(improved[i-1])
+        if i < len(improved) - 1:
+            neighbors.append(improved[i+1])
+
+        if neighbors:
+            avg_neighbor = np.mean(neighbors)
+            improved[i] = improved[i] * (1 - step_size) + avg_neighbor * step_size
+
+    return improved
+=======
+def multi_start_lbfgs_optimization(sequence: list[float], max_iter: int = 50) -> list[float]:
+    """Multi-start L-BFGS optimization to refine a sequence."""
+    best_sequence = sequence.copy()
+    best_inv_c1 = 0.0
+
+    # Try multiple starting points
+    for _ in range(5):  # 5 different start points
+        # Slightly perturb the sequence
+        perturbed = [x * random.uniform(0.9, 1.1) for x in sequence]
+        # Ensure all values are valid
+        perturbed = [max(0.01, x) for x in perturbed]
+
+        try:
+            # Use scipy.optimize.minimize with L-BFGS
+            def objective(x):
+                # Compute 1/C1 (we want to maximize this, so minimize -1/C1)
+                _, inv_c1 = compute_autocorrelation_constant(x)
+                return -inv_c1
+
+            # Constraints: all values must be non-negative
+            constraints = [{'type': 'ineq', 'fun': lambda x: x}]
+
+            # Bounds: ensure all values remain reasonable
+            bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+
+            result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds,
+                                     constraints=constraints, options={'maxiter': max_iter})
+
+            if result.success:
+                _, inv_c1 = compute_autocorrelation_constant(result.x)
+                if inv_c1 > best_inv_c1:
+                    best_inv_c1 = inv_c1
+                    best_sequence = result.x.tolist()
+        except Exception:
+            continue  # Skip if optimization fails
+
+    return best_sequence
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced local search."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 0.01:
+        return None
+
+    # Try multi-start L-BFGS optimization first
+    optimized_sequence = multi_start_lbfgs_optimization(sequence, max_iter=30)
+
+    # Check if optimization was successful and improved the result
+    _, original_inv_c1 = compute_autocorrelation_constant(sequence)
+    _, optimized_inv_c1 = compute_autocorrelation_constant(optimized_sequence)
+
+    if optimized_inv_c1 > original_inv_c1:
+        return optimized_sequence
+    else:
+        # Fallback to previous approach if optimization didn't help
+        normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+        rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+
+        if g_fun is None:
+            # Fallback to a simple gradient-based approach
+            return gradient_improve_sequence(sequence)
+
+        sum_sequence = np.sum(g_fun)
+        normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+        t = 0.01
+        new_sequence = [
+            (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+        ]
+        return new_sequence
+
+def gradient_improve_sequence(sequence: list[float], step_size: float = 0.01) -> list[float]:
+    """Apply simple gradient-like improvement to sequence."""
+    improved = sequence.copy()
+
+    # Simple smoothing: adjust towards local average
+    for i in range(len(improved)):
+        neighbors = []
+        if i > 0:
+            neighbors.append(improved[i-1])
+        if i < len(improved) - 1:
+            neighbors.append(improved[i+1])
+
+        if neighbors:
+            avg_neighbor = np.mean(neighbors)
+            improved[i] = improved[i] * (1 - step_size) + avg_neighbor * step_size
+
+    return improved
+>>>>>>> REPLACE
+</DIFF>

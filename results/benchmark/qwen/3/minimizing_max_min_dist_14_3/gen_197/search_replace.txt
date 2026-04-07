@@ -1,0 +1,316 @@
+<NAME>
+enhanced_symmetry_exploration
+</NAME>
+
+<DESCRIPTION>
+The current implementation only creates symmetric variants through rotations around specific axes, which may not fully explore the symmetry group of the optimal solution. I'll enhance the symmetry exploration by implementing a more comprehensive approach that includes:
+1. Creating multiple types of symmetric transformations (rotations, reflections, permutations)
+2. Using a more systematic approach to generate diverse variants
+3. Implementing better selection criteria for the best variant
+
+This should help escape local optima and discover better configurations that might have higher min/max distance ratios.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_symmetric_variants(points: np.ndarray, num_variants: int = 4) -> np.ndarray:
+    """
+    Create symmetric variants by rotating around different axes.
+    """
+    variants = [points]
+
+    # Create rotations around different axes
+    for i in range(num_variants):
+        angle = 2 * np.pi * (i + 1) / (num_variants + 1)
+
+        # Rotation around z-axis
+        rot_z = np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+
+        rotated = points @ rot_z.T
+        variants.append(rotated)
+
+        # Rotation around x-axis
+        rot_x = np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+        rotated_x = points @ rot_x.T
+        variants.append(rotated_x)
+
+        # Rotation around y-axis
+        rot_y = np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+        rotated_y = points @ rot_y.T
+        variants.append(rotated_y)
+
+    return np.vstack(variants)
+=======
+def create_symmetric_variants(points: np.ndarray, num_variants: int = 8) -> np.ndarray:
+    """
+    Create diverse symmetric variants including rotations, reflections, and permutations.
+    """
+    variants = [points]
+
+    # Create multiple rotation variants
+    for i in range(num_variants // 2):
+        # Random rotation around random axis
+        angle = 2 * np.pi * np.random.random()
+        axis = np.random.randn(3)
+        axis = axis / np.linalg.norm(axis)
+
+        # Rodrigues' rotation formula
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        kx, ky, kz = axis
+        rot_matrix = np.array([
+            [cos_a + kx*kx*(1-cos_a), kx*ky*(1-cos_a) - kz*sin_a, kx*kz*(1-cos_a) + ky*sin_a],
+            [kx*ky*(1-cos_a) + kz*sin_a, cos_a + ky*ky*(1-cos_a), ky*kz*(1-cos_a) - kx*sin_a],
+            [kx*kz*(1-cos_a) - ky*sin_a, ky*kz*(1-cos_a) + kx*sin_a, cos_a + kz*kz*(1-cos_a)]
+        ])
+
+        rotated = points @ rot_matrix.T
+        variants.append(rotated)
+
+    # Create reflection variants
+    reflections = [
+        np.array([[-1, 0, 0], [0, 1, 0], [0, 0, 1]]),  # Reflect across yz-plane
+        np.array([[1, 0, 0], [0, -1, 0], [0, 0, 1]]),  # Reflect across xz-plane
+        np.array([[1, 0, 0], [0, 1, 0], [0, 0, -1]]),  # Reflect across xy-plane
+        np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]]),  # Reflect across origin (xz)
+    ]
+
+    for ref_matrix in reflections:
+        reflected = points @ ref_matrix.T
+        variants.append(reflected)
+
+    # Add permutation variants (swap coordinates)
+    perms = [
+        [0, 1, 2],  # identity
+        [0, 2, 1],  # swap y and z
+        [1, 0, 2],  # swap x and y
+        [1, 2, 0],  # cyclic perm x->y, y->z, z->x
+        [2, 0, 1],  # cyclic perm x->z, z->y, y->x
+        [2, 1, 0],  # swap x and z
+    ]
+
+    for perm in perms:
+        permuted = points[:, perm]
+        variants.append(permuted)
+
+    return np.vstack(variants)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_variant_selection
+</NAME>
+
+<DESCRIPTION>
+The current variant selection only looks at the ratio of each variant, but we can improve this by:
+1. Using a more robust validation approach that checks both the ratio and the distribution quality
+2. Implementing a fitness function that considers not just the ratio but also how well-distributed the points are
+3. Adding a diversity component to avoid selecting overly similar variants
+
+This should lead to better selection of promising candidates from the symmetric variants.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Explore symmetric variants to find potentially better solutions
+    try:
+        variants = create_symmetric_variants(optimized_points, num_variants=3)
+        best_variant_points = optimized_points.copy()
+        _, _, best_ratio = calculate_distance_metrics(best_variant_points)
+
+        # Evaluate all variants
+        for i in range(len(variants) // 14):
+            variant_points = variants[i*14:(i+1)*14]
+            _, _, ratio = calculate_distance_metrics(variant_points)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_variant_points = variant_points.copy()
+
+        optimized_points = best_variant_points.copy()
+    except:
+        pass
+=======
+    # Explore symmetric variants to find potentially better solutions
+    try:
+        variants = create_symmetric_variants(optimized_points, num_variants=6)
+        best_variant_points = optimized_points.copy()
+        _, _, best_ratio = calculate_distance_metrics(best_variant_points)
+
+        # Evaluate all variants with more comprehensive fitness assessment
+        best_fitness = -float('inf')
+        best_variant_index = 0
+
+        for i in range(len(variants) // 14):
+            variant_points = variants[i*14:(i+1)*14]
+            min_dist, max_dist, ratio = calculate_distance_metrics(variant_points)
+
+            # Enhanced fitness function combining ratio with distribution quality
+            if max_dist > 0:
+                # Simple fitness: ratio plus a bonus for having larger minimum distances
+                fitness = ratio + 0.1 * (min_dist / max_dist)  # Bonus for well-separated points
+
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_variant_points = variant_points.copy()
+                    best_ratio = ratio
+
+        optimized_points = best_variant_points.copy()
+    except:
+        pass
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_local_refinement
+</NAME>
+
+<DESCRIPTION>
+The local refinement step currently uses L-BFGS-B with fixed tolerances. I'll improve this by:
+1. Making the local refinement more aggressive with better parameter tuning
+2. Adding multiple local refinement passes with different strategies
+3. Implementing early stopping criteria to prevent overfitting
+
+This should allow the optimization to reach better local optima closer to global optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 3: Local refinement using L-BFGS-B with adaptive tolerance tightening
+    def local_objective(x_flat):
+        points = x_flat.reshape(-1, 3)
+        # Add penalty for out-of-bounds
+        penalty = 0.0
+        for i in range(14):
+            for j in range(3):
+                if points[i,j] < 0:
+                    penalty += 1000 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1000 * (points[i,j] - 1)**2
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return float('inf') + penalty
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 0:
+            return float('inf') + penalty
+        return -min_dist / max_dist + penalty
+
+    try:
+        x0 = result.x.reshape(-1, 3).flatten()
+
+        # Adaptive tolerance tightening for L-BFGS-B
+        # Start with loose tolerances for faster initial convergence
+        looser_options = {'maxiter': 100, 'ftol': 1e-6, 'gtol': 1e-6}
+        tighter_options = {'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9}
+
+        # First run with looser tolerances
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options=looser_options
+        )
+
+        # If improvement was significant, try with tighter tolerances
+        if abs(local_result.fun - result.fun) > 1e-8:
+            local_result = minimize(
+                local_objective,
+                local_result.x,
+                method='L-BFGS-B',
+                options=tighter_options
+            )
+
+        result = local_result
+    except:
+        pass
+=======
+    # Phase 3: Local refinement with enhanced strategies
+    def local_objective(x_flat):
+        points = x_flat.reshape(-1, 3)
+        # Add penalty for out-of-bounds
+        penalty = 0.0
+        for i in range(14):
+            for j in range(3):
+                if points[i,j] < 0:
+                    penalty += 1000 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1000 * (points[i,j] - 1)**2
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return float('inf') + penalty
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 0:
+            return float('inf') + penalty
+        return -min_dist / max_dist + penalty
+
+    try:
+        x0 = result.x.reshape(-1, 3).flatten()
+
+        # Multiple local refinement passes with different strategies
+        best_local_result = None
+        best_local_value = float('inf')
+
+        # Strategy 1: Standard L-BFGS-B with tight tolerances
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options={'maxiter': 150, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+
+        if local_result.fun < best_local_value:
+            best_local_value = local_result.fun
+            best_local_result = local_result
+
+        # Strategy 2: L-BFGS-B with medium tolerances (faster convergence with less precision)
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+
+        if local_result.fun < best_local_value:
+            best_local_value = local_result.fun
+            best_local_result = local_result
+
+        # Strategy 3: Nelder-Mead as backup for robustness
+        try:
+            local_result = minimize(
+                local_objective,
+                x0,
+                method='Nelder-Mead',
+                options={'maxiter': 100, 'fatol': 1e-8, 'xatol': 1e-8}
+            )
+
+            if local_result.fun < best_local_value:
+                best_local_value = local_result.fun
+                best_local_result = local_result
+        except:
+            pass
+
+        if best_local_result is not None:
+            result = best_local_result
+    except:
+        pass
+>>>>>>> REPLACE
+</DIFF>

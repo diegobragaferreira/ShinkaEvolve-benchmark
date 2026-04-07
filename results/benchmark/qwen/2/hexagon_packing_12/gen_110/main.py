@@ -1,0 +1,200 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+import random
+from numba import njit
+from scipy.optimize import differential_evolution, minimize
+import matplotlib.pyplot as plt
+from matplotlib.patches import RegularPolygon
+
+# Constants
+HEX_SIDE_LENGTH = 1.0
+N_INNER_HEXAGONS = 12
+ROTATION_DEGREES = 60  # Hexagon rotation in degrees
+
+@njit
+def generate_hexagon_vertices(x, y, side_length, angle_degrees):
+    """Generate vertices for a hexagon at position (x,y) with given side length and rotation."""
+    angle_rad = np.radians(angle_degrees)
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * np.pi/3
+        vx = x + side_length * np.cos(theta)
+        vy = y + side_length * np.sin(theta)
+        vertices.append((vx, vy))
+    return np.array(vertices)
+
+@njit
+def create_hexagon_polygon(x, y, side_length, angle_degrees):
+    """Create a Shapely polygon for a hexagon."""
+    vertices = generate_hexagon_vertices(x, y, side_length, angle_degrees)
+    return Polygon(vertices)
+
+@njit
+def check_containment(hexagon_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hex_poly.contains(hexagon_poly) or outer_hex_poly.contains(hexagon_poly.buffer(1e-10))
+
+@njit
+def check_overlap(hex1, hex2):
+    """Check if two hexagon polygons overlap."""
+    return hex1.intersects(hex2)
+
+def calculate_inner_hexagon_data(inner_positions, inner_angles):
+    """Calculate 12 hexagon data from positions and angles."""
+    inner_hex_data = np.zeros((12, 3))
+    for i in range(12):
+        inner_hex_data[i] = [inner_positions[i][0], inner_positions[i][1], inner_angles[i]]
+    return inner_hex_data
+
+def evaluate_solution(config):
+    """Evaluate a 12-hexagon packing configuration."""
+    # Parse configuration: positions (x,y) and angles for 12 hexagons + outer hex dimensions
+    inner_positions = config[:24].reshape(12, 2)
+    inner_angles = config[24:36]
+    outer_radius = config[36]
+    
+    # Calculate outer hexagon vertices
+    outer_hex_vertices = generate_hexagon_vertices(0, 0, outer_radius, 0)
+    outer_hex_poly = Polygon(outer_hex_vertices)
+    
+    # Validate containment and overlap
+    total_penalty = 0.0
+    
+    # Check containment and overlap for all inner hexagons
+    inner_hexagons = []
+    for i in range(12):
+        x, y = inner_positions[i]
+        angle = inner_angles[i]
+        hex_poly = create_hexagon_polygon(x, y, HEX_SIDE_LENGTH, angle)
+        
+        # Check containment
+        if not check_containment(hex_poly, outer_hex_poly):
+            total_penalty += 1000.0
+        
+        # Check overlaps with other hexagons
+        for j in range(i):
+            if check_overlap(inner_hexagons[j], hex_poly):
+                total_penalty += 1000.0
+                
+        inner_hexagons.append(hex_poly)
+    
+    # If there are constraint violations, return very poor fitness
+    if total_penalty > 0:
+        return -total_penalty
+    
+    # If valid, return the inverse of outer radius (maximize 1/R)
+    return 1.0 / outer_radius
+
+def get_initial_population():
+    """Generate initial population with symmetric configurations."""
+    population = []
+    
+    # Generate multiple symmetric configurations
+    configs = []
+    
+    # Configuration 1: Central cluster with surrounding ring
+    base_positions = [
+        (0, 0),          # Center
+        (-2.5, 0),       # Left
+        (2.5, 0),        # Right
+        (0, 2.5),        # Top
+        (0, -2.5),       # Bottom
+        (-1.25, 1.25),   # Top-left
+        (1.25, 1.25),    # Top-right
+        (-1.25, -1.25),  # Bottom-left
+        (1.25, -1.25),   # Bottom-right
+        (-2.5, 1.25),    # Far top-left
+        (2.5, 1.25),     # Far top-right
+        (-2.5, -1.25),   # Far bottom-left
+    ]
+    
+    # Add variations to create diverse initial population
+    for _ in range(5):
+        # Perturb positions slightly
+        perturbed_positions = []
+        for pos in base_positions:
+            dx = (np.random.random() - 0.5) * 0.3
+            dy = (np.random.random() - 0.5) * 0.3
+            perturbed_positions.append((pos[0] + dx, pos[1] + dy))
+            
+        # Random angles
+        angles = np.random.random(12) * 360
+        
+        # Random outer hexagon size (start small)
+        outer_size = 8.0 + np.random.random() * 2.0
+        
+        # Create configuration
+        config = np.concatenate([
+            np.array(perturbed_positions).flatten(),
+            angles,
+            [outer_size]
+        ])
+        configs.append(config)
+    
+    return configs
+
+def optimize_with_de():
+    """Use differential evolution to find optimal configuration."""
+    def objective(x):
+        return -evaluate_solution(x)  # Minimize negative to maximize positive
+    
+    # Bounds: 12 positions (x, y), 12 angles, 1 outer radius
+    bounds = []
+    for _ in range(12):  # positions
+        bounds.extend([(-10, 10), (-10, 10)])
+    for _ in range(12):  # angles
+        bounds.extend([(0, 360)])
+    bounds.append((2.0, 15.0))  # outer radius
+    
+    # Get initial population
+    initial_pop = get_initial_population()
+    
+    # Run differential evolution
+    result = differential_evolution(objective, bounds, maxiter=50, popsize=10, seed=42)
+    
+    return result.x
+
+def refine_with_local_optimization(initial_config):
+    """Refine using local optimization."""
+    def objective(x):
+        return -evaluate_solution(x)  # Minimize negative to maximize positive
+    
+    # Use L-BFGS-B optimizer
+    result = minimize(objective, initial_config, method='L-BFGS-B')
+    return result.x
+
+def symmetric_hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Optimize using differential evolution
+    optimized_config = optimize_with_de()
+    
+    # Refine with local optimization
+    refined_config = refine_with_local_optimization(optimized_config)
+    
+    # Extract results
+    inner_positions = refined_config[:24].reshape(12, 2)
+    inner_angles = refined_config[24:36]
+    outer_hex_side_length = refined_config[36]
+    
+    # Convert to required output format
+    inner_hex_data = calculate_inner_hexagon_data(inner_positions, inner_angles)
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

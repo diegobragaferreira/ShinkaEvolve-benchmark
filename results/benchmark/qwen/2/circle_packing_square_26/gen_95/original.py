@@ -1,0 +1,433 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import KDTree
+import random
+from collections import defaultdict
+
+def check_containment(circles):
+    """Check if all circles are fully contained within the unit square"""
+    for x, y, r in circles:
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    return True
+
+def check_overlap(circles):
+    """Check if any circles overlap using KDTree for efficiency"""
+    if len(circles) < 2:
+        return True
+    
+    points = circles[:, :2]  # Extract (x,y) coordinates
+    tree = KDTree(points)
+    
+    # For each circle, find neighbors within sum of radii distance
+    for i, (x, y, r) in enumerate(circles):
+        # Find nearby circles (within 2*(r_max) distance is sufficient)
+        nearby = tree.query_ball_point([x, y], 2*r, p=np.inf)
+        for j in nearby:
+            if i != j:
+                x2, y2, r2 = circles[j]
+                distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                if distance < r + r2:
+                    return False
+    return True
+
+def calculate_penalty(circles):
+    """Calculate penalty based on constraint violations"""
+    penalty = 0.0
+    
+    # Boundary penalty
+    for x, y, r in circles:
+        boundary_violation = 0
+        if x - r < 0:
+            boundary_violation += abs(x - r)
+        if x + r > 1:
+            boundary_violation += abs(x + r - 1)
+        if y - r < 0:
+            boundary_violation += abs(y - r)
+        if y + r > 1:
+            boundary_violation += abs(y + r - 1)
+        penalty += boundary_violation * 1000
+    
+    # Overlap penalty
+    if len(circles) >= 2:
+        points = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Use KDTree for efficient neighbor search
+        tree = KDTree(points)
+        
+        for i, (x, y, r) in enumerate(circles):
+            nearby = tree.query_ball_point([x, y], 2*r, p=np.inf)
+            for j in nearby:
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    overlap = max(0, r + r2 - distance)
+                    if overlap > 0:
+                        penalty += overlap * 10000
+    
+    return penalty
+
+def evaluate_fitness(circles):
+    """Evaluate fitness as sum of radii minus penalty for constraint violations"""
+    if not check_containment(circles):
+        return -10000.0
+    
+    if not check_overlap(circles):
+        return -10000.0
+    
+    total_radius = np.sum(circles[:, 2])
+    penalty = calculate_penalty(circles)
+    
+    return total_radius - penalty
+
+def crossover(parent1, parent2):
+    """Uniform crossover with constraint preservation"""
+    n = len(parent1)
+    child = np.zeros_like(parent1)
+
+    # For each circle, randomly choose from parent1 or parent2
+    for i in range(n):
+        if random.random() < 0.5:
+            child[i] = parent1[i]
+        else:
+            child[i] = parent2[i]
+
+    # Repair any constraint violations
+    child = repair_constraints(child)
+    
+    return child
+
+def repair_constraints(circles):
+    """Repair constraint violations with geometric adjustments"""
+    repaired = circles.copy()
+    
+    # Improve containment constraints
+    for i in range(len(repaired)):
+        x, y, r = repaired[i]
+        
+        # Adjust radius to fit in square with margin
+        r_max = min(x, 1-x, y, 1-y) * 0.99
+        if r > r_max:
+            repaired[i, 2] = r_max
+            
+        # Adjust position to stay within bounds
+        repaired[i, 0] = np.clip(x, r, 1-r)
+        repaired[i, 1] = np.clip(y, r, 1-r)
+    
+    # Resolve overlaps by iterative adjustment
+    for iteration in range(20):
+        overlaps = []
+        points = repaired[:, :2]
+        radii = repaired[:, 2]
+        
+        # Find overlapping pairs
+        tree = KDTree(points)
+        for i in range(len(repaired)):
+            nearby = tree.query_ball_point(points[i], 2*radii[i], p=np.inf)
+            for j in nearby:
+                if i < j:  # Don't double count
+                    x1, y1, r1 = repaired[i]
+                    x2, y2, r2 = repaired[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        overlaps.append((i, j, distance, r1 + r2))
+        
+        if not overlaps:
+            break
+            
+        # Reduce radii of overlapping circles
+        overlap_count = defaultdict(int)
+        for i, j, _, _ in overlaps:
+            overlap_count[i] += 1
+            overlap_count[j] += 1
+            
+        # Apply shrinkage proportional to overlap count
+        for idx, count in overlap_count.items():
+            old_r = repaired[idx, 2]
+            shrink_factor = max(0.1, 1.0 - 0.1 * count)
+            repaired[idx, 2] = max(0.001, old_r * shrink_factor)
+            
+            # Re-adjust position to maintain bounds
+            x, y, r = repaired[idx]
+            repaired[idx, 0] = np.clip(x, r, 1-r)
+            repaired[idx, 1] = np.clip(y, r, 1-r)
+    
+    return repaired
+
+def local_optimization(circles, max_iterations=100):
+    """Apply local optimization to improve circle arrangement"""
+    optimized = circles.copy()
+    
+    # Try to increase radii while maintaining constraints
+    for iter_num in range(max_iterations):
+        improved = False
+        
+        for i in range(len(optimized)):
+            x, y, r = optimized[i]
+            
+            # Compute maximum possible radius at current position
+            r_max = min(x, 1-x, y, 1-y)
+            
+            # Find nearby circles to avoid collisions
+            points = optimized[:, :2]
+            radii = optimized[:, 2]
+            
+            # Get potential neighbors
+            tree = KDTree(points)
+            nearby = tree.query_ball_point([x, y], 2*r_max, p=np.inf)
+            
+            # Calculate the minimum distance to other circles
+            min_dist = r_max
+            for j in nearby:
+                if i != j:
+                    x2, y2, r2 = optimized[j]
+                    dist_to_center = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    min_dist = min(min_dist, dist_to_center - r2)
+            
+            # Try to increase radius up to constraint
+            new_r = min(r_max, min_dist)
+            if new_r > r and new_r > 0.001:
+                optimized[i, 2] = new_r
+                improved = True
+        
+        if not improved:
+            break
+    
+    # Final constraint repair
+    optimized = repair_constraints(optimized)
+    
+    return optimized
+
+def initialize_population(pop_size, n_circles):
+    """Initialize population with grid-guided approach"""
+    population = []
+
+    for _ in range(pop_size):
+        circles = np.zeros((n_circles, 3))
+        
+        # Phase 1: Coarse grid initialization
+        grid_size = int(np.ceil(np.sqrt(n_circles))) + 2
+        spacing_x = 1.0 / (grid_size + 1)
+        spacing_y = 1.0 / (grid_size + 1)
+        
+        # Place circles on a grid pattern
+        idx = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if idx >= n_circles:
+                    break
+                    
+                x_base = (i + 1) * spacing_x
+                y_base = (j + 1) * spacing_y
+                
+                # Small random perturbation
+                x = np.clip(x_base + np.random.normal(0, spacing_x * 0.15), 0, 1)
+                y = np.clip(y_base + np.random.normal(0, spacing_y * 0.15), 0, 1)
+                
+                # Radius based on grid spacing but randomized
+                r = min(spacing_x, spacing_y) * (0.3 + np.random.random() * 0.4)
+                
+                circles[idx] = [x, y, r]
+                idx += 1
+                
+            if idx >= n_circles:
+                break
+        
+        # Phase 2: Fill remaining circles with random placement near existing ones
+        for i in range(idx, n_circles):
+            attempts = 0
+            valid_placement = False
+            
+            # Prefer placing near existing circles to reduce overlap probability
+            if i > 0 and attempts < 50:
+                # Choose a random existing circle and place near it
+                ref_idx = np.random.randint(0, i)
+                ref_x, ref_y, ref_r = circles[ref_idx]
+                
+                # Place around reference with some random offset
+                angle = np.random.random() * 2 * np.pi
+                distance = np.random.exponential(0.05) + ref_r
+                x = np.clip(ref_x + distance * np.cos(angle), 0, 1)
+                y = np.clip(ref_y + distance * np.sin(angle), 0, 1)
+                
+                r = np.random.uniform(0.01, 0.1)
+                
+                # Check if it fits without violating constraints
+                if x - r >= 0 and x + r <= 1 and y - r >= 0 and y + r <= 1:
+                    # Check overlap with existing circles
+                    valid_placement = True
+                    for j in range(i):
+                        existing_x, existing_y, existing_r = circles[j]
+                        distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                        if distance < r + existing_r:
+                            valid_placement = False
+                            break
+                
+                if valid_placement:
+                    circles[i] = [x, y, r]
+                    continue
+            
+            # Fallback: random placement
+            while not valid_placement and attempts < 100:
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+                r = np.random.uniform(0.01, 0.1)
+
+                # Ensure it fits in the square
+                if x - r >= 0 and x + r <= 1 and y - r >= 0 and y + r <= 1:
+                    valid_placement = True
+
+                    # Check overlap with existing circles
+                    for j in range(i):
+                        existing_x, existing_y, existing_r = circles[j]
+                        distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                        if distance < r + existing_r:
+                            valid_placement = False
+                            break
+
+                attempts += 1
+
+            if valid_placement:
+                circles[i] = [x, y, r]
+            else:
+                # If we couldn't place it properly, just use random values
+                circles[i] = [np.random.uniform(0.05, 0.95),
+                             np.random.uniform(0.05, 0.95),
+                             np.random.uniform(0.01, 0.1)]
+
+        # Apply constraint repair
+        circles = repair_constraints(circles)
+        
+        population.append(circles)
+
+    return population
+
+def adaptive_mutation_rate(gen, max_generations):
+    """Adaptive mutation rate that decreases over time"""
+    return 0.15 * (0.01 / 0.15) ** (gen / max_generations)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    n_circles = 26
+    pop_size = 80
+    generations = 250
+    elite_size = 8
+
+    # Initialize population
+    population = initialize_population(pop_size, n_circles)
+
+    best_fitness_history = []
+
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(individual) for individual in population]
+
+        # Track best fitness
+        best_fitness = max(fitnesses)
+        best_fitness_history.append(best_fitness)
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        elite_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)[:elite_size]
+        for idx in elite_indices:
+            new_population.append(population[idx].copy())
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < pop_size:
+            # Tournament selection (size varies with generation)
+            tournament_size = max(3, min(10, 5 + gen // 50))
+            tournament_indices = random.sample(range(len(population)), tournament_size)
+            tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+            parent1_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+            parent1 = population[parent1_idx]
+            
+            tournament_indices = random.sample(range(len(population)), tournament_size)
+            tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+            parent2_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+            parent2 = population[parent2_idx]
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Adaptive mutation rate
+            mutation_rate = adaptive_mutation_rate(gen, generations)
+            child = mutate(child, mutation_rate=mutation_rate, max_mutation=0.03)
+
+            # Apply local optimization to improve offspring
+            child = local_optimization(child)
+            
+            new_population.append(child)
+
+        population = new_population[:pop_size]  # Ensure exact population size
+
+        # Print progress
+        if gen % 25 == 0:
+            avg_fitness = np.mean(fitnesses)
+            print(f"Generation {gen}: Best fitness = {best_fitness:.4f}, Avg fitness = {avg_fitness:.4f}")
+
+    # Return the best solution found
+    final_fitnesses = [evaluate_fitness(individual) for individual in population]
+    best_idx = np.argmax(final_fitnesses)
+    best_solution = population[best_idx]
+
+    # Apply final local optimization
+    best_solution = local_optimization(best_solution, max_iterations=50)
+
+    # Final validation
+    if not check_containment(best_solution) or not check_overlap(best_solution):
+        print("Warning: Best solution violates constraints")
+
+    print(f"Final fitness: {evaluate_fitness(best_solution):.6f}")
+
+    return best_solution
+
+def mutate(circles, mutation_rate, max_mutation=0.05):
+    """Apply mutation with geometric awareness"""
+    mutated = circles.copy()
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Choose type of mutation
+            mutation_type = random.random()
+            
+            if mutation_type < 0.5:  # Position mutation
+                # Mutate position with larger scale
+                mutated[i, 0] += np.random.normal(0, max_mutation * 2)
+                mutated[i, 1] += np.random.normal(0, max_mutation * 2)
+                # Ensure it stays within bounds
+                mutated[i, 0] = np.clip(mutated[i, 0], 0, 1)
+                mutated[i, 1] = np.clip(mutated[i, 1], 0, 1)
+            elif mutation_type < 0.9:  # Radius mutation (smaller scale)
+                # Mutate radius
+                mutated[i, 2] += np.random.normal(0, max_mutation * 0.5)
+                # Ensure radius remains positive
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+            else:  # Combined mutation
+                # Mutate position
+                mutated[i, 0] += np.random.normal(0, max_mutation)
+                mutated[i, 1] += np.random.normal(0, max_mutation)
+                mutated[i, 0] = np.clip(mutated[i, 0], 0, 1)
+                mutated[i, 1] = np.clip(mutated[i, 1], 0, 1)
+                
+                # Mutate radius slightly
+                mutated[i, 2] += np.random.normal(0, max_mutation * 0.2)
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+
+    # Repair any constraint violations introduced by mutation
+    mutated = repair_constraints(mutated)
+    
+    return mutated
+
+# EVOLVE-BLOCK-END

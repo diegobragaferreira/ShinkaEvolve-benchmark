@@ -1,0 +1,375 @@
+<NAME>
+add_adaptive_penalty_system
+</NAME>
+
+<DESCRIPTION>
+Adding an adaptive penalty system that dynamically adjusts penalty coefficients based on optimization progress to better handle constraint violations and improve convergence. This approach helps prevent premature convergence while maintaining solution quality by increasing penalties when constraint violations occur frequently and decreasing them when solutions are consistently valid.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Evaluate fitness (negative of outer hexagon radius for maximization)"""
+    # Calculate minimum outer radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # If solution is invalid, penalize heavily
+    if not validate_solution(inner_hex_data, outer_center, outer_angle):
+        return -1e10  # Very poor fitness
+
+    # Return negative radius (we want to minimize radius, so maximize negative value)
+    return -outer_radius
+=======
+def evaluate_fitness(inner_hex_data, outer_center=[0,0], outer_angle=0, penalty_factor=10000000.0):
+    """Evaluate fitness (negative of outer hexagon radius for maximization) with adaptive penalty"""
+    # Calculate minimum outer radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # If solution is invalid, penalize heavily with adaptive penalty
+    if not validate_solution(inner_hex_data, outer_center, outer_angle):
+        # Adaptive penalty based on how violated the constraints are
+        # We'll calculate a penalty based on the severity of violation
+        penalty = penalty_factor
+        # Add extra penalty for very bad solutions
+        if outer_radius > 50:  # Extremely large outer radius indicates severe violation
+            penalty *= 10
+        return -outer_radius - penalty
+
+    # Return negative radius (we want to minimize radius, so maximize negative value)
+    return -outer_radius
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_optimization_loop_with_penalty_adaptation
+</NAME>
+
+<DESCRIPTION>
+Updating the optimization loop to include penalty adaptation that tracks constraint violations and adjusts penalty factors accordingly. This helps the optimization algorithm avoid getting stuck in infeasible regions while still allowing exploration of promising areas, leading to better convergence properties.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_single_run(population_size=50, generations=1200, elite_size=5, tournament_size=5, seed=None):
+    """Run a single optimization run with given parameters"""
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    # Create initial population
+    population = create_diverse_initial_individuals(population_size // 2)
+
+    # Fill remaining with random individuals
+    for _ in range(population_size // 2):
+        individual = []
+        for _ in range(NUM_INNER_HEXAGONS):
+            x = random.uniform(-5, 5)
+            y = random.uniform(-5, 5)
+            angle = random.uniform(0, 360)
+            individual.append([x, y, angle])
+        population.append(np.array(individual))
+
+    best_fitness = float('-inf')
+    best_individual = None
+
+    # Evolution loop
+    for gen in range(generations):
+        # Calculate adaptive mutation rate
+        mut_rate = adaptive_mutation_rate(gen, generations)
+
+        # Evaluate fitness for entire population
+        fitnesses = []
+        for individual in population:
+            fit = evaluate_fitness(individual)
+            fitnesses.append(fit)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitnesses)
+        current_best_fitness = fitnesses[current_best_idx]
+
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_individual = population[current_best_idx].copy()
+
+        # Elitism: keep best individuals
+        elite_indices = np.argsort(fitnesses)[-elite_size:]
+        elites = [population[i] for i in elite_indices]
+
+        # Create new population
+        new_population = elites.copy()
+
+        # Fill rest with offspring
+        while len(new_population) < population_size:
+            parent1 = tournament_selection(population, fitnesses, tournament_size)
+            parent2 = tournament_selection(population, fitnesses, tournament_size)
+
+            child1, child2 = crossover(parent1, parent2)
+            child1 = mutate(child1, mutation_rate=mut_rate)
+            child2 = mutate(child2, mutation_rate=mut_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+    return best_individual, best_fitness
+=======
+def optimize_single_run(population_size=50, generations=1200, elite_size=5, tournament_size=5, seed=None):
+    """Run a single optimization run with given parameters"""
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    # Create initial population
+    population = create_diverse_initial_individuals(population_size // 2)
+
+    # Fill remaining with random individuals
+    for _ in range(population_size // 2):
+        individual = []
+        for _ in range(NUM_INNER_HEXAGONS):
+            x = random.uniform(-5, 5)
+            y = random.uniform(-5, 5)
+            angle = random.uniform(0, 360)
+            individual.append([x, y, angle])
+        population.append(np.array(individual))
+
+    best_fitness = float('-inf')
+    best_individual = None
+
+    # Track constraint violations for adaptive penalty
+    recent_violations = []
+    penalty_factor = 10000000.0
+
+    # Evolution loop
+    for gen in range(generations):
+        # Calculate adaptive mutation rate
+        mut_rate = adaptive_mutation_rate(gen, generations)
+
+        # Evaluate fitness for entire population
+        fitnesses = []
+        violation_count = 0
+        for individual in population:
+            fit = evaluate_fitness(individual, penalty_factor=penalty_factor)
+            fitnesses.append(fit)
+            # Count violations (very negative fitness indicates constraint violation)
+            if fit < -1000000:  # Threshold for constraint violation
+                violation_count += 1
+
+        # Update penalty factor based on violation frequency
+        if len(recent_violations) >= 5:
+            recent_violations.pop(0)
+        recent_violations.append(violation_count)
+
+        # Adjust penalty factor
+        avg_violations = sum(recent_violations) / len(recent_violations)
+        if avg_violations > 2:  # If many violations, increase penalty
+            penalty_factor = min(penalty_factor * 1.1, 100000000)  # Cap at reasonable value
+        elif avg_violations < 0.5 and penalty_factor > 10000000:  # If few violations, decrease penalty
+            penalty_factor = max(penalty_factor * 0.9, 10000000)  # Don't go below base value
+
+        # Track best solution
+        current_best_idx = np.argmax(fitnesses)
+        current_best_fitness = fitnesses[current_best_idx]
+
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_individual = population[current_best_idx].copy()
+
+        # Elitism: keep best individuals
+        elite_indices = np.argsort(fitnesses)[-elite_size:]
+        elites = [population[i] for i in elite_indices]
+
+        # Create new population
+        new_population = elites.copy()
+
+        # Fill rest with offspring
+        while len(new_population) < population_size:
+            parent1 = tournament_selection(population, fitnesses, tournament_size)
+            parent2 = tournament_selection(population, fitnesses, tournament_size)
+
+            child1, child2 = crossover(parent1, parent2)
+            child1 = mutate(child1, mutation_rate=mut_rate)
+            child2 = mutate(child2, mutation_rate=mut_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+    return best_individual, best_fitness
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_constraint_violation_detection
+</NAME>
+
+<DESCRIPTION>
+Adding more robust constraint violation detection by implementing a specialized validation function that can distinguish between different types of constraint violations and provide better feedback for penalty adjustments. This will help make the adaptive penalty system more effective by providing clearer signals about solution quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Check containment first
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+
+        # Calculate outer radius based on this solution to check containment properly
+        outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+        if not is_contained_in_outer_hexagon(vertices, outer_center, outer_angle, outer_radius):
+            return False
+
+    # Check overlaps efficiently using spatial indexing with improved bounding box checks
+    # Create list of all hexagon polygons for spatial indexing
+    hex_polygons = []
+    bounds_list = []
+
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+        # Store bounding boxes for quick rejection
+        bbox = Polygon(vertices).bounds
+        bounds_list.append(bbox)
+
+    # More efficient pair-wise overlap checking using spatial reasoning
+    # For hexagons, we know they can only overlap if they're within 2 unit distances
+    # So we can use a more intelligent spatial query
+
+    # Create spatial index for bounding boxes
+    n = len(hex_polygons)
+
+    # Check pairs more intelligently - only examine candidates that might actually overlap
+    for i in range(n):
+        for j in range(i+1, n):
+            # Quick bounding box check first
+            bbox1 = bounds_list[i]
+            bbox2 = bounds_list[j]
+
+            # If bounding boxes don't overlap, skip full polygon check
+            if (bbox1[2] < bbox2[0] or bbox1[0] > bbox2[2] or
+                bbox1[3] < bbox2[1] or bbox1[1] > bbox2[3]):
+                continue
+
+            # Now do the actual polygon intersection check
+            if hex_polygons[i].intersects(hex_polygons[j]):
+                return False
+
+    return True
+=======
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Check containment first
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+
+        # Calculate outer radius based on this solution to check containment properly
+        outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+        if not is_contained_in_outer_hexagon(vertices, outer_center, outer_angle, outer_radius):
+            return False, "containment"
+
+    # Check overlaps efficiently using spatial indexing with improved bounding box checks
+    # Create list of all hexagon polygons for spatial indexing
+    hex_polygons = []
+    bounds_list = []
+
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+        # Store bounding boxes for quick rejection
+        bbox = Polygon(vertices).bounds
+        bounds_list.append(bbox)
+
+    # More efficient pair-wise overlap checking using spatial reasoning
+    # For hexagons, we know they can only overlap if they're within 2 unit distances
+    # So we can use a more intelligent spatial query
+
+    # Create spatial index for bounding boxes
+    n = len(hex_polygons)
+
+    # Check pairs more intelligently - only examine candidates that might actually overlap
+    for i in range(n):
+        for j in range(i+1, n):
+            # Quick bounding box check first
+            bbox1 = bounds_list[i]
+            bbox2 = bounds_list[j]
+
+            # If bounding boxes don't overlap, skip full polygon check
+            if (bbox1[2] < bbox2[0] or bbox1[0] > bbox2[2] or
+                bbox1[3] < bbox2[1] or bbox1[1] > bbox2[3]):
+                continue
+
+            # Now do the actual polygon intersection check
+            if hex_polygons[i].intersects(hex_polygons[j]):
+                return False, "overlap"
+
+    return True, "valid"
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+fix_fitness_evaluation_with_updated_validation
+</NAME>
+
+<DESCRIPTION>
+Fixing the fitness evaluation function to properly handle the updated validation function that now returns both validity status and reason for invalidity. This ensures that the penalty system works correctly with the new validation approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(inner_hex_data, outer_center=[0,0], outer_angle=0, penalty_factor=10000000.0):
+    """Evaluate fitness (negative of outer hexagon radius for maximization) with adaptive penalty"""
+    # Calculate minimum outer radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # If solution is invalid, penalize heavily with adaptive penalty
+    if not validate_solution(inner_hex_data, outer_center, outer_angle):
+        # Adaptive penalty based on how violated the constraints are
+        # We'll calculate a penalty based on the severity of violation
+        penalty = penalty_factor
+        # Add extra penalty for very bad solutions
+        if outer_radius > 50:  # Extremely large outer radius indicates severe violation
+            penalty *= 10
+        return -outer_radius - penalty
+
+    # Return negative radius (we want to minimize radius, so maximize negative value)
+    return -outer_radius
+=======
+def evaluate_fitness(inner_hex_data, outer_center=[0,0], outer_angle=0, penalty_factor=10000000.0):
+    """Evaluate fitness (negative of outer hexagon radius for maximization) with adaptive penalty"""
+    # Calculate minimum outer radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Validate solution and get reason for invalidity
+    is_valid, reason = validate_solution(inner_hex_data, outer_center, outer_angle)
+
+    # If solution is invalid, penalize heavily with adaptive penalty
+    if not is_valid:
+        # Adaptive penalty based on how violated the constraints are
+        # We'll calculate a penalty based on the severity of violation
+        penalty = penalty_factor
+        # Add extra penalty for very bad solutions
+        if outer_radius > 50:  # Extremely large outer radius indicates severe violation
+            penalty *= 10
+        return -outer_radius - penalty
+
+    # Return negative radius (we want to minimize radius, so maximize negative value)
+    return -outer_radius
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,484 @@
+--- a/original.py
++++ b/original.py
+@@ -1,334 +1,206 @@
+ # EVOLVE-BLOCK-START
+-
+ import numpy as np
+ from typing import List
+ import time
++from scipy import signal
++from scipy.optimize import minimize
++import warnings
+ 
+ def compute_autoconvolution(f_values: List[float]) -> np.ndarray:
+     """Compute the autoconvolution g = f * f of step function f."""
+     n = len(f_values)
+     if n == 0:
+         return np.array([])
+ 
+-    # Create step function with proper spacing
+-    step_width = 0.5 / n  # interval [-1/4, 1/4] has width 0.5
+     f_array = np.array(f_values)
+-
+-    # Compute convolution using numpy's convolve (valid mode)
+-    # This gives us g[k] = sum_{i=0}^{n-1} f[i] * f[k-i] for valid indices
+     g = np.convolve(f_array, f_array, mode='full')
+-
+-    # Trim to appropriate size (should be 2*n-1 elements)
+     g = g[n-1:-(n-1)] if n > 1 else g
+-
+     return g
+ 
+ def compute_norms(g_values: np.ndarray) -> tuple:
+     """Compute the three required norms for C2 calculation."""
+     if len(g_values) == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # ||g||₂² using trapezoidal-like piecewise linear integration
+-    # For adjacent points y1, y2 with width h, contribution is (h/3)(y1² + y1*y2 + y2²)
+     if len(g_values) <= 1:
+         norm_2_sq = g_values[0]**2 if len(g_values) > 0 else 0.0
+     else:
+-        # We'll compute this properly using trapezoidal approximation
+-        # But since our g has been computed via convolution of discrete values,
+-        # we can just sum squares directly in this context (we'll treat it as area under curve)
+-        norm_2_sq = np.sum(g_values**2)
+-
+-        # Alternative implementation using the suggested formula for piecewise linear
+-        # If we had proper spacing, we'd use the trapezoidal-like approach
+-        # For now, we'll use simpler direct calculation for numerical stability
+-
+-    # ||g||₁: L1 norm, approximated as sum(|g|) / (len(g) + 1)
+-    # This appears to be a specific implementation choice from the evaluator
++        norm_2_sq = 0.0
++        for i in range(len(g_values)-1):
++            h = 1.0
++            norm_2_sq += (h/3.0) * (g_values[i]**2 + g_values[i]*g_values[i+1] + g_values[i+1]**2)
++    
++    # ||g||₁: L1 norm, approximated as sum(|g|) / (len(g) + 1) 
+     if len(g_values) > 0:
+         norm_1 = np.sum(np.abs(g_values)) / (len(g_values) + 1)
+     else:
+         norm_1 = 0.0
+-
++        
+     # ||g||∞: Infinity-norm
+     norm_inf = np.max(np.abs(g_values)) if len(g_values) > 0 else 0.0
+-
++    
+     return norm_2_sq, norm_1, norm_inf
+ 
+ def compute_c2(f_values: List[float]) -> float:
+     """Compute C2 for given step function values."""
+     g = compute_autoconvolution(f_values)
+     norm_2_sq, norm_1, norm_inf = compute_norms(g)
+-
++    
+     # Avoid division by zero
+     if norm_1 == 0 or norm_inf == 0:
+         return 0.0
+-
++    
+     c2 = norm_2_sq / (norm_1 * norm_inf)
+     return c2
+ 
+-def gaussian_peak_function(x: np.ndarray, peak_params: List[float]) -> np.ndarray:
+-    """Generate a function composed of multiple Gaussian peaks."""
+-    result = np.zeros_like(x)
+-    for i in range(0, len(peak_params), 3):
+-        amp, center, width = peak_params[i], peak_params[i+1], peak_params[i+2]
+-        width = max(width, 1e-6)  # Ensure positive width
+-        result += amp * np.exp(-0.5 * ((x - center) / width)**2)
+-    return result
+-
+-def enforce_peak_spacing(peak_params: List[float], domain_width: float = 0.5,
+-                        min_distance_ratio: float = 0.1) -> None:
+-    """Enforce minimum distance between Gaussian peaks to prevent narrow autoconvolution."""
+-    if len(peak_params) < 3:
+-        return
+-
+-    # Group peaks by their parameters [amp, center, width]
+-    peaks = []
+-    for i in range(0, len(peak_params), 3):
+-        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+-
+-    # Sort by center position
+-    peaks.sort(key=lambda x: x[1])
+-
+-    # Ensure minimum spacing
+-    min_distance = min_distance_ratio * domain_width
+-    for i in range(1, len(peaks)):
+-        prev_center = peaks[i-1][1]
+-        curr_center = peaks[i][1]
+-        distance = abs(curr_center - prev_center)
+-
+-        if distance < min_distance:
+-            # Adjust position of current peak
+-            offset = min_distance - distance
+-            if curr_center > prev_center:
+-                peaks[i][1] += offset
+-            else:
+-                peaks[i][1] -= offset
+-
+-    # Put them back into flat list
+-    for i, (amp, center, width) in enumerate(peaks):
+-        peak_params[i*3] = amp
+-        peak_params[i*3 + 1] = center
+-        peak_params[i*3 + 2] = width
+-
+-def adaptive_gaussian_construction(n_steps: int = 1000) -> List[float]:
+-    """
+-    Advanced Gaussian peak construction with adaptive parameters.
+-    """
+-    # Domain setup
++def spectral_peak_optimizer(n_steps: int = 1000) -> List[float]:
++    """
++    Spectral approach to optimize step function using frequency domain techniques.
++    This fundamentally different approach works in spectral space where convolution 
++    becomes multiplication and optimization is easier to formulate.
++    """
++    # Domain configuration
+     domain_width = 0.5
+     domain_center = 0.0
+     step_width = domain_width / n_steps
+-
+-    # Start with a configurable number of peaks
+-    n_peaks = 8  # Increased from previous versions for better flexibility
+-
+-    # Initialize peaks with logarithmic spacing to avoid clustering at edges
+-    peak_positions = []
+-    for i in range(n_peaks):
+-        # Logarithmic distribution to concentrate points near center
+-        ratio = (i + 1) / (n_peaks + 1)
+-        # Apply exponential mapping with power to concentrate more points near center
+-        pos = domain_center + (ratio ** 1.8) * domain_width/2
+-        if i % 2 == 0:
+-            pos = -pos  # Alternate sides for symmetry
+-        peak_positions.append(pos)
+-
+-    # Initialize peak parameters [amplitude, center, width]
+-    peak_params = []
+-    for i in range(n_peaks):
+-        amplitude = 50.0 + np.random.random() * 50.0  # Wider range for variation
+-        center = peak_positions[i]
+-        width = 0.03 + np.random.random() * 0.04  # Narrower initial widths
+-        peak_params.extend([amplitude, center, width])
+-
+-    # Build the function progressively
+-    domain_points = np.linspace(-domain_width/2, domain_width/2, n_steps)
+-
+-    # Adaptive optimization loop with better convergence control
+-    best_c2 = -1.0
+-    best_params = list(peak_params)
+-    best_function = None
+-
+-    max_iterations = 300  # Reduced for time constraint but still sufficient
+-    for iteration in range(max_iterations):
+-        # Create function from current peak parameters
+-        func_values = gaussian_peak_function(domain_points, peak_params)
+-
+-        # Convert to step function by taking samples
+-        step_values = func_values.tolist()
+-
++    
++    # Initialize with a spectrally-balanced function
++    # Use a combination of sinusoids that have good autoconvolution properties
++    x = np.linspace(-domain_width/2, domain_width/2, n_steps)
++    
++    # Generate initial function based on spectral characteristics
++    # Start with a smooth, symmetric function that avoids sharp peaks
++    initial_func = np.zeros(n_steps)
++    
++    # Add multiple frequency components with carefully chosen amplitudes
++    frequencies = [1.0, 2.0, 3.0, 4.0, 5.0]  # Fundamental frequencies
++    amplitudes = [1.0, 0.7, 0.5, 0.3, 0.2]   # Decreasing amplitudes
++    
++    # Create a superposition of cosine waves with different frequencies
++    # This creates a function with controlled spectral content
++    for freq, amp in zip(frequencies, amplitudes):
++        # Use cosine for better symmetry
++        initial_func += amp * np.cos(freq * np.pi * x / (domain_width/2))
++    
++    # Add some random components to break symmetry but maintain smoothness
++    np.random.seed(42)
++    noise = np.random.normal(0, 0.1, n_steps)
++    initial_func += noise
++    
++    # Ensure non-negative values (clipping)
++    initial_func = np.maximum(initial_func, 0)
++    
++    # Normalize to reasonable scale
++    if np.max(initial_func) > 0:
++        initial_func = initial_func / np.max(initial_func) * 100
++    
++    # Convert to step values
++    step_values = initial_func.tolist()
++    
++    return step_values
++
++def gradient_guided_refinement(f_values: List[float], max_iter: int = 300) -> List[float]:
++    """
++    Refinement using gradient-guided approach in frequency domain.
++    """
++    # Use scipy minimize with L-BFGS-B which works well for this type of problem
++    n_steps = len(f_values)
++    domain_width = 0.5
++    
++    # Create a wrapper function for scipy optimization
++    def objective_func_wrapper(x):
++        """Wrapper that converts flat parameter vector to function and computes negative C2"""
++        # Ensure non-negative values
++        x = np.maximum(x, 0)
++        
+         # Compute C2
+-        c2_val = compute_c2(step_values)
+-
+-        # Check if this is our best result so far
+-        if c2_val > best_c2:
+-            best_c2 = c2_val
+-            best_params = list(peak_params)
+-            best_function = step_values.copy()
+-
+-        # Stop if we're getting close to convergence
+-        if iteration > 10 and abs(c2_val - best_c2) < 1e-8:
+-            break
+-
+-        # Apply adaptive adjustments to peak parameters
+-        # Focus on adjusting parameters that are most likely to improve C2
+-        for i in range(0, len(peak_params), 3):
+-            # Perturb amplitude with moderate change
+-            if i < len(peak_params):  # amplitude
+-                old_amp = peak_params[i]
+-                # Small random change but biased towards increasing for better C2
+-                change_factor = 1.0 + np.random.normal(0, 0.1)
+-                new_amp = max(0, old_amp * change_factor)
+-                peak_params[i] = new_amp
+-
+-            # Perturb width slightly
+-            if i+2 < len(peak_params):  # width
+-                old_width = peak_params[i+2]
+-                # Change width by a factor
+-                change_factor = 1.0 + np.random.normal(0, 0.1)
+-                new_width = max(0.001, old_width * change_factor)
+-                peak_params[i+2] = new_width
+-
+-        # Enforce minimum spacing between peaks to avoid narrow autoconvolution
+-        enforce_peak_spacing(peak_params, domain_width)
+-
+-        # Occasionally do larger changes to explore more space
+-        if iteration > 50 and iteration % 25 == 0:
+-            # Occasionally do larger changes to explore more space
+-            for i in range(0, len(peak_params), 3):
+-                if i < len(peak_params):  # amplitude
+-                    change_factor = 1.0 + np.random.normal(0, 0.2)  # Larger change
+-                    new_amp = max(0, peak_params[i] * change_factor)
+-                    peak_params[i] = new_amp
+-
+-        # Reduce amplitudes if autoconvolution becomes too peaked
+-        if iteration > 30 and np.random.rand() < 0.1:
+-            # Check if we're getting very peaked g (high ||g||_∞)
+-            func_values = gaussian_peak_function(domain_points, peak_params)
+-            g = compute_autoconvolution(func_values.tolist())
+-            if len(g) > 0:
+-                norm_inf = np.max(np.abs(g))
+-                if norm_inf > 150:  # If autoconvolution is getting too peaked
+-                    # Reduce all peak amplitudes moderately
+-                    for j in range(0, len(peak_params), 3):
+-                        if j < len(peak_params):
+-                            peak_params[j] *= 0.97
+-
+-    # Final refinement - use the best parameters found
+-    final_func_values = gaussian_peak_function(domain_points, best_params)
+-    return final_func_values.tolist()
+-
+-def adaptive_refinement(f_values: List[float], max_iterations: int = 300,
+-                       initial_step_size: float = 0.1, min_improvement: float = 1e-6) -> List[float]:
+-    """
+-    Improved adaptive refinement with better convergence criteria and step size control.
+-    """
+-    current_f = list(f_values)
+-    current_c2 = compute_c2(current_f)
+-
+-    # Track progress for adaptive step size adjustment
+-    prev_c2 = current_c2
+-    improvement_count = 0
+-    step_size = initial_step_size
+-
+-    iteration = 0
+-    while iteration < max_iterations:
+-        # Create a slightly modified version of the function
+-        modified_f = list(current_f)
+-
+-        # Choose random index to modify
+-        idx = np.random.randint(len(modified_f))
+-
+-        # Slightly perturb the value with better distribution
+-        delta = np.random.normal(0, step_size * 0.5)  # Gaussian perturbation
+-        modified_f[idx] = max(0.0, modified_f[idx] + delta)  # Clamp to non-negative
+-
+-        # Try both positive and negative perturbations
+-        test_f = list(modified_f)
+-        test_c2 = compute_c2(test_f)
+-
+-        # If improvement, accept it
+-        if test_c2 > current_c2:
+-            current_f = test_f
+-            current_c2 = test_c2
+-            improvement_count = 0  # Reset counter on improvement
+-
+-            # Reset step size if we're making good progress
+-            if test_c2 - prev_c2 > min_improvement * 10:
+-                step_size = min(initial_step_size, step_size * 1.1)
+-        else:
+-            improvement_count += 1  # Increment counter if no improvement
+-
+-        # Adjust step size based on recent performance
+-        if improvement_count > 3:
+-            step_size *= 0.95  # Reduce step size if stuck
+-            improvement_count = 0
+-        elif improvement_count == 0 and abs(test_c2 - current_c2) > min_improvement:
+-            # Increase step size if making consistent progress
+-            step_size = min(initial_step_size, step_size * 1.05)
+-
+-        prev_c2 = current_c2
+-        iteration += 1
+-
+-        # Early stopping: if no meaningful improvement in several iterations
+-        if improvement_count > 15:
+-            break
+-
+-    return current_f
++        c2_val = compute_c2(x.tolist())
++        
++        # Return negative because we want to maximize C2
++        return -c2_val
++    
++    # Create bounds for parameters (non-negative)
++    bounds = [(0, None) for _ in range(n_steps)]
++    
++    # Use scipy's L-BFGS-B optimization
++    try:
++        result = minimize(
++            objective_func_wrapper,
++            np.array(f_values),
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-6}
++        )
++        
++        if result.success:
++            refined_values = result.x.tolist()
++            return [max(0, val) for val in refined_values]
++    except Exception as e:
++        # If optimization fails, return original
++        pass
++    
++    return f_values
++
++def spectral_optimization_approach(n_steps: int = 1000) -> List[float]:
++    """
++    Main spectral optimization approach that combines:
++    1. Spectral initialization with good frequency content
++    2. Gradient-guided refinement
++    3. Post-processing for better C2
++    """
++    # Step 1: Spectral initialization
++    initial_func = spectral_peak_optimizer(n_steps)
++    
++    # Step 2: Gradient-guided refinement
++    refined_func = gradient_guided_refinement(initial_func, max_iter=200)
++    
++    # Step 3: Additional post-processing to fine-tune
++    # Try a few iterations of local search for better results
++    best_c2 = compute_c2(refined_func)
++    best_func = list(refined_func)
++    
++    # Local neighborhood search
++    for _ in range(50):
++        test_func = list(best_func)
++        # Modify random subset of values
++        indices_to_modify = np.random.choice(len(test_func), size=min(10, len(test_func)//5), replace=False)
++        
++        for idx in indices_to_modify:
++            # Small random adjustment with clipping to non-negative
++            adjustment = np.random.normal(0, 0.5)
++            test_func[idx] = max(0, test_func[idx] + adjustment)
++        
++        test_c2 = compute_c2(test_func)
++        if test_c2 > best_c2:
++            best_c2 = test_c2
++            best_func = list(test_func)
++    
++    return best_func
+ 
+ def construct_function() -> List[float]:
+     """
+-    Main function to construct step-function with high C2 value.
+-    Uses advanced adaptive Gaussian construction with multiple strategies.
++    Main entry point function for constructing step function with high C2 value.
+     """
+     # Set seed for reproducibility
+     np.random.seed(42)
+-
+-    best_c2 = 0.0
+-    best_function = []
+-
+-    # Strategy 1: Multi-start with different peak configurations
+-    strategies = [
+-        {"n_peaks": 5, "n_steps": 800},
+-        {"n_peaks": 8, "n_steps": 1000},
+-        {"n_peaks": 10, "n_steps": 1200},
+-    ]
+-
+-    for strategy in strategies:
+-        try:
+-            # Create function using advanced Gaussian construction
+-            func = adaptive_gaussian_construction(strategy["n_steps"])
+-            c2_val = compute_c2(func)
+-
+-            if c2_val > best_c2:
+-                best_c2 = c2_val
+-                best_function = func
+-        except Exception:
+-            continue
+-
+-    # Strategy 2: If first strategy failed, try refined approach with different parameters
+-    if len(best_function) == 0:
+-        try:
+-            # Try with fewer peaks but more steps for better resolution
+-            func = adaptive_gaussian_construction(1500)
+-            c2_val = compute_c2(func)
+-
+-            if c2_val > best_c2:
+-                best_c2 = c2_val
+-                best_function = func
+-        except Exception:
+-            pass
+-
+-    # Strategy 3: Final fallback to simple approach
+-    if len(best_function) == 0:
+-        n_steps = 500  # Smaller for faster computation if needed
+-        base_f = [10.0] * n_steps  # Uniform distribution
+-        best_function = base_f
+-
+-    return best_function
++    
++    try:
++        # Strategy 1: Spectral optimization approach
++        result = spectral_optimization_approach(1000)
++        c2_score = compute_c2(result)
++        
++        # Strategy 2: If that doesn't work, fall back to a simple construction
++        if c2_score < 0.1:  # Very poor score
++            result = [10.0] * 500
++            
++        return result
++    except Exception as e:
++        # Final fallback
++        return [10.0] * 500
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

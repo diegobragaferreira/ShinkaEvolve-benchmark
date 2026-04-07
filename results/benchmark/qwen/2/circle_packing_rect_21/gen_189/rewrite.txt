@@ -1,0 +1,273 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+import warnings
+
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = 1.0  # Default rectangle dimensions (width=1, height=1)
+RECT_HEIGHT = 1.0
+NUM_CIRCLES = 21
+SEED = 42
+
+class PhysicsBasedCirclePacker:
+    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT,
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.rect_area = width * height
+
+        # Initialize random seed for reproducibility
+        np.random.seed(SEED)
+        random.seed(SEED)
+
+    def _hexagonal_grid_initialization(self) -> np.ndarray:
+        """Initialize circles using hexagonal packing for better density"""
+        circles = np.zeros((self.num_circles, 3))
+        
+        # Hexagonal packing parameters
+        aspect_ratio = self.width / self.height
+        rows = int(np.ceil(np.sqrt(self.num_circles / 1.5)))
+        cols = int(np.ceil(self.num_circles / rows))
+        
+        # Adjust to fit exactly
+        if rows * cols < self.num_circles:
+            cols = int(np.ceil(self.num_circles / rows))
+            
+        # Calculate spacing for hexagonal packing
+        max_radius = min(self.width, self.height) * 0.15
+        hex_radius = max_radius * 0.75  # Slightly smaller for spacing
+        
+        # Hexagon packing with offset rows
+        margin_x = 0.05
+        margin_y = 0.05
+        cell_width = hex_radius * 2
+        cell_height = hex_radius * 1.732  # sqrt(3)
+        
+        # Scale to fit the rectangle
+        scale_x = (self.width - 2*margin_x) / (cols * cell_width)
+        scale_y = (self.height - 2*margin_y) / (rows * cell_height)
+        scale = min(scale_x, scale_y)
+        
+        if scale < 0.1:
+            scale = 0.1
+            
+        actual_cell_width = cell_width * scale
+        actual_cell_height = cell_height * scale
+        actual_max_radius = hex_radius * scale
+        
+        # Place circles in hexagonal grid
+        circle_idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if circle_idx >= self.num_circles:
+                    break
+                    
+                # Offset odd rows
+                x_offset = 0 if i % 2 == 0 else actual_cell_width / 2
+                x = margin_x + j * actual_cell_width + x_offset
+                y = margin_y + i * actual_cell_height
+                
+                # Randomize position slightly within bounds
+                x += np.random.uniform(-actual_cell_width/4, actual_cell_width/4)
+                y += np.random.uniform(-actual_cell_height/4, actual_cell_height/4)
+                
+                # Ensure within bounds and set radius
+                x = np.clip(x, actual_max_radius, self.width - actual_max_radius)
+                y = np.clip(y, actual_max_radius, self.height - actual_max_radius)
+                r = actual_max_radius * (0.8 + np.random.uniform(0, 0.4))
+                
+                circles[circle_idx] = [x, y, r]
+                circle_idx += 1
+                
+            if circle_idx >= self.num_circles:
+                break
+                
+        return circles
+
+    def _is_valid_configuration(self, circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds"""
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not (r <= x <= self.width - r and r <= y <= self.height - r):
+                return False
+        return True
+
+    def _calculate_overlaps(self, circles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Calculate overlap distances and positions"""
+        # Compute pairwise distances
+        positions = circles[:, :2]
+        distances = cdist(positions, positions)
+        
+        # Get radii
+        radii = circles[:, 2]
+        
+        # Calculate overlap (negative means overlap)
+        overlap_matrix = radii.reshape(-1, 1) + radii.reshape(1, -1) - distances
+        
+        # Convert to overlap values (positive for overlap)
+        overlaps = np.maximum(-overlap_matrix, 0)
+        
+        # Find overlapping pairs
+        overlap_pairs = np.where(overlaps > 1e-6)
+        
+        return overlaps, overlap_pairs
+
+    def _compute_objective_and_gradient(self, flat_params: np.ndarray, 
+                                       circles: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Compute objective (negative sum of radii) and its gradient"""
+        # Reshape flat params back to circles
+        circles = circles.copy()
+        circles[:, 0] = flat_params[::3]   # x positions
+        circles[:, 1] = flat_params[1::3]  # y positions  
+        circles[:, 2] = flat_params[2::3]  # radii
+        
+        # Ensure valid radii
+        circles[:, 2] = np.maximum(circles[:, 2], 0.001)
+        
+        # Calculate overlaps
+        overlaps, overlap_pairs = self._calculate_overlaps(circles)
+        
+        # Objective: negative sum of radii (to minimize)
+        objective = -np.sum(circles[:, 2])
+        
+        # Penalty for overlaps
+        overlap_penalty = np.sum(overlaps[overlaps > 1e-6]) * 1000.0
+        objective += overlap_penalty
+        
+        # Boundary penalties
+        boundary_penalty = 0
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            # Penalize if close to boundary
+            boundary_penalty += max(0, r - x)**2 + max(0, x - (self.width - r))**2
+            boundary_penalty += max(0, r - y)**2 + max(0, y - (self.height - r))**2
+            
+        objective += boundary_penalty * 100.0
+        
+        # Gradient calculation
+        grad = np.zeros_like(flat_params)
+        
+        # Gradient from radii (negative sign since we minimize negative sum)
+        grad[2::3] = -1.0
+        
+        # Simple gradient approximation for position components
+        # In practice, this would be more complex, but we'll do basic approximations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            # Simple boundary gradients
+            if x < r:
+                grad[3*i] += 1000 * (r - x)
+            elif x > self.width - r:
+                grad[3*i] += 1000 * (x - (self.width - r))
+                
+            if y < r:
+                grad[3*i+1] += 1000 * (r - y)
+            elif y > self.height - r:
+                grad[3*i+1] += 1000 * (y - (self.height - r))
+                
+        return objective, grad
+
+    def _project_to_feasible(self, circles: np.ndarray) -> np.ndarray:
+        """Project circles to feasible region"""
+        proj_circles = circles.copy()
+        
+        # Ensure all radii are positive and reasonable
+        proj_circles[:, 2] = np.maximum(proj_circles[:, 2], 0.001)
+        proj_circles[:, 2] = np.minimum(proj_circles[:, 2], 0.5)
+        
+        # Clamp positions to feasible area
+        for i in range(self.num_circles):
+            x, y, r = proj_circles[i]
+            x = np.clip(x, r, self.width - r)
+            y = np.clip(y, r, self.height - r)
+            proj_circles[i] = [x, y, r]
+            
+        return proj_circles
+
+    def optimize(self) -> np.ndarray:
+        """Main optimization using physics-inspired approach"""
+        start_time = time.time()
+        
+        # Initialize with hexagonal grid
+        circles = self._hexagonal_grid_initialization()
+        
+        # Flatten for optimization
+        flat_init = np.concatenate([
+            circles[:, 0],  # x positions
+            circles[:, 1],  # y positions
+            circles[:, 2]   # radii
+        ])
+        
+        # Optimization settings
+        options = {
+            'maxiter': 1000,
+            'ftol': 1e-8,
+            'gtol': 1e-6,
+            'disp': False
+        }
+        
+        # Perform optimization
+        try:
+            result = minimize(
+                fun=lambda x: self._compute_objective_and_gradient(x, circles)[0],
+                x0=flat_init,
+                method='L-BFGS-B',
+                jac=lambda x: self._compute_objective_and_gradient(x, circles)[1],
+                bounds=[(0.001, self.width - 0.001)] * (self.num_circles) +
+                       [(0.001, self.height - 0.001)] * (self.num_circles) +
+                       [(0.001, 0.5)] * (self.num_circles),
+                options=options,
+                callback=None
+            )
+            
+            # Extract solution
+            circles_flat = result.x
+            circles = np.column_stack([
+                circles_flat[::3],      # x
+                circles_flat[1::3],     # y
+                circles_flat[2::3]      # r
+            ])
+            
+            # Project to feasible region
+            circles = self._project_to_feasible(circles)
+            
+        except Exception as e:
+            warnings.warn(f"Optimization failed: {e}")
+            # Fallback to initial configuration
+            pass
+            
+        # Final validation and refinement
+        if not self._is_valid_configuration(circles):
+            circles = self._project_to_feasible(circles)
+            
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        
+        return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Create packer instance with rectangle dimensions
+    packer = PhysicsBasedCirclePacker(width=1.0, height=1.0, num_circles=21)
+    
+    # Run optimization
+    circles = packer.optimize()
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

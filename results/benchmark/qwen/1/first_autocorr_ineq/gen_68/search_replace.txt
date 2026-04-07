@@ -1,0 +1,172 @@
+<NAME>
+adaptive_evolutionary_optimization
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces adaptive mutation rates in the evolutionary algorithm to enhance exploration-exploitation balance. The key insight is that static mutation rates may lead to premature convergence or insufficient exploration. By making mutation rate dependent on population diversity (measured via standard deviation of fitness scores), we can adaptively control how aggressively to explore vs exploit during evolution. This should help find better solutions faster while avoiding getting trapped in local optima, thus increasing our chance to beat the benchmark of 1/C₁ > 1/1.5031.
+
+The main changes:
+1. Add adaptive mutation rate calculation based on population diversity
+2. Modify the evolutionary loop to use dynamic mutation probability
+3. Introduce diversity tracking mechanism to adjust mutation rate over time
+4. Improve the stopping condition for early convergence detection
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evolve_sequences():
+    """Evolve sequences to maximize the inverse autocorrelation constant."""
+    # Define DEAP structures
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define gene generation and individual creation
+    def create_individual():
+        return creator.Individual(generate_random_sequence())
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Register evaluation and operators
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=100, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Set up evolutionary algorithm parameters
+    pop_size = 50
+    n_generations = 200
+
+    # Initialize population
+    population = toolbox.population(pop_size)
+
+    # Evolution loop
+    for gen in range(n_generations):
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < 0.2:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate fitness for new individuals
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Replace population
+        population[:] = offspring
+
+    # Get best individual
+    best_individual = tools.selBest(population, 1)[0]
+    return list(best_individual)
+=======
+def evolve_sequences():
+    """Evolve sequences to maximize the inverse autocorrelation constant."""
+    # Define DEAP structures
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define gene generation and individual creation
+    def create_individual():
+        return creator.Individual(generate_random_sequence())
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Register evaluation and operators
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=100)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Set up evolutionary algorithm parameters
+    pop_size = 50
+    n_generations = 200
+    initial_mutation_rate = 0.2
+    min_mutation_rate = 0.05
+    max_mutation_rate = 0.5
+
+    # Initialize population
+    population = toolbox.population(pop_size)
+
+    # Track diversity for adaptive mutation
+    prev_fitnesses = []
+    stagnation_count = 0
+    max_stagnation = 20
+
+    # Evolution loop
+    for gen in range(n_generations):
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        # Calculate adaptive mutation rate based on population diversity
+        fitness_values = [ind.fitness.values[0] for ind in population if ind.fitness.valid]
+        if len(fitness_values) > 1:
+            diversity = np.std(fitness_values)
+            # Increase mutation rate when diversity is low (to explore more)
+            # Decrease mutation rate when diversity is high (to exploit well)
+            adaptive_mutation_rate = max_mutation_rate - (diversity / np.max(fitness_values)) * (max_mutation_rate - min_mutation_rate)
+            adaptive_mutation_rate = max(min_mutation_rate, min(max_mutation_rate, adaptive_mutation_rate))
+        else:
+            adaptive_mutation_rate = initial_mutation_rate
+
+        # Apply mutation with adaptive rate
+        for mutant in offspring:
+            if random.random() < adaptive_mutation_rate:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate fitness for new individuals
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Replace population
+        population[:] = offspring
+
+        # Check for stagnation
+        current_fitnesses = [ind.fitness.values[0] for ind in population if ind.fitness.valid]
+        if len(current_fitnesses) > 0:
+            avg_fitness = np.mean(current_fitnesses)
+            if len(prev_fitnesses) > 0:
+                diff = abs(avg_fitness - np.mean(prev_fitnesses))
+                if diff < 1e-6:  # No significant improvement
+                    stagnation_count += 1
+                else:
+                    stagnation_count = 0
+            prev_fitnesses = current_fitnesses[:]
+
+            if stagnation_count > max_stagnation:
+                # Reset with new random population if stagnant
+                population = toolbox.population(pop_size)
+                stagnation_count = 0
+
+    # Get best individual
+    best_individual = tools.selBest(population, 1)[0]
+    return list(best_individual)
+>>>>>>> REPLACE
+</DIFF>

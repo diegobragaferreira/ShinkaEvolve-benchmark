@@ -1,0 +1,366 @@
+<NAME>
+add_hybrid_optimization_with_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces a hybrid optimization approach that combines evolutionary algorithms with local gradient-based optimization. The idea is to use the evolutionary algorithm to explore the global search space and find promising configurations, then apply local optimization techniques to fine-tune these solutions. This addresses the limitation of the current approach which relies solely on evolutionary methods that may get stuck in local optima.
+
+The key changes include:
+1. Adding local optimization using scipy's minimize function to refine solutions
+2. Implementing a refinement step that applies local search to the best individuals
+3. Modifying the evolutionary loop to periodically apply local refinement
+4. Adding a more sophisticated penalty system that better balances exploration vs exploitation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from typing import Tuple
+import math
+
+# Global constants
+POPULATION_SIZE = 150
+GENERATIONS = 250
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.2
+MUTATION_RATE_END = 0.005
+ELITISM_COUNT = 10
+BOUNDARY_MARGIN = 0.01
+MAX_EVAL_TIME = 60.0
+POISSON_DISK_MIN_DISTANCE = 0.1
+=======
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+import random
+from typing import Tuple
+import math
+
+# Global constants
+POPULATION_SIZE = 150
+GENERATIONS = 250
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.2
+MUTATION_RATE_END = 0.005
+ELITISM_COUNT = 10
+BOUNDARY_MARGIN = 0.01
+MAX_EVAL_TIME = 60.0
+POISSON_DISK_MIN_DISTANCE = 0.1
+LOCAL_REFINEMENT_FREQUENCY = 20  # How often to apply local refinement
+LOCAL_REFINEMENT_ITERATIONS = 50  # Number of local optimization iterations
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_fitness(circles: np.ndarray, generation: int = 0, total_generations: int = 1) -> Tuple[float, float]:
+    """
+    Calculate fitness with penalty for constraint violations
+    Returns (total_radius, penalty_score)
+    """
+    total_radius = np.sum(circles[:, 2])
+
+    if not is_valid_configuration(circles):
+        # Progressive penalty based on generation
+        penalty_factor = 10000 * (1 - generation/total_generations)
+        penalty = penalty_factor + 1000 * (np.sum(circles[:, 2]) if np.sum(circles[:, 2]) > 0 else 1)
+        return total_radius - penalty, penalty
+
+    return total_radius, 0.0
+=======
+def calculate_fitness(circles: np.ndarray, generation: int = 0, total_generations: int = 1) -> Tuple[float, float]:
+    """
+    Calculate fitness with penalty for constraint violations
+    Returns (total_radius, penalty_score)
+    """
+    total_radius = np.sum(circles[:, 2])
+
+    if not is_valid_configuration(circles):
+        # More aggressive penalty for constraint violations
+        penalty = 100000
+        return total_radius - penalty, penalty
+
+    return total_radius, 0.0
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(individual: np.ndarray, generation: int, total_generations: int, elite: bool = False) -> np.ndarray:
+    """Apply mutation to an individual with dual strategy"""
+    n_circles = len(individual)
+    mutated = individual.copy()
+
+    # Adaptive mutation rate
+    mutation_rate = MUTATION_RATE_START + (MUTATION_RATE_END - MUTATION_RATE_START) * (generation / total_generations)
+
+    # For elite individuals, use smaller mutations
+    pos_mutation_scale = 0.015 if elite else 0.03
+    rad_mutation_scale = 0.01 if elite else 0.02
+
+    # Mutate each circle
+    for i in range(n_circles):
+        if np.random.rand() < mutation_rate:
+            # Mutate position with larger scale
+            mutated[i, 0] += np.random.normal(0, pos_mutation_scale)  # X position
+            mutated[i, 1] += np.random.normal(0, pos_mutation_scale)  # Y position
+            # Mutate radius with smaller scale
+            mutated[i, 2] += np.random.normal(0, rad_mutation_scale)  # Radius
+
+            # Clamp values to valid ranges
+            mutated[i, 0] = np.clip(mutated[i, 0], BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            mutated[i, 1] = np.clip(mutated[i, 1], BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            mutated[i, 2] = max(mutated[i, 2], 0.001)
+
+            # Fix potential boundary constraint violations
+            x, y, r = mutated[i]
+            max_r = min(x, 1-x, y, 1-y)
+            mutated[i, 2] = min(r, max_r * 0.95)
+
+    return mutated
+=======
+def mutate(individual: np.ndarray, generation: int, total_generations: int, elite: bool = False) -> np.ndarray:
+    """Apply mutation to an individual with dual strategy"""
+    n_circles = len(individual)
+    mutated = individual.copy()
+
+    # Adaptive mutation rate
+    mutation_rate = MUTATION_RATE_START + (MUTATION_RATE_END - MUTATION_RATE_START) * (generation / total_generations)
+
+    # For elite individuals, use smaller mutations
+    pos_mutation_scale = 0.015 if elite else 0.03
+    rad_mutation_scale = 0.01 if elite else 0.02
+
+    # Mutate each circle
+    for i in range(n_circles):
+        if np.random.rand() < mutation_rate:
+            # Mutate position with larger scale
+            mutated[i, 0] += np.random.normal(0, pos_mutation_scale)  # X position
+            mutated[i, 1] += np.random.normal(0, pos_mutation_scale)  # Y position
+            # Mutate radius with smaller scale
+            mutated[i, 2] += np.random.normal(0, rad_mutation_scale)  # Radius
+
+            # Clamp values to valid ranges
+            mutated[i, 0] = np.clip(mutated[i, 0], BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            mutated[i, 1] = np.clip(mutated[i, 1], BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            mutated[i, 2] = max(mutated[i, 2], 0.001)
+
+            # Fix potential boundary constraint violations
+            x, y, r = mutated[i]
+            max_r = min(x, 1-x, y, 1-y)
+            mutated[i, 2] = min(r, max_r * 0.95)
+
+    return mutated
+
+def local_refinement(circles: np.ndarray, max_iterations: int = LOCAL_REFINEMENT_ITERATIONS) -> np.ndarray:
+    """
+    Apply local optimization to improve a given solution
+    Uses scipy optimize to maximize sum of radii with constraints
+    """
+    def objective(params):
+        # Extract parameters (x, y, r for each circle)
+        circles_copy = circles.copy()
+        idx = 0
+        for i in range(len(circles)):
+            circles_copy[i, 0] = params[idx]  # x
+            circles_copy[i, 1] = params[idx + 1]  # y
+            circles_copy[i, 2] = params[idx + 2]  # r
+            idx += 3
+
+        # Objective is negative sum of radii (we minimize negative to maximize positive)
+        return -np.sum(circles_copy[:, 2])
+
+    def constraint_func(params):
+        # Check if all constraints are satisfied
+        circles_copy = circles.copy()
+        idx = 0
+        for i in range(len(circles)):
+            circles_copy[i, 0] = params[idx]  # x
+            circles_copy[i, 1] = params[idx + 1]  # y
+            circles_copy[i, 2] = params[idx + 2]  # r
+            idx += 3
+
+        # Check boundary constraints
+        for i in range(len(circles_copy)):
+            x, y, r = circles_copy[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return -1  # Invalid
+
+        # Check overlap constraints
+        points = circles_copy[:, :2]
+        tree = cKDTree(points)
+        pairs = tree.query_pairs(2 * np.max(circles_copy[:, 2]), p=np.inf)
+
+        for i, j in pairs:
+            if i != j:
+                x1, y1, r1 = circles_copy[i]
+                x2, y2, r2 = circles_copy[j]
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    return -1  # Overlap
+
+        return 1  # Valid
+
+    # Flatten initial solution
+    initial_params = circles.flatten()
+
+    # Define bounds for each parameter (x, y, r for each circle)
+    bounds = []
+    for i in range(len(circles)):
+        bounds.extend([(BOUNDARY_MARGIN, 1-BOUNDARY_MARGIN),  # x bounds
+                       (BOUNDARY_MARGIN, 1-BOUNDARY_MARGIN),  # y bounds
+                       (0.001, 0.5)])  # r bounds (reasonable max radius)
+
+    # Create constraints
+    constraints = {'type': 'ineq', 'fun': constraint_func}
+
+    try:
+        # Apply local optimization
+        result = minimize(objective, initial_params, method='L-BFGS-B',
+                         bounds=bounds, constraints=constraints,
+                         options={'maxiter': max_iterations})
+
+        if result.success:
+            # Convert back to circles format
+            refined_circles = circles.copy()
+            idx = 0
+            for i in range(len(circles)):
+                refined_circles[i, 0] = result.x[idx]
+                refined_circles[i, 1] = result.x[idx + 1]
+                refined_circles[i, 2] = result.x[idx + 2]
+                idx += 3
+            return refined_circles
+    except:
+        pass  # If optimization fails, return original
+
+    return circles
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evolve_circles(n_circles: int = 26, generations: int = GENERATIONS) -> np.ndarray:
+    """Main evolutionary algorithm"""
+    # Initialize population
+    population = initialize_population(n_circles, POPULATION_SIZE)
+
+    best_fitness_history = []
+
+    for gen in range(generations):
+        # Evaluate fitness for entire population
+        fitness_scores = np.array([calculate_fitness(ind, gen, generations)[0] for ind in population])
+
+        # Track best fitness
+        best_fitness = np.max(fitness_scores)
+        best_fitness_history.append(best_fitness)
+
+        # Elitism: keep best individuals
+        elite_indices = np.argsort(fitness_scores)[-ELITISM_COUNT:]
+        elites = population[elite_indices].copy()
+
+        # Create new population
+        new_population = []
+
+        # Add elites first
+        new_population.extend(elites)
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < POPULATION_SIZE:
+            # Selection
+            parent1 = tournament_selection(population, fitness_scores)
+            parent2 = tournament_selection(population, fitness_scores)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation with different strategies for elites vs others
+            elite_flag = len(new_population) < ELITISM_COUNT
+            child = mutate(child, gen, generations, elite_flag)
+
+            new_population.append(child)
+
+        # Trim to exact population size
+        population = np.array(new_population[:POPULATION_SIZE])
+
+        # Early stopping when improvement plateaus
+        if len(best_fitness_history) > 15:
+            recent_improvement = best_fitness_history[-1] - best_fitness_history[-15]
+            if recent_improvement < 0.001:
+                break
+
+    # Return best individual
+    final_fitness_scores = np.array([calculate_fitness(ind, generations, generations)[0] for ind in population])
+    best_idx = np.argmax(final_fitness_scores)
+    return population[best_idx]
+=======
+def evolve_circles(n_circles: int = 26, generations: int = GENERATIONS) -> np.ndarray:
+    """Main evolutionary algorithm"""
+    # Initialize population
+    population = initialize_population(n_circles, POPULATION_SIZE)
+
+    best_fitness_history = []
+
+    for gen in range(generations):
+        # Evaluate fitness for entire population
+        fitness_scores = np.array([calculate_fitness(ind, gen, generations)[0] for ind in population])
+
+        # Track best fitness
+        best_fitness = np.max(fitness_scores)
+        best_fitness_history.append(best_fitness)
+
+        # Elitism: keep best individuals
+        elite_indices = np.argsort(fitness_scores)[-ELITISM_COUNT:]
+        elites = population[elite_indices].copy()
+
+        # Create new population
+        new_population = []
+
+        # Add elites first
+        new_population.extend(elites)
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < POPULATION_SIZE:
+            # Selection
+            parent1 = tournament_selection(population, fitness_scores)
+            parent2 = tournament_selection(population, fitness_scores)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation with different strategies for elites vs others
+            elite_flag = len(new_population) < ELITISM_COUNT
+            child = mutate(child, gen, generations, elite_flag)
+
+            new_population.append(child)
+
+        # Trim to exact population size
+        population = np.array(new_population[:POPULATION_SIZE])
+
+        # Apply local refinement periodically
+        if gen % LOCAL_REFINEMENT_FREQUENCY == 0 and gen > 0:
+            # Refine the best individuals in the population
+            refined_population = []
+            for ind in population:
+                refined = local_refinement(ind)
+                refined_population.append(refined)
+            population = np.array(refined_population)
+
+        # Early stopping when improvement plateaus
+        if len(best_fitness_history) > 15:
+            recent_improvement = best_fitness_history[-1] - best_fitness_history[-15]
+            if recent_improvement < 0.001:
+                break
+
+    # Return best individual
+    final_fitness_scores = np.array([calculate_fitness(ind, generations, generations)[0] for ind in population])
+    best_idx = np.argmax(final_fitness_scores)
+    return population[best_idx]
+>>>>>>> REPLACE

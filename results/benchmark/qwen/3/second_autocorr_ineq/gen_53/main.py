@@ -1,0 +1,251 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from numba import njit
+import time
+import random
+from joblib import Parallel, delayed
+
+# Global constants
+POPULATION_SIZE = 150
+GENERATIONS = 80
+CROSSOVER_RATE = 0.8
+ELITISM_COUNT = 8
+MAX_STEPS = 15000
+MIN_STEPS = 500
+SEED = 42
+
+# Set seed for reproducibility
+np.random.seed(SEED)
+random.seed(SEED)
+
+@njit
+def compute_autoconvolution_norms_numba(f_values):
+    """
+    Fast computation of autoconvolution norms using numba JIT compilation.
+    Returns ||g||₂², ||g||₁, ||g||∞ where g = f*f
+    """
+    # Convert to numpy array
+    f = np.array(f_values, dtype=np.float64)
+    
+    # Create step function on [-1/4, 1/4]
+    n_steps = len(f)
+    step_width = 0.5 / n_steps
+    dx = step_width / 10  # finer discretization for accuracy
+    
+    # Create x-axis points for convolution
+    x_length = int(0.5 / dx)
+    x = np.linspace(-0.25, 0.25, x_length)
+    
+    # Build piecewise constant function
+    f_func = np.zeros_like(x)
+    step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps)
+    
+    for i in range(n_steps):
+        pos = step_positions[i]
+        left = pos - step_width/2
+        right = pos + step_width/2
+        mask = (x >= left) & (x <= right)
+        f_func[mask] = f[i]
+    
+    # Perform autoconvolution using fast convolution
+    g = signal.convolve(f_func, f_func, mode='full')
+    g = g[:len(g)//2 + 1]  # Take only first half (symmetric)
+    
+    # Normalize
+    g = g * dx
+    
+    # Compute norms
+    g_squared = g**2
+    g_abs = np.abs(g)
+    
+    # Trapezoidal integration for ||g||₂²
+    norm_2_squared = 0.0
+    for i in range(len(g_squared)-1):
+        norm_2_squared += dx * (g_squared[i] + g_squared[i+1]) / 2
+    
+    # Trapezoidal integration for ||g||₁
+    norm_1 = 0.0
+    for i in range(len(g_abs)-1):
+        norm_1 += dx * (g_abs[i] + g_abs[i+1]) / 2
+    
+    # Infinity norm
+    norm_inf = np.max(g_abs)
+    
+    return norm_2_squared, norm_1, norm_inf
+
+@njit
+def calculate_c2_fast(f_values):
+    """Fast C₂ calculation using numba JIT compilation."""
+    try:
+        norm_2_squared, norm_1, norm_inf = compute_autoconvolution_norms_numba(f_values)
+        
+        # Avoid division by zero
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            return 0.0
+            
+        c2 = norm_2_squared / (norm_1 * norm_inf)
+        return c2
+    except:
+        return 0.0
+
+def compute_autoconvolution_norms(f_values):
+    """Wrapper function for compatibility."""
+    return compute_autoconvolution_norms_numba(f_values)
+
+def calculate_c2(f_values):
+    """Wrapper function for compatibility."""
+    return calculate_c2_fast(f_values)
+
+def generate_initial_population(pop_size, min_steps, max_steps):
+    """Generate initial population with structured patterns."""
+    population = []
+    for _ in range(pop_size):
+        # Random number of steps
+        n_steps = np.random.randint(min_steps, max_steps)
+        
+        # Start with alternating pattern (high/low)
+        heights = []
+        for i in range(n_steps):
+            if i % 2 == 0:
+                heights.append(np.random.exponential(scale=1.5))
+            else:
+                heights.append(np.random.exponential(scale=0.5))
+        
+        # Add some random perturbations
+        for i in range(len(heights)):
+            if np.random.random() < 0.3:  # 30% chance to modify
+                heights[i] *= np.random.normal(1.0, 0.3)
+                heights[i] = max(0, heights[i])  # Ensure non-negative
+        
+        population.append(heights)
+    return population
+
+def crossover(parent1, parent2):
+    """Perform uniform crossover between two parents."""
+    if len(parent1) != len(parent2):
+        # Make them same length by truncating or padding
+        min_len = min(len(parent1), len(parent2))
+        parent1 = parent1[:min_len]
+        parent2 = parent2[:min_len]
+        
+    if np.random.random() < CROSSOVER_RATE:
+        # Uniform crossover
+        child1, child2 = [], []
+        for i in range(len(parent1)):
+            if np.random.random() < 0.5:
+                child1.append(parent1[i])
+                child2.append(parent2[i])
+            else:
+                child1.append(parent2[i])
+                child2.append(parent1[i])
+        return child1, child2
+    else:
+        return parent1, parent2
+
+def mutate(individual, mutation_rate, generation, max_generations):
+    """Mutate individual with adaptive mutation rate."""
+    mutated = individual.copy()
+    
+    # Adaptive mutation rate: decrease over generations
+    adaptive_mutation = mutation_rate * (1.0 - generation / max_generations)
+    
+    for i in range(len(mutated)):
+        if np.random.random() < adaptive_mutation:
+            # Add Gaussian noise with adaptive scale
+            noise_scale = 0.1 * mutated[i] + 0.01
+            noise = np.random.normal(0, noise_scale)
+            mutated[i] = max(0, mutated[i] + noise)
+    return mutated
+
+def evaluate_fitness_parallel(population):
+    """Evaluate fitness of entire population in parallel."""
+    results = Parallel(n_jobs=-1)(delayed(calculate_c2_fast)(ind) for ind in population)
+    return results
+
+def tournament_selection(population, fitness_scores, tournament_size=None):
+    """Tournament selection with adaptive tournament size."""
+    if tournament_size is None:
+        tournament_size = min(5, len(population) // 3)
+    
+    selected = []
+    for _ in range(len(population)):
+        # Tournament
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitness)]
+        selected.append(population[winner_index].copy())
+    
+    return selected
+
+def elitism(population, fitness_scores, elite_count):
+    """Keep best individuals."""
+    sorted_indices = np.argsort(fitness_scores)[::-1]
+    elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+    return elite
+
+def adaptive_evolution():
+    """Main evolutionary algorithm with optimizations."""
+    # Initialize population
+    population = generate_initial_population(POPULATION_SIZE, MIN_STEPS, MAX_STEPS)
+    
+    best_individual = None
+    best_fitness = -np.inf
+    
+    for generation in range(GENERATIONS):
+        # Evaluate fitness
+        fitness_scores = evaluate_fitness_parallel(population)
+        
+        # Track best individual
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_individual = population[max_fitness_idx].copy()
+        
+        # Print progress every 10 generations
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best C2 = {best_fitness:.6f}")
+        
+        # Elitism
+        elite = elitism(population, fitness_scores, ELITISM_COUNT)
+        
+        # Selection
+        parents = tournament_selection(population, fitness_scores)
+        
+        # Crossover and mutation
+        new_population = elite.copy()
+        while len(new_population) < POPULATION_SIZE:
+            p1, p2 = np.random.choice(len(parents), 2, replace=False)
+            child1, child2 = crossover(parents[p1], parents[p2])
+            
+            child1 = mutate(child1, 0.1, generation, GENERATIONS)
+            child2 = mutate(child2, 0.1, generation, GENERATIONS)
+            
+            new_population.extend([child1, child2])
+        
+        # Trim to exact population size
+        population = new_population[:POPULATION_SIZE]
+    
+    return best_individual
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Run adaptive evolution
+    result = adaptive_evolution()
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    print(f"Evaluated in {eval_time:.2f} seconds")
+    print(f"Best C2 found: {calculate_c2(result):.6f}")
+    
+    return result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

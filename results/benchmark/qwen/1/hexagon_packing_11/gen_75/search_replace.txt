@@ -1,0 +1,297 @@
+<NAME>
+adaptive_mutation_scheduling
+</NAME>
+
+<DESCRIPTION>
+I'll implement adaptive mutation rate scheduling in the differential evolution optimization to improve convergence. The key insight is to start with a high mutation rate for exploration and gradually decrease it for exploitation, which helps avoid premature convergence while maintaining good search diversity.
+
+The changes include:
+1. Adding a time-varying mutation rate scheduler that decreases over generations
+2. Modifying the objective function to handle the new scheduling logic
+3. Updating the genetic algorithm to use this adaptive scheduling
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_individual(params, return_penalties=False):
+    """Evaluate a single individual (solution)."""
+    # Extract inner hexagon positions and rotations
+    inner_params = params[:-4]
+    outer_center_x, outer_center_y, outer_angle, outer_side_length = params[-4:]
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(11):
+        x, y, theta = inner_params[3*i:3*i+3]
+        vertices = generate_hexagon_vertices(x, y, theta, 1.0)
+        inner_hexagons.append(vertices)
+
+    # Create outer hexagon
+    outer_vertices = generate_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, outer_side_length)
+
+    # Check constraints
+    penalty = 0
+    penalties = []
+
+    # Check containment
+    for vertices in inner_hexagons:
+        if not check_containment(vertices, outer_vertices):
+            penalty += 1000000
+            penalties.append("containment")
+
+    # Check overlaps between inner hexagons
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                penalty += 1000000
+                penalties.append("overlap")
+
+    # Return negative of inverse side length plus penalties
+    if penalty > 0:
+        if return_penalties:
+            return penalty + 1.0 / outer_side_length, penalties
+        return penalty + 1.0 / outer_side_length
+    else:
+        if return_penalties:
+            return -1.0 / outer_side_length, []
+        return -1.0 / outer_side_length
+=======
+def evaluate_individual(params, return_penalties=False):
+    """Evaluate a single individual (solution)."""
+    # Extract inner hexagon positions and rotations
+    inner_params = params[:-4]
+    outer_center_x, outer_center_y, outer_angle, outer_side_length = params[-4:]
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(11):
+        x, y, theta = inner_params[3*i:3*i+3]
+        vertices = generate_hexagon_vertices(x, y, theta, 1.0)
+        inner_hexagons.append(vertices)
+
+    # Create outer hexagon
+    outer_vertices = generate_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, outer_side_length)
+
+    # Check constraints
+    penalty = 0
+    penalties = []
+
+    # Check containment
+    for vertices in inner_hexagons:
+        if not check_containment(vertices, outer_vertices):
+            penalty += 1000000
+            penalties.append("containment")
+
+    # Check overlaps between inner hexagons
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                penalty += 1000000
+                penalties.append("overlap")
+
+    # Return negative of inverse side length plus penalties
+    if penalty > 0:
+        if return_penalties:
+            return penalty + 1.0 / outer_side_length, penalties
+        return penalty + 1.0 / outer_side_length
+    else:
+        if return_penalties:
+            return -1.0 / outer_side_length, []
+        return -1.0 / outer_side_length
+
+
+def adaptive_mutation_rate(gen, max_gens, initial_rate=0.8, final_rate=0.1):
+    """Adaptive mutation rate that decreases over generations."""
+    # Linear decay from initial_rate to final_rate
+    if max_gens <= 1:
+        return final_rate
+    return initial_rate - (initial_rate - final_rate) * (gen / (max_gens - 1))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(individual, mutation_rate=0.1, bounds=(-10, 10), adaptive_mutation=False, generation=None, max_generations=None):
+    """Mutation operation for hexagon packing with adaptive mutation rate."""
+    mutated = individual.copy()
+
+    # Adaptive mutation rate - decrease over time
+    if adaptive_mutation and generation is not None and max_generations is not None:
+        # Start with higher mutation rate, decrease over generations
+        effective_mutation_rate = mutation_rate * (1.0 - generation/max_generations)
+        # Ensure it doesn't go too low
+        effective_mutation_rate = max(effective_mutation_rate, 0.01)
+    else:
+        effective_mutation_rate = mutation_rate
+
+    # Mutate inner hexagons
+    for i in range(11):
+        for j in range(3):  # x, y, angle
+            if random.random() < effective_mutation_rate:
+                if j < 2:  # x or y
+                    mutated[3*i+j] += np.random.normal(0, 0.5)
+                    # Keep within bounds
+                    mutated[3*i+j] = np.clip(mutated[3*i+j], bounds[0], bounds[1])
+                else:  # angle
+                    mutated[3*i+j] += np.random.normal(0, 30)
+                    # Normalize angle to [-180, 180]
+                    mutated[3*i+j] = ((mutated[3*i+j] + 180) % 360) - 180
+
+    # Mutate outer hexagon
+    if random.random() < effective_mutation_rate:
+        mutated[-1] += np.random.normal(0, 0.5)  # mutate side_length
+        mutated[-1] = max(1.0, mutated[-1])  # ensure positive side_length
+
+    return mutated
+=======
+def mutate(individual, mutation_rate=0.1, bounds=(-10, 10), adaptive_mutation=False, generation=None, max_generations=None):
+    """Mutation operation for hexagon packing with adaptive mutation rate."""
+    mutated = individual.copy()
+
+    # Use adaptive mutation rate if specified
+    if adaptive_mutation and generation is not None and max_generations is not None:
+        effective_mutation_rate = adaptive_mutation_rate(generation, max_generations)
+    else:
+        effective_mutation_rate = mutation_rate
+
+    # Mutate inner hexagons
+    for i in range(11):
+        for j in range(3):  # x, y, angle
+            if random.random() < effective_mutation_rate:
+                if j < 2:  # x or y
+                    mutated[3*i+j] += np.random.normal(0, 0.5)
+                    # Keep within bounds
+                    mutated[3*i+j] = np.clip(mutated[3*i+j], bounds[0], bounds[1])
+                else:  # angle
+                    mutated[3*i+j] += np.random.normal(0, 30)
+                    # Normalize angle to [-180, 180]
+                    mutated[3*i+j] = ((mutated[3*i+j] + 180) % 360) - 180
+
+    # Mutate outer hexagon
+    if random.random() < effective_mutation_rate:
+        mutated[-1] += np.random.normal(0, 0.5)  # mutate side_length
+        mutated[-1] = max(1.0, mutated[-1])  # ensure positive side_length
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_genetic_algorithm_optimization():
+    """Perform adaptive genetic algorithm optimization with dynamic parameters."""
+    pop_size = 30
+    max_generations = 50
+    initial_mutation_rate = 0.1
+
+    # Initialize population
+    population = initialize_population(pop_size)
+
+    best_fitness_history = []
+
+    for gen in range(max_generations):
+        # Evaluate fitness
+        fitnesses = [evaluate_individual(ind) for ind in population]
+
+        # Find best individual
+        best_idx = np.argmin(fitnesses)
+        best_fitness = fitnesses[best_idx]
+        best_fitness_history.append(best_fitness)
+
+        # Print progress
+        if gen % 10 == 0:
+            print(f"Generation {gen}: Best fitness = {-best_fitness}")
+
+        # Early stopping if no improvement for last 10 generations
+        if len(best_fitness_history) > 10:
+            recent_improvement = best_fitness_history[-10] - best_fitness_history[-1]  # Should be positive if improving
+            if recent_improvement < 1e-8 and gen > 20:  # Very small improvement, stop early
+                print(f"Early stopping at generation {gen}")
+                break
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best individual
+        new_population.append(population[best_idx].copy())
+
+        # Generate offspring
+        while len(new_population) < pop_size:
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            child1, child2 = crossover(parent1, parent2)
+
+            child1 = mutate(child1, initial_mutation_rate, adaptive_mutation=True, generation=gen, max_generations=max_generations)
+            child2 = mutate(child2, initial_mutation_rate, adaptive_mutation=True, generation=gen, max_generations=max_generations)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:pop_size]
+
+    # Return best individual
+    fitnesses = [evaluate_individual(ind) for ind in population]
+    best_idx = np.argmin(fitnesses)
+    return population[best_idx]
+=======
+def adaptive_genetic_algorithm_optimization():
+    """Perform adaptive genetic algorithm optimization with dynamic parameters."""
+    pop_size = 30
+    max_generations = 50
+    initial_mutation_rate = 0.8  # Start with higher mutation rate for exploration
+
+    # Initialize population
+    population = initialize_population(pop_size)
+
+    best_fitness_history = []
+
+    for gen in range(max_generations):
+        # Evaluate fitness
+        fitnesses = [evaluate_individual(ind) for ind in population]
+
+        # Find best individual
+        best_idx = np.argmin(fitnesses)
+        best_fitness = fitnesses[best_idx]
+        best_fitness_history.append(best_fitness)
+
+        # Print progress
+        if gen % 10 == 0:
+            print(f"Generation {gen}: Best fitness = {-best_fitness}")
+
+        # Early stopping if no improvement for last 10 generations
+        if len(best_fitness_history) > 10:
+            recent_improvement = best_fitness_history[-10] - best_fitness_history[-1]  # Should be positive if improving
+            if recent_improvement < 1e-8 and gen > 20:  # Very small improvement, stop early
+                print(f"Early stopping at generation {gen}")
+                break
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best individual
+        new_population.append(population[best_idx].copy())
+
+        # Generate offspring
+        while len(new_population) < pop_size:
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            child1, child2 = crossover(parent1, parent2)
+
+            child1 = mutate(child1, initial_mutation_rate, adaptive_mutation=True, generation=gen, max_generations=max_generations)
+            child2 = mutate(child2, initial_mutation_rate, adaptive_mutation=True, generation=gen, max_generations=max_generations)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:pop_size]
+
+    # Return best individual
+    fitnesses = [evaluate_individual(ind) for ind in population]
+    best_idx = np.argmin(fitnesses)
+    return population[best_idx]
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,280 @@
+<NAME>
+add_bvh_acceleration
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Compute vertices of a hexagon given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    # Vertices of regular hexagon with side length 1 centered at origin
+    base_verts = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    rotated_verts = np.empty_like(base_verts)
+    for i in range(6):
+        x_orig, y_orig = base_verts[i]
+        rotated_verts[i] = [
+            x + side_length * (x_orig * cos_a - y_orig * sin_a),
+            y + side_length * (x_orig * sin_a + y_orig * cos_a)
+        ]
+
+    return rotated_verts
+
+def compute_hexagon_polygon(x, y, angle_deg, side_length=1):
+    """Convert hexagon parameters to shapely polygon."""
+    vertices = hexagon_vertices(x, y, angle_deg, side_length)
+    return Polygon(vertices)
+
+def check_containment(hex_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hex_poly.contains(hex_poly) or outer_hex_poly.covers(hex_poly)
+
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap."""
+    return hex1_poly.intersects(hex2_poly) and not hex1_poly.touches(hex2_poly)
+
+def evaluate_configuration(params):
+    """Evaluate a configuration for validity and quality.
+    params: array of shape (37,) where first 36 values are (x,y,angle) for 12 hexagons
+            and the last value is the outer hexagon side length"""
+
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Check containment and overlaps
+    total_penetration = 0.0
+    valid = True
+
+    n = len(inner_hex_data)
+    inner_polys = []
+
+    # Compute all inner hexagon polygons
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        inner_poly = compute_hexagon_polygon(x, y, angle)
+        inner_polys.append(inner_poly)
+
+        # Check containment
+        if not check_containment(inner_poly, outer_hex_poly):
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_poly)
+                if hasattr(diff, 'area'):
+                    total_penetration += diff.area
+            except:
+                total_penetration += 1000  # Large penalty
+
+        # Check overlaps with previous hexagons
+        for j in range(i):
+            if check_overlap(inner_polys[i], inner_polys[j]):
+                valid = False
+                # Calculate overlap area
+                try:
+                    overlap = inner_polys[i].intersection(inner_polys[j])
+                    if hasattr(overlap, 'area'):
+                        total_penetration += overlap.area
+                except:
+                    total_penetration += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penetration * 10000 if total_penetration > 0 else 1000000
+        return penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from scipy.spatial import cKDTree
+import time
+from numba import jit
+from joblib import Parallel, delayed
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Compute vertices of a hexagon given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    # Vertices of regular hexagon with side length 1 centered at origin
+    base_verts = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    rotated_verts = np.empty_like(base_verts)
+    for i in range(6):
+        x_orig, y_orig = base_verts[i]
+        rotated_verts[i] = [
+            x + side_length * (x_orig * cos_a - y_orig * sin_a),
+            y + side_length * (x_orig * sin_a + y_orig * cos_a)
+        ]
+
+    return rotated_verts
+
+def compute_hexagon_polygon(x, y, angle_deg, side_length=1):
+    """Convert hexagon parameters to shapely polygon."""
+    vertices = hexagon_vertices(x, y, angle_deg, side_length)
+    return Polygon(vertices)
+
+def check_containment(hex_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hex_poly.contains(hex_poly) or outer_hex_poly.covers(hex_poly)
+
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap."""
+    return hex1_poly.intersects(hex2_poly) and not hex1_poly.touches(hex2_poly)
+
+@jit(nopython=True)
+def compute_bounding_circle_radius(hex_vertices):
+    """Compute the radius of the bounding circle for a hexagon."""
+    center_x = 0.0
+    center_y = 0.0
+    for i in range(6):
+        center_x += hex_vertices[i, 0]
+        center_y += hex_vertices[i, 1]
+    center_x /= 6.0
+    center_y /= 6.0
+
+    max_radius_sq = 0.0
+    for i in range(6):
+        dx = hex_vertices[i, 0] - center_x
+        dy = hex_vertices[i, 1] - center_y
+        radius_sq = dx*dx + dy*dy
+        if radius_sq > max_radius_sq:
+            max_radius_sq = radius_sq
+
+    return np.sqrt(max_radius_sq)
+
+@jit(nopython=True)
+def fast_bounding_circle_check(hex1_vertices, hex2_vertices, max_radius=1.0):
+    """Fast check using bounding circle centers and radii."""
+    # Compute centers
+    cx1, cy1 = 0.0, 0.0
+    cx2, cy2 = 0.0, 0.0
+    for i in range(6):
+        cx1 += hex1_vertices[i, 0]
+        cy1 += hex1_vertices[i, 1]
+        cx2 += hex2_vertices[i, 0]
+        cy2 += hex2_vertices[i, 1]
+    cx1 /= 6.0
+    cy1 /= 6.0
+    cx2 /= 6.0
+    cy2 /= 6.0
+
+    # Distance between centers
+    dx = cx1 - cx2
+    dy = cy1 - cy2
+    center_dist_sq = dx*dx + dy*dy
+
+    # Combined bounding radius
+    combined_radius = 2.0 * max_radius  # Max possible distance for unit hexagons
+
+    return center_dist_sq <= combined_radius * combined_radius
+
+def evaluate_configuration(params):
+    """Evaluate a configuration for validity and quality with BVH-style acceleration.
+    params: array of shape (37,) where first 36 values are (x,y,angle) for 12 hexagons
+            and the last value is the outer hexagon side length"""
+
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Check containment and overlaps
+    total_penetration = 0.0
+    valid = True
+
+    n = len(inner_hex_data)
+    inner_polys = []
+    inner_vertices = []
+
+    # Precompute all hexagon vertices for fast access
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        inner_poly = compute_hexagon_polygon(x, y, angle)
+        inner_polys.append(inner_poly)
+        inner_vertices.append(hexagon_vertices(x, y, angle))
+
+    # Check containment for all hexagons
+    for i in range(n):
+        inner_poly = inner_polys[i]
+        if not check_containment(inner_poly, outer_hex_poly):
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_poly)
+                if hasattr(diff, 'area'):
+                    total_penetration += diff.area
+            except:
+                total_penetration += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penetration * 10000 if total_penetration > 0 else 1000000
+        return penalty
+
+    # Spatial acceleration for overlap checking using cKDTree
+    # Build KD-tree from hexagon centers for efficient neighbor lookup
+    centers = np.array([[poly.centroid.x, poly.centroid.y] for poly in inner_polys])
+    tree = cKDTree(centers)
+
+    # Find pairs within maximum expected distance (2 units for unit hexagons)
+    pairs_to_check = tree.query_pairs(2.0, output_type='ndarray')
+
+    # For each pair, perform actual overlap check
+    for i, j in pairs_to_check:
+        if i < j:  # Avoid checking the same pair twice
+            if check_overlap(inner_polys[i], inner_polys[j]):
+                valid = False
+                # Calculate overlap area
+                try:
+                    overlap = inner_polys[i].intersection(inner_polys[j])
+                    if hasattr(overlap, 'area'):
+                        total_penetration += overlap.area
+                except:
+                    total_penetration += 1000  # Large penalty
+
+    if not valid:
+        penalty = total_penetration * 10000 if total_penetration > 0 else 1000000
+        return penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+>>>>>>> REPLACE
+</DIFF>

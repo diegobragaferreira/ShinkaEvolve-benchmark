@@ -1,0 +1,176 @@
+<NAME>
+adaptive_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive local search strategy that dynamically adjusts the intensity of local optimization based on the solution quality and constraint satisfaction. This approach will help escape local optima more effectively by using different intensities of local search depending on whether we're in a promising region or getting stuck.
+
+The key insight is to vary the number of local search iterations and the aggressive nature of the search based on:
+1. Current fitness quality relative to the best found
+2. Constraint satisfaction level (how many violations exist)
+3. Whether we're making significant progress
+
+This should help improve convergence and escape poor local optima that might trap the evolutionary algorithm.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_search_improve(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Apply gradient-based local search to improve a solution."""
+        # Create a copy to work with
+        improved = circles.copy()
+
+        # Simple gradient-based approach to maximize sum of radii
+        # We'll iteratively adjust positions to increase radii while respecting constraints
+        for _ in range(self.local_search_iterations):
+            # Compute gradients for each circle with respect to radius increase
+            # Since direct gradients of sum(radius) are complex due to constraints,
+            # we use a heuristic: try to move circles to make room for larger radii
+
+            # First, check all constraints
+            if not ConstraintChecker.validate(improved, rect_width, rect_height):
+                # If constraints violated, repair first
+                improved = RepairMechanism.repair(improved, rect_width, rect_height)
+
+            # Simple greedy improvement approach:
+            # For each circle, try increasing its radius if possible without violating constraints
+            updated = False
+            for i in range(len(improved)):
+                x, y, r = improved[i]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(x, y, rect_width - x, rect_height - y)
+
+                # Try to increase radius slightly (but don't exceed bounds or cause overlaps)
+                if r < max_radius * 0.95:  # Leave some margin
+                    # Test if we can increase this radius
+                    test_r = min(r * 1.05, max_radius * 0.95)
+                    test_circles = improved.copy()
+                    test_circles[i, 2] = test_r
+
+                    # Check if this change preserves constraints
+                    if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                        improved[i, 2] = test_r
+                        updated = True
+
+            # If no improvement possible in radius assignment, try position adjustments
+            if not updated:
+                # Try to slightly adjust positions to make room for larger radii
+                for i in range(len(improved)):
+                    x, y, r = improved[i]
+                    # Try small moves in different directions
+                    directions = [(0.005, 0), (0, 0.005), (-0.005, 0), (0, -0.005)]
+                    for dx, dy in directions:
+                        test_x, test_y = x + dx, y + dy
+                        # Check if the new position is valid
+                        if test_x - r >= 0 and test_x + r <= rect_width and \
+                           test_y - r >= 0 and test_y + r <= rect_height:
+                            # Check if it reduces overlaps with others
+                            test_circles = improved.copy()
+                            test_circles[i, 0] = test_x
+                            test_circles[i, 1] = test_y
+
+                            if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                                improved[i, 0] = test_x
+                                improved[i, 1] = test_y
+                                break
+
+        return improved
+=======
+    def adaptive_local_search_improve(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                                     current_fitness: float = None, best_fitness_so_far: float = None) -> np.ndarray:
+        """Apply adaptive gradient-based local search to improve a solution."""
+        # Create a copy to work with
+        improved = circles.copy()
+
+        # Determine search intensity based on current situation
+        if current_fitness is not None and best_fitness_so_far is not None:
+            # Calculate how close we are to the best fitness
+            fitness_ratio = current_fitness / max(1e-8, best_fitness_so_far)
+            # If we're close to the best, do more intensive search
+            # If we're far from best, do lighter search to explore more
+            search_intensity = max(0.5, min(2.0, 1.0 + (1.0 - fitness_ratio) * 0.5))
+            local_search_iters = int(self.local_search_iterations * search_intensity)
+        else:
+            local_search_iters = self.local_search_iterations
+
+        # Simple gradient-based approach to maximize sum of radii
+        # We'll iteratively adjust positions to increase radii while respecting constraints
+        for iteration in range(local_search_iters):
+            # Compute gradients for each circle with respect to radius increase
+            # Since direct gradients of sum(radius) are complex due to constraints,
+            # we use a heuristic: try to move circles to make room for larger radii
+
+            # First, check all constraints
+            if not ConstraintChecker.validate(improved, rect_width, rect_height):
+                # If constraints violated, repair first
+                improved = RepairMechanism.repair(improved, rect_width, rect_height)
+
+            # Simple greedy improvement approach:
+            # For each circle, try increasing its radius if possible without violating constraints
+            updated = False
+            for i in range(len(improved)):
+                x, y, r = improved[i]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(x, y, rect_width - x, rect_height - y)
+
+                # Try to increase radius slightly (but don't exceed bounds or cause overlaps)
+                if r < max_radius * 0.95:  # Leave some margin
+                    # Increase based on search intensity - be more aggressive when we're close to good solutions
+                    multiplier = 1.05 + (0.05 * (local_search_iters - iteration) / local_search_iters)  # Gradually decrease aggression
+                    test_r = min(r * multiplier, max_radius * 0.95)
+                    test_circles = improved.copy()
+                    test_circles[i, 2] = test_r
+
+                    # Check if this change preserves constraints
+                    if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                        improved[i, 2] = test_r
+                        updated = True
+
+            # If no improvement possible in radius assignment, try position adjustments
+            if not updated:
+                # Try to slightly adjust positions to make room for larger radii
+                # Be more aggressive with position adjustment when we've exhausted radius improvements
+                position_multiplier = 1.0 + (0.05 * (iteration / local_search_iters))  # Gradually become more aggressive
+                for i in range(len(improved)):
+                    x, y, r = improved[i]
+                    # Try small moves in different directions
+                    directions = [(0.005 * position_multiplier, 0), (0, 0.005 * position_multiplier),
+                                 (-0.005 * position_multiplier, 0), (0, -0.005 * position_multiplier)]
+                    for dx, dy in directions:
+                        test_x, test_y = x + dx, y + dy
+                        # Check if the new position is valid
+                        if test_x - r >= 0 and test_x + r <= rect_width and \
+                           test_y - r >= 0 and test_y + r <= rect_height:
+                            # Check if it reduces overlaps with others
+                            test_circles = improved.copy()
+                            test_circles[i, 0] = test_x
+                            test_circles[i, 1] = test_y
+
+                            if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                                improved[i, 0] = test_x
+                                improved[i, 1] = test_y
+                                break
+
+        return improved
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Apply local search improvement to top individuals
+            # Improve the top 3 individuals with local search
+            for i in range(min(3, len(population))):
+                population[i] = self.local_search_improve(population[i], rect_width, rect_height)
+=======
+            # Apply local search improvement to top individuals
+            # Improve the top 3 individuals with local search
+            for i in range(min(3, len(population))):
+                population[i] = self.adaptive_local_search_improve(
+                    population[i], rect_width, rect_height,
+                    fitness_scores[i], best_overall_fitness
+                )
+>>>>>>> REPLACE
+</DIFF>

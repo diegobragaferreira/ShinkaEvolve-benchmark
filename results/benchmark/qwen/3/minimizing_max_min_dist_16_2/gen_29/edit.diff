@@ -1,0 +1,399 @@
+--- a/original.py
++++ b/original.py
+@@ -1,202 +1,224 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial import Voronoi
+ from scipy.spatial.distance import cdist
++from scipy.spatial import cKDTree
+ import time
+-import random
++import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+     
+     np.random.seed(42)
+     
+-    # Initialize points using a hexagonal grid pattern for better starting configuration
+-    def initialize_hexagonal_grid():
+-        # Create a 4x4 grid with alternating rows offset
++    # Sphere packing-inspired initialization with geometric constraints
++    def initialize_sphere_packing():
++        # Start with a regular hexagonal grid
+         points = []
+-        for i in range(4):
+-            for j in range(4):
+-                x = j * 0.25 + (i % 2) * 0.125
+-                y = i * 0.25
++        rows = 4
++        cols = 4
++        spacing = 0.25
++        
++        for i in range(rows):
++            for j in range(cols):
++                x = j * spacing + (i % 2) * spacing * 0.5
++                y = i * spacing
+                 points.append([x, y])
+-        return np.array(points)
+-    
+-    # Compute min/max distance ratio with Voronoi-based quality measure
+-    def compute_fitness(points):
++        
++        points = np.array(points)
++        
++        # Add slight perturbations to break symmetry and improve optimization
++        noise = np.random.normal(0, 0.01, points.shape)
++        points += noise
++        points = np.clip(points, 0, 1)
++        
++        return points
++    
++    # Compute min/max distance ratio with efficient distance matrix
++    def compute_ratio(points):
+         if len(points) < 2:
+             return 0
+         
+-        # Calculate all pairwise distances
+-        distances = cdist(points, points)
+-        # Set diagonal to infinity to exclude self-distances
+-        np.fill_diagonal(distances, np.inf)
+-        
+-        d_min = np.min(distances)
+-        d_max = np.max(distances)
+-        
++        # Use cKDTree for efficient nearest neighbor search
++        tree = cKDTree(points)
++        
++        # Find minimum distance (excluding self-distance)
++        # Query for second closest point since first is self
++        distances, indices = tree.query(points, k=2)
++        d_min = np.min(distances[:, 1])  # Second closest (not self)
++        
++        # Find maximum distance
++        # For large point sets, find max distance more efficiently
++        if len(points) <= 100:
++            # Direct computation for small sets
++            distances = cdist(points, points)
++            np.fill_diagonal(distances, np.inf)
++            d_max = np.min(distances[distances != np.inf]) if np.any(distances != np.inf) else 0
++        else:
++            # For larger sets, use pairwise maximum
++            distances = cdist(points, points)
++            np.fill_diagonal(distances, 0)
++            d_max = np.max(distances)
++            
+         if d_max == 0:
+             return 0
+             
+-        # Additional quality metric based on Voronoi cell areas
+-        try:
+-            vor = Voronoi(points)
+-            # Calculate average Voronoi cell area
+-            areas = []
+-            for region in vor.regions:
+-                if not any(v == -1 for v in region):  # Skip infinite regions
+-                    polygon = [vor.vertices[i] for i in region]
+-                    if len(polygon) >= 3:
+-                        # Simple area calculation for convex polygons
+-                        area = 0.5 * abs(sum(polygon[i][0] * polygon[(i+1)%len(polygon)][1] - 
+-                                           polygon[(i+1)%len(polygon)][0] * polygon[i][1] 
+-                                           for i in range(len(polygon))))
+-                        areas.append(area)
+-            avg_area = np.mean(areas) if areas else 0
+-        except:
+-            avg_area = 0
+-        
+-        # Combined fitness: min/max ratio weighted with Voronoi uniformity
+-        ratio = d_min / d_max
+-        uniformity_factor = avg_area / (1.0/16.0) if avg_area > 0 else 0
+-        return ratio * (1 + 0.5 * uniformity_factor)
+-    
+-    # Evolutionary operators
+-    def mutate_individual(points, mutation_strength=0.02):
++        return d_min / d_max
++    
++    # Sphere packing objective function with geometric constraints
++    def sphere_packing_objective(points):
++        """Objective based on maximizing minimum distance (equivalent to maximum sphere radius)"""
++        if len(points) < 2:
++            return 0
++        
++        # Use cKDTree for efficient computation
++        tree = cKDTree(points)
++        distances, indices = tree.query(points, k=2)
++        min_distance = np.min(distances[:, 1])
++        
++        # Penalize if any points are too close to boundaries
++        boundary_penalty = 0
++        boundary_threshold = 0.02
++        for point in points:
++            if (point[0] < boundary_threshold or point[0] > 1-boundary_threshold or
++                point[1] < boundary_threshold or point[1] > 1-boundary_threshold):
++                boundary_penalty += 1000 * boundary_threshold
++        
++        return min_distance - boundary_penalty
++    
++    # Generate neighbor solution using sphere packing constraints
++    def generate_neighbor(points, step_size=0.02):
+         new_points = points.copy()
+-        # Select random point to mutate
+-        idx = np.random.randint(len(points))
+-        # Apply small random displacement
+-        new_points[idx] += np.random.normal(0, mutation_strength, 2)
+-        # Clamp to bounds
+-        new_points = np.clip(new_points, 0, 1)
++        
++        # Select multiple points to move for better exploration
++        num_moves = min(3, len(points))
++        move_indices = np.random.choice(len(points), num_moves, replace=False)
++        
++        for idx in move_indices:
++            # Move point with adaptive step size
++            movement = np.random.normal(0, step_size, 2)
++            new_points[idx] += movement
++            
++        # Apply boundary constraints with reflection
++        for i in range(len(new_points)):
++            for j in range(2):
++                if new_points[i, j] < 0:
++                    new_points[i, j] = -new_points[i, j]  # Reflect
++                elif new_points[i, j] > 1:
++                    new_points[i, j] = 2 - new_points[i, j]  # Reflect
++                    
+         return new_points
+     
+-    def crossover(parent1, parent2, crossover_rate=0.7):
+-        if np.random.rand() > crossover_rate:
+-            return parent1.copy()
+-        
+-        # Uniform crossover
+-        mask = np.random.rand(*parent1.shape) > 0.5
+-        child = np.where(mask, parent1, parent2).copy()
+-        return child
+-    
+-    # Initialize population
+-    population_size = 50
+-    population = []
+-    
+-    # Create initial population with various starting configurations
+-    for _ in range(population_size):
+-        # Start with hexagonal grid
+-        points = initialize_hexagonal_grid()
+-        # Add some randomness
+-        points += np.random.normal(0, 0.01, points.shape)
+-        points = np.clip(points, 0, 1)
+-        population.append(points)
+-    
+-    # Evolution parameters
+-    generations = 200
+-    elite_size = 5
+-    tournament_size = 3
+-    
+-    best_fitness = -np.inf
+-    best_individual = None
+-    
+-    # Evolutionary loop
+-    for generation in range(generations):
+-        # Evaluate fitness for entire population
+-        fitness_scores = []
+-        for individual in population:
+-            fitness = compute_fitness(individual)
+-            fitness_scores.append(fitness)
+-            if fitness > best_fitness:
+-                best_fitness = fitness
+-                best_individual = individual.copy()
+-        
+-        # Sort population by fitness
+-        sorted_indices = np.argsort(fitness_scores)[::-1]
+-        population = [population[i] for i in sorted_indices]
+-        fitness_scores = [fitness_scores[i] for i in sorted_indices]
+-        
+-        # Create new population
+-        new_population = []
+-        
+-        # Elitism: keep best individuals
+-        for i in range(elite_size):
+-            new_population.append(population[i].copy())
+-        
+-        # Generate offspring through tournament selection and crossover
+-        while len(new_population) < population_size:
+-            # Tournament selection
+-            tournament_indices = np.random.choice(len(population), tournament_size)
+-            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+-            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+-            
+-            # Select second parent
+-            tournament_indices2 = np.random.choice(len(population), tournament_size)
+-            tournament_fitness2 = [fitness_scores[i] for i in tournament_indices2]
+-            winner_idx2 = tournament_indices2[np.argmax(tournament_fitness2)]
+-            
+-            # Crossover
+-            child = crossover(population[winner_idx], population[winner_idx2])
+-            
+-            # Mutation
+-            child = mutate_individual(child, 0.01)
+-            
+-            new_population.append(child)
+-        
+-        population = new_population[:population_size]
+-    
+-    # Final refinement using local search around best solution
+-    if best_individual is not None:
+-        # Use gradient-based refinement for final optimization
+-        points = best_individual.copy()
+-        
+-        # Simple gradient ascent with adaptive step sizes
+-        for _ in range(1000):
+-            current_fitness = compute_fitness(points)
+-            
+-            # Estimate gradient by finite differences
+-            gradient = np.zeros_like(points)
+-            eps = 1e-4
+-            
+-            for i in range(len(points)):
+-                for j in range(2):
+-                    # Perturb point coordinate
+-                    points_plus = points.copy()
+-                    points_plus[i, j] += eps
+-                    points_plus = np.clip(points_plus, 0, 1)
++    # Advanced multi-scale optimization
++    def multi_scale_optimization(initial_points):
++        best_points = initial_points.copy()
++        best_ratio = compute_ratio(best_points)
++        
++        # Scale 1: Coarse-grained optimization with large steps
++        points = initial_points.copy()
++        for iter_coarse in range(500):
++            # Large step size for broad search
++            new_points = generate_neighbor(points, step_size=0.05)
++            new_ratio = compute_ratio(new_points)
++            
++            # Accept with Metropolis criterion
++            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 100):
++                points = new_points.copy()
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++        
++        # Scale 2: Medium-grained optimization  
++        for iter_medium in range(1000):
++            # Medium step size for local refinement
++            new_points = generate_neighbor(points, step_size=0.01)
++            new_ratio = compute_ratio(new_points)
++            
++            # Accept with Metropolis criterion
++            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 500):
++                points = new_points.copy()
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++        
++        # Scale 3: Fine-grained optimization with small steps
++        for iter_fine in range(1500):
++            # Small step size for fine adjustment
++            new_points = generate_neighbor(points, step_size=0.002)
++            new_ratio = compute_ratio(new_points)
++            
++            # Accept with Metropolis criterion (higher acceptance probability)
++            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 1000):
++                points = new_points.copy()
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
+                     
+-                    points_minus = points.copy()
+-                    points_minus[i, j] -= eps
+-                    points_minus = np.clip(points_minus, 0, 1)
+-                    
+-                    fitness_plus = compute_fitness(points_plus)
+-                    fitness_minus = compute_fitness(points_minus)
+-                    
+-                    gradient[i, j] = (fitness_plus - fitness_minus) / (2 * eps)
+-            
+-            # Update points
+-            step_size = 0.01
+-            points = points + step_size * gradient
+-            
+-            # Ensure bounds
+-            points = np.clip(points, 0, 1)
+-            
+-            # Check for convergence
+-            if np.all(np.abs(gradient) < 1e-6):
+-                break
+-        
+-        # Final evaluation
+-        final_fitness = compute_fitness(points)
+-        if final_fitness > best_fitness:
+-            best_individual = points
+-    
+-    return best_individual if best_individual is not None else initialize_hexagonal_grid()
++        return best_points
++    
++    # Initialize with sphere packing approach
++    points = initialize_sphere_packing()
++    
++    # Try multiple restarts to escape local optima
++    best_solution = points.copy()
++    best_ratio = compute_ratio(points)
++    
++    # Multiple restarts with different random seeds
++    for restart in range(5):
++        # Different initialization for each restart
++        points = initialize_sphere_packing()
++        
++        # Apply multi-scale optimization
++        optimized_points = multi_scale_optimization(points)
++        ratio = compute_ratio(optimized_points)
++        
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_solution = optimized_points.copy()
++    
++    # Final local refinement using gradient approximation
++    final_points = best_solution.copy()
++    
++    # Simple gradient-based refinement
++    for refinement_iter in range(500):
++        current_ratio = compute_ratio(final_points)
++        
++        # Estimate gradient using finite differences
++        gradient = np.zeros_like(final_points)
++        eps = 1e-5
++        
++        for i in range(len(final_points)):
++            for j in range(2):
++                # Perturb point coordinate
++                points_plus = final_points.copy()
++                points_plus[i, j] += eps
++                points_plus = np.clip(points_plus, 0, 1)
++                
++                points_minus = final_points.copy()
++                points_minus[i, j] -= eps
++                points_minus = np.clip(points_minus, 0, 1)
++                
++                ratio_plus = compute_ratio(points_plus)
++                ratio_minus = compute_ratio(points_minus)
++                
++                gradient[i, j] = (ratio_plus - ratio_minus) / (2 * eps)
++        
++        # Update with gradient ascent
++        step_size = 0.005
++        final_points = final_points + step_size * gradient
++        
++        # Ensure bounds
++        final_points = np.clip(final_points, 0, 1)
++        
++        # Early stopping condition
++        if np.all(np.abs(gradient) < 1e-6):
++            break
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

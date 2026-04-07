@@ -1,0 +1,162 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import njit
+import random
+from typing import List
+
+@njit
+def compute_autoconvolution_norms(f_vals):
+    """
+    Compute the autoconvolution g = f*f and return its norms.
+    Uses fast numba-compiled operations.
+    """
+    n = len(f_vals)
+    # Autoconvolution using direct computation
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    # Compute norms
+    g_squared = g * g
+    norm_g2_squared = np.sum(g_squared)
+    norm_g1 = np.sum(np.abs(g))
+    norm_g_inf = np.max(np.abs(g))
+
+    return norm_g2_squared, norm_g1, norm_g_inf
+
+@njit
+def calculate_c2(f_vals):
+    """
+    Calculate C2 value for given step function values.
+    """
+    norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+        return 0.0
+
+    c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+    return c2
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using evolutionary algorithm."""
+
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Evolutionary algorithm parameters
+    pop_size = 30
+    generations = 50
+    elite_size = 3
+    mutation_rate = 0.3
+
+    def initialize_individual(n_steps: int) -> List[float]:
+        """Create a new individual with hybrid initialization"""
+        # Start with alternating high/low pattern to encourage diversity
+        individual = []
+        for i in range(n_steps):
+            if i % 2 == 0:
+                individual.append(np.random.gamma(2.0, 2.0))
+            else:
+                individual.append(np.random.gamma(1.0, 1.0))
+
+        # Normalize to prevent extreme values
+        if sum(individual) > 0:
+            individual = [x / sum(individual) * 100 for x in individual]
+        return individual
+
+    def mutate(individual: List[float], rate: float) -> List[float]:
+        """Apply Gaussian mutation to individual"""
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if random.random() < rate:
+                noise = np.random.normal(0, rate * max(1e-6, mutated[i]))
+                mutated[i] = max(0, mutated[i] + noise)
+        return mutated
+
+    def crossover(parent1: List[float], parent2: List[float]) -> List[float]:
+        """Uniform crossover between two parents"""
+        child = []
+        for i in range(max(len(parent1), len(parent2))):
+            if random.random() < 0.5:
+                if i < len(parent1):
+                    child.append(parent1[i])
+                else:
+                    child.append(0.0)
+            else:
+                if i < len(parent2):
+                    child.append(parent2[i])
+                else:
+                    child.append(0.0)
+        return child
+
+    def tournament_selection(population: List[List[float]], fitnesses: List[float], tournament_size: int = 3) -> List[float]:
+        """Select individual using tournament selection"""
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_index].copy()
+
+    # Initialize population
+    population = []
+    for _ in range(pop_size):
+        n_steps = random.randint(200, 800)  # Variable step count
+        individual = initialize_individual(n_steps)
+        population.append(individual)
+
+    # Evolution loop
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitnesses = [calculate_c2(individual) for individual in population]
+
+        # Track best fitness
+        best_fitness = max(fitnesses)
+        if gen % 10 == 0:
+            print(f"Generation {gen}: Best C2 = {best_fitness:.6f}")
+
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        population = [population[i] for i in sorted_indices]
+        fitnesses = [fitnesses[i] for i in sorted_indices]
+
+        # Keep elite individuals
+        elite = population[:elite_size]
+
+        # Create new population
+        new_population = elite.copy()
+
+        # Update mutation rate (adaptive)
+        current_mutation_rate = mutation_rate * (1 - gen / generations) + 0.05
+
+        # Generate offspring through tournament selection, crossover, and mutation
+        while len(new_population) < pop_size:
+            # Tournament selection for parents
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            offspring = crossover(parent1, parent2)
+
+            # Mutation
+            mutated_offspring = mutate(offspring, current_mutation_rate)
+
+            new_population.append(mutated_offspring)
+
+        population = new_population[:pop_size]
+
+    # Final evaluation and return best individual
+    final_fitnesses = [calculate_c2(individual) for individual in population]
+    best_individual = population[np.argmax(final_fitnesses)]
+
+    return best_individual
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

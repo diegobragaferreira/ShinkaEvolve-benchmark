@@ -1,0 +1,417 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import jit, prange
+from scipy import signal
+import random
+import time
+from typing import List, Tuple, Optional
+from joblib import Parallel, delayed
+
+# Global constants
+SEED = 42
+TIME_LIMIT = 85  # seconds
+MAX_STEPS = 50000
+MIN_STEPS = 100
+BASE_POP_SIZE = 100
+MAX_GENERATIONS = 150
+INIT_STRATEGIES = 5  # Number of different initializations to try
+TOURNAMENT_SIZE = 3
+ELITISM_COUNT = 5
+
+# Set random seeds for reproducibility
+random.seed(SEED)
+np.random.seed(SEED)
+
+class FastNormCalculator:
+    """Highly optimized norm calculator using numba JIT compilation"""
+
+    @staticmethod
+    @jit(nopython=True, parallel=True)
+    def compute_autoconvolution_fast(f_vals):
+        """Fast autoconvolution computation using numba"""
+        n = len(f_vals)
+        # Autoconvolution size is 2*n - 1
+        g_size = 2 * n - 1
+        g_vals = np.zeros(g_size, dtype=np.float64)
+
+        # Parallel computation of convolution
+        for i in prange(n):
+            for j in range(n):
+                idx = i + j
+                if 0 <= idx < g_size:
+                    g_vals[idx] += f_vals[i] * f_vals[j]
+
+        return g_vals
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_norms_fast(g_vals):
+        """Fast computation of L1, L2², and L∞ norms"""
+        n = len(g_vals)
+
+        l1_norm = 0.0
+        l2_norm_sq = 0.0
+        linf_norm = 0.0
+
+        # Single pass through array
+        for i in range(n):
+            val = g_vals[i]
+            abs_val = abs(val)
+
+            l1_norm += abs_val
+            l2_norm_sq += val * val
+
+            if abs_val > linf_norm:
+                linf_norm = abs_val
+
+        return l1_norm, l2_norm_sq, linf_norm
+
+class StepFunctionOptimizer:
+    """Core optimizer for step function construction"""
+
+    def __init__(self):
+        self.best_individual = None
+        self.best_fitness = 0.0
+        self.start_time = 0.0
+
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Optimized autoconvolution norm computation with direct vectorized approach
+        """
+        if not f_values or len(f_values) == 0:
+            return 0.0, 0.0, 0.0
+
+        # Convert to numpy array
+        f = np.array(f_values, dtype=np.float64)
+        n_steps = len(f)
+
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        # Create step function with proper spacing using vectorized approach
+        step_width = 0.5 / n_steps
+        step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps, dtype=np.float64)
+
+        # Create fine grid for convolution with reduced resolution for efficiency
+        fine_grid_points = 2000  # Increased resolution for better accuracy but still manageable
+        x_fine = np.linspace(-0.25, 0.25, fine_grid_points, dtype=np.float64)
+        dx = x_fine[1] - x_fine[0]
+
+        # Vectorized creation of piecewise constant function
+        # Create a matrix where each row represents one step function value
+        # Compare against all x_fine positions at once
+
+        # Use broadcasting to create step indicators
+        positions_matrix = step_positions.reshape(-1, 1)  # Shape: (n_steps, 1)
+        x_fine_matrix = x_fine.reshape(1, -1)            # Shape: (1, fine_grid_points)
+
+        # Create step boundaries
+        left_boundaries = positions_matrix - step_width/2
+        right_boundaries = positions_matrix + step_width/2
+
+        # Check which x_fine points fall into each step
+        # This creates a boolean matrix of shape (n_steps, fine_grid_points)
+        in_step = (x_fine_matrix >= left_boundaries) & (x_fine_matrix <= right_boundaries)
+
+        # Multiply with the heights to get piecewise constant function
+        f_func = np.dot(f.reshape(-1, 1), np.ones((1, fine_grid_points))) * in_step
+
+        # Sum along rows to get the actual function values
+        f_func = np.sum(f_func, axis=0)
+
+        # Compute autoconvolution using direct vectorized approach
+        # Manually compute convolution with proper indexing
+        # This is more efficient than fftconvolve for this specific case
+        g_size = 2 * fine_grid_points - 1
+        g = np.zeros(g_size, dtype=np.float64)
+
+        # Vectorized convolution computation
+        f_func_expanded = np.concatenate([f_func, np.zeros(fine_grid_points - 1)])
+        for i in range(fine_grid_points):
+            g[i:i+fine_grid_points] += f_func_expanded[i] * f_func
+
+        # Keep only the central part (matching the original convolution)
+        g = g[:fine_grid_points]
+
+        # Apply proper scaling
+        g = g * dx
+
+        # Compute norms using fast numba methods
+        g_abs = np.abs(g)
+        norm_1, norm_2_sq, norm_inf = FastNormCalculator.compute_norms_fast(g_abs)
+
+        return norm_2_sq, norm_1, norm_inf
+
+    @staticmethod
+    def evaluate_c2_single(individual: List[float]) -> float:
+        """Fast evaluation of C2 for a single individual"""
+        try:
+            # Ensure non-negative values
+            f_values = [max(0.0, float(x)) for x in individual]
+
+            # Compute the norms
+            norm_2_sq, norm_1, norm_inf = StepFunctionOptimizer.compute_autoconvolution_norms(f_values)
+
+            # Avoid division by zero
+            if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+                return 0.0
+
+            # Calculate C₂
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            return c2
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def initialize_population(pop_size: int, min_steps: int, max_steps: int) -> List[List[float]]:
+        """Generate diverse population with multiple strategies"""
+        population = []
+
+        # Strategy 1: Random exponential distribution
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.exponential(scale=1.0, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 2: Log-normal distribution
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.lognormal(0, 0.5, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 3: Gaussian bumps pattern
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            # Create some structured pattern with random variations
+            heights = np.zeros(n_steps)
+            # Add some random peaks
+            n_peaks = max(1, n_steps // 20)
+            for _ in range(n_peaks):
+                peak_pos = np.random.randint(0, n_steps)
+                peak_height = np.random.exponential(1.0)
+                # Spread the peak over a few bins
+                spread = max(1, n_steps // 50)
+                for i in range(max(0, peak_pos - spread), min(n_steps, peak_pos + spread)):
+                    heights[i] += peak_height * np.exp(-((i - peak_pos) ** 2) / (2 * spread ** 2))
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 4: Structured pattern with multiple components
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.zeros(n_steps)
+
+            # Create multiple patterns
+            # Pattern 1: Central peak
+            center = n_steps // 2
+            peak_height = np.random.exponential(1.0)
+            spread = max(1, n_steps // 10)
+            for i in range(n_steps):
+                heights[i] += peak_height * np.exp(-((i - center) ** 2) / (2 * spread ** 2))
+
+            # Pattern 2: Exponential decay on left side
+            for i in range(n_steps // 3):
+                heights[i] += 0.5 * np.exp(-i / (n_steps // 10))
+
+            # Pattern 3: Exponential decay on right side
+            for i in range(2 * n_steps // 3, n_steps):
+                heights[i] += 0.5 * np.exp(-(n_steps - i) / (n_steps // 10))
+
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Ensure we have exactly pop_size individuals
+        if len(population) < pop_size:
+            # Fill with random ones
+            for i in range(pop_size - len(population)):
+                n_steps = np.random.randint(min_steps, max_steps)
+                heights = np.random.exponential(scale=1.0, size=n_steps)
+                heights = np.maximum(heights, 0)
+                population.append(heights.tolist())
+
+        return population[:pop_size]
+
+    @staticmethod
+    def tournament_selection(population: List[List[float]], fitness_scores: List[float],
+                            tournament_size: int) -> List[List[float]]:
+        """Efficient tournament selection"""
+        selected = []
+        for _ in range(len(population)):
+            # Tournament selection
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+            selected.append(population[winner_index].copy())
+        return selected
+
+    @staticmethod
+    def crossover(parent1: List[float], parent2: List[float]) -> Tuple[List[float], List[float]]:
+        """Uniform crossover between two parents"""
+        if len(parent1) != len(parent2):
+            # Make them same length by truncating or padding
+            min_len = min(len(parent1), len(parent2))
+            parent1 = parent1[:min_len]
+            parent2 = parent2[:min_len]
+
+        # Uniform crossover
+        child1, child2 = [], []
+        for i in range(len(parent1)):
+            if np.random.random() < 0.5:
+                child1.append(parent1[i])
+                child2.append(parent2[i])
+            else:
+                child1.append(parent2[i])
+                child2.append(parent1[i])
+        return child1, child2
+
+    @staticmethod
+    def mutate(individual: List[float], mutation_rate: float) -> List[float]:
+        """Mutate individual with adaptive noise"""
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if np.random.random() < mutation_rate:
+                # Add Gaussian noise with adaptive scale
+                noise_scale = 0.1 * mutated[i] + 0.01
+                noise = np.random.normal(0, noise_scale)
+                mutated[i] = max(0, mutated[i] + noise)
+        return mutated
+
+    @staticmethod
+    def elitism(population: List[List[float]], fitness_scores: List[float],
+               elite_count: int) -> List[List[float]]:
+        """Keep best individuals"""
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+        return elite
+
+    def run_evolution(self, initial_pop: List[List[float]] = None) -> List[float]:
+        """Run the main evolutionary optimization process with adaptive parameters"""
+        self.start_time = time.time()
+
+        # Initialize population
+        if initial_pop is None:
+            population = self.initialize_population(BASE_POP_SIZE, MIN_STEPS, MAX_STEPS)
+        else:
+            population = initial_pop
+
+        # Evaluate initial population
+        fitness_scores = []
+        for ind in population:
+            fitness_scores.append(self.evaluate_c2_single(ind))
+
+        # Track best solution
+        best_gen_index = np.argmax(fitness_scores)
+        self.best_fitness = fitness_scores[best_gen_index]
+        self.best_individual = population[best_gen_index].copy()
+
+        # Evolution parameters
+        generation = 0
+        # Adaptive parameters
+        mutation_rate = 0.15
+        crossover_rate = 0.8
+        stall_count = 0
+        max_stall = 20
+
+        # Main evolution loop
+        while generation < MAX_GENERATIONS:
+            if time.time() - self.start_time > TIME_LIMIT:
+                break
+
+            generation += 1
+
+            # Elitism
+            elite = self.elitism(population, fitness_scores, ELITISM_COUNT)
+
+            # Selection
+            parents = self.tournament_selection(population, fitness_scores, TOURNAMENT_SIZE)
+
+            # Crossover and mutation
+            new_population = elite.copy()
+            while len(new_population) < BASE_POP_SIZE:
+                p1, p2 = np.random.choice(len(parents), 2, replace=False)
+                child1, child2 = self.crossover(parents[p1], parents[p2])
+
+                child1 = self.mutate(child1, mutation_rate)
+                child2 = self.mutate(child2, mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:BASE_POP_SIZE]
+
+            # Evaluate new population
+            fitness_scores = []
+            for ind in population:
+                fitness_scores.append(self.evaluate_c2_single(ind))
+
+            # Update best solution
+            best_gen_index = np.argmax(fitness_scores)
+            if fitness_scores[best_gen_index] > self.best_fitness:
+                self.best_fitness = fitness_scores[best_gen_index]
+                self.best_individual = population[best_gen_index].copy()
+                stall_count = 0
+                # Increase mutation rate slightly if we're improving
+                mutation_rate = min(0.3, mutation_rate * 1.05)
+            else:
+                stall_count += 1
+                # Decrease mutation rate if we're stuck
+                mutation_rate = max(0.05, mutation_rate * 0.95)
+
+            # Adaptive stopping condition
+            if stall_count > max_stall:
+                # Restart with better initialization
+                population = self.initialize_population(BASE_POP_SIZE, MIN_STEPS, MAX_STEPS)
+                fitness_scores = []
+                for ind in population:
+                    fitness_scores.append(self.evaluate_c2_single(ind))
+                best_gen_index = np.argmax(fitness_scores)
+                self.best_fitness = fitness_scores[best_gen_index]
+                self.best_individual = population[best_gen_index].copy()
+                stall_count = 0
+                mutation_rate = 0.15
+
+        return self.best_individual
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value using multi-start evolutionary optimization."""
+
+    best_result = None
+    best_fitness = -np.inf
+
+    # Try multiple random initializations to improve chances of finding better optimum
+    for i in range(INIT_STRATEGIES):
+        # Set different seed for each try
+        np.random.seed(SEED + i)
+        random.seed(SEED + i)
+
+        optimizer = StepFunctionOptimizer()
+
+        try:
+            result = optimizer.run_evolution()
+            fitness = optimizer.best_fitness
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_result = result
+        except Exception as e:
+            # If any error occurs, continue with next strategy
+            continue
+
+    # If no good result was found, return a fallback
+    if best_result is None:
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        heights = np.random.lognormal(0, 0.5, size=n_steps)
+        heights = np.maximum(heights, 0)
+        best_result = heights.tolist()
+
+    return [float(x) for x in best_result]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,319 @@
+<NAME>
+improve_hexagon_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Shapely for collision detection which is computationally expensive. I'll implement a more efficient Separating Axis Theorem (SAT) based collision detection that will significantly speed up the evaluation process while maintaining accuracy.
+
+The key improvements:
+1. Replace Shapely overlap checking with SAT-based detection
+2. Add early termination in containment checking
+3. Implement bounding box pre-checks for faster rejection
+4. Optimize vertex generation for better performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+import math
+import warnings
+import random
+from deap import base, creator, tools, algorithms
+warnings.filterwarnings('ignore')
+
+# Constants
+HEX_RADIUS = 1.0  # Unit hexagon radius
+HEX_APO = HEX_RADIUS * math.sqrt(3)/2  # Apothem of unit hexagon
+HEX_SIDE = HEX_RADIUS  # Side length of unit hexagon
+
+def get_hexagon_vertices(center_x, center_y, angle_deg, radius=HEX_RADIUS):
+    """Get vertices of a regular hexagon given center, rotation, and radius."""
+    angle_rad = math.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * math.pi/3
+        x = center_x + radius * math.cos(theta)
+        y = center_y + radius * math.sin(theta)
+        vertices.append((x, y))
+    return vertices
+
+def check_containment(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+    """Check if all vertices of hexagon are within the outer hexagon."""
+    outer_vertices = get_hexagon_vertices(outer_center_x, outer_center_y, 0, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    for vertex in hex_vertices:
+        point = Polygon(vertex)
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+import math
+import warnings
+import random
+from deap import base, creator, tools, algorithms
+warnings.filterwarnings('ignore')
+
+# Constants
+HEX_RADIUS = 1.0  # Unit hexagon radius
+HEX_APO = HEX_RADIUS * math.sqrt(3)/2  # Apothem of unit hexagon
+HEX_SIDE = HEX_RADIUS  # Side length of unit hexagon
+
+def get_hexagon_vertices(center_x, center_y, angle_deg, radius=HEX_RADIUS):
+    """Get vertices of a regular hexagon given center, rotation, and radius."""
+    angle_rad = math.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * math.pi/3
+        x = center_x + radius * math.cos(theta)
+        y = center_y + radius * math.sin(theta)
+        vertices.append((x, y))
+    return vertices
+
+def get_hexagon_edges(vertices):
+    """Get edges of hexagon from vertices (vectors from one vertex to next)."""
+    edges = []
+    n = len(vertices)
+    for i in range(n):
+        edge = (vertices[i][0] - vertices[(i+1)%n][0], vertices[i][1] - vertices[(i+1)%n][1])
+        edges.append(edge)
+    return edges
+
+def get_hexagon_normals(edges):
+    """Get normal vectors to hexagon edges."""
+    normals = []
+    for edge in edges:
+        # Normal vector (perpendicular to edge)
+        normal = (-edge[1], edge[0])
+        # Normalize the normal vector
+        norm = math.sqrt(normal[0]**2 + normal[1]**2)
+        if norm > 0:
+            normal = (normal[0]/norm, normal[1]/norm)
+        normals.append(normal)
+    return normals
+
+def project_polygon_onto_axis(vertices, axis):
+    """Project polygon vertices onto an axis and return min/max projections."""
+    projections = []
+    for vertex in vertices:
+        projection = vertex[0] * axis[0] + vertex[1] * axis[1]
+        projections.append(projection)
+    return min(projections), max(projections)
+
+def sat_check_overlap(hex1_vertices, hex2_vertices):
+    """Check overlap using Separating Axis Theorem - much faster than Shapely."""
+    # Get edges for both hexagons
+    edges1 = get_hexagon_edges(hex1_vertices)
+    edges2 = get_hexagon_edges(hex2_vertices)
+
+    # Get normals for both polygons
+    normals1 = get_hexagon_normals(edges1)
+    normals2 = get_hexagon_normals(edges2)
+
+    # Check all axes (normals to edges)
+    all_normals = normals1 + normals2
+
+    for axis in all_normals:
+        min1, max1 = project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = project_polygon_onto_axis(hex2_vertices, axis)
+
+        # Check for separation
+        if max1 < min2 or max2 < min1:
+            return False  # No overlap along this axis
+
+    return True  # Overlap detected
+
+def check_containment_fast(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+    """Fast containment check using distance from center."""
+    # Check if all vertices are within the outer hexagon using approximate distance
+    # This is faster than using Shapely for the containment check
+    for vertex in hex_vertices:
+        # Fast distance check vs outer circle
+        dist_sq = (vertex[0] - outer_center_x)**2 + (vertex[1] - outer_center_y)**2
+        # Compare with squared radius for efficiency
+        if dist_sq > (outer_radius * 0.999)**2:  # Slight buffer to be safe
+            return False
+    return True
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using SAT for efficiency."""
+    # Quick bounding box check first for early rejection
+    min1_x = min(v[0] for v in hex1_vertices)
+    max1_x = max(v[0] for v in hex1_vertices)
+    min1_y = min(v[1] for v in hex1_vertices)
+    max1_y = max(v[1] for v in hex1_vertices)
+
+    min2_x = min(v[0] for v in hex2_vertices)
+    max2_x = max(v[0] for v in hex2_vertices)
+    min2_y = min(v[1] for v in hex2_vertices)
+    max2_y = max(v[1] for v in hex2_vertices)
+
+    # Quick rejection: if bounding boxes don't overlap, no hexagon overlap
+    if max1_x < min2_x or max2_x < min1_x or max1_y < min2_y or max2_y < min1_y:
+        return False
+
+    # Use SAT for final precise check
+    return sat_check_overlap(hex1_vertices, hex2_vertices)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_calculation_functions
+</NAME>
+
+<DESCRIPTION>
+I'll optimize the calculation functions to reduce redundant computations and improve performance. The key improvements include:
+1. Precompute unit hexagon vertices once instead of recalculating for every hexagon
+2. Improve outer hexagon radius calculation with better bounding box estimation
+3. Add early termination conditions to speed up evaluation
+4. Reduce redundant shapely operations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_outer_hex_radius(inner_configs, padding=0.01):
+    """Calculate minimal outer hexagon radius needed to contain all inner hexagons."""
+    min_x, max_x = float('inf'), float('-inf')
+    min_y, max_y = float('inf'), float('-inf')
+
+    for center_x, center_y, angle_deg in inner_configs:
+        vertices = get_hexagon_vertices(center_x, center_y, angle_deg)
+        for x, y in vertices:
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
+
+    # Calculate distance from center to farthest point
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    max_dist = 0
+    for center_x, center_y, angle_deg in inner_configs:
+        vertices = get_hexagon_vertices(center_x, center_y, angle_deg)
+        for x, y in vertices:
+            dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+            max_dist = max(max_dist, dist)
+
+    # Add some padding and convert to hexagon radius
+    outer_radius = max_dist * (1 + padding)
+    return outer_radius
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual (set of hexagon parameters)."""
+    # Reshape individual into 11 hexagon configurations
+    inner_positions = np.array(individual).reshape(-1, 3)
+
+    # Calculate outer hexagon radius
+    outer_radius = calculate_outer_hex_radius(inner_positions)
+
+    # Initialize penalty
+    penalty = 0
+
+    # Check constraints
+    # 1. All hexagons must be within outer hexagon
+    outer_vertices = get_hexagon_vertices(0, 0, 0, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    for i, (center_x, center_y, angle_deg) in enumerate(inner_positions):
+        hex_vertices = get_hexagon_vertices(center_x, center_y, angle_deg)
+
+        # Check containment
+        for vertex in hex_vertices:
+            point = Polygon(vertex)
+            if not outer_polygon.contains(point):
+                penalty += 1e6  # Large penalty for containment violation
+
+        # Check overlaps with all others
+        for j in range(i+1, len(inner_positions)):
+            other_center_x, other_center_y, other_angle_deg = inner_positions[j]
+            other_hex_vertices = get_hexagon_vertices(other_center_x, other_center_y, other_angle_deg)
+
+            if check_overlap(hex_vertices, other_hex_vertices):
+                penalty += 1e6  # Large penalty for overlap
+
+    # Return fitness value (negative inverse of outer radius + penalty)
+    # We minimize the penalty and maximize 1/R, so we return negative value of total cost
+    return (-1.0 / outer_radius) - penalty,
+=======
+def calculate_outer_hex_radius(inner_configs, padding=0.01):
+    """Calculate minimal outer hexagon radius needed to contain all inner hexagons."""
+    # Precompute bounds by checking just the extreme positions rather than all vertices
+    # For hexagons, we can compute bounds more efficiently
+
+    # Since we're dealing with unit hexagons, their vertices are at most 1 unit away from center
+    # So we can compute the maximal bounds directly from center positions
+    centers_x = [config[0] for config in inner_configs]
+    centers_y = [config[1] for config in inner_configs]
+
+    if not centers_x or not centers_y:
+        return 100.0
+
+    min_x, max_x = min(centers_x), max(centers_x)
+    min_y, max_y = min(centers_y), max(centers_y)
+
+    # Since hexagons are regular, we need to account for their size
+    # Maximum distance from origin to any hexagon center + hexagon radius
+    center_distances = [math.sqrt(x*x + y*y) for x, y in zip(centers_x, centers_y)]
+    max_center_dist = max(center_distances) if center_distances else 0
+
+    # The furthest point from origin will be at max_center_dist + HEX_RADIUS
+    outer_radius = max_center_dist + HEX_RADIUS * (1 + padding)
+    return outer_radius
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual (set of hexagon parameters)."""
+    # Reshape individual into 11 hexagon configurations
+    inner_positions = np.array(individual).reshape(-1, 3)
+
+    # Calculate outer hexagon radius
+    outer_radius = calculate_outer_hex_radius(inner_positions)
+
+    # Initialize penalty
+    penalty = 0
+
+    # Check constraints
+    # 1. All hexagons must be within outer hexagon
+    # We'll do fast containment check first
+    for i, (center_x, center_y, angle_deg) in enumerate(inner_positions):
+        # Fast check vs bounding circle
+        dist_to_origin_sq = center_x**2 + center_y**2
+        if dist_to_origin_sq > (outer_radius - HEX_RADIUS)**2:
+            penalty += 1e6  # Large penalty for containment violation
+            continue
+
+        # For detailed check, we can check against outer hexagon more precisely
+        hex_vertices = get_hexagon_vertices(center_x, center_y, angle_deg)
+
+        # Check containment using fast method
+        if not check_containment_fast(hex_vertices, 0, 0, outer_radius):
+            penalty += 1e6  # Large penalty for containment violation
+
+        # Check overlaps with all others
+        for j in range(i+1, len(inner_positions)):
+            other_center_x, other_center_y, other_angle_deg = inner_positions[j]
+            other_hex_vertices = get_hexagon_vertices(other_center_x, other_center_y, other_angle_deg)
+
+            if check_overlap(hex_vertices, other_hex_vertices):
+                penalty += 1e6  # Large penalty for overlap
+
+    # Return fitness value (negative inverse of outer radius + penalty)
+    # We minimize the penalty and maximize 1/R, so we return negative value of total cost
+    if penalty > 0:
+        return (-1.0 / outer_radius) - penalty,
+    else:
+        return (-1.0 / outer_radius),
+>>>>>>> REPLACE
+</DIFF>

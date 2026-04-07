@@ -1,0 +1,498 @@
+--- a/original.py
++++ b/original.py
+@@ -1,323 +1,319 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
++from scipy.optimize import differential_evolution
+ import warnings
+ from numba import jit
+ import time
+ import random
+ import logging
+-from typing import List, Tuple
++from typing import List, Tuple, Optional
+ import math
+-from scipy.optimize import differential_evolution
+ from scipy.fft import fft, ifft
+-from sklearn.cluster import KMeans
+ 
+ # Configure logging to reduce verbosity
+ logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+ 
+ @jit(nopython=True)
+ def compute_autoconvolution_norms_fast(f_values):
+     """
+     Fast computation of autoconvolution norms using Numba JIT compilation.
+     """
+     n = len(f_values)
+     if n < 1:
+         return 0.0, 0.0, 0.0
+ 
+     # Convert to numpy array for fast operations
+     f = np.array(f_values, dtype=np.float64)
+     
+     # Create the step function on [-1/4, 1/4] with equal spacing
+     dx = 0.5 / (n - 1) if n > 1 else 0.5
+     
+     # Precompute convolution manually for efficiency
+     # Autoconvolution g[k] = sum f[i] * f[k-i] for valid indices
+     g = np.zeros(2 * n - 1)
+     
+     # Manual convolution loop (optimized for autoconvolution)
+     for i in range(n):
+         for j in range(n):
+             k = i + j
+             if 0 <= k < len(g):
+                 g[k] += f[i] * f[j]
+     
+     # Keep only the middle part (proper autoconvolution)
+     g_middle = g[n-1:2*n-1]
+     
+     # Create x-axis for g (interval [-0.5, 0.5])
+     g_x = np.linspace(-0.5, 0.5, len(g_middle))
+     
+     # Compute the required norms
+     # ||g||₂² (L2 norm squared)
+     # Using trapezoidal integration approximation 
+     g_sq = g_middle * g_middle
+     area = 0.0
+     for i in range(len(g_middle) - 1):
+         h = g_x[i+1] - g_x[i]
+         area += h * (g_sq[i] + g_sq[i+1]) / 2
+     
+     norm_2_sq = area
+ 
+     # ||g||₁ (L1 norm) - approximate via summation
+     norm_1 = np.sum(np.abs(g_middle)) * dx  # dx is the step size
+ 
+     # ||g||∞ (infinity norm)
+     norm_inf = np.max(np.abs(g_middle))
+ 
+     return norm_2_sq, norm_1, norm_inf
+ 
+-def generate_spectral_function(n_points: int = 2000, seed: int = None) -> List[float]:
+-    """
+-    Generate function from spectral domain representation with optimized properties.
+-    """
+-    if seed is not None:
+-        np.random.seed(seed)
+-    
+-    # Create frequency domain representation with strategic peaks
+-    frequencies = np.fft.fftfreq(n_points, 0.5/n_points)
+-    magnitudes = np.zeros(n_points)
+-    
+-    # Create multiple clusters of frequency components to promote smooth autoconvolution
+-    # Cluster centers in log-frequency space
+-    n_clusters = 5
+-    cluster_centers = np.logspace(np.log10(1), np.log10(n_points//2), n_clusters)
+-    
+-    # Each cluster contributes multiple components
+-    for i, center in enumerate(cluster_centers):
+-        n_components = np.random.randint(2, 5)
+-        for j in range(n_components):
+-            # Spread components within cluster
+-            freq_offset = np.random.normal(0, center * 0.2)
+-            freq_idx = int(center + freq_offset)
+-            if 1 <= freq_idx < n_points//2:
+-                # Add energy with gamma distribution for varied strengths
+-                strength = np.random.gamma(2, 1.0)
+-                magnitudes[freq_idx] = strength
+-                if freq_idx > 0:
+-                    magnitudes[-freq_idx] = strength  # Conjugate symmetry
++class SpectralEvolutionOptimizer:
++    """Optimizes step functions using spectral domain evolutionary approach."""
++    
++    def __init__(self, max_time_seconds: int = 85, population_size: int = 20):
++        self.max_time_seconds = max_time_seconds
++        self.population_size = population_size
++        self.best_c2 = -1
++        self.best_individual = None
++        
++    def generate_spectral_function(self, n_points: int = 2000, seed: int = None) -> List[float]:
++        """Generate function from spectral domain representation."""
++        if seed is not None:
++            np.random.seed(seed)
++        
++        # Create frequency domain representation
++        magnitudes = np.zeros(n_points)
++        
++        # Create multiple clusters of frequency components
++        n_clusters = 4
++        cluster_centers = np.logspace(np.log10(2), np.log10(n_points//2), n_clusters)
++        
++        # Add components to clusters
++        for i, center in enumerate(cluster_centers):
++            n_components = np.random.randint(2, 5)
++            for j in range(n_components):
++                freq_offset = np.random.normal(0, center * 0.2)
++                freq_idx = int(center + freq_offset)
++                if 1 <= freq_idx < n_points//2:
++                    strength = np.random.gamma(2, 1.0)
++                    magnitudes[freq_idx] = strength
++                    if freq_idx > 0:
++                        magnitudes[-freq_idx] = strength
+                     
+-    # Add some low frequency content for smoothness
+-    magnitudes[0] = np.random.gamma(1, 2.0)  # DC component
+-    
+-    # Add phase information
+-    phases = np.random.uniform(0, 2*np.pi, n_points)
+-    
+-    # Create complex spectrum
+-    spectrum = magnitudes * np.exp(1j * phases)
+-    
+-    # Convert back to time domain
+-    f_real = np.real(ifft(spectrum))
+-    
+-    # Ensure non-negativity
+-    f_real = np.maximum(f_real, 0.0)
+-    
+-    # Normalize
+-    max_val = np.max(f_real)
+-    if max_val > 0:
+-        f_real = f_real / (max_val * 2.0)
+-    
+-    # Apply structured smoothing based on frequency content
+-    # High frequency components get more smoothing
+-    window_size = max(3, min(101, n_points // 10))
+-    if window_size % 2 == 0:
+-        window_size += 1
+-    
+-    # Apply Gaussian smoothing adapted to frequency content
+-    if window_size > 1:
+-        kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/4)**2)
+-        kernel = kernel / np.sum(kernel)
+-        f_smooth = np.convolve(f_real, kernel, mode='same')
+-        f_real = f_smooth
+-    
+-    # Final clip to ensure non-negativity
+-    f_real = np.maximum(f_real, 0.0)
+-    
+-    return f_real.tolist()
+-
+-def optimize_spectral_individual(individual: List[float], iterations: int = 10) -> List[float]:
+-    """
+-    Evolve a spectral individual through frequency-space perturbations.
+-    """
+-    n_points = len(individual)
+-    f_array = np.array(individual)
+-    
+-    # Convert to frequency domain
+-    fft_vals = fft(f_array)
+-    magnitudes = np.abs(fft_vals)
+-    phases = np.angle(fft_vals)
+-    
+-    # Apply evolutionary-style modifications to frequency components
+-    for _ in range(iterations):
+-        # Randomly select components to modify
+-        n_modify = np.random.randint(1, max(1, n_points // 20))
+-        indices = np.random.choice(n_points, n_modify, replace=False)
+-        
+-        for idx in indices:
+-            if np.random.random() < 0.7:  # 70% chance to modify magnitude
+-                # Perturb magnitude with bounded Gaussian
+-                perturbation = np.random.normal(0, 0.1)
+-                new_mag = magnitudes[idx] * np.exp(perturbation)
+-                magnitudes[idx] = np.clip(new_mag, 0, 1000.0)
+-            
+-            if np.random.random() < 0.5:  # 50% chance to modify phase
+-                # Perturb phase with small amount
+-                perturbation = np.random.normal(0, 0.1)
+-                phases[idx] += perturbation
+-                # Keep phases in [-pi, pi]
+-                phases[idx] = phases[idx] % (2 * np.pi)
+-    
+-    # Reconstruct signal
+-    reconstructed = magnitudes * np.exp(1j * phases)
+-    new_signal = np.real(ifft(reconstructed))
+-    
+-    # Ensure non-negativity
+-    new_signal = np.maximum(new_signal, 0.0)
+-    
+-    # Normalize
+-    max_val = np.max(new_signal)
+-    if max_val > 0:
+-        new_signal = new_signal / (max_val * 2.0)
+-    
+-    return new_signal.tolist()
+-
+-def adaptive_spectral_evolution(max_time_seconds: int = 85) -> List[float]:
+-    """
+-    Evolutionary algorithm working in spectral domain with adaptive strategy.
+-    """
+-    start_time = time.time()
+-    
+-    # Initial population: generate diverse spectral functions
+-    population_size = 20
+-    population = []
+-    
+-    # Generate initial diverse population
+-    for i in range(population_size):
+-        # Use different seeds for variety
+-        seed = i * 1000 + int(time.time())
+-        individual = generate_spectral_function(2000, seed)
+-        population.append(individual)
+-    
+-    best_c2 = -1
+-    best_individual = None
+-    
+-    generation = 0
+-    max_generations = 200
+-    stagnation_limit = 30
+-    stagnation_count = 0
+-    previous_best = -1
+-    
+-    while generation < max_generations and (time.time() - start_time) < max_time_seconds - 2:
+-        # Evaluate fitness
++        # Add low frequency content for smoothness
++        magnitudes[0] = np.random.gamma(1, 2.0)
++        
++        # Add phase information
++        phases = np.random.uniform(0, 2*np.pi, n_points)
++        
++        # Create complex spectrum
++        spectrum = magnitudes * np.exp(1j * phases)
++        
++        # Convert back to time domain
++        f_real = np.real(ifft(spectrum))
++        
++        # Ensure non-negativity
++        f_real = np.maximum(f_real, 0.0)
++        
++        # Normalize
++        max_val = np.max(f_real)
++        if max_val > 0:
++            f_real = f_real / (max_val * 2.0)
++        
++        # Apply structured smoothing
++        window_size = max(3, min(101, n_points // 10))
++        if window_size % 2 == 0:
++            window_size += 1
++        
++        if window_size > 1:
++            kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/4)**2)
++            kernel = kernel / np.sum(kernel)
++            f_smooth = np.convolve(f_real, kernel, mode='same')
++            f_real = f_smooth
++        
++        # Final clip to ensure non-negativity
++        f_real = np.maximum(f_real, 0.0)
++        
++        return f_real.tolist()
++    
++    def optimize_spectral_individual(self, individual: List[float], iterations: int = 5) -> List[float]:
++        """Evolve a spectral individual through frequency-space perturbations."""
++        n_points = len(individual)
++        f_array = np.array(individual)
++        
++        # Convert to frequency domain
++        fft_vals = fft(f_array)
++        magnitudes = np.abs(fft_vals)
++        phases = np.angle(fft_vals)
++        
++        # Apply evolutionary-style modifications
++        for _ in range(iterations):
++            n_modify = max(1, n_points // 20)
++            indices = np.random.choice(n_points, min(n_modify, n_points), replace=False)
++            
++            for idx in indices:
++                if np.random.random() < 0.7:
++                    perturbation = np.random.normal(0, 0.1)
++                    new_mag = magnitudes[idx] * np.exp(perturbation)
++                    magnitudes[idx] = np.clip(new_mag, 0, 1000.0)
++                
++                if np.random.random() < 0.5:
++                    perturbation = np.random.normal(0, 0.1)
++                    phases[idx] += perturbation
++                    phases[idx] = phases[idx] % (2 * np.pi)
++        
++        # Reconstruct signal
++        reconstructed = magnitudes * np.exp(1j * phases)
++        new_signal = np.real(ifft(reconstructed))
++        
++        # Ensure non-negativity
++        new_signal = np.maximum(new_signal, 0.0)
++        
++        # Normalize
++        max_val = np.max(new_signal)
++        if max_val > 0:
++            new_signal = new_signal / (max_val * 2.0)
++        
++        return new_signal.tolist()
++    
++    def evaluate_population(self, population: List[List[float]]) -> List[float]:
++        """Evaluate fitness for entire population."""
+         fitness_scores = []
+         for individual in population:
+             try:
+                 norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(individual)
+                 if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                     fitness = 0.0
+                 else:
+                     fitness = norm_2_sq / (norm_1 * norm_inf)
+                 fitness_scores.append(fitness)
+             except Exception:
+                 fitness_scores.append(0.0)
+-        
+-        # Track best
+-        current_best_idx = np.argmax(fitness_scores)
+-        current_best_fitness = fitness_scores[current_best_idx]
+-        
+-        if current_best_fitness > best_c2:
+-            best_c2 = current_best_fitness
+-            best_individual = population[current_best_idx].copy()
+-            stagnation_count = 0
+-        else:
+-            stagnation_count += 1
+-            
+-        if stagnation_count > stagnation_limit:
+-            # Introduce diversity by generating new individuals
+-            for i in range(population_size // 4):
+-                seed = int(time.time() * 1000 + i) % (2**32)
+-                new_individual = generate_spectral_function(2000, seed)
+-                # Replace worst individual
+-                worst_idx = np.argmin(fitness_scores)
+-                population[worst_idx] = new_individual
+-            stagnation_count = 0
+-        
++        return fitness_scores
++    
++    def evolve_generation(self, population: List[List[float]], fitness_scores: List[float]) -> List[List[float]]:
++        """Evolve one generation of the population."""
+         # Selection: tournament selection
+         selected_population = []
+-        for _ in range(population_size):
+-            # Tournament selection
++        for _ in range(self.population_size):
+             tournament_size = 3
+             tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+             tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+             winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+             selected_population.append(population[winner_idx].copy())
+         
+         # Reproduction: crossover and mutation
+         new_population = []
+         
+         # Elitism: keep best individuals
+         elite_indices = np.argsort(fitness_scores)[-4:]
+         for idx in elite_indices:
+             new_population.append(population[idx].copy())
+         
+         # Generate offspring
+-        while len(new_population) < population_size:
++        while len(new_population) < self.population_size:
+             if len(selected_population) < 2:
+                 break
+                 
+             # Select two parents
+             parent1 = selected_population[np.random.randint(len(selected_population))]
+             parent2 = selected_population[np.random.randint(len(selected_population))]
+             
+             # Crossover: spectral interpolation
+             if len(parent1) == len(parent2):
+-                # Blend frequency components
+                 fft1 = fft(np.array(parent1))
+                 fft2 = fft(np.array(parent2))
+                 
+                 # Create blend
+                 alpha = np.random.random()
+                 blended = alpha * fft1 + (1 - alpha) * fft2
+                 
+                 # Reconstruct
+                 reconstructed = np.real(ifft(blended))
+                 reconstructed = np.maximum(reconstructed, 0.0)
+                 
+                 # Normalize
+                 max_val = np.max(reconstructed)
+                 if max_val > 0:
+                     reconstructed = reconstructed / (max_val * 2.0)
+                 
+                 child = reconstructed.tolist()
+             else:
+                 # Fallback to simple averaging
+                 child = [(a + b) / 2 for a, b in zip(parent1, parent2)]
+             
+             # Mutation: spectral evolution
+-            child = optimize_spectral_individual(child, iterations=2)
++            child = self.optimize_spectral_individual(child, iterations=2)
+             
+             new_population.append(child)
+         
+-        population = new_population[:population_size]
+-        generation += 1
+-    
+-    return best_individual if best_individual is not None else [0.5] * 1000
++        return new_population[:self.population_size]
++    
++    def run_evolution(self) -> List[float]:
++        """Run the complete evolutionary optimization process."""
++        start_time = time.time()
++        
++        # Initial population: generate diverse spectral functions
++        population = []
++        for i in range(self.population_size):
++            seed = i * 1000 + int(time.time())
++            individual = self.generate_spectral_function(2000, seed)
++            population.append(individual)
++        
++        best_c2 = -1
++        best_individual = None
++        
++        generation = 0
++        max_generations = 200
++        stagnation_limit = 30
++        stagnation_count = 0
++        
++        while generation < max_generations and (time.time() - start_time) < self.max_time_seconds - 2:
++            # Evaluate fitness
++            fitness_scores = self.evaluate_population(population)
++            
++            # Track best
++            current_best_idx = np.argmax(fitness_scores)
++            current_best_fitness = fitness_scores[current_best_idx]
++            
++            if current_best_fitness > best_c2:
++                best_c2 = current_best_fitness
++                best_individual = population[current_best_idx].copy()
++                stagnation_count = 0
++            else:
++                stagnation_count += 1
++                
++            if stagnation_count > stagnation_limit:
++                # Introduce diversity
++                for i in range(self.population_size // 4):
++                    seed = int(time.time() * 1000 + i) % (2**32)
++                    new_individual = self.generate_spectral_function(2000, seed)
++                    # Replace worst individual
++                    worst_idx = np.argmin(fitness_scores)
++                    population[worst_idx] = new_individual
++                stagnation_count = 0
++            
++            # Evolve to next generation
++            population = self.evolve_generation(population, fitness_scores)
++            generation += 1
++        
++        return best_individual if best_individual is not None else [0.5] * 1000
+ 
+ def construct_function() -> list[float]:
+     """
+     Main function to construct step-function with high C2 value using spectral evolutionary approach.
+     """
+     try:
+         # Use spectral evolutionary approach
+-        f_values = adaptive_spectral_evolution(max_time_seconds=85)
++        optimizer = SpectralEvolutionOptimizer(max_time_seconds=85)
++        f_values = optimizer.run_evolution()
+         return f_values
+     except Exception as e:
+         # Fallback to simple uniform distribution
+         warnings.warn(f"Spectral evolution failed: {str(e)}")
+         return [0.5] * 1000
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

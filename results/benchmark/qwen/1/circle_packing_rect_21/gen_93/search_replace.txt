@@ -1,0 +1,310 @@
+<NAME>
+optimize_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses O(n²) distance calculations for collision detection in both the constraint checking and local optimization phases. This becomes increasingly expensive as the number of circles increases. The proposed improvement implements a spatial hashing approach to reduce collision detection complexity from O(n²) to O(n) by partitioning the space into grid cells and only checking collisions between circles in the same or adjacent cells. This will significantly speed up both the constraint validation and local optimization phases.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import Voronoi
+import random
+from typing import Tuple, List
+import math
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import Voronoi
+import random
+from typing import Tuple, List
+import math
+from collections import defaultdict
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+implement_spatial_hashing
+</NAME>
+
+<DESCRIPTION>
+Implement spatial hashing for efficient collision detection. This replaces the O(n²) pairwise distance calculations with a grid-based approach that only checks collisions between circles in adjacent grid cells, reducing complexity to O(n). This is particularly beneficial for the constraint checking and repair solution phases in the evolutionary algorithm.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def check_constraints(self, circles: np.ndarray) -> bool:
+        """Efficiently check if all circles satisfy the constraints with early termination."""
+        # Check boundary constraints first
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > self.rect_width or y - r < 0 or y + r > self.rect_height:
+                return False
+
+        # Check overlap constraints efficiently using distance matrix
+        if self.n_circles > 1:
+            positions = circles[:, :2]
+            radii = circles[:, 2]
+
+            # Compute distance matrix
+            distances = cdist(positions, positions)
+
+            # Check for overlaps
+            for i in range(self.n_circles):
+                for j in range(i+1, self.n_circles):
+                    distance = distances[i, j]
+                    overlap_distance = radii[i] + radii[j]
+                    if distance < overlap_distance:
+                        return False
+
+        return True
+=======
+    def _get_grid_cell(self, x: float, y: float, cell_size: float) -> Tuple[int, int]:
+        """Get grid cell coordinates for a given position."""
+        return (int(x / cell_size), int(y / cell_size))
+
+    def _get_adjacent_cells(self, cell: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """Get all adjacent cells including diagonals."""
+        return [(cell[0]+dx, cell[1]+dy) for dx in [-1, 0, 1] for dy in [-1, 0, 1]]
+
+    def _build_spatial_hash(self, circles: np.ndarray, cell_size: float) -> dict:
+        """Build spatial hash grid for efficient collision detection."""
+        grid = defaultdict(list)
+        for i, (x, y, r) in enumerate(circles):
+            cell = self._get_grid_cell(x, y, cell_size)
+            grid[cell].append(i)
+        return grid
+
+    def check_constraints(self, circles: np.ndarray) -> bool:
+        """Efficiently check if all circles satisfy the constraints with early termination."""
+        # Check boundary constraints first
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > self.rect_width or y - r < 0 or y + r > self.rect_height:
+                return False
+
+        # Check overlap constraints using spatial hashing for better performance
+        if self.n_circles > 1:
+            # Calculate cell size based on minimum circle diameter for efficiency
+            min_radius = np.min(circles[:, 2])
+            cell_size = min_radius * 2.0  # Ensures no overlap can occur within same cell
+
+            # Build spatial hash grid
+            grid = self._build_spatial_hash(circles, cell_size)
+
+            # Check for overlaps
+            for i in range(self.n_circles):
+                x1, y1, r1 = circles[i]
+                cell = self._get_grid_cell(x1, y1, cell_size)
+                adjacent_cells = self._get_adjacent_cells(cell)
+
+                for adj_cell in adjacent_cells:
+                    for j in grid[adj_cell]:
+                        if i != j:  # Don't compare with itself
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                            if distance < (r1 + r2):
+                                return False
+
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_repair_solution
+</NAME>
+
+<DESCRIPTION>
+Optimize the repair_solution method to use spatial hashing for collision detection when resolving overlaps. This improves performance of the repair phase by avoiding O(n²) distance calculations in the overlap resolution step, which is called repeatedly during evolution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def repair_solution(self, circles: np.ndarray) -> np.ndarray:
+        """Enhanced repair mechanism for fixing constraint violations with Voronoi-based adaptive movement."""
+        repaired = circles.copy()
+
+        # Ensure positive radii
+        repaired[:, 2] = np.maximum(repaired[:, 2], 0.001)
+
+        # Enforce bounds
+        for i in range(len(repaired)):
+            x, y, r = repaired[i]
+            x = np.clip(x, r, self.rect_width - r)
+            y = np.clip(y, r, self.rect_height - r)
+            repaired[i] = [x, y, r]
+
+        # Resolve overlaps iteratively with better algorithm
+        for iteration in range(50):
+            # Calculate pairwise distances
+            positions = repaired[:, :2]
+            radii = repaired[:, 2]
+            distances = cdist(positions, positions)
+
+            conflicts = []
+            for i in range(len(repaired)):
+                for j in range(i+1, len(repaired)):
+                    if distances[i, j] < (radii[i] + radii[j]):
+                        conflicts.append((i, j))
+
+            if not conflicts:
+                break
+
+            # Compute Voronoi diagram to assess local constraint density
+            try:
+                vor = Voronoi(positions)
+                # Calculate approximate Voronoi cell areas for each point
+                cell_areas = np.zeros(len(positions))
+                for i in range(len(positions)):
+                    # Get vertices for the Voronoi cell of point i
+                    vertices = vor.points[vor.regions[vor.point_region[i]]]
+                    if len(vertices) > 2:
+                        # Approximate area using bounding box
+                        if len(vertices) >= 2:
+                            min_x, max_x = np.min(vertices[:, 0]), np.max(vertices[:, 0])
+                            min_y, max_y = np.min(vertices[:, 1]), np.max(vertices[:, 1])
+                            cell_areas[i] = (max_x - min_x) * (max_y - min_y)
+                        else:
+                            cell_areas[i] = 1.0
+                    else:
+                        cell_areas[i] = 1.0
+            except:
+                # Fallback if Voronoi computation fails
+                cell_areas = np.ones(len(positions))
+
+            # Move conflicting pairs apart with adaptive step sizes based on Voronoi density
+            for i, j in conflicts:
+                x1, y1, r1 = repaired[i]
+                x2, y2, r2 = repaired[j]
+
+                dx = x2 - x1
+                dy = y2 - y1
+                distance = np.sqrt(dx*dx + dy*dy)
+
+                if distance > 0:
+                    # Move circles away from each other with density-adaptive movement
+                    move_distance = (r1 + r2 - distance) / 2
+
+                    # Adaptive movement based on Voronoi cell area (smaller cells = more constrained)
+                    # Inverse relationship: smaller cell area means higher constraint density
+                    base_step = 0.5  # Base movement factor
+                    density_factor = 1.0 / (1.0 + cell_areas[i] + cell_areas[j])  # Normalize
+
+                    # Apply movement with bounded adjustment and density weighting
+                    move1 = move_distance * r2 / (r1 + r2 + 1e-8) * base_step * density_factor
+                    move2 = move_distance * r1 / (r1 + r2 + 1e-8) * base_step * density_factor
+
+                    repaired[i, 0] -= dx / distance * move1
+                    repaired[i, 1] -= dy / distance * move1
+                    repaired[j, 0] += dx / distance * move2
+                    repaired[j, 1] += dy / distance * move2
+
+                    # Keep within bounds
+                    repaired[i, 0] = np.clip(repaired[i, 0], r1, self.rect_width - r1)
+                    repaired[i, 1] = np.clip(repaired[i, 1], r1, self.rect_height - r1)
+                    repaired[j, 0] = np.clip(repaired[j, 0], r2, self.rect_width - r2)
+                    repaired[j, 1] = np.clip(repaired[j, 1], r2, self.rect_height - r2)
+
+        return repaired
+=======
+    def repair_solution(self, circles: np.ndarray) -> np.ndarray:
+        """Enhanced repair mechanism for fixing constraint violations with Voronoi-based adaptive movement."""
+        repaired = circles.copy()
+
+        # Ensure positive radii
+        repaired[:, 2] = np.maximum(repaired[:, 2], 0.001)
+
+        # Enforce bounds
+        for i in range(len(repaired)):
+            x, y, r = repaired[i]
+            x = np.clip(x, r, self.rect_width - r)
+            y = np.clip(y, r, self.rect_height - r)
+            repaired[i] = [x, y, r]
+
+        # Resolve overlaps iteratively with better algorithm
+        for iteration in range(50):
+            # Use spatial hashing for efficient overlap detection
+            min_radius = np.min(repaired[:, 2])
+            cell_size = min_radius * 2.0
+
+            grid = self._build_spatial_hash(repaired, cell_size)
+
+            conflicts = []
+            for i in range(len(repaired)):
+                x1, y1, r1 = repaired[i]
+                cell = self._get_grid_cell(x1, y1, cell_size)
+                adjacent_cells = self._get_adjacent_cells(cell)
+
+                for adj_cell in adjacent_cells:
+                    for j in grid[adj_cell]:
+                        if i != j:  # Don't compare with itself
+                            x2, y2, r2 = repaired[j]
+                            distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                            if distance < (r1 + r2):
+                                conflicts.append((i, j))
+
+            if not conflicts:
+                break
+
+            # Compute Voronoi diagram to assess local constraint density
+            try:
+                vor = Voronoi(repaired[:, :2])
+                # Calculate approximate Voronoi cell areas for each point
+                cell_areas = np.zeros(len(repaired))
+                for i in range(len(repaired)):
+                    # Get vertices for the Voronoi cell of point i
+                    vertices = vor.points[vor.regions[vor.point_region[i]]]
+                    if len(vertices) > 2:
+                        # Approximate area using bounding box
+                        if len(vertices) >= 2:
+                            min_x, max_x = np.min(vertices[:, 0]), np.max(vertices[:, 0])
+                            min_y, max_y = np.min(vertices[:, 1]), np.max(vertices[:, 1])
+                            cell_areas[i] = (max_x - min_x) * (max_y - min_y)
+                        else:
+                            cell_areas[i] = 1.0
+                    else:
+                        cell_areas[i] = 1.0
+            except:
+                # Fallback if Voronoi computation fails
+                cell_areas = np.ones(len(repaired))
+
+            # Move conflicting pairs apart with adaptive step sizes based on Voronoi density
+            for i, j in conflicts:
+                x1, y1, r1 = repaired[i]
+                x2, y2, r2 = repaired[j]
+
+                dx = x2 - x1
+                dy = y2 - y1
+                distance = np.sqrt(dx*dx + dy*dy)
+
+                if distance > 0:
+                    # Move circles away from each other with density-adaptive movement
+                    move_distance = (r1 + r2 - distance) / 2
+
+                    # Adaptive movement based on Voronoi cell area (smaller cells = more constrained)
+                    # Inverse relationship: smaller cell area means higher constraint density
+                    base_step = 0.5  # Base movement factor
+                    density_factor = 1.0 / (1.0 + cell_areas[i] + cell_areas[j])  # Normalize
+
+                    # Apply movement with bounded adjustment and density weighting
+                    move1 = move_distance * r2 / (r1 + r2 + 1e-8) * base_step * density_factor
+                    move2 = move_distance * r1 / (r1 + r2 + 1e-8) * base_step * density_factor
+
+                    repaired[i, 0] -= dx / distance * move1
+                    repaired[i, 1] -= dy / distance * move1
+                    repaired[j, 0] += dx / distance * move2
+                    repaired[j, 1] += dy / distance * move2
+
+                    # Keep within bounds
+                    repaired[i, 0] = np.clip(repaired[i, 0], r1, self.rect_width - r1)
+                    repaired[i, 1] = np.clip(repaired[i, 1], r1, self.rect_height - r1)
+                    repaired[j, 0] = np.clip(repaired[j, 0], r2, self.rect_width - r2)
+                    repaired[j, 1] = np.clip(repaired[j, 1], r2, self.rect_height - r2)
+
+        return repaired
+>>>>>>> REPLACE
+</DIFF>

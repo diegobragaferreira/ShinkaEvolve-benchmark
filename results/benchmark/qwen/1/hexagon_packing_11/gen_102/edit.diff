@@ -1,0 +1,292 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,286 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.optimize import differential_evolution
++from scipy.spatial.distance import cdist
++import time
++
++# Constants
++UNIT_HEXAGON_RADIUS = 1.0  # Distance from center to vertex for unit hexagon
++UNIT_HEXAGON_WIDTH = 2.0  # Distance between parallel sides for unit hexagon
++UNIT_HEXAGON_HEIGHT = np.sqrt(3)  # Height of unit hexagon
++
++def get_hexagon_vertices(center_x, center_y, angle_degrees, side_length=1.0):
++    """Get vertices of a regular hexagon given center, angle, and side length"""
++    angle_rad = np.radians(angle_degrees)
++    # Vertices of a regular hexagon with side length 1, centered at origin
++    base_vertices = np.array([
++        [1.0, 0],
++        [0.5, np.sqrt(3)/2],
++        [-0.5, np.sqrt(3)/2],
++        [-1.0, 0],
++        [-0.5, -np.sqrt(3)/2],
++        [0.5, -np.sqrt(3)/2]
++    ])
++
++    # Rotate and translate
++    cos_a = np.cos(angle_rad)
++    sin_a = np.sin(angle_rad)
++    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
++
++    rotated_vertices = base_vertices @ rotation_matrix.T
++    translated_vertices = rotated_vertices * side_length + np.array([center_x, center_y])
++
++    return translated_vertices
++
++def check_hexagon_containment(hex_vertices, outer_center_x, outer_center_y, outer_side_length):
++    """Check if hexagon vertices are within outer hexagon"""
++    # Get outer hexagon vertices
++    outer_vertices = get_hexagon_vertices(outer_center_x, outer_center_y, 0, outer_side_length)
++
++    # Check if all vertices of inner hex are within outer hex
++    for vertex in hex_vertices:
++        if not point_in_hexagon(vertex[0], vertex[1], outer_center_x, outer_center_y, outer_side_length):
++            return False
++    return True
++
++def point_in_hexagon(px, py, center_x, center_y, side_length):
++    """Check if point is inside regular hexagon using distance from center method"""
++    # Normalize coordinates relative to center
++    dx = px - center_x
++    dy = py - center_y
++
++    # Hexagon circumscribed circle radius
++    r = side_length
++
++    # Check if point is within circumscribed circle
++    if dx*dx + dy*dy > r*r:
++        return False
++
++    # For regular hexagon, also check against the six sides
++    # Using the fact that the distance to each side must be >= 0
++    # We check the distance to the six half-planes of the hexagon
++    # Each side of the hexagon makes 60 degrees with adjacent sides
++    angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
++
++    for angle in angles:
++        # Distance from point to line through center at angle
++        # Line equation: x*cos(angle) + y*sin(angle) = r*cos(angle)
++        dist_to_line = abs(dx * np.cos(angle) + dy * np.sin(angle)) - r * np.cos(np.pi/6)
++        if dist_to_line > 1e-10:  # Small tolerance
++            return False
++
++    return True
++
++def check_hexagon_overlap(hex1_vertices, hex2_vertices):
++    """Check if two hexagons overlap using separating axis theorem"""
++    # Get all edge normals for both hexagons
++    def get_edges_and_normals(vertices):
++        edges = []
++        normals = []
++        n = len(vertices)
++        for i in range(n):
++            p1 = vertices[i]
++            p2 = vertices[(i+1) % n]
++            edge = p2 - p1
++            edges.append(edge)
++            # Normal vector (perpendicular to edge)
++            normal = np.array([-edge[1], edge[0]])
++            # Normalize
++            norm = np.linalg.norm(normal)
++            if norm > 1e-10:
++                normal /= norm
++            normals.append(normal)
++        return edges, normals
++
++    edges1, normals1 = get_edges_and_normals(hex1_vertices)
++    edges2, normals2 = get_edges_and_normals(hex2_vertices)
++
++    # Check all potential separating axes
++    all_normals = normals1 + normals2
++
++    for normal in all_normals:
++        # Project both hexagons onto this axis
++        proj1 = [np.dot(vertex, normal) for vertex in hex1_vertices]
++        proj2 = [np.dot(vertex, normal) for vertex in hex2_vertices]
++
++        min1, max1 = min(proj1), max(proj1)
++        min2, max2 = min(proj2), max(proj2)
++
++        # If projections don't overlap, vectors are separated
++        if max1 < min2 or max2 < min1:
++            return False  # Separating axis found - no overlap
++
++    return True  # No separating axis found - overlap exists
++
++def compute_outer_hexagon_radius(inner_hex_data, outer_center_x, outer_center_y):
++    """Compute minimum outer hexagon radius needed to contain all inner hexagons"""
++    max_distance = 0
++
++    # For each inner hexagon, find the maximum distance from center to its vertices
++    for i in range(len(inner_hex_data)):
++        center_x, center_y, angle = inner_hex_data[i]
++        hex_vertices = get_hexagon_vertices(center_x, center_y, angle)
++
++        for vertex in hex_vertices:
++            distance = np.sqrt((vertex[0] - outer_center_x)**2 + (vertex[1] - outer_center_y)**2)
++            max_distance = max(max_distance, distance)
++
++    # Convert from circumradius to side length for regular hexagon
++    # For a regular hexagon, the circumradius equals the side length
++    return max_distance
++
++def evaluate_configuration(config):
++    """Evaluate a configuration of 11 hexagons"""
++    # Extract parameters
++    # First 22 values: x,y coordinates for 11 hexagons (11*2 = 22)
++    # Next 11 values: rotation angles for 11 hexagons (11*1 = 11)
++    # Last 3 values: outer hexagon center x, y, and side length
++
++    inner_positions = config[:22].reshape(-1, 2)
++    inner_angles = config[22:33]
++    outer_center_x = config[33]
++    outer_center_y = config[34]
++    outer_side_length = config[35]
++
++    # Create list of inner hexagons
++    inner_hex_data = np.column_stack([inner_positions, inner_angles])
++
++    # Validate containment for all hexagons
++    valid_containment = True
++
++    # Check each inner hexagon
++    for i in range(len(inner_hex_data)):
++        center_x, center_y, angle = inner_hex_data[i]
++        hex_vertices = get_hexagon_vertices(center_x, center_y, angle)
++
++        # Check if all vertices are within outer hexagon
++        if not check_hexagon_containment(hex_vertices, outer_center_x, outer_center_y, outer_side_length):
++            valid_containment = False
++            break
++
++    if not valid_containment:
++        # Return very poor fitness for invalid configurations
++        return 1e10
++
++    # Check for overlaps between hexagons
++    valid_overlap = True
++    for i in range(len(inner_hex_data)):
++        for j in range(i+1, len(inner_hex_data)):
++            center_x1, center_y1, angle1 = inner_hex_data[i]
++            center_x2, center_y2, angle2 = inner_hex_data[j]
++
++            hex1_vertices = get_hexagon_vertices(center_x1, center_y1, angle1)
++            hex2_vertices = get_hexagon_vertices(center_x2, center_y2, angle2)
++
++            if check_hexagon_overlap(hex1_vertices, hex2_vertices):
++                valid_overlap = False
++                break
++        if not valid_overlap:
++            break
++
++    if not valid_overlap:
++        # Return very poor fitness for overlapping configurations
++        return 1e10
++
++    # If valid, return negative of the outer hexagon side length (to maximize 1/outer_hex_side_length)
++    return -outer_side_length
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
++
++    # Define bounds for optimization:
++    # Inner hexagon positions: x and y coordinates
++    pos_bounds = [(-10, 10)] * 22  # 11 hexagons, 2 coords each
++    # Inner hexagon angles: 0 to 360 degrees
++    angle_bounds = [(0, 360)] * 11
++    # Outer hexagon center (x, y): arbitrary bounds
++    outer_center_bounds = [(-10, 10), (-10, 10)]
++    # Outer hexagon side length: positive value (we want to minimize this)
++    outer_side_bounds = [(1.0, 20.0)]
++
++    # Combine all bounds
++    bounds = pos_bounds + angle_bounds + outer_center_bounds + outer_side_bounds
++
++    # Initial guess - start with a reasonable configuration
++    initial_guess = np.zeros(36)
++
++    # Set initial positions (some kind of symmetric arrangement)
++    initial_positions = np.array([
++        [0, 0, 0], [1.5, 0, 0], [-1.5, 0, 0],
++        [0, 1.5, 0], [0, -1.5, 0],
++        [1.5, 1.5, 0], [-1.5, 1.5, 0],
++        [1.5, -1.5, 0], [-1.5, -1.5, 0],
++        [3.0, 0, 0], [0, 3.0, 0]  # Additional hexagons
++    ])
++
++    # Fill in initial guess
++    initial_guess[:22] = initial_positions.flatten()
++    initial_guess[22:33] = np.random.uniform(0, 360, 11)  # Random angles
++    initial_guess[33:35] = [0, 0]  # Outer hex center
++    initial_guess[35] = 5.0  # Initial side length
++
++    # Use differential evolution to find optimal configuration
++    try:
++        result = differential_evolution(
++            evaluate_configuration,
++            bounds,
++            maxiter=100,
++            popsize=15,
++            mutation=(0.5, 1),
++            recombination=0.7,
++            seed=42,
++            disp=False
++        )
++
++        if result.success:
++            # Extract best solution
++            best_config = result.x
++
++            # Create inner hex data
++            inner_positions = best_config[:22].reshape(-1, 2)
++            inner_angles = best_config[22:33]
++            inner_hex_data = np.column_stack([inner_positions, inner_angles])
++
++            # Outer hex data
++            outer_center_x = best_config[33]
++            outer_center_y = best_config[34]
++            outer_hex_side_length = best_config[35]
++            outer_hex_data = np.array([outer_center_x, outer_center_y, 0])
++
++            return inner_hex_data, outer_hex_data, outer_hex_side_length
++        else:
++            # Fall back to original configuration if optimization fails
++            print("Optimization failed, returning default configuration")
++    except Exception as e:
++        print(f"Error during optimization: {e}")
++
++    # Default configuration if optimization fails or isn't working well
+     inner_hex_data = np.array(
+         [
+             [0, 0, 0],  # center
+             [-2.5, 0, 0],  # left
+             [2.5, 0, 0],  # right
+             [-1.25, 2.17, 0],  # top-left
+             [1.25, 2.17, 0],  # top-right
+             [-1.25, -2.17, 0],  # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+             [3.75, 2.17, 0],  # far top-right
+             [-3.75, -2.17, 0],  # far bottom-left
+             [3.75, -2.17, 0],  # far bottom-right
+         ]
+     )
+ 
+     outer_hex_data = np.array([0, 0, 0])  # centered at origin
+     outer_hex_side_length = 8  # large enough to contain all inner hexagons
+ 
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ 
+ # EVOLVE-BLOCK-END

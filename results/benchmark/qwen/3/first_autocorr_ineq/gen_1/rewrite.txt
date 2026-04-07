@@ -1,0 +1,174 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import numba
+from scipy.signal import fftconvolve
+from scipy.optimize import differential_evolution
+from joblib import Parallel, delayed
+import random
+import time
+
+# Constants
+MAX_TIME_SECONDS = 180
+MAX_MEMORY_GB = 5
+MIN_SEQUENCE_LENGTH = 10
+MAX_SEQUENCE_LENGTH = 1000
+BENCHMARK_THRESHOLD = 1.5031
+
+@numba.jit(nopython=True)
+def compute_convolution_fast(a):
+    """
+    Compute the convolution of a sequence with itself using direct method for small arrays,
+    FFT for larger ones to improve performance.
+    """
+    n = len(a)
+    if n < 100:
+        # Direct computation for small arrays
+        b = np.zeros(2*n - 1)
+        for i in range(n):
+            for j in range(n):
+                b[i+j] += a[i] * a[j]
+        return b
+    else:
+        # Use FFT for large arrays
+        b = fftconvolve(a, a, mode='full')
+        return b[:2*n - 1]
+
+def compute_c1(sequence):
+    """
+    Compute C1 value for a given sequence.
+    """
+    n = len(sequence)
+    if n < 1:
+        return float('inf')
+    
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+        
+    conv = compute_convolution_fast(sequence)
+    max_conv = np.max(conv)
+    
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+def compute_inv_c1(sequence):
+    """
+    Compute inverse of C1 value (the objective to maximize).
+    """
+    c1 = compute_c1(sequence)
+    if c1 == float('inf'):
+        return 0.0
+    return 1.0 / c1
+
+def generate_initial_sequence():
+    """
+    Generate an initial sequence with random heights.
+    """
+    n = random.randint(MIN_SEQUENCE_LENGTH, MAX_SEQUENCE_LENGTH)
+    return np.random.uniform(0, 1, n).tolist()
+
+def mutate_sequence(sequence, scale=0.1):
+    """
+    Mutate a sequence by slightly altering its elements.
+    """
+    mutated = sequence.copy()
+    n = len(mutated)
+    idx = random.randint(0, n-1)
+    mutated[idx] = max(0, mutated[idx] + random.gauss(0, scale))
+    return mutated
+
+def crossover_sequences(seq1, seq2):
+    """
+    Perform crossover between two sequences.
+    """
+    n1, n2 = len(seq1), len(seq2)
+    n = min(n1, n2)
+    point = random.randint(1, n-1)
+    child = seq1[:point] + seq2[point:]
+    return child
+
+def evaluate_sequence(sequence):
+    """
+    Evaluate a sequence and return its inverse C1 value.
+    """
+    try:
+        inv_c1 = compute_inv_c1(sequence)
+        return inv_c1
+    except Exception:
+        return 0.0
+
+def optimize_sequence_parallel(population_size=50, generations=100):
+    """
+    Optimizes a sequence using parallel evolution with adaptive parameters.
+    """
+    start_time = time.time()
+    
+    # Initialize population
+    population = [generate_initial_sequence() for _ in range(population_size)]
+    
+    best_sequence = None
+    best_fitness = 0.0
+    
+    for gen in range(generations):
+        if time.time() - start_time > MAX_TIME_SECONDS:
+            break
+            
+        # Evaluate fitness in parallel
+        fitnesses = Parallel(n_jobs=-1)(
+            delayed(evaluate_sequence)(seq) for seq in population
+        )
+        
+        # Update best solution
+        max_fitness_idx = np.argmax(fitnesses)
+        if fitnesses[max_fitness_idx] > best_fitness:
+            best_fitness = fitnesses[max_fitness_idx]
+            best_sequence = population[max_fitness_idx].copy()
+            
+        # Selection (tournament)
+        selected = []
+        for _ in range(population_size):
+            idx1, idx2 = random.sample(range(population_size), 2)
+            if fitnesses[idx1] > fitnesses[idx2]:
+                selected.append(population[idx1].copy())
+            else:
+                selected.append(population[idx2].copy())
+                
+        # Reproduction
+        next_generation = []
+        for i in range(0, population_size, 2):
+            parent1, parent2 = selected[i], selected[i+1] if i+1 < population_size else selected[0]
+            
+            # Crossover
+            child1 = crossover_sequences(parent1, parent2)
+            child2 = crossover_sequences(parent2, parent1)
+            
+            # Mutation
+            child1 = mutate_sequence(child1, 0.1)
+            child2 = mutate_sequence(child2, 0.1)
+            
+            next_generation.extend([child1, child2])
+            
+        population = next_generation
+        
+    return best_sequence, best_fitness
+
+def search_for_best_sequence():
+    """
+    Main function to search for the best coefficient sequence.
+    """
+    # Run optimization
+    best_sequence, best_fitness = optimize_sequence_parallel()
+    
+    # Ensure the sequence meets requirements
+    if best_fitness <= 0.0 or len(best_sequence) < MIN_SEQUENCE_LENGTH:
+        # Fallback to random generation if optimization fails
+        best_sequence = generate_initial_sequence()
+        
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

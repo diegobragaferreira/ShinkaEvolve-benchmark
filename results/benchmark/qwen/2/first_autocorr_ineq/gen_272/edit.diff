@@ -1,0 +1,431 @@
+--- a/original.py
++++ b/original.py
+@@ -1,206 +1,245 @@
+ # EVOLVE-BLOCK-START
+-
+ import numpy as np
+-from scipy.optimize import minimize
+-from scipy.signal import fftconvolve
++from scipy.fft import fft, ifft
+ import random
+ import time
+ 
+-# Set random seed for reproducibility
++# Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+-def compute_c1_constant(sequence):
+-    """Computes the C1 constant for a given sequence using FFT for efficiency."""
+-    a = np.array(sequence)
+-    sum_a = np.sum(a)
++def compute_convolution_fft(seq):
++    """Compute the autoconvolution using FFT for efficiency."""
++    n = len(seq)
++    padded_seq = np.pad(seq, (0, n-1), mode='constant')
++    conv_result = ifft(fft(padded_seq) * np.conj(fft(padded_seq)))
++    return np.real(conv_result[:n])
++
++def calculate_c1(sequence):
++    """Calculate the C1 constant for a given sequence."""
++    if len(sequence) == 0:
++        return float('inf')
++
++    sequence = np.array(sequence)
++    sum_a = np.sum(sequence)
+     if sum_a < 0.01:
+         return float('inf')
+-    conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+-    max_conv = np.max(conv)
+-    n = len(a)
+-    c1 = (2 * n * max_conv) / (sum_a ** 2)
++
++    # Use FFT-based convolution for efficiency
++    conv = compute_convolution_fft(sequence)
++    max_b = np.max(conv)
++    n = len(sequence)
++
++    # Avoid division by zero or very small numbers
++    if max_b <= 1e-12:
++        return float('inf')
++
++    c1 = (2 * n * max_b) / (sum_a ** 2)
+     return c1
+ 
+-def evaluate_sequence(sequence):
+-    """Evaluates a sequence and returns 1/C1 (the objective to maximize)."""
+-    try:
+-        c1 = compute_c1_constant(sequence)
+-        if c1 == float('inf'):
+-            return 0.0
+-        return 1.0 / c1
+-    except Exception:
+-        return 0.0
+-
+-def generate_step_function(n_steps, heights=None, max_height=1000):
+-    """Generate a step function with n_steps and optional specific heights."""
+-    if heights is None:
+-        heights = [random.uniform(0, max_height) for _ in range(n_steps)]
+-    else:
+-        heights = heights[:n_steps] + [0] * (n_steps - len(heights))
+-        heights = heights[:n_steps]
+-
+-    # Create step function with equal-length steps
+-    total_length = 1000  # Fixed length for step function
+-    step_sizes = [total_length // n_steps] * n_steps
+-    remainder = total_length % n_steps
+-    for i in range(remainder):
+-        step_sizes[i] += 1
+-
+-    # Build the sequence
+-    sequence = []
+-    for i, (height, size) in enumerate(zip(heights, step_sizes)):
+-        sequence.extend([height] * size)
+-
+-    # Trim or pad to exact length
+-    if len(sequence) > total_length:
+-        sequence = sequence[:total_length]
+-    elif len(sequence) < total_length:
+-        sequence.extend([0.0] * (total_length - len(sequence)))
+-
+-    return sequence
+-
+-def quadratic_optimization_approach(initial_sequence, max_iter=1000):
+-    """Use quadratic programming to directly optimize the 1/C1 objective."""
+-    n = len(initial_sequence)
+-    x0 = np.array(initial_sequence)
+-
+-    def objective(x):
+-        x = np.maximum(x, 0)
+-        conv = fftconvolve(x, x, mode='full')[:len(x)*2-1]
+-        max_conv = np.max(conv)
+-        sum_x = np.sum(x)
+-        if sum_x < 0.01:
+-            return 1e6
+-        c1 = (2 * len(x) * max_conv) / (sum_x ** 2)
+-        return -1.0 / c1  # Negative because we want to maximize 1/C1
+-
+-    bounds = [(0, 1000) for _ in range(n)]
+-    try:
+-        result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds,
+-                          options={'maxiter': max_iter, 'ftol': 1e-9})
+-        return result.x.tolist() if result.success else initial_sequence
+-    except:
+-        return initial_sequence
+-
+-def step_function_domain_specific_optimization(max_time_seconds=180):
+-    """
+-    Specialized approach focusing on step function domains.
+-    Uses a combination of heuristically-derived step configurations and quadratic optimization.
+-    """
++def evaluate_fitness(sequence):
++    """Evaluate the inverse of C1 as fitness (we want to maximize 1/C1)."""
++    c1 = calculate_c1(sequence)
++    if c1 == float('inf'):
++        return 0.0  # Penalty for invalid sequences
++    return 1.0 / c1
++
++def compute_convolution_gradient_fft(sequence):
++    """Compute gradient of maximum convolution value w.r.t. sequence elements using FFT."""
++    n = len(sequence)
++    if n == 0:
++        return np.zeros(n)
++
++    # Compute base convolution using FFT
++    conv = compute_convolution_fft(sequence)
++    max_conv_idx = np.argmax(conv)
++    max_conv_val = conv[max_conv_idx]
++
++    # Compute gradient using finite difference with FFT for efficiency
++    eps = 1e-6
++    grad = np.zeros(n)
++    
++    # For each element, compute gradient using convolution differences
++    for i in range(n):
++        # Create perturbed sequence
++        perturbed_seq = sequence.copy()
++        perturbed_seq[i] += eps
++        
++        # Compute convolution for perturbed sequence
++        perturbed_conv = compute_convolution_fft(perturbed_seq)
++        perturbed_max_conv = np.max(perturbed_conv)
++        
++        # Compute gradient component
++        grad[i] = (perturbed_max_conv - max_conv_val) / eps
++
++    return grad
++
++def gradient_ascent_step(current_sequence, learning_rate=0.01):
++    """Perform a single gradient ascent step."""
++    # Compute gradient
++    grad = compute_convolution_gradient_fft(current_sequence)
++    
++    # Update using gradient ascent
++    new_sequence = current_sequence + learning_rate * grad
++    
++    # Ensure non-negativity
++    new_sequence = np.maximum(new_sequence, 0)
++    
++    # Ensure minimum sum
++    if np.sum(new_sequence) < 0.01:
++        new_sequence[0] = max(0.1, new_sequence[0])
++    
++    # Clip to [0, 1000]
++    new_sequence = np.clip(new_sequence, 0, 1000)
++    
++    return new_sequence
++
++def multi_resolution_optimization(initial_sequence, max_iterations=100):
++    """Optimize using multi-resolution approach."""
++    sequence = np.array(initial_sequence)
++    best_fitness = evaluate_fitness(sequence)
++    best_sequence = sequence.copy()
++    
++    # Coarse resolution optimization
++    lr_coarse = 0.1
++    for _ in range(5):
++        sequence = gradient_ascent_step(sequence, lr_coarse)
++        fitness = evaluate_fitness(sequence)
++        if fitness > best_fitness:
++            best_fitness = fitness
++            best_sequence = sequence.copy()
++    
++    # Medium resolution optimization
++    lr_medium = 0.05
++    for _ in range(10):
++        sequence = gradient_ascent_step(sequence, lr_medium)
++        fitness = evaluate_fitness(sequence)
++        if fitness > best_fitness:
++            best_fitness = fitness
++            best_sequence = sequence.copy()
++    
++    # Fine resolution optimization
++    lr_fine = 0.01
++    for i in range(max_iterations):
++        sequence = gradient_ascent_step(sequence, lr_fine)
++        fitness = evaluate_fitness(sequence)
++        if fitness > best_fitness:
++            best_fitness = fitness
++            best_sequence = sequence.copy()
++        
++        # Adaptive learning rate decay
++        lr_fine *= 0.995
++    
++    return best_sequence.tolist()
++
++def generate_smart_initial_sequence():
++    """Generate an intelligent initial sequence based on theoretical expectations."""
++    n = random.randint(100, 1000)
++    
++    # Combine multiple patterns for better exploration
++    patterns = []
++    
++    # Power law decay
++    alpha = 0.95
++    power_law = [alpha ** i for i in range(n)]
++    power_law = np.array(power_law) / np.sum(power_law) * 1000
++    
++    # Linear decay
++    linear_decay = np.array([1.0 - i/(n-1) if n > 1 else 1.0 for i in range(n)])
++    linear_decay = linear_decay / np.sum(linear_decay) * 1000
++    
++    # Random noise
++    noise = np.random.uniform(0, 100, n)
++    
++    # Combine patterns
++    combined = (power_law + linear_decay + noise) / 3
++    
++    # Ensure non-negativity and minimum sum
++    combined = np.maximum(combined, 0)
++    if np.sum(combined) < 0.01:
++        combined[0] = 100
++    
++    return combined.tolist()
++
++def adaptive_local_search(initial_sequence, max_iter=200):
++    """Perform adaptive local search with dynamic parameters."""
++    current_sequence = np.array(initial_sequence)
++    current_fitness = evaluate_fitness(current_sequence)
++    best_sequence = current_sequence.copy()
++    best_fitness = current_fitness
++    
++    # Dynamic parameters
++    temp = 1.0
++    cooling_rate = 0.95
++    min_temp = 1e-4
++    
++    for iteration in range(max_iter):
++        # Perturb sequence
++        mutated = current_sequence.copy()
++        for i in range(len(mutated)):
++            if random.random() < 0.3:
++                delta = np.random.normal(0, 0.1 * np.mean(mutated) if np.mean(mutated) > 0 else 0.1)
++                mutated[i] = max(0.0, mutated[i] + delta)
++        
++        # Clip to valid range
++        mutated = np.clip(mutated, 0, 1000)
++        
++        mutated_fitness = evaluate_fitness(mutated)
++        
++        # Accept or reject based on simulated annealing criteria
++        if mutated_fitness > current_fitness or random.random() < np.exp((mutated_fitness - current_fitness) / (temp + 1e-10)):
++            current_sequence = mutated
++            current_fitness = mutated_fitness
++        
++        # Update best
++        if current_fitness > best_fitness:
++            best_sequence = current_sequence.copy()
++            best_fitness = current_fitness
++        
++        # Cool down temperature
++        temp = max(temp * cooling_rate, min_temp)
++    
++    return best_sequence.tolist(), best_fitness
++
++def search_for_best_sequence():
++    """Main search function using the new fast convolution gradient ascent approach."""
+     start_time = time.time()
++    best_inv_c1 = 0.0
+     best_sequence = None
+-    best_inv_c1 = 0.0
+-
+-    # Predefined step counts to explore
+-    step_counts = [2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200]
+-
+-    # Predefined height patterns that often work well
+-    height_patterns = [
+-        lambda n: [1000 * (0.9 ** i) for i in range(n)],  # Exponential decay
+-        lambda n: [1000 * (1.0 / (i + 1)) for i in range(n)],  # Harmonic decay
+-        lambda n: [1000] * n,  # Constant
+-        lambda n: [1000 * (i / (n - 1)) if n > 1 else 1000 for i in range(n)]  # Linear increase
+-    ]
+-
+-    # Try various combinations of step counts and height patterns
+-    for attempt in range(50):  # More attempts to ensure thorough search
+-        if time.time() - start_time > max_time_seconds:
++    
++    # Multiple initialization attempts with smart sequences
++    for attempt in range(30):
++        if time.time() - start_time > 170:
+             break
+-
+-        n_steps = random.choice(step_counts)
+-        pattern_fn = random.choice(height_patterns)
+-
+-        # Generate step function using a pattern
+-        heights = pattern_fn(n_steps)
+-        sequence = generate_step_function(n_steps, heights=heights)
+-
+-        # Optimize using quadratic programming
+-        optimized_sequence = quadratic_optimization_approach(sequence, 150)
+-
+-        # Evaluate the optimized sequence
+-        inv_c1 = evaluate_sequence(optimized_sequence)
++            
++        # Generate smart initial sequence
++        init_sequence = generate_smart_initial_sequence()
++        
++        # Multi-resolution optimization
++        optimized_sequence = multi_resolution_optimization(init_sequence, max_iterations=30)
++        
++        # Evaluate optimized sequence
++        inv_c1 = evaluate_fitness(optimized_sequence)
++        
+         if inv_c1 > best_inv_c1:
+             best_inv_c1 = inv_c1
+-            best_sequence = optimized_sequence
+-
+-    return best_sequence, best_inv_c1
+-
+-def adaptive_local_search(initial_sequence, max_iter=200):
+-    """Enhanced local search with adaptive mutation rates and dynamic step sizes."""
+-    current_sequence = initial_sequence.copy()
+-    current_fitness = evaluate_sequence(current_sequence)
+-
+-    # Adaptive parameters
+-    mutation_rate = 0.3
+-    max_mutation = 0.5
+-    cooling_factor = 0.99
+-
+-    for i in range(max_iter):
+-        # Adaptively decrease mutation rate
+-        mutation_rate *= cooling_factor
+-        max_mutation *= cooling_factor
+-
+-        # Mutate current sequence
+-        mutated = [x * random.uniform(1 - max_mutation, 1 + max_mutation) for x in current_sequence]
+-        mutated = [max(0, min(1000, x)) for x in mutated]
+-
+-        mutated_fitness = evaluate_sequence(mutated)
+-        if mutated_fitness > current_fitness:
+-            current_sequence = mutated
+-            current_fitness = mutated_fitness
+-
+-        # Occasionally introduce more drastic changes
+-        if random.random() < 0.1:
+-            # Large mutation
+-            mutated_large = [x * random.uniform(0.1, 10.0) for x in current_sequence]
+-            mutated_large = [max(0, min(1000, x)) for x in mutated_large]
+-            mutated_large_fitness = evaluate_sequence(mutated_large)
+-            if mutated_large_fitness > current_fitness:
+-                current_sequence = mutated_large
+-                current_fitness = mutated_large_fitness
+-
+-    return current_sequence, current_fitness
+-
+-def search_for_best_sequence():
+-    """Main search function implementing the new optimization strategy."""
+-    start_time = time.time()
+-    best_sequence = None
+-    best_inv_c1 = 0.0
+-
+-    # Phase 1: Domain-specific step function optimization
+-    step_seq, step_fitness = step_function_domain_specific_optimization(150)
+-    if step_fitness > best_inv_c1:
+-        best_inv_c1 = step_fitness
+-        best_sequence = step_seq
+-
+-    # Phase 2: Refinement using adaptive local search
+-    if best_sequence is not None:
+-        refined_seq, refined_fitness = adaptive_local_search(best_sequence, 100)
+-        if refined_fitness > best_inv_c1:
+-            best_inv_c1 = refined_fitness
+-            best_sequence = refined_seq
+-
+-    # Phase 3: Fallback to generic optimization if needed
+-    if best_sequence is None or time.time() - start_time > 170:
+-        initial_sequence = generate_step_function(random.randint(10, 100))
+-        optimized_seq = quadratic_optimization_approach(initial_sequence)
+-        optimized_fitness = evaluate_sequence(optimized_seq)
+-        if optimized_fitness > best_inv_c1:
+-            best_inv_c1 = optimized_fitness
+-            best_sequence = optimized_seq
+-
+-    # Final check with adaptive local search
+-    if best_sequence is not None:
+-        final_seq, final_fitness = adaptive_local_search(best_sequence, 100)
+-        if final_fitness > best_inv_c1:
+-            best_inv_c1 = final_fitness
+-            best_sequence = final_seq
+-
+-    return best_sequence if best_sequence is not None else generate_step_function(50)
++            best_sequence = optimized_sequence[:]
++    
++    # If no good sequence found, fallback to a basic approach
++    if best_sequence is None:
++        fallback_sequence = generate_smart_initial_sequence()
++        best_sequence = multi_resolution_optimization(fallback_sequence, max_iterations=50)
++    
++    # Final refinement with adaptive local search
++    refined_sequence, refined_fitness = adaptive_local_search(best_sequence, 100)
++    if refined_fitness > best_inv_c1:
++        best_inv_c1 = refined_fitness
++        best_sequence = refined_sequence
++    
++    return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

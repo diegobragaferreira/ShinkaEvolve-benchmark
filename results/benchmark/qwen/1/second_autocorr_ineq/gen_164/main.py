@@ -1,0 +1,341 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+import numba
+from numba import jit
+from typing import List
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+import time
+
+# Global constants
+MAX_TIME_SECONDS = 85.0
+DEFAULT_N_STEPS = 1000
+N_STARTS = 5
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_numba(f_vals: np.ndarray) -> tuple:
+    """
+    Fast computation of autoconvolution norms using Numba JIT compilation
+    """
+    if len(f_vals) == 0:
+        return 0.0, 0.0, 0.0
+    
+    # Compute autoconvolution manually for better performance
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+    
+    # Manual convolution loop 
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    # Trim to center portion for proper intervalmapping [-1/4, 1/4]
+    half_len = n
+    g_center = len(g) // 2
+    g_trimmed = g[g_center - half_len : g_center + half_len]
+    
+    # Compute norms using trapezoidal-like integration for L2^2
+    if len(g_trimmed) < 2:
+        norm_g2_sq = 0.0
+    else:
+        # Piecewise linear integration formula for ||g||₂²
+        # Each segment contributes (width/3)*(y1² + y1*y2 + y2²)
+        step_width = 0.5 / len(f_vals)
+        g_abs = np.abs(g_trimmed)
+        widths = np.full(len(g_abs)-1, step_width)
+        y1 = g_abs[:-1]
+        y2 = g_abs[1:]
+        norm_g2_sq = np.sum(widths * (y1**2 + y1*y2 + y2**2) / 3.0)
+    
+    # Compute L1 and L-inf norms
+    norm_g1 = np.sum(np.abs(g_trimmed)) / (len(g_trimmed) + 1) if len(g_trimmed) > 0 else 1e-12
+    norm_ginf = np.max(np.abs(g_trimmed)) if len(g_trimmed) > 0 else 1e-12
+    
+    return norm_g2_sq, norm_g1, norm_ginf
+
+def evaluate_c2_numba(f_vals: List[float]) -> float:
+    """
+    Evaluate C2 using Numba-compiled norms computation
+    """
+    norm_g2_sq, norm_g1, norm_ginf = compute_autoconvolution_norms_numba(np.array(f_vals))
+    
+    if norm_g1 <= 1e-12 or norm_ginf <= 1e-12:
+        return 0.0
+    
+    return norm_g2_sq / (norm_g1 * norm_ginf)
+
+@jax_jit
+def compute_autoconvolution_jax(f_vals):
+    """JAX version of autoconvolution computation"""
+    f = jnp.array(f_vals)
+    f = jnp.maximum(f, 0)
+    
+    if len(f_vals) == 0:
+        return jnp.array([])
+    
+    # Compute autoconvolution using JAX convolution
+    g_full = jnp.convolve(f, f, mode='full')
+    
+    # Trim to center portion
+    half_len = len(f_vals)
+    center_start = len(g_full) // 2 - half_len + 1
+    center_end = len(g_full) // 2 + half_len - 1
+    g_trimmed = g_full[center_start:center_end]
+    
+    return g_trimmed
+
+@jax_jit
+def compute_c2_jax(f_vals):
+    """JAX version of C2 computation for automatic differentiation"""
+    f = jnp.clip(jnp.array(f_vals), 0, None)
+    g = compute_autoconvolution_jax(f)
+    
+    g_abs = jnp.abs(g)
+    
+    # L2 squared norm (sum of squares)
+    norm_l2_sq = jnp.sum(g_abs * g_abs)
+    
+    # L1 norm
+    norm_l1 = jnp.sum(g_abs) / (len(g) + 1)
+    
+    # L-infinity norm
+    norm_inf = jnp.max(g_abs)
+    
+    # Avoid division by zero
+    safe_l1 = jnp.where(norm_l1 <= 1e-15, 1e-15, norm_l1)
+    safe_inf = jnp.where(norm_inf <= 1e-15, 1e-15, norm_inf)
+    
+    return norm_l2_sq / (safe_l1 * safe_inf)
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 score using JAX automatic differentiation"""
+    try:
+        f_array = jnp.array(np.clip(f_vals, 0, None))
+        grad_func = grad(compute_c2_jax)
+        gradients = grad_func(f_array)
+        return np.array(gradients)
+    except:
+        return np.zeros_like(f_vals)
+
+def generate_mathematical_patterns(n_steps: int) -> List[List[float]]:
+    """
+    Generate diverse mathematical patterns that are likely to produce good C₂ values
+    """
+    patterns = []
+    
+    # Pattern 1: Sinc-like pattern (often good for convolution)
+    x = np.linspace(-1, 1, n_steps)
+    pattern1 = np.sinc(x * 3) * 0.5 + 0.5 
+    pattern1 = np.clip(pattern1, 0, None)
+    patterns.append(pattern1.tolist())
+    
+    # Pattern 2: Gaussian-like with center peak
+    pattern2 = np.exp(-((x * 2)**2) / 0.1) * 0.8 + 0.2
+    pattern2 = np.clip(pattern2, 0, None)
+    patterns.append(pattern2.tolist())
+    
+    # Pattern 3: Symmetric multi-peak pattern
+    pattern3 = np.zeros(n_steps)
+    for i in range(5):
+        center = -0.8 + i * 0.4
+        width = 0.15 + i * 0.02
+        amplitude = 0.8 + i * 0.1
+        pattern3 += amplitude * np.exp(-((x - center)**2) / (2 * width**2))
+    pattern3 = np.clip(pattern3, 0, None)
+    patterns.append(pattern3.tolist())
+    
+    # Pattern 4: Flat-top with sharp edges
+    pattern4 = np.ones(n_steps)
+    pattern4[:n_steps//4] = 0.3
+    pattern4[3*n_steps//4:] = 0.3
+    pattern4 = np.clip(pattern4, 0, None)
+    patterns.append(pattern4.tolist())
+    
+    # Pattern 5: Alternating high/low pattern with smooth transitions
+    pattern5 = np.zeros(n_steps)
+    for i in range(n_steps):
+        base = 0.6 if i % 2 == 0 else 0.2
+        transition = 0.3 * np.sin(np.pi * i / n_steps) ** 2
+        pattern5[i] = base + transition
+    pattern5 = np.clip(pattern5, 0, None)
+    patterns.append(pattern5.tolist())
+    
+    return patterns
+
+def adaptive_gradient_descent(initial_params: List[float], max_iterations: int = 300) -> tuple:
+    """
+    Adaptive gradient descent using JAX gradients
+    """
+    current_params = np.array(initial_params, dtype=float)
+    current_c2 = evaluate_c2_numba(current_params)
+    
+    # Adaptive learning rate
+    learning_rate = 0.1
+    patience = 0
+    best_c2 = current_c2
+    best_params = current_params.copy()
+    
+    for iteration in range(max_iterations):
+        try:
+            # Compute gradients using JAX
+            grad_vec = compute_gradient_jax(current_params)
+        except:
+            # Fall back to finite differences if JAX fails
+            epsilon = 1e-5
+            grad_vec = np.zeros_like(current_params)
+            base_c2 = evaluate_c2_numba(current_params)
+            for i in range(len(current_params)):
+                f_vals_plus = current_params.copy()
+                f_vals_plus[i] = max(0, current_params[i] + epsilon)
+                c2_plus = evaluate_c2_numba(f_vals_plus)
+                grad_vec[i] = (c2_plus - base_c2) / epsilon
+        
+        # Apply gradient step
+        new_params = current_params - learning_rate * grad_vec
+        new_params = np.maximum(new_params, 0)
+        
+        # Evaluate new solution
+        new_c2 = evaluate_c2_numba(new_params)
+        
+        if new_c2 > current_c2:
+            current_params = new_params
+            current_c2 = new_c2
+            patience = 0
+            
+            if new_c2 > best_c2:
+                best_c2 = new_c2
+                best_params = current_params.copy()
+        else:
+            patience += 1
+            if patience > 10:
+                learning_rate *= 0.5
+                patience = 0
+                if learning_rate < 1e-6:
+                    break
+    
+    return best_params.tolist(), best_c2
+
+def multi_stage_optimization(initial_params: List[float]) -> tuple:
+    """
+    Multi-stage optimization approach
+    """
+    current_solution = np.array(initial_params)
+    best_c2 = evaluate_c2_numba(current_solution)
+    best_solution = current_solution.copy()
+    
+    # Stage 1: Coarse global search using simple gradient descent
+    stage1_params, stage1_c2 = adaptive_gradient_descent(current_solution.tolist(), max_iterations=100)
+    
+    if stage1_c2 > best_c2:
+        best_c2 = stage1_c2
+        best_solution = np.array(stage1_params)
+    
+    # Stage 2: Refine with another round of gradient descent
+    stage2_params, stage2_c2 = adaptive_gradient_descent(stage1_params, max_iterations=150)
+    
+    if stage2_c2 > best_c2:
+        best_c2 = stage2_c2
+        best_solution = np.array(stage2_params)
+    
+    # Stage 3: Local refinement with L-BFGS
+    try:
+        def objective(x):
+            return -evaluate_c2_numba(x.tolist())
+        
+        bounds = [(0, None) for _ in range(len(best_solution))]
+        result = minimize(
+            objective,
+            best_solution,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 50, 'ftol': 1e-8}
+        )
+        
+        if result.success:
+            refined_solution = np.maximum(result.x, 0)
+            refined_c2 = evaluate_c2_numba(refined_solution.tolist())
+            
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_solution = refined_solution
+    except:
+        pass
+    
+    return best_solution.tolist(), best_c2
+
+def construct_function() -> List[float]:
+    """
+    Main function to construct optimized step-function for high C2 value
+    """
+    start_time = time.time()
+    
+    best_c2 = -np.inf
+    best_params = None
+    
+    # Generate multiple initial patterns using mathematical insights
+    patterns = generate_mathematical_patterns(DEFAULT_N_STEPS)
+    
+    # Try multiple optimization strategies with different starting points
+    for i, initial_pattern in enumerate(patterns):
+        if time.time() - start_time > MAX_TIME_SECONDS - 5.0:
+            break
+            
+        try:
+            # Multi-start optimization with different random seeds
+            for seed in [42, 123, 456, 789, 246]:
+                if time.time() - start_time > MAX_TIME_SECONDS - 5.0:
+                    break
+                    
+                np.random.seed(seed)
+                
+                # Scale the pattern appropriately
+                scaled_pattern = np.array(initial_pattern) * (1 + np.random.random() * 0.5)
+                scaled_pattern = np.clip(scaled_pattern, 0, None)
+                
+                # Normalize to prevent extreme values
+                total = np.sum(scaled_pattern)
+                if total > 0:
+                    scaled_pattern = scaled_pattern / total * 2.0
+                
+                # Run multi-stage optimization
+                optimized_params, optimized_c2 = multi_stage_optimization(scaled_pattern.tolist())
+                
+                if optimized_c2 > best_c2:
+                    best_c2 = optimized_c2
+                    best_params = optimized_params.copy()
+                    
+        except Exception as e:
+            continue
+    
+    # If no good solution found, fall back to a basic pattern
+    if best_params is None:
+        # Create a baseline symmetric pattern
+        n = DEFAULT_N_STEPS
+        x = np.linspace(-1, 1, n)
+        baseline_pattern = np.exp(-((x * 2)**2) / 0.2) * 0.8 + 0.2
+        baseline_pattern = np.clip(baseline_pattern, 0, None)
+        total = np.sum(baseline_pattern)
+        if total > 0:
+            baseline_pattern = baseline_pattern / total * 2.0
+        best_params = baseline_pattern.tolist()
+    
+    # Final validation
+    best_params = np.maximum(best_params, 0).tolist()
+    
+    # Ensure we return exactly the right number of steps
+    if len(best_params) < DEFAULT_N_STEPS:
+        best_params.extend([0.0] * (DEFAULT_N_STEPS - len(best_params)))
+    elif len(best_params) > DEFAULT_N_STEPS:
+        best_params = best_params[:DEFAULT_N_STEPS]
+    
+    return best_params
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

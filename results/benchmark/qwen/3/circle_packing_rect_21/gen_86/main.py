@@ -1,0 +1,240 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    width, height = 1.0, 1.0  # Optimal square configuration
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Phase 1: Strategic initialization with corner/edge seeding
+    n_circles = 21
+    
+    # Predefined strategic points (corners and edges)
+    strategic_points = [
+        (0.1, 0.1), (0.1, height-0.1), (width-0.1, 0.1), (width-0.1, height-0.1),  # Corners
+        (0.5, 0.1), (0.5, height-0.1), (0.1, 0.5), (width-0.1, 0.5),              # Edges center
+        (0.25, 0.25), (0.25, height-0.25), (width-0.25, 0.25), (width-0.25, height-0.25),
+        (0.75, 0.25), (0.75, height-0.25), (0.25, 0.75), (0.75, 0.75),
+    ]
+    
+    # Initialize circles array
+    circles = np.zeros((n_circles, 3))
+
+    # Place circles using strategic initialization
+    placed_points = []
+    placed_radii = []
+    
+    # First use strategic points
+    for i, (cx, cy) in enumerate(strategic_points[:min(len(strategic_points), n_circles)]):
+        max_radius = min(cx, width - cx, cy, height - cy)
+        placed_points.append((cx, cy))
+        placed_radii.append(max_radius)
+        
+    # Fill remaining circles with random but boundary-aware placement
+    remaining_count = n_circles - len(placed_points)
+    while len(placed_points) < n_circles:
+        cx = np.random.uniform(0.05, width - 0.05)
+        cy = np.random.uniform(0.05, height - 0.05)
+        max_radius = min(cx, width - cx, cy, height - cy)
+        
+        # Check for conflicts with already placed circles
+        valid_placement = True
+        for j in range(len(placed_points)):
+            px, py = placed_points[j]
+            r = placed_radii[j]
+            dist = np.sqrt((cx - px)**2 + (cy - py)**2)
+            if dist < (r + max_radius):  # Conflict with existing circle
+                valid_placement = False
+                break
+                
+        if valid_placement:
+            placed_points.append((cx, cy))
+            placed_radii.append(max_radius)
+
+    # Initialize circles array
+    for i in range(n_circles):
+        circles[i] = [placed_points[i][0], placed_points[i][1], placed_radii[i]]
+
+    # Phase 2: Adaptive multi-scale local refinement with boundary awareness
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters with adaptive approach
+    max_iterations = 1000  # Increased iterations for better exploration
+    tolerance = 1e-8      # Tighter convergence criterion
+    
+    # Adaptive scale parameters - decrease over time
+    initial_scale = 0.1
+    final_scale = 0.001
+    scale_decay = 0.995  # Exponential decay factor
+    
+    # Track improvement for early termination
+    last_improvement = 0
+    patience = 50  # Maximum iterations without improvement before stopping
+    
+    current_scale = initial_scale
+    
+    for iteration in range(max_iterations):
+        # Decrease scale exponentially
+        current_scale = max(final_scale, initial_scale * (scale_decay ** iteration))
+        
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try moves with current adaptive scale
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Try perturbations with current adaptive scale
+            best_move_x, best_move_y, best_move_r = 0, 0, 0
+            best_new_sum = old_sum
+
+            # Try movements in a more systematic way
+            move_range = current_scale
+            
+            # Grid search for optimal movement
+            movement_steps = [-move_range, -move_range/2, 0, move_range/2, move_range]
+            
+            for dx in movement_steps:
+                for dy in movement_steps:
+                    # New position
+                    new_x = orig_x + dx
+                    new_y = orig_y + dy
+
+                    # Keep within bounds
+                    new_x = max(0.05, min(width - 0.05, new_x))
+                    new_y = max(0.05, min(height - 0.05, new_y))
+
+                    # Compute max radius at new location
+                    new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                    # Check for conflicts with all other circles efficiently
+                    valid = True
+                    overlap_penalty = 0.0
+                    
+                    # Only check against nearby circles to improve efficiency
+                    for j in range(n_circles):
+                        if i != j:
+                            px, py, pr = current_circles[j]
+                            dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                            if dist < (new_r + pr):
+                                valid = False
+                                # Calculate overlap penalty
+                                overlap_depth = (new_r + pr) - dist
+                                overlap_penalty += overlap_depth ** 2
+                                break
+
+                    if valid:
+                        # Multi-objective evaluation: balance radius gain with positional stability 
+                        new_sum = old_sum - orig_r + new_r
+                        
+                        # Apply penalty for significant positional changes to maintain stability
+                        pos_change = np.sqrt(dx**2 + dy**2)
+                        stability_penalty = pos_change * 0.1
+                        
+                        # Add heavy penalty for overlaps (should not happen for valid moves)
+                        if overlap_penalty > 0:
+                            new_sum -= overlap_penalty * 1000  # Heavy penalty for constraint violations
+                        else:
+                            new_sum -= stability_penalty  # Light penalty for stability
+
+                        if new_sum > best_new_sum:
+                            best_new_sum = new_sum
+                            best_move_x, best_move_y, best_move_r = dx, dy, new_r
+
+            # Apply the best move if it improves the sum
+            if best_new_sum > old_sum:
+                current_circles[i] = [orig_x + best_move_x, orig_y + best_move_y, best_move_r]
+                circles = current_circles.copy()
+
+        # Check for improvement and update best solution
+        new_sum = np.sum(circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = circles.copy()
+            last_improvement = iteration
+        elif iteration - last_improvement > patience:
+            # Early termination if no improvement for a while
+            break
+
+    # Phase 3: Fine-tuning with focused search around best configuration
+    circles = best_circles.copy()
+    
+    # More intensive final refinement
+    fine_search_iterations = 300
+    
+    for iteration in range(fine_search_iterations):
+        # Focus on circles that are most likely to benefit from improvement
+        current_sum = np.sum(circles[:, 2])
+        
+        # Sample more aggressively from promising circles
+        indices = np.random.choice(n_circles, size=max(5, n_circles//4), replace=False)
+        
+        for idx in indices:
+            old_x, old_y, old_r = circles[idx]
+            
+            # Even more refined search around current position
+            best_x, best_y = old_x, old_y
+            best_r = old_r
+            best_sum = current_sum
+            
+            # Sample densely around current position
+            search_range = current_scale * 2
+            density = 10  # Higher density for final search
+            
+            # Create dense grid around current position
+            x_samples = np.linspace(max(0.05, old_x - search_range), min(width - 0.05, old_x + search_range), density)
+            y_samples = np.linspace(max(0.05, old_y - search_range), min(height - 0.05, old_y + search_range), density)
+            
+            for new_x in x_samples:
+                for new_y in y_samples:
+                    # Ensure it's within bounds
+                    new_x = max(0.05, min(width - 0.05, new_x))
+                    new_y = max(0.05, min(height - 0.05, new_y))
+
+                    # Compute max radius at new location
+                    new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                    # Check for conflicts
+                    valid = True
+                    for j in range(n_circles):
+                        if j != idx:
+                            px, py, pr = circles[j]
+                            dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                            if dist < (new_r + pr):
+                                valid = False
+                                break
+
+                    if valid:
+                        # Evaluate improvement
+                        new_sum = current_sum - old_r + new_r
+                        if new_sum > best_sum:
+                            best_sum = new_sum
+                            best_x, best_y, best_r = new_x, new_y, new_r
+
+            # Apply improvement if found
+            if best_sum > current_sum:
+                circles[idx] = [best_x, best_y, best_r]
+
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

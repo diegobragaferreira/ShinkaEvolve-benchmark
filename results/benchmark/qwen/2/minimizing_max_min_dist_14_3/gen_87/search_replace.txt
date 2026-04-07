@@ -1,0 +1,351 @@
+<NAME>
+enhanced_adaptive_cooling
+</NAME>
+
+<DESCRIPTION>
+The proposed improvement focuses on enhancing the cooling schedule in the simulated annealing algorithm. The current implementation uses a fixed exponential cooling rate of 0.9995, but this can be made more adaptive by monitoring convergence behavior and dynamically adjusting the cooling rate based on performance trends. This approach helps overcome plateaus in optimization progress and allows for more efficient exploration of the solution space, which could lead to better convergence towards the benchmark ratio of 0.4898.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_points(initial_points, max_iterations=10000, temp_start=1.0, cooling_rate=0.9995):
+        """Optimize point placement using simulated annealing with adaptive perturbation."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+
+        # Add checkpointing to save best solution found so far
+        best_checkpoint = best_points.copy()
+        best_checkpoint_ratio = best_ratio
+
+        temp = temp_start
+        checkpoint_interval = 1000  # Save checkpoint every N iterations
+        stagnation_counter = 0
+        max_stagnation = 1000  # Max iterations without improvement before cooling
+
+        def project_to_unit_sphere(points):
+            """Strictly project points to unit sphere maintaining exact constraint."""
+            norms = np.linalg.norm(points, axis=1)
+            # Avoid division by zero
+            norms = np.where(norms == 0, 1.0, norms)
+            return points / norms[:, np.newaxis]
+
+        for iteration in range(max_iterations):
+            # Adaptive cooling schedule
+            if stagnation_counter > max_stagnation:
+                temp *= 0.98  # More aggressive cooling when stuck
+                stagnation_counter = 0
+            else:
+                temp *= cooling_rate  # Normal cooling
+
+            # Stop if temperature gets too low
+            if temp < 1e-10:
+                break
+=======
+    def optimize_points(initial_points, max_iterations=10000, temp_start=1.0, cooling_rate=0.9995):
+        """Optimize point placement using simulated annealing with adaptive perturbation."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+
+        # Add checkpointing to save best solution found so far
+        best_checkpoint = best_points.copy()
+        best_checkpoint_ratio = best_ratio
+
+        temp = temp_start
+        checkpoint_interval = 1000  # Save checkpoint every N iterations
+        stagnation_counter = 0
+        max_stagnation = 1000  # Max iterations without improvement before cooling
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 500
+
+        def project_to_unit_sphere(points):
+            """Strictly project points to unit sphere maintaining exact constraint."""
+            norms = np.linalg.norm(points, axis=1)
+            # Avoid division by zero
+            norms = np.where(norms == 0, 1.0, norms)
+            return points / norms[:, np.newaxis]
+
+        for iteration in range(max_iterations):
+            # Adaptive cooling schedule based on recent performance
+            if stagnation_counter > max_stagnation:
+                temp *= 0.95  # More aggressive cooling when stuck for long periods
+                stagnation_counter = 0
+            else:
+                # Dynamic cooling rate that adapts to convergence behavior
+                if len(recent_improvements) >= 10:
+                    avg_improvement = np.mean(recent_improvements[-10:])
+                    if avg_improvement < 1e-6:  # Very slow improvement
+                        temp *= 0.98  # Cool faster
+                    elif avg_improvement < 1e-5:  # Slow improvement
+                        temp *= 0.995  # Moderate cooling
+                    else:  # Rapid improvement
+                        temp *= cooling_rate  # Normal cooling
+                else:
+                    temp *= cooling_rate  # Normal cooling initially
+
+            # Stop if temperature gets too low
+            if temp < 1e-10:
+                break
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+improving_perturbation_strategy
+</NAME>
+
+<DESCRIPTION>
+This improvement modifies the perturbation strategy to be more intelligent about which points to perturb and how much to perturb them. Instead of randomly selecting points, we'll implement a distance-based neighborhood sampling that favors points involved in small distances (to encourage expansion) or large distances (to encourage contraction). This strategic approach should lead to more effective moves that directly target areas of the configuration space that are likely to improve the objective function.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Adaptive perturbation sizing based on current temperature and progress
+            # Start with larger perturbations, decrease as optimization progresses
+            base_perturbation_scale = temp * 0.02
+
+            # Make a small random perturbation to one random point
+            point_idx = np.random.randint(0, len(current_points))
+            # Create perturbation vector with adaptive scale
+            perturbation = np.random.normal(0, base_perturbation_scale, 3)
+            # Apply perturbation
+            new_points = current_points.copy()
+            new_points[point_idx] += perturbation
+
+            # Strictly enforce unit sphere constraint
+            new_points = project_to_unit_sphere(new_points)
+=======
+            # Adaptive perturbation sizing based on current temperature and progress
+            # Start with larger perturbations, decrease as optimization progresses
+            base_perturbation_scale = temp * 0.02
+
+            # Intelligent point selection based on distance characteristics
+            # Calculate all pairwise distances to understand current distribution
+            distances = pdist(current_points)
+
+            # Select point that would most benefit from adjustment
+            # Focus on extremes: points that are involved in small distances or large distances
+            if len(distances) > 0:
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                mean_dist = np.mean(distances)
+
+                # Determine if we're dealing with mostly close or far points
+                # If many points are close to each other, we want to expand
+                # If many points are far apart, we want to contract
+                if min_dist < mean_dist * 0.3:
+                    # We have many small distances, prefer to move points that are too close
+                    # Find indices of points involved in small distances
+                    small_distance_indices = set()
+                    for i in range(len(current_points)):
+                        for j in range(i+1, len(current_points)):
+                            if pdist([current_points[i], current_points[j]])[0] < mean_dist * 0.5:
+                                small_distance_indices.add(i)
+                                small_distance_indices.add(j)
+
+                    # If we found points involved in small distances, bias selection towards them
+                    if small_distance_indices:
+                        point_idx = np.random.choice(list(small_distance_indices))
+                    else:
+                        point_idx = np.random.randint(0, len(current_points))
+                elif max_dist > mean_dist * 1.5:
+                    # We have many large distances, prefer to move points that are too far
+                    # Find indices of points involved in large distances
+                    large_distance_indices = set()
+                    for i in range(len(current_points)):
+                        for j in range(i+1, len(current_points)):
+                            if pdist([current_points[i], current_points[j]])[0] > mean_dist * 1.5:
+                                large_distance_indices.add(i)
+                                large_distance_indices.add(j)
+
+                    # Bias selection towards points involved in large distances
+                    if large_distance_indices:
+                        point_idx = np.random.choice(list(large_distance_indices))
+                    else:
+                        point_idx = np.random.randint(0, len(current_points))
+                else:
+                    # Default to random selection
+                    point_idx = np.random.randint(0, len(current_points))
+            else:
+                point_idx = np.random.randint(0, len(current_points))
+
+            # Create perturbation vector with adaptive scale
+            perturbation = np.random.normal(0, base_perturbation_scale, 3)
+            # Apply perturbation
+            new_points = current_points.copy()
+            new_points[point_idx] += perturbation
+
+            # Strictly enforce unit sphere constraint
+            new_points = project_to_unit_sphere(new_points)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhanced_stagnation_detection
+</NAME>
+
+<DESCRIPTION>
+This change enhances the stagnation detection mechanism by implementing a more nuanced approach that tracks both absolute improvements and relative improvements over time. The original implementation simply counted iterations without improvement, but this enhanced version considers whether the improvement is statistically significant and adjusts the stagnation criteria accordingly. This prevents premature cooling and allows the algorithm to continue exploring even when improvement appears slow.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        stagnation_counter = 0
+        max_stagnation = 1000  # Max iterations without improvement before cooling
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 500
+=======
+        stagnation_counter = 0
+        max_stagnation = 1000  # Max iterations without improvement before cooling
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 500
+        # Track absolute best for stagnation detection
+        abs_best_ratio = best_ratio
+        abs_best_iteration = 0
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhanced_stagnation_detection_continued
+</NAME>
+
+<DESCRIPTION>
+Continuing from the previous enhancement, this change modifies the stagnation detection logic to use a more sophisticated approach. Instead of just counting iterations since last improvement, it now compares current improvement to the overall best seen so far and applies a more adaptive threshold. This prevents the algorithm from prematurely cooling down when it might still be making meaningful progress.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        for iteration in range(max_iterations):
+            # Adaptive cooling schedule based on recent performance
+            if stagnation_counter > max_stagnation:
+                temp *= 0.95  # More aggressive cooling when stuck for long periods
+                stagnation_counter = 0
+            else:
+                # Dynamic cooling rate that adapts to convergence behavior
+                if len(recent_improvements) >= 10:
+                    avg_improvement = np.mean(recent_improvements[-10:])
+                    if avg_improvement < 1e-6:  # Very slow improvement
+                        temp *= 0.98  # Cool faster
+                    elif avg_improvement < 1e-5:  # Slow improvement
+                        temp *= 0.995  # Moderate cooling
+                    else:  # Rapid improvement
+                        temp *= cooling_rate  # Normal cooling
+                else:
+                    temp *= cooling_rate  # Normal cooling initially
+
+            # Stop if temperature gets too low
+            if temp < 1e-10:
+                break
+=======
+        for iteration in range(max_iterations):
+            # Adaptive cooling schedule based on recent performance
+            # Enhanced stagnation detection with relative improvement tracking
+            if stagnation_counter > max_stagnation:
+                # Check if we've actually lost significant ground
+                if iteration - abs_best_iteration > 2000 and abs_best_ratio > 0:
+                    rel_improvement = (best_ratio - abs_best_ratio) / abs_best_ratio
+                    if rel_improvement < -0.01:  # Significant degradation
+                        temp *= 0.95  # More aggressive cooling
+                    else:
+                        temp *= 0.98  # Moderate cooling
+                else:
+                    temp *= 0.95  # More aggressive cooling when stuck for long periods
+                stagnation_counter = 0
+            else:
+                # Dynamic cooling rate that adapts to convergence behavior
+                if len(recent_improvements) >= 10:
+                    avg_improvement = np.mean(recent_improvements[-10:])
+                    if avg_improvement < 1e-6:  # Very slow improvement
+                        temp *= 0.98  # Cool faster
+                    elif avg_improvement < 1e-5:  # Slow improvement
+                        temp *= 0.995  # Moderate cooling
+                    else:  # Rapid improvement
+                        temp *= cooling_rate  # Normal cooling
+                else:
+                    temp *= cooling_rate  # Normal cooling initially
+
+            # Stop if temperature gets too low
+            if temp < 1e-10:
+                break
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_stagnation_handling
+</NAME>
+
+<DESCRIPTION>
+This update modifies how stagnation counters are managed during the optimization process. Instead of always resetting the stagnation counter on improvement, we now implement a more intelligent approach that considers the magnitude of improvement and maintains a more nuanced view of when we're truly making progress. This prevents unnecessary cooling while still allowing for responsive adaptation to stagnation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < math.exp((new_ratio - best_ratio) / temp):
+                current_points = new_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+                    stagnation_counter = 0  # Reset stagnation counter on improvement
+                    # Update checkpoint
+                    if new_ratio > best_checkpoint_ratio:
+                        best_checkpoint = new_points.copy()
+                        best_checkpoint_ratio = new_ratio
+                else:
+                    stagnation_counter += 1  # Increment if no improvement
+            else:
+                stagnation_counter += 1  # Increment if rejected
+
+            # Occasionally print progress
+            if iteration % 1000 == 0:
+                print(f"Iteration {iteration}, Best ratio: {best_ratio:.6f}, Temp: {temp:.6f}")
+=======
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < math.exp((new_ratio - best_ratio) / temp):
+                current_points = new_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+                    # Update absolute best tracking
+                    if new_ratio > abs_best_ratio:
+                        abs_best_ratio = new_ratio
+                        abs_best_iteration = iteration
+                    stagnation_counter = 0  # Reset stagnation counter on significant improvement
+                    # Update checkpoint
+                    if new_ratio > best_checkpoint_ratio:
+                        best_checkpoint = new_points.copy()
+                        best_checkpoint_ratio = new_ratio
+                else:
+                    # Only increment stagnation counter for minor improvements (below threshold)
+                    if new_ratio > best_ratio + 1e-8:  # Significant improvement
+                        stagnation_counter = 0  # Reset if substantial improvement
+                    else:
+                        stagnation_counter += 1  # Increment if only tiny improvement
+            else:
+                stagnation_counter += 1  # Increment if rejected
+
+            # Track recent improvements for adaptive cooling
+            recent_improvements.append(new_ratio - best_ratio)
+            if len(recent_improvements) > improvement_window:
+                recent_improvements.pop(0)
+
+            # Occasionally print progress
+            if iteration % 1000 == 0:
+                print(f"Iteration {iteration}, Best ratio: {best_ratio:.6f}, Temp: {temp:.6f}")
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,461 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+from scipy.spatial import Voronoi
+import math
+import random
+from numba import jit
+from scipy.optimize import minimize
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    # Using 1.2 x 0.8 ratio which often works well for circle packing
+    container_width, container_height = 1.2, 0.8
+
+    # Number of circles
+    n = 21
+
+    # Initialize circles array
+    circles = np.zeros((n, 3))
+
+    # Phase 1: Enhanced Initialization with Hybrid Approach
+    # Generate strategic anchor points (corners and edges)
+    anchors = []
+    # Corners
+    anchors.extend([(0.05, 0.05), (container_width - 0.05, 0.05),
+                   (0.05, container_height - 0.05), (container_width - 0.05, container_height - 0.05)])
+    # Edge centers
+    anchors.extend([(container_width/2, 0.05), (container_width/2, container_height - 0.05),
+                   (0.05, container_height/2), (container_width - 0.05, container_height/2)])
+
+    # Generate a denser set of candidate points for Voronoi-based selection
+    candidate_points = []
+    grid_density = 64  # Increased density for better Voronoi distribution
+    for i in range(grid_density):
+        for j in range(grid_density):
+            x = (i + 0.5) / grid_density * container_width
+            y = (j + 0.5) / grid_density * container_height
+            candidate_points.append((x, y))
+
+    # Add some random points to avoid regular grid bias
+    np.random.seed(42)
+    for _ in range(100):  # Increased random points
+        x = np.random.uniform(0.05, container_width - 0.05)
+        y = np.random.uniform(0.05, container_height - 0.05)
+        candidate_points.append((x, y))
+
+    # Use Voronoi approach to select well-distributed points
+    # First, combine anchors with candidates
+    all_points = anchors + candidate_points
+
+    # Use k-means++ to get initial centroids for Voronoi
+    kmeans = KMeans(n_clusters=min(len(all_points), n), init='k-means++', n_init=10, random_state=42)
+    all_array = np.array(all_points)
+    kmeans.fit(all_array)
+    selected_centroids = kmeans.cluster_centers_
+
+    # Now, for each centroid, find the closest actual candidate point
+    selected_positions = []
+    for centroid in selected_centroids:
+        distances = np.linalg.norm(all_array - centroid, axis=1)
+        closest_idx = np.argmin(distances)
+        selected_positions.append(tuple(all_array[closest_idx]))
+
+    # Ensure we have exactly n positions
+    if len(selected_positions) < n:
+        # Fill with additional points from candidates
+        remaining_needed = n - len(selected_positions)
+        for i in range(min(remaining_needed, len(candidate_points))):
+            selected_positions.append(candidate_points[i])
+    elif len(selected_positions) > n:
+        selected_positions = selected_positions[:n]
+
+    initial_positions = selected_positions
+
+    # Initialize circles with positions and small radii
+    for i in range(n):
+        x, y = initial_positions[i]
+        circles[i] = [x, y, 0.02]
+
+    # Phase 2: Multi-phase Optimization with Adaptive Gradient Descent
+    max_iterations = 5000
+    best_sum_radii = 0
+    best_circles = None
+
+    # Parameters that adapt during optimization
+    learning_rate = 0.2  # More aggressive start
+    penalty_weight = 1.0
+    max_radius_limit = 0.4  # Prevent extremely large radii
+
+    # Optimization phases - optimized parameters
+    phase_1_iterations = 1000
+    phase_2_iterations = 2000
+    phase_3_iterations = 2000
+
+    # Helper function for calculating constraint violations
+    @jit(nopython=True)
+    def compute_violations(positions, radii, width, height, n):
+        """Fast computation of total overlap violation"""
+        total_violation = 0.0
+        for i in range(n):
+            for j in range(i+1, n):
+                dx = positions[i, 0] - positions[j, 0]
+                dy = positions[i, 1] - positions[j, 1]
+                dist = np.sqrt(dx*dx + dy*dy)
+                min_dist = radii[i] + radii[j]
+                if dist < min_dist:
+                    violation = min_dist - dist
+                    total_violation += violation
+        return total_violation
+
+    @jit(nopython=True)
+    def compute_boundary_violations(positions, radii, width, height, n):
+        """Fast computation of boundary violations"""
+        total_violation = 0.0
+        for i in range(n):
+            x, y, r = positions[i, 0], positions[i, 1], radii[i]
+            # Check all four boundaries
+            violations = [r - x, r - y, x + r - width, y + r - height]
+            for v in violations:
+                if v > 0:
+                    total_violation += v
+        return total_violation
+
+    # Phase 1: Aggressive exploration with large steps
+    for iteration in range(phase_1_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Early termination if already optimal
+        if iteration > 100 and iteration % 100 == 0:
+            current_sum = np.sum(radii)
+            if current_sum > best_sum_radii:
+                best_sum_radii = current_sum
+                best_circles = circles.copy()
+
+        # Compute violations
+        total_overlap_violation = compute_violations(positions, radii, container_width, container_height, n)
+        total_boundary_violation = compute_boundary_violations(positions, radii, container_width, container_height, n)
+        
+        # Adaptive penalty based on overall violations
+        penalty_weight = 1.0 + min(0.5, (total_overlap_violation + total_boundary_violation) * 0.01)
+
+        # If there are violations, apply optimization
+        if total_overlap_violation > 1e-6 or total_boundary_violation > 1e-6 or iteration > phase_1_iterations // 2:
+            # Update radii based on available space
+            updated_radii = radii.copy()
+            for i in range(n):
+                max_radius = float('inf')
+
+                # Boundary constraints
+                x, y, r = circles[i]
+                boundary_radius = min(x, container_width - x, y, container_height - y)
+                max_radius = min(max_radius, boundary_radius)
+
+                # Circle-to-circle constraints
+                for j in range(n):
+                    if i != j:
+                        dist = np.sqrt((x - circles[j, 0])**2 + (y - circles[j, 1])**2)
+                        if dist > 0.001:  # Avoid division by zero
+                            max_radius = min(max_radius, dist - circles[j, 2])
+
+                # Limit maximum radius
+                max_radius = min(max_radius, max_radius_limit)
+
+                if max_radius > r and max_radius < float('inf'):
+                    # Adaptive radius increase with penalty consideration
+                    new_r = min(r + learning_rate * 0.5 * (max_radius - r), max_radius)
+                    updated_radii[i] = new_r
+
+            # Apply radius updates only if they improve the sum
+            if np.sum(updated_radii) > np.sum(radii):
+                radii[:] = updated_radii[:]
+
+            # Position optimization with adaptive gradient descent approach
+            # We'll use a simplified gradient approximation for update
+            updated_positions = positions.copy()
+            for i in range(n):
+                x, y, r = circles[i]
+                
+                # Compute gradients via finite differences
+                grad_x = 0.0
+                grad_y = 0.0
+                
+                # Force from other circles (repulsion)
+                for j in range(n):
+                    if i != j:
+                        dx = circles[j, 0] - x
+                        dy = circles[j, 1] - y
+                        dist = np.sqrt(dx*dx + dy*dy)
+                        
+                        if dist < (r + circles[j, 2]) and dist > 0.001:
+                            force_magnitude = (r + circles[j, 2] - dist) / dist
+                            grad_x -= force_magnitude * dx
+                            grad_y -= force_magnitude * dy
+                
+                # Boundary forces
+                if x < r:
+                    grad_x += (r - x) * 2.0
+                if x + r > container_width:
+                    grad_x -= (x + r - container_width) * 2.0
+                if y < r:
+                    grad_y += (r - y) * 2.0
+                if y + r > container_height:
+                    grad_y -= (y + r - container_height) * 2.0
+                
+                # Apply movement with bounds checking
+                new_x = max(r, min(container_width - r, x + learning_rate * grad_x))
+                new_y = max(r, min(container_height - r, y + learning_rate * grad_y))
+                
+                updated_positions[i, 0] = new_x
+                updated_positions[i, 1] = new_y
+
+            # Update positions only if they improve solution
+            # Check if new configuration has better radii sum
+            new_circles = circles.copy()
+            new_circles[:, 0] = updated_positions[:, 0]
+            new_circles[:, 1] = updated_positions[:, 1]
+            
+            if np.sum(new_circles[:, 2]) > np.sum(radii):
+                circles[:, 0] = updated_positions[:, 0]
+                circles[:, 1] = updated_positions[:, 1]
+
+        # Decay learning rate more aggressively in early iterations
+        if iteration < phase_1_iterations // 2:
+            learning_rate *= 0.999
+        else:
+            learning_rate *= 0.9995
+
+        # Global refinement occasionally (more frequent in early iterations)
+        if iteration % 100 == 0 and iteration > 0:
+            # Perturb positions with larger jumps in early iterations
+            perturbation_scale = 0.02 if iteration < 500 else 0.01
+            for i in range(n):
+                x, y, r = circles[i]
+                circles[i] = [max(r, min(container_width - r, x + np.random.normal(0, perturbation_scale))),
+                              max(r, min(container_height - r, y + np.random.normal(0, perturbation_scale))),
+                              r]
+
+    # Phase 2: Refinement with smaller steps
+    learning_rate = 0.05
+    for iteration in range(phase_2_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute violations
+        total_overlap_violation = compute_violations(positions, radii, container_width, container_height, n)
+        total_boundary_violation = compute_boundary_violations(positions, radii, container_width, container_height, n)
+        
+        # Adaptive penalty based on overall violations
+        penalty_weight = 1.0 + min(0.3, (total_overlap_violation + total_boundary_violation) * 0.02)
+
+        # Update radii with more careful adjustments
+        updated_radii = radii.copy()
+        for i in range(n):
+            max_radius = float('inf')
+
+            # Boundary constraints
+            x, y, r = circles[i]
+            boundary_radius = min(x, container_width - x, y, container_height - y)
+            max_radius = min(max_radius, boundary_radius)
+
+            # Circle-to-circle constraints
+            for j in range(n):
+                if i != j:
+                    dist = np.sqrt((x - circles[j, 0])**2 + (y - circles[j, 1])**2)
+                    if dist > 0.001:  # Avoid division by zero
+                        max_radius = min(max_radius, dist - circles[j, 2])
+
+            # Limit maximum radius
+            max_radius = min(max_radius, max_radius_limit)
+
+            if max_radius > r and max_radius < float('inf'):
+                # More conservative radius increase
+                new_r = min(r + learning_rate * 0.3 * (max_radius - r), max_radius)
+                updated_radii[i] = new_r
+
+        # Apply radius updates only if they improve the sum
+        if np.sum(updated_radii) > np.sum(radii):
+            radii[:] = updated_radii[:]
+
+        # Position optimization with gradient-based refinement
+        updated_positions = positions.copy()
+        for i in range(n):
+            x, y, r = circles[i]
+            
+            # Compute gradients via finite differences
+            grad_x = 0.0
+            grad_y = 0.0
+            
+            # Force from other circles (repulsion)
+            for j in range(n):
+                if i != j:
+                    dx = circles[j, 0] - x
+                    dy = circles[j, 1] - y
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    
+                    if dist < (r + circles[j, 2]) and dist > 0.001:
+                        force_magnitude = (r + circles[j, 2] - dist) / dist
+                        grad_x -= force_magnitude * dx
+                        grad_y -= force_magnitude * dy
+            
+            # Boundary forces
+            if x < r:
+                grad_x += (r - x) * 4.0
+            if x + r > container_width:
+                grad_x -= (x + r - container_width) * 4.0
+            if y < r:
+                grad_y += (r - y) * 4.0
+            if y + r > container_height:
+                grad_y -= (y + r - container_height) * 4.0
+            
+            # Apply movement with bounds checking
+            new_x = max(r, min(container_width - r, x + learning_rate * grad_x))
+            new_y = max(r, min(container_height - r, y + learning_rate * grad_y))
+            
+            updated_positions[i, 0] = new_x
+            updated_positions[i, 1] = new_y
+
+        # Update positions only if they improve solution
+        new_circles = circles.copy()
+        new_circles[:, 0] = updated_positions[:, 0]
+        new_circles[:, 1] = updated_positions[:, 1]
+        
+        if np.sum(new_circles[:, 2]) > np.sum(radii):
+            circles[:, 0] = updated_positions[:, 0]
+            circles[:, 1] = updated_positions[:, 1]
+
+        # Decay learning rate
+        learning_rate *= 0.9997
+
+        # Save best configuration
+        current_sum = np.sum(radii)
+        if current_sum > best_sum_radii:
+            best_sum_radii = current_sum
+            best_circles = circles.copy()
+
+    # Phase 3: Fine-tuning
+    learning_rate = 0.01
+    for iteration in range(phase_3_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute violations
+        total_overlap_violation = compute_violations(positions, radii, container_width, container_height, n)
+        total_boundary_violation = compute_boundary_violations(positions, radii, container_width, container_height, n)
+        
+        # Very strict penalty weight in fine-tuning phase
+        penalty_weight = 1.0 + min(0.1, (total_overlap_violation + total_boundary_violation) * 0.05)
+
+        # Update radii with fine adjustments
+        updated_radii = radii.copy()
+        for i in range(n):
+            max_radius = float('inf')
+
+            # Boundary constraints
+            x, y, r = circles[i]
+            boundary_radius = min(x, container_width - x, y, container_height - y)
+            max_radius = min(max_radius, boundary_radius)
+
+            # Circle-to-circle constraints
+            for j in range(n):
+                if i != j:
+                    dist = np.sqrt((x - circles[j, 0])**2 + (y - circles[j, 1])**2)
+                    if dist > 0.001:
+                        max_radius = min(max_radius, dist - circles[j, 2])
+
+            # Limit maximum radius
+            max_radius = min(max_radius, max_radius_limit)
+
+            if max_radius > r and max_radius < float('inf'):
+                # Very slow radius increase
+                new_r = min(r + learning_rate * 0.1 * (max_radius - r), max_radius)
+                updated_radii[i] = new_r
+
+        # Apply radius updates only if they improve the sum
+        if np.sum(updated_radii) > np.sum(radii):
+            radii[:] = updated_radii[:]
+
+        # Position optimization with gradient-based fine-grained movements
+        updated_positions = positions.copy()
+        for i in range(n):
+            x, y, r = circles[i]
+            
+            # Compute gradients via finite differences
+            grad_x = 0.0
+            grad_y = 0.0
+            
+            # Force from other circles (repulsion)
+            for j in range(n):
+                if i != j:
+                    dx = circles[j, 0] - x
+                    dy = circles[j, 1] - y
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    
+                    if dist < (r + circles[j, 2]) and dist > 0.001:
+                        force_magnitude = (r + circles[j, 2] - dist) / dist
+                        grad_x -= force_magnitude * dx
+                        grad_y -= force_magnitude * dy
+            
+            # Boundary forces
+            if x < r:
+                grad_x += (r - x) * 6.0
+            if x + r > container_width:
+                grad_x -= (x + r - container_width) * 6.0
+            if y < r:
+                grad_y += (r - y) * 6.0
+            if y + r > container_height:
+                grad_y -= (y + r - container_height) * 6.0
+            
+            # Apply small movements
+            new_x = max(r, min(container_width - r, x + learning_rate * grad_x))
+            new_y = max(r, min(container_height - r, y + learning_rate * grad_y))
+            
+            updated_positions[i, 0] = new_x
+            updated_positions[i, 1] = new_y
+
+        # Update positions only if they improve solution
+        new_circles = circles.copy()
+        new_circles[:, 0] = updated_positions[:, 0]
+        new_circles[:, 1] = updated_positions[:, 1]
+        
+        if np.sum(new_circles[:, 2]) > np.sum(radii):
+            circles[:, 0] = updated_positions[:, 0]
+            circles[:, 1] = updated_positions[:, 1]
+
+        # Decay learning rate
+        learning_rate *= 0.99995
+
+        # Save best configuration
+        current_sum = np.sum(radii)
+        if current_sum > best_sum_radii:
+            best_sum_radii = current_sum
+            best_circles = circles.copy()
+
+    # Return the best configuration found
+    if best_circles is not None:
+        return best_circles
+
+    # Final cleanup
+    for i in range(n):
+        x, y, r = circles[i]
+        # Ensure circles stay within bounds
+        x = max(r, min(container_width - r, x))
+        y = max(r, min(container_height - r, y))
+        circles[i] = [x, y, r]
+
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

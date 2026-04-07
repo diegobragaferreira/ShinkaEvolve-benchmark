@@ -1,0 +1,342 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.fft import fft, ifft, fftfreq
+import random
+import time
+from typing import List, Tuple
+import numba
+from numba import jit
+from joblib import Parallel, delayed
+import warnings
+
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """Fast numba-based autoconvolution computation"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+    
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@jit(nopython=True) 
+def compute_convolution_norms_fast(g_vals):
+    """Fast computation of convolution norms"""
+    n = len(g_vals)
+    l2_sq = 0.0
+    l1 = 0.0
+    l_inf = 0.0
+    
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+    
+    return l2_sq, l1, l_inf
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation with proper numerical handling
+    """
+    n = len(f_values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    
+    # Ensure non-negative values
+    f_array = np.array(f_values)
+    f_array = np.maximum(f_array, 0.0)
+    
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_fast(f_array)
+    
+    # Compute norms
+    l2_sq, l1, l_inf = compute_convolution_norms_fast(g_vals)
+    
+    # Handle edge cases
+    if l1 <= 1e-15:
+        l1 = 1e-15
+    if l_inf <= 1e-15:
+        l_inf = 1e-15
+        
+    return l2_sq, l1, l_inf
+
+def calculate_c2(f_values: List[float]) -> float:
+    """
+    Calculate the C2 constant from the step function values.
+    """
+    try:
+        g_norm_2_sq, g_norm_1, g_norm_inf = compute_autoconvolution_norms(f_values)
+        c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
+        return c2
+    except:
+        return 0.0
+
+def compute_frequency_spectrum(f_values: List[float]) -> np.ndarray:
+    """Compute the frequency spectrum of the step function"""
+    f_array = np.array(f_values)
+    # Zero-pad to improve FFT accuracy
+    padded = np.pad(f_array, (0, len(f_array)), mode='constant')
+    spectrum = fft(padded)
+    return spectrum
+
+def estimate_convolution_properties(f_values: List[float]) -> Tuple[float, float]:
+    """Estimate key convolution properties from frequency domain"""
+    spectrum = compute_frequency_spectrum(f_values)
+    # Power spectrum
+    power_spectrum = np.abs(spectrum)**2
+    
+    # Estimate how spread out the convolution will be
+    # High frequency components lead to more oscillatory convolution
+    # Low frequency dominance leads to flatter convolution
+    total_power = np.sum(power_spectrum)
+    if total_power > 0:
+        # Ratio of low frequency energy (first 10%) to total
+        low_freq_energy = np.sum(power_spectrum[:len(power_spectrum)//10])
+        low_freq_ratio = low_freq_energy / total_power
+    else:
+        low_freq_ratio = 0.0
+    
+    # Estimate peakiness of convolution (inverse of variance of spectrum)
+    if len(power_spectrum) > 1:
+        variance = np.var(power_spectrum)
+        peakiness = 1.0 / (1e-12 + variance) if variance > 0 else 1e12
+    else:
+        peakiness = 0.0
+    
+    return low_freq_ratio, peakiness
+
+def generate_spectral_initial_function(n: int) -> List[float]:
+    """
+    Create initial function based on spectral properties that should yield good C2 values.
+    This uses frequency-domain reasoning: functions with controlled spectral content
+    tend to produce favorable convolution profiles.
+    """
+    # Create a function that should yield relatively flat convolution
+    # This starts with a low-pass filtered approach
+    
+    # Base: sine wave with controlled harmonics
+    x = np.linspace(0, 2*np.pi, n)
+    
+    # Primary component (fundamental)
+    fundamental = 0.5 + 0.3 * np.sin(x)
+    
+    # Add some mid-frequency components to avoid overly simple patterns
+    harmonic1 = 0.1 * np.sin(3*x)
+    harmonic2 = 0.1 * np.cos(5*x)
+    
+    # Combine
+    combined = fundamental + harmonic1 + harmonic2
+    
+    # Add some localized peaks for better convolution mixing
+    num_peaks = max(1, n // 20)
+    for _ in range(num_peaks):
+        peak_pos = random.randint(0, n-1)
+        combined[peak_pos] += random.uniform(0.3, 0.8)
+    
+    # Ensure non-negativity and reasonable scale
+    combined = np.maximum(combined, 0)
+    combined = combined / (np.max(combined) + 1e-10) * 2.0
+    
+    return combined.tolist()
+
+def generate_broadband_initial_function(n: int) -> List[float]:
+    """
+    Generate broadband initial function that should create diverse convolution patterns
+    """
+    # Start with a base shaped function
+    x = np.linspace(0, 1, n)
+    
+    # Create a multi-scale pattern that should lead to favorable convolution
+    pattern = (
+        0.3 * np.exp(-((x - 0.2)**2) / (2 * 0.1**2)) +
+        0.4 * np.exp(-((x - 0.6)**2) / (2 * 0.1**2)) +
+        0.3 * np.exp(-((x - 0.8)**2) / (2 * 0.1**2))
+    )
+    
+    # Add some noise to prevent too perfect patterns
+    noise = np.random.normal(0, 0.05, n)
+    pattern += noise
+    
+    # Ensure non-negativity
+    pattern = np.maximum(pattern, 0)
+    
+    # Normalize to reasonable values
+    pattern = pattern / (np.max(pattern) + 1e-10) * 1.5
+    
+    return pattern.tolist()
+
+def adaptive_frequency_guided_mutation(individual: List[float], 
+                                     generation: int, 
+                                     max_generations: int,
+                                     spec_properties: Tuple[float, float]) -> List[float]:
+    """
+    Mutate using frequency-domain information to guide the process
+    """
+    mutated = individual.copy()
+    n = len(mutated)
+    
+    # Adaptive mutation rate based on generation and spectral properties
+    base_rate = 0.1 * (1.0 - generation/max_generations)
+    # If we have high low-frequency content, be more conservative
+    if spec_properties[0] > 0.7:
+        base_rate *= 0.5
+        
+    # Mutate each element
+    for i in range(n):
+        if random.random() < base_rate:
+            # Apply mutation with adaptive strength
+            strength = 0.2 * mutated[i] if mutated[i] > 0 else 0.2
+            # Use asymmetric mutation to preserve non-negativity
+            mutation = random.gauss(0, strength)
+            mutated[i] = max(0, mutated[i] + mutation)
+    
+    return mutated
+
+def evaluate_population_parallel(population: List[List[float]]) -> List[float]:
+    """Evaluate population in parallel"""
+    return Parallel(n_jobs=-1, backend='threading')(
+        delayed(calculate_c2)(individual) for individual in population
+    )
+
+def frequency_domain_evolutionary_optimization(max_generations: int = 30, 
+                                             pop_size: int = 25) -> Tuple[List[float], float]:
+    """
+    Evolutionary optimization guided by frequency domain analysis
+    """
+    # Initialize population
+    population = []
+    
+    # Generate diverse initial population using different strategies
+    for i in range(pop_size):
+        if i < pop_size // 3:
+            # Broadband functions
+            n = random.randint(200, 1000)
+            individual = generate_broadband_initial_function(n)
+        elif i < 2 * pop_size // 3:
+            # Spectral-initial functions
+            n = random.randint(200, 1000)
+            individual = generate_spectral_initial_function(n)
+        else:
+            # Simple random
+            n = random.randint(200, 1000)
+            individual = [random.uniform(0.1, 1.5) for _ in range(n)]
+        
+        population.append(individual)
+    
+    best_overall_c2 = 0.0
+    best_overall_solution = None
+    
+    for gen in range(max_generations):
+        # Evaluate population in parallel
+        fitnesses = evaluate_population_parallel(population)
+        
+        # Track best solution
+        max_fitness_idx = np.argmax(fitnesses)
+        current_best_c2 = fitnesses[max_fitness_idx]
+        
+        if current_best_c2 > best_overall_c2:
+            best_overall_c2 = current_best_c2
+            best_overall_solution = population[max_fitness_idx].copy()
+        
+        # Sort by fitness descending
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+        
+        # Elitism: keep top 2
+        elite = sorted_population[:2]
+        
+        # Create new population
+        new_population = elite.copy()
+        
+        # Generate offspring through crossover and mutation with frequency guidance
+        while len(new_population) < pop_size:
+            # Tournament selection based on fitness
+            tournament_size = 3
+            tournament_indices = random.sample(range(len(sorted_population)), tournament_size)
+            tournament_fitnesses = [sorted_fitnesses[i] for i in tournament_indices]
+            parent_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+            
+            parent = sorted_population[parent_idx].copy()
+            
+            # Some crossover with another random parent
+            if random.random() < 0.7:
+                other_parent = random.choice(sorted_population)
+                # Uniform crossover
+                child = []
+                for i in range(len(parent)):
+                    if random.random() < 0.5:
+                        child.append(parent[i])
+                    else:
+                        child.append(other_parent[i] if i < len(other_parent) else parent[i])
+                child = child[:len(parent)]  # Trim to correct length
+            else:
+                child = parent
+            
+            # Frequency-guided mutation
+            spec_props = estimate_convolution_properties(child)
+            mutated_child = adaptive_frequency_guided_mutation(
+                child, gen, max_generations, spec_props
+            )
+            
+            new_population.append(mutated_child)
+        
+        population = new_population[:pop_size]
+    
+    return best_overall_solution, best_overall_c2
+
+def construct_function() -> List[float]:
+    """
+    Function to construct step-function with high C2 value.
+    Uses frequency-domain guided evolutionary optimization.
+    """
+    start_time = time.time()
+    
+    # Set seeds for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Use frequency domain evolutionary optimization
+    try:
+        final_solution, final_c2 = frequency_domain_evolutionary_optimization(
+            max_generations=25, 
+            pop_size=25
+        )
+        
+        # Ensure we return a valid solution
+        if final_solution is not None:
+            # Final validation check
+            validate_c2 = calculate_c2(final_solution)
+            if validate_c2 > final_c2:
+                final_c2 = validate_c2
+        else:
+            # Fallback to simple function
+            final_solution = generate_spectral_initial_function(500)
+            final_c2 = calculate_c2(final_solution)
+            
+        # Make sure we have a reasonable minimum
+        if final_c2 < 0.1:
+            final_solution = generate_spectral_initial_function(500)
+            final_c2 = calculate_c2(final_solution)
+            
+        end_time = time.time()
+        return final_solution
+        
+    except Exception as e:
+        # Final fallback
+        print(f"Error occurred: {e}")
+        return generate_spectral_initial_function(500)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,296 @@
+<NAME>
+add_hybrid_evolutionary_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces a hybrid approach combining evolutionary algorithms with local optimization to better balance exploration and exploitation. The key insight is to use a more sophisticated multi-start strategy that includes a population-based differential evolution phase followed by focused local refinement. This addresses the problem's need for both global search capability (to escape local optima) and precise local optimization (to refine good solutions). The change adds a new optimization loop that runs evolutionary algorithms first to discover promising regions, then applies local optimization to polish those solutions, which should help achieve better ratios than the current implementation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_adaptive_restarts(initial_configs, max_time=170):
+        """Run optimization with multiple restarts using adaptive strategies"""
+        best_ratio = -np.inf
+        best_points = None
+        start_time = time.time()
+
+        # Track performance history for adaptive strategy
+        performance_history = []
+
+        # Sort initial configs by quality (descending)
+        initial_ratios = [compute_min_max_ratio(cfg) for cfg in initial_configs]
+        sorted_indices = np.argsort(initial_ratios)[::-1]
+        sorted_configs = [initial_configs[i] for i in sorted_indices]
+
+        # Try multiple different initial configurations
+        for i, init_points in enumerate(sorted_configs):
+            try:
+                # Early termination check
+                remaining_time = max_time - (time.time() - start_time)
+                if remaining_time <= 10:
+                    break
+
+                # Evaluate initial configuration quality
+                initial_ratio = compute_min_max_ratio(init_points)
+
+                # Flatten for optimization
+                x0 = init_points.flatten()
+
+                # Define bounds for each coordinate (0 to 1)
+                bounds = [(0, 1) for _ in range(32)]
+
+                # Adaptive optimization based on initial quality
+                if initial_ratio > 0.25:  # Very high quality starting point
+                    # Focus on local refinement with highest precision
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 2000, 'ftol': 1e-15, 'gtol': 1e-15}
+                    )
+                elif initial_ratio > 0.22:  # High quality starting point
+                    # Use L-BFGS-B with high precision
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1500, 'ftol': 1e-13, 'gtol': 1e-13}
+                    )
+                elif initial_ratio > 0.18:  # Medium-high quality starting point
+                    # Use L-BFGS-B with moderate precision
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1200, 'ftol': 1e-12, 'gtol': 1e-12}
+                    )
+                elif initial_ratio > 0.15:  # Medium quality starting point
+                    # Use L-BFGS-B with moderate tolerances
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1000, 'ftol': 1e-10, 'gtol': 1e-10}
+                    )
+                else:  # Low quality starting point
+                    # Use differential evolution for global search first with aggressive settings
+                    de_timeout = min(remaining_time * 0.4, 60)
+                    if de_timeout > 15:
+                        try:
+                            result_de = differential_evolution(
+                                objective_with_regularization,
+                                bounds,
+                                seed=42,
+                                maxiter=int(de_timeout/3),
+                                popsize=min(30, 16 * 3),  # Increased population size
+                                mutation=(0.8, 1),        # Higher mutation rate
+                                recombination=0.9,        # Higher recombination rate
+                                tol=1e-9                  # Stricter tolerance
+                            )
+
+                            if result_de.success:
+                                # Use differential evolution result as starting point for refinement
+                                x0 = result_de.x
+                        except:
+                            pass
+
+                    # Local optimization with L-BFGS-B
+                    lbfgs_timeout = remaining_time - de_timeout if de_timeout > 15 else remaining_time
+                    if lbfgs_timeout > 10:
+                        try:
+                            result = minimize(
+                                objective_with_regularization,
+                                x0,
+                                method='L-BFGS-B',
+                                bounds=bounds,
+                                options={'maxiter': 800, 'ftol': 1e-9, 'gtol': 1e-9}
+                            )
+                        except:
+                            # Fallback to basic optimization
+                            result = type('obj', (object,), {'x': x0, 'success': True})()
+                    else:
+                        # Skip local optimization if time is too limited
+                        result = type('obj', (object,), {'x': x0, 'success': True})()
+
+                if hasattr(result, 'success') and result.success:
+                    # Extract final points
+                    final_points = result.x.reshape(-1, 2)
+
+                    # Compute actual ratio
+                    ratio = compute_min_max_ratio(final_points)
+
+                    # Store performance history
+                    performance_history.append((ratio, initial_ratio))
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Optimization failed for initial config {i}: {e}")
+                continue
+
+        # If no successful optimization, return the best initial configuration
+        if best_points is None:
+            return sorted_configs[0]
+
+        return best_points
+=======
+    def optimize_with_hybrid_approach(initial_configs, max_time=170):
+        """Run hybrid optimization using evolutionary algorithms and local refinement"""
+        best_ratio = -np.inf
+        best_points = None
+        start_time = time.time()
+
+        # First, run a population-based evolutionary optimization to find promising regions
+        # This helps avoid getting stuck in poor local optima
+        evolutionary_configs = []
+
+        # Try a few different starting configurations for evolutionary approach
+        for i in range(min(3, len(initial_configs))):
+            init_points = initial_configs[i].copy()
+            try:
+                bounds = [(0, 1) for _ in range(32)]
+
+                # Run differential evolution on a subset of initial configurations
+                de_timeout = min(max_time * 0.3, 50)
+                if de_timeout > 20:
+                    result_de = differential_evolution(
+                        objective_with_regularization,
+                        bounds,
+                        seed=42,
+                        maxiter=int(de_timeout/2),
+                        popsize=min(30, 16 * 2),
+                        mutation=(0.7, 1),
+                        recombination=0.8,
+                        tol=1e-10
+                    )
+
+                    if result_de.success:
+                        de_points = result_de.x.reshape(-1, 2)
+                        evolutionary_configs.append(de_points)
+            except:
+                pass
+
+        # Combine evolutionary results with initial configurations
+        all_configs = initial_configs + evolutionary_configs
+
+        # Sort all configurations by quality
+        all_ratios = [compute_min_max_ratio(cfg) for cfg in all_configs]
+        sorted_indices = np.argsort(all_ratios)[::-1]
+        sorted_configs = [all_configs[i] for i in sorted_indices]
+
+        # Now apply adaptive local optimization to top candidates
+        for i, init_points in enumerate(sorted_configs):
+            try:
+                # Early termination check
+                remaining_time = max_time - (time.time() - start_time)
+                if remaining_time <= 5:
+                    break
+
+                # Evaluate initial configuration quality
+                initial_ratio = compute_min_max_ratio(init_points)
+
+                # Flatten for optimization
+                x0 = init_points.flatten()
+
+                # Define bounds for each coordinate (0 to 1)
+                bounds = [(0, 1) for _ in range(32)]
+
+                # Use a more aggressive multi-stage local optimization approach
+                if initial_ratio > 0.25:  # Very high quality starting point
+                    # Multi-stage refinement with decreasing tolerances
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1500, 'ftol': 1e-15, 'gtol': 1e-15}
+                    )
+                elif initial_ratio > 0.20:  # High quality starting point
+                    # Aggressive refinement
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1200, 'ftol': 1e-13, 'gtol': 1e-13}
+                    )
+                elif initial_ratio > 0.15:  # Medium quality starting point
+                    # Moderate refinement
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+                    )
+                else:  # Low quality starting point
+                    # More thorough local optimization
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 800, 'ftol': 1e-11, 'gtol': 1e-11}
+                    )
+
+                if hasattr(result, 'success') and result.success:
+                    # Extract final points
+                    final_points = result.x.reshape(-1, 2)
+
+                    # Compute actual ratio
+                    ratio = compute_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Optimization failed for config {i}: {e}")
+                continue
+
+        # If no successful optimization, return the best initial configuration
+        if best_points is None:
+            return sorted_configs[0] if sorted_configs else initial_configs[0] if initial_configs else np.random.rand(16, 2)
+
+        return best_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Optimize with adaptive restarts
+    try:
+        final_points = optimize_with_adaptive_restarts(initial_configs, max_time=165)
+    except Exception as e:
+        warnings.warn(f"Optimization failed: {e}")
+        # Fallback to the best initial configuration
+        best_initial = max(initial_configs, key=lambda x: compute_min_max_ratio(x))
+        final_points = best_initial
+
+    # Ensure final points are within bounds
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+=======
+    # Optimize with hybrid approach
+    try:
+        final_points = optimize_with_hybrid_approach(initial_configs, max_time=165)
+    except Exception as e:
+        warnings.warn(f"Optimization failed: {e}")
+        # Fallback to the best initial configuration
+        best_initial = max(initial_configs, key=lambda x: compute_min_max_ratio(x))
+        final_points = best_initial
+
+    # Ensure final points are within bounds
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+>>>>>>> REPLACE
+</DIFF>

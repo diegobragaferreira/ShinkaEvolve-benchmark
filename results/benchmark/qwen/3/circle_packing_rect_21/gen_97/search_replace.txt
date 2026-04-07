@@ -1,0 +1,153 @@
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the local search algorithm with more sophisticated optimization techniques. The current implementation uses simple random perturbations which can be inefficient. I propose implementing a more intelligent local search that:
+
+1. Uses a combination of gradient-free optimization strategies (Nelder-Mead style) instead of purely random moves
+2. Implements a more systematic exploration around each circle's current position
+3. Adds momentum-based updates to maintain progress direction
+4. Uses adaptive neighborhood sizes based on iteration progress
+
+This will help escape local optima more effectively and converge faster to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100) -> np.ndarray:
+        """Perform local refinement to improve circle configuration"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes
+        step_sizes = [0.05, 0.03, 0.01]
+
+        for iter_num in range(iterations):
+            # Decrease step size over time
+            step_size = step_sizes[min(iter_num // 30, len(step_sizes)-1)]
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Try several moves with random directions
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Try different perturbations
+                test_moves = [
+                    (step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)),
+                    (step_size * random.gauss(0, 1), 0),
+                    (0, step_size * random.gauss(0, 1)),
+                    (0, 0)
+                ]
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if is_valid_configuration(temp_circles, rect_width, rect_height):
+                        new_sum = calculate_radius_sum(temp_circles)
+                        if new_sum > best_sum:
+                            best_sum = new_sum
+                            best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+        return current
+=======
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100) -> np.ndarray:
+        """Perform local refinement to improve circle configuration with enhanced search strategies"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes with momentum tracking
+        step_sizes = [0.05, 0.03, 0.01]
+        momentum = np.zeros((len(current), 2))  # Track momentum for each circle
+
+        for iter_num in range(iterations):
+            # Decrease step size over time and adapt based on progress
+            step_size = step_sizes[min(iter_num // 30, len(step_sizes)-1)]
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Track best improvement found
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Enhanced search with momentum and adaptive neighborhood
+                search_directions = []
+
+                # 1. Current momentum direction (if exists)
+                if iter_num > 0 and np.linalg.norm(momentum[i]) > 0.001:
+                    search_directions.append(momentum[i] * step_size)
+
+                # 2. Random directions with decreasing variance
+                variance = max(0.001, step_size * (1.0 - iter_num/iterations))
+                search_directions.extend([
+                    (variance * random.gauss(0, 1), variance * random.gauss(0, 1)),
+                    (variance * random.gauss(0, 1), 0),
+                    (0, variance * random.gauss(0, 1)),
+                    (step_size * random.choice([-1, 1]), 0),
+                    (0, step_size * random.choice([-1, 1]))
+                ])
+
+                # 3. Grid-based search for structured exploration
+                if iter_num > iterations // 4:
+                    grid_steps = [step_size*0.5, step_size*0.75, step_size]
+                    for dx in grid_steps:
+                        for dy in grid_steps:
+                            search_directions.extend([(dx, dy), (-dx, dy), (dx, -dy), (-dx, -dy)])
+
+                # Try different perturbations
+                for dx, dy in search_directions:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if is_valid_configuration(temp_circles, rect_width, rect_height):
+                        new_sum = calculate_radius_sum(temp_circles)
+                        if new_sum > best_sum:
+                            best_sum = new_sum
+                            best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+                    # Update momentum
+                    momentum[i] = np.array([best_x - original_x, best_y - original_y])
+                else:
+                    # Reduce momentum decay when no improvement
+                    momentum[i] *= 0.8
+
+        return current
+>>>>>>> REPLACE
+</DIFF>

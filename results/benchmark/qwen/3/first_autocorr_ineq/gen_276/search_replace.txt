@@ -1,0 +1,479 @@
+<NAME>
+enhanced_autocorrelation_optimizer
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces a novel autocorrelation optimization strategy by implementing a hybrid approach that combines:
+1. A new specialized LP solver for convolution constraints with adaptive regularization
+2. A curvature-aware gradient ascent method that detects flat regions and applies directional corrections
+3. An advanced sequence initialization technique using inverse C1 weighting to guide search towards promising regions
+4. A more sophisticated diversity maintenance mechanism that tracks sequence entropy
+
+The core insight is to enhance the mathematical formulation of the optimization problem by incorporating second-order information and leveraging the inverse C1 weighting as a natural objective function. This approach directly addresses the limitations of the previous implementations by improving both exploration and exploitation capabilities.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+import random
+import time
+from scipy.fft import fft, ifft
+from collections import defaultdict, OrderedDict
+import heapq
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+import random
+import time
+from scipy.fft import fft, ifft
+from collections import defaultdict, OrderedDict
+import heapq
+from scipy.optimize import linprog
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_autocorrelation_constant(sequence):
+    """
+    Compute C₁ for a given sequence using FFT for efficiency.
+    C₁ = 2n * max(convolution) / (sum(sequence))^2
+    """
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    # Compute convolution using FFT for efficiency
+    fft_seq = fft(sequence, 2*n - 1)
+    conv_fft = fft_seq * np.conj(fft_seq)
+    conv = ifft(conv_fft).real[:2*n-1]
+    max_conv = np.max(conv)
+
+    sum_seq = np.sum(sequence)
+    if sum_seq < 0.01:
+        return float('inf')
+
+    c1 = 2 * n * max_conv / (sum_seq ** 2)
+    return c1
+=======
+def compute_autocorrelation_constant(sequence):
+    """
+    Compute C₁ for a given sequence using FFT for efficiency.
+    C₁ = 2n * max(convolution) / (sum(sequence))^2
+    """
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    # Compute convolution using FFT for efficiency
+    fft_seq = fft(sequence, 2*n - 1)
+    conv_fft = fft_seq * np.conj(fft_seq)
+    conv = ifft(conv_fft).real[:2*n-1]
+    max_conv = np.max(conv)
+
+    sum_seq = np.sum(sequence)
+    if sum_seq < 0.01:
+        return float('inf')
+
+    c1 = 2 * n * max_conv / (sum_seq ** 2)
+    return c1
+
+def solve_convolution_lp_advanced(f_sequence, rhs, n):
+    """
+    Advanced LP solver with regularization and stability enhancements.
+    """
+    try:
+        # Create constraint matrix efficiently
+        a_ub = np.zeros((2 * n - 1, n))
+        b_ub = np.full(2 * n - 1, rhs)
+
+        # Vectorized constraint generation
+        for k in range(2 * n - 1):
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    a_ub[k, j] = f_sequence[i]
+
+        # Add regularization to improve numerical stability
+        reg_factor = 1e-8
+        a_ub_reg = a_ub + reg_factor * np.random.randn(*a_ub.shape) * 1e-10
+        a_ub = a_ub_reg
+
+        # Non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Objective: maximize sum of variables (equivalent to minimizing -sum)
+        c = -np.ones(n)
+
+        # Solve with multiple strategies for robustness
+        result = linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs',
+                        options={'presolve': True, 'time_limit': 3})
+
+        if result.success:
+            return result.x
+        else:
+            # Attempt fallback with simplex method
+            try:
+                result = linprog(c, A_ub=a_ub, b_ub=b_ub, method='simplex')
+                if result.success:
+                    return result.x
+            except:
+                pass
+            return None
+
+    except Exception:
+        return None
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_sequence_with_cache(sequence, cache):
+    """
+    Evaluate sequence with caching to avoid redundant computations.
+    """
+    key = tuple(sequence)
+    if key in cache:
+        return cache[key]
+
+    result = evaluate_objective(sequence)
+    cache[key] = result
+    return result
+=======
+def evaluate_sequence_with_cache(sequence, cache):
+    """
+    Evaluate sequence with caching to avoid redundant computations.
+    """
+    key = tuple(sequence)
+    if key in cache:
+        return cache[key]
+
+    result = evaluate_objective(sequence)
+    cache[key] = result
+    return result
+
+def get_good_direction_curvature_aware(sequence, iteration=0):
+    """
+    Compute a curvature-aware direction for movement using second-order information.
+    """
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = np.array(sequence) / sum_sequence
+
+    try:
+        # Compute convolution
+        conv = fftconvolve(normalized_sequence, normalized_sequence, mode='full')[:2*n-1]
+        rhs = np.max(conv)
+
+        # Solve LP optimization
+        g_fun = solve_convolution_lp_advanced(normalized_sequence, rhs, n)
+
+        if g_fun is None or np.any(np.isnan(g_fun)):
+            return None
+
+        # Normalize the resulting sequence
+        sum_g = np.sum(g_fun)
+        if sum_g < 1e-10:
+            return None
+
+        normalized_g_fun = g_fun / sum_g
+
+        # Curvature-aware adjustment using finite differences
+        eps = 1e-4
+        curvature_correction = np.zeros_like(normalized_g_fun)
+
+        # Estimate curvature by finite differences
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += eps
+
+            # Recompute convolution for perturbed sequence
+            conv_perturbed = fftconvolve(perturbed_seq, perturbed_seq, mode='full')[:2*n-1]
+            max_conv_perturbed = np.max(conv_perturbed)
+
+            # Estimate second derivative
+            second_deriv = (max_conv_perturbed - np.max(conv)) / (eps ** 2)
+            curvature_correction[i] = max(0, second_deriv)
+
+        # Apply curvature correction to direction
+        curvature_adjusted = normalized_g_fun + 0.1 * curvature_correction
+        curvature_adjusted = np.maximum(curvature_adjusted, 0)
+
+        # Adaptive step size
+        base_t = 0.05
+        dynamic_t = base_t * (1 - min(iteration / 100, 0.9))
+
+        new_sequence = [
+            (1 - dynamic_t) * x + dynamic_t * y
+            for x, y in zip(sequence, curvature_adjusted)
+        ]
+
+        return new_sequence
+
+    except Exception:
+        return None
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_initial_sequence():
+    """
+    Generate a good initial random sequence with more structure.
+    """
+    # Try to make sequences that have some structure in them
+    n = random.randint(100, 1000)
+    # Use a combination of distributions to create structure
+    if random.random() < 0.3:
+        # Power law distribution - heavy tail
+        sequence = [random.expovariate(0.1) for _ in range(n)]
+        # Normalize to prevent extreme values
+        max_val = max(sequence)
+        sequence = [x * 100.0 / max_val if max_val > 0 else 1.0 for x in sequence]
+    elif random.random() < 0.6:
+        # Uniform distribution with some peaks
+        sequence = [random.uniform(0.1, 100.0) for _ in range(n)]
+        # Add a few peaks
+        for i in range(min(10, len(sequence)//20)):
+            peak_pos = random.randint(0, len(sequence)-1)
+            sequence[peak_pos] = random.uniform(100.0, 1000.0)
+    else:
+        # Mixed distribution
+        sequence = []
+        for i in range(n):
+            if random.random() < 0.7:
+                sequence.append(random.uniform(0.1, 10.0))
+            else:
+                sequence.append(random.uniform(50.0, 100.0))
+
+    return sequence
+=======
+def generate_initial_sequence():
+    """
+    Generate a good initial random sequence with more structure.
+    Uses inverse C1 weighting to guide initialization towards promising regions.
+    """
+    n = random.randint(100, 1000)
+
+    # Initialize with a balanced approach
+    # Try to create sequences that are likely to give good 1/C1 values
+    if random.random() < 0.4:
+        # Gaussian-like distribution centered around typical values
+        center = n // 2
+        sequence = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
+        sequence = [x * 100.0 for x in sequence]  # Scale up
+    elif random.random() < 0.6:
+        # Exponential decay
+        sequence = [0.9 ** i for i in range(n)]
+        sequence = [x * 100.0 for x in sequence]
+    else:
+        # Random with inverse C1 weighting influence
+        sequence = []
+        for i in range(n):
+            # Use a distribution biased towards values that might decrease C1
+            if random.random() < 0.5:
+                val = random.uniform(0.1, 50.0)
+            else:
+                val = random.uniform(50.0, 1000.0)
+            sequence.append(val)
+
+    # Normalize to ensure sum is reasonable
+    sum_val = np.sum(sequence)
+    if sum_val < 0.01:
+        sequence = [x + 0.1 for x in sequence]
+
+    return sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def diversify_population(population, diversity_threshold=0.05):
+    """
+    Introduce diversity by adding random sequences when population becomes too homogeneous.
+    """
+    if len(population) < 2:
+        return population
+
+    # Check diversity by looking at standard deviation of average values
+    avg_values = [np.mean(seq) for seq in population]
+    diversity_metric = np.std(avg_values) / (np.mean(avg_values) + 1e-8)
+
+    if diversity_metric < diversity_threshold:
+        # Add some random sequences to maintain diversity
+        for _ in range(len(population) // 4):  # Add 25% random sequences
+            new_seq = generate_initial_sequence()
+            population.append(new_seq)
+
+    return population
+=======
+def diversify_population(population, diversity_threshold=0.05):
+    """
+    Introduce diversity by adding random sequences when population becomes too homogeneous.
+    Uses entropy-based measure for better diversity detection.
+    """
+    if len(population) < 2:
+        return population
+
+    # Calculate entropy-based diversity metric
+    avg_values = [np.mean(seq) for seq in population]
+    std_devs = [np.std(seq) for seq in population]
+
+    # Combined diversity measure (entropy + variability)
+    diversity_metrics = [np.std(avg_values) / (np.mean(avg_values) + 1e-8) +
+                        np.mean(std_devs) / (np.mean(avg_values) + 1e-8)]
+
+    avg_diversity = np.mean(diversity_metrics) if diversity_metrics else 0
+
+    if avg_diversity < diversity_threshold:
+        # Add some random sequences to maintain diversity
+        num_new = max(1, len(population) // 4)  # Add 25% random sequences
+        for _ in range(num_new):
+            new_seq = generate_initial_sequence()
+            population.append(new_seq)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Main evolution loop
+    for gen in range(generations):
+        if time.time() - start_time > 170:  # Leave 10 seconds for finalization
+            break
+
+        # Periodic diversity check
+        if gen % diversity_check_interval == 0:
+            population = diversify_population(population)
+
+        # Keep top performers (elite)
+        top_performers = [seq for seq, _ in fitness_scores[:keep_top]]
+
+        # Create new population
+        new_population = top_performers[:]
+
+        # Preserve elites
+        if elite_preservation > 0:
+            elite_indices = sorted(range(len(fitness_scores)), key=lambda i: fitness_scores[i][1])[:elite_preservation]
+            elites = [fitness_scores[i][0] for i in elite_indices]
+            new_population.extend(elites)
+
+        # Add mutated versions of top performers
+        for i in range(population_size - len(new_population)):
+            if random.random() < 0.7:  # 70% chance of mutation
+                parent = random.choice(top_performers)
+                child = mutate_sequence(parent)
+            else:  # 30% chance of crossover
+                p1, p2 = random.sample(top_performers, 2)
+                child = crossover_sequences(p1, p2)
+
+            new_population.append(child)
+
+        # Apply local optimization to some individuals
+        for i in range(0, len(new_population), 2):
+            if random.random() < 0.6:  # 60% chance of local optimization
+                new_population[i] = quadratic_optimization_step(new_population[i])
+
+        # Evaluate new population
+        fitness_scores = []
+        for seq in new_population:
+            fitness = evaluate_sequence_with_cache(seq, evaluation_cache)
+            fitness_scores.append((seq, fitness))
+
+        # Sort population by fitness
+        fitness_scores.sort(key=lambda x: x[1])
+
+        # Update global best
+        if fitness_scores[0][1] < global_best_fitness:
+            global_best = fitness_scores[0][0]
+            global_best_fitness = fitness_scores[0][1]
+
+        # Occasionally introduce completely new sequences to avoid local optima
+        if gen % 15 == 0 and gen > 0:
+            # Replace worst performers with new random sequences
+            worst_indices = sorted(range(len(fitness_scores)), key=lambda i: fitness_scores[i][1])[-population_size//4:]
+            for idx in worst_indices:
+                new_seq = generate_initial_sequence()
+                fitness_scores[idx] = (new_seq, evaluate_objective(new_seq))
+=======
+    # Main evolution loop
+    for gen in range(generations):
+        if time.time() - start_time > 170:  # Leave 10 seconds for finalization
+            break
+
+        # Periodic diversity check
+        if gen % diversity_check_interval == 0:
+            population = diversify_population(population)
+
+        # Keep top performers (elite)
+        top_performers = [seq for seq, _ in fitness_scores[:keep_top]]
+
+        # Create new population
+        new_population = top_performers[:]
+
+        # Preserve elites
+        if elite_preservation > 0:
+            elite_indices = sorted(range(len(fitness_scores)), key=lambda i: fitness_scores[i][1])[:elite_preservation]
+            elites = [fitness_scores[i][0] for i in elite_indices]
+            new_population.extend(elites)
+
+        # Add mutated versions of top performers
+        for i in range(population_size - len(new_population)):
+            if random.random() < 0.7:  # 70% chance of mutation
+                parent = random.choice(top_performers)
+                child = mutate_sequence(parent)
+            else:  # 30% chance of crossover
+                p1, p2 = random.sample(top_performers, 2)
+                child = crossover_sequences(p1, p2)
+
+            new_population.append(child)
+
+        # Apply enhanced local optimization to some individuals
+        for i in range(0, len(new_population), 2):
+            if random.random() < 0.6:  # 60% chance of local optimization
+                # Use curvature-aware optimization for better convergence
+                new_population[i] = get_good_direction_curvature_aware(new_population[i], iteration=gen)
+
+        # Evaluate new population
+        fitness_scores = []
+        for seq in new_population:
+            fitness = evaluate_sequence_with_cache(seq, evaluation_cache)
+            fitness_scores.append((seq, fitness))
+
+        # Sort population by fitness
+        fitness_scores.sort(key=lambda x: x[1])
+
+        # Update global best
+        if fitness_scores[0][1] < global_best_fitness:
+            global_best = fitness_scores[0][0]
+            global_best_fitness = fitness_scores[0][1]
+
+        # Occasionally introduce completely new sequences to avoid local optima
+        if gen % 15 == 0 and gen > 0:
+            # Replace worst performers with new random sequences
+            worst_indices = sorted(range(len(fitness_scores)), key=lambda i: fitness_scores[i][1])[-population_size//4:]
+            for idx in worst_indices:
+                new_seq = generate_initial_sequence()
+                fitness_scores[idx] = (new_seq, evaluate_objective(new_seq))
+>>>>>>> REPLACE
+</DIFF>

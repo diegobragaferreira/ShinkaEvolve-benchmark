@@ -1,0 +1,263 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+import math
+from itertools import product
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2
+    # Using width=1.2, height=0.8 for a reasonable aspect ratio
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Initialize with a simple hexagonal-like pattern as starting point
+    circles = np.zeros((21, 3))
+    
+    # Predefine a grid of candidate positions
+    grid_size = 5
+    x_positions = np.linspace(0.05, rect_width - 0.05, grid_size)
+    y_positions = np.linspace(0.05, rect_height - 0.05, grid_size)
+    
+    # Generate candidate positions
+    candidates = []
+    for x in x_positions:
+        for y in y_positions:
+            candidates.append((x, y))
+    
+    # Initialize with some circles placed strategically
+    # Try to place circles in a way that maximizes initial radii
+    current_circles = []
+    max_radius = min(rect_width, rect_height) / 4.0
+    
+    # Try to place circles in corners and center
+    corner_positions = [
+        (rect_width * 0.1, rect_height * 0.1),
+        (rect_width * 0.9, rect_height * 0.1),
+        (rect_width * 0.1, rect_height * 0.9),
+        (rect_width * 0.9, rect_height * 0.9),
+        (rect_width / 2, rect_height / 2)
+    ]
+    
+    # Place a few circles at strategic locations
+    placed_count = 0
+    for x, y in corner_positions[:5]:
+        if placed_count >= 5:
+            break
+        # Compute maximum possible radius at this position
+        min_dist_to_edge = min(x, rect_width - x, y, rect_height - y)
+        max_rad = min_dist_to_edge * 0.9
+        if max_rad > 0.01:
+            current_circles.append([x, y, max_rad])
+            placed_count += 1
+    
+    # Fill remaining slots with greedy placement
+    remaining_slots = 21 - len(current_circles)
+    
+    # Try different strategies to fill remaining slots
+    if remaining_slots > 0:
+        # Create list of all valid candidate positions
+        valid_positions = []
+        for x in np.linspace(0.05, rect_width - 0.05, 10):
+            for y in np.linspace(0.05, rect_height - 0.05, 10):
+                valid_positions.append((x, y))
+        
+        # Greedy approach: place circles one by one
+        for _ in range(remaining_slots):
+            best_pos = None
+            best_radius = 0
+            
+            for x, y in valid_positions:
+                # Calculate maximum possible radius at this position without overlapping
+                min_dist_to_edges = min(x, rect_width - x, y, rect_height - y)
+                max_rad = min_dist_to_edges
+                
+                # Check overlap with existing circles
+                for cx, cy, cr in current_circles:
+                    dist = math.sqrt((x - cx)**2 + (y - cy)**2)
+                    if dist < max_rad + cr:
+                        # Cannot place here
+                        max_rad = 0
+                        break
+                
+                if max_rad > best_radius:
+                    best_radius = max_rad
+                    best_pos = (x, y)
+            
+            if best_pos and best_radius > 0.001:
+                current_circles.append([best_pos[0], best_pos[1], best_radius])
+    
+    # Final adjustment using optimization
+    def objective(radii):
+        # Reconstruct circles from x,y,r components
+        total_radius = 0
+        for i, (cx, cy) in enumerate(zip(circle_centers_x, circle_centers_y)):
+            if i < len(radii):
+                total_radius += radii[i]
+        return -total_radius  # Negative because we want to maximize
+    
+    def constraint_func(radii):
+        # Constraint: no overlaps
+        constraints = []
+        for i in range(len(current_circles)):
+            for j in range(i+1, len(current_circles)):
+                if i < len(radii) and j < len(radii):
+                    cx1, cy1, _ = current_circles[i]
+                    cx2, cy2, _ = current_circles[j]
+                    r1 = radii[i] if i < len(radii) else current_circles[i][2]
+                    r2 = radii[j] if j < len(radii) else current_circles[j][2]
+                    
+                    dist = math.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+                    # Distance constraint: must be >= sum of radii
+                    constraints.append(dist - (r1 + r2))  # Should be >= 0
+        
+        return np.array(constraints)
+    
+    # Optimization approach: try to slightly adjust the configuration
+    # Let's extract current circle positions and radii
+    circle_centers_x = [c[0] for c in current_circles]
+    circle_centers_y = [c[1] for c in current_circles]
+    initial_radii = [c[2] for c in current_circles]
+    
+    # Create bounds for optimization
+    bounds = [(0.001, rect_width/2) for _ in range(21)]
+    
+    # Simplified refinement approach
+    # Adjust radii only for now to see if improvement is possible
+    optimized_radii = []
+    for i, (cx, cy, cr) in enumerate(current_circles):
+        # Calculate how much we could increase the radius
+        min_dist_to_edges = min(abs(cx), abs(rect_width - cx), abs(cy), abs(rect_height - cy))
+        min_dist_to_others = float('inf')
+        
+        for j, (cx2, cy2, _) in enumerate(current_circles):
+            if i != j:
+                dist = math.sqrt((cx - cx2)**2 + (cy - cy2)**2)
+                min_dist_to_others = min(min_dist_to_others, dist)
+        
+        # Maximum radius is limited by both edges and other circles
+        max_possible_radius = min(min_dist_to_edges, min_dist_to_others/2.0)
+        
+        # Take a reasonable portion of that
+        final_radius = max(0.001, min(max_possible_radius, cr * 1.1))
+        optimized_radii.append(final_radius)
+    
+    # Final result construction
+    circles = np.zeros((21, 3))
+    for i, (cx, cy, _) in enumerate(current_circles):
+        circles[i] = [cx, cy, optimized_radii[i]]
+    
+    # Small local optimization
+    def get_total_radius():
+        return np.sum(circles[:, 2])
+    
+    # Try several local adjustments to improve sum
+    best_sum = get_total_radius()
+    best_circles = circles.copy()
+    
+    # Perform simulated annealing-inspired local search
+    for _ in range(100):  # Limited iterations for time constraint
+        # Perturb one circle at a time
+        test_circles = circles.copy()
+        circle_idx = np.random.randint(0, 21)
+        
+        # Slight perturbation to position
+        test_circles[circle_idx, 0] += np.random.normal(0, 0.01)
+        test_circles[circle_idx, 1] += np.random.normal(0, 0.01)
+        
+        # Keep within bounds
+        test_circles[circle_idx, 0] = np.clip(test_circles[circle_idx, 0], 0.01, rect_width - 0.01)
+        test_circles[circle_idx, 1] = np.clip(test_circles[circle_idx, 1], 0.01, rect_height - 0.01)
+        
+        # Adjust radius to fit constraints
+        new_radius = min(
+            test_circles[circle_idx, 0], 
+            rect_width - test_circles[circle_idx, 0],
+            test_circles[circle_idx, 1], 
+            rect_height - test_circles[circle_idx, 1]
+        )
+        
+        # Check overlap with others
+        min_dist = float('inf')
+        for j in range(21):
+            if j != circle_idx:
+                dist = math.sqrt(
+                    (test_circles[circle_idx, 0] - test_circles[j, 0])**2 +
+                    (test_circles[circle_idx, 1] - test_circles[j, 1])**2
+                )
+                min_dist = min(min_dist, dist)
+        
+        # Only accept if radius can be increased while avoiding overlap
+        if min_dist > 0.001:
+            new_radius = min(new_radius, min_dist/2.0 - 0.001)
+            test_circles[circle_idx, 2] = max(0.001, new_radius)
+        
+        new_sum = get_total_radius()
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = test_circles.copy()
+    
+    # Refine the final result with a more targeted approach
+    # Use a grid-based local refinement around each circle
+    refined_circles = best_circles.copy()
+    for attempt in range(50):
+        # Pick a random circle to refine
+        idx = np.random.randint(0, 21)
+        cx, cy, cr = refined_circles[idx]
+        
+        # Try several nearby positions with adjusted radii
+        best_position = (cx, cy, cr)
+        best_radius = cr
+        best_score = cr  # Simple greedy score
+        
+        # Sample around the current position
+        sample_points = []
+        for dx in [-0.05, -0.025, 0, 0.025, 0.05]:
+            for dy in [-0.05, -0.025, 0, 0.025, 0.05]:
+                sample_points.append((cx + dx, cy + dy))
+        
+        for nx, ny in sample_points:
+            # Check bounds
+            if nx < 0.01 or nx > rect_width - 0.01 or ny < 0.01 or ny > rect_height - 0.01:
+                continue
+                
+            # Compute max radius at this point
+            max_r = min(nx, rect_width - nx, ny, rect_height - ny)
+            
+            # Check overlap with others
+            overlap = False
+            for j in range(21):
+                if j != idx:
+                    dist = math.sqrt((nx - refined_circles[j, 0])**2 + (ny - refined_circles[j, 1])**2)
+                    if dist < (max_r + refined_circles[j, 2]):  # Overlap
+                        overlap = True
+                        break
+            
+            if not overlap and max_r > best_radius:
+                best_radius = max_r
+                best_position = (nx, ny, max_r)
+        
+        # Update if improvement found
+        if best_position[2] > refined_circles[idx, 2]:
+            refined_circles[idx] = best_position
+    
+    # Final validation and return
+    final_sum = np.sum(refined_circles[:, 2])
+    
+    # Return the best configuration we found
+    return refined_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

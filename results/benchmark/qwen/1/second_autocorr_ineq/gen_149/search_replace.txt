@@ -1,0 +1,242 @@
+<NAME>
+add_jax_gradient_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding JAX-based gradient optimization to enhance the local refinement phase. This leverages automatic differentiation for more accurate gradient computation compared to numerical approximations, and integrates it into the existing multi-stage optimization framework to potentially find better local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from numba import jit, njit
+import random
+import time
+from scipy.signal import convolve
+import copy
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from numba import jit, njit
+import random
+import time
+from scipy.signal import convolve
+import copy
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_local_refinement_with_jax_gradients
+</NAME>
+
+<DESCRIPTION>
+Enhancing the local refinement stage by adding JAX-based gradient computation. This replaces the simple numerical gradient with accurate automatic differentiation and adds a more sophisticated gradient-based refinement step that can better exploit the gradient information to improve local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def compute_c2_score(f_vals):
+    """
+    Compute the C2 score: ||g||₂² / (||g||₁ · ||g||∞)
+    """
+    norm_l2_sq, norm_l1, norm_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_l1 <= 1e-15 or norm_inf <= 1e-15:
+        return 0.0
+
+    return norm_l2_sq / (norm_l1 * norm_inf)
+=======
+@njit
+def compute_c2_score(f_vals):
+    """
+    Compute the C2 score: ||g||₂² / (||g||₁ · ||g||∞)
+    """
+    norm_l2_sq, norm_l1, norm_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_l1 <= 1e-15 or norm_inf <= 1e-15:
+        return 0.0
+
+    return norm_l2_sq / (norm_l1 * norm_inf)
+
+# JAX version of key computations for automatic differentiation
+@jax_jit
+def compute_autoconvolution_jax(f_vals):
+    """JAX version of autoconvolution for gradient computation"""
+    f = jnp.array(f_vals)
+    f = jnp.maximum(f, 0)  # Clip negative values to 0
+    if len(f) == 0:
+        return jnp.array([])
+
+    # Using JAX's convolution operation
+    g = jnp.convolve(f, f, mode='full')
+
+    # Trim to center portion
+    half_len = len(f)
+    center_start = len(g) // 2 - half_len + 1
+    center_end = len(g) // 2 + half_len - 1
+    g_trimmed = g[center_start:center_end]
+
+    return g_trimmed
+
+@jax_jit
+def compute_c2_jax(f_vals):
+    """JAX version of C2 computation for gradient computation"""
+    g = compute_autoconvolution_jax(f_vals)
+
+    # Compute norms
+    norm_l2_sq = jnp.sum(g * g)
+    norm_l1 = jnp.sum(jnp.abs(g)) / (len(g) + 1) if len(g) > 0 else 1e-15
+    norm_inf = jnp.max(jnp.abs(g)) if len(g) > 0 else 1e-15
+
+    # Avoid division by zero
+    return norm_l2_sq / (norm_l1 * norm_inf)
+
+# Gradient computation function using JAX
+def evaluate_c2_jax(params):
+    """Evaluate C2 using JAX for accurate gradient computation"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Convert to JAX array for gradient computation
+        f_jax = jnp.array(f_vals)
+
+        # Compute C2 using JAX version
+        c2 = compute_c2_jax(f_jax)
+        return float(c2)
+    except Exception as e:
+        return 0.0
+
+def compute_c2_gradient_jax(params):
+    """Compute gradient of C2 with respect to parameters using JAX"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Convert to JAX array
+        f_jax = jnp.array(f_vals)
+
+        # Compute gradient using JAX automatic differentiation
+        grad_func = grad(compute_c2_jax)
+        gradients = grad_func(f_jax)
+
+        return np.array(gradients)
+    except Exception as e:
+        return np.zeros_like(params)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_jax_gradient_refinement_step
+</NAME>
+
+<DESCRIPTION>
+Adding a dedicated JAX-based gradient refinement step in the local optimization process. This provides a more accurate way to refine solutions using automatic differentiation rather than relying solely on scipy's L-BFGS-B and simulated annealing approaches.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Second, apply simulated annealing-style local search
+            for _ in range(50):
+                # Create neighbor by perturbing values
+                trial = []
+                for val in current_solution:
+                    # Perturb by up to 25%
+                    perturbation = np.random.uniform(0.75, 1.25)
+                    new_val = max(0.0, val * perturbation)
+                    trial.append(new_val)
+
+                trial_c2 = compute_c2_score(trial)
+                if trial_c2 > current_c2:
+                    current_solution = trial
+                    current_c2 = trial_c2
+
+            if current_c2 > best_c2:
+                best_c2 = current_c2
+                best_f = current_solution
+=======
+            # Second, apply a sophisticated gradient-based refinement with JAX
+            try:
+                # Use JAX-based gradient ascent for more accurate refinement
+                current_jax = jnp.array(current_solution)
+                current_c2_jax = evaluate_c2_jax(current_solution)
+
+                # Gradient ascent with adaptive learning rate
+                learning_rate = 0.01
+                max_updates = 100
+                patience_counter = 0
+                best_jax_solution = current_jax
+                best_jax_c2 = current_c2_jax
+
+                for i in range(max_updates):
+                    try:
+                        # Compute gradient
+                        grad_val = compute_c2_gradient_jax(np.array(current_jax))
+
+                        # Update with gradient ascent
+                        new_jax = current_jax + learning_rate * grad_val
+                        new_jax = jnp.maximum(new_jax, 0)  # Keep non-negative
+
+                        # Convert back to list for scoring
+                        new_solution = list(new_jax)
+                        new_c2 = compute_c2_score(new_solution)
+
+                        if new_c2 > current_c2_jax:
+                            current_jax = new_jax
+                            current_c2_jax = new_c2
+                            patience_counter = 0
+
+                            if new_c2 > best_jax_c2:
+                                best_jax_c2 = new_c2
+                                best_jax_solution = new_jax
+                        else:
+                            patience_counter += 1
+                            if patience_counter > 10:
+                                learning_rate *= 0.5
+                                patience_counter = 0
+                                if learning_rate < 1e-6:
+                                    break
+                    except:
+                        break
+
+                # Finalize with the best JAX solution
+                final_solution = list(best_jax_solution)
+                final_c2 = best_jax_c2
+
+                if final_c2 > current_c2:
+                    current_solution = final_solution
+                    current_c2 = final_c2
+
+            except Exception as e:
+                # Fall back to original refinement if JAX fails
+                pass
+
+            # Third, apply simulated annealing-style local search as backup
+            for _ in range(50):
+                # Create neighbor by perturbing values
+                trial = []
+                for val in current_solution:
+                    # Perturb by up to 25%
+                    perturbation = np.random.uniform(0.75, 1.25)
+                    new_val = max(0.0, val * perturbation)
+                    trial.append(new_val)
+
+                trial_c2 = compute_c2_score(trial)
+                if trial_c2 > current_c2:
+                    current_solution = trial
+                    current_c2 = trial_c2
+
+            if current_c2 > best_c2:
+                best_c2 = current_c2
+                best_f = current_solution
+>>>>>>> REPLACE
+</DIFF>

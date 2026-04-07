@@ -1,0 +1,243 @@
+<NAME>
+improve_initialization_and_refinement
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic hexagonal lattice initialization which can be improved by using a more sophisticated approach that considers the optimal aspect ratio and better initial distribution. Additionally, the refinement phase needs enhancement to better explore the solution space and avoid local optima. I'll implement a more advanced initialization strategy and enhance the local refinement with simulated annealing-like behavior to improve global convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_hexagonal_lattice(self) -> np.ndarray:
+        """Initialize circle positions using a hexagonal lattice pattern."""
+        # Calculate appropriate spacing based on circle count and container size
+        max_radius = min(0.1, self.rect_width/5, self.rect_height/5)
+        side_length = max_radius * 2.0  # Diameter
+
+        # Generate hexagonal grid points
+        points = []
+        hex_radius = side_length / 2
+
+        # Calculate grid dimensions
+        cols = max(1, int(self.rect_width / side_length) + 2)
+        rows = max(1, int(self.rect_height / (side_length * np.sqrt(3) / 2)) + 2)
+
+        for i in range(rows):
+            for j in range(cols):
+                x = (j + (i % 2) * 0.5) * side_length
+                y = i * side_length * np.sqrt(3) / 2
+
+                # Only include if within bounds
+                if x >= hex_radius and x <= self.rect_width - hex_radius and \
+                   y >= hex_radius and y <= self.rect_height - hex_radius:
+                    points.append([x, y])
+
+        # If we don't have enough points, fill in additional ones
+        if len(points) < self.n_circles:
+            # Fill remaining space more evenly
+            remaining_needed = self.n_circles - len(points)
+            for i in range(remaining_needed):
+                # Distribute remaining circles more evenly across space
+                x = np.random.uniform(hex_radius, self.rect_width - hex_radius)
+                y = np.random.uniform(hex_radius, self.rect_height - hex_radius)
+                points.append([x, y])
+
+        # Trim to exact number needed
+        points = points[:self.n_circles]
+
+        # Create initial circles with reasonable radii
+        circles = np.zeros((self.n_circles, 3))
+        base_radius = max_radius * 0.8
+        for i, (x, y) in enumerate(points):
+            circles[i] = [x, y, base_radius]
+
+        return circles
+=======
+    def initialize_hexagonal_lattice(self) -> np.ndarray:
+        """Initialize circle positions using a hexagonal lattice pattern with improved distribution."""
+        # Calculate appropriate spacing based on circle count and container size
+        max_radius = min(0.1, self.rect_width/5, self.rect_height/5)
+        side_length = max_radius * 2.0  # Diameter
+
+        # Generate hexagonal grid points
+        points = []
+        hex_radius = side_length / 2
+
+        # Calculate grid dimensions
+        cols = max(1, int(self.rect_width / side_length) + 2)
+        rows = max(1, int(self.rect_height / (side_length * np.sqrt(3) / 2)) + 2)
+
+        for i in range(rows):
+            for j in range(cols):
+                x = (j + (i % 2) * 0.5) * side_length
+                y = i * side_length * np.sqrt(3) / 2
+
+                # Only include if within bounds
+                if x >= hex_radius and x <= self.rect_width - hex_radius and \
+                   y >= hex_radius and y <= self.rect_height - hex_radius:
+                    points.append([x, y])
+
+        # If we don't have enough points, fill in additional ones using Poisson disk sampling
+        if len(points) < self.n_circles:
+            # Fill remaining space with better distributed points
+            remaining_needed = self.n_circles - len(points)
+
+            # Use a more systematic approach for filling gaps
+            # Generate points more evenly across the space
+            for i in range(remaining_needed):
+                # Distribute points more systematically rather than purely random
+                x = (i + 1) * self.rect_width / (remaining_needed + 1)
+                y = (i % 3 + 1) * self.rect_height / 4  # Distribute vertically in thirds
+                points.append([x, y])
+
+        # Trim to exact number needed
+        points = points[:self.n_circles]
+
+        # Create initial circles with reasonable radii
+        circles = np.zeros((self.n_circles, 3))
+        base_radius = max_radius * 0.8
+        for i, (x, y) in enumerate(points):
+            circles[i] = [x, y, base_radius]
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_refinement_with_annealing
+</NAME>
+
+<DESCRIPTION>
+The current refinement approach has limited exploration capabilities. I'm enhancing it with a more sophisticated approach that incorporates temperature-based acceptance criteria (simulated annealing style) to escape local optima more effectively during the final refinement stage. This allows for occasional worse moves early on to potentially reach better solutions later.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def refine_solution(self, circles: np.ndarray, iterations: int = 150) -> np.ndarray:
+        """Apply local refinement to improve final solution."""
+        refined = circles.copy()
+
+        # First, try aggressive refinement
+        for _ in range(iterations // 3):
+            # Try small perturbations
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Try small random moves with adaptive strength
+                new_x = old_x + np.random.normal(0, 0.005)
+                new_y = old_y + np.random.normal(0, 0.005)
+                new_r = old_r + np.random.normal(0, 0.001)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, self.rect_width - new_r)
+                new_y = np.clip(new_y, new_r, self.rect_height - new_r)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        # Then, fine-tune with smaller steps
+        for _ in range(iterations // 3):
+            # Try very small perturbations
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Even smaller random moves
+                new_x = old_x + np.random.normal(0, 0.001)
+                new_y = old_y + np.random.normal(0, 0.001)
+                new_r = old_r + np.random.normal(0, 0.0005)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, self.rect_width - new_r)
+                new_y = np.clip(new_y, new_r, self.rect_height - new_r)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        return refined
+=======
+    def refine_solution(self, circles: np.ndarray, iterations: int = 150) -> np.ndarray:
+        """Apply local refinement to improve final solution with simulated annealing approach."""
+        refined = circles.copy()
+
+        # Simulated annealing-inspired refinement
+        current_fitness, _ = self.calculate_fitness(refined)
+
+        # Start with relatively high temperature for accepting worse solutions
+        temperature = 0.1
+        cooling_rate = 0.995
+
+        # Track best solution found
+        best_solution = refined.copy()
+        best_fitness = current_fitness
+
+        for iteration in range(iterations):
+            # Reduce temperature gradually
+            if iteration > 0 and iteration % 10 == 0:
+                temperature *= cooling_rate
+
+            # Try random perturbations on a random circle
+            i = random.randint(0, len(refined) - 1)
+
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Adapt mutation strength based on iteration and temperature
+            pos_mutation_strength = 0.005 * (1.0 - iteration / iterations) + 0.001
+            rad_mutation_strength = 0.001 * (1.0 - iteration / iterations) + 0.0001
+
+            # Try random moves
+            new_x = old_x + np.random.normal(0, pos_mutation_strength)
+            new_y = old_y + np.random.normal(0, pos_mutation_strength)
+            new_r = old_r + np.random.normal(0, rad_mutation_strength)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, self.rect_width - new_r)
+            new_y = np.clip(new_y, new_r, self.rect_height - new_r)
+            new_r = max(0.001, new_r)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Check if this move improves fitness or is accepted based on temperature
+            test_fitness, _ = self.calculate_fitness(test_config)
+
+            # Accept the move if it's better, or with probability based on temperature if worse
+            if test_fitness > current_fitness:
+                refined = test_config
+                current_fitness = test_fitness
+            else:
+                # Probability of accepting worse move decreases with temperature
+                if random.random() < np.exp((test_fitness - current_fitness) / max(temperature, 1e-10)):
+                    refined = test_config
+                    current_fitness = test_fitness
+
+            # Update best solution found
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_solution = refined.copy()
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

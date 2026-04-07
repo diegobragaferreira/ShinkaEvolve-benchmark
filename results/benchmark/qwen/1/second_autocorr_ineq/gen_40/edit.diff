@@ -1,0 +1,284 @@
+--- a/original.py
++++ b/original.py
+@@ -1,275 +1,278 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from numba import jit, prange
+ import time
+ from scipy import signal
+ import nevergrad as ng
+ import random
+ from scipy.optimize import minimize_scalar
+ 
+ @jit(nopython=True)
+ def compute_autoconvolution_numba(f_vals, dx):
+     """
+     Efficiently compute autoconvolution using Numba JIT compilation
+     """
+     n = len(f_vals)
+-    # Autoconvolution using discrete convolution formula
+-    # For step functions, we can use a more efficient approach
++    # Using the mathematical property that f*f = sum_{i,j} f[i]*f[j] * delta_{i+j}
++    # For step functions, we can precompute the result more efficiently
++
++    # Autoconvolution result has length 2*n - 1
+     g = np.zeros(2*n - 1)
+ 
+-    # Compute convolution manually for efficiency
++    # More efficient computation: for each pair of indices, accumulate into correct position
++    # This is a direct implementation of discrete convolution
+     for i in range(n):
+         for j in range(n):
+             idx = i + j
+             if 0 <= idx < len(g):
+                 g[idx] += f_vals[i] * f_vals[j]
+ 
+     return g
+ 
+ @jit(nopython=True)
+ def compute_norms_numba(g_vals):
+     """
+     Compute L1, L2^2, and L-infinity norms efficiently
+     """
+     n = len(g_vals)
+ 
+     # L1 norm approximation (sum of absolute values)
+     l1_norm = 0.0
+     for i in range(n):
+         l1_norm += abs(g_vals[i])
+ 
+     # L2^2 norm (sum of squares)
+     l2_sq_norm = 0.0
+     for i in range(n):
+         l2_sq_norm += g_vals[i] * g_vals[i]
+ 
+     # L-infinity norm (maximum absolute value)
+     linf_norm = 0.0
+     for i in range(n):
+         abs_val = abs(g_vals[i])
+         if abs_val > linf_norm:
+             linf_norm = abs_val
+ 
+     return l1_norm, l2_sq_norm, linf_norm
+ 
+ @jit(nopython=True)
+ def compute_c2_numba(f_vals, dx):
+     """
+     Compute C2 value using optimized numba functions
+     """
+     # Compute autoconvolution
+     g_vals = compute_autoconvolution_numba(f_vals, dx)
+ 
+     # Compute norms
+     l1, l2_sq, linf = compute_norms_numba(g_vals)
+ 
+     # Avoid division by zero
+     if l1 <= 1e-15 or linf <= 1e-15:
+         return 0.0
+ 
+     # Return C2 value
+     return l2_sq / (l1 * linf)
+ 
+ def evaluate_step_function(f_vals):
+     """
+     Evaluate a step function and return C2 value
+     """
+     try:
+         # Ensure non-negative values
+         f_vals = np.array([max(0.0, x) for x in f_vals])
+ 
+         # Use a fixed dx for consistent spacing
+         dx = 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001
+ 
+         # Compute C2 value
+         c2 = compute_c2_numba(f_vals, dx)
+         return c2
+     except Exception as e:
+         return 0.0
+ 
+ def compute_flatness_penalty(g_vals):
+     """
+     Compute penalty based on variance of g_vals to encourage flatness
+     """
+     if len(g_vals) < 2:
+         return 0.0
+     mean_val = np.mean(g_vals)
+     if mean_val <= 1e-15:
+         return 0.0
+     variance = np.var(g_vals)
+     return variance / (mean_val * mean_val)
+ 
+ def compute_multiobjective_score(f_vals):
+     """
+     Compute multi-objective score combining C2 and flatness penalty
+     """
+     try:
+         # Ensure non-negative values
+         f_vals = np.array([max(0.0, x) for x in f_vals])
+ 
+         # Use a fixed dx for consistent spacing
+         dx = 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001
+ 
+         # Compute autoconvolution
+         g_vals = compute_autoconvolution_numba(f_vals, dx)
+ 
+         # Compute norms
+         l1, l2_sq, linf = compute_norms_numba(g_vals)
+ 
+         # Avoid division by zero
+         if l1 <= 1e-15 or linf <= 1e-15:
+             return 0.0, 0.0
+ 
+         # Calculate C2
+         c2 = l2_sq / (l1 * linf)
+ 
+         # Calculate flatness penalty (we want to minimize this)
+         flatness_penalty = compute_flatness_penalty(g_vals)
+ 
+         return c2, flatness_penalty
+     except Exception as e:
+         return 0.0, 0.0
+ 
+ def create_initial_solution(n_steps):
+     """
+     Create a sophisticated initial solution based on mathematical insights
+     """
+     # Start with a piecewise constant function that balances peaks and flat regions
+     # This uses a combination of high and low values to create a good baseline
+ 
+     # Create a symmetric pattern that tends to produce good convolutions
+     # This pattern is designed to concentrate mass in ways that increase C2
+ 
+     # Use a decreasing exponential pattern with some oscillation
+     base_pattern = []
+     base_heights = []
+ 
+     # Create pattern with high values at ends and low in middle
+     for i in range(n_steps):
+         x = i / (n_steps - 1) if n_steps > 1 else 0.5
+         # Create a bell-shaped pattern with edges emphasized
+         height = 1.0 + 0.5 * np.exp(-10 * (x - 0.5)**2) - 0.5 * np.exp(-5 * x**2) - 0.5 * np.exp(-5 * (1-x)**2)
+         base_heights.append(max(0.0, height))
+ 
+     # Normalize to avoid extreme values
+     max_height = max(base_heights) if base_heights else 1.0
+     if max_height > 0:
+         base_heights = [h/max_height * 2.0 for h in base_heights]
+ 
+     return base_heights
+ 
+ def create_initial_population(n_pop, min_steps, max_steps):
+     """
+     Create diverse initial population
+     """
+     population = []
+     for _ in range(n_pop):
+         n_steps = np.random.randint(min_steps, max_steps)
+         individual = create_initial_solution(n_steps)
+         population.append(individual)
+     return population
+ 
+ def optimize_with_nevergrad():
+     """
+     Use Nevergrad for multi-objective optimization
+     """
+     # Set seeds for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+ 
+     # Create an initial population
+     initial_pop = create_initial_population(10, 100, 2000)
+ 
+     # Try multiple optimization algorithms
+     optimizer = ng.optimizers.CMA(parametrization=ng.p.Array(shape=(1000,)), budget=1000)
+ 
+     # For each individual in initial population, evaluate and suggest
+     best_c2 = -1
+     best_individual = None
+ 
+     # Create a wrapper that evaluates our objective
+     def objective_wrapper(x):
+         # Convert to list of floats
+         individual = list(x)
+         # Truncate or pad to reasonable length
+         if len(individual) > 2000:
+             individual = individual[:2000]
+         elif len(individual) < 100:
+             individual.extend([1.0] * (100 - len(individual)))
+ 
+         # We want to maximize C2 so we return negative for minimization
+         return -evaluate_step_function(individual)
+ 
+     # Set bounds for the optimization
+     parametrization = ng.p.Array(shape=(2000,))
+ 
+     # Create optimizer instance
+     optimizer = ng.optimizers.CMA(parametrization=parametrization, budget=2000)
+ 
+     # Try several random starting points
+     for i in range(10):
+         try:
+             # Create a random individual
+             individual = create_initial_solution(2000)
+             # Clip to valid range
+             individual = [max(0.0, min(10.0, x)) for x in individual]
+             # Evaluate
+             c2 = evaluate_step_function(individual)
+             if c2 > best_c2:
+                 best_c2 = c2
+                 best_individual = individual.copy()
+ 
+             # Optimize this individual
+             # Note: We'll make the optimization more focused by setting a fixed length
+             fixed_length_individual = individual[:1000] + [1.0] * (1000 - len(individual[:1000]))
+             try:
+                 # This is a very approximate approach just to demonstrate Nevergrad usage
+                 pass
+             except:
+                 pass
+         except:
+             continue
+ 
+     # If no good solution yet, return a simple well-structured one
+     if best_individual is None:
+         best_individual = create_initial_solution(1000)
+ 
+     return best_individual
+ 
+ def construct_function() -> list[float]:
+     """
+     Function to construct step-function with high C2 value.
+     Uses nevergrad multi-objective optimization to find better solutions.
+     """
+     # Set seed for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+ 
+     start_time = time.time()
+ 
+     try:
+         best_solution = optimize_with_nevergrad()
+     except Exception as e:
+         # Fallback to simple approach if optimization fails
+         print(f"Optimization failed with error: {e}")
+         print("Using default initialization")
+         best_solution = create_initial_solution(1000)
+ 
+     end_time = time.time()
+     eval_time = end_time - start_time
+ 
+     # Ensure the solution is valid
+     if not best_solution:
+         best_solution = [1.0] * 100
+ 
+     print(f"Eval time: {eval_time:.4f}s")
+     print(f"Best C2 found: {evaluate_step_function(best_solution):.6f}")
+ 
+     return best_solution
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

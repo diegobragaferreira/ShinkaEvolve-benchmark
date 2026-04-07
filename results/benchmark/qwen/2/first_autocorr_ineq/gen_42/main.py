@@ -1,0 +1,153 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+import random
+
+def compute_convolution(seq):
+    """Compute convolution using direct method for small sequences, FFT for large."""
+    n = len(seq)
+    if n < 100:  # For small sequences, use direct method
+        return np.convolve(seq, seq)
+    else:  # For large sequences, use FFT for efficiency
+        from scipy.fft import fft, ifft
+        padded_seq = np.pad(seq, (0, n-1), mode='constant')
+        fft_seq = fft(padded_seq)
+        conv_result = ifft(fft_seq * np.conj(fft_seq)).real
+        return conv_result[:2*n-1]
+
+def calculate_fitness(sequence):
+    """Calculate fitness as inverse of C1, i.e., (sum(a))^2 / (2*n*max(conv))"""
+    n = len(sequence)
+    if n < 1:
+        return 0.0
+    
+    sum_a = np.sum(sequence)
+    if sum_a < 1e-10:
+        return 0.0
+    
+    conv = compute_convolution(sequence)
+    max_conv = np.max(conv)
+    
+    if max_conv < 1e-10:
+        return 0.0
+    
+    # Calculate fitness: (sum(a))^2 / (2*n*max(conv))
+    fitness = (sum_a ** 2) / (2 * n * max_conv)
+    return fitness
+
+def adaptive_gradient_update(sequence, iteration, max_iterations):
+    """Perform adaptive gradient update with decreasing step size."""
+    n = len(sequence)
+    if n < 1:
+        return sequence
+    
+    # Adaptive step size: decreases with iteration
+    base_step = 0.05
+    step_size = base_step * (1.0 - iteration / max_iterations)
+    
+    # Compute current convolution and gradients
+    conv = compute_convolution(sequence)
+    sum_a = np.sum(sequence)
+    
+    if sum_a < 1e-10 or np.max(conv) < 1e-10:
+        return sequence
+    
+    # Simple gradient estimation: increase smaller values, decrease larger ones
+    # This is a heuristic gradient for demonstration purposes
+    # In practice, one would derive true gradients via calculus or finite differences
+    grad = np.array(sequence) - np.mean(sequence)
+    grad = np.clip(grad, -0.1, 0.1)  # Clip to prevent extreme moves
+    
+    # Apply gradient update
+    new_sequence = np.array(sequence) + step_size * grad
+    
+    # Ensure non-negativity and normalize
+    new_sequence = np.maximum(new_sequence, 0)
+    sum_new = np.sum(new_sequence)
+    
+    if sum_new > 0:
+        new_sequence = new_sequence / sum_new
+    
+    return new_sequence.tolist()
+
+def adaptive_sequence_length_adjustment(current_len, fitness_history, patience=5):
+    """Adjust sequence length based on recent fitness improvements."""
+    if len(fitness_history) < patience + 1:
+        return current_len
+    
+    recent_improvements = [
+        fitness_history[-i] - fitness_history[-i-1] 
+        for i in range(1, min(patience, len(fitness_history)-1))
+    ]
+    
+    avg_improvement = np.mean(recent_improvements) if recent_improvements else 0
+    
+    # Increase length if recent improvements are positive
+    if avg_improvement > 0.001:
+        new_len = min(current_len + 10, 2000)  # Cap at 2000
+    elif avg_improvement < -0.001 and current_len > 100:
+        new_len = max(current_len - 10, 100)  # Don't go below 100
+    else:
+        new_len = current_len  # No change
+    
+    return new_len
+
+def restart_strategy(sequence, fitness_history, max_fitness):
+    """Restart with a new random sequence if no improvement after several iterations."""
+    if len(fitness_history) < 10:
+        return False, sequence
+    
+    recent_fitness = fitness_history[-10:]
+    if max(recent_fitness) <= max_fitness * 0.99:
+        return True, [random.random() * 10 for _ in range(len(sequence))]
+    return False, sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Main function implementing adaptive gradient evolution."""
+    # Initialize parameters
+    max_iter = 300
+    patience = 10
+    current_sequence = [random.random() * 10 for _ in range(100)]
+    fitness_history = []
+    max_fitness = 0.0
+    best_sequence = current_sequence[:]
+    
+    for iteration in range(max_iter):
+        # Update sequence length adaptively
+        if iteration % 50 == 0 and iteration > 0:
+            current_len = len(current_sequence)
+            new_len = adaptive_sequence_length_adjustment(current_len, fitness_history)
+            if new_len != current_len:
+                # Adjust sequence length
+                if new_len > current_len:
+                    current_sequence.extend([0.0] * (new_len - current_len))
+                else:
+                    current_sequence = current_sequence[:new_len]
+        
+        # Perform adaptive gradient update
+        new_sequence = adaptive_gradient_update(current_sequence, iteration, max_iter)
+        
+        # Evaluate new fitness
+        new_fitness = calculate_fitness(new_sequence)
+        fitness_history.append(new_fitness)
+        
+        # Check for improvement
+        if new_fitness > max_fitness:
+            max_fitness = new_fitness
+            best_sequence = new_sequence[:]
+        
+        # Apply restart strategy
+        should_restart, new_seq = restart_strategy(current_sequence, fitness_history, max_fitness)
+        if should_restart:
+            current_sequence = new_seq
+        else:
+            current_sequence = new_sequence
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

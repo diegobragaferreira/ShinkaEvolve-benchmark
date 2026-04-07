@@ -1,0 +1,239 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,182 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import optimize
++from scipy.fft import fft, ifft
++import warnings
++import logging
+ 
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
+-    n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
++# Configure logging
++logging.basicConfig(level=logging.INFO)
++logger = logging.getLogger(__name__)
+ 
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
++class AutocorrelationOptimizer:
++    def __init__(self, seed=42):
++        np.random.seed(seed)
++        self.seed = seed
+ 
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
++    def compute_convolution_fft(self, seq1, seq2):
++        """
++        Compute convolution using FFT for efficiency.
++        """
++        n = len(seq1)
++        padded_length = 2 * n - 1
++        fft_seq1 = fft(seq1, padded_length)
++        fft_seq2 = fft(seq2, padded_length)
++        conv_result = ifft(fft_seq1 * np.conj(fft_seq2)).real
++        return conv_result[:n]
+ 
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
++    def solve_convolution_lp(self, f_sequence, rhs):
++        """
++        Solves the convolution LP for a given sequence and RHS.
++        """
++        try:
++            n = len(f_sequence)
++            if n < 1:
++                logger.warning("Invalid sequence length in solve_convolution_lp")
++                return None
+ 
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
++            # Precompute convolution constraints efficiently
++            num_constraints = 2 * n - 1
++            a_ub = np.zeros((num_constraints, n))
++            b_ub = np.zeros(num_constraints)
+ 
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
+-     
++            # Fill constraint matrix using vectorized operations
++            for k in range(num_constraints):
++                for i in range(n):
++                    j = k - i
++                    if 0 <= j < n:
++                        a_ub[k, j] = f_sequence[i]
++                b_ub[k] = rhs
+ 
+-def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
++            # Add non-negativity constraints
++            a_ub_nonneg = -np.eye(n)
++            b_ub_nonneg = np.zeros(n)
+ 
+-    return best_sequence
++            # Combine constraints
++            a_ub = np.vstack([a_ub, a_ub_nonneg])
++            b_ub = np.hstack([b_ub, b_ub_nonneg])
++
++            # Define objective function (minimize -sum x, i.e., maximize sum x)
++            c = -np.ones(n)
++
++            # Solve linear programming problem
++            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
++
++            if result.success:
++                return result.x
++            else:
++                # Try alternative methods
++                try:
++                    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
++                    if result.success:
++                        return result.x
++                except Exception as e:
++                    logger.warning(f"Alternative LP solver failed: {e}")
++                return None
++
++        except Exception as e:
++            logger.error(f"Error in solve_convolution_lp: {e}")
++            return None
++
++    def get_good_direction_to_move_into(self, sequence):
++        """
++        Returns the direction to move into the sequence.
++        """
++        try:
++            n = len(sequence)
++            if n < 1:
++                logger.warning("Invalid sequence length in get_good_direction_to_move_into")
++                return None
++
++            sum_sequence = np.sum(sequence)
++            if sum_sequence < 1e-10:
++                logger.warning("Sum of sequence too small")
++                return None
++
++            # Normalize sequence with sqrt(2*n) scaling factor
++            normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
++
++            # Compute convolution using FFT for efficiency
++            conv_result = self.compute_convolution_fft(normalized_sequence, normalized_sequence)
++            rhs = np.max(conv_result)
++
++            # Solve the LP problem
++            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
++
++            if g_fun is None:
++                logger.warning("LP solver returned None")
++                return None
++
++            # Normalize the result again
++            sum_g = np.sum(g_fun)
++            if sum_g < 1e-10:
++                logger.warning("Sum of LP result too small")
++                return None
++
++            normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g
++
++            # Use adaptive step size
++            t = 0.01 / (1.0 + 0.001 * n)  # Decrease step size with increasing n
++
++            # Create new sequence with adaptive mixing
++            new_sequence = (1 - t) * np.array(sequence) + t * normalized_g_fun
++
++            # Ensure non-negativity
++            new_sequence = np.maximum(new_sequence, 0)
++
++            return new_sequence.tolist()
++
++        except Exception as e:
++            logger.error(f"Error in get_good_direction_to_move_into: {e}")
++            return None
++
++    def search_for_best_sequence(self):
++        """
++        Function to search for the best coefficient sequence.
++        """
++        try:
++            # Generate a starting sequence with proper randomness and constraints
++            n = np.random.randint(100, 1000)
++            # Start with exponentially decaying sequence or random with some structure
++            base_seq = np.random.rand(n)
++            # Ensure some structure - use random but with decreasing values
++            base_seq = np.sort(base_seq)[::-1]  # Descending order
++            base_seq = base_seq / np.sum(base_seq) * 10  # Scale appropriately
++
++            # Apply some initial transformation to improve chances of good results
++            best_sequence = base_seq.tolist()
++
++            # Ensure non-negativity
++            best_sequence = [max(x, 0) for x in best_sequence]
++
++            # If sequence is all zeros or very small, adjust
++            if sum(best_sequence) < 0.01:
++                best_sequence[0] = 0.1  # Set first element to small positive value
++
++            # Iterate to find a good direction
++            h_function = self.get_good_direction_to_move_into(best_sequence)
++            if h_function is None:
++                # Fallback: add randomness to make sure we proceed
++                idx = np.random.randint(len(best_sequence))
++                best_sequence[idx] = (best_sequence[idx] + np.random.rand() * 0.1) % 1000
++            else:
++                best_sequence = h_function
++
++            # Final refinement step
++            refined_sequence = self.get_good_direction_to_move_into(best_sequence)
++            if refined_sequence is not None:
++                best_sequence = refined_sequence
++
++            return best_sequence
++
++        except Exception as e:
++            logger.error(f"Error in search_for_best_sequence: {e}")
++            # Fallback to simple random sequence
++            return [np.random.random() for _ in range(100)]
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

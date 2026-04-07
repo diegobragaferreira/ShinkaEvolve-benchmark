@@ -1,0 +1,131 @@
+<NAME>
+adaptive_precision_binary_search
+</NAME>
+
+<DESCRIPTION>
+The key insight is to improve the binary search precision adaptation in the `compute_outer_hexagon_radius` function. The current implementation has a hardcoded precision threshold that doesn't adapt well to different optimization stages. I'll implement a more sophisticated adaptive precision scheme that dynamically adjusts based on convergence behavior and problem characteristics, which should help achieve tighter packings faster.
+
+This change focuses on refining the core geometric computation that determines the outer hexagon radius - this is the most computationally expensive part of the fitness evaluation and directly impacts how quickly we can converge to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_outer_hexagon_radius(inner_positions, inner_angles, initial_radius_estimate=5.0):
+    """Compute minimum outer hexagon radius that contains all inner hexagons with enhanced precision"""
+    # Binary search with adaptive precision
+    left = initial_radius_estimate
+    right = 20.0
+    best_radius = right
+
+    precision_threshold = 1e-6
+    max_iterations = 100
+    iterations = 0
+
+    # Track recent improvements for adaptive precision
+    recent_differences = []
+    max_recent_differences = 10
+
+    while right - left > precision_threshold and iterations < max_iterations:
+        mid = (left + right) / 2.0
+        outer_vertices = hexagon_vertices(0, 0, 0, mid)
+        valid = True
+
+        # Check all inner hexagons
+        for i, (pos, angle) in enumerate(zip(inner_positions, inner_angles)):
+            hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+            if not check_containment(hex_vertices, outer_vertices):
+                valid = False
+                break
+
+        if valid:
+            best_radius = mid
+            right = mid
+        else:
+            left = mid
+
+        iterations += 1
+
+        # Track difference for adaptive precision
+        recent_differences.append(right - left)
+        if len(recent_differences) > max_recent_differences:
+            recent_differences.pop(0)
+
+        # Dynamically adjust precision based on convergence
+        if len(recent_differences) >= 3:
+            avg_diff = sum(recent_differences) / len(recent_differences)
+            if avg_diff > 0.01 and iterations > 20:
+                precision_threshold = max(1e-6, 1e-5 * (0.9 ** iterations))
+            else:
+                precision_threshold = 1e-6
+
+    return best_radius
+=======
+def compute_outer_hexagon_radius(inner_positions, inner_angles, initial_radius_estimate=5.0):
+    """Compute minimum outer hexagon radius that contains all inner hexagons with enhanced precision"""
+    # Binary search with adaptive precision
+    left = initial_radius_estimate
+    right = 20.0
+    best_radius = right
+
+    # Use stricter initial precision but allow coarser search early
+    precision_threshold = 1e-3  # Start with coarser precision
+    max_iterations = 100
+    iterations = 0
+
+    # Track convergence history
+    recent_differences = []
+    max_recent_differences = 15
+    significant_changes = 0
+    last_significant_change = 0
+
+    while right - left > precision_threshold and iterations < max_iterations:
+        mid = (left + right) / 2.0
+        outer_vertices = hexagon_vertices(0, 0, 0, mid)
+        valid = True
+
+        # Check all inner hexagons
+        for i, (pos, angle) in enumerate(zip(inner_positions, inner_angles)):
+            hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+            if not check_containment(hex_vertices, outer_vertices):
+                valid = False
+                break
+
+        if valid:
+            best_radius = mid
+            right = mid
+        else:
+            left = mid
+
+        iterations += 1
+
+        # Track difference for adaptive precision
+        current_diff = right - left
+        recent_differences.append(current_diff)
+        if len(recent_differences) > max_recent_differences:
+            recent_differences.pop(0)
+
+        # Count significant changes (larger than 0.01)
+        if current_diff > 0.01 and iterations > 10:
+            significant_changes += 1
+            last_significant_change = iterations
+
+        # Adaptive precision based on multiple criteria
+        if iterations > 10:
+            # If we've had recent significant changes, maintain higher precision
+            if significant_changes > 0 and iterations - last_significant_change < 30:
+                # Stay with relatively strict precision for fine-tuning
+                precision_threshold = max(1e-6, 1e-4 * (0.95 ** iterations))
+            else:
+                # Gradually tighten precision as we get closer to optimum
+                precision_threshold = max(1e-6, 1e-5 * (0.9 ** iterations))
+        else:
+            # More aggressive search in early iterations
+            precision_threshold = max(1e-4, 1e-3 * (0.95 ** iterations))
+
+        # Conservative early termination for very small differences
+        if current_diff < 0.001 and iterations > 30:
+            precision_threshold = max(1e-6, precision_threshold * 0.5)
+
+    return best_radius
+>>>>>>> REPLACE
+</DIFF>

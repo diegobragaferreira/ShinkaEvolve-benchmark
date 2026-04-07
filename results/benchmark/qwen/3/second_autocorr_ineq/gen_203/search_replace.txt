@@ -1,0 +1,272 @@
+<NAME>
+add_latin_hypercube_sampling
+</NAME>
+
+<DESCRIPTION>
+Adding Latin Hypercube Sampling (LHS) for better initialization diversity. This improves the multi-start strategy by ensuring more systematic exploration of the search space compared to simple random sampling. LHS will create more diverse and representative starting points that maintain the beneficial geometric structure while exploring different regions of the optimization landscape, which should help discover higher-value local optima that uniform random sampling might miss.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from numba import jit, prange
+import time
+from scipy.signal import convolve
+import math
+=======
+import numpy as np
+from numba import jit, prange
+import time
+from scipy.signal import convolve
+import math
+from scipy.stats import qmc
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+# Enhanced geometric initialization with multi-scale patterns
+def generate_multi_scale_geometric_initial(n_steps):
+    """Generate initial function using multi-scale geometric patterns"""
+    # Create a smooth, bell-shaped function that encourages flat convolution profiles
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Generate multiple overlapping Gaussian bumps with different scales and heights
+    # This creates a more complex structure that promotes better convolution properties
+    f_values = np.zeros(n_steps)
+
+    # Base Gaussian bump at center with moderate width
+    f_values += 1.0 * np.exp(-0.5 * ((x - 0.0) / 0.1)**2)
+
+    # Additional bumps at different scales for richer structure
+    f_values += 0.7 * np.exp(-0.5 * ((x - 0.05) / 0.05)**2)
+    f_values += 0.5 * np.exp(-0.5 * ((x + 0.05) / 0.07)**2)
+    f_values += 0.3 * np.exp(-0.5 * ((x - 0.1) / 0.08)**2)
+    f_values += 0.4 * np.exp(-0.5 * ((x + 0.1) / 0.06)**2)
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to reasonable scale
+    total_area = np.sum(f_values) * (0.5 / n_steps)
+    if total_area > 0:
+        f_values = f_values / total_area * 2.0
+
+    return f_values.tolist()
+=======
+# Enhanced geometric initialization with multi-scale patterns and Latin Hypercube Sampling
+def generate_multi_scale_geometric_initial(n_steps):
+    """Generate initial function using multi-scale geometric patterns"""
+    # Create a smooth, bell-shaped function that encourages flat convolution profiles
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Generate multiple overlapping Gaussian bumps with different scales and heights
+    # This creates a more complex structure that promotes better convolution properties
+    f_values = np.zeros(n_steps)
+
+    # Base Gaussian bump at center with moderate width
+    f_values += 1.0 * np.exp(-0.5 * ((x - 0.0) / 0.1)**2)
+
+    # Additional bumps at different scales for richer structure
+    f_values += 0.7 * np.exp(-0.5 * ((x - 0.05) / 0.05)**2)
+    f_values += 0.5 * np.exp(-0.5 * ((x + 0.05) / 0.07)**2)
+    f_values += 0.3 * np.exp(-0.5 * ((x - 0.1) / 0.08)**2)
+    f_values += 0.4 * np.exp(-0.5 * ((x + 0.1) / 0.06)**2)
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to reasonable scale
+    total_area = np.sum(f_values) * (0.5 / n_steps)
+    if total_area > 0:
+        f_values = f_values / total_area * 2.0
+
+    return f_values.tolist()
+
+def generate_lhs_initial_functions(n_functions, n_steps, seed=42):
+    """Generate multiple initial functions using Latin Hypercube Sampling"""
+    # Set up LHS sampler
+    sampler = qmc.LatinHypercube(d=n_steps, seed=seed)
+
+    # Generate samples in [0,1]^n_steps
+    samples = sampler.random(n=n_functions)
+
+    # Transform to appropriate range
+    lhs_functions = []
+
+    for sample in samples:
+        # Create function using the LHS sample
+        # Use the sample as weights for a combination of base patterns
+        f_values = np.zeros(n_steps)
+
+        # Base pattern with LHS-generated weights
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Create multiple Gaussian bumps with varying parameters based on sample values
+        for i in range(min(5, n_steps//10)):  # Limit to reasonable number of bumps
+            # Use sample values to determine bump properties
+            height = 0.5 + 0.5 * sample[i % len(sample)]  # Height between 0.5-1.0
+            width = 0.02 + 0.08 * sample[(i+1) % len(sample)]  # Width between 0.02-0.1
+            center = -0.2 + 0.4 * sample[(i+2) % len(sample)]  # Center between -0.2 and 0.2
+
+            bump = height * np.exp(-0.5 * ((x - center) / width)**2)
+            f_values += bump
+
+        # Ensure non-negativity
+        f_values = np.maximum(f_values, 0)
+
+        # Normalize
+        total_area = np.sum(f_values) * (0.5 / n_steps)
+        if total_area > 0:
+            f_values = f_values / total_area * 2.0
+
+        lhs_functions.append(f_values.tolist())
+
+    return lhs_functions
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+# Multi-resolution adaptive search
+def multi_resolution_search(n_steps, time_limit=85):
+    """Search at multiple resolutions to find good starting points"""
+    best_solution = None
+    best_c2 = -np.inf
+
+    # Try different resolutions
+    resolutions = [100, 150, 200, 250]
+
+    for res in resolutions:
+        if time.time() - start_time > time_limit:
+            break
+
+        try:
+            # Generate initial function at this resolution
+            if res <= 150:
+                f_values = generate_multi_scale_geometric_initial(res)
+            else:
+                # Use patterned construction for larger resolutions
+                f_values = generate_multi_scale_geometric_initial(res)
+                # Add controlled noise for exploration
+                noise_level = 0.1
+                for i in range(len(f_values)):
+                    if np.random.random() < 0.2:
+                        f_values[i] *= (1 + np.random.normal(0, noise_level))
+
+            # Ensure non-negativity
+            f_values = [max(0, x) for x in f_values]
+
+            # Normalize for numerical stability
+            total = sum(f_values)
+            if total > 0:
+                f_values = [x / total * 5.0 for x in f_values]
+
+            # Local refinement at this resolution
+            refined_f, refined_c2 = adaptive_local_search(f_values, max_iterations=10, time_limit=time_limit)
+
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                # Interpolate back to target resolution if needed
+                if res != n_steps:
+                    # Create target resolution function
+                    target_f = np.interp(np.linspace(0, len(refined_f)-1, n_steps),
+                                       np.arange(len(refined_f)), refined_f)
+                    best_solution = target_f.tolist()
+                else:
+                    best_solution = refined_f
+
+        except Exception as e:
+            continue
+
+    # If no good solution found, return a default pattern
+    if best_solution is None:
+        best_solution = generate_multi_scale_geometric_initial(n_steps)
+
+    return best_solution
+=======
+# Multi-resolution adaptive search with LHS initialization
+def multi_resolution_search(n_steps, time_limit=85):
+    """Search at multiple resolutions to find good starting points using LHS"""
+    best_solution = None
+    best_c2 = -np.inf
+
+    # Try different resolutions
+    resolutions = [100, 150, 200, 250]
+
+    # Generate multiple LHS initial functions for diversity
+    lhs_functions = generate_lhs_initial_functions(10, n_steps, seed=42)
+
+    # Store all initial candidates
+    all_candidates = []
+
+    for res in resolutions:
+        if time.time() - start_time > time_limit:
+            break
+
+        try:
+            # Generate initial function at this resolution
+            if res <= 150:
+                f_values = generate_multi_scale_geometric_initial(res)
+            else:
+                # Use patterned construction for larger resolutions
+                f_values = generate_multi_scale_geometric_initial(res)
+                # Add controlled noise for exploration
+                noise_level = 0.1
+                for i in range(len(f_values)):
+                    if np.random.random() < 0.2:
+                        f_values[i] *= (1 + np.random.normal(0, noise_level))
+
+            # Ensure non-negativity
+            f_values = [max(0, x) for x in f_values]
+
+            # Normalize for numerical stability
+            total = sum(f_values)
+            if total > 0:
+                f_values = [x / total * 5.0 for x in f_values]
+
+            # Local refinement at this resolution
+            refined_f, refined_c2 = adaptive_local_search(f_values, max_iterations=10, time_limit=time_limit)
+
+            all_candidates.append((refined_f, refined_c2))
+
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                # Interpolate back to target resolution if needed
+                if res != n_steps:
+                    # Create target resolution function
+                    target_f = np.interp(np.linspace(0, len(refined_f)-1, n_steps),
+                                       np.arange(len(refined_f)), refined_f)
+                    best_solution = target_f.tolist()
+                else:
+                    best_solution = refined_f
+
+        except Exception as e:
+            continue
+
+    # Also try LHS functions
+    for lhs_func in lhs_functions[:5]:  # Try first 5 LHS functions
+        if time.time() - start_time > time_limit:
+            break
+        try:
+            refined_f, refined_c2 = adaptive_local_search(lhs_func, max_iterations=8, time_limit=time_limit)
+            all_candidates.append((refined_f, refined_c2))
+
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_solution = refined_f
+        except Exception as e:
+            continue
+
+    # If no good solution found, return a default pattern
+    if best_solution is None:
+        best_solution = generate_multi_scale_geometric_initial(n_steps)
+
+    return best_solution
+>>>>>>> REPLACE
+
+</DIFF>

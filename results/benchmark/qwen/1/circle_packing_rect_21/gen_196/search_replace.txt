@@ -1,0 +1,152 @@
+<NAME>
+improve_voronoi_criticality_with_boundary_awareness
+</NAME>
+
+<DESCRIPTION>
+This change enhances the Voronoi-based criticality calculation to better reflect the true constraint density by incorporating boundary-awareness. The current implementation only considers proximity to other circles and basic boundary distance, but a more sophisticated approach would weight criticality based on both local density and how close circles are to container boundaries, since boundary-constrained circles are often more difficult to optimize without violating constraints.
+
+The improvement involves modifying the `get_voronoi_criticality` function to:
+1. Calculate proper Voronoi cell areas using scipy.spatial.Voronoi (more accurate than distance-based approach)
+2. Consider multiple boundary influence factors (distance to all boundaries, proximity to corners)
+3. Apply more sophisticated weighting to make criticality truly representative of optimization difficulty
+4. Maintain good performance with efficient computation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on minimum distance to neighbors"""
+        circles = individual.copy()
+        n = len(circles)
+
+        if n <= 1:
+            return np.ones(n) * 0.01
+
+        # Vectorized computation of distances to all others
+        coords = circles[:, :2]
+        distances = cdist(coords, coords)
+
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # Minimum distances for each circle
+        min_distances = np.min(distances, axis=1)
+
+        # Criticality is inverse of minimum distance
+        # Add small epsilon to avoid division by zero
+        criticality_scores = 1.0 / (min_distances + 1e-8)
+
+        # Also consider boundary constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to nearest boundary
+            min_boundary_dist = min(x, y, 1-x, 1-y)
+            # If very close to boundary, increase criticality
+            if min_boundary_dist < 0.05:
+                criticality_scores[i] *= (1 + 5 * (0.05 - min_boundary_dist))
+
+        # Normalize
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        # Ensure minimum values
+        criticality_scores = np.maximum(criticality_scores, 0.01)
+
+        return criticality_scores
+=======
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on Voronoi cell areas and boundary constraints"""
+        circles = individual.copy()
+        n = len(circles)
+
+        if n <= 1:
+            return np.ones(n) * 0.01
+
+        try:
+            # Use Voronoi diagram for better spatial understanding
+            from scipy.spatial import Voronoi
+
+            coords = circles[:, :2]
+            vor = Voronoi(coords)
+
+            # Calculate Voronoi cell areas for each point
+            areas = []
+            for i in range(len(coords)):
+                # Get vertices of Voronoi cell for point i
+                region_idx = np.where(vor.point_region == i)[0]
+                if len(region_idx) > 0:
+                    region = vor.regions[region_idx[0]]
+                    if -1 not in region and len(region) > 2:
+                        # Compute polygon area
+                        vertices = vor.vertices[region]
+                        if len(vertices) >= 3:
+                            # Shoelace formula for polygon area
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            areas.append(area)
+                        else:
+                            areas.append(float('inf'))
+                    else:
+                        areas.append(float('inf'))
+                else:
+                    areas.append(float('inf'))
+
+            areas = np.array(areas)
+            # Convert to criticality (smaller area = higher criticality)
+            # Handle infinities properly
+            finite_areas = areas[np.isfinite(areas)]
+            if len(finite_areas) > 0:
+                min_area = finite_areas.min()
+                max_area = finite_areas.max()
+                if max_area > min_area:
+                    # Normalize areas to [0,1] where 0 = most critical (smallest area)
+                    normalized_areas = (areas - min_area) / (max_area - min_area)
+                    # Invert so smaller areas = higher criticality
+                    criticality_from_areas = 1.0 - normalized_areas
+                else:
+                    criticality_from_areas = np.zeros_like(areas)
+            else:
+                criticality_from_areas = np.zeros_like(areas)
+
+        except Exception:
+            # Fallback to distance-based criticality if Voronoi fails
+            coords = circles[:, :2]
+            distances = cdist(coords, coords)
+            np.fill_diagonal(distances, np.inf)
+            min_distances = np.min(distances, axis=1)
+            criticality_from_areas = 1.0 / (min_distances + 1e-8)
+
+        # Boundary influence component
+        boundary_influence = np.zeros(n)
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to each boundary
+            distances_to_boundaries = [x, y, 1-x, 1-y]
+            min_boundary_dist = min(distances_to_boundaries)
+
+            # More complex boundary influence calculation
+            if min_boundary_dist < 0.05:
+                # Strong boundary influence - circles very close to edge
+                boundary_influence[i] = 1.0
+            elif min_boundary_dist < 0.1:
+                # Moderate boundary influence
+                boundary_influence[i] = 0.5
+            else:
+                # Weak or no boundary influence
+                boundary_influence[i] = 0.0
+
+        # Combine Voronoi and boundary criticality with weights
+        # High Voronoi criticality + high boundary influence = very critical
+        combined_criticality = 0.6 * criticality_from_areas + 0.4 * boundary_influence
+
+        # Ensure minimum values and normalize
+        combined_criticality = np.maximum(combined_criticality, 0.01)
+
+        # Normalize to [0,1] range
+        if np.max(combined_criticality) > 0:
+            combined_criticality = combined_criticality / np.max(combined_criticality)
+
+        return combined_criticality
+>>>>>>> REPLACE
+</DIFF>

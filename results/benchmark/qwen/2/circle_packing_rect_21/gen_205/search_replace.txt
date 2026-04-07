@@ -1,0 +1,89 @@
+<NAME>
+add_constraint_aware_fitness
+</NAME>
+
+<DESCRIPTION>
+The current fitness evaluation uses a fixed penalty weight for constraint violations. This approach can be improved by implementing a constraint-aware fitness function that dynamically adjusts penalties based on the severity of constraint violations. This will guide the optimization towards valid solutions more effectively while avoiding premature convergence to invalid configurations. The key insight is to make the penalty term responsive to both the number and magnitude of violations, rather than using a static multiplier.
+
+This change addresses recommendation #3 about adding constraint violation-aware penalties to the objective function for more robust optimization guidance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class FitnessEvaluator:
+    """Evaluates fitness of circle configurations."""
+
+    def __init__(self, validator: ConstraintValidator, penalty_weight: float = 1000.0):
+        self.validator = validator
+        self.penalty_weight = penalty_weight
+
+    def evaluate(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = np.sum(circles[:, 2])
+
+        # Validate constraints
+        violations, _ = self.validator.validate_all_constraints(circles)
+
+        # Return fitness score (higher is better)
+        return total_radius - (self.penalty_weight * violations), violations
+=======
+class FitnessEvaluator:
+    """Evaluates fitness of circle configurations."""
+
+    def __init__(self, validator: ConstraintValidator):
+        self.validator = validator
+
+    def evaluate(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+        Uses adaptive penalty based on violation severity
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = np.sum(circles[:, 2])
+
+        # Validate constraints
+        violations, violating_pairs = self.validator.validate_all_constraints(circles)
+
+        # Apply adaptive penalty: more severe penalty for boundary violations
+        # and progressively harsher penalties for overlapping violations
+        penalty = 0
+        if violations > 0:
+            # Separate boundary and overlap violations
+            boundary_violations = sum(1 for v in violating_pairs if v[0] < 0 or v[1] < 0)  # Simplified counting
+            overlap_violations = len(violating_pairs) - boundary_violations
+
+            # Boundary violations get higher penalty (heavier penalty per violation)
+            penalty += boundary_violations * 1000.0
+
+            # Overlap violations get moderate penalty (lighter penalty per violation)
+            penalty += overlap_violations * 500.0
+
+            # Additional penalty based on how severely constraints are violated
+            # This encourages movement away from boundary violations
+            violation_severity = 0
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                # Measure how far inside bounds the circle is
+                left_dist = x - r
+                right_dist = (self.validator.width - x) - r
+                bottom_dist = y - r
+                top_dist = (self.validator.height - y) - r
+
+                # The more negative these distances, the more severe the boundary violation
+                violation_severity += max(0, -left_dist) + max(0, -right_dist) + \
+                                    max(0, -bottom_dist) + max(0, -top_dist)
+
+            penalty += violation_severity * 100.0
+
+        # Return fitness score (higher is better)
+        return total_radius - penalty, violations
+>>>>>>> REPLACE
+
+</DIFF>

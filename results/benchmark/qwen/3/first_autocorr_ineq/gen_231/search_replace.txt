@@ -1,0 +1,408 @@
+<NAME>
+enhanced_convolution_optimization
+</NAME>
+
+<DESCRIPTION>
+Enhance the convolution optimization by implementing a more sophisticated hybrid approach that combines multiple optimization strategies with adaptive parameter tuning. The key improvements include:
+1. Adding a genetic algorithm component to explore diverse solution spaces
+2. Implementing an adaptive learning rate for the optimization steps
+3. Introducing a memory-based selection mechanism to retain valuable sequences
+4. Using a dual-approach for convolution computation (FFT and direct) based on sequence size
+These changes aim to improve the balance between exploration and exploitation in the search space, leading to better convergence towards high-quality sequences that maximize 1/C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.fft import fft, ifft
+from scipy.optimize import minimize
+import time
+import random
+from scipy import optimize
+
+np.random.seed(42)
+random.seed(42)
+=======
+import numpy as np
+from scipy.fft import fft, ifft
+from scipy.optimize import minimize
+import time
+import random
+from scipy import optimize
+from collections import deque
+
+np.random.seed(42)
+random.seed(42)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_convolution_fft(seq):
+    """Compute convolution using FFT with optimized padding for efficiency."""
+    n = len(seq)
+    padded_len = 1 << (n - 1).bit_length()  # Next power of 2 for efficient FFT
+    padded_seq = np.pad(seq, (0, padded_len - n), 'constant')
+    fft_seq = fft(padded_seq)
+    conv_fft = fft_seq * fft_seq.conj()
+    conv_result = ifft(conv_fft).real[:2*n-1]
+    return conv_result
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    """
+    if len(sequence) == 0:
+        return float('inf'), 0.0
+
+    a = np.array(sequence, dtype=np.float64)
+    n = len(a)
+
+    # Compute convolution using FFT for efficiency
+    conv = compute_convolution_fft(a)
+    max_b = np.max(conv)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    C1 = 2 * n * max_b / (sum_a ** 2)
+    inv_C1 = 1 / C1
+
+    return C1, inv_C1
+=======
+def compute_convolution_fft(seq):
+    """Compute convolution using FFT with optimized padding for efficiency."""
+    n = len(seq)
+    padded_len = 1 << (n - 1).bit_length()  # Next power of 2 for efficient FFT
+    padded_seq = np.pad(seq, (0, padded_len - n), 'constant')
+    fft_seq = fft(padded_seq)
+    conv_fft = fft_seq * fft_seq.conj()
+    conv_result = ifft(conv_fft).real[:2*n-1]
+    return conv_result
+
+def compute_convolution_direct(seq):
+    """Compute convolution directly for small sequences."""
+    n = len(seq)
+    conv = np.zeros(2*n-1)
+    for i in range(n):
+        for j in range(n):
+            if i+j < 2*n-1:
+                conv[i+j] += seq[i] * seq[j]
+    return conv[:n]  # Return only the first n elements
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    """
+    if len(sequence) == 0:
+        return float('inf'), 0.0
+
+    a = np.array(sequence, dtype=np.float64)
+    n = len(a)
+
+    # Choose convolution method based on sequence size for efficiency
+    if n > 100:
+        conv = compute_convolution_fft(a)
+    else:
+        conv = compute_convolution_direct(a)
+    max_b = np.max(conv)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    C1 = 2 * n * max_b / (sum_a ** 2)
+    inv_C1 = 1 / C1
+
+    return C1, inv_C1
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_frequency_optimize(current_sequence, max_iter=50):
+    """
+    Optimizes sequence using a hybrid approach combining frequency and time-domain optimization.
+    """
+    n = len(current_sequence)
+    if n == 0:
+        return current_sequence
+
+    # Ensure minimal positive values to prevent numerical issues
+    a = np.array(current_sequence, dtype=float)
+    a = np.maximum(a, 1e-10)
+
+    # First, try the LP-based optimization approach
+    lp_direction = get_good_direction_to_move_into(current_sequence)
+    if lp_direction is not None:
+        # Use LP direction as a good starting point
+        current_sequence = lp_direction
+
+    # Convert to frequency domain
+    a_fft = fft(a, 2*n-1)
+
+    # Objective function in frequency domain
+    def objective(freq_vals):
+        # Convert back to time domain
+        reconstructed = ifft(freq_vals, 2*n-1).real[:n]
+        reconstructed = np.maximum(reconstructed, 1e-10)
+
+        # Compute convolution using FFT
+        conv = compute_convolution_fft(reconstructed)
+        max_conv = np.max(conv)
+        sum_reconstructed = np.sum(reconstructed)
+
+        if sum_reconstructed < 0.01:
+            return float('inf')
+
+        # Minimize max(conv) / (sum^2) to maximize 1/C1
+        C1 = 2 * n * max_conv / (sum_reconstructed ** 2)
+        return C1
+
+    # Use L-BFGS-B for better convergence
+    try:
+        initial_freq = a_fft.copy()
+        result = minimize(objective, initial_freq, method='L-BFGS-B', options={'maxiter': max_iter})
+        if result.success:
+            optimized_freq = result.x
+            optimized_time = ifft(optimized_freq, 2*n-1).real[:n]
+            optimized_time = np.maximum(optimized_time, 1e-10)
+            return optimized_time.tolist()
+    except Exception as e:
+        pass
+
+    # Fallback to simple perturbation if optimization fails
+    new_sequence = current_sequence.copy()
+    idx = np.random.randint(0, n)
+    new_sequence[idx] = max(1e-10, new_sequence[idx] + np.random.normal(0, 0.1))
+    return new_sequence
+=======
+def adaptive_frequency_optimize(current_sequence, max_iter=50, adaptive_lr=True):
+    """
+    Optimizes sequence using a hybrid approach combining frequency and time-domain optimization.
+    """
+    n = len(current_sequence)
+    if n == 0:
+        return current_sequence
+
+    # Track history for adaptive learning rate
+    if not hasattr(adaptive_frequency_optimize, 'history'):
+        adaptive_frequency_optimize.history = deque(maxlen=10)
+
+    # Ensure minimal positive values to prevent numerical issues
+    a = np.array(current_sequence, dtype=float)
+    a = np.maximum(a, 1e-10)
+
+    # First, try the LP-based optimization approach
+    lp_direction = get_good_direction_to_move_into(current_sequence)
+    if lp_direction is not None:
+        # Use LP direction as a good starting point
+        current_sequence = lp_direction
+
+    # Convert to frequency domain
+    a_fft = fft(a, 2*n-1)
+
+    # Objective function in frequency domain
+    def objective(freq_vals):
+        # Convert back to time domain
+        reconstructed = ifft(freq_vals, 2*n-1).real[:n]
+        reconstructed = np.maximum(reconstructed, 1e-10)
+
+        # Compute convolution using appropriate method based on sequence size
+        if len(reconstructed) > 100:
+            conv = compute_convolution_fft(reconstructed)
+        else:
+            conv = compute_convolution_direct(reconstructed)
+        max_conv = np.max(conv)
+        sum_reconstructed = np.sum(reconstructed)
+
+        if sum_reconstructed < 0.01:
+            return float('inf')
+
+        # Minimize max(conv) / (sum^2) to maximize 1/C1
+        C1 = 2 * n * max_conv / (sum_reconstructed ** 2)
+        return C1
+
+    # Adjust learning rate based on historical performance
+    lr = 0.1
+    if adaptive_lr and len(adaptive_frequency_optimize.history) > 0:
+        recent_improvements = [h[1] for h in list(adaptive_frequency_optimize.history)[-5:]]
+        if len(recent_improvements) > 1:
+            avg_improvement = np.mean(np.diff(recent_improvements))
+            if avg_improvement < -0.01:  # If improvement is slowing down
+                lr *= 0.8  # Reduce learning rate
+
+    # Use L-BFGS-B for better convergence
+    try:
+        initial_freq = a_fft.copy()
+        result = minimize(objective, initial_freq, method='L-BFGS-B', options={'maxiter': max_iter, 'ftol': 1e-6})
+        if result.success:
+            optimized_freq = result.x
+            optimized_time = ifft(optimized_freq, 2*n-1).real[:n]
+            optimized_time = np.maximum(optimized_time, 1e-10)
+            # Store improvement for adaptive learning rate
+            adaptive_frequency_optimize.history.append((len(adaptive_frequency_optimize.history),
+                                                       np.mean(optimized_time)))
+            return optimized_time.tolist()
+    except Exception as e:
+        pass
+
+    # Fallback to simple perturbation if optimization fails
+    new_sequence = current_sequence.copy()
+    idx = np.random.randint(0, n)
+    # Adaptively adjust perturbation strength
+    perturbation_strength = 0.1 * lr
+    new_sequence[idx] = max(1e-10, new_sequence[idx] + np.random.normal(0, perturbation_strength))
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_start_optimization(initial_sequences, max_time):
+    """
+    Performs multi-start optimization to avoid local minima.
+    """
+    best_inv_C1 = 0.0
+    best_sequence = None
+    best_C1 = float('inf')
+    start_time = time.time()
+
+    # Try multiple starting points
+    for i, init_seq in enumerate(initial_sequences):
+        if time.time() - start_time > max_time - 5:
+            break
+
+        current_seq = init_seq.copy()
+        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+
+        if current_inv_C1 > best_inv_C1:
+            best_inv_C1 = current_inv_C1
+            best_sequence = current_seq.copy()
+            best_C1 = current_C1
+
+        # Multiple rounds of optimization with different strategies
+        for round_num in range(3):  # Multiple rounds
+            if time.time() - start_time > max_time - 5:
+                break
+
+            # Use different optimization strategies
+            if round_num == 0:
+                # Direct optimization
+                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=30)
+            elif round_num == 1:
+                # LP-based direction
+                lp_direction = get_good_direction_to_move_into(current_seq)
+                if lp_direction is not None:
+                    improved_seq = lp_direction
+                else:
+                    improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+            else:
+                # Random perturbation followed by optimization
+                perturbed_seq = current_seq.copy()
+                idx = np.random.randint(0, len(current_seq))
+                perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+                improved_seq = adaptive_frequency_optimize(perturbed_seq, max_iter=20)
+
+            improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+
+            if improved_inv_C1 > current_inv_C1:
+                current_seq = improved_seq
+                current_C1 = improved_C1
+                current_inv_C1 = improved_inv_C1
+
+                if current_inv_C1 > best_inv_C1:
+                    best_inv_C1 = current_inv_C1
+                    best_sequence = current_seq.copy()
+                    best_C1 = current_C1
+
+    return best_sequence, best_C1, best_inv_C1
+=======
+def multi_start_optimization(initial_sequences, max_time):
+    """
+    Performs multi-start optimization to avoid local minima.
+    """
+    best_inv_C1 = 0.0
+    best_sequence = None
+    best_C1 = float('inf')
+    start_time = time.time()
+
+    # Memory to store good sequences for genetic crossover
+    memory_buffer = deque(maxlen=10)
+
+    # Try multiple starting points
+    for i, init_seq in enumerate(initial_sequences):
+        if time.time() - start_time > max_time - 5:
+            break
+
+        current_seq = init_seq.copy()
+        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+
+        if current_inv_C1 > best_inv_C1:
+            best_inv_C1 = current_inv_C1
+            best_sequence = current_seq.copy()
+            best_C1 = current_C1
+
+        # Store in memory buffer for potential genetic crossover
+        memory_buffer.append(current_seq.copy())
+
+        # Multiple rounds of optimization with different strategies
+        for round_num in range(3):  # Multiple rounds
+            if time.time() - start_time > max_time - 5:
+                break
+
+            # Use different optimization strategies
+            if round_num == 0:
+                # Direct optimization
+                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=30)
+            elif round_num == 1:
+                # LP-based direction
+                lp_direction = get_good_direction_to_move_into(current_seq)
+                if lp_direction is not None:
+                    improved_seq = lp_direction
+                else:
+                    improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+            else:
+                # Random perturbation followed by optimization
+                perturbed_seq = current_seq.copy()
+                idx = np.random.randint(0, len(current_seq))
+                perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+                improved_seq = adaptive_frequency_optimize(perturbed_seq, max_iter=20)
+
+            improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+
+            if improved_inv_C1 > current_inv_C1:
+                current_seq = improved_seq
+                current_C1 = improved_C1
+                current_inv_C1 = improved_inv_C1
+
+                if current_inv_C1 > best_inv_C1:
+                    best_inv_C1 = current_inv_C1
+                    best_sequence = current_seq.copy()
+                    best_C1 = current_C1
+
+            # Add to memory for potential genetic crossover
+            memory_buffer.append(improved_seq.copy())
+
+    # Attempt genetic crossover to further refine
+    if len(memory_buffer) >= 2:
+        parent1 = memory_buffer[np.random.randint(0, len(memory_buffer))]
+        parent2 = memory_buffer[np.random.randint(0, len(memory_buffer))]
+        # Simple crossover: mix elements from both parents
+        crossover_point = len(parent1) // 2
+        offspring = parent1[:crossover_point] + parent2[crossover_point:]
+        # Optimize offspring
+        offspring_optimized = adaptive_frequency_optimize(offspring, max_iter=20)
+        offspring_C1, offspring_inv_C1 = compute_autocorrelation_constant(offspring_optimized)
+        if offspring_inv_C1 > best_inv_C1:
+            best_inv_C1 = offspring_inv_C1
+            best_sequence = offspring_optimized
+            best_C1 = offspring_C1
+
+    return best_sequence, best_C1, best_inv_C1
+>>>>>>> REPLACE
+</DIFF>

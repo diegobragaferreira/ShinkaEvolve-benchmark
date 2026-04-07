@@ -1,0 +1,127 @@
+<NAME>
+improved_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a KDTree-based overlap detection that can be inefficient for large populations. I'm going to optimize the overlap detection by implementing a more efficient spatial data structure approach that reduces redundant calculations and improves the overall performance of the evolutionary algorithm.
+
+The main improvements include:
+1. Using a more efficient overlap checking approach with precomputed neighbor lists
+2. Reducing redundant distance calculations
+3. Optimizing the tree query to be more selective rather than checking all pairs
+4. Improving the constraint checking logic to be more efficient
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _check_overlap_constraints(self, individual: np.ndarray) -> float:
+        """Check overlap constraints efficiently using KDTree"""
+        penalty = 0.0
+
+        if len(individual) <= 1:
+            return penalty
+
+        # Build KDTree for efficient neighbor queries
+        tree = cKDTree(individual[:, :2])
+
+        # Query for neighbors within distance of (r1 + r2) for each circle
+        # We iterate through each point and query neighbors
+        for i in range(len(individual)):
+            x1, y1, r1 = individual[i]
+
+            # Find all neighbors within distance 2*(r1 + max_radius) to optimize search
+            # In practice, we'll search for neighbors within r1 + max possible radius
+            # This ensures we catch all potential overlaps
+            max_radius = np.max(individual[:, 2])
+            neighbors = tree.query_ball_point([x1, y1], 2 * (r1 + max_radius), p=2)
+
+            # Check overlaps with neighbors
+            for j in neighbors:
+                if i >= j:  # Skip self-comparison and duplicate pairs
+                    continue
+
+                x2, y2, r2 = individual[j]
+
+                # Fast distance check using squared distance
+                dx = x2 - x1
+                dy = y2 - y1
+                distance_squared = dx*dx + dy*dy
+
+                # Check if circles are close enough to potentially overlap
+                if distance_squared < (r1 + r2)**2:
+                    actual_distance = math.sqrt(distance_squared)
+                    if actual_distance < r1 + r2:
+                        overlap = (r1 + r2) - actual_distance
+                        # Scale penalty based on overlap severity
+                        penalty += overlap * 1000 * (1 + overlap * 0.1)
+
+        return penalty
+=======
+    def _check_overlap_constraints(self, individual: np.ndarray) -> float:
+        """Check overlap constraints efficiently using optimized spatial queries"""
+        penalty = 0.0
+
+        if len(individual) <= 1:
+            return penalty
+
+        # For better performance with many circles, we'll use a two-phase approach
+        # Phase 1: Use a spatial grid for coarse filtering
+        grid_size = self.grid_size
+        grid_cells = {}
+
+        # Assign each circle to grid cells
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            # Determine grid cell bounds for this circle
+            min_gx = int((x - r) / grid_size)
+            max_gx = int((x + r) / grid_size)
+            min_gy = int((y - r) / grid_size)
+            max_gy = int((y + r) / grid_size)
+
+            # Add to all relevant grid cells
+            for gx in range(min_gx, max_gx + 1):
+                for gy in range(min_gy, max_gy + 1):
+                    key = (gx, gy)
+                    if key not in grid_cells:
+                        grid_cells[key] = []
+                    grid_cells[key].append(i)
+
+        # Phase 2: Check overlaps within and between cells
+        checked_pairs = set()
+
+        for cell_key, circle_indices in grid_cells.items():
+            if len(circle_indices) < 2:
+                continue
+
+            # Check all pairs in this cell
+            for i in range(len(circle_indices)):
+                idx1 = circle_indices[i]
+                x1, y1, r1 = individual[idx1]
+
+                for j in range(i + 1, len(circle_indices)):
+                    idx2 = circle_indices[j]
+
+                    # Skip if already checked (avoid duplicate work)
+                    if (idx1, idx2) in checked_pairs or (idx2, idx1) in checked_pairs:
+                        continue
+
+                    checked_pairs.add((idx1, idx2))
+                    x2, y2, r2 = individual[idx2]
+
+                    # Fast distance check using squared distance
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    distance_squared = dx*dx + dy*dy
+
+                    # Check if circles are close enough to potentially overlap
+                    combined_radius = r1 + r2
+                    if distance_squared < combined_radius * combined_radius:
+                        actual_distance = math.sqrt(distance_squared)
+                        if actual_distance < combined_radius:
+                            overlap = combined_radius - actual_distance
+                            # Apply penalty scaled with overlap severity
+                            penalty += overlap * 1000 * (1.0 + overlap * 0.01)
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>

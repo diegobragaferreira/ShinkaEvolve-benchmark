@@ -1,0 +1,318 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+import math
+import random
+from typing import Tuple, List
+
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = 1.2  # Optimized aspect ratio
+RECT_HEIGHT = 0.8
+NUM_CIRCLES = 21
+SEED = 42
+
+class AdaptiveGridEvolver:
+    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT, 
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        np.random.seed(SEED)
+        random.seed(SEED)
+        
+    def is_valid_position(self, x: float, y: float, r: float) -> bool:
+        """Check if circle center is within bounds"""
+        return (r <= x <= self.width - r and 
+                r <= y <= self.height - r)
+    
+    def is_valid_circle(self, x: float, y: float, r: float) -> bool:
+        """Check if circle is valid (within bounds and positive radius)"""
+        return (0 < r and 
+                self.is_valid_position(x, y, r))
+    
+    def check_overlap(self, circles: np.ndarray, idx1: int, idx2: int) -> bool:
+        """Check if two circles overlap using Euclidean distance"""
+        x1, y1, r1 = circles[idx1]
+        x2, y2, r2 = circles[idx2]
+        
+        # Calculate squared distance to avoid sqrt computation
+        dx = x1 - x2
+        dy = y1 - y2
+        dist_sq = dx*dx + dy*dy
+        radius_sum = r1 + r2
+        return dist_sq < radius_sum * radius_sum
+    
+    def calculate_total_radius_sum(self, circles: np.ndarray) -> float:
+        """Calculate sum of all circle radii"""
+        return np.sum(circles[:, 2])
+    
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+        
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+        
+        # Count constraint violations
+        violations = 0
+        
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 1
+                
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+            
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+            
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+                    
+        except Exception:
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+        
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        penalty_weight = 10000.0
+        return total_radius - (penalty_weight * violations), violations
+    
+    def generate_adaptive_grid(self) -> np.ndarray:
+        """Generate initial circle placement using adaptive grid approach"""
+        # Calculate ideal grid dimensions based on circle count
+        grid_size = int(math.ceil(math.sqrt(self.num_circles)))
+        # Ensure we have enough slots
+        while grid_size * grid_size < self.num_circles:
+            grid_size += 1
+            
+        # Calculate spacing with padding to ensure circles fit properly
+        col_spacing = self.width / (grid_size + 1)
+        row_spacing = self.height / (grid_size + 1)
+        
+        # Create initial grid placement
+        circles = np.zeros((self.num_circles, 3))
+        idx = 0
+        
+        # Fill grid with circles
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if idx >= self.num_circles:
+                    break
+                x = (j + 1) * col_spacing
+                y = (i + 1) * row_spacing
+                # Initial radius based on spacing, with some randomness
+                base_radius = min(col_spacing, row_spacing) * 0.25
+                radius = base_radius * (0.8 + np.random.random() * 0.4)
+                radius = max(0.01, min(0.2, radius))
+                circles[idx] = [x, y, radius]
+                idx += 1
+                
+        # Fill remaining slots with random positions
+        for i in range(idx, self.num_circles):
+            x = np.random.uniform(0.05, self.width - 0.05)
+            y = np.random.uniform(0.05, self.height - 0.05)
+            # Random radius with some clustering around reasonable values
+            radius = 0.05 + np.random.random() * 0.1
+            circles[i] = [x, y, radius]
+            
+        return circles
+    
+    def local_radius_optimization(self, circles: np.ndarray, 
+                                max_iterations: int = 50) -> np.ndarray:
+        """Optimize individual circle radii locally"""
+        optimized = circles.copy()
+        
+        # Try to improve each circle's radius one by one
+        for iter_count in range(max_iterations):
+            improved = False
+            
+            # Shuffle order for diversity in optimization attempts
+            indices = list(range(self.num_circles))
+            np.random.shuffle(indices)
+            
+            for i in indices:
+                current_x, current_y, current_r = optimized[i]
+                
+                # Objective function to maximize radius subject to constraints
+                def objective(r):
+                    temp_circles = optimized.copy()
+                    temp_circles[i, 2] = r[0]
+                    
+                    # Check boundary constraints
+                    if not self.is_valid_circle(temp_circles[i, 0], temp_circles[i, 1], r[0]):
+                        return 1e10
+                    
+                    # Check overlap constraints
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+                    
+                    # Return negative radius (we minimize to maximize) plus heavy penalty
+                    return -r[0] + 1000 * violations
+                
+                # Try to maximize this circle's radius
+                bounds = [(1e-6, min(self.width/2, self.height/2, current_r * 3))]
+                
+                try:
+                    result = minimize(objective, [current_r], bounds=bounds, method='L-BFGS-B')
+                    if result.success:
+                        new_r = max(1e-6, result.x[0])
+                        if new_r > current_r:
+                            optimized[i, 2] = new_r
+                            improved = True
+                except:
+                    continue  # Skip if optimization fails
+                    
+            if not improved:
+                break
+                
+        return optimized
+    
+    def constrained_local_search(self, circles: np.ndarray, 
+                               max_iterations: int = 30) -> np.ndarray:
+        """Perform constrained local search to improve circle placement"""
+        optimized = circles.copy()
+        
+        # Sequential optimization of positions and radii
+        for iter_count in range(max_iterations):
+            improved = False
+            
+            # Shuffle order for better exploration
+            indices = list(range(self.num_circles))
+            np.random.shuffle(indices)
+            
+            for i in indices:
+                current_x, current_y, current_r = optimized[i]
+                
+                # First, try to maximize radius
+                def radius_objective(r):
+                    temp_circles = optimized.copy()
+                    temp_circles[i, 2] = r[0]
+                    
+                    # Check constraints
+                    if not self.is_valid_circle(temp_circles[i, 0], temp_circles[i, 1], r[0]):
+                        return 1e10
+                    
+                    # Check overlaps
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+                    
+                    return -r[0] + 1000 * violations
+                
+                bounds = [(1e-6, min(self.width/2, self.height/2, current_r * 3))]
+                try:
+                    result = minimize(radius_objective, [current_r], bounds=bounds, method='L-BFGS-B')
+                    if result.success:
+                        new_r = max(1e-6, result.x[0])
+                        if new_r > current_r:
+                            optimized[i, 2] = new_r
+                            improved = True
+                except:
+                    pass
+                
+                # Then try to adjust position for better packing
+                def position_objective(pos):
+                    temp_circles = optimized.copy()
+                    temp_circles[i, 0] = pos[0]
+                    temp_circles[i, 1] = pos[1]
+                    
+                    # Check constraints
+                    if not self.is_valid_circle(pos[0], pos[1], temp_circles[i, 2]):
+                        return 1e10
+                    
+                    # Check overlaps
+                    violations = 0
+                    for j in range(self.num_circles):
+                        if i != j and self.check_overlap(temp_circles, i, j):
+                            violations += 1
+                    
+                    return 1000 * violations  # Just minimizing violations for positioning
+                
+                # Try to improve positioning
+                bounds_x = [(current_x - 0.1, current_x + 0.1)]
+                bounds_y = [(current_y - 0.1, current_y + 0.1)]
+                try:
+                    result = minimize(position_objective, [current_x, current_y], 
+                                    bounds=list(zip(bounds_x[0], bounds_y[0])), 
+                                    method='L-BFGS-B')
+                    if result.success:
+                        new_x, new_y = result.x
+                        # Clamp to valid bounds
+                        new_x = max(current_r, min(self.width - current_r, new_x))
+                        new_y = max(current_r, min(self.height - current_r, new_y))
+                        if abs(new_x - current_x) > 1e-4 or abs(new_y - current_y) > 1e-4:
+                            optimized[i, 0] = new_x
+                            optimized[i, 1] = new_y
+                            improved = True
+                except:
+                    pass
+                    
+            if not improved:
+                break
+                
+        return optimized
+    
+    def multi_phase_optimization(self) -> np.ndarray:
+        """Execute multi-phase optimization approach"""
+        # Phase 1: Adaptive Grid Initialization
+        circles = self.generate_adaptive_grid()
+        
+        # Phase 2: Coarse Local Optimization
+        circles = self.local_radius_optimization(circles, max_iterations=30)
+        
+        # Phase 3: Refinement with Local Search
+        circles = self.constrained_local_search(circles, max_iterations=20)
+        
+        # Phase 4: Fine-grained iterative improvement
+        for phase in range(3):
+            # Improve radii first
+            circles = self.local_radius_optimization(circles, max_iterations=20)
+            # Then improve positions
+            circles = self.constrained_local_search(circles, max_iterations=15)
+            
+        # Phase 5: Final validation and cleanup
+        # Ensure all circles are valid and within bounds
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            # Clamp to boundaries
+            circles[i] = [
+                max(r, min(self.width - r, x)),
+                max(r, min(self.height - r, y)),
+                r
+            ]
+            
+        return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Create evolver instance with optimized rectangle dimensions
+    evolver = AdaptiveGridEvolver(width=RECT_WIDTH, height=RECT_HEIGHT, num_circles=21)
+    
+    # Run multi-phase optimization
+    circles = evolver.multi_phase_optimization()
+    
+    return circles
+
+# EVOLVE-BLOCK-END

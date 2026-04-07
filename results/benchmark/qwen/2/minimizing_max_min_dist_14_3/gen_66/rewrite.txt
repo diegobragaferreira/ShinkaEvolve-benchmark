@@ -1,0 +1,223 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from numba import jit
+import time
+
+@jit(nopython=True)
+def compute_min_max_ratio_numba(points):
+    """Optimized distance computation using numba"""
+    n = points.shape[0]
+    min_dist = np.inf
+    max_dist = 0.0
+    
+    for i in range(n):
+        for j in range(i+1, n):
+            # Compute squared distance to avoid sqrt computation
+            dist_sq = (points[i,0]-points[j,0])**2 + (points[i,1]-points[j,1])**2 + (points[i,2]-points[j,2])**2
+            dist = np.sqrt(dist_sq)
+            if dist < min_dist:
+                min_dist = dist
+            if dist > max_dist:
+                max_dist = dist
+    
+    return min_dist, max_dist
+
+def fibonacci_sphere(n: int) -> np.ndarray:
+    """
+    Generate n points distributed as evenly as possible on a unit sphere
+    using Fibonacci spiral method.
+    """
+    points = []
+    phi = np.pi * (3. - np.sqrt(5.))  # golden angle
+
+    for i in range(n):
+        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+def compute_min_max_ratio(points: np.ndarray) -> tuple:
+    """
+    Compute the minimum and maximum distances between all pairs of points,
+    and return their ratio.
+    """
+    if len(points) < 2:
+        return 0.0, 0.0, 0.0
+    
+    # Use numba-optimized version
+    min_distance, max_distance = compute_min_max_ratio_numba(points)
+    
+    # Avoid division by zero
+    if max_distance == 0:
+        ratio = 0.0
+    else:
+        ratio = min_distance / max_distance
+    
+    return min_distance, max_distance, ratio
+
+def perturb_points_smart(points: np.ndarray, temperature: float, current_ratio: float) -> np.ndarray:
+    """
+    Apply smart perturbations based on distance distribution analysis.
+    """
+    # Create a copy of the points
+    new_points = points.copy()
+    
+    # Analyze current distribution to decide which point to perturb
+    # Get pairwise distances for analysis
+    distances = cdist(points, points)
+    np.fill_diagonal(distances, np.inf)
+    
+    # Find points that are closest to other points (potential bottlenecks)
+    min_distances = np.min(distances, axis=1)
+    
+    # Prefer perturbing points that are near the minimum distance
+    # or points that might help expand the configuration
+    if np.random.rand() < 0.7:  # 70% chance to target close points
+        # Target a point that's among the closest neighbors
+        target_idx = np.argmin(min_distances)
+    else:
+        # Random selection otherwise
+        target_idx = np.random.randint(len(points))
+    
+    # Generate small random perturbation
+    delta = np.random.normal(0, 0.01 * temperature, 3)
+    
+    # Add perturbation to selected point
+    new_points[target_idx] += delta
+    
+    # Project back to unit sphere
+    norms = np.linalg.norm(new_points, axis=1, keepdims=True)
+    # Handle case where norm might be zero (shouldn't happen but safety check)
+    norms = np.where(norms == 0, 1, norms)
+    new_points = new_points / norms
+    
+    return new_points
+
+def adaptive_cooling(initial_temp, iteration, max_iterations, ratio_history):
+    """
+    Adaptive cooling schedule that adjusts based on convergence
+    """
+    # Base cooling rate
+    base_cooling = 0.9995
+    
+    # Check recent convergence
+    if len(ratio_history) > 10:
+        recent_improvement = ratio_history[-1] - ratio_history[-10]
+        if recent_improvement < 1e-8:
+            # Slow improvement, cool faster
+            return base_cooling * 1.05
+        elif recent_improvement > 1e-6:
+            # Fast improvement, cool slower
+            return base_cooling * 0.95
+    
+    return base_cooling
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Multi-start optimization with multiple Fibonacci sphere seeds
+    best_points = None
+    best_ratio = -np.inf
+    best_min_dist = 0
+    best_max_dist = 0
+    
+    # Try multiple random seeds for Fibonacci initialization
+    num_seeds = 5
+    for seed in range(num_seeds):
+        np.random.seed(seed)
+        
+        # Initialize points using Fibonacci sphere method for better distribution
+        points = fibonacci_sphere(14)
+        
+        # Optimization parameters
+        max_iterations = 100000
+        initial_temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 0.0001
+        
+        # Track best solution
+        current_best_points = points.copy()
+        current_best_min_dist, current_best_max_dist, current_best_ratio = compute_min_max_ratio(points)
+        
+        # Current state
+        current_points = points.copy()
+        current_min_dist, current_max_dist, current_ratio = current_best_ratio, current_best_max_dist, current_best_ratio
+        
+        # Track ratio history for adaptive cooling
+        ratio_history = [current_ratio]
+        
+        # Simulated Annealing
+        temp = initial_temperature
+        last_improvement_iter = 0
+        
+        for iteration in range(max_iterations):
+            # Perturb the current solution
+            new_points = perturb_points_smart(current_points, temp, current_ratio)
+            
+            # Compute new ratio
+            new_min_dist, new_max_dist, new_ratio = compute_min_max_ratio(new_points)
+            
+            # Accept or reject the new solution using Metropolis criterion
+            if new_ratio > current_ratio:
+                # Always accept better solutions
+                current_points = new_points
+                current_ratio = new_ratio
+                current_min_dist = new_min_dist
+                current_max_dist = new_max_dist
+                
+                # Update best solution if this is better
+                if new_ratio > current_best_ratio:
+                    current_best_points = new_points.copy()
+                    current_best_ratio = new_ratio
+                    current_best_min_dist = new_min_dist
+                    current_best_max_dist = new_max_dist
+                    last_improvement_iter = iteration
+                    ratio_history.append(new_ratio)
+            else:
+                # Accept worse solutions with probability based on temperature
+                if temp > 0:  # Avoid division by zero
+                    acceptance_prob = np.exp((new_ratio - current_ratio) / temp)
+                    if np.random.rand() < acceptance_prob:
+                        current_points = new_points
+                        current_ratio = new_ratio
+                        current_min_dist = new_min_dist
+                        current_max_dist = new_max_dist
+                        ratio_history.append(new_ratio)
+            
+            # Apply adaptive cooling
+            temp = max(temp * adaptive_cooling(initial_temperature, iteration, max_iterations, ratio_history), min_temperature)
+            
+            # Early stopping if no improvement in a long time
+            if iteration - last_improvement_iter > 20000:
+                break
+        
+        # Update global best if this run was better
+        if current_best_ratio > best_ratio:
+            best_ratio = current_best_ratio
+            best_points = current_best_points.copy()
+            best_min_dist = current_best_min_dist
+            best_max_dist = current_best_max_dist
+    
+    # Ensure the result is properly normalized
+    norms = np.linalg.norm(best_points, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1, norms)
+    best_points = best_points / norms
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

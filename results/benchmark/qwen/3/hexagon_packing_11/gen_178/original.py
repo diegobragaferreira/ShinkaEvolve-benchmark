@@ -1,0 +1,364 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+import math
+from scipy.optimize import differential_evolution, minimize
+import time
+from typing import Tuple, List, Optional
+
+class HexagonGeometry:
+    """Handles all geometric operations related to hexagons"""
+    
+    @staticmethod
+    def create_regular_hexagon(center_x: float, center_y: float, side_length: float = 1, rotation_deg: float = 0) -> Polygon:
+        """Create a regular hexagon as a Shapely polygon"""
+        rotation_rad = math.radians(rotation_deg)
+        points = []
+        for i in range(6):
+            angle = rotation_rad + i * math.pi / 3
+            x = center_x + side_length * math.cos(angle)
+            y = center_y + side_length * math.sin(angle)
+            points.append((x, y))
+        return Polygon(points)
+    
+    @staticmethod
+    def compute_outer_hexagon_radius(inner_hexagons, padding=0.01) -> float:
+        """Compute minimum radius needed to contain all inner hexagons with some padding"""
+        # Get all vertices of all hexagons
+        all_vertices = []
+        for hex_poly in inner_hexagons:
+            all_vertices.extend(list(hex_poly.exterior.coords))
+
+        if not all_vertices:
+            return padding
+            
+        # Find center of bounding box
+        xs = [p[0] for p in all_vertices]
+        ys = [p[1] for p in all_vertices]
+        center_x = (min(xs) + max(xs)) / 2
+        center_y = (min(ys) + max(ys)) / 2
+
+        # Compute max distance from center to any vertex
+        max_dist = 0
+        for x, y in all_vertices:
+            dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+            max_dist = max(max_dist, dist)
+
+        # Add padding and convert to side length
+        # For a regular hexagon, radius = side_length
+        return max_dist + padding
+
+class ConstraintValidator:
+    """Validates spatial constraints for hexagon arrangements"""
+    
+    @staticmethod
+    def check_containment_and_overlap(inner_hexagons, outer_hexagon) -> bool:
+        """Check if all inner hexagons are contained in outer hexagon and don't overlap"""
+        # Check containment first (faster check)
+        for hex_poly in inner_hexagons:
+            if not outer_hexagon.contains(hex_poly):
+                return False
+
+        # Check pairwise overlaps - optimize for small number of hexagons
+        n = len(inner_hexagons)
+        if n <= 1:
+            return True
+            
+        # Early termination for most common cases
+        for i in range(n):
+            for j in range(i+1, n):
+                if inner_hexagons[i].intersects(inner_hexagons[j]):
+                    return False
+
+        return True
+
+class OptimizationState:
+    """Manages optimization state and history tracking"""
+    
+    def __init__(self):
+        self.best_score = float('inf')
+        self.best_inner_data = None
+        self.best_outer_side_length = 10.0
+        self.score_history = []
+        self.improvement_threshold = 1e-5
+        self.max_stall_iterations = 10
+    
+    def update_best(self, score: float, inner_data, side_length: float):
+        """Update best solution if current is better"""
+        if score < self.best_score and side_length > 0:
+            self.best_score = score
+            self.best_inner_data = inner_data.copy()
+            self.best_outer_side_length = side_length
+            return True
+        return False
+    
+    def add_to_history(self, score: float):
+        """Add score to history for convergence analysis"""
+        self.score_history.append(score)
+        if len(self.score_history) > self.max_stall_iterations:
+            self.score_history.pop(0)
+    
+    def has_stagnated(self) -> bool:
+        """Check if optimization has stagnated"""
+        if len(self.score_history) < self.max_stall_iterations:
+            return False
+        recent_scores = self.score_history[-self.max_stall_iterations:]
+        return abs(recent_scores[-1] - recent_scores[0]) < self.improvement_threshold
+
+class HexPackingOptimizer:
+    """Main optimizer class that orchestrates the hexagon packing process"""
+    
+    def __init__(self):
+        self.validator = ConstraintValidator()
+        self.geometry = HexagonGeometry()
+        self.state = OptimizationState()
+        
+    def evaluate_layout(self, inner_positions_angles, outer_center=(0, 0)) -> Tuple[float, float]:
+        """Evaluate the layout quality"""
+        # Convert to hexagon polygons
+        inner_hexagons = []
+        for pos_angle in inner_positions_angles:
+            x, y, angle = pos_angle
+            hex_poly = self.geometry.create_regular_hexagon(x, y, 1, angle)
+            inner_hexagons.append(hex_poly)
+
+        # Create outer hexagon with current radius
+        outer_radius = self.geometry.compute_outer_hexagon_radius(inner_hexagons, 0.01)
+        outer_hexagon = self.geometry.create_regular_hexagon(outer_center[0], outer_center[1], outer_radius, 0)
+
+        # Validate constraints
+        valid = self.validator.check_containment_and_overlap(inner_hexagons, outer_hexagon)
+
+        # Return negative because we want to maximize 1/R (minimize R)
+        outer_side_length = outer_radius
+        inv_radius = 1.0 / outer_side_length if valid else 0.0
+
+        return -inv_radius, outer_side_length
+    
+    def generate_better_initial_config(self) -> np.ndarray:
+        """
+        Generate a better initial configuration for 11 hexagons based on known dense packings
+        """
+        # This configuration is designed to be close to an optimal arrangement
+        # Based on hexagonal close packing principles with strategic placement
+        initial_positions = [
+            # Central hexagon
+            [0.0, 0.0, 0.0],
+            # First ring (6 hexagons)
+            [-2.0, 0.0, 0.0],      # Left
+            [2.0, 0.0, 0.0],       # Right
+            [0.0, 2.0, 0.0],       # Top
+            [0.0, -2.0, 0.0],      # Bottom
+            [-1.0, 1.732, 0.0],    # Top-left
+            [1.0, 1.732, 0.0],     # Top-right
+            # Second ring (4 hexagons)
+            [-1.0, -1.732, 0.0],   # Bottom-left
+            [1.0, -1.732, 0.0],    # Bottom-right
+            [-2.0, 1.0, 0.0],      # Far top-left
+            [2.0, 1.0, 0.0],       # Far top-right
+            [-2.0, -1.0, 0.0],     # Far bottom-left
+            [2.0, -1.0, 0.0],      # Far bottom-right
+        ]
+
+        # Keep only first 11 positions (the 11 required hexagons)
+        return np.array(initial_positions[:11])
+    
+    def objective_function(self, params):
+        """Objective function for optimization"""
+        # Reshape parameters into positions and angles
+        positions_angles = []
+        for i in range(11):
+            x = params[i*3]
+            y = params[i*3 + 1]
+            angle = params[i*3 + 2]
+            positions_angles.append([x, y, angle])
+
+        score, side_length = self.evaluate_layout(positions_angles)
+        return score  # Negative since we minimize -score = maximize score
+    
+    def run_global_optimization(self, bounds: List[Tuple[float, float]]) -> Optional[np.ndarray]:
+        """Run global optimization stage"""
+        try:
+            print("Starting global optimization...")
+            result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=100,
+                popsize=20,
+                seed=42,
+                tol=1e-6,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                disp=False
+            )
+            return result.x
+        except Exception as e:
+            print(f"Global optimization failed: {e}")
+            return None
+    
+    def run_local_optimization(self, initial_flat: List[float], bounds: List[Tuple[float, float]]) -> Optional[np.ndarray]:
+        """Run local optimization stage"""
+        try:
+            print("Starting local optimization...")
+            result_local = minimize(
+                self.objective_function,
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 150, 'ftol': 1e-9, 'gtol': 1e-9},
+                callback=None
+            )
+            return result_local.x
+        except Exception as e:
+            print(f"Local optimization failed: {e}")
+            return None
+    
+    def multi_start_optimization(self, best_inner_data: np.ndarray, bounds: List[Tuple[float, float]]):
+        """Multi-start optimization to escape local minima"""
+        print("Starting multi-start optimization...")
+        
+        for restart in range(3):
+            # Slightly perturbed version of best solution
+            perturbed_positions = best_inner_data.copy()
+            np.random.seed(42 + restart)
+            for i in range(11):
+                perturbed_positions[i][0] += np.random.normal(0, 0.2)
+                perturbed_positions[i][1] += np.random.normal(0, 0.2)
+                # Keep angle within bounds
+                perturbed_positions[i][2] = perturbed_positions[i][2] % 360
+
+            try:
+                initial_flat = []
+                for pos_angle in perturbed_positions:
+                    initial_flat.extend(pos_angle)
+
+                # Local refinement with L-BFGS-B
+                result_local = minimize(
+                    self.objective_function,
+                    initial_flat,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8},
+                    callback=None
+                )
+
+                # Extract refined solution
+                refined_params = result_local.x
+                refined_positions_angles = []
+                for i in range(11):
+                    x = refined_params[i*3]
+                    y = refined_params[i*3 + 1]
+                    angle = refined_params[i*3 + 2]
+                    refined_positions_angles.append([x, y, angle])
+
+                # Evaluate refined result
+                refined_score, refined_side_length = self.evaluate_layout(refined_positions_angles)
+
+                self.state.update_best(refined_score, refined_positions_angles, refined_side_length)
+                self.state.add_to_history(refined_score)
+                
+            except Exception as e:
+                print(f"Restart optimization attempt {restart} failed: {e}")
+                continue
+    
+    def finalize_result(self, best_inner_data, initial_positions) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Finalize and validate the best result"""
+        print("Performing final validation...")
+        
+        # Always validate the result
+        inner_hexagons = []
+        for pos_angle in best_inner_data:
+            x, y, angle = pos_angle
+            hex_poly = self.geometry.create_regular_hexagon(x, y, 1, angle)
+            inner_hexagons.append(hex_poly)
+
+        # Recompute outer hexagon size carefully
+        outer_radius = self.geometry.compute_outer_hexagon_radius(inner_hexagons, 0.01)
+        outer_hexagon = self.geometry.create_regular_hexagon(0, 0, outer_radius, 0)
+
+        # Final validation check
+        if not self.validator.check_containment_and_overlap(inner_hexagons, outer_hexagon):
+            print("Final validation failed, using fallback...")
+            # Fall back to initial configuration
+            best_inner_data = initial_positions.copy()
+            inner_hexagons = []
+            for pos_angle in best_inner_data:
+                x, y, angle = pos_angle
+                hex_poly = self.geometry.create_regular_hexagon(x, y, 1, angle)
+                inner_hexagons.append(hex_poly)
+            outer_radius = self.geometry.compute_outer_hexagon_radius(inner_hexagons, 0.01)
+
+        # Ensure we're returning the correct data format
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+        
+        return best_inner_data, outer_hex_data, outer_radius
+    
+    def optimize(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Main optimization routine"""
+        # Generate a better initial configuration
+        initial_positions = self.generate_better_initial_config()
+        inner_hex_data = initial_positions.copy()
+
+        # Optimization bounds for each parameter (x, y, angle)
+        bounds = []
+        for i in range(11):
+            # Reasonable bounds to keep solutions in a practical region
+            bounds.extend([(-8, 8), (-8, 8), (0, 360)])  # angle in degrees
+
+        # Run global optimization
+        global_params = self.run_global_optimization(bounds)
+        if global_params is not None:
+            final_positions_angles = []
+            for i in range(11):
+                x = global_params[i*3]
+                y = global_params[i*3 + 1]
+                angle = global_params[i*3 + 2]
+                final_positions_angles.append([x, y, angle])
+
+            # Evaluate final result
+            final_score, final_side_length = self.evaluate_layout(final_positions_angles)
+            
+            self.state.update_best(final_score, final_positions_angles, final_side_length)
+
+        # Run adaptive local optimization with restarts
+        if self.state.best_inner_data is not None:
+            # Convert to flat array for scipy optimization
+            initial_flat = []
+            for pos_angle in self.state.best_inner_data:
+                initial_flat.extend(pos_angle)
+
+            # Local refinement
+            local_params = self.run_local_optimization(initial_flat, bounds)
+            if local_params is not None:
+                refined_positions_angles = []
+                for i in range(11):
+                    x = local_params[i*3]
+                    y = local_params[i*3 + 1]
+                    angle = local_params[i*3 + 2]
+                    refined_positions_angles.append([x, y, angle])
+
+                # Evaluate refined result
+                refined_score, refined_side_length = self.evaluate_layout(refined_positions_angles)
+
+                self.state.update_best(refined_score, refined_positions_angles, refined_side_length)
+                self.state.add_to_history(refined_score)
+                
+                # Check for stagnation and apply multi-start if needed
+                if self.state.has_stagnated():
+                    self.multi_start_optimization(self.state.best_inner_data, bounds)
+
+        # Final validation
+        return self.finalize_result(self.state.best_inner_data, initial_positions)
+
+def hexagon_packing_11() -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    optimizer = HexPackingOptimizer()
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

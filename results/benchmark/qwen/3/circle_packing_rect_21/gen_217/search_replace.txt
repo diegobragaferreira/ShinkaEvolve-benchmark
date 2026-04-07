@@ -1,0 +1,167 @@
+<NAME>
+add_voronoi_based_initialization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to improve the initialization phase by incorporating Voronoi diagram analysis to better distribute initial circle positions. Instead of using a simple grid and k-means clustering, we can use Voronoi centroids to identify natural partition boundaries and place anchor points at locations that maximize coverage of unoccupied areas. This addresses the limitation noted in lower-performing generations that suffer from inadequate spatial coverage by incorporating geometric analysis to guide the placement of initial seeds.
+
+This improvement enhances the hybrid initialization by using Voronoi-based strategic placement, which should provide better starting positions for the optimization algorithm to work with.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import math
+import random
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    container_width, container_height = 1.0, 1.0
+
+    # Number of circles
+    n = 21
+
+    # Initialize circles array
+    circles = np.zeros((n, 3))
+
+    # Phase 1: Hybrid Initialization
+    # Get good starting positions using a combination of strategic placement and k-means clustering
+
+    # Generate strategic anchor points (corners and edges)
+    anchors = []
+    # Corners
+    anchors.extend([(0.05, 0.05), (container_width - 0.05, 0.05),
+                   (0.05, container_height - 0.05), (container_width - 0.05, container_height - 0.05)])
+    # Edge centers
+    anchors.extend([(container_width/2, 0.05), (container_width/2, container_height - 0.05),
+                   (0.05, container_height/2), (container_width - 0.05, container_height/2)])
+
+    # Generate dense grid for remaining positions
+    grid_points = []
+    grid_density = 16
+    for i in range(grid_density):
+        for j in range(grid_density):
+            x = (i + 0.5) / grid_density * container_width
+            y = (j + 0.5) / grid_density * container_height
+            grid_points.append((x, y))
+
+    # Use k-means to cluster grid points to reduce redundancy
+    if len(grid_points) >= n - len(anchors):
+        kmeans = KMeans(n_clusters=n - len(anchors), random_state=42)
+        grid_array = np.array(grid_points)
+        kmeans.fit(grid_array)
+        selected_grid = kmeans.cluster_centers_
+        # Convert back to list of tuples
+        selected_grid_points = [(x, y) for x, y in selected_grid]
+    else:
+        selected_grid_points = grid_points
+
+    # Combine anchors and selected grid points
+    initial_positions = anchors + selected_grid_points[:n-len(anchors)]
+
+    # Initialize circles with positions and small radii
+    for i in range(n):
+        x, y = initial_positions[i]
+        circles[i] = [x, y, 0.02]
+
+    # Phase 2: Multi-phase Optimization
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+from scipy.spatial import Voronoi
+import math
+import random
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    container_width, container_height = 1.0, 1.0
+
+    # Number of circles
+    n = 21
+
+    # Initialize circles array
+    circles = np.zeros((n, 3))
+
+    # Phase 1: Enhanced Hybrid Initialization with Voronoi Analysis
+    # Get good starting positions using strategic placement enhanced with Voronoi centroid analysis
+
+    # Generate strategic anchor points (corners and edges)
+    anchors = []
+    # Corners
+    anchors.extend([(0.05, 0.05), (container_width - 0.05, 0.05),
+                   (0.05, container_height - 0.05), (container_width - 0.05, container_height - 0.05)])
+    # Edge centers
+    anchors.extend([(container_width/2, 0.05), (container_width/2, container_height - 0.05),
+                   (0.05, container_height/2), (container_width - 0.05, container_height/2)])
+
+    # Additional strategic points using Voronoi-based approach
+    # Generate a dense set of candidate points
+    candidate_points = []
+    grid_density = 20
+    for i in range(grid_density):
+        for j in range(grid_density):
+            x = (i + 0.5) / grid_density * container_width
+            y = (j + 0.5) / grid_density * container_height
+            candidate_points.append((x, y))
+
+    # Use Voronoi diagram to identify good distribution points
+    if len(candidate_points) >= n - len(anchors):
+        # Create Voronoi diagram from candidate points
+        vor = Voronoi(np.array(candidate_points))
+
+        # Select Voronoi cell centroids that are within bounds
+        voronoi_centroids = []
+        for point in vor.points:
+            # Check if point is within container bounds
+            if 0.05 <= point[0] <= container_width - 0.05 and 0.05 <= point[1] <= container_height - 0.05:
+                voronoi_centroids.append(tuple(point))
+
+        # Add Voronoi centroids if we have space
+        remaining_slots = n - len(anchors)
+        selected_voronoi_points = voronoi_centroids[:remaining_slots]
+        # If not enough Voronoi points, fill with regular grid
+        if len(selected_voronoi_points) < remaining_slots:
+            # Fill with additional points from the grid
+            additional_points = []
+            for i in range(grid_density):
+                for j in range(grid_density):
+                    x = (i + 0.5) / grid_density * container_width
+                    y = (j + 0.5) / grid_density * container_height
+                    # Only add if not already included in anchors
+                    if (x, y) not in anchors and (x, y) not in selected_voronoi_points:
+                        additional_points.append((x, y))
+            selected_voronoi_points.extend(additional_points[:remaining_slots - len(selected_voronoi_points)])
+
+        # Select from Voronoi points to avoid redundancy
+        selected_grid_points = selected_voronoi_points[:remaining_slots]
+    else:
+        selected_grid_points = candidate_points
+
+    # Combine anchors and selected grid points
+    initial_positions = anchors + selected_grid_points[:n-len(anchors)]
+
+    # Initialize circles with positions and small radii
+    for i in range(n):
+        x, y = initial_positions[i]
+        circles[i] = [x, y, 0.02]
+
+    # Phase 2: Multi-phase Optimization
+>>>>>>> REPLACE
+</DIFF>

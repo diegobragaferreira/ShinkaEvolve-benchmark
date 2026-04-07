@@ -1,0 +1,331 @@
+<NAME>
+enhance_initialization_with_voronoi
+</NAME>
+
+<DESCRIPTION>
+The key insight is to improve the initial population generation by leveraging Voronoi diagrams to create better distributed circle placements. Instead of using simple grid or strategic positioning, I'll implement a Voronoi-based initialization that naturally avoids overlaps while maximizing coverage. This approach will provide a superior starting point for the evolutionary algorithm, leading to faster convergence towards better solutions.
+
+The improvement involves:
+1. Generating initial candidate positions using a Voronoi diagram approach
+2. Placing circles at Voronoi cell centroids with appropriate radii
+3. Using this more structured initialization to improve the baseline quality
+
+This technique should help overcome the limitations of purely random or grid-based initialization that can get stuck in poor local optima early in the evolution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+from scipy.spatial import cKDTree
+import math
+from scipy.optimize import minimize
+import warnings
+=======
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+from scipy.spatial import cKDTree, Voronoi
+import math
+from scipy.optimize import minimize
+import warnings
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_improved_initialization():
+    """Generate improved initial circle positions with strategic placement"""
+    n = 26
+    circles = []
+
+    # Strategic positions for better initial distribution
+    strategic_positions = [
+        (0.5, 0.5),  # center
+        (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75),  # corners
+        (0.5, 0.25), (0.5, 0.75), (0.25, 0.5), (0.75, 0.5),  # midpoints
+        (0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9),  # near corners
+    ]
+
+    placed_positions = set()
+    count = 0
+
+    # Place circles in strategic positions first
+    for pos in strategic_positions:
+        if count >= n:
+            break
+        x, y = pos
+        # Ensure we don't go out of bounds
+        x = max(0.05, min(0.95, x))
+        y = max(0.05, min(0.95, y))
+
+        # Skip if already placed
+        if (round(x, 3), round(y, 3)) not in placed_positions:
+            # Calculate max possible radius
+            min_dist_to_bound = min(x, 1-x, y, 1-y)
+            r = min(0.12, min_dist_to_bound/2)
+
+            # Add some variance
+            r *= random.uniform(0.85, 1.15)
+            r = max(0.005, min(0.15, r))
+
+            circles.extend([x, y, r])
+            placed_positions.add((round(x, 3), round(y, 3)))
+            count += 1
+
+    # Fill remaining spots with grid-based placement
+    rows_cols = int(math.ceil(math.sqrt(n - len(placed_positions))))
+    if rows_cols < 1:
+        rows_cols = 1
+
+    spacing_x = 1.0 / (rows_cols + 1)
+    spacing_y = 1.0 / (rows_cols + 1)
+
+    for i in range(rows_cols):
+        if count >= n:
+            break
+        for j in range(rows_cols):
+            if count >= n:
+                break
+            x = (i + 1) * spacing_x
+            y = (j + 1) * spacing_y
+
+            # Ensure boundary constraints
+            x = max(0.05, min(0.95, x))
+            y = max(0.05, min(0.95, y))
+
+            # Check if position already occupied
+            if (round(x, 3), round(y, 3)) not in placed_positions:
+                min_dist_to_bound = min(x, 1-x, y, 1-y)
+                r = min(0.08, min_dist_to_bound/2)
+
+                # Add variance
+                r *= random.uniform(0.75, 1.2)
+                r = max(0.005, min(0.15, r))
+
+                circles.extend([x, y, r])
+                placed_positions.add((round(x, 3), round(y, 3)))
+                count += 1
+
+    # Fill any remaining positions with random placement
+    while len(circles) < n * 3:
+        x = random.uniform(0.05, 0.95)
+        y = random.uniform(0.05, 0.95)
+        r = random.uniform(0.005, 0.12)
+        circles.extend([x, y, r])
+
+    return circles[:n*3]
+=======
+def generate_voronoi_based_initialization():
+    """Generate initial circle positions using Voronoi-based approach for better distribution"""
+    n = 26
+    circles = []
+
+    # Generate candidate points using a combination of regular grid and random sampling
+    # to create diverse initial positions that will form good Voronoi cells
+
+    # Start with a structured grid of points
+    grid_points = []
+    grid_size = max(1, int(math.ceil(math.sqrt(n * 2))))
+
+    # Create a grid of points with some randomness to avoid perfect symmetry
+    for i in range(grid_size):
+        for j in range(grid_size):
+            x = (i + 0.5 + random.uniform(-0.2, 0.2)) / grid_size
+            y = (j + 0.5 + random.uniform(-0.2, 0.2)) / grid_size
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                grid_points.append([x, y])
+
+    # Add some random points to increase diversity
+    for _ in range(n):
+        grid_points.append([random.uniform(0.05, 0.95), random.uniform(0.05, 0.95)])
+
+    # Limit to reasonable number of points for Voronoi computation
+    grid_points = grid_points[:n*3]  # Prevent excessive computation
+
+    # If we have enough points, use Voronoi to generate good distribution
+    if len(grid_points) >= n:
+        points = np.array(grid_points)
+
+        # Remove duplicates and limit to n points
+        unique_points = np.unique(points, axis=0)
+        if len(unique_points) < n:
+            # Fill with additional random points if needed
+            additional_points = []
+            while len(additional_points) + len(unique_points) < n:
+                additional_points.append([random.uniform(0.05, 0.95), random.uniform(0.05, 0.95)])
+            unique_points = np.vstack([unique_points, additional_points])
+
+        # Trim to exactly n points
+        unique_points = unique_points[:n]
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(unique_points)
+
+            # Use Voronoi cell centroids as circle centers
+            centroids = []
+            for i, point in enumerate(unique_points):
+                if i < len(vor.points):
+                    # Get the centroid of the Voronoi cell for this generator point
+                    # For now, just use the generator point itself as approximation
+                    centroids.append(point)
+
+            # Use the generator points directly as circle centers
+            centroids = unique_points
+
+            # Place circles at these centroids with appropriate radii
+            for i, (x, y) in enumerate(centroids[:n]):
+                # Calculate max possible radius for this position
+                min_dist_to_bound = min(x, 1-x, y, 1-y)
+
+                # For Voronoi approach, we want to maximize radius while avoiding overlaps
+                # Start with a reasonable value and adjust based on proximity to other points
+                r = min(0.1, min_dist_to_bound/2)
+
+                # Reduce radius based on proximity to other points
+                if len(centroids) > 1:
+                    min_dist_to_other = float('inf')
+                    for j, (other_x, other_y) in enumerate(centroids):
+                        if i != j:
+                            dist = math.sqrt((x - other_x)**2 + (y - other_y)**2)
+                            min_dist_to_other = min(min_dist_to_other, dist)
+
+                    # If there are nearby points, reduce radius to allow room for all circles
+                    if min_dist_to_other < 0.2:  # Threshold for considering proximity
+                        r = min(r, min_dist_to_other/3)
+
+                # Add some randomness to the radius
+                r *= random.uniform(0.8, 1.2)
+                r = max(0.005, min(0.15, r))
+
+                circles.extend([x, y, r])
+
+        except Exception:
+            # Fall back to simpler initialization if Voronoi fails
+            circles = fallback_initialization(n)
+    else:
+        # Fall back to simpler initialization if too few points
+        circles = fallback_initialization(n)
+
+    return circles[:n*3]
+
+def fallback_initialization(n):
+    """Fallback initialization when Voronoi approach is not feasible"""
+    circles = []
+
+    # Use a combination of strategic and grid-based placement
+    strategic_positions = [
+        (0.5, 0.5),  # center
+        (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75),  # corners
+        (0.5, 0.25), (0.5, 0.75), (0.25, 0.5), (0.75, 0.5),  # midpoints
+        (0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9),  # near corners
+    ]
+
+    placed_positions = set()
+    count = 0
+
+    # Place circles in strategic positions first
+    for pos in strategic_positions:
+        if count >= n:
+            break
+        x, y = pos
+        # Ensure we don't go out of bounds
+        x = max(0.05, min(0.95, x))
+        y = max(0.05, min(0.95, y))
+
+        # Skip if already placed
+        if (round(x, 3), round(y, 3)) not in placed_positions:
+            # Calculate max possible radius
+            min_dist_to_bound = min(x, 1-x, y, 1-y)
+            r = min(0.12, min_dist_to_bound/2)
+
+            # Add some variance
+            r *= random.uniform(0.85, 1.15)
+            r = max(0.005, min(0.15, r))
+
+            circles.extend([x, y, r])
+            placed_positions.add((round(x, 3), round(y, 3)))
+            count += 1
+
+    # Fill remaining spots with grid-based placement
+    rows_cols = int(math.ceil(math.sqrt(n - len(placed_positions))))
+    if rows_cols < 1:
+        rows_cols = 1
+
+    spacing_x = 1.0 / (rows_cols + 1)
+    spacing_y = 1.0 / (rows_cols + 1)
+
+    for i in range(rows_cols):
+        if count >= n:
+            break
+        for j in range(rows_cols):
+            if count >= n:
+                break
+            x = (i + 1) * spacing_x
+            y = (j + 1) * spacing_y
+
+            # Ensure boundary constraints
+            x = max(0.05, min(0.95, x))
+            y = max(0.05, min(0.95, y))
+
+            # Check if position already occupied
+            if (round(x, 3), round(y, 3)) not in placed_positions:
+                min_dist_to_bound = min(x, 1-x, y, 1-y)
+                r = min(0.08, min_dist_to_bound/2)
+
+                # Add variance
+                r *= random.uniform(0.75, 1.2)
+                r = max(0.005, min(0.15, r))
+
+                circles.extend([x, y, r])
+                placed_positions.add((round(x, 3), round(y, 3)))
+                count += 1
+
+    # Fill any remaining positions with random placement
+    while len(circles) < n * 3:
+        x = random.uniform(0.05, 0.95)
+        y = random.uniform(0.05, 0.95)
+        r = random.uniform(0.005, 0.12)
+        circles.extend([x, y, r])
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def init_individual():
+    """Initialize an individual with better initialization"""
+    individual = generate_improved_initialization()
+
+    # Add more variance via mutation-like perturbations
+    for i in range(len(individual)):
+        if i % 3 == 2:  # This is a radius
+            # Mutate radius with bounded adjustment
+            individual[i] = max(0.001, min(0.4, individual[i] * random.uniform(0.9, 1.1)))
+        else:  # This is x or y coordinate
+            # Mutate position with bounded adjustment
+            individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i] + random.gauss(0, 0.015)))
+
+    return individual
+=======
+def init_individual():
+    """Initialize an individual with better initialization"""
+    individual = generate_voronoi_based_initialization()
+
+    # Add more variance via mutation-like perturbations
+    for i in range(len(individual)):
+        if i % 3 == 2:  # This is a radius
+            # Mutate radius with bounded adjustment
+            individual[i] = max(0.001, min(0.4, individual[i] * random.uniform(0.9, 1.1)))
+        else:  # This is x or y coordinate
+            # Mutate position with bounded adjustment
+            individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i] + random.gauss(0, 0.015)))
+
+    return individual
+>>>>>>> REPLACE
+</DIFF>

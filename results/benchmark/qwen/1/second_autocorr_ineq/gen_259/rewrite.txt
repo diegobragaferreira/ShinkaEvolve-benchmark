@@ -1,0 +1,266 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.fftpack import fft, ifft
+from scipy.linalg import svd
+from typing import List
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+def construct_function() -> List[float]:
+    """
+    Construct step-function with high C2 value using multiscale convex optimization approach.
+    
+    This approach fundamentally differs from evolutionary methods by:
+    1. Using spectral analysis to identify important basis functions
+    2. Formulating the problem as convex optimization over sparse coefficients  
+    3. Leveraging FFT for fast convolution computation
+    4. Building multi-scale representations to avoid local optima
+    """
+    
+    # Set timing constraints
+    start_time = time.time()
+    max_time = 85.0
+    
+    # Determine problem size using a strategic approach
+    # Use smaller size for initial exploration, larger for exploitation
+    n_steps = np.random.randint(500, 3000)
+    
+    # Generate a rich dictionary of basis functions using multiscale approach
+    # Create radial basis functions with multiple scales and positions
+    basis_functions = []
+    
+    # Generate multiple scale levels for better coverage
+    scale_params = np.logspace(-2.5, -0.5, 25)  # Different scales from ~0.003 to ~0.3
+    position_params = np.linspace(0.05, 0.95, 30)  # Different positions
+    
+    # Add multiple types of basis functions to enrich the dictionary
+    for scale in scale_params:
+        for pos in position_params:
+            # Create Gaussian-like basis functions with varying width and position
+            x = np.linspace(0, 1, n_steps)
+            basis = np.exp(-((x - pos) / scale) ** 2) * 0.7 + 0.3
+            basis_functions.append(basis)
+    
+    # Add some additional structured basis functions for complexity
+    for i in range(15):
+        # Sine wave basis functions with varying frequencies
+        freq = 2 + np.random.randint(1, 5) * 2
+        x = np.linspace(0, 1, n_steps)
+        basis = np.sin(freq * np.pi * x) * 0.5 + 0.5
+        basis_functions.append(basis)
+    
+    # Use SVD to compress the basis functions space efficiently
+    # This identifies the most important combinations that can generate high C2 functions
+    basis_matrix = np.array(basis_functions).T
+    
+    try:
+        # If matrix is too large, subsample to manage memory
+        if basis_matrix.shape[0] > 2000:
+            indices = np.random.choice(basis_matrix.shape[0], 2000, replace=False)
+            basis_matrix = basis_matrix[indices]
+        
+        # Perform SVD to find principal components - more efficient than full SVD
+        U, s, Vt = svd(basis_matrix, full_matrices=False)
+        
+        # Keep significant components only (98% of variance)
+        cumulative = np.cumsum(s)
+        total_variance = cumulative[-1]
+        threshold = total_variance * 0.98
+        n_components = np.argmax(cumulative >= threshold) + 1
+        
+        # Limit to reasonable number of components to avoid overfitting
+        n_components = min(n_components, 50)
+        
+        # Use compressed representation
+        compressed_basis = U[:, :n_components]
+        compressed_weights = Vt[:n_components, :]
+        
+    except Exception:
+        # Fallback to simpler approach if SVD fails
+        n_components = min(30, len(basis_functions))
+        compressed_basis = basis_matrix.T[:, :n_components]
+        compressed_weights = np.eye(n_components)
+    
+    # Generate diverse candidate solutions by sampling from the compressed space
+    candidates = []
+    num_candidates = min(15, n_components)
+    
+    for _ in range(num_candidates):
+        # Sample random weights for the compressed basis
+        weights = np.random.randn(n_components) * 1.0  # Use normal distribution
+        # Apply inverse transform to get actual function
+        candidate_func = np.dot(compressed_basis, weights)
+        # Ensure non-negative values
+        candidate_func = np.clip(candidate_func, 0, None)
+        # Normalize to control magnitude (but preserve distribution shape)
+        total = np.sum(candidate_func)
+        if total > 0:
+            candidate_func = candidate_func / total * n_steps
+        candidates.append(candidate_func)
+    
+    # Select the best candidate to optimize further using convex approach
+    best_candidate = None
+    best_c2 = -1.0
+    
+    for candidate in candidates:
+        if time.time() - start_time > max_time - 2:
+            break
+        try:
+            # Fast compute C2 using FFT-based approach
+            c2 = compute_c2_fast(candidate)
+            if c2 > best_c2:
+                best_c2 = c2
+                best_candidate = candidate.copy()
+        except Exception:
+            continue
+    
+    # If no good candidates, create a reasonable default pattern
+    if best_candidate is None:
+        # Create a good baseline pattern using multi-peaked structure
+        best_candidate = np.zeros(n_steps)
+        # Place multiple peaks strategically
+        peak_positions = [n_steps // 4, n_steps // 2, 3*n_steps // 4]
+        peak_heights = [1.0, 1.5, 1.0]
+        for pos, height in zip(peak_positions, peak_heights):
+            if pos < n_steps:
+                # Gaussian around peak location
+                x = np.arange(n_steps)
+                sigma = n_steps // 20
+                best_candidate += height * np.exp(-((x - pos) / sigma) ** 2)
+        
+        # Add some random variation
+        noise = np.random.normal(0, 0.02, n_steps)
+        best_candidate += noise
+        best_candidate = np.clip(best_candidate, 0, None)
+        
+        total = np.sum(best_candidate)
+        if total > 0:
+            best_candidate = best_candidate / total * n_steps
+    
+    # Refine using convex optimization approach
+    if time.time() - start_time < max_time - 3:
+        try:
+            # Define objective function that we want to maximize
+            def objective(weights):
+                # Reconstruct function from weights
+                func = np.dot(compressed_basis, weights)
+                func = np.clip(func, 0, None)
+                total = np.sum(func)
+                if total > 0:
+                    func = func / total * n_steps
+                
+                # Compute C2 (minimize negative)
+                return -compute_c2_fast(func)
+            
+            # Bounds for weights - keep them reasonable to avoid extreme values
+            bounds = [(-5.0, 5.0) for _ in range(n_components)]
+            
+            # Initial guess from best candidate's projection
+            initial_weights = np.dot(compressed_weights, best_candidate)
+            
+            # Optimize using L-BFGS-B - efficient for large-scale problems
+            result = minimize(
+                objective,
+                initial_weights,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 150, 'ftol': 1e-8},
+                tol=1e-8
+            )
+            
+            # Reconstruct final function
+            if result.success:
+                final_func = np.dot(compressed_basis, result.x)
+                final_func = np.clip(final_func, 0, None)
+                total = np.sum(final_func)
+                if total > 0:
+                    final_func = final_func / total * n_steps
+                    
+                # Verify and compute final C2
+                final_c2 = compute_c2_fast(final_func)
+                if final_c2 > best_c2:
+                    best_candidate = final_func
+                else:
+                    # Even if not better, still use refined approach
+                    pass  # Keep the previous best
+                    
+        except Exception:
+            # If optimization fails, keep the best candidate
+            pass
+    
+    # Ensure we have valid output within time limits
+    if time.time() - start_time > max_time - 1:
+        # Truncate to manageable size if needed
+        best_candidate = best_candidate[:1500] if len(best_candidate) > 1500 else best_candidate
+    
+    # Convert to list of floats (ensure proper conversion to avoid any type issues)
+    return [float(x) for x in best_candidate]
+
+def compute_c2_fast(f_values: np.ndarray) -> float:
+    """
+    Fast computation of C2 using FFT-based convolution and optimized norm computation.
+    
+    This uses a more sophisticated approach to compute the norms to ensure numerical stability
+    and efficiency, especially for large arrays.
+    """
+    try:
+        # Ensure non-negative values with more careful clipping
+        f = np.clip(f_values, 0, None)
+        
+        if len(f) == 0:
+            return 0.0
+        
+        # Use FFT-based convolution for speed - more efficient than brute force
+        # Pad to appropriate size for FFT - use power of 2 for efficiency
+        n = len(f)
+        # Pad to next power of 2 for optimal FFT performance
+        padded_size = 2**int(np.ceil(np.log2(2*n - 1)))
+        
+        f_padded = np.pad(f, (0, padded_size - n), mode='constant')
+        
+        # FFT convolution: g = f * f using frequency domain multiplication
+        f_fft = fft(f_padded)
+        g_fft = f_fft * np.conj(f_fft)  # conjugate for autoconvolution
+        g = ifft(g_fft).real
+        
+        # Trim to the valid convolution range
+        # Autoconvolution result length is 2*n - 1
+        g_trimmed = g[:2*n - 1]
+        
+        # Center the convolution (this is what we actually want)
+        center_start = n - 1
+        g_center = g_trimmed[center_start:center_start + n]
+        
+        # Compute norms efficiently using numpy functions
+        g_abs = np.abs(g_center)
+        
+        # ||g||_2^2 using optimized computation
+        norm_2_squared = np.sum(g_abs**2)
+        
+        # ||g||_1 - normalize properly
+        norm_1 = np.sum(g_abs) / (len(g_abs) + 1) if len(g_abs) > 0 else 1e-12
+        
+        # ||g||_inf
+        norm_inf = np.max(g_abs) if len(g_abs) > 0 else 1e-12
+        
+        # Prevent division by zero with more robust checks
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            # If too close to zero, return a small value instead of inf/NaN
+            return 0.0
+            
+        # Return C2 value
+        c2 = norm_2_squared / (norm_1 * norm_inf)
+        
+        # Ensure reasonable values (handle numerical artifacts)
+        if np.isnan(c2) or np.isinf(c2):
+            return 0.0
+            
+        return c2
+        
+    except Exception:
+        return 0.0
+
+# EVOLVE-BLOCK-END

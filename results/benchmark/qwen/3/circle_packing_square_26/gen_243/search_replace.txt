@@ -1,0 +1,285 @@
+<NAME>
+enhance_initialization_with_voronoi
+</NAME>
+
+<DESCRIPTION>
+The current initialization approach uses a simple grid with jitter, which doesn't provide optimal spatial distribution for circle packing. I'll enhance the initialization by implementing a Voronoi-based approach that provides better spread of initial points, which should lead to better starting configurations and improved convergence toward the optimal solution.
+
+This change replaces the simple grid initialization with a more sophisticated Voronoi-based point generation that naturally distributes points with good spacing, which is crucial for circle packing problems.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_initial_grid_points(n_circles: int, density: int = INITIAL_GRID_DENSITY) -> np.ndarray:
+    """Generate initial points using a structured grid approach"""
+    # Create a structured grid pattern with some randomness for variation
+    grid_size = max(2, int(np.ceil(np.sqrt(n_circles))))
+
+    # Create regular grid points
+    points = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) >= n_circles:
+                break
+            # Add some jitter to make it less regular
+            x = (i + 0.5 + np.random.uniform(-0.2, 0.2)) / grid_size
+            y = (j + 0.5 + np.random.uniform(-0.2, 0.2)) / grid_size
+            # Ensure points stay within bounds
+            x = np.clip(x, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            y = np.clip(y, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            points.append([x, y])
+
+    # If we don't have enough points, add random ones
+    if len(points) < n_circles:
+        additional = n_circles - len(points)
+        for _ in range(additional):
+            x = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            y = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            points.append([x, y])
+
+    return np.array(points[:n_circles])
+=======
+def generate_initial_voronoi_points(n_circles: int, max_iter: int = 1000) -> np.ndarray:
+    """Generate initial points using Voronoi-based optimization for better distribution"""
+    # Start with random points
+    points = np.random.rand(n_circles, 2) * 0.8 + 0.1  # Keep away from edges
+
+    # Apply simple Voronoi-like repulsion to spread points
+    for iteration in range(max_iter):
+        # Calculate pairwise distances
+        distances = cdist(points, points)
+
+        # Set diagonal to large value to skip self-comparisons
+        np.fill_diagonal(distances, np.inf)
+
+        # Find minimum distances for each point
+        min_distances = np.min(distances, axis=1)
+
+        # Calculate forces from neighbors
+        forces = np.zeros_like(points)
+        for i in range(n_circles):
+            for j in range(n_circles):
+                if i != j:
+                    dx = points[i, 0] - points[j, 0]
+                    dy = points[i, 1] - points[j, 1]
+                    dist = max(1e-6, np.sqrt(dx*dx + dy*dy))
+
+                    # Repulsive force (inverse square law)
+                    force_magnitude = 1.0 / (dist * dist) if dist > 0 else 0
+                    forces[i, 0] += force_magnitude * dx / dist
+                    forces[i, 1] += force_magnitude * dy / dist
+
+        # Apply forces with damping
+        points += forces * 0.001
+
+        # Keep within bounds
+        points[:, 0] = np.clip(points[:, 0], 0.01, 0.99)
+        points[:, 1] = np.clip(points[:, 1], 0.01, 0.99)
+
+        # Check for convergence (very small movements)
+        if np.max(np.abs(forces)) < 1e-8:
+            break
+
+    return points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_initialization_method
+</NAME>
+
+<DESCRIPTION>
+Replace the grid-based initialization with the Voronoi-based initialization that was implemented in the previous step. This will provide much better initial spatial distribution for the circles, which is essential for achieving higher sum of radii in circle packing problems.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Step 1: Generate initial grid points
+    initial_points = generate_initial_grid_points(n_circles, INITIAL_GRID_DENSITY)
+=======
+    # Step 1: Generate initial Voronoi points for better distribution
+    initial_points = generate_initial_voronoi_points(n_circles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_radius_calculation
+</NAME>
+
+<DESCRIPTION>
+Improve the initial radius calculation by making it more sophisticated. Instead of just using minimum distances to neighbors, we'll implement a more robust approach that considers the local density and ensures better initial radii distribution. This will help the optimization process start with a more promising configuration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_initial_radii(points: np.ndarray, n_circles: int) -> np.ndarray:
+    """Calculate initial radii based on distance to nearest neighbors"""
+    if n_circles <= 1:
+        return np.full(n_circles, 0.05)
+
+    # Compute pairwise distances
+    distances = cdist(points, points, 'euclidean')
+
+    # Set diagonal to large value to ignore self-distance
+    np.fill_diagonal(distances, np.inf)
+
+    # Find minimum distances to neighbors
+    min_distances = np.min(distances, axis=1)
+
+    # Calculate initial radii - inversely proportional to neighbor distances
+    # but bounded by boundary constraints
+    initial_radii = np.minimum(
+        min_distances / 3.0,  # Half of min distance to nearest neighbor
+        np.minimum(
+            points[:, 0],  # Distance to left boundary
+            np.minimum(
+                1 - points[:, 0],  # Distance to right boundary
+                np.minimum(
+                    points[:, 1],  # Distance to bottom boundary
+                    1 - points[:, 1]   # Distance to top boundary
+                )
+            )
+        )
+    )
+
+    # Ensure minimum radius
+    initial_radii = np.maximum(initial_radii, 0.005)
+
+    # Add some randomness to break symmetry
+    initial_radii *= (1 + np.random.normal(0, 0.1, n_circles))
+    initial_radii = np.maximum(initial_radii, 0.005)
+
+    return initial_radii
+=======
+def calculate_initial_radii(points: np.ndarray, n_circles: int) -> np.ndarray:
+    """Calculate initial radii using Voronoi-based approach for better distribution"""
+    if n_circles <= 1:
+        return np.full(n_circles, 0.05)
+
+    # Compute pairwise distances
+    distances = cdist(points, points, 'euclidean')
+
+    # Set diagonal to large value to ignore self-distance
+    np.fill_diagonal(distances, np.inf)
+
+    # Find minimum distances to neighbors
+    min_distances = np.min(distances, axis=1)
+
+    # Calculate initial radii based on Voronoi cell areas - larger distances mean room for bigger radii
+    # Use a more sophisticated approach:
+    # - radii proportional to minimum neighbor distance (with safety factor)
+    # - bounded by boundary constraints
+    # - adjusted for local density
+    ideal_radii = min_distances * 0.4  # Scale down to ensure non-overlap
+
+    # Apply boundary constraints
+    boundary_radii = np.minimum(
+        points[:, 0],  # Distance to left boundary
+        np.minimum(
+            1 - points[:, 0],  # Distance to right boundary
+            np.minimum(
+                points[:, 1],  # Distance to bottom boundary
+                1 - points[:, 1]   # Distance to top boundary
+            )
+        )
+    )
+
+    # Take minimum of ideal and boundary radii to ensure feasibility
+    initial_radii = np.minimum(ideal_radii, boundary_radii * 0.9)
+
+    # Ensure minimum radius
+    initial_radii = np.maximum(initial_radii, 0.005)
+
+    # Add some randomness to break symmetry and make solutions more diverse
+    # Use log-normal distribution for more realistic spread
+    initial_radii *= np.random.lognormal(0, 0.2, n_circles)
+    initial_radii = np.maximum(initial_radii, 0.005)
+
+    # Ensure we don't exceed reasonable limits
+    initial_radii = np.minimum(initial_radii, 0.4)
+
+    return initial_radii
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_constraint_handling_improvements
+</NAME>
+
+<DESCRIPTION>
+Improve the constraint handling in the optimization process to make it more robust and efficient. This involves refining how boundary and overlap constraints are checked and handled, which will help prevent the optimization from getting stuck in infeasible regions and improve convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Constraints function
+    def constraint_func(x):
+        positions = x[:n_circles*2].reshape((-1, 2))
+        radii_vals = x[n_circles*2:]
+
+        # Boundary violations
+        violations = []
+        for i in range(n_circles):
+            x_pos, y_pos = positions[i]
+            r_val = radii_vals[i]
+            # Boundary violations (penalty if outside bounds)
+            if x_pos - r_val < 0:
+                violations.append((0 - (x_pos - r_val))**2)
+            if x_pos + r_val > 1:
+                violations.append(((x_pos + r_val) - 1)**2)
+            if y_pos - r_val < 0:
+                violations.append((0 - (y_pos - r_val))**2)
+            if y_pos + r_val > 1:
+                violations.append(((y_pos + r_val) - 1)**2)
+
+        # Overlap violations
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                x1, y1 = positions[i]
+                x2, y2 = positions[j]
+                r1 = radii_vals[i]
+                r2 = radii_vals[j]
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                overlap = max(0, r1 + r2 - distance)
+                violations.append(overlap**2)
+
+        return np.array(violations)
+=======
+    # Constraints function with improved handling
+    def constraint_func(x):
+        positions = x[:n_circles*2].reshape((-1, 2))
+        radii_vals = x[n_circles*2:]
+
+        # Boundary violations (return negative values for constraint violation)
+        violations = []
+        for i in range(n_circles):
+            x_pos, y_pos = positions[i]
+            r_val = radii_vals[i]
+            # Boundary violations (negative means constraint violated)
+            if x_pos - r_val < 0:
+                violations.append(-(x_pos - r_val))  # Violation amount (positive value)
+            elif x_pos + r_val > 1:
+                violations.append(-(x_pos + r_val - 1))  # Violation amount
+            if y_pos - r_val < 0:
+                violations.append(-(y_pos - r_val))  # Violation amount
+            elif y_pos + r_val > 1:
+                violations.append(-(y_pos + r_val - 1))  # Violation amount
+
+        # Overlap violations (return negative values for constraint violation)
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                x1, y1 = positions[i]
+                x2, y2 = positions[j]
+                r1 = radii_vals[i]
+                r2 = radii_vals[j]
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                overlap = max(0, r1 + r2 - distance)
+                if overlap > 0:
+                    violations.append(-overlap)  # Negative means constraint violated
+
+        return np.array(violations)
+>>>>>>> REPLACE
+</DIFF>

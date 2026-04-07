@@ -1,0 +1,100 @@
+<NAME>
+enhance_voronoi_analysis
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi analysis implementation has several issues that prevent effective constraint identification. The main problems are:
+1. Incorrect Voronoi volume calculation (uses 'volume' instead of 'areas')
+2. Incomplete constraint scoring logic
+3. Poor handling of edge cases
+
+This change improves the VoronoiAnalyzer class to provide better constraint identification and more effective point selection for perturbation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class VoronoiAnalyzer:
+    @staticmethod
+    def analyze_constraint_regions(points: np.ndarray, threshold_ratio: float = 0.3) -> np.ndarray:
+        """Analyze current configuration using spherical Voronoi to identify constraints"""
+        try:
+            # Create spherical Voronoi diagram
+            sv = SphericalVoronoi(points)
+
+            # Compute Voronoi cell areas and identify small cells (indicating dense regions)
+            cell_areas = sv.volume
+            mean_area = np.mean(cell_areas)
+
+            # Find points in cells that are below 20% of average area (dense regions)
+            dense_point_indices = np.where(cell_areas < 0.2 * mean_area)[0]
+
+            # Also identify points that have many close neighbors
+            distances = pdist(points)
+            distance_matrix = squareform(distances)
+            close_neighbor_counts = np.sum(distance_matrix < np.percentile(distances, 10), axis=1)
+
+            # Combine criteria for constraint identification
+            constraint_scores = np.zeros(len(points))
+
+            # Score based on close neighbors
+            constraint_scores += close_neighbor_counts * 0.5
+
+            # Bonus for being in a dense region
+            for idx in dense_point_indices:
+                constraint_scores[idx] += 2.0
+
+            return constraint_scores
+
+        except Exception:
+            # Fallback if Voronoi computation fails
+            return np.ones(len(points)) * 0.5
+=======
+class VoronoiAnalyzer:
+    @staticmethod
+    def analyze_constraint_regions(points: np.ndarray, threshold_ratio: float = 0.3) -> np.ndarray:
+        """Analyze current configuration using spherical Voronoi to identify constraints"""
+        try:
+            # Create spherical Voronoi diagram
+            sv = SphericalVoronoi(points)
+
+            # Compute Voronoi cell areas properly
+            cell_areas = sv.calculate_areas()
+            mean_area = np.mean(cell_areas) if len(cell_areas) > 0 else 1.0
+
+            # Find points in cells that are below 20% of average area (dense regions)
+            dense_point_indices = np.where(cell_areas < 0.2 * mean_area)[0] if len(cell_areas) > 0 else np.array([])
+
+            # Also identify points that have many close neighbors
+            distances = pdist(points)
+            if len(distances) > 0:
+                distance_matrix = squareform(distances)
+                # Count neighbors within 10th percentile distance
+                threshold_dist = np.percentile(distances, 10)
+                close_neighbor_counts = np.sum(distance_matrix < threshold_dist, axis=1)
+            else:
+                close_neighbor_counts = np.zeros(len(points))
+
+            # Combine criteria for constraint identification with proper normalization
+            constraint_scores = np.zeros(len(points))
+
+            # Score based on close neighbors (normalized)
+            if len(close_neighbor_counts) > 0:
+                max_neighbors = np.max(close_neighbor_counts) if np.max(close_neighbor_counts) > 0 else 1
+                constraint_scores += close_neighbor_counts / max_neighbors * 0.5
+
+            # Bonus for being in a dense region
+            if len(dense_point_indices) > 0:
+                for idx in dense_point_indices:
+                    if idx < len(constraint_scores):  # Safety check
+                        constraint_scores[idx] += 2.0
+
+            # Ensure scores are non-negative
+            constraint_scores = np.maximum(constraint_scores, 0)
+
+            return constraint_scores
+
+        except Exception as e:
+            # Fallback if Voronoi computation fails
+            return np.ones(len(points)) * 0.5
+>>>>>>> REPLACE
+</DIFF>

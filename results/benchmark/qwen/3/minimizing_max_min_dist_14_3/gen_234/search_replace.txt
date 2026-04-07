@@ -1,0 +1,93 @@
+<NAME>
+add_adaptive_tolerance_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll add adaptive tolerance refinement to the local optimization stage to improve convergence precision. The idea is to start with looser tolerances for faster initial convergence and then tighten them during the optimization process when improvements are occurring, which will help achieve better final solutions without excessive computational cost.
+
+This enhancement directly addresses the multi-stage optimization pattern that was successful in previous generations, particularly the "Enhance local refinement with adaptive tolerance tightening" recommendation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, initial_points):
+        """Local refinement with L-BFGS-B."""
+        def local_obj(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = self.optimizer.spherical_constraint(points)
+            ratio = self.optimizer.compute_min_max_ratio(points)
+            return -ratio
+
+        try:
+            x0 = initial_points.flatten()
+            bounds = [(-1, 1)] * (14 * 3)
+            result = minimize(
+                local_obj,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 60, 'ftol': 1e-10, 'gtol': 1e-10, 'disp': False}
+            )
+            if result.success:
+                points = result.x.reshape(-1, 3)
+                return self.optimizer.spherical_constraint(points)
+        except:
+            pass
+        return initial_points
+=======
+    def local_refinement(self, initial_points):
+        """Local refinement with L-BFGS-B and adaptive tolerance tightening."""
+        def local_obj(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = self.optimizer.spherical_constraint(points)
+            ratio = self.optimizer.compute_min_max_ratio(points)
+            return -ratio
+
+        try:
+            x0 = initial_points.flatten()
+            bounds = [(-1, 1)] * (14 * 3)
+
+            # Start with looser tolerances for faster initial convergence
+            ftol = 1e-6
+            gtol = 1e-6
+
+            # Try with initial loose tolerances
+            result = minimize(
+                local_obj,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 60, 'ftol': ftol, 'gtol': gtol, 'disp': False}
+            )
+
+            if result.success:
+                points = result.x.reshape(-1, 3)
+                points = self.optimizer.spherical_constraint(points)
+
+                # If we got a good improvement, try tighter tolerances for final precision
+                # We use a heuristic to determine if it's worth the extra computation
+                current_ratio = self.optimizer.compute_min_max_ratio(points)
+                if current_ratio > 0.35:  # Only refine if we're getting reasonable results
+                    # Try with tighter tolerances
+                    ftol_tight = 1e-9
+                    gtol_tight = 1e-9
+                    result_tight = minimize(
+                        local_obj,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 60, 'ftol': ftol_tight, 'gtol': gtol_tight, 'disp': False}
+                    )
+                    if result_tight.success:
+                        points_tight = result_tight.x.reshape(-1, 3)
+                        points_tight = self.optimizer.spherical_constraint(points_tight)
+                        tight_ratio = self.optimizer.compute_min_max_ratio(points_tight)
+                        if tight_ratio > current_ratio:
+                            points = points_tight.copy()
+
+                return points
+        except:
+            pass
+        return initial_points
+>>>>>>> REPLACE
+</DIFF>

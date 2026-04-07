@@ -1,0 +1,348 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import jit, prange
+import random
+import time
+from typing import List
+import math
+
+# Set random seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+@jit(nopython=True, parallel=True)
+def compute_autoconvolution_fast(f_vals):
+    """
+    Fast numba-based autoconvolution computation for step functions
+    """
+    n = len(f_vals)
+    # Autoconvolution size is 2*n - 1
+    g_size = 2 * n - 1
+    g_vals = np.zeros(g_size)
+
+    # Compute convolution directly with numba optimization
+    for i in prange(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_size:
+                g_vals[idx] += f_vals[i] * f_vals[j]
+
+    return g_vals
+
+@jit(nopython=True)
+def compute_convolution_norms_fast(g_vals, dx):
+    """
+    Fast computation of norms using numba JIT compilation
+    """
+    n = len(g_vals)
+
+    # Compute L2 norm squared using trapezoidal-like integration
+    # (dx/3)(g[i]^2 + g[i]*g[i+1] + g[i+1]^2) for each segment
+    l2_norm_sq = 0.0
+    for i in range(n-1):
+        l2_norm_sq += (dx/3) * (g_vals[i]**2 + g_vals[i]*g_vals[i+1] + g_vals[i+1]**2)
+
+    # Compute L1 norm using trapezoidal integration
+    l1_norm = 0.0
+    for i in range(n-1):
+        l1_norm += (dx/2) * (abs(g_vals[i]) + abs(g_vals[i+1]))
+
+    # Compute infinity norm
+    linf_norm = 0.0
+    for i in range(n):
+        val = abs(g_vals[i])
+        if val > linf_norm:
+            linf_norm = val
+
+    return l2_norm_sq, l1_norm, linf_norm
+
+def compute_autoconvolution_norms(f_values: List[float]):
+    """
+    Compute the three norms needed for C₂ calculation:
+    ||g||₂², ||g||₁, ||g||∞ where g = f*f
+    """
+    if not f_values:
+        return 0.0, 0.0, 0.0
+
+    # Create step function on [-1/4, 1/4]
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    dx = 0.5 / n_steps  # Step size
+
+    # Create piecewise constant function from step heights
+    f = np.array(f_values, dtype=np.float64)
+
+    # Compute autoconvolution g = f * f using numba optimized version
+    g = compute_autoconvolution_fast(f)
+
+    # Adjust indices for the correct domain
+    # Result has length 2*n_steps - 1
+    g_len = len(g)
+
+    # Extract the central region corresponding to [-1/4, 1/4]
+    # This takes the middle n_steps elements of the full convolution
+    central_start = (g_len - n_steps) // 2
+    central_end = central_start + n_steps
+    g_centered = g[central_start:central_end]
+
+    # Compute norms using numba optimized version
+    norm_2_sq, norm_1, norm_inf = compute_convolution_norms_fast(g_centered, dx)
+
+    return norm_2_sq, norm_1, norm_inf
+
+def evaluate_c2(individual):
+    """Evaluate fitness for individual (step function heights)"""
+    try:
+        # Convert individual to list of floats and clip negatives
+        f_values = [max(0.0, float(x)) for x in individual]  # Ensure non-negative
+
+        # Compute the norms
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+            return (0.0,)
+
+        # Calculate C₂
+        c2 = norm_2_sq / (norm_1 * norm_inf)
+        return (c2,)
+    except Exception as e:
+        return (0.0,)
+
+def generate_multi_scale_geometric_initial(n_steps):
+    """Generate initial function using multi-scale geometric patterns"""
+    # Create a smooth, bell-shaped function that encourages flat convolution profiles
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Generate multiple overlapping Gaussian bumps with different scales and heights
+    # This creates a more complex structure that promotes better convolution properties
+    f_values = np.zeros(n_steps)
+
+    # Base Gaussian bump at center with moderate width
+    f_values += 1.0 * np.exp(-0.5 * ((x - 0.0) / 0.1)**2)
+
+    # Additional bumps at different scales for richer structure
+    f_values += 0.7 * np.exp(-0.5 * ((x - 0.05) / 0.05)**2)
+    f_values += 0.5 * np.exp(-0.5 * ((x + 0.05) / 0.07)**2)
+    f_values += 0.3 * np.exp(-0.5 * ((x - 0.1) / 0.08)**2)
+    f_values += 0.4 * np.exp(-0.5 * ((x + 0.1) / 0.06)**2)
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to reasonable scale
+    total_area = np.sum(f_values) * (0.5 / n_steps)
+    if total_area > 0:
+        f_values = f_values / total_area * 2.0
+
+    return f_values.tolist()
+
+def adaptive_local_search(initial_f, max_iterations=100, time_limit=85):
+    """Perform adaptive local search with dynamic step sizing"""
+    start_time = time.time()
+    old_c2 = evaluate_c2(initial_f)[0]
+
+    # Start with larger steps and decrease as we converge
+    step_sizes = [0.1, 0.05, 0.02, 0.01]
+
+    best_f = initial_f.copy()
+    best_c2 = old_c2
+
+    for iter_num in range(max_iterations):
+        if time.time() - start_time > time_limit:
+            break
+
+        improved = False
+        # Randomly sample indices to process for efficiency
+        indices_to_try = np.random.choice(len(best_f), min(20, len(best_f)//3), replace=False)
+
+        for idx in indices_to_try:
+            if time.time() - start_time > time_limit:
+                break
+
+            original_value = best_f[idx]
+
+            # Try different step sizes in order of preference
+            for step_size in step_sizes:
+                if time.time() - start_time > time_limit:
+                    break
+
+                # Try increasing and decreasing
+                for direction in [1, -1]:
+                    if time.time() - start_time > time_limit:
+                        break
+                    test_f = best_f.copy()
+                    new_val = original_value + direction * step_size
+                    test_f[idx] = max(0, new_val)
+
+                    new_c2 = evaluate_c2(test_f)[0]
+                    if new_c2 > old_c2:
+                        best_f = test_f
+                        old_c2 = new_c2
+                        best_c2 = new_c2
+                        improved = True
+
+        # If no improvement was found in this iteration, stop early
+        if not improved:
+            break
+
+    return best_f, best_c2
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value using enhanced evolutionary optimization."""
+
+    # Algorithm parameters
+    INITIAL_POPSIZE = 20
+    MAX_POPSIZE = 100
+    NGEN = 150
+    INITIAL_MUTPB = 0.35
+    INITIAL_CXPB = 0.6
+    TOURNAMENT_SIZE = 3
+    TIME_LIMIT = 85  # seconds
+    DIVERSITY_THRESHOLD = 0.01
+    STAGNATION_LIMIT = 20
+    IMPROVEMENT_THRESHOLD = 1e-6
+
+    start_time = time.time()
+
+    # Pre-generate initial solutions with better patterns
+    initial_solutions = []
+    
+    # Add multi-scale geometric pattern
+    n_steps = random.randint(300, 1000)
+    initial_solutions.append(generate_multi_scale_geometric_initial(n_steps))
+    
+    # Add uniform pattern
+    uniform_size = random.randint(300, 1000)
+    initial_solutions.append([1.0] * uniform_size)
+    
+    # Add some structured patterns
+    for _ in range(3):
+        structure_size = random.randint(300, 1000)
+        structure = []
+        for i in range(structure_size):
+            if i % 4 < 2:
+                structure.append(random.uniform(0.8, 1.0))
+            else:
+                structure.append(random.uniform(0.1, 0.3))
+        initial_solutions.append(structure)
+    
+    # Try each initial solution as a starting point
+    best_overall_fitness = 0.0
+    best_overall_individual = None
+    
+    # Process initial solutions
+    for i, initial_sol in enumerate(initial_solutions):
+        if time.time() - start_time > TIME_LIMIT - 5:  # Leave margin for cleanup
+            break
+            
+        print(f"Processing initial solution {i + 1}")
+        
+        # Run local search on initial solution
+        refined_sol, refined_fitness = adaptive_local_search(initial_sol, max_iterations=50, time_limit=TIME_LIMIT)
+        
+        if refined_fitness > best_overall_fitness:
+            best_overall_fitness = refined_fitness
+            best_overall_individual = refined_sol.copy()
+
+    # If we haven't found a good solution yet, use a more comprehensive approach
+    if best_overall_individual is None:
+        # Generate a diverse set of initial solutions
+        population = []
+        
+        # Different initialization strategies
+        for _ in range(INITIAL_POPSIZE):
+            strategy = random.choice(["geometric", "uniform", "structured"])
+            
+            if strategy == "geometric":
+                n_steps = random.randint(300, 1000)
+                individual = generate_multi_scale_geometric_initial(n_steps)
+            elif strategy == "uniform":
+                n_steps = random.randint(300, 1000)
+                individual = [1.0] * n_steps
+            else:  # structured
+                n_steps = random.randint(300, 1000)
+                individual = []
+                for i in range(n_steps):
+                    if i % 6 < 3:
+                        individual.append(random.uniform(0.8, 1.0))
+                    else:
+                        individual.append(random.uniform(0.1, 0.3))
+            
+            # Ensure non-negative
+            individual = [max(0.0, x) for x in individual]
+            population.append(individual)
+        
+        # Evolve the population
+        for gen in range(NGEN):
+            if time.time() - start_time > TIME_LIMIT:
+                break
+                
+            # Evaluate fitness
+            fitnesses = [evaluate_c2(individual)[0] for individual in population]
+            
+            # Track best
+            max_fitness_idx = np.argmax(fitnesses)
+            if fitnesses[max_fitness_idx] > best_overall_fitness:
+                best_overall_fitness = fitnesses[max_fitness_idx]
+                best_overall_individual = population[max_fitness_idx].copy()
+            
+            # Selection
+            selected = []
+            for _ in range(len(population)):
+                tournament_indices = random.sample(range(len(population)), TOURNAMENT_SIZE)
+                tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+                winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+                selected.append(population[winner_idx].copy())
+            
+            # Create offspring
+            new_population = []
+            
+            # Elitism - keep best
+            elites = [population[i] for i in np.argsort(fitnesses)[-2:]]
+            new_population.extend(elites)
+            
+            # Crossover and mutation
+            while len(new_population) < len(population):
+                parent1 = random.choice(selected)
+                parent2 = random.choice(selected)
+                
+                # Crossover
+                if random.random() < INITIAL_CXPB:
+                    crossover_point = random.randint(1, min(len(parent1), len(parent2)) - 1)
+                    child = parent1[:crossover_point] + parent2[crossover_point:]
+                else:
+                    child = parent1.copy()
+                
+                # Mutation
+                if random.random() < INITIAL_MUTPB:
+                    mutate_idx = random.randint(0, len(child) - 1)
+                    # Add Gaussian noise
+                    noise = np.random.normal(0, 0.1 * max(1e-6, child[mutate_idx]))
+                    child[mutate_idx] = max(0, child[mutate_idx] + noise)
+                
+                new_population.append(child)
+            
+            population = new_population[:len(population)]
+    
+    # Final refinement with adaptive local search
+    if best_overall_individual is not None:
+        final_solution, final_fitness = adaptive_local_search(
+            best_overall_individual, 
+            max_iterations=50, 
+            time_limit=TIME_LIMIT - (time.time() - start_time)
+        )
+        return final_solution
+    
+    # Fallback: return reasonable random solution
+    fallback_size = random.randint(300, 1000)
+    return [abs(random.gauss(0.5, 0.3)) for _ in range(fallback_size)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

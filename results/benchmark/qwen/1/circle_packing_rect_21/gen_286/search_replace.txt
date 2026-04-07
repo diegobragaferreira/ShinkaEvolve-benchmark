@@ -1,0 +1,145 @@
+<NAME>
+voronoi_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Voronoi-based criticality scoring for adaptive mutation, but it could be enhanced by making the mutation parameters more sophisticated. The idea is to implement a more fine-grained adaptive mutation that uses Voronoi cell areas not just for weighting but also for determining the magnitude of mutations. Circles in smaller Voronoi cells (higher constraint density) should receive more conservative mutations, while circles in larger Voronoi cells (lower constraint density) can receive more aggressive adjustments. This will lead to better exploration in sparse regions and more stable convergence in dense regions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based criticality weighting and adaptive step sizes."""
+        mutated = circles.copy()
+
+        # Compute criticality scores
+        criticality_scores = MutationOperator.compute_voronoi_criticality(circles, rect_width, rect_height)
+
+        for i in range(21):
+            if np.random.random() < 0.25:  # 25% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score for this circle
+                crit_score = criticality_scores[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size based on criticality
+                    base_step = 0.03 + 0.02 * crit_score  # Smaller steps in critical regions
+                    step_size = base_step + np.random.random() * base_step * 0.5
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary awareness: penalize movements that go out of bounds
+                    bound_penalty_x = max(0, mutated[i, 0] - (rect_width - mutated[i, 2]))
+                    bound_penalty_y = max(0, mutated[i, 1] - (rect_height - mutated[i, 2]))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        mutated[i, 0] -= bound_penalty_x * 0.5
+                        mutated[i, 1] -= bound_penalty_y * 0.5
+
+                else:
+                    # Mutate radius with log-normal distribution
+                    # Scale based on criticality (less change in high-criticality regions)
+                    scale_factor = np.exp(np.random.normal(0, 0.15 * (1 - crit_score)))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+
+        return mutated
+=======
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based adaptive mutation parameters."""
+        mutated = circles.copy()
+
+        # Compute criticality scores based on Voronoi cell areas
+        criticality_scores = MutationOperator.compute_voronoi_criticality(circles, rect_width, rect_height)
+
+        # Also compute raw Voronoi cell areas for more sophisticated adaptive mutation
+        try:
+            points = circles[:, :2]
+            shifted_points = points.copy()
+            shifted_points[:, 0] = np.clip(shifted_points[:, 0], 0.01, rect_width - 0.01)
+            shifted_points[:, 1] = np.clip(shifted_points[:, 1], 0.01, rect_height - 0.01)
+            vor = Voronoi(shifted_points)
+
+            # Get actual Voronoi cell areas for each point
+            cell_areas = []
+            for i in range(len(shifted_points)):
+                region = vor.regions[vor.point_region[i]]
+                if -1 in region:
+                    cell_areas.append(1000000)
+                else:
+                    vertices = [vor.vertices[j] for j in region if j >= 0]
+                    if len(vertices) < 3:
+                        cell_areas.append(1000000)
+                    else:
+                        vertices_array = np.array(vertices)
+                        x = vertices_array[:, 0]
+                        y = vertices_array[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        cell_areas.append(area)
+            cell_areas = np.array(cell_areas)
+        except:
+            # Fallback if Voronoi fails
+            cell_areas = np.ones(len(circles)) * 1000
+
+        for i in range(21):
+            if np.random.random() < 0.25:  # 25% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score and cell area for this circle
+                crit_score = criticality_scores[i]
+                cell_area = cell_areas[i]
+
+                # Adaptive mutation based on both criticality and cell area
+                # Smaller cells (high constraint density) get conservative mutations
+                # Larger cells (low constraint density) get more aggressive mutations
+                area_factor = np.log(cell_area + 1) / 5.0  # Normalize area impact
+                area_factor = np.clip(area_factor, 0.1, 1.0)  # Clamp between 0.1 and 1.0
+
+                # Combine criticality and area factors
+                mutation_factor = 0.5 * crit_score + 0.5 * area_factor
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size
+                    base_step = 0.03 + 0.02 * crit_score  # Base step depends on criticality
+                    # Adjust step based on cell area - larger cells allow bigger moves
+                    step_size = base_step * (1.0 + 0.5 * (1.0 - area_factor))
+                    step_size = np.clip(step_size, 0.01, 0.1)  # Clamp step size
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary awareness: penalize movements that go out of bounds
+                    bound_penalty_x = max(0, mutated[i, 0] - (rect_width - mutated[i, 2]))
+                    bound_penalty_y = max(0, mutated[i, 1] - (rect_height - mutated[i, 2]))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        mutated[i, 0] -= bound_penalty_x * 0.5
+                        mutated[i, 1] -= bound_penalty_y * 0.5
+
+                else:
+                    # Mutate radius with adaptive step
+                    # Base mutation std dev scaled by criticality and cell area
+                    base_std = 0.15 * (1 - crit_score) * (0.5 + 0.5 * area_factor)
+                    base_std = np.clip(base_std, 0.005, 0.3)  # Clamp standard deviation
+
+                    scale_factor = np.exp(np.random.normal(0, base_std))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

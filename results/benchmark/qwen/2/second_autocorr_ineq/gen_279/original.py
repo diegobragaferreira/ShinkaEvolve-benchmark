@@ -1,0 +1,429 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+import time
+from numba import jit, prange
+from typing import List, Tuple, Optional, Callable
+
+# Core JIT-compiled functions for performance
+@jit(nopython=True)
+def compute_autoconvolution_fast(f: np.ndarray) -> np.ndarray:
+    """Fast autoconvolution computation using numba."""
+    n = len(f)
+    g = np.zeros(2*n - 1, dtype=np.float64)
+
+    # Manual convolution loop for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f[i] * f[j]
+
+    return g[n-1:]  # Return positive lags only
+
+@jit(nopython=True)
+def compute_norms_fast(g: np.ndarray) -> Tuple[float, float, float]:
+    """Fast norm computations using numba."""
+    n = len(g)
+
+    # Compute norms
+    norm_1 = 0.0
+    norm_2_sq = 0.0
+    norm_inf = 0.0
+
+    for i in range(n):
+        abs_g = abs(g[i])
+        norm_1 += abs_g
+        norm_2_sq += abs_g * abs_g
+        if abs_g > norm_inf:
+            norm_inf = abs_g
+
+    return norm_1, norm_2_sq, norm_inf
+
+@jit(nopython=True)
+def compute_c2_fast(norm_1: float, norm_2_sq: float, norm_inf: float) -> float:
+    """Fast C2 computation using numba."""
+    if norm_1 < 1e-12 or norm_inf < 1e-12:
+        return 0.0
+    return norm_2_sq / (norm_1 * norm_inf)
+
+class LogSpacedStepFunctionStrategy:
+    """Enhanced strategy for generating step functions with logarithmic spacing."""
+
+    @staticmethod
+    def gaussian_peaks_log_spaced(n_steps: int, seed: int) -> np.ndarray:
+        """Generate Gaussian peak structure with logarithmic spacing and constraints."""
+        np.random.seed(seed)
+        x = np.linspace(-0.25, 0.25, n_steps)
+        base_function = np.zeros_like(x)
+
+        # Logarithmic peak distribution with better coverage
+        num_peaks = np.random.randint(12, 25)  # Increased peak count for better coverage
+
+        # Use log-spaced distribution across the domain
+        log_min = np.log(0.005)  # Smaller minimum to capture fine details
+        log_max = np.log(0.25)   # Maximum half-width
+        log_spacings = np.logspace(log_min, log_max, num_peaks + 2)[1:-1]  # Exclude endpoints
+
+        # Distribute peaks more evenly with log spacing
+        peak_positions = []
+        for i in range(num_peaks):
+            # Position based on logarithmic distribution
+            pos = -0.25 + np.sum(log_spacings[:i+1])  # cumulative log spacing
+            # Add small randomness to avoid perfect periodicity
+            pos += np.random.uniform(-0.004, 0.004)
+            peak_positions.append(pos)
+
+        # Ensure minimum spacing between peaks (0.05 of domain width = 0.0125)
+        min_spacing = 0.0125
+        adjusted_positions = []
+        for i, pos in enumerate(peak_positions):
+            # Check against previous peaks
+            if i > 0:
+                prev_pos = adjusted_positions[-1]
+                min_allowed = prev_pos + min_spacing
+                pos = max(pos, min_allowed)
+            # Also ensure we don't go outside the domain
+            pos = max(-0.25, min(0.25, pos))
+            adjusted_positions.append(pos)
+
+        # Create peaks with adaptive height adjustment based on intermediate evaluation
+        temp_f = np.zeros_like(x)
+
+        # Track intermediate performance to prevent unstable configurations
+        intermediate_scores = []
+
+        for i, pos in enumerate(adjusted_positions):
+            # Start with moderate amplitude and adjust based on feedback
+            # Use adaptive heights that consider proximity to other peaks
+            peak_height = 0.9 + np.random.random() * 0.6  # Range: 0.9-1.5
+
+            # Adjust height to avoid numerical instability
+            proximity_factor = 1.0
+            for other_pos in adjusted_positions[:i]:
+                dist = abs(pos - other_pos)
+                if dist < 0.03:  # Close peaks
+                    proximity_factor *= 0.8  # Reduce height for close peaks
+
+            peak_height *= proximity_factor
+
+            # Use varied widths for better autoconvolution properties
+            peak_width = 0.015 + np.random.random() * 0.03  # Range: 0.015-0.045
+
+            gaussian = peak_height * np.exp(-0.5 * ((x - pos) / peak_width)**2)
+            temp_f += gaussian
+
+            # Real-time performance monitoring (check intermediate scores)
+            if i > 0 and i % 3 == 0:  # Check every few peaks
+                # Evaluate intermediate function
+                try:
+                    g = compute_autoconvolution_fast(temp_f)
+                    norm_1, norm_2_sq, norm_inf = compute_norms_fast(g)
+                    c2_intermediate = compute_c2_fast(norm_1, norm_2_sq, norm_inf)
+                    intermediate_scores.append(c2_intermediate)
+
+                    # If we're getting too aggressive with heights, back off
+                    if len(intermediate_scores) > 2 and c2_intermediate < 0.1:
+                        # Scale down recent peaks
+                        temp_f = temp_f * 0.8  # Reduction factor
+                        # Re-evaluate and re-adjust heights for the last few peaks
+                        break_point = max(0, len(adjusted_positions) - 3)
+                        for j in range(break_point, i):
+                            # Recalculate peak with reduced height
+                            pos_j = adjusted_positions[j]
+                            new_height = 0.9 + np.random.random() * 0.6  # New random height
+                            new_height *= proximity_factor * 0.7
+                            temp_f -= peak_height * np.exp(-0.5 * ((x - pos_j) / peak_width)**2)
+                            temp_f += new_height * np.exp(-0.5 * ((x - pos_j) / peak_width)**2)
+                except Exception:
+                    continue
+
+        # Ensure non-negative and normalize properly
+        temp_f = np.maximum(temp_f, 0)
+        if np.sum(temp_f) > 0:
+            temp_f = temp_f / np.sum(temp_f) * 10  # Scale appropriately
+        else:
+            temp_f = np.ones_like(temp_f) * 0.1
+
+        return temp_f
+
+class PerformanceMonitor:
+    """Monitors performance and manages time constraints."""
+
+    def __init__(self, max_time: float = 90.0):
+        self.max_time = max_time
+        self.start_time = time.time()
+
+    def time_remaining(self) -> float:
+        """Returns remaining time in seconds."""
+        return self.max_time - (time.time() - self.start_time)
+
+    def is_expired(self) -> bool:
+        """Check if time budget is exhausted."""
+        return self.time_remaining() <= 0.1
+
+class AutoCorrelationEvaluator:
+    """Handles evaluation of functions and computation of C2."""
+
+    @staticmethod
+    def evaluate_function(f: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Evaluate function and compute C2."""
+        try:
+            # Fast autoconvolution
+            g = compute_autoconvolution_fast(f)
+
+            # Fast norm computations
+            norm_1, norm_2_sq, norm_inf = compute_norms_fast(g)
+
+            # C2 computation
+            c2 = compute_c2_fast(norm_1, norm_2_sq, norm_inf)
+
+            return c2, g
+        except Exception:
+            return 0.0, np.array([0.0])
+
+class OptimizedOptimizationPipeline:
+    """Main optimization pipeline with improved strategies."""
+
+    def __init__(self, seed: int = 42, max_time: float = 90.0):
+        self.seed = seed
+        self.performance_monitor = PerformanceMonitor(max_time)
+        self.evaluator = AutoCorrelationEvaluator()
+
+        # Initialize deterministic behavior
+        np.random.seed(seed)
+        random.seed(seed)
+
+    def _enhance_function(self, base_function: np.ndarray, n_steps: int) -> np.ndarray:
+        """Apply enhancements to improve function quality."""
+        # Ensure non-negative values
+        enhanced_function = np.maximum(base_function, 0)
+
+        # Normalize
+        if np.max(enhanced_function) > 0:
+            enhanced_function = enhanced_function / np.max(enhanced_function) * 1.5
+
+        # Apply light noise
+        noise_level = 0.015  # Slightly reduced noise level
+        noisy_function = enhanced_function + np.random.normal(0, noise_level, len(enhanced_function))
+        noisy_function = np.maximum(noisy_function, 0)
+
+        # Apply smoothing (more conservative approach)
+        window_size = max(1, n_steps // 150)  # Larger windows for better smoothing
+        if window_size % 2 == 0:
+            window_size += 1
+        if window_size > 1:
+            try:
+                smoothed_function = signal.savgol_filter(noisy_function, window_size, 1)
+                smoothed_function = np.maximum(smoothed_function, 0)
+                noisy_function = smoothed_function
+            except:
+                pass  # Continue with original if smoothing fails
+
+        return noisy_function
+
+    def _adaptive_hill_climb_refinement(self, f: np.ndarray) -> np.ndarray:
+        """Improved hill climbing with adaptive step sizes."""
+        if self.performance_monitor.is_expired():
+            return f
+
+        current_f = f.copy()
+        best_f = current_f.copy()
+        best_c2, _ = self.evaluator.evaluate_function(best_f)
+
+        max_iterations = min(75, int(self.performance_monitor.time_remaining() * 1.5))
+        adaptive_step_size = 0.01
+
+        for iteration in range(max_iterations):
+            if self.performance_monitor.is_expired():
+                break
+
+            # Random perturbation with adaptive step size
+            perturbed_f = current_f.copy()
+            indices_to_modify = np.random.choice(
+                len(current_f),
+                size=max(1, len(current_f) // 40),  # Less aggressive sampling
+                replace=False
+            )
+
+            for idx in indices_to_modify:
+                # Adaptive noise based on current value
+                current_val = perturbed_f[idx]
+                adaptive_noise = np.random.normal(0, adaptive_step_size * (1 + current_val * 0.1))
+                perturbed_f[idx] += adaptive_noise
+                perturbed_f[idx] = max(0, perturbed_f[idx])  # Keep non-negative
+
+            # Evaluate perturbed function
+            c2_new, _ = self.evaluator.evaluate_function(perturbed_f)
+
+            if c2_new > best_c2:
+                best_c2 = c2_new
+                best_f = perturbed_f.copy()
+                current_f = perturbed_f.copy()
+                # Gradually decrease step size for fine-tuning
+                adaptive_step_size *= 0.98
+            else:
+                # Sometimes accept worse solutions with low probability (simulated annealing)
+                if np.random.random() < 0.03:  # Lower acceptance rate for stability
+                    current_f = perturbed_f.copy()
+
+        return best_f
+
+    def _selective_differential_evolution(self, initial_func: np.ndarray, n_steps: int) -> np.ndarray:
+        """Selective differential evolution focusing only on peak parameters."""
+        if self.performance_monitor.is_expired() or self.performance_monitor.time_remaining() < 5.0:
+            return initial_func
+
+        try:
+            x = np.linspace(-0.25, 0.25, n_steps)
+
+            # Identify approximate peak locations more carefully
+            peaks = []
+            for i in range(1, len(initial_func)-1):
+                if initial_func[i] > initial_func[i-1] and initial_func[i] > initial_func[i+1]:
+                    peaks.append((i, initial_func[i]))
+
+            # Early exit if few peaks
+            if len(peaks) == 0:
+                return initial_func
+
+            # Sort by height and take top peaks
+            peaks.sort(key=lambda x: x[1], reverse=True)
+            selected_peaks = peaks[:min(6, len(peaks))]  # Reduced number of peaks
+
+            if len(selected_peaks) == 0:
+                return initial_func
+
+            # Objective function for optimization with improved constraints
+            def objective(params):
+                if self.performance_monitor.is_expired():
+                    return 1e10
+
+                temp_func = np.zeros_like(x)
+                param_idx = 0
+                for i, (pos_idx, height) in enumerate(selected_peaks):
+                    if param_idx + 1 >= len(params):
+                        break
+                    # Position adjustment with bounds checking
+                    center_pos = x[pos_idx] + (params[param_idx] - 0.5) * 0.04  # Tighter range
+                    center_pos = max(-0.25, min(0.25, center_pos))  # Constrain to domain
+
+                    # Height adjustment with bounded scaling
+                    peak_height = height * (1.0 + params[param_idx + 1] * 0.4)  # Reduced scaling
+                    peak_height = max(0.1, min(3.0, peak_height))  # Constrain heights
+
+                    # Width is kept consistent to preserve structure
+                    width = 0.025 + np.random.random() * 0.02  # Consistent width range
+
+                    temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+                    param_idx += 2
+
+                # Return negative C2 (minimization)
+                c2_value, _ = self.evaluator.evaluate_function(temp_func)
+                return -c2_value if c2_value > 0 else 1e10
+
+            # Initial parameter guess
+            params0 = [0.0] * (len(selected_peaks) * 2)
+
+            # Dynamic iteration count based on time
+            maxiter = min(15, int(self.performance_monitor.time_remaining() * 1.2))  # Reduced iterations
+            if maxiter < 3:
+                return initial_func
+
+            # Optimization with more conservative parameters
+            try:
+                result = differential_evolution(
+                    objective,
+                    bounds=[(-0.5, 0.5)] * (len(selected_peaks) * 2),
+                    maxiter=maxiter,
+                    popsize=min(6, maxiter + 2),  # Reduced population size
+                    seed=self.seed,
+                    polish=True,
+                    disp=False
+                )
+
+                if result.success:
+                    optimized_params = result.x
+
+                    # Apply optimization results
+                    final_func = np.zeros_like(x)
+                    param_idx = 0
+                    for i, (pos_idx, height) in enumerate(selected_peaks):
+                        if param_idx + 1 >= len(optimized_params):
+                            break
+                        center_pos = x[pos_idx] + (optimized_params[param_idx] - 0.5) * 0.04
+                        center_pos = max(-0.25, min(0.25, center_pos))
+                        peak_height = height * (1.0 + optimized_params[param_idx + 1] * 0.4)
+                        peak_height = max(0.1, min(3.0, peak_height))
+                        width = 0.025 + np.random.random() * 0.02
+                        final_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+                        param_idx += 2
+
+                    # Incorporate remaining components
+                    for i in range(len(initial_func)):
+                        if not any(abs(x[i] - x[pos_idx]) < 0.01 for _, pos_idx in selected_peaks):
+                            final_func[i] += initial_func[i] * 0.4  # Reduced incorporation weight
+
+                    return final_func
+            except:
+                pass
+
+        except Exception:
+            pass
+
+        return initial_func
+
+    def construct_function(self) -> List[float]:
+        """Main function to construct step-function with high C2 value."""
+        if self.performance_monitor.is_expired():
+            return [0.5] * 1000
+
+        # Determine number of steps
+        n_steps = np.random.randint(1500, 8000)  # Broader range for exploration
+
+        # Early exit if insufficient time
+        if self.performance_monitor.time_remaining() < 8.0:
+            return [0.5] * 1000
+
+        # Generate initial function using enhanced strategy
+        try:
+            initial_func = LogSpacedStepFunctionStrategy.gaussian_peaks_log_spaced(n_steps, self.seed)
+
+            # Apply enhancement
+            enhanced_f = self._enhance_function(initial_func, n_steps)
+
+            # Refinement phase
+            refined_f = self._adaptive_hill_climb_refinement(enhanced_f)
+
+            # Differential evolution optimization
+            optimized_f = self._selective_differential_evolution(refined_f, n_steps)
+
+            # Final evaluation
+            c2, _ = self.evaluator.evaluate_function(optimized_f)
+
+            # Final post-processing and noise addition
+            final_result = np.maximum(optimized_f, 0).tolist()
+
+            # Add slight noise for robustness
+            noise_level = 0.008  # Even smaller noise
+            noisy_func = np.array(final_result) + np.random.normal(0, noise_level, len(final_result))
+            noisy_func = np.maximum(noisy_func, 0)
+
+            return noisy_func.tolist()
+
+        except Exception:
+            # Fallback to default if something goes wrong
+            default_func = np.ones(n_steps) * 0.5
+            return default_func.tolist()
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value."""
+    optimizer = OptimizedOptimizationPipeline()
+    return optimizer.construct_function()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

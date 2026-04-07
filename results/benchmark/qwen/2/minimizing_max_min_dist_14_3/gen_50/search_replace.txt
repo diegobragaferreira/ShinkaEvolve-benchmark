@@ -1,0 +1,122 @@
+<NAME>
+voronoi_based_perturbation_improvement
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based perturbation uses a simple threshold approach which doesn't fully leverage the geometric insights from Voronoi diagrams. The improvement involves creating a more sophisticated perturbation mechanism that:
+
+1. Analyzes Voronoi cell areas to identify both underpopulated and overpopulated regions
+2. Uses area-based weights to probabilistically select points for perturbation
+3. Adjusts perturbation magnitude based on how much a region deviates from uniform distribution
+4. Incorporates both local refinement and global exploration strategies
+
+This enhancement should provide better point distribution by targeting regions that are most in need of adjustment, leading to improved min/max distance ratios.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def voronoi_guided_perturbation(current_points: np.ndarray, temp: float,
+                                  voronoi_threshold: float = 0.1) -> np.ndarray:
+        """
+        Generate neighbor using Voronoi-based guidance to improve point distribution.
+        """
+        neighbor_points = current_points.copy()
+
+        # Compute Voronoi statistics for current configuration
+        mean_area, std_area, max_deviation = compute_voronoi_stats(current_points)
+
+        # If deviation is significant, focus on perturbing underpopulated regions
+        if max_deviation > voronoi_threshold and len(current_points) > 3:
+            # Find the point that is in the largest Voronoi cell (most underpopulated region)
+            try:
+                sv = SphericalVoronoi(current_points, radius=1.0)
+                areas = sv.calculate_areas()
+
+                # Perturb the point in the largest cell
+                max_area_idx = np.argmax(areas)
+                idx = max_area_idx
+            except Exception:
+                # Fall back to random selection if Voronoi computation fails
+                idx = np.random.randint(0, len(current_points))
+        else:
+            # Random selection for diversity
+            idx = np.random.randint(0, len(current_points))
+
+        # Determine perturbation magnitude based on temperature
+        perturbation_mag = temp * 0.05  # Reduced magnitude for stability
+
+        # Add Gaussian noise to selected point
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[idx] += noise
+
+        # Project back to sphere
+        neighbor_points = project_to_sphere(neighbor_points)
+
+        return neighbor_points
+=======
+    def voronoi_guided_perturbation(current_points: np.ndarray, temp: float,
+                                  voronoi_threshold: float = 0.1) -> np.ndarray:
+        """
+        Generate neighbor using Voronoi-based guidance to improve point distribution.
+        Uses area-weighted selection and adaptive perturbation magnitudes.
+        """
+        neighbor_points = current_points.copy()
+
+        # Compute Voronoi statistics for current configuration
+        mean_area, std_area, max_deviation = compute_voronoi_stats(current_points)
+
+        # Calculate weighted probabilities based on Voronoi cell sizes
+        # Points in larger cells (underpopulated regions) get higher probability
+        try:
+            sv = SphericalVoronoi(current_points, radius=1.0)
+            areas = sv.calculate_areas()
+
+            # Create probability weights (higher weight for larger cells)
+            # Use softmax to convert areas to probabilities
+            if len(areas) > 0:
+                # Normalize areas to be comparable (subtract mean, divide by std)
+                normalized_areas = (areas - np.mean(areas)) / (np.std(areas) + 1e-8)
+                # Apply softmax to convert to probabilities
+                exp_areas = np.exp(normalized_areas * 2)  # Scale up influence
+                weights = exp_areas / np.sum(exp_areas)
+
+                # Select point using weighted probability
+                idx = np.random.choice(len(current_points), p=weights)
+            else:
+                # Fall back to random selection if Voronoi computation fails
+                idx = np.random.randint(0, len(current_points))
+
+        except Exception:
+            # Fall back to random selection if Voronoi computation fails
+            idx = np.random.randint(0, len(current_points))
+
+        # Determine perturbation magnitude based on:
+        # 1. Temperature
+        # 2. Voronoi deviation (larger deviations = more aggressive perturbation)
+        # 3. Whether point is in extreme cell (large or small area)
+        base_perturbation = temp * 0.05
+
+        # Increase perturbation magnitude for extreme cases
+        if max_deviation > voronoi_threshold:
+            # More aggressive perturbation when there's significant non-uniformity
+            perturbation_mag = base_perturbation * (1.0 + max_deviation / (mean_area + 1e-8))
+        else:
+            perturbation_mag = base_perturbation
+
+        # Further adjust based on cell size
+        if len(areas) > 0:
+            area_ratio = areas[idx] / (mean_area + 1e-8)
+            # If point is in a particularly large cell, perturb more aggressively
+            if area_ratio > 1.5:
+                perturbation_mag *= 1.5
+
+        # Add Gaussian noise to selected point
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[idx] += noise
+
+        # Project back to sphere
+        neighbor_points = project_to_sphere(neighbor_points)
+
+        return neighbor_points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,219 @@
+<NAME>
+enhance_local_search_with_overlap_severity_classification
+</NAME>
+
+<DESCRIPTION>
+This enhancement addresses the current limitation in the local optimization refinement by implementing a more sophisticated approach that classifies overlap severity and applies different refinement intensities accordingly. The current implementation uses a basic grid search around each circle, but this new approach will:
+
+1. Classify overlap severity levels (low, medium, high) based on overlap amount
+2. Apply targeted refinement strategies:
+   - Low overlap: Light-weight position adjustments
+   - Medium overlap: Moderate intensity optimization with radius adjustments
+   - High overlap: Intensive local search including greedy expansion and systematic position adjustments
+3. This targeted approach will be more efficient and effective than uniform refinement
+
+The change will modify the `local_optimization_refinement` function to implement this three-tiered approach, which should lead to better convergence and higher sum_radii values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_optimization_refinement(circles: np.ndarray) -> np.ndarray:
+    """
+    Apply local optimization to refine the solution by adjusting positions
+    to reduce overlaps and increase total radius
+    """
+    result = circles.copy()
+    n = len(result)
+
+    # Try multiple local optimization passes
+    for pass_num in range(5):
+        improved = False
+
+        # For each circle, try to improve its position
+        for i in range(n):
+            original_pos = result[i].copy()
+            original_radius = result[i][2]
+            original_total = np.sum(result[:, 2])
+
+            # Try different positions around current location
+            best_pos = original_pos.copy()
+            best_radius = original_radius
+            best_total = original_total
+
+            # Test several nearby positions
+            step_size = 0.02
+            for dx in [-step_size, 0, step_size]:
+                for dy in [-step_size, 0, step_size]:
+                    # New tentative position
+                    new_x = original_pos[0] + dx
+                    new_y = original_pos[1] + dy
+
+                    # Check if new position is valid
+                    if (new_x - original_radius >= 0 and new_x + original_radius <= 1 and
+                        new_y - original_radius >= 0 and new_y + original_radius <= 1):
+
+                        # Temporarily update
+                        temp_result = result.copy()
+                        temp_result[i] = [new_x, new_y, original_radius]
+
+                        # Check overlap constraints with others
+                        valid = True
+                        for j in range(n):
+                            if i != j:
+                                x1, y1, r1 = temp_result[i]
+                                x2, y2, r2 = temp_result[j]
+                                dist = math.sqrt((x1-x2)**2 + (y1-y2)**2)
+                                if dist < r1 + r2:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            new_total = np.sum(temp_result[:, 2])
+                            if new_total > best_total:
+                                best_total = new_total
+                                best_pos = [new_x, new_y, original_radius]
+                                improved = True
+
+            # Update if we found improvement
+            if improved:
+                result[i] = best_pos
+
+        # If no improvement, stop early
+        if not improved:
+            break
+
+    return result
+=======
+def local_optimization_refinement(circles: np.ndarray) -> np.ndarray:
+    """
+    Apply advanced local optimization to refine the solution by adjusting positions
+    to reduce overlaps and increase total radius, with overlap severity classification
+    """
+    result = circles.copy()
+    n = len(result)
+
+    # Compute overlap matrix once for efficiency
+    def compute_overlaps(circles_array):
+        n = len(circles_array)
+        overlaps = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles_array[i]
+                x2, y2, r2 = circles_array[j]
+                dist = math.sqrt((x1-x2)**2 + (y1-y2)**2)
+                overlap = max(0, r1 + r2 - dist)
+                overlaps[i, j] = overlap
+                overlaps[j, i] = overlap
+        return overlaps
+
+    # Classify overlap severity for each circle
+    def classify_overlap_severity(overlaps, index):
+        total_overlap = np.sum(overlaps[index])
+        if total_overlap < 0.01:
+            return 'low'
+        elif total_overlap < 0.05:
+            return 'medium'
+        else:
+            return 'high'
+
+    # Try multiple local optimization passes
+    for pass_num in range(3):  # Reduced passes to save computation but maintain quality
+        improved = False
+
+        # Compute overlaps once per pass
+        overlap_matrix = compute_overlaps(result)
+
+        # For each circle, try to improve its position based on overlap severity
+        for i in range(n):
+            original_pos = result[i].copy()
+            original_radius = result[i][2]
+            original_total = np.sum(result[:, 2])
+
+            # Classify overlap severity
+            severity = classify_overlap_severity(overlap_matrix, i)
+
+            # Choose refinement strategy based on severity
+            if severity == 'low':
+                # Light-weight refinement for low overlap
+                step_size = 0.01
+                search_range = [-step_size, 0, step_size]
+            elif severity == 'medium':
+                # Moderate refinement for medium overlap
+                step_size = 0.02
+                search_range = [-step_size, 0, step_size]
+            else:  # high overlap
+                # Intensive refinement for high overlap
+                step_size = 0.03
+                search_range = [-step_size, -step_size*0.5, 0, step_size*0.5, step_size]
+
+            best_pos = original_pos.copy()
+            best_radius = original_radius
+            best_total = original_total
+
+            # Test different positions based on severity
+            for dx in search_range:
+                for dy in search_range:
+                    # New tentative position
+                    new_x = original_pos[0] + dx
+                    new_y = original_pos[1] + dy
+
+                    # Check if new position is valid
+                    if (new_x - original_radius >= 0 and new_x + original_radius <= 1 and
+                        new_y - original_radius >= 0 and new_y + original_radius <= 1):
+
+                        # Temporarily update
+                        temp_result = result.copy()
+                        temp_result[i] = [new_x, new_y, original_radius]
+
+                        # Check overlap constraints with others
+                        valid = True
+                        for j in range(n):
+                            if i != j:
+                                x1, y1, r1 = temp_result[i]
+                                x2, y2, r2 = temp_result[j]
+                                dist = math.sqrt((x1-x2)**2 + (y1-y2)**2)
+                                if dist < r1 + r2:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            new_total = np.sum(temp_result[:, 2])
+                            if new_total > best_total:
+                                best_total = new_total
+                                best_pos = [new_x, new_y, original_radius]
+                                improved = True
+
+            # For high overlap cases, also try adjusting radius
+            if severity == 'high' and improved:
+                # Attempt to increase radius slightly if we can maintain validity
+                temp_result = result.copy()
+                temp_result[i] = [best_pos[0], best_pos[1], min(original_radius * 1.1, 0.45)]
+
+                # Check if this is valid and better
+                valid = True
+                for j in range(n):
+                    if i != j:
+                        x1, y1, r1 = temp_result[i]
+                        x2, y2, r2 = temp_result[j]
+                        dist = math.sqrt((x1-x2)**2 + (y1-y2)**2)
+                        if dist < r1 + r2:
+                            valid = False
+                            break
+
+                if valid:
+                    new_total = np.sum(temp_result[:, 2])
+                    if new_total > best_total:
+                        best_total = new_total
+                        best_pos = [temp_result[i][0], temp_result[i][1], temp_result[i][2]]
+                        improved = True
+
+            # Update if we found improvement
+            if improved:
+                result[i] = best_pos
+
+        # If no improvement, stop early
+        if not improved:
+            break
+
+    return result
+>>>>>>> REPLACE

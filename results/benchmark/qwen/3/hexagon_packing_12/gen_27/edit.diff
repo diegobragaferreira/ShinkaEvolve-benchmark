@@ -1,0 +1,322 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,295 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++import time
++from shapely.geometry import Polygon, Point
++from shapely.ops import unary_union
++from scipy.spatial.distance import cdist
++from scipy.optimize import differential_evolution
++import random
++
++def create_regular_hexagon(center=(0,0), radius=1, rotation=0):
++    """Create a regular hexagon as a Shapely polygon"""
++    angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation)
++    points = [(center[0] + radius*np.cos(a), center[1] + radius*np.sin(a)) for a in angles]
++    return Polygon(points)
++
++def get_hexagon_vertices(center, radius, rotation):
++    """Get vertices of a hexagon"""
++    angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation)
++    return [(center[0] + radius*np.cos(a), center[1] + radius*np.sin(a)) for a in angles]
++
++def check_containment(hexagon, outer_hexagon):
++    """Check if hexagon is fully contained in outer hexagon"""
++    return outer_hexagon.contains(hexagon)
++
++def check_overlap(hex1, hex2):
++    """Check if two hexagons overlap"""
++    return hex1.intersects(hex2) and not hex1.touches(hex2)
++
++def evaluate_configuration(inner_positions, inner_rotations, outer_center, outer_radius):
++    """Evaluate a configuration for all constraints and return penalty"""
++    # Create hexagons
++    inner_hexagons = []
++    for pos, rot in zip(inner_positions, inner_rotations):
++        hexagon = create_regular_hexagon(pos, 1, rot)
++        inner_hexagons.append(hexagon)
++    
++    outer_hexagon = create_regular_hexagon(outer_center, outer_radius, 0)
++    
++    # Check containment
++    containment_penalty = 0
++    for hexagon in inner_hexagons:
++        if not check_containment(hexagon, outer_hexagon):
++            containment_penalty += 1000
++    
++    # Check overlaps
++    overlap_penalty = 0
++    for i in range(len(inner_hexagons)):
++        for j in range(i+1, len(inner_hexagons)):
++            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
++                overlap_penalty += 1000
++    
++    # Return penalty (lower is better)
++    return containment_penalty + overlap_penalty
++
++def generate_symmetric_initial_population(size=50):
++    """Generate population with symmetric arrangements"""
++    population = []
++    
++    # Generate various symmetric patterns
++    patterns = [
++        # Pattern 1: 2x2 square-like
++        lambda: [[0,0,0], [-2,0,0], [2,0,0], [0,2,0], [0,-2,0], [-1,1,0], [1,1,0], [-1,-1,0], [1,-1,0], [-2,1,0], [2,1,0], [-2,-1,0], [2,-1,0]],
++        # Pattern 2: 3x4 rectangular
++        lambda: [[0,0,0], [-1.5,0,0], [1.5,0,0], [0,1.5,0], [0,-1.5,0], [-1.5,1.5,0], [1.5,1.5,0], [-1.5,-1.5,0], [1.5,-1.5,0], [0,3,0], [0,-3,0], [3,0,0], [-3,0,0]],
++        # Pattern 3: Star-like with central hexagon
++        lambda: [[0,0,0], [2,0,0], [-2,0,0], [0,2,0], [0,-2,0], [1,1,0], [-1,1,0], [1,-1,0], [-1,-1,0], [3,0,0], [-3,0,0], [0,3,0], [0,-3,0]],
++    ]
++    
++    for _ in range(size):
++        pattern_idx = random.randint(0, len(patterns)-1)
++        base = patterns[pattern_idx]()
++        
++        # Add some randomness while keeping symmetry
++        individual = []
++        for i in range(12):
++            x, y, angle = base[i]
++            # Add small random noise
++            x += random.uniform(-0.2, 0.2)
++            y += random.uniform(-0.2, 0.2)
++            angle += random.uniform(-15, 15)
++            individual.append((x, y, angle))
++        
++        population.append(individual)
++    
++    return population
++
++def mutate_individual(individual, mutation_rate=0.3):
++    """Mutate an individual with symmetry preservation"""
++    mutated = []
++    for i, (x, y, angle) in enumerate(individual):
++        if random.random() < mutation_rate:
++            # Apply symmetric mutations 
++            # Mutate position
++            new_x = x + random.uniform(-0.3, 0.3)
++            new_y = y + random.uniform(-0.3, 0.3)
++            new_angle = angle + random.uniform(-10, 10)
++            mutated.append((new_x, new_y, new_angle))
++        else:
++            mutated.append((x, y, angle))
++    return mutated
++
++def crossover_parents(parent1, parent2):
++    """Perform crossover between two parents with symmetry considerations"""
++    child = []
++    for i in range(12):
++        if random.random() < 0.5:
++            child.append(parent1[i])
++        else:
++            child.append(parent2[i])
++    return child
++
++def fitness_function(config_params):
++    """Fitness function for optimization"""
++    # config_params format: [x1,y1,a1,x2,y2,a2,...,x12,y12,a12,outer_x,outer_y,outer_radius]
++    n = 12
++    inner_positions = []
++    inner_rotations = []
++    
++    for i in range(n):
++        x = config_params[i*3]
++        y = config_params[i*3+1]
++        angle = config_params[i*3+2]
++        inner_positions.append((x, y))
++        inner_rotations.append(angle)
++    
++    outer_x = config_params[n*3]
++    outer_y = config_params[n*3+1]
++    outer_radius = config_params[n*3+2]
++    
++    # Evaluate the configuration
++    penalty = evaluate_configuration(inner_positions, inner_rotations, (outer_x, outer_y), outer_radius)
++    
++    # Fitness is inverse of penalty plus 1/(outer_radius) as primary objective
++    if penalty > 0:
++        return penalty + 1000000  # Penalize invalid solutions heavily
++    else:
++        return 1.0 / outer_radius  # We want to maximize 1/outer_radius
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++    start_time = time.time()
++    
++    # Initialize population with symmetric arrangements
++    population_size = 30
++    population = generate_symmetric_initial_population(population_size)
++    
++    # Evolution parameters
++    generations = 100
++    elite_size = 5
++    mutation_rate = 0.3
++    
++    best_fitness = float('inf')
++    best_config = None
++    
++    # Main evolutionary loop
++    for gen in range(generations):
++        if time.time() - start_time > 170:  # Leave some time for final processing
++            break
++            
++        # Evaluate fitness for entire population
++        fitness_scores = []
++        for individual in population:
++            params = []
++            for x, y, angle in individual:
++                params.extend([x, y, angle])
++            
++            # Add outer hexagon parameters (initially large)
++            params.extend([0, 0, 10.0])  # center at (0,0), radius 10 initially
++            
++            fitness = fitness_function(params)
++            fitness_scores.append(fitness)
++        
++        # Sort by fitness (lower is better)
++        sorted_indices = np.argsort(fitness_scores)
++        population = [population[i] for i in sorted_indices]
++        fitness_scores = [fitness_scores[i] for i in sorted_indices]
++        
++        # Track best solution
++        if fitness_scores[0] < best_fitness:
++            best_fitness = fitness_scores[0]
++            best_config = population[0]
++        
++        # Create new generation
++        new_population = []
++        
++        # Elitism: keep best individuals
++        for i in range(elite_size):
++            new_population.append(population[i])
++        
++        # Generate offspring through crossover and mutation
++        while len(new_population) < population_size:
++            # Tournament selection
++            parent1_idx = random.randint(0, population_size//2)
++            parent2_idx = random.randint(0, population_size//2)
++            
++            parent1 = population[parent1_idx]
++            parent2 = population[parent2_idx]
++            
++            # Crossover
++            child = crossover_parents(parent1, parent2)
++            
++            # Mutation
++            child = mutate_individual(child, mutation_rate)
++            
++            new_population.append(child)
++        
++        population = new_population
++    
++    # Final optimization with scipy for the best solution
++    if best_config is not None:
++        # Convert to parameter array for scipy optimization
++        params = []
++        for x, y, angle in best_config:
++            params.extend([x, y, angle])
++        params.extend([0, 0, 10.0])  # initial outer hex parameters
++        
++        try:
++            # Refine with bounds and scipy optimization
++            bounds = []
++            for i in range(12):  # 12 hexagons, each has 3 params
++                bounds.extend([(-10, 10), (-10, 10), (-180, 180)])  # x, y, angle bounds
++            bounds.extend([(-5, 5), (-5, 5), (1, 10)])  # outer hex bounds
++            
++            result = differential_evolution(
++                fitness_function,
++                bounds,
++                maxiter=50,
++                popsize=10,
++                seed=42
++            )
++            
++            # Extract final solution
++            config_params = result.x
++            n = 12
++            inner_positions = []
++            inner_rotations = []
++            
++            for i in range(n):
++                x = config_params[i*3]
++                y = config_params[i*3+1]
++                angle = config_params[i*3+2]
++                inner_positions.append((x, y))
++                inner_rotations.append(angle)
++            
++            outer_x = config_params[n*3]
++            outer_y = config_params[n*3+1]
++            outer_radius = config_params[n*3+2]
++            
++        except:
++            # Fall back to our best configuration if optimization fails
++            config_params = []
++            for x, y, angle in best_config:
++                config_params.extend([x, y, angle])
++            config_params.extend([0, 0, 10.0])
++            
++            inner_positions = []
++            inner_rotations = []
++            for i in range(12):
++                x = config_params[i*3]
++                y = config_params[i*3+1]
++                angle = config_params[i*3+2]
++                inner_positions.append((x, y))
++                inner_rotations.append(angle)
++            
++            outer_x = config_params[36]
++            outer_y = config_params[37]
++            outer_radius = config_params[38]
++    
++    else:
++        # Fallback to basic configuration if nothing was found
++        inner_positions = [(0, 0), (-2.5, 0), (2.5, 0), (-1.25, 2.17), (1.25, 2.17), 
++                          (-1.25, -2.17), (1.25, -2.17), (-3.75, 2.17), (3.75, 2.17),
++                          (-3.75, -2.17), (3.75, -2.17), (0, -4)]
++        inner_rotations = [0] * 12
++        outer_radius = 8.0
++        outer_x = 0.0
++        outer_y = 0.0
++    
++    # Convert to output format
++    inner_hex_data = np.zeros((12, 3))
++    for i, (pos, angle) in enumerate(zip(inner_positions, inner_rotations)):
++        inner_hex_data[i] = [pos[0], pos[1], angle]
++    
++    outer_hex_data = np.array([outer_x, outer_y, 0.0])
++    outer_hex_side_length = outer_radius
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

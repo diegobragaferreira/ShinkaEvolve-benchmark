@@ -1,0 +1,93 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if len(points) < 2:
+            return 0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        dmin = np.min(distances)
+        dmax = np.max(distances)
+
+        # Avoid division by zero
+        if dmax == 0:
+            return 0
+
+        return dmin / dmax
+
+    def objective_function(x_flat):
+        """Objective function to maximize (negative because we minimize)."""
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+
+        # Ensure points are within bounds [0,1]
+        points = np.clip(points, 0, 1)
+
+        # Compute ratio
+        ratio = compute_min_max_ratio(points)
+
+        # Return negative because we want to maximize
+        return -ratio
+
+    # Initialize with a more strategic grid-like configuration
+    # Create a 4x4 grid pattern with some randomness to avoid symmetry issues
+    np.random.seed(42)
+
+    # Generate points in a structured way, then perturb slightly
+    points = []
+    for i in range(4):
+        for j in range(4):
+            # Add some jitter to create a non-uniform but well-distributed pattern
+            x = (i + 0.5 + np.random.normal(0, 0.1)) / 4.0
+            y = (j + 0.5 + np.random.normal(0, 0.1)) / 4.0
+            points.append([x, y])
+
+    points = np.array(points)
+
+    # Ensure all points are within the valid domain [0,1] x [0,1]
+    points = np.clip(points, 0, 1)
+
+    # Refine using optimization
+    # Flatten the points for optimization
+    x0 = points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Use differential evolution with a reasonable number of iterations
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        maxiter=100,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        disp=False
+    )
+
+    # Reshape the result back to points
+    final_points = result.x.reshape(-1, 2)
+
+    # Ensure final points are within bounds again
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

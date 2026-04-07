@@ -1,0 +1,140 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective_function(points_flat):
+        # Reshape flat array back to 16x2 points
+        points = points_flat.reshape(-1, 2)
+
+        # Ensure points are within unit square
+        points = np.clip(points, 0, 1)
+
+        # Compute pairwise distances
+        distances = squareform(pdist(points))
+
+        # Set diagonal to large value so it doesn't affect min
+        np.fill_diagonal(distances, np.inf)
+
+        # Get minimum and maximum distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Return negative ratio since we want to maximize
+        if max_dist > 0:
+            return -min_dist / max_dist
+        else:
+            return -np.inf
+
+    # Create initial guess using a structured approach
+    # Start with a hexagonal grid pattern and add some noise
+    np.random.seed(42)
+
+    # Generate a hexagonal lattice pattern
+    rows = 4
+    cols = 4
+    points = []
+
+    # Hexagonal grid with slight perturbation
+    for i in range(rows):
+        for j in range(cols):
+            x = j * 0.25 + (i % 2) * 0.125
+            y = i * 0.25
+            points.append([x, y])
+
+    # Convert to numpy array for distance computations
+    points_array = np.array(points)
+
+    # Compute current ratio to adapt perturbation magnitude
+    distances = squareform(pdist(points_array))
+    np.fill_diagonal(distances, np.inf)
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+    current_ratio = min_dist / max_dist if max_dist > 0 else 0.0
+
+    # Adaptive perturbation based on current ratio
+    # If ratio is low (poorly distributed), use larger perturbations
+    # If ratio is high (well distributed), use smaller perturbations
+    base_perturbation = 0.05
+    perturbation_scale = max(0.1, 1.0 - current_ratio)  # Scale from 0.1 to 1.0
+    actual_perturbation = base_perturbation * perturbation_scale
+
+    # Add random perturbations to break symmetry with adaptive scaling
+    for i in range(16):
+        points[i][0] += (np.random.random() - 0.5) * actual_perturbation
+        points[i][1] += (np.random.random() - 0.5) * actual_perturbation
+
+    # Clip to unit square
+    initial_points = np.array(points)
+    initial_points = np.clip(initial_points, 0, 1)
+
+    # Flatten for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1) for _ in range(32)]
+
+    # First, try differential evolution for global optimization
+    best_result = None
+    best_ratio = -np.inf
+
+    # Try multiple random starts to avoid local optima
+    for _ in range(3):
+        # Use differential evolution with controlled parameters
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=50,
+            popsize=10,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+
+        # Evaluate final result
+        final_obj = objective_function(result.x)
+        if final_obj > best_ratio:
+            best_ratio = final_obj
+            best_result = result
+
+    # If differential evolution didn't work well, try local optimization
+    if best_result is None or best_ratio == -np.inf:
+        # Use local optimization to refine the initial configuration
+        result = minimize(
+            objective_function,
+            initial_flat,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+        optimized_points = result.x.reshape(-1, 2)
+        optimized_points = np.clip(optimized_points, 0, 1)
+        return optimized_points
+
+    # Refine with local optimization if needed
+    refined_result = minimize(
+        objective_function,
+        best_result.x,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9}
+    )
+
+    # Extract the best solution
+    best_points = refined_result.x.reshape(-1, 2)
+    # Ensure they're still in bounds
+    best_points = np.clip(best_points, 0, 1)
+    return best_points
+
+# EVOLVE-BLOCK-END

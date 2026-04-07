@@ -1,0 +1,147 @@
+<NAME>
+improve_initialization_with_grid_placement
+</NAME>
+
+<DESCRIPTION>
+The current initialization method relies heavily on random placement which can be inefficient and slow to converge. I'll improve the initialization by using a more structured approach that places circles in a grid pattern first, then applies small random perturbations. This will provide better starting points that are already mostly valid, reducing the number of failed placement attempts and improving overall convergence speed.
+
+The key insight is to use a hybrid initialization: start with a structured grid layout that ensures good spatial distribution, then slightly randomize positions to allow for local optimization while maintaining feasibility.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_initial_population(pop_size: int, n_circles: int) -> list:
+    """Create initial population of valid circle arrangements."""
+    population = []
+
+    for _ in range(pop_size):
+        # Create random circles
+        circles = np.zeros((n_circles, 3))
+
+        # Place circles one by one
+        for i in range(n_circles):
+            attempts = 0
+            valid = False
+
+            while not valid and attempts < 1000:
+                # Random position and radius
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.001, 0.1)
+
+                # Temporarily place circle
+                circles[i] = [x, y, r]
+
+                # Check validity
+                if is_valid_placement(circles, i):
+                    valid = True
+                else:
+                    # Try again
+                    attempts += 1
+                    continue
+
+            # If we couldn't place this circle, start over
+            if not valid:
+                break
+
+        # Only add if all circles were placed successfully
+        if len(circles[circles[:, 2] > 0]) == n_circles:
+            population.append(circles.copy())
+
+    # Ensure we have enough valid individuals
+    while len(population) < pop_size:
+        # Add some random individuals
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x = np.random.uniform(0.01, 0.99)
+            y = np.random.uniform(0.01, 0.99)
+            r = np.random.uniform(0.001, 0.1)
+            circles[i] = [x, y, r]
+        population.append(circles)
+
+    return population
+=======
+def create_initial_population(pop_size: int, n_circles: int) -> list:
+    """Create initial population of valid circle arrangements."""
+    population = []
+
+    # First, try to create valid individuals with structured grid initialization
+    for _ in range(pop_size):
+        # Create circles in a grid-like pattern and then apply small random perturbations
+        circles = np.zeros((n_circles, 3))
+
+        # Determine grid dimensions
+        grid_size = int(np.ceil(np.sqrt(n_circles)))
+        spacing_x = 1.0 / (grid_size + 1)
+        spacing_y = 1.0 / (grid_size + 1)
+
+        # Initial grid placement with reduced radius
+        radius = spacing_x / 3.0
+
+        count = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if count >= n_circles:
+                    break
+                x = (i + 1) * spacing_x
+                y = (j + 1) * spacing_y
+
+                # Apply small random perturbation to position
+                x += np.random.uniform(-spacing_x/6, spacing_x/6)
+                y += np.random.uniform(-spacing_y/6, spacing_y/6)
+
+                # Ensure it stays within bounds
+                x = np.clip(x, radius, 1 - radius)
+                y = np.clip(y, radius, 1 - radius)
+
+                circles[count] = [x, y, radius]
+                count += 1
+            if count >= n_circles:
+                break
+
+        # Refine positions to improve validity and fitness
+        for i in range(n_circles):
+            # Try to increase radius if possible without violating constraints
+            original_radius = circles[i, 2]
+            test_radius = original_radius * 1.1  # Try slightly larger radius
+
+            # Check if we can increase the radius
+            valid = True
+            for j in range(n_circles):
+                if i != j:
+                    dist = np.sqrt((circles[i, 0] - circles[j, 0])**2 + (circles[i, 1] - circles[j, 1])**2)
+                    if dist < test_radius + circles[j, 2]:
+                        valid = False
+                        break
+
+            if valid and test_radius <= 1 - max(circles[i, 0], 1 - circles[i, 0]) and test_radius <= 1 - max(circles[i, 1], 1 - circles[i, 1]):
+                circles[i, 2] = test_radius
+
+        # Ensure all circles are valid
+        valid_circles = []
+        for i in range(n_circles):
+            if is_valid_placement(circles, i):
+                valid_circles.append(circles[i].copy())
+            else:
+                # If invalid, reset to basic configuration
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.001, 0.05)
+                circles[i] = [x, y, r]
+                if is_valid_placement(circles, i):
+                    valid_circles.append(circles[i].copy())
+                else:
+                    # Last resort: just make it valid
+                    circles[i] = [0.5, 0.5, 0.05]
+                    valid_circles.append(circles[i].copy())
+
+        # Fill up to n_circles if needed
+        while len(valid_circles) < n_circles:
+            valid_circles.append([0.5, 0.5, 0.05])
+
+        circles = np.array(valid_circles[:n_circles])
+        population.append(circles.copy())
+
+    return population
+>>>>>>> REPLACE
+</DIFF>

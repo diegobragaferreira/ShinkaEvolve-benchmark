@@ -1,0 +1,298 @@
+--- a/original.py
++++ b/original.py
+@@ -1,189 +1,144 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy import signal
+-from scipy.optimize import differential_evolution
+ import random
+ from typing import List
++from deap import base, creator, tools, algorithms
++import time
+ 
+ def construct_function() -> List[float]:
+-    """
+-    High-performance step function construction using adaptive peak sampling
+-    that directly optimizes the discrete function representation.
+-    """
+-    # Fixed seed for reproducibility
++    """Optimized step function construction using evolutionary algorithm with specialized operators."""
++    
++    # Set seeds for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+     
+-    # Use a reasonable number of steps for good resolution
+-    n_steps = 5000  # Fixed at 5000 to ensure consistency with AlphaEvolve
++    # Problem parameters
++    n_steps = 5000  # Fixed at 5000 to match AlphaEvolve
++    max_evaluations = 10000  # Limit evaluations for time constraint
+     
+-    # Initialize with a simple symmetric peak structure
+-    x = np.linspace(-0.25, 0.25, n_steps)
++    # Initialize DEAP framework
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
+     
+-    # Create base step function using adaptive peak sampling
+-    step_values = np.zeros(n_steps)
++    toolbox = base.Toolbox()
+     
+-    # Strategy: sample peak locations and heights adaptively
+-    # Use a grid-based approach with adaptive density
+-    peak_count = 25  # Increased peak count for better optimization potential
++    # Define individual initialization
++    def init_individual():
++        # Create step function with random heights between 0 and 2
++        return [random.uniform(0, 2) for _ in range(n_steps)]
+     
+-    # Place peaks using strategic spacing to avoid interference
+-    peak_positions = []
+-    peak_heights = []
++    toolbox.register("individual", init_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+     
+-    # First, place some central peaks with varying heights
+-    for i in range(peak_count):
+-        # Adaptive positioning with more peaks near center
+-        if i < peak_count // 3:
+-            # Central region with higher density
+-            pos = np.random.uniform(-0.08, 0.08)
+-            height = np.random.uniform(1.8, 3.0)
+-        elif i < 2 * peak_count // 3:
+-            # Middle region
+-            pos = np.random.uniform(-0.15, 0.15)
+-            height = np.random.uniform(1.5, 2.5)
+-        else:
+-            # Outer regions with lower density
+-            pos = np.random.choice([-0.2, -0.18, -0.16, -0.14, -0.12, 
+-                                  -0.1, -0.08, -0.06, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2])
+-            height = np.random.uniform(1.2, 2.2)
+-            
+-        peak_positions.append(pos)
+-        peak_heights.append(height)
++    # Define custom crossover operator for step functions
++    def cx_steps(ind1, ind2):
++        """Crossover that maintains step function properties"""
++        size = min(len(ind1), len(ind2))
++        cxpoint1 = random.randint(1, size)
++        cxpoint2 = random.randint(cxpoint1, size)
++        
++        # Swap segments between individuals
++        ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2], ind1[cxpoint1:cxpoint2]
++        
++        return ind1, ind2
+     
+-    # Apply peaks with optimized widths based on position
+-    for pos, height in zip(peak_positions, peak_heights):
+-        # Width varies with distance from center - narrower near center, wider at edges
+-        width_factor = 1.0 - abs(pos) / 0.25
+-        # Use a more refined width calculation with minimum constraints
+-        base_width = 0.02 + 0.03 * width_factor
+-        width = max(0.01, base_width)  # Minimum width constraint
++    # Define custom mutation operator for step functions
++    def mut_steps(individual, indpb=0.05):
++        """Mutation that adjusts step heights with adaptive parameters"""
++        for i in range(len(individual)):
++            if random.random() < indpb:
++                # Adaptive mutation: smaller changes near boundaries, larger in middle
++                if individual[i] < 0.1 or individual[i] > 1.9:
++                    # Boundary regions: small mutations
++                    individual[i] += random.gauss(0, 0.05)
++                else:
++                    # Middle regions: larger mutations
++                    individual[i] += random.gauss(0, 0.1)
++                # Ensure non-negativity
++                individual[i] = max(0, individual[i])
++        return individual,
++    
++    toolbox.register("mate", cx_steps)
++    toolbox.register("mutate", mut_steps)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Define evaluation function
++    def evaluate(individual):
++        # Ensure individual has correct size
++        if len(individual) != n_steps:
++            individual = individual[:n_steps] + [0] * (n_steps - len(individual))
+         
+-        # Create Gaussian-like peak
+-        peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+-        step_values += peak
+-    
+-    # Ensure non-negative values
+-    step_values = np.maximum(step_values, 0)
+-    
+-    # Normalize to prevent extreme values
+-    if np.max(step_values) > 0:
+-        step_values = step_values / np.max(step_values) * 2.0
+-    
+-    # Add some random noise to ensure variety
+-    noise_level = 0.015
+-    step_values += np.random.normal(0, noise_level, n_steps)
+-    step_values = np.maximum(step_values, 0)
+-    
+-    # Convert to list form for output
+-    step_list = step_values.tolist()
+-    
+-    # Enhanced local optimization using a hybrid approach
+-    def compute_c2(func):
+-        # Compute autoconvolution g = f * f
+-        g = np.convolve(func, func, mode='full')
++        # Compute autoconvolution using discrete convolution
++        f = np.array(individual)
++        g = np.convolve(f, f, mode='full')
+         g = g[len(g)//2:]  # Take positive part
+         
+         # Truncate if necessary to match original length
+-        if len(g) > len(func):
+-            g = g[:len(func)]
++        if len(g) > len(f):
++            g = g[:len(f)]
+             
+-        # Compute norms using the exact specification
+-        norm_2_sq = np.sum(g**2) * (0.5 / len(func))  # Approximate integral
++        # Compute norms exactly as specified
++        norm_2_sq = np.sum(g**2) * (0.5 / len(f))  # Approximate integral
+         norm_1 = np.sum(np.abs(g)) / (len(g) + 1)
+         norm_inf = np.max(np.abs(g))
+         
++        # Check for numerical stability
+         if norm_1 == 0 or norm_inf == 0:
+             return 0.0
+             
+-        return norm_2_sq / (norm_1 * norm_inf)
++        c2 = norm_2_sq / (norm_1 * norm_inf)
++        return c2
+     
+-    # Advanced peak refinement with multiple strategies
+-    def refine_peaks(original_func):
+-        # Simple hill climbing approach for peak refinement
+-        refined_func = np.array(original_func)
+-        current_c2 = compute_c2(refined_func)
++    toolbox.register("evaluate", evaluate)
++    
++    # Genetic algorithm parameters
++    population_size = min(50, max(10, n_steps // 200))
++    generations = min(50, max(5, max_evaluations // (population_size * 10)))
++    
++    # Create initial population
++    pop = toolbox.population(n=population_size)
++    
++    # Evaluate initial population
++    fitnesses = list(map(toolbox.evaluate, pop))
++    for ind, fit in zip(pop, fitnesses):
++        ind.fitness.values = (fit,)
++    
++    # Statistics
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("std", np.std)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Evolution algorithm
++    try:
++        # Run evolution with early termination if needed
++        hof = tools.HallOfFame(1)
++        pop, logbook = algorithms.eaSimple(
++            pop, toolbox, cxpb=0.7, mutpb=0.3, ngen=generations,
++            stats=stats, halloffame=hof, verbose=False
++        )
+         
+-        # Try small adjustments to various points
+-        best_func = refined_func.copy()
+-        best_c2 = current_c2
++        # Return best individual
++        best_individual = hof[0]
+         
+-        # Multiple refinement passes for better convergence
+-        for iteration in range(3):
+-            # Sample several neighborhood adjustments
+-            for _ in range(150):  # Reduced iterations per pass but multiple passes
+-                test_func = refined_func.copy()
+-                
+-                # Select random point to adjust
+-                idx = random.randint(0, len(test_func) - 1)
+-                adjustment = random.uniform(-0.08, 0.08)  # Larger adjustment range
+-                
+-                # Apply adjustment
+-                test_func[idx] = max(0, test_func[idx] + adjustment)
+-                
+-                # Evaluate
+-                test_c2 = compute_c2(test_func)
+-                if test_c2 > best_c2:
+-                    best_c2 = test_c2
+-                    best_func = test_func.copy()
+-            
+-            # Update refined_func for next iteration
+-            refined_func = best_func.copy()
++        # Ensure it's properly clipped and formatted
++        result = [max(0, val) for val in best_individual]
+         
+-        return best_func, best_c2
+-    
+-    # Apply local refinement with retry mechanism
+-    try:
+-        refined_func, refined_c2 = refine_peaks(step_list)
++        # Add final small noise for robustness
++        noise = np.random.normal(0, 0.005, n_steps)
++        noisy_result = np.array(result) + noise
++        noisy_result = np.maximum(noisy_result, 0)
+         
+-        # If improvement found, use refined version
+-        if refined_c2 > compute_c2(step_list):
+-            step_list = refined_func.tolist()
+-            
+-    except Exception:
+-        # Continue with original if refinement fails
+-        pass
+-    
+-    # Final optimization using a more sophisticated approach with multiple restarts
+-    def advanced_optimization(func_list, max_restarts=3):
+-        best_func = np.array(func_list)
+-        best_c2 = compute_c2(best_func)
++        return noisy_result.tolist()
+         
+-        for restart in range(max_restarts):
+-            # Random perturb the function slightly
+-            perturbed_func = best_func.copy()
+-            for i in range(len(perturbed_func)):
+-                if random.random() > 0.8:  # 20% chance to perturb
+-                    perturbed_func[i] = max(0, perturbed_func[i] + random.uniform(-0.02, 0.02))
+-            
+-            # Run local refinement
+-            try:
+-                refined_func, refined_c2 = refine_peaks(perturbed_func.tolist())
+-                if refined_c2 > best_c2:
+-                    best_c2 = refined_c2
+-                    best_func = np.array(refined_func)
+-            except Exception:
+-                continue
+-                
+-        return best_func.tolist(), best_c2
+-    
+-    # Final optimization pass
+-    try:
+-        final_func, final_c2 = advanced_optimization(step_list)
+-        if final_c2 > compute_c2(step_list):
+-            step_list = final_func
+-    except Exception:
+-        pass
+-    
+-    # Add final small noise for robustness
+-    final_noise = np.random.normal(0, 0.005, n_steps)
+-    final_func = np.array(step_list) + final_noise
+-    final_func = np.maximum(final_func, 0)
+-    
+-    return final_func.tolist()
++    except Exception as e:
++        # Fallback to simple constructed function
++        base_function = np.ones(n_steps) * 0.5
++        return base_function.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

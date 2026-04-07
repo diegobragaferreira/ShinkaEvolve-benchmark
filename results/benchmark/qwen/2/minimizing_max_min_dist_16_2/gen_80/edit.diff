@@ -1,0 +1,335 @@
+--- a/original.py
++++ b/original.py
+@@ -1,191 +1,302 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist, squareform
+ import time
+ from sklearn.metrics.pairwise import euclidean_distances
+ from typing import Tuple, Optional, List
+ import warnings
+-
++import random
++from collections import namedtuple
++
++# Define a simple Point class for cleaner code
++Point = namedtuple('Point', ['x', 'y'])
+ 
+ class PointDispersionOptimizer:
+-    """Optimizes point placement to maximize min/max distance ratio."""
++    """Optimizes point placement to maximize min/max distance ratio using hierarchical approach."""
+     
+     def __init__(self, n_points: int = 16, dimension: int = 2):
+         self.n_points = n_points
+         self.dimension = dimension
+         self.benchmark_ratio = 0.2786
++        self.max_eval_time = 180  # 3 minutes maximum execution time
++        self.max_local_iter = 500
+         
+     def compute_min_max_ratio(self, points: np.ndarray) -> float:
+         """Compute the min/max distance ratio for given points."""
+         if points.shape[0] < 2:
+             return 0.0
+             
+         # Compute pairwise distances efficiently
+         distances = euclidean_distances(points)
+         # Set diagonal to infinity to exclude self-distances
+         np.fill_diagonal(distances, np.inf)
+         
+         # Compute min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         
+         # Return ratio (avoid division by zero)
+         if max_dist == 0:
+             return 0.0
+         return min_dist / max_dist
+     
+     def initialize_points(self, strategy: str = "deterministic") -> np.ndarray:
+         """Generate initial point configuration."""
+         if strategy == "deterministic":
+             # Use known good configuration
+             return np.array([
+                 [0.25, 0.25], [0.75, 0.25],
+                 [0.25, 0.75], [0.75, 0.75],
+                 [0.1, 0.1], [0.9, 0.1],
+                 [0.1, 0.9], [0.9, 0.9],
+                 [0.3, 0.5], [0.7, 0.5],
+                 [0.5, 0.3], [0.5, 0.7],
+                 [0.4, 0.4], [0.6, 0.6],
+                 [0.4, 0.6], [0.6, 0.4]
+             ])
+         elif strategy == "grid":
+             # Generate grid-based initialization
+             grid_x = np.linspace(0.1, 0.9, 4)
+             grid_y = np.linspace(0.1, 0.9, 4)
+             x_grid, y_grid = np.meshgrid(grid_x, grid_y)
+             points = np.column_stack([x_grid.ravel(), y_grid.ravel()])[:self.n_points]
+             # Add small perturbation
+             points += np.random.normal(0, 0.02, points.shape)
+             return np.clip(points, 0, 1)
+         elif strategy == "random":
+             # Random initialization
+             return np.random.uniform(0.05, 0.95, (self.n_points, self.dimension))
+         else:
+             raise ValueError(f"Unknown initialization strategy: {strategy}")
+     
+     def constraint_function(self, points_flat: np.ndarray) -> np.ndarray:
+         """Constraint function ensuring points stay within [0,1]^2."""
+         points = points_flat.reshape(-1, self.dimension)
+         # Each point coordinate should be between 0 and 1
+         return np.concatenate([
+             points[:, 0],  # x coordinates
+             points[:, 1],  # y coordinates
+             1 - points[:, 0],  # 1 - x coordinates
+             1 - points[:, 1]   # 1 - y coordinates
+         ])
+     
+     def objective_function(self, points_flat: np.ndarray) -> float:
+         """Objective function: minimize negative of min/max ratio."""
+         return -self.compute_min_max_ratio(points_flat.reshape(-1, self.dimension))
+     
+-    def optimize_single_start(self, initial_points: np.ndarray, 
+-                            max_iter: int = 500) -> Tuple[np.ndarray, float, float]:
+-        """Perform optimization from single starting point."""
++    def evaluate_candidate(self, points: np.ndarray) -> Tuple[float, float]:
++        """
++        Evaluate a candidate solution and return ratio and computation time.
++        Returns tuple of (ratio, eval_time)
++        """
++        start_time = time.time()
++        ratio = self.compute_min_max_ratio(points)
++        end_time = time.time()
++        return ratio, end_time - start_time
++    
++    def local_optimization(self, initial_points: np.ndarray) -> Tuple[np.ndarray, float, float]:
++        """
++        Perform local optimization using SLSQP from given starting point.
++        Returns tuple of (optimized_points, ratio, eval_time)
++        """
+         start_time = time.time()
+         
+         # Flatten for optimization
+         initial_flat = initial_points.flatten()
+         
+         # Define bounds: 0 <= x_i <= 1, 0 <= y_i <= 1
+         bounds = [(0, 1) for _ in range(self.n_points * self.dimension)]
+         
+         # Define constraint
+         cons = {'type': 'ineq', 'fun': self.constraint_function}
+         
+-        # First, try L-BFGS-B for coarse optimization
+         try:
+-            result_coarse = minimize(
++            # Use SLSQP for final refinement
++            result = minimize(
+                 self.objective_function,
+                 initial_flat,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                options={'maxiter': 200, 'ftol': 1e-6, 'gtol': 1e-6}
+-            )
+-            
+-            # Then refine with SLSQP
+-            result_fine = minimize(
+-                self.objective_function,
+-                result_coarse.x,
+                 method='SLSQP',
+                 bounds=bounds,
+                 constraints=cons,
+-                options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-9}
++                options={'maxiter': self.max_local_iter, 'ftol': 1e-9, 'gtol': 1e-9}
+             )
++            
++            # Extract optimized points
++            optimized_points = result.x.reshape(-1, self.dimension)
++            optimized_points = np.clip(optimized_points, 0, 1)
+             
+             end_time = time.time()
+             eval_time = end_time - start_time
+             
+-            # Extract optimized points
+-            optimized_points = result_fine.x.reshape(-1, self.dimension)
+-            optimized_points = np.clip(optimized_points, 0, 1)
+-            
+             final_ratio = self.compute_min_max_ratio(optimized_points)
+             
+             return optimized_points, final_ratio, eval_time
+             
+         except Exception as e:
+-            warnings.warn(f"Optimization failed: {e}")
++            warnings.warn(f"Local optimization failed: {e}")
+             # Return original points if optimization fails
+             end_time = time.time()
+             eval_time = end_time - start_time
+             final_ratio = self.compute_min_max_ratio(initial_points)
+             return initial_points, final_ratio, eval_time
+     
+-    def optimize_with_multiple_starts(self) -> Tuple[np.ndarray, float, float]:
+-        """Run optimization with multiple starting strategies and return best result."""
++    def evolutionary_search(self, timeout_seconds: float = 60) -> Tuple[np.ndarray, float, float]:
++        """
++        Perform evolutionary search to find promising configurations.
++        Returns tuple of (best_points, best_ratio, eval_time)
++        """
++        start_time = time.time()
++        timeout = start_time + timeout_seconds
++        
++        # Simple evolutionary approach using mutation and selection
++        population_size = 20
++        num_generations = 30
++        
++        # Generate initial population
++        population = []
++        for _ in range(population_size):
++            # Use grid initialization with noise for diversity
++            points = self.initialize_points("grid")
++            population.append(points)
++        
++        best_individual = None
++        best_fitness = -np.inf
++        best_time = 0.0
++        
++        for generation in range(num_generations):
++            if time.time() > timeout:
++                break
++                
++            # Evaluate fitness of current population
++            fitness_scores = []
++            for individual in population:
++                ratio, eval_time = self.evaluate_candidate(individual)
++                fitness_scores.append((ratio, individual, eval_time))
++            
++            # Sort by fitness (descending)
++            fitness_scores.sort(key=lambda x: x[0], reverse=True)
++            
++            # Track best so far
++            current_best_ratio, current_best_individual, current_best_time = fitness_scores[0]
++            if current_best_ratio > best_fitness:
++                best_fitness = current_best_ratio
++                best_individual = current_best_individual.copy()
++                best_time = current_best_time
++            
++            # Create new population through selection and mutation
++            new_population = []
++            
++            # Elitism: keep top 2
++            for i in range(2):
++                new_population.append(fitness_scores[i][1].copy())
++            
++            # Generate remaining individuals through mutation
++            while len(new_population) < population_size:
++                # Tournament selection
++                parent1_idx = random.randint(0, len(fitness_scores)-1)
++                parent2_idx = random.randint(0, len(fitness_scores)-1)
++                
++                parent1 = fitness_scores[parent1_idx][1]
++                parent2 = fitness_scores[parent2_idx][1]
++                
++                # Crossover: average parents
++                child = (parent1 + parent2) / 2.0
++                
++                # Mutation: add Gaussian noise
++                noise = np.random.normal(0, 0.03, child.shape)
++                child += noise
++                child = np.clip(child, 0, 1)
++                
++                new_population.append(child)
++            
++            population = new_population
++        
++        # Final local optimization on best found individual
++        if best_individual is not None:
++            _, final_ratio, final_time = self.local_optimization(best_individual)
++            return best_individual, final_ratio, final_time + best_time
++        else:
++            # Fallback to grid initialization if evolutionary search failed
++            fallback_points = self.initialize_points("grid")
++            return fallback_points, self.compute_min_max_ratio(fallback_points), 0.0
++    
++    def optimize_with_hierarchical_approach(self) -> Tuple[np.ndarray, float, float]:
++        """
++        Run optimization using hierarchical approach: 
++        1. Fast evolutionary search for good starting points
++        2. Local optimization on best candidates
++        Returns tuple of (best_points, best_ratio, eval_time)
++        """
++        start_time_total = time.time()
++        
++        # Try evolutionary search first (faster global exploration)
++        if time.time() - start_time_total < self.max_eval_time * 0.8:
++            try:
++                ev_points, ev_ratio, ev_time = self.evolutionary_search(
++                    timeout_seconds=min(60, self.max_eval_time * 0.8)
++                )
++                
++                # If we got a significantly better result, use it
++                if ev_ratio > 0.2 and ev_ratio > 0.25:  # Threshold for significant improvement
++                    return ev_points, ev_ratio, ev_time
++            except Exception as e:
++                warnings.warn(f"Evolutionary search failed: {e}")
++        
++        # Fall back to multiple restart strategies if needed
+         strategies = ["deterministic", "grid", "random"]
+         best_points = None
+         best_ratio = -np.inf
+         best_time = float('inf')
+         
+-        # Try each initialization strategy
++        # Try each initialization strategy with local optimization
+         for strategy in strategies:
++            if time.time() - start_time_total > self.max_eval_time * 0.9:
++                break
++                
+             try:
+                 initial_points = self.initialize_points(strategy)
+-                optimized_points, final_ratio, eval_time = self.optimize_single_start(
+-                    initial_points, max_iter=500
+-                )
++                optimized_points, final_ratio, eval_time = self.local_optimization(initial_points)
+                 
+                 if final_ratio > best_ratio:
+                     best_ratio = final_ratio
+                     best_points = optimized_points.copy()
+                     best_time = eval_time
+                     
+             except Exception as e:
+                 warnings.warn(f"Strategy {strategy} failed: {e}")
+                 continue
+         
+         # Fallback to deterministic if nothing worked
+         if best_points is None:
+             fallback_points = self.initialize_points("deterministic")
+             return fallback_points, self.compute_min_max_ratio(fallback_points), 0.0
+             
+         return best_points, best_ratio, best_time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     # Create optimizer instance
+     optimizer = PointDispersionOptimizer(n_points=16, dimension=2)
+     
+-    # Perform optimization
+-    best_points, best_ratio, eval_time = optimizer.optimize_with_multiple_starts()
++    # Perform optimization with hierarchical approach
++    best_points, best_ratio, eval_time = optimizer.optimize_with_hierarchical_approach()
+     
+     # Compute benchmark ratio
+     benchmark_ratio = best_ratio / optimizer.benchmark_ratio if optimizer.benchmark_ratio != 0 else 0.0
+     
+     # Print metrics
+     print(f"Final min/max ratio: {best_ratio:.6f}")
+     print(f"Benchmark ratio: {benchmark_ratio:.6f}")
+     print(f"Evaluation time: {eval_time:.6f}s")
+     
+     return best_points
+ 
+ 
+ # EVOLVE-BLOCK-END

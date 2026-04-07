@@ -1,0 +1,256 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+from numba import jit
+import warnings
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Calculate vertices of a hexagon given center, angle, and side length"""
+    angle_rad = np.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vx = x + side_length * np.cos(theta)
+        vy = y + side_length * np.sin(theta)
+        vertices.append((vx, vy))
+    return np.array(vertices)
+
+def get_hexagon_polygon(x, y, angle_deg, side_length=1):
+    """Get shapely polygon representation of hexagon"""
+    vertices = hexagon_vertices(x, y, angle_deg, side_length)
+    return Polygon(vertices)
+
+def check_containment(hex_poly, outer_poly):
+    """Check if hexagon is completely contained within outer hexagon"""
+    return outer_poly.contains(hex_poly) or outer_poly.intersection(hex_poly).area == hex_poly.area
+
+def calculate_outer_hexagon_radius(inner_positions, inner_angles):
+    """Calculate minimum radius needed to contain all inner hexagons"""
+    max_dist = 0
+    outer_center = (0, 0)
+    
+    # Get all vertices of all inner hexagons
+    all_vertices = []
+    for i in range(len(inner_positions)):
+        pos = inner_positions[i]
+        angle = inner_angles[i]
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        all_vertices.extend(hex_vertices)
+    
+    # Find maximum distance from center
+    for vertex in all_vertices:
+        dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+        max_dist = max(max_dist, dist)
+    
+    # Add buffer for safety and account for hexagon shape
+    return max_dist * 1.1  # Safety factor
+
+def evaluate_solution(solution):
+    """Evaluate a solution and return negative of objective (since we minimize)"""
+    # Reshape solution into positions and angles
+    positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+    angles = solution[22:]  # 11 angles
+    
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(11):
+        pos = positions[i]
+        angle = angles[i]
+        hex_poly = get_hexagon_polygon(pos[0], pos[1], angle)
+        inner_hexagons.append(hex_poly)
+    
+    # Check containment
+    outer_radius = calculate_outer_hexagon_radius(positions, angles)
+    # Outer hexagon with center at origin and calculated radius
+    outer_hexagon = get_hexagon_polygon(0, 0, 0, outer_radius)
+    
+    # Check containment for all inner hexagons
+    for hex_poly in inner_hexagons:
+        if not check_containment(hex_poly, outer_hexagon):
+            return 1e10  # Penalty for non-containment
+    
+    # Check for overlaps
+    for i in range(11):
+        for j in range(i+1, 11):
+            if inner_hexagons[i].intersects(inner_hexagons[j]):
+                return 1e10  # Penalty for overlap
+    
+    # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+    return -1.0 / outer_radius
+
+def optimize_hexagon_packing():
+    """Main optimization function"""
+    # Initial guess: arrange in hexagonal pattern around center
+    initial_positions = []
+    initial_angles = []
+    
+    # Center hexagon
+    initial_positions.append([0.0, 0.0])
+    initial_angles.append(0.0)
+    
+    # Surrounding hexagons in ring
+    for i in range(6):
+        angle = i * 60
+        radius = 2.0
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        initial_positions.append([x, y])
+        initial_angles.append(0.0)
+    
+    # Additional positions for remaining hexagons
+    # Place them in a more spread out pattern
+    additional_positions = [
+        (-3.0, 1.0), (3.0, 1.0),
+        (-3.0, -1.0), (3.0, -1.0),
+        (0.0, 3.0), (0.0, -3.0),
+        (1.5, 2.6), (-1.5, -2.6),
+        (-1.5, 2.6), (1.5, -2.6)
+    ]
+    
+    for pos in additional_positions:
+        if len(initial_positions) < 11:
+            initial_positions.append(list(pos))
+            initial_angles.append(0.0)
+    
+    # Ensure we have exactly 11 positions
+    while len(initial_positions) < 11:
+        initial_positions.append([0.0, 0.0])
+        initial_angles.append(0.0)
+    
+    # Flatten initial solution
+    initial_solution = []
+    for pos in initial_positions[:11]:
+        initial_solution.extend(pos)
+    initial_solution.extend(initial_angles[:11])
+    initial_solution = np.array(initial_solution)
+    
+    # Set bounds for optimization
+    bounds = []
+    # Position bounds
+    for _ in range(22):
+        bounds.append((-10.0, 10.0))  # X and Y coordinates
+    # Angle bounds
+    for _ in range(11):
+        bounds.append((0.0, 360.0))   # Rotation angles
+    
+    # Optimization parameters
+    maxiter = 100
+    popsize = 15
+    
+    # Run differential evolution
+    result = differential_evolution(
+        evaluate_solution,
+        bounds,
+        maxiter=maxiter,
+        popsize=popsize,
+        seed=42,
+        disp=False,
+        tol=1e-6
+    )
+    
+    # Extract final solution
+    final_positions = result.x[:22].reshape(-1, 2)
+    final_angles = result.x[22:]
+    
+    # Refine the solution with local optimization
+    refined_solution = local_refinement(final_positions, final_angles)
+    
+    return refined_solution
+
+def local_refinement(positions, angles):
+    """Apply local refinement to improve the solution"""
+    # Simple gradient descent-like refinement
+    best_positions = positions.copy()
+    best_angles = angles.copy()
+    best_score = evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+    
+    step_size = 0.01
+    max_iterations = 50
+    
+    for iteration in range(max_iterations):
+        improved = False
+        
+        # Try small perturbations to each position and angle
+        for i in range(11):
+            # Perturb position
+            for dim in range(2):
+                old_val = best_positions[i][dim]
+                best_positions[i][dim] += step_size
+                new_score = evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                if new_score < best_score:
+                    best_score = new_score
+                    improved = True
+                else:
+                    best_positions[i][dim] = old_val
+            
+            # Perturb angle
+            old_angle = best_angles[i]
+            best_angles[i] += 1.0
+            new_score = evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+            if new_score < best_score:
+                best_score = new_score
+                improved = True
+            else:
+                best_angles[i] = old_angle
+                
+        if not improved:
+            break
+    
+    return best_positions, best_angles
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Run optimization
+        final_positions, final_angles = optimize_hexagon_packing()
+        
+        # Create inner hex data
+        inner_hex_data = np.column_stack([final_positions, final_angles])
+        
+        # Create outer hex data (centered)
+        outer_hex_data = np.array([0, 0, 0])
+        
+        # Calculate outer hex side length
+        outer_radius = calculate_outer_hexagon_radius(final_positions, final_angles)
+        # Convert to side length for regular hexagon
+        outer_hex_side_length = outer_radius / (np.sqrt(3) / 2)
+        
+        elapsed_time = time.time() - start_time
+        print(f"Optimization completed in {elapsed_time:.2f} seconds")
+        
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+        
+    except Exception as e:
+        print(f"Optimization failed: {e}")
+        # Fallback to initial solution
+        inner_hex_data = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8.0
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

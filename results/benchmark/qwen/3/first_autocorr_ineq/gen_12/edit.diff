@@ -1,0 +1,193 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,130 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import optimize
+-
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
+-    n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
+-
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
++import random
++from scipy import signal
++from deap import base, creator, tools, algorithms
++import time
+ 
+ 
+-def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
++def calculate_c1(sequence):
++    """Calculate the autocorrelation constant C₁ for a given sequence."""
++    if len(sequence) == 0 or sum(sequence) < 0.01:
++        return float('inf')
+ 
+-    return best_sequence
++    # Compute convolution (auto-correlation)
++    conv = signal.convolve(sequence, sequence, mode='full')
++    # Get the maximum value (excluding the zero padding)
++    max_conv = np.max(conv[len(sequence)-1:])
++
++    # Calculate C₁
++    sum_sq = sum(x**2 for x in sequence)
++    numerator = 2 * len(sequence) * max_conv
++    denominator = sum_sq
++
++    if denominator == 0:
++        return float('inf')
++
++    return numerator / denominator
++
++
++def evaluate_individual(individual):
++    """Evaluate fitness of an individual (sequence)."""
++    # Convert individual to a valid sequence
++    sequence = [max(0, min(1000, x)) for x in individual]
++    c1 = calculate_c1(sequence)
++    # We want to minimize C₁, so we return its inverse as fitness
++    if c1 == float('inf'):
++        return (0,)  # Invalid solution
++    return (1/c1,)
++
++
++def create_individual(n_steps):
++    """Create a random individual with specified number of steps."""
++    return [random.uniform(0, 1000) for _ in range(n_steps)]
++
++
++def mutate_individual(individual, indpb=0.1):
++    """Mutate an individual by adding Gaussian noise."""
++    for i in range(len(individual)):
++        if random.random() < indpb:
++            individual[i] += random.gauss(0, 100)
++            individual[i] = max(0, individual[i])  # Ensure non-negative
++    return individual,
++
++
++def crossover_individuals(ind1, ind2):
++    """Crossover two individuals."""
++    cxpoint = random.randint(1, min(len(ind1), len(ind2))-1)
++    ind1[cxpoint:], ind2[cxpoint:] = ind2[cxpoint:], ind1[cxpoint:]
++    return ind1, ind2
++
++
++def search_for_best_sequence():
++    """Search for the best coefficient sequence using evolutionary algorithm."""
++    # Set up the evolutionary algorithm
++    random.seed(42)
++    np.random.seed(42)
++
++    # Create fitness and individual classes
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++
++    toolbox = base.Toolbox()
++    toolbox.register("individual", create_individual, n_steps=random.randint(100, 1000))
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate_individual)
++    toolbox.register("mate", crossover_individuals)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++
++    # Evolution parameters
++    population_size = 50
++    generations = 100
++    crossover_prob = 0.8
++    mutation_prob = 0.2
++
++    # Generate initial population
++    pop = toolbox.population(n=population_size)
++
++    # Evaluate initial population
++    fitnesses = list(map(toolbox.evaluate, pop))
++    for ind, fit in zip(pop, fitnesses):
++        ind.fitness.values = fit
++
++    # Main evolutionary loop
++    for gen in range(generations):
++        # Select the next generation individuals
++        offspring = toolbox.select(pop, len(pop))
++        offspring = list(map(toolbox.clone, offspring))
++
++        # Apply crossover and mutation
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < crossover_prob:
++                toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++
++        for mutant in offspring:
++            if random.random() < mutation_prob:
++                toolbox.mutate(mutant)
++                del mutant.fitness.values
++
++        # Evaluate the individuals with an invalid fitness
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = map(toolbox.evaluate, invalid_ind)
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++
++        # Replace the old population with the new one
++        pop[:] = offspring
++
++    # Find the best individual
++    best_ind = tools.selBest(pop, 1)[0]
++    return best_ind
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

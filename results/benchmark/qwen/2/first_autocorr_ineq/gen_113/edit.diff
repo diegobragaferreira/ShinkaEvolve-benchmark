@@ -1,0 +1,347 @@
+--- a/original.py
++++ b/original.py
+@@ -1,197 +1,202 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import optimize
+ from scipy.signal import fftconvolve
+ import random
+ import time
++import math
+ 
+ def compute_c1_constant(sequence):
+     """Computes the C1 constant for a given sequence."""
+     a = np.array(sequence)
+     sum_a = np.sum(a)
+     if sum_a < 0.01:
+         return float('inf')
+     conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+     max_conv = np.max(conv)
+     n = len(a)
+     c1 = (2 * n * max_conv) / (sum_a ** 2)
+     return c1
+ 
+ def evaluate_sequence(sequence):
+     """Evaluates a sequence and returns 1/C1 (the objective to maximize)."""
+     try:
+         c1 = compute_c1_constant(sequence)
+         if c1 == float('inf'):
+             return 0.0
+         return 1.0 / c1
+     except Exception:
+         return 0.0
+ 
+ def generate_random_sequence(length=None, min_length=10, max_length=1000):
+     """Generate a random sequence with specified or random length."""
+     if length is None:
+         length = random.randint(min_length, max_length)
+     sequence = [random.uniform(0, 1000) for _ in range(length)]
+     if all(x == 0 for x in sequence):
+         sequence[0] = 1.0
+     return sequence
+ 
+-def mutate_sequence(sequence, mutation_rate=0.1, max_mutation=0.5):
+-    """Mutate a sequence by randomly modifying elements."""
+-    new_sequence = sequence.copy()
+-    for i in range(len(new_sequence)):
+-        if random.random() < mutation_rate:
+-            new_sequence[i] *= random.uniform(1 - max_mutation, 1 + max_mutation)
+-            new_sequence[i] = max(0, min(1000, new_sequence[i]))
+-    if all(x == 0 for x in new_sequence):
+-        new_sequence[0] = max(0.1, new_sequence[0])
+-    return new_sequence
+-
+-def crossover_sequences(seq1, seq2):
+-    """Perform uniform crossover between two sequences."""
+-    min_len = min(len(seq1), len(seq2))
+-    max_len = max(len(seq1), len(seq2))
+-    padded_seq1 = seq1 + [0] * (max_len - len(seq1))
+-    padded_seq2 = seq2 + [0] * (max_len - len(seq2))
+-    new_seq = []
+-    for i in range(max_len):
+-        if random.random() < 0.5:
+-            new_seq.append(padded_seq1[i])
++def adaptive_hill_climb(initial_sequence, max_iter=1000):
++    """
++    Adaptive hill climbing with dynamic step size and convex relaxation.
++    """
++    current_sequence = np.array(initial_sequence, dtype=float)
++    current_fitness = evaluate_sequence(current_sequence)
++    
++    # Track recent improvements for adaptive step sizing
++    recent_improvements = []
++    max_recent = 5
++    
++    # Initial step size and decay factor
++    step_size = 0.01
++    decay_factor = 0.99
++    
++    for iteration in range(max_iter):
++        # Estimate gradient via finite differences
++        eps = 1e-4
++        gradient = np.zeros_like(current_sequence)
++        base_fitness = current_fitness
++        
++        # Compute gradient for each dimension
++        for i in range(len(current_sequence)):
++            perturbed = current_sequence.copy()
++            perturbed[i] += eps
++            perturbed_fitness = evaluate_sequence(perturbed)
++            gradient[i] = (perturbed_fitness - base_fitness) / eps
++        
++        # Use convex relaxation to find direction
++        direction = -gradient  # Negative gradient for ascent
++        direction_normalized = direction / (np.linalg.norm(direction) + 1e-10)
++        
++        # Adjust step size adaptively based on recent performance
++        if len(recent_improvements) > 0:
++            avg_improvement = np.mean(recent_improvements)
++            if avg_improvement > 0:
++                step_size *= 1.05  # Increase step if improving
++            else:
++                step_size *= 0.95  # Decrease step if not improving
++                step_size = max(step_size, 1e-6)  # Minimum step size
++        
++        # Take step in direction
++        new_sequence = current_sequence + step_size * direction_normalized
++        new_sequence = np.clip(new_sequence, 0, 1000)  # Clip to valid range
++        
++        # Evaluate new position
++        new_fitness = evaluate_sequence(new_sequence)
++        
++        # Accept improvement
++        if new_fitness > current_fitness:
++            current_sequence = new_sequence
++            current_fitness = new_fitness
++            recent_improvements.append(new_fitness - current_fitness)
+         else:
+-            new_seq.append(padded_seq2[i])
+-    return new_seq
+-
+-def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+-    """Returns the direction to move into the sequence using LP optimization."""
++            # Occasionally accept worse moves to escape local maxima
++            if random.random() < 0.01:
++                current_sequence = new_sequence
++                current_fitness = new_fitness
++                recent_improvements.append(new_fitness - current_fitness)
++        
++        # Maintain recent improvements window
++        if len(recent_improvements) > max_recent:
++            recent_improvements.pop(0)
++        
++        # Adaptive decay of step size
++        step_size *= decay_factor
++        
++        # Early stopping if no improvement recently
++        if len(recent_improvements) >= 3 and np.mean(recent_improvements[-3:]) < 1e-8:
++            break
++    
++    return current_sequence.tolist(), current_fitness
++
++def convex_direction_search(sequence, max_search_steps=20):
++    """
++    Uses a simple convex relaxation to find a better direction.
++    This is a simplified version that finds a descent direction without full LP.
++    """
+     n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    if sum_sequence < 0.01:
+-        return None
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    if sum_sequence < 0.01:
+-        return None
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+-    return new_sequence
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-    a_ub_nonneg = -np.eye(n)
+-    b_ub_nonneg = np.zeros(n)
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
++    if n < 2:
++        return sequence
++    
++    # Create a simple convex optimization model for guidance
++    # We'll approximate the gradient and use a descent direction
++    eps = 1e-4
++    base_fitness = evaluate_sequence(sequence)
++    
++    # Estimate gradient
++    gradient = np.zeros_like(sequence)
++    for i in range(n):
++        perturbed = sequence.copy()
++        perturbed[i] += eps
++        perturbed_fitness = evaluate_sequence(perturbed)
++        gradient[i] = (perturbed_fitness - base_fitness) / eps
++    
++    # Use a simple descent direction (negative gradient)
++    # Normalize for unit step
++    norm_grad = np.linalg.norm(gradient)
++    if norm_grad > 0:
++        descent_dir = -gradient / norm_grad
+     else:
+-        return None
+-
+-def genetic_algorithm_search(max_time_seconds=180):
+-    """Search using genetic algorithm approach with LP-based enhancements."""
+-    start_time = time.time()
+-    pop_size = 50
+-    population = [generate_random_sequence() for _ in range(pop_size)]
+-    best_individual = None
+-    best_fitness = 0.0
+-    generation = 0
+-    while time.time() - start_time < max_time_seconds:
+-        generation += 1
+-        fitness_scores = []
+-        for individual in population:
+-            fitness = evaluate_sequence(individual)
+-            fitness_scores.append(fitness)
+-            if fitness > best_fitness:
+-                best_fitness = fitness
+-                best_individual = individual.copy()
+-        selected = []
+-        for _ in range(pop_size):
+-            tournament_indices = random.sample(range(pop_size), 3)
+-            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+-            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+-            selected.append(population[winner_index].copy())
+-        new_population = []
+-        for i in range(0, pop_size, 2):
+-            parent1 = selected[i]
+-            parent2 = selected[(i + 1) % pop_size]
+-            child1 = crossover_sequences(parent1, parent2)
+-            child2 = crossover_sequences(parent2, parent1)
+-            child1 = mutate_sequence(child1)
+-            child2 = mutate_sequence(child2)
+-            enhanced_child1 = get_good_direction_to_move_into(child1)
+-            if enhanced_child1 is not None:
+-                child1 = enhanced_child1
+-            enhanced_child2 = get_good_direction_to_move_into(child2)
+-            if enhanced_child2 is not None:
+-                child2 = enhanced_child2
+-            new_population.extend([child1, child2])
+-        population = new_population[:pop_size]
+-        if generation % 10 == 0:
+-            for i in range(0, pop_size, 5):
+-                if i < pop_size:
+-                    population[i] = generate_random_sequence()
+-    return (best_individual, best_fitness)
+-
+-def local_improvement_search(initial_sequence, max_iter=100):
+-    """Improve a sequence using local search around it."""
+-    current_sequence = initial_sequence.copy()
+-    current_fitness = evaluate_sequence(current_sequence)
+-    for _ in range(max_iter):
+-        mutated = mutate_sequence(current_sequence, mutation_rate=0.3, max_mutation=0.2)
+-        mutated_fitness = evaluate_sequence(mutated)
+-        if mutated_fitness > current_fitness:
+-            current_sequence = mutated
+-            current_fitness = mutated_fitness
+-        enhanced = get_good_direction_to_move_into(current_sequence)
+-        if enhanced is not None:
+-            enhanced_fitness = evaluate_sequence(enhanced)
+-            if enhanced_fitness > current_fitness:
+-                current_sequence = enhanced
+-                current_fitness = enhanced_fitness
+-    return current_sequence, current_fitness
++        descent_dir = np.zeros_like(sequence)
++    
++    # Take a small step to test
++    step_size = 0.01
++    candidate = sequence + step_size * descent_dir
++    candidate = np.clip(candidate, 0, 1000)
++    
++    # Accept if better, otherwise return original
++    if evaluate_sequence(candidate) > base_fitness:
++        return candidate.tolist()
++    else:
++        return sequence
+ 
+ def search_for_best_sequence():
+     """Main search function to find the best sequence."""
+     best_sequence = None
+     best_inv_c1 = 0.0
+-    for attempt in range(5):
++    
++    # Try multiple starting points
++    for attempt in range(10):
++        # Generate a random initial sequence
+         initial_sequence = generate_random_sequence()
+-        improved_seq, improved_fitness = local_improvement_search(initial_sequence, 100)
+-        if improved_fitness > best_inv_c1:
+-            best_inv_c1 = improved_fitness
+-            best_sequence = improved_seq
+-        ga_seq, ga_fitness = genetic_algorithm_search(10)
+-        if ga_fitness > best_inv_c1:
+-            best_inv_c1 = ga_fitness
+-            best_sequence = ga_seq
++        
++        # Try adaptive hill climb
++        climb_seq, climb_fitness = adaptive_hill_climb(initial_sequence, 500)
++        if climb_fitness > best_inv_c1:
++            best_inv_c1 = climb_fitness
++            best_sequence = climb_seq
++            
++        # Also try convex direction search
++        conv_seq = convex_direction_search(initial_sequence)
++        conv_fitness = evaluate_sequence(conv_seq)
++        if conv_fitness > best_inv_c1:
++            best_inv_c1 = conv_fitness
++            best_sequence = conv_seq
++            
++        # Try another adaptive climb with a different starting point
++        alt_seq = generate_random_sequence()
++        alt_seq, alt_fitness = adaptive_hill_climb(alt_seq, 300)
++        if alt_fitness > best_inv_c1:
++            best_inv_c1 = alt_fitness
++            best_sequence = alt_seq
++    
++    # Final refinement with adaptive climb on best found
+     if best_sequence is not None:
+-        final_seq, final_fitness = local_improvement_search(best_sequence, 500)
+-        if final_fitness > best_inv_c1:
+-            best_inv_c1 = final_fitness
+-            best_sequence = final_seq
+-    return best_sequence if best_sequence is not None else generate_random_sequence()
++        ref_seq, ref_fitness = adaptive_hill_climb(best_sequence, 500)
++        if ref_fitness > best_inv_c1:
++            best_inv_c1 = ref_fitness
++            best_sequence = ref_seq
++    
++    # Return best found or default
++    if best_sequence is None:
++        best_sequence = generate_random_sequence()
++    
++    return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

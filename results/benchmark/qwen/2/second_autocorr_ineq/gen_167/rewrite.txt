@@ -1,0 +1,637 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import numba
+from scipy import signal
+from scipy.optimize import differential_evolution
+from scipy.ndimage import gaussian_filter1d
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import random
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+@numba.jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution efficiently using numba"""
+    n = len(f_vals)
+    # Create output array for autoconvolution
+    g = np.zeros(2*n - 1)
+    
+    # Compute convolution manually with numba optimization
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@numba.jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently with numba"""
+    n = len(g_vals)
+    
+    # L2 norm squared (using trapezoidal-like scheme)
+    l2_sq = 0.0
+    for i in range(n - 1):
+        y1 = g_vals[i]
+        y2 = g_vals[i + 1]
+        l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+    
+    # L1 norm
+    l1 = 0.0
+    for i in range(n):
+        l1 += abs(g_vals[i])
+    
+    # L-infinity norm
+    linf = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf:
+            linf = abs_val
+    
+    return l2_sq, l1, linf
+
+class MultiScaleGaussianOptimizer:
+    """Advanced multi-scale Gaussian function optimizer for maximizing C2 constant."""
+    
+    def __init__(self):
+        self.max_evaluations = 1000
+        
+    def compute_autoconvolution_norms(self, f_values):
+        """Compute the norms needed for C2 calculation with enhanced numerical stability."""
+        if not f_values or len(f_values) < 1:
+            return 0.0, 1e-12, 1e-12
+            
+        # Convert to numpy array
+        f = np.array(f_values, dtype=np.float64)
+        
+        # Compute autoconvolution
+        g = signal.convolve(f, f, mode='full')
+        g = g[len(f)-1:]  # Keep only the relevant part
+        
+        # Compute norms with numerical stability checks
+        g_abs = np.abs(g)
+        
+        # ||g||₂² (L2 norm squared) - trapezoidal rule
+        g_sq = g_abs ** 2
+        if len(g_sq) < 2:
+            norm_2_sq = 0.0 if len(g_sq) == 0 else g_sq[0]
+        else:
+            # Proper trapezoidal integration for discrete samples
+            norm_2_sq = np.sum((g_sq[:-1] + g_sq[1:]) / 2.0)
+        
+        # ||g||₁ (L1 norm) - sum of absolute values
+        norm_1 = np.sum(g_abs)
+        
+        # ||g||∞ (infinity norm)
+        norm_inf = np.max(g_abs)
+        
+        # Numerical stability checks
+        norm_2_sq = max(0.0, norm_2_sq)
+        norm_1 = max(1e-12, norm_1)  # Avoid division by zero
+        norm_inf = max(1e-12, norm_inf)  # Avoid division by zero
+        
+        return norm_2_sq, norm_1, norm_inf
+
+    def generate_multiscale_gaussian(self, n_points, min_peaks=5, max_peaks=30):
+        """Generate function using multi-scale Gaussian components."""
+        # Create domain
+        x = np.linspace(-0.25, 0.25, n_points)
+        f_values = np.zeros_like(x)
+        
+        # Determine number of peaks
+        n_peaks = np.random.randint(min_peaks, max_peaks + 1)
+        
+        # Generate peaks at multiple scales using harmonic-inspired approach
+        peak_positions = []
+        peak_amplitudes = []
+        peak_widths = []
+        
+        # Use a combination of logarithmic and strategic positioning
+        # First, establish base scale peaks
+        base_n_peaks = max(2, n_peaks // 3)
+        base_positions = np.linspace(-0.23, 0.23, base_n_peaks)
+        
+        # Add some randomness to base positions
+        base_positions += np.random.normal(0, 0.01, len(base_positions))
+        
+        # Then add finer scale peaks
+        fine_n_peaks = n_peaks - base_n_peaks
+        if fine_n_peaks > 0:
+            # Distribute finer peaks around the base ones
+            fine_positions = []
+            for i, base_pos in enumerate(base_positions):
+                # Add 1-2 finer peaks near each base peak
+                n_fine = 1 + (i % 2)  # Alternate between 1 and 2 fine peaks
+                if n_fine > 0:
+                    for j in range(n_fine):
+                        # Position within a small neighborhood
+                        fine_pos = base_pos + np.random.normal(0, 0.005, 1)[0]
+                        if -0.25 <= fine_pos <= 0.25:  # Ensure within bounds
+                            fine_positions.append(fine_pos)
+            
+            # Add more fine peaks if needed
+            while len(fine_positions) < fine_n_peaks and len(fine_positions) < n_peaks:
+                pos = np.random.uniform(-0.23, 0.23)
+                fine_positions.append(pos)
+            
+            positions = list(base_positions[:base_n_peaks]) + fine_positions[:fine_n_peaks]
+        else:
+            positions = list(base_positions)
+            
+        # Filter unique positions and ensure they're valid
+        unique_positions = []
+        for pos in positions:
+            # Check if position is sufficiently far from others
+            is_valid = True
+            for existing in unique_positions:
+                if abs(pos - existing) < 0.015:  # Minimum spacing constraint
+                    is_valid = False
+                    break
+            if is_valid and -0.25 <= pos <= 0.25:
+                unique_positions.append(pos)
+                
+        # Limit to actual number of peaks requested
+        if len(unique_positions) > n_peaks:
+            unique_positions = unique_positions[:n_peaks]
+        elif len(unique_positions) < n_peaks:
+            # Fill missing positions with random valid ones
+            while len(unique_positions) < n_peaks:
+                pos = np.random.uniform(-0.23, 0.23)
+                is_valid = True
+                for existing in unique_positions:
+                    if abs(pos - existing) < 0.015:
+                        is_valid = False
+                        break
+                if is_valid:
+                    unique_positions.append(pos)
+        
+        # Generate all peak parameters using harmonic-inspired patterns
+        for pos in unique_positions:
+            # Amplitude with distance-dependent decay (harmonic pattern)
+            center_distance = abs(pos)
+            base_amp = 0.5 + 0.5 * np.exp(-center_distance * 4.0)
+            # Apply harmonic decay factor
+            amp = base_amp * np.random.uniform(0.7, 1.3)
+            amp = min(1.0, amp)  # Cap amplitude
+            peak_amplitudes.append(amp)
+            
+            # Width with distance-dependent scaling
+            base_width = 0.015 + 0.03 * (1.0 - np.exp(-center_distance * 2.0)) 
+            width = np.clip(base_width * np.random.uniform(0.8, 1.2), 0.005, 0.08)
+            peak_widths.append(width)
+        
+        # Build the function with multi-scale approach
+        for i, (pos, amp, width) in enumerate(zip(unique_positions, peak_amplitudes, peak_widths)):
+            gaussian_peak = amp * np.exp(-0.5 * ((x - pos) / width) ** 2)
+            f_values += gaussian_peak
+            
+        # Apply structured smoothing to reduce sharp edges but maintain structure
+        if n_points > 100:
+            # Adaptive smoothing based on function complexity
+            smooth_width = max(1, min(15, int(n_points * 0.02)))
+            if smooth_width % 2 == 0:
+                smooth_width += 1
+            f_values = gaussian_filter1d(f_values, smooth_width, mode='nearest')
+        
+        # Ensure non-negativity and normalize
+        f_values = np.maximum(f_values, 0)
+        max_val = np.max(f_values)
+        if max_val > 0:
+            f_values = f_values / (max_val * 1.3)  # Gentle normalization
+            
+        return f_values.tolist()
+
+    def harmonic_peak_construction(self, n_steps=None):
+        """
+        Construct function using harmonic peak pattern inspired by evolutionary approach
+        """
+        if n_steps is None:
+            n_steps = random.randint(300, 1000)
+        
+        # Create a base function with carefully positioned harmonic peaks
+        f_vals = np.zeros(n_steps)
+        
+        # Use a pattern based on sine harmonics which often produce good autoconvolutions
+        # We place peaks in a way that creates constructive interference in convolution
+        n_peaks = max(3, min(15, n_steps // 50))
+        
+        for i in range(n_peaks):
+            # Position peaks with geometric spacing to avoid too regular patterns
+            # but still maintain enough structure for good autoconvolution
+            if i == 0:
+                center = random.uniform(0.1 * n_steps, 0.3 * n_steps)
+            elif i == n_peaks - 1:
+                center = random.uniform(0.7 * n_steps, 0.9 * n_steps)
+            else:
+                # Distribute middle peaks with some randomness
+                prev_center = (n_peaks - 1) * (0.5 * n_steps) / (n_peaks - 1) if n_peaks > 1 else 0.5 * n_steps
+                center = random.uniform(prev_center + n_steps / (n_peaks * 2), 
+                                    prev_center + n_steps / (n_peaks * 1.5))
+            
+            # Adjust center to stay within bounds
+            center = max(0, min(n_steps - 1, center))
+            
+            # Width and height determined by harmonic relationships
+            width = max(5, min(50, n_steps // (2 * (i + 1) + 1)))
+            height = random.uniform(0.8, 2.5) * (1.0 / (i + 1))  # Harmonic decay
+            
+            # Create Gaussian-like peaks with varying shapes
+            x = np.arange(n_steps)
+            gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+            f_vals += gaussian
+        
+        # Apply smoothing with adaptive window size
+        if n_steps > 50:
+            window_size = min(51, n_steps - 1)
+            if window_size % 2 == 0:
+                window_size -= 1
+            if window_size > 1:
+                f_vals = signal.savgol_filter(f_vals, window_size, 3)
+        
+        # Ensure non-negativity and normalize
+        f_vals = np.maximum(f_vals, 0)
+        
+        # Apply final constraints to prevent extreme values
+        if np.max(f_vals) > 0:
+            # Cap extreme values to prevent autoconvolution spikes
+            threshold = np.percentile(f_vals, 95)
+            f_vals = np.minimum(f_vals, threshold * 3.0)
+            f_vals = f_vals / np.max(f_vals) * 2.0 if np.max(f_vals) > 0 else f_vals
+        
+        return f_vals.tolist()
+
+    def adaptive_harmonic_evolution(self, n_generations=30):
+        """
+        Evolutionary approach focused on harmonic peak structures
+        """
+        # Create initial population with harmonic constructions
+        population = []
+        pop_size = 25
+        
+        for _ in range(pop_size):
+            individual = self.harmonic_peak_construction()
+            population.append(individual)
+        
+        best_individual = None
+        best_fitness = 0
+        
+        # Evolution loop
+        for generation in range(n_generations):
+            # Evaluate population
+            fitnesses = list(map(self.evaluate_individual, population))
+            
+            # Track best
+            for i, (ind, fit) in enumerate(zip(population, fitnesses)):
+                if fit[0] > best_fitness:
+                    best_fitness = fit[0]
+                    best_individual = ind.copy()
+            
+            # Selection and reproduction
+            # Tournament selection
+            selected = []
+            for _ in range(pop_size):
+                tournament = random.sample(list(zip(population, fitnesses)), 3)
+                winner = max(tournament, key=lambda x: x[1][0])
+                selected.append(winner[0].copy())
+            
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                parent1 = selected[i]
+                parent2 = selected[(i + 1) % len(selected)]
+                
+                # Crossover - blend harmonic characteristics
+                child1 = self.blend_harmonic_functions(parent1, parent2)
+                child2 = self.blend_harmonic_functions(parent2, parent1)
+                
+                # Mutation with harmonic awareness
+                child1 = self.mutate_harmonic_function(child1)
+                child2 = self.mutate_harmonic_function(child2)
+                
+                offspring.extend([child1, child2])
+            
+            # Trim to population size
+            population = offspring[:pop_size]
+        
+        return best_individual if best_individual is not None else []
+
+    def evaluate_individual(self, individual):
+        """Evaluate fitness of an individual (step function)"""
+        try:
+            # Convert to numpy array and ensure non-negative
+            f_vals = np.array(individual, dtype=np.float64)
+            f_vals = np.maximum(f_vals, 0.0)
+            
+            # Skip if all zeros
+            if np.sum(f_vals) == 0:
+                return (0.0,)
+                
+            # Compute autoconvolution
+            g_vals = compute_autoconvolution_numba(f_vals)
+            
+            # Compute norms
+            l2_sq, l1, linf = compute_norms_numba(g_vals)
+            
+            # Avoid division by zero
+            if l1 <= 1e-15 or linf <= 1e-15:
+                return (0.0,)
+            
+            # Compute C2
+            c2 = l2_sq / (l1 * linf)
+            return (c2,)
+        except:
+            return (0.0,)
+
+    def blend_harmonic_functions(self, func1, func2):
+        """Blend two harmonic functions by averaging their elements"""
+        blended = []
+        min_len = min(len(func1), len(func2))
+        
+        for i in range(min_len):
+            # Blend with preference toward higher values
+            blended_val = (func1[i] + func2[i]) / 2.0
+            blended.append(blended_val)
+        
+        # Append remaining elements if lengths differ
+        if len(func1) > min_len:
+            blended.extend(func1[min_len:])
+        elif len(func2) > min_len:
+            blended.extend(func2[min_len:])
+        
+        return blended
+
+    def mutate_harmonic_function(self, func):
+        """Apply mutation that maintains harmonic properties"""
+        mutated = func.copy()
+        
+        # Apply mutations with harmonic-aware approach
+        for i in range(len(mutated)):
+            if random.random() < 0.15:  # 15% chance to mutate
+                # Choose mutation type based on current value
+                if mutated[i] > 0.1:
+                    # Small additive mutation
+                    delta = random.gauss(0, 0.1 * mutated[i])
+                    mutated[i] = max(0, mutated[i] + delta)
+                else:
+                    # Multiplicative mutation for small values
+                    factor = random.uniform(0.8, 1.2)
+                    mutated[i] = max(0, mutated[i] * factor)
+        
+        return mutated
+
+    def coordinate_ascent_refinement(self, initial_f, max_iter=20):
+        """Refine function using coordinate ascent approach."""
+        f_values = np.array(initial_f, dtype=np.float64)
+        n_points = len(f_values)
+        
+        # Simple refinement by adjusting peak amplitudes and positions
+        # This focuses on improving the autoconvolution structure
+        for iteration in range(max_iter):
+            try:
+                # Compute current C2
+                norm_2_sq, norm_1, norm_inf = self.compute_autoconvolution_norms(f_values)
+                if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+                    break
+                    
+                current_c2 = norm_2_sq / (norm_1 * norm_inf)
+                
+                # Slightly modify function to see improvement
+                # Create new candidate by making small adjustments
+                candidate = f_values.copy()
+                
+                # Adjust a few randomly selected points
+                indices_to_adjust = np.random.choice(n_points, size=min(10, n_points//4), replace=False)
+                for idx in indices_to_adjust:
+                    # Small perturbation
+                    perturbation = np.random.normal(0, 0.01 * np.std(candidate))
+                    new_value = candidate[idx] + perturbation
+                    candidate[idx] = max(0, new_value)  # Ensure non-negativity
+                    
+                # Test the candidate
+                norm_2_sq_new, norm_1_new, norm_inf_new = self.compute_autoconvolution_norms(candidate)
+                if norm_1_new <= 1e-12 or norm_inf_new <= 1e-12:
+                    continue
+                    
+                new_c2 = norm_2_sq_new / (norm_1_new * norm_inf_new)
+                
+                # Accept improvement
+                if new_c2 > current_c2:
+                    f_values = candidate
+                    
+            except Exception as e:
+                warnings.warn(f"Coordinate ascent refinement error: {str(e)}")
+                break
+                
+        return f_values.tolist()
+
+    def local_improvement_search(self, individual, max_iter=20):
+        """
+        Local search using differential evolution to fine-tune harmonic structure
+        """
+        if not individual or len(individual) < 10:
+            return individual
+        
+        try:
+            # Convert to array for optimization
+            x0 = np.array(individual)
+            
+            # Define bounds
+            bounds = [(0, 5) for _ in range(len(x0))]
+            
+            # Objective function
+            def obj_func(x):
+                x = np.maximum(x, 0)
+                score = self.evaluate_individual(x.tolist())[0]
+                return -score if score > 0 else 1e10  # Minimize negative of score
+            
+            # Run differential evolution for local refinement
+            result = differential_evolution(
+                obj_func, 
+                bounds, 
+                maxiter=50,
+                popsize=10,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                disp=False
+            )
+            
+            if result.success:
+                refined = np.maximum(result.x, 0).tolist()
+                if self.evaluate_individual(refined)[0] > self.evaluate_individual(individual)[0]:
+                    return refined
+                    
+        except:
+            pass
+        
+        return individual
+
+    def construct_optimized_function(self, max_time_seconds=85):
+        """Main function construction with multi-scale optimization."""
+        start_time = time.time()
+        best_c2 = 0.0
+        best_f = None
+        
+        # Phase 1: Multiple candidate generation with different strategies
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            
+            for strategy_id in range(12):  # More strategies for better exploration
+                if time.time() - start_time > max_time_seconds * 0.8:
+                    break
+                    
+                def worker_func(strategy):
+                    try:
+                        # Use hybrid approach - alternate between harmonic and multi-scale
+                        if strategy % 2 == 0:
+                            # Multi-scale Gaussian approach
+                            n_points = 2000 + (strategy * 100)  # Vary resolution
+                            f_values = self.generate_multiscale_gaussian(n_points, 10, 30)
+                        else:
+                            # Harmonic peak approach
+                            n_points = 500 + (strategy * 150)  # Vary resolution
+                            f_values = self.harmonic_peak_construction(n_points)
+                        
+                        # Evaluate the candidate
+                        norm_2_sq, norm_1, norm_inf = self.compute_autoconvolution_norms(f_values)
+                        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+                            return (0.0, [])
+                        
+                        c2 = norm_2_sq / (norm_1 * norm_inf)
+                        return (c2, f_values)
+                    except Exception as e:
+                        warnings.warn(f"Worker strategy {strategy} failed: {str(e)}")
+                        return (0.0, [])
+                
+                futures.append(executor.submit(worker_func, strategy_id))
+            
+            # Collect results
+            for future in as_completed(futures):
+                try:
+                    c2, f_values = future.result()
+                    if c2 > best_c2:
+                        best_c2 = c2
+                        best_f = f_values
+                except Exception as e:
+                    warnings.warn(f"Future result error: {str(e)}")
+        
+        # Phase 2: Evolutionary refinement of best candidate
+        if best_f is not None and time.time() - start_time < max_time_seconds * 0.7:
+            try:
+                # Try evolutionary approach on the best found so far
+                evolved_result = self.adaptive_harmonic_evolution(15)
+                if evolved_result:
+                    norm_2_sq, norm_1, norm_inf = self.compute_autoconvolution_norms(evolved_result)
+                    if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+                        evolved_c2 = 0.0
+                    else:
+                        evolved_c2 = norm_2_sq / (norm_1 * norm_inf)
+                    if evolved_c2 > best_c2:
+                        best_c2 = evolved_c2
+                        best_f = evolved_result
+                        
+            except Exception as e:
+                warnings.warn(f"Evolutionary refinement failed: {str(e)}")
+                pass
+        
+        # Phase 3: Final refinement and local optimization
+        if best_f is not None and time.time() - start_time < max_time_seconds * 0.9:
+            try:
+                # Multi-stage refinement
+                refined_f = best_f
+                
+                # Stage 1: Coordinate ascent
+                refined_f = self.coordinate_ascent_refinement(refined_f, 15)
+                
+                # Stage 2: Local improvement search (evolutionary)
+                refined_f = self.local_improvement_search(refined_f, 15)
+                
+                # Stage 3: Final optimization using differential evolution
+                if time.time() - start_time < max_time_seconds * 0.95:
+                    # Final optimization using differential evolution with reduced bounds
+                    def objective(params):
+                        norm_2_sq, norm_1, norm_inf = self.compute_autoconvolution_norms(params)
+                        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+                            return 0.0
+                        c2 = norm_2_sq / (norm_1 * norm_inf)
+                        return -c2 if not np.isnan(c2) and not np.isinf(c2) else 0.0
+                    
+                    bounds = [(0, 1) for _ in range(len(best_f))]
+                    result = differential_evolution(
+                        objective,
+                        bounds=bounds,
+                        maxiter=20,  # Reduced iterations due to time constraint
+                        popsize=5,   # Reduced population
+                        seed=42,
+                        strategy='best1bin'
+                    )
+                    
+                    refined_params = result.x
+                    refined_params = np.maximum(refined_params, 0)
+                    refined_c2 = self.compute_autoconvolution_norms(refined_params)[0] / (
+                        self.compute_autoconvolution_norms(refined_params)[1] * 
+                        self.compute_autoconvolution_norms(refined_params)[2] + 1e-15
+                    )
+                    
+                    if refined_c2 > best_c2:
+                        best_c2 = refined_c2
+                        refined_f = refined_params.tolist()
+                
+                best_f = refined_f
+                
+            except Exception as e:
+                warnings.warn(f"Final refinement failed: {str(e)}")
+                pass
+        
+        # Phase 4: Fallback if nothing worked well
+        if best_f is None:
+            # Fallback to sophisticated structured approach combining both methods
+            n_points = 1000
+            x = np.linspace(-0.25, 0.25, n_points)
+            f_values = np.zeros(n_points)
+            
+            # Create a multi-scale approach with known good characteristics
+            # Use a combination of different scales
+            scales = [0.02, 0.03, 0.04, 0.05, 0.06]
+            n_peaks_per_scale = 3
+            
+            for i, scale in enumerate(scales):
+                n_peaks = n_peaks_per_scale
+                positions = np.linspace(-0.23, 0.23, n_peaks)
+                if i % 2 == 0:  # Add some randomness
+                    positions += np.random.normal(0, 0.005, len(positions))
+                
+                for pos in positions:
+                    if -0.25 <= pos <= 0.25:
+                        width = scale * (1.0 + np.random.uniform(-0.1, 0.1))
+                        height = 0.5 + 0.3 * np.random.uniform(0, 1)
+                        peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+                        f_values += peak
+                        
+            # Final smoothing and normalization
+            f_values = np.maximum(f_values, 0)
+            max_val = np.max(f_values)
+            if max_val > 0:
+                f_values = f_values / (max_val * 1.2)
+            
+            best_f = f_values.tolist()
+            
+        return best_f
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    optimizer = MultiScaleGaussianOptimizer()
+    return optimizer.construct_optimized_function()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

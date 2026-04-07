@@ -1,0 +1,241 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2
+    # Using width=1.2, height=0.8 for a reasonable aspect ratio
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Physics-based approach with force simulation
+    np.random.seed(42)  # For reproducibility
+    
+    # Initialize circles with random positions and small radii
+    n_circles = 21
+    circles = np.zeros((n_circles, 3))
+    
+    # Start with a hexagonal-like grid pattern for good initial distribution
+    rows = 5
+    cols = 5
+    grid_x = np.linspace(0.1, rect_width - 0.1, cols)
+    grid_y = np.linspace(0.1, rect_height - 0.1, rows)
+    
+    positions = []
+    for i, x in enumerate(grid_x):
+        for j, y in enumerate(grid_y):
+            if len(positions) < n_circles:
+                positions.append([x, y])
+    
+    # Add small random perturbations to break symmetry
+    for i in range(len(positions)):
+        positions[i][0] += np.random.uniform(-0.03, 0.03)
+        positions[i][1] += np.random.uniform(-0.03, 0.03)
+    
+    # Clip to bounds
+    positions = np.clip(positions, [0.01, 0.01], [rect_width - 0.01, rect_height - 0.01])
+    
+    # Initialize with small radii
+    radii = np.full(n_circles, 0.01)
+    
+    # Physics constants
+    repulsion_strength = 100.0
+    boundary_strength = 50.0
+    dt = 0.001
+    max_iter = 10000
+    
+    # Store best solution
+    best_sum = 0
+    best_circles = None
+    
+    start_time = time.time()
+    
+    for iteration in range(max_iter):
+        # Calculate pairwise distances
+        pos_array = np.array(positions)
+        dist_matrix = cdist(pos_array, pos_array)
+        
+        # Zero out diagonal
+        np.fill_diagonal(dist_matrix, 1e10)
+        
+        # Calculate forces between circles
+        forces = np.zeros_like(pos_array)
+        
+        # Repulsion forces (inverse distance law)
+        for i in range(n_circles):
+            for j in range(n_circles):
+                if i != j:
+                    dist = dist_matrix[i, j]
+                    if dist > 0:
+                        # Force direction from i to j
+                        direction = pos_array[j] - pos_array[i]
+                        force_magnitude = repulsion_strength / (dist * dist + 1e-8)
+                        # Normalize and apply force
+                        norm = np.linalg.norm(direction) + 1e-8
+                        unit_direction = direction / norm
+                        forces[i] += force_magnitude * unit_direction
+        
+        # Boundary forces (attract to edges with strength proportional to distance)
+        for i in range(n_circles):
+            x, y = pos_array[i]
+            # Force toward left edge
+            forces[i][0] += boundary_strength * (0.01 - x) if x < 0.01 else 0
+            # Force toward right edge
+            forces[i][0] += boundary_strength * (rect_width - 0.01 - x) if x > rect_width - 0.01 else 0
+            # Force toward bottom edge
+            forces[i][1] += boundary_strength * (0.01 - y) if y < 0.01 else 0
+            # Force toward top edge
+            forces[i][1] += boundary_strength * (rect_height - 0.01 - y) if y > rect_height - 0.01 else 0
+        
+        # Update positions
+        for i in range(n_circles):
+            # Apply forces with damping
+            positions[i] += forces[i] * dt * 0.1
+            
+            # Keep within bounds
+            positions[i][0] = np.clip(positions[i][0], 0.01, rect_width - 0.01)
+            positions[i][1] = np.clip(positions[i][1], 0.01, rect_height - 0.01)
+        
+        # Calculate maximum possible radii at current positions
+        new_radii = np.full(n_circles, 0.0)
+        valid_positions = True
+        
+        for i in range(n_circles):
+            x, y = positions[i]
+            # Distance to boundaries
+            dist_to_edges = [x, rect_width - x, y, rect_height - y]
+            
+            # Distance to other circles (minimum)
+            min_dist_to_others = float('inf')
+            for j in range(n_circles):
+                if i != j:
+                    dist = np.sqrt((x - positions[j][0])**2 + (y - positions[j][1])**2)
+                    min_dist_to_others = min(min_dist_to_others, dist)
+            
+            # Max radius is limited by boundary distances and other circle distances
+            if min_dist_to_others < 0.001:
+                valid_positions = False
+                break
+                
+            max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+            new_radii[i] = max(0.001, max_radius)
+        
+        # Only accept valid solutions
+        if valid_positions:
+            total_radius = np.sum(new_radii)
+            
+            if total_radius > best_sum:
+                best_sum = total_radius
+                best_circles = np.column_stack([positions, new_radii])
+        
+        # Early termination if time limit exceeded
+        if time.time() - start_time > 55:  # Leave 5 seconds for final refinement
+            break
+    
+    # If no good solution was found, fall back to structured approach
+    if best_circles is None:
+        # Create hexagonal arrangement with better distribution
+        circles = np.zeros((21, 3))
+        rows = 5
+        cols = 5
+        grid_x = np.linspace(0.1, rect_width - 0.1, cols)
+        grid_y = np.linspace(0.1, rect_height - 0.1, rows)
+        
+        positions = []
+        for i, x in enumerate(grid_x):
+            for j, y in enumerate(grid_y):
+                if len(positions) < 21:
+                    positions.append([x, y])
+        
+        # Slightly offset every other row for hexagonal packing
+        for i in range(len(positions)):
+            if (i // cols) % 2 == 1:
+                positions[i][0] += (grid_x[1] - grid_x[0]) * 0.5
+        
+        # Add final refinement with small perturbations
+        for i in range(len(positions)):
+            positions[i][0] += np.random.uniform(-0.01, 0.01)
+            positions[i][1] += np.random.uniform(-0.01, 0.01)
+            positions[i][0] = np.clip(positions[i][0], 0.01, rect_width - 0.01)
+            positions[i][1] = np.clip(positions[i][1], 0.01, rect_height - 0.01)
+        
+        # Calculate radii
+        for i in range(21):
+            x, y = positions[i]
+            dist_to_edges = [x, rect_width - x, y, rect_height - y]
+            min_dist_to_others = float('inf')
+            
+            for j in range(21):
+                if i != j:
+                    dist = np.sqrt((x - positions[j][0])**2 + (y - positions[j][1])**2)
+                    min_dist_to_others = min(min_dist_to_others, dist)
+            
+            max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+            circles[i] = [x, y, max(0.001, max_radius)]
+        
+        return circles
+    
+    # Final refinement step - local optimization
+    refined_circles = best_circles.copy()
+    
+    # Simple gradient ascent with small steps
+    for _ in range(2000):
+        improved = False
+        for circle_idx in range(21):
+            current_x, current_y, current_r = refined_circles[circle_idx]
+            
+            # Try several positions around current location
+            best_pos = [current_x, current_y]
+            best_radius = current_r
+            
+            # Grid search around current position
+            for dx in [-0.02, -0.01, 0, 0.01, 0.02]:
+                for dy in [-0.02, -0.01, 0, 0.01, 0.02]:
+                    test_x = current_x + dx
+                    test_y = current_y + dy
+                    
+                    # Check bounds
+                    if (test_x < 0.01 or test_x > rect_width - 0.01 or 
+                        test_y < 0.01 or test_y > rect_height - 0.01):
+                        continue
+                    
+                    # Calculate max radius at test position
+                    dist_to_edges = [test_x, rect_width - test_x, test_y, rect_height - test_y]
+                    min_dist_to_others = float('inf')
+                    
+                    for j in range(21):
+                        if j != circle_idx:
+                            dist = np.sqrt((test_x - refined_circles[j, 0])**2 + (test_y - refined_circles[j, 1])**2)
+                            min_dist_to_others = min(min_dist_to_others, dist)
+                    
+                    max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+                    test_radius = max(0.001, max_radius)
+                    
+                    if test_radius > best_radius:
+                        best_radius = test_radius
+                        best_pos = [test_x, test_y]
+                        improved = True
+            
+            # Apply improvement if found
+            if improved:
+                refined_circles[circle_idx, 0] = best_pos[0]
+                refined_circles[circle_idx, 1] = best_pos[1]
+                refined_circles[circle_idx, 2] = best_radius
+    
+    return refined_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

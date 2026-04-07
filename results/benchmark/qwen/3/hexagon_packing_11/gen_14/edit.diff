@@ -1,0 +1,208 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,185 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++import math
++import random
++import time
++
++
++def create_hexagon_vertices(center_x, center_y, side_length, rotation_degrees):
++    """Create vertices of a regular hexagon given center, side length, and rotation."""
++    rotation_rad = math.radians(rotation_degrees)
++    angles = [math.pi/3 * i + rotation_rad for i in range(6)]
++    vertices = []
++    for angle in angles:
++        x = center_x + side_length * math.cos(angle)
++        y = center_y + side_length * math.sin(angle)
++        vertices.append((x, y))
++    return vertices
++
++
++def create_hexagon_polygon(center_x, center_y, side_length, rotation_degrees):
++    """Create a Shapely Polygon object for a hexagon."""
++    vertices = create_hexagon_vertices(center_x, center_y, side_length, rotation_degrees)
++    return Polygon(vertices)
++
++
++def check_hexagon_containment(hexagon_polygon, outer_hexagon_polygon):
++    """Check if a hexagon is completely contained within the outer hexagon."""
++    return outer_hexagon_polygon.contains(hexagon_polygon)
++
++
++def check_hexagon_overlap(hex1, hex2):
++    """Check if two hexagons overlap using Shapely."""
++    return hex1.intersects(hex2)
++
++
++def calculate_outer_hexagon_radius(inner_hex_data, outer_center=(0, 0), outer_rotation=0):
++    """Calculate minimum outer hexagon radius needed to contain all inner hexagons."""
++    max_dist = 0
++    side_length = 1  # unit hexagon
++
++    for i in range(len(inner_hex_data)):
++        center_x, center_y, rotation = inner_hex_data[i]
++        vertices = create_hexagon_vertices(center_x, center_y, side_length, rotation)
++        for vx, vy in vertices:
++            dist = math.sqrt((vx - outer_center[0])**2 + (vy - outer_center[1])**2)
++            max_dist = max(max_dist, dist)
++
++    # Convert distance to radius of circumscribed circle of outer hexagon
++    # For a regular hexagon, radius = side_length
++    # But we need the distance to the farthest vertex from center
++    return max_dist + side_length * math.sqrt(3)/2  # Extra buffer for hexagon size
++
++
++def evaluate_configuration(inner_hex_data, outer_center=(0, 0), outer_rotation=0):
++    """Evaluate a configuration for validity and score."""
++    side_length = 1  # unit hexagons
++
++    # Create outer hexagon
++    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_rotation)
++    outer_hex = create_hexagon_polygon(outer_center[0], outer_center[1], outer_radius, outer_rotation)
++
++    # Check containment and overlaps
++    inner_polygons = []
++    for i in range(len(inner_hex_data)):
++        center_x, center_y, rotation = inner_hex_data[i]
++        hex_poly = create_hexagon_polygon(center_x, center_y, side_length, rotation)
++        inner_polygons.append(hex_poly)
++
++        # Check containment
++        if not check_hexagon_containment(hex_poly, outer_hex):
++            return None, float('inf')  # Invalid, overlaps boundary
++
++    # Check overlaps between inner hexagons
++    for i in range(len(inner_hex_data)):
++        for j in range(i+1, len(inner_hex_data)):
++            if check_hexagon_overlap(inner_polygons[i], inner_polygons[j]):
++                return None, float('inf')  # Invalid, overlaps with another hexagon
++
++    # Valid configuration, return inverse of outer radius
++    return outer_hex, 1/outer_radius
++
++
++def generate_neighbor_config(current_config, step_size=0.5):
++    """Generate a neighboring configuration by slightly perturbing positions."""
++    neighbor = current_config.copy()
++
++    # Randomly choose which hexagon to perturb
++    hex_idx = random.randint(0, len(neighbor)-1)
++
++    # Perturb position (x, y) and optionally rotation
++    if random.random() < 0.7:  # 70% chance to perturb position
++        neighbor[hex_idx, 0] += random.uniform(-step_size, step_size)  # x
++        neighbor[hex_idx, 1] += random.uniform(-step_size, step_size)  # y
++    else:  # 30% chance to perturb rotation
++        neighbor[hex_idx, 2] += random.uniform(-15, 15)  # rotation in degrees
++
++    return neighbor
++
++
++def simulated_annealing_optimization():
++    """Optimize hexagon packing using simulated annealing."""
++    # Initial configuration from original approach but more carefully arranged
++    initial_config = np.array([
++        [0, 0, 0],      # center
++        [-2, 0, 0],     # left
++        [2, 0, 0],      # right
++        [0, 2, 0],      # top
++        [0, -2, 0],     # bottom
++        [-1, 1, 0],     # top-left
++        [1, 1, 0],      # top-right
++        [-1, -1, 0],    # bottom-left
++        [1, -1, 0],     # bottom-right
++        [-2, 1, 0],     # far top-left
++        [2, 1, 0],      # far top-right
++    ])
++
++    current_config = initial_config.copy()
++    current_score = float('-inf')
++
++    # Simulated Annealing parameters
++    temp = 1000.0
++    min_temp = 1e-8
++    alpha = 0.995
++    max_iterations = 100000
++    iteration = 0
++
++    best_config = current_config.copy()
++    best_score = current_score
++
++    start_time = time.time()
++
++    while temp > min_temp and iteration < max_iterations and (time.time() - start_time) < 170:
++        # Generate neighbor
++        neighbor_config = generate_neighbor_config(current_config, step_size=0.2)
++
++        # Evaluate neighbor
++        _, neighbor_score = evaluate_configuration(neighbor_config)
++
++        if neighbor_score != float('inf'):  # Valid configuration
++            # Accept or reject based on simulated annealing probability
++            delta = neighbor_score - current_score
++            if delta > 0 or random.random() < math.exp(delta / temp):
++                current_config = neighbor_config
++                current_score = neighbor_score
++
++                if current_score > best_score:
++                    best_config = current_config.copy()
++                    best_score = current_score
++
++        # Cool down
++        temp *= alpha
++        iteration += 1
++
++    # Final evaluation of best solution
++    final_outer_hex, final_score = evaluate_configuration(best_config)
++
++    if final_score == float('inf'):
++        # Fall back to initial configuration if optimization failed
++        final_outer_hex, final_score = evaluate_configuration(initial_config)
++
++    outer_radius = 1/final_score if final_score != float('inf') else 8
++    outer_hex_data = np.array([0, 0, 0])
++
++    return best_config, outer_hex_data, outer_radius
+ 
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
++    # Run optimization
++    inner_hex_data, outer_hex_data, outer_hex_side_length = simulated_annealing_optimization()
+ 
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++    # Ensure we're returning the right data structures
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ 
+ # EVOLVE-BLOCK-END

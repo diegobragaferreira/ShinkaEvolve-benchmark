@@ -1,0 +1,179 @@
+<NAME>
+adaptive_grid_spacing
+</NAME>
+
+<DESCRIPTION>
+The current program uses a fixed grid-based initialization approach that doesn't adapt well to the optimal circle packing density. I'll implement a more sophisticated adaptive grid spacing that calculates the optimal spacing based on the container dimensions and circle count to achieve better initial packing efficiency.
+
+This change will improve the initial configuration quality, which is crucial since better starting points lead to faster convergence and higher final scores. The adaptive spacing formula will be based on the relationship between total circle area and available container area.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_optimized_initialization(self) -> np.ndarray:
+        """Create initial configuration using optimized grid placement"""
+        circles = np.zeros((self.num_circles, 3))
+
+        # Calculate optimal grid dimensions based on rectangle aspect ratio and circle count
+        aspect_ratio = self.width / self.height
+
+        # Try different grid layouts and pick the one that best utilizes space
+        best_layout_score = 0
+        best_rows = 1
+        best_cols = self.num_circles
+
+        # Test various grid configurations with more systematic approach
+        max_rows = int(np.sqrt(self.num_circles)) + 5
+        for rows in range(1, min(max_rows, self.num_circles + 1)):
+            cols = int(np.ceil(self.num_circles / rows))
+            if cols <= 0:
+                continue
+            # Score based on how well the grid fits the aspect ratio and is complete
+            grid_aspect = (cols * self.width) / (rows * self.height)
+            aspect_score = 1.0 / (1.0 + abs(grid_aspect - aspect_ratio))
+            layout_score = aspect_score * min(cols * rows, self.num_circles)  # Prefer complete layouts
+
+            if layout_score > best_layout_score:
+                best_layout_score = layout_score
+                best_rows = rows
+                best_cols = cols
+
+        rows, cols = best_rows, best_cols
+        actual_circles = rows * cols
+        if actual_circles > self.num_circles:
+            # Adjust rows to fit exactly the required number of circles
+            rows = int(np.ceil(self.num_circles / cols))
+
+        # Calculate spacing with better margin consideration
+        margin = 0.02  # Even smaller margin for tighter packing
+        if cols > 0:
+            cell_width = (self.width - 2 * margin) / cols
+        else:
+            cell_width = self.width / 2
+        if rows > 0:
+            cell_height = (self.height - 2 * margin) / rows
+        else:
+            cell_height = self.height / 2
+
+        # Use minimum of cell dimensions as base for radius, with better scaling factor
+        base_radius = min(cell_width, cell_height) * 0.35  # Slightly smaller base radius for better packing
+
+        # Place circles using grid pattern with more sophisticated positioning
+        circle_idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if circle_idx >= self.num_circles:
+                    break
+
+                # Position circle at center of grid cell with strategic randomization
+                x = margin + (j + 0.5) * cell_width + np.random.uniform(-0.05 * cell_width, 0.05 * cell_width)
+                y = margin + (i + 0.5) * cell_height + np.random.uniform(-0.05 * cell_height, 0.05 * cell_height)
+
+                # Radius based on cell size with randomized variation
+                r = base_radius * (0.85 + np.random.uniform(0, 0.3))
+
+                # Ensure circle fits within bounds with tighter constraints
+                x = np.clip(x, r, self.width - r)
+                y = np.clip(y, r, self.height - r)
+
+                circles[circle_idx] = [x, y, r]
+                circle_idx += 1
+
+            if circle_idx >= self.num_circles:
+                break
+
+        # Ensure minimum radius and fix any constraint violations
+        for i in range(self.num_circles):
+            if circles[i, 2] < 0.001:
+                circles[i, 2] = 0.001
+
+        return circles
+=======
+    def _generate_optimized_initialization(self) -> np.ndarray:
+        """Create initial configuration using optimized adaptive grid placement"""
+        circles = np.zeros((self.num_circles, 3))
+
+        # Calculate optimal grid spacing based on container dimensions and circle count
+        # Approach: determine spacing that would optimally fill the container area
+        # For 21 circles, we want to approximate hexagonal packing efficiency
+        total_circle_area = self.num_circles * (0.05 ** 2) * np.pi  # Estimate initial area
+        container_area = self.width * self.height
+
+        # Calculate target density - aiming for roughly 70% packing efficiency (hexagonal)
+        target_density = 0.70
+        desired_total_area = container_area * target_density
+        if desired_total_area > 0:
+            avg_circle_area = desired_total_area / self.num_circles
+            avg_radius = np.sqrt(avg_circle_area / np.pi)
+        else:
+            avg_radius = 0.05
+
+        # Calculate spacing based on optimal packing density
+        # In hexagonal packing, circles are arranged with spacing = 2 * radius * sqrt(3)/2 ≈ 1.732 * radius
+        spacing = avg_radius * 1.732  # Optimal spacing for hexagonal packing
+
+        # Ensure spacing doesn't exceed container dimensions
+        max_spacing_x = self.width / np.sqrt(self.num_circles)
+        max_spacing_y = self.height / np.sqrt(self.num_circles)
+        spacing = min(spacing, max_spacing_x, max_spacing_y)
+
+        # Calculate grid dimensions with proper margins
+        margin = spacing * 0.1  # Small margin to prevent boundary issues
+        effective_width = self.width - 2 * margin
+        effective_height = self.height - 2 * margin
+
+        # Calculate rows and columns that would fit with calculated spacing
+        cols = max(1, int(effective_width / spacing))
+        rows = max(1, int(effective_height / spacing))
+
+        # Adjust to make sure we have enough cells for all circles
+        if cols * rows < self.num_circles:
+            # Increase spacing slightly to accommodate more circles
+            spacing = max(spacing * 1.1, min(effective_width, effective_height) / 5)
+            cols = max(1, int(effective_width / spacing))
+            rows = max(1, int(effective_height / spacing))
+
+        # Calculate final cell dimensions
+        cell_width = effective_width / cols if cols > 0 else effective_width
+        cell_height = effective_height / rows if rows > 0 else effective_height
+
+        # Calculate base radius as proportional to cell size with some randomness
+        base_radius = min(cell_width, cell_height) * 0.35
+
+        # Place circles using grid pattern with staggered rows for better packing
+        circle_idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if circle_idx >= self.num_circles:
+                    break
+
+                # Stagger odd rows for better packing efficiency
+                x_offset = (i % 2) * (cell_width / 2)
+                x = margin + (j + 0.5) * cell_width + x_offset
+                y = margin + (i + 0.5) * cell_height
+
+                # Add small randomization to positions for better exploration
+                x += np.random.uniform(-cell_width * 0.05, cell_width * 0.05)
+                y += np.random.uniform(-cell_height * 0.05, cell_height * 0.05)
+
+                # Ensure circle fits within bounds
+                x = np.clip(x, base_radius, self.width - base_radius)
+                y = np.clip(y, base_radius, self.height - base_radius)
+
+                # Radius with variation for better initial diversity
+                r = base_radius * (0.85 + np.random.uniform(0, 0.3))
+
+                circles[circle_idx] = [x, y, r]
+                circle_idx += 1
+
+            if circle_idx >= self.num_circles:
+                break
+
+        # Ensure minimum radius and fix any constraint violations
+        for i in range(self.num_circles):
+            if circles[i, 2] < 0.001:
+                circles[i, 2] = 0.001
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

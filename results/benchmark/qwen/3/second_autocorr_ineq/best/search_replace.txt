@@ -1,0 +1,413 @@
+<NAME>
+enhance_step_function_construction
+</NAME>
+
+<DESCRIPTION>
+This change enhances the step function construction by implementing a more sophisticated initialization strategy that creates geometrically structured functions with peak distributions. The new approach focuses on creating better starting points for optimization that are more likely to lead to high C2 values. It uses mathematical insights about optimal convolution shapes and incorporates structured patterns that have shown to perform well in previous implementations.
+
+The key improvements include:
+1. Creating geometrically meaningful initial functions based on mathematical patterns
+2. Implementing a multi-scale approach that builds upon successful structural patterns
+3. Adding adaptive refinement based on local improvement opportunities
+4. Improving the overall exploration-exploitation balance in the optimization process
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import time
+import numba
+from numba import jit
+
+# Constants
+DOMAIN = [-0.25, 0.25]
+N_MIN, N_MAX = 100, 2000
+N_BEST = 1000  # Best candidate size
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using numba-optimized approach"""
+    n = len(f_vals)
+    # Initialize result array
+    g = np.zeros(2*n - 1)
+
+    # Compute autoconvolution manually for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently using numba"""
+    n = len(g_vals)
+
+    # L2 norm squared
+    l2_sq = 0.0
+    # L1 norm
+    l1 = 0.0
+    # Infinity norm
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+def compute_c2(f_vals):
+    """Compute C2 value for given function values"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute norms
+        l2_sq, l1, l_inf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-12 or l_inf <= 1e-12:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_sq / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def generate_candidate_solution(n):
+    """Generate a candidate solution with n steps"""
+    # Generate random positive values
+    return np.random.exponential(1, n)
+
+def evaluate_solution(f_vals):
+    """Evaluate a candidate solution"""
+    return compute_c2(f_vals)
+
+def evolve_step_function():
+    """Main evolution function to find optimal step function"""
+    best_c2 = 0.0
+    best_f_vals = None
+
+    # Try several random configurations to get started
+    for _ in range(100):
+        # Randomly sample number of steps
+        n_steps = np.random.randint(N_MIN, N_MAX + 1)
+
+        # Generate candidate
+        f_vals = generate_candidate_solution(n_steps)
+
+        # Evaluate
+        c2 = evaluate_solution(f_vals)
+
+        if c2 > best_c2:
+            best_c2 = c2
+            best_f_vals = f_vals.copy()
+
+    # If we found something better than baseline, let's use it as starting point
+    if best_c2 > 0:
+        # Fine-tune the best configuration with local search
+        n_steps = len(best_f_vals)
+
+        def objective(x):
+            # Normalize x to 0-1 scale and rescale to reasonable range
+            f_vals = np.abs(x) * 5.0  # Scale up to avoid very small values
+            return -evaluate_solution(f_vals)  # Negative because we're minimizing
+
+        # Use differential evolution for local optimization
+        try:
+            bounds = [(0, 10) for _ in range(n_steps)]
+            result = differential_evolution(objective, bounds, maxiter=100, popsize=15, seed=42)
+
+            if result.success:
+                final_f_vals = np.abs(result.x) * 5.0
+                final_c2 = evaluate_solution(final_f_vals)
+
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_f_vals = final_f_vals
+        except:
+            pass  # Fall back to initial solution if optimization fails
+
+    return best_f_vals.tolist() if best_f_vals is not None else [0.5]*100
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Try to beat the benchmark
+    result = evolve_step_function()
+
+    # Limit execution time
+    end_time = time.time()
+    if end_time - start_time > 85:  # Leave some buffer
+        return result
+
+    return result
+=======
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import time
+import numba
+from numba import jit
+import random
+
+# Constants
+DOMAIN = [-0.25, 0.25]
+N_MIN, N_MAX = 100, 2000
+N_BEST = 1000  # Best candidate size
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using numba-optimized approach"""
+    n = len(f_vals)
+    # Initialize result array
+    g = np.zeros(2*n - 1)
+
+    # Compute autoconvolution manually for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently using numba"""
+    n = len(g_vals)
+
+    # L2 norm squared
+    l2_sq = 0.0
+    # L1 norm
+    l1 = 0.0
+    # Infinity norm
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+def compute_c2(f_vals):
+    """Compute C2 value for given function values"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute norms
+        l2_sq, l1, l_inf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-12 or l_inf <= 1e-12:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_sq / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def generate_geometric_initial_function(n):
+    """Generate a geometrically structured initial function that's more likely to produce good results"""
+    # Create a pattern that combines multiple peaks and valleys to encourage good convolution behavior
+    f_vals = np.zeros(n)
+
+    # Create a central peak with tapering edges
+    center = n // 2
+    half_width = n // 3
+
+    for i in range(n):
+        # Central peak with exponential decay
+        distance_from_center = abs(i - center)
+        if distance_from_center < half_width:
+            # Gaussian-like shape in the center
+            f_vals[i] = np.exp(-0.5 * (distance_from_center / (half_width/2))**2)
+        else:
+            # Tapered edges
+            f_vals[i] = np.exp(-0.5 * ((distance_from_center - half_width) / (n/4))**2)
+
+    # Add some random variation to avoid local minima trapping
+    for i in range(n):
+        if random.random() < 0.1:  # 10% chance to modify
+            f_vals[i] *= random.uniform(0.7, 1.3)
+
+    # Normalize to prevent extreme values
+    if np.sum(f_vals) > 0:
+        f_vals = f_vals / np.sum(f_vals) * 10
+
+    return f_vals
+
+def generate_bump_initial_function(n):
+    """Generate an initial function with strategically placed bumps"""
+    f_vals = np.zeros(n)
+
+    # Place several peaks in strategic locations
+    num_peaks = max(1, n // 20)
+
+    # Place peaks at regular intervals with varying heights
+    for i in range(num_peaks):
+        # Position the peak
+        position = (i * n // num_peaks) if num_peaks > 1 else n // 2
+        # Height with some randomness
+        height = 1.0 + random.random() * 2.0
+
+        # Spread the peak over a few bins (using triangular distribution)
+        spread = max(1, n // 50)
+        for j in range(max(0, position - spread), min(n, position + spread + 1)):
+            distance = abs(j - position)
+            # Triangular kernel
+            kernel = max(0, 1 - distance / spread)
+            f_vals[j] += height * kernel
+
+    # Add some noise for exploration
+    for i in range(n):
+        if random.random() < 0.05:
+            f_vals[i] *= random.uniform(0.8, 1.2)
+
+    # Ensure all values are non-negative
+    f_vals = np.maximum(f_vals, 0)
+
+    # Normalize
+    if np.sum(f_vals) > 0:
+        f_vals = f_vals / np.sum(f_vals) * 10
+
+    return f_vals
+
+def evaluate_solution(f_vals):
+    """Evaluate a candidate solution"""
+    return compute_c2(f_vals)
+
+def adaptive_local_search(f_vals, max_iterations=20):
+    """Perform adaptive coordinate-wise local search to refine the solution"""
+    current_f_vals = f_vals.copy()
+    current_c2 = evaluate_solution(current_f_vals)
+
+    for iteration in range(max_iterations):
+        improved = False
+        # Try small perturbations to each element
+        for i in range(len(current_f_vals)):
+            original_val = current_f_vals[i]
+            # Try different step sizes
+            step_sizes = [0.01, 0.05, 0.1]
+            for step in step_sizes:
+                for direction in [-1, 1]:
+                    # Test perturbation
+                    new_val = original_val + direction * step
+                    if new_val >= 0:
+                        test_vals = current_f_vals.copy()
+                        test_vals[i] = new_val
+                        new_c2 = evaluate_solution(test_vals)
+
+                        if new_c2 > current_c2:
+                            current_c2 = new_c2
+                            current_f_vals = test_vals
+                            improved = True
+                            break
+                if improved:
+                    break
+        if not improved:
+            break
+
+    return current_f_vals, current_c2
+
+def evolve_step_function():
+    """Main evolution function to find optimal step function"""
+    best_c2 = 0.0
+    best_f_vals = None
+
+    # Multi-initialization strategy
+    initial_strategies = [
+        lambda n: np.random.exponential(1, n),
+        generate_geometric_initial_function,
+        generate_bump_initial_function,
+        lambda n: np.ones(n)  # Uniform function
+    ]
+
+    # Try several configurations with different initialization strategies
+    for strategy in initial_strategies:
+        for _ in range(20):  # 20 attempts per strategy
+            # Randomly sample number of steps
+            n_steps = np.random.randint(N_MIN, N_MAX + 1)
+
+            # Generate candidate with specific strategy
+            try:
+                f_vals = strategy(n_steps)
+
+                # Evaluate
+                c2 = evaluate_solution(f_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_f_vals = f_vals.copy()
+            except Exception:
+                continue
+
+    # If we found something better than baseline, let's refine it further
+    if best_c2 > 0:
+        # First apply coordinate-wise local search to refine
+        refined_f_vals, refined_c2 = adaptive_local_search(best_f_vals, max_iterations=15)
+
+        if refined_c2 > best_c2:
+            best_c2 = refined_c2
+            best_f_vals = refined_f_vals
+
+        # Then try differential evolution for final tuning
+        n_steps = len(best_f_vals)
+
+        def objective(x):
+            # Ensure non-negative values and reasonable scaling
+            f_vals = np.abs(x) * 5.0  # Scale to reasonable range
+            return -evaluate_solution(f_vals)  # Negative because we minimize
+
+        # Use differential evolution for local optimization
+        try:
+            bounds = [(0, 10) for _ in range(n_steps)]
+            result = differential_evolution(objective, bounds, maxiter=50, popsize=10, seed=42)
+
+            if result.success:
+                final_f_vals = np.abs(result.x) * 5.0
+                final_c2 = evaluate_solution(final_f_vals)
+
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_f_vals = final_f_vals
+        except:
+            pass  # Fall back to previous best if optimization fails
+
+    return best_f_vals.tolist() if best_f_vals is not None else [0.5]*100
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Try to beat the benchmark
+    result = evolve_step_function()
+
+    # Limit execution time
+    end_time = time.time()
+    if end_time - start_time > 85:  # Leave some buffer
+        return result
+
+    return result
+>>>>>>> REPLACE
+</DIFF>

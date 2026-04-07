@@ -1,0 +1,223 @@
+<NAME>
+add_multi_start_strategy
+</NAME>
+
+<DESCRIPTION>
+Adding a multi-start strategy with diverse initial configurations to improve the chances of finding a globally optimal solution. This approach runs the optimization pipeline from multiple different starting points and selects the best result, which is a proven technique for avoiding local minima in complex optimization landscapes like this point dispersion problem.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 3: Hybrid optimization approach
+    x0 = points.flatten()
+
+    # Define bounds with extra margin for better numerical behavior
+    bounds = [(0.01, 0.99) for _ in range(32)]
+
+    # First stage: Differential Evolution with adaptive parameters
+    try:
+        de_result = differential_evolution(
+            adaptive_objective_with_penalty,  # Use enhanced objective with penalties
+            bounds,
+            seed=42,
+            maxiter=250,
+            popsize=25,
+            tol=1e-9,
+            recombination=0.9,
+            mutation=(0.8, 1.0),
+            disp=False
+        )
+
+        # Update x0 with better solution from DE
+        x0 = de_result.x.copy()
+
+    except Exception as e:
+        warnings.warn(f"Differential evolution failed: {e}")
+        pass
+
+    # Second stage: Local optimization with enhanced convergence control
+    try:
+        # Try L-BFGS-B first with strict tolerances
+        lbfgs_result = minimize(
+            adaptive_objective_with_penalty,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 1000, 'ftol': 1e-15, 'gtol': 1e-15},
+            callback=None
+        )
+
+        # If L-BFGS-B doesn't work, fallback to SLSQP
+        if lbfgs_result.success:
+            x0 = lbfgs_result.x.copy()
+        else:
+            slsqp_result = minimize(
+                adaptive_objective_with_penalty,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+            if slsqp_result.success:
+                x0 = slsqp_result.x.copy()
+
+    except Exception as e:
+        warnings.warn(f"Local optimization failed: {e}")
+        pass
+
+    # Final refinement with standard objective (to ensure proper output)
+    try:
+        final_result = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12},
+            callback=None
+        )
+
+        if final_result.success:
+            points = final_result.x.reshape(-1, 2)
+        else:
+            points = x0.reshape(-1, 2)
+    except Exception as e:
+        warnings.warn(f"Final optimization failed: {e}")
+        points = x0.reshape(-1, 2)
+=======
+    # Phase 3: Multi-start optimization with diverse initial configurations
+    best_points = None
+    best_ratio = float('inf')
+
+    # Define multiple diverse initial configurations
+    initial_configs = []
+
+    # Configuration 1: Voronoi-enhanced hexagonal grid (our main initialization)
+    initial_configs.append(points.copy())
+
+    # Configuration 2: Golden spiral for even distribution
+    np.random.seed(123)
+    golden_spiral_points = []
+    phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+    for i in range(16):
+        angle = i * 2.4  # Modified golden angle
+        radius = 0.4 * np.sqrt(i / 15.0) if i > 0 else 0.05
+        x = 0.5 + radius * np.cos(angle)
+        y = 0.5 + radius * np.sin(angle)
+        golden_spiral_points.append([x, y])
+    golden_spiral_points = np.array(golden_spiral_points)
+    golden_spiral_points = np.clip(golden_spiral_points, 0.05, 0.95)
+    initial_configs.append(golden_spiral_points)
+
+    # Configuration 3: Circle arrangement
+    np.random.seed(234)
+    circle_points = []
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    radii = 0.4 + 0.1 * np.sin(np.arange(16) * np.pi / 8)
+    center = np.array([0.5, 0.5])
+    for angle, radius in zip(angles, radii):
+        x = center[0] + radius * np.cos(angle)
+        y = center[1] + radius * np.sin(angle)
+        circle_points.append([x, y])
+    circle_points = np.array(circle_points)
+    circle_points = np.clip(circle_points, 0.05, 0.95)
+    initial_configs.append(circle_points)
+
+    # Configuration 4: Corner-based positioning
+    np.random.seed(345)
+    corner_points = np.array([
+        [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+        [0.5, 0.1], [0.5, 0.9], [0.1, 0.5], [0.9, 0.5],
+        [0.25, 0.25], [0.25, 0.75], [0.75, 0.25], [0.75, 0.75],
+        [0.33, 0.33], [0.33, 0.67], [0.67, 0.33], [0.67, 0.67]
+    ])
+    corner_points = np.clip(corner_points, 0.05, 0.95)
+    initial_configs.append(corner_points)
+
+    # Run optimization from each initial configuration
+    bounds = [(0.01, 0.99) for _ in range(32)]
+
+    for i, initial_config in enumerate(initial_configs):
+        try:
+            x0 = initial_config.flatten()
+
+            # First stage: Differential Evolution with adaptive parameters
+            de_result = differential_evolution(
+                adaptive_objective_with_penalty,  # Use enhanced objective with penalties
+                bounds,
+                seed=42+i,
+                maxiter=150,  # Reduced iterations for faster multi-start
+                popsize=20,
+                tol=1e-9,
+                recombination=0.9,
+                mutation=(0.8, 1.0),
+                disp=False
+            )
+
+            # Update x0 with better solution from DE
+            x0 = de_result.x.copy()
+
+            # Second stage: Local optimization with enhanced convergence control
+            # Try L-BFGS-B first with strict tolerances
+            lbfgs_result = minimize(
+                adaptive_objective_with_penalty,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15, 'gtol': 1e-15},
+                callback=None
+            )
+
+            # If L-BFGS-B doesn't work, fallback to SLSQP
+            if lbfgs_result.success:
+                x0 = lbfgs_result.x.copy()
+            else:
+                slsqp_result = minimize(
+                    adaptive_objective_with_penalty,
+                    x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+                    callback=None
+                )
+                if slsqp_result.success:
+                    x0 = slsqp_result.x.copy()
+
+            # Final refinement with standard objective (to ensure proper output)
+            final_result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+
+            if final_result.success:
+                current_points = final_result.x.reshape(-1, 2)
+            else:
+                current_points = x0.reshape(-1, 2)
+
+            # Calculate the ratio for this configuration
+            distances = squareform(pdist(current_points))
+            np.fill_diagonal(distances, np.inf)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+
+            if d_max > 0:
+                current_ratio = d_min / d_max
+                if current_ratio < best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+
+        except Exception as e:
+            warnings.warn(f"Optimization from config {i} failed: {e}")
+            continue
+
+    # If we found a valid result, use it; otherwise use our original configuration
+    if best_points is not None:
+        points = best_points
+    else:
+        points = initial_configs[0]
+>>>>>>> REPLACE
+</DIFF>

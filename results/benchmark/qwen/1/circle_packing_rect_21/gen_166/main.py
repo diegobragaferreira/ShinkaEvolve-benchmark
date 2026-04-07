@@ -1,0 +1,453 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, cKDTree
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+from collections import defaultdict
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    width, height = 1.0, 1.0
+
+    def is_valid_position(x: float, y: float, r: float) -> bool:
+        """Check if circle is within bounds"""
+        return (r <= x <= width - r) and (r <= y <= height - r)
+
+    def build_spatial_index(circles_list: List[Tuple[float, float, float]]) -> cKDTree:
+        """Build spatial index for fast neighbor lookup"""
+        if len(circles_list) == 0:
+            return None
+        points = np.array([[x, y] for x, y, r in circles_list])
+        return cKDTree(points)
+
+    def get_potential_collisions(spatial_tree, circle: Tuple[float, float, float],
+                               max_distance: float) -> List[int]:
+        """Get potential collision candidates using spatial index"""
+        if spatial_tree is None:
+            return []
+        x, y, r = circle
+        # Query neighbors within 2*(r_max) distance 
+        indices = spatial_tree.query_ball_point([x, y], max_distance)
+        return indices
+
+    def calculate_criticality_weights(circles_list: List[Tuple[float, float, float]]) -> np.ndarray:
+        """Calculate criticality weights based on Voronoi density and proximity to boundaries"""
+        if len(circles_list) < 2:
+            return np.ones(len(circles_list))
+        
+        points = np.array([[x, y] for x, y, r in circles_list])
+        weights = np.ones(len(circles_list))
+        
+        try:
+            vor = Voronoi(points)
+            # For each circle, compute criticality based on Voronoi cell geometry
+            for i, (x, y, r) in enumerate(circles_list):
+                # Calculate how much area is available relative to neighbors
+                # Find Voronoi region for this point
+                region_idx = None
+                min_distance_to_boundary = min(x, width-x, y, height-y)
+                
+                # Simple boundary influence (closer to edge = higher criticality)
+                boundary_weight = 1.0 + min_distance_to_boundary * 5.0
+                
+                # Compute neighborhood density - more neighbors = higher criticality
+                neighbor_distances = []
+                for j, (ox, oy, oradius) in enumerate(circles_list):
+                    if i != j:
+                        dist = np.sqrt((x - ox)**2 + (y - oy)**2)
+                        if dist < 2.0 * (r + oradius):  # Within reasonable range
+                            neighbor_distances.append(dist)
+                
+                neighbor_count = len(neighbor_distances)
+                density_weight = 1.0 + neighbor_count * 0.3
+                
+                # Combined criticality weight
+                weights[i] = boundary_weight * density_weight
+        except:
+            # Fallback to simple weights
+            for i in range(len(circles_list)):
+                weights[i] = 1.0
+        
+        return weights
+
+    def evaluate_fitness(circles_array: np.ndarray) -> Tuple[float, float]:
+        """Evaluate fitness: sum of radii and penalty for overlaps/bounds"""
+        total_radius = np.sum(circles_array[:, 2])
+
+        # Check bounds
+        valid = True
+        for x, y, r in circles_array:
+            if not is_valid_position(x, y, r):
+                valid = False
+                break
+
+        if not valid:
+            return -1e6, total_radius
+
+        # Check overlaps using spatial indexing for efficiency
+        circles_list = [(x, y, r) for x, y, r in circles_array]
+        spatial_tree = build_spatial_index(circles_list)
+
+        # For each circle, find neighbors and check overlap efficiently
+        max_radius = np.max(circles_array[:, 2])
+        for i, circle in enumerate(circles_list):
+            # Get nearby potential collisions
+            potential_neighbors = get_potential_collisions(spatial_tree, circle, 2 * max_radius)
+
+            for j in potential_neighbors:
+                if i != j:  # Don't compare with self
+                    x1, y1, r1 = circle
+                    x2, y2, r2 = circles_list[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < (r1 + r2):
+                        return -1e6, total_radius  # Overlap penalty
+
+        return total_radius, total_radius
+
+    def initialize_smart_arrangement(width: float, height: float, n_circles: int) -> np.ndarray:
+        """Initialize circles using a smarter approach that considers spacing and constraints"""
+        circles = np.zeros((n_circles, 3))
+        
+        # Start with hexagonal pattern but make it more optimized
+        base_radius = min(width, height) * 0.08
+        
+        # Place in a slightly irregular hexagonal pattern
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+        
+        spacing_x = width / (cols + 1)
+        spacing_y = height / (rows + 1)
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                x = (j + 1) * spacing_x
+                y = (i + 1) * spacing_y
+                
+                # Add slight randomness to avoid perfect symmetry
+                x += np.random.uniform(-spacing_x * 0.1, spacing_x * 0.1)
+                y += np.random.uniform(-spacing_y * 0.1, spacing_y * 0.1)
+                
+                # Adjust for hexagonal pattern
+                if i % 2 == 1:
+                    x += spacing_x / 2
+                
+                # Bound checks and adjust radius
+                r = min(base_radius,
+                       min(x, width-x), min(y, height-y))
+                
+                # Make some circles slightly smaller to create space for larger ones later
+                if np.random.random() < 0.3:
+                    r *= 0.8
+                
+                if r > 0.001:
+                    circles[idx] = [x, y, r]
+                    idx += 1
+        
+        # If we didn't fill all positions, distribute remaining ones randomly
+        while idx < n_circles:
+            x = np.random.uniform(0.01, width - 0.01)
+            y = np.random.uniform(0.01, height - 0.01)
+            # Make radius dependent on distance to other circles
+            r = min(0.05, min(x, width-x), min(y, height-y))
+            
+            # Check if it's not too close to existing circles
+            valid = True
+            for i in range(idx):
+                ox, oy, oradius = circles[i]
+                distance = np.sqrt((x - ox)**2 + (y - oy)**2)
+                if distance < (r + oradius) * 0.8:  # Allow some overlap for randomness
+                    valid = False
+                    break
+                    
+            if valid:
+                circles[idx] = [x, y, r]
+                idx += 1
+                
+        return circles
+
+    def criticality_mutation(circles: np.ndarray, criticality_weights: np.ndarray, 
+                           generation: int) -> np.ndarray:
+        """Mutate circles with step sizes tuned by criticality weights"""
+        mutated = circles.copy()
+        n = len(mutated)
+        
+        # Scale step sizes based on criticality (lower criticality = larger steps)
+        base_step_pos = 0.02
+        base_step_rad = 0.01
+        
+        # Normalize criticality weights to range [0.3, 1.0] to prevent extreme mutations
+        normalized_weights = np.clip(criticality_weights / np.max(criticality_weights) * 0.7 + 0.3, 0.3, 1.0)
+        
+        mutation_rate = 0.3 + 0.2 * np.exp(-generation/100)
+        
+        for i in range(n):
+            if random.random() < mutation_rate:
+                # Adaptive step size based on criticality
+                weight = normalized_weights[i]
+                pos_step = base_step_pos / weight * (0.5 + 0.5 * np.exp(-generation/50))
+                rad_step = base_step_rad / weight * (0.5 + 0.5 * np.exp(-generation/50))
+                
+                # Mutate position with criticality-driven step size
+                mutated[i, 0] += np.random.normal(0, pos_step)
+                mutated[i, 1] += np.random.normal(0, pos_step)
+                
+                # Mutate radius
+                mutated[i, 2] += np.random.normal(0, rad_step)
+                
+                # Ensure valid bounds
+                mutated[i, 0] = np.clip(mutated[i, 0], mutated[i, 2], width - mutated[i, 2])
+                mutated[i, 1] = np.clip(mutated[i, 1], mutated[i, 2], height - mutated[i, 2])
+                mutated[i, 2] = np.clip(mutated[i, 2], 0.001, width/2)
+                
+        return mutated
+
+    def refined_local_optimization(circles: np.ndarray, max_iterations: int = 50) -> np.ndarray:
+        """Improved local optimization with multi-resolution approach"""
+        current = circles.copy()
+        best_fitness = evaluate_fitness(current)[0]
+        
+        # Phase 1: Coarse grained optimization
+        for iteration in range(max_iterations // 2):
+            improved = False
+            for i in range(len(current)):
+                x, y, r = current[i]
+                best_r = r
+                best_x, best_y = x, y
+                best_fitness_local = best_fitness
+                
+                # Coarse resolution grid
+                coarse_steps = 10
+                for dx in np.linspace(-0.05, 0.05, coarse_steps):
+                    for dy in np.linspace(-0.05, 0.05, coarse_steps):
+                        new_x, new_y = x + dx, y + dy
+                        new_r = r
+                        
+                        if is_valid_position(new_x, new_y, new_r):
+                            valid = True
+                            for j in range(len(current)):
+                                if i != j:
+                                    ox, oy, oradius = current[j]
+                                    distance = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                                    if distance < (new_r + oradius):
+                                        valid = False
+                                        break
+                            
+                            if valid:
+                                # Test if we can increase radius
+                                test_r = min(
+                                    new_r,
+                                    new_x, width - new_x,
+                                    new_y, height - new_y
+                                )
+
+                                test_circles = current.copy()
+                                test_circles[i] = [new_x, new_y, test_r]
+
+                                new_fitness, _ = evaluate_fitness(test_circles)
+
+                                if new_fitness > best_fitness_local:
+                                    best_fitness_local = new_fitness
+                                    best_r = test_r
+                                    best_x, best_y = new_x, new_y
+                                    improved = True
+                
+                current[i] = [best_x, best_y, best_r]
+                
+            new_fitness, _ = evaluate_fitness(current)
+            if new_fitness > best_fitness:
+                best_fitness = new_fitness
+            elif not improved:
+                break
+
+        # Phase 2: Fine grained optimization
+        for iteration in range(max_iterations // 2):
+            improved = False
+            for i in range(len(current)):
+                x, y, r = current[i]
+                best_r = r
+                best_x, best_y = x, y
+                best_fitness_local = best_fitness
+                
+                # Fine resolution grid based on radius
+                fine_steps = max(5, int(20 * r))
+                for dx in np.linspace(-0.02, 0.02, fine_steps):
+                    for dy in np.linspace(-0.02, 0.02, fine_steps):
+                        new_x, new_y = x + dx, y + dy
+                        new_r = r
+                        
+                        if is_valid_position(new_x, new_y, new_r):
+                            valid = True
+                            for j in range(len(current)):
+                                if i != j:
+                                    ox, oy, oradius = current[j]
+                                    distance = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                                    if distance < (new_r + oradius):
+                                        valid = False
+                                        break
+                            
+                            if valid:
+                                # Test if we can increase radius
+                                test_r = min(
+                                    new_r,
+                                    new_x, width - new_x,
+                                    new_y, height - new_y
+                                )
+
+                                test_circles = current.copy()
+                                test_circles[i] = [new_x, new_y, test_r]
+
+                                new_fitness, _ = evaluate_fitness(test_circles)
+
+                                if new_fitness > best_fitness_local:
+                                    best_fitness_local = new_fitness
+                                    best_r = test_r
+                                    best_x, best_y = new_x, new_y
+                                    improved = True
+                
+                current[i] = [best_x, best_y, best_r]
+                
+            new_fitness, _ = evaluate_fitness(current)
+            if new_fitness > best_fitness:
+                best_fitness = new_fitness
+            elif not improved:
+                break
+
+        return current
+
+    def enhanced_initialization(width: float, height: float, n_circles: int) -> np.ndarray:
+        """Enhanced initialization with multiple strategies"""
+        # Try hexagonal first
+        try:
+            hex_arrangement = initialize_smart_arrangement(width, height, n_circles)
+            
+            # Try local optimization to improve starting point
+            optimized = refined_local_optimization(hex_arrangement, 30)
+            
+            # Check if it's valid
+            fitness, _ = evaluate_fitness(optimized)
+            if fitness > -1e5:
+                return optimized
+        except:
+            pass
+            
+        # Fallback to random initialization
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x = np.random.uniform(0.01, width - 0.01)
+            y = np.random.uniform(0.01, height - 0.01)
+            # Radius should be reasonable
+            r = min(0.05, min(x, width-x), min(y, height-y))
+            circles[i] = [x, y, r]
+            
+        return circles
+
+    # Main algorithm
+
+    # Enhanced initialization
+    circles = enhanced_initialization(width, height, 21)
+
+    # Evolution parameters
+    generations = 100
+    population_size = 40
+    elite_size = 5
+
+    # Initialize population with better diversity
+    population = [circles.copy()]
+    
+    # Add more variation to initial population
+    for _ in range(population_size - 1):
+        mutated = circles.copy()
+        # Apply more aggressive initial mutations  
+        for i in range(len(mutated)):
+            # More significant position variation
+            mutated[i, 0] += np.random.uniform(-0.05, 0.05)
+            mutated[i, 1] += np.random.uniform(-0.05, 0.05)
+            # Less aggressive radius variation
+            mutated[i, 2] += np.random.uniform(-0.01, 0.01)
+            mutated[i, 2] = max(0.001, mutated[i, 2])
+            
+            # Ensure bounds remain
+            mutated[i, 0] = np.clip(mutated[i, 0], mutated[i, 2], width - mutated[i, 2])
+            mutated[i, 1] = np.clip(mutated[i, 1], mutated[i, 2], height - mutated[i, 2])
+        population.append(mutated)
+
+    best_solution = None
+    best_fitness = -1e10
+
+    # Evolution loop
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            score, _ = evaluate_fitness(individual)
+            fitness_scores.append(score)
+
+        # Sort by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+        # Keep elite
+        elite = sorted_population[:elite_size]
+
+        # Update best solution
+        if sorted_fitness[0] > best_fitness:
+            best_fitness = sorted_fitness[0]
+            best_solution = sorted_population[0].copy()
+
+        # Create new population
+        new_population = elite.copy()
+
+        # Generate offspring through criticality-guided mutation
+        while len(new_population) < population_size:
+            # Select parent - tournament selection
+            tournament_size = 5
+            tournament_indices = random.sample(range(len(sorted_population)), tournament_size)
+            tournament_fitness = [sorted_fitness[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+            parent = sorted_population[winner_index]
+
+            # Calculate criticality weights for this parent
+            criticality_weights = calculate_criticality_weights([(x, y, r) for x, y, r in parent])
+            
+            # Mutate parent with criticality guidance
+            child = criticality_mutation(parent, criticality_weights, gen)
+            
+            # Local optimization on child
+            child = refined_local_optimization(child, max_iterations=10)
+            
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final refinement
+    if best_solution is not None:
+        final_solution = refined_local_optimization(best_solution, max_iterations=100)
+        return final_solution
+
+    # Fallback to enhanced initialization if nothing worked
+    return enhanced_initialization(width, height, 21)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

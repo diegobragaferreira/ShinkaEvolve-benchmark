@@ -1,0 +1,169 @@
+<NAME>
+enhance_initialization_with_voronoi_density
+</NAME>
+
+<DESCRIPTION>
+The key insight is to improve the initial configuration generation by incorporating Voronoi density analysis to better distribute circles in regions of varying spatial density. This approach builds upon the current golden spiral initialization but adds intelligence about spatial density to create more effective starting points. The enhancement involves:
+
+1. Creating a grid-based density estimation to identify high-density regions
+2. Using this information to assign appropriate initial radii based on local density
+3. Better distributing circles to avoid clustering in already dense areas
+4. Maintaining the golden spiral spatial distribution while adding density awareness
+
+This should provide better starting configurations that are closer to optimal, leading to faster convergence toward higher sum_radii values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_golden_spiral_initial_config(self):
+        """Generate initial circle configuration using golden spiral for better distribution."""
+        circles = np.zeros((self.N_CIRCLES, 3))
+
+        # Golden spiral distribution
+        golden_angle = np.pi * (3 - np.sqrt(5))
+
+        for i in range(self.N_CIRCLES):
+            # Improved spiral layout with better distribution
+            r = np.sqrt(i / (self.N_CIRCLES - 1)) if self.N_CIRCLES > 1 else 0
+            theta = i * golden_angle
+
+            # Convert to Cartesian coordinates in [0.1, 0.9] range to keep margin
+            x = 0.4 * r * np.cos(theta) + 0.5
+            y = 0.4 * r * np.sin(theta) + 0.5
+
+            # Apply small random perturbations for diversity
+            x += random.uniform(-0.015, 0.015)
+            y += random.uniform(-0.015, 0.015)
+
+            # Clamp to valid range
+            x = max(0.01, min(0.99, x))
+            y = max(0.01, min(0.99, y))
+
+            # Set initial radius based on distance to borders and available space
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+            # Base radius calculation with some randomness
+            base_radius = min(min_dist_to_edge, 0.15) * random.uniform(0.6, 0.9)
+            r = max(0.005, base_radius)
+
+            circles[i] = [x, y, r]
+
+        return circles
+=======
+    def _generate_voronoi_density_initial_config(self):
+        """Generate initial circle configuration using golden spiral with density-aware radius assignment."""
+        circles = np.zeros((self.N_CIRCLES, 3))
+
+        # Golden spiral distribution
+        golden_angle = np.pi * (3 - np.sqrt(5))
+
+        # Create a coarse density grid to understand spatial distribution
+        grid_size = 8
+        density_grid = np.zeros((grid_size, grid_size))
+
+        # Sample points for density estimation
+        sample_points = []
+        sample_count = min(100, self.N_CIRCLES * 2)  # Sample more points for better density estimate
+
+        # Use a subset of spiral points for density estimation
+        for i in range(sample_count):
+            r = np.sqrt(i / (sample_count - 1)) if sample_count > 1 else 0
+            theta = i * golden_angle
+            x = 0.4 * r * np.cos(theta) + 0.5
+            y = 0.4 * r * np.sin(theta) + 0.5
+            if 0.01 <= x <= 0.99 and 0.01 <= y <= 0.99:
+                sample_points.append([x, y])
+
+        # Estimate density in grid cells
+        for point in sample_points:
+            x, y = point
+            grid_x = int(x * grid_size)
+            grid_y = int(y * grid_size)
+            grid_x = min(grid_x, grid_size - 1)
+            grid_y = min(grid_y, grid_size - 1)
+            density_grid[grid_y, grid_x] += 1
+
+        # Normalize density grid
+        max_density = np.max(density_grid)
+        if max_density > 0:
+            density_grid = density_grid / max_density
+
+        for i in range(self.N_CIRCLES):
+            # Improved spiral layout with better distribution
+            r = np.sqrt(i / (self.N_CIRCLES - 1)) if self.N_CIRCLES > 1 else 0
+            theta = i * golden_angle
+
+            # Convert to Cartesian coordinates in [0.1, 0.9] range to keep margin
+            x = 0.4 * r * np.cos(theta) + 0.5
+            y = 0.4 * r * np.sin(theta) + 0.5
+
+            # Apply small random perturbations for diversity
+            x += random.uniform(-0.015, 0.015)
+            y += random.uniform(-0.015, 0.015)
+
+            # Clamp to valid range
+            x = max(0.01, min(0.99, x))
+            y = max(0.01, min(0.99, y))
+
+            # Calculate density-based initial radius
+            grid_x = int(x * grid_size)
+            grid_y = int(y * grid_size)
+            grid_x = min(grid_x, grid_size - 1)
+            grid_y = min(grid_y, grid_size - 1)
+
+            # Density factor: lower density = higher radius potential
+            density_factor = 1.0 / (density_grid[grid_y, grid_x] + 0.1)  # Add small value to avoid division by zero
+
+            # Set initial radius based on distance to borders, availability and density
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+            # Base radius calculation with some randomness and density consideration
+            base_radius = min(min_dist_to_edge, 0.15) * random.uniform(0.5, 0.8) * density_factor
+            r = max(0.005, base_radius)
+
+            circles[i] = [x, y, r]
+
+        return circles
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_initialization_call
+</NAME>
+
+<DESCRIPTION>
+Update the call to use the new density-aware initialization method instead of the old golden spiral method. This ensures we're using the enhanced initialization approach that incorporates spatial density information to create better starting configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _create_individual(self):
+        """Create a random valid individual."""
+        # Start with golden spiral-based configuration
+        individual = self._generate_golden_spiral_initial_config().flatten().tolist()
+
+        # Add small random perturbations
+        for i in range(len(individual)):
+            if i % 3 < 2:  # x or y coordinate
+                individual[i] += random.uniform(-0.01, 0.01)
+                individual[i] = max(0, min(1, individual[i]))
+            else:  # radius
+                individual[i] *= random.uniform(0.95, 1.05)
+                individual[i] = max(0.001, min(0.5, individual[i]))
+        return creator.Individual(individual)
+=======
+    def _create_individual(self):
+        """Create a random valid individual."""
+        # Start with density-aware spiral-based configuration
+        individual = self._generate_voronoi_density_initial_config().flatten().tolist()
+
+        # Add small random perturbations
+        for i in range(len(individual)):
+            if i % 3 < 2:  # x or y coordinate
+                individual[i] += random.uniform(-0.01, 0.01)
+                individual[i] = max(0, min(1, individual[i]))
+            else:  # radius
+                individual[i] *= random.uniform(0.95, 1.05)
+                individual[i] = max(0.001, min(0.5, individual[i]))
+        return creator.Individual(individual)
+>>>>>>> REPLACE

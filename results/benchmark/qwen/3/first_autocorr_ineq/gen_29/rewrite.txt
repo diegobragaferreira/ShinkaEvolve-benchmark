@@ -1,0 +1,179 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+import time
+
+# Global constants
+MAX_TIME_SECONDS = 180
+MIN_SEQ_LENGTH = 10
+MAX_SEQ_LENGTH = 1000
+BENCHMARK_RATIO = 1.5031
+
+def convolve_fft(a, b):
+    """Compute convolution using FFT for efficiency."""
+    n = len(a)
+    # Pad to size 2*n-1 for full convolution
+    pad_size = 2 * n - 1
+    a_padded = np.pad(a, (0, pad_size - n), 'constant')
+    b_padded = np.pad(b, (0, pad_size - n), 'constant')
+    
+    # Perform convolution in frequency domain
+    a_fft = fft(a_padded)
+    b_fft = fft(b_padded)
+    conv_result = ifft(a_fft * np.conj(b_fft))
+    return np.real(conv_result[:pad_size])
+
+def compute_c1_constant(sequence):
+    """Computes the C1 constant for a given sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+    
+    # Compute convolution using FFT
+    conv = convolve_fft(sequence, sequence)
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence)**2
+    
+    if sum_sq < 1e-10:
+        return float('inf')
+        
+    c1 = 2 * n * max_conv / sum_sq
+    return c1
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    try:
+        n = len(sequence)
+        if n < MIN_SEQ_LENGTH:
+            return None
+            
+        # Normalize sequence for processing
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 1e-10:
+            return None
+            
+        # Normalize to avoid numerical issues
+        normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+        
+        # Compute the target RHS for LP solver
+        conv = convolve_fft(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv)
+        
+        # Solve the LP optimization
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is None:
+            return None
+            
+        # Normalize the result and create new sequence
+        sum_g = np.sum(g_fun)
+        if sum_g < 1e-10:
+            return None
+            
+        normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+        
+        return new_sequence
+    except Exception as e:
+        return None
+
+def solve_convolution_lp(f_sequence, rhs, n):
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        # Create the constraint matrix using the convolution structure
+        # We'll build constraints row-by-row, representing each convolution equation
+        a_ub = []
+        b_ub = []
+        
+        # Generate convolution constraints
+        f_seq = np.array(f_sequence)
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_seq[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Define objective function (we want to minimize negative sum)
+        c = -np.ones(n)
+        
+        # Solve the linear program
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        
+        if result.success:
+            g_sequence = result.x
+            # Ensure non-negativity due to numerical errors
+            g_sequence = np.maximum(g_sequence, 0)
+            return g_sequence.tolist()
+        else:
+            return None
+    except Exception:
+        return None
+
+def search_for_best_sequence() -> list[float]:
+    """Search for the best coefficient sequence."""
+    start_time = time.time()
+    
+    # Initialize with a good random sequence
+    n = np.random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+    best_sequence = np.random.uniform(0.1, 2.0, n).tolist()
+    
+    # Iteratively improve the sequence
+    iterations = 0
+    max_iterations = 1000
+    improvement_threshold = 1e-6
+    
+    prev_c1 = float('inf')
+    
+    while time.time() - start_time < MAX_TIME_SECONDS - 5 and iterations < max_iterations:
+        # Get direction to move to
+        new_sequence = get_good_direction_to_move_into(best_sequence)
+        if new_sequence is None:
+            break
+            
+        # Check if we're making progress
+        current_c1 = compute_c1_constant(new_sequence)
+        if np.isinf(prev_c1) or (prev_c1 - current_c1) / prev_c1 > improvement_threshold:
+            best_sequence = new_sequence
+            prev_c1 = current_c1
+            iterations += 1
+        else:
+            # If no significant improvement, try a different approach
+            n = max(MIN_SEQ_LENGTH, min(MAX_SEQ_LENGTH, int(len(best_sequence) * 0.9)))
+            best_sequence = np.random.uniform(0.1, 2.0, n).tolist()
+            iterations += 1
+
+    # Final validation
+    final_c1 = compute_c1_constant(best_sequence)
+    if final_c1 >= 1.5031:
+        # Try one more refinement if we're close to the benchmark
+        refined = get_good_direction_to_move_into(best_sequence)
+        if refined is not None:
+            test_c1 = compute_c1_constant(refined)
+            if test_c1 < final_c1:
+                best_sequence = refined
+                
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    c1 = compute_c1_constant(sequence)
+    inv_c1 = 1.0 / c1 if c1 != 0 else float('inf')
+    benchmark_ratio = BENCHMARK_RATIO / c1 if c1 != 0 else float('inf')
+    
+    print(f"Found sequence with C1 = {c1}")
+    print(f"Inverse C1 = {inv_c1}")
+    print(f"Benchmark ratio = {benchmark_ratio}")
+    print(f"Sequence length = {len(sequence)}")

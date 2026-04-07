@@ -1,0 +1,386 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, KDTree
+from scipy.spatial.distance import cdist
+import random
+from copy import deepcopy
+import math
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def check_collision(circle1, circle2):
+    """Check if two circles collide using squared distances for efficiency"""
+    x1, y1, r1 = circle1
+    x2, y2, r2 = circle2
+    distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+    return distance_squared < (r1 + r2)**2
+
+def is_valid_position(circle, circles, tree=None):
+    """Check if a circle position is valid (within bounds and no collisions)"""
+    x, y, r = circle
+
+    # Check boundary constraints
+    if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+        return False
+
+    # Fast collision detection using KDTree if available
+    if tree is not None:
+        # Query for potential nearby circles
+        nearby_indices = tree.query_ball_point([x, y], r * 2)
+        for idx in nearby_indices:
+            if check_collision(circle, circles[idx]):
+                return False
+    else:
+        # Fallback to brute force checking
+        for existing_circle in circles:
+            if check_collision(circle, existing_circle):
+                return False
+
+    return True
+
+def compute_max_radius(x, y, circles, tree=None):
+    """Compute the maximum radius for a circle at position (x,y) without overlapping existing circles"""
+    if len(circles) == 0:
+        return min(x, 1-x, y, 1-y)
+
+    # Use KDTree for efficient nearest neighbor lookup
+    if tree is not None:
+        # Find nearest circles to this position
+        distances, indices = tree.query([x, y], k=min(10, len(circles)))
+        # Take only the closest ones that could potentially cause overlap
+        valid_indices = indices if isinstance(indices, (list, np.ndarray)) else [indices]
+        
+        min_distance = float('inf')
+        for idx in valid_indices:
+            if idx < len(circles):
+                cx, cy, cr = circles[idx]
+                distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+                min_distance = min(min_distance, distance)
+    else:
+        # Fallback to full search
+        min_distance = float('inf')
+        for cx, cy, cr in circles:
+            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+            min_distance = min(min_distance, distance)
+
+    # Maximum radius is limited by boundaries and distance to other circles
+    boundary_radius = min(x, 1-x, y, 1-y)
+    collision_radius = min_distance - 1e-8  # Very small epsilon to avoid numerical issues
+
+    return min(boundary_radius, collision_radius) if collision_radius > 0 else 0
+
+def generate_adaptive_voronoi_candidates(circles, num_candidates=1000, tree=None):
+    """Generate candidate positions using adaptive Voronoi and boundary-aware sampling"""
+    if len(circles) == 0:
+        # Return random points if no circles exist yet
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+
+    # Get circle centers
+    points = np.array([[cx, cy] for cx, cy, cr in circles])
+
+    try:
+        # Compute Voronoi diagram
+        vor = Voronoi(points)
+
+        candidates = []
+        
+        # Add Voronoi vertices with boundary weighting
+        for vertex in vor.vertices:
+            x, y = vertex
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                # Weight vertices based on distance to boundaries
+                dist_to_border = min(x, 1-x, y, 1-y)
+                weight = 1.0 + max(0, (0.1 - dist_to_border) * 5)  # Higher weight for closer to edges
+                candidates.append((float(x), float(y), weight))
+
+        # Add some random points around existing circles
+        for i, (cx, cy, cr) in enumerate(circles):
+            for _ in range(2):
+                angle = random.uniform(0, 2*np.pi)
+                distance = random.uniform(0.02, 0.15)
+                x = cx + distance * np.cos(angle)
+                y = cy + distance * np.sin(angle)
+                if 0 <= x <= 1 and 0 <= y <= 1:
+                    # Weight based on proximity to edge
+                    dist_to_border = min(x, 1-x, y, 1-y)
+                    weight = 1.0 + max(0, (0.1 - dist_to_border) * 5)
+                    candidates.append((float(x), float(y), weight))
+
+        # Add strategic edge/vertex points
+        edge_points = [
+            (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),  # corners
+            (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),  # edges
+            (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75),  # diagonals
+            (0.5, 0.5)  # center
+        ]
+        for x, y in edge_points:
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                dist_to_border = min(x, 1-x, y, 1-y)
+                weight = 1.0 + max(0, (0.1 - dist_to_border) * 5)
+                candidates.append((x, y, weight))
+
+        # If we don't have enough candidates, fill with random ones weighted by distance to border
+        if len(candidates) < num_candidates:
+            additional = num_candidates - len(candidates)
+            for _ in range(additional):
+                x = random.uniform(0.01, 0.99)
+                y = random.uniform(0.01, 0.99)
+                dist_to_border = min(x, 1-x, y, 1-y)
+                weight = 1.0 + max(0, (0.1 - dist_to_border) * 5)
+                candidates.append((x, y, weight))
+
+        # Sort by weight (descending) and select best candidates
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        selected_candidates = [(x, y) for x, y, w in candidates[:num_candidates]]
+
+        return selected_candidates
+
+    except:
+        # Fallback to random sampling if Voronoi fails
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+
+def place_circles_adaptive_voronoi(circles, max_circles):
+    """Place circles using adaptive Voronoi-based approach with progressive refinement"""
+    new_circles = circles.copy()
+    placed = 0
+
+    # Predefined strategic positions for initial placement
+    strategic_positions = [
+        (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),  # corners
+        (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),  # edges
+        (0.5, 0.5),  # center
+        (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75)  # diagonals
+    ]
+
+    # Place initial strategic circles
+    for i, (x, y) in enumerate(strategic_positions[:min(12, max_circles)]):
+        if placed >= max_circles:
+            break
+        # Try to place with maximum possible radius
+        max_radius = min(x, 1-x, y, 1-y)
+        test_circle = (x, y, max_radius)
+        if is_valid_position(test_circle, new_circles[:placed]):
+            new_circles[placed] = test_circle
+            placed += 1
+
+    # Build KDTree for efficient collision detection
+    if placed > 0:
+        tree = KDTree([[cx, cy] for cx, cy, cr in new_circles[:placed]])
+    else:
+        tree = None
+
+    # Fill remaining spots with adaptive Voronoi-based approach
+    remaining = max_circles - placed
+    attempt_count = 0
+    max_attempts = remaining * 50  # Prevent infinite loops
+
+    while placed < max_circles and attempt_count < max_attempts:
+        # Generate candidates based on current state
+        if placed < 5:
+            # Early stages: random exploration
+            candidates = [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(50)]
+        else:
+            # Use Voronoi-based candidates
+            candidates = generate_adaptive_voronoi_candidates(new_circles[:placed], 200, tree)
+
+        # Find the best valid circle among candidates
+        best_circle = None
+        best_radius = 0
+
+        # Sample candidates for efficiency
+        sample_size = min(30, max(10, len(candidates) // 2))
+        sampled_candidates = random.sample(candidates, sample_size)
+
+        for x, y in sampled_candidates:
+            # Compute maximum possible radius for this position
+            max_radius = compute_max_radius(x, y, new_circles[:placed], tree)
+            if max_radius <= best_radius:
+                continue
+            test_circle = (x, y, max_radius)
+            if is_valid_position(test_circle, new_circles[:placed], tree):
+                best_circle = test_circle
+                best_radius = max_radius
+
+        if best_circle is not None:
+            new_circles[placed] = best_circle
+            placed += 1
+            # Rebuild tree after adding new circle
+            if placed > 0:
+                tree = KDTree([[cx, cy] for cx, cy, cr in new_circles[:placed]])
+        else:
+            # If we can't find a valid circle, add a tiny circle and continue
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            test_circle = (x, y, 0.0001)
+            if is_valid_position(test_circle, new_circles[:placed], tree):
+                new_circles[placed] = test_circle
+                placed += 1
+                # Rebuild tree
+                if placed > 0:
+                    tree = KDTree([[cx, cy] for cx, cy, cr in new_circles[:placed]])
+
+        attempt_count += 1
+
+    return new_circles
+
+def local_optimization_simulated_annealing(circles, max_iterations=1000, initial_temp=0.1):
+    """Apply simulated annealing-like local optimization"""
+    circles = circles.copy()
+    
+    # Build KDTree once
+    if len(circles) > 0:
+        tree = KDTree([[cx, cy] for cx, cy, cr in circles])
+    else:
+        tree = None
+
+    # Initial fitness (sum of radii)
+    current_fitness = sum(circle[2] for circle in circles)
+    
+    # Simulated annealing parameters
+    temperature = initial_temp
+    cooling_rate = 0.995
+    min_temperature = 1e-6
+    
+    for iteration in range(max_iterations):
+        # Cool temperature
+        if temperature < min_temperature:
+            break
+            
+        # Make a small random change to one circle
+        circle_idx = random.randint(0, len(circles) - 1)
+        old_circle = circles[circle_idx].copy()
+        
+        # Perturb the position slightly
+        new_x = old_circle[0] + random.uniform(-0.02, 0.02)
+        new_y = old_circle[1] + random.uniform(-0.02, 0.02)
+        new_x = max(0.01, min(0.99, new_x))
+        new_y = max(0.01, min(0.99, new_y))
+        
+        # Recalculate radius
+        new_radius = compute_max_radius(new_x, new_y, np.concatenate([circles[:circle_idx], circles[circle_idx+1:]]), tree)
+        
+        if new_radius <= 0:
+            # If invalid, skip this change
+            continue
+            
+        new_circle = (new_x, new_y, new_radius)
+        
+        # Check validity
+        valid = is_valid_position(new_circle, np.concatenate([circles[:circle_idx], circles[circle_idx+1:]]), tree)
+        
+        if valid:
+            # Accept the change if it improves fitness or with some probability
+            old_fitness = old_circle[2]
+            new_fitness = new_radius
+            
+            delta_fitness = new_fitness - old_fitness
+            
+            if delta_fitness > 0 or random.random() < math.exp(delta_fitness / temperature):
+                circles[circle_idx] = new_circle
+                current_fitness += delta_fitness
+                # Rebuild tree since we've changed positions
+                if len(circles) > 0:
+                    tree = KDTree([[cx, cy] for cx, cy, cr in circles])
+        
+        # Cool temperature
+        temperature *= cooling_rate
+        
+    return circles
+
+def adaptive_local_refinement(circles, iterations=100):
+    """Apply adaptive local refinement that progressively becomes more aggressive"""
+    circles = circles.copy()
+    
+    # Build KDTree once
+    if len(circles) > 0:
+        tree = KDTree([[cx, cy] for cx, cy, cr in circles])
+    else:
+        tree = None
+
+    for iter_num in range(iterations):
+        improved = False
+        
+        # Progressive tightening of constraints
+        if iter_num < 20:
+            # Early iterations: broad exploration
+            moves_per_circle = 5
+            step_size = 0.03
+        elif iter_num < 50:
+            # Mid iterations: moderate refinement
+            moves_per_circle = 3
+            step_size = 0.02
+        else:
+            # Late iterations: fine-tuning
+            moves_per_circle = 2
+            step_size = 0.01
+
+        # Try to improve each circle
+        for i in range(len(circles)):
+            old_x, old_y, old_r = circles[i]
+
+            # Store original values
+            orig_circle = circles[i].copy()
+
+            # Try several random moves
+            best_circle = orig_circle.copy()
+            best_radius = old_r
+
+            for _ in range(moves_per_circle):
+                # Perturb the position
+                new_x = old_x + random.uniform(-step_size, step_size)
+                new_y = old_y + random.uniform(-step_size, step_size)
+
+                # Ensure new position is within bounds
+                new_x = max(0.01, min(0.99, new_x))
+                new_y = max(0.01, min(0.99, new_y))
+
+                # Compute new radius
+                new_r = compute_max_radius(new_x, new_y, np.concatenate([circles[:i], circles[i+1:]]), tree)
+
+                if new_r > 0 and new_r > best_radius:
+                    test_circle = (new_x, new_y, new_r)
+                    if is_valid_position(test_circle, np.concatenate([circles[:i], circles[i+1:]]), tree):
+                        best_circle = test_circle
+                        best_radius = new_r
+
+            # Update if improvement found
+            if best_radius > old_r:
+                circles[i] = best_circle
+                improved = True
+                # Rebuild tree after update
+                if len(circles) > 0:
+                    tree = KDTree([[cx, cy] for cx, cy, cr in circles])
+
+        # Break early if no significant improvement was made
+        if not improved and iter_num > 30:
+            break
+
+    return circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Phase 1: Adaptive Voronoi-based initialization
+    circles = place_circles_adaptive_voronoi(circles, n)
+
+    # Phase 2: Local optimization with simulated annealing
+    circles = local_optimization_simulated_annealing(circles)
+
+    # Phase 3: Adaptive local refinement
+    circles = adaptive_local_refinement(circles, 100)
+
+    # Phase 4: Final polishing with more intensive refinement
+    circles = adaptive_local_refinement(circles, 100)
+
+    return circles
+
+# EVOLVE-BLOCK-END

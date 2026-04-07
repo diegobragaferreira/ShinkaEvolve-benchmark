@@ -1,0 +1,343 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy import signal
+import random
+import time
+from typing import List, Tuple
+from numba import jit, prange
+import warnings
+
+# Global constants
+SEED = 42
+TIME_LIMIT = 85  # seconds
+MAX_STEPS = 50000
+MIN_STEPS = 100
+INIT_STRATEGIES = 3  # Reduced for faster execution
+RESTARTS = 2  # Number of restarts for multi-start approach
+LOCAL_SEARCH_ITERATIONS = 10  # Local search iterations
+
+# Set random seeds for reproducibility
+random.seed(SEED)
+np.random.seed(SEED)
+
+@jit(nopython=True, parallel=True)
+def compute_autoconvolution_fast_numba(f_vals):
+    """Fast autoconvolution computation using numba"""
+    n = len(f_vals)
+    # Autoconvolution size is 2*n - 1
+    g_size = 2 * n - 1
+    g_vals = np.zeros(g_size, dtype=np.float64)
+
+    # Parallel computation of convolution
+    for i in prange(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_size:
+                g_vals[idx] += f_vals[i] * f_vals[j]
+
+    return g_vals
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Fast computation of L1, L2², and L∞ norms"""
+    n = len(g_vals)
+
+    l1_norm = 0.0
+    l2_norm_sq = 0.0
+    linf_norm = 0.0
+
+    # Single pass through array
+    for i in range(n):
+        val = g_vals[i]
+        abs_val = abs(val)
+
+        l1_norm += abs_val
+        l2_norm_sq += val * val
+
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_norm_sq, linf_norm
+
+@jit(nopython=True)
+def compute_convolution_norms_fast_numba(f_values):
+    """
+    Fast computation of convolution norms using numba JIT compilation.
+    This focuses on optimizing the core convolution operation.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = 0.5 / n_steps
+
+    # Direct autoconvolution computation using numba
+    g = compute_autoconvolution_fast_numba(np.array(f_values, dtype=np.float64))
+
+    # Compute norms using fast numba methods
+    g_abs = np.abs(g[:n_steps])  # Only take central part (approximate)
+    norm_1, norm_2_sq, norm_inf = compute_norms_numba(g_abs)
+
+    # Apply scaling
+    norm_1 *= dx
+    norm_2_sq *= dx
+
+    return norm_2_sq, norm_1, norm_inf
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Optimized autoconvolution norm computation with hybrid approach:
+    - Uses numba JIT for the core convolution operations
+    - Handles the integration in a piecewise linear manner as per the specification
+    """
+    try:
+        # Convert to numpy array for faster processing
+        f_array = np.array(f_values, dtype=np.float64)
+        n_steps = len(f_array)
+        
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        # Step size
+        dx = 0.5 / n_steps
+        
+        # Create step function values on the domain [-0.25, 0.25]
+        # Use more efficient numpy array operations
+        step_width = 0.5 / n_steps
+        step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps, dtype=np.float64)
+        
+        # Create a refined grid for better convolution approximation
+        # Use 5 times the number of steps for better resolution
+        fine_grid_points = n_steps * 5
+        x_fine = np.linspace(-0.25, 0.25, fine_grid_points, dtype=np.float64)
+        dx_fine = x_fine[1] - x_fine[0]
+        
+        # Vectorized approach for creating step function on fine grid
+        # Create a matrix to efficiently check which positions fall in which step
+        positions_matrix = step_positions.reshape(-1, 1)
+        x_fine_matrix = x_fine.reshape(1, -1)
+        
+        left_boundaries = positions_matrix - step_width/2
+        right_boundaries = positions_matrix + step_width/2
+        
+        # Broadcasting to find which points belong to which step
+        in_step = (x_fine_matrix >= left_boundaries) & (x_fine_matrix <= right_boundaries)
+        
+        # Create piecewise constant function on fine grid
+        f_func = np.zeros_like(x_fine, dtype=np.float64)
+        for i in range(n_steps):
+            mask = in_step[i]
+            f_func[mask] = f_array[i]
+            
+        # Compute autoconvolution using FFT for efficiency
+        # The full convolution of length n with itself
+        g_full = signal.fftconvolve(f_func, f_func, mode='full')
+        
+        # Take the first half (since convolution is symmetric)  
+        g = g_full[:len(g_full)//2 + 1]
+        
+        # Apply proper scaling
+        g = g * dx_fine
+
+        # Compute norms - now use the fast numba version
+        g_abs = np.abs(g)
+        norm_1, norm_2_sq, norm_inf = compute_norms_numba(g_abs)
+        
+        # Apply additional scaling to match our domain
+        norm_1 *= dx
+        norm_2_sq *= dx
+        
+        return norm_2_sq, norm_1, norm_inf
+        
+    except Exception as e:
+        # Fallback to basic computation if anything fails
+        return 0.0, 0.0, 0.0
+
+def evaluate_c2_single(f_values: List[float]) -> float:
+    """Fast evaluation of C2 for a single individual"""
+    try:
+        # Ensure non-negative values and convert to float
+        f_values = [max(0.0, float(x)) for x in f_values]
+
+        # Compute the norms
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+            return 0.0
+
+        # Calculate C₂
+        c2 = norm_2_sq / (norm_1 * norm_inf)
+        return c2
+    except Exception:
+        return 0.0
+
+def generate_structured_initial_function(n_steps: int) -> List[float]:
+    """
+    Generate highly structured initial function that promotes good C2 values.
+    This method uses a multi-scale approach with strategic peak placements.
+    """
+    # Create multi-scale structure with varying amplitudes and widths
+    heights = np.zeros(n_steps)
+    
+    # Scale 1: Major peaks in center
+    center = n_steps // 2
+    main_peak = np.random.exponential(1.0) * 2.0
+    spread_main = max(1, n_steps // 8)
+    
+    for i in range(n_steps):
+        heights[i] += main_peak * np.exp(-((i - center) ** 2) / (2 * spread_main ** 2))
+    
+    # Scale 2: Minor peaks around edges
+    edge_spread = max(1, n_steps // 12)
+    for edge in [n_steps//4, 3*n_steps//4]:
+        peak_height = np.random.exponential(0.5)
+        for i in range(n_steps):
+            heights[i] += peak_height * np.exp(-((i - edge) ** 2) / (2 * edge_spread ** 2))
+    
+    # Scale 3: Random small peaks to add complexity
+    n_peaks = max(1, n_steps // 30)
+    for _ in range(n_peaks):
+        peak_pos = np.random.randint(0, n_steps)
+        peak_height = np.random.exponential(0.3)
+        spread = max(1, n_steps // 100)
+        for i in range(n_steps):
+            heights[i] += peak_height * np.exp(-((i - peak_pos) ** 2) / (2 * spread ** 2))
+            
+    # Ensure non-negative values
+    heights = np.maximum(heights, 0)
+    
+    # Normalize to a reasonable magnitude
+    if np.sum(heights) > 0:
+        heights = heights / np.sum(heights) * n_steps * 0.1
+        
+    return heights.tolist()
+
+def adaptive_local_search(initial_function: List[float], max_iterations: int = LOCAL_SEARCH_ITERATIONS) -> List[float]:
+    """
+    Perform aggressive local search with adaptive perturbations to improve solution quality.
+    This is designed to refine the solution obtained from global optimization.
+    """
+    current_function = initial_function.copy()
+    best_function = current_function.copy()
+    best_c2 = evaluate_c2_single(best_function)
+    
+    for iteration in range(max_iterations):
+        # Create perturbed version
+        candidate_function = current_function.copy()
+        
+        # Perturb different portions of the function with varying intensities
+        n_steps = len(candidate_function)
+        n_changes = max(1, n_steps // 20)  # Small number of changes
+        
+        # Select random indices to modify
+        indices_to_modify = np.random.choice(n_steps, n_changes, replace=False)
+        
+        for idx in indices_to_modify:
+            # Adaptive perturbation strength based on current value
+            current_value = candidate_function[idx]
+            if current_value > 0:
+                # Gaussian noise with adaptive scale
+                noise_scale = 0.1 * current_value + 0.01
+                noise = np.random.normal(0, noise_scale)
+                new_value = max(0, current_value + noise)
+                
+                # Accept with probability that depends on improvement
+                candidate_function[idx] = new_value
+                
+        # Evaluate the candidate
+        candidate_c2 = evaluate_c2_single(candidate_function)
+        
+        # Accept if better or sometimes accept worse (simulated annealing component)
+        if candidate_c2 > best_c2 or (iteration < max_iterations//2 and np.random.rand() < 0.1):
+            current_function = candidate_function.copy()
+            if candidate_c2 > best_c2:
+                best_c2 = candidate_c2
+                best_function = current_function.copy()
+    
+    return best_function
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    best_result = None
+    best_fitness = -np.inf
+    
+    # Try multiple initialization strategies
+    for strategy in range(INIT_STRATEGIES):
+        # Set seed for this strategy
+        np.random.seed(SEED + strategy * 10)
+        random.seed(SEED + strategy * 10)
+        
+        # Strategy 1: Structured initialization
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        initial_function = generate_structured_initial_function(n_steps)
+        
+        # Local search refinement for this initialization
+        refined_function = adaptive_local_search(initial_function, LOCAL_SEARCH_ITERATIONS)
+        fitness = evaluate_c2_single(refined_function)
+        
+        if fitness > best_fitness:
+            best_fitness = fitness
+            best_result = refined_function
+            
+        # Additional restart with different structure if time allows
+        if time.time() - start_time > TIME_LIMIT * 0.7:
+            break
+            
+        # Strategy 2: Random initialization with local refinement
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        random_function = np.random.lognormal(0, 0.5, size=n_steps).tolist()
+        random_function = [max(0, x) for x in random_function]
+        refined_random = adaptive_local_search(random_function, LOCAL_SEARCH_ITERATIONS)
+        fitness_random = evaluate_c2_single(refined_random)
+        
+        if fitness_random > best_fitness:
+            best_fitness = fitness_random
+            best_result = refined_random
+            
+        # Strategy 3: Exponential distribution with local refinement
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        exp_function = np.random.exponential(scale=1.0, size=n_steps).tolist()
+        exp_function = [max(0, x) for x in exp_function]
+        refined_exp = adaptive_local_search(exp_function, LOCAL_SEARCH_ITERATIONS)
+        fitness_exp = evaluate_c2_single(refined_exp)
+        
+        if fitness_exp > best_fitness:
+            best_fitness = fitness_exp
+            best_result = refined_exp
+            
+        # Early exit if sufficient time is remaining
+        if time.time() - start_time > TIME_LIMIT * 0.8:
+            break
+    
+    # Final local search on the best result
+    if best_result is not None:
+        final_result = adaptive_local_search(best_result, 5)
+        final_fitness = evaluate_c2_single(final_result)
+        if final_fitness > best_fitness:
+            best_result = final_result
+    
+    # Fallback to a reasonable solution if nothing works
+    if best_result is None:
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        heights = np.random.lognormal(0, 0.5, size=n_steps)
+        heights = np.maximum(heights, 0)
+        best_result = heights.tolist()
+    
+    # Ensure it's a list of floats
+    best_result = [float(x) for x in best_result]
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    print(f"Evaluated in {eval_time:.2f} seconds")
+    print(f"Best C2 found: {evaluate_c2_single(best_result):.6f}")
+
+    return best_result
+
+# EVOLVE-BLOCK-END

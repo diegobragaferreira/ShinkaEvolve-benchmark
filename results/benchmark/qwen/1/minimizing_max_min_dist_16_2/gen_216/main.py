@@ -1,0 +1,229 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.optimize import minimize
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+        distances = distance.pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max <= 1e-12:
+            return 0.0
+        return d_min / d_max
+    
+    def compute_voronoi_quality(points):
+        """Compute quality metric based on Voronoi cell uniformity."""
+        try:
+            vor = Voronoi(points)
+            # Calculate areas of finite Voronoi cells
+            areas = []
+            for region in vor.regions:
+                if len(region) > 0 and -1 not in region:
+                    # Compute area of polygon
+                    polygon_points = [vor.vertices[i] for i in region]
+                    if len(polygon_points) >= 3:
+                        # Simple polygon area calculation using shoelace formula
+                        x_coords = [p[0] for p in polygon_points]
+                        y_coords = [p[1] for p in polygon_points]
+                        area = 0.5 * abs(sum(x_coords[i] * y_coords[i+1] - x_coords[i+1] * y_coords[i] 
+                                           for i in range(len(x_coords)-1)) + 
+                                         x_coords[-1] * y_coords[0] - x_coords[0] * y_coords[-1])
+                        areas.append(area)
+            
+            if not areas:
+                return 0.0
+                
+            # Return coefficient of variation of cell areas (lower is better)
+            mean_area = np.mean(areas)
+            if mean_area <= 1e-12:
+                return 0.0
+            cv = np.std(areas) / mean_area
+            return 1.0 / (1.0 + cv)  # Invert so higher values indicate better uniformity
+        except:
+            return 0.0
+    
+    def initialize_fortune_grid():
+        """Initialize points using a structured grid that mimics Voronoi optimal distribution."""
+        # Create a 4x4 grid with slight perturbations to avoid perfect symmetry
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + 0.125
+                y = i * 0.25 + 0.125
+                # Add small random perturbation
+                x += (np.random.rand() - 0.5) * 0.03
+                y += (np.random.rand() - 0.5) * 0.03
+                points.append([x, y])
+        
+        # Ensure points are within bounds
+        points = np.array(points)
+        points = np.clip(points, 0.01, 0.99)
+        return points
+    
+    def optimize_with_voronoi_guidance(points, max_iter=100):
+        """Optimize points using Voronoi-based guidance."""
+        current_points = points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+        
+        # Precompute bounds for clipping
+        bounds_min = 0.01
+        bounds_max = 0.99
+        
+        for iteration in range(max_iter):
+            # Analyze current Voronoi diagram
+            try:
+                vor = Voronoi(current_points)
+                # Get Voronoi vertices and regions for each point
+                n_points = len(current_points)
+                
+                # Gradient-based updates guided by Voronoi geometry
+                new_points = current_points.copy()
+                step_size = 0.001 * (1.0 - iteration/max_iter)  # Decreasing step size
+                
+                # For each point, move towards more optimal position based on Voronoi analysis
+                for i in range(n_points):
+                    # Find neighboring points that influence this point's Voronoi cell
+                    # This is a simplified approximation for performance
+                    distances_to_others = [distance.euclidean(current_points[i], current_points[j]) 
+                                         for j in range(n_points) if i != j]
+                    sorted_indices = np.argsort(distances_to_others)
+                    
+                    # Move point away from very close neighbors and towards far ones
+                    # This creates a repulsion-attract mechanism
+                    total_force = np.array([0.0, 0.0])
+                    
+                    # Repulsion from close points (up to 3 closest)
+                    for j in range(min(3, len(sorted_indices))):
+                        idx = sorted_indices[j]
+                        dist = distances_to_others[idx]
+                        if dist > 1e-6 and dist < 0.2:  # Only consider nearby points
+                            force_direction = current_points[i] - current_points[idx]
+                            force_magnitude = 1.0 / (dist * dist + 1e-8)
+                            total_force += force_direction * force_magnitude
+                    
+                    # Attraction to far points (up to 3 furthest)
+                    for j in range(min(3, len(sorted_indices))):
+                        idx = sorted_indices[-(j+1)]
+                        dist = distances_to_others[idx]
+                        if dist > 0.2:  # Only consider distant points for attraction
+                            force_direction = current_points[idx] - current_points[i]
+                            force_magnitude = 0.1 / (dist * dist + 1e-8)
+                            total_force += force_direction * force_magnitude
+                    
+                    # Apply force with damping
+                    new_position = current_points[i] + total_force * step_size * 0.5
+                    # Clip to bounds
+                    new_position = np.clip(new_position, bounds_min, bounds_max)
+                    new_points[i] = new_position
+                
+                # Evaluate new configuration
+                new_ratio = compute_min_max_ratio(new_points)
+                
+                # Accept improvement or occasionally accept worse solutions for escape
+                if new_ratio > best_ratio:
+                    current_points = new_points
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+                elif np.random.rand() < 0.05:  # 5% chance to accept worse solutions
+                    current_points = new_points
+                    
+            except Exception:
+                # If Voronoi computation fails, do simple random perturbations
+                new_points = current_points.copy()
+                for i in range(len(current_points)):
+                    new_points[i] += (np.random.rand(2) - 0.5) * 0.01
+                    new_points[i] = np.clip(new_points[i], bounds_min, bounds_max)
+                current_points = new_points
+                
+            # Periodic validation check
+            if iteration % 20 == 0:
+                ratio_check = compute_min_max_ratio(current_points)
+                if ratio_check > best_ratio:
+                    best_ratio = ratio_check
+                    best_points = current_points.copy()
+        
+        return best_points
+    
+    def adaptive_voronoi_optimization(initial_points, max_iterations=100):
+        """Run multiple rounds of Voronoi-guided optimization with different strategies."""
+        best_points = initial_points.copy()
+        best_ratio = compute_min_max_ratio(best_points)
+        
+        # Try several optimization strategies
+        strategies = [
+            lambda p: optimize_with_voronoi_guidance(p, max_iter=max_iterations//3),
+            lambda p: optimize_with_voronoi_guidance(p, max_iter=max_iterations//2),
+            lambda p: optimize_with_voronoi_guidance(p, max_iter=max_iterations)
+        ]
+        
+        for strategy in strategies:
+            try:
+                optimized_points = strategy(best_points)
+                ratio = compute_min_max_ratio(optimized_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+            except:
+                continue
+                
+        return best_points
+    
+    # Main optimization process
+    np.random.seed(42)
+    
+    # Start with structured initialization
+    initial_points = initialize_fortune_grid()
+    
+    # Apply Voronoi-guided optimization
+    final_points = adaptive_voronoi_optimization(initial_points, max_iterations=150)
+    
+    # Final refinement using simple gradient descent approach
+    try:
+        # Flatten for optimization
+        x_flat = final_points.flatten()
+        
+        def objective(x_flat):
+            points = x_flat.reshape(-1, 2)
+            # Ensure bounds
+            points = np.clip(points, 0.01, 0.99)
+            ratio = compute_min_max_ratio(points)
+            # Minimize negative ratio (maximize ratio)
+            return -ratio
+        
+        # Use L-BFGS-B for final refinement
+        bounds = [(0.01, 0.99) for _ in range(32)]
+        
+        result = minimize(
+            objective,
+            x_flat,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 50, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+        
+        if result.success:
+            final_points = result.x.reshape(-1, 2)
+    except:
+        pass
+    
+    # Ensure final results respect bounds
+    final_points = np.clip(final_points, 0.01, 0.99)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

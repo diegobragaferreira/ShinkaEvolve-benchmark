@@ -1,0 +1,128 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    np.random.seed(42)
+
+    def fibonacci_sphere(n):
+        """Generate n points distributed approximately uniformly on a sphere."""
+        points = []
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        for i in range(n):
+            z = 1 - (i / (n - 1)) * 2  # z goes from 1 to -1
+            radius = np.sqrt(1 - z*z)
+
+            theta = np.arctan2(np.sin(i * 2 * np.pi / phi), np.cos(i * 2 * np.pi / phi))
+            x = radius * np.cos(theta)
+            y = radius * np.sin(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on unit sphere."""
+        norms = np.linalg.norm(points, axis=1)
+        return points / norms[:, np.newaxis]
+
+    def compute_distance_matrix(points):
+        """Efficiently compute distance matrix."""
+        return cdist(points, points, 'euclidean')
+
+    def compute_min_max_ratio(dist_matrix):
+        """Calculate min/max distance ratio, ignoring diagonal."""
+        np.fill_diagonal(dist_matrix, np.inf)
+        dmin = np.min(dist_matrix)
+        dmax = np.max(dist_matrix)
+        return dmin / dmax if dmax > 0 else 0
+
+    def project_to_sphere(points):
+        """Project points onto unit sphere while maintaining relative positions."""
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms[:, np.newaxis]
+
+    def simulated_annealing_optimization(initial_points, max_iter=5000):
+        """Optimize points using simulated annealing with proper temperature cooling."""
+        current_points = initial_points.copy()
+        current_points = project_to_sphere(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = 0.0
+
+        # Initial temperature and cooling parameters
+        temperature = 0.1
+        cooling_rate = 0.9995
+        min_temp = 1e-6
+
+        for iteration in range(max_iter):
+            # Store current configuration
+            old_points = current_points.copy()
+
+            # Select random point to perturb
+            idx = np.random.randint(len(current_points))
+
+            # Generate small random perturbation in tangent plane (better for sphere)
+            perturbation = np.random.normal(0, 0.01, 3)
+
+            # Project perturbation to tangent plane of the sphere at current point
+            # This ensures we don't move too far from the sphere surface
+            current_point = current_points[idx]
+            # Tangent plane projection: remove component parallel to radius vector
+            projection_factor = np.dot(perturbation, current_point)
+            perturbation_tangent = perturbation - projection_factor * current_point
+
+            # Apply perturbation
+            current_points[idx] += perturbation_tangent
+
+            # Project back to sphere
+            current_points[idx] = project_to_sphere(current_points[idx:idx+1])[0]
+
+            # Compute new distance matrix
+            dist_matrix = compute_distance_matrix(current_points)
+            new_ratio = compute_min_max_ratio(dist_matrix)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = current_points.copy()
+            elif np.random.random() < np.exp((new_ratio - best_ratio) / temperature):
+                # Accept worse solution with probability
+                pass  # Keep the new configuration
+            else:
+                # Revert to previous configuration
+                current_points = old_points
+
+            # Cool down temperature
+            temperature = max(min_temp, temperature * cooling_rate)
+
+            # Occasionally rescale to keep diversity
+            if iteration % 500 == 0 and iteration > 0:
+                # Occasionally reset points to maintain exploration
+                current_points = project_to_sphere(current_points)
+
+        return best_points, best_ratio
+
+    # Phase 1: Initialize with Fibonacci sphere placement
+    initial_points = fibonacci_sphere(14)
+
+    # Normalize to unit sphere (this is our constraint)
+    initial_points = normalize_to_unit_sphere(initial_points)
+
+    # Map to unit cube [0,1]^3 for output requirements
+    initial_points = (initial_points + 1) / 2
+
+    # Phase 2: Optimize using simulated annealing
+    final_points, ratio = simulated_annealing_optimization(initial_points, 5000)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

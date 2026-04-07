@@ -1,0 +1,266 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import jit
+import time
+from scipy.optimize import differential_evolution
+import random
+from typing import List
+
+# Set random seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """
+    Compute autoconvolution using numba for speed
+    """
+    n = len(f_vals)
+    g_size = 2 * n - 1
+    g_vals = np.zeros(g_size)
+
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_size:
+                g_vals[idx] += f_vals[i] * f_vals[j]
+
+    return g_vals
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals, dx):
+    """
+    Compute norms efficiently with numba
+    """
+    n = len(g_vals)
+
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    l2_norm_sq = 0.0
+    for i in range(n):
+        l2_norm_sq += g_vals[i] * g_vals[i]
+
+    linf_norm = 0.0
+    for i in range(n):
+        val = abs(g_vals[i])
+        if val > linf_norm:
+            linf_norm = val
+
+    return l1_norm, l2_norm_sq, linf_norm
+
+def compute_autoconvolution_norms(f_values: List[float]):
+    """
+    Compute the three norms needed for C₂ calculation:
+    ||g||₂², ||g||₁, ||g||∞ where g = f*f
+    """
+    if not f_values:
+        return 0.0, 0.0, 0.0
+
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    dx = 0.5 / n_steps  # Step size
+
+    f = np.array(f_values)
+
+    g = compute_autoconvolution_numba(f)
+
+    g_len = len(g)
+    central_start = (g_len - n_steps) // 2
+    central_end = central_start + n_steps
+    g_centered = g[central_start:central_end]
+
+    g_abs = np.abs(g_centered)
+
+    norm_1, norm_2_sq, norm_inf = compute_norms_numba(g_abs, dx)
+
+    norm_1 *= dx
+    norm_2_sq *= dx
+
+    return norm_2_sq, norm_1, norm_inf
+
+def calculate_c2(f_values: List[float]) -> float:
+    """Calculate C2 value for given step function"""
+    try:
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+        
+        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+            return 0.0
+        
+        return norm_2_sq / (norm_1 * norm_inf)
+    except:
+        return 0.0
+
+def generate_multiscale_gaussian_initial(n_steps: int) -> List[float]:
+    """Generate initial step function with multiple Gaussian components at different scales"""
+    f_values = np.zeros(n_steps)
+    
+    # Create different scale Gaussian bumps
+    scales = [n_steps // 10, n_steps // 8, n_steps // 6, n_steps // 4]
+    centers = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+    
+    for scale in scales:
+        for center in centers:
+            x = np.arange(n_steps)
+            # Create Gaussian bump with decay
+            gauss = np.exp(-0.5 * ((x - center) / scale) ** 2)
+            # Add to existing function with amplitude modulation
+            amplitude = 0.5 + 0.5 * np.sin(center / n_steps * np.pi * 2)
+            f_values += gauss * amplitude
+    
+    # Add some sinusoidal component for additional structure
+    sine_component = np.sin(np.linspace(0, 8*np.pi, n_steps)) * 0.2 + 0.8
+    f_values += sine_component * 0.3
+    
+    # Ensure non-negativity
+    f_values = np.maximum(f_values, 0)
+    
+    # Normalize to prevent extreme values
+    total = np.sum(f_values)
+    if total > 0:
+        f_values = f_values / total * 10.0
+    
+    return f_values.tolist()
+
+def adaptive_local_search(current_solution: List[float], max_iterations: int = 50) -> List[float]:
+    """Enhanced local search with adaptive step sizes and gradient estimation"""
+    current_f = np.array(current_solution)
+    current_c2 = calculate_c2(current_solution)
+    
+    best_f = current_f.copy()
+    best_c2 = current_c2
+    
+    # Adaptive step sizes based on function behavior
+    step_sizes = [0.05, 0.02, 0.01, 0.005]
+    
+    for iteration in range(max_iterations):
+        improved = False
+        
+        # Sample indices for more efficient search
+        search_indices = np.random.choice(len(current_f), min(20, len(current_f)//3), replace=False)
+        
+        for i in search_indices:
+            original_value = current_f[i]
+            
+            # Try different step sizes
+            for step_size in step_sizes:
+                # Try both directions
+                for direction in [1, -1]:
+                    if abs(direction * step_size * original_value) < 1e-10:
+                        continue
+                        
+                    test_value = original_value + direction * step_size * original_value
+                    if test_value < 0:
+                        test_value = 0
+                    
+                    # Create test solution
+                    test_f = current_f.copy()
+                    test_f[i] = test_value
+                    
+                    test_c2 = calculate_c2(test_f.tolist())
+                    
+                    if test_c2 > best_c2:
+                        best_c2 = test_c2
+                        best_f = test_f.copy()
+                        improved = True
+                        current_f = test_f.copy()
+                        current_c2 = test_c2
+                        break
+                    
+                if improved:
+                    break
+        
+        if not improved:
+            break
+    
+    return best_f.tolist()
+
+def hierarchical_evolution_strategy() -> List[float]:
+    """Main optimization strategy with multi-scale evolution"""
+    time_limit = 85  # seconds
+    start_time = time.time()
+    
+    best_solution = None
+    best_c2 = -float('inf')
+    
+    # Multi-scale approach with different resolutions
+    resolutions = [100, 200, 400, 800]
+    
+    for res in resolutions:
+        if time.time() - start_time > time_limit - 10:
+            break
+            
+        # Generate initial population with different strategies
+        population = []
+        for _ in range(10):
+            if time.time() - start_time > time_limit - 10:
+                break
+                
+            # Generate diverse initial functions
+            if random.random() < 0.5:
+                # Multiscale Gaussian initialization
+                individual = generate_multiscale_gaussian_initial(res)
+            else:
+                # Random initialization with some structure
+                individual = [random.uniform(0.1, 1.0) for _ in range(res)]
+                
+            # Add small random noise to increase diversity
+            individual = [max(0, val + random.gauss(0, 0.01 * val)) for val in individual]
+            
+            population.append(individual)
+        
+        # Evolve each individual
+        for individual in population:
+            if time.time() - start_time > time_limit - 10:
+                break
+                
+            # Local search at current resolution
+            refined = adaptive_local_search(individual, max_iterations=30)
+            refined_c2 = calculate_c2(refined)
+            
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_solution = refined.copy()
+    
+    # Final high-resolution refinement if time permits
+    if best_solution is not None and time.time() - start_time < time_limit - 5:
+        # Increase resolution for final refinement
+        high_res_solution = generate_multiscale_gaussian_initial(1600)
+        
+        # Use the best solution as starting point for fine-tuning
+        if len(best_solution) < 1600:
+            # Pad the solution to match higher resolution
+            padded_solution = best_solution + [0.0] * (1600 - len(best_solution))
+            high_res_solution = padded_solution[:1600]
+        else:
+            high_res_solution = best_solution[:1600]
+            
+        # Fine-grained local search
+        final_solution = adaptive_local_search(high_res_solution, max_iterations=50)
+        
+        final_c2 = calculate_c2(final_solution)
+        if final_c2 > best_c2:
+            best_c2 = final_c2
+            best_solution = final_solution
+    
+    return best_solution if best_solution is not None else [1.0] * 200
+
+def construct_function() -> List[float]:
+    """Main function to construct step-function with high C2 value"""
+    try:
+        # Use hierarchical evolution strategy
+        solution = hierarchical_evolution_strategy()
+        return solution
+    except Exception as e:
+        # Fallback to simple uniform distribution
+        return [1.0] * 200
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

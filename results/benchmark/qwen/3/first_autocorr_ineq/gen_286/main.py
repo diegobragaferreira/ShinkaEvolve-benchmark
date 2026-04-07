@@ -1,0 +1,302 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.signal import fftconvolve
+from scipy.optimize import minimize
+import random
+import time
+from typing import List, Tuple
+import math
+
+# Set seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')
+
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence."""
+    a = np.array(sequence)
+    n = len(a)
+
+    # Use FFT for efficiency when sequence is large
+    if n > 100:
+        b = convolve_fft(a, a)
+    else:
+        b = convolve_direct(a, a)
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+
+def compute_smooth_convolution(sequence: List[float], epsilon: float = 1e-6) -> np.ndarray:
+    """
+    Compute a smooth approximation of convolution to allow gradient-based optimization.
+    """
+    a = np.array(sequence)
+    n = len(a)
+    
+    # For simplicity, we'll use direct convolution for small sequences
+    if n <= 100:
+        return convolve_direct(a, a)
+    else:
+        # Use FFT for large sequences
+        return convolve_fft(a, a)
+
+def fitness_function_with_gradient(sequence: List[float]) -> Tuple[float, np.ndarray]:
+    """
+    Evaluate fitness of a sequence and compute its gradient (approximate).
+    Returns a tuple (fitness_value, approximate_gradient).
+    """
+    a = np.array(sequence)
+    n = len(a)
+    
+    # Compute convolution
+    conv = compute_smooth_convolution(sequence)
+    max_conv = np.max(conv)
+    sum_a = np.sum(a)
+    
+    if sum_a < 0.01:
+        return float('inf'), np.zeros_like(a)
+    
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+    
+    # Approximate gradient using finite differences
+    eps = 1e-5
+    grad = np.zeros_like(a)
+    for i in range(n):
+        a_plus = a.copy()
+        a_plus[i] += eps
+        _, inv_c1_plus = compute_c1_constant(a_plus.tolist())
+        
+        a_minus = a.copy()
+        a_minus[i] -= eps
+        _, inv_c1_minus = compute_c1_constant(a_minus.tolist())
+        
+        grad[i] = (inv_c1_plus - inv_c1_minus) / (2 * eps)
+    
+    return inv_c1, grad
+
+def mutate_sequence(sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
+    """Apply random mutation to a sequence."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            mutated[i] = max(0, mutated[i] + np.random.normal(0, 0.2 * mutated[i]))
+    return mutated
+
+def crossover_sequences(seq1: List[float], seq2: List[float]) -> List[float]:
+    """Perform uniform crossover between two sequences."""
+    min_len = min(len(seq1), len(seq2))
+    child = []
+
+    # Uniform crossover
+    for i in range(min_len):
+        if random.random() < 0.5:
+            child.append(seq1[i])
+        else:
+            child.append(seq2[i])
+
+    # Append extra elements from longer sequence
+    if len(seq1) > len(seq2):
+        child.extend(seq1[min_len:])
+    elif len(seq2) > len(seq1):
+        child.extend(seq2[min_len:])
+
+    return child
+
+def tournament_selection(population: List[List[float]], fitnesses: List[float],
+                         tournament_size: int = 3) -> List[float]:
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_index].copy()
+
+def local_gradient_ascent(sequence: List[float], max_iter: int = 20, step_size: float = 0.01) -> List[float]:
+    """
+    Apply local gradient ascent to refine a sequence.
+    """
+    current_seq = np.array(sequence, dtype=float)
+    n = len(current_seq)
+    
+    for iteration in range(max_iter):
+        try:
+            # Compute approximate gradient
+            fitness_val, grad = fitness_function_with_gradient(current_seq.tolist())
+            
+            # Apply gradient ascent
+            step = step_size * grad
+            current_seq = current_seq + step
+            
+            # Ensure non-negativity
+            current_seq = np.maximum(current_seq, 0)
+            
+            # Normalize to keep magnitudes manageable
+            sum_current = np.sum(current_seq)
+            if sum_current > 1e-10:
+                current_seq = current_seq * (n * 10 / sum_current)
+                
+        except Exception as e:
+            break  # Exit if there's an error
+            
+    return current_seq.tolist()
+
+def adaptive_sequence_length(sequence: List[float], target_length: int) -> List[float]:
+    """Adaptively adjust sequence length to target length."""
+    if len(sequence) > target_length:
+        return sequence[:target_length]
+    elif len(sequence) < target_length:
+        extended = sequence[:]
+        extended.extend([sequence[-1]] * (target_length - len(sequence)))
+        return extended
+    return sequence
+
+def initialize_diverse_sequences(pop_size: int, min_length: int = 100, max_length: int = 1000) -> List[List[float]]:
+    """Initialize a diverse set of sequences using various strategies."""
+    population = []
+    for _ in range(pop_size):
+        n = random.randint(min_length, max_length)
+        
+        # Choose initialization strategy
+        strategy = random.choice(['harmonic', 'spike', 'random'])
+        
+        if strategy == 'harmonic':
+            # Decreasing harmonic series to encourage sparsity
+            sequence = [1.0 / (i + 1) for i in range(n)]
+            total = sum(sequence)
+            sequence = [x * 2.0 / total for x in sequence]
+        elif strategy == 'spike':
+            # Sparse with a single large spike
+            sequence = [0.0] * n
+            spike_idx = random.randint(0, n - 1)
+            sequence[spike_idx] = random.uniform(1.0, 10.0)
+        else:  # random
+            sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+        
+        population.append(sequence)
+        
+    return population
+
+def adaptive_genetic_autocorrelation_optimizer(
+    max_time_seconds: int = 180,
+    pop_size: int = 50,
+    generations: int = 100,
+    initial_mutation_rate: float = 0.1,
+    elite_size: int = 5,
+    diversity_threshold: float = 0.01,
+    stagnation_limit: int = 10,
+    local_refinement_iter: int = 20,
+    multi_start_count: int = 3,
+    scale_factors: List[float] = [0.5, 1.0, 2.0]
+) -> List[float]:
+    """
+    Enhanced Genetic Algorithm with adaptive scaling and gradient refinement.
+    Incorporates local gradient ascent, multi-scale evolution, and adaptive mechanisms.
+    """
+    start_time = time.time()
+
+    # Multi-start strategy
+    best_overall_sequence = None
+    best_overall_fitness = -float('inf')
+
+    for start in range(multi_start_count):
+        # Initialize diverse population
+        population = initialize_diverse_sequences(pop_size)
+        
+        best_sequence = None
+        best_fitness = -float('inf')
+        stagnation_counter = 0
+
+        for gen in range(generations):
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Evaluate fitness for all individuals
+            fitness_scores = [compute_c1_constant(individual)[1] for individual in population]
+
+            # Track best individual
+            max_fitness_idx = np.argmax(fitness_scores)
+            if fitness_scores[max_fitness_idx] > best_fitness:
+                best_fitness = fitness_scores[max_fitness_idx]
+                best_sequence = population[max_fitness_idx].copy()
+                stagnation_counter = 0
+            else:
+                stagnation_counter += 1
+
+            # Adaptive mutation rate based on stagnation
+            mutation_rate = initial_mutation_rate * (1 + stagnation_counter / stagnation_limit)
+
+            # Check for diversity loss and reintroduce diversity if needed
+            if stagnation_counter > stagnation_limit:
+                # Introduce random sequences to maintain diversity
+                for i in range(int(pop_size * 0.1)):  # 10% of population
+                    population[random.randint(0, pop_size - 1)] = [
+                        random.uniform(0.1, 2.0) for _ in range(random.randint(100, 1000))
+                    ]
+                stagnation_counter = 0
+
+            # Sort population by fitness
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            sorted_population = [population[i] for i in sorted_indices]
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep top individuals
+            for i in range(elite_size):
+                new_population.append(sorted_population[i].copy())
+
+            # Generate offspring through crossover and mutation
+            while len(new_population) < pop_size:
+                # Tournament selection for parents
+                parent1 = tournament_selection(population, fitness_scores)
+                parent2 = tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = crossover_sequences(parent1, parent2)
+
+                # Mutation
+                child = mutate_sequence(child, mutation_rate)
+
+                # Random initialization for diversity
+                if random.random() < 0.1:
+                    child = [random.uniform(0.1, 2.0) for _ in range(random.randint(100, 1000))]
+
+                new_population.append(child)
+
+            population = new_population
+
+        # Local refinement of best sequence from this run
+        if best_sequence is not None:
+            refined_sequence = local_gradient_ascent(best_sequence, local_refinement_iter)
+            _, refined_fitness = compute_c1_constant(refined_sequence)
+            if refined_fitness > best_overall_fitness:
+                best_overall_fitness = refined_fitness
+                best_overall_sequence = refined_sequence.copy()
+
+    return best_overall_sequence if best_overall_sequence is not None else [1.0]
+
+def search_for_best_sequence() -> List[float]:
+    """Function to search for the best coefficient sequence."""
+    return adaptive_genetic_autocorrelation_optimizer()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

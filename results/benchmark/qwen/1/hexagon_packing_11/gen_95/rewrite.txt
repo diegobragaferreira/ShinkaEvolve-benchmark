@@ -1,0 +1,231 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+from scipy.spatial.distance import cdist
+import time
+import numba
+from numba import jit
+import warnings
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_rad, side_length=1):
+    """Calculate vertices of a regular hexagon given center, rotation, and side length."""
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        vertices[i, 0] = x + side_length * np.cos(angle)
+        vertices[i, 1] = y + side_length * np.sin(angle)
+    return vertices
+
+@jit(nopython=True)
+def point_in_hexagon(point_x, point_y, hex_center_x, hex_center_y, hex_angle_rad, side_length=1):
+    """Check if a point is inside a regular hexagon using dot product method."""
+    # Rotate point to hexagon's coordinate system
+    cos_a = np.cos(-hex_angle_rad)
+    sin_a = np.sin(-hex_angle_rad)
+    rel_x = (point_x - hex_center_x) * cos_a - (point_y - hex_center_y) * sin_a
+    rel_y = (point_x - hex_center_x) * sin_a + (point_y - hex_center_y) * cos_a
+    
+    # Check if point is in hexagon with side length 1
+    # Using distance to center and angles
+    dist = np.sqrt(rel_x**2 + rel_y**2)
+    if dist > 1:
+        return False
+    
+    # More precise check using hexagon edges
+    # Hexagon vertices in local coordinates
+    for i in range(6):
+        angle = i * np.pi / 3
+        v_x = np.cos(angle)
+        v_y = np.sin(angle)
+        
+        # Edge normal (perpendicular to edge)
+        norm_x = -v_y
+        norm_y = v_x
+        
+        # Distance from point to edge
+        dist_to_edge = rel_x * norm_x + rel_y * norm_y
+        
+        # Minimum distance to edge should be >= -0.5 (half side length)
+        if dist_to_edge < -0.5:
+            return False
+    
+    return True
+
+def calculate_outer_hexagon_radius(inner_hex_data, side_length=1):
+    """Calculate the minimum radius needed for outer hexagon to contain all inner hexagons."""
+    max_dist = 0
+    
+    for i in range(len(inner_hex_data)):
+        x, y, angle = inner_hex_data[i]
+        # Get hexagon vertices
+        vertices = hexagon_vertices(x, y, np.radians(angle), side_length)
+        
+        # Find maximum distance from center to any vertex
+        for vx, vy in vertices:
+            dist = np.sqrt(vx**2 + vy**2)
+            max_dist = max(max_dist, dist)
+    
+    return max_dist
+
+def validate_solution(inner_hex_data, outer_hex_side_length, side_length=1):
+    """Validate that inner hexagons are properly contained and don't overlap."""
+    # Check containment
+    for i in range(len(inner_hex_data)):
+        x, y, angle = inner_hex_data[i]
+        # Calculate vertices
+        vertices = hexagon_vertices(x, y, np.radians(angle), side_length)
+        
+        # Check if all vertices are within outer hexagon
+        for vx, vy in vertices:
+            dist_from_center = np.sqrt(vx**2 + vy**2)
+            if dist_from_center >= outer_hex_side_length:
+                return False
+    
+    # Check overlaps between hexagons
+    for i in range(len(inner_hex_data)):
+        for j in range(i+1, len(inner_hex_data)):
+            x1, y1, angle1 = inner_hex_data[i]
+            x2, y2, angle2 = inner_hex_data[j]
+            
+            # Create hexagon polygons
+            vertices1 = hexagon_vertices(x1, y1, np.radians(angle1), side_length)
+            vertices2 = hexagon_vertices(x2, y2, np.radians(angle2), side_length)
+            
+            poly1 = Polygon(vertices1)
+            poly2 = Polygon(vertices2)
+            
+            # Check if they intersect
+            if poly1.intersects(poly2):
+                return False
+    
+    return True
+
+def fitness_function(params, side_length=1):
+    """Fitness function to minimize negative of inverse outer hexagon size."""
+    n = 11
+    # Reshape parameters into hexagon data
+    inner_hex_data = params.reshape(n, 3)
+    
+    # Calculate outer hexagon radius needed
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, side_length)
+    
+    # Ensure it's a valid configuration
+    if not validate_solution(inner_hex_data, outer_radius, side_length):
+        # Return large penalty value for invalid solutions
+        return 1e10
+    
+    # Return negative inverse of radius (we want to maximize 1/radius)
+    return -1.0 / outer_radius
+
+def evaluate_solution(inner_hex_data, outer_hex_side_length, side_length=1):
+    """Evaluate solution quality and return performance metrics."""
+    # Validate solution
+    is_valid = validate_solution(inner_hex_data, outer_hex_side_length, side_length)
+    
+    # Calculate inverse side length
+    inv_side_length = 1.0 / outer_hex_side_length
+    
+    # Benchmark ratio (our score relative to the 0.2544 benchmark)
+    benchmark_ratio = inv_side_length / 0.2544
+    
+    # Return all metrics
+    return {
+        'inv_outer_hex_side_length': inv_side_length,
+        'benchmark_ratio': benchmark_ratio,
+        'is_valid': is_valid
+    }
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    n = 11
+    side_length = 1
+    
+    # Use a good initial configuration
+    initial_config = np.array([
+        [0, 0, 0],      # center
+        [-2, 0, 0],     # left
+        [2, 0, 0],      # right
+        [0, 2, 0],      # top
+        [0, -2, 0],     # bottom
+        [-1.5, 1.5, 0], # top-left
+        [1.5, 1.5, 0],  # top-right
+        [-1.5, -1.5, 0],# bottom-left
+        [1.5, -1.5, 0], # bottom-right
+        [-2.5, 0, 0],   # far left
+        [2.5, 0, 0],    # far right
+    ])
+    
+    # Set up bounds for optimization (positions and rotations)
+    bounds = []
+    for i in range(n):
+        # x positions - allow some flexibility around the initial configuration
+        bounds.extend([(-5, 5), (-5, 5), (0, 360)])  # x, y, angle
+    
+    # Run optimization
+    start_time = time.time()
+    
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        fitness_function,
+        bounds,
+        args=(side_length,),
+        maxiter=100,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        disp=False,
+        tol=1e-6
+    )
+    
+    end_time = time.time()
+    
+    # Extract the best solution found
+    best_inner_hex_data = result.x.reshape(n, 3)
+    
+    # Calculate final outer hexagon side length
+    outer_radius = calculate_outer_hexagon_radius(best_inner_hex_data, side_length)
+    
+    # Final validation
+    is_valid = validate_solution(best_inner_hex_data, outer_radius, side_length)
+    
+    # If invalid, fall back to initial configuration
+    if not is_valid:
+        best_inner_hex_data = initial_config.copy()
+        outer_radius = calculate_outer_hexagon_radius(best_inner_hex_data, side_length)
+    
+    # Create outer hexagon data (centered at origin with no rotation)
+    outer_hex_data = np.array([0, 0, 0])
+    
+    # Evaluate final solution
+    metrics = evaluate_solution(best_inner_hex_data, outer_radius, side_length)
+    
+    # Ensure we're returning the best valid configuration
+    final_inv_side_length = metrics['inv_outer_hex_side_length']
+    
+    # Check if we've improved upon our initial configuration
+    initial_radius = calculate_outer_hexagon_radius(initial_config, side_length)
+    initial_metrics = evaluate_solution(initial_config, initial_radius, side_length)
+    initial_inv_side_length = initial_metrics['inv_outer_hex_side_length']
+    
+    # Use better solution
+    if final_inv_side_length > initial_inv_side_length:
+        final_inner_hex_data = best_inner_hex_data
+        final_outer_radius = outer_radius
+    else:
+        final_inner_hex_data = initial_config
+        final_outer_radius = initial_radius
+    
+    return final_inner_hex_data, outer_hex_data, final_outer_radius
+
+# EVOLVE-BLOCK-END

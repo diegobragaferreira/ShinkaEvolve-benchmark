@@ -1,0 +1,413 @@
+--- a/original.py
++++ b/original.py
+@@ -1,231 +1,208 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
+-from scipy.optimize import differential_evolution, minimize
++from scipy.optimize import minimize
++from scipy.spatial import Voronoi
+ import time
+-
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+-
++    
++    np.random.seed(42)
+     n_points = 16
+     dimension = 2
+-    bounds = (0, 1)
+-
+-    # Set seed for reproducibility
+-    np.random.seed(42)
+-
+-    def calculate_distance_matrix(points):
+-        """Calculate pairwise distance matrix with numerical stability"""
+-        # Use squareform(pdist(...)) for better numerical stability
+-        distances = squareform(pdist(points))
+-        # Ensure diagonal is infinity to ignore self-distances
+-        np.fill_diagonal(distances, np.inf)
+-        return distances
+-
+-    def fitness_function(points_flat):
+-        """Calculate fitness as min/max distance ratio"""
+-        # Reshape flat array back to points
+-        points = points_flat.reshape(-1, dimension)
+-
+-        # Ensure points are within bounds with small epsilon to avoid edge cases
+-        epsilon = 1e-8
+-        points = np.clip(points, bounds[0] + epsilon, bounds[1] - epsilon)
+-
+-        # Calculate distance matrix
++    
++    def compute_min_max_ratio(points):
++        """Compute the ratio of minimum to maximum distance between all point pairs."""
++        if len(points) < 2:
++            return 0
++        
++        # Compute pairwise distances with numerical stability
++        distances = pdist(points)
++        
++        # Filter out very small distances that might be numerical artifacts
++        distances = distances[distances > 1e-12]
++        
++        if len(distances) == 0:
++            return 0
++        
++        # Get min and max distances
++        dmin = np.min(distances)
++        dmax = np.max(distances)
++        
++        # Avoid division by zero
++        if dmax == 0:
++            return 0
++            
++        return dmin / dmax
++    
++    def generate_hexagonal_initial():
++        """Generate initial points arranged in a hexagonal lattice structure."""
++        # Create a 4x4 grid with alternating rows offset
++        points = []
++        rows, cols = 4, 4
++        
++        for i in range(rows):
++            for j in range(cols):
++                x = j * 0.25 + (i % 2) * 0.125
++                y = i * 0.25 * np.sqrt(3) / 2
++                
++                # Add small random perturbation
++                x += np.random.normal(0, 0.005)
++                y += np.random.normal(0, 0.005)
++                
++                points.append([x, y])
++        
++        points = np.array(points[:n_points])
++        
++        # Normalize to [0,1] bounds
++        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
++        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
++        
++        if x_range > 0:
++            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range * 0.9 + 0.05
++        if y_range > 0:
++            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range * 0.9 + 0.05
++            
++        return points
++    
++    def compute_voronoi_energy(points):
++        """Compute an energy-like metric based on Voronoi cell areas for regularization."""
+         try:
+-            dist_matrix = calculate_distance_matrix(points)
+-
+-            # Calculate min and max distances (excluding infinity from diagonal)
+-            min_dist = np.min(dist_matrix)
+-            max_dist = np.max(dist_matrix)
+-
+-            # Avoid division by zero or extremely small values
+-            if max_dist < 1e-12:
++            vor = Voronoi(points)
++            areas = []
++            
++            # Get Voronoi cell areas
++            for region in vor.regions:
++                if len(region) > 0 and -1 not in region:
++                    # Calculate area of polygon
++                    poly_points = vor.vertices[region]
++                    if len(poly_points) >= 3:
++                        # Simple polygon area calculation using shoelace formula
++                        x_vals = poly_points[:, 0]
++                        y_vals = poly_points[:, 1]
++                        area = 0.5 * np.abs(np.dot(x_vals, np.roll(y_vals, 1)) - np.dot(y_vals, np.roll(x_vals, 1)))
++                        areas.append(area)
++            
++            if not areas:
+                 return 0
+-
+-            # Return ratio (we want to maximize this)
+-            ratio = min_dist / max_dist
+-            return ratio
+-
+-        except Exception:
+-            return 0
+-
+-    def adaptive_lbfgs_optimization(initial_points, max_iter=300):
+-        """Enhanced L-BFGS optimization with adaptive early stopping"""
+-        def objective_with_callbacks(x):
+-            # Track objective values for early stopping
+-            return -fitness_function(x)  # Negative because minimize function
+-
+-        # Add callback for tracking progress
+-        objective_values = []
+-        def callback(xk):
+-            obj_val = fitness_function(xk)
+-            objective_values.append(obj_val)
+-            # Early stopping if improvement is minimal
+-            if len(objective_values) > 10:
+-                recent_improvement = abs(objective_values[-1] - objective_values[-10])
+-                if recent_improvement < 1e-12:
+-                    return True  # Stop optimization
+-            return False
+-
+-        bounds_list = [(bounds[0], bounds[1]) for _ in range(n_points * dimension)]
+-
+-        # Use L-BFGS-B with improved settings
++                
++            # Return variance of areas (lower variance means more uniformity)
++            return 1.0 / (1.0 + np.var(areas))
++        except:
++            return 0
++    
++    def combined_objective(x_flat):
++        """Combined objective function that balances distance ratio and geometric uniformity."""
++        points = x_flat.reshape(-1, 2)
++        
++        # Ensure bounds
++        points = np.clip(points, 0, 1)
++        
++        # Compute distance ratio
++        ratio = compute_min_max_ratio(points)
++        
++        # Compute Voronoi-based uniformity energy
++        voronoi_energy = compute_voronoi_energy(points)
++        
++        # Weighted combination: prioritize distance ratio but penalize irregular Voronoi cells
++        # This helps avoid extreme clustering while maximizing the desired ratio
++        combined = ratio * 0.8 + voronoi_energy * 0.2
++        
++        # Return negative for minimization
++        return -combined
++    
++    def constrained_optimization(initial_points, max_iter=1000):
++        """Perform constrained optimization with better convergence."""
++        bounds = [(0, 1) for _ in range(n_points * dimension)]
++        
++        # Use L-BFGS-B with enhanced parameters
+         result = minimize(
+-            objective_with_callbacks,
++            combined_objective,
+             initial_points.flatten(),
+             method='L-BFGS-B',
+-            bounds=bounds_list,
++            bounds=bounds,
+             options={
+                 'maxiter': max_iter,
+                 'ftol': 1e-12,
+                 'gtol': 1e-12,
+-                'maxcor': 20  # Number of corrections to store
+-            },
+-            callback=callback if max_iter > 50 else None
++                'maxcor': 30
++            }
+         )
+-
+-        return result.x.reshape(-1, 2) if result.success else initial_points
+-
+-    def generate_multiple_initializations():
+-        """Generate multiple initial point configurations and select the best"""
+-        best_points = None
+-        best_ratio = 0
+-
+-        # Strategy 1: Hexagonal grid pattern
+-        points_hex = np.zeros((n_points, dimension))
+-        rows = 4
+-        cols = 4
+-        spacing = 0.25
+-        idx = 0
+-        for row in range(rows):
+-            for col in range(cols):
+-                if idx < n_points:
+-                    x = col * spacing + (row % 2) * spacing * 0.5
+-                    y = row * spacing * np.sqrt(3) / 2
+-                    points_hex[idx] = [x, y]
+-                    idx += 1
+-        # Normalize to [0,1] range
+-        points_hex[:, 0] = (points_hex[:, 0] - points_hex[:, 0].min()) / (points_hex[:, 0].max() - points_hex[:, 0].min()) * 0.8 + 0.1
+-        points_hex[:, 1] = (points_hex[:, 1] - points_hex[:, 1].min()) / (points_hex[:, 1].max() - points_hex[:, 1].min()) * 0.8 + 0.1
+-        # Add noise
+-        points_hex += np.random.normal(0, 0.01, points_hex.shape)
+-        points_hex = np.clip(points_hex, 0, 1)
+-
+-        # Strategy 2: Golden spiral
+-        indices = np.arange(n_points)
+-        golden_angle = 2.399963229728653  # ~2π/(φ^2) where φ is golden ratio
+-        angles = golden_angle * indices
+-        radii = np.log(indices + 1) / np.log(n_points)  # Better distribution
+-        points_golden = np.column_stack([
+-            0.5 + 0.45 * radii * np.cos(angles),
+-            0.5 + 0.45 * radii * np.sin(angles)
+-        ])
+-        points_golden = np.clip(points_golden, 0, 1)
+-
+-        # Strategy 3: Perturbed square grid
+-        points_grid = []
+-        for i in range(4):
+-            for j in range(4):
+-                x = (i + 0.5) / 4.0 + np.random.normal(0, 0.015)
+-                y = (j + 0.5) / 4.0 + np.random.normal(0, 0.015)
+-                points_grid.append([x, y])
+-        points_grid = np.array(points_grid)
+-        points_grid = np.clip(points_grid, 0, 1)
+-
+-        # Strategy 4: Random with boundary awareness
+-        points_random = np.random.rand(n_points, dimension)
+-        points_random = np.clip(points_random, 0.05, 0.95)
+-
+-        # Test all strategies and return the best
+-        strategies = [points_hex, points_golden, points_grid, points_random]
+-        for points_strategy in strategies:
+-            ratio = fitness_function(points_strategy.flatten())
++        
++        # Return optimized points
++        if result.success:
++            optimized_points = result.x.reshape(-1, 2)
++        else:
++            optimized_points = initial_points
++            
++        return optimized_points
++    
++    def local_refinement_step(points, iterations=5):
++        """Apply local refinement using conjugate gradient method."""
++        # Start with the best known configuration
++        current_points = points.copy()
++        
++        # Perform several rounds of refinement
++        for i in range(iterations):
++            # Apply constrained optimization step
++            refined_points = constrained_optimization(current_points, max_iter=200)
++            
++            # Check if there's significant improvement
++            old_ratio = compute_min_max_ratio(current_points)
++            new_ratio = compute_min_max_ratio(refined_points)
++            
++            if new_ratio > old_ratio:
++                current_points = refined_points
++            else:
++                # If no improvement, add small random perturbations to escape local minima
++                current_points += np.random.normal(0, 0.001, current_points.shape)
++                current_points = np.clip(current_points, 0, 1)
++        
++        return current_points
++    
++    # Generate initial configuration
++    initial_points = generate_hexagonal_initial()
++    
++    # Multi-start approach for better exploration
++    best_points = initial_points.copy()
++    best_ratio = compute_min_max_ratio(initial_points)
++    
++    # Try different initialization strategies
++    strategies = [
++        generate_hexagonal_initial,  # Original hexagonal approach
++        lambda: np.random.rand(n_points, dimension) * 0.9 + 0.05,  # Random in [0.05, 0.95]
++    ]
++    
++    for i, strategy in enumerate(strategies):
++        try:
++            # Generate initial points
++            strategy_points = strategy()
++            
++            # Apply local refinement
++            refined_points = local_refinement_step(strategy_points, iterations=3)
++            
++            # Evaluate
++            ratio = compute_min_max_ratio(refined_points)
++            
+             if ratio > best_ratio:
+                 best_ratio = ratio
+-                best_points = points_strategy.copy()
+-
+-        return best_points if best_points is not None else points_random
+-
+-    # Multi-start optimization with restart capability
+-    best_final_points = None
+-    best_final_ratio = 0
+-    max_restarts = 5  # Increase restarts for better exploration
+-
+-    # Keep track of previous good solutions for seeding
+-    previous_solutions = []
+-
+-    for restart in range(max_restarts):
+-        # Generate initial points using multiple strategies
+-        if restart == 0:
+-            # First restart: use enhanced initialization
+-            points = generate_multiple_initializations()
+-        elif restart == 1:
+-            # Second restart: use previous best if available
+-            if previous_solutions:
+-                points = previous_solutions[-1]
+-            else:
+-                points = np.random.rand(n_points, dimension)
+-                points = np.clip(points, 0.05, 0.95)
+-        else:
+-            # Subsequent restarts: use random initialization with boundary awareness
+-            points = np.random.rand(n_points, dimension)
+-            points = np.clip(points, 0.05, 0.95)
+-
+-        # Method 1: Try differential evolution for global search
+-        try:
+-            # Flatten bounds for scipy
+-            flat_bounds = [(bounds[0], bounds[1]) for _ in range(n_points * dimension)]
+-
+-            # Use differential evolution for global search with improved parameters
+-            de_result = differential_evolution(
+-                fitness_function,
+-                flat_bounds,
+-                maxiter=300,      # Increased iterations for better search
+-                popsize=30,       # Larger population for better diversity
+-                tol=1e-8,         # Tighter tolerance
+-                mutation=(0.7, 1.2),  # Wider mutation range
+-                recombination=0.8,    # Higher recombination rate
+-                seed=42 + restart,  # Different seed for each restart
+-                disp=False
+-            )
+-
+-            # Local refinement with enhanced L-BFGS-B
+-            refined_points = adaptive_lbfgs_optimization(de_result.x, max_iter=500)
+-
+-            # Reshape result
+-            final_points = refined_points
+-            final_ratio = fitness_function(final_points.flatten())
+-
+-            # Keep the best solution found so far
+-            if final_ratio > best_final_ratio:
+-                best_final_ratio = final_ratio
+-                best_final_points = final_points.copy()
+-                previous_solutions.append(final_points.copy())
+-
+-        except Exception as e:
+-            # Fallback to current points if optimization fails
+-            print(f"Optimization failed on restart {restart}: {e}")
++                best_points = refined_points.copy()
++                
++        except Exception:
+             continue
+-
+-    # If no successful optimization, return the best initialization
+-    if best_final_points is None:
+-        points = generate_multiple_initializations()
+-        # Final verification of bounds
+-        points = np.clip(points, bounds[0], bounds[1])
+-        return points
+-
+-    # Ensure final points are within bounds
+-    best_final_points = np.clip(best_final_points, bounds[0], bounds[1])
+-
+-    return best_final_points
+-
++    
++    # Final optimization of best configuration
++    final_points = local_refinement_step(best_points, iterations=8)
++    
++    # Ensure final bounds
++    final_points = np.clip(final_points, 0, 1)
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

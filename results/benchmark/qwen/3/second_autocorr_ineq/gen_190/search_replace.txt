@@ -1,0 +1,239 @@
+<NAME>
+optimize_convolution_computation
+</NAME>
+
+<DESCRIPTION>
+The main idea is to replace the current convolution implementation with a more efficient FFT-based approach using scipy's fftconvolve, which should significantly speed up the computation while maintaining numerical accuracy. This will allow for more evaluations within the time constraint and potentially better optimization results. The FFT approach will also be more numerically stable for large step functions.
+
+I'm also adding a new initialization strategy that creates a more structured function with multiple peaks, which should help explore the search space more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Optimized autoconvolution norm computation using fast methods
+        """
+        if not f_values or len(f_values) == 0:
+            return 0.0, 0.0, 0.0
+
+        # Convert to numpy array
+        f = np.array(f_values, dtype=np.float64)
+        n_steps = len(f)
+
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        # Create step function with proper spacing
+        step_width = 0.5 / n_steps
+        step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps, dtype=np.float64)
+
+        # Create fine grid for convolution
+        fine_grid_points = 1000
+        x_fine = np.linspace(-0.25, 0.25, fine_grid_points, dtype=np.float64)
+        dx = x_fine[1] - x_fine[0]
+
+        # Build piecewise constant function using vectorized operations
+        f_func = np.zeros_like(x_fine, dtype=np.float64)
+        for i in range(n_steps):
+            pos = step_positions[i]
+            height = f[i]
+            left = pos - step_width/2
+            right = pos + step_width/2
+            mask = (x_fine >= left) & (x_fine <= right)
+            f_func[mask] = height
+
+        # Compute autoconvolution using optimized scipy
+        g = signal.convolve(f_func, f_func, mode='full')
+        g = g[:len(g)//2 + 1]  # Take first half (symmetric)
+
+        # Apply proper scaling
+        g = g * dx
+
+        # Compute norms using fast numba methods
+        g_abs = np.abs(g)
+        norm_1, norm_2_sq, norm_inf = FastNormCalculator.compute_norms_fast(g_abs)
+
+        return norm_2_sq, norm_1, norm_inf
+=======
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Optimized autoconvolution norm computation using FFT-based convolution
+        """
+        if not f_values or len(f_values) == 0:
+            return 0.0, 0.0, 0.0
+
+        # Convert to numpy array
+        f = np.array(f_values, dtype=np.float64)
+        n_steps = len(f)
+
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        # Create step function with proper spacing
+        step_width = 0.5 / n_steps
+        step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps, dtype=np.float64)
+
+        # Create fine grid for convolution
+        fine_grid_points = 1000
+        x_fine = np.linspace(-0.25, 0.25, fine_grid_points, dtype=np.float64)
+        dx = x_fine[1] - x_fine[0]
+
+        # Build piecewise constant function using vectorized operations
+        f_func = np.zeros_like(x_fine, dtype=np.float64)
+        for i in range(n_steps):
+            pos = step_positions[i]
+            height = f[i]
+            left = pos - step_width/2
+            right = pos + step_width/2
+            mask = (x_fine >= left) & (x_fine <= right)
+            f_func[mask] = height
+
+        # Compute autoconvolution using FFT-based convolution for better performance
+        # This is much faster than manual loop-based convolution for large arrays
+        g = signal.fftconvolve(f_func, f_func, mode='full')
+        g = g[:len(g)//2 + 1]  # Take first half (symmetric)
+
+        # Apply proper scaling
+        g = g * dx
+
+        # Compute norms using fast numba methods
+        g_abs = np.abs(g)
+        norm_1, norm_2_sq, norm_inf = FastNormCalculator.compute_norms_fast(g_abs)
+
+        return norm_2_sq, norm_1, norm_inf
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_structured_initialization
+</NAME>
+
+<DESCRIPTION>
+Adding a new initialization strategy that creates a structured function with multiple peaks and valleys, which is more likely to produce better C2 values than simple random distributions. This uses a combination of Gaussian bumps and exponential decay patterns to create more complex and potentially higher-performing functions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def initialize_population(pop_size: int, min_steps: int, max_steps: int) -> List[List[float]]:
+        """Generate diverse population with multiple strategies"""
+        population = []
+
+        # Strategy 1: Random exponential distribution
+        for _ in range(pop_size // 3):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.exponential(scale=1.0, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 2: Log-normal distribution
+        for _ in range(pop_size // 3):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.lognormal(0, 0.5, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 3: Gaussian bumps pattern
+        for _ in range(pop_size // 3):
+            n_steps = np.random.randint(min_steps, max_steps)
+            # Create some structured pattern with random variations
+            heights = np.zeros(n_steps)
+            # Add some random peaks
+            n_peaks = max(1, n_steps // 20)
+            for _ in range(n_peaks):
+                peak_pos = np.random.randint(0, n_steps)
+                peak_height = np.random.exponential(1.0)
+                # Spread the peak over a few bins
+                spread = max(1, n_steps // 50)
+                for i in range(max(0, peak_pos - spread), min(n_steps, peak_pos + spread)):
+                    heights[i] += peak_height * np.exp(-((i - peak_pos) ** 2) / (2 * spread ** 2))
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Ensure we have exactly pop_size individuals
+        if len(population) < pop_size:
+            # Fill with random ones
+            for i in range(pop_size - len(population)):
+                n_steps = np.random.randint(min_steps, max_steps)
+                heights = np.random.exponential(scale=1.0, size=n_steps)
+                heights = np.maximum(heights, 0)
+                population.append(heights.tolist())
+
+        return population[:pop_size]
+=======
+    @staticmethod
+    def initialize_population(pop_size: int, min_steps: int, max_steps: int) -> List[List[float]]:
+        """Generate diverse population with multiple strategies"""
+        population = []
+
+        # Strategy 1: Random exponential distribution
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.exponential(scale=1.0, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 2: Log-normal distribution
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.lognormal(0, 0.5, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 3: Gaussian bumps pattern
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            # Create some structured pattern with random variations
+            heights = np.zeros(n_steps)
+            # Add some random peaks
+            n_peaks = max(1, n_steps // 20)
+            for _ in range(n_peaks):
+                peak_pos = np.random.randint(0, n_steps)
+                peak_height = np.random.exponential(1.0)
+                # Spread the peak over a few bins
+                spread = max(1, n_steps // 50)
+                for i in range(max(0, peak_pos - spread), min(n_steps, peak_pos + spread)):
+                    heights[i] += peak_height * np.exp(-((i - peak_pos) ** 2) / (2 * spread ** 2))
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 4: Structured pattern with multiple components
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.zeros(n_steps)
+
+            # Create multiple patterns
+            # Pattern 1: Central peak
+            center = n_steps // 2
+            peak_height = np.random.exponential(1.0)
+            spread = max(1, n_steps // 10)
+            for i in range(n_steps):
+                heights[i] += peak_height * np.exp(-((i - center) ** 2) / (2 * spread ** 2))
+
+            # Pattern 2: Exponential decay on left side
+            for i in range(n_steps // 3):
+                heights[i] += 0.5 * np.exp(-i / (n_steps // 10))
+
+            # Pattern 3: Exponential decay on right side
+            for i in range(2 * n_steps // 3, n_steps):
+                heights[i] += 0.5 * np.exp(-(n_steps - i) / (n_steps // 10))
+
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Ensure we have exactly pop_size individuals
+        if len(population) < pop_size:
+            # Fill with random ones
+            for i in range(pop_size - len(population)):
+                n_steps = np.random.randint(min_steps, max_steps)
+                heights = np.random.exponential(scale=1.0, size=n_steps)
+                heights = np.maximum(heights, 0)
+                population.append(heights.tolist())
+
+        return population[:pop_size]
+>>>>>>> REPLACE
+</DIFF>

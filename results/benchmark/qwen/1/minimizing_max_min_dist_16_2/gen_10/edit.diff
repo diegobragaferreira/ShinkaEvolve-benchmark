@@ -1,0 +1,104 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,96 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import pdist, squareform
++from scipy.optimize import differential_evolution
++import time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+-    n = 16
+-    d = 2
++    def objective(x):
++        # Reshape the flat array back to points
++        points = x.reshape(-1, 2)
+ 
+-    # places points randomly
++        # Calculate pairwise distances
++        distances = pdist(points)
++
++        # Handle case where there might be zero distances (overlapping points)
++        if len(distances) == 0:
++            return -np.inf
++
++        # Get min and max distances
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++
++        # Avoid division by zero
++        if d_max <= 0:
++            return -np.inf
++
++        # Return negative because we want to maximize the ratio
++        return -d_min / d_max
++
++    # Initial configuration - try to place points more systematically
++    # Start with a good initial guess (hexagonal-like arrangement)
+     np.random.seed(42)
+-    points = np.random.randn(n, d)
+ 
+-    return points
++    # Create a more structured initial arrangement
++    initial_points = []
++    # Arrange in a roughly hexagonal pattern within unit square
++    grid_size = 4
++    spacing_x = 1.0 / (grid_size - 1)
++    spacing_y = 1.0 / (grid_size - 1)
++
++    for i in range(grid_size):
++        for j in range(grid_size):
++            if len(initial_points) < 16:
++                x = i * spacing_x + (np.random.rand() - 0.5) * 0.1
++                y = j * spacing_y + (np.random.rand() - 0.5) * 0.1
++                # Keep within bounds
++                x = max(0, min(1, x))
++                y = max(0, min(1, y))
++                initial_points.append([x, y])
++
++    # Ensure exactly 16 points
++    while len(initial_points) < 16:
++        x = np.random.rand()
++        y = np.random.rand()
++        initial_points.append([x, y])
++
++    initial_points = np.array(initial_points[:16])
++
++    # Flatten for optimization
++    initial_flat = initial_points.flatten()
++
++    # Define bounds for coordinates (0 to 1)
++    bounds = [(0, 1) for _ in range(32)]
++
++    # Use differential evolution for global optimization
++    result = differential_evolution(
++        objective,
++        bounds,
++        maxiter=1000,
++        popsize=15,
++        tol=1e-6,
++        mutation=(0.5, 1),
++        recombination=0.7,
++        seed=42,
++        disp=False
++    )
++
++    # Extract optimized points
++    optimized_points = result.x.reshape(-1, 2)
++
++    # Ensure all points are within [0,1] bounds
++    optimized_points = np.clip(optimized_points, 0, 1)
++
++    return optimized_points
+ 
+ 
+ # EVOLVE-BLOCK-END

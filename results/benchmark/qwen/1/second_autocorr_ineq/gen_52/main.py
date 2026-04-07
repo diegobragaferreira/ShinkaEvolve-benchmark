@@ -1,0 +1,228 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+import time
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂² (L2 norm squared), ||g||₁ (L1 norm), ||g||∞ (L-infinity norm)
+    
+    Args:
+        f_values: list of step function heights
+        
+    Returns:
+        tuple: (c2_value, benchmark_ratio, eval_time)
+    """
+    start_time = time.time()
+    
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values)
+    
+    # Ensure non-negative values
+    f = np.maximum(f, 0)
+    
+    # Compute autoconvolution g = f * f (discrete convolution)
+    # Using 'full' mode to get complete convolution result
+    g = convolve(f, f, mode='full')
+    
+    # The convolution result has length 2*n - 1
+    # We center it properly for the interval [-1/4, 1/4]
+    # The middle element corresponds to index n-1
+    
+    # Extract the central portion that represents the main interval
+    n = len(f)
+    middle_idx = n - 1
+    half_width = n  # This should capture the main convolution support
+    
+    # Take the central part of the convolution
+    g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+    
+    # Compute the norms
+    g_squared = g_centered ** 2
+    g_abs = np.abs(g_centered)
+    
+    # ||g||₂² - integrate using trapezoidal rule manually for piecewise linear
+    # Since we're dealing with discrete values, we approximate the integral
+    # For a piecewise linear function with equal spacing, we use the trapezoidal rule
+    # But since we don't know exact spacing, we just sum the squares
+    norm_g_2_squared = np.sum(g_squared)
+    
+    # ||g||₁ - sum of absolute values
+    norm_g_1 = np.sum(g_abs)
+    
+    # ||g||∞ - maximum absolute value
+    norm_g_inf = np.max(g_abs)
+    
+    # Avoid division by zero
+    if norm_g_1 == 0 or norm_g_inf == 0:
+        c2 = 0.0
+    else:
+        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+    
+    eval_time = time.time() - start_time
+    benchmark_ratio = c2 / 0.962 if c2 > 0 else 0.0
+    
+    return c2, benchmark_ratio, eval_time
+
+def evaluate_function(params):
+    """
+    Evaluate objective function for optimization
+    """
+    # Convert params to step function heights
+    f_values = np.clip(params, 0, None)  # Ensure non-negative
+    
+    # Compute the C2 value
+    c2, _, _ = compute_autoconvolution_norms(f_values)
+    
+    # Return negative because we want to maximize C2
+    return -c2
+
+def generate_adaptive_pattern(n_steps):
+    """
+    Generate an adaptive step function pattern that leverages mathematical 
+    insights for maximizing C2 values.
+    
+    The pattern is designed to:
+    1. Concentrate energy in a central region (for peak value in autoconvolution)
+    2. Have controlled tails (to manage L1 norm growth)
+    3. Be smooth enough to allow gradient optimization
+    """
+    
+    # Generate a Gaussian-like pattern with adjustable parameters
+    # This pattern tends to perform well because it creates sharp peaks in convolution
+    
+    # Base pattern: centered Gaussian with controllable shape
+    x = np.linspace(-1, 1, n_steps)
+    
+    # Parameters for the Gaussian pattern - these are tuned for good performance
+    mu = 0.0  # Center of the peak
+    sigma = 0.2  # Width of the peak
+    amplitude = 1.0  # Overall height
+    
+    # Create the Gaussian shaped pattern
+    gaussian = amplitude * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    
+    # Add some structured variation to encourage better convolution properties
+    # Introduce a secondary peak that's weaker to create interesting interference
+    secondary_amplitude = 0.3 * amplitude
+    secondary_sigma = 0.4
+    secondary_mu = 0.4
+    
+    secondary_peak = secondary_amplitude * np.exp(-0.5 * ((x - secondary_mu) / secondary_sigma) ** 2)
+    
+    # Combine main and secondary peaks
+    combined_pattern = gaussian + secondary_peak
+    
+    # Ensure the pattern is well-behaved for optimization
+    # Apply soft thresholding to remove potential negative values
+    combined_pattern = np.maximum(combined_pattern, 0.0)
+    
+    # Normalize to prevent extremely large values that could cause numerical issues
+    max_val = np.max(combined_pattern)
+    if max_val > 0:
+        combined_pattern = combined_pattern / max_val * 2.0
+    
+    # Add small amount of noise for additional exploration 
+    # but keep it controlled to preserve the mathematical structure
+    noise_scale = 0.02
+    noise = np.random.normal(0, noise_scale, n_steps)
+    noisy_pattern = combined_pattern + noise
+    noisy_pattern = np.maximum(noisy_pattern, 0.0)
+    
+    # Normalize again after adding noise
+    max_val = np.max(noisy_pattern)
+    if max_val > 0:
+        noisy_pattern = noisy_pattern / max_val * 2.0
+    
+    return noisy_pattern.tolist()
+
+def generate_multi_scale_patterns():
+    """
+    Generate multiple candidate patterns at different resolutions to 
+    provide better starting points for optimization
+    """
+    candidates = []
+    
+    # Generate several patterns with different characteristics
+    for i in range(5):
+        # Vary the Gaussian parameters systematically
+        n_steps = np.random.randint(1000, 5000)
+        pattern = generate_adaptive_pattern(n_steps)
+        candidates.append(pattern)
+        
+    return candidates
+
+def convex_optimization_approach():
+    """
+    Use a convex optimization approach with carefully selected initial points
+    """
+    # Generate multiple initial candidates
+    candidates = generate_multi_scale_patterns()
+    
+    best_c2 = -np.inf
+    best_solution = None
+    
+    # Try optimizing from each candidate
+    for i, initial_guess in enumerate(candidates):
+        try:
+            # Set up bounds for optimization
+            n_dims = len(initial_guess)
+            bounds = [(0, 3.0) for _ in range(n_dims)]
+            
+            # Use L-BFGS-B which is typically more efficient for this kind of smooth problem
+            result = minimize(
+                evaluate_function,
+                initial_guess,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8},
+                callback=None
+            )
+            
+            if result.success:
+                # Evaluate the result
+                final_c2, _, _ = compute_autoconvolution_norms(result.x)
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = result.x.tolist()
+                    
+        except Exception:
+            # Continue to next candidate if optimization fails
+            continue
+            
+    # If no optimization succeeded, fall back to the best candidate
+    if best_solution is None:
+        # Pick the best among raw candidates
+        best_candidate = max(candidates, key=lambda x: compute_autoconvolution_norms(x)[0])
+        best_solution = best_candidate
+        
+    return best_solution
+
+def construct_function() -> list[float]:
+    """
+    Main entry point for constructing step-function with high C2 value.
+    Uses convex optimization approach based on mathematically motivated patterns.
+    """
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    
+    # Use convex optimization approach
+    try:
+        f_values = convex_optimization_approach()
+    except Exception as e:
+        # Fallback to simple initialization if optimization fails
+        print(f"Optimization failed with error: {e}. Using fallback.")
+        # Generate a simple but effective pattern
+        n_steps = np.random.randint(1000, 5000)
+        f_values = generate_adaptive_pattern(n_steps)
+    
+    return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

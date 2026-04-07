@@ -1,0 +1,341 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+import math
+import random
+from typing import Tuple, List, Optional
+
+class CirclePackingOptimizer:
+    def __init__(self, rect_width: float = 1.2, rect_height: float = 0.8, seed: int = 42):
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+        self.seed = seed
+        np.random.seed(seed)
+        random.seed(seed)
+        
+    def compute_circle_radius(self, point: np.ndarray, points: np.ndarray) -> float:
+        """Compute maximum possible radius for a circle centered at 'point'"""
+        center_x, center_y = point
+        # Distance to rectangle edges
+        dist_to_edges = [
+            center_x,                    # distance to left edge
+            self.rect_width - center_x,  # distance to right edge
+            center_y,                    # distance to bottom edge
+            self.rect_height - center_y  # distance to top edge
+        ]
+        
+        # Distance to other circles (excluding self)
+        min_dist_to_others = float('inf')
+        if len(points) > 1:
+            # Use cKDTree for efficient nearest neighbor search
+            tree = cKDTree(points)
+            distances, _ = tree.query(point, k=2)  # Get 2 nearest (including self)
+            if len(distances) >= 2:
+                min_dist_to_others = distances[1]  # Exclude self-distance
+        
+        # Maximum radius is limited by both edges and other circles
+        max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+        return max(0.001, max_radius)
+    
+    def evaluate_configuration(self, points: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Evaluate a configuration by computing sum of radii"""
+        total_radius = 0.0
+        circles = []
+        for point in points:
+            radius = self.compute_circle_radius(point, points)
+            circles.append([point[0], point[1], radius])
+            total_radius += radius
+        return total_radius, np.array(circles)
+    
+    def generate_initial_config(self) -> np.ndarray:
+        """Generate highly optimized initial configuration using multiple strategies"""
+        points = []
+        
+        # Strategy 1: Corner placements with strategic perturbation
+        corner_positions = [
+            (self.rect_width * 0.1, self.rect_height * 0.1),
+            (self.rect_width * 0.9, self.rect_height * 0.1),
+            (self.rect_width * 0.1, self.rect_height * 0.9),
+            (self.rect_width * 0.9, self.rect_height * 0.9),
+            (self.rect_width / 2, self.rect_height / 2)
+        ]
+        
+        for x, y in corner_positions:
+            pert_x = np.random.normal(0, 0.03)
+            pert_y = np.random.normal(0, 0.03)
+            points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 2: Edge placements
+        edge_positions = [
+            (self.rect_width/2, self.rect_height * 0.1),  # top center
+            (self.rect_width/2, self.rect_height * 0.9),  # bottom center
+            (self.rect_width * 0.1, self.rect_height/2),  # left center
+            (self.rect_width * 0.9, self.rect_height/2),  # right center
+        ]
+        
+        for x, y in edge_positions:
+            pert_x = np.random.normal(0, 0.02)
+            pert_y = np.random.normal(0, 0.02)
+            points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 3: Grid placements in interior
+        grid_x = np.linspace(self.rect_width * 0.2, self.rect_width * 0.8, 3)
+        grid_y = np.linspace(self.rect_height * 0.2, self.rect_height * 0.8, 3)
+        
+        for x in grid_x:
+            for y in grid_y:
+                if len(points) < 21:
+                    pert_x = np.random.normal(0, 0.02)
+                    pert_y = np.random.normal(0, 0.02)
+                    points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 4: Fill remaining with Voronoi-based distribution
+        while len(points) < 21:
+            # More intelligent random placement based on spatial distribution
+            x = np.random.uniform(0.05, self.rect_width - 0.05)
+            y = np.random.uniform(0.05, self.rect_height - 0.05)
+            points.append([x, y])
+        
+        return np.array(points[:21])
+    
+    def evolve_population(self, population: List[np.ndarray], 
+                         fitness_scores: List[float]) -> List[np.ndarray]:
+        """Evolve population through selection, crossover, and mutation"""
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        
+        # Keep elite individuals
+        elite_size = max(3, len(population) // 6)
+        new_population = sorted_population[:elite_size]
+        
+        # Generate offspring through crossover and mutation
+        while len(new_population) < len(population):
+            # Tournament selection
+            parent1 = self.tournament_selection(sorted_population, fitness_scores)
+            parent2 = self.tournament_selection(sorted_population, fitness_scores)
+            
+            # Crossover
+            offspring = self.crossover(parent1, parent2)
+            
+            # Mutation
+            offspring = self.mutate(offspring)
+            
+            new_population.append(offspring)
+        
+        return new_population
+    
+    def tournament_selection(self, population: List[np.ndarray], 
+                           fitnesses: List[float], tournament_size: int = 3) -> np.ndarray:
+        """Select best individual from tournament"""
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_index]
+    
+    def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """Create offspring via uniform crossover"""
+        offspring = []
+        for i in range(len(parent1)):
+            if random.random() < 0.5:
+                offspring.append(parent1[i])
+            else:
+                offspring.append(parent2[i])
+        return np.array(offspring)
+    
+    def mutate(self, individual: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+        """Apply random mutations to individual"""
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                mutated[i] = mutated[i] + np.random.normal(0, 0.03, 2)
+                # Keep within bounds
+                mutated[i][0] = np.clip(mutated[i][0], 0.05, self.rect_width - 0.05)
+                mutated[i][1] = np.clip(mutated[i][1], 0.05, self.rect_height - 0.05)
+        return mutated
+    
+    def local_refinement(self, points: np.ndarray, max_iterations: int = 500) -> np.ndarray:
+        """Perform local refinement with adaptive step sizes"""
+        refined_points = points.copy()
+        
+        # Progressive refinement with decreasing steps
+        for iteration in range(max_iterations):
+            step_size = max(0.005, 0.1 * (1.0 - iteration/max_iterations))
+            updated = False
+            
+            # For each point, try to find better position
+            for i in range(len(refined_points)):
+                current_point = refined_points[i]
+                best_point = current_point.copy()
+                best_radius = self.compute_circle_radius(current_point, refined_points)
+                
+                # Sample neighborhood with adaptive step
+                step_range = min(0.1, step_size * 5)
+                steps = max(3, int(step_range / step_size))
+                search_space = np.linspace(-step_range, step_range, steps)
+                
+                for dx in search_space:
+                    for dy in search_space:
+                        new_x = current_point[0] + dx
+                        new_y = current_point[1] + dy
+                        
+                        # Keep within bounds
+                        if (0.05 <= new_x <= self.rect_width - 0.05 and 
+                            0.05 <= new_y <= self.rect_height - 0.05):
+                            
+                            test_point = np.array([new_x, new_y])
+                            test_radius = self.compute_circle_radius(test_point, refined_points)
+                            
+                            if test_radius > best_radius:
+                                best_radius = test_radius
+                                best_point = test_point
+                                updated = True
+                
+                refined_points[i] = best_point
+            
+            # Early stopping if no significant improvement
+            if not updated and iteration > 100:
+                break
+                
+        return refined_points
+    
+    def adaptive_voronoi_optimization(self, points: np.ndarray, 
+                                    max_iterations: int = 100) -> np.ndarray:
+        """Use Voronoi-guided optimization with adaptive intensity"""
+        current_points = points.copy()
+        
+        # Multi-stage optimization
+        stages = [
+            {"steps": 30, "step_size": 0.1},
+            {"steps": 50, "step_size": 0.05}, 
+            {"steps": 50, "step_size": 0.01}
+        ]
+        
+        for stage_config in stages:
+            steps = stage_config["steps"]
+            step_size = stage_config["step_size"]
+            
+            for _ in range(steps):
+                updated = False
+                for i in range(len(current_points)):
+                    current_point = current_points[i]
+                    best_point = current_point.copy()
+                    best_radius = self.compute_circle_radius(current_point, current_points)
+                    
+                    # Search in structured neighborhood
+                    search_range = min(0.1, step_size * 5)
+                    steps_in_range = max(3, int(search_range / step_size))
+                    search_space = np.linspace(-search_range, search_range, steps_in_range)
+                    
+                    for dx in search_space:
+                        for dy in search_space:
+                            new_x = current_point[0] + dx
+                            new_y = current_point[1] + dy
+                            
+                            # Keep within bounds
+                            if (0.05 <= new_x <= self.rect_width - 0.05 and 
+                                0.05 <= new_y <= self.rect_height - 0.05):
+                                
+                                test_point = np.array([new_x, new_y])
+                                test_radius = self.compute_circle_radius(test_point, current_points)
+                                
+                                if test_radius > best_radius:
+                                    best_radius = test_radius
+                                    best_point = test_point
+                                    updated = True
+                    
+                    current_points[i] = best_point
+                
+                # Early stopping
+                if not updated and steps > 20:
+                    break
+                    
+        return current_points
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    optimizer = CirclePackingOptimizer()
+    
+    # Generate initial configuration
+    points = optimizer.generate_initial_config()
+    
+    # Stage 1: Coarse global optimization
+    points = optimizer.adaptive_voronoi_optimization(points, max_iterations=80)
+    
+    # Stage 2: Evolutionary refinement with adaptive population management
+    pop_size = 20
+    num_generations = 50
+    elite_size = 4
+    
+    # Initial population
+    population = [optimizer.generate_initial_config() for _ in range(pop_size)]
+    
+    best_fitness = 0
+    best_solution = None
+    
+    for generation in range(num_generations):
+        # Evaluate fitness
+        fitness_scores = []
+        population_circles = []
+        
+        for individual in population:
+            fitness, circles = optimizer.evaluate_configuration(individual)
+            fitness_scores.append(fitness)
+            population_circles.append(circles)
+            
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_solution = circles.copy()
+        
+        # Evolve population
+        population = optimizer.evolve_population(population, fitness_scores)
+    
+    # Stage 3: Final local refinement
+    if best_solution is not None:
+        final_points = []
+        for i in range(21):
+            final_points.append([best_solution[i, 0], best_solution[i, 1]])
+        final_points = np.array(final_points)
+        
+        # Refine using adaptive local search
+        final_points = optimizer.local_refinement(final_points, max_iterations=300)
+        
+        # Final evaluation
+        _, circles = optimizer.evaluate_configuration(final_points)
+        return circles
+    
+    # Fallback to simple grid pattern
+    circles = np.zeros((21, 3))
+    row_size = int(np.ceil(np.sqrt(21)))
+    col_size = int(np.ceil(21 / row_size))
+    
+    spacing_x = optimizer.rect_width / (col_size + 1)
+    spacing_y = optimizer.rect_height / (row_size + 1)
+    
+    count = 0
+    for i in range(row_size):
+        for j in range(col_size):
+            if count < 21:
+                x = spacing_x * (j + 1)
+                y = spacing_y * (i + 1)
+                # Set radius to be proportional to available space
+                radius = min(x, optimizer.rect_width - x, y, optimizer.rect_height - y) * 0.4
+                circles[count] = [x, y, max(radius, 0.001)]
+                count += 1
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

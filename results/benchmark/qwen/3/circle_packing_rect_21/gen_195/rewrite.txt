@@ -1,0 +1,377 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from collections import defaultdict
+import time
+
+class QuadTree:
+    """Efficient spatial data structure for constraint checking"""
+    def __init__(self, bounds, max_points=4):
+        self.bounds = bounds
+        self.max_points = max_points
+        self.points = []
+        self.divided = False
+        self.children = [None, None, None, None]  # NW, NE, SW, SE
+        
+    def subdivide(self):
+        x, y, w, h = self.bounds
+        hw = w / 2
+        hh = h / 2
+        
+        # Create four quadrants
+        self.children[0] = QuadTree((x, y, hw, hh), self.max_points)  # NW
+        self.children[1] = QuadTree((x + hw, y, hw, hh), self.max_points)  # NE
+        self.children[2] = QuadTree((x, y + hh, hw, hh), self.max_points)  # SW
+        self.children[3] = QuadTree((x + hw, y + hh, hw, hh), self.max_points)  # SE
+        
+        self.divided = True
+        
+        # Redistribute points
+        for point in self.points:
+            self.insert_point(point)
+        
+        self.points = []
+        
+    def insert_point(self, point):
+        if not self.in_bounds(point):
+            return False
+            
+        if len(self.points) < self.max_points and not self.divided:
+            self.points.append(point)
+            return True
+            
+        if not self.divided:
+            self.subdivide()
+            
+        # Insert into children
+        for child in self.children:
+            if child.insert_point(point):
+                return True
+                
+        return False
+        
+    def in_bounds(self, point):
+        x, y = point
+        bx, by, bw, bh = self.bounds
+        return bx <= x <= bx + bw and by <= y <= by + bh
+        
+    def query_range(self, range_bounds):
+        """Get all points in the given range"""
+        x, y, w, h = range_bounds
+        points_in_range = []
+        
+        if not self.intersects_range(range_bounds):
+            return points_in_range
+            
+        if self.divided:
+            for child in self.children:
+                points_in_range.extend(child.query_range(range_bounds))
+        else:
+            # Check all points in this node
+            for point in self.points:
+                px, py = point
+                if x <= px <= x + w and y <= py <= y + h:
+                    points_in_range.append(point)
+                    
+        return points_in_range
+        
+    def intersects_range(self, range_bounds):
+        x, y, w, h = range_bounds
+        bx, by, bw, bh = self.bounds
+        
+        return not (x > bx + bw or x + w < bx or y > by + bh or y + h < by)
+
+class VoronoiEvolvePack:
+    def __init__(self, n_circles=21, width=1.2, height=0.8):
+        self.n_circles = n_circles
+        self.width = width
+        self.height = height
+        self.bounds = (0, 0, width, height)
+        self.max_evaluations = 50000
+        self.current_evaluations = 0
+        
+    def initialize_population(self, pop_size=50):
+        """Initialize diverse population using strategic seeding"""
+        population = []
+        
+        # Strategy 1: Corner and edge seeding
+        corner_points = [
+            [0.1, 0.1], [self.width-0.1, 0.1],
+            [0.1, self.height-0.1], [self.width-0.1, self.height-0.1]
+        ]
+        
+        edge_points = [
+            [self.width/2, 0.1], [self.width/2, self.height-0.1],
+            [0.1, self.height/2], [self.width-0.1, self.height/2]
+        ]
+        
+        # Add some random points
+        random_points = []
+        for _ in range(self.n_circles - len(corner_points) - len(edge_points)):
+            x = random.uniform(0.05, self.width - 0.05)
+            y = random.uniform(0.05, self.height - 0.05)
+            random_points.append([x, y])
+            
+        base_positions = corner_points + edge_points + random_points
+        
+        for _ in range(pop_size):
+            # Perturb base positions slightly
+            positions = []
+            for pos in base_positions:
+                x = max(0.05, min(self.width - 0.05, pos[0] + random.gauss(0, 0.05)))
+                y = max(0.05, min(self.height - 0.05, pos[1] + random.gauss(0, 0.05)))
+                positions.append([x, y])
+                
+            individual = self.create_individual(positions)
+            population.append(individual)
+            
+        return population
+    
+    def create_individual(self, positions):
+        """Create individual with initial small radii"""
+        individual = np.zeros((self.n_circles, 3))
+        for i in range(self.n_circles):
+            individual[i] = [positions[i][0], positions[i][1], 0.01]
+        return individual
+    
+    def calculate_fitness(self, individual):
+        """Calculate fitness based on sum of radii with penalty for constraints"""
+        self.current_evaluations += 1
+        
+        # Check if individual violates constraints
+        if not self.is_valid(individual):
+            return -float('inf')  # Penalize invalid individuals heavily
+            
+        # Return sum of radii
+        return np.sum(individual[:, 2])
+    
+    def is_valid(self, individual):
+        """Check if individual satisfies all constraints"""
+        # Check boundary constraints
+        for i in range(self.n_circles):
+            x, y, r = individual[i]
+            if x - r < 0 or x + r > self.width or y - r < 0 or y + r > self.height:
+                return False
+                
+        # Check overlap constraints using quadtree for efficiency
+        try:
+            tree = QuadTree(self.bounds)
+            points = individual[:, :2]
+            
+            for point in points:
+                if not tree.insert_point(tuple(point)):
+                    return False
+                    
+            # Check overlaps by checking distances between nearby points
+            for i in range(self.n_circles):
+                x1, y1, r1 = individual[i]
+                # Query nearby points (within 2*(r1+r2) distance)
+                query_range = (x1 - 2*(r1+0.01), y1 - 2*(r1+0.01), 4*(r1+0.01), 4*(r1+0.01))
+                nearby_points = tree.query_range(query_range)
+                
+                for j in range(i+1, self.n_circles):
+                    x2, y2, r2 = individual[j]
+                    distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+                    min_distance_squared = (r1 + r2)**2
+                    
+                    if distance_squared < min_distance_squared:
+                        return False
+                        
+        except Exception:
+            # Fallback to brute force if quadtree fails
+            try:
+                for i in range(self.n_circles):
+                    x1, y1, r1 = individual[i]
+                    for j in range(i+1, self.n_circles):
+                        x2, y2, r2 = individual[j]
+                        distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+                        min_distance_squared = (r1 + r2)**2
+                        
+                        if distance_squared < min_distance_squared:
+                            return False
+            except:
+                return False
+                
+        return True
+    
+    def mutate(self, individual, mutation_rate=0.3):
+        """Specialized mutation operator for circle packing"""
+        mutated = individual.copy()
+        
+        # Mutate randomly selected circles
+        for i in range(self.n_circles):
+            if random.random() < mutation_rate:
+                # Mutate position
+                if random.random() < 0.7:
+                    # Move circle
+                    delta_x = random.uniform(-0.1, 0.1)
+                    delta_y = random.uniform(-0.1, 0.1)
+                    mutated[i][0] = max(0.05, min(self.width - 0.05, mutated[i][0] + delta_x))
+                    mutated[i][1] = max(0.05, min(self.height - 0.05, mutated[i][1] + delta_y))
+                else:
+                    # Mutate radius
+                    delta_radius = random.uniform(-0.05, 0.05)
+                    mutated[i][2] = max(0.001, mutated[i][2] + delta_radius)
+                    
+        return mutated
+    
+    def crossover(self, parent1, parent2):
+        """Specialized crossover operator that preserves topology"""
+        child = parent1.copy()
+        
+        # Exchange segments of circles
+        split_point = random.randint(1, self.n_circles - 1)
+        for i in range(split_point, self.n_circles):
+            # Copy position and radius from parent2
+            child[i][0] = parent2[i][0]
+            child[i][1] = parent2[i][1]
+            child[i][2] = parent2[i][2]
+            
+        return child
+    
+    def calculate_max_radius(self, individual, index):
+        """Calculate maximum radius for circle at index without overlap"""
+        x, y, current_radius = individual[index]
+        
+        # Boundary constraints
+        max_radius_bound = min(x, y, self.width - x, self.height - y)
+        
+        # Overlap constraints - only check with nearby circles for efficiency
+        max_radius_overlap = float('inf')
+        
+        # Use spatial locality for efficiency
+        target_x, target_y = x, y
+        search_radius = 2 * max_radius_bound  # Approximate search radius
+        
+        for i in range(self.n_circles):
+            if i != index:
+                other_x, other_y, other_radius = individual[i]
+                distance_squared = (target_x - other_x)**2 + (target_y - other_y)**2
+                min_distance_squared = (current_radius + other_radius)**2
+                
+                if distance_squared < min_distance_squared:
+                    # Check if this is a real overlap
+                    distance = np.sqrt(distance_squared)
+                    available_radius = distance - other_radius
+                    if available_radius < max_radius_overlap:
+                        max_radius_overlap = available_radius
+                        
+        max_radius = min(max_radius_bound, max_radius_overlap)
+        return max(max_radius, 0.001)
+    
+    def optimize_individual(self, individual):
+        """Local optimization for individual - maximize radii"""
+        for _ in range(100):  # Limited local iterations
+            improved = False
+            
+            # Try to increase radii of circles
+            for i in range(self.n_circles):
+                max_radius = self.calculate_max_radius(individual, i)
+                if max_radius > individual[i][2]:
+                    individual[i][2] = max_radius
+                    improved = True
+                    
+            if not improved:
+                break
+                
+        return individual
+    
+    def run_evolutionary_algorithm(self):
+        """Main evolutionary optimization loop"""
+        # Initialize population
+        population = self.initialize_population(50)
+        fitness_scores = []
+        
+        # Evaluate initial population
+        for i, individual in enumerate(population):
+            population[i] = self.optimize_individual(individual)
+            fitness = self.calculate_fitness(population[i])
+            fitness_scores.append(fitness)
+            
+        # Evolutionary loop
+        generation = 0
+        best_fitness = max(fitness_scores)
+        best_individual = population[np.argmax(fitness_scores)].copy()
+        
+        while self.current_evaluations < self.max_evaluations and generation < 1000:
+            # Sort population by fitness
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elites = [population[i] for i in sorted_indices[:10]]
+            
+            # Create new population
+            new_population = elites.copy()
+            
+            # Generate offspring through crossover and mutation
+            while len(new_population) < 50:
+                parent1 = random.choice(elites)
+                parent2 = random.choice(elites)
+                
+                # Crossover
+                child = self.crossover(parent1, parent2)
+                
+                # Mutation
+                child = self.mutate(child)
+                
+                # Local optimization
+                child = self.optimize_individual(child)
+                
+                # Add to population
+                new_population.append(child)
+                
+            # Evaluate new population
+            population = new_population
+            fitness_scores = []
+            
+            for individual in population:
+                fitness = self.calculate_fitness(individual)
+                fitness_scores.append(fitness)
+                
+            # Update best solution
+            current_best_fitness = max(fitness_scores)
+            if current_best_fitness > best_fitness:
+                best_fitness = current_best_fitness
+                best_individual = population[np.argmax(fitness_scores)].copy()
+                
+            # Adaptive parameters based on convergence
+            if generation > 50:
+                # Increase mutation rate if stagnation detected
+                if generation % 20 == 0:
+                    # Some convergence check logic
+                    pass
+                    
+            generation += 1
+            
+        # Final refinement
+        final_individual = self.optimize_individual(best_individual)
+        return final_individual
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    Uses advanced evolutionary optimization with spatial data structures.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Fixed random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Create optimizer
+    optimizer = VoronoiEvolvePack(n_circles=21, width=1.2, height=0.8)
+    
+    # Run optimization
+    start_time = time.time()
+    result = optimizer.run_evolutionary_algorithm()
+    end_time = time.time()
+    
+    # Ensure minimum radius and boundary constraints
+    for i in range(21):
+        result[i][2] = max(result[i][2], 0.001)
+        result[i][0] = max(0.001, min(1.2 - 0.001, result[i][0]))
+        result[i][1] = max(0.001, min(0.8 - 0.001, result[i][1]))
+    
+    return result
+
+# EVOLVE-BLOCK-END

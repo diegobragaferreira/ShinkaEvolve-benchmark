@@ -1,0 +1,199 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    container_width, container_height = 1.0, 1.0
+    
+    # Number of circles
+    n = 21
+    
+    # Initialize circles with strategic placement
+    circles = np.zeros((n, 3))
+    
+    # Strategic initialization using hexagonal packing pattern for better density
+    rows = 4
+    cols = 6
+    padding = 0.1
+    
+    # Calculate spacing for hexagonal arrangement
+    spacing_x = (container_width - 2 * padding) / (cols - 1)
+    spacing_y = (container_height - 2 * padding) / (rows - 1)
+    
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            # Offset every other row for hexagonal packing
+            offset = 0.5 if i % 2 == 1 else 0.0
+            x = padding + j * spacing_x + offset * spacing_x / 2
+            y = padding + i * spacing_y
+            # Ensure positions are within bounds
+            x = max(0.05, min(container_width - 0.05, x))
+            y = max(0.05, min(container_height - 0.05, y))
+            circles[idx] = [x, y, 0.03]
+            idx += 1
+        if idx >= n:
+            break
+    
+    # Trim to exact number if needed
+    if idx < n:
+        # Fill remaining positions with scattered initial values
+        for i in range(idx, n):
+            x = np.random.uniform(0.05, container_width - 0.05)
+            y = np.random.uniform(0.05, container_height - 0.05)
+            circles[i] = [x, y, 0.03]
+    
+    # Physics-based optimization with continuous gradient updates
+    max_iterations = 3000
+    best_sum_radii = 0
+    best_circles = None
+    
+    # Optimization parameters
+    learning_rate = 0.1
+    damping_factor = 0.995
+    min_radius = 0.001
+    max_radius = 0.4
+    
+    for iteration in range(max_iterations):
+        # Calculate pairwise distances
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Compute distance matrix
+        distances = cdist(positions, positions)
+        
+        # Check for overlaps and compute forces
+        total_force = np.zeros((n, 2))  # Force on each circle (x, y)
+        overlap_violations = 0
+        
+        # Compute forces from other circles
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    dx = positions[i, 0] - positions[j, 0]
+                    dy = positions[i, 1] - positions[j, 1]
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    
+                    # Check for overlap
+                    if dist < (radii[i] + radii[j]):
+                        overlap_violations += 1
+                        # Repulsive force (inverse square law)
+                        if dist > 0.001:
+                            force_magnitude = (radii[i] + radii[j] - dist) / (dist * dist + 1e-8)
+                            total_force[i, 0] += force_magnitude * dx
+                            total_force[i, 1] += force_magnitude * dy
+                    else:
+                        # Attractive force towards optimal spacing (soft constraint)
+                        if dist > 0.001:
+                            # Add some attractive force to maintain good distribution
+                            force_magnitude = 0.001 / (dist * dist + 1e-8)
+                            total_force[i, 0] -= force_magnitude * dx
+                            total_force[i, 1] -= force_magnitude * dy
+        
+        # Boundary forces (stronger repulsion near borders)
+        for i in range(n):
+            x, y, r = circles[i]
+            # Boundary repulsion forces
+            boundary_forces = np.array([
+                max(0, r - x) * 10.0,   # Left boundary
+                max(0, r - (container_width - x)) * 10.0,   # Right boundary
+                max(0, r - y) * 10.0,   # Bottom boundary
+                max(0, r - (container_height - y)) * 10.0   # Top boundary
+            ])
+            
+            # Apply boundary forces
+            total_force[i, 0] -= boundary_forces[0] - boundary_forces[1]
+            total_force[i, 1] -= boundary_forces[2] - boundary_forces[3]
+        
+        # Update positions and radii based on forces
+        for i in range(n):
+            x, y, r = circles[i]
+            
+            # Update position with force and learning rate
+            new_x = max(r, min(container_width - r, x + learning_rate * total_force[i, 0]))
+            new_y = max(r, min(container_height - r, y + learning_rate * total_force[i, 1]))
+            
+            # Update radius to maximize sum (gradient ascent on radius)
+            # Compute how much we can increase radius without violating constraints
+            max_radius_increase = float('inf')
+            
+            # Boundary constraints
+            boundary_radius = min(x, container_width - x, y, container_height - y)
+            max_radius_increase = min(max_radius_increase, boundary_radius)
+            
+            # Circle-to-circle constraints
+            for j in range(n):
+                if i != j:
+                    dist = math.sqrt((new_x - circles[j, 0])**2 + (new_y - circles[j, 1])**2)
+                    if dist > 0.001:
+                        max_radius_increase = min(max_radius_increase, dist - circles[j, 2])
+            
+            # Limit maximum radius
+            max_radius_increase = min(max_radius_increase, max_radius)
+            
+            # Only increase radius if beneficial and feasible
+            if max_radius_increase > r and max_radius_increase < float('inf'):
+                # Conservative increase to prevent instability
+                new_r = min(r + learning_rate * 0.1 * (max_radius_increase - r), max_radius_increase)
+                new_r = max(min_radius, new_r)
+                circles[i] = [new_x, new_y, new_r]
+            else:
+                circles[i] = [new_x, new_y, r]
+        
+        # Decay learning rate
+        learning_rate *= damping_factor
+        
+        # Periodic cleanup to ensure valid configuration
+        if iteration % 50 == 0:
+            for i in range(n):
+                x, y, r = circles[i]
+                # Ensure circles stay within bounds
+                x = max(r, min(container_width - r, x))
+                y = max(r, min(container_height - r, y))
+                circles[i] = [x, y, r]
+        
+        # Track best solution
+        current_sum = np.sum(circles[:, 2])
+        if current_sum > best_sum_radii:
+            best_sum_radii = current_sum
+            best_circles = circles.copy()
+        
+        # Early stopping if convergence is achieved
+        if overlap_violations == 0 and iteration > 100:
+            # Occasionally check if we're making progress
+            if iteration % 100 == 0:
+                if abs(current_sum - best_sum_radii) < 0.0001:
+                    break
+    
+    # Return best configuration or final result
+    if best_circles is not None:
+        return best_circles
+    
+    # Final cleanup
+    for i in range(n):
+        x, y, r = circles[i]
+        x = max(r, min(container_width - r, x))
+        y = max(r, min(container_height - r, y))
+        circles[i] = [x, y, r]
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

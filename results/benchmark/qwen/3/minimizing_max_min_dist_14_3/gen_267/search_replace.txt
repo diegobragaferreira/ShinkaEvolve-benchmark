@@ -1,0 +1,283 @@
+Looking at the current code more carefully, I notice that the function `adaptive_differential_evolution` does not exist in the current code. I need to make changes to the main optimization function instead. Let me look at the exact structure and make the appropriate changes.
+
+<NAME>
+improve_convergence_tracking
+</NAME>
+
+<DESCRIPTION>
+This change improves the convergence tracking and early stopping mechanisms in the optimization process. The key improvements are:
+
+1. Added proper convergence monitoring with history tracking of best ratios
+2. Implemented better early stopping based on minimal improvement thresholds
+3. Added adaptive tolerance settings for L-BFGS-B refinement
+4. Made the optimization process more efficient by avoiding unnecessary iterations
+
+These changes should help achieve better convergence to higher scores by detecting when improvements stall and adjusting the optimization accordingly.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    best_ratio = 0
+    best_points = None
+
+    # Multiple initialization strategies
+    initialization_strategies = [
+        # Strategy 1: Enhanced Fibonacci sphere scaled to unit cube
+        lambda: create_initial_placement(),
+
+        # Strategy 2: Fibonacci sphere scaled to unit cube
+        lambda: (fibonacci_sphere(14) + 1) / 2,
+
+        # Strategy 3: Latin Hypercube Sampling
+        lambda: latin_hypercube_sampling(14, 3, seed=42),
+
+        # Strategy 4: Random initialization
+        lambda: np.random.rand(14, 3)
+    ]
+
+    # Track improvement for early stopping
+    previous_best = -1
+    improvement_streak = 0
+    max_improvement_streak = 8
+
+    # Try different combinations of strategies with multiple restarts
+    for restart in range(3):  # 3 restart rounds for better exploration
+        for i, init_func in enumerate(initialization_strategies):
+            # Generate initial points
+            initial_points = init_func()
+
+            # Flatten initial points for optimization
+            x0 = initial_points.flatten()
+
+            # Define bounds for each coordinate (0 to 1)
+            bounds = [(0, 1) for _ in range(14 * 3)]
+
+            # Phase 1: Global optimization with differential evolution
+            try:
+                # Use adaptive population size and mutation strategy based on restart round
+                base_popsize = 15 + restart * 5  # Increase population size with restarts
+                maxiter = 100 + restart * 50  # More iterations with restarts
+
+                # Adaptive mutation strategy based on convergence
+                mutation_rates = [(0.5, 1.0), (0.7, 1.0), (0.8, 1.0)]
+                mutation_strategy = mutation_rates[min(restart, len(mutation_rates)-1)]
+
+                # Try different recombination rates
+                recombination_rates = [0.7, 0.8, 0.9]
+                recombination_rate = recombination_rates[min(restart, len(recombination_rates)-1)]
+
+                result = differential_evolution(
+                    lambda x: adaptive_penalty_objective(x, iteration=restart),
+                    bounds,
+                    seed=42 + restart * 10 + i,
+                    maxiter=maxiter,
+                    popsize=base_popsize,
+                    tol=1e-6,
+                    mutation=mutation_strategy,
+                    recombination=recombination_rate,
+                    disp=False
+                )
+
+                # Extract optimized points
+                optimized_points = result.x.reshape((14, 3))
+
+                # Calculate final ratio
+                final_ratio = min_max_ratio(optimized_points)
+
+                # Store best result
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = optimized_points.copy()
+                    improvement_streak = 0  # Reset streak
+                else:
+                    improvement_streak += 1
+
+                # Early stopping if no improvement for too many attempts
+                if improvement_streak >= max_improvement_streak:
+                    break
+
+            except Exception as e:
+                continue  # Skip this strategy if optimization fails
+
+    # Phase 2: Local refinement with L-BFGS-B if we found a good candidate
+    if best_points is not None and best_ratio > 0:
+        try:
+            # Flatten the best points
+            x0_refine = best_points.flatten()
+
+            # Refinement with L-BFGS-B
+            result_refined = minimize(
+                lambda x: adaptive_penalty_objective(x, iteration=10),
+                x0_refine,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-9, 'gtol': 1e-9},
+                tol=1e-9
+            )
+
+            refined_points = result_refined.x.reshape((14, 3))
+            final_ratio = min_max_ratio(refined_points)
+
+            # Update if improved
+            if final_ratio > best_ratio:
+                best_points = refined_points
+
+        except Exception as e:
+            pass  # Keep original best points if refinement fails
+
+    # Ensure we return valid points even if optimization failed
+    if best_points is None:
+        # Fallback to enhanced Fibonacci initialization
+        best_points = create_initial_placement()
+
+    return best_points
+=======
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    best_ratio = 0
+    best_points = None
+
+    # Multiple initialization strategies
+    initialization_strategies = [
+        # Strategy 1: Enhanced Fibonacci sphere scaled to unit cube
+        lambda: create_initial_placement(),
+
+        # Strategy 2: Fibonacci sphere scaled to unit cube
+        lambda: (fibonacci_sphere(14) + 1) / 2,
+
+        # Strategy 3: Latin Hypercube Sampling
+        lambda: latin_hypercube_sampling(14, 3, seed=42),
+
+        # Strategy 4: Random initialization
+        lambda: np.random.rand(14, 3)
+    ]
+
+    # Track improvement for early stopping
+    improvement_streak = 0
+    max_improvement_streak = 5
+    best_ratio_history = []
+    min_improvement_threshold = 1e-8
+
+    # Try different combinations of strategies with multiple restarts
+    for restart in range(3):  # 3 restart rounds for better exploration
+        for i, init_func in enumerate(initialization_strategies):
+            # Generate initial points
+            initial_points = init_func()
+
+            # Flatten initial points for optimization
+            x0 = initial_points.flatten()
+
+            # Define bounds for each coordinate (0 to 1)
+            bounds = [(0, 1) for _ in range(14 * 3)]
+
+            # Phase 1: Global optimization with differential evolution
+            try:
+                # Use adaptive population size and mutation strategy based on restart round
+                base_popsize = 15 + restart * 5  # Increase population size with restarts
+                maxiter = 100 + restart * 50  # More iterations with restarts
+
+                # Adaptive mutation strategy based on convergence
+                mutation_rates = [(0.5, 1.0), (0.7, 1.0), (0.8, 1.0)]
+                mutation_strategy = mutation_rates[min(restart, len(mutation_rates)-1)]
+
+                # Try different recombination rates
+                recombination_rates = [0.7, 0.8, 0.9]
+                recombination_rate = recombination_rates[min(restart, len(recombination_rates)-1)]
+
+                result = differential_evolution(
+                    lambda x: adaptive_penalty_objective(x, iteration=restart),
+                    bounds,
+                    seed=42 + restart * 10 + i,
+                    maxiter=maxiter,
+                    popsize=base_popsize,
+                    tol=1e-6,
+                    mutation=mutation_strategy,
+                    recombination=recombination_rate,
+                    disp=False
+                )
+
+                # Extract optimized points
+                optimized_points = result.x.reshape((14, 3))
+
+                # Calculate final ratio
+                final_ratio = min_max_ratio(optimized_points)
+
+                # Store best result
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = optimized_points.copy()
+                    improvement_streak = 0  # Reset streak
+                    best_ratio_history = []  # Reset history
+                else:
+                    improvement_streak += 1
+                    # Check for convergence by monitoring recent improvements
+                    best_ratio_history.append(final_ratio)
+                    if len(best_ratio_history) > 10:
+                        # Remove oldest entry
+                        best_ratio_history.pop(0)
+                        # Check if improvement is minimal
+                        if len(best_ratio_history) >= 2:
+                            recent_improvement = abs(best_ratio_history[-1] - best_ratio_history[0])
+                            if recent_improvement < min_improvement_threshold:
+                                improvement_streak += 1  # Count as stagnation
+
+                # Early stopping if no improvement for too many attempts
+                if improvement_streak >= max_improvement_streak:
+                    break
+
+            except Exception as e:
+                continue  # Skip this strategy if optimization fails
+
+    # Phase 2: Local refinement with L-BFGS-B if we found a good candidate
+    if best_points is not None and best_ratio > 0:
+        try:
+            # Flatten the best points
+            x0_refine = best_points.flatten()
+
+            # Refinement with L-BFGS-B - use adaptive tolerances
+            ftol_vals = [1e-6, 1e-8, 1e-9]
+            gtol_vals = [1e-6, 1e-8, 1e-9]
+
+            # Try different tolerance settings to balance speed and accuracy
+            for ftol, gtol in zip(ftol_vals, gtol_vals):
+                result_refined = minimize(
+                    lambda x: adaptive_penalty_objective(x, iteration=10),
+                    x0_refine,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'ftol': ftol, 'gtol': gtol},
+                    tol=ftol
+                )
+
+                refined_points = result_refined.x.reshape((14, 3))
+                final_ratio = min_max_ratio(refined_points)
+
+                # Update if improved
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = refined_points
+                    break  # Stop once we achieve improvement
+
+        except Exception as e:
+            pass  # Keep original best points if refinement fails
+
+    # Ensure we return valid points even if optimization failed
+    if best_points is None:
+        # Fallback to enhanced Fibonacci initialization
+        best_points = create_initial_placement()
+
+    return best_points
+>>>>>>> REPLACE
+</DIFF>

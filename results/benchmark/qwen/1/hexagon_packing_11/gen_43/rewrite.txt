@@ -1,0 +1,281 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+from math import sqrt, cos, sin, pi
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+
+def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, rotation and side length"""
+    angle_rad = angle_deg * pi / 180
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * pi / 3
+        x = center_x + side_length * cos(theta)
+        y = center_y + side_length * sin(theta)
+        vertices.append((x, y))
+    return vertices
+
+def outer_hexagon_vertices(side_length):
+    """Generate vertices of outer hexagon centered at origin"""
+    vertices = []
+    for i in range(6):
+        theta = i * pi / 3
+        x = side_length * cos(theta)
+        y = side_length * sin(theta)
+        vertices.append((x, y))
+    return vertices
+
+def check_hexagon_containment(hex_vertices, outer_side_length):
+    """Check if all vertices of a hexagon are within the outer hexagon"""
+    outer_vertices = outer_hexagon_vertices(outer_side_length)
+    outer_polygon = Polygon(outer_vertices)
+    
+    for vx, vy in hex_vertices:
+        if not outer_polygon.contains(Point(vx, vy)):
+            return False
+    return True
+
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def evaluate_solution(solution, outer_side_length_guess):
+    """
+    Evaluate a solution for 11 hexagons
+    Returns negative penalty value (higher is better)
+    """
+    # Parse solution into 11 hexagon positions and rotations
+    # Format: [x1, y1, angle1, x2, y2, angle2, ..., x11, y11, angle11]
+    penalty = 0
+    
+    # Create hexagon objects
+    hexagons = []
+    for i in range(11):
+        x, y, angle = solution[3*i:3*i+3]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagons.append(vertices)
+    
+    # Check containment
+    outer_vertices = outer_hexagon_vertices(outer_side_length_guess)
+    outer_polygon = Polygon(outer_vertices)
+    
+    for vertices in hexagons:
+        for vx, vy in vertices:
+            if not outer_polygon.contains(Point(vx, vy)):
+                penalty += 1000  # Heavy penalty for containment violation
+    
+    # Check overlaps
+    for i in range(11):
+        for j in range(i+1, 11):
+            if check_hexagon_overlap(hexagons[i], hexagons[j]):
+                penalty += 1000  # Heavy penalty for overlap
+    
+    # Penalize for being too close to outer boundary
+    boundary_penalty = 0
+    for vertices in hexagons:
+        for vx, vy in vertices:
+            distance_to_center = sqrt(vx*vx + vy*vy)
+            # Penalize if closer than 0.5 to boundary
+            if distance_to_center > outer_side_length_guess - 0.5:
+                boundary_penalty += 10 * (distance_to_center - (outer_side_length_guess - 0.5))
+    
+    return -(penalty + boundary_penalty)
+
+def objective_function(solution):
+    """Objective function to minimize (negative of fitness)"""
+    # This is called with a fixed outer_hex_side_length
+    # We'll use a guess and let the optimizer find the best arrangement
+    outer_side_length_guess = 4.0  # Starting guess
+    return -evaluate_solution(solution, outer_side_length_guess)
+
+def construct_hexagon_positions():
+    """Construct an initial configuration using a more sophisticated layout"""
+    # Start with a central hexagon
+    positions = [[0, 0, 0]]  # Center hexagon at origin, no rotation
+    
+    # Arrange 10 surrounding hexagons in a pattern that maximizes packing efficiency
+    # Using a combination of direct neighbors and diagonals
+    directions = [
+        (2, 0, 0),      # Right
+        (-2, 0, 0),     # Left
+        (1, sqrt(3), 0),  # Top right
+        (-1, sqrt(3), 0), # Top left
+        (1, -sqrt(3), 0), # Bottom right
+        (-1, -sqrt(3), 0), # Bottom left
+        (3, 0, 0),      # Far right
+        (-3, 0, 0),     # Far left
+        (2, 2*sqrt(3), 0), # Upper diagonal
+        (-2, 2*sqrt(3), 0), # Upper left diagonal
+    ]
+    
+    for dx, dy, rot in directions:
+        positions.append([dx, dy, rot])
+    
+    return np.array(positions).flatten()
+
+def optimize_hexagon_arrangement():
+    """Main optimization routine"""
+    # Initialize with a good starting configuration
+    initial_positions = construct_hexagon_positions()
+    
+    # Define bounds for each variable (x, y, angle for each of 11 hexagons)
+    bounds = []
+    for _ in range(11):  # 11 hexagons
+        bounds.extend([
+            (-10, 10),  # x-coordinate
+            (-10, 10),  # y-coordinate
+            (-180, 180) # angle in degrees
+        ])
+    
+    # Run differential evolution optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        maxiter=200,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        disp=False
+    )
+    
+    # Extract optimized solution
+    optimized_solution = result.x
+    
+    # Refine using local search
+    refined_solution = local_refinement(optimized_solution, bounds)
+    
+    return refined_solution
+
+def local_refinement(initial_solution, bounds):
+    """Apply local optimization to refine the solution"""
+    # Simple gradient-free refinement using Nelder-Mead
+    # For demonstration, we'll just run a few iterations manually
+    solution = initial_solution.copy()
+    
+    # Simple neighborhood search
+    for _ in range(100):
+        # Try small perturbations
+        new_solution = solution.copy()
+        
+        # Perturb one random hexagon at a time
+        hex_idx = np.random.randint(0, 11)
+        param_idx = hex_idx * 3
+        
+        # Add small random changes
+        new_solution[param_idx] += np.random.normal(0, 0.1)  # x
+        new_solution[param_idx+1] += np.random.normal(0, 0.1)  # y  
+        new_solution[param_idx+2] += np.random.uniform(-5, 5)  # angle
+        
+        # Apply bounds
+        for i in range(len(bounds)):
+            new_solution[i] = max(bounds[i][0], min(bounds[i][1], new_solution[i]))
+            
+        # Evaluate and accept if better
+        old_fitness = evaluate_solution(solution, 4.0)
+        new_fitness = evaluate_solution(new_solution, 4.0)
+        
+        if new_fitness > old_fitness:
+            solution = new_solution
+            
+    return solution
+
+# Import Point from shapely.geometry for containment checks
+from shapely.geometry import Point
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    # Set up timing
+    start_time = time.time()
+    
+    # Run optimization to find best arrangement
+    optimized_solution = optimize_hexagon_arrangement()
+    
+    # Extract inner hexagon data
+    inner_hex_data = np.zeros((11, 3))
+    for i in range(11):
+        inner_hex_data[i] = optimized_solution[3*i:3*i+3]
+    
+    # Calculate minimum outer hexagon side length needed
+    # This will take a bit more work since we need to calculate the actual 
+    # minimum bounding hexagon that contains all our hexagons
+    
+    # Get vertices of all hexagons
+    all_vertices = []
+    for i in range(11):
+        x, y, angle = optimized_solution[3*i:3*i+3]
+        vertices = hexagon_vertices(x, y, angle)
+        all_vertices.extend(vertices)
+    
+    # Find bounding circle and estimate side length
+    # Compute centroid
+    centroid_x = sum(v[0] for v in all_vertices) / len(all_vertices)
+    centroid_y = sum(v[1] for v in all_vertices) / len(all_vertices)
+    
+    # Compute maximum distance from centroid to any vertex
+    max_dist = 0
+    for vx, vy in all_vertices:
+        dist = sqrt((vx - centroid_x)**2 + (vy - centroid_y)**2)
+        max_dist = max(max_dist, dist)
+    
+    # Estimate outer hexagon side length to safely contain everything
+    # Add some buffer for safety
+    outer_hex_side_length = max_dist + 1.5
+    
+    # The actual optimal side length would require more precise computation,
+    # but for now we'll use the approximation from our solution quality
+    # Refine the side length slightly based on the solution quality
+    # Try to get a better estimate by checking actual constraints
+    final_side_length = compute_actual_min_side_length(optimized_solution)
+    
+    # Final outer hexagon data (centered at origin, no rotation)
+    outer_hex_data = np.array([0, 0, 0])
+    
+    # Return results
+    end_time = time.time()
+    
+    # The benchmark ratio should be calculated based on the actual 
+    # outer hexagon side length achieved
+    inv_side_length = 1.0 / final_side_length
+    
+    return inner_hex_data, outer_hex_data, final_side_length
+
+def compute_actual_min_side_length(solution):
+    """Compute the true minimum side length of outer hexagon that contains all inner hexagons"""
+    # This is a simplified estimation - in practice this might involve convex hull or 
+    # more complex geometric computation
+    all_vertices = []
+    for i in range(11):
+        x, y, angle = solution[3*i:3*i+3]
+        vertices = hexagon_vertices(x, y, angle)
+        all_vertices.extend(vertices)
+    
+    # Find bounding box
+    min_x = min(v[0] for v in all_vertices)
+    max_x = max(v[0] for v in all_vertices)
+    min_y = min(v[1] for v in all_vertices)
+    max_y = max(v[1] for v in all_vertices)
+    
+    # Estimate side length based on diameter
+    width = max_x - min_x
+    height = max_y - min_y
+    
+    # For hexagon, side length ~ diameter/1.732 (approx 2/sqrt(3))
+    estimated_side = max(width, height) / 1.732
+    
+    # Add buffer and ensure it's reasonable
+    return max(estimated_side + 1.0, 3.5)
+
+# EVOLVE-BLOCK-END

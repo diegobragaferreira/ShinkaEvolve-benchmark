@@ -1,0 +1,209 @@
+<NAME>
+add_multi_scale_gaussian_initialization
+</NAME>
+
+<DESCRIPTION>
+This change implements a multi-scale Gaussian pattern construction for initial function generation. Instead of using simple random or patterned initialization, we create a structured initialization that builds upon multiple scales of Gaussian bumps. This approach leverages the mathematical insight that structured patterns with varying spatial frequencies often produce better convolution behavior. The multi-scale approach ensures we capture both broad trends and fine details that contribute to maximizing C₂.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_patterned_initial_function(n_steps):
+    """Generate an initial function based on mathematical insight about optimal convolution shapes"""
+    # Create a function designed to produce uniform convolution profiles
+    # This pattern balances peak and flat regions to encourage good C2 values
+
+    f_values = []
+
+    # Create a pattern that starts low, rises to a peak, then falls back down
+    # but with enough variation to be interesting
+    half = n_steps // 2
+    quarter = n_steps // 4
+
+    # Base pattern with multiple regions
+    for i in range(n_steps):
+        if i < quarter:
+            # Rising edge
+            f_values.append(i / quarter)
+        elif i < half:
+            # Peak region
+            f_values.append(1.0)
+        elif i < 3*quarter:
+            # Falling edge
+            f_values.append((3*quarter - i) / quarter)
+        else:
+            # Low tail
+            f_values.append((n_steps - i) / quarter)
+
+    # Apply some smoothing to reduce sharp transitions
+    smoothed = []
+    for i in range(n_steps):
+        if i == 0 or i == n_steps - 1:
+            smoothed.append(f_values[i])
+        else:
+            # Weighted average
+            smoothed.append(0.2 * f_values[i-1] + 0.6 * f_values[i] + 0.2 * f_values[i+1])
+
+    # Normalize to ensure reasonable magnitude
+    total_area = sum(smoothed) * (0.5 / n_steps)
+    if total_area > 0:
+        smoothed = [x / total_area * 2.0 for x in smoothed]
+
+    return smoothed
+=======
+def generate_multiscale_gaussian_initial_function(n_steps):
+    """Generate an initial function using multi-scale Gaussian pattern construction.
+
+    This creates a structured pattern with multiple Gaussian bumps at different scales
+    to encourage good convolution behavior across various spatial frequencies.
+    """
+    # Create base function with multi-scale Gaussian components
+    f_values = np.zeros(n_steps)
+
+    # Define multiple scales of Gaussian bumps
+    scales = [n_steps // 20, n_steps // 15, n_steps // 10, n_steps // 8]
+    centers = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+
+    # Create Gaussian bumps at different scales and positions
+    for scale in scales:
+        for center in centers:
+            # Create Gaussian bump
+            x = np.arange(n_steps)
+            gauss = np.exp(-0.5 * ((x - center) / scale) ** 2)
+            f_values += gauss * np.random.uniform(0.5, 1.5)  # Random amplitude
+
+    # Add some additional structured variation
+    # Create a base pattern that encourages uniformity in convolution
+    base_pattern = np.sin(np.linspace(0, 4*np.pi, n_steps)) * 0.3 + 0.7
+    f_values += base_pattern * 0.5
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to control the overall magnitude
+    total = np.sum(f_values)
+    if total > 0:
+        f_values = f_values / total * 5.0
+
+    return f_values.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_initialization_strategy
+</NAME>
+
+<DESCRIPTION>
+This change replaces the existing patterned initialization with the new multi-scale Gaussian initialization function. The new approach provides better structural diversity and mathematical grounding for producing high C₂ values by creating patterns that are more likely to generate favorable autoconvolution profiles with good balance between peaks and uniform regions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Generate initial function using pattern-based approach
+            if res <= 300:
+                # For smaller problems, use patterned construction
+                f_values = generate_patterned_initial_function(res)
+            else:
+                # For larger problems, use a more structured approach
+                f_values = generate_patterned_initial_function(res)
+                # Add some noise for exploration
+                noise_level = 0.1
+                for i in range(len(f_values)):
+                    if np.random.random() < 0.3:
+                        f_values[i] *= (1 + np.random.normal(0, noise_level))
+=======
+            # Generate initial function using multi-scale Gaussian construction
+            f_values = generate_multiscale_gaussian_initial_function(res)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_local_refinement
+</NAME>
+
+<DESCRIPTION>
+This change enhances the local refinement process by implementing a more sophisticated coordinate-wise search that includes checking for improvements in both directions with adaptive step sizes. This improves the precision of local optimization and helps escape local minima more effectively by exploring multiple perturbation magnitudes systematically.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Refinement loop
+    for coord_iter in range(20):
+        if time.time() - start_time > max_time:
+            break
+
+        improved = False
+        for i in range(len(refined_individual)):
+            if time.time() - start_time > max_time:
+                break
+
+            # Try small perturbations
+            original_value = refined_individual[i]
+            step_sizes = [0.01, 0.05, 0.1]
+
+            for step in step_sizes:
+                # Try increasing and decreasing
+                for direction in [1, -1]:
+                    if time.time() - start_time > max_time:
+                        break
+                    test_individual = refined_individual.copy()
+                    new_val = original_value + direction * step
+                    test_individual[i] = max(0, new_val)
+
+                    new_c2 = compute_c2(test_individual.tolist())
+                    if new_c2 > old_c2:
+                        refined_individual = test_individual
+                        old_c2 = new_c2
+                        improved = True
+
+        if not improved:
+            break
+=======
+    # Refinement loop with enhanced local search
+    for coord_iter in range(20):
+        if time.time() - start_time > max_time:
+            break
+
+        improved = False
+        # Sample a subset of indices for more efficient search
+        search_indices = np.random.choice(len(refined_individual),
+                                        min(20, len(refined_individual)//2),
+                                        replace=False)
+
+        for i in search_indices:
+            if time.time() - start_time > max_time:
+                break
+
+            original_value = refined_individual[i]
+
+            # Try multiple step sizes for adaptive search
+            step_sizes = [0.005, 0.01, 0.02, 0.05, 0.1]
+
+            # Try both positive and negative perturbations
+            for step in step_sizes:
+                for direction in [1, -1]:
+                    if time.time() - start_time > max_time:
+                        break
+                    test_individual = refined_individual.copy()
+                    new_val = original_value + direction * step
+                    test_individual[i] = max(0, new_val)
+
+                    new_c2 = compute_c2(test_individual.tolist())
+                    if new_c2 > old_c2:
+                        refined_individual = test_individual
+                        old_c2 = new_c2
+                        improved = True
+
+                        # If we found improvement, break to move to next index
+                        # to avoid getting stuck in local refinements
+                        break
+                if improved:
+                    break
+
+        # Break if no improvement was found in this iteration
+        if not improved:
+            break
+>>>>>>> REPLACE
+</DIFF>

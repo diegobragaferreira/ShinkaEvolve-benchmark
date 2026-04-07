@@ -1,0 +1,241 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+from typing import List, Optional
+import random
+import time
+from scipy.optimize import minimize
+
+# Set a fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_autocorrelation_constant(sequence: List[float]) -> tuple[float, float]:
+    """Computes the autocorrelation constant C1 and its reciprocal 1/C1."""
+    if not sequence or sum(sequence) < 0.01:
+        return (float('inf'), 0.0)
+
+    n = len(sequence)
+    # Use FFT-based convolution for efficiency O(n log n)
+    conv = np.convolve(sequence, sequence, mode='full')
+    max_conv = np.max(conv)
+    sum_seq = sum(sequence)
+
+    if sum_seq == 0:
+        return (float('inf'), 0.0)
+
+    c1 = 2 * n * max_conv / (sum_seq ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return (c1, inv_c1)
+
+def generate_step_function(length: int, num_steps: int) -> List[float]:
+    """Generate a step function with specified number of steps."""
+    sequence = [0.0] * length
+    # Place steps at strategic positions to avoid correlation peaks
+    step_positions = []
+    for i in range(num_steps):
+        pos = int((i + 1) * length / (num_steps + 1))
+        step_positions.append(pos)
+    step_positions.sort()
+
+    # Assign heights that decrease towards the end to reduce convolution peaks
+    for i, pos in enumerate(step_positions):
+        if i < len(step_positions) - 1:
+            end_pos = step_positions[i+1]
+        else:
+            end_pos = length
+        # Decreasing heights to reduce autocorrelation peaks
+        height = 100.0 * (1.0 - i / (num_steps - 1)) if num_steps > 1 else 100.0
+        sequence[pos:end_pos] = [height] * (end_pos - pos)
+
+    return sequence
+
+def generate_population(population_size: int, length_range=(100, 1000)) -> List[List[float]]:
+    """Generate a diverse population with step functions."""
+    population = []
+
+    # Generate sequences with varying number of steps
+    for i in range(population_size):
+        n = random.randint(*length_range)
+        num_steps = random.randint(2, max(20, n // 10))
+        sequence = generate_step_function(n, num_steps)
+        population.append(sequence)
+
+    return population
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Directional improvement using gradient-free search."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Use FFT for faster convolution
+    try:
+        conv_result = np.real(ifft(fft(normalized_sequence, 2*n-1) *
+                                   np.conj(fft(normalized_sequence, 2*n-1))))
+        rhs = np.max(conv_result[:2*n-1])
+    except Exception as e:
+        print(f"Error during FFT convolution: {e}")
+        return None
+
+    # Solve linear program for direction
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    # Calculate new sequence with small step in the direction of improvement
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, g_fun)
+    ]
+    return new_sequence
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+
+    # Precompute the convolution constraint matrix using explicit loop
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints: b_i >= 0
+    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+    b_ub_nonneg = np.zeros(n)  # Zero vector
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    try:
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        if result.success:
+            g_sequence = result.x
+            return g_sequence
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def adaptive_tournament_selection(population: List[List[float]],
+                                fitness_scores: List[float],
+                                generation: int,
+                                population_size: int) -> List[float]:
+    """Perform adaptive tournament selection."""
+    # Determine tournament size based on generation and population diversity
+    if generation <= 20:  # Early generations
+        tournament_size = min(9, max(5, population_size // 4))
+    elif generation >= 50:  # Later generations
+        tournament_size = min(4, max(3, population_size // 8))
+    else:  # Middle generations
+        tournament_size = 5
+
+    # Perform tournament selection
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+
+    return population[winner_idx].copy()
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    # Start with a diverse population
+    population_size = 15
+    population = generate_population(population_size)
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    stagnation_count = 0
+    max_stagnation = 20
+    max_generations = 100
+
+    for generation in range(max_generations):
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for seq in population:
+            c1, inv_c1 = compute_autocorrelation_constant(seq)
+            fitness_scores.append(inv_c1)
+
+        # Update best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Early termination if we've achieved good performance
+        if best_inv_c1 > 0.6653 and stagnation_count > 10:
+            break
+
+        # Selection and reproduction
+        selected_parents = []
+
+        # Tournament selection for better exploration
+        for _ in range(population_size // 2):
+            selected_parents.append(adaptive_tournament_selection(population, fitness_scores, generation, population_size))
+
+        # Elitism: keep the best individual
+        selected_parents.insert(0, best_sequence.copy())
+
+        # Create new population
+        new_population = [best_sequence.copy()]
+
+        # Crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Uniform crossover
+            child = []
+            for i in range(min(len(parent1), len(parent2))):
+                if random.random() < 0.5:
+                    child.append(parent1[i])
+                else:
+                    child.append(parent2[i])
+
+            # Mutation
+            for i in range(len(child)):
+                if random.random() < 0.1:
+                    child[i] = max(0.01, child[i] + random.gauss(0, 1.0))
+
+            new_population.append(child)
+
+        # Replace old population with new one
+        population = new_population[:population_size]
+
+        # Debug output every few generations
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best inv_C1 = {best_inv_c1:.4f}")
+
+    return best_sequence if best_sequence is not None else generate_step_function(100, 5)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

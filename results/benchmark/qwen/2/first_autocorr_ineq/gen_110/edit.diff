@@ -1,0 +1,399 @@
+--- a/original.py
++++ b/original.py
+@@ -1,395 +1,395 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy import optimize
+ from scipy.fft import fft, ifft
+ import random
+ import warnings
+-from typing import List, Tuple
++from typing import List
+ 
+ # Set random seed for reproducibility
+ np.random.seed(42)
+ 
+ def compute_convolution_fft(seq1, seq2):
+     """Compute convolution using FFT for efficiency."""
+     n = len(seq1)
+     # Zero-pad to avoid circular convolution effects
+     padded_length = 2 * n - 1
+     fft_seq1 = fft(seq1, padded_length)
+     fft_seq2 = fft(seq2, padded_length)
+     conv_result = ifft(fft_seq1 * np.conj(fft_seq2)).real
+     return conv_result[:n]
+ 
+ def compute_c1(sequence):
+     """Compute C1 value for a given sequence."""
+     n = len(sequence)
+     if n < 1:
+         return float('inf')
+ 
+     sum_a = np.sum(sequence)
+     if sum_a < 1e-10:
+         return float('inf')
+ 
+     # Compute autoconvolution
+     conv_result = compute_convolution_fft(sequence, sequence)
+     max_conv = np.max(conv_result)
+ 
+     # Compute C1
+     c1 = 2 * n * max_conv / (sum_a ** 2)
+     return c1
+ 
+ def evaluate_sequence(sequence):
+     """Evaluate a sequence by computing its inverse C1."""
+     c1 = compute_c1(sequence)
+     if c1 == float('inf'):
+         return 0.0  # Invalid sequence gets low score
+     return 1.0 / c1  # Higher inverse C1 is better
+ 
+ def spectral_analysis(sequence):
+     """
+     Perform spectral analysis of a sequence to understand its frequency characteristics.
+     Returns dominant frequencies and power distribution.
+     """
+     n = len(sequence)
+     if n < 1:
+         return np.array([]), np.array([])
+     
+     # Compute discrete Fourier transform
+     fft_coeffs = fft(sequence)
+     # Power spectrum (magnitude squared)
+     power_spectrum = np.abs(fft_coeffs)**2
+     
+     # Return frequency indices and corresponding powers
+     freq_indices = np.arange(n)
+     return freq_indices, power_spectrum
+ 
+ def get_spectral_guidance(sequence: List[float]) -> List[float]:
+     """
+     Generate a spectral-guided direction for sequence modification.
+     This helps in guiding evolution towards better frequency characteristics.
+     """
+     try:
+         n = len(sequence)
+         if n < 1:
+             return sequence
+             
+         # Get spectral information
+         freq_indices, power_spectrum = spectral_analysis(sequence)
+         
+         # Identify dominant frequencies (those with significant power)
+         threshold = np.percentile(power_spectrum, 70)  # Top 30% of power
+         dominant_freqs = freq_indices[power_spectrum > threshold]
+         
+         # Create a modified sequence based on spectral features
+         guided_sequence = np.array(sequence).copy()
+         
+         # Apply a smoothing filter focused on dominant frequencies
+         # This encourages smoothness in regions that contribute most to convolution
+         if len(dominant_freqs) > 0:
+             # Create a frequency domain mask
+             mask = np.zeros(n)
+             mask[dominant_freqs] = 1.0
+             
+             # Transform to frequency domain
+             seq_fft = fft(guided_sequence)
+             
+             # Apply mask (low-pass filter based on dominant frequencies)
+             filtered_fft = seq_fft * mask
+             
+             # Transform back to time domain
+             guided_sequence = np.real(ifft(filtered_fft))
+             
+             # Ensure non-negativity
+             guided_sequence = np.maximum(guided_sequence, 0)
+         
+         return guided_sequence.tolist()
+         
+     except Exception as e:
+         # Fallback to original sequence if spectral guidance fails
+         return sequence
+ 
+ def get_good_direction_to_move_into(
+     sequence: list[float],
+ ) -> list[float] | None:
+     """Returns the direction to move into the sequence using spectral guidance."""
+     try:
+         n = len(sequence)
+         if n < 1:
+             return None
+ 
+         # Apply spectral guidance to get a better starting point
+         guided_seq = get_spectral_guidance(sequence)
+         
+         # Normalize the sequence appropriately for LP solving
+         sum_sequence = np.sum(guided_seq)
+         if sum_sequence < 1e-10:
+             return None
+ 
+         # Normalize sequence with sqrt(2*n) scaling factor
+         normalized_sequence = np.array(guided_seq) * np.sqrt(2 * n) / sum_sequence
+ 
+         # Compute convolution using FFT for efficiency
+         conv_result = compute_convolution_fft(normalized_sequence, normalized_sequence)
+         rhs = np.max(conv_result)
+ 
+         # Solve the LP problem
+         g_fun = solve_convolution_lp(normalized_sequence, rhs)
+ 
+         if g_fun is None:
+             return None
+ 
+         # Normalize the result again
+         sum_g = np.sum(g_fun)
+         if sum_g < 1e-10:
+             return None
+ 
+         normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g
+ 
+         # Use adaptive step size based on sequence complexity
+         t = 0.01 / (1.0 + 0.001 * n)  # Decrease step size with increasing n
+ 
+         # Create new sequence with adaptive mixing
+         new_sequence = (1 - t) * np.array(guided_seq) + t * normalized_g_fun
+ 
+         # Ensure non-negativity
+         new_sequence = np.maximum(new_sequence, 0)
+ 
+         return new_sequence.tolist()
+ 
+     except Exception as e:
+         warnings.warn(f"Error in get_good_direction_to_move_into: {str(e)}")
+         return None
+ 
+ def solve_convolution_lp(f_sequence, rhs):
+     """Solves the convolution LP for a given sequence and RHS."""
+     try:
+         n = len(f_sequence)
+         if n < 1:
+             return None
+ 
+         # Precompute convolution constraints using FFT-based approach
+         # To reduce computation, we'll use a more efficient constraint matrix construction
+ 
+         # Constraint matrix A_ub such that A_ub * x <= b_ub
+         # For each convolution index k, generate constraint coefficients
+         # We'll use a more compact representation
+ 
+         # Number of convolution constraints (2n-1)
+         num_constraints = 2 * n - 1
+ 
+         # Preallocate constraint matrix
+         a_ub = np.zeros((num_constraints, n))
+         b_ub = np.zeros(num_constraints)
+ 
+         # Fill constraint matrix efficiently
+         # Using vectorized operations for better performance
+         for k in range(num_constraints):
+             # Generate convolution coefficients for constraint k
+             # This is done by sliding the sequence over itself
+             coefficients = np.zeros(n)
+             for i in range(n):
+                 j = k - i
+                 if 0 <= j < n:
+                     coefficients[j] = f_sequence[i]
+             a_ub[k] = coefficients
+             b_ub[k] = rhs
+ 
+         # Add non-negativity constraints
+         a_ub_nonneg = -np.eye(n)
+         b_ub_nonneg = np.zeros(n)
+ 
+         # Combine constraints
+         a_ub = np.vstack([a_ub, a_ub_nonneg])
+         b_ub = np.hstack([b_ub, b_ub_nonneg])
+ 
+         # Define objective function (minimize -sum x, i.e., maximize sum x)
+         c = -np.ones(n)
+ 
+         # Solve linear programming problem with multiple fallbacks
+         result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+ 
+         if result.success:
+             return result.x
+         else:
+             # Try with another solver method
+             try:
+                 result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+                 if result.success:
+                     return result.x
+             except:
+                 pass
+             # If everything fails, return None
+             return None
+ 
+     except Exception as e:
+         warnings.warn(f"Error in solve_convolution_lp: {str(e)}")
+         return None
+ 
+ def create_structured_sequence(n):
+     """Create a structured sequence that's more likely to yield good results."""
+     # Use a more sophisticated approach to mix multiple patterns
+     # This includes exponential decay, cosine envelope, and random components
+     
+     # Pattern 1: Exponential decay
+     exp_decay = np.exp(-np.linspace(0, 3, n))
+     
+     # Pattern 2: Cosine envelope for smoothness
+     cosine_env = 0.5 + 0.5 * np.cos(np.linspace(0, 2*np.pi, n))
+     
+     # Pattern 3: Random component with structured bias
+     random_part = np.random.rand(n)
+     
+     # Blend patterns with different weights
+     base_seq = 0.4 * exp_decay + 0.3 * cosine_env + 0.3 * random_part
+     
+     # Normalize and rescale
+     base_seq = base_seq / np.sum(base_seq) * 10
+     
+     # Ensure non-negativity and bounds
+     base_seq = np.clip(base_seq, 0, 1000)
+ 
+     return base_seq.tolist()
+ 
+ def mutate_sequence(sequence, mutation_rate=0.1, diversity_factor=1.0):
+     """Apply random mutation to a sequence with increased control."""
+     mutated = sequence.copy()
+     n = len(mutated)
+ 
+     # Adjust mutation rate based on diversity and sequence length
+     effective_mutation_rate = mutation_rate * diversity_factor
+     
+     # Determine number of mutations
+     num_mutations = max(1, int(n * effective_mutation_rate))
+ 
+     for _ in range(num_mutations):
+         idx = random.randint(0, n - 1)
+         # Apply multiplicative mutation to preserve non-negativity
+         change_factor = random.uniform(0.7, 1.3)
+         mutated[idx] *= change_factor
+         mutated[idx] = max(0, mutated[idx])
+ 
+     return mutated
+ 
+ def tournament_selection(population, fitnesses, k=3):
+     """Select an individual from population using tournament selection."""
+     if len(population) < k:
+         selected_idx = np.argmax(fitnesses)
+         return population[selected_idx]
+ 
+     tournament_indices = random.sample(range(len(population)), k)
+     tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+     winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+     return population[winner_idx]
+ 
+ def calculate_diversity(population):
+     """Calculate diversity of the population."""
+     if len(population) < 2:
+         return 0.0
+     # Flatten all sequences into one big array
+     flat_array = np.concatenate(population)
+     std_dev = np.std(flat_array)
+     # Normalize by the mean
+     mean_val = np.mean(flat_array)
+     return std_dev / (mean_val + 1e-10) if mean_val != 0 else 0.0
+ 
+ def spectral_evolutionary_search():
+     """Run spectral-guided evolutionary optimization."""
+     population_size = 30
+     generations = 40
+     elite_size = 6
+     
+     # Initialize population with diverse sequences
+     population = []
+     for _ in range(population_size):
+         # Create sequences with varying lengths
+         n = random.randint(60, 800)
+         sequence = create_structured_sequence(n)
+         population.append(sequence)
+ 
+     # Evolution loop
+     for gen in range(generations):
+         # Evaluate fitness for current population
+         fitnesses = [evaluate_sequence(seq) for seq in population]
+ 
+         # Calculate diversity for adaptive mutation
+         diversity = calculate_diversity(population)
+         
+         # Preserve elite individuals
+         elite_indices = np.argsort(fitnesses)[-elite_size:]
+         elite_individuals = [population[i] for i in elite_indices]
+ 
+         # Create new population
+         new_population = elite_individuals[:]
+ 
+         # Fill rest of population through selection, crossover, and mutation
+         while len(new_population) < population_size:
+             # Tournament selection for parents
+             parent1 = tournament_selection(population, fitnesses)
+             parent2 = tournament_selection(population, fitnesses)
+ 
+             # Crossover: weighted average with spectral guidance
+             child = []
+             min_len = min(len(parent1), len(parent2))
+             for i in range(min_len):
+                 # Blend parents with spectral bias
+                 blend_factor = random.uniform(0.25, 0.75)
+                 val = blend_factor * parent1[i] + (1 - blend_factor) * parent2[i]
+                 child.append(val)
+             
+             # Extend child with remaining elements
+             if len(parent1) > min_len:
+                 child.extend(parent1[min_len:])
+             elif len(parent2) > min_len:
+                 child.extend(parent2[min_len:])
+ 
+             # Mutation with adaptive rate
+             mutation_rate = max(0.05, 0.1 - gen * 0.002)
+             child = mutate_sequence(child, mutation_rate, diversity)
+ 
+             # Ensure minimum sum requirement
+             if sum(child) < 0.01:
+                 child[0] = 0.1
+ 
+             new_population.append(child)
+ 
+         population = new_population
+ 
+     # Return best individual from final population
+     final_fitnesses = [evaluate_sequence(seq) for seq in population]
+     best_idx = np.argmax(final_fitnesses)
+     return population[best_idx]
+ 
+ def search_for_best_sequence() -> list[float]:
+     """Main function to search for the best coefficient sequence using spectral evolutionary optimization."""
+     try:
+         # Stage 1: Spectral evolutionary search
+         best_sequence = spectral_evolutionary_search()
+ 
+         # Stage 2: Refinement with spectral-guided local search
+         for _ in range(6):
+             refined = get_good_direction_to_move_into(best_sequence)
+             if refined is not None:
+                 best_sequence = refined
+             else:
+                 break
+ 
+         # Ensure minimum sum requirement
+         if sum(best_sequence) < 0.01:
+             best_sequence[0] = 0.1
+             
+         return best_sequence
+ 
+     except Exception as e:
+         warnings.warn(f"Error in search_for_best_sequence: {str(e)}")
+         # Fallback to simple approach
+         try:
+             n = np.random.randint(100, 1000)
+             base_seq = create_structured_sequence(n)
+             return base_seq
+         except:
+             return [np.random.random() for _ in range(100)]
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

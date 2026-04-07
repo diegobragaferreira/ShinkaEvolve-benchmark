@@ -1,0 +1,276 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, cdist
+import math
+import time
+from typing import Tuple, Optional
+from functools import partial
+
+def fibonacci_sphere(samples: int = 14) -> np.ndarray:
+    """Generate points distributed evenly on a sphere using Fibonacci method"""
+    points = []
+    phi = math.pi * (3. - math.sqrt(5.))  # golden angle in radians
+    
+    for i in range(samples):
+        y = 1 - (i / float(samples - 1)) * 2  # y goes from 1 to -1
+        radius = math.sqrt(1 - y * y)  # radius at y
+        
+        theta = phi * i  # golden angle increment
+        
+        x = math.cos(theta) * radius
+        z = math.sin(theta) * radius
+        
+        points.append([x, y, z])
+        
+    return np.array(points)
+
+def calculate_ratio(points: np.ndarray) -> float:
+    """Calculate the min/max distance ratio"""
+    if len(points) < 2:
+        return 0.0
+        
+    try:
+        distances = pdist(points)
+        
+        if len(distances) == 0:
+            return 0.0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        # Avoid division by zero
+        if d_max <= 0:
+            return 0.0
+            
+        return d_min / d_max
+    except Exception:
+        return 0.0
+
+def apply_constraints(points: np.ndarray) -> np.ndarray:
+    """Ensure points stay within unit cube [0,1]^3"""
+    return np.clip(points, 0, 1)
+
+def perturb_point(point: np.ndarray, delta: float = 0.01) -> np.ndarray:
+    """Perturb a single point slightly"""
+    noise = np.random.normal(0, delta, 3)
+    return point + noise
+
+def adaptive_perturbation_temperature(temperature: float, iteration: int) -> float:
+    """Adaptive perturbation size based on temperature and iteration"""
+    base_perturbation = 0.005
+    return base_perturbation * (1.0 + 0.5 * (temperature / 1.0))
+
+def simulate_annealing_step(
+    points: np.ndarray, 
+    current_ratio: float, 
+    temperature: float,
+    iteration: int,
+    max_iter: int
+) -> Tuple[np.ndarray, float, bool]:
+    """Perform a single simulated annealing step"""
+    # Perturb one random point
+    idx = np.random.randint(0, len(points))
+    old_point = points[idx].copy()
+    
+    # Adaptive perturbation based on temperature and iteration
+    perturbation_size = adaptive_perturbation_temperature(temperature, iteration)
+    new_point = perturb_point(old_point, perturbation_size)
+    points[idx] = new_point
+    
+    # Apply constraints
+    points = apply_constraints(points)
+    
+    # Calculate new ratio
+    new_ratio = calculate_ratio(points)
+    
+    # Accept or reject based on Metropolis criterion
+    accepted = False
+    if new_ratio > current_ratio:
+        current_ratio = new_ratio
+        accepted = True
+    else:
+        # Accept with probability based on temperature
+        delta = new_ratio - current_ratio
+        if np.random.rand() < np.exp(delta / temperature):
+            current_ratio = new_ratio
+            accepted = True
+        else:
+            # Revert the change
+            points[idx] = old_point
+    
+    return points, current_ratio, accepted
+
+def local_refinement(points: np.ndarray, max_iter: int = 50) -> np.ndarray:
+    """Apply simple local refinement to improve a point configuration"""
+    current_points = points.copy()
+    current_ratio = calculate_ratio(current_points)
+    
+    for _ in range(max_iter):
+        best_move = None
+        best_ratio_change = 0
+        
+        # Try to improve each point
+        for i in range(len(current_points)):
+            original_point = current_points[i].copy()
+            
+            # Try small moves in several directions
+            for _ in range(10):  # Sample several directions
+                # Generate small random perturbation
+                perturbation = np.random.normal(0, 0.001, 3)
+                
+                # Apply perturbation
+                new_point = original_point + perturbation
+                
+                # Constrain to unit cube
+                new_point = np.clip(new_point, 0, 1)
+                
+                # Test this move
+                test_points = current_points.copy()
+                test_points[i] = new_point
+                new_ratio = calculate_ratio(test_points)
+                
+                # Check improvement
+                ratio_change = new_ratio - current_ratio
+                
+                if ratio_change > best_ratio_change:
+                    best_ratio_change = ratio_change
+                    best_move = (i, new_point.copy())
+        
+        # Apply the best move if it improves the ratio
+        if best_move is not None and best_ratio_change > 1e-10:
+            idx, new_point = best_move
+            current_points[idx] = new_point
+            current_ratio += best_ratio_change
+        else:
+            break  # No significant improvement
+    
+    return current_points
+
+def adaptive_cooling_schedule(temperature: float, 
+                            recent_acceptance: list, 
+                            window_size: int = 50) -> Tuple[float, float]:
+    """Adaptive cooling based on recent acceptance rates"""
+    alpha = 0.999  # Base cooling rate
+    
+    if len(recent_acceptance) > window_size:
+        recent_acceptance = recent_acceptance[-window_size:]
+        acceptance_rate = sum(recent_acceptance) / len(recent_acceptance)
+        
+        # Adjust cooling based on acceptance rate
+        if acceptance_rate < 0.2:  # Too few acceptances
+            alpha = max(0.9995, alpha * 1.02)  # Accelerate cooling
+        elif acceptance_rate > 0.6:  # Too many acceptances
+            alpha = min(0.9999, alpha * 0.98)  # Slow down cooling
+    
+    new_temperature = max(temperature * alpha, 1e-8)
+    return new_temperature, alpha
+
+def optimize_single_start(seed: int, 
+                         num_points: int = 14, 
+                         dimension: int = 3,
+                         max_iter: int = 15000) -> Tuple[np.ndarray, float]:
+    """Perform optimization from a single starting configuration"""
+    np.random.seed(seed)
+    
+    # Initialize using Fibonacci sphere method with slight random perturbation
+    initial_points = fibonacci_sphere(num_points)
+    # Add small random perturbations to avoid perfect symmetry
+    initial_points += np.random.normal(0, 0.001, (num_points, dimension))
+    
+    # Scale and shift to unit cube [0.05, 0.95]^3 to avoid boundary issues
+    initial_points = initial_points * 0.9 + 0.05
+    
+    # Apply constraints to ensure they're within bounds
+    points = apply_constraints(initial_points)
+    
+    # Simulated Annealing parameters
+    current_ratio = calculate_ratio(points)
+    best_ratio_local = current_ratio
+    best_points_local = points.copy()
+    
+    # Cooling schedule parameters
+    T = 1.0  # Initial temperature
+    T_min = 1e-8  # Minimum temperature
+    alpha = 0.999  # Cooling rate
+    iter_without_improvement = 0
+    max_no_improvement = 1500  # Early stopping threshold
+    
+    # Track recent improvements for adaptive cooling
+    recent_acceptance = []
+    improvement_window = 50
+    
+    # Local refinement parameters
+    refine_frequency = 1000  # How often to attempt local refinement
+    refine_iterations = 50   # Number of local refinement steps
+    
+    for iteration in range(max_iter):
+        points, new_ratio, accepted = simulate_annealing_step(
+            points, current_ratio, T, iteration, max_iter
+        )
+        
+        # Update tracking
+        current_ratio = new_ratio
+        recent_acceptance.append(1 if accepted else 0)
+        
+        if accepted:
+            if new_ratio > best_ratio_local:
+                best_ratio_local = new_ratio
+                best_points_local = points.copy()
+            iter_without_improvement = 0
+        else:
+            iter_without_improvement += 1
+            
+        # Update temperature with adaptive cooling
+        T, alpha = adaptive_cooling_schedule(T, recent_acceptance, improvement_window)
+        
+        # Periodic local refinement to polish the solution
+        if iteration % refine_frequency == 0 and iteration > 0:
+            refined_points = local_refinement(best_points_local.copy(), refine_iterations)
+            refined_ratio = calculate_ratio(refined_points)
+            if refined_ratio > best_ratio_local:
+                best_ratio_local = refined_ratio
+                best_points_local = refined_points.copy()
+        
+        # Early stopping if no improvement
+        if iter_without_improvement > max_no_improvement:
+            break
+            
+    return best_points_local, best_ratio_local
+
+def run_multi_start_optimization(num_points: int = 14, 
+                                dimension: int = 3,
+                                num_starts: int = 6) -> np.ndarray:
+    """Run multi-start optimization to find best configuration"""
+    seeds = [42, 123, 456, 789, 999, 555]
+    
+    best_ratio = 0.0
+    best_points = None
+    
+    for seed in seeds[:num_starts]:
+        try:
+            points, ratio = optimize_single_start(seed, num_points, dimension)
+            
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = points.copy()
+        except Exception:
+            continue
+    
+    # Final validation
+    if best_points is None:
+        # Fallback to random initialization if something went wrong
+        np.random.seed(42)
+        best_points = np.random.rand(num_points, dimension)
+    
+    return best_points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    return run_multi_start_optimization(num_points=14, dimension=3)
+
+# EVOLVE-BLOCK-END

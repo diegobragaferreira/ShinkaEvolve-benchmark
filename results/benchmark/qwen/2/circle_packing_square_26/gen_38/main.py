@@ -1,0 +1,251 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from deap import base, creator, tools, algorithms
+import math
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+
+    # Problem parameters
+    N_CIRCLES = 26
+    POP_SIZE = 100
+    N_GEN = 200
+    MUT_PB_INIT = 0.1
+    MUT_PB_FINAL = 0.01
+    CROSSOVER_PB = 0.8
+
+    # Define the fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Create an individual representing a solution
+    # Each individual is a list of [x, y, r] for each circle
+    def create_individual():
+        individual = []
+        for _ in range(N_CIRCLES):
+            # x, y in [0,1], r in [0, 0.5] (max possible radius)
+            x = random.uniform(0, 1)
+            y = random.uniform(0, 1)
+            r = random.uniform(0, 0.5)
+            individual.extend([x, y, r])
+        return creator.Individual(individual)
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    def eval_circle_packing(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Calculate total radius (objective function)
+        total_radius = np.sum(circles[:, 2])
+
+        # Check constraints
+        penalty = 0
+
+        # Check containment constraints
+        for i in range(N_CIRCLES):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                penalty += 1000  # Large penalty for containment violation
+
+        # Check overlap constraints
+        for i in range(N_CIRCLES):
+            for j in range(i+1, N_CIRCLES):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    # Penalty based on how much they overlap
+                    overlap = (r1 + r2) - distance
+                    penalty += 10000 * overlap
+
+        # Return fitness: total radius minus penalties
+        return (total_radius - penalty,)
+
+    toolbox.register("evaluate", eval_circle_packing)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    def mutate_adaptive(individual):
+        # Adaptive mutation rate that decreases over generations
+        gen = getattr(mutate_adaptive, 'generation', 0)
+        mut_pb = MUT_PB_INIT - (MUT_PB_INIT - MUT_PB_FINAL) * (gen / N_GEN)
+
+        # Apply mutation with adaptive probability
+        return tools.mutGaussian(individual, mu=0, sigma=0.05, indpb=mut_pb)
+
+    # Store generation info for adaptive mutation
+    mutate_adaptive.generation = 0
+
+    toolbox.register("mutate", mutate_adaptive)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population
+    population = toolbox.population(n=POP_SIZE)
+
+    # Run evolution
+    hall_of_fame = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    def eaSimple_with_adaptive_mutation(population, toolbox, cxpb, mutpb, ngen, stats=None,
+                                       halloffame=None, verbose=__debug__):
+        """
+        Extended version of eaSimple that updates generation info for adaptive mutation
+        """
+        # Initialize generation counter for adaptive mutation
+        mutate_adaptive.generation = 0
+
+        for gen in range(ngen):
+            mutate_adaptive.generation = gen
+
+            population = algorithms.eaSimple.__wrapped__(
+                population, toolbox, cxpb, mutpb, 1, stats, halloffame, verbose
+            )[0]
+
+        return population, None  # Returning None for logbook as we don't use it
+
+    try:
+        population, logbook = eaSimple_with_adaptive_mutation(
+            population, toolbox, cxpb=CROSSOVER_PB, mutpb=MUT_PB_INIT,
+            ngen=N_GEN, stats=stats, halloffame=hall_of_fame, verbose=False
+        )
+    except Exception as e:
+        print(f"Evolution failed: {e}")
+        # Return a simple heuristic solution if evolution fails
+        return heuristic_solution()
+
+    # Get best individual
+    best_individual = hall_of_fame[0]
+    best_circles = np.array(best_individual).reshape(-1, 3)
+
+    # Ensure final validation
+    circles = validate_and_fix_solution(best_circles)
+
+    return circles
+
+def heuristic_solution() -> np.ndarray:
+    """Fallback solution using hexagonal packing heuristic"""
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Simple heuristic: place circles in a hexagonal lattice pattern
+    # This is not optimal but gives a reasonable starting point
+
+    # Try a simple grid-based approach
+    rows = int(math.ceil(math.sqrt(n)))
+    cols = int(math.ceil(n / rows))
+
+    # Adjust to ensure we have exactly 26 circles
+    spacing_x = 1.0 / (cols + 1)
+    spacing_y = 1.0 / (rows + 1)
+
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            # Radius is limited by proximity to edges
+            r = min(x, 1-x, y, 1-y) * 0.4
+            circles[idx] = [x, y, r]
+            idx += 1
+
+    # If we don't have enough circles, fill remaining positions with small radii
+    for i in range(idx, n):
+        circles[i] = [0.5, 0.5, 0.01]
+
+    return circles
+
+def validate_and_fix_solution(circles: np.ndarray) -> np.ndarray:
+    """Ensure the solution respects constraints and has reasonable values"""
+    # Make a copy to avoid modifying original
+    result = circles.copy()
+
+    # Clip radii to reasonable bounds
+    result[:, 2] = np.clip(result[:, 2], 0.001, 0.45)
+
+    # Ensure circles stay within bounds
+    for i in range(len(result)):
+        x, y, r = result[i]
+        # Clamp positions to valid range
+        x = np.clip(x, r, 1-r)
+        y = np.clip(y, r, 1-r)
+        result[i] = [x, y, r]
+
+    # Enhanced local search refinement
+    improved = True
+    iterations = 0
+    max_iterations = 20
+
+    while improved and iterations < max_iterations:
+        improved = False
+        iterations += 1
+
+        # Try small adjustments for each circle
+        for i in range(len(result)):
+            best_x, best_y, best_r = result[i]
+            best_sum = np.sum(result[:, 2])  # Original sum
+
+            # Try multiple adjustment strategies
+            adjustments = [
+                (0, 0),           # no change
+                (-0.005, 0),      # move left
+                (0.005, 0),       # move right
+                (0, -0.005),      # move down
+                (0, 0.005),       # move up
+                (-0.005, -0.005), # move diagonally
+                (0.005, 0.005),
+                (-0.005, 0.005),
+                (0.005, -0.005)
+            ]
+
+            for dx, dy in adjustments:
+                new_x = best_x + dx
+                new_y = best_y + dy
+
+                # Check if new position is valid
+                if (new_x - best_r >= 0 and new_x + best_r <= 1 and
+                    new_y - best_r >= 0 and new_y + best_r <= 1):
+
+                    # Temporarily update
+                    temp_result = result.copy()
+                    temp_result[i] = [new_x, new_y, best_r]
+
+                    # Check overlap constraints with others
+                    valid = True
+                    for j in range(len(temp_result)):
+                        if i != j:
+                            x1, y1, r1 = temp_result[i]
+                            x2, y2, r2 = temp_result[j]
+                            dist = math.sqrt((x1-x2)**2 + (y1-y2)**2)
+                            if dist < r1 + r2:
+                                valid = False
+                                break
+
+                    if valid:
+                        # Check if this actually improves the total radius
+                        new_sum = np.sum(temp_result[:, 2])
+                        if new_sum > best_sum:
+                            result[i] = [new_x, new_y, best_r]
+                            best_sum = new_sum
+                            improved = True
+
+    return result
+
+
+# EVOLVE-BLOCK-END

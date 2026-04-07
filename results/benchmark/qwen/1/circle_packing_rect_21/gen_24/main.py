@@ -1,0 +1,340 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial.distance import cdist
+from deap import base, creator, tools, algorithms
+import time
+from typing import Tuple, List
+import math
+
+# Configuration constants
+RECTANGLE_PERIMETER = 4.0
+MAX_ITERATIONS = 10000
+POPULATION_SIZE = 50
+NUM_GENERATIONS = 100
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+INITIAL_RADIUS_RANGE = (0.001, 0.1)
+GRID_RESOLUTION = 10  # For efficient spatial indexing
+
+class CirclePacker:
+    def __init__(self, n_circles: int = 21):
+        self.n_circles = n_circles
+        self.width = 1.0  # Default rectangle dimensions
+        self.height = 1.0
+        self.rectangle_perimeter = RECTANGLE_PERIMETER
+        
+    def _validate_constraints(self, circles: np.ndarray) -> bool:
+        """Check if all circles satisfy constraints: no overlaps, fully contained"""
+        if len(circles) < 2:
+            return True
+            
+        # Check if all circles are fully contained within rectangle
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if (x - r < 0 or x + r > self.width or 
+                y - r < 0 or y + r > self.height):
+                return False
+                
+        # Check for overlaps using efficient spatial indexing
+        # Create a simple grid-based spatial index for collision detection
+        grid = {}
+        cell_size = max(0.01, 2 * max(circles[:, 2]))  # Cell size based on max radius
+        
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Get grid cell indices
+            grid_x = int(x // cell_size)
+            grid_y = int(y // cell_size)
+            
+            # Check this cell and surrounding cells for collisions
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    key = (grid_x + dx, grid_y + dy)
+                    if key in grid:
+                        for j in grid[key]:
+                            # Check actual distance
+                            dist = np.sqrt((x - circles[j, 0])**2 + (y - circles[j, 1])**2)
+                            if dist < (r + circles[j, 2]):
+                                return False
+            
+            # Add to grid
+            key = (grid_x, grid_y)
+            if key not in grid:
+                grid[key] = []
+            grid[key].append(i)
+            
+        return True
+    
+    def _calculate_sum_radii(self, circles: np.ndarray) -> float:
+        """Calculate total sum of radii"""
+        return np.sum(circles[:, 2])
+    
+    def _initialize_hexagonal_pattern(self) -> np.ndarray:
+        """Initialize circles in a hexagonal pattern within the rectangle"""
+        circles = np.zeros((self.n_circles, 3))
+        
+        # Hexagonal packing parameters
+        max_radius = 0.1
+        padding = 0.01
+        
+        # Calculate the effective area for packing
+        effective_width = self.width - 2 * padding
+        effective_height = self.height - 2 * padding
+        
+        # Calculate how many rows and columns we can fit
+        # For hexagonal packing, horizontal spacing is 2*r, vertical spacing is sqrt(3)*r
+        radius = min(max_radius, effective_width / (2 * 3), effective_height / (math.sqrt(3) * 3))
+        
+        if radius <= 0:
+            # Fall back to uniform distribution
+            for i in range(self.n_circles):
+                circles[i] = [
+                    random.uniform(padding, self.width - padding),
+                    random.uniform(padding, self.height - padding),
+                    random.uniform(0.001, 0.05)
+                ]
+            return circles
+        
+        # Generate hexagonal grid
+        rows = int(effective_height / (radius * math.sqrt(3)))
+        cols = int(effective_width / (2 * radius))
+        
+        if rows * cols < self.n_circles:
+            # If not enough space, adjust radius
+            radius = min(
+                effective_width / (2 * cols),
+                effective_height / (rows * math.sqrt(3))
+            )
+            
+        count = 0
+        y_offset = padding + radius
+        for i in range(rows):
+            y = y_offset + i * radius * math.sqrt(3)
+            if y + radius > self.height - padding:
+                break
+                
+            x_offset = padding + radius if i % 2 == 0 else padding + 2 * radius
+            for j in range(cols):
+                x = x_offset + j * 2 * radius
+                if x + radius > self.width - padding:
+                    break
+                    
+                if count < self.n_circles:
+                    circles[count] = [x, y, radius]
+                    count += 1
+                else:
+                    break
+                    
+            if count >= self.n_circles:
+                break
+        
+        # Fill remaining circles with random positions
+        for i in range(count, self.n_circles):
+            circles[i] = [
+                random.uniform(padding, self.width - padding),
+                random.uniform(padding, self.height - padding),
+                random.uniform(0.001, 0.05)
+            ]
+            
+        return circles
+    
+    def _evaluate_individual(self, individual: np.ndarray) -> Tuple[float,]:  
+        """Evaluate fitness of an individual (circles configuration)"""
+        circles = individual.reshape(-1, 3)
+        
+        # Validate constraints
+        if not self._validate_constraints(circles):
+            # Return very poor fitness for invalid configurations
+            return (-np.inf,)
+        
+        # Return negative sum of radii (since DEAP minimizes)
+        return (-self._calculate_sum_radii(circles),)
+    
+    def _mutate_individual(self, individual: np.ndarray) -> np.ndarray:
+        """Mutate an individual by randomly adjusting some radii"""
+        individual = individual.copy()
+        mutated_genes = []
+        
+        # Mutation rate applied per gene (radius)
+        for i in range(0, len(individual), 3):  # For each circle
+            if random.random() < MUTATION_RATE:
+                # Mutate only the radius (third element)
+                current_radius = individual[i+2]
+                # Apply small random change
+                delta = random.uniform(-0.01, 0.01)
+                new_radius = max(0.001, current_radius + delta)
+                individual[i+2] = new_radius
+                mutated_genes.append(i+2)
+                
+        return individual
+    
+    def _crossover_individuals(self, ind1: np.ndarray, ind2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Cross over two individuals"""
+        ind1 = ind1.copy()
+        ind2 = ind2.copy()
+        
+        # Simple uniform crossover on radii
+        for i in range(2, len(ind1), 3):  # Only consider radii (every third element)
+            if random.random() < CROSSOVER_RATE:
+                ind1[i], ind2[i] = ind2[i], ind1[i]
+                
+        return ind1, ind2
+    
+    def optimize(self) -> np.ndarray:
+        """Perform evolutionary optimization"""
+        # Set up the genetic algorithm
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+        
+        toolbox = base.Toolbox()
+        toolbox.register("individual", self._create_individual)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+        toolbox.register("evaluate", self._evaluate_individual)
+        toolbox.register("mate", self._crossover_individuals)
+        toolbox.register("mutate", self._mutate_individual)
+        toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+        
+        # Create initial population
+        pop = toolbox.population(n=POPULATION_SIZE)
+        
+        # Evaluate initial population
+        fitnesses = list(map(toolbox.evaluate, pop))
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = fit
+        
+        # Begin evolution
+        for generation in range(NUM_GENERATIONS):
+            # Select the next generation individuals
+            offspring = toolbox.select(pop, len(pop))
+            offspring = list(map(toolbox.clone, offspring))
+            
+            # Apply crossover and mutation on the offspring
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < CROSSOVER_RATE:
+                    child1, child2 = toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+            
+            for mutant in offspring:
+                if random.random() < MUTATION_RATE:
+                    mutant = toolbox.mutate(mutant)
+                    del mutant.fitness.values
+            
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = map(toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+            
+            # Replace the old population with the new one
+            pop[:] = offspring
+        
+        # Get the best individual
+        best_ind = tools.selBest(pop, 1)[0]
+        return best_ind.reshape(-1, 3)
+    
+    def _create_individual(self) -> np.ndarray:
+        """Create a new individual (random circles configuration)"""
+        individual = np.zeros(self.n_circles * 3)
+        
+        # Initialize with hexagonal pattern
+        circles = self._initialize_hexagonal_pattern()
+        
+        # Flatten circles array
+        for i in range(self.n_circles):
+            individual[i*3] = circles[i][0]   # x
+            individual[i*3+1] = circles[i][1] # y
+            individual[i*3+2] = circles[i][2] # radius
+        
+        return individual
+    
+    def _local_optimization_step(self, circles: np.ndarray) -> np.ndarray:
+        """Apply local optimization to increase radii without violating constraints"""
+        max_attempts = 1000
+        attempts = 0
+        
+        while attempts < max_attempts:
+            improved = False
+            
+            # Try increasing each circle's radius
+            for i in range(len(circles)):
+                original_radius = circles[i][2]
+                new_radius = original_radius + 0.01
+                
+                # Temporarily increase radius
+                circles[i][2] = new_radius
+                
+                # Check if constraints are satisfied
+                if not self._validate_constraints(circles):
+                    # Revert if constraints violated
+                    circles[i][2] = original_radius
+                else:
+                    improved = True
+            
+            if not improved:
+                break
+                
+            attempts += 1
+            
+        return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    packer = CirclePacker(n_circles=21)
+    
+    # Try different rectangle dimensions that preserve perimeter
+    best_result = None
+    best_sum = -np.inf
+    
+    # Test several aspect ratios
+    ratios = [0.5, 1.0, 2.0, 0.3, 3.0]
+    
+    for ratio in ratios:
+        packer.width = ratio
+        packer.height = RECTANGLE_PERIMETER/2 - ratio
+        
+        # Skip if invalid dimensions
+        if packer.width <= 0 or packer.height <= 0:
+            continue
+            
+        try:
+            # Perform optimization
+            result = packer.optimize()
+            
+            # Local optimization
+            result = packer._local_optimization_step(result)
+            
+            # Check final fitness
+            sum_radii = packer._calculate_sum_radii(result)
+            
+            if sum_radii > best_sum:
+                best_sum = sum_radii
+                best_result = result
+                
+        except Exception as e:
+            # Continue with other aspect ratios if this fails
+            continue
+    
+    # If no valid solution found, return basic hexagonal pattern
+    if best_result is None:
+        packer.width = 1.0
+        packer.height = 1.0
+        best_result = packer._initialize_hexagonal_pattern()
+        
+    return best_result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

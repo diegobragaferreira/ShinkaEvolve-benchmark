@@ -1,0 +1,319 @@
+--- a/original.py
++++ b/original.py
+@@ -1,150 +1,198 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
++from scipy.optimize import differential_evolution, minimize
+ import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+     
+     # Set seed for reproducibility
+     np.random.seed(42)
+     
+-    # Phase 1: Initialize points using enhanced hexagonal grid pattern
+-    n = 16
+-    points = np.zeros((n, 2))
+-    
+-    # Create enhanced hexagonal grid pattern with better distribution
+-    rows = 4
+-    cols = 4
+-    spacing = 0.25
+-    
+-    idx = 0
+-    for row in range(rows):
+-        for col in range(cols):
+-            if idx < n:
+-                # Offset every other row for hexagonal packing
+-                x = col * spacing + (row % 2) * spacing * 0.5
+-                y = row * spacing * math.sqrt(3) / 2
+-                points[idx] = [x, y]
+-                idx += 1
+-    
+-    # Scale and shift points to fit within [0.1, 0.9] x [0.1, 0.9] with some initial randomness
+-    points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
+-    points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
+-    
+-    # Phase 2: Enhanced Simulated Annealing optimization with adaptive cooling
+-    def compute_energy_and_ratio(points):
+-        # Compute pairwise distances
++    def compute_ratio(points):
++        """Compute min/max distance ratio for given point configuration."""
++        if len(points) < 2:
++            return 0.0
++
++        # Compute pairwise distances efficiently
+         distances = squareform(pdist(points))
+-        
++
+         # Mask diagonal elements (distance to self is 0)
+         np.fill_diagonal(distances, np.inf)
+-        
++
+         # Get min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
++
++        # Handle case where all points might be coincident
++        if max_dist == 0:
++            return 0.0
++
++        return min_dist / max_dist
++
++    def objective_function(points_vec):
++        """Objective function for optimization (negative ratio to maximize)."""
++        points = points_vec.reshape(-1, 2)
++        ratio = compute_ratio(points)
++        return -ratio  # Negative because scipy minimizes
++
++    def initialize_hexagonal_grid():
++        """Initialize points using a better hexagonal grid pattern."""
++        n = 16
++        points = np.zeros((n, 2))
++
++        # Create hexagonal grid pattern with better distribution
++        rows = 4
++        cols = 4
++        spacing = 0.25
++
++        idx = 0
++        for row in range(rows):
++            for col in range(cols):
++                if idx < n:
++                    # Offset every other row for hexagonal packing
++                    x = col * spacing + (row % 2) * spacing * 0.5
++                    y = row * spacing * math.sqrt(3) / 2
++                    points[idx] = [x, y]
++                    idx += 1
++
++        # Adjust points to fit within [0.1,0.9]x[0.1,0.9] with some randomness
++        points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
++        points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
++
++        # Add small random perturbation
++        points += np.random.normal(0, 0.01, points.shape)
++
++        # Clamp to bounds
++        points = np.clip(points, 0.01, 0.99)
++
++        return points
++
++    def initialize_fibonacci_spiral():
++        """Initialize points using Fibonacci spiral for even distribution."""
++        n = 16
++        points = np.zeros((n, 2))
++
++        # Create points along Fibonacci spiral
++        golden_angle = np.pi * (3 - np.sqrt(5))
++        center = np.array([0.5, 0.5])
++        radius = 0.4
++
++        for i in range(n):
++            r = radius * np.sqrt(i / (n - 1)) if n > 1 else 0
++            theta = i * golden_angle
++            
++            points[i] = center + r * np.array([np.cos(theta), np.sin(theta)])
++
++        # Add noise for better optimization
++        points += np.random.normal(0, 0.015, points.shape)
+         
+-        # Avoid division by zero
+-        if max_dist == 0:
+-            ratio = 0
+-        else:
+-            ratio = min_dist / max_dist
++        # Clamp to bounds
++        points = np.clip(points, 0.05, 0.95)
++
++        return points
++
++    def initialize_circle_packing():
++        """Initialize points using circle packing principles."""
++        n = 16
++        points = np.zeros((n, 2))
++        center = np.array([0.5, 0.5])
++        radius = 0.4
++        
++        # Place points evenly around a circle
++        angles = np.linspace(0, 2*np.pi, n, endpoint=False)
++        
++        for i in range(n):
++            points[i] = center + radius * np.array([np.cos(angles[i]), np.sin(angles[i])])
+             
+-        # Energy is negative ratio (we want to maximize ratio, so minimize negative ratio)
+-        # Add penalty for points outside bounds with epsilon padding
+-        penalty = 0
+-        epsilon = 1e-8
+-        for pt in points:
+-            if pt[0] < 0+epsilon or pt[0] > 1-epsilon or pt[1] < 0+epsilon or pt[1] > 1-epsilon:
+-                penalty += 1000
++        # Add slight random perturbations
++        points += np.random.normal(0, 0.02, points.shape)
+         
+-        return -ratio + penalty, ratio
+-    
+-    # Simulated Annealing parameters with intelligent adaptation
+-    temp = 1.0
+-    min_temp = 1e-8
+-    cooling_rate = 0.9999
+-    max_iter = 100000  # Increased iteration limit
+-    
+-    current_energy, current_ratio = compute_energy_and_ratio(points)
+-    best_points = points.copy()
+-    best_ratio = current_ratio
+-    
+-    # Track convergence for adaptive cooling
+-    last_improvement = 0
+-    patience = 2000
+-    improvement_count = 0
+-    recent_improvements = []
+-    
+-    # Main optimization loop
+-    for iteration in range(max_iter):
+-        # Generate neighbor solution (random perturbation)
+-        neighbor_points = points.copy()
+-        # Pick a random point to move
+-        move_idx = np.random.randint(0, n)
+-        # Small random displacement with adaptive magnitude based on temperature
+-        displacement_magnitude = 0.005 * temp
+-        displacement = np.random.normal(0, displacement_magnitude, 2)
+-        neighbor_points[move_idx] += displacement
++        # Ensure all points remain in [0.1, 0.9] x [0.1, 0.9]
++        points = np.clip(points, 0.1, 0.9)
+         
+-        # Apply boundary constraints with epsilon padding
+-        epsilon = 1e-8
+-        neighbor_points[move_idx, 0] = np.clip(neighbor_points[move_idx, 0], 0+epsilon, 1-epsilon)
+-        neighbor_points[move_idx, 1] = np.clip(neighbor_points[move_idx, 1], 0+epsilon, 1-epsilon)
++        return points
++
++    def initialize_random():
++        """Initialize points using random distribution."""
++        return np.random.uniform(0.1, 0.9, (16, 2))
++
++    # Try multiple initialization strategies with enhanced diversity
++    initial_configs = [
++        initialize_hexagonal_grid(),
++        initialize_fibonacci_spiral(),
++        initialize_circle_packing(),
++        initialize_random()
++    ]
++
++    best_points = None
++    best_ratio = -np.inf
++
++    # Run optimization from each initialization
++    for init_config in initial_configs:
++        points = init_config.copy()
+         
+-        # Compute energy of neighbor
+-        neighbor_energy, neighbor_ratio = compute_energy_and_ratio(neighbor_points)
+-        
+-        # Accept or reject move
+-        if neighbor_energy < current_energy:
+-            # Always accept better solutions
+-            points = neighbor_points
+-            current_energy = neighbor_energy
+-            current_ratio = neighbor_ratio
+-        else:
+-            # Accept worse solutions with probability based on temperature
+-            delta = neighbor_energy - current_energy
+-            if np.random.rand() < np.exp(-delta / temp):
+-                points = neighbor_points
+-                current_energy = neighbor_energy
+-                current_ratio = neighbor_ratio
+-        
+-        # Update best solution
+-        if current_ratio > best_ratio:
+-            best_ratio = current_ratio
+-            best_points = points.copy()
+-            last_improvement = iteration
+-            improvement_count += 1
+-            recent_improvements.append(iteration)
+-            if len(recent_improvements) > 10:
+-                recent_improvements.pop(0)
+-        
+-        # Adaptive cooling schedule
+-        temp *= cooling_rate
+-        
+-        # Gradually cool down more aggressively if not improving
+-        if iteration % 1000 == 0 and temp > min_temp:
+-            temp *= 0.98
+-        
+-        # Early stopping based on patience and convergence
+-        if iteration - last_improvement > patience:
+-            # Check if recent improvements have stalled
+-            if len(recent_improvements) >= 5:
+-                if recent_improvements[-1] - recent_improvements[0] < 500:
+-                    break
++        # Stage 1: Global search with Differential Evolution
++        bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
++
++        try:
++            de_result = differential_evolution(
++                objective_function,
++                bounds,
++                maxiter=200,
++                popsize=15,
++                mutation=(0.5, 1),
++                recombination=0.7,
++                seed=42,
++                disp=False,
++                atol=1e-12,
++                rtol=1e-12
++            )
++
++            # Extract best solution from DE
++            if de_result.success:
++                de_points = de_result.x.reshape(-1, 2)
+             else:
+-                break
+-            
+-        # Very aggressive early stopping if barely improving
+-        if temp < min_temp * 10 and improvement_count < 5:
+-            break
+-    
++                de_points = points.copy()
++
++            # Stage 2: Local refinement with L-BFGS-B
++            bounds = [(0, 1) for _ in range(32)]
++            lbfgs_result = minimize(
++                objective_function,
++                de_points.flatten(),
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
++                tol=1e-12
++            )
++
++            final_points = lbfgs_result.x.reshape(-1, 2)
++
++            # Evaluate final solution
++            current_ratio = compute_ratio(final_points)
++
++            # Update global best if this run was better
++            if current_ratio > best_ratio:
++                best_ratio = current_ratio
++                best_points = final_points.copy()
++                
++        except Exception:
++            continue
++
++    # If no successful optimization, return the best initial configuration
++    if best_points is None:
++        # Take the best of the initializations
++        ratios = [compute_ratio(init) for init in initial_configs]
++        best_idx = np.argmax(ratios)
++        best_points = initial_configs[best_idx]
++
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

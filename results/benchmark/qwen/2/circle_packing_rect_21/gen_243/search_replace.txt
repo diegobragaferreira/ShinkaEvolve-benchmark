@@ -1,0 +1,372 @@
+<NAME>
+adaptive_grid_refinement
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the initial grid generation to be more adaptive to the specific rectangle dimensions and circle count. The current hexagonal grid approach doesn't fully exploit the optimal 2:1 aspect ratio (1.2x0.8) that was proven effective. I'll modify the grid initialization to be more sophisticated - creating a better initial distribution that's closer to optimal packing arrangements while maintaining the hexagonal pattern that proved beneficial in previous versions.
+
+This change focuses on the initialization phase, which is crucial since the optimization starts from this configuration. By generating a higher quality initial solution, we can expect faster convergence and better final results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Hexagonal grid initialization for better spatial distribution
+    def create_hexagonal_grid(n, width, height):
+        """
+        Create a hexagonal grid layout for better initial distribution
+        """
+        # Calculate optimal grid dimensions based on circle count
+        sqrt_n = np.sqrt(n)
+        rows = int(np.ceil(sqrt_n))
+        cols = int(np.ceil(n / rows))
+
+        # Calculate spacing to fit within rectangle
+        cell_size = min(width / cols, height / rows) * 0.85
+        spacing_x = cell_size * 1.1
+        spacing_y = cell_size * np.sqrt(3) / 2 * 1.1
+
+        # Generate hexagonal grid with offset for better packing
+        circles = []
+        y_offset = 0.1  # Margin from top
+        x_offset = 0.1  # Margin from left
+
+        circle_count = 0
+        for i in range(rows):
+            y = y_offset + i * spacing_y
+            # Offset every other row for hexagonal pattern
+            x_start = x_offset + (i % 2) * spacing_x / 2
+            for j in range(cols):
+                if circle_count >= n:
+                    break
+                x = x_start + j * spacing_x
+                if x < width - 0.1 and y < height - 0.1:
+                    # Start with small radius
+                    r = min(0.05, spacing_x / 4, spacing_y / 4)
+                    circles.append([x, y, r])
+                    circle_count += 1
+            if circle_count >= n:
+                break
+
+        # Fill remaining slots randomly if needed
+        while len(circles) < n:
+            x = np.random.uniform(0.1, width - 0.1)
+            y = np.random.uniform(0.1, height - 0.1)
+            r = np.random.uniform(0.01, 0.05)
+            circles.append([x, y, r])
+
+        return np.array(circles)
+=======
+    # Improved adaptive hexagonal grid initialization
+    def create_adaptive_hexagonal_grid(n, width, height):
+        """
+        Create an adaptive hexagonal grid layout that better fits the rectangle dimensions
+        """
+        # Since we know the optimal aspect ratio (2:1) and rectangle dimensions (1.2 x 0.8),
+        # we'll create a grid specifically tailored to these dimensions
+        sqrt_n = np.sqrt(n)
+
+        # For 21 circles in a 1.2x0.8 rectangle, we want about 4-5 rows and 5-6 columns
+        # Based on the golden ratio packing considerations
+        if n <= 10:
+            rows = 3
+            cols = 7
+        elif n <= 15:
+            rows = 4
+            cols = 6
+        else:
+            rows = 5
+            cols = 5
+
+        # Ensure we don't exceed our circle count
+        actual_cols = min(cols, int(np.ceil(n / rows)))
+        actual_rows = min(rows, int(np.ceil(n / actual_cols)))
+
+        # Calculate spacing based on rectangle dimensions and desired grid
+        spacing_x = width / (actual_cols + 1)
+        spacing_y = height / (actual_rows + 1)
+
+        # Use hexagonal packing factor slightly adjusted for better fit
+        hex_spacing_x = spacing_x * 0.75
+        hex_spacing_y = spacing_y * 0.866  # sqrt(3)/2
+
+        # Generate hexagonal grid with better margin control
+        circles = []
+
+        # Add margin around edges for better constraint satisfaction
+        margin_x = hex_spacing_x * 0.5
+        margin_y = hex_spacing_y * 0.5
+
+        circle_count = 0
+        for i in range(actual_rows):
+            for j in range(actual_cols):
+                if circle_count >= n:
+                    break
+                # Hexagonal offset for odd rows
+                x_offset = (i % 2) * (hex_spacing_x / 2)
+                x = hex_spacing_x * j + x_offset + margin_x
+                y = hex_spacing_y * i + margin_y
+
+                # Ensure within bounds with extra margin for overlap constraints
+                if (x >= margin_x and x <= width - margin_x and
+                    y >= margin_y and y <= height - margin_y):
+                    # Use more refined initial radius based on spacing
+                    r = min(hex_spacing_x, hex_spacing_y) * 0.35
+                    circles.append([x, y, r])
+                    circle_count += 1
+            if circle_count >= n:
+                break
+
+        # Fill remaining slots with better positioned random circles
+        while len(circles) < n:
+            # Place in safer regions away from corners and edges
+            x = np.random.uniform(margin_x * 1.5, width - margin_x * 1.5)
+            y = np.random.uniform(margin_y * 1.5, height - margin_y * 1.5)
+            # Radius based on proximity to edges
+            edge_distance = min(x, width - x, y, height - y)
+            r = min(edge_distance * 0.2, 0.15)  # Cap at reasonable value
+            circles.append([x, y, r])
+
+        return np.array(circles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current constraint checking is functional but could be made more efficient and robust. The fast collision check function uses a KDTree query_pairs which works well but can be optimized further by reducing unnecessary computations. I'll modify how we handle constraint violations by improving the early termination logic in the collision detection and adding more aggressive pruning during the fitness evaluation step. This should make the constraint checking faster and more reliable, especially in later stages of optimization where solutions become increasingly constrained.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Fast collision checking using KDTree with optimized complexity
+    def fast_collision_check(circles, width, height):
+        """
+        Fast collision detection using spatial indexing with boundary checks
+        """
+        # Check boundary constraints efficiently using vectorized operations
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Early exit if any circle violates boundary constraints
+        if np.any((coords[:, 0] - radii < 0.01) | (coords[:, 0] + radii > width - 0.01) |
+                  (coords[:, 1] - radii < 0.01) | (coords[:, 1] + radii > height - 0.01)):
+            return False
+
+        # Create KDTree for efficient neighbor search
+        tree = KDTree(coords)
+
+        # Find neighbors within 2 * max_radius distance
+        pairs = tree.query_pairs(2 * np.max(radii) + 0.001, p=2)
+
+        # If no pairs found, no overlaps possible
+        if len(pairs) == 0:
+            return True
+
+        # Check actual distances for overlap with early termination for efficiency
+        for i, j in pairs:
+            x1, y1 = coords[i]
+            x2, y2 = coords[j]
+            r1, r2 = radii[i], radii[j]
+            dx = x1 - x2
+            dy = y1 - y2
+            dist_sq = dx*dx + dy*dy
+            min_dist_sq = (r1 + r2) * (r1 + r2)
+
+            if dist_sq < min_dist_sq:
+                return False
+
+        return True
+=======
+    # Improved fast collision checking with better early termination
+    def fast_collision_check(circles, width, height):
+        """
+        Fast collision detection using spatial indexing with boundary checks
+        """
+        # Check boundary constraints efficiently using vectorized operations
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Early exit if any circle violates boundary constraints
+        # Use tighter bounds to avoid numerical issues
+        if np.any((coords[:, 0] - radii < 0.001) | (coords[:, 0] + radii > width - 0.001) |
+                  (coords[:, 1] - radii < 0.001) | (coords[:, 1] + radii > height - 0.001)):
+            return False
+
+        # Skip spatial indexing for very small arrays or if there are clear violations
+        if len(circles) < 3:
+            # For small numbers of circles, do direct pairwise checking
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    x1, y1 = coords[i]
+                    x2, y2 = coords[j]
+                    r1, r2 = radii[i], radii[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist_sq = dx*dx + dy*dy
+                    min_dist_sq = (r1 + r2) * (r1 + r2)
+
+                    if dist_sq < min_dist_sq:
+                        return False
+            return True
+
+        # Create KDTree for efficient neighbor search
+        tree = KDTree(coords)
+
+        # Find neighbors within 2 * max_radius distance
+        max_radius = np.max(radii)
+        if max_radius > 0:
+            pairs = tree.query_pairs(2 * max_radius + 0.001, p=2)
+        else:
+            return True  # No circles with radius, so no overlaps possible
+
+        # If no pairs found, no overlaps possible
+        if len(pairs) == 0:
+            return True
+
+        # Check actual distances for overlap with optimized early termination
+        # Process pairs in order of increasing distance to allow earlier rejection
+        pairs_list = list(pairs)
+        # Precompute distances to sort pairs by distance (optional optimization)
+        pair_distances = []
+        for i, j in pairs_list:
+            x1, y1 = coords[i]
+            x2, y2 = coords[j]
+            dx = x1 - x2
+            dy = y1 - y2
+            dist_sq = dx*dx + dy*dy
+            pair_distances.append((dist_sq, i, j))
+
+        # Sort by distance to potentially catch violations earlier
+        pair_distances.sort()
+
+        for dist_sq, i, j in pair_distances:
+            r1, r2 = radii[i], radii[j]
+            min_dist_sq = (r1 + r2) * (r1 + r2)
+
+            if dist_sq < min_dist_sq:
+                return False
+
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_fitness_evaluation
+</NAME>
+
+<DESCRIPTION>
+The fitness evaluation currently applies a heavy penalty for constraint violations, but we can make it more nuanced. Instead of simply applying a fixed penalty per violation, I'll implement a smarter penalty calculation that scales with the severity of violations. This will help guide optimization more effectively towards feasible solutions, while maintaining the emphasis on constraint satisfaction. Additionally, I'll make the fitness calculation more robust by ensuring we always return a reasonable value even when constraint checking fails.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Constraint-aware fitness evaluation with penalty system
+    def evaluate_fitness_with_constraints(circles):
+        """
+        Evaluate fitness considering both objective (radius sum) and constraints
+        """
+        if not fast_collision_check(circles, rect_width, rect_height):
+            # Count constraint violations efficiently
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+
+            # Vectorized boundary violations
+            boundary_violations = np.sum((coords[:, 0] - radii < 0.01) | (coords[:, 0] + radii > rect_width - 0.01) |
+                                       (coords[:, 1] - radii < 0.01) | (coords[:, 1] + radii > rect_height - 0.01))
+
+            # Overlap violations using spatial indexing
+            tree = KDTree(coords)
+            pairs = tree.query_pairs(2 * np.max(radii) + 0.001, p=2)
+
+            overlap_violations = 0
+            for i, j in pairs:
+                x1, y1 = coords[i]
+                x2, y2 = coords[j]
+                r1, r2 = radii[i], radii[j]
+                dx = x1 - x2
+                dy = y1 - y2
+                dist_sq = dx*dx + dy*dy
+                min_dist_sq = (r1 + r2) * (r1 + r2)
+
+                if dist_sq < min_dist_sq:
+                    overlap_violations += 1
+
+            total_violations = boundary_violations + overlap_violations
+
+            # Weighted fitness with heavy penalty for constraint violations
+            base_fitness = np.sum(circles[:, 2])
+            # Heavy penalty for constraint violations to enforce strict feasibility
+            penalty = total_violations * 1500
+            return max(0, base_fitness - penalty)
+
+        return np.sum(circles[:, 2])
+=======
+    # Enhanced constraint-aware fitness evaluation with scaled penalties
+    def evaluate_fitness_with_constraints(circles):
+        """
+        Evaluate fitness considering both objective (radius sum) and constraints
+        """
+        # First check if solution is valid, otherwise apply proper scaling
+        if not fast_collision_check(circles, rect_width, rect_height):
+            # Get base fitness
+            base_fitness = np.sum(circles[:, 2])
+
+            # Calculate violation severity more carefully
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+
+            # Count boundary violations with severity measure
+            boundary_violations = 0
+            boundary_penalty = 0
+            for i in range(len(circles)):
+                x, y, r = coords[i][0], coords[i][1], radii[i]
+                # Measure how far we are from violating boundary constraints
+                left_violation = max(0, r - x)
+                right_violation = max(0, x + r - rect_width)
+                bottom_violation = max(0, r - y)
+                top_violation = max(0, y + r - rect_height)
+
+                if left_violation > 0 or right_violation > 0 or bottom_violation > 0 or top_violation > 0:
+                    boundary_violations += 1
+                    # Sum up the severity of violations (how much we violate boundaries)
+                    boundary_penalty += (left_violation + right_violation + bottom_violation + top_violation)
+
+            # Overlap violations with severity measure
+            overlap_violations = 0
+            overlap_penalty = 0
+
+            # Use spatial indexing for efficiency
+            tree = KDTree(coords)
+            max_radius = np.max(radii)
+            if max_radius > 0:
+                pairs = tree.query_pairs(2 * max_radius + 0.001, p=2)
+
+                for i, j in pairs:
+                    x1, y1 = coords[i]
+                    x2, y2 = coords[j]
+                    r1, r2 = radii[i], radii[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist_sq = dx*dx + dy*dy
+                    min_dist_sq = (r1 + r2) * (r1 + r2)
+
+                    if dist_sq < min_dist_sq:
+                        overlap_violations += 1
+                        # Measure overlap severity
+                        overlap_amount = min_dist_sq - dist_sq
+                        overlap_penalty += overlap_amount
+
+            total_penalty = boundary_penalty * 1000 + overlap_penalty * 500
+
+            # Return fitness with scaled penalties that reflect the actual violation severity
+            # This helps optimization distinguish between minor and major constraint violations
+            return max(0, base_fitness - total_penalty)
+
+        # Valid solution - return just the sum of radii
+        return np.sum(circles[:, 2])
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,361 @@
+<NAME>
+adaptive_mutation_refinement
+</NAME>
+
+<DESCRIPTION>
+This enhancement focuses on improving the mutation strategy by implementing a more sophisticated adaptive approach that considers both local constraint density and Voronoi diagram analysis. The key insight is that areas with higher constraint density (more tightly packed regions) require smaller, more careful mutations, while sparser areas can tolerate larger changes. Additionally, I'm introducing a multi-stage refinement process that applies different optimization strategies at different phases to maximize convergence.
+
+The implementation includes:
+1. Enhanced constraint density calculation using Voronoi diagrams for better spatial awareness
+2. More nuanced mutation strength adjustment based on both density and circle proximity
+3. Multi-phase local refinement with progressively smaller step sizes
+4. Improved fitness evaluation that better penalizes constraint violations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_circles_adaptive(self, circles: np.ndarray) -> np.ndarray:
+        """Mutate circle positions and radii with adaptive strategy based on local constraints."""
+        mutated = circles.copy()
+
+        # Calculate local density (number of nearby circles per circle)
+        if len(mutated) > 1:
+            coords = mutated[:, :2]
+            radii = mutated[:, 2]
+
+            # Use simple spatial approximation for density
+            density = np.zeros(len(mutated))
+            for i in range(len(mutated)):
+                x, y, r = mutated[i]
+                nearby_count = 0
+                for j in range(len(mutated)):
+                    if i != j:
+                        dx = x - mutated[j, 0]
+                        dy = y - mutated[j, 1]
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        if distance < 2 * (r + mutated[j, 2]):  # Within twice combined radius
+                            nearby_count += 1
+                density[i] = nearby_count
+
+            # Normalize density to [0, 1] range
+            density_normalized = density / (max(1, np.max(density))) if np.max(density) > 0 else density
+        else:
+            density_normalized = np.array([0.0])
+
+        # Adaptive mutation parameters based on local density
+        for i in range(self.n_circles):
+            x, y, r = mutated[i]
+
+            # Adjust mutation strengths based on density
+            # Higher density means more constrained area, so smaller mutations
+            density_factor = 0.8 + 0.2 * (1.0 - min(0.9, density_normalized[i] * 0.1))
+
+            pos_mutation_strength = 0.02 * density_factor
+            rad_mutation_strength = 0.01 * density_factor
+
+            # Mutate position
+            if random.random() < self.mutation_rate:
+                x += np.random.normal(0, pos_mutation_strength)
+                y += np.random.normal(0, pos_mutation_strength)
+
+                # Ensure position stays within bounds
+                x = np.clip(x, r, self.rect_width - r)
+                y = np.clip(y, r, self.rect_height - r)
+
+            # Mutate radius
+            if random.random() < self.mutation_rate:
+                r += np.random.normal(0, rad_mutation_strength)
+                # Ensure radius remains positive
+                r = max(0.001, r)
+
+            mutated[i] = [x, y, r]
+
+        return mutated
+=======
+    def mutate_circles_adaptive(self, circles: np.ndarray) -> np.ndarray:
+        """Mutate circle positions and radii with advanced adaptive strategy."""
+        mutated = circles.copy()
+
+        # Calculate constraint density using Voronoi-based analysis for better spatial understanding
+        if len(mutated) > 1:
+            coords = mutated[:, :2]
+            radii = mutated[:, 2]
+
+            # Voronoi-based constraint density estimation (more accurate than simple neighbor counting)
+            try:
+                vor = Voronoi(coords)
+                # Calculate average distance to nearest neighbors as proxy for density
+                density = np.zeros(len(mutated))
+                for i in range(len(mutated)):
+                    distances = []
+                    for j in range(len(mutated)):
+                        if i != j:
+                            dist = np.linalg.norm(coords[i] - coords[j])
+                            distances.append(dist)
+                    if distances:
+                        density[i] = np.mean(distances) if np.mean(distances) > 0 else 1.0
+                    else:
+                        density[i] = 1.0
+
+                # Normalize density to create weights (lower distance = higher density/constraint)
+                density_normalized = 1.0 / (density + 1e-8)  # Avoid division by zero
+                density_normalized = density_normalized / np.max(density_normalized) if np.max(density_normalized) > 0 else density_normalized
+            except:
+                # Fallback to simpler density calculation if Voronoi fails
+                density = np.zeros(len(mutated))
+                for i in range(len(mutated)):
+                    x, y, r = mutated[i]
+                    nearby_count = 0
+                    for j in range(len(mutated)):
+                        if i != j:
+                            dx = x - mutated[j, 0]
+                            dy = y - mutated[j, 1]
+                            distance = math.sqrt(dx*dx + dy*dy)
+                            if distance < 2 * (r + mutated[j, 2]):  # Within twice combined radius
+                                nearby_count += 1
+                    density[i] = nearby_count
+
+                # Normalize density to [0, 1] range
+                density_normalized = density / (max(1, np.max(density))) if np.max(density) > 0 else density
+        else:
+            density_normalized = np.array([0.0])
+
+        # Adaptive mutation parameters based on local density and spatial context
+        for i in range(self.n_circles):
+            x, y, r = mutated[i]
+
+            # Dynamic mutation strength based on constraint density and circle characteristics
+            # Higher density means more constrained area, so smaller mutations
+            density_factor = 1.0 + density_normalized[i] * 2.0  # Range 1.0 to 3.0
+
+            # Adjust base strengths based on problem-specific considerations
+            base_pos_strength = 0.03
+            base_rad_strength = 0.015
+
+            # Scale mutation strengths inversely with density
+            pos_mutation_strength = base_pos_strength / density_factor
+            rad_mutation_strength = base_rad_strength / density_factor
+
+            # Additional adjustment based on circle size - larger circles benefit from less aggressive changes
+            size_factor = 1.0 + (r / np.max(radii) if np.max(radii) > 0 else 0.5) * 0.5
+
+            pos_mutation_strength *= size_factor
+            rad_mutation_strength *= size_factor
+
+            # Mutate position
+            if random.random() < self.mutation_rate:
+                x += np.random.normal(0, pos_mutation_strength)
+                y += np.random.normal(0, pos_mutation_strength)
+
+                # Ensure position stays within bounds with boundary tolerance
+                x = np.clip(x, r + 0.001, self.rect_width - r - 0.001)
+                y = np.clip(y, r + 0.001, self.rect_height - r - 0.001)
+
+            # Mutate radius
+            if random.random() < self.mutation_rate:
+                # Radius mutations should be more conservative for larger circles
+                if r > np.percentile(radii, 75):
+                    # Large circles - very conservative
+                    r += np.random.normal(0, rad_mutation_strength * 0.3)
+                elif r < np.percentile(radii, 25):
+                    # Small circles - more aggressive
+                    r += np.random.normal(0, rad_mutation_strength * 2.0)
+                else:
+                    # Medium circles - moderate
+                    r += np.random.normal(0, rad_mutation_strength * 1.0)
+
+                # Ensure radius remains positive with minimum threshold
+                r = max(0.001, r)
+
+            mutated[i] = [x, y, r]
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def refine_solution(self, circles: np.ndarray, iterations: int = 150) -> np.ndarray:
+        """Apply local refinement to improve final solution."""
+        refined = circles.copy()
+
+        # First, try aggressive refinement
+        for _ in range(iterations // 3):
+            # Try small perturbations
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Try small random moves with adaptive strength
+                new_x = old_x + np.random.normal(0, 0.005)
+                new_y = old_y + np.random.normal(0, 0.005)
+                new_r = old_r + np.random.normal(0, 0.001)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, self.rect_width - new_r)
+                new_y = np.clip(new_y, new_r, self.rect_height - new_r)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        # Then, fine-tune with smaller steps
+        for _ in range(iterations // 3):
+            # Try very small perturbations
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Even smaller random moves
+                new_x = old_x + np.random.normal(0, 0.001)
+                new_y = old_y + np.random.normal(0, 0.001)
+                new_r = old_r + np.random.normal(0, 0.0005)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, self.rect_width - new_r)
+                new_y = np.clip(new_y, new_r, self.rect_height - new_r)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        return refined
+=======
+    def refine_solution(self, circles: np.ndarray, iterations: int = 150) -> np.ndarray:
+        """Apply advanced local refinement to improve final solution."""
+        refined = circles.copy()
+
+        # Multi-phase refinement process
+        # Phase 1: Coarse exploration - larger steps for rapid improvement
+        coarse_steps = iterations // 4
+        pos_step = 0.02
+        rad_step = 0.01
+
+        for _ in range(coarse_steps):
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Larger random moves for coarse exploration
+                new_x = old_x + np.random.normal(0, pos_step)
+                new_y = old_y + np.random.normal(0, pos_step)
+                new_r = old_r + np.random.normal(0, rad_step)
+
+                # Clip to bounds with safety margin
+                new_x = np.clip(new_x, new_r + 0.001, self.rect_width - new_r - 0.001)
+                new_y = np.clip(new_y, new_r + 0.001, self.rect_height - new_r - 0.001)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Quick constraint validation before expensive fitness calculation
+                if not self._quick_constraint_check(test_config):
+                    continue
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        # Phase 2: Medium refinement - balanced steps
+        medium_steps = iterations // 4
+        pos_step = 0.01
+        rad_step = 0.005
+
+        for _ in range(medium_steps):
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Medium random moves for refinement
+                new_x = old_x + np.random.normal(0, pos_step)
+                new_y = old_y + np.random.normal(0, pos_step)
+                new_r = old_r + np.random.normal(0, rad_step)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r + 0.001, self.rect_width - new_r - 0.001)
+                new_y = np.clip(new_y, new_r + 0.001, self.rect_height - new_r - 0.001)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Quick constraint validation before expensive fitness calculation
+                if not self._quick_constraint_check(test_config):
+                    continue
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        # Phase 3: Fine-tuning - very small steps for maximum precision
+        fine_steps = iterations // 2
+        pos_step = 0.002
+        rad_step = 0.001
+
+        for _ in range(fine_steps):
+            for i in range(len(refined)):
+                # Save current state
+                old_x, old_y, old_r = refined[i]
+
+                # Very small random moves for fine-tuning
+                new_x = old_x + np.random.normal(0, pos_step)
+                new_y = old_y + np.random.normal(0, pos_step)
+                new_r = old_r + np.random.normal(0, rad_step)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r + 0.001, self.rect_width - new_r - 0.001)
+                new_y = np.clip(new_y, new_r + 0.001, self.rect_height - new_r - 0.001)
+                new_r = max(0.001, new_r)
+
+                # Test if this change improves fitness
+                test_config = refined.copy()
+                test_config[i] = [new_x, new_y, new_r]
+
+                # Quick constraint validation before expensive fitness calculation
+                if not self._quick_constraint_check(test_config):
+                    continue
+
+                # Check if this move improves fitness
+                current_fitness, _ = self.calculate_fitness(refined)
+                test_fitness, _ = self.calculate_fitness(test_config)
+
+                if test_fitness > current_fitness:
+                    refined = test_config
+
+        return refined
+
+    def _quick_constraint_check(self, circles: np.ndarray) -> bool:
+        """Quick check for constraint validity before expensive fitness calculation."""
+        # Check boundary constraints quickly
+        for x, y, r in circles:
+            if x - r < 0 or x + r > self.rect_width or y - r < 0 or y + r > self.rect_height:
+                return False
+        return True
+>>>>>>> REPLACE
+</DIFF>

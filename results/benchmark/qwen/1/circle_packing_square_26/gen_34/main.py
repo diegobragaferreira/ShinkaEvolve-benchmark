@@ -1,0 +1,351 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+from typing import List, Tuple
+import time
+
+# Set random seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Problem parameters
+    N_CIRCLES = 26
+    MAX_RADIUS = 0.5
+    UNIT_SIZE = 1.0
+    
+    def check_collision(x1, y1, r1, x2, y2, r2):
+        """Check if two circles collide"""
+        dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+        return dist_sq <= (r1 + r2)**2
+    
+    def is_valid_position(x, y, r, existing_circles):
+        """Check if a circle at (x,y) with radius r is valid"""
+        # Check containment
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+        
+        # Check collisions with existing circles
+        for cx, cy, cr in existing_circles:
+            if check_collision(x, y, r, cx, cy, cr):
+                return False
+        return True
+    
+    def generate_initial_population(pop_size: int, num_circles: int) -> List[List[Tuple[float, float, float]]]:
+        """Generate initial population using Voronoi-based approach"""
+        population = []
+        
+        for _ in range(pop_size):
+            circles = []
+            
+            # Try multiple initialization strategies
+            for attempt in range(10):  # Retry up to 10 times
+                circles = []
+                try:
+                    # Start with a few randomly placed circles
+                    initial_count = min(5, num_circles // 2)
+                    for i in range(initial_count):
+                        x = np.random.uniform(0.1, 0.9)
+                        y = np.random.uniform(0.1, 0.9)
+                        r = np.random.uniform(0.01, 0.1)
+                        
+                        # Ensure this circle doesn't collide with existing ones
+                        if is_valid_position(x, y, r, circles):
+                            circles.append((x, y, r))
+                    
+                    # Place remaining circles using Voronoi-like approach
+                    for i in range(len(circles), num_circles):
+                        # Find best location for next circle
+                        max_radius = 0
+                        best_x, best_y = 0.5, 0.5
+                        
+                        # Sample multiple candidate positions
+                        for _ in range(100):
+                            x = np.random.uniform(0.05, 0.95)
+                            y = np.random.uniform(0.05, 0.95)
+                            
+                            # Calculate minimum distance to existing circles
+                            min_dist = float('inf')
+                            for cx, cy, cr in circles:
+                                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                                min_dist = min(min_dist, dist)
+                            
+                            # Radius is constrained by distance to nearest circle and boundaries
+                            radius = min(min_dist - 0.001, 
+                                       x, 1-x, y, 1-y,
+                                       MAX_RADIUS)
+                            
+                            if radius > max_radius:
+                                max_radius = radius
+                                best_x, best_y = x, y
+                        
+                        if max_radius > 0.001:
+                            circles.append((best_x, best_y, max_radius))
+                    
+                    # If we got enough circles, add to population
+                    if len(circles) == num_circles:
+                        population.append(circles)
+                        break
+                    
+                except Exception:
+                    continue
+            
+            # Fallback to random placement if Voronoi approach fails
+            if len(population) < _ + 1:
+                circles = []
+                attempt = 0
+                while len(circles) < num_circles and attempt < 1000:
+                    x = np.random.uniform(0.05, 0.95)
+                    y = np.random.uniform(0.05, 0.95)
+                    r = np.random.uniform(0.01, 0.1)
+                    
+                    if is_valid_position(x, y, r, circles):
+                        circles.append((x, y, r))
+                    attempt += 1
+                
+                if len(circles) == num_circles:
+                    population.append(circles)
+    
+        return population
+    
+    def evaluate(individual):
+        """Evaluate fitness of individual (sum of radii)"""
+        total_radius = sum(circle[2] for circle in individual)
+        return total_radius,
+    
+    def mutate_individual(individual, indpb=0.1, mut_radius=0.05):
+        """Mutate an individual (circle positions and radii)"""
+        mutated = []
+        for x, y, r in individual:
+            # Mutate position
+            if random.random() < indpb:
+                x += np.random.normal(0, 0.02)
+                x = np.clip(x, 0.05, 0.95)
+                
+            if random.random() < indpb:
+                y += np.random.normal(0, 0.02)
+                y = np.clip(y, 0.05, 0.95)
+                
+            # Mutate radius
+            if random.random() < indpb:
+                r += np.random.normal(0, mut_radius)
+                r = np.clip(r, 0.01, 0.45)
+            
+            mutated.append((x, y, r))
+        
+        # Ensure constraints are satisfied
+        valid_mutated = []
+        for x, y, r in mutated:
+            if r > 0.01:
+                # Check if this circle still fits in the square
+                if x - r >= 0 and x + r <= 1 and y - r >= 0 and y + r <= 1:
+                    valid_mutated.append((x, y, r))
+                else:
+                    # Adjust to fit if needed
+                    x = np.clip(x, r, 1-r)
+                    y = np.clip(y, r, 1-r)
+                    valid_mutated.append((x, y, r))
+            else:
+                # If radius too small, keep the original
+                valid_mutated.append((x, y, r))
+        
+        return valid_mutated,
+    
+    def crossover_individuals(ind1, ind2):
+        """Crossover two individuals"""
+        child1, child2 = [], []
+        
+        # Simple uniform crossover for circle parameters
+        for i in range(len(ind1)):
+            if random.random() < 0.5:
+                child1.append(ind1[i])
+                child2.append(ind2[i])
+            else:
+                child1.append(ind2[i])
+                child2.append(ind1[i])
+        
+        # Apply repair mechanism to fix any constraint violations
+        repaired_child1 = repair_individual(child1)
+        repaired_child2 = repair_individual(child2)
+        
+        return repaired_child1, repaired_child2
+    
+    def repair_individual(individual):
+        """Repair individual to satisfy all constraints"""
+        repaired = []
+        for i, (x, y, r) in enumerate(individual):
+            # Ensure radius is valid
+            r = max(0.001, min(r, 0.45))
+            
+            # Ensure position is valid
+            x = np.clip(x, r, 1-r)
+            y = np.clip(y, r, 1-r)
+            
+            # Check if it collides with other circles
+            valid = True
+            for j, (ox, oy, oradius) in enumerate(repaired):
+                if i != j:
+                    dist_sq = (x - ox)**2 + (y - oy)**2
+                    if dist_sq <= (r + oradius)**2:
+                        valid = False
+                        break
+            
+            if valid:
+                repaired.append((x, y, r))
+            else:
+                # Try to find a valid nearby position
+                best_x, best_y, best_r = x, y, r
+                min_distance = float('inf')
+                
+                # Sample nearby positions
+                for _ in range(100):
+                    test_x = np.random.uniform(max(0.05, x - 0.1), min(0.95, x + 0.1))
+                    test_y = np.random.uniform(max(0.05, y - 0.1), min(0.95, y + 0.1))
+                    test_r = r
+                    
+                    # Check validity
+                    if test_x - test_r >= 0 and test_x + test_r <= 1 and \
+                       test_y - test_r >= 0 and test_y + test_r <= 1:
+                        
+                        collision_free = True
+                        for ox, oy, oradius in repaired:
+                            dist_sq = (test_x - ox)**2 + (test_y - oy)**2
+                            if dist_sq <= (test_r + oradius)**2:
+                                collision_free = False
+                                break
+                        
+                        if collision_free:
+                            dist_to_original = (test_x - x)**2 + (test_y - y)**2
+                            if dist_to_original < min_distance:
+                                min_distance = dist_to_original
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                
+                repaired.append((best_x, best_y, best_r))
+        
+        # Pad or truncate to required size
+        while len(repaired) < N_CIRCLES:
+            # Generate random valid circle
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            r = np.random.uniform(0.01, 0.1)
+            
+            if is_valid_position(x, y, r, repaired):
+                repaired.append((x, y, r))
+        
+        return repaired[:N_CIRCLES]
+    
+    # DEAP setup
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", tools.initRepeat, creator.Individual, 
+                     lambda: (np.random.uniform(0.05, 0.95), 
+                              np.random.uniform(0.05, 0.95),
+                              np.random.uniform(0.01, 0.1)), 
+                     N_CIRCLES)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Generate initial population
+    pop = generate_initial_population(50, N_CIRCLES)
+    
+    # Convert to DEAP individuals if needed
+    if len(pop) == 0:
+        pop = toolbox.population(n=50)
+    else:
+        # Convert our custom format to DEAP individuals
+        deap_pop = []
+        for individual in pop:
+            deap_pop.append(creator.Individual(individual))
+        pop = deap_pop
+    
+    # Evolution parameters
+    CXPB = 0.7  # Crossover probability
+    MUTPB = 0.3  # Mutation probability
+    NGEN = 100   # Number of generations
+    POPSIZE = len(pop)
+    
+    # Statistics
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    
+    try:
+        pop, logbook = algorithms.eaSimple(pop, toolbox, CXPB, MUTPB, NGEN, 
+                                          stats=stats, halloffame=hof, verbose=False)
+    except Exception as e:
+        # Fallback to greedy approach if evolution fails
+        print(f"Evolution failed: {e}")
+        final_circles = []
+        for _ in range(N_CIRCLES):
+            # Greedy approach: place largest possible circle
+            max_radius = 0
+            best_x, best_y = 0.5, 0.5
+            
+            for attempt in range(10000):
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+                r = min(0.2, x, 1-x, y, 1-y)
+                
+                if is_valid_position(x, y, r, final_circles):
+                    if r > max_radius:
+                        max_radius = r
+                        best_x, best_y = x, y
+            
+            if max_radius > 0.001:
+                final_circles.append((best_x, best_y, max_radius))
+        
+        # Return result
+        circles_array = np.array(final_circles)
+        return circles_array
+    
+    # Get best individual
+    best_individual = hof[0]
+    
+    # Ensure we have exactly N_CIRCLES
+    if len(best_individual) < N_CIRCLES:
+        # Fill with additional circles using greedy approach
+        for _ in range(N_CIRCLES - len(best_individual)):
+            max_radius = 0
+            best_x, best_y = 0.5, 0.5
+            
+            for attempt in range(10000):
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+                r = min(0.2, x, 1-x, y, 1-y)
+                
+                if is_valid_position(x, y, r, best_individual):
+                    if r > max_radius:
+                        max_radius = r
+                        best_x, best_y = x, y
+            
+            if max_radius > 0.001:
+                best_individual.append((best_x, best_y, max_radius))
+    
+    # Convert to numpy array
+    circles_array = np.array(best_individual)
+    
+    # Final repair to ensure all constraints are met
+    final_circles = repair_individual(circles_array.tolist())
+    circles_array = np.array(final_circles)
+    
+    return circles_array
+
+# EVOLVE-BLOCK-END

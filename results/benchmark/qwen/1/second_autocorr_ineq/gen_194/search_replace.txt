@@ -1,0 +1,119 @@
+<NAME>
+replace_gradient_with_jax_autodiff
+</NAME>
+
+<DESCRIPTION>
+The current program uses finite-difference approximation for gradients in `adaptive_gradient_optimization`, which introduces numerical inaccuracies and instability. This change replaces the manual gradient computation with JAX's automatic differentiation capabilities, leveraging `jax.grad(evaluate_c2_jax)` for precise and efficient gradient calculation. This follows the proven pattern from successful generations that achieved consistent 0.8 scores by eliminating gradient estimation errors.
+
+This change addresses the core issue in the optimization process by:
+1. Eliminating numerical inaccuracies in gradient computation
+2. Improving convergence reliability through exact derivatives
+3. Maintaining the existing multi-stage refinement framework
+4. Aligning with the mathematical foundation of high-performing programs
+
+The modification focuses specifically on replacing the manual finite-difference gradient approximation with JAX's automatic differentiation while preserving all other optimization strategies.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_gradient_optimization(initial_f: List[float], max_iter: int = 100) -> List[float]:
+    """
+    Perform adaptive gradient-based optimization with momentum and learning rate scheduling
+    """
+    f_start = np.array(initial_f)
+    n_steps = len(f_start)
+
+    # Use scipy's L-BFGS-B as it provides good control over constraints and is robust
+    def objective(x):
+        return -evaluate_c2(x.tolist())
+
+    def gradient(x):
+        # Convert to numpy array for gradient computation
+        x_array = np.array(x)
+        # Simple finite difference approximation for gradient
+        eps = 1e-6
+        grad_vals = np.zeros_like(x_array)
+
+        for i in range(len(x_array)):
+            x_plus = x_array.copy()
+            x_minus = x_array.copy()
+            x_plus[i] += eps
+            x_minus[i] -= eps
+            grad_vals[i] = (evaluate_c2(x_plus.tolist()) - evaluate_c2(x_minus.tolist())) / (2 * eps)
+
+        return -grad_vals  # Negative because we're minimizing negative C2
+
+    try:
+        # Define bounds
+        bounds = [(0, 1.0) for _ in range(n_steps)]
+
+        # Run L-BFGS-B optimization
+        result = minimize(
+            objective,
+            f_start,
+            method='L-BFGS-B',
+            bounds=bounds,
+            jac=gradient,
+            options={'maxiter': max_iter, 'gtol': 1e-6},
+            callback=None
+        )
+
+        if result.success:
+            optimized_f = np.maximum(result.x, 0)
+            if np.sum(optimized_f) > 0:
+                optimized_f = optimized_f / np.sum(optimized_f)
+            return optimized_f.tolist()
+    except Exception as e:
+        print(f"Gradient optimization failed: {e}")
+
+    return initial_f
+=======
+def adaptive_gradient_optimization(initial_f: List[float], max_iter: int = 100) -> List[float]:
+    """
+    Perform adaptive gradient-based optimization with momentum and learning rate scheduling
+    """
+    f_start = np.array(initial_f)
+    n_steps = len(f_start)
+
+    # Use scipy's L-BFGS-B as it provides good control over constraints and is robust
+    def objective(x):
+        return -evaluate_c2(x.tolist())
+
+    @jit
+    def jax_objective(x):
+        return -evaluate_c2_jax(x)
+
+    # Use JAX automatic differentiation instead of finite differences
+    jax_grad = grad(jax_objective)
+
+    def gradient(x):
+        # Use JAX's automatic differentiation for precise gradients
+        grad_vals = jax_grad(x)
+        return -np.array(grad_vals)  # Negative because we're minimizing negative C2
+
+    try:
+        # Define bounds
+        bounds = [(0, 1.0) for _ in range(n_steps)]
+
+        # Run L-BFGS-B optimization
+        result = minimize(
+            objective,
+            f_start,
+            method='L-BFGS-B',
+            bounds=bounds,
+            jac=gradient,
+            options={'maxiter': max_iter, 'gtol': 1e-6},
+            callback=None
+        )
+
+        if result.success:
+            optimized_f = np.maximum(result.x, 0)
+            if np.sum(optimized_f) > 0:
+                optimized_f = optimized_f / np.sum(optimized_f)
+            return optimized_f.tolist()
+    except Exception as e:
+        print(f"Gradient optimization failed: {e}")
+
+    return initial_f
+>>>>>>> REPLACE
+</DIFF>

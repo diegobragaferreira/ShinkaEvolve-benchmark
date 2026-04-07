@@ -1,0 +1,204 @@
+<NAME>
+add_fft_based_convolution_optimization
+</NAME>
+
+<DESCRIPTION>
+This edit introduces a more sophisticated approach to convolution computation by leveraging FFT-based methods for all sequence sizes, including smaller ones. The key insight is that even for relatively small sequences, FFT can provide performance benefits due to reduced overhead compared to repeated direct convolution operations. The change modifies the convolution strategy to always use FFT for consistency and improved numerical stability, which can lead to better overall performance in finding optimal sequences.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')
+=======
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for all sequence sizes."""
+    return fftconvolve(a, b, mode='full')
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+remove_conditional_convolution_logic
+</NAME>
+
+<DESCRIPTION>
+This edit removes the conditional logic that switches between FFT and direct convolution based on sequence length. Instead, it standardizes the use of FFT for all computations. This simplifies the code and ensures consistent performance characteristics across all sequence sizes, which can help avoid potential bottlenecks and improve maintainability.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence."""
+    a = np.array(sequence)
+    n = len(a)
+
+    # Use FFT for efficiency when sequence is large
+    if n > 100:
+        b = convolve_fft(a, a)
+    else:
+        b = convolve_direct(a, a)
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+=======
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence."""
+    a = np.array(sequence)
+    n = len(a)
+
+    # Always use FFT for consistent performance and numerical stability
+    b = convolve_fft(a, a)
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_local_optimization_with_gradient_ascent
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the local optimization by implementing a more robust gradient ascent strategy that incorporates adaptive step sizes and convergence checks. It adds safeguards to prevent divergence and ensures the optimization stays within reasonable bounds. This should lead to more effective local refinement and potentially better convergence to high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Improve the sequence using enhanced local optimization strategies."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try solving LP multiple times with adjusted RHS if necessary
+    g_fun = None
+    for attempt in range(5):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is not None:
+            break
+        rhs *= 1.05
+
+    if g_fun is None:
+        # Fallback to simple gradient ascent with adaptive step size
+        t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation with multiple strategies
+    t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+
+    # Hybrid approach: combine LP solution with gradient descent refinement
+    # First try direct combination
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+    # Add a bit of randomness for exploration
+    if n > 100:
+        # For larger sequences, use more sophisticated exploration
+        random_perturbation = np.random.normal(0, 0.01 * t, n)
+        new_sequence = [max(0, x + 0.5 * p * x) for x, p in zip(new_sequence, random_perturbation)]
+    else:
+        # For smaller sequences, add simple noise
+        new_sequence = [max(0, x + np.random.normal(0, 0.02 * x)) for x in new_sequence]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Improve the sequence using enhanced local optimization strategies."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints using FFT for consistency
+    b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try solving LP multiple times with adjusted RHS if necessary
+    g_fun = None
+    for attempt in range(5):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is not None:
+            break
+        rhs *= 1.05
+
+    if g_fun is None:
+        # Enhanced fallback with gradient ascent approach
+        # Use a more adaptive step size that decreases with iterations
+        t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation with advanced gradient ascent
+    t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+
+    # Combine LP solution with gradient ascent for better convergence
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+    # Add bounded random exploration to prevent getting stuck in local optima
+    exploration_noise = np.random.normal(0, 0.01 * t, n)
+    new_sequence = [max(0, x + 0.3 * p * np.clip(x, 1e-3, 1000)) for x, p in zip(new_sequence, exploration_noise)]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

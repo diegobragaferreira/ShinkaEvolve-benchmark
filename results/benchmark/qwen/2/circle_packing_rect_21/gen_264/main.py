@@ -1,0 +1,352 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import math
+import random
+from typing import Tuple, Optional
+
+class CircleConstraintChecker:
+    """Handles all constraint validation for circle packing"""
+    
+    @staticmethod
+    def is_valid_position(x: float, y: float, r: float, width: float, height: float) -> bool:
+        """Check if circle position is valid (within bounds)"""
+        return (r <= x <= width - r and r <= y <= height - r)
+    
+    @staticmethod
+    def calculate_boundary_penalty(x: float, y: float, r: float, width: float, height: float) -> float:
+        """Calculate penalty for boundary violations"""
+        boundary_dist = min(x, y, width - x, height - y)
+        return max(0, r - boundary_dist) ** 2 if boundary_dist < r else 0
+    
+    @staticmethod
+    def calculate_overlap_penalty(circles: np.ndarray, i: int, j: int) -> float:
+        """Calculate penalty for overlap between two circles"""
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        dx = x2 - x1
+        dy = y2 - y1
+        distance = math.sqrt(dx*dx + dy*dy)
+        overlap = max(0, (r1 + r2) - distance)
+        return overlap ** 2
+
+class CircleInitializer:
+    """Responsible for generating initial circle configurations"""
+    
+    @staticmethod
+    def initialize_grid_placement(n_circles: int, width: float, height: float) -> np.ndarray:
+        """Initialize circles with adaptive grid placement"""
+        circles = np.zeros((n_circles, 3))
+        
+        # Calculate optimal spacing using area-based approach
+        total_area = width * height
+        area_per_circle = total_area / n_circles
+        optimal_spacing = math.sqrt(area_per_circle)
+        
+        # Determine grid dimensions that best match the rectangle aspect ratio
+        aspect_ratio = width / height
+        
+        # Find appropriate grid dimensions
+        cols = max(1, int(width / optimal_spacing))
+        rows = max(1, int(height / optimal_spacing))
+        
+        # Adjust grid dimensions to fit required circles
+        while cols * rows < n_circles:
+            if aspect_ratio >= 1:  # landscape
+                cols += 1
+            else:  # portrait
+                rows += 1
+                
+        # Ensure we don't exceed required number of circles
+        while cols * rows > n_circles and cols > 1 and rows > 1:
+            if aspect_ratio >= 1:
+                cols -= 1
+            else:
+                rows -= 1
+        
+        # Calculate actual spacing
+        spacing_x = width / (cols + 1) if cols > 0 else width
+        spacing_y = height / (rows + 1) if rows > 0 else height
+        
+        # Create grid with hexagonal offset for better packing
+        idx = 0
+        for i in range(cols):
+            for j in range(rows):
+                if idx >= n_circles:
+                    break
+                # Offset every other row for hexagonal packing
+                offset = (j % 2) * spacing_x * 0.5
+                x = (i + 1) * spacing_x + offset + random.uniform(-spacing_x*0.05, spacing_x*0.05)
+                y = (j + 1) * spacing_y + random.uniform(-spacing_y*0.05, spacing_y*0.05)
+                
+                # Initial radius calculation
+                base_radius = min(spacing_x, spacing_y) * 0.25
+                r = base_radius
+                
+                # Adjust radius based on position for better distribution
+                center_x, center_y = width/2, height/2
+                dist_to_center = math.sqrt((x-center_x)**2 + (y-center_y)**2)
+                max_dist_to_center = math.sqrt((width/2)**2 + (height/2)**2)
+                if max_dist_to_center > 0:
+                    center_adjustment = 1.0 + 0.5 * (1.0 - dist_to_center/max_dist_to_center)
+                    r *= center_adjustment
+                else:
+                    r *= 1.0
+                
+                circles[idx] = [x, y, r]
+                idx += 1
+            if idx >= n_circles:
+                break
+        
+        # Adjust initial radii to ensure proper bounds
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            min_dist = min(x, y, width - x, height - y)
+            center_x, center_y = width/2, height/2
+            dist_to_center = math.sqrt((x-center_x)**2 + (y-center_y)**2)
+            max_dist_to_center = math.sqrt((width/2)**2 + (height/2)**2)
+            if max_dist_to_center > 0:
+                edge_adjustment = 0.7 + 0.3 * (1.0 - dist_to_center/max_dist_to_center)
+                circles[i][2] = min(r, min_dist * edge_adjustment * 0.8)
+            else:
+                circles[i][2] = min(r, min_dist * 0.7)
+                
+        return circles
+
+class PhysicsOptimizer:
+    """Handles physics-based optimization of circle arrangements"""
+    
+    def __init__(self, width: float, height: float, repulsion_strength: float = 2.0, 
+                 attraction_strength: float = 0.1, boundary_force: float = 0.5):
+        self.width = width
+        self.height = height
+        self.repulsion_strength = repulsion_strength
+        self.attraction_strength = attraction_strength
+        self.boundary_force = boundary_force
+        
+    def optimize(self, circles: np.ndarray, max_iter: int = 1000) -> np.ndarray:
+        """Apply physics-based optimization to improve packing"""
+        tree = cKDTree(circles[:, :2])
+        step_size = 0.01
+        
+        for iteration in range(max_iter):
+            forces = np.zeros_like(circles)
+            
+            # Calculate repulsion forces using spatial indexing
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                
+                # Find neighbors within reasonable range
+                neighbors = tree.query_ball_point([x1, y1], 3 * (r1 + 0.01), p=2)
+                for j in neighbors:
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        
+                        if distance > 0.001:
+                            overlap_distance = (r1 + r2) - distance
+                            if overlap_distance > 0:
+                                force_magnitude = self.repulsion_strength * overlap_distance / (distance ** 2)
+                                
+                                forces[i, 0] -= force_magnitude * dx / distance
+                                forces[i, 1] -= force_magnitude * dy / distance
+            
+            # Apply boundary and center attraction forces
+            center_x, center_y = self.width/2, self.height/2
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                
+                # Attract to center of rectangle
+                dx = center_x - x
+                dy = center_y - y
+                forces[i, 0] += self.attraction_strength * dx
+                forces[i, 1] += self.attraction_strength * dy
+                
+                # Boundary forces
+                if x - r < 0:
+                    forces[i, 0] += self.boundary_force * (r - x)
+                if x + r > self.width:
+                    forces[i, 0] -= self.boundary_force * (x + r - self.width)
+                if y - r < 0:
+                    forces[i, 1] += self.boundary_force * (r - y)
+                if y + r > self.height:
+                    forces[i, 1] -= self.boundary_force * (y + r - self.height)
+            
+            # Update positions
+            for i in range(len(circles)):
+                circles[i, 0] += forces[i, 0] * step_size
+                circles[i, 1] += forces[i, 1] * step_size
+                
+                # Maintain positive radii
+                if circles[i, 2] < 0.0001:
+                    circles[i, 2] = 0.0001
+                
+                # Enforce valid positions
+                if not CircleConstraintChecker.is_valid_position(circles[i, 0], circles[i, 1], 
+                                                                circles[i, 2], self.width, self.height):
+                    x, y, r = circles[i]
+                    x = max(r, min(self.width - r, x))
+                    y = max(r, min(self.height - r, y))
+                    circles[i] = [x, y, r]
+            
+            # Early termination check
+            if iteration % 100 == 0:
+                penalty = self._calculate_total_penalty(circles)
+                if penalty < 1e-5:
+                    break
+                    
+        return circles
+    
+    def _calculate_total_penalty(self, circles: np.ndarray) -> float:
+        """Calculate total penalty for all constraints"""
+        penalty = 0.0
+        for circle in circles:
+            x, y, r = circle
+            penalty += CircleConstraintChecker.calculate_boundary_penalty(x, y, r, self.width, self.height)
+        return penalty
+
+class EvolutionaryRefiner:
+    """Performs evolutionary refinement to improve circle radii"""
+    
+    def __init__(self, width: float, height: float):
+        self.width = width
+        self.height = height
+    
+    def refine_radii(self, circles: np.ndarray, iterations: int = 200) -> np.ndarray:
+        """Use evolutionary approach to refine circle radii"""
+        best_circles = circles.copy()
+        best_sum = np.sum(best_circles[:, 2])
+        
+        # Generate variations and test
+        for _ in range(iterations):
+            test_circles = best_circles.copy()
+            
+            # Randomly select one circle to modify
+            idx = random.randint(0, len(test_circles) - 1)
+            x, y, r = test_circles[idx]
+            
+            # Try to slightly increase radius
+            old_r = r
+            new_r = min(old_r * 1.05, 0.2)
+            test_circles[idx, 2] = new_r
+            
+            # Verify constraint satisfaction
+            if not CircleConstraintChecker.is_valid_position(test_circles[idx, 0], test_circles[idx, 1], 
+                                                           test_circles[idx, 2], self.width, self.height):
+                continue
+                
+            # Remove this circle for overlap testing
+            temp_circles = np.delete(test_circles, idx, axis=0)
+            if not self._check_any_overlaps(test_circles[idx], temp_circles):
+                # Test the modified configuration
+                new_sum = np.sum(test_circles[:, 2])
+                if new_sum > best_sum:
+                    best_sum = new_sum
+                    best_circles = test_circles.copy()
+                    
+        return best_circles
+    
+    def _check_any_overlaps(self, test_circle, existing_circles) -> bool:
+        """Check if test circle overlaps with any existing circles"""
+        x, y, r = test_circle
+        for cx, cy, cr in existing_circles:
+            dx = x - cx
+            dy = y - cy
+            distance = math.sqrt(dx*dx + dy*dy)
+            if distance < (r + cr):
+                return True
+        return False
+
+class CirclePackingOptimizer:
+    """Main optimizer class coordinating the complete circle packing process"""
+    
+    def __init__(self, width: float = 1.0, height: float = 1.0, n_circles: int = 21):
+        self.width = width
+        self.height = height
+        self.n_circles = n_circles
+        self.physics_optimizer = PhysicsOptimizer(width, height)
+        self.evolutionary_refiner = EvolutionaryRefiner(width, height)
+        self.initializer = CircleInitializer()
+        random.seed(42)
+    
+    def optimize(self) -> np.ndarray:
+        """Main optimization pipeline"""
+        # Phase 1: Initialization
+        circles = self.initializer.initialize_grid_placement(self.n_circles, self.width, self.height)
+        
+        # Phase 2: Physics-based optimization
+        circles = self.physics_optimizer.optimize(circles, max_iter=1500)
+        
+        # Phase 3: Evolutionary refinement
+        circles = self.evolutionary_refiner.refine_radii(circles, iterations=200)
+        
+        # Phase 4: Final polishing
+        circles = self.physics_optimizer.optimize(circles, max_iter=500)
+        
+        # Phase 5: Individual radius maximization
+        circles = self._maximize_individual_radii(circles)
+        
+        return circles
+    
+    def _maximize_individual_radii(self, circles: np.ndarray) -> np.ndarray:
+        """Try to maximize individual radii after main optimization"""
+        for _ in range(100):
+            improvement_made = False
+            for i in range(len(circles)):
+                original_circle = circles[i].copy()
+                x, y, r = original_circle
+                
+                # Try to increase radius by small amount
+                new_r = min(r * 1.02, 0.2)
+                test_circle = [x, y, new_r]
+                
+                # Check if valid and causes no overlaps
+                if (CircleConstraintChecker.is_valid_position(x, y, new_r, self.width, self.height) and
+                    not self._check_overlap_for_single(test_circle, circles, i)):
+                    circles[i] = test_circle
+                    improvement_made = True
+                    
+            if not improvement_made:
+                break
+                
+        return circles
+    
+    def _check_overlap_for_single(self, test_circle, all_circles, exclude_idx: int) -> bool:
+        """Check if test circle overlaps with any other circles (excluding index)"""
+        x, y, r = test_circle
+        for idx, (cx, cy, cr) in enumerate(all_circles):
+            if idx == exclude_idx:
+                continue
+            dx = x - cx
+            dy = y - cy
+            distance = math.sqrt(dx*dx + dy*dy)
+            if distance < (r + cr):
+                return True
+        return False
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Create optimizer with default rectangle dimensions
+    optimizer = CirclePackingOptimizer(width=1.0, height=1.0, n_circles=21)
+    
+    # Run optimization
+    circles = optimizer.optimize()
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

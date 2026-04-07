@@ -1,0 +1,318 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,287 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from itertools import product
++import math
++
++# Hexagon constants
++HEX_RADIUS = 1.0
++HEX_WIDTH = 2 * HEX_RADIUS
++HEX_HEIGHT = math.sqrt(3) * HEX_RADIUS
++HEX_APOGEE = HEX_RADIUS * math.sqrt(3) / 2
++
++def get_hexagon_vertices(center_x, center_y, angle_degrees):
++    """Get vertices of a unit regular hexagon given center and rotation"""
++    angle_rad = math.radians(angle_degrees)
++    
++    # Vertices of a unit hexagon centered at origin, pointing up
++    base_vertices = []
++    for i in range(6):
++        theta = angle_rad + i * math.pi/3
++        x = HEX_RADIUS * math.cos(theta)
++        y = HEX_RADIUS * math.sin(theta)
++        base_vertices.append((x, y))
++
++    # Translate to center
++    vertices = [(x + center_x, y + center_y) for x, y in base_vertices]
++    return np.array(vertices)
++
++def hexagon_collision(hex1_vertices, hex2_vertices):
++    """Fast collision detection using bounding circle and SAT"""
++    # Quick bounding circle check first
++    center1 = np.mean(hex1_vertices, axis=0)
++    center2 = np.mean(hex2_vertices, axis=0)
++    dist = np.linalg.norm(center1 - center2)
++    if dist > 2 * HEX_RADIUS:
++        return False
++    
++    # Full SAT check
++    # Get all edges of both hexagons
++    edges1 = []
++    edges2 = []
++
++    for i in range(6):
++        p1 = hex1_vertices[i]
++        p2 = hex1_vertices[(i+1)%6]
++        edge = (p2[0]-p1[0], p2[1]-p1[1])
++        edges1.append(edge)
++
++        p1 = hex2_vertices[i]
++        p2 = hex2_vertices[(i+1)%6]
++        edge = (p2[0]-p1[0], p2[1]-p1[1])
++        edges2.append(edge)
++
++    # Combine all potential separating axes
++    all_axes = edges1 + edges2
++
++    # Normalize axes
++    for i, axis in enumerate(all_axes):
++        length = math.sqrt(axis[0]**2 + axis[1]**2)
++        if length > 0:
++            all_axes[i] = (axis[0]/length, axis[1]/length)
++
++    # Check projection overlap on each axis
++    for axis in all_axes:
++        # Project both hexagons onto this axis
++        proj1 = []
++        proj2 = []
++
++        for v in hex1_vertices:
++            dot = v[0]*axis[0] + v[1]*axis[1]
++            proj1.append(dot)
++
++        for v in hex2_vertices:
++            dot = v[0]*axis[0] + v[1]*axis[1]
++            proj2.append(dot)
++
++        min1, max1 = min(proj1), max(proj1)
++        min2, max2 = min(proj2), max(proj2)
++
++        # If projections don't overlap, then there's separation
++        if max1 < min2 or max2 < min1:
++            return False
++
++    return True
++
++def is_contained_in_outer_hex(hex_vertices, outer_radius):
++    """Check if all vertices of hexagon are within outer hexagon"""
++    for vertex in hex_vertices:
++        x, y = vertex
++        distance = math.sqrt(x*x + y*y)
++        if distance >= outer_radius:
++            return False
++    return True
++
++def calculate_outer_radius(inner_hex_data):
++    """Calculate minimum outer hex radius to contain all inner hexagons"""
++    max_dist = 0
++    for i in range(len(inner_hex_data)):
++        center_x = inner_hex_data[i][0]
++        center_y = inner_hex_data[i][1]
++        angle = inner_hex_data[i][2]
++        
++        # Get vertices of this hexagon
++        vertices = get_hexagon_vertices(center_x, center_y, angle)
++        
++        # Find maximum distance from origin to any vertex
++        for x, y in vertices:
++            distance = math.sqrt(x*x + y*y)
++            max_dist = max(max_dist, distance)
++    
++    # Add buffer to ensure complete containment
++    return max_dist + HEX_RADIUS
++
++def generate_tiling_pattern(n_hexagons=11):
++    """Generate a good initial tiling pattern based on hexagonal lattice"""
++    # Generate candidates for placing hexagons in a hexagonal lattice pattern
++    positions = []
++    
++    # First try to place in a honeycomb pattern around center
++    # This is a simplified approximation
++    center_positions = [
++        (0, 0),
++        (-1.732, 0),   # -sqrt(3)
++        (1.732, 0),    # sqrt(3)
++        (0, 1.732),    # sqrt(3)
++        (0, -1.732),   # -sqrt(3)
++        (-0.866, 0.866), # -sqrt(3)/2, sqrt(3)/2  
++        (0.866, 0.866),  # sqrt(3)/2, sqrt(3)/2
++        (-0.866, -0.866), # -sqrt(3)/2, -sqrt(3)/2
++        (0.866, -0.866),  # sqrt(3)/2, -sqrt(3)/2
++        (-1.732, 1.732),  # -sqrt(3), sqrt(3)
++        (1.732, 1.732),   # sqrt(3), sqrt(3)
++    ]
++    
++    # Make sure we have exactly n_hexagons
++    positions = center_positions[:n_hexagons]
++    
++    # Create initial configuration with zero rotations
++    config = np.zeros((n_hexagons, 3))
++    for i, (x, y) in enumerate(positions):
++        config[i] = [x, y, 0]
++        
++    return config
++
++def perturb_configuration(config, step_size=0.1):
++    """Create a random perturbation of the configuration"""
++    new_config = config.copy()
++    
++    # Randomly mutate one or two hexagons
++    num_mutations = np.random.randint(1, 3)
++    mutated_indices = np.random.choice(len(config), num_mutations, replace=False)
++    
++    for idx in mutated_indices:
++        # Slightly change position and rotation
++        new_config[idx, 0] += np.random.uniform(-step_size, step_size)
++        new_config[idx, 1] += np.random.uniform(-step_size, step_size)
++        new_config[idx, 2] += np.random.uniform(-30, 30)
++        
++        # Keep rotation in [0, 360) range
++        new_config[idx, 2] %= 360
++        
++    return new_config
++
++def check_validity(config, outer_radius):
++    """Check if configuration is valid"""
++    # Check all pairs for collisions
++    for i in range(len(config)):
++        hex1_vertices = get_hexagon_vertices(config[i][0], config[i][1], config[i][2])
++        
++        # Check containment
++        if not is_contained_in_outer_hex(hex1_vertices, outer_radius):
++            return False
++            
++        # Check collisions with others
++        for j in range(i+1, len(config)):
++            hex2_vertices = get_hexagon_vertices(config[j][0], config[j][1], config[j][2])
++            if hexagon_collision(hex1_vertices, hex2_vertices):
++                return False
++                
++    return True
++
++def evaluate_config(config):
++    """Evaluate a configuration and return fitness"""
++    # Calculate outer radius required
++    outer_radius = calculate_outer_radius(config)
++    
++    # Check validity
++    if not check_validity(config, outer_radius):
++        return 1e10  # Very bad fitness for invalid configs
++        
++    # Return inverse of outer radius (we want to maximize 1/R)
++    return 1.0 / outer_radius
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+-    Returns
+-        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+-        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+-        outer_hex_side_length: float representing the side length of the outer hexagon.
++    Uses a grid-based evolutionary optimization approach.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
+-
++    np.random.seed(42)
++    
++    # Generate initial good tiling
++    current_config = generate_tiling_pattern(11)
++    
++    # Best solution found so far
++    best_config = current_config.copy()
++    best_fitness = evaluate_config(current_config)
++    
++    # Evolutionary parameters
++    max_iterations = 1000
++    population_size = 20
++    
++    # Initialize population
++    population = [current_config]
++    for _ in range(population_size - 1):
++        mutated = perturb_configuration(current_config, 0.3)
++        population.append(mutated)
++    
++    # Evolution loop
++    for iteration in range(max_iterations):
++        # Evaluate population
++        fitness_scores = [evaluate_config(individual) for individual in population]
++        
++        # Track best
++        best_idx = np.argmin(fitness_scores)
++        if fitness_scores[best_idx] < best_fitness:
++            best_config = population[best_idx].copy()
++            best_fitness = fitness_scores[best_idx]
++            
++        # Select parents (tournament selection)
++        parents = []
++        for _ in range(population_size // 2):
++            tournament_size = 3
++            tournament_indices = np.random.choice(population_size, tournament_size, replace=False)
++            tournament_fitnesses = [fitness_scores[i] for i in tournament_indices]
++            winner_idx = tournament_indices[np.argmin(tournament_fitnesses)]
++            parents.append(population[winner_idx])
++            
++        # Create new population through crossover and mutation
++        new_population = []
++        
++        # Elitism: keep best solution
++        new_population.append(best_config)
++        
++        # Generate offspring
++        for i in range(len(parents) - 1):
++            parent1 = parents[i]
++            parent2 = parents[(i + 1) % len(parents)]
++            
++            # Crossover: blend positions, average rotations
++            child = parent1.copy()  # Start with parent1
++            alpha = np.random.rand()
++            
++            # Blend positions
++            for j in range(len(child)):
++                child[j, 0] = alpha * parent1[j, 0] + (1 - alpha) * parent2[j, 0]
++                child[j, 1] = alpha * parent1[j, 1] + (1 - alpha) * parent2[j, 1]
++                child[j, 2] = alpha * parent1[j, 2] + (1 - alpha) * parent2[j, 2]
++                
++            # Mutate child
++            mutated_child = perturb_configuration(child, 0.1)
++            new_population.append(mutated_child)
++            
++        # Fill up population to correct size
++        while len(new_population) < population_size:
++            # Add random perturbations to existing configurations
++            rand_config = population[np.random.randint(len(population))]
++            mutated = perturb_configuration(rand_config, 0.2)
++            new_population.append(mutated)
++            
++        population = new_population[:population_size]
++        
++        # Occasionally add some diversity
++        if iteration % 50 == 0 and iteration > 0:
++            for i in range(population_size // 4):
++                new_config = generate_tiling_pattern(11)
++                population[np.random.randint(len(population))] = new_config
++    
++    # Final evaluation of best solution
++    final_fitness = evaluate_config(best_config)
++    
++    # Create outer hexagon data (centered at origin)
++    outer_hex_data = np.array([0, 0, 0])
++    outer_radius = calculate_outer_radius(best_config)
++    
++    return best_config, outer_hex_data, outer_radius
+ 
+ # EVOLVE-BLOCK-END

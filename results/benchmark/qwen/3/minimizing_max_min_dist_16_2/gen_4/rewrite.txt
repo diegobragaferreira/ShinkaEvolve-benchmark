@@ -1,0 +1,172 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+
+class PointDispersionOptimizer:
+    """Optimizes point distribution to maximize min/max distance ratio."""
+    
+    def __init__(self, n_points=16, dimensions=2, seed=42):
+        self.n_points = n_points
+        self.dimensions = dimensions
+        self.seed = seed
+        np.random.seed(seed)
+        
+    def _compute_distances(self, points):
+        """Compute pairwise distances between points."""
+        if len(points.shape) == 1:
+            points = points.reshape(-1, self.dimensions)
+        distances = pdist(points)
+        return distances
+        
+    def _objective_function(self, flat_points):
+        """Objective function to maximize min/max distance ratio."""
+        points = flat_points.reshape(-1, self.dimensions)
+        distances = self._compute_distances(points)
+        
+        if len(distances) == 0:
+            return -np.inf
+            
+        min_distance = np.min(distances)
+        max_distance = np.max(distances)
+        
+        # Avoid division by zero
+        if max_distance <= 1e-12:
+            return -np.inf
+            
+        return min_distance / max_distance
+    
+    def _constraint_function(self, flat_points):
+        """Constraint function to keep points within unit square."""
+        points = flat_points.reshape(-1, self.dimensions)
+        # Ensure all coordinates are in [0,1]
+        return np.concatenate([
+            points.flatten() - 1,  # x_i - 1 <= 0
+            -points.flatten()     # x_i >= 0
+        ])
+    
+    def _optimize_single_start(self, initial_points):
+        """Perform optimization from single starting configuration."""
+        # Flatten points for optimization
+        flat_initial = initial_points.flatten()
+        
+        # Define bounds for each coordinate [0,1]
+        bounds = [(0, 1) for _ in range(len(flat_initial))]
+        
+        # Constraints for boundary conditions
+        constraints = {'type': 'ineq', 'fun': self._constraint_function}
+        
+        # Optimize using L-BFGS-B
+        try:
+            result = minimize(
+                lambda x: -self._objective_function(x),  # Negative because we maximize
+                flat_initial,
+                method='L-BFGS-B',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+            
+            if result.success:
+                optimized_points = result.x.reshape(-1, self.dimensions)
+                return optimized_points, self._objective_function(result.x)
+            else:
+                warnings.warn(f"Optimization failed: {result.message}")
+                return initial_points, self._objective_function(flat_initial)
+                
+        except Exception as e:
+            warnings.warn(f"Optimization error: {str(e)}")
+            return initial_points, self._objective_function(flat_initial)
+    
+    def generate_initial_points(self):
+        """Generate initial point configurations."""
+        # Generate multiple random initial configurations
+        configurations = []
+        
+        # Grid-based initialization for better coverage
+        grid_points = self._generate_grid_points()
+        configurations.append(grid_points.copy())
+        
+        # Random initialization
+        random_points = np.random.rand(self.n_points, self.dimensions)
+        configurations.append(random_points.copy())
+        
+        # Hexagonal-like pattern
+        hex_points = self._generate_hexagon_points()
+        configurations.append(hex_points.copy())
+        
+        return configurations
+    
+    def _generate_grid_points(self):
+        """Generate points in a grid pattern."""
+        n_per_side = int(np.ceil(np.sqrt(self.n_points)))
+        x = np.linspace(0.1, 0.9, n_per_side)
+        y = np.linspace(0.1, 0.9, n_per_side)
+        xx, yy = np.meshgrid(x, y)
+        points = np.column_stack([xx.ravel(), yy.ravel()])[:self.n_points]
+        return points
+    
+    def _generate_hexagon_points(self):
+        """Generate points in a hexagonal pattern."""
+        points = []
+        radius = 0.4
+        center_x, center_y = 0.5, 0.5
+        
+        # Center point
+        points.append([center_x, center_y])
+        
+        # Surrounding points in hexagonal arrangement
+        angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
+        for angle in angles:
+            x = center_x + radius * np.cos(angle)
+            y = center_y + radius * np.sin(angle)
+            points.append([x, y])
+        
+        # Additional points
+        for i in range(self.n_points - len(points)):
+            points.append([np.random.rand(), np.random.rand()])
+            
+        return np.array(points[:self.n_points])
+    
+    def optimize(self):
+        """Main optimization routine."""
+        best_points = None
+        best_ratio = -np.inf
+        
+        # Try multiple initial configurations
+        initial_configs = self.generate_initial_points()
+        
+        for i, initial_config in enumerate(initial_configs):
+            try:
+                optimized_points, ratio = self._optimize_single_start(initial_config)
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+                    
+            except Exception as e:
+                warnings.warn(f"Error in optimization round {i}: {str(e)}")
+                continue
+                
+        # Final validation
+        if best_points is not None:
+            final_ratio = self._objective_function(best_points.flatten())
+            print(f"Final optimized ratio: {final_ratio:.6f}")
+            return best_points
+        else:
+            # Return the last attempted configuration if nothing worked
+            return initial_configs[-1] if initial_configs else np.random.rand(self.n_points, self.dimensions)
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    optimizer = PointDispersionOptimizer(n_points=16, dimensions=2, seed=42)
+    points = optimizer.optimize()
+    return points
+
+# EVOLVE-BLOCK-END

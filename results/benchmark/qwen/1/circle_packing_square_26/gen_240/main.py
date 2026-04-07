@@ -1,0 +1,324 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple
+
+# Global constants
+POPULATION_SIZE = 100
+GENERATIONS = 500
+MUTATION_RATE = 0.1
+ELITISM_COUNT = 10
+MAX_ATTEMPTS = 1000
+
+def initialize_population(n_circles: int, population_size: int) -> np.ndarray:
+    """Initialize a population of circle configurations using enhanced Voronoi-based method"""
+    from scipy.spatial import Voronoi
+    import numpy as np
+
+    population = []
+
+    # Use enhanced Voronoi initialization for first few individuals
+    for i in range(min(30, population_size)):
+        # Create points using structured distribution for better Voronoi coverage
+        points = []
+
+        # Add grid points with jitter
+        grid_size = 6
+        spacing = 1.0 / (grid_size + 1)
+        for i in range(grid_size):
+            for j in range(grid_size):
+                x = (i + 1) * spacing + np.random.uniform(-spacing/6, spacing/6)
+                y = (j + 1) * spacing + np.random.uniform(-spacing/6, spacing/6)
+                points.append([x, y])
+
+        # Add boundary points for better coverage
+        for _ in range(10):
+            side = np.random.randint(0, 4)
+            if side == 0:  # Top
+                points.append([np.random.rand(), 1.0])
+            elif side == 1:  # Bottom
+                points.append([np.random.rand(), 0.0])
+            elif side == 2:  # Left
+                points.append([0.0, np.random.rand()])
+            else:  # Right
+                points.append([1.0, np.random.rand()])
+
+        # Ensure we have enough points
+        while len(points) < n_circles:
+            points.append([np.random.rand(), np.random.rand()])
+
+        points = np.array(points[:n_circles])
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+
+            # Use Voronoi cell centroids for circle positions
+            if len(vor.points) >= n_circles:
+                circles = np.zeros((n_circles, 3))
+
+                # Get Voronoi vertices and compute cell areas
+                for i in range(n_circles):
+                    if i < len(vor.points):
+                        x, y = vor.points[i]
+
+                        # Estimate radius based on Voronoi cell characteristics
+                        # Compute minimum distance to other points (approximates cell size)
+                        min_dist = float('inf')
+                        for j in range(n_circles):
+                            if i != j:
+                                dist = np.sqrt((vor.points[i, 0] - vor.points[j, 0])**2 +
+                                             (vor.points[i, 1] - vor.points[j, 1])**2)
+                                min_dist = min(min_dist, dist)
+
+                        # Use conservative radius estimation
+                        estimated_radius = min(0.25, min_dist / 4.0) if min_dist < float('inf') else 0.1
+                        radius = max(0.001, min(0.5, estimated_radius))
+
+                        # Ensure position is within bounds
+                        x = max(radius, min(1-radius, x))
+                        y = max(radius, min(1-radius, y))
+
+                        circles[i] = [x, y, radius]
+                    else:
+                        # Fallback to random
+                        x = np.random.uniform(0.001, 0.999)
+                        y = np.random.uniform(0.001, 0.999)
+                        r = np.random.uniform(0.001, 0.5)
+                        circles[i] = [x, y, r]
+
+                population.append(circles)
+            else:
+                # Fallback to random initialization
+                circles = np.zeros((n_circles, 3))
+                for j in range(n_circles):
+                    max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+                    circles[j, 2] = random.uniform(0.001, max_radius)
+                    safe_bound = circles[j, 2]
+                    circles[j, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+                    circles[j, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+                population.append(circles)
+
+        except:
+            # Fallback to random initialization if Voronoi fails
+            circles = np.zeros((n_circles, 3))
+            for j in range(n_circles):
+                max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+                circles[j, 2] = random.uniform(0.001, max_radius)
+                safe_bound = circles[j, 2]
+                circles[j, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+                circles[j, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+            population.append(circles)
+
+    # Fill remaining population with standard random initialization
+    while len(population) < population_size:
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+            circles[i, 2] = random.uniform(0.001, max_radius)
+            safe_bound = circles[i, 2]
+            circles[i, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+            circles[i, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+        population.append(circles)
+
+    return population
+
+def is_valid_placement(circles: np.ndarray) -> bool:
+    """Check if all circles are within bounds and don't overlap"""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x < r or x > 1 - r or y < r or y > 1 - r:
+            return False
+
+    # Check overlap constraints
+    for i in range(n):
+        for j in range(i + 1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+
+            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            if distance < r1 + r2:
+                return False
+
+    return True
+
+def fitness_function(circles: np.ndarray) -> float:
+    """Calculate fitness as sum of radii with penalty for constraint violations"""
+    if not is_valid_placement(circles):
+        # Return very low fitness for invalid solutions
+        return -1000.0
+
+    # Sum of all radii
+    total_radius = np.sum(circles[:, 2])
+    return total_radius
+
+def crossover(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+    """Perform crossover between two parents"""
+    n = len(parent1)
+    child = np.copy(parent1)
+
+    # Single point crossover on positions and radii
+    crossover_point = random.randint(1, n - 1)
+
+    # Swap positions and radii for second half
+    child[crossover_point:, 0] = parent2[crossover_point:, 0]  # x
+    child[crossover_point:, 1] = parent2[crossover_point:, 1]  # y
+    child[crossover_point:, 2] = parent2[crossover_point:, 2]  # radius
+
+    return child
+
+def mutate(circles: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+    """Apply mutation to a circle configuration"""
+    mutated = np.copy(circles)
+    n = len(mutated)
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            # Mutate radius
+            old_r = mutated[i, 2]
+            new_r = old_r * random.uniform(0.8, 1.2)  # Small perturbation
+
+            # Ensure radius stays within reasonable bounds
+            new_r = max(0.001, min(0.5, new_r))
+            mutated[i, 2] = new_r
+
+            # Adjust position to maintain containment
+            safe_bound = new_r
+            mutated[i, 0] = max(safe_bound, min(1.0 - safe_bound, mutated[i, 0]))
+            mutated[i, 1] = max(safe_bound, min(1.0 - safe_bound, mutated[i, 1]))
+
+    return mutated
+
+def selection(population: list, fitnesses: list) -> list:
+    """Select top performing individuals for reproduction"""
+    # Sort by fitness (descending)
+    sorted_indices = np.argsort(fitnesses)[::-1]
+    selected = [population[i] for i in sorted_indices[:ELITISM_COUNT]]
+
+    # Add some diversity with tournament selection
+    tournament_size = 5
+    for _ in range(len(population) - ELITISM_COUNT):
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        selected.append(population[winner_index])
+
+    return selected
+
+def optimize_circles(initial_circles: np.ndarray, generations: int = GENERATIONS) -> np.ndarray:
+    """Main optimization loop using evolutionary algorithm"""
+    population = [initial_circles.copy()]
+
+    # Initialize population
+    population.extend(initialize_population(len(initial_circles), POPULATION_SIZE - 1))
+
+    best_solution = None
+    best_fitness = -np.inf
+
+    for generation in range(generations):
+        # Evaluate fitness for entire population
+        fitnesses = [fitness_function(individual) for individual in population]
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitnesses)
+        if fitnesses[max_fitness_idx] > best_fitness:
+            best_fitness = fitnesses[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Print progress every 50 generations
+        if generation % 50 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+        # Selection
+        selected = selection(population, fitnesses)
+
+        # Create new population through crossover and mutation
+        new_population = []
+
+        # Elitism: keep best solutions
+        new_population.extend(selected[:ELITISM_COUNT])
+
+        # Generate offspring
+        while len(new_population) < POPULATION_SIZE:
+            parent1 = random.choice(selected)
+            parent2 = random.choice(selected)
+
+            child = crossover(parent1, parent2)
+            child = mutate(child, MUTATION_RATE)
+
+            new_population.append(child)
+
+        population = new_population[:POPULATION_SIZE]
+
+    return best_solution
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates
+                 of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Try multiple random initializations to find a good starting point
+    best_total_radius = 0
+    best_solution = None
+
+    for attempt in range(MAX_ATTEMPTS):
+        # Initialize with random placement
+        initial_circles = np.zeros((n, 3))
+
+        # More systematic approach: place circles with reasonable size distribution
+        for i in range(n):
+            max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+            initial_circles[i, 2] = random.uniform(0.001, max_radius)  # radius
+
+            # Place center within bounds considering radius
+            safe_bound = initial_circles[i, 2]
+            initial_circles[i, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+            initial_circles[i, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+
+        # Optimize this initial solution
+        optimized_circles = optimize_circles(initial_circles, GENERATIONS)
+
+        if optimized_circles is not None:
+            total_radius = np.sum(optimized_circles[:, 2])
+            if total_radius > best_total_radius:
+                best_total_radius = total_radius
+                best_solution = optimized_circles.copy()
+
+        print(f"Attempt {attempt}: Current best = {best_total_radius:.6f}")
+
+    # If we found a solution, return it; otherwise return the default
+    if best_solution is not None:
+        return best_solution
+    else:
+        # Fallback to simple strategy if evolution fails
+        circles = np.zeros((n, 3))
+        # Place circles in a grid-like pattern with diminishing radii
+        rows = 5
+        cols = 6
+        spacing_x = 1.0 / cols
+        spacing_y = 1.0 / rows
+
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                radius = min(0.1, 0.5 * spacing_x)
+                x = (j + 0.5) * spacing_x
+                y = (i + 0.5) * spacing_y
+                circles[idx] = [x, y, radius]
+                idx += 1
+        return circles
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,234 @@
+<NAME>
+implement_numba_jit_for_geometric_operations
+</NAME>
+
+<DESCRIPTION>
+This improvement implements Numba JIT compilation for the most computationally intensive geometric operations in the hexagon packing problem. The key insight is that the `generate_hexagon_vertices` and `create_hexagon_polygon` functions are called repeatedly during both the evolutionary optimization process and constraint checking, making them prime candidates for JIT compilation. This will significantly speed up the constraint validation and fitness evaluation steps, enabling more iterations within the 180-second time limit and potentially finding better solutions.
+
+The changes involve:
+1. Adding `@njit` decorators to the geometric computation functions
+2. Using `numba` types for parameter typing to ensure proper JIT compilation
+3. Leveraging the existing structure while adding performance enhancements
+
+This follows the pattern established in the prior generations' success with Numba JIT compilation for geometric operations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from typing import Tuple, List, Optional, NamedTuple
+import random
+import warnings
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from typing import Tuple, List, Optional, NamedTuple
+import random
+import warnings
+from numba import njit, float64, int64
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class GeometryHandler:
+    """Handles all geometric computations for hexagon operations."""
+
+    def __init__(self):
+        self.hex_radius = 1.0
+        self.hex_apothem = np.sqrt(3) / 2
+        self.hex_height = 2 * self.hex_apothem
+        self.hex_width = 2 * self.hex_radius
+
+    def generate_hexagon_vertices(self, center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
+        """Generate vertices of a regular hexagon given center and rotation."""
+        angle_rad = np.deg2rad(angle_deg)
+        # Vertices of a unit hexagon centered at origin
+        base_vertices = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+        # Rotate and translate
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+
+    def create_hexagon_polygon(self, center_x: float, center_y: float, angle_deg: float) -> Polygon:
+        """Create Shapely polygon representation of a hexagon."""
+        vertices = self.generate_hexagon_vertices(center_x, center_y, angle_deg)
+        return Polygon(vertices)
+=======
+class GeometryHandler:
+    """Handles all geometric computations for hexagon operations."""
+
+    def __init__(self):
+        self.hex_radius = 1.0
+        self.hex_apothem = np.sqrt(3) / 2
+        self.hex_height = 2 * self.hex_apothem
+        self.hex_width = 2 * self.hex_radius
+
+    @staticmethod
+    @njit(float64[:,:](float64, float64, float64))
+    def generate_hexagon_vertices(center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
+        """Generate vertices of a regular hexagon given center and rotation."""
+        angle_rad = np.deg2rad(angle_deg)
+        # Vertices of a unit hexagon centered at origin
+        base_vertices = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ], dtype=np.float64)
+        # Rotate and translate
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]], dtype=np.float64)
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y], dtype=np.float64)
+
+    @staticmethod
+    @njit(float64[:,:](float64, float64, float64))
+    def generate_hexagon_vertices_fast(center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
+        """Fast version for internal use with pre-computed constants."""
+        angle_rad = np.deg2rad(angle_deg)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+
+        # Pre-computed hexagon vertices
+        vertices = np.empty((6, 2), dtype=np.float64)
+        vertices[0] = [1.0, 0.0]
+        vertices[1] = [0.5, np.sqrt(3)/2]
+        vertices[2] = [-0.5, np.sqrt(3)/2]
+        vertices[3] = [-1.0, 0.0]
+        vertices[4] = [-0.5, -np.sqrt(3)/2]
+        vertices[5] = [0.5, -np.sqrt(3)/2]
+
+        # Apply rotation and translation
+        for i in range(6):
+            x, y = vertices[i]
+            rotated_x = x * cos_a - y * sin_a
+            rotated_y = x * sin_a + y * cos_a
+            vertices[i] = [rotated_x + center_x, rotated_y + center_y]
+
+        return vertices
+
+    def create_hexagon_polygon(self, center_x: float, center_y: float, angle_deg: float) -> Polygon:
+        """Create Shapely polygon representation of a hexagon."""
+        vertices = self.generate_hexagon_vertices_fast(center_x, center_y, angle_deg)
+        return Polygon(vertices)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def compute_constraint_violations(self, hex_configs: List[HexagonConfig],
+                                    outer_radius: float) -> Tuple[bool, float]:
+        """Compute constraint violations for a configuration."""
+        # Create outer hexagon (scaled appropriately)
+        outer_vertices = self.geo.generate_hexagon_vertices(0, 0, 0)
+        outer_vertices *= outer_radius / self.geo.hex_radius
+        outer_hex = Polygon(outer_vertices)
+
+        # Check containment and overlap efficiently
+        total_violation = 0.0
+        inner_polygons = []
+
+        for i, config in enumerate(hex_configs):
+            inner_hex = self.geo.create_hexagon_polygon(config.center_x, config.center_y, config.angle_deg)
+            inner_polygons.append(inner_hex)
+
+            # Check containment - more robust way
+            if not self.check_containment(inner_hex, outer_hex):
+                # For containment violations, we measure the extent of violation
+                try:
+                    intersection = outer_hex.intersection(inner_hex)
+                    if intersection.is_empty:
+                        # Complete violation
+                        total_violation += 10000.0
+                    else:
+                        # Partial violation
+                        contained_area = intersection.area
+                        total_violation += (inner_hex.area - contained_area) * 100.0
+                except:
+                    total_violation += 10000.0
+
+            # Check overlaps with previously processed hexagons only
+            # (We're iterating in order so we avoid redundant checks)
+            for j in range(i):
+                if self.check_overlap(inner_hex, inner_polygons[j]):
+                    try:
+                        intersection_area = self.calculate_overlap_area(inner_hex, inner_polygons[j])
+                        # Penalty based on the amount of overlapping area
+                        overlap_penalty = (inner_hex.area + inner_polygons[j].area - 2 * intersection_area) * 500.0
+                        total_violation += overlap_penalty
+                    except:
+                        total_violation += 50000.0
+
+        return total_violation == 0, total_violation
+=======
+    def compute_constraint_violations(self, hex_configs: List[HexagonConfig],
+                                    outer_radius: float) -> Tuple[bool, float]:
+        """Compute constraint violations for a configuration."""
+        # Create outer hexagon (scaled appropriately)
+        outer_vertices = self.geo.generate_hexagon_vertices_fast(0, 0, 0)
+        scale_factor = outer_radius / self.geo.hex_radius
+        outer_vertices *= scale_factor
+        outer_hex = Polygon(outer_vertices)
+
+        # Check containment and overlap efficiently
+        total_violation = 0.0
+        inner_polygons = []
+
+        for i, config in enumerate(hex_configs):
+            inner_hex = self.geo.create_hexagon_polygon(config.center_x, config.center_y, config.angle_deg)
+            inner_polygons.append(inner_hex)
+
+            # Check containment - more robust way
+            if not self.check_containment(inner_hex, outer_hex):
+                # For containment violations, we measure the extent of violation
+                try:
+                    intersection = outer_hex.intersection(inner_hex)
+                    if intersection.is_empty:
+                        # Complete violation
+                        total_violation += 10000.0
+                    else:
+                        # Partial violation
+                        contained_area = intersection.area
+                        total_violation += (inner_hex.area - contained_area) * 100.0
+                except:
+                    total_violation += 10000.0
+
+            # Check overlaps with previously processed hexagons only
+            # (We're iterating in order so we avoid redundant checks)
+            for j in range(i):
+                if self.check_overlap(inner_hex, inner_polygons[j]):
+                    try:
+                        intersection_area = self.calculate_overlap_area(inner_hex, inner_polygons[j])
+                        # Penalty based on the amount of overlapping area
+                        overlap_penalty = (inner_hex.area + inner_polygons[j].area - 2 * intersection_area) * 500.0
+                        total_violation += overlap_penalty
+                    except:
+                        total_violation += 50000.0
+
+        return total_violation == 0, total_violation
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,464 @@
+<NAME>
+adaptive_aspect_ratio_optimization
+</NAME>
+
+<DESCRIPTION>
+The current program uses a fixed 1:1 rectangle aspect ratio, but the optimal aspect ratio for packing 21 circles in a perimeter-4 rectangle might be different. This change implements an adaptive approach to find the optimal rectangle dimensions by testing multiple aspect ratios and selecting the one that produces the best packing density. The key insight is that for perimeter-constrained rectangles, certain aspect ratios allow for more efficient circle packing than others, and we should optimize both the circle arrangement AND the container dimensions simultaneously rather than fixing them.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class CirclePacker:
+    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT,
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.rect_area = width * height
+
+        # Initialize random seed for reproducibility
+        np.random.seed(SEED)
+        random.seed(SEED)
+=======
+class CirclePacker:
+    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT,
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.rect_area = width * height
+
+        # Initialize random seed for reproducibility
+        np.random.seed(SEED)
+        random.seed(SEED)
+
+    def find_optimal_rectangle_dimensions(self) -> Tuple[float, float]:
+        """
+        Find optimal rectangle dimensions for packing circles given perimeter constraint.
+        Perimeter = 4 means width + height = 2.
+        """
+        best_width = 1.0
+        best_height = 1.0
+        best_radius_sum = 0.0
+
+        # Test various aspect ratios from 0.5 to 2.0 (more skewed rectangles)
+        aspect_ratios = np.linspace(0.5, 2.0, 20)
+
+        for ratio in aspect_ratios:
+            width = 1.0  # Start with width = 1
+            height = width / ratio
+
+            # Ensure perimeter constraint is satisfied
+            if width + height > 2.0:
+                # Scale down to fit perimeter constraint
+                scale = 2.0 / (width + height)
+                width *= scale
+                height *= scale
+
+            # Test this dimension setup by creating a temporary packer and running optimization
+            temp_packer = CirclePacker(width=width, height=height, num_circles=self.num_circles)
+            try:
+                # Use a quick optimization approach to get a rough estimate
+                circles = temp_packer._generate_grid_initialization()
+                # Just evaluate the configuration quickly - don't do full EA
+                total_radius = np.sum(circles[:, 2])
+                if total_radius > best_radius_sum:
+                    best_radius_sum = total_radius
+                    best_width = width
+                    best_height = height
+            except:
+                continue
+
+        return best_width, best_height
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current constraint checking approach has performance issues due to repeated redundant calculations and inefficient overlap detection. This change improves the constraint handling by implementing more efficient overlap detection using spatial indexing with better distance thresholding, and by optimizing the fitness calculation to avoid recomputing everything from scratch. The optimization focuses on reducing computational overhead during constraint validation which is called frequently during evolution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 100  # Heavy penalty for boundary violations
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance
+        penalty_weight = 1000.0
+        return total_radius - (penalty_weight * violations), violations
+=======
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations - vectorized for efficiency
+        radii = circles[:, 2]
+        positions = circles[:, :2]
+
+        # Vectorized boundary checks
+        boundary_violations = (
+            (radii > positions[:, 0]) |
+            (radii > self.width - positions[:, 0]) |
+            (radii > positions[:, 1]) |
+            (radii > self.height - positions[:, 1])
+        )
+        violations += np.sum(boundary_violations.astype(int)) * 100
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (more precise threshold)
+            max_radius = np.max(circles[:, 2])
+            if max_radius > 0:
+                # Use a slightly more conservative distance threshold
+                pairs = tree.query_pairs(1.5 * max_radius, output_type='ndarray')
+
+                for i, j in pairs:
+                    if i < j:  # Only check each pair once
+                        if self.check_overlap(circles, i, j):
+                            violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance
+        penalty_weight = 1000.0
+        return total_radius - (penalty_weight * violations), violations
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimized_initialization_with_aspect_ratio
+</NAME>
+
+<DESCRIPTION>
+This change enhances the grid-based initialization by incorporating the previously computed optimal rectangle dimensions into the initialization process. The improvement ensures that the initial configurations are generated with the best possible aspect ratio from the start, rather than being optimized later. This provides a much stronger baseline for the evolutionary algorithm to work from, potentially leading to better convergence and higher final scores.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_initial_population(self, pop_size: int) -> List[np.ndarray]:
+        """Generate initial population of circle configurations"""
+        population = []
+
+        for _ in range(pop_size):
+            # Use adaptive grid initialization for better starting point
+            circles = self._generate_grid_initialization()
+            population.append(circles)
+
+        return population
+=======
+    def generate_initial_population(self, pop_size: int) -> List[np.ndarray]:
+        """Generate initial population of circle configurations"""
+        population = []
+
+        # First, determine optimal rectangle dimensions for better initial placement
+        optimal_width, optimal_height = self.find_optimal_rectangle_dimensions()
+        self.width = optimal_width
+        self.height = optimal_height
+
+        for _ in range(pop_size):
+            # Use adaptive grid initialization for better starting point
+            circles = self._generate_grid_initialization()
+            population.append(circles)
+
+        return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_mutation_operator
+</NAME>
+
+<DESCRIPTION>
+The current mutation operator applies mutations uniformly, but a better approach would be to adapt the mutation strategy based on the current state of the optimization. This change modifies the mutation operator to apply different mutation strategies: position mutations with larger steps for early generations (to explore broadly) and smaller steps for later generations (for fine-tuning). Additionally, it introduces a more intelligent radius mutation that considers the relationship between radius and position constraints. This should lead to faster convergence and better exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate(self, individual: np.ndarray, mutation_rate: float = MUTATION_RATE) -> np.ndarray:
+        """Apply mutation to an individual"""
+        mutated = individual.copy()
+
+        for i in range(self.num_circles):
+            if np.random.rand() < mutation_rate:
+                # Mutate either center position or radius
+                if np.random.rand() < 0.5:
+                    # Mutate position
+                    mutated[i, 0] = np.random.uniform(
+                        max(0.001, mutated[i, 0] - 0.05),
+                        min(self.width - 0.001, mutated[i, 0] + 0.05)
+                    )
+                    mutated[i, 1] = np.random.uniform(
+                        max(0.001, mutated[i, 1] - 0.05),
+                        min(self.height - 0.001, mutated[i, 1] + 0.05)
+                    )
+                else:
+                    # Mutate radius
+                    mutated[i, 2] = np.random.uniform(
+                        max(0.001, mutated[i, 2] - 0.02),
+                        min(0.2, mutated[i, 2] + 0.02)
+                    )
+
+        return mutated
+=======
+    def mutate(self, individual: np.ndarray, mutation_rate: float = MUTATION_RATE,
+               generation: int = 0, max_generations: int = MAX_GENERATIONS) -> np.ndarray:
+        """Apply mutation to an individual with adaptive strategy"""
+        mutated = individual.copy()
+
+        # Adaptive mutation rate that decreases over time
+        adaptive_mutation_rate = mutation_rate * (1.0 - generation / max_generations)
+
+        for i in range(self.num_circles):
+            if np.random.rand() < adaptive_mutation_rate:
+                # Mutate either center position or radius with probability based on generation
+                if np.random.rand() < 0.5:
+                    # Mutate position with adaptive step size
+                    step_size = 0.05 * (1.0 - generation / max_generations)  # Decrease with generation
+                    mutated[i, 0] = np.random.uniform(
+                        max(0.001, mutated[i, 0] - step_size),
+                        min(self.width - 0.001, mutated[i, 0] + step_size)
+                    )
+                    mutated[i, 1] = np.random.uniform(
+                        max(0.001, mutated[i, 1] - step_size),
+                        min(self.height - 0.001, mutated[i, 1] + step_size)
+                    )
+                else:
+                    # Mutate radius with adaptive range based on current radius and position constraints
+                    current_radius = mutated[i, 2]
+                    # Mutate by ±20% of current radius, but stay within reasonable bounds
+                    delta = current_radius * 0.2
+                    min_radius = 0.001
+                    max_radius = min(self.width, self.height) * 0.3  # Reasonable upper bound
+                    mutated[i, 2] = np.random.uniform(
+                        max(min_radius, current_radius - delta),
+                        min(max_radius, current_radius + delta)
+                    )
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+refined_optimization_loop
+</NAME>
+
+<DESCRIPTION>
+This change refines the main optimization loop to incorporate the improved mutation operator with generation-aware parameters and adds a more robust termination condition that monitors both fitness improvement and constraint satisfaction. It also increases the population size and generations to allow for better exploration, while keeping the computational budget reasonable. This should lead to more thorough optimization and potentially better final results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm"""
+        start_time = time.time()
+
+        # Generate initial population
+        population = self.generate_initial_population(POPULATION_SIZE)
+
+        best_solution = None
+        best_fitness = float('-inf')
+
+        # Track convergence
+        fitness_history = []
+
+        for generation in range(MAX_GENERATIONS):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.calculate_fitness(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 20 generations
+            if generation % 20 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < POPULATION_SIZE:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate(child)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if len(fitness_history) >= 10:
+                recent_avg = np.mean(fitness_history[-10:])
+                prev_avg = np.mean(fitness_history[-20:-10])
+                if abs(recent_avg - prev_avg) < 1e-6:
+                    print(f"Converged at generation {generation}")
+                    break
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+=======
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm"""
+        start_time = time.time()
+
+        # Increase population size and generations for better exploration
+        adaptive_pop_size = max(POPULATION_SIZE, 80)
+        adaptive_max_generations = max(MAX_GENERATIONS, 300)
+
+        # Generate initial population
+        population = self.generate_initial_population(adaptive_pop_size)
+
+        best_solution = None
+        best_fitness = float('-inf')
+
+        # Track convergence
+        fitness_history = []
+        stagnation_counter = 0
+        stagnation_threshold = 20
+
+        for generation in range(adaptive_max_generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.calculate_fitness(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+                stagnation_counter = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_counter += 1
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 30 generations
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < adaptive_pop_size:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation with generation-aware parameters
+                child = self.mutate(child, generation=generation, max_generations=adaptive_max_generations)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged or stagnated
+            if len(fitness_history) >= 15:
+                recent_avg = np.mean(fitness_history[-15:])
+                prev_avg = np.mean(fitness_history[-30:-15])
+                if abs(recent_avg - prev_avg) < 1e-6 or stagnation_counter > stagnation_threshold:
+                    print(f"Converged or stagnated at generation {generation}")
+                    break
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

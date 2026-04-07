@@ -1,0 +1,234 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import warnings
+warnings.filterwarnings('ignore')
+
+class SphericalPointOptimizer:
+    """Enhanced hierarchical optimizer for distributing points on a sphere to maximize min/max distance ratio."""
+    
+    def __init__(self, num_points=14):
+        self.num_points = num_points
+        self.best_solution = None
+        self.best_ratio = 0
+        
+    def generate_fibonacci_points(self):
+        """Generate points using Fibonacci-like distribution on unit sphere"""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(self.num_points):
+            theta = np.arccos(1 - 2*(i/(self.num_points-1)))
+            phi = i * 2 * np.pi / golden_ratio
+            x = np.sin(theta) * np.cos(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(theta)
+            points.append([x, y, z])
+        return np.array(points)
+    
+    def generate_sobol_points(self):
+        """Generate points using Sobol sequence for optimal space-filling"""
+        try:
+            from scipy.stats.qmc import Sobol
+            sobol_gen = Sobol(d=3, scramble=True, seed=42)
+            samples = sobol_gen.random(self.num_points)
+
+            points = []
+            for i in range(self.num_points):
+                u1, u2, u3 = samples[i]
+                theta = 2 * np.pi * u1
+                phi = np.arccos(2 * u2 - 1)
+                x = np.sin(phi) * np.cos(theta)
+                y = np.sin(phi) * np.sin(theta)
+                z = np.cos(phi)
+                points.append([x, y, z])
+
+            return np.array(points)
+        except ImportError:
+            # Fallback to improved Fibonacci-based approach
+            points = []
+            phi = np.pi * (3 - np.sqrt(5))
+            for i in range(self.num_points):
+                y = 1 - (i / float(self.num_points - 1)) * 2
+                radius = np.sqrt(1 - y * y)
+                theta = phi * i
+                x = np.cos(theta) * radius
+                z = np.sin(theta) * radius
+                
+                # Apply perturbations for better distribution
+                perturbation_factor = 0.025
+                seq1 = (i * 1.618033988749895) % 1.0
+                seq2 = (i * 0.7853981633974483) % 1.0
+                seq3 = (i * 2.3561944901923448) % 1.0
+                
+                x_pert = perturbation_factor * (seq1 - 0.5)
+                y_pert = perturbation_factor * (seq2 - 0.5)
+                z_pert = perturbation_factor * (seq3 - 0.5)
+                
+                x += x_pert
+                y += y_pert
+                z += z_pert
+                
+                # Normalize to unit sphere
+                norm = np.sqrt(x*x + y*y + z*z)
+                if norm > 0:
+                    x /= norm
+                    y /= norm
+                    z /= norm
+                    
+                points.append([x, y, z])
+            return np.array(points)
+    
+    def normalize_to_unit_sphere(self, points):
+        """Normalize points to lie exactly on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms
+    
+    def calculate_distance_metrics(self, points):
+        """Calculate minimum and maximum distances efficiently"""
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        return min_dist, max_dist, distances
+    
+    def evaluate_solution(self, points):
+        """Evaluate a point configuration and return the min/max ratio"""
+        min_dist, max_dist, _ = self.calculate_distance_metrics(points)
+        if max_dist > 0:
+            return min_dist / max_dist
+        return 0
+    
+    def constraint_sphere(self, x):
+        """Constraint ensuring points remain on or inside unit sphere"""
+        points = x.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return 1 - norms  # Should be >= 0
+    
+    def objective_function(self, x):
+        """Objective function to minimize (negative of min/max ratio)"""
+        points = x.reshape(-1, 3)
+        points = self.normalize_to_unit_sphere(points)
+        min_dist, _, _ = self.calculate_distance_metrics(points)
+        return -min_dist  # We want to maximize min_dist, so minimize -min_dist
+    
+    def local_refinement(self, points, max_iter=50):
+        """Apply local optimization to refine the configuration"""
+        points_flat = points.flatten()
+        
+        try:
+            result = minimize(
+                self.objective_function, 
+                points_flat, 
+                method='L-BFGS-B',
+                constraints=[{'type': 'ineq', 'fun': self.constraint_sphere}],
+                options={'maxiter': max_iter, 'ftol': 1e-10}
+            )
+            if result.success:
+                return result.x.reshape(-1, 3)
+        except Exception:
+            pass
+        return points
+    
+    def generate_diverse_configs(self):
+        """Generate multiple diverse starting configurations"""
+        configs = []
+        
+        # 1. Standard Fibonacci
+        configs.append(self.generate_fibonacci_points())
+        
+        # 2. Sobol-inspired
+        configs.append(self.generate_sobol_points())
+        
+        # 3. Perturbed Fibonacci with different strengths
+        base_fib = self.generate_fibonacci_points()
+        for pert_strength in [0.02, 0.03, 0.05]:
+            np.random.seed(42)
+            perturbed = base_fib + np.random.normal(0, pert_strength, base_fib.shape)
+            configs.append(self.normalize_to_unit_sphere(perturbed))
+        
+        # 4. Random distributions with different seeds
+        for seed_val in [100, 200, 300, 400]:
+            np.random.seed(seed_val)
+            random_points = np.random.randn(self.num_points, 3)
+            configs.append(self.normalize_to_unit_sphere(random_points))
+            
+        return configs
+    
+    def optimize_single_config(self, initial_points):
+        """Optimize a single configuration and return improved solution"""
+        current_points = initial_points.copy()
+        
+        # Apply local refinement
+        refined_points = self.local_refinement(current_points, max_iter=100)
+        
+        # Additional refinement step
+        try:
+            def obj_func(x):
+                pts = x.reshape(-1, 3)
+                pts = self.normalize_to_unit_sphere(pts)
+                min_dist, _, _ = self.calculate_distance_metrics(pts)
+                return -min_dist
+            
+            result = minimize(
+                obj_func,
+                refined_points.flatten(),
+                method='L-BFGS-B',
+                constraints=[{'type': 'ineq', 'fun': self.constraint_sphere}],
+                options={'maxiter': 50, 'ftol': 1e-10}
+            )
+            
+            if result.success:
+                final_points = result.x.reshape(-1, 3)
+                return self.normalize_to_unit_sphere(final_points)
+        except Exception:
+            pass
+            
+        return refined_points
+    
+    def run_optimization_pipeline(self):
+        """Main optimization pipeline with multi-start strategy"""
+        # Generate diverse starting configurations
+        configs = self.generate_diverse_configs()
+        
+        # Evaluate each configuration
+        for i, initial_points in enumerate(configs):
+            try:
+                # Optimize this configuration
+                optimized_points = self.optimize_single_config(initial_points)
+                
+                # Evaluate solution
+                ratio = self.evaluate_solution(optimized_points)
+                
+                # Track best solution
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_solution = optimized_points.copy()
+                    
+            except Exception as e:
+                continue
+        
+        # Fallback to Fibonacci if no improvement found
+        if self.best_solution is None:
+            self.best_solution = self.generate_fibonacci_points()
+            self.best_ratio = self.evaluate_solution(self.best_solution)
+            
+        return self.best_solution
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Initialize optimizer
+    optimizer = SphericalPointOptimizer(num_points=14)
+    
+    # Run optimization pipeline
+    return optimizer.run_optimization_pipeline()
+
+# EVOLVE-BLOCK-END

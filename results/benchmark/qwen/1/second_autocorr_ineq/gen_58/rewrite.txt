@@ -1,0 +1,247 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+from numba import jit
+import time
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_numba(f_vals: np.ndarray) -> tuple:
+    """
+    Efficiently compute autoconvolution norms using numba acceleration
+    """
+    n = len(f_vals)
+    
+    # Pre-allocate arrays for efficiency
+    g = np.zeros(2 * n - 1)
+    
+    # Manual convolution for maximum speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    # Extract valid convolution part (center portion)
+    half_len = n - 1
+    g_center = g[half_len:-half_len] if half_len < len(g) else g[half_len:]
+    
+    # Compute norms
+    norm_g2_sq = 0.0
+    norm_g1 = 0.0
+    norm_ginf = 0.0
+    
+    # Vectorized computation for better performance
+    for i in range(len(g_center)):
+        val = g_center[i]
+        norm_g2_sq += val * val
+        norm_g1 += abs(val)
+        if abs(val) > norm_ginf:
+            norm_ginf = abs(val)
+    
+    return norm_g2_sq, norm_g1, norm_ginf
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂² (L2 norm squared), ||g||₁ (L1 norm), ||g||∞ (L-infinity norm)
+    
+    Args:
+        f_values: list of step function heights
+        
+    Returns:
+        tuple: (c2_value, benchmark_ratio, eval_time)
+    """
+    start_time = time.time()
+    
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values, dtype=np.float64)
+    
+    # Ensure non-negative values
+    f = np.maximum(f, 0.0)
+    
+    # Compute autoconvolution g = f * f (discrete convolution)
+    g = convolve(f, f, mode='full')
+    
+    # Extract the central portion that represents the main interval
+    n = len(f)
+    middle_idx = n - 1
+    half_width = n
+    
+    # Take the central part of the convolution
+    g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+    
+    # Compute the norms
+    g_squared = g_centered ** 2
+    g_abs = np.abs(g_centered)
+    
+    # ||g||₂² - integrate using trapezoidal rule manually for piecewise linear
+    norm_g_2_squared = np.sum(g_squared)
+    
+    # ||g||₁ - sum of absolute values
+    norm_g_1 = np.sum(g_abs)
+    
+    # ||g||∞ - maximum absolute value
+    norm_g_inf = np.max(g_abs)
+    
+    # Avoid division by zero
+    if norm_g_1 == 0 or norm_g_inf == 0:
+        c2 = 0.0
+    else:
+        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+    
+    eval_time = time.time() - start_time
+    benchmark_ratio = c2 / 0.962 if c2 > 0 else 0.0
+    
+    return c2, benchmark_ratio, eval_time
+
+def evaluate_function(params):
+    """
+    Evaluate objective function for optimization
+    """
+    # Convert params to step function heights
+    f_values = np.clip(params, 0, None)  # Ensure non-negative
+    
+    # Compute the C2 value
+    c2, _, _ = compute_autoconvolution_norms(f_values)
+    
+    # Return negative because we want to maximize C2
+    return -c2
+
+def sophisticated_initialization(n_steps: int) -> np.ndarray:
+    """
+    Create a sophisticated initial step function pattern
+    Based on mathematical intuition for maximizing autoconvolution properties
+    """
+    # Create more sophisticated pattern with multiple regions
+    f_values = np.zeros(n_steps)
+    
+    # Divide into multiple regions with varying intensities
+    regions = 8
+    region_size = n_steps // regions
+    
+    for i in range(regions):
+        start_idx = i * region_size
+        end_idx = start_idx + region_size if i < regions - 1 else n_steps
+        
+        # Create pattern with alternating high/low
+        if i % 2 == 0:
+            # High intensity region
+            amplitude = np.random.uniform(0.8, 1.0)
+        else:
+            # Low intensity region
+            amplitude = np.random.uniform(0.1, 0.3)
+            
+        f_values[start_idx:end_idx] = amplitude
+    
+    # Add some structured variation and Gaussian smoothing
+    if n_steps >= 5:
+        # Apply Gaussian smoothing for smoother transitions
+        kernel_size = min(11, n_steps // 10)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        sigma = kernel_size / 6.0
+        x = np.arange(kernel_size) - kernel_size // 2
+        gaussian_kernel = np.exp(-x**2 / (2 * sigma**2))
+        gaussian_kernel /= np.sum(gaussian_kernel)
+        
+        # Apply convolution to smooth the function
+        f_values = np.convolve(f_values, gaussian_kernel, mode='same')
+    
+    # Ensure non-negative values
+    f_values = np.maximum(f_values, 0.0)
+    
+    # Normalize to avoid extreme values
+    max_val = np.max(f_values)
+    if max_val > 0:
+        f_values = f_values / max_val
+    
+    return f_values
+
+def adaptive_evolutionary_optimization(f_vals: np.ndarray, max_evals: int = 1000) -> np.ndarray:
+    """
+    Perform adaptive evolutionary optimization with dynamic parameters
+    """
+    n_steps = len(f_vals)
+    
+    # Set bounds for each parameter
+    bounds = [(0.0, 3.0) for _ in range(n_steps)]
+    
+    def objective(f_vals_array):
+        return -compute_autoconvolution_norms(f_vals_array)[0]  # Negative because we minimize
+    
+    try:
+        # Use differential evolution with adaptive settings
+        popsize = min(15, max(5, n_steps // 10))
+        maxiter = min(50, max_evals // popsize)
+        
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=maxiter,
+            popsize=popsize,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            disp=False
+        )
+        
+        optimized_values = result.x
+        
+        # Refine with L-BFGS-B if optimization was successful
+        if result.success:
+            refined_result = minimize(
+                objective,
+                optimized_values,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 30, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+            
+            if refined_result.success:
+                final_values = refined_result.x
+            else:
+                final_values = optimized_values
+        else:
+            final_values = optimized_values
+            
+    except Exception:
+        # Fallback to simple approach
+        final_values = f_vals
+    
+    return np.clip(final_values, 0, None)
+
+def construct_function() -> list[float]:
+    """
+    Main entry point for constructing step-function with high C2 value.
+    Uses adaptive evolutionary optimization with sophisticated initialization.
+    """
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    
+    # Determine number of steps within reasonable bounds
+    n_steps = np.random.randint(500, 3000)
+    
+    # Create sophisticated initial pattern
+    initial_f = sophisticated_initialization(n_steps)
+    
+    # Apply adaptive evolutionary optimization
+    optimized_f = adaptive_evolutionary_optimization(initial_f, max_evals=800)
+    
+    # Final refinement and normalization
+    # Ensure non-negative values
+    optimized_f = np.maximum(optimized_f, 0.0)
+    
+    # Normalize to maintain reasonable scale
+    total = np.sum(optimized_f)
+    if total > 0:
+        optimized_f = optimized_f / total * n_steps * 0.5
+    
+    # Return as list of floats
+    return optimized_f.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

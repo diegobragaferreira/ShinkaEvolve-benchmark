@@ -1,0 +1,192 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial.distance import cdist
+from typing import Tuple
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def check_validity(circles: np.ndarray) -> bool:
+    """Check if all circles are within bounds and non-overlapping."""
+    n = circles.shape[0]
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check overlap constraints
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+
+    # Calculate pairwise distances
+    distances = cdist(positions, positions)
+
+    # Check for overlaps
+    for i in range(n):
+        for j in range(i+1, n):
+            dist = distances[i, j]
+            if dist < radii[i] + radii[j]:
+                return False
+
+    return True
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness of a circle configuration."""
+    if not check_validity(circles):
+        # Return very negative value for invalid configurations
+        return -1000000.0
+
+    # Fitness is sum of radii (we want to maximize this)
+    return np.sum(circles[:, 2])
+
+def create_individual() -> np.ndarray:
+    """Create a single valid individual (set of 26 circles)."""
+    while True:
+        # Create initial random circles
+        circles = np.zeros((26, 3))
+
+        # Generate random positions and radii
+        for i in range(26):
+            # Random radius between 0.01 and 0.25 (reasonable range)
+            r = np.random.uniform(0.01, 0.25)
+            # Random center within bounds considering radius
+            x = np.random.uniform(r, 1-r)
+            y = np.random.uniform(r, 1-r)
+            circles[i] = [x, y, r]
+
+        if check_validity(circles):
+            return circles
+
+def create_initial_population(population_size: int) -> list:
+    """Create initial population of valid individuals."""
+    population = []
+    for _ in range(population_size):
+        population.append(create_individual())
+    return population
+
+def tournament_selection(population: list, fitnesses: list, tournament_size: int = 3) -> np.ndarray:
+    """Select an individual using tournament selection."""
+    tournament_indices = np.random.choice(len(population), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_index].copy()
+
+def crossover(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Perform uniform crossover between two parents."""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+
+    # Uniform crossover for each circle
+    for i in range(26):
+        if np.random.rand() < 0.5:
+            child1[i] = parent2[i]
+            child2[i] = parent1[i]
+
+    return child1, child2
+
+def mutate(individual: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+    """Mutate an individual."""
+    mutated = individual.copy()
+
+    for i in range(26):
+        if np.random.rand() < mutation_rate:
+            # Randomly decide what to mutate
+            if np.random.rand() < 0.5:
+                # Mutate radius
+                r = mutated[i, 2]
+                delta_r = np.random.normal(0, 0.02)  # Small random change
+                new_r = max(0.01, min(0.3, r + delta_r))  # Keep within reasonable bounds
+                mutated[i, 2] = new_r
+            else:
+                # Mutate position
+                x, y, r = mutated[i]
+                delta_x = np.random.normal(0, 0.02)
+                delta_y = np.random.normal(0, 0.02)
+                new_x = max(r, min(1-r, x + delta_x))
+                new_y = max(r, min(1-r, y + delta_y))
+                mutated[i, :2] = [new_x, new_y]
+
+    # If the mutated individual is invalid, try to fix it
+    if not check_validity(mutated):
+        # Try to repair by reducing radii and adjusting positions
+        for j in range(26):
+            if j != i:  # Skip the mutated circle for now
+                continue
+            x, y, r = mutated[j]
+            # Reduce radius to prevent overlap issues
+            mutated[j, 2] = max(0.01, r * 0.95)
+
+    return mutated
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Evolution parameters
+    population_size = 50
+    generations = 100
+    mutation_rate = 0.1
+    elite_size = 5
+
+    # Create initial population
+    population = create_initial_population(population_size)
+
+    best_fitness_history = []
+
+    # Evolution loop
+    for generation in range(generations):
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(ind) for ind in population]
+
+        # Track best fitness
+        best_fitness = max(fitnesses)
+        best_fitness_history.append(best_fitness)
+
+        # Print progress every 10 generations
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness}")
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitnesses)[-elite_size:]
+        for idx in elite_indices:
+            new_population.append(population[idx])
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < population_size:
+            # Selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation
+            child1 = mutate(child1, mutation_rate)
+            child2 = mutate(child2, mutation_rate)
+
+            # Add to new population
+            new_population.extend([child1, child2])
+
+        # Trim population to exact size
+        population = new_population[:population_size]
+
+    # Return the best solution found
+    final_fitnesses = [evaluate_fitness(ind) for ind in population]
+    best_idx = np.argmax(final_fitnesses)
+    return population[best_idx]
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,392 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,368 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++import math
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++import random
++from deap import base, creator, tools, algorithms
++import numba
++from numba import jit
++import time
++from joblib import Parallel, delayed
++
++# Constants
++UNIT_HEX_RADIUS = 1.0
++HEXAGON_SIDES = 6
++
++@jit(nopython=True)
++def get_hexagon_vertices(center_x, center_y, angle_deg, radius=1.0):
++    """Generate vertices of a regular hexagon given center, angle, and radius."""
++    vertices = np.zeros((6, 2))
++    angle_rad = math.radians(angle_deg)
++    for i in range(6):
++        angle_i = angle_rad + i * math.pi / 3
++        vertices[i, 0] = center_x + radius * math.cos(angle_i)
++        vertices[i, 1] = center_y + radius * math.sin(angle_i)
++    return vertices
++
++@jit(nopython=True)
++def hexagon_area(radius):
++    """Calculate area of regular hexagon with given radius."""
++    return (3 * math.sqrt(3) / 2) * radius * radius
++
++@jit(nopython=True)
++def distance_point_to_segment(px, py, x1, y1, x2, y2):
++    """Distance from point to line segment."""
++    # Vector from (x1,y1) to (x2,y2)
++    dx = x2 - x1
++    dy = y2 - y1
++    
++    # Length squared of segment
++    len_sq = dx*dx + dy*dy
++    
++    if len_sq == 0:
++        # Segment is a point
++        return math.sqrt((px - x1)**2 + (py - y1)**2)
++    
++    # Project point onto line
++    t = ((px - x1) * dx + (py - y1) * dy) / len_sq
++    
++    # Clamp t to [0,1]
++    t = max(0, min(1, t))
++    
++    # Closest point on segment
++    closest_x = x1 + t * dx
++    closest_y = y1 + t * dy
++    
++    # Distance to closest point
++    return math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
++
++@jit(nopython=True)
++def point_in_hexagon(px, py, hex_center_x, hex_center_y, hex_angle, hex_radius):
++    """Check if point is inside regular hexagon."""
++    # Get hexagon vertices
++    vertices = get_hexagon_vertices(hex_center_x, hex_center_y, hex_angle, hex_radius)
++    
++    # Check if point is on correct side of each edge
++    # Using winding number or ray casting method
++    # For simplicity, we'll check the distance to edges
++    # We need to check if point is inside polygon
++    
++    # For a regular hexagon, we can also do this more efficiently
++    # Calculate distance from center to point
++    dist_from_center = math.sqrt((px - hex_center_x)**2 + (py - hex_center_y)**2)
++    
++    # If distance exceeds radius, point is outside
++    if dist_from_center > hex_radius:
++        return False
++    
++    # For exact check, we use the fact that in a regular hexagon
++    # we can calculate the angle from center and compare with 30 degree sectors
++    if dist_from_center < 1e-10:
++        return True
++    
++    angle_from_center = math.atan2(py - hex_center_y, px - hex_center_x)
++    # Normalize angle to [0, 2*pi]
++    if angle_from_center < 0:
++        angle_from_center += 2 * math.pi
++        
++    # Calculate sector
++    sector = angle_from_center / (math.pi / 3)
++    
++    # In a regular hexagon, the distance to the boundary forms a consistent pattern
++    # But for a precise check, we'd need to check against each edge
++    
++    # Since this is a quick approximation, let's just use the distance check
++    # For full accuracy, would implement proper point-in-polygon test
++    
++    return dist_from_center <= hex_radius
++
++def create_hexagon_polygon(center_x, center_y, angle_deg, radius=1.0):
++    """Create Shapely polygon of hexagon."""
++    vertices = get_hexagon_vertices(center_x, center_y, angle_deg, radius)
++    return Polygon(vertices)
++
++def check_overlap(hex1, hex2):
++    """Check if two hexagons overlap."""
++    try:
++        poly1 = create_hexagon_polygon(hex1[0], hex1[1], hex1[2])
++        poly2 = create_hexagon_polygon(hex2[0], hex2[1], hex2[2])
++        return poly1.intersects(poly2)
++    except:
++        return False
++
++def check_containment(hex_center_x, hex_center_y, hex_angle, outer_hex_radius):
++    """Check if hexagon is fully contained within outer hexagon."""
++    vertices = get_hexagon_vertices(hex_center_x, hex_center_y, hex_angle)
++    outer_vertices = get_hexagon_vertices(0, 0, 0, outer_hex_radius)
++    outer_polygon = Polygon(outer_vertices)
++    
++    # Check if all vertices of inner hexagon are inside outer hexagon
++    for vertex in vertices:
++        if not outer_polygon.contains(Point(vertex[0], vertex[1])):
++            return False
++    return True
++
++def fitness_function(individual, outer_radius):
++    """Evaluate fitness of individual."""
++    # Convert individual to hexagon data
++    hex_data = []
++    for i in range(12):
++        x = individual[i*3]
++        y = individual[i*3 + 1]
++        angle = individual[i*3 + 2]
++        hex_data.append([x, y, angle])
++    
++    # Check overlaps
++    overlap_count = 0
++    for i in range(len(hex_data)):
++        for j in range(i+1, len(hex_data)):
++            if check_overlap(hex_data[i], hex_data[j]):
++                overlap_count += 1
++    
++    # Check containment
++    containment_violations = 0
++    for hex_info in hex_data:
++        if not check_containment(hex_info[0], hex_info[1], hex_info[2], outer_radius):
++            containment_violations += 1
++    
++    # Penalty for violations
++    penalty = overlap_count * 1000 + containment_violations * 10000
++    
++    # If no violations, return the negative of the penalty (since we minimize)
++    if overlap_count == 0 and containment_violations == 0:
++        # Try to maximize 1/outer_radius (minimize outer_radius)
++        return (1.0 / outer_radius,)
++    else:
++        # Return very poor fitness for invalid configurations
++        return (penalty,)
++
++def evaluate(individual, target_radius=None):
++    """Evaluate the individual solution."""
++    # Extract parameters
++    hex_positions_angles = np.array(individual).reshape(12, 3)
++    
++    # Check all constraints
++    # First check overlaps
++    overlaps = []
++    for i in range(12):
++        for j in range(i+1, 12):
++            if check_overlap(hex_positions_angles[i], hex_positions_angles[j]):
++                overlaps.append((i, j))
++    
++    # Check containment
++    containment_errors = []
++    for i in range(12):
++        if not check_containment(hex_positions_angles[i][0], hex_positions_angles[i][1], hex_positions_angles[i][2], target_radius):
++            containment_errors.append(i)
++    
++    # If any violations, penalize heavily
++    if len(overlaps) > 0 or len(containment_errors) > 0:
++        return 1e6 + len(overlaps) * 1000 + len(containment_errors) * 10000
++    
++    # Otherwise, compute fitness based on inverse of outer radius
++    # This is a simplified approach - we'll need to determine the actual outer radius
++    # Let's first compute what outer radius would be needed
++    
++    # Get vertices of all hexagons
++    all_vertices = []
++    for i in range(12):
++        vertices = get_hexagon_vertices(hex_positions_angles[i][0], hex_positions_angles[i][1], hex_positions_angles[i][2])
++        all_vertices.extend(vertices)
++    
++    # Compute bounding box
++    if len(all_vertices) == 0:
++        return 1e6
++    
++    min_x = min(v[0] for v in all_vertices)
++    max_x = max(v[0] for v in all_vertices)
++    min_y = min(v[1] for v in all_vertices)
++    max_y = max(v[1] for v in all_vertices)
++    
++    # For hexagon, we compute radius needed
++    # We need to find the circumradius of the outer hexagon that contains all vertices
++    # The furthest point from center determines the outer radius
++    distances = [math.sqrt(x*x + y*y) for x, y in all_vertices]
++    outer_radius = max(distances) if distances else 1
++    
++    # For hexagon, we want to make sure we're using the correct metric
++    # The problem asks to maximize 1/outer_hex_side_length
++    # So we just return 1/outer_radius (which approximates 1/outer_side_length)
++    return 1.0 / outer_radius
++
++# Create individuals and population
++creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++creator.create("Individual", list, fitness=creator.FitnessMax)
++
++toolbox = base.Toolbox()
++
++def generate_individual():
++    """Generate initial individual (12 hexagons with positions and angles)."""
++    individual = []
++    # Generate positions in circle pattern
++    for i in range(12):
++        angle = 2 * math.pi * i / 12
++        radius = 1.5 + random.random() * 2  # Random within some range
++        x = radius * math.cos(angle)
++        y = radius * math.sin(angle)
++        angle_deg = random.random() * 360
++        individual.extend([x, y, angle_deg])
++    return creator.Individual(individual)
++
++# Register operators
++toolbox.register("individual", generate_individual)
++toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++
++def mutate_individual(individual):
++    """Custom mutation for hexagon packing."""
++    for i in range(len(individual)):
++        if random.random() < 0.3:  # Mutate 30% of genes
++            if i % 3 == 0:  # Position x
++                individual[i] += random.gauss(0, 0.2)
++            elif i % 3 == 1:  # Position y
++                individual[i] += random.gauss(0, 0.2)
++            else:  # Angle
++                individual[i] += random.gauss(0, 10)
++                individual[i] %= 360
++    return individual,
++
++def crossover_individuals(ind1, ind2):
++    """Custom crossover for hexagon packing."""
++    size = min(len(ind1), len(ind2))
++    cxpoint1 = random.randint(1, size//2)
++    cxpoint2 = random.randint(cxpoint1, size)
++    
++    ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2], ind1[cxpoint1:cxpoint2]
++    return ind1, ind2
++
++toolbox.register("mate", crossover_individuals)
++toolbox.register("mutate", mutate_individual)
++toolbox.register("select", tools.selTournament, tournsize=3)
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
++    # Starting with the best known result
++    best_result = None
++    best_inv_radius = 0
++    
++    # Run multiple optimizations to find better solution
++    num_runs = 5
++    best_run_results = []
++    
++    for run in range(num_runs):
++        random.seed(run)  # Fix seed for reproducibility
++        
++        # Initialize population
++        pop = toolbox.population(n=20)
++        
++        # Evaluate initial population
++        fitnesses = list(map(lambda ind: evaluate(ind, 10.0), pop))
++        for ind, fit in zip(pop, fitnesses):
++            ind.fitness.values = fit
++        
++        # Main evolutionary loop
++        for gen in range(50):  # Limited generations
++            # Select the next generation individuals
++            offspring = toolbox.select(pop, len(pop))
++            offspring = list(map(toolbox.clone, offspring))
++            
++            # Apply crossover and mutation
++            for child1, child2 in zip(offspring[::2], offspring[1::2]):
++                if random.random() < 0.5:
++                    toolbox.mate(child1, child2)
++                    del child1.fitness.values
++                    del child2.fitness.values
++            
++            for mutant in offspring:
++                if random.random() < 0.2:
++                    toolbox.mutate(mutant)
++                    del mutant.fitness.values
++            
++            # Evaluate the individuals with an invalid fitness
++            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++            fitnesses = list(map(lambda ind: evaluate(ind, 10.0), invalid_ind))
++            for ind, fit in zip(invalid_ind, fitnesses):
++                ind.fitness.values = fit
++            
++            # Replace the old population with the new one
++            pop[:] = offspring
++        
++        # Find best individual from this run
++        best_of_run = tools.selBest(pop, 1)[0]
++        best_fitness = evaluate(best_of_run, 10.0)
++        
++        # Calculate actual outer radius for this individual
++        hex_positions_angles = np.array(best_of_run).reshape(12, 3)
++        all_vertices = []
++        for i in range(12):
++            vertices = get_hexagon_vertices(hex_positions_angles[i][0], hex_positions_angles[i][1], hex_positions_angles[i][2])
++            all_vertices.extend(vertices)
++        
++        if len(all_vertices) > 0:
++            distances = [math.sqrt(x*x + y*y) for x, y in all_vertices]
++            outer_radius = max(distances) if distances else 1
++            actual_fitness = 1.0 / outer_radius
++            
++            if actual_fitness > best_inv_radius:
++                best_inv_radius = actual_fitness
++                best_result = (best_of_run, outer_radius)
++    
++    # Final optimization with better parameters
++    if best_result is None:
++        # Fallback to default
++        inner_hex_data = np.array([
++            [0, 0, 0],      # center
++            [-2.5, 0, 0],   # left
++            [2.5, 0, 0],    # right
+             [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
++            [1.25, 2.17, 0],   # top-right
++            [-1.25, -2.17, 0], # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++            [3.75, 2.17, 0],   # far top-right
++            [-3.75, -2.17, 0], # far bottom-left
++            [3.75, -2.17, 0],  # far bottom-right
++            [0, -4, 0],       # far bottom-center
++        ])
++        outer_hex_data = np.array([0, 0, 0])  # centered at origin
++        outer_hex_side_length = 8  # large enough to contain all inner hexagons
++        return inner_hex_data, outer_hex_data, outer_hex_side_length
++    
++    # Extract result
++    individual, outer_radius = best_result
++    
++    # Convert to final format
++    inner_hex_data = np.array(individual).reshape(12, 3)
++    outer_hex_data = np.array([0, 0, 0])  # Centered outer hexagon
++    outer_hex_side_length = outer_radius
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

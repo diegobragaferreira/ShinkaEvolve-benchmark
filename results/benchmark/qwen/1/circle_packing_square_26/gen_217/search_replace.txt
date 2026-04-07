@@ -1,0 +1,129 @@
+<NAME>
+enhanced_voronoi_init
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic hierarchical clustering approach for initial placement, but we can significantly improve the initialization by creating a more sophisticated Voronoi-based method that better distributes circles in the unit square. This will provide a superior starting configuration that makes subsequent optimization easier and more effective.
+
+The key insight is to leverage Voronoi diagrams more effectively by generating a diverse set of initial points that naturally promote good spatial distribution, then use these to create a better initial configuration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def _initialize_hierarchical_placement(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Initialize circle positions using hierarchical clustering for better spatial distribution."""
+    np.random.seed(seed)
+
+    # First, create a coarse grid to identify promising regions
+    coarse_grid_size = max(3, int(np.ceil(np.sqrt(n_circles))))
+    x_coords = np.linspace(0.05, 0.95, coarse_grid_size)
+    y_coords = np.linspace(0.05, 0.95, coarse_grid_size)
+    coarse_points = np.array([[x, y] for x in x_coords for y in y_coords])
+
+    # Use hierarchical clustering to group regions
+    clustering = AgglomerativeClustering(n_clusters=min(n_circles, len(coarse_points)),
+                                        linkage='ward')
+    cluster_labels = clustering.fit_predict(coarse_points)
+
+    # Select representative points from each cluster
+    selected_points = []
+    for cluster_id in range(max(cluster_labels) + 1):
+        cluster_mask = cluster_labels == cluster_id
+        if np.any(cluster_mask):
+            # Get the centroid of the cluster
+            cluster_points = coarse_points[cluster_mask]
+            centroid = np.mean(cluster_points, axis=0)
+            selected_points.append(centroid)
+
+    # If we don't have enough points, fill with random ones
+    while len(selected_points) < n_circles:
+        random_point = np.random.uniform(0.05, 0.95, (2,))
+        selected_points.append(random_point)
+
+    # Trim to exactly n_circles
+    final_points = np.array(selected_points[:n_circles])
+
+    # Add some randomness to prevent perfect grid patterns that might not generalize well
+    noise_level = 0.05
+    final_points += np.random.uniform(-noise_level, noise_level, final_points.shape)
+
+    # Ensure all points are within bounds
+    final_points[:, 0] = np.clip(final_points[:, 0], 0.05, 0.95)
+    final_points[:, 1] = np.clip(final_points[:, 1], 0.05, 0.95)
+
+    return final_points
+=======
+def _initialize_hierarchical_placement(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Initialize circle positions using enhanced Voronoi-based approach for better spatial distribution."""
+    np.random.seed(seed)
+
+    # Generate initial candidate points using multiple strategies for better diversity
+    points = []
+
+    # Strategy 1: Grid-based points
+    grid_size = max(4, int(np.ceil(np.sqrt(n_circles * 1.5))))
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) < n_circles * 2:  # Generate extra points
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                points.append([x, y])
+
+    # Strategy 2: Random points in interior
+    random_interior = np.random.uniform(0.1, 0.9, (n_circles, 2))
+    points.extend(random_interior.tolist())
+
+    # Strategy 3: Boundary points for edge coverage
+    for _ in range(n_circles // 2):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top edge
+            points.append([np.random.uniform(0.05, 0.95), 0.95])
+        elif side == 1:  # Bottom edge
+            points.append([np.random.uniform(0.05, 0.95), 0.05])
+        elif side == 2:  # Left edge
+            points.append([0.05, np.random.uniform(0.05, 0.95)])
+        else:  # Right edge
+            points.append([0.95, np.random.uniform(0.05, 0.95)])
+
+    points = np.array(points[:n_circles * 3])
+
+    # Ensure points are within valid bounds
+    points = np.clip(points, 0.05, 0.95)
+
+    # Use Voronoi to get well-distributed centers
+    try:
+        # Create Voronoi diagram
+        vor = Voronoi(points)
+
+        # Use Voronoi vertices and centroids as potential circle centers
+        # Filter out invalid points and keep only those within bounds
+        valid_centers = []
+
+        # Use the Voronoi points that correspond to finite regions
+        for i, point in enumerate(vor.points):
+            if i < len(vor.point_region) and vor.point_region[i] >= 0:
+                # Check if it's within our valid bounds
+                if 0.05 <= point[0] <= 0.95 and 0.05 <= point[1] <= 0.95:
+                    valid_centers.append(point)
+
+        # If we have enough valid centers, use them; otherwise, use the original points
+        if len(valid_centers) >= n_circles:
+            selected_centers = np.array(valid_centers[:n_circles])
+        else:
+            # Fall back to sampling from original points
+            selected_centers = points[np.random.choice(len(points), n_circles, replace=False)]
+    except:
+        # Fallback to direct sampling
+        selected_centers = points[np.random.choice(len(points), n_circles, replace=False)]
+
+    # Add slight jitter to prevent symmetry issues
+    jitter_magnitude = 0.02
+    selected_centers += np.random.uniform(-jitter_magnitude, jitter_magnitude, selected_centers.shape)
+
+    # Ensure all points are within bounds
+    selected_centers[:, 0] = np.clip(selected_centers[:, 0], 0.05, 0.95)
+    selected_centers[:, 1] = np.clip(selected_centers[:, 1], 0.05, 0.95)
+
+    return selected_centers
+>>>>>>> REPLACE
+</DIFF>

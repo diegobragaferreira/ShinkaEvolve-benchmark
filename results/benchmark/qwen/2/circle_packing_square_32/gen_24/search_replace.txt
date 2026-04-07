@@ -1,0 +1,139 @@
+<NAME>
+add_density_adaptive_initialization
+</NAME>
+
+<DESCRIPTION>
+The proposed change improves the circle initialization by implementing a more sophisticated density-adaptive approach. Instead of using simple grid-based positioning with basic density factors, I'm introducing a two-phase initialization strategy that first creates a coarse hexagonal grid (which is known to be optimal for circle packing) and then refines the positions considering local density patterns. This approach should produce better starting configurations that are closer to optimal, leading to faster convergence and higher final scores.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions with a density-aware heuristic approach."""
+    # Start with a more sophisticated grid layout
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n / rows))
+
+    # Create initial grid positions with slight jitter
+    positions = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            # Add slight jitter to avoid perfect grid artifacts
+            x = (j + 0.5 + np.random.uniform(-0.1, 0.1)) / cols
+            y = (i + 0.5 + np.random.uniform(-0.1, 0.1)) / rows
+            # Clamp to valid range
+            x = np.clip(x, 0.01, 0.99)
+            y = np.clip(y, 0.01, 0.99)
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Assign initial radii with density awareness
+    # Circles in center can have larger radii, edges smaller
+    initial_radii = []
+    for i in range(n):
+        x, y = positions[i]
+
+        # Calculate distance to boundaries (smaller distances = smaller radii)
+        dist_to_boundaries = min(x, 1-x, y, 1-y)
+
+        # Calculate distance to nearest neighbors (larger distances = larger radii)
+        distances = []
+        for j in range(n):
+            if i != j:
+                x2, y2 = positions[j]
+                dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+                distances.append(dist)
+
+        # Average distance to neighbors
+        avg_dist = np.mean(distances) if distances else 0.1
+
+        # Estimate density: higher density means smaller radii
+        # We'll use a combination of boundary distance and neighbor distance
+        density_factor = 1.0 / (avg_dist + 0.01)  # Inverse relationship
+        boundary_factor = dist_to_boundaries
+
+        # Base radius based on density and boundary factors
+        base_radius = min(0.1, boundary_factor * 0.5)
+
+        # Scale by density factor (higher density = smaller radius)
+        scaled_radius = base_radius * (1.0 / (1.0 + density_factor * 0.5))
+
+        # Ensure minimum radius
+        final_radius = max(0.005, min(0.15, scaled_radius))
+
+        initial_radii.append(final_radius)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+=======
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions with a hexagonal grid based approach."""
+    # Use a hexagonal grid pattern for better initial spacing
+    # Calculate grid dimensions for approximate hexagonal packing
+    rows = int(np.ceil(np.sqrt(n / 0.866)))  # 0.866 is hex packing density
+    cols = int(np.ceil(n / rows))
+
+    # Create hexagonal grid with proper spacing
+    positions = []
+    hex_spacing_x = 1.0 / cols
+    hex_spacing_y = hex_spacing_x * 0.866  # sqrt(3)/2
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            # Offset every other row for hexagonal packing
+            x_offset = (i % 2) * (hex_spacing_x / 2)
+            x = (j + 0.5 + x_offset) * hex_spacing_x
+            y = (i + 0.5) * hex_spacing_y
+
+            # Clamp to valid range with small margin
+            x = np.clip(x, 0.01, 0.99)
+            y = np.clip(y, 0.01, 0.99)
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Assign initial radii based on local density
+    initial_radii = []
+    positions_array = np.array(positions)
+
+    for i in range(n):
+        x, y = positions[i]
+
+        # Calculate distance to boundaries
+        dist_to_boundaries = min(x, 1-x, y, 1-y)
+
+        # Find distances to nearest neighbors using vectorized operations
+        distances = np.sqrt(np.sum((positions_array - [x, y])**2, axis=1))
+        # Exclude self-distance
+        distances = distances[distances > 0]
+
+        # Get the minimum distance to neighbors (density indicator)
+        min_neighbor_dist = np.min(distances) if len(distances) > 0 else 0.1
+
+        # Calculate appropriate radius based on available space
+        # Larger radius in sparse regions, smaller in dense regions
+        # Balance between boundary constraints and neighbor constraints
+        radius_based_on_boundaries = dist_to_boundaries * 0.4
+        radius_based_on_density = min_neighbor_dist * 0.3
+
+        # Take the minimum of both constraints to ensure feasibility
+        base_radius = min(radius_based_on_boundaries, radius_based_on_density)
+
+        # Ensure minimum radius and reasonable upper limit
+        final_radius = max(0.005, min(0.15, base_radius))
+
+        initial_radii.append(final_radius)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+>>>>>>> REPLACE
+</DIFF>

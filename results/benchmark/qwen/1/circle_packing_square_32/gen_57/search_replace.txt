@@ -1,0 +1,235 @@
+<NAME>
+voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+I'll implement a Voronoi-based initialization strategy that places circles more strategically before optimization begins. This approach uses Voronoi diagrams to identify natural spacing opportunities and places larger circles first in positions that maximize their potential size while respecting constraints. This should provide a much better starting point than the current random greedy placement.
+
+The key insight is that Voronoi diagrams naturally reveal the optimal spacing patterns for packing problems, and by placing circles at Voronoi vertices (where they can be as large as possible without overlapping), we get a much stronger foundation for the evolutionary algorithm to build upon.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from deap import base, creator, tools, algorithms
+import time
+
+# Global constants for optimization
+POPULATION_SIZE = 100
+GENERATIONS = 50
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+
+def check_containment(circles):
+    """Check if all circles are fully contained within the unit square"""
+    for x, y, r in circles:
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    return True
+
+def check_overlap(circles):
+    """Check if any circles overlap"""
+    n = len(circles)
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+            if distance < r1 + r2:
+                return False
+    return True
+
+def calculate_objective(circles):
+    """Calculate the sum of radii"""
+    return sum(circle[2] for circle in circles)
+
+def create_initial_placement(n):
+    """Create initial placement using a greedy approach"""
+    circles = []
+
+    # Start with a few large circles in corners and edges
+    # Corner positions
+    corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+    edge_centers = [(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)]
+
+    # Place some initial circles
+    initial_positions = corners + edge_centers
+    initial_radii = [0.08, 0.08, 0.08, 0.08, 0.06, 0.06, 0.06, 0.06]
+
+    for pos, r in zip(initial_positions[:min(len(initial_positions), n)], initial_radii[:min(len(initial_radii), n)]):
+        circles.append([pos[0], pos[1], r])
+
+    # Fill remaining spots with small circles
+    while len(circles) < n:
+        best_radius = 0
+        best_pos = None
+
+        # Try to place a circle in a random location
+        for _ in range(100):  # Try 100 times for each new circle
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            max_radius = min(x, 1-x, y, 1-y)
+
+            if max_radius <= 0:
+                continue
+
+            # Check if we can place a reasonable-sized circle here
+            test_circle = [x, y, max_radius]
+            temp_circles = circles + [test_circle]
+
+            if check_containment(temp_circles) and check_overlap(temp_circles):
+                if max_radius > best_radius:
+                    best_radius = max_radius
+                    best_pos = (x, y)
+
+        if best_pos is not None:
+            circles.append([best_pos[0], best_pos[1], min(best_radius, 0.1)])
+        else:
+            # If we can't find a good spot, try with smaller radius
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            r = min(0.02, 0.1)
+            circles.append([x, y, r])
+
+    return circles[:n]
+=======
+import numpy as np
+from scipy.spatial import Voronoi, voronoi_plot_2d
+import random
+from deap import base, creator, tools, algorithms
+import time
+from itertools import combinations
+
+# Global constants for optimization
+POPULATION_SIZE = 100
+GENERATIONS = 50
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+
+def check_containment(circles):
+    """Check if all circles are fully contained within the unit square"""
+    for x, y, r in circles:
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    return True
+
+def check_overlap(circles):
+    """Check if any circles overlap"""
+    n = len(circles)
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+            if distance < r1 + r2:
+                return False
+    return True
+
+def calculate_objective(circles):
+    """Calculate the sum of radii"""
+    return sum(circle[2] for circle in circles)
+
+def generate_voronoi_candidates(points, width=1, height=1):
+    """Generate candidate points from Voronoi diagram"""
+    # Add boundary points to ensure good coverage
+    boundary_points = [
+        (0, 0), (0, height), (width, 0), (width, height),
+        (width/2, 0), (width/2, height),
+        (0, height/2), (width, height/2)
+    ]
+
+    # Combine original points with boundary points
+    all_points = points + boundary_points
+
+    try:
+        vor = Voronoi(all_points)
+
+        # Filter out points that are too close to boundaries or invalid
+        candidates = []
+        for vertex in vor.vertices:
+            x, y = vertex
+            if 0 < x < width and 0 < y < height:
+                candidates.append((x, y))
+        return candidates
+    except:
+        # Fallback to random points if Voronoi fails
+        return [(random.uniform(0.05, 0.95), random.uniform(0.05, 0.95))
+                for _ in range(50)]
+
+def place_largest_circles_first(n):
+    """Place the largest possible circles first using Voronoi-based approach"""
+    circles = []
+    attempted_positions = []
+
+    # Start with corner placements
+    corner_positions = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+    center_positions = [(0.5, 0.5)]
+
+    # Try to place circles at these strategic positions
+    strategic_positions = corner_positions + center_positions
+
+    for pos in strategic_positions[:min(len(strategic_positions), n)]:
+        # Determine maximum radius at this position
+        max_radius = min(pos[0], 1-pos[0], pos[1], 1-pos[1])
+        if max_radius > 0:
+            circles.append([pos[0], pos[1], max_radius])
+
+    # Fill remaining spots using Voronoi-based candidate generation
+    while len(circles) < n:
+        # Generate candidate points using existing circles as Voronoi generators
+        generators = [(c[0], c[1]) for c in circles]
+
+        # Generate candidates from Voronoi diagram
+        candidates = generate_voronoi_candidates(generators)
+
+        best_radius = 0
+        best_pos = None
+
+        # Try several candidate positions
+        for x, y in candidates[:50]:  # Limit candidates to avoid slowness
+            # Calculate maximum possible radius at this position
+            max_radius = min(x, 1-x, y, 1-y)
+
+            if max_radius <= 0:
+                continue
+
+            # Check if this could work with existing circles
+            test_circle = [x, y, max_radius]
+            temp_circles = circles + [test_circle]
+
+            # Check containment
+            if not check_containment(temp_circles):
+                continue
+
+            # Check overlap with existing circles
+            overlap = False
+            for existing in circles:
+                ex, ey, er = existing
+                distance = np.sqrt((x-ex)**2 + (y-ey)**2)
+                if distance < max_radius + er:
+                    overlap = True
+                    break
+
+            if not overlap and max_radius > best_radius:
+                best_radius = max_radius
+                best_pos = (x, y)
+
+        # If we found a good position, add the circle
+        if best_pos is not None and best_radius > 0:
+            circles.append([best_pos[0], best_pos[1], best_radius])
+        else:
+            # If no good position found, use a fallback random positioning
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            max_radius = min(x, 1-x, y, 1-y)
+            # Even if we can't find a perfect spot, keep some minimal radius
+            r = max(0.01, max_radius * 0.5)
+            circles.append([x, y, r])
+
+    return circles[:n]
+>>>>>>> REPLACE
+</DIFF>

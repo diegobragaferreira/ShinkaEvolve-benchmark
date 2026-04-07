@@ -1,0 +1,328 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+from typing import Tuple, List, Optional, Any
+import warnings
+
+class SymmetricHexagonPacker:
+    """A symmetric approach to hexagon packing optimization that reduces search space"""
+
+    def __init__(self):
+        # Precomputed constants for hexagon geometry
+        self.hex_radius = 1.0  # Unit hexagon radius
+        self.hex_diameter = 2.0  # Unit hexagon diameter
+        self.circumradius = 1.0  # Circumradius of unit hexagon
+        self.hex_area = (3 * np.sqrt(3) / 2) * self.hex_radius**2  # Area of unit hexagon
+        
+    def compute_outer_hex_side_from_config(self, inner_hex_data, center=(0,0)):
+        """Fast analytical computation of outer hexagon side length using geometric properties."""
+        if len(inner_hex_data) == 0:
+            return 100.0
+
+        max_dist = 0.0
+        for i in range(len(inner_hex_data)):
+            cx, cy, _ = inner_hex_data[i]
+            dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
+            dist_to_edge = dist + self.circumradius
+            max_dist = max(max_dist, dist_to_edge)
+
+        return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+
+    def check_symmetric_constraints(self, inner_hex_data):
+        """Fast verification of symmetric constraints for hexagon arrangement."""
+        if len(inner_hex_data) != 12:
+            return False
+            
+        # Check if we have the expected symmetry structure
+        # Central hexagon at origin
+        if not (np.isclose(inner_hex_data[0][0], 0) and np.isclose(inner_hex_data[0][1], 0)):
+            return False
+            
+        # Verify ring structure - first 6 should be at distance ~2 from center
+        ring1_centers = inner_hex_data[1:7]
+        distances1 = [np.sqrt(c[0]**2 + c[1]**2) for c in ring1_centers]
+        
+        # Second 5 should be at distance ~3.5 from center  
+        ring2_centers = inner_hex_data[7:12]
+        distances2 = [np.sqrt(c[0]**2 + c[1]**2) for c in ring2_centers]
+        
+        # Check that they're roughly in expected rings
+        if not (all(1.8 <= d <= 2.2 for d in distances1) and 
+                all(3.2 <= d <= 3.8 for d in distances2)):
+            return False
+            
+        return True
+
+    def get_min_distance_between_rings(self, ring1_centers, ring2_centers):
+        """Fast calculation of minimum distance between ring centers."""
+        if len(ring1_centers) == 0 or len(ring2_centers) == 0:
+            return float('inf')
+            
+        # Use matrix distance calculation for efficiency
+        distances = cdist(ring1_centers, ring2_centers)
+        return np.min(distances)
+
+    def estimate_valid_region(self, ring1_spacing, ring2_spacing):
+        """Estimate if given spacing parameters can produce a valid packing."""
+        # Minimum separation needed for non-overlapping hexagons
+        # For two hexagons to not overlap, their centers must be at least 2 units apart
+        min_separation = self.hex_diameter
+        
+        # With rings at distances ring1_spacing and ring2_spacing from center,
+        # check if they're far enough apart
+        if abs(ring1_spacing - ring2_spacing) < min_separation:
+            # Check if rings are properly separated
+            if ring1_spacing > ring2_spacing:
+                # Ring 1 inside ring 2 - check if they're far enough
+                if ring2_spacing - ring1_spacing < min_separation:
+                    return False
+            else:
+                # Ring 2 inside ring 1 - check if they're far enough  
+                if ring1_spacing - ring2_spacing < min_separation:
+                    return False
+                    
+        # Additional constraint: rings should not be too close
+        if ring1_spacing < 1.5 or ring2_spacing < 1.5:
+            return False
+            
+        return True
+
+    def compute_theoretical_bounds(self, ring1_spacing, ring2_spacing):
+        """Compute theoretical bounds instead of expensive geometric checks."""
+        # For hexagons in rings, compute minimum outer hexagon size
+        # Outer radius = max(radius1, radius2) + hex_radius
+        outer_radius = max(ring1_spacing, ring2_spacing) + self.circumradius
+        # Side length of outer hexagon = 2 * outer_radius / sqrt(3) 
+        # But since we want hexagon side length, and outer radius is circumscribed:
+        # side = outer_radius for regular hexagon
+        outer_side_length = outer_radius
+        
+        # In fact, let's be more precise:
+        # For a hexagon with circumradius R, side length = R
+        # So outer hexagon side length should be outer_radius
+        return outer_side_length
+
+    def evaluate_symmetric_configuration(self, params):
+        """Fast evaluation using analytical approaches."""
+        ring1_spacing, ring2_spacing, ring_rotation, offset1, offset2, offset3 = params
+        
+        # Validate parameters are feasible
+        if not self.estimate_valid_region(ring1_spacing, ring2_spacing):
+            return 1e-10
+            
+        # Compute theoretical outer hexagon size
+        outer_side_length = self.compute_theoretical_bounds(ring1_spacing, ring2_spacing)
+        
+        # Fast check: verify that all hexagons can fit in outer hexagon
+        # We know that maximum distance from center for any hexagon is max(ring1_spacing, ring2_spacing) + 1
+        # For a hexagon with side length s, the circumradius is s
+        # So if max(ring1_spacing, ring2_spacing) + 1 < outer_side_length, it's valid
+        max_dist_from_center = max(ring1_spacing, ring2_spacing) + self.circumradius
+        if max_dist_from_center >= outer_side_length:
+            # Not necessarily invalid, but need stricter check
+            pass
+            
+        # Theoretically, if we construct the actual hexagon positions:
+        # 1. Center hexagon (0,0) 
+        # 2. Ring 1: 6 hexagons at (ring1_spacing * cos(angle), ring1_spacing * sin(angle))
+        # 3. Ring 2: 5 hexagons at (ring2_spacing * cos(angle), ring2_spacing * sin(angle))
+        # With proper offsetting to maintain symmetry
+        
+        # Construct configuration
+        positions = []
+        positions.append([0, 0, 0])  # Central hexagon
+        
+        # Ring 1 - 6 hexagons
+        for i in range(6):
+            angle = 60 * i + ring_rotation + offset1
+            x = ring1_spacing * np.cos(np.radians(angle))
+            y = ring1_spacing * np.sin(np.radians(angle))
+            positions.append([x, y, 0])
+            
+        # Ring 2 - 5 hexagons  
+        for i in range(5):
+            angle = 72 * i + ring_rotation + offset2
+            x = ring2_spacing * np.cos(np.radians(angle))
+            y = ring2_spacing * np.sin(np.radians(angle))
+            positions.append([x, y, 0])
+            
+        # Convert to numpy array
+        hex_data = np.array(positions[:12])
+        
+        # Estimate minimum required outer side length
+        estimated_outer_side = self.compute_outer_hex_side_from_config(hex_data)
+        
+        # Final validation using theoretical bounds
+        if estimated_outer_side > outer_side_length * 1.2:  # Allow some margin
+            # This indicates something is wrong with the estimates
+            return 1e-10
+            
+        return 1.0 / estimated_outer_side
+
+    def generate_symmetric_initial_placement(self):
+        """Generate initial placement using mathematical insight about optimal symmetry."""
+        # Start with a known good symmetric arrangement
+        # Based on optimal hexagonal packing patterns
+        
+        # Central hexagon
+        positions = [[0, 0, 0]]
+        
+        # First ring: 6 hexagons at distance 2.0
+        for i in range(6):
+            angle = 60 * i  # 60 degree increments
+            x = 2.0 * np.cos(np.radians(angle))
+            y = 2.0 * np.sin(np.radians(angle))
+            positions.append([x, y, 0])
+            
+        # Second ring: 5 hexagons at distance 3.5 - this creates a 12-hexagon pattern
+        for i in range(5):
+            angle = 72 * i  # 72 degree increments (pentagon symmetry)
+            x = 3.5 * np.cos(np.radians(angle))
+            y = 3.5 * np.sin(np.radians(angle))
+            positions.append([x, y, 0])
+            
+        # Ensure exactly 12 positions
+        while len(positions) < 12:
+            positions.append([0, -4, 0])
+        positions = positions[:12]
+        
+        # Add small random perturbations to break perfect symmetry and avoid local minima
+        np.random.seed(42)
+        for i in range(len(positions)):
+            positions[i][0] += np.random.normal(0, 0.05)
+            positions[i][1] += np.random.normal(0, 0.05)
+            
+        return np.array(positions)
+
+    def encode_symmetric_parameters(self, inner_hex_data):
+        """Convert full hexagon data to compact symmetric parameters."""
+        # Simple heuristic encoding - in practice this would be more sophisticated
+        
+        # Get distances from center
+        distances = []
+        for i in range(len(inner_hex_data)):
+            cx, cy, _ = inner_hex_data[i]
+            dist = np.sqrt(cx**2 + cy**2)
+            distances.append(dist)
+            
+        # Separate into rings
+        ring1_distances = [d for d in distances if 1.5 <= d <= 2.5]
+        ring2_distances = [d for d in distances if 3.0 <= d <= 4.5]
+        
+        avg_ring1 = np.mean(ring1_distances) if ring1_distances else 2.0
+        avg_ring2 = np.mean(ring2_distances) if ring2_distances else 3.5
+        
+        return [avg_ring1, avg_ring2, 0.0, 0.0, 0.0, 0.0]
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    packer = SymmetricHexagonPacker()
+    
+    # Generate initial symmetric configuration
+    initial_guess = packer.generate_symmetric_initial_placement()
+    
+    # Define bounds for our reduced symmetric parameter space (6 parameters)
+    # [ring1_spacing, ring2_spacing, ring_rotation, offset1, offset2, offset3]
+    bounds = [
+        (1.5, 3.0),      # ring1_spacing: distance from center for first ring
+        (3.0, 5.0),      # ring2_spacing: distance from center for second ring  
+        (-180, 180),     # ring_rotation: overall rotation angle
+        (-30, 30),       # offset1: phase adjustment for ring 1
+        (-30, 30),       # offset2: phase adjustment for ring 2
+        (-30, 30)        # offset3: additional freedom
+    ]
+    
+    def objective(params):
+        # Direct evaluation using analytical bounds
+        score = packer.evaluate_symmetric_configuration(params)
+        return -score  # Negative because we want to maximize
+
+    try:
+        # Use constrained optimization on symmetric parameters
+        # Reduced iterations to stay within time budget
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=30,         # Reduced iterations for speed
+            popsize=8,          # Smaller population for efficiency
+            seed=42,
+            strategy='best1bin',
+            atol=1e-5,          # Tighter tolerance for earlier convergence
+            disp=False
+        )
+        
+        # Convert back to full hexagon configuration
+        optimized_params = result.x
+        
+        # Generate final configuration using optimized parameters
+        ring1_spacing, ring2_spacing, ring_rotation, offset1, offset2, offset3 = optimized_params
+        
+        # Build final configuration manually for consistency
+        positions = []
+        positions.append([0, 0, 0])  # Central hexagon
+        
+        # Ring 1 - 6 hexagons
+        for i in range(6):
+            angle = 60 * i + ring_rotation + offset1
+            x = ring1_spacing * np.cos(np.radians(angle))
+            y = ring1_spacing * np.sin(np.radians(angle))
+            positions.append([x, y, 0])
+            
+        # Ring 2 - 5 hexagons  
+        for i in range(5):
+            angle = 72 * i + ring_rotation + offset2
+            x = ring2_spacing * np.cos(np.radians(angle))
+            y = ring2_spacing * np.sin(np.radians(angle))
+            positions.append([x, y, 0])
+            
+        # Final configuration
+        optimized_hex_data = np.array(positions[:12])
+        
+        # Final validation with full accuracy
+        final_side_length = packer.compute_outer_hex_side_from_config(optimized_hex_data)
+        
+        if result.success and final_side_length > 0:
+            # Compute the outer hexagon parameters
+            outer_side_length = final_side_length
+            outer_hex_center = (0, 0)
+            
+            # Create outer hexagon data (centered at origin, no rotation)
+            outer_hex_data = np.array([0, 0, 0])
+            
+            return optimized_hex_data, outer_hex_data, outer_side_length
+            
+    except Exception as e:
+        warnings.warn(f"Optimization failed: {str(e)}")
+        pass
+
+    # Fall back to the original reasonable configuration 
+    inner_hex_data = np.array([
+        [0, 0, 0],  # center
+        [0, 2, 0],  # top
+        [0, -2, 0],  # bottom  
+        [1.732, 1, 0],  # top right
+        [-1.732, 1, 0],  # top left
+        [1.732, -1, 0],  # bottom right
+        [-1.732, -1, 0],  # bottom left
+        [3.464, 0, 0],  # far right
+        [-3.464, 0, 0],  # far left
+        [1.732, 3, 0],  # top far right
+        [-1.732, 3, 0],  # top far left
+        [1.732, -3, 0],  # bottom far right
+    ])
+
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = 6.928  # approximated value (1/0.1443 ~= 6.928)
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

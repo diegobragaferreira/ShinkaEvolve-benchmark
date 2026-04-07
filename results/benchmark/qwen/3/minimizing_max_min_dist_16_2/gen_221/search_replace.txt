@@ -1,0 +1,226 @@
+<NAME>
+add_adaptive_cooling_schedule
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed cooling rate in the particle swarm optimization. This change introduces an adaptive cooling schedule that adjusts based on optimization progress, similar to what was successfully used in previous generations. The adaptive cooling will help escape local optima more effectively and converge faster to better solutions. This enhancement should improve the overall performance by allowing the algorithm to explore more aggressively in early iterations and exploit more carefully in later iterations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def __init__(self, n_particles: int = 30, n_dimensions: int = 2, n_points: int = 16,
+                 max_iterations: int = 1000, inertia: float = 0.7, cognitive: float = 1.5,
+                 social: float = 1.5, seed: int = 42):
+        self.n_particles = n_particles
+        self.n_dimensions = n_dimensions
+        self.n_points = n_points
+        self.max_iterations = max_iterations
+        self.inertia = inertia
+        self.cognitive = cognitive
+        self.social = social
+        self.seed = seed
+        np.random.seed(seed)
+
+        # Swarm parameters
+        self.particles = None
+        self.velocities = None
+        self.personal_best_positions = None
+        self.personal_best_scores = None
+        self.global_best_position = None
+        self.global_best_score = 0.0
+
+        # Force parameters
+        self.repulsion_strength = 0.1
+        self.attraction_strength = 0.05
+        self.boundary_repulsion = 1.0
+=======
+    def __init__(self, n_particles: int = 30, n_dimensions: int = 2, n_points: int = 16,
+                 max_iterations: int = 1000, inertia: float = 0.7, cognitive: float = 1.5,
+                 social: float = 1.5, seed: int = 42):
+        self.n_particles = n_particles
+        self.n_dimensions = n_dimensions
+        self.n_points = n_points
+        self.max_iterations = max_iterations
+        self.inertia = inertia
+        self.cognitive = cognitive
+        self.social = social
+        self.seed = seed
+        np.random.seed(seed)
+
+        # Swarm parameters
+        self.particles = None
+        self.velocities = None
+        self.personal_best_positions = None
+        self.personal_best_scores = None
+        self.global_best_position = None
+        self.global_best_score = 0.0
+
+        # Adaptive cooling parameters
+        self.initial_inertia = inertia
+        self.final_inertia = 0.2
+        self.cooling_rate = 0.999
+
+        # Force parameters
+        self.repulsion_strength = 0.1
+        self.attraction_strength = 0.05
+        self.boundary_repulsion = 1.0
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+add_progress_tracking
+</NAME>
+
+<DESCRIPTION>
+This change adds progress tracking to monitor optimization convergence and adjust parameters accordingly. By tracking the improvement in the best score over recent iterations, we can detect stagnation and trigger adaptive responses such as resetting poor performers or adjusting the cooling schedule. This helps maintain optimization momentum and prevents getting trapped in suboptimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Initialize swarm
+        self.particles, self.velocities = self.initialize_particles()
+        self.personal_best_positions = self.particles.copy()
+        self.personal_best_scores = self.evaluate_fitness(self.particles)
+
+        # Initialize global best
+        best_idx = np.argmax(self.personal_best_scores)
+        self.global_best_score = self.personal_best_scores[best_idx]
+        self.global_best_position = self.personal_best_positions[best_idx].copy()
+
+        # Evolution loop
+        for iteration in range(self.max_iterations):
+            # Evaluate fitness
+            fitness = self.evaluate_fitness(self.particles)
+
+            # Apply forces
+            self.particles, self.velocities = self.apply_forces(
+                self.particles, self.velocities, fitness
+            )
+
+            # Periodically reinitialize poor performers
+            if iteration % 100 == 0 and iteration > 0:
+                worst_idx = np.argmin(fitness)
+                if fitness[worst_idx] < self.global_best_score * 0.5:
+                    self.particles[worst_idx] = self._generate_hexagonal_lattice().flatten()
+                    self.velocities[worst_idx] = np.zeros(self.n_points * self.n_dimensions)
+                    self.personal_best_positions[worst_idx] = self.particles[worst_idx].copy()
+                    self.personal_best_scores[worst_idx] = self.evaluate_fitness(
+                        self.particles[worst_idx].reshape(1, -1)
+                    )[0]
+=======
+        # Initialize swarm
+        self.particles, self.velocities = self.initialize_particles()
+        self.personal_best_positions = self.particles.copy()
+        self.personal_best_scores = self.evaluate_fitness(self.particles)
+
+        # Initialize global best
+        best_idx = np.argmax(self.personal_best_scores)
+        self.global_best_score = self.personal_best_scores[best_idx]
+        self.global_best_position = self.personal_best_positions[best_idx].copy()
+
+        # Progress tracking
+        self.best_score_history = []
+        self.stagnation_counter = 0
+        self.max_stagnation = 50
+
+        # Evolution loop
+        for iteration in range(self.max_iterations):
+            # Evaluate fitness
+            fitness = self.evaluate_fitness(self.particles)
+
+            # Apply adaptive cooling and parameter updates
+            if iteration > 0 and iteration % 10 == 0:
+                # Track best score history for stagnation detection
+                current_best = np.max(fitness)
+                self.best_score_history.append(current_best)
+                if len(self.best_score_history) > 10:
+                    self.best_score_history.pop(0)
+
+                # Check for stagnation
+                if len(self.best_score_history) >= 10:
+                    improvement = current_best - self.best_score_history[0]
+                    if improvement < 1e-8:
+                        self.stagnation_counter += 1
+                        # Reset poor performers if stagnating
+                        if self.stagnation_counter > self.max_stagnation:
+                            worst_idx = np.argmin(fitness)
+                            self.particles[worst_idx] = self._generate_hexagonal_lattice().flatten()
+                            self.velocities[worst_idx] = np.zeros(self.n_points * self.n_dimensions)
+                            self.personal_best_positions[worst_idx] = self.particles[worst_idx].copy()
+                            self.personal_best_scores[worst_idx] = self.evaluate_fitness(
+                                self.particles[worst_idx].reshape(1, -1)
+                            )[0]
+                            self.stagnation_counter = 0
+                    else:
+                        self.stagnation_counter = 0
+
+                # Apply adaptive cooling
+                if iteration > 100:
+                    # Gradually decrease inertia
+                    self.inertia = max(self.final_inertia,
+                                     self.initial_inertia * (self.cooling_rate ** (iteration // 20)))
+
+            # Apply forces
+            self.particles, self.velocities = self.apply_forces(
+                self.particles, self.velocities, fitness
+            )
+
+            # Periodically reinitialize poor performers
+            if iteration % 100 == 0 and iteration > 0:
+                worst_idx = np.argmin(fitness)
+                if fitness[worst_idx] < self.global_best_score * 0.5:
+                    self.particles[worst_idx] = self._generate_hexagonal_lattice().flatten()
+                    self.velocities[worst_idx] = np.zeros(self.n_points * self.n_dimensions)
+                    self.personal_best_positions[worst_idx] = self.particles[worst_idx].copy()
+                    self.personal_best_scores[worst_idx] = self.evaluate_fitness(
+                        self.particles[worst_idx].reshape(1, -1)
+                    )[0]
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+improve_boundary_handling
+</NAME>
+
+<DESCRIPTION>
+This change improves the boundary handling by implementing more sophisticated boundary response mechanisms. Instead of simple clipping, we now use a combination of boundary repulsion forces and probabilistic boundary adjustments. This approach prevents particles from getting stuck at boundaries while maintaining proper constraints, leading to better exploration of the feasible region and potentially better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Ensure particles stay within bounds
+            new_positions[i] = np.clip(new_positions[i], 0, 1)
+=======
+            # Ensure particles stay within bounds with better boundary handling
+            for j in range(self.n_points):
+                point = new_positions[i][j*self.n_dimensions:(j+1)*self.n_dimensions]
+                # Apply boundary repulsion forces for boundary points
+                boundary_repulsion_magnitude = 0.0
+                if point[0] < 0.01:
+                    boundary_repulsion_magnitude = (0.01 - point[0]) * self.boundary_repulsion * 2.0
+                    new_positions[i][j*self.n_dimensions] = 0.01
+                elif point[0] > 0.99:
+                    boundary_repulsion_magnitude = (point[0] - 0.99) * self.boundary_repulsion * 2.0
+                    new_positions[i][j*self.n_dimensions] = 0.99
+
+                if point[1] < 0.01:
+                    boundary_repulsion_magnitude = (0.01 - point[1]) * self.boundary_repulsion * 2.0
+                    new_positions[i][j*self.n_dimensions + 1] = 0.01
+                elif point[1] > 0.99:
+                    boundary_repulsion_magnitude = (point[1] - 0.99) * self.boundary_repulsion * 2.0
+                    new_positions[i][j*self.n_dimensions + 1] = 0.99
+
+                # Apply small random adjustments for boundary points to prevent sticking
+                if boundary_repulsion_magnitude > 0:
+                    new_positions[i][j*self.n_dimensions:(j+1)*self.n_dimensions] += \
+                        np.random.normal(0, 0.001, 2)
+
+            # Final clip to ensure bounds
+            new_positions[i] = np.clip(new_positions[i], 0, 1)
+>>>>>>> REPLACE
+
+</DIFF>

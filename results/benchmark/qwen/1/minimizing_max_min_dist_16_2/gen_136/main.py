@@ -1,0 +1,223 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import math
+from sklearn.cluster import KMeans
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    def compute_ratio(points):
+        """Compute min/max distance ratio for given point configuration."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances efficiently using squareform
+        distances = squareform(pdist(points))
+        
+        # Mask diagonal elements (distance to self is 0)
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Handle case where all points might be coincident
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+    
+    def initialize_grid_pattern():
+        """Initialize points using a structured grid pattern with enhanced distribution."""
+        n = 16
+        points = np.zeros((n, 2))
+        
+        # Create a 4x4 grid pattern with some strategic offsets
+        rows = 4
+        cols = 4
+        spacing_x = 0.25
+        spacing_y = 0.25
+        
+        idx = 0
+        for row in range(rows):
+            for col in range(cols):
+                if idx < n:
+                    # Add offset to create better spacing
+                    x = col * spacing_x + (row % 2) * spacing_x * 0.25
+                    y = row * spacing_y + (col % 2) * spacing_y * 0.25
+                    points[idx] = [x, y]
+                    idx += 1
+        
+        # Scale to fit within [0.1, 0.9] x [0.1, 0.9] 
+        points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
+        points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
+        
+        # Add small random perturbation to break symmetry
+        points += np.random.normal(0, 0.005, points.shape)
+        
+        return points
+    
+    def geometric_mutation(points, mutation_rate=0.1):
+        """Apply geometric transformations to points."""
+        mutated = points.copy()
+        
+        # Randomly select points to mutate
+        num_mutate = max(1, int(len(points) * mutation_rate))
+        indices = np.random.choice(len(points), size=num_mutate, replace=False)
+        
+        for i in indices:
+            # Select transformation type
+            transform_type = np.random.choice(['translate', 'rotate', 'scale'])
+            
+            if transform_type == 'translate':
+                # Translate the point
+                displacement = np.random.normal(0, 0.02, 2)
+                mutated[i] += displacement
+                mutated[i] = np.clip(mutated[i], 0.01, 0.99)
+                
+            elif transform_type == 'rotate':
+                # Rotate around centroid
+                centroid = np.mean(mutated, axis=0)
+                angle = np.random.normal(0, 0.1)
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                diff = mutated[i] - centroid
+                rotated = np.array([
+                    diff[0]*cos_a - diff[1]*sin_a,
+                    diff[0]*sin_a + diff[1]*cos_a
+                ])
+                mutated[i] = centroid + rotated
+                mutated[i] = np.clip(mutated[i], 0.01, 0.99)
+                
+            elif transform_type == 'scale':
+                # Scale around centroid with bounded factor
+                centroid = np.mean(mutated, axis=0)
+                scale_factor = np.random.normal(1, 0.1)
+                scale_factor = np.clip(scale_factor, 0.7, 1.3)  # Limit scale changes
+                mutated[i] = centroid + (mutated[i] - centroid) * scale_factor
+                mutated[i] = np.clip(mutated[i], 0.01, 0.99)
+        
+        return mutated
+    
+    def local_refinement(points, max_iterations=20):
+        """Perform local refinement using greedy improvements."""
+        current_points = points.copy()
+        current_ratio = compute_ratio(current_points)
+        
+        for _ in range(max_iterations):
+            improved = False
+            # Try moving each point slightly in various directions
+            for i in range(len(current_points)):
+                original_point = current_points[i].copy()
+                best_point = original_point.copy()
+                best_ratio = current_ratio
+                
+                # Try several small displacements
+                for _ in range(10):
+                    displacement = np.random.normal(0, 0.005, 2)
+                    test_point = original_point + displacement
+                    test_point = np.clip(test_point, 0.01, 0.99)
+                    
+                    # Temporarily update the point
+                    current_points[i] = test_point
+                    test_ratio = compute_ratio(current_points)
+                    
+                    if test_ratio > best_ratio:
+                        best_ratio = test_ratio
+                        best_point = test_point.copy()
+                        improved = True
+                        
+                    # Restore original point
+                    current_points[i] = original_point
+                    
+                # If we found an improvement, apply it
+                if improved:
+                    current_points[i] = best_point
+                    current_ratio = best_ratio
+                    
+            # If no improvement, break
+            if not improved:
+                break
+                
+        return current_points
+    
+    def population_evolution():
+        """Main evolutionary optimization using grid-based population."""
+        # Initialize population with diverse configurations
+        population_size = 20
+        population = []
+        fitness_scores = []
+        
+        # Create initial diverse configurations
+        for i in range(population_size):
+            np.random.seed(42 + i)  # Different seeds for diversity
+            # Start with grid pattern and add varied perturbations
+            base_config = initialize_grid_pattern()
+            
+            # Add some variation to make populations diverse
+            if i > 0:
+                # Add some specific structure variations
+                base_config += np.random.normal(0, 0.03, base_config.shape)
+                base_config = np.clip(base_config, 0.01, 0.99)
+            
+            population.append(base_config)
+            fitness_scores.append(compute_ratio(base_config))
+        
+        # Evolution loop
+        max_generations = 100
+        elite_count = 4  # Keep top performers
+        mutation_rate = 0.2
+        
+        for generation in range(max_generations):
+            # Sort by fitness
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+            
+            # Print progress
+            if generation % 20 == 0:
+                best_fitness = fitness_scores[0]
+                #print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+            
+            # Create offspring from elite
+            new_population = population[:elite_count].copy()
+            
+            # Generate children through mutations
+            for i in range(elite_count, population_size):
+                # Select parents from top 50% 
+                parent_idx = np.random.randint(0, elite_count)
+                child = geometric_mutation(population[parent_idx], mutation_rate)
+                
+                # Apply local refinement
+                child = local_refinement(child, max_iterations=10)
+                
+                new_population.append(child)
+                # Recalculate fitness
+                fitness_scores.append(compute_ratio(child))
+            
+            # Replace old population
+            population = new_population[:population_size]
+            fitness_scores = fitness_scores[:population_size]
+        
+        # Return best solution
+        best_index = np.argmax(fitness_scores)
+        return population[best_index]
+    
+    # Run the evolutionary optimization
+    best_solution = population_evolution()
+    
+    # Final local refinement to polish the solution
+    best_solution = local_refinement(best_solution, max_iterations=30)
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END

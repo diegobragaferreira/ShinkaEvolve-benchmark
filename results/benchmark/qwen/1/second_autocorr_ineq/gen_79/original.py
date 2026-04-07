@@ -1,0 +1,422 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from numba import njit
+import time
+import warnings
+from typing import List, Tuple
+import concurrent.futures
+from functools import partial
+
+class StepFunctionOptimizer:
+    def __init__(self, max_time=90, max_evaluations=1000):
+        self.max_time = max_time
+        self.max_evaluations = max_evaluations
+        self.best_result = None
+        self.seed = 42
+
+    @staticmethod
+    @njit
+    def compute_autoconvolution_numba(f):
+        """Compute autoconvolution g = f * f using numba JIT"""
+        n = len(f)
+        # Autoconvolution using discrete convolution
+        g = np.zeros(2*n - 1)
+        for i in range(n):
+            for j in range(n):
+                g[i + j] += f[i] * f[j]
+
+        # Trim to center portion (length n-1)
+        offset = (n - 1) // 2
+        g_trimmed = g[offset:(2*n-1)-offset]
+        return g_trimmed
+
+    @staticmethod
+    @njit
+    def compute_c2_numba(f):
+        """Compute C2 value for given step function f using numba JIT"""
+        if len(f) < 2:
+            return 0.0
+
+        # Compute autoconvolution
+        g = StepFunctionOptimizer.compute_autoconvolution_numba(f)
+
+        if len(g) == 0:
+            return 0.0
+
+        # Compute norms
+        norm_l2_sq = 0.0
+        norm_l1 = 0.0
+        norm_inf = 0.0
+
+        for i in range(len(g)):
+            abs_g = abs(g[i])
+            norm_l2_sq += abs_g * abs_g
+            norm_l1 += abs_g
+            if abs_g > norm_inf:
+                norm_inf = abs_g
+
+        # Avoid division by zero
+        if norm_l1 < 1e-12 or norm_inf < 1e-12:
+            return 0.0
+
+        c2 = norm_l2_sq / (norm_l1 * norm_inf)
+        return c2
+
+    @staticmethod
+    def uniform_initialization(n):
+        """Initialize with uniform step heights"""
+        return [1.0] * n
+
+    @staticmethod
+    def alternating_initialization(n):
+        """Initialize with alternating high/low segments"""
+        f = []
+        segment_length = max(1, n // 8)
+        for i in range(0, n, segment_length):
+            if i // segment_length % 2 == 0:
+                f.extend([1.0] * min(segment_length, n - i))
+            else:
+                f.extend([0.1] * min(segment_length, n - i))
+        return f
+
+    @staticmethod
+    def gaussian_weighted_initialization(n):
+        """Initialize with Gaussian-weighted alternating pattern"""
+        # Create alternating high/low segments
+        f = []
+        segment_length = max(1, n // 8)
+
+        for i in range(0, n, segment_length):
+            if i // segment_length % 2 == 0:
+                f.extend([1.0] * min(segment_length, n - i))
+            else:
+                f.extend([0.1] * min(segment_length, n - i))
+
+        # Apply Gaussian weighting to smooth transitions
+        if len(f) > 0:
+            f = np.array(f)
+            f = np.clip(f, 0, 10.0)
+
+            # Apply Gaussian smoothing kernel
+            kernel_size = min(5, len(f)//4)
+            if kernel_size > 1:
+                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+                kernel = kernel / np.sum(kernel)
+                f = np.convolve(f, kernel, mode='same')
+
+            # Ensure all values are non-negative
+            f = np.maximum(f, 0)
+
+        return f.tolist()
+
+    @staticmethod
+    def mixed_initialization(n):
+        """Mix of different initialization strategies"""
+        # Use uniform initialization for half the elements
+        half_n = n // 2
+        f = [1.0] * half_n
+
+        # Add alternating pattern for the rest
+        remaining = n - half_n
+        if remaining > 0:
+            alt_pattern = StepFunctionOptimizer.alternating_initialization(remaining)
+            f.extend(alt_pattern)
+
+        # Apply Gaussian weighting
+        f = np.array(f)
+        f = np.clip(f, 0, 10.0)
+
+        # Apply Gaussian smoothing kernel
+        kernel_size = min(5, len(f)//4)
+        if kernel_size > 1:
+            kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/3)**2))
+            kernel = kernel / np.sum(kernel)
+            f = np.convolve(f, kernel, mode='same')
+
+        # Ensure all values are non-negative
+        f = np.maximum(f, 0)
+
+        return f.tolist()
+
+    def initialize_population(self, n, popsize):
+        """Generate diverse initial population with multiple strategies"""
+        population = []
+
+        # Add different initialization strategies
+        strategies = [
+            self.uniform_initialization,
+            self.alternating_initialization,
+            self.gaussian_weighted_initialization,
+            self.mixed_initialization
+        ]
+
+        # Add each strategy multiple times with noise
+        for i in range(popsize):
+            strategy_idx = i % len(strategies)
+            strategy = strategies[strategy_idx]
+
+            # Generate individual
+            individual = strategy(n)
+
+            # Add noise to break symmetry
+            noise = np.random.normal(0, 0.05, len(individual))
+            individual = np.maximum(np.array(individual) + noise, 0)
+
+            population.append(individual.tolist())
+
+        return population
+
+    def evaluate_function(self, f):
+        """Evaluate the function and return C2 value with error handling"""
+        try:
+            if len(f) < 2:
+                return 0.0
+
+            # Convert to numpy array for fast computation
+            f_array = np.array(f)
+
+            # Ensure non-negativity
+            f_array = np.maximum(f_array, 0)
+
+            # Compute C2
+            c2_value = self.compute_c2_numba(f_array)
+            return c2_value
+
+        except Exception as e:
+            warnings.warn(f"Evaluation failed: {str(e)}")
+            return 0.0
+
+    def objective_function(self, x):
+        """Objective function to minimize (negative C2)"""
+        # x contains the step heights
+        # Need to ensure non-negativity
+        f = np.maximum(x, 0)
+        c2 = self.evaluate_function(f)
+        return -c2  # Negative because we want to maximize
+
+    def adaptive_differential_evolution(self, bounds, maxiter, popsize, seed, init_pop=None):
+        """Run differential evolution with adaptive parameters"""
+        try:
+            # Try with different settings based on popsize
+            if popsize <= 10:
+                # Small population - fewer iterations
+                result = differential_evolution(
+                    self.objective_function,
+                    bounds,
+                    maxiter=min(maxiter, 20),
+                    popsize=popsize,
+                    seed=seed,
+                    strategy='best1bin',
+                    init=init_pop,
+                    disp=False,
+                    atol=1e-6,
+                    rtol=1e-6
+                )
+            elif popsize <= 20:
+                # Medium population - normal settings
+                result = differential_evolution(
+                    self.objective_function,
+                    bounds,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    seed=seed,
+                    strategy='best1bin',
+                    init=init_pop,
+                    disp=False,
+                    atol=1e-6,
+                    rtol=1e-6
+                )
+            else:
+                # Large population - more iterations
+                result = differential_evolution(
+                    self.objective_function,
+                    bounds,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    seed=seed,
+                    strategy='best1bin',
+                    init=init_pop,
+                    disp=False,
+                    atol=1e-6,
+                    rtol=1e-6
+                )
+
+            return result
+        except Exception:
+            # Fallback
+            try:
+                return differential_evolution(
+                    self.objective_function,
+                    bounds,
+                    maxiter=maxiter,
+                    popsize=min(popsize, 10),
+                    seed=seed,
+                    strategy='best1bin',
+                    disp=False,
+                    atol=1e-6,
+                    rtol=1e-6
+                )
+            except Exception:
+                return None
+
+    def multi_start_optimization(self, n, max_time_remaining):
+        """Perform multi-start optimization with parallel execution"""
+        current_best_c2 = 0.0
+        current_best_f = None
+
+        # Determine how many starts we can afford with time budget
+        max_starts = min(10, int(max_time_remaining * 0.05))
+        if max_starts <= 0:
+            max_starts = 1
+
+        # Create partial function with fixed n
+        partial_optimize = partial(self.single_optimization, n=n)
+
+        # Use parallel processing for multiple starts
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max_starts)) as executor:
+                futures = [executor.submit(partial_optimize) for _ in range(max_starts)]
+                results = [future.result() for future in futures if future.result() is not None]
+        except Exception:
+            # Fallback to sequential if parallel fails
+            results = []
+            for _ in range(max_starts):
+                result = self.single_optimization(n)
+                if result is not None:
+                    results.append(result)
+
+        # Find best among all starts
+        for c2, f in results:
+            if c2 > current_best_c2:
+                current_best_c2 = c2
+                current_best_f = f
+
+        return current_best_c2, current_best_f
+
+    def single_optimization(self, n, seed_offset=0):
+        """Single optimization run with specific parameters"""
+        try:
+            # Generate diverse initial population
+            popsize = min(20, max(10, n // 50))
+            maxiter = min(50, max(20, n // 10))
+
+            initial_population = self.initialize_population(n, popsize)
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Run differential evolution
+            de_result = self.adaptive_differential_evolution(
+                bounds,
+                maxiter,
+                popsize,
+                self.seed + seed_offset,
+                initial_population
+            )
+
+            if de_result is not None and de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -self.objective_function(f_opt)
+
+                return c2_value, f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Single optimization failed: {str(e)}")
+
+        return None
+
+    def construct_function(self) -> list[float]:
+        """Main function to construct step-function with high C2 value"""
+        # Set seed for reproducibility
+        np.random.seed(self.seed)
+
+        # Initialize tracking variables
+        best_c2 = 0.0
+        best_f = []
+
+        # Try different configurations to find the best one
+        configurations = [
+            100,   # Small configuration for quick testing
+            500,   # Medium configuration
+            1000,  # Large configuration
+            2000,  # Extra large configuration
+        ]
+
+        start_time = time.time()
+        max_time_remaining = self.max_time * 0.9
+
+        # Multi-start optimization for each configuration
+        for n in configurations:
+            if time.time() - start_time > max_time_remaining:
+                break
+
+            try:
+                # Calculate remaining time for this configuration
+                remaining_time_for_config = max_time_remaining - (time.time() - start_time)
+                if remaining_time_for_config < 5:
+                    break
+
+                # Perform multi-start optimization
+                c2_value, f_opt = self.multi_start_optimization(n, remaining_time_for_config)
+
+                if c2_value > best_c2:
+                    best_c2 = c2_value
+                    best_f = f_opt
+
+            except Exception as e:
+                warnings.warn(f"Configuration {n} failed: {str(e)}")
+                continue
+
+        # If nothing worked, fallback to sophisticated initialization
+        if len(best_f) == 0:
+            # Try multiple sizes with sophisticated initialization
+            for n in [500, 1000, 2000]:
+                try:
+                    # Try different initialization strategies
+                    strategies = [
+                        self.uniform_initialization,
+                        self.alternating_initialization,
+                        self.gaussian_weighted_initialization,
+                        self.mixed_initialization
+                    ]
+
+                    best_strategy_c2 = 0.0
+                    best_strategy_f = None
+
+                    for strategy in strategies:
+                        f_strategy = strategy(n)
+                        c2_strategy = self.evaluate_function(f_strategy)
+
+                        if c2_strategy > best_strategy_c2:
+                            best_strategy_c2 = c2_strategy
+                            best_strategy_f = f_strategy
+
+                    if best_strategy_c2 > best_c2:
+                        best_c2 = best_strategy_c2
+                        best_f = best_strategy_f
+
+                except Exception as e:
+                    warnings.warn(f"Fallback initialization {n} failed: {str(e)}")
+                    continue
+
+        # Final safety check - if still no good solution, use uniform distribution
+        if len(best_f) == 0:
+            n = 500
+            best_f = [1.0] * n
+            best_c2 = self.evaluate_function(best_f)
+
+        return best_f
+
+# Main execution function
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using optimization."""
+    optimizer = StepFunctionOptimizer(max_time=90)
+    return optimizer.construct_function()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,257 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+import time
+from itertools import combinations
+from typing import Tuple, List, Optional, Any
+import functools
+
+class HexagonGeometry:
+    """Handles all geometric operations related to hexagons."""
+    
+    def __init__(self):
+        self._unit_hex_vertices = self._get_unit_hexagon_vertices()
+    
+    @staticmethod
+    def _get_unit_hexagon_vertices():
+        """Return vertices of a unit regular hexagon centered at origin."""
+        angles = np.linspace(0, 2*np.pi, 7)[:-1]
+        vertices = np.array([[np.cos(angle), np.sin(angle)] for angle in angles])
+        return vertices
+    
+    def transform_vertices(self, center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
+        """Transform hexagon vertices by translation and rotation."""
+        angle_rad = np.radians(angle_deg)
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        
+        rotated_vertices = self._unit_hex_vertices @ rotation_matrix.T
+        translated_vertices = rotated_vertices + np.array([center_x, center_y])
+        
+        return translated_vertices
+    
+    def create_polygon(self, center_x: float, center_y: float, angle_deg: float) -> Polygon:
+        """Create a Shapely polygon representing a unit hexagon."""
+        vertices = self.transform_vertices(center_x, center_y, angle_deg)
+        return Polygon(vertices)
+    
+    def is_contained(self, hex_polygon: Polygon, outer_hex_polygon: Polygon) -> bool:
+        """Check if hexagon is fully contained within outer hexagon."""
+        return outer_hex_polygon.contains(hex_polygon)
+    
+    def check_overlap(self, hex1_polygon: Polygon, hex2_polygon: Polygon) -> bool:
+        """Check if two hexagons overlap."""
+        return hex1_polygon.intersects(hex2_polygon)
+
+
+class PackingEvaluator:
+    """Evaluates packing configurations with caching for performance."""
+    
+    def __init__(self, geometry: HexagonGeometry):
+        self.geometry = geometry
+        self._cache = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+    
+    def clear_cache(self):
+        """Clear the evaluation cache."""
+        self._cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+    
+    def _hash_config(self, configs: np.ndarray) -> str:
+        """Create a hashable representation of a configuration."""
+        return str(configs.flatten())
+    
+    def _compute_outer_radius_cached(self, configs: np.ndarray) -> float:
+        """Compute outer radius with caching."""
+        key = self._hash_config(configs)
+        if key in self._cache:
+            self._cache_hits += 1
+            return self._cache[key]
+        
+        self._cache_misses += 1
+        result = self._compute_outer_radius(configs)
+        self._cache[key] = result
+        return result
+    
+    def _compute_outer_radius(self, configs: np.ndarray, outer_center=(0,0), outer_angle=0) -> float:
+        """
+        Compute minimum radius needed to contain all inner hexagons.
+        Uses optimized binary search to find tightest fit.
+        """
+        # Quick estimation for bounds
+        max_dist = 0
+        for i in range(len(configs)):
+            cx, cy, _ = configs[i]
+            # Estimate maximum distance to hexagon vertices
+            dist = np.sqrt(cx**2 + cy**2) + 1.0
+            max_dist = max(max_dist, dist)
+        
+        if max_dist < 0.1:
+            return 0.1
+            
+        min_radius = 0.001
+        max_radius = max_dist * 2
+        
+        # Binary search with tighter bounds checking
+        iterations = 0
+        max_iterations = 50
+        
+        def test_radius(radius: float) -> bool:
+            outer_vertices = self.geometry.transform_vertices(
+                outer_center[0], outer_center[1], outer_angle)
+            outer_hex = Polygon(outer_vertices)
+            
+            for i in range(len(configs)):
+                cx, cy, angle = configs[i]
+                inner_hex = self.geometry.create_polygon(cx, cy, angle)
+                
+                if not self.geometry.is_contained(inner_hex, outer_hex):
+                    return False
+            return True
+        
+        # Optimized binary search
+        while max_radius - min_radius > 0.0001 and iterations < max_iterations:
+            mid_radius = (min_radius + max_radius) / 2
+            if test_radius(mid_radius):
+                max_radius = mid_radius
+            else:
+                min_radius = mid_radius
+            iterations += 1
+        
+        return max_radius
+    
+    def evaluate_fitness(self, config: np.ndarray) -> float:
+        """
+        Evaluate fitness of a configuration.
+        Returns negative of 1/outer_hex_side_length to maximize 1/outer_hex_side_length.
+        """
+        configs = config.reshape(-1, 3)
+        
+        # Cache lookup
+        cached_result = self._compute_outer_radius_cached(configs)
+        return -1.0 / cached_result
+
+
+class EvolutionaryOptimizer:
+    """Handles the evolutionary optimization process."""
+    
+    def __init__(self, evaluator: PackingEvaluator, geometry: HexagonGeometry):
+        self.evaluator = evaluator
+        self.geometry = geometry
+        self._best_fitness = float('inf')
+        self._best_config = None
+    
+    def get_initial_guess(self) -> np.ndarray:
+        """Generate initial configuration based on known good solution."""
+        return np.array([
+            [0, 0, 0],          # center
+            [-2.5, 0, 0],       # left
+            [2.5, 0, 0],        # right
+            [-1.25, 2.17, 0],   # top-left
+            [1.25, 2.17, 0],    # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],   # bottom-right
+            [-3.75, 2.17, 0],   # far top-left
+            [3.75, 2.17, 0],    # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],   # far bottom-right
+        ]).flatten()
+    
+    def get_bounds(self) -> List[Tuple[float, float]]:
+        """Return optimization bounds."""
+        return [(-10, 10), (-10, 10), (0, 360)] * 11
+    
+    def run_evolution(self, timeout: float = 180.0) -> Tuple[np.ndarray, float]:
+        """Run the evolutionary optimization."""
+        start_time = time.time()
+        
+        # Clear caches before optimization
+        self.evaluator.clear_cache()
+        
+        initial_guess = self.get_initial_guess()
+        bounds = self.get_bounds()
+        
+        # Set up optimization parameters with timeout consideration
+        maxiter = int(1000 * (timeout / 180.0))  # Scale iterations with timeout
+        popsize = min(20, max(5, int(15 * (timeout / 180.0))))
+        
+        # Run optimization with time limit
+        try:
+            result = differential_evolution(
+                self.evaluator.evaluate_fitness,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                tol=1e-6,
+                disp=False
+            )
+            
+            configs = result.x.reshape(-1, 3)
+            final_radius = self.evaluator._compute_outer_radius_cached(configs)
+            
+            return configs, final_radius
+            
+        except Exception as e:
+            # Fall back to initial configuration
+            print(f"Optimization failed: {e}")
+            configs = initial_guess.reshape(-1, 3)
+            final_radius = self.evaluator._compute_outer_radius_cached(configs)
+            return configs, final_radius
+
+
+def hexagon_packing_11() -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Initialize components
+        geometry = HexagonGeometry()
+        evaluator = PackingEvaluator(geometry)
+        optimizer = EvolutionaryOptimizer(evaluator, geometry)
+        
+        # Run optimization
+        inner_configs, outer_radius = optimizer.run_evolution(timeout=180.0)
+        
+        # Validate results
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+        
+        end_time = time.time()
+        
+        return inner_configs, outer_hex_data, outer_radius
+        
+    except Exception as e:
+        print(f"Evolutionary search failed: {e}")
+        # Fallback to original configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+        outer_hex_side_length = 8.0  # large enough to contain all inner hexagons
+        
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

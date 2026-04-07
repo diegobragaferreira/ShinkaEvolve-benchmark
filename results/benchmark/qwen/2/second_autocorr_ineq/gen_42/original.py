@@ -1,0 +1,170 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+import random
+from deap import base, creator, tools, algorithms
+import math
+
+def compute_autoconvolution_norms(f_values: list[float]) -> tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation using piecewise linear integration.
+    """
+    # Convert to numpy array for easier manipulation
+    f = np.array(f_values)
+
+    # Create step function on [-1/4, 1/4] with equal spacing
+    n_steps = len(f)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step width
+    dx = 0.5 / n_steps
+
+    # Compute autoconvolution using discrete convolution
+    g = np.convolve(f, f, mode='full')
+    # Trim g to the correct size (this accounts for the convolution)
+    g = g[len(f)-1:2*len(f)-1]
+
+    # Compute L2 norm squared using piecewise linear integration
+    # For each pair of adjacent points, integrate quadratic function
+    g_sq = g**2
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        # Trapezoidal-like integration for quadratic function
+        # Using formula for integral of ax^2 + bx + c over [x0,x1]
+        # But here we approximate with piecewise linear segments
+        # So we use: (dx/3)(y0^2 + y0*y1 + y1^2)
+        y0, y1 = g[i], g[i+1]
+        norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+
+    # L1 norm (sum of absolute values)
+    norm_1 = np.sum(np.abs(g))
+
+    # Infinity norm
+    norm_inf = np.max(np.abs(g))
+
+    # Handle numerical edge cases
+    if norm_1 <= 1e-15:
+        norm_1 = 1e-15
+    if norm_inf <= 1e-15:
+        norm_inf = 1e-15
+
+    return norm_2_squared, norm_1, norm_inf
+
+def evaluate_individual(individual):
+    """Evaluate the fitness of an individual (function coefficients)"""
+    # Convert individual to function values
+    # individual contains amplitude and frequency pairs
+    n_steps = 1000  # Fixed number of steps for consistency
+    dx = 0.5 / n_steps
+
+    # Create frequency grid (harmonic frequencies)
+    max_freq = 20  # Limit to reasonable frequencies
+    frequencies = np.linspace(1, max_freq, len(individual)//2)
+
+    # Create function using sine/cosine basis functions
+    x = np.linspace(-0.25, 0.25, n_steps)
+    f = np.zeros(n_steps)
+
+    # Sum up sine and cosine components
+    for i in range(0, len(individual), 2):
+        amp = abs(individual[i])  # Ensure non-negative amplitude
+        freq = frequencies[i//2] if i//2 < len(frequencies) else frequencies[-1]
+        if i//2 % 2 == 0:
+            f += amp * np.sin(2 * np.pi * freq * x)
+        else:
+            f += amp * np.cos(2 * np.pi * freq * x)
+
+    # Ensure non-negative values and normalize
+    f = np.maximum(f, 0)
+    if np.sum(f) > 0:
+        f = f / np.sum(f) * 100  # Scale appropriately
+
+    # Compute norms
+    try:
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f.tolist())
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            return (0,)
+        c2 = norm_2_sq / (norm_1 * norm_inf)
+        return (c2,)
+    except Exception:
+        return (0,)
+
+def construct_function() -> list[float]:
+    """Construct step function using evolutionary spectral optimization."""
+
+    # Set up evolutionary algorithm
+    random.seed(42)
+    np.random.seed(42)
+
+    # Individual is a list of (amplitude, frequency) pairs
+    # We'll use 20 pairs (10 sine, 10 cosine components)
+    IND_SIZE = 20
+
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("attr_float", random.uniform, -10, 10)
+    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, n=IND_SIZE)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxBlend, alpha=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=2, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population
+    pop = toolbox.population(n=50)
+
+    # Run evolution for limited time
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("max", np.max)
+
+    # Run evolution for 20 generations (short timeout)
+    try:
+        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2,
+                                          ngen=20, stats=stats, verbose=False)
+    except:
+        # Fallback: use a simple constructed function
+        pass
+
+    # Get best individual
+    best_ind = tools.selBest(pop, 1)[0] if pop else []
+
+    # Convert back to function representation
+    n_steps = 1000
+    dx = 0.5 / n_steps
+    x = np.linspace(-0.25, 0.25, n_steps)
+    f = np.zeros(n_steps)
+
+    # Reconstruct function with best coefficients
+    if best_ind:
+        # Use the same reconstruction as in evaluation
+        max_freq = 20
+        frequencies = np.linspace(1, max_freq, len(best_ind)//2)
+
+        for i in range(0, len(best_ind), 2):
+            amp = abs(best_ind[i])
+            freq = frequencies[i//2] if i//2 < len(frequencies) else frequencies[-1]
+            if i//2 % 2 == 0:
+                f += amp * np.sin(2 * np.pi * freq * x)
+            else:
+                f += amp * np.cos(2 * np.pi * freq * x)
+    else:
+        # Fallback construction
+        f = np.ones(n_steps)
+
+    # Final processing
+    f = np.maximum(f, 0)
+    if np.sum(f) > 0:
+        f = f / np.sum(f) * 100
+
+    return f.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

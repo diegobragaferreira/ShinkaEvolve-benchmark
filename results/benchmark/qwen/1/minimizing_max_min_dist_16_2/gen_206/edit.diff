@@ -1,0 +1,347 @@
+--- a/original.py
++++ b/original.py
+@@ -1,206 +1,295 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
+ from scipy.optimize import differential_evolution, minimize
++import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+     
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum distance between all point pairs."""
+         if len(points) < 2:
+             return 0
+ 
+         # Compute pairwise distances with enhanced numerical stability
+         distance_matrix = squareform(pdist(points))
+         
+         # Set diagonal to infinity to exclude self-distances
+         np.fill_diagonal(distance_matrix, np.inf)
+         
+         # Get all finite distances (excluding NaN and inf values)
+         finite_distances = distance_matrix[np.isfinite(distance_matrix)]
+         
+         if len(finite_distances) == 0:
+             return 0
+ 
+         # Get min and max distances
+         dmin = np.min(finite_distances)
+         dmax = np.max(finite_distances)
+ 
+         # Avoid division by zero
+         if dmax == 0:
+             return 0
+ 
+         return dmin / dmax
+ 
+-    def generate_hexagonal_grid():
+-        """Generate a hexagonal grid arrangement."""
++    def generate_advanced_hexagonal_grid():
++        """Generate an advanced hexagonal grid arrangement with better packing."""
+         points = []
+         rows = 4
+         cols = 4
+         
+-        # Hexagonal packing parameters
+-        spacing_x = 1.0 / (cols - 1)
+-        spacing_y = np.sqrt(3) / 2 / (rows - 1)  # Height of equilateral triangle
++        # Calculate spacing for optimal hexagonal packing
++        spacing_x = 1.0 / (cols - 0.5)  # Adjusted spacing
++        spacing_y = np.sqrt(3) / 2 / (rows - 0.5)  # Height of equilateral triangle
+         
+         for i in range(rows):
+             for j in range(cols):
+-                x = j * spacing_x + (i % 2) * spacing_x / 2
++                # Offset odd rows for hexagonal arrangement
++                offset = 0.5 * (i % 2)
++                x = j * spacing_x + offset * spacing_x
+                 y = i * spacing_y
+-                points.append([x, y])
+-                
+-        return np.array(points)
++                
++                # Ensure we don't exceed bounds (add small padding)
++                if x <= 1.0 and y <= 1.0:
++                    points.append([x, y])
++                
++        # Convert to numpy array
++        points = np.array(points)
++        
++        # If we have fewer than 16 points, fill with random ones
++        if len(points) < 16:
++            extra_points = np.random.rand(16 - len(points), 2)
++            points = np.vstack([points, extra_points])
++        else:
++            points = points[:16]
++        
++        # Normalize to fit nicely in [0,1] x [0,1] with padding
++        x_min, y_min = np.min(points, axis=0)
++        x_max, y_max = np.max(points, axis=0)
++        
++        if x_max > x_min and y_max > y_min:
++            points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min) * 0.95 + 0.025
++            points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min) * 0.95 + 0.025
++        
++        return points
++
++    def generate_fibonacci_sphere_projection():
++        """Generate points using Fibonacci sphere projection for better uniformity."""
++        points_sphere = []
++        phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
++        
++        for i in range(16):
++            y = 1 - (i / float(16 - 1)) * 2  # y goes from 1 to -1
++            radius = math.sqrt(1 - y * y)  # radius at y
++            theta = phi * i
++            x = math.cos(theta) * radius
++            z = math.sin(theta) * radius
++            points_sphere.append([x, y, z])
++        
++        # Project to 2D using stereographic projection
++        points_2d = []
++        for x, y, z in points_sphere:
++            # Stereographic projection from south pole (0,0,-1)
++            w = 1 / (1 + z + 1e-12)  # Small epsilon to avoid division by zero
++            proj_x = x * w
++            proj_y = y * w
++            points_2d.append([proj_x, proj_y])
++        
++        points_2d = np.array(points_2d)
++        
++        # Normalize to unit square
++        x_min, y_min = np.min(points_2d, axis=0)
++        x_max, y_max = np.max(points_2d, axis=0)
++        
++        if x_max > x_min and y_max > y_min:
++            points_2d[:, 0] = (points_2d[:, 0] - x_min) / (x_max - x_min) * 0.9 + 0.05
++            points_2d[:, 1] = (points_2d[:, 1] - y_min) / (y_max - y_min) * 0.9 + 0.05
++        
++        return points_2d
+ 
+     def generate_initial_strategies():
+         """Generate multiple initial point configurations."""
+         strategies = {}
+         
+-        # Strategy 1: Hexagonal grid (primary)
+-        strategies['hex'] = generate_hexagonal_grid()
+-        
+-        # Strategy 2: Perturbed hexagonal grid
++        # Strategy 1: Advanced hexagonal grid (primary)
++        strategies['hex_adv'] = generate_advanced_hexagonal_grid()
++        
++        # Strategy 2: Fibonacci sphere projection
++        strategies['fibonacci'] = generate_fibonacci_sphere_projection()
++        
++        # Strategy 3: Perturbed hexagonal grid
+         np.random.seed(42)
+-        perturbed_hex = strategies['hex'] + np.random.normal(0, 0.02, strategies['hex'].shape)
++        perturbed_hex = strategies['hex_adv'] + np.random.normal(0, 0.015, strategies['hex_adv'].shape)
+         strategies['hex_perturbed'] = np.clip(perturbed_hex, 0, 1)
+         
+-        # Strategy 3: Regular grid with jitter
++        # Strategy 4: Regular grid with jitter
+         regular_grid = []
+         for i in range(4):
+             for j in range(4):
+                 x = (i + 0.5) / 4.0
+                 y = (j + 0.5) / 4.0
+                 regular_grid.append([x, y])
+         regular_grid = np.array(regular_grid)
+-        jittered_grid = regular_grid + np.random.normal(0, 0.01, regular_grid.shape)
++        jittered_grid = regular_grid + np.random.normal(0, 0.008, regular_grid.shape)
+         strategies['grid_jittered'] = np.clip(jittered_grid, 0, 1)
+         
+-        # Strategy 4: Golden spiral (better radial distribution)
++        # Strategy 5: Golden spiral with better distribution
+         indices = np.arange(16)
+         golden_angle = 2.399963229728653
+         angles = golden_angle * indices
+         # Use logarithmic distribution for better point spreading
+-        radii = np.log(indices + 1) / np.log(16)
++        radii = np.log(indices + 1) / np.log(16 + 1)  # Added 1 to prevent log(0)
+         golden_spiral = np.column_stack([
+             0.5 + 0.45 * radii * np.cos(angles),
+             0.5 + 0.45 * radii * np.sin(angles)
+         ])
+         strategies['spiral'] = np.clip(golden_spiral, 0, 1)
+         
+-        # Strategy 5: Random points with edge avoidance
++        # Strategy 6: Random with better centering
+         np.random.seed(123)
+-        random_points = np.random.rand(16, 2)
+-        strategies['random'] = np.clip(random_points, 0.05, 0.95)
++        random_points = np.random.rand(16, 2) * 0.9 + 0.05  # Centered in [0.05, 0.95]
++        strategies['random_centered'] = random_points
+         
+         return strategies
+ 
+     def evaluate_all_strategies(strategies):
+         """Evaluate all initial strategies and return the best one."""
+         best_strategy = None
+         best_ratio = 0
+         
+         for name, points in strategies.items():
+             ratio = compute_min_max_ratio(points)
+             if ratio > best_ratio:
+                 best_ratio = ratio
+                 best_strategy = points.copy()
+                 
+         return best_strategy, best_ratio
+ 
+     def robust_optimization(initial_points, max_evaluations=1000):
+-        """Perform robust optimization with multiple strategies."""
++        """Perform robust optimization with multiple strategies and fallbacks."""
+         # Flatten for optimization
+         x0 = initial_points.flatten()
+         
+-        # Define bounds for each coordinate (0 to 1)
+-        bounds = [(0, 1) for _ in range(32)]
++        # Define bounds for each coordinate (0 to 1) with small epsilon padding
++        bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+         
+         try:
+-            # First aggressive differential evolution with good parameters
++            # First aggressive differential evolution with better parameters
+             de_result = differential_evolution(
+                 lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
+                 bounds,
+-                maxiter=max_evaluations // 10,
+-                popsize=20,
+-                mutation=(0.5, 1),
+-                recombination=0.7,
++                maxiter=max_evaluations // 12,
++                popsize=30,  # Increased population size
++                mutation=(0.7, 1.0),  # Adaptive mutation
++                recombination=0.8,  # Higher recombination rate
+                 seed=42,
+                 disp=False,
+-                tol=1e-8,
++                tol=1e-10,  # Tighter tolerance
+                 strategy='best1bin'
+             )
+             
+-            # Try local refinement with L-BFGS-B
++            # Try local refinement with multiple methods in order of preference
+             if de_result.success:
++                # Try L-BFGS-B first (most efficient for smooth functions)
+                 refined_result = minimize(
+                     lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
+                     de_result.x,
+                     method='L-BFGS-B',
+                     bounds=bounds,
+-                    options={'ftol': 1e-12, 'gtol': 1e-12},
+-                    tol=1e-12
++                    options={'ftol': 1e-14, 'gtol': 1e-14, 'maxiter': 1000},
++                    tol=1e-14
+                 )
+                 
+                 if refined_result.success:
+                     final_points = refined_result.x.reshape(-1, 2)
+                     final_points = np.clip(final_points, 0, 1)
+                     return final_points
+                     
+-            # If local refinement fails, return DE result
++                # Fallback to SLSQP if L-BFGS-B fails
++                refined_result = minimize(
++                    lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
++                    de_result.x,
++                    method='SLSQP',
++                    bounds=bounds,
++                    options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500}
++                )
++                
++                if refined_result.success:
++                    final_points = refined_result.x.reshape(-1, 2)
++                    final_points = np.clip(final_points, 0, 1)
++                    return final_points
++            
++            # If local refinement fails, return DE result with bounds checking
+             final_points = de_result.x.reshape(-1, 2)
+             final_points = np.clip(final_points, 0, 1)
+             return final_points
+             
+-        except Exception:
++        except Exception as e:
+             # If all else fails, return the initial points
+             return initial_points
++
++    def adaptive_perturbation(base_points, iteration=0):
++        """Apply adaptive perturbations based on optimization stage."""
++        perturbed = base_points.copy()
++        
++        # Different noise levels for different optimization stages
++        noise_levels = [0.02, 0.015, 0.01, 0.005]
++        noise_level = noise_levels[min(iteration, len(noise_levels)-1)]
++        
++        # Add noise with some correlation to maintain structure
++        noise = np.random.normal(0, noise_level, base_points.shape)
++        perturbed += noise
++        
++        # Ensure bounds
++        perturbed = np.clip(perturbed, 0, 1)
++        
++        return perturbed
+ 
+     # Generate initial strategies
+     strategies = generate_initial_strategies()
+     
+     # Find the best initial configuration
+     best_initial, initial_ratio = evaluate_all_strategies(strategies)
+     
+     # Initialize best results
+     best_points = best_initial.copy()
+     best_ratio = initial_ratio
+     
+-    # Multi-start optimization with different initial variations
+-    for restart in range(5):
+-        # Generate new variation of the initial points
+-        np.random.seed(restart + 1000)
+-        perturbed_points = best_initial.copy()
+-        noise_level = 0.03 + restart * 0.005  # Gradually increasing noise
+-        perturbed_points += np.random.normal(0, noise_level, best_initial.shape)
+-        perturbed_points = np.clip(perturbed_points, 0, 1)
++    # Multi-start optimization with adaptive strategies
++    for restart in range(7):  # Increase restarts for better exploration
++        # Generate new variation of the initial points with adaptive perturbation
++        perturbed_points = adaptive_perturbation(best_initial, restart)
+         
+         # Optimize this variant
+-        optimized_points = robust_optimization(perturbed_points, max_evaluations=500)
++        optimized_points = robust_optimization(perturbed_points, max_evaluations=400)
+         optimized_ratio = compute_min_max_ratio(optimized_points)
+         
+         if optimized_ratio > best_ratio:
+             best_ratio = optimized_ratio
+             best_points = optimized_points.copy()
+     
+-    # Final optimization on the best configuration found
+-    final_points = robust_optimization(best_points, max_evaluations=300)
++    # Final optimization on the best configuration found with aggressive settings
++    final_points = robust_optimization(best_points, max_evaluations=500)
+     final_ratio = compute_min_max_ratio(final_points)
+     
+-    # One final refinement attempt
++    # One final refinement attempt with aggressive parameters
+     np.random.seed(9999)
+-    last_attempt = final_points + np.random.normal(0, 0.01, final_points.shape)
++    last_attempt = final_points + np.random.normal(0, 0.008, final_points.shape)
+     last_attempt = np.clip(last_attempt, 0, 1)
+-    refined_final = robust_optimization(last_attempt, max_evaluations=200)
++    refined_final = robust_optimization(last_attempt, max_evaluations=300)
+     refined_ratio = compute_min_max_ratio(refined_final)
+     
+     if refined_ratio > final_ratio:
+         return refined_final
+     else:
+         return final_points
+ 
+ # EVOLVE-BLOCK-END

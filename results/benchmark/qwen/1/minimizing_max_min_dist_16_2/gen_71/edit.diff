@@ -1,0 +1,174 @@
+--- a/original.py
++++ b/original.py
+@@ -1,77 +1,145 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist, squareform
++from scipy.spatial.distance import pdist
++import time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     def objective(x):
+         # Reshape x into points array
+         points = x.reshape(-1, 2)
+ 
+         # Calculate pairwise distances
+         distances = pdist(points)
+ 
+         # Return negative ratio (since we want to maximize ratio, we minimize its negative)
+-        if len(distances) == 0:
+-            return 0
++        if len(distances) == 0 or np.allclose(distances, 0):
++            return float('inf')  # Worst possible case
+ 
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+ 
+         # Avoid division by zero
+         if max_dist == 0:
+             return float('inf')
+ 
+         return -min_dist / max_dist
+ 
+     def constraint_func(x):
+-        # Ensure points are within [0,1] x [0,1]
++        # Ensure points are within [eps,1-eps] x [eps,1-eps] for numerical stability
++        eps = 1e-8
+         points = x.reshape(-1, 2)
+         constraints = []
+ 
+-        # x coordinates in [0,1]
+-        constraints.extend([points[:, 0].min() - 0])  # x_min >= 0
+-        constraints.extend([1 - points[:, 0].max()])  # x_max <= 1
++        # x coordinates in [eps, 1-eps]
++        constraints.append(points[:, 0].min() - eps)  # x_min >= eps
++        constraints.append(1 - eps - points[:, 0].max())  # x_max <= 1-eps
+ 
+-        # y coordinates in [0,1]
+-        constraints.extend([points[:, 1].min() - 0])  # y_min >= 0
+-        constraints.extend([1 - points[:, 1].max()])  # y_max <= 1
++        # y coordinates in [eps, 1-eps]
++        constraints.append(points[:, 1].min() - eps)  # y_min >= eps
++        constraints.append(1 - eps - points[:, 1].max())  # y_max <= 1-eps
+ 
+         return np.array(constraints)
+ 
+-    # Initialize points randomly but within bounds
+-    np.random.seed(42)
+-    initial_points = np.random.rand(16, 2)
++    def generate_hexagonal_initial():
++        """Generate initial configuration based on hexagonal packing principles"""
++        # Create a more structured initial configuration that approximates optimal distribution
++        np.random.seed(42)
++
++        # Use a modified hexagonal grid pattern
++        rows = 4
++        cols = 4
++
++        points = []
++        for i in range(rows):
++            for j in range(cols):
++                if len(points) >= 16:
++                    break
++                # Hexagonal offset pattern
++                x = 0.1 + 0.8 * j / (cols - 1) if cols > 1 else 0.5
++                y = 0.1 + 0.8 * i / (rows - 1) if rows > 1 else 0.5
++                if i % 2 == 1:  # Offset odd rows
++                    x += 0.4 / (cols - 1) if cols > 1 else 0.2
++                points.append([x, y])
++
++        # Convert to numpy array and apply small random jitter to break symmetry
++        points = np.array(points[:16])
++        points += np.random.normal(0, 0.01, points.shape)
++        points = np.clip(points, 0, 1)
++
++        return points
++
++    def bounded_objective(x):
++        # Boundary checking with clamping to safe bounds
++        eps = 1e-8
++        points = np.clip(x.reshape(-1, 2), eps, 1-eps).flatten()
++        return objective(points)
++
++    # Phase 1: Generate a better initial configuration
++    initial_points = generate_hexagonal_initial()
+ 
+     # Flatten for optimization
+     x0 = initial_points.flatten()
+ 
+-    # Define bounds for each coordinate (0 to 1)
+-    bounds = [(0, 1) for _ in range(32)]
++    # Define bounds for each coordinate (safe bounds to avoid numerical issues)
++    bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+ 
+-    # Use SLSQP optimizer which handles constraints well
+-    result = minimize(
+-        objective,
+-        x0,
+-        method='SLSQP',
+-        bounds=bounds,
+-        constraints={'type': 'ineq', 'fun': constraint_func},
+-        options={'maxiter': 1000, 'ftol': 1e-8}
+-    )
++    # Phase 2: Global optimization with SLSQP (first refinement)
++    try:
++        result = minimize(
++            bounded_objective,
++            x0,
++            method='SLSQP',
++            bounds=bounds,
++            constraints={'type': 'ineq', 'fun': constraint_func},
++            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8}
++        )
+ 
+-    # Extract optimized points
+-    optimized_points = result.x.reshape(-1, 2)
++        if result.success:
++            x0 = result.x
++        else:
++            # If SLSQP fails, try L-BFGS-B as fallback
++            lbfgs_result = minimize(
++                bounded_objective,
++                x0,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 500}
++            )
++            if lbfgs_result.success:
++                x0 = lbfgs_result.x
++    except Exception as e:
++        print(f"First optimization failed: {e}")
++        # Continue with original initialization
++
++    # Phase 3: Additional refinement with L-BFGS-B
++    try:
++        final_result = minimize(
++            bounded_objective,
++            x0,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10}
++        )
++
++        if final_result.success:
++            x0 = final_result.x
++    except Exception as e:
++        print(f"Final optimization failed: {e}")
++
++    # Extract optimized points and ensure they are within bounds
++    optimized_points = np.clip(x0.reshape(-1, 2), 1e-8, 1-1e-8)
+ 
+     return optimized_points
+ 
+ 
+ # EVOLVE-BLOCK-END

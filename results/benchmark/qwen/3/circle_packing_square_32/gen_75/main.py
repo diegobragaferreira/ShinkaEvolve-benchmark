@@ -1,0 +1,204 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+from scipy.optimize import differential_evolution
+import random
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+    n = 32
+
+    # Improved hexagonal grid initialization
+    def initialize_hexagonal_grid():
+        # Create a more optimized hexagonal grid pattern
+        rows = int(math.sqrt(n)) + 1
+        cols = int(math.ceil(n / rows)) + 1
+
+        # Calculate more precise spacing
+        spacing_x = 1.0 / cols
+        spacing_y = 1.0 / rows
+
+        # More conservative hexagon radius to ensure good packing
+        hex_radius = min(spacing_x, spacing_y) * 0.35
+
+        circles = []
+
+        # Place circles in hexagonal pattern
+        for i in range(rows):
+            for j in range(cols):
+                if len(circles) >= n:
+                    break
+
+                # Offset every other row for hexagonal pattern
+                x_offset = (i % 2) * (spacing_x / 2)
+                x = (j * spacing_x) + x_offset + hex_radius
+                y = (i * spacing_y) + hex_radius
+
+                # Ensure it's within bounds
+                if x >= hex_radius and x <= 1 - hex_radius and y >= hex_radius and y <= 1 - hex_radius:
+                    circles.append([x, y, hex_radius])
+
+        # If we don't have enough circles, fill remaining with small radii
+        while len(circles) < n:
+            circles.append([0.5, 0.5, 0.02])
+
+        return np.array(circles[:n])
+
+    # Enhanced constraint checking
+    def check_constraints(circles):
+        """Check if all constraints are satisfied"""
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Check boundary constraints
+        left_ok = np.all(radii <= positions[:, 0])
+        right_ok = np.all(radii <= 1 - positions[:, 0])
+        bottom_ok = np.all(radii <= positions[:, 1])
+        top_ok = np.all(radii <= 1 - positions[:, 1])
+
+        if not (left_ok and right_ok and bottom_ok and top_ok):
+            return False
+
+        # Check overlap constraints with more efficient approach
+        if len(circles) >= 2:
+            # Use a more efficient overlap detection
+            dist_matrix = cdist(positions, positions)
+            overlap_matrix = dist_matrix < (radii.reshape(-1, 1) + radii.reshape(1, -1))
+            np.fill_diagonal(overlap_matrix, False)
+            if np.any(overlap_matrix):
+                return False
+
+        return True
+
+    # Adaptive optimization approach
+    def adaptive_optimize(circles):
+        """Apply adaptive optimization to improve the configuration"""
+        # First, try to expand radii using gradient-based approach
+        def objective(x_flat):
+            # Reshape back to circles
+            circles = x_flat.reshape(-1, 3)
+            # Negative because we want to maximize sum of radii
+            return -np.sum(circles[:, 2])
+
+        def constraint_func(x_flat):
+            circles = x_flat.reshape(-1, 3)
+            positions = circles[:, :2]
+            radii = circles[:, 2]
+
+            # Boundary constraints (return positive values for violation)
+            boundary_violations = []
+            boundary_violations.extend(np.maximum(0, radii - positions[:, 0]))      # Left
+            boundary_violations.extend(np.maximum(0, radii - (1 - positions[:, 0])))  # Right
+            boundary_violations.extend(np.maximum(0, radii - positions[:, 1]))      # Bottom
+            boundary_violations.extend(np.maximum(0, radii - (1 - positions[:, 1])))  # Top
+            boundary_violations.extend(np.maximum(0, -1))  # Placeholder for overlap constraint
+
+            return np.sum(boundary_violations)
+
+        # Use differential evolution for robust optimization
+        bounds = []
+        for i in range(n):
+            # x bounds
+            bounds.append((0.001, 0.999))
+            # y bounds
+            bounds.append((0.001, 0.999))
+            # radius bounds
+            bounds.append((0.001, 0.49))
+
+        try:
+            # Try a few rounds of optimization with different strategies
+            for _ in range(3):
+                result = differential_evolution(
+                    objective,
+                    bounds,
+                    maxiter=100,
+                    popsize=15,
+                    seed=42,
+                    disp=False,
+                    strategy='best1bin'
+                )
+
+                # Check if result is valid
+                optimized_circles = result.x.reshape(-1, 3)
+                if check_constraints(optimized_circles):
+                    return optimized_circles
+        except:
+            pass
+
+        return circles
+
+    # Main optimization loop with multiple refinement strategies
+    # Initialize with hexagonal grid
+    circles = initialize_hexagonal_grid()
+
+    # Try optimization first
+    optimized_circles = adaptive_optimize(circles)
+
+    # If optimization improved things, use it; otherwise proceed with iterative refinement
+    if check_constraints(optimized_circles) and np.sum(optimized_circles[:, 2]) > np.sum(circles[:, 2]):
+        circles = optimized_circles
+    else:
+        # Continue with iterative refinement but with smarter approach
+        max_iterations = 200
+        tolerance = 1e-6
+        step_size = 0.01
+        last_improvement = 0
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_sum = np.sum(circles[:, 2])
+
+            # Try to improve by increasing each radius in turn
+            new_circles = circles.copy()
+
+            # Randomize order to avoid systematic bias
+            indices = list(range(n))
+            random.shuffle(indices)
+
+            for i in indices:
+                test_circles = new_circles.copy()
+                test_circles[i, 2] = min(0.49, test_circles[i, 2] + step_size)
+
+                # Additional constraint checking for this specific change
+                test_circles[i, 2] = min(0.49, test_circles[i, 2])
+
+                # Check if this change violates constraints with all other circles
+                if check_constraints(test_circles):
+                    new_circles = test_circles
+                    improved = True
+                    last_improvement = iteration
+
+            # Update if we made progress
+            if improved:
+                circles = new_circles
+            else:
+                # Reduce step size if no improvement recently
+                if iteration - last_improvement > 10:
+                    step_size *= 0.9
+                if step_size < tolerance:
+                    break
+
+    # Final validation and fallback
+    if not check_constraints(circles):
+        # Try another approach if constraints are violated
+        circles = initialize_hexagonal_grid()
+        # Apply one more round of optimization
+        circles = adaptive_optimize(circles)
+
+    # Final check
+    if not check_constraints(circles):
+        # If we still have issues, return the hexagonal grid as fallback
+        return initialize_hexagonal_grid()
+
+    return circles
+
+# EVOLVE-BLOCK-END

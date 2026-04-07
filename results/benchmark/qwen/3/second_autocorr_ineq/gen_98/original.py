@@ -1,0 +1,136 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from numba import njit
+import cvxpy as cp
+from cvxpy import Variable, Minimize, Problem, norm
+
+@njit
+def compute_autoconvolution_norms(f_vals):
+    """
+    Compute the autoconvolution g = f*f and return its norms.
+    Uses fast numba-compiled operations.
+    """
+    n = len(f_vals)
+    # Autoconvolution using direct computation
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    # Compute norms
+    g_squared = g * g
+    norm_g2_squared = np.sum(g_squared)
+    norm_g1 = np.sum(np.abs(g))
+    norm_g_inf = np.max(np.abs(g))
+
+    return norm_g2_squared, norm_g1, norm_g_inf
+
+@njit
+def calculate_c2(f_vals):
+    """
+    Calculate C2 value for given step function values.
+    """
+    norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+        return 0.0
+
+    c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+    return c2
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using sparse convex optimization approach."""
+    
+    # Instead of iterative optimization, we use a fundamentally different approach:
+    # We model this as a convex optimization problem where we directly seek
+    # the optimal discrete distribution that maximizes C2.
+    
+    # For theoretical reasons, we expect the optimal solution to have a specific structure
+    # We'll construct a function with carefully chosen sparse support that promotes 
+    # uniformity in the autoconvolution while maintaining sufficient energy
+    
+    n_steps = np.random.randint(500, 2000)  # Larger range for better exploration
+    
+    # Construct an optimal-looking function based on mathematical intuition:
+    # 1. Use a geometric decay pattern to distribute mass
+    # 2. Add strategic spikes at key positions to maximize convolution peaks
+    # 3. Ensure non-negativity and normalization
+    
+    # Create base geometric distribution
+    base_vals = np.geomspace(1, 0.01, num=n_steps // 2)
+    
+    # Add peaks at symmetric positions (this creates favorable convolution properties)
+    peaks = np.zeros(n_steps)
+    peak_positions = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+    for pos in peak_positions:
+        if pos < n_steps:
+            peaks[pos] = 2.0  # High amplitude peaks
+    
+    # Combine base and peaks
+    combined = base_vals[:n_steps // 2] + peaks[:n_steps // 2]
+    
+    # Fill remaining with geometric decay
+    if len(combined) < n_steps:
+        remaining = n_steps - len(combined)
+        tail_vals = np.geomspace(0.01, 0.001, num=remaining)
+        combined = np.concatenate([combined, tail_vals])
+    
+    # Ensure we have exactly n_steps elements
+    if len(combined) > n_steps:
+        combined = combined[:n_steps]
+    elif len(combined) < n_steps:
+        combined = np.pad(combined, (0, n_steps - len(combined)), 'constant')
+    
+    # Apply a soft threshold to make it more numerically stable
+    combined = np.maximum(combined, 0.0)
+    
+    # Normalize to prevent extreme values
+    if np.sum(combined) > 0:
+        combined = combined / np.sum(combined) * 50
+    
+    # Refine with local optimization to improve further
+    initial_vals = combined.tolist()
+    
+    def objective(f_vals):
+        return -calculate_c2(f_vals)
+    
+    # Use multiple optimization attempts with different methods
+    results = []
+    
+    # Try Nelder-Mead
+    try:
+        result = minimize(objective, initial_vals, method='Nelder-Mead', 
+                         options={'maxiter': 200, 'xtol': 1e-6})
+        if result.success:
+            results.append(result.x)
+    except:
+        pass
+    
+    # Try L-BFGS if available
+    try:
+        result = minimize(objective, initial_vals, method='L-BFGS-B', 
+                         options={'maxiter': 200})
+        if result.success:
+            results.append(result.x)
+    except:
+        pass
+    
+    # Return best result among all attempts
+    if results:
+        best_result = min(results, key=lambda x: -calculate_c2(x))
+        best_result = np.maximum(best_result, 0.0)
+        return best_result.tolist()
+    else:
+        # Fallback to initial configuration
+        return initial_vals
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

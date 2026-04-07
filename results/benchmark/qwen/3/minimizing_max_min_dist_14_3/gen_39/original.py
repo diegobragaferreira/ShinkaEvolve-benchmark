@@ -1,0 +1,108 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist, squareform
+
+
+def fibonacci_sphere(n):
+    """Generate n points evenly distributed on a unit sphere using Fibonacci spiral method."""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n):
+        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+
+def min_max_ratio(points):
+    """Calculate the ratio of minimum to maximum pairwise distances."""
+    if len(points) < 2:
+        return 0
+
+    # Calculate pairwise distances
+    distances = pdist(points)
+
+    # Get min and max distances
+    d_min = np.min(distances)
+    d_max = np.max(distances)
+
+    # Avoid division by zero
+    if d_max == 0:
+        return 0
+
+    return d_min / d_max
+
+
+def objective_function(x_flat):
+    """Objective function to maximize the min/max distance ratio.
+
+    Args:
+        x_flat: Flattened array of point coordinates [x1, y1, z1, x2, y2, z2, ...]
+
+    Returns:
+        Negative of min/max ratio (since we minimize in scipy.optimize)
+    """
+    # Reshape flat array back to points
+    n_points = 14
+    points = x_flat.reshape((n_points, 3))
+
+    # Ensure points are within bounds [0, 1]^3
+    points = np.clip(points, 0, 1)
+
+    # Calculate min/max ratio
+    ratio = min_max_ratio(points)
+
+    # Return negative because we want to maximize (minimize negative)
+    return -ratio
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    # Start with Fibonacci sphere initialization for good spread
+    initial_points = fibonacci_sphere(14)
+
+    # Scale to unit cube [0,1]^3
+    initial_points = (initial_points + 1) / 2
+
+    # Flatten initial points for optimization
+    x0 = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(14 * 3)]
+
+    # Run differential evolution optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        seed=42,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        disp=False
+    )
+
+    # Extract optimized points
+    optimized_points = result.x.reshape((14, 3))
+
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

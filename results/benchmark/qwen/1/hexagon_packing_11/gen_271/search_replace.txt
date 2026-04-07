@@ -1,0 +1,242 @@
+<NAME>
+improve_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The current spatial indexing approach uses a simple KD-tree with basic distance thresholds, which may not be optimal for hexagon-hexagon overlap detection. I'll improve the spatial indexing by implementing a more sophisticated approach that leverages the specific properties of hexagons - their regular structure and known distances. This will reduce false positives in overlap detection and improve overall performance.
+
+The key improvements include:
+1. Using a more efficient spatial grid structure specifically designed for hexagon packing
+2. Implementing a better overlap detection strategy that takes advantage of hexagon geometry
+3. Adding early termination conditions in overlap checking
+4. Optimizing the distance calculations for hexagon-to-hexagon scenarios
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SolutionValidator:
+    """Validates hexagon packing solutions"""
+
+    def __init__(self, geometry: HexagonGeometry):
+        self.geometry = geometry
+
+    def is_contained_in_outer_hexagon(self, hexagon_vertices_list: np.ndarray,
+                                    outer_center: np.ndarray, outer_angle: float,
+                                    outer_radius: float) -> bool:
+        """Check if hexagon is fully contained in outer hexagon"""
+        outer_vertices = self.geometry.hexagon_vertices(outer_center, outer_angle, outer_radius)
+        outer_polygon = Polygon(outer_vertices)
+
+        for vertex in hexagon_vertices_list:
+            if not self.geometry.point_in_polygon(vertex, outer_polygon):
+                return False
+        return True
+
+    def check_overlap_fast(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast overlap check using polygon intersection"""
+        try:
+            poly1 = Polygon(hex1_vertices)
+            poly2 = Polygon(hex2_vertices)
+            return poly1.intersects(poly2)
+        except:
+            return False
+
+    def calculate_outer_hexagon_radius(self, inner_hex_data: np.ndarray,
+                                     outer_center: np.ndarray = np.array([0,0]),
+                                     outer_angle: float = 0) -> float:
+        """Calculate minimum radius needed for outer hexagon to contain all inner hexagons"""
+        max_dist = 0
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+
+            for vertex in vertices:
+                dist = np.linalg.norm(np.array(vertex) - np.array(outer_center))
+                max_dist = max(max_dist, dist)
+        return max_dist
+
+    def validate_solution(self, inner_hex_data: np.ndarray,
+                        outer_center: np.ndarray = np.array([0,0]),
+                        outer_angle: float = 0) -> bool:
+        """Validate solution: check containment and non-overlap"""
+        # Check containment first
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+
+            outer_radius = self.calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+            if not self.is_contained_in_outer_hexagon(vertices, outer_center, outer_angle, outer_radius):
+                return False
+
+        # Check overlaps efficiently using spatial indexing
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+            hex_polygons.append(Polygon(vertices))
+
+        # Use spatial index to speed up overlap checking
+        centroids = np.array([np.mean(vertices, axis=0) for vertices in [self.geometry.hexagon_vertices(
+            inner_hex_data[i][:2], np.radians(inner_hex_data[i][2]), self.geometry.unit_radius)
+            for i in range(len(inner_hex_data))]])
+        tree = cKDTree(centroids)
+        pairs = tree.query_pairs(r=self.geometry.unit_radius * 2.0, eps=0)
+
+        # Check actual overlaps for candidate pairs
+        for i, j in pairs:
+            if self.check_overlap_fast(hex_polygons[i].exterior.coords,
+                                     hex_polygons[j].exterior.coords):
+                return False
+
+        return True
+=======
+class SolutionValidator:
+    """Validates hexagon packing solutions"""
+
+    def __init__(self, geometry: HexagonGeometry):
+        self.geometry = geometry
+
+    def is_contained_in_outer_hexagon(self, hexagon_vertices_list: np.ndarray,
+                                    outer_center: np.ndarray, outer_angle: float,
+                                    outer_radius: float) -> bool:
+        """Check if hexagon is fully contained in outer hexagon"""
+        outer_vertices = self.geometry.hexagon_vertices(outer_center, outer_angle, outer_radius)
+        outer_polygon = Polygon(outer_vertices)
+
+        for vertex in hexagon_vertices_list:
+            if not self.geometry.point_in_polygon(vertex, outer_polygon):
+                return False
+        return True
+
+    def check_overlap_fast(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast overlap check using polygon intersection with early termination"""
+        try:
+            poly1 = Polygon(hex1_vertices)
+            poly2 = Polygon(hex2_vertices)
+
+            # Early termination: if bounding boxes don't intersect, no overlap possible
+            if not poly1.bounds or not poly2.bounds:
+                return False
+
+            # Check if bounding boxes intersect first (very fast)
+            bbox1 = poly1.bounds
+            bbox2 = poly2.bounds
+            if (bbox1[2] < bbox2[0] or bbox1[0] > bbox2[2] or
+                bbox1[3] < bbox2[1] or bbox1[1] > bbox2[3]):
+                return False
+
+            # Check if polygons actually intersect
+            return poly1.intersects(poly2)
+        except:
+            return False
+
+    def check_hexagon_overlap_direct(self, center1: np.ndarray, angle1: float,
+                                   center2: np.ndarray, angle2: float) -> bool:
+        """Direct overlap check using distance and geometric properties of hexagons"""
+        # Distance between centers
+        dist = np.linalg.norm(center1 - center2)
+
+        # For unit hexagons, they cannot overlap if distance > 2
+        if dist > 2.0:
+            return False
+
+        # If distance is less than the sum of apothems (sqrt(3)/2 ≈ 0.866) plus some buffer,
+        # there's a real chance of overlap
+        # But we're checking for unit hexagons (circumradius = 1), so they can touch at distance 2
+        # For proper overlap, distance should be < 2 (when they're not just touching)
+        # However, let's use a more reliable approach: use actual polygon check for candidates
+        return True  # Defer to polygon check for accuracy
+
+    def calculate_outer_hexagon_radius(self, inner_hex_data: np.ndarray,
+                                     outer_center: np.ndarray = np.array([0,0]),
+                                     outer_angle: float = 0) -> float:
+        """Calculate minimum radius needed for outer hexagon to contain all inner hexagons"""
+        max_dist = 0
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+
+            for vertex in vertices:
+                dist = np.linalg.norm(np.array(vertex) - np.array(outer_center))
+                max_dist = max(max_dist, dist)
+        return max_dist
+
+    def get_hexagon_bounding_box(self, center: np.ndarray, angle: float) -> tuple:
+        """Get axis-aligned bounding box for a hexagon"""
+        vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+        mins = np.min(vertices, axis=0)
+        maxs = np.max(vertices, axis=0)
+        return (mins[0], mins[1], maxs[0], maxs[1])
+
+    def validate_solution(self, inner_hex_data: np.ndarray,
+                        outer_center: np.ndarray = np.array([0,0]),
+                        outer_angle: float = 0) -> bool:
+        """Validate solution: check containment and non-overlap"""
+        # Check containment first
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+
+            outer_radius = self.calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+            if not self.is_contained_in_outer_hexagon(vertices, outer_center, outer_angle, outer_radius):
+                return False
+
+        # Check overlaps efficiently using improved spatial indexing
+        n = len(inner_hex_data)
+        hex_centers = np.array([inner_hex_data[i][:2] for i in range(n)])
+        hex_angles = np.array([np.radians(inner_hex_data[i][2]) for i in range(n)])
+
+        # Create spatial grid for overlap detection
+        # Use a grid cell size approximately equal to 2*unit_radius for efficiency
+        cell_size = 2.0
+        grid = {}
+
+        # Index all hexagons into spatial grid
+        for i in range(n):
+            center = hex_centers[i]
+            # Grid cell coordinates
+            grid_x = int(np.floor(center[0] / cell_size))
+            grid_y = int(np.floor(center[1] / cell_size))
+
+            if (grid_x, grid_y) not in grid:
+                grid[(grid_x, grid_y)] = []
+            grid[(grid_x, grid_y)].append(i)
+
+        # Check potential overlaps
+        for i in range(n):
+            center1 = hex_centers[i]
+            angle1 = hex_angles[i]
+
+            # Check nearby grid cells for potential overlaps
+            grid_x = int(np.floor(center1[0] / cell_size))
+            grid_y = int(np.floor(center1[1] / cell_size))
+
+            # Check 3x3 neighborhood
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    neighbor_key = (grid_x + dx, grid_y + dy)
+                    if neighbor_key in grid:
+                        for j in grid[neighbor_key]:
+                            if i != j:  # Don't compare with self
+                                center2 = hex_centers[j]
+                                angle2 = hex_angles[j]
+
+                                # Perform direct geometric check before expensive polygon operation
+                                if self.check_hexagon_overlap_direct(center1, angle1, center2, angle2):
+                                    # Now perform precise polygon intersection check
+                                    vertices1 = self.geometry.hexagon_vertices(center1, angle1, self.geometry.unit_radius)
+                                    vertices2 = self.geometry.hexagon_vertices(center2, angle2, self.geometry.unit_radius)
+                                    if self.check_overlap_fast(vertices1, vertices2):
+                                        return False  # Overlap detected
+
+        return True
+>>>>>>> REPLACE
+
+</DIFF>

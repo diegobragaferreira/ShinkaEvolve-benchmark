@@ -1,0 +1,189 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.fft import fft, ifft
+from scipy.signal import fftconvolve
+import time
+import math
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+def compute_c1_constant(sequence):
+    """Computes the C1 constant for a given sequence using FFT for efficiency."""
+    if len(sequence) == 0:
+        return float('inf') 
+    
+    a = np.array(sequence, dtype=float)
+    sum_a = np.sum(a)
+    
+    if sum_a < 0.01:
+        return float('inf')
+    
+    # Using FFT for convolution
+    conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+    conv = conv[:len(a)]
+    max_conv = np.max(conv)
+    n = len(a)
+    c1 = (2 * n * max_conv) / (sum_a ** 2)
+    return c1
+
+def compute_inverse_c1(sequence):
+    """Computes 1/C1 for maximizing."""
+    c1 = compute_c1_constant(sequence)
+    if c1 == float('inf') or c1 == 0:
+        return 0.0
+    return 1.0 / c1
+
+def compute_convolution_gradient(sequence):
+    """
+    Computes the gradient w.r.t. convolution effect.
+    Based on the fact that the gradient of convolution w.r.t. input
+    is the convolution of the derivative of the kernel with itself.
+    """
+    a = np.array(sequence, dtype=float)
+    n = len(a)
+    
+    if n < 1:
+        return np.zeros(n)
+        
+    sum_a = np.sum(a)
+    if sum_a < 1e-10:
+        return np.zeros(n)
+        
+    # Compute convolution
+    conv = fftconvolve(a, a, mode='full')[:2*n-1]
+    conv = conv[:n]
+    
+    # Find the maximum convolution value and its location
+    max_loc = np.argmax(conv)
+    max_val = conv[max_loc]
+    
+    # Create a mask for the maximum convolution location
+    mask = np.zeros(n)
+    mask[max_loc] = 1.0
+    
+    # Compute gradient of convolution w.r.t. sequence
+    # This approximates the effect of changing each element on the max convolution
+    grad = np.zeros(n)
+    for i in range(n):
+        # Simple approximation: change element i and recompute
+        a_copy = a.copy()
+        a_copy[i] += 1e-6  # Small perturbation
+        conv_perturbed = fftconvolve(a_copy, a_copy, mode='full')[:2*n-1]
+        conv_perturbed = conv_perturbed[:n]
+        grad[i] = (np.max(conv_perturbed) - max_val) / 1e-6
+    
+    return grad
+
+def gradient_ascent_update(sequence, learning_rate=0.01, max_iterations=100):
+    """
+    Performs gradient ascent on the inverse C1 to maximize it.
+    """
+    current_seq = np.array(sequence, dtype=float)
+    current_inv_c1 = compute_inverse_c1(current_seq)
+    best_seq = current_seq.copy()
+    best_inv_c1 = current_inv_c1
+    
+    for i in range(max_iterations):
+        # Compute gradient
+        grad = compute_convolution_gradient(current_seq)
+        
+        # Update sequence
+        current_seq += learning_rate * grad
+        
+        # Ensure non-negativity
+        current_seq = np.maximum(current_seq, 0)
+        
+        # Recompute inverse C1
+        current_inv_c1 = compute_inverse_c1(current_seq)
+        
+        # Track best
+        if current_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_inv_c1
+            best_seq = current_seq.copy()
+    
+    return best_seq.tolist(), best_inv_c1
+
+def generate_initial_sequence():
+    """
+    Generate a diverse set of initial sequences for exploration.
+    Combines several heuristic sequences.
+    """
+    # Generate random sequence
+    n = np.random.randint(100, 1000)
+    initial_seq = np.random.uniform(0, 1000, n)
+    
+    # Add a few structured patterns
+    if np.random.rand() < 0.5:
+        # Exponential decay
+        decay_factor = np.random.uniform(0.8, 0.99)
+        initial_seq = np.array([1.0 * (decay_factor ** i) for i in range(n)])
+    elif np.random.rand() < 0.3:
+        # Step function
+        half = n // 2
+        initial_seq = np.array([1.0] * half + [0.0] * (n - half))
+    else:
+        # Random with slight clustering
+        clusters = np.random.randint(1, 5)
+        cluster_size = n // clusters
+        for i in range(clusters):
+            start = i * cluster_size
+            end = min((i+1) * cluster_size, n)
+            value = np.random.uniform(0, 1000)
+            initial_seq[start:end] = value
+    
+    # Ensure minimum sum
+    if np.sum(initial_seq) < 0.01:
+        initial_seq[0] = 0.1
+    
+    # Clip to valid range
+    initial_seq = np.clip(initial_seq, 0, 1000)
+    
+    return initial_seq.tolist()
+
+def search_for_best_sequence():
+    """The main search function that tries various initialization strategies."""
+    start_time = time.time()
+    best_sequence = None
+    best_inv_c1 = 0.0
+    
+    # Try several initialization strategies
+    for _ in range(5):
+        # Generate initial sequence
+        initial_seq = generate_initial_sequence()
+        
+        # Try gradient ascent
+        try:
+            ascent_seq, ascent_inv_c1 = gradient_ascent_update(initial_seq, learning_rate=0.01, max_iterations=100)
+            if ascent_inv_c1 > best_inv_c1:
+                best_inv_c1 = ascent_inv_c1
+                best_sequence = ascent_seq
+        except Exception as e:
+            continue
+        
+        # Also try a few more steps of gradient ascent with different learning rates
+        for lr in [0.005, 0.02]:
+            try:
+                if time.time() - start_time > 160:
+                    break
+                temp_seq, temp_inv_c1 = gradient_ascent_update(initial_seq, learning_rate=lr, max_iterations=50)
+                if temp_inv_c1 > best_inv_c1:
+                    best_inv_c1 = temp_inv_c1
+                    best_sequence = temp_seq
+            except Exception as e:
+                continue
+    
+    # If we didn't find anything, return a simple random sequence
+    if best_sequence is None:
+        n = np.random.randint(100, 1000)
+        best_sequence = np.random.uniform(0, 1000, n).tolist()
+        if np.sum(best_sequence) < 0.01:
+            best_sequence[0] = 0.1
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

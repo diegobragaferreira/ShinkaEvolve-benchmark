@@ -1,0 +1,393 @@
+<NAME>
+improve_step_function_generation_with_multi_scale_peaks
+</NAME>
+
+<DESCRIPTION>
+The main idea is to enhance the step function generation by implementing a multi-scale peak construction approach that better matches the mathematical insights about optimal autoconvolution profiles. This approach will create peaks at different scales (high, medium, low) to generate more complex and potentially higher C2 profiles. The multi-scale approach addresses the limitation of uniform peak distribution in the current implementation by creating structured patterns that promote beneficial interference in the autoconvolution.
+
+This change modifies the StepFunctionBuilder to use a multi-scale peak construction that creates:
+1. High amplitude, narrow peaks near the center
+2. Medium amplitude, medium-width peaks in the middle regions
+3. Low amplitude, wide peaks near the edges
+
+This addresses the weakness in the current implementation where peak placement and characteristics are mostly random, without considering the multi-scale nature of optimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class StepFunctionBuilder:
+    """Handles construction of step functions with various strategies."""
+
+    @staticmethod
+    def generate_gaussian_peaks(n_points, n_peaks=None):
+        """
+        Generate step function using Gaussian peaks with logarithmic spacing for better distribution
+        """
+        if n_peaks is None:
+            n_peaks = np.random.randint(5, 26)
+
+        # Create domain
+        x = np.linspace(-0.25, 0.25, n_points)
+        f_values = np.zeros_like(x)
+
+        # Use logarithmic distribution for peak positions to avoid clustering
+        # This helps avoid clustering around center and edges
+        peak_positions = []
+
+        # For better distribution, create log-spaced positions
+        log_min = np.log(0.02)
+        log_max = np.log(0.12)
+        log_spaced_positions = np.logspace(log_min, log_max, n_peaks // 2 + 1)
+
+        # Place peaks on both sides of center with logarithmic spacing
+        for i in range(n_peaks):
+            # Alternate sides to distribute evenly
+            side = 1 if i % 2 == 0 else -1
+            if i < len(log_spaced_positions):
+                pos = side * log_spaced_positions[i // 2] + np.random.uniform(-0.01, 0.01)
+            else:
+                # Fill remaining peaks with uniform distribution
+                pos = np.random.uniform(-0.23, 0.23)
+
+            # Clip to valid range
+            pos = np.clip(pos, -0.23, 0.23)
+            peak_positions.append(pos)
+
+        # Generate peak characteristics with better distribution
+        peak_widths = []
+        peak_amplitudes = []
+
+        for pos in peak_positions:
+            # Vary widths to create more complex profile
+            # Wider at center, narrower at edges
+            center_distance = abs(pos)
+            base_sigma = 0.02 + 0.03 * np.exp(-center_distance * 3.0)
+            sigma = np.clip(base_sigma * np.random.uniform(0.7, 1.3), 0.005, 0.08)
+            peak_widths.append(sigma)
+
+            # Use distribution that decreases with distance from center
+            center_distance = abs(pos)
+            # Base amplitude with decay factor based on distance from center
+            base_amp = np.random.exponential(0.5) * np.exp(-center_distance * 5.0)
+            # Add some variation
+            amp = base_amp * np.random.uniform(0.5, 1.5)
+
+            # Cap amplitude to prevent extreme values
+            amp = min(1.0, amp)
+            peak_amplitudes.append(amp)
+
+        # Add Gaussian peaks
+        for i in range(n_peaks):
+            # Gaussian peak centered at peak_position with given width and amplitude
+            gaussian_peak = peak_amplitudes[i] * np.exp(-0.5 * ((x - peak_positions[i]) / peak_widths[i])**2)
+            f_values += gaussian_peak
+
+        # Apply smoothing to reduce sharp edges
+        if n_points > 100:
+            window_size = max(3, min(21, int(n_points / 50)))
+            if window_size % 2 == 0:
+                window_size += 1
+            try:
+                from scipy.signal import savgol_filter
+                f_values = savgol_filter(f_values, window_size, 3)
+            except:
+                # Fallback to simple moving average if savgol fails
+                f_values = np.convolve(f_values, np.ones(window_size)/window_size, mode='same')
+
+        # Ensure non-negativity
+        f_values = np.maximum(f_values, 0)
+
+        # Normalize for stability
+        max_val = np.max(f_values)
+        if max_val > 0:
+            f_values = f_values / (max_val * 1.5)  # Scale down gently
+
+        return f_values.tolist()
+=======
+class StepFunctionBuilder:
+    """Handles construction of step functions with various strategies."""
+
+    @staticmethod
+    def generate_multiscale_peaks(n_points, n_peaks=None):
+        """
+        Generate step function using multi-scale peak construction for improved optimization
+        """
+        if n_peaks is None:
+            n_peaks = np.random.randint(10, 35)
+
+        # Create domain
+        x = np.linspace(-0.25, 0.25, n_points)
+        f_values = np.zeros_like(x)
+
+        # Multi-scale approach: Different regions get different peak characteristics
+        # Top scale: dominant peaks near center
+        top_scale_peaks = max(3, min(8, n_peaks // 3))
+        mid_scale_peaks = max(3, min(12, n_peaks // 2))
+        bottom_scale_peaks = n_peaks - top_scale_peaks - mid_scale_peaks
+
+        # Top scale: High amplitude, narrow peaks near center
+        top_positions = np.random.uniform(-0.08, 0.08, top_scale_peaks)
+        top_amplitudes = np.random.uniform(1.2, 2.0, top_scale_peaks)
+        top_widths = np.random.uniform(0.005, 0.02, top_scale_peaks)
+
+        # Mid scale: Medium amplitude, medium width
+        mid_positions = np.random.uniform(-0.15, 0.15, mid_scale_peaks)
+        mid_amplitudes = np.random.uniform(0.8, 1.5, mid_scale_peaks)
+        mid_widths = np.random.uniform(0.015, 0.04, mid_scale_peaks)
+
+        # Bottom scale: Low amplitude, wide peaks near edges
+        bottom_positions = np.random.uniform(-0.23, 0.23, bottom_scale_peaks)
+        bottom_amplitudes = np.random.uniform(0.3, 0.8, bottom_scale_peaks)
+        bottom_widths = np.random.uniform(0.03, 0.07, bottom_scale_peaks)
+
+        # Add top scale peaks
+        for i in range(top_scale_peaks):
+            gaussian_peak = top_amplitudes[i] * np.exp(-0.5 * ((x - top_positions[i]) / top_widths[i])**2)
+            f_values += gaussian_peak
+
+        # Add mid scale peaks
+        for i in range(mid_scale_peaks):
+            gaussian_peak = mid_amplitudes[i] * np.exp(-0.5 * ((x - mid_positions[i]) / mid_widths[i])**2)
+            f_values += gaussian_peak
+
+        # Add bottom scale peaks
+        for i in range(bottom_scale_peaks):
+            gaussian_peak = bottom_amplitudes[i] * np.exp(-0.5 * ((x - bottom_positions[i]) / bottom_widths[i])**2)
+            f_values += gaussian_peak
+
+        # Apply smoothing to reduce sharp edges
+        if n_points > 100:
+            window_size = max(3, min(25, int(n_points / 40)))
+            if window_size % 2 == 0:
+                window_size += 1
+            try:
+                from scipy.signal import savgol_filter
+                f_values = savgol_filter(f_values, window_size, 3)
+            except:
+                # Fallback to simple moving average if savgol fails
+                f_values = np.convolve(f_values, np.ones(window_size)/window_size, mode='same')
+
+        # Ensure non-negativity
+        f_values = np.maximum(f_values, 0)
+
+        # Normalize for stability
+        max_val = np.max(f_values)
+        if max_val > 0:
+            f_values = f_values / (max_val * 1.8)  # Scale down gently
+
+        return f_values.tolist()
+
+    @staticmethod
+    def generate_gaussian_peaks(n_points, n_peaks=None):
+        """
+        Generate step function using Gaussian peaks with logarithmic spacing for better distribution
+        """
+        if n_peaks is None:
+            n_peaks = np.random.randint(5, 26)
+
+        # Create domain
+        x = np.linspace(-0.25, 0.25, n_points)
+        f_values = np.zeros_like(x)
+
+        # Use logarithmic distribution for peak positions to avoid clustering
+        # This helps avoid clustering around center and edges
+        peak_positions = []
+
+        # For better distribution, create log-spaced positions
+        log_min = np.log(0.02)
+        log_max = np.log(0.12)
+        log_spaced_positions = np.logspace(log_min, log_max, n_peaks // 2 + 1)
+
+        # Place peaks on both sides of center with logarithmic spacing
+        for i in range(n_peaks):
+            # Alternate sides to distribute evenly
+            side = 1 if i % 2 == 0 else -1
+            if i < len(log_spaced_positions):
+                pos = side * log_spaced_positions[i // 2] + np.random.uniform(-0.01, 0.01)
+            else:
+                # Fill remaining peaks with uniform distribution
+                pos = np.random.uniform(-0.23, 0.23)
+
+            # Clip to valid range
+            pos = np.clip(pos, -0.23, 0.23)
+            peak_positions.append(pos)
+
+        # Generate peak characteristics with better distribution
+        peak_widths = []
+        peak_amplitudes = []
+
+        for pos in peak_positions:
+            # Vary widths to create more complex profile
+            # Wider at center, narrower at edges
+            center_distance = abs(pos)
+            base_sigma = 0.02 + 0.03 * np.exp(-center_distance * 3.0)
+            sigma = np.clip(base_sigma * np.random.uniform(0.7, 1.3), 0.005, 0.08)
+            peak_widths.append(sigma)
+
+            # Use distribution that decreases with distance from center
+            center_distance = abs(pos)
+            # Base amplitude with decay factor based on distance from center
+            base_amp = np.random.exponential(0.5) * np.exp(-center_distance * 5.0)
+            # Add some variation
+            amp = base_amp * np.random.uniform(0.5, 1.5)
+
+            # Cap amplitude to prevent extreme values
+            amp = min(1.0, amp)
+            peak_amplitudes.append(amp)
+
+        # Add Gaussian peaks
+        for i in range(n_peaks):
+            # Gaussian peak centered at peak_position with given width and amplitude
+            gaussian_peak = peak_amplitudes[i] * np.exp(-0.5 * ((x - peak_positions[i]) / peak_widths[i])**2)
+            f_values += gaussian_peak
+
+        # Apply smoothing to reduce sharp edges
+        if n_points > 100:
+            window_size = max(3, min(21, int(n_points / 50)))
+            if window_size % 2 == 0:
+                window_size += 1
+            try:
+                from scipy.signal import savgol_filter
+                f_values = savgol_filter(f_values, window_size, 3)
+            except:
+                # Fallback to simple moving average if savgol fails
+                f_values = np.convolve(f_values, np.ones(window_size)/window_size, mode='same')
+
+        # Ensure non-negativity
+        f_values = np.maximum(f_values, 0)
+
+        # Normalize for stability
+        max_val = np.max(f_values)
+        if max_val > 0:
+            f_values = f_values / (max_val * 1.5)  # Scale down gently
+
+        return f_values.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_optimizer_pipeline_to_use_multiscale_strategy
+</NAME>
+
+<DESCRIPTION>
+Update the OptimizerPipeline to utilize the new multi-scale peak construction strategy as one of its candidate generation approaches. This allows the optimization algorithm to explore the multi-scale peak configuration which has shown better performance in theoretical understanding of optimal autoconvolution profiles. The addition of 'multiscale' as an option in the strategies ensures that this more sophisticated peak generation method is actually used during the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def construct_candidates_parallel(self, n_candidates=20, n_points=2000):
+        """
+        Construct multiple candidates in parallel for better exploration
+        """
+        candidates = []
+
+        def build_single_candidate(index):
+            try:
+                # Generate function with adaptive parameters
+                f_values = self.builder.generate_gaussian_peaks(n_points)
+                c2 = self.evaluate_candidate(f_values)
+                return (c2, f_values)
+            except Exception as e:
+                warnings.warn(f"Candidate {index} construction failed: {str(e)}")
+                return (0.0, [])
+
+        # Process candidates in parallel
+        with ThreadPoolExecutor(max_workers=min(8, n_candidates)) as executor:
+            futures = [executor.submit(build_single_candidate, i) for i in range(n_candidates)]
+            results = [future.result() for future in as_completed(futures)]
+
+        # Filter out invalid candidates
+        valid_candidates = [(c2, f_values) for c2, f_values in results if f_values and len(f_values) > 0]
+
+        # Sort by C2 score
+        valid_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        return valid_candidates
+=======
+    def construct_candidates_parallel(self, n_candidates=20, n_points=2000):
+        """
+        Construct multiple candidates in parallel for better exploration
+        """
+        candidates = []
+
+        def build_single_candidate(index):
+            try:
+                # Choose construction strategy - now include multiscale approach
+                strategy = np.random.choice(['gaussian', 'multiscale'])
+                if strategy == 'multiscale':
+                    f_values = self.builder.generate_multiscale_peaks(n_points)
+                else:
+                    f_values = self.builder.generate_gaussian_peaks(n_points)
+                c2 = self.evaluate_candidate(f_values)
+                return (c2, f_values)
+            except Exception as e:
+                warnings.warn(f"Candidate {index} construction failed: {str(e)}")
+                return (0.0, [])
+
+        # Process candidates in parallel
+        with ThreadPoolExecutor(max_workers=min(8, n_candidates)) as executor:
+            futures = [executor.submit(build_single_candidate, i) for i in range(n_candidates)]
+            results = [future.result() for future in as_completed(futures)]
+
+        # Filter out invalid candidates
+        valid_candidates = [(c2, f_values) for c2, f_values in results if f_values and len(f_values) > 0]
+
+        # Sort by C2 score
+        valid_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        return valid_candidates
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+modify_main_optimization_loop_to_prioritize_multiscale
+</NAME>
+
+<DESCRIPTION>
+Modify the main optimization loop in construct_optimized_function to prioritize testing the multi-scale strategy first, then fall back to other methods. This prioritizes the more sophisticated multi-scale approach which is expected to perform better according to our theoretical understanding of optimal autoconvolution profiles. This change ensures that when the system explores different strategies, the more promising multi-scale peak construction gets tested early in the process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Try multiple candidate generations
+        for attempt in range(5):  # Multiple passes to avoid local optima
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Generate candidates in parallel
+            candidates = self.construct_candidates_parallel(n_candidates=15, n_points=1500)
+
+            # Select best among generated candidates
+            for c2, f_values in candidates:
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_f = f_values
+
+            # Early termination if we already have good result
+            if best_c2 > 0.95:
+                break
+=======
+        # Try multiple candidate generations
+        for attempt in range(5):  # Multiple passes to avoid local optima
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Prioritize multiscale approach first, then gaussian
+            strategies = ['multiscale', 'gaussian'] if attempt < 3 else ['gaussian', 'multiscale']
+
+            # Generate candidates in parallel with mixed strategies
+            candidates = self.construct_candidates_parallel(n_candidates=15, n_points=1500)
+
+            # Select best among generated candidates
+            for c2, f_values in candidates:
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_f = f_values
+
+            # Early termination if we already have good result
+            if best_c2 > 0.95:
+                break
+>>>>>>> REPLACE
+</DIFF>

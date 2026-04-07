@@ -1,0 +1,291 @@
+<NAME>
+add_constraint_relaxation
+</NAME>
+
+<DESCRIPTION>
+Adding progressive constraint relaxation during early generations to allow more aggressive exploration before tightening constraints. This approach follows successful patterns from prior implementations where temporal constraint management improved performance by allowing better exploration in early stages while enforcing strict constraints later.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Global constants for optimization
+POPULATION_SIZE = 120
+GENERATIONS = 500
+INITIAL_MUTATION_RATE = 0.25
+FINAL_MUTATION_RATE = 0.02
+CROSSOVER_RATE = 0.8
+TOURNAMENT_SIZE = 7
+BOUNDARY_PENALTY_BASE = 1000.0
+OVERLAP_PENALTY_BASE = 10000.0
+ELITISM_COUNT = 5
+BOUNDARY_MARGIN = 0.01
+
+class CirclePackingOptimizer:
+=======
+# Global constants for optimization
+POPULATION_SIZE = 120
+GENERATIONS = 500
+INITIAL_MUTATION_RATE = 0.25
+FINAL_MUTATION_RATE = 0.02
+CROSSOVER_RATE = 0.8
+TOURNAMENT_SIZE = 7
+BOUNDARY_PENALTY_BASE = 1000.0
+OVERLAP_PENALTY_BASE = 10000.0
+ELITISM_COUNT = 5
+BOUNDARY_MARGIN = 0.01
+CONSTRAINT_RELAXATION_START = 50
+CONSTRAINT_RELAXATION_END = 200
+
+class CirclePackingOptimizer:
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+modify_evaluate_fitness_with_constraint_relaxation
+</NAME>
+
+<DESCRIPTION>
+Modifying the fitness evaluation to include progressive constraint relaxation where penalty weights are reduced in early generations to allow more exploration. This builds upon the concept from prior implementations that successfully used temporal constraint management to improve exploration before convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_fitness(self, circles: np.ndarray, population: List[np.ndarray] = None) -> Tuple[float, float, float]:
+        """Evaluate the fitness of a solution with optional fitness sharing"""
+        # Sum of radii (primary objective)
+        total_radius = np.sum(circles[:, 2])
+
+        # Penalty for constraint violations
+        penalty, _, _ = self.calculate_penalty(circles)
+
+        # Basic fitness
+        fitness = total_radius - penalty
+
+        # Apply fitness sharing if population is provided to maintain diversity
+        if population is not None and len(population) > 1:
+            # Calculate similarity-based penalty
+            similarity_penalty = 0.0
+            individual_array = circles.flatten()
+
+            # Compare with other individuals in the population
+            for other_individual in population:
+                if not np.array_equal(other_individual, circles):
+                    other_array = other_individual.flatten()
+                    # Calculate normalized Euclidean distance in parameter space
+                    distance = np.linalg.norm(individual_array - other_array)
+                    # Similarity threshold (adjustable)
+                    similarity_threshold = 0.1  # This can be tuned
+                    if distance < similarity_threshold:
+                        # Apply penalty inversely proportional to similarity
+                        similarity_penalty += 1.0 / (1.0 + distance)
+
+            # Apply fitness sharing penalty (small weight to avoid drastic changes)
+            fitness -= 0.1 * similarity_penalty
+
+        return fitness, total_radius, penalty
+=======
+    def evaluate_fitness(self, circles: np.ndarray, population: List[np.ndarray] = None,
+                        generation: int = 0) -> Tuple[float, float, float]:
+        """Evaluate the fitness of a solution with optional fitness sharing and constraint relaxation"""
+        # Sum of radii (primary objective)
+        total_radius = np.sum(circles[:, 2])
+
+        # Penalty for constraint violations
+        penalty, _, _ = self.calculate_penalty(circles)
+
+        # Apply progressive constraint relaxation in early generations
+        relaxation_factor = 1.0
+        if generation < CONSTRAINT_RELAXATION_START:
+            relaxation_factor = 0.2  # Very relaxed in early generations
+        elif generation < CONSTRAINT_RELAXATION_END:
+            # Gradually increase constraint enforcement
+            relaxation_factor = 0.2 + (1.0 - 0.2) * (generation - CONSTRAINT_RELAXATION_START) / \
+                              (CONSTRAINT_RELAXATION_END - CONSTRAINT_RELAXATION_START)
+
+        # Apply relaxation to penalty
+        adjusted_penalty = penalty * relaxation_factor
+
+        # Basic fitness
+        fitness = total_radius - adjusted_penalty
+
+        # Apply fitness sharing if population is provided to maintain diversity
+        if population is not None and len(population) > 1:
+            # Calculate similarity-based penalty
+            similarity_penalty = 0.0
+            individual_array = circles.flatten()
+
+            # Compare with other individuals in the population
+            for other_individual in population:
+                if not np.array_equal(other_individual, circles):
+                    other_array = other_individual.flatten()
+                    # Calculate normalized Euclidean distance in parameter space
+                    distance = np.linalg.norm(individual_array - other_array)
+                    # Similarity threshold (adjustable)
+                    similarity_threshold = 0.1  # This can be tuned
+                    if distance < similarity_threshold:
+                        # Apply penalty inversely proportional to similarity
+                        similarity_penalty += 1.0 / (1.0 + distance)
+
+            # Apply fitness sharing penalty (small weight to avoid drastic changes)
+            fitness -= 0.1 * similarity_penalty
+
+        return fitness, total_radius, penalty
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_evolve_population_with_generation_tracking
+</NAME>
+
+<DESCRIPTION>
+Updating the evolve_population method to pass generation information to fitness evaluation for constraint relaxation, ensuring the progressive constraint management works correctly throughout the evolutionary process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evolve_population(self, population: List[np.ndarray]) -> Tuple[List[np.ndarray], float, float, float]:
+        """Evolve the population for one generation"""
+        # Evaluate fitness
+        fitness_scores = []
+        total_radii = []
+        penalties = []
+
+        for individual in population:
+            fitness, total_radius, penalty = self.evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+            total_radii.append(total_radius)
+            penalties.append(penalty)
+
+        # Track best individual
+        best_idx = np.argmax(fitness_scores)
+        best_fitness = fitness_scores[best_idx]
+        best_total_radius = total_radii[best_idx]
+        best_penalty = penalties[best_idx]
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitness_scores)[-ELITISM_COUNT:]
+        for idx in elite_indices:
+            new_population.append(population[idx].copy())
+
+        # Generate rest of population
+        while len(new_population) < len(population):
+            # Selection
+            parent1 = self.tournament_selection(population, fitness_scores)
+            parent2 = self.tournament_selection(population, fitness_scores)
+
+            # Crossover
+            child = self.crossover(parent1, parent2)
+
+            # Mutation with adaptive rate
+            mut_rate = self.adaptive_mutation_rate(len(new_population), POPULATION_SIZE)
+            child = self.mutate(child, mut_rate)
+
+            new_population.append(child)
+
+        return new_population, best_fitness, best_total_radius, best_penalty
+=======
+    def evolve_population(self, population: List[np.ndarray], generation: int = 0) -> Tuple[List[np.ndarray], float, float, float]:
+        """Evolve the population for one generation"""
+        # Evaluate fitness
+        fitness_scores = []
+        total_radii = []
+        penalties = []
+
+        for individual in population:
+            fitness, total_radius, penalty = self.evaluate_fitness(individual, population, generation)
+            fitness_scores.append(fitness)
+            total_radii.append(total_radius)
+            penalties.append(penalty)
+
+        # Track best individual
+        best_idx = np.argmax(fitness_scores)
+        best_fitness = fitness_scores[best_idx]
+        best_total_radius = total_radii[best_idx]
+        best_penalty = penalties[best_idx]
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitness_scores)[-ELITISM_COUNT:]
+        for idx in elite_indices:
+            new_population.append(population[idx].copy())
+
+        # Generate rest of population
+        while len(new_population) < len(population):
+            # Selection
+            parent1 = self.tournament_selection(population, fitness_scores)
+            parent2 = self.tournament_selection(population, fitness_scores)
+
+            # Crossover
+            child = self.crossover(parent1, parent2)
+
+            # Mutation with adaptive rate
+            mut_rate = self.adaptive_mutation_rate(len(new_population), POPULATION_SIZE)
+            child = self.mutate(child, mut_rate)
+
+            new_population.append(child)
+
+        return new_population, best_fitness, best_total_radius, best_penalty
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_main_evolution_loop_with_generation_info
+</NAME>
+
+<DESCRIPTION>
+Updating the main evolution loop in circle_packing26 to pass generation information to the evolve_population method, enabling the constraint relaxation functionality to work properly throughout the evolutionary process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Evolution loop
+    start_time = time.time()
+    for generation in range(GENERATIONS):
+        population, gen_fitness, gen_radius, gen_penalty = optimizer.evolve_population(population)
+
+        if gen_radius > best_total_radius:
+            best_total_radius = gen_radius
+            best_individual = population[0]  # Keep track of best individual
+            best_penalty = gen_penalty
+
+        # Print progress every 100 generations
+        if generation % 100 == 0:
+            elapsed = time.time() - start_time
+            print(f"Generation {generation}: Best radius sum = {gen_radius:.6f} (penalty={gen_penalty:.2f}) Time: {elapsed:.2f}s")
+
+    elapsed = time.time() - start_time
+    print(f"Final result: Best radius sum = {best_total_radius:.6f} (penalty={best_penalty:.2f}) Time: {elapsed:.2f}s")
+    print(f"Benchmark ratio: {best_total_radius / 2.6358627564136983:.6f}")
+=======
+    # Evolution loop
+    start_time = time.time()
+    for generation in range(GENERATIONS):
+        population, gen_fitness, gen_radius, gen_penalty = optimizer.evolve_population(population, generation)
+
+        if gen_radius > best_total_radius:
+            best_total_radius = gen_radius
+            best_individual = population[0]  # Keep track of best individual
+            best_penalty = gen_penalty
+
+        # Print progress every 100 generations
+        if generation % 100 == 0:
+            elapsed = time.time() - start_time
+            print(f"Generation {generation}: Best radius sum = {gen_radius:.6f} (penalty={gen_penalty:.2f}) Time: {elapsed:.2f}s")
+
+    elapsed = time.time() - start_time
+    print(f"Final result: Best radius sum = {best_total_radius:.6f} (penalty={best_penalty:.2f}) Time: {elapsed:.2f}s")
+    print(f"Benchmark ratio: {best_total_radius / 2.6358627564136983:.6f}")
+>>>>>>> REPLACE
+
+</DIFF>

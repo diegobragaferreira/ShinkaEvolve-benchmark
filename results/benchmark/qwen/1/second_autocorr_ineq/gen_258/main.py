@@ -1,0 +1,334 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import time
+from numba import jit, prange
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+from scipy.optimize import differential_evolution
+import random
+import math
+from functools import partial
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L2 norm squared (trapezoidal integration)
+    for i in range(len(g_vals) - 1):
+        val1 = g_vals[i]
+        val2 = g_vals[i+1]
+        # Trapezoidal rule: (h/2)*(y1 + y2) but we square for L2 norm
+        # Using piecewise quadratic approximation instead (more accurate)
+        h = STEP_WIDTH
+        g_l2_sq += (h/3) * (val1*val1 + val1*val2 + val2*val2)
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+# Hamiltonian Monte Carlo-inspired optimizer
+class HamiltonianOptimizer:
+    def __init__(self, target_func, dim, step_size=0.01, num_leapfrog=10):
+        self.target_func = target_func
+        self.dim = dim
+        self.step_size = step_size
+        self.num_leapfrog = num_leapfrog
+        
+    def _leapfrog_step(self, position, momentum, grad_func, step_size):
+        """Perform a single leapfrog step"""
+        # Half step for momentum
+        new_momentum = momentum - 0.5 * step_size * grad_func(position)
+        
+        # Full step for position
+        new_position = position + step_size * new_momentum
+        
+        # Recompute gradient
+        new_grad = grad_func(new_position)
+        
+        # Half step for momentum
+        new_momentum = new_momentum - 0.5 * step_size * new_grad
+        
+        return new_position, new_momentum
+    
+    def _hamiltonian_step(self, position, momentum, grad_func):
+        """Perform full Hamiltonian step using leapfrog integration"""
+        current_pos, current_mom = position, momentum
+        for _ in range(self.num_leapfrog):
+            current_pos, current_mom = self._leapfrog_step(
+                current_pos, current_mom, grad_func, self.step_size
+            )
+        return current_pos, current_mom
+    
+    def optimize(self, initial_params, max_iter=1000):
+        """Optimize using Hamiltonian dynamics"""
+        # Initialize
+        current_x = initial_params.copy()
+        current_y = self.target_func(current_x)
+        
+        # Use JAX for gradient computation
+        grad_func = jax.grad(lambda x: self.target_func(list(x)))
+        
+        # Initialize momentum
+        momentum = np.random.randn(len(current_x)) * 0.1
+        
+        best_x = current_x.copy()
+        best_y = current_y
+        
+        # Main optimization loop
+        for i in range(max_iter):
+            # Hamiltonian dynamics step
+            new_x, new_momentum = self._hamiltonian_step(
+                current_x, momentum, grad_func
+            )
+            
+            # Accept/reject step based on energy difference
+            new_y = self.target_func(new_x)
+            
+            # Simple acceptance criterion (energy difference)
+            if new_y < current_y:
+                current_x = new_x
+                current_y = new_y
+                momentum = new_momentum
+            else:
+                # Accept with probability based on energy difference
+                energy_diff = new_y - current_y
+                accept_prob = math.exp(-energy_diff)
+                if random.random() < accept_prob:
+                    current_x = new_x
+                    current_y = new_y
+                    momentum = new_momentum
+            
+            # Track best solution
+            if current_y < best_y:
+                best_y = current_y
+                best_x = current_x.copy()
+            
+            # Adaptive step size adjustment
+            if i > 0 and i % 100 == 0:
+                self.step_size = max(0.001, self.step_size * 0.9)
+        
+        return best_x
+
+def objective_function(params):
+    """Objective function to minimize (negative C2)"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+        
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+        
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+        
+        # Return negative because we're minimizing
+        return -c2
+    except Exception as e:
+        return 1e10  # Large penalty for invalid results
+
+def advanced_hierarchical_initialization(dim):
+    """Create an intelligent initialization using hierarchical patterns"""
+    # Initialize with a complex multi-component pattern
+    init_params = np.zeros(dim)
+    
+    # Component 1: Central peak with exponential decay
+    center = dim // 2
+    sigma = dim / 8
+    for i in range(dim):
+        init_params[i] += 2.0 * np.exp(-0.5 * ((i - center) / sigma) ** 2)
+    
+    # Component 2: Oscillatory pattern for fine structure
+    freq_factor = 2 * np.pi / (dim / 4)
+    for i in range(dim):
+        init_params[i] += 0.5 * np.sin(freq_factor * i)
+    
+    # Component 3: Random fluctuations
+    np.random.seed(42)
+    rand_component = np.random.random(dim) * 0.3
+    init_params += rand_component
+    
+    # Component 4: Sharp transitions for convolution enhancement
+    transition_points = [dim // 4, dim // 2, 3 * dim // 4]
+    for point in transition_points:
+        for i in range(max(0, point-10), min(dim, point+10)):
+            # Create sharp transitions
+            dist = abs(i - point)
+            if dist < 10:
+                init_params[i] += 1.5 * (10 - dist) / 10.0
+    
+    # Ensure non-negative values and normalize
+    init_params = np.maximum(init_params, 0)
+    total = np.sum(init_params)
+    if total > 0:
+        init_params = init_params / total * dim
+    
+    return init_params.tolist()
+
+def hierarchical_sampling_optimization():
+    """Hierarchical optimization using multiple sampling stages"""
+    # Stage 1: Broad exploration with low resolution
+    coarse_dim = np.random.randint(100, 300)
+    coarse_init = advanced_hierarchical_initialization(coarse_dim)
+    
+    # Stage 2: Mid-resolution refinement  
+    mid_dim = np.random.randint(400, 700)
+    mid_init = advanced_hierarchical_initialization(mid_dim)
+    
+    # Stage 3: Fine optimization
+    fine_dim = np.random.randint(800, 1200)
+    fine_init = advanced_hierarchical_initialization(fine_dim)
+    
+    # Optimize each stage with different strategies
+    best_score = float('inf')
+    best_params = None
+    
+    # Optimize coarse with a more exploratory approach
+    try:
+        coarse_optimizer = HamiltonianOptimizer(objective_function, coarse_dim, step_size=0.05)
+        coarse_result = coarse_optimizer.optimize(coarse_init, max_iter=300)
+        coarse_score = objective_function(coarse_result)
+        
+        if coarse_score < best_score:
+            best_score = coarse_score
+            best_params = coarse_result
+    except:
+        pass
+    
+    # Optimize mid with medium resolution
+    try:
+        mid_optimizer = HamiltonianOptimizer(objective_function, mid_dim, step_size=0.03)
+        mid_result = mid_optimizer.optimize(mid_init, max_iter=500)
+        mid_score = objective_function(mid_result)
+        
+        if mid_score < best_score:
+            best_score = mid_score
+            best_params = mid_result
+    except:
+        pass
+    
+    # Optimize fine with highest resolution
+    try:
+        fine_optimizer = HamiltonianOptimizer(objective_function, fine_dim, step_size=0.01)
+        fine_result = fine_optimizer.optimize(fine_init, max_iter=800)
+        fine_score = objective_function(fine_result)
+        
+        if fine_score < best_score:
+            best_score = fine_score
+            best_params = fine_result
+    except:
+        pass
+    
+    # Final refinement with differential evolution if needed
+    if best_params is not None:
+        try:
+            # Try to refine with a more local optimization
+            bounds = [(0, 10) for _ in range(len(best_params))]
+            
+            def refinement_objective(x):
+                return objective_function(x)
+            
+            result = differential_evolution(
+                refinement_objective,
+                bounds,
+                maxiter=50,
+                popsize=15,
+                seed=42,
+                disp=False
+            )
+            
+            if result.success:
+                refined_score = objective_function(result.x)
+                if refined_score < best_score:
+                    best_params = result.x
+        except:
+            pass
+    
+    return best_params if best_params is not None else fine_init
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Multi-stage hierarchical optimization approach
+    best_c2 = float('inf')
+    best_params = None
+    
+    # Multiple restarts with different initialization strategies
+    for restart in range(5):
+        if time.time() - start_time > 85:
+            break
+            
+        try:
+            np.random.seed(42 + restart)
+            
+            # Use our hierarchical sampling optimization
+            params = hierarchical_sampling_optimization()
+            
+            # Compute actual C2 value
+            f_vals = np.clip(params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+                
+                if c2 > best_c2:  # Maximizing C2
+                    best_c2 = c2
+                    best_params = params.copy()
+        except Exception as e:
+            continue
+    
+    # If no valid parameters found, return default
+    if best_params is None:
+        return [0.5] * 100
+        
+    # Final check and conversion to list
+    final_f_vals = np.clip(best_params, 0, None)
+    return final_f_vals.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

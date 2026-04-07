@@ -1,0 +1,230 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def objective_function(params):
+        """Objective function to minimize (negative of min/max ratio)."""
+        # Reshape parameters back to points array
+        points = params.reshape(-1, 2)
+        ratio = compute_min_max_ratio(points)
+        # Return negative because we want to maximize the ratio
+        return -ratio
+
+    def generate_multiple_initial_configs():
+        """Generate several different initial configurations with symmetry breaking."""
+        configs = []
+
+        # Configuration 1: Hexagonal grid with symmetry-breaking perturbations
+        points1 = []
+        for i in range(4):
+            for j in range(4):
+                # Base hexagonal position
+                x_base = j * 0.25 + (i % 2) * 0.125
+                y_base = i * 0.25
+
+                # Apply symmetry-breaking perturbation based on position
+                # This creates a fundamentally asymmetric pattern that breaks
+                # the rotational and translational symmetries of pure hexagonal grids
+                symmetry_factor = (i * 7 + j * 3) % 10  # Deterministic but varied
+                x_pert = np.sin(symmetry_factor * 0.5) * 0.005
+                y_pert = np.cos(symmetry_factor * 0.3) * 0.005
+
+                x = x_base + x_pert + np.random.normal(0, 0.003)
+                y = y_base + y_pert + np.random.normal(0, 0.003)
+                points1.append([x, y])
+        points1 = np.array(points1)
+        points1 = np.clip(points1, 0, 1)
+        configs.append(points1)
+
+        # Configuration 2: More clustered arrangement with asymmetry
+        points2 = []
+        for i in range(4):
+            for j in range(4):
+                x_base = j * 0.25 + (i % 2) * 0.125
+                y_base = i * 0.25
+
+                # Different symmetry breaking for second config
+                x_pert = np.sin(i * 0.7) * 0.008 * (1 + j * 0.1)
+                y_pert = np.cos(j * 0.5) * 0.008 * (1 + i * 0.1)
+
+                x = x_base + x_pert + np.random.normal(0, 0.007)
+                y = y_base + y_pert + np.random.normal(0, 0.007)
+                points2.append([x, y])
+        points2 = np.array(points2)
+        points2 = np.clip(points2, 0, 1)
+        configs.append(points2)
+
+        # Configuration 3: Random but structured with controlled asymmetry
+        points3 = []
+        # Create a more complex base pattern
+        for i in range(4):
+            for j in range(4):
+                # Apply non-uniform spacing and asymmetry
+                x = 0.1 + j * 0.22 + (i % 2) * 0.11 + np.sin(i * 1.3) * 0.01
+                y = 0.1 + i * 0.22 + np.cos(j * 1.7) * 0.01
+                points3.append([x, y])
+        points3 = np.array(points3) + np.random.normal(0, 0.01, (16, 2))
+        points3 = np.clip(points3, 0, 1)
+        configs.append(points3)
+
+        # Configuration 4: Spiral-like pattern with deterministic asymmetry
+        points4 = []
+        angle = 0
+        radius = 0
+        for i in range(16):
+            # Add deterministic asymmetry to spiral
+            angle_offset = np.sin(i * 0.3) * 0.1
+            radius_offset = np.cos(i * 0.2) * 0.01
+            x = 0.5 + (radius + radius_offset) * np.cos(angle + angle_offset)
+            y = 0.5 + (radius + radius_offset) * np.sin(angle + angle_offset)
+            points4.append([x, y])
+            angle += 0.5 + np.sin(i * 0.1) * 0.05
+            radius += 0.01 + np.cos(i * 0.2) * 0.005
+        points4 = np.array(points4)
+        points4 = np.clip(points4, 0, 1)
+        configs.append(points4)
+
+        # Configuration 5: Checkerboard with systematic asymmetry
+        points5 = []
+        for i in range(4):
+            for j in range(4):
+                x_base = j * 0.25 + (i % 2) * 0.125
+                y_base = i * 0.25
+
+                # Systematic asymmetry based on position
+                asym_x = ((i + 1) * (j + 1)) % 5 * 0.003
+                asym_y = ((i + 1) * (j + 1)) % 7 * 0.002
+
+                x = x_base + asym_x + np.random.normal(0, 0.005)
+                y = y_base + asym_y + np.random.normal(0, 0.005)
+                points5.append([x, y])
+        points5 = np.array(points5)
+        points5 = np.clip(points5, 0, 1)
+        configs.append(points5)
+
+        return configs
+
+    # Generate multiple initial configurations
+    np.random.seed(42)
+    initial_configs = generate_multiple_initial_configs()
+
+    # Run optimization from each configuration
+    best_final_points = None
+    best_final_ratio = -np.inf
+
+    for i, initial_config in enumerate(initial_configs):
+        # Flatten for optimization
+        initial_params = initial_config.flatten()
+
+        # Set up bounds for each coordinate (0 to 1 for both x and y)
+        bounds = [(0, 1)] * 32  # 16 points * 2 coordinates each
+
+        # Optimize using L-BFGS-B which is well-suited for this type of problem
+        try:
+            result = minimize(
+                objective_function,
+                initial_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 5000, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+
+            # Extract optimized points
+            optimized_points = result.x.reshape(-1, 2)
+
+            # Make sure they're within bounds
+            optimized_points = np.clip(optimized_points, 0, 1)
+
+            # Evaluate the ratio for this configuration
+            current_ratio = compute_min_max_ratio(optimized_points)
+
+            if current_ratio > best_final_ratio:
+                best_final_ratio = current_ratio
+                best_final_points = optimized_points.copy()
+
+        except Exception as e:
+            # If optimization fails, continue with next configuration
+            continue
+
+    # Final fallback to original approach if nothing worked
+    if best_final_points is None:
+        # Create a more optimized initial configuration
+        # Use a combination of hexagonal and perturbed grid arrangement
+        points = []
+
+        # Arrange in a 4x4 grid (16 points total) with appropriate spacing
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + (i % 2) * 0.125  # Offset every other row for hexagonal packing
+                y = i * 0.25
+                points.append([x, y])
+
+        # Convert to numpy array and add small random noise
+        points = np.array(points) + np.random.normal(0, 0.005, (16, 2))
+
+        # Ensure all points are within [0,1] bounds and normalize properly
+        points = np.clip(points, 0, 1)
+
+        # Flatten for optimization
+        initial_params = points.flatten()
+
+        # Set up bounds for each coordinate (0 to 1 for both x and y)
+        bounds = [(0, 1)] * 32  # 16 points * 2 coordinates each
+
+        # Optimize using L-BFGS-B which is well-suited for this type of problem
+        try:
+            result = minimize(
+                objective_function,
+                initial_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 5000, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+
+            # Extract optimized points
+            optimized_points = result.x.reshape(-1, 2)
+
+            # Make sure they're within bounds
+            optimized_points = np.clip(optimized_points, 0, 1)
+
+            return optimized_points
+
+        except Exception as e:
+            # Fallback to initial points if optimization fails
+            print(f"Optimization failed: {e}")
+            return points
+
+    return best_final_points
+
+# EVOLVE-BLOCK-END

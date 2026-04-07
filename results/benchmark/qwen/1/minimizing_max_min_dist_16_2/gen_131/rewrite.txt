@@ -1,0 +1,190 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+        
+        # Add boundary padding to avoid numerical issues
+        points = np.clip(points, 1e-8, 1-1e-8)
+
+        # Compute pairwise distances using squareform for better numerical stability
+        distance_matrix = squareform(pdist(points))
+        
+        # Zero out diagonal to avoid considering distance to self
+        np.fill_diagonal(distance_matrix, np.inf)
+        
+        # Compute min and max distances from the full matrix
+        d_min = np.min(distance_matrix)
+        d_max = np.max(distance_matrix)
+        
+        # Avoid division by zero or invalid cases
+        if d_max <= 1e-12:
+            return -np.inf
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        return -d_min / d_max
+
+    def create_diverse_initial_guesses():
+        """Create multiple diverse initial guesses using different geometric patterns"""
+        initial_guesses = []
+
+        # 1. Golden spiral for good point distribution
+        golden_angle = 2.399963229728653  # ~4π/(3+√5)
+        points_spiral = []
+        for i in range(16):
+            radius = np.sqrt(i/15.0)  # Normalize to [0,1]
+            angle = i * golden_angle
+            x = 0.5 + radius * np.cos(angle) * 0.45
+            y = 0.5 + radius * np.sin(angle) * 0.45
+            points_spiral.append([x, y])
+        initial_guesses.append(np.array(points_spiral).flatten())
+
+        # 2. Hexagonal grid approximation
+        hex_points = []
+        rows, cols = 4, 4
+        spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+        spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
+
+        for i in range(rows):
+            for j in range(cols):
+                if len(hex_points) >= 16:
+                    break
+                x = j * spacing_x
+                y = i * spacing_y
+                # Offset every other row
+                if i % 2 == 1:
+                    x += spacing_x / 2
+                hex_points.append([x, y])
+
+        # Trim or pad to 16 points
+        if len(hex_points) < 16:
+            extra_points = np.random.rand(16 - len(hex_points), 2)
+            hex_points.extend(extra_points.tolist())
+        elif len(hex_points) > 16:
+            hex_points = hex_points[:16]
+
+        initial_guesses.append(np.array(hex_points).flatten())
+
+        # 3. Perturbed grid initialization
+        grid_points = np.array([[i/3, j/3] for i in range(4) for j in range(4) if i*4+j < 16]).reshape(-1, 2)
+        perturbed_grid = grid_points + np.random.normal(0, 0.05, (16, 2))
+        perturbed_grid = np.clip(perturbed_grid, 1e-8, 1-1e-8)
+        initial_guesses.append(perturbed_grid.flatten())
+
+        # 4. Random initialization with fixed seed
+        np.random.seed(42)
+        random_points = np.random.rand(16, 2)
+        initial_guesses.append(random_points.flatten())
+
+        # 5. Another random initialization with different seed
+        np.random.seed(123)
+        random_points_2 = np.random.rand(16, 2)
+        initial_guesses.append(random_points_2.flatten())
+
+        return initial_guesses
+
+    # Define bounds with small padding to avoid boundary issues
+    bounds = [(1e-8, 1-1e-8) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    # Create diverse initial guesses
+    initial_guesses = create_diverse_initial_guesses()
+
+    best_result = None
+    best_ratio = -np.inf
+
+    # Multi-start approach with different initializations
+    for i, initial_guess in enumerate(initial_guesses):
+        try:
+            # Use differential evolution for global search with enhanced parameters
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                seed=42 + i,
+                maxiter=300,      # Increased iterations for better convergence
+                popsize=50,       # Even larger population size for better exploration
+                tol=1e-10,        # Tighter tolerance for global search
+                recombination=0.95, # Very high recombination rate for diversity
+                mutation=(0.9, 1.0), # Larger mutation range for better exploration
+                disp=False
+            )
+
+            # Local refinement with adaptive strategy
+            local_result = minimize(
+                objective,
+                de_result.x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1000}
+            )
+
+            # If L-BFGS-B fails, try SLSQP as backup
+            if not local_result.success:
+                local_result = minimize(
+                    objective,
+                    de_result.x,
+                    method='SLSQP',
+                    bounds=bounds,
+                    options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1000}
+                )
+
+            # If SLSQP also fails, try Nelder-Mead as final fallback
+            if not local_result.success:
+                local_result = minimize(
+                    objective,
+                    de_result.x,
+                    method='Nelder-Mead',
+                    options={'ftol': 1e-13, 'xtol': 1e-13, 'maxiter': 1000}
+                )
+
+            # Keep track of the best solution found
+            if -local_result.fun > best_ratio:
+                best_ratio = -local_result.fun
+                best_result = local_result.x
+
+        except Exception as e:
+            # Skip failed optimizations and continue with others
+            continue
+
+    # Final refinement with even more aggressive settings if we found a good candidate
+    if best_result is not None:
+        final_result = minimize(
+            objective,
+            best_result,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'ftol': 1e-14, 'gtol': 1e-14, 'maxiter': 2000}
+        )
+
+        # If L-BFGS fails, try SLSQP as final fallback
+        if not final_result.success:
+            final_result = minimize(
+                objective,
+                best_result,
+                method='SLSQP',
+                bounds=bounds,
+                options={'ftol': 1e-14, 'gtol': 1e-14, 'maxiter': 2000}
+            )
+
+        points = final_result.x.reshape(-1, 2)
+    else:
+        # Fallback to the first initial guess if everything else failed
+        points = initial_guesses[0].reshape(-1, 2)
+
+    # Ensure all points are within [0,1]^2 bounds (final safeguard)
+    points = np.clip(points, 0, 1)
+
+    return points
+
+# EVOLVE-BLOCK-END

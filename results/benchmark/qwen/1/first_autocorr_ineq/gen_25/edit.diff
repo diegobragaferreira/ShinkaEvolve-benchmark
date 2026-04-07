@@ -1,0 +1,344 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,285 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import optimize
+-
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
++import random
++from scipy.signal import fftconvolve
++from deap import base, creator, tools, algorithms
++import time
++from numba import jit
++import multiprocessing as mp
++from functools import partial
++
++# Global constants for optimization
++POP_SIZE = 50
++N_GENERATIONS = 200
++MUTATION_RATE_START = 0.2
++MUTATION_RATE_END = 0.05
++TOURNAMENT_SIZE = 3
++CROSSOVER_PROB = 0.5
++MUTATION_PROB = 0.2
++INITIAL_LENGTH_MIN = 100
++INITIAL_LENGTH_MAX = 1000
++MAX_EVALUATIONS = 2000
++BENCHMARK_THRESHOLD = 1.5031
++
++@jit(nopython=True)
++def fast_convolve(a, b):
++    """Fast convolution computation using Numba"""
++    n = len(a)
++    result = np.zeros(2 * n - 1)
++    for i in range(n):
++        for j in range(n):
++            result[i + j] += a[i] * b[j]
++    return result
++
++def compute_autocorrelation_constant(sequence):
++    """
++    Computes the autocorrelation constant C₁ for a given sequence.
++    Returns 1/C₁ which we want to maximize.
++    """
++    if len(sequence) == 0 or np.sum(sequence) < 0.01:
++        return 0.0
++
++    # Compute convolution using FFT for efficiency
++    # Note: We use scipy's fftconvolve for now due to reliability
++    conv = fftconvolve(sequence, sequence, mode='full')
++    # Take the maximum of the convolution (excluding the zero-padding)
++    max_conv = np.max(conv[len(sequence)-1:])
++
++    # Calculate C₁ = 2*n*max(b) / (sum(a))^2
++    sum_a = np.sum(sequence)
+     n = len(sequence)
++
++    if sum_a == 0:
++        return 0.0
++
++    C1 = 2 * n * max_conv / (sum_a ** 2)
++    return 1 / C1  # Return reciprocal for maximization
++
++def evaluate_individual(individual):
++    """Evaluate an individual (sequence) and return fitness."""
++    try:
++        fitness = compute_autocorrelation_constant(individual)
++        return (fitness,)
++    except Exception as e:
++        return (0.0,)
++
++def generate_structured_sequence(length):
++    """Generate a structured sequence that tends to perform well."""
++    # Use sinusoidal pattern to balance mass and convolution
++    sequence = []
++    for i in range(length):
++        # Combine exponential decay with sine wave for structured behavior
++        val = 500 * np.exp(-i/50) * (1 + 0.5 * np.sin(i/10))
++        sequence.append(max(0, min(1000, val)))  # Clip to [0, 1000]
++    return sequence
++
++def generate_random_valid_sequence(min_length=100, max_length=1000):
++    """Generate a random valid sequence within specified constraints."""
++    length = random.randint(min_length, max_length)
++    # Generate heights in [0, 1000] but with some structure
++    sequence = [random.uniform(0, 1000) for _ in range(length)]
++    return sequence
++
++def get_local_gradient_direction(sequence, epsilon=1e-4):
++    """Compute approximate gradient using finite differences."""
++    n = len(sequence)
++    if n == 0:
++        return None
++
+     sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
++    if sum_sequence < 0.01:
+         return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
+-
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
+-
++
++    # Normalize the sequence
++    normalized_seq = np.array(sequence) / sum_sequence
++
++    # Compute current autocorrelation constant
++    current_value = compute_autocorrelation_constant(sequence)
++
++    # Approximate gradient using finite differences
++    gradient = np.zeros(n)
++
++    for i in range(n):
++        # Create perturbed sequence
++        perturbed_seq = normalized_seq.copy()
++        perturbed_seq[i] += epsilon
++
++        # Compute new value
++        new_value = compute_autocorrelation_constant(perturbed_seq * sum_sequence)
++
++        # Gradient approximation
++        gradient[i] = (new_value - current_value) / epsilon
++
++    return gradient
++
++def refine_with_gradient(sequence, max_iterations=10):
++    """Refine sequence using gradient ascent."""
++    refined_sequence = np.array(sequence)
++    current_score = compute_autocorrelation_constant(refined_sequence)
++
++    for _ in range(max_iterations):
++        grad = get_local_gradient_direction(refined_sequence)
++        if grad is None:
++            break
++
++        # Normalize gradient
++        grad_norm = np.linalg.norm(grad)
++        if grad_norm > 0:
++            grad = grad / grad_norm
++
++        # Step size
++        step_size = 0.01
++
++        # Update sequence
++        new_sequence = refined_sequence + step_size * grad * np.sum(refined_sequence)
++
++        # Ensure non-negativity and clipping
++        new_sequence = np.clip(new_sequence, 0, 1000)
++
++        new_score = compute_autocorrelation_constant(new_sequence)
++        if new_score > current_score:
++            refined_sequence = new_sequence
++            current_score = new_score
++        else:
++            break
++
++    return refined_sequence.tolist()
++
++def evolve_sequences_parallel(starting_sequences, n_generations=N_GENERATIONS):
++    """Parallel evolutionary optimization."""
++    # Define DEAP structures
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++
++    toolbox = base.Toolbox()
++
++    # Define gene generation and individual creation
++    def create_individual():
++        return creator.Individual(random.choice(starting_sequences))
++
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++
++    # Register evaluation and operators
++    toolbox.register("evaluate", evaluate_individual)
++    toolbox.register("mate", tools.cxUniform, indpb=0.5)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=100, indpb=0.2)
++    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
++
++    # Initialize population
++    population = toolbox.population(POP_SIZE)
++
++    # Evolution loop with adaptive mutation rate
++    for gen in range(n_generations):
++        # Adaptive mutation rate
++        current_mutation_rate = MUTATION_RATE_START + (MUTATION_RATE_END - MUTATION_RATE_START) * (gen / n_generations)
++
++        # Select next generation
++        offspring = toolbox.select(population, len(population))
++        offspring = list(map(toolbox.clone, offspring))
++
++        # Apply crossover and mutation
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < CROSSOVER_PROB:
++                toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++
++        for mutant in offspring:
++            if random.random() < current_mutation_rate:
++                toolbox.mutate(mutant)
++                del mutant.fitness.values
++
++        # Evaluate fitness for new individuals
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = map(toolbox.evaluate, invalid_ind)
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++
++        # Replace population
++        population[:] = offspring
++
++    # Get best individual
++    best_individual = tools.selBest(population, 1)[0]
++    return list(best_individual)
+ 
+ def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
++    """Main function to find the best sequence."""
++    start_time = time.time()
++    best_score = 0
++    best_sequence = None
++
++    # Multi-start approach to find better solutions
++    starting_sequences = []
++
++    # Add structured sequences
++    for _ in range(5):
++        length = random.randint(INITIAL_LENGTH_MIN, INITIAL_LENGTH_MAX)
++        seq = generate_structured_sequence(length)
++        starting_sequences.append(seq)
++
++    # Add random sequences
++    for _ in range(5):
++        seq = generate_random_valid_sequence()
++        starting_sequences.append(seq)
++
++    # Run parallel evolution on multiple starting points
++    pool = mp.Pool(mp.cpu_count())
++
++    # Use partial to pass additional arguments to the function
++    func = partial(evolve_sequences_parallel, n_generations=N_GENERATIONS//2)
++
++    results = pool.map(func, [starting_sequences] * 5)
++    pool.close()
++    pool.join()
++
++    # Refine each result with local gradient search
++    refined_results = []
++    for result in results:
++        refined_result = refine_with_gradient(result, max_iterations=20)
++        refined_results.append(refined_result)
++
++    # Evaluate all refined results
++    evaluated_results = []
++    for result in refined_results:
++        score = compute_autocorrelation_constant(result)
++        evaluated_results.append((score, result))
++
++    # Find best among all
++    if evaluated_results:
++        best_score, best_sequence = max(evaluated_results, key=lambda x: x[0])
++
++    # If we haven't found a good enough solution, do one final refinement
++    if best_score < 0.6654:  # 1/BENCHMARK_THRESHOLD
++        # Try a few more direct optimizations
++        for _ in range(10):
++            seq = generate_random_valid_sequence()
++            refined = refine_with_gradient(seq, max_iterations=50)
++            score = compute_autocorrelation_constant(refined)
++            if score > best_score:
++                best_score = score
++                best_sequence = refined
++
++    # Ensure we have a valid sequence
++    if best_sequence is None or len(best_sequence) == 0:
++        best_sequence = [1.0]  # fallback to simple case
++
++    # Limit size to prevent excessive computation
++    if len(best_sequence) > INITIAL_LENGTH_MAX:
++        best_sequence = best_sequence[:INITIAL_LENGTH_MAX]
++
++    # Clip values to [0, 1000] for practicality
++    best_sequence = [max(0, min(1000, x)) for x in best_sequence]
++
++    elapsed = time.time() - start_time
++    if elapsed > 170:
++        return best_sequence
+ 
+     return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

@@ -1,0 +1,297 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+import random
+import time
+from typing import List, Tuple
+from joblib import Parallel, delayed
+import copy
+
+def convolve_fft(a: List[float], b: List[float]) -> List[float]:
+    """Compute convolution using FFT for better performance."""
+    n = len(a)
+    if n == 0:
+        return []
+
+    # Pad to length 2*n - 1 for full convolution
+    padded_length = 2 * n - 1
+    fa = fft(a, padded_length)
+    fb = fft(b, padded_length)
+    result = ifft(fa * fb.conj()).real
+    # Return only the valid convolution part
+    return result[:n].tolist()
+
+def compute_c1(sequence: List[float]) -> float:
+    """Compute the C1 constant for a given sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 1e-10:
+        return float('inf')
+
+    # Compute convolution using FFT
+    conv = convolve_fft(sequence, sequence)
+    max_conv = np.max(conv)
+
+    # Compute C1 = 2n * max(conv) / (sum(a))^2
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+def evaluate_fitness(sequence: List[float]) -> float:
+    """Evaluate fitness as inverse of C1 (higher is better)."""
+    c1 = compute_c1(sequence)
+    if c1 == float('inf') or c1 <= 0:
+        return 0.0
+    return 1.0 / c1
+
+def generate_mathematical_step_function(n: int) -> List[float]:
+    """
+    Generate a mathematical step function designed to minimize autocorrelation peaks.
+    Uses geometric decay and strategic positioning for better performance.
+    """
+    # Use geometric progression for step heights with controlled randomness
+    num_steps = max(3, min(25, n // 15))
+
+    # Create step positions with clustered and sinusoidal modulation
+    step_positions = []
+    step_width = n / num_steps
+    for i in range(num_steps):
+        start_pos = int(i * step_width)
+        # Add sinusoidal modulation to avoid regularity
+        modulate = int(5 * np.sin(i * 0.5) * np.cos(i * 0.3))
+        actual_start = max(0, min(n-1, start_pos + modulate))
+        step_positions.append(actual_start)
+
+    # Ensure distinct positions and pad if needed
+    step_positions = sorted(set(step_positions))
+    while len(step_positions) < num_steps:
+        new_pos = random.randint(0, n-1)
+        if new_pos not in step_positions:
+            step_positions.append(new_pos)
+    step_positions = sorted(step_positions[:num_steps])
+
+    # Calculate step heights with geometric decay and controlled randomness
+    step_heights = []
+    base_decay = 0.85
+    base_height = 100.0
+    for i in range(len(step_positions)):
+        height_base = base_height * (base_decay ** i)
+        # Inject controlled randomness
+        variance = 0.15
+        noise = 1 + random.uniform(-variance, variance)
+        height = max(0.01, height_base * noise)
+        step_heights.append(height)
+
+    # Construct final sequence
+    sequence = [0.0] * n
+    for i, (pos, height) in enumerate(zip(step_positions, step_heights)):
+        if i < len(step_positions) - 1:
+            end_pos = step_positions[i+1]
+        else:
+            end_pos = n
+
+        pos = max(0, min(n-1, pos))
+        end_pos = max(pos+1, min(n, end_pos))
+
+        if end_pos > pos:
+            sequence[pos:end_pos] = [height] * (end_pos - pos)
+
+    return sequence
+
+def generate_structured_sequence(n: int) -> List[float]:
+    """Generate a structured sequence that's likely to perform well."""
+    # Exponential decay with some noise to break symmetry
+    sequence = [max(0.01, 100 * np.exp(-i * 0.05) * random.uniform(0.9, 1.1)) for i in range(n)]
+    return sequence
+
+def generate_population(population_size: int, min_n: int = 50, max_n: int = 1000) -> List[List[float]]:
+    """Generate diverse initial population with structured sequences."""
+    population = []
+    for _ in range(population_size):
+        n = random.randint(min_n, max_n)
+        # Use a mix of structured, mathematical step, and random sequences
+        if random.random() < 0.3:
+            # Mathematical step function
+            individual = generate_mathematical_step_function(n)
+        elif random.random() < 0.7:
+            # Structured sequence
+            individual = generate_structured_sequence(n)
+        else:
+            # Random sequence
+            individual = [random.uniform(0.1, 100) for _ in range(n)]
+        population.append(individual)
+    return population
+
+def mutate_sequence(sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
+    """Apply mutation to sequence with multiplicative Gaussian perturbation."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply multiplicative Gaussian perturbation
+            perturbation = random.gauss(1, 0.1)
+            mutated[i] *= abs(perturbation)  # Ensure non-negative
+            mutated[i] = max(0.01, mutated[i])
+    return mutated
+
+def crossover_sequences(parent1: List[float], parent2: List[float]) -> List[float]:
+    """Perform crossover between two sequences."""
+    min_len = min(len(parent1), len(parent2))
+    crossover_point = random.randint(1, min_len - 1)
+    child = parent1[:crossover_point] + parent2[crossover_point:]
+    return child
+
+def local_search_refinement(sequence: List[float], max_iterations: int = 10) -> List[float]:
+    """Apply local search refinement to improve sequence."""
+    best_seq = sequence.copy()
+    best_fitness = evaluate_fitness(best_seq)
+
+    for _ in range(max_iterations):
+        # Try small perturbations
+        mutant = mutate_sequence(best_seq, 0.05)
+        mutant_fitness = evaluate_fitness(mutant)
+
+        if mutant_fitness > best_fitness:
+            best_seq = mutant
+            best_fitness = mutant_fitness
+
+        # Coordinate-wise optimization
+        new_seq = best_seq.copy()
+        for i in range(len(new_seq)):
+            old_val = new_seq[i]
+            test_vals = [old_val * 0.9, old_val, old_val * 1.1]
+            best_test = old_val
+            best_test_fitness = evaluate_fitness(new_seq)
+
+            for test_val in test_vals:
+                test_seq = new_seq.copy()
+                test_seq[i] = max(0.01, test_val)
+                test_fitness = evaluate_fitness(test_seq)
+                if test_fitness > best_test_fitness:
+                    best_test = test_val
+                    best_test_fitness = test_fitness
+
+            new_seq[i] = best_test
+
+        test_fitness = evaluate_fitness(new_seq)
+        if test_fitness > best_fitness:
+            best_seq = new_seq
+            best_fitness = test_fitness
+
+    return best_seq
+
+def adaptive_mutation_rate(population_fitnesses: List[float]) -> float:
+    """Calculate adaptive mutation rate based on population diversity."""
+    if len(population_fitnesses) < 2:
+        return 0.1
+
+    std_dev = np.std(population_fitnesses)
+    avg_fitness = np.mean(population_fitnesses)
+
+    # Higher diversity = higher mutation rate
+    if avg_fitness > 0:
+        mutation_rate = min(0.3, max(0.01, 0.1 + std_dev / avg_fitness))
+    else:
+        mutation_rate = 0.1
+
+    return mutation_rate
+
+def search_for_best_sequence() -> List[float]:
+    """
+    Main function to search for the best coefficient sequence.
+    Uses evolutionary optimization with adaptive selection and local search.
+    """
+    start_time = time.time()
+    max_time = 175  # Leave some time for cleanup
+
+    # Configuration
+    population_size = 50
+    generations = 100
+    max_stagnation = 20
+    elite_size = 5
+
+    # Initialize population with structured sequences
+    population = generate_population(population_size)
+
+    best_solution = None
+    best_fitness = 0.0
+    stagnation_counter = 0
+    fitness_history = []
+
+    for generation in range(generations):
+        # Check time limit
+        if time.time() - start_time > max_time:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_solution = individual.copy()
+
+        fitness_history.append(best_fitness)
+
+        # Check for stagnation using multi-generational trend analysis
+        if len(fitness_history) > 10:
+            recent_improvement = np.mean(fitness_history[-10:]) - np.mean(fitness_history[:-10])
+            if recent_improvement < 0.0001:
+                stagnation_counter += 1
+                if stagnation_counter >= max_stagnation:
+                    # Reset with new diverse population
+                    population = generate_population(population_size)
+                    stagnation_counter = 0
+        else:
+            stagnation_counter = 0
+
+        # Calculate adaptive mutation rate
+        mutation_rate = adaptive_mutation_rate(fitness_scores)
+
+        # Selection: keep top individuals
+        sorted_indices = np.argsort(fitness_scores)[::-1][:elite_size]
+        elite = [population[i] for i in sorted_indices]
+
+        # Apply local search to elite members
+        refined_elite = []
+        for ind in elite:
+            refined = local_search_refinement(ind)
+            refined_elite.append(refined)
+        elite = refined_elite
+
+        # Create new population through selection, crossover, and mutation
+        new_population = elite.copy()
+
+        while len(new_population) < population_size:
+            # Tournament selection with larger size for stronger selection pressure
+            tournament_size = 5
+            tournament_indices = random.sample(range(len(elite)), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            parents = [elite[winner_idx]]
+            
+            # Second parent
+            second_parent_idx = random.choice([i for i in range(len(elite)) if i != winner_idx])
+            parents.append(elite[second_parent_idx])
+            
+            child = crossover_sequences(parents[0], parents[1])
+            mutated_child = mutate_sequence(child, mutation_rate)
+            new_population.append(mutated_child)
+
+        population = new_population
+
+    # Final local search on best solution
+    if best_solution is not None:
+        best_solution = local_search_refinement(best_solution, 20)
+
+    return best_solution if best_solution is not None else generate_structured_sequence(100)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

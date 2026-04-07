@@ -1,0 +1,358 @@
+<NAME>
+enhanced_constraint_validation
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the constraint validation system by adding more robust geometric checks and improving the efficiency of overlap detection. The key changes include:
+
+1. Adding a more precise overlap detection using SAT (Separating Axis Theorem) for early rejection
+2. Improving the containment check with better buffering strategy
+3. Implementing a more efficient bounding box calculation for faster constraint validation
+4. Adding a caching mechanism for frequently computed hexagon vertices to reduce redundant calculations
+
+These changes will help the optimization converge faster by providing more reliable constraint checking and reducing the number of invalid solutions that get evaluated in detail.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_hexagon_overlap_fast(hex1_vertices, hex2_vertices):
+    """Fast bounding box overlap check"""
+    # Get bounding boxes
+    x1 = [v[0] for v in hex1_vertices]
+    y1 = [v[1] for v in hex1_vertices]
+    x2 = [v[0] for v in hex2_vertices]
+    y2 = [v[1] for v in hex2_vertices]
+
+    min_x1, max_x1 = min(x1), max(x1)
+    min_y1, max_y1 = min(y1), max(y1)
+    min_x2, max_x2 = min(x2), max(x2)
+    min_y2, max_y2 = min(y2), max(y2)
+
+    # Check if bounding boxes overlap
+    if max_x1 < min_x2 or max_x2 < min_x1 or max_y1 < min_y2 or max_y2 < min_y1:
+        return False
+    return True
+
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely with buffer for precision"""
+    # Fast preliminary check
+    if not check_hexagon_overlap_fast(hex1_vertices, hex2_vertices):
+        return False
+
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    # Use a small buffer to prevent floating point precision issues
+    buffered_poly1 = poly1.buffer(1e-6)
+    buffered_poly2 = poly2.buffer(1e-6)
+    return buffered_poly1.intersects(buffered_poly2)
+=======
+def check_hexagon_overlap_fast(hex1_vertices, hex2_vertices):
+    """Fast bounding box overlap check"""
+    # Get bounding boxes
+    x1 = [v[0] for v in hex1_vertices]
+    y1 = [v[1] for v in hex1_vertices]
+    x2 = [v[0] for v in hex2_vertices]
+    y2 = [v[1] for v in hex2_vertices]
+
+    min_x1, max_x1 = min(x1), max(x1)
+    min_y1, max_y1 = min(y1), max(y1)
+    min_x2, max_x2 = min(x2), max(x2)
+    min_y2, max_y2 = min(y2), max(y2)
+
+    # Check if bounding boxes overlap
+    if max_x1 < min_x2 or max_x2 < min_x1 or max_y1 < min_y2 or max_y2 < min_y1:
+        return False
+    return True
+
+def check_hexagon_overlap_sat(hex1_vertices, hex2_vertices):
+    """Fast SAT-based overlap check for hexagons"""
+    # For regular hexagons, we can do a more efficient separation axis test
+    # Get all edge normals for both hexagons
+    axes = []
+
+    # Get edges and normals for first hexagon
+    for i in range(6):
+        p1 = hex1_vertices[i]
+        p2 = hex1_vertices[(i + 1) % 6]
+        edge = (p2[0] - p1[0], p2[1] - p1[1])
+        # Normal vector (perpendicular)
+        normal = (-edge[1], edge[0])
+        # Normalize
+        length = math.sqrt(normal[0]**2 + normal[1]**2)
+        if length > 1e-10:
+            normal = (normal[0]/length, normal[1]/length)
+        axes.append(normal)
+
+    # Get edges and normals for second hexagon
+    for i in range(6):
+        p1 = hex2_vertices[i]
+        p2 = hex2_vertices[(i + 1) % 6]
+        edge = (p2[0] - p1[0], p2[1] - p1[1])
+        # Normal vector (perpendicular)
+        normal = (-edge[1], edge[0])
+        # Normalize
+        length = math.sqrt(normal[0]**2 + normal[1]**2)
+        if length > 1e-10:
+            normal = (normal[0]/length, normal[1]/length)
+        axes.append(normal)
+
+    # Check each axis
+    for axis in axes:
+        # Project both polygons onto axis
+        proj1 = [p[0]*axis[0] + p[1]*axis[1] for p in hex1_vertices]
+        proj2 = [p[0]*axis[0] + p[1]*axis[1] for p in hex2_vertices]
+
+        min1, max1 = min(proj1), max(proj1)
+        min2, max2 = min(proj2), max(proj2)
+
+        # Check for overlap
+        if max1 < min2 or max2 < min1:
+            return False  # No overlap on this axis
+
+    return True  # Overlap exists
+
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely with buffer for precision"""
+    # Fast preliminary check with SAT
+    if not check_hexagon_overlap_sat(hex1_vertices, hex2_vertices):
+        return False
+
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    # Use a small buffer to prevent floating point precision issues
+    buffered_poly1 = poly1.buffer(1e-6)
+    buffered_poly2 = poly2.buffer(1e-6)
+    return buffered_poly1.intersects(buffered_poly2)
+
+# Cache for vertex computations to avoid recalculation
+_vertex_cache = {}
+
+def create_hexagon_vertices_cached(center_x, center_y, angle_deg, side_length=1):
+    """Create vertices with caching to avoid recomputation"""
+    key = (center_x, center_y, angle_deg, side_length)
+    if key in _vertex_cache:
+        return _vertex_cache[key]
+
+    angle_rad = math.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        angle = angle_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices.append((x, y))
+
+    _vertex_cache[key] = vertices
+    return vertices
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_outer_hex_side_calculation
+</NAME>
+
+<DESCRIPTION>
+This improvement refines the outer hexagon side length calculation to be more accurate and efficient. The changes include:
+
+1. Using a tighter bounding circle calculation instead of just bounding box diagonal
+2. Implementing a more accurate hexagon containment calculation that considers the hexagon's actual geometry
+3. Adding a safety factor adjustment based on hexagon size and arrangement
+4. Optimizing the calculation to use fewer redundant operations
+
+These improvements will help the optimization algorithm better estimate the required outer hexagon size, leading to more accurate fitness evaluations and potentially better convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_outer_hex_side_length(inner_hex_data):
+    """Calculate minimum outer hexagon side length that contains all inner hexagons using tight bounding"""
+    if len(inner_hex_data) == 0:
+        return 1000
+
+    # Get all vertices of inner hexagons
+    all_vertices = []
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices(center_x, center_y, angle)
+        all_vertices.extend(vertices)
+
+    if not all_vertices:
+        return 1000
+
+    # Calculate tight bounding box
+    xs = [v[0] for v in all_vertices]
+    ys = [v[1] for v in all_vertices]
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    # Calculate the diagonal of the bounding box
+    bbox_width = max_x - min_x
+    bbox_height = max_y - min_y
+
+    # For a hexagon, we need to ensure all points fit within the hexagon's circumscribed circle
+    # The diagonal of the bounding box gives us half the side length needed
+    # But we also consider the width and height separately
+    diagonal = math.sqrt(bbox_width**2 + bbox_height**2)
+
+    # For a regular hexagon, the relationship between circumradius and side length:
+    # Circumradius = side_length
+    # We want to fit our bounding box diagonal into the hexagon
+    # So the outer hexagon's side length should be at least diagonal/sqrt(3)
+    side_length = diagonal / math.sqrt(3)
+
+    # Add a small margin to ensure full containment
+    side_length *= 1.1
+
+    return side_length
+=======
+def calculate_outer_hex_side_length(inner_hex_data):
+    """Calculate minimum outer hexagon side length that contains all inner hexagons using tight bounding"""
+    if len(inner_hex_data) == 0:
+        return 1000
+
+    # Get all vertices of inner hexagons
+    all_vertices = []
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices_cached(center_x, center_y, angle)
+        all_vertices.extend(vertices)
+
+    if not all_vertices:
+        return 1000
+
+    # Calculate the centroid of all vertices
+    avg_x = sum(v[0] for v in all_vertices) / len(all_vertices)
+    avg_y = sum(v[1] for v in all_vertices) / len(all_vertices)
+
+    # Calculate maximum distance from centroid to any vertex
+    max_dist = 0
+    for x, y in all_vertices:
+        dist = math.sqrt((x - avg_x)**2 + (y - avg_y)**2)
+        max_dist = max(max_dist, dist)
+
+    # For a hexagon, the relationship is simpler:
+    # If we want to contain all points within a hexagon of side length R,
+    # then the maximum distance from center to any vertex is R.
+    # So we need side length = max_dist
+
+    # Add safety margin - typically 1.05 to 1.1 is sufficient
+    side_length = max_dist * 1.05
+
+    return side_length
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimized_evaluate_function
+</NAME>
+
+<DESCRIPTION>
+This improvement optimizes the evaluation function by:
+1. Reducing redundant vertex calculations through caching
+2. Early termination for constraint violations
+3. More efficient overlap checking using the SAT method
+4. Better organization of the constraint checking logic
+
+The changes will make each fitness evaluation faster and more reliable, allowing the evolutionary algorithm to explore the search space more efficiently and converge to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution(individual):
+    """Evaluate fitness of a solution - maximize 1/outer_hex_side_length"""
+    # Convert individual to hexagon data
+    hex_data = np.array(individual).reshape(-1, 3)
+
+    # Create outer hexagon vertices (assuming centered at origin)
+    outer_side_length = calculate_outer_hex_side_length(hex_data)
+
+    # Check constraints
+    try:
+        # Check containment for all inner hexagons
+        outer_hex_vertices = create_hexagon_vertices(0, 0, 0, outer_side_length)
+
+        # Check if all hexagons are contained and non-overlapping
+        total_penalty = 0
+
+        # Check containment
+        for i in range(len(hex_data)):
+            center_x, center_y, angle = hex_data[i]
+            inner_hex_vertices = create_hexagon_vertices(center_x, center_y, angle)
+            if not check_hexagon_containment(inner_hex_vertices, outer_hex_vertices):
+                total_penalty += 10000  # Large penalty for containment violation
+
+        # Check overlaps with early termination
+        overlap_count = 0
+        for i in range(len(hex_data)):
+            for j in range(i+1, len(hex_data)):
+                center_x1, center_y1, angle1 = hex_data[i]
+                center_x2, center_y2, angle2 = hex_data[j]
+
+                hex1_vertices = create_hexagon_vertices(center_x1, center_y1, angle1)
+                hex2_vertices = create_hexagon_vertices(center_x2, center_y2, angle2)
+
+                if check_hexagon_overlap(hex1_vertices, hex2_vertices):
+                    overlap_count += 1
+                    total_penalty += 10000  # Large penalty for overlap
+
+        # Return fitness (inverse of outer hex side length + penalties)
+        if total_penalty > 0:
+            return (1.0 / outer_side_length - total_penalty,),  # Return tuple for DEAP
+
+        return (1.0 / outer_side_length,),  # Maximize 1/outer_side_length
+
+    except Exception as e:
+        return (-10000,),  # Very poor fitness for invalid solutions
+=======
+def evaluate_solution(individual):
+    """Evaluate fitness of a solution - maximize 1/outer_hex_side_length"""
+    # Convert individual to hexagon data
+    hex_data = np.array(individual).reshape(-1, 3)
+
+    # Create outer hexagon vertices (assuming centered at origin)
+    outer_side_length = calculate_outer_hex_side_length(hex_data)
+
+    # Check constraints
+    try:
+        # Check containment for all inner hexagons
+        outer_hex_vertices = create_hexagon_vertices_cached(0, 0, 0, outer_side_length)
+
+        # Check if all hexagons are contained and non-overlapping
+        total_penalty = 0
+
+        # Check containment - early termination if violated
+        for i in range(len(hex_data)):
+            center_x, center_y, angle = hex_data[i]
+            inner_hex_vertices = create_hexagon_vertices_cached(center_x, center_y, angle)
+            if not check_hexagon_containment(inner_hex_vertices, outer_hex_vertices):
+                total_penalty += 10000  # Large penalty for containment violation
+                return (1.0 / outer_side_length - total_penalty,),  # Early return
+
+        # Check overlaps with early termination
+        overlap_count = 0
+        for i in range(len(hex_data)):
+            for j in range(i+1, len(hex_data)):
+                center_x1, center_y1, angle1 = hex_data[i]
+                center_x2, center_y2, angle2 = hex_data[j]
+
+                hex1_vertices = create_hexagon_vertices_cached(center_x1, center_y1, angle1)
+                hex2_vertices = create_hexagon_vertices_cached(center_x2, center_y2, angle2)
+
+                if check_hexagon_overlap(hex1_vertices, hex2_vertices):
+                    overlap_count += 1
+                    total_penalty += 10000  # Large penalty for overlap
+                    # Early termination - don't need to check more overlaps for this individual
+                    return (1.0 / outer_side_length - total_penalty,),
+
+        # Return fitness (inverse of outer hex side length + penalties)
+        if total_penalty > 0:
+            return (1.0 / outer_side_length - total_penalty,),  # Return tuple for DEAP
+
+        return (1.0 / outer_side_length,),  # Maximize 1/outer_side_length
+
+    except Exception as e:
+        return (-10000,),  # Very poor fitness for invalid solutions
+>>>>>>> REPLACE
+</DIFF>

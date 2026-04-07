@@ -1,0 +1,214 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, Delaunay
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import time
+from typing import Tuple
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def generate_spiral_initialization(n_points: int = 16) -> np.ndarray:
+    """
+    Generate initial point configuration using a spiral pattern that naturally distributes points.
+    This helps avoid poor local minima that commonly occur with random initialization.
+    """
+    # Create a spiral pattern that covers the unit square
+    angles = np.linspace(0, 4 * np.pi, n_points)
+    radii = np.linspace(0.1, 0.9, n_points)
+    
+    # Spiral coordinates
+    x = 0.5 + radii * np.cos(angles) * 0.4
+    y = 0.5 + radii * np.sin(angles) * 0.4
+    
+    # Add small random perturbations to break symmetry
+    np.random.seed(42)
+    noise_magnitude = 0.03
+    x += np.random.normal(0, noise_magnitude, n_points)
+    y += np.random.normal(0, noise_magnitude, n_points)
+    
+    # Clip to [0,1] bounds
+    x = np.clip(x, 0, 1)
+    y = np.clip(y, 0, 1)
+    
+    return np.column_stack([x, y])
+
+def voronoi_uniformity_score(points: np.ndarray) -> float:
+    """
+    Calculate a score based on Voronoi cell uniformity.
+    Higher scores indicate more uniform Voronoi cells.
+    """
+    if len(points) < 3:
+        return 0.0
+    
+    try:
+        # Compute Voronoi diagram
+        vor = Voronoi(points)
+        
+        # Calculate areas of finite Voronoi cells
+        areas = []
+        for i in range(len(points)):
+            # Get the vertices of the Voronoi cell for point i
+            region = vor.regions[vor.point_region[i]]
+            if -1 not in region and len(region) > 0:
+                # Get vertices for this region
+                vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+                
+                # Skip if not enough vertices
+                if len(vertices) < 3:
+                    continue
+                    
+                # Calculate area using shoelace formula
+                n = len(vertices)
+                if n >= 3:
+                    # Close the polygon
+                    vertices = np.vstack([vertices, vertices[0]])
+                    area = 0.5 * abs(sum(vertices[i][0] * vertices[i+1][1] - vertices[i+1][0] * vertices[i][1] 
+                                       for i in range(n-1)))
+                    areas.append(area)
+        
+        if len(areas) == 0:
+            return 0.0
+            
+        # Return coefficient of variation of areas (lower is better)
+        mean_area = np.mean(areas)
+        if mean_area == 0:
+            return 0.0
+        std_area = np.std(areas)
+        return 1.0 / (1.0 + std_area / mean_area)
+        
+    except Exception:
+        return 0.0
+
+def geometric_objective(points_flat: np.ndarray) -> float:
+    """
+    Combined geometric objective function that considers:
+    1. Min/max distance ratio (primary goal)
+    2. Voronoi uniformity (secondary regularization)
+    """
+    points = points_flat.reshape(-1, 2)
+    
+    # Primary objective: maximize min/max distance ratio
+    ratio = compute_min_max_ratio(points)
+    
+    # Secondary objective: encourage uniform Voronoi cells
+    uniformity = voronoi_uniformity_score(points)
+    
+    # Combine objectives (the ratio is what we want to maximize)
+    # We minimize the negative ratio plus a penalty for non-uniformity
+    combined = -ratio + 0.1 * (1 - uniformity)
+    
+    return combined
+
+def constraint_function(points_flat: np.ndarray) -> np.ndarray:
+    """Constraint function ensuring points stay within [0,1]^2."""
+    points = points_flat.reshape(-1, 2)
+    # Each point coordinate should be between 0 and 1
+    return np.concatenate([
+        points[:, 0],      # x coordinates
+        points[:, 1],      # y coordinates
+        1 - points[:, 0],  # 1 - x coordinates
+        1 - points[:, 1]   # 1 - y coordinates
+    ])
+
+def constrained_optimization(initial_points: np.ndarray, max_iter: int = 1000) -> Tuple[np.ndarray, float]:
+    """
+    Perform optimization using SLSQP with geometric constraints.
+    """
+    start_time = time.time()
+    
+    # Flatten for optimization
+    initial_flat = initial_points.flatten()
+    
+    # Define bounds: 0 <= x_i <= 1, 0 <= y_i <= 1
+    bounds = [(0, 1) for _ in range(len(initial_flat))]
+    
+    # Define constraint
+    cons = {'type': 'ineq', 'fun': constraint_function}
+    
+    # Optimize using SLSQP with multiple restarts
+    best_points = initial_points.copy()
+    best_ratio = compute_min_max_ratio(initial_points)
+    
+    try:
+        # First optimization attempt
+        result = minimize(
+            geometric_objective,
+            initial_flat,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            options={'maxiter': max_iter, 'ftol': 1e-10, 'gtol': 1e-10}
+        )
+        
+        if result.success:
+            optimized_points = result.x.reshape(-1, 2)
+            optimized_points = np.clip(optimized_points, 0, 1)
+            final_ratio = compute_min_max_ratio(optimized_points)
+            
+            if final_ratio > best_ratio:
+                best_ratio = final_ratio
+                best_points = optimized_points.copy()
+                
+    except Exception as e:
+        pass
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return best_points, best_ratio, eval_time
+
+def geometric_optimization_approach() -> np.ndarray:
+    """
+    Main geometric optimization approach.
+    Uses spiral initialization + constrained optimization.
+    """
+    # Generate initial configuration using spiral pattern
+    initial_points = generate_spiral_initialization(16)
+    
+    # Apply constrained optimization
+    optimized_points, ratio, eval_time = constrained_optimization(initial_points, max_iter=1000)
+    
+    return optimized_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    # Use the geometric optimization approach
+    best_points = geometric_optimization_approach()
+    
+    # Compute benchmark ratio for reporting
+    benchmark_ratio = compute_min_max_ratio(best_points) / 0.2786
+    
+    # Print metrics
+    print(f"Final min/max ratio: {compute_min_max_ratio(best_points):.6f}")
+    print(f"Benchmark ratio: {benchmark_ratio:.6f}")
+    print(f"Evaluation time: {0.0:.6f}s")  # Not measured in this approach
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,591 @@
+--- a/original.py
++++ b/original.py
+@@ -1,281 +1,372 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+ from scipy.optimize import differential_evolution
+ import warnings
+ from typing import List, Tuple
+ import random
++import time
++from numba import jit
++
++# Set seeds for reproducibility
++np.random.seed(42)
++random.seed(42)
++
++@jit(nopython=True)
++def compute_autoconvolution_fast(f_vals):
++    """Fast autoconvolution computation using Numba JIT compilation"""
++    n = len(f_vals)
++    g = np.zeros(2 * n - 1)
++    
++    # Manual convolution for speed
++    for i in range(n):
++        for j in range(n):
++            g[i + j] += f_vals[i] * f_vals[j]
++    
++    return g
++
++@jit(nopython=True)
++def compute_norms_piecewise(g_vals):
++    """Compute norms using piecewise linear integration matching evaluator's method"""
++    n = len(g_vals)
++    
++    if n <= 1:
++        return 0.0, 0.0, 0.0
++    
++    # Compute L2 norm squared using trapezoidal-like integration
++    # Formula: (dx/3) * (y_i^2 + y_i*y_{i+1} + y_{i+1}^2)
++    norm_2_sq = 0.0
++    dx = 0.5 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.5
++    
++    for i in range(n - 1):
++        y1 = g_vals[i]
++        y2 = g_vals[i + 1]
++        norm_2_sq += (dx / 3.0) * (y1 * y1 + y1 * y2 + y2 * y2)
++    
++    # Compute L1 norm (sum of absolute values)
++    norm_1 = 0.0
++    for i in range(n):
++        norm_1 += abs(g_vals[i])
++    
++    # Compute L-infinity norm (maximum absolute value)
++    norm_inf = 0.0
++    for i in range(n):
++        abs_val = abs(g_vals[i])
++        if abs_val > norm_inf:
++            norm_inf = abs_val
++    
++    return norm_2_sq, norm_1, norm_inf
++
++def compute_c2(func_vals: List[float]) -> float:
++    """
++    Compute C₂ value with optimized numerical integration using Numba JIT.
++    """
++    # Convert to numpy array
++    f_arr = np.array(func_vals, dtype=np.float64)
++    
++    # Compute autoconvolution using fast Numba version
++    g = compute_autoconvolution_fast(f_arr)
++    
++    # Compute norms using piecewise integration
++    norm_2_sq, norm_1, norm_inf = compute_norms_piecewise(g)
++    
++    # Prevent division by zero or extremely small values
++    if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++        return 0.0
++
++    return norm_2_sq / (norm_1 * norm_inf)
++
++def generate_spectral_guided_peaks(n_steps: int) -> List[Tuple[float, float, float]]:
++    """
++    Generate peaks guided by spectral analysis to optimize autoconvolution properties.
++    Uses logarithmic spacing and careful amplitude distribution.
++    """
++    peaks = []
++    
++    # Generate peak positions using logarithmic spacing for better distribution
++    # This helps avoid clustering near edges while ensuring good coverage
++    n_peaks = max(10, min(25, n_steps // 200))  # Adaptive peak count
++    
++    # Logarithmic distribution with strategic gaps
++    for i in range(n_peaks):
++        # Use a combination of logarithmic and uniform distribution
++        if i < n_peaks // 2:
++            # First half: logarithmic spread in central region
++            log_min = np.log(0.02)
++            log_max = np.log(0.15)
++            pos_log = log_min + (log_max - log_min) * i / max(1, n_peaks // 2 - 1)
++            pos = np.exp(pos_log)
++            pos = np.random.uniform(pos * 0.8, pos * 1.2)  # Add variation
++        else:
++            # Second half: spread towards edges
++            pos = np.random.uniform(-0.24, -0.15) if i % 2 == 0 else np.random.uniform(0.15, 0.24)
++        
++        # Ensure unique positions with minimum separation
++        if any(abs(pos - p[0]) < 0.01 for p in peaks):
++            continue
++            
++        # Height based on position - central peaks get higher amplitudes
++        if abs(pos) < 0.05:
++            height = np.random.uniform(2.0, 3.0)
++        elif abs(pos) < 0.15:
++            height = np.random.uniform(1.5, 2.5)
++        else:
++            height = np.random.uniform(1.0, 2.0)
++            
++        # Width inversely related to height for better balance
++        width = np.random.uniform(0.015, 0.04)
++        
++        peaks.append((pos, height, width))
++    
++    # Ensure we always have at least some peaks
++    if len(peaks) == 0:
++        peaks.append((0.0, 2.0, 0.02))
++    
++    # Sort by position for consistent ordering
++    peaks.sort(key=lambda x: x[0])
++    
++    return peaks
++
++def add_supplementary_structure(f_values: np.ndarray, x: np.ndarray):
++    """
++    Add supplementary structure to enhance autoconvolution properties.
++    """
++    n_steps = len(f_values)
++    # Add more structured bumps for better interference patterns
++    for i in range(0, n_steps, max(1, n_steps//25)):
++        if np.random.random() > 0.8:  # 20% chance to add bump
++            bump_center = x[i]
++            bump_height = np.random.uniform(0.05, 0.25)
++            bump_width = np.random.uniform(0.005, 0.02)
++            bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
++            f_values += bump
++
++def identify_key_peaks(func_vals: np.ndarray, x: np.ndarray, 
++                      min_height_ratio: float = 0.15) -> List[float]:
++    """
++    Identify key peak locations in the function for evolutionary optimization.
++    """
++    # Find local maxima with better filtering
++    peaks = []
++    threshold = min_height_ratio * np.max(func_vals)
++    
++    for i in range(1, len(func_vals)-1):
++        if (func_vals[i] > func_vals[i-1] and 
++            func_vals[i] > func_vals[i+1] and 
++            func_vals[i] > threshold):
++            peaks.append(x[i])
++
++    # If no significant peaks found, sample strategically
++    if not peaks:
++        # Sample from key regions: center, quarter points, and edges
++        key_positions = [x[len(x)//2], x[len(x)//4], x[3*len(x)//4], x[0], x[-1]]
++        # Keep only those with sufficient height
++        peaks = [pos for pos in key_positions if 
++                func_vals[np.argmin(np.abs(x - pos))] > threshold]
++
++    return sorted(set(peaks))  # Remove duplicates and sort
++
++def reconstruct_from_peaks(peak_params: List[float], x: np.ndarray) -> np.ndarray:
++    """
++    Reconstruct function from peak parameters with optimized Gaussian creation.
++    """
++    func = np.zeros_like(x)
++
++    # Peak parameters come in groups of 3: [position, height, width]
++    for i in range(0, len(peak_params), 3):
++        if i + 2 < len(peak_params):
++            pos = peak_params[i]
++            height = peak_params[i+1]
++            width = max(0.005, peak_params[i+2])  # Ensure minimum width
++
++            # Create Gaussian peak with better numerical stability
++            gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
++            func += gaussian_peak
++
++    return func
++
++def evolve_peak_parameters(initial_func: List[float], n_steps: int) -> List[float]:
++    """
++    Selective evolutionary optimization focusing only on peak parameters.
++    Uses enhanced genetic algorithm with better initialization and termination.
++    """
++    x = np.linspace(-0.25, 0.25, n_steps)
++    current_func = np.array(initial_func)
++    
++    # First, identify key peak characteristics from the current function
++    peak_locations = identify_key_peaks(current_func, x)
++    
++    # Create detailed peak parameter vector
++    # Format: [position_1, height_1, width_1, position_2, height_2, width_2, ...]
++    peak_params = []
++    for loc in peak_locations:
++        idx = np.argmin(np.abs(x - loc))
++        height = current_func[idx]
++        width = 0.025  # Initial guess for width
++        peak_params.extend([loc, height, width])
++
++    # If no peaks identified, initialize with basic structure
++    if len(peak_params) == 0:
++        # Add some default peaks
++        peak_params = [0.0, 1.5, 0.02, -0.1, 1.0, 0.03, 0.1, 1.0, 0.03]
++
++    # Improved evolutionary algorithm with better convergence
++    best_params = peak_params.copy()
++    best_c2 = compute_c2(current_func)
++    
++    # Enhanced EA parameters
++    population_size = 30  # Increased for better exploration
++    generations = 60      # More generations for better convergence
++    mutation_rate = 0.15  # Slightly higher mutation rate
++    
++    # Track convergence
++    last_improvement = 0
++    patience = 10  # Early stopping if no improvement
++    
++    # Initialize population with diverse solutions
++    population = []
++    for _ in range(population_size):
++        individual = []
++        # Add small random perturbations to base solution
++        for i, param in enumerate(best_params):
++            if isinstance(param, (int, float)):
++                # Mutate each parameter with appropriate scaling
++                mutation_strength = 0.1 * abs(param) if param != 0 else 0.1
++                mutated = param + random.gauss(0, mutation_strength)
++                individual.append(mutated)
++            else:
++                individual.append(param)
++        population.append(individual)
++
++    for generation in range(generations):
++        # Evaluate population
++        fitness_scores = []
++        evaluated_individuals = []
++
++        for individual in population:
++            # Reconstruct function from peak parameters
++            reconstructed_func = reconstruct_from_peaks(individual, x)
++            reconstructed_func = np.maximum(reconstructed_func, 0)
++
++            # Compute C2 for this individual
++            c2 = compute_c2(reconstructed_func)
++            fitness_scores.append(c2)
++            evaluated_individuals.append((individual, c2))
++
++        # Find best individual in this generation
++        best_idx = np.argmax(fitness_scores)
++        if fitness_scores[best_idx] > best_c2:
++            best_c2 = fitness_scores[best_idx]
++            best_params = evaluated_individuals[best_idx][0].copy()
++            last_improvement = generation
++
++        # Create new population through selection and mutation
++        # Tournament selection with better diversity
++        new_population = []
++        for _ in range(population_size):
++            # Select multiple individuals for tournament
++            tournament_size = 4
++            tournament_indices = random.sample(range(population_size), tournament_size)
++            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
++            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
++
++            # Clone and mutate with adaptive mutation rate
++            new_individual = population[winner_idx].copy()
++            adaptive_mutation_rate = mutation_rate * (1.0 - generation / generations)
++            
++            for i in range(len(new_individual)):
++                if random.random() < adaptive_mutation_rate:
++                    # Apply mutation with better scaling
++                    mutation_strength = 0.15 * abs(new_individual[i]) if new_individual[i] != 0 else 0.15
++                    new_individual[i] += random.gauss(0, mutation_strength)
++
++            new_population.append(new_individual)
++
++        population = new_population
++        
++        # Early stopping if no improvement
++        if generation - last_improvement > patience:
++            break
++
++    # Return the best reconstructed function
++    best_function = reconstruct_from_peaks(best_params, x)
++    return best_function.tolist()
+ 
+ def construct_function() -> list[float]:
+     """
+     Spectral-guided step function optimizer that leverages frequency domain analysis
+     to construct optimal step functions for maximizing C₂ constant.
+     Implements selective evolutionary optimization for peak parameters.
+     """
+-    np.random.seed(42)
+-
++    start_time = time.time()
++    
+     # Determine number of steps with reasonable resolution
+     n_steps = 5000  # Fixed at 5000 to match AlphaEvolve benchmark
+ 
+     # Create x-axis points in [-1/4, 1/4]
+     x = np.linspace(-0.25, 0.25, n_steps)
+ 
+     # Phase 1: Spectral-guided initialization with peak identification
+-    # Analyze what spectral properties lead to good autoconvolution behavior
+     spectral_peaks = generate_spectral_guided_peaks(n_steps)
+ 
+     # Build function from spectral-guided peaks
+     base_function = np.zeros_like(x)
+ 
+     # Apply the generated peaks with optimized parameters
+     for peak_info in spectral_peaks:
+         pos, height, width = peak_info
+         gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+         base_function += gaussian_peak
+ 
+-    # Add supplementary structure for better autoconvolution properties
++    # Add supplementary structure for better autoconvolution properties  
+     add_supplementary_structure(base_function, x)
+ 
+-    # Ensure non-negative values and normalize
++    # Ensure non-negative values and normalize with better scaling
+     base_function = np.maximum(base_function, 0)
+     if np.max(base_function) > 0:
+-        base_function = base_function / np.max(base_function) * 2.0
+-
+-    # Apply smoothing to reduce sharp transitions
+-    window_size = min(51, max(3, n_steps // 100))
++        # Scale more conservatively to maintain peak structure
++        base_function = base_function / np.max(base_function) * 1.8
++
++    # Apply optimized smoothing to reduce sharp transitions
++    window_size = min(51, max(3, n_steps // 150))
+     if window_size % 2 == 0:
+         window_size += 1
+     if window_size > 1:
++        # Use a more efficient smoothing kernel
+         window = np.ones(window_size) / window_size
+         base_function = np.convolve(base_function, window, mode='same')
+ 
+     # Convert to list and apply final refinement using selective evolutionary approach
+     step_values = base_function.tolist()
+ 
+     # Phase 2: Selective evolutionary optimization of peak parameters
+     try:
+         refined_values = evolve_peak_parameters(step_values, n_steps)
+         step_values = refined_values
++        
++        # Additional refinement pass if time permits
++        if time.time() - start_time < 80:
++            refined_values2 = evolve_peak_parameters(step_values, n_steps)
++            step_values = refined_values2
+     except Exception as e:
+         warnings.warn(f"Evolutionary refinement failed: {str(e)}")
+         pass
+ 
+     # Add final robustness noise
+-    final_noise = np.random.normal(0, 0.005, len(step_values))
++    final_noise = np.random.normal(0, 0.003, len(step_values))
+     final_func = np.array(step_values) + final_noise
+     final_func = np.maximum(final_func, 0)
+ 
++    # Ensure we don't exceed the time limit
++    if time.time() - start_time > 85:
++        # Return a stable baseline if we're running out of time
++        return [1.0] * 1000
++
+     return final_func.tolist()
+-
+-def generate_spectral_guided_peaks(n_steps: int) -> List[Tuple[float, float, float]]:
+-    """
+-    Generate peaks guided by spectral analysis to optimize autoconvolution properties.
+-    """
+-    x = np.linspace(-0.25, 0.25, n_steps)
+-    peaks = []
+-
+-    # Create peaks with strategic distribution based on spectral optimization principles
+-    # Central region - dense peaks for smooth autoconvolution
+-    central_count = 12
+-    for i in range(central_count):
+-        pos = np.random.uniform(-0.1, 0.1)
+-        height = np.random.uniform(1.8, 2.5)
+-        width = np.random.uniform(0.015, 0.035)
+-        peaks.append((pos, height, width))
+-
+-    # Mid-region - moderate density
+-    mid_count = 8
+-    for i in range(mid_count):
+-        pos = np.random.choice([-0.2, -0.18, -0.16, -0.14, -0.12, -0.1,
+-                               0.1, 0.12, 0.14, 0.16, 0.18, 0.2])
+-        height = np.random.uniform(1.5, 2.2)
+-        width = np.random.uniform(0.025, 0.045)
+-        peaks.append((pos, height, width))
+-
+-    # Outer region - sparse peaks
+-    outer_count = 5
+-    for i in range(outer_count):
+-        pos = np.random.choice([-0.24, -0.22, -0.2, 0.2, 0.22, 0.24])
+-        height = np.random.uniform(1.2, 1.8)
+-        width = np.random.uniform(0.035, 0.06)
+-        peaks.append((pos, height, width))
+-
+-    return peaks
+-
+-def add_supplementary_structure(f_values: np.ndarray, x: np.ndarray):
+-    """
+-    Add supplementary structure to enhance autoconvolution properties.
+-    """
+-    n_steps = len(f_values)
+-    for i in range(0, n_steps, max(1, n_steps//30)):
+-        if np.random.random() > 0.85:
+-            bump_center = x[i]
+-            bump_height = np.random.uniform(0.05, 0.2)
+-            bump_width = np.random.uniform(0.008, 0.018)
+-            bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+-            f_values += bump
+-
+-def evolve_peak_parameters(initial_func: List[float], n_steps: int) -> List[float]:
+-    """
+-    Selective evolutionary optimization focusing only on peak parameters (positions and heights)
+-    rather than all function values to improve convergence speed and quality.
+-    """
+-    x = np.linspace(-0.25, 0.25, n_steps)
+-    current_func = np.array(initial_func)
+-
+-    # First, identify key peak characteristics from the current function
+-    # This helps us understand which parameters matter most for autoconvolution
+-    peak_locations = identify_key_peaks(current_func, x)
+-
+-    # Create a representative peak parameter vector
+-    # Format: [position_1, height_1, width_1, position_2, height_2, width_2, ...]
+-    peak_params = []
+-    for loc in peak_locations:
+-        # Find the peak height at this location
+-        idx = np.argmin(np.abs(x - loc))
+-        height = current_func[idx]
+-        # Use a typical width for initial guess
+-        width = 0.025
+-        peak_params.extend([loc, height, width])
+-
+-    # Evolutionary optimization of peak parameters only
+-    best_params = peak_params.copy()
+-    best_c2 = compute_c2(current_func)
+-
+-    # Simple evolutionary algorithm focused on peak parameters
+-    population_size = 20
+-    generations = 50
+-    mutation_rate = 0.1
+-
+-    # Initialize population
+-    population = [best_params.copy()]
+-    for _ in range(population_size - 1):
+-        individual = [p + random.gauss(0, 0.05 * abs(p) if p != 0 else 0.05)
+-                     for p in best_params]
+-        population.append(individual)
+-
+-    for generation in range(generations):
+-        # Evaluate population
+-        fitness_scores = []
+-        evaluated_individuals = []
+-
+-        for individual in population:
+-            # Reconstruct function from peak parameters
+-            reconstructed_func = reconstruct_from_peaks(individual, x)
+-            reconstructed_func = np.maximum(reconstructed_func, 0)
+-
+-            # Compute C2 for this individual
+-            c2 = compute_c2(reconstructed_func)
+-            fitness_scores.append(c2)
+-            evaluated_individuals.append((individual, c2))
+-
+-        # Find best individual in this generation
+-        best_idx = np.argmax(fitness_scores)
+-        if fitness_scores[best_idx] > best_c2:
+-            best_c2 = fitness_scores[best_idx]
+-            best_params = evaluated_individuals[best_idx][0].copy()
+-
+-        # Create new population through selection and mutation
+-        # Tournament selection
+-        new_population = []
+-        for _ in range(population_size):
+-            # Select two individuals
+-            tournament_size = 3
+-            tournament_indices = random.choices(range(population_size), k=tournament_size)
+-            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+-            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+-
+-            # Clone and mutate
+-            new_individual = population[winner_idx].copy()
+-            for i in range(len(new_individual)):
+-                if random.random() < mutation_rate:
+-                    # Apply mutation with appropriate scaling
+-                    mutation_strength = 0.1 * abs(new_individual[i]) if new_individual[i] != 0 else 0.1
+-                    new_individual[i] += random.gauss(0, mutation_strength)
+-
+-            new_population.append(new_individual)
+-
+-        population = new_population
+-
+-    # Return the best reconstructed function
+-    best_function = reconstruct_from_peaks(best_params, x)
+-    return best_function.tolist()
+-
+-def identify_key_peaks(func_vals: np.ndarray, x: np.ndarray, min_height_ratio: float = 0.1) -> List[float]:
+-    """
+-    Identify key peak locations in the function for evolutionary optimization.
+-    """
+-    # Find local maxima
+-    peaks = []
+-    for i in range(1, len(func_vals)-1):
+-        if func_vals[i] > func_vals[i-1] and func_vals[i] > func_vals[i+1]:
+-            # Only consider significant peaks
+-            if func_vals[i] > min_height_ratio * np.max(func_vals):
+-                peaks.append(x[i])
+-
+-    # If no peaks found, return some strategic positions
+-    if not peaks:
+-        peaks = [x[len(x)//2], x[len(x)//4], x[3*len(x)//4]]
+-
+-    return sorted(set(peaks))  # Remove duplicates and sort
+-
+-def reconstruct_from_peaks(peak_params: List[float], x: np.ndarray) -> np.ndarray:
+-    """
+-    Reconstruct function from peak parameters.
+-    """
+-    func = np.zeros_like(x)
+-
+-    # Peak parameters come in groups of 3: [position, height, width]
+-    for i in range(0, len(peak_params), 3):
+-        if i + 2 < len(peak_params):
+-            pos = peak_params[i]
+-            height = peak_params[i+1]
+-            width = peak_params[i+2]
+-
+-            # Create Gaussian peak
+-            gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+-            func += gaussian_peak
+-
+-    return func
+-
+-def compute_c2(func_vals: List[float]) -> float:
+-    """
+-    Compute C₂ value with optimized numerical integration.
+-    """
+-    f = np.array(func_vals)
+-
+-    # Autoconvolution using convolution
+-    g = np.convolve(f, f, mode='full')
+-    g = g[len(g)//2:]  # Take middle portion
+-
+-    # Adjust for correct length
+-    if len(g) > len(f):
+-        g = g[:len(f)]
+-
+-    # Compute norms with improved numerical accuracy
+-    # ||g||₂² (L2 norm squared) - using piecewise quadratic integration
+-    dx = 0.5 / (len(f) - 1) if len(f) > 1 else 0.5
+-    norm_2_sq = 0
+-    for i in range(len(g)-1):
+-        # Trapezoidal rule for better precision
+-        area = dx * (g[i]**2 + g[i+1]**2) / 2
+-        norm_2_sq += area
+-
+-    # ||g||₁ (L1 norm)
+-    norm_1 = np.sum(np.abs(g)) * dx
+-
+-    # ||g||∞ (infinity norm)
+-    norm_inf = np.max(np.abs(g))
+-
+-    # Prevent division by zero or extremely small values
+-    if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+-        return 0.0
+-
+-    return norm_2_sq / (norm_1 * norm_inf)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

@@ -1,0 +1,244 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.fft import fft, ifft, fftfreq
+from scipy.optimize import differential_evolution
+import random
+import time
+from typing import List, Tuple
+
+class SpectralEvolutionOptimizer:
+    """Novel spectral-domain optimization for maximizing C2 constant."""
+    
+    def __init__(self, seed: int = 42, max_time: float = 90.0):
+        self.seed = seed
+        self.max_time = max_time
+        self.start_time = time.time()
+        
+        np.random.seed(seed)
+        random.seed(seed)
+        
+    def _time_remaining(self) -> float:
+        """Check time remaining for computation."""
+        return self.max_time - (time.time() - self.start_time)
+        
+    def _compute_autoconvolution_norms(self, f: np.ndarray) -> Tuple[float, float, float]:
+        """Compute norms using efficient piecewise integration."""
+        # Direct convolution (already optimized)
+        g = signal.convolve(f, f, mode='full')
+        g = g[len(g)//2:]
+        if len(g) > len(f):
+            g = g[:len(f)]
+            
+        # Compute norms using the provided integration method
+        norm_2_sq = 0.0
+        dx = 0.5 / max(1, len(g) - 1)
+        
+        # Trapezoidal-like piecewise linear integration for L2^2
+        if len(g) > 1:
+            for i in range(len(g) - 1):
+                y1, y2 = g[i], g[i+1]
+                norm_2_sq += (dx/3.0) * (y1**2 + y1*y2 + y2**2)
+        
+        norm_1 = np.sum(np.abs(g)) / (len(g) + 1)
+        norm_inf = np.max(np.abs(g))
+        
+        return norm_2_sq, norm_1, norm_inf
+        
+    def _compute_c2(self, f: np.ndarray) -> float:
+        """Compute C2 value efficiently."""
+        try:
+            norm_2_sq, norm_1, norm_inf = self._compute_autoconvolution_norms(f)
+            
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                return 0.0
+                
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            return float(c2)
+        except Exception:
+            return 0.0
+    
+    def _create_initial_spectrum(self, n_steps: int) -> np.ndarray:
+        """Create structured initial spectrum in frequency domain."""
+        # Use frequency-domain approach: create a spectrum that encourages good autoconvolution
+        freqs = fftfreq(n_steps, 0.5/n_steps)
+        spectrum = np.zeros(n_steps, dtype=complex)
+        
+        # Add multiple frequency components at different scales
+        # This targets the autoconvolution behavior directly by shaping frequency content
+        for i in range(1, min(20, n_steps//2)):
+            # Add harmonics spaced geometrically
+            scale = 1.0 / (1.0 + i*0.3)
+            freq = i * 0.1
+            mag = np.random.uniform(0.5, 2.0) * scale
+            
+            # Place peaks at specific frequencies
+            if i < n_steps//2:
+                spectrum[i] = mag * np.exp(1j * np.random.uniform(0, 2*np.pi))
+                if i > 0:
+                    spectrum[n_steps-i] = np.conj(spectrum[i])  # Hermitian symmetry
+
+        # Add central frequency components for smoothness  
+        spectrum[0] = np.random.uniform(0.5, 1.5)  # DC component
+        if n_steps > 1:
+            spectrum[1] = np.random.uniform(0.2, 0.8) * np.exp(1j * np.random.uniform(0, 2*np.pi))
+            if n_steps > 2:
+                spectrum[n_steps-1] = np.conj(spectrum[1])
+        
+        return spectrum
+        
+    def _spectral_peak_modification(self, spectrum: np.ndarray, strength: float = 0.1) -> np.ndarray:
+        """Modify spectral peaks to improve autoconvolution properties."""
+        modified_spec = spectrum.copy()
+        
+        # Convert to absolute values for peak detection
+        abs_spec = np.abs(modified_spec)
+        
+        # Find significant peaks in spectrum
+        peaks = []
+        for i in range(1, len(abs_spec)-1):
+            if abs_spec[i] > abs_spec[i-1] and abs_spec[i] > abs_spec[i+1]:
+                peaks.append((i, abs_spec[i]))
+                
+        # Sort by magnitude and modify top peaks
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        top_peaks = peaks[:min(5, len(peaks))]
+        
+        # Modify these peaks to encourage desirable autoconvolution
+        for pos, _ in top_peaks:
+            if pos < len(modified_spec)//2:  # Only modify positive frequencies
+                # Adjust magnitude to influence autoconvolution
+                phase = np.angle(modified_spec[pos])
+                new_mag = abs(modified_spec[pos]) * (1.0 + np.random.uniform(-strength, strength))
+                modified_spec[pos] = new_mag * np.exp(1j * phase)
+                
+                # Mirror to maintain hermitian symmetry
+                if len(modified_spec) - pos < len(modified_spec):
+                    modified_spec[len(modified_spec) - pos] = np.conj(modified_spec[pos])
+                    
+        return modified_spec
+        
+    def _optimize_spectral_domain(self, spectrum: np.ndarray, n_iterations: int = 50) -> np.ndarray:
+        """Optimize spectrum iteratively using gradient ascent on C2."""
+        current_spec = spectrum.copy()
+        best_c2 = 0.0
+        best_spec = current_spec.copy()
+        
+        # Iterative spectral modification
+        for iter_num in range(n_iterations):
+            if self._time_remaining() < 2.0:
+                break
+                
+            # Create candidate by modifying spectrum
+            candidate_spec = self._spectral_peak_modification(current_spec, strength=0.05)
+            
+            # Convert back to time domain and evaluate
+            try:
+                # Inverse FFT to get time-domain function
+                time_func = np.real(ifft(candidate_spec))
+                # Ensure non-negativity and normalize
+                time_func = np.maximum(time_func, 0)
+                if np.max(time_func) > 0:
+                    time_func = time_func / np.max(time_func) * 2.0
+                
+                # Evaluate C2
+                c2_val = self._compute_c2(time_func)
+                
+                if c2_val > best_c2:
+                    best_c2 = c2_val
+                    best_spec = candidate_spec.copy()
+                    current_spec = candidate_spec.copy()
+                else:
+                    # Occasionally accept worse solutions to escape local maxima
+                    if np.random.random() < 0.05:
+                        current_spec = candidate_spec.copy()
+                        
+            except Exception:
+                continue
+                
+        return best_spec
+        
+    def _refine_with_local_search(self, final_func: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply local search to fine-tune the final function."""
+        current_func = final_func.copy()
+        current_c2 = self._compute_c2(current_func)
+        
+        for i in range(max_iter):
+            if self._time_remaining() < 1.0:
+                break
+                
+            # Small perturbation
+            perturbed = current_func.copy()
+            idx = np.random.randint(len(perturbed))
+            delta = np.random.uniform(-0.1, 0.1)
+            perturbed[idx] = max(0, perturbed[idx] + delta)
+            
+            # Evaluate
+            new_c2 = self._compute_c2(perturbed)
+            if new_c2 > current_c2:
+                current_func = perturbed
+                current_c2 = new_c2
+                
+        return current_func
+        
+    def construct_function(self) -> List[float]:
+        """Main function to construct step-function with high C2 value."""
+        if self._time_remaining() < 2.0:
+            return [0.5] * 1000
+            
+        # Determine number of steps with dynamic allocation
+        n_steps = np.random.randint(2000, 8000)
+        
+        try:
+            # Step 1: Create initial spectral structure
+            initial_spectrum = self._create_initial_spectrum(n_steps)
+            
+            # Step 2: Optimize in spectral domain
+            optimized_spectrum = self._optimize_spectral_domain(initial_spectrum, n_iterations=30)
+            
+            # Step 3: Convert back to time domain
+            time_domain = np.real(ifft(optimized_spectrum))
+            
+            # Step 4: Post-process
+            time_domain = np.maximum(time_domain, 0)
+            if np.max(time_domain) > 0:
+                time_domain = time_domain / np.max(time_domain) * 1.8
+                
+            # Step 5: Apply final local refinement
+            final_func = self._refine_with_local_search(time_domain.tolist(), max_iter=50)
+            
+            # Step 6: Add robustness noise
+            noise_level = 0.01
+            noisy_func = np.array(final_func) + np.random.normal(0, noise_level, len(final_func))
+            noisy_func = np.maximum(noisy_func, 0)
+            
+            return noisy_func.tolist()
+            
+        except Exception:
+            # Fallback to simple structured function
+            try:
+                x = np.linspace(-0.25, 0.25, n_steps)
+                # Create a structured function with multiple peaks
+                func = np.zeros_like(x)
+                centers = [-0.2, -0.1, 0, 0.1, 0.2]
+                heights = [1.5, 1.8, 2.2, 1.8, 1.5]
+                widths = [0.03, 0.04, 0.05, 0.04, 0.03]
+                
+                for center, height, width in zip(centers, heights, widths):
+                    func += height * np.exp(-0.5 * ((x - center) / width)**2)
+                    
+                func = np.maximum(func, 0)
+                if np.max(func) > 0:
+                    func = func / np.max(func) * 1.5
+                    
+                return func.tolist()
+            except Exception:
+                return [0.5] * n_steps
+
+def construct_function() -> List[float]:
+    """Interface function for spectral evolution optimizer."""
+    optimizer = SpectralEvolutionOptimizer()
+    return optimizer.construct_function()
+
+# EVOLVE-BLOCK-END

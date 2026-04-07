@@ -1,0 +1,285 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+from typing import List, Tuple
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+        
+        # Calculate pairwise distances
+        distances = pdist(points)
+        
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        # Avoid division by zero
+        if d_max == 0:
+            return -np.inf
+        
+        # Return negative ratio (since we want to maximize)
+        return -d_min / d_max
+    
+    def constraint(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        return np.concatenate([
+            points[:, 0],           # x coordinates >= 0
+            1 - points[:, 0],       # x coordinates <= 1
+            points[:, 1],           # y coordinates >= 0
+            1 - points[:, 1]        # y coordinates <= 1
+        ])
+    
+    def compute_ratio(points):
+        """Compute the min/max distance ratio for given points."""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max == 0:
+            return 0.0
+        return d_min / d_max
+    
+    def generate_grid_configs() -> List[np.ndarray]:
+        """Generate multiple grid-based initial configurations."""
+        configs = []
+        
+        # 2x2 grid with perturbations
+        np.random.seed(42)
+        grid_x = np.linspace(0.1, 0.9, 2)
+        grid_y = np.linspace(0.1, 0.9, 2)
+        grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+        noise = np.random.normal(0, 0.1, (4, 2))
+        config1 = np.clip(grid_points + noise, 0, 1)
+        configs.append(config1)
+        
+        # 3x3 grid with perturbations  
+        np.random.seed(123)
+        grid_x = np.linspace(0.05, 0.95, 3)
+        grid_y = np.linspace(0.05, 0.95, 3)
+        grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+        noise = np.random.normal(0, 0.08, (9, 2))
+        config2 = np.clip(grid_points + noise, 0, 1)
+        configs.append(config2)
+        
+        # 4x4 grid with perturbations
+        np.random.seed(456)
+        grid_x = np.linspace(0.1, 0.9, 4)
+        grid_y = np.linspace(0.1, 0.9, 4)
+        grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+        noise = np.random.normal(0, 0.05, (16, 2))
+        config3 = np.clip(grid_points + noise, 0, 1)
+        configs.append(config3)
+        
+        # Additional structured configuration with golden ratio spiral
+        np.random.seed(789)
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        angles = np.arange(16) * 2 * np.pi / phi
+        radii = np.sqrt(np.linspace(0.05, 0.45, 16))
+        spiral_points = np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
+        spiral_points = np.clip((spiral_points + 1) / 2, 0, 1)
+        configs.append(spiral_points)
+        
+        # Hexagonal arrangement
+        np.random.seed(999)
+        hex_x = np.array([0.15, 0.45, 0.75, 0.3, 0.6, 0.15, 0.45, 0.75, 0.225, 0.525, 0.825, 0.375, 0.675, 0.225, 0.525, 0.825])
+        hex_y = np.array([0.15, 0.15, 0.15, 0.45, 0.45, 0.75, 0.75, 0.75, 0.3, 0.3, 0.3, 0.6, 0.6, 0.9, 0.9, 0.9])
+        hex_points = np.column_stack([hex_x, hex_y])
+        noise = np.random.normal(0, 0.03, (16, 2))
+        config5 = np.clip(hex_points + noise, 0, 1)
+        configs.append(config5)
+        
+        return configs
+    
+    def smart_perturbation(initial_points: np.ndarray, best_ratio: float) -> np.ndarray:
+        """Apply adaptive perturbations based on current solution quality."""
+        # Scale perturbation inversely with the current ratio
+        base_perturbation = 0.1
+        adaptive_scale = max(0.1, 1.0 / (best_ratio + 0.01))  # Prevent extreme scaling
+        perturbation_magnitude = base_perturbation * adaptive_scale * 0.5
+        
+        # Add noise
+        noise = np.random.normal(0, perturbation_magnitude/3, (16, 2))
+        perturbed_points = np.clip(initial_points + noise, 0, 1)
+        return perturbed_points
+    
+    def tournament_selection(population: List[np.ndarray], fitnesses: List[float], tournament_size: int = 3) -> np.ndarray:
+        """Select individual using tournament selection."""
+        tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_idx].copy()
+    
+    def adaptive_crossover(parent1: np.ndarray, parent2: np.ndarray, generation: int) -> np.ndarray:
+        """Create offspring with adaptive crossover rate."""
+        # Higher crossover rate in early generations, lower in later ones
+        crossover_rate = max(0.3, 0.8 - generation * 0.02)
+        
+        if np.random.random() < crossover_rate:
+            # Uniform crossover
+            mask = np.random.random(16) > 0.5
+            child = np.where(mask, parent1, parent2)
+        else:
+            # Clone parent
+            child = parent1.copy()
+            
+        return child
+    
+    def evolve_population(initial_configs: List[np.ndarray], max_generations: int = 20) -> np.ndarray:
+        """Evolve population of configurations to find better starting points."""
+        population_size = 8
+        population = initial_configs[:population_size]  # Start with initial configs
+        
+        # Evaluate initial population
+        fitnesses = []
+        for i, config in enumerate(population):
+            try:
+                # Quick optimization to evaluate fitness
+                x0 = config.flatten()
+                bounds = [(0, 1) for _ in range(32)]
+                result = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 100, 'ftol': 1e-5, 'gtol': 1e-5}
+                )
+                if result.success:
+                    fitness = -compute_ratio(result.x.reshape(-1, 2))  # Negative because we're minimizing
+                else:
+                    fitness = -np.inf
+                fitnesses.append(fitness)
+            except Exception:
+                fitnesses.append(-np.inf)
+        
+        # Evolve population
+        for generation in range(max_generations):
+            new_population = []
+            
+            # Elitism: keep best 2 individuals
+            elite_indices = np.argsort(fitnesses)[-2:]
+            for idx in elite_indices:
+                new_population.append(population[idx].copy())
+            
+            # Generate rest through selection, crossover, and mutation
+            while len(new_population) < population_size:
+                parent1 = tournament_selection(population, fitnesses)
+                parent2 = tournament_selection(population, fitnesses)
+                
+                # Crossover
+                child = adaptive_crossover(parent1, parent2, generation)
+                
+                # Mutation (smart perturbation)
+                if np.random.random() < 0.3:  # 30% mutation rate
+                    # Find the best current solution to guide perturbation
+                    best_idx = np.argmax(fitnesses)
+                    best_ratio = -fitnesses[best_idx] if fitnesses[best_idx] != -np.inf else 0.0
+                    child = smart_perturbation(child, best_ratio)
+                
+                new_population.append(child)
+            
+            population = new_population
+            
+            # Re-evaluate fitnesses
+            fitnesses = []
+            for i, config in enumerate(population):
+                try:
+                    x0 = config.flatten()
+                    bounds = [(0, 1) for _ in range(32)]
+                    result = minimize(
+                        objective,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 100, 'ftol': 1e-5, 'gtol': 1e-5}
+                    )
+                    if result.success:
+                        fitness = -compute_ratio(result.x.reshape(-1, 2))
+                    else:
+                        fitness = -np.inf
+                    fitnesses.append(fitness)
+                except Exception:
+                    fitnesses.append(-np.inf)
+        
+        # Return best individual from evolved population
+        best_idx = np.argmax(fitnesses)
+        return population[best_idx]
+    
+    def optimize_with_refinement(x0):
+        """Perform sequential optimization with refinement stages."""
+        # Stage 1: Fast optimization with L-BFGS-B
+        bounds = [(0, 1) for _ in range(32)]
+        result1 = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 200, 'ftol': 1e-6, 'gtol': 1e-6}
+        )
+        
+        if not result1.success:
+            return None
+            
+        # Stage 2: Precise optimization with SLSQP
+        result2 = minimize(
+            objective,
+            result1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraint},
+            options={'maxiter': 300, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+        
+        if result2.success:
+            return result2.x
+        return None
+
+    # Multi-start optimization with improved initializations
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Generate multiple initial configurations
+    initial_configs = generate_grid_configs()
+    
+    # Evolve population to find even better starting points
+    evolved_best = evolve_population(initial_configs, max_generations=15)
+    
+    # Add evolved solution to initial configs
+    initial_configs.append(evolved_best)
+    
+    # Run optimizations with different initial configurations
+    for i, initial_points in enumerate(initial_configs):
+        try:
+            # Optimize using our refined approach
+            optimized_x = optimize_with_refinement(initial_points.flatten())
+            
+            if optimized_x is not None:
+                optimized_points = optimized_x.reshape(-1, 2)
+                final_ratio = compute_ratio(optimized_points)
+                
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = optimized_points.copy()
+                    
+        except Exception as e:
+            continue
+    
+    # If no successful optimization, return the evolved best
+    if best_points is None:
+        best_points = evolved_best if evolved_best is not None else initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+        
+    return best_points
+
+# EVOLVE-BLOCK-END

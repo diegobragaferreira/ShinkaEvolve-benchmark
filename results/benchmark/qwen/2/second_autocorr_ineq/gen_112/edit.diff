@@ -1,0 +1,268 @@
+--- a/original.py
++++ b/original.py
+@@ -1,248 +1,254 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+ import random
+ from typing import List, Tuple
+ 
+ class PeakOptimizer:
+     """Modular peak optimizer for maximizing C₂ constant."""
+ 
+     def __init__(self, seed: int = 42):
+         self.seed = seed
+         np.random.seed(seed)
+         random.seed(seed)
+ 
+     def generate_initial_peaks(self, n_steps: int) -> List[Tuple[float, float, float]]:
+         """
+         Generate strategically placed peaks with multi-scale distribution.
+         Returns list of (position, height, width) tuples.
+         """
+         # Create x-axis grid
+         x = np.linspace(-0.25, 0.25, n_steps)
+ 
+         # Multi-scale peak placement strategy
+         peaks = []
+ 
+         # Scale 1: Fine scale peaks (high frequency details)
+         fine_count = np.random.randint(10, 25)
+-        fine_positions = np.random.uniform(-0.05, 0.05, fine_count)
+-        fine_heights = np.random.uniform(1.5, 2.5, fine_count)
+-        fine_widths = np.random.uniform(0.005, 0.015, fine_count)
++        # Use log-uniform distribution for better spread in fine scale
++        fine_positions = np.loguniform(np.log(0.005), np.log(0.05), fine_count)
++        # Mirror for negative positions
++        fine_positions = np.concatenate([-fine_positions[::-1], fine_positions])
++        fine_heights = np.random.uniform(1.5, 2.5, len(fine_positions))
++        fine_widths = np.random.uniform(0.005, 0.015, len(fine_positions))
+ 
+         # Scale 2: Medium scale peaks (mid frequency content)
+         medium_count = np.random.randint(15, 30)
+-        medium_positions = np.random.uniform(-0.15, 0.15, medium_count)
+-        medium_heights = np.random.uniform(1.2, 2.0, medium_count)
+-        medium_widths = np.random.uniform(0.015, 0.035, medium_count)
++        # Use log-uniform for medium scale too
++        medium_positions = np.loguniform(np.log(0.05), np.log(0.15), medium_count)
++        # Mirror for negative positions
++        medium_positions = np.concatenate([-medium_positions[::-1], medium_positions])
++        medium_heights = np.random.uniform(1.2, 2.0, len(medium_positions))
++        medium_widths = np.random.uniform(0.015, 0.035, len(medium_positions))
+ 
+         # Scale 3: Coarse scale peaks (low frequency structure)
+         coarse_count = np.random.randint(8, 15)
+-        coarse_positions = np.random.choice([-0.2, -0.18, -0.16, -0.14, -0.12, -0.1,
+-                                           -0.08, -0.06, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2],
+-                                         coarse_count)
+-        coarse_heights = np.random.uniform(1.0, 1.8, coarse_count)
+-        coarse_widths = np.random.uniform(0.025, 0.055, coarse_count)
++        # Use a more structured approach with specific locations
++        coarse_positions = np.array([-0.2, -0.18, -0.16, -0.14, -0.12, -0.1,
++                                   -0.08, -0.06, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2])
++        coarse_heights = np.random.uniform(1.0, 1.8, len(coarse_positions))
++        coarse_widths = np.random.uniform(0.025, 0.055, len(coarse_positions))
+ 
+         # Combine all peak scales
+         all_positions = np.concatenate([fine_positions, medium_positions, coarse_positions])
+         all_heights = np.concatenate([fine_heights, medium_heights, coarse_heights])
+         all_widths = np.concatenate([fine_widths, medium_widths, coarse_widths])
+ 
+         # Filter peaks to ensure minimum separation
+         filtered_peaks = self._filter_peaks(all_positions, all_heights, all_widths)
+ 
+         # Enhance peak quality by adjusting positions and heights
+         enhanced_peaks = self._enhance_peaks(filtered_peaks)
+ 
+         return enhanced_peaks
+ 
+     def _filter_peaks(self, positions: np.ndarray, heights: np.ndarray, widths: np.ndarray) -> List[Tuple[float, float, float]]:
+         """Filter peaks to maintain minimum spatial separation."""
+         filtered_peaks = []
+         min_gap = 0.01  # Minimum spatial separation
+ 
+         for pos, height, width in zip(positions, heights, widths):
+             # Check if this peak is far enough from existing peaks
+             valid = True
+             for existing_pos, _, _ in filtered_peaks:
+                 if abs(pos - existing_pos) < min_gap:
+                     valid = False
+                     break
+ 
+             if valid:
+                 filtered_peaks.append((pos, height, width))
+ 
+         return filtered_peaks
+ 
+     def _enhance_peaks(self, peaks: List[Tuple[float, float, float]]) -> List[Tuple[float, float, float]]:
+         """Enhance peak quality by adjusting heights based on position."""
+         enhanced = []
+         for pos, height, width in peaks:
+             # Adjust height based on position to avoid very sharp peaks near edges
+             if abs(pos) > 0.15:
+                 height *= 0.8
+             enhanced.append((pos, height, width))
+         return enhanced
+ 
+     def build_function_from_peaks(self, peaks: List[Tuple[float, float, float]], n_steps: int) -> np.ndarray:
+         """Build function from peak specifications."""
+         x = np.linspace(-0.25, 0.25, n_steps)
+         f_values = np.zeros(n_steps)
+ 
+         # Apply all peaks
+         for pos, height, width in peaks:
+             gaussian = height * np.exp(-0.5 * ((x - pos) / width)**2)
+             f_values += gaussian
+ 
+         # Add supplementary structure
+         self._add_supplementary_structure(f_values, x)
+ 
+         # Ensure non-negativity and normalization
+         f_values = np.maximum(f_values, 0)
+         if np.max(f_values) > 0:
+             f_values = f_values / np.max(f_values) * 1.8
+ 
+         return f_values
+ 
+     def _add_supplementary_structure(self, f_values: np.ndarray, x: np.ndarray):
+         """Add supplementary structure for better autoconvolution."""
+         n_steps = len(f_values)
+         for i in range(0, n_steps, max(1, n_steps//40)):
+             if np.random.random() > 0.8:
+                 bump_center = x[i]
+                 bump_height = np.random.uniform(0.05, 0.3)
+                 bump_width = np.random.uniform(0.005, 0.015)
+                 bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+                 f_values += bump
+ 
+     def smooth_function(self, f_values: np.ndarray, n_steps: int) -> np.ndarray:
+         """Apply smoothing to reduce sharp transitions."""
+         window_size = min(51, max(3, n_steps // 150))
+         if window_size % 2 == 0:
+             window_size += 1
+         if window_size > 1:
+             window = np.ones(window_size) / window_size
+             f_values = np.convolve(f_values, window, mode='same')
+         return f_values
+ 
+     def compute_autoconvolution_norms(self, func_vals: List[float]) -> Tuple[float, float, float]:
+         """
+         Compute the three norms needed for C2 calculation with improved accuracy.
+         Returns (norm_2_sq, norm_1, norm_inf).
+         """
+         f = np.array(func_vals)
+         n_steps = len(f)
+ 
+         # Autoconvolution using convolution
+         g = np.convolve(f, f, mode='full')
+         g = g[len(g)//2:]  # Take middle portion
+ 
+         # Adjust for correct length
+         if len(g) > n_steps:
+             g = g[:n_steps]
+ 
+         # ||g||₂² (L2 norm squared) - more accurate piecewise integration
+         # Using trapezoidal rule for better accuracy
+         dx = 0.5 / (n_steps - 1) if n_steps > 1 else 0.5
+         norm_2_sq = 0
+         for i in range(len(g)-1):
+             # Trapezoidal rule: integral of g^2 from i to i+1
+             area = dx * (g[i]**2 + g[i+1]**2) / 2
+             norm_2_sq += area
+ 
+         # ||g||₁ (L1 norm) - via summation with proper normalization
+         norm_1 = np.sum(np.abs(g)) * dx
+ 
+         # ||g||∞ (infinity norm)
+         norm_inf = np.max(np.abs(g))
+ 
+         return norm_2_sq, norm_1, norm_inf
+ 
+     def compute_c2(self, func_vals: List[float]) -> float:
+         """Compute C₂ value with numerical stability."""
+         norm_2_sq, norm_1, norm_inf = self.compute_autoconvolution_norms(func_vals)
+ 
+         # Add small epsilon to prevent division by zero
+         epsilon = 1e-15
+         if norm_1 <= epsilon or norm_inf <= epsilon:
+             return 0.0
+ 
+         return norm_2_sq / (norm_1 * norm_inf)
+ 
+     def optimize_function(self, func_vals: List[float]) -> List[float]:
+         """Perform multi-pass local optimization."""
+         current_func = np.array(func_vals)
+         best_c2 = self.compute_c2(current_func)
+         best_func = current_func.copy()
+ 
+         # Multi-pass optimization to avoid local minima
+         for pass_num in range(3):
+             # Local hill-climbing optimization
+             for _ in range(100):
+                 test_func = current_func.copy()
+ 
+                 # Randomly select index and perturb
+                 idx = np.random.randint(0, len(test_func))
+                 adjustment = np.random.normal(0, 0.03)
+                 test_func[idx] = max(0, test_func[idx] + adjustment)
+ 
+                 # Evaluate
+                 test_c2 = self.compute_c2(test_func)
+                 if test_c2 > best_c2:
+                     best_c2 = test_c2
+                     best_func = test_func.copy()
+ 
+             # Second optimization pass with smaller adjustments
+             for _ in range(50):
+                 test_func = best_func.copy()
+                 idx = np.random.randint(0, len(test_func))
+                 adjustment = np.random.normal(0, 0.02)
+                 test_func[idx] = max(0, test_func[idx] + adjustment)
+                 test_c2 = self.compute_c2(test_func)
+                 if test_c2 > best_c2:
+                     best_c2 = test_c2
+                     best_func = test_func.copy()
+ 
+             current_func = best_func.copy()
+ 
+         return best_func.tolist()
+ 
+ def construct_function() -> List[float]:
+     """
+     Multi-scale peak placement optimizer for maximizing C₂ constant.
+     Uses strategic multi-scale peak distribution to create optimal autoconvolution properties.
+     """
+     optimizer = PeakOptimizer()
+ 
+     # Parameters
+     n_steps = np.random.randint(2000, 8000)
+ 
+     # Generate initial peaks
+     peaks = optimizer.generate_initial_peaks(n_steps)
+ 
+     # Build function from peaks
+     f_values = optimizer.build_function_from_peaks(peaks, n_steps)
+ 
+     # Apply smoothing
+     f_values = optimizer.smooth_function(f_values, n_steps)
+ 
+     # Convert to list
+     f_list = f_values.tolist()
+ 
+     # Optimize the function
+     optimized_func = optimizer.optimize_function(f_list)
+ 
+     # Add final small noise for robustness
+     final_func = np.array(optimized_func)
+     noise = np.random.normal(0, 0.005, len(final_func))
+     final_func = final_func + noise
+     final_func = np.maximum(final_func, 0)
+ 
+     return final_func.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

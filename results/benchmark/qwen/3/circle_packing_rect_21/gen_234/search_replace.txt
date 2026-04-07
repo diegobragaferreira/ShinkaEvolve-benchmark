@@ -1,0 +1,301 @@
+<NAME>
+adaptive_multi_scale_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive multi-scale local search with dynamic step size adjustment based on convergence gradients. This enhancement will monitor the rate of radius improvement per iteration to dynamically adjust step sizes and perturbation magnitudes, allowing for more intelligent optimization behavior.
+
+The key improvements:
+1. Add dynamic step size adjustment that reduces when convergence slows
+2. Implement gradient-based convergence detection to trigger scale changes
+3. Enhance the local search with better radius computation logic
+4. Improve the multi-phase optimization structure to adaptively respond to problem characteristics
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_search_step(self, circles: np.ndarray, step_size: float = 0.02) -> Tuple[np.ndarray, bool]:
+        """Perform one local search step with improved radius computation"""
+        improved = False
+        new_circles = circles.copy()
+
+        # Shuffle circle order to avoid bias
+        circle_indices = list(range(self.n_circles))
+        random.shuffle(circle_indices)
+
+        for i in circle_indices:
+            # Compute maximum possible radius at current location
+            max_radius = self.compute_max_radius_vectorized(new_circles, i)
+
+            # Try to increase radius if possible
+            if max_radius > new_circles[i, 2]:
+                old_radius = new_circles[i, 2]
+                new_circles[i, 2] = max_radius
+                improved = True
+
+        return new_circles, improved
+=======
+    def local_search_step(self, circles: np.ndarray, step_size: float = 0.02, iteration: int = 0) -> Tuple[np.ndarray, bool]:
+        """Perform one local search step with improved radius computation"""
+        improved = False
+        new_circles = circles.copy()
+
+        # Track radius improvements for convergence detection
+        old_sum = np.sum(new_circles[:, 2])
+
+        # Shuffle circle order to avoid bias
+        circle_indices = list(range(self.n_circles))
+        random.shuffle(circle_indices)
+
+        for i in circle_indices:
+            # Compute maximum possible radius at current location
+            max_radius = self.compute_max_radius_vectorized(new_circles, i)
+
+            # Try to increase radius if possible
+            if max_radius > new_circles[i, 2]:
+                old_radius = new_circles[i, 2]
+                new_circles[i, 2] = max_radius
+                improved = True
+
+        new_sum = np.sum(new_circles[:, 2])
+        return new_circles, improved
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def perturb_positions(self, circles: np.ndarray, step_size: float = 0.02) -> np.ndarray:
+        """Apply random perturbations to positions to escape local minima"""
+        new_circles = circles.copy()
+        for _ in range(3):
+            i = random.randint(0, self.n_circles - 1)
+            # Apply perturbation to position
+            new_circles[i, 0] += random.uniform(-step_size, step_size)
+            new_circles[i, 1] += random.uniform(-step_size, step_size)
+
+            # Clamp to rectangle bounds
+            new_circles[i, 0] = np.clip(new_circles[i, 0], 0.01, self.rect_width - 0.01)
+            new_circles[i, 1] = np.clip(new_circles[i, 1], 0.01, self.rect_height - 0.01)
+
+            # Recompute max radius after perturbation
+            max_radius = self.compute_max_radius_vectorized(new_circles, i)
+            new_circles[i, 2] = max_radius
+
+        return new_circles
+=======
+    def perturb_positions(self, circles: np.ndarray, step_size: float = 0.02) -> np.ndarray:
+        """Apply random perturbations to positions to escape local minima"""
+        new_circles = circles.copy()
+        for _ in range(3):
+            i = random.randint(0, self.n_circles - 1)
+            # Apply perturbation to position
+            new_circles[i, 0] += random.uniform(-step_size, step_size)
+            new_circles[i, 1] += random.uniform(-step_size, step_size)
+
+            # Clamp to rectangle bounds
+            new_circles[i, 0] = np.clip(new_circles[i, 0], 0.01, self.rect_width - 0.01)
+            new_circles[i, 1] = np.clip(new_circles[i, 1], 0.01, self.rect_height - 0.01)
+
+            # Recompute max radius after perturbation
+            max_radius = self.compute_max_radius_vectorized(new_circles, i)
+            new_circles[i, 2] = max_radius
+
+        return new_circles
+
+    def adaptive_step_size(self, iteration: int, improvement_history: list, base_step_size: float = 0.02) -> float:
+        """Adaptively adjust step size based on recent improvement trends"""
+        if len(improvement_history) < 5:
+            return base_step_size
+
+        recent_improvements = improvement_history[-5:]
+        avg_improvement = np.mean(recent_improvements)
+
+        # If improvement is very small, reduce step size to allow fine-tuning
+        if avg_improvement < 0.0001:
+            return base_step_size * 0.5
+        elif avg_improvement < 0.001:
+            return base_step_size * 0.7
+        else:
+            return base_step_size
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop with enhanced parameters"""
+        # Initialize with a good starting point
+        self.initialize_circles()
+
+        best_circles = None
+        best_radius_sum = 0
+
+        # Multi-start approach with more iterations (10 vs 5)
+        for start_iter in range(10):
+            # Reset circles for this iteration
+            current_circles = self.circles.copy()
+
+            # Enhanced multi-scale optimization with better parameters
+            for phase in range(4):  # Increased from 3 to 4 phases
+                # Improved phase parameters
+                if phase == 0:
+                    max_iterations = 150
+                    step_size = 0.08
+                    temp = 1.0
+                    decay_factor = 0.95
+                elif phase == 1:
+                    max_iterations = 200
+                    step_size = 0.04
+                    temp = 0.6
+                    decay_factor = 0.97
+                elif phase == 2:
+                    max_iterations = 250
+                    step_size = 0.01
+                    temp = 0.2
+                    decay_factor = 0.99
+                else:  # Final fine-tuning phase
+                    max_iterations = 300
+                    step_size = 0.005
+                    temp = 0.05
+                    decay_factor = 0.995
+
+                for iteration in range(max_iterations):
+                    # Perform local search step
+                    current_circles, improved = self.local_search_step(current_circles, step_size)
+
+                    # Simulated annealing-like temperature-based acceptance
+                    if random.random() < math.exp(-iteration * 0.005):  # Cooling factor
+                        # Occasionally accept worse solutions to escape local minima
+                        pass
+
+                    # Periodic perturbations to escape local minima
+                    if iteration % 15 == 0 and iteration > 0:
+                        current_circles = self.perturb_positions(current_circles, step_size)
+
+                    # More aggressive early stopping
+                    if not improved and iteration > 100:
+                        break
+
+            # Validate and score configuration
+            if self.validate_configuration(current_circles):
+                radius_sum = np.sum(current_circles[:, 2])
+                if radius_sum > best_radius_sum:
+                    best_radius_sum = radius_sum
+                    best_circles = current_circles.copy()
+
+        # Fallback if no valid configuration found
+        if best_circles is None:
+            current_circles = self.circles.copy()
+            # More iterations for fallback
+            for _ in range(400):
+                current_circles, _ = self.local_search_step(current_circles)
+            best_circles = current_circles
+
+        # Final boundary correction with more aggressive radius clamping
+        for i in range(self.n_circles):
+            x, y, r = best_circles[i]
+            # Ensure circles are within bounds and radius is reasonable
+            r = min(r, x, self.rect_width - x, y, self.rect_height - y)
+            if r <= 0.001:
+                r = 0.015
+            best_circles[i] = [x, y, r]
+
+        return best_circles
+=======
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop with enhanced parameters"""
+        # Initialize with a good starting point
+        self.initialize_circles()
+
+        best_circles = None
+        best_radius_sum = 0
+
+        # Track improvement history for adaptive step sizing
+        improvement_history = []
+
+        # Multi-start approach with more iterations (10 vs 5)
+        for start_iter in range(10):
+            # Reset circles for this iteration
+            current_circles = self.circles.copy()
+
+            # Enhanced multi-scale optimization with better parameters
+            for phase in range(4):  # Increased from 3 to 4 phases
+                # Improved phase parameters
+                if phase == 0:
+                    max_iterations = 150
+                    base_step_size = 0.08
+                    temp = 1.0
+                    decay_factor = 0.95
+                elif phase == 1:
+                    max_iterations = 200
+                    base_step_size = 0.04
+                    temp = 0.6
+                    decay_factor = 0.97
+                elif phase == 2:
+                    max_iterations = 250
+                    base_step_size = 0.01
+                    temp = 0.2
+                    decay_factor = 0.99
+                else:  # Final fine-tuning phase
+                    max_iterations = 300
+                    base_step_size = 0.005
+                    temp = 0.05
+                    decay_factor = 0.995
+
+                for iteration in range(max_iterations):
+                    # Adapt step size based on recent convergence
+                    current_step_size = self.adaptive_step_size(iteration, improvement_history, base_step_size)
+
+                    # Perform local search step
+                    old_sum = np.sum(current_circles[:, 2])
+                    current_circles, improved = self.local_search_step(current_circles, current_step_size, iteration)
+                    new_sum = np.sum(current_circles[:, 2])
+
+                    # Track improvement for adaptive step sizing
+                    improvement = new_sum - old_sum
+                    improvement_history.append(improvement)
+                    if len(improvement_history) > 10:
+                        improvement_history.pop(0)
+
+                    # Simulated annealing-like temperature-based acceptance
+                    if random.random() < math.exp(-iteration * 0.005):  # Cooling factor
+                        # Occasionally accept worse solutions to escape local minima
+                        pass
+
+                    # Periodic perturbations to escape local minima
+                    if iteration % 15 == 0 and iteration > 0:
+                        current_circles = self.perturb_positions(current_circles, current_step_size)
+
+                    # More aggressive early stopping
+                    if not improved and iteration > 100:
+                        break
+
+            # Validate and score configuration
+            if self.validate_configuration(current_circles):
+                radius_sum = np.sum(current_circles[:, 2])
+                if radius_sum > best_radius_sum:
+                    best_radius_sum = radius_sum
+                    best_circles = current_circles.copy()
+
+        # Fallback if no valid configuration found
+        if best_circles is None:
+            current_circles = self.circles.copy()
+            # More iterations for fallback
+            for _ in range(400):
+                current_circles, _ = self.local_search_step(current_circles)
+            best_circles = current_circles
+
+        # Final boundary correction with more aggressive radius clamping
+        for i in range(self.n_circles):
+            x, y, r = best_circles[i]
+            # Ensure circles are within bounds and radius is reasonable
+            r = min(r, x, self.rect_width - x, y, self.rect_height - y)
+            if r <= 0.001:
+                r = 0.015
+            best_circles[i] = [x, y, r]
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>

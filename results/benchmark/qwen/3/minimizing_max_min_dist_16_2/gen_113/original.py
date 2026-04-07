@@ -1,0 +1,176 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import warnings
+import math
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Avoid division by zero
+        if len(distances) == 0:
+            return 0
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since minimize minimizes)
+        if d_max == 0:
+            return 0
+        return -d_min / d_max
+
+    def compute_ratio(points):
+        """Compute the actual ratio for given points"""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max == 0:
+            return 0
+        return d_min / d_max
+
+    def generate_initial_configurations():
+        """Generate multiple diverse initial configurations"""
+        configs = []
+        np.random.seed(42)
+
+        # 1. Grid configuration
+        grid_points = []
+        grid_size = 4  # 4x4 grid for 16 points
+        spacing = 1.0 / (grid_size - 1) if grid_size > 1 else 1.0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if len(grid_points) < 16:
+                    grid_points.append([i * spacing, j * spacing])
+        configs.append(np.array(grid_points))
+
+        # 2. Perturbed grid configuration
+        perturbed_points = []
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if len(perturbed_points) < 16:
+                    x = max(0, min(1, i * spacing + np.random.normal(0, 0.05 * spacing)))
+                    y = max(0, min(1, j * spacing + np.random.normal(0, 0.05 * spacing)))
+                    perturbed_points.append([x, y])
+        configs.append(np.array(perturbed_points))
+
+        # 3. Random configuration
+        configs.append(np.random.rand(16, 2))
+
+        # 4. Hexagonal-like configuration
+        hex_points = []
+        # Center point
+        hex_points.append([0.5, 0.5])
+
+        # Surrounding points in hexagonal pattern
+        radius = 0.3
+        angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
+        for angle in angles:
+            x = 0.5 + radius * np.cos(angle)
+            y = 0.5 + radius * np.sin(angle)
+            if len(hex_points) < 16:
+                hex_points.append([x, y])
+
+        # Fill remaining points randomly
+        for i in range(16 - len(hex_points)):
+            hex_points.append([np.random.rand(), np.random.rand()])
+
+        configs.append(np.array(hex_points[:16]))
+
+        return configs
+
+    def simulated_annealing(points, max_iter=5000, initial_temp=1.0, cooling_rate=0.9995):
+        """
+        Simulated Annealing optimization for point dispersion
+        """
+        current_points = points.copy()
+        current_ratio = compute_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        temp = initial_temp
+
+        for iteration in range(max_iter):
+            # Create neighbor by perturbing one random point
+            neighbor_points = current_points.copy()
+            idx = np.random.randint(0, len(neighbor_points))
+
+            # Perturb the selected point
+            neighbor_points[idx, 0] += np.random.normal(0, 0.01)
+            neighbor_points[idx, 1] += np.random.normal(0, 0.01)
+
+            # Keep within bounds
+            neighbor_points[idx, 0] = np.clip(neighbor_points[idx, 0], 0, 1)
+            neighbor_points[idx, 1] = np.clip(neighbor_points[idx, 1], 0, 1)
+
+            # Calculate neighbor ratio
+            neighbor_ratio = compute_ratio(neighbor_points)
+
+            # Accept or reject the neighbor
+            if neighbor_ratio > current_ratio:
+                current_points = neighbor_points
+                current_ratio = neighbor_ratio
+                if neighbor_ratio > best_ratio:
+                    best_points = neighbor_points.copy()
+                    best_ratio = neighbor_ratio
+            else:
+                # Accept with probability based on temperature
+                delta = neighbor_ratio - current_ratio
+                acceptance_prob = math.exp(delta / temp)
+                if np.random.random() < acceptance_prob:
+                    current_points = neighbor_points
+                    current_ratio = neighbor_ratio
+
+            # Cool down
+            temp *= cooling_rate
+
+            # Early stopping condition
+            if temp < 1e-8:
+                break
+
+        return best_points, best_ratio
+
+    # Generate multiple initial configurations
+    initial_configs = generate_initial_configurations()
+
+    best_points = None
+    best_ratio = -np.inf
+
+    # Try all initial configurations with optimization
+    for i, initial_config in enumerate(initial_configs):
+        try:
+            # Apply simulated annealing optimization
+            optimized_points, ratio = simulated_annealing(initial_config.copy())
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+        except Exception as e:
+            warnings.warn(f"Error optimizing initial config {i}: {str(e)}")
+            continue
+
+    # If no optimization succeeded, return the first configuration
+    if best_points is None:
+        return initial_configs[0]
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

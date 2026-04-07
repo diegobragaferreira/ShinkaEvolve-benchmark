@@ -1,0 +1,115 @@
+--- a/original.py
++++ b/original.py
+@@ -1,14 +1,108 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
++from deap import base, creator, tools, algorithms
++import random
++from typing import List
+ 
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
+-    f_values = [np.random.random()] * np.random.randint(100,1000)
+-    return f_values
++def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
++    """Compute the norms needed for C2 calculation"""
++    # Convert to numpy array for easier manipulation
++    f = np.array(f_values)
++
++    # Compute autoconvolution g = f * f using discrete convolution
++    g = np.convolve(f, f, mode='full')
++
++    # Only keep the middle portion (valid convolution)
++    half_len = len(f) - 1
++    g = g[half_len:-half_len]
++
++    # Compute norms
++    norm_2_squared = np.sum(g**2)
++    norm_1 = np.sum(np.abs(g))
++    norm_inf = np.max(np.abs(g))
++
++    # Avoid division by zero
++    if norm_1 == 0 or norm_inf == 0:
++        return 0.0, 0.0, 0.0, 0.0
++
++    # C2 = ||g||₂² / (||g||₁ · ||g||∞)
++    c2 = norm_2_squared / (norm_1 * norm_inf)
++
++    return c2, norm_2_squared, norm_1, norm_inf
++
++def evaluate_c2(individual: List[float]) -> tuple:
++    """Evaluate fitness of individual (step function)"""
++    try:
++        # Ensure non-negative values
++        individual = [max(0, x) for x in individual]
++
++        # Compute C2 value
++        c2, _, _, _ = compute_autoconvolution_norms(individual)
++
++        # Return negative because we want to maximize
++        return (-c2,)
++    except:
++        # Return very poor fitness if error occurs
++        return (-1e10,)
++
++def construct_function() -> List[float]:
++    """Function to construct step-function with high C2 value using evolutionary algorithm"""
++    # Set up evolutionary algorithm
++    random.seed(42)
++    np.random.seed(42)
++
++    # Problem parameters
++    population_size = 50
++    num_generations = 30
++    num_steps = 200  # Fixed size for consistency
++
++    # Create fitness and individual classes
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++
++    toolbox = base.Toolbox()
++
++    # Define how to create individuals
++    toolbox.register("attr_float", random.random)
++    toolbox.register("individual", tools.initRepeat, creator.Individual,
++                     toolbox.attr_float, n=num_steps)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++
++    # Define operators
++    toolbox.register("evaluate", evaluate_c2)
++    toolbox.register("mate", tools.cxBlend, alpha=0.5)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++
++    # Create initial population
++    pop = toolbox.population(n=population_size)
++
++    # Run evolution
++    hof = tools.HallOfFame(1)
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++
++    try:
++        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2,
++                                          ngen=num_generations, stats=stats,
++                                          halloffame=hof, verbose=False)
++    except:
++        # Fallback to simple approach if evolution fails
++        return [random.random() for _ in range(100)]
++
++    # Get best individual
++    best_individual = hof[0]
++
++    # Ensure non-negative values
++    best_individual = [max(0, x) for x in best_individual]
++
++    return best_individual
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

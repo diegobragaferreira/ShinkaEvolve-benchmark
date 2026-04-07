@@ -1,0 +1,161 @@
+<NAME>
+numba_jit_convolution_optimization
+</NAME>
+
+<DESCRIPTION>
+This change focuses on optimizing the convolution computation in the numba JIT function by replacing the manual loop-based convolution with a more efficient approach using scipy's fft-based convolution. This should significantly speed up the computation while maintaining numerical accuracy. The key insight is that for large step functions, the direct convolution becomes computationally expensive, but FFT-based convolution can be much faster.
+
+The change replaces the manual convolution loop in `compute_convolution_norms_numba` with scipy's fft-based convolution, which is much more efficient for large arrays.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Global constants
+MAX_STEPS = 50000
+MIN_STEPS = 100
+POPULATION_SIZE = 200
+GENERATIONS = 100
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+ELITISM_COUNT = 5
+SEED = 42
+
+# Set seed for reproducibility
+np.random.seed(SEED)
+
+@jit(nopython=True)
+def compute_convolution_norms_numba(f_values):
+    """Compute the three norms needed for C2 calculation using numba JIT acceleration"""
+    # Convert to numpy array
+    f = np.array(f_values)
+    n_steps = len(f)
+
+    # Create step function on [-1/4, 1/4] with proper spacing
+    step_width = 0.5 / n_steps
+    step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps)
+
+    # For autoconvolution, we'll work with a finer grid
+    # Create piecewise constant function on refined grid
+    x_fine = np.linspace(-0.25, 0.25, 1000)  # Fine grid for convolution
+    dx = x_fine[1] - x_fine[0]
+
+    # Build piecewise constant function
+    f_func = np.zeros_like(x_fine)
+    for i in range(n_steps):
+        pos = step_positions[i]
+        left = pos - step_width/2
+        right = pos + step_width/2
+        # Find indices where x_fine falls in this step
+        mask = (x_fine >= left) & (x_fine <= right)
+        f_func[mask] = f[i]
+
+    # Perform autoconvolution manually (simplified version)
+    # We compute g = f * f where * is convolution
+    g = np.zeros(len(x_fine))
+    for i in range(len(x_fine)):
+        total = 0.0
+        for j in range(len(x_fine)):
+            if i - j >= 0 and i - j < len(x_fine):
+                total += f_func[j] * f_func[i-j]
+        g[i] = total
+
+    # Normalize for proper scaling
+    g = g * dx
+
+    # Compute the required norms
+    g_squared = g**2
+    g_abs = np.abs(g)
+
+    # ||g||₂² (using trapezoidal rule for integration)
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        norm_2_squared += (dx/3) * (g_squared[i] + g_squared[i+1] + g_squared[i]*g_squared[i+1])
+
+    # ||g||₁ (L1 norm)
+    norm_1 = 0.0
+    for i in range(len(g)-1):
+        norm_1 += (dx/2) * (g_abs[i] + g_abs[i+1])
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(g_abs)
+
+    return norm_2_squared, norm_1, norm_inf
+=======
+# Global constants
+MAX_STEPS = 50000
+MIN_STEPS = 100
+POPULATION_SIZE = 200
+GENERATIONS = 100
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+ELITISM_COUNT = 5
+SEED = 42
+
+# Set seed for reproducibility
+np.random.seed(SEED)
+
+@jit(nopython=True)
+def compute_convolution_norms_numba(f_values):
+    """Compute the three norms needed for C2 calculation using numba JIT acceleration"""
+    # Convert to numpy array
+    f = np.array(f_values)
+    n_steps = len(f)
+
+    # Create step function on [-1/4, 1/4] with proper spacing
+    step_width = 0.5 / n_steps
+    step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps)
+
+    # For autoconvolution, we'll work with a finer grid
+    # Create piecewise constant function on refined grid
+    x_fine = np.linspace(-0.25, 0.25, 1000)  # Fine grid for convolution
+    dx = x_fine[1] - x_fine[0]
+
+    # Build piecewise constant function
+    f_func = np.zeros_like(x_fine)
+    for i in range(n_steps):
+        pos = step_positions[i]
+        left = pos - step_width/2
+        right = pos + step_width/2
+        # Find indices where x_fine falls in this step
+        mask = (x_fine >= left) & (x_fine <= right)
+        f_func[mask] = f[i]
+
+    # Perform autoconvolution using FFT-based convolution for efficiency
+    # This replaces the manual loop-based approach which is O(n^2)
+    # We use the fact that convolution in frequency domain is multiplication
+    # First pad to appropriate size for FFT
+    padded_length = 2 * len(x_fine) - 1
+    f_padded = np.pad(f_func, (0, padded_length - len(f_func)), mode='constant')
+
+    # Perform FFT-based convolution
+    # Note: we compute f * f where * is convolution
+    f_fft = np.fft.fft(f_padded)
+    g_fft = f_fft * f_fft.conj()  # Convolution in frequency domain
+    g = np.fft.ifft(g_fft).real
+
+    # Take only the first half (corresponding to the actual convolution result)
+    g = g[:len(x_fine)]
+
+    # Normalize for proper scaling
+    g = g * dx
+
+    # Compute the required norms
+    g_squared = g**2
+    g_abs = np.abs(g)
+
+    # ||g||₂² (using trapezoidal rule for integration)
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        norm_2_squared += (dx/3) * (g_squared[i] + g_squared[i+1] + g_squared[i]*g_squared[i+1])
+
+    # ||g||₁ (L1 norm)
+    norm_1 = 0.0
+    for i in range(len(g)-1):
+        norm_1 += (dx/2) * (g_abs[i] + g_abs[i+1])
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(g_abs)
+
+    return norm_2_squared, norm_1, norm_inf
+>>>>>>> REPLACE
+</DIFF>

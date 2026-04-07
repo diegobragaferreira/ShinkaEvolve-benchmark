@@ -1,0 +1,228 @@
+Let me try a more targeted approach by replacing just the perturbation method selection part:
+
+<NAME>
+enhance_perturbation_methods
+</NAME>
+
+<DESCRIPTION>
+Instead of trying to replace the entire optimization loop, I'll focus on enhancing the perturbation method selection logic and adding the neighborhood-based perturbation functionality. The key issue is that I need to work with the exact indentation and structure as it exists in the file.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def perturb_points(self, points, magnitude=0.01, method='individual'):
+        """Apply small perturbations to points with boundary checking."""
+        new_points = points.copy()
+
+        if method == 'individual':
+            # Select random subset of points to perturb
+            num_perturb = max(1, len(points) // 4)
+            indices = np.random.choice(len(points), size=num_perturb, replace=False)
+
+            for idx in indices:
+                # Apply perturbation
+                delta = np.random.uniform(-magnitude, magnitude, 2)
+                new_points[idx] += delta
+
+                # Keep within bounds
+                new_points[idx] = np.clip(new_points[idx], 0, 1)
+        elif method == 'cluster':
+            # Perturb small clusters together to maintain local structure
+            cluster_size = min(3, len(points) // 4)
+            num_clusters = len(points) // cluster_size
+
+            for i in range(num_clusters):
+                start_idx = i * cluster_size
+                end_idx = min(start_idx + cluster_size, len(points))
+
+                # Find centroid of cluster
+                cluster_center = np.mean(new_points[start_idx:end_idx], axis=0)
+
+                # Apply same perturbation to whole cluster
+                perturbation = np.random.uniform(-magnitude, magnitude, 2)
+                for idx in range(start_idx, end_idx):
+                    new_points[idx] += perturbation
+
+                    # Keep within bounds
+                    new_points[idx] = np.clip(new_points[idx], 0, 1)
+
+        return new_points
+=======
+    def perturb_points(self, points, magnitude=0.01, method='individual'):
+        """Apply small perturbations to points with boundary checking."""
+        new_points = points.copy()
+
+        if method == 'individual':
+            # Select random subset of points to perturb
+            num_perturb = max(1, len(points) // 4)
+            indices = np.random.choice(len(points), size=num_perturb, replace=False)
+
+            for idx in indices:
+                # Apply perturbation
+                delta = np.random.uniform(-magnitude, magnitude, 2)
+                new_points[idx] += delta
+
+                # Keep within bounds
+                new_points[idx] = np.clip(new_points[idx], 0, 1)
+        elif method == 'cluster':
+            # Perturb small clusters together to maintain local structure
+            cluster_size = min(3, len(points) // 4)
+            num_clusters = len(points) // cluster_size
+
+            for i in range(num_clusters):
+                start_idx = i * cluster_size
+                end_idx = min(start_idx + cluster_size, len(points))
+
+                # Find centroid of cluster
+                cluster_center = np.mean(new_points[start_idx:end_idx], axis=0)
+
+                # Apply same perturbation to whole cluster
+                perturbation = np.random.uniform(-magnitude, magnitude, 2)
+                for idx in range(start_idx, end_idx):
+                    new_points[idx] += perturbation
+
+                    # Keep within bounds
+                    new_points[idx] = np.clip(new_points[idx], 0, 1)
+        elif method == 'neighborhood':
+            # Focus on points that are near the current minimum distance
+            # This requires computing distances to identify tight regions
+            from scipy.spatial.distance import cdist
+
+            # Find the minimum distance and associated pairs
+            distances = cdist(points, points)
+            np.fill_diagonal(distances, np.inf)
+            min_dist = np.min(distances)
+
+            # Find pairs that are close to the minimum distance
+            close_pairs = np.where((distances < min_dist * 1.2) & (distances > 0))
+
+            # If we have close pairs, perturb the points in these pairs
+            if len(close_pairs[0]) > 0:
+                # Pick pairs at random and perturb both points in the pair
+                pair_indices = np.random.choice(len(close_pairs[0]),
+                                               min(len(close_pairs[0]), max(1, len(points) // 8)),
+                                               replace=False)
+                for i in pair_indices:
+                    idx1, idx2 = close_pairs[0][i], close_pairs[1][i]
+                    # Perturb both points in the pair in opposite directions
+                    perturbation = np.random.normal(0, magnitude, 2)
+                    new_points[idx1] -= perturbation * 0.5
+                    new_points[idx2] += perturbation * 0.5
+            else:
+                # Fallback to random selection if no close pairs found
+                num_perturb = max(1, len(points) // 4)
+                indices = np.random.choice(len(points), size=num_perturb, replace=False)
+                for idx in indices:
+                    delta = np.random.uniform(-magnitude, magnitude, 2)
+                    new_points[idx] += delta
+
+            # Keep within bounds
+            new_points = np.clip(new_points, 0, 1)
+
+        return new_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Optimization loop
+        for iteration in range(max_iterations):
+            # Alternate perturbation methods
+            perturbation_method = 'cluster' if iteration % 3 == 0 else 'individual'
+
+            # Perturb points
+            new_points = self.perturb_points(
+                current_points,
+                magnitude=self.adaptive_cooling_schedule(iteration, max_iterations) * 0.5,
+                method=perturbation_method
+            )
+
+            # Evaluate new configuration
+            new_ratio = self.compute_min_max_ratio_with_boundary_penalty(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            temperature = self.adaptive_cooling_schedule(iteration, max_iterations)
+
+            if new_ratio > current_ratio or np.random.random() < np.exp((new_ratio - current_ratio) / temperature):
+                current_points = new_points
+                current_ratio = new_ratio
+
+                # Update local best solution
+                if current_ratio > local_best_ratio:
+                    local_best_points = current_points.copy()
+                    local_best_ratio = current_ratio
+                    recent_improvements = []  # Reset improvement tracking
+                else:
+                    # Track recent improvements
+                    if len(recent_improvements) < max_recent:
+                        recent_improvements.append(current_ratio)
+                    else:
+                        recent_improvements.pop(0)
+                        recent_improvements.append(current_ratio)
+
+                # Adaptive cooling based on recent improvement variance
+                if len(recent_improvements) >= 10:
+                    recent_std = np.std(recent_improvements[-10:])
+                    if recent_std < 0.001 * local_best_ratio:  # Very little variation
+                        # Slow down cooling to allow more exploration
+                        pass  # Already handled by cooling schedule
+
+            # Early stopping if we're getting very good results
+            if local_best_ratio > 0.3:  # Early exit threshold
+                break
+=======
+        # Optimization loop
+        for iteration in range(max_iterations):
+            # Alternate perturbation methods with more sophistication
+            if iteration < 1000:
+                # Early phase: more aggressive exploration
+                perturbation_method = np.random.choice(['individual', 'cluster', 'neighborhood'],
+                                                      p=[0.5, 0.3, 0.2])
+            else:
+                # Later phase: balance exploration and exploitation
+                perturbation_method = np.random.choice(['individual', 'cluster', 'neighborhood'],
+                                                      p=[0.3, 0.4, 0.3])
+
+            # Perturb points
+            new_points = self.perturb_points(
+                current_points,
+                magnitude=self.adaptive_cooling_schedule(iteration, max_iterations) * 0.5,
+                method=perturbation_method
+            )
+
+            # Evaluate new configuration
+            new_ratio = self.compute_min_max_ratio_with_boundary_penalty(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            temperature = self.adaptive_cooling_schedule(iteration, max_iterations)
+
+            if new_ratio > current_ratio or np.random.random() < np.exp((new_ratio - current_ratio) / temperature):
+                current_points = new_points
+                current_ratio = new_ratio
+
+                # Update local best solution
+                if current_ratio > local_best_ratio:
+                    local_best_points = current_points.copy()
+                    local_best_ratio = current_ratio
+                    recent_improvements = []  # Reset improvement tracking
+                else:
+                    # Track recent improvements
+                    if len(recent_improvements) < max_recent:
+                        recent_improvements.append(current_ratio)
+                    else:
+                        recent_improvements.pop(0)
+                        recent_improvements.append(current_ratio)
+
+                # Adaptive cooling based on recent improvement variance
+                if len(recent_improvements) >= 10:
+                    recent_std = np.std(recent_improvements[-10:])
+                    if recent_std < 0.001 * local_best_ratio:  # Very little variation
+                        # Slow down cooling to allow more exploration
+                        pass  # Already handled by cooling schedule
+
+            # Early stopping if we're getting very good results
+            if local_best_ratio > 0.3:  # Early exit threshold
+                break
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,349 @@
+<NAME>
+add_jax_gradient_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding JAX-based gradient optimization to improve convergence speed and accuracy. This approach leverages automatic differentiation to compute gradients more accurately than finite differences, which should help achieve higher C₂ values. The key insight is to use JAX's gradient computation for local refinement after global optimization, combining the strengths of evolutionary algorithms with precise gradient-based optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from numba import njit
+import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+import random
+from typing import List, Tuple, Optional
+import multiprocessing as mp
+from functools import partial
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from numba import njit
+import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+import random
+from typing import List, Tuple, Optional
+import multiprocessing as mp
+from functools import partial
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_jax_gradient_computation
+</NAME>
+
+<DESCRIPTION>
+Adding JAX gradient computation capability to enhance optimization precision. This involves creating a JAX-based version of the C2 computation that can be differentiated automatically, which will be used for more accurate gradient-based refinement in the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def compute_c2_numba(f):
+    """Compute C2 value for given step function f using numba JIT"""
+    if len(f) < 2:
+        return 0.0
+
+    # Compute autoconvolution
+    g = compute_autoconvolution_numba(f)
+
+    if len(g) == 0:
+        return 0.0
+
+    # Compute norms
+    norm_l2_sq = 0.0
+    norm_l1 = 0.0
+    norm_inf = 0.0
+
+    for i in range(len(g)):
+        abs_g = abs(g[i])
+        norm_l2_sq += abs_g * abs_g
+        norm_l1 += abs_g
+        if abs_g > norm_inf:
+            norm_inf = abs_g
+
+    # Avoid division by zero
+    if norm_l1 < 1e-12 or norm_inf < 1e-12:
+        return 0.0
+
+    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+    return c2
+=======
+@njit
+def compute_c2_numba(f):
+    """Compute C2 value for given step function f using numba JIT"""
+    if len(f) < 2:
+        return 0.0
+
+    # Compute autoconvolution
+    g = compute_autoconvolution_numba(f)
+
+    if len(g) == 0:
+        return 0.0
+
+    # Compute norms
+    norm_l2_sq = 0.0
+    norm_l1 = 0.0
+    norm_inf = 0.0
+
+    for i in range(len(g)):
+        abs_g = abs(g[i])
+        norm_l2_sq += abs_g * abs_g
+        norm_l1 += abs_g
+        if abs_g > norm_inf:
+            norm_inf = abs_g
+
+    # Avoid division by zero
+    if norm_l1 < 1e-12 or norm_inf < 1e-12:
+        return 0.0
+
+    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+    return c2
+
+def compute_c2_jax(f_vals):
+    """JAX version for automatic differentiation"""
+    # Convert to JAX array
+    f = jnp.array(f_vals, dtype=jnp.float32)
+
+    # Compute autoconvolution using JAX operations
+    g = jnp.convolve(f, f, mode='full')
+    n = len(f)
+    offset = (n - 1) // 2
+    g = g[offset:-offset]
+
+    # Compute norms
+    g_abs = jnp.abs(g)
+    norm_l2_sq = jnp.sum(g_abs**2)
+    norm_l1 = jnp.sum(g_abs)
+    norm_inf = jnp.max(g_abs)
+
+    # Avoid division by zero
+    eps = 1e-12
+    norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+    norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+    return c2
+
+@jax_jit
+def compute_c2_jax_vectorized(f_vals):
+    """Vectorized JAX version for computing C2"""
+    return compute_c2_jax(f_vals)
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 with respect to f_vals using JAX"""
+    try:
+        f = jnp.array(f_vals, dtype=jnp.float32)
+        grad_fn = grad(compute_c2_jax)
+        grad_val = grad_fn(f)
+        return np.array(grad_val)
+    except Exception:
+        return np.zeros_like(f_vals)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_local_refinement_with_gradients
+</NAME>
+
+<DESCRIPTION>
+Enhancing the local refinement process by incorporating JAX-based gradient computation. Instead of just using L-BFGS, we'll add a gradient ascent refinement step that uses the more accurate JAX gradients computed with automatic differentiation. This should lead to better convergence towards local optima with higher C₂ values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _single_optimization_run(self, n: int, seed_offset: int,
+                               initial_population: List[List[float]] = None) -> Tuple[Optional[float], Optional[List[float]]]:
+        """Perform a single optimization run with given parameters"""
+        try:
+            # Set seed for reproducibility
+            np.random.seed(self.seed + seed_offset)
+
+            # Get adaptive parameters
+            popsize, maxiter = self._adaptive_parameters(n)
+
+            # Generate initial population if not provided
+            if initial_population is None:
+                initial_patterns = self._create_initial_patterns(n)
+                initial_population = []
+                for i, pattern in enumerate(initial_patterns):
+                    # Add noise to break symmetry
+                    noise = np.random.normal(0, 0.05, len(pattern))
+                    individual = np.maximum(np.array(pattern) + noise, 0).tolist()
+                    initial_population.append(individual)
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Helper function for differential evolution
+            def objective_function(x):
+                # x contains the step heights
+                # Need to ensure non-negativity
+                f = np.maximum(x, 0)
+                c2 = compute_c2_numba(f)
+                return -c2  # Negative because we want to maximize
+
+            # Run differential evolution
+            de_result = differential_evolution(
+                objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed + seed_offset,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False
+            )
+
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -objective_function(f_opt)
+
+                # If we have a good solution, also try local refinement
+                if c2_value > 0.1:
+                    try:
+                        # Use L-BFGS for local refinement
+                        lbfgs_result = minimize(
+                            objective_function,
+                            f_opt,
+                            method='L-BFGS-B',
+                            bounds=[(0, 10) for _ in range(n)],
+                            options={'maxiter': min(50, max(20, n // 10)), 'disp': False}
+                        )
+
+                        if lbfgs_result.success:
+                            f_refined = np.maximum(lbfgs_result.x, 0)
+                            c2_refined = -objective_function(f_refined)
+
+                            if c2_refined > c2_value:
+                                c2_value = c2_refined
+                                f_opt = f_refined.tolist()
+                    except Exception:
+                        pass  # Continue with original result if refinement fails
+
+                return c2_value, f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Optimization run failed: {str(e)}")
+
+        return None, None
+=======
+    def _single_optimization_run(self, n: int, seed_offset: int,
+                               initial_population: List[List[float]] = None) -> Tuple[Optional[float], Optional[List[float]]]:
+        """Perform a single optimization run with given parameters"""
+        try:
+            # Set seed for reproducibility
+            np.random.seed(self.seed + seed_offset)
+
+            # Get adaptive parameters
+            popsize, maxiter = self._adaptive_parameters(n)
+
+            # Generate initial population if not provided
+            if initial_population is None:
+                initial_patterns = self._create_initial_patterns(n)
+                initial_population = []
+                for i, pattern in enumerate(initial_patterns):
+                    # Add noise to break symmetry
+                    noise = np.random.normal(0, 0.05, len(pattern))
+                    individual = np.maximum(np.array(pattern) + noise, 0).tolist()
+                    initial_population.append(individual)
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Helper function for differential evolution
+            def objective_function(x):
+                # x contains the step heights
+                # Need to ensure non-negativity
+                f = np.maximum(x, 0)
+                c2 = compute_c2_numba(f)
+                return -c2  # Negative because we want to maximize
+
+            # Run differential evolution
+            de_result = differential_evolution(
+                objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed + seed_offset,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False
+            )
+
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -objective_function(f_opt)
+
+                # If we have a good solution, also try local refinement
+                if c2_value > 0.1:
+                    try:
+                        # First use L-BFGS for local refinement
+                        lbfgs_result = minimize(
+                            objective_function,
+                            f_opt,
+                            method='L-BFGS-B',
+                            bounds=[(0, 10) for _ in range(n)],
+                            options={'maxiter': min(50, max(20, n // 10)), 'disp': False}
+                        )
+
+                        if lbfgs_result.success:
+                            f_refined = np.maximum(lbfgs_result.x, 0)
+                            c2_refined = -objective_function(f_refined)
+
+                            if c2_refined > c2_value:
+                                c2_value = c2_refined
+                                f_opt = f_refined.tolist()
+
+                        # Then try gradient ascent refinement using JAX gradients
+                        try:
+                            # Use gradient ascent with JAX gradients
+                            f_jax_refined = np.array(f_opt, dtype=np.float32)
+                            max_grad_iter = min(30, max(10, n // 50))
+                            step_size = 0.01
+
+                            for _ in range(max_grad_iter):
+                                grad_val = compute_gradient_jax(f_jax_refined)
+                                f_new = f_jax_refined + step_size * grad_val
+                                f_new = np.maximum(f_new, 0)
+
+                                # Check improvement
+                                old_c2 = compute_c2_numba(f_jax_refined)
+                                new_c2 = compute_c2_numba(f_new)
+
+                                if new_c2 > old_c2:
+                                    f_jax_refined = f_new
+                                else:
+                                    step_size *= 0.5
+                                    if step_size < 1e-6:
+                                        break
+
+                            # Final evaluation
+                            final_c2 = compute_c2_numba(f_jax_refined)
+                            if final_c2 > c2_value:
+                                c2_value = final_c2
+                                f_opt = f_jax_refined.tolist()
+
+                        except Exception:
+                            pass  # Continue with previous result if gradient refinement fails
+
+                    except Exception:
+                        pass  # Continue with original result if refinement fails
+
+                return c2_value, f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Optimization run failed: {str(e)}")
+
+        return None, None
+>>>>>>> REPLACE
+</DIFF>

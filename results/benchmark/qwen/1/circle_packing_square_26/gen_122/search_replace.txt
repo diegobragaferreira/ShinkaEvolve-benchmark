@@ -1,0 +1,214 @@
+<NAME>
+add_voronoi_based_initialization_improvement
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based initialization uses a simple Voronoi diagram approach but doesn't fully leverage the geometric properties for optimal circle packing. I'll enhance the Voronoi initialization by implementing a more sophisticated approach that considers circle packing density and uses Delaunay triangulation to better distribute circles. The key insight is that better initial distribution leads to faster convergence and higher quality solutions.
+
+This change focuses on improving the `create_voronoi_initialization` function to generate more evenly distributed initial configurations that are closer to optimal placements from the start.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import Voronoi
+import time
+from typing import Tuple, List
+
+# Global constants for the optimization
+INITIAL_POPULATION_SIZE = 200
+MAX_GENERATIONS = 500
+TOURNAMENT_SIZE = 5
+INITIAL_MUTATION_RATE = 0.15
+ELITISM_COUNT = 10
+MIN_MUTATION_RATE = 0.02
+BOUNDARY_MARGIN = 0.01
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import Voronoi, Delaunay
+import time
+from typing import Tuple, List
+
+# Global constants for the optimization
+INITIAL_POPULATION_SIZE = 200
+MAX_GENERATIONS = 500
+TOURNAMENT_SIZE = 5
+INITIAL_MUTATION_RATE = 0.15
+ELITISM_COUNT = 10
+MIN_MUTATION_RATE = 0.02
+BOUNDARY_MARGIN = 0.01
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def create_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced Voronoi-based spreading."""
+    # Start with a structured grid pattern for better initial distribution
+    grid_size = int(np.ceil(np.sqrt(n_circles)))
+    grid_points = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(grid_points) < n_circles:
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                grid_points.append([x, y])
+
+    points = np.array(grid_points)
+
+    # Add some randomness to avoid perfect grids that might cause issues
+    noise_level = 0.05
+    points += np.random.uniform(-noise_level, noise_level, points.shape)
+
+    # Clip points to ensure they're within bounds
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Add boundary points to ensure good coverage
+    boundary_points = []
+    for _ in range(15):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            boundary_points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            boundary_points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            boundary_points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            boundary_points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    points = np.vstack([points, boundary_points])
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x, y = selected_centroids[i]
+            # Initial radius based on proximity to neighbors
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+            if len(distances) > 0:
+                avg_distance = np.min(distances) * 0.4
+                radius = min(avg_distance, 0.2)
+            else:
+                radius = 0.1
+
+            # Ensure it's within bounds
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            circles[i] = [x, y, max(radius, 0.001)]
+
+        return circles
+    except:
+        # Fallback to random initialization if Voronoi fails
+        return generate_random_initialization(n_circles)
+=======
+def create_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced Voronoi-based spreading with Delaunay optimization."""
+    # Generate points using a more sophisticated approach
+    # Start with a grid pattern for good initial coverage
+    grid_size = int(np.ceil(np.sqrt(n_circles)))
+    grid_points = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(grid_points) < n_circles:
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                grid_points.append([x, y])
+
+    points = np.array(grid_points)
+
+    # Add some randomness and boundary points for better distribution
+    noise_level = 0.05
+    points += np.random.uniform(-noise_level, noise_level, points.shape)
+
+    # Add boundary points to encourage better edge coverage
+    boundary_points = []
+    for _ in range(20):  # More boundary points for better coverage
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            boundary_points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            boundary_points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            boundary_points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            boundary_points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    points = np.vstack([points, boundary_points])
+
+    # Clip points to ensure they're within bounds
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        if len(centroids) >= n_circles:
+            selected_centroids = centroids[:n_circles]
+        else:
+            # If we don't have enough centroids, extend with additional points
+            selected_centroids = centroids
+            # Add more points in remaining space
+            remaining = n_circles - len(selected_centroids)
+            for _ in range(remaining):
+                # Add points based on Delaunay triangulation to maintain good spacing
+                try:
+                    delaunay = Delaunay(selected_centroids)
+                    # Sample points within the convex hull
+                    centroid = np.mean(selected_centroids, axis=0)
+                    # Add points with some offset from existing points
+                    new_point = centroid + np.random.normal(0, 0.1, 2)
+                    new_point = np.clip(new_point, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+                    selected_centroids = np.vstack([selected_centroids, new_point])
+                except:
+                    # Fallback to random point
+                    new_point = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN, 2)
+                    selected_centroids = np.vstack([selected_centroids, new_point])
+            selected_centroids = selected_centroids[:n_circles]
+
+        # Create circles with initial radii that balance density and spacing
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x, y = selected_centroids[i]
+
+            # Calculate the minimum distance to any other point to determine appropriate initial radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+
+            if len(distances) > 0:
+                # Use the median distance to determine radius, but scale appropriately
+                # This avoids very small radii that could lead to poor packing
+                min_distance = np.min(distances)
+                # Scale by packing density considerations for circle packings
+                radius = min(min_distance * 0.3, 0.2)
+            else:
+                radius = 0.1
+
+            # Ensure it's within bounds
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            # Use minimum radius to avoid degenerate cases
+            circles[i] = [x, y, max(radius, 0.005)]
+
+        return circles
+    except Exception as e:
+        # Fallback to random initialization if Voronoi fails
+        return generate_random_initialization(n_circles)
+>>>>>>> REPLACE

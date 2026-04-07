@@ -1,0 +1,320 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+import time
+from numba import jit
+import numba
+
+# Global constants
+MAX_TIME_SECONDS = 85
+BASE_RESOLUTION = 1000
+MIN_RESOLUTION = 200
+MAX_RESOLUTION = 5000
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Fast Numba implementation of autoconvolution for performance"""
+    n = len(f_vals)
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Fast Numba computation of C2 value with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # L2^2 norm using trapezoidal rule
+    if len(g_vals) >= 2:
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        h = 0.5 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # L-infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute C2 with safety checks
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def analyze_convolution_structure(f_vals):
+    """Analyze the convolution structure to guide evolution"""
+    g_vals = compute_autoconvolution_numba(f_vals)
+    
+    # Compute various structural features of convolution result
+    g_abs = np.abs(g_vals)
+    
+    # Peak concentration measure (how much energy is concentrated in peaks)
+    peakiness = np.std(g_abs) / (np.mean(g_abs) + 1e-12)
+    
+    # Smoothness measure (variance of differences)
+    if len(g_abs) > 1:
+        smoothness = np.std(np.diff(g_abs)) / (np.mean(np.abs(np.diff(g_abs))) + 1e-12)
+    else:
+        smoothness = 0.0
+    
+    # Energy distribution (entropy-like measure)
+    if len(g_abs) > 0:
+        g_norm = g_abs / (np.sum(g_abs) + 1e-12)
+        energy_entropy = -np.sum(g_norm * np.log(g_norm + 1e-12))
+    else:
+        energy_entropy = 0.0
+    
+    return {
+        'peakiness': peakiness,
+        'smoothness': smoothness,
+        'energy_entropy': energy_entropy,
+        'max_val': np.max(g_abs),
+        'mean_val': np.mean(g_abs)
+    }
+
+def generate_convolution_informed_patterns(n_steps):
+    """Generate step function patterns specifically designed for good convolution properties"""
+    patterns = []
+    
+    # Pattern 1: Multi-peak structure with varying amplitudes
+    x = np.linspace(0, 1, n_steps)
+    pattern1 = np.zeros(n_steps)
+    # Create peaks at different locations with varying heights
+    peaks = [0.2, 0.4, 0.6, 0.8]
+    for i, peak_pos in enumerate(peaks):
+        # Varying heights for each peak
+        height = 0.8 + 0.2 * np.random.random()
+        width = 0.08 + 0.04 * np.random.random()
+        pattern1 += height * np.exp(-((x - peak_pos)**2) / (2 * width**2))
+    patterns.append(pattern1)
+    
+    # Pattern 2: Balanced alternating structure
+    pattern2 = np.zeros(n_steps)
+    segment_size = max(1, n_steps // 12)
+    for i in range(0, n_steps, segment_size):
+        end_idx = min(i + segment_size, n_steps)
+        if (i // segment_size) % 2 == 0:
+            pattern2[i:end_idx] = 0.7 + 0.3 * np.random.random(end_idx - i)
+        else:
+            pattern2[i:end_idx] = 0.2 + 0.1 * np.random.random(end_idx - i)
+    patterns.append(pattern2)
+    
+    # Pattern 3: Sparse but energetic peaks
+    pattern3 = np.zeros(n_steps)
+    peak_positions = [0.1, 0.3, 0.5, 0.7, 0.9]
+    for pos in peak_positions:
+        idx = int(pos * (n_steps - 1))
+        if idx < n_steps:
+            pattern3[idx] = 2.0 + 1.0 * np.random.random()
+    patterns.append(pattern3)
+    
+    # Pattern 4: Smooth bell-shaped with high central peak
+    pattern4 = np.zeros(n_steps)
+    x = np.linspace(-1, 1, n_steps)
+    pattern4 = 0.5 + 0.5 * np.exp(-0.5 * (x / 0.3)**2)
+    patterns.append(pattern4)
+    
+    # Pattern 5: Fractal-like self-similar structure
+    pattern5 = np.zeros(n_steps)
+    # Create layers of different scales
+    for scale in [0.1, 0.05, 0.02]:
+        for i in range(0, n_steps, int(n_steps * scale)):
+            if i < n_steps:
+                pattern5[i] = 1.0 + 0.5 * np.random.random()
+    patterns.append(pattern5)
+    
+    return patterns
+
+def convolution_guided_mutation(parent, mutation_strength=0.1):
+    """Mutation that preserves beneficial convolution characteristics"""
+    child = parent.copy()
+    
+    # Apply random mutations but consider structure preservation
+    n_steps = len(child)
+    for i in range(n_steps):
+        if np.random.random() < 0.3:  # 30% chance to mutate
+            # Mutate with bias towards maintaining good convolution properties
+            delta = np.random.normal(0, mutation_strength)
+            # Apply boundary conditions and preserve pattern characteristics
+            child[i] = max(0.0, child[i] + delta)
+    
+    return child
+
+def convolution_guided_selection(population, fitness_scores):
+    """Select individuals based on both fitness and convolution quality"""
+    # Sort by fitness (descending)
+    sorted_indices = np.argsort(fitness_scores)[::-1]
+    
+    # Select top performers, but also consider structural diversity
+    selected = []
+    for i in range(min(len(population), 20)):  # Top 20
+        if i < len(sorted_indices):
+            selected.append(population[sorted_indices[i]])
+    
+    return selected
+
+def convolution_guided_evolution(n_steps, max_generations=30):
+    """Evolutionary process guided by convolution structure analysis"""
+    # Generate initial population with convolution-informed patterns
+    patterns = generate_convolution_informed_patterns(n_steps)
+    
+    # Initialize population
+    population = []
+    fitness_scores = []
+    
+    # Evaluate initial patterns
+    for pattern in patterns:
+        pattern = np.array(pattern)
+        # Normalize
+        if np.sum(pattern) > 0:
+            pattern = pattern / np.sum(pattern) * 2.0
+        population.append(pattern)
+        
+        # Evaluate fitness
+        g_vals = compute_autoconvolution_numba(pattern)
+        c2 = compute_c2_numba(g_vals)
+        fitness_scores.append(c2)
+    
+    # Evolution loop
+    for generation in range(max_generations):
+        if time.time() - start_time > MAX_TIME_SECONDS - 5:
+            break
+            
+        # Selection
+        selected = convolution_guided_selection(population, fitness_scores)
+        
+        # Create new generation through crossover and mutation
+        new_population = selected.copy()
+        
+        # Keep some originals
+        while len(new_population) < 20:  # Target population size
+            parent1 = selected[np.random.randint(0, len(selected))]
+            parent2 = selected[np.random.randint(0, len(selected))]
+            
+            # Simple crossover
+            crossover_point = np.random.randint(1, len(parent1) - 1)
+            child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+            
+            # Mutation with convolution guidance
+            child = convolution_guided_mutation(child, 0.1)
+            
+            # Normalize
+            if np.sum(child) > 0:
+                child = child / np.sum(child) * 2.0
+                
+            new_population.append(child)
+            
+        # Evaluate new population
+        population = new_population
+        fitness_scores = []
+        for individual in population:
+            g_vals = compute_autoconvolution_numba(individual)
+            c2 = compute_c2_numba(g_vals)
+            fitness_scores.append(c2)
+    
+    # Return best individual
+    best_idx = np.argmax(fitness_scores)
+    return population[best_idx]
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using convolution-guided evolution."""
+    global start_time
+    start_time = time.time()
+    
+    best_c2 = -np.inf
+    best_params = None
+    
+    # Try multiple resolutions to find optimal balance
+    resolutions = [200, 400, 600, 800, 1000, 1200, 1500, 2000]
+    
+    # Add some random resolutions
+    for _ in range(5):
+        res = np.random.randint(200, 2000)
+        if res not in resolutions:
+            resolutions.append(res)
+    
+    # Filter out extreme values
+    resolutions = [r for r in resolutions if MIN_RESOLUTION <= r <= MAX_RESOLUTION]
+    
+    for resolution in resolutions:
+        if time.time() - start_time > MAX_TIME_SECONDS - 5:
+            break
+            
+        try:
+            # Use convolution-guided evolution
+            params = convolution_guided_evolution(resolution, max_generations=20)
+            
+            # Evaluate final result
+            g_vals = compute_autoconvolution_numba(params)
+            c2 = compute_c2_numba(g_vals)
+            
+            if c2 > best_c2:
+                best_c2 = c2
+                best_params = params.copy()
+                
+        except Exception as e:
+            continue
+    
+    # If no evolution was successful, fallback to structured initialization
+    if best_params is None:
+        # Create a well-tested pattern based on successful heuristics
+        n_steps = 1000
+        x = np.linspace(-1, 1, n_steps)
+        
+        # Multiple peak structure
+        pattern = np.zeros(n_steps)
+        # Create 5 peaks
+        for i in range(5):
+            center = -0.7 + i * 0.4
+            height = 0.8 + 0.4 * np.random.random()
+            width = 0.1 + 0.05 * np.random.random()
+            pattern += height * np.exp(-((x - center)**2) / (2 * width**2))
+        
+        # Normalize
+        if np.sum(pattern) > 0:
+            pattern = pattern / np.sum(pattern) * 2.0
+            
+        best_params = pattern.tolist()
+    
+    # Final normalization and clean-up
+    if best_params is not None:
+        # Ensure non-negative values
+        best_params = np.maximum(best_params, 0).tolist()
+        
+        # Ensure reasonable size
+        if len(best_params) < 50:
+            best_params = best_params + [0.5] * (50 - len(best_params))
+        elif len(best_params) > MAX_RESOLUTION:
+            best_params = best_params[:MAX_RESOLUTION]
+    
+    return best_params
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

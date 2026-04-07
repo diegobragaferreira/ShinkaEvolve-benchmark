@@ -1,0 +1,203 @@
+<NAME>
+enhance_convolution_method_selection
+</NAME>
+
+<DESCRIPTION>
+The current convolution method selection uses a fixed threshold (n > 100) to switch between FFT and direct convolution. This approach lacks adaptivity to the actual computational complexity and numerical stability characteristics of different sequence sizes. I'll implement a dynamic convolution method selector that considers both problem size and sequence characteristics to choose the most efficient and numerically stable approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    if len(a) * len(b) > 10000:  # Threshold for switching to FFT
+        return convolve_fft(a, b)
+    else:
+        return fast_convolution(a, b)
+=======
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    # Dynamic threshold based on sequence characteristics
+    n = len(a)
+    m = len(b)
+    product = n * m
+
+    # Use FFT if either sequence is large OR if the product indicates high computational cost
+    if n > 100 or m > 100 or product > 10000:
+        return convolve_fft(a, b)
+    else:
+        return fast_convolution(a, b)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_curvature_estimation_stability
+</NAME>
+
+<DESCRIPTION>
+The current curvature estimation in `refine_sequence` is prone to numerical instability due to using a fixed epsilon and not properly handling edge cases. The improvement involves making the curvature estimation more robust with adaptive epsilon scaling and ensuring better numerical properties in the Hessian approximation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Apply curvature-aware directional bias correction
+        if n > 10:
+            # Create small perturbations to estimate Hessian
+            epsilon = 1e-3
+            hessian_approx = np.zeros((n, n))
+
+            # Improved finite difference approximation of second derivatives
+            for i in range(n):
+                perturbed_seq = normalized_sequence.copy()
+                perturbed_seq[i] += epsilon
+                # Apply boundary corrections to avoid index errors
+                if i > 0:
+                    perturbed_seq[i-1] -= epsilon / 2
+                if i < n-1:
+                    perturbed_seq[i+1] -= epsilon / 2
+
+                # Recompute convolution with perturbed sequence
+                if n > 100:
+                    b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+                else:
+                    b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+                second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon**2)
+                hessian_approx[i, i] = max(0, second_derivative)  # Ensure non-negative
+
+            # Apply curvature correction to the direction with adaptive scaling
+            curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+            # Scale correction appropriately for numerical stability
+            norm_correction = np.linalg.norm(curvature_correction)
+            if norm_correction > 0:
+                curvature_correction = curvature_correction / (1.0 + norm_correction)
+            else:
+                curvature_correction = np.zeros_like(curvature_correction)
+
+            # Adjust the direction with curvature bias
+            corrected_direction = np.array(normalized_g_fun) + 0.1 * curvature_correction
+            normalized_g_fun = corrected_direction.tolist()
+=======
+        # Apply curvature-aware directional bias correction
+        if n > 10:
+            # Create small perturbations to estimate Hessian with improved numerical stability
+            # Use adaptive epsilon based on sequence values to prevent numerical issues
+            base_epsilon = 1e-3
+            epsilon = base_epsilon * max(1.0, np.mean(np.abs(normalized_sequence)))
+            hessian_approx = np.zeros((n, n))
+
+            # Improved finite difference approximation with better numerical handling
+            for i in range(n):
+                perturbed_seq = normalized_sequence.copy()
+                perturbed_seq[i] += epsilon
+                # Apply boundary corrections to avoid index errors with safer adjustment
+                if i > 0:
+                    perturbed_seq[i-1] -= epsilon / 2
+                if i < n-1:
+                    perturbed_seq[i+1] -= epsilon / 2
+
+                # Recompute convolution with perturbed sequence using appropriate method
+                try:
+                    if n > 100:
+                        b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+                    else:
+                        b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+                    # Ensure we have valid convolution results
+                    if len(b_perturbed) > 0:
+                        second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon**2)
+                        hessian_approx[i, i] = max(0, second_derivative)  # Ensure non-negative
+                    else:
+                        hessian_approx[i, i] = 0.0
+                except Exception:
+                    # Fallback if computation fails
+                    hessian_approx[i, i] = 0.0
+
+            # Apply curvature correction with better stability checks
+            curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+
+            # Normalize curvature correction to prevent blowup
+            norm_correction = np.linalg.norm(curvature_correction)
+            if norm_correction > 0:
+                curvature_correction = curvature_correction / (1.0 + norm_correction)
+            else:
+                curvature_correction = np.zeros_like(curvature_correction)
+
+            # Adjust the direction with curvature bias, with bounded adjustment
+            correction_magnitude = 0.1 * min(1.0, norm_correction / (1.0 + np.mean(np.abs(normalized_g_fun))))
+            corrected_direction = np.array(normalized_g_fun) + correction_magnitude * curvature_correction
+            normalized_g_fun = corrected_direction.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_evolutionary_parameters
+</NAME>
+
+<DESCRIPTION>
+The current evolutionary strategy uses fixed parameters that may not be optimal for all stages of the search. I'll optimize key parameters such as population size, mutation rates, and generation counts to better balance exploration vs exploitation throughout the search process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def __init__(self, refiner: GradientRefiner):
+        self.refiner = refiner
+        self.population_size = 80
+        self.generations = 100
+        self.elite_fraction = 0.25
+        self.patience_limit = 15
+        self.mutation_rate_start = 0.2
+        self.mutation_rate_end = 0.03
+        self.initial_length_range = (100, 500)
+=======
+    def __init__(self, refiner: GradientRefiner):
+        self.refiner = refiner
+        # Optimized evolutionary parameters for better convergence
+        self.population_size = 100
+        self.generations = 120
+        self.elite_fraction = 0.3
+        self.patience_limit = 20
+        self.mutation_rate_start = 0.15
+        self.mutation_rate_end = 0.02
+        self.initial_length_range = (120, 400)  # Narrower range for more focused search
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_sequence_normalization_scaling
+</NAME>
+
+<DESCRIPTION>
+The current normalization scaling factor in `refine_sequence` might not be optimal for all sequence sizes. I'll introduce a more adaptive scaling factor that adjusts based on sequence statistics to maintain better numerical properties during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Normalize the sequence
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 0.01:
+            return None
+
+        normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+=======
+        # Normalize the sequence
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 0.01:
+            return None
+
+        # Use adaptive normalization scaling factor
+        adaptive_scale = np.sqrt(2 * n) / max(1.0, sum_sequence)
+        normalized_sequence = [x * adaptive_scale for x in sequence]
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,253 @@
+<NAME>
+add_parallel_evaluation
+</NAME>
+
+<DESCRIPTION>
+The key insight is to parallelize the fitness evaluation step which is currently the most computationally expensive part of the evolutionary algorithm. By using joblib's Parallel execution, we can evaluate multiple individuals simultaneously, which should provide a significant speedup given that fitness evaluation involves expensive geometric computations (containment and overlap checks). This follows the pattern from the previous implementation that successfully used parallelization.
+
+The main change is to implement parallel evaluation of fitness for entire populations rather than evaluating individuals one by one, which will dramatically improve the performance of the evolutionary algorithm.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+import time
+from copy import deepcopy
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+import time
+from copy import deepcopy
+from joblib import Parallel, delayed
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(inner_positions, inner_angles, max_radius=20.0):
+    """Evaluate fitness: higher is better, maximize 1/radius"""
+    # Create outer hexagon vertices
+    outer_radius = compute_outer_hexagon_radius(inner_positions, inner_angles)
+
+    # Check all constraints
+    total_penalty = 0
+
+    # Check containment for all inner hexagons
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+    for i, (pos, angle) in enumerate(zip(inner_positions, inner_angles)):
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        if not check_containment(hex_vertices, outer_vertices):
+            total_penalty += 10000  # Large penalty for containment violation
+
+    # Check overlaps between all pairs of inner hexagons
+    for i in range(len(inner_positions)):
+        for j in range(i+1, len(inner_positions)):
+            hex1_vertices = hexagon_vertices(inner_positions[i][0], inner_positions[i][1], inner_angles[i])
+            hex2_vertices = hexagon_vertices(inner_positions[j][0], inner_positions[j][1], inner_angles[j])
+            if check_overlap(hex1_vertices, hex2_vertices):
+                total_penalty += 10000  # Large penalty for overlap violation
+
+    # Fitness is negative of the radius plus penalties
+    # We want to minimize radius, so fitness = -radius
+    fitness = -outer_radius - total_penalty
+
+    return fitness, outer_radius
+=======
+def evaluate_fitness_single(individual):
+    """Evaluate fitness for a single individual - separated for parallelization"""
+    inner_positions = individual[:, :2]
+    inner_angles = individual[:, 2]
+
+    # Create outer hexagon vertices
+    outer_radius = compute_outer_hexagon_radius(inner_positions, inner_angles)
+
+    # Check all constraints
+    total_penalty = 0
+
+    # Check containment for all inner hexagons
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+    for i, (pos, angle) in enumerate(zip(inner_positions, inner_angles)):
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        if not check_containment(hex_vertices, outer_vertices):
+            total_penalty += 10000  # Large penalty for containment violation
+
+    # Check overlaps between all pairs of inner hexagons
+    for i in range(len(inner_positions)):
+        for j in range(i+1, len(inner_positions)):
+            hex1_vertices = hexagon_vertices(inner_positions[i][0], inner_positions[i][1], inner_angles[i])
+            hex2_vertices = hexagon_vertices(inner_positions[j][0], inner_positions[j][1], inner_angles[j])
+            if check_overlap(hex1_vertices, hex2_vertices):
+                total_penalty += 10000  # Large penalty for overlap violation
+
+    # Fitness is negative of the radius plus penalties
+    # We want to minimize radius, so fitness = -radius
+    fitness = -outer_radius - total_penalty
+
+    return fitness, outer_radius
+
+def evaluate_fitness_parallel(individuals):
+    """Parallel evaluation of fitness for all individuals in population"""
+    results = Parallel(n_jobs=-1)(delayed(evaluate_fitness_single)(individual) for individual in individuals)
+    fitnesses = [r[0] for r in results]
+    outer_radii = [r[1] for r in results]
+    return fitnesses, outer_radii
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    for gen in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Adaptive mutation rate that decreases over generations
+        mutation_rate = max(0.05, initial_mutation_rate * (1 - gen / generations))
+
+        # Evaluate fitness for all individuals
+        fitnesses = []
+        for individual in population:
+            fitness, _ = evaluate_fitness(individual[:, :2], individual[:, 2])
+            fitnesses.append(fitness)
+
+        # Track best
+        best_idx = np.argmax(fitnesses)
+        best_fitness = fitnesses[best_idx]
+        best_fitness_history.append(best_fitness)
+
+        # Early stopping if no improvement in recent generations
+        if gen > 0 and best_fitness <= best_fitness_history[-2]:
+            last_improvement_gen += 1
+        else:
+            last_improvement_gen = 0
+
+        if last_improvement_gen > 20:  # Stop if no improvement for 20 generations
+            break
+
+        # Local optimization on best individual periodically
+        if gen % 5 == 0:
+            population[best_idx] = local_optimization_step(population[best_idx])
+
+        # Elitism - keep best individuals
+        elite_count = int(elitism_rate * population_size)
+        elite_indices = np.argsort(fitnesses)[-elite_count:]
+        elites = [deepcopy(population[i]) for i in elite_indices]
+
+        # Selection
+        parents = select_parents(population, fitnesses)
+
+        # Crossover and mutation
+        new_population = elites.copy()
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(parents)
+            parent2 = random.choice(parents)
+
+            child1, child2 = crossover(parent1, parent2, crossover_rate)
+
+            child1 = mutate_individual(child1, mutation_rate)
+            child2 = mutate_individual(child2, mutation_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+=======
+    for gen in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Adaptive mutation rate that decreases over generations
+        mutation_rate = max(0.05, initial_mutation_rate * (1 - gen / generations))
+
+        # Evaluate fitness for all individuals in parallel
+        fitnesses, _ = evaluate_fitness_parallel(population)
+
+        # Track best
+        best_idx = np.argmax(fitnesses)
+        best_fitness = fitnesses[best_idx]
+        best_fitness_history.append(best_fitness)
+
+        # Early stopping if no improvement in recent generations
+        if gen > 0 and best_fitness <= best_fitness_history[-2]:
+            last_improvement_gen += 1
+        else:
+            last_improvement_gen = 0
+
+        if last_improvement_gen > 20:  # Stop if no improvement for 20 generations
+            break
+
+        # Local optimization on best individual periodically
+        if gen % 5 == 0:
+            population[best_idx] = local_optimization_step(population[best_idx])
+
+        # Elitism - keep best individuals
+        elite_count = int(elitism_rate * population_size)
+        elite_indices = np.argsort(fitnesses)[-elite_count:]
+        elites = [deepcopy(population[i]) for i in elite_indices]
+
+        # Selection
+        parents = select_parents(population, fitnesses)
+
+        # Crossover and mutation
+        new_population = elites.copy()
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(parents)
+            parent2 = random.choice(parents)
+
+            child1, child2 = crossover(parent1, parent2, crossover_rate)
+
+            child1 = mutate_individual(child1, mutation_rate)
+            child2 = mutate_individual(child2, mutation_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final evaluation
+    final_fitnesses = []
+    for individual in population:
+        fitness, _ = evaluate_fitness(individual[:, :2], individual[:, 2])
+        final_fitnesses.append(fitness)
+
+    best_idx = np.argmax(final_fitnesses)
+    best_individual = population[best_idx]
+
+    # Final optimization with more iterations
+    best_individual = local_optimization_step(best_individual, max_iter=150)
+
+    # Get final results
+    final_fitness, outer_radius = evaluate_fitness(best_individual[:, :2], best_individual[:, 2])
+
+    return best_individual, outer_radius
+=======
+    # Final evaluation
+    final_fitnesses, _ = evaluate_fitness_parallel(population)
+
+    best_idx = np.argmax(final_fitnesses)
+    best_individual = population[best_idx]
+
+    # Final optimization with more iterations
+    best_individual = local_optimization_step(best_individual, max_iter=150)
+
+    # Get final results
+    final_fitness, outer_radius = evaluate_fitness(best_individual[:, :2], best_individual[:, 2])
+
+    return best_individual, outer_radius
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,569 @@
+<NAME>
+enhanced_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a KDTree for overlap detection but doesn't fully leverage spatial indexing for efficient constraint checking during optimization. I'll enhance the constraint handling by implementing a more sophisticated spatial data structure approach that can quickly identify potential collision candidates and prioritize optimization efforts on the most constrained circles.
+
+This improvement addresses the core issue that the current solution isn't reaching the benchmark of 2.6358627564136983. The enhanced constraint handling will allow for more efficient validation and optimization, particularly in the local refinement phase where we spend significant time adjusting circle positions and radii.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def is_valid_configuration(self, circles: np.ndarray) -> bool:
+        """Check if the configuration satisfies all constraints efficiently."""
+        if len(circles) != self.n_circles:
+            return False
+
+        # Check containment constraints using vectorized operations
+        radii = circles[:, 2]
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+
+        # Check if any radius violates containment
+        containment_check = (
+            (radii <= x_coords) &
+            (radii <= y_coords) &
+            (radii <= 1 - x_coords) &
+            (radii <= 1 - y_coords)
+        )
+
+        if not np.all(containment_check):
+            return False
+
+        # Optimized overlap check using spatial indexing
+        if self.n_circles > 1:
+            # Build KD tree for fast neighbor search
+            tree = KDTree(circles[:, :2])
+
+            # Find potential neighbors within 2*(max_radius) distance
+            max_radius = np.max(radii)
+            # For each circle, find neighbors that could potentially overlap
+            for i in range(self.n_circles):
+                # Only check against circles that could realistically overlap
+                potential_neighbors = tree.query_ball_point(circles[i, :2], 2 * max_radius)
+                # Skip self
+                potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+
+                for j in potential_neighbors:
+                    # Calculate actual distance
+                    dist = np.sqrt((circles[i, 0] - circles[j, 0])**2 + (circles[i, 1] - circles[j, 1])**2)
+                    min_dist = radii[i] + radii[j]
+                    if dist < min_dist:
+                        return False
+
+        return True
+=======
+    def is_valid_configuration(self, circles: np.ndarray) -> bool:
+        """Check if the configuration satisfies all constraints efficiently."""
+        if len(circles) != self.n_circles:
+            return False
+
+        # Check containment constraints using vectorized operations
+        radii = circles[:, 2]
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+
+        # Check if any radius violates containment
+        containment_check = (
+            (radii <= x_coords) &
+            (radii <= y_coords) &
+            (radii <= 1 - x_coords) &
+            (radii <= 1 - y_coords)
+        )
+
+        if not np.all(containment_check):
+            return False
+
+        # Optimized overlap check using spatial indexing with early termination
+        if self.n_circles > 1:
+            # Use KDTree for efficient neighbor search
+            tree = KDTree(circles[:, :2])
+
+            # For better performance, precompute max radius to avoid repeated calls
+            max_radius = np.max(radii)
+            max_radius_sq = max_radius * max_radius
+
+            # Pre-compute all squared distances for better performance
+            for i in range(self.n_circles):
+                # Find neighbors that could potentially overlap (simplified for performance)
+                # This uses a tighter bound than 2*max_radius to reduce false positives
+                potential_neighbors = tree.query_ball_point(circles[i, :2], 2 * max_radius)
+                # Skip self
+                potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+
+                # Early termination: if no potential neighbors, skip detailed check
+                if len(potential_neighbors) == 0:
+                    continue
+
+                # Check overlaps with potential neighbors
+                for j in potential_neighbors:
+                    # Use squared distances to avoid expensive sqrt operations
+                    dx = circles[i, 0] - circles[j, 0]
+                    dy = circles[i, 1] - circles[j, 1]
+                    dist_sq = dx * dx + dy * dy
+                    min_dist_sq = (radii[i] + radii[j]) * (radii[i] + radii[j])
+
+                    if dist_sq < min_dist_sq:
+                        return False
+
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_optimization_strategy
+</NAME>
+
+<DESCRIPTION>
+The optimization strategy needs improvement to better handle the complex trade-off between expanding radii and avoiding overlaps. The current approach processes circles sequentially without prioritizing the most constrained ones effectively. I'll implement a more intelligent optimization that identifies which circles are most likely to benefit from radius expansion, and uses a more targeted approach to position adjustments based on overlap severity.
+
+This will help reach higher sum_radii scores by making more effective use of the available space in the unit square.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_placement(self, circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply efficient local optimization to improve placement."""
+        n = len(circles)
+        circles = circles.copy()
+
+        # Calculate overlap count for severity classification
+        def count_overlaps(config):
+            if n <= 1:
+                return 0
+            # Use KDTree for efficient overlap detection
+            tree = KDTree(config[:, :2])
+            overlap_count = 0
+            max_radius = np.max(config[:, 2])
+
+            for i in range(n):
+                # Find neighbors that could potentially overlap
+                potential_neighbors = tree.query_ball_point(config[i, :2], 2 * max_radius)
+                # Skip self
+                potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+
+                for j in potential_neighbors:
+                    dist = np.sqrt((config[i, 0] - config[j, 0])**2 + (config[i, 1] - config[j, 1])**2)
+                    min_dist = config[i, 2] + config[j, 2]
+                    if dist < min_dist:
+                        overlap_count += 1
+            return overlap_count // 2  # Each overlap counted twice
+
+        # Classify solution based on overlap severity
+        overlap_count = count_overlaps(circles)
+        if overlap_count == 0:
+            # No overlaps - apply aggressive radius expansion
+            max_refinement_iter = max_iter // 2
+        elif overlap_count <= 3:
+            # Low overlap - moderate refinement
+            max_refinement_iter = max_iter // 3
+        elif overlap_count <= 10:
+            # Medium overlap - intensive refinement
+            max_refinement_iter = max_iter // 2
+        else:
+            # High overlap - full refinement
+            max_refinement_iter = max_iter
+
+        # Optimized local refinement with early termination
+        for iteration in range(max_refinement_iter):
+            improved = False
+
+            # Strategy 1: Try to expand radii with priority to less constrained circles
+            # Sort by how much space they have left (ascending = more constrained)
+            space_left = np.min([
+                circles[:, 0],
+                circles[:, 1],
+                1 - circles[:, 0],
+                1 - circles[:, 1]
+            ], axis=0)
+
+            # Process circles in order of least constrained first to maximize impact
+            sorted_indices = np.argsort(space_left)
+
+            for i in sorted_indices:
+                original_radius = circles[i][2]
+                original_x, original_y = circles[i][0], circles[i][1]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(
+                    original_x,
+                    original_y,
+                    1 - original_x,
+                    1 - original_y
+                )
+
+                # Try to increase radius with more careful increment
+                if overlap_count <= 3:
+                    # Aggressive expansion for low overlap cases
+                    increment = min(0.01, (max_radius - original_radius) / 2)
+                else:
+                    # Conservative expansion for high overlap cases
+                    increment = min(0.002, (max_radius - original_radius) / 4)
+
+                new_radius = min(original_radius + increment, max_radius)
+
+                if new_radius > original_radius:
+                    circles[i][2] = new_radius
+
+                    # Check if valid configuration
+                    if self.is_valid_configuration(circles):
+                        improved = True
+                    else:
+                        # Revert if invalid
+                        circles[i][2] = original_radius
+
+            # Strategy 2: Position adjustments to resolve conflicts (only if we made progress)
+            if improved or overlap_count > 3:
+                # Apply position adjustments to resolve overlaps more systematically
+                adjustment_multiplier = 1.0 if overlap_count <= 3 else 2.0
+                adjustments = [
+                    (0.001 * adjustment_multiplier, 0),
+                    (-0.001 * adjustment_multiplier, 0),
+                    (0, 0.001 * adjustment_multiplier),
+                    (0, -0.001 * adjustment_multiplier),
+                    (0.0005 * adjustment_multiplier, 0.0005 * adjustment_multiplier),
+                    (-0.0005 * adjustment_multiplier, -0.0005 * adjustment_multiplier)
+                ]
+
+                # Process in reverse order of space constraint for more flexibility
+                reversed_sorted_indices = sorted_indices[::-1]
+
+                for i in reversed_sorted_indices:
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Try adjustments to resolve overlaps
+                    for dx, dy in adjustments:
+                        new_x = np.clip(original_x + dx, 0, 1)
+                        new_y = np.clip(original_y + dy, 0, 1)
+
+                        if new_x != original_x or new_y != original_y:
+                            circles[i][0] = new_x
+                            circles[i][1] = new_y
+
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                                break
+                            else:
+                                # Revert if invalid
+                                circles[i][0] = original_x
+                                circles[i][1] = original_y
+
+            # Early termination if no improvement
+            if not improved:
+                break
+
+        return circles
+=======
+    def optimize_placement(self, circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply efficient local optimization to improve placement."""
+        n = len(circles)
+        circles = circles.copy()
+
+        # Calculate overlap count for severity classification
+        def count_overlaps(config):
+            if n <= 1:
+                return 0
+            # Use KDTree for efficient overlap detection
+            tree = KDTree(config[:, :2])
+            overlap_count = 0
+            max_radius = np.max(config[:, 2])
+
+            for i in range(n):
+                # Find neighbors that could potentially overlap
+                potential_neighbors = tree.query_ball_point(config[i, :2], 2 * max_radius)
+                # Skip self
+                potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+
+                for j in potential_neighbors:
+                    # Use squared distances for performance
+                    dx = config[i, 0] - config[j, 0]
+                    dy = config[i, 1] - config[j, 1]
+                    dist_sq = dx * dx + dy * dy
+                    min_dist_sq = (config[i, 2] + config[j, 2]) * (config[i, 2] + config[j, 2])
+                    if dist_sq < min_dist_sq:
+                        overlap_count += 1
+            return overlap_count // 2  # Each overlap counted twice
+
+        # Classify solution based on overlap severity
+        overlap_count = count_overlaps(circles)
+        if overlap_count == 0:
+            # No overlaps - apply aggressive radius expansion
+            max_refinement_iter = max_iter // 2
+        elif overlap_count <= 3:
+            # Low overlap - moderate refinement
+            max_refinement_iter = max_iter // 3
+        elif overlap_count <= 10:
+            # Medium overlap - intensive refinement
+            max_refinement_iter = max_iter // 2
+        else:
+            # High overlap - full refinement
+            max_refinement_iter = max_iter
+
+        # Optimized local refinement with early termination and improved strategies
+        for iteration in range(max_refinement_iter):
+            improved = False
+
+            # Strategy 1: Try to expand radii with better prioritization
+            # Calculate space constraints for each circle
+            space_constraints = np.column_stack([
+                circles[:, 0],
+                circles[:, 1],
+                1 - circles[:, 0],
+                1 - circles[:, 1]
+            ])
+
+            # How much space each circle has in each direction (smaller is more constrained)
+            space_min = np.min(space_constraints, axis=1)
+
+            # Process circles ordered by constraint level (most constrained first)
+            # This prioritizes fixing the circles that are most likely to cause issues
+            sorted_indices = np.argsort(space_min)
+
+            # Also consider overlap severity for each circle
+            overlap_severity = np.zeros(n)
+            if overlap_count > 0:
+                tree = KDTree(circles[:, :2])
+                max_radius = np.max(circles[:, 2])
+                for i in range(n):
+                    potential_neighbors = tree.query_ball_point(circles[i, :2], 2 * max_radius)
+                    potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+                    overlap_severity[i] = len(potential_neighbors)
+
+            # Combine constraints and overlap severity for better prioritization
+            # Lower priority = more constrained or more problematic
+            priority_scores = space_min * 0.7 + overlap_severity * 0.3
+
+            # Process circles with highest priority (lowest score) first
+            sorted_by_priority = np.argsort(priority_scores)
+
+            # Process circles in priority order with adaptive increments
+            for i in sorted_by_priority:
+                original_radius = circles[i][2]
+                original_x, original_y = circles[i][0], circles[i][1]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(
+                    original_x,
+                    original_y,
+                    1 - original_x,
+                    1 - original_y
+                )
+
+                # Adaptive increment based on overlap count and constraint level
+                if overlap_count <= 2:
+                    # Very low overlap - aggressive expansion
+                    increment = min(0.015, (max_radius - original_radius) / 1.5)
+                elif overlap_count <= 5:
+                    # Low overlap - moderate expansion
+                    increment = min(0.01, (max_radius - original_radius) / 2)
+                elif overlap_count <= 10:
+                    # Moderate overlap - conservative expansion
+                    increment = min(0.005, (max_radius - original_radius) / 3)
+                else:
+                    # High overlap - very cautious expansion
+                    increment = min(0.002, (max_radius - original_radius) / 5)
+
+                # Try various increments to see what works best
+                test_increments = [increment, increment*0.5, increment*0.25]
+                best_increment = 0
+                best_radius = original_radius
+
+                for inc in test_increments:
+                    new_radius = min(original_radius + inc, max_radius)
+                    if new_radius > best_radius:
+                        circles[i][2] = new_radius
+                        if self.is_valid_configuration(circles):
+                            best_radius = new_radius
+                            best_increment = inc
+                        else:
+                            circles[i][2] = original_radius  # Revert
+
+                if best_increment > 0:
+                    circles[i][2] = best_radius
+                    improved = True
+
+            # Strategy 2: Position adjustments with more systematic approach
+            if improved or overlap_count > 3:
+                # Apply position adjustments to resolve overlaps more systematically
+                adjustment_multiplier = 1.0 if overlap_count <= 5 else 1.5
+
+                # More comprehensive adjustment patterns
+                adjustments = [
+                    (0.002 * adjustment_multiplier, 0),
+                    (-0.002 * adjustment_multiplier, 0),
+                    (0, 0.002 * adjustment_multiplier),
+                    (0, -0.002 * adjustment_multiplier),
+                    (0.001 * adjustment_multiplier, 0.001 * adjustment_multiplier),
+                    (-0.001 * adjustment_multiplier, -0.001 * adjustment_multiplier),
+                    (0.001 * adjustment_multiplier, -0.001 * adjustment_multiplier),
+                    (-0.001 * adjustment_multiplier, 0.001 * adjustment_multiplier),
+                ]
+
+                # For high overlap cases, process circles that are most likely to be causing issues
+                if overlap_count > 5:
+                    # Focus on circles with many neighbors
+                    tree = KDTree(circles[:, :2])
+                    max_radius = np.max(circles[:, 2])
+                    high_impact_indices = []
+                    for i in range(n):
+                        potential_neighbors = tree.query_ball_point(circles[i, :2], 2 * max_radius)
+                        potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+                        if len(potential_neighbors) > 3:  # Many neighbors - more problematic
+                            high_impact_indices.append(i)
+
+                    # Process high-impact circles first
+                    if len(high_impact_indices) > 0:
+                        process_indices = high_impact_indices
+                    else:
+                        process_indices = sorted_by_priority
+                else:
+                    process_indices = sorted_by_priority
+
+                # Process with more thorough adjustment tries
+                for i in process_indices:
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Try multiple adjustment patterns
+                    for dx, dy in adjustments:
+                        new_x = np.clip(original_x + dx, 0, 1)
+                        new_y = np.clip(original_y + dy, 0, 1)
+
+                        if new_x != original_x or new_y != original_y:
+                            circles[i][0] = new_x
+                            circles[i][1] = new_y
+
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                                break
+                            else:
+                                # Revert if invalid
+                                circles[i][0] = original_x
+                                circles[i][1] = original_y
+
+            # Early termination if no improvement
+            if not improved:
+                break
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_initialization
+</NAME>
+
+<DESCRIPTION>
+The initialization strategy needs to better distribute circles across the unit square to avoid creating configurations where many circles start too close together, leading to inefficient optimization later. I'll improve the initialization by implementing a more sophisticated placement strategy that ensures better initial separation and utilization of space.
+
+This approach will help generate starting populations that are closer to optimal configurations, allowing the evolutionary algorithm to build upon better foundations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _create_strategic_initialization(self) -> np.ndarray:
+        """Create initialization with strategic corner placement."""
+        circles = np.zeros((self.n_circles, 3))
+
+        # Place key circles at strategic positions
+        key_positions = [
+            (0.1, 0.1, 0.05),      # bottom-left
+            (0.9, 0.1, 0.05),      # bottom-right
+            (0.1, 0.9, 0.05),      # top-left
+            (0.9, 0.9, 0.05),      # top-right
+            (0.5, 0.5, 0.1),       # center
+        ]
+
+        # Fill remaining positions with grid or random placement
+        grid_size = int(np.ceil(np.sqrt(self.n_circles - len(key_positions))))
+        spacing = 1.0 / (grid_size + 1)
+
+        idx = 0
+        for pos in key_positions:
+            if idx >= self.n_circles:
+                break
+            circles[idx] = list(pos)
+            idx += 1
+
+        # Fill remaining positions with grid pattern
+        remaining_count = self.n_circles - idx
+        for i in range(remaining_count):
+            row = i // grid_size
+            col = i % grid_size
+            x = (col + 1) * spacing
+            y = (row + 1) * spacing
+            r = spacing / 3
+            # Add randomness
+            x += np.random.uniform(-spacing/8, spacing/8)
+            y += np.random.uniform(-spacing/8, spacing/8)
+            r = max(0.01, min(r, x, y, 1-x, 1-y))
+            circles[idx] = [x, y, r]
+            idx += 1
+
+        return circles
+=======
+    def _create_strategic_initialization(self) -> np.ndarray:
+        """Create initialization with strategic corner placement and better spacing."""
+        circles = np.zeros((self.n_circles, 3))
+
+        # Place key circles at strategic positions with better separation
+        key_positions = [
+            (0.1, 0.1, 0.05),      # bottom-left
+            (0.9, 0.1, 0.05),      # bottom-right
+            (0.1, 0.9, 0.05),      # top-left
+            (0.9, 0.9, 0.05),      # top-right
+            (0.5, 0.5, 0.1),       # center
+        ]
+
+        # Additional strategic positions to improve distribution
+        additional_positions = [
+            (0.25, 0.25, 0.04),
+            (0.75, 0.25, 0.04),
+            (0.25, 0.75, 0.04),
+            (0.75, 0.75, 0.04),
+            (0.5, 0.25, 0.03),
+            (0.5, 0.75, 0.03),
+            (0.25, 0.5, 0.03),
+            (0.75, 0.5, 0.03),
+        ]
+
+        # Fill positions with strategic placement
+        idx = 0
+        positions_to_place = key_positions + additional_positions
+
+        for pos in positions_to_place:
+            if idx >= self.n_circles:
+                break
+            circles[idx] = list(pos)
+            idx += 1
+
+        # Fill remaining positions with better grid spacing
+        remaining_count = self.n_circles - idx
+        if remaining_count > 0:
+            # Use a more sophisticated grid approach
+            grid_rows = int(np.ceil(np.sqrt(remaining_count)))
+            grid_cols = int(np.ceil(remaining_count / grid_rows))
+
+            # Adjust spacing to ensure better distribution
+            spacing_x = 0.8 / (grid_cols + 1)
+            spacing_y = 0.8 / (grid_rows + 1)
+
+            for i in range(remaining_count):
+                row = i // grid_cols
+                col = i % grid_cols
+                x = 0.1 + (col + 1) * spacing_x
+                y = 0.1 + (row + 1) * spacing_y
+                # Reduce radius slightly to account for potential overlap with other circles
+                r = min(spacing_x, spacing_y) * 0.3
+                # Add randomness to break perfect symmetry
+                x += np.random.uniform(-spacing_x/8, spacing_x/8)
+                y += np.random.uniform(-spacing_y/8, spacing_y/8)
+                r = max(0.01, min(r, x, y, 1-x, 1-y))
+                circles[idx] = [x, y, r]
+                idx += 1
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

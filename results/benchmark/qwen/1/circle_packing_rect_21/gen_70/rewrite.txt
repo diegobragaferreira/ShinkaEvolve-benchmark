@@ -1,0 +1,349 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+import random
+import time
+from collections import defaultdict
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Rectangle dimensions (width + height = 2)
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Number of circles
+    n = 21
+    
+    def get_voronoi_criticality(circles):
+        """Calculate criticality based on Voronoi diagram and proximity to boundaries"""
+        if len(circles) == 0:
+            return np.array([])
+            
+        n = len(circles)
+        criticality_scores = np.zeros(n)
+        
+        # Calculate minimum distance to any other circle center
+        coords = circles[:, :2]
+        if n > 1:
+            for i in range(n):
+                # Calculate distances to all other circles
+                distances = np.sqrt(np.sum((coords - coords[i])**2, axis=1))
+                distances[i] = float('inf')  # Exclude self-distance
+                min_distance = np.min(distances)
+                # Criticality is inversely proportional to distance
+                # Smaller distance = more constrained
+                if min_distance > 0:
+                    criticality_scores[i] = 1.0 / (min_distance + 0.001)
+                else:
+                    criticality_scores[i] = 1000
+        
+        # Add boundary constraint component
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to nearest boundary
+            boundary_distances = [x, y, rect_width - x, rect_height - y]
+            min_boundary = min(boundary_distances)
+            # If very close to boundary, increase criticality
+            if min_boundary < 0.05:
+                criticality_scores[i] *= (1 + 10 * (0.05 - min_boundary))
+        
+        # Normalize
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+            
+        return criticality_scores
+    
+    def is_valid_solution(circles):
+        """Check if solution is valid with efficient spatial indexing"""
+        if len(circles) <= 1:
+            return True
+            
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+        
+        # More efficient overlap checking using spatial hashing
+        # Hash circles into grid cells
+        cell_size = 0.1  # Cell size should be ~2 * avg_radius
+        grid = defaultdict(list)
+        
+        # Place circles in grid cells
+        for i, (x, y, r) in enumerate(circles):
+            # Determine which grid cells this circle affects
+            min_x_cell = int((x - r) / cell_size)
+            max_x_cell = int((x + r) / cell_size)
+            min_y_cell = int((y - r) / cell_size)
+            max_y_cell = int((y + r) / cell_size)
+            
+            for gx in range(min_x_cell, max_x_cell + 1):
+                for gy in range(min_y_cell, max_y_cell + 1):
+                    grid[(gx, gy)].append(i)
+        
+        # Check for overlaps within each cell
+        for cell_key, indices in grid.items():
+            # Check pairs in this cell
+            for i in range(len(indices)):
+                for j in range(i+1, len(indices)):
+                    idx1, idx2 = indices[i], indices[j]
+                    x1, y1, r1 = circles[idx1]
+                    x2, y2, r2 = circles[idx2]
+                    
+                    # Fast distance check
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist_sq = dx*dx + dy*dy
+                    radius_sum = r1 + r2
+                    
+                    if dist_sq < radius_sum * radius_sum:
+                        return False
+                        
+        return True
+    
+    def compute_total_radius(circles):
+        """Compute sum of all radii"""
+        return np.sum(circles[:, 2])
+    
+    def initialize_with_boundary_aware_pattern():
+        """Initialize with a pattern that considers boundaries"""
+        circles = np.zeros((n, 3))
+        
+        # Start with a hexagonal-like pattern but with boundary awareness
+        max_radius = min(rect_width, rect_height) * 0.1
+        
+        # Place circles in a pattern that avoids tight boundary constraints
+        rows = int(np.sqrt(n)) + 1
+        cols = int(np.ceil(n / rows))
+        
+        # Margin to avoid tight boundary constraints
+        margin = 0.1
+        
+        x_spacing = (rect_width - 2 * margin) / (cols - 1) if cols > 1 else rect_width - 2 * margin
+        y_spacing = (rect_height - 2 * margin) / (rows - 1) if rows > 1 else rect_height - 2 * margin
+        
+        # Reduce spacing slightly to allow for better packing
+        x_spacing = min(x_spacing, max_radius * 2.5)
+        y_spacing = min(y_spacing, max_radius * 2.5)
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = margin + j * x_spacing
+                y = margin + i * y_spacing
+                
+                # Apply some randomness to avoid perfect patterns
+                x += np.random.uniform(-0.02, 0.02)
+                y += np.random.uniform(-0.02, 0.02)
+                
+                # Ensure circles stay within bounds
+                x = max(max_radius, min(rect_width - max_radius, x))
+                y = max(max_radius, min(rect_height - max_radius, y))
+                
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+                
+        return circles
+    
+    def compute_collision_free_radius(circles, target_idx, x, y):
+        """Compute maximum possible radius for target circle at given position without overlapping others"""
+        if len(circles) <= 1:
+            return min(x, y, rect_width - x, rect_height - y)
+            
+        min_distance = float('inf')
+        
+        # Check distance to all other circles
+        for i, (ox, oy, oradius) in enumerate(circles):
+            if i != target_idx:
+                dx = x - ox
+                dy = y - oy
+                dist = np.sqrt(dx*dx + dy*dy)
+                # Minimum distance to maintain separation
+                min_distance = min(min_distance, dist)
+        
+        # Maximum radius is limited by boundary and other circles
+        boundary_distance = min(x, y, rect_width - x, rect_height - y)
+        max_radius = min(boundary_distance, min_distance - 0.001) if min_distance != float('inf') else boundary_distance
+        
+        return max(0.001, max_radius)
+    
+    def refine_solution_greedy(circles, max_iterations=500):
+        """Refine solution using greedy approach focused on critical circles"""
+        current_circles = circles.copy()
+        
+        for iteration in range(max_iterations):
+            # Compute criticality scores
+            criticality = get_voronoi_criticality(current_circles)
+            
+            # Sort by criticality (worst constrained first)
+            sorted_indices = np.argsort(-criticality)
+            
+            # Try to improve the most critical circles
+            improvement_made = False
+            
+            # Process top 10% of critical circles each iteration
+            num_to_process = max(1, int(n * 0.1))
+            
+            for i in range(min(num_to_process, len(sorted_indices))):
+                idx = sorted_indices[i]
+                
+                # Store current values
+                old_x, old_y, old_r = current_circles[idx]
+                
+                # Try to expand radius
+                old_radius = old_r
+                new_radius = old_radius
+                
+                # Try expanding radius
+                max_radius_allowed = compute_collision_free_radius(current_circles, idx, old_x, old_y)
+                if max_radius_allowed > old_radius:
+                    # Increase radius up to the limit
+                    new_radius = min(max_radius_allowed, old_radius + 0.01)
+                    # Try to move the circle to maximize radius
+                    # Simple local search around current position
+                    best_x, best_y, best_r = old_x, old_y, new_radius
+                    
+                    # Try several nearby positions
+                    best_radius = old_radius
+                    best_position = (old_x, old_y)
+                    
+                    # Test nearby positions
+                    steps = [(0, 0), (-0.01, 0), (0.01, 0), (0, -0.01), (0, 0.01)]
+                    for dx, dy in steps:
+                        test_x = old_x + dx
+                        test_y = old_y + dy
+                        test_radius = compute_collision_free_radius(current_circles, idx, test_x, test_y)
+                        if test_radius > best_radius:
+                            best_radius = test_radius
+                            best_position = (test_x, test_y)
+                    
+                    if best_radius > old_radius:
+                        new_x, new_y = best_position
+                        new_r = best_radius
+                        # Only accept if valid
+                        temp_circles = current_circles.copy()
+                        temp_circles[idx] = [new_x, new_y, new_r]
+                        
+                        if is_valid_solution(temp_circles):
+                            current_circles[idx] = [new_x, new_y, new_r]
+                            improvement_made = True
+                            continue
+                
+                # If not expanding radius, try to adjust position for better fit
+                if not improvement_made:
+                    # Simple local optimization - try moving closer to center if beneficial
+                    center_x, center_y = rect_width/2, rect_height/2
+                    dx = center_x - old_x
+                    dy = center_y - old_y
+                    
+                    # Move slightly towards center (but respect constraints)
+                    test_x = max(0.005, min(rect_width - 0.005, old_x + dx * 0.05))
+                    test_y = max(0.005, min(rect_height - 0.005, old_y + dy * 0.05))
+                    test_radius = compute_collision_free_radius(current_circles, idx, test_x, test_y)
+                    
+                    if test_radius > old_radius:
+                        temp_circles = current_circles.copy()
+                        temp_circles[idx] = [test_x, test_y, test_radius]
+                        if is_valid_solution(temp_circles):
+                            current_circles[idx] = [test_x, test_y, test_radius]
+                            improvement_made = True
+            
+            # If no improvements were made, terminate early
+            if not improvement_made:
+                break
+                
+        return current_circles
+    
+    def boundary_optimization(circles):
+        """Specialized optimization for circles near boundaries"""
+        current_circles = circles.copy()
+        
+        # Identify boundary circles (within 0.1 of any edge)
+        boundary_circles = []
+        for i, (x, y, r) in enumerate(current_circles):
+            if x < 0.1 or y < 0.1 or (rect_width - x) < 0.1 or (rect_height - y) < 0.1:
+                boundary_circles.append(i)
+        
+        # For each boundary circle, try to optimize its position
+        for idx in boundary_circles:
+            old_x, old_y, old_r = current_circles[idx]
+            best_x, best_y, best_r = old_x, old_y, old_r
+            
+            # Try various positions near the boundary
+            # Try moving away from the boundary
+            candidates = []
+            
+            # Move right if too far left
+            if old_x < 0.1:
+                candidates.append((0.1 + old_r, old_y, old_r))
+            # Move left if too far right
+            elif (rect_width - old_x) < 0.1:
+                candidates.append((rect_width - 0.1 - old_r, old_y, old_r))
+            # Move down if too high
+            elif (rect_height - old_y) < 0.1:
+                candidates.append((old_x, rect_height - 0.1 - old_r, old_r))
+            # Move up if too low
+            elif old_y < 0.1:
+                candidates.append((old_x, 0.1 + old_r, old_r))
+            
+            # Try moving diagonally
+            if old_x < 0.1 and old_y < 0.1:
+                candidates.append((0.1 + old_r, 0.1 + old_r, old_r))
+            elif (rect_width - old_x) < 0.1 and old_y < 0.1:
+                candidates.append((rect_width - 0.1 - old_r, 0.1 + old_r, old_r))
+            elif old_x < 0.1 and (rect_height - old_y) < 0.1:
+                candidates.append((0.1 + old_r, rect_height - 0.1 - old_r, old_r))
+            elif (rect_width - old_x) < 0.1 and (rect_height - old_y) < 0.1:
+                candidates.append((rect_width - 0.1 - old_r, rect_height - 0.1 - old_r, old_r))
+            
+            # Check candidates and find best valid one
+            for tx, ty, tr in candidates:
+                temp_circles = current_circles.copy()
+                temp_circles[idx] = [tx, ty, tr]
+                if is_valid_solution(temp_circles):
+                    new_radius = compute_collision_free_radius(temp_circles, idx, tx, ty)
+                    if new_radius > best_r:
+                        best_x, best_y, best_r = tx, ty, new_radius
+                        
+            # If found a better position, update
+            if best_r > old_r:
+                current_circles[idx] = [best_x, best_y, best_r]
+                
+        return current_circles
+    
+    # Main optimization process
+    # Stage 1: Initialize with good pattern
+    circles = initialize_with_boundary_aware_pattern()
+    
+    # Stage 2: Greedy refinement focusing on critical circles
+    circles = refine_solution_greedy(circles, max_iterations=500)
+    
+    # Stage 3: Specialized boundary optimization
+    circles = boundary_optimization(circles)
+    
+    # Stage 4: Final global refinement
+    circles = refine_solution_greedy(circles, max_iterations=300)
+    
+    # Ensure validity
+    if not is_valid_solution(circles):
+        # Fallback to hexagonal pattern if needed
+        circles = initialize_with_boundary_aware_pattern()
+        circles = refine_solution_greedy(circles, max_iterations=300)
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

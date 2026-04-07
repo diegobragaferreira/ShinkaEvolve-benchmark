@@ -1,0 +1,213 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,205 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from deap import base, creator, tools, algorithms
++from scipy.spatial.distance import cdist
++import random
++import time
++
++# Set random seed for reproducibility
++random.seed(42)
++np.random.seed(42)
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
++    # Problem parameters
++    n_circles = 26
++    max_evaluations = 50000
++    pop_size = 100
++
++    # Setup DEAP
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++
++    toolbox = base.Toolbox()
++
++    # Define bounds for each parameter
++    # Each individual represents [x1,y1,r1,x2,y2,r2,...,x26,y26,r26]
++    lower_bounds = [0.0] * (3 * n_circles)
++    upper_bounds = [1.0] * (3 * n_circles)
++
++    # Initialize individuals with random values
++    def init_individual():
++        individual = []
++        for i in range(n_circles):
++            # Position and radius constrained by square boundaries
++            x = random.uniform(0.01, 0.99)  # Ensure some margin
++            y = random.uniform(0.01, 0.99)
++            r = random.uniform(0.001, 0.2)  # Reasonable radius range
++            individual.extend([x, y, r])
++        return creator.Individual(individual)
++
++    toolbox.register("individual", init_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++
++    def evaluate(individual):
++        """Evaluate fitness of an individual"""
++        # Convert individual to array
++        circles = np.array(individual).reshape(-1, 3)
++
++        # Extract positions and radii
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++
++        # Check boundary constraints
++        valid = True
++        total_radius = np.sum(radii)
++
++        # Penalize if any circle violates boundary constraints
++        for i, (x, y, r) in enumerate(circles):
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                valid = False
++                break
++
++        if not valid:
++            return (0,)  # Invalid solution
++
++        # Compute pairwise distances between circle centers
++        distances = cdist(positions, positions)
++
++        # Penalty for overlapping circles
++        penalty = 0
++        for i in range(n_circles):
++            for j in range(i+1, n_circles):
++                dist = distances[i, j]
++                min_dist = radii[i] + radii[j]
++                if dist < min_dist:
++                    # Overlapping - penalize based on overlap amount
++                    overlap = min_dist - dist
++                    penalty += overlap
++
++        # Return fitness (total radius minus penalty)
++        return (total_radius - penalty,)
++
++    toolbox.register("evaluate", evaluate)
++    toolbox.register("mate", tools.cxUniform, indpb=0.5)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.01, indpb=0.2)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++
++    # Create initial population
++    population = toolbox.population(n=pop_size)
++
++    # Run evolution
++    hof = tools.HallOfFame(1)
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++
++    try:
++        population, logbook = algorithms.eaSimple(
++            population, toolbox, cxpb=0.8, mutpb=0.2,
++            ngen=100, stats=stats, halloffame=hof, verbose=False
++        )
++    except Exception as e:
++        print(f"Evolution failed: {e}")
++        # Return a basic solution if evolution fails
++        return generate_basic_solution()
++
++    best_individual = hof[0]
++
++    # Convert back to circles array
++    circles = np.array(best_individual).reshape(-1, 3)
++
++    # Final validation and refinement
++    final_circles = refine_solution(circles)
++
++    return final_circles
++
++def generate_basic_solution():
++    """Generate a simple and feasible starting solution"""
++    circles = np.zeros((26, 3))
++    # Place circles in a grid-like pattern with varying radii
++    rows = 5
++    cols = 5
++    spacing_x = 0.8 / cols
++    spacing_y = 0.8 / rows
++
++    for i in range(26):
++        row = i // cols
++        col = i % cols
++        if row < rows and col < cols:
++            x = 0.1 + col * spacing_x
++            y = 0.1 + row * spacing_y
++            r = 0.05
++            circles[i] = [x, y, r]
+ 
+     return circles
+ 
++def refine_solution(circles):
++    """Apply local refinement to improve solution quality"""
++    # Simple iterative refinement: adjust positions to avoid overlaps
++    max_iterations = 50
++    for _ in range(max_iterations):
++        improved = False
++        for i in range(len(circles)):
++            # Try slightly adjusting position and radius
++            original_pos = circles[i, :2].copy()
++            original_rad = circles[i, 2]
++
++            # Try small adjustments to see if improvement occurs
++            for dx in [-0.001, 0, 0.001]:
++                for dy in [-0.001, 0, 0.001]:
++                    # Skip if this would move outside boundaries
++                    new_x = original_pos[0] + dx
++                    new_y = original_pos[1] + dy
++                    if new_x - original_rad < 0 or new_x + original_rad > 1 \
++                       or new_y - original_rad < 0 or new_y + original_rad > 1:
++                        continue
++
++                    # Update temporarily and check collisions
++                    circles[i, 0] = new_x
++                    circles[i, 1] = new_y
++
++                    # Check if this creates fewer collisions or is valid
++                    valid = check_constraints(circles)
++
++                    if valid:
++                        improved = True
++                    else:
++                        # Reset if invalid
++                        circles[i, 0] = original_pos[0]
++                        circles[i, 1] = original_pos[1]
++
++        if not improved:
++            break
++
++    return circles
++
++def check_constraints(circles):
++    """Check if all constraints are satisfied"""
++    positions = circles[:, :2]
++    radii = circles[:, 2]
++
++    # Check boundary constraints
++    for x, y, r in circles:
++        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++            return False
++
++    # Check overlap constraints
++    distances = cdist(positions, positions)
++    for i in range(len(circles)):
++        for j in range(i+1, len(circles)):
++            dist = distances[i, j]
++            min_dist = radii[i] + radii[j]
++            if dist < min_dist:
++                return False
++
++    return True
++
+ 
+ # EVOLVE-BLOCK-END

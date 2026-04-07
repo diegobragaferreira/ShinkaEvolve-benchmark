@@ -1,0 +1,92 @@
+<NAME>
+add_local_search_refinement
+</NAME>
+
+<DESCRIPTION>
+Adding a local search refinement step that uses gradient-based optimization to further improve the best solution found by simulated annealing. This approach combines the global exploration capabilities of SA with local exploitation to fine-tune promising configurations. The local search will use a constrained optimization approach that maintains the spherical constraint while optimizing the min/max ratio.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Refine the best solution with additional optimization
+    if best_points is not None:
+        final_points, _ = simulated_annealing_optimization(best_points, 5000)
+        return final_points
+
+    # Fallback to single optimization if nothing worked
+    initial_points = fibonacci_sphere(14)
+    initial_points = project_to_sphere(initial_points)
+    optimized_points, _ = simulated_annealing_optimization(initial_points, 15000)
+    return optimized_points
+=======
+    # Refine the best solution with additional optimization
+    if best_points is not None:
+        final_points, _ = simulated_annealing_optimization(best_points, 5000)
+
+        # Add local search refinement for final polishing
+        refined_points = local_search_refinement(final_points)
+        return refined_points
+
+    # Fallback to single optimization if nothing worked
+    initial_points = fibonacci_sphere(14)
+    initial_points = project_to_sphere(initial_points)
+    optimized_points, _ = simulated_annealing_optimization(initial_points, 15000)
+    return optimized_points
+
+def local_search_refinement(points, max_iter=1000):
+    """Apply local search refinement to improve the solution near the optimum."""
+    from scipy.optimize import minimize
+    from scipy.spatial.distance import cdist
+
+    # Convert points to flattened array for optimization
+    points_flat = points.flatten()
+
+    def objective(x_flat):
+        # Reshape back to points
+        current_points = x_flat.reshape(-1, 3)
+
+        # Project back to sphere
+        norms = np.linalg.norm(current_points, axis=1)
+        norms = np.where(norms == 0, 1, norms)
+        current_points = current_points / norms[:, np.newaxis]
+
+        # Compute distances
+        distances = cdist(current_points, current_points)
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Return negative ratio (since we want to maximize)
+        if max_dist == 0:
+            return -np.inf
+        return -min_dist / max_dist
+
+    def constraint_func(x_flat):
+        # Ensure all points remain on the unit sphere
+        points = x_flat.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0  # Should be zero for unit sphere
+
+    # Create constraints for the optimization
+    constraints = {'type': 'eq', 'fun': constraint_func}
+
+    # Run local optimization
+    try:
+        result = minimize(objective, points_flat, method='SLSQP',
+                         constraints=constraints,
+                         options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-6})
+        if result.success:
+            refined_points = result.x.reshape(-1, 3)
+            # Ensure normalization
+            norms = np.linalg.norm(refined_points, axis=1)
+            norms = np.where(norms == 0, 1, norms)
+            refined_points = refined_points / norms[:, np.newaxis]
+            return refined_points
+    except:
+        pass
+
+    # If local search fails, return original points
+    return points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,312 @@
+<NAME>
+implement_adaptive_penalty_weighting
+</NAME>
+
+<DESCRIPTION>
+I'll implement adaptive penalty weighting that dynamically adjusts penalty weights based on constraint violation severity. This approach will assign higher penalties to containment violations (which are more fundamental) compared to overlap violations, and will also provide more nuanced penalty adjustments that better reflect the relative importance of different constraint types, helping the optimization converge more effectively toward valid configurations with minimal outer hexagon side lengths.
+
+This change addresses recommendation #3 from the prior suggestions, enhancing the penalty-based objective design with adaptive weighting that better reflects constraint importance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration(config, outer_side_length):
+    """Evaluate a configuration of 12 hexagons."""
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Early termination for invalid configurations
+    if not check_containment_fast_numba(hexagon_vertices_list, outer_side_length):
+        return float('inf')  # Invalid configuration
+
+    # Check overlap
+    if not check_overlap(hexagon_vertices_list):
+        return float('inf')  # Overlapping hexagons
+
+    return 0  # Valid configuration
+
+def objective_function(config, outer_side_length):
+    """Objective function to minimize (negative of 1/outer_hex_side_length)."""
+    # We want to maximize 1/outer_hex_side_length, so we minimize -1/outer_hex_side_length
+    penalty = evaluate_configuration(config, outer_side_length)
+    if penalty == float('inf'):
+        # Return large value for invalid configurations
+        return 1000000
+    else:
+        # For valid configurations, return negative of 1/outer_hex_side_length
+        if outer_side_length > 0:
+            return -1.0 / outer_side_length
+        else:
+            return 1000000
+=======
+def evaluate_configuration(config, outer_side_length):
+    """Evaluate a configuration of 12 hexagons."""
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Early termination for invalid configurations
+    if not check_containment_fast_numba(hexagon_vertices_list, outer_side_length):
+        return float('inf')  # Invalid configuration
+
+    # Check overlap
+    if not check_overlap(hexagon_vertices_list):
+        return float('inf')  # Overlapping hexagons
+
+    return 0  # Valid configuration
+
+def objective_function(config, outer_side_length):
+    """Objective function to minimize (negative of 1/outer_hex_side_length)."""
+    # We want to maximize 1/outer_hex_side_length, so we minimize -1/outer_hex_side_length
+    penalty = evaluate_configuration(config, outer_side_length)
+    if penalty == float('inf'):
+        # Return large value for invalid configurations
+        return 1000000
+    else:
+        # For valid configurations, return negative of 1/outer_hex_side_length
+        if outer_side_length > 0:
+            return -1.0 / outer_side_length
+        else:
+            return 1000000
+
+def evaluate_fitness_with_adaptive_penalties(config, outer_side_length):
+    """
+    Enhanced fitness evaluation with adaptive penalty weighting.
+    Assigns higher penalties to containment violations which are more fundamental.
+    """
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Count constraint violations
+    containment_violations = 0
+    overlap_violations = 0
+
+    # Check containment violations more thoroughly
+    if not check_containment_fast_numba(hexagon_vertices_list, outer_side_length):
+        containment_violations = 1  # At least one containment violation
+
+    # Check overlap violations
+    if not check_overlap(hexagon_vertices_list):
+        overlap_violations = 1  # At least one overlap violation
+
+    # Adaptive penalty weights - containment is more critical than overlap
+    containment_penalty_weight = 1500
+    overlap_penalty_weight = 1000
+
+    # Total penalty calculation
+    total_penalty = (containment_violations * containment_penalty_weight +
+                    overlap_violations * overlap_penalty_weight)
+
+    # For valid configurations, return negative of 1/outer_hex_side_length plus penalties
+    if containment_violations > 0 or overlap_violations > 0:
+        return total_penalty  # Very bad fitness if constraints violated
+    else:
+        # For valid configurations, return negative of 1/outer_hex_side_length
+        if outer_side_length > 0:
+            return -1.0 / outer_side_length
+        else:
+            return 1000000
+>>>>>>> REPLACE
+
+</DIFF>
+
+<NAME>
+update_optimization_loop_for_adaptive_penalties
+</NAME>
+
+<DESCRIPTION>
+Update the optimization loop to use the new adaptive penalty evaluation function instead of the basic one. This will allow the optimizer to better distinguish between different types of constraint violations and prioritize containment over overlap violations, leading to better convergence toward valid solutions with smaller outer hexagon side lengths.
+
+This change implements part of recommendation #3 by updating the penalty system to be more adaptive and reflective of constraint importance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_stage_optimization(initial_guess, bounds, target_side_length):
+    """Perform multi-stage optimization for better results."""
+    best_config = initial_guess.copy()
+    best_side_length = target_side_length
+    best_score = -float('inf')
+
+    # Stage 1: Coarse optimization with high population
+    print("Stage 1: Coarse optimization")
+    try:
+        opt_result = differential_evolution(
+            lambda x: -objective_function(x, target_side_length),
+            bounds,
+            seed=random.randint(0, 1000),
+            maxiter=30,
+            popsize=20,
+            disp=False,
+            strategy='best1bin',
+            tol=1e-5
+        )
+
+        final_config = opt_result.x
+        penalty = evaluate_configuration(final_config, target_side_length)
+
+        if penalty != float('inf'):
+            stage1_score = -1.0 / target_side_length
+            if stage1_score > best_score:
+                best_score = stage1_score
+                best_config = final_config.copy()
+
+    except Exception as e:
+        print(f"Stage 1 error: {e}")
+
+    # Stage 2: Fine tuning with lower population but more iterations
+    print("Stage 2: Fine tuning")
+    try:
+        # Use a slightly modified version of best config as starting point
+        start_config = best_config.copy()
+
+        # Add small random perturbation
+        for i in range(len(start_config)):
+            if i % 3 < 2:  # Position components only
+                start_config[i] += np.random.uniform(-0.1, 0.1)
+
+        opt_result = differential_evolution(
+            lambda x: -objective_function(x, target_side_length),
+            bounds,
+            seed=random.randint(0, 1000),
+            maxiter=50,  # More iterations for fine tuning
+            popsize=10,   # Lower population for better convergence
+            disp=False,
+            strategy='best1bin',
+            tol=1e-6
+        )
+
+        final_config = opt_result.x
+        penalty = evaluate_configuration(final_config, target_side_length)
+
+        if penalty != float('inf'):
+            stage2_score = -1.0 / target_side_length
+            if stage2_score > best_score:
+                best_score = stage2_score
+                best_config = final_config.copy()
+
+    except Exception as e:
+        print(f"Stage 2 error: {e}")
+
+    # Stage 3: Local refinement around best solution
+    print("Stage 3: Local refinement")
+    try:
+        # Test various side lengths around optimal
+        test_side_lengths = np.linspace(3.85, min(target_side_length, 3.9419123), 20)
+
+        for test_side in test_side_lengths:
+            penalty = evaluate_configuration(best_config, test_side)
+            if penalty != float('inf'):
+                if test_side > best_side_length:
+                    best_side_length = test_side
+
+    except Exception as e:
+        print(f"Stage 3 error: {e}")
+
+    return best_config, best_side_length
+=======
+def multi_stage_optimization(initial_guess, bounds, target_side_length):
+    """Perform multi-stage optimization for better results."""
+    best_config = initial_guess.copy()
+    best_side_length = target_side_length
+    best_score = -float('inf')
+
+    # Stage 1: Coarse optimization with high population
+    print("Stage 1: Coarse optimization")
+    try:
+        opt_result = differential_evolution(
+            lambda x: evaluate_fitness_with_adaptive_penalties(x, target_side_length),
+            bounds,
+            seed=random.randint(0, 1000),
+            maxiter=30,
+            popsize=20,
+            disp=False,
+            strategy='best1bin',
+            tol=1e-5
+        )
+
+        final_config = opt_result.x
+        penalty = evaluate_configuration(final_config, target_side_length)
+
+        if penalty != float('inf'):
+            stage1_score = -1.0 / target_side_length
+            if stage1_score > best_score:
+                best_score = stage1_score
+                best_config = final_config.copy()
+
+    except Exception as e:
+        print(f"Stage 1 error: {e}")
+
+    # Stage 2: Fine tuning with lower population but more iterations
+    print("Stage 2: Fine tuning")
+    try:
+        # Use a slightly modified version of best config as starting point
+        start_config = best_config.copy()
+
+        # Add small random perturbation
+        for i in range(len(start_config)):
+            if i % 3 < 2:  # Position components only
+                start_config[i] += np.random.uniform(-0.1, 0.1)
+
+        opt_result = differential_evolution(
+            lambda x: evaluate_fitness_with_adaptive_penalties(x, target_side_length),
+            bounds,
+            seed=random.randint(0, 1000),
+            maxiter=50,  # More iterations for fine tuning
+            popsize=10,   # Lower population for better convergence
+            disp=False,
+            strategy='best1bin',
+            tol=1e-6
+        )
+
+        final_config = opt_result.x
+        penalty = evaluate_configuration(final_config, target_side_length)
+
+        if penalty != float('inf'):
+            stage2_score = -1.0 / target_side_length
+            if stage2_score > best_score:
+                best_score = stage2_score
+                best_config = final_config.copy()
+
+    except Exception as e:
+        print(f"Stage 2 error: {e}")
+
+    # Stage 3: Local refinement around best solution
+    print("Stage 3: Local refinement")
+    try:
+        # Test various side lengths around optimal
+        test_side_lengths = np.linspace(3.85, min(target_side_length, 3.9419123), 20)
+
+        for test_side in test_side_lengths:
+            penalty = evaluate_configuration(best_config, test_side)
+            if penalty != float('inf'):
+                if test_side > best_side_length:
+                    best_side_length = test_side
+
+    except Exception as e:
+        print(f"Stage 3 error: {e}")
+
+    return best_config, best_side_length
+>>>>>>> REPLACE
+
+</DIFF>

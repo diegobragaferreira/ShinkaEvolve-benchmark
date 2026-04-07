@@ -1,0 +1,245 @@
+--- a/original.py
++++ b/original.py
+@@ -1,108 +1,184 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist, squareform
++from scipy.spatial import SphericalVoronoi
+ import warnings
++from sklearn.cluster import KMeans
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+ 
+     """
+     
+     def objective(x):
+         # Reshape to points
+         points = x.reshape(-1, 3)
+         
+         # Compute pairwise distances
+         distances = squareform(pdist(points))
+         
+         # Zero out diagonal
+         np.fill_diagonal(distances, np.inf)
+         
+         # Get min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+         
+         # Return negative ratio to maximize (min/max)
+         if d_max == 0:
+             return -np.inf
+         return -d_min / d_max
+     
+     def constraint_sphere(x):
+         # Keep points on unit sphere
+         points = x.reshape(-1, 3)
+         norms = np.linalg.norm(points, axis=1)
+         return norms - 1.0
+     
+-    def constraint_bounds(x):
+-        # Keep points within [-1, 1]^3
+-        points = x.reshape(-1, 3)
+-        return np.concatenate([
+-            1.0 - np.abs(points).max(axis=0),
+-            np.abs(points).max(axis=0) - (-1.0)
+-        ])
++    def spherical_voronoi_energy(points):
++        """Compute energy based on Voronoi cell volumes for better distribution"""
++        # Normalize points to sphere
++        norms = np.linalg.norm(points, axis=1)
++        points_normalized = points / norms[:, np.newaxis]
++        
++        # Create spherical Voronoi diagram
++        try:
++            sv = SphericalVoronoi(points_normalized)
++            # Energy is inversely related to cell area variance (want uniform cells)
++            cell_areas = sv.calculate_areas()
++            # We want low variance in cell areas (high uniformity)
++            return np.var(cell_areas)
++        except:
++            # Fallback to simple distance variance if Voronoi fails
++            distances = squareform(pdist(points_normalized))
++            np.fill_diagonal(distances, np.inf)
++            return np.var(distances)
+     
+-    # Start with a good initial configuration
+-    # Using a spherical arrangement as starting point
+-    np.random.seed(42)
++    def generate_voronoi_based_initial():
++        """Generate initial points using spherical Voronoi-based approach"""
++        np.random.seed(42)
++        
++        # Start with a good distribution - use a combination of techniques
++        points = []
++        n = 14
++        
++        # Phase 1: Generate points using Fibonacci-like distribution
++        golden_ratio = (1 + np.sqrt(5)) / 2
++        for i in range(n):
++            y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
++            radius = np.sqrt(1 - y * y)  # radius at y
++            
++            phi = (i * 2 * np.pi) / golden_ratio  # azimuthal angle
++            
++            x = radius * np.cos(phi)
++            z = radius * np.sin(phi)
++            
++            points.append([x, y, z])
++        
++        points = np.array(points)
++        
++        # Phase 2: Improve with k-means clustering on sphere
++        # Project to sphere and cluster to get better spacing
++        points_norm = points / np.linalg.norm(points, axis=1, keepdims=True)
++        
++        # Cluster to reduce density variations
++        kmeans = KMeans(n_clusters=min(6, n), random_state=42, n_init=10)
++        labels = kmeans.fit_predict(points_norm)
++        
++        # Replace clustered points with cluster centers
++        for i in range(min(6, n)):
++            mask = labels == i
++            if np.sum(mask) > 0:
++                cluster_points = points_norm[mask]
++                cluster_center = np.mean(cluster_points, axis=0)
++                # Normalize to sphere
++                cluster_center = cluster_center / np.linalg.norm(cluster_center)
++                points_norm[labels == i] = cluster_center
++        
++        # Phase 3: Add some randomness to break symmetries
++        points_norm += np.random.normal(0, 0.02, points_norm.shape)
++        
++        # Renormalize to sphere
++        for i in range(len(points_norm)):
++            norm = np.linalg.norm(points_norm[i])
++            if norm > 0:
++                points_norm[i] = points_norm[i] / norm
++                
++        return points_norm
+     
+-    # Generate points uniformly distributed on sphere using Fibonacci
+-    # This provides a good initial distribution
+-    n = 14
+-    points = []
++    def optimize_with_local_search(initial_points, max_iter=1000):
++        """Optimize using local search with proper constraints"""
++        x0 = initial_points.flatten()
++        
++        # Define constraint that keeps points on unit sphere
++        cons = [{'type': 'eq', 'fun': constraint_sphere}]
++        
++        # Use L-BFGS-B for local optimization
++        result = minimize(
++            objective,
++            x0,
++            method='L-BFGS-B',
++            constraints=cons,
++            options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12}
++        )
++        
++        if result.success:
++            optimized_points = result.x.reshape(-1, 3)
++            # Ensure normalization
++            for i in range(len(optimized_points)):
++                norm = np.linalg.norm(optimized_points[i])
++                if norm > 0:
++                    optimized_points[i] = optimized_points[i] / norm
++            return optimized_points
++        else:
++            # Fallback to initial points
++            return initial_points
+     
+-    # Fibonacci sphere sampling
+-    golden_ratio = (1 + np.sqrt(5)) / 2
+-    for i in range(n):
+-        y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+-        radius = np.sqrt(1 - y * y)  # radius at y
++    # Generate initial configuration using Voronoi-based method
++    initial_points = generate_voronoi_based_initial()
++    
++    # Multiple optimization attempts with different starting configurations
++    best_points = initial_points.copy()
++    best_ratio = -np.inf
++    
++    # Try several variants starting from different configurations
++    for attempt in range(3):
++        # Create perturbed version for diversity
++        if attempt > 0:
++            np.random.seed(42 + attempt)
++            perturbed = initial_points + np.random.normal(0, 0.01, initial_points.shape)
++            # Renormalize
++            for i in range(len(perturbed)):
++                norm = np.linalg.norm(perturbed[i])
++                if norm > 0:
++                    perturbed[i] = perturbed[i] / norm
++            current_points = perturbed
++        else:
++            current_points = initial_points.copy()
+         
+-        theta = np.arccos(y)  # angle from z-axis
+-        phi = (i * 2 * np.pi) / golden_ratio  # azimuthal angle
++        # Optimize this configuration
++        optimized = optimize_with_local_search(current_points, max_iter=500)
+         
+-        x = radius * np.cos(phi)
+-        z = radius * np.sin(phi)
++        # Evaluate and keep best
++        distances = squareform(pdist(optimized))
++        np.fill_diagonal(distances, np.inf)
++        d_min = np.min(distances)
++        d_max = np.max(distances)
+         
+-        points.append([x, y, z])
++        if d_max > 0:
++            ratio = d_min / d_max
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = optimized.copy()
+     
+-    points = np.array(points)
++    # Final refinement
++    final_points = optimize_with_local_search(best_points, max_iter=1000)
+     
+-    # Normalize to unit sphere
+-    points = points / np.linalg.norm(points[0])
+-    
+-    # Flatten for optimization
+-    x0 = points.flatten()
+-    
+-    # Define constraints
+-    cons = [
+-        {'type': 'eq', 'fun': constraint_sphere},
+-        # Bounds for each coordinate
+-        {'type': 'ineq', 'fun': lambda x: 1.0 - np.abs(x.reshape(-1, 3)).max(axis=0)},
+-        {'type': 'ineq', 'fun': lambda x: np.abs(x.reshape(-1, 3)).max(axis=0) - (-1.0)}
+-    ]
+-    
+-    # Use L-BFGS-B method which handles bounds well
+-    result = minimize(
+-        objective,
+-        x0,
+-        method='L-BFGS-B',
+-        constraints=cons,
+-        options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+-    )
+-    
+-    # Extract optimized points
+-    optimized_points = result.x.reshape(-1, 3)
+-    
+-    # Ensure they're normalized to unit sphere (should already be done by constraint)
+-    for i in range(len(optimized_points)):
+-        norm = np.linalg.norm(optimized_points[i])
+-        if norm > 0:
+-            optimized_points[i] = optimized_points[i] / norm
+-    
+-    return optimized_points
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

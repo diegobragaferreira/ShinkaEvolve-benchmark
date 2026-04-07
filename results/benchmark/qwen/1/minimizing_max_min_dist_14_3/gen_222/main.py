@@ -1,0 +1,265 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, cdist
+from scipy.spatial import SphericalVoronoi
+import time
+
+def sobol_points_sphere(n_points):
+    """Generate points on sphere using 3D Sobol sequence for superior space-filling properties."""
+    try:
+        from sobol_seq import i4_sobol_generate
+        sobol_points = i4_sobol_generate(3, n_points)
+        
+        points = np.zeros((n_points, 3))
+        for i in range(n_points):
+            u = sobol_points[i, 0]
+            v = sobol_points[i, 1]
+            
+            theta = 2 * np.pi * u
+            phi = np.arccos(2 * v - 1)
+            
+            x = np.sin(phi) * np.cos(theta)
+            y = np.sin(phi) * np.sin(theta)
+            z = np.cos(phi)
+            
+            points[i] = [x, y, z]
+        return points
+    except ImportError:
+        # Fallback to fibonacci if sobol not available
+        return fibonacci_spiral_sphere(n_points)
+
+def fibonacci_spiral_sphere(n_points):
+    """Generate points on a sphere using Fibonacci spiral method."""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))
+    for i in range(n_points):
+        y = 1 - (i / float(n_points - 1)) * 2
+        radius = np.sqrt(1 - y * y)
+        theta = phi * i
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+        points.append([x, y, z])
+    return np.array(points)
+
+def min_max_dist_ratio(points):
+    """Calculate the ratio of minimum to maximum distance."""
+    if len(points) < 2:
+        return 0.0
+    distances = pdist(points)
+    if len(distances) == 0:
+        return 0.0
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+    if max_dist < 1e-12:
+        return 0.0
+    return min_dist / max_dist
+
+def voronoi_regularization_penalty(points, alpha=0.1):
+    """Add penalty for non-uniform Voronoi cell areas."""
+    try:
+        sv = SphericalVoronoi(points)
+        areas = sv.voronoi_cell_areas()
+        # Return variance of areas as penalty (higher variance = less uniform)
+        return np.var(areas)
+    except:
+        return 0.0
+
+def enhanced_objective_function(x_flat, points_count=14):
+    """Enhanced objective function incorporating multiple optimization criteria."""
+    points_reshaped = x_flat.reshape(points_count, 3)
+    
+    # Ensure points are on unit sphere
+    norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+    normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+    
+    # Calculate pairwise distances
+    distances = cdist(normalized_points, normalized_points)
+    np.fill_diagonal(distances, np.inf)
+    
+    if distances.size == 0:
+        return 1e10
+    
+    # Get min and max distances
+    d_min = np.min(distances)
+    d_max = np.max(distances)
+    
+    if d_max < 1e-12:
+        return 1e10
+    
+    # Calculate ratio
+    ratio = d_min / d_max
+    
+    # Add regularization penalty for distance variance
+    # This encourages more uniform spacing
+    distance_var = np.var(distances[distances != np.inf])
+    dist_mean = np.mean(distances[distances != np.inf])
+    
+    if dist_mean > 1e-12:
+        variance_penalty = distance_var / (dist_mean ** 2)
+        # Penalize high variance while maximizing ratio
+        # Higher lambda means stronger emphasis on uniformity
+        lambda_reg = 0.15
+        adjusted_ratio = ratio - lambda_reg * variance_penalty
+    else:
+        adjusted_ratio = ratio
+    
+    # Return negative for minimization (since we want to maximize ratio)
+    return -adjusted_ratio
+
+def adaptive_optimization_stage(points, max_iter=500, stage=1):
+    """Perform adaptive optimization stage with varying parameters."""
+    n = len(points)
+    
+    def constraint_sphere(x_flat):
+        points_reshaped = x_flat.reshape(n, 3)
+        norms = np.linalg.norm(points_reshaped, axis=1)
+        return norms - 1.0
+
+    constraints = {'type': 'eq', 'fun': constraint_sphere}
+    bounds = [(-2, 2) for _ in range(n * 3)]
+    
+    # Adaptive parameters based on stage
+    if stage == 1:  # Coarse optimization
+        method = 'SLSQP'
+        options = {'maxiter': max_iter//3, 'ftol': 1e-6, 'gtol': 1e-6}
+        tol = 1e-6
+    elif stage == 2:  # Medium optimization
+        method = 'trust-constr'
+        options = {'maxiter': max_iter//3, 'xtol': 1e-9, 'gtol': 1e-9}
+        tol = 1e-9
+    else:  # Fine optimization
+        method = 'L-BFGS-B' 
+        options = {'maxiter': max_iter//3, 'ftol': 1e-12, 'gtol': 1e-12}
+        tol = 1e-12
+    
+    try:
+        result = minimize(
+            enhanced_objective_function,
+            points.flatten(),
+            method=method,
+            bounds=bounds,
+            constraints=constraints,
+            options=options,
+            tol=tol
+        )
+        
+        if result.success:
+            optimized_points = result.x.reshape(n, 3)
+            # Ensure points are on unit sphere
+            norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+            normalized_points = optimized_points / np.maximum(norms, 1e-12)
+            return normalized_points
+    except Exception:
+        pass
+        
+    return points
+
+def icosahedron_points(n=14):
+    """Generate points using icosahedron-based construction"""
+    # Vertices of a regular icosahedron
+    phi = (1 + np.sqrt(5)) / 2  # golden ratio
+    vertices = np.array([
+        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+    ])
+
+    # Normalize to unit sphere
+    vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+
+    # If we need more than 12 points, distribute additional points
+    if n <= 12:
+        # Just return subset of vertices
+        return vertices[:n]
+    else:
+        # For 14 points, we'll start with icosahedron vertices and add two more
+        points = vertices.copy()
+
+        # Add two more points that are well-distributed
+        # Add points along major axes
+        points = np.vstack([points, [[0, 0, 1], [0, 0, -1]]])
+
+        # Apply slight random perturbation to ensure good distribution
+        np.random.seed(42)
+        points += np.random.normal(0, 0.05, (points.shape[0], 3))
+
+        # Normalize again to maintain unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / np.maximum(norms[:, np.newaxis], 1e-12)
+
+        return points[:n]
+
+def initialize_multiple_strategies(n_points=14):
+    """Initialize 14 points using multiple strategies."""
+    strategies = []
+    
+    # Strategy 1: Sobol sequence initialization
+    sobol_points = sobol_points_sphere(n_points)
+    strategies.append(("sobol", sobol_points))
+    
+    # Strategy 2: Fibonacci spiral 
+    fib_points = fibonacci_spiral_sphere(n_points)
+    strategies.append(("fibonacci", fib_points))
+    
+    # Strategy 3: Icosahedron-based initialization  
+    ico_points = icosahedron_points(n_points)
+    strategies.append(("icosahedron", ico_points))
+    
+    # Strategy 4: Random initialization with perturbation
+    np.random.seed(42)
+    random_points = np.random.randn(n_points, 3)
+    norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+    rand_points = random_points / np.maximum(norms, 1e-12)
+    strategies.append(("random", rand_points))
+    
+    return strategies
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    n = 14
+    d = 3
+    
+    # Initialize multiple strategies
+    strategies = initialize_multiple_strategies(n)
+    
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Try each strategy with optimized multi-stage approach
+    for strategy_name, initial_points in strategies:
+        # Add slight random noise to break symmetry
+        np.random.seed(42)
+        noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
+        
+        # Ensure all points are on unit sphere
+        norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+        normalized_points = noisy_points / np.maximum(norms, 1e-12)
+        
+        # Multi-stage optimization
+        optimized_points = adaptive_optimization_stage(normalized_points, max_iter=500, stage=1)
+        optimized_points = adaptive_optimization_stage(optimized_points, max_iter=500, stage=2)
+        optimized_points = adaptive_optimization_stage(optimized_points, max_iter=500, stage=3)
+        
+        # Evaluate solution
+        ratio = min_max_dist_ratio(optimized_points)
+        
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = optimized_points.copy()
+    
+    # Fallback to random if no good solution found
+    if best_points is None:
+        np.random.seed(42)
+        random_points = np.random.randn(n, d)
+        norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+        best_points = random_points / np.maximum(norms, 1e-12)
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

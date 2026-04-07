@@ -1,0 +1,428 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import time
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon, Point
+from scipy.optimize import minimize
+import warnings
+from numba import jit, prange
+
+@jit(nopython=True)
+def distance_point_to_line_segment(px, py, x1, y1, x2, y2):
+    """Fast distance from point to line segment"""
+    # Vector from (x1,y1) to (x2,y2)
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Length squared of segment
+    length_sq = dx*dx + dy*dy
+
+    # Avoid division by zero
+    if length_sq == 0.0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+
+    # Project point onto line
+    t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+    t = max(0.0, min(1.0, t))  # Clamp to segment
+
+    # Closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+
+    # Distance to closest point
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@jit(nopython=True)
+def point_in_hexagon_fast(px, py, hex_center_x, hex_center_y, hex_radius, rotation_rad):
+    """Fast point-in-hexagon test using geometric relationships"""
+    # Transform point to hexagon reference frame
+    dx = px - hex_center_x
+    dy = py - hex_center_y
+
+    # Rotate back to hexagon's local coordinate system
+    cos_r = np.cos(-rotation_rad)
+    sin_r = np.sin(-rotation_rad)
+    local_x = dx * cos_r - dy * sin_r
+    local_y = dx * sin_r + dy * cos_r
+
+    # Check against hexagon boundaries
+    # For a regular hexagon with radius r, the distance from center to corner is r
+    # The distance from center to edge is r * cos(π/6) = r * √3/2
+    edge_distance = hex_radius * np.sqrt(3) / 2
+
+    # In hexagon coordinates, we're in the "wedge" between two edges
+    # Check if point is within the hexagon using angular checks
+    # Simplified approach: use distance to center and to edges
+
+    # Distance from center
+    dist_to_center = np.sqrt(local_x**2 + local_y**2)
+
+    # If too far, definitely not in hexagon
+    if dist_to_center > hex_radius:
+        return False
+
+    # If close to center, definitely in hexagon
+    if dist_to_center < edge_distance:
+        return True
+
+    # Otherwise, check distance to edges
+    # For a regular hexagon, there are 6 edges to check
+    # We'll simplify to checking just one representative edge per sector
+    # But since we're doing numerical work, let's just do a basic check
+
+    # The key insight: in a regular hexagon, we can approximate by checking
+    # the distance from the point to the 6 edges
+    for i in range(6):
+        angle = i * np.pi / 3
+        x1 = hex_radius * np.cos(angle)
+        y1 = hex_radius * np.sin(angle)
+        angle2 = ((i+1) % 6) * np.pi / 3
+        x2 = hex_radius * np.cos(angle2)
+        y2 = hex_radius * np.sin(angle2)
+
+        dist = distance_point_to_line_segment(local_x, local_y, x1, y1, x2, y2)
+        if dist < 0.001:  # Close enough
+            return True
+
+        # Also check if we're inside the hexagon based on angle
+        # This is a simplification but works well for most cases
+        theta = np.arctan2(local_y, local_x) + np.pi
+        # Normalize to [0, 2π]
+        while theta < 0:
+            theta += 2 * np.pi
+        while theta >= 2 * np.pi:
+            theta -= 2 * np.pi
+
+        sector_angle = (i * np.pi / 3) + np.pi/6  # Center of sector
+        sector_start = sector_angle - np.pi/6
+        sector_end = sector_angle + np.pi/6
+
+        # Check if point's angle falls in this sector
+        if sector_start <= sector_end:
+            if sector_start <= theta <= sector_end:
+                continue  # Within sector
+        else:
+            if theta >= sector_start or theta <= sector_end:
+                continue  # Within sector
+
+    return dist_to_center <= hex_radius
+
+class HexTilingOptimizer:
+    def __init__(self):
+        self.hex_radius = 1.0
+        self.hex_width = 2 * self.hex_radius * np.cos(np.pi/6)
+        self.hex_height = 2 * self.hex_radius
+
+    def generate_hexagon_vertices(self, center_x, center_y, side_length=1, rotation_deg=0):
+        """Generate vertices of a regular hexagon"""
+        rotation_rad = np.radians(rotation_deg)
+        angles = np.linspace(0, 2*np.pi, 7) + rotation_rad
+        vertices = np.column_stack([
+            center_x + side_length * np.cos(angles),
+            center_y + side_length * np.sin(angles)
+        ])
+        return vertices[:-1]  # Remove duplicate last vertex
+
+    def compute_outer_hexagon_radius(self, inner_hex_data, outer_center=(0, 0)):
+        """Compute the minimal radius required to contain all inner hexagons"""
+        ox, oy = outer_center
+        max_dist = 0
+        for i in range(len(inner_hex_data)):
+            cx, cy, angle = inner_hex_data[i]
+            # Get vertices of inner hexagon
+            vertices = self.generate_hexagon_vertices(cx, cy, 1, angle)
+            # Distance from outer center to each vertex
+            distances = np.sqrt((vertices[:, 0] - ox)**2 + (vertices[:, 1] - oy)**2)
+            max_dist = max(max_dist, np.max(distances))
+        return max_dist + 0.1  # Small buffer
+
+    def calculate_tiling_pattern(self):
+        """Create an optimized hexagonal tiling pattern for 11 hexagons"""
+        # Use a more sophisticated arrangement inspired by optimal hexagonal packings
+        # Based on the principle of hexagonal close packing with strategic adjustments
+
+        positions = []
+
+        # Central hexagon
+        positions.append([0.0, 0.0, 0.0])
+
+        # First ring - 6 hexagons arranged in a perfect hexagonal pattern
+        # Distance between centers in adjacent hexagons is 2 (touching unit hexagons)
+        for i in range(6):
+            angle = i * np.pi / 3
+            x = 2.0 * np.cos(angle)
+            y = 2.0 * np.sin(angle)
+            positions.append([x, y, 0.0])
+
+        # Second ring - 4 hexagons placed strategically to minimize space
+        # These are positioned to fill gaps in the outer ring
+        ring_positions = [
+            [-1.0, -1.732, 0.0],   # Bottom left (at sqrt(3) distance)
+            [1.0, -1.732, 0.0],    # Bottom right
+            [-1.0, 1.732, 0.0],    # Top left
+            [1.0, 1.732, 0.0],     # Top right
+        ]
+
+        positions.extend(ring_positions)
+
+        # Ensure we have exactly 11 positions
+        return np.array(positions[:11])
+
+    def validate_tiling(self, hex_data):
+        """Quick validation of the tiling configuration"""
+        # Check basic containment (all hexes have centers reasonably within bounds)
+        max_dist_from_origin = 0
+        for i in range(len(hex_data)):
+            cx, cy, angle = hex_data[i]
+            dist = np.sqrt(cx*cx + cy*cy)
+            max_dist_from_origin = max(max_dist_from_origin, dist)
+
+        # Check overlaps via simple distance check first (fast)
+        for i in range(len(hex_data)):
+            for j in range(i+1, len(hex_data)):
+                cx1, cy1, _ = hex_data[i]
+                cx2, cy2, _ = hex_data[j]
+                dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                # Two unit hexagons should not overlap if they're more than 2 units apart
+                if dist < 1.99:  # Allow some tolerance
+                    return False
+        return True
+
+    def optimize_positions(self, initial_positions):
+        """Optimize the positions for better packing using hybrid approach"""
+        # Implement a more sophisticated hybrid optimization
+        # Phase 1: Position optimization with iterative refinement
+        # Phase 2: Rotation optimization
+        # Phase 3: Combined local search
+
+        def compute_penalty(positions):
+            """Compute penalty for overlaps and boundary violations"""
+            total_cost = 0
+
+            # Overlap penalties
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    cx1, cy1, _ = positions[i]
+                    cx2, cy2, _ = positions[j]
+                    dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                    if dist < 1.99:  # Overlapping
+                        penalty = (1.99 - dist) * 10000
+                        total_cost += penalty
+                    elif dist < 2.2:  # Too close but not overlapping
+                        penalty = (2.2 - dist) * 50
+                        total_cost += penalty
+
+            # Boundary penalties (keep hexagons within reasonable bounds)
+            for i in range(len(positions)):
+                cx, cy, _ = positions[i]
+                dist = np.sqrt(cx*cx + cy*cy)
+                if dist > 15:  # Arbitrary limit
+                    total_cost += (dist - 15) * 50
+
+            return total_cost
+
+        def compute_position_only_penalty(positions):
+            """Compute penalty focusing only on positions"""
+            total_cost = 0
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    cx1, cy1, _ = positions[i]
+                    cx2, cy2, _ = positions[j]
+                    dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                    if dist < 1.99:  # Overlapping
+                        penalty = (1.99 - dist) * 10000
+                        total_cost += penalty
+                    elif dist < 2.2:  # Too close
+                        penalty = (2.2 - dist) * 50
+                        total_cost += penalty
+            return total_cost
+
+        # Start with the initial configuration
+        current_positions = initial_positions.copy()
+        best_positions = current_positions.copy()
+        best_penalty = compute_penalty(current_positions)
+
+        # Phase 1: Iterative position refinement
+        for iter_num in range(30):  # More iterations for better convergence
+            improved = False
+
+            # Try moving each hexagon slightly
+            for i in range(len(current_positions)):
+                original_pos = current_positions[i].copy()
+
+                # Try small perturbations in different directions
+                best_test_pos = original_pos.copy()
+                best_test_penalty = compute_position_only_penalty(current_positions)
+
+                # Test small movements in 8 directions
+                for dx in [-0.1, -0.05, 0, 0.05, 0.1]:
+                    for dy in [-0.1, -0.05, 0, 0.05, 0.1]:
+                        test_positions = current_positions.copy()
+                        test_positions[i, 0] = original_pos[0] + dx
+                        test_positions[i, 1] = original_pos[1] + dy
+
+                        penalty = compute_position_only_penalty(test_positions)
+                        if penalty < best_test_penalty:
+                            best_test_penalty = penalty
+                            best_test_pos = test_positions[i].copy()
+
+                # Update if improvement
+                if not np.array_equal(best_test_pos, original_pos):
+                    current_positions[i] = best_test_pos
+                    improved = True
+
+            # Update best if we improved
+            current_penalty = compute_penalty(current_positions)
+            if current_penalty < best_penalty:
+                best_penalty = current_penalty
+                best_positions = current_positions.copy()
+
+            if not improved:
+                break  # No more improvements, stop early
+
+        # Phase 2: Rotation optimization (try small rotations)
+        # Only for outer hexagons that are likely to benefit from rotation
+        for i in range(2, len(current_positions)):  # Skip center and immediate neighbors
+            best_rotation = current_positions[i, 2]
+            best_rotation_penalty = compute_penalty(current_positions)
+
+            # Test small rotations
+            for rot_delta in [-5, -2, 0, 2, 5]:
+                test_positions = current_positions.copy()
+                test_positions[i, 2] = (current_positions[i, 2] + rot_delta) % 360
+
+                penalty = compute_penalty(test_positions)
+                if penalty < best_rotation_penalty:
+                    best_rotation_penalty = penalty
+                    best_rotation = (current_positions[i, 2] + rot_delta) % 360
+
+            current_positions[i, 2] = best_rotation
+
+        # Final validation and return best result
+        final_penalty = compute_penalty(current_positions)
+        if final_penalty < best_penalty:
+            return current_positions
+        else:
+            return best_positions
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    try:
+        # Create optimizer instance
+        optimizer = HexTilingOptimizer()
+
+        # Step 1: Generate initial tiling pattern
+        initial_positions = optimizer.calculate_tiling_pattern()
+
+        # Step 2: Optimize the positions with enhanced local search
+        refined_positions = optimizer.optimize_positions(initial_positions)
+
+        # Step 3: Validate and compute final radius
+        if optimizer.validate_tiling(refined_positions):
+            # Compute outer hexagon radius
+            outer_radius = optimizer.compute_outer_hexagon_radius(refined_positions)
+
+            # Make sure final configuration is valid
+            inner_hex_data = refined_positions
+
+            # Final comprehensive check with Shapely
+            from shapely.geometry import Polygon
+
+            # Generate outer hexagon vertices
+            outer_vertices = optimizer.generate_hexagon_vertices(0, 0, outer_radius, 0)
+            outer_polygon = Polygon(outer_vertices)
+
+            # Check each inner hexagon for containment and overlaps
+            valid = True
+            for i in range(len(inner_hex_data)):
+                cx, cy, angle = inner_hex_data[i]
+                inner_vertices = optimizer.generate_hexagon_vertices(cx, cy, 1, angle)
+
+                # Check containment more rigorously
+                inner_polygon = Polygon(inner_vertices)
+                if not outer_polygon.contains(inner_polygon):
+                    valid = False
+                    break
+
+                # Check overlaps with others
+                for j in range(i+1, len(inner_hex_data)):
+                    cx2, cy2, angle2 = inner_hex_data[j]
+                    inner_vertices2 = optimizer.generate_hexagon_vertices(cx2, cy2, 1, angle2)
+                    poly1 = Polygon(inner_vertices)
+                    poly2 = Polygon(inner_vertices2)
+                    if poly1.intersects(poly2):
+                        valid = False
+                        break
+
+                if not valid:
+                    break
+
+            if not valid:
+                # More robust fallback with better configuration
+                inner_hex_data = np.array([
+                    [0, 0, 0],
+                    [-2.5, 0, 0],
+                    [2.5, 0, 0],
+                    [-1.25, 2.17, 0],
+                    [1.25, 2.17, 0],
+                    [-1.25, -2.17, 0],
+                    [1.25, -2.17, 0],
+                    [-3.75, 2.17, 0],
+                    [3.75, 2.17, 0],
+                    [-3.75, -2.17, 0],
+                    [3.75, -2.17, 0]
+                ], dtype=float)
+                outer_radius = 8.0
+        else:
+            # If our tiling was invalid, fall back to simple configuration with better parameters
+            inner_hex_data = np.array([
+                [0, 0, 0],
+                [-2.5, 0, 0],
+                [2.5, 0, 0],
+                [-1.25, 2.17, 0],
+                [1.25, 2.17, 0],
+                [-1.25, -2.17, 0],
+                [1.25, -2.17, 0],
+                [-3.75, 2.17, 0],
+                [3.75, 2.17, 0],
+                [-3.75, -2.17, 0],
+                [3.75, -2.17, 0]
+            ], dtype=float)
+            outer_radius = 8.0
+
+    except Exception as e:
+        warnings.warn(f"Optimization failed: {str(e)}, using fallback")
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0]
+        ])
+        outer_radius = 8.0
+
+    # Set up outer hexagon data (centered at origin)
+    outer_hex_data = np.array([0.0, 0.0, 0.0])
+
+    # Ensure we have a valid result within time limits
+    end_time = time.time()
+    if end_time - start_time > 175:  # Leave some buffer
+        warnings.warn("Time limit approaching, returning best available result")
+
+    return inner_hex_data, outer_hex_data, outer_radius
+
+# EVOLVE-BLOCK-END

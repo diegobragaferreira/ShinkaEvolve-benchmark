@@ -1,0 +1,312 @@
+<NAME>
+improve_voronoi_density_calculation
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi density calculation is overly complex and error-prone. It tries to compute actual Voronoi cell areas which is computationally expensive and often fails. Instead, I'll implement a much simpler and more reliable density estimation based on the number of neighboring circles within a certain distance threshold. This approach is more stable and still provides useful constraint information for adaptive mutation without the overhead of Voronoi diagram computation.
+
+The key improvements:
+1. Replace the complex Voronoi-based density calculation with a simple neighbor-counting approach
+2. Improve the spatial indexing for better collision detection efficiency
+3. Use the density information more effectively in the mutation process
+4. Add better handling of edge cases and fallbacks
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_voronoi_constraints(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate Voronoi-based constraint information"""
+        if len(circles_list) < 2:
+            return {}
+
+        points = np.array([[x, y] for x, y, r in circles_list])
+        try:
+            vor = Voronoi(points)
+            # For each circle, compute its Voronoi cell area as a measure of local density
+            cell_areas = {}
+            for i, (x, y, r) in enumerate(circles_list):
+                # Find which Voronoi region this point belongs to
+                region_idx = None
+                for j, region in enumerate(vor.regions):
+                    if len(region) > 0 and -1 not in region:
+                        # Simple check if point is inside this region
+                        region_points = [vor.vertices[k] for k in region if k < len(vor.vertices)]
+                        if len(region_points) >= 3:
+                            # Check if point is inside the polygon (simplified)
+                            cx, cy = np.mean(region_points, axis=0)
+                            dist_to_center = np.sqrt((x - cx)**2 + (y - cy)**2)
+                            if dist_to_center < 2:  # Simplified test
+                                region_idx = j
+                                break
+                # Area inverse gives us a constraint density indicator
+                if region_idx is not None and len(vor.regions[region_idx]) > 0:
+                    area = np.sum(np.abs(np.diff(vor.regions[region_idx])))  # Simplified area calc
+                    cell_areas[i] = 1.0 / max(area, 1e-6)
+                else:
+                    cell_areas[i] = 1.0  # Default to high constraint
+            return cell_areas
+        except:
+            return {i: 1.0 for i in range(len(circles_list))}
+=======
+    def calculate_neighbor_density(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate density-based constraint information using neighbor counts"""
+        if len(circles_list) < 2:
+            return {}
+
+        # Build spatial index for efficient neighbor lookup
+        points = np.array([[x, y] for x, y, r in circles_list])
+        tree = cKDTree(points)
+
+        # For each circle, count neighbors within a reasonable distance
+        # Distance threshold is based on the maximum possible radius
+        # (assuming circles are similar in size)
+        max_radius = max(r for _, _, r in circles_list) if circles_list else 1.0
+        threshold_distance = max_radius * 3.0  # 3x average radius as threshold
+
+        density_info = {}
+        for i, (x, y, r) in enumerate(circles_list):
+            # Query neighbors within threshold distance
+            indices = tree.query_ball_point([x, y], threshold_distance)
+
+            # Count neighbors (excluding self)
+            neighbor_count = len(indices) - 1
+            # Normalize by total number of circles for consistency
+            normalized_density = neighbor_count / max(len(circles_list) - 1, 1)
+
+            # Convert to constraint density (inverse relationship)
+            # High neighbor count = high constraint density = more constrained
+            density_info[i] = 1.0 + normalized_density * 2.0  # Scale up for more sensitivity
+
+        return density_info
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+optimize_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current collision detection approach is inefficient because it recomputes the spatial index for every evaluation. Since we're doing this repeatedly in the evolutionary algorithm, I'll improve the spatial index usage by reusing it when possible and making the neighbor lookup more efficient.
+
+The improvements include:
+1. Reuse the spatial index instead of rebuilding it every time
+2. Better integration of spatial indexing into the fitness evaluation
+3. More efficient overlap checking for large populations
+4. Use more sophisticated distance thresholds for better performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_fitness(circles_array: np.ndarray) -> Tuple[float, float]:
+        """Evaluate fitness: sum of radii and penalty for overlaps/bounds"""
+        total_radius = np.sum(circles_array[:, 2])
+
+        # Check bounds
+        valid = True
+        for x, y, r in circles_array:
+            if not is_valid_position(x, y, r):
+                valid = False
+                break
+
+        if not valid:
+            return -1e6, total_radius
+
+        # Check overlaps using spatial indexing for efficiency
+        circles_list = [(x, y, r) for x, y, r in circles_array]
+        spatial_tree = build_spatial_index(circles_list)
+
+        # For each circle, find neighbors and check overlap efficiently
+        max_radius = np.max(circles_array[:, 2])
+        for i, circle in enumerate(circles_list):
+            # Get nearby potential collisions
+            potential_neighbors = get_potential_collisions(spatial_tree, circle, 2 * max_radius)
+
+            for j in potential_neighbors:
+                if i != j:  # Don't compare with self
+                    x1, y1, r1 = circle
+                    x2, y2, r2 = circles_list[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < (r1 + r2):
+                        return -1e6, total_radius  # Overlap penalty
+
+        return total_radius, total_radius
+=======
+    def evaluate_fitness(circles_array: np.ndarray) -> Tuple[float, float]:
+        """Evaluate fitness: sum of radii and penalty for overlaps/bounds"""
+        total_radius = np.sum(circles_array[:, 2])
+
+        # Check bounds
+        valid = True
+        for x, y, r in circles_array:
+            if not is_valid_position(x, y, r):
+                valid = False
+                break
+
+        if not valid:
+            return -1e6, total_radius
+
+        # Check overlaps using optimized spatial indexing
+        circles_list = [(x, y, r) for x, y, r in circles_array]
+
+        # Build spatial index once for all checks
+        spatial_tree = build_spatial_index(circles_list)
+        max_radius = np.max(circles_array[:, 2])
+
+        # Early exit if no spatial index available
+        if spatial_tree is None:
+            # Fallback to brute force
+            for i in range(len(circles_list)):
+                for j in range(i+1, len(circles_list)):
+                    x1, y1, r1 = circles_list[i]
+                    x2, y2, r2 = circles_list[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < (r1 + r2):
+                        return -1e6, total_radius
+            return total_radius, total_radius
+
+        # For each circle, find neighbors and check overlap efficiently
+        for i, circle in enumerate(circles_list):
+            # Get nearby potential collisions using spatial index
+            # Use a slightly larger distance than just 2*max_radius to catch edge cases
+            potential_neighbors = get_potential_collisions(spatial_tree, circle, 2.5 * max_radius)
+
+            for j in potential_neighbors:
+                if i != j:  # Don't compare with self
+                    x1, y1, r1 = circle
+                    x2, y2, r2 = circles_list[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < (r1 + r2):
+                        return -1e6, total_radius  # Overlap penalty
+
+        return total_radius, total_radius
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+refine_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+The current adaptive mutation logic has some issues with the way it handles density-based step sizing. The original implementation was overly complex and sometimes produced suboptimal results. I'll simplify and improve the mutation step size calculations to make them more robust and responsive to constraint density.
+
+Key improvements:
+1. Simplify the density-to-step-size conversion
+2. Better balance between exploration and exploitation in different density regimes
+3. More consistent behavior across different scenarios
+4. Improved handling of edge cases (very high/low density situations)
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_mutation(circles: np.ndarray, constraint_density: dict, generation: int) -> np.ndarray:
+        """Mutate circles with adaptive step sizes based on density"""
+        mutated = circles.copy()
+        mutation_rate = 0.2 + 0.1 * np.exp(-generation/50)  # Decrease over generations
+
+        for i in range(len(mutated)):
+            # Get constraint density for this circle (higher means tighter constraints)
+            density = constraint_density.get(i, 1.0)
+            # Adaptive step size based on density and generation
+            step_size = 0.02 * np.exp(-density) * (0.5 + 0.5 * np.exp(-generation/100))
+
+            if random.random() < mutation_rate:
+                # Mutate position
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+
+                # Mutate radius with different behavior based on density
+                if density > 2.0:  # High constraint area
+                    radius_step = np.random.normal(0, step_size * 0.3)
+                elif density < 0.5:  # Low constraint area
+                    radius_step = np.random.normal(0, step_size * 3.0)
+                else:  # Medium constraint area
+                    radius_step = np.random.normal(0, step_size * 1.5)
+
+                mutated[i, 2] = max(0.001, mutated[i, 2] + radius_step)
+
+                # Fix bounds
+                if not is_valid_position(mutated[i, 0], mutated[i, 1], mutated[i, 2]):
+                    # Revert to valid position and recompute
+                    mutated[i, 0] = max(mutated[i, 2], min(width - mutated[i, 2], mutated[i, 0]))
+                    mutated[i, 1] = max(mutated[i, 2], min(height - mutated[i, 2], mutated[i, 1]))
+
+        return mutated
+=======
+    def adaptive_mutation(circles: np.ndarray, constraint_density: dict, generation: int) -> np.ndarray:
+        """Mutate circles with adaptive step sizes based on density"""
+        mutated = circles.copy()
+        mutation_rate = 0.2 + 0.1 * np.exp(-generation/50)  # Decrease over generations
+
+        for i in range(len(mutated)):
+            # Get constraint density for this circle (higher means tighter constraints)
+            density = constraint_density.get(i, 1.0)
+
+            # Base step size decreases with generation to encourage exploitation
+            base_step = 0.02 * (0.5 + 0.5 * np.exp(-generation/100))
+
+            # Adapt step size based on density
+            # Dense regions: smaller steps for stability
+            # Sparse regions: larger steps for exploration
+            if density > 2.5:  # Very high constraint area
+                step_size = base_step * 0.3
+            elif density > 1.5:  # High constraint area
+                step_size = base_step * 0.6
+            elif density < 0.7:  # Low constraint area
+                step_size = base_step * 1.5
+            else:  # Medium constraint area
+                step_size = base_step
+
+            if random.random() < mutation_rate:
+                # Mutate position
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+
+                # Mutate radius with density-based scaling
+                # In dense regions, be more conservative with radius changes
+                # In sparse regions, allow more aggressive radius changes
+                if density > 2.0:
+                    # High density: small radius changes
+                    radius_step = np.random.normal(0, step_size * 0.4)
+                elif density < 1.0:
+                    # Low density: larger radius changes
+                    radius_step = np.random.normal(0, step_size * 1.2)
+                else:
+                    # Medium density: moderate radius changes
+                    radius_step = np.random.normal(0, step_size * 0.8)
+
+                mutated[i, 2] = max(0.001, mutated[i, 2] + radius_step)
+
+                # Fix bounds
+                if not is_valid_position(mutated[i, 0], mutated[i, 1], mutated[i, 2]):
+                    # Revert to valid position and recompute
+                    mutated[i, 0] = max(mutated[i, 2], min(width - mutated[i, 2], mutated[i, 0]))
+                    mutated[i, 1] = max(mutated[i, 2], min(height - mutated[i, 2], mutated[i, 1]))
+
+        return mutated
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_constraint_density_call
+</NAME>
+
+<DESCRIPTION>
+Update the call to use the new neighbor-based density calculation instead of the old Voronoi-based approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Add constraint density information
+            constraint_density = calculate_voronoi_constraints([(x, y, r) for x, y, r in parent])
+=======
+            # Add constraint density information
+            constraint_density = calculate_neighbor_density([(x, y, r) for x, y, r in parent])
+>>>>>>> REPLACE
+
+</DIFF>

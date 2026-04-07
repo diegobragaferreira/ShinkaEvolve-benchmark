@@ -1,0 +1,303 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+from numba import jit
+import time
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+import warnings
+warnings.filterwarnings('ignore')
+
+# Enable JAX to use CPU
+jax.config.update('jax_platform_name', 'cpu')
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using Numba for speed"""
+    n = len(f_vals)
+    # Create convolution result array
+    g = np.zeros(2*n - 1)
+
+    # Compute autoconvolution: g[k] = sum(f[i]*f[k-i])
+    for i in range(n):
+        for j in range(n):
+            k = i + j
+            g[k] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently with Numba"""
+    n = len(g_vals)
+
+    # L2 norm squared (using trapezoidal approximation for piecewise linear)
+    l2_sq = 0.0
+    for i in range(n-1):
+        h = 1.0  # assuming unit spacing
+        y1 = g_vals[i]
+        y2 = g_vals[i+1]
+        l2_sq += (h/3.0) * (y1*y1 + y1*y2 + y2*y2)
+
+    # L1 norm
+    l1 = 0.0
+    for i in range(n):
+        l1 += abs(g_vals[i])
+
+    # L-infinity norm
+    linf = 0.0
+    for i in range(n):
+        if abs(g_vals[i]) > linf:
+            linf = abs(g_vals[i])
+
+    return l2_sq, l1, linf
+
+def compute_c2_score(f_vals):
+    """Compute C2 score for given step function values"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute norms
+        l2_sq, l1, linf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 < 1e-12 or linf < 1e-12:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_sq / (l1 * linf)
+        return c2
+
+    except Exception:
+        return 0.0
+
+@jax_jit
+def compute_c2_jax(f_vals):
+    """JAX version for automatic differentiation"""
+    # Convert to JAX array
+    f = jnp.array(f_vals, dtype=jnp.float32)
+
+    # Compute autoconvolution using JAX operations
+    g = jnp.convolve(f, f, mode='full')
+    n = len(f)
+    offset = (n - 1) // 2
+    g = g[offset:-offset]
+
+    # Compute norms
+    g_abs = jnp.abs(g)
+    norm_l2_sq = jnp.sum(g_abs**2)
+    norm_l1 = jnp.sum(g_abs)
+    norm_inf = jnp.max(g_abs)
+
+    # Avoid division by zero
+    eps = 1e-12
+    norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+    norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+    return c2
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 with respect to f_vals using JAX"""
+    try:
+        f = jnp.array(f_vals, dtype=jnp.float32)
+        grad_fn = grad(compute_c2_jax)
+        grad_val = grad_fn(f)
+        return np.array(grad_val)
+    except Exception:
+        return np.zeros_like(f_vals)
+
+def sophisticated_initialization(n):
+    """Create good initial candidate with alternating pattern and mathematical insight"""
+    # Create pattern with alternating high/low regions
+    f_vals = []
+    
+    # Create segmented approach with mathematical pattern
+    segment_size = max(1, n // 8)
+    
+    for i in range(n):
+        # Create high/low alternating pattern
+        segment_idx = i // segment_size
+        if segment_idx % 2 == 0:
+            # High value region with slight Gaussian-like distribution
+            base_val = 1.0 + 0.3 * np.random.random()
+            # Add some local structure
+            if i % 4 == 0:
+                base_val = 1.5
+            elif i % 4 == 2:
+                base_val = 0.3
+            else:
+                base_val = 0.8 + 0.4 * np.random.random()
+        else:
+            # Low value region
+            base_val = 0.1 + 0.3 * np.random.random()
+            
+        # Add some noise for exploration but maintain mathematical structure
+        noise = np.random.normal(0, 0.05)
+        val = max(0, base_val + noise)
+        
+        f_vals.append(val)
+
+    # Apply gentle smoothing for better gradient behavior
+    if len(f_vals) >= 3:
+        smoothed = []
+        for i in range(len(f_vals)):
+            if i == 0:
+                smoothed.append(f_vals[i])
+            elif i == len(f_vals) - 1:
+                smoothed.append(f_vals[i])
+            else:
+                # Weighted average with neighbors
+                weighted = 0.6 * f_vals[i] + 0.2 * f_vals[i-1] + 0.2 * f_vals[i+1]
+                smoothed.append(weighted)
+        f_vals = smoothed
+    
+    return np.array(f_vals)
+
+def gradient_ascent_refinement(initial_f, max_iter=50, step_size=0.01):
+    """Refine solution using gradient ascent with adaptive step size"""
+    f_current = np.array(initial_f, dtype=np.float32)
+    
+    try:
+        for iteration in range(max_iter):
+            # Compute gradient
+            grad_val = compute_gradient_jax(f_current)
+            
+            # Adaptive step size adjustment
+            current_c2 = compute_c2_score(f_current)
+            
+            # Update with gradient ascent
+            f_new = f_current + step_size * grad_val
+            
+            # Ensure non-negativity
+            f_new = np.maximum(f_new, 0)
+            
+            # Test improvement
+            new_c2 = compute_c2_score(f_new)
+            
+            if new_c2 > current_c2:
+                f_current = f_new
+                # Gradually decrease step size to avoid overshooting
+                step_size = max(step_size * 0.99, 1e-6)
+            else:
+                # Reduce step size if no improvement
+                step_size *= 0.5
+                if step_size < 1e-6:
+                    break
+                    
+    except Exception:
+        pass  # Return current if refinement fails
+
+    return f_current
+
+def multi_scale_refinement(initial_f, levels=3):
+    """Apply refinement at multiple scales with adaptive parameters"""
+    f_refined = np.array(initial_f)
+    
+    # Apply refinement at different scales
+    for level in range(levels):
+        # Reduce step size for finer refinement
+        step_size = 0.01 / (2**level)
+        max_iter = 20 // (level + 1) if level < 2 else 10
+        
+        f_refined = gradient_ascent_refinement(f_refined, max_iter=max_iter, step_size=step_size)
+
+    return f_refined
+
+def adaptive_evolutionary_optimization():
+    """Main optimization routine with adaptive parameters"""
+    # Set up optimization parameters - larger population for better exploration
+    n = np.random.randint(800, 4000)  # Variable size based on experience
+
+    # Define bounds for each parameter (step height)
+    bounds = [(0.0, 3.0) for _ in range(n)]
+
+    def objective(x):
+        # Convert to array and compute score
+        score = compute_c2_score(x)
+        return -score  # Minimize negative to maximize original score
+
+    # Run differential evolution with adaptive settings
+    best_score = 0.0
+    best_solution = None
+
+    # Multi-start approach with different starting points
+    for start in range(5):  # Five different starting points
+        # Generate different initial solutions with better initialization
+        x0 = sophisticated_initialization(n) + np.random.normal(0, 0.05, n)
+        
+        # Adaptive population sizing based on problem dimensionality
+        popsize = max(10, min(20, n // 50))
+        maxiter = max(50, min(100, n // 20))
+        
+        # Run differential evolution
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=start,
+            maxiter=maxiter,
+            popsize=popsize,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            disp=False,
+            tol=1e-6
+        )
+
+        if result.success and -result.fun > best_score:
+            best_score = -result.fun
+            best_solution = result.x.copy()
+
+    # If we found a solution, refine it with gradient ascent
+    if best_solution is not None:
+        try:
+            # Apply multi-scale gradient refinement
+            refined_solution = multi_scale_refinement(best_solution, levels=3)
+            refined_score = compute_c2_score(refined_solution)
+
+            # Keep the better of the two
+            if refined_score > best_score:
+                best_score = refined_score
+                best_solution = refined_solution
+        except Exception:
+            pass  # Continue with original solution if refinement fails
+
+    return best_solution, best_score
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using evolutionary optimization"""
+    # Time limit enforcement
+    start_time = time.time()
+
+    try:
+        # Run adaptive evolutionary optimization
+        f_values, score = adaptive_evolutionary_optimization()
+
+        # Ensure we don't exceed time limit
+        elapsed = time.time() - start_time
+        if elapsed > 85:  # Leave 5 seconds buffer
+            pass
+
+        # Return the best solution
+        if f_values is not None:
+            return list(f_values)
+        else:
+            # Fallback to simple initialization if optimization fails
+            return sophisticated_initialization(1000).tolist()
+
+    except Exception as e:
+        # Fallback to simple initialization if optimization fails
+        print(f"Fallback due to error: {e}")
+        return sophisticated_initialization(1000).tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,380 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.fft import fft, ifft
+import random
+import time
+import multiprocessing as mp
+from functools import partial
+from collections import defaultdict
+from typing import List, Tuple, Optional
+import itertools
+
+class AutocorrelationEvaluator:
+    """Handles all autocorrelation computations and objective evaluations."""
+
+    def __init__(self):
+        self.cache = {}
+        self.eval_count = 0
+
+    def compute_autocorrelation_constant(self, sequence: List[float]) -> float:
+        """
+        Compute C₁ for a given sequence using FFT for efficiency.
+        C₁ = 2n * max(convolution) / (sum(sequence))^2
+        """
+        n = len(sequence)
+        if n == 0:
+            return float('inf')
+
+        # Compute convolution using FFT for efficiency
+        fft_seq = fft(sequence, 2*n - 1)
+        conv_fft = fft_seq * np.conj(fft_seq)
+        conv = ifft(conv_fft).real[:2*n-1]
+        max_conv = np.max(conv)
+
+        sum_seq = np.sum(sequence)
+        if sum_seq < 0.01:
+            return float('inf')
+
+        c1 = 2 * n * max_conv / (sum_seq ** 2)
+        return c1
+
+    def evaluate_objective(self, sequence: List[float]) -> float:
+        """
+        Evaluate the objective function: -1/C₁ (we minimize this to maximize 1/C₁)
+        """
+        self.eval_count += 1
+        c1 = self.compute_autocorrelation_constant(sequence)
+        if c1 == float('inf'):
+            return float('inf')  # Invalid solution
+        return -1.0 / c1  # Negative because we want to maximize 1/C₁
+
+    def evaluate_sequence_with_cache(self, sequence: List[float]) -> float:
+        """
+        Evaluate sequence with caching to avoid redundant computations.
+        """
+        key = tuple(sequence)
+        if key in self.cache:
+            return self.cache[key]
+
+        result = self.evaluate_objective(sequence)
+        self.cache[key] = result
+        return result
+
+class EvolutionaryStrategy:
+    """Manages the evolutionary search process with adaptive parameters."""
+
+    def __init__(self, evaluator: AutocorrelationEvaluator):
+        self.evaluator = evaluator
+        self.population_size = 40
+        self.generations = 80
+        self.keep_top = 10
+        self.elite_preservation = 3
+        self.diversity_check_interval = 10
+        self.patience_limit = 15
+        self.mutation_rate = 0.1
+        self.crossover_prob = 0.3
+        self.local_search_prob = 0.7
+        self.global_best = None
+        self.global_best_fitness = float('inf')
+
+    def generate_initial_sequence(self) -> List[float]:
+        """
+        Generate a good initial random sequence with more structure.
+        """
+        # Use a combination of distributions to create structure
+        n = random.randint(100, 1000)
+        if random.random() < 0.3:
+            # Power law distribution - heavy tail
+            sequence = [random.expovariate(0.1) for _ in range(n)]
+            # Normalize to prevent extreme values
+            max_val = max(sequence)
+            sequence = [x * 100.0 / max_val if max_val > 0 else 1.0 for x in sequence]
+        elif random.random() < 0.6:
+            # Uniform distribution with some peaks
+            sequence = [random.uniform(0.1, 100.0) for _ in range(n)]
+            # Add a few peaks
+            for i in range(min(10, len(sequence)//20)):
+                peak_pos = random.randint(0, len(sequence)-1)
+                sequence[peak_pos] = random.uniform(100.0, 1000.0)
+        else:
+            # Mixed distribution
+            sequence = []
+            for i in range(n):
+                if random.random() < 0.7:
+                    sequence.append(random.uniform(0.1, 10.0))
+                else:
+                    sequence.append(random.uniform(50.0, 100.0))
+
+        return sequence
+
+    def generate_population(self, size: int) -> List[List[float]]:
+        """Generate a population of sequences."""
+        return [self.generate_initial_sequence() for _ in range(size)]
+
+    def quadratic_optimization_step(self, current_seq: List[float], max_iter: int = 100) -> List[float]:
+        """
+        Perform a quadratic optimization step to improve the sequence.
+        """
+        n = len(current_seq)
+        # Define bounds: all elements must be in [0, 1000]
+        bounds = [(0.0, 1000.0) for _ in range(n)]
+
+        # Define constraints
+        def sum_constraint(x):
+            return np.sum(x) - 0.01  # Require sum >= 0.01
+
+        constraints = [{'type': 'ineq', 'fun': sum_constraint}]
+
+        # Objective function to minimize
+        def objective(x):
+            return self.evaluator.evaluate_objective(x)
+
+        # Try multiple optimization methods
+        methods_to_try = ['SLSQP', 'L-BFGS-B']
+
+        for method in methods_to_try:
+            try:
+                # Use smaller tolerance for faster convergence
+                result = minimize(objective, current_seq, method=method, bounds=bounds,
+                                constraints=constraints, options={'maxiter': max_iter, 'ftol': 1e-6, 'gtol': 1e-6})
+                if result.success:
+                    return result.x.tolist()
+            except:
+                continue
+
+        # If all methods fail, return the original sequence slightly perturbed
+        perturbed = [max(0.0, x + random.gauss(0, 0.05)) for x in current_seq]
+        if np.sum(perturbed) < 0.01:
+            perturbed[0] = max(0.0, perturbed[0] + 0.01)
+        return perturbed
+
+    def mutate_sequence(self, sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
+        """Mutate a sequence by randomly changing some elements."""
+        mutated = sequence.copy()
+        # Adaptive mutation rate: lower for longer sequences
+        if len(sequence) > 500:
+            mutation_rate *= 0.5
+        elif len(sequence) < 200:
+            mutation_rate *= 1.5
+
+        # Calculate standard deviation for mutation scaling
+        std_dev = np.std(sequence) if len(sequence) > 0 else 1.0
+        mutation_scale = max(0.1, std_dev * 0.1)  # Scale mutation by sequence variability
+
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                # Mutate with Gaussian noise scaled by sequence variability
+                mutated[i] = max(0.0, mutated[i] + random.gauss(0, mutation_scale))
+        return mutated
+
+    def crossover_sequences(self, parent1: List[float], parent2: List[float]) -> List[float]:
+        """Perform crossover between two sequences with adaptive mixing."""
+        # Use a blend crossover that considers characteristics of parents
+        n1, n2 = len(parent1), len(parent2)
+        min_len = min(n1, n2)
+
+        # Create offspring with blended elements
+        offspring = []
+
+        # Determine if we're doing crossover or just taking one parent
+        if random.random() < 0.7:  # 70% chance of crossover
+            # Blend elements with weight based on parent characteristics
+            for i in range(max(n1, n2)):
+                if i < min_len:
+                    # Blend based on similarity of elements
+                    if random.random() < 0.5:
+                        offspring.append(parent1[i])
+                    else:
+                        offspring.append(parent2[i])
+                elif i < n1:
+                    # Extending beyond shorter parent
+                    offspring.append(parent1[i])
+                else:
+                    offspring.append(parent2[i])
+        else:
+            # Just take one parent with some variation
+            parent = parent1 if random.random() < 0.5 else parent2
+            offspring = parent.copy()
+
+        # Ensure all elements are non-negative
+        offspring = [max(0.0, x) for x in offspring]
+        return offspring
+
+    def adaptive_local_search(self, current_seq: List[float], max_iter: int = 200) -> List[float]:
+        """Enhanced local search with adaptive step sizes"""
+        n = len(current_seq)
+        bounds = [(0.0, 1000.0) for _ in range(n)]
+
+        def sum_constraint(x):
+            return np.sum(x) - 0.01
+
+        constraints = [{'type': 'ineq', 'fun': sum_constraint}]
+
+        def objective(x):
+            return self.evaluator.evaluate_objective(x)
+
+        # Try multiple local optimization approaches
+        methods = ['SLSQP', 'L-BFGS-B']
+        best_result = None
+        best_value = float('inf')
+
+        for method in methods:
+            try:
+                # Start with small steps and gradually increase
+                for step_size in [1e-3, 1e-2, 1e-1]:
+                    attempt = current_seq.copy()
+                    if random.random() < 0.5:  # Randomize a bit
+                        attempt = self.mutate_sequence(attempt, step_size)
+
+                    result = minimize(objective, attempt, method=method, bounds=bounds, constraints=constraints,
+                                    options={'maxiter': max_iter, 'ftol': 1e-6, 'gtol': 1e-6})
+                    if result.success and result.fun < best_value:
+                        best_value = result.fun
+                        best_result = result.x.tolist()
+            except:
+                continue
+
+        if best_result is not None:
+            return best_result
+        else:
+            return current_seq
+
+    def evaluate_population_parallel(self, population: List[List[float]], max_workers: Optional[int] = None) -> List[float]:
+        """Evaluate a population in parallel."""
+        if max_workers is None:
+            max_workers = min(mp.cpu_count(), 4)
+
+        with mp.Pool(processes=max_workers) as pool:
+            func = partial(self.evaluator.evaluate_objective)
+            results = pool.map(func, population)
+        return results
+
+    def diversify_population(self, population: List[List[float]]) -> List[List[float]]:
+        """
+        Introduce diversity by adding random sequences when population becomes too homogeneous.
+        """
+        if len(population) < 2:
+            return population
+
+        # Check diversity by looking at standard deviation of average values
+        avg_values = [np.mean(seq) for seq in population]
+        diversity_metric = np.std(avg_values) / (np.mean(avg_values) + 1e-8)
+
+        if diversity_metric < 0.05:
+            # Add some random sequences to maintain diversity
+            for _ in range(self.population_size // 4):  # Add 25% random sequences
+                new_seq = self.generate_initial_sequence()
+                population.append(new_seq)
+
+        return population
+
+    def run_evolution(self, start_time: float) -> List[float]:
+        """Execute the main evolutionary search loop."""
+        # Generate initial population
+        population = self.generate_population(self.population_size)
+
+        # Evaluate initial population in parallel
+        fitness_scores = []
+        for seq in population:
+            fitness = self.evaluator.evaluate_sequence_with_cache(seq)
+            fitness_scores.append((seq, fitness))
+
+        # Sort population by fitness (lower is better)
+        fitness_scores.sort(key=lambda x: x[1])
+
+        # Track best solution globally
+        self.global_best = fitness_scores[0][0]
+        self.global_best_fitness = fitness_scores[0][1]
+
+        # Track patience for early stopping
+        patience_counter = 0
+
+        # Main evolution loop
+        for gen in range(self.generations):
+            if time.time() - start_time > 170:  # Leave 10 seconds for finalization
+                break
+
+            # Adjust adaptive parameters based on performance
+            if patience_counter > self.patience_limit // 2:
+                self.mutation_rate = min(0.3, self.mutation_rate * 1.1)
+                self.crossover_prob = min(0.6, self.crossover_prob * 1.1)
+
+            # Periodic diversity check
+            if gen % self.diversity_check_interval == 0:
+                population = self.diversify_population(population)
+
+            # Keep top performers (elite)
+            top_performers = [seq for seq, _ in fitness_scores[:self.keep_top]]
+
+            # Create new population
+            new_population = top_performers[:]
+
+            # Preserve elites
+            if self.elite_preservation > 0:
+                elite_indices = sorted(range(len(fitness_scores)), key=lambda i: fitness_scores[i][1])[:self.elite_preservation]
+                elites = [fitness_scores[i][0] for i in elite_indices]
+                new_population.extend(elites)
+
+            # Add mutated versions of top performers
+            for i in range(self.population_size - len(new_population)):
+                if random.random() < self.crossover_prob:  # Crossover
+                    p1, p2 = random.sample(top_performers, 2)
+                    child = self.crossover_sequences(p1, p2)
+                else:  # Mutation
+                    parent = random.choice(top_performers)
+                    child = self.mutate_sequence(parent, self.mutation_rate)
+
+                new_population.append(child)
+
+            # Apply local optimization to some individuals
+            for i in range(0, len(new_population), 2):
+                if random.random() < self.local_search_prob:  # Local search
+                    new_population[i] = self.adaptive_local_search(new_population[i])
+
+            # Evaluate new population in parallel
+            fitness_scores = []
+            for seq in new_population:
+                fitness = self.evaluator.evaluate_sequence_with_cache(seq)
+                fitness_scores.append((seq, fitness))
+
+            # Sort population by fitness
+            fitness_scores.sort(key=lambda x: x[1])
+
+            # Update global best
+            if fitness_scores[0][1] < self.global_best_fitness:
+                self.global_best = fitness_scores[0][0]
+                self.global_best_fitness = fitness_scores[0][1]
+                patience_counter = 0  # Reset patience
+            else:
+                patience_counter += 1
+
+            # Occasionally restart with a new random individual if stuck
+            if patience_counter > self.patience_limit:
+                new_individual = [random.uniform(0.1, 100.0) for _ in range(random.randint(100, 1000))]
+                fitness_scores[-1] = (new_individual, self.evaluator.evaluate_objective(new_individual))
+                patience_counter = 0  # Reset patience
+
+        # Final optimization of the best sequence
+        final_best = self.adaptive_local_search(self.global_best, max_iter=300)
+
+        # Return the best sequence found
+        return final_best
+
+def search_for_best_sequence() -> List[float]:
+    """
+    Main function to search for the best coefficient sequence using an enhanced evolutionary approach.
+    Returns the optimized sequence.
+    """
+    start_time = time.time()
+    evaluator = AutocorrelationEvaluator()
+    strategy = EvolutionaryStrategy(evaluator)
+    best_sequence = strategy.run_evolution(start_time)
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

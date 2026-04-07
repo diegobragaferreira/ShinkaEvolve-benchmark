@@ -1,0 +1,314 @@
+<NAME>
+adaptive_perturbation_scaling
+</NAME>
+
+<DESCRIPTION>
+The current implementation already has some adaptive scaling based on initial ratio, but it's limited to a simple inverse relationship. I'll enhance this by implementing a more sophisticated adaptive perturbation scheme that dynamically adjusts perturbation magnitudes based on the optimization landscape. This involves creating a more intelligent perturbation strategy that considers not just the initial quality but also how the optimization progresses, which should help escape poor local optima more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_perturbed_initialization(base_points, perturbation_magnitude=0.015, adaptive_scale=1.0):
+        """Create a perturbed version of base initialization with adaptive scaling."""
+        perturbed = base_points.copy()
+        # Add random perturbation scaled by adaptive factor
+        actual_perturbation = perturbation_magnitude * adaptive_scale
+        perturbed += np.random.normal(0, actual_perturbation, base_points.shape)
+        # Ensure points stay within bounds
+        perturbed = np.clip(perturbed, 0, 1)
+        return perturbed
+=======
+    def create_perturbed_initialization(base_points, perturbation_magnitude=0.015, adaptive_scale=1.0):
+        """Create a perturbed version of base initialization with adaptive scaling."""
+        perturbed = base_points.copy()
+        # Add random perturbation scaled by adaptive factor
+        actual_perturbation = perturbation_magnitude * adaptive_scale
+        perturbed += np.random.normal(0, actual_perturbation, base_points.shape)
+        # Ensure points stay within bounds
+        perturbed = np.clip(perturbed, 0, 1)
+        return perturbed
+
+    def create_adaptive_perturbed_initialization(base_points, initial_ratio, iteration=0):
+        """Create an adaptive perturbed initialization based on current optimization state."""
+        # Base perturbation magnitude
+        base_perturbation = 0.015
+
+        # Adaptive scaling based on initial quality and optimization iteration
+        if initial_ratio < 0.1:
+            # Poor initial configuration - use larger perturbations to explore more
+            perturbation_magnitude = base_perturbation * (1.0 + (0.1 - initial_ratio) * 5.0)
+        elif initial_ratio > 0.25:
+            # Good initial configuration - use smaller perturbations to refine
+            perturbation_magnitude = base_perturbation * max(0.1, 1.0 - (initial_ratio - 0.25) * 2.0)
+        else:
+            # Medium quality - use moderate perturbations
+            perturbation_magnitude = base_perturbation
+
+        # Additional adjustment based on iteration (decrease over time)
+        if iteration > 0:
+            perturbation_magnitude *= max(0.1, 1.0 - iteration * 0.02)
+
+        perturbed = base_points.copy()
+        perturbed += np.random.normal(0, perturbation_magnitude, base_points.shape)
+        perturbed = np.clip(perturbed, 0, 1)
+        return perturbed
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_multi_start_strategy
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more robust multi-start strategy that incorporates multiple optimization phases with different approaches. Rather than just trying different initial configurations once, I'll add a more systematic approach where we evaluate the quality of each initial configuration and then apply different optimization strategies accordingly. This should help in finding better solutions by tailoring optimization approaches to each initial configuration's characteristics.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_start_optimization():
+        """Perform multi-start optimization with different initial configurations."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Try different initialization strategies with improved diversity
+        initial_configs = []
+
+        # Strategy 1: Better hexagonal initialization
+        hex_initial = create_better_hexagonal_initialization()
+        initial_configs.append(create_perturbed_initialization(hex_initial, 0.015))
+
+        # Strategy 2: Concentric ring initialization
+        ring_initial = create_concentric_ring_initialization()
+        initial_configs.append(create_perturbed_initialization(ring_initial, 0.02))
+
+        # Strategy 3: Fibonacci-like arrangement
+        fib_initial = create_fibonacci_sphere_like_initialization()
+        initial_configs.append(create_perturbed_initialization(fib_initial, 0.01))
+
+        # Strategy 4: Modified grid initialization
+        grid_initial = np.zeros((16, 2))
+        idx = 0
+        for i in range(4):
+            for j in range(4):
+                if idx < 16:
+                    x = j / 3.0 if j > 0 else 0.0
+                    y = i / 3.0 if i > 0 else 0.0
+                    # Add slight perturbation to break symmetry
+                    x = min(1.0, max(0.0, x + np.random.normal(0, 0.02)))
+                    y = min(1.0, max(0.0, y + np.random.normal(0, 0.02)))
+                    grid_initial[idx] = [x, y]
+                    idx += 1
+        initial_configs.append(grid_initial)
+
+        # Strategy 5: Pure random with better seed control
+        np.random.seed(42)
+        random_initial = np.random.rand(16, 2)
+        initial_configs.append(random_initial)
+
+        # Try each initialization with hybrid optimization
+        for i, initial_config in enumerate(initial_configs):
+            try:
+                # Compute adaptive scaling factor based on initial quality
+                initial_ratio = calculate_min_max_ratio(initial_config)
+                # Scale perturbation inversely proportional to current ratio
+                # When ratio is low (bad), use larger perturbations; when ratio is high (good), use smaller perturbations
+                adaptive_factor = max(0.5, 1.0 - initial_ratio * 2.0)  # Between 0.5 and 1.0
+
+                # First perform global optimization with DE
+                bounds = [(0, 1)] * 32
+
+                # Use differential evolution for global search with better parameters
+                de_result = differential_evolution(
+                    lambda x: objective_function(x.reshape(-1, 2)),
+                    bounds,
+                    seed=42 + i,
+                    maxiter=300,  # Reduced iterations for efficiency
+                    popsize=25,    # Increased population size for better exploration
+                    mutation=(0.5, 1),
+                    recombination=0.7,
+                    tol=1e-8,      # Tighter tolerance
+                    disp=False
+                )
+
+                # Refine with local optimization using adaptive perturbation
+                refined_points = optimize_with_local_refinement(de_result.x.reshape(-1, 2), 400)
+                ratio = calculate_min_max_ratio(refined_points)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = refined_points
+
+            except Exception as e:
+                # If optimization fails, continue with next configuration
+                continue
+
+        # If no better solution found, return the best local optimization
+        if best_points is None:
+            # Fallback to single local optimization with the best hexagonal initialization
+            hex_initial = create_better_hexagonal_initialization()
+            # Use adaptive scaling for the fallback
+            initial_ratio = calculate_min_max_ratio(hex_initial)
+            adaptive_factor = max(0.5, 1.0 - initial_ratio * 2.0)
+            perturbed_hex = create_perturbed_initialization(hex_initial, 0.008, adaptive_factor)
+            best_points = optimize_with_local_refinement(perturbed_hex, 600)
+
+        return best_points
+=======
+    def multi_start_optimization():
+        """Perform multi-start optimization with different initial configurations and strategies."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Try different initialization strategies with improved diversity
+        initial_configs = []
+
+        # Strategy 1: Better hexagonal initialization
+        hex_initial = create_better_hexagonal_initialization()
+        initial_configs.append(('hex', hex_initial))
+
+        # Strategy 2: Concentric ring initialization
+        ring_initial = create_concentric_ring_initialization()
+        initial_configs.append(('ring', ring_initial))
+
+        # Strategy 3: Fibonacci-like arrangement
+        fib_initial = create_fibonacci_sphere_like_initialization()
+        initial_configs.append(('fibonacci', fib_initial))
+
+        # Strategy 4: Modified grid initialization
+        grid_initial = np.zeros((16, 2))
+        idx = 0
+        for i in range(4):
+            for j in range(4):
+                if idx < 16:
+                    x = j / 3.0 if j > 0 else 0.0
+                    y = i / 3.0 if i > 0 else 0.0
+                    # Add slight perturbation to break symmetry
+                    x = min(1.0, max(0.0, x + np.random.normal(0, 0.02)))
+                    y = min(1.0, max(0.0, y + np.random.normal(0, 0.02)))
+                    grid_initial[idx] = [x, y]
+                    idx += 1
+        initial_configs.append(('grid', grid_initial))
+
+        # Strategy 5: Pure random with better seed control
+        np.random.seed(42)
+        random_initial = np.random.rand(16, 2)
+        initial_configs.append(('random', random_initial))
+
+        # Try each initialization with different optimization approaches
+        for i, (config_type, initial_config) in enumerate(initial_configs):
+            try:
+                # Evaluate initial configuration quality
+                initial_ratio = calculate_min_max_ratio(initial_config)
+
+                # Choose optimization approach based on initial quality
+                if initial_ratio < 0.1:
+                    # Very poor initial configuration - aggressive optimization
+                    print(f"Config {config_type}: Poor initial quality ({initial_ratio:.4f}), using aggressive approach")
+                    # Use stronger global optimization and multiple refinement passes
+                    perturbed_config = create_adaptive_perturbed_initialization(initial_config, initial_ratio, 0)
+
+                    # First, use differential evolution with more iterations
+                    bounds = [(0, 1)] * 32
+                    de_result = differential_evolution(
+                        lambda x: objective_function(x.reshape(-1, 2)),
+                        bounds,
+                        seed=42 + i,
+                        maxiter=500,  # More iterations for poor starts
+                        popsize=30,    # Larger population for better exploration
+                        mutation=(0.5, 1),
+                        recombination=0.7,
+                        tol=1e-8,
+                        disp=False
+                    )
+
+                    # Multiple rounds of local refinement with decreasing perturbations
+                    current_points = de_result.x.reshape(-1, 2)
+                    best_refined_points = current_points
+                    best_refined_ratio = calculate_min_max_ratio(current_points)
+
+                    for round_num in range(3):
+                        # Decrease perturbation strength for later rounds
+                        perturbation_factor = 0.8 ** round_num
+                        refined_points = optimize_with_local_refinement(current_points, 300)
+                        refined_ratio = calculate_min_max_ratio(refined_points)
+
+                        if refined_ratio > best_refined_ratio:
+                            best_refined_ratio = refined_ratio
+                            best_refined_points = refined_points
+
+                        # Use even smaller perturbations for next round
+                        current_points = best_refined_points
+                        current_points = create_adaptive_perturbed_initialization(
+                            current_points, refined_ratio, round_num + 1)
+
+                    final_ratio = best_refined_ratio
+                    final_points = best_refined_points
+
+                elif initial_ratio > 0.25:
+                    # Good initial configuration - focused refinement
+                    print(f"Config {config_type}: Good initial quality ({initial_ratio:.4f}), using focused approach")
+                    # Use less aggressive but more precise optimization
+                    perturbed_config = create_adaptive_perturbed_initialization(initial_config, initial_ratio, 0)
+
+                    # Use DE with fewer iterations since quality is already good
+                    bounds = [(0, 1)] * 32
+                    de_result = differential_evolution(
+                        lambda x: objective_function(x.reshape(-1, 2)),
+                        bounds,
+                        seed=42 + i,
+                        maxiter=200,
+                        popsize=20,
+                        mutation=(0.5, 1),
+                        recombination=0.7,
+                        tol=1e-8,
+                        disp=False
+                    )
+
+                    # Single round of local refinement
+                    final_points = optimize_with_local_refinement(de_result.x.reshape(-1, 2), 500)
+                    final_ratio = calculate_min_max_ratio(final_points)
+
+                else:
+                    # Medium quality - balanced approach
+                    print(f"Config {config_type}: Medium initial quality ({initial_ratio:.4f}), using balanced approach")
+                    # Standard approach
+                    perturbed_config = create_adaptive_perturbed_initialization(initial_config, initial_ratio, 0)
+
+                    bounds = [(0, 1)] * 32
+                    de_result = differential_evolution(
+                        lambda x: objective_function(x.reshape(-1, 2)),
+                        bounds,
+                        seed=42 + i,
+                        maxiter=300,
+                        popsize=25,
+                        mutation=(0.5, 1),
+                        recombination=0.7,
+                        tol=1e-8,
+                        disp=False
+                    )
+
+                    # One round of local refinement
+                    final_points = optimize_with_local_refinement(de_result.x.reshape(-1, 2), 400)
+                    final_ratio = calculate_min_max_ratio(final_points)
+
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = final_points
+
+            except Exception as e:
+                # If optimization fails, continue with next configuration
+                print(f"Config {config_type} failed with error: {e}")
+                continue
+
+        # If no better solution found, return the best local optimization
+        if best_points is None:
+            # Fallback to single local optimization with the best hexagonal initialization
+            hex_initial = create_better_hexagonal_initialization()
+            initial_ratio = calculate_min_max_ratio(hex_initial)
+            perturbed_hex = create_adaptive_perturbed_initialization(hex_initial, initial_ratio, 0)
+            best_points = optimize_with_local_refinement(perturbed_hex, 600)
+
+        return best_points
+>>>>>>> REPLACE
+</DIFF>

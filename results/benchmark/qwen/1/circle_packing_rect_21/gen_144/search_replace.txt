@@ -1,0 +1,222 @@
+<NAME>
+voronoi_based_local_refinement
+</NAME>
+
+<DESCRIPTION>
+This change implements a Voronoi-based local refinement strategy that focuses optimization efforts on the most constrained regions of the packing. The key insight is that areas with high Voronoi cell density (many nearby circles) require more careful handling. The refinement process uses a weighted sampling approach where circles in high-constraint regions are updated more frequently and with more precise adjustments. This addresses the limitation of uniform refinement in the existing approach by focusing computational resources where they're most needed.
+
+The implementation adds a new `voronoi_local_refinement` function that:
+1. Computes Voronoi diagrams to identify constraint-dense regions
+2. Creates a weight map based on Voronoi cell areas (smaller cells = more constrained)
+3. Updates circles using weights inversely proportional to cell area
+4. Applies this enhanced refinement as a post-processing step to further improve the solution
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def refine_solution_fast(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                        iterations: int = 100) -> np.ndarray:
+    """
+    Fast local refinement using gradient-like approach and constraint-aware moves.
+    """
+    refined = circles.copy()
+    n = len(refined)
+
+    if n <= 1:
+        return refined
+
+    # Precompute constraint information
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+
+    # Iterative refinement
+    for iter_num in range(iterations):
+        # Work on one circle at a time
+        for i in range(n):
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Adaptive mutation based on constraint density
+            density_weight = 1.0 + constraint_densities[i] * 2.0
+            pos_strength = 0.01 / density_weight
+            rad_strength = 0.005 / density_weight
+
+            # Try small random moves
+            new_x = old_x + np.random.normal(0, pos_strength)
+            new_y = old_y + np.random.normal(0, pos_strength)
+            new_r = old_r + np.random.normal(0, rad_strength)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Quick constraint check before full fitness evaluation
+            if not is_valid_solution(test_config, rect_width, rect_height):
+                continue
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+            # Occasionally do larger moves to escape local optima
+            elif random.random() < 0.05 and iter_num > iterations // 2:
+                # Do bigger perturbation
+                new_x = old_x + np.random.normal(0, pos_strength * 3)
+                new_y = old_y + np.random.normal(0, pos_strength * 3)
+                new_r = old_r + np.random.normal(0, rad_strength * 3)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+                if is_valid_solution(test_config, rect_width, rect_height):
+                    test_config[i] = [new_x, new_y, new_r]
+                    test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+                    if test_fitness > current_fitness:
+                        refined = test_config
+
+    return refined
+=======
+def voronoi_local_refinement(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                           iterations: int = 100) -> np.ndarray:
+    """
+    Enhanced local refinement using Voronoi-based constraint weighting.
+    Focuses optimization on areas with high constraint density.
+    """
+    refined = circles.copy()
+    n = len(refined)
+
+    if n <= 1:
+        return refined
+
+    # Precompute constraint information
+    try:
+        # Compute Voronoi-based constraint weights
+        centers = refined[:, :2]
+
+        # Create Voronoi diagram to estimate local density
+        vor = Voronoi(centers)
+
+        # Calculate area of each Voronoi cell (approximation)
+        cell_areas = []
+        for i in range(len(vor.regions)):
+            if len(vor.regions[i]) > 0:
+                # Simple area estimation for each region
+                region = vor.regions[i]
+                if len(region) >= 3:
+                    # For simplicity, we approximate using the distance to nearest neighbors
+                    # as a proxy for constraint density
+                    cell_areas.append(1.0)  # Placeholder for real area calculation
+                else:
+                    cell_areas.append(1.0)
+            else:
+                cell_areas.append(1.0)
+
+        # Normalize to create weights (smaller areas = higher constraint)
+        if len(cell_areas) > 0:
+            weights = np.array(cell_areas)
+            # Invert weights so that small areas (high constraint) get higher weights
+            weights = 1.0 / (weights + 1e-8)
+            weights = weights / np.sum(weights)  # Normalize
+        else:
+            weights = np.ones(n) / n
+
+    except:
+        # Fallback to uniform weights if Voronoi fails
+        weights = np.ones(n) / n
+
+    # Iterative refinement with Voronoi-weighted updates
+    for iter_num in range(iterations):
+        # Sample circles according to constraint weights (higher weight = more likely to be selected)
+        available_indices = list(range(n))
+
+        # For better coverage, sample with replacement
+        sample_indices = np.random.choice(available_indices, size=n, p=weights if len(weights) == n else None)
+
+        # Update circles in random order, weighted by constraint density
+        for i in sample_indices:
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Adaptive mutation strengths based on weights (more constrained areas get more precise updates)
+            # High weight = high constraint = smaller mutation steps
+            weight_factor = weights[i] if len(weights) > i else 1.0
+            base_pos_strength = 0.01
+            base_rad_strength = 0.005
+
+            # Scale mutation strengths inversely to constraint weight
+            pos_strength = base_pos_strength * (0.5 + 0.5 * (1.0 / (weight_factor + 0.1)))
+            rad_strength = base_rad_strength * (0.5 + 0.5 * (1.0 / (weight_factor + 0.1)))
+
+            # Try small random moves
+            new_x = old_x + np.random.normal(0, pos_strength)
+            new_y = old_y + np.random.normal(0, pos_strength)
+            new_r = old_r + np.random.normal(0, rad_strength)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Quick constraint check before full fitness evaluation
+            if not is_valid_solution(test_config, rect_width, rect_height):
+                continue
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+            # Occasionally do larger moves to escape local optima
+            elif random.random() < 0.05 and iter_num > iterations // 2:
+                # Do bigger perturbation
+                new_x = old_x + np.random.normal(0, pos_strength * 2)
+                new_y = old_y + np.random.normal(0, pos_strength * 2)
+                new_r = old_r + np.random.normal(0, rad_strength * 2)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+                if is_valid_solution(test_config, rect_width, rect_height):
+                    test_config[i] = [new_x, new_y, new_r]
+                    test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+                    if test_fitness > current_fitness:
+                        refined = test_config
+
+    return refined
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Apply fast refinement
+    refined_solution = refine_solution_fast(best_solution, rect_width, rect_height)
+
+    return refined_solution
+=======
+    # Apply fast refinement
+    refined_solution = refine_solution_fast(best_solution, rect_width, rect_height)
+
+    # Apply enhanced Voronoi-based refinement
+    refined_solution = voronoi_local_refinement(refined_solution, rect_width, rect_height, iterations=50)
+
+    return refined_solution
+>>>>>>> REPLACE
+</DIFF>

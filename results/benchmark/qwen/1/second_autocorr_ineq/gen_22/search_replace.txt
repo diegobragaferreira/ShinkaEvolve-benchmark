@@ -1,0 +1,139 @@
+<NAME>
+implement_numba_jit_for_performance
+</NAME>
+
+<DESCRIPTION>
+Implement Numba JIT compilation for the core computation functions to significantly improve performance. The current implementation uses pure NumPy operations which are slower than compiled code. By adding @njit decorators to the key functions, especially the autoconvolution norm computation, we can drastically reduce execution time and enable more iterations within the 90-second constraint, allowing for better optimization results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from typing import List
+
+def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+    """
+    Compute the norms ||g||₂², ||g||₁, and ||g||∞ for the autoconvolution g = f*f
+    Using piecewise linear integration for ||g||₂² as specified in requirements
+    """
+    f = np.array(f_values)
+
+    # Compute autoconvolution g = f * f using discrete convolution
+    g = np.convolve(f, f, mode='full')
+
+    # Compute the norms
+    # ||g||₂² = sum(g[i]²) weighted by intervals (trapezoidal-like approach)
+    # For piecewise linear integration, we approximate integral of g^2
+    # Using trapezoidal rule: (h/3)(y1^2 + y1*y2 + y2^2) per segment
+    norm_g_2_squared = 0.0
+
+    # Simplified approach for now - use direct sum of squares
+    # In the full implementation this would use proper piecewise integration
+    norm_g_2_squared = np.sum(g**2)
+
+    # ||g||₁ = sum(|g[i]|)
+    norm_g_1 = np.sum(np.abs(g))
+
+    # ||g||∞ = max(|g[i]|)
+    norm_g_inf = np.max(np.abs(g))
+
+    return norm_g_2_squared, norm_g_1, norm_g_inf
+
+def evaluate_c2(f_values: List[float]) -> float:
+    """
+    Evaluate C₂ = ||g||₂² / (||g||₁ · ||g||∞) for given step function
+    """
+    try:
+        norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_g_1 <= 1e-12 or norm_g_inf <= 1e-12:
+            return 0.0
+
+        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+        return c2
+    except Exception:
+        return 0.0
+=======
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from typing import List
+from numba import njit
+
+@njit
+def compute_autoconvolution_norms_fast(f_values: np.ndarray) -> tuple:
+    """
+    Fast computation of autoconvolution norms using Numba JIT compilation
+    """
+    n = len(f_values)
+
+    # Compute autoconvolution g = f * f using discrete convolution
+    # The resulting g will have length 2*n - 1 where n is the length of f
+    g_length = 2 * n - 1
+    g = np.zeros(g_length)
+
+    # Manual convolution loop for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_values[i] * f_values[j]
+
+    # Compute the norms
+    # ||g||₂² = sum(g[i]²) using proper piecewise integration
+    norm_g_2_squared = 0.0
+
+    # For piecewise linear integration, we use trapezoidal-like approach:
+    # for consecutive pairs of points (y1, y2) with unit spacing:
+    # integral of y^2 ≈ (1/3)(y1^2 + y1*y2 + y2^2)
+    for i in range(g_length - 1):
+        y1 = g[i]
+        y2 = g[i + 1]
+        norm_g_2_squared += (y1 * y1 + y1 * y2 + y2 * y2) / 3.0
+
+    # ||g||₁ = sum(|g[i]|)
+    norm_g_1 = 0.0
+    for i in range(g_length):
+        norm_g_1 += abs(g[i])
+
+    # ||g||∞ = max(|g[i]|)
+    norm_g_inf = 0.0
+    for i in range(g_length):
+        abs_g = abs(g[i])
+        if abs_g > norm_g_inf:
+            norm_g_inf = abs_g
+
+    return norm_g_2_squared, norm_g_1, norm_g_inf
+
+def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+    """
+    Compute the norms ||g||₂², ||g||₁, and ||g||∞ for the autoconvolution g = f*f
+    Using proper piecewise linear integration for ||g||₂² as specified in requirements
+    """
+    f = np.array(f_values)
+
+    # Use the fast JIT-compiled version
+    norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms_fast(f)
+
+    return norm_g_2_squared, norm_g_1, norm_g_inf
+
+def evaluate_c2(f_values: List[float]) -> float:
+    """
+    Evaluate C₂ = ||g||₂² / (||g||₁ · ||g||∞) for given step function
+    """
+    try:
+        norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_g_1 <= 1e-12 or norm_g_inf <= 1e-12:
+            return 0.0
+
+        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+        return c2
+    except Exception:
+        return 0.0
+>>>>>>> REPLACE
+</DIFF>

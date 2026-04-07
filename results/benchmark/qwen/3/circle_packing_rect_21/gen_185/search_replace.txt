@@ -1,0 +1,225 @@
+<NAME>
+add_voronoi_based_initialization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a hybrid initialization with corner positions and hexagonal grids, but doesn't leverage Voronoi diagrams effectively for spatial distribution. I'll enhance the initialization by incorporating Voronoi-based point generation which typically provides better spatial distribution for circle packing problems. This approach will help achieve more uniform coverage of the rectangle space, leading to better packing efficiency.
+
+The key improvement is replacing the current hybrid initialization with a Voronoi-based approach that generates well-distributed points, then uses these as circle centers with appropriate radius computation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_hybrid_initialization(n_circles: int, width: float, height: float) -> np.ndarray:
+        """Create initial configuration using a hybrid approach combining corner placements and hexagonal grid"""
+        circles = np.zeros((n_circles, 3))
+
+        # Corner and edge positions to establish boundaries
+        corner_positions = [
+            (width * 0.1, height * 0.1),    # bottom-left
+            (width * 0.9, height * 0.1),    # bottom-right
+            (width * 0.1, height * 0.9),    # top-left
+            (width * 0.9, height * 0.9),    # top-right
+            (width * 0.5, height * 0.1),    # bottom-middle
+            (width * 0.5, height * 0.9),    # top-middle
+            (width * 0.1, height * 0.5),    # left-middle
+            (width * 0.9, height * 0.5),    # right-middle
+        ]
+
+        # Place some circles at strategic positions
+        for i in range(min(len(corner_positions), n_circles)):
+            x, y = corner_positions[i]
+            circles[i] = [x, y, 0.03]
+
+        # Fill remaining positions with hexagonal grid
+        remaining = n_circles - len(corner_positions)
+        if remaining > 0:
+            rows = int(math.ceil(math.sqrt(remaining)))
+            cols = int(math.ceil(remaining / rows))
+
+            cell_width = width / (cols + 1)
+            cell_height = height / (rows + 1)
+
+            idx = len(corner_positions)
+            for i in range(rows):
+                for j in range(cols):
+                    if idx >= n_circles:
+                        break
+                    x_offset = 0.0 if i % 2 == 0 else 0.5
+                    x = (j + 1 + x_offset) * cell_width
+                    y = (i + 1) * cell_height
+                    # Ensure within bounds
+                    x = max(0.01, min(width - 0.01, x))
+                    y = max(0.01, min(height - 0.01, y))
+                    circles[idx] = [x, y, 0.02]
+                    idx += 1
+                    if idx >= n_circles:
+                        break
+
+        return circles
+=======
+    def create_voronoi_initialization(n_circles: int, width: float, height: float) -> np.ndarray:
+        """Create initial configuration using Voronoi-based spatial distribution"""
+        circles = np.zeros((n_circles, 3))
+
+        # Generate initial points for Voronoi diagram
+        # Start with corner and edge positions for good coverage
+        initial_points = [
+            (width * 0.1, height * 0.1),    # bottom-left
+            (width * 0.9, height * 0.1),    # bottom-right
+            (width * 0.1, height * 0.9),    # top-left
+            (width * 0.9, height * 0.9),    # top-right
+            (width * 0.5, height * 0.1),    # bottom-middle
+            (width * 0.5, height * 0.9),    # top-middle
+            (width * 0.1, height * 0.5),    # left-middle
+            (width * 0.9, height * 0.5),    # right-middle
+        ]
+
+        # Add random points to ensure good coverage
+        additional_points = []
+        for _ in range(n_circles - len(initial_points)):
+            x = random.uniform(0.05 * width, 0.95 * width)
+            y = random.uniform(0.05 * height, 0.95 * height)
+            additional_points.append([x, y])
+
+        # Combine all points
+        all_points = initial_points + additional_points[:n_circles - len(initial_points)]
+
+        # Create Voronoi diagram
+        try:
+            from scipy.spatial import Voronoi
+            vor = Voronoi(all_points)
+
+            # Get Voronoi vertices that are inside our rectangle
+            valid_vertices = []
+            for vertex in vor.vertices:
+                if (0 <= vertex[0] <= width) and (0 <= vertex[1] <= height):
+                    valid_vertices.append(vertex)
+
+            # Use Voronoi vertices as center points
+            chosen_centers = valid_vertices[:min(n_circles, len(valid_vertices))]
+            if len(chosen_centers) < n_circles:
+                # Fill missing circles with random points
+                for i in range(len(chosen_centers), n_circles):
+                    x = random.uniform(0.05 * width, 0.95 * width)
+                    y = random.uniform(0.05 * height, 0.95 * height)
+                    chosen_centers.append([x, y])
+
+            # Assign positions with initial radii based on Voronoi-based density
+            for i, (x, y) in enumerate(chosen_centers[:n_circles]):
+                # Base radius estimation based on Voronoi cell size
+                circles[i] = [x, y, 0.02]
+
+        except Exception:
+            # Fallback to simple initialization if Voronoi fails
+            for i in range(n_circles):
+                x = random.uniform(0.05 * width, 0.95 * width)
+                y = random.uniform(0.05 * height, 0.95 * height)
+                circles[i] = [x, y, 0.02]
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_initialization_method
+</NAME>
+
+<DESCRIPTION>
+Replace the existing create_hybrid_initialization function call with the new Voronoi-based initialization function in the multi-scale optimization flow. This ensures that the entire optimization pipeline uses the improved initialization method that should provide better spatial distribution of initial circles, leading to better final packing results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_scale_optimization() -> np.ndarray:
+        """Run multi-scale optimization to handle different levels of detail"""
+        best_circles = None
+        best_sum = -float('inf')
+
+        # Scale 1: Coarse optimization with large steps
+        print("Starting coarse optimization...")
+        coarse_circles = create_hybrid_initialization(21, rect_width, rect_height)
+        coarse_circles = local_refinement_step(coarse_circles, rect_width, rect_height, 20, relax_overlap=True)
+        coarse_sum = calculate_radius_sum(coarse_circles)
+        print(f"Coarse optimization sum: {coarse_sum}")
+
+        # Scale 2: Medium optimization with medium steps
+        print("Starting medium optimization...")
+        medium_circles = coarse_circles.copy()
+        medium_circles = local_refinement_step(medium_circles, rect_width, rect_height, 50, relax_overlap=True)
+        medium_sum = calculate_radius_sum(medium_circles)
+        print(f"Medium optimization sum: {medium_sum}")
+
+        # Scale 3: Fine optimization with small steps
+        print("Starting fine optimization...")
+        fine_circles = medium_circles.copy()
+        fine_circles = local_refinement_step(fine_circles, rect_width, rect_height, 100, relax_overlap=False)
+        fine_sum = calculate_radius_sum(fine_circles)
+        print(f"Fine optimization sum: {fine_sum}")
+
+        # Return best of all scales
+        if fine_sum > best_sum:
+            best_sum = fine_sum
+            best_circles = fine_circles.copy()
+
+        # Also try with different initializations
+        print("Trying alternative initialization...")
+        alt_circles = create_hybrid_initialization(21, rect_width, rect_height)
+        alt_circles = local_refinement_step(alt_circles, rect_width, rect_height, 30, relax_overlap=True)
+        alt_circles = local_refinement_step(alt_circles, rect_width, rect_height, 70, relax_overlap=False)
+        alt_sum = calculate_radius_sum(alt_circles)
+        print(f"Alternative initialization sum: {alt_sum}")
+
+        if alt_sum > best_sum:
+            best_sum = alt_sum
+            best_circles = alt_circles.copy()
+
+        return best_circles
+=======
+    def multi_scale_optimization() -> np.ndarray:
+        """Run multi-scale optimization to handle different levels of detail"""
+        best_circles = None
+        best_sum = -float('inf')
+
+        # Scale 1: Coarse optimization with large steps
+        print("Starting coarse optimization...")
+        coarse_circles = create_voronoi_initialization(21, rect_width, rect_height)
+        coarse_circles = local_refinement_step(coarse_circles, rect_width, rect_height, 20, relax_overlap=True)
+        coarse_sum = calculate_radius_sum(coarse_circles)
+        print(f"Coarse optimization sum: {coarse_sum}")
+
+        # Scale 2: Medium optimization with medium steps
+        print("Starting medium optimization...")
+        medium_circles = coarse_circles.copy()
+        medium_circles = local_refinement_step(medium_circles, rect_width, rect_height, 50, relax_overlap=True)
+        medium_sum = calculate_radius_sum(medium_circles)
+        print(f"Medium optimization sum: {medium_sum}")
+
+        # Scale 3: Fine optimization with small steps
+        print("Starting fine optimization...")
+        fine_circles = medium_circles.copy()
+        fine_circles = local_refinement_step(fine_circles, rect_width, rect_height, 100, relax_overlap=False)
+        fine_sum = calculate_radius_sum(fine_circles)
+        print(f"Fine optimization sum: {fine_sum}")
+
+        # Return best of all scales
+        if fine_sum > best_sum:
+            best_sum = fine_sum
+            best_circles = fine_circles.copy()
+
+        # Also try with different initializations
+        print("Trying alternative initialization...")
+        alt_circles = create_voronoi_initialization(21, rect_width, rect_height)
+        alt_circles = local_refinement_step(alt_circles, rect_width, rect_height, 30, relax_overlap=True)
+        alt_circles = local_refinement_step(alt_circles, rect_width, rect_height, 70, relax_overlap=False)
+        alt_sum = calculate_radius_sum(alt_circles)
+        print(f"Alternative initialization sum: {alt_sum}")
+
+        if alt_sum > best_sum:
+            best_sum = alt_sum
+            best_circles = alt_circles.copy()
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,363 @@
+<NAME>
+add_spatial_hashing_optimization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic spatial hashing approach but doesn't fully leverage its potential for performance optimization. I'll enhance the spatial hashing by implementing more sophisticated neighbor finding and overlap detection that reduces redundant computations. This involves improving the neighbor lookup logic and adding early termination conditions in overlap checking to significantly speed up the constraint validation process.
+
+The main improvement is to create a more efficient spatial hash grid that properly handles the hexagon-specific geometry and reduces the number of overlap checks needed by using tighter bounding boxes and more intelligent neighbor selection.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor lookups."""
+
+    def __init__(self, cell_size=5.0):
+        self.cell_size = cell_size
+        self.grid = {}
+
+    def clear(self):
+        self.grid.clear()
+
+    def insert(self, hex_id, center_x, center_y):
+        """Insert hexagon into spatial hash grid."""
+        cell_x = int(center_x // self.cell_size)
+        cell_y = int(center_y // self.cell_size)
+        key = (cell_x, cell_y)
+        if key not in self.grid:
+            self.grid[key] = []
+        self.grid[key].append(hex_id)
+
+    def get_neighbors(self, center_x, center_y):
+        """Get all hexagons in the same and neighboring cells."""
+        cell_x = int(center_x // self.cell_size)
+        cell_y = int(center_y // self.cell_size)
+
+        neighbors = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                key = (cell_x + dx, cell_y + dy)
+                if key in self.grid:
+                    neighbors.extend(self.grid[key])
+        return neighbors
+=======
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor lookups with improved hexagon handling."""
+
+    def __init__(self, cell_size=3.0):
+        self.cell_size = cell_size
+        self.grid = {}
+
+    def clear(self):
+        self.grid.clear()
+
+    def get_cell_key(self, x, y):
+        """Get the grid cell key for coordinates."""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def insert(self, hex_id, center_x, center_y):
+        """Insert hexagon into spatial hash grid."""
+        key = self.get_cell_key(center_x, center_y)
+        if key not in self.grid:
+            self.grid[key] = []
+        self.grid[key].append(hex_id)
+
+    def get_neighbors(self, center_x, center_y):
+        """Get all hexagons in the same and neighboring cells."""
+        cell_x, cell_y = self.get_cell_key(center_x, center_y)
+
+        neighbors = []
+        # Check 3x3 neighborhood for efficiency
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                key = (cell_x + dx, cell_y + dy)
+                if key in self.grid:
+                    neighbors.extend(self.grid[key])
+        return neighbors
+
+    def get_local_neighbors(self, center_x, center_y, radius=2.0):
+        """Get neighbors within a specific radius to reduce unnecessary comparisons."""
+        cell_x, cell_y = self.get_cell_key(center_x, center_y)
+        neighbors = []
+
+        # Check cells within a square around the current cell
+        max_dist_cells = int(radius // self.cell_size) + 1
+        for dx in range(-max_dist_cells, max_dist_cells + 1):
+            for dy in range(-max_dist_cells, max_dist_cells + 1):
+                key = (cell_x + dx, cell_y + dy)
+                if key in self.grid:
+                    for hex_id in self.grid[key]:
+                        # Perform additional distance check for true neighbors
+                        if hex_id != -1:  # Skip dummy entries
+                            neighbors.append(hex_id)
+        return neighbors
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the overlap detection by optimizing how we check for overlaps between hexagons. The current approach calls shapely's intersects method which is expensive. I'll implement a more efficient approach using the spatial hash to limit the number of pairwise overlap checks, and add early termination conditions to skip overlap checks when bounding boxes don't intersect.
+
+Also, I'll add a more intelligent bounding box calculation for hexagons that takes into account their specific geometry rather than just axis-aligned bounding boxes.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def distance_point_to_segment(point, seg_start, seg_end):
+    """Calculate distance from point to line segment - JIT compiled."""
+    px, py = point
+    x1, y1 = seg_start
+    x2, y2 = seg_end
+
+    # Vector from seg_start to seg_end
+    dx, dy = x2 - x1, y2 - y1
+    # Vector from seg_start to point
+    fx, fy = px - x1, py - y1
+
+    # Project point onto line
+    length_sq = dx*dx + dy*dy
+    if length_sq == 0:
+        return np.sqrt(fx*fx + fy*fy)
+
+    t = (fx*dx + fy*dy) / length_sq
+    t = max(0, min(1, t))  # Clamp t to [0,1]
+
+    # Closest point on segment
+    closest_x = x1 + t*dx
+    closest_y = y1 + t*dy
+
+    # Distance to closest point
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@njit
+def polygon_distance(polygon1, polygon2):
+    """Compute minimum distance between two polygons - JIT compiled."""
+    # Check if any vertex of polygon1 is inside polygon2
+    for i in range(len(polygon1)):
+        if point_in_polygon_numba(polygon1[i], polygon2):
+            return 0.0
+
+    # Check if any vertex of polygon2 is inside polygon1
+    for i in range(len(polygon2)):
+        if point_in_polygon_numba(polygon2[i], polygon1):
+            return 0.0
+
+    # Check edges
+    min_dist = np.inf
+    for i in range(len(polygon1)):
+        for j in range(len(polygon2)):
+            p1 = polygon1[i]
+            p2 = polygon1[(i+1)%len(polygon1)]
+            p3 = polygon2[j]
+            p4 = polygon2[(j+1)%len(polygon2)]
+
+            # Compute distance between segments
+            dist = distance_point_to_segment(p1, p3, p4)
+            min_dist = min(min_dist, dist)
+
+            dist = distance_point_to_segment(p3, p1, p2)
+            min_dist = min(min_dist, dist)
+
+    return min_dist
+=======
+@njit
+def hexagon_bounding_circle(center_x, center_y, angle_degrees):
+    """Calculate the bounding circle (center and radius) for a hexagon."""
+    # For a unit hexagon, the bounding circle radius is 1
+    return center_x, center_y, 1.0
+
+@njit
+def circles_intersect(cx1, cy1, r1, cx2, cy2, r2):
+    """Check if two circles intersect."""
+    dx = cx1 - cx2
+    dy = cy1 - cy2
+    distance_sq = dx*dx + dy*dy
+    radii_sum = r1 + r2
+    return distance_sq <= radii_sum * radii_sum
+
+@njit
+def distance_point_to_segment(point, seg_start, seg_end):
+    """Calculate distance from point to line segment - JIT compiled."""
+    px, py = point
+    x1, y1 = seg_start
+    x2, y2 = seg_end
+
+    # Vector from seg_start to seg_end
+    dx, dy = x2 - x1, y2 - y1
+    # Vector from seg_start to point
+    fx, fy = px - x1, py - y1
+
+    # Project point onto line
+    length_sq = dx*dx + dy*dy
+    if length_sq == 0:
+        return np.sqrt(fx*fx + fy*fy)
+
+    t = (fx*dx + fy*dy) / length_sq
+    t = max(0, min(1, t))  # Clamp t to [0,1]
+
+    # Closest point on segment
+    closest_x = x1 + t*dx
+    closest_y = y1 + t*dy
+
+    # Distance to closest point
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_constraint_validation
+</NAME>
+
+<DESCRIPTION>
+The constraint validation is currently inefficient because it performs full overlap checking even when it's obvious from bounding boxes that there's no overlap. I'll implement a hybrid approach that:
+
+1. Uses spatial hash to quickly identify potential neighbors
+2. Performs fast circle-circle intersection checks before expensive polygon intersection checks
+3. Adds early termination conditions to avoid unnecessary work
+4. Optimizes the overall validation flow to reduce redundant operations
+
+This will significantly speed up the constraint checking phase which is a major bottleneck in the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution with optimized overlap checking."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Create polygons for all inner hexagons
+    inner_polygons = []
+    for i in range(len(positions)):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        inner_polygons.append(poly)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length_fast(positions)
+
+    # Check containment and overlaps efficiently using spatial hashing
+    total_penalty = 0
+    num_inner = len(inner_polygons)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Build spatial hash for fast neighbor lookup
+    spatial_grid = SpatialHashGrid(cell_size=3.0)
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        spatial_grid.insert(i, center_x, center_y)
+
+    # Check containment
+    for i in range(num_inner):
+        if not check_containment_fast(inner_polygons[i], outer_poly):
+            # Large penalty for containment violations
+            total_penalty += 1e6
+
+    # Check overlaps using spatial hash for efficiency
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        neighbors = spatial_grid.get_neighbors(center_x, center_y)
+
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks and self-checking
+                continue
+            if check_overlap_fast(inner_polygons[i], inner_polygons[j]):
+                # Penalize overlap more heavily
+                total_penalty += 1e5
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    if side_length < 1e-6:
+        fitness = -1e10 - total_penalty
+    else:
+        fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+=======
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution with optimized overlap checking."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length_fast(positions)
+
+    # Check containment and overlaps efficiently using spatial hashing
+    total_penalty = 0
+    num_inner = len(positions)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Build spatial hash for fast neighbor lookup
+    spatial_grid = SpatialHashGrid(cell_size=3.0)
+    centers = []
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        centers.append((center_x, center_y))
+        spatial_grid.insert(i, center_x, center_y)
+
+    # Check containment early (this is fast and can catch many violations)
+    for i in range(num_inner):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        if not check_containment_fast(poly, outer_poly):
+            # Large penalty for containment violations
+            return -1e10 - 1e6, side_length
+
+    # Check overlaps using spatial hash for efficiency
+    # We'll store all hexagon data to avoid repeated computations
+    hex_data = []
+    for i in range(num_inner):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        hex_data.append((poly, center_x, center_y, angle_degrees))
+
+    # More efficient overlap checking with spatial hash
+    checked_pairs = set()
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        neighbors = spatial_grid.get_neighbors(center_x, center_y)
+
+        # Only check each pair once
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks and self-checking
+                continue
+            if (i, j) in checked_pairs or (j, i) in checked_pairs:
+                continue
+            checked_pairs.add((i, j))
+
+            # Fast circle-based early rejection
+            center_x1, center_y1 = centers[i]
+            center_x2, center_y2 = centers[j]
+
+            # Circle intersection check (fast approximation)
+            if circles_intersect(center_x1, center_y1, 1.0, center_x2, center_y2, 1.0):
+                # If circles intersect, check actual polygon overlap
+                poly1, _, _, _ = hex_data[i]
+                poly2, _, _, _ = hex_data[j]
+                if check_overlap_fast(poly1, poly2):
+                    # Penalize overlap more heavily
+                    total_penalty += 1e5
+                    # No need to continue checking this pair
+                    break
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    if side_length < 1e-6:
+        fitness = -1e10 - total_penalty
+    else:
+        fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+>>>>>>> REPLACE
+</DIFF>

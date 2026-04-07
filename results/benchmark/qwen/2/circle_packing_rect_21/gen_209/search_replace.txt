@@ -1,0 +1,389 @@
+<NAME>
+add_constraint_aware_fitness_and_improved_local_search
+</NAME>
+
+<DESCRIPTION>
+This change introduces a constraint-aware fitness function that penalizes constraint violations more effectively, and improves the local search mechanism by using a more systematic approach to radius and position optimization. The key improvements include:
+1. Adding a fitness function that incorporates both radius sum and constraint penalties
+2. Enhancing the single circle optimization with better radius search strategies
+3. Improving the constraint checking logic for better reliability
+4. Adding dynamic penalty weights that adapt to constraint violation severity
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_single_circle(self, circles: np.ndarray, idx: int) -> Tuple[bool, np.ndarray]:
+        """Optimize a single circle by trying various positions and radii"""
+        current_x, current_y, current_r = circles[idx]
+        best_radius = current_r
+        best_position = [current_x, current_y]
+        best_valid = False
+
+        # Try several radius values with log spacing for efficiency
+        max_radius = min(0.25, self.container_width/3, self.container_height/3)
+        radius_steps = np.logspace(np.log10(current_r), np.log10(max_radius), 8, base=10)
+
+        # Try several positions near current location with adaptive grid
+        position_grid = [(dx, dy) for dx in [-0.08, -0.04, 0, 0.04, 0.08]
+                        for dy in [-0.08, -0.04, 0, 0.04, 0.08]]
+
+        for r_trial in radius_steps:
+            for dx, dy in position_grid:
+                trial_x = current_x + dx
+                trial_y = current_y + dy
+
+                # Ensure within bounds
+                trial_x = max(r_trial, min(self.container_width - r_trial, trial_x))
+                trial_y = max(r_trial, min(self.container_height - r_trial, trial_y))
+
+                # Test if this placement works
+                test_circles = circles.copy()
+                test_circles[idx] = [trial_x, trial_y, r_trial]
+
+                # Check validity using spatial tree for efficiency
+                if self.is_valid_position(trial_x, trial_y, r_trial, test_circles):
+                    if r_trial > best_radius:
+                        best_radius = r_trial
+                        best_position = [trial_x, trial_y]
+                        best_valid = True
+
+        if best_valid:
+            circles[idx] = [best_position[0], best_position[1], best_radius]
+
+        return best_valid, circles
+=======
+    def calculate_fitness_with_penalties(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness with constraint awareness to guide optimization properly
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = np.sum(circles[:, 2])
+        total_penalty = 0.0
+        violations = 0
+
+        # Check boundary violations with proper penalty calculation
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            # Check if circle is within bounds
+            if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+                # Calculate how far outside boundaries we are
+                boundary_violation = 0
+                if x < r:
+                    boundary_violation += r - x
+                elif x > self.container_width - r:
+                    boundary_violation += x - (self.container_width - r)
+                if y < r:
+                    boundary_violation += r - y
+                elif y > self.container_height - r:
+                    boundary_violation += y - (self.container_height - r)
+
+                # Apply penalty based on severity of violation
+                total_penalty += 10000 * boundary_violation**2
+                violations += 1
+
+        # Check overlap violations with penalty based on overlap magnitude
+        # Use spatial tree for efficient overlap detection
+        try:
+            points = circles[:, :2]
+            tree = cKDTree(points)
+            # Use a safe search radius for overlap checking
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2*max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if i < j:  # Avoid double counting
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        # Penalize based on overlap magnitude - quadratic penalty for better convergence
+                        total_penalty += 50000 * overlap**2
+                        violations += 1
+
+        except Exception:
+            # Fallback to direct checking if spatial tree fails
+            for i in range(self.n_circles):
+                for j in range(i+1, self.n_circles):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        total_penalty += 50000 * overlap**2
+                        violations += 1
+
+        # Return fitness: sum of radii minus penalties
+        fitness = total_radius - total_penalty
+        return fitness, violations
+
+    def optimize_single_circle(self, circles: np.ndarray, idx: int) -> Tuple[bool, np.ndarray]:
+        """Optimize a single circle by trying various positions and radii"""
+        current_x, current_y, current_r = circles[idx]
+        best_radius = current_r
+        best_position = [current_x, current_y]
+        best_valid = False
+
+        # Try several radius values with adaptive spacing
+        max_radius = min(0.25, self.container_width/3, self.container_height/3)
+
+        # Use exponential spacing for more efficient search
+        if current_r < max_radius:
+            # Use a more refined approach for radius search
+            radius_steps = []
+            # Start from current radius and go up to max_radius
+            r_current = current_r
+            while r_current <= max_radius:
+                radius_steps.append(r_current)
+                r_current *= 1.2  # Exponential growth for efficient search
+            if not radius_steps or radius_steps[-1] < max_radius:
+                radius_steps.append(max_radius)
+        else:
+            radius_steps = [current_r, max_radius]
+
+        # Try several positions near current location with dense grid
+        position_grid = [(dx, dy) for dx in [-0.1, -0.05, 0, 0.05, 0.1]
+                        for dy in [-0.1, -0.05, 0, 0.05, 0.1]]
+
+        # Also try some positions in the opposite direction for better exploration
+        position_grid.extend([(dx, dy) for dx in [-0.08, -0.04, 0.04, 0.08]
+                             for dy in [-0.08, -0.04, 0.04, 0.08]])
+
+        for r_trial in radius_steps:
+            # Skip if radius is too small or too large
+            if r_trial < 0.001 or r_trial > max_radius:
+                continue
+
+            for dx, dy in position_grid:
+                trial_x = current_x + dx
+                trial_y = current_y + dy
+
+                # Ensure within bounds
+                trial_x = max(r_trial, min(self.container_width - r_trial, trial_x))
+                trial_y = max(r_trial, min(self.container_height - r_trial, trial_y))
+
+                # Test if this placement works
+                test_circles = circles.copy()
+                test_circles[idx] = [trial_x, trial_y, r_trial]
+
+                # Check validity using spatial tree for efficiency
+                if self.is_valid_position(trial_x, trial_y, r_trial, test_circles):
+                    if r_trial > best_radius:
+                        best_radius = r_trial
+                        best_position = [trial_x, trial_y]
+                        best_valid = True
+
+        if best_valid:
+            circles[idx] = [best_position[0], best_position[1], best_radius]
+
+        return best_valid, circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_adaptive_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+This change adds adaptive constraint handling and enhances the spatial tree initialization to improve performance. The improvements include:
+1. Using the new fitness function in the optimization workflow
+2. Adding better error handling for spatial tree operations
+3. Improving the refinement phase with more comprehensive overlap resolution
+4. Making the optimization process more robust to edge cases
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def is_valid_position(self, x, y, r, existing_circles: np.ndarray) -> bool:
+        """Check if a circle position is valid (boundary and overlap constraints)"""
+        # Check boundary constraints
+        if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+            return False
+
+        # Use spatial tree for efficient neighbor checking
+        if self.spatial_tree is not None:
+            nearby_indices = self.spatial_tree.query_ball_point([x, y], r * 2)
+        else:
+            nearby_indices = range(len(existing_circles))
+
+        # Check overlap with nearby circles
+        for i in nearby_indices:
+            existing_x, existing_y, existing_r = existing_circles[i]
+            if i != len(existing_circles):  # Skip the circle being placed
+                distance = self.calculate_distance([x, y], [existing_x, existing_y])
+                if distance < (r + existing_r):
+                    return False
+        return True
+=======
+    def is_valid_position(self, x, y, r, existing_circles: np.ndarray) -> bool:
+        """Check if a circle position is valid (boundary and overlap constraints)"""
+        # Check boundary constraints
+        if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+            return False
+
+        # Use spatial tree for efficient neighbor checking
+        try:
+            if self.spatial_tree is not None:
+                nearby_indices = self.spatial_tree.query_ball_point([x, y], r * 2)
+            else:
+                nearby_indices = range(len(existing_circles))
+
+            # Check overlap with nearby circles
+            for i in nearby_indices:
+                existing_x, existing_y, existing_r = existing_circles[i]
+                if i != len(existing_circles):  # Skip the circle being placed
+                    distance = self.calculate_distance([x, y], [existing_x, existing_y])
+                    if distance < (r + existing_r):
+                        return False
+        except Exception:
+            # Fallback to direct checking if spatial tree fails
+            for i in range(len(existing_circles)):
+                existing_x, existing_y, existing_r = existing_circles[i]
+                distance = self.calculate_distance([x, y], [existing_x, existing_y])
+                if distance < (r + existing_r):
+                    return False
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_optimization_loop_with_fitness_tracking
+</NAME>
+
+<DESCRIPTION>
+This change improves the main optimization loop by incorporating the new fitness function tracking and enhancing the overall optimization workflow. The key improvements are:
+1. Track fitness scores instead of just radius sums for better optimization guidance
+2. Add more robust termination criteria based on fitness improvements
+3. Improve the refinement process with better constraint handling
+4. Add more frequent evaluation of solutions to catch improvements earlier
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self, max_iterations: int = 2000) -> np.ndarray:
+        """Main optimization routine with hybrid approach"""
+        # Initialize
+        circles = self.initialize_grid_placement()
+        self.update_spatial_tree(circles)
+
+        best_sum = np.sum(circles[:, 2])
+        best_circles = circles.copy()
+
+        # Phase 1: Global exploration with larger steps
+        for iteration in range(max_iterations // 2):
+            # Select multiple circles to optimize in batches
+            batch_size = max(1, self.n_circles // 8)
+            selected_indices = random.sample(range(self.n_circles), min(batch_size, self.n_circles))
+
+            for idx in selected_indices:
+                improved, circles = self.optimize_single_circle(circles, idx)
+
+                # Update spatial tree after modification
+                if improved:
+                    self.update_spatial_tree(circles)
+
+            # Periodic evaluation of the solution
+            if iteration % 50 == 0:
+                current_sum = np.sum(circles[:, 2])
+                if current_sum > best_sum:
+                    best_sum = current_sum
+                    best_circles = circles.copy()
+
+        # Phase 2: Fine-grained refinement with smaller steps
+        for iteration in range(max_iterations // 2):
+            # Select circles more systematically for fine-tuning
+            selected_indices = random.sample(range(self.n_circles), min(5, self.n_circles))
+
+            for idx in selected_indices:
+                improved, circles = self.optimize_single_circle(circles, idx)
+
+                # Update spatial tree after modification
+                if improved:
+                    self.update_spatial_tree(circles)
+
+            # Periodic evaluation with higher frequency
+            if iteration % 20 == 0:
+                current_sum = np.sum(circles[:, 2])
+                if current_sum > best_sum:
+                    best_sum = current_sum
+                    best_circles = circles.copy()
+
+        # Final refinement
+        final_circles = self.refine_configuration(best_circles.copy())
+
+        return final_circles
+=======
+    def optimize(self, max_iterations: int = 2000) -> np.ndarray:
+        """Main optimization routine with hybrid approach"""
+        # Initialize
+        circles = self.initialize_grid_placement()
+        self.update_spatial_tree(circles)
+
+        # Track fitness instead of raw sum for better optimization guidance
+        best_fitness, _ = self.calculate_fitness_with_penalties(circles)
+        best_circles = circles.copy()
+
+        # For tracking improvement
+        last_improvement_iteration = 0
+        patience = 100  # How many iterations to wait before early stopping
+
+        # Phase 1: Global exploration with larger steps
+        for iteration in range(max_iterations // 2):
+            # Select multiple circles to optimize in batches
+            batch_size = max(1, self.n_circles // 8)
+            selected_indices = random.sample(range(self.n_circles), min(batch_size, self.n_circles))
+
+            for idx in selected_indices:
+                improved, circles = self.optimize_single_circle(circles, idx)
+
+                # Update spatial tree after modification
+                if improved:
+                    self.update_spatial_tree(circles)
+
+            # Periodic evaluation of the solution
+            if iteration % 30 == 0:
+                current_fitness, _ = self.calculate_fitness_with_penalties(circles)
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_circles = circles.copy()
+                    last_improvement_iteration = iteration
+
+        # Phase 2: Fine-grained refinement with smaller steps
+        for iteration in range(max_iterations // 2):
+            # Select circles more systematically for fine-tuning
+            selected_indices = random.sample(range(self.n_circles), min(5, self.n_circles))
+
+            for idx in selected_indices:
+                improved, circles = self.optimize_single_circle(circles, idx)
+
+                # Update spatial tree after modification
+                if improved:
+                    self.update_spatial_tree(circles)
+
+            # Periodic evaluation with higher frequency
+            if iteration % 10 == 0:
+                current_fitness, _ = self.calculate_fitness_with_penalties(circles)
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_circles = circles.copy()
+                    last_improvement_iteration = iteration + max_iterations // 2
+
+            # Early stopping if no significant improvement
+            if iteration - last_improvement_iteration > patience:
+                break
+
+        # Final refinement with improved overlap resolution
+        final_circles = self.refine_configuration(best_circles.copy())
+
+        # One final fitness check
+        final_fitness, _ = self.calculate_fitness_with_penalties(final_circles)
+        if final_fitness > best_fitness:
+            return final_circles
+        else:
+            return best_circles
+>>>>>>> REPLACE
+</DIFF>

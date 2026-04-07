@@ -1,0 +1,279 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,214 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import optimize
+-
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
++import random
++from scipy import signal
++from scipy.optimize import differential_evolution
++import time
++
++def compute_autocorrelation_constant(sequence):
++    """
++    Compute the first autocorrelation inequality constant C₁ for a sequence.
++
++    For a sequence a, the autocorrelation is b = a * a (convolution),
++    and C₁ = 2n * max(b) / (sum(a))^2
++
++    Returns 1/C₁ (which we want to maximize)
++    """
++    if len(sequence) == 0 or np.sum(sequence) < 0.01:
++        return 0.0
++
++    # Use FFT-based convolution for efficiency
++    conv = signal.convolve(sequence, sequence, mode='full')
++    max_conv = np.max(conv)
++    sum_seq = np.sum(sequence)
++
++    if sum_seq == 0:
++        return 0.0
++
++    # C₁ = 2n * max(b) / (sum(a))^2
+     n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
+-
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
+-
+-
+-def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
+-
+-    return best_sequence
++    c1 = 2 * n * max_conv / (sum_seq ** 2)
++
++    # Return 1/C₁ (our objective to maximize)
++    return 1.0 / c1 if c1 > 0 else 0.0
++
++def generate_random_step_function(n_steps=None, max_height=1000.0):
++    """Generate a random step function with specified number of steps."""
++    if n_steps is None:
++        n_steps = random.randint(50, 500)
++
++    # Generate random heights with some structure
++    heights = np.random.exponential(scale=1.0, size=n_steps)
++    heights = np.clip(heights, 0, max_height)
++
++    # Normalize to make sure sum is reasonable but not too small
++    total = np.sum(heights)
++    if total < 0.01:
++        heights = heights * 0.01 / total if total > 0 else heights
++
++    return heights.tolist()
++
++def mutate_sequence(sequence, mutation_rate=0.1):
++    """Mutate a sequence by randomly changing some elements."""
++    mutated = sequence.copy()
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Apply small random change
++            mutated[i] = max(0, mutated[i] + np.random.normal(0, 0.1 * mutated[i] + 0.1))
++    return mutated
++
++def crossover_sequences(seq1, seq2):
++    """Create offspring from two parent sequences."""
++    if len(seq1) != len(seq2):
++        # If lengths differ, truncate to shorter length
++        min_len = min(len(seq1), len(seq2))
++        seq1 = seq1[:min_len]
++        seq2 = seq2[:min_len]
++
++    # Single-point crossover
++    crossover_point = random.randint(1, len(seq1) - 1)
++    child = seq1[:crossover_point] + seq2[crossover_point:]
++
++    return child
++
++def evaluate_fitness(sequence):
++    """Evaluate the fitness of a sequence (we want to maximize 1/C₁)."""
++    inv_c1 = compute_autocorrelation_constant(sequence)
++    return inv_c1
++
++def genetic_algorithm_search(max_time=150):
++    """
++    Perform genetic algorithm search for optimal step function.
++    """
++    start_time = time.time()
++
++    # Initialize population
++    population_size = 50
++    population = []
++
++    # Generate initial population
++    for _ in range(population_size):
++        seq = generate_random_step_function()
++        population.append(seq)
++
++    best_individual = None
++    best_fitness = 0.0
++
++    generation = 0
++    stagnation_counter = 0
++    max_stagnation = 20
++
++    while time.time() - start_time < max_time and stagnation_counter < max_stagnation:
++        # Evaluate fitness for all individuals
++        fitness_scores = [evaluate_fitness(individual) for individual in population]
++
++        # Track best individual
++        max_fitness_idx = np.argmax(fitness_scores)
++        if fitness_scores[max_fitness_idx] > best_fitness:
++            best_fitness = fitness_scores[max_fitness_idx]
++            best_individual = population[max_fitness_idx].copy()
++            stagnation_counter = 0
++        else:
++            stagnation_counter += 1
++
++        # Selection - tournament selection
++        def select_parent():
++            tournament_size = 3
++            tournament_indices = random.sample(range(population_size), tournament_size)
++            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
++            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
++            return population[winner_idx].copy()
++
++        # Create new population through reproduction
++        new_population = []
++
++        # Elitism - keep best individual
++        new_population.append(best_individual.copy())
++
++        # Generate rest of population
++        while len(new_population) < population_size:
++            parent1 = select_parent()
++            parent2 = select_parent()
++
++            # Crossover
++            if random.random() < 0.8:
++                child = crossover_sequences(parent1, parent2)
++            else:
++                child = parent1
++
++            # Mutation
++            child = mutate_sequence(child)
++
++            # Ensure minimum sum constraint
++            if np.sum(child) < 0.01:
++                child = [max(0.01, x) for x in child]
++
++            new_population.append(child)
++
++        population = new_population
++        generation += 1
++
++        # Print progress occasionally
++        if generation % 10 == 0:
++            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
++
++    return best_individual, best_fitness
++
++def direct_optimization_approach():
++    """
++    Use direct optimization methods to improve the results.
++    """
++    # Try to optimize based on promising results from GA
++    def objective(x):
++        # Flip sign since we want to maximize (minimize negative)
++        return -compute_autocorrelation_constant(x)
++
++    # Start with a good initial guess from genetic algorithm
++    initial_guess = generate_random_step_function()
++
++    # Simple local optimization around the best found solution
++    try:
++        # Use differential evolution for global optimization
++        bounds = [(0, 1000) for _ in range(len(initial_guess))]
++        result = differential_evolution(objective, bounds, maxiter=200, popsize=15, seed=42)
++
++        if result.success:
++            return result.x.tolist(), -result.fun
++    except Exception as e:
++        print(f"Differential evolution failed: {e}")
++
++    return initial_guess, compute_autocorrelation_constant(initial_guess)
++
++def search_for_best_sequence() -> tuple[list[float], float]:
++    """
++    Main function to search for the best coefficient sequence.
++    Returns both the sequence and its 1/C₁ value.
++    """
++    print("Starting genetic algorithm search...")
++    sequence, fitness = genetic_algorithm_search(max_time=160)
++
++    print(f"GA found fitness: {fitness:.6f}")
++
++    # If fitness is promising, refine with direct optimization
++    if fitness > 0.67:  # Slightly above benchmark
++        print("Refining with direct optimization...")
++        refined_sequence, refined_fitness = direct_optimization_approach()
++        if refined_fitness > fitness:
++            sequence = refined_sequence
++            fitness = refined_fitness
++            print(f"Refinement improved fitness to: {fitness:.6f}")
++
++    # Final validation
++    final_fitness = compute_autocorrelation_constant(sequence)
++    if abs(final_fitness - fitness) > 1e-6:
++        print(f"Warning: Fitness mismatch detected: {final_fitness} vs {fitness}")
++        fitness = final_fitness
++
++    return sequence, fitness
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

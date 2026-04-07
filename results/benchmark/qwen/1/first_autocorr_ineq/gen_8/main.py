@@ -1,0 +1,134 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy import signal
+from deap import base, creator, tools, algorithms
+from functools import partial
+import time
+
+# Global constants
+POP_SIZE = 50
+NGEN = 100
+MUTPB = 0.3
+CXPB = 0.5
+BOUND_LOW, BOUND_UP = 0.0, 1000.0
+MIN_SEQ_LEN, MAX_SEQ_LEN = 2, 1000
+BENCHMARK_RATIO_THRESHOLD = 1.0
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def evaluate_individual(individual):
+    """
+    Evaluate the individual (sequence) and return the inverse of C₁ (higher is better).
+    """
+    # Convert individual to a valid sequence
+    sequence = np.array(individual)
+    
+    # Ensure sequence has at least one non-zero element
+    if np.sum(sequence) < 0.01:
+        return (0.0,)
+    
+    # Compute convolution using FFT for efficiency
+    conv = signal.fftconvolve(sequence, sequence, mode='full')
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence)**2
+    
+    # Avoid division by zero or near-zero values
+    if sum_sq < 1e-10:
+        return (0.0,)
+        
+    # Compute inverse of C₁
+    inv_c1 = 2 * len(sequence) * sum_sq / (max_conv * len(sequence)**2)
+    return (inv_c1,)
+
+def mutate_sequence(individual):
+    """Mutate the sequence by perturbing each element slightly"""
+    for i in range(len(individual)):
+        if random.random() < MUTPB:
+            individual[i] += random.gauss(0, 0.1 * individual[i] if individual[i] > 0 else 1)
+            individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i]))
+    return individual,
+
+def crossover_sequences(ind1, ind2):
+    """Crossover two sequences by averaging their elements"""
+    size = min(len(ind1), len(ind2))
+    for i in range(size):
+        if random.random() < CXPB:
+            ind1[i], ind2[i] = ind2[i], ind1[i]
+    return ind1, ind2
+
+def create_individual():
+    """Create a new individual with random length and values"""
+    seq_len = random.randint(MIN_SEQ_LEN, MAX_SEQ_LEN)
+    return [random.uniform(BOUND_LOW, BOUND_UP) for _ in range(seq_len)]
+
+def search_for_best_sequence():
+    """
+    Main evolutionary algorithm to find the best sequence.
+    Returns the best sequence found.
+    """
+    # Initialize the evolutionary framework
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_sequences)
+    toolbox.register("mutate", mutate_sequence)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population
+    pop = toolbox.population(n=POP_SIZE)
+    
+    # Evaluate initial population
+    invalid_ind = [ind for ind in pop if not ind.fitness.valid]
+    fitnesses = list(map(toolbox.evaluate, invalid_ind))
+    for ind, fit in zip(invalid_ind, fitnesses):
+        ind.fitness.values = fit
+    
+    # Begin the evolution
+    for gen in range(NGEN):
+        # Select next generation
+        offspring = toolbox.select(pop, len(pop))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+            
+        # Replace the old population with the new one
+        pop[:] = offspring
+        
+        # Check if any individual exceeds benchmark
+        best_ind = tools.selBest(pop, 1)[0]
+        _, inv_c1 = evaluate_individual(best_ind)
+        if inv_c1 > BENCHMARK_RATIO_THRESHOLD * 1.5031:  # 1.5031 * 1.0 = 1.5031
+            break
+    
+    # Return the best individual found
+    best_ind = tools.selBest(pop, 1)[0]
+    return best_ind
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

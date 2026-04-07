@@ -1,0 +1,366 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize, basinhopping
+from scipy.spatial.distance import pdist
+import warnings
+import time
+from scipy.spatial.transform import Rotation as R
+
+
+class PointDispersionOptimizer:
+    """Optimizes 14 points in 3D to maximize min/max distance ratio."""
+
+    def __init__(self, num_points=14):
+        self.num_points = num_points
+        self.best_solution = None
+        self.best_ratio = -np.inf
+
+    def fibonacci_sphere(self, samples=14):
+        """Generate points on sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3. - np.sqrt(5.))  # golden angle
+
+        for i in range(samples):
+            y = 1 - (i / float(samples - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def golden_spiral_points(self, samples=14):
+        """Generate points using golden spiral method for better distribution."""
+        points = []
+        phi = np.pi * (3. - np.sqrt(5.))  # golden angle
+
+        for i in range(samples):
+            y = 1 - (i / float(samples - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def spherical_voronoi_points(self, samples=14, seed=42):
+        """Generate well-distributed points using spherical Voronoi approach."""
+        np.random.seed(seed)
+        points = np.random.randn(samples, 3)
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        points = points / norms
+        return points
+
+    def generate_initial_configurations(self):
+        """Create multiple diverse initial configurations."""
+        configs = []
+        np.random.seed(42)
+
+        # Config 1: Standard Fibonacci sphere
+        fib_points = self.fibonacci_sphere(self.num_points)
+        # Scale to unit cube [0,1]^3
+        fib_points = fib_points - np.mean(fib_points, axis=0)
+        max_coord = np.max(np.abs(fib_points))
+        if max_coord > 0:
+            fib_points = fib_points / (2 * max_coord) + 0.5
+        configs.append(("fibonacci", fib_points))
+
+        # Config 2: Golden spiral points (enhanced distribution)
+        golden_points = self.golden_spiral_points(self.num_points)
+        # Scale to unit cube [0,1]^3
+        golden_points = golden_points - np.mean(golden_points, axis=0)
+        max_coord = np.max(np.abs(golden_points))
+        if max_coord > 0:
+            golden_points = golden_points / (2 * max_coord) + 0.5
+        configs.append(("golden_spiral", golden_points))
+
+        # Config 3: Perturbed Fibonacci for better escape from local optima
+        perturbed = fib_points + np.random.normal(0, 0.03, fib_points.shape)
+        # Clamp to [0,1]^3
+        perturbed = np.clip(perturbed, 0, 1)
+        configs.append(("perturbed_fibonacci", perturbed))
+
+        # Config 4: Random uniform distribution
+        random_points = np.random.rand(self.num_points, 3)
+        configs.append(("random", random_points))
+
+        # Config 5: Spherical Voronoi points (new addition)
+        sv_points = self.spherical_voronoi_points(self.num_points, seed=123)
+        # Scale to unit cube [0,1]^3
+        sv_points = sv_points - np.mean(sv_points, axis=0)
+        max_coord = np.max(np.abs(sv_points))
+        if max_coord > 0:
+            sv_points = sv_points / (2 * max_coord) + 0.5
+        configs.append(("spherical_voronoi", sv_points))
+
+        # Config 6: Grid-based with jitter
+        grid_coords = np.linspace(0.05, 0.95, 3)  # Avoid edges
+        grid_points = []
+        for x in grid_coords:
+            for y in grid_coords:
+                for z in grid_coords:
+                    grid_points.append([x, y, z])
+        # Take first N points and add jitter
+        grid_array = np.array(grid_points[:self.num_points]) + np.random.normal(0, 0.02, (self.num_points, 3))
+        # Clamp to [0,1]^3
+        grid_array = np.clip(grid_array, 0, 1)
+        configs.append(("grid", grid_array))
+
+        # Config 7: Another random with different seed
+        np.random.seed(2468)
+        random_points2 = np.random.rand(self.num_points, 3)
+        configs.append(("random2", random_points2))
+
+        # Config 8: Rotated Fibonacci points
+        rotated = fib_points.copy()
+        rotation = R.from_euler('xyz', [0.1, 0.2, 0.3]).as_matrix()
+        rotated = rotated @ rotation.T
+        configs.append(("rotated_fibonacci", rotated))
+
+        return configs
+
+    def objective(self, x):
+        """Objective function to minimize (negative ratio)."""
+        # Reshape x into points array
+        points = x.reshape(-1, 3)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Handle edge cases
+        if len(distances) == 0:
+            return -1.0
+
+        # Remove any NaN or infinite values
+        distances = distances[np.isfinite(distances)]
+
+        if len(distances) == 0:
+            return -1.0
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing)
+        if d_max <= 0:
+            return -1.0
+        return -d_min / d_max
+
+    def penalty_objective(self, x, penalty_weight=1e6):
+        """Objective with penalty for constraint violations."""
+        points = x.reshape(-1, 3)
+
+        # Vectorized penalty calculation - much more efficient
+        penalty = 0
+        penalty += np.sum(np.maximum(0, -points)**2) * penalty_weight  # Below 0
+        penalty += np.sum(np.maximum(0, points - 1)**2) * penalty_weight  # Above 1
+
+        # Original objective
+        obj_val = self.objective(x)
+
+        return obj_val + penalty
+
+    def adaptive_differential_evolution(self, x0, bounds, time_limit):
+        """Run differential evolution with adaptive population sizing and early stopping."""
+        start_time = time.time()
+        best_solution = None
+        best_value = float('inf')
+        last_improvement = 0
+        patience = 0
+        max_patience = 10
+
+        # Multi-start optimization with different initial configurations
+        configs = self.generate_initial_configurations()
+
+        for i, (config_name, config) in enumerate(configs):
+            if time.time() - start_time > time_limit - 15:  # Leave buffer time
+                break
+
+            x0_current = config.flatten()
+
+            # Dynamic population sizing based on iteration count and success history
+            base_popsize = 15
+            popsize = min(base_popsize + i * 3, 50)  # Gradually increase popsize
+
+            # More iterations for initial configs
+            maxiter = 100 if i < 3 else 60
+
+            try:
+                result = differential_evolution(
+                    self.penalty_objective,
+                    bounds,
+                    seed=42 + i,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    mutation=(0.7, 1.0),  # Balanced mutation rate
+                    recombination=0.8,    # Good recombination rate
+                    atol=1e-8,
+                    tol=1e-8,
+                    callback=lambda x, convergence: time.time() - start_time > time_limit - 15,
+                    disp=False,
+                    polish=True
+                )
+
+                if result.success:
+                    current_value = result.fun
+                    if current_value < best_value:
+                        best_value = current_value
+                        best_solution = result.x
+                        last_improvement = time.time()
+                        patience = 0
+                    else:
+                        patience += 1
+
+                # Early stopping if no improvement for too long
+                if patience > max_patience:
+                    break
+
+            except Exception as e:
+                warnings.warn(f"DE optimization failed for config {config_name}: {e}")
+                patience += 1
+                continue
+
+        if best_solution is None:
+            # Fallback to initial configuration
+            return x0
+
+        return best_solution
+
+    def improved_local_refinement(self, initial_points, time_limit):
+        """Apply advanced local optimization refinement approaches"""
+        start_time = time.time()
+
+        # First try Basin-hopping with aggressive parameters
+        try:
+            minimizer_kwargs = {"method": "L-BFGS-B", "bounds": [(0, 1) for _ in range(42)]}
+            result_bh = basinhopping(
+                self.penalty_objective,
+                initial_points,
+                niter=50,  # More iterations for better search
+                T=0.5,     # Lower temperature for more focused search
+                stepsize=0.05,  # Smaller step size for finer tuning
+                minimizer_kwargs=minimizer_kwargs,
+                seed=42,
+                callback=lambda x, f, accepted: time.time() - start_time > time_limit - 10
+            )
+
+            if result_bh.success:
+                return result_bh.x
+        except Exception as e:
+            warnings.warn(f"Basin-hopping optimization failed: {e}")
+
+        # Fall back to gradient-based optimization with tight tolerances
+        try:
+            result = minimize(
+                self.penalty_objective,
+                initial_points,
+                method='L-BFGS-B',
+                bounds=[(0, 1) for _ in range(42)],
+                options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=lambda x: time.time() - start_time > time_limit - 10
+            )
+
+            if result.success:
+                return result.x
+        except Exception as e:
+            warnings.warn(f"Gradient optimization failed: {e}")
+
+        return initial_points
+
+    def calculate_ratio(self, points):
+        """Calculate min/max distance ratio with robust error handling."""
+        if len(points) < 2:
+            return 0.0
+        try:
+            distances = pdist(points)
+            if len(distances) == 0:
+                return 0.0
+            # Filter out invalid distances
+            finite_distances = distances[np.isfinite(distances)]
+            if len(finite_distances) == 0:
+                return 0.0
+            d_min = np.min(finite_distances)
+            d_max = np.max(finite_distances)
+            if d_max <= 0:
+                return 0.0
+            return d_min / d_max
+        except:
+            return 0.0
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+    # Initialize optimizer
+    optimizer = PointDispersionOptimizer(num_points=14)
+
+    # Set time limit
+    start_time = time.time()
+    time_limit = 345  # seconds (leave some buffer for final steps)
+
+    # Generate initial configuration
+    np.random.seed(42)
+
+    # Start with spherical arrangement
+    initial_points = optimizer.fibonacci_sphere(14)
+
+    # Scale to fit within unit cube [0,1]^3
+    initial_points = initial_points - np.mean(initial_points, axis=0)
+    max_coord = np.max(np.abs(initial_points))
+    if max_coord > 0:
+        initial_points = initial_points / (2 * max_coord) + 0.5
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(42)]
+
+    # Run adaptive differential evolution optimization
+    optimized_flat = optimizer.adaptive_differential_evolution(
+        initial_points.flatten(),
+        bounds,
+        time_limit
+    )
+
+    # Apply local refinement if time permits
+    if time.time() - start_time < time_limit - 10:
+        refined_flat = optimizer.improved_local_refinement(optimized_flat, time_limit)
+
+        # Evaluate which solution is better
+        points_before = optimized_flat.reshape(-1, 3)
+        points_after = refined_flat.reshape(-1, 3)
+
+        ratio_before = optimizer.calculate_ratio(points_before)
+        ratio_after = optimizer.calculate_ratio(points_after)
+
+        if ratio_after > ratio_before:
+            optimized_flat = refined_flat
+
+    # Extract optimized points
+    optimized_points = optimized_flat.reshape(-1, 3)
+
+    # Ensure all points are within [0,1]^3 (handle any edge cases)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    # Final validation check
+    if optimizer.calculate_ratio(optimized_points) <= 0:
+        # If something went wrong, return original good initialization
+        return initial_points
+
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

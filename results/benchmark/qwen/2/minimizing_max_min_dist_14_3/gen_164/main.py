@@ -1,0 +1,251 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import math
+import random
+import time
+from scipy.spatial import SphericalVoronoi
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances."""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return min_dist / max_dist
+
+    def fibonacci_sphere(n: int, seed: int = 42) -> np.ndarray:
+        """Generate n points on a sphere using Fibonacci spiral method with better distribution."""
+        np.random.seed(seed)
+        points = []
+        phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
+
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = math.sqrt(1 - y * y)  # radius at y
+
+            # Add jitter to improve distribution
+            jitter = 0.1 * np.random.normal(0, 1)
+            theta = phi * i + jitter
+
+            x = math.cos(theta) * radius
+            z = math.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def initialize_points(seed: int = 42):
+        """Initialize points using improved methods."""
+        # Strategy 1: Start with better Fibonacci sphere
+        points = fibonacci_sphere(14, seed)
+        
+        # Strategy 2: Apply strategic geometric transformations
+        # Add a bit more randomness to break any remaining symmetries
+        points += 0.01 * np.random.randn(14, 3)
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        safe_norms = np.where(norms == 0, 1.0, norms)
+        points = points / safe_norms[:, np.newaxis]
+        
+        # Strategy 3: Apply slight rotation with multiple axes for better distribution
+        angles = [np.pi/10, np.pi/8, np.pi/6]
+        for angle in angles:
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+            # Rotate around different axes
+            for i in range(14):
+                x, y, z = points[i]
+                # Rotate around z-axis
+                points[i] = [x * cos_a - y * sin_a, x * sin_a + y * cos_a, z]
+        
+        return points
+
+    def project_to_sphere(points):
+        """Project points onto unit sphere while maintaining exact constraint."""
+        norms = np.linalg.norm(points, axis=1)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms[:, np.newaxis]
+
+    def smart_perturb_point(point: np.ndarray, temp: float, points: np.ndarray, distances: np.ndarray) -> np.ndarray:
+        """Smartly perturb a single point based on current configuration analysis."""
+        # Get current distance info
+        if len(distances) > 0:
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            mean_dist = np.mean(distances)
+            
+            # If there are very small distances, move points that are too close apart
+            if min_dist < mean_dist * 0.3:
+                # Find the point that's making a very small distance pair
+                # This requires more careful analysis
+                pass
+        
+        # Default: generate random perturbation in tangent plane
+        delta = np.random.randn(3)
+        # Project to tangent plane (orthogonal to point)
+        delta = delta - np.dot(delta, point) * point
+        # Normalize the tangent vector
+        delta_norm = np.linalg.norm(delta)
+        if delta_norm > 1e-10:
+            delta = delta / delta_norm
+        else:
+            # If the vector is essentially zero, use a random orthogonal vector
+            perpendicular = np.array([1, 0, 0]) if abs(point[0]) < 0.9 else np.array([0, 1, 0])
+            delta = np.cross(perpendicular, point)
+            delta = delta / np.linalg.norm(delta)
+
+        # Adaptive scaling based on temperature and current configuration
+        # Higher temperature = larger perturbations
+        perturbation_scale = temp * 0.03
+        new_point = point + perturbation_scale * delta
+        # Project back to sphere
+        new_point = new_point / np.linalg.norm(new_point)
+        return new_point
+
+    def improved_simulated_annealing():
+        """Enhanced simulated annealing with adaptive cooling and intelligent perturbations."""
+        # Initialize with multiple starting configurations
+        best_points = None
+        best_ratio = 0.0
+        
+        # Try multiple initialization strategies
+        init_seeds = [42, 123, 456, 789, 999, 111, 222]
+        
+        for seed in init_seeds:
+            np.random.seed(seed)
+            points = initialize_points(seed)
+            current_ratio = compute_min_max_ratio(points)
+            
+            # Parameters for this run
+            T = 0.8  # Higher initial temp for more exploration
+            Tmin = 1e-10  # Much lower minimum temp
+            alpha = 0.9997  # Slightly faster cooling
+            max_iter = 150000  # More iterations
+            step_size = 0.01
+            
+            # Track best solution for this run
+            run_best_points = points.copy()
+            run_best_ratio = current_ratio
+            
+            # Adaptive cooling tracking
+            last_improvement = 0
+            stagnation_count = 0
+            max_stagnation = 800
+            recent_improvements = []
+            
+            for iteration in range(max_iter):
+                # Dynamic cooling adjustment
+                if stagnation_count > max_stagnation and T > Tmin:
+                    # Increase cooling rate when stagnating
+                    alpha = min(0.9999, alpha * 1.05)
+                    stagnation_count = 0
+                else:
+                    # Decrease cooling rate as we get closer to optimum
+                    if T < 0.1:
+                        alpha = max(0.999, alpha * 0.9999)
+                
+                T = max(Tmin, T * alpha)
+                
+                if T < Tmin:
+                    break
+
+                # Strategic point selection
+                point_idx = np.random.randint(0, 14)
+                
+                # Save current point
+                old_point = points[point_idx].copy()
+                
+                # Perturb selected point with smart perturbation
+                points[point_idx] = smart_perturb_point(points[point_idx], T, points, pdist(points))
+                
+                # Compute new ratio
+                new_ratio = compute_min_max_ratio(points)
+                
+                # Accept or reject based on Metropolis criterion
+                if new_ratio > current_ratio:
+                    current_ratio = new_ratio
+                    if new_ratio > run_best_ratio:
+                        run_best_ratio = new_ratio
+                        run_best_points = points.copy()
+                        last_improvement = iteration
+                        stagnation_count = 0
+                else:
+                    # Calculate acceptance probability
+                    delta = new_ratio - current_ratio
+                    acceptance_prob = math.exp(delta / T)
+                    
+                    if np.random.random() < acceptance_prob:
+                        current_ratio = new_ratio
+                        if new_ratio > run_best_ratio:
+                            run_best_ratio = new_ratio
+                            run_best_points = points.copy()
+                            last_improvement = iteration
+                            stagnation_count = 0
+                    else:
+                        # Revert change
+                        points[point_idx] = old_point
+                        stagnation_count += 1
+                
+                # Periodic local refinement
+                if iteration % 500 == 0 and iteration > 0:
+                    # Simple but effective local refinement
+                    refined_points = points.copy()
+                    for i in range(14):
+                        # Estimate gradient using finite differences
+                        old_ratio = compute_min_max_ratio(refined_points)
+                        
+                        # Test small perturbations in each dimension
+                        for j in range(3):
+                            eps = 1e-4
+                            test_points = refined_points.copy()
+                            test_points[i, j] += eps
+                            test_points[i] = test_points[i] / np.linalg.norm(test_points[i])
+                            new_ratio = compute_min_max_ratio(test_points)
+                            grad = (new_ratio - old_ratio) / eps
+                            
+                            # Move in gradient direction if beneficial
+                            if abs(grad) > 1e-12:
+                                refined_points[i] = refined_points[i] + 0.02 * grad * np.array([1 if k == j else 0 for k in range(3)])
+                                refined_points[i] = refined_points[i] / np.linalg.norm(refined_points[i])
+                    
+                    # Update if improved
+                    new_ratio = compute_min_max_ratio(refined_points)
+                    if new_ratio > compute_min_max_ratio(points):
+                        points = refined_points.copy()
+                        current_ratio = new_ratio
+                        
+                        if new_ratio > run_best_ratio:
+                            run_best_ratio = new_ratio
+                            run_best_points = points.copy()
+                            last_improvement = iteration
+                            stagnation_count = 0
+                
+                # Early stopping
+                if iteration - last_improvement > 8000:
+                    break
+            
+            # Update global best
+            if run_best_ratio > best_ratio:
+                best_ratio = run_best_ratio
+                best_points = run_best_points.copy()
+        
+        return best_points if best_points is not None else initialize_points(42)
+
+    # Run the optimization
+    return improved_simulated_annealing()
+
+# EVOLVE-BLOCK-END

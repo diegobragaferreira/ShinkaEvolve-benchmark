@@ -1,0 +1,193 @@
+<NAME>
+add_fitness_sharing
+</NAME>
+
+<DESCRIPTION>
+Adding fitness sharing to maintain population diversity and prevent premature convergence. This technique penalizes individuals that are too similar to each other, encouraging exploration of different regions of the search space. The fitness sharing helps maintain diversity in the population, which is crucial for finding better solutions in complex optimization problems like circle packing.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_fitness(circles: np.ndarray, generation: int = 0) -> float:
+        """Evaluate fitness of a solution with optimizations"""
+        if not is_valid(circles):
+            # Progressive constraint relaxation
+            penalty_weight = max(0.2, 1.0 - (generation / max_generations) * 0.8)
+
+            # Fast penalty calculation with early termination
+            total_penalty = 0
+
+            # Boundary violations (fast vectorized check)
+            boundary_penalties = np.maximum(0, -circles[:, 0] + circles[:, 2]) + \
+                               np.maximum(0, circles[:, 0] - circles[:, 2] - 1) + \
+                               np.maximum(0, -circles[:, 1] + circles[:, 2]) + \
+                               np.maximum(0, circles[:, 1] - circles[:, 2] - 1)
+            total_penalty += np.sum(boundary_penalties) * 1000 * penalty_weight
+
+            # Overlap violations (vectorized approach)
+            n = len(circles)
+            if n > 1:
+                coords = circles[:, :2]
+                radii = circles[:, 2]
+
+                # Vectorized distance computation
+                try:
+                    # Fast pairwise distance calculation for small populations
+                    distances = cdist(coords, coords)
+                    np.fill_diagonal(distances, np.inf)
+
+                    # Check overlaps efficiently
+                    overlap_matrix = (radii[:, None] + radii[None, :] - distances) > 0
+                    np.fill_diagonal(overlap_matrix, False)  # No self-overlap
+
+                    # Sum up all overlaps
+                    overlap_distances = np.where(overlap_matrix,
+                                               radii[:, None] + radii[None, :] - distances, 0)
+                    total_penalty += np.sum(overlap_distances) * 10000 * penalty_weight
+
+                except Exception:
+                    # Fallback to slower approach if vectorization fails
+                    for i in range(n):
+                        for j in range(i+1, n):
+                            x1, y1, r1 = circles[i]
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            overlap = max(0, r1 + r2 - distance)
+                            total_penalty += overlap * 10000 * penalty_weight
+
+            return -total_penalty
+
+        # Valid configuration: maximize sum of radii
+        return np.sum(circles[:, 2])
+=======
+    def evaluate_fitness(circles: np.ndarray, generation: int = 0, population: List[np.ndarray] = None) -> float:
+        """Evaluate fitness of a solution with optimizations and fitness sharing"""
+        if not is_valid(circles):
+            # Progressive constraint relaxation
+            penalty_weight = max(0.2, 1.0 - (generation / max_generations) * 0.8)
+
+            # Fast penalty calculation with early termination
+            total_penalty = 0
+
+            # Boundary violations (fast vectorized check)
+            boundary_penalties = np.maximum(0, -circles[:, 0] + circles[:, 2]) + \
+                               np.maximum(0, circles[:, 0] - circles[:, 2] - 1) + \
+                               np.maximum(0, -circles[:, 1] + circles[:, 2]) + \
+                               np.maximum(0, circles[:, 1] - circles[:, 2] - 1)
+            total_penalty += np.sum(boundary_penalties) * 1000 * penalty_weight
+
+            # Overlap violations (vectorized approach)
+            n = len(circles)
+            if n > 1:
+                coords = circles[:, :2]
+                radii = circles[:, 2]
+
+                # Vectorized distance computation
+                try:
+                    # Fast pairwise distance calculation for small populations
+                    distances = cdist(coords, coords)
+                    np.fill_diagonal(distances, np.inf)
+
+                    # Check overlaps efficiently
+                    overlap_matrix = (radii[:, None] + radii[None, :] - distances) > 0
+                    np.fill_diagonal(overlap_matrix, False)  # No self-overlap
+
+                    # Sum up all overlaps
+                    overlap_distances = np.where(overlap_matrix,
+                                               radii[:, None] + radii[None, :] - distances, 0)
+                    total_penalty += np.sum(overlap_distances) * 10000 * penalty_weight
+
+                except Exception:
+                    # Fallback to slower approach if vectorization fails
+                    for i in range(n):
+                        for j in range(i+1, n):
+                            x1, y1, r1 = circles[i]
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            overlap = max(0, r1 + r2 - distance)
+                            total_penalty += overlap * 10000 * penalty_weight
+
+            return -total_penalty
+
+        # Valid configuration: maximize sum of radii
+        base_fitness = np.sum(circles[:, 2])
+
+        # Add fitness sharing penalty to maintain diversity (if population provided)
+        if population is not None and len(population) > 1:
+            # Calculate average similarity to other individuals in the population
+            similarity_penalty = 0
+            for other in population:
+                if not np.array_equal(circles, other):
+                    # Calculate similarity based on normalized Euclidean distance
+                    diff = np.linalg.norm(circles.flatten() - other.flatten()) / np.sqrt(len(circles) * 3)
+                    # Apply fitness sharing penalty - the closer individuals are,
+                    # the more they're penalized
+                    similarity_penalty += diff * 0.01  # Penalty scale
+
+            # Apply fitness sharing penalty
+            base_fitness -= similarity_penalty
+
+        return base_fitness
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_tournament_selection
+</NAME>
+
+<DESCRIPTION>
+Updating the tournament selection function to pass the population to the fitness evaluation function, enabling fitness sharing. This ensures that the diversity-preserving mechanism works correctly during selection.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def tournament_selection(population: List[np.ndarray], k: int = 3) -> np.ndarray:
+        """Tournament selection with early termination"""
+        selected = random.sample(population, k)
+        # Sort by fitness (descending) and return best
+        return max(selected, key=lambda x: evaluate_fitness(x))
+=======
+    def tournament_selection(population: List[np.ndarray], k: int = 3) -> np.ndarray:
+        """Tournament selection with early termination"""
+        selected = random.sample(population, k)
+        # Sort by fitness (descending) and return best
+        return max(selected, key=lambda x: evaluate_fitness(x, population=population))
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_evolution_loop
+</NAME>
+
+<DESCRIPTION>
+Updating the main evolution loop to pass the current population to the fitness evaluation function, enabling fitness sharing throughout the evolutionary process. This allows the algorithm to maintain diversity in the population and avoid premature convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    for generation in range(max_generations):
+        # Evaluate fitness for entire population
+        fitness_scores = [evaluate_fitness(individual, generation) for individual in population]
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_solution = deepcopy(population[max_fitness_idx])
+=======
+    for generation in range(max_generations):
+        # Evaluate fitness for entire population
+        fitness_scores = [evaluate_fitness(individual, generation, population) for individual in population]
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_solution = deepcopy(population[max_fitness_idx])
+>>>>>>> REPLACE
+
+</DIFF>

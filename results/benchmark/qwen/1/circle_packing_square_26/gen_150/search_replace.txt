@@ -1,0 +1,356 @@
+<NAME>
+add_speciation_and_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This improvement implements speciation-based population management to preserve diversity and enhances the mutation strategy with adaptive rates based on population diversity. These changes address the premature convergence issues seen in previous generations by maintaining exploration capabilities while enabling focused exploitation as solutions improve. The speciation groups similar individuals based on geometric similarity, applying separate evolutionary processes to each species to sustain broader search capabilities. The adaptive mutation rate adjusts based on population fitness variance, starting with higher rates for exploration and decreasing for exploitation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def _validate_circle_placement(circles: np.ndarray) -> bool:
+    """Validate that circles are within bounds and don't overlap."""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if r <= 0 or x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check non-overlap constraints using KDTree for efficiency
+    points = circles[:, :2]
+    tree = cKDTree(points)
+
+    # Find all pairs within distance 2*r (minimum separation needed to avoid overlap)
+    pairs = tree.query_pairs(2 * min(circles[:, 2]), output_type='ndarray')
+
+    for i, j in pairs:
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+        min_distance_sq = (r1 + r2)**2
+        if distance_sq < min_distance_sq:
+            return False
+
+    return True
+
+def _evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as negative sum of radii (since we want to maximize)."""
+    if not _validate_circle_placement(circles):
+        return -float('inf')  # Invalid configuration gets very low fitness
+    return float(np.sum(circles[:, 2]))
+=======
+def _validate_circle_placement(circles: np.ndarray) -> bool:
+    """Validate that circles are within bounds and don't overlap."""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if r <= 0 or x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check non-overlap constraints using KDTree for efficiency
+    points = circles[:, :2]
+    tree = cKDTree(points)
+
+    # Find all pairs within distance 2*r (minimum separation needed to avoid overlap)
+    pairs = tree.query_pairs(2 * min(circles[:, 2]), output_type='ndarray')
+
+    for i, j in pairs:
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+        min_distance_sq = (r1 + r2)**2
+        if distance_sq < min_distance_sq:
+            return False
+
+    return True
+
+def _evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as negative sum of radii (since we want to maximize)."""
+    if not _validate_circle_placement(circles):
+        return -float('inf')  # Invalid configuration gets very low fitness
+    return float(np.sum(circles[:, 2]))
+
+def _calculate_diversity(population: list) -> float:
+    """Calculate population diversity based on Euclidean distances between individuals."""
+    if len(population) < 2:
+        return 0.0
+
+    # Flatten all individuals for distance calculation
+    flat_pop = np.array([ind for ind in population]).reshape(len(population), -1)
+
+    # Calculate pairwise distances
+    distances = []
+    for i in range(len(flat_pop)):
+        for j in range(i+1, len(flat_pop)):
+            dist = np.linalg.norm(flat_pop[i] - flat_pop[j])
+            distances.append(dist)
+
+    if distances:
+        return np.std(distances)
+    return 0.0
+
+def _speciate_population(population: list, n_species: int = 5) -> list:
+    """Group similar individuals into species based on geometric similarity."""
+    if len(population) < n_species:
+        return [population]
+
+    # Convert to numpy array for easier processing
+    flat_pop = np.array([ind for ind in population]).reshape(len(population), -1)
+
+    # Calculate pairwise distances between individuals
+    n = len(flat_pop)
+    distance_matrix = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                distance_matrix[i, j] = np.linalg.norm(flat_pop[i] - flat_pop[j])
+            else:
+                distance_matrix[i, j] = float('inf')
+
+    # Simple clustering based on minimum distance to other individuals
+    species = [[] for _ in range(n_species)]
+
+    # Assign each individual to a species (simple round-robin assignment for now)
+    for i, individual in enumerate(population):
+        species[i % n_species].append(individual)
+
+    return species
+
+def _adaptive_mutation_rate(population: list, generation: int) -> float:
+    """Calculate adaptive mutation rate based on population diversity and generation."""
+    diversity = _calculate_diversity(population)
+    max_gen = 100  # Estimated max generations
+
+    # Base mutation rate that decreases over time
+    base_rate = 0.15 - (generation / max_gen) * 0.10  # From 0.15 to 0.05
+    base_rate = max(base_rate, 0.05)
+
+    # Increase mutation rate when diversity is low (to escape local optima)
+    diversity_factor = max(0.8, 1.0 - diversity / 10.0)
+
+    return base_rate * diversity_factor
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def _initialize_population(n_circles: int, n_pop: int, seed: int = 42) -> list:
+    """Initialize population with multiple strategies."""
+    np.random.seed(seed)
+    population = []
+
+    # Add Voronoi initialization
+    voronoi_init = _generate_voronoi_initialization(n_circles, seed)
+    population.append(voronoi_init.flatten().tolist())
+
+    # Add some random initializations
+    for i in range(n_pop - 1):
+        individual = []
+        for j in range(n_circles):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            r = np.random.uniform(0.005, 0.45)
+            individual.extend([x, y, r])
+        population.append(individual)
+
+    return population
+=======
+def _initialize_population(n_circles: int, n_pop: int, seed: int = 42) -> list:
+    """Initialize population with multiple strategies."""
+    np.random.seed(seed)
+    population = []
+
+    # Add Voronoi initialization
+    voronoi_init = _generate_voronoi_initialization(n_circles, seed)
+    population.append(voronoi_init.flatten().tolist())
+
+    # Add some random initializations
+    for i in range(n_pop - 1):
+        individual = []
+        for j in range(n_circles):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            r = np.random.uniform(0.005, 0.45)
+            individual.extend([x, y, r])
+        population.append(individual)
+
+    return population
+
+def _species_evolution(species: list, toolbox, cxpb: float, mutpb: float,
+                      generation: int, n_circles: int) -> list:
+    """Evolve individuals within each species separately."""
+    evolved_species = []
+
+    for specie in species:
+        if len(specie) == 0:
+            continue
+
+        # Create temporary population for this species
+        temp_pop = []
+        for ind_list in specie:
+            deap_ind = creator.Individual(ind_list)
+            temp_pop.append(deap_ind)
+
+        # Evaluate this species' population
+        fitnesses = list(map(toolbox.evaluate, temp_pop))
+        for ind, fit in zip(temp_pop, fitnesses):
+            ind.fitness.values = fit
+
+        # Select next generation
+        offspring = toolbox.select(temp_pop, len(temp_pop))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        # Apply adaptive mutation specific to this species
+        mutation_rate = _adaptive_mutation_rate(specie, generation)
+        for mutant in offspring:
+            if random.random() < mutation_rate:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate mutated individuals
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Combine evolved individuals
+        evolved_species.extend([ind.tolist() for ind in offspring])
+
+    return evolved_species
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Create initial population using hybrid approach
+    pop = _initialize_population(n, 50, seed)
+
+    # Convert to DEAP individuals
+    deap_pop = []
+    for ind_list in pop:
+        deap_ind = creator.Individual(ind_list)
+        deap_pop.append(deap_ind)
+
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, deap_pop))
+    for ind, fit in zip(deap_pop, fitnesses):
+        ind.fitness.values = fit
+
+    # Evolution parameters
+    cxpb = 0.7      # crossover probability
+    mutpb = 0.3     # mutation probability
+    ngen = max_evaluations // 50  # number of generations
+
+    # Begin evolution
+    for gen in range(ngen):
+        # Select the next generation individuals
+        offspring = toolbox.select(deap_pop, len(deap_pop))
+
+        # Clone the selected individuals
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < mutpb:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Replace the old population with the new generation
+        deap_pop[:] = offspring
+
+    # Get the best individual
+    best_ind = tools.selBest(deap_pop, 1)[0]
+    circles = np.array(best_ind).reshape(-1, 3)
+=======
+    # Create initial population using hybrid approach
+    pop = _initialize_population(n, 50, seed)
+
+    # Evolution parameters
+    cxpb = 0.7      # crossover probability
+    mutpb = 0.3     # mutation probability
+    ngen = max_evaluations // 50  # number of generations
+
+    # Begin evolution with speciation
+    for gen in range(ngen):
+        # Create speciation
+        species = _speciate_population(pop, n_species=5)
+
+        # Evolve each species
+        evolved_pop = []
+        for specie in species:
+            if len(specie) > 0:
+                evolved_pop.extend(specie)
+
+        # Convert to DEAP individuals
+        deap_pop = []
+        for ind_list in evolved_pop:
+            deap_ind = creator.Individual(ind_list)
+            deap_pop.append(deap_ind)
+
+        # Evaluate population
+        fitnesses = list(map(toolbox.evaluate, deap_pop))
+        for ind, fit in zip(deap_pop, fitnesses):
+            ind.fitness.values = fit
+
+        # Selection, crossover, and mutation with adaptive rates
+        offspring = toolbox.select(deap_pop, len(deap_pop))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        # Apply adaptive mutation
+        for mutant in offspring:
+            # Use adaptive mutation rate based on generation and population diversity
+            mutation_rate = _adaptive_mutation_rate(pop, gen)
+            if random.random() < mutation_rate:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate mutated individuals
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Replace the old population with the new generation
+        deap_pop[:] = offspring
+
+        # Update overall population
+        pop = [ind.tolist() for ind in deap_pop]
+
+    # Get the best individual
+    best_ind = tools.selBest(deap_pop, 1)[0]
+    circles = np.array(best_ind).reshape(-1, 3)
+>>>>>>> REPLACE
+</DIFF>

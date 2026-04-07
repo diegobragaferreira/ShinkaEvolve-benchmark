@@ -1,0 +1,273 @@
+--- a/original.py
++++ b/original.py
+@@ -1,170 +1,160 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+ import random
+ from deap import base, creator, tools, algorithms
+-import math
++import time
++from numba import jit
+ 
+-def compute_autoconvolution_norms(f_values: list[float]) -> tuple[float, float, float]:
++@jit(nopython=True)
++def compute_autoconvolution_norms_fast(f_values: list[float]) -> tuple[float, float, float]:
+     """
+-    Compute the three norms needed for C2 calculation using piecewise linear integration.
++    Fast computation of the three norms needed for C2 calculation using piecewise linear integration.
+     """
+     # Convert to numpy array for easier manipulation
+     f = np.array(f_values)
+-
+-    # Create step function on [-1/4, 1/4] with equal spacing
+     n_steps = len(f)
++    
+     if n_steps == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # Step width
+     dx = 0.5 / n_steps
+ 
+     # Compute autoconvolution using discrete convolution
+     g = np.convolve(f, f, mode='full')
+     # Trim g to the correct size (this accounts for the convolution)
+     g = g[len(f)-1:2*len(f)-1]
+ 
+     # Compute L2 norm squared using piecewise linear integration
+-    # For each pair of adjacent points, integrate quadratic function
+-    g_sq = g**2
+     norm_2_squared = 0.0
+     for i in range(len(g)-1):
+         # Trapezoidal-like integration for quadratic function
+         # Using formula for integral of ax^2 + bx + c over [x0,x1]
+         # But here we approximate with piecewise linear segments
+         # So we use: (dx/3)(y0^2 + y0*y1 + y1^2)
+         y0, y1 = g[i], g[i+1]
+         norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+ 
+     # L1 norm (sum of absolute values)
+     norm_1 = np.sum(np.abs(g))
+ 
+     # Infinity norm
+     norm_inf = np.max(np.abs(g))
+ 
+     # Handle numerical edge cases
+     if norm_1 <= 1e-15:
+         norm_1 = 1e-15
+     if norm_inf <= 1e-15:
+         norm_inf = 1e-15
+ 
+     return norm_2_squared, norm_1, norm_inf
+ 
+-def evaluate_individual(individual):
+-    """Evaluate the fitness of an individual (function coefficients)"""
+-    # Convert individual to function values
+-    # individual contains amplitude and frequency pairs
+-    n_steps = 1000  # Fixed number of steps for consistency
+-    dx = 0.5 / n_steps
+-    
+-    # Create frequency grid (harmonic frequencies)
+-    max_freq = 20  # Limit to reasonable frequencies
+-    frequencies = np.linspace(1, max_freq, len(individual)//2)
+-    
+-    # Create function using sine/cosine basis functions
+-    x = np.linspace(-0.25, 0.25, n_steps)
+-    f = np.zeros(n_steps)
+-    
+-    # Sum up sine and cosine components
+-    for i in range(0, len(individual), 2):
+-        amp = abs(individual[i])  # Ensure non-negative amplitude
+-        freq = frequencies[i//2] if i//2 < len(frequencies) else frequencies[-1]
+-        if i//2 % 2 == 0:
+-            f += amp * np.sin(2 * np.pi * freq * x)
+-        else:
+-            f += amp * np.cos(2 * np.pi * freq * x)
+-    
+-    # Ensure non-negative values and normalize
+-    f = np.maximum(f, 0)
+-    if np.sum(f) > 0:
+-        f = f / np.sum(f) * 100  # Scale appropriately
+-    
+-    # Compute norms
+-    try:
+-        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f.tolist())
+-        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+-            return (0,)
+-        c2 = norm_2_sq / (norm_1 * norm_inf)
+-        return (c2,)
+-    except Exception:
+-        return (0,)
+-
+-def construct_function() -> list[float]:
+-    """Construct step function using evolutionary spectral optimization."""
+-    
+-    # Set up evolutionary algorithm
++def create_adaptive_step_function() -> list[float]:
++    """
++    Create an adaptive step function optimized for high C2 values.
++    Uses a hybrid approach with adaptive peak positioning and amplitude control.
++    """
++    # Set seed for reproducibility
+     random.seed(42)
+     np.random.seed(42)
+     
+-    # Individual is a list of (amplitude, frequency) pairs
+-    # We'll use 20 pairs (10 sine, 10 cosine components)
+-    IND_SIZE = 20
++    # Parameters for function construction
++    n_steps = 3000  # Increased steps for better resolution
++    max_attempts = 200  # Maximum attempts to find good function
++    max_time = 85  # Time limit in seconds
+     
+-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+-    creator.create("Individual", list, fitness=creator.FitnessMax)
++    best_c2 = -1
++    best_function = None
++    start_time = time.time()
+     
+-    toolbox = base.Toolbox()
+-    toolbox.register("attr_float", random.uniform, -10, 10)
+-    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, n=IND_SIZE)
+-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    # Strategy 1: Adaptive peak positioning with logarithmic distribution
++    for attempt in range(max_attempts):
++        # Early termination if time is running out
++        if time.time() - start_time > max_time:
++            break
++            
++        # Create positions using logarithmic distribution to avoid clustering
++        # Generate logarithmically spaced positions away from center
++        n_peaks = min(200, n_steps // 10)  # Dynamic number of peaks
++        
++        # Create logarithmic spacing for peak positions
++        log_positions = np.logspace(np.log10(0.001), np.log10(0.25), n_peaks//2)
++        # Mirror and combine for symmetric distribution
++        positions = np.concatenate([-log_positions[::-1], log_positions])
++        # Ensure we don't exceed our step count
++        positions = positions[:n_steps]
++        
++        # Add some randomness to break systematic patterns
++        noise_level = 0.02
++        positions += np.random.normal(0, noise_level, len(positions))
++        
++        # Clip to valid range and sort
++        positions = np.clip(positions, -0.25, 0.25)
++        positions = np.sort(positions)
++        
++        # Generate amplitudes with adaptive behavior
++        # Peaks near center get higher amplitude, with natural decay
++        amplitudes = np.exp(-8 * positions**2)  # Stronger center concentration
++        
++        # Add adaptive noise with dynamic scaling
++        adaptive_noise = np.random.normal(0, 0.15, len(positions))
++        amplitudes += adaptive_noise
++        
++        # Ensure non-negative amplitudes
++        amplitudes = np.maximum(amplitudes, 0)
++        
++        # Apply constraint-aware normalization to prevent extreme autoconvolution spikes
++        if np.sum(amplitudes) > 0:
++            amplitudes = amplitudes / np.sum(amplitudes) * 150  # Scaled appropriately
++        
++        # Apply additional constraint checking
++        try:
++            # Quick test to avoid obviously bad configurations
++            test_norm_2_sq, test_norm_1, test_norm_inf = compute_autoconvolution_norms_fast(amplitudes.tolist())
++            
++            # If the ratio is already very poor, skip this configuration
++            if test_norm_1 > 0 and test_norm_inf > 0:
++                test_c2 = test_norm_2_sq / (test_norm_1 * test_norm_inf)
++                if test_c2 < 0.1:  # Skip obviously bad candidates early
++                    continue
++                    
++            # Compute final norms
++            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(amplitudes.tolist())
++            
++            # Skip if invalid
++            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++                continue
++
++            c2 = norm_2_sq / (norm_1 * norm_inf)
++            
++            # Keep the best function
++            if c2 > best_c2:
++                best_c2 = c2
++                best_function = amplitudes.tolist()
++                
++        except Exception:
++            # Skip invalid functions
++            continue
+     
+-    toolbox.register("evaluate", evaluate_individual)
+-    toolbox.register("mate", tools.cxBlend, alpha=0.5)
+-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=2, indpb=0.2)
+-    toolbox.register("select", tools.selTournament, tournsize=3)
+-    
+-    # Create initial population
+-    pop = toolbox.population(n=50)
+-    
+-    # Run evolution for limited time
+-    stats = tools.Statistics(lambda ind: ind.fitness.values)
+-    stats.register("max", np.max)
+-    
+-    # Run evolution for 20 generations (short timeout)
+-    try:
+-        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, 
+-                                          ngen=20, stats=stats, verbose=False)
+-    except:
+-        # Fallback: use a simple constructed function
+-        pass
+-    
+-    # Get best individual
+-    best_ind = tools.selBest(pop, 1)[0] if pop else []
+-    
+-    # Convert back to function representation
+-    n_steps = 1000
+-    dx = 0.5 / n_steps
+-    x = np.linspace(-0.25, 0.25, n_steps)
+-    f = np.zeros(n_steps)
+-    
+-    # Reconstruct function with best coefficients
+-    if best_ind:
+-        # Use the same reconstruction as in evaluation
+-        max_freq = 20
+-        frequencies = np.linspace(1, max_freq, len(best_ind)//2)
+-        
+-        for i in range(0, len(best_ind), 2):
+-            amp = abs(best_ind[i])
+-            freq = frequencies[i//2] if i//2 < len(frequencies) else frequencies[-1]
+-            if i//2 % 2 == 0:
+-                f += amp * np.sin(2 * np.pi * freq * x)
+-            else:
+-                f += amp * np.cos(2 * np.pi * freq * x)
++    # Return the best function found or fallback
++    if best_function is not None:
++        return best_function
+     else:
+-        # Fallback construction
+-        f = np.ones(n_steps)
+-    
+-    # Final processing
+-    f = np.maximum(f, 0)
+-    if np.sum(f) > 0:
+-        f = f / np.sum(f) * 100
+-    
+-    return f.tolist()
++        # Fallback to a uniform distribution with some variation
++        base_value = 1.0
++        variation = 0.2
++        return [base_value + np.random.uniform(-variation, variation) for _ in range(n_steps)]
++
++def construct_function() -> list[float]:
++    """
++    Main function to construct optimized step function using adaptive approach.
++    """
++    return create_adaptive_step_function()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

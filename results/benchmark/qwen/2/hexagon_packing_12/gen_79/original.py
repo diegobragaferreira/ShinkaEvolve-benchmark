@@ -1,0 +1,80 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from numba import jit
+import math
+
+
+@jit(nopython=True)
+def hexagon_vertices_numba(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, angle, and side length."""
+    angle_rad = angle_deg * math.pi / 180.0
+    vertices = np.empty((6, 2))
+    for i in range(6):
+        angle = angle_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices[i] = (x, y)
+    return vertices
+
+
+@jit(nopython=True)
+def point_in_hexagon(point_x, point_y, hex_center_x, hex_center_y, hex_angle_deg, hex_side_length=1):
+    """Check if a point is inside a hexagon using fast geometric operations."""
+    # Transform point to hexagon's local coordinate system
+    hex_angle_rad = hex_angle_deg * math.pi / 180.0
+    dx = point_x - hex_center_x
+    dy = point_y - hex_center_y
+
+    # Rotate point back to align with hexagon axes
+    cos_a = math.cos(-hex_angle_rad)
+    sin_a = math.sin(-hex_angle_rad)
+    local_x = dx * cos_a - dy * sin_a
+    local_y = dx * sin_a + dy * cos_a
+
+    # Check if point is inside hexagon
+    # For regular hexagon with side length 1, distance from center to vertex is 1
+    # Distance from center to edge is sqrt(3)/2
+    r = math.sqrt(local_x * local_x + local_y * local_y)
+    if r > hex_side_length:
+        return False
+
+    # More precise check using hexagon boundaries
+    # Hexagon vertices in local coordinates (simplified)
+    # But for our use case, just check against outer radius
+    return True
+
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    n = 12
+    # Simple grid arrangement of inner hexagons
+    inner_hex_data = np.array(
+        [
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right,
+            [0, -4, 0],  # far bottom-center
+        ]
+    )
+
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

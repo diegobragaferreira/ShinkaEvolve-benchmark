@@ -1,0 +1,276 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from deap import base, creator, tools, algorithms
+from scipy.spatial import Voronoi
+import math
+from collections import defaultdict
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Problem parameters
+    N_CIRCLES = 26
+    POP_SIZE = 100
+    N_GEN = 200
+    MUTPB = 0.3
+    CXPB = 0.5
+    TOURNAMENT_SIZE = 3
+    
+    # Fitness and individual definitions
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Initialize individual with random valid circles
+    def init_individual():
+        # Start with Voronoi-inspired placement
+        circles = []
+        
+        # Generate initial Voronoi points to spread circles
+        voronoi_points = []
+        # Create a grid of potential Voronoi points
+        n_grid = int(math.ceil(math.sqrt(N_CIRCLES)))
+        for i in range(n_grid):
+            for j in range(n_grid):
+                x = (i + 0.5) / n_grid
+                y = (j + 0.5) / n_grid
+                # Add some randomness to avoid perfect grid
+                x += np.random.uniform(-0.05, 0.05)
+                y += np.random.uniform(-0.05, 0.05)
+                # Ensure within bounds
+                x = max(0.05, min(0.95, x))
+                y = max(0.05, min(0.95, y))
+                voronoi_points.append([x, y])
+        
+        # Use Voronoi diagram to get better spreading
+        if len(voronoi_points) >= N_CIRCLES:
+            vor = Voronoi(np.array(voronoi_points[:N_CIRCLES]))
+            # Set initial circle centers from Voronoi points
+            centers = vor.points
+        else:
+            # Fall back to random placement with grid
+            centers = voronoi_points
+        
+        # Create circles with random radii (smaller than distance to boundaries)
+        for i in range(N_CIRCLES):
+            if i < len(centers):
+                cx, cy = centers[i]
+            else:
+                cx = np.random.uniform(0.05, 0.95)
+                cy = np.random.uniform(0.05, 0.95)
+                
+            # Initialize with small radius
+            r = np.random.uniform(0.01, 0.05)
+            
+            # Ensure valid placement initially
+            r = min(r, cx, 1 - cx, cy, 1 - cy)
+            
+            circles.append([cx, cy, r])
+        
+        return circles
+    
+    # Check if configuration is valid
+    def is_valid(circles):
+        # Check containment
+        for x, y, r in circles:
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+        
+        # Check overlap
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    return False
+        return True
+    
+    # Calculate fitness (sum of radii)
+    def evaluate(individual):
+        circles = individual
+        # Validate and repair if needed
+        if not is_valid(circles):
+            # Simple greedy repair
+            circles = repair_circles(circles)
+            if not is_valid(circles):
+                return (0,)
+        
+        return (sum(circle[2] for circle in circles),)
+    
+    # Repair invalid configurations
+    def repair_circles(circles):
+        # Simple repair: try to move overlapping circles away
+        repaired = []
+        for i, (x, y, r) in enumerate(circles):
+            # Adjust radius to fit in bounds
+            r = min(r, x, 1-x, y, 1-y)
+            
+            # Ensure no overlap with already placed circles
+            for j in range(i):
+                x_prev, y_prev, r_prev = repaired[j]
+                dist = math.sqrt((x - x_prev)**2 + (y - y_prev)**2)
+                if dist < r + r_prev:
+                    # Move away from overlapping circle
+                    dx = x - x_prev
+                    dy = y - y_prev
+                    dist = max(0.001, math.sqrt(dx*dx + dy*dy))
+                    dx /= dist
+                    dy /= dist
+                    new_x = x_prev + (r_prev + r + 0.001) * dx
+                    new_y = y_prev + (r_prev + r + 0.001) * dy
+                    # Clamp to bounds
+                    new_x = max(r, min(1-r, new_x))
+                    new_y = max(r, min(1-r, new_y))
+                    x, y = new_x, new_y
+            
+            repaired.append([x, y, r])
+        return repaired
+    
+    # Custom mutation operator that respects constraints
+    def mut_circle(individual):
+        # Mutate one circle randomly
+        idx = random.randint(0, len(individual) - 1)
+        x, y, r = individual[idx]
+        
+        # Randomly choose what to mutate
+        choice = random.randint(0, 2)
+        
+        if choice == 0:  # Mutate x
+            x += random.uniform(-0.02, 0.02)
+            x = max(r, min(1-r, x))
+        elif choice == 1:  # Mutate y
+            y += random.uniform(-0.02, 0.02)
+            y = max(r, min(1-r, y))
+        else:  # Mutate radius
+            r += random.uniform(-0.02, 0.02)
+            r = max(0.001, min(min(x, 1-x, y, 1-y), r))
+        
+        individual[idx] = [x, y, r]
+        return individual,
+    
+    # Custom crossover operator that respects constraints
+    def cx_circle(ind1, ind2):
+        # Single point crossover
+        size = min(len(ind1), len(ind2))
+        if size < 2:
+            return ind1, ind2
+            
+        cxpoint = random.randint(1, size - 1)
+        
+        # Perform crossover
+        for i in range(cxpoint):
+            ind1[i], ind2[i] = ind2[i], ind1[i]
+        
+        return ind1, ind2
+    
+    toolbox.register("individual", tools.initIterFunc, creator.Individual, init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", cx_circle)
+    toolbox.register("mutate", mut_circle)
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+    
+    # Initialize population
+    pop = toolbox.population(n=POP_SIZE)
+    
+    # Statistics about the evolution
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Run evolution
+    try:
+        hof = tools.ParetoFront()
+        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CXPB, mutpb=MUTPB,
+                                          ngen=N_GEN, stats=stats, halloffame=hof,
+                                          verbose=False)
+        
+        # Get the best individual
+        best_individual = hof[0] if hof else pop[0]
+        best_fitness = best_individual.fitness.values[0]
+        
+        # If we have a valid solution, use it
+        if best_fitness > 0 and is_valid(best_individual):
+            return np.array(best_individual)
+        else:
+            # Fall back to greedy approach
+            return greedy_circle_packing()
+    except Exception as e:
+        # On error, fall back to greedy approach
+        return greedy_circle_packing()
+
+def greedy_circle_packing():
+    """Fallback greedy approach to ensure we always return a valid configuration."""
+    N_CIRCLES = 26
+    circles = []
+    
+    # Start with a few circles placed strategically
+    # Try to place circles in a way that maximizes total radius
+    placed = 0
+    
+    # Place circles in a structured way, prioritizing placement in corners and center
+    positions = [(0.2, 0.2), (0.8, 0.2), (0.2, 0.8), (0.8, 0.8), (0.5, 0.5)]
+    radii = [0.1, 0.1, 0.1, 0.1, 0.1]
+    
+    for i in range(min(5, N_CIRCLES)):
+        circles.append([positions[i][0], positions[i][1], radii[i]])
+        placed += 1
+    
+    # Try to add more circles greedily
+    while placed < N_CIRCLES:
+        max_radius = 0
+        best_x, best_y = 0.5, 0.5
+        best_r = 0.01
+        
+        # Check multiple candidate positions
+        candidates = []
+        for _ in range(100):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            candidates.append((x, y))
+        
+        for x, y in candidates:
+            # Compute maximum possible radius at this position
+            r_max = min(x, 1-x, y, 1-y)
+            
+            # Check for overlap with existing circles
+            overlap = False
+            for cx, cy, r in circles:
+                dist = math.sqrt((x - cx)**2 + (y - cy)**2)
+                if dist < r + r_max:  # Might overlap
+                    overlap = True
+                    break
+            
+            if not overlap and r_max > max_radius:
+                max_radius = r_max
+                best_x, best_y = x, y
+                best_r = r_max
+        
+        if max_radius > 0.001:
+            circles.append([best_x, best_y, best_r])
+            placed += 1
+        else:
+            # If no valid position found, break
+            break
+    
+    # Fill remaining slots with small circles
+    while len(circles) < N_CIRCLES:
+        circles.append([0.5, 0.5, 0.005])
+    
+    # Trim to exact count
+    return np.array(circles[:N_CIRCLES])
+
+# EVOLVE-BLOCK-END

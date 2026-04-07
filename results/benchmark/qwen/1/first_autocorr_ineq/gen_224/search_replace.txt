@@ -1,0 +1,232 @@
+<NAME>
+improve_evolutionary_strategy
+</NAME>
+
+<DESCRIPTION>
+The idea is to enhance the evolutionary strategy by implementing a more sophisticated selection mechanism and introducing adaptive parameters that adjust based on the optimization progress. This includes using a dynamic tournament size based on population diversity and employing a more adaptive mutation rate that considers both generation progress and fitness variance. These modifications aim to improve convergence speed and solution quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _cache_manager.clear()
+
+    # Initialize population with diverse strategies
+    population_size = 50
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 40
+
+    # History for diversity tracking
+    recent_improvements = collections.deque(maxlen=20)
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual in batches
+        fitness_scores = evaluate_fitness_batch_parallel(population)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+            recent_improvements.append(current_best_inv_c1)
+        else:
+            stagnation_count += 1
+            recent_improvements.append(best_inv_c1)
+
+        # Try to improve best sequence using LP-based direction
+        if best_sequence is not None:
+            improved = get_good_direction_to_move_into(best_sequence)
+            if improved is not None:
+                _, improved_inv_c1 = compute_autocorrelation_constant(improved)
+                if improved_inv_c1 > best_inv_c1:
+                    best_sequence = improved
+                    best_inv_c1 = improved_inv_c1
+
+        # Reintroduce diversity if stagnating
+        if stagnation_count > 20 and check_diversity(population):
+            # Reset part of the population with fresh sequences
+            reset_count = population_size // 4
+            for i in range(reset_count):
+                n = random.randint(100, 1000)
+                if random.random() < 0.5:
+                    population[i] = generate_step_function(n)
+                else:
+                    population[i] = generate_pattern_based_sequence(n)
+            stagnation_count = 0  # Reset stagnation count
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover with probability
+            child = crossover_sequences(parent1, parent2, crossover_rate=0.8)
+
+            # Mutation with adaptive rate based on generation
+            child = adaptive_mutate_sequence(child, generation, 100, 0.15, 0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final cleanup and validation
+    if best_sequence is not None:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        if sum_seq > 0.01:
+            best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_uniform_distribution(100)
+=======
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _cache_manager.clear()
+
+    # Initialize population with diverse strategies
+    population_size = 50
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 40
+
+    # History for diversity tracking
+    recent_improvements = collections.deque(maxlen=20)
+    fitness_history = []
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual in batches
+        fitness_scores = evaluate_fitness_batch_parallel(population)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+            recent_improvements.append(current_best_inv_c1)
+        else:
+            stagnation_count += 1
+            recent_improvements.append(best_inv_c1)
+
+        # Try to improve best sequence using LP-based direction
+        if best_sequence is not None:
+            improved = get_good_direction_to_move_into(best_sequence)
+            if improved is not None:
+                _, improved_inv_c1 = compute_autocorrelation_constant(improved)
+                if improved_inv_c1 > best_inv_c1:
+                    best_sequence = improved
+                    best_inv_c1 = improved_inv_c1
+
+        # Reintroduce diversity if stagnating
+        if stagnation_count > 20 and check_diversity(population):
+            # Reset part of the population with fresh sequences
+            reset_count = population_size // 4
+            for i in range(reset_count):
+                n = random.randint(100, 1000)
+                if random.random() < 0.5:
+                    population[i] = generate_step_function(n)
+                else:
+                    population[i] = generate_pattern_based_sequence(n)
+            stagnation_count = 0  # Reset stagnation count
+
+        # Compute population diversity statistics
+        diversity = np.std(fitness_scores) if len(fitness_scores) > 1 else 0.0
+        fitness_history.append(current_best_inv_c1)
+        if len(fitness_history) > 10:
+            fitness_history.pop(0)
+
+        # Adjust tournament size based on diversity and generation
+        tournament_size = max(3, min(7, int(5 + diversity * 2)))
+
+        # Adjust mutation rate based on fitness variance and generation
+        if len(fitness_history) >= 2:
+            fitness_variance = np.var(fitness_history[-5:]) if len(fitness_history) >= 5 else 0.0
+            adaptive_mutation_rate = 0.15 * (1 - generation / 100) * (1 + fitness_variance)
+        else:
+            adaptive_mutation_rate = 0.15 * (1 - generation / 100)
+        adaptive_mutation_rate = max(0.05, min(0.3, adaptive_mutation_rate))
+
+        # Selection with dynamic tournament size and elitism
+        selected_parents = []
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest with dynamic tournament size
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover with probability
+            child = crossover_sequences(parent1, parent2, crossover_rate=0.8)
+
+            # Mutation with adaptive rate
+            child = adaptive_mutate_sequence(child, generation, 100, adaptive_mutation_rate, 0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final cleanup and validation
+    if best_sequence is not None:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        if sum_seq > 0.01:
+            best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_uniform_distribution(100)
+>>>>>>> REPLACE
+</DIFF>

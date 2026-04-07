@@ -1,0 +1,214 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+import time
+import random
+
+# Fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_convolution_fft(seq):
+    """Compute convolution using FFT for better efficiency"""
+    n = len(seq)
+    if n == 0:
+        return np.array([])
+    # Pad to size 2*n-1 for full convolution
+    padded_seq = np.pad(seq, (0, n-1), mode='constant')
+    # Compute FFT-based convolution
+    fft_seq = fft(padded_seq)
+    conv_result = ifft(fft_seq * np.conj(fft_seq)).real[:2*n-1]
+    return conv_result
+
+def compute_autocorrelation_constant(sequence):
+    """Compute the C1 constant for a given sequence"""
+    if len(sequence) == 0:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+
+    # Use FFT for efficient convolution
+    conv_result = compute_convolution_fft(sequence)
+    max_conv = np.max(conv_result)
+
+    # Compute C1 = 2n * max(conv) / (sum(a))^2
+    n = len(sequence)
+    c1 = (2 * n * max_conv) / (sum_a ** 2)
+
+    return c1
+
+def evaluate_sequence(sequence):
+    """Evaluate a sequence by computing its inverse C1"""
+    c1 = compute_autocorrelation_constant(sequence)
+    if c1 == float('inf'):
+        return 0.0  # Invalid sequence
+    return 1.0 / c1  # Return 1/C1 as the objective
+
+def project_to_feasible_region(x):
+    """Project a sequence onto the feasible region with non-negativity and sum constraint"""
+    # Ensure non-negativity
+    x = np.maximum(x, 0)
+    # Normalize to keep sum within reasonable bounds
+    total = np.sum(x)
+    if total > 0.01:
+        x = x / total * 100  # Scale to roughly 100 total mass
+    else:
+        x = np.ones_like(x) * 0.1  # Avoid zero sum
+    return np.clip(x, 0, 1000)  # Clip to [0, 1000]
+
+def compute_gradient(sequence, eps=1e-6):
+    """Compute gradient of inverse C1 with respect to sequence elements"""
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    grad = np.zeros(n)
+    
+    # Evaluate base function
+    base_c1 = compute_autocorrelation_constant(sequence)
+    base_inv_c1 = 1.0 / base_c1 if base_c1 != float('inf') else 0.0
+
+    # Compute finite difference gradients
+    for i in range(n):
+        perturbed_plus = sequence.copy()
+        perturbed_minus = sequence.copy()
+        perturbed_plus[i] += eps
+        perturbed_minus[i] -= eps
+        
+        # Evaluate at perturbed points
+        c1_plus = compute_autocorrelation_constant(perturbed_plus)
+        c1_minus = compute_autocorrelation_constant(perturbed_minus)
+        
+        # Compute gradient component
+        if c1_plus != float('inf') and c1_minus != float('inf'):
+            inv_c1_plus = 1.0 / c1_plus
+            inv_c1_minus = 1.0 / c1_minus
+            grad[i] = (inv_c1_plus - inv_c1_minus) / (2 * eps)
+        else:
+            # If either evaluation failed, assume zero gradient for this component
+            grad[i] = 0.0
+
+    return grad
+
+def accelerated_gradient_descent(initial_seq, max_iter=1000, step_size=0.01):
+    """Perform accelerated gradient descent to optimize sequence"""
+    x = np.array(initial_seq, dtype=float)
+    x = project_to_feasible_region(x)
+    
+    # Parameters for Nesterov's accelerated gradient
+    y = x.copy()
+    v = np.zeros_like(x)
+    gamma = 0.9  # Momentum parameter
+    
+    best_x = x.copy()
+    best_score = evaluate_sequence(best_x)
+    
+    for t in range(max_iter):
+        # Gradient estimation
+        grad = compute_gradient(y)
+        if grad is None:
+            break
+            
+        # Update with momentum
+        v = gamma * v + step_size * grad
+        x_new = y - v
+        
+        # Project to feasible set
+        x_new = project_to_feasible_region(x_new)
+        
+        # Nesterov update
+        y = x_new + gamma * (x_new - x)
+        x = x_new
+        
+        # Track best solution
+        current_score = evaluate_sequence(x)
+        if current_score > best_score:
+            best_x = x.copy()
+            best_score = current_score
+            
+        # Adaptive step size adjustment
+        if t % 50 == 0 and t > 0:
+            step_size *= 0.95
+            
+    return best_x.tolist()
+
+def generate_initial_sequence(n):
+    """Generate a structured initial sequence to improve convergence"""
+    # Use piecewise constant or sinusoidal pattern
+    if n < 50:
+        return [1.0] * n
+    else:
+        # Create a more complex pattern
+        pattern = np.sin(np.linspace(0, np.pi, n)) + 1
+        pattern = np.clip(pattern, 0.1, 2.0)
+        pattern = pattern * 50 / np.sum(pattern)
+        return pattern.tolist()
+
+def adaptive_search_strategy(max_time=180):
+    """Main adaptive search strategy for finding improved sequences"""
+    start_time = time.time()
+    best_sequence = None
+    best_score = 0.0
+    best_c1 = float('inf')
+    
+    # Strategy: Multiple restarts with different patterns
+    restarts = 5
+    for r in range(restarts):
+        if time.time() - start_time > max_time - 10:
+            break
+            
+        # Vary initial sequence length and pattern
+        n = np.random.randint(100, 1000)
+        sequence = generate_initial_sequence(n)
+        
+        # Optimize using accelerated gradient descent
+        optimized_seq = accelerated_gradient_descent(sequence, max_iter=500)
+        
+        # Evaluate result
+        score = evaluate_sequence(optimized_seq)
+        c1 = compute_autocorrelation_constant(optimized_seq)
+        
+        if score > best_score:
+            best_score = score
+            best_sequence = optimized_seq
+            best_c1 = c1
+            
+            # Check benchmark
+            benchmark_ratio = 1.5031 / c1
+            if benchmark_ratio > 1.0:
+                print(f"BEAT BENCHMARK at restart {r}! Ratio = {benchmark_ratio:.6f}")
+                break
+    
+    # Final validation
+    if best_sequence is not None:
+        final_score = evaluate_sequence(best_sequence)
+        final_c1 = compute_autocorrelation_constant(best_sequence)
+        benchmark_ratio = 1.5031 / final_c1
+        
+        print(f"Final result:")
+        print(f"  Score: {final_score:.6f}")
+        print(f"  C1: {final_c1:.6f}")
+        print(f"  Benchmark ratio: {benchmark_ratio:.6f}")
+    else:
+        # Fallback
+        n = np.random.randint(100, 1000)
+        best_sequence = generate_initial_sequence(n)
+        final_score = evaluate_sequence(best_sequence)
+        final_c1 = compute_autocorrelation_constant(best_sequence)
+        benchmark_ratio = 1.5031 / final_c1
+
+    return best_sequence
+
+def search_for_best_sequence(max_time=180) -> list[float]:
+    """Main function to search for the best coefficient sequence."""
+    return adaptive_search_strategy(max_time)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

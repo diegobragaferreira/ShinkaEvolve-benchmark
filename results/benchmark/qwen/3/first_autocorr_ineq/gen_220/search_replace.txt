@@ -1,0 +1,519 @@
+<NAME>
+adaptive_convolution_method_selection
+</NAME>
+
+<DESCRIPTION>
+This edit introduces a more adaptive convolution method selection strategy. Instead of always using FFT for large sequences and direct convolution for small ones, we now dynamically select the most efficient and numerically stable method based on the actual properties of the input sequences. This improves both performance and reliability.
+
+The key insight is that for certain types of sequences (like those with specific sparsity patterns or decay properties), direct convolution might be faster or more stable than FFT even for "large" sequences. We implement a heuristic that evaluates the sequence characteristics and chooses the optimal convolution method accordingly.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')
+=======
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')
+
+def adaptive_convolve(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Adaptive convolution method selection based on sequence properties."""
+    n = len(a)
+
+    # For very small sequences, always use direct method
+    if n < 50:
+        return convolve_direct(a, b)
+
+    # For larger sequences, evaluate if FFT is beneficial
+    # Calculate sparsity and decay characteristics
+    nonzero_ratio = np.count_nonzero(a) / n
+    nonzero_ratio_b = np.count_nonzero(b) / n
+
+    # If sequences are very sparse, direct might be better
+    if nonzero_ratio < 0.1 or nonzero_ratio_b < 0.1:
+        return convolve_direct(a, b)
+
+    # If sequences have strong decay or structured patterns, direct might be more stable
+    # Check if the sequence has significant variation in values
+    std_a = np.std(a)
+    std_b = np.std(b)
+
+    # For sequences with low standard deviation, FFT might introduce more numerical error
+    if std_a < 1e-3 or std_b < 1e-3:
+        return convolve_direct(a, b)
+
+    # Otherwise, use FFT (default behavior)
+    return convolve_fft(a, b)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_local_optimization_step
+</NAME>
+
+<DESCRIPTION>
+This edit improves the local optimization step by implementing a more sophisticated refinement approach. Instead of simple gradient ascent, we now use a combination of:
+1. Direct LP-based refinement (as before)
+2. A simple gradient-free local search with multiple perturbation strategies
+3. Adaptive step sizes that consider both sequence length and current convergence
+
+The new approach provides better balance between exploration and exploitation, potentially leading to better convergence to high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Improve the sequence using enhanced local optimization strategies."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try solving LP multiple times with adjusted RHS if necessary
+    g_fun = None
+    for attempt in range(5):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is not None:
+            break
+        rhs *= 1.05
+
+    if g_fun is None:
+        # Fallback to simple gradient ascent with adaptive step size
+        t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation with multiple strategies
+    t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+
+    # Hybrid approach: combine LP solution with gradient descent refinement
+    # First try direct combination
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+    # Add a bit of randomness for exploration
+    if n > 100:
+        # For larger sequences, use more sophisticated exploration
+        random_perturbation = np.random.normal(0, 0.01 * t, n)
+        new_sequence = [max(0, x + 0.5 * p * x) for x, p in zip(new_sequence, random_perturbation)]
+    else:
+        # For smaller sequences, add simple noise
+        new_sequence = [max(0, x + np.random.normal(0, 0.02 * x)) for x in new_sequence]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Improve the sequence using enhanced local optimization strategies."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints using adaptive method
+    b = adaptive_convolve(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try solving LP multiple times with adjusted RHS if necessary
+    g_fun = None
+    for attempt in range(5):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is not None:
+            break
+        rhs *= 1.05
+
+    if g_fun is None:
+        # Enhanced fallback with multiple strategies
+        # Strategy 1: Gradient ascent with adaptive step
+        t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+
+        # Strategy 2: Add perturbations with different intensities
+        if n > 100:
+            # For larger sequences, apply multiple perturbation strategies
+            random_perturbation = np.random.normal(0, 0.01 * t, n)
+            perturbed = [max(0, x + 0.5 * p * x) for x, p in zip(new_sequence, random_perturbation)]
+            # Try a more aggressive perturbation for some elements
+            for i in range(min(5, n)):
+                if random.random() < 0.3:
+                    idx = random.randint(0, n-1)
+                    perturbed[idx] = max(0, perturbed[idx] * np.random.normal(1, 0.1))
+            new_sequence = perturbed
+        else:
+            # For smaller sequences, add simple noise
+            new_sequence = [max(0, x + np.random.normal(0, 0.02 * x)) for x in new_sequence]
+
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation with multiple strategies
+    t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+
+    # Hybrid approach: combine LP solution with gradient descent refinement
+    # Use a more aggressive mixing for better exploration
+    new_sequence = [(1 - t*0.8) * x + t*0.8 * y for x, y in zip(sequence, normalized_g_fun)]
+
+    # Add more sophisticated randomness for better exploration
+    if n > 100:
+        # For larger sequences, use more diverse perturbations
+        random_perturbation = np.random.normal(0, 0.02 * t, n)
+        new_sequence = [max(0, x + 0.3 * p * x) for x, p in zip(new_sequence, random_perturbation)]
+
+        # Occasionally apply stronger perturbations for escape from local optima
+        for i in range(min(3, n)):
+            if random.random() < 0.1:
+                idx = random.randint(0, n-1)
+                new_sequence[idx] = max(0, new_sequence[idx] * np.random.normal(1, 0.2))
+    else:
+        # For smaller sequences, add simple noise with occasional larger jumps
+        for i in range(n):
+            if random.random() < 0.1:  # 10% chance of larger jump
+                new_sequence[i] = max(0, new_sequence[i] * np.random.normal(1, 0.3))
+            else:
+                new_sequence[i] = max(0, new_sequence[i] + np.random.normal(0, 0.02 * new_sequence[i]))
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_population_diversity
+</NAME>
+
+<DESCRIPTION>
+This edit strengthens the population diversity mechanisms by:
+1. Adding explicit diversity checks and maintenance
+2. Implementing a more robust mechanism for introducing diversity when stagnation is detected
+3. Using more varied initialization strategies to ensure better starting point spread
+
+These changes help prevent premature convergence and improve the exploration capabilities of the evolutionary algorithm.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 30,
+    generations: int = 70,
+    elite_fraction: float = 0.2,
+    stagnation_limit: int = 15,
+    diversity_threshold: float = 0.02
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using improved evolutionary approach."""
+    start_time = time.time()
+
+    # Multi-start strategy to improve chances of finding global optimum
+    best_overall_sequence = None
+    best_overall_inv_c1 = 0.0
+
+    # Run multiple independent searches
+    for start_run in range(3):
+        # Initialize population with diverse sequences
+        population = []
+        for _ in range(population_size):
+            n = random.randint(*initial_length_range)
+            # Use different initialization strategies
+            init_type = random.randint(0, 2)
+            if init_type == 0:
+                individual = [random.random() * 100 for _ in range(n)]
+            elif init_type == 1:
+                individual = [0.0] * n
+                individual[random.randint(0, n-1)] = random.random() * 100
+            else:
+                individual = [abs(random.gauss(0, 1)) * 10 for _ in range(n)]
+            population.append(individual)
+
+        best_sequence = None
+        best_inv_c1 = 0.0
+        stagnation_counter = 0
+        previous_best = -float('inf')
+
+        for generation in range(generations):
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Evaluate fitness for all individuals
+            fitness_scores = []
+            for individual in population:
+                _, inv_c1 = compute_c1_constant(individual)
+                fitness_scores.append((individual, inv_c1))
+
+            # Sort by fitness (descending order)
+            fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+            # Update best solution
+            current_best, current_best_inv_c1 = fitness_scores[0]
+            if current_best_inv_c1 > best_inv_c1:
+                best_inv_c1 = current_best_inv_c1
+                best_sequence = current_best.copy()
+                stagnation_counter = 0
+                previous_best = current_best_inv_c1
+            else:
+                stagnation_counter += 1
+
+            # Adaptive mutation rate
+            adaptive_mutation_rate = 0.1 * (1 - generation / generations)
+
+            # Adjust population size if performance is stagnant
+            if stagnation_counter > stagnation_limit:
+                if len(population) > 10:
+                    population = population[:len(population)//2]  # Reduce population size
+                stagnation_counter = 0
+
+            # Select elite individuals
+            elite_count = max(1, int(elite_fraction * len(population)))
+            elite_individuals = [ind for ind, _ in fitness_scores[:elite_count]]
+
+            # Generate new population
+            new_population = elite_individuals.copy()
+
+            # Create offspring through crossover and mutation
+            while len(new_population) < len(population):
+                parent1 = random.choice(elite_individuals)
+                parent2 = random.choice(elite_individuals)
+
+                # Crossover
+                child = crossover_sequences(parent1, parent2)
+
+                # Mutation
+                child = mutate_sequence(child, adaptive_mutation_rate)
+
+                # Random initialization for diversity
+                if random.random() < 0.15:
+                    n = random.randint(*initial_length_range)
+                    # Use different initialization strategies
+                    init_type = random.randint(0, 2)
+                    if init_type == 0:
+                        child = [random.random() * 100 for _ in range(n)]
+                    elif init_type == 1:
+                        child = [0.0] * n
+                        child[random.randint(0, n-1)] = random.random() * 100
+                    else:
+                        child = [abs(random.gauss(0, 1)) * 10 for _ in range(n)]
+
+                new_population.append(child)
+
+            population = new_population
+
+        # Final optimization of best solution from this run
+        if best_sequence is not None:
+            for _ in range(20):  # Additional fine-tuning iterations
+                improved = get_good_direction_to_move_into(best_sequence)
+                if improved is None:
+                    break
+                _, inv_c1_new = compute_c1_constant(improved)
+                _, inv_c1_old = compute_c1_constant(best_sequence)
+                if inv_c1_new > inv_c1_old:
+                    best_sequence = improved
+                else:
+                    break
+
+        # Update overall best
+        if best_sequence is not None:
+            _, inv_c1_final = compute_c1_constant(best_sequence)
+            if inv_c1_final > best_overall_inv_c1:
+                best_overall_inv_c1 = inv_c1_final
+                best_overall_sequence = best_sequence.copy()
+
+    return best_overall_sequence if best_overall_sequence is not None else [1.0]
+=======
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 30,
+    generations: int = 70,
+    elite_fraction: float = 0.2,
+    stagnation_limit: int = 15,
+    diversity_threshold: float = 0.02
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using improved evolutionary approach."""
+    start_time = time.time()
+
+    # Multi-start strategy to improve chances of finding global optimum
+    best_overall_sequence = None
+    best_overall_inv_c1 = 0.0
+
+    # Run multiple independent searches
+    for start_run in range(3):
+        # Initialize population with diverse sequences
+        population = []
+        for _ in range(population_size):
+            n = random.randint(*initial_length_range)
+            # Use different initialization strategies
+            init_type = random.randint(0, 3)
+            if init_type == 0:
+                individual = [random.random() * 100 for _ in range(n)]
+            elif init_type == 1:
+                individual = [0.0] * n
+                individual[random.randint(0, n-1)] = random.random() * 100
+            elif init_type == 2:
+                individual = [abs(random.gauss(0, 1)) * 10 for _ in range(n)]
+            else:
+                # New strategy: exponential distribution for heavy-tailed sequences
+                individual = [np.random.exponential(1.0) for _ in range(n)]
+            population.append(individual)
+
+        best_sequence = None
+        best_inv_c1 = 0.0
+        stagnation_counter = 0
+        previous_best = -float('inf')
+
+        for generation in range(generations):
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Evaluate fitness for all individuals
+            fitness_scores = []
+            for individual in population:
+                _, inv_c1 = compute_c1_constant(individual)
+                fitness_scores.append((individual, inv_c1))
+
+            # Sort by fitness (descending order)
+            fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+            # Update best solution
+            current_best, current_best_inv_c1 = fitness_scores[0]
+            if current_best_inv_c1 > best_inv_c1:
+                best_inv_c1 = current_best_inv_c1
+                best_sequence = current_best.copy()
+                stagnation_counter = 0
+                previous_best = current_best_inv_c1
+            else:
+                stagnation_counter += 1
+
+            # Adaptive mutation rate
+            adaptive_mutation_rate = 0.1 * (1 - generation / generations)
+
+            # Diversity maintenance: check if population is becoming too homogeneous
+            if generation > 10:  # Only check after some generations
+                fitness_values = [score for _, score in fitness_scores]
+                fitness_std = np.std(fitness_values)
+                if fitness_std < diversity_threshold:
+                    # Introduce more diversity
+                    for i in range(population_size // 5):  # 20% of population
+                        idx = random.randint(0, len(population) - 1)
+                        n = random.randint(*initial_length_range)
+                        init_type = random.randint(0, 3)
+                        if init_type == 0:
+                            population[idx] = [random.random() * 100 for _ in range(n)]
+                        elif init_type == 1:
+                            population[idx] = [0.0] * n
+                            population[idx][random.randint(0, n-1)] = random.random() * 100
+                        elif init_type == 2:
+                            population[idx] = [abs(random.gauss(0, 1)) * 10 for _ in range(n)]
+                        else:
+                            population[idx] = [np.random.exponential(1.0) for _ in range(n)]
+
+            # Adjust population size if performance is stagnant
+            if stagnation_counter > stagnation_limit:
+                if len(population) > 10:
+                    population = population[:len(population)//2]  # Reduce population size
+                stagnation_counter = 0
+
+            # Select elite individuals
+            elite_count = max(1, int(elite_fraction * len(population)))
+            elite_individuals = [ind for ind, _ in fitness_scores[:elite_count]]
+
+            # Generate new population
+            new_population = elite_individuals.copy()
+
+            # Create offspring through crossover and mutation
+            while len(new_population) < len(population):
+                parent1 = random.choice(elite_individuals)
+                parent2 = random.choice(elite_individuals)
+
+                # Crossover
+                child = crossover_sequences(parent1, parent2)
+
+                # Mutation
+                child = mutate_sequence(child, adaptive_mutation_rate)
+
+                # Random initialization for diversity with increased probability
+                if random.random() < 0.2:  # Increased from 0.15 to 0.2
+                    n = random.randint(*initial_length_range)
+                    # Use different initialization strategies
+                    init_type = random.randint(0, 3)
+                    if init_type == 0:
+                        child = [random.random() * 100 for _ in range(n)]
+                    elif init_type == 1:
+                        child = [0.0] * n
+                        child[random.randint(0, n-1)] = random.random() * 100
+                    elif init_type == 2:
+                        child = [abs(random.gauss(0, 1)) * 10 for _ in range(n)]
+                    else:
+                        child = [np.random.exponential(1.0) for _ in range(n)]
+
+                new_population.append(child)
+
+            population = new_population
+
+        # Final optimization of best solution from this run
+        if best_sequence is not None:
+            for _ in range(20):  # Additional fine-tuning iterations
+                improved = get_good_direction_to_move_into(best_sequence)
+                if improved is None:
+                    break
+                _, inv_c1_new = compute_c1_constant(improved)
+                _, inv_c1_old = compute_c1_constant(best_sequence)
+                if inv_c1_new > inv_c1_old:
+                    best_sequence = improved
+                else:
+                    break
+
+        # Update overall best
+        if best_sequence is not None:
+            _, inv_c1_final = compute_c1_constant(best_sequence)
+            if inv_c1_final > best_overall_inv_c1:
+                best_overall_inv_c1 = inv_c1_final
+                best_overall_sequence = best_sequence.copy()
+
+    return best_overall_sequence if best_overall_sequence is not None else [1.0]
+>>>>>>> REPLACE
+</DIFF>

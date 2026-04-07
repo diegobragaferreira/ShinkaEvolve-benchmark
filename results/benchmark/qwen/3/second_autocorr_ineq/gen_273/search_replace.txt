@@ -1,0 +1,136 @@
+<NAME>
+enhance_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses direct convolution computation which has O(n²) complexity. I'll enhance it by implementing FFT-based convolution which can significantly speed up computations, especially for larger step counts. This will allow us to explore larger solution spaces within the time constraint and potentially achieve higher C₂ values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+import math
+from numba import njit
+from sklearn.cluster import KMeans
+
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    # g[k] = integral f(x) * f(y) where x+y = k*dx - domain_length/2
+    # We'll compute this as a discrete approximation
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                # For two adjacent pieces with heights f[i] and f[j],
+                # the convolution contributes to g[k]
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2_numba(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+import math
+from numba import njit
+from sklearn.cluster import KMeans
+from scipy import fft
+
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using FFT for efficiency
+    # Pad to power of 2 for FFT efficiency
+    padded_length = 2**(int(np.log2(2*n_steps - 1)) + 1)
+
+    # Zero-pad the input
+    f_padded = np.zeros(padded_length)
+    f_padded[:n_steps] = f_values
+
+    # FFT-based convolution: convolve f with itself
+    f_fft = fft.fft(f_padded)
+    g_fft = f_fft * f_fft.conj()  # Element-wise multiplication in frequency domain
+    g = fft.ifft(g_fft).real
+
+    # Extract the valid convolution part (first 2*n_steps-1 elements)
+    g_valid = g[:2*n_steps-1]
+
+    # Compute norms using piecewise linear integration
+    # ||g||₂² using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g_valid)-1):
+        g2_sq += (dx/3) * (g_valid[i]**2 + g_valid[i]*g_valid[i+1] + g_valid[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g_valid)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g_valid))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2_numba(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+>>>>>>> REPLACE
+
+</DIFF>

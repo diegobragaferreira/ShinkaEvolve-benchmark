@@ -1,0 +1,178 @@
+<NAME>
+add_adaptive_perturbation_scaling
+</NAME>
+
+<DESCRIPTION>
+The key insight is to implement adaptive perturbation scaling in the grid initialization. Instead of using fixed perturbation magnitudes, we should dynamically adjust the perturbation based on the current distance distribution. When the configuration has a poor min/max ratio (indicating distances are skewed), we should use larger perturbations to explore more aggressively. When the configuration is already well-balanced, we should use smaller perturbations to fine-tune without disrupting good arrangements.
+
+This builds on the existing multi-start approach but makes the perturbation strategy smarter by adapting to the current state of the optimization landscape.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def perturb_points(points, magnitude):
+        """Add controlled random perturbations"""
+        np.random.seed(42)  # For reproducibility
+        noise = np.random.normal(0, magnitude, points.shape)
+        perturbed = points + noise
+        return np.clip(perturbed, 0, 1)
+
+    def create_hexagonal_pattern():
+        """Create a hexagonal pattern"""
+=======
+    def perturb_points(points, magnitude):
+        """Add controlled random perturbations"""
+        np.random.seed(42)  # For reproducibility
+        noise = np.random.normal(0, magnitude, points.shape)
+        perturbed = points + noise
+        return np.clip(perturbed, 0, 1)
+
+    def perturb_points_adaptive(points, current_ratio):
+        """Add adaptive random perturbations based on current solution quality"""
+        # Scale perturbation magnitude inversely with the current ratio
+        # If ratio is low (bad solution), use larger perturbations
+        # If ratio is high (good solution), use smaller perturbations
+        base_magnitude = 0.05
+        # The adjustment factor ensures we don't perturb too aggressively when solution is already good
+        adjustment_factor = max(0.1, 1.0 - current_ratio * 2.0)  # Decrease perturbation as ratio increases
+        magnitude = base_magnitude * adjustment_factor
+        np.random.seed(42)  # For reproducibility
+        noise = np.random.normal(0, magnitude, points.shape)
+        perturbed = points + noise
+        return np.clip(perturbed, 0, 1)
+
+    def create_hexagonal_pattern():
+        """Create a hexagonal pattern"""
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Strategy 1: Regular grid with small perturbations
+    try:
+        grid_points = create_initial_grid()
+        # Try multiple perturbations to avoid local minima
+        for perturbation_magnitude in [0.01, 0.005, 0.02]:
+            perturbed = perturb_points(grid_points, perturbation_magnitude)
+            x0 = perturbed.flatten()
+            bounds = [(0, 1) for _ in range(32)]
+
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = evaluate_solution(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+            strategies_tried += 1
+    except Exception as e:
+        pass
+=======
+    # Strategy 1: Regular grid with adaptive perturbations
+    try:
+        grid_points = create_initial_grid()
+        # Use adaptive perturbations that scale with solution quality
+        # Start with a baseline configuration to estimate initial ratio
+        x0_baseline = grid_points.flatten()
+        baseline_result = minimize(
+            objective,
+            x0_baseline,
+            method='L-BFGS-B',
+            bounds=[(0, 1) for _ in range(32)],
+            options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+        baseline_ratio = evaluate_solution(baseline_result.x.reshape(-1, 2)) if baseline_result.success else 0
+
+        # Try multiple adaptive perturbations to avoid local minima
+        for i in range(5):  # More attempts with different adaptive scales
+            # Use adaptive perturbation based on current solution quality
+            perturbed = perturb_points_adaptive(grid_points, baseline_ratio)
+            x0 = perturbed.flatten()
+            bounds = [(0, 1) for _ in range(32)]
+
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = evaluate_solution(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+            strategies_tried += 1
+    except Exception as e:
+        pass
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Strategy 4: Random initialization with multiple tries
+    try:
+        for i in range(3):  # Multiple random starts
+            np.random.seed(42 + i)  # Different seed for each attempt
+            random_points = np.random.rand(16, 2)
+            x0 = random_points.flatten()
+            bounds = [(0, 1) for _ in range(32)]
+
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = evaluate_solution(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+            strategies_tried += 1
+    except Exception as e:
+        pass
+=======
+    # Strategy 4: Random initialization with adaptive perturbations
+    try:
+        for i in range(3):  # Multiple random starts
+            np.random.seed(42 + i)  # Different seed for each attempt
+            random_points = np.random.rand(16, 2)
+            # Apply adaptive perturbation to random points
+            adaptive_random_points = perturb_points_adaptive(random_points, 0.0)  # No prior ratio info
+            x0 = adaptive_random_points.flatten()
+            bounds = [(0, 1) for _ in range(32)]
+
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = evaluate_solution(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+            strategies_tried += 1
+    except Exception as e:
+        pass
+>>>>>>> REPLACE
+</DIFF>

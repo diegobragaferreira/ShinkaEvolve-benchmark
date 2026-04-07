@@ -1,0 +1,314 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.stats import qmc
+import time
+from numba import jit
+import optuna
+from scipy.spatial.distance import pdist
+import warnings
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # For L2^2 norm using proper trapezoidal integration
+    # For convolution on domain [-1/2, 1/2], with len(g_vals) points
+    # Step width h = 1.0 / (len(g_vals) - 1) if len > 1, else 0.001
+    if len(g_vals) >= 2:
+        # Trapezoidal rule: h * (y0^2 + 2*y1^2 + ... + yn-1^2)/2  
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def compute_c2_for_params(params):
+    """Wrapper function for optimization"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.clip(params, 0, None)
+        
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+        
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+        
+        return c2
+    except Exception:
+        return 0.0
+
+def gaussian_pattern_initialization(dim):
+    """Initialize with a Gaussian-shaped pattern"""
+    x = np.linspace(-1.0, 1.0, dim)
+    # Create two overlapping Gaussians with different widths
+    g1 = np.exp(-x**2 / 0.1) * 0.8
+    g2 = np.exp(-(x - 0.4)**2 / 0.2) * 0.6
+    g3 = np.exp(-(x + 0.4)**2 / 0.2) * 0.6
+    pattern = np.maximum(g1, np.maximum(g2, g3))
+    return pattern.tolist()
+
+def cosine_modulated_initialization(dim):
+    """Initialize with cosine-modulated pattern"""
+    pattern = []
+    for i in range(dim):
+        # Create alternating pattern with cosine modulation
+        pos = i / dim * 2 - 1
+        val = 0.5 + 0.4 * np.cos(pos * np.pi * 3) + 0.1 * np.sin(pos * np.pi * 7)
+        pattern.append(max(0, val))
+    return pattern
+
+def fractal_like_initialization(dim):
+    """Initialize with fractal-like self-similar pattern"""
+    pattern = []
+    # Generate multiple scales of pattern to create complexity
+    for i in range(dim):
+        # Base pattern with multiple frequencies
+        pos = i / dim
+        base = 0.5 + 0.3 * np.sin(pos * np.pi * 8) 
+        base += 0.2 * np.sin(pos * np.pi * 16)
+        base += 0.1 * np.sin(pos * np.pi * 32)
+        pattern.append(max(0, base))
+    return pattern
+
+def latin_hypercube_initialization(dim):
+    """Initialize using Latin Hypercube Sampling"""
+    try:
+        sampler = qmc.LatinHypercube(d=1, seed=42)
+        samples = sampler.random(n=dim)
+        # Scale to [0, 1] and add some variation
+        pattern = [0.3 + 0.7 * s[0] + 0.1 * np.sin(i) for i, s in enumerate(samples)]
+        return [max(0, p) for p in pattern]
+    except:
+        # Fallback to basic random
+        return [0.3 + 0.7 * np.random.random() + 0.1 * np.sin(i) for i in range(dim)]
+
+def mixed_strategy_initialization(dim):
+    """Create an initialization combining multiple strategies"""
+    strategies = [
+        gaussian_pattern_initialization,
+        cosine_modulated_initialization,
+        fractal_like_initialization,
+        latin_hypercube_initialization
+    ]
+    
+    # Evaluate all strategies and select the best
+    best_score = -1.0
+    best_pattern = None
+    
+    for strategy in strategies:
+        try:
+            pattern = strategy(dim)
+            score = compute_c2_for_params(pattern)
+            if score > best_score:
+                best_score = score
+                best_pattern = pattern[:]
+        except:
+            continue
+    
+    if best_pattern is None:
+        # Fallback to simple pattern
+        return [0.5] * dim
+    
+    return best_pattern
+
+def adaptive_population_evolution(initial_dim, max_iter=150):
+    """Perform evolutionary optimization with adaptive population sizing"""
+    # Start with multiple initialization strategies
+    x0 = mixed_strategy_initialization(initial_dim)
+    
+    # Initialize parameters with dynamic scaling
+    popsize = min(20, initial_dim // 10 + 5)  # Adaptive population size
+    mutation_range = (0.5, 0.9)
+    recombination_rate = 0.7
+    
+    # Set bounds for optimization
+    bounds = [(0, 10)] * len(x0)
+    
+    # Run differential evolution with adaptive parameters
+    result = differential_evolution(
+        lambda x: -compute_c2_for_params(x),
+        bounds,
+        maxiter=max_iter,
+        popsize=popsize,
+        seed=42,
+        disp=False,
+        tol=1e-6,
+        mutation=mutation_range,
+        recombination=recombination_rate,
+        init='random'  # Use random initialization to avoid bias
+    )
+    
+    return result.x
+
+def advanced_local_search(initial_params, max_iter=100):
+    """Advanced local search using multiple optimization techniques"""
+    def objective(x):
+        return -compute_c2_for_params(x)
+    
+    try:
+        # First try Nelder-Mead for global refinement
+        result1 = minimize(
+            objective, 
+            initial_params, 
+            method='Nelder-Mead', 
+            options={'maxiter': max_iter//2, 'ftol': 1e-8, 'xtol': 1e-8}
+        )
+        
+        # Then try L-BFGS-B for local fine-tuning
+        result2 = minimize(
+            objective, 
+            result1.x, 
+            method='L-BFGS-B', 
+            bounds=[(0, 10) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter//2, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+        
+        return result2.x
+    except Exception:
+        # Fallback to coordinate-wise optimization
+        try:
+            # Simple gradient descent-like approach for robustness
+            current_params = np.array(initial_params)
+            for _ in range(max_iter):
+                new_params = current_params.copy()
+                # Update each parameter slightly
+                for i in range(len(current_params)):
+                    test_params = current_params.copy()
+                    test_params[i] = max(0, current_params[i] + 0.01 * np.random.randn())
+                    if compute_c2_for_params(test_params) > compute_c2_for_params(current_params):
+                        new_params[i] = test_params[i]
+                current_params = new_params
+            return current_params
+        except:
+            return initial_params
+
+def multi_start_optimization():
+    """Run multiple optimization starts with different strategies"""
+    start_time = time.time()
+    best_c2 = -np.inf
+    best_params = None
+    
+    # Different configurations to try
+    configurations = [
+        (300, 50),   # Small population
+        (500, 70),   # Medium population  
+        (700, 80),   # Large population
+        (900, 90),   # Very large population
+    ]
+    
+    # Add randomized configurations
+    for _ in range(5):
+        dim = np.random.randint(400, 1000)
+        iterations = np.random.randint(60, 120)
+        configurations.append((dim, iterations))
+    
+    # Run optimization for each configuration
+    for n_steps, n_trials in configurations:
+        if time.time() - start_time > 85:  # Leave buffer for cleanup
+            break
+            
+        try:
+            # Try different random seeds
+            for seed in [42, 123, 456, 789]:
+                np.random.seed(seed)
+                # Run adaptive evolutionary optimization
+                params = adaptive_population_evolution(n_steps, n_trials)
+                
+                # Apply advanced local refinement
+                refined_params = advanced_local_search(params, 50)
+                
+                # Evaluate final result
+                c2 = compute_c2_for_params(refined_params)
+                
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = refined_params.copy()
+                    
+        except Exception as e:
+            continue
+    
+    return best_params, best_c2
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    try:
+        # Main optimization strategy
+        best_params, best_c2 = multi_start_optimization()
+        
+        # If we found a good solution, use it
+        if best_params is not None and best_c2 > 0:
+            return best_params
+        
+        # Fallback to deterministic approach
+        size = 800
+        best_f_vals = adaptive_population_evolution(size, 100)
+        best_f_vals = advanced_local_search(best_f_vals, 50)
+        c2_val = compute_c2_for_params(best_f_vals)
+        print(f"Best C2 found: {c2_val}")
+
+        # Return the optimized values
+        return best_f_vals.tolist()
+
+    except Exception as e:
+        print(f"Error in optimization: {e}")
+        # Final fallback to structured initialization
+        return mixed_strategy_initialization(1000)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

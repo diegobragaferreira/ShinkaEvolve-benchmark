@@ -1,0 +1,322 @@
+<NAME>
+hexagonal_initialization_and_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces two key enhancements to boost the evolutionary algorithm's performance:
+
+1. **Hexagonal Grid Initialization**: Replaces the random initialization with a more structured hexagonal grid approach that naturally avoids overlaps while providing good spatial distribution, leading to faster convergence.
+
+2. **Adaptive Mutation Rate**: Implements an adaptive mutation rate that decreases over generations, allowing for broader exploration in early stages and fine-tuning in later stages, which improves final solution quality.
+
+These changes work synergistically - the better initial configuration from hexagonal packing means the evolutionary process starts closer to optimal regions, while adaptive mutation prevents premature convergence and allows for precise optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import cKDTree
+from joblib import Parallel, delayed
+import random
+from typing import Tuple, List
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+=======
+import numpy as np
+from scipy.spatial import cKDTree
+from joblib import Parallel, delayed
+import random
+from typing import Tuple, List
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+def generate_hexagonal_grid(n_circles: int) -> np.ndarray:
+    """
+    Generate initial circle positions using hexagonal grid pattern.
+    This provides a much better starting configuration than pure random placement.
+    """
+    # Determine grid dimensions
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+
+    # Ensure we don't exceed our target count
+    actual_cells = rows * cols
+    if actual_cells > n_circles:
+        # Adjust to fit exactly n_circles
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+
+    # Calculate spacing to fit within unit square
+    padding = 0.05  # Leave margin around edges
+    cell_width = (1 - 2 * padding) / cols
+    cell_height = (1 - 2 * padding) / rows
+
+    # Hexagonal packing parameters
+    hex_radius = min(cell_width, cell_height) * 0.4  # Slightly smaller than cell size
+
+    circles = np.zeros((n_circles, 3))
+
+    circle_idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if circle_idx >= n_circles:
+                break
+
+            # Offset every other row for hexagonal arrangement
+            offset = (i % 2) * (cell_width / 2)
+
+            # Calculate position
+            x = padding + offset + j * cell_width + cell_width / 2
+            y = padding + i * cell_height + cell_height / 2
+            r = hex_radius
+
+            # Add slight randomness to avoid perfect grid
+            noise_scale = cell_width * 0.1
+            x += np.random.normal(0, noise_scale)
+            y += np.random.normal(0, noise_scale)
+
+            # Clip to unit square bounds
+            x = np.clip(x, r, 1 - r)
+            y = np.clip(y, r, 1 - r)
+
+            circles[circle_idx] = [x, y, r]
+            circle_idx += 1
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Generate initial population of circle configurations."""
+    population = []
+    for _ in range(pop_size):
+        # Randomly initialize circles with small radii
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            # Try multiple times to place circle without overlap
+            max_attempts = 1000
+            attempts = 0
+
+            while attempts < max_attempts:
+                # Generate random position and radius
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+                r = np.random.uniform(0.01, 0.15)
+
+                # Check if this would be valid
+                temp_circles = circles.copy()
+                temp_circles[i] = [x, y, r]
+
+                # Check validity
+                if is_valid_configuration(temp_circles):
+                    circles[i] = [x, y, r]
+                    break
+
+                attempts += 1
+
+            # If could not place, use minimal valid configuration
+            if attempts >= max_attempts:
+                circles[i] = [0.1, 0.1, 0.05]
+
+        population.append(circles)
+
+    return population
+=======
+def initialize_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Generate initial population of circle configurations."""
+    population = []
+    for _ in range(pop_size):
+        # Use hexagonal initialization for better starting configurations
+        circles = generate_hexagonal_grid(n_circles)
+
+        # Apply some random perturbations to create diversity
+        for i in range(n_circles):
+            circles[i, 0] += np.random.normal(0, 0.02)
+            circles[i, 1] += np.random.normal(0, 0.02)
+            circles[i, 2] += np.random.normal(0, 0.01)
+
+            # Ensure circles stay within bounds
+            circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], 1 - circles[i, 2])
+            circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], 1 - circles[i, 2])
+            circles[i, 2] = np.clip(circles[i, 2], 0.01, 0.2)
+
+        # Validate and correct if needed
+        if not is_valid_configuration(circles):
+            # If invalid, try to fix by adjusting radii
+            for i in range(n_circles):
+                x, y, r = circles[i]
+                # Reduce radius to ensure containment
+                r = min(r, x, 1 - x, y, 1 - y)
+                # Ensure minimum radius
+                r = max(r, 0.01)
+                circles[i] = [x, y, r]
+
+        population.append(circles)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(individual: np.ndarray, mutation_rate: float = 0.1,
+          max_radius_change: float = 0.02) -> np.ndarray:
+    """Mutate an individual configuration."""
+    mutated = individual.copy()
+
+    for i in range(len(mutated)):
+        if np.random.random() < mutation_rate:
+            # Randomly change position slightly
+            mutated[i, 0] = np.clip(mutated[i, 0] + np.random.normal(0, 0.02), 0, 1)
+            mutated[i, 1] = np.clip(mutated[i, 1] + np.random.normal(0, 0.02), 0, 1)
+
+            # Change radius with some constraints
+            mutated[i, 2] = np.clip(mutated[i, 2] + np.random.normal(0, max_radius_change), 0.01, 0.2)
+
+    # Ensure validity after mutation
+    if not is_valid_configuration(mutated):
+        # If invalid, revert to a valid configuration
+        mutated = individual.copy()  # This is a simplification; in practice might require reinitialization
+
+    return mutated
+=======
+def mutate(individual: np.ndarray, mutation_rate: float = 0.1,
+          max_radius_change: float = 0.02, generation: int = 0,
+          max_generations: int = 100) -> np.ndarray:
+    """Mutate an individual configuration with adaptive mutation rate."""
+    # Adaptive mutation rate: decrease over generations
+    adaptive_rate = mutation_rate * (1 - generation / max_generations)
+    adaptive_rate = max(adaptive_rate, 0.01)  # Minimum mutation rate
+
+    mutated = individual.copy()
+
+    for i in range(len(mutated)):
+        if np.random.random() < adaptive_rate:
+            # Randomly change position slightly
+            mutated[i, 0] = np.clip(mutated[i, 0] + np.random.normal(0, 0.02), 0, 1)
+            mutated[i, 1] = np.clip(mutated[i, 1] + np.random.normal(0, 0.02), 0, 1)
+
+            # Change radius with some constraints
+            mutated[i, 2] = np.clip(mutated[i, 2] + np.random.normal(0, max_radius_change), 0.01, 0.2)
+
+    # Ensure validity after mutation
+    if not is_valid_configuration(mutated):
+        # If invalid, apply a corrective approach rather than reverting entirely
+        # This helps maintain diversity while staying within constraints
+        corrected = individual.copy()
+        for i in range(len(corrected)):
+            x, y, r = corrected[i]
+            # Ensure containment
+            corrected[i, 0] = np.clip(x, r, 1 - r)
+            corrected[i, 1] = np.clip(y, r, 1 - r)
+            corrected[i, 2] = np.clip(r, 0.01, min(r, 1 - corrected[i, 0], corrected[i, 0],
+                                                 1 - corrected[i, 1], corrected[i, 1]))
+
+        mutated = corrected
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evolve_circles(n_circles: int = 32, pop_size: int = 50,
+                  generations: int = 100, elite_size: int = 5) -> np.ndarray:
+    """Main evolutionary algorithm to pack circles optimally."""
+    # Initialize population
+    population = initialize_population(pop_size, n_circles)
+
+    # Evolution loop
+    for generation in range(generations):
+        # Evaluate fitness
+        fitnesses = evaluate_fitness_parallel(population)
+
+        # Get best individuals
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        best_individuals = [population[i] for i in sorted_indices[:elite_size]]
+
+        # Create new population with elitism
+        new_population = best_individuals.copy()
+
+        # Fill rest of population with offspring
+        while len(new_population) < pop_size:
+            # Selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation
+            child1 = mutate(child1)
+            child2 = mutate(child2)
+
+            # Add to new population if valid
+            if is_valid_configuration(child1):
+                new_population.append(child1)
+            if len(new_population) < pop_size and is_valid_configuration(child2):
+                new_population.append(child2)
+
+        population = new_population[:pop_size]
+
+    # Return best solution
+    final_fitnesses = evaluate_fitness_parallel(population)
+    best_idx = np.argmax(final_fitnesses)
+
+    return population[best_idx]
+=======
+def evolve_circles(n_circles: int = 32, pop_size: int = 50,
+                  generations: int = 100, elite_size: int = 5) -> np.ndarray:
+    """Main evolutionary algorithm to pack circles optimally."""
+    # Initialize population
+    population = initialize_population(pop_size, n_circles)
+
+    # Evolution loop
+    for generation in range(generations):
+        # Evaluate fitness
+        fitnesses = evaluate_fitness_parallel(population)
+
+        # Get best individuals
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        best_individuals = [population[i] for i in sorted_indices[:elite_size]]
+
+        # Create new population with elitism
+        new_population = best_individuals.copy()
+
+        # Fill rest of population with offspring
+        while len(new_population) < pop_size:
+            # Selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation with adaptive rate
+            child1 = mutate(child1, generation=generation, max_generations=generations)
+            child2 = mutate(child2, generation=generation, max_generations=generations)
+
+            # Add to new population if valid
+            if is_valid_configuration(child1):
+                new_population.append(child1)
+            if len(new_population) < pop_size and is_valid_configuration(child2):
+                new_population.append(child2)
+
+        population = new_population[:pop_size]
+
+    # Return best solution
+    final_fitnesses = evaluate_fitness_parallel(population)
+    best_idx = np.argmax(final_fitnesses)
+
+    return population[best_idx]
+>>>>>>> REPLACE
+</DIFF>

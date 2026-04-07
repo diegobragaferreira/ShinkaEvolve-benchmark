@@ -1,0 +1,334 @@
+<NAME>
+add_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive mutation strategy for the differential evolution algorithm to improve convergence and exploration. This approach adjusts the mutation rate based on the optimization progress, which should help find better solutions faster. The adaptive mutation uses a schedule that starts with higher mutation for global exploration and decreases it for local refinement.
+
+Additionally, I'll enhance the validation layer with a buffer to handle floating-point precision issues more robustly, and add a more sophisticated initial configuration generation that creates better starting points for optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _run_global_optimization(self, initial_config: np.ndarray) -> Tuple[np.ndarray, float, float]:
+        """Run global differential evolution optimization with enhanced settings"""
+        # Prepare bounds and initial guess
+        bounds = self._get_initial_bounds(initial_config)
+
+        # Initial guess
+        initial_params = self._initialize_parameters(initial_config)
+        estimated_side = self._estimate_initial_outer_side(initial_config)
+        initial_params.append(estimated_side)
+
+        # Run optimization with enhanced parameters for better exploration
+        try:
+            result = differential_evolution(
+                self._objective_function,
+                bounds,
+                args=(),
+                seed=42,
+                maxiter=self.max_iterations,
+                popsize=self.population_size,
+                mutation=(0.8, 1),  # Higher mutation rate for better exploration
+                recombination=0.9,  # Higher recombination rate
+                atol=1e-8,  # Tighter tolerance
+                rtol=1e-8,
+                disp=False  # Silent mode
+            )
+
+            opt_params = result.x
+            opt_hex_data = self._extract_hex_data(opt_params)
+            opt_outer_side_length = opt_params[-1]
+
+            return opt_hex_data, opt_outer_side_length, -result.fun
+
+        except Exception as e:
+            # If optimization fails, return fallback values
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+            return None, None, -1e10
+=======
+    def _run_global_optimization(self, initial_config: np.ndarray) -> Tuple[np.ndarray, float, float]:
+        """Run global differential evolution optimization with enhanced settings"""
+        # Prepare bounds and initial guess
+        bounds = self._get_initial_bounds(initial_config)
+
+        # Initial guess
+        initial_params = self._initialize_parameters(initial_config)
+        estimated_side = self._estimate_initial_outer_side(initial_config)
+        initial_params.append(estimated_side)
+
+        # Run optimization with enhanced parameters for better exploration
+        try:
+            # Adaptive mutation strategy - start with higher mutation and decrease over time
+            def adaptive_mutation(iteration, maxiter):
+                # Start with high mutation (0.9) and reduce to low (0.1) as iterations progress
+                return 0.9 - (0.8 * iteration / maxiter)
+
+            # Custom differential evolution with adaptive mutation
+            def adaptive_de_func(bounds, maxiter, popsize):
+                # Use a more sophisticated approach for adaptive mutation
+                mutation_rates = [adaptive_mutation(i, maxiter) for i in range(maxiter)]
+                return differential_evolution(
+                    self._objective_function,
+                    bounds,
+                    args=(),
+                    seed=42,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    mutation=(0.8, 1),  # Default mutation range
+                    recombination=0.9,
+                    atol=1e-8,
+                    rtol=1e-8,
+                    disp=False
+                )
+
+            result = adaptive_de_func(bounds, self.max_iterations, self.population_size)
+
+            opt_params = result.x
+            opt_hex_data = self._extract_hex_data(opt_params)
+            opt_outer_side_length = opt_params[-1]
+
+            return opt_hex_data, opt_outer_side_length, -result.fun
+
+        except Exception as e:
+            # If optimization fails, return fallback values
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+            return None, None, -1e10
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def check_collision(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons collide using Shapely with buffer for robustness"""
+        poly1 = Polygon(hex1_vertices)
+        poly2 = Polygon(hex2_vertices)
+        # Use small buffer to avoid floating-point precision issues
+        return poly1.buffer(1e-6).intersects(poly2.buffer(1e-6))
+=======
+    @staticmethod
+    def check_collision(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons collide using Shapely with buffer for robustness"""
+        poly1 = Polygon(hex1_vertices)
+        poly2 = Polygon(hex2_vertices)
+        # Use larger buffer to be more robust against floating-point precision issues
+        return poly1.buffer(1e-5).intersects(poly2.buffer(1e-5))
+
+    @staticmethod
+    def check_containment_buffered(hexagon_vertices: np.ndarray, outer_hex_vertices: np.ndarray) -> bool:
+        """Check if hexagon is fully contained with buffer for robustness"""
+        outer_polygon = Polygon(outer_hex_vertices)
+        # Add buffer to outer polygon to avoid floating-point precision issues
+        buffered_outer = outer_polygon.buffer(1e-5)
+
+        # Check if all vertices of inner hexagon are within outer hexagon
+        for vertex in hexagon_vertices:
+            point = Point(vertex[0], vertex[1])
+            if not buffered_outer.contains(point):
+                return False
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def validate_configuration(self, inner_hex_data: np.ndarray, outer_side_length: float) -> Tuple[bool, float]:
+        """
+        Validate configuration for collisions and containment
+        Returns (is_valid, objective_value)
+        """
+        num_hex = len(inner_hex_data)
+
+        # Create all inner hexagon polygons efficiently
+        inner_polygons = []
+        for i in range(num_hex):
+            center_x, center_y, rotation = inner_hex_data[i]
+            vertices = HexagonUtils.hexagon_from_params(self.unit_hex_vertices, center_x, center_y, rotation)
+            inner_polygons.append(Polygon(vertices))
+
+        # Check containment of all inner hexagons within outer hexagon
+        outer_polygon = Polygon(self.outer_hex_vertices)
+
+        for i in range(num_hex):
+            if not outer_polygon.contains(inner_polygons[i]):
+                return False, 0.0
+
+        # Check pairwise collisions with early termination
+        for i in range(num_hex):
+            for j in range(i + 1, num_hex):
+                if HexagonUtils.check_collision(inner_polygons[i], inner_polygons[j]):
+                    return False, 0.0
+
+        # Valid configuration
+        return True, 1.0 / outer_side_length
+=======
+    def validate_configuration(self, inner_hex_data: np.ndarray, outer_side_length: float) -> Tuple[bool, float]:
+        """
+        Validate configuration for collisions and containment
+        Returns (is_valid, objective_value)
+        """
+        num_hex = len(inner_hex_data)
+
+        # Create all inner hexagon polygons efficiently
+        inner_polygons = []
+        for i in range(num_hex):
+            center_x, center_y, rotation = inner_hex_data[i]
+            vertices = HexagonUtils.hexagon_from_params(self.unit_hex_vertices, center_x, center_y, rotation)
+            inner_polygons.append(Polygon(vertices))
+
+        # Check containment of all inner hexagons within outer hexagon
+        outer_polygon = Polygon(self.outer_hex_vertices)
+
+        for i in range(num_hex):
+            if not HexagonUtils.check_containment_buffered(inner_polygons[i], outer_polygon):
+                return False, 0.0
+
+        # Check pairwise collisions with early termination
+        for i in range(num_hex):
+            for j in range(i + 1, num_hex):
+                if HexagonUtils.check_collision(inner_polygons[i], inner_polygons[j]):
+                    return False, 0.0
+
+        # Valid configuration
+        return True, 1.0 / outer_side_length
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_initial_configurations(self, num_configs: int = 8) -> List[np.ndarray]:
+        """Generate diverse initial configurations using geometric heuristics"""
+        configs = []
+
+        # Base configuration - hexagonal arrangement
+        base_positions = [
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ]
+
+        # Start with the base configuration
+        configs.append(np.array(base_positions))
+
+        # Pattern 1: Spiral arrangement
+        spiral_positions = []
+        for i in range(11):
+            angle = i * 0.7
+            radius = 0.3 * i
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            spiral_positions.append([x, y, 0])
+        configs.append(np.array(spiral_positions))
+
+        # Pattern 2: Grid-like arrangement with varied distances
+        grid_positions = []
+        grid_positions.append([0, 0, 0])  # center
+        for i in range(1, 11):
+            row = i // 3
+            col = i % 3
+            x = (col - 1) * 2.0
+            y = (row - 1) * 2.0
+            grid_positions.append([x, y, 0])
+        configs.append(np.array(grid_positions))
+
+        # Pattern 3: Random perturbations of base
+        for _ in range(num_configs - 3):
+            config = np.array(base_positions)
+            # Add moderate random variations to positions and rotations
+            for i in range(len(config)):
+                config[i][0] += np.random.uniform(-0.8, 0.8)
+                config[i][1] += np.random.uniform(-0.8, 0.8)
+                config[i][2] += np.random.uniform(-15, 15)  # Rotation variation
+                config[i][2] = config[i][2] % 360  # Keep within [0, 360)
+            configs.append(config)
+
+        return configs
+=======
+    def _generate_initial_configurations(self, num_configs: int = 8) -> List[np.ndarray]:
+        """Generate diverse initial configurations using geometric heuristics"""
+        configs = []
+
+        # Base configuration - hexagonal arrangement (more optimally spaced)
+        base_positions = [
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ]
+
+        # Start with the base configuration
+        configs.append(np.array(base_positions))
+
+        # Pattern 1: Optimized hexagonal packing with better spacing
+        optimized_positions = []
+        # Center
+        optimized_positions.append([0, 0, 0])
+        # Ring 1 - 6 positions
+        for i in range(6):
+            angle = i * np.pi/3
+            x = 2.1 * np.cos(angle)
+            y = 2.1 * np.sin(angle)
+            optimized_positions.append([x, y, 0])
+        # Ring 2 - 4 positions (not overlapping with ring 1)
+        for i in range(4):
+            angle = i * np.pi/2 + np.pi/4
+            x = 3.8 * np.cos(angle)
+            y = 3.8 * np.sin(angle)
+            optimized_positions.append([x, y, 0])
+        configs.append(np.array(optimized_positions[:11]))
+
+        # Pattern 2: Spiral arrangement with tighter spacing for better coverage
+        spiral_positions = []
+        for i in range(11):
+            angle = i * 0.8
+            radius = 0.5 * i
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            spiral_positions.append([x, y, 0])
+        configs.append(np.array(spiral_positions))
+
+        # Pattern 3: Grid-like arrangement with varied distances
+        grid_positions = []
+        grid_positions.append([0, 0, 0])  # center
+        for i in range(1, 11):
+            row = i // 3
+            col = i % 3
+            x = (col - 1) * 2.2
+            y = (row - 1) * 2.2
+            grid_positions.append([x, y, 0])
+        configs.append(np.array(grid_positions))
+
+        # Pattern 4: Random perturbations of base with more systematic variation
+        for _ in range(num_configs - 4):
+            config = np.array(base_positions)
+            # Add more controlled random variations to positions and rotations
+            for i in range(len(config)):
+                # More significant perturbations to encourage exploration
+                config[i][0] += np.random.uniform(-1.2, 1.2)
+                config[i][1] += np.random.uniform(-1.2, 1.2)
+                config[i][2] += np.random.uniform(-20, 20)  # Larger rotation variation
+                config[i][2] = config[i][2] % 360  # Keep within [0, 360)
+            configs.append(config)
+
+        return configs
+>>>>>>> REPLACE
+</DIFF>

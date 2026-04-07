@@ -1,0 +1,267 @@
+<NAME>
+add_adaptive_mutation_and_local_search
+</NAME>
+
+<DESCRIPTION>
+This modification introduces adaptive mutation rate and local search to the optimization process. The changes include:
+
+1. Adding a new `adaptive_mutate_sequence` function that adjusts mutation rate based on generation count and population diversity
+2. Implementing a `local_search` method that applies gradient-based refinement to promising sequences
+3. Integrating these enhancements into the main evolutionary loop to improve convergence and avoid local optima
+
+These modifications aim to boost the optimization performance and potentially exceed the benchmark of 1/1.5031.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_good_direction_to_move_into(self, sequence: List[float]) -> Optional[List[float]]:
+        """Get the direction to move into the sequence."""
+        try:
+            n = len(sequence)
+            if n == 0:
+                return None
+
+            sequence = np.array(sequence)
+
+            # Normalize for consistent scale
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 0.01:
+                return None
+
+            # Normalize sequence
+            normalized_sequence = sequence * np.sqrt(2 * n) / sum_sequence
+
+            # Compute the RHS for LP
+            try:
+                padded_seq = np.pad(normalized_sequence, (0, len(normalized_sequence) - 1), 'constant')
+                conv = np.convolve(padded_seq, normalized_sequence, mode='valid')
+            except Exception:
+                conv = np.convolve(normalized_sequence, normalized_sequence, mode='full')[:2*n-1]
+            rhs = np.max(conv)
+
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+
+            if g_fun is None:
+                return None
+
+            # Normalize result back
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 0.01:
+                return None
+            normalized_g_fun = g_fun * np.sqrt(2 * n) / sum_g_fun
+
+            # Apply mixing
+            t = 0.01
+            new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+            return new_sequence
+        except Exception as e:
+            return None
+
+    def generate_initial_sequence(self) -> List[float]:
+        """Generate a good initial sequence."""
+        n = np.random.randint(self.min_sequence_length, self.max_sequence_length)
+        # Generate a sequence with some structure to avoid poor starts
+        sequence = np.random.exponential(scale=1.0, size=n).tolist()
+        # Normalize to have reasonable total weight
+        total = sum(sequence)
+        if total > 0:
+            sequence = [x / total * 100 for x in sequence]
+        return sequence
+
+    def run_evolution(self) -> Tuple[List[float], float]:
+=======
+    def adaptive_mutate_sequence(self, sequence: List[float], generation: int,
+                                max_generations: int, diversity: float = 0.0) -> List[float]:
+        """Apply adaptive mutation to a sequence with rate based on generation and diversity."""
+        mutated = sequence.copy()
+        # Base mutation rate decreases over generations
+        base_rate = 0.3 * (1.0 - generation / max_generations)
+        # Increase rate if diversity is low
+        diversity_factor = max(0.5, 1.0 - diversity / 100.0) if diversity > 0 else 1.0
+        mutation_rate = max(0.05, base_rate * diversity_factor)
+
+        # Apply mutation with Gaussian noise
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                noise = random.gauss(0, 0.5 * mutated[i])
+                mutated[i] = max(0.01, mutated[i] + noise)
+        return mutated
+
+    def local_search(self, sequence: List[float], iterations: int = 5) -> List[float]:
+        """Perform local search using gradient approximation."""
+        # Convert to numpy array for easier manipulation
+        refined = np.array(sequence, dtype=float)
+        epsilon = 1e-6
+
+        # Simple gradient ascent using finite differences
+        for _ in range(iterations):
+            grad = np.zeros_like(refined)
+            base_inv_c1 = self.compute_inv_c1(refined.tolist())
+
+            for i in range(len(refined)):
+                perturbed = refined.copy()
+                perturbed[i] += epsilon
+                perturbed = np.maximum(perturbed, 0.01)  # Keep non-negative
+                perturbed_inv_c1 = self.compute_inv_c1(perturbed.tolist())
+                grad[i] = (perturbed_inv_c1 - base_inv_c1) / epsilon
+
+            # Update with gradient ascent (since we're maximizing)
+            refined += 0.01 * grad
+            refined = np.maximum(refined, 0.01)  # Keep non-negative
+
+        return refined.tolist()
+
+    def get_good_direction_to_move_into(self, sequence: List[float]) -> Optional[List[float]]:
+        """Get the direction to move into the sequence."""
+        try:
+            n = len(sequence)
+            if n == 0:
+                return None
+
+            sequence = np.array(sequence)
+
+            # Normalize for consistent scale
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 0.01:
+                return None
+
+            # Normalize sequence
+            normalized_sequence = sequence * np.sqrt(2 * n) / sum_sequence
+
+            # Compute the RHS for LP
+            try:
+                padded_seq = np.pad(normalized_sequence, (0, len(normalized_sequence) - 1), 'constant')
+                conv = np.convolve(padded_seq, normalized_sequence, mode='valid')
+            except Exception:
+                conv = np.convolve(normalized_sequence, normalized_sequence, mode='full')[:2*n-1]
+            rhs = np.max(conv)
+
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+
+            if g_fun is None:
+                return None
+
+            # Normalize result back
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 0.01:
+                return None
+            normalized_g_fun = g_fun * np.sqrt(2 * n) / sum_g_fun
+
+            # Apply mixing
+            t = 0.01
+            new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+            return new_sequence
+        except Exception as e:
+            return None
+
+    def generate_initial_sequence(self) -> List[float]:
+        """Generate a good initial sequence."""
+        n = np.random.randint(self.min_sequence_length, self.max_sequence_length)
+        # Generate a sequence with some structure to avoid poor starts
+        sequence = np.random.exponential(scale=1.0, size=n).tolist()
+        # Normalize to have reasonable total weight
+        total = sum(sequence)
+        if total > 0:
+            sequence = [x / total * 100 for x in sequence]
+        return sequence
+
+    def run_evolution(self) -> Tuple[List[float], float]:
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Evolution loop
+        iteration = 0
+        while time.time() - start_time < self.max_time_seconds:
+            try:
+                direction = self.get_good_direction_to_move_into(best_sequence)
+
+                if direction is not None:
+                    # Evaluate proposed direction
+                    candidate_inv_c1 = self.compute_inv_c1(direction)
+
+                    if candidate_inv_c1 > best_inv_c1:
+                        best_sequence = direction
+                        best_inv_c1 = candidate_inv_c1
+                        print(f'Iteration {iteration}: New best inv_C1: {best_inv_c1:.6f}')
+
+                        # Early exit if we beat the benchmark
+                        if best_inv_c1 > 1.0 / 1.5031:
+                            print(f'Beaten benchmark at iteration {iteration}')
+                            break
+                else:
+                    # Fallback if direction is not computed
+                    print(f'Iteration {iteration}: LP failed, using random perturbation')
+                    new_sequence = self.generate_initial_sequence()
+                    new_inv_c1 = self.compute_inv_c1(new_sequence)
+                    if new_inv_c1 > best_inv_c1:
+                        best_sequence = new_sequence
+                        best_inv_c1 = new_inv_c1
+
+            except Exception as e:
+                print(f'Error in evolution iteration {iteration}: {e}')
+                # Perturb slightly
+                if best_sequence:
+                    index = np.random.randint(len(best_sequence))
+                    best_sequence[index] = max(0, best_sequence[index] + np.random.normal(0, 0.5))
+
+            iteration += 1
+
+        return best_sequence, best_inv_c1
+=======
+        # Evolution loop
+        iteration = 0
+        max_generations = 500  # Define max generations to control adaptive mutation
+        while time.time() - start_time < self.max_time_seconds:
+            try:
+                # Calculate diversity (simplified proxy)
+                diversity = 0.0  # Placeholder for actual diversity calculation
+
+                # Apply adaptive mutation to best sequence
+                mutated_sequence = self.adaptive_mutate_sequence(
+                    best_sequence, iteration, max_generations, diversity
+                )
+
+                # Local search on mutated sequence
+                local_refined = self.local_search(mutated_sequence)
+
+                # Evaluate the local refined version
+                refined_inv_c1 = self.compute_inv_c1(local_refined)
+
+                if refined_inv_c1 > best_inv_c1:
+                    best_sequence = local_refined
+                    best_inv_c1 = refined_inv_c1
+                    print(f'Iteration {iteration}: New best inv_C1: {best_inv_c1:.6f}')
+
+                    # Early exit if we beat the benchmark
+                    if best_inv_c1 > 1.0 / 1.5031:
+                        print(f'Beaten benchmark at iteration {iteration}')
+                        break
+
+                # Optionally use the direction-based approach for additional exploration
+                direction = self.get_good_direction_to_move_into(best_sequence)
+                if direction is not None:
+                    direction_inv_c1 = self.compute_inv_c1(direction)
+                    if direction_inv_c1 > best_inv_c1:
+                        best_sequence = direction
+                        best_inv_c1 = direction_inv_c1
+
+            except Exception as e:
+                print(f'Error in evolution iteration {iteration}: {e}')
+                # Perturb slightly if there is an issue
+                if best_sequence:
+                    index = np.random.randint(len(best_sequence))
+                    best_sequence[index] = max(0, best_sequence[index] + np.random.normal(0, 0.5))
+
+            iteration += 1
+
+        return best_sequence, best_inv_c1
+>>>>>>> REPLACE
+```

@@ -1,0 +1,329 @@
+--- a/original.py
++++ b/original.py
+@@ -1,118 +1,224 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial import Voronoi, distance
++from scipy.spatial.distance import cdist
++import warnings
++warnings.filterwarnings('ignore')
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+-
++    
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+-    circles = np.zeros((n, 3))
+-
+-    # Create a more systematic hexagonal grid
+-    # We want to place circles in a hexagonal pattern within the unit square
+-    # Let's use 5 rows and 7 columns for 35 total positions (enough for 32)
+-
+-    # Calculate spacing for hexagonal packing
+-    # For hexagonal packing, the vertical spacing is sqrt(3)/2 times the horizontal spacing
+-    # We start with an estimated radius and calculate appropriate spacing
+-
+-    # Try to place circles in a hexagonal grid pattern
+-    rows = 5
+-    cols = 7
+-
+-    # Initial estimate for the radius that would allow 32 circles in a hexagonal pattern
+-    # This is approximate - we'll use a more systematic approach
+-    target_total_radius = 2.5  # Estimate to work with
+-    avg_radius = target_total_radius / n
+-
+-    # Hexagonal spacing calculation
+-    spacing_x = 2.2 * avg_radius  # Slightly more than diameter to allow for optimization
+-    spacing_y = spacing_x * np.sqrt(3) / 2
+-
+-    # Calculate actual grid dimensions
+-    grid_width = (cols - 1) * spacing_x
+-    grid_height = (rows - 1) * spacing_y + spacing_y / 2
+-
+-    # Center the grid in the unit square
+-    offset_x = (1 - grid_width) / 2
+-    offset_y = (1 - grid_height) / 2
+-
+-    # Generate positions in hexagonal grid
+-    positions = []
+-    for i in range(rows):
+-        for j in range(cols):
+-            x = offset_x + j * spacing_x
+-            y = offset_y + i * spacing_y
+-
+-            # Apply hexagonal offset for odd rows
+-            if i % 2 == 1:
+-                x += spacing_x / 2
+-
+-            positions.append((x, y))
+-
+-    # Filter positions to only keep those that can fit a circle with reasonable radius
+-    valid_positions = []
+-    for x, y in positions:
+-        # Check if a circle of radius 0.05 could fit at this location
+-        if (x >= 0.05 and x <= 0.95 and
+-            y >= 0.05 and y <= 0.95):
+-            valid_positions.append((x, y))
+-
+-    # Use first 32 valid positions
+-    valid_positions = valid_positions[:n]
+-
+-    # Initialize circles with small radius
+-    for i, (x, y) in enumerate(valid_positions):
+-        circles[i, 0] = x
+-        circles[i, 1] = y
+-        circles[i, 2] = 0.05  # Small initial radius
+-
+-    # Simple iterative optimization to expand radii while maintaining constraints
+-    max_iterations = 100
+-    tolerance = 1e-6
+-
+-    for _ in range(max_iterations):
+-        improved = False
+-        # Try to increase each circle's radius
++    
++    # Initialize with a structured hexagonal pattern
++    def generate_hexagonal_initial():
++        # Use a 6x6 grid (36 positions) to comfortably fit 32 circles
++        rows, cols = 6, 6
++        spacing_x = 1.0 / cols
++        spacing_y = 1.0 / rows
++        
++        # Hexagonal packing: offset odd rows
++        circles = []
++        for i in range(rows):
++            for j in range(cols):
++                if len(circles) >= n:
++                    break
++                    
++                x_offset = (i % 2) * (spacing_x / 2)
++                x = (j * spacing_x) + x_offset + spacing_x / 2
++                y = (i * spacing_y) + spacing_y / 2
++                
++                # Ensure within bounds
++                if 0 <= x <= 1 and 0 <= y <= 1:
++                    circles.append([x, y, 0.02])  # Small initial radius
++                    
++        return np.array(circles[:n])
++    
++    # Generate initial configuration
++    circles = generate_hexagonal_initial()
++    
++    # Compute Voronoi diagram and helper functions
++    def compute_voronoi_regions(points):
++        """Compute Voronoi regions for given points"""
++        try:
++            vor = Voronoi(points)
++            return vor
++        except:
++            return None
++    
++    def get_voronoi_areas(vor):
++        """Calculate area of each Voronoi cell"""
++        if vor is None:
++            return None
++            
++        areas = []
++        for region in vor.regions:
++            if len(region) > 0 and -1 not in region:
++                # Calculate polygon area
++                vertices = [vor.vertices[i] for i in region]
++                if len(vertices) >= 3:
++                    # Simple polygon area calculation
++                    area = 0
++                    for i in range(len(vertices)):
++                        j = (i + 1) % len(vertices)
++                        area += vertices[i][0] * vertices[j][1]
++                        area -= vertices[j][0] * vertices[i][1]
++                    areas.append(abs(area) / 2)
++                else:
++                    areas.append(0)
++            else:
++                areas.append(0)
++        return areas
++    
++    def compute_voronoi_cell_areas(points, vor):
++        """Compute areas of Voronoi cells for each point"""
++        if vor is None:
++            return [0] * len(points)
++            
++        areas = []
++        for i, point in enumerate(points):
++            # Find Voronoi cell for this point
++            cell_vertices = []
++            for j, region in enumerate(vor.regions):
++                if len(region) > 0 and -1 not in region:
++                    # Check if this region corresponds to our point
++                    if i in vor.point_region:
++                        region_idx = vor.point_region[i]
++                        if j == region_idx:
++                            cell_vertices = [vor.vertices[k] for k in region]
++                            break
++            
++            # If we found vertices, compute area
++            if len(cell_vertices) >= 3:
++                area = 0
++                for j in range(len(cell_vertices)):
++                    k = (j + 1) % len(cell_vertices)
++                    area += cell_vertices[j][0] * cell_vertices[k][1]
++                    area -= cell_vertices[k][0] * cell_vertices[j][1]
++                areas.append(abs(area) / 2)
++            else:
++                areas.append(0)
++                
++        return areas
++    
++    def get_safe_radius(position, radii, positions, idx):
++        """Get the maximum safe radius for circle at idx"""
++        x, y = position
++        # Boundary constraints
++        r_boundary = min(x, 1-x, y, 1-y)
++        
++        # Overlap constraints
++        r_overlap = r_boundary
++        for i in range(len(positions)):
++            if i != idx:
++                dx = x - positions[i][0]
++                dy = y - positions[i][1]
++                dist = np.sqrt(dx*dx + dy*dy)
++                # Must be at least radius_sum apart
++                max_r = dist - radii[i]
++                if max_r > 0:
++                    r_overlap = min(r_overlap, max_r)
++        
++        return min(r_boundary, r_overlap)
++    
++    def validate_configuration(circles):
++        """Validate that all constraints are satisfied"""
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++        
++        # Check boundary constraints
++        for i, (x, y, r) in enumerate(circles):
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                return False
++        
++        # Check overlap constraints
++        for i in range(len(circles)):
++            for j in range(i+1, len(circles)):
++                dx = positions[i][0] - positions[j][0]
++                dy = positions[i][1] - positions[j][1]
++                dist = np.sqrt(dx*dx + dy*dy)
++                if dist < (radii[i] + radii[j]):
++                    return False
++                    
++        return True
++    
++    # Main optimization loop
++    max_iterations = 1000
++    improvement_threshold = 1e-6
++    
++    for iteration in range(max_iterations):
++        # Get current positions and radii
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++        
++        # Compute Voronoi diagram of current positions
++        vor = compute_voronoi_regions(positions)
++        
++        # Calculate weighted improvements based on Voronoi regions
++        # Circles in larger Voronoi cells have more room to grow
++        total_improvement = 0
++        
++        # Update each circle's radius in a smart way
+         for i in range(n):
+-            old_radius = circles[i, 2]
+-            new_radius = old_radius
+-
+-            # Try to increase radius up to the maximum possible without violating constraints
+-            max_possible_radius = min(
+-                circles[i, 0],  # Distance to left edge
+-                1 - circles[i, 0],  # Distance to right edge
+-                circles[i, 1],  # Distance to bottom edge
+-                1 - circles[i, 1]  # Distance to top edge
+-            )
+-
+-            # Now check against other circles
+-            for j in range(n):
+-                if i != j:
+-                    dx = circles[i, 0] - circles[j, 0]
+-                    dy = circles[i, 1] - circles[j, 1]
+-                    distance = np.sqrt(dx*dx + dy*dy)
+-                    # Must be at least the sum of radii apart
+-                    max_radius_with_j = distance - circles[j, 2]
+-                    max_possible_radius = min(max_possible_radius, max_radius_with_j)
+-
+-            # Limit the new radius to be at most max_possible_radius
+-            new_radius = min(new_radius + 0.001, max_possible_radius)
+-
+-            if new_radius > old_radius + tolerance:
++            # Current state
++            x, y = positions[i]
++            current_radius = radii[i]
++            
++            # Compute safe maximum radius
++            safe_radius = get_safe_radius((x, y), radii, positions, i)
++            
++            # Prefer expansion in directions with larger Voronoi cells
++            # This is a proxy for available space
++            expansion_amount = min(0.005, safe_radius - current_radius)
++            
++            if expansion_amount > improvement_threshold:
++                new_radius = min(safe_radius, current_radius + expansion_amount)
+                 circles[i, 2] = new_radius
+-                improved = True
+-
+-        if not improved:
++                total_improvement += expansion_amount
++        
++        # If no meaningful improvement, break
++        if total_improvement < improvement_threshold:
+             break
+-
++    
++    # Final validation and cleanup
++    if not validate_configuration(circles):
++        # Revert to best valid configuration
++        circles = generate_hexagonal_initial()
++        
++        # Simple greedy expansion
++        for _ in range(100):
++            improved = False
++            for i in range(n):
++                x, y = circles[i, 0], circles[i, 1]
++                current_radius = circles[i, 2]
++                
++                # Safety limit
++                r_boundary = min(x, 1-x, y, 1-y)
++                
++                # Check overlaps with others
++                r_overlap = r_boundary
++                for j in range(n):
++                    if i != j:
++                        dx = x - circles[j, 0]
++                        dy = y - circles[j, 1]
++                        dist = np.sqrt(dx*dx + dy*dy)
++                        max_r = dist - circles[j, 2]
++                        if max_r > 0:
++                            r_overlap = min(r_overlap, max_r)
++                
++                # Expand if beneficial
++                new_radius = min(r_overlap, current_radius + 0.002)
++                if new_radius > current_radius + 1e-6:
++                    circles[i, 2] = new_radius
++                    improved = True
++            
++            if not improved:
++                break
++    
+     return circles
+ 
+-
+ # EVOLVE-BLOCK-END

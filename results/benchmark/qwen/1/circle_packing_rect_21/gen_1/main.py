@@ -1,0 +1,209 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import cdist
+import warnings
+warnings.filterwarnings('ignore')
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    # Using width=1.2, height=0.8 as a reasonable ratio
+    width, height = 1.2, 0.8
+    
+    # Number of circles
+    n = 21
+    
+    def get_distance_matrix(circles_array):
+        """Compute pairwise distances between circle centers"""
+        centers = circles_array[:, :2]
+        return cdist(centers, centers)
+    
+    def is_valid_configuration(circles_array):
+        """Check if configuration is valid (no overlaps, all within bounds)"""
+        # Check bounds
+        if np.any(circles_array[:, 0] - circles_array[:, 2] < 0) or \
+           np.any(circles_array[:, 0] + circles_array[:, 2] > width) or \
+           np.any(circles_array[:, 1] - circles_array[:, 2] < 0) or \
+           np.any(circles_array[:, 1] + circles_array[:, 2] > height):
+            return False
+            
+        # Check for overlaps
+        dist_matrix = get_distance_matrix(circles_array)
+        # For each pair of circles, check if they overlap
+        for i in range(n):
+            for j in range(i+1, n):
+                if dist_matrix[i, j] < (circles_array[i, 2] + circles_array[j, 2]):
+                    return False
+                    
+        return True
+    
+    def objective_function(circles_flat):
+        """Objective: maximize sum of radii"""
+        circles_array = circles_flat.reshape(-1, 3)
+        return -np.sum(circles_array[:, 2])  # Negative because we minimize
+    
+    def constraint_function(circles_flat):
+        """Constraint: circles must not overlap and stay within bounds"""
+        circles_array = circles_flat.reshape(-1, 3)
+        
+        # Bounds constraints (x, y, r)
+        bounds_violation = []
+        
+        # Check bounds
+        for i in range(n):
+            x, y, r = circles_array[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                bounds_violation.append(1e6)  # Large penalty
+            else:
+                bounds_violation.append(0)
+                
+        # Check overlaps
+        dist_matrix = get_distance_matrix(circles_array)
+        overlap_penalty = 0
+        
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = dist_matrix[i, j]
+                min_distance = circles_array[i, 2] + circles_array[j, 2]
+                if distance < min_distance:
+                    overlap_penalty += (min_distance - distance)**2  # Quadratic penalty
+                    
+        return bounds_violation + [overlap_penalty]
+    
+    def generate_initial_grid():
+        """Generate initial configuration using a grid pattern"""
+        circles = np.zeros((n, 3))
+        # Grid layout
+        rows = int(np.ceil(np.sqrt(n)))
+        cols = int(np.ceil(n / rows))
+        
+        # Adjust grid size to fit within rectangle
+        cell_width = width / cols
+        cell_height = height / rows
+        
+        # Place circles with some randomness to avoid perfect symmetry
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = (j + 0.5) * cell_width
+                y = (i + 0.5) * cell_height
+                
+                # Add small random offset to avoid symmetries
+                x += np.random.uniform(-cell_width*0.1, cell_width*0.1)
+                y += np.random.uniform(-cell_height*0.1, cell_height*0.1)
+                
+                # Set initial radius (smaller than minimum needed to keep within bounds)
+                max_radius = min(x, width-x, y, height-y)
+                radius = max_radius * 0.3
+                
+                circles[idx] = [x, y, radius]
+                idx += 1
+                
+        # Ensure all circles are within bounds
+        for i in range(n):
+            x, y, r = circles[i]
+            # Check and adjust if needed
+            bounded_r = min(r, x, width-x, y, height-y)
+            if bounded_r < r:
+                circles[i] = [x, y, bounded_r]
+                
+        return circles
+    
+    def optimize_local(circles_init):
+        """Apply local optimization to improve configuration"""
+        # Flatten the array for optimization
+        flat_init = circles_init.flatten()
+        
+        # Define bounds for x, y, r coordinates
+        bounds = []
+        for i in range(n):
+            bounds.extend([(0, width), (0, height), (1e-6, min(width, height)/2)])
+        
+        # Try multiple optimization attempts with different starting points
+        best_result = None
+        best_sum = float('-inf')
+        
+        for attempt in range(3):
+            try:
+                # Randomly perturb initial solution slightly
+                perturbed = flat_init.copy()
+                for i in range(len(perturbed)):
+                    if i % 3 == 2:  # radius component
+                        # Perturb radius with small amount
+                        perturbed[i] *= np.random.uniform(0.9, 1.1)
+                    else:
+                        # Perturb position with small amount
+                        perturbed[i] += np.random.uniform(-0.05, 0.05)
+                
+                # Optimize using L-BFGS-B which works well for this kind of smooth problem
+                result = minimize(
+                    objective_function,
+                    perturbed,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 100}
+                )
+                
+                if result.success:
+                    result_circles = result.x.reshape(-1, 3)
+                    if is_valid_configuration(result_circles):
+                        current_sum = np.sum(result_circles[:, 2])
+                        if current_sum > best_sum:
+                            best_sum = current_sum
+                            best_result = result_circles.copy()
+            except:
+                continue
+                
+        if best_result is not None:
+            return best_result
+        else:
+            # Fallback to original if optimization fails
+            return circles_init
+    
+    # Generate initial configuration
+    initial_config = generate_initial_grid()
+    
+    # Local optimization step
+    optimized_config = optimize_local(initial_config)
+    
+    # Final validation and adjustment
+    if not is_valid_configuration(optimized_config):
+        # If still invalid, make a conservative adjustment
+        for i in range(n):
+            x, y, r = optimized_config[i]
+            bounded_r = min(r, x, width-x, y, height-y)
+            if bounded_r < r:
+                optimized_config[i] = [x, y, bounded_r]
+    
+    # Ensure all circles are valid
+    final_config = optimized_config.copy()
+    
+    # One final pass to fix any remaining issues
+    for _ in range(5):  # Multiple passes to ensure stability
+        if is_valid_configuration(final_config):
+            break
+        # Gradually reduce radii to prevent overlaps
+        for i in range(n):
+            x, y, r = final_config[i]
+            min_bound_r = min(x, width-x, y, height-y)
+            if min_bound_r < r:
+                final_config[i, 2] = min_bound_r * 0.99
+    
+    return final_config
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

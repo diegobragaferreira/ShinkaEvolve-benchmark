@@ -1,0 +1,210 @@
+<NAME>
+implement_adaptive_cooling_schedule
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed exponential cooling rate which may not be optimal for different phases of optimization. I propose implementing an adaptive cooling schedule that dynamically adjusts based on the optimization progress. This approach monitors convergence behavior and adjusts the cooling rate accordingly - speeding up when progress stalls and slowing down when approaching optimal solutions. This should help overcome plateaus in optimization progress and potentially improve the 0.1 score by enabling more efficient exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Parameters for simulated annealing
+    temp = 1.0
+    min_temp = 1e-12
+    base_cooling_rate = 0.9995
+    max_total_iter = 400000
+=======
+    # Parameters for simulated annealing
+    temp = 1.0
+    min_temp = 1e-12
+    base_cooling_rate = 0.9995
+    max_total_iter = 400000
+
+    # Adaptive cooling tracking
+    improvement_window = 100
+    improvement_count = 0
+    last_improvement_iter = 0
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    patience_counter = 0
+    patience_limit = 2000
+
+    while temp > min_temp and total_iterations < max_total_iter and time.time() - start_time < max_time:
+        # Determine current phase based on iteration count and cooling
+        if temp > 0.7:
+            phase = 0
+        elif temp > 0.3:
+            phase = 1
+        else:
+            phase = 2
+
+        current_phase = phases[phase]
+
+        # Select point to move (random selection for now)
+        point_to_move = random.randint(0, len(points) - 1)
+
+        # Create new candidate point
+        new_points = points.copy()
+
+        # Apply targeted directional perturbation
+        perturbation = compute_targeted_directional_perturbation(
+            points, point_to_move, current_ratio, temp)
+
+        new_points[point_to_move] += perturbation * current_phase["perturb_factor"]
+
+        # Project back onto sphere
+        norm = np.linalg.norm(new_points[point_to_move])
+        if norm > 0:
+            new_points[point_to_move] = new_points[point_to_move] / norm
+
+        # Compute new ratio
+        new_ratio, new_min_dist = compute_min_max_ratio(new_points)
+
+        # Accept or reject based on Metropolis criterion
+        if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temp):
+            points = new_points
+            current_ratio = new_ratio
+            min_dist = new_min_dist
+
+            # Update best solution if improved
+            if new_ratio > best_ratio:
+                best_points = new_points.copy()
+                best_ratio = new_ratio
+                best_min_dist = new_min_dist
+                patience_counter = 0  # Reset patience counter when improvement found
+        else:
+            patience_counter += 1  # Increment patience counter when no improvement
+
+        # Adaptive cooling based on recent performance
+        recent_ratios.append(current_ratio)
+        if len(recent_ratios) > max_recent:
+            recent_ratios.pop(0)
+
+        # Adjust cooling rate based on recent progress
+        cooling_rate = current_phase["cooling_rate"]
+        if len(recent_ratios) >= 5:
+            recent_improvement = recent_ratios[-1] - recent_ratios[0]
+            if recent_improvement < 1e-8:
+                # Very slow progress, cool faster
+                cooling_rate = current_phase["cooling_rate"] * 1.05
+            elif recent_improvement > 1e-5:
+                # Fast progress, cool slower (but not in final phase)
+                cooling_rate = current_phase["cooling_rate"] * 0.98
+
+        # Apply temperature cooling
+        temp *= cooling_rate
+        iter_count += 1
+        total_iterations += 1
+
+        # Early stopping if no improvement for a long time
+        if patience_counter > patience_limit:
+            break
+
+        # Periodic restart if stuck
+        if iter_count % 5000 == 0 and iter_count > 0:
+            # Restart with better configuration if needed
+            current_ratio, _ = compute_min_max_ratio(points)
+            if current_ratio < best_ratio * 0.99:
+                # Reset to best solution so far
+                points = best_points.copy()
+                temp = min(temp * 1.5, 1.0)  # Increase temperature slightly
+                patience_counter = 0
+=======
+    patience_counter = 0
+    patience_limit = 2000
+
+    while temp > min_temp and total_iterations < max_total_iter and time.time() - start_time < max_time:
+        # Determine current phase based on iteration count and cooling
+        if temp > 0.7:
+            phase = 0
+        elif temp > 0.3:
+            phase = 1
+        else:
+            phase = 2
+
+        current_phase = phases[phase]
+
+        # Select point to move (random selection for now)
+        point_to_move = random.randint(0, len(points) - 1)
+
+        # Create new candidate point
+        new_points = points.copy()
+
+        # Apply targeted directional perturbation
+        perturbation = compute_targeted_directional_perturbation(
+            points, point_to_move, current_ratio, temp)
+
+        new_points[point_to_move] += perturbation * current_phase["perturb_factor"]
+
+        # Project back onto sphere
+        norm = np.linalg.norm(new_points[point_to_move])
+        if norm > 0:
+            new_points[point_to_move] = new_points[point_to_move] / norm
+
+        # Compute new ratio
+        new_ratio, new_min_dist = compute_min_max_ratio(new_points)
+
+        # Accept or reject based on Metropolis criterion
+        if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temp):
+            points = new_points
+            current_ratio = new_ratio
+            min_dist = new_min_dist
+
+            # Update best solution if improved
+            if new_ratio > best_ratio:
+                best_points = new_points.copy()
+                best_ratio = new_ratio
+                best_min_dist = new_min_dist
+                patience_counter = 0  # Reset patience counter when improvement found
+                last_improvement_iter = total_iterations
+                improvement_count += 1
+        else:
+            patience_counter += 1  # Increment patience counter when no improvement
+
+        # Adaptive cooling based on recent performance
+        recent_ratios.append(current_ratio)
+        if len(recent_ratios) > max_recent:
+            recent_ratios.pop(0)
+
+        # Dynamic cooling rate adjustment based on optimization progress
+        cooling_rate = current_phase["cooling_rate"]
+
+        # Check if we're making consistent progress
+        if len(recent_ratios) >= improvement_window:
+            recent_improvement = recent_ratios[-1] - recent_ratios[-improvement_window]
+            if recent_improvement < 1e-8:
+                # Very slow progress, increase cooling rate to escape local optima
+                cooling_rate = min(0.99995, cooling_rate * 1.02)
+            elif recent_improvement > 1e-5:
+                # Fast progress, decrease cooling rate to fine-tune
+                cooling_rate = max(0.9993, cooling_rate * 0.99)
+
+        # Additional adaptive cooling based on improvement frequency
+        if total_iterations - last_improvement_iter > 2000:
+            # No improvement in a while, increase cooling rate
+            cooling_rate = min(0.99995, cooling_rate * 1.01)
+
+        # Apply temperature cooling
+        temp *= cooling_rate
+        iter_count += 1
+        total_iterations += 1
+
+        # Early stopping if no improvement for a long time
+        if patience_counter > patience_limit:
+            break
+
+        # Periodic restart if stuck
+        if iter_count % 5000 == 0 and iter_count > 0:
+            # Restart with better configuration if needed
+            current_ratio, _ = compute_min_max_ratio(points)
+            if current_ratio < best_ratio * 0.99:
+                # Reset to best solution so far
+                points = best_points.copy()
+                temp = min(temp * 1.5, 1.0)  # Increase temperature slightly
+                patience_counter = 0
+>>>>>>> REPLACE
+</DIFF>

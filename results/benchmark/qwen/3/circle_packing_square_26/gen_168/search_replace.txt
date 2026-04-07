@@ -1,0 +1,225 @@
+<NAME>
+add_multi_scale_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+This change introduces multi-scale spatial indexing to improve overlap detection performance. The current implementation uses a single spatial grid resolution, but different circle sizes benefit from different grid resolutions. Small circles need finer grids for accurate overlap detection, while large circles can use coarser grids. This optimization reduces the computational overhead of overlap checking while maintaining accuracy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SpatialGrid:
+    """Efficient spatial grid for fast overlap detection"""
+
+    def __init__(self, resolution: int = 20):
+        self.resolution = resolution
+        self.grid = {}
+        self.cell_size = 1.0 / resolution
+        self.neighbors_cache = {}
+
+    def _get_cell_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Get grid cell coordinates for a point"""
+        return (int(x / self.cell_size), int(y / self.cell_size))
+
+    def clear(self):
+        """Clear the spatial grid"""
+        self.grid.clear()
+        self.neighbors_cache.clear()
+
+    def add_circle(self, idx: int, x: float, y: float, radius: float):
+        """Add a circle to the spatial grid"""
+        cell_coords = self._get_cell_coords(x, y)
+        if cell_coords not in self.grid:
+            self.grid[cell_coords] = []
+        self.grid[cell_coords].append((idx, x, y, radius))
+
+    def get_neighbors(self, x: float, y: float, radius: float, use_cache: bool = True) -> List[Tuple[int, float, float, float]]:
+        """Get all circles in neighboring cells that could potentially overlap"""
+        cache_key = (x, y, radius)
+        if use_cache and cache_key in self.neighbors_cache:
+            return self.neighbors_cache[cache_key]
+
+        neighbors = []
+        cell_x, cell_y = self._get_cell_coords(x, y)
+
+        # Check surrounding cells (3x3 grid around main cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell_x + dx, cell_y + dy)
+                if neighbor_cell in self.grid:
+                    for idx, nx, ny, nr in self.grid[neighbor_cell]:
+                        # Skip self
+                        if idx == -1:  # Placeholder for self-check
+                            continue
+                        neighbors.append((idx, nx, ny, nr))
+
+        if use_cache:
+            self.neighbors_cache[cache_key] = neighbors
+
+        return neighbors
+=======
+class MultiScaleSpatialGrid:
+    """Multi-scale spatial grid for efficient overlap detection"""
+
+    def __init__(self):
+        # Multiple resolutions for different circle sizes
+        self.resolutions = [10, 20, 40]
+        self.grids = {}
+        self.cell_sizes = {}
+        self.neighbors_cache = {}
+
+        # Precompute cell sizes for all resolutions
+        for res in self.resolutions:
+            self.cell_sizes[res] = 1.0 / res
+            self.grids[res] = {}
+
+    def _get_cell_coords(self, x: float, y: float, resolution: int) -> Tuple[int, int]:
+        """Get grid cell coordinates for a point with specific resolution"""
+        cell_size = self.cell_sizes[resolution]
+        return (int(x / cell_size), int(y / cell_size))
+
+    def clear(self):
+        """Clear all grids and cache"""
+        for grid in self.grids.values():
+            grid.clear()
+        self.neighbors_cache.clear()
+
+    def add_circle(self, idx: int, x: float, y: float, radius: float):
+        """Add a circle to all relevant grids"""
+        for resolution in self.resolutions:
+            cell_coords = self._get_cell_coords(x, y, resolution)
+            if cell_coords not in self.grids[resolution]:
+                self.grids[resolution][cell_coords] = []
+            self.grids[resolution][cell_coords].append((idx, x, y, radius))
+
+    def get_best_resolution(self, radius: float) -> int:
+        """Choose appropriate resolution based on circle radius"""
+        if radius < 0.02:
+            return 40  # Fine grid for very small circles
+        elif radius < 0.05:
+            return 20  # Medium grid for medium circles
+        else:
+            return 10  # Coarse grid for large circles
+
+    def get_neighbors(self, x: float, y: float, radius: float, use_cache: bool = True) -> List[Tuple[int, float, float, float]]:
+        """Get all circles in neighboring cells that could potentially overlap"""
+        cache_key = (x, y, radius)
+        if use_cache and cache_key in self.neighbors_cache:
+            return self.neighbors_cache[cache_key]
+
+        # Use the most appropriate resolution for this circle
+        resolution = self.get_best_resolution(radius)
+        neighbors = []
+        cell_x, cell_y = self._get_cell_coords(x, y, resolution)
+
+        # Check surrounding cells (3x3 grid around main cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell_x + dx, cell_y + dy)
+                if neighbor_cell in self.grids[resolution]:
+                    for idx, nx, ny, nr in self.grids[resolution][neighbor_cell]:
+                        # Skip self
+                        if idx == -1:  # Placeholder for self-check
+                            continue
+                        neighbors.append((idx, nx, ny, nr))
+
+        if use_cache:
+            self.neighbors_cache[cache_key] = neighbors
+
+        return neighbors
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_spatial_grid_instance
+</NAME>
+
+<DESCRIPTION>
+Replace the old SpatialGrid instance with the new MultiScaleSpatialGrid instance in the main function to utilize the multi-scale spatial indexing capabilities.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Global spatial grid instance for validation
+    spatial_grid = SpatialGrid(resolution=20)
+=======
+    # Global multi-scale spatial grid instance for validation
+    spatial_grid = MultiScaleSpatialGrid()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_is_valid_function
+</NAME>
+
+<DESCRIPTION>
+Optimize the is_valid function to take advantage of the multi-scale spatial grid by using the appropriate resolution for each circle when checking overlaps. Also add early termination to improve performance when constraints are violated.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def is_valid(circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping"""
+        n = len(circles)
+
+        # Clear spatial grid
+        spatial_grid.clear()
+
+        # First check boundary constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+
+            # Add to spatial grid for overlap checking
+            spatial_grid.add_circle(i, x, y, r)
+
+        # Then check overlap constraints using spatial grid
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+
+            # Get potential overlapping candidates from neighbors
+            candidates = spatial_grid.get_neighbors(x1, y1, r1, use_cache=True)
+
+            # Check actual overlaps
+            for _, x2, y2, r2 in candidates:
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    return False
+
+        return True
+=======
+    def is_valid(circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping"""
+        n = len(circles)
+
+        # Clear spatial grid
+        spatial_grid.clear()
+
+        # First check boundary constraints with early termination
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+
+            # Add to spatial grid for overlap checking
+            spatial_grid.add_circle(i, x, y, r)
+
+        # Then check overlap constraints using spatial grid with appropriate resolutions
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+
+            # Get potential overlapping candidates from neighbors using appropriate resolution
+            candidates = spatial_grid.get_neighbors(x1, y1, r1, use_cache=True)
+
+            # Check actual overlaps with early termination
+            for _, x2, y2, r2 in candidates:
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    return False
+
+        return True
+>>>>>>> REPLACE
+</DIFF>

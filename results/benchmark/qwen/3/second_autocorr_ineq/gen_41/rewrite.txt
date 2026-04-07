@@ -1,0 +1,302 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from typing import List, Tuple
+import time
+
+def compute_autoconvolution_norms(f: List[float]) -> tuple:
+    """
+    Compute the L2, L1, and L-infinity norms of the autoconvolution of f.
+    
+    Args:
+        f: List of step heights
+        
+    Returns:
+        Tuple of (||g||₂², ||g||₁, ||g||∞)
+    """
+    if not f:
+        return 0.0, 0.0, 0.0
+    
+    # Convert to numpy array for easier manipulation
+    f_array = np.array(f)
+    
+    # Compute autoconvolution g = f * f (discrete convolution)
+    g = np.convolve(f_array, f_array, mode='full')
+    
+    # Compute norms
+    # ||g||₂² - integrate g² using trapezoidal rule approximation
+    g_squared = g * g
+    trapz_sum = 0.0
+    
+    # Use trapezoidal integration for ||g||₂²  
+    if len(g) >= 2:
+        h = 1.0 / (len(g) - 1)  # Normalized spacing
+        for i in range(len(g) - 1):
+            y1, y2 = g_squared[i], g_squared[i+1]
+            trapz_sum += (y1 + y1*y2 + y2) * h / 3.0
+    else:
+        trapz_sum = g_squared[0] if len(g_squared) > 0 else 0.0
+        
+    # ||g||₁ - integrate |g| using trapezoidal rule
+    g_abs = np.abs(g)
+    trapz_l1_sum = 0.0
+    
+    if len(g) >= 2:
+        h = 1.0 / (len(g) - 1)  # Normalized spacing
+        for i in range(len(g) - 1):
+            y1, y2 = g_abs[i], g_abs[i+1]
+            trapz_l1_sum += (y1 + y2) * h / 2.0
+    else:
+        trapz_l1_sum = g_abs[0] if len(g_abs) > 0 else 0.0
+    
+    # ||g||∞ - infinity norm (maximum absolute value)
+    g_max = np.max(np.abs(g)) if len(g) > 0 else 0.0
+    
+    return trapz_sum, trapz_l1_sum, g_max
+
+def calculate_c2(f: List[float]) -> float:
+    """
+    Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) where g = f * f.
+    
+    Args:
+        f: List of step heights
+        
+    Returns:
+        C₂ value
+    """
+    try:
+        g_norm2_sq, g_norm1, g_norm_inf = compute_autoconvolution_norms(f)
+        
+        # Avoid division by zero
+        if g_norm1 <= 1e-12 or g_norm_inf <= 1e-12:
+            return 0.0
+            
+        return g_norm2_sq / (g_norm1 * g_norm_inf)
+    except Exception as e:
+        return 0.0
+
+def generate_harmonic_individual(length: int) -> List[float]:
+    """Generate initial individual using harmonic oscillation pattern."""
+    # Create a base harmonic pattern
+    t = np.linspace(0, 4*np.pi, length)
+    # Combine sine and cosine components with decreasing frequencies
+    base_pattern = 1.0 + 0.5 * np.sin(t) + 0.3 * np.cos(2*t) + 0.2 * np.sin(3*t)
+    # Ensure non-negative values
+    heights = np.maximum(base_pattern, 0.0)
+    return heights.tolist()
+
+def generate_smooth_individual(length: int) -> List[float]:
+    """Generate smooth initial individual with gradual transitions."""
+    # Create a smooth step function using sigmoid-like behavior
+    x = np.linspace(-2, 2, length)
+    # Create smooth transition using tanh
+    heights = 1.0 + 0.5 * np.tanh(x) + 0.3 * np.tanh(2*x) + 0.1 * np.tanh(3*x)
+    # Ensure non-negative values
+    heights = np.maximum(heights, 0.0)
+    return heights.tolist()
+
+def mutate_individual(individual: List[float], mutation_rate: float = 0.1, 
+                     strength: float = 0.2) -> List[float]:
+    """Mutate an individual with adaptive mutation strength."""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if np.random.random() < mutation_rate:
+            # Add Gaussian noise with adaptive strength
+            noise = np.random.normal(0, strength * np.mean(mutated) if np.mean(mutated) > 0 else 0.1)
+            mutated[i] = max(0.0, mutated[i] + noise)
+    return mutated
+
+def crossover(parent1: List[float], parent2: List[float]) -> tuple:
+    """Perform uniform crossover with enhanced mixing."""
+    if not parent1 or not parent2:
+        return parent1, parent2
+    
+    # Create children with enhanced mixing
+    child1, child2 = [], []
+    max_len = max(len(parent1), len(parent2))
+    min_len = min(len(parent1), len(parent2))
+    
+    # Mix with some structural preservation
+    for i in range(max_len):
+        if i < min_len:
+            # Blend with probability
+            if np.random.random() < 0.5:
+                child1.append(parent1[i])
+                child2.append(parent2[i])
+            else:
+                child1.append(parent2[i])
+                child2.append(parent1[i])
+        elif i < len(parent1):
+            child1.append(parent1[i])
+            child2.append(parent2[i] if i < len(parent2) else parent1[i])
+        else:
+            child1.append(parent2[i])
+            child2.append(parent1[i] if i < len(parent1) else parent2[i])
+            
+    return child1, child2
+
+def local_improve(individual: List[float], iterations: int = 5) -> List[float]:
+    """Apply local hill-climbing improvement to a solution."""
+    current = individual.copy()
+    current_fitness = calculate_c2(current)
+    
+    for _ in range(iterations):
+        # Try small perturbations to find better neighbors
+        candidate = current.copy()
+        idx = np.random.randint(len(candidate))
+        # Small random change
+        delta = np.random.normal(0, 0.05 * np.mean(candidate) if np.mean(candidate) > 0 else 0.01)
+        candidate[idx] = max(0.0, candidate[idx] + delta)
+        
+        candidate_fitness = calculate_c2(candidate)
+        if candidate_fitness > current_fitness:
+            current = candidate
+            current_fitness = candidate_fitness
+    
+    return current
+
+def tournament_selection(population: List[List[float]], 
+                        fitness_scores: List[float], 
+                        tournament_size: int = 3) -> List[float]:
+    """Select an individual using tournament selection with elitism."""
+    if len(population) <= tournament_size:
+        tournament_indices = list(range(len(population)))
+    else:
+        tournament_indices = np.random.choice(len(population), 
+                                             size=tournament_size, 
+                                             replace=False)
+    
+    # Select the best from tournament
+    best_idx = tournament_indices[np.argmax([fitness_scores[i] for i in tournament_indices])]
+    return population[best_idx].copy()
+
+def evolve_generation(population: List[List[float]], 
+                     fitness_scores: List[float],
+                     generation: int,
+                     max_generations: int) -> List[List[float]]:
+    """Evolve one generation with adaptive parameters."""
+    new_population = []
+    pop_size = len(population)
+    
+    # Elitism: keep best individual
+    best_idx = np.argmax(fitness_scores)
+    new_population.append(population[best_idx].copy())
+    
+    # Adaptive mutation rate based on generation
+    if generation < max_generations * 0.3:
+        mutation_rate = 0.2  # High exploration
+        mutation_strength = 0.3
+    elif generation < max_generations * 0.7:
+        mutation_rate = 0.1  # Balanced
+        mutation_strength = 0.15
+    else:
+        mutation_rate = 0.05  # High exploitation
+        mutation_strength = 0.08
+    
+    # Generate rest through selection, crossover, and mutation
+    for _ in range(pop_size - 1):
+        # Selection
+        parent1 = tournament_selection(population, fitness_scores)
+        parent2 = tournament_selection(population, fitness_scores)
+        
+        # Crossover
+        child1, child2 = crossover(parent1, parent2)
+        
+        # Mutation
+        child1 = mutate_individual(child1, mutation_rate, mutation_strength)
+        child2 = mutate_individual(child2, mutation_rate, mutation_strength)
+        
+        # Local improvement
+        child1 = local_improve(child1, 3)
+        child2 = local_improve(child2, 3)
+        
+        new_population.extend([child1, child2])
+    
+    # Trim to exact population size
+    return new_population[:pop_size]
+
+def construct_function() -> List[float]:
+    """
+    Advanced evolutionary algorithm to find step-function with high C2 value.
+    
+    Returns:
+        List of step heights that maximize C2
+    """
+    # Parameters
+    initial_generations = 20
+    fine_generations = 30
+    initial_individual_length = 500  # Increased precision
+    fine_individual_length = 2000   # Even finer resolution
+    
+    best_fitness = -float('inf')
+    best_individual = None
+    
+    # Phase 1: Coarse resolution exploration
+    print("Phase 1: Coarse resolution exploration")
+    population_coarse = [generate_harmonic_individual(initial_individual_length) 
+                        for _ in range(10)]
+    
+    for gen in range(initial_generations):
+        # Evaluate fitness
+        fitness_scores = [calculate_c2(individual) for individual in population_coarse]
+        
+        # Track best
+        max_fitness = max(fitness_scores)
+        if max_fitness > best_fitness:
+            best_fitness = max_fitness
+            best_individual = population_coarse[fitness_scores.index(max_fitness)].copy()
+        
+        # Print progress every 5 generations
+        if gen % 5 == 0:
+            print(f"Generation {gen}: Best C2 = {best_fitness:.6f}")
+        
+        # Evolve
+        population_coarse = evolve_generation(population_coarse, fitness_scores, gen, initial_generations)
+    
+    # Phase 2: Fine resolution optimization
+    print("Phase 2: Fine resolution optimization")
+    # Start with best from coarse phase
+    seed_individual = best_individual.copy() if best_individual is not None else generate_harmonic_individual(fine_individual_length)
+    
+    # Create population around the best solution with refined individuals
+    population_fine = [seed_individual]
+    # Add some variation to help with local search
+    for _ in range(9):
+        # Perturb the seed slightly
+        individual = mutate_individual(seed_individual, 0.1, 0.1)
+        # Try local improvement
+        individual = local_improve(individual, 5)
+        population_fine.append(individual)
+    
+    for gen in range(fine_generations):
+        # Evaluate fitness
+        fitness_scores = [calculate_c2(individual) for individual in population_fine]
+        
+        # Track best
+        max_fitness = max(fitness_scores)
+        if max_fitness > best_fitness:
+            best_fitness = max_fitness
+            best_individual = population_fine[fitness_scores.index(max_fitness)].copy()
+        
+        # Print progress every 5 generations
+        if gen % 5 == 0:
+            print(f"Fine Generation {gen}: Best C2 = {best_fitness:.6f}")
+        
+        # Evolve
+        population_fine = evolve_generation(population_fine, fitness_scores, gen, fine_generations)
+    
+    # Final local refinement
+    if best_individual is not None:
+        best_individual = local_improve(best_individual, 10)
+        final_fitness = calculate_c2(best_individual)
+        if final_fitness > best_fitness:
+            best_fitness = final_fitness
+    
+    # Return the best individual found
+    return best_individual if best_individual is not None else []
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

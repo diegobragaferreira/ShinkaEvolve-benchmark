@@ -1,0 +1,74 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances efficiently using scipy
+        distances = pdist(points)
+
+        # Return negative ratio (since we want to maximize ratio, we minimize negative ratio)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    # Create initial grid points with better spacing
+    n = 16
+    d = 2
+
+    # Initialize points on a regular 4x4 grid scaled to [0.1,0.9] x [0.1,0.9] to avoid tight boundaries
+    grid_size = int(np.sqrt(n))
+    x_vals = np.linspace(0.1, 0.9, grid_size)
+    y_vals = np.linspace(0.1, 0.9, grid_size)
+
+    points_grid = np.array([[x, y] for x in x_vals for y in y_vals])
+
+    # Add some random perturbations to avoid degenerate cases - use smaller perturbations initially
+    np.random.seed(42)
+    noise = np.random.normal(0, 0.02, points_grid.shape)
+    points_init = points_grid + noise
+    points_init = np.clip(points_init, 0, 1)
+
+    # Flatten initial points for optimization
+    x0 = points_init.flatten()
+
+    # Define bounds (all coordinates between 0 and 1)
+    bounds = [(0, 1) for _ in range(2*n)]
+
+    # Use L-BFGS-B optimization method which handles bounds well and is efficient for this problem size
+    result = minimize(
+        objective,
+        x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+    )
+
+    # Reshape result back to points
+    final_points = result.x.reshape(-1, 2)
+
+    return final_points
+
+
+# EVOLVE-BLOCK-END

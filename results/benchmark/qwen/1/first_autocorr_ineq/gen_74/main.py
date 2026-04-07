@@ -1,0 +1,242 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+from scipy.optimize import linprog
+import random
+from typing import List, Optional, Tuple
+import multiprocessing as mp
+from functools import partial
+import time
+
+# Set a fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_convolution_fft(sequence: np.ndarray) -> np.ndarray:
+    """Compute convolution using FFT for efficiency."""
+    n = len(sequence)
+    padded_seq = np.pad(sequence, (0, n - 1), 'constant')
+    conv_result = np.real(ifft(fft(padded_seq) * np.conj(fft(sequence))))
+    return conv_result[:2*n - 1]
+
+def compute_c1(sequence: np.ndarray) -> float:
+    """Compute C₁ constant using FFT-based convolution."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+    
+    conv = compute_convolution_fft(sequence)
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence) ** 2
+    
+    if sum_sq == 0:
+        return float('inf')
+        
+    c1 = 2 * n * max_conv / sum_sq
+    return c1
+
+def compute_inv_c1(sequence: np.ndarray) -> float:
+    """Compute 1/C₁ for the given sequence."""
+    c1 = compute_c1(sequence)
+    if c1 == 0:
+        return float('inf')
+    return 1.0 / c1
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+
+    # Precompute the convolution constraint matrix
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints
+    a_ub_nonneg = -np.eye(n)
+    b_ub_nonneg = np.zeros(n)
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    try:
+        result = linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        if result.success:
+            g_sequence = result.x
+            return g_sequence
+        else:
+            return None
+    except Exception:
+        return None
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using LP optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    
+    if sum_sequence < 1e-10:
+        return None
+        
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    
+    try:
+        conv_result = compute_convolution_fft(np.array(normalized_sequence))
+        rhs = np.max(conv_result[:2*n-1])
+    except Exception:
+        return None
+    
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+        
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+        
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def mutate_individual(individual: List[float], mutation_rate: float = 0.1) -> List[float]:
+    """Mutate an individual sequence with a certain probability."""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian noise with bounded support
+            mutated[i] = max(0, mutated[i] + np.random.normal(0, 0.1 * mutated[i] if mutated[i] != 0 else 1))
+    return mutated
+
+def crossover(parent1: List[float], parent2: List[float]) -> List[float]:
+    """Perform single-point crossover between two individuals."""
+    if len(parent1) != len(parent2):
+        raise ValueError("Parents must have the same length")
+
+    point = random.randint(1, len(parent1) - 1)
+    child = parent1[:point] + parent2[point:]
+    return child
+
+def tournament_selection(population: List[List[float]], fitnesses: List[float], tournament_size: int = 3) -> List[float]:
+    """Select an individual using tournament selection."""
+    selected_indices = random.sample(range(len(population)), tournament_size)
+    best_index = max(selected_indices, key=lambda i: fitnesses[i])
+    return population[best_index].copy()
+
+def local_refinement(sequence: List[float], max_iter: int = 10) -> List[float]:
+    """Apply local refinement to improve a sequence."""
+    current = sequence.copy()
+    for _ in range(max_iter):
+        improved = get_good_direction_to_move_into(current)
+        if improved is not None:
+            current = improved
+        else:
+            break
+    return current
+
+def evolve_population(population: List[List[float]], fitnesses: List[float], 
+                      elite_size: int = 2, mutation_rate: float = 0.1) -> List[List[float]]:
+    """Evolve a population using genetic operators."""
+    # Sort by fitness descending
+    sorted_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
+    elite = [population[i] for i in sorted_indices[:elite_size]]
+    
+    new_population = elite.copy()
+    
+    while len(new_population) < len(population):
+        parent1 = tournament_selection(population, fitnesses)
+        parent2 = tournament_selection(population, fitnesses)
+        child = crossover(parent1, parent2)
+        child = mutate_individual(child, mutation_rate)
+        new_population.append(child)
+        
+    return new_population
+
+def evaluate_fitness(sequence: List[float]) -> float:
+    """Evaluate the fitness (inverse C1) of a sequence."""
+    # Ensure minimum sum
+    if sum(sequence) < 0.01:
+        return 0
+    return compute_inv_c1(np.array(sequence))
+
+def generate_initial_population(pop_size: int, seq_len: int) -> List[List[float]]:
+    """Generate an initial population of sequences."""
+    population = []
+    for _ in range(pop_size):
+        # Randomly initialize with exponential distribution to encourage sparsity
+        individual = np.random.exponential(scale=1.0, size=seq_len).tolist()
+        # Normalize to have reasonable total weight
+        total = sum(individual)
+        if total > 0:
+            individual = [x / total * 100 for x in individual]
+        population.append(individual)
+    return population
+
+def multi_start_evolution(max_generations: int = 50, pop_size: int = 50, 
+                         seq_len: int = 500, num_starts: int = 5) -> List[float]:
+    """Run multiple evolutionary starts and return the best solution."""
+    best_individual = None
+    best_fitness = -float('inf')
+    
+    for start in range(num_starts):
+        # Each start uses a different sequence length and initialization
+        current_seq_len = max(seq_len - 100 + random.randint(0, 200), 100)
+        population = generate_initial_population(pop_size, current_seq_len)
+        
+        for gen in range(max_generations):
+            # Evaluate fitness
+            fitnesses = [evaluate_fitness(ind) for ind in population]
+            
+            # Track best individual
+            max_fitness_idx = np.argmax(fitnesses)
+            if fitnesses[max_fitness_idx] > best_fitness:
+                best_fitness = fitnesses[max_fitness_idx]
+                best_individual = population[max_fitness_idx].copy()
+            
+            # Local refinement every few generations
+            if gen % 5 == 0:
+                for i in range(len(population)):
+                    population[i] = local_refinement(population[i], max_iter=2)
+            
+            # Evolve population
+            population = evolve_population(population, fitnesses, 
+                                          elite_size=2, mutation_rate=0.1)
+        
+        # Final refinement of best from this start
+        if best_individual is not None:
+            best_individual = local_refinement(best_individual, max_iter=5)
+            final_fitness = evaluate_fitness(best_individual)
+            if final_fitness > best_fitness:
+                best_fitness = final_fitness
+    
+    return best_individual if best_individual is not None else [1.0]
+
+def search_for_best_sequence() -> list[float]:
+    """Main function to search for the best coefficient sequence."""
+    start_time = time.time()
+    best_sequence = multi_start_evolution(max_generations=30, pop_size=30, seq_len=300, num_starts=3)
+    end_time = time.time()
+    
+    # If no valid solution found or too slow, fallback to simple method
+    if len(best_sequence) == 0 or end_time - start_time > 170:
+        n = random.randint(100, 1000)
+        best_sequence = [random.random() for _ in range(n)]
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

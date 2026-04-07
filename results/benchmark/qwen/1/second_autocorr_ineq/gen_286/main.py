@@ -1,0 +1,344 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+from numba import jit
+import time
+import math
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Fast Numba-based autoconvolution computation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Fast Numba-based C2 computation with proper numerical integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # For L2 norm squared using proper trapezoidal integration
+    if len(g_vals) >= 2:
+        # Use trapezoidal rule for integration of g^2
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq = 0.0
+        for i in range(len(g_vals)):
+            if i == 0 or i == len(g_vals) - 1:
+                g_l2_sq += g_vals[i] * g_vals[i]
+            else:
+                g_l2_sq += 2.0 * g_vals[i] * g_vals[i]
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2 with numerical stability checks
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def compute_convolution_structure(f_values):
+    """Compute convolution and return structured norms"""
+    # Ensure non-negative values
+    f = np.maximum(f_values, 0.0)
+    
+    # Compute autoconvolution g = f * f (discrete convolution)
+    g = convolve(f, f, mode='full')
+    
+    # Extract the central portion that represents the main interval
+    n = len(f)
+    middle_idx = n - 1
+    half_width = n
+    
+    # Take the central part of the convolution
+    g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+    
+    # Compute the norms using more accurate integration approach
+    g_abs = np.abs(g_centered)
+    
+    # ||g||₂² - integrate using proper trapezoidal rule 
+    # Manually compute trapezoidal integration for g^2
+    if len(g_centered) >= 2:
+        g_squared = g_centered ** 2
+        h = 1.0 / (len(g_centered) - 1) if len(g_centered) > 1 else 0.001
+        g_l2_sq = g_squared[0] + g_squared[-1]
+        for i in range(1, len(g_squared) - 1):
+            g_l2_sq += 2 * g_squared[i]
+        g_l2_sq *= h / 2.0
+    else:
+        g_l2_sq = g_centered[0]**2 if len(g_centered) > 0 else 0.0
+    
+    # ||g||₁ - sum of absolute values
+    norm_g1 = np.sum(g_abs)
+    
+    # ||g||∞ - maximum absolute value
+    norm_ginf = np.max(g_abs)
+    
+    return g_l2_sq, norm_g1, norm_ginf
+
+def evaluate_c2_structured(f_values):
+    """Structured evaluation of C2 with better numerical handling"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_values, 0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Compute the norms directly
+        norm_g2_sq, norm_g1, norm_ginf = compute_convolution_structure(f_vals)
+        
+        # Compute C2 with numerical stability
+        if norm_g1 > 1e-15 and norm_ginf > 1e-15:
+            c2 = norm_g2_sq / (norm_g1 * norm_ginf)
+        else:
+            c2 = 0.0
+        
+        return c2
+    except Exception as e:
+        return 0.0
+
+def generate_fourier_pattern(n_steps):
+    """Generate step function based on Fourier series pattern for better convolution properties"""
+    # Create a pattern that emphasizes constructive interference in convolution
+    pattern = np.zeros(n_steps)
+    
+    # Mix of frequencies to create good convolution behavior
+    frequencies = [1, 2, 3, 4, 5, 8, 12]
+    amplitudes = [1.0, 0.8, 0.6, 0.5, 0.4, 0.3, 0.2]
+    
+    x = np.linspace(0, 2*np.pi, n_steps)
+    
+    for freq, amp in zip(frequencies, amplitudes):
+        pattern += amp * np.sin(freq * x) + amp * np.cos(freq * x)
+    
+    # Add some randomness for diversity
+    pattern += np.random.normal(0, 0.1, n_steps)
+    
+    # Ensure non-negative values and normalize
+    pattern = np.maximum(pattern, 0)
+    if np.max(pattern) > 0:
+        pattern = pattern / np.max(pattern) * 2.0
+    
+    return pattern
+
+def generate_bump_pattern(n_steps):
+    """Generate a bump-like pattern with sharp transitions that promote high convolution"""
+    # Create a pattern with prominent peaks and valleys
+    pattern = np.zeros(n_steps)
+    
+    # Place some prominent bumps
+    num_bumps = min(8, n_steps // 10)
+    
+    for i in range(num_bumps):
+        # Place bump at random positions
+        pos = np.random.randint(0, n_steps)
+        bump_width = max(1, n_steps // 20)
+        
+        # Create Gaussian-like bump
+        x = np.arange(n_steps)
+        pattern += np.exp(-((x - pos)**2) / (2 * bump_width**2)) * (0.5 + 0.5 * np.random.random())
+    
+    # Add some smoothing
+    kernel = np.ones(5) / 5
+    pattern = np.convolve(pattern, kernel, mode='same')
+    
+    # Ensure non-negative
+    pattern = np.maximum(pattern, 0)
+    
+    # Normalize for good range
+    if np.max(pattern) > 0:
+        pattern = pattern / np.max(pattern) * 2.0
+    
+    return pattern
+
+def generate_sparse_pattern(n_steps):
+    """Generate sparse, high-value pattern that maximizes convolution peaks"""
+    # Create a pattern with mostly low values and a few high values
+    pattern = np.ones(n_steps) * 0.1
+    
+    # Place some high-value peaks
+    num_peaks = min(10, n_steps // 15)
+    peak_positions = np.random.choice(n_steps, num_peaks, replace=False)
+    
+    for pos in peak_positions:
+        # Create a peak with some spread
+        peak_height = 1.0 + 0.5 * np.random.random()
+        spread = max(1, n_steps // 30)
+        
+        # Apply a Gaussian-like spreading
+        x = np.arange(n_steps)
+        spread_pattern = np.exp(-((x - pos)**2) / (2 * spread**2))
+        pattern += spread_pattern * peak_height
+    
+    # Ensure non-negative
+    pattern = np.maximum(pattern, 0)
+    
+    return pattern
+
+def generate_wavelet_pattern(n_steps):
+    """Generate wavelet-like pattern for multi-scale convolution enhancement"""
+    # Create a pattern resembling wavelets
+    pattern = np.zeros(n_steps)
+    
+    # Add several multi-scale structures
+    scales = [n_steps//20, n_steps//15, n_steps//10, n_steps//5]
+    
+    for scale in scales:
+        if scale > 1:
+            # Create wavelet-like pattern
+            x = np.linspace(-2, 2, min(scale * 2, n_steps))
+            wavelet = np.exp(-x**2/2) * np.cos(3*x)
+            wavelet = np.maximum(wavelet, 0)
+            
+            # Place in random positions
+            start_pos = np.random.randint(0, max(0, n_steps - len(wavelet)))
+            end_pos = min(start_pos + len(wavelet), n_steps)
+            pattern[start_pos:end_pos] += wavelet[:end_pos-start_pos]
+    
+    # Add some noise and ensure non-negativity
+    pattern += np.random.normal(0, 0.05, n_steps)
+    pattern = np.maximum(pattern, 0)
+    
+    # Normalize
+    if np.max(pattern) > 0:
+        pattern = pattern / np.max(pattern) * 2.0
+    
+    return pattern
+
+def create_structured_initialization(n_steps):
+    """Create a structured initial population with multiple good patterns"""
+    # Generate several diverse initial patterns
+    patterns = []
+    
+    # Fourier pattern
+    patterns.append(generate_fourier_pattern(n_steps))
+    
+    # Bump pattern
+    patterns.append(generate_bump_pattern(n_steps))
+    
+    # Sparse pattern
+    patterns.append(generate_sparse_pattern(n_steps))
+    
+    # Wavelet pattern  
+    patterns.append(generate_wavelet_pattern(n_steps))
+    
+    # Basic uniform pattern
+    patterns.append(np.ones(n_steps) * 0.5)
+    
+    # Evaluate each pattern and return the best
+    best_pattern = patterns[0]
+    best_c2 = -1.0
+    
+    for pattern in patterns:
+        c2 = evaluate_c2_structured(pattern)
+        if c2 > best_c2:
+            best_c2 = c2
+            best_pattern = pattern.copy()
+    
+    return best_pattern
+
+def convex_optimization_step(initial_params, max_iter=50):
+    """Apply convex optimization approach to refine the solution"""
+    def objective(x):
+        return -evaluate_c2_structured(x)
+    
+    # Use L-BFGS-B for local refinement as it's good for this kind of smooth optimization
+    try:
+        result = minimize(
+            objective, 
+            initial_params, 
+            method='L-BFGS-B', 
+            bounds=[(0, 3.0) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+        
+        if result.success:
+            return result.x
+    except:
+        pass
+    
+    return initial_params
+
+def hybrid_convex_evolutionary_optimization():
+    """Hybrid approach combining structured initialization with convex optimization"""
+    # Determine problem size
+    n_steps = np.random.randint(500, 3000)
+    
+    # Create structured initial solution
+    initial_solution = create_structured_initialization(n_steps)
+    
+    # Apply convex optimization to refine
+    refined_solution = convex_optimization_step(initial_solution, max_iter=100)
+    
+    # Additional fine-tuning with local search
+    c2_before = evaluate_c2_structured(refined_solution)
+    
+    # Try a few more local refinements
+    for _ in range(3):
+        # Small perturbations to explore neighborhood
+        perturbed = refined_solution + np.random.normal(0, 0.05, len(refined_solution))
+        perturbed = np.maximum(perturbed, 0)
+        
+        c2_perturbed = evaluate_c2_structured(perturbed)
+        if c2_perturbed > c2_before:
+            refined_solution = perturbed
+            c2_before = c2_perturbed
+    
+    return refined_solution
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using hybrid convex-evolutionary optimization."""
+    start_time = time.time()
+
+    # Use hybrid convex evolutionary optimization
+    optimized_params = hybrid_convex_evolutionary_optimization()
+
+    # Clip negative values to zero
+    f_values = np.maximum(optimized_params, 0).tolist()
+
+    end_time = time.time()
+
+    # Verify the result
+    c2_value = evaluate_c2_structured(optimized_params)
+
+    print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+    print(f"C2 achieved: {c2_value}")
+
+    return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

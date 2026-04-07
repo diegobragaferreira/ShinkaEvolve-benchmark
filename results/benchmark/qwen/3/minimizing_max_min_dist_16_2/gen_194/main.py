@@ -1,0 +1,510 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import math
+from scipy.spatial.distance import cdist
+import time
+from typing import List, Tuple, Optional, Callable
+import warnings
+
+class PointConfigurationOptimizer:
+    """Structured optimizer for 16-point configuration with enhanced performance."""
+
+    def __init__(self):
+        """Initialize optimizer with configurable parameters."""
+        # Optimization parameters
+        self.max_iterations = 5000
+        self.initial_temp = 0.1
+        self.cooling_rate = 0.9995
+        self.min_temp = 1e-8
+        self.improvement_threshold = 50
+        self.stagnation_threshold = 100
+
+        # Initialization strategies
+        self.random_seed = 42
+        self.noise_levels = [0.002, 0.005, 0.01, 0.02]
+
+        # Penalty parameters
+        self.boundary_penalty_weight = 10.0
+        self.boundary_threshold = 0.01
+
+        # Refinement parameters
+        self.refinement_iterations = 2000
+        self.refinement_temp = 0.02
+
+    def compute_min_max_ratio(self, points: np.ndarray) -> float:
+        """Computes the ratio of minimum to maximum pairwise distances."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+        dmin = np.min(distances)
+        dmax = np.max(distances)
+
+        # Handle edge case where all points are identical
+        if dmax == 0:
+            return 0.0
+
+        return dmin / dmax
+
+    def compute_boundary_penalty(self, points: np.ndarray) -> float:
+        """Computes penalty for points near boundaries with improved scaling."""
+        penalty = 0.0
+        for point in points:
+            # Penalty for being close to any boundary
+            dist_to_boundaries = [
+                point[0],  # distance to left boundary
+                1 - point[0],  # distance to right boundary
+                point[1],  # distance to bottom boundary
+                1 - point[1]   # distance to top boundary
+            ]
+            min_dist = min(dist_to_boundaries)
+
+            # Soft penalty that increases smoothly as points approach boundaries
+            if min_dist < self.boundary_threshold:
+                # Use exponential penalty for smoother transition
+                penalty += self.boundary_penalty_weight * np.exp(-min_dist / (self.boundary_threshold * 0.5)) * (self.boundary_threshold - min_dist)
+        return penalty
+
+    def evaluate_with_penalty(self, points: np.ndarray) -> float:
+        """Evaluate ratio with boundary penalty applied."""
+        ratio = self.compute_min_max_ratio(points)
+        penalty = self.compute_boundary_penalty(points)
+        return ratio - penalty
+
+    def generate_spherical_voronoi_initialization(self) -> np.ndarray:
+        """Generate initial configuration using spherical Voronoi sampling."""
+        # Create points distributed on a sphere using Fibonacci-like distribution
+        # Then project them to 2D using stereographic projection
+        points = []
+        n = 16
+
+        # Generate Fibonacci spiral points on sphere
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            # Uniform distribution on sphere using Fibonacci method
+            z = 1 - (i / (n - 1)) * 2  # z coordinate from -1 to 1
+            radius = np.sqrt(1 - z*z)
+            theta = np.arccos(z)
+            phi = (i * golden_ratio) % (2 * np.pi)
+
+            # Convert to Cartesian coordinates on unit sphere
+            x = radius * np.cos(phi)
+            y = radius * np.sin(phi)
+            z_coord = z
+
+            points.append([x, y, z_coord])
+
+        points = np.array(points)
+
+        # Project from sphere to 2D using stereographic projection
+        projected_points = []
+        for point in points:
+            x, y, z = point
+            # Stereographic projection from south pole (0,0,-1)
+            # This maps the sphere to the plane
+            if z == -1:
+                projected_points.append([0, 0])
+            else:
+                # Project from south pole
+                scale = 1 / (1 - z)
+                px = x * scale
+                py = y * scale
+                projected_points.append([px, py])
+
+        projected_points = np.array(projected_points)
+
+        # Normalize to fit in [0,1] x [0,1]
+        x_range = np.max(projected_points[:, 0]) - np.min(projected_points[:, 0])
+        y_range = np.max(projected_points[:, 1]) - np.min(projected_points[:, 1])
+
+        if x_range > 0:
+            projected_points[:, 0] = (projected_points[:, 0] - np.min(projected_points[:, 0])) / x_range
+        if y_range > 0:
+            projected_points[:, 1] = (projected_points[:, 1] - np.min(projected_points[:, 1])) / y_range
+
+        # Scale to [0.05, 0.95] range
+        projected_points[:, 0] = projected_points[:, 0] * 0.9 + 0.05
+        projected_points[:, 1] = projected_points[:, 1] * 0.9 + 0.05
+
+        return projected_points
+
+    def generate_hexagonal_with_rotation(self) -> np.ndarray:
+        """Generate hexagonal grid with strategic rotation and perturbations."""
+        points = []
+        sqrt3 = np.sqrt(3)
+
+        # Create a 4x4 hexagonal pattern with rotation
+        for i in range(4):
+            for j in range(4):
+                x = j + 0.5 * (i % 2)
+                y = i * sqrt3 / 2
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Normalize to [0,1] x [0,1]
+        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+
+        if x_range > 0:
+            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+        if y_range > 0:
+            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+
+        # Apply rotation to break symmetries
+        rotation_angle = np.pi / 8  # 22.5 degrees
+        cos_a, sin_a = np.cos(rotation_angle), np.sin(rotation_angle)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+
+        # Apply rotation to all points
+        rotated_points = np.dot(points, rotation_matrix.T)
+
+        # Normalize again after rotation
+        x_range_rot = np.max(rotated_points[:, 0]) - np.min(rotated_points[:, 0])
+        y_range_rot = np.max(rotated_points[:, 1]) - np.min(rotated_points[:, 1])
+
+        if x_range_rot > 0:
+            rotated_points[:, 0] = (rotated_points[:, 0] - np.min(rotated_points[:, 0])) / x_range_rot
+        if y_range_rot > 0:
+            rotated_points[:, 1] = (rotated_points[:, 1] - np.min(rotated_points[:, 1])) / y_range_rot
+
+        # Scale to [0.05, 0.95] range
+        rotated_points[:, 0] = rotated_points[:, 0] * 0.9 + 0.05
+        rotated_points[:, 1] = rotated_points[:, 1] * 0.9 + 0.05
+
+        # Apply position-dependent perturbations to break remaining symmetries
+        np.random.seed(self.random_seed)
+        for i in range(len(rotated_points)):
+            # Different perturbation strengths based on position
+            row = i // 4
+            col = i % 4
+            base_noise = 0.008
+
+            # Apply different noise patterns for different positions
+            noise_x = np.random.normal(0, base_noise * (1 + 0.1 * row + 0.1 * col), 1)[0]
+            noise_y = np.random.normal(0, base_noise * (1 + 0.1 * row + 0.1 * col), 1)[0]
+
+            rotated_points[i, 0] += noise_x
+            rotated_points[i, 1] += noise_y
+
+            # Ensure bounds
+            rotated_points[i, 0] = np.clip(rotated_points[i, 0], 0, 1)
+            rotated_points[i, 1] = np.clip(rotated_points[i, 1], 0, 1)
+
+        return rotated_points[:16]
+
+    def generate_triangular_lattice(self) -> np.ndarray:
+        """Generate triangular lattice pattern with proper normalization."""
+        points = []
+        sqrt3 = np.sqrt(3)
+
+        # Create triangular lattice with 4x4 grid
+        spacing_x = 1.0 / 3.0
+        spacing_y = spacing_x * sqrt3 / 2
+
+        for i in range(4):
+            for j in range(4):
+                x = j * spacing_x
+                if i % 2 == 1:
+                    x += spacing_x / 2
+                y = i * spacing_y
+                points.append([x, y])
+
+        points = np.array(points[:16])
+
+        # Normalize to [0,1] x [0,1]
+        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+
+        if x_range > 0:
+            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+        if y_range > 0:
+            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+
+        # Scale to [0.05, 0.95] range
+        points[:, 0] = points[:, 0] * 0.9 + 0.05
+        points[:, 1] = points[:, 1] * 0.9 + 0.05
+
+        return points
+
+    def generate_random_initialization(self) -> np.ndarray:
+        """Generate random initialization."""
+        np.random.seed(self.random_seed)
+        return np.random.rand(16, 2)
+
+    def initialize_strategies(self) -> List[Tuple[str, np.ndarray]]:
+        """Initialize multiple starting configurations using different strategies."""
+        strategies = []
+
+        # Strategy 1: Spherical Voronoi based initialization
+        try:
+            sv_points = self.generate_spherical_voronoi_initialization()
+            strategies.append(("sv", sv_points))
+        except Exception as e:
+            warnings.warn(f"Spherical Voronoi initialization failed: {str(e)}")
+            # Fallback if spherical Voronoi fails
+            base_grid = self.generate_hexagonal_with_rotation()
+            strategies.append(("fallback_sv", base_grid))
+
+        # Strategy 2: Rotated hexagonal grid
+        try:
+            hex_points = self.generate_hexagonal_with_rotation()
+            strategies.append(("hex_rot", hex_points))
+        except Exception as e:
+            warnings.warn(f"Hexagonal rotation initialization failed: {str(e)}")
+            base_grid = self.generate_hexagonal_with_rotation()
+            strategies.append(("fallback_hex_rot", base_grid))
+
+        # Strategy 3: Triangular lattice
+        try:
+            tri_points = self.generate_triangular_lattice()
+            strategies.append(("tri", tri_points))
+        except Exception as e:
+            warnings.warn(f"Triangular lattice initialization failed: {str(e)}")
+            base_grid = self.generate_hexagonal_with_rotation()
+            strategies.append(("fallback_tri", base_grid))
+
+        # Strategy 4: Random initialization
+        strategies.append(("random", self.generate_random_initialization()))
+
+        # Strategy 5: Hexagonal with less noise
+        try:
+            base_grid = self.generate_hexagonal_with_rotation()
+            less_noisy = base_grid + np.random.normal(0, 0.002, base_grid.shape)
+            less_noisy = np.clip(less_noisy, 0, 1)
+            strategies.append(("hex_less_noise", less_noisy))
+        except Exception as e:
+            warnings.warn(f"Less noisy hexagonal initialization failed: {str(e)}")
+            base_grid = self.generate_hexagonal_with_rotation()
+            strategies.append(("fallback_less_noise", base_grid))
+
+        return strategies
+
+    def neighborhood_move(self, current_points: np.ndarray, point_indices: List[int], step_size: float = 0.01) -> np.ndarray:
+        """Performs a coordinated move on a cluster of points."""
+        new_points = current_points.copy()
+
+        # Simple centroid-based cluster movement for better exploration
+        centroid = np.mean(current_points[point_indices], axis=0)
+
+        # Generate movement vector
+        move_vector = np.random.normal(0, step_size, 2)
+
+        # Apply movement to selected points
+        for idx in point_indices:
+            new_points[idx] = current_points[idx] + move_vector
+
+            # Boundary avoidance - push points away from boundaries
+            for dim in range(2):
+                if new_points[idx, dim] < 0.01:
+                    # Push away from left boundary
+                    new_points[idx, dim] = 0.01 + np.random.uniform(0, 0.005)
+                elif new_points[idx, dim] > 0.99:
+                    # Push away from right boundary
+                    new_points[idx, dim] = 0.99 - np.random.uniform(0, 0.005)
+
+        return new_points
+
+    def adaptive_simulated_annealing(self, initial_points: np.ndarray) -> Tuple[np.ndarray, float]:
+        """Enhanced simulated annealing with adaptive cooling and neighborhood moves."""
+        current_points = initial_points.copy()
+        current_ratio = self.evaluate_with_penalty(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        temperature = self.initial_temp
+        cooling_rate = self.cooling_rate
+        min_temp = self.min_temp
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        stagnation_counter = 0
+
+        # Progress tracking variables
+        last_best_ratio = current_ratio
+        progress_stagnation = 0
+        max_progress_stagnation = 100
+
+        for iteration in range(self.max_iterations):
+            # Adaptive temperature adjustment based on progress and iteration stage
+            if iteration % 100 == 0 and iteration > 0:
+                # Check for improvement
+                ratio_diff = current_ratio - last_best_ratio
+                if ratio_diff > 1e-8:
+                    # There was an improvement - speed up cooling slightly
+                    cooling_rate = min(cooling_rate * 1.005, 0.9998)
+                    last_best_ratio = current_ratio
+                    progress_stagnation = 0
+                else:
+                    # No improvement - slow down cooling and track stagnation
+                    cooling_rate = max(cooling_rate * 0.99, 0.999)
+                    progress_stagnation += 1
+
+                    # If stagnating for too long, restart with higher temperature
+                    if progress_stagnation > max_progress_stagnation:
+                        temperature = min(temperature * 2.0, 0.5)
+                        progress_stagnation = 0
+
+                # Position-dependent temperature adjustment
+                # More aggressive cooling in later phases
+                if iteration > self.max_iterations * 0.7:
+                    cooling_rate = min(cooling_rate * 0.995, 0.9995)
+                elif iteration > self.max_iterations * 0.5:
+                    cooling_rate = min(cooling_rate * 0.998, 0.9997)
+
+            # Decide between single point or neighborhood move
+            if np.random.random() < 0.65:  # 65% chance of neighborhood move
+                # Select random subset of points for neighborhood move
+                num_selected = np.random.randint(2, 6)  # 2 to 5 points
+                point_indices = np.random.choice(len(current_points), size=num_selected, replace=False)
+
+                # Perform neighborhood move
+                new_points = self.neighborhood_move(current_points, point_indices, step_size=temperature * 0.15)
+            else:
+                # Single point move with enhanced strategy
+                new_points = current_points.copy()
+                point_idx = np.random.randint(len(current_points))
+
+                # Choose perturbation type adaptively based on temperature
+                if temperature > 0.05:
+                    # High temperature: use larger, more diverse perturbations
+                    perturbation_type = np.random.choice(['normal', 'uniform', 'exponential'])
+                    if perturbation_type == 'normal':
+                        delta = np.random.normal(0, temperature * 0.15, 2)
+                    elif perturbation_type == 'uniform':
+                        delta = np.random.uniform(-temperature * 0.2, temperature * 0.2, 2)
+                    else:  # exponential
+                        delta = np.random.exponential(temperature * 0.1, 2)
+                        if np.random.random() > 0.5:
+                            delta[0] = -delta[0]
+                        if np.random.random() > 0.5:
+                            delta[1] = -delta[1]
+                else:
+                    # Low temperature: use smaller, precise perturbations
+                    delta = np.random.normal(0, temperature * 0.05, 2)
+
+                new_points[point_idx] = current_points[point_idx] + delta
+
+                # Boundary avoidance with more careful handling
+                for dim in range(2):
+                    if new_points[point_idx, dim] < 0.01:
+                        # Push away from left boundary
+                        new_points[point_idx, dim] = 0.01 + np.random.uniform(0, 0.005)
+                    elif new_points[point_idx, dim] > 0.99:
+                        # Push away from right boundary
+                        new_points[point_idx, dim] = 0.99 - np.random.uniform(0, 0.005)
+
+            # Evaluate new solution
+            new_ratio = self.evaluate_with_penalty(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_points = new_points
+                current_ratio = new_ratio
+
+                if new_ratio > best_ratio:
+                    best_points = new_points.copy()
+                    best_ratio = new_ratio
+                    stagnation_counter = 0
+            else:
+                if np.random.random() < np.exp((new_ratio - current_ratio) / temperature):
+                    current_points = new_points
+                    current_ratio = new_ratio
+                else:
+                    stagnation_counter += 1
+
+            # Adaptive cooling: If no improvement for a while, cool faster
+            if stagnation_counter > self.stagnation_threshold:
+                cooling_rate = min(cooling_rate * 0.99, 0.9999)
+                stagnation_counter = 0
+
+            # Cool down temperature
+            temperature *= cooling_rate
+            if temperature < min_temp:
+                temperature = min_temp
+
+            # Early stopping if we're not improving much
+            recent_improvements.append(1 if new_ratio > current_ratio else 0)
+            if len(recent_improvements) > self.improvement_threshold:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < 2 and iteration > 1000:
+                    break
+
+        return best_points, best_ratio
+
+    def refine_solution(self, points: np.ndarray) -> Tuple[np.ndarray, float]:
+        """Perform refinement on the given solution."""
+        # Temporarily change parameters for refinement phase
+        old_iterations = self.max_iterations
+        old_temp = self.initial_temp
+        old_cooling = self.cooling_rate
+
+        self.max_iterations = self.refinement_iterations
+        self.initial_temp = self.refinement_temp
+        self.cooling_rate = 0.9998  # Slightly faster cooling for refinement
+
+        try:
+            refined_points, refined_ratio = self.adaptive_simulated_annealing(points)
+            return refined_points, refined_ratio
+        finally:
+            # Restore original parameters
+            self.max_iterations = old_iterations
+            self.initial_temp = old_temp
+            self.cooling_rate = old_cooling
+
+    def optimize(self) -> np.ndarray:
+        """Main optimization routine."""
+        # Initialize strategies
+        strategies = self.initialize_strategies()
+
+        # Run optimization from each starting point
+        best_result = None
+        best_score = -np.inf
+
+        for strategy_name, initial_points in strategies:
+            try:
+                optimized_points, score = self.adaptive_simulated_annealing(initial_points)
+
+                if score > best_score:
+                    best_score = score
+                    best_result = optimized_points
+
+            except Exception as e:
+                warnings.warn(f"Optimization failed for strategy {strategy_name}: {str(e)}")
+                continue  # Skip failed runs
+
+        # Final refinement with the best result
+        if best_result is not None:
+            try:
+                final_points, _ = self.refine_solution(best_result)
+                return final_points
+            except Exception as e:
+                warnings.warn(f"Final refinement failed: {str(e)}")
+                pass
+
+        # Fallback to best found if optimization fails
+        if best_result is not None:
+            return best_result
+
+        # Last resort: return a basic hexagonal grid with small perturbation
+        base_grid = self.generate_hexagonal_with_rotation()
+        np.random.seed(self.random_seed)
+        fallback = base_grid + np.random.normal(0, 0.005, base_grid.shape)
+        return np.clip(fallback, 0, 1)
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    optimizer = PointConfigurationOptimizer()
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

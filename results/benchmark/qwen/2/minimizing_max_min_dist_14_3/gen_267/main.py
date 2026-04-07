@@ -1,0 +1,356 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, SphericalVoronoi
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import math
+import random
+from typing import Tuple, List
+
+class SphereVoronoiOptimizer:
+    def __init__(self):
+        self.best_points = None
+        self.best_ratio = 0.0
+        self.dimension = 3
+        self.num_points = 14
+
+    def compute_min_max_ratio(self, points: np.ndarray) -> float:
+        """Compute the ratio of minimum to maximum distances."""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances) if np.max(distances) > 0 else 0
+
+    def icosahedron_vertices(self) -> np.ndarray:
+        """Generate vertices of a regular icosahedron."""
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = []
+        # Add vertices at (±1, ±φ, 0), (0, ±1, ±φ), (±φ, 0, ±1)
+        for i in [1, -1]:
+            for j in [1, -1]:
+                vertices.append([i, j * phi, 0])
+                vertices.append([0, i, j * phi])
+                vertices.append([i * phi, 0, j])
+        return np.array(vertices)
+
+    def project_to_sphere(self, points: np.ndarray) -> np.ndarray:
+        """Project points onto unit sphere."""
+        norms = np.linalg.norm(points, axis=1)
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms[:, np.newaxis]
+
+    def compute_voronoi_entropy(self, points: np.ndarray) -> float:
+        """Compute entropy of Voronoi cell areas to measure uniformity."""
+        try:
+            voronoi = Voronoi(points)
+            # For small point sets, we compute cell areas manually
+            # This is a simplified approximation for our case
+            if len(points) <= 20:
+                # Estimate area using cross products for triangles
+                areas = []
+                for i in range(len(points)):
+                    # Get neighbors in a way that approximates cell boundaries
+                    # Simple estimation via sampling
+                    pass
+                return 0.0  # Placeholder - real implementation would compute actual areas
+            return 0.0
+        except:
+            return 0.0
+
+    def generate_initial_configurations(self, num_configs: int = 5) -> List[np.ndarray]:
+        """Generate multiple diverse initial configurations."""
+        configs = []
+
+        # Base icosahedron configuration
+        ico_vertices = self.icosahedron_vertices()
+        if len(ico_vertices) >= 14:
+            ico_config = ico_vertices[:14].copy()
+        else:
+            ico_config = np.vstack([ico_vertices, ico_vertices[:(14-len(ico_vertices))]]).copy()
+        ico_config = self.project_to_sphere(ico_config)
+        configs.append(ico_config)
+
+        # Alternative configurations: modified icosahedron and random perturbations
+        for i in range(num_configs):
+            np.random.seed(i * 1000)
+            # Start with icosahedron and add noise
+            base_config = ico_config.copy()
+            noise_magnitude = 0.05
+            noise = np.random.normal(0, noise_magnitude, base_config.shape)
+            noisy_config = base_config + noise
+            noisy_config = self.project_to_sphere(noisy_config)
+            configs.append(noisy_config)
+
+        return configs
+
+    def compute_force_field(self, points: np.ndarray) -> np.ndarray:
+        """Compute net force field on each point based on Voronoi geometry and distances."""
+        n = len(points)
+        forces = np.zeros_like(points)
+
+        # Compute approximate Voronoi-based forces
+        # For simplicity in this implementation, we'll use a hybrid approach:
+        # 1. Repulsion based on distance squared (inverse square law)
+        # 2. A global uniformity term based on pairwise differences
+        # 3. Spatial weighting based on neighborhood density
+
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    diff = points[i] - points[j]
+                    dist_sq = np.dot(diff, diff)
+
+                    # Avoid division by zero
+                    if dist_sq > 1e-12:
+                        # Repulsive force inversely proportional to square of distance
+                        # This encourages points to spread out
+                        force_magnitude = 1.0 / (dist_sq * np.sqrt(dist_sq))
+                        force_direction = diff / np.sqrt(dist_sq)
+                        forces[i] += force_magnitude * force_direction
+
+        return forces
+
+    def voronoi_based_optimization(self, initial_points: np.ndarray, max_iter: int = 5000) -> Tuple[np.ndarray, float]:
+        """Optimize points using Voronoi-based particle dynamics with enhanced adaptive cooling."""
+        current_points = initial_points.copy()
+        current_points = self.project_to_sphere(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = self.compute_min_max_ratio(current_points)
+
+        # Enhanced adaptive cooling schedule
+        initial_temp = 0.1
+        min_temp = 1e-8
+        max_stagnation = 1000
+        stagnation_counter = 0
+
+        # Track optimization progress
+        improvement_history = []
+        recent_improvements = []
+
+        # Phase-based cooling rates
+        phase1_cooling = 0.9995  # Early exploration
+        phase2_cooling = 0.9990  # Mid-convergence
+        phase3_cooling = 0.9985  # Late refinement
+
+        def get_cooling_rate(iteration, max_iter):
+            if iteration < max_iter * 0.3:
+                return phase1_cooling
+            elif iteration < max_iter * 0.7:
+                return phase2_cooling
+            else:
+                return phase3_cooling
+
+        # Improved force computation with better directional guidance
+        def compute_enhanced_force_field(points):
+            n = len(points)
+            forces = np.zeros_like(points)
+
+            for i in range(n):
+                for j in range(n):
+                    if i != j:
+                        diff = points[i] - points[j]
+                        dist_sq = np.dot(diff, diff)
+
+                        # Avoid division by zero
+                        if dist_sq > 1e-12:
+                            # Enhanced force with distance-dependent strength
+                            force_magnitude = 1.0 / (dist_sq * np.sqrt(dist_sq))
+                            force_direction = diff / np.sqrt(dist_sq)
+
+                            # Add some directional bias based on distance relationships
+                            # Points that are too close should repel more strongly
+                            if dist_sq < 0.1:
+                                force_magnitude *= 2.0  # Stronger repulsion for close points
+                            elif dist_sq > 0.5:
+                                force_magnitude *= 0.5  # Weaker repulsion for distant points
+
+                            forces[i] += force_magnitude * force_direction
+
+            return forces
+
+        for iteration in range(max_iter):
+            old_points = current_points.copy()
+            old_ratio = self.compute_min_max_ratio(current_points)
+
+            # Enhanced force computation
+            forces = compute_enhanced_force_field(current_points)
+
+            # Adaptive learning rate based on optimization stage
+            if iteration < max_iter * 0.3:
+                learning_rate = 0.02  # Higher for exploration
+            elif iteration < max_iter * 0.7:
+                learning_rate = 0.01  # Medium for convergence
+            else:
+                learning_rate = 0.005  # Lower for refinement
+
+            # Apply forces with momentum-like damping
+            velocities = forces * learning_rate
+            current_points += velocities
+
+            # Project back to sphere
+            current_points = self.project_to_sphere(current_points)
+
+            # Compute new ratio
+            new_ratio = self.compute_min_max_ratio(current_points)
+
+            # Update best if improved
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = current_points.copy()
+                stagnation_counter = 0
+                improvement_history.append(new_ratio)
+            else:
+                stagnation_counter += 1
+
+            # Advanced cooling strategy with phase-aware adjustments
+            temperature = initial_temp * (0.999 ** iteration)
+            temperature = max(min_temp, temperature)
+
+            # Dynamic cooling based on recent performance
+            if len(recent_improvements) >= 50:
+                recent_improvement_rate = np.mean(recent_improvements[-50:])
+                if recent_improvement_rate < 0.02:  # Very slow improvement
+                    # Aggressive cooling to escape local optima
+                    cooling_rate = min(0.9999, get_cooling_rate(iteration, max_iter) * 1.05)
+                elif recent_improvement_rate < 0.05:  # Slow improvement
+                    cooling_rate = min(0.9998, get_cooling_rate(iteration, max_iter) * 1.02)
+                else:  # Fast improvement
+                    cooling_rate = max(0.999, get_cooling_rate(iteration, max_iter) * 0.98)
+            else:
+                cooling_rate = get_cooling_rate(iteration, max_iter)
+
+            # Temperature updates
+            temperature = max(min_temp, temperature * cooling_rate)
+
+            # Add diversity injections with dynamic probability
+            diversification_probability = max(0.05, 0.2 - (iteration / max_iter) * 0.15)
+
+            if stagnation_counter > 0 and stagnation_counter % 200 == 0:
+                if np.random.random() < diversification_probability:
+                    # Apply more aggressive diversification
+                    num_diverse = max(1, len(current_points) // 8)
+                    for _ in range(num_diverse):
+                        idx = np.random.randint(len(current_points))
+                        # Larger perturbation for better diversification
+                        perturbation = np.random.normal(0, 0.015, 3)
+                        current_point = current_points[idx]
+                        projection_factor = np.dot(perturbation, current_point)
+                        perturbation_tangent = perturbation - projection_factor * current_point
+                        current_points[idx] += perturbation_tangent
+                        current_points[idx] = self.project_to_sphere(current_points[idx:idx+1])[0]
+
+            # Track improvements for adaptive behavior
+            improvement = new_ratio - old_ratio
+            recent_improvements.append(1 if improvement > 1e-10 else 0)
+            if len(recent_improvements) > 200:
+                recent_improvements.pop(0)
+
+            # Early stopping with adaptive criteria
+            if stagnation_counter > max_stagnation:
+                break
+
+            # Periodic high-quality local search
+            if iteration > 0 and iteration % 1500 == 0:
+                # Perform more intensive local refinement
+                temp_points = current_points.copy()
+                local_improved = False
+
+                # Try various small adjustments
+                for _ in range(200):
+                    for i in range(len(temp_points)):
+                        for j in range(3):
+                            old_val = temp_points[i, j]
+                            # Try multiple step sizes for better exploration
+                            for delta in [-0.002, -0.0015, -0.001, -0.0005, 0.0005, 0.001, 0.0015, 0.002]:
+                                temp_points[i, j] = old_val + delta
+                                temp_points[i] = self.project_to_sphere(temp_points[i:i+1])[0]
+                                new_ratio = self.compute_min_max_ratio(temp_points)
+                                if new_ratio > best_ratio:
+                                    best_ratio = new_ratio
+                                    best_points = temp_points.copy()
+                                    local_improved = True
+                                else:
+                                    temp_points[i, j] = old_val  # Revert
+
+                if local_improved:
+                    current_points = best_points.copy()
+
+        return best_points, best_ratio
+
+    def local_search_refinement(self, points: np.ndarray, iterations: int = 100) -> np.ndarray:
+        """Perform local search refinement."""
+        current_points = points.copy()
+        current_ratio = self.compute_min_max_ratio(current_points)
+
+        for _ in range(iterations):
+            # Try small adjustments to each coordinate
+            for i in range(len(current_points)):
+                for j in range(3):
+                    old_val = current_points[i, j]
+                    for delta in [-0.0005, 0.0005]:
+                        current_points[i, j] = old_val + delta
+                        current_points[i] = self.project_to_sphere(current_points[i:i+1])[0]
+                        new_ratio = self.compute_min_max_ratio(current_points)
+                        if new_ratio > current_ratio:
+                            current_ratio = new_ratio
+                        else:
+                            current_points[i, j] = old_val  # Revert
+
+        return current_points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    optimizer = SphereVoronoiOptimizer()
+
+    # Generate diverse initial configurations
+    initial_configs = optimizer.generate_initial_configurations(5)
+
+    best_overall_points = None
+    best_overall_ratio = 0.0
+
+    # Try each initial configuration
+    for i, config in enumerate(initial_configs):
+        # Apply Voronoi-based optimization
+        optimized_points, final_ratio = optimizer.voronoi_based_optimization(config, 5000)
+
+        if final_ratio > best_overall_ratio:
+            best_overall_ratio = final_ratio
+            best_overall_points = optimized_points.copy()
+
+    # Final refinement with local search
+    if best_overall_points is not None:
+        best_overall_points = optimizer.local_search_refinement(best_overall_points, 200)
+        final_ratio = optimizer.compute_min_max_ratio(best_overall_points)
+        if final_ratio > best_overall_ratio:
+            best_overall_ratio = final_ratio
+
+    # L-BFGS refinement for final polish
+    def objective_function(x_flat: np.ndarray) -> float:
+        points = x_flat.reshape(-1, 3)
+        return -optimizer.compute_min_max_ratio(points)
+
+    try:
+        x0 = best_overall_points.flatten()
+        result = minimize(
+            objective_function,
+            x0,
+            method='L-BFGS-B',
+            options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+
+        refined_points = result.x.reshape(-1, 3)
+        refined_points = optimizer.project_to_sphere(refined_points)
+        ratio = optimizer.compute_min_max_ratio(refined_points)
+
+        if ratio > best_overall_ratio:
+            best_overall_points = refined_points
+    except:
+        pass
+
+    return best_overall_points
+
+# EVOLVE-BLOCK-END

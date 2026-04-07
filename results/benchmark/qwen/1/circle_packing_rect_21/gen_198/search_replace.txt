@@ -1,0 +1,351 @@
+<NAME>
+add_voronoi_based_mutation_adaptation
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more sophisticated Voronoi-based mutation adaptation that uses the actual Voronoi cell areas to determine how much each circle can be adjusted. The key insight is that in regions with smaller Voronoi cells (more constrained), we should use smaller mutation steps, while in regions with larger Voronoi cells (less constrained), we can use larger steps.
+
+This builds on the existing Voronoi density computation but makes the mutation adaptation more precise by directly using Voronoi cell areas rather than just density estimation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_radius(self, circles: np.ndarray, idx: int, density_scores: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on Voronoi density."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on density - more sophisticated
+        max_delta = 0.01
+        if density_scores is not None and len(density_scores) > idx:
+            # High density means more constraints, use smaller deltas
+            # Normalize density to [0,1] range and invert for delta scaling
+            normalized_density = min(1.0, density_scores[idx] / 10.0)  # Cap at 10 for stability
+            delta_factor = 1.0 - 0.8 * normalized_density  # Reduce delta by up to 80% in dense regions
+            delta = max_delta * delta_factor
+        else:
+            delta = max_delta
+
+        # Random small perturbation
+        delta_r = np.random.uniform(-delta, delta)
+        new_r = old_r + delta_r
+
+        # Ensure positive radius with better clamping
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+=======
+    def mutate_radius(self, circles: np.ndarray, idx: int, voronoi_areas: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on Voronoi cell area."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on Voronoi cell area - more sophisticated
+        max_delta = 0.01
+        delta = max_delta
+
+        if voronoi_areas is not None and len(voronoi_areas) > idx:
+            # Smaller Voronoi areas mean more constrained regions, use smaller deltas
+            # Larger Voronoi areas mean more relaxed regions, use larger deltas
+            # Normalize area relative to average area for stability
+            avg_area = np.mean(voronoi_areas) if len(voronoi_areas) > 0 else 1.0
+            normalized_area = voronoi_areas[idx] / max(avg_area, 1e-8)  # Avoid division by zero
+            # Invert relationship: smaller areas = smaller deltas (more constraint)
+            delta_factor = max(0.1, min(1.0, 1.0 / (normalized_area + 0.1)))  # Prevent extreme values
+            delta = max_delta * delta_factor
+        else:
+            delta = max_delta
+
+        # Random small perturbation with better distribution
+        if np.random.random() < 0.7:  # 70% chance of small change
+            delta_r = np.random.uniform(-delta*0.5, delta*0.5)
+        else:  # 30% chance of larger change
+            delta_r = np.random.uniform(-delta, delta)
+
+        new_r = old_r + delta_r
+
+        # Ensure positive radius with better clamping
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_position(self, circles: np.ndarray, idx: int) -> np.ndarray:
+        """Mutate position with small random perturbation."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Small random perturbation with boundary awareness
+        max_delta = 0.05
+        delta_x = np.random.uniform(-max_delta, max_delta)
+        delta_y = np.random.uniform(-max_delta, max_delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds with margin
+        margin = 0.01
+        new_x = np.clip(new_x, margin, self.rect_width - margin)
+        new_y = np.clip(new_y, margin, self.rect_height - margin)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+=======
+    def mutate_position(self, circles: np.ndarray, idx: int, voronoi_areas: np.ndarray = None) -> np.ndarray:
+        """Mutate position with small random perturbation."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Adaptive step size based on Voronoi cell area and boundary proximity
+        max_delta = 0.05
+        delta = max_delta
+
+        if voronoi_areas is not None and len(voronoi_areas) > idx:
+            # Smaller Voronoi areas mean more constrained regions, use smaller deltas
+            avg_area = np.mean(voronoi_areas) if len(voronoi_areas) > 0 else 1.0
+            normalized_area = voronoi_areas[idx] / max(avg_area, 1e-8)
+            delta_factor = max(0.1, min(1.0, 1.0 / (normalized_area + 0.1)))
+            delta = max_delta * delta_factor
+
+        # Consider proximity to boundary
+        x, y, r = new_circles[idx]
+        boundary_distance = min(x, self.rect_width - x, y, self.rect_height - y)
+        boundary_factor = min(1.0, boundary_distance / (r * 2.0))  # Scale based on radius
+        boundary_delta = delta * boundary_factor
+
+        # Use minimum of adaptive and boundary delta
+        actual_delta = min(delta, boundary_delta)
+
+        # Small random perturbation
+        delta_x = np.random.uniform(-actual_delta, actual_delta)
+        delta_y = np.random.uniform(-actual_delta, actual_delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds with margin
+        margin = 0.01
+        new_x = np.clip(new_x, r + margin, self.rect_width - r - margin)
+        new_y = np.clip(new_y, r + margin, self.rect_height - r - margin)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def enhanced_local_optimization(self, circles: np.ndarray, max_iter: int = 50, patience: int = 10) -> np.ndarray:
+        """Enhanced local optimization with Voronoi-aware mutation."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.evaluate_fitness(current_circles)
+
+        patience_counter = 0
+        last_improvement = 0
+
+        # Get Voronoi densities for adaptive mutation
+        density_scores = self.compute_voronoi_density(current_circles)
+
+        # Identify boundary circles for special treatment
+        boundary_indices = []
+        for i in range(len(current_circles)):
+            x, y, r = current_circles[i]
+            # Check if circle is near boundary
+            if (x <= r + 0.05 or x >= self.rect_width - r - 0.05 or
+                y <= r + 0.05 or y >= self.rect_height - r - 0.05):
+                boundary_indices.append(i)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Process boundary circles first (they're more constrained)
+            if boundary_indices:
+                for i in boundary_indices:
+                    # Special handling for boundary circles with smaller deltas
+                    mutated_rad = self.mutate_radius(current_circles, i, density_scores)
+                    mutated_pos = self.mutate_position(current_circles, i)
+
+                    # Test both mutations
+                    rad_fitness = self.evaluate_fitness(mutated_rad)
+                    pos_fitness = self.evaluate_fitness(mutated_pos)
+
+                    # Choose better mutation
+                    if rad_fitness > pos_fitness:
+                        if self.is_valid_solution(mutated_rad):
+                            current_circles = mutated_rad
+                            improved = True
+                    else:
+                        if self.is_valid_solution(mutated_pos):
+                            current_circles = mutated_pos
+                            improved = True
+
+            # Process remaining circles
+            remaining_indices = [i for i in range(len(current_circles)) if i not in boundary_indices]
+            for i in remaining_indices:
+                # Try position mutation
+                mutated_pos = self.mutate_position(current_circles, i)
+
+                # Try radius mutation with adaptive delta
+                mutated_rad = self.mutate_radius(current_circles, i, density_scores)
+
+                # Evaluate both mutations
+                pos_fitness = self.evaluate_fitness(mutated_pos)
+                rad_fitness = self.evaluate_fitness(mutated_rad)
+
+                # Choose the better one
+                if pos_fitness > rad_fitness:
+                    if self.is_valid_solution(mutated_pos):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.is_valid_solution(mutated_rad):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution
+            current_fitness = self.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+                patience_counter = 0
+                last_improvement = iteration
+            else:
+                patience_counter += 1
+
+            # Early stopping if no improvement for too long
+            if patience_counter >= patience or (iteration - last_improvement > max_iter // 2):
+                break
+
+        # Final boundary check and adjustment
+        if not self.is_valid_solution(best_circles):
+            # Try to fix boundary violations
+            for i in range(len(best_circles)):
+                x, y, r = best_circles[i]
+                # Reposition to safe zone if needed
+                if x - r < 0:
+                    x = r + 0.01
+                elif x + r > self.rect_width:
+                    x = self.rect_width - r - 0.01
+                if y - r < 0:
+                    y = r + 0.01
+                elif y + r > self.rect_height:
+                    y = self.rect_height - r - 0.01
+                best_circles[i] = [x, y, r]
+
+        return best_circles
+=======
+    def enhanced_local_optimization(self, circles: np.ndarray, max_iter: int = 50, patience: int = 10) -> np.ndarray:
+        """Enhanced local optimization with Voronoi-aware mutation."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.evaluate_fitness(current_circles)
+
+        patience_counter = 0
+        last_improvement = 0
+
+        # Get Voronoi cell areas for adaptive mutation
+        voronoi_areas = self.compute_voronoi_density(current_circles)
+
+        # Identify boundary circles for special treatment
+        boundary_indices = []
+        for i in range(len(current_circles)):
+            x, y, r = current_circles[i]
+            # Check if circle is near boundary
+            if (x <= r + 0.05 or x >= self.rect_width - r - 0.05 or
+                y <= r + 0.05 or y >= self.rect_height - r - 0.05):
+                boundary_indices.append(i)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Process boundary circles first (they're more constrained)
+            if boundary_indices:
+                for i in boundary_indices:
+                    # Special handling for boundary circles with smaller deltas
+                    mutated_rad = self.mutate_radius(current_circles, i, voronoi_areas)
+                    mutated_pos = self.mutate_position(current_circles, i, voronoi_areas)
+
+                    # Test both mutations
+                    rad_fitness = self.evaluate_fitness(mutated_rad)
+                    pos_fitness = self.evaluate_fitness(mutated_pos)
+
+                    # Choose better mutation
+                    if rad_fitness > pos_fitness:
+                        if self.is_valid_solution(mutated_rad):
+                            current_circles = mutated_rad
+                            improved = True
+                    else:
+                        if self.is_valid_solution(mutated_pos):
+                            current_circles = mutated_pos
+                            improved = True
+
+            # Process remaining circles
+            remaining_indices = [i for i in range(len(current_circles)) if i not in boundary_indices]
+            for i in remaining_indices:
+                # Try position mutation with adaptive parameter
+                mutated_pos = self.mutate_position(current_circles, i, voronoi_areas)
+
+                # Try radius mutation with adaptive delta
+                mutated_rad = self.mutate_radius(current_circles, i, voronoi_areas)
+
+                # Evaluate both mutations
+                pos_fitness = self.evaluate_fitness(mutated_pos)
+                rad_fitness = self.evaluate_fitness(mutated_rad)
+
+                # Choose the better one
+                if pos_fitness > rad_fitness:
+                    if self.is_valid_solution(mutated_pos):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.is_valid_solution(mutated_rad):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution and Voronoi areas for next iteration
+            current_fitness = self.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+                patience_counter = 0
+                last_improvement = iteration
+                # Recompute Voronoi areas after significant improvement
+                voronoi_areas = self.compute_voronoi_density(current_circles)
+            else:
+                patience_counter += 1
+
+            # Early stopping if no improvement for too long
+            if patience_counter >= patience or (iteration - last_improvement > max_iter // 2):
+                break
+
+        # Final boundary check and adjustment
+        if not self.is_valid_solution(best_circles):
+            # Try to fix boundary violations
+            for i in range(len(best_circles)):
+                x, y, r = best_circles[i]
+                # Reposition to safe zone if needed
+                if x - r < 0:
+                    x = r + 0.01
+                elif x + r > self.rect_width:
+                    x = self.rect_width - r - 0.01
+                if y - r < 0:
+                    y = r + 0.01
+                elif y + r > self.rect_height:
+                    y = self.rect_height - r - 0.01
+                best_circles[i] = [x, y, r]
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>

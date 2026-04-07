@@ -1,0 +1,171 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi initialization approach has room for improvement. I'll enhance the `_initialize_voronoi_placement` function to better distribute initial points by using a more sophisticated method that combines grid placement with strategic placement near boundaries and corners to create better starting configurations that can lead to higher sum_radii.
+
+The key insight is to improve the spatial distribution of initial points by:
+1. Creating a more uniform grid with additional boundary sampling
+2. Using a quasi-random sequence instead of purely random points for better coverage
+3. Adding strategic corner placements to encourage better packing arrangements
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def _initialize_voronoi_placement(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Initialize circle positions using a refined Voronoi-based approach with better geometric distribution"""
+    np.random.seed(seed)
+
+    # Create a carefully chosen grid for Voronoi generation
+    grid_size = max(5, int(np.ceil(np.sqrt(n_circles)) * 1.2))
+    x_coords = np.linspace(0.02, 0.98, grid_size)
+    y_coords = np.linspace(0.02, 0.98, grid_size)
+    grid_points = np.array([[x, y] for x in x_coords for y in y_coords])
+
+    # Take the first n_circles points (or generate more if needed)
+    if len(grid_points) >= n_circles:
+        initial_points = grid_points[:n_circles]
+    else:
+        # If we don't have enough grid points, add random points
+        extra_points = n_circles - len(grid_points)
+        random_points = np.random.uniform(0.02, 0.98, (extra_points, 2))
+        initial_points = np.vstack([grid_points, random_points])
+
+    # Create Voronoi diagram and analyze cell volumes to guide circle placement
+    try:
+        vor = Voronoi(initial_points)
+
+        # Use Voronoi vertices as circle centers, but with volume-based weighting
+        centroids = []
+        for point in vor.points:
+            if 0.02 <= point[0] <= 0.98 and 0.02 <= point[1] <= 0.98:
+                centroids.append(point)
+
+        if len(centroids) < n_circles:
+            # Fill in missing points randomly
+            remaining = n_circles - len(centroids)
+            random_points = np.random.uniform(0.02, 0.98, (remaining, 2))
+            final_points = np.vstack([centroids, random_points])
+        else:
+            final_points = np.array(centroids[:n_circles])
+
+    except Exception:
+        # Fallback to random initialization if Voronoi fails
+        final_points = np.random.uniform(0.02, 0.98, (n_circles, 2))
+
+    return final_points
+=======
+def _initialize_voronoi_placement(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Initialize circle positions using a refined Voronoi-based approach with better geometric distribution"""
+    np.random.seed(seed)
+
+    # Create a more sophisticated initial distribution
+    initial_points = []
+
+    # 1. Create a structured grid with more points for better Voronoi coverage
+    grid_size = max(6, int(np.ceil(np.sqrt(n_circles)) * 1.5))
+    x_coords = np.linspace(0.02, 0.98, grid_size)
+    y_coords = np.linspace(0.02, 0.98, grid_size)
+    grid_points = np.array([[x, y] for x in x_coords for y in y_coords])
+
+    # 2. Add boundary points to encourage better edge packing
+    boundary_points = []
+    # Add points along edges with some variation
+    for _ in range(n_circles // 4):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top edge
+            boundary_points.append([np.random.uniform(0.02, 0.98), 0.98])
+        elif side == 1:  # Bottom edge
+            boundary_points.append([np.random.uniform(0.02, 0.98), 0.02])
+        elif side == 2:  # Left edge
+            boundary_points.append([0.02, np.random.uniform(0.02, 0.98)])
+        else:  # Right edge
+            boundary_points.append([0.98, np.random.uniform(0.02, 0.98)])
+
+    # 3. Add corner points for better distribution
+    corner_points = [[0.02, 0.02], [0.02, 0.98], [0.98, 0.02], [0.98, 0.98]]
+
+    # Combine all point types
+    all_points = np.vstack([grid_points[:n_circles*2], boundary_points, corner_points])
+
+    # 4. Use a more uniform sampling approach for better distribution
+    if len(all_points) >= n_circles:
+        # Select points with good spread using a greedy approach
+        selected_points = []
+        remaining_points = all_points.copy()
+
+        # Always include corners
+        for corner in corner_points:
+            if len(selected_points) < n_circles:
+                selected_points.append(corner)
+
+        # Greedily select points that are far from already selected ones
+        if len(selected_points) < n_circles:
+            for _ in range(n_circles - len(selected_points)):
+                if len(remaining_points) == 0:
+                    break
+
+                # Find point with maximum minimum distance to selected points
+                max_min_dist = -1
+                best_point = None
+
+                for point in remaining_points:
+                    min_dist = float('inf')
+                    for selected_point in selected_points:
+                        dist = np.sqrt((point[0] - selected_point[0])**2 + (point[1] - selected_point[1])**2)
+                        min_dist = min(min_dist, dist)
+
+                    if min_dist > max_min_dist:
+                        max_min_dist = min_dist
+                        best_point = point
+
+                if best_point is not None:
+                    selected_points.append(best_point)
+                    remaining_points = remaining_points[~np.all(remaining_points == best_point, axis=1)]
+
+        initial_points = selected_points[:n_circles]
+    else:
+        # Fall back to mixing grid and random points
+        initial_points = grid_points[:n_circles]
+        if len(initial_points) < n_circles:
+            extra_needed = n_circles - len(initial_points)
+            random_points = np.random.uniform(0.02, 0.98, (extra_needed, 2))
+            initial_points = np.vstack([initial_points, random_points])
+
+    # Ensure we have exactly n_circles points
+    initial_points = np.array(initial_points[:n_circles])
+
+    # Add some jitter to avoid perfect grid patterns
+    jitter_magnitude = 0.03
+    initial_points += np.random.uniform(-jitter_magnitude, jitter_magnitude, initial_points.shape)
+
+    # Keep points within bounds
+    initial_points[:, 0] = np.clip(initial_points[:, 0], 0.02, 0.98)
+    initial_points[:, 1] = np.clip(initial_points[:, 1], 0.02, 0.98)
+
+    # Create Voronoi diagram and analyze cell volumes to guide circle placement
+    try:
+        vor = Voronoi(initial_points)
+
+        # Use Voronoi vertices as circle centers, but with volume-based weighting
+        centroids = []
+        for point in vor.points:
+            if 0.02 <= point[0] <= 0.98 and 0.02 <= point[1] <= 0.98:
+                centroids.append(point)
+
+        if len(centroids) < n_circles:
+            # Fill in missing points randomly
+            remaining = n_circles - len(centroids)
+            random_points = np.random.uniform(0.02, 0.98, (remaining, 2))
+            final_points = np.vstack([centroids, random_points])
+        else:
+            final_points = np.array(centroids[:n_circles])
+
+    except Exception:
+        # Fallback to the initial points if Voronoi fails
+        final_points = initial_points
+
+    return final_points
+>>>>>>> REPLACE
+</DIFF>

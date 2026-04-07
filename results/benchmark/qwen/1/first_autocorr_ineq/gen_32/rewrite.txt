@@ -1,0 +1,232 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.signal import fftconvolve
+from deap import base, creator, tools, algorithms
+import nevergrad as ng
+from functools import partial
+import time
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    Returns 1/C₁ which we want to maximize.
+    """
+    if len(sequence) == 0 or np.sum(sequence) < 0.01:
+        return 0.0
+    
+    # Compute convolution using FFT for efficiency
+    conv = fftconvolve(sequence, sequence, mode='full')
+    # Take the maximum of the convolution (excluding the zero-padding)
+    max_conv = np.max(conv[len(sequence)-1:])
+    
+    # Calculate C₁ = 2*n*max(b) / (sum(a))^2
+    sum_a = np.sum(sequence)
+    n = len(sequence)
+    
+    if sum_a == 0:
+        return 0.0
+        
+    C1 = 2 * n * max_conv / (sum_a ** 2)
+    return 1 / C1  # Return reciprocal for maximization
+
+def evaluate_individual(individual):
+    """Evaluate an individual (sequence) and return fitness."""
+    try:
+        fitness = compute_autocorrelation_constant(individual)
+        return (fitness,)
+    except Exception as e:
+        return (0.0,)
+
+def generate_random_sequence(min_length=10, max_length=1000):
+    """Generate a random sequence within specified constraints."""
+    length = random.randint(min_length, max_length)
+    # Generate heights in [0, 1000]
+    sequence = [random.uniform(0, 1000) for _ in range(length)]
+    return sequence
+
+def initialize_good_sequence(length=None):
+    """Initialize a good starting sequence."""
+    if length is None:
+        length = random.randint(100, 1000)
+
+    # Create a sequence with exponential decay to balance mass and convolution
+    # This helps to reduce the peak convolution while maintaining significant total mass
+    sequence = [1000 * np.exp(-i/10) for i in range(length)]
+
+    # Normalize to have reasonable total mass
+    total_mass = sum(sequence)
+    if total_mass > 0:
+        sequence = [x / total_mass * 100 for x in sequence]
+
+    return sequence
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence using finite difference approximation."""
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    # Normalize sequence to avoid numerical issues
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    # Use a more principled normalization
+    normalized_sequence = np.array(sequence) / sum_sequence
+
+    # Compute current autocorrelation constant
+    current_value = compute_autocorrelation_constant(sequence)
+
+    # Approximate gradient using finite differences
+    epsilon = 1e-4
+    step_direction = np.zeros(n)
+
+    for i in range(n):
+        # Create perturbed sequence
+        perturbed_sequence = normalized_sequence.copy()
+        perturbed_sequence[i] += epsilon
+
+        # Compute new value
+        new_value = compute_autocorrelation_constant(perturbed_sequence * sum_sequence)
+
+        # Gradient approximation
+        step_direction[i] = (new_value - current_value) / epsilon
+
+    # Normalize the step direction
+    step_norm = np.linalg.norm(step_direction)
+    if step_norm > 0:
+        step_direction = step_direction / step_norm
+
+    # Move in the direction of steepest ascent
+    t = 0.01
+    new_sequence = (1 - t) * np.array(sequence) + t * step_direction * sum_sequence
+
+    # Ensure non-negativity and clip values
+    new_sequence = np.clip(new_sequence, 0, 1000)
+
+    return new_sequence.tolist()
+
+def evolve_sequences():
+    """Evolve sequences to maximize the inverse autocorrelation constant."""
+    # Define DEAP structures
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Define gene generation and individual creation
+    def create_individual():
+        return creator.Individual(generate_random_sequence())
+    
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    # Register evaluation and operators
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=100, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Set up evolutionary algorithm parameters
+    pop_size = 50
+    n_generations = 200
+    
+    # Initialize population
+    population = toolbox.population(pop_size)
+    
+    # Evolution loop
+    for gen in range(n_generations):
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < 0.2:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate fitness for new individuals
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+            
+        # Replace population
+        population[:] = offspring
+    
+    # Get best individual
+    best_individual = tools.selBest(population, 1)[0]
+    return list(best_individual)
+
+def search_for_best_sequence() -> list[float]:
+    """Main function to find the best sequence."""
+    start_time = time.time()
+    
+    # Try evolving sequences using DEAP
+    try:
+        sequence = evolve_sequences()
+        # Ensure we have a valid sequence
+        if len(sequence) == 0 or np.sum(sequence) < 0.01:
+            sequence = [1.0]  # fallback to simple case
+    except Exception as e:
+        # Fallback to a basic random approach if evolution fails
+        sequence = generate_random_sequence()
+    
+    # Multi-start approach to escape local optima
+    best_score = 0
+    best_sequence = None
+
+    # Try multiple starting points
+    for _ in range(10):
+        # Initialize with a better structured sequence
+        sequence = initialize_good_sequence()
+
+        # Allow some iterations of improvement
+        for _ in range(50):
+            h_function = get_good_direction_to_move_into(sequence)
+            if h_function is not None:
+                sequence = h_function
+            else:
+                break
+
+        # Evaluate final sequence
+        score = compute_autocorrelation_constant(sequence)
+        if score > best_score:
+            best_score = score
+            best_sequence = sequence[:]
+
+    # If no good sequence found, return a default one
+    if best_sequence is None:
+        best_sequence = [1.0] * 100
+
+    # Final verification
+    if len(best_sequence) == 0 or np.sum(best_sequence) < 0.01:
+        best_sequence = [1.0]
+    
+    # Limit size to prevent excessive computation
+    if len(best_sequence) > 1000:
+        best_sequence = best_sequence[:1000]
+    
+    # Clip values to [0, 1000] for practicality
+    best_sequence = [max(0, min(1000, x)) for x in best_sequence]
+    
+    elapsed = time.time() - start_time
+    # Early exit if time is almost up
+    if elapsed > 170:
+        return best_sequence
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

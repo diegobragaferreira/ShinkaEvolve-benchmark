@@ -1,0 +1,229 @@
+<NAME>
+add_local_refinement
+</NAME>
+
+<DESCRIPTION>
+Adding a local refinement step that periodically applies constrained optimization to improve the best solution found so far. This hybrid approach combines the global exploration of simulated annealing with local search precision to escape local optima and find better solutions. The refinement uses a simple gradient-like approach to adjust points in directions that maximize the ratio change.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_single_start(self, seed: int) -> Tuple[np.ndarray, float]:
+        """Perform optimization from a single starting configuration"""
+        # Initialize points
+        points = self.initialize_points(seed)
+
+        # Simulated Annealing parameters
+        current_ratio = self.calculate_ratio(points)
+        best_ratio_local = current_ratio
+        best_points_local = points.copy()
+
+        # Cooling schedule parameters
+        T = 1.0  # Initial temperature
+        T_min = 1e-8  # Minimum temperature
+        alpha = 0.999  # Cooling rate
+        max_iter = 10000  # Max iterations
+        iter_without_improvement = 0
+        max_no_improvement = 1000  # Early stopping threshold
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 50
+
+        for iteration in range(max_iter):
+            # Perturb one random point
+            idx = np.random.randint(0, self.num_points)
+            old_point = points[idx].copy()
+
+            # Create new candidate point with adaptive perturbation size
+            # Use smaller perturbations initially, larger ones later to escape local minima
+            perturbation_size = 0.005 * (1.0 + 0.5 * (T / 1.0))  # Adaptive based on temperature
+            new_point = self.perturb_point(old_point, perturbation_size)
+            points[idx] = new_point
+
+            # Apply constraints
+            points = self.apply_constraints(points)
+
+            # Calculate new ratio
+            new_ratio = self.calculate_ratio(points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio_local:
+                    best_ratio_local = new_ratio
+                    best_points_local = points.copy()
+                iter_without_improvement = 0
+                recent_improvements.append(True)
+            else:
+                # Accept with probability based on temperature
+                delta = new_ratio - current_ratio
+                if np.random.rand() < np.exp(delta / T):
+                    current_ratio = new_ratio
+                    if new_ratio > best_ratio_local:
+                        best_ratio_local = new_ratio
+                        best_points_local = points.copy()
+                    iter_without_improvement = 0
+                    recent_improvements.append(True)
+                else:
+                    # Revert the change
+                    points[idx] = old_point
+                    recent_improvements.append(False)
+
+            # Update temperature with adaptive cooling
+            # If we've had too many non-improvements recently, cool faster
+            if len(recent_improvements) > improvement_window:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < improvement_window * 0.2:  # Less than 20% improvements
+                    alpha = max(0.9995, alpha * 1.02)  # Accelerate cooling
+                elif sum(recent_improvements) > improvement_window * 0.6:  # More than 60% improvements
+                    alpha = min(0.9999, alpha * 0.98)  # Slow down cooling
+
+            T = max(T * alpha, T_min)
+
+            # Early stopping if no improvement
+            iter_without_improvement += 1
+            if iter_without_improvement > max_no_improvement:
+                break
+
+        return best_points_local, best_ratio_local
+=======
+    def optimize_single_start(self, seed: int) -> Tuple[np.ndarray, float]:
+        """Perform optimization from a single starting configuration"""
+        # Initialize points
+        points = self.initialize_points(seed)
+
+        # Simulated Annealing parameters
+        current_ratio = self.calculate_ratio(points)
+        best_ratio_local = current_ratio
+        best_points_local = points.copy()
+
+        # Cooling schedule parameters
+        T = 1.0  # Initial temperature
+        T_min = 1e-8  # Minimum temperature
+        alpha = 0.999  # Cooling rate
+        max_iter = 10000  # Max iterations
+        iter_without_improvement = 0
+        max_no_improvement = 1000  # Early stopping threshold
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 50
+
+        # Local refinement parameters
+        refine_frequency = 1000  # How often to attempt local refinement
+        refine_iterations = 50   # Number of local refinement steps
+
+        for iteration in range(max_iter):
+            # Perturb one random point
+            idx = np.random.randint(0, self.num_points)
+            old_point = points[idx].copy()
+
+            # Create new candidate point with adaptive perturbation size
+            # Use smaller perturbations initially, larger ones later to escape local minima
+            perturbation_size = 0.005 * (1.0 + 0.5 * (T / 1.0))  # Adaptive based on temperature
+            new_point = self.perturb_point(old_point, perturbation_size)
+            points[idx] = new_point
+
+            # Apply constraints
+            points = self.apply_constraints(points)
+
+            # Calculate new ratio
+            new_ratio = self.calculate_ratio(points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio_local:
+                    best_ratio_local = new_ratio
+                    best_points_local = points.copy()
+                iter_without_improvement = 0
+                recent_improvements.append(True)
+            else:
+                # Accept with probability based on temperature
+                delta = new_ratio - current_ratio
+                if np.random.rand() < np.exp(delta / T):
+                    current_ratio = new_ratio
+                    if new_ratio > best_ratio_local:
+                        best_ratio_local = new_ratio
+                        best_points_local = points.copy()
+                    iter_without_improvement = 0
+                    recent_improvements.append(True)
+                else:
+                    # Revert the change
+                    points[idx] = old_point
+                    recent_improvements.append(False)
+
+            # Update temperature with adaptive cooling
+            # If we've had too many non-improvements recently, cool faster
+            if len(recent_improvements) > improvement_window:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < improvement_window * 0.2:  # Less than 20% improvements
+                    alpha = max(0.9995, alpha * 1.02)  # Accelerate cooling
+                elif sum(recent_improvements) > improvement_window * 0.6:  # More than 60% improvements
+                    alpha = min(0.9999, alpha * 0.98)  # Slow down cooling
+
+            T = max(T * alpha, T_min)
+
+            # Periodic local refinement to polish the solution
+            if iteration % refine_frequency == 0 and iteration > 0:
+                refined_points = self.local_refinement(best_points_local.copy(), refine_iterations)
+                refined_ratio = self.calculate_ratio(refined_points)
+                if refined_ratio > best_ratio_local:
+                    best_ratio_local = refined_ratio
+                    best_points_local = refined_points.copy()
+
+            # Early stopping if no improvement
+            iter_without_improvement += 1
+            if iter_without_improvement > max_no_improvement:
+                break
+
+        return best_points_local, best_ratio_local
+
+    def local_refinement(self, points: np.ndarray, max_iter: int = 50) -> np.ndarray:
+        """Apply simple local refinement to improve a point configuration"""
+        current_points = points.copy()
+        current_ratio = self.calculate_ratio(current_points)
+
+        for _ in range(max_iter):
+            # For each point, compute gradients (approximated by small perturbations)
+            best_move = None
+            best_ratio_change = 0
+
+            for i in range(self.num_points):
+                original_point = current_points[i].copy()
+
+                # Try small moves in several directions
+                for _ in range(10):  # Sample several directions
+                    # Generate small random perturbation
+                    perturbation = np.random.normal(0, 0.001, 3)
+
+                    # Apply perturbation
+                    new_point = original_point + perturbation
+
+                    # Constrain to unit cube
+                    new_point = np.clip(new_point, 0, 1)
+
+                    # Test this move
+                    test_points = current_points.copy()
+                    test_points[i] = new_point
+                    new_ratio = self.calculate_ratio(test_points)
+
+                    # Check improvement
+                    ratio_change = new_ratio - current_ratio
+
+                    if ratio_change > best_ratio_change:
+                        best_ratio_change = ratio_change
+                        best_move = (i, new_point.copy())
+
+            # Apply the best move if it improves the ratio
+            if best_move is not None and best_ratio_change > 1e-10:
+                idx, new_point = best_move
+                current_points[idx] = new_point
+                current_ratio += best_ratio_change
+            else:
+                break  # No significant improvement
+
+        return current_points
+>>>>>>> REPLACE
+</DIFF>

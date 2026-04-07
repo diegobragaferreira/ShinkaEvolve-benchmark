@@ -1,0 +1,425 @@
+--- a/original.py
++++ b/original.py
+@@ -1,208 +1,251 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist, squareform
++from scipy.spatial.distance import cdist
+ import time
+-from sklearn.metrics.pairwise import euclidean_distances
+-
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     
+-    def compute_min_max_ratio(points_flat):
+-        """Compute the min/max distance ratio for given flattened point coordinates."""
+-        points = points_flat.reshape(-1, 2)
+-        
+-        # Compute pairwise distances efficiently
+-        distances = euclidean_distances(points)
++    def compute_min_max_ratio(points):
++        """Compute the min/max distance ratio for given points."""
++        if len(points) < 2:
++            return 0.0
++
++        # Compute pairwise distances efficiently using cdist
++        distances = cdist(points, points)
++        
+         # Set diagonal to infinity to exclude self-distances
+         np.fill_diagonal(distances, np.inf)
+-        
+-        # Compute min and max distances
++
++        # Find min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+-        
+-        # Return ratio (avoid division by zero)
++
++        # Avoid division by zero
+         if max_dist == 0:
+-            return 0
++            return 0.0
++
+         return min_dist / max_dist
+-    
+-    def energy_objective(points_flat):
+-        """Energy-based objective function that encourages uniform distribution."""
+-        points = points_flat.reshape(-1, 2)
+-        distances = euclidean_distances(points)
+-        np.fill_diagonal(distances, np.inf)
+-        
+-        # Energy is sum of inverse squared distances (repulsive force model)
+-        # This promotes points being spread out
+-        energy = 0.0
++
++    def objective(x):
++        """Objective function to maximize min/max distance ratio (minimize negative ratio)."""
++        # Reshape flat array back to points
++        points = x.reshape(-1, 2)
++        # Return negative ratio since we want to maximize
++        return -compute_min_max_ratio(points)
++
++    def adaptive_hexagonal_init():
++        """Initialize points using hexagonal packing pattern with adaptive perturbations."""
++        # Create a hexagonal lattice pattern
++        rows = 4
++        cols = 4
++        points = []
++        
++        for i in range(rows):
++            for j in range(cols):
++                # offset every other row
++                x_offset = 0.5 if i % 2 == 1 else 0.0
++                x = (j + x_offset) * 0.25 + 0.125  # Scale and shift to [0.125, 0.875]
++                y = i * 0.25 + 0.125
++                
++                # Add adaptive perturbation based on position
++                if (i == 0 or i == rows-1) and (j == 0 or j == cols-1):
++                    # Corner points - smallest perturbation
++                    perturbation = 0.005
++                elif i == 0 or i == rows-1 or j == 0 or j == cols-1:
++                    # Edge points - medium perturbation  
++                    perturbation = 0.01
++                else:
++                    # Interior points - largest perturbation
++                    perturbation = 0.015
++                    
++                x += np.random.normal(0, perturbation)
++                y += np.random.normal(0, perturbation)
++                points.append([x, y])
++        
++        # Ensure all points are within bounds
++        result = np.array(points)
++        result = np.clip(result, 0, 1)
++        return result[:16]
++
++    def perturbed_grid_init():
++        """Initialize with grid points plus adaptive random perturbations."""
++        # Start with a regular grid
++        grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
++        points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
++        
++        # Adaptive perturbation based on point position
+         for i in range(len(points)):
+-            for j in range(i+1, len(points)):
+-                dist = distances[i, j]
+-                if dist > 0:
+-                    energy += 1.0 / (dist * dist)
+-        return energy
+-    
+-    def objective(points_flat):
+-        """Minimize negative of min/max ratio (equivalent to maximizing the ratio)."""
+-        return -compute_min_max_ratio(points_flat)
+-    
+-    def constraint_func(points_flat):
+-        """Ensure points stay within [0,1] x [0,1]."""
+-        points = points_flat.reshape(-1, 2)
+-        # Each point coordinate should be between 0 and 1
+-        return np.concatenate([
+-            points[:, 0],  # x coordinates
+-            points[:, 1],  # y coordinates
+-            1 - points[:, 0],  # 1 - x coordinates
+-            1 - points[:, 1]   # 1 - y coordinates
+-        ])
+-    
+-    def geometric_initialization():
+-        """Initialize points using determinant-based approach for good geometric balance."""
+-        # Start with a regular grid pattern
+-        grid_points = []
+-        for i in range(4):
+-            for j in range(4):
+-                grid_points.append([i/3.0, j/3.0])
+-        
+-        # Convert to numpy array and add small perturbation  
+-        points = np.array(grid_points[:16]) + np.random.normal(0, 0.01, (16, 2))
++            # Determine perturbation strength based on location
++            x, y = points[i]
++            # Points near corners should have smaller perturbations
++            if (abs(x - 0) < 0.1 or abs(x - 1) < 0.1) and (abs(y - 0) < 0.1 or abs(y - 1) < 0.1):
++                perturbation_magnitude = 0.008
++            elif abs(x - 0.5) < 0.2 and abs(y - 0.5) < 0.2:
++                # Center points allow more variation
++                perturbation_magnitude = 0.02
++            else:
++                # Edge points
++                perturbation_magnitude = 0.015
++                
++            points[i] += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, 2)
++        
++        # Ensure points stay within bounds
+         points = np.clip(points, 0, 1)
+         return points
+-    
+-    def adaptive_constraint_handler(points_flat, penalty_weight=100.0):
+-        """Adaptive constraint handling that penalizes violations more heavily when they occur frequently."""
+-        points = points_flat.reshape(-1, 2)
+-        violations = []
+-        
+-        # Check x bounds
+-        x_violations = np.concatenate([points[:, 0], 1 - points[:, 0]])
+-        violations.extend(x_violations[x_violations < 0])
+-        
+-        # Check y bounds  
+-        y_violations = np.concatenate([points[:, 1], 1 - points[:, 1]])
+-        violations.extend(y_violations[y_violations < 0])
+-        
+-        # Return penalty based on violation magnitude
+-        if len(violations) > 0:
+-            return penalty_weight * np.sum(np.array(violations)**2)
+-        return 0.0
+-    
+-    def enhanced_objective(points_flat):
+-        """Enhanced objective combining distance ratio with constraint penalties."""
+-        main_obj = objective(points_flat)
+-        constraint_penalty = adaptive_constraint_handler(points_flat)
+-        return main_obj + constraint_penalty * 1e-6
+-    
+-    # Multi-stage optimization approach
+-    best_result = None
++
++    def random_spread_init():
++        """Initialize with random points that are intentionally spread out."""
++        np.random.seed(42)
++        points = np.random.rand(16, 2)
++        
++        # Apply some basic spacing to prevent clustering with adaptive factors
++        for i in range(16):
++            # Move points away from center slightly with adaptive factor
++            center_vec = points[i] - [0.5, 0.5]
++            center_distance = np.linalg.norm(center_vec)
++            if center_distance > 0:
++                # Adaptive movement based on distance from center
++                adaptive_factor = min(0.2, 0.1 / (center_distance + 0.01))
++                points[i] += center_vec * adaptive_factor
++                
++        # Clip to ensure within bounds
++        points = np.clip(points, 0, 1)
++        return points
++
++    def smart_optimization(initial_points, time_limit):
++        """Apply intelligent optimization with adaptive parameters."""
++        n = 16
++        d = 2
++        start_time = time.time()
++        
++        # Define bounds (points must be in [0,1] x [0,1])
++        bounds = [(0, 1) for _ in range(n * d)]
++        
++        # Try multiple optimization methods with appropriate settings
++        best_result = None
++        best_value = np.inf
++        
++        # Method 1: L-BFGS-B with conservative settings for reliable convergence
++        if time_limit > 30:
++            try:
++                result1 = minimize(
++                    objective,
++                    initial_points.flatten(),
++                    method='L-BFGS-B',
++                    bounds=bounds,
++                    options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10}
++                )
++                if result1.fun < best_value and result1.success:
++                    best_value = result1.fun
++                    best_result = result1
++            except:
++                pass
++        
++        # Method 2: SLSQP for tighter constraint handling
++        if time_limit > 45 and best_result is None:
++            try:
++                result2 = minimize(
++                    objective,
++                    initial_points.flatten(),
++                    method='SLSQP',
++                    bounds=bounds,
++                    options={'maxiter': 400, 'ftol': 1e-11, 'gtol': 1e-11}
++                )
++                if result2.fun < best_value and result2.success:
++                    best_value = result2.fun
++                    best_result = result2
++            except:
++                pass
++        
++        # Method 3: Nelder-Mead as fallback
++        if time_limit > 20 and best_result is None:
++            try:
++                result3 = minimize(
++                    objective,
++                    initial_points.flatten(),
++                    method='Nelder-Mead',
++                    options={'maxiter': 200, 'fatol': 1e-11, 'xatol': 1e-11}
++                )
++                if result3.fun < best_value and result3.success:
++                    best_value = result3.fun
++                    best_result = result3
++            except:
++                pass
++        
++        # Extract optimized points or return original if optimization failed
++        if best_result is not None:
++            optimized_points = best_result.x.reshape(n, d)
++        else:
++            optimized_points = initial_points.copy()
++        
++        # Ensure points are within bounds
++        optimized_points = np.clip(optimized_points, 0, 1)
++        return optimized_points
++
++    # Multi-start optimization with strategic initialization
+     best_ratio = -np.inf
+-    best_time = float('inf')
+-    
+-    # Stage 1: Global search with multiple strategies
+-    strategies = []
+-    
+-    # Strategy 1: Determinant-maximizing initialization
+-    np.random.seed(42)
+-    init1 = geometric_initialization()
+-    strategies.append(("det_init", init1))
+-    
+-    # Strategy 2: Random initialization with better bounds
+-    init2 = np.random.uniform(0.05, 0.95, (16, 2))
+-    strategies.append(("rand_init", init2))
+-    
+-    # Strategy 3: Regular grid with more randomness
+-    grid_x = np.linspace(0.1, 0.9, 4)
+-    grid_y = np.linspace(0.1, 0.9, 4)
+-    x_grid, y_grid = np.meshgrid(grid_x, grid_y)
+-    init3 = np.column_stack([x_grid.ravel(), y_grid.ravel()])[:16]
+-    init3 += np.random.normal(0, 0.02, init3.shape)
+-    init3 = np.clip(init3, 0, 1)
+-    strategies.append(("grid_init", init3))
+-    
+-    # Run optimizations with different strategies
+-    for strategy_name, initial_points in strategies:
+-        try:
+-            # Flatten for optimization
+-            initial_flat = initial_points.flatten()
+-            
+-            # Define bounds
+-            bounds = [(0, 1) for _ in range(32)]
+-            
+-            # Define constraint
+-            cons = {'type': 'ineq', 'fun': constraint_func}
+-            
+-            # First, try a coarse optimization to get close to good region
+-            start_time = time.time()
+-            
+-            # Coarse optimization with fewer iterations
+-            result_coarse = minimize(
+-                enhanced_objective,
+-                initial_flat,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                options={'maxiter': 200, 'ftol': 1e-6, 'gtol': 1e-6}
+-            )
+-            
+-            # Then fine optimization
+-            result_fine = minimize(
+-                enhanced_objective,
+-                result_coarse.x,
+-                method='SLSQP',
+-                bounds=bounds,
+-                constraints=cons,
+-                options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9}
+-            )
+-            
+-            end_time = time.time()
+-            
+-            # Extract optimized points
+-            optimized_points = result_fine.x.reshape(-1, 2)
+-            optimized_points = np.clip(optimized_points, 0, 1)
+-            
+-            # Compute final metrics
+-            final_ratio = compute_min_max_ratio(result_fine.x)
+-            benchmark_ratio = final_ratio / 0.2786  # AlphaEvolve benchmark
+-            eval_time = end_time - start_time
+-            
+-            print(f"{strategy_name} - Final min/max ratio: {final_ratio:.6f}, Benchmark ratio: {benchmark_ratio:.6f}")
+-            
+-            # Keep track of best result
+-            if final_ratio > best_ratio:
+-                best_ratio = final_ratio
+-                best_result = optimized_points.copy()
+-                best_time = eval_time
+-                
+-        except Exception as e:
+-            print(f"{strategy_name} failed with error: {e}")
+-            continue
+-    
+-    # Fallback to deterministic initialization if nothing worked
+-    if best_result is None:
+-        print("All optimization attempts failed, returning deterministic configuration")
++    best_points = None
++    start_time = time.time()
++    time_limit = 180.0
++    
++    # Strategy 1: Adaptive hexagonal pattern
++    try:
++        np.random.seed(42)
++        points = adaptive_hexagonal_init()
++        optimized_points = smart_optimization(points, time_limit - (time.time() - start_time))
++        ratio = compute_min_max_ratio(optimized_points)
++        
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_points = optimized_points.copy()
++    except Exception as e:
++        pass
++    
++    # Strategy 2: Perturbed grid
++    try:
++        points = perturbed_grid_init()
++        optimized_points = smart_optimization(points, time_limit - (time.time() - start_time))
++        ratio = compute_min_max_ratio(optimized_points)
++        
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_points = optimized_points.copy()
++    except Exception as e:
++        pass
++    
++    # Strategy 3: Random spread
++    try:
++        points = random_spread_init()
++        optimized_points = smart_optimization(points, time_limit - (time.time() - start_time))
++        ratio = compute_min_max_ratio(optimized_points)
++        
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_points = optimized_points.copy()
++    except Exception as e:
++        pass
++    
++    # Strategy 4: Deterministic fallback
++    if best_points is None:
+         fallback_points = np.array([
+             [0.25, 0.25], [0.75, 0.25],
+             [0.25, 0.75], [0.75, 0.75],
+             [0.1, 0.1], [0.9, 0.1],
+             [0.1, 0.9], [0.9, 0.9],
+             [0.3, 0.5], [0.7, 0.5],
+             [0.5, 0.3], [0.5, 0.7],
+             [0.4, 0.4], [0.6, 0.6],
+             [0.4, 0.6], [0.6, 0.4]
+         ])
+         return fallback_points
+     
+-    print(f"\nBest final min/max ratio: {best_ratio:.6f}")
+-    print(f"Best benchmark ratio: {best_ratio / 0.2786:.6f}")
+-    print(f"Best evaluation time: {best_time:.6f}s")
+-    
+-    return best_result
+-
++    return best_points
+ 
+ # EVOLVE-BLOCK-END

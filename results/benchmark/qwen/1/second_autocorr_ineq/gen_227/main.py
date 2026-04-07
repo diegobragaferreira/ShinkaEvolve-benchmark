@@ -1,0 +1,445 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.stats import qmc
+import time
+from numba import jit
+import numba
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+
+# Global constants
+MAX_TIME_SECONDS = 85
+DEFAULT_DIMENSION = 1000
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jax_jit
+def compute_autoconvolution_jax(f_vals):
+    """JAX version of autoconvolution computation for gradient support"""
+    f = jnp.array(f_vals)
+    f = jnp.maximum(f, 0)
+
+    if len(f_vals) == 0:
+        return jnp.array([])
+
+    # Using JAX's convolution operation
+    g_full = jnp.convolve(f, f, mode='full')
+
+    # Trim to center portion
+    half_len = len(f_vals)
+    center_start = len(g_full) // 2 - half_len + 1
+    center_end = len(g_full) // 2 + half_len - 1
+    g_trimmed = g_full[center_start:center_end]
+
+    return g_trimmed
+
+@jax_jit
+def compute_c2_jax(f_vals):
+    """JAX version of C2 computation for automatic differentiation support"""
+    # Ensure non-negative values
+    f = jnp.clip(jnp.array(f_vals), 0, None)
+
+    # Compute autoconvolution
+    g = compute_autoconvolution_jax(f)
+
+    # Compute norms using JAX operations
+    g_abs = jnp.abs(g)
+
+    # L2 squared norm using summation (simplified for JAX compatibility)
+    norm_l2_sq = jnp.sum(g_abs * g_abs)
+
+    # L1 norm
+    norm_l1 = jnp.sum(g_abs) / (len(g) + 1)
+
+    # L-infinity norm
+    norm_inf = jnp.max(g_abs)
+
+    # Avoid division by zero
+    safe_l1 = jnp.where(norm_l1 <= 1e-15, 1e-15, norm_l1)
+    safe_inf = jnp.where(norm_inf <= 1e-15, 1e-15, norm_inf)
+
+    return norm_l2_sq / (safe_l1 * safe_inf)
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm using trapezoidal integration
+    # Using proper trapezoidal rule: int g^2 dt ≈ h * (g[0]^2 + 2*sum(g[i]^2) + g[n-1]^2)/2
+    if len(g_vals) >= 2:
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        # Step width for convolution domain
+        h = 0.5 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L1, L2^2, and L-infinity norms efficiently"""
+    n = len(g_vals)
+
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_sq_norm, linf_norm
+
+def objective_function(params):
+    """Objective function to minimize (negative C2)"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        # Return negative because we're minimizing
+        return -c2
+    except Exception as e:
+        return 1e10  # Large penalty for invalid results
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 score using JAX automatic differentiation"""
+    # Ensure inputs are properly clipped and converted to JAX arrays
+    f_array = jnp.array(np.clip(f_vals, 0, None))
+
+    try:
+        # Compute gradient using JAX automatic differentiation
+        grad_func = grad(compute_c2_jax)
+        gradients = grad_func(f_array)
+
+        # Convert back to numpy array
+        return np.array(gradients)
+    except Exception as e:
+        # If JAX gradient computation fails, fall back to a more robust approach
+        # by using finite differences with a very small epsilon
+        epsilon = 1e-6
+        base_c2 = compute_c2_jax(f_array)
+        gradients = []
+
+        for i in range(len(f_vals)):
+            # Create perturbed arrays
+            f_vals_plus = f_array.at[i].set(f_array[i] + epsilon)
+            f_vals_minus = f_array.at[i].set(f_array[i] - epsilon)
+
+            # Compute C2 values
+            c2_plus = compute_c2_jax(f_vals_plus)
+            c2_minus = compute_c2_jax(f_vals_minus)
+
+            # Finite difference approximation
+            gradient_i = (c2_plus - c2_minus) / (2 * epsilon)
+            gradients.append(float(gradient_i))
+
+        return np.array(gradients)
+
+def sophisticated_initialization(dim):
+    """Create a sophisticated initial step function using Sobol sequences and pattern recognition"""
+    # Generate points using Sobol sequence for better space-filling
+    try:
+        sampler = qmc.Sobol(d=dim, seed=42)
+        points = sampler.random(n=100)
+    except:
+        # Fallback to regular random if Sobol fails
+        points = np.random.random((100, dim))
+
+    # Create a pattern that has shown success in previous implementations
+    init_params = []
+    for i in range(dim):
+        # Create structured pattern: alternating high/low with sinusoidal modulation
+        pattern_val = 0.5 + 0.3 * np.sin(i * 0.7)
+        # Add variation from Sobol sampling
+        variation = points[i % 100][0] * 0.2 if i < 100 else np.random.random() * 0.2
+        init_params.append(max(0, pattern_val + variation - 0.1))
+
+    return init_params
+
+def advanced_initialization(dim):
+    """Create advanced initial step functions with multiple pattern types"""
+    # Pattern 1: Wavelet-inspired structures with multiple scales
+    pattern1 = np.zeros(dim)
+    x = np.linspace(-1, 1, dim)
+
+    # Multi-scale wavelet-like pattern
+    scales = [0.05, 0.1, 0.2]
+    for scale in scales:
+        centers = np.linspace(-0.8, 0.8, 5)
+        for center in centers:
+            pattern1 += 0.5 * np.exp(-((x - center)**2) / (2 * scale**2))
+
+    # Pattern 2: Sparse high-value regions with low interconnections
+    pattern2 = np.zeros(dim)
+    for i in range(0, dim, 10):
+        if i < dim:
+            pattern2[i] = 1.5 + 0.5 * np.random.random()
+
+    # Pattern 3: Modulated sinusoidal pattern with adaptive frequencies
+    pattern3 = np.zeros(dim)
+    x = np.linspace(0, 2*np.pi, dim)
+    freqs = [1, 2, 4, 8]
+    for freq in freqs:
+        pattern3 += 0.5 * np.sin(freq * x) + 0.5
+
+    # Pattern 4: Alternating high-low with specific periodicity
+    pattern4 = []
+    for i in range(dim):
+        if i % 6 < 2:
+            pattern4.append(1.2 + 0.3 * np.random.random())
+        else:
+            pattern4.append(0.3 + 0.2 * np.random.random())
+
+    # Pattern 5: Gaussian mixture model pattern
+    pattern5 = np.zeros(dim)
+    x = np.linspace(-1, 1, dim)
+    for i in range(5):
+        mu = -0.5 + i * 0.25
+        sigma = 0.1 + 0.05 * np.random.random()
+        amplitude = 0.8 + 0.4 * np.random.random()
+        pattern5 += amplitude * np.exp(-((x - mu)**2) / (2 * sigma**2))
+
+    patterns = [pattern1, pattern2, pattern3, pattern4, pattern5]
+    best_pattern = patterns[0]
+    best_score = -1.0
+
+    for pattern in patterns:
+        # Ensure pattern has right dimensionality
+        if len(pattern) != dim:
+            pattern = pattern[:dim] if len(pattern) > dim else list(pattern) + [0.0] * (dim - len(pattern))
+        try:
+            score = compute_c2_numba(compute_autoconvolution_numba(pattern))
+            if score > best_score:
+                best_score = score
+                best_pattern = pattern
+        except Exception:
+            continue
+
+    return best_pattern
+
+def evolutionary_optimization(initial_dim):
+    """Perform evolutionary optimization with adaptive parameters"""
+    # Start with good initialization
+    x0 = advanced_initialization(initial_dim)
+
+    # Set bounds for optimization
+    bounds = [(0, 10)] * len(x0)
+
+    # Parameters for differential evolution
+    de_params = {
+        'mutation': (0.5, 1),
+        'recombination': 0.7,
+        'popsize': max(15, initial_dim // 50),
+        'maxiter': max(50, initial_dim // 20),
+        'seed': 42,
+        'tol': 1e-6,
+        'init': 'latinhypercube',
+        'disp': False
+    }
+
+    # Run optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        **de_params
+    )
+
+    return result.x
+
+def adaptive_gradient_descent(initial_params, max_iterations=300):
+    """Adaptive gradient descent with dynamic learning rates using JAX gradients"""
+    current_params = np.array(initial_params, dtype=float)
+    current_c2 = compute_c2_numba(compute_autoconvolution_numba(current_params))
+
+    # Adaptive learning rate
+    learning_rate = 0.1
+    patience = 0
+    best_c2 = current_c2
+    best_params = current_params.copy()
+
+    for iteration in range(max_iterations):
+        # Compute gradient using JAX for better accuracy
+        try:
+            grad = compute_gradient_jax(current_params)
+        except:
+            # Fall back to numerical gradient if needed
+            grad = np.zeros_like(current_params)
+            epsilon = 1e-5
+            base_c2 = compute_c2_numba(compute_autoconvolution_numba(current_params))
+            for i in range(len(current_params)):
+                f_vals_plus = current_params.copy()
+                f_vals_plus[i] = max(0, current_params[i] + epsilon)
+                c2_plus = compute_c2_numba(compute_autoconvolution_numba(f_vals_plus))
+                grad[i] = (c2_plus - base_c2) / epsilon
+
+        # Apply gradient with clipping to maintain non-negativity
+        new_params = current_params - learning_rate * grad
+        new_params = np.maximum(new_params, 0)
+
+        # Evaluate new solution
+        new_c2 = compute_c2_numba(compute_autoconvolution_numba(new_params))
+
+        if new_c2 > current_c2:
+            current_params = new_params
+            current_c2 = new_c2
+            patience = 0
+
+            if new_c2 > best_c2:
+                best_c2 = new_c2
+                best_params = current_params.copy()
+        else:
+            patience += 1
+            if patience > 10:
+                learning_rate *= 0.5
+                patience = 0
+                if learning_rate < 1e-6:
+                    break
+
+    return best_params, best_c2
+
+def adaptive_optimization_strategy():
+    """Main adaptive optimization function with multiple strategies"""
+    start_time = time.time()
+    best_c2 = -np.inf
+    best_params = None
+
+    # Strategy 1: Multiple random starts with different initialization sizes
+    start_configs = [
+        (300, 42),
+        (500, 123),
+        (700, 234),
+        (900, 345),
+        (1100, 456),
+        (1300, 567)
+    ]
+
+    # Add some random configurations
+    for _ in range(3):
+        dim = np.random.randint(400, 1200)
+        seed = np.random.randint(1000, 9999)
+        start_configs.append((dim, seed))
+
+    for dim, seed in start_configs:
+        if time.time() - start_time > MAX_TIME_SECONDS * 0.9:
+            break
+
+        try:
+            np.random.seed(seed)
+
+            # Try evolutionary optimization first
+            params = evolutionary_optimization(dim)
+
+            # Compute actual C2 value
+            f_vals = np.clip(params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = params.copy()
+        except Exception as e:
+            continue
+
+    # Strategy 2: Local refinement with adaptive gradient descent
+    if best_params is not None and time.time() - start_time < MAX_TIME_SECONDS - 3.0:
+        try:
+            # Use adaptive gradient descent with JAX gradients for better accuracy
+            refined_params, refined_c2 = adaptive_gradient_descent(best_params, max_iterations=200)
+
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_params = refined_params.tolist()
+        except Exception:
+            pass
+
+    return best_params, best_c2
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    try:
+        # Run adaptive optimization strategy
+        f_values, best_c2 = adaptive_optimization_strategy()
+
+        # Fallback in case of failure
+        if f_values is None or len(f_values) == 0:
+            # Use simple initialization
+            n = DEFAULT_DIMENSION
+            f_values = sophisticated_initialization(n)
+
+        # Ensure non-negative values
+        f_values = np.maximum(f_values, 0).tolist()
+
+        # Ensure reasonable size
+        if len(f_values) < 50:
+            f_values = f_values + [0.5] * (50 - len(f_values))
+        elif len(f_values) > 10000:
+            f_values = f_values[:10000]
+
+        return f_values
+
+    except Exception as e:
+        # Final fallback
+        return [0.5] * 500
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

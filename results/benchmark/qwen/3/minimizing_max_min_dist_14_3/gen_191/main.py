@@ -1,0 +1,307 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist
+import time
+from typing import Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+def initialize_points(n: int = 14, d: int = 3) -> np.ndarray:
+    """
+    Initialize points using a sophisticated spherical geometry approach with multiple strategies.
+
+    Args:
+        n: number of points
+        d: dimensionality
+
+    Returns:
+        Initial point configuration
+    """
+    np.random.seed(42)
+
+    # Strategy 1: Icosahedron-based initialization for better distribution
+    # Start with vertices of regular icosahedron (12 vertices)
+    phi = (1 + np.sqrt(5)) / 2  # golden ratio
+    vertices = np.array([
+        [-1,  phi,  0],
+        [ 1,  phi,  0],
+        [-1, -phi,  0],
+        [ 1, -phi,  0],
+        [ 0, -1,  phi],
+        [ 0,  1,  phi],
+        [ 0, -1, -phi],
+        [ 0,  1, -phi],
+        [ phi,  0, -1],
+        [ phi,  0,  1],
+        [-phi,  0, -1],
+        [-phi,  0,  1]
+    ])
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(vertices, axis=1, keepdims=True)
+    vertices = vertices / norms
+
+    # If we need more than 12 points, add them strategically
+    if n <= 12:
+        points = vertices[:n].copy()
+    else:
+        # For 13-14 points, add them at strategic locations
+        points = vertices.copy()
+
+        # Add one more point at a strategic location to maintain symmetry
+        additional_point = -vertices[0]  # Opposite to first vertex
+        points = np.vstack([points, additional_point])
+
+        if n == 14:
+            # Add a second point to achieve 14 points
+            additional_point2 = -vertices[1]  # Opposite to second vertex
+            points = np.vstack([points, additional_point2])
+
+    # Normalize newly added points
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    points = points / np.max(norms)
+
+    # Scale and shift to [0,1]^3
+    points = points * 0.5 + 0.5
+
+    # Add small random perturbations to break symmetry and improve optimization
+    points += np.random.normal(0, 0.01, points.shape)
+
+    # Ensure all points remain within bounds
+    points = np.clip(points, 0, 1)
+
+    return points
+
+def calculate_distance_metrics(points: np.ndarray) -> tuple[float, float]:
+    """
+    Calculate minimum and maximum distances between all point pairs.
+
+    Args:
+        points: Array of shape (n, d)
+
+    Returns:
+        Tuple of (min_distance, max_distance)
+    """
+    if len(points) < 2:
+        return 0.0, 0.0
+
+    distances = pdist(points)
+
+    if len(distances) == 0:
+        return 0.0, 0.0
+
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    return min_dist, max_dist
+
+def objective_function_with_penalty(points_flat: np.ndarray, penalty_weight: float = 1000.0) -> float:
+    """
+    Objective function with penalty for constraint violations.
+
+    Args:
+        points_flat: Flattened array of point coordinates
+        penalty_weight: Weight for constraint penalty
+
+    Returns:
+        Objective value to minimize
+    """
+    n, d = 14, 3
+    points = points_flat.reshape(n, d)
+
+    # Compute penalty for boundary violations
+    penalty = 0.0
+    for i, coord in enumerate(points.flat):
+        if coord < 0:
+            penalty += penalty_weight * (0 - coord)**2
+        elif coord > 1:
+            penalty += penalty_weight * (coord - 1)**2
+
+    # Calculate distances
+    distances = pdist(points)
+
+    if len(distances) == 0:
+        return penalty + float('inf')
+
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist <= 0:
+        return penalty + float('inf')
+
+    # Return negative ratio plus penalty to minimize (maximize the ratio)
+    ratio = -min_dist / max_dist
+    return ratio + penalty
+
+def adaptive_differential_evolution(initial_points: np.ndarray, max_time: float = 350.0) -> np.ndarray:
+    """
+    Optimize point configuration using adaptive differential evolution with multiple strategies.
+
+    Args:
+        initial_points: Starting point configuration
+        max_time: Maximum optimization time in seconds
+
+    Returns:
+        Optimized point configuration
+    """
+    start_time = time.time()
+
+    # Try multiple optimization strategies with different parameters
+    strategies = [
+        {'popsize': 15, 'maxiter': 300, 'mutation': (0.5, 1.0), 'recombination': 0.7},
+        {'popsize': 20, 'maxiter': 250, 'mutation': (0.7, 1.0), 'recombination': 0.8},
+        {'popsize': 25, 'maxiter': 200, 'mutation': (0.8, 1.0), 'recombination': 0.9}
+    ]
+
+    best_points = initial_points.copy()
+    best_ratio = -float('inf')
+
+    for strategy in strategies:
+        try:
+            # Flatten initial points for optimization
+            initial_flat = initial_points.flatten()
+
+            # Define bounds for each coordinate (0 to 1)
+            bounds = [(0.0, 1.0)] * len(initial_flat)
+
+            # Run differential evolution with current strategy
+            result = differential_evolution(
+                objective_function_with_penalty,
+                bounds,
+                maxiter=strategy['maxiter'],
+                popsize=strategy['popsize'],
+                tol=1e-8,  # Tighter tolerance
+                mutation=strategy['mutation'],
+                recombination=strategy['recombination'],
+                seed=42,
+                disp=False
+            )
+
+            # Reshape result
+            optimized_points = result.x.reshape(14, 3)
+            optimized_points = np.clip(optimized_points, 0, 1)
+
+            # Evaluate the ratio
+            min_dist, max_dist = calculate_distance_metrics(optimized_points)
+            if max_dist > 0:
+                ratio = min_dist / max_dist
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    return best_points
+
+def local_refinement(initial_points: np.ndarray, max_time: float = 60.0) -> np.ndarray:
+    """
+    Perform local refinement using L-BFGS-B with multiple attempts.
+
+    Args:
+        initial_points: Starting point configuration
+        max_time: Maximum optimization time in seconds
+
+    Returns:
+        Refined point configuration
+    """
+    best_points = initial_points.copy()
+    best_ratio = -float('inf')
+
+    # Try multiple refinement approaches
+    refinement_attempts = [
+        {'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500},
+        {'ftol': 1e-10, 'gtol': 1e-10, 'maxiter': 1000},
+        {'ftol': 1e-11, 'gtol': 1e-11, 'maxiter': 750}
+    ]
+
+    for attempt in refinement_attempts:
+        try:
+            x0 = initial_points.flatten()
+            bounds = [(0.0, 1.0)] * len(x0)
+
+            # Refinement with more aggressive tolerance
+            result = minimize(
+                objective_function_with_penalty,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options=attempt
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(14, 3)
+                refined_points = np.clip(refined_points, 0, 1)
+
+                # Evaluate the ratio
+                min_dist, max_dist = calculate_distance_metrics(refined_points)
+                if max_dist > 0:
+                    ratio = min_dist / max_dist
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = refined_points.copy()
+        except Exception:
+            continue
+
+    return best_points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns:
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    # Phase 1: Multiple initialization attempts
+    initial_points = initialize_points(14, 3)
+
+    # Try a few different initializations to find a promising starting point
+    best_initial = initial_points.copy()
+    best_initial_ratio = -float('inf')
+
+    for i in range(3):
+        test_initial = initialize_points(14, 3)
+        min_dist, max_dist = calculate_distance_metrics(test_initial)
+        if max_dist > 0:
+            ratio = min_dist / max_dist
+            if ratio > best_initial_ratio:
+                best_initial_ratio = ratio
+                best_initial = test_initial.copy()
+
+    # Phase 2: Global optimization with adaptive differential evolution
+    global_optimized = adaptive_differential_evolution(best_initial)
+
+    # Phase 3: Local refinement with L-BFGS-B
+    local_optimized = local_refinement(global_optimized)
+
+    # Phase 4: Extra refinement attempt with different approach
+    extra_refinement = local_refinement(local_optimized)
+
+    # Select the best of all results
+    final_points = local_optimized.copy()
+    final_ratio = -float('inf')
+
+    for candidate in [global_optimized, local_optimized, extra_refinement]:
+        min_dist, max_dist = calculate_distance_metrics(candidate)
+        if max_dist > 0:
+            ratio = min_dist / max_dist
+            if ratio > final_ratio:
+                final_ratio = ratio
+                final_points = candidate.copy()
+
+    # Phase 5: Final validation and adjustment
+    # Calculate final metrics
+    min_dist, max_dist = calculate_distance_metrics(final_points)
+
+    # If optimization didn't work well, fall back to a good known arrangement
+    if max_dist <= 0 or min_dist <= 0:
+        # Fallback to regularized arrangement
+        np.random.seed(42)
+        final_points = np.random.rand(14, 3)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

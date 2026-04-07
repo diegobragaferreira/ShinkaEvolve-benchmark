@@ -1,0 +1,540 @@
+--- a/original.py
++++ b/original.py
+@@ -1,270 +1,364 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from shapely.geometry import Polygon, Point
+ from scipy.spatial.distance import cdist
+ import time
+-from scipy.optimize import minimize
+ from scipy.spatial import cKDTree
+ import itertools
+ import random
++from collections import defaultdict
++import warnings
++warnings.filterwarnings('ignore')
+ 
+ # Constants
+ NUM_INNER_HEXAGONS = 11
+ UNIT_HEXAGON_RADIUS = 1.0
+ MAX_EVAL_TIME = 180.0
+ 
+ # Precomputed unit hexagon vertices (centered at origin)
+ def get_unit_hexagon_vertices():
+     angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 angles + close the loop
+     vertices = np.column_stack([np.cos(angles), np.sin(angles)])
+     return vertices
+ 
+ UNIT_HEXAGON_VERTICES = get_unit_hexagon_vertices()
+ 
+ def rotate_point(point, angle_rad):
+     """Rotate a point around origin"""
+     cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+     return np.array([point[0]*cos_a - point[1]*sin_a, point[0]*sin_a + point[1]*cos_a])
+ 
+ def hexagon_vertices(center, angle_rad, scale=1.0):
+     """Get vertices of a hexagon at given position and rotation"""
+     rotated_vertices = np.array([rotate_point(v, angle_rad) for v in UNIT_HEXAGON_VERTICES])
+     return rotated_vertices * scale + np.array(center)
+-
+-def point_in_polygon(point, polygon):
+-    """Fast point-in-polygon check"""
+-    return polygon.contains(Point(point))
+ 
+ def calculate_outer_hexagon_radius(inner_hex_data, outer_center=[0,0], outer_angle=0):
+     """Calculate minimum radius needed for outer hexagon to contain all inner hexagons"""
+     max_dist = 0
+     for i in range(len(inner_hex_data)):
+         center = inner_hex_data[i][:2]
+         angle = np.radians(inner_hex_data[i][2])
+ 
+         # Get all vertices of this hexagon
+         vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+ 
+         # Calculate max distance from outer center to any vertex
+         for vertex in vertices:
+             dist = np.linalg.norm(np.array(vertex) - np.array(outer_center))
+             max_dist = max(max_dist, dist)
+ 
+     return max_dist
+ 
+-def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+-    """Validate solution: check containment and non-overlap"""
+-    # Precompute all hexagon polygons once for reuse
++def point_in_polygon(point, polygon):
++    """Fast point-in-polygon check"""
++    return polygon.contains(Point(point))
++
++def build_spatial_grid(hex_polygons, cell_size=3.0):
++    """Build spatial grid for fast collision detection"""
++    grid = defaultdict(list)
++    for i, hex_poly in enumerate(hex_polygons):
++        bbox = hex_poly.bounds
++        min_x, min_y, max_x, max_y = bbox
++        for x in range(int(min_x//cell_size), int(max_x//cell_size)+1):
++            for y in range(int(min_y//cell_size), int(max_y//cell_size)+1):
++                grid[(x,y)].append(i)
++    return grid
++
++def get_collision_candidates(grid, hex_index, hex_poly, cell_size=3.0):
++    """Get collision candidates efficiently"""
++    candidates = []
++    bbox = hex_poly.bounds
++    min_x, min_y, max_x, max_y = bbox
++    for x in range(int(min_x//cell_size)-1, int(max_x//cell_size)+2):
++        for y in range(int(min_y//cell_size)-1, int(max_y//cell_size)+2):
++            candidates.extend(grid.get((x,y), []))
++    return [i for i in candidates if i != hex_index]
++
++def check_containment_and_overlap(inner_hex_data, outer_center=[0,0], outer_angle=0):
++    """Efficiently check containment and overlaps using spatial indexing"""
++    # Create all hexagon polygons
+     hex_polygons = []
+     for i in range(len(inner_hex_data)):
+         center = inner_hex_data[i][:2]
+         angle = np.radians(inner_hex_data[i][2])
+         vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+         hex_polygons.append(Polygon(vertices))
+-
+-    # Check containment using the outer hexagon polygon
++    
++    # Check containment first
+     outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+     outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+     outer_polygon = Polygon(outer_vertices)
+-
+-    # Check if all inner hexagons are contained within outer hexagon
+-    for hex_poly in hex_polygons:
+-        # Fast check: if any vertex is outside, reject
+-        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+-            if not outer_polygon.contains(Point(vertex)):
+-                return False
+-
+-    # Check overlaps efficiently using spatial indexing
+-    # Build spatial index for faster overlap detection
+-    points_list = []
++    
++    # Check containment for all hexagons
+     for i, hex_poly in enumerate(hex_polygons):
+-        # Collect all vertices for spatial indexing
++        # Check if any vertex is outside the outer hexagon
+         for vertex in hex_poly.exterior.coords[:-1]:
+-            points_list.append((vertex[0], vertex[1], i))
+-
+-    if len(points_list) > 0:
+-        # Create spatial tree for vertices
+-        tree_points = cKDTree([(p[0], p[1]) for p in points_list])
+-
+-        # Check overlaps between hexagons using spatial indexing
+-        for i in range(len(hex_polygons)):
+-            for j in range(i+1, len(hex_polygons)):
+-                if hex_polygons[i].intersects(hex_polygons[j]):
+-                    return False
+-    else:
+-        # Fallback for empty case
+-        return False
+-
+-    return True
+-
+-def generate_hexagonal_lattice_initial():
+-    """Generate initial configuration based on hexagonal lattice pattern"""
+-    # Create a more sophisticated initial layout
+-    config = []
+-    
+-    # Center hexagon
+-    config.append([0, 0, 0])
+-    
+-    # First ring around center (6 hexagons)
+-    angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
+-    for angle in angles:
+-        x = 2.0 * np.cos(angle)
+-        y = 2.0 * np.sin(angle)
+-        config.append([x, y, 0])
+-    
+-    # Second ring (12 hexagons total, but we only need 11)
+-    # Place in a way that creates better packing
+-    angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
+-    for i, angle in enumerate(angles):
+-        x = 3.0 * np.cos(angle) + (-1)**i * 1.0
+-        y = 3.0 * np.sin(angle)
+-        config.append([x, y, 0])
+-    
+-    # Ensure we have exactly 11 hexagons
+-    while len(config) < 11:
++            if not point_in_polygon(vertex, outer_polygon):
++                return False, True, None  # containment violated, overlap not checked yet
++    
++    # Check overlaps using spatial indexing for efficiency
++    grid = build_spatial_grid(hex_polygons, cell_size=3.0)
++    
++    # Check for overlaps
++    for i in range(len(hex_polygons)):
++        candidates = get_collision_candidates(grid, i, hex_polygons[i], cell_size=3.0)
++        for j in candidates:
++            if i < j and hex_polygons[i].intersects(hex_polygons[j]):
++                return True, False, None  # containment ok, overlap exists
++    
++    return True, True, hex_polygons  # both ok
++
++def generate_initial_population(size=30):
++    """Generate diverse initial population using geometric knowledge"""
++    population = []
++    
++    # Pattern 1: Hexagonal lattice arrangement
++    for _ in range(size//6):
++        config = []
++        # Center hexagon
+         config.append([0, 0, 0])
+-    
+-    config = config[:11]
+-    
+-    # Add small random rotations to break symmetry
+-    for i in range(len(config)):
+-        config[i][2] = np.random.uniform(0, 360)
+-    
+-    return np.array(config)
+-
+-def adaptive_local_optimization(initial_config, start_time):
+-    """Perform adaptive local optimization with variable mutation rates"""
+-    best_config = initial_config.copy()
+-    best_radius = calculate_outer_hexagon_radius(best_config)
+-    
+-    # Adaptive parameters
+-    max_iterations = 2000
+-    stagnation_threshold = 50
+-    max_stagnation = 200
+-    initial_mutation_rate = 0.8
+-    final_mutation_rate = 0.1
+-    
+-    stagnation_count = 0
+-    improvement_count = 0
+-    
+-    for iteration in range(max_iterations):
+-        if time.time() - start_time > MAX_EVAL_TIME - 1:
++        # First ring (6 hexagons)
++        for i in range(6):
++            angle = i * np.pi/3
++            config.append([2 * np.cos(angle), 2 * np.sin(angle), 0])
++        # Second ring (4 hexagons)
++        for i in range(4):
++            angle = i * np.pi/2 + np.pi/4  # offset for better packing
++            config.append([3 * np.cos(angle), 3 * np.sin(angle), 0])
++        # Fill remainder with zeros
++        while len(config) < NUM_INNER_HEXAGONS:
++            config.append([0, 0, 0])
++        config = config[:NUM_INNER_HEXAGONS]
++        # Add small random noise
++        for i in range(len(config)):
++            config[i][0] += np.random.normal(0, 0.2)
++            config[i][1] += np.random.normal(0, 0.2)
++            config[i][2] += np.random.normal(0, 10)
++            config[i][2] %= 360
++        population.append(np.array(config))
++    
++    # Pattern 2: Cross pattern
++    for _ in range(size//6):
++        config = []
++        config.append([0, 0, 0])
++        config.append([0, 2, 0])
++        config.append([0, -2, 0])
++        config.append([2, 0, 0])
++        config.append([-2, 0, 0])
++        # Add more hexagons in cross pattern
++        config.append([0, 3, 0])
++        config.append([0, -3, 0])
++        config.append([3, 0, 0])
++        config.append([-3, 0, 0])
++        config.append([1, 1, 0])
++        config.append([-1, -1, 0])
++        # Fill remaining
++        while len(config) < NUM_INNER_HEXAGONS:
++            config.append([0, 0, 0])
++        config = config[:NUM_INNER_HEXAGONS]
++        # Add small random noise
++        for i in range(len(config)):
++            config[i][0] += np.random.normal(0, 0.3)
++            config[i][1] += np.random.normal(0, 0.3)
++            config[i][2] += np.random.normal(0, 15)
++            config[i][2] %= 360
++        population.append(np.array(config))
++    
++    # Pattern 3: Random but constrained
++    for _ in range(size//3):
++        config = []
++        for i in range(NUM_INNER_HEXAGONS):
++            config.append([
++                np.random.uniform(-3, 3),
++                np.random.uniform(-3, 3),
++                np.random.uniform(0, 360)
++            ])
++        population.append(np.array(config))
++    
++    # Ensure we have exactly the right size
++    return population[:size]
++
++def adaptive_neural_evolution():
++    """Neural-inspired evolutionary algorithm with self-adaptation"""
++    # Initialize population
++    population = generate_initial_population(30)
++    
++    # Track performance statistics
++    fitness_history = []
++    improvement_history = []
++    stagnation_counter = 0
++    best_fitness = float('inf') 
++    best_individual = None
++    
++    # Evolution parameters
++    generations = 1000
++    elite_size = 5
++    mutation_rate = 0.8
++    max_mutation_rate = 1.0
++    min_mutation_rate = 0.1
++    cross_rate = 0.8
++    max_stagnation = 50
++    
++    for gen in range(generations):
++        if time.time() > MAX_EVAL_TIME:
+             break
+             
+-        # Adaptive mutation rate scheduling
+-        current_mutation_rate = initial_mutation_rate + (final_mutation_rate - initial_mutation_rate) * \
+-                               (iteration / max_iterations)
+-        
+-        # Create perturbed configuration
+-        test_config = best_config.copy()
+-        
+-        # Apply perturbations with adaptive rate
+-        for i in range(NUM_INNER_HEXAGONS):
+-            # Position perturbations with adaptive magnitude
+-            pos_mutation = 0.2 * current_mutation_rate
+-            test_config[i][0] += np.random.normal(0, pos_mutation)
+-            test_config[i][1] += np.random.normal(0, pos_mutation)
+-            
+-            # Rotation perturbations
+-            rot_mutation = 10.0 * current_mutation_rate
+-            test_config[i][2] += np.random.normal(0, rot_mutation)
+-            test_config[i][2] %= 360
+-        
+-        # Validate and accept if better
+-        if validate_solution(test_config):
+-            test_radius = calculate_outer_hexagon_radius(test_config)
+-            if test_radius < best_radius:
+-                best_radius = test_radius
+-                best_config = test_config.copy()
+-                improvement_count += 1
+-                stagnation_count = 0
++        # Evaluate fitness for all individuals
++        fitness_scores = []
++        valid_individuals = []
++        
++        for ind in population:
++            # Check if solution is valid and compute fitness
++            containment_ok, overlap_ok, hex_polygons = check_containment_and_overlap(ind)
++            
++            if containment_ok and overlap_ok:
++                # Valid solution - calculate objective
++                radius = calculate_outer_hexagon_radius(ind)
++                fitness = 1.0/radius  # Higher is better
++                fitness_scores.append(fitness)
++                valid_individuals.append((ind, fitness))
+             else:
+-                stagnation_count += 1
++                # Invalid solution - assign very poor fitness
++                fitness_scores.append(-1000000)
++                valid_individuals.append((ind, -1000000))
++        
++        # Sort by fitness (descending)
++        sorted_indices = np.argsort(fitness_scores)[::-1]
++        sorted_population = [population[i] for i in sorted_indices]
++        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
++        
++        # Update best solution
++        if sorted_fitness[0] > best_fitness:
++            best_fitness = sorted_fitness[0]
++            best_individual = sorted_population[0].copy()
++            stagnation_counter = 0
++            improvement_history.append(gen)
+         else:
+-            stagnation_count += 1
+-            
+-        # Early stopping if stagnation occurs
+-        if stagnation_count > max_stagnation:
+-            break
+-    
+-    return best_config, best_radius
+-
+-def multi_start_optimization(start_time):
+-    """Run multiple optimization runs with different initial conditions"""
+-    best_overall_config = None
+-    best_overall_radius = float('inf')
+-    
+-    # Run multiple optimization trials
+-    num_trials = 15
+-    
+-    for trial in range(num_trials):
+-        if time.time() - start_time > MAX_EVAL_TIME - 1:
+-            break
+-            
+-        # Generate different initial configurations
+-        if trial == 0:
+-            # First trial with structured initial layout
+-            initial_config = generate_hexagonal_lattice_initial()
+-        else:
+-            # Later trials with random perturbations of the best known
+-            if best_overall_config is not None:
+-                initial_config = best_overall_config.copy()
+-                # Add some random noise
+-                for i in range(len(initial_config)):
+-                    initial_config[i][0] += np.random.normal(0, 0.5)
+-                    initial_config[i][1] += np.random.normal(0, 0.5)
+-                    initial_config[i][2] += np.random.normal(0, 30)
+-                    initial_config[i][2] %= 360
++            stagnation_counter += 1
++        
++        if stagnation_counter > max_stagnation:
++            # Reset mutation rate if stuck
++            mutation_rate = min(max_mutation_rate, mutation_rate * 1.1)
++            stagnation_counter = 0
++        
++        # Adapt mutation rate based on performance
++        if len(improvement_history) > 10:
++            recent_improvements = len(improvement_history) - len([x for x in improvement_history if x < gen-20])
++            if recent_improvements < 2:
++                mutation_rate = min(max_mutation_rate, mutation_rate * 1.1)
+             else:
+-                # Fallback to lattice layout
+-                initial_config = generate_hexagonal_lattice_initial()
+-        
+-        # Perform local optimization
+-        local_config, local_radius = adaptive_local_optimization(initial_config, start_time)
+-        
+-        # Update best overall solution
+-        if local_radius < best_overall_radius:
+-            best_overall_radius = local_radius
+-            best_overall_config = local_config.copy()
+-    
+-    return best_overall_config, best_overall_radius
++                mutation_rate = max(min_mutation_rate, mutation_rate * 0.95)
++        
++        # Create new population
++        new_population = []
++        
++        # Elitism - keep best individuals
++        for i in range(elite_size):
++            new_population.append(sorted_population[i].copy())
++        
++        # Generate offspring through crossover and mutation
++        while len(new_population) < len(population):
++            # Selection based on fitness (tournament selection)
++            tournament_size = 3
++            selected_indices = []
++            for _ in range(tournament_size):
++                idx = np.random.randint(0, len(sorted_population))
++                selected_indices.append(idx)
++            
++            # Pick the best from tournament
++            tournament_fitness = [sorted_fitness[i] for i in selected_indices]
++            winner_idx = selected_indices[np.argmax(tournament_fitness)]
++            parent1 = sorted_population[winner_idx].copy()
++            
++            # Another parent
++            selected_indices = []
++            for _ in range(tournament_size):
++                idx = np.random.randint(0, len(sorted_population))
++                selected_indices.append(idx)
++            
++            tournament_fitness = [sorted_fitness[i] for i in selected_indices]
++            winner_idx = selected_indices[np.argmax(tournament_fitness)]
++            parent2 = sorted_population[winner_idx].copy()
++            
++            # Crossover
++            if np.random.random() < cross_rate:
++                # Uniform crossover
++                child1 = parent1.copy()
++                child2 = parent2.copy()
++                for i in range(NUM_INNER_HEXAGONS):
++                    if np.random.random() < 0.5:
++                        child1[i] = parent2[i].copy()
++                        child2[i] = parent1[i].copy()
++            else:
++                child1 = parent1.copy()
++                child2 = parent2.copy()
++            
++            # Mutation with adaptive rate
++            for i in range(NUM_INNER_HEXAGONS):
++                if np.random.random() < mutation_rate:
++                    # Position mutation
++                    child1[i][0] += np.random.normal(0, 0.5)
++                    child1[i][1] += np.random.normal(0, 0.5)
++                    child1[i][2] += np.random.normal(0, 20)
++                    child1[i][2] %= 360
++                    
++                    # Same for child2
++                    child2[i][0] += np.random.normal(0, 0.5)
++                    child2[i][1] += np.random.normal(0, 0.5)
++                    child2[i][2] += np.random.normal(0, 20)
++                    child2[i][2] %= 360
++            
++            new_population.append(child1)
++            if len(new_population) < len(population):
++                new_population.append(child2)
++        
++        population = new_population[:len(population)]
++    
++    return best_individual, best_fitness
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
++    Uses a neural-inspired evolutionary algorithm with adaptive parameters.
++    
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     start_time = time.time()
+     
+-    # Multi-start optimization approach
+-    best_inner_config, best_radius = multi_start_optimization(start_time)
+-    
+-    # Final validation
+-    if not validate_solution(best_inner_config):
++    # Run neural evolutionary optimization
++    best_individual, best_fitness = adaptive_neural_evolution()
++    
++    # Get final radius
++    final_radius = calculate_outer_hexagon_radius(best_individual)
++    
++    # Validate final solution
++    is_valid, _, _ = check_containment_and_overlap(best_individual)
++    if not is_valid:
+         # Fallback to well-known good configuration
+-        best_inner_config = np.array([
++        best_individual = np.array([
+             [0, 0, 0],
+             [-2.5, 0, 0],
+             [2.5, 0, 0],
+             [-1.25, 2.17, 0],
+             [1.25, 2.17, 0],
+             [-1.25, -2.17, 0],
+             [1.25, -2.17, 0],
+             [-3.75, 2.17, 0],
+             [3.75, 2.17, 0],
+             [-3.75, -2.17, 0],
+             [3.75, -2.17, 0],
+         ])
+-        best_radius = 8.0
++        final_radius = 8.0
+     
+     # Return result
+-    inner_hex_data = best_inner_config
++    inner_hex_data = best_individual
+     outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+-    outer_hex_side_length = best_radius
++    outer_hex_side_length = final_radius
+     
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ # EVOLVE-BLOCK-END

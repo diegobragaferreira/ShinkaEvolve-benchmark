@@ -1,0 +1,112 @@
+<NAME>
+enhance_gradient_computation_with_vectorization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# JAX-based version for gradient computation with improved numerical stability
+@jax_jit
+def compute_autoconvolution_jax(f_vals_jax):
+    """JAX version of autoconvolution for gradient computation"""
+    # Convert to JAX array
+    f_vals = f_vals_jax
+
+    # For autoconvolution using JAX operations
+    n = len(f_vals)
+    g = jnp.zeros(2*n - 1)
+
+    # Vectorized autoconvolution
+    for i in range(n):
+        g = g.at[i:i+n].add(f_vals[i] * f_vals)
+
+    # Trim to center portion
+    offset = (n - 1) // 2
+    g_trimmed = g[offset:(2*n-1)-offset]
+
+    return g_trimmed
+
+@jax_jit
+def compute_c2_jax(g_vals):
+    """JAX version of C2 computation"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using JAX operations
+    g_l2_sq = jnp.sum((g_vals[:-1]**2 + g_vals[:-1]*g_vals[1:] + g_vals[1:]**2) * STEP_WIDTH / 3.0)
+    g_l1 = jnp.sum(jnp.abs(g_vals))
+    g_max = jnp.max(jnp.abs(g_vals))
+
+    # Compute C2 with better numerical handling
+    safe_g_l1 = jnp.where(g_l1 > 1e-15, g_l1, 1e-15)
+    safe_g_max = jnp.where(g_max > 1e-15, g_max, 1e-15)
+
+    c2 = g_l2_sq / (safe_g_l1 * safe_g_max)
+
+    return c2
+
+def evaluate_c2_jax(f_vals):
+    """Evaluate C2 using JAX for better gradient computation"""
+    # Ensure non-negative values
+    f_vals = jnp.maximum(f_vals, 0)
+
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_jax(f_vals)
+
+    # Compute C2
+    c2 = compute_c2_jax(g_vals)
+
+    return c2
+=======
+# JAX-based version for gradient computation with improved numerical stability and vectorization
+@jax_jit
+def compute_autoconvolution_jax(f_vals_jax):
+    """Vectorized JAX version of autoconvolution for gradient computation"""
+    # Convert to JAX array
+    f_vals = f_vals_jax
+
+    # Vectorized autoconvolution using outer product - much faster than loop
+    # This computes the full convolution matrix and extracts the relevant part
+    f_ext = jnp.pad(f_vals, (0, len(f_vals) - 1), mode='constant')
+    g_full = jnp.convolve(f_ext, f_vals, mode='full')
+
+    # Keep only the central portion (autoconvolution)
+    n = len(f_vals)
+    offset = n - 1
+    g_trimmed = g_full[offset:offset + n]
+
+    return g_trimmed
+
+@jax_jit
+def compute_c2_jax(g_vals):
+    """Vectorized JAX version of C2 computation"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using vectorized JAX operations
+    # L2 squared norm using trapezoidal-like integration
+    g_l2_sq = jnp.sum((g_vals[:-1]**2 + g_vals[:-1]*g_vals[1:] + g_vals[1:]**2) * STEP_WIDTH / 3.0)
+    g_l1 = jnp.sum(jnp.abs(g_vals))
+    g_max = jnp.max(jnp.abs(g_vals))
+
+    # Compute C2 with better numerical handling
+    safe_g_l1 = jnp.where(g_l1 > 1e-15, g_l1, 1e-15)
+    safe_g_max = jnp.where(g_max > 1e-15, g_max, 1e-15)
+
+    c2 = g_l2_sq / (safe_g_l1 * safe_g_max)
+
+    return c2
+
+def evaluate_c2_jax(f_vals):
+    """Evaluate C2 using vectorized JAX for better gradient computation"""
+    # Ensure non-negative values
+    f_vals = jnp.maximum(f_vals, 0)
+
+    # Compute autoconvolution using vectorized operation
+    g_vals = compute_autoconvolution_jax(f_vals)
+
+    # Compute C2
+    c2 = compute_c2_jax(g_vals)
+
+    return c2
+>>>>>>> REPLACE
+</DIFF>

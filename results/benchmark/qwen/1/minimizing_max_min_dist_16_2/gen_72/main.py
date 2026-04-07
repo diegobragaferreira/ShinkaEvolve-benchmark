@@ -1,0 +1,177 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Phase 1: Initialize points using improved hexagonal grid pattern
+    n_points = 16
+    points = np.zeros((n_points, 2))
+    
+    # Create a more regular hexagonal grid with proper spacing
+    rows = 4
+    cols = 4
+    spacing = 0.25
+    
+    idx = 0
+    for row in range(rows):
+        for col in range(cols):
+            if idx < n_points:
+                # Hexagonal grid with alternating row offsets
+                x = col * spacing + (row % 2) * spacing * 0.5
+                y = row * spacing * np.sqrt(3) / 2
+                
+                points[idx] = [x, y]
+                idx += 1
+    
+    # Normalize to [0,1] range with padding to avoid boundary issues
+    points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.9 + 0.05
+    points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.9 + 0.05
+    
+    # Add small random perturbations to escape local optima
+    points += np.random.normal(0, 0.005, points.shape)
+    
+    # Ensure points are within bounds
+    points = np.clip(points, 0, 1)
+    
+    # Phase 2: Hybrid Optimization with enhanced stability
+    
+    # Objective function for optimization with improved numerical stability
+    def objective_function(points_vec):
+        # Reshape vector back to points array
+        points = points_vec.reshape(-1, 2)
+        
+        # Ensure points are within bounds (with small padding to maintain feasibility)
+        points = np.clip(points, 1e-8, 1-1e-8)
+        
+        try:
+            # Compute pairwise distances using squareform for better numerical stability
+            distances = squareform(pdist(points))
+            
+            # Set diagonal to large value to avoid zero distances
+            np.fill_diagonal(distances, np.inf)
+            
+            # Get min and max distances
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            
+            # Avoid division by zero or extremely small values
+            if max_dist < 1e-12:
+                return 0
+            
+            # Return negative ratio (since we want to maximize ratio)
+            ratio = min_dist / max_dist
+            return -ratio
+            
+        except Exception:
+            return 0
+    
+    # Improved constraint function with epsilon padding
+    def constraint_func(points_vec):
+        points = points_vec.reshape(-1, 2)
+        epsilon = 1e-6  # Larger epsilon for better numerical stability
+        
+        # Check if any point is outside [epsilon, 1-epsilon] range
+        valid_count = 0
+        for pt in points:
+            if epsilon <= pt[0] <= (1 - epsilon) and epsilon <= pt[1] <= (1 - epsilon):
+                valid_count += 1
+        
+        return valid_count / len(points)  # Should be 1 for valid solutions
+    
+    # Define bounds with epsilon padding to prevent hitting exact boundaries
+    bounds = [(1e-6, 1-1e-6) for _ in range(2 * n_points)]
+    
+    # Use Differential Evolution for global search with optimized parameters
+    de_start_time = time.time()
+    
+    try:
+        de_result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=800,      # Reduced iterations for faster processing
+            popsize=20,       # Standard population size
+            mutation=(0.5, 1.0),  # Standard mutation range
+            recombination=0.7,    # Standard recombination rate
+            seed=42,
+            disp=False,
+            strategy='best1bin'
+        )
+        
+        de_end_time = time.time()
+        print(f"Differential Evolution completed in {de_end_time - de_start_time:.2f} seconds")
+        
+        # Extract best solution from DE
+        best_points_vec = de_result.x
+        best_points = best_points_vec.reshape(-1, 2)
+        
+        # Local refinement with SLSQP using adaptive early stopping
+        slsqp_start_time = time.time()
+        
+        # Define constraint dictionary for SLSQP
+        constraints = {'type': 'ineq', 'fun': lambda x: constraint_func(x)}
+        
+        # Monitor convergence for early stopping
+        prev_obj_value = float('inf')
+        patience_counter = 0
+        max_patience = 30
+        
+        # Custom callback to track progress
+        def callback(xk):
+            nonlocal prev_obj_value, patience_counter
+            obj_value = objective_function(xk)
+            if abs(prev_obj_value - obj_value) < 1e-10:
+                patience_counter += 1
+            else:
+                patience_counter = 0
+            prev_obj_value = obj_value
+            
+        # Local optimization with SLSQP
+        try:
+            result = minimize(
+                objective_function,
+                best_points_vec,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10,
+                callback=callback
+            )
+            
+            # Check if optimization converged properly
+            if result.success and constraint_func(result.x) > 0.95:
+                final_points = result.x.reshape(-1, 2)
+            else:
+                # Fallback to DE result if SLSQP doesn't work well
+                final_points = best_points
+                
+        except Exception as e:
+            print(f"SLSQP failed: {e}")
+            final_points = best_points
+            
+        slsqp_end_time = time.time()
+        print(f"SLSQP refinement completed in {slsqp_end_time - slsqp_start_time:.2f} seconds")
+        
+    except Exception as e:
+        print(f"Differential Evolution failed: {e}")
+        # Fallback to current points if optimization fails
+        final_points = points
+    
+    # Ensure final points are within bounds
+    final_points = np.clip(final_points, 1e-6, 1-1e-6)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

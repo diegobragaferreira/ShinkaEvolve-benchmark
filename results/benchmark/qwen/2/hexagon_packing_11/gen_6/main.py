@@ -1,0 +1,177 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+import math
+
+def hexagon_vertices(center_x, center_y, side_length=1, rotation=0):
+    """Generate vertices of a regular hexagon given center, side length, and rotation."""
+    angles = [rotation + i * np.pi / 3 for i in range(6)]
+    return [(center_x + side_length * np.cos(angle), center_y + side_length * np.sin(angle)) for angle in angles]
+
+def hexagon_polygon(center_x, center_y, side_length=1, rotation=0):
+    """Create a Shapely polygon for a hexagon."""
+    return Polygon(hexagon_vertices(center_x, center_y, side_length, rotation))
+
+def check_containment(hex_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hex_poly.contains(hex_poly)
+
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap."""
+    return hex1_poly.intersects(hex2_poly)
+
+def calculate_outer_hex_side_length(inner_hex_data, outer_center=(0,0), outer_rotation=0):
+    """Calculate the minimum outer hexagon side length needed to contain all inner hexagons."""
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        # Get all vertices of inner hexagon
+        inner_verts = hexagon_vertices(cx, cy, 1, angle)
+        # Find distance from center to each vertex
+        for vx, vy in inner_verts:
+            dist = np.sqrt((vx - outer_center[0])**2 + (vy - outer_center[1])**2)
+            max_dist = max(max_dist, dist)
+    
+    # Convert to hexagon side length (for a hexagon centered at origin)
+    # The outer hexagon needs to have radius >= max_dist
+    # For a regular hexagon with side length s, the circumradius is also s
+    return max_dist
+
+def objective_function(params):
+    """Objective function to maximize 1/R (minimize R)."""
+    # Reshape params into hexagon data
+    # params: [x1,y1,a1,x2,y2,a2,...,x11,y11,a11]
+    n = 11
+    inner_hex_data = params.reshape(n, 3)
+    
+    # Calculate the outer hexagon side length needed
+    outer_side_length = calculate_outer_hex_side_length(inner_hex_data)
+    
+    # Return negative because we want to minimize
+    return -outer_side_length
+
+def constraint_function(params):
+    """Constraint function ensuring no overlaps and containment."""
+    n = 11
+    inner_hex_data = params.reshape(n, 3)
+    
+    # Create polygons for all inner hexagons
+    inner_polys = []
+    for i in range(n):
+        cx, cy, angle = inner_hex_data[i]
+        poly = hexagon_polygon(cx, cy, 1, angle)
+        inner_polys.append(poly)
+    
+    # Check containment constraints (simple bounding box approach for initial feasibility)
+    outer_side_length = calculate_outer_hex_side_length(inner_hex_data)
+    outer_center = (0, 0)
+    outer_poly = hexagon_polygon(outer_center[0], outer_center[1], outer_side_length, 0)
+    
+    # Check containment for all inner hexagons
+    containment_violations = 0
+    for i in range(n):
+        if not check_containment(inner_polys[i], outer_poly):
+            containment_violations += 1
+    
+    # Check overlap constraints
+    overlap_violations = 0
+    for i in range(n):
+        for j in range(i+1, n):
+            if check_overlap(inner_polys[i], inner_polys[j]):
+                overlap_violations += 1
+    
+    # Return positive values for constraint violations
+    return containment_violations + overlap_violations
+
+def generate_initial_lattice_config():
+    """Generate a good initial configuration based on hexagonal lattice."""
+    # Start with a known efficient configuration
+    # This uses a pattern that's known to be relatively efficient
+    
+    # Pattern: one central hexagon surrounded by 6, then another layer of 6 more
+    # But optimized for 11 hexagons
+    initial_positions = [
+        # Central hexagon
+        [0, 0, 0],
+        # First ring around center
+        [2, 0, 0],      # right
+        [-2, 0, 0],     # left  
+        [1, np.sqrt(3), 0],  # top-right
+        [-1, np.sqrt(3), 0], # top-left
+        [1, -np.sqrt(3), 0], # bottom-right
+        [-1, -np.sqrt(3), 0], # bottom-left
+        # Second ring
+        [3, np.sqrt(3), 0],  # far top-right
+        [-3, np.sqrt(3), 0], # far top-left
+        [3, -np.sqrt(3), 0], # far bottom-right
+        [-3, -np.sqrt(3), 0], # far bottom-left
+    ]
+    
+    # Trim to 11 hexagons and add some variation
+    initial_positions = initial_positions[:11]
+    
+    # Add small perturbations to create a better initial configuration
+    np.random.seed(42)
+    for i in range(len(initial_positions)):
+        initial_positions[i][0] += np.random.uniform(-0.1, 0.1)
+        initial_positions[i][1] += np.random.uniform(-0.1, 0.1)
+        initial_positions[i][2] += np.random.uniform(-5, 5)
+    
+    return np.array(initial_positions)
+
+def optimize_hexagon_packing():
+    """Main optimization routine."""
+    # Generate initial configuration
+    x0 = generate_initial_lattice_config()
+    initial_params = x0.flatten()
+    
+    # Set up constraints and bounds
+    # Bounds for positions: [-10, 10] for x and y
+    # Bounds for rotations: [0, 360) degrees
+    bounds = []
+    n = 11
+    for i in range(n):
+        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+    
+    # Use scipy.optimize.minimize with L-BFGS-B method
+    result = minimize(
+        objective_function,
+        initial_params,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 1000, 'ftol': 1e-6, 'gtol': 1e-6}
+    )
+    
+    # Extract final result
+    final_params = result.x.reshape(n, 3)
+    
+    # Verify the solution
+    outer_side_length = calculate_outer_hex_side_length(final_params)
+    
+    # Return same format as original
+    return final_params, np.array([0, 0, 0]), outer_side_length
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    try:
+        inner_hex_data, outer_hex_data, outer_hex_side_length = optimize_hexagon_packing()
+        
+        # If optimization fails, fall back to the basic configuration
+        if outer_hex_side_length <= 0 or np.isnan(outer_hex_side_length):
+            return generate_initial_lattice_config(), np.array([0, 0, 0]), 8.0
+        
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+        
+    except Exception as e:
+        # Fallback to simple configuration if anything fails
+        return generate_initial_lattice_config(), np.array([0, 0, 0]), 8.0
+
+# EVOLVE-BLOCK-END

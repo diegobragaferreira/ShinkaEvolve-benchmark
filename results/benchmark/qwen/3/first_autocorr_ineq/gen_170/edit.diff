@@ -1,0 +1,236 @@
+--- a/original.py
++++ b/original.py
+@@ -1,188 +1,188 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy import optimize
+ from scipy.signal import fftconvolve
+ import math
+ import random
++
++# Enhanced global parameters
++MAX_SEQ_LENGTH = 1000
++MIN_SEQ_LENGTH = 10
++FFT_THRESHOLD = 100
++NUMERIC_STABILITY_THRESHOLD = 1e10
+ 
+ def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+     """Returns the direction to move into the sequence with enhanced adaptive parameters."""
+     n = len(sequence)
+     sum_sequence = np.sum(sequence)
+ 
+     # Prevent division by zero
+     if sum_sequence < 1e-10:
+         return None
+ 
+     # Normalize with adaptive factor
+     adaptive_factor = np.sqrt(2 * n)
+     normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
+ 
+-    # Use FFT for large sequences, direct convolution for small ones
+-    if n > 100:
+-        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+-    else:
+-        conv_result = np.convolve(normalized_sequence, normalized_sequence)
++    # Use enhanced convolution strategy
++    conv_result = compute_enhanced_convolution(normalized_sequence, n)
+ 
+     rhs = np.max(conv_result)
+ 
+     # Try solving LP with improved constraints
+     g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+ 
+     if g_fun is None:
+         # Enhanced fallback: try with modified RHS and different method
+         rhs_fallback = rhs * 1.1
+         g_fun = solve_convolution_lp(normalized_sequence, rhs_fallback, n)
+ 
+     if g_fun is None:
+         # Final fallback: simple gradient ascent with dynamic step
+         t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+         new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+         return new_sequence
+ 
+     # Normalize g_fun
+     sum_g_fun = np.sum(g_fun)
+     if sum_g_fun < 1e-10:
+         return None
+ 
+     normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
+ 
+     # Adaptive step-size with convergence awareness
+     t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+     new_sequence = [
+         (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+     ]
+     return new_sequence
+ 
++def compute_enhanced_convolution(sequence, n):
++    """Enhanced convolution computation with numerical stability checks."""
++    # Use FFT for large sequences, direct convolution for small ones
++    if n > FFT_THRESHOLD:
++        try:
++            conv_result = fftconvolve(sequence, sequence, mode='full')
++            conv_result = conv_result[:2*n-1]
++
++            # Numerical stability check
++            conv_max = np.max(np.abs(conv_result))
++            if conv_max > NUMERIC_STABILITY_THRESHOLD or np.any(np.isnan(conv_result)) or np.any(np.isinf(conv_result)):
++                # Fall back to direct method if numerical issues arise
++                conv_result = np.convolve(sequence, sequence)
++        except (ValueError, np.linalg.LinAlgError):
++            # If FFT fails, fall back to direct computation
++            conv_result = np.convolve(sequence, sequence)
++    else:
++        conv_result = np.convolve(sequence, sequence)
++
++    return conv_result[:2*n-1]
++
+ def solve_convolution_lp(f_sequence, rhs, n):
+     """Solves the convolution LP for a given sequence and RHS with enhanced constraints."""
+     c = -np.ones(n)
+     a_ub = []
+     b_ub = []
+ 
+-    # Enhanced strategy for convolution computation with numerical stability checks
+-    conv_method = 'fft' if n > 100 else 'direct'
+-    f_conv = None
+-
+-    if conv_method == 'fft':
+-        try:
+-            # Use FFT for large sequences with error handling and validation
+-            f_conv = fftconvolve(f_sequence, f_sequence, mode='full')
+-            f_conv = f_conv[:2*n-1]
+-
+-            # Additional numerical stability check
+-            conv_max = np.max(np.abs(f_conv))
+-            if conv_max > 1e10 or np.any(np.isnan(f_conv)) or np.any(np.isinf(f_conv)):
+-                # Fall back to direct method if numerical issues arise
+-                conv_method = 'direct'
+-                f_conv = None
+-        except (ValueError, np.linalg.LinAlgError):
+-            # If FFT fails due to any reason, fall back to direct computation
+-            conv_method = 'direct'
+-
+-    if conv_method == 'direct' or f_conv is None:
+-        # Use direct convolution for better numerical control when needed
+-        f_conv = np.convolve(f_sequence, f_sequence)
+-
+-    # Ensure f_conv is properly shaped
+-    if len(f_conv) != 2 * n - 1:
+-        f_conv = f_conv[:2*n-1]
+-
+-    # Improved constraint matrix creation with careful indexing
++    # Enhanced constraint matrix creation with careful indexing
+     for k in range(2 * n - 1):
+         # Create constraint row for convolution bound
+         row = np.zeros(n)
+         for i in range(n):
+             j = k - i
+             if 0 <= j < n:
+                 row[j] = f_sequence[i]
+         a_ub.append(row)
+         b_ub.append(rhs)
+ 
+     # Add non-negativity constraints
+     a_ub_nonneg = -np.eye(n)
+     b_ub_nonneg = np.zeros(n)
+ 
+     a_ub = np.vstack([a_ub, a_ub_nonneg])
+     b_ub = np.hstack([b_ub, b_ub_nonneg])
+ 
+     # Try multiple methods to solve LP, with improved error handling and diagnostics
+     try:
+         # Try the 'highs' method first for better performance
+         result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs',
+                                  options={'presolve': True, 'maxiter': 1000})
+     except Exception as e:
+         # Fallback to 'simplex' with relaxed tolerances
+         try:
+             result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='simplex',
+                                      options={'maxiter': 1000, 'tol': 1e-8})
+-        except:
+-            return None
++        except Exception:
++            # Final fallback to interior-point method
++            try:
++                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
++            except Exception:
++                return None
+ 
+     if result.success:
+         g_sequence = result.x
+         # Validate solution
+         if np.any(np.isnan(g_sequence)) or np.any(np.isinf(g_sequence)):
+             return None
+         # Ensure non-negativity and reasonable values
+         g_sequence = np.maximum(g_sequence, 0)
+         if np.sum(g_sequence) < 1e-10:
+             return None
+         return g_sequence
+     else:
+         return None
+ 
+ def search_for_best_sequence() -> list[float]:
+     """Function to search for the best coefficient sequence with enhanced diversity."""
+     # Initialize with deterministic seed for reproducibility
+     random.seed(42)
+     np.random.seed(42)
+ 
+     # Enhanced initialization: use multiple strategies for better diversity
+     init_strategies = []
+ 
+     # Strategy 1: Random uniform distribution
+-    n_init1 = max(10, int(math.log(1000) * 50))
++    n_init1 = max(MIN_SEQ_LENGTH, int(math.log(MAX_SEQ_LENGTH) * 50))
+     seq1 = np.random.rand(n_init1).tolist()
+ 
+     # Strategy 2: Exponential distribution for heavy-tailed distributions
+-    n_init2 = max(10, int(math.log(500) * 30))
++    n_init2 = max(MIN_SEQ_LENGTH, int(math.log(MAX_SEQ_LENGTH/2) * 30))
+     seq2 = [np.random.exponential(1.0) for _ in range(n_init2)]
+ 
+     # Strategy 3: Gamma distribution for varied shapes
+-    n_init3 = max(10, int(math.log(800) * 40))
++    n_init3 = max(MIN_SEQ_LENGTH, int(math.log(MAX_SEQ_LENGTH/1.5) * 40))
+     seq3 = [np.random.gamma(2.0, 1.0) for _ in range(n_init3)]
+ 
+     # Combine strategies and ensure positivity
+     combined_seq = seq1 + seq2 + seq3
+     combined_seq = [max(x, 0.01) for x in combined_seq]
+ 
+-    # Select best initial sequence
+-    best_sequence = combined_seq[:100]  # Cap at 100 elements
++    # Select best initial sequence with capped length
++    best_sequence = combined_seq[:MAX_SEQ_LENGTH]
+ 
+     # Evolution loop with adaptive refinement
+-    max_iterations = 50  # Increase iterations for better convergence
++    max_iterations = 100  # Increase iterations for better convergence
+     for iteration in range(max_iterations):
+         h_function = get_good_direction_to_move_into(best_sequence)
+         if h_function is not None:
+             best_sequence = h_function
+         else:
+             # If evolution fails, try to recover with a more robust mutation
+             index = np.random.randint(len(best_sequence))
+             # Use multiplicative mutation with larger perturbations
+-            perturbation = np.random.normal(1, 0.2)  # Allow larger variations
++            perturbation = np.random.normal(1, 0.3)  # Slightly larger variations
+             best_sequence[index] = max(0.01, best_sequence[index] * perturbation)
+ 
+         # Periodic diversity injection
+-        if iteration % 10 == 0:
+-            # Inject some new diversity every 10 iterations
++        if iteration % 15 == 0:
++            # Inject some new diversity every 15 iterations
+             new_index = np.random.randint(len(best_sequence))
+             best_sequence[new_index] = max(0.01, np.random.exponential(1.0))
+ 
+     return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

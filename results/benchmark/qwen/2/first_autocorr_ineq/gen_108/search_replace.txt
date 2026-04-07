@@ -1,0 +1,181 @@
+<NAME>
+add_ensemble_method
+</NAME>
+
+<DESCRIPTION>
+This edit introduces an ensemble method that combines multiple optimization strategies to improve performance. The idea is to use a combination of gradient-based updates, evolutionary strategies, and local search techniques to avoid getting stuck in local optima and to leverage the strengths of different approaches. This will help us beat the benchmark of 1/C₁ > 1/1.5031.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class AutocorrelationOptimizer:
+    def __init__(self, max_iterations=1000, timeout_seconds=180, elite_size=50, use_fft_constraints=True):
+        self.max_iterations = max_iterations
+        self.timeout_seconds = timeout_seconds
+        self.elite_size = elite_size
+        self.use_fft_constraints = use_fft_constraints
+        self.best_sequence = None
+        self.best_inv_c1 = 0.0
+        self.elite_sequences = []  # Store top performing sequences
+=======
+class AutocorrelationOptimizer:
+    def __init__(self, max_iterations=1000, timeout_seconds=180, elite_size=50, use_fft_constraints=True):
+        self.max_iterations = max_iterations
+        self.timeout_seconds = timeout_seconds
+        self.elite_size = elite_size
+        self.use_fft_constraints = use_fft_constraints
+        self.best_sequence = None
+        self.best_inv_c1 = 0.0
+        self.elite_sequences = []  # Store top performing sequences
+        self.ensemble_weights = [0.4, 0.3, 0.3]  # Weights for different strategies
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_ensemble_strategy
+</NAME>
+
+<DESCRIPTION>
+This edit adds a new method `get_ensemble_direction` that combines multiple optimization strategies (gradient, evolutionary, and local search) to provide a more robust direction for optimization. This should increase the likelihood of finding better solutions and beating the benchmark.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            return new_sequence
+
+        except Exception:
+            return None
+=======
+            return new_sequence
+
+        except Exception:
+            return None
+
+    def get_ensemble_direction(self, sequence, iteration):
+        """Combine multiple strategies to get a better optimization direction."""
+        strategies = []
+
+        # Strategy 1: Gradient-based update
+        grad_direction = self.get_good_direction_to_move_into(sequence, iteration)
+        if grad_direction is not None:
+            strategies.append(('gradient', grad_direction))
+
+        # Strategy 2: Random perturbation (as fallback)
+        random_perturbation = [max(0, x + random.uniform(-0.1, 0.1)) for x in sequence]
+        strategies.append(('random', random_perturbation))
+
+        # Strategy 3: Evolutionary mutation
+        if len(sequence) > 10:
+            mutated = sequence.copy()
+            for i in range(len(mutated)):
+                if random.random() < 0.1:
+                    mutated[i] = max(0, mutated[i] * random.uniform(0.9, 1.1))
+            strategies.append(('mutation', mutated))
+
+        # Strategy 4: Mirror
+        mirror_seq = sequence[::-1]
+        strategies.append(('mirror', mirror_seq))
+
+        # Weighted selection of best strategy
+        best_strategy = None
+        best_fitness = float('-inf')
+
+        for strategy_name, strat_seq in strategies:
+            fitness = self.compute_inv_c1(strat_seq)
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_strategy = strat_seq
+
+        return best_strategy
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+modify_optimization_loop
+</NAME>
+
+<DESCRIPTION>
+This edit modifies the main optimization loop to use the ensemble strategy instead of just the gradient approach, falling back to the ensemble method when the gradient fails. This should lead to better exploration of the search space and improved performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        for iteration in range(self.max_iterations):
+            if time.time() - start_time > self.timeout_seconds:
+                break
+
+            # Compute current performance
+            inv_c1 = self.compute_inv_c1(current_sequence)
+            if inv_c1 > self.best_inv_c1:
+                self.best_inv_c1 = inv_c1
+                self.best_sequence = current_sequence.copy()
+
+            # Store elite sequences
+            if len(self.elite_sequences) < self.elite_size:
+                self.elite_sequences.append((current_sequence.copy(), inv_c1))
+            else:
+                # Replace worst elite if current is better
+                worst_idx = min(range(len(self.elite_sequences)), key=lambda i: self.elite_sequences[i][1])
+                if inv_c1 > self.elite_sequences[worst_idx][1]:
+                    self.elite_sequences[worst_idx] = (current_sequence.copy(), inv_c1)
+
+            # Attempt to find better direction
+            new_sequence = self.get_good_direction_to_move_into(current_sequence, iteration)
+
+            if new_sequence is not None:
+                current_sequence = new_sequence
+            else:
+                # Three-tiered fallback strategy
+                # Tier 1: Try mirrored sequence
+                mirrored_seq = current_sequence[::-1]
+                mirrored_inv_c1 = self.compute_inv_c1(mirrored_seq)
+                if mirrored_inv_c1 > inv_c1:
+                    current_sequence = mirrored_seq
+                else:
+                    # Tier 2: Apply bounded random perturbations
+                    perturbed_seq = [
+                        max(0, x + random.uniform(-0.05, 0.05))
+                        for x in current_sequence
+                    ]
+                    perturbed_inv_c1 = self.compute_inv_c1(perturbed_seq)
+                    if perturbed_inv_c1 > inv_c1:
+                        current_sequence = perturbed_seq
+                    else:
+                        # Tier 3: Resort to randomization
+                        current_sequence = [
+                            random.random()
+                            for _ in range(len(current_sequence))
+                        ]
+
+        return self.best_sequence
+=======
+        for iteration in range(self.max_iterations):
+            if time.time() - start_time > self.timeout_seconds:
+                break
+
+            # Compute current performance
+            inv_c1 = self.compute_inv_c1(current_sequence)
+            if inv_c1 > self.best_inv_c1:
+                self.best_inv_c1 = inv_c1
+                self.best_sequence = current_sequence.copy()
+
+            # Store elite sequences
+            if len(self.elite_sequences) < self.elite_size:
+                self.elite_sequences.append((current_sequence.copy(), inv_c1))
+            else:
+                # Replace worst elite if current is better
+                worst_idx = min(range(len(self.elite_sequences)), key=lambda i: self.elite_sequences[i][1])
+                if inv_c1 > self.elite_sequences[worst_idx][1]:
+                    self.elite_sequences[worst_idx] = (current_sequence.copy(), inv_c1)
+
+            # Attempt to find better direction using ensemble method
+            new_sequence = self.get_ensemble_direction(current_sequence, iteration)
+
+            if new_sequence is not None:
+                current_sequence = new_sequence
+
+        return self.best_sequence
+>>>>>>> REPLACE
+</DIFF>

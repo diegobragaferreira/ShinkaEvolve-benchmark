@@ -1,0 +1,364 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+import time
+import random
+from scipy.optimize import minimize
+from scipy.special import erf
+import warnings
+warnings.filterwarnings('ignore')
+
+# Global constants
+MAX_TIME_SECONDS = 90.0
+DEFAULT_STEPS = 3000
+MIN_STEPS = 500
+MAX_STEPS = 8000
+
+def compute_autoconvolution_fft(f_vals):
+    """
+    Compute autoconvolution using FFT - O(n log n) complexity
+    """
+    f_vals = np.array(f_vals, dtype=np.float64)
+    
+    # For autoconvolution f*f, we can use FFT:
+    # conv(f,f) = ifft(fft(f)^2)
+    n = len(f_vals)
+    
+    # Pad to next power of 2 for better FFT performance
+    fft_size = 2**int(np.ceil(np.log2(2*n - 1)))
+    
+    # Compute FFT of f padded to fft_size
+    f_padded = np.pad(f_vals, (0, fft_size - n), 'constant')
+    f_fft = fft(f_padded)
+    
+    # Compute autoconvolution in frequency domain (square the FFT)
+    g_fft = f_fft * f_fft
+    
+    # Transform back to time domain
+    g = np.real(ifft(g_fft))
+    
+    # Keep only the valid convolution part (middle)
+    # The valid convolution goes from index (n-1) to (n-1)+(n-1) = 2*n-2
+    g_valid = g[n-1:2*n-1]
+    
+    return g_valid
+
+def compute_autoconvolution_norms_fft(f_vals):
+    """
+    Compute all three norms using FFT-based autoconvolution
+    """
+    try:
+        # Compute autoconvolution using FFT
+        g_vals = compute_autoconvolution_fft(f_vals)
+        
+        # Compute norms
+        l1_norm = np.sum(np.abs(g_vals))
+        l2_sq_norm = np.sum(g_vals**2)
+        linf_norm = np.max(np.abs(g_vals))
+        
+        # Handle edge cases
+        if l1_norm <= 1e-15 or linf_norm <= 1e-15:
+            return 0.0, 0.0, 0.0, 0.0
+            
+        # Compute C2
+        c2 = l2_sq_norm / (l1_norm * linf_norm)
+        
+        return c2, l2_sq_norm, l1_norm, linf_norm
+    except Exception:
+        return 0.0, 0.0, 0.0, 0.0
+
+def evaluate_c2_fft(f_vals):
+    """
+    Fast evaluation of C2 using FFT-based convolution
+    """
+    try:
+        c2, _, _, _ = compute_autoconvolution_norms_fft(f_vals)
+        return c2
+    except Exception:
+        return 0.0
+
+def create_frequency_domain_initialization(n_steps):
+    """
+    Create initial solution based on mathematical properties that maximize C2
+    """
+    # Pattern inspired by optimal structures in frequency domain
+    # Create a pattern that will produce desirable autoconvolution properties
+    
+    # Phase 1: Create a multi-frequency base pattern
+    pattern = np.zeros(n_steps)
+    
+    # Create a superposition of sine waves that will lead to good convolution properties
+    x = np.linspace(0, 4*np.pi, n_steps)
+    
+    # Primary frequencies
+    pattern += 0.5 * np.sin(x) + 0.3 * np.sin(3*x) + 0.2 * np.sin(5*x)
+    
+    # Add some low frequency components for structure  
+    pattern += 0.1 * np.sin(0.5*x)
+    
+    # Add some modulated components
+    pattern += 0.2 * np.sin(2*x) * np.exp(-x**2/(2*(n_steps/10)**2))
+    
+    # Make non-negative and normalize
+    pattern = np.maximum(pattern, 0.0)
+    
+    if np.sum(pattern) > 0:
+        pattern = pattern * n_steps / np.sum(pattern)
+    
+    return pattern
+
+def create_spectral_optimized_initialization(n_steps):
+    """
+    Create initialization with spectral characteristics that favor high C2
+    """
+    # Create structured pattern that will produce favorable autoconvolution
+    pattern = np.zeros(n_steps)
+    
+    # Create a pattern with strategic peaks and valleys
+    # This aims to create constructive interference in convolution
+    
+    # Central region with higher values
+    center = n_steps // 2
+    width = n_steps // 8
+    
+    # Create a bell-shaped central region
+    for i in range(n_steps):
+        distance = abs(i - center)
+        if distance <= width:
+            pattern[i] = 1.0 + 0.5 * np.exp(-distance**2 / (2 * (width/3)**2))
+    
+    # Add some periodic structure
+    x = np.linspace(0, 2*np.pi, n_steps)
+    periodic = 0.3 * np.sin(4*x) + 0.1 * np.sin(8*x)
+    
+    pattern = pattern + periodic
+    
+    # Make non-negative and normalize
+    pattern = np.maximum(pattern, 0.0)
+    
+    if np.sum(pattern) > 0:
+        pattern = pattern * n_steps / np.sum(pattern)
+    
+    return pattern
+
+def create_mixed_frequency_initialization(n_steps):
+    """
+    Create diversified initialization using multiple frequency-based approaches
+    """
+    strategies = [
+        lambda n: create_frequency_domain_initialization(n),
+        lambda n: create_spectral_optimized_initialization(n),
+        lambda n: create_bell_shaped_initialization(n),
+        lambda n: create_alternating_initialization(n)
+    ]
+    
+    # Choose a strategy
+    strategy = np.random.choice(strategies)
+    pattern = strategy(n_steps)
+    
+    # Add small noise for diversity
+    noise = np.random.normal(0, 0.01, n_steps)
+    pattern = pattern + noise
+    pattern = np.maximum(pattern, 0.0)
+    
+    # Normalize
+    if np.sum(pattern) > 0:
+        pattern = pattern * n_steps / np.sum(pattern)
+    
+    return pattern
+
+def create_bell_shaped_initialization(n_steps):
+    """Create bell-shaped pattern optimized for frequency domain properties"""
+    x = np.linspace(0, 1, n_steps)
+    # Create Gaussian-like shape with emphasis on central region
+    pattern = 1.0 + 0.8 * np.exp(-12 * (x - 0.5)**2) - 0.3 * np.exp(-6 * x**2) - 0.3 * np.exp(-6 * (1-x)**2)
+    pattern = np.clip(pattern, 0, np.inf)
+    
+    # Normalize appropriately
+    if np.sum(pattern) > 0:
+        pattern = pattern * n_steps / np.sum(pattern)
+    return pattern
+
+def create_alternating_initialization(n_steps):
+    """Create alternating high/low pattern for frequency domain"""
+    pattern = []
+    for i in range(n_steps):
+        if i % 2 == 0:
+            pattern.append(1.0 + np.random.random() * 0.5)
+        else:
+            pattern.append(0.2 + np.random.random() * 0.3)
+    
+    pattern = np.array(pattern)
+    if np.sum(pattern) > 0:
+        pattern = pattern * n_steps / np.sum(pattern)
+    return pattern
+
+def compute_gradient_fft(f_vals):
+    """
+    Compute gradient of C2 with respect to f_vals using automatic differentiation
+    """
+    # This is a simplified gradient computation
+    # In practice, one would use more sophisticated automatic differentiation
+    eps = 1e-8
+    grad = np.zeros_like(f_vals)
+    
+    for i in range(len(f_vals)):
+        # Forward difference approximation
+        f_plus = f_vals.copy()
+        f_minus = f_vals.copy()
+        f_plus[i] += eps
+        f_minus[i] -= eps
+        
+        c2_plus = evaluate_c2_fft(f_plus)
+        c2_minus = evaluate_c2_fft(f_minus)
+        
+        grad[i] = (c2_plus - c2_minus) / (2 * eps)
+    
+    return grad
+
+def gradient_based_optimization(initial_solution, max_iter=200):
+    """
+    Direct gradient-based optimization using FFT-based C2 computation
+    """
+    # Convert to numpy array and ensure non-negativity
+    x0 = np.array(initial_solution)
+    x0 = np.maximum(x0, 0.0)
+    
+    # Set up bounds for optimization
+    bounds = [(0, 10.0) for _ in range(len(x0))]
+    
+    # Objective function (negative for maximization)
+    def objective(x):
+        return -evaluate_c2_fft(x)
+    
+    # Gradient function (approximate)
+    def grad_objective(x):
+        return -compute_gradient_fft(x)
+    
+    # Use L-BFGS-B for local refinement
+    try:
+        result = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            jac=grad_objective,
+            options={'maxiter': max_iter, 'ftol': 1e-10, 'gtol': 1e-8},
+            tol=1e-10
+        )
+        
+        if result.success:
+            return np.maximum(result.x, 0.0).tolist()
+    except:
+        pass
+    
+    return initial_solution
+
+def frequency_domain_refinement(initial_solution):
+    """
+    Comprehensive refinement strategy using frequency domain properties
+    """
+    # Multiple stages of refinement
+    current_solution = np.array(initial_solution)
+    
+    # Stage 1: Gradient-based optimization
+    try:
+        refined_1 = gradient_based_optimization(current_solution.tolist(), max_iter=100)
+        current_solution = np.array(refined_1)
+    except:
+        pass
+    
+    # Stage 2: Frequency domain filtering and enhancement
+    try:
+        # Apply smoothing in frequency domain
+        freq_domain = fft(current_solution)
+        # Apply a low-pass filter to reduce high-frequency noise
+        n = len(freq_domain)
+        cutoff = n // 10
+        filtered_freq = freq_domain.copy()
+        filtered_freq[cutoff:-cutoff] = 0
+        
+        # Transform back
+        smoothed = np.real(ifft(filtered_freq))
+        current_solution = np.maximum(smoothed, 0.0)
+        
+        # Normalize
+        if np.sum(current_solution) > 0:
+            current_solution = current_solution * len(current_solution) / np.sum(current_solution)
+    except:
+        pass
+    
+    # Stage 3: Final gradient refinement
+    try:
+        refined_2 = gradient_based_optimization(current_solution.tolist(), max_iter=50)
+        current_solution = np.array(refined_2)
+    except:
+        pass
+    
+    return current_solution.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Frequency domain optimization approach to maximize C2.
+    Uses FFT-based autoconvolution computation and direct gradient optimization.
+    """
+    global start_time
+    start_time = time.time()
+    
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Create diverse initial population using frequency domain insights
+    initial_solutions = []
+    n_attempts = 10
+    
+    for i in range(n_attempts):
+        # Create diverse initial solutions with frequency domain optimization in mind
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        init_solution = create_mixed_frequency_initialization(n_steps)
+        initial_solutions.append(init_solution)
+    
+    # Select the best initial solution
+    best_init = max(initial_solutions, key=evaluate_c2_fft)
+    
+    # Apply frequency domain refinement strategy
+    refined_solution = frequency_domain_refinement(best_init)
+    
+    # Final evaluation
+    final_c2 = evaluate_c2_fft(refined_solution)
+    initial_c2 = evaluate_c2_fft(best_init)
+    
+    if final_c2 > initial_c2:
+        result = refined_solution
+    else:
+        result = best_init
+    
+    # Ensure proper length
+    if len(result) < MIN_STEPS:
+        result.extend([1.0] * (MIN_STEPS - len(result)))
+    elif len(result) > MAX_STEPS:
+        result = result[:MAX_STEPS]
+    
+    # Final normalization
+    if np.sum(result) > 0:
+        result = np.array(result) / np.sum(result) * len(result)
+    
+    # Ensure non-negativity
+    result = np.clip(result, 0, np.inf)
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    # Print debug info
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Best C2 found: {evaluate_c2_fft(result):.6f}")
+    
+    return result.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

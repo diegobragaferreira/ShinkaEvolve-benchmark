@@ -1,0 +1,324 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import math
+import random
+import time
+import numba
+from numba import jit
+
+# Set random seed for determinism
+random.seed(42)
+np.random.seed(42)
+
+# Constants
+MAX_TIME_SECONDS = 180
+MAX_MEMORY_GB = 5
+MIN_SEQUENCE_LENGTH = 10
+MAX_SEQUENCE_LENGTH = 1000
+BENCHMARK_THRESHOLD = 1.5031
+POPULATION_SIZE = 50
+GENERATIONS = 50
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+ELITISM_COUNT = 5
+ADAPTIVE_THRESHOLD = 0.01
+NUM_RESTARTS = 3
+
+@jit(nopython=True)
+def compute_convolution_fast_numba(a):
+    """
+    Compute the convolution of a sequence with itself using direct method for small arrays,
+    FFT for larger ones to improve performance.
+    """
+    n = len(a)
+    if n < 100:
+        # Direct computation for small arrays
+        b = np.zeros(2*n - 1)
+        for i in range(n):
+            for j in range(n):
+                b[i+j] += a[i] * a[j]
+        return b
+    else:
+        # Use FFT for large arrays
+        b = fftconvolve(a, a, mode='full')
+        return b[:2*n - 1]
+
+def compute_c1(sequence):
+    """
+    Compute C1 value for a given sequence.
+    """
+    n = len(sequence)
+    if n < 1:
+        return float('inf')
+    
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+        
+    conv = compute_convolution_fast_numba(sequence)
+    max_conv = np.max(conv)
+    
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+def compute_inv_c1(sequence):
+    """
+    Compute inverse of C1 value (the objective to maximize).
+    """
+    c1 = compute_c1(sequence)
+    if c1 == float('inf') or c1 <= 0:
+        return 0.0
+    return 1.0 / c1
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence using adaptive gradient."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    
+    if sum_sequence < 1e-10:
+        return None
+    
+    # Normalize sequence
+    normalized_sequence = [x / sum_sequence for x in sequence]
+    
+    # Compute convolution
+    if n > 100:
+        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+        conv_result = conv_result[:2*n - 1]
+    else:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+    
+    rhs = np.max(conv_result)
+    
+    # Attempt to solve constrained optimization problem
+    try:
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+    except Exception:
+        g_fun = None
+        
+    if g_fun is None:
+        # Fallback: simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+        
+    normalized_g_fun = [x / sum_g_fun for x in g_fun]
+    
+    # Adaptive step-size based on sequence size
+    t = min(0.05, 0.01 + 0.005 * math.log(n + 1))
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def solve_convolution_lp(f_sequence, rhs, n):
+    """Solves the convolution LP for a given sequence and RHS."""
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+    
+    # Generate convolution constraints
+    if n > 100:
+        f_conv = fftconvolve(f_sequence, f_sequence, mode='full')
+        f_conv = f_conv[:2*n-1]
+    else:
+        f_conv = np.convolve(f_sequence, f_sequence)
+    
+    # Build constraint matrix
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+    
+    # Add non-negativity constraints
+    a_ub_nonneg = -np.eye(n)
+    b_ub_nonneg = np.zeros(n)
+    
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    # Solve using high quality solver with increased maxiter
+    try:
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', options={'maxiter': 1000})
+    except:
+        # Fallback to simplex if highs fails
+        try:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='simplex', options={'maxiter': 1000})
+        except:
+            return None
+
+    if result.success:
+        g_sequence = result.x
+        return g_sequence
+    else:
+        return None
+
+def generate_initial_sequence(length: int) -> list[float]:
+    """Generate an initial random sequence with specified length."""
+    return [random.uniform(0.1, 100.0) for _ in range(length)]
+
+def mutate_individual(individual: list[float], mutation_rate: float = MUTATION_RATE) -> list[float]:
+    """Mutate an individual with adaptive mutation rates."""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian perturbation
+            mutated[i] = max(0, mutated[i] + random.gauss(0, 0.1 * mutated[i] + 0.01))
+    return mutated
+
+def crossover_individuals(parent1: list[float], parent2: list[float],
+                         crossover_rate: float = CROSSOVER_RATE) -> tuple[list[float], list[float]]:
+    """Perform crossover between two individuals."""
+    if random.random() > crossover_rate or len(parent1) != len(parent2):
+        return parent1.copy(), parent2.copy()
+
+    # Single-point crossover
+    crossover_point = random.randint(1, len(parent1) - 1)
+    child1 = parent1[:crossover_point] + parent2[crossover_point:]
+    child2 = parent2[:crossover_point] + parent1[crossover_point:]
+    return child1, child2
+
+def genetic_algorithm_search(initial_sequence: list[float]) -> list[float]:
+    """Main genetic algorithm implementation."""
+    start_time = time.time()
+    
+    # Initialize population
+    population = [initial_sequence.copy()]
+    population.extend([mutate_individual(initial_sequence) for _ in range(POPULATION_SIZE - 1)])
+
+    best_sequence = None
+    best_fitness = 0.0
+    prev_fitness = 0.0
+    stagnation_count = 0
+
+    for generation in range(GENERATIONS):
+        if time.time() - start_time > MAX_TIME_SECONDS:
+            break
+
+        # Calculate fitness for all individuals
+        fitness_scores = [compute_inv_c1(individual) for individual in population]
+
+        # Update best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_sequence = population[max_fitness_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Check for stagnation
+        if stagnation_count > 10:
+            # Restart with new random population
+            population = [initial_sequence.copy()]
+            population.extend([mutate_individual(initial_sequence) for _ in range(POPULATION_SIZE - 1)])
+            stagnation_count = 0
+            continue
+
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+        # Keep elite individuals
+        elite = sorted_population[:ELITISM_COUNT]
+
+        # Create next generation
+        next_generation = elite.copy()
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(next_generation) < POPULATION_SIZE:
+            # Tournament selection
+            tournament_size = 3
+            selected_parents = []
+            for _ in range(2):
+                tournament_indices = random.sample(range(len(sorted_population)), tournament_size)
+                tournament_fitness = [sorted_fitness[i] for i in tournament_indices]
+                winner_index = tournament_indices[np.argmax(tournament_fitness)]
+                selected_parents.append(sorted_population[winner_index])
+
+            # Crossover
+            child1, child2 = crossover_individuals(selected_parents[0], selected_parents[1])
+
+            # Mutation
+            child1 = mutate_individual(child1)
+            child2 = mutate_individual(child2)
+
+            next_generation.extend([child1, child2])
+
+        # Trim to correct population size
+        population = next_generation[:POPULATION_SIZE]
+        prev_fitness = best_fitness
+
+    return best_sequence if best_sequence is not None else initial_sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Main function to find the best coefficient sequence."""
+    start_time = time.time()
+    
+    # Try multiple initializations to get better results
+    best_overall_sequence = None
+    best_overall_fitness = 0.0
+    
+    for restart in range(NUM_RESTARTS):
+        if time.time() - start_time > MAX_TIME_SECONDS:
+            break
+            
+        # Use adaptive length generation
+        n = max(MIN_SEQUENCE_LENGTH, random.randint(int(MAX_SEQUENCE_LENGTH/2), MAX_SEQUENCE_LENGTH))
+        
+        # Generate initial sequence with mixed distributions
+        if restart % 3 == 0:
+            initial_sequence = [random.uniform(0.1, 100.0) for _ in range(n)]
+        elif restart % 3 == 1:
+            initial_sequence = [abs(random.gauss(10, 5)) for _ in range(n)]
+        else:
+            initial_sequence = [random.expovariate(0.5) for _ in range(n)]
+        
+        # Ensure positivity
+        for i in range(len(initial_sequence)):
+            if initial_sequence[i] < 0.01:
+                initial_sequence[i] = 0.01
+                
+        # First, try gradient-based optimization
+        sequence = initial_sequence.copy()
+        for iteration in range(20):
+            direction = get_good_direction_to_move_into(sequence)
+            if direction is not None:
+                sequence = direction
+            else:
+                break
+                
+        # Then run genetic algorithm for further optimization
+        evolved_sequence = genetic_algorithm_search(sequence)
+        
+        # Evaluate and keep the best
+        fitness = compute_inv_c1(evolved_sequence)
+        if fitness > best_overall_fitness:
+            best_overall_fitness = fitness
+            best_overall_sequence = evolved_sequence.copy()
+    
+    # Return the best found sequence or fallback
+    if best_overall_sequence is not None:
+        return best_overall_sequence
+    else:
+        # Fallback to simple initialization
+        n = random.randint(MIN_SEQUENCE_LENGTH, MAX_SEQUENCE_LENGTH)
+        return [random.uniform(0.1, 100.0) for _ in range(n)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

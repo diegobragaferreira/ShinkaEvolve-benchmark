@@ -1,0 +1,319 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import random
+import math
+from typing import Tuple, List
+
+# Global constants
+POP_SIZE = 100
+NGEN = 50
+CXPB = 0.7
+MUTPB = 0.2
+TOURNAMENT_SIZE = 3
+SEED = 42
+MAX_LOCAL_ITERS = 1000
+
+# Set seed for reproducibility
+random.seed(SEED)
+np.random.seed(SEED)
+
+def evaluate_fitness(individual: list) -> Tuple[float,]:
+    """Evaluate fitness of individual (list of [x,y,r])"""
+    # Convert to array for easier manipulation
+    circles = np.array(individual).reshape(-1, 3)
+    
+    # Extract positions and radii
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+    
+    # Check containment constraints
+    valid_containment = True
+    for i, (x, y, r) in enumerate(circles):
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            valid_containment = False
+            break
+    
+    if not valid_containment:
+        # Heavy penalty for containment violations
+        return (-1000000.0,)
+    
+    # Build spatial index for efficient collision checking
+    try:
+        tree = cKDTree(positions)
+    except:
+        return (-1000000.0,)
+    
+    # Check overlap constraints
+    total_radius = np.sum(radii)
+    
+    # Use spatial indexing for fast neighbor lookup
+    neighbors = tree.query_pairs(0.0001, p=2)  # Small epsilon for nearby check
+    
+    # Check actual overlap conditions
+    penalty = 0.0
+    for i, j in neighbors:
+        if i >= j:  # Avoid double counting
+            continue
+        dx = positions[i, 0] - positions[j, 0]
+        dy = positions[i, 1] - positions[j, 1]
+        distance = math.sqrt(dx*dx + dy*dy)
+        min_dist = radii[i] + radii[j]
+        
+        if distance < min_dist:
+            # Overlap penalty - proportional to how much they overlap
+            overlap = min_dist - distance
+            penalty += overlap * 1000000.0  # Large penalty
+    
+    # Return negative because DEAP minimizes by default
+    # We want to maximize sum of radii, so return negative
+    return (total_radius - penalty,)
+
+def create_individual(n_circles: int = 26) -> list:
+    """Create a single individual with valid initialization"""
+    # Try multiple initialization strategies until one works
+    max_attempts = 100
+    
+    for _ in range(max_attempts):
+        # Initialize with Voronoi-inspired spread
+        individual = []
+        
+        # Place circles based on grid with some randomness to avoid regular patterns
+        grid_size = int(math.ceil(math.sqrt(n_circles)))
+        spacing_x = 1.0 / (grid_size + 1)
+        spacing_y = 1.0 / (grid_size + 1)
+        
+        placed = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if placed >= n_circles:
+                    break
+                
+                # Add some randomness to grid positions
+                x = (i + 1) * spacing_x + np.random.normal(0, spacing_x * 0.1)
+                y = (j + 1) * spacing_y + np.random.normal(0, spacing_y * 0.1)
+                
+                # Ensure within bounds
+                x = max(0.05, min(0.95, x))
+                y = max(0.05, min(0.95, y))
+                
+                # Initial radius guess - smaller than minimum possible to ensure room for growth
+                r = min(0.1, 0.5 * min(x, 1-x, y, 1-y)) 
+                r = max(0.001, r)
+                
+                individual.extend([x, y, r])
+                placed += 1
+            
+            if placed >= n_circles:
+                break
+        
+        # If we have enough circles, validate
+        if len(individual) == 3 * n_circles:
+            # Try a quick local optimization to resolve overlaps
+            optimized = optimize_placement(individual)
+            
+            # Validate final result
+            test_circles = np.array(optimized).reshape(-1, 3)
+            if is_valid_placement(test_circles):
+                return optimized
+    
+    # Fallback to completely randomized placement
+    individual = []
+    for _ in range(n_circles):
+        x = np.random.uniform(0.05, 0.95)
+        y = np.random.uniform(0.05, 0.95)
+        r = np.random.uniform(0.001, 0.1)
+        individual.extend([x, y, r])
+    
+    return individual
+
+def is_valid_placement(circles: np.ndarray) -> bool:
+    """Check if all circles are within bounds and don't overlap"""
+    # Check containment
+    for x, y, r in circles:
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    
+    # Check overlaps
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+    tree = cKDTree(positions)
+    neighbors = tree.query_pairs(0.0001, p=2)
+    
+    for i, j in neighbors:
+        if i >= j:
+            continue
+        dx = positions[i, 0] - positions[j, 0]
+        dy = positions[i, 1] - positions[j, 1]
+        distance = math.sqrt(dx*dx + dy*dy)
+        min_dist = radii[i] + radii[j]
+        if distance < min_dist:
+            return False
+    
+    return True
+
+def optimize_placement(initial_individual: list) -> list:
+    """Simple greedy local optimization for overlaps"""
+    circles = np.array(initial_individual).reshape(-1, 3)
+    
+    # Simple local optimization step
+    for _ in range(50):  # Limited iterations to keep it fast
+        moved = False
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            
+            # Try small perturbations
+            best_x, best_y, best_r = x, y, r
+            best_score = evaluate_fitness(circles.flatten())[0]
+            
+            # Try moving in different directions
+            for dx in [-0.01, -0.005, 0, 0.005, 0.01]:
+                for dy in [-0.01, -0.005, 0, 0.005, 0.01]:
+                    new_x = max(0.001, min(0.999, x + dx))
+                    new_y = max(0.001, min(0.999, y + dy))
+                    
+                    # Test this modification
+                    temp_circles = circles.copy()
+                    temp_circles[i, 0] = new_x
+                    temp_circles[i, 1] = new_y
+                    
+                    if is_valid_placement(temp_circles):
+                        test_individual = temp_circles.flatten().tolist()
+                        score = evaluate_fitness(test_individual)[0]
+                        if score > best_score:
+                            best_score = score
+                            best_x, best_y = new_x, new_y
+                            moved = True
+            
+            circles[i, 0] = best_x
+            circles[i, 1] = best_y
+        
+        if not moved:
+            break
+    
+    return circles.flatten().tolist()
+
+def cx_circle(ind1: list, ind2: list) -> Tuple[list, list]:
+    """Custom crossover for circle packing - preserves valid structures"""
+    size = min(len(ind1), len(ind2)) // 3
+    if size < 1:
+        return ind1[:], ind2[:]
+    
+    # Select crossover points
+    cxpoint1 = random.randint(1, size)
+    cxpoint2 = random.randint(cxpoint1, size)
+    
+    # Create children
+    child1 = ind1[:]
+    child2 = ind2[:]
+    
+    # Swap genes (coordinates and radii)
+    for i in range(cxpoint1, cxpoint2):
+        # Swap entire circle representations
+        start_idx1 = i * 3
+        start_idx2 = i * 3
+        child1[start_idx1:start_idx1+3], child2[start_idx2:start_idx2+3] = \
+            child2[start_idx2:start_idx2+3], child1[start_idx1:start_idx1+3]
+    
+    return child1, child2
+
+def mut_circle(individual: list, indpb: float = 0.05) -> list:
+    """Custom mutation for circle packing"""
+    for i in range(len(individual)):
+        if random.random() < indpb:
+            # Determine what type of gene we're mutating
+            gene_type = i % 3  # 0=x, 1=y, 2=r
+            if gene_type == 0:  # x coordinate
+                individual[i] = max(0.001, min(0.999, individual[i] + random.uniform(-0.02, 0.02)))
+            elif gene_type == 1:  # y coordinate
+                individual[i] = max(0.001, min(0.999, individual[i] + random.uniform(-0.02, 0.02)))
+            else:  # radius
+                individual[i] = max(0.001, min(0.4, individual[i] + random.uniform(-0.02, 0.02)))
+    
+    # Re-optimize after mutation to clean up overlaps
+    optimized = optimize_placement(individual)
+    return optimized
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    N_CIRCLES = 26
+    
+    # Register DEAP types
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual, N_CIRCLES)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_fitness)
+    toolbox.register("mate", cx_circle)
+    toolbox.register("mutate", mut_circle, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+    
+    # Create initial population
+    pop = toolbox.population(n=POP_SIZE)
+    
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, pop))
+    for ind, fit in zip(pop, fitnesses):
+        ind.fitness.values = fit
+    
+    # Track best individual
+    best_ind = tools.selBest(pop, 1)[0]
+    best_fitness = best_ind.fitness.values[0]
+    
+    # Evolution loop
+    for generation in range(NGEN):
+        # Select the next generation individuals
+        offspring = toolbox.select(pop, len(pop))
+        
+        # Clone the selected individuals
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace the old population with the new one
+        pop[:] = offspring
+        
+        # Find the best individual in current generation
+        gen_best = tools.selBest(pop, 1)[0]
+        gen_fitness = gen_best.fitness.values[0]
+        
+        # Update overall best if needed
+        if gen_fitness > best_fitness:
+            best_fitness = gen_fitness
+            best_ind = tools.selBest(pop, 1)[0]
+    
+    # Convert best individual to required format
+    final_circles = np.array(best_ind).reshape(-1, 3)
+    
+    # Final validation
+    if not is_valid_placement(final_circles):
+        # Try to fix with more aggressive optimization
+        final_circles = np.array(optimize_placement(best_ind)).reshape(-1, 3)
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,327 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+import random
+import time
+
+# Global constants
+RECT_PERIMETER = 4.0
+NUM_CIRCLES = 21
+SEED = 42
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Initialize random seed for reproducibility
+    np.random.seed(SEED)
+    random.seed(SEED)
+    
+    # Optimize rectangle dimensions using golden ratio for better packing
+    phi = (1 + np.sqrt(5)) / 2
+    rect_width = 2 / (1 + phi)  # Width around 0.764
+    rect_height = 2 / (1 + 1/phi)  # Height around 1.236
+    
+    # Phase 1: Initialize configuration using a hexagonal grid approach
+    def initialize_hexagonal_layout(width, height, n_circles):
+        circles = np.zeros((n_circles, 3))
+        
+        # Estimate grid spacing based on circle count and rectangle dimensions
+        aspect_ratio = width / height
+        cols = max(1, int(np.ceil(np.sqrt(n_circles * aspect_ratio))))
+        rows = max(1, int(np.ceil(n_circles / cols)))
+        
+        # Adjust to ensure we have enough cells
+        while cols * rows < n_circles:
+            if aspect_ratio >= 1:
+                cols += 1
+            else:
+                rows += 1
+                
+        cell_width = width / cols if cols > 0 else width
+        cell_height = height / rows if rows > 0 else height
+        
+        # Create hexagonal-like packing pattern
+        placed_count = 0
+        for i in range(rows):
+            for j in range(cols):
+                if placed_count >= n_circles:
+                    break
+                    
+                # Offset every other row for hexagonal packing
+                offset_x = cell_width * 0.5 if i % 2 == 1 else 0
+                base_x = (j + 1) * cell_width + offset_x
+                base_y = (i + 1) * cell_height
+                
+                # Add small random perturbation for diversity
+                perturbation_factor = min(0.1, 0.2 * min(cell_width, cell_height))
+                x = np.clip(base_x + np.random.uniform(-perturbation_factor, perturbation_factor),
+                           0.01, width - 0.01)
+                y = np.clip(base_y + np.random.uniform(-perturbation_factor, perturbation_factor),
+                           0.01, height - 0.01)
+                
+                # Initial radius estimation
+                max_r = min(x, width - x, y, height - y)
+                estimated_radius = min(0.15, max_r * 0.7)
+                r = np.random.uniform(estimated_radius * 0.6, estimated_radius * 1.1)
+                
+                circles[placed_count] = [x, y, r]
+                placed_count += 1
+                
+            if placed_count >= n_circles:
+                break
+                
+        return circles
+    
+    # Initialize with good starting configuration
+    circles = initialize_hexagonal_layout(rect_width, rect_height, NUM_CIRCLES)
+    
+    # Phase 2: Physics-based optimization using force simulation
+    def is_valid_configuration(circles, width, height):
+        """Check if the configuration is valid (within bounds and non-overlapping)"""
+        # Boundary check
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                return False
+        
+        # Overlap check using KDTree for efficiency
+        try:
+            positions = circles[:, :2]
+            tree = cKDTree(positions)
+            pairs = tree.query_pairs(2 * np.max(circles[:, 2]), output_type='ndarray')
+            
+            for i, j in pairs:
+                if i < j:  # Only check each pair once
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist_sq = dx*dx + dy*dy
+                    radius_sum = r1 + r2
+                    if dist_sq < radius_sum * radius_sum:
+                        return False
+        except:
+            # Fallback to brute force if spatial indexing fails
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist_sq = dx*dx + dy*dy
+                    radius_sum = r1 + r2
+                    if dist_sq < radius_sum * radius_sum:
+                        return False
+                        
+        return True
+    
+    def compute_forces(circles, width, height):
+        """Compute forces between circles and boundaries"""
+        forces = np.zeros_like(circles)
+        k_repel = 100.0  # Repulsion constant
+        k_boundary = 500.0  # Boundary attraction constant
+        
+        # Force between circles
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Use cKDTree for efficient neighbor detection
+        tree = cKDTree(positions)
+        pairs = tree.query_pairs(2 * np.max(radii) + 0.01, output_type='ndarray')
+        
+        for i, j in pairs:
+            if i < j:  # Process each pair only once
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dx = x1 - x2
+                dy = y1 - y2
+                dist_sq = dx*dx + dy*dy
+                dist = np.sqrt(dist_sq)
+                
+                if dist > 0 and dist < (r1 + r2):
+                    # Repulsion force
+                    force_magnitude = k_repel * (1.0/dist - 1.0/(r1+r2)) / dist
+                    forces[i, 0] += force_magnitude * dx
+                    forces[i, 1] += force_magnitude * dy
+                    forces[j, 0] -= force_magnitude * dx
+                    forces[j, 1] -= force_magnitude * dy
+        
+        # Boundary forces (attract to walls with decreasing strength)
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            fx, fy = 0.0, 0.0
+            
+            # Left boundary
+            if x - r < 0:
+                fx += k_boundary * (r - x)
+            # Right boundary
+            elif x + r > width:
+                fx -= k_boundary * (x + r - width)
+            
+            # Bottom boundary
+            if y - r < 0:
+                fy += k_boundary * (r - y)
+            # Top boundary
+            elif y + r > height:
+                fy -= k_boundary * (y + r - height)
+                
+            forces[i, 0] += fx
+            forces[i, 1] += fy
+            
+        return forces
+    
+    def update_positions(circles, forces, dt=0.01, damping=0.9):
+        """Update positions based on forces and damping"""
+        new_circles = circles.copy()
+        
+        # Update positions
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            fx, fy = forces[i, 0], forces[i, 1]
+            
+            # Apply forces
+            new_x = x + dt * fx
+            new_y = y + dt * fy
+            
+            # Apply damping
+            new_x = x + damping * (new_x - x)
+            new_y = y + damping * (new_y - y)
+            
+            # Ensure circles stay within bounds
+            new_x = np.clip(new_x, r, rect_width - r)
+            new_y = np.clip(new_y, r, rect_height - r)
+            
+            new_circles[i, 0] = new_x
+            new_circles[i, 1] = new_y
+            
+        return new_circles
+    
+    def physics_simulation(circles, width, height, max_steps=1000, dt=0.01):
+        """Run physics simulation to relax the configuration"""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_sum = np.sum(current_circles[:, 2])
+        
+        # Start with large timesteps, then decrease
+        for step in range(max_steps):
+            # Compute forces
+            forces = compute_forces(current_circles, width, height)
+            
+            # Update positions
+            current_circles = update_positions(current_circles, forces, dt, 0.95)
+            
+            # Every few steps, check if we're making progress
+            if step % 50 == 0:
+                current_sum = np.sum(current_circles[:, 2])
+                if current_sum > best_sum:
+                    best_sum = current_sum
+                    best_circles = current_circles.copy()
+                    
+            # Decrease timestep for smaller steps toward convergence
+            if step > 500:
+                dt *= 0.99
+                
+        return best_circles
+    
+    # Phase 3: Strategic optimization using circle replacement
+    def strategic_replacement(circles, width, height, max_iterations=50):
+        """Replace circles that appear to be in suboptimal positions"""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_sum = np.sum(current_circles[:, 2])
+        
+        for iteration in range(max_iterations):
+            # Find circles that might be suboptimal (small radii or in crowded areas)
+            radii = current_circles[:, 2]
+            positions = current_circles[:, :2]
+            
+            # Calculate a measure of crowding for each circle (how many others are nearby)
+            tree = cKDTree(positions)
+            crowding = np.zeros(len(current_circles))
+            
+            # For each circle, count how many others are within 2x its radius
+            for i in range(len(current_circles)):
+                x, y, r = current_circles[i]
+                nearby = tree.query_ball_point([x, y], 2*r)
+                crowding[i] = len(nearby) - 1  # Subtract 1 for itself
+                
+            # Replace circles with low radii or high crowding with new ones
+            for i in range(len(current_circles)):
+                # Replace if it has very small radius or is in a crowded place
+                if radii[i] < 0.05 or crowding[i] > 3:
+                    # Generate a new circle with good properties
+                    new_x = np.random.uniform(0.01, width - 0.01)
+                    new_y = np.random.uniform(0.01, height - 0.01)
+                    # Try to make a reasonably large radius
+                    max_r = min(new_x, width - new_x, new_y, height - new_y)
+                    new_r = np.random.uniform(0.05, min(0.15, max_r * 0.8))
+                    
+                    # Check if it violates constraints with other circles
+                    valid = True
+                    test_circles = current_circles.copy()
+                    test_circles[i] = [new_x, new_y, new_r]
+                    
+                    # Check overlap with all other circles
+                    positions_test = test_circles[:, :2]
+                    radii_test = test_circles[:, 2]
+                    for j in range(len(current_circles)):
+                        if i != j:
+                            x1, y1, r1 = test_circles[i]
+                            x2, y2, r2 = test_circles[j]
+                            dx = x1 - x2
+                            dy = y1 - y2
+                            dist_sq = dx*dx + dy*dy
+                            if dist_sq < (r1 + r2)**2:
+                                valid = False
+                                break
+                    
+                    # Also check boundary constraints
+                    if valid and new_x - new_r >= 0 and new_x + new_r <= width and \
+                       new_y - new_r >= 0 and new_y + new_r <= height:
+                        current_circles[i] = [new_x, new_y, new_r]
+                        # Check if this improved the solution
+                        current_sum = np.sum(current_circles[:, 2])
+                        if current_sum > best_sum:
+                            best_sum = current_sum
+                            best_circles = current_circles.copy()
+                            
+            # Occasionally run full physics simulation to relax everything
+            if iteration % 10 == 0:
+                relaxed = physics_simulation(current_circles, width, height, dt=0.005)
+                current_sum = np.sum(relaxed[:, 2])
+                if current_sum > best_sum:
+                    best_sum = current_sum
+                    best_circles = relaxed.copy()
+                    
+        return best_circles
+    
+    # Main optimization process
+    start_time = time.time()
+    
+    # Step 1: Initial physics simulation
+    relaxed = physics_simulation(circles, rect_width, rect_height, dt=0.01)
+    
+    # Step 2: Strategic replacement optimization
+    optimized = strategic_replacement(relaxed, rect_width, rect_height)
+    
+    # Step 3: Final fine-tuning with physics simulation
+    final_result = physics_simulation(optimized, rect_width, rect_height, max_steps=500, dt=0.001)
+    
+    end_time = time.time()
+    print(f"Physics-based optimization completed in {end_time - start_time:.2f} seconds")
+    
+    return final_result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

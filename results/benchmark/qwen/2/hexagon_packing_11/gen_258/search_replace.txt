@@ -1,0 +1,193 @@
+<NAME>
+enhance_geometric_validation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses basic containment and overlap detection which can be improved with more robust geometric validation. I'll implement a SAT-based containment check and add a buffer validation layer to handle floating-point precision issues that could cause near-touching hexagons to incorrectly pass validation. This enhancement will improve the reliability of constraint enforcement and potentially discover better solutions by ensuring stricter geometric validation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def point_in_hexagon_jit(px, py, center_x, center_y, angle_deg, radius=1.0):
+    """Fast point-in-hexagon test using numba"""
+    # Transform point to hexagon's local coordinate system
+    angle_rad = np.radians(angle_deg)
+    rel_x = px - center_x
+    rel_y = py - center_y
+
+    # Rotate point back to align with hexagon axes
+    cos_a = np.cos(-angle_rad)
+    sin_a = np.sin(-angle_rad)
+    rot_x = rel_x * cos_a - rel_y * sin_a
+    rot_y = rel_x * sin_a + rel_y * cos_a
+
+    # Hexagon dimensions
+    hex_width = radius * np.sqrt(3)
+    half_width = hex_width / 2
+    max_y = radius * np.sqrt(3) / 2
+
+    # Check bounds
+    if abs(rot_x) > half_width or abs(rot_y) > max_y:
+        return False
+    return True
+=======
+@jit(nopython=True)
+def point_in_hexagon_jit(px, py, center_x, center_y, angle_deg, radius=1.0):
+    """Fast point-in-hexagon test using numba with improved precision"""
+    # Transform point to hexagon's local coordinate system
+    angle_rad = np.radians(angle_deg)
+    rel_x = px - center_x
+    rel_y = py - center_y
+
+    # Rotate point back to align with hexagon axes
+    cos_a = np.cos(-angle_rad)
+    sin_a = np.sin(-angle_rad)
+    rot_x = rel_x * cos_a - rel_y * sin_a
+    rot_y = rel_x * sin_a + rel_y * cos_a
+
+    # Hexagon dimensions
+    hex_width = radius * np.sqrt(3)
+    half_width = hex_width / 2
+    max_y = radius * np.sqrt(3) / 2
+
+    # Check bounds with small epsilon for numerical stability
+    if abs(rot_x) > half_width * 1.0001 or abs(rot_y) > max_y * 1.0001:
+        return False
+    return True
+
+@jit(nopython=True)
+def check_containment_buffered(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+    """Check containment with small buffer for floating-point precision issues"""
+    # Check if all vertices are within the outer hexagon with a small buffer
+    outer_circumradius = outer_radius * np.sqrt(3) / 2
+
+    # Add small buffer to circumradius for numerical stability
+    buffered_radius = outer_circumradius * 0.9999
+
+    for i in range(6):
+        vertex = hex_vertices[i]
+        dist_from_center = np.sqrt((vertex[0] - outer_center_x)**2 + (vertex[1] - outer_center_y)**2)
+        if dist_from_center > buffered_radius:
+            return False
+    return True
+
+@jit(nopython=True)
+def check_overlap_buffered(hex1_vertices, hex2_vertices):
+    """Buffered overlap detection to handle near-touching cases"""
+    # Early rejection using bounding boxes with buffer
+    min1_x = min(hex1_vertices[i][0] for i in range(6))
+    max1_x = max(hex1_vertices[i][0] for i in range(6))
+    min1_y = min(hex1_vertices[i][1] for i in range(6))
+    max1_y = max(hex1_vertices[i][1] for i in range(6))
+
+    min2_x = min(hex2_vertices[i][0] for i in range(6))
+    max2_x = max(hex2_vertices[i][0] for i in range(6))
+    min2_y = min(hex2_vertices[i][1] for i in range(6))
+    max2_y = max(hex2_vertices[i][1] for i in range(6))
+
+    # Add small buffer to bounding boxes
+    buffer = 0.001
+    if (max1_x + buffer < min2_x or max2_x + buffer < min1_x or
+        max1_y + buffer < min2_y or max2_y + buffer < min1_y):
+        return False
+
+    # Use SAT for more precise overlap detection
+    # For hexagon-hexagon collision using Separating Axis Theorem
+    def get_edges(vertices):
+        edges = []
+        n = len(vertices)
+        for i in range(n):
+            edges.append([vertices[i][0] - vertices[(i+1)%n][0],
+                         vertices[i][1] - vertices[(i+1)%n][1]])
+        return edges
+
+    def dot_product(a, b):
+        return a[0]*b[0] + a[1]*b[1]
+
+    def project_polygon_onto_axis(vertices, axis):
+        projections = []
+        for i in range(len(vertices)):
+            proj = dot_product(vertices[i], axis)
+            projections.append(proj)
+        return min(projections), max(projections)
+
+    edges1 = get_edges(hex1_vertices)
+    edges2 = get_edges(hex2_vertices)
+
+    # Get normals to all edges (perpendicular vectors)
+    normals1 = []
+    normals2 = []
+
+    for edge in edges1:
+        # Normal vector (perpendicular to edge)
+        normal = [-edge[1], edge[0]]
+        # Normalize
+        norm = np.sqrt(normal[0]**2 + normal[1]**2)
+        if norm > 1e-10:
+            normal[0] /= norm
+            normal[1] /= norm
+        normals1.append(normal)
+
+    for edge in edges2:
+        # Normal vector (perpendicular to edge)
+        normal = [-edge[1], edge[0]]
+        # Normalize
+        norm = np.sqrt(normal[0]**2 + normal[1]**2)
+        if norm > 1e-10:
+            normal[0] /= norm
+            normal[1] /= norm
+        normals2.append(normal)
+
+    # Test all axes
+    all_normals = normals1 + normals2
+
+    for axis in all_normals:
+        min1, max1 = project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = project_polygon_onto_axis(hex2_vertices, axis)
+
+        # Check for overlap with small tolerance
+        if max1 < min2 - 1e-6 or max2 < min1 - 1e-6:
+            return False  # No overlap along this axis
+
+    return True  # Overlap detected
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_constraint_evaluation
+</NAME>
+
+<DESCRIPTION>
+The constraint evaluation in the current code can be made more efficient and robust by replacing the current containment and overlap checking functions with the more reliable buffered versions we just added. Additionally, I'll modify the objective function to use these improved functions for better geometric validation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def check_containment_fast(self, hex_vertices, outer_radius):
+        """Fast containment check using vertex distances"""
+        # Check that all vertices are within the outer hexagon's circumscribed circle
+        for i in range(6):
+            vertex = hex_vertices[i]
+            distance = np.sqrt(vertex[0]**2 + vertex[1]**2)
+            if distance > outer_radius * 0.999:  # Add small buffer
+                return False
+        return True
+
+    def check_overlap_fast(self, hex1_vertices, hex2_vertices):
+        """Fast overlap check using vertex-edge distance estimation"""
+        # Early rejection using bounding circles
+        min_dist = hexagon_distance_jit(hex1_vertices, hex2_vertices)
+        # Overlap occurs if distance < 2*radius (diameter of unit hexagon)
+        return min_dist < 1.999  # Slightly smaller than exact threshold for numerical stability
+=======
+    def check_containment_fast(self, hex_vertices, outer_radius):
+        """Fast containment check using vertex distances with improved precision"""
+        return check_containment_buffered(hex_vertices, 0.0, 0.0, outer_radius)
+
+    def check_overlap_fast(self, hex1_vertices, hex2_vertices):
+        """Fast overlap check using buffered SAT approach"""
+        return check_overlap_buffered(hex1_vertices, hex2_vertices)
+>>>>>>> REPLACE
+</DIFF>

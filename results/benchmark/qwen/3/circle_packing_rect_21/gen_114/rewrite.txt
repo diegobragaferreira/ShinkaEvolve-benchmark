@@ -1,0 +1,271 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+from scipy.spatial import Voronoi
+from scipy.spatial import cKDTree
+import math
+import random
+from numba import jit
+
+@jit(nopython=True)
+def compute_distance_numba(x1, y1, x2, y2):
+    """Fast distance computation"""
+    dx = x1 - x2
+    dy = y1 - y2
+    return math.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def check_overlap_numba(pos1, r1, pos2, r2):
+    """Fast overlap check"""
+    dist = compute_distance_numba(pos1[0], pos1[1], pos2[0], pos2[1])
+    return dist < (r1 + r2)
+
+class AdaptiveVoronoiPacker:
+    def __init__(self):
+        self.container_width = 1.0
+        self.container_height = 1.0
+        self.n = 21
+        self.circles = np.zeros((self.n, 3))
+        self.best_sum_radii = 0
+        self.best_circles = None
+        
+    def initialize_with_voronoi(self):
+        """Initialize circles using Voronoi-based distribution"""
+        # Generate strategic anchor points (corners and edges)
+        anchors = []
+        anchors.extend([(0.05, 0.05), (self.container_width - 0.05, 0.05),
+                       (0.05, self.container_height - 0.05), (self.container_width - 0.05, self.container_height - 0.05)])
+        anchors.extend([(self.container_width/2, 0.05), (self.container_width/2, self.container_height - 0.05),
+                       (0.05, self.container_height/2), (self.container_width - 0.05, self.container_height/2)])
+
+        # Generate a denser set of candidate points
+        candidate_points = []
+        grid_density = 32
+        for i in range(grid_density):
+            for j in range(grid_density):
+                x = (i + 0.5) / grid_density * self.container_width
+                y = (j + 0.5) / grid_density * self.container_height
+                candidate_points.append((x, y))
+
+        # Add some random points to avoid regular grid bias
+        np.random.seed(42)
+        for _ in range(50):
+            x = np.random.uniform(0.05, self.container_width - 0.05)
+            y = np.random.uniform(0.05, self.container_height - 0.05)
+            candidate_points.append((x, y))
+
+        # Use k-means++ to get initial centroids for Voronoi
+        all_points = anchors + candidate_points
+        kmeans = KMeans(n_clusters=min(len(all_points), self.n), init='k-means++', n_init=10, random_state=42)
+        all_array = np.array(all_points)
+        kmeans.fit(all_array)
+        selected_centroids = kmeans.cluster_centers_
+
+        # Find closest candidate points
+        selected_positions = []
+        for centroid in selected_centroids:
+            distances = np.linalg.norm(all_array - centroid, axis=1)
+            closest_idx = np.argmin(distances)
+            selected_positions.append(tuple(all_array[closest_idx]))
+
+        # Ensure we have exactly n positions
+        if len(selected_positions) < self.n:
+            remaining_needed = self.n - len(selected_positions)
+            for i in range(min(remaining_needed, len(candidate_points))):
+                selected_positions.append(candidate_points[i])
+        elif len(selected_positions) > self.n:
+            selected_positions = selected_positions[:self.n]
+
+        # Initialize circles with positions and small radii
+        for i in range(self.n):
+            x, y = selected_positions[i]
+            self.circles[i] = [x, y, 0.02]
+            
+    def validate_and_correct(self):
+        """Ensure all circles are valid and correct bounds"""
+        for i in range(self.n):
+            x, y, r = self.circles[i]
+            # Ensure within bounds and radius is positive
+            self.circles[i] = [max(r, min(self.container_width - r, x)), 
+                              max(r, min(self.container_height - r, y)), 
+                              max(0.001, r)]
+    
+    def get_violations(self):
+        """Get list of overlapping pairs with severity"""
+        violations = []
+        for i in range(self.n):
+            for j in range(i+1, self.n):
+                x1, y1, r1 = self.circles[i]
+                x2, y2, r2 = self.circles[j]
+                dist = compute_distance_numba(x1, y1, x2, y2)
+                if dist < (r1 + r2):
+                    severity = (r1 + r2 - dist) / (r1 + r2 + 1e-8)
+                    violations.append((i, j, severity))
+        return violations
+    
+    def calculate_max_radius_at_position(self, x, y, current_index):
+        """Calculate maximum radius at given position without conflicts"""
+        # Boundary constraints
+        boundary_radius = min(x, self.container_width - x, y, self.container_height - y)
+        
+        # Circle constraints
+        min_dist_to_others = float('inf')
+        for i in range(self.n):
+            if i != current_index:
+                x_other, y_other, r_other = self.circles[i]
+                dist = compute_distance_numba(x, y, x_other, y_other)
+                if dist > 0:
+                    min_dist_to_others = min(min_dist_to_others, dist)
+        
+        # Maximum radius is limited by both boundaries and other circles
+        max_radius = min(boundary_radius, min_dist_to_others/2 - 1e-6)
+        return max(0.001, max_radius)
+    
+    def update_radii(self):
+        """Update all radii based on available space"""
+        # Track which circles were updated for adaptive learning
+        updated_indices = []
+        
+        for i in range(self.n):
+            x, y, r = self.circles[i]
+            
+            # Calculate max possible radius at current position
+            max_radius = self.calculate_max_radius_at_position(x, y, i)
+            
+            # Update radius if beneficial and valid
+            if max_radius > r and max_radius < float('inf'):
+                # Use adaptive increment based on how much we can increase
+                delta = min(0.05, max_radius - r)
+                new_r = min(max_radius, r + delta)
+                self.circles[i, 2] = new_r
+                updated_indices.append(i)
+                
+        return len(updated_indices) > 0
+    
+    def local_optimization_step(self, learning_rate=0.1, max_iters=50):
+        """Perform local optimization using iterative improvements"""
+        improved = False
+        tree = cKDTree(self.circles[:, :2])
+        
+        for iter_count in range(max_iters):
+            # Randomly select a circle to optimize
+            idx = np.random.randint(0, self.n)
+            x0, y0, r0 = self.circles[idx]
+            
+            # Store original values
+            orig_x, orig_y, orig_r = x0, y0, r0
+            
+            # Search for better position in neighborhood
+            best_pos = (x0, y0, r0)
+            best_radius = r0
+            best_score = r0  # Simple greedy score
+            
+            # Sample around current position
+            for dx in [-0.1, -0.05, 0, 0.05, 0.1]:
+                for dy in [-0.1, -0.05, 0, 0.05, 0.1]:
+                    nx = x0 + dx
+                    ny = y0 + dy
+                    
+                    # Check bounds
+                    if nx < 0.01 or nx > self.container_width - 0.01 or \
+                       ny < 0.01 or ny > self.container_height - 0.01:
+                        continue
+                        
+                    # Calculate max possible radius at this new position
+                    max_r = self.calculate_max_radius_at_position(nx, ny, idx)
+                    
+                    # Check overlap with others
+                    overlap = False
+                    for j in range(self.n):
+                        if j != idx:
+                            dist = compute_distance_numba(nx, ny, self.circles[j, 0], self.circles[j, 1])
+                            if dist < (max_r + self.circles[j, 2]):  # Overlap
+                                overlap = True
+                                break
+                    
+                    if not overlap and max_r > best_radius:
+                        best_radius = max_r
+                        best_pos = (nx, ny, max_r)
+            
+            # Update if we found an improvement
+            if best_pos[2] > self.circles[idx, 2]:
+                self.circles[idx] = best_pos
+                improved = True
+                
+        return improved
+    
+    def run_optimization(self):
+        """Main optimization loop with multi-scale approach"""
+        # Phase 1: Fast exploration with aggressive modifications
+        for iteration in range(300):
+            # Occasionally do global perturbation
+            if iteration % 50 == 0:
+                # Perturb a few circles significantly
+                for _ in range(3):
+                    idx = np.random.randint(0, self.n)
+                    self.circles[idx, 0] += np.random.normal(0, 0.05)
+                    self.circles[idx, 1] += np.random.normal(0, 0.05)
+                    self.circles[idx, 0] = np.clip(self.circles[idx, 0], 0.01, self.container_width - 0.01)
+                    self.circles[idx, 1] = np.clip(self.circles[idx, 1], 0.01, self.container_height - 0.01)
+            
+            # Update radii
+            self.update_radii()
+            
+            # Do local optimization 
+            self.local_optimization_step(learning_rate=0.15)
+            
+            # Periodically check for improvement
+            current_sum = np.sum(self.circles[:, 2])
+            if current_sum > self.best_sum_radii:
+                self.best_sum_radii = current_sum
+                self.best_circles = self.circles.copy()
+        
+        # Phase 2: Medium-scale refinement
+        for iteration in range(500):
+            # Update radii with more careful increments
+            self.update_radii()
+            
+            # Do local optimization with smaller steps
+            self.local_optimization_step(learning_rate=0.05)
+            
+            # Periodically check for improvement
+            current_sum = np.sum(self.circles[:, 2])
+            if current_sum > self.best_sum_radii:
+                self.best_sum_radii = current_sum
+                self.best_circles = self.circles.copy()
+        
+        # Phase 3: Fine-tuning
+        for iteration in range(500):
+            # Update radii with very small increments
+            self.update_radii()
+            
+            # Do local optimization with very small steps
+            self.local_optimization_step(learning_rate=0.01)
+            
+            # Periodically check for improvement
+            current_sum = np.sum(self.circles[:, 2])
+            if current_sum > self.best_sum_radii:
+                self.best_sum_radii = current_sum
+                self.best_circles = self.circles.copy()
+        
+        # Final cleanup
+        self.validate_and_correct()
+        
+        # Return best configuration found or current state
+        if self.best_circles is not None:
+            return self.best_circles
+        return self.circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    packer = AdaptiveVoronoiPacker()
+    packer.initialize_with_voronoi()
+    return packer.run_optimization()
+
+# EVOLVE-BLOCK-END

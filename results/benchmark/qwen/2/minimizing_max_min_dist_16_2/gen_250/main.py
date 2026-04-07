@@ -1,0 +1,289 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import random
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    n = 16
+    d = 2
+    best_ratio = -np.inf
+    best_points = None
+
+    # Multiple restart strategies
+    restart_strategies = [
+        # Strategy 1: Hexagonal packing initialization (better initial spacing)
+        lambda: _hexagonal_packing_init(),
+
+        # Strategy 2: Perturbed grid initialization
+        lambda: _perturbed_grid_init(),
+
+        # Strategy 3: Random initialization with better spread
+        lambda: _random_spread_init()
+    ]
+
+    # Try each initialization strategy multiple times
+    for strategy_idx, init_func in enumerate(restart_strategies):
+        for restart in range(3):  # 3 restarts per strategy
+            np.random.seed(strategy_idx * 1000 + restart)
+
+            # Get initial points
+            points = init_func()
+
+            # Apply local optimization with multiple methods
+            optimized_points = _local_optimization(points)
+
+            # Calculate ratio for this optimization run
+            ratio = _calculate_min_max_ratio(optimized_points)
+
+            # Keep track of best solution
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+    return best_points
+
+
+def _hexagonal_packing_init():
+    """Initialize points using hexagonal packing pattern with adaptive perturbation."""
+    # Create a hexagonal lattice pattern
+    rows = 4
+    cols = 4
+    points = []
+
+    for i in range(rows):
+        for j in range(cols):
+            # offset every other row
+            x_offset = 0.5 if i % 2 == 1 else 0.0
+            x = (j + x_offset) * 0.25 + 0.125  # Scale and shift to [0.125, 0.875]
+            y = i * 0.25 + 0.125
+            points.append([x, y])
+
+    points = np.array(points)
+
+    # Add adaptive perturbation based on distance analysis
+    # Calculate current distances to determine if we need more or less perturbation
+    if len(points) >= 2:
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        if len(distances[distances > 0]) > 0:
+            min_dist = np.min(distances[distances > 0])
+            max_dist = np.max(distances[distances > 0])
+            if max_dist > 0:
+                ratio = min_dist / max_dist
+                # Adjust perturbation magnitude based on how balanced the distribution is
+                # If ratio is low (poorly distributed), use larger perturbations
+                # If ratio is high (well distributed), use smaller perturbations
+                perturbation_magnitude = max(0.005, 0.03 * (1.0 - ratio * 5.0)) if ratio > 0 else 0.02
+            else:
+                perturbation_magnitude = 0.02
+        else:
+            perturbation_magnitude = 0.02
+    else:
+        perturbation_magnitude = 0.02
+
+    # Add perturbation
+    np.random.seed(42)
+    points += np.random.normal(0, perturbation_magnitude, points.shape)
+    points = np.clip(points, 0, 1)
+
+    return points
+
+
+def _perturbed_grid_init():
+    """Initialize with grid points plus small random perturbations."""
+    # Start with a regular grid
+    grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+    points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+
+    # Add small random perturbations
+    np.random.seed(42)
+    perturbation_magnitude = 0.02
+    points += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, points.shape)
+
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+
+    return points
+
+
+def _random_spread_init():
+    """Initialize with random points that are intentionally spread out with clustering prevention."""
+    np.random.seed(42)
+    points = np.random.rand(16, 2)
+
+    # Apply clustering prevention by iteratively pushing points apart
+    # This helps prevent initial configurations where points are too close together
+    for _ in range(5):  # Multiple iterations for better spreading
+        for i in range(16):
+            # Calculate distances to all other points
+            distances = np.linalg.norm(points - points[i], axis=1)
+            distances[i] = np.inf  # Ignore self-distance
+            closest_idx = np.argmin(distances)
+
+            # If too close to another point, push away
+            if distances[closest_idx] < 0.05:  # Threshold distance
+                direction = points[i] - points[closest_idx]
+                distance = np.linalg.norm(direction)
+                if distance > 0:
+                    points[i] += direction / distance * 0.02  # Push away
+
+    # Apply some basic spacing to prevent clustering
+    for i in range(16):
+        # Move points away from center slightly to avoid center clustering
+        center_vec = points[i] - [0.5, 0.5]
+        center_distance = np.linalg.norm(center_vec)
+        if center_distance > 0:
+            points[i] += center_vec * 0.05 / center_distance
+
+    # Clip to ensure within bounds
+    points = np.clip(points, 0, 1)
+
+    return points
+
+
+def _calculate_min_max_ratio(points):
+    """Calculate the ratio of minimum to maximum pairwise distances."""
+    if len(points) < 2:
+        return 0
+
+    # Efficiently compute all pairwise distances
+    distances = cdist(points, points, metric='euclidean')
+
+    # Set diagonal to infinity to ignore self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    if max_dist <= 0:
+        return 0
+
+    return min_dist / max_dist
+
+
+def _analyze_distance_distribution(points):
+    """Analyze the distribution of distances to inform perturbation strategies."""
+    if len(points) < 2:
+        return {"mean": 0, "std": 0, "min": 0, "max": 0, "ratio": 0}
+
+    distances = cdist(points, points)
+    np.fill_diagonal(distances, np.inf)
+
+    # Filter out infinite values
+    finite_distances = distances[distances > 0]
+
+    if len(finite_distances) == 0:
+        return {"mean": 0, "std": 0, "min": 0, "max": 0, "ratio": 0}
+
+    mean_dist = np.mean(finite_distances)
+    std_dist = np.std(finite_distances)
+    min_dist = np.min(finite_distances)
+    max_dist = np.max(finite_distances)
+
+    # Ratio of std to mean gives us a measure of distribution uniformity
+    ratio = std_dist / mean_dist if mean_dist > 0 else 0
+
+    return {
+        "mean": mean_dist,
+        "std": std_dist,
+        "min": min_dist,
+        "max": max_dist,
+        "ratio": ratio  # Uniformity measure
+    }
+
+
+def _local_optimization(initial_points):
+    """Apply local optimization to improve the point distribution with adaptive tolerances."""
+    n = 16
+    d = 2
+
+    # Define objective function: negative ratio (we'll minimize this)
+    def objective(x):
+        # Reshape flat array back to points
+        pts = x.reshape(n, d)
+
+        # Calculate all pairwise distances efficiently
+        distances = cdist(pts, pts, metric='euclidean')
+        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Return negative ratio to maximize the ratio
+        if max_dist <= 0:
+            return 0
+        return -min_dist / max_dist
+
+    # Define bounds (points must be in [0,1] x [0,1])
+    bounds = [(0, 1) for _ in range(n * d)]
+
+    # Analyze the initial configuration
+    initial_ratio = _calculate_min_max_ratio(initial_points)
+    dist_analysis = _analyze_distance_distribution(initial_points)
+
+    # Set adaptive tolerances based on solution quality
+    if initial_ratio < 0.1:
+        # Poor initial solution - aggressive optimization
+        ftol = 1e-10
+        gtol = 1e-10
+        maxiter = 500
+    elif initial_ratio < 0.25:
+        # Moderate solution - balanced optimization
+        ftol = 1e-11
+        gtol = 1e-11
+        maxiter = 300
+    else:
+        # Good solution - precise optimization
+        ftol = 1e-12
+        gtol = 1e-12
+        maxiter = 200
+
+    # Try multiple optimization methods with adaptive parameters
+    best_result = None
+    best_value = np.inf
+
+    # Method 1: L-BFGS-B with adaptive parameters
+    try:
+        result1 = minimize(objective, initial_points.flatten(), method='L-BFGS-B', bounds=bounds,
+                          options={'ftol': ftol, 'gtol': gtol, 'maxiter': maxiter})
+        if result1.fun < best_value:
+            best_value = result1.fun
+            best_result = result1
+    except:
+        pass
+
+    # Method 2: Nelder-Mead as fallback with adaptive parameters
+    try:
+        if best_result is None:
+            result2 = minimize(objective, initial_points.flatten(), method='Nelder-Mead',
+                              options={'fatol': ftol, 'xatol': gtol, 'maxiter': maxiter})
+            if result2.fun < best_value:
+                best_value = result2.fun
+                best_result = result2
+    except:
+        pass
+
+    # If no optimization succeeded, return original points
+    if best_result is None:
+        return initial_points
+
+    # Extract optimized points
+    optimized_points = best_result.x.reshape(n, d)
+
+    # Ensure points are within bounds
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

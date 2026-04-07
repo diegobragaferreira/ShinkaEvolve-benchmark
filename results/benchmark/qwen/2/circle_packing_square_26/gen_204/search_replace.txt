@@ -1,0 +1,209 @@
+<NAME>
+enhance_local_search_with_physics_repulsion
+</NAME>
+
+<DESCRIPTION>
+This enhancement modifies the local search improvement method to incorporate physics-inspired repulsion forces when resolving overlaps, which should help escape local optima and find better configurations. The idea is to apply repulsive forces between overlapping circles to push them apart before attempting to increase radii, leading to more effective optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_search_improve(self, circles: np.ndarray, max_iterations: int = 50) -> np.ndarray:
+        """
+        Apply local search to improve a given solution by iteratively adjusting positions/radii.
+        This helps fine-tune the solution and reduce overlaps.
+        """
+        current = circles.copy()
+        current_fitness = self.calculate_fitness(current)
+
+        for iteration in range(max_iterations):
+            improved = False
+            # Try to improve each circle individually
+            for i in range(self.n_circles):
+                original_x, original_y, original_r = current[i]
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_fitness = current_fitness
+
+                # Try small adjustments to position and radius
+                step_sizes = [0.005, 0.01, 0.02]
+                for step in step_sizes:
+                    # Test position changes
+                    for dx in [-step, 0, step]:
+                        for dy in [-step, 0, step]:
+                            new_x = original_x + dx
+                            new_y = original_y + dy
+
+                            # Ensure new position is within bounds
+                            if (new_x - original_r >= 0 and new_x + original_r <= 1 and
+                                new_y - original_r >= 0 and new_y + original_r <= 1):
+
+                                # Create temporary configuration
+                                temp_circles = current.copy()
+                                temp_circles[i] = [new_x, new_y, original_r]
+
+                                # Check if this improves overall fitness
+                                if self.validate_circles(temp_circles):
+                                    new_fitness = self.calculate_fitness(temp_circles)
+                                    if new_fitness > best_fitness:
+                                        best_fitness = new_fitness
+                                        best_x, best_y, best_r = new_x, new_y, original_r
+                                        improved = True
+
+                    # Test radius changes
+                    for dr in [-step, 0, step]:
+                        new_r = original_r + dr
+                        if new_r > 0.001 and new_r < 0.5:  # Reasonable bounds
+                            # Ensure new radius allows for valid positioning
+                            new_r = min(new_r, original_x, 1-original_x, original_y, 1-original_y)
+                            if new_r > 0.001:
+                                # Create temporary configuration
+                                temp_circles = current.copy()
+                                temp_circles[i] = [original_x, original_y, new_r]
+
+                                # Check if this improves overall fitness
+                                if self.validate_circles(temp_circles):
+                                    new_fitness = self.calculate_fitness(temp_circles)
+                                    if new_fitness > best_fitness:
+                                        best_fitness = new_fitness
+                                        best_x, best_y, best_r = original_x, original_y, new_r
+                                        improved = True
+
+                # Update if we found a better configuration
+                if improved:
+                    current[i] = [best_x, best_y, best_r]
+                    current_fitness = best_fitness
+
+            # Stop if no improvement was made in this iteration
+            if not improved:
+                break
+
+        return current
+=======
+    def local_search_improve(self, circles: np.ndarray, max_iterations: int = 50) -> np.ndarray:
+        """
+        Apply local search to improve a given solution by iteratively adjusting positions/radii.
+        This helps fine-tune the solution and reduce overlaps.
+        """
+        current = circles.copy()
+        current_fitness = self.calculate_fitness(current)
+
+        for iteration in range(max_iterations):
+            improved = False
+
+            # First, apply physics-inspired repulsion to resolve overlaps
+            # Count overlaps to determine approach intensity
+            overlap_count = 0
+            for i in range(self.n_circles):
+                for j in range(i+1, self.n_circles):
+                    x1, y1, r1 = current[i]
+                    x2, y2, r2 = current[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        overlap_count += 1
+
+            # Apply repulsion if there are overlaps
+            if overlap_count > 0:
+                # Apply physics-inspired repulsion forces
+                for i in range(self.n_circles):
+                    total_dx, total_dy = 0, 0
+                    for j in range(self.n_circles):
+                        if i != j:
+                            x1, y1, r1 = current[i]
+                            x2, y2, r2 = current[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2) + 1e-8  # Avoid division by zero
+
+                            # Only repulse if overlapping
+                            if distance < r1 + r2:
+                                # Repulsion force direction (away from overlapping circle)
+                                dx = (x1 - x2) / distance
+                                dy = (y1 - y2) / distance
+
+                                # Force magnitude inversely proportional to distance squared
+                                force_strength = 0.01 / (distance**2)  # Stronger force when closer
+
+                                total_dx += dx * force_strength
+                                total_dy += dy * force_strength
+
+                    # Apply repulsion if there are forces
+                    if abs(total_dx) > 1e-6 or abs(total_dy) > 1e-6:
+                        # Apply small movement
+                        new_x = current[i][0] + total_dx * 0.01
+                        new_y = current[i][1] + total_dy * 0.01
+
+                        # Keep within bounds
+                        new_x = np.clip(new_x, current[i][2], 1 - current[i][2])
+                        new_y = np.clip(new_y, current[i][2], 1 - current[i][2])
+
+                        # Check if this improves fitness
+                        temp_circles = current.copy()
+                        temp_circles[i] = [new_x, new_y, current[i][2]]
+
+                        if self.validate_circles(temp_circles):
+                            new_fitness = self.calculate_fitness(temp_circles)
+                            if new_fitness > current_fitness:
+                                current[i] = [new_x, new_y, current[i][2]]
+                                current_fitness = new_fitness
+                                improved = True
+
+            # Then try to improve each circle individually
+            for i in range(self.n_circles):
+                original_x, original_y, original_r = current[i]
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_fitness = current_fitness
+
+                # Try small adjustments to position and radius
+                step_sizes = [0.005, 0.01, 0.02]
+                for step in step_sizes:
+                    # Test position changes
+                    for dx in [-step, 0, step]:
+                        for dy in [-step, 0, step]:
+                            new_x = original_x + dx
+                            new_y = original_y + dy
+
+                            # Ensure new position is within bounds
+                            if (new_x - original_r >= 0 and new_x + original_r <= 1 and
+                                new_y - original_r >= 0 and new_y + original_r <= 1):
+
+                                # Create temporary configuration
+                                temp_circles = current.copy()
+                                temp_circles[i] = [new_x, new_y, original_r]
+
+                                # Check if this improves overall fitness
+                                if self.validate_circles(temp_circles):
+                                    new_fitness = self.calculate_fitness(temp_circles)
+                                    if new_fitness > best_fitness:
+                                        best_fitness = new_fitness
+                                        best_x, best_y, best_r = new_x, new_y, original_r
+                                        improved = True
+
+                    # Test radius changes
+                    for dr in [-step, 0, step]:
+                        new_r = original_r + dr
+                        if new_r > 0.001 and new_r < 0.5:  # Reasonable bounds
+                            # Ensure new radius allows for valid positioning
+                            new_r = min(new_r, original_x, 1-original_x, original_y, 1-original_y)
+                            if new_r > 0.001:
+                                # Create temporary configuration
+                                temp_circles = current.copy()
+                                temp_circles[i] = [original_x, original_y, new_r]
+
+                                # Check if this improves overall fitness
+                                if self.validate_circles(temp_circles):
+                                    new_fitness = self.calculate_fitness(temp_circles)
+                                    if new_fitness > best_fitness:
+                                        best_fitness = new_fitness
+                                        best_x, best_y, best_r = original_x, original_y, new_r
+                                        improved = True
+
+                # Update if we found a better configuration
+                if improved:
+                    current[i] = [best_x, best_y, best_r]
+                    current_fitness = best_fitness
+
+            # Stop if no improvement was made in this iteration
+            if not improved:
+                break
+
+        return current
+>>>>>>> REPLACE
+</DIFF>

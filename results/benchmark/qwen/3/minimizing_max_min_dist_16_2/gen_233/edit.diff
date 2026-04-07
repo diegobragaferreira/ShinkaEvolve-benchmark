@@ -1,0 +1,319 @@
+--- a/original.py
++++ b/original.py
+@@ -1,302 +1,313 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import cdist
+ from scipy.spatial import cKDTree
+ import time
+ import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     np.random.seed(42)
+ 
+     # Enhanced hexagonal initialization with mathematical precision and deterministic symmetry breaking
+     def initialize_enhanced_hexagonal():
+         # Create a mathematically precise hexagonal arrangement using golden ratio for optimal packing
+         # The golden ratio provides better distribution properties for hexagonal lattices
+ 
+         # Use the golden ratio for better hexagonal packing
+         golden_ratio = (1 + np.sqrt(5)) / 2
+         row_spacing = np.sqrt(3) / 2  # Standard hexagonal row spacing
+         col_spacing = 1.0
+ 
+         # Arrange points in a more sophisticated hexagonal pattern - 4 rows by 4 columns
+         # But use a more mathematically sound approach
+         points = []
+         rows = 4
+         cols = 4
+ 
+         # Generate hexagonal lattice with optimized spacing
+         for i in range(rows):
+             for j in range(cols):
+                 # Offset every other row for true hexagonal packing
+                 x = j * col_spacing + (i % 2) * col_spacing * 0.5
+                 y = i * row_spacing
+ 
+                 # Apply a more sophisticated pattern that maintains hexagonal properties
+                 # while ensuring good distribution
+                 points.append([x, y])
+ 
+         points = np.array(points)
+ 
+         # Normalize to fit precisely in [0,1] x [0,1] while preserving hexagonal structure
+         # Calculate actual bounding box
+         x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
+         y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
+ 
+         # Handle case where there's no spread
+         if x_max > x_min and y_max > y_min:
+             # Preserve aspect ratio by scaling appropriately
+             scale_x = 1.0 / (x_max - x_min)
+             scale_y = 1.0 / (y_max - y_min)
+             # Use minimum scale to maintain hexagonal properties
+             scale = min(scale_x, scale_y) * 0.95  # Leave padding
+ 
+             points[:, 0] = (points[:, 0] - x_min) * scale
+             points[:, 1] = (points[:, 1] - y_min) * scale
+         elif x_max > x_min:
+             scale = 1.0 / (x_max - x_min) * 0.95
+             points[:, 0] = (points[:, 0] - x_min) * scale
+         elif y_max > y_min:
+             scale = 1.0 / (y_max - y_min) * 0.95
+             points[:, 1] = (points[:, 1] - y_min) * scale
+ 
+         # Apply sophisticated deterministic symmetry breaking using mathematical patterns
+         # This uses Fibonacci indexing and prime-based selection to break symmetries effectively
+         np.random.seed(42)  # For reproducibility
+ 
+         # Use Fibonacci sequence for determining which points get perturbed
+         fibonacci_indices = []
+         a, b = 1, 1
+         while len(fibonacci_indices) < 16:
+             fibonacci_indices.append(a)
+             a, b = b, a + b
+ 
+         # Also use prime-based pattern for additional asymmetry
+         primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]
+ 
+         # Apply systematic perturbations that break all known symmetries
+         for i in range(len(points)):
+             # Determine perturbation scale based on mathematical patterns
+             # Points at Fibonacci positions get larger perturbations
+             if i in fibonacci_indices[:len(fibonacci_indices)//2]:
+                 scale = 0.025
+             # Points at prime positions get medium perturbations
+             elif i < len(primes) and i % primes[i % len(primes)] == 0:
+                 scale = 0.015
+             else:  # Others get small perturbations
+                 scale = 0.008
+ 
+             # Apply directional perturbation with phase based on position
+             # This ensures the perturbations break rotational and translational symmetries
+             phase = (i * golden_ratio) % 1
+             theta = phase * 2 * np.pi
+             dx = scale * np.cos(theta) * (0.8 + np.random.random() * 0.4)
+             dy = scale * np.sin(theta) * (0.8 + np.random.random() * 0.4)
+ 
+             points[i, 0] += dx
+             points[i, 1] += dy
+ 
+         # Ensure all points are within bounds
+         points = np.clip(points, 0, 1)
+ 
+         return points
+ 
+     # Compute min/max distance ratio with efficient distance matrix
+     def compute_ratio(points):
+         if len(points) < 2:
+             return 0
+ 
+         # Use cKDTree for efficient nearest neighbor search
+         tree = cKDTree(points)
+ 
+         # Find minimum distance (excluding self-distance)
+         # Query for second closest point since first is self
+         distances, indices = tree.query(points, k=2)
+         d_min = np.min(distances[:, 1])  # Second closest (not self)
+ 
+         # Find maximum distance
+         # For large point sets, find max distance more efficiently
+         if len(points) <= 100:
+             # Direct computation for small sets
+             distances = cdist(points, points)
+             np.fill_diagonal(distances, np.inf)
+             d_max = np.min(distances[distances != np.inf]) if np.any(distances != np.inf) else 0
+         else:
+             # For larger sets, use pairwise maximum
+             distances = cdist(points, points)
+             np.fill_diagonal(distances, 0)
+             d_max = np.max(distances)
+ 
+         if d_max == 0:
+             return 0
+ 
+         return d_min / d_max
+ 
+     # Sphere packing objective function with geometric constraints
+     def sphere_packing_objective(points):
+         """Objective based on maximizing minimum distance (equivalent to maximum sphere radius)"""
+         if len(points) < 2:
+             return 0
+ 
+         # Use cKDTree for efficient computation
+         tree = cKDTree(points)
+         distances, indices = tree.query(points, k=2)
+         min_distance = np.min(distances[:, 1])
+ 
+         # Penalize if any points are too close to boundaries
+         boundary_penalty = 0
+         boundary_threshold = 0.02
+         for point in points:
+             if (point[0] < boundary_threshold or point[0] > 1-boundary_threshold or
+                 point[1] < boundary_threshold or point[1] > 1-boundary_threshold):
+                 boundary_penalty += 1000 * boundary_threshold
+ 
+         return min_distance - boundary_penalty
+ 
+     # Generate neighbor solution with more sophisticated moves and improved boundary handling
+     def generate_neighbor_adaptive(points, step_size=0.02):
+         new_points = points.copy()
+ 
+         # Choose move type: single point, pair move, or cluster move
+         move_type = np.random.choice(['single', 'pair', 'cluster'], p=[0.5, 0.3, 0.2])
+ 
+         if move_type == 'single':
+             # Single point move with adaptive step size
+             idx = np.random.randint(len(points))
+             # Use adaptive step size based on how close we are to optimal
+             adaptive_step = step_size * np.random.uniform(0.5, 1.5)
+             movement = np.random.normal(0, adaptive_step, 2)
+             new_points[idx] += movement
+ 
+         elif move_type == 'pair':
+             # Move two nearby points together - more structured approach
+             # Find two points that are among the closest (avoid calculating all distances)
+             # Instead, sample a few points and check their distances
+             sample_size = min(10, len(points))
+             sample_indices = np.random.choice(len(points), sample_size, replace=False)
+             sample_points = points[sample_indices]
+ 
+             # Calculate distances for sampled points
+             distances = cdist(sample_points, sample_points)
+             np.fill_diagonal(distances, np.inf)
+ 
+             # Get indices of two closest points among sampled
+             min_indices = np.unravel_index(np.argmin(distances), distances.shape)
+             actual_idx1 = sample_indices[min_indices[0]]
+             actual_idx2 = sample_indices[min_indices[1]]
+ 
+             # Move them in coordinated way with adaptive movement
+             adaptive_step = step_size * np.random.uniform(0.8, 1.2)
+             movement = np.random.normal(0, adaptive_step, 2)
+             new_points[actual_idx1] += movement
+             new_points[actual_idx2] += movement
+ 
+         else:  # cluster
+             # Move a small cluster of points together with more structured approach
+             num_cluster = min(3, len(points) // 3)
+             cluster_indices = np.random.choice(len(points), num_cluster, replace=False)
+ 
+             # Move them towards their centroid with adaptive step
+             centroid = np.mean(new_points[cluster_indices], axis=0)
+             adaptive_step = step_size * np.random.uniform(0.6, 1.0)
+             movement = np.random.normal(0, adaptive_step, 2)
+ 
+             for idx in cluster_indices:
+                 new_points[idx] += movement
+ 
+-        # Apply boundary constraints with better handling
+-        # Use clipping to keep all points within bounds
+-        new_points = np.clip(new_points, 0, 1)
++        # Apply boundary constraints with better handling - push points away from boundaries
++        boundary_threshold = 0.02
++        for i in range(len(new_points)):
++            point = new_points[i]
++            # If point is too close to boundary, push it away from the boundary
++            if point[0] < boundary_threshold:
++                new_points[i, 0] = boundary_threshold + np.random.uniform(0, boundary_threshold/2)
++            elif point[0] > 1 - boundary_threshold:
++                new_points[i, 0] = 1 - boundary_threshold - np.random.uniform(0, boundary_threshold/2)
++
++            if point[1] < boundary_threshold:
++                new_points[i, 1] = boundary_threshold + np.random.uniform(0, boundary_threshold/2)
++            elif point[1] > 1 - boundary_threshold:
++                new_points[i, 1] = 1 - boundary_threshold - np.random.uniform(0, boundary_threshold/2)
+ 
+         return new_points
+ 
+     # Advanced adaptive optimization with improved cooling and early stopping
+     def adaptive_optimization(initial_points):
+         points = initial_points.copy()
+         current_ratio = compute_ratio(points)
+         best_points = points.copy()
+         best_ratio = current_ratio
+ 
+         # Adaptive cooling schedule with more sophisticated logic
+         temp = 0.1  # Start with higher temperature
+         cooling_rate = 0.9995  # Standard cooling rate
+         min_temp = 1e-6
+ 
+         # Track improvement for adaptive cooling
+         improvement_window = 50
+         recent_improvements = []
+         stagnation_count = 0
+         max_stagnation = 200  # Early stopping threshold
+ 
+         max_iterations = 3000
+         for iteration in range(max_iterations):
+             # Adjust temperature based on recent performance
+             if len(recent_improvements) >= improvement_window:
+                 avg_improvement = np.mean(recent_improvements[-improvement_window:])
+                 if avg_improvement < 1e-6:
+                     temp *= 0.98  # Cool faster if stagnating
+                 elif avg_improvement > 1e-3:
+                     temp *= 1.02  # Warm up if making good progress
+                 else:
+                     temp *= 0.999  # Slow cooling otherwise
+ 
+             temp = max(temp * cooling_rate, min_temp)
+ 
+             # Early stopping if stagnating
+             if stagnation_count > max_stagnation:
+                 break
+ 
+             # Generate neighbor solution
+             new_points = generate_neighbor_adaptive(points, step_size=temp)
+             new_ratio = compute_ratio(new_points)
+ 
+             # Track recent improvements
+             if new_ratio > current_ratio:
+                 recent_improvements.append(new_ratio - current_ratio)
+                 if len(recent_improvements) > improvement_window * 2:
+                     recent_improvements.pop(0)
+                 stagnation_count = 0  # Reset stagnation counter
+             else:
+                 stagnation_count += 1  # Increment stagnation counter
+ 
+             # Accept or reject based on Metropolis criterion
+             if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temp):
+                 points = new_points.copy()
+                 current_ratio = new_ratio
+ 
+                 if current_ratio > best_ratio:
+                     best_ratio = current_ratio
+                     best_points = points.copy()
+ 
+         return best_points, best_ratio
+ 
+     # Initialize with enhanced hexagonal approach
+     points = initialize_enhanced_hexagonal()
+ 
+     # Try multiple restarts to escape local optima
+     best_solution = points.copy()
+     best_ratio = compute_ratio(points)
+ 
+     # Multiple restarts with different random seeds
+     for restart in range(5):
+         # Different initialization for each restart
+         points = initialize_enhanced_hexagonal()
+ 
+         # Apply adaptive optimization
+         optimized_points, ratio = adaptive_optimization(points)
+ 
+         if ratio > best_ratio:
+             best_ratio = ratio
+             best_solution = optimized_points.copy()
+ 
+     # Return the best solution found
+     return best_solution
+ 
+ # EVOLVE-BLOCK-END

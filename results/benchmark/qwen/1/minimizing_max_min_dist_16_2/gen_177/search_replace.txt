@@ -1,0 +1,200 @@
+<NAME>
+add_simulated_annealing_fallback
+</NAME>
+
+<DESCRIPTION>
+Adding a simulated annealing fallback mechanism to enhance robustness of the optimization process. This addresses the issue identified in the recommendations where gradient-based methods might get trapped in local minima. The simulated annealing will serve as a backup optimization method when the primary L-BFGS-B and SLSQP methods fail to converge properly, allowing for broader exploration in later stages of optimization and providing an escape route from problematic local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+class PointOptimizer:
+    """Enhanced optimizer for maximizing min/max distance ratio of 16 points in 2D."""
+
+    def __init__(self, n_points=16, max_time=180):
+        self.n_points = n_points
+        self.max_time = max_time
+        self.best_solution = None
+        self.best_ratio = -np.inf
+        self.start_time = time.time()
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+import math
+
+class PointOptimizer:
+    """Enhanced optimizer for maximizing min/max distance ratio of 16 points in 2D."""
+
+    def __init__(self, n_points=16, max_time=180):
+        self.n_points = n_points
+        self.max_time = max_time
+        self.best_solution = None
+        self.best_ratio = -np.inf
+        self.start_time = time.time()
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement_step(self, x0, method='L-BFGS-B'):
+        """Perform local refinement optimization with fallback."""
+        bounds = [(0, 1)] * (self.n_points * 2)
+
+        try:
+            # Try primary method
+            result = minimize(
+                self.objective_function,
+                x0,
+                method=method,
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                return True, result.x
+            else:
+                # Try with looser tolerances
+                result = minimize(
+                    self.objective_function,
+                    x0,
+                    method=method,
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+                return result.success, result.x if result.success else x0
+
+        except Exception:
+            # Try alternate method as fallback
+            if method == 'L-BFGS-B':
+                try:
+                    result = minimize(
+                        self.objective_function,
+                        x0,
+                        method='SLSQP',
+                        bounds=bounds,
+                        options={'maxiter': 300, 'ftol': 1e-10}
+                    )
+                    return result.success, result.x if result.success else x0
+                except Exception:
+                    return False, x0
+            return False, x0
+=======
+    def simulated_annealing(self, x0, max_iter=1000):
+        """Simulated annealing optimization as fallback method."""
+        np.random.seed(int(time.time()) % 1000000)
+
+        current_x = x0.copy()
+        current_points = current_x.reshape(-1, 2)
+        current_ratio = self.compute_distance_ratio(current_points)
+
+        best_x = current_x.copy()
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        # Annealing parameters
+        T_start = 1.0
+        T_end = 1e-8
+        alpha = 0.95
+        T = T_start
+
+        iter_count = 0
+        while iter_count < max_iter and T > T_end:
+            # Generate neighbor solution by perturbing one point
+            neighbor_x = current_x.copy()
+            point_idx = np.random.randint(0, self.n_points)
+            coord_idx = np.random.randint(0, 2)
+
+            # Perturb the selected coordinate
+            step_size = 0.01 * T
+            neighbor_x[point_idx * 2 + coord_idx] += np.random.normal(0, step_size)
+
+            # Keep within bounds
+            neighbor_x[point_idx * 2 + coord_idx] = np.clip(neighbor_x[point_idx * 2 + coord_idx], 0, 1)
+
+            # Evaluate neighbor
+            neighbor_points = neighbor_x.reshape(-1, 2)
+            neighbor_ratio = self.compute_distance_ratio(neighbor_points)
+
+            # Accept or reject the neighbor
+            if neighbor_ratio > current_ratio:
+                current_x = neighbor_x
+                current_ratio = neighbor_ratio
+            else:
+                # Accept with probability based on temperature
+                delta = neighbor_ratio - current_ratio
+                prob = math.exp(delta / T)
+                if np.random.random() < prob:
+                    current_x = neighbor_x
+                    current_ratio = neighbor_ratio
+
+            # Update best solution
+            if current_ratio > best_ratio:
+                best_x = current_x.copy()
+                best_ratio = current_ratio
+                best_points = neighbor_points.copy()
+
+            # Cool down
+            T *= alpha
+            iter_count += 1
+
+        return True, best_x
+
+    def local_refinement_step(self, x0, method='L-BFGS-B'):
+        """Perform local refinement optimization with fallback."""
+        bounds = [(0, 1)] * (self.n_points * 2)
+
+        try:
+            # Try primary method
+            result = minimize(
+                self.objective_function,
+                x0,
+                method=method,
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                return True, result.x
+            else:
+                # Try with looser tolerances
+                result = minimize(
+                    self.objective_function,
+                    x0,
+                    method=method,
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+                return result.success, result.x if result.success else x0
+
+        except Exception:
+            # Try alternate method as fallback
+            if method == 'L-BFGS-B':
+                try:
+                    result = minimize(
+                        self.objective_function,
+                        x0,
+                        method='SLSQP',
+                        bounds=bounds,
+                        options={'maxiter': 300, 'ftol': 1e-10}
+                    )
+                    if result.success:
+                        return True, result.x
+                    else:
+                        # Fallback to simulated annealing
+                        return self.simulated_annealing(x0)
+                except Exception:
+                    # Fallback to simulated annealing
+                    return self.simulated_annealing(x0)
+            # Fallback to simulated annealing for all other cases
+            return self.simulated_annealing(x0)
+>>>>>>> REPLACE
+</DIFF>

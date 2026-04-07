@@ -1,0 +1,216 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import random
+import time
+from typing import Tuple
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Parameters
+    N_CIRCLES = 32
+    MAX_RADIUS = 0.5
+    UNIT_SIZE = 1.0
+    
+    def create_individual():
+        """Create a valid individual with 32 circles"""
+        circles = []
+        for _ in range(N_CIRCLES):
+            # Generate random valid circle
+            while True:
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.01, 0.2)
+                
+                # Check if it's valid (not overlapping with existing circles)
+                if is_valid_circle(circles, x, y, r):
+                    circles.append([x, y, r])
+                    break
+        return np.array(circles).flatten()
+    
+    def is_valid_circle(existing_circles, x, y, r):
+        """Check if a circle is valid"""
+        # Check boundaries
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+            
+        # Check overlap with existing circles
+        for cx, cy, cr in existing_circles:
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            if dist < r + cr:
+                return False
+        return True
+    
+    def evaluate(individual):
+        """Evaluate fitness of individual"""
+        circles = individual.reshape(-1, 3)
+        
+        # Calculate sum of radii
+        total_radius = np.sum(circles[:, 2])
+        
+        # Penalty for constraint violations
+        penalty = 0
+        
+        # Boundary penalty
+        for x, y, r in circles:
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                penalty += 1000
+                
+        # Overlap penalty  
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    penalty += 10000 * (r1 + r2 - dist)
+                    
+        return (total_radius - penalty,)
+    
+    def mutate(individual):
+        """Custom mutation operator"""
+        circles = individual.reshape(-1, 3)
+        mutated_circles = []
+        
+        for i, (x, y, r) in enumerate(circles):
+            # Apply mutation with probability 0.1
+            if random.random() < 0.1:
+                # Mutate one of x, y, or r
+                choice = random.randint(0, 2)
+                if choice == 0:  # Mutate x
+                    x = max(0.01, min(0.99, x + np.random.normal(0, 0.02)))
+                elif choice == 1:  # Mutate y
+                    y = max(0.01, min(0.99, y + np.random.normal(0, 0.02)))
+                else:  # Mutate r
+                    r = max(0.01, min(0.2, r + np.random.normal(0, 0.01)))
+            
+            # Validate and fix if necessary
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                # Try to fix the position
+                x = max(r, min(1-r, x))
+                y = max(r, min(1-r, y))
+            
+            mutated_circles.append([x, y, r])
+            
+        return (np.array(mutated_circles).flatten(),)
+    
+    def crossover(ind1, ind2):
+        """Custom crossover operator"""
+        # Simple uniform crossover
+        circles1 = ind1.reshape(-1, 3)
+        circles2 = ind2.reshape(-1, 3)
+        
+        # Create offspring
+        child1 = []
+        child2 = []
+        
+        for i in range(len(circles1)):
+            if random.random() < 0.5:
+                child1.append(circles1[i])
+                child2.append(circles2[i])
+            else:
+                child1.append(circles2[i])
+                child2.append(circles1[i])
+                
+        return (np.array(child1).flatten(), np.array(child2).flatten())
+    
+    def initialize_population():
+        """Initialize population with grid-based heuristic"""
+        population = []
+        # Create grid-based starting points
+        grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+        spacing = 1.0 / (grid_size + 1)
+        
+        positions = []
+        for i in range(grid_size):
+            for j in range(grid_size):
+                x = (i + 1) * spacing
+                y = (j + 1) * spacing
+                positions.append((x, y))
+        
+        # Fill positions with circles
+        while len(population) < 20:
+            circles = []
+            pos_idx = 0
+            for _ in range(N_CIRCLES):
+                if pos_idx < len(positions):
+                    x, y = positions[pos_idx]
+                    # Add some randomness
+                    x += np.random.uniform(-spacing/4, spacing/4)
+                    y += np.random.uniform(-spacing/4, spacing/4)
+                    x = max(0.01, min(0.99, x))
+                    y = max(0.01, min(0.99, y))
+                    r = np.random.uniform(0.01, 0.15)
+                    
+                    # Check validity
+                    if is_valid_circle(circles, x, y, r):
+                        circles.append([x, y, r])
+                        pos_idx += 1
+                    
+            if len(circles) == N_CIRCLES:
+                population.append(np.array(circles).flatten())
+                
+        return population
+    
+    # Setup DEAP
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", crossover)
+    toolbox.register("mutate", mutate)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initialize population
+    pop = initialize_population()
+    # Fill up to standard size
+    while len(pop) < 50:
+        pop.append(create_individual())
+    
+    # Evolve
+    hof = tools.ParetoFront()
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    try:
+        # Run evolution
+        pop, logbook = algorithms.eaSimple(
+            pop, toolbox, cxpb=0.7, mutpb=0.3, 
+            ngen=100, stats=stats, halloffame=hof, verbose=False
+        )
+    except Exception as e:
+        print(f"Evolution error: {e}")
+        # Return best attempt so far
+        pass
+    
+    # Get best solution
+    best_individual = hof[0] if hof else create_individual()
+    final_circles = best_individual.reshape(-1, 3)
+    
+    # Final validation and cleanup
+    validated_circles = []
+    for x, y, r in final_circles:
+        # Ensure boundary constraints
+        x = max(r, min(1-r, x))
+        y = max(r, min(1-r, y))
+        validated_circles.append([x, y, r])
+    
+    return np.array(validated_circles)
+
+# EVOLVE-BLOCK-END

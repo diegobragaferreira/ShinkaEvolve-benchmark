@@ -1,0 +1,373 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+import random
+from copy import deepcopy
+from platypus import NSGAII, Problem, Real
+import warnings
+warnings.filterwarnings('ignore')
+
+class AdaptiveEvolvePack:
+    def __init__(self):
+        # Rectangle dimensions - perimeter = 4, so width + height = 2
+        # Using optimized rectangle dimensions
+        self.rect_width = 1.25
+        self.rect_height = 0.75
+        self.n_circles = 21
+        self.max_generations = 120
+        self.population_size = 80
+        self.elite_ratio = 0.15
+        
+        # Set seed for reproducibility
+        np.random.seed(42)
+        random.seed(42)
+        
+    def create_adaptive_grid(self, n, width, height):
+        """Create an adaptive grid layout using proven spacing formula"""
+        # Use the spacing formula from successful implementations
+        avg_area_per_circle = (width * height) / n
+        spacing = np.sqrt(avg_area_per_circle)
+        
+        # Determine grid dimensions based on rectangle aspect ratio
+        aspect_ratio = width / height
+        cols = max(1, int(np.ceil(width / spacing)))
+        rows = max(1, int(np.ceil(height / spacing)))
+        
+        # Adjust for circle count
+        while cols * rows < n:
+            if aspect_ratio >= 1:  # Landscape
+                cols += 1
+            else:  # Portrait  
+                rows += 1
+                
+        # Recalculate actual spacing
+        actual_spacing_x = width / cols if cols > 0 else width
+        actual_spacing_y = height / rows if rows > 0 else height
+        
+        circles = []
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                    
+                # Hexagonal offset for better packing
+                offset_x = actual_spacing_x * 0.5 if i % 2 == 1 else 0
+                base_x = (j + 1) * actual_spacing_x + offset_x
+                base_y = (i + 1) * actual_spacing_y
+                
+                # Add controlled random perturbation
+                perturbation_factor = min(0.15, 0.2 * min(actual_spacing_x, actual_spacing_y))
+                x = np.clip(base_x + np.random.uniform(-perturbation_factor, perturbation_factor),
+                           0.01, width - 0.01)
+                y = np.clip(base_y + np.random.uniform(-perturbation_factor, perturbation_factor),
+                           0.01, height - 0.01)
+                
+                # Initial radius based on spacing and available space
+                max_r = min(x, width - x, y, height - y)
+                estimated_radius = min(0.12, max_r * 0.7)
+                r = np.random.uniform(estimated_radius * 0.6, estimated_radius * 1.0)
+                
+                circles.append([x, y, r])
+                idx += 1
+                
+        return np.array(circles)
+    
+    def fast_collision_check(self, circles):
+        """Fast collision detection using spatial indexing with boundary checks"""
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Early boundary check
+        if np.any((coords[:, 0] - radii < 0) | (coords[:, 0] + radii > self.rect_width) |
+                  (coords[:, 1] - radii < 0) | (coords[:, 1] + radii > self.rect_height)):
+            return False
+        
+        # Use KDTree for efficient neighbor search
+        tree = cKDTree(coords)
+        try:
+            pairs = tree.query_pairs(2 * np.max(radii), p=2)
+        except:
+            # Fallback to manual checking if spatial indexing fails
+            pairs = []
+            for i in range(len(coords)):
+                for j in range(i+1, len(coords)):
+                    dx = coords[i][0] - coords[j][0]
+                    dy = coords[i][1] - coords[j][1]
+                    dist_sq = dx*dx + dy*dy
+                    min_dist_sq = (radii[i] + radii[j]) * (radii[i] + radii[j])
+                    if dist_sq < min_dist_sq:
+                        pairs.append((i, j))
+        
+        if len(pairs) == 0:
+            return True
+            
+        # Check actual distances for overlap
+        for i, j in pairs:
+            x1, y1 = coords[i]
+            x2, y2 = coords[j]
+            r1, r2 = radii[i], radii[j]
+            dx = x1 - x2
+            dy = y1 - y2
+            dist_sq = dx*dx + dy*dy
+            min_dist_sq = (r1 + r2) * (r1 + r2)
+            
+            if dist_sq < min_dist_sq:
+                return False
+                
+        return True
+    
+    def evaluate_fitness_with_penalty(self, circles):
+        """Improved fitness evaluation with penalty scaling"""
+        # Check constraints first
+        if not self.fast_collision_check(circles):
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            
+            # Count violations
+            boundary_violations = np.sum((coords[:, 0] - radii < 0) | (coords[:, 0] + radii > self.rect_width) |
+                                       (coords[:, 1] - radii < 0) | (coords[:, 1] + radii > self.rect_height))
+            
+            # Overlap violations using spatial indexing
+            tree = cKDTree(coords)
+            try:
+                pairs = tree.query_pairs(2 * np.max(radii), p=2)
+            except:
+                pairs = []
+                for i in range(len(coords)):
+                    for j in range(i+1, len(coords)):
+                        dx = coords[i][0] - coords[j][0]
+                        dy = coords[i][1] - coords[j][1]
+                        dist_sq = dx*dx + dy*dy
+                        min_dist_sq = (radii[i] + radii[j]) * (radii[i] + radii[j])
+                        if dist_sq < min_dist_sq:
+                            pairs.append((i, j))
+            
+            overlap_violations = 0
+            for i, j in pairs:
+                x1, y1 = coords[i]
+                x2, y2 = coords[j]
+                r1, r2 = radii[i], radii[j]
+                dx = x1 - x2
+                dy = y1 - y2
+                dist_sq = dx*dx + dy*dy
+                min_dist_sq = (r1 + r2) * (r1 + r2)
+                
+                if dist_sq < min_dist_sq:
+                    overlap_violations += 1
+            
+            total_violations = boundary_violations + overlap_violations
+            base_fitness = np.sum(circles[:, 2])
+            # More sophisticated penalty scaling
+            penalty = total_violations * 2000 + (total_violations ** 2) * 100
+            return max(0, base_fitness - penalty)
+        
+        return np.sum(circles[:, 2])
+
+    def nsga2_optimization(self):
+        """NSGA-II based multi-objective optimization"""
+        # Define the problem: maximize radius sum, minimize constraint violations
+        class CirclePackProblem(Problem):
+            def __init__(self):
+                super(CirclePackProblem, self).__init__(63, 2, 0)  # 21 circles * 3 params = 63, 2 objectives, 0 constraints
+                # Bounds for variables (x, y, r) for each circle
+                for i in range(21):
+                    self.types[i*3] = Real(0.05, self.rect_width - 0.05)     # x
+                    self.types[i*3 + 1] = Real(0.05, self.rect_height - 0.05) # y
+                    self.types[i*3 + 2] = Real(0.01, 0.3)                    # r
+        
+            def evaluate(self, solution):
+                # Convert solution to circles array
+                circles = np.array(solution.variables).reshape(-1, 3)
+                
+                # Evaluate objectives
+                radius_sum = np.sum(circles[:, 2])
+                
+                # Constraint violation count (penalize heavily)
+                penalty = 0
+                coords = circles[:, :2]
+                radii = circles[:, 2]
+                
+                # Boundary violations
+                boundary_violations = np.sum((coords[:, 0] - radii < 0) | (coords[:, 0] + radii > self.rect_width) |
+                                           (coords[:, 1] - radii < 0) | (coords[:, 1] + radii > self.rect_height))
+                
+                # Overlap violations
+                try:
+                    tree = cKDTree(coords)
+                    pairs = tree.query_pairs(2 * np.max(radii), p=2)
+                except:
+                    pairs = []
+                    for i in range(len(coords)):
+                        for j in range(i+1, len(coords)):
+                            dx = coords[i][0] - coords[j][0]
+                            dy = coords[i][1] - coords[j][1]
+                            dist_sq = dx*dx + dy*dy
+                            min_dist_sq = (radii[i] + radii[j]) * (radii[i] + radii[j])
+                            if dist_sq < min_dist_sq:
+                                pairs.append((i, j))
+                
+                overlap_violations = 0
+                for i, j in pairs:
+                    x1, y1 = coords[i]
+                    x2, y2 = coords[j]
+                    r1, r2 = radii[i], radii[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist_sq = dx*dx + dy*dy
+                    min_dist_sq = (r1 + r2) * (r1 + r2)
+                    
+                    if dist_sq < min_dist_sq:
+                        overlap_violations += 1
+                
+                total_violations = boundary_violations + overlap_violations
+                penalty = total_violations * 5000 + (total_violations ** 2) * 200
+                
+                # Objectives: maximize radius sum (minimize negative), minimize violations
+                self.set_objectives(solution, [-radius_sum, penalty])
+        
+        # Run NSGA-II optimization
+        problem = CirclePackProblem()
+        algorithm = NSGAII(problem, population_size=self.population_size, 
+                          termination_condition=lambda: problem.nfe > 5000)
+        
+        algorithm.run(100)  # Run for limited generations
+        
+        # Return best individual
+        if len(algorithm.result) > 0:
+            best_solution = algorithm.result[0]
+            circles = np.array(best_solution.variables).reshape(-1, 3)
+            # Ensure valid radii
+            circles[:, 2] = np.maximum(0.001, np.minimum(0.3, circles[:, 2]))
+            return circles
+        else:
+            # Fallback to adaptive grid
+            return self.create_adaptive_grid(self.n_circles, self.rect_width, self.rect_height)
+
+    def smart_refinement_step(self, circles, max_iter=25):
+        """Smart refinement using local optimization and greedy improvements"""
+        refined_circles = circles.copy()
+        best_circles = refined_circles.copy()
+        best_fitness = self.evaluate_fitness_with_penalty(best_circles)
+        
+        # Attempt greedy improvements
+        for iteration in range(max_iter):
+            improved = False
+            
+            # Try to increase each circle's radius one by one
+            for i in range(self.n_circles):
+                # Save current state
+                original_circles = refined_circles.copy()
+                
+                # Try to increase radius
+                original_radius = refined_circles[i, 2]
+                max_possible_radius = min(
+                    refined_circles[i, 0], 
+                    self.rect_width - refined_circles[i, 0],
+                    refined_circles[i, 1], 
+                    self.rect_height - refined_circles[i, 1]
+                )
+                
+                if max_possible_radius > original_radius:
+                    # Try different increments
+                    step_sizes = [0.005, 0.01, 0.015, 0.02]
+                    for step in step_sizes:
+                        new_radius = min(original_radius + step, max_possible_radius)
+                        if new_radius > original_radius:
+                            refined_circles[i, 2] = new_radius
+                            
+                            # Check if this improves the solution
+                            if self.fast_collision_check(refined_circles):
+                                test_fitness = self.evaluate_fitness_with_penalty(refined_circles)
+                                if test_fitness > best_fitness:
+                                    best_fitness = test_fitness
+                                    best_circles = refined_circles.copy()
+                                    improved = True
+                                    break
+                            # Restore if invalid
+                            refined_circles = original_circles.copy()
+            
+            if not improved:
+                break
+                
+        return best_circles
+
+    def hybrid_optimization(self):
+        """Hybrid approach combining global and local optimization"""
+        # Stage 1: NSGA-II for global exploration
+        try:
+            initial_solution = self.nsga2_optimization()
+        except:
+            # Fallback to grid
+            initial_solution = self.create_adaptive_grid(self.n_circles, self.rect_width, self.rect_height)
+        
+        # Stage 2: Smart refinement for local improvement
+        refined_solution = self.smart_refinement_step(initial_solution, max_iter=30)
+        
+        # Stage 3: Local optimization with scipy
+        try:
+            # Flatten for scipy optimization
+            initial_vars = refined_solution.flatten()
+            
+            def objective(vars):
+                # Reconstruct
+                circles = vars.reshape(-1, 3)
+                circles[:, 2] = np.maximum(0.001, np.minimum(0.3, circles[:, 2]))
+                
+                # Check constraints
+                if not self.fast_collision_check(circles):
+                    return 1e8  # Penalty for constraint violations
+                
+                return -np.sum(circles[:, 2])  # Minimize negative sum (maximize sum)
+            
+            # Bounds
+            bounds = []
+            for i in range(self.n_circles * 3):
+                if i % 3 == 0:  # x coordinate
+                    bounds.append((0.05, self.rect_width - 0.05))
+                elif i % 3 == 1:  # y coordinate
+                    bounds.append((0.05, self.rect_height - 0.05))
+                else:  # radius
+                    bounds.append((0.01, 0.3))
+            
+            # Optimize
+            result = minimize(objective, initial_vars, method='L-BFGS-B', bounds=bounds, 
+                            options={'maxiter': 200, 'ftol': 1e-6})
+            
+            if result.success:
+                final_circles = result.x.reshape(-1, 3)
+                final_circles[:, 2] = np.maximum(0.001, np.minimum(0.3, final_circles[:, 2]))
+                return final_circles
+            
+        except:
+            pass
+            
+        return refined_solution
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    optimizer = AdaptiveEvolvePack()
+    
+    try:
+        final_solution = optimizer.hybrid_optimization()
+        
+        # Final validation
+        if not optimizer.fast_collision_check(final_solution):
+            # Try to fix with another refinement step
+            final_solution = optimizer.smart_refinement_step(final_solution, max_iter=10)
+            
+        return final_solution
+        
+    except Exception as e:
+        # Fallback to grid-based solution
+        print(f"Error during optimization: {e}")
+        optimizer = AdaptiveEvolvePack()
+        return optimizer.create_adaptive_grid(optimizer.n_circles, optimizer.rect_width, optimizer.rect_height)
+
+# EVOLVE-BLOCK-END

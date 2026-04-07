@@ -1,0 +1,179 @@
+<NAME>
+add_curvature_aware_gradient_update
+</NAME>
+
+<DESCRIPTION>
+This change introduces a more sophisticated curvature-aware gradient update mechanism that improves upon the basic finite difference approach in `get_good_direction_to_move_into`. It uses second-order Taylor expansion for better gradient estimation, incorporates adaptive learning rates based on curvature magnitude, and adds robustness against numerical instability. This should lead to faster convergence and better exploration of the solution space by providing more informed movement directions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence using adaptive gradient with curvature awareness."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = [x / sum_sequence for x in sequence]
+
+    # Compute convolution
+    if n > 100:
+        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+        conv_result = conv_result[:2*n - 1]
+    else:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+
+    rhs = np.max(conv_result)
+
+    # Attempt to solve constrained optimization problem
+    try:
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+    except Exception:
+        g_fun = None
+
+    if g_fun is None:
+        # Fallback: simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x / sum_g_fun for x in g_fun]
+
+    # Adaptive step-size based on sequence size
+    t = min(0.05, 0.01 + 0.005 * np.log(n + 1))
+
+    # Curvature-aware adjustment with improved stability
+    if n > 10:
+        # Better curvature estimation using symmetric finite differences
+        eps = 1e-4
+        hessian_approx = np.zeros((n, n))
+        for i in range(n):
+            # Symmetric perturbation
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += eps
+
+            # Apply boundary penalties
+            if i > 0:
+                perturbed_seq[i-1] -= eps / 2
+            if i < n-1:
+                perturbed_seq[i+1] -= eps / 2
+
+            if n > 100:
+                b_perturbed = fftconvolve(perturbed_seq, perturbed_seq, mode='full')[:2*n - 1]
+            else:
+                b_perturbed = np.convolve(perturbed_seq, perturbed_seq)
+
+            second_deriv = (np.max(b_perturbed) - np.max(conv_result)) / (eps**2)
+            hessian_approx[i, i] = max(0, second_deriv)
+
+        # Apply curvature correction with better normalization
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        norm_correction = np.linalg.norm(curvature_correction)
+        if norm_correction > 0:
+            curvature_correction = curvature_correction / (1.0 + 0.1 * norm_correction)
+        else:
+            curvature_correction = np.zeros_like(curvature_correction)
+
+        adjusted_direction = np.array(normalized_g_fun) + 0.05 * curvature_correction
+        normalized_g_fun = adjusted_direction.tolist()
+
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence using adaptive gradient with curvature awareness."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = [x / sum_sequence for x in sequence]
+
+    # Compute convolution
+    if n > 100:
+        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+        conv_result = conv_result[:2*n - 1]
+    else:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+
+    rhs = np.max(conv_result)
+
+    # Attempt to solve constrained optimization problem
+    try:
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+    except Exception:
+        g_fun = None
+
+    if g_fun is None:
+        # Fallback: simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x / sum_g_fun for x in g_fun]
+
+    # Adaptive step-size based on sequence size and curvature
+    # Incorporate curvature information for adaptive learning rate
+    if n > 10:
+        # Improved curvature estimation using second-order Taylor expansion
+        eps = 1e-5
+        hessian_diag = np.zeros(n)
+        for i in range(n):
+            # Perturb along i-th dimension and compute second derivative
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += eps
+            if n > 100:
+                b_plus = fftconvolve(perturbed_seq, perturbed_seq, mode='full')[:2*n - 1]
+            else:
+                b_plus = np.convolve(perturbed_seq, perturbed_seq)
+
+            # Estimate second derivative using central difference
+            second_deriv = (np.max(b_plus) - np.max(conv_result)) / (eps**2)
+            hessian_diag[i] = max(0, second_deriv)
+
+        # Compute average curvature
+        avg_curvature = np.mean(hessian_diag) if np.any(hessian_diag > 0) else 1e-10
+        # Adaptive learning rate based on curvature
+        adaptive_lr = min(0.1, max(0.005, 0.01 / (1.0 + avg_curvature)))
+        t = adaptive_lr
+    else:
+        t = 0.01
+
+    # Apply curvature-aware adjustments with better numerical stability
+    if n > 10:
+        # Use a smoother curvature correction
+        curvature_correction = np.zeros(n)
+        for i in range(n):
+            # Compute directional second derivative
+            if i < n - 1:
+                # Use a more stable approach to estimate curvature
+                hess_i = hessian_diag[i]
+                curvature_correction[i] = 0.05 * hess_i * normalized_g_fun[i]
+
+        # Apply curvature correction
+        adjusted_direction = np.array(normalized_g_fun) + curvature_correction
+        normalized_g_fun = adjusted_direction.tolist()
+
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,214 @@
+<NAME>
+implement_adaptive_penalty_weighting
+</NAME>
+
+<DESCRIPTION>
+I'll implement adaptive penalty weighting to improve the optimization performance. The key insight is that different constraint violations should have different penalty weights - containment violations are more critical than overlap violations since they break the basic problem requirements. This will help guide the optimizer toward valid solutions more effectively.
+
+The main changes include:
+1. Adding adaptive penalty weights that increase based on constraint violation severity
+2. Improving the objective function to properly handle these weighted penalties
+3. Enhancing the evaluation function with more nuanced penalty calculation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration(config, outer_side_length):
+    """Evaluate a configuration of 12 hexagons."""
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Fast containment check first
+    if not check_containment_distance_only(hexagon_vertices_list, outer_side_length):
+        return False, float('inf')  # Invalid configuration
+
+    # Fast overlap check using spatial hash
+    if not check_overlap_spatial_hash(hexagon_vertices_list):
+        return False, float('inf')  # Overlapping hexagons
+
+    # Final precise validation
+    if not check_overlap_shapely(hexagon_vertices_list):
+        return False, float('inf')
+
+    return True, 0  # Valid configuration
+=======
+def evaluate_configuration(config, outer_side_length):
+    """Evaluate a configuration of 12 hexagons."""
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Initialize penalty
+    total_penalty = 0.0
+
+    # Fast containment check first
+    containment_violations = 0
+    for vertices in hexagon_vertices_list:
+        # Check distance from center to each vertex
+        for vertex in vertices:
+            x, y = vertex
+            distance = math.sqrt(x*x + y*y)
+            # For outer hexagon with side length R, apothem is R * sqrt(3)/2
+            outer_apothem = outer_side_length * math.sqrt(3) / 2
+            if distance > outer_apothem:
+                containment_violations += 1
+                # Adaptive penalty based on how far outside
+                excess_distance = distance - outer_apothem
+                total_penalty += 1000.0 * (excess_distance + 0.1)**2
+
+    # Fast overlap check using spatial hash
+    overlap_violations = 0
+    if not check_overlap_spatial_hash(hexagon_vertices_list):
+        overlap_violations += 1
+        total_penalty += 100000.0  # Large penalty for overlaps
+
+    # Final precise validation
+    if not check_overlap_shapely(hexagon_vertices_list):
+        overlap_violations += 1
+        total_penalty += 100000.0  # Large penalty for overlaps
+
+    if containment_violations > 0 or overlap_violations > 0:
+        return False, total_penalty  # Invalid configuration
+
+    return True, total_penalty  # Valid configuration
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_objective_function_with_adaptive_weights
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the objective function to better handle adaptive penalty weights and improve convergence. The key improvement is to modify how the optimization objective accounts for both the validity of the configuration and the maximization of 1/outer_side_length.
+
+This involves adjusting the optimization target to properly incorporate the weighted penalties and ensuring that valid configurations are prioritized appropriately.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Objective function for differential evolution
+            def objective(x):
+                valid, penalty = evaluate_configuration(x, best_outer_side_length)
+                if valid:
+                    return -1.0 / best_outer_side_length  # Maximize 1/outer_side_length
+                else:
+                    return 1e6  # Penalty for invalid configurations
+
+            # Run differential evolution with more iterations for better convergence
+            result = differential_evolution(
+                objective, bounds, seed=i, maxiter=200, popsize=25, disp=False
+            )
+=======
+            # Objective function for differential evolution
+            def objective(x):
+                valid, penalty = evaluate_configuration(x, best_outer_side_length)
+                if valid:
+                    # For valid configurations, we want to maximize 1/outer_side_length
+                    # This means we minimize -1/outer_side_length
+                    return -1.0 / best_outer_side_length
+                else:
+                    # For invalid configurations, return penalty scaled appropriately
+                    # The penalty includes both containment and overlap violations
+                    return penalty + 1000000.0  # Add large constant to ensure invalid always worse
+
+            # Run differential evolution with more iterations for better convergence
+            result = differential_evolution(
+                objective, bounds, seed=i, maxiter=200, popsize=25, disp=False
+            )
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_improved_local_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll add an improved local refinement function that better explores the neighborhood of promising solutions. This new implementation will perform more sophisticated local searches using gradient-like moves and better handling of hexagon positions and orientations.
+
+The improvements include:
+1. Better perturbation strategy for positions and angles
+2. More thorough local search with multiple passes
+3. Proper handling of rotational constraints
+4. Enhanced validation during refinement
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_refinement(config, outer_side_length, max_iter=50):
+    """Perform local refinement to improve configuration."""
+    # Simple gradient-like approach
+    best_config = config.copy()
+    best_valid, best_penalty = evaluate_configuration(best_config, outer_side_length)
+
+    if not best_valid:
+        return config
+
+    # Try small perturbations to improve
+    for iteration in range(max_iter):
+        # Try small modifications to positions
+        current_config = best_config.copy()
+        # Randomly modify one hexagon at a time
+        hex_idx = np.random.randint(0, 12)
+        # Small random perturbation
+        current_config[hex_idx*3:hex_idx*3+2] += np.random.normal(0, 0.01, 2)
+        # Keep angle within [0, 360]
+        current_config[hex_idx*3+2] = current_config[hex_idx*3+2] % 360
+
+        valid, penalty = evaluate_configuration(current_config, outer_side_length)
+        if valid and penalty < best_penalty:
+            best_config = current_config
+            best_penalty = penalty
+
+    return best_config
+=======
+def local_refinement(config, outer_side_length, max_iter=100):
+    """Perform enhanced local refinement to improve configuration."""
+    best_config = config.copy()
+    best_valid, best_penalty = evaluate_configuration(best_config, outer_side_length)
+
+    if not best_valid:
+        return config
+
+    # Multiple passes of local optimization
+    for pass_num in range(3):
+        # Perform local search with diminishing step sizes
+        step_size = 0.1 / (pass_num + 1)
+
+        for iteration in range(max_iter // 3):
+            # Try modifying multiple hexagons in each iteration
+            current_config = best_config.copy()
+
+            # Modify 2-4 hexagons per iteration for better exploration
+            hex_indices = np.random.choice(12, size=np.random.randint(2, 5), replace=False)
+
+            for hex_idx in hex_indices:
+                # Small random perturbation to position
+                current_config[hex_idx*3:hex_idx*3+2] += np.random.normal(0, step_size, 2)
+                # Small random perturbation to rotation (with less impact)
+                current_config[hex_idx*3+2] += np.random.normal(0, step_size * 5)
+                # Keep angle within [0, 360]
+                current_config[hex_idx*3+2] = current_config[hex_idx*3+2] % 360
+
+            valid, penalty = evaluate_configuration(current_config, outer_side_length)
+            if valid and penalty < best_penalty:
+                best_config = current_config
+                best_penalty = penalty
+
+    return best_config
+>>>>>>> REPLACE
+</DIFF>

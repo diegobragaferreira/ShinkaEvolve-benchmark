@@ -1,0 +1,187 @@
+<NAME>
+add_adaptive_temperature_control
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed cooling rate in simulated annealing. I'll implement adaptive temperature control that dynamically adjusts based on optimization progress to improve convergence speed and quality. This will help escape local optima more effectively and converge to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_simulated_annealing(initial_points, max_iterations=5000, initial_temp=0.1):
+        """Enhanced simulated annealing with adaptive cooling and neighborhood moves."""
+        current_points = initial_points.copy()
+        current_ratio = evaluate_with_penalty(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        temperature = initial_temp
+        cooling_rate = 0.9995
+        min_temp = 1e-8
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_threshold = 50
+        stagnation_counter = 0
+
+        for iteration in range(max_iterations):
+            # Decide between single point or neighborhood move
+            if np.random.random() < 0.7:  # 70% chance of neighborhood move
+                # Select random subset of points for neighborhood move
+                num_selected = np.random.randint(2, 5)  # 2 to 4 points
+                point_indices = np.random.choice(len(current_points), size=num_selected, replace=False)
+
+                # Perform neighborhood move
+                new_points = neighborhood_move(current_points, point_indices, step_size=temperature * 0.1)
+            else:
+                # Single point move (traditional approach)
+                new_points = current_points.copy()
+                point_idx = np.random.randint(len(current_points))
+                delta = np.random.uniform(-temperature * 0.1, temperature * 0.1, 2)
+                new_points[point_idx] = current_points[point_idx] + delta
+
+                # Boundary handling with reflection
+                for dim in range(2):
+                    if new_points[point_idx, dim] < 0:
+                        new_points[point_idx, dim] = -new_points[point_idx, dim]
+                    elif new_points[point_idx, dim] > 1:
+                        new_points[point_idx, dim] = 2 - new_points[point_idx, dim]
+
+            # Evaluate new solution
+            new_ratio = evaluate_with_penalty(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_points = new_points
+                current_ratio = new_ratio
+
+                if new_ratio > best_ratio:
+                    best_points = new_points.copy()
+                    best_ratio = new_ratio
+                    stagnation_counter = 0
+            else:
+                if np.random.random() < np.exp((new_ratio - current_ratio) / temperature):
+                    current_points = new_points
+                    current_ratio = new_ratio
+                else:
+                    stagnation_counter += 1
+
+            # Adaptive cooling: If no improvement for a while, cool faster
+            if stagnation_counter > 100:
+                cooling_rate = min(cooling_rate * 0.99, 0.9999)
+                stagnation_counter = 0
+
+            # Cool down temperature
+            temperature *= cooling_rate
+            if temperature < min_temp:
+                temperature = min_temp
+
+            # Early stopping if we're not improving much
+            recent_improvements.append(1 if new_ratio > current_ratio else 0)
+            if len(recent_improvements) > improvement_threshold:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < 2 and iteration > 1000:
+                    break
+
+        return best_points, best_ratio
+=======
+    def adaptive_simulated_annealing(initial_points, max_iterations=5000, initial_temp=0.1):
+        """Enhanced simulated annealing with adaptive cooling and neighborhood moves."""
+        current_points = initial_points.copy()
+        current_ratio = evaluate_with_penalty(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        temperature = initial_temp
+        cooling_rate = 0.9995
+        min_temp = 1e-8
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_threshold = 50
+        stagnation_counter = 0
+
+        # Track improvement history for adaptive temperature control
+        improvement_history = []
+        history_window = 100
+
+        for iteration in range(max_iterations):
+            # Decide between single point or neighborhood move
+            if np.random.random() < 0.7:  # 70% chance of neighborhood move
+                # Select random subset of points for neighborhood move
+                num_selected = np.random.randint(2, 5)  # 2 to 4 points
+                point_indices = np.random.choice(len(current_points), size=num_selected, replace=False)
+
+                # Perform neighborhood move
+                new_points = neighborhood_move(current_points, point_indices, step_size=temperature * 0.1)
+            else:
+                # Single point move (traditional approach)
+                new_points = current_points.copy()
+                point_idx = np.random.randint(len(current_points))
+                delta = np.random.uniform(-temperature * 0.1, temperature * 0.1, 2)
+                new_points[point_idx] = current_points[point_idx] + delta
+
+                # Boundary handling with reflection
+                for dim in range(2):
+                    if new_points[point_idx, dim] < 0:
+                        new_points[point_idx, dim] = -new_points[point_idx, dim]
+                    elif new_points[point_idx, dim] > 1:
+                        new_points[point_idx, dim] = 2 - new_points[point_idx, dim]
+
+            # Evaluate new solution
+            new_ratio = evaluate_with_penalty(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_points = new_points
+                current_ratio = new_ratio
+
+                if new_ratio > best_ratio:
+                    best_points = new_points.copy()
+                    best_ratio = new_ratio
+                    stagnation_counter = 0
+            else:
+                if np.random.random() < np.exp((new_ratio - current_ratio) / temperature):
+                    current_points = new_points
+                    current_ratio = new_ratio
+                else:
+                    stagnation_counter += 1
+
+            # Adaptive cooling: If no improvement for a while, cool faster
+            if stagnation_counter > 100:
+                cooling_rate = min(cooling_rate * 0.99, 0.9999)
+                stagnation_counter = 0
+
+            # MORE ADVANCED ADAPTIVE TEMPERATURE CONTROL
+            # Track recent improvements for temperature adjustment
+            improvement_history.append(new_ratio - current_ratio)
+            if len(improvement_history) > history_window:
+                improvement_history.pop(0)
+
+            # Adjust cooling rate based on recent progress
+            if len(improvement_history) >= history_window // 2:
+                recent_avg_improvement = np.mean(improvement_history[-history_window//2:])
+                if recent_avg_improvement < 1e-6:  # Very slow improvement
+                    # Increase cooling rate to explore more aggressively
+                    cooling_rate = min(cooling_rate * 1.01, 0.99999)
+                elif recent_avg_improvement > 1e-4:  # Fast improvement
+                    # Decrease cooling rate to exploit well
+                    cooling_rate = max(cooling_rate * 0.99, 0.999)
+
+            # Cool down temperature
+            temperature *= cooling_rate
+            if temperature < min_temp:
+                temperature = min_temp
+
+            # Early stopping if we're not improving much
+            recent_improvements.append(1 if new_ratio > current_ratio else 0)
+            if len(recent_improvements) > improvement_threshold:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < 2 and iteration > 1000:
+                    break
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,205 @@
+<NAME>
+add_parallel_de_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding parallel differential evolution runs to explore the search space more effectively. This approach runs multiple DE instances with different random seeds and initialization strategies simultaneously, then picks the best solution among all runs. This increases the likelihood of finding better local optima and avoids getting stuck in poor regions of the search space, which is particularly important for complex optimization landscapes like hexagon packing.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_solution(self):
+        """Main optimization routine using differential evolution followed by local search"""
+        # Generate bounds for optimization
+        bounds = []
+
+        # Bounds for inner hexagon positions and rotations - tightened for better convergence
+        for _ in range(self.n_inner):
+            bounds.extend([(-6.0, 6.0), (-6.0, 6.0), (0, 360)])  # x, y, angle
+
+        # Bound for outer radius - tightened for better convergence
+        bounds.append((3.0, 8.0))  # Tightened range for outer radius
+
+        # Generate multiple initial configurations and pick the best one
+        initial_configs = self.get_optimal_initial_positions()
+        best_value = float('inf')
+        best_params = None
+
+        # Try several initial configurations
+        for config in initial_configs[:10]:  # Test first 10 configs
+            try:
+                # Use DE with fewer iterations for faster screening
+                result = differential_evolution(
+                    self.objective_function,
+                    bounds,
+                    seed=42,
+                    maxiter=50,  # Reduced iterations for screening
+                    popsize=15,
+                    tol=1e-5,
+                    mutation=(0.5, 1.0),
+                    recombination=0.7,
+                    disp=False
+                )
+
+                if result.success:
+                    # Evaluate the result
+                    temp_params = result.x
+                    # Check if this is better than what we have
+                    current_value = self.objective_function(temp_params)
+                    if current_value < best_value:
+                        best_value = current_value
+                        best_params = temp_params
+
+            except Exception as e:
+                continue
+
+        # If we found a good initial solution, refine it
+        if best_params is not None:
+            refined_params = self.optimize_with_local_search(best_params)
+            return refined_params
+
+        # Fallback to a single run with default parameters
+        try:
+            # Use differential evolution for global optimization with more iterations
+            result = differential_evolution(
+                self.objective_function,
+                bounds,
+                seed=42,
+                maxiter=100,
+                popsize=20,
+                tol=1e-6,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                disp=False
+            )
+
+            if result.success:
+                # Refine with local search
+                refined_params = self.optimize_with_local_search(result.x)
+                return refined_params
+
+        except Exception as e:
+            warnings.warn(f"Optimization failed: {str(e)}")
+
+        # Return default initial guess if optimization fails
+        initial_guess = []
+        centers = [
+            (0.0, 0.0),       # center
+            (-1.8, 0.0),      # left
+            (1.8, 0.0),       # right
+            (0.0, 1.8),       # top
+            (0.0, -1.8),      # bottom
+            (-1.3, 1.3),      # top-left
+            (1.3, 1.3),       # top-right
+            (-1.3, -1.3),     # bottom-left
+            (1.3, -1.3),      # bottom-right
+            (-2.2, 0.0),      # further left
+            (2.2, 0.0),       # further right
+        ]
+
+        for i, (cx, cy) in enumerate(centers):
+            initial_guess.extend([cx, cy, np.random.uniform(0, 360)])
+
+        initial_guess.append(4.0)  # Initial outer radius estimate
+        return initial_guess
+=======
+    def optimize_solution(self):
+        """Main optimization routine using parallel differential evolution followed by local search"""
+        # Generate bounds for optimization
+        bounds = []
+
+        # Bounds for inner hexagon positions and rotations - tightened for better convergence
+        for _ in range(self.n_inner):
+            bounds.extend([(-6.0, 6.0), (-6.0, 6.0), (0, 360)])  # x, y, angle
+
+        # Bound for outer radius - tightened for better convergence
+        bounds.append((3.0, 8.0))  # Tightened range for outer radius
+
+        # Run multiple differential evolution instances in parallel with different seeds
+        import multiprocessing as mp
+        from functools import partial
+
+        # Define a worker function for parallel execution
+        def run_de_instance(seed_val):
+            try:
+                # Use DE with more iterations for better exploration
+                result = differential_evolution(
+                    self.objective_function,
+                    bounds,
+                    seed=seed_val,
+                    maxiter=100,  # More iterations for better exploration
+                    popsize=20,   # Larger population
+                    tol=1e-6,     # Tighter tolerance
+                    mutation=(0.8, 1.0),  # Higher mutation rate for more exploration
+                    recombination=0.9,    # Higher recombination for more mixing
+                    disp=False
+                )
+                if result.success:
+                    return result.x
+            except Exception as e:
+                warnings.warn(f"DE instance with seed {seed_val} failed: {str(e)}")
+            return None
+
+        # Run multiple instances in parallel
+        seeds = [42, 123, 456, 789]  # Different random seeds
+        with mp.Pool(processes=min(len(seeds), mp.cpu_count())) as pool:
+            results = pool.map(run_de_instance, seeds)
+
+        # Filter out None results
+        valid_results = [r for r in results if r is not None]
+
+        # If we have valid results, refine the best one
+        if valid_results:
+            # Find the best result based on objective function value
+            best_result = min(valid_results, key=lambda x: self.objective_function(x))
+
+            # Refine with local search
+            refined_params = self.optimize_with_local_search(best_result)
+            return refined_params
+
+        # Fallback to a single run with default parameters if parallel runs fail
+        try:
+            # Use differential evolution for global optimization with more iterations
+            result = differential_evolution(
+                self.objective_function,
+                bounds,
+                seed=42,
+                maxiter=150,   # Increased iterations for more thorough search
+                popsize=25,    # Larger population
+                tol=1e-7,      # Tighter tolerance
+                mutation=(0.9, 1.0),  # Even higher mutation rate
+                recombination=0.95,   # Very high recombination
+                disp=False
+            )
+
+            if result.success:
+                # Refine with local search
+                refined_params = self.optimize_with_local_search(result.x)
+                return refined_params
+
+        except Exception as e:
+            warnings.warn(f"Optimization failed: {str(e)}")
+
+        # Return default initial guess if optimization fails
+        initial_guess = []
+        centers = [
+            (0.0, 0.0),       # center
+            (-1.8, 0.0),      # left
+            (1.8, 0.0),       # right
+            (0.0, 1.8),       # top
+            (0.0, -1.8),      # bottom
+            (-1.3, 1.3),      # top-left
+            (1.3, 1.3),       # top-right
+            (-1.3, -1.3),     # bottom-left
+            (1.3, -1.3),      # bottom-right
+            (-2.2, 0.0),      # further left
+            (2.2, 0.0),       # further right
+        ]
+
+        for i, (cx, cy) in enumerate(centers):
+            initial_guess.extend([cx, cy, np.random.uniform(0, 360)])
+
+        initial_guess.append(4.0)  # Initial outer radius estimate
+        return initial_guess
+>>>>>>> REPLACE
+</DIFF>

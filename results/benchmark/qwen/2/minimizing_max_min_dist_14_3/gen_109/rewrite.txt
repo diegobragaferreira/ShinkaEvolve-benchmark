@@ -1,0 +1,334 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.linalg import eigh
+import time
+from typing import Tuple, List, Optional
+import warnings
+from dataclasses import dataclass
+import math
+
+@dataclass
+class OptimizationConfig:
+    """Configuration parameters for the optimization process."""
+    n_points: int = 14
+    n_dimensions: int = 3
+    max_iterations: int = 100000
+    initial_temp: float = 1.0
+    final_temp: float = 1e-6
+    cooling_rate: float = 0.9995
+    log_interval: int = 1000
+    num_seeds: int = 8
+    local_refinement_iters: int = 500
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+    
+    Uses a spherical Voronoi-based evolution approach that combines geometric insights with 
+    adaptive optimization strategies to improve upon traditional simulated annealing methods.
+    
+    Returns:
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Create configuration
+    config = OptimizationConfig(
+        n_points=14,
+        n_dimensions=3,
+        max_iterations=100000,
+        initial_temp=1.0,
+        final_temp=1e-6,
+        cooling_rate=0.9995,
+        log_interval=1000,
+        num_seeds=8,
+        local_refinement_iters=500
+    )
+    
+    def fibonacci_sphere(n: int, seed_offset: int = 0) -> np.ndarray:
+        """Generate points on a unit sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3.0 - np.sqrt(5.0))  # golden angle in radians
+        
+        for i in range(n):
+            # Add seed offset to create variations
+            y = 1 - ((i + seed_offset) / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = phi * (i + seed_offset)  # golden angle increment with offset
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+    
+    def calculate_distances(points: np.ndarray) -> Tuple[float, float]:
+        """Calculate minimum and maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0, 0.0
+            
+        try:
+            distances = pdist(points)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            return d_min, d_max
+        except Exception:
+            return 0.0, 0.0
+    
+    def calculate_ratio(points: np.ndarray) -> float:
+        """Calculate the ratio of minimum to maximum distances."""
+        d_min, d_max = calculate_distances(points)
+        if d_max <= 0:
+            return 0.0
+        return d_min / d_max
+    
+    def project_to_sphere(points: np.ndarray) -> np.ndarray:
+        """Project points onto unit sphere."""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        safe_norms = np.where(norms == 0, 1.0, norms)
+        return points / safe_norms
+    
+    def compute_distance_gradient(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Analyze distance relationships to identify critical points and directions.
+        Returns gradient vectors and importance scores for each point.
+        """
+        n = len(points)
+        if n < 2:
+            return np.zeros((n, 3)), np.ones(n)
+        
+        try:
+            # Compute distance matrix
+            dist_matrix = squareform(pdist(points))
+            
+            # Compute eigenvalues and eigenvectors of distance matrix
+            # This captures the intrinsic geometric structure
+            eigenvals, eigenvecs = eigh(dist_matrix)
+            
+            # Use the smallest non-zero eigenvalues as indicators of critical directions
+            # The eigenvector corresponding to smallest positive eigenvalue shows 
+            # major structural modes
+            if len(eigenvals) > 1 and eigenvals[1] > 1e-10:
+                # Direction vector for most significant structural mode
+                struct_dir = eigenvecs[:, 1]
+            else:
+                struct_dir = np.ones(n) / n
+            
+            # Compute importance scores based on distance variance
+            # Points contributing to distance extremes are more important
+            dist_var = np.var(dist_matrix, axis=0)
+            importance_scores = dist_var / (np.max(dist_var) + 1e-10)
+            
+            return struct_dir, importance_scores
+            
+        except Exception:
+            # Fallback to simple distance-based approach
+            return np.ones((n, 3)), np.ones(n)
+    
+    def gradient_guided_perturbation(current_points: np.ndarray, temp: float) -> np.ndarray:
+        """
+        Generate neighbor using distance gradient information to guide perturbations.
+        """
+        neighbor_points = current_points.copy()
+        
+        # Compute structural information
+        struct_dir, importance_scores = compute_distance_gradient(current_points)
+        
+        # Select point based on importance scores (higher importance gets higher chance)
+        if np.sum(importance_scores) > 0:
+            weights = importance_scores / np.sum(importance_scores)
+            idx = np.random.choice(len(current_points), p=weights)
+        else:
+            idx = np.random.randint(0, len(current_points))
+        
+        # Determine perturbation magnitude based on temperature and importance
+        base_perturbation = temp * 0.08
+        importance_factor = importance_scores[idx] * 2.0  # Scale by importance
+        perturbation_mag = base_perturbation * (1.0 + importance_factor)
+        
+        # Add directional perturbation based on structural information
+        noise = np.random.normal(0, perturbation_mag, 3)
+        
+        # Apply some structural direction influence (if available)
+        if len(struct_dir) > idx:
+            struct_component = struct_dir[idx] * 0.3 * perturbation_mag
+            noise += np.array([struct_component, 0, 0])  # Simple x-direction influence
+        
+        neighbor_points[idx] += noise
+        
+        # Project back to sphere
+        neighbor_points = project_to_sphere(neighbor_points)
+        
+        return neighbor_points
+    
+    def adaptive_local_refinement(starting_points: np.ndarray, 
+                                max_iters: int = 500) -> Tuple[np.ndarray, float]:
+        """Apply local refinement with gradient-based enhancements."""
+        current_points = starting_points.copy()
+        current_ratio = calculate_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        # Enhanced local search with multiple strategies
+        for iter_num in range(max_iters):
+            # Strategy 1: Gradient-guided perturbation
+            candidate_points = gradient_guided_perturbation(current_points, temp=0.01)
+            candidate_ratio = calculate_ratio(candidate_points)
+            
+            # Always accept improvement
+            if candidate_ratio > current_ratio:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+                
+                if current_ratio > best_ratio:
+                    best_points = current_points.copy()
+                    best_ratio = current_ratio
+            
+            # Strategy 2: Multi-point simultaneous perturbation for exploration
+            if iter_num % 10 == 0 and iter_num > 0:
+                multi_candidate = current_points.copy()
+                num_perturbed = max(1, len(current_points) // 8)  # Perturb ~12.5%
+                indices = np.random.choice(len(current_points), num_perturbed, replace=False)
+                
+                for idx in indices:
+                    noise = np.random.normal(0, 0.02, 3)  # Smaller perturbation
+                    multi_candidate[idx] += noise
+                
+                multi_candidate = project_to_sphere(multi_candidate)
+                multi_ratio = calculate_ratio(multi_candidate)
+                
+                if multi_ratio > current_ratio:
+                    current_points = multi_candidate
+                    current_ratio = multi_ratio
+                    
+                    if current_ratio > best_ratio:
+                        best_points = current_points.copy()
+                        best_ratio = current_ratio
+        
+        return best_points, best_ratio
+    
+    def complex_hybrid_optimization() -> Tuple[np.ndarray, float]:
+        """Enhanced hybrid optimization with multiple layers of intelligence."""
+        # Try multiple Fibonacci seeds for diverse starting points
+        best_points_overall = None
+        best_ratio_overall = 0.0
+        
+        for seed_offset in range(config.num_seeds):
+            # Initialize with Fibonacci sphere configuration
+            current_points = fibonacci_sphere(config.n_points, seed_offset)
+            current_ratio = calculate_ratio(current_points)
+            
+            # Store best from this seed
+            seed_best_points = current_points.copy()
+            seed_best_ratio = current_ratio
+            
+            # Main optimization loop with adaptive temperature and complex cooling
+            temp = config.initial_temp
+            iteration = 0
+            stagnant_count = 0
+            last_improvement_iter = 0
+            improvement_history = []
+            
+            while iteration < config.max_iterations and temp > config.final_temp:
+                # Hybrid perturbation: sometimes use gradient guidance, sometimes random
+                if np.random.random() < 0.7:  # 70% gradient guided
+                    candidate_points = gradient_guided_perturbation(current_points, temp)
+                else:
+                    # Random perturbation for diversity
+                    candidate_points = current_points.copy()
+                    idx = np.random.randint(0, len(current_points))
+                    noise = np.random.normal(0, temp * 0.05, 3)
+                    candidate_points[idx] += noise
+                    candidate_points = project_to_sphere(candidate_points)
+                
+                candidate_ratio = calculate_ratio(candidate_points)
+                
+                # Metropolis acceptance criterion
+                delta_ratio = candidate_ratio - current_ratio
+                
+                # Avoid numerical issues
+                if temp < 1e-12:
+                    accept_prob = 1.0 if delta_ratio > 0 else 0.0
+                else:
+                    accept_prob = min(1.0, np.exp(delta_ratio / temp))
+                
+                if np.random.random() < accept_prob:
+                    current_points = candidate_points
+                    current_ratio = candidate_ratio
+                    
+                    if current_ratio > seed_best_ratio:
+                        seed_best_points = current_points.copy()
+                        seed_best_ratio = current_ratio
+                        last_improvement_iter = iteration
+                        improvement_history.append(iteration)
+                    
+                    stagnant_count = 0
+                else:
+                    stagnant_count += 1
+                
+                # Complex adaptive cooling schedule
+                if stagnant_count > 300:
+                    # More aggressive cooling when stuck
+                    temp = max(temp * 0.92, config.final_temp)
+                    stagnant_count = 0
+                elif stagnant_count > 100:
+                    # Moderate cooling
+                    temp *= 0.99
+                else:
+                    # Normal cooling
+                    temp *= config.cooling_rate
+                
+                iteration += 1
+                
+                # Periodic local refinement to escape local minima
+                if iteration % 1500 == 0 and iteration > 0:
+                    refined_points, refined_ratio = adaptive_local_refinement(
+                        seed_best_points, config.local_refinement_iters
+                    )
+                    
+                    if refined_ratio > seed_best_ratio:
+                        seed_best_points = refined_points
+                        seed_best_ratio = refined_ratio
+            
+            # Update overall best
+            if seed_best_ratio > best_ratio_overall:
+                best_ratio_overall = seed_best_ratio
+                best_points_overall = seed_best_points.copy()
+        
+        # Final enhanced local refinement
+        if best_points_overall is not None:
+            final_points, final_ratio = adaptive_local_refinement(
+                best_points_overall, config.local_refinement_iters * 2
+            )
+            return final_points, final_ratio
+        
+        return best_points_overall, best_ratio_overall
+    
+    try:
+        # Run enhanced hybrid optimization
+        optimized_points, best_ratio = complex_hybrid_optimization()
+        
+        # Final validation
+        if optimized_points is not None:
+            final_min, final_max = calculate_distances(optimized_points)
+            if final_max <= 0:
+                warnings.warn("Final validation failed, returning Fibonacci sphere initialization")
+                optimized_points = fibonacci_sphere(14)
+        else:
+            # Fallback to Fibonacci initialization if optimization failed
+            warnings.warn("Optimization returned None, using Fibonacci sphere initialization")
+            optimized_points = fibonacci_sphere(14)
+            
+        return optimized_points
+    
+    except Exception as e:
+        # Fallback to basic initialization if anything fails
+        warnings.warn(f"Optimization failed with error: {str(e)}, returning Fibonacci sphere initialization")
+        return fibonacci_sphere(14)
+
+# EVOLVE-BLOCK-END

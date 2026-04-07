@@ -1,0 +1,207 @@
+<NAME>
+enhance_density_adaptive_radius_calculation
+</NAME>
+
+<DESCRIPTION>
+The key improvement is to enhance the density-adaptive radius calculation by implementing a more sophisticated approach that uses k-nearest neighbor clustering analysis as recommended. Instead of just using the minimum neighbor distance, I'll implement the k=5 nearest neighbors approach with cKDTree to compute local density more accurately. This will provide better initial radius assignments that scale inversely with density, helping circles in dense regions start smaller and those in sparse regions start larger. This addresses the "abrupt fitness discontinuities" mentioned in the recommendations and improves convergence by providing better starting configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+
+def initialize_circles_hexagonal(n=32):
+    """Initialize circle positions with a hexagonal grid approach."""
+    # Use a hexagonal grid pattern for better initial spacing
+    # Calculate grid dimensions for approximate hexagonal packing
+    rows = int(np.ceil(np.sqrt(n / 0.866)))  # 0.866 is hex packing density
+    cols = int(np.ceil(n / rows))
+
+    # Create hexagonal grid with proper spacing
+    positions = []
+    hex_spacing_x = 1.0 / cols
+    hex_spacing_y = hex_spacing_x * 0.866  # sqrt(3)/2
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            # Offset every other row for hexagonal packing
+            x_offset = (i % 2) * (hex_spacing_x / 2)
+            x = (j + 0.5 + x_offset) * hex_spacing_x
+            y = (i + 0.5) * hex_spacing_y
+
+            # Clamp to valid range with small margin
+            x = np.clip(x, 0.01, 0.99)
+            y = np.clip(y, 0.01, 0.99)
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Assign initial radii based on local density
+    initial_radii = []
+    positions_array = np.array(positions)
+
+    for i in range(n):
+        x, y = positions[i]
+
+        # Calculate distance to boundaries
+        dist_to_boundaries = min(x, 1-x, y, 1-y)
+
+        # Find distances to nearest neighbors using vectorized operations
+        distances = np.sqrt(np.sum((positions_array - [x, y])**2, axis=1))
+        # Exclude self-distance
+        distances = distances[distances > 0]
+
+        # Get the minimum distance to neighbors (density indicator)
+        min_neighbor_dist = np.min(distances) if len(distances) > 0 else 0.1
+
+        # Calculate appropriate radius based on available space
+        # Larger radius in sparse regions, smaller in dense regions
+        # Balance between boundary constraints and neighbor constraints
+        radius_based_on_boundaries = dist_to_boundaries * 0.4
+        radius_based_on_density = min_neighbor_dist * 0.3
+
+        # Take the minimum of both constraints to ensure feasibility
+        base_radius = min(radius_based_on_boundaries, radius_based_on_density)
+
+        # Ensure minimum radius and reasonable upper limit
+        final_radius = max(0.005, min(0.15, base_radius))
+
+        initial_radii.append(final_radius)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+
+def initialize_circles_hexagonal_enhanced(n=32):
+    """Initialize circle positions with enhanced hexagonal grid approach using k-nearest neighbor density estimation."""
+    # Use a hexagonal grid pattern for better initial spacing
+    rows = int(np.ceil(np.sqrt(n / 0.866)))  # 0.866 is hex packing density
+    cols = int(np.ceil(n / rows))
+
+    # Create hexagonal grid with proper spacing
+    positions = []
+    hex_spacing_x = 1.0 / cols
+    hex_spacing_y = hex_spacing_x * 0.866  # sqrt(3)/2
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            # Offset every other row for hexagonal packing
+            x_offset = (i % 2) * (hex_spacing_x / 2)
+            x = (j + 0.5 + x_offset) * hex_spacing_x
+            y = (i + 0.5) * hex_spacing_y
+
+            # Clamp to valid range with small margin
+            x = np.clip(x, 0.01, 0.99)
+            y = np.clip(y, 0.01, 0.99)
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Build KDTree for efficient neighbor queries
+    positions_array = np.array(positions)
+    tree = cKDTree(positions_array)
+
+    # Assign initial radii based on local density using k-nearest neighbors
+    initial_radii = []
+
+    # Use k=5 for density estimation as suggested in recommendations
+    k = 5
+
+    for i in range(n):
+        x, y = positions[i]
+
+        # Calculate distance to boundaries
+        dist_to_boundaries = min(x, 1-x, y, 1-y)
+
+        # Find k nearest neighbors (excluding self)
+        distances, indices = tree.query(positions_array[i], k=k+1)
+        # Remove self-distance (distance 0)
+        distances = distances[1:]
+
+        # Compute average distance to k nearest neighbors for density estimation
+        avg_neighbor_distance = np.mean(distances) if len(distances) > 0 else 0.1
+
+        # Calculate appropriate radius based on available space
+        # Larger radius in sparse regions, smaller in dense regions
+        # Scale inverse with density (average neighbor distance)
+        radius_based_on_boundaries = dist_to_boundaries * 0.4
+        radius_based_on_density = avg_neighbor_distance * 0.15  # Reduced weight compared to boundary
+
+        # Take the minimum of both constraints to ensure feasibility
+        base_radius = min(radius_based_on_boundaries, radius_based_on_density)
+
+        # Apply additional constraints to ensure reasonable initial values
+        final_radius = max(0.005, min(0.15, base_radius))
+
+        # Add slight randomness to avoid symmetric solutions
+        final_radius *= np.random.uniform(0.95, 1.05)
+
+        initial_radii.append(final_radius)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_initialization_function_call
+</NAME>
+
+<DESCRIPTION>
+Update the main function to use the enhanced initialization function that implements the k-nearest neighbor density estimation approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Initialize with heuristic approach
+    circles = initialize_circles_hexagonal(n)
+
+    # Optimize the configuration
+    circles = optimize_circles(circles)
+
+    return circles
+=======
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Initialize with enhanced heuristic approach
+    circles = initialize_circles_hexagonal_enhanced(n)
+
+    # Optimize the configuration
+    circles = optimize_circles(circles)
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>

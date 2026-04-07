@@ -1,0 +1,346 @@
+<NAME>
+add_adaptive_mutation_strength
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive mutation strength that adjusts based on optimization stage and convergence progress. This will allow broader exploration in early stages when configurations are less defined, then transition to precise optimization as the algorithm approaches optimal solutions, directly supporting the program's four-stage workflow that has consistently yielded high-performance results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SymmetryAwareMutation:
+    """Custom mutation operator that respects hexagonal symmetries"""
+
+    @staticmethod
+    def mutate_symmetrically(individual, mutation_strength=0.5, stage=1, temperature=1.0):
+        """
+        Apply mutation that maintains certain symmetry properties
+        stage: 1=initial exploration, 2=refinement, 3=final polishing
+        temperature: controls randomness in early stages
+        """
+        # Determine mutation strength based on stage and temperature
+        if stage == 1:
+            current_strength = mutation_strength * 1.5 * temperature  # More aggressive for exploration
+        elif stage == 2:
+            current_strength = mutation_strength * 0.8 * temperature  # Moderate for refinement
+        else:  # stage == 3
+            current_strength = mutation_strength * 0.3 * temperature  # Conservative for polishing
+
+        # Apply mutations to positions (first 24 values of 36 total)
+        mutated = individual.copy()
+        for i in range(12):  # 12 hexagons
+            # Mutate positions (x, y) with some symmetry consideration
+            for j in range(2):  # x and y coordinates
+                # Apply Gaussian mutation with adaptive strength
+                mutated[i*3 + j] += np.random.normal(0, current_strength)
+
+            # Mutate rotation
+            mutated[i*3 + 2] += np.random.normal(0, current_strength * 0.5)
+            # Keep rotation within [0, 360) range
+            mutated[i*3 + 2] = mutated[i*3 + 2] % 360
+
+        return mutated
+=======
+class SymmetryAwareMutation:
+    """Custom mutation operator that respects hexagonal symmetries"""
+
+    @staticmethod
+    def mutate_symmetrically(individual, mutation_strength=0.5, stage=1, temperature=1.0, convergence_progress=0.0):
+        """
+        Apply mutation that maintains certain symmetry properties
+        stage: 1=initial exploration, 2=refinement, 3=final polishing
+        temperature: controls randomness in early stages
+        convergence_progress: 0.0 to 1.0 indicating how much optimization has progressed
+        """
+        # Determine mutation strength based on stage, temperature, and convergence progress
+        if stage == 1:
+            # More aggressive for initial exploration with adaptive strength based on convergence
+            current_strength = mutation_strength * 1.5 * temperature * (1.0 - convergence_progress * 0.5)
+        elif stage == 2:
+            # Moderate for refinement with convergence-based adjustment
+            current_strength = mutation_strength * 0.8 * temperature * (1.0 - convergence_progress * 0.3)
+        else:  # stage == 3
+            # Conservative for final polishing with strong convergence influence
+            current_strength = mutation_strength * 0.3 * temperature * (1.0 - convergence_progress * 0.8)
+
+        # Apply mutations to positions (first 24 values of 36 total)
+        mutated = individual.copy()
+        for i in range(12):  # 12 hexagons
+            # Mutate positions (x, y) with some symmetry consideration
+            for j in range(2):  # x and y coordinates
+                # Apply Gaussian mutation with adaptive strength
+                mutated[i*3 + j] += np.random.normal(0, current_strength)
+
+            # Mutate rotation
+            mutated[i*3 + 2] += np.random.normal(0, current_strength * 0.5)
+            # Keep rotation within [0, 360) range
+            mutated[i*3 + 2] = mutated[i*3 + 2] % 360
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_simulated_annealing
+</NAME>
+
+<DESCRIPTION>
+Improving the simulated annealing implementation by adding convergence tracking and more sophisticated temperature scheduling. The new approach will track the best solution found so far and implement a more adaptive cooling schedule that responds to the optimization progress, which will help escape local minima more effectively and converge to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def simulate_annealing(initial_config, max_iterations=500, initial_temp=1.0, cooling_rate=0.95):
+    """Apply simulated annealing to escape local optima"""
+    current_config = initial_config.copy()
+    current_fitness = 1.0 / compute_outer_hexagon_radius(current_config) if compute_outer_hexagon_radius(current_config) > 0 else 0.0
+    best_config = current_config.copy()
+    best_fitness = current_fitness
+    temperature = initial_temp
+
+    for iteration in range(max_iterations):
+        # Generate neighbor solution with temperature-based mutation
+        mutated_config = SymmetryAwareMutation.mutate_symmetrically(
+            current_config.flatten(),
+            mutation_strength=0.3,
+            stage=1,
+            temperature=temperature
+        ).reshape(12, 3)
+
+        # Evaluate neighbor
+        valid, _ = validate_solution(mutated_config)
+        if valid:
+            mutated_fitness = 1.0 / compute_outer_hexagon_radius(mutated_config) if compute_outer_hexagon_radius(mutated_config) > 0 else 0.0
+        else:
+            mutated_fitness = 0  # Invalid solutions get low fitness
+
+        # Accept or reject based on Metropolis criterion
+        if mutated_fitness > current_fitness or random.random() < math.exp((mutated_fitness - current_fitness) / temperature):
+            current_config = mutated_config.copy()
+            current_fitness = mutated_fitness
+
+            if mutated_fitness > best_fitness:
+                best_config = mutated_config.copy()
+                best_fitness = mutated_fitness
+
+        # Cool down
+        temperature *= cooling_rate
+
+        # Early stopping if we've reached a good solution
+        if best_fitness >= TARGET_RATIO:
+            break
+
+    return best_config
+=======
+def simulate_annealing(initial_config, max_iterations=500, initial_temp=1.0, cooling_rate=0.95):
+    """Apply simulated annealing to escape local optima"""
+    current_config = initial_config.copy()
+    current_fitness = 1.0 / compute_outer_hexagon_radius(current_config) if compute_outer_hexagon_radius(current_config) > 0 else 0.0
+    best_config = current_config.copy()
+    best_fitness = current_fitness
+    temperature = initial_temp
+
+    # Track convergence progress
+    stagnation_count = 0
+    stagnation_threshold = 20
+    prev_best_fitness = best_fitness
+
+    for iteration in range(max_iterations):
+        # Generate neighbor solution with temperature-based mutation
+        mutated_config = SymmetryAwareMutation.mutate_symmetrically(
+            current_config.flatten(),
+            mutation_strength=0.3,
+            stage=1,
+            temperature=temperature,
+            convergence_progress=iteration / max_iterations
+        ).reshape(12, 3)
+
+        # Evaluate neighbor
+        valid, _ = validate_solution(mutated_config)
+        if valid:
+            mutated_fitness = 1.0 / compute_outer_hexagon_radius(mutated_config) if compute_outer_hexagon_radius(mutated_config) > 0 else 0.0
+        else:
+            mutated_fitness = 0  # Invalid solutions get low fitness
+
+        # Accept or reject based on Metropolis criterion
+        if mutated_fitness > current_fitness or random.random() < math.exp((mutated_fitness - current_fitness) / temperature):
+            current_config = mutated_config.copy()
+            current_fitness = mutated_fitness
+
+            if mutated_fitness > best_fitness:
+                best_config = mutated_config.copy()
+                best_fitness = mutated_fitness
+                stagnation_count = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_count += 1
+        else:
+            stagnation_count += 1
+
+        # Adaptive cooling based on convergence
+        if stagnation_count > stagnation_threshold:
+            # Increase cooling rate when stagnating to speed up convergence
+            cooling_rate = min(cooling_rate * 1.05, 0.99)
+            stagnation_count = 0  # Reset stagnation counter
+
+        # Cool down
+        temperature *= cooling_rate
+
+        # Further adaptive cooling when we're close to target
+        if best_fitness >= TARGET_RATIO * 0.95:
+            temperature *= 0.98  # Aggressive cooling near target
+
+        # Early stopping if we've reached a good solution
+        if best_fitness >= TARGET_RATIO:
+            break
+
+        # Reduce temperature more aggressively after significant improvements
+        if best_fitness > prev_best_fitness * 1.01:  # If improvement is significant
+            temperature *= 0.92
+            prev_best_fitness = best_fitness
+
+    return best_config
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_local_search
+</NAME>
+
+<DESCRIPTION>
+Enhancing the local search optimization by implementing a multi-level refinement approach. This involves using a more sophisticated optimization pipeline where we first perform a coarse-grained optimization to find a good region, then progressively refine with finer-grained optimization. This approach helps balance exploration and exploitation more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_local_search(initial_config, max_iter=100, temperature=1.0, stage=1):
+    """Refine configuration using local search with symmetry awareness"""
+    # Flatten the initial configuration
+    params = initial_config.flatten()
+
+    # Objective function to minimize
+    def objective(x):
+        # Reshape back to hexagon configuration
+        hex_config = x.reshape(12, 3)
+
+        # Validate and penalize invalid solutions
+        valid, msg = validate_solution(hex_config)
+        if not valid:
+            return 1e10  # High penalty for invalid solutions
+
+        # Minimize negative of 1/outer_radius (i.e., maximize 1/outer_radius)
+        outer_radius = compute_outer_hexagon_radius(hex_config)
+        if outer_radius <= 0:
+            return 1e10
+        return -1.0 / outer_radius
+
+    # Local optimization with bounds
+    bounds = [(-10.0, 10.0)] * 36  # 12 hexagons * 3 params each
+
+    try:
+        result = minimize(
+            objective,
+            params,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': max_iter, 'ftol': 1e-8}
+        )
+
+        if result.success:
+            optimized_config = result.x.reshape(12, 3)
+            return optimized_config
+    except Exception as e:
+        # In case of optimization failure, return original config
+        pass
+
+    return initial_config
+=======
+def optimize_with_local_search(initial_config, max_iter=100, temperature=1.0, stage=1):
+    """Refine configuration using local search with symmetry awareness and multi-level approach"""
+    # Flatten the initial configuration
+    params = initial_config.flatten()
+
+    # Objective function to minimize
+    def objective(x):
+        # Reshape back to hexagon configuration
+        hex_config = x.reshape(12, 3)
+
+        # Validate and penalize invalid solutions
+        valid, msg = validate_solution(hex_config)
+        if not valid:
+            return 1e10  # High penalty for invalid solutions
+
+        # Minimize negative of 1/outer_radius (i.e., maximize 1/outer_radius)
+        outer_radius = compute_outer_hexagon_radius(hex_config)
+        if outer_radius <= 0:
+            return 1e10
+        return -1.0 / outer_radius
+
+    # Multi-level optimization approach
+    best_result = None
+    best_fitness = -float('inf')
+
+    # Level 1: Coarse optimization
+    try:
+        result = minimize(
+            objective,
+            params,
+            method='L-BFGS-B',
+            bounds=[(-10.0, 10.0)] * 36,
+            options={'maxiter': max_iter // 3, 'ftol': 1e-6}
+        )
+        if result.success:
+            level1_config = result.x.reshape(12, 3)
+            level1_fitness = 1.0 / compute_outer_hexagon_radius(level1_config) if compute_outer_hexagon_radius(level1_config) > 0 else 0.0
+            if level1_fitness > best_fitness:
+                best_fitness = level1_fitness
+                best_result = level1_config
+    except Exception as e:
+        pass
+
+    # Level 2: Fine optimization
+    if best_result is not None:
+        try:
+            result = minimize(
+                objective,
+                best_result.flatten(),
+                method='L-BFGS-B',
+                bounds=[(-10.0, 10.0)] * 36,
+                options={'maxiter': max_iter // 2, 'ftol': 1e-8}
+            )
+            if result.success:
+                level2_config = result.x.reshape(12, 3)
+                level2_fitness = 1.0 / compute_outer_hexagon_radius(level2_config) if compute_outer_hexagon_radius(level2_config) > 0 else 0.0
+                if level2_fitness > best_fitness:
+                    best_fitness = level2_fitness
+                    best_result = level2_config
+        except Exception as e:
+            pass
+
+    # Level 3: Very fine optimization
+    if best_result is not None:
+        try:
+            result = minimize(
+                objective,
+                best_result.flatten(),
+                method='L-BFGS-B',
+                bounds=[(-10.0, 10.0)] * 36,
+                options={'maxiter': max_iter // 2, 'ftol': 1e-10}
+            )
+            if result.success:
+                level3_config = result.x.reshape(12, 3)
+                level3_fitness = 1.0 / compute_outer_hexagon_radius(level3_config) if compute_outer_hexagon_radius(level3_config) > 0 else 0.0
+                if level3_fitness > best_fitness:
+                    best_fitness = level3_fitness
+                    best_result = level3_config
+        except Exception as e:
+            pass
+
+    # Return best result found, fallback to original if nothing worked
+    if best_result is not None:
+        return best_result
+    else:
+        return initial_config
+>>>>>>> REPLACE
+</DIFF>

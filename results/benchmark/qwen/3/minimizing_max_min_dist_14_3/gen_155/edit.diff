@@ -1,0 +1,377 @@
+--- a/original.py
++++ b/original.py
+@@ -1,349 +1,372 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial import Voronoi, SphericalVoronoi
+ from scipy.optimize import minimize, differential_evolution
+ from scipy.spatial.distance import pdist
+ import time
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+ 
+     """
+ 
+     def compute_min_max_ratio(points):
+         """Compute the min/max distance ratio for given points."""
+         if len(points) < 2:
+             return 0.0
+ 
+         # Compute pairwise distances efficiently
+         distances = pdist(points)
+ 
+         # Get min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         # Avoid division by zero
+         if d_max == 0:
+             return 0.0
+ 
+         return d_min / d_max
+ 
+     def fibonacci_sphere(n):
+         """Generate points on sphere using Fibonacci spiral (good initial distribution)"""
+         points = []
+         golden_angle = np.pi * (3 - np.sqrt(5))
+ 
+         for i in range(n):
+             y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = golden_angle * i  # Golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         return np.array(points)
+ 
+     def adaptive_geometric_optimization(initial_points):
+         """Enhanced geometric optimization with multiple stages and adaptive strategies"""
+         points = initial_points.copy()
+ 
+         # Convert to unit sphere for better numerical properties
+         norms = np.linalg.norm(points, axis=1, keepdims=True)
+         points = points / np.maximum(norms, 1e-10)  # Normalize but avoid division by zero
+ 
+         # Stage 1: Differential Evolution for global exploration
+         bounds = [(-1, 1)] * (14 * 3)
+ 
+         def de_objective(x_flat):
+             points = x_flat.reshape(-1, 3)
+             # Ensure points remain on unit sphere
+             norms = np.linalg.norm(points, axis=1, keepdims=True)
+             normalized_points = points / np.maximum(norms, 1e-10)
+ 
+             distances = pdist(normalized_points)
+             if len(distances) == 0:
+                 return float('inf')
+ 
+             min_dist = np.min(distances)
+             max_dist = np.max(distances)
+ 
+             if max_dist == 0:
+                 return float('inf')
+ 
+             # Use ratio with penalty for extreme cases
+             ratio = min_dist / max_dist
+             # Penalty for very small minimum distances to avoid degenerate cases
+             if min_dist < 1e-6:
+                 return -(ratio - 1000.0)  # Large penalty
+             return -ratio  # Negative because we minimize
+ 
+         try:
+             # Enhanced differential evolution with adaptive population sizing
+             def adaptive_de_objective(x_flat):
+                 return de_objective(x_flat)
+ 
+             # Track convergence for adaptive population sizing
+             history = []
+             stagnation_count = 0
+             max_stagnation = 10
+             popsize = 25  # Base population size
+             min_popsize = 10
+             max_popsize = 50
+ 
+             # Monitor improvement rate for adaptive adjustments
+             improvement_threshold = 1e-6
+             last_best = float('-inf')
+ 
+             # Run multiple rounds with adaptive population sizing
+             for iteration in range(5):
+                 # Adjust population size based on convergence behavior
+                 current_popsize = popsize
+ 
+                 # If stagnation detected, increase population size for more exploration
+                 if stagnation_count >= max_stagnation and popsize < max_popsize:
+                     current_popsize = min(popsize + 5, max_popsize)
+                     stagnation_count = 0  # Reset stagnation counter
+                 # If improvement is too slow, decrease population size to speed up
+                 elif iteration > 2 and stagnation_count < 3 and popsize > min_popsize:
+                     current_popsize = max(popsize - 3, min_popsize)
+ 
+                 # Run differential evolution with current settings
+                 de_result = differential_evolution(
+                     adaptive_de_objective,
+                     bounds,
+                     maxiter=15,  # More iterations per round
+                     popsize=current_popsize,
+                     seed=42 + iteration,
+                     disp=False,
+                     polish=True
+                 )
+ 
+                 if de_result.success:
+                     temp_points = de_result.x.reshape(-1, 3)
+                     # Project back to unit sphere
+                     norms = np.linalg.norm(temp_points, axis=1, keepdims=True)
+                     temp_points = temp_points / np.maximum(norms, 1e-10)
+                     current_ratio = compute_min_max_ratio(temp_points)
+                     history.append(current_ratio)
+ 
+                     # Check for stagnation - monitor relative improvement
+                     if len(history) > 1:
+                         improvement = current_ratio - last_best
+                         if improvement < improvement_threshold:
+                             stagnation_count += 1
+                         else:
+                             stagnation_count = 0
+                             last_best = current_ratio
+ 
+                         # Adapt population size based on stagnation
+                         if stagnation_count >= max_stagnation and popsize < max_popsize:
+                             popsize = min(popsize + 5, max_popsize)
+                             stagnation_count = 0
+                         elif stagnation_count >= 5 and popsize > min_popsize:
+                             popsize = max(popsize - 3, min_popsize)
+                     else:
+                         last_best = current_ratio
+                         history.append(current_ratio)
+ 
+                     # Update points with best result so far
+                     if len(history) > 0 and current_ratio > compute_min_max_ratio(points):
+                         points = temp_points.copy()
+                 else:
+                     # If optimization fails, continue with current points
+                     pass
+ 
+         except Exception as e:
+             pass
+ 
+         # Stage 2: Local optimization with adaptive refinement
+         bounds = [(-1, 1)] * (14 * 3)
+ 
+         def local_obj_func(x_flat):
+             points = x_flat.reshape(-1, 3)
+             # Ensure points remain on unit sphere
+             norms = np.linalg.norm(points, axis=1, keepdims=True)
+             normalized_points = points / np.maximum(norms, 1e-10)
+ 
+             distances = pdist(normalized_points)
+             if len(distances) == 0:
+                 return float('inf')
+ 
+             min_dist = np.min(distances)
+             max_dist = np.max(distances)
+ 
+             if max_dist == 0:
+                 return float('inf')
+ 
+             ratio = min_dist / max_dist
+             # Penalty for very small minimum distances
+             if min_dist < 1e-6:
+                 return -(ratio - 1000.0)
+             return -ratio
+ 
+         try:
+-            # Use L-BFGS-B for fine-tuning
++            # Use L-BFGS-B for fine-tuning with adaptive tolerances
+             x0 = points.flatten()
++
++            # Start with looser tolerances for faster initial convergence
++            ftol = 1e-6
++            gtol = 1e-6
++
++            # Try with initial loose tolerances
+             result = minimize(local_obj_func, x0, method='L-BFGS-B', bounds=bounds,
+-                            options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9, 'disp': False})
++                            options={'maxiter': 100, 'ftol': ftol, 'gtol': gtol, 'disp': False})
+ 
+             if result.success:
+                 points = result.x.reshape(-1, 3)
+                 # Project back to unit sphere
+                 norms = np.linalg.norm(points, axis=1, keepdims=True)
+                 points = points / np.maximum(norms, 1e-10)
++
++                # If we got a good improvement, try tighter tolerances for final precision
++                final_ratio = compute_min_max_ratio(points)
++                if final_ratio > 0.4:  # Only refine if we're getting reasonable results
++                    # Try with tighter tolerances
++                    ftol_tight = 1e-9
++                    gtol_tight = 1e-9
++                    result_tight = minimize(local_obj_func, x0, method='L-BFGS-B', bounds=bounds,
++                                          options={'maxiter': 100, 'ftol': ftol_tight, 'gtol': gtol_tight, 'disp': False})
++                    if result_tight.success:
++                        points_tight = result_tight.x.reshape(-1, 3)
++                        norms_tight = np.linalg.norm(points_tight, axis=1, keepdims=True)
++                        points_tight = points_tight / np.maximum(norms_tight, 1e-10)
++                        tight_ratio = compute_min_max_ratio(points_tight)
++                        if tight_ratio > final_ratio:
++                            points = points_tight.copy()
++
+         except:
+             pass
+ 
+         # Stage 3: Adaptive hill climbing with dynamic step sizes
+         # Track convergence to adapt step sizes
+         last_ratio = compute_min_max_ratio(points)
+         patience = 0
+         max_patience = 10
+         step_size = 0.01
+ 
+         for iteration in range(200):
+             current_ratio = compute_min_max_ratio(points)
+             best_points = points.copy()
+             best_ratio = current_ratio
+ 
+             # Adaptive step size - decrease if no progress
+             if current_ratio > last_ratio:
+                 patience = 0
+                 step_size = min(0.01, step_size * 1.1)  # Increase step size if improving
+             else:
+                 patience += 1
+                 if patience > max_patience:
+                     step_size = max(0.0001, step_size * 0.8)  # Decrease step size if stuck
+ 
+             last_ratio = current_ratio
+ 
+             # Try perturbations with adaptive step sizes
+             for i in range(14):
+                 for dim in range(3):
+                     # Try moving in positive direction
+                     test_points = points.copy()
+                     test_points[i, dim] += step_size
+ 
+                     # Project back to unit sphere
+                     norm = np.linalg.norm(test_points[i])
+                     if norm > 0:
+                         test_points[i] = test_points[i] / norm
+ 
+                     test_ratio = compute_min_max_ratio(test_points)
+ 
+                     if test_ratio > best_ratio:
+                         best_ratio = test_ratio
+                         best_points = test_points.copy()
+ 
+                     # Try moving in negative direction
+                     test_points = points.copy()
+                     test_points[i, dim] -= step_size
+ 
+                     # Project back to unit sphere
+                     norm = np.linalg.norm(test_points[i])
+                     if norm > 0:
+                         test_points[i] = test_points[i] / norm
+ 
+                     test_ratio = compute_min_max_ratio(test_points)
+ 
+                     if test_ratio > best_ratio:
+                         best_ratio = test_ratio
+                         best_points = test_points.copy()
+ 
+             # Check for early stopping
+             if best_ratio <= current_ratio:
+                 # No significant improvement, potentially stop
+                 if patience > max_patience:
+                     break
+             else:
+                 points = best_points
+ 
+         # Final normalization to ensure points are on unit sphere
+         norms = np.linalg.norm(points, axis=1, keepdims=True)
+         points = points / np.maximum(norms, 1e-10)
+ 
+         return points
+ 
+     def generate_diverse_initial_points():
+         """Generate diverse initial point configurations"""
+         initial_points_list = []
+ 
+         # Strategy 1: Fibonacci sphere
+         fib_points = fibonacci_sphere(14)
+         np.random.seed(42)
+         perturbation = np.random.normal(0, 0.05, fib_points.shape)
+         points1 = fib_points + perturbation
+         norms = np.linalg.norm(points1, axis=1, keepdims=True)
+         points1 = points1 / np.maximum(norms, 1e-10) * 0.99
+         initial_points_list.append(points1)
+ 
+         # Strategy 2: Random points on sphere with structured distribution
+         points2 = np.random.randn(14, 3)
+         norms = np.linalg.norm(points2, axis=1, keepdims=True)
+         points2 = points2 / np.maximum(norms, 1e-10) * 0.99
+         initial_points_list.append(points2)
+ 
+         # Strategy 3: Axis-based distribution
+         points3 = np.zeros((14, 3))
+         for i in range(min(14, 6)):
+             # Distribute along coordinate axes
+             axis = i % 3
+             sign = 1 if i < 3 else -1
+             points3[i] = np.eye(3)[axis] * sign * 0.9
+         points3[6:] = np.random.randn(8, 3)
+         norms = np.linalg.norm(points3, axis=1, keepdims=True)
+         points3 = points3 / np.maximum(norms, 1e-10) * 0.99
+         initial_points_list.append(points3)
+ 
+         # Strategy 4: Perturbed Fibonacci with larger variance
+         fib_points = fibonacci_sphere(14)
+         np.random.seed(43)
+         perturbation = np.random.normal(0, 0.1, fib_points.shape)
+         points4 = fib_points + perturbation
+         norms = np.linalg.norm(points4, axis=1, keepdims=True)
+         points4 = points4 / np.maximum(norms, 1e-10) * 0.99
+         initial_points_list.append(points4)
+ 
+         return initial_points_list
+ 
+     # Multiple restart strategy with enhanced initialization and optimization
+     best_solution = None
+     best_ratio = 0.0
+ 
+     # Generate diverse initial configurations
+     initial_configs = generate_diverse_initial_points()
+ 
+     # Try each initial configuration
+     for idx, initial_points in enumerate(initial_configs):
+         # Enhanced optimization with adaptive strategies
+         optimized_points = adaptive_geometric_optimization(initial_points)
+         ratio = compute_min_max_ratio(optimized_points)
+ 
+         if ratio > best_ratio:
+             best_ratio = ratio
+             best_solution = optimized_points.copy()
+ 
+     # Additional fine-tuning of the best solution
+     if best_solution is not None:
+         final_points = adaptive_geometric_optimization(best_solution)
+         ratio = compute_min_max_ratio(final_points)
+         if ratio > best_ratio:
+             best_ratio = ratio
+             best_solution = final_points.copy()
+ 
+     # Fallback to best initial configuration if nothing worked
+     if best_solution is None:
+         initial_configs = generate_diverse_initial_points()
+         best_initial = max(initial_configs, key=lambda p: compute_min_max_ratio(p))
+         best_solution = best_initial.copy()
+ 
+     return best_solution
+ 
+ # EVOLVE-BLOCK-END

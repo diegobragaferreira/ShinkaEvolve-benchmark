@@ -1,0 +1,219 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, use 2:1 ratio for better packing efficiency
+    rect_width = 1.3333333333333333  # 2/3
+    rect_height = 0.6666666666666666  # 1/3
+
+    # Number of circles
+    n = 21
+    
+    # Analytical hexagonal packing approach
+    def generate_hexagonal_grid():
+        # Determine optimal grid parameters for 21 circles
+        rows = int(np.ceil(np.sqrt(n * 1.5)))
+        cols = int(np.ceil(n / rows))
+        
+        # Ensure minimum grid size
+        rows = max(rows, 3)
+        cols = max(cols, 3)
+        
+        # Hexagonal spacing calculations
+        spacing_x = rect_width / (cols + 1)
+        spacing_y = rect_height / (rows + 1)
+        
+        hex_spacing_x = spacing_x * 0.75
+        hex_spacing_y = spacing_y * 0.866  # sqrt(3)/2
+        
+        circles = []
+        idx = 0
+        
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x_offset = (i % 2) * (hex_spacing_x / 2)
+                x = hex_spacing_x * j + x_offset + hex_spacing_x
+                y = hex_spacing_y * i + hex_spacing_y
+                
+                # Ensure within bounds
+                x = max(hex_spacing_x, min(rect_width - hex_spacing_x, x))
+                y = max(hex_spacing_y, min(rect_height - hex_spacing_y, y))
+                
+                # Initial radius based on spacing
+                r = min(hex_spacing_x, hex_spacing_y) * 0.25
+                
+                circles.append([x, y, r])
+                idx += 1
+                if idx >= n:
+                    break
+        
+        # Fill remaining slots if needed
+        while len(circles) < n:
+            x = np.random.uniform(hex_spacing_x, rect_width - hex_spacing_x)
+            y = np.random.uniform(hex_spacing_y, rect_height - hex_spacing_y)
+            r = min(hex_spacing_x, hex_spacing_y) * 0.25
+            circles.append([x, y, r])
+            
+        return np.array(circles)
+    
+    # Get initial hexagonal arrangement
+    circles = generate_hexagonal_grid()
+    
+    # Build spatial index for efficient neighbor queries
+    tree = cKDTree(circles[:, :2])
+    
+    # Progressive refinement with multi-scale approach
+    max_iterations = 1000
+    
+    # Multi-scale refinement - different phases with different intensities
+    phases = [
+        {'iterations': 200, 'step_size': 0.05, 'tolerance': 1e-4},
+        {'iterations': 300, 'step_size': 0.02, 'tolerance': 1e-5},
+        {'iterations': 500, 'step_size': 0.005, 'tolerance': 1e-6}
+    ]
+    
+    for phase in phases:
+        step_size = phase['step_size']
+        tolerance = phase['tolerance']
+        iterations = phase['iterations']
+        
+        for iter_num in range(iterations):
+            improved = False
+            total_improvement = 0
+            
+            # Shuffle indices for better exploration
+            indices = list(range(n))
+            np.random.shuffle(indices)
+            
+            for i in indices:
+                current_cx, current_cy, current_r = circles[i]
+                
+                # Maximum allowable radius calculation
+                max_radius = float('inf')
+                
+                # Boundary constraints
+                boundary_radius = min([
+                    current_cx,  # left
+                    rect_width - current_cx,  # right  
+                    current_cy,  # bottom
+                    rect_height - current_cy   # top
+                ])
+                max_radius = min(max_radius, boundary_radius)
+                
+                # Overlap constraints with nearby circles only
+                nearby_indices = tree.query_ball_point([current_cx, current_cy], 3 * max_radius)
+                
+                for j in nearby_indices:
+                    if i != j:
+                        other_cx, other_cy, other_r = circles[j]
+                        dist = np.sqrt((current_cx - other_cx)**2 + (current_cy - other_cy)**2)
+                        max_allowed_radius = dist - other_r
+                        if max_allowed_radius > 0:
+                            max_radius = min(max_radius, max_allowed_radius)
+                
+                # Try to increase radius if beneficial and valid
+                if max_radius > current_r and max_radius > 0:
+                    # Try several step sizes to find the best improvement
+                    new_r = min(current_r + step_size, max_radius)
+                    
+                    # Validate against all constraints
+                    valid = True
+                    for k in range(n):
+                        if i != k:
+                            other_cx, other_cy, other_r = circles[k]
+                            dist = np.sqrt((current_cx - other_cx)**2 + (current_cy - other_cy)**2)
+                            if dist < new_r + other_r:
+                                valid = False
+                                break
+                    
+                    if valid:
+                        circles[i, 2] = new_r
+                        improved = True
+                        total_improvement += (new_r - current_r)
+            
+            # Rebuild spatial index after updates
+            tree = cKDTree(circles[:, :2])
+            
+            # Early stopping condition
+            if not improved or total_improvement < tolerance:
+                break
+    
+    # Final optimization pass with very small steps for maximum precision
+    for iter_num in range(200):
+        improved = False
+        total_improvement = 0
+        indices = list(range(n))
+        np.random.shuffle(indices)
+        
+        for i in indices:
+            current_cx, current_cy, current_r = circles[i]
+            
+            # Compute maximum possible radius
+            max_radius = float('inf')
+            
+            # Boundary constraints
+            boundary_radius = min([
+                current_cx,  # left
+                rect_width - current_cx,  # right  
+                current_cy,  # bottom
+                rect_height - current_cy   # top
+            ])
+            max_radius = min(max_radius, boundary_radius)
+            
+            # Overlap constraints using spatial indexing
+            nearby_indices = tree.query_ball_point([current_cx, current_cy], 3 * max_radius)
+            
+            for j in nearby_indices:
+                if i != j:
+                    other_cx, other_cy, other_r = circles[j]
+                    dist = np.sqrt((current_cx - other_cx)**2 + (current_cy - other_cy)**2)
+                    max_allowed_radius = dist - other_r
+                    if max_allowed_radius > 0:
+                        max_radius = min(max_radius, max_allowed_radius)
+            
+            # Increase radius if beneficial
+            if max_radius > current_r and max_radius > 0:
+                step = min(0.001, max_radius - current_r)
+                new_r = min(current_r + step, max_radius)
+                
+                # Full validation
+                valid = True
+                for k in range(n):
+                    if i != k:
+                        other_cx, other_cy, other_r = circles[k]
+                        dist = np.sqrt((current_cx - other_cx)**2 + (current_cy - other_cy)**2)
+                        if dist < new_r + other_r:
+                            valid = False
+                            break
+                
+                if valid:
+                    circles[i, 2] = new_r
+                    improved = True
+                    total_improvement += (new_r - current_r)
+        
+        # Rebuild spatial index
+        tree = cKDTree(circles[:, :2])
+        
+        if not improved or total_improvement < 1e-7:
+            break
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

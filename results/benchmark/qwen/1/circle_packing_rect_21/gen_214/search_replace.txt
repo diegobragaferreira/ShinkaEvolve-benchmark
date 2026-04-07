@@ -1,0 +1,397 @@
+<NAME>
+voronoi_based_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces a more sophisticated Voronoi-based adaptive mutation that considers both local Voronoi cell areas and boundary constraints. The key enhancement is to use Voronoi diagrams not just for criticality assessment, but to compute adaptive mutation strengths that are inversely proportional to the local density (small Voronoi cells mean higher constraint density, requiring smaller mutations). This addresses the fundamental issue of the current implementation where mutation strength is only based on a simplified distance metric rather than true spatial constraint density.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on Voronoi cell areas for more accurate spatial constraint assessment"""
+        circles = individual.copy()
+        n = len(circles)
+
+        if n <= 1:
+            return np.ones(n) * 0.01
+
+        try:
+            # Use Voronoi diagram for better spatial understanding
+            from scipy.spatial import Voronoi
+
+            coords = circles[:, :2]
+            vor = Voronoi(coords)
+
+            # Calculate Voronoi cell areas for each point
+            areas = []
+            for i in range(len(coords)):
+                # Get vertices of Voronoi cell for point i
+                region_idx = np.where(vor.point_region == i)[0]
+                if len(region_idx) > 0:
+                    region = vor.regions[region_idx[0]]
+                    if -1 not in region and len(region) > 2:
+                        # Compute polygon area using shoelace formula
+                        vertices = vor.vertices[region]
+                        if len(vertices) >= 3:
+                            # Shoelace formula for polygon area
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            areas.append(area)
+                        else:
+                            areas.append(float('inf'))
+                    else:
+                        areas.append(float('inf'))
+                else:
+                    areas.append(float('inf'))
+
+            areas = np.array(areas)
+            # Convert to criticality (smaller area = higher criticality)
+            # Handle infinities properly
+            finite_areas = areas[np.isfinite(areas)]
+            if len(finite_areas) > 0:
+                min_area = finite_areas.min()
+                max_area = finite_areas.max()
+                if max_area > min_area:
+                    # Normalize areas to [0,1] where 0 = most critical (smallest area)
+                    normalized_areas = (areas - min_area) / (max_area - min_area)
+                    # Invert so smaller areas = higher criticality
+                    criticality_from_areas = 1.0 - normalized_areas
+                else:
+                    criticality_from_areas = np.zeros_like(areas)
+            else:
+                criticality_from_areas = np.zeros_like(areas)
+
+        except Exception:
+            # Fallback to distance-based criticality if Voronoi fails
+            coords = circles[:, :2]
+            distances = cdist(coords, coords)
+            np.fill_diagonal(distances, np.inf)
+            min_distances = np.min(distances, axis=1)
+            criticality_from_areas = 1.0 / (min_distances + 1e-8)
+
+        # Boundary influence component
+        boundary_influence = np.zeros(n)
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to each boundary
+            distances_to_boundaries = [x, y, 1-x, 1-y]
+            min_boundary_dist = min(distances_to_boundaries)
+
+            # More complex boundary influence calculation
+            if min_boundary_dist < 0.05:
+                # Strong boundary influence - circles very close to edge
+                boundary_influence[i] = 1.0
+            elif min_boundary_dist < 0.1:
+                # Moderate boundary influence
+                boundary_influence[i] = 0.5
+            else:
+                # Weak or no boundary influence
+                boundary_influence[i] = 0.0
+
+        # Combine Voronoi and boundary criticality with weights
+        # High Voronoi criticality + high boundary influence = very critical
+        combined_criticality = 0.7 * criticality_from_areas + 0.3 * boundary_influence
+
+        # Ensure minimum values and normalize
+        combined_criticality = np.maximum(combined_criticality, 0.01)
+
+        # Normalize to [0,1] range
+        if np.max(combined_criticality) > 0:
+            combined_criticality = combined_criticality / np.max(combined_criticality)
+
+        return combined_criticality
+=======
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on Voronoi cell areas for more accurate spatial constraint assessment"""
+        circles = individual.copy()
+        n = len(circles)
+
+        if n <= 1:
+            return np.ones(n) * 0.01
+
+        try:
+            # Use Voronoi diagram for better spatial understanding
+            from scipy.spatial import Voronoi
+
+            coords = circles[:, :2]
+            vor = Voronoi(coords)
+
+            # Calculate Voronoi cell areas for each point
+            areas = []
+            for i in range(len(coords)):
+                # Get vertices of Voronoi cell for point i
+                region_idx = np.where(vor.point_region == i)[0]
+                if len(region_idx) > 0:
+                    region = vor.regions[region_idx[0]]
+                    if -1 not in region and len(region) > 2:
+                        # Compute polygon area using shoelace formula
+                        vertices = vor.vertices[region]
+                        if len(vertices) >= 3:
+                            # Shoelace formula for polygon area
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            areas.append(area)
+                        else:
+                            areas.append(float('inf'))
+                    else:
+                        areas.append(float('inf'))
+                else:
+                    areas.append(float('inf'))
+
+            areas = np.array(areas)
+            # Convert to criticality (smaller area = higher criticality)
+            # Handle infinities properly
+            finite_areas = areas[np.isfinite(areas)]
+            if len(finite_areas) > 0:
+                min_area = finite_areas.min()
+                max_area = finite_areas.max()
+                if max_area > min_area:
+                    # Normalize areas to [0,1] where 0 = most critical (smallest area)
+                    normalized_areas = (areas - min_area) / (max_area - min_area)
+                    # Invert so smaller areas = higher criticality
+                    criticality_from_areas = 1.0 - normalized_areas
+                else:
+                    criticality_from_areas = np.zeros_like(areas)
+            else:
+                criticality_from_areas = np.zeros_like(areas)
+
+        except Exception:
+            # Fallback to distance-based criticality if Voronoi fails
+            coords = circles[:, :2]
+            distances = cdist(coords, coords)
+            np.fill_diagonal(distances, np.inf)
+            min_distances = np.min(distances, axis=1)
+            criticality_from_areas = 1.0 / (min_distances + 1e-8)
+
+        # Boundary influence component
+        boundary_influence = np.zeros(n)
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to each boundary
+            distances_to_boundaries = [x, y, 1-x, 1-y]
+            min_boundary_dist = min(distances_to_boundaries)
+
+            # More complex boundary influence calculation
+            if min_boundary_dist < 0.05:
+                # Strong boundary influence - circles very close to edge
+                boundary_influence[i] = 1.0
+            elif min_boundary_dist < 0.1:
+                # Moderate boundary influence
+                boundary_influence[i] = 0.5
+            else:
+                # Weak or no boundary influence
+                boundary_influence[i] = 0.0
+
+        # Combine Voronoi and boundary criticality with weights
+        # High Voronoi criticality + high boundary influence = very critical
+        combined_criticality = 0.7 * criticality_from_areas + 0.3 * boundary_influence
+
+        # Ensure minimum values and normalize
+        combined_criticality = np.maximum(combined_criticality, 0.01)
+
+        # Normalize to [0,1] range
+        if np.max(combined_criticality) > 0:
+            combined_criticality = combined_criticality / np.max(combined_criticality)
+
+        return combined_criticality
+
+    def mut_radius_adaptive_voronoi(individual, indpb=0.2):
+        """Enhanced mutation operator using Voronoi-based adaptive strength with proper density consideration"""
+        mutated_individual = individual.copy()
+        n = len(mutated_individual)
+
+        # Get Voronoi-based criticality scores
+        criticality = get_voronoi_criticality(mutated_individual)
+
+        # Sort by criticality (most critical first)
+        sorted_indices = np.argsort(-criticality)
+
+        # Mutate top 60% of critical circles (more aggressive focus)
+        num_mutations = int(n * 0.6)
+        mutation_indices = sorted_indices[:num_mutations]
+
+        for i in range(num_mutations):
+            idx = mutation_indices[i]
+            if random.random() < indpb:
+                old_radius = mutated_individual[idx, 2]
+
+                # Enhanced adaptive mutation strength based on Voronoi cell area
+                # Circles in high-density regions (small Voronoi cells) get smaller mutations
+                # Circles in low-density regions (large Voronoi cells) get larger mutations
+                criticality_value = criticality[idx]
+
+                # Use inverse relationship with criticality to determine mutation strength
+                # But apply a non-linear transformation to make the effect more pronounced
+                adaptive_strength = 0.005 * (1.0 / (criticality_value + 0.001)**1.8)
+                adaptive_strength = min(adaptive_strength, 0.02)  # Cap maximum mutation
+
+                # Apply Gaussian noise with adaptive standard deviation
+                delta = np.random.normal(0, adaptive_strength)
+                new_radius = max(0.001, old_radius + delta)
+                mutated_individual[idx, 2] = new_radius
+
+        return mutated_individual,
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_evolutionary_loop
+</NAME>
+
+<DESCRIPTION>
+This improvement refactors the main evolutionary loop to use the new enhanced adaptive mutation operator and incorporates a more sophisticated evolution strategy. Instead of just doing a fixed number of global iterations, we now implement a more structured evolution process that includes:
+1. Using the enhanced Voronoi-based adaptive mutation instead of the simpler radius mutation
+2. Adding a proper selection mechanism based on fitness
+3. Implementing a more intelligent parameter adaptation
+The key insight is that the current approach uses a uniform random selection which isn't optimal for evolutionary algorithms - we should be more selective about which individuals to evolve and how to evolve them.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Main algorithm - improved version
+    start_time = time.time()
+
+    # Stage 1: Initialization with better patterns
+    best_individual = generate_initial_patterns(rect_width, rect_height, n)
+
+    # Stage 2: Global optimization with increased iterations
+    for iteration in range(500):
+        # Create a copy to work with
+        test_individual = best_individual.copy()
+
+        # Select 8 circles to adjust (more than before)
+        selected_indices = np.random.choice(len(test_individual), 8, replace=False)
+
+        for idx in selected_indices:
+            old_x, old_y, old_r = test_individual[idx]
+            # Small random adjustments
+            new_x = max(0.005, min(0.995, old_x + np.random.normal(0, 0.01)))
+            new_y = max(0.005, min(0.995, old_y + np.random.normal(0, 0.01)))
+            new_r = max(0.001, old_r + np.random.normal(0, 0.006))
+
+            # Quick boundary check before detailed validation
+            if new_x - new_r < 0 or new_x + new_r > rect_width or \
+               new_y - new_r < 0 or new_y + new_r > rect_height:
+                continue
+
+            # Check if this violates constraints
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                    if dist < (new_r + oradius):
+                        valid = False
+                        break
+
+            # If valid, update
+            if valid:
+                test_individual[idx] = [new_x, new_y, new_r]
+
+        # If this improves the fitness, accept it
+        old_fitness = evaluate_fitness(best_individual, rect_width, rect_height)
+        new_fitness = evaluate_fitness(test_individual, rect_width, rect_height)
+
+        if new_fitness > old_fitness:
+            best_individual = test_individual.copy()
+
+    # Early termination check
+    if time.time() - start_time > 50:
+        return best_individual
+
+    # Stage 3: Enhanced local search
+    best_individual = local_search_optimization(best_individual, rect_width, rect_height, 300)
+
+    # Stage 4: Edge-focused optimization
+    best_individual = edge_focused_optimization(best_individual, rect_width, rect_height, 150)
+
+    # Final validation
+    if not is_valid_solution(best_individual, rect_width, rect_height):
+        # Fallback to structured pattern
+        best_individual = generate_hexagonal_pattern(rect_width, rect_height, n)
+
+    return best_individual
+=======
+    # Main algorithm - improved version with enhanced evolutionary strategy
+    start_time = time.time()
+
+    # Stage 1: Initialization with better patterns
+    best_individual = generate_initial_patterns(rect_width, rect_height, n)
+
+    # Stage 2: Evolutionary optimization with enhanced operators
+    max_generations = 300
+    population_size = 10  # Size of the evolutionary population
+
+    # Initialize population
+    population = [generate_initial_patterns(rect_width, rect_height, n) for _ in range(population_size)]
+    population_fitness = [evaluate_fitness(ind, rect_width, rect_height) for ind in population]
+
+    for generation in range(max_generations):
+        # Selection: keep top 60% of population
+        sorted_indices = np.argsort(-np.array(population_fitness))
+        elite_indices = sorted_indices[:int(population_size * 0.6)]
+        elite_population = [population[i] for i in elite_indices]
+
+        # Create new population through variation
+        new_population = elite_population.copy()
+
+        # Fill rest of population with offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, population_fitness, 3)
+            parent2 = tournament_selection(population, population_fitness, 3)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation with enhanced Voronoi-based approach
+            child1 = mut_radius_adaptive_voronoi(child1, indpb=0.3)[0]
+            child2 = mut_radius_adaptive_voronoi(child2, indpb=0.3)[0]
+
+            # Add to new population
+            new_population.extend([child1, child2])
+
+        # Keep only the required population size
+        new_population = new_population[:population_size]
+
+        # Evaluate new population
+        new_fitness = [evaluate_fitness(ind, rect_width, rect_height) for ind in new_population]
+
+        # Replace old population with new one
+        population = new_population
+        population_fitness = new_fitness
+
+        # Track best individual
+        best_idx = np.argmax(population_fitness)
+        if population_fitness[best_idx] > evaluate_fitness(best_individual, rect_width, rect_height):
+            best_individual = population[best_idx].copy()
+
+        # Early termination check
+        if time.time() - start_time > 50:
+            break
+
+    # Stage 3: Enhanced local search on best individual
+    best_individual = local_search_optimization(best_individual, rect_width, rect_height, 300)
+
+    # Stage 4: Edge-focused optimization
+    best_individual = edge_focused_optimization(best_individual, rect_width, rect_height, 150)
+
+    # Final validation
+    if not is_valid_solution(best_individual, rect_width, rect_height):
+        # Fallback to structured pattern
+        best_individual = generate_hexagonal_pattern(rect_width, rect_height, n)
+
+    return best_individual
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Select individual using tournament selection"""
+    tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+    tournament_fitness = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitness)]
+    return population[winner_index]
+>>>>>>> REPLACE
+</DIFF>

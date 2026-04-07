@@ -1,0 +1,181 @@
+<NAME>
+implement_bvh_acceleration_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+I'll implement a spatial acceleration structure using a Bounding Volume Hierarchy (BVH) to significantly improve the performance of overlap detection. This will replace the current cKDTree-based approach and provide sub-quadratic performance for overlap checking, which is crucial for the 12-hexagon case where we need to check all pairwise overlaps.
+
+The key benefits of this approach:
+1. Reduces overlap checking complexity from O(n²) to O(n log n) on average
+2. More accurate than simple bounding circle approximations
+3. Better handles complex geometric relationships
+4. Will significantly speed up the constraint validation process
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+from scipy.spatial import cKDTree
+from numba import jit
+import math
+=======
+from scipy.spatial import cKDTree
+from numba import jit
+import math
+
+class BVHNode:
+    """A node in the Bounding Volume Hierarchy."""
+    def __init__(self, bounds=None, left=None, right=None, objects=None):
+        self.bounds = bounds  # Bounding box: [min_x, min_y, max_x, max_y]
+        self.left = left
+        self.right = right
+        self.objects = objects if objects is not None else []
+
+    def is_leaf(self):
+        return self.left is None and self.right is None
+
+class BVH:
+    """Bounding Volume Hierarchy for spatial acceleration."""
+    def __init__(self, objects, max_objects_per_node=4):
+        self.max_objects_per_node = max_objects_per_node
+        self.root = self._build_tree(objects)
+
+    def _build_tree(self, objects):
+        if len(objects) == 0:
+            return None
+
+        # Calculate bounding box for all objects
+        bounds = self._calculate_bounds(objects)
+
+        # If we have few objects, make a leaf node
+        if len(objects) <= self.max_objects_per_node:
+            return BVHNode(bounds=bounds, objects=objects)
+
+        # Split along the longest axis
+        split_axis = self._get_longest_axis(bounds)
+        sorted_objects = sorted(objects, key=lambda obj: self._get_object_center(obj)[split_axis])
+
+        # Split into two halves
+        mid = len(sorted_objects) // 2
+        left_objects = sorted_objects[:mid]
+        right_objects = sorted_objects[mid:]
+
+        # Recursively build subtrees
+        left_node = self._build_tree(left_objects)
+        right_node = self._build_tree(right_objects)
+
+        # Create internal node
+        return BVHNode(
+            bounds=bounds,
+            left=left_node,
+            right=right_node
+        )
+
+    def _calculate_bounds(self, objects):
+        if not objects:
+            return [float('inf'), float('inf'), float('-inf'), float('-inf')]
+
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+
+        for obj in objects:
+            center = self._get_object_center(obj)
+            min_x = min(min_x, center[0])
+            min_y = min(min_y, center[1])
+            max_x = max(max_x, center[0])
+            max_y = max(max_y, center[1])
+
+        return [min_x, min_y, max_x, max_y]
+
+    def _get_longest_axis(self, bounds):
+        min_x, min_y, max_x, max_y = bounds
+        width = max_x - min_x
+        height = max_y - min_y
+        return 0 if width > height else 1
+
+    def _get_object_center(self, obj):
+        # Assuming obj is a hexagon with vertices
+        vertices = obj['vertices']
+        if not vertices:
+            return [0, 0]
+        avg_x = sum(v[0] for v in vertices) / len(vertices)
+        avg_y = sum(v[1] for v in vertices) / len(vertices)
+        return [avg_x, avg_y]
+
+    def _bounds_intersect(self, bounds1, bounds2):
+        min_x1, min_y1, max_x1, max_y1 = bounds1
+        min_x2, min_y2, max_x2, max_y2 = bounds2
+        return not (max_x1 < min_x2 or max_x2 < min_x1 or max_y1 < min_y2 or max_y2 < min_y1)
+
+    def _objects_intersect(self, obj1, obj2):
+        # Simple overlap check using shapely for accuracy
+        poly1 = Polygon(obj1['vertices'])
+        poly2 = Polygon(obj2['vertices'])
+        return poly1.intersects(poly2)
+
+    def query(self, bounds):
+        """Find all objects that might intersect with the given bounds."""
+        results = []
+        self._query_recursive(self.root, bounds, results)
+        return results
+
+    def _query_recursive(self, node, bounds, results):
+        if node is None:
+            return
+
+        if not self._bounds_intersect(node.bounds, bounds):
+            return
+
+        if node.is_leaf():
+            for obj in node.objects:
+                results.append(obj)
+        else:
+            self._query_recursive(node.left, bounds, results)
+            self._query_recursive(node.right, bounds, results)
+
+    def find_overlapping_pairs(self):
+        """Find all overlapping pairs of objects."""
+        pairs = []
+        self._find_overlapping_pairs_recursive(self.root, pairs)
+        return pairs
+
+    def _find_overlapping_pairs_recursive(self, node, pairs):
+        if node is None:
+            return
+
+        if node.is_leaf():
+            # Check pairwise overlap within this leaf
+            for i in range(len(node.objects)):
+                for j in range(i+1, len(node.objects)):
+                    obj1 = node.objects[i]
+                    obj2 = node.objects[j]
+                    if self._objects_intersect(obj1, obj2):
+                        pairs.append((obj1, obj2))
+        else:
+            # Check pairs across children
+            if node.left and node.right:
+                # Check left vs right
+                left_objs = self._collect_objects(node.left)
+                right_objs = self._collect_objects(node.right)
+
+                for obj1 in left_objs:
+                    for obj2 in right_objs:
+                        if self._objects_intersect(obj1, obj2):
+                            pairs.append((obj1, obj2))
+
+            # Recursive calls
+            self._find_overlapping_pairs_recursive(node.left, pairs)
+            self._find_overlapping_pairs_recursive(node.right, pairs)
+
+    def _collect_objects(self, node):
+        """Collect all objects from subtree."""
+        if node is None:
+            return []
+        if node.is_leaf():
+            return node.objects[:]
+        else:
+            all_objects = []
+            all_objects.extend(self._collect_objects(node.left))
+            all_objects.extend(self._collect_objects(node.right))
+            return all_objects
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,469 @@
+--- a/original.py
++++ b/original.py
+@@ -1,259 +1,242 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import cdist
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist
+ import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+-    Uses a geometry-inspired packing evolution algorithm with hierarchical refinement.
++    Uses smart initialization, hybrid optimization, and symmetry breaking for superior results.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     
+-    def compute_distance_ratios(points):
+-        """Helper function to compute the ratio metrics for evaluation."""
+-        distances = pdist(points)
+-        if len(distances) == 0:
+-            return 0, 0, 0
++    def compute_min_max_ratio(points):
++        """Compute the minimum to maximum distance ratio for given points."""
++        if len(points) < 2:
++            return 0.0
++        
++        # Compute pairwise distances efficiently
++        distances = cdist(points, points)
++        
++        # Set diagonal to infinity to exclude self-distances
++        np.fill_diagonal(distances, np.inf)
++        
++        # Find min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
++        
++        # Avoid division by zero
+         if max_dist == 0:
+-            return 0, 0, 0
+-        ratio = min_dist / max_dist
+-        return ratio, min_dist, max_dist
+-    
+-    def packing_energy_objective(x):
+-        """Energy-based objective that encourages good point distribution."""
+-        points = x.reshape(-1, 2)
+-        distances = pdist(points)
+-        
+-        if len(distances) == 0:
+-            return 0
+-            
+-        # Use inverse distance squared as energy term (repulsion effect)
+-        # But also consider the ratio structure
+-        min_dist = np.min(distances)
+-        max_dist = np.max(distances)
+-        
+-        if max_dist == 0:
+-            return np.inf
+-            
+-        # Energy function that penalizes both very small and very large distances
+-        # This encourages a balanced distribution
+-        energy = 0
+-        for i in range(len(points)):
+-            for j in range(i+1, len(points)):
+-                dx = points[i][0] - points[j][0]
+-                dy = points[i][1] - points[j][1]
+-                dist_sq = dx*dx + dy*dy
+-                
+-                if dist_sq > 0:
+-                    energy += 1.0 / dist_sq
+-                    
+-        return energy
+-    
+-    def create_golden_ratio_pattern():
+-        """Create pattern based on golden ratio properties for even distribution."""
++            return 0.0
++            
++        return min_dist / max_dist
++
++    def initialize_points(n_points=16, method='hexagonal'):
++        """Initialize points using various intelligent strategies."""
+         np.random.seed(42)
+-        points = []
+-        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+-        
+-        # Distribute points using golden angle spiral approach
+-        for i in range(16):
+-            angle = i * 2 * np.pi / phi
+-            radius = np.sqrt(i / 15.0)  # Scale to keep within unit square
+-            x = 0.5 + radius * np.cos(angle) * 0.4
+-            y = 0.5 + radius * np.sin(angle) * 0.4
+-            points.append([x, y])
+-            
+-        # Add small perturbations to break perfect symmetry
+-        points = np.array(points)
+-        noise = np.random.normal(0, 0.01, points.shape)
+-        points = points + noise
+-        points = np.clip(points, 0, 1)
+-        return points
+-    
+-    def create_hierarchical_grid():
+-        """Create a hierarchy of grid patterns for multi-scale optimization."""
+-        # Start with coarse grid, then refine
+-        base_points = []
+-        
+-        # Base 2x2 grid with some offset for diversity
+-        offsets = [[0,0], [0.5,0], [0,0.5], [0.5,0.5]]
+-        for i in range(4):
+-            for j in range(4):
+-                x = 0.1 + j * 0.225 + offsets[i%4][0] * 0.05
+-                y = 0.1 + i * 0.225 + offsets[i%4][1] * 0.05
+-                base_points.append([x, y])
+-                
+-        return np.array(base_points)
+-    
+-    def create_refined_pattern():
+-        """Create a refined pattern using geometric construction."""
+-        # Use a combination of spiral and grid elements
+-        np.random.seed(42)
+-        
+-        # Create a base spiral
+-        spiral_points = []
+-        for i in range(16):
+-            t = i / 15.0 * 4 * np.pi
+-            r = 0.4 * (i / 15.0)
+-            x = 0.5 + r * np.cos(t) * 0.8
+-            y = 0.5 + r * np.sin(t) * 0.8
+-            spiral_points.append([x, y])
+-            
+-        # Add some randomization to break symmetry
+-        points = np.array(spiral_points)
+-        noise = np.random.normal(0, 0.01, points.shape)
+-        points = points + noise
+-        points = np.clip(points, 0, 1)
+-        return points
+-    
+-    def create_symmetry_breaking_pattern():
+-        """Create pattern that breaks common symmetries."""
+-        # Start with a regular grid but apply non-uniform transformation
+-        base_points = []
+-        for i in range(4):
+-            for j in range(4):
+-                x = 0.1 + j * 0.225
+-                y = 0.1 + i * 0.225
+-                base_points.append([x, y])
+-        
+-        points = np.array(base_points)
+-        
+-        # Apply a non-linear transformation to break symmetry
+-        transformed = points.copy()
+-        for i in range(len(transformed)):
+-            # Apply small non-linear deformations per point
+-            rx = np.random.random() * 0.01
+-            ry = np.random.random() * 0.01
+-            transformed[i][0] += rx * (points[i][0] - 0.5)
+-            transformed[i][1] += ry * (points[i][1] - 0.5)
+-            
+-        # Add noise and clip
+-        noise = np.random.normal(0, 0.005, transformed.shape)
+-        transformed = transformed + noise
+-        transformed = np.clip(transformed, 0, 1)
+-        return transformed
+-    
+-    def optimize_with_constraints(points, max_iter=1000):
+-        """Optimize points with explicit bound constraints."""
+-        x0 = points.flatten()
++        
++        if method == 'hexagonal':
++            # Create hexagonal-like arrangement with adaptive spacing
++            points = []
++            rows, cols = 4, 4
++            
++            for i in range(rows):
++                for j in range(cols):
++                    # Create hexagonal offset pattern
++                    x_offset = 0.5 if i % 2 == 1 else 0.0
++                    x = (j + x_offset) * 0.25 + 0.125
++                    y = i * 0.25 + 0.125
++                    
++                    # Add small adaptive perturbations
++                    perturbation = 0.015
++                    x += np.random.normal(0, perturbation * 0.5)
++                    y += np.random.normal(0, perturbation * 0.5)
++                    points.append([x, y])
++            
++            points = np.clip(points, 0, 1)
++            return np.array(points[:n_points])
++            
++        elif method == 'perturbed_grid':
++            # Start with regular grid and add perturbations
++            grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
++            points = grid_points.astype(float) / 3.0
++            
++            # Add adaptive perturbations
++            for i in range(len(points)):
++                # Points near edges get less perturbation, interior gets more
++                x, y = points[i]
++                if (abs(x - 0) < 0.1 or abs(x - 1) < 0.1 or 
++                    abs(y - 0) < 0.1 or abs(y - 1) < 0.1):
++                    perturbation_magnitude = 0.01
++                elif abs(x - 0.5) < 0.3 and abs(y - 0.5) < 0.3:
++                    perturbation_magnitude = 0.02
++                else:
++                    perturbation_magnitude = 0.015
++                    
++                points[i] += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, 2)
++            
++            points = np.clip(points, 0, 1)
++            return points[:n_points]
++            
++        else:  # random_spread
++            # Create points with intentional spreading
++            points = np.random.rand(n_points, 2)
++            
++            # Apply spreading to reduce clustering
++            for i in range(n_points):
++                center_vec = points[i] - [0.5, 0.5]
++                center_distance = np.linalg.norm(center_vec)
++                if center_distance > 0:
++                    # Move points away from center with adaptive factor
++                    adaptive_factor = min(0.15, 0.08 / (center_distance + 0.01))
++                    points[i] += center_vec * adaptive_factor
++            
++            points = np.clip(points, 0, 1)
++            return points
++
++    def adaptive_local_optimization(initial_points, time_limit):
++        """Optimize using adaptive sequential quadratic programming."""
++        start_time = time.time()
++        
++        # Best solution tracking
++        best_points = initial_points.copy()
++        best_ratio = compute_min_max_ratio(initial_points)
++        
++        # Objective function for optimization
++        def objective(x):
++            points = x.reshape(-1, 2)
++            # Negative because we minimize -ratio to maximize ratio
++            return -compute_min_max_ratio(points)
++        
++        # Bounds for each coordinate
+         bounds = [(0, 1) for _ in range(32)]
+         
+-        # Use a hybrid approach: try different optimization methods
+-        methods = ['L-BFGS-B', 'SLSQP']
+-        best_points = points.copy()
+-        best_ratio = 0
+-        
+-        for method in methods:
++        # Try L-BFGS-B with adaptive parameters based on time
++        remaining_time = time_limit - (time.time() - start_time)
++        max_iter = int(500 + remaining_time * 2) if remaining_time > 10 else 200
++        
++        try:
++            result = minimize(
++                objective,
++                initial_points.flatten(),
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12}
++            )
++            
++            if result.success:
++                final_points = result.x.reshape(-1, 2)
++                final_points = np.clip(final_points, 0, 1)
++                final_ratio = compute_min_max_ratio(final_points)
++                
++                if final_ratio > best_ratio:
++                    best_ratio = final_ratio
++                    best_points = final_points.copy()
++                    
++        except Exception:
++            pass
++        
++        # Try SLSQP as fallback with symmetry-breaking constraints
++        if (time.time() - start_time) < time_limit - 5:
+             try:
++                # Add symmetry breaking constraints to avoid degenerate solutions
++                def symmetry_constraint(x):
++                    points = x.reshape(-1, 2)
++                    # Fix first point to (0,0) and last point to (1,1) to break symmetry
++                    constraints = []
++                    constraints.append(points[0, 0])  # x0 = 0
++                    constraints.append(points[0, 1])  # y0 = 0
++                    constraints.append(points[-1, 0] - 1.0)  # x15 = 1
++                    constraints.append(points[-1, 1] - 1.0)  # y15 = 1
++                    return np.array(constraints)
++                
++                # Simple constraint for boundary handling
++                constraints = {'type': 'eq', 'fun': lambda x: np.array([0.0])}
++                
+                 result = minimize(
+-                    packing_energy_objective,
+-                    x0,
+-                    method=method,
++                    objective,
++                    best_points.flatten(),
++                    method='SLSQP',
+                     bounds=bounds,
+-                    options={'maxiter': max_iter, 'ftol': 1e-10, 'gtol': 1e-10}
++                    constraints=constraints,
++                    options={'maxiter': 300, 'ftol': 1e-13, 'gtol': 1e-13}
+                 )
+                 
+                 if result.success:
+                     final_points = result.x.reshape(-1, 2)
+-                    ratio, _, _ = compute_distance_ratios(final_points)
+-                    
+-                    if ratio > best_ratio:
+-                        best_ratio = ratio
++                    final_points = np.clip(final_points, 0, 1)
++                    final_ratio = compute_min_max_ratio(final_points)
++                    
++                    if final_ratio > best_ratio:
++                        best_ratio = final_ratio
+                         best_points = final_points.copy()
+                         
+-            except:
++            except Exception:
++                pass
++        
++        return best_points
++
++    def multi_start_optimization(max_time=170):
++        """Run optimization with multiple starting strategies."""
++        start_time = time.time()
++        best_points = None
++        best_ratio = -np.inf
++        
++        # Multiple restart strategies with different initialization methods
++        restart_strategies = [
++            ('hex', 'hexagonal'),
++            ('grid', 'perturbed_grid'),
++            ('rand', 'random_spread')
++        ]
++        
++        # Try each strategy
++        for strategy_name, init_method in restart_strategies:
++            if (time.time() - start_time) > max_time - 10:
++                break
++                
++            try:
++                # Generate initial points with this strategy
++                current_points = initialize_points(16, init_method)
++                
++                # Optimize with adaptive method
++                optimized_points = adaptive_local_optimization(current_points, 
++                                                              max_time - (time.time() - start_time))
++                
++                # Calculate ratio
++                ratio = compute_min_max_ratio(optimized_points)
++                
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_points = optimized_points.copy()
++                    
++            except Exception:
+                 continue
+-                
+-        return best_points
+-    
+-    def hierarchical_evolution():
+-        """Hierarchical optimization with progressive refinement."""
+-        best_ratio = 0
+-        best_points = None
+-        
+-        # Strategy 1: Golden ratio pattern
+-        try:
+-            points = create_golden_ratio_pattern()
+-            refined = optimize_with_constraints(points, 500)
+-            ratio, _, _ = compute_distance_ratios(refined)
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = refined.copy()
+-        except:
+-            pass
+-            
+-        # Strategy 2: Hierarchical grid
+-        try:
+-            points = create_hierarchical_grid()
+-            refined = optimize_with_constraints(points, 500)
+-            ratio, _, _ = compute_distance_ratios(refined)
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = refined.copy()
+-        except:
+-            pass
+-            
+-        # Strategy 3: Refined spiral pattern
+-        try:
+-            points = create_refined_pattern()
+-            refined = optimize_with_constraints(points, 500)
+-            ratio, _, _ = compute_distance_ratios(refined)
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = refined.copy()
+-        except:
+-            pass
+-            
+-        # Strategy 4: Symmetry breaking pattern
+-        try:
+-            points = create_symmetry_breaking_pattern()
+-            refined = optimize_with_constraints(points, 500)
+-            ratio, _, _ = compute_distance_ratios(refined)
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = refined.copy()
+-        except:
+-            pass
+-            
+-        # Strategy 5: Multi-start with random seeds
+-        if best_points is None:
+-            for seed_val in [42, 123, 456, 789]:
+-                try:
+-                    np.random.seed(seed_val)
+-                    points = np.random.rand(16, 2)
+-                    refined = optimize_with_constraints(points, 300)
+-                    ratio, _, _ = compute_distance_ratios(refined)
+-                    if ratio > best_ratio:
+-                        best_ratio = ratio
+-                        best_points = refined.copy()
+-                except:
+-                    continue
+-        
+-        # Final refinement if we have a reasonable solution
+-        if best_points is not None and best_ratio > 0.15:
++        
++        # Final refinement with more aggressive optimization if we have time
++        if (time.time() - start_time) < max_time - 5 and best_points is not None:
+             try:
+-                # Apply one final high-precision optimization
+-                refined_final = optimize_with_constraints(best_points, 800)
+-                final_ratio, _, _ = compute_distance_ratios(refined_final)
+-                if final_ratio > best_ratio:
+-                    best_points = refined_final
+-            except:
++                refined_points = adaptive_local_optimization(
++                    best_points, 
++                    max_time - (time.time() - start_time)
++                )
++                refined_ratio = compute_min_max_ratio(refined_points)
++                
++                if refined_ratio > best_ratio:
++                    best_points = refined_points.copy()
++                    
++            except Exception:
+                 pass
+-                
+-        return best_points if best_points is not None else create_hierarchical_grid()
+-    
++        
++        return best_points if best_points is not None else initialize_points(16, 'hexagonal')
++
+     # Main execution
+     try:
+-        result = hierarchical_evolution()
+-        return result
+-    except:
+-        # Fallback to simple grid
+-        return create_hierarchical_grid()
++        return multi_start_optimization(170)
++    except Exception:
++        # Fallback to deterministic hexagonal pattern
++        return initialize_points(16, 'hexagonal')
+ 
+ # EVOLVE-BLOCK-END

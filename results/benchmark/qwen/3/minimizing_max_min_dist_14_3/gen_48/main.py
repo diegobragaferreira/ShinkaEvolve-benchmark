@@ -1,0 +1,225 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial import SphericalVoronoi
+import warnings
+warnings.filterwarnings('ignore')
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def objective_function(x):
+        # Reshape flat array back to 14x3 points
+        points = x.reshape((14, 3))
+
+        # Compute pairwise distances efficiently
+        distances = pdist(points)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        # Return negative because we want to maximize the ratio
+        return -min_dist / max_dist
+
+    def penalty_objective(x, penalty_weight=1e6):
+        """Objective function with penalty for boundary violations"""
+        points = x.reshape((14, 3))
+
+        # Calculate base objective
+        ratio = -objective_function(x)
+        base_obj = ratio
+
+        # Add penalty for points outside [0,1]^3 bounds
+        penalty = 0
+        for i in range(14):
+            for j in range(3):
+                coord = points[i, j]
+                if coord < 0:
+                    penalty += penalty_weight * (0 - coord) ** 2
+                elif coord > 1:
+                    penalty += penalty_weight * (coord - 1) ** 2
+
+        return base_obj + penalty
+
+    def fibonacci_sphere_sampling(n):
+        """Generate points on a unit sphere using Fibonacci spiral method with better distribution"""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(n):
+            y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def spherical_voronoi_initialization():
+        """Initialize points using spherical Voronoi diagram approach for better spreading"""
+        # Generate points using Fibonacci method
+        points = fibonacci_sphere_sampling(14)
+
+        # Add slight perturbations to break symmetries
+        np.random.seed(42)
+        noise = np.random.normal(0, 0.05, points.shape)
+        points += noise
+
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points = points / norms
+
+        # Scale and transform to [0,1]^3
+        points *= 0.8
+        points = (points + 1) / 2
+
+        return points
+
+    def initialize_points():
+        """Initialize points using enhanced spherical sampling with multiple strategies"""
+        # Strategy 1: Fibonacci sphere sampling
+        points1 = fibonacci_sphere_sampling(14)
+
+        # Strategy 2: Random uniform initialization
+        np.random.seed(42)
+        points2 = np.random.rand(14, 3)
+
+        # Strategy 3: Perturbed Fibonacci with more variation
+        np.random.seed(42)
+        points3 = points1 + np.random.normal(0, 0.1, points1.shape)
+
+        # Strategy 4: Spherical Voronoi approach
+        points4 = spherical_voronoi_initialization()
+
+        # Normalize all strategies to unit sphere
+        for points in [points1, points3, points4]:
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            points /= norms
+
+        # Scale appropriately
+        points1 *= 0.8
+        points3 *= 0.8
+        points4 *= 0.8
+
+        # Transform to [0,1]^3 space
+        points1 = (points1 + 1) / 2
+        points3 = (points3 + 1) / 2
+        points4 = (points4 + 1) / 2
+
+        # Evaluate all initializations
+        eval_points = [points1, points2, points3, points4]
+        ratios = []
+
+        for points in eval_points:
+            distances = pdist(points)
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            if max_dist > 0:
+                ratio = min_dist / max_dist
+            else:
+                ratio = 0
+            ratios.append(ratio)
+
+        # Select the best initialization
+        best_idx = np.argmax(ratios)
+        return eval_points[best_idx].flatten()
+
+    def adaptive_differential_evolution(initial_points):
+        """Perform differential evolution with adaptive population sizing and multiple strategies"""
+        bounds = [(0, 1)] * 14 * 3
+
+        # Try different population sizes and mutation strategies
+        strategies = [
+            {'popsize': 12, 'mutation': (0.5, 1.0), 'recombination': 0.7},
+            {'popsize': 18, 'mutation': (0.7, 1.0), 'recombination': 0.8},
+            {'popsize': 24, 'mutation': (0.8, 1.0), 'recombination': 0.9}
+        ]
+
+        best_points = initial_points.reshape((14, 3))
+        best_ratio = -np.inf
+
+        for strategy in strategies:
+            try:
+                result = differential_evolution(
+                    penalty_objective,
+                    bounds,
+                    seed=42,
+                    maxiter=200,
+                    popsize=strategy['popsize'],
+                    mutation=strategy['mutation'],
+                    recombination=strategy['recombination'],
+                    tol=1e-8,
+                    callback=None
+                )
+
+                # Evaluate result
+                points = result.x.reshape((14, 3))
+                distances = pdist(points)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+
+                if max_dist > 0:
+                    ratio = min_dist / max_dist
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = points
+
+            except Exception:
+                continue
+
+        return best_points
+
+    def improved_local_refinement(points):
+        """Apply improved local optimization refinement using multiple techniques"""
+        # First try L-BFGS-B
+        try:
+            result = minimize(
+                objective_function,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=[(0, 1)] * 14 * 3,
+                options={'ftol': 1e-10, 'gtol': 1e-10, 'maxiter': 1000}
+            )
+
+            refined_points = result.x.reshape((14, 3))
+            return refined_points
+
+        except Exception:
+            return points
+
+    def validate_and_correct_bounds(points):
+        """Ensure all points are within [0,1]^3 bounds"""
+        corrected_points = np.clip(points, 0, 1)
+        return corrected_points
+
+    # Initialize with enhanced spherical configuration
+    initial_points = initialize_points()
+
+    # Phase 1: Global optimization with adaptive differential evolution
+    global_optimized = adaptive_differential_evolution(initial_points)
+
+    # Phase 2: Local refinement with improved technique
+    local_optimized = improved_local_refinement(global_optimized)
+
+    # Phase 3: Additional local refinement with different settings
+    final_local_optimized = improved_local_refinement(local_optimized)
+
+    # Final validation
+    final_points = validate_and_correct_bounds(final_local_optimized)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

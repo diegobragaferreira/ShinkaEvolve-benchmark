@@ -1,0 +1,146 @@
+<NAME>
+implement_adaptive_penalty_scaling
+</NAME>
+
+<DESCRIPTION>
+The key insight is to implement adaptive penalty scaling that dynamically adjusts penalty weights based on constraint violation rates during optimization. This approach will help stabilize constraint handling without compromising solution quality, similar to the successful technique from Generation 42. The adaptive scaling will monitor how often constraints are violated and adjust penalty weights accordingly, preventing premature convergence to suboptimal local minima while maintaining robust constraint enforcement.
+
+This change will modify the objective function to include adaptive penalty scaling logic that tracks constraint violations and adjusts penalties dynamically throughout the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_objective(params, outer_radius_guess=None, penalty_scale=1000000):
+    """Calculate objective function with spatial indexing for overlap detection"""
+    # Extract positions and angles
+    positions_angles = params.reshape(-1, 3)
+    positions = positions_angles[:, :2]
+    angles = positions_angles[:, 2]
+
+    # Estimate outer hexagon radius
+    estimated_radius = estimate_outer_hexagon_radius(positions, angles)
+    if outer_radius_guess is not None:
+        outer_radius = outer_radius_guess
+    else:
+        outer_radius = estimated_radius
+
+    # Create outer hexagon (centered at origin)
+    outer_hex = create_unit_hexagon((0, 0), 0)
+
+    # Check constraints
+    total_penalty = 0
+
+    # Check containment
+    for i, (pos, angle) in enumerate(zip(positions, angles)):
+        hexagon = create_unit_hexagon(pos, angle)
+        if not check_containment(hexagon, outer_hex):
+            total_penalty += penalty_scale
+
+    # Check overlaps using spatial indexing (much faster)
+    centers = get_hexagon_centers(positions, angles)
+    tree = cKDTree(centers)
+
+    # Check all pairs using the spatial tree
+    overlap_found = False
+    try:
+        # Use spatial indexing for fast overlap checking
+        overlap_found = fast_check_overlaps_spatial(positions, angles, tree)
+    except Exception as e:
+        # Fallback to brute force if spatial indexing fails
+        for i in range(len(positions)):
+            for j in range(i+1, len(positions)):
+                hex1 = create_unit_hexagon(positions[i], angles[i])
+                hex2 = create_unit_hexagon(positions[j], angles[j])
+                if check_overlap(hex1, hex2):
+                    overlap_found = True
+                    break
+            if overlap_found:
+                break
+
+    if overlap_found:
+        total_penalty += penalty_scale
+
+    # Return negative 1/outer_radius plus penalties
+    if outer_radius > 0:
+        obj_val = -1.0 / outer_radius + total_penalty
+    else:
+        obj_val = np.inf
+
+    return obj_val
+=======
+def calculate_objective(params, outer_radius_guess=None, penalty_scale=1000000, violation_history=[]):
+    """Calculate objective function with adaptive penalty scaling"""
+    # Extract positions and angles
+    positions_angles = params.reshape(-1, 3)
+    positions = positions_angles[:, :2]
+    angles = positions_angles[:, 2]
+
+    # Estimate outer hexagon radius
+    estimated_radius = estimate_outer_hexagon_radius(positions, angles)
+    if outer_radius_guess is not None:
+        outer_radius = outer_radius_guess
+    else:
+        outer_radius = estimated_radius
+
+    # Create outer hexagon (centered at origin)
+    outer_hex = create_unit_hexagon((0, 0), 0)
+
+    # Check constraints
+    total_penalty = 0
+    violation_count = 0
+
+    # Check containment
+    for i, (pos, angle) in enumerate(zip(positions, angles)):
+        hexagon = create_unit_hexagon(pos, angle)
+        if not check_containment(hexagon, outer_hex):
+            total_penalty += penalty_scale
+            violation_count += 1
+
+    # Check overlaps using spatial indexing (much faster)
+    centers = get_hexagon_centers(positions, angles)
+    tree = cKDTree(centers)
+
+    # Check all pairs using the spatial tree
+    overlap_found = False
+    try:
+        # Use spatial indexing for fast overlap checking
+        overlap_found = fast_check_overlaps_spatial(positions, angles, tree)
+    except Exception as e:
+        # Fallback to brute force if spatial indexing fails
+        for i in range(len(positions)):
+            for j in range(i+1, len(positions)):
+                hex1 = create_unit_hexagon(positions[i], angles[i])
+                hex2 = create_unit_hexagon(positions[j], angles[j])
+                if check_overlap(hex1, hex2):
+                    overlap_found = True
+                    break
+            if overlap_found:
+                break
+
+    if overlap_found:
+        total_penalty += penalty_scale
+        violation_count += 1
+
+    # Adaptive penalty scaling based on violation history
+    if len(violation_history) > 0:
+        avg_violations = np.mean(violation_history[-10:])  # Average over last 10 evaluations
+        if avg_violations > 0.5:  # If many violations recently
+            # Increase penalty to be more strict
+            penalty_scale *= 1.2
+        elif avg_violations < 0.2:  # If few violations recently
+            # Decrease penalty slightly to allow more exploration
+            penalty_scale *= 0.95
+
+    # Update violation history
+    violation_history.append(violation_count)
+
+    # Return negative 1/outer_radius plus penalties
+    if outer_radius > 0:
+        obj_val = -1.0 / outer_radius + total_penalty
+    else:
+        obj_val = np.inf
+
+    return obj_val
+>>>>>>> REPLACE
+
+</DIFF>

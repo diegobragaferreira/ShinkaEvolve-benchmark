@@ -1,0 +1,232 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import basinhopping
+import time
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def initialize_points(n_points=16, method='symmetric_grid'):
+    """Initialize points with different strategies for better spread."""
+    np.random.seed(42)
+
+    if method == 'symmetric_grid':
+        # Create a symmetric 4x4 grid with optimized perturbations
+        points = []
+        rows = 4
+        cols = 4
+
+        # Generate a more evenly distributed grid
+        for i in range(rows):
+            for j in range(cols):
+                # Even spacing with offset for better distribution
+                x = (j + 0.5) / cols
+                y = (i + 0.5) / rows
+
+                # Adaptive perturbation based on distance from center and edges
+                center_distance = np.sqrt((x - 0.5)**2 + (y - 0.5)**2)
+                edge_distance = min(x, 1-x, y, 1-y)
+
+                # Smaller perturbations for central points, larger for edge points
+                if center_distance < 0.2:
+                    perturbation = 0.005
+                elif edge_distance < 0.1:
+                    perturbation = 0.02
+                else:
+                    perturbation = 0.015
+
+                x += np.random.normal(0, perturbation)
+                y += np.random.normal(0, perturbation)
+                points.append([x, y])
+
+        # Ensure points are within bounds [0,1] and return first n_points
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    elif method == 'hexagonal':
+        # Hexagonal lattice approximation with better distribution
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                # Hexagonal pattern with alternating rows
+                x = j * 0.3 + (i % 2) * 0.15
+                y = i * 0.3
+
+                # Add adaptive perturbation
+                if i == 0 or i == rows-1 or j == 0 or j == cols-1:
+                    perturbation = 0.02
+                else:
+                    perturbation = 0.01
+
+                x += np.random.normal(0, perturbation)
+                y += np.random.normal(0, perturbation)
+                points.append([x, y])
+
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    elif method == 'random':
+        return np.random.rand(n_points, 2)
+
+    else:
+        return np.random.rand(n_points, 2)
+
+def adaptive_constraint_handler(x, points_shape=(16, 2)):
+    """Adaptive constraint handling with penalty based on violation severity."""
+    points = x.reshape(points_shape)
+
+    # Calculate penalties for boundary violations
+    penalties = []
+
+    # X coordinate penalties
+    x_violations = np.concatenate([
+        points[:, 0],           # x coordinates
+        1 - points[:, 0]        # 1 - x coordinates
+    ])
+    x_penalties = np.maximum(0, -x_violations) ** 2
+    penalties.append(np.sum(x_penalties))
+
+    # Y coordinate penalties
+    y_violations = np.concatenate([
+        points[:, 1],           # y coordinates
+        1 - points[:, 1]        # 1 - y coordinates
+    ])
+    y_penalties = np.maximum(0, -y_violations) ** 2
+    penalties.append(np.sum(y_penalties))
+
+    # Return total penalty
+    return 1000 * np.sum(penalties)
+
+def enhanced_objective(x):
+    """Enhanced objective function with constraint penalties."""
+    points = x.reshape(-1, 2)
+    ratio = compute_min_max_ratio(points)
+
+    # Add penalty for constraint violations
+    penalty = adaptive_constraint_handler(x)
+
+    # Return negative ratio + penalty (we want to maximize ratio, minimize penalty)
+    return -ratio + penalty * 1e-6
+
+def optimize_with_symmetry_breaking(initial_points, max_time=150):
+    """Optimize with symmetry breaking to avoid degenerate solutions."""
+    start_time = time.time()
+    best_ratio = -np.inf
+    best_points = initial_points.copy()
+
+    # Define bounds for points (0,1) in both dimensions
+    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    # Multi-level hybrid optimization
+    max_iterations = 1000
+
+    # Level 1: Global search with basin hopping to escape local minima
+    try:
+        # Start with basin hopping for global exploration
+        bh_result = basinhopping(
+            enhanced_objective,
+            initial_points.flatten(),
+            niter=100,
+            T=1.0,
+            stepsize=0.1,
+            minimizer_kwargs={'method': 'L-BFGS-B', 'bounds': bounds},
+            seed=42,
+            callback=None
+        )
+
+        bh_points = bh_result.x.reshape(-1, 2)
+        bh_ratio = compute_min_max_ratio(bh_points)
+
+        if bh_ratio > best_ratio:
+            best_ratio = bh_ratio
+            best_points = bh_points.copy()
+
+    except Exception as e:
+        print(f"Basin hopping failed: {e}")
+
+    # Level 2: Fine tune with L-BFGS-B for local optimization
+    try:
+        lbfgs_result = minimize(
+            enhanced_objective,
+            initial_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+
+        lbfgs_points = lbfgs_result.x.reshape(-1, 2)
+        lbfgs_ratio = compute_min_max_ratio(lbfgs_points)
+
+        if lbfgs_ratio > best_ratio:
+            best_ratio = lbfgs_ratio
+            best_points = lbfgs_points.copy()
+
+    except Exception as e:
+        print(f"L-BFGS failed: {e}")
+
+    # Level 3: Additional refinement with SLSQP if time permits
+    if (time.time() - start_time) < max_time * 0.8:
+        try:
+            slsqp_result = minimize(
+                enhanced_objective,
+                best_points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            slsqp_points = slsqp_result.x.reshape(-1, 2)
+            slsqp_ratio = compute_min_max_ratio(slsqp_points)
+
+            if slsqp_ratio > best_ratio:
+                best_ratio = slsqp_ratio
+                best_points = slsqp_points.copy()
+
+        except Exception as e:
+            print(f"SLSQP failed: {e}")
+
+    # Ensure final points are within bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Initialize points with symmetric grid for superior starting configuration
+    initial_points = initialize_points(n_points=16, method='symmetric_grid')
+
+    # Optimize the point distribution with hybrid approach
+    optimized_points = optimize_with_symmetry_breaking(initial_points, max_time=150)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

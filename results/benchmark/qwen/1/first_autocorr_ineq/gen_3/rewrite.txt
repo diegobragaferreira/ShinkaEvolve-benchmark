@@ -1,0 +1,131 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax import grad, jit, vmap
+from jax.scipy.signal import convolve as jax_convolve
+from scipy.optimize import minimize
+import jax.random as random
+import time
+
+# Set seed for reproducibility
+np.random.seed(42)
+key = random.PRNGKey(42)
+
+# Enable float64 for higher precision
+jax.config.update("jax_enable_x64", True)
+
+@jit
+def compute_convolution_fft(x):
+    """Compute convolution using FFT for efficiency."""
+    # Using 'full' mode and then extracting the relevant part
+    conv = jax_convolve(x, x, mode='full')
+    # Return only the middle part corresponding to valid convolution
+    n = len(x)
+    start_idx = n - 1
+    end_idx = 2 * n - 2
+    return conv[start_idx:end_idx]
+
+@jit
+def compute_autocorr_constant(a):
+    """Computes C₁ based on the given sequence a."""
+    n = len(a)
+    if n == 0:
+        return jnp.inf
+    
+    # Normalize the sequence to have unit sum for meaningful comparison
+    sum_a = jnp.sum(a)
+    if sum_a < 1e-10:
+        return jnp.inf
+    
+    # Compute convolution
+    conv = compute_convolution_fft(a)
+    
+    # Compute C₁
+    max_conv = jnp.max(conv)
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+@jit
+def inv_c1_objective(a):
+    """Objective function to minimize (negative inverse of C₁)."""
+    c1 = compute_autocorr_constant(a)
+    # Return negative inverse to convert maximization to minimization
+    return -1.0 / c1
+
+# Gradient of the objective function
+@jit
+def grad_inv_c1_objective(a):
+    """Gradient of the inverse C₁ objective."""
+    # We use numerical gradients due to the complexity of the expression
+    # This can be replaced with analytical derivatives if needed
+    return grad(inv_c1_objective)(a)
+
+@jit
+def update_sequence(a, learning_rate=1e-3):
+    """Update sequence based on gradient ascent."""
+    grad_a = grad_inv_c1_objective(a)
+    updated_a = a + learning_rate * grad_a
+    # Ensure non-negativity
+    updated_a = jnp.maximum(updated_a, 0.0)
+    return updated_a
+
+def generate_initial_sequence(n=None):
+    """Generate an initial sequence with random positive values."""
+    if n is None:
+        n = np.random.randint(100, 1000)
+    # Use JAX random generation for better compatibility
+    key, subkey = random.split(key)
+    a = random.uniform(subkey, shape=(n,), minval=0.0, maxval=10.0)
+    return a
+
+def optimize_sequence():
+    """Main optimization loop to find the best sequence."""
+    # Generate initial sequence
+    a = generate_initial_sequence()
+    
+    # Optimization parameters
+    max_iter = 1000
+    tol = 1e-6
+    learning_rate = 1e-3
+    
+    # Initial objective value
+    prev_obj = inv_c1_objective(a)
+    
+    # Optimization loop
+    for i in range(max_iter):
+        # Update sequence
+        a_new = update_sequence(a, learning_rate)
+        
+        # Compute new objective value
+        obj_new = inv_c1_objective(a_new)
+        
+        # Check for convergence
+        if abs(obj_new - prev_obj) < tol:
+            break
+            
+        a = a_new
+        prev_obj = obj_new
+        
+        # Ensure non-negativity and clipping to range [0, 1000]
+        a = jnp.clip(a, 0.0, 1000.0)
+    
+    # Convert back to numpy array for returning
+    return np.array(a)
+
+def search_for_best_sequence():
+    """Function to search for the best coefficient sequence."""
+    # Run optimization
+    sequence = optimize_sequence()
+    
+    # Ensure minimum sum
+    if np.sum(sequence) < 0.01:
+        sequence = np.clip(sequence, 0.01, 1000.0)
+        
+    return sequence.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

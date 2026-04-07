@@ -1,0 +1,203 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    n_circles = 32
+    max_iterations = 10000
+    grid_size = 10
+    
+    # Initialize circles array
+    circles = np.zeros((n_circles, 3))
+    
+    # Create grid for spatial partitioning
+    grid_cells = {}
+    cell_size = 1.0 / grid_size
+    
+    def get_cell_coords(x, y):
+        """Get grid cell coordinates for given point"""
+        return (int(x / cell_size), int(y / cell_size))
+    
+    def add_circle_to_grid(circle_idx, x, y, r):
+        """Add circle to grid structure"""
+        cell_coords = get_cell_coords(x, y)
+        if cell_coords not in grid_cells:
+            grid_cells[cell_coords] = []
+        grid_cells[cell_coords].append(circle_idx)
+    
+    def remove_circle_from_grid(circle_idx, x, y, r):
+        """Remove circle from grid structure"""
+        cell_coords = get_cell_coords(x, y)
+        if cell_coords in grid_cells and circle_idx in grid_cells[cell_coords]:
+            grid_cells[cell_coords].remove(circle_idx)
+    
+    def get_nearby_circles(x, y, r):
+        """Get circles in neighboring grid cells"""
+        nearby_circles = []
+        center_cell = get_cell_coords(x, y)
+        
+        # Check 3x3 neighborhood around center cell
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (center_cell[0] + dx, center_cell[1] + dy)
+                if cell in grid_cells:
+                    nearby_circles.extend(grid_cells[cell])
+        
+        return nearby_circles
+    
+    def is_valid_position(x, y, r):
+        """Check if circle is within bounds"""
+        return (r <= x <= 1 - r) and (r <= y <= 1 - r)
+    
+    def is_valid_placement(circle_idx, x, y, r):
+        """Check if circle placement is valid (no overlap)"""
+        if not is_valid_position(x, y, r):
+            return False
+            
+        # Check nearby circles using spatial partitioning
+        nearby_indices = get_nearby_circles(x, y, r)
+        for idx in nearby_indices:
+            if idx != circle_idx:
+                ox, oy, oradius = circles[idx]
+                distance = np.sqrt((x - ox)**2 + (y - oy)**2)
+                if distance < r + oradius:
+                    return False
+        return True
+    
+    def calculate_fitness(circles_array):
+        """Calculate total radius sum fitness"""
+        return np.sum(circles_array[:, 2])
+    
+    def initialize_circles():
+        """Initialize circles using a combination of greedy placement and randomization"""
+        # Start with some preset good positions
+        centers = []
+        radii = []
+        
+        # Place some circles near corners and edges
+        corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+        edges = [(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)]
+        
+        # Place initial circles in corners/edges
+        for i, (x, y) in enumerate(corners + edges[:2]):
+            if i < n_circles:
+                r = min(x, y, 1-x, 1-y) * 0.3
+                centers.append([x, y])
+                radii.append(r)
+        
+        # Fill remaining positions randomly with reasonable radii
+        for i in range(len(centers), n_circles):
+            attempts = 0
+            while attempts < 1000:
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+                max_radius = min(x, y, 1-x, 1-y)
+                r = np.random.uniform(0.01, max_radius * 0.4)
+                
+                if is_valid_placement(i, x, y, r):
+                    centers.append([x, y])
+                    radii.append(r)
+                    break
+                attempts += 1
+        
+        # Ensure we have enough circles
+        while len(centers) < n_circles:
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            max_radius = min(x, y, 1-x, 1-y)
+            r = np.random.uniform(0.01, max_radius * 0.4)
+            
+            if is_valid_placement(len(centers), x, y, r):
+                centers.append([x, y])
+                radii.append(r)
+        
+        return np.column_stack([centers, radii])[:n_circles]
+    
+    def optimize_step():
+        """Perform one optimization step"""
+        # Randomly select one circle to modify
+        idx = np.random.randint(0, n_circles)
+        
+        # Store old values
+        old_x, old_y, old_r = circles[idx]
+        
+        # Try to modify the circle
+        new_x = old_x + np.random.uniform(-0.02, 0.02)
+        new_y = old_y + np.random.uniform(-0.02, 0.02)
+        new_r = old_r + np.random.uniform(-0.01, 0.01)
+        
+        # Apply boundary constraints
+        new_x = np.clip(new_x, old_r, 1 - old_r)
+        new_y = np.clip(new_y, old_r, 1 - old_r)
+        new_r = np.clip(new_r, 0.001, min(new_x, new_y, 1-new_x, 1-new_y))
+        
+        # If new configuration is valid, accept it
+        if is_valid_placement(idx, new_x, new_y, new_r):
+            circles[idx] = [new_x, new_y, new_r]
+            remove_circle_from_grid(idx, old_x, old_y, old_r)
+            add_circle_to_grid(idx, new_x, new_y, new_r)
+            return True
+        else:
+            # Restore old values
+            circles[idx] = [old_x, old_y, old_r]
+            return False
+    
+    # Initialize
+    circles = initialize_circles()
+    
+    # Clear grid
+    grid_cells.clear()
+    
+    # Add all circles to grid
+    for i in range(n_circles):
+        add_circle_to_grid(i, circles[i, 0], circles[i, 1], circles[i, 2])
+    
+    # Main optimization loop
+    best_fitness = calculate_fitness(circles)
+    patience = 0
+    max_patience = 500
+    
+    for iteration in range(max_iterations):
+        # Perform optimization step
+        changed = optimize_step()
+        
+        # Update best fitness
+        current_fitness = calculate_fitness(circles)
+        if current_fitness > best_fitness:
+            best_fitness = current_fitness
+            patience = 0
+        else:
+            patience += 1
+            
+        # Early stopping if no improvement for too long
+        if patience > max_patience:
+            break
+    
+    # Final verification and cleanup
+    for i in range(n_circles):
+        x, y, r = circles[i]
+        # Ensure each circle is valid
+        if not is_valid_position(x, y, r):
+            # Fix boundary issues conservatively
+            x = np.clip(x, r, 1-r)
+            y = np.clip(y, r, 1-r)
+            circles[i] = [x, y, r]
+    
+    # Update grid one final time
+    grid_cells.clear()
+    for i in range(n_circles):
+        add_circle_to_grid(i, circles[i, 0], circles[i, 1], circles[i, 2])
+    
+    return circles
+
+# EVOLVE-BLOCK-END

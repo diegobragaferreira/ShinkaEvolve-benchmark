@@ -1,0 +1,159 @@
+--- a/original.py
++++ b/original.py
+@@ -1,14 +1,153 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
++import nevergrad as ng
++from scipy import signal
++import time
++
++def compute_autoconvolution_norms(f_values):
++    """
++    Compute the three norms needed for C2 calculation:
++    ||g||₂², ||g||₁, ||g||∞ where g = f*f
++    """
++    if len(f_values) == 0:
++        return 0.0, 0.0, 0.0
++    
++    # Create step function on [-1/4, 1/4] with equal spacing
++    n_steps = len(f_values)
++    dx = 0.5 / n_steps  # Width of each step
++    x = np.linspace(-0.25, 0.25, n_steps + 1)
++    
++    # Construct the step function
++    f = np.repeat(f_values, 2)[:-1]  # Duplicate values for step function representation
++    
++    # Compute autoconvolution g = f * f using fast convolution
++    # Using the fact that convolution of step functions has a known form
++    # But we'll use direct computation for accuracy
++    g = signal.convolve(f, f, mode='full')
++    
++    # Adjust indices to match the correct domain
++    # The convolution result spans from -0.5 to 0.5
++    # We want it on [-0.5, 0.5] with appropriate discretization
++    g_x = np.linspace(-0.5, 0.5, len(g))
++    
++    # For simplicity, we'll focus on the valid range [-0.25, 0.25] 
++    # and compute norms appropriately
++    g_valid_idx = np.where((g_x >= -0.25) & (g_x <= 0.25))[0]
++    g_valid = g[g_valid_idx]
++    
++    # Compute norms
++    # ||g||₂² using trapezoidal rule approximation for piecewise linear integration
++    if len(g_valid) < 2:
++        g_norm_2_sq = 0.0
++    else:
++        # For trapezoidal integration of g², we need pairs of points
++        # For a piecewise linear function, the integral of f² over segment [x_i, x_{i+1}] 
++        # with values y_i, y_{i+1} is approximately (x_{i+1}-x_i)/3 * (y_i² + y_i*y_{i+1} + y_{i+1}²)
++        g_norm_2_sq = 0.0
++        dx_g = 2 * 0.25 / (len(g_valid) - 1)  # width between points in g
++        for i in range(len(g_valid) - 1):
++            y1, y2 = g_valid[i], g_valid[i+1]
++            g_norm_2_sq += (dx_g / 3.0) * (y1*y1 + y1*y2 + y2*y2)
++    
++    # ||g||₁ = sum of absolute values divided by number of points
++    g_norm_1 = np.sum(np.abs(g_valid)) / len(g_valid) if len(g_valid) > 0 else 0.0
++    
++    # ||g||∞ = maximum absolute value
++    g_norm_inf = np.max(np.abs(g_valid)) if len(g_valid) > 0 else 0.0
++    
++    return g_norm_2_sq, g_norm_1, g_norm_inf
++
++def evaluate_c2(f_values):
++    """
++    Evaluate C2 = ||g||₂² / (||g||₁ · ||g||∞)
++    """
++    try:
++        g_norm_2_sq, g_norm_1, g_norm_inf = compute_autoconvolution_norms(f_values)
++        
++        # Avoid division by zero
++        if g_norm_1 == 0 or g_norm_inf == 0:
++            return 0.0
++        
++        c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
++        return c2
++    except Exception:
++        return 0.0
+ 
+ def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
+-    f_values = [np.random.random()] * np.random.randint(100,1000)
+-    return f_values
++    """
++    Function to construct step-function with high C2 value.
++    Uses Nevergrad optimization to evolve step heights.
++    """
++    # Set seed for reproducibility
++    np.random.seed(42)
++    
++    # Initial optimization parameters
++    n_steps = 200  # Number of steps
++    
++    # Initialize optimizer with a more informed search space
++    # We know good solutions typically have some structure
++    optimizer = ng.optimizers.CMA(
++        dimension=n_steps,
++        budget=1000,  # Limit number of iterations for time constraint
++        noise_handling="optimistic"
++    )
++    
++    # Initialize with some reasonable starting values
++    best_f_values = None
++    best_c2 = -1.0
++    
++    # Run optimization
++    start_time = time.time()
++    
++    try:
++        # Run evolution with time constraint
++        while time.time() - start_time < 85:  # Leave some buffer time
++            try:
++                # Suggest new candidate
++                candidate = optimizer.ask()
++                
++                # Clip negative values to 0
++                candidate = np.clip(candidate, 0, None)
++                
++                # Evaluate fitness
++                c2_value = evaluate_c2(candidate)
++                
++                # Store best solution
++                if c2_value > best_c2:
++                    best_c2 = c2_value
++                    best_f_values = list(candidate)
++                
++                # Tell optimizer the result
++                optimizer.tell(candidate, -c2_value)  # Negative because we minimize
++                
++            except Exception:
++                continue
++                
++    except Exception:
++        pass
++    
++    # If we didn't find anything, fall back to simple strategy
++    if best_f_values is None:
++        # Start with a simple symmetric pattern that tends to work well
++        half_size = n_steps // 2
++        if n_steps % 2 == 0:
++            # Even number - symmetric around center
++            best_f_values = [1.0] * half_size + [1.0] * half_size
++        else:
++            # Odd number - symmetric with middle element
++            best_f_values = [1.0] * half_size + [1.0] + [1.0] * half_size
++            
++        # Add some randomness to avoid local minima
++        best_f_values = [max(0.0, x + np.random.normal(0, 0.1)) for x in best_f_values]
++    
++    # Final cleanup to ensure non-negativity
++    best_f_values = [max(0.0, x) for x in best_f_values]
++    
++    return best_f_values
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

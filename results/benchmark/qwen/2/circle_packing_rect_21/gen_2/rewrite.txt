@@ -1,0 +1,123 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions - we'll use width=1.5, height=0.5 for a good aspect ratio
+    # This gives us perimeter = 2*(1.5+0.5) = 4 as required
+    rect_width = 1.5
+    rect_height = 0.5
+    
+    # Parameters for physics simulation
+    n_circles = 21
+    max_iterations = 5000
+    dt = 0.01  # time step
+    temp = 1.0  # initial temperature
+    cooling_rate = 0.999
+    min_temp = 0.001
+    repulsion_strength = 100.0
+    boundary_strength = 1000.0
+    
+    # Initialize circles with random positions and small radii
+    circles = np.zeros((n_circles, 3))
+    
+    # Set initial positions within bounds with random radii
+    for i in range(n_circles):
+        # Initial positions near center to avoid boundary issues
+        circles[i, 0] = np.random.uniform(0.1, rect_width - 0.1)
+        circles[i, 1] = np.random.uniform(0.1, rect_height - 0.1)
+        circles[i, 2] = 0.05  # Initial small radius
+    
+    # Precompute some constants
+    boundary_min_x = 0
+    boundary_max_x = rect_width
+    boundary_min_y = 0
+    boundary_max_y = rect_height
+    
+    # Physics simulation loop
+    for iteration in range(max_iterations):
+        # Calculate forces on each circle
+        forces = np.zeros((n_circles, 2))
+        
+        # Repulsion forces between circles
+        for i in range(n_circles):
+            for j in range(i + 1, n_circles):
+                dx = circles[i, 0] - circles[j, 0]
+                dy = circles[i, 1] - circles[j, 1]
+                distance = np.sqrt(dx*dx + dy*dy)
+                
+                if distance > 0 and distance < (circles[i, 2] + circles[j, 2]):
+                    # Circles are overlapping - apply repulsion force
+                    force_magnitude = repulsion_strength * (circles[i, 2] + circles[j, 2] - distance) / distance
+                    forces[i, 0] += force_magnitude * dx
+                    forces[i, 1] += force_magnitude * dy
+                    forces[j, 0] -= force_magnitude * dx
+                    forces[j, 1] -= force_magnitude * dy
+        
+        # Boundary forces
+        for i in range(n_circles):
+            # Left boundary
+            if circles[i, 0] < circles[i, 2]:
+                forces[i, 0] += boundary_strength * (circles[i, 2] - circles[i, 0])
+            # Right boundary
+            if circles[i, 0] > rect_width - circles[i, 2]:
+                forces[i, 0] -= boundary_strength * (rect_width - circles[i, 2] - circles[i, 0])
+            # Bottom boundary
+            if circles[i, 1] < circles[i, 2]:
+                forces[i, 1] += boundary_strength * (circles[i, 2] - circles[i, 1])
+            # Top boundary
+            if circles[i, 1] > rect_height - circles[i, 2]:
+                forces[i, 1] -= boundary_strength * (rect_height - circles[i, 2] - circles[i, 1])
+        
+        # Update positions and radii based on forces
+        for i in range(n_circles):
+            # Apply velocity (force) to position
+            circles[i, 0] += forces[i, 0] * dt * temp
+            circles[i, 1] += forces[i, 1] * dt * temp
+            
+            # Keep circles within bounds
+            circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+            circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+            
+            # Gradually increase radius while maintaining non-overlapping constraint
+            # This helps escape local minima
+            if temp > 0.1:
+                # Increase radius slightly when force is small
+                total_force = np.sqrt(forces[i, 0]**2 + forces[i, 1]**2)
+                if total_force < 1.0:  # Low force means we're relatively stable
+                    circles[i, 2] = min(0.4, circles[i, 2] + 0.0005)
+            
+            # Ensure minimum radius
+            circles[i, 2] = max(0.01, circles[i, 2])
+        
+        # Cool down temperature
+        temp = max(min_temp, temp * cooling_rate)
+        
+        # Occasionally do a cleanup to ensure valid configuration
+        if iteration % 100 == 0:
+            # Recheck constraints and adjust if necessary
+            for i in range(n_circles):
+                circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+                circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+    
+    # Final cleanup to enforce boundaries
+    for i in range(n_circles):
+        circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+        circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+    
+    # Normalize radii to make better use of space - try to get them larger
+    total_radius = np.sum(circles[:, 2])
+    if total_radius < 1.0:  # If too small, scale up
+        scale_factor = 1.0 / total_radius if total_radius > 0 else 1.0
+        for i in range(n_circles):
+            circles[i, 2] = min(0.4, circles[i, 2] * scale_factor)
+    
+    return circles
+
+# EVOLVE-BLOCK-END

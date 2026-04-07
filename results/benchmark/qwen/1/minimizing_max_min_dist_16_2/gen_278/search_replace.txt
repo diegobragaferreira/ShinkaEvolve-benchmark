@@ -1,0 +1,241 @@
+<NAME>
+integrate_simulated_annealing_fallback
+</NAME>
+
+<DESCRIPTION>
+This change introduces a simulated annealing fallback mechanism to improve the optimization process. The idea is to add a secondary optimization method that can escape local optima when the primary evolutionary algorithm gets stuck. This is particularly important for complex optimization landscapes like the point dispersion problem where multiple local maxima exist. The simulated annealing will be triggered when the evolutionary search shows signs of stagnation, providing a more robust path to finding better solutions.
+
+The implementation adds a new `_simulated_annealing` function that uses a temperature-based acceptance criterion to allow occasional uphill moves, helping escape local maxima. This is integrated into the main optimization flow after the evolutionary search but before returning the final result.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def _local_refinement(points: np.ndarray, max_iter: int = 150, method: str = 'hybrid') -> np.ndarray:
+    """Perform local refinement using gradient-based methods."""
+    def objective(x_flat):
+        points_candidate = x_flat.reshape(-1, 2)
+        return -_compute_distance_ratio(points_candidate)
+
+    # Flatten points for optimization
+    x0 = points.flatten()
+
+    # Define bounds
+    bounds = [(0, 1) for _ in range(len(x0))]
+
+    try:
+        # Try multiple methods for robustness
+        if method == 'hybrid':
+            # First try L-BFGS-B
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+
+            if result.success and result.fun < -0.9:  # Acceptable quality check
+                refined_points = result.x.reshape(-1, 2)
+                return np.clip(refined_points, 0, 1)
+
+            # Fallback to Nelder-Mead if L-BFGS-B doesn't work well
+            result = minimize(
+                objective,
+                x0,
+                method='Nelder-Mead',
+                options={'maxiter': max_iter//2, 'adaptive': True}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                return np.clip(refined_points, 0, 1)
+
+        elif method == 'l_bfgs':
+            # Direct L-BFGS-B approach
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                return np.clip(refined_points, 0, 1)
+
+    except Exception:
+        # Return original points if optimization fails
+        pass
+
+    return points
+=======
+def _simulated_annealing(points: np.ndarray, max_iter: int = 1000) -> np.ndarray:
+    """Perform simulated annealing to escape local optima."""
+    def objective(x_flat):
+        points_candidate = x_flat.reshape(-1, 2)
+        return -_compute_distance_ratio(points_candidate)
+
+    # Flatten points for optimization
+    current_solution = points.flatten().copy()
+    current_energy = objective(current_solution)
+
+    # Initialize temperature and cooling schedule
+    temperature = 0.1
+    cooling_rate = 0.995
+    min_temperature = 1e-8
+
+    # Store best solution found
+    best_solution = current_solution.copy()
+    best_energy = current_energy
+
+    for iteration in range(max_iter):
+        # Generate neighbor solution by adding small random perturbation
+        neighbor = current_solution.copy()
+        # Randomly select points to perturb
+        n_points = len(points)
+        n_perturb = max(1, n_points // 10)  # Perturb about 10% of points
+        indices = np.random.choice(n_points, n_perturb, replace=False)
+
+        for idx in indices:
+            # Add Gaussian noise scaled by temperature
+            noise = np.random.normal(0, 0.005 * temperature, 2)
+            # Apply noise to the corresponding point
+            neighbor[idx*2:(idx+1)*2] += noise
+            # Ensure bounds
+            neighbor[idx*2:(idx+1)*2] = np.clip(neighbor[idx*2:(idx+1)*2], 0, 1)
+
+        # Evaluate neighbor
+        neighbor_energy = objective(neighbor)
+
+        # Accept or reject the neighbor based on Metropolis criterion
+        if neighbor_energy < current_energy:
+            # Always accept better solutions
+            current_solution = neighbor.copy()
+            current_energy = neighbor_energy
+        else:
+            # Accept worse solutions with probability based on temperature
+            delta_energy = neighbor_energy - current_energy
+            acceptance_probability = np.exp(-delta_energy / temperature)
+            if np.random.random() < acceptance_probability:
+                current_solution = neighbor.copy()
+                current_energy = neighbor_energy
+
+        # Update best solution if needed
+        if current_energy < best_energy:
+            best_solution = current_solution.copy()
+            best_energy = current_energy
+
+        # Cool down temperature
+        temperature *= cooling_rate
+
+        # Stop if temperature gets too low
+        if temperature < min_temperature:
+            break
+
+    # Return best solution found
+    best_points = best_solution.reshape(-1, 2)
+    return np.clip(best_points, 0, 1)
+
+def _local_refinement(points: np.ndarray, max_iter: int = 150, method: str = 'hybrid') -> np.ndarray:
+    """Perform local refinement using gradient-based methods."""
+    def objective(x_flat):
+        points_candidate = x_flat.reshape(-1, 2)
+        return -_compute_distance_ratio(points_candidate)
+
+    # Flatten points for optimization
+    x0 = points.flatten()
+
+    # Define bounds
+    bounds = [(0, 1) for _ in range(len(x0))]
+
+    try:
+        # Try multiple methods for robustness
+        if method == 'hybrid':
+            # First try L-BFGS-B
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+
+            if result.success and result.fun < -0.9:  # Acceptable quality check
+                refined_points = result.x.reshape(-1, 2)
+                return np.clip(refined_points, 0, 1)
+
+            # Fallback to Nelder-Mead if L-BFGS-B doesn't work well
+            result = minimize(
+                objective,
+                x0,
+                method='Nelder-Mead',
+                options={'maxiter': max_iter//2, 'adaptive': True}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                return np.clip(refined_points, 0, 1)
+
+        elif method == 'l_bfgs':
+            # Direct L-BFGS-B approach
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                return np.clip(refined_points, 0, 1)
+
+    except Exception:
+        # Return original points if optimization fails
+        pass
+
+    return points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final local refinement with high precision
+    refined_solution = _local_refinement(best_solution, max_iter=300, method='hybrid')
+
+    # Double-check the result
+    final_ratio = _compute_distance_ratio(refined_solution)
+
+    # If something went wrong, return the best we have
+    if final_ratio <= 0:
+        return initial_population[0]
+
+    return refined_solution
+=======
+    # Final local refinement with high precision
+    refined_solution = _local_refinement(best_solution, max_iter=300, method='hybrid')
+
+    # If we're still far from good solution, try simulated annealing as final fallback
+    final_ratio = _compute_distance_ratio(refined_solution)
+    if final_ratio < 0.1:  # If ratio is very poor, apply SA
+        sa_solution = _simulated_annealing(refined_solution, max_iter=500)
+        sa_ratio = _compute_distance_ratio(sa_solution)
+        if sa_ratio > final_ratio:
+            refined_solution = sa_solution
+
+    # Double-check the result
+    final_ratio = _compute_distance_ratio(refined_solution)
+
+    # If something went wrong, return the best we have
+    if final_ratio <= 0:
+        return initial_population[0]
+
+    return refined_solution
+>>>>>>> REPLACE
+</DIFF>

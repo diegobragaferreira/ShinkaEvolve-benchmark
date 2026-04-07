@@ -1,0 +1,141 @@
+<NAME>
+implement_numba_jit_compilation
+</NAME>
+
+<DESCRIPTION>
+Implement Numba JIT compilation for the most computationally intensive functions to significantly speed up the hexagon packing optimization. The key functions to JIT compile are `create_unit_hexagon` (which creates polygons), `calculate_outer_hexagon_radius` (which processes all hexagon data), and `check_overlap_fast` (which performs overlap checks). This will eliminate Python overhead and enable much faster iteration cycles during optimization, which is crucial given the tight time constraint of 180 seconds.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+from itertools import combinations
+
+# Constants
+HEXAGON_RADIUS = 1.0
+HEXAGON_WIDTH = HEXAGON_RADIUS * 2 * np.sqrt(3) / 3
+HEXAGON_HEIGHT = HEXAGON_RADIUS * 2
+MAX_EVAL_TIME = 180
+
+def create_unit_hexagon(center=(0, 0), rotation=0):
+    """Create a unit regular hexagon as a Shapely polygon"""
+    angle_step = np.pi / 3
+    points = []
+    for i in range(6):
+        angle = rotation + i * angle_step
+        x = center[0] + HEXAGON_RADIUS * np.cos(angle)
+        y = center[1] + HEXAGON_RADIUS * np.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+def check_containment(hexagon, outer_hexagon):
+    """Check if a hexagon is fully contained within outer hexagon"""
+    return outer_hexagon.contains(hexagon)
+
+def check_overlap_fast(hex1, hex2):
+    """Fast overlap check using spatial indexing - early termination"""
+    # Quick bounding box check first
+    if not hex1.bounds[2] < hex2.bounds[0] and \
+       not hex1.bounds[0] > hex2.bounds[2] and \
+       not hex1.bounds[3] < hex2.bounds[1] and \
+       not hex1.bounds[1] > hex2.bounds[3]:
+        # If bounding boxes intersect, do detailed check
+        return hex1.intersects(hex2)
+    return False
+
+def calculate_outer_hexagon_radius(inner_hex_data):
+    """Calculate minimum outer hexagon radius required to contain all inner hexagons"""
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, _ = inner_hex_data[i]
+        dist_to_center = np.sqrt(center_x**2 + center_y**2)
+        # Hexagon diagonal is sqrt(3) * radius
+        hex_diag = HEXAGON_RADIUS * np.sqrt(3)
+        max_dist = max(max_dist, dist_to_center + hex_diag)
+    return max_dist
+
+def evaluate_solution(params):
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+from itertools import combinations
+from numba import njit
+
+# Constants
+HEXAGON_RADIUS = 1.0
+HEXAGON_WIDTH = HEXAGON_RADIUS * 2 * np.sqrt(3) / 3
+HEXAGON_HEIGHT = HEXAGON_RADIUS * 2
+MAX_EVAL_TIME = 180
+
+@njit
+def create_unit_hexagon_numba(center_x, center_y, rotation):
+    """Create a unit regular hexagon as a Shapely polygon - JIT compiled"""
+    points = np.empty((6, 2))
+    angle_step = np.pi / 3
+    for i in range(6):
+        angle = rotation + i * angle_step
+        x = center_x + HEXAGON_RADIUS * np.cos(angle)
+        y = center_y + HEXAGON_RADIUS * np.sin(angle)
+        points[i] = (x, y)
+    return points
+
+@njit
+def calculate_outer_hexagon_radius_numba(inner_hex_data):
+    """Calculate minimum outer hexagon radius required to contain all inner hexagons - JIT compiled"""
+    max_dist = 0.0
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, _ = inner_hex_data[i]
+        dist_to_center = np.sqrt(center_x**2 + center_y**2)
+        # Hexagon diagonal is sqrt(3) * radius
+        hex_diag = HEXAGON_RADIUS * np.sqrt(3)
+        max_dist = max(max_dist, dist_to_center + hex_diag)
+    return max_dist
+
+def create_unit_hexagon(center=(0, 0), rotation=0):
+    """Create a unit regular hexagon as a Shapely polygon"""
+    angle_step = np.pi / 3
+    points = []
+    for i in range(6):
+        angle = rotation + i * angle_step
+        x = center[0] + HEXAGON_RADIUS * np.cos(angle)
+        y = center[1] + HEXAGON_RADIUS * np.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+def check_containment(hexagon, outer_hexagon):
+    """Check if a hexagon is fully contained within outer hexagon"""
+    return outer_hexagon.contains(hexagon)
+
+def check_overlap_fast(hex1, hex2):
+    """Fast overlap check using spatial indexing - early termination"""
+    # Quick bounding box check first
+    if not hex1.bounds[2] < hex2.bounds[0] and \
+       not hex1.bounds[0] > hex2.bounds[2] and \
+       not hex1.bounds[3] < hex2.bounds[1] and \
+       not hex1.bounds[1] > hex2.bounds[3]:
+        # If bounding boxes intersect, do detailed check
+        return hex1.intersects(hex2)
+    return False
+
+def calculate_outer_hexagon_radius(inner_hex_data):
+    """Calculate minimum outer hexagon radius required to contain all inner hexagons"""
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, _ = inner_hex_data[i]
+        dist_to_center = np.sqrt(center_x**2 + center_y**2)
+        # Hexagon diagonal is sqrt(3) * radius
+        hex_diag = HEXAGON_RADIUS * np.sqrt(3)
+        max_dist = max(max_dist, dist_to_center + hex_diag)
+    return max_dist
+
+def evaluate_solution(params):
+>>>>>>> REPLACE
+
+</DIFF>

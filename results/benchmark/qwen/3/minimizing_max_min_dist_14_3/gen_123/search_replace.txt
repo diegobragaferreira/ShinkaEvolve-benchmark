@@ -1,0 +1,210 @@
+<NAME>
+add_spherical_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current penalty-based constraint handling is computationally expensive and may not be effectively guiding the optimization towards feasible solutions. I'll implement a more sophisticated approach that uses spherical constraint handling during optimization instead of penalizing violations afterwards. This approach will ensure points stay on or near the unit sphere during optimization, which should lead to better convergence properties for this specific problem where we want to maximize the minimum distance ratio among points in 3D space.
+
+The key insight is that we can transform the problem to work on the unit sphere directly, which should be more efficient and effective than penalty methods. I'll modify the penalty_objective function to instead enforce spherical constraints through geometric projection and add a spherical-aware initialization approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def penalty_objective(x, penalty_weight=1e6):
+        """Objective with penalty for constraint violations"""
+        points = x.reshape(-1, 3)
+
+        # Apply penalty for points outside unit cube
+        penalty = 0
+        for i in range(len(points)):
+            for j in range(3):  # x, y, z coordinates
+                if points[i,j] < 0:
+                    penalty += penalty_weight * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += penalty_weight * (points[i,j] - 1)**2
+
+        # Original objective
+        obj_val = objective(x)
+
+        return obj_val + penalty
+=======
+    def spherical_objective(x):
+        """Objective function that keeps points constrained to unit sphere"""
+        points = x.reshape(-1, 3)
+
+        # Project all points onto unit sphere to maintain constraint
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1, norms)
+        points_on_sphere = points / norms
+
+        # Calculate pairwise distances on sphere
+        distances = pdist(points_on_sphere)
+
+        # Handle edge cases
+        if len(distances) == 0:
+            return -1.0
+
+        # Remove any NaN or infinite values
+        distances = distances[np.isfinite(distances)]
+
+        if len(distances) == 0:
+            return -1.0
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing)
+        if d_max <= 0:
+            return -1.0
+        return -d_min / d_max
+
+    def project_to_unit_cube(points):
+        """Project points to unit cube [0,1]^3 with proper scaling"""
+        # Center points around origin
+        centered = points - np.mean(points, axis=0)
+        # Scale to fit within unit cube
+        max_coord = np.max(np.abs(centered))
+        if max_coord > 0:
+            scaled = centered / (2 * max_coord) + 0.5
+        else:
+            scaled = centered + 0.5
+        return np.clip(scaled, 0, 1)
+
+    def get_spherical_initialization():
+        """Create better initial configuration that respects spherical constraints"""
+        # Start with Fibonacci spiral on sphere
+        np.random.seed(42)
+        points = []
+        phi = np.pi * (3. - np.sqrt(5.))  # golden angle
+
+        for i in range(14):
+            y = 1 - (i / float(14 - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        initial_points = np.array(points)
+
+        # Add small random jitter to break symmetry
+        noise = np.random.normal(0, 0.02, initial_points.shape)
+        initial_points += noise
+
+        # Normalize to unit sphere
+        norms = np.linalg.norm(initial_points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        initial_points = initial_points / norms
+
+        # Scale to fit in unit cube [0,1]^3
+        initial_points = project_to_unit_cube(initial_points)
+
+        return initial_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_optimization_approach_with_sphere_constrained
+</NAME>
+
+<DESCRIPTION>
+I'm replacing the main optimization logic to use the new spherical-aware objective function and initialization approach. This change focuses on using a more principled way to handle the geometric constraints of the problem, specifically keeping points on or near the unit sphere while optimizing for the minimum/maximum distance ratio. The key improvements are:
+1. Using spherical_objective instead of penalty_objective for more direct constraint handling
+2. Using get_spherical_initialization for better starting points
+3. Simplifying the optimization flow by removing redundant penalty handling
+4. Using the spherical objective throughout the process since it naturally enforces the spherical constraint
+
+This approach should be more efficient and effective than previous penalty methods because it directly works with the geometric constraints inherent to the problem.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Generate initial configuration
+    np.random.seed(42)
+
+    # Start with spherical arrangement
+    initial_points = fibonacci_sphere(14)
+
+    # Scale to fit within unit cube [0,1]^3
+    initial_points = initial_points - np.mean(initial_points, axis=0)
+    max_coord = np.max(np.abs(initial_points))
+    if max_coord > 0:
+        initial_points = initial_points / (2 * max_coord) + 0.5
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(42)]
+
+    # Run adaptive differential evolution optimization
+    optimized_flat = adaptive_de_optimize(penalty_objective, bounds, initial_points, time_limit)
+
+    # Apply local refinement if time permits
+    if time.time() - start_time < time_limit - 10:
+        refined_flat = improved_local_refinement(penalty_objective, optimized_flat, time_limit)
+
+        # Evaluate which solution is better
+        points_before = optimized_flat.reshape(-1, 3)
+        points_after = refined_flat.reshape(-1, 3)
+
+        ratio_before = calculate_ratio(points_before)
+        ratio_after = calculate_ratio(points_after)
+
+        if ratio_after > ratio_before:
+            optimized_flat = refined_flat
+
+    # Extract optimized points
+    optimized_points = optimized_flat.reshape(-1, 3)
+
+    # Ensure all points are within [0,1]^3 (handle any edge cases)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    # Final validation check
+    if calculate_ratio(optimized_points) <= 0:
+        # If something went wrong, return original good initialization
+        return initial_points
+
+    return optimized_points
+=======
+    # Generate initial configuration using spherical approach
+    np.random.seed(42)
+    initial_points = get_spherical_initialization()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(42)]
+
+    # Run adaptive differential evolution optimization with spherical objective
+    optimized_flat = adaptive_de_optimize(spherical_objective, bounds, initial_points, time_limit)
+
+    # Apply local refinement if time permits
+    if time.time() - start_time < time_limit - 10:
+        refined_flat = improved_local_refinement(spherical_objective, optimized_flat, time_limit)
+
+        # Evaluate which solution is better
+        points_before = optimized_flat.reshape(-1, 3)
+        points_after = refined_flat.reshape(-1, 3)
+
+        ratio_before = calculate_ratio(points_before)
+        ratio_after = calculate_ratio(points_after)
+
+        if ratio_after > ratio_before:
+            optimized_flat = refined_flat
+
+    # Extract optimized points
+    optimized_points = optimized_flat.reshape(-1, 3)
+
+    # Ensure all points are within [0,1]^3 (handle any edge cases)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    # Final validation check
+    if calculate_ratio(optimized_points) <= 0:
+        # If something went wrong, return original good initialization
+        return initial_points
+
+    return optimized_points
+>>>>>>> REPLACE
+</DIFF>

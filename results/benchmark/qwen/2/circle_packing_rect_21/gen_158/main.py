@@ -1,0 +1,320 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import math
+import random
+from scipy.optimize import differential_evolution
+from typing import Tuple
+
+class HexagonalGridOptimizer:
+    def __init__(self, n_circles=21, container_width=1.0, container_height=1.0):
+        self.n_circles = n_circles
+        self.container_width = container_width
+        self.container_height = container_height
+        self.spatial_tree = None
+        
+    def initialize_hexagonal_grid(self):
+        """Initialize circles using hexagonal packing pattern for better density"""
+        circles = np.zeros((self.n_circles, 3))
+        
+        # Calculate hexagonal grid parameters
+        # For optimal hexagonal packing, we want to fit as many circles as possible
+        # in our rectangle using the hexagonal arrangement
+        
+        # Estimate radius based on area
+        total_area = self.container_width * self.container_height
+        # Approximate area per circle in hexagonal packing (π/2√3 ≈ 0.9069)
+        area_per_circle = math.pi / (2 * math.sqrt(3))
+        estimated_radius = math.sqrt(total_area / (self.n_circles * area_per_circle))
+        
+        # Use a slightly smaller radius to allow room for optimization
+        base_radius = min(estimated_radius * 0.8, 0.2)
+        
+        # Hexagonal grid parameters
+        hex_radius = base_radius
+        hex_spacing_x = hex_radius * 2
+        hex_spacing_y = hex_radius * math.sqrt(3)
+        
+        # Determine grid dimensions
+        cols = max(1, int(math.ceil(self.container_width / hex_spacing_x)))
+        rows = max(1, int(math.ceil(self.container_height / hex_spacing_y)))
+        
+        # Adjust for rectangle dimensions to ensure we fit all circles
+        total_cells_needed = self.n_circles
+        while cols * rows < total_cells_needed:
+            if self.container_width / self.container_height > 1:  # Wide rectangle
+                cols += 1
+            else:  # Tall rectangle
+                rows += 1
+        
+        # Fill grid with hexagonal arrangement
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= self.n_circles:
+                    break
+                    
+                # Hexagonal offset pattern
+                offset = (i % 2) * (hex_spacing_x / 2)
+                x = offset + j * hex_spacing_x + random.uniform(-hex_spacing_x*0.1, hex_spacing_x*0.1)
+                y = i * hex_spacing_y + random.uniform(-hex_spacing_y*0.1, hex_spacing_y*0.1)
+                
+                # Ensure within bounds
+                x = max(hex_radius, min(self.container_width - hex_radius, x))
+                y = max(hex_radius, min(self.container_height - hex_radius, y))
+                
+                # Add some randomness to break perfect pattern
+                circles[idx] = [x, y, hex_radius]
+                idx += 1
+                
+        # Fill remaining circles with random positioning if needed
+        if idx < self.n_circles:
+            for i in range(idx, self.n_circles):
+                x = random.uniform(hex_radius, self.container_width - hex_radius)
+                y = random.uniform(hex_radius, self.container_height - hex_radius)
+                # Smaller random radius
+                r = random.uniform(0.01, base_radius * 0.5)
+                circles[i] = [x, y, r]
+                
+        return circles
+    
+    def calculate_distance(self, point1, point2):
+        """Calculate Euclidean distance between two points"""
+        return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+    
+    def is_valid_configuration(self, circles):
+        """Check if all circles are within bounds and non-overlapping"""
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+                return False
+                
+        # Check overlap constraints using spatial tree for efficiency
+        if len(circles) > 1:
+            try:
+                points = circles[:, :2]
+                tree = cKDTree(points)
+                pairs = tree.query_pairs(2 * max(circles[:, 2]), output_type='ndarray')
+                
+                for i, j in pairs:
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = self.calculate_distance([x1, y1], [x2, y2])
+                    if distance < (r1 + r2):
+                        return False
+                        
+            except Exception:
+                # Fallback to brute force checking
+                for i in range(len(circles)):
+                    for j in range(i+1, len(circles)):
+                        x1, y1, r1 = circles[i]
+                        x2, y2, r2 = circles[j]
+                        distance = self.calculate_distance([x1, y1], [x2, y2])
+                        if distance < (r1 + r2):
+                            return False
+        
+        return True
+    
+    def compute_total_radius(self, circles):
+        """Compute sum of all circle radii"""
+        return np.sum(circles[:, 2])
+    
+    def local_optimization_step(self, circles):
+        """Perform local optimization on a single circle"""
+        # Try to improve each circle individually
+        improved = False
+        for i in range(len(circles)):
+            current_x, current_y, current_r = circles[i]
+            best_radius = current_r
+            best_x, best_y = current_x, current_y
+            best_valid = False
+            
+            # Try several nearby positions and radii
+            test_radii = np.linspace(current_r * 0.8, min(current_r * 1.5, self.container_width/4, self.container_height/4), 8)
+            
+            for test_r in test_radii:
+                # Try nearby positions
+                for dx in np.linspace(-0.05, 0.05, 5):
+                    for dy in np.linspace(-0.05, 0.05, 5):
+                        test_x = current_x + dx
+                        test_y = current_y + dy
+                        
+                        # Keep within bounds
+                        test_x = max(test_r, min(self.container_width - test_r, test_x))
+                        test_y = max(test_r, min(self.container_height - test_r, test_y))
+                        
+                        # Test validity
+                        temp_circles = circles.copy()
+                        temp_circles[i] = [test_x, test_y, test_r]
+                        
+                        if self.is_valid_configuration(temp_circles):
+                            if test_r > best_radius:
+                                best_radius = test_r
+                                best_x, best_y = test_x, test_y
+                                best_valid = True
+            
+            if best_valid:
+                circles[i] = [best_x, best_y, best_radius]
+                improved = True
+                
+        return improved
+    
+    def global_optimization_step(self, circles):
+        """Use global optimization to improve configuration"""
+        def objective_function(params):
+            # Convert params back to circles array
+            temp_circles = circles.copy()
+            for i in range(len(circles)):
+                temp_circles[i][0] = params[i*3]      # x
+                temp_circles[i][1] = params[i*3+1]    # y
+                temp_circles[i][2] = params[i*3+2]    # radius
+                
+            # Penalize constraint violations
+            penalty = 0
+            # Boundary penalty
+            for i in range(len(circles)):
+                x, y, r = temp_circles[i]
+                if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+                    penalty += 1000
+                    
+            # Overlap penalty
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    x1, y1, r1 = temp_circles[i]
+                    x2, y2, r2 = temp_circles[j]
+                    distance = self.calculate_distance([x1, y1], [x2, y2])
+                    if distance < (r1 + r2):
+                        penalty += 1000
+                        
+            # Try to maximize sum of radii minus penalties
+            return -(np.sum(temp_circles[:, 2]) - penalty)
+        
+        # Flatten current circles for optimization
+        flat_params = []
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            flat_params.extend([x, y, r])
+            
+        # Define bounds for optimization
+        bounds = []
+        for i in range(len(circles)):
+            bounds.extend([
+                (0.001, self.container_width - 0.001),   # x
+                (0.001, self.container_height - 0.001),  # y
+                (0.001, min(self.container_width, self.container_height)/2)  # radius
+            ])
+        
+        # Perform optimization
+        try:
+            result = differential_evolution(objective_function, bounds, maxiter=50, popsize=10, seed=42)
+            
+            # Update circles with optimized values
+            if not result.success:
+                return False
+                
+            optimized_params = result.x
+            for i in range(len(circles)):
+                circles[i][0] = optimized_params[i*3]
+                circles[i][1] = optimized_params[i*3+1]
+                circles[i][2] = optimized_params[i*3+2]
+                
+            return True
+            
+        except Exception:
+            # Fall back to local optimization if global fails
+            return False
+    
+    def optimize(self, max_iterations=1000):
+        """Main optimization routine"""
+        # Initialize
+        circles = self.initialize_hexagonal_grid()
+        
+        # Local optimization passes
+        last_improvement = 0
+        best_sum = self.compute_total_radius(circles)
+        best_circles = circles.copy()
+        
+        # Optimization loop with alternating strategies
+        for iteration in range(max_iterations):
+            # Alternate between local and global optimization
+            if iteration % 2 == 0:
+                # Local optimization
+                improved = self.local_optimization_step(circles)
+                if improved:
+                    last_improvement = iteration
+            else:
+                # Global optimization
+                self.global_optimization_step(circles)
+                
+            # Periodic evaluation
+            current_sum = self.compute_total_radius(circles)
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_circles = circles.copy()
+                
+            # Early stopping if no improvement for a while
+            if iteration - last_improvement > 200:
+                break
+                
+        # Final cleanup and validation
+        # Ensure all constraints are met by applying boundary corrections and resolving overlaps
+        for i in range(self.n_circles):
+            x, y, r = best_circles[i]
+            # Boundary corrections
+            if x - r < 0:
+                x = r
+            elif x + r > self.container_width:
+                x = self.container_width - r
+            if y - r < 0:
+                y = r
+            elif y + r > self.container_height:
+                y = self.container_height - r
+            
+            best_circles[i] = [x, y, r]
+            
+        # Resolve any remaining overlaps with iterative approach
+        for _ in range(50):
+            improved = False
+            for i in range(self.n_circles):
+                x, y, r = best_circles[i]
+                # Try to decrease radius to resolve overlaps
+                for j in range(self.n_circles):
+                    if i != j:
+                        x2, y2, r2 = best_circles[j]
+                        dx = x - x2
+                        dy = y - y2
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        
+                        if distance < (r + r2):
+                            new_r = max(0.001, (distance - 0.001) / 2)
+                            if new_r < r:
+                                best_circles[i, 2] = new_r
+                                improved = True
+                                break
+                                
+            if not improved:
+                break
+                
+        return best_circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set up container dimensions (perimeter = 4, so width + height = 2)
+    # Using a 1:1 ratio gives width = height = 1 for simplicity
+    optimizer = HexagonalGridOptimizer(n_circles=21, container_width=1.0, container_height=1.0)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

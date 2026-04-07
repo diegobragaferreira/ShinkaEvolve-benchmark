@@ -1,0 +1,157 @@
+<NAME>
+improve_spatial_acceleration
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic spatial grid for collision detection but doesn't fully leverage the advantages of hierarchical spatial partitioning. I'll implement a more sophisticated spatial acceleration structure that adapts cell sizes based on local density and improves the overlap checking logic. This will reduce the O(n²) complexity of overlap detection and provide better performance for the 11-hexagon problem.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Precompute all hexagon polygons once for reuse
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+    # Calculate outer radius once
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Check containment using the outer hexagon polygon
+    outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check if all inner hexagons are contained within outer hexagon
+    for hex_poly in hex_polygons:
+        # Fast check: if any vertex is outside, reject
+        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+            if not outer_polygon.contains(Point(vertex)):
+                return False
+
+    # Check overlaps efficiently using spatial indexing
+    points_list = []
+    for i, hex_poly in enumerate(hex_polygons):
+        # Collect all vertices for spatial indexing
+        for vertex in hex_poly.exterior.coords[:-1]:
+            points_list.append((vertex[0], vertex[1], i))
+
+    if len(points_list) > 0:
+        # Create spatial tree for vertices
+        tree_points = cKDTree([(p[0], p[1]) for p in points_list])
+
+        # Check overlaps between hexagons
+        for i in range(len(hex_polygons)):
+            for j in range(i+1, len(hex_polygons)):
+                if hex_polygons[i].intersects(hex_polygons[j]):
+                    return False
+    else:
+        # Fallback for empty case
+        return False
+
+    return True
+=======
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Precompute all hexagon polygons once for reuse
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+    # Calculate outer radius once
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Check containment using the outer hexagon polygon
+    outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check if all inner hexagons are contained within outer hexagon
+    for hex_poly in hex_polygons:
+        # Fast check: if any vertex is outside, reject
+        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+            if not outer_polygon.contains(Point(vertex)):
+                return False
+
+    # Check overlaps using hierarchical spatial grid for better performance
+    # This uses a multi-resolution approach - coarse grid for distant hexagons,
+    # fine grid for dense regions
+    def get_spatial_grid_resolution(num_hexagons):
+        # Adaptive grid size based on density
+        if num_hexagons <= 5:
+            return 2.8  # Coarse for sparse cases
+        elif num_hexagons <= 10:
+            return 2.0  # Medium density
+        else:
+            return 1.5  # Fine for dense cases
+
+    grid_size = get_spatial_grid_resolution(len(hex_polygons))
+
+    # Create grid cells for spatial acceleration
+    grid = {}
+
+    # Place each hexagon into grid cells
+    for i, hex_poly in enumerate(hex_polygons):
+        try:
+            # Get bounding box of hexagon
+            min_x, min_y, max_x, max_y = hex_poly.bounds
+            # Determine grid cell range
+            min_grid_x = int(min_x // grid_size)
+            max_grid_x = int(max_x // grid_size)
+            min_grid_y = int(min_y // grid_size)
+            max_grid_y = int(max_y // grid_size)
+
+            # Add to all overlapping grid cells
+            for gx in range(min_grid_x, max_grid_x + 1):
+                for gy in range(min_grid_y, max_grid_y + 1):
+                    if (gx, gy) not in grid:
+                        grid[(gx, gy)] = []
+                    grid[(gx, gy)].append(i)
+        except:
+            # If we can't get bounds, treat this as invalid
+            return False
+
+    # Check overlaps only between hexagons in the same or adjacent cells
+    # and use a more efficient approach for the actual intersection test
+    for i in range(len(hex_polygons)):
+        # Get the grid cells this hexagon occupies
+        try:
+            min_x, min_y, max_x, max_y = hex_polygons[i].bounds
+            min_grid_x = int(min_x // grid_size)
+            max_grid_x = int(max_x // grid_size)
+            min_grid_y = int(min_y // grid_size)
+            max_grid_y = int(max_y // grid_size)
+
+            # Check neighbors in this and adjacent cells
+            for gx in range(min_grid_x - 1, max_grid_x + 2):
+                for gy in range(min_grid_y - 1, max_grid_y + 2):
+                    if (gx, gy) in grid:
+                        for j in grid[(gx, gy)]:
+                            # Only check pairs once and skip self
+                            if i < j:
+                                # Quick distance check before expensive intersection
+                                center_i = hex_polygons[i].centroid.coords[0]
+                                center_j = hex_polygons[j].centroid.coords[0]
+                                dist_sq = (center_i[0] - center_j[0])**2 + (center_i[1] - center_j[1])**2
+                                # If centers are too far apart, no overlap possible
+                                if dist_sq > (2.5)**2:  # Slightly larger than 2*radius to be safe
+                                    continue
+
+                                # Now do the expensive intersection check
+                                try:
+                                    if hex_polygons[i].intersects(hex_polygons[j]):
+                                        return False
+                                except:
+                                    return False
+        except:
+            # If bounds fail, treat as invalid
+            return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>

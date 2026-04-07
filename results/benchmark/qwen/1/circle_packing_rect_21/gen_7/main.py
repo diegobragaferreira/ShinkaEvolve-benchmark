@@ -1,0 +1,240 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+from scipy.spatial import cKDTree
+from rtree import index
+import multiprocessing as mp
+from joblib import Parallel, delayed
+import time
+
+def check_collision(c1, c2):
+    """Check if two circles collide"""
+    dx = c1[0] - c2[0]
+    dy = c1[1] - c2[1]
+    distance = np.sqrt(dx*dx + dy*dy)
+    return distance < (c1[2] + c2[2])
+
+def is_valid_placement(circle, circles, container_width, container_height):
+    """Check if a circle placement is valid (within bounds and no collisions)"""
+    x, y, r = circle
+    
+    # Check bounds
+    if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
+        return False
+    
+    # Check collisions with existing circles
+    for c in circles:
+        if check_collision((x, y, r), c):
+            return False
+    
+    return True
+
+def evaluate_individual(individual, container_width=1.0, container_height=1.0):
+    """Evaluate fitness of individual (sum of radii)"""
+    circles = individual.reshape(-1, 3)
+    
+    # Check if all circles are valid
+    for circle in circles:
+        if not is_valid_placement(circle, circles, container_width, container_height):
+            return (0,)  # Invalid solution
+    
+    # Return negative sum of radii (since we want to maximize)
+    return (-np.sum(circles[:, 2]),)
+
+def create_initial_population(n_circles, population_size, container_width=1.0, container_height=1.0):
+    """Create initial population using adaptive grid method"""
+    population = []
+    
+    # Try different grid arrangements
+    for _ in range(population_size):
+        # Start with a coarse grid arrangement
+        circles = []
+        
+        # Determine grid dimensions based on number of circles
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+        
+        # Grid cell dimensions
+        cell_width = container_width / cols
+        cell_height = container_height / rows
+        
+        # Place circles in grid pattern
+        count = 0
+        for i in range(rows):
+            for j in range(cols):
+                if count >= n_circles:
+                    break
+                    
+                # Position at center of grid cell with some randomness
+                x = (j + 0.5) * cell_width + (np.random.rand() - 0.5) * 0.1 * cell_width
+                y = (i + 0.5) * cell_height + (np.random.rand() - 0.5) * 0.1 * cell_height
+                
+                # Initial radius - small to start with
+                r = min(cell_width, cell_height) * 0.2 * (1 + np.random.rand() * 0.2)
+                
+                # Ensure it's valid before adding
+                temp_circles = circles.copy()
+                temp_circles.append((x, y, r))
+                
+                # If valid, add to circles list (try with increasing radius until valid)
+                max_trials = 10
+                for _ in range(max_trials):
+                    if is_valid_placement((x, y, r), temp_circles[:-1], container_width, container_height):
+                        circles.append((x, y, r))
+                        count += 1
+                        break
+                    else:
+                        r *= 0.9  # Reduce radius slightly
+                        if r <= 0.001:
+                            break
+                
+                if count >= n_circles:
+                    break
+        
+        # If we couldn't fill all circles, try again with different approach
+        if len(circles) < n_circles:
+            # Fill remaining circles randomly but validly
+            remaining = n_circles - len(circles)
+            for _ in range(remaining):
+                # Random valid placement
+                max_attempts = 1000
+                attempts = 0
+                success = False
+                
+                while attempts < max_attempts and not success:
+                    x = np.random.uniform(0.01, container_width - 0.01)
+                    y = np.random.uniform(0.01, container_height - 0.01)
+                    r = np.random.uniform(0.001, min(container_width, container_height) * 0.1)
+                    
+                    if is_valid_placement((x, y, r), circles, container_width, container_height):
+                        circles.append((x, y, r))
+                        success = True
+                    attempts += 1
+                
+                if not success:
+                    # Add a tiny circle if we can't find a good placement
+                    circles.append((container_width/2, container_height/2, 0.001))
+        
+        # Flatten into array
+        individual = np.array(circles).flatten()
+        population.append(individual)
+    
+    return population
+
+def optimize_circles(n_circles=21, container_width=1.0, container_height=1.0, 
+                     population_size=50, generations=100):
+    """Optimize circle packing using evolutionary approach"""
+    
+    # Set up DEAP
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Register genetic operators
+    toolbox.register("individual", tools.initRepeat, creator.Individual, 
+                     lambda: np.random.uniform(0.01, container_width-0.01), 
+                     n=n_circles * 3)
+    
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    # Custom evaluation function
+    def eval_func(individual):
+        return evaluate_individual(individual, container_width, container_height)
+    
+    toolbox.register("evaluate", eval_func)
+    toolbox.register("mate", tools.cxBlend, alpha=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.05, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population
+    pop = create_initial_population(n_circles, population_size, container_width, container_height)
+    
+    # Convert to DEAP individuals
+    for i, individual in enumerate(pop):
+        pop[i] = creator.Individual(individual)
+        pop[i].fitness.values = eval_func(pop[i])
+    
+    # Statistics tracking
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Evolution
+    pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.8, mutpb=0.1, 
+                                       ngen=generations, stats=stats, 
+                                       verbose=False)
+    
+    # Get best individual
+    best_ind = tools.selBest(pop, 1)[0]
+    return best_ind
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container dimensions: perimeter = 4 => width + height = 2
+    # For optimal packing, we use a square container (width = height = 1)
+    container_width = 1.0
+    container_height = 1.0
+    
+    # Run optimization
+    start_time = time.time()
+    try:
+        best_individual = optimize_circles(
+            n_circles=21,
+            container_width=container_width,
+            container_height=container_height,
+            population_size=50,
+            generations=100
+        )
+        
+        # Convert back to proper format
+        circles = best_individual.reshape(-1, 3)
+        
+        # Ensure we have exact 21 circles
+        if circles.shape[0] < 21:
+            # Pad with small circles if needed
+            padding = 21 - circles.shape[0]
+            extra_circles = np.array([[0.5, 0.5, 0.001]] * padding)
+            circles = np.vstack([circles, extra_circles])
+        elif circles.shape[0] > 21:
+            circles = circles[:21]
+            
+        end_time = time.time()
+        
+    except Exception as e:
+        # Fallback to simple grid if optimization fails
+        print(f"Optimization failed with error: {e}")
+        circles = np.zeros((21, 3))
+        # Simple grid arrangement
+        rows = int(np.ceil(np.sqrt(21)))
+        cols = int(np.ceil(21 / rows))
+        cell_width = container_width / cols
+        cell_height = container_height / rows
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= 21:
+                    break
+                x = (j + 0.5) * cell_width
+                y = (i + 0.5) * cell_height
+                r = min(cell_width, cell_height) * 0.15
+                circles[idx] = [x, y, r]
+                idx += 1
+        end_time = time.time()
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

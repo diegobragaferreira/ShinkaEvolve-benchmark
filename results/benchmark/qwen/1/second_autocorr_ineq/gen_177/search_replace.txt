@@ -1,0 +1,385 @@
+<NAME>
+add_jax_automatic_differentiation
+</NAME>
+
+<DESCRIPTION>
+Adding JAX automatic differentiation to improve gradient-based optimization. This approach leverages JAX's superior numerical stability and efficiency for computing gradients compared to finite differences, which should lead to better convergence and higher C₂ values. The key insight is to convert the optimization problem to use JAX's automatic differentiation capabilities to guide the evolutionary optimization more effectively.
+
+The change involves:
+1. Adding JAX as a dependency
+2. Implementing a JAX-based version of the C2 computation for automatic differentiation
+3. Using JAX's grad function to get precise gradients for local optimization
+4. Integrating this with the existing evolutionary framework
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.stats import qmc
+import time
+from numba import jit
+import optuna
+from scipy.spatial.distance import pdist
+import warnings
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # For L2^2 norm using proper trapezoidal integration
+    # For convolution on domain [-1/2, 1/2], with len(g_vals) points
+    # Step width h = 1.0 / (len(g_vals) - 1) if len > 1, else 0.001
+    if len(g_vals) >= 2:
+        # Trapezoidal rule: h * (y0^2 + 2*y1^2 + ... + yn-1^2)/2
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def compute_c2_for_params(params):
+    """Wrapper function for optimization"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        return c2
+    except Exception:
+        return 0.0
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.stats import qmc
+import time
+from numba import jit
+import optuna
+from scipy.spatial.distance import pdist
+import warnings
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # For L2^2 norm using proper trapezoidal integration
+    # For convolution on domain [-1/2, 1/2], with len(g_vals) points
+    # Step width h = 1.0 / (len(g_vals) - 1) if len > 1, else 0.001
+    if len(g_vals) >= 2:
+        # Trapezoidal rule: h * (y0^2 + 2*y1^2 + ... + yn-1^2)/2
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def compute_c2_jax(f_vals):
+    """JAX-based C2 computation for automatic differentiation"""
+    # Convert to JAX array
+    f = jnp.array(f_vals)
+
+    # Compute autoconvolution
+    n = len(f_vals)
+    g_len = 2 * n - 1
+    g = jnp.zeros(g_len)
+
+    # Manual convolution (can be optimized further)
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g = g.at[idx].add(f[i] * f[j])
+
+    # Compute norms using JAX operations
+    g_l1 = jnp.sum(jnp.abs(g))
+    g_l2_sq = jnp.sum(g ** 2)
+    g_max = jnp.max(jnp.abs(g))
+
+    # Compute C2 with numerical stability
+    epsilon = 1e-16
+    c2 = jnp.where(
+        (g_l1 > epsilon) & (g_max > epsilon),
+        g_l2_sq / (g_l1 * g_max),
+        0.0
+    )
+
+    return c2
+
+def evaluate_c2_jax(params):
+    """Wrapper for evaluating C2 using JAX for gradient computation"""
+    return compute_c2_jax(params)
+
+# Create JAX gradients for optimization
+evaluate_c2_grad = grad(evaluate_c2_jax)
+evaluate_c2_jax_vectorized = jax_jit(jax.vmap(evaluate_c2_jax))
+
+def compute_c2_for_params(params):
+    """Wrapper function for optimization"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        return c2
+    except Exception:
+        return 0.0
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_gradient_based_local_search
+</NAME>
+
+<DESCRIPTION>
+Enhancing the local search with JAX-based gradient information. This change modifies the advanced_local_search function to utilize the newly added JAX automatic differentiation capabilities to provide more accurate gradient information for local optimization. This should result in better convergence properties and higher-quality solutions than relying solely on scipy.optimize methods.
+
+The improvement involves:
+1. Using JAX's gradient information in local optimization steps
+2. Adding a gradient-descent-like component to the local search
+3. Combining both gradient-based and derivative-free approaches for robustness
+4. Leveraging JAX's computational efficiency for repeated gradient evaluations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def advanced_local_search(initial_params, max_iter=100):
+    """Advanced local search using multiple optimization techniques"""
+    def objective(x):
+        return -compute_c2_for_params(x)
+
+    try:
+        # First try Nelder-Mead for global refinement
+        result1 = minimize(
+            objective,
+            initial_params,
+            method='Nelder-Mead',
+            options={'maxiter': max_iter//2, 'ftol': 1e-8, 'xtol': 1e-8}
+        )
+
+        # Then try L-BFGS-B for local fine-tuning
+        result2 = minimize(
+            objective,
+            result1.x,
+            method='L-BFGS-B',
+            bounds=[(0, 10) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter//2, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        return result2.x
+    except Exception:
+        # Fallback to coordinate-wise optimization
+        try:
+            # Simple gradient descent-like approach for robustness
+            current_params = np.array(initial_params)
+            for _ in range(max_iter):
+                new_params = current_params.copy()
+                # Update each parameter slightly
+                for i in range(len(current_params)):
+                    test_params = current_params.copy()
+                    test_params[i] = max(0, current_params[i] + 0.01 * np.random.randn())
+                    if compute_c2_for_params(test_params) > compute_c2_for_params(current_params):
+                        new_params[i] = test_params[i]
+                current_params = new_params
+            return current_params
+        except:
+            return initial_params
+=======
+def advanced_local_search(initial_params, max_iter=100):
+    """Advanced local search using multiple optimization techniques with JAX gradient enhancements"""
+    def objective(x):
+        return -compute_c2_for_params(x)
+
+    # Use JAX-based gradient if available
+    try:
+        # Try gradient-based optimization first
+        jax_grads = evaluate_c2_grad(np.array(initial_params))
+
+        # Simple gradient ascent step (with clipping to maintain non-negativity)
+        updated_params = np.array(initial_params) + 0.01 * np.array(jax_grads)
+        updated_params = np.clip(updated_params, 0, None)
+
+        # Evaluate and refine
+        c2_before = compute_c2_for_params(initial_params)
+        c2_after = compute_c2_for_params(updated_params)
+
+        if c2_after > c2_before:
+            current_params = updated_params
+        else:
+            current_params = initial_params
+
+    except Exception:
+        current_params = initial_params
+
+    try:
+        # First try Nelder-Mead for global refinement
+        result1 = minimize(
+            objective,
+            current_params,
+            method='Nelder-Mead',
+            options={'maxiter': max_iter//3, 'ftol': 1e-8, 'xtol': 1e-8}
+        )
+
+        # Then try L-BFGS-B for local fine-tuning
+        result2 = minimize(
+            objective,
+            result1.x,
+            method='L-BFGS-B',
+            bounds=[(0, 10) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter//3, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        # Final gradient-based refinement using JAX gradients
+        final_params = result2.x
+        try:
+            # Apply small gradient steps
+            jax_grads = evaluate_c2_grad(np.array(final_params))
+            refined_params = np.array(final_params) + 0.005 * np.array(jax_grads)
+            refined_params = np.clip(refined_params, 0, None)
+
+            if compute_c2_for_params(refined_params) > compute_c2_for_params(final_params):
+                final_params = refined_params
+        except:
+            pass
+
+        return final_params
+    except Exception:
+        # Fallback to coordinate-wise optimization
+        try:
+            # Simple gradient descent-like approach for robustness
+            current_params = np.array(initial_params)
+            for _ in range(max_iter//2):
+                new_params = current_params.copy()
+                # Update each parameter slightly using gradient info when available
+                try:
+                    jax_grads = evaluate_c2_grad(current_params)
+                    step_direction = np.array(jax_grads)
+                except:
+                    step_direction = np.random.randn(len(current_params))
+
+                # Apply step with clipping
+                test_params = current_params + 0.01 * step_direction
+                test_params = np.clip(test_params, 0, None)
+
+                if compute_c2_for_params(test_params) > compute_c2_for_params(current_params):
+                    new_params = test_params
+                current_params = new_params
+
+            return current_params
+        except:
+            return initial_params
+>>>>>>> REPLACE
+</DIFF>

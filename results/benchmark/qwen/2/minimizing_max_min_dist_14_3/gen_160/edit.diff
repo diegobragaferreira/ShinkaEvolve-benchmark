@@ -1,0 +1,294 @@
+--- a/original.py
++++ b/original.py
+@@ -1,107 +1,245 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
+ import math
++import random
++from scipy.spatial import SphericalVoronoi
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+ 
+     """
+ 
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum pairwise distances."""
++        if len(points) < 2:
++            return 0.0
+         distances = pdist(points)
+-        return np.min(distances) / np.max(distances)
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++        if max_dist == 0:
++            return 0.0
++        return min_dist / max_dist
+ 
+     def initialize_points():
+-        """Initialize points in a good starting configuration using enhanced Fibonacci sphere method."""
+-        # Generate points on a unit sphere using enhanced Fibonacci spiral method
+-        # This version improves distribution by using a more carefully calibrated approach
++        """Initialize points using an improved Fibonacci sphere method with better distribution."""
++        # Use a more sophisticated Fibonacci implementation
+         points = np.zeros((14, 3))
+ 
+-        # Golden ratio
++        # Golden ratio constant
+         golden_ratio = (1 + math.sqrt(5)) / 2
+ 
+-        # Use a slightly modified approach to ensure better spacing
++        # Generate points using Fibonacci method with better spacing
+         for i in range(14):
+-            # Adjusted Fibonacci approach for better distribution
+-            # The offset helps avoid clustering near poles
+-            offset = 0.5
+-            y = 1 - (i / float(14 - 1)) * 2  # y goes from 1 to -1
+-            radius = math.sqrt(1 - y * y)  # radius at y
+-
+-            # Use a more refined phi calculation to better distribute points
+-            # The golden ratio relationship helps with uniformity
+-            phi = (i * golden_ratio) % 14 * (2 * math.pi / 14) + offset * (i / 14) * math.pi
++            # More evenly distributed y-coordinates using Fibonacci-like spacing
++            y = 1 - (i / (14 - 1)) * 2  # y goes from 1 to -1
++
++            # Calculate radius at given y
++            radius = math.sqrt(1 - y * y)
++
++            # Improved phi calculation to avoid clustering
++            # Using a modified golden angle to distribute points more uniformly
++            phi = (i * golden_ratio) % 14 * (2 * math.pi / 14) + 0.1 * math.sin(i * 0.5)
+ 
+             # Convert to Cartesian coordinates
+             x = radius * math.cos(phi)
+             z = radius * math.sin(phi)
+ 
+             points[i] = [x, y, z]
+ 
+-        # Apply small random perturbations to break any remaining symmetries
+-        # This helps avoid local minima during optimization
++        # Apply multiple levels of perturbations to break symmetries
+         np.random.seed(42)  # For reproducibility
+-        perturbation_magnitude = 0.05
+-        points += np.random.normal(0, perturbation_magnitude, points.shape)
+-
+-        # Normalize to unit sphere to ensure all points are exactly on the surface
++
++        # Level 1: Small random perturbation
++        points += np.random.normal(0, 0.03, points.shape)
++
++        # Level 2: Additional perturbation based on golden ratio sequence
++        for i in range(14):
++            angle = (i * golden_ratio) % 14 * 0.1
++            points[i] += np.array([
++                0.01 * math.cos(angle),
++                0.01 * math.sin(angle),
++                0.01 * math.cos(angle * 2)
++            ])
++
++        # Normalize to unit sphere
+         norms = np.linalg.norm(points, axis=1)
+         safe_norms = np.where(norms == 0, 1.0, norms)
+         points = points / safe_norms[:, np.newaxis]
+ 
+         return points
+ 
+-    def optimize_points(initial_points, max_iterations=10000, temp_start=1.0, cooling_rate=0.9995):
+-        """Optimize point placement using simulated annealing."""
++    def compute_gradient_vector(points, point_idx, epsilon=1e-4):
++        """Compute gradient vector for a specific point using finite differences."""
++        current_ratio = compute_min_max_ratio(points)
++        gradient = np.zeros(3)
++
++        # For each dimension, compute partial derivative
++        for dim in range(3):
++            # Perturb point in positive direction
++            test_points_pos = points.copy()
++            test_points_pos[point_idx, dim] += epsilon
++            # Project back to sphere
++            norm = np.linalg.norm(test_points_pos[point_idx])
++            if norm > 1e-10:
++                test_points_pos[point_idx] = test_points_pos[point_idx] / norm
++
++            ratio_pos = compute_min_max_ratio(test_points_pos)
++
++            # Perturb point in negative direction
++            test_points_neg = points.copy()
++            test_points_neg[point_idx, dim] -= epsilon
++            # Project back to sphere
++            norm = np.linalg.norm(test_points_neg[point_idx])
++            if norm > 1e-10:
++                test_points_neg[point_idx] = test_points_neg[point_idx] / norm
++
++            ratio_neg = compute_min_max_ratio(test_points_neg)
++
++            # Approximate gradient
++            gradient[dim] = (ratio_pos - ratio_neg) / (2 * epsilon)
++
++        return gradient
++
++    def adaptive_local_search(points, max_iterations=100):
++        """Apply adaptive local search to improve point configuration."""
++        current_points = points.copy()
++        current_ratio = compute_min_max_ratio(current_points)
++
++        for iteration in range(max_iterations):
++            # Select point to optimize based on distance characteristics
++            if iteration % 10 == 0 and iteration > 0:
++                # Analyze distribution to select problematic points
++                distances = pdist(current_points)
++                if len(distances) > 0:
++                    min_dist = np.min(distances)
++                    max_dist = np.max(distances)
++                    mean_dist = np.mean(distances)
++
++                    # Prefer points in very close pairs if they exist
++                    if min_dist < mean_dist * 0.3:
++                        # Find point involved in smallest distances
++                        dist_matrix = squareform(distances)
++                        min_indices = np.unravel_index(np.argmin(dist_matrix), dist_matrix.shape)
++                        point_idx = min_indices[0]
++                    else:
++                        # Random selection otherwise
++                        point_idx = random.randint(0, 13)
++                else:
++                    point_idx = random.randint(0, 13)
++            else:
++                point_idx = random.randint(0, 13)
++
++            # Compute gradient for the selected point
++            gradient = compute_gradient_vector(current_points, point_idx)
++
++            # Apply gradient step with adaptive learning rate
++            learning_rate = 0.05 / (1 + iteration / 50.0)  # Decreasing over time
++            new_points = current_points.copy()
++            new_points[point_idx] = current_points[point_idx] + learning_rate * gradient
++
++            # Project back to unit sphere
++            norm = np.linalg.norm(new_points[point_idx])
++            if norm > 1e-10:
++                new_points[point_idx] = new_points[point_idx] / norm
++
++            new_ratio = compute_min_max_ratio(new_points)
++
++            # Accept improvement or based on a broader acceptance criterion
++            if new_ratio > current_ratio:
++                current_points = new_points
++                current_ratio = new_ratio
++            elif np.random.random() < math.exp((new_ratio - current_ratio) / 0.01):
++                current_points = new_points
++                current_ratio = new_ratio
++
++            # Occasionally add random perturbation to escape local minima
++            if iteration % 20 == 0 and iteration > 0:
++                rand_point = random.randint(0, 13)
++                perturb = np.random.normal(0, 0.005, 3)
++                current_points[rand_point] = current_points[rand_point] + perturb
++                norm = np.linalg.norm(current_points[rand_point])
++                if norm > 1e-10:
++                    current_points[rand_point] = current_points[rand_point] / norm
++
++        return current_points
++
++    def optimize_points(initial_points, max_iterations=20000, temp_start=1.0, cooling_rate=0.9995):
++        """Optimize point placement using enhanced simulated annealing."""
+         current_points = initial_points.copy()
+         best_points = current_points.copy()
+         best_ratio = compute_min_max_ratio(current_points)
+ 
+         temp = temp_start
+ 
++        # Track improvement for adaptive cooling
++        last_improvement = 0
++        improvement_count = 0
++
+         for iteration in range(max_iterations):
+-            # Make a small random perturbation to one random point
+-            point_idx = np.random.randint(0, len(current_points))
+-            # Create perturbation vector
+-            perturbation = np.random.normal(0, temp * 0.01, 3)
+-            # Apply perturbation
+-            new_points = current_points.copy()
+-            new_points[point_idx] += perturbation
+-
+-            # Normalize to keep points on unit sphere (this helps maintain the constraint)
+-            # But we don't strictly enforce this to allow for better optimization
+-            new_ratio = compute_min_max_ratio(new_points)
+-
+-            # Accept or reject based on Metropolis criterion
+-            if new_ratio > best_ratio or np.random.rand() < math.exp((new_ratio - best_ratio) / temp):
+-                current_points = new_points
+-                if new_ratio > best_ratio:
+-                    best_ratio = new_ratio
+-                    best_points = new_points.copy()
+-
+-            # Cool down
++            # Adaptive cooling based on performance
++            if iteration - last_improvement > 1000:
++                temp = max(1e-8, temp * 0.98)  # Slowly cool down when stagnating
++
++            # Decide whether to do local search or traditional SA
++            if iteration % 500 == 0 and iteration > 0:
++                # Perform local search periodically
++                refined_points = adaptive_local_search(current_points, max_iterations=20)
++                refined_ratio = compute_min_max_ratio(refined_points)
++
++                if refined_ratio > best_ratio:
++                    current_points = refined_points
++                    best_ratio = refined_ratio
++                    best_points = refined_points.copy()
++                    last_improvement = iteration
++            else:
++                # Traditional simulated annealing step
++                point_idx = np.random.randint(0, len(current_points))
++
++                # Create perturbation vector with adaptive scale
++                perturbation = np.random.normal(0, temp * 0.02, 3)
++                new_points = current_points.copy()
++                new_points[point_idx] += perturbation
++
++                # Project back to sphere
++                norm = np.linalg.norm(new_points[point_idx])
++                if norm > 1e-10:
++                    new_points[point_idx] = new_points[point_idx] / norm
++
++                new_ratio = compute_min_max_ratio(new_points)
++
++                # Accept or reject based on Metropolis criterion
++                if new_ratio > best_ratio or np.random.rand() < math.exp((new_ratio - best_ratio) / temp):
++                    current_points = new_points
++                    if new_ratio > best_ratio:
++                        best_ratio = new_ratio
++                        best_points = new_points.copy()
++                        last_improvement = iteration
++
++            # Cool down temperature
+             temp *= cooling_rate
+ 
+             # Occasionally print progress
+-            if iteration % 1000 == 0:
++            if iteration % 5000 == 0:
+                 print(f"Iteration {iteration}, Best ratio: {best_ratio:.6f}")
+ 
+         return best_points, best_ratio
+ 
+     # Initialize with a good configuration
+     initial_points = initialize_points()
+ 
+-    # Optimize using simulated annealing
++    # Optimize using enhanced simulated annealing
+     optimized_points, final_ratio = optimize_points(initial_points)
+ 
++    # Final local search refinement
++    final_points = adaptive_local_search(optimized_points, max_iterations=100)
++
+     # Ensure we're returning the best solution found
+-    return optimized_points
++    return final_points
+ 
+ 
+ # EVOLVE-BLOCK-END

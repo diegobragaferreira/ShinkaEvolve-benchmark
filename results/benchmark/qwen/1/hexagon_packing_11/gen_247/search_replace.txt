@@ -1,0 +1,185 @@
+Let me look more carefully at the actual structure of the code to find the right location for the spatial grid methods.
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def get_bounding_box(hex_poly):
+        """Get bounding box of hexagon for spatial indexing"""
+        bounds = hex_poly.bounds
+        return (bounds[0], bounds[1], bounds[2], bounds[3])
+
+    @staticmethod
+    def build_spatial_grid(hexagons, grid_size=5.0):
+        """Build a simple spatial grid for fast collision detection"""
+        grid = defaultdict(list)
+        for i, hex_poly in enumerate(hexagons):
+            bbox = ConstraintChecker.get_bounding_box(hex_poly)
+            min_x, min_y, max_x, max_y = bbox
+            for x in range(int(min_x/grid_size), int(max_x/grid_size)+1):
+                for y in range(int(min_y/grid_size), int(max_y/grid_size)+1):
+                    grid[(x,y)].append(i)
+        return grid
+
+    @staticmethod
+    def fast_collision_check(hexagons, grid, i, j):
+        """Fast collision check using spatial grid"""
+        if i == j:
+            return False
+
+        # Check if hexagons are in same or adjacent grid cells
+        bbox_i = ConstraintChecker.get_bounding_box(hexagons[i])
+        bbox_j = ConstraintChecker.get_bounding_box(hexagons[j])
+
+        # Simple overlap test first
+        if not hexagons[i].intersects(hexagons[j]):
+            return False
+
+        # More precise check
+        return hexagons[i].intersects(hexagons[j])
+=======
+    @staticmethod
+    def get_bounding_box(hex_poly):
+        """Get bounding box of hexagon for spatial indexing"""
+        bounds = hex_poly.bounds
+        return (bounds[0], bounds[1], bounds[2], bounds[3])
+
+    @staticmethod
+    def build_hierarchical_spatial_grid(hexagons, positions, angles):
+        """Build a hierarchical spatial grid for fast collision detection"""
+        if len(hexagons) == 0:
+            return None, None
+
+        # Determine bounds of all hexagons
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+
+        for i in range(len(positions)):
+            pos = positions[i]
+            angle = angles[i]
+            hex_vertices = HexagonGeometry.vertices(pos[0], pos[1], angle)
+            for vx, vy in hex_vertices:
+                min_x = min(min_x, vx)
+                max_x = max(max_x, vx)
+                min_y = min(min_y, vy)
+                max_y = max(max_y, vy)
+
+        # Add padding
+        padding = 0.5
+        min_x -= padding
+        max_x += padding
+        min_y -= padding
+        max_y += padding
+
+        # Calculate grid sizes based on distribution
+        width = max_x - min_x
+        height = max_y - min_y
+
+        # Use coarser grid for sparse regions, finer for dense regions
+        # Estimate density based on number of hexagons vs area
+        area = width * height
+        density = len(hexagons) / area if area > 0 else 0
+
+        # Fine grid size for dense areas, coarse for sparse
+        if density > 2.0:  # High density region
+            coarse_cell_size = 1.4  # Fine grid
+            fine_cell_size = 0.7    # Even finer for tight checks
+        else:  # Sparse region
+            coarse_cell_size = 2.8  # Coarse grid
+            fine_cell_size = 1.4    # Medium grid
+
+        # Build coarse grid
+        coarse_grid = defaultdict(list)
+        for i in range(len(hexagons)):
+            bbox = ConstraintChecker.get_bounding_box(hexagons[i])
+            min_x_i, min_y_i, max_x_i, max_y_i = bbox
+            # Grid cells that this hexagon touches
+            start_x = int(min_x_i / coarse_cell_size)
+            end_x = int(max_x_i / coarse_cell_size) + 1
+            start_y = int(min_y_i / coarse_cell_size)
+            end_y = int(max_y_i / coarse_cell_size) + 1
+
+            for x in range(start_x, end_x):
+                for y in range(start_y, end_y):
+                    coarse_grid[(x, y)].append(i)
+
+        # Build fine grid for closer proximity checking
+        fine_grid = defaultdict(list)
+        for i in range(len(hexagons)):
+            bbox = ConstraintChecker.get_bounding_box(hexagons[i])
+            min_x_i, min_y_i, max_x_i, max_y_i = bbox
+            # Grid cells that this hexagon touches
+            start_x = int(min_x_i / fine_cell_size)
+            end_x = int(max_x_i / fine_cell_size) + 1
+            start_y = int(min_y_i / fine_cell_size)
+            end_y = int(max_y_i / fine_cell_size) + 1
+
+            for x in range(start_x, end_x):
+                for y in range(start_y, end_y):
+                    fine_grid[(x, y)].append(i)
+
+        return coarse_grid, fine_grid
+
+    @staticmethod
+    def fast_collision_check_hierarchical(hexagons, coarse_grid, fine_grid, i, j):
+        """Fast collision check using hierarchical spatial grid"""
+        if i == j:
+            return False
+
+        # Check if hexagons are in same or adjacent coarse grid cells
+        bbox_i = ConstraintChecker.get_bounding_box(hexagons[i])
+        bbox_j = ConstraintChecker.get_bounding_box(hexagons[j])
+
+        # Quick coarse check: if not in same or adjacent coarse cells, no need to check
+        min_x_i, min_y_i, max_x_i, max_y_i = bbox_i
+        min_x_j, min_y_j, max_x_j, max_y_j = bbox_j
+
+        # Find coarse grid cells for both hexagons
+        coarse_size = 2.8  # This should match the coarse grid construction
+        cell_i_start_x = int(min_x_i / coarse_size)
+        cell_i_end_x = int(max_x_i / coarse_size)
+        cell_i_start_y = int(min_y_i / coarse_size)
+        cell_i_end_y = int(max_y_i / coarse_size)
+
+        cell_j_start_x = int(min_x_j / coarse_size)
+        cell_j_end_x = int(max_x_j / coarse_size)
+        cell_j_start_y = int(min_y_j / coarse_size)
+        cell_j_end_y = int(max_y_j / coarse_size)
+
+        # Check if coarse cells overlap (within 1 cell in each dimension)
+        if abs(cell_i_start_x - cell_j_start_x) > 1 or \
+           abs(cell_i_start_y - cell_j_start_y) > 1 or \
+           abs(cell_i_end_x - cell_j_end_x) > 1 or \
+           abs(cell_i_end_y - cell_j_end_y) > 1:
+            return False
+
+        # More precise check using fine grid
+        # First check if they're in same fine grid cells (most likely case)
+        fine_size = 1.4  # This should match the fine grid construction
+        fine_cell_i_start_x = int(min_x_i / fine_size)
+        fine_cell_i_end_x = int(max_x_i / fine_size)
+        fine_cell_i_start_y = int(min_y_i / fine_size)
+        fine_cell_i_end_y = int(max_y_i / fine_size)
+
+        fine_cell_j_start_x = int(min_x_j / fine_size)
+        fine_cell_j_end_x = int(max_x_j / fine_size)
+        fine_cell_j_start_y = int(min_y_j / fine_size)
+        fine_cell_j_end_y = int(max_y_j / fine_size)
+
+        # Check if fine cells overlap
+        fine_overlap = (abs(fine_cell_i_start_x - fine_cell_j_start_x) <= 1 and
+                       abs(fine_cell_i_start_y - fine_cell_j_start_y) <= 1 and
+                       abs(fine_cell_i_end_x - fine_cell_j_end_x) <= 1 and
+                       abs(fine_cell_i_end_y - fine_cell_j_end_y) <= 1)
+
+        # If they don't have overlapping fine cells, quick rejection
+        if not fine_overlap:
+            # Still do a quick distance check first for performance
+            dist_sq = (min_x_i - min_x_j)**2 + (min_y_i - min_y_j)**2
+            if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+                return False
+            return False
+
+        # More precise check with intersection test
+        return hexagons[i].intersects(hexagons[j])
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,159 @@
+<NAME>
+add_numba_jit_compilation
+</NAME>
+
+<DESCRIPTION>
+Adding numba JIT compilation to the core geometric computation functions will significantly improve performance by compiling the hot paths (like overlap checking and vertex generation) to machine code. This addresses the computational bottleneck in the hexagon packing problem where many geometric operations are repeated during optimization.
+
+The key areas to target with numba:
+1. Hexagon vertex generation
+2. Bounding circle calculations
+3. Fast overlap checking with early rejection
+4. Spatial indexing operations
+
+This follows the pattern from successful generations (151, 160, 161, etc.) that achieved 0.1 scores through Numba JIT compilation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+from functools import lru_cache
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+from functools import lru_cache
+from numba import jit, prange
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_vertices(self):
+        """Generate vertices of a regular hexagon."""
+        angle_rad = np.radians(self.angle_degrees)
+        angles = np.linspace(0, 2*np.pi, 7) + angle_rad  # 6 sides + closing vertex
+        vertices = []
+        for angle in angles:
+            x = self.center_x + self.side_length * np.cos(angle)
+            y = self.center_y + self.side_length * np.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+=======
+    @staticmethod
+    @jit(nopython=True)
+    def _generate_vertices_static(center_x, center_y, angle_degrees, side_length):
+        """Generate vertices of a regular hexagon."""
+        angle_rad = np.radians(angle_degrees)
+        angles = np.linspace(0, 2*np.pi, 7) + angle_rad  # 6 sides + closing vertex
+        vertices = np.empty((6, 2))
+        for i, angle in enumerate(angles[:-1]):  # exclude last duplicate vertex
+            x = center_x + side_length * np.cos(angle)
+            y = center_y + side_length * np.sin(angle)
+            vertices[i, 0] = x
+            vertices[i, 1] = y
+        return vertices
+
+    def _generate_vertices(self):
+        """Generate vertices of a regular hexagon."""
+        return self._generate_vertices_static(self.center_x, self.center_y, self.angle_degrees, self.side_length)
+>>>>>>> REPLACE
+
+</Diff>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_bounding_circle(self):
+        """Get the bounding circle (center and radius) of the hexagon."""
+        cx, cy = self.center_x, self.center_y
+        # Distance from center to corner of unit hexagon is 1
+        r = self.side_length
+        return cx, cy, r
+=======
+    @staticmethod
+    @jit(nopython=True)
+    def get_bounding_circle_static(center_x, center_y, side_length):
+        """Get the bounding circle (center and radius) of the hexagon."""
+        # Distance from center to corner of unit hexagon is 1
+        r = side_length
+        return center_x, center_y, r
+
+    def get_bounding_circle(self):
+        """Get the bounding circle (center and radius) of the hexagon."""
+        return self.get_bounding_circle_static(self.center_x, self.center_y, self.side_length)
+>>>>>>> REPLACE
+
+</Diff>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    @lru_cache(maxsize=1000)
+    def _cached_overlap_check(hex1_vertices_tuple, hex2_vertices_tuple):
+        """Cached overlap check between two hexagons."""
+        polygon1 = Polygon(hex1_vertices_tuple)
+        polygon2 = Polygon(hex2_vertices_tuple)
+        return polygon1.intersects(polygon2)
+
+    def fast_overlap_check(self, hex1, hex2):
+        """Fast overlap check using bounding circles for early rejection."""
+        cx1, cy1, r1 = hex1.get_bounding_circle()
+        cx2, cy2, r2 = hex2.get_bounding_circle()
+
+        # Fast circle overlap test
+        dist = np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+        if dist >= (r1 + r2):
+            return False  # Definitely don't overlap
+
+        # If close enough, do precise overlap check
+        return self._cached_overlap_check(
+            tuple(tuple(v) for v in hex1.vertices),
+            tuple(tuple(v) for v in hex2.vertices)
+        )
+=======
+    @staticmethod
+    @lru_cache(maxsize=1000)
+    def _cached_overlap_check(hex1_vertices_tuple, hex2_vertices_tuple):
+        """Cached overlap check between two hexagons."""
+        polygon1 = Polygon(hex1_vertices_tuple)
+        polygon2 = Polygon(hex2_vertices_tuple)
+        return polygon1.intersects(polygon2)
+
+    @staticmethod
+    @jit(nopython=True)
+    def _fast_circle_overlap_test(cx1, cy1, r1, cx2, cy2, r2):
+        """Fast circle overlap test using numba."""
+        # Fast circle overlap test
+        dx = cx1 - cx2
+        dy = cy1 - cy2
+        dist_sq = dx*dx + dy*dy
+        radii_sum = r1 + r2
+        return dist_sq < (radii_sum * radii_sum)
+
+    def fast_overlap_check(self, hex1, hex2):
+        """Fast overlap check using bounding circles for early rejection."""
+        cx1, cy1, r1 = hex1.get_bounding_circle()
+        cx2, cy2, r2 = hex2.get_bounding_circle()
+
+        # Fast circle overlap test
+        if not self._fast_circle_overlap_test(cx1, cy1, r1, cx2, cy2, r2):
+            return False  # Definitely don't overlap
+
+        # If close enough, do precise overlap check
+        return self._cached_overlap_check(
+            tuple(tuple(v) for v in hex1.vertices),
+            tuple(tuple(v) for v in hex2.vertices)
+        )
+>>>>>>> REPLACE
+
+</Diff>

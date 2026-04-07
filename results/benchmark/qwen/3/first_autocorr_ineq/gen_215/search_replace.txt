@@ -1,0 +1,412 @@
+<NAME>
+improve_autocorrelation_optimization
+</NAME>
+
+<DESCRIPTION>
+I propose improving the autocorrelation optimization by implementing a multi-start gradient-based optimization with adaptive learning rates and incorporating second-order information more effectively. The key enhancements include:
+
+1. Using a multi-start approach to avoid local minima
+2. Implementing adaptive learning rates that decrease with iterations
+3. Better curvature estimation using a more stable second-order method
+4. Adding early stopping criteria based on convergence rate
+5. Improving the local refinement phase with simulated annealing-like temperature control
+
+These changes will help discover better sequences that beat the current benchmark (1/C₁ > 1/1.5031) by exploring more effectively in the optimization landscape.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_curvature(sequence: List[float]) -> np.ndarray:
+    """Estimate curvature using finite differences for the Hessian."""
+    a = np.array(sequence)
+    n = len(a)
+    epsilon = 1e-4
+
+    # Estimate diagonal Hessian elements
+    hessian_diag = np.zeros(n)
+    delta = epsilon
+
+    # Compute second derivative using central differences
+    for i in range(n):
+        # Perturb element i
+        a_plus = a.copy()
+        a_minus = a.copy()
+        a_plus[i] += delta
+        a_minus[i] -= delta
+
+        # Compute max convolution values
+        use_fft = n > 100 and assess_numerical_stability(a, a)
+
+        if use_fft:
+            b_plus = convolve_fft(a_plus, a_plus)
+            b_minus = convolve_fft(a_minus, a_minus)
+        else:
+            b_plus = convolve_direct(a_plus, a_plus)
+            b_minus = convolve_direct(a_minus, a_minus)
+
+        max_plus = np.max(b_plus)
+        max_minus = np.max(b_minus)
+        max_center = np.max(convolve_fft(a, a) if use_fft else convolve_direct(a, a))
+
+        # Estimate second derivative (approximate curvature)
+        curvature = (max_plus + max_minus - 2 * max_center) / (delta**2)
+        hessian_diag[i] = max(0, curvature)  # Ensuring non-negative curvature
+
+    return hessian_diag
+
+def curvature_aware_descent(sequence: List[float], learning_rate: float = 0.001,
+                          curvature_weight: float = 0.01) -> List[float]:
+    """Perform descent with curvature information to improve convergence."""
+    grad = compute_gradient(sequence)
+    curvature = compute_curvature(sequence)
+
+    # Adjust gradient with curvature term
+    # This helps avoid overshooting in flat regions
+    adjusted_grad = grad + curvature_weight * curvature * grad
+
+    new_sequence = np.array(sequence) + learning_rate * adjusted_grad
+    new_sequence = np.maximum(new_sequence, 0.0)
+    new_sequence = np.clip(new_sequence, 0, 1000)
+
+    return new_sequence.tolist()
+=======
+def compute_curvature(sequence: List[float]) -> np.ndarray:
+    """Estimate curvature using a more stable second-order method."""
+    a = np.array(sequence)
+    n = len(a)
+    epsilon = 1e-5
+
+    # Use a more stable approximation with multiple points
+    hessian_diag = np.zeros(n)
+
+    # Compute second derivative using centered differences with multiple points
+    for i in range(n):
+        # Use a three-point stencil for better accuracy
+        delta = epsilon * (1.0 + np.abs(a[i]))  # Adaptive delta based on magnitude
+
+        # Perturb element i
+        a_plus = a.copy()
+        a_minus = a.copy()
+        a_plus[i] += delta
+        a_minus[i] -= delta
+
+        # Compute max convolution values
+        use_fft = n > 100 and assess_numerical_stability(a, a)
+
+        if use_fft:
+            b_plus = convolve_fft(a_plus, a_plus)
+            b_minus = convolve_fft(a_minus, a_minus)
+        else:
+            b_plus = convolve_direct(a_plus, a_plus)
+            b_minus = convolve_direct(a_minus, a_minus)
+
+        max_plus = np.max(b_plus)
+        max_minus = np.max(b_minus)
+        max_center = np.max(convolve_fft(a, a) if use_fft else convolve_direct(a, a))
+
+        # Estimate second derivative using 3-point stencil
+        curvature = (max_plus + max_minus - 2 * max_center) / (delta**2)
+        hessian_diag[i] = max(0, curvature)  # Ensuring non-negative curvature
+
+    return hessian_diag
+
+def curvature_aware_descent(sequence: List[float], learning_rate: float = 0.001,
+                          curvature_weight: float = 0.01) -> List[float]:
+    """Perform descent with curvature information to improve convergence."""
+    grad = compute_gradient(sequence)
+    curvature = compute_curvature(sequence)
+
+    # Adjust gradient with curvature term
+    # This helps avoid overshooting in flat regions
+    adjusted_grad = grad + curvature_weight * curvature * grad
+
+    new_sequence = np.array(sequence) + learning_rate * adjusted_grad
+    new_sequence = np.maximum(new_sequence, 0.0)
+    new_sequence = np.clip(new_sequence, 0, 1000)
+
+    return new_sequence.tolist()
+
+def simulated_annealing_refinement(sequence: List[float], max_iterations: int = 20) -> List[float]:
+    """Refine sequence using a simulated annealing-inspired approach."""
+    current_seq = np.array(sequence)
+    current_inv_c1 = compute_c1_constant(sequence)[1]
+
+    # Initial temperature and cooling schedule
+    temp = 1.0
+    cooling_rate = 0.95
+
+    for iteration in range(max_iterations):
+        # Generate neighbor by small random perturbation
+        neighbor = current_seq + np.random.normal(0, 0.1 * np.abs(current_seq) + 1e-5)
+        neighbor = np.maximum(neighbor, 0.0)
+        neighbor = np.clip(neighbor, 0, 1000)
+
+        # Compute neighbor's inverse C1
+        _, neighbor_inv_c1 = compute_c1_constant(neighbor.tolist())
+
+        # Accept or reject based on Metropolis criterion
+        if neighbor_inv_c1 > current_inv_c1:
+            current_seq = neighbor
+            current_inv_c1 = neighbor_inv_c1
+        else:
+            # Probability of acceptance for worse solution
+            prob_accept = np.exp((neighbor_inv_c1 - current_inv_c1) / temp)
+            if np.random.random() < prob_accept:
+                current_seq = neighbor
+                current_inv_c1 = neighbor_inv_c1
+
+        # Cool down temperature
+        temp *= cooling_rate
+
+    return current_seq.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_local_refinement_phase(best_sequence: List[float],
+                                   max_iterations: int = 10) -> List[float]:
+    """Refine the best individual using multiple optimization techniques."""
+    current_seq = best_sequence.copy()
+
+    # Try different refinement methods
+    for iteration in range(max_iterations):
+        # Try curvature-aware descent
+        refined = curvature_aware_descent(current_seq, learning_rate=0.001, curvature_weight=0.01)
+        _, inv_c1_refined = compute_c1_constant(refined)
+        _, inv_c1_current = compute_c1_constant(current_seq)
+
+        if inv_c1_refined > inv_c1_current:
+            current_seq = refined
+        else:
+            # Try a standard gradient descent step
+            refined_grad = gradient_descent_step(current_seq, learning_rate=0.0001)
+            _, inv_c1_refined_grad = compute_c1_constant(refined_grad)
+
+            if inv_c1_refined_grad > inv_c1_current:
+                current_seq = refined_grad
+
+        # Small random perturbation for further exploration
+        if random.random() < 0.3:
+            perturbed = mutate_sequence(current_seq, mutation_rate=0.02)
+            _, inv_c1_perturbed = compute_c1_constant(perturbed)
+            _, inv_c1_current = compute_c1_constant(current_seq)
+
+            if inv_c1_perturbed > inv_c1_current:
+                current_seq = perturbed
+
+    return current_seq
+=======
+def adaptive_local_refinement_phase(best_sequence: List[float],
+                                   max_iterations: int = 15) -> List[float]:
+    """Refine the best individual using multi-start gradient-based approach."""
+    current_seq = best_sequence.copy()
+    current_inv_c1 = compute_c1_constant(current_seq)[1]
+
+    # Multi-start gradient descent with adaptive learning rates
+    best_found = current_seq.copy()
+    best_inv_c1_found = current_inv_c1
+
+    # Try multiple starting points
+    for start_iter in range(5):
+        # Randomly perturb the sequence to create a new starting point
+        if start_iter > 0:
+            perturbed = mutate_sequence(current_seq, mutation_rate=0.1)
+            current_seq = perturbed
+
+        # Adaptive learning rate schedule
+        initial_lr = 0.001 * (0.5 + 0.5 * random.random())  # Randomize initial LR
+        lr = initial_lr
+
+        for iteration in range(max_iterations // 5):  # Reduce iterations per start
+            # Perform curvature-aware descent
+            refined = curvature_aware_descent(current_seq, learning_rate=lr, curvature_weight=0.01)
+            _, inv_c1_refined = compute_c1_constant(refined)
+
+            if inv_c1_refined > current_inv_c1:
+                current_seq = refined
+                current_inv_c1 = inv_c1_refined
+
+                # Update best found so far
+                if inv_c1_refined > best_inv_c1_found:
+                    best_inv_c1_found = inv_c1_refined
+                    best_found = refined.copy()
+
+            # Reduce learning rate for later iterations (warm restart)
+            lr *= 0.95
+
+            # Early stopping if improvement is minimal
+            if iteration > 5 and abs(inv_c1_refined - current_inv_c1) < 1e-8:
+                break
+
+    # Final simulated annealing refinement
+    final_refined = simulated_annealing_refinement(best_found, max_iterations=10)
+    _, final_inv_c1 = compute_c1_constant(final_refined)
+
+    return final_refined if final_inv_c1 > best_inv_c1_found else best_found
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 20,
+    generations: int = 50,
+    elite_fraction: float = 0.2,
+    patience_limit: int = 10
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using enhanced approach."""
+    start_time = time.time()
+
+    # Phase 1: Initialize population with historical sequences
+    population = initialize_population_with_historical_samples(
+        population_size, initial_length_range
+    )
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    patience_counter = 0
+
+    for generation in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            _, inv_c1 = compute_c1_constant(individual)
+            fitness_scores.append(inv_c1)
+
+        # Sort by fitness (descending order)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        current_best, current_best_inv_c1 = population[sorted_indices[0]], fitness_scores[sorted_indices[0]]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = current_best.copy()
+            patience_counter = 0  # Reset patience counter
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement for too long
+        if patience_counter > patience_limit:
+            break
+
+        # Phase 2: Adaptive evolution
+        population = adaptive_evolution_phase(
+            population,
+            fitness_scores,
+            int(elite_fraction * population_size)
+        )
+
+    # Phase 3: Local refinement of best solution
+    if best_sequence is not None:
+        best_sequence = adaptive_local_refinement_phase(best_sequence)
+
+    # Phase 4: Dynamic sequence length exploration
+    if best_sequence is not None:
+        best_final_sequence = best_sequence.copy()
+        best_final_inv_c1 = best_inv_c1
+
+        # Try several sequence lengths around the optimal
+        test_lengths = [int(l) for l in np.linspace(100, 1000, 10)]
+        for length in test_lengths:
+            # Adjust length of sequence
+            adjusted_seq = adjust_sequence_length(best_sequence, length)
+
+            # Compute new C1 value
+            _, inv_c1 = compute_c1_constant(adjusted_seq)
+
+            # If better, keep the new sequence
+            if inv_c1 > best_final_inv_c1:
+                best_final_inv_c1 = inv_c1
+                best_final_sequence = adjusted_seq
+
+        best_sequence = best_final_sequence
+
+    return best_sequence if best_sequence is not None else [1.0]
+=======
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 20,
+    generations: int = 40,
+    elite_fraction: float = 0.2,
+    patience_limit: int = 10
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using enhanced approach."""
+    start_time = time.time()
+
+    # Phase 1: Initialize population with historical sequences
+    population = initialize_population_with_historical_samples(
+        population_size, initial_length_range
+    )
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    patience_counter = 0
+
+    for generation in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            _, inv_c1 = compute_c1_constant(individual)
+            fitness_scores.append(inv_c1)
+
+        # Sort by fitness (descending order)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        current_best, current_best_inv_c1 = population[sorted_indices[0]], fitness_scores[sorted_indices[0]]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = current_best.copy()
+            patience_counter = 0  # Reset patience counter
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement for too long
+        if patience_counter > patience_limit:
+            break
+
+        # Phase 2: Adaptive evolution
+        population = adaptive_evolution_phase(
+            population,
+            fitness_scores,
+            int(elite_fraction * population_size)
+        )
+
+    # Phase 3: Local refinement of best solution
+    if best_sequence is not None:
+        best_sequence = adaptive_local_refinement_phase(best_sequence, max_iterations=20)
+
+    # Phase 4: Dynamic sequence length exploration
+    if best_sequence is not None:
+        best_final_sequence = best_sequence.copy()
+        best_final_inv_c1 = best_inv_c1
+
+        # Try several sequence lengths around the optimal
+        test_lengths = [int(l) for l in np.linspace(100, 1000, 10)]
+        for length in test_lengths:
+            # Adjust length of sequence
+            adjusted_seq = adjust_sequence_length(best_sequence, length)
+
+            # Compute new C1 value
+            _, inv_c1 = compute_c1_constant(adjusted_seq)
+
+            # If better, keep the new sequence
+            if inv_c1 > best_final_inv_c1:
+                best_final_inv_c1 = inv_c1
+                best_final_sequence = adjusted_seq
+
+        best_sequence = best_final_sequence
+
+    return best_sequence if best_sequence is not None else [1.0]
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,186 @@
+<NAME>
+add_simple_optimization_loop
+</NAME>
+
+<DESCRIPTION>
+Adding a simple local optimization loop that iteratively improves the circle packing configuration. This approach starts with a good initial grid-based configuration and then applies local search improvements to maximize the sum of radii while maintaining non-overlapping constraints. The optimization uses a greedy approach where we try to increase individual circle radii while respecting constraints.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def initialize_grid_config(n_circles=21, rect_width=1.0, rect_height=1.0):
+    """Initialize circle positions on a grid pattern"""
+    # Create a grid layout for initial positioning
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+
+    # Adjust dimensions to ensure circles fit properly
+    x_spacing = rect_width / (cols + 1)
+    y_spacing = rect_height / (rows + 1)
+
+    # Generate grid points
+    circles = []
+    count = 0
+
+    for i in range(rows):
+        for j in range(cols):
+            if count >= n_circles:
+                break
+            x = (j + 1) * x_spacing
+            y = (i + 1) * y_spacing
+            circles.append([x, y, 0.0])  # Initialize with zero radius
+            count += 1
+
+    return np.array(circles)
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Initialize with grid-based configuration
+    circles = initialize_grid_config(n, 1.0, 1.0)
+
+    # Set initial reasonable radii based on spacing
+    for i in range(n):
+        x, y, _ = circles[i]
+        # Radius is limited by distance to nearest boundary
+        min_distance_to_boundary = min(x, 1-x, y, 1-y)
+        # Assign a small but reasonable initial radius
+        circles[i, 2] = min_distance_to_boundary * 0.4
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def initialize_grid_config(n_circles=21, rect_width=1.0, rect_height=1.0):
+    """Initialize circle positions on a grid pattern"""
+    # Create a grid layout for initial positioning
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+
+    # Adjust dimensions to ensure circles fit properly
+    x_spacing = rect_width / (cols + 1)
+    y_spacing = rect_height / (rows + 1)
+
+    # Generate grid points
+    circles = []
+    count = 0
+
+    for i in range(rows):
+        for j in range(cols):
+            if count >= n_circles:
+                break
+            x = (j + 1) * x_spacing
+            y = (i + 1) * y_spacing
+            circles.append([x, y, 0.0])  # Initialize with zero radius
+            count += 1
+
+    return np.array(circles)
+
+
+def is_valid_placement(circles, idx, new_x, new_y, new_radius):
+    """Check if placing a circle at (new_x, new_y) with new_radius is valid"""
+    # Check boundary constraints
+    if (new_x - new_radius < 0 or new_x + new_radius > 1.0 or
+        new_y - new_radius < 0 or new_y + new_radius > 1.0):
+        return False
+
+    # Check overlap constraints with existing circles
+    for i in range(len(circles)):
+        if i == idx:
+            continue
+        old_x, old_y, old_radius = circles[i]
+        distance_sq = (new_x - old_x)**2 + (new_y - old_y)**2
+        min_distance = old_radius + new_radius
+        if distance_sq < min_distance**2:
+            return False
+
+    return True
+
+
+def compute_max_radius(circles, idx):
+    """Compute maximum radius for circle at index idx without violating constraints"""
+    x, y, _ = circles[idx]
+
+    # Distance to boundaries
+    dist_to_left = x
+    dist_to_right = 1.0 - x
+    dist_to_bottom = y
+    dist_to_top = 1.0 - y
+    min_boundary_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+
+    # Check overlap constraints with other circles
+    max_radius = min_boundary_dist
+
+    for i in range(len(circles)):
+        if i == idx:
+            continue
+        old_x, old_y, old_radius = circles[i]
+        distance = np.sqrt((x - old_x)**2 + (y - old_y)**2)
+        max_possible_radius = distance - old_radius
+        if max_possible_radius > 0:
+            max_radius = min(max_radius, max_possible_radius)
+
+    return max(max_radius, 0.001)  # Ensure positive radius
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Initialize with grid-based configuration
+    circles = initialize_grid_config(n, 1.0, 1.0)
+
+    # Set initial reasonable radii based on spacing
+    for i in range(n):
+        x, y, _ = circles[i]
+        # Radius is limited by distance to nearest boundary
+        min_distance_to_boundary = min(x, 1-x, y, 1-y)
+        # Assign a small but reasonable initial radius
+        circles[i, 2] = min_distance_to_boundary * 0.4
+
+    # Simple local optimization loop
+    max_iter = 1000
+    for iteration in range(max_iter):
+        improved = False
+
+        # Try to improve each circle's radius
+        for i in range(n):
+            max_rad = compute_max_radius(circles, i)
+            if max_rad > circles[i, 2]:
+                circles[i, 2] = max_rad
+                improved = True
+
+        # If no improvement, break early
+        if not improved:
+            break
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

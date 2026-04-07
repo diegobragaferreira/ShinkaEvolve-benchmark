@@ -1,0 +1,329 @@
+<NAME>
+add_evolutionary_restart_strategy
+</NAME>
+
+<DESCRIPTION>
+Adding an evolutionary algorithm restart strategy will enhance the global search capabilities of the optimization. This approach combines the strengths of population-based optimization (like differential evolution) with local refinement techniques. By running multiple independent optimization processes with different strategies and populations, we can better explore the solution space and avoid getting trapped in poor local optima. This is particularly effective for complex geometric optimization problems like maximizing the min/max distance ratio where the landscape can have many local maxima.
+
+The implementation involves adding a new function that runs multiple differential evolution processes with varying parameters and then applies local refinement to the best results. This approach was successful in previous generations and will help us beat the AlphaEvolve benchmark.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_adaptive_strategy(initial_points):
+        """Run optimization with adaptive parameters based on initial configuration quality"""
+        try:
+            # Evaluate initial quality
+            initial_ratio = -objective_with_regularization(initial_points.flatten())
+
+            x0 = initial_points.flatten()
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Select optimization strategy based on initial quality
+            if initial_ratio > 0.25:  # Very high quality starting point
+                # Use high precision L-BFGS-B optimization
+                result = minimize(
+                    objective_with_regularization,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 2000, 'ftol': 1e-15, 'gtol': 1e-15}
+                )
+            elif initial_ratio > 0.20:  # High quality starting point
+                # Use L-BFGS-B with moderate precision
+                result = minimize(
+                    objective_with_regularization,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 1500, 'ftol': 1e-13, 'gtol': 1e-13}
+                )
+            elif initial_ratio > 0.15:  # Medium quality starting point
+                # Use L-BFGS-B with less strict tolerances
+                result = minimize(
+                    objective_with_regularization,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 1200, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+            else:  # Low quality starting point
+                # Use Differential Evolution first to escape local minima
+                try:
+                    result_de = differential_evolution(
+                        objective_with_regularization,
+                        bounds,
+                        seed=42,
+                        maxiter=100,
+                        popsize=20,
+                        mutation=(0.5, 1),
+                        recombination=0.7,
+                        tol=1e-9
+                    )
+                    if result_de.success:
+                        x0 = result_de.x
+                except:
+                    pass
+
+                # Then use L-BFGS-B for refinement
+                try:
+                    result = minimize(
+                        objective_with_regularization,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1000, 'ftol': 1e-10, 'gtol': 1e-10}
+                    )
+                except:
+                    # Fallback to basic optimization if needed
+                    result = type('obj', (object,), {'x': x0, 'success': True})()
+
+            # Apply local improvement heuristic to final result
+            if hasattr(result, 'success') and result.success:
+                final_points = result.x.reshape(-1, 2)
+                refined_points = local_improvement_heuristic(final_points)
+                return refined_points
+            else:
+                # Even if optimization failed, apply local heuristic to initial points
+                refined_points = local_improvement_heuristic(initial_points)
+                return refined_points
+
+        except Exception as e:
+            warnings.warn(f"Optimization failed: {e}")
+            # Return initial points with local improvement
+            refined_points = local_improvement_heuristic(initial_points)
+            return refined_points
+
+    def optimize_with_restarts():
+        """Run optimization with multiple enhanced initial configurations"""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Try multiple different initial configurations with enhanced strategies
+        initial_configs = []
+
+        # 1. Dispersed corner pattern
+        initial_configs.append(create_dispersed_corner_pattern())
+
+        # 2. Hexagonal grid with perturbations
+        initial_configs.append(create_hexagonal_grid())
+
+        # 3. Golden spiral pattern
+        spiral_points = golden_spiral_2d(16)
+        spiral_points = (spiral_points - np.min(spiral_points, axis=0)) / (
+            np.max(spiral_points, axis=0) - np.min(spiral_points, axis=0) + 1e-12)
+        spiral_points = spiral_points * 0.8 + 0.1
+        initial_configs.append(spiral_points.copy())
+
+        # 4. Adaptive perturbed grid
+        initial_configs.append(create_adaptive_perturbed_grid())
+
+        # 5. Random uniform points with fixed seed
+        np.random.seed(42)
+        random_points = np.random.rand(16, 2)
+        initial_configs.append(random_points)
+
+        # Run optimization for each configuration with adaptive strategy
+        for i, init_points in enumerate(initial_configs):
+            try:
+                final_points = optimize_with_adaptive_strategy(init_points)
+
+                # Compute actual ratio
+                distances = pdist(final_points)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+
+                if max_dist > 0:
+                    ratio = min_dist / max_dist
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Optimization failed for initial config {i}: {e}")
+                continue
+
+        # If no successful optimization, return the best initial configuration
+        if best_points is None:
+            return initial_configs[0]
+
+        return best_points
+=======
+    def evolutionary_restart_strategy(initial_points, max_evaluations=5000):
+        """Enhanced evolutionary restart strategy combining DE and local refinement"""
+        best_points = initial_points.copy()
+        best_ratio = -objective_with_regularization(initial_points.flatten())
+
+        # Run multiple differential evolution processes with different strategies
+        de_strategies = [
+            {'popsize': 25, 'mutation': (0.5, 1), 'recombination': 0.7, 'maxiter': 100},
+            {'popsize': 30, 'mutation': (0.7, 1), 'recombination': 0.8, 'maxiter': 80},
+            {'popsize': 20, 'mutation': (0.3, 1), 'recombination': 0.6, 'maxiter': 120},
+        ]
+
+        bounds = [(0, 1) for _ in range(32)]
+
+        for i, strategy in enumerate(de_strategies):
+            try:
+                # Run differential evolution with current strategy
+                de_result = differential_evolution(
+                    objective_with_regularization,
+                    bounds,
+                    seed=42 + i,
+                    maxiter=strategy['maxiter'],
+                    popsize=strategy['popsize'],
+                    mutation=strategy['mutation'],
+                    recombination=strategy['recombination'],
+                    tol=1e-9,
+                    disp=False
+                )
+
+                if de_result.success:
+                    # Refine with L-BFGS-B
+                    refined_result = minimize(
+                        objective_with_regularization,
+                        de_result.x,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+                    )
+
+                    if refined_result.success:
+                        refined_points = refined_result.x.reshape(-1, 2)
+                        refined_ratio = -objective_with_regularization(refined_result.x)
+
+                        if refined_ratio > best_ratio:
+                            best_ratio = refined_ratio
+                            best_points = refined_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"DE strategy {i} failed: {e}")
+                continue
+
+        return best_points
+
+    def optimize_with_adaptive_strategy(initial_points):
+        """Run optimization with adaptive parameters based on initial configuration quality"""
+        try:
+            # Evaluate initial quality
+            initial_ratio = -objective_with_regularization(initial_points.flatten())
+
+            x0 = initial_points.flatten()
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Select optimization strategy based on initial quality
+            if initial_ratio > 0.25:  # Very high quality starting point
+                # Use high precision L-BFGS-B optimization
+                result = minimize(
+                    objective_with_regularization,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 2000, 'ftol': 1e-15, 'gtol': 1e-15}
+                )
+            elif initial_ratio > 0.20:  # High quality starting point
+                # Use L-BFGS-B with moderate precision
+                result = minimize(
+                    objective_with_regularization,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 1500, 'ftol': 1e-13, 'gtol': 1e-13}
+                )
+            elif initial_ratio > 0.15:  # Medium quality starting point
+                # Use L-BFGS-B with less strict tolerances
+                result = minimize(
+                    objective_with_regularization,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 1200, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+            else:  # Low quality starting point
+                # Use evolutionary restart strategy for better global search
+                evolved_points = evolutionary_restart_strategy(initial_points)
+                # Apply L-BFGS-B refinement to the evolved solution
+                try:
+                    result = minimize(
+                        objective_with_regularization,
+                        evolved_points.flatten(),
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 1000, 'ftol': 1e-10, 'gtol': 1e-10}
+                    )
+                except:
+                    # Fallback to basic optimization if needed
+                    result = type('obj', (object,), {'x': evolved_points.flatten(), 'success': True})()
+
+            # Apply local improvement heuristic to final result
+            if hasattr(result, 'success') and result.success:
+                final_points = result.x.reshape(-1, 2)
+                refined_points = local_improvement_heuristic(final_points)
+                return refined_points
+            else:
+                # Even if optimization failed, apply local heuristic to initial points
+                refined_points = local_improvement_heuristic(initial_points)
+                return refined_points
+
+        except Exception as e:
+            warnings.warn(f"Optimization failed: {e}")
+            # Return initial points with local improvement
+            refined_points = local_improvement_heuristic(initial_points)
+            return refined_points
+
+    def optimize_with_restarts():
+        """Run optimization with multiple enhanced initial configurations"""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Try multiple different initial configurations with enhanced strategies
+        initial_configs = []
+
+        # 1. Dispersed corner pattern
+        initial_configs.append(create_dispersed_corner_pattern())
+
+        # 2. Hexagonal grid with perturbations
+        initial_configs.append(create_hexagonal_grid())
+
+        # 3. Golden spiral pattern
+        spiral_points = golden_spiral_2d(16)
+        spiral_points = (spiral_points - np.min(spiral_points, axis=0)) / (
+            np.max(spiral_points, axis=0) - np.min(spiral_points, axis=0) + 1e-12)
+        spiral_points = spiral_points * 0.8 + 0.1
+        initial_configs.append(spiral_points.copy())
+
+        # 4. Adaptive perturbed grid
+        initial_configs.append(create_adaptive_perturbed_grid())
+
+        # 5. Random uniform points with fixed seed
+        np.random.seed(42)
+        random_points = np.random.rand(16, 2)
+        initial_configs.append(random_points)
+
+        # Run optimization for each configuration with adaptive strategy
+        for i, init_points in enumerate(initial_configs):
+            try:
+                final_points = optimize_with_adaptive_strategy(init_points)
+
+                # Compute actual ratio
+                distances = pdist(final_points)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+
+                if max_dist > 0:
+                    ratio = min_dist / max_dist
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Optimization failed for initial config {i}: {e}")
+                continue
+
+        # If no successful optimization, return the best initial configuration
+        if best_points is None:
+            return initial_configs[0]
+
+        return best_points
+>>>>>>> REPLACE
+</DIFF>

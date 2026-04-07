@@ -1,0 +1,357 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial import SphericalVoronoi
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+    np.random.seed(42)
+
+    def compute_min_max_ratio(points):
+        """Compute the min/max distance ratio for given points."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances efficiently
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return 0.0
+
+        return d_min / d_max
+
+    def compute_spherical_angle_matrix(points):
+        """Compute angular distances between all pairs of points on unit sphere."""
+        # Normalize points to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        normalized_points = points / np.maximum(norms, 1e-10)
+        
+        # Compute dot products (cosines of angles)
+        dot_products = np.dot(normalized_points, normalized_points.T)
+        
+        # Clip to handle floating point errors
+        dot_products = np.clip(dot_products, -1.0, 1.0)
+        
+        # Convert to angles (radians)
+        angles = np.arccos(dot_products)
+        
+        # Set diagonal to large value so they don't affect min
+        np.fill_diagonal(angles, np.pi)
+        
+        return angles
+
+    def spherical_dispersal_objective(points_flat):
+        """Novel objective function based on angular separation and distance distribution."""
+        points = points_flat.reshape(-1, 3)
+        
+        # Ensure points are on unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        normalized_points = points / np.maximum(norms, 1e-10)
+        
+        # Compute angular distances
+        angles = compute_spherical_angle_matrix(normalized_points)
+        
+        # Find minimum angular distance and maximum angular distance
+        min_angle = np.min(angles[np.triu_indices_from(angles, k=1)])
+        max_angle = np.max(angles[np.triu_indices_from(angles, k=1)])
+        
+        # Compute actual Euclidean distances
+        distances = pdist(normalized_points)
+        if len(distances) == 0:
+            return float('inf')
+            
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Combined objective: prioritize angular separation but maintain good distance spread
+        # Use the ratio of min angle to max angle as primary measure, then distance consistency
+        if max_angle == 0:
+            angle_ratio = 0.0
+        else:
+            angle_ratio = min_angle / max_angle
+            
+        # Penalize extreme ratios
+        if min_dist < 1e-8 or max_dist < 1e-8:
+            return float('inf')
+        
+        # Mix angular and distance measures
+        dist_ratio = min_dist / max_dist if max_dist > 0 else 0.0
+        
+        # Prefer solutions with both good angular spread AND good distance spread
+        # Use geometric mean to balance both factors
+        if angle_ratio > 0 and dist_ratio > 0:
+            # Weighted sum with emphasis on angular properties
+            combined = 0.7 * angle_ratio + 0.3 * dist_ratio
+        else:
+            combined = 0.0
+            
+        # Penalize if angle spread is too small (points clustering)
+        if min_angle < 0.1:  # Less than ~5.7 degrees
+            combined *= 0.1  # Heavy penalty
+            
+        return -combined  # Negative because we minimize
+
+    def fibonacci_sphere(n):
+        """Generate points on sphere using Fibonacci spiral."""
+        points = []
+        golden_angle = np.pi * (3 - np.sqrt(5))
+
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = golden_angle * i  # Golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def disparity_aware_initialization():
+        """Generate initial configuration with maximal angular disparity."""
+        # Start with Fibonacci-like distribution
+        initial_points = fibonacci_sphere(14)
+        
+        # Add structured perturbations to break symmetries
+        np.random.seed(42)
+        perturbations = np.random.normal(0, 0.03, (14, 3))
+        initial_points += perturbations
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(initial_points, axis=1, keepdims=True)
+        initial_points = initial_points / np.maximum(norms, 1e-10)
+        
+        # Add more structured elements
+        # Place some points near vertices of regular polyhedra
+        regular_vertices = np.array([
+            [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+            [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1],
+            [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0],
+            [1, 0, 0], [-1, 0, 0]
+        ])
+        
+        # Scale and add to existing points
+        regular_points = regular_vertices[:14].astype(float)
+        norms = np.linalg.norm(regular_points, axis=1, keepdims=True)
+        regular_points = regular_points / np.maximum(norms, 1e-10) * 0.7
+        initial_points[:14] = (initial_points[:14] + regular_points) / 2
+        
+        # Ensure all points are on unit sphere
+        norms = np.linalg.norm(initial_points, axis=1, keepdims=True)
+        initial_points = initial_points / np.maximum(norms, 1e-10)
+        
+        return initial_points
+
+    def momentum_hill_climbing(initial_points, max_iter=100):
+        """Apply momentum-based hill climbing with directional memory."""
+        points = initial_points.copy()
+        
+        # Track momentum for each point in each dimension
+        momentum = np.zeros_like(points)
+        momentum_decay = 0.9
+        learning_rate = 0.01
+        
+        best_points = points.copy()
+        best_ratio = compute_min_max_ratio(points)
+        
+        for iteration in range(max_iter):
+            current_ratio = compute_min_max_ratio(points)
+            
+            # Update best solution
+            if current_ratio > best_ratio:
+                best_ratio = current_ratio
+                best_points = points.copy()
+                
+            # Compute gradients for each point (numerically approximate)
+            gradients = np.zeros_like(points)
+            
+            # Small perturbations to estimate gradient
+            epsilon = 1e-5
+            for i in range(14):
+                for dim in range(3):
+                    # Positive perturbation
+                    test_points_pos = points.copy()
+                    test_points_pos[i, dim] += epsilon
+                    # Project back to sphere
+                    norm = np.linalg.norm(test_points_pos[i])
+                    if norm > 0:
+                        test_points_pos[i] = test_points_pos[i] / norm
+                    pos_ratio = compute_min_max_ratio(test_points_pos)
+                    
+                    # Negative perturbation
+                    test_points_neg = points.copy()
+                    test_points_neg[i, dim] -= epsilon
+                    # Project back to sphere
+                    norm = np.linalg.norm(test_points_neg[i])
+                    if norm > 0:
+                        test_points_neg[i] = test_points_neg[i] / norm
+                    neg_ratio = compute_min_max_ratio(test_points_neg)
+                    
+                    # Estimate gradient
+                    gradients[i, dim] = (pos_ratio - neg_ratio) / (2 * epsilon)
+            
+            # Apply momentum and update points
+            momentum = momentum * momentum_decay + gradients * learning_rate
+            
+            # Update points with momentum
+            new_points = points + momentum
+            
+            # Project new points back onto unit sphere
+            for i in range(14):
+                norm = np.linalg.norm(new_points[i])
+                if norm > 0:
+                    new_points[i] = new_points[i] / norm
+                    
+            points = new_points
+            
+            # Early stopping if improvement is minimal
+            if abs(current_ratio - best_ratio) < 1e-10:
+                break
+                
+        return best_points
+
+    def progressive_optimization(initial_points):
+        """Optimize with progressive resolution levels."""
+        points = initial_points.copy()
+        
+        # Level 1: Coarse optimization
+        try:
+            # Coarse differential evolution with relaxed tolerances
+            bounds = [(-1, 1)] * (14 * 3)
+            result = differential_evolution(
+                spherical_dispersal_objective,
+                bounds,
+                maxiter=10,
+                popsize=10,
+                seed=42,
+                disp=False,
+                polish=True
+            )
+            if result.success:
+                points = result.x.reshape(-1, 3)
+                # Project back to sphere
+                norms = np.linalg.norm(points, axis=1, keepdims=True)
+                points = points / np.maximum(norms, 1e-10)
+        except:
+            pass
+            
+        # Level 2: Medium resolution with momentum hill climbing
+        points = momentum_hill_climbing(points, max_iter=30)
+        
+        # Level 3: Fine resolution with L-BFGS
+        try:
+            def fine_obj(x_flat):
+                points = x_flat.reshape(-1, 3)
+                # Project to sphere
+                norms = np.linalg.norm(points, axis=1, keepdims=True)
+                points = points / np.maximum(norms, 1e-10)
+                ratio = compute_min_max_ratio(points)
+                return -ratio  # Negative for minimization
+
+            x0 = points.flatten()
+            bounds = [(-1, 1)] * (14 * 3)
+            result = minimize(
+                fine_obj,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50, 'ftol': 1e-12, 'gtol': 1e-12, 'disp': False}
+            )
+            if result.success:
+                points = result.x.reshape(-1, 3)
+                # Project back to sphere
+                norms = np.linalg.norm(points, axis=1, keepdims=True)
+                points = points / np.maximum(norms, 1e-10)
+        except:
+            pass
+            
+        return points
+
+    # Multi-start with diverse initialization strategies
+    best_solution = None
+    best_ratio = 0.0
+    
+    # Strategy 1: Disparity-aware initialization
+    init1 = disparity_aware_initialization()
+    optimized1 = progressive_optimization(init1)
+    ratio1 = compute_min_max_ratio(optimized1)
+    
+    if ratio1 > best_ratio:
+        best_ratio = ratio1
+        best_solution = optimized1.copy()
+    
+    # Strategy 2: Slightly perturbed Fibonacci
+    fib_points = fibonacci_sphere(14)
+    np.random.seed(43)
+    perturbation = np.random.normal(0, 0.05, fib_points.shape)
+    init2 = fib_points + perturbation
+    norms = np.linalg.norm(init2, axis=1, keepdims=True)
+    init2 = init2 / np.maximum(norms, 1e-10)
+    optimized2 = progressive_optimization(init2)
+    ratio2 = compute_min_max_ratio(optimized2)
+    
+    if ratio2 > best_ratio:
+        best_ratio = ratio2
+        best_solution = optimized2.copy()
+        
+    # Strategy 3: Random points on sphere
+    init3 = np.random.randn(14, 3)
+    norms = np.linalg.norm(init3, axis=1, keepdims=True)
+    init3 = init3 / np.maximum(norms, 1e-10)
+    optimized3 = progressive_optimization(init3)
+    ratio3 = compute_min_max_ratio(optimized3)
+    
+    if ratio3 > best_ratio:
+        best_ratio = ratio3
+        best_solution = optimized3.copy()
+        
+    # Strategy 4: Structured point distribution
+    init4 = np.zeros((14, 3))
+    for i in range(14):
+        if i < 3:
+            init4[i] = [1 if j == i else 0 for j in range(3)]
+        elif i < 6:
+            init4[i] = [-1 if j == (i-3) else 0 for j in range(3)]
+        elif i < 9:
+            init4[i] = [1 if k == (i-6) else -1 if k == ((i-6)+1)%3 else 0 for k in range(3)]
+        else:
+            init4[i] = np.random.randn(3)
+    
+    norms = np.linalg.norm(init4, axis=1, keepdims=True)
+    init4 = init4 / np.maximum(norms, 1e-10)
+    optimized4 = progressive_optimization(init4)
+    ratio4 = compute_min_max_ratio(optimized4)
+    
+    if ratio4 > best_ratio:
+        best_ratio = ratio4
+        best_solution = optimized4.copy()
+        
+    # Fallback to best attempt if all failed
+    if best_solution is None:
+        # Return the best from our initial attempts
+        best_from_attempts = max([
+            (init1, ratio1),
+            (init2, ratio2),
+            (init3, ratio3),
+            (init4, ratio4)
+        ], key=lambda x: x[1])
+        return best_from_attempts[0]
+        
+    return best_solution
+
+# EVOLVE-BLOCK-END

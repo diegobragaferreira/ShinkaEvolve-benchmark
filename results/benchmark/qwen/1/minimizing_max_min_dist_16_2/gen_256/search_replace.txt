@@ -1,0 +1,233 @@
+<NAME>
+implement_voronoi_refinement
+</NAME>
+
+<DESCRIPTION>
+This improvement adds Voronoi-based refinement to enhance point distribution quality. The idea is to iteratively adjust point positions based on Voronoi diagram analysis to achieve more uniform spacing. This addresses the issue of the current program potentially getting stuck in suboptimal configurations by adding a post-processing step that refines the final solution using geometric insights from Voronoi diagrams.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import Voronoi
+import warnings
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def constraint_func(x):
+        # Ensure points are within [0+eps,1-eps] x [0+eps,1-eps] for numerical stability
+        eps = 1e-8
+        points = x.reshape(-1, 2)
+        constraints = []
+
+        # x coordinates in [eps, 1-eps]
+        constraints.append(points[:, 0].min() - eps)  # x_min >= eps
+        constraints.append(1 - eps - points[:, 0].max())  # x_max <= 1-eps
+
+        # y coordinates in [eps, 1-eps]
+        constraints.append(points[:, 1].min() - eps)  # y_min >= eps
+        constraints.append(1 - eps - points[:, 1].max())  # y_max <= 1-eps
+
+        return np.array(constraints)
+
+    def bounded_objective(x):
+        # Boundary checking with clamping to safe bounds
+        eps = 1e-8
+        points = np.clip(x.reshape(-1, 2), eps, 1-eps).flatten()
+        return objective(points)
+=======
+    def constraint_func(x):
+        # Ensure points are within [0+eps,1-eps] x [0+eps,1-eps] for numerical stability
+        eps = 1e-8
+        points = x.reshape(-1, 2)
+        constraints = []
+
+        # x coordinates in [eps, 1-eps]
+        constraints.append(points[:, 0].min() - eps)  # x_min >= eps
+        constraints.append(1 - eps - points[:, 0].max())  # x_max <= 1-eps
+
+        # y coordinates in [eps, 1-eps]
+        constraints.append(points[:, 1].min() - eps)  # y_min >= eps
+        constraints.append(1 - eps - points[:, 1].max())  # y_max <= 1-eps
+
+        return np.array(constraints)
+
+    def bounded_objective(x):
+        # Boundary checking with clamping to safe bounds
+        eps = 1e-8
+        points = np.clip(x.reshape(-1, 2), eps, 1-eps).flatten()
+        return objective(points)
+
+    def voronoi_refinement(points, iterations=3):
+        """
+        Refine point distribution using Voronoi diagram analysis and centroid adjustment
+        """
+        for _ in range(iterations):
+            try:
+                # Create Voronoi diagram
+                vor = Voronoi(points)
+
+                # Calculate centroids of Voronoi regions
+                new_points = []
+                for i in range(len(points)):
+                    # Get vertices of Voronoi region for point i
+                    region_indices = np.where(vor.point_region == i)[0]
+                    if len(region_indices) > 0:
+                        region_id = region_indices[0]
+                        vertices = vor.vertices[vor.region[region_id]]
+
+                        # Skip if region is unbounded or has too few vertices
+                        if len(vertices) < 3:
+                            new_points.append(points[i])
+                            continue
+
+                        # Compute centroid of Voronoi region
+                        centroid = np.mean(vertices, axis=0)
+
+                        # Move point towards centroid but respect bounds
+                        # Only move if the centroid is significantly different
+                        if np.linalg.norm(centroid - points[i]) > 1e-6:
+                            # Move point towards centroid (but not too aggressively)
+                            direction = centroid - points[i]
+                            step_size = min(0.1, 0.1 * np.linalg.norm(direction))
+                            new_point = points[i] + step_size * direction / (np.linalg.norm(direction) + 1e-10)
+
+                            # Clamp to bounds
+                            new_point = np.clip(new_point, 1e-8, 1-1e-8)
+                            new_points.append(new_point)
+                        else:
+                            new_points.append(points[i])
+                    else:
+                        new_points.append(points[i])
+                points = np.array(new_points)
+            except:
+                # If Voronoi computation fails, just return original points
+                pass
+        return points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        except Exception as e:
+            continue
+
+    # If we still don't have a good solution, use a fallback approach
+    if best_points is None:
+        # Use the most promising initial configuration with more aggressive local optimization
+        fallback_config = np.random.rand(16, 2)
+        x0 = fallback_config.flatten()
+        bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+
+        # More aggressive local optimization with adaptive iteration counting
+        adaptive_iter = 800
+        result = minimize(
+            bounded_objective,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraint_func},
+            options={'maxiter': adaptive_iter, 'ftol': 1e-10, 'gtol': 1e-10}
+        )
+
+        # Fallback to L-BFGS-B if SLSQP fails
+        if not result.success:
+            result = minimize(
+                bounded_objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500}
+            )
+
+        if result.success:
+            best_points = result.x.reshape(-1, 2)
+
+    # Final safety check - ensure points are within bounds
+    if best_points is not None:
+        best_points = np.clip(best_points, 1e-8, 1-1e-8)
+    else:
+        # Last resort: return random configuration
+        best_points = np.random.rand(16, 2)
+
+    return best_points
+=======
+        except Exception as e:
+            continue
+
+    # If we still don't have a good solution, use a fallback approach
+    if best_points is None:
+        # Use the most promising initial configuration with more aggressive local optimization
+        fallback_config = np.random.rand(16, 2)
+        x0 = fallback_config.flatten()
+        bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+
+        # More aggressive local optimization with adaptive iteration counting
+        adaptive_iter = 800
+        result = minimize(
+            bounded_objective,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraint_func},
+            options={'maxiter': adaptive_iter, 'ftol': 1e-10, 'gtol': 1e-10}
+        )
+
+        # Fallback to L-BFGS-B if SLSQP fails
+        if not result.success:
+            result = minimize(
+                bounded_objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500}
+            )
+
+        if result.success:
+            best_points = result.x.reshape(-1, 2)
+
+    # Apply Voronoi refinement to improve final configuration
+    if best_points is not None:
+        best_points = voronoi_refinement(best_points, iterations=3)
+
+    # Final safety check - ensure points are within bounds
+    if best_points is not None:
+        best_points = np.clip(best_points, 1e-8, 1-1e-8)
+    else:
+        # Last resort: return random configuration
+        best_points = np.random.rand(16, 2)
+
+    return best_points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,415 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial import ConvexHull
+import time
+
+class PointConfiguration:
+    """Represents a configuration of points and provides utility methods."""
+
+    def __init__(self, points):
+        self.points = np.array(points)
+        self.n_points = len(points)
+
+    def compute_min_max_ratio(self):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if self.n_points < 2:
+            return 0
+
+        # Compute pairwise distances with enhanced numerical stability
+        distance_matrix = squareform(pdist(self.points))
+
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distance_matrix, np.inf)
+
+        # Get all finite distances (excluding NaN and inf values)
+        finite_distances = distance_matrix[np.isfinite(distance_matrix)]
+
+        if len(finite_distances) == 0:
+            return 0
+
+        # Get min and max distances
+        dmin = np.min(finite_distances)
+        dmax = np.max(finite_distances)
+
+        # Avoid division by zero
+        if dmax == 0:
+            return 0
+
+        return dmin / dmax
+
+    def compute_distance_matrix(self):
+        """Compute full pairwise distance matrix."""
+        return squareform(pdist(self.points))
+
+    def get_clipped_points(self, lower=0, upper=1):
+        """Get points clipped to specified bounds."""
+        return np.clip(self.points, lower, upper)
+
+    def copy(self):
+        """Create a copy of this configuration."""
+        return PointConfiguration(self.points.copy())
+        
+    def compute_mean_distance(self):
+        """Compute mean distance between all point pairs."""
+        if self.n_points < 2:
+            return 0
+        distance_matrix = squareform(pdist(self.points))
+        np.fill_diagonal(distance_matrix, np.inf)
+        finite_distances = distance_matrix[np.isfinite(distance_matrix)]
+        if len(finite_distances) == 0:
+            return 0
+        return np.mean(finite_distances)
+        
+    def compute_std_distance(self):
+        """Compute standard deviation of distances."""
+        if self.n_points < 2:
+            return 0
+        distance_matrix = squareform(pdist(self.points))
+        np.fill_diagonal(distance_matrix, np.inf)
+        finite_distances = distance_matrix[np.isfinite(distance_matrix)]
+        if len(finite_distances) == 0:
+            return 0
+        return np.std(finite_distances)
+
+class GeometricDiversityOptimizer:
+    """Manages the optimization process with geometrically diverse strategies."""
+
+    def __init__(self):
+        self.best_ratio = 0
+        self.best_points = None
+        
+    def generate_triangular_lattice(self):
+        """Generate a triangular (hexagonal) lattice arrangement."""
+        points = []
+        rows = 4
+        cols = 4
+
+        # Triangular packing parameters
+        spacing_x = 1.0 / (cols - 1)
+        spacing_y = np.sqrt(3) / 2 / (rows - 1)  # Height of equilateral triangle
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * spacing_x + (i % 2) * spacing_x / 2
+                y = i * spacing_y
+                points.append([x, y])
+
+        return np.array(points)
+        
+    def generate_square_lattice(self):
+        """Generate a square lattice arrangement."""
+        points = []
+        n_per_side = 4
+        spacing = 1.0 / (n_per_side - 1)
+        
+        for i in range(n_per_side):
+            for j in range(n_per_side):
+                x = i * spacing
+                y = j * spacing
+                points.append([x, y])
+                
+        return np.array(points)
+        
+    def generate_thomson_approximation(self):
+        """Generate points approximating Thomson problem on sphere, projected to 2D."""
+        # Generate points on the surface of a sphere using Fibonacci-like method
+        # Then project to 2D
+        
+        N = 16
+        points_3d = []
+        
+        # Generate points using Fibonacci-based sphere sampling
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        
+        for i in range(N):
+            # Latitude angle (in radians)
+            theta = np.arccos(1 - 2 * i / (N - 1))
+            # Longitude angle (golden angle progression)
+            phi_angle = i * 2.399963229728653  # golden angle
+            
+            # Convert to Cartesian coordinates
+            x = np.sin(theta) * np.cos(phi_angle)
+            y = np.sin(theta) * np.sin(phi_angle)
+            z = np.cos(theta)
+            
+            points_3d.append([x, y, z])
+            
+        points_3d = np.array(points_3d)
+        
+        # Stereographic projection from south pole to plane
+        # This maps the sphere to a disk
+        points_2d = []
+        for p in points_3d:
+            # Stereographic projection from south pole (0,0,-1)
+            # Formula: ((x,y)/(1-z), 0) 
+            if abs(p[2] + 1) > 1e-10:  # Avoid division by zero
+                proj_x = p[0] / (1 + p[2])
+                proj_y = p[1] / (1 + p[2])
+                points_2d.append([proj_x, proj_y])
+            else:
+                # Special case - point at south pole
+                points_2d.append([0, 0])
+                
+        points_2d = np.array(points_2d)
+        
+        # Normalize to fit in [0,1] x [0,1] 
+        if len(points_2d) > 0:
+            # Center and scale
+            center = np.mean(points_2d, axis=0)
+            points_2d = points_2d - center
+            
+            # Find maximum absolute coordinate to normalize
+            max_coord = np.max(np.abs(points_2d))
+            if max_coord > 0:
+                points_2d = points_2d / max_coord
+                
+            # Bring to [0,1] range
+            points_2d = (points_2d + 1) / 2
+            
+        # If not enough points, fill with random
+        if len(points_2d) < 16:
+            points_2d = np.vstack([points_2d, np.random.rand(16 - len(points_2d), 2)])
+            
+        return np.clip(points_2d, 0, 1)
+
+    def generate_initial_strategies(self):
+        """Generate multiple initial point configurations."""
+        strategies = {}
+
+        # Strategy 1: Triangular lattice
+        strategies['triangular'] = self.generate_triangular_lattice()
+
+        # Strategy 2: Perturbed triangular lattice
+        np.random.seed(42)
+        perturbed_tri = strategies['triangular'] + np.random.normal(0, 0.02, strategies['triangular'].shape)
+        strategies['tri_perturbed'] = np.clip(perturbed_tri, 0, 1)
+
+        # Strategy 3: Square lattice
+        strategies['square'] = self.generate_square_lattice()
+        
+        # Strategy 4: Perturbed square lattice
+        np.random.seed(43)
+        perturbed_square = strategies['square'] + np.random.normal(0, 0.02, strategies['square'].shape)
+        strategies['square_perturbed'] = np.clip(perturbed_square, 0, 1)
+
+        # Strategy 5: Golden spiral
+        indices = np.arange(16)
+        golden_angle = 2.399963229728653
+        angles = golden_angle * indices
+        radii = np.log(indices + 1) / np.log(16)
+        golden_spiral = np.column_stack([
+            0.5 + 0.45 * radii * np.cos(angles),
+            0.5 + 0.45 * radii * np.sin(angles)
+        ])
+        strategies['spiral'] = np.clip(golden_spiral, 0, 1)
+
+        # Strategy 6: Thomson approximation
+        strategies['thomson'] = self.generate_thomson_approximation()
+
+        # Strategy 7: Random points with higher spread
+        np.random.seed(123)
+        random_points = np.random.rand(16, 2)
+        strategies['random'] = np.clip(random_points, 0.05, 0.95)
+
+        return strategies
+
+    def evaluate_all_strategies(self, strategies):
+        """Evaluate all initial strategies and return the best one."""
+        best_strategy = None
+        best_ratio = 0
+
+        for name, points in strategies.items():
+            config = PointConfiguration(points)
+            ratio = config.compute_min_max_ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_strategy = points.copy()
+
+        return best_strategy, best_ratio
+
+    def adaptive_local_optimization(self, initial_points, max_evaluations=1000):
+        """Perform robust optimization with smart local refinement."""
+        # Flatten for optimization
+        x0 = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(32)]
+
+        try:
+            # Phase 1: Differential Evolution for global search
+            de_result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=max_evaluations // 10,
+                popsize=20,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                disp=False,
+                tol=1e-8,
+                strategy='best1bin'
+            )
+
+            # Phase 2: Local refinement with L-BFGS-B
+            if de_result.success:
+                refined_result = minimize(
+                    self.objective_function,
+                    de_result.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500},
+                    tol=1e-12
+                )
+
+                if refined_result.success:
+                    final_points = refined_result.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    return final_points
+
+            # Phase 3: If L-BFGS fails, try a specialized neighborhood search
+            final_points = de_result.x.reshape(-1, 2)
+            final_points = np.clip(final_points, 0, 1)
+            
+            # Try iterative improvement focusing on worst pairs
+            improved_points = self.improve_worst_pairs(final_points, max_iter=100)
+            return improved_points
+            
+        except Exception:
+            # Fallback: return the initial points
+            return initial_points
+
+    def improve_worst_pairs(self, points, max_iter=100):
+        """Iteratively improve the configuration by focusing on the worst distance pairs."""
+        points = points.copy()
+        current_config = PointConfiguration(points)
+        prev_ratio = current_config.compute_min_max_ratio()
+        
+        # Identify the pair with the smallest distance
+        dist_matrix = squareform(pdist(points))
+        np.fill_diagonal(dist_matrix, np.inf)
+        min_dist_idx = np.unravel_index(np.argmin(dist_matrix), dist_matrix.shape)
+        
+        for iteration in range(max_iter):
+            # Try to move one of the points in the worst pair to increase their distance
+            if np.random.rand() < 0.5:
+                # Move first point away from the second
+                idx1, idx2 = min_dist_idx
+                direction = points[idx1] - points[idx2]
+                magnitude = np.linalg.norm(direction)
+                if magnitude > 0:
+                    direction /= magnitude
+                    move_vector = direction * 0.01
+                    points[idx1] = points[idx1] + move_vector
+                    points[idx1] = np.clip(points[idx1], 0, 1)
+                else:
+                    # Move randomly if they're identical
+                    points[idx1] = points[idx1] + np.random.normal(0, 0.01, 2)
+                    points[idx1] = np.clip(points[idx1], 0, 1)
+            else:
+                # Move second point away from the first
+                idx1, idx2 = min_dist_idx
+                direction = points[idx2] - points[idx1]
+                magnitude = np.linalg.norm(direction)
+                if magnitude > 0:
+                    direction /= magnitude
+                    move_vector = direction * 0.01
+                    points[idx2] = points[idx2] + move_vector
+                    points[idx2] = np.clip(points[idx2], 0, 1)
+                else:
+                    # Move randomly if they're identical
+                    points[idx2] = points[idx2] + np.random.normal(0, 0.01, 2)
+                    points[idx2] = np.clip(points[idx2], 0, 1)
+            
+            # Update and check progress
+            current_config = PointConfiguration(points)
+            current_ratio = current_config.compute_min_max_ratio()
+            
+            # If improvement, continue; otherwise, stop
+            if current_ratio <= prev_ratio:
+                break
+            else:
+                prev_ratio = current_ratio
+            
+            # Update worst pair
+            dist_matrix = squareform(pdist(points))
+            np.fill_diagonal(dist_matrix, np.inf)
+            min_dist_idx = np.unravel_index(np.argmin(dist_matrix), dist_matrix.shape)
+            
+        return points
+
+    def objective_function(self, x_flat):
+        """Objective function to maximize (negative because we minimize)."""
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+
+        # Ensure points are within bounds [0,1]
+        points = np.clip(points, 0, 1)
+
+        # Create temporary configuration
+        temp_config = PointConfiguration(points)
+
+        # Compute ratio
+        ratio = temp_config.compute_min_max_ratio()
+
+        # Return negative because we want to maximize
+        return -ratio
+
+    def run_advanced_optimization(self):
+        """Run advanced optimization with geometric diversity and smart restarts."""
+        # Generate initial strategies
+        strategies = self.generate_initial_strategies()
+
+        # Find the best initial configuration
+        best_initial, initial_ratio = self.evaluate_all_strategies(strategies)
+
+        # Initialize best results
+        self.best_points = best_initial.copy()
+        self.best_ratio = initial_ratio
+
+        # Multi-start optimization with different initial variations
+        for restart in range(5):
+            # Generate new variation of the initial points
+            np.random.seed(restart + 1000)
+            perturbed_points = best_initial.copy()
+            noise_level = 0.03 + restart * 0.005  # Gradually increasing noise
+            perturbed_points += np.random.normal(0, noise_level, best_initial.shape)
+            perturbed_points = np.clip(perturbed_points, 0, 1)
+
+            # Optimize this variant
+            optimized_points = self.adaptive_local_optimization(perturbed_points, max_evaluations=500)
+            optimized_ratio = PointConfiguration(optimized_points).compute_min_max_ratio()
+
+            if optimized_ratio > self.best_ratio:
+                self.best_ratio = optimized_ratio
+                self.best_points = optimized_points.copy()
+
+        # Final optimization on the best configuration found
+        final_points = self.adaptive_local_optimization(self.best_points, max_evaluations=300)
+        final_ratio = PointConfiguration(final_points).compute_min_max_ratio()
+
+        # One final refinement attempt with specialized method
+        np.random.seed(9999)
+        last_attempt = final_points + np.random.normal(0, 0.01, final_points.shape)
+        last_attempt = np.clip(last_attempt, 0, 1)
+        refined_final = self.adaptive_local_optimization(last_attempt, max_evaluations=200)
+        refined_ratio = PointConfiguration(refined_final).compute_min_max_ratio()
+
+        if refined_ratio > final_ratio:
+            return refined_final
+        else:
+            return final_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    engine = GeometricDiversityOptimizer()
+    return engine.run_advanced_optimization()
+
+# EVOLVE-BLOCK-END

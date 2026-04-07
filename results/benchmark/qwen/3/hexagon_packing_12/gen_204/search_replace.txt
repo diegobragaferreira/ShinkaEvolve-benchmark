@@ -1,0 +1,228 @@
+<NAME>
+add_symmetry_aware_mutation
+</NAME>
+
+<DESCRIPTION>
+Adding symmetry-aware mutation operators to the optimization process. This enhances exploration of the solution space by preserving beneficial symmetry patterns while allowing controlled perturbations that can escape local minima. The key insight is that hexagon packing problems often benefit from symmetric arrangements, so we should design mutation operators that respect and enhance these symmetries rather than completely randomizing positions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class HexagonOptimizer:
+    """Main optimization controller"""
+
+    def __init__(self):
+        self.start_time = time.time()
+        self.best_score = float('inf')
+        self.best_solution = None
+
+    def optimize_single_configuration(self, initial_hex_data):
+        """Perform optimization on a single configuration using L-BFGS-B"""
+        # Flatten initial data for optimization
+        initial_flat = initial_hex_data.flatten()
+
+        # Bounds: positions (-10, 10), angles (0, 360)
+        bounds = []
+        for i in range(12):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+
+        def objective_and_gradient(params):
+            # Reshape parameters back to hex data format
+            hex_data = params.reshape(12, 3)
+
+            # Evaluate objective function
+            obj_value = HexagonEvaluator.compute_objective_function(hex_data)
+
+            # Approximate gradient using finite differences
+            epsilon = 1e-6
+            grad = np.zeros_like(params)
+
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += epsilon
+                hex_data_plus = params_plus.reshape(12, 3)
+                obj_plus = HexagonEvaluator.compute_objective_function(hex_data_plus)
+                grad[i] = (obj_plus - obj_value) / epsilon
+
+            return obj_value, grad
+
+        # Optimize using L-BFGS-B
+        try:
+            result = minimize(
+                objective_and_gradient,
+                initial_flat,
+                method='L-BFGS-B',
+                jac=True,
+                bounds=bounds,
+                options={
+                    'maxiter': 500,
+                    'ftol': 1e-12,
+                    'gtol': 1e-12,
+                    'maxls': 50
+                },
+                tol=1e-12
+            )
+
+            if result.success:
+                optimized_data = result.x.reshape(12, 3)
+                return optimized_data
+        except Exception:
+            pass
+
+        return initial_hex_data
+
+    def multi_start_optimization(self):
+        """Run multiple optimization starts with different initial configurations"""
+        # Generate multiple initial configurations
+        initial_configs = InitialConfigurationGenerator.generate_multiple_initial_configs()
+
+        best_score = float('inf')
+        best_solution = None
+
+        # Multiple random restarts
+        for restart, initial_hex_data in enumerate(initial_configs):
+            # Optimize this configuration
+            optimized_hex_data = self.optimize_single_configuration(initial_hex_data)
+
+            # Evaluate this solution
+            valid, obj_value, violations = HexagonEvaluator.evaluate_solution(optimized_hex_data, [0, 0, 0])
+
+            if valid and obj_value < best_score:
+                best_score = obj_value
+                best_solution = optimized_hex_data
+
+        return best_solution if best_solution is not None else initial_configs[0]
+=======
+class HexagonOptimizer:
+    """Main optimization controller"""
+
+    def __init__(self):
+        self.start_time = time.time()
+        self.best_score = float('inf')
+        self.best_solution = None
+
+    @staticmethod
+    def mutate_symmetrically(individual, mut_pb=0.3, mut_strength=0.2):
+        """
+        Mutate an individual while preserving symmetry properties.
+        For hexagon packing, this maintains the ring structure.
+        """
+        # Copy individual to avoid modifying original
+        mutated = individual.copy()
+
+        # Define symmetric groups
+        # Group 0: Central hexagon (index 0)
+        # Group 1: First ring (indices 1-6)
+        # Group 2: Second ring (indices 7-11)
+
+        # Mutate central hexagon
+        if random.random() < mut_pb:
+            mutated[0, 0] += random.uniform(-mut_strength, mut_strength)
+            mutated[0, 1] += random.uniform(-mut_strength, mut_strength)
+            mutated[0, 2] += random.uniform(-mut_strength, mut_strength)
+
+        # Mutate first ring (6 hexagons)
+        if random.random() < mut_pb:
+            # Mutate all 6 hexagons with same amount to maintain some rotational symmetry
+            offset_x = random.uniform(-mut_strength, mut_strength)
+            offset_y = random.uniform(-mut_strength, mut_strength)
+            offset_angle = random.uniform(-mut_strength, mut_strength)
+            for i in range(1, 7):
+                mutated[i, 0] += offset_x
+                mutated[i, 1] += offset_y
+                mutated[i, 2] += offset_angle
+
+        # Mutate second ring (6 hexagons)
+        if random.random() < mut_pb:
+            # Mutate all 6 hexagons with same amount to maintain rotational symmetry
+            offset_x = random.uniform(-mut_strength, mut_strength)
+            offset_y = random.uniform(-mut_strength, mut_strength)
+            offset_angle = random.uniform(-mut_strength, mut_strength)
+            for i in range(7, 12):
+                mutated[i, 0] += offset_x
+                mutated[i, 1] += offset_y
+                mutated[i, 2] += offset_angle
+
+        return mutated
+
+    def optimize_single_configuration(self, initial_hex_data):
+        """Perform optimization on a single configuration using L-BFGS-B"""
+        # Flatten initial data for optimization
+        initial_flat = initial_hex_data.flatten()
+
+        # Bounds: positions (-10, 10), angles (0, 360)
+        bounds = []
+        for i in range(12):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+
+        def objective_and_gradient(params):
+            # Reshape parameters back to hex data format
+            hex_data = params.reshape(12, 3)
+
+            # Evaluate objective function
+            obj_value = HexagonEvaluator.compute_objective_function(hex_data)
+
+            # Approximate gradient using finite differences
+            epsilon = 1e-6
+            grad = np.zeros_like(params)
+
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += epsilon
+                hex_data_plus = params_plus.reshape(12, 3)
+                obj_plus = HexagonEvaluator.compute_objective_function(hex_data_plus)
+                grad[i] = (obj_plus - obj_value) / epsilon
+
+            return obj_value, grad
+
+        # Optimize using L-BFGS-B
+        try:
+            result = minimize(
+                objective_and_gradient,
+                initial_flat,
+                method='L-BFGS-B',
+                jac=True,
+                bounds=bounds,
+                options={
+                    'maxiter': 500,
+                    'ftol': 1e-12,
+                    'gtol': 1e-12,
+                    'maxls': 50
+                },
+                tol=1e-12
+            )
+
+            if result.success:
+                optimized_data = result.x.reshape(12, 3)
+                return optimized_data
+        except Exception:
+            pass
+
+        return initial_hex_data
+
+    def multi_start_optimization(self):
+        """Run multiple optimization starts with different initial configurations"""
+        # Generate multiple initial configurations
+        initial_configs = InitialConfigurationGenerator.generate_multiple_initial_configs()
+
+        best_score = float('inf')
+        best_solution = None
+
+        # Multiple random restarts
+        for restart, initial_hex_data in enumerate(initial_configs):
+            # Apply symmetry-aware mutation to create diversified starting points
+            diversified_config = self.mutate_symmetrically(initial_hex_data, mut_pb=0.5, mut_strength=0.3)
+
+            # Optimize this configuration
+            optimized_hex_data = self.optimize_single_configuration(diversified_config)
+
+            # Evaluate this solution
+            valid, obj_value, violations = HexagonEvaluator.evaluate_solution(optimized_hex_data, [0, 0, 0])
+
+            if valid and obj_value < best_score:
+                best_score = obj_value
+                best_solution = optimized_hex_data
+
+        return best_solution if best_solution is not None else initial_configs[0]
+>>>>>>> REPLACE
+</DIFF>

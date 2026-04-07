@@ -1,0 +1,187 @@
+<NAME>
+adaptive_perturbation_initialization
+</NAME>
+
+<DESCRIPTION>
+The improvement focuses on enhancing the initialization strategy by implementing adaptive perturbation scaling based on the current distance distribution. Instead of using fixed perturbation magnitudes, we analyze the initial configuration's distance characteristics and scale perturbations accordingly. This helps avoid getting trapped in poor local optima while maintaining good exploration of the solution space. The approach dynamically adjusts perturbation sizes inversely with the current min/max distance ratio to guide optimization more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances efficiently using scipy
+        distances = pdist(points)
+
+        # Return negative ratio (since we want to maximize ratio, we minimize negative ratio)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    # Create initial grid points
+    n = 16
+    d = 2
+
+    # Initialize points on a regular 4x4 grid scaled to [0.05,0.95] x [0.05,0.95] to avoid boundary issues
+    grid_size = int(np.sqrt(n))
+    x_vals = np.linspace(0.05, 0.95, grid_size)
+    y_vals = np.linspace(0.05, 0.95, grid_size)
+
+    points_grid = np.array([[x, y] for x in x_vals for y in y_vals])
+
+    # Add some random perturbations to avoid degenerate cases
+    np.random.seed(42)
+    noise = np.random.normal(0, 0.01, points_grid.shape)
+    points_init = points_grid + noise
+    points_init = np.clip(points_init, 0, 1)
+
+    # Flatten initial points for optimization
+    x0 = points_init.flatten()
+
+    # Define bounds (all coordinates between 0 and 1)
+    bounds = [(0, 1) for _ in range(2*n)]
+
+    # Use SLSQP optimization method which handles bounds well and is robust for this problem
+    result = minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9}
+    )
+
+    # Reshape result back to points
+    final_points = result.x.reshape(-1, 2)
+
+    return final_points
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the minimum to maximum distance ratio for given points."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Set diagonal to infinity to exclude self-distances
+        # Note: pdist already excludes self-distances, so no need to do this manually
+
+        # Find min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances efficiently using scipy
+        distances = pdist(points)
+
+        # Return negative ratio (since we want to maximize ratio, we minimize negative ratio)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    # Create initial grid points
+    n = 16
+    d = 2
+
+    # Initialize points on a regular 4x4 grid scaled to [0.05,0.95] x [0.05,0.95] to avoid boundary issues
+    grid_size = int(np.sqrt(n))
+    x_vals = np.linspace(0.05, 0.95, grid_size)
+    y_vals = np.linspace(0.05, 0.95, grid_size)
+
+    points_grid = np.array([[x, y] for x in x_vals for y in y_vals])
+
+    # Adaptive perturbation: Scale based on current distance distribution
+    np.random.seed(42)
+
+    # First compute the baseline ratio with just the grid (no perturbation)
+    baseline_ratio = compute_min_max_ratio(points_grid)
+
+    # Determine perturbation magnitude based on how balanced the initial configuration is
+    # If ratio is already quite good, use smaller perturbations
+    # If ratio is poor, use larger perturbations to explore more
+    if baseline_ratio > 0.1:  # Good initial balance
+        perturbation_std = 0.005
+    elif baseline_ratio > 0.05:  # Moderately balanced
+        perturbation_std = 0.01
+    else:  # Poorly balanced, more aggressive perturbation
+        perturbation_std = 0.02
+
+    # Add adaptive random perturbations to avoid degenerate cases
+    noise = np.random.normal(0, perturbation_std, points_grid.shape)
+    points_init = points_grid + noise
+    points_init = np.clip(points_init, 0, 1)
+
+    # Flatten initial points for optimization
+    x0 = points_init.flatten()
+
+    # Define bounds (all coordinates between 0 and 1)
+    bounds = [(0, 1) for _ in range(2*n)]
+
+    # Use SLSQP optimization method which handles bounds well and is robust for this problem
+    result = minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9}
+    )
+
+    # Reshape result back to points
+    final_points = result.x.reshape(-1, 2)
+
+    return final_points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,630 @@
+--- a/original.py
++++ b/original.py
+@@ -1,322 +1,331 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+-from joblib import Parallel, delayed
++from scipy.fft import fft, ifft
++import warnings
++from numba import jit
++import time
+ import random
++import logging
+ from typing import List, Tuple
+-import time
+-from scipy import optimize
+-from scipy.ndimage import gaussian_filter1d
++import math
++from collections import deque
++import copy
++
++# Configure logging to reduce verbosity
++logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+ 
+ # Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+-def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
++@jit(nopython=True)
++def compute_autoconvolution_norms_fast(f_values):
+     """
+-    Compute the autoconvolution g = f*f and its norms efficiently.
+-    Returns (||g||₂², ||g||₁, ||g||∞)
++    Fast computation of autoconvolution norms using Numba JIT compilation.
+     """
+-    if not f_values:
++    n = len(f_values)
++    if n < 1:
+         return 0.0, 0.0, 0.0
+ 
+-    # Create step function on [-1/4, 1/4] with equal spacing
+-    n = len(f_values)
+-    if n == 0:
+-        return 0.0, 0.0, 0.0
+-
+-    # Step size in x domain [-1/4, 1/4]
++    # Convert to numpy array for fast operations
++    f = np.array(f_values, dtype=np.float64)
++    
++    # Create the step function on [-1/4, 1/4] with equal spacing
+     dx = 0.5 / (n - 1) if n > 1 else 0.5
+-
+-    # Compute autoconvolution using numpy's convolution
+-    g = np.convolve(f_values, f_values, mode='full')
+-
+-    # Properly extract the convolution result on [-1/2, 1/2]
+-    # For two functions of length n on [-1/4, 1/4], convolution produces 2*n-1 points
+-    center_start = len(g) // 2 - (n - 1)
+-    center_end = center_start + (2 * n - 1)
+-    g = g[center_start:center_end]
+-
+-    # Now we compute the three norms
+-    # ||g||∞ = max of |g|
+-    norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+-
+-    # ||g||₁ = sum of |g| * dx
+-    if len(g) <= 1:
+-        norm_1 = 0.0
+-    else:
+-        # Trapezoidal approximation for ||g||₁
+-        norm_1 = np.sum(np.abs(g)) * dx
+-
+-    # ||g||₂² = ∫ g² dx ≈ (dx/3) * Σ (y_i^2 + y_i*y_{i+1} + y_{i+1}^2)
+-    if len(g) <= 1:
+-        norm_2_squared = 0.0
+-    else:
+-        # Piecewise linear integration (trapezoidal-like for quadratic form)
+-        norm_2_squared = 0.0
+-        for i in range(len(g)-1):
+-            y1, y2 = g[i], g[i+1]
+-            norm_2_squared += (dx / 3.0) * (y1**2 + y1*y2 + y2**2)
+-
+-    return norm_2_squared, norm_1, norm_inf
+-
+-def compute_c2(f_values: List[float]) -> float:
+-    """Compute the C2 value for given step function."""
+-    norm_2_squared, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+-
+-    # Avoid division by zero
+-    if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++    
++    # Precompute convolution manually for efficiency
++    # Autoconvolution g[k] = sum f[i] * f[k-i] for valid indices
++    g = np.zeros(2 * n - 1)
++    
++    # Manual convolution loop (optimized for autoconvolution)
++    for i in range(n):
++        for j in range(n):
++            k = i + j
++            if 0 <= k < len(g):
++                g[k] += f[i] * f[j]
++    
++    # Keep only the middle part (proper autoconvolution)
++    g_middle = g[n-1:2*n-1]
++    
++    # Create x-axis for g (interval [-0.5, 0.5])
++    g_x = np.linspace(-0.5, 0.5, len(g_middle))
++    
++    # Compute the required norms
++    # ||g||₂² (L2 norm squared)
++    # Using trapezoidal integration approximation 
++    g_sq = g_middle * g_middle
++    area = 0.0
++    for i in range(len(g_middle) - 1):
++        h = g_x[i+1] - g_x[i]
++        area += h * (g_sq[i] + g_sq[i+1]) / 2
++    
++    norm_2_sq = area
++
++    # ||g||₁ (L1 norm) - approximate via summation
++    norm_1 = np.sum(np.abs(g_middle)) * dx  # dx is the step size
++
++    # ||g||∞ (infinity norm)
++    norm_inf = np.max(np.abs(g_middle))
++
++    return norm_2_sq, norm_1, norm_inf
++
++class SpectralOptimizer:
++    """Handles spectral domain optimization operations"""
++    
++    def __init__(self, n_points: int = 2000):
++        self.n_points = n_points
++    
++    def generate_initial_spectrum(self, seed: int = None) -> Tuple[np.ndarray, np.ndarray]:
++        """Generate initial spectral representation with strategic peaks"""
++        if seed is not None:
++            np.random.seed(seed)
++        
++        # Create frequency domain representation with strategic peaks
++        magnitudes = np.zeros(self.n_points)
++        
++        # Create multiple clusters of frequency components to promote smooth autoconvolution
++        # Cluster centers in log-frequency space
++        n_clusters = 5
++        cluster_centers = np.logspace(np.log10(1), np.log10(self.n_points//2), n_clusters)
++        
++        # Each cluster contributes multiple components
++        for i, center in enumerate(cluster_centers):
++            n_components = np.random.randint(2, 6)
++            for j in range(n_components):
++                # Spread components within cluster
++                freq_offset = np.random.normal(0, center * 0.15)
++                freq_idx = int(center + freq_offset)
++                if 1 <= freq_idx < self.n_points//2:
++                    # Add energy with gamma distribution for varied strengths
++                    strength = np.random.gamma(2.5, 1.2)
++                    magnitudes[freq_idx] = strength
++                    if freq_idx > 0:
++                        magnitudes[-freq_idx] = strength  # Conjugate symmetry
++                        
++        # Add some low frequency content for smoothness
++        magnitudes[0] = np.random.gamma(1.5, 2.5)  # DC component
++        
++        # Add phase information
++        phases = np.random.uniform(0, 2*np.pi, self.n_points)
++        
++        return magnitudes, phases
++    
++    def reconstruct_time_domain(self, magnitudes: np.ndarray, phases: np.ndarray) -> np.ndarray:
++        """Convert spectral representation back to time domain"""
++        # Create complex spectrum
++        spectrum = magnitudes * np.exp(1j * phases)
++        
++        # Convert back to time domain
++        f_real = np.real(ifft(spectrum))
++        
++        # Ensure non-negativity
++        f_real = np.maximum(f_real, 0.0)
++        
++        # Normalize
++        max_val = np.max(f_real)
++        if max_val > 0:
++            f_real = f_real / (max_val * 1.8)
++        
++        return f_real
++    
++    def evolve_spectrum(self, magnitudes: np.ndarray, phases: np.ndarray, 
++                       iterations: int = 5) -> Tuple[np.ndarray, np.ndarray]:
++        """Evolve spectrum through frequency domain modifications"""
++        evolved_mags = magnitudes.copy()
++        evolved_phases = phases.copy()
++        
++        for _ in range(iterations):
++            # Randomly select components to modify
++            n_modify = np.random.randint(1, max(1, self.n_points // 15))
++            indices = np.random.choice(self.n_points, n_modify, replace=False)
++            
++            for idx in indices:
++                if np.random.random() < 0.7:  # 70% chance to modify magnitude
++                    # Perturb magnitude with bounded Gaussian
++                    perturbation = np.random.normal(0, 0.15)
++                    new_mag = evolved_mags[idx] * np.exp(perturbation)
++                    evolved_mags[idx] = np.clip(new_mag, 0, 1000.0)
++                
++                if np.random.random() < 0.5:  # 50% chance to modify phase
++                    # Perturb phase with small amount
++                    perturbation = np.random.normal(0, 0.15)
++                    evolved_phases[idx] += perturbation
++                    # Keep phases in [-pi, pi]
++                    evolved_phases[idx] = evolved_phases[idx] % (2 * np.pi)
++        
++        return evolved_mags, evolved_phases
++    
++    def crossover_spectra(self, magnitudes1: np.ndarray, phases1: np.ndarray,
++                         magnitudes2: np.ndarray, phases2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
++        """Crossover operation in frequency domain"""
++        # Blend frequency components
++        alpha = np.random.beta(2, 2)  # Beta distribution for more balanced blending
++        blended_mags = alpha * magnitudes1 + (1 - alpha) * magnitudes2
++        blended_phases = alpha * phases1 + (1 - alpha) * phases2
++        
++        return blended_mags, blended_phases
++
++class PopulationManager:
++    """Manages evolutionary population dynamics"""
++    
++    def __init__(self, population_size: int = 25, n_points: int = 2000):
++        self.population_size = population_size
++        self.n_points = n_points
++        self.optimizer = SpectralOptimizer(n_points)
++        self.stagnation_count = 0
++        self.best_fitness_history = deque(maxlen=10)
++    
++    def initialize_population(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
++        """Initialize population with diverse spectral functions"""
++        population = []
++        
++        for i in range(self.population_size):
++            # Use different seeds for variety
++            seed = i * 1000 + int(time.time())
++            magnitudes, phases = self.optimizer.generate_initial_spectrum(seed)
++            
++            # Convert to time domain
++            time_domain = self.optimizer.reconstruct_time_domain(magnitudes, phases)
++            
++            population.append((magnitudes, phases, time_domain.tolist()))
++        
++        return population
++    
++    def tournament_selection(self, population_data: List[Tuple[np.ndarray, np.ndarray, List[float], float]], 
++                           tournament_size: int = 4) -> Tuple[np.ndarray, np.ndarray, List[float]]:
++        """Perform tournament selection"""
++        tournament_indices = np.random.choice(len(population_data), tournament_size, replace=False)
++        tournament_fitness = [population_data[i][3] for i in tournament_indices]
++        winner_idx = tournament_indices[np.argmax(tournament_fitness)]
++        return population_data[winner_idx][0], population_data[winner_idx][1], population_data[winner_idx][2]
++    
++    def evolve_population(self, population_data: List[Tuple[np.ndarray, np.ndarray, List[float], float]], 
++                         generation: int) -> List[Tuple[np.ndarray, np.ndarray, List[float], float]]:
++        """Evolve the population using selection, crossover and mutation"""
++        # Sort by fitness
++        sorted_indices = sorted(range(len(population_data)), key=lambda i: population_data[i][3], reverse=True)
++        
++        # Keep elites
++        elite_count = max(1, self.population_size // 4)
++        elites = [population_data[i] for i in sorted_indices[:elite_count]]
++        
++        # Generate offspring
++        offspring = []
++        
++        while len(offspring) < self.population_size - elite_count:
++            # Selection
++            parent1_mag, parent1_phase, parent1_time = self.tournament_selection(population_data)
++            parent2_mag, parent2_phase, parent2_time = self.tournament_selection(population_data)
++            
++            # Crossover
++            if len(parent1_time) == len(parent2_time):
++                child_mag, child_phase = self.optimizer.crossover_spectra(
++                    parent1_mag, parent1_phase, parent2_mag, parent2_phase
++                )
++            else:
++                # Fallback to simple averaging
++                child_mag = (parent1_mag + parent2_mag) / 2
++                child_phase = (parent1_phase + parent2_phase) / 2
++            
++            # Mutation
++            child_mag, child_phase = self.optimizer.evolve_spectrum(child_mag, child_phase, iterations=3)
++            
++            # Reconstruct and add to offspring
++            child_time = self.optimizer.reconstruct_time_domain(child_mag, child_phase)
++            offspring.append((child_mag, child_phase, child_time.tolist()))
++        
++        # Combine elites and offspring
++        new_population = elites + offspring
++        return new_population
++
++def compute_c2_with_fallback(f_values: List[float]) -> float:
++    """Compute C2 with comprehensive error handling"""
++    try:
++        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
++        
++        # Avoid division by zero with numerical stability
++        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++            return 0.0
++            
++        c2 = norm_2_sq / (norm_1 * norm_inf)
++        return float(c2)
++    except Exception as e:
++        warnings.warn(f"C2 computation failed: {str(e)}")
+         return 0.0
+ 
+-    c2 = norm_2_squared / (norm_1 * norm_inf)
+-    return c2
+-
+-def adaptive_gaussian_construction(n_points: int = None) -> List[float]:
++def adaptive_spectral_evolution(max_time_seconds: int = 85) -> List[float]:
++    """Main evolutionary algorithm in spectral domain with adaptive strategies"""
++    start_time = time.time()
++    
++    # Initialize population manager
++    pop_manager = PopulationManager(population_size=25, n_points=2000)
++    population = pop_manager.initialize_population()
++    
++    best_fitness = -1
++    best_individual = None
++    
++    generation = 0
++    max_generations = 200
++    stagnation_limit = 30
++    
++    while generation < max_generations and (time.time() - start_time) < max_time_seconds - 2:
++        # Evaluate fitness for current population
++        population_with_fitness = []
++        
++        for magnitudes, phases, time_domain in population:
++            fitness = compute_c2_with_fallback(time_domain)
++            population_with_fitness.append((magnitudes, phases, time_domain, fitness))
++        
++        # Track best
++        current_best_idx = max(range(len(population_with_fitness)), 
++                              key=lambda i: population_with_fitness[i][3])
++        current_best_fitness = population_with_fitness[current_best_idx][3]
++        
++        if current_best_fitness > best_fitness:
++            best_fitness = current_best_fitness
++            best_individual = population_with_fitness[current_best_idx][2].copy()
++            pop_manager.stagnation_count = 0
++            pop_manager.best_fitness_history.append(best_fitness)
++        else:
++            pop_manager.stagnation_count += 1
++            
++        # Check for stagnation
++        if pop_manager.stagnation_count > stagnation_limit:
++            # Introduce diversity by generating new individuals
++            for i in range(pop_manager.population_size // 5):
++                seed = int(time.time() * 1000 + i + generation) % (2**32)
++                magnitudes, phases = pop_manager.optimizer.generate_initial_spectrum(seed)
++                time_domain = pop_manager.optimizer.reconstruct_time_domain(magnitudes, phases)
++                # Replace worst individual
++                worst_idx = min(range(len(population_with_fitness)), 
++                               key=lambda i: population_with_fitness[i][3])
++                population[worst_idx] = (magnitudes, phases, time_domain.tolist())
++            pop_manager.stagnation_count = 0
++        
++        # Evolve population
++        population = pop_manager.evolve_population(population_with_fitness, generation)
++        generation += 1
++    
++    # Return best individual found
++    return best_individual if best_individual is not None else [0.5] * 1000
++
++def construct_function() -> list[float]:
+     """
+-    Construct step function using adaptive Gaussian shaping with strategic positioning
+-    and dynamic amplitude adjustment.
++    Main function to construct step-function with high C2 value using spectral evolutionary approach.
+     """
+-    if n_points is None:
+-        n_points = np.random.randint(200, 2000)  # Increased range for better exploration
+-
+-    # Generate x coordinates from -1/4 to 1/4
+-    x = np.linspace(-0.25, 0.25, n_points)
+-
+-    # Create multiple Gaussian peaks with strategic positioning
+-    f_values = np.zeros(n_points)
+-
+-    # Use logarithmic spacing for peak positions to avoid clustering
+-    num_peaks = np.random.randint(3, 8)
+-    peak_positions = []
+-
+-    # Generate logarithmically spaced positions to ensure good distribution
+-    log_min = np.log(0.01)
+-    log_max = np.log(0.2)
+-    log_positions = np.logspace(log_min, log_max, num_peaks)
+-
+-    # Distribute peaks along the domain with some randomness
+-    for i in range(num_peaks):
+-        # Place peaks in the middle third of domain to avoid edge effects
+-        base_pos = np.random.choice([-1, 1]) * log_positions[i] * 0.5
+-        # Add slight variation to avoid perfect symmetry
+-        peak_pos = base_pos + np.random.uniform(-0.02, 0.02)
+-        peak_positions.append(peak_pos)
+-
+-    # Generate peaks with adaptive amplitudes
+-    peak_width = 0.05  # Fixed peak width for consistency
+-
+-    for peak_pos in peak_positions:
+-        # Adaptive amplitude based on peak position and strategy to avoid sharp autoconvolutions
+-        # Peaks near center contribute more to flat autoconvolution profiles
+-        center_distance = abs(peak_pos)
+-        if center_distance < 0.05:  # Near center
+-            amp_factor = 1.5
+-        elif center_distance < 0.1:  # Middle area
+-            amp_factor = 1.2
+-        else:  # Outer areas
+-            amp_factor = 0.8
+-
+-        peak_amplitude = np.random.uniform(0.8, 1.5) * amp_factor
+-
+-        # Create Gaussian peak with dynamic width adjustment
+-        gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - peak_pos) / peak_width)**2)
+-        f_values += gaussian_peak
+-
+-    # Apply adaptive smoothing with optimized Gaussian kernel
+-    if len(f_values) > 10:
+-        # Use Gaussian filtering for smooth transitions
+-        sigma = max(1.0, len(f_values) / 100)  # Dynamic smoothing strength
+-        f_values = gaussian_filter1d(f_values, sigma=sigma, mode='constant', cval=0.0)
+-
+-    # Ensure non-negative values
+-    f_values = np.clip(f_values, 0, None)
+-
+-    # Normalize to control overall magnitude
+-    if np.max(f_values) > 1e-6:
+-        f_values = f_values / np.max(f_values) * 5.0  # Scale to reasonable range
+-
+-    return f_values.tolist()
+-
+-def selective_local_optimization(individual: List[float], max_iter: int = 50) -> List[float]:
+-    """
+-    Apply selective differential evolution targeting only key parameters
+-    that influence the autoconvolution shape.
+-    """
+-    # Convert to numpy for easier manipulation
+-    x = np.array(individual)
+-    n = len(x)
+-
+-    # For now, simply apply smoothing and clipping
+-    if n > 20:
+-        # Apply a selective smoothing operation that preserves important features
+-        # but reduces noise that might hurt C2
+-        smoothed = np.convolve(x, np.ones(5)/5, mode='same')
+-        # Keep original values in regions where there are clear peaks
+-        # Use threshold-based approach to preserve significant features
+-        threshold = np.percentile(x, 75)
+-        mask = x > threshold * 0.3
+-        result = np.where(mask, smoothed, x)
+-        # Ensure non-negativity
+-        result = np.clip(result, 0, None)
+-        return result.tolist()
+-
+-    return individual
+-
+-def adaptive_mutation(individual: List[float], generation: int, best_c2: float) -> List[float]:
+-    """Enhanced mutation strategy with adaptive parameters."""
+-    mutated = individual.copy()
+-    n = len(mutated)
+-
+-    # Dynamic mutation parameters based on generation and performance
+-    if best_c2 > 0.95:
+-        mutation_rate = 0.05
+-        noise_sigma = 0.02
+-    elif best_c2 > 0.9:
+-        mutation_rate = 0.08
+-        noise_sigma = 0.03
+-    else:
+-        mutation_rate = 0.1
+-        noise_sigma = 0.05
+-
+-    # Apply Gaussian perturbation to elements
+-    for i in range(n):
+-        if random.random() < mutation_rate:
+-            # Add Gaussian noise with adaptive scale
+-            mutated[i] += np.random.normal(0, noise_sigma * np.mean(mutated) if np.mean(mutated) > 0 else 0.01)
+-            # Ensure non-negativity
+-            mutated[i] = max(0.0, mutated[i])
+-
+-    # Occasionally apply more aggressive local search
+-    if random.random() < 0.2 and n > 20:
+-        # Apply selective smoothing
+-        window_size = min(5, max(1, n // 20))
+-        if window_size > 1:
+-            smoothed = np.convolve(mutated, np.ones(window_size)/window_size, mode='same')
+-            # Mix with original for balance
+-            alpha = random.uniform(0.3, 0.7)
+-            mutated = [alpha * old + (1 - alpha) * new for old, new in zip(mutated, smoothed)]
+-
+-    return mutated
+-
+-def evolve_population(population: List[List[float]],
+-                      fitnesses: List[float],
+-                      generation: int,
+-                      population_size: int,
+-                      best_fitness: float) -> List[List[float]]:
+-    """Generate next generation using tournament selection and enhanced mutation."""
+-    # Sort by fitness
+-    sorted_indices = np.argsort(fitnesses)[::-1]
+-
+-    # Keep top 30%
+-    elite_count = max(1, population_size // 3)
+-    elites = [population[i] for i in sorted_indices[:elite_count]]
+-
+-    # Generate offspring through tournament selection and enhanced mutation
+-    offspring = []
+-
+-    while len(offspring) < population_size - elite_count:
+-        # Tournament selection
+-        tournament_size = 3
+-        tournament_indices = random.sample(range(len(population)), tournament_size)
+-        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+-        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+-
+-        # Mutate the winner with adaptive strategy
+-        mutated = adaptive_mutation(population[winner_index], generation, best_fitness)
+-        offspring.append(mutated)
+-
+-    # Combine elites and offspring
+-    new_population = elites + offspring
+-
+-    return new_population
+-
+-def evaluate_population(population: List[List[float]]) -> List[float]:
+-    """Evaluate fitness for entire population in parallel."""
+-    def evaluate_single(individual):
+-        try:
+-            return compute_c2(individual)
+-        except Exception:
+-            return 0.0
+-
+-    # Parallel evaluation
+-    fitnesses = Parallel(n_jobs=-1, backend='threading')(
+-        delayed(evaluate_single)(ind) for ind in population
+-    )
+-
+-    return fitnesses
+-
+-def construct_function() -> List[float]:
+-    """Optimized function to construct step-function with high C2 value."""
+-    # Parameters for evolution
+-    population_size = 50
+-    generations = 200
+-    max_time_seconds = 85  # Leave room for finalization
+-
+-    start_time = time.time()
+-
+-    # Initialize population with adaptive Gaussian constructions
+-    def create_adaptive_individual():
+-        return adaptive_gaussian_construction()
+-
+-    # Generate initial population with varied strategies
+-    population = [create_adaptive_individual() for _ in range(population_size)]
+-
+-    best_fitness = -float('inf')
+-    best_individual = None
+-
+-    # Precompute initial fitnesses
+-    fitnesses = evaluate_population(population)
+-
+-    for gen in range(generations):
+-        if time.time() - start_time > max_time_seconds:
+-            break
+-
+-        # Update best solution
+-        current_best_idx = np.argmax(fitnesses)
+-        if fitnesses[current_best_idx] > best_fitness:
+-            best_fitness = fitnesses[current_best_idx]
+-            best_individual = population[current_best_idx].copy()
+-
+-        # Apply local optimization to best individual before evolution
+-        if best_fitness > 0.95 and best_individual is not None:
+-            optimized = selective_local_optimization(best_individual)
+-            optimized_c2 = compute_c2(optimized)
+-            if optimized_c2 > best_fitness:
+-                best_individual = optimized
+-                # Update fitness in population
+-                for i, individual in enumerate(population):
+-                    if individual == population[current_best_idx]:
+-                        fitnesses[i] = optimized_c2
+-                        break
+-
+-        # Evolve population
+-        population = evolve_population(population, fitnesses, gen, population_size, best_fitness)
+-
+-        # Evaluate new population
+-        fitnesses = evaluate_population(population)
+-
+-        # Early stopping if no improvement
+-        if gen > 10 and abs(best_fitness - fitnesses[current_best_idx]) < 1e-6:
+-            break
+-
+-        # Adaptive population size adjustment
+-        if gen % 50 == 0 and gen > 0:
+-            population_size = max(20, min(200, population_size + (10 if gen % 100 == 0 else 0)))
+-
+-    # Final refinement of best individual if it looks promising
+-    if best_individual is not None:
+-        final_c2 = compute_c2(best_individual)
+-        if final_c2 > 0.95:
+-            refined = selective_local_optimization(best_individual)
+-            refined_c2 = compute_c2(refined)
+-            if refined_c2 > final_c2:
+-                best_individual = refined
+-
+-    return best_individual if best_individual is not None else []
++    try:
++        # Use spectral evolutionary approach
++        f_values = adaptive_spectral_evolution(max_time_seconds=85)
++        return f_values
++    except Exception as e:
++        # Fallback to simple uniform distribution
++        warnings.warn(f"Spectral evolution failed: {str(e)}")
++        return [0.5] * 1000
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

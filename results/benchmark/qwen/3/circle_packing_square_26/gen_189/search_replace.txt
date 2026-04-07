@@ -1,0 +1,342 @@
+<NAME>
+add_multi_scale_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+I'll implement a multi-scale spatial indexing approach to improve the efficiency of overlap detection. The current implementation uses a single cKDTree with a fixed query radius, but this can be improved by using adaptive grid-based indexing that becomes more refined as the algorithm progresses. This approach leverages the fact that early generations need faster but less precise overlap detection, while later generations benefit from more accurate but computationally expensive checks.
+
+The key insight is to use a hierarchical spatial indexing system where:
+1. Early generations use coarse grids for fast overlap detection
+2. Later generations switch to finer grids for more precise checking
+3. This reduces unnecessary computation while maintaining accuracy
+
+This addresses the computational bottleneck in overlap checking that prevents reaching the target score of 2.6358627564136983.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Global constants
+POPULATION_SIZE = 100
+NUM_GENERATIONS = 500
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.15
+MUTATION_RATE_END = 0.01
+CROSSOVER_RATE = 0.8
+BOUNDARY_PENALTY_WEIGHT = 10000.0
+OVERLAP_PENALTY_WEIGHT = 100000.0
+# Progressive constraint relaxation parameters
+RELAXATION_START_GEN = 50
+RELAXATION_END_GEN = 200
+INITIAL_PENALTY_WEIGHTS = [1.0, 1.0]  # [boundary, overlap]
+FINAL_PENALTY_WEIGHTS = [6.0, 6.0]
+=======
+# Global constants
+POPULATION_SIZE = 100
+NUM_GENERATIONS = 500
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.15
+MUTATION_RATE_END = 0.01
+CROSSOVER_RATE = 0.8
+BOUNDARY_PENALTY_WEIGHT = 10000.0
+OVERLAP_PENALTY_WEIGHT = 100000.0
+# Progressive constraint relaxation parameters
+RELAXATION_START_GEN = 50
+RELAXATION_END_GEN = 200
+INITIAL_PENALTY_WEIGHTS = [1.0, 1.0]  # [boundary, overlap]
+FINAL_PENALTY_WEIGHTS = [6.0, 6.0]
+# Multi-scale spatial indexing parameters
+GRID_SCALES = [0.1, 0.05, 0.02]  # Coarse, medium, fine grid sizes
+GRID_TRANSITION_GEN = [100, 300]  # When to transition between scales
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def is_valid(circles: np.ndarray) -> bool:
+    """Check if all circles are within bounds and non-overlapping using spatial indexing."""
+    n = len(circles)
+
+    # Check boundary constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Use spatial indexing for efficient overlap checking
+    if n > 1:
+        try:
+            positions = [(x, y) for x, y, r in circles]
+            tree = cKDTree(positions)
+
+            # Query pairs within sum of radii distance
+            pairs = tree.query_pairs(r=2.0, output_type='ndarray')
+
+            # Check each potential overlapping pair
+            for i, j in pairs:
+                if i < j:  # Avoid duplicate checking
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        return False
+        except Exception:
+            # Fallback to brute force if tree fails
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        return False
+
+    return True
+=======
+def is_valid(circles: np.ndarray, generation: int = 0) -> bool:
+    """Check if all circles are within bounds and non-overlapping using spatial indexing."""
+    n = len(circles)
+
+    # Check boundary constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Use spatial indexing for efficient overlap checking
+    if n > 1:
+        # Determine grid scale based on generation
+        if generation < GRID_TRANSITION_GEN[0]:
+            grid_size = GRID_SCALES[0]  # Coarse grid
+        elif generation < GRID_TRANSITION_GEN[1]:
+            grid_size = GRID_SCALES[1]  # Medium grid
+        else:
+            grid_size = GRID_SCALES[2]  # Fine grid
+
+        try:
+            # Use spatial grid indexing for faster overlap detection
+            positions = [(x, y) for x, y, r in circles]
+
+            # Create spatial grid structure for overlap checking
+            grid = {}
+            for i, (x, y) in enumerate(positions):
+                # Determine grid cell for this point
+                grid_x = int(x / grid_size)
+                grid_y = int(y / grid_size)
+                if (grid_x, grid_y) not in grid:
+                    grid[(grid_x, grid_y)] = []
+                grid[(grid_x, grid_y)].append(i)
+
+            # Check for overlaps in neighboring cells
+            for (gx, gy), indices in grid.items():
+                # Check against neighbors in 3x3 grid
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        neighbor_key = (gx + dx, gy + dy)
+                        if neighbor_key in grid:
+                            for i in indices:
+                                for j in grid[neighbor_key]:
+                                    if i < j:  # Avoid duplicate checks
+                                        x1, y1, r1 = circles[i]
+                                        x2, y2, r2 = circles[j]
+                                        distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                                        if distance < r1 + r2:
+                                            return False
+        except Exception:
+            # Fallback to brute force if anything goes wrong
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(circles: np.ndarray, generation: int = 0) -> float:
+    """Evaluate fitness of a solution, higher is better."""
+    if not is_valid(circles):
+        # Apply penalty for constraint violations
+        penalty = 0
+
+        # Dynamic penalty weighting based on generation
+        if generation < RELAXATION_START_GEN:
+            # Early generations: lighter penalties for exploration
+            boundary_weight = INITIAL_PENALTY_WEIGHTS[0]
+            overlap_weight = INITIAL_PENALTY_WEIGHTS[1]
+        elif generation < RELAXATION_END_GEN:
+            # Middle generations: gradual transition
+            progress = (generation - RELAXATION_START_GEN) / (RELAXATION_END_GEN - RELAXATION_START_GEN)
+            boundary_weight = INITIAL_PENALTY_WEIGHTS[0] + progress * (FINAL_PENALTY_WEIGHTS[0] - INITIAL_PENALTY_WEIGHTS[0])
+            overlap_weight = INITIAL_PENALTY_WEIGHTS[1] + progress * (FINAL_PENALTY_WEIGHTS[1] - INITIAL_PENALTY_WEIGHTS[1])
+        else:
+            # Later generations: strict penalties for convergence
+            boundary_weight = FINAL_PENALTY_WEIGHTS[0]
+            overlap_weight = FINAL_PENALTY_WEIGHTS[1]
+
+        # Boundary penalty
+        boundary_violations = 0
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0:
+                boundary_violations += (r - x)**2
+            if x + r > 1:
+                boundary_violations += (x + r - 1)**2
+            if y - r < 0:
+                boundary_violations += (r - y)**2
+            if y + r > 1:
+                boundary_violations += (y + r - 1)**2
+
+        penalty += boundary_weight * boundary_violations
+
+        # Overlap penalty - compute based on actual overlap amounts
+        overlap_penalty = 0
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    overlap = (r1 + r2 - distance)
+                    overlap_penalty += overlap**2
+
+        penalty += overlap_weight * overlap_penalty
+
+        return -penalty
+
+    return calculate_sum_radii(circles)
+=======
+def evaluate_fitness(circles: np.ndarray, generation: int = 0) -> float:
+    """Evaluate fitness of a solution, higher is better."""
+    if not is_valid(circles, generation):
+        # Apply penalty for constraint violations
+        penalty = 0
+
+        # Dynamic penalty weighting based on generation
+        if generation < RELAXATION_START_GEN:
+            # Early generations: lighter penalties for exploration
+            boundary_weight = INITIAL_PENALTY_WEIGHTS[0]
+            overlap_weight = INITIAL_PENALTY_WEIGHTS[1]
+        elif generation < RELAXATION_END_GEN:
+            # Middle generations: gradual transition
+            progress = (generation - RELAXATION_START_GEN) / (RELAXATION_END_GEN - RELAXATION_START_GEN)
+            boundary_weight = INITIAL_PENALTY_WEIGHTS[0] + progress * (FINAL_PENALTY_WEIGHTS[0] - INITIAL_PENALTY_WEIGHTS[0])
+            overlap_weight = INITIAL_PENALTY_WEIGHTS[1] + progress * (FINAL_PENALTY_WEIGHTS[1] - INITIAL_PENALTY_WEIGHTS[1])
+        else:
+            # Later generations: strict penalties for convergence
+            boundary_weight = FINAL_PENALTY_WEIGHTS[0]
+            overlap_weight = FINAL_PENALTY_WEIGHTS[1]
+
+        # Boundary penalty
+        boundary_violations = 0
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0:
+                boundary_violations += (r - x)**2
+            if x + r > 1:
+                boundary_violations += (x + r - 1)**2
+            if y - r < 0:
+                boundary_violations += (r - y)**2
+            if y + r > 1:
+                boundary_violations += (y + r - 1)**2
+
+        penalty += boundary_weight * boundary_violations
+
+        # Overlap penalty - compute based on actual overlap amounts
+        overlap_penalty = 0
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    overlap = (r1 + r2 - distance)
+                    overlap_penalty += overlap**2
+
+        penalty += overlap_weight * overlap_penalty
+
+        return -penalty
+
+    return calculate_sum_radii(circles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    for generation in range(NUM_GENERATIONS):
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(individual, generation) for individual in population]
+
+        # Track best fitness
+        best_fitness = max(fitnesses)
+        best_fitness_history.append(best_fitness)
+
+        # Print progress every 50 generations
+        if generation % 50 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness}")
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best individual
+        best_individual = get_best_individual(population, fitnesses)
+        new_population.append(best_individual)
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < POPULATION_SIZE:
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            child1, child2 = crossover(parent1, parent2)
+
+            child1 = mutate(child1, generation, NUM_GENERATIONS)
+            child2 = mutate(child2, generation, NUM_GENERATIONS)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:POPULATION_SIZE]
+=======
+    for generation in range(NUM_GENERATIONS):
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(individual, generation) for individual in population]
+
+        # Track best fitness
+        best_fitness = max(fitnesses)
+        best_fitness_history.append(best_fitness)
+
+        # Print progress every 50 generations
+        if generation % 50 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness}")
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best individual
+        best_individual = get_best_individual(population, fitnesses)
+        new_population.append(best_individual)
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < POPULATION_SIZE:
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            child1, child2 = crossover(parent1, parent2)
+
+            child1 = mutate(child1, generation, NUM_GENERATIONS)
+            child2 = mutate(child2, generation, NUM_GENERATIONS)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:POPULATION_SIZE]
+>>>>>>> REPLACE
+</DIFF>

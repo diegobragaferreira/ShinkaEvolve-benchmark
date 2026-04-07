@@ -1,0 +1,313 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import Voronoi
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Implements a novel geometric optimization approach with Voronoi-based refinement.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances using squareform for better numerical stability
+        distances = squareform(pdist(points))
+
+        # Zero out diagonal elements (distance to self)
+        np.fill_diagonal(distances, np.inf)
+
+        # Compute min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        if d_max == 0:
+            return -1.0
+        return -d_min / d_max
+
+    def adaptive_objective_with_penalty(x, penalty_weight=1000.0):
+        """
+        Enhanced objective with built-in geometric penalties for better convergence
+        """
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # If all points are identical or near identical, penalize heavily
+        if d_max == 0:
+            return -1.0
+
+        # Calculate ratio to maximize
+        ratio = d_min / d_max
+
+        # Add penalty for points near boundaries to avoid numerical issues
+        boundary_penalty = 0.0
+        margin = 0.01
+        for point in points:
+            if (point[0] < margin or point[0] > 1-margin or
+                point[1] < margin or point[1] > 1-margin):
+                boundary_penalty += penalty_weight * (margin - min(point[0], 1-point[0], point[1], 1-point[1]))
+
+        # Add penalty for very small distances (close point clustering)
+        min_distance_penalty = 0.0
+        if d_min < 0.05:  # Threshold for clustering penalty
+            min_distance_penalty = penalty_weight * (0.05 - d_min)
+
+        total_penalty = boundary_penalty + min_distance_penalty
+        return -(ratio - total_penalty / penalty_weight)
+
+    def voronoi_refinement(points, iterations=3):
+        """
+        Refine point distribution using Voronoi diagram analysis and centroid adjustment
+        """
+        for _ in range(iterations):
+            try:
+                # Create Voronoi diagram
+                vor = Voronoi(points)
+
+                # Calculate centroids of Voronoi regions
+                new_points = []
+                for i in range(len(points)):
+                    # Get vertices of Voronoi region for point i
+                    region_indices = np.where(vor.point_region == i)[0]
+                    if len(region_indices) > 0:
+                        region_id = region_indices[0]
+                        vertices = vor.vertices[vor.region[region_id]]
+
+                        # Skip if region is unbounded or has too few vertices
+                        if len(vertices) < 3:
+                            new_points.append(points[i])
+                            continue
+
+                        # Compute centroid of Voronoi region
+                        centroid = np.mean(vertices, axis=0)
+
+                        # Move point towards centroid but respect bounds
+                        # Only move if the centroid is significantly different
+                        if np.linalg.norm(centroid - points[i]) > 1e-6:
+                            # Move point towards centroid (but not too aggressively)
+                            direction = centroid - points[i]
+                            step_size = min(0.1, 0.1 * np.linalg.norm(direction))
+                            new_point = points[i] + step_size * direction / (np.linalg.norm(direction) + 1e-10)
+
+                            # Clamp to bounds
+                            new_point = np.clip(new_point, 0.01, 0.99)
+                            new_points.append(new_point)
+                        else:
+                            new_points.append(points[i])
+                    else:
+                        new_points.append(points[i])
+                points = np.array(new_points)
+            except:
+                # If Voronoi computation fails, just return original points
+                pass
+        return points
+
+    # Phase 1: Voronoi-enhanced geometric initialization
+    np.random.seed(42)
+
+    # Create better initial configuration based on known optimal patterns
+    # Generate a set of points that approximate a Voronoi diagram with good properties
+    # Use a regular hexagonal lattice pattern with controlled perturbation
+
+    # Create a regular hexagonal pattern that's close to optimal
+    # For 16 points, we'll use a 4x4 grid with hexagonal offset
+    points = []
+
+    # Generate points on a hexagonal lattice
+    rows, cols = 4, 4
+    sqrt3 = np.sqrt(3)
+    spacing = 0.9  # Adjust spacing to fit better in [0,1] square
+
+    # Calculate spacing factors
+    row_spacing = spacing / sqrt3
+    col_spacing = spacing
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(points) >= 16:
+                break
+            # Offset every other row for hexagonal packing
+            x = j * col_spacing + (i % 2) * col_spacing * 0.5
+            y = i * row_spacing
+
+            # Scale to fit within unit square [0.05, 0.95] for better boundary handling
+            x_scaled = 0.05 + (x / (col_spacing * cols)) * 0.9
+            y_scaled = 0.05 + (y / (row_spacing * rows)) * 0.9
+
+            points.append([x_scaled, y_scaled])
+
+    points = np.array(points[:16])
+
+    # Add strategic perturbations to break symmetry and improve optimization
+    # Only perturb points that are not at extreme positions
+    for i in range(len(points)):
+        # Apply different perturbation patterns based on position
+        if 4 <= i < 12:  # Middle points get larger perturbations
+            points[i] += np.random.normal(0, 0.015, 2)
+        else:  # Boundary points get smaller perturbations
+            points[i] += np.random.normal(0, 0.005, 2)
+
+    # Ensure all points are within bounds
+    points = np.clip(points, 0.05, 0.95)
+
+    # Phase 2: Voronoi refinement before optimization to improve starting configuration
+    points = voronoi_refinement(points, iterations=2)
+
+    # Phase 3: Multi-start optimization with diverse initial configurations
+    best_points = None
+    best_ratio = float('inf')
+
+    # Define multiple diverse initial configurations
+    initial_configs = []
+
+    # Configuration 1: Voronoi-enhanced hexagonal grid (our main initialization)
+    initial_configs.append(points.copy())
+
+    # Configuration 2: Golden spiral for even distribution
+    np.random.seed(123)
+    golden_spiral_points = []
+    phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+    for i in range(16):
+        angle = i * 2.4  # Modified golden angle
+        radius = 0.4 * np.sqrt(i / 15.0) if i > 0 else 0.05
+        x = 0.5 + radius * np.cos(angle)
+        y = 0.5 + radius * np.sin(angle)
+        golden_spiral_points.append([x, y])
+    golden_spiral_points = np.array(golden_spiral_points)
+    golden_spiral_points = np.clip(golden_spiral_points, 0.05, 0.95)
+    initial_configs.append(golden_spiral_points)
+
+    # Configuration 3: Circle arrangement
+    np.random.seed(234)
+    circle_points = []
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    radii = 0.4 + 0.1 * np.sin(np.arange(16) * np.pi / 8)
+    center = np.array([0.5, 0.5])
+    for angle, radius in zip(angles, radii):
+        x = center[0] + radius * np.cos(angle)
+        y = center[1] + radius * np.sin(angle)
+        circle_points.append([x, y])
+    circle_points = np.array(circle_points)
+    circle_points = np.clip(circle_points, 0.05, 0.95)
+    initial_configs.append(circle_points)
+
+    # Configuration 4: Corner-based positioning
+    np.random.seed(345)
+    corner_points = np.array([
+        [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+        [0.5, 0.1], [0.5, 0.9], [0.1, 0.5], [0.9, 0.5],
+        [0.25, 0.25], [0.25, 0.75], [0.75, 0.25], [0.75, 0.75],
+        [0.33, 0.33], [0.33, 0.67], [0.67, 0.33], [0.67, 0.67]
+    ])
+    corner_points = np.clip(corner_points, 0.05, 0.95)
+    initial_configs.append(corner_points)
+
+    # Run optimization from each initial configuration
+    bounds = [(0.01, 0.99) for _ in range(32)]
+
+    for i, initial_config in enumerate(initial_configs):
+        try:
+            x0 = initial_config.flatten()
+
+            # First stage: Differential Evolution with adaptive parameters
+            de_result = differential_evolution(
+                adaptive_objective_with_penalty,  # Use enhanced objective with penalties
+                bounds,
+                seed=42+i,
+                maxiter=150,  # Reduced iterations for faster multi-start
+                popsize=20,
+                tol=1e-9,
+                recombination=0.9,
+                mutation=(0.8, 1.0),
+                disp=False
+            )
+
+            # Update x0 with better solution from DE
+            x0 = de_result.x.copy()
+
+            # Second stage: Local optimization with enhanced convergence control
+            # Try L-BFGS-B first with strict tolerances
+            lbfgs_result = minimize(
+                adaptive_objective_with_penalty,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15, 'gtol': 1e-15},
+                callback=None
+            )
+
+            # If L-BFGS-B doesn't work, fallback to SLSQP
+            if lbfgs_result.success:
+                x0 = lbfgs_result.x.copy()
+            else:
+                slsqp_result = minimize(
+                    adaptive_objective_with_penalty,
+                    x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+                    callback=None
+                )
+                if slsqp_result.success:
+                    x0 = slsqp_result.x.copy()
+
+            # Final refinement with standard objective (to ensure proper output)
+            final_result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+
+            if final_result.success:
+                current_points = final_result.x.reshape(-1, 2)
+            else:
+                current_points = x0.reshape(-1, 2)
+
+            # Calculate the ratio for this configuration
+            distances = squareform(pdist(current_points))
+            np.fill_diagonal(distances, np.inf)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+
+            if d_max > 0:
+                current_ratio = d_min / d_max
+                if current_ratio < best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+
+        except Exception as e:
+            warnings.warn(f"Optimization from config {i} failed: {e}")
+            continue
+
+    # If we found a valid result, use it; otherwise use our original configuration
+    if best_points is not None:
+        points = best_points
+    else:
+        points = initial_configs[0]
+
+    # Phase 4: Post-processing with Voronoi refinement
+    points = voronoi_refinement(points, iterations=3)
+
+    # Ensure final points are within bounds
+    points = np.clip(points, 0.01, 0.99)
+
+    return points
+
+# EVOLVE-BLOCK-END

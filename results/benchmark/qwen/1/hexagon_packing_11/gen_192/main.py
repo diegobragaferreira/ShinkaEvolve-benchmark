@@ -1,0 +1,488 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import numba
+from numba import jit
+import time
+from joblib import Parallel, delayed
+import math
+from collections import defaultdict
+
+@jit(nopython=True)
+def hexagon_vertices_numba(x, y, angle_deg, side_length=1):
+    """Calculate vertices of a regular hexagon using numba for speed"""
+    angle_rad = np.deg2rad(angle_deg)
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vertices[i, 0] = x + side_length * np.cos(theta)
+        vertices[i, 1] = y + side_length * np.sin(theta)
+    return vertices
+
+@jit(nopython=True)
+def point_in_hexagon_numba(px, py, hex_vertices):
+    """Fast point-in-polygon check for hexagon using ray casting"""
+    n = len(hex_vertices)
+    inside = False
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if py > min(p1y, p2y):
+            if py <= max(p1y, p2y):
+                if px <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or px <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+class ConstraintChecker:
+    """Handles constraint validation efficiently"""
+    
+    @staticmethod
+    @jit(nopython=True)
+    def check_hexagon_overlap_numba(hex1_vertices, hex2_vertices):
+        """Fast overlap check between two hexagons using numba"""
+        # Simple bounding box check first for early rejection
+        min1_x, max1_x = np.min(hex1_vertices[:, 0]), np.max(hex1_vertices[:, 0])
+        min1_y, max1_y = np.min(hex1_vertices[:, 1]), np.max(hex1_vertices[:, 1])
+        min2_x, max2_x = np.min(hex2_vertices[:, 0]), np.max(hex2_vertices[:, 0])
+        min2_y, max2_y = np.min(hex2_vertices[:, 1]), np.max(hex2_vertices[:, 1])
+        
+        if max1_x < min2_x or max2_x < min1_x or max1_y < min2_y or max2_y < min1_y:
+            return False  # No overlap possible
+        
+        # More detailed check using separating axis theorem (simplified for hexagons)
+        # For hexagons, we can check if any edge of one hexagon intersects with any edge of another
+        # This simplified version just checks if any vertex of one is inside the other
+        for i in range(6):
+            px, py = hex1_vertices[i]
+            if point_in_hexagon_numba(px, py, hex2_vertices):
+                return True
+        
+        for i in range(6):
+            px, py = hex2_vertices[i]
+            if point_in_hexagon_numba(px, py, hex1_vertices):
+                return True
+                
+        return False
+    
+    @staticmethod
+    def check_containment_all(inner_hexagons, outer_polygon):
+        """Check that all inner hexagons are contained within outer polygon"""
+        for hexagon in inner_hexagons:
+            vertices = hexagon.get_vertices()
+            # Check if all vertices are inside the outer polygon
+            for vx, vy in vertices:
+                if not outer_polygon.contains(Point(vx, vy)):
+                    return False
+        return True
+    
+    @staticmethod
+    def check_overlaps_fast(inner_hexagons):
+        """Fast overlap checking with spatial indexing"""
+        if len(inner_hexagons) < 2:
+            return False
+            
+        # Build spatial index to optimize collision detection
+        cell_size = 3.0
+        index = defaultdict(list)
+        
+        # Populate spatial index
+        for i, hexagon in enumerate(inner_hexagons):
+            min_x, max_x, min_y, max_y = hexagon.get_bounding_box()
+            start_grid_x = int(np.floor(min_x / cell_size))
+            end_grid_x = int(np.ceil(max_x / cell_size))
+            start_grid_y = int(np.floor(min_y / cell_size))
+            end_grid_y = int(np.ceil(max_y / cell_size))
+            
+            # Add to all relevant grid cells
+            for gx in range(start_grid_x, end_grid_x + 1):
+                for gy in range(start_grid_y, end_grid_y + 1):
+                    index[(gx, gy)].append(i)
+        
+        # Check potential collisions
+        checked_pairs = set()
+        for i, hexagon in enumerate(inner_hexagons):
+            min_x, max_x, min_y, max_y = hexagon.get_bounding_box()
+            start_grid_x = int(np.floor(min_x / cell_size))
+            end_grid_x = int(np.ceil(max_x / cell_size))
+            start_grid_y = int(np.floor(min_y / cell_size))
+            end_grid_y = int(np.ceil(max_y / cell_size))
+            
+            # Check neighboring cells
+            for gx in range(start_grid_x - 1, end_grid_x + 2):
+                for gy in range(start_grid_y - 1, end_grid_y + 2):
+                    if (gx, gy) in index:
+                        for j in index[(gx, gy)]:
+                            if i < j and (i, j) not in checked_pairs:
+                                checked_pairs.add((i, j))
+                                hex1_vertices = inner_hexagons[i].get_vertices()
+                                hex2_vertices = inner_hexagons[j].get_vertices()
+                                if ConstraintChecker.check_hexagon_overlap_numba(hex1_vertices, hex2_vertices):
+                                    return True
+        return False
+
+class Hexagon:
+    """Represents a regular hexagon with position, rotation, and size"""
+    
+    def __init__(self, center_x, center_y, rotation_deg, side_length=1):
+        self.center_x = center_x
+        self.center_y = center_y
+        self.rotation_deg = rotation_deg
+        self.side_length = side_length
+    
+    def get_vertices(self):
+        """Get the 6 vertices of the hexagon"""
+        return hexagon_vertices_numba(self.center_x, self.center_y, self.rotation_deg, self.side_length)
+    
+    def get_bounding_box(self):
+        """Get the bounding box coordinates of the hexagon"""
+        vertices = self.get_vertices()
+        xs = vertices[:, 0]
+        ys = vertices[:, 1]
+        return np.min(xs), np.max(xs), np.min(ys), np.max(ys)
+    
+    def contains_point(self, px, py):
+        """Check if a point is inside this hexagon"""
+        vertices = self.get_vertices()
+        return point_in_hexagon_numba(px, py, vertices)
+
+class HexagonPacker:
+    """Handles the core packing logic and constraint validation"""
+    
+    def __init__(self, inner_side_length=1.0):
+        self.inner_side_length = inner_side_length
+        self.hex_apothem = inner_side_length * np.sqrt(3) / 2
+    
+    def get_inner_hexagons(self, positions, rotations):
+        """Create list of Hexagon objects from positions and rotations"""
+        return [Hexagon(pos[0], pos[1], rot) for pos, rot in zip(positions, rotations)]
+    
+    def estimate_outer_side_length(self, inner_positions, padding=0.1):
+        """Estimate minimum outer hexagon side length to contain all inner hexagons"""
+        if len(inner_positions) == 0:
+            return 1000
+        
+        # Flatten positions to array for easier processing
+        positions = np.array(inner_positions)
+        
+        # Get all vertices of all hexagons
+        all_vertices = []
+        for i, (x, y) in enumerate(positions):
+            hexagon = Hexagon(x, y, 0, self.inner_side_length)
+            vertices = hexagon.get_vertices()
+            all_vertices.extend(vertices)
+        
+        if len(all_vertices) == 0:
+            return 1000
+        
+        # Calculate bounding box
+        all_vertices = np.array(all_vertices)
+        min_x, max_x = np.min(all_vertices[:, 0]), np.max(all_vertices[:, 0])
+        min_y, max_y = np.min(all_vertices[:, 1]), np.max(all_vertices[:, 1])
+        
+        # Calculate center
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        
+        # Find maximum distance from center to any vertex
+        max_dist = 0
+        for vx, vy in all_vertices:
+            dist = np.sqrt((vx - center_x)**2 + (vy - center_y)**2)
+            max_dist = max(max_dist, dist)
+        
+        # Convert to hexagon side length - correct calculation
+        # For a regular hexagon, side length = circumradius / cos(π/6) = circumradius / (√3/2) = 2 * circumradius / √3
+        outer_side_length = 2 * max_dist / np.sqrt(3)
+        
+        return outer_side_length + padding  # Add padding for safety
+
+class OptimizationEngine:
+    """Handles the optimization process using differential evolution"""
+    
+    def __init__(self, packer, max_iterations=500, population_size=20):
+        self.packer = packer
+        self.max_iterations = max_iterations
+        self.population_size = population_size
+    
+    def evaluate_fitness(self, params):
+        """Evaluate a candidate solution - returns negative because we minimize"""
+        # Unpack parameters: 11 positions (x,y) + 11 rotations + 1 outer center (x,y) + 1 outer angle + 1 outer side length
+        n_hexagons = 11
+        inner_positions = params[:2*n_hexagons].reshape(-1, 2)
+        inner_rotations = params[2*n_hexagons:3*n_hexagons]
+        outer_center_x = params[3*n_hexagons]
+        outer_center_y = params[3*n_hexagons+1]
+        outer_angle = params[3*n_hexagons+2]
+        outer_side_length = params[3*n_hexagons+3]
+        
+        # Create inner hexagons
+        inner_hexagons = self.packer.get_inner_hexagons(inner_positions, inner_rotations)
+        
+        # Create outer polygon
+        outer_hex = Hexagon(outer_center_x, outer_center_y, outer_angle, outer_side_length)
+        outer_vertices = outer_hex.get_vertices()
+        outer_polygon = Polygon(outer_vertices)
+        
+        # Check constraints
+        try:
+            # Early exit if outer hexagon too small
+            if outer_side_length < 0.1:
+                return 1e10
+            
+            # Check containment first (more likely to fail)
+            if not ConstraintChecker.check_containment_all(inner_hexagons, outer_polygon):
+                return 1e10
+            
+            # Check overlaps (more expensive)
+            if ConstraintChecker.check_overlaps_fast(inner_hexagons):
+                return 1e10
+            
+            # Return negative of 1/outer_side_length to maximize 1/outer_side_length
+            return -1.0 / outer_side_length
+        except Exception:
+            return 1e10
+    
+    def run_optimization(self, initial_guess, bounds):
+        """Run differential evolution optimization"""
+        try:
+            result = differential_evolution(
+                self.evaluate_fitness,
+                bounds,
+                maxiter=self.max_iterations,
+                popsize=self.population_size,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=42,
+                disp=False,
+                polish=True
+            )
+            return result
+        except Exception as e:
+            return None
+
+class MultiStartOptimizer:
+    """Handles multi-start optimization with diverse initial configurations"""
+    
+    def __init__(self, packer, engine, num_starts=5):
+        self.packer = packer
+        self.engine = engine
+        self.num_starts = num_starts
+    
+    def generate_initial_configs(self):
+        """Generate multiple diverse initial configurations"""
+        configs = []
+        
+        # Configuration 1: Hexagonal pattern around center
+        center_config = np.array([
+            [0, 0, 0],      # Center
+            [-1.75, 0, 0],  # Left
+            [1.75, 0, 0],   # Right
+            [0, 1.75, 0],   # Top
+            [0, -1.75, 0],  # Bottom
+            [-0.875, 0.875, 0],  # Top-left
+            [0.875, 0.875, 0],   # Top-right
+            [-0.875, -0.875, 0], # Bottom-left
+            [0.875, -0.875, 0],  # Bottom-right
+            [-1.75, 1.75, 0],    # Far-top-left
+            [1.75, 1.75, 0],     # Far-top-right
+        ])
+        configs.append(center_config)
+        
+        # Configuration 2: Spiral pattern
+        spiral_config = np.array([
+            [0, 0, 0],      # Center
+            [1.5, 0, 0],    # Right
+            [0, 1.5, 0],    # Top
+            [-1.5, 0, 0],   # Left
+            [0, -1.5, 0],   # Bottom
+            [1.5, 1.5, 0],  # Top-right
+            [-1.5, 1.5, 0], # Top-left
+            [-1.5, -1.5, 0], # Bottom-left
+            [1.5, -1.5, 0],  # Bottom-right
+            [3.0, 0, 0],     # Far right
+            [0, 3.0, 0],     # Far top
+        ])
+        configs.append(spiral_config)
+        
+        # Configuration 3: Clustered
+        cluster_config = np.array([
+            [0, 0, 0],       # Center
+            [1.25, 0, 0],    # Right
+            [-1.25, 0, 0],   # Left
+            [0, 1.25, 0],    # Top
+            [0, -1.25, 0],   # Bottom
+            [1.25, 1.25, 0], # Top-right
+            [-1.25, 1.25, 0], # Top-left
+            [-1.25, -1.25, 0], # Bottom-left
+            [1.25, -1.25, 0],  # Bottom-right
+            [2.5, 0, 0],       # Far right
+            [0, 2.5, 0],       # Far top
+        ])
+        configs.append(cluster_config)
+        
+        # Configuration 4: Staggered pattern
+        staggered_config = np.array([
+            [0, 0, 0],       # Center
+            [1.25, 0, 0],    # Right
+            [-1.25, 0, 0],   # Left
+            [0, 1.25, 0],    # Top
+            [0, -1.25, 0],   # Bottom
+            [0.625, 1.25, 0], # Top-right
+            [-0.625, 1.25, 0], # Top-left
+            [-0.625, -1.25, 0], # Bottom-left
+            [0.625, -1.25, 0],  # Bottom-right
+            [1.875, 1.25, 0],   # Far top-right
+            [1.875, -1.25, 0],  # Far bottom-right
+        ])
+        configs.append(staggered_config)
+        
+        # Configuration 5: Random distribution
+        np.random.seed(42)
+        random_config = np.zeros((11, 3))
+        for i in range(11):
+            # Spread hexagons in a circular manner with some randomness
+            angle = 2 * np.pi * i / 11
+            distance = 1.5 + np.random.uniform(0, 0.5)
+            x = distance * np.cos(angle)
+            y = distance * np.sin(angle)
+            random_config[i] = [x, y, np.random.uniform(0, 360)]
+        configs.append(random_config)
+        
+        return configs
+    
+    def run_multi_start_optimization(self):
+        """Run optimization from multiple starting points"""
+        initial_configs = self.generate_initial_configs()
+        best_result = None
+        best_score = -np.inf
+        best_params = None
+        
+        # Run optimization from each initial configuration in parallel
+        def run_single_optimization(config_data):
+            try:
+                # Estimate outer hexagon side length
+                estimated_side = self.packer.estimate_outer_side_length(config_data[:, :2])
+                
+                # Set up bounds for optimization
+                bounds = []
+                n_hexagons = 11
+                
+                # Inner positions (x,y)
+                for j in range(n_hexagons):
+                    bounds.extend([(-10, 10), (-10, 10)])  # x,y positions
+                
+                # Inner angles (0 to 360)
+                for _ in range(n_hexagons):
+                    bounds.extend([(0, 360)])
+                
+                # Outer center (x,y) 
+                bounds.extend([(-10, 10), (-10, 10)])
+                
+                # Outer angle (0 to 360)
+                bounds.extend([(0, 360)])
+                
+                # Outer side length (bounded)
+                bounds.extend([(0.5, 20)])
+                
+                # Create initial guess
+                initial_guess = []
+                # Add inner positions
+                for j in range(n_hexagons):
+                    initial_guess.extend([config_data[j][0], config_data[j][1]])
+                # Add inner angles
+                for j in range(n_hexagons):
+                    initial_guess.extend([config_data[j][2]])
+                # Add outer center
+                initial_guess.extend([0, 0])  # Start centered
+                # Add outer angle
+                initial_guess.extend([0])
+                # Add outer side length
+                initial_guess.extend([estimated_side])
+                
+                # Run optimization
+                result = self.engine.run_optimization(initial_guess, bounds)
+                
+                if result is not None:
+                    final_score = self.engine.evaluate_fitness(result.x)
+                    return final_score, result.x
+                else:
+                    return -np.inf, None
+                    
+            except Exception as e:
+                return -np.inf, None
+        
+        # Parallel execution of optimizations
+        results = Parallel(n_jobs=-1)(delayed(run_single_optimization)(config) for config in initial_configs)
+        
+        # Find best result
+        for score, params in results:
+            if params is not None and score > best_score:
+                best_score = score
+                best_params = params
+        
+        return best_params
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Initialize core components
+    packer = HexagonPacker()
+    engine = OptimizationEngine(packer)
+    optimizer = MultiStartOptimizer(packer, engine)
+    
+    # Run multi-start optimization
+    best_params = optimizer.run_multi_start_optimization()
+    
+    if best_params is None:
+        # Fallback to baseline configuration
+        n = 11
+        inner_hex_data = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+        outer_hex_side_length = 8  # large enough to contain all inner hexagons
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+    
+    # Extract results from best solution
+    n_hexagons = 11
+    inner_positions = best_params[:2*n_hexagons].reshape(-1, 2)
+    inner_rotations = best_params[2*n_hexagons:3*n_hexagons]
+    outer_center_x = best_params[3*n_hexagons]
+    outer_center_y = best_params[3*n_hexagons+1]
+    outer_angle = best_params[3*n_hexagons+2]
+    outer_side_length = best_params[3*n_hexagons+3]
+    
+    # Construct inner hex data
+    inner_hex_data = np.column_stack([inner_positions, inner_rotations])
+    
+    # Construct outer hex data
+    outer_hex_data = np.array([outer_center_x, outer_center_y, outer_angle])
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_side_length
+
+# EVOLVE-BLOCK-END

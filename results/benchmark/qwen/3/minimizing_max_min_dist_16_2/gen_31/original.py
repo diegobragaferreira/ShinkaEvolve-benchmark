@@ -1,0 +1,150 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def compute_distance_matrix(points):
+    """Compute pairwise distance matrix for given points."""
+    return squareform(pdist(points))
+
+def calculate_min_max_ratio(distance_matrix):
+    """Calculate the ratio of minimum to maximum distances."""
+    # Exclude diagonal (distance to self)
+    off_diagonal = distance_matrix[distance_matrix > 0]
+    if len(off_diagonal) == 0:
+        return 0.0
+    d_min = np.min(off_diagonal)
+    d_max = np.max(off_diagonal)
+    return d_min / d_max if d_max > 0 else 0.0
+
+def initialize_points_circle_packing():
+    """Initialize points using circle packing principles for better distribution."""
+    # Start with a good initial configuration based on known optimal arrangements
+    # This uses a modified hexagonal lattice with some randomness to avoid local minima
+    points = []
+    rows = 4
+    cols = 4
+
+    # Create a slightly perturbed hexagonal grid
+    for i in range(rows):
+        for j in range(cols):
+            x = j / (cols - 1) if cols > 1 else 0.5
+            y = i / (rows - 1) if rows > 1 else 0.5
+
+            # Add small perturbation to break symmetry
+            if i % 2 == 1 and cols > 1:
+                x += 0.125 / (cols - 1)  # Shift odd rows
+
+            points.append([x, y])
+
+    return np.array(points)
+
+def initialize_points_regular_grid():
+    """Initialize points using regular grid with slight perturbations."""
+    # Create a 4x4 grid
+    grid_size = 4
+    points = np.array([[i/(grid_size-1), j/(grid_size-1)] for i in range(grid_size) for j in range(grid_size)])
+
+    # Add slight random perturbations to avoid symmetric solutions
+    np.random.seed(42)
+    noise = np.random.normal(0, 0.02, points.shape)
+    points += noise
+    points = np.clip(points, 0, 1)
+
+    return points
+
+def optimize_point_placement(initial_points, max_iterations=500):
+    """Optimize point placement using L-BFGS-B for faster convergence."""
+    def objective(x_flat):
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+
+        # Ensure points are within bounds
+        points = np.clip(points, 0, 1)
+
+        try:
+            dist_matrix = compute_distance_matrix(points)
+            ratio = calculate_min_max_ratio(dist_matrix)
+
+            # Return negative ratio since we want to maximize
+            # We also penalize configurations that are too close to boundary
+            penalty = 0
+            if np.any(points < 0.01) or np.any(points > 0.99):
+                penalty = -0.01
+
+            return -(ratio + penalty)
+        except Exception:
+            return 1e6  # Return large value for invalid configurations
+
+    # Flatten initial points for optimization
+    x0 = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1) but slightly inside to avoid boundary issues
+    bounds = [(0.01, 0.99) for _ in range(len(x0))]
+
+    # Use L-BFGS-B which is more efficient for this problem
+    result = minimize(
+        objective,
+        x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': max_iterations, 'ftol': 1e-8, 'gtol': 1e-5},
+        callback=None
+    )
+
+    # Reshape optimized points
+    optimized_points = result.x.reshape(-1, 2)
+
+    # Ensure final points are within bounds
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    # Try multiple initialization strategies and pick the best
+    initial_strategies = [
+        initialize_points_circle_packing,
+        initialize_points_regular_grid
+    ]
+
+    best_points = None
+    best_ratio = 0
+
+    for init_func in initial_strategies:
+        try:
+            initial_points = init_func()
+
+            # Add noise to break symmetry
+            np.random.seed(42)
+            initial_points += np.random.normal(0, 0.005, initial_points.shape)
+            initial_points = np.clip(initial_points, 0, 1)
+
+            # Optimize the point placement
+            final_points = optimize_point_placement(initial_points)
+
+            # Calculate the resulting ratio
+            dist_matrix = compute_distance_matrix(final_points)
+            ratio = calculate_min_max_ratio(dist_matrix)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = final_points.copy()
+
+        except Exception as e:
+            continue  # Skip this strategy if it fails
+
+    # If no valid configuration was found, use a fallback
+    if best_points is None:
+        initial_points = initialize_points_regular_grid()
+        best_points = optimize_point_placement(initial_points)
+
+    return best_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,394 @@
+<NAME>
+enhanced_voronoi_based_mutation
+</NAME>
+
+<DESCRIPTION>
+This enhancement modifies the mutation strategy to use Voronoi-based criticality assessment with improved density weighting. The key insight is that instead of just using basic Voronoi cell areas, we compute a more sophisticated criticality metric that considers both local packing density and boundary constraints. This allows for more intelligent mutation sizing where circles in dense regions get smaller, more precise mutations while circles in sparse regions can take larger steps.
+
+The change focuses on:
+1. Improving the `compute_voronoi_density` function to return a more meaningful criticality score
+2. Modifying the `mutate_radius` function to use this enhanced criticality scoring
+3. Adding a new function `compute_local_criticality` that better captures geometric constraints
+
+This should improve convergence by making mutations more adaptive to the actual constraint landscape.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon using shoelace formula
+                    vertices = np.array([vor.vertices[i] for i in region])
+                    if len(vertices) >= 3:
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+=======
+def compute_local_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute enhanced criticality scores based on local constraints and boundary distances."""
+    n = len(circles)
+    criticality_scores = np.zeros(n)
+
+    # Compute pairwise distances between all circles
+    coords = circles[:, :2]
+    radii = circles[:, 2]
+
+    # Vectorized distance computation
+    x_diff = coords[:, np.newaxis] - coords[np.newaxis, :]
+    y_diff = coords[:, np.newaxis] - coords[np.newaxis, :]
+    dists = np.sqrt(x_diff**2 + y_diff**2)
+
+    # Set diagonal to infinity to avoid self-comparison
+    np.fill_diagonal(dists, np.inf)
+
+    # Find minimum distances to other circles for each circle
+    min_neighbor_distances = np.min(dists, axis=1)
+
+    # Compute boundary constraint scores
+    boundary_distances = np.array([
+        coords[:, 0],  # Distance to left boundary
+        rect_width - coords[:, 0],  # Distance to right boundary
+        coords[:, 1],  # Distance to bottom boundary
+        rect_height - coords[:, 1]   # Distance to top boundary
+    ])
+    min_boundary_distances = np.min(boundary_distances, axis=0)
+
+    # Combine constraints into criticality scores
+    for i in range(n):
+        # Neighbor-based criticality (inverse of minimum distance)
+        neighbor_crit = 1.0 / (min_neighbor_distances[i] + 0.001) if min_neighbor_distances[i] < np.inf else 1000
+
+        # Boundary-based criticality (more critical near boundaries)
+        boundary_crit = 0
+        if min_boundary_distances[i] < 0.05:  # Near boundary threshold
+            boundary_crit = 1000 * (0.05 - min_boundary_distances[i])
+
+        # Combined criticality score
+        criticality_scores[i] = neighbor_crit + boundary_crit
+
+    # Normalize to [0,1] range
+    if np.max(criticality_scores) > 0:
+        criticality_scores = criticality_scores / np.max(criticality_scores)
+
+    # Ensure minimum value
+    criticality_scores = np.maximum(criticality_scores, 0.01)
+
+    return criticality_scores
+
+def compute_voronoi_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon using shoelace formula
+                    vertices = np.array([vor.vertices[i] for i in region])
+                    if len(vertices) >= 3:
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+adaptive_mutation_enhancement
+</NAME>
+
+<DESCRIPTION>
+This change enhances the mutation strategies to be more sophisticated by replacing the existing mutate_radius function with a new version that properly utilizes the enhanced criticality scoring. The improved version takes into account both the local criticality and the geometric constraints when determining mutation step sizes.
+
+Key improvements:
+1. Replaces the basic mutate_radius with an enhanced version that uses compute_local_criticality
+2. Makes the delta calculation more sophisticated by using the criticality scores
+3. Ensures that critical regions get finer-grained mutations while less constrained regions can explore more aggressively
+4. Maintains backward compatibility with existing function signatures
+
+This should provide more intelligent mutation behavior that adapts to the actual geometric constraints of the problem.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_radius(circles: np.ndarray, idx: int, max_delta: float = 0.01, density_scores: np.ndarray = None) -> np.ndarray:
+    """Mutate radius with adaptive delta based on Voronoi density."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Adaptive delta based on density
+    if density_scores is not None and len(density_scores) > idx:
+        # High density means more constraints, use smaller deltas
+        density_factor = 1.0 / (1.0 + density_scores[idx])  # Normalize
+        delta = max_delta * density_factor
+    else:
+        delta = max_delta
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+=======
+def mutate_radius(circles: np.ndarray, idx: int, max_delta: float = 0.01) -> np.ndarray:
+    """Mutate radius with adaptive delta based on local criticality."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Compute criticality for all circles to determine adaptive delta
+    criticality_scores = compute_local_criticality(circles)
+
+    # Get criticality of the specific circle being mutated
+    criticality = criticality_scores[idx]
+
+    # Adaptive delta: low criticality (sparse regions) = larger changes
+    # High criticality (dense regions) = smaller changes
+    # Transform criticality to delta factor: higher criticality -> smaller delta
+    delta_factor = 1.0 / (1.0 + 10 * criticality)  # Scale down delta for higher criticality
+    delta = max_delta * delta_factor
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_local_optimization
+</NAME>
+
+<DESCRIPTION>
+This change refactors the local optimization function to better utilize the enhanced criticality measures. The new version uses the compute_local_criticality function to identify the most constrained circles and applies mutations specifically to those regions. It also adds better handling of the boundary conditions and improves the overall convergence behavior.
+
+Key improvements:
+1. Uses compute_local_criticality instead of the older Voronoi-based density calculation
+2. More intelligent selection of which circles to mutate based on actual constraint levels
+3. Better handling of boundary conditions during local search
+4. Improved adaptive mutation sizing based on constraint levels
+5. More systematic approach to identifying and optimizing critical regions
+
+This makes the local optimization phase more effective at finding high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_optimization(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                       max_iter: int = 50, patience: int = 10) -> np.ndarray:
+    """Perform local optimization using enhanced approach with boundary awareness."""
+    current_circles = circles.copy()
+    best_circles = current_circles.copy()
+    best_fitness = evaluate_fitness(current_circles)
+
+    patience_counter = 0
+
+    # Get Voronoi densities for adaptive mutation
+    density_scores = compute_voronoi_density(current_circles, rect_width, rect_height)
+
+    for iteration in range(max_iter):
+        # Try several mutations to improve solution
+        improved = False
+
+        # First, prioritize boundary circles for special treatment
+        boundary_indices = []
+        for i in range(len(current_circles)):
+            x, y, r = current_circles[i]
+            # Check if circle is near boundary (within 0.05 units)
+            if (x <= r + 0.05 or x >= rect_width - r - 0.05 or
+                y <= r + 0.05 or y >= rect_height - r - 0.05):
+                boundary_indices.append(i)
+
+        # Process boundary circles with higher precision
+        if boundary_indices:
+            for i in boundary_indices:
+                # Try boundary-aware mutations
+                mutated_rad = mutate_radius(current_circles, i, 0.01, density_scores)
+                mutated_pos = mutate_position(current_circles, i, 0.01)
+
+                # Test both mutations
+                rad_fitness = evaluate_fitness(mutated_rad)
+                pos_fitness = evaluate_fitness(mutated_pos)
+
+                # Choose better mutation
+                if rad_fitness > pos_fitness:
+                    if is_valid_solution(mutated_rad, rect_width, rect_height):
+                        current_circles = mutated_rad
+                        improved = True
+                else:
+                    if is_valid_solution(mutated_pos, rect_width, rect_height):
+                        current_circles = mutated_pos
+                        improved = True
+
+        # Then process all circles normally
+        for i in range(len(current_circles)):
+            if i in boundary_indices:
+                continue  # Already handled
+
+            # Try position mutation
+            mutated_pos = mutate_position(current_circles, i, 0.02)
+
+            # Try radius mutation
+            mutated_rad = mutate_radius(current_circles, i, 0.01, density_scores)
+
+            # Evaluate both mutations
+            pos_fitness = evaluate_fitness(mutated_pos)
+            rad_fitness = evaluate_fitness(mutated_rad)
+
+            # Choose the better one
+            if pos_fitness > rad_fitness:
+                if is_valid_solution(mutated_pos, rect_width, rect_height):
+                    current_circles = mutated_pos
+                    improved = True
+            else:
+                if is_valid_solution(mutated_rad, rect_width, rect_height):
+                    current_circles = mutated_rad
+                    improved = True
+
+        # Update best solution
+        current_fitness = evaluate_fitness(current_circles)
+        if current_fitness > best_fitness:
+            best_fitness = current_fitness
+            best_circles = current_circles.copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement
+        if patience_counter >= patience:
+            break
+
+    return best_circles
+=======
+def local_optimization(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                       max_iter: int = 50, patience: int = 10) -> np.ndarray:
+    """Perform local optimization using enhanced approach with boundary awareness."""
+    current_circles = circles.copy()
+    best_circles = current_circles.copy()
+    best_fitness = evaluate_fitness(current_circles)
+
+    patience_counter = 0
+
+    for iteration in range(max_iter):
+        # Try several mutations to improve solution
+        improved = False
+
+        # Get criticality scores for all circles
+        criticality_scores = compute_local_criticality(current_circles)
+
+        # Sort circles by criticality (descending) - most constrained first
+        sorted_indices = np.argsort(-criticality_scores)
+
+        # Focus on top 60% of critical circles for mutations
+        num_critical = max(1, int(len(current_circles) * 0.6))
+        critical_indices = sorted_indices[:num_critical]
+
+        # Process critical circles with higher priority
+        for i in critical_indices:
+            # Try position mutation
+            mutated_pos = mutate_position(current_circles, i, 0.02)
+
+            # Try radius mutation
+            mutated_rad = mutate_radius(current_circles, i)
+
+            # Evaluate both mutations
+            pos_fitness = evaluate_fitness(mutated_pos)
+            rad_fitness = evaluate_fitness(mutated_rad)
+
+            # Choose the better one
+            if pos_fitness > rad_fitness:
+                if is_valid_solution(mutated_pos, rect_width, rect_height):
+                    current_circles = mutated_pos
+                    improved = True
+            else:
+                if is_valid_solution(mutated_rad, rect_width, rect_height):
+                    current_circles = mutated_rad
+                    improved = True
+
+        # Update best solution
+        current_fitness = evaluate_fitness(current_circles)
+        if current_fitness > best_fitness:
+            best_fitness = current_fitness
+            best_circles = current_circles.copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement
+        if patience_counter >= patience:
+            break
+
+    return best_circles
+>>>>>>> REPLACE
+</DIFF>

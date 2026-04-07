@@ -1,0 +1,294 @@
+<NAME>
+adaptive_mutation_scheduling
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the optimization algorithm by implementing a more sophisticated adaptive mutation rate scheduling that dynamically adjusts based on convergence behavior rather than just fixed time-based decay. This will allow for better exploration in early stages and more focused exploitation in later stages.
+
+The key improvements are:
+1. Implementing a more intelligent mutation rate that tracks convergence progress
+2. Adding more aggressive local refinement techniques
+3. Improving the spatial indexing approach for better collision detection performance
+
+This approach leverages the fact that in evolutionary algorithms, the optimal mutation rate often depends not just on generation number but on how well the population is converging.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, positions: np.ndarray, angles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply enhanced local refinement to improve the solution"""
+        # Simple gradient descent-like refinement with better perturbations
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+        step_size = 0.01
+        max_iterations = 100
+        patience = 10
+        patience_counter = 0
+
+        for iteration in range(max_iterations):
+            improved = False
+
+            # Try small perturbations to each position and angle
+            for i in range(len(positions)):
+                # Perturb position in both directions
+                for dim in range(2):
+                    old_val = best_positions[i][dim]
+                    for delta in [-step_size, step_size]:
+                        best_positions[i][dim] = old_val + delta
+                        new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                        if new_score < best_score:
+                            best_score = new_score
+                            improved = True
+                        else:
+                            best_positions[i][dim] = old_val
+
+                # Perturb angle in both directions
+                old_angle = best_angles[i]
+                for delta in [-2.0, 2.0]:
+                    best_angles[i] = old_angle + delta
+                    new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                    if new_score < best_score:
+                        best_score = new_score
+                        improved = True
+                    else:
+                        best_angles[i] = old_angle
+
+            # Check for improvement
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+
+        return best_positions, best_angles
+=======
+    def local_refinement(self, positions: np.ndarray, angles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply enhanced local refinement to improve the solution"""
+        # Enhanced local refinement with multiple strategies
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+        step_size = 0.01
+        max_iterations = 100
+        patience = 10
+        patience_counter = 0
+        improvement_count = 0
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_improvements = 0
+
+            # Try small perturbations to each position and angle
+            for i in range(len(positions)):
+                # Perturb position in both directions with adaptive step sizes
+                for dim in range(2):
+                    old_val = best_positions[i][dim]
+                    for delta in [-step_size * 2, -step_size, step_size, step_size * 2]:
+                        best_positions[i][dim] = old_val + delta
+                        new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                        if new_score < best_score:
+                            best_score = new_score
+                            improved = True
+                            current_improvements += 1
+                        else:
+                            best_positions[i][dim] = old_val
+
+                # Perturb angle with larger steps for orientation
+                old_angle = best_angles[i]
+                for delta in [-5.0, -2.0, -1.0, 1.0, 2.0, 5.0]:
+                    best_angles[i] = old_angle + delta
+                    new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                    if new_score < best_score:
+                        best_score = new_score
+                        improved = True
+                        current_improvements += 1
+                    else:
+                        best_angles[i] = old_angle
+
+            # Reduce step size if we're getting many improvements (converging)
+            if current_improvements > 2 and step_size > 0.001:
+                step_size *= 0.95
+
+            # Increase step size if we're not improving much
+            elif current_improvements == 0 and step_size < 0.1:
+                step_size *= 1.1
+
+            # Check for improvement
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+                improvement_count += 1
+
+        return best_positions, best_angles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+                # Custom adaptive differential evolution with mutation rate scheduling
+                def adaptive_differential_evolution(func, bounds, maxiter, popsize, seed=None):
+                    """Custom differential evolution with adaptive mutation rate scheduling"""
+                    # Initialize random number generator
+                    rng = np.random.default_rng(seed)
+
+                    # Generate initial population
+                    population = []
+                    for _ in range(popsize):
+                        individual = []
+                        for (min_val, max_val) in bounds:
+                            individual.append(rng.uniform(min_val, max_val))
+                        population.append(individual)
+
+                    # Track best solution
+                    best_individual = None
+                    best_fitness = float('inf')
+
+                    for generation in range(maxiter):
+                        # Adaptive mutation rate: start high (0.8) for exploration, decrease to 0.1
+                        mutation_rate = 0.8 - (0.7 * generation / maxiter)
+
+                        # Evaluate current population
+                        fitnesses = []
+                        for individual in population:
+                            fitness = func(np.array(individual))
+                            fitnesses.append(fitness)
+                            if fitness < best_fitness:
+                                best_fitness = fitness
+                                best_individual = individual[:]
+
+                        # Create new population
+                        new_population = []
+                        for j in range(popsize):
+                            # Select three different individuals
+                            candidates = list(range(popsize))
+                            candidates.remove(j)
+                            selected = rng.choice(candidates, 3, replace=False)
+
+                            # Differential evolution mutation with adaptive rate
+                            mutant = []
+                            for k in range(len(bounds)):
+                                if rng.random() < mutation_rate or generation == 0:
+                                    # Mutation using differential evolution
+                                    mutant.append(population[selected[0]][k] +
+                                                0.8 * (population[selected[1]][k] - population[selected[2]][k]))
+                                else:
+                                    mutant.append(population[j][k])
+
+                                # Ensure bounds are respected
+                                min_val, max_val = bounds[k]
+                                mutant[k] = np.clip(mutant[k], min_val, max_val)
+
+                            # Crossover
+                            trial = []
+                            for k in range(len(bounds)):
+                                if rng.random() < 0.9 or k == 0:  # Keep some randomness
+                                    trial.append(mutant[k])
+                                else:
+                                    trial.append(population[j][k])
+
+                            new_population.append(trial)
+
+                        population = new_population
+
+                    return type('Result', (), {
+                        'x': np.array(best_individual),
+                        'fun': best_fitness
+                    })()
+=======
+                # Custom adaptive differential evolution with improved mutation rate scheduling
+                def adaptive_differential_evolution(func, bounds, maxiter, popsize, seed=None):
+                    """Custom differential evolution with adaptive mutation rate scheduling"""
+                    # Initialize random number generator
+                    rng = np.random.default_rng(seed)
+
+                    # Generate initial population
+                    population = []
+                    for _ in range(popsize):
+                        individual = []
+                        for (min_val, max_val) in bounds:
+                            individual.append(rng.uniform(min_val, max_val))
+                        population.append(individual)
+
+                    # Track best solution
+                    best_individual = None
+                    best_fitness = float('inf')
+                    previous_best = float('inf')
+                    stagnation_count = 0
+                    max_stagnation = 20
+
+                    for generation in range(maxiter):
+                        # Adaptive mutation rate based on convergence progress
+                        # Start with high exploration, adapt based on improvement
+                        if generation == 0:
+                            mutation_rate = 0.8
+                        else:
+                            # If we've made significant progress, decrease mutation rate
+                            if abs(previous_best - best_fitness) > 1e-6:
+                                mutation_rate = max(0.1, 0.8 - (generation / maxiter) * 0.7)
+                                stagnation_count = 0
+                            else:
+                                # If no improvement, increase mutation rate to escape local optima
+                                mutation_rate = min(0.9, 0.5 + (stagnation_count / max_stagnation) * 0.4)
+                                stagnation_count += 1
+
+                        # Evaluate current population
+                        fitnesses = []
+                        for individual in population:
+                            fitness = func(np.array(individual))
+                            fitnesses.append(fitness)
+                            if fitness < best_fitness:
+                                best_fitness = fitness
+                                best_individual = individual[:]
+
+                        # Track previous best for convergence monitoring
+                        previous_best = best_fitness
+
+                        # Create new population
+                        new_population = []
+                        for j in range(popsize):
+                            # Select three different individuals
+                            candidates = list(range(popsize))
+                            candidates.remove(j)
+                            selected = rng.choice(candidates, 3, replace=False)
+
+                            # Differential evolution mutation with adaptive rate
+                            mutant = []
+                            for k in range(len(bounds)):
+                                if rng.random() < mutation_rate or generation == 0:
+                                    # Mutation using differential evolution
+                                    mutant.append(population[selected[0]][k] +
+                                                0.8 * (population[selected[1]][k] - population[selected[2]][k]))
+                                else:
+                                    mutant.append(population[j][k])
+
+                                # Ensure bounds are respected
+                                min_val, max_val = bounds[k]
+                                mutant[k] = np.clip(mutant[k], min_val, max_val)
+
+                            # Crossover with adaptive probability
+                            crossover_prob = 0.8 if generation < maxiter//2 else 0.6
+                            trial = []
+                            for k in range(len(bounds)):
+                                if rng.random() < crossover_prob or k == 0:  # Keep some randomness
+                                    trial.append(mutant[k])
+                                else:
+                                    trial.append(population[j][k])
+
+                            new_population.append(trial)
+
+                        population = new_population
+
+                    return type('Result', (), {
+                        'x': np.array(best_individual),
+                        'fun': best_fitness
+                    })()
+>>>>>>> REPLACE
+</DIFF>

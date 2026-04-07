@@ -1,0 +1,319 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import time
+
+def compute_voronoi_density(circles, rect_width, rect_height):
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    if len(circles) == 0:
+        return np.array([])
+    
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+    
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon using shoelace formula
+                    vertices = np.array([vor.vertices[i] for i in region])
+                    if len(vertices) >= 3:
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+
+def distance(p1, p2):
+    return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+def is_valid_solution(circles, rect_width=1.0, rect_height=1.0):
+    """Check if all circles are within bounds and non-overlapping."""
+    n = len(circles)
+
+    # Check bounds
+    x_coords = circles[:, 0]
+    y_coords = circles[:, 1]
+    radii = circles[:, 2]
+
+    if np.any(x_coords - radii < 0) or np.any(x_coords + radii > rect_width) or \
+       np.any(y_coords - radii < 0) or np.any(y_coords + radii > rect_height):
+        return False
+
+    # Fast collision detection for all pairs
+    if n <= 1:
+        return True
+        
+    # Use distance matrix for efficiency
+    coords = circles[:, :2]
+    distances = cdist(coords, coords)
+    
+    # Create mask for valid comparisons (excluding diagonal)
+    mask = np.ones((n, n), dtype=bool)
+    np.fill_diagonal(mask, False)
+    
+    # Check all pairs for overlap
+    min_distances = distances[mask]
+    required_distances = (circles[:, 2] + circles[:, 2][:, None])[mask]
+    
+    # If any pair has distance < sum of radii, there's overlap
+    if np.any(min_distances < required_distances):
+        return False
+        
+    return True
+
+def generate_hexagonal_pattern(n, rect_width=1.0, rect_height=1.0):
+    """Generate initial hexagonal pattern."""
+    circles = np.zeros((n, 3))
+    
+    # Hexagonal packing parameters
+    rows = int(np.sqrt(n)) + 1
+    cols = int(np.ceil(n / rows))
+    
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    # Adjust spacing to fit better
+    min_radius = 0.02
+    
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            
+            # Offset every other row for hexagonal arrangement
+            if i % 2 == 1:
+                x += spacing_x / 2
+                
+            circles[idx] = [x, y, min_radius]
+            idx += 1
+        if idx >= n:
+            break
+    
+    return circles
+
+def generate_triangular_pattern(n, rect_width=1.0, rect_height=1.0):
+    """Generate triangular pattern."""
+    circles = np.zeros((n, 3))
+    
+    # Arrange in triangular pattern
+    sqrt_n = int(np.ceil(np.sqrt(n))) + 1
+    spacing_x = rect_width / (sqrt_n + 1)
+    spacing_y = rect_height / (sqrt_n + 1)
+    
+    idx = 0
+    for i in range(sqrt_n):
+        for j in range(sqrt_n):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            # Slight offset for triangular pattern
+            if i % 2 == 1:
+                x += spacing_x / 2
+            circles[idx] = [x, y, 0.02]
+            idx += 1
+        if idx >= n:
+            break
+    
+    return circles
+
+def generate_square_pattern(n, rect_width=1.0, rect_height=1.0):
+    """Generate square grid pattern."""
+    circles = np.zeros((n, 3))
+    
+    sqrt_n = int(np.ceil(np.sqrt(n))) + 1
+    spacing_x = rect_width / (sqrt_n + 1)
+    spacing_y = rect_height / (sqrt_n + 1)
+    
+    idx = 0
+    for i in range(sqrt_n):
+        for j in range(sqrt_n):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            circles[idx] = [x, y, 0.02]
+            idx += 1
+        if idx >= n:
+            break
+    
+    return circles
+
+def generate_random_pattern(n, rect_width=1.0, rect_height=1.0):
+    """Generate random initial pattern."""
+    circles = np.zeros((n, 3))
+    
+    # Generate random positions and large initial radii
+    for i in range(n):
+        x = np.random.uniform(0.05, rect_width - 0.05)
+        y = np.random.uniform(0.05, rect_height - 0.05)
+        r = 0.05  # Start with larger radius
+        circles[i] = [x, y, r]
+    
+    return circles
+
+def calculate_free_space(circles, i, rect_width, rect_height):
+    """Calculate maximum free space for circle i in terms of radius increase."""
+    x, y, r = circles[i]
+    
+    # Distance to boundaries
+    min_boundary = min(x, rect_width - x, y, rect_height - y)
+    
+    # Maximum possible radius without boundary constraints
+    max_radius = min_boundary
+    
+    # Check collisions with other circles
+    for j in range(len(circles)):
+        if i != j:
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+            # Available space for this circle's radius
+            collision_radius = distance - r2
+            if collision_radius > 0:
+                max_radius = min(max_radius, collision_radius)
+    
+    return max_radius
+
+def voronoi_guided_expand(circles, rect_width, rect_height, max_iter=100):
+    """Expand circles using Voronoi-guided approach."""
+    current_circles = circles.copy()
+    
+    # Initial Voronoi density computation
+    voronoi_areas = compute_voronoi_density(current_circles, rect_width, rect_height)
+    
+    # Precompute distances for collision checking
+    coords = current_circles[:, :2]
+    distances = cdist(coords, coords)
+    
+    for iteration in range(max_iter):
+        improved = False
+        # Random ordering for better exploration
+        indices = list(range(len(current_circles)))
+        np.random.shuffle(indices)
+        
+        for i in indices:
+            # Calculate maximum free space for this circle
+            max_radius = calculate_free_space(current_circles, i, rect_width, rect_height)
+            
+            # Current radius
+            current_r = current_circles[i, 2]
+            
+            # If we can expand
+            if max_radius > current_r and max_radius > 0.001:
+                # Determine expansion factor based on Voronoi area
+                # Smaller Voronoi area = more constrained region = smaller expansion
+                if len(voronoi_areas) > i and voronoi_areas[i] > 0:
+                    # Normalize density (smaller areas mean higher density/constraints)
+                    density_factor = 1.0 / (1.0 + voronoi_areas[i] * 0.5)
+                else:
+                    density_factor = 1.0
+                    
+                # Apply adaptive step size
+                base_delta = min(0.02, max_radius - current_r)
+                delta = base_delta * density_factor
+                
+                if delta > 0.001:
+                    current_circles[i, 2] += delta
+                    improved = True
+        
+        if not improved:
+            break
+            
+        # Recompute Voronoi areas periodically for better adaptation
+        if iteration % 10 == 0:
+            voronoi_areas = compute_voronoi_density(current_circles, rect_width, rect_height)
+    
+    return current_circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle with perimeter = 4, so width + height = 2. Using 1.2 x 0.8 for better packing efficiency.
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Try multiple initialization strategies
+    initial_strategies = [
+        generate_hexagonal_pattern(n, rect_width, rect_height),
+        generate_triangular_pattern(n, rect_width, rect_height), 
+        generate_square_pattern(n, rect_width, rect_height),
+        generate_random_pattern(n, rect_width, rect_height)
+    ]
+    
+    best_solution = None
+    best_score = -float('inf')
+    
+    # Multi-start optimization with Voronoi-guided expansion
+    for i, seed_pattern in enumerate(initial_strategies):
+        # Apply Voronoi-guided expansion
+        optimized_pattern = voronoi_guided_expand(seed_pattern, rect_width, rect_height, max_iter=50)
+        
+        # Additional refinement pass
+        refined_pattern = voronoi_guided_expand(optimized_pattern, rect_width, rect_height, max_iter=30)
+        
+        # Validate and score
+        if is_valid_solution(refined_pattern, rect_width, rect_height):
+            score = np.sum(refined_pattern[:, 2])
+            if score > best_score:
+                best_score = score
+                best_solution = refined_pattern.copy()
+    
+    # Final safety validation and refinement
+    if best_solution is not None:
+        # Do one final optimization pass
+        final_solution = voronoi_guided_expand(best_solution, rect_width, rect_height, max_iter=20)
+        
+        # Ensure validity
+        if is_valid_solution(final_solution, rect_width, rect_height):
+            return final_solution
+        else:
+            # If invalid, return the best valid one
+            return best_solution
+    
+    # Fallback
+    fallback = generate_random_pattern(n, rect_width, rect_height)
+    return voronoi_guided_expand(fallback, rect_width, rect_height, max_iter=100)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

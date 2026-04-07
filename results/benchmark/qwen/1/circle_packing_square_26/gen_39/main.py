@@ -1,0 +1,148 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import random
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _compute_voronoi_centers(points, bounds=(0, 1)):
+    """Compute Voronoi cell centers for given points within bounds."""
+    # Add boundary points to ensure bounded Voronoi cells
+    b = bounds
+    extended_points = np.vstack([points,
+                                [[b[0], b[0]], [b[1], b[0]], [b[1], b[1]], [b[0], b[1]]]])
+
+    vor = Voronoi(extended_points)
+
+    # Get centroids of finite Voronoi cells
+    centers = []
+    for i, region in enumerate(vor.point_region[:-4]):  # Exclude boundary points
+        if region < len(vor.regions) and -1 not in vor.regions[region]:
+            vertices = vor.vertices[vor.regions[region]]
+            if len(vertices) > 0:
+                centers.append(np.mean(vertices, axis=0))
+
+    return np.array(centers[:len(points)])
+
+def _initialize_voronoi_placement(n, seed=42):
+    """Initialize circle positions using Voronoi-like distribution."""
+    np.random.seed(seed)
+
+    # Generate initial random points
+    points = np.random.rand(n, 2)
+
+    # Create Voronoi-based centers
+    voronoi_centers = _compute_voronoi_centers(points)
+
+    # Ensure all points are within bounds
+    voronoi_centers = np.clip(voronoi_centers, 0, 1)
+
+    return voronoi_centers
+
+def _validate_and_fix_overlaps(circles, min_radius=1e-6):
+    """Validate configuration and fix overlap issues."""
+    n = len(circles)
+
+    # Check overlaps and fix them by reducing radii
+    for i in range(n):
+        x_i, y_i, r_i = circles[i]
+
+        # Check containment constraint
+        if r_i <= x_i <= 1 - r_i and r_i <= y_i <= 1 - r_i:
+            # Valid containment
+            pass
+        else:
+            # Fix containment violation by adjusting position/radius
+            x_i = max(r_i, min(1 - r_i, x_i))
+            y_i = max(r_i, min(1 - r_i, y_i))
+            circles[i, 0] = x_i
+            circles[i, 1] = y_i
+
+        # Check overlap with all other circles
+        for j in range(i+1, n):
+            x_j, y_j, r_j = circles[j]
+
+            # Calculate distance between circle centers
+            dx = x_i - x_j
+            dy = y_i - y_j
+            dist = np.sqrt(dx*dx + dy*dy)
+
+            # Check for overlap
+            if dist < r_i + r_j:
+                # Rescale radii to remove overlap
+                total_radius = r_i + r_j
+                if dist > 0:
+                    scale_factor = (total_radius - dist * 0.1) / total_radius
+                    if scale_factor > 0:  # Only if there's room to adjust
+                        circles[i, 2] *= scale_factor
+                        circles[j, 2] *= scale_factor
+                    else:
+                        # If too close, reduce both
+                        new_r = max(min_radius, (r_i + r_j) / 2)
+                        circles[i, 2] = new_r
+                        circles[j, 2] = new_r
+
+    return circles
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Initialize with Voronoi-based placement
+    initial_positions = _initialize_voronoi_placement(n, seed=42)
+
+    # Set initial radii to be relatively large but feasible
+    # Start with equal radii, then optimize
+    initial_radius = 0.1
+
+    for i in range(n):
+        circles[i, 0] = initial_positions[i, 0]
+        circles[i, 1] = initial_positions[i, 1]
+        circles[i, 2] = initial_radius
+
+    # Validate initial configuration
+    circles = _validate_and_fix_overlaps(circles)
+
+    # Simple greedy improvement: increase radii where possible
+    improved = True
+    while improved:
+        improved = False
+        # Try to increase each radius
+        for i in range(n):
+            original_r = circles[i, 2]
+            # Test with slightly larger radius
+            test_r = min(original_r * 1.05, 0.5)  # Cap at reasonable value
+
+            # Check if this is valid
+            x_i, y_i = circles[i, 0], circles[i, 1]
+            valid = True
+
+            # Check containment
+            if test_r <= x_i <= 1 - test_r and test_r <= y_i <= 1 - test_r:
+                # Check overlaps with others
+                for j in range(n):
+                    if i != j:
+                        x_j, y_j, r_j = circles[j, 0], circles[j, 1], circles[j, 2]
+                        dx = x_i - x_j
+                        dy = y_i - y_j
+                        dist = np.sqrt(dx*dx + dy*dy)
+                        if dist < test_r + r_j:
+                            valid = False
+                            break
+
+                if valid:
+                    circles[i, 2] = test_r
+                    improved = True
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

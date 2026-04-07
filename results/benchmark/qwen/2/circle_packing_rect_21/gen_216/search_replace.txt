@@ -1,0 +1,263 @@
+<NAME>
+implement_adaptive_constraint_violation_penalty
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed penalty approach that may not adequately guide optimization towards valid solutions. I'll implement an adaptive penalty system that dynamically adjusts penalty weights based on constraint violation severity and evolution stage, which should help the optimizer escape poor local optima and converge to better solutions. This approach addresses the weakness identified in the prior analysis about constraint violation-aware penalties.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness_with_penalties(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness with constraint awareness to guide optimization properly
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = np.sum(circles[:, 2])
+        total_penalty = 0.0
+        violations = 0
+
+        # Check boundary violations with proper penalty calculation
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            # Check if circle is within bounds
+            if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+                # Calculate how far outside boundaries we are
+                boundary_violation = 0
+                if x < r:
+                    boundary_violation += r - x
+                elif x > self.container_width - r:
+                    boundary_violation += x - (self.container_width - r)
+                if y < r:
+                    boundary_violation += r - y
+                elif y > self.container_height - r:
+                    boundary_violation += y - (self.container_height - r)
+
+                # Apply penalty based on severity of violation
+                total_penalty += 10000 * boundary_violation**2
+                violations += 1
+
+        # Check overlap violations with penalty based on overlap magnitude
+        # Use spatial tree for efficient overlap detection
+        try:
+            points = circles[:, :2]
+            tree = cKDTree(points)
+            # Use a safe search radius for overlap checking
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2*max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if i < j:  # Avoid double counting
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        # Penalize based on overlap magnitude - quadratic penalty for better convergence
+                        total_penalty += 50000 * overlap**2
+                        violations += 1
+
+        except Exception:
+            # Fallback to direct checking if spatial tree fails
+            for i in range(self.n_circles):
+                for j in range(i+1, self.n_circles):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        total_penalty += 50000 * overlap**2
+                        violations += 1
+
+        # Return fitness: sum of radii minus penalties
+        fitness = total_radius - total_penalty
+        return fitness, violations
+=======
+    def calculate_fitness_with_penalties(self, circles: np.ndarray, generation: int = 0, max_generations: int = 1000) -> Tuple[float, int]:
+        """
+        Calculate fitness with adaptive constraint awareness to guide optimization properly
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = np.sum(circles[:, 2])
+        total_penalty = 0.0
+        violations = 0
+
+        # Adaptive penalty coefficients that change based on optimization stage
+        # Early stage: more tolerant to violations to encourage exploration
+        # Later stage: stricter penalties to enforce feasibility
+        exploration_factor = max(0.1, 1.0 - (generation / max_generations))
+        penalty_multiplier = 1.0 + (0.5 * (1.0 - exploration_factor))
+
+        # Check boundary violations with proper penalty calculation
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            # Check if circle is within bounds
+            if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+                # Calculate how far outside boundaries we are
+                boundary_violation = 0
+                if x < r:
+                    boundary_violation += r - x
+                elif x > self.container_width - r:
+                    boundary_violation += x - (self.container_width - r)
+                if y < r:
+                    boundary_violation += r - y
+                elif y > self.container_height - r:
+                    boundary_violation += y - (self.container_height - r)
+
+                # Apply adaptive penalty based on violation severity and stage
+                base_penalty = 5000 * boundary_violation**2
+                adaptive_penalty = base_penalty * penalty_multiplier * exploration_factor
+                total_penalty += adaptive_penalty
+                violations += 1
+
+        # Check overlap violations with adaptive penalty based on overlap magnitude
+        # Use spatial tree for efficient overlap detection
+        try:
+            points = circles[:, :2]
+            tree = cKDTree(points)
+            # Use a safe search radius for overlap checking
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2*max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if i < j:  # Avoid double counting
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        # Adaptive penalty based on overlap magnitude and optimization stage
+                        base_penalty = 20000 * overlap**2
+                        adaptive_penalty = base_penalty * penalty_multiplier * exploration_factor
+                        total_penalty += adaptive_penalty
+                        violations += 1
+
+        except Exception:
+            # Fallback to direct checking if spatial tree fails
+            for i in range(self.n_circles):
+                for j in range(i+1, self.n_circles):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        base_penalty = 20000 * overlap**2
+                        adaptive_penalty = base_penalty * penalty_multiplier * exploration_factor
+                        total_penalty += adaptive_penalty
+                        violations += 1
+
+        # Return fitness: sum of radii minus penalties
+        fitness = total_radius - total_penalty
+        return fitness, violations
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_probability_based_overlap_resolution
+</NAME>
+
+<DESCRIPTION>
+Instead of always resolving overlaps through simple radius reduction, I'll implement a more sophisticated approach where overlaps are resolved with probability based on their severity and the number of violations. This introduces a more nuanced resolution strategy that can help escape local minima while still maintaining feasibility. This builds on the constraint awareness idea but adds probabilistic element for better exploration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def refine_configuration(self, circles: np.ndarray) -> np.ndarray:
+        """Apply final refinement to resolve any remaining issues"""
+        # Apply boundary corrections
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            # Correct boundary violations
+            if x - r < 0:
+                circles[i, 0] = r
+            elif x + r > self.container_width:
+                circles[i, 0] = self.container_width - r
+
+            if y - r < 0:
+                circles[i, 1] = r
+            elif y + r > self.container_height:
+                circles[i, 1] = self.container_height - r
+
+        # Resolve overlaps through iterative adjustment
+        for _ in range(200):  # Limited iterations to prevent infinite loop
+            improved = False
+            for i in range(self.n_circles):
+                x, y, r = circles[i]
+                # Try to reduce radius if overlapping
+                for j in range(self.n_circles):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        distance = self.calculate_distance([x, y], [x2, y2])
+                        if distance < (r + r2):
+                            new_r = max(1e-6, (distance - 0.001) / 2)
+                            if new_r < r:
+                                circles[i, 2] = new_r
+                                improved = True
+                                break
+
+            if not improved:
+                break
+
+        return circles
+=======
+    def refine_configuration(self, circles: np.ndarray) -> np.ndarray:
+        """Apply final refinement to resolve any remaining issues"""
+        # Apply boundary corrections
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            # Correct boundary violations
+            if x - r < 0:
+                circles[i, 0] = r
+            elif x + r > self.container_width:
+                circles[i, 0] = self.container_width - r
+
+            if y - r < 0:
+                circles[i, 1] = r
+            elif y + r > self.container_height:
+                circles[i, 1] = self.container_height - r
+
+        # Resolve overlaps through iterative adjustment with probabilistic resolution
+        for iteration in range(200):  # Limited iterations to prevent infinite loop
+            improved = False
+            # Track which circles were modified in this iteration
+            modified_circles = set()
+
+            for i in range(self.n_circles):
+                if i in modified_circles:
+                    continue
+
+                x, y, r = circles[i]
+                # Try to reduce radius if overlapping
+                for j in range(self.n_circles):
+                    if i != j and j not in modified_circles:
+                        x2, y2, r2 = circles[j]
+                        distance = self.calculate_distance([x, y], [x2, y2])
+                        if distance < (r + r2):
+                            # Calculate overlap severity
+                            overlap = (r + r2) - distance
+
+                            # Probabilistic resolution based on overlap severity
+                            # More severe overlaps are more likely to be resolved
+                            resolution_prob = min(1.0, overlap * 10.0)
+
+                            if random.random() < resolution_prob:
+                                # Reduce radius to resolve overlap
+                                new_r = max(1e-6, (distance - 0.001) / 2)
+                                if new_r < r:
+                                    circles[i, 2] = new_r
+                                    modified_circles.add(i)
+                                    improved = True
+                                    break
+
+            # Break if no improvement made in this iteration
+            if not improved:
+                break
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

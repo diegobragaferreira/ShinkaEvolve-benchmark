@@ -1,0 +1,364 @@
+<NAME>
+add_voronoi_based_local_search
+</NAME>
+
+<DESCRIPTION>
+The current implementation attempts to use Voronoi diagrams for guidance but doesn't fully leverage their power for optimization. I'll enhance the Voronoi-based approach to create a more systematic local search that better utilizes the geometric properties of Voronoi cells to find better positions for circles. This involves more sophisticated Voronoi cell analysis and systematic exploration of Voronoi-based candidate positions.
+
+The key improvements include:
+1. Better Voronoi cell analysis for determining unoccupied regions
+2. More systematic exploration of Voronoi cell boundaries
+3. Integration of Voronoi-based position sampling with proper conflict checking
+4. Improved heuristics for selecting the most promising Voronoi-based moves
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 2: Enhanced local refinement with Voronoi-guided search
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters
+    max_iterations = 500
+    tolerance = 1e-6
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try to improve using Voronoi-guided local search
+        improvement_found = False
+
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Calculate current constraints and available space
+            max_radius_current = min(orig_x, width - orig_x, orig_y, height - orig_y)
+
+            # Use Voronoi-based approach to guide search more systematically
+            best_x, best_y, best_r = orig_x, orig_y, orig_r
+            best_delta_sum = 0
+
+            # Create temporary points for Voronoi calculation
+            temp_points = np.array([[c[0], c[1]] for c in current_circles])
+
+            # Compute Voronoi diagram for current configuration
+            try:
+                vor = Voronoi(temp_points)
+            except:
+                # Fallback to simple approach if Voronoi fails
+                vor = None
+
+            strategies = []
+
+            # Strategy 1: Direct gradient-like search in 4 directions
+            for dx, dy in [(0, 0), (-0.01, 0), (0.01, 0), (0, -0.01), (0, 0.01)]:
+                strategies.append((dx, dy))
+
+            # Strategy 2: Larger steps
+            for dx, dy in [(-0.02, 0), (0.02, 0), (0, -0.02), (0, 0.02)]:
+                strategies.append((dx, dy))
+
+            # Strategy 3: Diagonal moves
+            for dx, dy in [(-0.01, -0.01), (-0.01, 0.01), (0.01, -0.01), (0.01, 0.01)]:
+                strategies.append((dx, dy))
+
+            # Strategy 4: Voronoi-based moves (enhanced)
+            if vor is not None and i < len(vor.point_region) and len(vor.regions[vor.point_region[i]]) > 0:
+                try:
+                    # Get the Voronoi region for this circle
+                    region_vertices = vor.vertices[vor.regions[vor.point_region[i]]]
+                    # Only proceed if we have meaningful vertices
+                    if len(region_vertices) > 2:
+                        # Move towards center of Voronoi cell, but ensure it's within bounds
+                        # and represents an area that's likely to be unoccupied
+                        centroid_x = np.mean(region_vertices[:, 0])
+                        centroid_y = np.mean(region_vertices[:, 1])
+
+                        # Check if centroid is far from other circles (meaning it's likely unoccupied)
+                        min_dist_to_others = float('inf')
+                        for j in range(len(current_circles)):
+                            if j != i:
+                                px, py = current_circles[j][0], current_circles[j][1]
+                                dist = np.sqrt((centroid_x - px)**2 + (centroid_y - py)**2)
+                                min_dist_to_others = min(min_dist_to_others, dist)
+
+                        # Only consider Voronoi-based moves if they're reasonably far from other circles
+                        if min_dist_to_others > 0.1:
+                            # Normalize direction and scale it
+                            dx = centroid_x - orig_x
+                            dy = centroid_y - orig_y
+                            # Normalize and scale
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            if dist > 0.001:
+                                dx, dy = dx/dist * 0.02, dy/dist * 0.02
+                                strategies.append((dx, dy))
+                except:
+                    pass  # Continue if Voronoi processing fails
+
+            # Strategy 5: Explore nearby grid points in Voronoi region
+            if vor is not None:
+                try:
+                    # Sample points around the Voronoi cell to find promising spots
+                    region_vertices = vor.vertices[vor.regions[vor.point_region[i]]]
+                    if len(region_vertices) > 2 and i < len(vor.point_region):
+                        # Sample around the convex hull of the Voronoi cell
+                        # But prioritize positions that are away from other circles
+                        for _ in range(5):
+                            # Generate samples in the Voronoi cell region
+                            # Simple approach: sample near the center with a bit of randomness
+                            if len(region_vertices) > 0:
+                                center_x = np.mean(region_vertices[:, 0])
+                                center_y = np.mean(region_vertices[:, 1])
+
+                                # Perturb around center, but keep within reasonable bounds
+                                sample_x = max(0.05, min(width - 0.05, center_x + np.random.normal(0, 0.02)))
+                                sample_y = max(0.05, min(height - 0.05, center_y + np.random.normal(0, 0.02)))
+
+                                # Add to strategies
+                                strategies.append((sample_x - orig_x, sample_y - orig_y))
+                except:
+                    pass  # Continue if Voronoi sampling fails
+
+            # Evaluate different move candidates
+            for dx, dy in strategies:
+                new_x = orig_x + dx
+                new_y = orig_y + dy
+
+                # Keep within bounds
+                new_x = max(0.05, min(width - 0.05, new_x))
+                new_y = max(0.05, min(height - 0.05, new_y))
+
+                # Compute max radius at new location
+                new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                # Check for conflicts with all other circles
+                valid = True
+                for j in range(n_circles):
+                    if i != j:
+                        px, py, pr = current_circles[j]
+                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                        if dist < (new_r + pr):
+                            valid = False
+                            break
+
+                if valid:
+                    # Calculate change in sum
+                    delta_sum = new_r - orig_r
+
+                    # Prefer moves that increase radius significantly and maintain good distribution
+                    if delta_sum > best_delta_sum:
+                        best_delta_sum = delta_sum
+                        best_x, best_y, best_r = new_x, new_y, new_r
+                        improvement_found = True
+
+            # Apply the best move if there was an improvement
+            if best_delta_sum > 0:
+                current_circles[i] = [best_x, best_y, best_r]
+
+        # Check for improvement
+        new_sum = np.sum(current_circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = current_circles.copy()
+            improvement_found = True
+        elif not improvement_found and abs(new_sum - best_sum) < tolerance:
+            break
+
+        circles = current_circles.copy()
+=======
+    # Phase 2: Enhanced local refinement with Voronoi-guided search
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters
+    max_iterations = 500
+    tolerance = 1e-6
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try to improve using Voronoi-guided local search
+        improvement_found = False
+
+        # Track which circles were successfully modified
+        modified_circles = set()
+
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Calculate current constraints and available space
+            max_radius_current = min(orig_x, width - orig_x, orig_y, height - orig_y)
+
+            # Use Voronoi-based approach to guide search more systematically
+            best_x, best_y, best_r = orig_x, orig_y, orig_r
+            best_delta_sum = 0
+
+            # Create temporary points for Voronoi calculation
+            temp_points = np.array([[c[0], c[1]] for c in current_circles])
+
+            # Compute Voronoi diagram for current configuration
+            try:
+                vor = Voronoi(temp_points)
+            except:
+                # Fallback to simple approach if Voronoi fails
+                vor = None
+
+            strategies = []
+
+            # Strategy 1: Direct gradient-like search in 4 directions
+            for dx, dy in [(0, 0), (-0.01, 0), (0.01, 0), (0, -0.01), (0, 0.01)]:
+                strategies.append((dx, dy))
+
+            # Strategy 2: Larger steps
+            for dx, dy in [(-0.02, 0), (0.02, 0), (0, -0.02), (0, 0.02)]:
+                strategies.append((dx, dy))
+
+            # Strategy 3: Diagonal moves
+            for dx, dy in [(-0.01, -0.01), (-0.01, 0.01), (0.01, -0.01), (0.01, 0.01)]:
+                strategies.append((dx, dy))
+
+            # Strategy 4: Voronoi-based moves with enhanced logic
+            if vor is not None and i < len(vor.point_region) and len(vor.regions[vor.point_region[i]]) > 0:
+                try:
+                    # Get the Voronoi region for this circle
+                    region_vertices = vor.vertices[vor.regions[vor.point_region[i]]]
+                    # Only proceed if we have meaningful vertices
+                    if len(region_vertices) > 2:
+                        # Compute Voronoi cell area and centroid to understand unoccupied space
+                        # For better Voronoi-based positioning, we'll sample around the Voronoi cell boundary
+
+                        # Approach: sample points along Voronoi cell edges that are likely unoccupied
+                        # Compute Voronoi cell area to understand how much space is available
+                        centroid_x = np.mean(region_vertices[:, 0])
+                        centroid_y = np.mean(region_vertices[:, 1])
+
+                        # Check if centroid is far from other circles (meaning it's likely unoccupied)
+                        min_dist_to_others = float('inf')
+                        for j in range(len(current_circles)):
+                            if j != i:
+                                px, py = current_circles[j][0], current_circles[j][1]
+                                dist = np.sqrt((centroid_x - px)**2 + (centroid_y - py)**2)
+                                min_dist_to_others = min(min_dist_to_others, dist)
+
+                        # If centroid is reasonably far from others, consider it
+                        if min_dist_to_others > 0.1:
+                            # Direction towards Voronoi cell center
+                            dx = centroid_x - orig_x
+                            dy = centroid_y - orig_y
+                            # Normalize and scale
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            if dist > 0.001:
+                                dx, dy = dx/dist * 0.02, dy/dist * 0.02
+                                strategies.append((dx, dy))
+
+                            # Add sampling points around the Voronoi cell boundary
+                            # Sample around the cell center but with more diversity
+                            for _ in range(3):
+                                angle = np.random.uniform(0, 2*np.pi)
+                                radius = np.random.uniform(0.01, 0.05)
+                                sample_x = orig_x + radius * np.cos(angle)
+                                sample_y = orig_y + radius * np.sin(angle)
+                                strategies.append((sample_x - orig_x, sample_y - orig_y))
+
+                except:
+                    pass  # Continue if Voronoi processing fails
+
+            # Strategy 5: Explore positions near Voronoi cell boundaries or centroids more intelligently
+            if vor is not None:
+                try:
+                    # More systematic sampling around Voronoi cells
+                    # Sample along Voronoi cell boundary edges
+                    if i < len(vor.point_region) and len(vor.regions[vor.point_region[i]]) > 0:
+                        region_vertices = vor.vertices[vor.regions[vor.point_region[i]]]
+                        if len(region_vertices) > 0:
+                            # Try sampling positions along Voronoi cell edges that are likely to be unoccupied
+                            for _ in range(4):
+                                # Sample around Voronoi cell center but with bounded randomness
+                                # This approach helps avoid getting stuck in local minima
+                                sample_x = max(0.05, min(width - 0.05, orig_x + np.random.uniform(-0.05, 0.05)))
+                                sample_y = max(0.05, min(height - 0.05, orig_y + np.random.uniform(-0.05, 0.05)))
+                                strategies.append((sample_x - orig_x, sample_y - orig_y))
+                except:
+                    pass  # Continue if Voronoi sampling fails
+
+            # Strategy 6: Add some systematic grid-based sampling in vicinity of circle
+            # This ensures we don't miss good positions due to Voronoi limitations
+            for dx in [-0.05, -0.025, 0, 0.025, 0.05]:
+                for dy in [-0.05, -0.025, 0, 0.025, 0.05]:
+                    if abs(dx) + abs(dy) > 0.01:  # Avoid identical moves
+                        strategies.append((dx, dy))
+
+            # Evaluate different move candidates
+            # We'll make this smarter by evaluating the potential improvement more carefully
+            candidate_evaluations = []
+            for dx, dy in strategies:
+                new_x = orig_x + dx
+                new_y = orig_y + dy
+
+                # Keep within bounds
+                new_x = max(0.05, min(width - 0.05, new_x))
+                new_y = max(0.05, min(height - 0.05, new_y))
+
+                # Compute max radius at new location
+                new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                # Check for conflicts with all other circles
+                valid = True
+                overlap_depth = 0
+                for j in range(n_circles):
+                    if i != j:
+                        px, py, pr = current_circles[j]
+                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                        # Allow a small amount of overlap (for numerical reasons) but penalize heavily
+                        if dist < (new_r + pr):
+                            valid = False
+                            # Calculate overlap depth for scoring purposes
+                            overlap_depth += (new_r + pr - dist)
+                            break
+
+                if valid:
+                    # Calculate change in sum with overlap penalty consideration
+                    delta_sum = new_r - orig_r
+                    # Apply a small penalty for very close neighbors to encourage spread
+                    if overlap_depth > 0:
+                        delta_sum -= overlap_depth * 10  # Heavy penalty for overlap
+
+                    candidate_evaluations.append((delta_sum, new_x, new_y, new_r))
+
+            # Sort candidates by improvement potential and pick top few
+            if candidate_evaluations:
+                # Sort by improvement (descending)
+                candidate_evaluations.sort(reverse=True)
+                # Pick top 3 or so
+                top_candidates = candidate_evaluations[:min(3, len(candidate_evaluations))]
+
+                # Pick the best among top candidates
+                for delta_sum, new_x, new_y, new_r in top_candidates:
+                    if delta_sum > best_delta_sum:
+                        best_delta_sum = delta_sum
+                        best_x, best_y, best_r = new_x, new_y, new_r
+                        improvement_found = True
+
+            # Apply the best move if there was an improvement
+            if best_delta_sum > 0:
+                current_circles[i] = [best_x, best_y, best_r]
+                modified_circles.add(i)
+
+        # Check for improvement
+        new_sum = np.sum(current_circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = current_circles.copy()
+            improvement_found = True
+        elif not improvement_found and abs(new_sum - best_sum) < tolerance:
+            break
+
+        circles = current_circles.copy()
+>>>>>>> REPLACE
+</DIFF>

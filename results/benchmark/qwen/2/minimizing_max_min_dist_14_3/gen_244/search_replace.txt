@@ -1,0 +1,199 @@
+Let me take a different approach and just identify where the method starts in the actual code and provide the fix directly.
+
+<NAME>
+enhanced_perturbation_with_diversity
+</NAME>
+
+<DESCRIPTION>
+I'll add a new hybrid perturbation method that improves on the existing Voronoi-guided perturbation by creating a more intelligent selection process that considers both Voronoi imbalance and distance characteristics. This will enhance exploration capabilities during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _voronoi_guided_perturbation(self, current_points: np.ndarray, temp: float,
+                                   voronoi_threshold: float = 0.1) -> np.ndarray:
+        """
+        Generate neighbor using Voronoi-based guidance to improve point distribution.
+        Uses improved selection strategy for points in imbalanced cells and enhanced perturbation.
+        """
+        neighbor_points = current_points.copy()
+
+        # Compute Voronoi statistics for current configuration
+        mean_area, std_area, max_deviation = self._compute_voronoi_stats(current_points)
+
+        # Calculate weighted probabilities based on Voronoi cell sizes
+        try:
+            sv = SphericalVoronoi(current_points, radius=1.0)
+            areas = sv.calculate_areas()
+
+            # Improved selection strategy:
+            # 1. If extreme imbalance, select from most imbalanced cells
+            # 2. Otherwise, use weighted probabilistic selection with better balancing
+            if len(areas) > 0 and max_deviation > voronoi_threshold:
+                # Select point that maximizes the difference from mean area
+                # This emphasizes changing points in the most imbalanced cells
+                deviations = np.abs(areas - mean_area)
+                # Give higher priority to points in cells that are 2+ std deviations away from mean
+                threshold = 2.0 * std_area
+                weight_factors = np.where(deviations > threshold, deviations, 0.0)
+                if np.sum(weight_factors) > 0:
+                    weights = weight_factors / np.sum(weight_factors)
+                    idx = np.random.choice(len(current_points), p=weights)
+                else:
+                    # Fallback to uniform selection if no strong deviations
+                    idx = np.random.randint(0, len(current_points))
+            else:
+                # Standard weighted selection for balanced configurations
+                if len(areas) > 0:
+                    # Normalize areas for better probability distribution
+                    normalized_areas = (areas - np.mean(areas)) / (np.std(areas) + 1e-8)
+                    # Apply sharper exponentiation to emphasize differences
+                    exp_areas = np.exp(normalized_areas * 3)
+                    weights = exp_areas / np.sum(exp_areas)
+
+                    # Select point using weighted probability
+                    idx = np.random.choice(len(current_points), p=weights)
+                else:
+                    # Fall back to random selection if Voronoi computation fails
+                    idx = np.random.randint(0, len(current_points))
+        except Exception:
+            # Fall back to random selection if Voronoi computation fails
+            idx = np.random.randint(0, len(current_points))
+
+        # Determine perturbation magnitude with enhanced logic:
+        # 1. Temperature-based scaling
+        # 2. Aggressive perturbation for extreme imbalances
+        # 3. Context-aware scaling based on cell type
+        base_perturbation = temp * 0.05
+
+        # Increase perturbation magnitude for extreme cases
+        if max_deviation > voronoi_threshold:
+            # More aggressive perturbation for high-deviation configurations
+            perturbation_mag = base_perturbation * (1.0 + max_deviation / (mean_area + 1e-8))
+
+            # Even more aggressive for very extreme cases
+            if max_deviation > 2.0 * std_area:
+                perturbation_mag *= 1.5
+        else:
+            perturbation_mag = base_perturbation
+
+        # Further adjust based on cell size relative to neighbors
+        if len(areas) > 0:
+            area_ratio = areas[idx] / (mean_area + 1e-8)
+            # If point is in a particularly large or small cell, perturb more aggressively
+            if area_ratio > 2.0 or area_ratio < 0.5:
+                perturbation_mag *= 2.0
+            elif area_ratio > 1.5 or area_ratio < 0.67:
+                perturbation_mag *= 1.5
+
+        # Add Gaussian noise to selected point with enhanced magnitude
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[idx] += noise
+
+        # Project back to sphere
+        neighbor_points = self._project_to_sphere(neighbor_points)
+
+        return neighbor_points
+=======
+    def _hybrid_perturbation(self, current_points: np.ndarray, temp: float,
+                           voronoi_threshold: float = 0.1) -> np.ndarray:
+        """
+        Hybrid perturbation that combines Voronoi guidance with distance characteristics.
+        """
+        neighbor_points = current_points.copy()
+
+        # Compute Voronoi statistics for current configuration
+        mean_area, std_area, max_deviation = self._compute_voronoi_stats(current_points)
+
+        # Calculate pairwise distances for distance-based analysis
+        if len(current_points) >= 2:
+            distances = pdist(current_points)
+            distance_matrix = squareform(distances)
+            mean_distances = np.mean(distance_matrix, axis=1)
+        else:
+            mean_distances = np.zeros(len(current_points))
+
+        # Enhanced point selection using combined criteria
+        try:
+            sv = SphericalVoronoi(current_points, radius=1.0)
+            areas = sv.calculate_areas()
+
+            # Create composite weights combining Voronoi imbalance and distance characteristics
+            if len(areas) > 0:
+                # Voronoi-based weights (emphasize imbalanced cells)
+                voronoi_deviations = np.abs(areas - mean_area)
+                voronoi_weights = np.exp(-voronoi_deviations / (std_area + 1e-8))
+
+                # Distance-based weights (points with extreme mean distances)
+                median_mean_dist = np.median(mean_distances)
+                if median_mean_dist > 0:
+                    distance_weights = np.exp(-np.abs(mean_distances - median_mean_dist) / (median_mean_dist + 1e-8))
+                else:
+                    distance_weights = np.ones(len(mean_distances))
+
+                # Combine weights with adaptive blending
+                # Higher weight on Voronoi for early iterations, more on distance later
+                blend_factor = min(1.0, self.iteration_count / (self.config.max_iterations * 0.3))
+                combined_weights = (1 - blend_factor) * voronoi_weights + blend_factor * distance_weights
+
+                # Normalize weights
+                combined_weights = combined_weights / np.sum(combined_weights)
+                idx = np.random.choice(len(current_points), p=combined_weights)
+            else:
+                # Fallback to random selection if Voronoi computation fails
+                idx = np.random.randint(0, len(current_points))
+        except Exception:
+            # Fall back to random selection if any computation fails
+            idx = np.random.randint(0, len(current_points))
+
+        # Determine perturbation magnitude with enhanced logic:
+        # 1. Temperature-based scaling
+        # 2. Adaptive scaling based on optimization stage
+        # 3. Context-aware scaling based on Voronoi imbalance and distance characteristics
+        base_perturbation = temp * 0.05
+
+        # Stage-dependent adjustment (more aggressive early on)
+        stage_factor = min(1.0, self.iteration_count / (self.config.max_iterations * 0.5))
+        stage_adjustment = 0.5 + 0.5 * stage_factor  # More aggressive in early stages
+
+        # Quality-dependent adjustment (smaller changes when we're doing well)
+        quality_factor = min(1.0, self.current_ratio / 0.3)  # Normalize by expected good range
+        quality_adjustment = 0.5 + 0.5 * quality_factor  # Smaller perturbations for good solutions
+
+        # Imbalance-dependent adjustment
+        imbalance_factor = min(1.0, max_deviation / (mean_area + 1e-8))
+        imbalance_adjustment = 1.0 + 0.5 * imbalance_factor  # More aggressive for imbalanced configs
+
+        # Total adjustment factor
+        adjustment_factor = stage_adjustment * quality_adjustment * imbalance_adjustment
+        perturbation_mag = base_perturbation * adjustment_factor
+
+        # Further adjust based on cell type and distance characteristics
+        if len(areas) > 0:
+            area_ratio = areas[idx] / (mean_area + 1e-8)
+            mean_dist_ratio = mean_distances[idx] / (np.mean(mean_distances) + 1e-8)
+
+            # If point is in a particularly large or small cell OR far from neighbors, perturb more aggressively
+            if area_ratio > 2.0 or area_ratio < 0.5 or mean_dist_ratio > 1.5:
+                perturbation_mag *= 2.0
+            elif area_ratio > 1.5 or area_ratio < 0.67 or mean_dist_ratio > 1.2:
+                perturbation_mag *= 1.5
+
+        # Add Gaussian noise to selected point
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[idx] += noise
+
+        # Project back to sphere
+        neighbor_points = self._project_to_sphere(neighbor_points)
+
+        return neighbor_points
+
+    def _voronoi_guided_perturbation(self, current_points: np.ndarray, temp: float,
+                                   voronoi_threshold: float = 0.1) -> np.ndarray:
+        """
+        Generate neighbor using Voronoi-based guidance to improve point distribution.
+        """
+        # Use the enhanced hybrid perturbation method
+        return self._hybrid_perturbation(current_points, temp, voronoi_threshold)
+>>>>>>> REPLACE
+</DIFF>

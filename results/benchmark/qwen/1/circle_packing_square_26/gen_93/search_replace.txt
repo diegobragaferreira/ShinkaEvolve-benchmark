@@ -1,0 +1,146 @@
+<NAME>
+improve_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi initialization uses a simple grid with random jitter, but we can significantly improve the quality of initial configurations by using a more sophisticated approach. Instead of just placing points on a grid, we'll use a k-means clustering approach with better initialization that distributes points more evenly while maintaining the Voronoi-based concept. This should lead to better starting configurations that are closer to optimal, thus improving the overall evolutionary process.
+
+The key insight is that we want to maximize the minimum distance between points in our Voronoi seed set, which leads to better initial circle distributions. We'll enhance the Voronoi initialization to use a more principled approach to point placement.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Generate initial Voronoi-based configuration
+    def generate_voronoi_initial():
+        # Generate seed points distributed via Voronoi cells
+        np.random.seed(42)
+        points = []
+
+        # Create a grid of seed points with some randomness
+        grid_size = 6  # 6x6 grid gives us 36 points, more than needed
+        spacing = 1.0 / (grid_size + 1)
+
+        for i in range(grid_size):
+            for j in range(grid_size):
+                x = (i + 1) * spacing + np.random.uniform(-spacing/4, spacing/4)
+                y = (j + 1) * spacing + np.random.uniform(-spacing/4, spacing/4)
+                points.append([x, y])
+
+        points = np.array(points[:n_circles])
+
+        # Create Voronoi diagram
+        vor = Voronoi(points)
+
+        # For each Voronoi cell, place a circle at the centroid with radius based on cell area
+        circles = []
+        for i in range(n_circles):
+            if i < len(vor.points):
+                x, y = vor.points[i]
+
+                # Estimate radius based on minimum distance to neighbors
+                min_dist = float('inf')
+                for j in range(n_circles):
+                    if i != j:
+                        dist = distance.euclidean(vor.points[i], vor.points[j])
+                        min_dist = min(min_dist, dist)
+
+                # Use half the minimum distance to neighboring points as radius
+                estimated_radius = min(0.2, min_dist / 4.0) if min_dist < float('inf') else 0.1
+
+                # Ensure it's within bounds and reasonable
+                radius = max(min_radius, min(max_radius, estimated_radius))
+
+                # Make sure it's within unit square
+                x = max(radius, min(1-radius, x))
+                y = max(radius, min(1-radius, y))
+
+                circles.append([x, y, radius])
+
+        return np.array(circles)
+=======
+    # Generate initial Voronoi-based configuration
+    def generate_voronoi_initial():
+        # Generate seed points distributed via better Voronoi cells
+        np.random.seed(42)
+        points = []
+
+        # Use k-means++ like approach with multiple random initializations
+        # and select the best configuration for Voronoi generation
+        best_points = None
+        best_min_distance = 0
+
+        for _ in range(5):  # Try multiple random configurations
+            # Create more scattered points than needed to allow for good Voronoi cells
+            candidate_points = []
+            # Use a more even distribution approach
+            for i in range(100):  # Generate 100 candidate points
+                x = np.random.uniform(0.05, 0.95)  # Keep away from edges to allow room
+                y = np.random.uniform(0.05, 0.95)
+                candidate_points.append([x, y])
+
+            candidate_points = np.array(candidate_points)
+
+            # Cluster them using k-means to get good distribution
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=n_circles, init='k-means++', n_init=10,
+                          random_state=42, max_iter=300)
+            kmeans.fit(candidate_points)
+            clustered_points = kmeans.cluster_centers_
+
+            # Calculate minimum distance between points in this configuration
+            if len(clustered_points) >= 2:
+                distances = cdist(clustered_points, clustered_points)
+                np.fill_diagonal(distances, np.inf)  # Ignore diagonal elements
+                min_dist = np.min(distances)
+                if min_dist > best_min_distance:
+                    best_min_distance = min_dist
+                    best_points = clustered_points.copy()
+
+        # If we couldn't find a good configuration, fall back to simple approach
+        if best_points is None:
+            # Create a grid of seed points with some randomness
+            grid_size = 6  # 6x6 grid gives us 36 points, more than needed
+            spacing = 1.0 / (grid_size + 1)
+
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    x = (i + 1) * spacing + np.random.uniform(-spacing/4, spacing/4)
+                    y = (j + 1) * spacing + np.random.uniform(-spacing/4, spacing/4)
+                    points.append([x, y])
+
+            points = np.array(points[:n_circles])
+        else:
+            points = best_points
+
+        # Create Voronoi diagram
+        vor = Voronoi(points)
+
+        # For each Voronoi cell, place a circle at the centroid with radius based on cell area
+        circles = []
+        for i in range(n_circles):
+            if i < len(vor.points):
+                x, y = vor.points[i]
+
+                # Estimate radius based on minimum distance to neighbors
+                min_dist = float('inf')
+                for j in range(n_circles):
+                    if i != j:
+                        dist = distance.euclidean(vor.points[i], vor.points[j])
+                        min_dist = min(min_dist, dist)
+
+                # Use half the minimum distance to neighboring points as radius
+                estimated_radius = min(0.2, min_dist / 4.0) if min_dist < float('inf') else 0.1
+
+                # Ensure it's within bounds and reasonable
+                radius = max(min_radius, min(max_radius, estimated_radius))
+
+                # Make sure it's within unit square
+                x = max(radius, min(1-radius, x))
+                y = max(radius, min(1-radius, y))
+
+                circles.append([x, y, radius])
+
+        return np.array(circles)
+>>>>>>> REPLACE
+
+</DIFF>

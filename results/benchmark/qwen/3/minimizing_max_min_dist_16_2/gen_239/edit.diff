@@ -1,0 +1,425 @@
+--- a/original.py
++++ b/original.py
+@@ -1,208 +1,262 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import pdist
++from scipy.spatial import Voronoi
+ from scipy.optimize import minimize
+ import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+-
++    
++    def compute_voronoi_min_area_ratio(points):
++        """Compute ratio using Voronoi cell areas as a measure of dispersion quality"""
++        # Ensure points are within bounds
++        points = np.clip(points, 0, 1)
++        
++        try:
++            # Compute Voronoi diagram
++            vor = Voronoi(points)
++            
++            # Calculate areas of finite Voronoi cells
++            areas = []
++            for i, region in enumerate(vor.point_region):
++                if region != -1:  # Skip infinite regions
++                    vertices = vor.vertices[vor.regions[region]]
++                    if len(vertices) >= 3:  # Need at least 3 vertices for a polygon
++                        # Compute area of polygon using shoelace formula
++                        x = vertices[:, 0]
++                        y = vertices[:, 1]
++                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
++                        areas.append(area)
++            
++            if not areas:
++                return 0.0
++                
++            min_area = np.min(areas)
++            max_area = np.max(areas)
++            
++            if max_area == 0:
++                return 0.0
++                
++            return min_area / max_area
++            
++        except:
++            # Fallback to distance-based ratio if Voronoi computation fails
++            distances = np.sqrt(np.sum((points[:, np.newaxis] - points[np.newaxis, :])**2, axis=2))
++            np.fill_diagonal(distances, np.inf)
++            if distances.size > 0:
++                min_dist = np.min(distances)
++                max_dist = np.max(distances)
++                if max_dist > 0:
++                    return min_dist / max_dist
++            return 0.0
++    
+     def compute_min_max_ratio(points):
+-        """Compute the ratio of minimum to maximum pairwise distances"""
+-        distances = pdist(points)
+-        return np.min(distances) / np.max(distances)
+-
+-    def objective_function(x_flat):
+-        """Objective function to maximize (negative because we minimize)"""
+-        # Reshape flat array back to points
++        """Original distance-based ratio computation"""
++        distances = np.sqrt(np.sum((points[:, np.newaxis] - points[np.newaxis, :])**2, axis=2))
++        np.fill_diagonal(distances, np.inf)
++        if distances.size > 0:
++            min_dist = np.min(distances)
++            max_dist = np.max(distances)
++            if max_dist > 0:
++                return min_dist / max_dist
++        return 0.0
++    
++    def energy_objective_function(x_flat):
++        """Energy-based objective function using inverse distance repulsion"""
+         points = x_flat.reshape(-1, 2)
+-        return -compute_min_max_ratio(points)
+-
+-    def constraint_function(x_flat):
+-        """Constraint to keep points within unit square"""
++        points = np.clip(points, 0, 1)
++        
++        # Compute pairwise distances
++        distances = np.sqrt(np.sum((points[:, np.newaxis] - points[np.newaxis, :])**2, axis=2))
++        np.fill_diagonal(distances, 1e-10)  # Avoid division by zero
++        
++        # Compute total repulsive energy (inverse distance)
++        # Sum of 1/d_ij for all pairs (i,j) where i<j
++        energy = 0
++        n = len(points)
++        for i in range(n):
++            for j in range(i+1, n):
++                energy += 1.0 / distances[i, j]
++        
++        # Penalize boundary violations
++        boundary_penalty = 0
++        for point in points:
++            for coord in point:
++                if coord <= 0.01 or coord >= 0.99:
++                    boundary_penalty += 1000.0
++        
++        return -energy + boundary_penalty * 1000.0
++    
++    def voronoi_objective_function(x_flat):
++        """Voronoi-based objective function focused on cell area uniformity"""
+         points = x_flat.reshape(-1, 2)
+-        # Return negative values for constraint violations (we want >= 0)
+-        violations = np.concatenate([
+-            np.minimum(points[:, 0], 0),
+-            np.minimum(points[:, 1], 0),
+-            np.maximum(points[:, 0] - 1, 0),
+-            np.maximum(points[:, 1] - 1, 0)
+-        ])
+-        return violations
+-
+-    # Multi-start optimization with different initialization strategies
+-    best_ratio = -np.inf
+-    best_points = None
+-
+-    # Strategy 1: Enhanced hexagonal grid with proper hexagonal lattice
++        
++        # Apply boundary constraints via reflection
++        points = np.clip(points, 0, 1)
++        points = np.clip(points, 0, 1)
++        
++        # Compute Voronoi-based quality
++        area_ratio = compute_voronoi_min_area_ratio(points)
++        
++        # Add distance-based penalty for very small minimum distances
++        distances = np.sqrt(np.sum((points[:, np.newaxis] - points[np.newaxis, :])**2, axis=2))
++        np.fill_diagonal(distances, np.inf)
++        if distances.size > 0:
++            min_dist = np.min(distances)
++            if min_dist < 0.05:  # Penalize very small distances
++                area_ratio -= (0.05 - min_dist) * 1000.0
++        
++        return -area_ratio
++    
+     def hexagonal_grid_init():
+-        # Create a proper hexagonal lattice arrangement
+-        # Using 4 rows with alternating column offsets for true hexagonal pattern
++        """Create a proper hexagonal lattice arrangement"""
+         points = []
+-
++        
+         # Parameters for hexagonal lattice
+-        # In a hexagonal lattice, the vertical spacing is sqrt(3)/2 times the horizontal spacing
+-        hex_spacing = 1.0  # Normalize to unit square
++        hex_spacing = 1.0
+         row_spacing = hex_spacing * np.sqrt(3) / 2.0
+         col_spacing = hex_spacing
+ 
+         # Place points in hexagonal pattern (4 rows, 4 columns)
+         for row in range(4):
+             for col in range(4):
+                 if len(points) >= 16:
+                     break
+-                # Calculate position
+                 x = col * col_spacing
+-                # Offset odd rows
+                 if row % 2 == 1:
+                     x += col_spacing / 2.0
+-
+                 y = row * row_spacing
+-
+                 points.append([x, y])
+ 
+-        # Convert to numpy array and adjust to fit within [0,1] bounds
++        # Convert to numpy array and normalize
+         points = np.array(points[:16])
+-
+-        # Normalize to fit within unit square [0,1] x [0,1]
+-        # Find bounding box
++        
++        # Normalize to fit within unit square
+         min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+         min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+ 
+-        # Avoid division by zero
+-        if max_x > min_x:
+-            points[:, 0] = (points[:, 0] - min_x) / (max_x - min_x)
+-        if max_y > min_y:
+-            points[:, 1] = (points[:, 1] - min_y) / (max_y - min_y)
+-
+-        # Scale to fit entirely within [0,1] x [0,1]
+-        scale_factor = min(1.0, 1.0 / (max_x - min_x) if max_x > min_x else 1.0,
+-                          1.0 / (max_y - min_y) if max_y > min_y else 1.0)
+-        points = points * scale_factor
+-
+-        # Center the points in the unit square
++        if max_x > min_x and max_y > min_y:
++            scale_x = 1.0 / (max_x - min_x)
++            scale_y = 1.0 / (max_y - min_y)
++            scale = min(scale_x, scale_y, 1.0)
++            
++            points[:, 0] = (points[:, 0] - min_x) * scale
++            points[:, 1] = (points[:, 1] - min_y) * scale
++
++        # Center the points
+         center_shift = 0.5 - np.mean(points, axis=0)
+         points = points + center_shift
+ 
+-        # Ensure points are within bounds
+-        points = np.clip(points, 0, 1)
+-
+-        # Apply small random perturbations to break potential symmetries
++        # Ensure bounds
++        points = np.clip(points, 0, 1)
++
++        # Apply randomness to break symmetries
+         np.random.seed(42)
+-        perturbations = np.random.normal(0, 0.01, points.shape)
++        perturbations = np.random.normal(0, 0.005, points.shape)
+         points += perturbations
+         points = np.clip(points, 0, 1)
+-
+-        # Additional symmetry breaking: rotate some points
+-        # Apply a small rotation to every 3rd point to break rotational symmetry
+-        angle_offset = np.pi / 24  # 7.5 degree rotation
+-        cos_a = np.cos(angle_offset)
+-        sin_a = np.sin(angle_offset)
+-        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+-
+-        center = np.mean(points, axis=0)
+-        for i in range(0, 16, 3):  # Every 3rd point
+-            if i < len(points):
+-                points[i] = rotation_matrix @ (points[i] - center) + center
+-
++        
+         return points
+-
+-    # Strategy 2: Random with clustering avoidance
+-    def random_init():
++    
++    def initialize_points():
++        """Initialize points with multiple strategies"""
++        # Strategy 1: Hexagonal grid
++        points = hexagonal_grid_init()
++        
++        # Strategy 2: Random with some clustering avoidance
+         np.random.seed(42)
+-        points = np.random.rand(16, 2)
++        random_points = np.random.rand(16, 2)
++        
++        # Strategy 3: Perturbed hexagonal
++        perturbed_points = points.copy()
++        np.random.seed(42)
++        perturbed_points += np.random.normal(0, 0.02, points.shape)
++        perturbed_points = np.clip(perturbed_points, 0, 1)
++        
++        # Evaluate which initialization performs better
++        orig_ratio = compute_min_max_ratio(points)
++        random_ratio = compute_min_max_ratio(random_points)
++        perturbed_ratio = compute_min_max_ratio(perturbed_points)
++        
++        # Choose the best initialization
++        if random_ratio > orig_ratio and random_ratio > perturbed_ratio:
++            return random_points
++        elif perturbed_ratio > orig_ratio:
++            return perturbed_points
++        else:
++            return points
++    
++    # Main optimization loop with multiple restarts
++    best_ratio = -np.inf
++    best_points = None
++    
++    # Try multiple initialization strategies
++    num_restarts = 10
++    for restart in range(num_restarts):
++        # Initialize points
++        points = initialize_points()
++        
++        # Apply different optimization approaches
++        x0 = points.flatten()
++        
++        # Approach 1: Voronoi-based optimization
++        try:
++            # Use bounds for constrained optimization
++            bounds = [(0, 1) for _ in range(32)]
++            
++            # Try different optimization methods
++            result = minimize(
++                voronoi_objective_function,
++                x0,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 300, 'ftol': 1e-8, 'gtol': 1e-6}
++            )
++            
++            if result.success:
++                optimized_points = result.x.reshape(-1, 2)
++                optimized_points = np.clip(optimized_points, 0, 1)
++                current_ratio = compute_min_max_ratio(optimized_points)
++                
++                if current_ratio > best_ratio:
++                    best_ratio = current_ratio
++                    best_points = optimized_points.copy()
++        except:
++            pass
++            
++        # Approach 2: Energy-based optimization as backup
++        if best_points is None:
++            try:
++                bounds = [(0, 1) for _ in range(32)]
++                result = minimize(
++                    energy_objective_function,
++                    x0,
++                    method='L-BFGS-B',
++                    bounds=bounds,
++                    options={'maxiter': 300, 'ftol': 1e-8, 'gtol': 1e-6}
++                )
++                
++                if result.success:
++                    optimized_points = result.x.reshape(-1, 2)
++                    optimized_points = np.clip(optimized_points, 0, 1)
++                    current_ratio = compute_min_max_ratio(optimized_points)
++                    
++                    if current_ratio > best_ratio:
++                        best_ratio = current_ratio
++                        best_points = optimized_points.copy()
++            except:
++                pass
++    
++    # Final fallback to hexagonal grid if nothing worked
++    if best_points is None:
++        points = hexagonal_grid_init()
+         return points
+-
+-    # Strategy 3: Perturbed hexagonal grid (more structured)
+-    def perturbed_hexagonal_init():
+-        points = hexagonal_grid_init()
+-        np.random.seed(42)
+-        # Add small random perturbations
+-        points += np.random.normal(0, 0.02, points.shape)
+-        # Ensure all points are within bounds
+-        points = np.clip(points, 0, 1)
+-        return points
+-
+-    initial_strategies = [
+-        hexagonal_grid_init,
+-        random_init,
+-        perturbed_hexagonal_init
+-    ]
+-
+-    # Try multiple random restarts
+-    num_restarts = 5
+-    for restart in range(num_restarts):
+-        # Select initialization strategy
+-        init_func = initial_strategies[restart % len(initial_strategies)]
+-        points = init_func()
+-
+-        # Flatten for optimization
+-        x0 = points.flatten()
+-
+-        # Set up constraints
+-        bounds = [(0, 1) for _ in range(32)]
+-        constraints = {'type': 'ineq', 'fun': constraint_function}
+-
+-        # First optimization with SLSQP for global search
+-        try:
+-            result = minimize(
+-                objective_function,
+-                x0,
+-                method='SLSQP',
+-                bounds=bounds,
+-                constraints=constraints,
+-                options={'maxiter': 500, 'ftol': 1e-6, 'eps': 1e-4}
+-            )
+-
+-            if result.success:
+-                final_points = result.x.reshape(-1, 2)
+-                ratio = compute_min_max_ratio(final_points)
+-
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = final_points.copy()
+-
+-        except Exception as e:
+-            continue
+-
+-    # If none worked, fallback to simple approach
+-    if best_points is None:
+-        # Fallback to the original approach with better settings
+-        points = hexagonal_grid_init()
+-        np.random.seed(42)
+-        points += np.random.normal(0, 0.01, points.shape)
+-        points = np.clip(points, 0, 1)
+-        x0 = points.flatten()
+-
+-        bounds = [(0, 1) for _ in range(32)]
+-        constraints = {'type': 'ineq', 'fun': constraint_function}
+-
+-        try:
+-            result = minimize(
+-                objective_function,
+-                x0,
+-                method='SLSQP',
+-                bounds=bounds,
+-                constraints=constraints,
+-                options={'maxiter': 500, 'ftol': 1e-6, 'eps': 1e-4}
+-            )
+-
+-            if result.success:
+-                best_points = result.x.reshape(-1, 2)
+-            else:
+-                # Final fallback to random points
+-                np.random.seed(42)
+-                best_points = np.random.rand(16, 2)
+-        except:
+-            # Final fallback
+-            np.random.seed(42)
+-            best_points = np.random.rand(16, 2)
+-
++    
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

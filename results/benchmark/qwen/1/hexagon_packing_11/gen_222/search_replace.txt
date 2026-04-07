@@ -1,0 +1,272 @@
+<NAME>
+improve_hexagon_packaging_with_adaptive_de
+</NAME>
+
+<DESCRIPTION>
+This improvement modifies the differential evolution approach to use adaptive parameters that dynamically adjust based on optimization progress. The key insight is that early generations benefit from high exploration (high mutation rate, high crossover rate) while later generations benefit from high exploitation (low mutation rate, high crossover rate). This adaptive scheduling helps avoid premature convergence and improves overall optimization performance.
+
+The changes include:
+1. Implementing adaptive DE parameters with dynamic mutation and crossover rates
+2. Adding convergence tracking to detect when to adjust parameters
+3. Improving the initial population generation to be more diverse
+4. Enhancing the local refinement process with better cooling schedule
+
+These changes aim to push the solution closer to the benchmark of 0.2544 by enabling better exploration in early stages and more focused exploitation in later stages.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_geometric_constraints():
+    """Optimize using geometric constraints and tiling insights"""
+
+    # Phase 1: Generate geometrically informed initial solution
+    initial_positions = find_optimal_tiling_pattern()
+    initial_angles = [0.0] * 11
+
+    # Flatten initial solution
+    initial_solution = []
+    for pos in initial_positions:
+        initial_solution.extend(pos)
+    initial_solution.extend(initial_angles)
+    initial_solution = np.array(initial_solution)
+
+    # Phase 2: Use a hybrid approach with different optimization strategies
+    # First, try to improve using differential evolution with tight constraints
+    bounds = []
+    # Position bounds
+    for _ in range(22):
+        bounds.append((-8.0, 8.0))  # Tighter bounds for faster convergence
+    # Angle bounds
+    for _ in range(11):
+        bounds.append((0.0, 360.0))
+
+    try:
+        # Try differential evolution first
+        de_result = differential_evolution(
+            evaluate_solution_solution,
+            bounds,
+            maxiter=25,
+            popsize=10,
+            seed=42,
+            disp=False,
+            tol=1e-6,
+            strategy='best1bin'
+        )
+
+        final_positions = de_result.x[:22].reshape(-1, 2)
+        final_angles = de_result.x[22:]
+
+        # Refine with local optimization using L-BFGS
+        # We'll use a wrapper to fit the optimization interface
+        def obj_for_lbfgs(params):
+            # Reshape and evaluate
+            positions = params[:22].reshape(-1, 2)
+            angles = params[22:]
+            flat_solution = np.concatenate([positions.flatten(), angles])
+            return evaluate_solution_solution(flat_solution)
+
+        # Create initial parameters for L-BFGS
+        lbfgs_initial = np.concatenate([final_positions.flatten(), final_angles])
+
+        # Local refinement with L-BFGS-B
+        lbfgs_result = minimize(
+            obj_for_lbfgs,
+            lbfgs_initial,
+            method='L-BFGS-B',
+            bounds=[(-8.0, 8.0)] * 22 + [(0.0, 360.0)] * 11,
+            options={'maxiter': 50, 'disp': False}
+        )
+
+        # Extract final refined solution
+        final_positions_refined = lbfgs_result.x[:22].reshape(-1, 2)
+        final_angles_refined = lbfgs_result.x[22:]
+
+    except Exception as e:
+        # Fallback to original solution
+        final_positions_refined = np.array(initial_positions)
+        final_angles_refined = np.array(initial_angles)
+
+    return final_positions_refined, final_angles_refined
+=======
+def optimize_with_geometric_constraints():
+    """Optimize using geometric constraints and tiling insights"""
+
+    # Phase 1: Generate geometrically informed initial solution
+    initial_positions = find_optimal_tiling_pattern()
+    initial_angles = [0.0] * 11
+
+    # Flatten initial solution
+    initial_solution = []
+    for pos in initial_positions:
+        initial_solution.extend(pos)
+    initial_solution.extend(initial_angles)
+    initial_solution = np.array(initial_solution)
+
+    # Phase 2: Use a hybrid approach with adaptive differential evolution
+    bounds = []
+    # Position bounds
+    for _ in range(22):
+        bounds.append((-8.0, 8.0))  # Tighter bounds for faster convergence
+    # Angle bounds
+    for _ in range(11):
+        bounds.append((0.0, 360.0))
+
+    try:
+        # Adaptive differential evolution parameters
+        def adaptive_de_strategy(func, bounds, maxiter=50, popsize=15, seed=42):
+            # Initialize parameters with high exploration values
+            mutation_rate = 0.9
+            crossover_rate = 0.9
+            patience_counter = 0
+            last_best_fitness = float('inf')
+            improvement_threshold = 1e-5
+
+            # Initialize population
+            np.random.seed(seed)
+            population = []
+            for i in range(popsize):
+                individual = []
+                for lower, upper in bounds:
+                    individual.append(np.random.uniform(lower, upper))
+                population.append(individual)
+
+            history = []
+
+            for generation in range(maxiter):
+                # Evaluate fitness
+                fitnesses = [func(ind) for ind in population]
+                best_fitness = min(fitnesses)
+                history.append(best_fitness)
+
+                # Check for improvement
+                if len(history) > 1 and abs(history[-2] - best_fitness) < improvement_threshold:
+                    patience_counter += 1
+                else:
+                    patience_counter = 0
+
+                # Adaptive parameter adjustment based on progress
+                if patience_counter > 5 and generation > 10:
+                    # Decrease mutation rate and increase crossover rate to exploit
+                    mutation_rate = max(0.2, mutation_rate * 0.95)
+                    crossover_rate = min(0.9, crossover_rate + 0.05)
+                elif generation > 20 and len(history) > 10:
+                    # Further tune if no significant improvement in recent history
+                    if abs(history[-10] - history[-1]) < 1e-6:
+                        mutation_rate = max(0.1, mutation_rate * 0.9)
+                        crossover_rate = min(0.95, crossover_rate + 0.02)
+
+                # Select parents
+                tournament_size = 3
+                selected = []
+                for _ in range(popsize):
+                    tournament = [np.random.choice(population) for _ in range(tournament_size)]
+                    tournament_fitness = [func(ind) for ind in tournament]
+                    winner = tournament[np.argmin(tournament_fitness)]
+                    selected.append(winner)
+
+                # Generate new population
+                new_population = []
+                for i in range(popsize):
+                    # Mutation
+                    a, b, c = np.random.choice(selected, 3, replace=False)
+                    mutant = []
+                    for j in range(len(bounds)):
+                        if np.random.rand() < mutation_rate:
+                            mutant.append(a[j] + 0.5 * (b[j] - c[j]))
+                        else:
+                            mutant.append(selected[i][j])
+
+                    # Boundary handling
+                    for j, (lower, upper) in enumerate(bounds):
+                        mutant[j] = max(lower, min(upper, mutant[j]))
+
+                    # Crossover
+                    trial = []
+                    for j in range(len(bounds)):
+                        if np.random.rand() < crossover_rate:
+                            trial.append(mutant[j])
+                        else:
+                            trial.append(selected[i][j])
+
+                    new_population.append(trial)
+
+                population = new_population
+
+            # Return best individual
+            fitnesses = [func(ind) for ind in population]
+            best_idx = np.argmin(fitnesses)
+            return population[best_idx]
+
+        # Use adaptive DE approach
+        adaptive_result = adaptive_de_strategy(
+            evaluate_solution_solution,
+            bounds,
+            maxiter=30,
+            popsize=12,
+            seed=42
+        )
+
+        # Extract results
+        final_positions = np.array(adaptive_result[:22]).reshape(-1, 2)
+        final_angles = np.array(adaptive_result[22:])
+
+        # Enhanced local refinement with simulated annealing
+        # Apply a more comprehensive refinement strategy
+        best_positions = final_positions.copy()
+        best_angles = final_angles.copy()
+        best_score = evaluate_solution_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+        # Simulated annealing with adaptive cooling schedule
+        temperature = 5.0
+        cooling_rate = 0.998
+        min_temperature = 0.001
+        max_iterations = 500
+
+        for iteration in range(max_iterations):
+            if temperature < min_temperature:
+                break
+
+            # Try multiple perturbations per iteration
+            for _ in range(3):
+                # Pick a random hexagon to perturb
+                hex_idx = np.random.randint(0, 11)
+
+                # Save original values
+                old_pos = best_positions[hex_idx].copy()
+                old_angle = best_angles[hex_idx]
+
+                # Perturb position
+                best_positions[hex_idx][0] += np.random.normal(0, 0.05 * temperature)
+                best_positions[hex_idx][1] += np.random.normal(0, 0.05 * temperature)
+
+                # Perturb angle
+                best_angles[hex_idx] += np.random.normal(0, 5.0 * temperature)
+                best_angles[hex_idx] %= 360
+
+                # Evaluate new solution
+                new_score = evaluate_solution_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+                # Accept or reject
+                if new_score < best_score:
+                    best_score = new_score
+                else:
+                    # Accept with probability based on temperature
+                    delta = new_score - best_score
+                    acceptance_prob = np.exp(-delta / temperature)
+                    if np.random.rand() >= acceptance_prob:
+                        # Revert changes
+                        best_positions[hex_idx] = old_pos
+                        best_angles[hex_idx] = old_angle
+
+                # Check if we need to cool down
+                if iteration % 20 == 0:
+                    temperature *= cooling_rate
+
+    except Exception as e:
+        # Fallback to original solution
+        final_positions = np.array(initial_positions)
+        final_angles = np.array(initial_angles)
+
+    return final_positions, final_angles
+>>>>>>> REPLACE
+</DIFF>

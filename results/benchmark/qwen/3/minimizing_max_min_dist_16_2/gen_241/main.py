@@ -1,0 +1,275 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances"""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances)
+
+    def objective_function(x_flat):
+        """Objective function to maximize (negative because we minimize)"""
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+        return -compute_min_max_ratio(points)
+
+    def constraint_function(x_flat):
+        """Constraint to keep points within unit square"""
+        points = x_flat.reshape(-1, 2)
+        # Return negative values for constraint violations (we want >= 0)
+        violations = np.concatenate([
+            np.minimum(points[:, 0], 0),
+            np.minimum(points[:, 1], 0),
+            np.maximum(points[:, 0] - 1, 0),
+            np.maximum(points[:, 1] - 1, 0)
+        ])
+        return violations
+
+    # Multi-start optimization with different initialization strategies
+    best_ratio = -np.inf
+    best_points = None
+
+    # Strategy 1: Enhanced hexagonal grid with true hexagonal lattice
+    def hexagonal_grid_init():
+        # Create points in a true hexagonal lattice pattern
+        # Using the mathematical relationship: spacing_y = spacing_x * sqrt(3)/2
+        # Better approach: start with a hexagonal tiling that naturally fits 16 points
+
+        # Generate points in a hexagonal pattern with radius adjustment
+        # Hexagonal packing with 4 rows and 4 columns (but adjusted for better distribution)
+        points = []
+
+        # Define hexagonal grid parameters
+        # For 16 points, we can use a 4x4 grid with proper hexagonal spacing
+        spacing = 0.8  # Slightly reduced spacing to allow for better packing
+        row_spacing = spacing * np.sqrt(3) / 2.0
+        col_spacing = spacing
+
+        # Create hexagonal grid
+        rows = 4
+        cols = 4
+
+        for row in range(rows):
+            for col in range(cols):
+                if len(points) >= 16:
+                    break
+                # Calculate position
+                x = col * col_spacing
+                # Offset odd rows
+                if row % 2 == 1:
+                    x += col_spacing / 2.0
+                y = row * row_spacing
+                points.append([x, y])
+
+        # Convert to numpy array
+        points = np.array(points[:16])
+
+        # Normalize to fit within [0,1] x [0,1] with better fitting approach
+        min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+        min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+
+        # Avoid division by zero
+        if max_x > min_x and max_y > min_y:
+            scale_x = 1.0 / (max_x - min_x) if max_x > min_x else 1.0
+            scale_y = 1.0 / (max_y - min_y) if max_y > min_y else 1.0
+
+            # Apply scaling and centering
+            points[:, 0] = (points[:, 0] - min_x) * scale_x
+            points[:, 1] = (points[:, 1] - min_y) * scale_y
+
+            # Ensure we don't exceed bounds after scaling
+            points[:, 0] = np.clip(points[:, 0], 0, 1)
+            points[:, 1] = np.clip(points[:, 1], 0, 1)
+
+        # Better centering approach
+        center_shift = 0.5 - np.mean(points, axis=0)
+        points = points + center_shift
+
+        # Ensure within bounds after centering
+        points = np.clip(points, 0, 1)
+
+        # Apply sophisticated perturbation strategy
+        np.random.seed(42)
+
+        # Calculate distances to center and boundaries for adaptive perturbations
+        center = np.mean(points, axis=0)
+        distances_from_center = np.sqrt(np.sum((points - center)**2, axis=1))
+        max_center_distance = np.max(distances_from_center)
+
+        # Calculate distances to boundaries
+        distances_to_boundaries = np.minimum(
+            np.minimum(points[:, 0], 1 - points[:, 0]),
+            np.minimum(points[:, 1], 1 - points[:, 1])
+        )
+
+        # Apply adaptive perturbation based on position and boundary proximity
+        for i in range(len(points)):
+            # Base perturbation magnitude
+            base_perturbation = 0.01
+
+            # Distance-based factor (points further from center get more freedom)
+            if max_center_distance > 0:
+                distance_factor = 1.0 - (distances_from_center[i] / max_center_distance)
+            else:
+                distance_factor = 0.5
+
+            # Boundary proximity factor (points near boundaries get smaller perturbations)
+            boundary_factor = np.clip(distances_to_boundaries[i] * 2.0, 0.0, 1.0)
+
+            # Combine factors for adaptive perturbation
+            pert_magnitude = base_perturbation * distance_factor * boundary_factor
+
+            # Add 2D Gaussian noise
+            noise = np.random.normal(0, pert_magnitude, 2)
+            points[i] += noise
+
+        # Final clipping to ensure bounds
+        points = np.clip(points, 0, 1)
+
+        # Apply additional symmetry breaking with multiple small rotations
+        # Create a more sophisticated rotation pattern that breaks rotational symmetry more effectively
+        rotation_angles = [
+            0,
+            np.pi/12,      # 15 degrees
+            np.pi/8,       # 22.5 degrees
+            np.pi/6,       # 30 degrees
+            np.pi/4,       # 45 degrees
+            np.pi/3,       # 60 degrees
+            np.pi*2/3,     # 120 degrees
+            np.pi*3/4      # 135 degrees
+        ]
+
+        # Apply rotation to specific points in a pattern that avoids rotational symmetry
+        for i in range(len(points)):
+            # Apply rotation to points in a way that breaks symmetry more thoroughly
+            # Use a more complex indexing scheme
+            rotation_idx = (i * 7 + i * 3) % len(rotation_angles)
+            angle = rotation_angles[rotation_idx]
+
+            cos_a = np.cos(angle)
+            sin_a = np.sin(angle)
+            rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+
+            # Only apply rotation if it makes a meaningful change
+            if angle != 0:
+                points[i] = rotation_matrix @ (points[i] - center) + center
+
+        return points
+
+    # Strategy 2: Random with clustering avoidance
+    def random_init():
+        np.random.seed(42)
+        points = np.random.rand(16, 2)
+        return points
+
+    # Strategy 3: Perturbed hexagonal grid (more structured)
+    def perturbed_hexagonal_init():
+        points = hexagonal_grid_init()
+        np.random.seed(42)
+        # Add small random perturbations
+        points += np.random.normal(0, 0.02, points.shape)
+        # Ensure all points are within bounds
+        points = np.clip(points, 0, 1)
+        return points
+
+    initial_strategies = [
+        hexagonal_grid_init,
+        random_init,
+        perturbed_hexagonal_init
+    ]
+
+    # Try multiple random restarts with adaptive optimization
+    num_restarts = 5
+    for restart in range(num_restarts):
+        # Select initialization strategy
+        init_func = initial_strategies[restart % len(initial_strategies)]
+        points = init_func()
+
+        # Flatten for optimization
+        x0 = points.flatten()
+
+        # Set up constraints
+        bounds = [(0, 1) for _ in range(32)]
+        constraints = {'type': 'ineq', 'fun': constraint_function}
+
+        # Adaptive optimization with intelligent cooling schedule
+        try:
+            # Use different optimization methods based on restart count
+            if restart < 3:
+                # More thorough optimization for early restarts
+                result = minimize(
+                    objective_function,
+                    x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints=constraints,
+                    options={'maxiter': 1000, 'ftol': 1e-8, 'eps': 1e-6}
+                )
+            else:
+                # Faster optimization for later restarts
+                result = minimize(
+                    objective_function,
+                    x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints=constraints,
+                    options={'maxiter': 500, 'ftol': 1e-6, 'eps': 1e-4}
+                )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = compute_min_max_ratio(final_points)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If none worked, fallback to simple approach
+    if best_points is None:
+        # Fallback to the original approach with better settings
+        points = hexagonal_grid_init()
+        np.random.seed(42)
+        points += np.random.normal(0, 0.01, points.shape)
+        points = np.clip(points, 0, 1)
+        x0 = points.flatten()
+
+        bounds = [(0, 1) for _ in range(32)]
+        constraints = {'type': 'ineq', 'fun': constraint_function}
+
+        try:
+            result = minimize(
+                objective_function,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 1000, 'ftol': 1e-8, 'eps': 1e-6}
+            )
+
+            if result.success:
+                best_points = result.x.reshape(-1, 2)
+            else:
+                # Final fallback to random points
+                np.random.seed(42)
+                best_points = np.random.rand(16, 2)
+        except:
+            # Final fallback
+            np.random.seed(42)
+            best_points = np.random.rand(16, 2)
+
+    return best_points
+
+# EVOLVE-BLOCK-END

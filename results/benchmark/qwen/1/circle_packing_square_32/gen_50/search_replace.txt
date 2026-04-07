@@ -1,0 +1,391 @@
+<NAME>
+add_spatial_grid_indexing
+</NAME>
+
+<DESCRIPTION>
+Adding spatial grid indexing to significantly improve collision detection performance. The current implementation uses either KDTree (with fallback to brute force) or pairwise distance calculations that scale quadratically. By implementing a spatial grid with 10x10 cells, we can reduce collision checking from O(n²) to approximately O(n) by only checking circles in adjacent grid cells, which will enable faster validation and mutation operations during evolution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class CircleValidator:
+    """Handles validation of circle configurations"""
+
+    @staticmethod
+    def validate_solution(circles: np.ndarray) -> bool:
+        """Check if solution satisfies all constraints"""
+        n = len(circles)
+        # Check containment constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if r <= 0 or x < r or x > 1-r or y < r or y > 1-r:
+                return False
+
+        # Check overlap constraints using KDTree for efficiency
+        try:
+            tree = cKDTree(circles[:, :2])
+            pairs = tree.query_pairs(r=0.0001)  # Find very close pairs
+            for i, j in pairs:
+                if i != j:
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist_sq = (x1-x2)**2 + (y1-y2)**2
+                    if dist_sq < (r1 + r2)**2:
+                        return False
+        except:
+            # Fallback to brute force if KDTree fails
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if dist < r1 + r2:
+                        return False
+        return True
+=======
+class CircleValidator:
+    """Handles validation of circle configurations"""
+
+    @staticmethod
+    def validate_solution(circles: np.ndarray) -> bool:
+        """Check if solution satisfies all constraints"""
+        n = len(circles)
+        # Check containment constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if r <= 0 or x < r or x > 1-r or y < r or y > 1-r:
+                return False
+
+        # Check overlap constraints using spatial grid for efficiency
+        return CircleValidator._validate_overlaps_spatial_grid(circles)
+
+    @staticmethod
+    def _validate_overlaps_spatial_grid(circles: np.ndarray) -> bool:
+        """Validate overlaps using spatial grid indexing - O(n) instead of O(n^2)"""
+        n = len(circles)
+        if n <= 1:
+            return True
+
+        # Create spatial grid (10x10 cells)
+        GRID_SIZE = 10
+        grid = {}
+
+        # Helper function to get grid cell index
+        def get_cell_index(x, y):
+            return (int(x * GRID_SIZE), int(y * GRID_SIZE))
+
+        # Place all circles in grid
+        for i, (x, y, r) in enumerate(circles):
+            cell_idx = get_cell_index(x, y)
+            if cell_idx not in grid:
+                grid[cell_idx] = []
+            grid[cell_idx].append(i)
+
+        # Check for overlaps within and between adjacent cells
+        for i, (x1, y1, r1) in enumerate(circles):
+            cell_idx = get_cell_index(x1, y1)
+
+            # Check nearby cells (3x3 neighborhood)
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    neighbor_cell = (cell_idx[0] + dx, cell_idx[1] + dy)
+                    if neighbor_cell in grid:
+                        for j in grid[neighbor_cell]:
+                            if i != j:  # Don't check against itself
+                                x2, y2, r2 = circles[j]
+                                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                                if dist_sq < (r1 + r2)**2:
+                                    return False
+
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_overlap_checking_with_grid
+</NAME>
+
+<DESCRIPTION>
+Optimizing the evaluation_fitness method to use the same spatial grid technique for collision detection. This ensures consistency between validation and fitness evaluation, and further improves performance by avoiding redundant overlap calculations. The spatial grid approach scales much better than the previous O(n²) methods.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_fitness(self, circles: np.ndarray) -> float:
+        """Evaluate fitness of a candidate solution"""
+        total_radius = np.sum(circles[:, 2])
+
+        # Calculate penalty for constraint violations
+        penalty = 0
+
+        # Boundary penalties (quadratic penalties for severe violations)
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x < r:
+                penalty += 10000 * (r - x)**2
+            if x > 1-r:
+                penalty += 10000 * (x - (1-r))**2
+            if y < r:
+                penalty += 10000 * (r - y)**2
+            if y > 1-r:
+                penalty += 10000 * (y - (1-r))**2
+
+        # Collision penalties (quadratic for overlap severity)
+        tree = cKDTree(circles[:, :2])
+        pairs = tree.query_pairs(r=0.0001)
+        for i, j in pairs:
+            if i != j:
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_dist_sq = (r1 + r2)**2
+
+                if dist_sq < min_dist_sq:
+                    overlap = min_dist_sq - dist_sq
+                    penalty += 100000 * overlap
+
+        return -(total_radius - penalty)  # Negative because we minimize in scipy
+=======
+    def evaluate_fitness(self, circles: np.ndarray) -> float:
+        """Evaluate fitness of a candidate solution"""
+        total_radius = np.sum(circles[:, 2])
+
+        # Calculate penalty for constraint violations
+        penalty = 0
+
+        # Boundary penalties (quadratic penalties for severe violations)
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x < r:
+                penalty += 10000 * (r - x)**2
+            if x > 1-r:
+                penalty += 10000 * (x - (1-r))**2
+            if y < r:
+                penalty += 10000 * (r - y)**2
+            if y > 1-r:
+                penalty += 10000 * (y - (1-r))**2
+
+        # Collision penalties (quadratic for overlap severity) using spatial grid
+        penalty += self._calculate_collision_penalty_spatial_grid(circles)
+
+        return -(total_radius - penalty)  # Negative because we minimize in scipy
+
+    def _calculate_collision_penalty_spatial_grid(self, circles: np.ndarray) -> float:
+        """Calculate collision penalty using spatial grid indexing"""
+        n = len(circles)
+        if n <= 1:
+            return 0.0
+
+        # Create spatial grid (10x10 cells)
+        GRID_SIZE = 10
+        grid = {}
+
+        # Helper function to get grid cell index
+        def get_cell_index(x, y):
+            return (int(x * GRID_SIZE), int(y * GRID_SIZE))
+
+        # Place all circles in grid
+        for i, (x, y, r) in enumerate(circles):
+            cell_idx = get_cell_index(x, y)
+            if cell_idx not in grid:
+                grid[cell_idx] = []
+            grid[cell_idx].append(i)
+
+        # Calculate penalty for overlaps
+        penalty = 0.0
+
+        # Check for overlaps within and between adjacent cells
+        for i, (x1, y1, r1) in enumerate(circles):
+            cell_idx = get_cell_index(x1, y1)
+
+            # Check nearby cells (3x3 neighborhood)
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    neighbor_cell = (cell_idx[0] + dx, cell_idx[1] + dy)
+                    if neighbor_cell in grid:
+                        for j in grid[neighbor_cell]:
+                            if i != j:  # Don't check against itself
+                                x2, y2, r2 = circles[j]
+                                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                                min_dist_sq = (r1 + r2)**2
+
+                                if dist_sq < min_dist_sq:
+                                    overlap = min_dist_sq - dist_sq
+                                    penalty += 100000 * overlap
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_voronoi_initialization_with_grid
+</NAME>
+
+<DESCRIPTION>
+Enhancing the Voronoi initialization to better utilize spatial grid principles. Rather than just adding special corner/edge placements, we're making the Voronoi-based initialization more systematic by ensuring that the Voronoi vertices are distributed more evenly across the space using grid-based sampling. This will provide better starting points for the evolutionary algorithm, improving the chance of finding high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def voronoi_initialization(n_circles: int) -> np.ndarray:
+        """Initialize circles using enhanced Voronoi diagram approach with strategic placement"""
+        # Strategy: Mix of Voronoi vertices with strategic corner/edge placements
+
+        # Step 1: Place some circles strategically in corners and along edges
+        # Reserve some slots for corner/edge placements
+        special_positions = []
+        reserved_slots = min(8, n_circles // 4)  # Reserve up to 25% for special positions
+
+        # Add corner positions (4 corners)
+        corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+        for i, (x, y) in enumerate(corners):
+            if i < reserved_slots:
+                # Large radii for corners
+                r = min(x, y, 0.5)
+                special_positions.append([x, y, r])
+
+        # Add edge positions (if we have more reserved slots)
+        edges = [(0.5, 0.1), (0.1, 0.5), (0.5, 0.9), (0.9, 0.5)]
+        for i, (x, y) in enumerate(edges):
+            if len(special_positions) < reserved_slots:
+                # Medium radii for edges
+                r = min(x, y, 1-x, 1-y, 0.3)
+                special_positions.append([x, y, r])
+
+        # Fill remaining with Voronoi vertices
+        remaining_slots = n_circles - len(special_positions)
+        if remaining_slots > 0:
+            points = np.random.rand(remaining_slots * 3, 2)
+
+            # Create Voronoi diagram
+            try:
+                vor = Voronoi(points)
+            except:
+                # Fallback if Voronoi fails
+                return CircleInitializer._simple_grid_initialization(n_circles)
+
+            # Get Voronoi vertices that are inside the unit square
+            vertices = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    vertices.append(vertex)
+
+            # If we don't have enough valid vertices, add random ones
+            while len(vertices) < remaining_slots:
+                vertices.append([np.random.rand(), np.random.rand()])
+
+            # Select first remaining_slots vertices
+            selected_vertices = vertices[:remaining_slots]
+
+            # Create circles with better radius calculation
+            additional_circles = []
+            for i, (x, y) in enumerate(selected_vertices):
+                # Calculate minimum distance to other points to determine max radius
+                min_dist = float('inf')
+                for j, (x2, y2) in enumerate(selected_vertices):
+                    if i != j:
+                        d = np.sqrt((x-x2)**2 + (y-y2)**2)
+                        min_dist = min(min_dist, d)
+
+                # Better radius calculation: consider both neighbor distance and boundaries
+                # Use a more aggressive approach but ensure containment
+                potential_radius = min(min_dist/2, x, 1-x, y, 1-y)
+                # Add some randomness to avoid getting stuck in local optima
+                r = max(0.001, potential_radius * (0.8 + np.random.rand() * 0.4))
+                additional_circles.append([x, y, r])
+
+            # Combine special positions with Voronoi circles
+            circles = special_positions + additional_circles
+        else:
+            circles = special_positions
+
+        # Ensure we have exactly n_circles
+        while len(circles) < n_circles:
+            circles.append([0.5, 0.5, 0.01])
+
+        return np.array(circles[:n_circles])
+=======
+    @staticmethod
+    def voronoi_initialization(n_circles: int) -> np.ndarray:
+        """Initialize circles using enhanced Voronoi diagram approach with strategic placement"""
+        # Strategy: Mix of Voronoi vertices with strategic corner/edge placements
+
+        # Step 1: Place some circles strategically in corners and along edges
+        # Reserve some slots for corner/edge placements
+        special_positions = []
+        reserved_slots = min(8, n_circles // 4)  # Reserve up to 25% for special positions
+
+        # Add corner positions (4 corners)
+        corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+        for i, (x, y) in enumerate(corners):
+            if i < reserved_slots:
+                # Large radii for corners
+                r = min(x, y, 0.5)
+                special_positions.append([x, y, r])
+
+        # Add edge positions (if we have more reserved slots)
+        edges = [(0.5, 0.1), (0.1, 0.5), (0.5, 0.9), (0.9, 0.5)]
+        for i, (x, y) in enumerate(edges):
+            if len(special_positions) < reserved_slots:
+                # Medium radii for edges
+                r = min(x, y, 1-x, 1-y, 0.3)
+                special_positions.append([x, y, r])
+
+        # Fill remaining with Voronoi vertices
+        remaining_slots = n_circles - len(special_positions)
+        if remaining_slots > 0:
+            # Use better grid-based sampling for Voronoi points to ensure more even distribution
+            points = np.random.rand(remaining_slots * 5, 2)  # More points for better coverage
+
+            # Create Voronoi diagram
+            try:
+                vor = Voronoi(points)
+            except:
+                # Fallback if Voronoi fails
+                return CircleInitializer._simple_grid_initialization(n_circles)
+
+            # Get Voronoi vertices that are inside the unit square
+            vertices = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    vertices.append(vertex)
+
+            # If we don't have enough valid vertices, add random ones
+            while len(vertices) < remaining_slots:
+                vertices.append([np.random.rand(), np.random.rand()])
+
+            # Select first remaining_slots vertices
+            selected_vertices = vertices[:remaining_slots]
+
+            # Create circles with better radius calculation using spatial grid concept
+            additional_circles = []
+            for i, (x, y) in enumerate(selected_vertices):
+                # Calculate minimum distance to other points to determine max radius
+                min_dist = float('inf')
+                for j, (x2, y2) in enumerate(selected_vertices):
+                    if i != j:
+                        d = np.sqrt((x-x2)**2 + (y-y2)**2)
+                        min_dist = min(min_dist, d)
+
+                # Better radius calculation: consider both neighbor distance and boundaries
+                # Use a more aggressive approach but ensure containment
+                potential_radius = min(min_dist/2, x, 1-x, y, 1-y)
+                # Add some randomness to avoid getting stuck in local optima
+                r = max(0.001, potential_radius * (0.8 + np.random.rand() * 0.4))
+                additional_circles.append([x, y, r])
+
+            # Combine special positions with Voronoi circles
+            circles = special_positions + additional_circles
+        else:
+            circles = special_positions
+
+        # Ensure we have exactly n_circles
+        while len(circles) < n_circles:
+            circles.append([0.5, 0.5, 0.01])
+
+        return np.array(circles[:n_circles])
+>>>>>>> REPLACE
+</DIFF>

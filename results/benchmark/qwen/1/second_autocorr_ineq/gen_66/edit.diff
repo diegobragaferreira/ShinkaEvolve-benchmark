@@ -1,0 +1,237 @@
+--- a/original.py
++++ b/original.py
+@@ -1,130 +1,182 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.optimize import differential_evolution
+ from numba import jit
+ import time
+ 
+-def compute_autoconvolution(f_vals):
+-    """Compute autoconvolution g = f*f using NumPy's convolve function for better efficiency"""
+-    # Using 'full' mode to get complete convolution result
+-    # This is equivalent to manual double sum but much faster and numerically stable
+-    g = np.convolve(f_vals, f_vals, mode='full')
++@jit(nopython=True)
++def compute_autoconvolution_numba(f_vals):
++    """Compute autoconvolution using Numba for speed"""
++    n = len(f_vals)
++    # Create convolution result array
++    g = np.zeros(2*n - 1)
++
++    # Compute autoconvolution: g[k] = sum(f[i]*f[k-i])
++    for i in range(n):
++        for j in range(n):
++            k = i + j
++            g[k] += f_vals[i] * f_vals[j]
++
+     return g
+ 
+-def compute_norms(g_vals):
+-    """Compute L2, L1, and L-infinity norms correctly"""
+-    # L2 norm squared (using trapezoidal-like approximation)
+-    l2_squared = 0.0
++@jit(nopython=True)
++def compute_norms_numba(g_vals):
++    """Compute norms efficiently with Numba"""
+     n = len(g_vals)
+-    if n >= 2:
+-        # For piecewise linear integration: integrate over intervals
+-        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1
+-        for i in range(n-1):
+-            y1 = g_vals[i]
+-            y2 = g_vals[i+1]
+-            l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+ 
+-    # L1 norm (sum of absolute values - correctly computed)
++    # L2 norm squared (using trapezoidal approximation for piecewise linear)
++    l2_sq = 0.0
++    for i in range(n-1):
++        h = 1.0  # assuming unit spacing
++        y1 = g_vals[i]
++        y2 = g_vals[i+1]
++        l2_sq += (h/3.0) * (y1*y1 + y1*y2 + y2*y2)
++
++    # L1 norm
+     l1 = 0.0
+-    for val in g_vals:
+-        l1 += abs(val)
++    for i in range(n):
++        l1 += abs(g_vals[i])
+ 
+-    # L-infinity norm (maximum absolute value)
+-    l_inf = np.max(np.abs(g_vals))
++    # L-infinity norm
++    linf = 0.0
++    for i in range(n):
++        if abs(g_vals[i]) > linf:
++            linf = abs(g_vals[i])
+ 
+-    return l2_squared, l1, l_inf
++    return l2_sq, l1, linf
+ 
+ def evaluate_c2(f_vals):
+     """Evaluate C2 for a given set of step heights"""
+     try:
+         # Ensure non-negative values
+         f_vals = np.maximum(f_vals, 0)
+ 
+         # Skip empty sequences
+         if len(f_vals) == 0:
+             return 0.0
+ 
+-        # Compute autoconvolution
+-        g_vals = compute_autoconvolution(f_vals)
++        # Compute autoconvolution using Numba for speed
++        g_vals = compute_autoconvolution_numba(f_vals)
+ 
+         # Compute norms
+-        l2_squared, l1, l_inf = compute_norms(g_vals)
++        l2_squared, l1, l_inf = compute_norms_numba(g_vals)
+ 
+         # Avoid division by zero
+         if l1 <= 1e-15 or l_inf <= 1e-15:
+             return 0.0
+ 
+         # Compute C2
+         c2 = l2_squared / (l1 * l_inf)
+         return c2
+     except Exception as e:
+         return 0.0
+ 
+ def objective_function(x):
+     """Objective function to minimize (negative C2)"""
+     c2 = evaluate_c2(x)
+     return -c2
+ 
+ def sophisticated_initialization(n_steps):
+-    """Create a sophisticated initial population"""
+-    # Create alternating high/low pattern with some randomness
++    """Create a sophisticated initial population with alternating pattern and Gaussian smoothing"""
++    # Create alternating high/low regions with some randomness
+     initial = []
++
++    # Divide into segments for structured alternation
++    segment_size = max(1, n_steps // 10)
++
+     for i in range(n_steps):
+-        if i % 2 == 0:
+-            initial.append(np.random.uniform(0.5, 1.0))
++        segment_idx = i // segment_size
++        if segment_idx % 2 == 0:
++            # High value region (with some randomness)
++            base_val = 1.0 + np.random.random() * 0.5
+         else:
+-            initial.append(np.random.uniform(0.0, 0.2))
++            # Low value region (with some randomness)
++            base_val = 0.1 + np.random.random() * 0.3
++
++        # Apply Gaussian smoothing to avoid sharp transitions
++        if len(initial) >= 2:
++            # Smooth with previous values
++            smooth_factor = 0.7
++            base_val = smooth_factor * base_val + (1-smooth_factor) * 0.5 * (initial[-1] + initial[-2])
++
++        initial.append(max(0, base_val))
++
+     return np.array(initial)
+ 
+ def evolutionary_optimization():
+-    """Use differential evolution to optimize step function"""
+-    # Start with a reasonable initial size
+-    n_steps = 500
++    """Use enhanced differential evolution with multi-start and adaptive settings"""
++    # Start with a larger initial size for better optimization
++    n_steps = 1000
+ 
+     # Define bounds for each parameter (step height)
+-    bounds = [(0.0, 1.0) for _ in range(n_steps)]
++    bounds = [(0.0, 2.0) for _ in range(n_steps)]
+ 
+-    # Use sophisticated initialization
+-    x0 = sophisticated_initialization(n_steps)
++    # Multi-start approach for better exploration
++    best_score = -np.inf
++    best_solution = None
+ 
+-    # Run differential evolution with constraints
+-    result = differential_evolution(
+-        objective_function,
+-        bounds,
+-        seed=42,
+-        maxiter=100,
+-        popsize=10,
+-        mutation=(0.5, 1.0),
+-        recombination=0.7,
+-        disp=False,
+-        tol=1e-6
+-    )
++    # Try multiple random initializations
++    for start_seed in [42, 123, 456]:
++        # Use sophisticated initialization
++        np.random.seed(start_seed)
++        x0 = sophisticated_initialization(n_steps)
+ 
+-    return result.x
++        # Adaptive population size based on problem dimensionality
++        popsize = max(15, min(30, n_steps // 50))  # Adjust based on n_steps
++
++        try:
++            # Run differential evolution with adaptive settings
++            result = differential_evolution(
++                objective_function,
++                bounds,
++                seed=start_seed,
++                maxiter=150,  # Increase iterations
++                popsize=popsize,
++                mutation=(0.5, 1.0),
++                recombination=0.7,
++                disp=False,
++                tol=1e-6,
++                callback=None  # Remove callback to save time
++            )
++
++            # Check if this is better
++            if -result.fun > best_score:
++                best_score = -result.fun
++                best_solution = result.x.copy()
++
++        except Exception:
++            continue  # Skip this run if it fails
++
++    # If we didn't find a solution, fallback to a simple approach
++    if best_solution is None:
++        # Create a basic pattern
++        best_solution = np.ones(n_steps) * 0.5
++
++    return best_solution
+ 
+ def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value using evolutionary optimization."""
++    """Function to construct step-function with high C2 value using enhanced evolutionary optimization."""
+     start_time = time.time()
+ 
+-    # Use evolutionary optimization to find optimal step heights
++    # Use enhanced evolutionary optimization to find optimal step heights
+     optimized_params = evolutionary_optimization()
+ 
+-    # Clip negative values to zero (though DE should maintain bounds)
++    # Clip negative values to zero
+     f_values = np.maximum(optimized_params, 0).tolist()
+ 
+     end_time = time.time()
+ 
+     # Verify the result
+     c2_value = evaluate_c2(optimized_params)
+ 
+     print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+     print(f"C2 achieved: {c2_value}")
+ 
+     return f_values
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

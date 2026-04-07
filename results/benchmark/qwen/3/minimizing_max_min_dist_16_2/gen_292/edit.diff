@@ -1,0 +1,615 @@
+--- a/original.py
++++ b/original.py
+@@ -1,262 +1,378 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import pdist
+-from scipy.optimize import differential_evolution, minimize
++from scipy.spatial import Voronoi, voronoi_plot_2d
++from scipy.spatial.distance import cdist
++from scipy.optimize import differential_evolution
+ import time
+ import random
+-from typing import Tuple, Callable, List, Optional
++from typing import Tuple, List
++import warnings
+ 
+-class PointConfiguration:
+-    """Handles point configuration generation and optimization."""
+-    
+-    def __init__(self):
+-        self.points = None
+-        self.ratio = -np.inf
+-        
+-    def compute_min_max_ratio(self, points: np.ndarray) -> float:
+-        """Compute the ratio of minimum to maximum pairwise distances"""
++class VoronoiEvolutionOptimizer:
++    """Optimizes point distribution using Voronoi-based evolutionary approach."""
++    
++    def __init__(self, n_points=16, seed=42, max_time_seconds=180):
++        self.n_points = n_points
++        self.seed = seed
++        self.max_time_seconds = max_time_seconds
++        np.random.seed(seed)
++        random.seed(seed)
++        
++    def _compute_min_max_ratio(self, points):
++        """Compute the min/max distance ratio for given points."""
+         if len(points) < 2:
+             return 0.0
+-        distances = pdist(points)
+-        max_dist = np.max(distances)
+-        if max_dist == 0:
++            
++        # Use efficient distance computation
++        distances = cdist(points, points)
++        np.fill_diagonal(distances, np.inf)
++        
++        if distances.size == 0:
+             return 0.0
+-        return np.min(distances) / max_dist
+-
+-    def objective_function(self, x_flat: np.ndarray) -> float:
+-        """Objective function to maximize (negative because we minimize)"""
+-        points = x_flat.reshape(-1, 2)
+-        return -self.compute_min_max_ratio(points)
+-
+-    def constraint_function(self, x_flat: np.ndarray) -> np.ndarray:
+-        """Constraint to keep points within unit square"""
+-        points = x_flat.reshape(-1, 2)
+-        violations = np.concatenate([
+-            np.minimum(points[:, 0], 0),
+-            np.minimum(points[:, 1], 0),
+-            np.maximum(points[:, 0] - 1, 0),
+-            np.maximum(points[:, 1] - 1, 0)
+-        ])
+-        return violations
+-
+-class InitializationStrategies:
+-    """Collection of different initialization strategies."""
+-    
+-    @staticmethod
+-    def hexagonal_grid_init() -> np.ndarray:
+-        """Create a proper hexagonal lattice arrangement"""
++            
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max <= 1e-12:
++            return 0.0
++            
++        return d_min / d_max
++    
++    def _generate_voronoi_based_initialization(self):
++        """Create initial configuration using Voronoi-based approach."""
++        # Start with regular hexagonal grid
+         points = []
+-        
+-        # Parameters for hexagonal lattice
+-        hex_spacing = 1.0
+-        row_spacing = hex_spacing * np.sqrt(3) / 2.0
+-        col_spacing = hex_spacing
+-
+-        # Place points in hexagonal pattern (4 rows, 4 columns)
+-        for row in range(4):
+-            for col in range(4):
+-                if len(points) >= 16:
+-                    break
+-                x = col * col_spacing
+-                if row % 2 == 1:
+-                    x += col_spacing / 2.0
+-                y = row * row_spacing
+-                points.append([x, y])
+-
+-        # Convert to numpy array and normalize
+-        points = np.array(points[:16])
+-        
+-        # Normalize to fit within unit square
+-        min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+-        min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+-
+-        if max_x > min_x and max_y > min_y:
+-            scale_x = 1.0 / (max_x - min_x)
+-            scale_y = 1.0 / (max_y - min_y)
+-            scale = min(scale_x, scale_y, 1.0)
+-            
+-            points[:, 0] = (points[:, 0] - min_x) * scale
+-            points[:, 1] = (points[:, 1] - min_y) * scale
+-
+-        # Center the points
+-        center_shift = 0.5 - np.mean(points, axis=0)
+-        points = points + center_shift
+-
+-        # Ensure bounds
+-        points = np.clip(points, 0, 1)
+-
+-        # Apply randomness to break symmetries
+-        np.random.seed(42)
+-        perturbations = np.random.normal(0, 0.005, points.shape)
+-        points += perturbations
+-        points = np.clip(points, 0, 1)
+-        
+-        return points
+-
+-    @staticmethod
+-    def random_init() -> np.ndarray:
+-        """Generate random point configuration"""
+-        np.random.seed(42)
+-        return np.random.rand(16, 2)
+-
+-    @staticmethod
+-    def perturbed_hexagonal_init() -> np.ndarray:
+-        """Create perturbed hexagonal grid"""
+-        points = InitializationStrategies.hexagonal_grid_init()
+-        np.random.seed(42)
+-        points += np.random.normal(0, 0.01, points.shape)
+-        return np.clip(points, 0, 1)
+-
+-    @staticmethod
+-    def adaptive_hexagonal_init() -> np.ndarray:
+-        """Create adaptive hexagonal grid"""
+-        points = InitializationStrategies.hexagonal_grid_init()
+-        
+-        center = np.mean(points, axis=0)
+-        distances_from_center = np.sqrt(np.sum((points - center)**2, axis=1))
+-        max_distance = np.max(distances_from_center)
+-        
+-        if max_distance > 0:
+-            normalized_distances = distances_from_center / max_distance
+-            perturbation_magnitude = 0.01 * (1 - normalized_distances)
+-            
+-            np.random.seed(42)
+-            perturbations = np.random.normal(0, 0.005, points.shape)
+-            perturbations *= perturbation_magnitude.reshape(-1, 1)
+-            points += perturbations
+-        
+-        return np.clip(points, 0, 1)
+-
+-    @staticmethod
+-    def generate_initial_config() -> np.ndarray:
+-        """Generate a better initial configuration"""
+-        points = []
+-        
+-        # Create a 4x4 grid with strategic spacing
++        sqrt3 = np.sqrt(3)
++        spacing_x = 1.0 / 3.0
++        spacing_y = sqrt3 / 4.0
++        
++        # Create 4x4 hexagonal grid
+         for i in range(4):
+             for j in range(4):
+-                x = j * 0.25 + (i % 2) * 0.125 + random.uniform(-0.01, 0.01)
+-                y = i * 0.25 + random.uniform(-0.01, 0.01)
++                if len(points) >= self.n_points:
++                    break
++                    
++                x = j * spacing_x
++                y = i * spacing_y
++                
++                # Offset odd rows for hexagonal pattern
++                if i % 2 == 1:
++                    x += spacing_x / 2
++                
+                 points.append([x, y])
+         
+-        points = np.array(points)
+-        points += np.random.normal(0, 0.005, (16, 2))
+-        return np.clip(points, 0, 1)
+-
+-class OptimizationEngine:
+-    """Main optimization engine with adaptive strategies."""
+-    
+-    def __init__(self):
+-        self.config = PointConfiguration()
+-        self.strategies = [
+-            InitializationStrategies.hexagonal_grid_init,
+-            InitializationStrategies.random_init,
+-            InitializationStrategies.perturbed_hexagonal_init,
+-            InitializationStrategies.adaptive_hexagonal_init,
+-            InitializationStrategies.generate_initial_config
+-        ]
+-        self.bounds = [(0, 1) for _ in range(32)]
+-        
+-    def optimize_with_differential_evolution(self, x0: np.ndarray, restart: int) -> Optional[np.ndarray]:
+-        """Attempt optimization using differential evolution"""
++        points = np.array(points[:self.n_points])
++        
++        # Normalize to [0,1] range
++        x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
++        y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
++        
++        if x_max > x_min and x_max != x_min:
++            points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
++        if y_max > y_min and y_max != y_min:
++            points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
++            
++        # Ensure proper bounds
++        points[:, 0] = np.clip(points[:, 0], 0, 1)
++        points[:, 1] = np.clip(points[:, 1], 0, 1)
++        
++        # Add structured perturbations to break symmetry
++        for i in range(len(points)):
++            # Different noise for different points
++            noise_level = 0.01 + (i % 5) * 0.002
++            points[i, 0] += np.random.normal(0, noise_level * 0.5)
++            points[i, 1] += np.random.normal(0, noise_level * 0.5)
++            
++        points[:, 0] = np.clip(points[:, 0], 0, 1)
++        points[:, 1] = np.clip(points[:, 1], 0, 1)
++        
++        return points
++    
++    def _create_voronoi_representation(self, points):
++        """Create Voronoi representation for the points."""
+         try:
+-            # Adjust parameters based on restart number for efficiency
+-            if restart < 3:
+-                result = differential_evolution(
+-                    self.config.objective_function,
+-                    self.bounds,
+-                    maxiter=500,
+-                    popsize=15,
+-                    tol=1e-8,
+-                    seed=42 + restart,
+-                    callback=None
+-                )
++            # Create Voronoi diagram
++            vor = Voronoi(points)
++            return vor
++        except Exception as e:
++            warnings.warn(f"Voronoi creation failed: {str(e)}")
++            # Fallback to simple point representation
++            return None
++    
++    def _evaluate_voronoi_fitness(self, points):
++        """Evaluate fitness based on Voronoi cell properties."""
++        # Calculate the min/max distance ratio
++        ratio = self._compute_min_max_ratio(points)
++        
++        # Additional geometric considerations from Voronoi structure
++        try:
++            vor = self._create_voronoi_representation(points)
++            if vor is not None:
++                # Penalize highly irregular cells (very large or very small)
++                areas = []
++                for i, region in enumerate(vor.point_region):
++                    if region < len(vor.regions) and vor.regions[region]:
++                        # Calculate area of Voronoi cell
++                        points_in_region = np.array(vor.vertices)[vor.regions[region]]
++                        if len(points_in_region) > 2:
++                            # Simplified area calculation
++                            area = abs(np.cross(points_in_region[:-1] - points_in_region[0], 
++                                              points_in_region[1:] - points_in_region[0]).sum() / 2)
++                            areas.append(area)
++                
++                # Penalize extreme variations in cell sizes
++                if len(areas) > 1:
++                    area_std = np.std(areas)
++                    area_mean = np.mean(areas)
++                    if area_mean > 0:
++                        area_penalty = area_std / area_mean
++                        ratio *= (1.0 - 0.1 * min(area_penalty, 1.0))
++        except:
++            pass
++            
++        return ratio
++    
++    def _generate_voronoi_mutant(self, points, mutation_strength=0.02):
++        """Generate mutant points based on Voronoi structure."""
++        # Start with copy of current points
++        mutant_points = points.copy()
++        
++        # Select subset of points to modify (more points for better diversity)
++        num_modify = max(1, min(len(points) // 3, 5))
++        indices = np.random.choice(len(points), num_modify, replace=False)
++        
++        for idx in indices:
++            # Apply perturbation that considers Voronoi neighbors
++            # Find nearest neighbors to understand local structure
++            distances = cdist([mutant_points[idx]], mutant_points)[0]
++            distances[idx] = np.inf  # Exclude self
++            nearest_idx = np.argmin(distances)
++            
++            # Perturb towards or away from neighbors based on structure
++            if np.random.random() < 0.5:
++                # Move away from nearest neighbor (for dispersion)
++                direction = mutant_points[idx] - mutant_points[nearest_idx]
++                magnitude = np.linalg.norm(direction)
++                if magnitude > 0:
++                    direction /= magnitude
++                    perturbation = direction * np.random.uniform(0, mutation_strength)
++                else:
++                    perturbation = np.random.uniform(-mutation_strength, mutation_strength, 2)
+             else:
+-                result = differential_evolution(
+-                    self.config.objective_function,
+-                    self.bounds,
+-                    maxiter=200,
+-                    popsize=10,
+-                    tol=1e-6,
+-                    seed=42 + restart,
+-                    callback=None
+-                )
+-            
+-            if result.success:
+-                optimized_points = result.x.reshape(-1, 2)
+-                optimized_points = np.clip(optimized_points, 0, 1)
+-                return optimized_points
+-        except Exception:
+-            pass
+-        return None
+-
+-    def optimize_with_local_search(self, x0: np.ndarray) -> Optional[np.ndarray]:
+-        """Attempt optimization using local search method"""
+-        try:
+-            result = minimize(
+-                self.config.objective_function,
+-                x0,
+-                method='SLSQP',
+-                bounds=self.bounds,
+-                constraints={'type': 'ineq', 'fun': self.config.constraint_function},
+-                options={'maxiter': 500, 'ftol': 1e-6, 'eps': 1e-4}
+-            )
+-
+-            if result.success:
+-                return result.x.reshape(-1, 2)
+-        except Exception:
+-            pass
+-        return None
+-
+-    def execute_multi_start_optimization(self) -> np.ndarray:
+-        """Execute multi-start optimization with adaptive strategy selection"""
++                # Move towards nearest neighbor (for clustering if beneficial)
++                direction = mutant_points[nearest_idx] - mutant_points[idx]
++                magnitude = np.linalg.norm(direction)
++                if magnitude > 0:
++                    direction /= magnitude
++                    perturbation = direction * np.random.uniform(0, mutation_strength * 0.5)
++                else:
++                    perturbation = np.random.uniform(-mutation_strength, mutation_strength, 2)
++            
++            # Apply perturbation
++            mutant_points[idx] += perturbation
++            
++            # Ensure bounds
++            mutant_points[idx, 0] = np.clip(mutant_points[idx, 0], 0, 1)
++            mutant_points[idx, 1] = np.clip(mutant_points[idx, 1], 0, 1)
++            
++        return mutant_points
++    
++    def _generate_voronoi_crossover(self, parent1, parent2):
++        """Generate offspring from two Voronoi structures."""
++        # Simple uniform crossover on point positions
++        mask = np.random.random(len(parent1)) < 0.5
++        child = np.where(mask, parent1, parent2).copy()
++        
++        # Add some mutation to ensure diversity
++        mutation_mask = np.random.random(len(child)) < 0.1
++        for i in range(len(child)):
++            if mutation_mask[i]:
++                child[i] += np.random.normal(0, 0.01, 2)
++                child[i, 0] = np.clip(child[i, 0], 0, 1)
++                child[i, 1] = np.clip(child[i, 1], 0, 1)
++                
++        return child
++    
++    def _initialize_population(self, pop_size=30):
++        """Initialize population using Voronoi-based strategies."""
++        population = []
++        
++        # Generate diverse initial configurations
++        for i in range(pop_size):
++            # Mix different initialization strategies
++            if i < 10:  # Hexagonal grid
++                points = self._generate_voronoi_based_initialization()
++            elif i < 20:  # Random with structured elements
++                points = np.random.rand(self.n_points, 2)
++                # Add some structure
++                for j in range(0, self.n_points, 3):
++                    if j < self.n_points:
++                        points[j] = np.random.rand(2) * 0.5 + 0.25  # Center cluster
++            else:  # Random
++                points = np.random.rand(self.n_points, 2)
++            
++            # Add controlled noise based on population index
++            noise_factor = 0.01 * (i % 3 + 1) / 3
++            points += np.random.normal(0, noise_factor, points.shape)
++            points[:, 0] = np.clip(points[:, 0], 0, 1)
++            points[:, 1] = np.clip(points[:, 1], 0, 1)
++            
++            population.append(points)
++            
++        return population
++    
++    def _evolve_population(self, population, fitness_scores):
++        """Evolve the population using tournament selection and genetic operators."""
++        # Sort by fitness (descending)
++        sorted_indices = np.argsort(fitness_scores)[::-1]
++        sorted_population = [population[i] for i in sorted_indices]
++        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
++        
++        # Elitism: keep top 20%
++        elite_count = max(1, len(population) // 5)
++        new_population = sorted_population[:elite_count]
++        
++        # Generate offspring through crossover and mutation
++        while len(new_population) < len(population):
++            # Tournament selection for parents
++            tournament_size = 3
++            parent1_idx = sorted_indices[np.random.choice(tournament_size, replace=False)]
++            parent2_idx = sorted_indices[np.random.choice(tournament_size, replace=False)]
++            
++            parent1 = population[parent1_idx]
++            parent2 = population[parent2_idx]
++            
++            # Crossover
++            child = self._generate_voronoi_crossover(parent1, parent2)
++            
++            # Mutation
++            if np.random.random() < 0.7:  # 70% chance of mutation
++                child = self._generate_voronoi_mutant(child, mutation_strength=0.03)
++            
++            new_population.append(child)
++        
++        return new_population[:len(population)]
++    
++    def _local_refinement(self, points, max_iterations=100):
++        """Perform local refinement using gradient-based approach."""
++        best_points = points.copy()
++        best_ratio = self._compute_min_max_ratio(best_points)
++        
++        # Try several local search strategies
++        for iter_num in range(max_iterations):
++            current_points = best_points.copy()
++            
++            # Try moving each point optimally
++            for i in range(len(current_points)):
++                # Store original point
++                original_point = current_points[i].copy()
++                
++                # Try small perturbations in directions of neighbors
++                distances = cdist([original_point], current_points)[0]
++                distances[i] = np.inf  # Exclude self
++                
++                if len(distances) > 0:
++                    # Find closest neighbors
++                    nearest_indices = np.argsort(distances)[:3]  # Top 3 nearest
++                    
++                    # Try moving away from neighbors to increase minimum distance
++                    avg_neighbor_pos = np.mean(current_points[nearest_indices], axis=0)
++                    direction = original_point - avg_neighbor_pos
++                    distance = np.linalg.norm(direction)
++                    
++                    if distance > 0:
++                        direction /= distance
++                        
++                        # Try perturbation in this direction
++                        test_point = current_points[i] + direction * 0.01
++                        test_point[0] = np.clip(test_point[0], 0, 1)
++                        test_point[1] = np.clip(test_point[1], 0, 1)
++                        
++                        current_points[i] = test_point
++                        new_ratio = self._compute_min_max_ratio(current_points)
++                        
++                        if new_ratio > best_ratio:
++                            best_ratio = new_ratio
++                            best_points = current_points.copy()
++                        else:
++                            current_points[i] = original_point  # Revert
++                
++                # Also try random small perturbations
++                test_point = original_point + np.random.normal(0, 0.005, 2)
++                test_point[0] = np.clip(test_point[0], 0, 1)
++                test_point[1] = np.clip(test_point[1], 0, 1)
++                
++                current_points[i] = test_point
++                new_ratio = self._compute_min_max_ratio(current_points)
++                
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = current_points.copy()
++                else:
++                    current_points[i] = original_point  # Revert
++        
++        return best_points
++    
++    def optimize(self):
++        """Main optimization routine using Voronoi evolutionary approach."""
++        start_time = time.time()
++        
++        # Initialize population
++        population = self._initialize_population(pop_size=30)
++        best_points = None
+         best_ratio = -np.inf
+-        best_points = None
+-        
+-        num_restarts = 5
+-        for restart in range(num_restarts):
+-            # Select initialization strategy
+-            init_func = self.strategies[restart % len(self.strategies)]
+-            points = init_func()
+-
+-            # Flatten for optimization
+-            x0 = points.flatten()
+-
+-            # Try differential evolution first (global search)
+-            optimized_points = self.optimize_with_differential_evolution(x0, restart)
+-            
+-            # If DE failed, try local optimization
+-            if optimized_points is None:
+-                optimized_points = self.optimize_with_local_search(x0)
+-            
+-            # Check results
+-            if optimized_points is not None:
+-                current_ratio = self.config.compute_min_max_ratio(optimized_points)
+-                if current_ratio > best_ratio:
+-                    best_ratio = current_ratio
+-                    best_points = optimized_points.copy()
+-
+-        # Fallback if all optimizations failed
++        
++        # Evolutionary process
++        generations = 50
++        for generation in range(generations):
++            if time.time() - start_time > self.max_time_seconds - 10:
++                break
++                
++            # Evaluate fitness for current population
++            fitness_scores = []
++            for points in population:
++                # Evaluate Voronoi-based fitness
++                ratio = self._evaluate_voronoi_fitness(points)
++                fitness_scores.append(ratio)
++                
++                # Track best solution
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_points = points.copy()
++            
++            # Evolve population
++            population = self._evolve_population(population, fitness_scores)
++            
++            # Periodic local refinement
++            if generation % 5 == 0 and best_points is not None:
++                refined_points = self._local_refinement(best_points.copy())
++                refined_ratio = self._compute_min_max_ratio(refined_points)
++                if refined_ratio > best_ratio:
++                    best_ratio = refined_ratio
++                    best_points = refined_points.copy()
++        
++        # Final local refinement
++        if best_points is not None:
++            final_points = self._local_refinement(best_points.copy())
++            final_ratio = self._compute_min_max_ratio(final_points)
++            if final_ratio > best_ratio:
++                best_points = final_points
++        
++        # Fallback to hexagonal initialization if nothing worked
+         if best_points is None:
+-            points = InitializationStrategies.hexagonal_grid_init()
+-            x0 = points.flatten()
+-            best_points = self.optimize_with_local_search(x0)
+-            
+-            if best_points is None:
+-                # Final fallback to random points
+-                np.random.seed(42)
+-                best_points = np.random.rand(16, 2)
+-
++            best_points = self._generate_voronoi_based_initialization()
++        
+         return best_points
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+-    engine = OptimizationEngine()
+-    return engine.execute_multi_start_optimization()
++    optimizer = VoronoiEvolutionOptimizer(n_points=16, seed=42, max_time_seconds=180)
++    points = optimizer.optimize()
++    return points
+ 
+ # EVOLVE-BLOCK-END

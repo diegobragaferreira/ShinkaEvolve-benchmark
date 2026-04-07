@@ -1,0 +1,572 @@
+<NAME>
+add_multi_scale_spatial_indexing
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SpatialIndexer:
+    """Efficient spatial indexing for circle collision detection"""
+
+    def __init__(self, grid_size: int = 20):
+        self.grid_size = grid_size
+        self.grid_cells = {}
+
+    def _get_grid_key(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert coordinates to grid cell indices"""
+        return (int(x * self.grid_size), int(y * self.grid_size))
+
+    def build_index(self, circles: np.ndarray) -> dict:
+        """Build spatial grid index for efficient neighbor queries"""
+        self.grid_cells.clear()
+        for i, (x, y, r) in enumerate(circles):
+            cell = self._get_grid_key(x, y)
+            if cell not in self.grid_cells:
+                self.grid_cells[cell] = []
+            self.grid_cells[cell].append(i)
+        return self.grid_cells
+
+    def get_neighbors(self, x: float, y: float, radius: float) -> List[int]:
+        """Get candidate neighbors within a search radius"""
+        neighbors = []
+        center_cell = self._get_grid_key(x, y)
+
+        # Check nearby cells in a 3x3 grid around center
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (center_cell[0] + dx, center_cell[1] + dy)
+                if cell in self.grid_cells:
+                    neighbors.extend(self.grid_cells[cell])
+
+        return neighbors
+=======
+class SpatialIndexer:
+    """Efficient spatial indexing for circle collision detection with adaptive resolution"""
+
+    def __init__(self, grid_size: int = 20, adaptive_resolution: bool = True):
+        self.grid_size = grid_size
+        self.adaptive_resolution = adaptive_resolution
+        self.grid_cells = {}
+        self.current_grid_size = grid_size
+
+    def _get_grid_key(self, x: float, y: float, grid_size: int = None) -> Tuple[int, int]:
+        """Convert coordinates to grid cell indices"""
+        if grid_size is None:
+            grid_size = self.current_grid_size
+        return (int(x * grid_size), int(y * grid_size))
+
+    def build_index(self, circles: np.ndarray, density_threshold: float = 0.5) -> dict:
+        """Build spatial grid index for efficient neighbor queries with adaptive resolution"""
+        self.grid_cells.clear()
+
+        # Adaptive grid sizing based on population density
+        if self.adaptive_resolution and len(circles) > 0:
+            # Estimate density from circle radii and positions
+            avg_radius = np.mean(circles[:, 2])
+            area_coverage = len(circles) * np.pi * avg_radius * avg_radius
+
+            # If circles are densely packed, use finer grid
+            # Otherwise, use coarser grid for better performance
+            if area_coverage > 0.1:  # Densely packed scenario
+                self.current_grid_size = max(10, self.grid_size // 2)
+            else:
+                self.current_grid_size = self.grid_size
+
+        # Build index with current grid resolution
+        for i, (x, y, r) in enumerate(circles):
+            cell = self._get_grid_key(x, y)
+            if cell not in self.grid_cells:
+                self.grid_cells[cell] = []
+            self.grid_cells[cell].append(i)
+        return self.grid_cells
+
+    def get_neighbors(self, x: float, y: float, radius: float, use_fine_grid: bool = False) -> List[int]:
+        """Get candidate neighbors within a search radius"""
+        neighbors = []
+
+        # Use fine grid for dense areas, coarse for sparse areas
+        effective_grid_size = self.current_grid_size
+        if use_fine_grid:
+            effective_grid_size = max(10, self.current_grid_size * 2)
+
+        center_cell = self._get_grid_key(x, y, effective_grid_size)
+
+        # Check nearby cells in a 3x3 grid around center
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (center_cell[0] + dx, center_cell[1] + dy)
+                if cell in self.grid_cells:
+                    neighbors.extend(self.grid_cells[cell])
+
+        return neighbors
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_constraint_validator_with_adaptive_indexing
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class ConstraintValidator:
+    """Handles all constraint validation and enforcement"""
+
+    @staticmethod
+    def validate_containment(circles: np.ndarray) -> bool:
+        """Check if all circles are fully contained in the unit square"""
+        for x, y, r in circles:
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+        return True
+
+    @staticmethod
+    def validate_overlap(circles: np.ndarray, spatial_indexer: Optional[SpatialIndexer] = None) -> bool:
+        """Check for circle overlaps using spatial indexing for efficiency"""
+        if len(circles) <= 1:
+            return True
+
+        # Use spatial indexing for efficiency
+        if spatial_indexer is not None:
+            positions = [(x, y) for x, y, r in circles]
+            tree = cKDTree(positions)
+
+            # Check each circle against its neighbors
+            for i, (xi, yi, ri) in enumerate(circles):
+                # Query nearby points with search radius slightly larger than max possible overlap
+                indices = tree.query_ball_point([xi, yi], 2 * (ri + 0.01))
+
+                for j in indices:
+                    if i != j:
+                        xj, yj, rj = circles[j]
+                        distance = math.sqrt((xi - xj)**2 + (yi - yj)**2)
+
+                        if distance < (ri + rj - 1e-8):  # Validity threshold
+                            return False
+        else:
+            # Fallback to brute force for small populations
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    xi, yi, ri = circles[i]
+                    xj, yj, rj = circles[j]
+                    distance = math.sqrt((xi - xj)**2 + (yi - yj)**2)
+
+                    if distance < (ri + rj - 1e-8):
+                        return False
+
+        return True
+
+    @staticmethod
+    def enforce_bounds(circles: np.ndarray) -> np.ndarray:
+        """Enforce boundary constraints by adjusting positions and radii"""
+        result = circles.copy()
+
+        for i in range(len(result)):
+            x, y, r = result[i]
+
+            # Ensure circle fits in the unit square
+            max_radius = min(x, 1-x, y, 1-y)
+            r = min(r, max_radius)
+            r = max(0.001, min(0.49, r))
+
+            # Clamp coordinates to valid range
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+
+            result[i] = [x, y, r]
+
+        return result
+=======
+class ConstraintValidator:
+    """Handles all constraint validation and enforcement"""
+
+    @staticmethod
+    def validate_containment(circles: np.ndarray) -> bool:
+        """Check if all circles are fully contained in the unit square"""
+        for x, y, r in circles:
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+        return True
+
+    @staticmethod
+    def validate_overlap(circles: np.ndarray, spatial_indexer: Optional[SpatialIndexer] = None) -> bool:
+        """Check for circle overlaps using spatial indexing for efficiency"""
+        if len(circles) <= 1:
+            return True
+
+        # Use spatial indexing for efficiency
+        if spatial_indexer is not None:
+            # Determine if we should use fine grid based on population characteristics
+            use_fine_grid = len(circles) > 20  # More densely populated cases
+
+            # Build index with adaptive resolution
+            spatial_indexer.build_index(circles)
+
+            # Check each circle against its neighbors
+            for i, (xi, yi, ri) in enumerate(circles):
+                # Get neighbors with appropriate grid resolution
+                neighbors = spatial_indexer.get_neighbors(xi, yi, ri, use_fine_grid)
+
+                for j in neighbors:
+                    if i != j:
+                        xj, yj, rj = circles[j]
+                        distance = math.sqrt((xi - xj)**2 + (yi - yj)**2)
+
+                        if distance < (ri + rj - 1e-8):  # Validity threshold
+                            return False
+        else:
+            # Fallback to brute force for small populations
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    xi, yi, ri = circles[i]
+                    xj, yj, rj = circles[j]
+                    distance = math.sqrt((xi - xj)**2 + (yi - yj)**2)
+
+                    if distance < (ri + rj - 1e-8):
+                        return False
+
+        return True
+
+    @staticmethod
+    def enforce_bounds(circles: np.ndarray) -> np.ndarray:
+        """Enforce boundary constraints by adjusting positions and radii"""
+        result = circles.copy()
+
+        for i in range(len(result)):
+            x, y, r = result[i]
+
+            # Ensure circle fits in the unit square
+            max_radius = min(x, 1-x, y, 1-y)
+            r = min(r, max_radius)
+            r = max(0.001, min(0.49, r))
+
+            # Clamp coordinates to valid range
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+
+            result[i] = [x, y, r]
+
+        return result
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+modify_fitness_evaluator_with_density_aware_penalty
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class FitnessEvaluator:
+    """Evaluates fitness with adaptive penalty system"""
+
+    def __init__(self, boundary_weight: float = 1000.0, overlap_weight: float = 100000.0):
+        self.boundary_weight = boundary_weight
+        self.overlap_weight = overlap_weight
+        self.penalty_weights = [boundary_weight, overlap_weight]
+
+    def evaluate(self, circles: np.ndarray, spatial_indexer: Optional[SpatialIndexer] = None,
+                generation: int = 0, total_generations: int = 1000) -> float:
+        """Evaluate fitness with constraint penalties and progressive constraint relaxation"""
+        # Progressive constraint relaxation scheme
+        # Early generations: light penalties for exploration
+        # Later generations: strict penalties for feasibility
+        progress = min(1.0, generation / total_generations)
+
+        # Use different penalty weights based on progress
+        if progress < 0.25:  # First 25% of generations - very light penalties
+            current_boundary_weight = self.boundary_weight * 0.1
+            current_overlap_weight = self.overlap_weight * 0.2
+        elif progress < 0.5:  # Next 25% - moderate penalties
+            current_boundary_weight = self.boundary_weight * 0.3
+            current_overlap_weight = self.overlap_weight * 0.5
+        elif progress < 0.75:  # Next 25% - standard penalties
+            current_boundary_weight = self.boundary_weight * 0.7
+            current_overlap_weight = self.overlap_weight * 0.8
+        else:  # Last 25% - full penalties
+            current_boundary_weight = self.boundary_weight
+            current_overlap_weight = self.overlap_weight
+
+        # Check constraints
+        if not ConstraintValidator.validate_containment(circles):
+            penalty = self._compute_boundary_penalty(circles, current_boundary_weight)
+            return -penalty
+
+        if not ConstraintValidator.validate_overlap(circles, spatial_indexer):
+            penalty = self._compute_overlap_penalty(circles, current_overlap_weight)
+            return -penalty
+
+        # Valid solution - return sum of radii
+        return float(np.sum(circles[:, 2]))
+
+    def _compute_boundary_penalty(self, circles: np.ndarray, weight: float) -> float:
+        """Compute penalty based on boundary violations"""
+        penalty = 0.0
+
+        for x, y, r in circles:
+            # Calculate boundary violations
+            if x - r < 0:
+                penalty += abs(x - r) * weight
+            elif x + r > 1:
+                penalty += abs(x + r - 1) * weight
+            if y - r < 0:
+                penalty += abs(y - r) * weight
+            elif y + r > 1:
+                penalty += abs(y + r - 1) * weight
+
+        return penalty
+
+    def _compute_overlap_penalty(self, circles: np.ndarray, weight: float) -> float:
+        """Compute penalty based on overlap violations"""
+        penalty = 0.0
+
+        # Compute actual overlap amounts for more accurate penalty
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
+                if distance < (r1 + r2):
+                    overlap = (r1 + r2 - distance)
+                    penalty += overlap * weight
+
+        return penalty
+=======
+class FitnessEvaluator:
+    """Evaluates fitness with adaptive penalty system"""
+
+    def __init__(self, boundary_weight: float = 1000.0, overlap_weight: float = 100000.0):
+        self.boundary_weight = boundary_weight
+        self.overlap_weight = overlap_weight
+        self.penalty_weights = [boundary_weight, overlap_weight]
+
+    def evaluate(self, circles: np.ndarray, spatial_indexer: Optional[SpatialIndexer] = None,
+                generation: int = 0, total_generations: int = 1000) -> float:
+        """Evaluate fitness with constraint penalties and progressive constraint relaxation"""
+        # Progressive constraint relaxation scheme
+        # Early generations: light penalties for exploration
+        # Later generations: strict penalties for feasibility
+        progress = min(1.0, generation / total_generations)
+
+        # Use different penalty weights based on progress
+        if progress < 0.25:  # First 25% of generations - very light penalties
+            current_boundary_weight = self.boundary_weight * 0.1
+            current_overlap_weight = self.overlap_weight * 0.2
+        elif progress < 0.5:  # Next 25% - moderate penalties
+            current_boundary_weight = self.boundary_weight * 0.3
+            current_overlap_weight = self.overlap_weight * 0.5
+        elif progress < 0.75:  # Next 25% - standard penalties
+            current_boundary_weight = self.boundary_weight * 0.7
+            current_overlap_weight = self.overlap_weight * 0.8
+        else:  # Last 25% - full penalties
+            current_boundary_weight = self.boundary_weight
+            current_overlap_weight = self.overlap_weight
+
+        # Check constraints
+        if not ConstraintValidator.validate_containment(circles):
+            penalty = self._compute_boundary_penalty(circles, current_boundary_weight)
+            return -penalty
+
+        if not ConstraintValidator.validate_overlap(circles, spatial_indexer):
+            penalty = self._compute_overlap_penalty(circles, current_overlap_weight)
+            return -penalty
+
+        # Valid solution - return sum of radii with density-aware fitness bonus
+        base_fitness = float(np.sum(circles[:, 2]))
+
+        # Add bonus for dense packing (more circles packed tightly)
+        if len(circles) > 0:
+            avg_radius = np.mean(circles[:, 2])
+            area_coverage = len(circles) * np.pi * avg_radius * avg_radius
+            # Bonus for higher density packing (but capped to avoid extreme bonuses)
+            density_bonus = min(area_coverage * 10, 1.0)
+            base_fitness += density_bonus
+
+        return base_fitness
+
+    def _compute_boundary_penalty(self, circles: np.ndarray, weight: float) -> float:
+        """Compute penalty based on boundary violations"""
+        penalty = 0.0
+
+        for x, y, r in circles:
+            # Calculate boundary violations
+            if x - r < 0:
+                penalty += abs(x - r) * weight
+            elif x + r > 1:
+                penalty += abs(x + r - 1) * weight
+            if y - r < 0:
+                penalty += abs(y - r) * weight
+            elif y + r > 1:
+                penalty += abs(y + r - 1) * weight
+
+        return penalty
+
+    def _compute_overlap_penalty(self, circles: np.ndarray, weight: float) -> float:
+        """Compute penalty based on overlap violations"""
+        penalty = 0.0
+
+        # Compute actual overlap amounts for more accurate penalty
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
+                if distance < (r1 + r2):
+                    overlap = (r1 + r2 - distance)
+                    penalty += overlap * weight
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_evolutionary_optimizer_with_density_adaptation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evolve(self, n: int) -> np.ndarray:
+        """Main evolution loop with improvements"""
+        # Initialize population
+        population = self.initialize_population(n)
+
+        # Track best fitness
+        best_fitness_history = []
+
+        # Evolution loop
+        for gen in range(self.generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluator.evaluate(individual, self.spatial_indexer, gen, self.generations)
+                fitnesses.append(fitness)
+
+            # Track best
+            best_fitness = max(fitnesses)
+            best_fitness_history.append(best_fitness)
+
+            # Print progress every 25 generations
+            if gen % 25 == 0:
+                print(f"Generation {gen}: Best fitness = {best_fitness:.6f}")
+
+            # Selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individuals (more aggressive elitism)
+            sorted_indices = np.argsort(fitnesses)[::-1][:self.population_size // 4]
+            for idx in sorted_indices:
+                new_population.append(population[idx].copy())
+
+            # Generate offspring
+            while len(new_population) < self.population_size:
+                # Tournament selection (larger tournament for more pressure)
+                parent1 = self._tournament_select(population, fitnesses, tournament_size=8)
+                parent2 = self._tournament_select(population, fitnesses, tournament_size=8)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate(child, gen, self.generations)
+
+                new_population.append(child)
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+        # Return the best individual
+        final_fitnesses = []
+        for individual in population:
+            fitness = self.evaluator.evaluate(individual, self.spatial_indexer, self.generations-1, self.generations)
+            final_fitnesses.append(fitness)
+
+        best_index = np.argmax(final_fitnesses)
+        best_solution = population[best_index]
+
+        return best_solution
+=======
+    def evolve(self, n: int) -> np.ndarray:
+        """Main evolution loop with improvements"""
+        # Initialize population
+        population = self.initialize_population(n)
+
+        # Track best fitness
+        best_fitness_history = []
+
+        # Evolution loop
+        for gen in range(self.generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluator.evaluate(individual, self.spatial_indexer, gen, self.generations)
+                fitnesses.append(fitness)
+
+            # Track best
+            best_fitness = max(fitnesses)
+            best_fitness_history.append(best_fitness)
+
+            # Print progress every 25 generations
+            if gen % 25 == 0:
+                print(f"Generation {gen}: Best fitness = {best_fitness:.6f}")
+
+            # Selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individuals (more aggressive elitism)
+            sorted_indices = np.argsort(fitnesses)[::-1][:self.population_size // 4]
+            for idx in sorted_indices:
+                new_population.append(population[idx].copy())
+
+            # Generate offspring
+            while len(new_population) < self.population_size:
+                # Tournament selection (larger tournament for more pressure)
+                parent1 = self._tournament_select(population, fitnesses, tournament_size=8)
+                parent2 = self._tournament_select(population, fitnesses, tournament_size=8)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate(child, gen, self.generations)
+
+                new_population.append(child)
+
+            # Add density-aware population diversity maintenance
+            if gen % 50 == 0 and gen > 0:
+                self._maintain_diversity(new_population)
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+        # Return the best individual
+        final_fitnesses = []
+        for individual in population:
+            fitness = self.evaluator.evaluate(individual, self.spatial_indexer, self.generations-1, self.generations)
+            final_fitnesses.append(fitness)
+
+        best_index = np.argmax(final_fitnesses)
+        best_solution = population[best_index]
+
+        return best_solution
+
+    def _maintain_diversity(self, population: List[np.ndarray]) -> None:
+        """Maintain population diversity through selective reintroduction"""
+        if len(population) < 10:
+            return
+
+        # Sample a few individuals to potentially reinitialize for diversity
+        sample_size = min(5, len(population) // 4)
+        sample_indices = random.sample(range(len(population)), sample_size)
+
+        for idx in sample_indices:
+            # With some probability, replace with new initialization
+            if random.random() < 0.3:
+                # Reinitialize with different strategy
+                new_individual = self.initialize_population(len(population[0]))[0]
+                population[idx] = new_individual
+>>>>>>> REPLACE
+</DIFF>

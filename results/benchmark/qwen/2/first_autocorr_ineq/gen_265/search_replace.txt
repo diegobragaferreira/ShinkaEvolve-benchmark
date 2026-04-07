@@ -1,0 +1,270 @@
+<NAME>
+enhanced_gradient_descent_and_elite_preservation
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the gradient-based optimization by incorporating adaptive step sizing, elite preservation, and improved gradient computation methods. These enhancements aim to boost convergence speed and solution quality, thereby increasing the combined score. Key changes include:
+1. Implementing adaptive step size that decreases exponentially with iterations
+2. Adding elite preservation to maintain high-performing sequences during optimization
+3. Improving gradient computation with better numerical stability and handling of boundary cases
+4. Increasing exploration in genetic algorithm through varied mutation rates and enhanced diversity mechanisms
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def gradient_based_improvement(sequence, max_iter=50):
+    """Improve sequence using simple gradient estimation."""
+    current_sequence = np.array(sequence, dtype=float)
+    current_fitness = evaluate_sequence(current_sequence)
+    step_size = 0.01
+    eps = 1e-6
+
+    for iteration in range(max_iter):
+        # Estimate gradient using finite differences
+        grad = np.zeros_like(current_sequence)
+        for i in range(len(current_sequence)):
+            # Compute numerical gradient
+            delta = np.zeros_like(current_sequence)
+            delta[i] = eps
+            f_plus = evaluate_sequence(current_sequence + delta)
+            f_minus = evaluate_sequence(current_sequence - delta)
+            grad[i] = (f_plus - f_minus) / (2 * eps)
+
+        # Update step
+        new_sequence = current_sequence + step_size * grad
+
+        # Ensure non-negativity and reasonable bounds
+        new_sequence = np.maximum(0, new_sequence)
+        new_sequence = np.minimum(1000, new_sequence)
+
+        # Check if update improved fitness
+        new_fitness = evaluate_sequence(new_sequence)
+        if new_fitness > current_fitness:
+            current_sequence = new_sequence
+            current_fitness = new_fitness
+        else:
+            # Reduce step size if no improvement
+            step_size *= 0.95
+            if step_size < 1e-6:
+                break
+
+    return current_sequence.tolist(), current_fitness
+=======
+def gradient_based_improvement(sequence, max_iter=50):
+    """Improve sequence using enhanced gradient estimation with adaptive step sizing."""
+    current_sequence = np.array(sequence, dtype=float)
+    current_fitness = evaluate_sequence(current_sequence)
+    eps = 1e-6
+
+    # Track elite sequences for better convergence
+    elite_sequences = []
+    elite_fitness = []
+
+    for iteration in range(max_iter):
+        # Estimate gradient using finite differences with adaptive epsilon
+        grad = np.zeros_like(current_sequence)
+        for i in range(len(current_sequence)):
+            # Determine adaptive epsilon based on element magnitude
+            elem_mag = abs(current_sequence[i])
+            if elem_mag < 1e-6:
+                adaptive_eps = eps
+            else:
+                adaptive_eps = eps * elem_mag
+
+            # Compute numerical gradient
+            delta = np.zeros_like(current_sequence)
+            delta[i] = adaptive_eps
+            f_plus = evaluate_sequence(current_sequence + delta)
+            f_minus = evaluate_sequence(current_sequence - delta)
+            grad[i] = (f_plus - f_minus) / (2 * adaptive_eps)
+
+        # Adaptive step size with exponential decay
+        step_size = 0.01 * np.exp(-iteration / 50.0)
+
+        # Update step
+        new_sequence = current_sequence + step_size * grad
+
+        # Ensure non-negativity and reasonable bounds
+        new_sequence = np.maximum(0, new_sequence)
+        new_sequence = np.minimum(1000, new_sequence)
+
+        # Check if update improved fitness
+        new_fitness = evaluate_sequence(new_sequence)
+        if new_fitness > current_fitness:
+            current_sequence = new_sequence
+            current_fitness = new_fitness
+
+            # Preserve elite sequences
+            if len(elite_sequences) < 5:
+                elite_sequences.append(current_sequence.copy())
+                elite_fitness.append(current_fitness)
+            else:
+                # Replace worst elite if new is better
+                worst_idx = np.argmin(elite_fitness)
+                if current_fitness > elite_fitness[worst_idx]:
+                    elite_sequences[worst_idx] = current_sequence.copy()
+                    elite_fitness[worst_idx] = current_fitness
+        else:
+            # Early stopping if no significant improvement
+            if iteration > 10 and abs(new_fitness - current_fitness) < 1e-10:
+                break
+
+    # Return best sequence among elites or current if none preserved
+    if elite_sequences:
+        best_elite_idx = np.argmax(elite_fitness)
+        return elite_sequences[best_elite_idx].tolist(), elite_fitness[best_elite_idx]
+    else:
+        return current_sequence.tolist(), current_fitness
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def genetic_algorithm_search(max_time_seconds=180):
+    """Search using genetic algorithm approach."""
+    start_time = time.time()
+
+    # Initialize population
+    pop_size = 50
+    population = [generate_random_sequence() for _ in range(pop_size)]
+
+    best_individual = None
+    best_fitness = 0.0
+
+    generation = 0
+    while time.time() - start_time < max_time_seconds:
+        generation += 1
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_sequence(individual)
+            fitness_scores.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = individual.copy()
+
+        # Sort population by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+        # Keep top 10% as elites
+        elite_count = max(1, pop_size // 10)
+        elites = sorted_population[:elite_count]
+
+        # Selection - tournament selection with elitism
+        selected = elites.copy()  # Start with elites
+        remaining_slots = pop_size - elite_count
+
+        for _ in range(remaining_slots):
+            # Tournament selection of 3
+            tournament_indices = random.sample(range(len(sorted_population)), 3)
+            tournament_fitness = [sorted_fitness[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+            selected.append(sorted_population[winner_index].copy())
+
+        # Create new population through crossover and mutation
+        new_population = elites.copy()  # Preserve elites
+        for i in range(elite_count, len(selected), 2):
+            parent1 = selected[i]
+            parent2 = selected[(i + 1) % len(selected)]
+
+            # Crossover
+            child1 = crossover_sequences(parent1, parent2)
+            child2 = crossover_sequences(parent2, parent1)
+
+            # Mutation
+            child1 = mutate_sequence(child1, mutation_rate=0.15, max_mutation=0.3)
+            child2 = mutate_sequence(child2, mutation_rate=0.15, max_mutation=0.3)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:pop_size]
+
+        # Occasionally add some diversity
+        if generation % 10 == 0:
+            for i in range(0, pop_size, 5):
+                if i < pop_size:
+                    population[i] = generate_random_sequence()
+
+    return (best_individual, best_fitness)
+=======
+def genetic_algorithm_search(max_time_seconds=180):
+    """Search using enhanced genetic algorithm approach with adaptive mutation and elite preservation."""
+    start_time = time.time()
+
+    # Initialize population
+    pop_size = 50
+    population = [generate_random_sequence() for _ in range(pop_size)]
+
+    best_individual = None
+    best_fitness = 0.0
+
+    generation = 0
+    while time.time() - start_time < max_time_seconds:
+        generation += 1
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_sequence(individual)
+            fitness_scores.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = individual.copy()
+
+        # Sort population by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+        # Keep top 15% as elites for better preservation
+        elite_count = max(1, pop_size // 7)  # Increased elite percentage
+        elites = sorted_population[:elite_count]
+
+        # Selection - tournament selection with elitism
+        selected = elites.copy()  # Start with elites
+        remaining_slots = pop_size - elite_count
+
+        for _ in range(remaining_slots):
+            # Tournament selection of 3
+            tournament_indices = random.sample(range(len(sorted_population)), 3)
+            tournament_fitness = [sorted_fitness[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+            selected.append(sorted_population[winner_index].copy())
+
+        # Create new population through crossover and mutation with adaptive rates
+        new_population = elites.copy()  # Preserve elites
+
+        # Adaptive mutation rate that decreases over generations
+        adaptive_mutation_rate = max(0.05, 0.2 * np.exp(-generation / 20.0))
+
+        for i in range(elite_count, len(selected), 2):
+            parent1 = selected[i]
+            parent2 = selected[(i + 1) % len(selected)]
+
+            # Crossover
+            child1 = crossover_sequences(parent1, parent2)
+            child2 = crossover_sequences(parent2, parent1)
+
+            # Mutation with adaptive rate and varying magnitudes
+            child1 = mutate_sequence(child1, mutation_rate=adaptive_mutation_rate, max_mutation=0.5)
+            child2 = mutate_sequence(child2, mutation_rate=adaptive_mutation_rate, max_mutation=0.5)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:pop_size]
+
+        # Occasionally add some diversity with increased frequency
+        if generation % 5 == 0:  # More frequent diversity injection
+            for i in range(0, pop_size, 3):  # More aggressive diversity
+                if i < pop_size:
+                    population[i] = generate_random_sequence()
+
+    return (best_individual, best_fitness)
+>>>>>>> REPLACE
+</DIFF>

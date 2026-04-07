@@ -1,0 +1,444 @@
+--- a/original.py
++++ b/original.py
+@@ -1,280 +1,212 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy import signal, optimize
+ from scipy.fft import fft, ifft
+ import random
+ from typing import List, Tuple, Optional
+ import time
++import copy
++from functools import lru_cache
+ 
+ # Constants
+ MAX_TIME_SECONDS = 180
+ MIN_SEQ_LENGTH = 10
+ MAX_SEQ_LENGTH = 1000
+ FFT_THRESHOLD = 100  # Use FFT for sequences longer than this
+-CONVERGENCE_TOLERANCE = 1e-6
+-MAX_STAGNANT_ITERATIONS = 50
+-ELITE_SIZE = 5  # Number of top sequences to preserve
+-
+-def autocorrelation_constant(sequence: List[float]) -> float:
+-    """
+-    Calculates C₁ = 2n * max(b) / (sum(a))^2 where b = a * a (autoconvolution).
+-    Returns the inverse 1/C₁ which we want to maximize.
+-    """
++POPULATION_SIZE = 50
++GENERATIONS = 100
++TOURNAMENT_SIZE = 5
++MUTATION_RATE = 0.1
++ELITE_SIZE = 10  # Number of top sequences to preserve
++
++# Seed for reproducibility
++random.seed(42)
++np.random.seed(42)
++
++@lru_cache(maxsize=1000)
++def cached_autocorrelation_constant(sequence_tuple: tuple) -> float:
++    """
++    Cached version of autocorrelation_constant to speed up repeated evaluations.
++    """
++    sequence = list(sequence_tuple)
+     n = len(sequence)
+     if n == 0:
+         return 0.0
+ 
+     sum_a = sum(sequence)
+     if sum_a < 0.01:
+         return 0.0
+ 
+     # Compute autoconvolution using FFT for efficiency
+     if n > FFT_THRESHOLD:
+         # Use FFT for fast convolution
+         padded_len = 2 * n - 1
+         seq_fft = fft(sequence, padded_len)
+         conv_fft = seq_fft * seq_fft.conj()  # Element-wise multiplication
+         autoconv = ifft(conv_fft).real
+         max_conv = max(autoconv)
+     else:
+         # Direct convolution for small sequences
+         autoconv = signal.convolve(sequence, sequence, mode='full')
+         max_conv = max(autoconv)
+ 
+     # Calculate C₁
+     c1 = (2 * n * max_conv) / (sum_a ** 2)
+     if c1 == 0:
+         return 0.0
+     return 1.0 / c1
+ 
+-def compute_gradient_approximation(sequence: List[float], epsilon_base: float = 1e-4) -> List[float]:
+-    """
+-    Approximate gradient using symmetric finite differences with adaptive epsilon.
+-    """
+-    n = len(sequence)
+-    grad = []
+-    for i in range(n):
+-        # Determine adaptive epsilon based on element magnitude
+-        elem_mag = abs(sequence[i])
+-        if elem_mag < 1e-6:
+-            epsilon = epsilon_base
++def autocorrelation_constant(sequence: List[float]) -> float:
++    """
++    Calculates C₁ = 2n * max(b) / (sum(a))^2 where b = a * a (autoconvolution).
++    Returns the inverse 1/C₁ which we want to maximize.
++    """
++    return cached_autocorrelation_constant(tuple(sequence))
++
++def create_individual(length: int) -> List[float]:
++    """Create a random individual with given length."""
++    return [random.uniform(0.1, 1.0) for _ in range(length)]
++
++def create_population(size: int, min_length: int = MIN_SEQ_LENGTH, max_length: int = MAX_SEQ_LENGTH) -> List[List[float]]:
++    """Create an initial population."""
++    return [create_individual(random.randint(min_length, max_length)) for _ in range(size)]
++
++def fitness(individual: List[float]) -> float:
++    """Evaluate fitness of an individual (inverse of C₁)."""
++    return autocorrelation_constant(individual)
++
++def tournament_selection(population: List[List[float]], fitnesses: List[float], tournament_size: int) -> List[float]:
++    """Select an individual using tournament selection."""
++    tournament_indices = random.sample(range(len(population)), tournament_size)
++    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
++    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
++    return population[winner_index]
++
++def crossover(parent1: List[float], parent2: List[float]) -> Tuple[List[float], List[float]]:
++    """Specialized crossover that respects sequence structure."""
++    # If parents have different lengths, pad the shorter one
++    max_len = max(len(parent1), len(parent2))
++    p1 = parent1 + [0.0] * (max_len - len(parent1))
++    p2 = parent2 + [0.0] * (max_len - len(parent2))
++    
++    # Use uniform crossover
++    child1 = []
++    child2 = []
++    
++    for i in range(max_len):
++        if random.random() < 0.5:
++            child1.append(p1[i])
++            child2.append(p2[i])
+         else:
+-            epsilon = epsilon_base * elem_mag
+-
+-        # Perturb dimension i symmetrically
+-        perturbed_plus = sequence[:]
+-        perturbed_minus = sequence[:]
+-        perturbed_plus[i] += epsilon
+-        perturbed_minus[i] -= epsilon
+-
+-        # Ensure non-negativity
+-        perturbed_plus[i] = max(0, perturbed_plus[i])
+-        perturbed_minus[i] = max(0, perturbed_minus[i])
+-
+-        # Evaluate function
+-        f_plus = autocorrelation_constant(perturbed_plus)
+-        f_minus = autocorrelation_constant(perturbed_minus)
+-
+-        grad_i = (f_plus - f_minus) / (2 * epsilon)
+-        grad.append(grad_i)
+-
+-    return grad
+-
+-def adaptive_step_size(iteration: int, prev_grad_norm: float = 1.0) -> float:
+-    """
+-    Adaptive step size with exponential decay and gradient normalization.
+-    """
+-    # Base step size
+-    base_step = 0.01
+-
+-    # Exponential decay with iteration count
+-    decay_rate = 0.98
+-    base_step *= (decay_rate ** iteration)
+-
+-    # Adjust based on gradient magnitude
+-    if prev_grad_norm > 1e-3:
+-        base_step *= min(1.0, 1.0 / prev_grad_norm)
+-
+-    # Ensure minimum step size
+-    base_step = max(base_step, 1e-6)
+-    return base_step
+-
+-def optimize_sequence_pso(initial_seq: List[float], max_iter: int = 1000) -> List[float]:
+-    """
+-    Enhanced Particle Swarm Optimization for finding good initial sequences.
+-    """
+-    n = len(initial_seq)
+-    num_particles = 100  # Increased particle count for better exploration
+-    max_vel = 0.2  # Increased maximum velocity for faster movement
+-    inertia = 0.7
+-    cognitive_weight = 1.5
+-    social_weight = 1.5
+-
+-    # Hybrid initialization: mix of Gaussian and uniform distributions
+-    particles = []
+-    velocities = []
+-    for _ in range(num_particles):
+-        # Create a diverse initial population
+-        particle = [max(0, random.gauss(1, 0.3)) for _ in range(n)]
+-        particles.append(particle)
+-        velocities.append([random.uniform(-max_vel, max_vel) for _ in range(n)])
+-
+-    # Track best positions
+-    best_positions = [p[:] for p in particles]
+-    best_scores = [autocorrelation_constant(p) for p in particles]
+-
+-    # Global best
+-    global_best_idx = np.argmax(best_scores)
+-    global_best = best_positions[global_best_idx][:]
+-    global_best_score = best_scores[global_best_idx]
+-
+-    # PSO iterations
+-    for iteration in range(max_iter):
+-        if time.time() > start_time + MAX_TIME_SECONDS - 2:
+-            break
+-
+-        for i in range(num_particles):
+-            particle = particles[i]
+-            velocity = velocities[i]
+-
+-            # Update velocity
+-            r1, r2 = random.random(), random.random()
+-            for d in range(n):
+-                cognitive = cognitive_weight * r1 * (best_positions[i][d] - particle[d])
+-                social = social_weight * r2 * (global_best[d] - particle[d])
+-                velocity[d] = inertia * velocity[d] + cognitive + social
+-
+-                # Clamp velocity
+-                velocity[d] = max(-max_vel, min(max_vel, velocity[d]))
+-
+-                # Update position
+-                particle[d] += velocity[d]
+-                particle[d] = max(0, particle[d])  # Enforce non-negativity
+-
+-            # Evaluate new position
+-            score = autocorrelation_constant(particle)
+-
+-            # Update personal best
+-            if score > best_scores[i]:
+-                best_scores[i] = score
+-                best_positions[i] = particle[:]
+-
+-                # Update global best
+-                if score > global_best_score:
+-                    global_best_score = score
+-                    global_best = particle[:]
+-
+-    return global_best
+-
+-def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+-    """
+-    Returns the direction to move into the sequence using enhanced gradient ascent and PSO.
+-    """
+-    n = len(sequence)
+-    if n == 0:
+-        return None
+-
+-    # Check if we have enough elements
+-    if n < MIN_SEQ_LENGTH:
+-        # Expand sequence
+-        extended_seq = sequence + [0.0] * (MIN_SEQ_LENGTH - n)
+-        sequence = extended_seq
+-
+-    # Use PSO to find a good starting point
+-    try:
+-        sequence = optimize_sequence_pso(sequence, 300)
+-    except Exception as e:
+-        pass  # Fallback to regular sequence
+-
+-    # Perform enhanced gradient ascent with elite preservation
+-    current_inv_c1 = autocorrelation_constant(sequence)
+-    prev_grad_norm = 1.0
+-    stagnant_count = 0
+-
+-    # Elite sequences to preserve good solutions
+-    elite_sequences = []
+-    elite_scores = []
+-
+-    # Maximum number of gradient steps
+-    max_steps = 1000
+-    for step in range(max_steps):
+-        if time.time() > start_time + MAX_TIME_SECONDS - 2:
+-            break
+-
+-        # Compute gradient
+-        try:
+-            gradient = compute_gradient_approximation(sequence)
+-        except Exception:
+-            return None
+-
+-        # Normalize gradient
+-        grad_norm = np.linalg.norm(gradient)
+-        if grad_norm < 1e-10:
+-            break
+-
+-        # Compute adaptive step size with exponential decay
+-        step_size = adaptive_step_size(step, prev_grad_norm)
+-
+-        # Update sequence
+-        new_sequence = []
+-        for i in range(len(sequence)):
+-            new_val = sequence[i] + step_size * gradient[i]
+-            new_sequence.append(max(0, new_val))
+-
+-        # Evaluate new sequence
+-        new_inv_c1 = autocorrelation_constant(new_sequence)
+-
+-        if new_inv_c1 > current_inv_c1:
+-            sequence = new_sequence
+-            current_inv_c1 = new_inv_c1
+-            stagnant_count = 0
+-
+-            # Preserve elite sequences
+-            if len(elite_sequences) < ELITE_SIZE:
+-                elite_sequences.append(sequence[:])
+-                elite_scores.append(current_inv_c1)
+-            else:
+-                # Replace the worst elite if new is better
+-                worst_idx = np.argmin(elite_scores)
+-                if current_inv_c1 > elite_scores[worst_idx]:
+-                    elite_sequences[worst_idx] = sequence[:]
+-                    elite_scores[worst_idx] = current_inv_c1
+-        else:
+-            stagnant_count += 1
+-            if stagnant_count > MAX_STAGNANT_ITERATIONS:
+-                # Occasionally restart from elite if stuck
+-                if elite_sequences:
+-                    restart_idx = np.argmax(elite_scores)
+-                    sequence = elite_sequences[restart_idx][:]
+-                    current_inv_c1 = elite_scores[restart_idx]
+-                break
+-
+-        prev_grad_norm = grad_norm
+-
+-    return sequence
++            child1.append(p2[i])
++            child2.append(p1[i])
++    
++    # Trim to original lengths (with some variance)
++    len1 = random.randint(MIN_SEQ_LENGTH, max_len)
++    len2 = random.randint(MIN_SEQ_LENGTH, max_len)
++    
++    child1 = child1[:len1]
++    child2 = child2[:len2]
++    
++    # Ensure minimum length
++    if len(child1) < MIN_SEQ_LENGTH:
++        child1.extend([0.0] * (MIN_SEQ_LENGTH - len(child1)))
++    if len(child2) < MIN_SEQ_LENGTH:
++        child2.extend([0.0] * (MIN_SEQ_LENGTH - len(child2)))
++    
++    return child1, child2
++
++def mutate(individual: List[float], mutation_rate: float = MUTATION_RATE) -> List[float]:
++    """Mutate an individual with careful handling around boundary conditions."""
++    mutated = individual.copy()
++    
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Gaussian mutation for continuous values
++            mutated[i] += random.gauss(0, 0.1 * mutated[i])
++            mutated[i] = max(0.01, mutated[i])  # Ensure non-negativity
++    
++    return mutated
++
++def evolve_generation(population: List[List[float]], fitnesses: List[float]) -> List[List[float]]:
++    """Evolve one generation of the population."""
++    new_population = []
++    
++    # Elitism: keep top individuals
++    elite_indices = np.argsort(fitnesses)[-ELITE_SIZE:]
++    elite = [population[i] for i in elite_indices]
++    new_population.extend(elite)
++    
++    # Generate offspring
++    while len(new_population) < POPULATION_SIZE:
++        parent1 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
++        parent2 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
++        
++        child1, child2 = crossover(parent1, parent2)
++        
++        child1 = mutate(child1)
++        child2 = mutate(child2)
++        
++        new_population.extend([child1, child2])
++    
++    # Trim to exact population size
++    return new_population[:POPULATION_SIZE]
+ 
+ def search_for_best_sequence() -> List[float]:
+-    """
+-    Function to search for the best coefficient sequence.
+-    """
++    """Main search function using genetic algorithm."""
+     global start_time
+     start_time = time.time()
+-
+-    # Start with a random sequence of medium length
+-    n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+-    sequence = [random.uniform(0.1, 1.0) for _ in range(n)]
+-
+-    # Try to improve it
+-    improved_sequence = get_good_direction_to_move_into(sequence)
+-
+-    if improved_sequence is not None and len(improved_sequence) > 0:
+-        return improved_sequence
+-    else:
+-        # Return original if nothing works
+-        return sequence
++    
++    # Initialize population
++    population = create_population(POPULATION_SIZE)
++    
++    best_sequence = None
++    best_fitness = 0.0
++    
++    for generation in range(GENERATIONS):
++        if time.time() - start_time > MAX_TIME_SECONDS - 2:
++            break
++            
++        # Evaluate fitness
++        fitnesses = [fitness(individual) for individual in population]
++        
++        # Track best individual
++        max_fitness_idx = np.argmax(fitnesses)
++        if fitnesses[max_fitness_idx] > best_fitness:
++            best_fitness = fitnesses[max_fitness_idx]
++            best_sequence = copy.deepcopy(population[max_fitness_idx])
++        
++        # Evolve to next generation
++        population = evolve_generation(population, fitnesses)
++    
++    # Final refinement with local search
++    if best_sequence is not None:
++        try:
++            def objective_func(seq_array):
++                return -autocorrelation_constant(seq_array.tolist())
++            
++            x0 = np.array(best_sequence, dtype=float)
++            result = optimize.minimize(
++                objective_func,
++                x0,
++                method='Nelder-Mead',
++                options={'maxiter': 50, 'adaptive': True}
++            )
++            
++            if result.success:
++                refined_seq = np.maximum(result.x, 0)
++                if np.sum(refined_seq) < 0.01:
++                    refined_seq[0] = 0.1
++                refined_fitness = autocorrelation_constant(refined_seq.tolist())
++                if refined_fitness > best_fitness:
++                    best_sequence = refined_seq.tolist()
++        except:
++            pass
++    
++    return best_sequence if best_sequence is not None else [0.1] * 100
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

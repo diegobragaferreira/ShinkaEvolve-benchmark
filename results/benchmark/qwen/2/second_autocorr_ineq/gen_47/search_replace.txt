@@ -1,0 +1,173 @@
+<NAME>
+enhance_peak_positioning
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses logarithmic spacing for peak positioning, but this doesn't fully exploit the mathematical structure that maximizes C2. I'm going to improve the peak positioning strategy by implementing a more sophisticated approach that places peaks at positions that create desirable autoconvolution properties. Specifically, I'll implement a golden ratio-based distribution that tends to produce more evenly spaced and optimally distributed peaks, which should help avoid clustering and create better autoconvolution profiles.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Start with a few well-placed Gaussian peaks
+    # Using logarithmic spacing to distribute peaks effectively
+    n_peaks = 5  # Start with 5 peaks
+
+    # Initialize peaks with positions based on logarithmic distribution
+    # to avoid clustering at edges
+    peak_positions = []
+    for i in range(n_peaks):
+        # Logarithmic distribution to get more points near center and fewer at edges
+        # Map from 0-1 to -0.25 to 0.25 with logarithmic spacing
+        ratio = (i + 1) / (n_peaks + 1)
+        # Apply exponential mapping to concentrate points near center
+        pos = domain_center + (ratio ** 1.5) * domain_width/2
+        if i % 2 == 0:
+            pos = -pos  # Alternate sides to balance
+        peak_positions.append(pos)
+=======
+    # Start with a few well-placed Gaussian peaks
+    # Using golden ratio distribution for better spread and optimal spacing
+    n_peaks = 5  # Start with 5 peaks
+
+    # Initialize peaks with positions based on golden ratio distribution
+    # This provides more even spacing and better distribution than logarithmic
+    peak_positions = []
+    phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+    for i in range(n_peaks):
+        # Use golden ratio to place peaks more optimally
+        # Map to domain [-0.25, 0.25] with better spacing
+        ratio = (i * phi) % 1.0
+        # Apply sine transformation for better center concentration
+        pos = domain_center + np.sin(ratio * np.pi) * domain_width/2
+        if i % 2 == 0:
+            pos = -pos  # Alternate sides to balance
+        peak_positions.append(pos)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+refine_adaptive_adjustments
+</NAME>
+
+<DESCRIPTION>
+The current adaptive adjustments to peak parameters are too simplistic. I'm improving the parameter adjustment strategy by making it more sophisticated and targeted. Instead of uniformly perturbing all parameters, I'll implement a more intelligent approach that focuses on parameter changes that are more likely to improve C2, particularly emphasizing amplitude changes that maintain good autoconvolution profiles while avoiding excessive peakiness that reduces C2.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Apply adaptive adjustments to peak parameters
+        # Only adjust the parameters that are most likely to improve C2
+        for i in range(0, len(peak_params), 3):
+            # Perturb amplitude slightly
+            if i < len(peak_params):  # amplitude
+                old_amp = peak_params[i]
+                # Small random change
+                change_factor = 1.0 + np.random.normal(0, 0.1)
+                new_amp = max(0, old_amp * change_factor)
+                peak_params[i] = new_amp
+
+            # Perturb width slightly
+            if i+2 < len(peak_params):  # width
+                old_width = peak_params[i+2]
+                # Change width by a factor
+                change_factor = 1.0 + np.random.normal(0, 0.1)
+                new_width = max(0.001, old_width * change_factor)
+                peak_params[i+2] = new_width
+=======
+        # Apply adaptive adjustments to peak parameters with more sophisticated strategy
+        # Focus on changes that are more likely to improve C2
+        for i in range(0, len(peak_params), 3):
+            # More sophisticated amplitude adjustment
+            if i < len(peak_params):  # amplitude
+                old_amp = peak_params[i]
+                # Use a combination of normal and uniform distributions
+                # to allow for both small and occasional larger changes
+                if np.random.random() < 0.7:
+                    # Small change around current value
+                    change_factor = 1.0 + np.random.normal(0, 0.05)
+                else:
+                    # Occasionally make larger changes
+                    change_factor = 1.0 + np.random.uniform(-0.2, 0.2)
+                new_amp = max(0, old_amp * change_factor)
+                peak_params[i] = new_amp
+
+            # Width adjustment with more control
+            if i+2 < len(peak_params):  # width
+                old_width = peak_params[i+2]
+                # Make changes that preserve reasonable peak widths
+                if np.random.random() < 0.8:
+                    # Small adjustment
+                    change_factor = 1.0 + np.random.normal(0, 0.05)
+                else:
+                    # Occasionally larger change
+                    change_factor = 1.0 + np.random.uniform(-0.1, 0.1)
+                new_width = max(0.001, old_width * change_factor)
+                peak_params[i+2] = new_width
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_local_optimization_refinement
+</NAME>
+
+<DESCRIPTION>
+I'm adding a local optimization refinement step that applies a more focused optimization technique to the final result. This will use a simple gradient ascent approach on the amplitude and width parameters of the peaks to fine-tune the function for maximum C2. This leverages the fact that we can make small targeted adjustments to peak parameters that significantly impact the resulting autoconvolution profile.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final refinement - use the best parameters found
+    final_func_values = gaussian_peak_function(domain_points, best_params)
+    return final_func_values.tolist()
+=======
+    # Final refinement - use the best parameters found
+    final_func_values = gaussian_peak_function(domain_points, best_params)
+
+    # Apply local optimization refinement to fine-tune peak parameters
+    # Use a simple iterative local search on peak parameters
+    refined_params = list(best_params)
+    best_final_c2 = best_c2
+    max_local_iterations = 100
+
+    for local_iter in range(max_local_iterations):
+        # Store current state
+        current_params = list(refined_params)
+        current_func = gaussian_peak_function(domain_points, current_params)
+        current_c2 = compute_c2(current_func.tolist())
+
+        # Try small adjustments to each parameter
+        for param_idx in range(len(refined_params)):
+            # Save original value
+            original_value = refined_params[param_idx]
+
+            # Try a small positive and negative perturbation
+            step_size = 0.1
+            if param_idx % 3 == 0:  # amplitude
+                step_size = 1.0
+            elif param_idx % 3 == 2:  # width
+                step_size = 0.01
+
+            for direction in [-1, 1]:
+                # Perturb parameter
+                test_params = list(current_params)
+                test_params[param_idx] = max(0, original_value + direction * step_size)
+
+                # Test result
+                test_func = gaussian_peak_function(domain_points, test_params)
+                test_c2 = compute_c2(test_func.tolist())
+
+                if test_c2 > best_final_c2:
+                    best_final_c2 = test_c2
+                    refined_params = list(test_params)
+
+        # If no improvement in this cycle, stop early
+        if refined_params == current_params:
+            break
+
+    # Return refined function
+    final_func_values = gaussian_peak_function(domain_points, refined_params)
+    return final_func_values.tolist()
+>>>>>>> REPLACE
+</DIFF>

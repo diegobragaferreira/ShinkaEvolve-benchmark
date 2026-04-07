@@ -1,0 +1,327 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import KDTree
+from scipy.spatial.distance import cdist
+import time
+import random
+from typing import Tuple, Optional
+
+class PhysicsGuidedEvolutionOptimizer:
+    def __init__(self, n_circles: int = 21):
+        self.n_circles = n_circles
+        self.container_width = 1.0
+        self.container_height = 1.0
+        self.boundary_strength = 100.0
+        self.repulsion_strength = 50.0
+        self.stabilization_threshold = 0.001
+        self.max_physics_steps = 1000
+        self.min_radius = 0.001
+        
+    def estimate_optimal_container_dimensions(self) -> Tuple[float, float]:
+        """Estimate optimal container dimensions based on circle count and perimeter constraint."""
+        # For perimeter = 4, width + height = 2
+        # Try different aspect ratios to find one that works well for 21 circles
+        
+        best_ratio = 1.0
+        best_efficiency = 0.0
+        
+        # Test aspect ratios from 0.5 to 2.0
+        ratios = np.linspace(0.5, 2.0, 20)
+        
+        for ratio in ratios:
+            width = 1.0
+            height = width / ratio
+            
+            if width + height <= 2.0:
+                # Estimate packing efficiency - for 21 circles in a rectangle
+                # We want to maximize total radius sum, so we look for good utilization
+                area_ratio = (self.n_circles * 0.05**2 * np.pi) / (width * height)
+                
+                # Prefer ratios that allow for better packing
+                efficiency = area_ratio * (0.5 + 0.5 * np.exp(-abs(ratio - 1.0)))  # Center around 1
+                
+                if efficiency > best_efficiency:
+                    best_efficiency = efficiency
+                    best_ratio = ratio
+                    
+        container_width = 1.0
+        container_height = container_width / best_ratio
+        
+        return container_width, container_height
+    
+    def setup_initial_configuration(self, width: float, height: float) -> np.ndarray:
+        """Setup initial circle configuration using geometric principles."""
+        circles = np.zeros((self.n_circles, 3))
+        
+        # Determine grid configuration that works well with rectangular container
+        # Use golden ratio based grid for better distribution
+        phi = (1 + np.sqrt(5)) / 2
+        cols = max(3, int(np.ceil(np.sqrt(self.n_circles / phi))))
+        rows = max(3, int(np.ceil(self.n_circles / cols)))
+        
+        # Ensure reasonable grid
+        cols = min(cols, 10)
+        rows = min(rows, 10)
+        
+        # Adjust grid to container dimensions
+        cell_width = width / (cols + 1)
+        cell_height = height / (rows + 1)
+        
+        # Place circles on staggered grid (hexagonal packing pattern)
+        idx = 0
+        for i in range(rows):
+            offset = (i % 2) * (cell_width / 2)
+            for j in range(cols):
+                if idx >= self.n_circles:
+                    break
+                x = (j + 1) * cell_width + offset + np.random.uniform(-cell_width*0.1, cell_width*0.1)
+                y = (i + 1) * cell_height + np.random.uniform(-cell_height*0.1, cell_height*0.1)
+                
+                # Clamp to bounds
+                x = np.clip(x, 0.01, width - 0.01)
+                y = np.clip(y, 0.01, height - 0.01)
+                
+                # Initial radii - start with reasonable values
+                r = min(cell_width, cell_height) * 0.25
+                
+                circles[idx, 0] = x
+                circles[idx, 1] = y
+                circles[idx, 2] = r
+                
+                idx += 1
+                
+            if idx >= self.n_circles:
+                break
+        
+        # Fill remaining circles if needed
+        if idx < self.n_circles:
+            for i in range(idx, self.n_circles):
+                x = np.random.uniform(0.01, width - 0.01)
+                y = np.random.uniform(0.01, height - 0.01)
+                r = np.random.uniform(0.01, min(width, height) * 0.05)
+                circles[i, 0] = x
+                circles[i, 1] = y
+                circles[i, 2] = r
+        
+        # Normalize total radius to reasonable starting value
+        total_radius = np.sum(circles[:, 2])
+        if total_radius > 0:
+            scaling = 0.5 / total_radius
+            circles[:, 2] *= scaling
+            
+        return circles
+    
+    def check_constraints(self, circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping."""
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Check boundary constraints
+        for i in range(self.n_circles):
+            x, y, r = positions[i, 0], positions[i, 1], radii[i]
+            if x - r < 0 or x + r > self.container_width or y - r < 0 or y + r > self.container_height:
+                return False
+        
+        # Check overlap constraints using efficient spatial indexing
+        tree = KDTree(positions)
+        pairs = tree.query_pairs(radii.sum() * 2)
+        
+        for i, j in pairs:
+            dx = positions[i, 0] - positions[j, 0]
+            dy = positions[i, 1] - positions[j, 1]
+            distance = np.sqrt(dx*dx + dy*dy)
+            if distance < (radii[i] + radii[j]):
+                return False
+                
+        return True
+    
+    def compute_forces(self, circles: np.ndarray) -> np.ndarray:
+        """Compute net forces acting on each circle."""
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        forces = np.zeros_like(positions)
+        
+        # Boundary forces
+        for i in range(self.n_circles):
+            x, y, r = positions[i, 0], positions[i, 1], radii[i]
+            
+            # Left boundary
+            if x - r < 0:
+                forces[i, 0] += self.boundary_strength * (0 - (x - r))
+            # Right boundary
+            if x + r > self.container_width:
+                forces[i, 0] += self.boundary_strength * (self.container_width - (x + r))
+            # Bottom boundary
+            if y - r < 0:
+                forces[i, 1] += self.boundary_strength * (0 - (y - r))
+            # Top boundary
+            if y + r > self.container_height:
+                forces[i, 1] += self.boundary_strength * (self.container_height - (y + r))
+        
+        # Repulsion forces
+        # Use spatial indexing for efficiency
+        tree = KDTree(positions)
+        neighbors = tree.query_ball_tree(tree, 2 * max(radii) if len(radii) > 0 else 1.0)
+        
+        for i in range(self.n_circles):
+            for j_idx in neighbors[i]:
+                j = j_idx
+                if i != j:
+                    dx = positions[i, 0] - positions[j, 0]
+                    dy = positions[i, 1] - positions[j, 1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    
+                    if distance < (radii[i] + radii[j]) and distance > 1e-8:
+                        force_magnitude = self.repulsion_strength * (1.0 - distance/(radii[i] + radii[j]))
+                        fx = force_magnitude * dx / distance
+                        fy = force_magnitude * dy / distance
+                        forces[i, 0] += fx
+                        forces[i, 1] += fy
+        
+        return forces
+    
+    def physics_refinement(self, circles: np.ndarray, dt: float = 0.01, 
+                          max_steps: int = 500) -> np.ndarray:
+        """Perform physics-based refinement."""
+        positions = circles[:, :2].copy()
+        radii = circles[:, 2].copy()
+        
+        prev_positions = positions.copy()
+        stable_count = 0
+        
+        for step in range(max_steps):
+            forces = self.compute_forces(circles)
+            
+            # Update positions with forces
+            for i in range(self.n_circles):
+                # Apply force
+                positions[i, 0] += forces[i, 0] * dt
+                positions[i, 1] += forces[i, 1] * dt
+                
+                # Keep within bounds
+                positions[i, 0] = np.clip(positions[i, 0], radii[i], self.container_width - radii[i])
+                positions[i, 1] = np.clip(positions[i, 1], radii[i], self.container_height - radii[i])
+            
+            # Check for stabilization
+            pos_change = np.mean(np.linalg.norm(positions - prev_positions, axis=1))
+            if pos_change < self.stabilization_threshold:
+                stable_count += 1
+                if stable_count > 20:
+                    break
+            else:
+                stable_count = 0
+                
+            prev_positions = positions.copy()
+            
+        # Update circles with refined positions
+        circles[:, :2] = positions
+        return circles
+    
+    def optimize_parameters(self) -> Tuple[float, float, float, float]:
+        """Use evolutionary approach to optimize physics parameters."""
+        # Parameters to optimize: boundary_strength, repulsion_strength, container_width, container_height
+        best_params = [100.0, 50.0, 1.0, 1.0]  # Initial guess
+        best_score = -float('inf')
+        
+        # Simple evolution - try several parameter combinations
+        for _ in range(20):
+            # Perturb parameters slightly
+            boundary_strength = max(10.0, best_params[0] * np.random.uniform(0.8, 1.2))
+            repulsion_strength = max(10.0, best_params[1] * np.random.uniform(0.8, 1.2))
+            
+            # Test different container aspect ratios
+            ratio = np.random.uniform(0.5, 2.0)
+            width = 1.0
+            height = width / ratio
+            
+            # Check if this configuration is feasible under perimeter constraint
+            if width + height > 2.0:
+                continue
+                
+            # Test these parameters by creating a sample solution
+            temp_circles = self.setup_initial_configuration(width, height)
+            temp_circles[:, 2] *= 0.5  # Scale down for testing
+            
+            # Apply some physics refinement
+            temp_circles = self.physics_refinement(temp_circles, dt=0.005, max_steps=100)
+            
+            # Check validity and score
+            if self.check_constraints(temp_circles):
+                score = np.sum(temp_circles[:, 2])
+                if score > best_score:
+                    best_score = score
+                    best_params = [boundary_strength, repulsion_strength, width, height]
+        
+        return tuple(best_params)
+    
+    def optimize_single_run(self) -> np.ndarray:
+        """Run single optimization pass with optimized parameters."""
+        # Get optimized parameters
+        params = self.optimize_parameters()
+        self.boundary_strength, self.repulsion_strength, self.container_width, self.container_height = params
+        
+        # Setup initial configuration
+        circles = self.setup_initial_configuration(self.container_width, self.container_height)
+        
+        # Perform multiple rounds of physics refinement with adaptive time steps
+        dt_schedule = [0.02, 0.01, 0.005, 0.002]
+        
+        for dt in dt_schedule:
+            circles = self.physics_refinement(circles, dt=dt, max_steps=self.max_physics_steps//len(dt_schedule))
+            
+        # Final cleanup and validation
+        circles = self.physics_refinement(circles, dt=0.001, max_steps=200)
+        
+        # Ensure constraints are met
+        if not self.check_constraints(circles):
+            # Fallback: simple random placement with constraints
+            circles = self.setup_initial_configuration(self.container_width, self.container_height)
+            
+        return circles
+    
+    def run_evolution(self, max_runs: int = 10) -> np.ndarray:
+        """Run multiple optimization runs and select best."""
+        best_circles = None
+        best_sum = -float('inf')
+        
+        for run in range(max_runs):
+            try:
+                circles = self.optimize_single_run()
+                current_sum = np.sum(circles[:, 2])
+                
+                if current_sum > best_sum:
+                    best_sum = current_sum
+                    best_circles = circles.copy()
+                    
+            except Exception as e:
+                # Skip failed runs
+                continue
+                
+        return best_circles if best_circles is not None else self.setup_initial_configuration(1.0, 1.0)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    
+    Uses physics-guided evolutionary optimization approach.
+    
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set seed for determinism
+    random.seed(42)
+    np.random.seed(42)
+    
+    optimizer = PhysicsGuidedEvolutionOptimizer(n_circles=21)
+    circles = optimizer.run_evolution(max_runs=8)
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

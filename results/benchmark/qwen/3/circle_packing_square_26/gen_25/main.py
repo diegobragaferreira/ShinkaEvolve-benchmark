@@ -1,0 +1,294 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial.distance import cdist
+from deap import base, creator, tools, algorithms
+import time
+
+# Global constants
+POPULATION_SIZE = 100
+NUM_GENERATIONS = 200
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+GRID_SIZE = 20  # Grid size for spatial indexing
+
+# Spatial indexing structure
+class SpatialIndex:
+    def __init__(self, grid_size=GRID_SIZE):
+        self.grid_size = grid_size
+        self.grid = {}
+
+    def _get_cell(self, x, y):
+        """Get cell indices for given coordinates"""
+        return (int(x * self.grid_size), int(y * self.grid_size))
+
+    def insert(self, idx, x, y, r):
+        """Insert circle into spatial index"""
+        cell = self._get_cell(x, y)
+        if cell not in self.grid:
+            self.grid[cell] = []
+        self.grid[cell].append((idx, x, y, r))
+
+    def get_candidates(self, x, y, r):
+        """Get candidate circles that might overlap with given circle"""
+        candidates = []
+        cell = self._get_cell(x, y)
+
+        # Check neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                if neighbor_cell in self.grid:
+                    candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+
+    def clear(self):
+        """Clear spatial index"""
+        self.grid.clear()
+
+def check_containment(circles):
+    """Check if all circles are contained within unit square."""
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    return True
+
+def check_overlap(circles, spatial_index=None):
+    """Check if there are overlaps between circles."""
+    if spatial_index is None:
+        # Brute force method for small populations
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                if dist_sq < (r1 + r2)**2:
+                    return False
+        return True
+    else:
+        # Spatial index method
+        n = len(circles)
+        for i in range(n):
+            x, y, r = circles[i]
+            candidates = spatial_index.get_candidates(x, y, r)
+            for j, x2, y2, r2 in candidates:
+                if i != j:
+                    dist_sq = (x - x2)**2 + (y - y2)**2
+                    if dist_sq < (r + r2)**2:
+                        return False
+        return True
+
+def evaluate_fitness(circles):
+    """Evaluate fitness of a circle configuration."""
+    if not check_containment(circles):
+        return -1000000  # Large negative penalty
+    if not check_overlap(circles):
+        return -1000000  # Large negative penalty
+
+    # Sum of radii as objective function
+    total_radius = sum(circles[:, 2])
+    return total_radius
+
+def initialize_population(pop_size, n_circles):
+    """Initialize population with good starting configurations."""
+    population = []
+
+    # Try several initialization strategies
+    for _ in range(pop_size):
+        # Strategy 1: Random placement with careful radius assignment
+        circles = np.zeros((n_circles, 3))
+
+        # Try to place circles avoiding overlap
+        max_attempts = 1000
+        attempts = 0
+        success = False
+
+        while attempts < max_attempts and not success:
+            # Initialize with random positions and small radii
+            for i in range(n_circles):
+                valid = False
+                max_tries = 100
+
+                for _ in range(max_tries):
+                    # Generate random position
+                    x = random.uniform(0.05, 0.95)
+                    y = random.uniform(0.05, 0.95)
+                    r = random.uniform(0.01, 0.15)
+
+                    # Check if this circle fits
+                    if x - r >= 0 and x + r <= 1 and y - r >= 0 and y + r <= 1:
+                        # Check overlap with existing circles
+                        overlap = False
+                        for j in range(i):
+                            x_prev, y_prev, r_prev = circles[j]
+                            dist_sq = (x - x_prev)**2 + (y - y_prev)**2
+                            if dist_sq < (r + r_prev)**2:
+                                overlap = True
+                                break
+
+                        if not overlap:
+                            circles[i] = [x, y, r]
+                            valid = True
+                            break
+
+                if not valid:
+                    break
+
+            if i == n_circles - 1:
+                success = True
+            else:
+                # Reset and try again
+                circles = np.zeros((n_circles, 3))
+                attempts += 1
+
+        if not success:
+            # Fallback: uniform grid initialization
+            rows = cols = int(np.ceil(np.sqrt(n_circles)))
+            spacing_x = 1.0 / (cols + 1)
+            spacing_y = 1.0 / (rows + 1)
+            radius = min(spacing_x, spacing_y) * 0.4
+
+            for i in range(n_circles):
+                row = i // cols
+                col = i % cols
+                if row < rows and col < cols:
+                    x = (col + 1) * spacing_x
+                    y = (row + 1) * spacing_y
+                    circles[i] = [x, y, radius]
+
+        population.append(circles)
+
+    return population
+
+def mutate_individual(individual, indpb=0.1):
+    """Mutate an individual with probability indpb for each gene."""
+    individual = individual.copy()
+    n_circles = len(individual)
+
+    for i in range(n_circles):
+        if random.random() < indpb:
+            # Mutate position (x,y) and radius (r)
+            x, y, r = individual[i]
+
+            # Small perturbation
+            x += random.uniform(-0.02, 0.02)
+            y += random.uniform(-0.02, 0.02)
+            r += random.uniform(-0.01, 0.01)
+
+            # Keep within bounds
+            x = max(0.001, min(0.999, x))
+            y = max(0.001, min(0.999, y))
+            r = max(0.001, min(0.499, r))
+
+            individual[i] = [x, y, r]
+
+    return individual,
+
+def crossover_individuals(parent1, parent2):
+    """Create offspring from two parents using uniform crossover."""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+
+    # Uniform crossover
+    for i in range(len(parent1)):
+        if random.random() < 0.5:
+            child1[i], child2[i] = child2[i], child1[i]
+
+    return child1, child2
+
+def optimize_circles_evolutionary():
+    """Evolutionary optimization for circle packing."""
+    n_circles = 26
+    pop_size = POPULATION_SIZE
+    generations = NUM_GENERATIONS
+
+    # Initialize population
+    population = initialize_population(pop_size, n_circles)
+
+    # Track best solution
+    best_fitness_history = []
+
+    # Evolution loop
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitnesses = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitnesses.append(fitness)
+
+        # Track best fitness
+        best_fitness = max(fitnesses)
+        best_fitness_history.append(best_fitness)
+
+        # Print progress
+        if gen % 20 == 0:
+            print(f"Generation {gen}: Best fitness = {best_fitness:.6f}")
+
+        # Selection (tournament selection)
+        selected = []
+        for _ in range(pop_size):
+            tournament_indices = random.sample(range(pop_size), TOURNAMENT_SIZE)
+            tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+            winner_idx = tournament_indices[tournament_fitnesses.index(max(tournament_fitnesses))]
+            selected.append(population[winner_idx].copy())
+
+        # Crossover and mutation
+        new_population = []
+        for i in range(0, pop_size, 2):
+            parent1 = selected[i]
+            parent2 = selected[i+1] if i+1 < pop_size else selected[0]
+
+            # Crossover
+            if random.random() < CROSSOVER_RATE:
+                child1, child2 = crossover_individuals(parent1, parent2)
+            else:
+                child1, child2 = parent1, parent2
+
+            # Mutation
+            child1 = mutate_individual(child1)[0]
+            child2 = mutate_individual(child2)[0]
+
+            # Add to new population
+            new_population.extend([child1, child2])
+
+        # Keep only valid individuals (or just keep what we have since mutation keeps valid)
+        population = new_population[:pop_size]
+
+    # Find best solution
+    best_fitness = -float('inf')
+    best_individual = None
+
+    for individual in population:
+        fitness = evaluate_fitness(individual)
+        if fitness > best_fitness:
+            best_fitness = fitness
+            best_individual = individual
+
+    print(f"\nFinal best fitness: {best_fitness:.6f}")
+    return best_individual
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    start_time = time.time()
+
+    # Run optimization
+    circles = optimize_circles_evolutionary()
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    print(f"Execution time: {eval_time:.2f} seconds")
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

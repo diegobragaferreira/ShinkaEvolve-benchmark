@@ -1,0 +1,305 @@
+<NAME>
+add_spherical_geometry_refinement
+</NAME>
+
+<DESCRIPTION>
+This improvement focuses on enhancing the spherical geometry aspects of the optimization. The key insight is that for maximizing min/max distance ratios, we should leverage spherical geometry more explicitly. I'm adding a dedicated spherical geometry refinement phase that:
+1. Converts points to unit sphere representation
+2. Applies spherical Voronoi-based optimization
+3. Maps back to cubic space
+4. Uses more sophisticated spherical distance computations
+
+This addresses the fact that current implementations may not fully exploit the geometric structure of the optimal solutions which tend to be distributed on or near the surface of a sphere.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_differential_evolution(objective_func, bounds, initial_popsize=25, maxiter=300):
+        """Enhanced differential evolution with adaptive population sizing and early stopping"""
+        current_popsize = initial_popsize
+        prev_best = -np.inf
+        stagnation_count = 0
+        improvement_threshold = 1e-8
+        min_improvement = 1e-12
+
+        # Track improvement for early stopping
+        recent_improvements = []
+
+        for iteration in range(maxiter // 10):  # Reduced iterations per batch
+            # Adjust population size based on convergence
+            if stagnation_count > 3 and current_popsize < 35:
+                current_popsize = min(current_popsize + 5, 35)
+
+            # Run differential evolution with current parameters
+            try:
+                result = differential_evolution(
+                    objective_func,
+                    bounds,
+                    seed=42 + iteration,
+                    maxiter=10,  # Fewer iterations per batch
+                    popsize=current_popsize,
+                    tol=1e-9,   # Tighter tolerance
+                    mutation=(0.7, 1.0),  # More aggressive exploration
+                    recombination=0.85,   # Higher recombination for better exploration
+                    disp=False
+                )
+            except:
+                # Fall back to smaller population if needed
+                try:
+                    result = differential_evolution(
+                        objective_func,
+                        bounds,
+                        seed=42 + iteration,
+                        maxiter=10,
+                        popsize=max(5, current_popsize - 5),
+                        tol=1e-9,
+                        mutation=(0.7, 1.0),
+                        recombination=0.85,
+                        disp=False
+                    )
+                except:
+                    # Last resort - use basic differential evolution
+                    result = differential_evolution(
+                        objective_func,
+                        bounds,
+                        seed=42 + iteration,
+                        maxiter=10,
+                        popsize=10,
+                        tol=1e-9,
+                        mutation=(0.7, 1.0),
+                        recombination=0.7,
+                        disp=False
+                    )
+
+            # Check for improvement
+            current_best = -result.fun
+            improvement = current_best - prev_best
+
+            recent_improvements.append(improvement)
+            if len(recent_improvements) > 5:
+                recent_improvements.pop(0)
+
+            # Early stopping if improvement is minimal
+            if len(recent_improvements) == 5 and all(abs(impr) < min_improvement for impr in recent_improvements):
+                break
+
+            if improvement > improvement_threshold:
+                stagnation_count = 0
+            else:
+                stagnation_count += 1
+
+            prev_best = current_best
+
+        return result
+=======
+    def spherical_geometry_refinement(points):
+        """Apply refinement using explicit spherical geometry principles"""
+        def spherical_objective(x):
+            # Convert to unit sphere representation
+            points_sphere = x.reshape(-1, 3)
+
+            # Normalize to unit sphere
+            norms = np.linalg.norm(points_sphere, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1, norms)
+            normalized = points_sphere / norms
+
+            # Calculate great-circle distances on unit sphere
+            dot_product = np.dot(normalized, normalized.T)
+            # Clamp to avoid numerical errors
+            dot_product = np.clip(dot_product, -1.0, 1.0)
+            angular_distances = np.arccos(dot_product)
+
+            # Set diagonal to infinity to exclude self-distances
+            np.fill_diagonal(angular_distances, np.inf)
+
+            # Convert to chordal distances (straight-line distances through sphere)
+            chordal_distances = 2 * np.sin(angular_distances / 2)
+            np.fill_diagonal(chordal_distances, np.inf)
+
+            min_dist = np.min(chordal_distances)
+            max_dist = np.max(chordal_distances)
+
+            if max_dist == 0:
+                return -np.inf
+
+            return -(min_dist / max_dist)
+
+        # First try to optimize using this spherical objective
+        try:
+            x0_spherical = points.flatten()
+            bounds_spherical = [(0, 1)] * 42
+
+            result = minimize(
+                spherical_objective,
+                x0_spherical,
+                method='L-BFGS-B',
+                bounds=bounds_spherical,
+                options={'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 3)
+                # Ensure they're in valid bounds
+                refined_points = np.clip(refined_points, 0, 1)
+                return refined_points
+        except:
+            pass
+
+        return points
+
+    def adaptive_differential_evolution(objective_func, bounds, initial_popsize=25, maxiter=300):
+        """Enhanced differential evolution with adaptive population sizing and early stopping"""
+        current_popsize = initial_popsize
+        prev_best = -np.inf
+        stagnation_count = 0
+        improvement_threshold = 1e-8
+        min_improvement = 1e-12
+
+        # Track improvement for early stopping
+        recent_improvements = []
+
+        for iteration in range(maxiter // 10):  # Reduced iterations per batch
+            # Adjust population size based on convergence
+            if stagnation_count > 3 and current_popsize < 35:
+                current_popsize = min(current_popsize + 5, 35)
+
+            # Run differential evolution with current parameters
+            try:
+                result = differential_evolution(
+                    objective_func,
+                    bounds,
+                    seed=42 + iteration,
+                    maxiter=10,  # Fewer iterations per batch
+                    popsize=current_popsize,
+                    tol=1e-9,   # Tighter tolerance
+                    mutation=(0.7, 1.0),  # More aggressive exploration
+                    recombination=0.85,   # Higher recombination for better exploration
+                    disp=False
+                )
+            except:
+                # Fall back to smaller population if needed
+                try:
+                    result = differential_evolution(
+                        objective_func,
+                        bounds,
+                        seed=42 + iteration,
+                        maxiter=10,
+                        popsize=max(5, current_popsize - 5),
+                        tol=1e-9,
+                        mutation=(0.7, 1.0),
+                        recombination=0.85,
+                        disp=False
+                    )
+                except:
+                    # Last resort - use basic differential evolution
+                    result = differential_evolution(
+                        objective_func,
+                        bounds,
+                        seed=42 + iteration,
+                        maxiter=10,
+                        popsize=10,
+                        tol=1e-9,
+                        mutation=(0.7, 1.0),
+                        recombination=0.7,
+                        disp=False
+                    )
+
+            # Check for improvement
+            current_best = -result.fun
+            improvement = current_best - prev_best
+
+            recent_improvements.append(improvement)
+            if len(recent_improvements) > 5:
+                recent_improvements.pop(0)
+
+            # Early stopping if improvement is minimal
+            if len(recent_improvements) == 5 and all(abs(impr) < min_improvement for impr in recent_improvements):
+                break
+
+            if improvement > improvement_threshold:
+                stagnation_count = 0
+            else:
+                stagnation_count += 1
+
+            prev_best = current_best
+
+        return result
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_preprocessing_spherical_projection
+</NAME>
+
+<DESCRIPTION>
+This change adds preprocessing that projects the initial points onto a unit sphere before optimization. This leverages the geometric insight that optimal configurations for this type of problem often have points lying on or near the surface of a sphere. The spherical projection helps ensure that the optimization starts with points that respect the spherical nature of the problem, which can lead to better convergence towards globally optimal solutions. This is particularly important since many of our initialization strategies (like Fibonacci and Voronoi-based) produce points that are already on or near the sphere.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Use the best initialization as starting point
+    x0 = best_initialization.flatten()
+
+    # Bounds for each coordinate: [0, 1] for all 14 points × 3 coordinates
+    bounds = [(0, 1)] * 14 * 3
+
+    # Run adaptive differential evolution optimization
+=======
+    # Use the best initialization as starting point
+    x0 = best_initialization.flatten()
+
+    # Apply spherical preprocessing to ensure points lie on unit sphere
+    # This helps guide optimization towards configurations that exploit spherical geometry
+    points_sphere = best_initialization.copy()
+    norms = np.linalg.norm(points_sphere, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1, norms)
+    points_sphere = points_sphere / norms
+
+    # Map back to [0,1]^3 space for optimization
+    x0 = ((points_sphere + 1) / 2).flatten()
+
+    # Bounds for each coordinate: [0, 1] for all 14 points × 3 coordinates
+    bounds = [(0, 1)] * 14 * 3
+
+    # Run adaptive differential evolution optimization
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_final_spherical_refinement
+</NAME>
+
+<DESCRIPTION>
+This improvement adds a final spherical refinement stage that specifically targets the spherical geometry properties of the solution. After the main optimization process, we apply a specialized refinement step that explicitly works with spherical distances rather than Euclidean distances. This refinement uses:
+1. Great circle distances on the unit sphere
+2. Chordal distances for actual straight-line distances
+3. An objective function that's specifically designed for spherical point distributions
+
+This addresses the fact that optimal solutions often have particular geometric properties that aren't fully captured by the standard Euclidean distance optimization, especially when the points are constrained to a bounded domain like [0,1]^3.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Apply multi-stage refinement
+    optimized_points = multi_stage_lbfgs_refinement(optimized_points)
+
+    # Final clipping to ensure bounds are respected
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+=======
+    # Apply multi-stage refinement
+    optimized_points = multi_stage_lbfgs_refinement(optimized_points)
+
+    # Apply final spherical geometry refinement
+    optimized_points = spherical_geometry_refinement(optimized_points)
+
+    # Final clipping to ensure bounds are respected
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+>>>>>>> REPLACE
+</DIFF>

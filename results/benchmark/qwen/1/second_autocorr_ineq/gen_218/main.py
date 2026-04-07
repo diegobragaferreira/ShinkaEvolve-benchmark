@@ -1,0 +1,300 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.sparse import diags, dia_matrix
+from scipy.sparse.linalg import eigsh
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+import time
+from typing import List, Tuple, Optional
+import warnings
+from numba import jit
+
+class SparseConvolutionOptimizer:
+    """Optimizes step functions using sparse matrix representations for convolution."""
+    
+    def __init__(self, max_time_seconds: float = 90.0, seed: int = 42):
+        self.max_time_seconds = max_time_seconds
+        self.seed = seed
+        np.random.seed(seed)
+        
+    def _create_sparse_convolution_matrix(self, n: int) -> dia_matrix:
+        """
+        Create a sparse matrix representation of the convolution operator.
+        For a step function of length n, creates an (2n-1) x n convolution matrix.
+        """
+        # Create the convolution matrix as a sparse diagonal matrix
+        # This is more efficient than computing full convolution for repeated evaluations
+        conv_matrix = []
+        offsets = []
+        
+        # For each row in the output (convolution result), we have n elements
+        # from the input that contribute to it
+        for i in range(2*n - 1):
+            row_indices = []
+            row_values = []
+            
+            # For convolution at position i, we sum over all valid combinations
+            for j in range(n):
+                k = i - j
+                if 0 <= k < n:
+                    row_indices.append(k)
+                    row_values.append(1.0)  # Unit weights for convolution
+            
+            # Store only non-zero elements
+            if row_indices:
+                conv_matrix.append(row_values)
+                offsets.append(i - (n - 1))
+        
+        # Convert to sparse matrix
+        return dia_matrix((conv_matrix, offsets), shape=(2*n - 1, n))
+    
+    def _compute_autoconvolution_sparse(self, f_values: np.ndarray) -> np.ndarray:
+        """
+        Compute autoconvolution using sparse matrix multiplication for efficiency.
+        """
+        n = len(f_values)
+        if n == 0:
+            return np.array([])
+            
+        # Create sparse convolution matrix
+        A = self._create_sparse_convolution_matrix(n)
+        
+        # Compute g = f * f using sparse matrix multiplication
+        # First, we need to compute f * f, which means A * f where A is the convolution operator
+        # Actually, for autoconvolution g = f * f, we compute:
+        # g = (f @ A^T) where A^T is transpose of convolution matrix
+        # This is still complex, so we fall back to standard convolution for reliability
+        
+        # Use standard convolution for reliability (sparse approach is more complex for autoconv)
+        g = convolve(f_values, f_values, mode='full')
+        
+        # Extract central portion
+        middle_idx = n - 1
+        half_width = n
+        g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+        
+        return g_centered
+    
+    def _compute_norms_fast(self, g_vals: np.ndarray) -> Tuple[float, float, float]:
+        """
+        Fast computation of norms using optimized NumPy operations.
+        """
+        if len(g_vals) == 0:
+            return 0.0, 0.0, 0.0
+            
+        # Precomputed norms using optimized operations
+        g_squared = g_vals ** 2
+        g_abs = np.abs(g_vals)
+        
+        # L2 norm squared (using trapezoidal-like approximation)
+        norm_g2_sq = 0.0
+        if len(g_vals) >= 2:
+            for i in range(len(g_vals) - 1):
+                y1 = g_vals[i]
+                y2 = g_vals[i+1]
+                norm_g2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+        
+        # L1 norm
+        norm_g1 = np.sum(g_abs)
+        
+        # L-infinity norm
+        norm_ginf = np.max(g_abs)
+        
+        return norm_g2_sq, norm_g1, norm_ginf
+    
+    def _evaluate_c2_fast(self, f_values: np.ndarray) -> float:
+        """
+        Fast evaluation of C2 using sparse convolution and optimized norms.
+        """
+        try:
+            # Ensure non-negative values
+            f_vals = np.maximum(f_values, 0.0)
+            
+            if len(f_vals) == 0:
+                return 0.0
+            
+            # Compute autoconvolution
+            g_vals = self._compute_autoconvolution_sparse(f_vals)
+            
+            # Compute norms
+            norm_g2_sq, norm_g1, norm_ginf = self._compute_norms_fast(g_vals)
+            
+            # Avoid division by zero
+            if norm_g1 <= 1e-15 or norm_ginf <= 1e-15:
+                return 0.0
+            
+            # Compute C2
+            c2 = norm_g2_sq / (norm_g1 * norm_ginf)
+            return c2
+            
+        except Exception:
+            return 0.0
+    
+    def _create_structured_initialization(self, n_steps: int) -> np.ndarray:
+        """
+        Create an initial pattern using mathematical insights for better starting point.
+        """
+        # Create a hybrid pattern that balances peak and valley regions
+        pattern = np.zeros(n_steps)
+        
+        # Create a base pattern with distinct regions
+        # Region 1: Peaks (important for convolution boosting)
+        peak_positions = []
+        for i in range(0, n_steps, 4):
+            if i < n_steps:
+                peak_positions.append(i)
+        
+        # Assign peak values
+        for pos in peak_positions:
+            if pos < n_steps:
+                pattern[pos] = np.random.uniform(0.8, 1.0)
+        
+        # Region 2: Valleys (helps with normalization)
+        valley_positions = []
+        for i in range(1, n_steps, 4):
+            if i < n_steps:
+                valley_positions.append(i)
+        
+        # Assign valley values  
+        for pos in valley_positions:
+            if pos < n_steps:
+                pattern[pos] = np.random.uniform(0.0, 0.2)
+        
+        # Region 3: Intermediate values
+        intermediate_positions = []
+        for i in range(2, n_steps, 4):
+            if i < n_steps:
+                intermediate_positions.append(i)
+        
+        # Assign intermediate values
+        for pos in intermediate_positions:
+            if pos < n_steps:
+                pattern[pos] = np.random.uniform(0.3, 0.7)
+        
+        # Add some noise for exploration
+        noise_level = 0.05
+        pattern += np.random.normal(0, noise_level, n_steps)
+        pattern = np.maximum(pattern, 0.0)
+        
+        # Normalize to prevent extreme values
+        max_val = np.max(pattern)
+        if max_val > 0:
+            pattern = pattern / max_val * 2.0
+            
+        return pattern
+    
+    def _adaptive_optimization(self, initial_guess: np.ndarray) -> np.ndarray:
+        """
+        Perform adaptive optimization using multiple strategies.
+        """
+        start_time = time.time()
+        n_dims = len(initial_guess)
+        
+        # Strategy 1: Differential Evolution (Global Search)
+        bounds = [(0, 3) for _ in range(n_dims)]
+        max_iter_de = min(50, int(self.max_time_seconds * 0.6))
+        popsize_de = min(15, max(5, n_dims // 10))
+        
+        best_solution = initial_guess.copy()
+        best_c2 = self._evaluate_c2_fast(best_solution)
+        
+        try:
+            def objective(x):
+                return -self._evaluate_c2_fast(x)
+            
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=max_iter_de,
+                popsize=popsize_de,
+                tol=1e-6,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=self.seed,
+                disp=False
+            )
+            
+            if de_result.success:
+                new_solution = de_result.x
+                new_c2 = self._evaluate_c2_fast(new_solution)
+                if new_c2 > best_c2:
+                    best_solution = new_solution
+                    best_c2 = new_c2
+                    
+        except Exception:
+            pass
+        
+        # Strategy 2: Local Refinement with L-BFGS
+        try:
+            def objective(x):
+                return -self._evaluate_c2_fast(x)
+            
+            # Use best solution from DE as starting point
+            refined_result = minimize(
+                objective,
+                best_solution,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={
+                    'maxiter': max(10, int(self.max_time_seconds * 0.3)),
+                    'ftol': 1e-8,
+                    'gtol': 1e-8
+                }
+            )
+            
+            if refined_result.success:
+                final_solution = refined_result.x
+                final_c2 = self._evaluate_c2_fast(final_solution)
+                if final_c2 > best_c2:
+                    best_solution = final_solution
+                    best_c2 = final_c2
+                    
+        except Exception:
+            pass
+        
+        # Final post-processing
+        best_solution = np.maximum(best_solution, 0.0)
+        return best_solution
+    
+    def optimize(self, n_steps: int = None) -> np.ndarray:
+        """
+        Main optimization routine with sparse convolution approach.
+        """
+        if n_steps is None:
+            n_steps = np.random.randint(500, 3000)  # Balanced range
+        
+        # Create initial structured pattern
+        initial_pattern = self._create_structured_initialization(n_steps)
+        
+        # Perform adaptive optimization
+        optimized_values = self._adaptive_optimization(initial_pattern)
+        
+        return optimized_values
+
+def construct_function() -> List[float]:
+    """
+    Main entry point for constructing step-function with high C2 value.
+    Uses sparse convolution-based optimization approach.
+    """
+    # Create optimizer with time constraints
+    optimizer = SparseConvolutionOptimizer(max_time_seconds=90.0, seed=42)
+    
+    try:
+        # Perform optimization
+        optimized_function = optimizer.optimize()
+    except Exception as e:
+        # Fallback to simple initialization if optimization fails
+        print(f"Optimization failed with error: {e}. Using fallback.")
+        # Generate simple pattern
+        n_steps = np.random.randint(500, 3000)
+        f_values = [0.5] * n_steps
+        optimized_function = np.array(f_values)
+    
+    # Ensure valid output format
+    return optimized_function.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

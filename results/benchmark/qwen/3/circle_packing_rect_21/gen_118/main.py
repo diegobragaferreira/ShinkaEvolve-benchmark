@@ -1,0 +1,354 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+import math
+import random
+from typing import Tuple, List, Optional
+import time
+from sklearn.cluster import KMeans
+
+class VoronoiGuidedEvolutionOptimizer:
+    """
+    A multi-stage optimizer for placing 21 non-overlapping circles
+    inside a rectangle to maximize sum of radii, using Voronoi-based initialization
+    and evolutionary algorithms.
+    """
+    
+    def __init__(self, rect_width: float = 1.2, rect_height: float = 0.8, seed: int = 42):
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+        self.seed = seed
+        np.random.seed(seed)
+        random.seed(seed)
+        
+    def compute_circle_radius(self, point: np.ndarray, points: np.ndarray) -> float:
+        """
+        Compute maximum possible radius for a circle centered at 'point'
+        considering both rectangular boundaries and other circles.
+        """
+        center_x, center_y = point
+        # Distance to rectangle edges
+        dist_to_edges = [
+            center_x,                    # distance to left edge
+            self.rect_width - center_x,  # distance to right edge
+            center_y,                    # distance to bottom edge
+            self.rect_height - center_y  # distance to top edge
+        ]
+        
+        # Distance to other circles (excluding self)
+        min_dist_to_others = float('inf')
+        for other_point in points:
+            if not (abs(other_point[0] - center_x) < 1e-10 and abs(other_point[1] - center_y) < 1e-10):
+                dist = distance.euclidean(point, other_point)
+                min_dist_to_others = min(min_dist_to_others, dist)
+        
+        # Maximum radius is limited by both edges and other circles
+        max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+        return max(0.001, max_radius)
+    
+    def evaluate_configuration(self, points: np.ndarray) -> Tuple[float, np.ndarray]:
+        """
+        Evaluate a configuration by computing sum of radii and returning full details.
+        """
+        total_radius = 0
+        circles = []
+        for point in points:
+            radius = self.compute_circle_radius(point, points)
+            circles.append([point[0], point[1], radius])
+            total_radius += radius
+        return total_radius, np.array(circles)
+    
+    def generate_voronoi_based_initialization(self, num_points: int = 21) -> np.ndarray:
+        """
+        Generate initial points using Voronoi-based seeding with strategic placement.
+        """
+        points = []
+        
+        # Strategy 1: Corner placements with padding
+        corner_positions = [
+            (self.rect_width * 0.1, self.rect_height * 0.1),
+            (self.rect_width * 0.9, self.rect_height * 0.1),
+            (self.rect_width * 0.1, self.rect_height * 0.9),
+            (self.rect_width * 0.9, self.rect_height * 0.9),
+            (self.rect_width / 2, self.rect_height / 2)
+        ]
+        
+        # Add corners with slight perturbations
+        for x, y in corner_positions:
+            pert_x = np.random.normal(0, 0.03)
+            pert_y = np.random.normal(0, 0.03)
+            points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 2: Edge midpoint placements
+        edge_positions = [
+            (self.rect_width/2, self.rect_height * 0.1),  # top center
+            (self.rect_width/2, self.rect_height * 0.9),  # bottom center
+            (self.rect_width * 0.1, self.rect_height/2),  # left center
+            (self.rect_width * 0.9, self.rect_height/2),  # right center
+        ]
+        
+        for x, y in edge_positions:
+            pert_x = np.random.normal(0, 0.02)
+            pert_y = np.random.normal(0, 0.02)
+            points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 3: Grid placements in interior
+        grid_x = np.linspace(self.rect_width * 0.2, self.rect_width * 0.8, 3)
+        grid_y = np.linspace(self.rect_height * 0.2, self.rect_height * 0.8, 3)
+        
+        for x in grid_x:
+            for y in grid_y:
+                if len(points) < 21:
+                    pert_x = np.random.normal(0, 0.02)
+                    pert_y = np.random.normal(0, 0.02)
+                    points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 4: Fill remaining with random points
+        while len(points) < 21:
+            x = np.random.uniform(0.05, self.rect_width - 0.05)
+            y = np.random.uniform(0.05, self.rect_height - 0.05)
+            points.append([x, y])
+        
+        return np.array(points[:21])
+    
+    def generate_voronoi_seed_population(self, pop_size: int = 30) -> List[np.ndarray]:
+        """
+        Generate a diverse population using Voronoi-seeded initialization.
+        """
+        population = []
+        for _ in range(pop_size):
+            # Start with Voronoi-based initialization
+            points = self.generate_voronoi_based_initialization()
+            
+            # Add some variation to make population diverse
+            noise_magnitude = 0.05
+            for i in range(len(points)):
+                if random.random() < 0.3:  # 30% chance to add noise
+                    points[i] = points[i] + np.random.normal(0, noise_magnitude, 2)
+                    # Clamp to bounds
+                    points[i][0] = np.clip(points[i][0], 0.05, self.rect_width - 0.05)
+                    points[i][1] = np.clip(points[i][1], 0.05, self.rect_height - 0.05)
+            
+            population.append(points)
+        return population
+    
+    def compute_voronoi_fitness(self, points: np.ndarray) -> float:
+        """
+        Compute fitness based on Voronoi diagram properties.
+        Higher fitness means better spatial distribution.
+        """
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+            # Sum of minimum distances to neighboring points
+            total_min_distance = 0
+            for i, point in enumerate(points):
+                if len(vor.point_generator) > i:
+                    # Get neighbors from Voronoi cells
+                    neighbors = []
+                    for j in range(len(points)):
+                        if i != j:
+                            neighbors.append(points[j])
+                    
+                    if neighbors:
+                        min_dist = min(distance.euclidean(point, neighbor) for neighbor in neighbors)
+                        total_min_distance += min_dist
+            
+            # Normalize by number of points
+            return total_min_distance / len(points) if len(points) > 0 else 0
+        except:
+            # If Voronoi fails, fall back to simple approach
+            return 0
+    
+    def voronoi_crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """
+        Create offspring using Voronoi-based crossover that respects spatial relationships.
+        """
+        # Use a blend of both parents with some randomness
+        offspring = []
+        for i in range(len(parent1)):
+            if random.random() < 0.5:
+                offspring.append(parent1[i])
+            else:
+                offspring.append(parent2[i])
+        
+        # Add some randomness to encourage exploration
+        for i in range(len(offspring)):
+            if random.random() < 0.1:  # 10% chance to add noise
+                offspring[i] = offspring[i] + np.random.normal(0, 0.02, 2)
+                # Clamp to bounds
+                offspring[i][0] = np.clip(offspring[i][0], 0.05, self.rect_width - 0.05)
+                offspring[i][1] = np.clip(offspring[i][1], 0.05, self.rect_height - 0.05)
+        
+        return np.array(offspring)
+    
+    def voronoi_mutate(self, individual: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+        """
+        Mutate individual using Voronoi-guided mutation.
+        """
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                # Apply more sophisticated mutation with spatial awareness
+                # First check if this point is near another point (high density region)
+                distances = [distance.euclidean(mutated[i], other) for other in mutated if not np.array_equal(mutated[i], other)]
+                if distances:
+                    avg_dist = np.mean(distances)
+                    # Adjust mutation strength based on local density
+                    mutation_strength = 0.05 if avg_dist > 0.1 else 0.02
+                else:
+                    mutation_strength = 0.05
+                
+                mutated[i] = mutated[i] + np.random.normal(0, mutation_strength, 2)
+                # Keep within bounds
+                mutated[i][0] = np.clip(mutated[i][0], 0.05, self.rect_width - 0.05)
+                mutated[i][1] = np.clip(mutated[i][1], 0.05, self.rect_height - 0.05)
+        return mutated
+    
+    def tournament_selection(self, population: List[np.ndarray], fitnesses: List[float], 
+                           tournament_size: int = 3) -> np.ndarray:
+        """
+        Select best individual from tournament with Voronoi fitness consideration.
+        """
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_index]
+    
+    def run_evolutionary_search(self, max_generations: int = 50) -> Tuple[float, np.ndarray]:
+        """
+        Execute the evolutionary search with Voronoi-guided operators.
+        """
+        # Evolutionary algorithm parameters
+        pop_size = 30
+        elite_size = 5
+        
+        # Generate initial population using Voronoi-based seeding
+        population = self.generate_voronoi_seed_population(pop_size)
+        
+        best_solution = None
+        best_fitness = 0
+        
+        for generation in range(max_generations):
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            population_circles = []
+            
+            for individual in population:
+                fitness, circles = self.evaluate_configuration(individual)
+                fitness_scores.append(fitness)
+                population_circles.append(circles)
+                
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_solution = circles.copy()
+            
+            # Sort population by fitness
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            sorted_population = [population[i] for i in sorted_indices]
+            sorted_circles = [population_circles[i] for i in sorted_indices]
+            
+            # Keep elite individuals
+            new_population = sorted_population[:elite_size]
+            
+            # Generate offspring through Voronoi-guided crossover and mutation
+            while len(new_population) < pop_size:
+                # Tournament selection with probability weighting
+                parent1 = self.tournament_selection(sorted_population, fitness_scores)
+                parent2 = self.tournament_selection(sorted_population, fitness_scores)
+                
+                # Crossover
+                offspring = self.voronoi_crossover(parent1, parent2)
+                
+                # Mutation
+                offspring = self.voronoi_mutate(offspring)
+                
+                new_population.append(offspring)
+            
+            population = new_population
+        
+        return best_fitness, best_solution
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Initialize optimizer
+    optimizer = VoronoiGuidedEvolutionOptimizer()
+    
+    # Stage 1: Voronoi-based initial seeding 
+    points = optimizer.generate_voronoi_based_initialization()
+    
+    # Stage 2: Evaluate initial configuration
+    initial_fitness, initial_circles = optimizer.evaluate_configuration(points)
+    
+    # Stage 3: Run Voronoi-guided evolutionary search
+    best_fitness, best_solution = optimizer.run_evolutionary_search(max_generations=40)
+    
+    # Stage 4: Final refinement 
+    final_points = []
+    if best_solution is not None:
+        for i in range(21):
+            final_points.append([best_solution[i, 0], best_solution[i, 1]])
+        final_points = np.array(final_points)
+        
+        # Perform local refinement on best solution
+        refined_points = final_points.copy()
+        best_radius_sum = sum(optimizer.compute_circle_radius(p, refined_points) for p in refined_points)
+        
+        # Do several rounds of local search
+        for round_num in range(3):
+            updated = False
+            for i in range(len(refined_points)):
+                current_point = refined_points[i]
+                best_point = current_point.copy()
+                best_radius = optimizer.compute_circle_radius(current_point, refined_points)
+                
+                # Sample neighborhood in more structured way
+                for dx in np.linspace(-0.05, 0.05, 5):
+                    for dy in np.linspace(-0.05, 0.05, 5):
+                        if abs(dx) < 0.001 and abs(dy) < 0.001:
+                            continue
+                        new_x = current_point[0] + dx
+                        new_y = current_point[1] + dy
+                        
+                        # Keep within bounds
+                        if (0.05 <= new_x <= optimizer.rect_width - 0.05 and
+                            0.05 <= new_y <= optimizer.rect_height - 0.05):
+                            
+                            test_point = np.array([new_x, new_y])
+                            test_radius = optimizer.compute_circle_radius(test_point, refined_points)
+                            
+                            if test_radius > best_radius:
+                                best_radius = test_radius
+                                best_point = test_point
+                                updated = True
+                
+                refined_points[i] = best_point
+            
+            # Check if there was improvement
+            new_sum = sum(optimizer.compute_circle_radius(p, refined_points) for p in refined_points)
+            if new_sum > best_radius_sum:
+                best_radius_sum = new_sum
+            else:
+                if not updated and round_num > 1:
+                    break  # Stop if no improvement after two rounds
+      
+        # Recalculate final configuration
+        _, final_circles = optimizer.evaluate_configuration(refined_points)
+        return final_circles
+    
+    # Fallback to initial solution if evolutionary search failed
+    return initial_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

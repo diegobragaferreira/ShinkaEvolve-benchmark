@@ -1,0 +1,192 @@
+<NAME>
+voronoi_based_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more sophisticated Voronoi-based adaptive mutation that considers not just the immediate Voronoi cell area but also the local geometric constraints and criticality. The key insight is to use Voronoi diagrams to identify regions of high constraint density and apply more careful, smaller mutations there, while allowing larger mutations in sparser areas.
+
+This approach will:
+1. Improve the accuracy of constraint density estimation using Voronoi diagrams
+2. Apply adaptive mutation step sizes based on Voronoi cell characteristics
+3. Better handle edge cases and boundary constraints
+4. Provide more stable convergence behavior
+
+The change involves enhancing the `compute_voronoi_criticality` method to provide more nuanced criticality scores and updating the mutation operator to use these more sophisticated scores.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def compute_voronoi_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute criticality scores for each circle based on Voronoi diagram."""
+        if len(circles) < 3:
+            return np.ones(len(circles)) * 0.5
+
+        try:
+            # Get circle centers
+            points = circles[:, :2]
+
+            # Shift points to avoid boundary issues
+            shifted_points = points.copy()
+            shifted_points[:, 0] = np.clip(shifted_points[:, 0], 0.01, rect_width - 0.01)
+            shifted_points[:, 1] = np.clip(shifted_points[:, 1], 0.01, rect_height - 0.01)
+
+            # Compute Voronoi diagram
+            vor = Voronoi(shifted_points)
+
+            # Compute area of Voronoi cells
+            areas = []
+            for i in range(len(shifted_points)):
+                # Get vertices of Voronoi cell for point i
+                region = vor.regions[vor.point_region[i]]
+                if -1 in region:
+                    # Infinite region, skip
+                    areas.append(1000000)  # Large area for infinite regions
+                else:
+                    # Compute polygon area
+                    vertices = [vor.vertices[j] for j in region if j >= 0]
+                    if len(vertices) < 3:
+                        areas.append(1000000)
+                    else:
+                        # Simplified area calculation using cross product
+                        vertices_array = np.array(vertices)
+                        x = vertices_array[:, 0]
+                        y = vertices_array[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+
+            # Convert to criticality score (lower area = higher criticality)
+            areas = np.array(areas)
+            # Normalize to [0,1] where 0 = most critical
+            normalized_areas = (areas - areas.min()) / (areas.max() - areas.min() + 1e-8)
+            return 1.0 - normalized_areas  # Higher criticality = closer to 1
+
+        except:
+            # Fallback to uniform criticality if Voronoi fails
+            return np.ones(len(circles)) * 0.5
+=======
+    @staticmethod
+    def compute_voronoi_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute criticality scores for each circle based on Voronoi diagram and geometric constraints."""
+        if len(circles) < 2:
+            return np.ones(len(circles)) * 0.5
+
+        try:
+            # Get circle centers
+            points = circles[:, :2]
+
+            # Shift points to avoid boundary issues and ensure proper Voronoi computation
+            shifted_points = points.copy()
+            shifted_points[:, 0] = np.clip(shifted_points[:, 0], 0.01, rect_width - 0.01)
+            shifted_points[:, 1] = np.clip(shifted_points[:, 1], 0.01, rect_height - 0.01)
+
+            # Compute Voronoi diagram
+            vor = Voronoi(shifted_points)
+
+            # Compute area of Voronoi cells and additional geometric features
+            areas = []
+            min_distances = []
+
+            for i in range(len(shifted_points)):
+                # Get vertices of Voronoi cell for point i
+                region = vor.regions[vor.point_region[i]]
+                if -1 in region:
+                    # Infinite region, skip
+                    areas.append(1000000)  # Large area for infinite regions
+                else:
+                    # Compute polygon area
+                    vertices = [vor.vertices[j] for j in region if j >= 0]
+                    if len(vertices) < 3:
+                        areas.append(1000000)
+                    else:
+                        # Compute polygon area using cross product
+                        vertices_array = np.array(vertices)
+                        x = vertices_array[:, 0]
+                        y = vertices_array[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+
+                # Calculate minimum distance to other circles (local crowding)
+                distances_to_others = []
+                for j in range(len(shifted_points)):
+                    if i != j:
+                        dist = np.sqrt(np.sum((shifted_points[i] - shifted_points[j])**2))
+                        distances_to_others.append(dist)
+                min_distances.append(min(distances_to_others) if distances_to_others else 1.0)
+
+            # Convert to criticality scores
+            areas = np.array(areas)
+            min_distances = np.array(min_distances)
+
+            # Normalize areas and distances to [0,1] range
+            if np.max(areas) > 0:
+                normalized_areas = (areas - areas.min()) / (areas.max() - areas.min() + 1e-8)
+            else:
+                normalized_areas = np.zeros_like(areas)
+
+            if np.max(min_distances) > 0:
+                normalized_distances = (min_distances - min_distances.min()) / (min_distances.max() - min_distances.min() + 1e-8)
+            else:
+                normalized_distances = np.zeros_like(min_distances)
+
+            # Compute combined criticality score
+            # Areas: lower area (smaller Voronoi cell) = higher criticality (more constrained)
+            # Distances: smaller distance to neighbors = higher criticality (crowded)
+            voronoi_criticality = 1.0 - normalized_areas
+            neighbor_criticality = 1.0 - normalized_distances
+
+            # Combine both measures with appropriate weights
+            # Prioritize Voronoi-based criticality as it's more geometrically meaningful
+            combined_criticality = 0.7 * voronoi_criticality + 0.3 * neighbor_criticality
+
+            # Also consider boundary distance as a criticality factor
+            boundary_distances = np.minimum(
+                shifted_points[:, 0],  # Distance to left boundary
+                np.minimum(
+                    rect_width - shifted_points[:, 0],  # Distance to right boundary
+                    np.minimum(
+                        shifted_points[:, 1],  # Distance to bottom boundary
+                        rect_height - shifted_points[:, 1]  # Distance to top boundary
+                    )
+                )
+            )
+
+            # Normalize boundary distances
+            if np.max(boundary_distances) > 0:
+                normalized_boundary = boundary_distances / np.max(boundary_distances)
+            else:
+                normalized_boundary = np.zeros_like(boundary_distances)
+
+            # Increase criticality for circles near boundaries
+            boundary_criticality = 1.0 - normalized_boundary
+
+            # Combine all factors
+            final_criticality = 0.5 * combined_criticality + 0.5 * boundary_criticality
+
+            # Ensure values are in [0, 1] range
+            final_criticality = np.clip(final_criticality, 0, 1)
+
+            return final_criticality
+
+        except Exception as e:
+            # Fallback to simpler geometric criticality if Voronoi fails
+            # Use distance to nearest neighbor as proxy for criticality
+            if len(circles) > 1:
+                positions = circles[:, :2]
+                distances = cdist(positions, positions)
+                np.fill_diagonal(distances, np.inf)
+                min_distances = np.min(distances, axis=1)
+
+                # Normalize distances (smaller = more critical)
+                if np.max(min_distances) > 0:
+                    normalized_distances = (min_distances - min_distances.min()) / (min_distances.max() - min_distances.min() + 1e-8)
+                else:
+                    normalized_distances = np.zeros_like(min_distances)
+
+                # Higher criticality = more constrained (smaller distances)
+                criticality = 1.0 - normalized_distances
+                return np.clip(criticality, 0, 1)
+            else:
+                return np.ones(len(circles)) * 0.5
+>>>>>>> REPLACE
+</DIFF>

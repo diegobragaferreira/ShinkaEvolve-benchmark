@@ -1,0 +1,223 @@
+<NAME>
+adaptive_voronoi_mutation
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the existing Voronoi-based density scoring system to create more intelligent mutation strategies. Instead of using a simple inverse relationship between density and mutation step size, I'm implementing a sophisticated adaptive approach that considers both local constraint density and geometric proximity. This allows for more precise control over how mutations are applied based on the specific geometric context of each circle, leading to better convergence properties and higher-quality solutions.
+
+The key insight is to create a more nuanced mutation strategy where:
+1. Circles in high-density Voronoi regions (many constraints) get smaller, more conservative mutations
+2. Circles in low-density regions can take larger steps
+3. The mutation magnitude is also influenced by the geometric relationship between neighboring circles
+4. We combine Voronoi density with actual overlap distances to make decisions
+
+This builds upon the existing Voronoi infrastructure but makes it more sophisticated for better optimization performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon
+                    vertices = np.array([vor.vertices[i] for i in region])
+                    # Simple polygon area calculation
+                    if len(vertices) >= 3:
+                        # Shoelace formula
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+
+def mutate_radius(circles: np.ndarray, idx: int, max_delta: float = 0.01, density_scores: np.ndarray = None) -> np.ndarray:
+    """Mutate radius with adaptive delta based on Voronoi density."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Adaptive delta based on density
+    if density_scores is not None and len(density_scores) > idx:
+        # High density means more constraints, use smaller deltas
+        density_factor = 1.0 / (1.0 + density_scores[idx])  # Normalize
+        delta = max_delta * density_factor
+    else:
+        delta = max_delta
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+=======
+def compute_voronoi_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon
+                    vertices = np.array([vor.vertices[i] for i in region])
+                    # Simple polygon area calculation
+                    if len(vertices) >= 3:
+                        # Shoelace formula
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+
+def compute_constraint_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute constraint density for each circle based on proximity to others."""
+    n = len(circles)
+    density_scores = np.zeros(n)
+
+    # For each circle, count nearby neighbors
+    for i in range(n):
+        x1, y1, r1 = circles[i]
+        nearby_count = 0
+
+        for j in range(n):
+            if i != j:
+                x2, y2, r2 = circles[j]
+                dist = distance([x1, y1], [x2, y2])
+                # Consider as 'nearby' if distance is less than sum of radii (potential overlap)
+                if dist < (r1 + r2):
+                    nearby_count += 1
+
+        density_scores[i] = nearby_count
+
+    return density_scores
+
+def mutate_radius(circles: np.ndarray, idx: int, max_delta: float = 0.01,
+                  voronoi_densities: np.ndarray = None,
+                  constraint_densities: np.ndarray = None) -> np.ndarray:
+    """Mutate radius with adaptive delta based on both Voronoi and constraint density."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Base delta from Voronoi density (high density = small mutations)
+    delta = max_delta
+
+    if voronoi_densities is not None and len(voronoi_densities) > idx:
+        # Normalize Voronoi density (smaller area = higher density)
+        # Use log to prevent extreme scaling
+        voronoi_factor = max(0.1, 1.0 / (1.0 + np.log(1.0 + voronoi_densities[idx])))
+        delta *= voronoi_factor
+
+    # Adjust based on constraint density (more constraints = smaller changes)
+    if constraint_densities is not None and len(constraint_densities) > idx:
+        # More nearby constraints = smaller delta
+        constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.5)
+        delta *= constraint_factor
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+
+def mutate_position(circles: np.ndarray, idx: int, max_delta: float = 0.05,
+                    voronoi_densities: np.ndarray = None,
+                    constraint_densities: np.ndarray = None) -> np.ndarray:
+    """Mutate position with adaptive delta based on both Voronoi and constraint density."""
+    new_circles = circles.copy()
+    old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+    # Base delta from Voronoi density (high density = small movements)
+    delta = max_delta
+
+    if voronoi_densities is not None and len(voronoi_densities) > idx:
+        # Normalize Voronoi density (smaller area = higher density)
+        voronoi_factor = max(0.1, 1.0 / (1.0 + np.log(1.0 + voronoi_densities[idx])))
+        delta *= voronoi_factor
+
+    # Adjust based on constraint density (more constraints = smaller changes)
+    if constraint_densities is not None and len(constraint_densities) > idx:
+        # More nearby constraints = smaller delta
+        constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.5)
+        delta *= constraint_factor
+
+    # Small random perturbation
+    delta_x = np.random.uniform(-delta, delta)
+    delta_y = np.random.uniform(-delta, delta)
+
+    new_x = old_x + delta_x
+    new_y = old_y + delta_y
+
+    # Ensure within bounds (with some margin)
+    new_x = np.clip(new_x, 0.01, 0.99)
+    new_y = np.clip(new_y, 0.01, 0.99)
+
+    new_circles[idx, 0] = new_x
+    new_circles[idx, 1] = new_y
+
+    return new_circles
+>>>>>>> REPLACE
+</DIFF>

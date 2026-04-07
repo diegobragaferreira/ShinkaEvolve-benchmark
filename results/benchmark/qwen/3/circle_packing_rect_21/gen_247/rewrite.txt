@@ -1,0 +1,279 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.cluster.vq import kmeans2
+
+
+class CirclePackingOptimizer:
+    def __init__(self, n_circles=21, perimeter=4):
+        self.n_circles = n_circles
+        self.perimeter = perimeter
+        # Optimal rectangle dimensions (width=1.2, height=0.8) for better packing density
+        self.width, self.height = 1.2, 0.8
+        
+    def initialize_circles(self):
+        """Enhanced initialization with strategic corner/edge points and k-means clustering"""
+        circles = np.zeros((self.n_circles, 3))
+        
+        # Phase 1a: Strategic initialization with corner/edge points
+        corner_points = [
+            [0.1, 0.1],           # Bottom-left
+            [self.width-0.1, 0.1],     # Bottom-right
+            [0.1, self.height-0.1],    # Top-left
+            [self.width-0.1, self.height-0.1], # Top-right
+        ]
+
+        edge_points = [
+            [self.width/2, 0.1],       # Bottom-middle
+            [self.width/2, self.height-0.1], # Top-middle
+            [0.1, self.height/2],      # Left-middle
+            [self.width-0.1, self.height/2], # Right-middle
+        ]
+
+        init_points = corner_points + edge_points
+
+        # Fill remaining slots with k-means clustering for good distribution
+        dense_grid_size = 50
+        grid_x = np.linspace(0.01, self.width - 0.01, dense_grid_size)
+        grid_y = np.linspace(0.01, self.height - 0.01, dense_grid_size)
+        grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+
+        centroids, _ = kmeans2(grid_points, self.n_circles - len(init_points), minit='points')
+        all_init_points = init_points + centroids.tolist()
+
+        # Initialize with small radii
+        for i in range(self.n_circles):
+            circles[i] = [all_init_points[i][0], all_init_points[i][1], 0.01]
+            
+        return circles
+    
+    def get_max_radius(self, circles, index):
+        """Calculate maximum radius for circle at given index without overlapping others."""
+        x, y, current_radius = circles[index]
+
+        # Maximum radius based on container boundaries
+        max_radius_bound = min(x, y, self.width - x, self.height - y)
+
+        # Maximum radius based on other circles
+        max_radius_overlap = float('inf')
+
+        for i, (cx, cy, cr) in enumerate(circles):
+            if i != index:
+                # Distance to other circle center
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                # Max radius that avoids overlap
+                max_radius_for_this_circle = dist - cr
+
+                if max_radius_for_this_circle < max_radius_overlap:
+                    max_radius_overlap = max_radius_for_this_circle
+
+        max_radius = min(max_radius_bound, max_radius_overlap)
+        return max(max_radius, 0.001)  # Ensure minimum radius
+    
+    def get_max_radius_at_position(self, circles, index, x, y):
+        """Calculate maximum radius for circle at given position without overlapping others."""
+        # Maximum radius based on container boundaries
+        max_radius_bound = min(x, y, self.width - x, self.height - y)
+
+        # Maximum radius based on other circles
+        max_radius_overlap = float('inf')
+
+        for i, (cx, cy, cr) in enumerate(circles):
+            if i != index:
+                # Distance to other circle center
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                # Max radius that avoids overlap
+                max_radius_for_this_circle = dist - cr
+
+                if max_radius_for_this_circle < max_radius_overlap:
+                    max_radius_overlap = max_radius_for_this_circle
+
+        max_radius = min(max_radius_bound, max_radius_overlap)
+        return max(max_radius, 0.001)  # Ensure minimum radius
+    
+    def phase1_evolutionary_enhancement(self, circles):
+        """Create diverse initial solutions and select the best"""
+        best_solution = circles.copy()
+        best_sum = np.sum(circles[:, 2])
+        
+        # Create multiple diverse initial solutions
+        for trial in range(5):
+            np.random.seed(trial * 42)
+            
+            # Create a random configuration
+            trial_circles = circles.copy()
+            for i in range(self.n_circles):
+                trial_circles[i][0] = np.random.uniform(0.01, self.width - 0.01)
+                trial_circles[i][1] = np.random.uniform(0.01, self.height - 0.01)
+                trial_circles[i][2] = 0.01
+
+            # Maximize radii for this configuration
+            for _ in range(200):
+                improved = False
+                for j in range(self.n_circles):
+                    max_radius = self.get_max_radius(trial_circles, j)
+                    if max_radius > trial_circles[j][2]:
+                        trial_circles[j][2] = max_radius
+                        improved = True
+                if not improved:
+                    break
+
+            # Check if this trial is better
+            trial_sum = np.sum(trial_circles[:, 2])
+            if trial_sum > best_sum:
+                best_sum = trial_sum
+                best_solution = trial_circles.copy()
+                
+        return best_solution
+    
+    def phase2_multi_scale_optimization(self, circles):
+        """Multi-scale aggressive optimization with enhanced early stopping"""
+        max_iterations = 800
+        last_improvement_iter = 0
+        improvement_count = 0
+        prev_sum_radii = 0
+
+        # Iteration-based adaptive parameters
+        for iteration in range(max_iterations):
+            improved = False
+            
+            # Adaptive step size decreases over time
+            if iteration < 200:
+                step_size = 0.15
+                radius_update_factor = 0.9
+            elif iteration < 500:
+                step_size = 0.08
+                radius_update_factor = 0.7
+            else:
+                step_size = 0.03
+                radius_update_factor = 0.5
+
+            # Try to increase each circle's radius
+            for i in range(self.n_circles):
+                # Find maximum possible radius for circle i
+                max_radius = self.get_max_radius(circles, i)
+
+                if max_radius > circles[i][2]:
+                    circles[i][2] = min(max_radius, circles[i][2] * radius_update_factor)
+                    improved = True
+
+            # Track improvement for early stopping
+            current_sum_radii = np.sum(circles[:, 2])
+            if current_sum_radii > prev_sum_radii:
+                improvement_count += 1
+                last_improvement_iter = iteration
+                prev_sum_radii = current_sum_radii
+            else:
+                improvement_count = 0
+
+            # Early termination if stagnated for too long or no significant improvement
+            if improvement_count > 50 or (iteration - last_improvement_iter > 300 and current_sum_radii < prev_sum_radii * 1.001):
+                break
+                
+        return circles
+    
+    def phase3_advanced_local_search(self, circles):
+        """Advanced local search with adaptive neighborhood and enhanced exploration"""
+        local_search_iterations = 400
+
+        for refinement_iteration in range(local_search_iterations):
+            # Progressive step size reduction
+            if refinement_iteration < 150:
+                step_size = 0.08
+            elif refinement_iteration < 300:
+                step_size = 0.03
+            else:
+                step_size = 0.01
+
+            # Try moving each circle slightly to see if we can improve the configuration
+            for i in range(self.n_circles):
+                current_x, current_y, current_r = circles[i]
+
+                # Try movements in different directions with enhanced search patterns
+                best_pos = [current_x, current_y, current_r]
+                best_radius = current_r
+
+                # Use adaptive grid pattern based on iteration stage
+                if refinement_iteration < 100:
+                    # Coarse search in early stages
+                    search_grid = [-step_size*2, -step_size, 0, step_size, step_size*2]
+                elif refinement_iteration < 250:
+                    # Medium search in middle stages
+                    search_grid = [-step_size, -step_size/2, 0, step_size/2, step_size]
+                else:
+                    # Fine search in later stages
+                    search_grid = [-step_size/2, 0, step_size/2]
+
+                # Also add diagonal searches for better exploration
+                if refinement_iteration > 200:
+                    search_grid.extend([-step_size*1.5, step_size*1.5])
+
+                # Examine grid around current position with adaptive step size
+                for dx in search_grid:
+                    for dy in search_grid:
+                        new_x, new_y = current_x + dx, current_y + dy
+
+                        # Check if new position is within bounds
+                        if 0 <= new_x <= self.width and 0 <= new_y <= self.height:
+                            # Calculate max radius at new position
+                            max_radius = self.get_max_radius_at_position(
+                                circles, i, new_x, new_y
+                            )
+
+                            if max_radius > best_radius:
+                                best_radius = max_radius
+                                best_pos = [new_x, new_y, max_radius]
+
+                # Update if we found a better position
+                if best_pos[2] > circles[i][2]:
+                    circles[i] = best_pos
+                    
+        return circles
+    
+    def validate_and_cleanup(self, circles):
+        """Final validation and cleanup of circles"""
+        for i in range(self.n_circles):
+            # Ensure minimum radius
+            circles[i][2] = max(circles[i][2], 0.001)
+            
+            # Ensure circles stay within bounds
+            circles[i][0] = np.clip(circles[i][0], 0.001, self.width - 0.001)
+            circles[i][1] = np.clip(circles[i][1], 0.001, self.height - 0.001)
+            
+        return circles
+    
+    def optimize(self):
+        """Main optimization pipeline"""
+        # Phase 1: Initialize circles
+        circles = self.initialize_circles()
+        
+        # Phase 1b: Evolutionary enhancement for diverse starting points
+        circles = self.phase1_evolutionary_enhancement(circles)
+        
+        # Phase 2: Multi-scale optimization
+        circles = self.phase2_multi_scale_optimization(circles)
+        
+        # Phase 3: Local search refinement
+        circles = self.phase3_advanced_local_search(circles)
+        
+        # Final validation
+        circles = self.validate_and_cleanup(circles)
+        
+        return circles
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    optimizer = CirclePackingOptimizer()
+    return optimizer.optimize()
+
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

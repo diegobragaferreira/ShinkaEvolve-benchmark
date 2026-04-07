@@ -1,0 +1,226 @@
+<NAME>
+add_numba_jit_to_constraint_functions
+</NAME>
+
+<DESCRIPTION>
+Adding @jit decorators to constraint validation functions will significantly improve performance by compiling these frequently called geometric operations. The key functions to JIT compile are:
+1. `_hexagon_overlap_sat_jit` - the core overlap detection algorithm
+2. `_get_edges` - edge calculation for SAT
+3. `_project_polygon_onto_axis` - projection calculation for SAT
+4. `is_contained` - containment checking function
+
+These functions are called repeatedly during optimization and represent major computational bottlenecks that can benefit greatly from JIT compilation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Efficient constraint validation with spatial hashing
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        cell = self._hash_cell(center_x, center_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        cell = self._hash_cell(center_x, center_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+
+# Optimized overlap detection using SAT
+@jit(nopython=True)
+def _get_edges(vertices: np.ndarray) -> np.ndarray:
+    """Get edges from vertices."""
+    edges = np.empty((len(vertices), 2))
+    for i in range(len(vertices)):
+        edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+    return edges
+
+@jit(nopython=True)
+def _project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+    """Project polygon vertices onto an axis."""
+    projections = np.empty(len(vertices))
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@jit(nopython=True)
+def _hexagon_overlap_sat_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """Separating Axis Theorem for hexagon overlap detection."""
+    # Get edges of both hexagons
+    edges1 = _get_edges(hex1_vertices)
+    edges2 = _get_edges(hex2_vertices)
+
+    # Combine all axes (edges perpendicular to edges)
+    all_axes = np.empty((len(edges1) + len(edges2), 2))
+    for i in range(len(edges1)):
+        # Normal vector to edge (perpendicular)
+        all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+        if norm > 1e-10:
+            all_axes[i] /= norm
+    for i in range(len(edges2)):
+        # Normal vector to edge (perpendicular)
+        all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+        if norm > 1e-10:
+            all_axes[len(edges1) + i] /= norm
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = _project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = _project_polygon_onto_axis(hex2_vertices, axis)
+
+        # If no overlap on this axis, polygons don't overlap
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+=======
+# Efficient constraint validation with spatial hashing
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        cell = self._hash_cell(center_x, center_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        cell = self._hash_cell(center_x, center_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+
+# Optimized overlap detection using SAT
+@jit(nopython=True)
+def _get_edges(vertices: np.ndarray) -> np.ndarray:
+    """Get edges from vertices."""
+    edges = np.empty((len(vertices), 2))
+    for i in range(len(vertices)):
+        edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+    return edges
+
+@jit(nopython=True)
+def _project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+    """Project polygon vertices onto an axis."""
+    projections = np.empty(len(vertices))
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@jit(nopython=True)
+def _hexagon_overlap_sat_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """Separating Axis Theorem for hexagon overlap detection."""
+    # Get edges of both hexagons
+    edges1 = _get_edges(hex1_vertices)
+    edges2 = _get_edges(hex2_vertices)
+
+    # Combine all axes (edges perpendicular to edges)
+    all_axes = np.empty((len(edges1) + len(edges2), 2))
+    for i in range(len(edges1)):
+        # Normal vector to edge (perpendicular)
+        all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+        if norm > 1e-10:
+            all_axes[i] /= norm
+    for i in range(len(edges2)):
+        # Normal vector to edge (perpendicular)
+        all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+        if norm > 1e-10:
+            all_axes[len(edges1) + i] /= norm
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = _project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = _project_polygon_onto_axis(hex2_vertices, axis)
+
+        # If no overlap on this axis, polygons don't overlap
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+# Add JIT compilation to the constraint validator methods for better performance
+class ConstraintValidator:
+    """Robust constraint validation for hexagon packing."""
+
+    def __init__(self, geometry: HexagonGeometry):
+        self.geo = geometry
+        self.spatial_hash = SpatialHashGrid()
+
+    @staticmethod
+    @jit(nopython=True)
+    def is_contained_jit(hex_vertices: np.ndarray, outer_center_x: float,
+                        outer_center_y: float, outer_side_length: float) -> bool:
+        """JIT compiled containment check."""
+        # For a regular hexagon, we can check distance from center
+        dist_from_center = np.sqrt((hex_vertices[:, 0] - outer_center_x)**2 +
+                                  (hex_vertices[:, 1] - outer_center_y)**2)
+        # Maximum distance from center in a regular hexagon is side_length * sqrt(3)/2
+        max_radius = outer_side_length * np.sqrt(3) / 2
+        return np.all(dist_from_center <= max_radius)
+
+    def is_contained(self, hex_vertices: np.ndarray, outer_center_x: float,
+                     outer_center_y: float, outer_side_length: float) -> bool:
+        """Check if all hexagon vertices are within outer hexagon."""
+        return self.is_contained_jit(hex_vertices, outer_center_x, outer_center_y, outer_side_length)
+
+    @staticmethod
+    @jit(nopython=True)
+    def has_overlap_fast_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast approximate overlap check before precise check."""
+        # Simple distance check first
+        center1 = np.mean(hex1_vertices, axis=0)
+        center2 = np.mean(hex2_vertices, axis=0)
+        dist_centers = np.sqrt(np.sum((center1 - center2)**2))
+
+        # If centers are far apart, no overlap
+        if dist_centers > 2.0:  # Approximate sum of radii for unit hexagons
+            return False
+
+        # Otherwise, use SAT for precise check
+        return _hexagon_overlap_sat_jit(hex1_vertices, hex2_vertices)
+
+    def has_overlap_fast(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast approximate overlap check before precise check."""
+        return self.has_overlap_fast_jit(hex1_vertices, hex2_vertices)
+>>>>>>> REPLACE
+</DIFF>

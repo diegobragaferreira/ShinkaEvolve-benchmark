@@ -1,0 +1,302 @@
+Let me examine the current code more carefully to identify the correct location for the change.
+
+<NAME>
+adaptive_mutation_with_voronoi_criticality
+</NAME>
+
+<DESCRIPTION>
+The key improvement is to replace the constraint density computation with actual Voronoi-based criticality using cell areas, and update the mutation function to properly use this criticality information. The current code uses a simplified constraint density approach but doesn't leverage Voronoi cell areas which would be more accurate for determining constraint density. The mutation function needs to be updated to work with the new criticality scores.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi neighbors.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    centers = circles[:, :2]
+
+    try:
+        vor = Voronoi(centers)
+    except:
+        return np.ones(n) * 0.5
+
+    constraint_density = np.zeros(n)
+
+    for i in range(n):
+        center_i = centers[i]
+        nearby_count = 0
+        max_radius = np.max(circles[:, 2])
+        threshold = 3 * max_radius
+
+        for j in range(n):
+            if i != j:
+                dist = np.linalg.norm(center_i - centers[j])
+                if dist < threshold:
+                    nearby_count += 1
+
+        constraint_density[i] = nearby_count / max(1, n - 1)
+
+    return constraint_density
+=======
+def compute_voronoi_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute criticality scores for each circle based on Voronoi diagram cell areas.
+    Lower area = higher criticality (more constrained).
+    """
+    n = len(circles)
+    if n < 3:
+        return np.ones(n) * 0.5
+
+    try:
+        # Get circle centers
+        points = circles[:, :2]
+
+        # Shift points to avoid boundary issues
+        shifted_points = points.copy()
+        shifted_points[:, 0] = np.clip(shifted_points[:, 0], 0.01, rect_width - 0.01)
+        shifted_points[:, 1] = np.clip(shifted_points[:, 1], 0.01, rect_height - 0.01)
+
+        # Compute Voronoi diagram
+        vor = Voronoi(shifted_points)
+
+        # Compute area of Voronoi cells
+        areas = []
+        for i in range(len(shifted_points)):
+            # Get vertices of Voronoi cell for point i
+            region = vor.regions[vor.point_region[i]]
+            if -1 in region:
+                # Infinite region, use large area
+                areas.append(1000000)
+            else:
+                # Compute polygon area
+                vertices = [vor.vertices[j] for j in region if j >= 0]
+                if len(vertices) < 3:
+                    areas.append(1000000)
+                else:
+                    # Use shoelace formula for polygon area
+                    vertices_array = np.array(vertices)
+                    x = vertices_array[:, 0]
+                    y = vertices_array[:, 1]
+                    area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                    areas.append(area)
+
+        # Convert to criticality score (lower area = higher criticality)
+        areas = np.array(areas)
+        # Normalize to [0,1] where 0 = most critical (smallest area)
+        normalized_areas = (areas - areas.min()) / (areas.max() - areas.min() + 1e-8)
+        criticality_scores = 1.0 - normalized_areas  # Higher criticality = closer to 1
+
+        return criticality_scores
+
+    except:
+        # Fallback to uniform criticality if Voronoi fails
+        return np.ones(len(circles)) * 0.5
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_circles_adaptive(circles: np.ndarray,
+                          constraint_densities: np.ndarray,
+                          rect_width: float = 1.0,
+                          rect_height: float = 1.0,
+                          max_radius: float = 0.5) -> np.ndarray:
+    """
+    Mutate circle positions and radii with adaptive weights based on constraint density.
+    """
+    mutated = circles.copy()
+    n = len(mutated)
+
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        density_weight = 1.0 + constraint_densities[i] * 2.0
+
+        pos_strength = 0.02 / density_weight
+        rad_strength = 0.01 / density_weight
+
+        x += np.random.normal(0, pos_strength)
+        y += np.random.normal(0, pos_strength)
+
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+
+        r += np.random.normal(0, rad_strength)
+        r = np.clip(r, 0.001, max_radius * 0.9)
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+=======
+def mutate_circles_adaptive(circles: np.ndarray,
+                          criticality_scores: np.ndarray,
+                          rect_width: float = 1.0,
+                          rect_height: float = 1.0,
+                          max_radius: float = 0.5) -> np.ndarray:
+    """
+    Mutate circle positions and radii with adaptive weights based on Voronoi-based criticality.
+    High criticality (small Voronoi cells) = more conservative mutations.
+    """
+    mutated = circles.copy()
+    n = len(mutated)
+
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        # Criticality-based mutation factors
+        # High criticality (0-1 scale) -> smaller mutations
+        criticality = criticality_scores[i]
+        # Scale mutation strength: criticality 1 (high) = 0.1x base, criticality 0 (low) = 1x base
+        mutation_scale = 0.1 + 0.9 * (1 - criticality)
+
+        pos_strength = 0.02 * mutation_scale
+        rad_strength = 0.01 * mutation_scale
+
+        # Mutate position
+        x += np.random.normal(0, pos_strength)
+        y += np.random.normal(0, pos_strength)
+
+        # Ensure position stays within bounds
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+
+        # Mutate radius
+        r += np.random.normal(0, rad_strength)
+        # Ensure radius remains positive and reasonable
+        r = np.clip(r, 0.001, max_radius * 0.9)
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        for gen in range(generations):
+            fitness_scores = []
+            for circles in population:
+                fitness, _ = calculate_fitness(circles, rect_width, rect_height)
+                fitness_scores.append(fitness)
+
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores.sort(reverse=True)
+
+            best_fitness_history.append(fitness_scores[0])
+
+            if gen % 20 == 0:
+                print(f"Generation {gen}, Best fitness: {fitness_scores[0]:.6f}")
+
+            new_population = [population[0]]
+
+            while len(new_population) < population_size:
+                tournament_size = 5
+                tournament_indices = random.sample(range(population_size), tournament_size)
+                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                winner_index = tournament_indices[np.argmax(tournament_fitness)]
+
+                parent1 = population[winner_index]
+
+                tournament_indices.remove(winner_index)
+                tournament_fitness.remove(max(tournament_fitness))
+                winner_index2 = tournament_indices[np.argmax(tournament_fitness)]
+                parent2 = population[winner_index2]
+
+                offspring = crossover_circles(parent1, parent2)
+
+                constraint_densities = compute_voronoi_constraints(offspring, rect_width, rect_height)
+                offspring = mutate_circles_adaptive(offspring, constraint_densities,
+                                                  rect_width, rect_height,
+                                                  max_radius=min(rect_width, rect_height) / 2)
+
+                new_population.append(offspring)
+
+            population = new_population[:population_size]
+
+            if len(best_fitness_history) >= 5:
+                recent_improvement = best_fitness_history[-1] - best_fitness_history[-5]
+                if recent_improvement < 1e-6 and gen > 30:
+                    break
+=======
+        for gen in range(generations):
+            fitness_scores = []
+            for circles in population:
+                fitness, _ = calculate_fitness(circles, rect_width, rect_height)
+                fitness_scores.append(fitness)
+
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores.sort(reverse=True)
+
+            best_fitness_history.append(fitness_scores[0])
+
+            if gen % 20 == 0:
+                print(f"Generation {gen}, Best fitness: {fitness_scores[0]:.6f}")
+
+            new_population = [population[0]]
+
+            while len(new_population) < population_size:
+                tournament_size = 5
+                tournament_indices = random.sample(range(population_size), tournament_size)
+                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                winner_index = tournament_indices[np.argmax(tournament_fitness)]
+
+                parent1 = population[winner_index]
+
+                tournament_indices.remove(winner_index)
+                tournament_fitness.remove(max(tournament_fitness))
+                winner_index2 = tournament_indices[np.argmax(tournament_fitness)]
+                parent2 = population[winner_index2]
+
+                offspring = crossover_circles(parent1, parent2)
+
+                criticality_scores = compute_voronoi_criticality(offspring, rect_width, rect_height)
+                offspring = mutate_circles_adaptive(offspring, criticality_scores,
+                                                  rect_width, rect_height,
+                                                  max_radius=min(rect_width, rect_height) / 2)
+
+                new_population.append(offspring)
+
+            population = new_population[:population_size]
+
+            if len(best_fitness_history) >= 5:
+                recent_improvement = best_fitness_history[-1] - best_fitness_history[-5]
+                if recent_improvement < 1e-6 and gen > 30:
+                    break
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+
+    for iter_num in range(iterations):
+        for i in range(n):
+            old_x, old_y, old_r = refined[i]
+
+            density_weight = 1.0 + constraint_densities[i] * 2.0
+            pos_strength = 0.01 / density_weight
+            rad_strength = 0.005 / density_weight
+=======
+    criticality_scores = compute_voronoi_criticality(refined, rect_width, rect_height)
+
+    for iter_num in range(iterations):
+        for i in range(n):
+            old_x, old_y, old_r = refined[i]
+
+            # Use criticality for adaptive mutation
+            criticality = criticality_scores[i]
+            mutation_scale = 0.1 + 0.9 * (1 - criticality)
+            pos_strength = 0.01 * mutation_scale
+            rad_strength = 0.005 * mutation_scale
+>>>>>>> REPLACE
+</DIFF>

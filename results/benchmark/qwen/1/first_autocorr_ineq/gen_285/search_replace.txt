@@ -1,0 +1,206 @@
+<NAME>
+enhance_local_search_with_multi_start_gradient
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more sophisticated local search strategy that leverages multi-start gradient-based optimization with adaptive step sizes. This enhancement will improve exploration around promising solutions and potentially find better local optima by:
+1. Using multiple random starting points to avoid local minima
+2. Implementing adaptive learning rates based on gradient magnitude
+3. Employing more robust gradient estimation techniques
+4. Combining local search with global exploration to maintain balance
+
+This approach builds upon the existing framework while injecting more advanced optimization techniques to push beyond current performance limits.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class LocalSearchStrategy:
+    """Handles local search strategies including gradient-based improvements."""
+
+    @staticmethod
+    def get_good_direction_to_move_into(sequence: List[float]) -> List[float] | None:
+        """Returns the direction to move into the sequence using a specialized optimization."""
+        n = len(sequence)
+        sum_sequence = np.sum(sequence)
+
+        # Avoid division by zero
+        if sum_sequence < 1e-10:
+            return None
+
+        # Use a direct gradient descent approach to improve the sequence
+        try:
+            # Approximate gradient using finite differences
+            epsilon = 1e-4
+            base_fitness = 1.0 / _evaluator.compute(sequence)[0] if _evaluator.compute(sequence)[0] != float('inf') else 0.0
+
+            # Compute gradient per dimension
+            grad = np.zeros(n)
+            for i in range(n):
+                perturbed = sequence[:]
+                perturbed[i] = max(0.01, perturbed[i] + epsilon)
+                perturbed_fitness = 1.0 / _evaluator.compute(perturbed)[0] if _evaluator.compute(perturbed)[0] != float('inf') else 0.0
+                grad[i] = (perturbed_fitness - base_fitness) / epsilon
+
+            # Update in the direction of gradient ascent
+            step_size = 0.1
+            updated = [max(0.01, sequence[i] + step_size * grad[i]) for i in range(n)]
+
+            return updated
+        except Exception:
+            # Fallback to simple perturbation
+            return [max(0.01, x * random.uniform(0.95, 1.05)) for x in sequence]
+
+    @staticmethod
+    def multi_start_local_search(sequence: List[float], max_starts: int = 5) -> List[float]:
+        """Perform multi-start local search to find better local optima."""
+        best_sequence = sequence.copy()
+        best_fitness = fitness_evaluator(best_sequence)
+
+        # Try multiple perturbations and local searches
+        for _ in range(max_starts):
+            # Create a slightly perturbed version of the sequence
+            perturbed = [x * random.uniform(0.95, 1.05) for x in sequence]
+            # Ensure non-negative values
+            perturbed = [max(0.01, x) for x in perturbed]
+
+            # Apply local search to the perturbed sequence
+            improved = LocalSearchStrategy.get_good_direction_to_move_into(perturbed)
+            if improved is not None:
+                # Evaluate the improved sequence
+                inv_c1 = fitness_evaluator(improved)
+                if inv_c1 > best_fitness:
+                    best_fitness = inv_c1
+                    best_sequence = improved
+
+        return best_sequence
+=======
+class LocalSearchStrategy:
+    """Handles local search strategies including gradient-based improvements."""
+
+    @staticmethod
+    def gradient_ascent_step(sequence: List[float], learning_rate: float = 0.1,
+                           epsilon: float = 1e-4) -> List[float] | None:
+        """Perform a single gradient ascent step with adaptive learning rate."""
+        n = len(sequence)
+        sum_sequence = np.sum(sequence)
+
+        # Avoid division by zero
+        if sum_sequence < 1e-10:
+            return None
+
+        try:
+            base_fitness = 1.0 / _evaluator.compute(sequence)[0] if _evaluator.compute(sequence)[0] != float('inf') else 0.0
+
+            # Compute gradient per dimension using central differences for better accuracy
+            grad = np.zeros(n)
+            for i in range(n):
+                # Perturb forward and backward
+                perturbed_forward = sequence[:]
+                perturbed_backward = sequence[:]
+
+                perturbed_forward[i] = max(0.01, perturbed_forward[i] + epsilon)
+                perturbed_backward[i] = max(0.01, perturbed_backward[i] - epsilon)
+
+                forward_fitness = 1.0 / _evaluator.compute(perturbed_forward)[0] if _evaluator.compute(perturbed_forward)[0] != float('inf') else 0.0
+                backward_fitness = 1.0 / _evaluator.compute(perturbed_backward)[0] if _evaluator.compute(perturbed_backward)[0] != float('inf') else 0.0
+
+                grad[i] = (forward_fitness - backward_fitness) / (2 * epsilon)
+
+            # Adaptive learning rate based on gradient magnitude
+            grad_norm = np.linalg.norm(grad)
+            if grad_norm > 0:
+                adaptive_lr = learning_rate / (1.0 + grad_norm)
+            else:
+                adaptive_lr = learning_rate
+
+            # Update in the direction of gradient ascent
+            updated = [max(0.01, sequence[i] + adaptive_lr * grad[i]) for i in range(n)]
+
+            return updated
+        except Exception as e:
+            print(f"Gradient ascent failed: {e}")
+            return None
+
+    @staticmethod
+    def multi_start_gradient_ascent(sequence: List[float], max_starts: int = 10,
+                                  max_iterations: int = 20) -> List[float]:
+        """Perform multi-start gradient ascent to find better local optima."""
+        best_sequence = sequence.copy()
+        best_fitness = fitness_evaluator(best_sequence)
+
+        # Store the best performing sequence
+        best_performing = (best_sequence.copy(), best_fitness)
+
+        # Try multiple starting points
+        for start_idx in range(max_starts):
+            # Start with a slightly modified version
+            current_sequence = [x * random.uniform(0.9, 1.1) for x in sequence]
+            current_sequence = [max(0.01, x) for x in current_sequence]
+
+            # Perform gradient ascent
+            for iter_idx in range(max_iterations):
+                improved = LocalSearchStrategy.gradient_ascent_step(
+                    current_sequence, learning_rate=0.05 + 0.05 * (start_idx / max_starts)
+                )
+
+                if improved is None:
+                    break
+
+                current_fitness = fitness_evaluator(improved)
+
+                # If improved, accept the new solution
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_sequence = improved.copy()
+                    best_performing = (best_sequence.copy(), best_fitness)
+
+                current_sequence = improved
+
+        return best_performing[0]
+
+    @staticmethod
+    def hybrid_local_search(sequence: List[float], max_starts: int = 5) -> List[float]:
+        """Combine multiple local search strategies for robust optimization."""
+        # Strategy 1: Multi-start gradient ascent
+        ga_result = LocalSearchStrategy.multi_start_gradient_ascent(sequence, max_starts, 15)
+        ga_fitness = fitness_evaluator(ga_result)
+
+        # Strategy 2: Simple perturbation (fallback)
+        perturbed = [x * random.uniform(0.95, 1.05) for x in sequence]
+        perturbed = [max(0.01, x) for x in perturbed]
+        perturbed_fitness = fitness_evaluator(perturbed)
+
+        # Return the better of the two approaches
+        if ga_fitness > perturbed_fitness:
+            return ga_result
+        else:
+            return perturbed
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Apply enhanced local search to the best sequence
+            if self.best_sequence is not None:
+                local_search_result = LocalSearchStrategy.multi_start_local_search(self.best_sequence)
+                if local_search_result is not None:
+                    # Evaluate the local search result
+                    local_inv_c1 = fitness_evaluator(local_search_result)
+                    if local_inv_c1 > self.best_inv_c1:
+                        self.best_inv_c1 = local_inv_c1
+                        self.best_sequence = local_search_result
+                        self.stagnation_count = 0
+=======
+            # Apply enhanced local search to the best sequence
+            if self.best_sequence is not None:
+                local_search_result = LocalSearchStrategy.hybrid_local_search(self.best_sequence)
+                if local_search_result is not None:
+                    # Evaluate the local search result
+                    local_inv_c1 = fitness_evaluator(local_search_result)
+                    if local_inv_c1 > self.best_inv_c1:
+                        self.best_inv_c1 = local_inv_c1
+                        self.best_sequence = local_search_result
+                        self.stagnation_count = 0
+>>>>>>> REPLACE
+</DIFF>

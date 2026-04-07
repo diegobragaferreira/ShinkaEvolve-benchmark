@@ -1,0 +1,258 @@
+<NAME>
+enhance_jax_autodiff_with_vectorization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses JAX autodiff but doesn't fully leverage its vectorization capabilities. The idea is to implement vectorized batch processing of autoconvolution norms using `vmap` to evaluate multiple step function variants simultaneously. This will significantly speed up optimization cycles and allow for more intensive exploration of the solution space, potentially discovering higher C₂ values. The key insight is that we can compute gradients for multiple candidates in parallel, which will make the refinement stage much more efficient.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def compute_autoconvolution_jax(f):
+        """Compute autoconvolution using JAX for potential gradient computation"""
+        f = jnp.array(f)
+        # Autoconvolution using discrete convolution
+        g = jnp.convolve(f, f, mode='full')
+        # Trim to center portion (length n-1)
+        n = len(f)
+        offset = (n - 1) // 2
+        g = g[offset:-offset]
+        return g
+
+    @staticmethod
+    def compute_c2_jax(f):
+        """Compute C2 value using JAX for automatic differentiation"""
+        try:
+            # Compute autoconvolution
+            g = StepFunctionOptimizer.compute_autoconvolution_jax(f)
+
+            # Compute norms using JAX operations
+            g_abs = jnp.abs(g)
+            norm_l2_sq = jnp.sum(g_abs**2)
+            norm_l1 = jnp.sum(g_abs)
+            norm_inf = jnp.max(g_abs)
+
+            # Avoid division by zero
+            eps = 1e-12
+            norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+            norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+            c2 = norm_l2_sq / (norm_l1 * norm_inf)
+            return c2
+        except Exception:
+            return 0.0
+=======
+    @staticmethod
+    def compute_autoconvolution_jax(f):
+        """Compute autoconvolution using JAX for potential gradient computation"""
+        f = jnp.array(f)
+        # Autoconvolution using discrete convolution
+        g = jnp.convolve(f, f, mode='full')
+        # Trim to center portion (length n-1)
+        n = len(f)
+        offset = (n - 1) // 2
+        g = g[offset:-offset]
+        return g
+
+    @staticmethod
+    def compute_c2_jax(f):
+        """Compute C2 value using JAX for automatic differentiation"""
+        try:
+            # Compute autoconvolution
+            g = StepFunctionOptimizer.compute_autoconvolution_jax(f)
+
+            # Compute norms using JAX operations
+            g_abs = jnp.abs(g)
+            norm_l2_sq = jnp.sum(g_abs**2)
+            norm_l1 = jnp.sum(g_abs)
+            norm_inf = jnp.max(g_abs)
+
+            # Avoid division by zero
+            eps = 1e-12
+            norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+            norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+            c2 = norm_l2_sq / (norm_l1 * norm_inf)
+            return c2
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    @jit
+    def compute_autoconvolution_norms_jax(f):
+        """
+        Compute autoconvolution norms using JAX operations for vectorized batch processing
+        """
+        # Compute autoconvolution
+        g = StepFunctionOptimizer.compute_autoconvolution_jax(f)
+
+        # Compute norms using JAX operations
+        g_abs = jnp.abs(g)
+        norm_l2_sq = jnp.sum(g_abs**2)
+        norm_l1 = jnp.sum(g_abs)
+        norm_inf = jnp.max(g_abs)
+
+        # Avoid division by zero
+        eps = 1e-12
+        norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+        norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+        return norm_l2_sq, norm_l1, norm_inf
+
+    @staticmethod
+    @jit
+    def compute_c2_batch_jax(f_batch):
+        """
+        Compute C2 values for a batch of functions using vectorized operations
+        """
+        # Vectorized computation of norms for all functions in batch
+        norms = jax.vmap(StepFunctionOptimizer.compute_autoconvolution_norms_jax)(f_batch)
+        norm_l2_sq, norm_l1, norm_inf = norms
+
+        # Compute C2 values for all functions in batch
+        eps = 1e-12
+        norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+        norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+        c2_batch = norm_l2_sq / (norm_l1 * norm_inf)
+        return c2_batch
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+integrate_vectorized_gradient_ascent
+</NAME>
+
+<DESCRIPTION>
+This change integrates the vectorized JAX operations into the refinement stage of the optimization. Instead of refining one solution at a time, we'll now use the vectorized approach to evaluate multiple perturbed versions simultaneously. This increases the efficiency of the local optimization phase and allows more thorough exploration of the neighborhood around promising solutions. The key improvement is using `vmap` to run gradient ascent on multiple candidates in parallel, making the refinement process much faster and more effective.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+                # Try multiple refinements using JAX autodiff
+                for _ in range(3):
+                    # Perturb current best solution
+                    perturbed = np.array(current_best_f) * (1 + np.random.normal(0, 0.03, len(current_best_f)))
+                    perturbed = np.maximum(perturbed, 0)
+
+                    # Refine using JAX-based gradient ascent
+                    try:
+                        # Use JAX's jit for better performance
+                        @jax_jit
+                        def refine_step(f_vals):
+                            # Convert to JAX array
+                            f = jnp.array(f_vals, dtype=jnp.float32)
+
+                            # Compute gradient using JAX autodiff
+                            grad_fn = grad(StepFunctionOptimizer.compute_c2_jax)
+                            grad_val = grad_fn(f)
+
+                            # Gradient ascent step
+                            step_size = 0.01
+                            refined = f + step_size * grad_val
+                            # Ensure non-negativity
+                            refined = jnp.maximum(refined, 0)
+
+                            # Convert back to numpy for evaluation
+                            return np.array(refined)
+
+                        # Apply refinement
+                        refined_f = refine_step(perturbed)
+
+                        # Evaluate refined solution
+                        c2_refined = self.evaluate_function(refined_f)
+
+                        if c2_refined > best_local_c2:
+                            best_local_c2 = c2_refined
+                            best_local_f = refined_f.tolist()
+
+                    except Exception as refinement_error:
+                        warnings.warn(f"JAX refinement failed: {str(refinement_error)}")
+                        # Skip this refinement attempt
+                        continue
+
+                # Update with better local result if found
+                if best_local_c2 > current_best_c2:
+                    current_best_c2 = best_local_c2
+                    current_best_f = best_local_f
+=======
+                # Try multiple refinements using vectorized JAX autodiff
+                try:
+                    # Prepare batch of perturbed solutions
+                    batch_size = 5  # Number of simultaneous refinements
+                    f_array = np.array(current_best_f)
+
+                    # Create batch of perturbed solutions
+                    perturbed_batch = []
+                    for _ in range(batch_size):
+                        perturbed = f_array * (1 + np.random.normal(0, 0.03, len(f_array)))
+                        perturbed = np.maximum(perturbed, 0)
+                        perturbed_batch.append(perturbed)
+
+                    # Convert to JAX array for vectorized computation
+                    f_batch = jnp.array(perturbed_batch, dtype=jnp.float32)
+
+                    # Vectorized gradient computation
+                    grad_fn = grad(StepFunctionOptimizer.compute_c2_jax)
+                    grad_batch = jax.vmap(grad_fn)(f_batch)
+
+                    # Vectorized gradient ascent
+                    step_size = 0.01
+                    refined_batch = f_batch + step_size * grad_batch
+                    refined_batch = jnp.maximum(refined_batch, 0)
+
+                    # Convert back to numpy for evaluation
+                    refined_numpy = np.array(refined_batch)
+
+                    # Evaluate all refined solutions in batch
+                    c2_values = []
+                    for refined_f in refined_numpy:
+                        c2_val = self.evaluate_function(refined_f.tolist())
+                        c2_values.append(c2_val)
+
+                    # Find best among refined solutions
+                    best_idx = np.argmax(c2_values)
+                    best_c2_refined = c2_values[best_idx]
+                    best_refined_f = refined_numpy[best_idx].tolist()
+
+                    if best_c2_refined > best_local_c2:
+                        best_local_c2 = best_c2_refined
+                        best_local_f = best_refined_f
+
+                except Exception as refinement_error:
+                    warnings.warn(f"Vectorized JAX refinement failed: {str(refinement_error)}")
+                    # Fallback to single refinement if vectorized fails
+                    try:
+                        # Perturb current best solution
+                        perturbed = np.array(current_best_f) * (1 + np.random.normal(0, 0.03, len(current_best_f)))
+                        perturbed = np.maximum(perturbed, 0)
+
+                        # Refine using single JAX-based gradient ascent
+                        @jit
+                        def refine_step(f_vals):
+                            f = jnp.array(f_vals, dtype=jnp.float32)
+                            grad_fn = grad(StepFunctionOptimizer.compute_c2_jax)
+                            grad_val = grad_fn(f)
+                            step_size = 0.01
+                            refined = f + step_size * grad_val
+                            refined = jnp.maximum(refined, 0)
+                            return np.array(refined)
+
+                        refined_f = refine_step(perturbed)
+                        c2_refined = self.evaluate_function(refined_f)
+
+                        if c2_refined > best_local_c2:
+                            best_local_c2 = c2_refined
+                            best_local_f = refined_f.tolist()
+
+                    except Exception:
+                        pass  # Continue with original result if all refinements fail
+
+                # Update with better local result if found
+                if best_local_c2 > current_best_c2:
+                    current_best_c2 = best_local_c2
+                    current_best_f = best_local_f
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,474 @@
+--- a/original.py
++++ b/original.py
+@@ -1,236 +1,314 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist
+ import warnings
+ import math
+-
+-
+-def min_max_dist_dim2_16() -> np.ndarray:
+-    """
+-    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+-
+-    Returns
+-        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+-    """
+-
+-    def objective(x):
+-        # Reshape x into points array
+-        points = x.reshape(-1, 2)
+-
+-        # Compute pairwise distances
+-        distances = pdist(points)
+-
+-        # Avoid division by zero
+-        if len(distances) == 0:
+-            return 0
+-
+-        # Calculate min and max distances
+-        d_min = np.min(distances)
+-        d_max = np.max(distances)
+-
+-        # Return negative ratio to maximize (since minimize minimizes)
+-        if d_max == 0:
+-            return 0
+-        return -d_min / d_max
+-
+-    def compute_ratio(points):
+-        """Compute the actual ratio for given points"""
+-        distances = pdist(points)
+-        if len(distances) == 0:
+-            return 0
+-        d_min = np.min(distances)
+-        d_max = np.max(distances)
+-        if d_max == 0:
+-            return 0
+-        return d_min / d_max
+-
+-    def generate_initial_configurations():
+-        """Generate multiple diverse initial configurations"""
+-        configs = []
+-        np.random.seed(42)
+-
+-        # 1. Grid configuration
+-        grid_points = []
+-        grid_size = 4  # 4x4 grid for 16 points
+-        spacing = 1.0 / (grid_size - 1) if grid_size > 1 else 1.0
+-        for i in range(grid_size):
+-            for j in range(grid_size):
+-                if len(grid_points) < 16:
+-                    grid_points.append([i * spacing, j * spacing])
+-        configs.append(np.array(grid_points))
+-
+-        # 2. Perturbed grid configuration
+-        perturbed_points = []
+-        for i in range(grid_size):
+-            for j in range(grid_size):
+-                if len(perturbed_points) < 16:
+-                    x = max(0, min(1, i * spacing + np.random.normal(0, 0.05 * spacing)))
+-                    y = max(0, min(1, j * spacing + np.random.normal(0, 0.05 * spacing)))
+-                    perturbed_points.append([x, y])
+-        configs.append(np.array(perturbed_points))
+-
+-        # 3. Random configuration
+-        configs.append(np.random.rand(16, 2))
+-
+-        # 4. Hexagonal-like configuration with better spacing
+-        hex_points = []
++from typing import List, Tuple, Optional
++import time
++
++class PointConfiguration:
++    """Handles point configuration generation and manipulation."""
++    
++    def __init__(self, n_points: int = 16, dimensions: int = 2, seed: int = 42):
++        self.n_points = n_points
++        self.dimensions = dimensions
++        np.random.seed(seed)
++    
++    def generate_grid_points(self) -> np.ndarray:
++        """Generate points in a grid pattern."""
++        n_per_side = int(np.ceil(np.sqrt(self.n_points)))
++        x = np.linspace(0.1, 0.9, n_per_side)
++        y = np.linspace(0.1, 0.9, n_per_side)
++        xx, yy = np.meshgrid(x, y)
++        points = np.column_stack([xx.ravel(), yy.ravel()])[:self.n_points]
++        return points
++    
++    def generate_perturbed_grid_points(self) -> np.ndarray:
++        """Generate a perturbed grid to break symmetries."""
++        grid_points = self.generate_grid_points()
++        # Add small random perturbations
++        perturbation_magnitude = 0.05
++        perturbed = grid_points + np.random.normal(0, perturbation_magnitude, grid_points.shape)
++        # Clip to bounds
++        perturbed = np.clip(perturbed, 0, 1)
++        return perturbed
++    
++    def generate_hexagonal_points(self) -> np.ndarray:
++        """Generate points in a hexagonal pattern."""
++        points = []
+         # Center point
+-        hex_points.append([0.5, 0.5])
+-
+-        # Surrounding points in hexagonal pattern with proper spacing
++        points.append([0.5, 0.5])
++        
++        # Surrounding points in hexagonal pattern
+         radius = 0.3
+         angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
+         for angle in angles:
+             x = 0.5 + radius * np.cos(angle)
+             y = 0.5 + radius * np.sin(angle)
+-            if len(hex_points) < 16:
+-                hex_points.append([x, y])
+-
+-        # Fill remaining points with triangular packing pattern
+-        if len(hex_points) < 16:
+-            # Add points in triangular lattice pattern to maximize dispersion
++            if len(points) < self.n_points:
++                points.append([x, y])
++        
++        # Fill remaining points with triangular lattice pattern
++        if len(points) < self.n_points:
+             rows = 3
+             cols = 3
+-            spacing = 0.25  # Adjusted spacing for better distribution
++            spacing = 0.25
+             y_spacing = spacing * np.sqrt(3)
+             x_spacing = spacing * 2
+             
+             for i in range(rows):
+                 for j in range(cols):
+-                    if len(hex_points) < 16:
++                    if len(points) < self.n_points:
+                         x = 0.5 - (cols-1)*x_spacing/2 + j*x_spacing
+                         # Offset every other row for hexagonal packing
+                         if i % 2 == 1:
+                             x += x_spacing/2
+                         y = 0.5 - (rows-1)*y_spacing/2 + i*y_spacing
+                         
+                         # Add noise to break symmetry
+                         x += np.random.normal(0, spacing * 0.1)
+                         y += np.random.normal(0, spacing * 0.1)
+                         
+                         # Clip to bounds
+                         x = np.clip(x, 0, 1)
+                         y = np.clip(y, 0, 1)
+-                        hex_points.append([x, y])
+-
++                        points.append([x, y])
++        
+         # Fill remaining points randomly
+-        for i in range(16 - len(hex_points)):
+-            hex_points.append([np.random.rand(), np.random.rand()])
+-
+-        configs.append(np.array(hex_points[:16]))
+-
+-        return configs
+-
+-    def simulated_annealing(points, max_iter=5000, initial_temp=1.0, cooling_rate=0.9995):
+-        """
+-        Simulated Annealing optimization for point dispersion
+-        """
++        while len(points) < self.n_points:
++            points.append([np.random.rand(), np.random.rand()])
++            
++        return np.array(points[:self.n_points])
++    
++    def generate_random_points(self) -> np.ndarray:
++        """Generate random points."""
++        return np.random.rand(self.n_points, self.dimensions)
++    
++    def generate_all_configurations(self) -> List[np.ndarray]:
++        """Generate all types of initial configurations."""
++        configurations = [
++            self.generate_grid_points(),
++            self.generate_perturbed_grid_points(),
++            self.generate_hexagonal_points(),
++            self.generate_random_points()
++        ]
++        return configurations
++
++class FitnessEvaluator:
++    """Evaluates the quality of point configurations."""
++    
++    @staticmethod
++    def compute_ratio(points: np.ndarray) -> float:
++        """Compute the min/max distance ratio for given points."""
++        distances = pdist(points)
++        if len(distances) == 0:
++            return 0
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        if d_max == 0:
++            return 0
++        return d_min / d_max
++
++class OptimizationStrategy:
++    """Base class for optimization strategies."""
++    
++    def optimize(self, points: np.ndarray) -> Tuple[np.ndarray, float]:
++        raise NotImplementedError
++
++class LBFGSBOptimizer(OptimizationStrategy):
++    """L-BFGS-B optimization strategy."""
++    
++    def __init__(self, max_iterations: int = 1000):
++        self.max_iterations = max_iterations
++    
++    def optimize(self, points: np.ndarray) -> Tuple[np.ndarray, float]:
++        """Optimize using L-BFGS-B method."""
++        def objective(x):
++            # Reshape x into points array
++            reshaped_points = x.reshape(-1, 2)
++            
++            # Compute pairwise distances
++            distances = pdist(reshaped_points)
++            
++            # Avoid division by zero
++            if len(distances) == 0:
++                return 0
++            
++            # Calculate min and max distances
++            d_min = np.min(distances)
++            d_max = np.max(distances)
++            
++            # Return negative ratio to maximize (since minimize minimizes)
++            if d_max == 0:
++                return 0
++            return -d_min / d_max
++        
++        # Flatten initial guess
++        x0 = points.flatten()
++        
++        # Set up bounds (each coordinate must be between 0 and 1)
++        bounds = [(0, 1) for _ in range(len(x0))]
++        
++        # Optimize using L-BFGS-B
++        try:
++            result = minimize(
++                objective,
++                x0,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': self.max_iterations, 'ftol': 1e-10, 'gtol': 1e-10}
++            )
++            
++            if result.success:
++                optimized_points = result.x.reshape(-1, 2)
++                return optimized_points, -result.fun
++            else:
++                warnings.warn(f"L-BFGS-B optimization failed: {result.message}")
++                return points, FitnessEvaluator.compute_ratio(points)
++                
++        except Exception as e:
++            warnings.warn(f"L-BFGS-B optimization error: {str(e)}")
++            return points, FitnessEvaluator.compute_ratio(points)
++
++class SimulatedAnnealingOptimizer(OptimizationStrategy):
++    """Simulated Annealing optimization strategy."""
++    
++    def __init__(self, max_iterations: int = 5000, initial_temp: float = 1.0, cooling_rate: float = 0.9995):
++        self.max_iterations = max_iterations
++        self.initial_temp = initial_temp
++        self.cooling_rate = cooling_rate
++    
++    def optimize(self, points: np.ndarray) -> Tuple[np.ndarray, float]:
++        """Optimize using Simulated Annealing."""
++        def compute_ratio(points_array):
++            """Compute the actual ratio for given points"""
++            distances = pdist(points_array)
++            if len(distances) == 0:
++                return 0
++            d_min = np.min(distances)
++            d_max = np.max(distances)
++            if d_max == 0:
++                return 0
++            return d_min / d_max
++        
+         current_points = points.copy()
+         current_ratio = compute_ratio(current_points)
+         best_points = current_points.copy()
+         best_ratio = current_ratio
+ 
+-        temp = initial_temp
+-
+-        for iteration in range(max_iter):
++        temp = self.initial_temp
++
++        for iteration in range(self.max_iterations):
+             # Create neighbor by perturbing one random point
+             neighbor_points = current_points.copy()
+             idx = np.random.randint(0, len(neighbor_points))
+ 
+             # Perturb the selected point with adaptive step size
+-            step_size = 0.02 if iteration < max_iter//2 else 0.005
++            step_size = 0.02 if iteration < self.max_iterations//2 else 0.005
+             neighbor_points[idx, 0] += np.random.normal(0, step_size)
+             neighbor_points[idx, 1] += np.random.normal(0, step_size)
+ 
+             # Keep within bounds
+             neighbor_points[idx, 0] = np.clip(neighbor_points[idx, 0], 0, 1)
+             neighbor_points[idx, 1] = np.clip(neighbor_points[idx, 1], 0, 1)
+ 
+             # Calculate neighbor ratio
+             neighbor_ratio = compute_ratio(neighbor_points)
+ 
+             # Accept or reject the neighbor
+             if neighbor_ratio > current_ratio:
+                 current_points = neighbor_points
+                 current_ratio = neighbor_ratio
+                 if neighbor_ratio > best_ratio:
+                     best_points = neighbor_points.copy()
+                     best_ratio = neighbor_ratio
+             else:
+                 # Accept with probability based on temperature
+                 delta = neighbor_ratio - current_ratio
+                 if delta < 0:  # Only accept worse solutions with probability
+                     acceptance_prob = math.exp(delta / temp)
+                     if np.random.random() < acceptance_prob:
+                         current_points = neighbor_points
+                         current_ratio = neighbor_ratio
+ 
+             # Cool down
+-            temp *= cooling_rate
++            temp *= self.cooling_rate
+ 
+             # Early stopping condition
+             if temp < 1e-8:
+                 break
+ 
+         return best_points, best_ratio
+ 
+-    # Generate multiple initial configurations
+-    initial_configs = generate_initial_configurations()
+-
+-    best_points = None
+-    best_ratio = -np.inf
+-
+-    # Try all initial configurations with optimization
+-    for i, initial_config in enumerate(initial_configs):
+-        try:
+-            # First, try direct optimization with L-BFGS-B
+-            # Flatten initial guess
+-            x0 = initial_config.flatten()
+-
+-            # Set up bounds (each coordinate must be between 0 and 1)
+-            bounds = [(0, 1) for _ in range(32)]
+-
+-            # Optimize using L-BFGS-B which handles bounds well
+-            result = minimize(
+-                objective,
+-                x0,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                options={'maxiter': 1000, 'ftol': 1e-10, 'gtol': 1e-10}
+-            )
+-
+-            optimized_points = initial_config.copy()
+-            ratio = compute_ratio(initial_config)
+-            
+-            if result.success:
+-                optimized_points = result.x.reshape(-1, 2)
+-                # Evaluate the actual ratio achieved
+-                ratio = compute_ratio(optimized_points)
+-            else:
+-                warnings.warn(f"Optimization failed for initial config {i}: {result.message}")
+-
+-            # Refine with simulated annealing if we have a reasonable solution
+-            if ratio > 0.1 and ratio > best_ratio:
+-                sa_points, sa_ratio = simulated_annealing(optimized_points.copy())
+-                if sa_ratio > ratio:
+-                    optimized_points = sa_points
+-                    ratio = sa_ratio
+-
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = optimized_points.copy()
+-
+-        except Exception as e:
+-            warnings.warn(f"Error optimizing initial config {i}: {str(e)}")
+-            continue
+-
+-    # If no optimization succeeded, return the first configuration
+-    if best_points is None:
+-        return initial_configs[0]
+-
+-    return best_points
+-
++class EvolutionaryPointOptimizer:
++    """Main optimizer that orchestrates multiple strategies."""
++    
++    def __init__(self, n_points: int = 16, dimensions: int = 2, seed: int = 42, max_time_seconds: int = 180):
++        self.n_points = n_points
++        self.dimensions = dimensions
++        self.seed = seed
++        self.max_time_seconds = max_time_seconds
++        self.config_generator = PointConfiguration(n_points, dimensions, seed)
++        self.fitness_evaluator = FitnessEvaluator()
++        self.lbfgsb_optimizer = LBFGSBOptimizer()
++        self.sa_optimizer = SimulatedAnnealingOptimizer()
++    
++    def optimize(self) -> np.ndarray:
++        """Main optimization routine."""
++        start_time = time.time()
++        best_points = None
++        best_ratio = -np.inf
++        
++        # Generate all initial configurations
++        configurations = self.config_generator.generate_all_configurations()
++        
++        # Try each configuration with multiple optimization strategies
++        for i, initial_config in enumerate(configurations):
++            if time.time() - start_time > self.max_time_seconds - 5:
++                break
++                
++            try:
++                # Strategy 1: L-BFGS-B optimization
++                lbfgsb_points, lbfgsb_ratio = self.lbfgsb_optimizer.optimize(initial_config)
++                
++                # Strategy 2: Simulated Annealing refinement (only if L-BFGS-B gave reasonable results)
++                if lbfgsb_ratio > 0.1:  # Only refine if it's a decent solution
++                    sa_points, sa_ratio = self.sa_optimizer.optimize(lbfgsb_points)
++                    optimized_points = sa_points if sa_ratio > lbfgsb_ratio else lbfgsb_points
++                    ratio = max(sa_ratio, lbfgsb_ratio)
++                else:
++                    optimized_points = lbfgsb_points
++                    ratio = lbfgsb_ratio
++                
++                # Update best solution
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_points = optimized_points.copy()
++                    
++            except Exception as e:
++                warnings.warn(f"Error in optimization round {i}: {str(e)}")
++                continue
++        
++        # Final validation
++        if best_points is not None:
++            final_ratio = self.fitness_evaluator.compute_ratio(best_points)
++            print(f"Final optimized ratio: {final_ratio:.6f}")
++            return best_points
++        else:
++            # Fallback to the first configuration if nothing worked
++            return configurations[0] if configurations else np.random.rand(self.n_points, self.dimensions)
++
++def min_max_dist_dim2_16() -> np.ndarray:
++    """
++    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
++
++    Returns
++        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
++
++    """
++    optimizer = EvolutionaryPointOptimizer(n_points=16, dimensions=2, seed=42, max_time_seconds=180)
++    points = optimizer.optimize()
++    return points
+ 
+ # EVOLVE-BLOCK-END

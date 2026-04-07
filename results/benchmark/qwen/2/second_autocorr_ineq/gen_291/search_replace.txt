@@ -1,0 +1,330 @@
+<NAME>
+add_multi_scale_peak_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding multi-scale peak optimization that focuses on optimizing peak positions and amplitudes rather than individual step values. This approach leverages the fact that the autoconvolution behavior is dominated by the interaction between peaks, so optimizing their parameters directly leads to better convergence. The optimization targets specific peak characteristics that maximize the C2 ratio.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_gaussian_peak_function(size: int, n_peaks: int = None) -> List[float]:
+    """Create a step function with Gaussian peaks for better initialization"""
+    if n_peaks is None:
+        n_peaks = max(3, min(10, size // 50))
+
+    f_values = np.zeros(size)
+
+    # Create peaks with log-uniform distribution to avoid clustering
+    positions = np.logspace(0, 1, n_peaks, base=10) - 1  # [0, 9]
+    peak_positions = (positions / 9.0) * (size - 10) + 5  # Centered in domain
+
+    # Ensure unique positions
+    peak_positions = np.unique(peak_positions.astype(int))
+    while len(peak_positions) < n_peaks:
+        new_pos = np.random.randint(5, size - 5)
+        if new_pos not in peak_positions:
+            peak_positions = np.append(peak_positions, new_pos)
+    peak_positions = np.sort(peak_positions)[:n_peaks]
+
+    # Generate peaks with adaptive parameters
+    for i, center in enumerate(peak_positions):
+        # Width varies based on peak importance and position
+        if i == 0 or i == len(peak_positions) - 1:
+            width = max(15, min(60, size // 8))
+            height = random.uniform(1.5, 2.5)
+        else:
+            width = max(10, min(40, size // 15))
+            height = random.uniform(1.0, 2.0)
+
+        # Apply peak shape with exponential decay
+        x = np.arange(size)
+        peak = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_values += peak
+
+    # Apply smoothing to reduce extreme variations
+    if size > 50:
+        window_size = min(51, size - 1)
+        if window_size % 2 == 0:
+            window_size -= 1
+        if window_size > 1:
+            f_values = signal.savgol_filter(f_values, window_size, 3)
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+    max_val = np.max(f_values)
+    if max_val > 0:
+        f_values = f_values / max_val * 2.0
+
+    return f_values.tolist()
+=======
+def create_gaussian_peak_function(size: int, n_peaks: int = None) -> List[float]:
+    """Create a step function with Gaussian peaks for better initialization"""
+    if n_peaks is None:
+        n_peaks = max(3, min(10, size // 50))
+
+    f_values = np.zeros(size)
+
+    # Create peaks with log-uniform distribution to avoid clustering
+    positions = np.logspace(0, 1, n_peaks, base=10) - 1  # [0, 9]
+    peak_positions = (positions / 9.0) * (size - 10) + 5  # Centered in domain
+
+    # Ensure unique positions
+    peak_positions = np.unique(peak_positions.astype(int))
+    while len(peak_positions) < n_peaks:
+        new_pos = np.random.randint(5, size - 5)
+        if new_pos not in peak_positions:
+            peak_positions = np.append(peak_positions, new_pos)
+    peak_positions = np.sort(peak_positions)[:n_peaks]
+
+    # Generate peaks with adaptive parameters
+    for i, center in enumerate(peak_positions):
+        # Width varies based on peak importance and position
+        if i == 0 or i == len(peak_positions) - 1:
+            width = max(15, min(60, size // 8))
+            height = random.uniform(1.5, 2.5)
+        else:
+            width = max(10, min(40, size // 15))
+            height = random.uniform(1.0, 2.0)
+
+        # Apply peak shape with exponential decay
+        x = np.arange(size)
+        peak = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_values += peak
+
+    # Apply smoothing to reduce extreme variations
+    if size > 50:
+        window_size = min(51, size - 1)
+        if window_size % 2 == 0:
+            window_size -= 1
+        if window_size > 1:
+            f_values = signal.savgol_filter(f_values, window_size, 3)
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+    max_val = np.max(f_values)
+    if max_val > 0:
+        f_values = f_values / max_val * 2.0
+
+    return f_values.tolist()
+
+def optimize_peak_parameters(f_values: List[float], max_iterations: int = 100) -> List[float]:
+    """
+    Perform multi-scale peak parameter optimization targeting direct peak interactions
+    to maximize C2 ratio by adjusting peak positions and amplitudes rather than
+    individual step values.
+    """
+    # Convert to numpy for easier manipulation
+    f_array = np.array(f_values)
+    size = len(f_array)
+
+    # Detect peaks in the current function
+    # Use a simple method to identify significant peaks
+    from scipy.signal import find_peaks
+    peaks, _ = find_peaks(f_array, height=np.max(f_array)*0.1, distance=size//20)
+
+    if len(peaks) < 2:
+        # If not enough peaks, just return original
+        return f_values
+
+    # Select representative peaks for optimization
+    # Focus on peaks that are not too close to edges
+    edge_threshold = size // 10
+    valid_peaks = [p for p in peaks if p > edge_threshold and p < size - edge_threshold]
+
+    if len(valid_peaks) < 2:
+        valid_peaks = peaks[:2] if len(peaks) >= 2 else peaks
+
+    # Create initial peak parameters to optimize
+    # Format: [position, height, width] for each peak
+    peak_params = []
+    for peak_idx in valid_peaks[:5]:  # Limit to 5 peaks for efficiency
+        # Get approximate position and amplitude
+        height = f_array[peak_idx]
+        # Estimate width based on local spread
+        width = 10  # Default
+        peak_params.append([peak_idx, height, width])
+
+    # Simple gradient-free optimization loop
+    best_f = f_array.copy()
+    best_c2 = evaluate_individual(best_f.tolist())
+
+    for iteration in range(max_iterations):
+        # Create candidate by slightly adjusting peak parameters
+        candidate_f = np.zeros(size)
+
+        for pos, height, width in peak_params:
+            # Convert parameters to actual peak
+            x = np.arange(size)
+            # Add some jitter to make it less symmetric
+            peak = height * np.exp(-0.5 * ((x - pos) / width) ** 2)
+            candidate_f += peak
+
+        # Apply smoothing to new function
+        if size > 50:
+            window = min(51, size - 1)
+            if window % 2 == 0:
+                window -= 1
+            if window > 1:
+                candidate_f = signal.savgol_filter(candidate_f, window, 3)
+
+        # Ensure non-negativity
+        candidate_f = np.maximum(candidate_f, 0)
+
+        # Normalize to same total area as original
+        if np.sum(candidate_f) > 0:
+            scale_factor = np.sum(f_array) / np.sum(candidate_f)
+            candidate_f = candidate_f * scale_factor
+
+        # Evaluate
+        candidate_c2 = evaluate_individual(candidate_f.tolist())
+
+        if candidate_c2 > best_c2:
+            best_c2 = candidate_c2
+            best_f = candidate_f.copy()
+
+        # Make small adjustments to peak parameters for next iteration
+        for i in range(len(peak_params)):
+            param = peak_params[i]
+            if random.random() < 0.3:  # 30% chance to modify parameter
+                # Adjust position
+                if random.random() < 0.5 and param[0] > 10 and param[0] < size - 10:
+                    param[0] = max(10, min(size - 10, param[0] + random.randint(-5, 5)))
+                # Adjust height
+                if random.random() < 0.5:
+                    param[1] = max(0.1, param[1] * random.uniform(0.95, 1.05))
+                # Adjust width
+                if random.random() < 0.5:
+                    param[2] = max(5, min(size//4, param[2] * random.uniform(0.9, 1.1)))
+
+    return best_f.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_evolutionary_optimization_with_peak_refinement
+</NAME>
+
+<DESCRIPTION>
+Enhancing the evolutionary optimization by incorporating the new peak parameter optimization function into the main optimization loop. This allows for more targeted improvements by focusing on optimizing peak characteristics rather than just mutating individual step values. The refinement helps avoid getting stuck in poor local optima by working directly on meaningful parameters of the function structure.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Replace population with offspring
+        population = offspring
+        fitness_scores = offspring_fitness
+
+        current_generation += 1
+
+    return best_individual
+=======
+        # Replace population with offspring
+        population = offspring
+        fitness_scores = offspring_fitness
+
+        # Apply peak parameter refinement to the best individual periodically
+        if current_generation % 5 == 0 and current_generation > 0:
+            try:
+                refined = optimize_peak_parameters(best_individual)
+                refined_c2 = evaluate_individual(refined)
+                if refined_c2 > best_fitness:
+                    best_fitness = refined_c2
+                    best_individual = refined
+            except:
+                pass
+
+        current_generation += 1
+
+    return best_individual
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_specialized_peak_detection_and_refinement
+</NAME>
+
+<DESCRIPTION>
+Adding specialized peak detection and refinement that identifies significant peaks in the function and applies targeted optimization to these peaks. This approach recognizes that the performance is largely determined by how peaks interact in the autoconvolution, so focusing computational effort on peak parameters rather than every individual step is more efficient. This also adds a final refinement step that specifically targets peak optimization after the evolutionary process completes.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Additional fine-tuning with local search
+    if best_result and (time.time() - start_time) < 80:
+        try:
+            # Apply a simple local search refinement
+            refined_result = best_result.copy()
+            best_score = evaluate_individual(refined_result)
+
+            # Try small perturbations
+            for _ in range(50):
+                if time.time() - start_time > 80:
+                    break
+
+                test_result = refined_result.copy()
+                # Perturb a few elements
+                n_perturb = max(1, len(test_result) // 20)
+                indices = random.sample(range(len(test_result)), n_perturb)
+
+                for idx in indices:
+                    # Apply multiplicative perturbation
+                    factor = random.uniform(0.95, 1.05)
+                    test_result[idx] = max(0, test_result[idx] * factor)
+
+                test_score = evaluate_individual(test_result)
+                if test_score > best_score:
+                    refined_result = test_result
+                    best_score = test_score
+
+            # Update best if refined version is better
+            if evaluate_individual(refined_result) > best_c2:
+                best_result = refined_result
+        except:
+            pass
+=======
+    # Additional fine-tuning with local search
+    if best_result and (time.time() - start_time) < 80:
+        try:
+            # Apply a simple local search refinement
+            refined_result = best_result.copy()
+            best_score = evaluate_individual(refined_result)
+
+            # Try small perturbations
+            for _ in range(50):
+                if time.time() - start_time > 80:
+                    break
+
+                test_result = refined_result.copy()
+                # Perturb a few elements
+                n_perturb = max(1, len(test_result) // 20)
+                indices = random.sample(range(len(test_result)), n_perturb)
+
+                for idx in indices:
+                    # Apply multiplicative perturbation
+                    factor = random.uniform(0.95, 1.05)
+                    test_result[idx] = max(0, test_result[idx] * factor)
+
+                test_score = evaluate_individual(test_result)
+                if test_score > best_score:
+                    refined_result = test_result
+                    best_score = test_score
+
+            # Update best if refined version is better
+            if evaluate_individual(refined_result) > best_c2:
+                best_result = refined_result
+
+            # Apply specialized peak refinement at the end
+            try:
+                final_refined = optimize_peak_parameters(best_result)
+                final_c2 = evaluate_individual(final_refined)
+                if final_c2 > best_c2:
+                    best_result = final_refined
+            except:
+                pass
+        except:
+            pass
+>>>>>>> REPLACE
+</DIFF>

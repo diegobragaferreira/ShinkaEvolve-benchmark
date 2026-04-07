@@ -1,0 +1,214 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import differential_evolution
+import math
+
+def is_valid_placement(circles, x, y, r, tree=None):
+    """Check if placing a circle at (x,y) with radius r is valid."""
+    # Check boundary constraints
+    if r > x or r > y or r > (1-x) or r > (1-y):
+        return False
+
+    # Use spatial index for faster overlap checking if provided
+    if tree is not None:
+        # Find nearby circles efficiently
+        neighbors = tree.query_ball_point([x, y], r + 0.001)
+        for i in neighbors:
+            cx, cy, cr = circles[i]
+            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+            if distance < (r + cr + 1e-8):  # Small epsilon for numerical stability
+                return False
+    else:
+        # Fallback to brute force
+        for i in range(len(circles)):
+            cx, cy, cr = circles[i]
+            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+            if distance < (r + cr + 1e-8):
+                return False
+
+    return True
+
+def initialize_hexagonal_grid(n=32, seed=42):
+    """Initialize circle positions using a hexagonal grid pattern with adaptive radius scaling."""
+    np.random.seed(seed)
+    
+    # Calculate grid dimensions
+    grid_size = int(np.ceil(np.sqrt(n)))
+    rows = grid_size
+    cols = grid_size
+    
+    # Hexagonal grid spacing
+    spacing = 1.0 / (max(rows, cols) + 1)
+    hex_radius = spacing * 0.8  # Slightly reduced to allow for variation
+    
+    circles = []
+    
+    # Create hexagonal grid with adaptive radii based on position and local density
+    for i in range(rows):
+        for j in range(cols):
+            if len(circles) >= n:
+                break
+                
+            # Hexagonal offset
+            x_offset = (i % 2) * spacing * 0.5
+            x = (j + 1) * spacing + x_offset
+            y = (i + 1) * spacing
+            
+            # Adaptive radius based on proximity to boundaries and local density considerations
+            r_max = min(x, y, 1-x, 1-y)
+            if r_max <= 0:
+                continue
+            
+            # Base radius with some randomness to avoid perfect configurations
+            base_r = min(r_max * 0.25, hex_radius)
+            
+            # Adjust radius based on position - corners get smaller radii
+            corner_factor = min(1.0, max(0.5, 
+                (abs(x - 0.5) + abs(y - 0.5)) / 0.5))
+            r = base_r * corner_factor * np.random.uniform(0.7, 1.0)
+            
+            # Only add if valid
+            if is_valid_placement(circles, x, y, r):
+                circles.append([x, y, r])
+    
+    # Fill remaining spots with smaller circles using heuristic
+    while len(circles) < n:
+        best_r = 0
+        best_x, best_y = 0, 0
+        
+        # Sample potential positions with bias towards less crowded areas
+        for _ in range(500):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            
+            # Estimate max radius at this location
+            r_max = min(x, y, 1-x, 1-y)
+            if r_max <= 0:
+                continue
+                
+            # Try different radii with exponential spacing
+            test_radii = np.logspace(-3, np.log10(r_max * 0.3), 15)
+            for r in test_radii:
+                if is_valid_placement(circles, x, y, r):
+                    if r > best_r:
+                        best_r = r
+                        best_x, best_y = x, y
+                        break
+                        
+        if best_r > 0:
+            circles.append([best_x, best_y, best_r])
+    
+    return np.array(circles)
+
+def evaluate_fitness(circles):
+    """Evaluate the fitness of the current circle configuration."""
+    total_radius = np.sum(circles[:, 2])
+    penalty = 0
+    
+    # Penalty for boundary violations
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            penalty += 1000 * (1 - (min(x, y, 1-x, 1-y) / r))
+    
+    # Penalty for overlap violations using smooth approximation
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            overlap = max(0, r1 + r2 - distance)
+            if overlap > 0:
+                penalty += 100 * overlap**2
+    
+    return total_radius - penalty
+
+def optimize_circles(circles, max_iter=200, popsize=15):
+    """Optimize circle positions using differential evolution with bounds."""
+    n = len(circles)
+    
+    # Define bounds for each variable (x, y, r) for all circles
+    bounds = []
+    for i in range(n):
+        # x bounds
+        bounds.append((circles[i][2], 1 - circles[i][2]))
+        # y bounds  
+        bounds.append((circles[i][2], 1 - circles[i][2]))
+        # r bounds (min radius to max possible)
+        bounds.append((circles[i][2] * 0.1, min(0.5, 1 - circles[i][2])))
+    
+    def objective(vars):
+        # Reconstruct circles from variables
+        temp_circles = np.copy(circles)
+        for i in range(n):
+            temp_circles[i][0] = vars[3*i]
+            temp_circles[i][1] = vars[3*i+1] 
+            temp_circles[i][2] = vars[3*i+2]
+        
+        # Evaluate fitness (negative because we want to maximize)
+        return -evaluate_fitness(temp_circles)
+    
+    # Run differential evolution optimization
+    try:
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=max_iter,
+            popsize=popsize,
+            seed=42,
+            disp=False,
+            polish=True,
+            recombination=0.9
+        )
+        
+        # Reconstruct final circles
+        optimized_circles = np.copy(circles)
+        for i in range(n):
+            optimized_circles[i][0] = result.x[3*i]
+            optimized_circles[i][1] = result.x[3*i+1]
+            optimized_circles[i][2] = result.x[3*i+2]
+        
+        return optimized_circles, -result.fun
+    except Exception as e:
+        # If optimization fails, return original
+        return circles, evaluate_fitness(circles)
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    
+    # Multiple restarts with different initializations
+    best_circles = None
+    best_fitness = -np.inf
+    
+    # Try different initial configurations
+    for restart in range(5):
+        # Initialize with hexagonal grid
+        circles = initialize_hexagonal_grid(n, seed=42 + restart)
+        
+        # Build spatial index for fast collision detection
+        tree = cKDTree(circles[:, :2])
+        
+        # Improve with spatial-aware validation
+        improved_circles = []
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if is_valid_placement(improved_circles, x, y, r, tree):
+                improved_circles.append([x, y, r])
+        
+        # Optimize the configuration
+        optimized_circles, fitness = optimize_circles(np.array(improved_circles))
+        
+        if fitness > best_fitness:
+            best_fitness = fitness
+            best_circles = optimized_circles
+    
+    return best_circles if best_circles is not None else initialize_hexagonal_grid(n)
+
+# EVOLVE-BLOCK-END

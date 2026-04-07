@@ -1,0 +1,254 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+import time
+from typing import Tuple, List, Optional
+import random
+import warnings
+
+class GeometryHandler:
+    """Handles all geometric computations for hexagon operations."""
+    
+    def __init__(self):
+        self.hex_radius = 1.0
+        self.hex_apothem = np.sqrt(3) / 2
+        self.hex_height = 2 * self.hex_apothem
+        self.hex_width = 2 * self.hex_radius
+    
+    def generate_hexagon_vertices(self, center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
+        """Generate vertices of a regular hexagon given center and rotation."""
+        angle_rad = np.deg2rad(angle_deg)
+        # Vertices of a unit hexagon centered at origin
+        base_vertices = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+        # Rotate and translate
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+    
+    def create_hexagon_polygon(self, center_x: float, center_y: float, angle_deg: float) -> Polygon:
+        """Create Shapely polygon representation of a hexagon."""
+        vertices = self.generate_hexagon_vertices(center_x, center_y, angle_deg)
+        return Polygon(vertices)
+
+class ConstraintChecker:
+    """Handles all constraint validation logic."""
+    
+    def __init__(self, geometry_handler: GeometryHandler):
+        self.geo = geometry_handler
+    
+    def check_containment(self, hexagon: Polygon, outer_hex: Polygon) -> bool:
+        """Check if hexagon is fully contained within outer hexagon."""
+        return outer_hex.contains(hexagon) or outer_hex.touches(hexagon)
+    
+    def check_overlap(self, hex1: Polygon, hex2: Polygon) -> bool:
+        """Check if two hexagons overlap."""
+        return hex1.intersects(hex2) and not hex1.touches(hex2)
+    
+    def calculate_overlap_area(self, hex1: Polygon, hex2: Polygon) -> float:
+        """Calculate the overlap area between two hexagons."""
+        try:
+            intersection = hex1.intersection(hex2)
+            return intersection.area if not intersection.is_empty else 0.0
+        except:
+            return 0.0
+    
+    def compute_constraint_violations(self, positions: np.ndarray, outer_radius: float) -> Tuple[bool, float]:
+        """Compute constraint violations for a configuration."""
+        # Create outer hexagon (scaled appropriately)
+        outer_vertices = self.geo.generate_hexagon_vertices(0, 0, 0)
+        outer_vertices *= outer_radius / self.geo.hex_radius
+        outer_hex = Polygon(outer_vertices)
+        
+        # Check containment and overlap efficiently
+        total_violation = 0.0
+        inner_polygons = []
+        
+        for i in range(len(positions)):
+            cx, cy, angle = positions[i]
+            inner_hex = self.geo.create_hexagon_polygon(cx, cy, angle)
+            inner_polygons.append(inner_hex)
+            
+            # Check containment - more robust way
+            if not self.check_containment(inner_hex, outer_hex):
+                # For containment violations, we measure the extent of violation
+                try:
+                    intersection = outer_hex.intersection(inner_hex)
+                    if intersection.is_empty:
+                        # Complete violation
+                        total_violation += 10000.0
+                    else:
+                        # Partial violation
+                        contained_area = intersection.area
+                        total_violation += (inner_hex.area - contained_area) * 100.0
+                except:
+                    total_violation += 10000.0
+            
+            # Check overlaps with previously processed hexagons only
+            for j in range(i):
+                if self.check_overlap(inner_hex, inner_polygons[j]):
+                    try:
+                        intersection_area = self.calculate_overlap_area(inner_hex, inner_polygons[j])
+                        # Penalty based on the amount of overlapping area
+                        overlap_penalty = (inner_hex.area + inner_polygons[j].area - 2 * intersection_area) * 500.0
+                        total_violation += overlap_penalty
+                    except:
+                        total_violation += 50000.0
+                        
+        return total_violation == 0, total_violation
+
+class SymmetryGuidedOptimizer:
+    """Implements symmetry-guided optimization for hexagon packing."""
+    
+    def __init__(self, geometry_handler: GeometryHandler, constraint_checker: ConstraintChecker):
+        self.geo = geometry_handler
+        self.constraint_checker = constraint_checker
+        self.n_hexagons = 12
+        self.max_time = 180.0
+        
+    def get_symmetric_initial_guess(self) -> np.ndarray:
+        """Generate a highly symmetric initial configuration."""
+        # This creates a pattern inspired by efficient hexagonal packing arrangements
+        # 3 concentric rings of hexagons
+        positions = []
+        
+        # Center hexagon
+        positions.append([0, 0, 0])
+        
+        # First ring (radius ~2.5)
+        ring1_radius = 2.5
+        for i in range(6):
+            angle = i * 60  # 60-degree increments
+            x = ring1_radius * np.cos(np.deg2rad(angle))
+            y = ring1_radius * np.sin(np.deg2rad(angle))
+            positions.append([x, y, 0])
+        
+        # Second ring (radius ~3.75)  
+        ring2_radius = 3.75
+        for i in range(6):
+            angle = i * 60  # 60-degree increments
+            x = ring2_radius * np.cos(np.deg2rad(angle))
+            y = ring2_radius * np.sin(np.deg2rad(angle))
+            positions.append([x, y, 0])
+        
+        # Ensure exactly 12 positions
+        positions = positions[:12]
+        
+        # Convert to numpy array
+        positions_array = np.array(positions)
+        
+        # Add small random variations to break perfect symmetry for optimization
+        positions_array[:, 0] += np.random.normal(0, 0.1, 12)
+        positions_array[:, 1] += np.random.normal(0, 0.1, 12)
+        
+        # Initial outer radius estimate (based on the arrangement)
+        max_distance = 0
+        for i in range(len(positions_array)):
+            dist = np.sqrt(positions_array[i][0]**2 + positions_array[i][1]**2)
+            if dist > max_distance:
+                max_distance = dist
+        outer_radius_guess = max_distance + self.geo.hex_radius
+        
+        # Add outer radius to the configuration
+        return np.concatenate([positions_array.flatten(), [outer_radius_guess]])
+
+    def compute_fitness(self, positions_and_radius: np.ndarray) -> float:
+        """Compute fitness for a configuration."""
+        # Extract parameters
+        positions = positions_and_radius[:-1].reshape(-1, 3)
+        outer_radius = positions_and_radius[-1]
+        
+        # Check constraints
+        valid, violation = self.constraint_checker.compute_constraint_violations(positions, outer_radius)
+        
+        if not valid:
+            # Return very poor fitness for invalid configurations
+            return 1e12 + violation
+        
+        # Return negative inverse of outer radius (we want to maximize 1/R)
+        return -1.0 / outer_radius
+
+    def optimize(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Main optimization routine."""
+        # Get symmetric initial configuration
+        initial_config = self.get_symmetric_initial_guess()
+        
+        bounds = []
+        # Position bounds
+        for _ in range(12):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+        # Outer radius bound
+        bounds.append((2.0, 15.0))
+        
+        # First, try global optimization
+        try:
+            de_result = differential_evolution(
+                self.compute_fitness,
+                bounds,
+                maxiter=200,
+                popsize=15,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                disp=False,
+                tol=1e-6
+            )
+            result = de_result.x
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed: {e}")
+            result = initial_config
+            
+        # Then, local refinement with L-BFGS-B
+        try:
+            local_result = minimize(
+                self.compute_fitness,
+                result,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-8}
+            )
+            if local_result.success:
+                final_result = local_result.x
+            else:
+                final_result = result
+        except Exception as e:
+            warnings.warn(f"Local optimization failed: {e}")
+            final_result = result
+        
+        # Extract positions and radius
+        positions = final_result[:-1].reshape(-1, 3)
+        outer_radius = final_result[-1]
+        
+        # Convert back to requested format
+        inner_hex_data = positions.copy()
+        outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+        
+        return inner_hex_data, outer_hex_data, outer_radius
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Initialize components
+    geo_handler = GeometryHandler()
+    constraint_checker = ConstraintChecker(geo_handler)
+    optimizer = SymmetryGuidedOptimizer(geo_handler, constraint_checker)
+    
+    # Execute optimization
+    inner_hex_data, outer_hex_data, outer_hex_side_length = optimizer.optimize()
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

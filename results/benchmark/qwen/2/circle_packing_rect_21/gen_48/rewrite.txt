@@ -1,0 +1,329 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import random
+from deap import base, creator, tools, algorithms
+import time
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, optimizing for better packing
+    width, height = 1.4, 0.6
+    
+    # Number of circles
+    n = 21
+    
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Initialize toolbox for evolutionary algorithm
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Define bounds for each variable (x, y, r) for all 21 circles
+    # Each circle has 3 variables: x, y, radius
+    # x: [0.001, width - 0.001], y: [0.001, height - 0.001], radius: [0.001, 0.3]
+    bounds = [(0.001, width - 0.001), (0.001, height - 0.001), (0.001, 0.3)]
+    
+    # Generate bounds for all variables
+    var_bounds = []
+    for i in range(n):
+        for bound in bounds:
+            var_bounds.append(bound)
+    
+    # Individual initialization function
+    def init_individual():
+        individual = []
+        for i in range(n):
+            # Initialize with better spatial distribution
+            # Use a more uniform grid-based approach
+            grid_size = int(math.ceil(math.sqrt(n)))
+            row = i // grid_size
+            col = i % grid_size
+            
+            # Calculate position with padding
+            pad_x = 0.05
+            pad_y = 0.05
+            cell_width = (width - 2*pad_x) / grid_size
+            cell_height = (height - 2*pad_y) / grid_size
+            
+            x = pad_x + col * cell_width + cell_width/2
+            y = pad_y + row * cell_height + cell_height/2
+            
+            # Add random noise to position
+            x += random.uniform(-cell_width/4, cell_width/4)
+            y += random.uniform(-cell_height/4, cell_height/4)
+            
+            # Clip to bounds
+            x = max(bounds[0][0], min(bounds[0][1], x))
+            y = max(bounds[1][0], min(bounds[1][1], y))
+            
+            # Initial radius based on average available space
+            radius = min(0.15, (width * height) / (n * 3.14159) * 0.8)
+            radius = max(bounds[2][0], min(bounds[2][1], radius))
+            
+            individual.extend([x, y, radius])
+        return creator.Individual(individual)
+    
+    # Register functions to toolbox
+    toolbox.register("individual", init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    # Fitness evaluation function
+    def eval_fitness(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(n, 3)
+        
+        # Check constraints and calculate fitness
+        # First, validate that all circles are within bounds
+        valid = True
+        total_radius = 0
+        
+        # Check boundary constraints and collect valid positions
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Validate all circles are within bounds
+        for i in range(n):
+            x, y, r = circles[i]
+            if (x - r < 0 or x + r > width or 
+                y - r < 0 or y + r > height):
+                valid = False
+                break
+            total_radius += r
+            
+        if not valid:
+            return (0,)
+        
+        # Use cKDTree for efficient nearest neighbor queries
+        tree = cKDTree(positions)
+        
+        # Check overlap constraints efficiently
+        # For each circle, query nearby circles using the tree
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            
+            # Query nearby points within 2*(r1+r2) distance
+            neighbors = tree.query_ball_point([x1, y1], 2*(r1 + 0.3), p=2)
+            
+            # For each neighbor, check actual distance
+            for j in neighbors:
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    distance = math.sqrt(dx*dx + dy*dy)
+                    # Check if circles overlap
+                    if distance < (r1 + r2) * 0.999:  # Slight tolerance
+                        valid = False
+                        break
+            if not valid:
+                break
+        
+        if not valid:
+            return (0,)
+        
+        # Return negative sum of radii (since we're maximizing)
+        return (-total_radius,)
+    
+    toolbox.register("evaluate", eval_fitness)
+    
+    # Genetic operators
+    toolbox.register("mate", tools.cxUniform, indpb=0.1)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.01, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Population parameters
+    pop_size = 50
+    generations = 50
+    cxpb = 0.7
+    mutpb = 0.3
+    
+    # Create initial population
+    pop = toolbox.population(n=pop_size)
+    
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, pop))
+    for ind, fit in zip(pop, fitnesses):
+        ind.fitness.values = fit
+    
+    # Begin evolution
+    best_ind = None
+    best_fitness = float('-inf')
+    
+    for gen in range(generations):
+        # Select the next generation individuals
+        offspring = toolbox.select(pop, len(pop))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < mutpb:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace population
+        pop[:] = offspring
+        
+        # Track best individual
+        current_best = tools.selBest(pop, 1)[0]
+        if current_best.fitness.values[0] > best_fitness:
+            best_fitness = current_best.fitness.values[0]
+            best_ind = current_best[:]
+    
+    # Convert best individual back to circles format
+    if best_ind is None:
+        # Fallback to simple initialization if no good solution found
+        circles = np.zeros((n, 3))
+        grid_size = int(math.ceil(math.sqrt(n)))
+        pad_x = 0.05
+        pad_y = 0.05
+        cell_width = (width - 2*pad_x) / grid_size
+        cell_height = (height - 2*pad_y) / grid_size
+        
+        for i in range(n):
+            row = i // grid_size
+            col = i % grid_size
+            x = pad_x + col * cell_width + cell_width/2
+            y = pad_y + row * cell_height + cell_height/2
+            radius = min(0.15, (width * height) / (n * 3.14159) * 0.8)
+            circles[i] = [x, y, radius]
+            
+        return circles
+    
+    # Convert the best solution to circles format
+    best_circles = np.array(best_ind).reshape(n, 3)
+    
+    # Run local refinement to improve quality
+    refined_circles = refine_solution(best_circles, width, height)
+    
+    # Final validation and return
+    final_valid = validate_and_correct(refined_circles, width, height)
+    return final_valid
+
+def refine_solution(circles, width, height):
+    """Apply local refinement to improve solution quality."""
+    n = len(circles)
+    refined = circles.copy()
+    
+    # Try to increase radii where possible while maintaining constraints
+    improved = True
+    attempts = 0
+    
+    while improved and attempts < 20:
+        improved = False
+        attempts += 1
+        
+        # Try increasing each radius individually
+        for i in range(n):
+            test_circles = refined.copy()
+            old_radius = test_circles[i, 2]
+            
+            # Try to increase radius by 0.005
+            test_circles[i, 2] = min(old_radius + 0.005, 0.3)
+            
+            if validate_solution(test_circles, width, height):
+                refined = test_circles.copy()
+                improved = True
+    
+    return refined
+
+def validate_solution(circles, width, height):
+    """Check if solution satisfies all constraints."""
+    n = len(circles)
+    
+    # Check boundary constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+            return False
+    
+    # Check overlap constraints using distance matrix
+    positions = circles[:, :2]
+    distances = cdist(positions, positions)
+    
+    for i in range(n):
+        for j in range(i+1, n):
+            distance = distances[i, j]
+            r1, r2 = circles[i, 2], circles[j, 2]
+            
+            # Overlap occurs if distance < sum of radii
+            if distance < (r1 + r2) * 0.999:
+                return False
+    
+    return True
+
+def validate_and_correct(circles, width, height):
+    """Ensure solution is valid and correct."""
+    n = len(circles)
+    
+    # First ensure all circles are within bounds
+    corrected = circles.copy()
+    for i in range(n):
+        x, y, r = corrected[i]
+        # Clamp positions to valid range
+        x = max(r, min(width - r, x))
+        y = max(r, min(height - r, y))
+        corrected[i] = [x, y, r]
+    
+    # If still invalid, try to resolve overlaps with a simple greedy approach
+    if not validate_solution(corrected, width, height):
+        # Very basic resolution: reduce radii of overlapping circles
+        positions = corrected[:, :2]
+        distances = cdist(positions, positions)
+        
+        # Keep track of which circles we've adjusted
+        adjusted = set()
+        
+        # Iterate until no more overlaps or max iterations
+        for _ in range(50):
+            changed = False
+            for i in range(n):
+                if i in adjusted:
+                    continue
+                for j in range(i+1, n):
+                    distance = distances[i, j]
+                    r1, r2 = corrected[i, 2], corrected[j, 2]
+                    
+                    if distance < (r1 + r2) * 0.999:
+                        # Reduce radii evenly
+                        reduction = (r1 + r2 - distance) * 0.2
+                        if r1 > 0.001 and r2 > 0.001:
+                            corrected[i, 2] = max(0.001, r1 - reduction/2)
+                            corrected[j, 2] = max(0.001, r2 - reduction/2)
+                            changed = True
+                            adjusted.add(i)
+                            adjusted.add(j)
+                            
+            if not changed:
+                break
+    
+    return corrected
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

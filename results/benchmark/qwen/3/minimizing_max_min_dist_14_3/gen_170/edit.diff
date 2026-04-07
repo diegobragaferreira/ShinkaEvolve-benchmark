@@ -1,0 +1,458 @@
+--- a/original.py
++++ b/original.py
+@@ -1,328 +1,393 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist
+ import time
+ 
+ class PointLayoutOptimizer:
+     """Optimizes point layouts in 3D space to maximize min/max distance ratio."""
+     
+     def __init__(self, n_points=14, bounds=(0, 1)):
+         self.n_points = n_points
+         self.bounds = bounds
+         self.best_layout = None
+         self.best_ratio = 0.0
+         
+     def fibonacci_sphere(self, n):
+         """Generate n points evenly distributed on a unit sphere using Fibonacci spiral method."""
+         points = []
+         phi = np.pi * (3 - np.sqrt(5))  # golden angle
+ 
+         for i in range(n):
+             y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = phi * i  # golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         return np.array(points)
++    
++    def create_geometric_initialization(self, n_points: int = 14) -> np.ndarray:
++        """
++        Create initial point configuration based on geometric principles.
++        Uses a modified Fibonacci-like distribution adapted for 3D point placement.
++        """
++        points = []
++        
++        # Generate points using modified Fibonacci-like distribution
++        # More uniform than basic Fibonacci but still structured
++        phi = (1 + np.sqrt(5)) / 2  # golden ratio
++        
++        # Generate points along spiral pattern on sphere
++        for i in range(n_points):
++            # Distribute points more evenly in z-direction
++            z = 1 - (i / (n_points - 1)) * 2  # z from 1 to -1
++            radius = np.sqrt(1 - z*z)
++            
++            # Modified angular spacing to avoid clustering
++            theta = np.arctan2(z, radius) + (i * 2 * np.pi / n_points) + (i * 0.1) 
++            
++            x = radius * np.cos(theta)
++            y = radius * np.sin(theta)
++            points.append([x, y, z])
++        
++        points = np.array(points)
++        
++        # Normalize to unit sphere
++        norms = np.linalg.norm(points, axis=1, keepdims=True)
++        points = points / np.where(norms == 0, 1, norms)
++        
++        return points
+     
+     def generate_initial_layouts(self):
+         """Generate multiple candidate layouts using different strategies."""
+         strategies = [
+             self._fibonacci_strategy,
+             self._spherical_code_strategy,
+             self._random_strategy,
+             self._perturbed_fibonacci_strategy,
+             self._perturbed_spherical_strategy,
+-            self._relaxed_random_strategy
++            self._relaxed_random_strategy,
++            self._geometric_initialization_strategy
+         ]
+         
+         best_layout = None
+         best_ratio = 0.0
+         
+         for i, strategy in enumerate(strategies):
+             try:
+                 layout = strategy()
+                 if layout is not None:
+                     ratio = self._calculate_ratio(layout)
+                     if ratio > best_ratio:
+                         best_ratio = ratio
+                         best_layout = layout.copy()
+             except Exception:
+                 continue
+         
+         # Fallback to random if no strategy works
+         if best_layout is None:
+             np.random.seed(42)
+             best_layout = np.random.rand(self.n_points, 3)
+             best_ratio = self._calculate_ratio(best_layout)
+             
+         return best_layout
+     
+     def _fibonacci_strategy(self):
+         """Fibonacci sphere initialization strategy."""
+         points = self.fibonacci_sphere(self.n_points)
+         points = (points + 1) / 2  # Map from [-1,1] to [0,1]
+         return points
+     
+     def _spherical_code_strategy(self):
+         """Spherical code initialization strategy."""
+         # Known good configuration for 14 points on sphere from literature
+         spherical_points = np.array([
+             [0.0000, 0.0000, 1.0000],
+             [0.0000, 0.0000, -1.0000],
+             [0.9343, 0.0000, 0.3564],
+             [-0.9343, 0.0000, 0.3564],
+             [0.0000, 0.9343, 0.3564],
+             [0.0000, -0.9343, 0.3564],
+             [0.0000, 0.9343, -0.3564],
+             [0.0000, -0.9343, -0.3564],
+             [0.9343, 0.0000, -0.3564],
+             [-0.9343, 0.0000, -0.3564],
+             [0.3564, 0.9343, 0.0000],
+             [-0.3564, 0.9343, 0.0000],
+             [0.3564, -0.9343, 0.0000],
+             [-0.3564, -0.9343, 0.0000]
+         ])
+         
+         # Normalize to unit sphere
+         norms = np.linalg.norm(spherical_points, axis=1, keepdims=True)
+         spherical_points = spherical_points / np.where(norms == 0, 1, norms)
+         
+         # Add small perturbations
+         np.random.seed(42)
+         perturbation = np.random.normal(0, 0.01, spherical_points.shape)
+         spherical_points = spherical_points + perturbation
+         
+         # Normalize again after perturbation
+         norms = np.linalg.norm(spherical_points, axis=1, keepdims=True)
+         spherical_points = spherical_points / np.where(norms == 0, 1, norms)
+         
+         # Scale to unit cube [0,1]^3
+         points = (spherical_points + 1) / 2
+         return points
+     
+     def _random_strategy(self):
+         """Random initialization strategy."""
+         np.random.seed(42)
+         return np.random.rand(self.n_points, 3)
+     
+     def _perturbed_fibonacci_strategy(self):
+         """Perturbed Fibonacci strategy."""
+         points = self.fibonacci_sphere(self.n_points)
+         points = (points + 1) / 2
+         np.random.seed(42)
+         points += np.random.normal(0, 0.005, points.shape)
+         points = np.clip(points, 0, 1)
+         return points
+     
+     def _perturbed_spherical_strategy(self):
+         """Perturbed spherical code strategy."""
+         points = self._spherical_code_strategy()
+         np.random.seed(42)
+         points += np.random.normal(0, 0.01, points.shape)
+         points = np.clip(points, 0, 1)
+         return points
+     
+     def _relaxed_random_strategy(self):
+         """Geometric relaxation on random points strategy."""
+         np.random.seed(42)
+         points = np.random.rand(self.n_points, 3)
+         points = self._geometric_relaxation_step(points, iterations=25)
+         return points
+     
++    def _geometric_initialization_strategy(self):
++        """Geometric initialization using modified Fibonacci approach."""
++        points = self.create_geometric_initialization(self.n_points)
++        points = (points + 1) / 2
++        return points
++    
+     def _geometric_relaxation_step(self, points, iterations=20):
+-        """Apply geometric relaxation using force-based repulsion model."""
++        """
++        Apply geometric relaxation using force-based repulsion model.
++        Each point repels others with inverse-square law, projected back to cube.
++        """
+         points = points.copy()
+         
+         for _ in range(iterations):
+             # Calculate pairwise distances
+             n = len(points)
+             forces = np.zeros_like(points)
+             
+             # Compute repulsive forces between all pairs
+             for i in range(n):
+                 for j in range(i+1, n):
+                     diff = points[i] - points[j]
+                     dist_sq = np.sum(diff**2)
+                     
+                     # Avoid singularity
+                     if dist_sq > 1e-10:
+                         force_magnitude = 1.0 / dist_sq
+                         forces[i] += force_magnitude * diff
+                         forces[j] -= force_magnitude * diff
+             
+             # Apply forces and project back to unit cube
+-            points += 0.005 * forces  # Smaller step size for more stable convergence
++            points += 0.01 * forces  # Small step size
+             points = np.clip(points, 0, 1)
+         
+         return points
+     
+     def _calculate_ratio(self, points):
+         """Calculate the min/max distance ratio for a given layout."""
+         distances = pdist(points)
+         
+         if len(distances) == 0:
+             return 0.0
+         
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         
+         if max_dist <= 0:
+             return 0.0
+         
+         return min_dist / max_dist
+     
+     def _objective_function(self, points_flat):
+         """Objective function to maximize the min/max distance ratio."""
+         points = points_flat.reshape(self.n_points, 3)
+         
+         # Ensure points are within bounds [0,1]^3
+         points = np.clip(points, 0, 1)
+         
+         # Calculate distances
+         distances = pdist(points)
+         
+         if len(distances) == 0:
+             return float('inf')
+         
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         
+         # Avoid division by zero
+         if max_dist <= 0:
+             return float('inf')
+         
+         # Return negative ratio to minimize (maximize the ratio)
+         return -min_dist / max_dist
+     
+     def _adaptive_optimization(self, initial_points, max_time=350.0):
+-        """Perform adaptive optimization with changing population sizes."""
++        """Perform adaptive optimization with changing population sizes and strategies."""
+         start_time = time.time()
+         
+         # Flatten initial points for optimization
+         initial_flat = initial_points.flatten()
+         
+         # Define bounds for each coordinate (0 to 1)
+         bounds = [(0.0, 1.0)] * len(initial_flat)
+         
+-        # Run optimization with progressive strategy
++        # Track convergence history
++        prev_best = float('inf')
++        stagnant_count = 0
++        max_stagnant = 10
++        population_history = []
++        current_popsize = 15
++        
++        def adaptive_objective(x_flat):
++            result = self._objective_function(x_flat)
++            population_history.append(result)
++            return result
++        
++        # Run multiple optimization phases with adaptive population sizing
++        for phase in range(5):
++            if time.time() - start_time > max_time * 0.95:  # Leave some time for final processing
++                break
++                
++            try:
++                # Adjust population size based on convergence
++                if len(population_history) >= 2:
++                    recent_improvement = abs(population_history[-1] - population_history[-2])
++                    if recent_improvement < 1e-8:
++                        stagnant_count += 1
++                        if stagnant_count >= max_stagnant and current_popsize < 30:
++                            current_popsize = min(current_popsize + 5, 30)
++                            stagnant_count = 0  # Reset after increase
++                    else:
++                        stagnant_count = 0
++                else:
++                    stagnant_count = 0
++
++                # Run differential evolution with current population size
++                result = differential_evolution(
++                    adaptive_objective,
++                    bounds,
++                    maxiter=200,  # Reduced iterations per phase
++                    popsize=current_popsize,
++                    tol=1e-6,
++                    mutation=(0.5, 1.0),
++                    recombination=0.7,
++                    seed=42 + phase,
++                    disp=False
++                )
++                
++                # Update best value
++                prev_best = result.fun
++                
++            except Exception as e:
++                # Continue with next phase if current one fails
++                continue
++
++        # Reshape optimized result
++        optimized_points = result.x.reshape(self.n_points, 3)
++        
++        # Ensure all points are within valid range
++        optimized_points = np.clip(optimized_points, 0, 1)
++        
++        # Additional local refinement using L-BFGS-B
++        def local_objective(x_flat):
++            points = x_flat.reshape(-1, 3)
++            points = np.clip(points, 0, 1)
++            distances = pdist(points)
++            if len(distances) == 0:
++                return float('inf')
++            min_dist = np.min(distances)
++            max_dist = np.max(distances)
++            if max_dist <= 0:
++                return float('inf')
++            return -min_dist / max_dist
++        
+         try:
+-            # Phase 1: Global search with large population
+-            result = differential_evolution(
+-                self._objective_function,
+-                bounds,
+-                maxiter=200,
+-                popsize=25,
+-                tol=1e-6,
+-                mutation=(0.5, 1.0),
+-                recombination=0.7,
+-                seed=42,
+-                disp=False
+-            )
+-            
+-            # Phase 2: Refinement with smaller population
+-            result = differential_evolution(
+-                self._objective_function,
+-                bounds,
+-                maxiter=250,
+-                popsize=15,
+-                tol=1e-7,
+-                mutation=(0.7, 1.0),
+-                recombination=0.8,
+-                seed=43,
+-                disp=False
+-            )
+-            
+-            # Phase 3: Local refinement using L-BFGS-B
+-            def local_objective(x_flat):
+-                points = x_flat.reshape(-1, 3)
+-                points = np.clip(points, 0, 1)
+-                distances = pdist(points)
+-                if len(distances) == 0:
+-                    return float('inf')
+-                min_dist = np.min(distances)
+-                max_dist = np.max(distances)
+-                if max_dist <= 0:
+-                    return float('inf')
+-                return -min_dist / max_dist
+-            
+-            x0 = result.x.reshape(-1, 3).flatten()
++            x0 = optimized_points.flatten()
+             local_result = minimize(
+                 local_objective,
+                 x0,
+                 method='L-BFGS-B',
+-                options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
++                options={'maxiter': 50, 'ftol': 1e-9, 'gtol': 1e-9}
+             )
+-            result = local_result
+-            
+-        except Exception:
+-            # Fallback to initial points if optimization fails
+-            return initial_points
+-            
+-        # Reshape optimized result
+-        optimized_points = result.x.reshape(self.n_points, 3)
+-        
+-        # Ensure all points are within valid range
+-        optimized_points = np.clip(optimized_points, 0, 1)
+-        
++            optimized_points = local_result.x.reshape(self.n_points, 3)
++            optimized_points = np.clip(optimized_points, 0, 1)
++        except:
++            pass
++
+         return optimized_points
+     
+     def optimize(self):
+         """Main optimization process."""
+         # Generate initial layouts
+         initial_layout = self.generate_initial_layouts()
+         
+-        # Apply geometric relaxation
++        # Apply geometric relaxation for better distribution
+         relaxed_layout = self._geometric_relaxation_step(initial_layout, iterations=30)
+         
+         # Optimize with adaptive strategy
+         final_layout = self._adaptive_optimization(relaxed_layout)
+         
+         # Final validation
+         final_ratio = self._calculate_ratio(final_layout)
+         
+         # Check if we should try another optimization pass
+         if final_ratio < 0.15:
+             try:
+                 bounds = [(0.0, 1.0)] * (self.n_points * 3)
+                 result = differential_evolution(
+                     self._objective_function,
+                     bounds,
+-                    maxiter=400,
+-                    popsize=30,
+-                    tol=1e-10,
++                    maxiter=500,
++                    popsize=25,
++                    tol=1e-8,
+                     mutation=(0.8, 1.0),
+                     recombination=0.9,
+                     seed=42,
+                     disp=False
+                 )
+                 final_layout = result.x.reshape(self.n_points, 3)
+                 final_layout = np.clip(final_layout, 0, 1)
+                 final_ratio = self._calculate_ratio(final_layout)
+             except Exception:
+                 pass
+         
+         # Final validation check
+         if final_ratio < 0.05:
+             np.random.seed(42)
+             final_layout = np.random.rand(self.n_points, 3)
+             
+         return final_layout
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     optimizer = PointLayoutOptimizer(14)
+     return optimizer.optimize()
+ 
+ # EVOLVE-BLOCK-END

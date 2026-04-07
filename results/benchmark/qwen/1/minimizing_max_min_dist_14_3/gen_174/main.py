@@ -1,0 +1,192 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import math
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def distance_ratio(points_flat):
+        """Calculate the ratio of minimum to maximum distance"""
+        points = points_flat.reshape(-1, 3)
+        distances = squareform(pdist(points))
+        # Set diagonal to large value so it doesn't affect min/max
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        return min_dist / max_dist
+
+    def objective_function(points_flat):
+        """Minimize negative of distance ratio (since we want to maximize)"""
+        return -distance_ratio(points_flat)
+
+    def hybrid_sobol_initialization(n):
+        """
+        Generate initial points using hybrid approach combining Sobol sequence with icosahedron.
+        Sobol sequences provide superior space-filling properties compared to deterministic methods.
+        """
+        # First, generate points using Sobol sequence for better distribution
+        from scipy.stats import qmc
+        sampler = qmc.Sobol(d=3, seed=42)
+        sobol_points = sampler.random(n=n)
+
+        # Convert Sobol points to spherical coordinates
+        # Map [0,1] to [0,pi] for theta and [0,2pi] for phi
+        theta = sobol_points[:, 0] * np.pi  # 0 to pi
+        phi = sobol_points[:, 1] * 2 * np.pi  # 0 to 2pi
+        r = sobol_points[:, 2]  # Radius component (we'll use 1 for unit sphere)
+
+        # Convert to Cartesian coordinates
+        x = r * np.sin(theta) * np.cos(phi)
+        y = r * np.sin(theta) * np.sin(phi)
+        z = r * np.cos(theta)
+
+        # Combine into points array
+        points = np.column_stack([x, y, z])
+
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+
+        # Add some structure by mixing with icosahedron vertices for better symmetry
+        phi = (1 + math.sqrt(5)) / 2  # Golden ratio
+        vertices = [
+            (0, 1, phi), (0, -1, phi), (0, 1, -phi), (0, -1, -phi),
+            (1, phi, 0), (-1, phi, 0), (1, -phi, 0), (-1, -phi, 0),
+            (phi, 0, 1), (phi, 0, -1), (-phi, 0, 1), (-phi, 0, -1)
+        ]
+
+        # Convert to numpy array and normalize (if needed)
+        ico_points = np.array(vertices, dtype=float)
+        norms = np.linalg.norm(ico_points, axis=1)
+        ico_points = ico_points / norms[:, np.newaxis]
+
+        # Replace first 12 points with icosahedron vertices for better structural properties
+        points[:min(12, len(points))] = ico_points[:min(12, len(points))]
+
+        # Add small perturbations to break symmetry and avoid local minima
+        np.random.seed(42)
+        # Perturbation with controlled magnitude
+        noise = np.random.normal(0, 0.015, points.shape)
+        points += noise
+
+        # Normalize again to maintain unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+
+        return points
+
+    def progressive_optimization(x0, maxiter=1000):
+        """
+        Perform progressive optimization with adaptive constraint tightening
+        """
+        # Define constraints for normalization (points should be on unit sphere)
+        constraints = []
+
+        def constraint_func(x):
+            points = x.reshape(-1, 3)
+            norms = np.linalg.norm(points, axis=1)
+            return norms - 1.0  # Should be near 0 for unit sphere
+
+        # Add constraint for each point to lie on unit sphere
+        for i in range(14):
+            constraints.append({'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]})
+
+        # Phase 1: Coarse optimization (fast, loose constraints)
+        bounds = [(-1.3, 1.3)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 150, 'ftol': 1e-3, 'gtol': 1e-3},
+            tol=1e-3
+        )
+
+        # Phase 2: Medium optimization (moderate constraints)
+        x1 = result.x
+        bounds = [(-1.15, 1.15)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x1,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 250, 'ftol': 1e-5, 'gtol': 1e-5},
+            tol=1e-5
+        )
+
+        # Phase 3: Fine optimization (tight constraints)
+        x2 = result.x
+        bounds = [(-1.05, 1.05)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x2,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 400, 'ftol': 1e-7, 'gtol': 1e-7},
+            tol=1e-7
+        )
+
+        return result.x
+
+    best_ratio = -np.inf
+    best_points = None
+
+    # Multi-start optimization with enhanced initialization and more restarts
+    for restart in range(20):  # Increased restarts for better exploration
+        np.random.seed(42 + restart)
+
+        # Alternate between different initialization strategies for better exploration
+        if restart % 2 == 0:
+            # Use Sobol-based initialization
+            initial_points = hybrid_sobol_initialization(14)
+        else:
+            # Use original hybrid initialization for comparison
+            initial_points = hybrid_initialization(14)
+
+        x0 = initial_points.flatten()
+
+        # Add small random perturbation to break any symmetry
+        perturbation = np.random.normal(0, 0.01, x0.shape)
+        x0 += perturbation
+
+        # Optimize with progressive refinement
+        try:
+            optimized_points = progressive_optimization(x0, maxiter=1000)
+
+            # Calculate final ratio
+            ratio = distance_ratio(optimized_points)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If no good solution found, fallback to hybrid initialization
+    if best_points is None:
+        initial_points = hybrid_initialization(14)
+        best_points = initial_points.flatten()
+
+    # Convert back to 14x3 array
+    final_points = best_points.reshape(14, 3)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

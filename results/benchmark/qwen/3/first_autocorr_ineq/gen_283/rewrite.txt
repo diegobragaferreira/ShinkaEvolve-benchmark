@@ -1,0 +1,164 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.fft import fft, ifft
+import random
+import time
+
+def compute_convolution_fft(seq):
+    """Efficiently compute convolution using FFT."""
+    n = len(seq)
+    padded_len = 2 * n - 1
+    padded_seq = np.pad(seq, (0, padded_len - n), 'constant')
+    fft_seq = fft(padded_seq)
+    conv_fft = fft_seq * fft_seq.conj()
+    conv_result = ifft(conv_fft).real[:n]
+    return conv_result
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    """
+    if len(sequence) == 0:
+        return float('inf'), 0.0
+
+    a = np.array(sequence, dtype=np.float64)
+    n = len(a)
+
+    # Use FFT for larger sequences and direct for smaller ones for numerical stability
+    conv = compute_convolution_fft(a)
+
+    max_b = np.max(conv)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    C1 = 2 * n * max_b / (sum_a ** 2)
+    inv_C1 = 1 / C1
+
+    return C1, inv_C1
+
+def solve_quadratic_convolution_optimization(sequence):
+    """
+    Solves the quadratic optimization for improved step direction using second-order methods.
+    """
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    # Normalize sequence for stable computation
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+
+    normalized_sequence = np.array(sequence) / sum_sequence
+
+    # Compute convolution using FFT
+    conv = compute_convolution_fft(normalized_sequence)
+    max_conv = np.max(conv)
+
+    # Define objective function: minimize 1/C1 equivalent to minimize max(conv) / (sum^2)
+    def objective(x):
+        # Ensure non-negative and normalize
+        x = np.maximum(x, 0)
+        sum_x = np.sum(x)
+        if sum_x < 1e-10:
+            return float('inf')
+        
+        x_norm = x / sum_x
+        x_conv = compute_convolution_fft(x_norm)
+        max_conv_x = np.max(x_conv)
+        
+        # Objective to be minimized: max(conv) / (sum^2)
+        return max_conv_x / (sum_x ** 2)
+
+    # Use L-BFGS-B for efficient optimization
+    try:
+        result = minimize(objective, normalized_sequence, method='L-BFGS-B', 
+                          bounds=[(0, 1000) for _ in range(n)],
+                          options={'maxiter': 50})
+        if result.success:
+            return result.x.tolist()
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def get_good_direction_to_move_into(sequence):
+    """
+    Returns the direction to move into the sequence using quadratic optimization.
+    """
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    # Use quadratic optimization to get a better direction
+    improved_sequence = solve_quadratic_convolution_optimization(sequence)
+    
+    if improved_sequence is None:
+        # Fallback to a simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the improved sequence
+    sum_improved = np.sum(improved_sequence)
+    if sum_improved < 1e-10:
+        return None
+
+    normalized_improved = [x / sum_improved for x in improved_sequence]
+    
+    # Apply small perturbation for further exploration
+    t = 0.05  # Increased perturbation to encourage exploration
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_improved)
+    ]
+    
+    # Ensure non-negativity
+    new_sequence = [max(0, x) for x in new_sequence]
+    
+    return new_sequence
+
+def initialize_sequence():
+    """Initialize a sequence with a mix of distributions for better exploration."""
+    n = random.randint(100, 1000)
+    # Generate sequence with some structure (e.g., exponential decay, Gaussian)
+    if random.random() < 0.5:
+        # Exponential decay
+        sequence = [0.9 ** i for i in range(n)]
+    else:
+        # Gaussian-like
+        center = n // 2
+        sequence = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
+    
+    # Normalize to ensure reasonable sum
+    sum_seq = sum(sequence)
+    if sum_seq < 0.01:
+        sequence = [1.0] * n
+    else:
+        sequence = [x / sum_seq for x in sequence]
+        
+    return sequence
+
+def search_for_best_sequence():
+    """Main function to search for the best coefficient sequence."""
+    # Initialize with a structured sequence
+    best_sequence = initialize_sequence()
+    
+    # Perform several iterations of optimization
+    for _ in range(50):  # Limit iterations to stay within time budget
+        direction = get_good_direction_to_move_into(best_sequence)
+        if direction is not None:
+            best_sequence = direction
+        else:
+            break
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

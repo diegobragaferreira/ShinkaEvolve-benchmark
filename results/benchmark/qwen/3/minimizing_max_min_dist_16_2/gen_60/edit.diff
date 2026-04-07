@@ -1,0 +1,288 @@
+--- a/original.py
++++ b/original.py
+@@ -1,79 +1,223 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist, squareform
+-
++from scipy.spatial.distance import pdist
++import random
++import copy
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+-
+-    def objective(x):
+-        # Reshape x into points array
+-        points = x.reshape(-1, 2)
+-
+-        # Compute pairwise distances
++    
++    # Evolutionary algorithm parameters
++    POPULATION_SIZE = 50
++    NUM_GENERATIONS = 100
++    MUTATION_RATE = 0.1
++    CROSSOVER_RATE = 0.8
++    ELITISM_COUNT = 5
++    
++    def compute_min_max_ratio(points):
++        """Compute the ratio of minimum to maximum distance."""
++        if len(points) < 2:
++            return 0.0
+         distances = pdist(points)
+-
+-        # Avoid division by zero
+         if len(distances) == 0:
+-            return 0
+-
+-        # Calculate min and max distances
++            return 0.0
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+-
+-        # Return negative ratio to maximize (since minimize minimizes)
+         if d_max == 0:
+-            return 0
+-        return -d_min / d_max
+-
+-    def constraint_bounds(x):
+-        # Ensure all points are within [0,1] x [0,1]
+-        points = x.reshape(-1, 2)
+-        return np.concatenate([points.flatten(), (1-points.flatten())])
+-
+-    # Start with a more intelligent initial configuration
+-    # Use a regular grid pattern with slight perturbation
+-    np.random.seed(42)
+-    grid_size = int(np.ceil(np.sqrt(16)))
+-    points = []
+-    for i in range(grid_size):
+-        for j in range(grid_size):
+-            if len(points) < 16:
+-                points.append([i/grid_size + np.random.normal(0, 0.05/grid_size),
+-                              j/grid_size + np.random.normal(0, 0.05/grid_size)])
+-
+-    # Clip to ensure points stay in [0,1] x [0,1]
+-    points = np.clip(points, 0, 1)
+-
+-    # Flatten initial guess
+-    x0 = points.flatten()
+-
+-    # Set up bounds (each coordinate must be between 0 and 1)
+-    bounds = [(0, 1) for _ in range(32)]
+-
+-    # Define constraints for bounds
+-    cons = [{'type': 'ineq', 'fun': lambda x: constraint_bounds(x)}]
+-
+-    # Optimize
+-    try:
+-        result = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons,
+-                         options={'maxiter': 1000, 'ftol': 1e-9})
+-        if result.success:
+-            optimized_points = result.x.reshape(-1, 2)
+-            return optimized_points
+-        else:
+-            # If optimization fails, return the initial points
+-            return points
+-    except:
+-        # If anything goes wrong, return initial points
+-        return points
+-
++            return 0.0
++        return d_min / d_max
++    
++    def create_hexagonal_initial_population(size):
++        """Create initial population with hexagonal grid pattern."""
++        population = []
++        
++        # Create hexagonal arrangement - more efficient than square grid
++        points = []
++        center_x, center_y = 0.5, 0.5
++        radius = 0.4  # Radius of hexagonal arrangement
++        
++        # Center point
++        points.append([center_x, center_y])
++        
++        # Surrounding points in hexagonal pattern
++        angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
++        for angle in angles:
++            x = center_x + radius * np.cos(angle)
++            y = center_y + radius * np.sin(angle)
++            points.append([x, y])
++        
++        # Additional points arranged in hexagonal pattern
++        for i in range(size - len(points)):
++            # Distribute remaining points in hexagonal fashion
++            if i < 9:  # First 9 points form a hexagonal layer
++                angle = (i * 2 * np.pi / 9) + np.pi/9  # Offset to avoid symmetry
++                r = 0.3 + 0.1 * (i // 3)  # Varying radii
++                x = center_x + r * np.cos(angle)
++                y = center_y + r * np.sin(angle)
++                points.append([x, y])
++            else:
++                # Random points to fill up to size
++                points.append([random.uniform(0.1, 0.9), random.uniform(0.1, 0.9)])
++        
++        # Trim to exact size and ensure all are in bounds
++        points = points[:size]
++        points = [[max(0, min(1, p[0])), max(0, min(1, p[1]))] for p in points]
++        
++        # Ensure we have exactly 'size' points
++        while len(points) < size:
++            points.append([random.uniform(0.1, 0.9), random.uniform(0.1, 0.9)])
++        
++        return [np.array(points[:size])]
++    
++    def mutate_individual(individual):
++        """Apply mutation to an individual."""
++        mutated = copy.deepcopy(individual)
++        for i in range(len(mutated)):
++            if random.random() < MUTATION_RATE:
++                # Apply small random perturbation
++                mutated[i][0] += random.gauss(0, 0.02)
++                mutated[i][1] += random.gauss(0, 0.02)
++                # Keep within bounds
++                mutated[i][0] = max(0, min(1, mutated[i][0]))
++                mutated[i][1] = max(0, min(1, mutated[i][1]))
++        return mutated
++    
++    def crossover(parent1, parent2):
++        """Create offspring through crossover."""
++        if random.random() > CROSSOVER_RATE:
++            return copy.deepcopy(parent1)
++            
++        # Single-point crossover on the points
++        crossover_point = random.randint(1, len(parent1) - 1)
++        child1 = list(parent1[:crossover_point]) + list(parent2[crossover_point:])
++        child2 = list(parent2[:crossover_point]) + list(parent1[crossover_point:])
++        
++        # Ensure points are within bounds
++        for i in range(len(child1)):
++            child1[i][0] = max(0, min(1, child1[i][0]))
++            child1[i][1] = max(0, min(1, child1[i][1]))
++            
++        for i in range(len(child2)):
++            child2[i][0] = max(0, min(1, child2[i][0]))
++            child2[i][1] = max(0, min(1, child2[i][1]))
++            
++        return [child1, child2]
++    
++    def evaluate_fitness(population):
++        """Evaluate fitness of population."""
++        fitness_scores = []
++        for individual in population:
++            fitness = compute_min_max_ratio(individual)
++            fitness_scores.append((fitness, individual))
++        return sorted(fitness_scores, key=lambda x: x[0], reverse=True)
++    
++    def selection(population_with_fitness):
++        """Select parents for reproduction."""
++        # Tournament selection
++        selected = []
++        tournament_size = 3
++        for _ in range(POPULATION_SIZE):
++            tournament = random.sample(population_with_fitness, tournament_size)
++            winner = max(tournament, key=lambda x: x[0])
++            selected.append(winner[1])
++        return selected
++    
++    def local_refinement(point_set, iterations=10):
++        """Perform local geometric refinement to improve solution."""
++        refined = copy.deepcopy(point_set)
++        for _ in range(iterations):
++            # For each point, try to improve by moving it slightly
++            for i in range(len(refined)):
++                original_fitness = compute_min_max_ratio(refined)
++                best_position = refined[i].copy()
++                best_fitness = original_fitness
++                
++                # Try several small movements
++                for _ in range(20):
++                    new_pos = refined[i].copy()
++                    new_pos[0] += random.uniform(-0.01, 0.01)
++                    new_pos[1] += random.uniform(-0.01, 0.01)
++                    # Keep in bounds
++                    new_pos[0] = max(0, min(1, new_pos[0]))
++                    new_pos[1] = max(0, min(1, new_pos[1]))
++                    
++                    # Temporarily update position
++                    old_pos = refined[i].copy()
++                    refined[i] = new_pos
++                    
++                    new_fitness = compute_min_max_ratio(refined)
++                    if new_fitness > best_fitness:
++                        best_fitness = new_fitness
++                        best_position = new_pos.copy()
++                        
++                    # Restore original position
++                    refined[i] = old_pos
++                
++                # Apply the best move
++                refined[i] = best_position
++                
++        return refined
++    
++    # Initialize population
++    population = create_hexagonal_initial_population(POPULATION_SIZE)
++    
++    # Also include some random populations for diversity
++    for _ in range(POPULATION_SIZE - 1):
++        rand_points = []
++        for _ in range(16):
++            rand_points.append([random.uniform(0.1, 0.9), random.uniform(0.1, 0.9)])
++        population.append(np.array(rand_points))
++    
++    best_solution = None
++    best_fitness = -1
++    
++    # Evolutionary loop
++    for generation in range(NUM_GENERATIONS):
++        # Evaluate fitness
++        fitness_results = evaluate_fitness(population)
++        
++        # Track best solution
++        current_best_fitness = fitness_results[0][0]
++        if current_best_fitness > best_fitness:
++            best_fitness = current_best_fitness
++            best_solution = copy.deepcopy(fitness_results[0][1])
++        
++        # Apply elitism
++        elite = [ind for _, ind in fitness_results[:ELITISM_COUNT]]
++        
++        # Selection
++        selected_parents = selection(fitness_results)
++        
++        # Crossover and mutation
++        new_population = elite[:]  # Start with elites
++        
++        while len(new_population) < POPULATION_SIZE:
++            parent1 = random.choice(selected_parents)
++            parent2 = random.choice(selected_parents)
++            
++            children = crossover(parent1, parent2)
++            for child in children:
++                if len(new_population) < POPULATION_SIZE:
++                    mutated_child = mutate_individual(child)
++                    new_population.append(mutated_child)
++        
++        # Local refinement on top solutions
++        for i in range(min(5, len(new_population))):
++            new_population[i] = local_refinement(new_population[i])
++        
++        population = new_population
++    
++    # Final local refinement on best solution
++    if best_solution is not None:
++        final_solution = local_refinement(best_solution, 20)
++        return final_solution
++    
++    # If no solution found, return last population member
++    return population[0] if population else np.random.rand(16, 2)
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,399 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+import math
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def create_regular_hexagon(center_x, center_y, side_length=1, rotation_deg=0):
+    """Create a regular hexagon as a Shapely polygon"""
+    rotation_rad = math.radians(rotation_deg)
+    points = []
+    for i in range(6):
+        angle = rotation_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+def check_containment_and_overlap(inner_hexagons, outer_hexagon):
+    """Check if all inner hexagons are contained in outer hexagon and don't overlap"""
+    # Check containment
+    for hex_poly in inner_hexagons:
+        if not outer_hexagon.contains(hex_poly):
+            return False
+
+    # Check pairwise overlaps - optimized for the specific case of 11 hexagons
+    # Use early termination and avoid redundant checks
+    n = len(inner_hexagons)
+    for i in range(n):
+        for j in range(i+1, n):
+            if inner_hexagons[i].intersects(inner_hexagons[j]):
+                return False
+
+    return True
+
+def compute_outer_hexagon_radius(inner_hexagons, padding=0.01):
+    """Compute minimum radius needed to contain all inner hexagons with some padding using adaptive binary search"""
+    # Get all vertices of all hexagons
+    all_vertices = []
+    for hex_poly in inner_hexagons:
+        all_vertices.extend(list(hex_poly.exterior.coords))
+
+    if not all_vertices:
+        return padding
+
+    # Find center of bounding box
+    xs = [p[0] for p in all_vertices]
+    ys = [p[1] for p in all_vertices]
+    center_x = (min(xs) + max(xs)) / 2
+    center_y = (min(ys) + max(ys)) / 2
+
+    # Compute max distance from center to any vertex
+    max_dist = 0
+    for x, y in all_vertices:
+        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_dist = max(max_dist, dist)
+
+    # Adaptive binary search with improved convergence
+    low = max_dist
+    high = max_dist * 2.0
+    tolerance = 1e-6
+    max_iterations = 25  # Increased iterations for better precision
+
+    # Track convergence for adaptive tolerance adjustment
+    previous_diff = float('inf')
+    tolerance_reduction_factor = 0.9
+    min_tolerance = 1e-8
+
+    for iteration in range(max_iterations):
+        current_diff = high - low
+        
+        # Adaptive tolerance: decrease as convergence happens
+        if iteration > 0 and current_diff < previous_diff * 0.8:
+            tolerance = max(min_tolerance, tolerance * tolerance_reduction_factor)
+            
+        if current_diff < tolerance:
+            break
+            
+        previous_diff = current_diff
+
+        mid = (low + high) / 2
+        # Create test outer hexagon
+        test_outer_hex = create_regular_hexagon(0, 0, mid, 0)
+        # Check if all inner hexagons fit
+        all_contained = True
+        for hex_poly in inner_hexagons:
+            if not test_outer_hex.contains(hex_poly):
+                all_contained = False
+                break
+        if all_contained:
+            high = mid
+        else:
+            low = mid
+
+    # Add padding and convert to side length
+    # For a regular hexagon, radius = side_length
+    return (low + high) / 2 + padding
+
+def evaluate_layout(inner_positions_angles, outer_center=(0, 0), initial_outer_radius=8):
+    """Evaluate the layout quality"""
+    # Convert to hexagon polygons
+    inner_hexagons = []
+    for pos_angle in inner_positions_angles:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+
+    # Create outer hexagon with current radius
+    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    outer_hexagon = create_regular_hexagon(outer_center[0], outer_center[1], outer_radius, 0)
+
+    # Validate constraints
+    valid = check_containment_and_overlap(inner_hexagons, outer_hexagon)
+
+    # Return negative because we want to maximize 1/R (minimize R)
+    outer_side_length = outer_radius
+    inv_radius = 1.0 / outer_side_length if valid else 0.0
+
+    return -inv_radius, outer_side_length
+
+def generate_better_initial_config():
+    """
+    Generate a better initial configuration for 11 hexagons using optimized hexagonal lattice pattern
+    """
+    # Create a structured hexagonal lattice pattern that's known to work well for 11 hexagons
+    # Central hexagon plus surrounding rings with strategic positioning
+    initial_positions = []
+
+    # Central hexagon
+    initial_positions.append([0.0, 0.0, 0.0])
+
+    # First ring - 6 hexagons arranged in a hexagon
+    hex_radius = 2.0  # Distance between centers
+    for i in range(6):
+        angle = i * math.pi / 3
+        x = hex_radius * math.cos(angle)
+        y = hex_radius * math.sin(angle)
+        initial_positions.append([x, y, 0.0])
+
+    # Second ring - 4 hexagons positioned to fill gaps efficiently
+    second_ring_positions = [
+        [-1.0, -1.732, 0.0],   # Bottom-left
+        [1.0, -1.732, 0.0],    # Bottom-right
+        [-1.0, 1.732, 0.0],    # Top-left
+        [1.0, 1.732, 0.0],     # Top-right
+    ]
+
+    initial_positions.extend(second_ring_positions)
+
+    # Keep only first 11 positions (the 11 required hexagons)
+    return np.array(initial_positions[:11])
+
+def generate_diverse_initial_configs(base_config, num_configs=5):
+    """Generate diverse initial configurations for multi-start approach"""
+    configs = [base_config.copy()]
+    
+    for i in range(num_configs - 1):
+        # Add random perturbations with controlled magnitude
+        perturbed = base_config.copy()
+        np.random.seed(42 + i)
+        
+        for j in range(len(perturbed)):
+            # Perturb positions slightly with different magnitudes
+            perturbed[j][0] += np.random.normal(0, 0.3)
+            perturbed[j][1] += np.random.normal(0, 0.3)
+            # Randomize angles with slight variation
+            perturbed[j][2] = np.random.uniform(0, 360)
+            
+        configs.append(perturbed)
+    
+    return configs
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Generate a better initial configuration
+    initial_positions = generate_better_initial_config()
+    
+    # Generate diverse starting configurations
+    initial_configs = generate_diverse_initial_configs(initial_positions, 5)
+
+    # Optimization bounds for each parameter (x, y, angle)
+    bounds = []
+    for i in range(11):
+        # Reasonable bounds to keep solutions in a practical region
+        bounds.extend([(-8, 8), (-8, 8), (0, 360)])  # angle in degrees
+
+    # Define objective function for optimization
+    def objective(params):
+        # Reshape parameters into positions and angles
+        positions_angles = []
+        for i in range(11):
+            x = params[i*3]
+            y = params[i*3 + 1]
+            angle = params[i*3 + 2]
+            positions_angles.append([x, y, angle])
+
+        score, side_length = evaluate_layout(positions_angles)
+        return score  # Negative since we minimize -score = maximize score
+
+    # Multi-start optimization with diverse initial configurations and improved settings
+    best_score = float('inf')  # We'll minimize this
+    best_inner_data = initial_positions.copy()
+    best_outer_side_length = 10.0
+
+    # Track optimization history for adaptive behavior
+    score_history = []
+    improvement_threshold = 1e-6
+    max_stall_iterations = 20
+    early_stop_count = 0
+    max_early_stop = 5
+
+    # Run optimization from each start point with enhanced strategies
+    for config_idx, initial_config in enumerate(initial_configs):
+        print(f"Starting optimization from configuration {config_idx + 1}")
+        
+        # Strategy 1: Enhanced global optimization with better parameters
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=100,  # Increased iterations
+                popsize=25,   # Larger population size
+                seed=42 + config_idx,
+                tol=1e-8,     # Tighter tolerance
+                mutation=(0.5, 1),
+                recombination=0.7,
+                disp=False
+            )
+
+            # Extract best solution from global optimization
+            best_params = result.x
+            final_positions_angles = []
+            for i in range(11):
+                x = best_params[i*3]
+                y = best_params[i*3 + 1]
+                angle = best_params[i*3 + 2]
+                final_positions_angles.append([x, y, angle])
+
+            # Evaluate final result
+            final_score, final_side_length = evaluate_layout(final_positions_angles)
+
+            if final_score < best_score and final_side_length > 0:
+                best_score = final_score
+                best_inner_data = np.array(final_positions_angles)
+                best_outer_side_length = final_side_length
+
+        except Exception as e:
+            print(f"Global optimization for config {config_idx} failed: {e}")
+            continue
+
+    # Strategy 2: Enhanced local refinement with multiple attempts
+    if best_score < float('inf'):
+        print("Starting enhanced local refinement optimization...")
+        
+        # Multiple attempts with varying precision settings
+        precision_levels = [1e-9, 1e-10, 1e-11]
+        
+        for level_idx, ftol in enumerate(precision_levels):
+            try:
+                # Convert to flat array for scipy optimization
+                initial_flat = []
+                for pos_angle in best_inner_data:
+                    initial_flat.extend(pos_angle)
+
+                # Local refinement with L-BFGS-B with higher iteration count
+                result_local = minimize(
+                    objective,
+                    initial_flat,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': ftol, 'gtol': ftol},
+                    callback=None
+                )
+
+                # Extract refined solution
+                refined_params = result_local.x
+                refined_positions_angles = []
+                for i in range(11):
+                    x = refined_params[i*3]
+                    y = refined_params[i*3 + 1]
+                    angle = refined_params[i*3 + 2]
+                    refined_positions_angles.append([x, y, angle])
+
+                # Evaluate refined result
+                refined_score, refined_side_length = evaluate_layout(refined_positions_angles)
+
+                if refined_score < best_score and refined_side_length > 0:
+                    best_score = refined_score
+                    best_inner_data = np.array(refined_positions_angles)
+                    best_outer_side_length = refined_side_length
+                    early_stop_count = 0  # Reset early stop counter on improvement
+                else:
+                    early_stop_count += 1
+
+                # Add to history for convergence checking
+                score_history.append(best_score)
+                if len(score_history) > max_stall_iterations:
+                    score_history.pop(0)
+
+                # Early stopping if no improvement for several iterations
+                if early_stop_count >= max_early_stop:
+                    print("Early stopping triggered due to lack of improvement")
+                    break
+
+            except Exception as e:
+                print(f"Local optimization level {level_idx} failed: {e}")
+                continue
+
+    # Strategy 3: Multi-start optimization with even more diverse starting points
+    print("Running multi-start optimization for further improvements...")
+    
+    # Generate additional diverse starting configurations
+    for restart in range(5):  # Increased from 3 to 5
+        # Slightly perturbed version of best solution with more aggressive perturbations
+        np.random.seed(100 + restart)
+        perturbed_positions = best_inner_data.copy()
+        for i in range(11):
+            # Larger perturbations for better exploration
+            perturbed_positions[i][0] += np.random.normal(0, 0.5)
+            perturbed_positions[i][1] += np.random.normal(0, 0.5)
+            # Keep angle within bounds
+            perturbed_positions[i][2] = perturbed_positions[i][2] % 360
+
+        try:
+            initial_flat = []
+            for pos_angle in perturbed_positions:
+                initial_flat.extend(pos_angle)
+
+            # Local refinement with L-BFGS-B
+            result_local = minimize(
+                objective,
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 200, 'ftol': 1e-10, 'gtol': 1e-10},
+                callback=None
+            )
+
+            # Extract refined solution
+            refined_params = result_local.x
+            refined_positions_angles = []
+            for i in range(11):
+                x = refined_params[i*3]
+                y = refined_params[i*3 + 1]
+                angle = refined_params[i*3 + 2]
+                refined_positions_angles.append([x, y, angle])
+
+            # Evaluate refined result
+            refined_score, refined_side_length = evaluate_layout(refined_positions_angles)
+
+            if refined_score < best_score and refined_side_length > 0:
+                best_score = refined_score
+                best_inner_data = np.array(refined_positions_angles)
+                best_outer_side_length = refined_side_length
+                early_stop_count = 0  # Reset early stop counter on improvement
+
+        except Exception as e:
+            print(f"Multi-start optimization attempt {restart} failed: {e}")
+            continue
+
+    # Final validation and refinement
+    print("Performing final validation...")
+
+    # Always validate the result
+    inner_hexagons = []
+    for pos_angle in best_inner_data:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+
+    # Recompute outer hexagon size carefully
+    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    outer_hexagon = create_regular_hexagon(0, 0, outer_radius, 0)
+
+    # Final validation check
+    if not check_containment_and_overlap(inner_hexagons, outer_hexagon):
+        print("Final validation failed, using fallback...")
+        # Fall back to initial configuration
+        best_inner_data = initial_positions.copy()
+        inner_hexagons = []
+        for pos_angle in best_inner_data:
+            x, y, angle = pos_angle
+            hex_poly = create_regular_hexagon(x, y, 1, angle)
+            inner_hexagons.append(hex_poly)
+        outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+
+    # Ensure we're returning the correct data format
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+    # Return results
+    return best_inner_data, outer_hex_data, outer_radius
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,263 @@
+<NAME>
+enhanced_grid_init_and_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll implement two key improvements to enhance the circle packing performance:
+
+1. **Enhanced Grid Initialization**: Instead of simple grid placement, I'll use a more sophisticated multi-scale approach that tries different grid configurations (3x3, 4x4, 5x5) and selects the best one for each individual. This approach better explores the configuration space.
+
+2. **Adaptive Mutation Rate Scheduling**: Implement a three-phase adaptive mutation rate schedule that starts with high exploration, transitions to balanced refinement, and ends with focused exploitation - similar to successful approaches from previous generations.
+
+These changes should help achieve better coverage of the search space and more effective convergence toward optimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_initial_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Create initial population with improved initialization"""
+    population = []
+
+    for _ in range(pop_size):
+        # Start with structured grid initialization
+        circles = np.zeros((n_circles, 3))
+
+        # Try to place circles in a grid-like pattern with random perturbations
+        attempts = 0
+        success = False
+
+        while not success and attempts < MAX_ATTEMPTS:
+            # Initialize with smaller radii in grid-like formation
+            rows = int(np.ceil(np.sqrt(n_circles)))
+            cols = int(np.ceil(n_circles / rows))
+
+            # Create a grid of positions
+            grid_positions = []
+            for i in range(rows):
+                for j in range(cols):
+                    if len(grid_positions) >= n_circles:
+                        break
+                    x = (j + 0.5) / cols
+                    y = (i + 0.5) / rows
+                    grid_positions.append((x, y))
+
+            # Fill circles with grid positions
+            for i in range(n_circles):
+                if i < len(grid_positions):
+                    x, y = grid_positions[i]
+                    # Small random offset
+                    x += (random.random() - 0.5) * 0.05
+                    y += (random.random() - 0.5) * 0.05
+                    # Small random radius
+                    r = min(0.05, 0.5 * min(x, 1-x, y, 1-y))
+                    circles[i] = [x, y, r]
+                else:
+                    # Random placement for extra circles
+                    x = random.uniform(0.05, 0.95)
+                    y = random.uniform(0.05, 0.95)
+                    r = min(0.05, 0.5 * min(x, 1-x, y, 1-y))
+                    circles[i] = [x, y, r]
+
+            # Try to improve the configuration with local optimization
+            improved = local_improvement(circles)
+
+            if validate_circle_placement(improved):
+                circles = improved
+                success = True
+            else:
+                # Try again with different initialization
+                attempts += 1
+
+        if not success:
+            # Fallback to random initialization if everything fails
+            circles = np.zeros((n_circles, 3))
+            for i in range(n_circles):
+                x = random.uniform(0.05, 0.95)
+                y = random.uniform(0.05, 0.95)
+                r = min(0.05, 0.5 * min(x, 1-x, y, 1-y))
+                circles[i] = [x, y, r]
+
+        population.append(circles)
+
+    return population
+=======
+def create_initial_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Create initial population with enhanced multi-scale grid initialization"""
+    population = []
+
+    for _ in range(pop_size):
+        circles = np.zeros((n_circles, 3))
+
+        # Try multiple grid configurations to find a good starting point
+        grid_configs = [(3, 3), (4, 4), (5, 5), (6, 6)]  # Different grid sizes
+        best_config = None
+        best_fitness = -np.inf
+
+        # Try each grid configuration
+        for rows, cols in grid_configs:
+            # Skip if too many circles for this grid
+            if rows * cols < n_circles:
+                continue
+
+            # Create a grid of positions
+            grid_positions = []
+            for i in range(rows):
+                for j in range(cols):
+                    if len(grid_positions) >= n_circles:
+                        break
+                    # Add some jitter to make the grid more interesting
+                    x = (j + 0.5 + (random.random() - 0.5) * 0.2) / cols
+                    y = (i + 0.5 + (random.random() - 0.5) * 0.2) / rows
+                    grid_positions.append((x, y))
+
+            # Fill circles with grid positions and random radii
+            temp_circles = np.zeros((n_circles, 3))
+            for i in range(n_circles):
+                if i < len(grid_positions):
+                    x, y = grid_positions[i]
+                    # Ensure within bounds
+                    x = np.clip(x, 0.01, 0.99)
+                    y = np.clip(y, 0.01, 0.99)
+                    # Assign radius based on proximity to edges with variation
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.6, 0.9))
+                    temp_circles[i] = [x, y, r]
+                else:
+                    # Random placement for extra circles
+                    x = random.uniform(0.05, 0.95)
+                    y = random.uniform(0.05, 0.95)
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+                    temp_circles[i] = [x, y, r]
+
+            # Try to improve the configuration locally
+            improved = local_improvement(temp_circles)
+
+            if validate_circle_placement(improved):
+                fitness = calculate_sum_radii(improved)
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_config = improved.copy()
+
+        # If we found a good configuration, use it; otherwise fallback to random
+        if best_config is not None:
+            circles = best_config
+        else:
+            # Fallback to random initialization
+            for i in range(n_circles):
+                x = random.uniform(0.05, 0.95)
+                y = random.uniform(0.05, 0.95)
+                min_dist_to_edge = min(x, 1-x, y, 1-y)
+                r = min(0.08, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+                circles[i] = [x, y, r]
+
+        population.append(circles)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(individual: np.ndarray, generation: int, diversity: float) -> np.ndarray:
+    """Apply adaptive mutation to an individual"""
+    mutated = individual.copy()
+    n = len(mutated)
+
+    # Adaptive mutation rate based on generation and diversity
+    mutation_rate_start = 0.15
+    mutation_rate_end = 0.015
+    mutation_rate = mutation_rate_start - (mutation_rate_start - mutation_rate_end) * (generation / GENERATIONS)
+
+    # Increase mutation rate when diversity is low (for exploration)
+    if diversity < 0.3:
+        mutation_rate *= 1.5
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            # Mutate either position or radius with higher probability for position
+            if random.random() < 0.7:  # 70% chance to mutate position
+                # Mutate position with adaptive step size
+                step_size = 0.08 * (1.0 - generation / GENERATIONS)  # Decrease over time
+                mutated[i, 0] += (random.random() - 0.5) * step_size
+                mutated[i, 1] += (random.random() - 0.5) * step_size
+
+                # Keep within bounds
+                mutated[i, 0] = np.clip(mutated[i, 0], 0.01, 0.99)
+                mutated[i, 1] = np.clip(mutated[i, 1], 0.01, 0.99)
+            else:
+                # Mutate radius with adaptive step size
+                rad_step_size = 0.03 * (1.0 - generation / GENERATIONS)
+                mutated[i, 2] += (random.random() - 0.5) * rad_step_size
+
+                # Ensure positive radius
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+
+    # Repair any constraint violations
+    repaired = repair_constraints(mutated)
+    return repaired
+=======
+def mutate(individual: np.ndarray, generation: int, diversity: float) -> np.ndarray:
+    """Apply adaptive mutation to an individual with three-phase scheduling"""
+    mutated = individual.copy()
+    n = len(mutated)
+
+    # Three-phase adaptive mutation rate scheduling
+    if generation < GENERATIONS * 0.4:
+        # Phase 1: High exploration (generations 1-80)
+        mutation_rate = 0.15
+    elif generation < GENERATIONS * 0.7:
+        # Phase 2: Balanced refinement (generations 81-140)
+        mutation_rate = 0.05
+    else:
+        # Phase 3: Exploitation (generations 141-200)
+        mutation_rate = 0.015
+
+    # Increase mutation rate when diversity is low (for exploration)
+    if diversity < 0.3:
+        mutation_rate *= 1.5
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            # Mutate either position or radius with higher probability for position
+            if random.random() < 0.7:  # 70% chance to mutate position
+                # Mutate position with adaptive step size
+                if generation < GENERATIONS * 0.4:
+                    # High exploration phase - larger moves
+                    step_size = 0.1
+                elif generation < GENERATIONS * 0.7:
+                    # Balanced phase - moderate moves
+                    step_size = 0.05
+                else:
+                    # Exploitation phase - small moves
+                    step_size = 0.01
+
+                mutated[i, 0] += (random.random() - 0.5) * step_size
+                mutated[i, 1] += (random.random() - 0.5) * step_size
+
+                # Keep within bounds
+                mutated[i, 0] = np.clip(mutated[i, 0], 0.01, 0.99)
+                mutated[i, 1] = np.clip(mutated[i, 1], 0.01, 0.99)
+            else:
+                # Mutate radius with adaptive step size based on phase
+                if generation < GENERATIONS * 0.4:
+                    # High exploration phase - larger radius changes
+                    rad_step_size = 0.05
+                elif generation < GENERATIONS * 0.7:
+                    # Balanced phase - moderate radius changes
+                    rad_step_size = 0.02
+                else:
+                    # Exploitation phase - small radius changes
+                    rad_step_size = 0.005
+
+                mutated[i, 2] += (random.random() - 0.5) * rad_step_size
+
+                # Ensure positive radius
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+
+    # Repair any constraint violations
+    repaired = repair_constraints(mutated)
+    return repaired
+>>>>>>> REPLACE
+</DIFF>

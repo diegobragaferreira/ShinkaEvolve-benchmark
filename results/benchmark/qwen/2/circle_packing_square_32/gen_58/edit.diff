@@ -1,0 +1,239 @@
+--- a/original.py
++++ b/original.py
+@@ -1,173 +1,150 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import cdist
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+-def initialize_circles_heuristic(n=32):
+-    """Initialize circle positions with a density-aware heuristic approach."""
+-    # Start with a more sophisticated grid layout
+-    rows = int(np.ceil(np.sqrt(n)))
+-    cols = int(np.ceil(n / rows))
++def initialize_circles_hexagonal(n=32):
++    """Initialize circle positions using hexagonal grid pattern."""
++    # Create hexagonal grid points for 32 circles
++    rows = 6
++    cols = 6  # 6x6 = 36 positions, more than enough for 32 circles
+ 
+-    # Create initial grid positions with slight jitter
+-    positions = []
++    # Create hexagonal grid points
++    sqrt3 = np.sqrt(3)
++    spacing_x = 1.0 / cols
++    spacing_y = sqrt3 / 2 * spacing_x
++
++    # Generate base grid positions
++    grid_points = []
+     for i in range(rows):
+         for j in range(cols):
+-            if len(positions) >= n:
+-                break
+-            # Add slight jitter to avoid perfect grid artifacts
+-            x = (j + 0.5 + np.random.uniform(-0.1, 0.1)) / cols
+-            y = (i + 0.5 + np.random.uniform(-0.1, 0.1)) / rows
+-            # Clamp to valid range
+-            x = np.clip(x, 0.01, 0.99)
+-            y = np.clip(y, 0.01, 0.99)
+-            positions.append([x, y])
++            x = (j + 0.5) * spacing_x
++            y = (i + 0.5) * spacing_y
++            if x <= 1.0 and y <= 1.0:
++                grid_points.append([x, y])
+ 
+-    # Adjust for exact count
+-    positions = positions[:n]
+-
+-    # Assign initial radii with density awareness
+-    # Circles in center can have larger radii, edges smaller
++    # Take first n points and add some randomness
++    points = np.array(grid_points[:n])
++    
++    # Add slight jitter to avoid perfect grid artifacts
++    jitter_strength = 0.1
++    points[:, 0] += np.random.uniform(-jitter_strength * spacing_x, jitter_strength * spacing_x, n)
++    points[:, 1] += np.random.uniform(-jitter_strength * spacing_y, jitter_strength * spacing_y, n)
++    
++    # Clamp to valid range
++    points[:, 0] = np.clip(points[:, 0], 0.01, 0.99)
++    points[:, 1] = np.clip(points[:, 1], 0.01, 0.99)
++    
++    # Initial radius estimation based on density and boundary awareness
+     initial_radii = []
+     for i in range(n):
+-        x, y = positions[i]
+-
+-        # Calculate distance to boundaries (smaller distances = smaller radii)
++        x, y = points[i]
++        
++        # Calculate distance to boundaries
+         dist_to_boundaries = min(x, 1-x, y, 1-y)
+-
+-        # Calculate distance to nearest neighbors (larger distances = larger radii)
++        
++        # Estimate neighborhood influence
+         distances = []
+         for j in range(n):
+             if i != j:
+-                x2, y2 = positions[j]
++                x2, y2 = points[j]
+                 dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+                 distances.append(dist)
+-
+-        # Average distance to neighbors
++                
+         avg_dist = np.mean(distances) if distances else 0.1
+-
+-        # Estimate density: higher density means smaller radii
+-        # We'll use a combination of boundary distance and neighbor distance
+-        density_factor = 1.0 / (avg_dist + 0.01)  # Inverse relationship
++        
++        # Density-based radius adjustment
++        density_factor = 1.0 / (avg_dist + 0.01)
+         boundary_factor = dist_to_boundaries
+-
+-        # Base radius based on density and boundary factors
+-        base_radius = min(0.1, boundary_factor * 0.5)
+-
+-        # Scale by density factor (higher density = smaller radius)
+-        scaled_radius = base_radius * (1.0 / (1.0 + density_factor * 0.5))
+-
+-        # Ensure minimum radius
++        
++        # Base radius based on boundary proximity and density
++        base_radius = min(0.1, boundary_factor * 0.3)
++        scaled_radius = base_radius * (1.0 / (1.0 + density_factor * 0.3))
++        
+         final_radius = max(0.005, min(0.15, scaled_radius))
+-
+         initial_radii.append(final_radius)
+ 
+     # Combine into circles array
+-    circles = np.column_stack([positions, initial_radii])
++    circles = np.column_stack([points, initial_radii])
+     return circles
+ 
+ def evaluate_fitness(circles):
+-    """Evaluate fitness of circle configuration."""
++    """Evaluate fitness of circle configuration with proper penalties."""
+     n = len(circles)
+     total_radius = np.sum(circles[:, 2])
+-
+-    # Penalty for overlaps and containment violations
++    
++    # Penalty for constraint violations
+     penalty = 0
+-
++    
+     # Check containment constraints
+     for i in range(n):
+         x, y, r = circles[i]
+         if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+             penalty += 1000  # Large penalty for containment violation
+-
++            
+     # Check overlap constraints
+     for i in range(n):
+         for j in range(i+1, n):
+             x1, y1, r1 = circles[i]
+             x2, y2, r2 = circles[j]
+             distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+             if distance < r1 + r2:
+-                penalty += 1000 * (r1 + r2 - distance)
+-
++                overlap_amount = (r1 + r2 - distance)
++                penalty += 1000 * overlap_amount
++                
+     return total_radius - penalty
+ 
+-def optimize_circles(circles):
+-    """Optimize circle positions using scipy optimization."""
++def optimize_circles(circles, max_iter=1000):
++    """Optimize circle positions and radii using scipy optimization."""
+     def objective(params):
+         # Reshape params back to circles array
+         circles_flat = params.reshape(-1, 3)
+         return -evaluate_fitness(circles_flat)  # Negative because we maximize
+ 
+-    def constraint_func(params):
+-        # Constraints for non-overlap and containment
+-        circles_flat = params.reshape(-1, 3)
+-        n = len(circles_flat)
+-
+-        # Containment constraints (should be within [r, 1-r] for x and y)
+-        bounds_violation = 0
+-
+-        for i in range(n):
+-            x, y, r = circles_flat[i]
+-            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+-                bounds_violation += 1000
+-
+-        # Overlap constraints
+-        overlap_violation = 0
+-        for i in range(n):
+-            for j in range(i+1, n):
+-                x1, y1, r1 = circles_flat[i]
+-                x2, y2, r2 = circles_flat[j]
+-                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+-                if distance < r1 + r2:
+-                    overlap_violation += 1000 * (r1 + r2 - distance)
+-
+-        return bounds_violation + overlap_violation
+-
+     # Flatten the circles array for optimization
+     initial_params = circles.flatten()
+-
+-    # Define bounds for optimization
++    
++    # Define bounds for optimization (radius: 0.001-0.5, positions: 0.001-0.999)
+     bounds = []
+     for i in range(len(initial_params)):
+         if i % 3 == 2:  # radius parameter
+             bounds.append((0.001, 0.5))  # Radius between 0.001 and 0.5
+         else:  # x and y parameters
+             bounds.append((0.001, 0.999))  # Position within the unit square
+ 
+     try:
+         # Use L-BFGS-B which handles bounds well
+         result = minimize(objective, initial_params, method='L-BFGS-B',
+-                         bounds=bounds, options={'maxiter': 1000})
++                         bounds=bounds, options={'maxiter': max_iter})
+ 
+         if result.success:
+             optimized_circles = result.x.reshape(-1, 3)
+             return optimized_circles
+     except Exception as e:
+         print(f"Optimization error: {e}")
+ 
+     # Return original if optimization failed
+     return circles
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+     circles = np.zeros((n, 3))
+-
+-    # Initialize with heuristic approach
+-    circles = initialize_circles_heuristic(n)
+-
++    
++    # Initialize with hexagonal grid approach
++    circles = initialize_circles_hexagonal(n)
++    
+     # Optimize the configuration
+     circles = optimize_circles(circles)
+-
++    
+     return circles
+ 
+-
+ # EVOLVE-BLOCK-END

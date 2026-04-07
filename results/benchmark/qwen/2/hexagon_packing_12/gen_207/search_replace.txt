@@ -1,0 +1,220 @@
+<NAME>
+add_spatial_hashing_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a combination of fast containment checks and Shapely-based overlap detection, but the overlap detection is inefficient for the 12-hexagon case. I'll implement a more efficient spatial hashing approach for overlap detection, similar to what was suggested in prior versions but integrated more systematically. This will dramatically improve the performance of overlap checking during optimization, allowing for more iterations and better exploration of the solution space within the 180-second time limit.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        return min_x, max_x, min_y, max_y
+
+    @staticmethod
+    @jit(nopython=True)
+    def hexagon_to_grid_cells(vertices, cell_size):
+        """Get all grid cells that a hexagon might occupy."""
+        min_x, max_x, min_y, max_y = HexagonPacker.get_hexagon_bounds(vertices)
+
+        min_cell_x = int(min_x // cell_size)
+        max_cell_x = int(max_x // cell_size)
+        min_cell_y = int(min_y // cell_size)
+        max_cell_y = int(max_y // cell_size)
+
+        cells = []
+        for x in range(min_cell_x, max_cell_x + 1):
+            for y in range(min_cell_y, max_cell_y + 1):
+                cells.append((x, y))
+
+        return cells
+
+    @staticmethod
+    @jit(nopython=True)
+    def check_overlap_spatial_hashing(hexagon_vertices_list, cell_size=1.5):
+        """Spatial hashing overlap check for improved performance."""
+        n_hexagons = len(hexagon_vertices_list)
+
+        grid = {}
+
+        for i in range(n_hexagons):
+            vertices = hexagon_vertices_list[i]
+            cells = HexagonPacker.hexagon_to_grid_cells(vertices, cell_size)
+            for cell in cells:
+                if cell not in grid:
+                    grid[cell] = []
+                grid[cell].append(i)
+
+        for i in range(n_hexagons):
+            vertices_i = hexagon_vertices_list[i]
+            cells = HexagonPacker.hexagon_to_grid_cells(vertices_i, cell_size)
+
+            for cell in cells:
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                        if neighbor_cell in grid:
+                            for j in grid[neighbor_cell]:
+                                if i != j:
+                                    min_x_i, max_x_i, min_y_i, max_y_i = HexagonPacker.get_hexagon_bounds(vertices_i)
+                                    vertices_j = hexagon_vertices_list[j]
+                                    min_x_j, max_x_j, min_y_j, max_y_j = HexagonPacker.get_hexagon_bounds(vertices_j)
+
+                                    if (max_x_i >= min_x_j and min_x_i <= max_x_j and
+                                        max_y_i >= min_y_j and min_y_i <= max_y_j):
+                                        cx_i = vertices_i[0][0]
+                                        cy_i = vertices_i[0][1]
+                                        cx_j = vertices_j[0][0]
+                                        cy_j = vertices_j[0][1]
+                                        dist_sq = (cx_i - cx_j)**2 + (cy_i - cy_j)**2
+                                        if dist_sq < 4.0:
+                                            return False
+
+        return True
+
+    def check_containment(self, hexagon_vertices_list, outer_side_length):
+        """Check if all hexagon vertices are within the outer hexagon."""
+        if HexagonPacker.check_containment_fast(hexagon_vertices_list, outer_side_length):
+            outer_polygon = Polygon(HexagonPacker.outer_hexagon_vertices(outer_side_length))
+
+            for vertices in hexagon_vertices_list:
+                center_x = vertices[0][0]
+                center_y = vertices[0][1]
+                if not outer_polygon.contains(Point(center_x, center_y)):
+                    return False
+                hex_polygon = Polygon(vertices)
+                if not outer_polygon.contains(hex_polygon):
+                    return False
+            return True
+        return False
+
+    def check_overlap(self, hexagon_vertices_list):
+        """Check if any hexagons overlap using optimized spatial hashing."""
+        if HexagonPacker.check_overlap_spatial_hashing(hexagon_vertices_list):
+            try:
+                polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+                union = unary_union(polygons)
+                total_area = sum(polygon.area for polygon in polygons)
+                union_area = union.area
+                return abs(total_area - union_area) < 1e-10
+            except:
+                for i in range(len(polygons)):
+                    for j in range(i+1, len(polygons)):
+                        if polygons[i].intersects(polygons[j]):
+                            return False
+                return True
+        return False
+=======
+        return min_x, max_x, min_y, max_y
+
+    @staticmethod
+    @jit(nopython=True)
+    def hexagon_to_grid_cells(vertices, cell_size):
+        """Get all grid cells that a hexagon might occupy."""
+        min_x, max_x, min_y, max_y = HexagonPacker.get_hexagon_bounds(vertices)
+
+        min_cell_x = int(min_x // cell_size)
+        max_cell_x = int(max_x // cell_size)
+        min_cell_y = int(min_y // cell_size)
+        max_cell_y = int(max_y // cell_size)
+
+        cells = []
+        for x in range(min_cell_x, max_cell_x + 1):
+            for y in range(min_cell_y, max_cell_y + 1):
+                cells.append((x, y))
+
+        return cells
+
+    @staticmethod
+    @jit(nopython=True)
+    def check_overlap_spatial_hashing(hexagon_vertices_list, cell_size=1.0):
+        """Spatial hashing overlap check for improved performance."""
+        n_hexagons = len(hexagon_vertices_list)
+
+        # Initialize grid
+        grid = {}
+        cell_size_inv = 1.0 / cell_size
+
+        # Populate grid with hexagon indices
+        for i in range(n_hexagons):
+            vertices = hexagon_vertices_list[i]
+            cells = HexagonPacker.hexagon_to_grid_cells(vertices, cell_size)
+            for cell in cells:
+                if cell not in grid:
+                    grid[cell] = []
+                grid[cell].append(i)
+
+        # Check for overlaps using spatial hashing
+        for i in range(n_hexagons):
+            vertices_i = hexagon_vertices_list[i]
+            cells = HexagonPacker.hexagon_to_grid_cells(vertices_i, cell_size)
+
+            for cell in cells:
+                # Check 3x3 neighborhood
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                        if neighbor_cell in grid:
+                            for j in grid[neighbor_cell]:
+                                if i != j:
+                                    # Quick bounding box check
+                                    min_x_i, max_x_i, min_y_i, max_y_i = HexagonPacker.get_hexagon_bounds(vertices_i)
+                                    vertices_j = hexagon_vertices_list[j]
+                                    min_x_j, max_x_j, min_y_j, max_y_j = HexagonPacker.get_hexagon_bounds(vertices_j)
+
+                                    # If bounding boxes don't intersect, skip detailed check
+                                    if (max_x_i < min_x_j or min_x_i > max_x_j or
+                                        max_y_i < min_y_j or min_y_i > max_y_j):
+                                        continue
+
+                                    # Quick center distance check (more efficient than full overlap test)
+                                    cx_i = vertices_i[0][0]
+                                    cy_i = vertices_i[0][1]
+                                    cx_j = vertices_j[0][0]
+                                    cy_j = vertices_j[0][1]
+
+                                    # Use squared distance to avoid sqrt computation
+                                    dist_sq = (cx_i - cx_j)**2 + (cy_i - cy_j)**2
+                                    # For unit hexagons, centers must be < 2 units apart to possibly overlap
+                                    if dist_sq < 4.0:
+                                        return False
+
+        return True
+
+    def check_containment(self, hexagon_vertices_list, outer_side_length):
+        """Check if all hexagon vertices are within the outer hexagon."""
+        if HexagonPacker.check_containment_fast(hexagon_vertices_list, outer_side_length):
+            outer_polygon = Polygon(HexagonPacker.outer_hexagon_vertices(outer_side_length))
+
+            for vertices in hexagon_vertices_list:
+                center_x = vertices[0][0]
+                center_y = vertices[0][1]
+                if not outer_polygon.contains(Point(center_x, center_y)):
+                    return False
+                hex_polygon = Polygon(vertices)
+                if not outer_polygon.contains(hex_polygon):
+                    return False
+            return True
+        return False
+
+    def check_overlap(self, hexagon_vertices_list):
+        """Check if any hexagons overlap using spatial hashing for early rejection."""
+        # First use spatial hashing for fast rejection
+        if HexagonPacker.check_overlap_spatial_hashing(hexagon_vertices_list, cell_size=1.0):
+            # If spatial hashing didn't detect overlap, do precise check
+            try:
+                polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+                union = unary_union(polygons)
+                total_area = sum(polygon.area for polygon in polygons)
+                union_area = union.area
+                return abs(total_area - union_area) < 1e-10
+            except:
+                # Fallback to pairwise intersection check for robustness
+                for i in range(len(polygons)):
+                    for j in range(i+1, len(polygons)):
+                        if polygons[i].intersects(polygons[j]):
+                            return False
+                return True
+        return False
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,306 @@
+--- a/original.py
++++ b/original.py
+@@ -1,193 +1,270 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist, squareform
+-import time
++from scipy.spatial import SphericalVoronoi
++import warnings
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+-
++    Uses spherical Voronoi-based initialization for better geometric distribution.
++    
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+ 
+     def objective(x):
+-        # Reshape flat array back to 16x2 points
++        # Reshape x into points
+         points = x.reshape(-1, 2)
+ 
+         # Add small padding to avoid boundary issues
+         points = np.clip(points, 1e-8, 1-1e-8)
+ 
+         # Compute full pairwise distance matrix for better numerical stability
+         distance_matrix = squareform(pdist(points))
+ 
+         # Zero out diagonal to avoid considering distance to self
+         np.fill_diagonal(distance_matrix, np.inf)
+ 
+-        # Get min and max distances from the full matrix
++        # Compute min and max distances from the full matrix
+         d_min = np.min(distance_matrix)
+         d_max = np.max(distance_matrix)
+ 
+         # Handle case where all points are coincident
+         if d_max <= 1e-12:
+             return -np.inf
+ 
+-        # Return negative ratio since we're minimizing
++        # Return negative ratio to maximize (since we're minimizing the negative)
+         return -d_min / d_max
+ 
+-    def constraint_func(x):
+-        # Ensure all points are within [0,1]^2
+-        points = x.reshape(-1, 2)
+-        return np.concatenate([points.flatten(), (1 - points).flatten()])
+-
+-    # Define bounds for all coordinates with small padding to avoid boundary issues
+-    bounds = [(1e-8, 1-1e-8) for _ in range(32)]
++    def create_spherical_initialization():
++        """Create initial points using spherical Voronoi principles"""
++        # Generate 16 points on a sphere using icosahedral projection
++        # This provides a good starting configuration that approximates uniform distribution
++        
++        # Icosahedral vertices (normalized)
++        phi = (1 + np.sqrt(5)) / 2  # golden ratio
++        vertices = np.array([
++            [-1,  phi,  0],
++            [ 1,  phi,  0],
++            [-1, -phi,  0],
++            [ 1, -phi,  0],
++            [ 0, -1,  phi],
++            [ 0,  1,  phi],
++            [ 0, -1, -phi],
++            [ 0,  1, -phi],
++            [ phi,  0, -1],
++            [ phi,  0,  1],
++            [-phi,  0, -1],
++            [-phi,  0,  1]
++        ])
++        
++        # Normalize vertices to unit sphere
++        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
++        
++        # Add more points by subdividing faces (approach similar to icosphere)
++        # We start with 12 vertices and want 16 total points
++        # Add one more point at the center of the icosahedron face that contains 0,0,0 direction
++        # But for our 16-point case, we'll use simpler approach
++        
++        # Method: Use 16 points from icosahedral subdivision of 20 faces
++        # For simplicity, we take 16 of the 12 vertices plus some additional points
++        # Take 12 vertices from icosahedron and add 4 more
++        # Generate additional points using spiral or sampling
++        
++        # Simple approach: start with 12 icosahedral vertices and add 4 more
++        # Add 4 vertices by sampling from the surface
++        np.random.seed(42)
++        additional_points = np.random.randn(4, 3)
++        additional_points = additional_points / np.linalg.norm(additional_points, axis=1, keepdims=True)
++        
++        # Combine all points
++        all_points = np.vstack([vertices[:12], additional_points])
++        
++        # Project to sphere (should already be on sphere, but just in case)
++        all_points = all_points / np.linalg.norm(all_points, axis=1, keepdims=True)
++        
++        # Project to 2D using stereographic projection
++        # Stereographic projection from north pole (0,0,1)
++        # This maps sphere to plane using f(x,y,z) = (x/(1-z), y/(1-z))
++        proj_points = []
++        for pt in all_points:
++            if abs(pt[2] - 1) > 1e-10:  # Avoid projection singularity at north pole
++                x_proj = pt[0] / (1 - pt[2])
++                y_proj = pt[1] / (1 - pt[2])
++                proj_points.append([x_proj, y_proj])
++            else:
++                # If point is nearly at north pole, project it differently
++                proj_points.append([0, 0])
++        
++        proj_points = np.array(proj_points)
++        
++        # Normalize to make it suitable for our [0,1] box
++        # Find min and max in both dimensions
++        x_min, x_max = proj_points[:, 0].min(), proj_points[:, 0].max()
++        y_min, y_max = proj_points[:, 1].min(), proj_points[:, 1].max()
++        
++        if x_max - x_min > 1e-10 and y_max - y_min > 1e-10:
++            # Normalize to [0.05, 0.95] range to maintain interior points
++            scale_x = 0.9 / (x_max - x_min)
++            scale_y = 0.9 / (y_max - y_min)
++            
++            proj_points[:, 0] = 0.05 + (proj_points[:, 0] - x_min) * scale_x
++            proj_points[:, 1] = 0.05 + (proj_points[:, 1] - y_min) * scale_y
++        else:
++            # If all points are essentially the same, use random placement
++            proj_points = np.random.rand(16, 2) * 0.9 + 0.05
++            
++        return proj_points
+ 
+     def create_diverse_initial_guesses():
+-        """Create multiple diverse initial guesses using different geometric patterns"""
++        """Create multiple diverse initial guesses including spherical Voronoi based"""
+         initial_guesses = []
+ 
+-        # 1. Golden spiral for good point distribution
++        # 1. Spherical Voronoi based initialization (main new approach)
++        try:
++            spherical_points = create_spherical_initialization()
++            initial_guesses.append(spherical_points.flatten())
++        except Exception:
++            # Fallback to simple random
++            np.random.seed(42)
++            initial_guesses.append(np.random.rand(32))
++
++        # 2. Golden spiral initialization for good distribution
+         golden_angle = 2.399963229728653  # ~4π/(3+√5)
+         points_spiral = []
+         for i in range(16):
+             radius = np.sqrt(i/15.0)  # Normalize to [0,1]
+             angle = i * golden_angle
+             x = 0.5 + radius * np.cos(angle) * 0.45
+             y = 0.5 + radius * np.sin(angle) * 0.45
+             points_spiral.append([x, y])
+         initial_guesses.append(np.array(points_spiral).flatten())
+ 
+-        # 2. Hexagonal grid approximation
++        # 3. Hexagonal grid approximation
+         hex_points = []
+         rows, cols = 4, 4
+         spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+         spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
+ 
+         for i in range(rows):
+             for j in range(cols):
+                 if len(hex_points) >= 16:
+                     break
+                 x = j * spacing_x
+                 y = i * spacing_y
+                 # Offset every other row
+                 if i % 2 == 1:
+                     x += spacing_x / 2
+                 hex_points.append([x, y])
+ 
+         # Trim or pad to 16 points
+         if len(hex_points) < 16:
+             extra_points = np.random.rand(16 - len(hex_points), 2)
+             hex_points.extend(extra_points.tolist())
+         elif len(hex_points) > 16:
+             hex_points = hex_points[:16]
+ 
+         initial_guesses.append(np.array(hex_points).flatten())
+ 
+-        # 3. Perturbed grid initialization
++        # 4. Perturbed grid initialization
+         grid_points = np.array([[i/3, j/3] for i in range(4) for j in range(4) if i*4+j < 16]).reshape(-1, 2)
+         perturbed_grid = grid_points + np.random.normal(0, 0.05, (16, 2))
+         perturbed_grid = np.clip(perturbed_grid, 0, 1)
+         initial_guesses.append(perturbed_grid.flatten())
+ 
+-        # 4. Random initialization with fixed seed
++        # 5. Random initialization with fixed seed
+         np.random.seed(42)
+         random_points = np.random.rand(16, 2)
+         initial_guesses.append(random_points.flatten())
+ 
+-        # 5. Another random initialization with different seed
+-        np.random.seed(123)
+-        random_points_2 = np.random.rand(16, 2)
+-        initial_guesses.append(random_points_2.flatten())
+-
+         return initial_guesses
++
++    # Define bounds for all coordinates with small padding to avoid boundary issues
++    bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+ 
+     # Create diverse initial guesses
+     initial_guesses = create_diverse_initial_guesses()
+ 
+     # Multi-start approach with differential evolution for global search
+     best_result = None
+     best_ratio = -np.inf
+ 
+     # Try multiple initializations with enhanced parameters
+     for i, initial_guess in enumerate(initial_guesses):
+         try:
+             # Use differential evolution for global search with enhanced parameters
+             de_result = differential_evolution(
+                 objective,
+                 bounds,
+                 seed=42+i,
+-                maxiter=200,      # Increased iterations
+-                popsize=30,       # Larger population size
++                maxiter=150,      # Reduced iterations for speed
++                popsize=25,       # Moderate population size for balance
+                 tol=1e-8,         # Tighter tolerance
+                 recombination=0.9, # Higher recombination rate
+                 mutation=(0.8, 1.0), # Different mutation strategy
+                 disp=False
+             )
+ 
+             # Local refinement with adaptive strategy
+             local_result = minimize(
+                 objective,
+                 de_result.x,
+                 method='L-BFGS-B',
+                 bounds=bounds,
+-                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 1000}
++                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 800}
+             )
+ 
+             # If L-BFGS-B fails, try SLSQP as backup
+             if not local_result.success:
+                 local_result = minimize(
+                     objective,
+                     de_result.x,
+                     method='SLSQP',
+                     bounds=bounds,
+-                    options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 1000}
++                    options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 800}
+                 )
+ 
+             # Keep track of the best solution found
+             if -local_result.fun > best_ratio:
+                 best_ratio = -local_result.fun
+                 best_result = local_result.x
+ 
+         except Exception as e:
+             # Skip failed optimizations and continue with others
+             continue
+ 
+-    # Final refinement with even more aggressive settings if we found a good candidate
++    # Final refinement with aggressive settings if we found a good candidate
+     if best_result is not None:
+         final_result = minimize(
+             objective,
+             best_result,
+             method='L-BFGS-B',
+             bounds=bounds,
+-            options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1500}
++            options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1000}
+         )
+ 
+         # If L-BFGS fails, try SLSQP as final fallback
+         if not final_result.success:
+             final_result = minimize(
+                 objective,
+                 best_result,
+                 method='SLSQP',
+                 bounds=bounds,
+-                options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1500}
++                options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1000}
+             )
+ 
+         points = final_result.x.reshape(-1, 2)
+     else:
+         # Fallback to the first initial guess if everything else failed
+         points = initial_guesses[0].reshape(-1, 2)
+ 
+-    # Return final points
+-    points = final_result.x.reshape(-1, 2)
+-
+     # Ensure all points are within [0,1]^2 (handle any boundary issues)
+     points = np.clip(points, 0, 1)
+ 
+     return points
+ 
+ 
+ # EVOLVE-BLOCK-END

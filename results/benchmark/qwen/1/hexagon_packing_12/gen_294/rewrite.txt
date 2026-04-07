@@ -1,0 +1,235 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon, Point
+import time
+from math import sqrt, cos, sin, pi
+from itertools import product
+
+def hex_distance(p1, p2):
+    """Calculate distance between two hexagonal lattice points."""
+    return max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]), abs((p1[0] - p1[1]) - (p2[0] - p2[1])))
+
+def generate_hexagon_vertices(center_x, center_y, rotation_deg, side_length=1):
+    """Generate vertices of a regular hexagon."""
+    angle_rad = np.radians(rotation_deg)
+    angles = np.linspace(0, 2*np.pi, 7) + angle_rad
+    vertices = []
+    for angle in angles:
+        x = center_x + side_length * np.cos(angle)
+        y = center_y + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+def check_containment(hexagon_vertices, outer_hexagon_vertices):
+    """Check if all vertices of inner hexagon are within outer hexagon."""
+    inner_polygon = Polygon(hexagon_vertices)
+    outer_polygon = Polygon(outer_hexagon_vertices)
+    return outer_polygon.contains(inner_polygon)
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap."""
+    polygon1 = Polygon(hex1_vertices)
+    polygon2 = Polygon(hex2_vertices)
+    return polygon1.intersects(polygon2)
+
+def get_hex_lattice_points(radius, max_dist):
+    """Get lattice points within a hexagonal region up to max_dist."""
+    points = []
+    for i in range(-max_dist, max_dist + 1):
+        for j in range(-max_dist, max_dist + 1):
+            # Check if this lattice point is within the hexagon
+            if hex_distance((0, 0), (i, j)) <= radius:
+                points.append((i, j))
+    return points
+
+def create_hexagonal_lattice_layout(lattice_points, base_radius=2.0, center_offset=(0, 0)):
+    """Create hexagonal lattice arrangement for 12 hexagons."""
+    # Distribute points in layers around center
+    center_point = (0, 0)
+    positions = []
+    
+    # Layer 1: center (1 point)
+    positions.append((0, 0, 0))  # center at origin with 0 rotation
+    
+    # Layer 2: first ring (6 points)
+    ring_points = [p for p in lattice_points if hex_distance(center_point, p) == 1]
+    # Select 6 appropriately spaced points for the ring
+    ring_positions = []
+    for i, p in enumerate(ring_points):
+        # Distribute evenly around the ring
+        angle = (i * 60) % 360
+        # Scale to appropriate distance
+        scaled_x = (base_radius * p[0] * 0.866) 
+        scaled_y = (base_radius * p[1] * 0.866)
+        if i < 6:  # We want just 6 points
+            ring_positions.append((scaled_x, scaled_y, 0))
+    
+    # Take the first 6 points for ring
+    if len(ring_positions) >= 6:
+        positions.extend(ring_positions[:6])
+    else:
+        # Fill remaining positions with dummy locations
+        positions.extend([(0, 0, 0)] * (6 - len(ring_positions)))
+    
+    # Layer 3: second ring (5 points)
+    # Get points at distance 2
+    second_ring_points = [p for p in lattice_points if hex_distance(center_point, p) == 2]
+    second_ring_positions = []
+    
+    for i, p in enumerate(second_ring_points):
+        if i < 5:
+            scaled_x = (base_radius * 1.732 * p[0] * 0.866)
+            scaled_y = (base_radius * 1.732 * p[1] * 0.866)
+            second_ring_positions.append((scaled_x, scaled_y, 0))
+    
+    # Fill remaining positions if needed
+    if len(second_ring_positions) < 5:
+        second_ring_positions.extend([(0, 0, 0)] * (5 - len(second_ring_positions)))
+        
+    positions.extend(second_ring_positions[:5])
+    
+    # Ensure we have exactly 12 positions
+    while len(positions) < 12:
+        positions.append((0, 0, 0))
+        
+    return positions[:12]
+
+def compute_outer_hex_radius(inner_positions):
+    """Compute the minimal required outer hexagon radius."""
+    max_dist = 0
+    for x, y, _ in inner_positions:
+        dist = sqrt(x*x + y*y)
+        # Account for hexagon radius (circumradius of unit hexagon)
+        dist_with_radius = dist + 1.0
+        max_dist = max(max_dist, dist_with_radius)
+    return max_dist * 1.05  # Add 5% buffer
+
+def validate_solution(positions, outer_radius):
+    """Fast validation of solution constraints."""
+    # Create hexagon vertices
+    hex_vertices = []
+    for x, y, angle in positions:
+        vertices = generate_hexagon_vertices(x, y, angle)
+        hex_vertices.append(vertices)
+    
+    # Create outer hexagon
+    outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_radius)
+    
+    # Check containment
+    for vertices in hex_vertices:
+        if not check_containment(vertices, outer_vertices):
+            return False, 0
+    
+    # Check overlaps (just critical pairs for speed)
+    for i in range(len(hex_vertices)):
+        for j in range(i+1, len(hex_vertices)):
+            if check_overlap(hex_vertices[i], hex_vertices[j]):
+                return False, 0
+    
+    # Compute inverse of outer radius as fitness
+    return True, 1.0 / outer_radius
+
+def refine_solution_lattice(search_space, base_radius=2.0):
+    """Perform lattice-based search with refinement."""
+    best_fitness = 0
+    best_positions = None
+    
+    # Generate lattice points for the search
+    max_lattice_dist = 4  # Maximum distance in lattice units
+    lattice_points = get_hex_lattice_points(max_lattice_dist, max_lattice_dist)
+    
+    # Multi-scale search
+    scales = [1.0, 0.5, 0.25]
+    
+    for scale in scales:
+        # Sample different arrangements
+        for attempt in range(20):
+            # Create a random lattice-based arrangement
+            positions = create_hexagonal_lattice_layout(lattice_points, base_radius * scale)
+            
+            # Add some randomization
+            for i in range(len(positions)):
+                # Small random adjustments
+                x, y, angle = positions[i]
+                if i > 0:  # Don't perturb center
+                    x += np.random.normal(0, 0.1 * scale)
+                    y += np.random.normal(0, 0.1 * scale)
+                    angle += np.random.normal(0, 5 * scale)
+                positions[i] = (x, y, angle)
+            
+            # Compute required outer radius
+            outer_radius = compute_outer_hex_radius(positions)
+            
+            # Validate and evaluate
+            valid, fitness = validate_solution(positions, outer_radius)
+            if valid and fitness > best_fitness:
+                best_fitness = fitness
+                best_positions = positions.copy()
+            
+    return best_positions, best_fitness
+
+def hexagonal_lattice_search(max_evaluations=5000):
+    """Main search function using hexagonal lattice approach."""
+    best_fitness = 0
+    best_positions = None
+    best_outer_radius = float('inf')
+    
+    # Sample from multiple configurations
+    for attempt in range(max_evaluations):
+        # Vary the base radius and other parameters
+        base_radius = 2.0 + np.random.random() * 2.0  # Between 2 and 4
+        positions, fitness = refine_solution_lattice([], base_radius)
+        
+        if positions and fitness > best_fitness:
+            best_fitness = fitness
+            best_positions = positions.copy()
+            # Recalculate actual outer radius
+            outer_radius = compute_outer_hex_radius(positions)
+            best_outer_radius = outer_radius
+            
+    return best_positions, best_fitness, best_outer_radius
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses a hexagonal lattice-based optimization approach.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Use hexagonal lattice-based approach
+    best_positions, best_fitness, best_outer_radius = hexagonal_lattice_search(1000)
+    
+    # If we didn't find anything good, fallback to previous configuration
+    if best_positions is None or best_fitness < 0.1:
+        # Fallback to simple grid arrangement
+        inner_hex_data = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right,
+            [0, -4, 0],  # far bottom-center
+        ])
+        
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+    
+    # Format output
+    inner_hex_data = np.array(best_positions)
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    outer_hex_side_length = best_outer_radius
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

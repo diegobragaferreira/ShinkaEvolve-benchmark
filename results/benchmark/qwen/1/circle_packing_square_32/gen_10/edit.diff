@@ -1,0 +1,182 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,173 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++import random
++from deap import base, creator, tools, algorithms
++import math
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
+-    circles = np.zeros((n, 3))
+-
++    # Set random seed for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
++    # Problem parameters
++    n_circles = 32
++    max_evaluations = 5000
++    
++    # Define the evaluation function
++    def eval_fitness(individual):
++        # Convert individual to circles array
++        circles = np.array(individual).reshape(-1, 3)
++        
++        # Extract positions and radii
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++        
++        # Calculate total radius sum (objective to maximize)  
++        total_radius = np.sum(radii)
++        
++        # Penalty for invalid configurations
++        penalty = 0
++        
++        # Check containment constraints
++        for i in range(n_circles):
++            x, y, r = positions[i][0], positions[i][1], radii[i]
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                penalty += 1000
++        
++        # Check overlap constraints
++        for i in range(n_circles):
++            for j in range(i+1, n_circles):
++                x1, y1, r1 = positions[i][0], positions[i][1], radii[i]
++                x2, y2, r2 = positions[j][0], positions[j][1], radii[j]
++                
++                distance = math.sqrt((x1-x2)**2 + (y1-y2)**2)
++                if distance < r1 + r2:
++                    penalty += 10000
++        
++        # Return fitness (negative because we minimize in DEAP but want to maximize)
++        return (total_radius - penalty,),
++    
++    # Create types
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    # Attribute generator
++    def generate_individual():
++        individual = []
++        for _ in range(n_circles):
++            # Generate valid x, y, r
++            x = random.uniform(0.01, 0.99)
++            y = random.uniform(0.01, 0.99)
++            r = random.uniform(0.005, 0.15)
++            individual.extend([x, y, r])
++        return creator.Individual(individual)
++    
++    toolbox.register("individual", generate_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    
++    # Register operators
++    toolbox.register("evaluate", eval_fitness)
++    toolbox.register("mate", tools.cxUniform, indpb=0.1)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.02, indpb=0.1)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Create initial population
++    pop = toolbox.population(n=100)
++    
++    # Statistics
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Evolution parameters
++    CXPB = 0.8   # Crossover probability
++    MUTPB = 0.1  # Mutation probability
++    NGEN = 200   # Number of generations
++    
++    # Run evolution
++    pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CXPB, mutpb=MUTPB, 
++                                       ngen=NGEN, stats=stats, verbose=False)
++    
++    # Get best individual
++    best_ind = tools.selBest(pop, 1)[0]
++    circles = np.array(best_ind).reshape(-1, 3)
++    
++    # Local refinement with simulated annealing
++    circles = refine_with_simulated_annealing(circles)
++    
+     return circles
+ 
++def refine_with_simulated_annealing(circles):
++    """Apply local refinement to improve solution quality"""
++    n_circles = len(circles)
++    current_circles = circles.copy()
++    current_fitness = compute_fitness(current_circles)
++    
++    T = 1.0
++    T_min = 0.001
++    alpha = 0.95
++    max_iterations = 1000
++    
++    while T > T_min:
++        for _ in range(max_iterations):
++            # Create neighbor solution by perturbing one circle
++            new_circles = current_circles.copy()
++            idx = random.randint(0, n_circles-1)
++            
++            # Perturb position and radius
++            new_circles[idx, 0] += random.gauss(0, 0.005)  # x
++            new_circles[idx, 1] += random.gauss(0, 0.005)  # y
++            new_circles[idx, 2] += random.gauss(0, 0.002)  # r
++            
++            # Ensure bounds
++            new_circles[idx, 0] = max(0.001, min(0.999, new_circles[idx, 0]))
++            new_circles[idx, 1] = max(0.001, min(0.999, new_circles[idx, 1]))
++            new_circles[idx, 2] = max(0.001, min(0.2, new_circles[idx, 2]))
++            
++            new_fitness = compute_fitness(new_circles)
++            
++            # Accept or reject
++            if new_fitness > current_fitness or random.random() < math.exp((new_fitness - current_fitness) / T):
++                current_circles = new_circles
++                current_fitness = new_fitness
++                
++        T *= alpha
++        
++    return current_circles
++
++def compute_fitness(circles):
++    """Compute fitness with penalties"""
++    positions = circles[:, :2]
++    radii = circles[:, 2]
++    
++    total_radius = np.sum(radii)
++    penalty = 0
++    
++    # Check containment
++    for i in range(len(circles)):
++        x, y, r = positions[i][0], positions[i][1], radii[i]
++        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++            penalty += 1000
++    
++    # Check overlaps
++    for i in range(len(circles)):
++        for j in range(i+1, len(circles)):
++            x1, y1, r1 = positions[i][0], positions[i][1], radii[i]
++            x2, y2, r2 = positions[j][0], positions[j][1], radii[j]
++            
++            distance = math.sqrt((x1-x2)**2 + (y1-y2)**2)
++            if distance < r1 + r2:
++                penalty += 10000
++    
++    return total_radius - penalty
+ 
+ # EVOLVE-BLOCK-END

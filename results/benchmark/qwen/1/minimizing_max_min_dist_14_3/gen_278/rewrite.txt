@@ -1,0 +1,271 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import warnings
+from typing import Tuple, Optional
+import time
+
+class SphericalVoronoiEvolution:
+    """A novel spherical Voronoi-based evolutionary optimizer for point distribution."""
+    
+    def __init__(self, num_points: int = 14):
+        self.n = num_points
+        self.golden_ratio = (1 + np.sqrt(5)) / 2
+        self.best_solution = None
+        self.best_ratio = -np.inf
+        
+    def _calculate_ratio(self, points: np.ndarray) -> Tuple[float, float]:
+        """Calculate min/max distance ratio for given points."""
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        return min_dist, max_dist
+    
+    def _objective(self, x: np.ndarray, regularization_weight: float = 0.1) -> float:
+        """Enhanced objective function with adaptive regularization."""
+        points = x.reshape(-1, 3)
+        min_dist, max_dist = self._calculate_ratio(points)
+        
+        if max_dist == 0:
+            return 0
+        
+        ratio = min_dist / max_dist
+        
+        # Dynamic regularization based on distribution quality
+        # Calculate Voronoi cell volumes to assess uniformity
+        try:
+            sv = SphericalVoronoi(points)
+            cell_volumes = sv.volumes
+            volume_std = np.std(cell_volumes)
+            volume_mean = np.mean(cell_volumes)
+            
+            # Penalize non-uniform cell volumes
+            if volume_mean > 0:
+                uniformity_penalty = volume_std / volume_mean
+            else:
+                uniformity_penalty = 0
+                
+            # Combine ratio with uniformity penalty
+            final_objective = -ratio + regularization_weight * uniformity_penalty
+            
+        except Exception:
+            # Fallback to simple ratio minimization
+            final_objective = -ratio
+            
+        return final_objective
+    
+    def _constraint_func(self, x: np.ndarray) -> np.ndarray:
+        """Constraint function ensuring points lie on unit sphere."""
+        points = x.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0
+    
+    def _generate_voronoi_initial(self) -> np.ndarray:
+        """Generate initial points using hierarchical spherical Voronoi construction."""
+        # Start with icosahedron vertices (better than simple Fibonacci for 14 points)
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+        ])
+        
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+        
+        # Generate points from spherical Voronoi-like distribution
+        # Use recursive subdivision approach for better coverage
+        points = vertices.copy()
+        
+        # Add points along great circles to fill space
+        # Create a more structured distribution
+        for i in range(self.n - 12):
+            # Choose two existing points to define a great circle
+            if len(points) >= 2:
+                idx1, idx2 = np.random.choice(len(points), 2, replace=False)
+                p1, p2 = points[idx1], points[idx2]
+                
+                # Generate point perpendicular to p1 and p2
+                cross_product = np.cross(p1, p2)
+                norm_cross = np.linalg.norm(cross_product)
+                
+                if norm_cross > 1e-10:
+                    # Normalize and add to points
+                    perp = cross_product / norm_cross
+                    # Add some randomness to avoid perfect symmetry
+                    noise = np.random.normal(0, 0.01, 3)
+                    new_point = perp + noise
+                    new_point = new_point / np.linalg.norm(new_point)
+                    points = np.vstack([points, new_point])
+                else:
+                    # Fallback to random point
+                    random_point = np.random.randn(3)
+                    random_point = random_point / np.linalg.norm(random_point)
+                    points = np.vstack([points, random_point])
+            else:
+                # Fallback to random point
+                random_point = np.random.randn(3)
+                random_point = random_point / np.linalg.norm(random_point)
+                points = np.vstack([points, random_point])
+                
+            if len(points) >= self.n:
+                break
+        
+        # Trim to exactly n points and ensure normalization
+        points = points[:self.n]
+        points = points / np.linalg.norm(points, axis=1, keepdims=True)
+        
+        return points
+    
+    def _generate_fibonacci_points(self) -> np.ndarray:
+        """Generate points using Fibonacci spiral on sphere."""
+        points = []
+        for i in range(self.n):
+            phi = np.arccos(1 - 2 * i / (self.n - 1))
+            theta = 2 * np.pi * i / self.golden_ratio
+            x = np.sin(phi) * np.cos(theta)
+            y = np.sin(phi) * np.sin(theta)
+            z = np.cos(phi)
+            points.append([x, y, z])
+        return np.array(points)
+    
+    def _perturb_points(self, points: np.ndarray, noise_level: float = 0.01) -> np.ndarray:
+        """Add controlled noise to points and normalize them."""
+        noisy_points = points + np.random.normal(0, noise_level, points.shape)
+        return noisy_points / np.linalg.norm(noisy_points, axis=1, keepdims=True)
+    
+    def _optimize_with_method(self, x0: np.ndarray, method: str, 
+                            options: dict, regularization_weight: float = 0.1) -> Optional[np.ndarray]:
+        """Optimize using specified method with custom objective."""
+        try:
+            cons = {'type': 'eq', 'fun': self._constraint_func}
+            
+            def custom_objective(x_flat):
+                return self._objective(x_flat, regularization_weight)
+                
+            result = minimize(custom_objective, x0, method=method, constraints=cons, 
+                            options=options)
+            
+            if result.success:
+                optimized_points = result.x.reshape(-1, 3)
+                # Ensure normalization
+                optimized_points = optimized_points / np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                return optimized_points
+        except Exception as e:
+            warnings.warn(f"Optimization with {method} failed: {e}")
+        return None
+    
+    def _evaluate_and_update_best(self, points: np.ndarray) -> bool:
+        """Evaluate solution and update best if better."""
+        min_dist, max_dist = self._calculate_ratio(points)
+        if max_dist > 0:
+            ratio = min_dist / max_dist
+            if ratio > self.best_ratio:
+                self.best_ratio = ratio
+                self.best_solution = points.copy()
+                return True
+        return False
+    
+    def _multi_scale_optimization(self) -> np.ndarray:
+        """Multi-scale optimization with hierarchical refinement."""
+        
+        # Phase 1: Coarse spherical Voronoi initialization with multiple strategies
+        strategies = []
+        
+        # Strategy 1: Voronoi-based initialization
+        voronoi_points = self._generate_voronoi_initial()
+        strategies.append(voronoi_points)
+        
+        # Strategy 2: Fibonacci-based initialization
+        fib_points = self._generate_fibonacci_points()
+        strategies.append(fib_points)
+        
+        # Strategy 3: Perturbed Voronoi
+        for i in range(3):
+            np.random.seed(i * 10)
+            perturbed = self._perturb_points(voronoi_points, 0.02)
+            strategies.append(perturbed)
+        
+        # Evaluate all initial strategies
+        for strategy in strategies:
+            self._evaluate_and_update_best(strategy)
+        
+        # Phase 2: Hierarchical optimization - multi-resolution approach
+        # First, optimize with loose tolerances to find good baselines
+        coarse_options = {'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': 200}
+        medium_options = {'ftol': 1e-10, 'gtol': 1e-10, 'maxiter': 300}
+        fine_options = {'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500}
+        
+        optimization_stages = [
+            (coarse_options, 0.1),      # Coarse stage with strong regularization
+            (medium_options, 0.05),     # Medium stage with moderate regularization
+            (fine_options, 0.01),       # Fine stage with weak regularization
+        ]
+        
+        # Apply optimization stages to best solutions found so far
+        current_population = [self.best_solution.copy()] if self.best_solution is not None else strategies[:3]
+        
+        for stage_idx, (options, reg_weight) in enumerate(optimization_stages):
+            new_population = []
+            
+            for pop_idx, individual in enumerate(current_population):
+                # Apply optimization with current stage settings
+                np.random.seed(stage_idx * 100 + pop_idx)
+                optimized = self._optimize_with_method(
+                    individual.flatten(), 'L-BFGS-B', options, reg_weight
+                )
+                
+                if optimized is not None:
+                    self._evaluate_and_update_best(optimized)
+                    new_population.append(optimized)
+                    
+                    # Add some diversity by slightly perturbing optimized result
+                    if stage_idx < len(optimization_stages) - 1:  # Not last stage
+                        perturbed = self._perturb_points(optimized, 0.005)
+                        new_population.append(perturbed)
+            
+            # Update population for next stage
+            current_population = new_population
+        
+        # Phase 3: Final refinement with extreme precision
+        if self.best_solution is not None:
+            final_options = {'ftol': 1e-15, 'gtol': 1e-15, 'maxiter': 1000}
+            
+            # Multiple refinement attempts
+            for attempt in range(5):
+                np.random.seed(2000 + attempt)
+                # Small perturbation of best solution
+                refined_x0 = self.best_solution + np.random.normal(0, 0.0001, self.best_solution.shape)
+                refined_x0 = refined_x0 / np.linalg.norm(refined_x0, axis=1, keepdims=True)
+                
+                refined = self._optimize_with_method(
+                    refined_x0.flatten(), 'L-BFGS-B', final_options, 0.001
+                )
+                if refined is not None:
+                    self._evaluate_and_update_best(refined)
+        
+        return self.best_solution if self.best_solution is not None else strategies[0]
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    # Set fixed seed for reproducibility
+    np.random.seed(42)
+    
+    # Create optimizer instance
+    optimizer = SphericalVoronoiEvolution(14)
+    
+    # Execute optimization
+    result = optimizer._multi_scale_optimization()
+    
+    return result
+
+# EVOLVE-BLOCK-END

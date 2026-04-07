@@ -1,0 +1,191 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import itertools
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    # Try different aspect ratios to find optimal
+    best_sum = 0
+    best_circles = None
+    
+    # Try several aspect ratios
+    ratios = [0.5, 0.7, 1.0, 1.3, 1.5, 2.0, 2.5]
+    
+    for ratio in ratios:
+        width = 1.0
+        height = 1.0 / ratio
+        
+        # Try different grid arrangements
+        # For 21 circles, try 3x7, 7x3, 4x5, 5x4 layouts
+        layouts = [
+            (3, 7), (7, 3), 
+            (4, 5), (5, 4),
+            (6, 4), (4, 6),
+            (2, 11), (11, 2)
+        ]
+        
+        for rows, cols in layouts:
+            if rows * cols < 21:
+                continue
+                
+            # Initialize positions in a grid
+            circles = []
+            
+            # Calculate grid spacing
+            cell_width = width / cols
+            cell_height = height / rows
+            
+            # Place circles in grid pattern with some offset for better packing
+            for i in range(rows):
+                for j in range(cols):
+                    if len(circles) >= 21:
+                        break
+                        
+                    x = (j + 0.5) * cell_width
+                    y = (i + 0.5) * cell_height
+                    
+                    # Add some jitter to avoid perfect grid which might not be optimal
+                    x += (np.random.random() - 0.5) * cell_width * 0.1
+                    y += (np.random.random() - 0.5) * cell_height * 0.1
+                    
+                    # Clip to bounds
+                    x = np.clip(x, 0, width)
+                    y = np.clip(y, 0, height)
+                    
+                    circles.append([x, y, min(cell_width, cell_height) * 0.4])
+            
+            # If we don't have enough circles, fill with random ones
+            while len(circles) < 21:
+                x = np.random.random() * width
+                y = np.random.random() * height
+                r = min(width, height) * 0.05
+                circles.append([x, y, r])
+                
+            # Keep only first 21
+            circles = circles[:21]
+            
+            # Convert to numpy array for easier manipulation
+            circles_array = np.array(circles)
+            
+            # Define optimization variables: [x0,y0,r0,x1,y1,r1,...,x20,y20,r20]
+            def objective(vars):
+                # Extract radii from vars (odd indices)
+                radii = vars[2::3]
+                return -np.sum(radii)  # Negative because we minimize
+            
+            def constraints(vars):
+                # Convert back to circles array
+                circles = np.zeros((21, 3))
+                for i in range(21):
+                    circles[i] = [vars[3*i], vars[3*i+1], vars[3*i+2]]
+                
+                # Non-overlap constraints
+                cons = []
+                
+                # Distance constraints: (xi-xj)^2 + (yi-yj)^2 >= (ri+rj)^2
+                for i in range(21):
+                    for j in range(i+1, 21):
+                        dx = circles[i, 0] - circles[j, 0]
+                        dy = circles[i, 1] - circles[j, 1]
+                        dist_sq = dx*dx + dy*dy
+                        radius_sum = circles[i, 2] + circles[j, 2]
+                        
+                        # Constraint: distance^2 - (radius_sum)^2 >= 0
+                        cons.append(dist_sq - radius_sum * radius_sum)
+                
+                # Boundary constraints
+                for i in range(21):
+                    # Circle must be inside rectangle
+                    # x - r >= 0
+                    cons.append(circles[i, 0] - circles[i, 2])
+                    # y - r >= 0
+                    cons.append(circles[i, 1] - circles[i, 2])
+                    # width - x - r >= 0
+                    cons.append(width - circles[i, 0] - circles[i, 2])
+                    # height - y - r >= 0
+                    cons.append(height - circles[i, 1] - circles[i, 2])
+                
+                return np.array(cons)
+            
+            # Initial guess
+            initial_vars = circles_array.flatten()
+            
+            # Define bounds: each circle has x,y in [0,width],[0,height]; r > 0
+            bounds = []
+            for i in range(21):
+                bounds.extend([(0, width), (0, height), (1e-6, min(width, height)/2)])
+            
+            # Apply bounds and initial values
+            bounds = [(max(0, b[0]), min(b[1], width if idx % 3 == 0 else height if idx % 3 == 1 else min(width, height))) 
+                     for idx, b in enumerate(bounds)]
+            
+            # Optimize
+            try:
+                result = minimize(
+                    objective,
+                    initial_vars,
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints={'type': 'ineq', 'fun': constraints},
+                    options={'maxiter': 1000, 'ftol': 1e-6}
+                )
+                
+                if result.success:
+                    final_circles = np.zeros((21, 3))
+                    for i in range(21):
+                        final_circles[i] = [result.x[3*i], result.x[3*i+1], result.x[3*i+2]]
+                    
+                    total_radius = np.sum(final_circles[:, 2])
+                    if total_radius > best_sum:
+                        best_sum = total_radius
+                        best_circles = final_circles.copy()
+            
+            except Exception as e:
+                # If optimization fails, just keep trying other configurations
+                pass
+    
+    # Fallback to simple grid if nothing worked
+    if best_circles is None:
+        width, height = 1.0, 1.0
+        cells_per_row = 7
+        cells_per_col = 3
+        cell_width = width / cells_per_row
+        cell_height = height / cells_per_col
+        
+        circles = []
+        for i in range(cells_per_col):
+            for j in range(cells_per_row):
+                if len(circles) >= 21:
+                    break
+                x = (j + 0.5) * cell_width
+                y = (i + 0.5) * cell_height
+                r = min(cell_width, cell_height) * 0.3
+                circles.append([x, y, r])
+                
+        while len(circles) < 21:
+            x = np.random.random() * width
+            y = np.random.random() * height
+            r = min(width, height) * 0.05
+            circles.append([x, y, r])
+            
+        best_circles = np.array(circles[:21])
+    
+    return best_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

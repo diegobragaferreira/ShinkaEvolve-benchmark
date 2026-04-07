@@ -1,0 +1,132 @@
+<NAME>
+enhanced_gradient_local_search
+</NAME>
+
+<DESCRIPTION>
+The proposed enhancement introduces a more sophisticated gradient-based local search method that leverages second-order finite differences for improved convergence accuracy. This approach aims to accelerate the optimization process by providing better gradient estimates and incorporating adaptive learning rates. Additionally, I'm adding a new parameter to control the number of gradient refinement steps to balance computational cost and improvement gain.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using a more informed approach."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize the sequence
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution for the normalized sequence
+    conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    conv_result = conv_result[n-1:2*n-1]
+    rhs = np.max(conv_result)
+
+    # Solve the LP problem for better direction
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    # Normalize the result
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+    # Move in the direction of improvement
+    t = 0.02  # Slightly higher movement for more aggressive improvement
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Clip to prevent extreme values
+    new_sequence = [max(0, min(x, 1000)) for x in new_sequence]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using enhanced gradient-based refinement."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize the sequence to avoid numerical issues
+    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+    # Enhanced gradient refinement using second-order finite differences
+    steps = 100  # Increased steps for better convergence
+    lr = 1e-4   # Initial learning rate
+    epsilon = 1e-6  # Step size for finite differences
+    prev_max_conv = float('inf')
+
+    # Momentum term for accelerated convergence
+    velocity = np.zeros_like(normalized_sequence)
+    beta = 0.9  # Momentum coefficient
+
+    for step in range(steps):
+        # Compute convolution
+        conv = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+        conv = conv[n-1:2*n-1]
+        max_conv = np.max(conv)
+
+        # Early stopping condition
+        if abs(prev_max_conv - max_conv) < 1e-12:
+            break
+        prev_max_conv = max_conv
+
+        # Compute gradient estimate using second-order central differences
+        grad = np.zeros_like(normalized_sequence)
+        for i in range(n):
+            # Forward perturbation
+            seq_forward = normalized_sequence.copy()
+            seq_forward[i] += epsilon
+            seq_forward /= np.sum(seq_forward)
+
+            # Backward perturbation
+            seq_backward = normalized_sequence.copy()
+            seq_backward[i] -= epsilon
+            seq_backward /= np.sum(seq_backward)
+
+            # Compute max convolution values
+            conv_forward = fftconvolve(seq_forward, seq_forward, mode='full')
+            conv_forward = conv_forward[n-1:2*n-1]
+            max_forward = np.max(conv_forward)
+
+            conv_backward = fftconvolve(seq_backward, seq_backward, mode='full')
+            conv_backward = conv_backward[n-1:2*n-1]
+            max_backward = np.max(conv_backward)
+
+            # Second-order central difference gradient estimate
+            grad[i] = (max_forward - max_backward) / (2 * epsilon)
+
+        # Update with momentum for accelerated convergence
+        velocity = beta * velocity + (1 - beta) * grad
+
+        # Adaptive learning rate
+        adaptive_lr = lr * (1.0 - 0.95 * (step / steps))
+
+        # Gradient ascent update
+        normalized_sequence += adaptive_lr * velocity
+        normalized_sequence = np.maximum(normalized_sequence, 0)  # Ensure non-negativity
+
+        # Renormalize
+        sum_seq = np.sum(normalized_sequence)
+        if sum_seq > 0:
+            normalized_sequence /= sum_seq
+
+    # Convert back to list and clip values
+    refined_sequence = normalized_sequence.tolist()
+    refined_sequence = [max(0, min(x, 1000)) for x in refined_sequence]
+    return refined_sequence
+>>>>>>> REPLACE
+</DIFF>

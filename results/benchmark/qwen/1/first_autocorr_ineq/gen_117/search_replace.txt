@@ -1,0 +1,282 @@
+<NAME>
+enhance_evolutionary_search_with_adaptive_mutation_and_local_refinement
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the evolutionary optimization algorithm by implementing adaptive mutation rates and integrating local refinement techniques. The key improvements include:
+1. Using adaptive mutation rates that decrease over generations to balance exploration and exploitation
+2. Adding local refinement via gradient-based optimization to fine-tune promising sequences
+3. Implementing diversity preservation mechanisms to prevent premature convergence
+These enhancements aim to boost both the quality of solutions found and the speed of convergence, leading to better performance in maximizing 1/C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_sequence(sequence: List[float], mutation_rate=0.1, mutation_strength=0.3) -> List[float]:
+    """Apply mutation to a sequence with specified rate and strength."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian noise scaled by mutation strength
+            noise = random.gauss(0, mutation_strength * mutated[i])
+            mutated[i] = max(0.01, mutated[i] + noise)
+    return mutated
+=======
+def mutate_sequence(sequence: List[float], mutation_rate=0.1, mutation_strength=0.3) -> List[float]:
+    """Apply mutation to a sequence with specified rate and strength."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian noise scaled by mutation strength
+            noise = random.gauss(0, mutation_strength * mutated[i])
+            mutated[i] = max(0.01, mutated[i] + noise)
+    return mutated
+
+def adaptive_mutate_sequence(sequence: List[float], generation: int, max_generations: int,
+                           base_mutation_rate: float = 0.15, mutation_strength: float = 0.2) -> List[float]:
+    """Apply adaptive mutation with decreasing rate over generations."""
+    # Decrease mutation rate as generations progress
+    adaptive_rate = base_mutation_rate * (1 - generation / max_generations)
+    return mutate_sequence(sequence, adaptive_rate, mutation_strength)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def crossover_sequences(seq1: List[float], seq2: List[float]) -> List[float]:
+    """Perform crossover between two sequences."""
+    min_len = min(len(seq1), len(seq2))
+    if min_len == 0:
+        return seq1 if seq1 else seq2
+
+    # Single-point crossover with bias towards preserving better parts
+    crossover_point = random.randint(1, min_len - 1)
+    child = seq1[:crossover_point] + seq2[crossover_point:]
+
+    # Ensure minimum positive value for all elements
+    child = [max(0.01, x) for x in child]
+    return child
+=======
+def crossover_sequences(seq1: List[float], seq2: List[float]) -> List[float]:
+    """Perform crossover between two sequences."""
+    min_len = min(len(seq1), len(seq2))
+    if min_len == 0:
+        return seq1 if seq1 else seq2
+
+    # Single-point crossover with bias towards preserving better parts
+    crossover_point = random.randint(1, min_len - 1)
+    child = seq1[:crossover_point] + seq2[crossover_point:]
+
+    # Ensure minimum positive value for all elements
+    child = [max(0.01, x) for x in child]
+    return child
+
+def local_refinement(sequence: List[float], iterations: int = 10, learning_rate: float = 0.01) -> List[float]:
+    """Perform local refinement using gradient-based updates."""
+    # Simple gradient descent on the sequence
+    refined = np.array(sequence, dtype=float)
+    for _ in range(iterations):
+        # Compute finite difference gradient
+        grad = np.zeros_like(refined)
+        epsilon = 1e-6
+        base_inv_c1 = compute_autocorrelation_constant(refined.tolist())[1]
+
+        for i in range(len(refined)):
+            perturbed = refined.copy()
+            perturbed[i] += epsilon
+            perturbed = np.maximum(perturbed, 0.01)  # Keep non-negative
+            perturbed_inv_c1 = compute_autocorrelation_constant(perturbed.tolist())[1]
+            grad[i] = (perturbed_inv_c1 - base_inv_c1) / epsilon
+
+        # Update with gradient ascent (since we're maximizing)
+        refined += learning_rate * grad
+        refined = np.maximum(refined, 0.01)  # Keep non-negative
+
+    return refined.tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _evaluator.clear_cache()
+
+    # Initialize population with more diverse strategies
+    population_size = 50
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 40
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual in batches
+        fitness_scores = evaluate_fitness_batch_parallel(population)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Try to improve best sequence using LP-based direction
+        if best_sequence is not None:
+            improved = get_good_direction_to_move_into(best_sequence)
+            if improved is not None:
+                _, improved_inv_c1 = compute_autocorrelation_constant(improved)
+                if improved_inv_c1 > best_inv_c1:
+                    best_sequence = improved
+                    best_inv_c1 = improved_inv_c1
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate based on generation
+            adaptive_mutation_rate = 0.15 * (1 - generation / 100)  # Decreases over time
+            child = mutate_sequence(child, mutation_rate=adaptive_mutation_rate, mutation_strength=0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final cleanup and validation
+    if best_sequence is not None:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        if sum_seq > 0.01:
+            best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_random_valid_sequence()
+=======
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _evaluator.clear_cache()
+
+    # Initialize population with more diverse strategies
+    population_size = 50
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 40
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual in batches
+        fitness_scores = evaluate_fitness_batch_parallel(population)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Try to improve best sequence using LP-based direction
+        if best_sequence is not None:
+            improved = get_good_direction_to_move_into(best_sequence)
+            if improved is not None:
+                _, improved_inv_c1 = compute_autocorrelation_constant(improved)
+                if improved_inv_c1 > best_inv_c1:
+                    best_sequence = improved
+                    best_inv_c1 = improved_inv_c1
+
+        # Apply local refinement to best sequence
+        if best_sequence is not None:
+            refined = local_refinement(best_sequence, iterations=5)
+            _, refined_inv_c1 = compute_autocorrelation_constant(refined)
+            if refined_inv_c1 > best_inv_c1:
+                best_sequence = refined
+                best_inv_c1 = refined_inv_c1
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate based on generation
+            child = adaptive_mutate_sequence(child, generation, 100, 0.15, 0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final cleanup and validation
+    if best_sequence is not None:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        if sum_seq > 0.01:
+            best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_random_valid_sequence()
+>>>>>>> REPLACE
+</DIFF>

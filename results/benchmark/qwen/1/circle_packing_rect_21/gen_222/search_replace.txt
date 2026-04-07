@@ -1,0 +1,311 @@
+<NAME>
+adaptive_constraint_density
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based criticality calculation is computationally expensive and not always reliable. I'll implement a more efficient and robust constraint density calculation that combines multiple metrics to better guide the evolutionary process. This approach will use a hybrid method that considers both spatial proximity and boundary constraints to provide more accurate adaptive mutation scaling.
+
+The key insight is to create a more sophisticated constraint density metric that balances:
+1. Direct neighbor distances (overlap risk)
+2. Boundary proximity (containment risk)
+3. Local clustering density (crowding effect)
+
+This will lead to better mutation adaptation and improved convergence toward optimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def compute_voronoi_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute criticality scores for each circle based on Voronoi diagram."""
+        if len(circles) < 3:
+            return np.ones(len(circles)) * 0.5
+
+        try:
+            # Get circle centers
+            points = circles[:, :2]
+
+            # Shift points to avoid boundary issues
+            shifted_points = points.copy()
+            shifted_points[:, 0] = np.clip(shifted_points[:, 0], 0.01, rect_width - 0.01)
+            shifted_points[:, 1] = np.clip(shifted_points[:, 1], 0.01, rect_height - 0.01)
+
+            # Compute Voronoi diagram
+            vor = Voronoi(shifted_points)
+
+            # Compute area of Voronoi cells
+            areas = []
+            for i in range(len(shifted_points)):
+                # Get vertices of Voronoi cell for point i
+                region = vor.regions[vor.point_region[i]]
+                if -1 in region:
+                    # Infinite region, skip
+                    areas.append(1000000)  # Large area for infinite regions
+                else:
+                    # Compute polygon area
+                    vertices = [vor.vertices[j] for j in region if j >= 0]
+                    if len(vertices) < 3:
+                        areas.append(1000000)
+                    else:
+                        # Simplified area calculation using cross product
+                        vertices_array = np.array(vertices)
+                        x = vertices_array[:, 0]
+                        y = vertices_array[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+
+            # Convert to criticality score (lower area = higher criticality)
+            areas = np.array(areas)
+            # Normalize to [0,1] where 0 = most critical
+            normalized_areas = (areas - areas.min()) / (areas.max() - areas.min() + 1e-8)
+            return 1.0 - normalized_areas  # Higher criticality = closer to 1
+
+        except:
+            # Fallback to uniform criticality if Voronoi fails
+            return np.ones(len(circles)) * 0.5
+=======
+    @staticmethod
+    def compute_constraint_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute constraint density scores for each circle based on multiple factors."""
+        n = len(circles)
+        if n <= 1:
+            return np.ones(n) * 0.5
+
+        # Get positions and radii
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # 1. Compute pairwise distances for neighbor density
+        distances = cdist(positions, positions)
+
+        # Mask diagonal (self-distances) and make them very large
+        np.fill_diagonal(distances, np.inf)
+
+        # For each circle, find minimum distance to neighbors
+        min_distances = np.min(distances, axis=1)
+
+        # 2. Compute boundary distances (how close each circle is to boundaries)
+        boundary_distances = np.minimum(
+            positions[:, 0],  # Distance to left boundary
+            np.minimum(
+                rect_width - positions[:, 0],  # Distance to right boundary
+                np.minimum(
+                    positions[:, 1],  # Distance to bottom boundary
+                    rect_height - positions[:, 1]  # Distance to top boundary
+                )
+            )
+        )
+
+        # 3. Calculate local density (number of neighbors within a certain radius)
+        # This gives us a measure of crowding
+        neighborhood_radius = np.mean(radii) * 3  # Use average radius * 3 as reference
+        neighbor_counts = np.zeros(n)
+
+        for i in range(n):
+            # Count neighbors within neighborhood radius
+            neighbor_count = np.sum(distances[i] < neighborhood_radius)
+            neighbor_counts[i] = neighbor_count
+
+        # 4. Combine all metrics into a composite constraint density score
+        # Normalize all metrics to [0,1] range
+        if np.max(min_distances) > 0:
+            normalized_min_dist = min_distances / np.max(min_distances)
+        else:
+            normalized_min_dist = np.zeros(n)
+
+        if np.max(boundary_distances) > 0:
+            normalized_boundary_dist = boundary_distances / np.max(boundary_distances)
+        else:
+            normalized_boundary_dist = np.zeros(n)
+
+        normalized_neighbor_count = neighbor_counts / max(1, np.max(neighbor_counts))
+
+        # Combine metrics with different weights:
+        # - Close neighbors = more constrained (higher density)
+        # - Close to boundaries = more constrained (higher density)
+        # - High neighbor count = more constrained (higher density)
+        constraint_density = (
+            0.4 * (1.0 - normalized_min_dist) +  # 40% neighbor proximity
+            0.3 * (1.0 - normalized_boundary_dist) +  # 30% boundary proximity
+            0.3 * normalized_neighbor_count  # 30% local density
+        )
+
+        # Normalize final constraint density to [0,1] where 1 = most constrained
+        if np.max(constraint_density) > 0:
+            constraint_density = constraint_density / np.max(constraint_density)
+
+        return constraint_density
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based criticality weighting and adaptive step sizes."""
+        mutated = circles.copy()
+
+        # Compute criticality scores
+        criticality_scores = MutationOperator.compute_voronoi_criticality(circles, rect_width, rect_height)
+
+        for i in range(21):
+            if np.random.random() < 0.25:  # 25% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score for this circle
+                crit_score = criticality_scores[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size based on criticality
+                    base_step = 0.03 + 0.02 * crit_score  # Smaller steps in critical regions
+                    step_size = base_step + np.random.random() * base_step * 0.5
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary awareness: penalize movements that go out of bounds
+                    bound_penalty_x = max(0, mutated[i, 0] - (rect_width - mutated[i, 2]))
+                    bound_penalty_y = max(0, mutated[i, 1] - (rect_height - mutated[i, 2]))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        mutated[i, 0] -= bound_penalty_x * 0.5
+                        mutated[i, 1] -= bound_penalty_y * 0.5
+
+                else:
+                    # Mutate radius with log-normal distribution
+                    # Scale based on criticality (less change in high-criticality regions)
+                    scale_factor = np.exp(np.random.normal(0, 0.15 * (1 - crit_score)))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+
+        return mutated
+=======
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with constraint density-based weighting and adaptive step sizes."""
+        mutated = circles.copy()
+
+        # Compute constraint density scores (more efficient than Voronoi)
+        constraint_densities = MutationOperator.compute_constraint_density(circles, rect_width, rect_height)
+
+        for i in range(21):
+            if np.random.random() < 0.25:  # 25% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get constraint density for this circle (higher density = more constrained)
+                density = constraint_densities[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size based on constraint density
+                    # More constrained regions get smaller steps to maintain stability
+                    base_step = 0.03 + 0.02 * density  # Larger steps in less constrained regions
+                    step_size = base_step + np.random.random() * base_step * 0.5
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary awareness: penalize movements that go out of bounds
+                    bound_penalty_x = max(0, mutated[i, 0] - (rect_width - mutated[i, 2]))
+                    bound_penalty_y = max(0, mutated[i, 1] - (rect_height - mutated[i, 2]))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        mutated[i, 0] -= bound_penalty_x * 0.5
+                        mutated[i, 1] -= bound_penalty_y * 0.5
+
+                else:
+                    # Mutate radius with adaptive scaling based on constraint density
+                    # Less change in highly constrained regions (high density)
+                    scale_factor = np.exp(np.random.normal(0, 0.15 * (1 - density)))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def crossover(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Improved crossover operator with better recombination and symmetry preservation."""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Uniform crossover with blended inheritance
+        for i in range(21):
+            if np.random.random() < 0.5:
+                # Swap entire circle data
+                child1[i], child2[i] = child2[i], child1[i]
+            else:
+                # Blend positions and radii
+                alpha_pos = np.random.random() * 0.6 + 0.2  # Blend factor for position [0.2, 0.8]
+                alpha_rad = np.random.random() * 0.6 + 0.2  # Blend factor for radius [0.2, 0.8]
+
+                # Position blending
+                child1[i, :2] = parent1[i, :2] * alpha_pos + parent2[i, :2] * (1 - alpha_pos)
+                child2[i, :2] = parent1[i, :2] * (1 - alpha_pos) + parent2[i, :2] * alpha_pos
+
+                # Radius blending
+                child1[i, 2] = parent1[i, 2] * alpha_rad + parent2[i, 2] * (1 - alpha_rad)
+                child2[i, 2] = parent1[i, 2] * (1 - alpha_rad) + parent2[i, 2] * alpha_rad
+
+                # Ensure positive radii
+                child1[i, 2] = max(0.001, child1[i, 2])
+                child2[i, 2] = max(0.001, child2[i, 2])
+
+        return child1, child2
+=======
+    @staticmethod
+    def crossover(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Improved crossover operator with smart recombination and constraint-aware blending."""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Get constraint densities for both parents
+        density1 = MutationOperator.compute_constraint_density(parent1)
+        density2 = MutationOperator.compute_constraint_density(parent2)
+
+        # Uniform crossover with enhanced blending based on constraint density
+        for i in range(21):
+            if np.random.random() < 0.5:
+                # Swap entire circle data
+                child1[i], child2[i] = child2[i], child1[i]
+            else:
+                # Blend with density-aware weights
+                # Parents with lower constraint density (more freedom) contribute more
+                weight1 = 0.5 + 0.3 * (1 - density1[i])  # Bias towards less constrained parent
+                weight2 = 0.5 + 0.3 * (1 - density2[i])
+
+                # Normalize weights
+                total_weight = weight1 + weight2
+                if total_weight > 0:
+                    weight1 /= total_weight
+                    weight2 /= total_weight
+
+                # Position blending with density-weighted contributions
+                child1[i, :2] = parent1[i, :2] * weight1 + parent2[i, :2] * weight2
+                child2[i, :2] = parent1[i, :2] * weight2 + parent2[i, :2] * weight1
+
+                # Radius blending with weighted average
+                child1[i, 2] = parent1[i, 2] * weight1 + parent2[i, 2] * weight2
+                child2[i, 2] = parent1[i, 2] * weight2 + parent2[i, 2] * weight1
+
+                # Ensure positive radii
+                child1[i, 2] = max(0.001, child1[i, 2])
+                child2[i, 2] = max(0.001, child2[i, 2])
+
+        return child1, child2
+>>>>>>> REPLACE
+</DIFF>

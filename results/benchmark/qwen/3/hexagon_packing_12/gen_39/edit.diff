@@ -1,0 +1,304 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,277 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++import time
++
++def generate_unit_hexagon(center=(0,0), rotation=0):
++    """Generate a unit regular hexagon with given center and rotation."""
++    angle = rotation * np.pi / 180
++    # Vertices of unit hexagon centered at origin
++    vertices = []
++    for i in range(6):
++        theta = angle + i * np.pi / 3
++        x = np.cos(theta)
++        y = np.sin(theta)
++        vertices.append((x + center[0], y + center[1]))
++    return Polygon(vertices)
++
++def check_containment(hexagon, outer_hexagon):
++    """Check if all vertices of hexagon are within outer_hexagon."""
++    for point in hexagon.exterior.coords:
++        if not outer_hexagon.contains(Point(point)):
++            return False
++    return True
++
++def check_overlap(hex1, hex2):
++    """Check if two hexagons overlap."""
++    return hex1.intersects(hex2)
++
++def create_outer_hexagon(inner_hexagons, padding=0.01):
++    """Create the smallest outer hexagon that contains all inner hexagons."""
++    # Get all vertices from all inner hexagons
++    all_vertices = []
++    for hex_poly in inner_hexagons:
++        all_vertices.extend(list(hex_poly.exterior.coords))
++    
++    if len(all_vertices) == 0:
++        return Polygon([(0,0), (1,0), (0.5, 0.866), (-0.5, 0.866), (-1,0), (-0.5, -0.866), (0.5, -0.866)])
++    
++    # Convert to numpy array for easier processing
++    vertices_array = np.array(all_vertices)
++    
++    # Find bounding box
++    min_x, max_x = vertices_array[:, 0].min(), vertices_array[:, 0].max()
++    min_y, max_y = vertices_array[:, 1].min(), vertices_array[:, 1].max()
++    
++    # Calculate center and approximate radius
++    center_x = (min_x + max_x) / 2
++    center_y = (min_y + max_y) / 2
++    
++    # Create hexagon with side length based on dimensions
++    width = max_x - min_x
++    height = max_y - min_y
++    side_length = max(width, height) / 1.732 + padding  # Divide by sqrt(3) for hexagon diameter
++    
++    return generate_unit_hexagon((center_x, center_y), 0)
++
++def evaluate_solution(positions, rotations):
++    """Evaluate how well a configuration fits."""
++    try:
++        # Create all inner hexagons
++        inner_hexagons = []
++        for i in range(len(positions)):
++            center = tuple(positions[i])
++            rotation = rotations[i]
++            hexagon = generate_unit_hexagon(center, rotation)
++            inner_hexagons.append(hexagon)
++        
++        # Check for overlaps
++        for i in range(len(inner_hexagons)):
++            for j in range(i+1, len(inner_hexagons)):
++                if check_overlap(inner_hexagons[i], inner_hexagons[j]):
++                    return 0  # Invalid - overlapping hexagons
++        
++        # Create outer hexagon
++        outer_hexagon = create_outer_hexagon(inner_hexagons)
++        
++        # Check containment
++        for hexagon in inner_hexagons:
++            if not check_containment(hexagon, outer_hexagon):
++                return 0  # Invalid - some hexagon outside outer
++            
++        # Calculate the side length of the outer hexagon
++        # We'll use a simplified estimation - the distance from center to corner of outer hexagon
++        outer_center_x = outer_hexagon.centroid.x
++        outer_center_y = outer_hexagon.centroid.y
++        
++        # Get one vertex of outer hexagon (we know it's regular)
++        outer_vertex = list(outer_hexagon.exterior.coords)[0]
++        side_length = np.sqrt((outer_vertex[0] - outer_center_x)**2 + (outer_vertex[1] - outer_center_y)**2)
++        
++        # Return inverse side length (higher is better)
++        return 1.0 / (side_length + 1e-8) if side_length > 0 else 0
++        
++    except Exception as e:
++        return 0
++
++def mutate_individual(positions, rotations, mutation_rate=0.1):
++    """Mutate an individual solution."""
++    new_positions = positions.copy()
++    new_rotations = rotations.copy()
++    
++    # Mutate positions
++    for i in range(len(positions)):
++        if np.random.random() < mutation_rate:
++            # Add small random displacement
++            new_positions[i] += np.random.normal(0, 0.1, 2)
++            
++        if np.random.random() < mutation_rate:
++            # Mutate rotation
++            new_rotations[i] += np.random.normal(0, 10) % 360
++    
++    return new_positions, new_rotations
++
++def crossover(parent1_pos, parent1_rot, parent2_pos, parent2_rot):
++    """Perform crossover between two parents."""
++    child_pos = np.copy(parent1_pos)
++    child_rot = np.copy(parent1_rot)
++    
++    # Crossover at random points
++    crossover_point = np.random.randint(0, len(parent1_pos))
++    
++    # Half of the positions and rotations come from parent2
++    child_pos[crossover_point:] = parent2_pos[crossover_point:]
++    child_rot[crossover_point:] = parent2_rot[crossover_point:]
++    
++    return child_pos, child_rot
++
++def initialize_population(pop_size, n_hexagons=12):
++    """Initialize a population of solutions."""
++    population = []
++    for _ in range(pop_size):
++        # Start with a symmetric arrangement
++        positions = np.zeros((n_hexagons, 2))
++        rotations = np.zeros(n_hexagons)
++        
++        # Center hexagon
++        positions[0] = [0, 0]
++        
++        # Arrange others in rings around center
++        # First ring (6 hexagons) - positioned at 1-unit distance 
++        angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
++        for i in range(1, 7):
++            positions[i] = [np.cos(angles[i-1]), np.sin(angles[i-1])]
++            
++        # Second ring (6 hexagons) - positioned at 2-unit distance
++        angles = np.linspace(0, 2*np.pi, 6, endpoint=False) + np.pi/6
++        for i in range(7, 13):
++            positions[i] = [2*np.cos(angles[i-7]), 2*np.sin(angles[i-7])]
++            
++        # Apply slight random perturbation to avoid perfect symmetry
++        positions += np.random.normal(0, 0.05, positions.shape)
++        
++        population.append((positions, rotations))
++    
++    return population
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++    start_time = time.time()
++    
++    # Parameters
++    pop_size = 50
++    generations = 200
++    elite_size = 5
++    
++    # Initialize population
++    population = initialize_population(pop_size)
++    
++    best_fitness = 0
++    best_individual = None
++    
++    # Evolution loop
++    for gen in range(generations):
++        # Evaluate fitness for all individuals
++        fitness_scores = []
++        for positions, rotations in population:
++            fitness = evaluate_solution(positions, rotations)
++            fitness_scores.append(fitness)
++        
++        # Sort population by fitness
++        sorted_indices = np.argsort(fitness_scores)[::-1]
++        population = [population[i] for i in sorted_indices]
++        fitness_scores = [fitness_scores[i] for i in sorted_indices]
++        
++        # Track best solution
++        if fitness_scores[0] > best_fitness:
++            best_fitness = fitness_scores[0]
++            best_individual = (population[0][0].copy(), population[0][1].copy())
++        
++        # Early stopping if we're close to target
++        if time.time() - start_time > 170:  # Leave 10 seconds for final steps
++            break
++            
++        # Create new population (elitism + offspring)
++        new_population = population[:elite_size]
++        
++        # Generate offspring
++        for _ in range(pop_size - elite_size):
++            # Tournament selection
++            tournament_size = 5
++            tournament_indices = np.random.choice(len(population), tournament_size)
++            tournament_fitnesses = [fitness_scores[i] for i in tournament_indices]
++            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
++            
++            # Select parent
++            parent1_pos, parent1_rot = population[winner_index]
++            
++            # Create offspring through mutation
++            child_pos, child_rot = mutate_individual(parent1_pos, parent1_rot)
++            
++            new_population.append((child_pos, child_rot))
++        
++        population = new_population
++    
++    # Final optimization of best solution
++    if best_individual is not None:
++        final_positions, final_rotations = best_individual
++        
++        # Perform local optimization using gradient-based refinement
++        # Using scipy's optimization for fine-tuning
++        from scipy.optimize import minimize
++        
++        def objective(params):
++            positions = params.reshape(-1, 2)
++            inv_fitness = -evaluate_solution(positions, final_rotations)  # Negative because we want to maximize
++            return inv_fitness
++        
++        # Flatten positions for optimization
++        initial_params = final_positions.flatten()
++        
++        # Local optimization
++        try:
++            result = minimize(objective, initial_params, method='L-BFGS-B', 
++                            options={'maxiter': 50, 'ftol': 1e-6})
++            if result.success:
++                final_positions = result.x.reshape(-1, 2)
++        except:
++            pass  # If optimization fails, keep current solution
++    
++    # Generate final hexagon data
++    inner_hex_data = np.zeros((12, 3))
++    for i in range(12):
++        inner_hex_data[i] = [final_positions[i][0], final_positions[i][1], final_rotations[i]]
++        
++    # Create outer hexagon using the final positions 
++    try:
++        inner_hexagons = []
++        for i in range(12):
++            center = tuple(final_positions[i])
++            rotation = final_rotations[i]
++            hexagon = generate_unit_hexagon(center, rotation)
++            inner_hexagons.append(hexagon)
++        
++        outer_hexagon = create_outer_hexagon(inner_hexagons)
++        outer_center_x = outer_hexagon.centroid.x
++        outer_center_y = outer_hexagon.centroid.y
++        outer_vertex = list(outer_hexagon.exterior.coords)[0]
++        outer_hex_side_length = np.sqrt((outer_vertex[0] - outer_center_x)**2 + (outer_vertex[1] - outer_center_y)**2)
++        
++        outer_hex_data = np.array([outer_center_x, outer_center_y, 0])  # No rotation expected
++        
++    except Exception as e:
++        # Fallback if something goes wrong
++        outer_hex_side_length = 10.0
++        outer_hex_data = np.array([0, 0, 0])
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

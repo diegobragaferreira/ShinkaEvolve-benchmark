@@ -1,0 +1,214 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+import random
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (width + height = 2)
+    rect_width, rect_height = 1.5, 0.5
+    
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Phase 1: Hexagonal lattice initialization
+    def create_hexagonal_grid(n_circles: int, width: float, height: float) -> np.ndarray:
+        """Create initial circle positions using hexagonal lattice pattern"""
+        circles = np.zeros((n_circles, 3))
+        
+        # Determine grid parameters
+        # For a hexagonal packing, we need to estimate how many rows/columns
+        # We'll use approximately sqrt(n) spacing
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+        
+        # Determine cell size based on container dimensions
+        cell_width = width / (cols + 1)
+        cell_height = height / (rows + 1)
+        
+        # Adjust cell size to ensure we fit within bounds
+        min_cell_size = min(cell_width, cell_height)
+        if min_cell_size <= 0:
+            min_cell_size = 0.1
+
+        # Create hexagonal lattice with offset rows
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                    
+                # Offset every other row
+                x_offset = 0.0 if i % 2 == 0 else 0.5
+                x = (j + 1 + x_offset) * (width / (cols + 1))
+                y = (i + 1) * (height / (rows + 1))
+                
+                # Ensure within bounds
+                x = max(0.01, min(width - 0.01, x))
+                y = max(0.01, min(height - 0.01, y))
+                
+                # Initial small radius
+                circles[idx] = [x, y, 0.02]
+                idx += 1
+                
+            if idx >= n_circles:
+                break
+        
+        return circles
+    
+    # Phase 2: Constraint-aware optimization
+    def compute_max_radius_at_position(x: float, y: float, existing_circles: np.ndarray, 
+                                     rect_width: float, rect_height: float) -> float:
+        """Compute maximum possible radius for a circle at given position"""
+        # Distance to boundaries
+        min_bound = min(x, rect_width - x, y, rect_height - y)
+        
+        # Distance to other circles
+        min_dist = float('inf')
+        for i in range(len(existing_circles)):
+            ex, ey, er = existing_circles[i]
+            dist = np.sqrt((x - ex)**2 + (y - ey)**2)
+            if dist > 0:  # Avoid self-distance
+                min_dist = min(min_dist, dist - er)
+        
+        # Take minimum of boundary and other-circle distances
+        max_radius = min(min_bound, min_dist if min_dist < float('inf') else float('inf'))
+        return max(0.001, max_radius)
+    
+    def is_valid_configuration(circles: np.ndarray, rect_width: float, rect_height: float) -> bool:
+        """Check if configuration is valid (no overlaps, all within bounds)"""
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+        
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < (r1 + r2):
+                    return False
+        return True
+    
+    def calculate_radius_sum(circles: np.ndarray) -> float:
+        """Calculate sum of all radii"""
+        return np.sum(circles[:, 2])
+    
+    def refine_one_circle(circle_idx: int, circles: np.ndarray, rect_width: float, rect_height: float) -> np.ndarray:
+        """Refine a single circle by optimizing its position and radius"""
+        new_circles = circles.copy()
+        
+        # Get current circle data
+        current_x, current_y, current_r = circles[circle_idx]
+        
+        # Store original values for comparison
+        original_x, original_y, original_r = current_x, current_y, current_r
+        
+        # Optimization parameters
+        step_size = 0.05
+        max_iterations = 50
+        
+        # Gradient-free optimization: try several moves and evaluate
+        best_x, best_y, best_r = current_x, current_y, current_r
+        best_sum = calculate_radius_sum(new_circles)
+        
+        # Try different combinations of movements
+        for _ in range(max_iterations):
+            # Try to improve position and radius
+            test_positions = [
+                (current_x + random.uniform(-step_size, step_size), 
+                 current_y + random.uniform(-step_size, step_size)),
+                (current_x + random.uniform(-step_size, step_size), 
+                 current_y),
+                (current_x, current_y + random.uniform(-step_size, step_size)),
+                (current_x, current_y),
+            ]
+            
+            for test_x, test_y in test_positions:
+                # Ensure within bounds
+                test_x = max(0.01, min(rect_width - 0.01, test_x))
+                test_y = max(0.01, min(rect_height - 0.01, test_y))
+                
+                # Compute maximum possible radius at this position
+                test_circles = new_circles.copy()
+                test_circles[circle_idx] = [test_x, test_y, 0.01]  # Temporarily small
+                max_r = compute_max_radius_at_position(test_x, test_y, test_circles, rect_width, rect_height)
+                test_r = min(max_r, max(0.001, current_r + random.uniform(-0.02, 0.02)))
+                
+                # Apply final adjustment
+                test_circles[circle_idx] = [test_x, test_y, test_r]
+                
+                # Check validity and calculate new sum
+                if is_valid_configuration(test_circles, rect_width, rect_height):
+                    new_sum = calculate_radius_sum(test_circles)
+                    if new_sum > best_sum:
+                        best_sum = new_sum
+                        best_x, best_y, best_r = test_x, test_y, test_r
+        
+        # Update circle if improvement found
+        new_circles[circle_idx] = [best_x, best_y, best_r]
+        return new_circles
+    
+    # Main optimization loop
+    # Step 1: Initialize with hexagonal grid
+    circles = create_hexagonal_grid(21, rect_width, rect_height)
+    
+    # Step 2: Refine using coordinate descent
+    best_circles = circles.copy()
+    best_sum = calculate_radius_sum(best_circles)
+    
+    # Multiple passes to find better solution
+    for pass_num in range(10):
+        # Randomly select circles to optimize in this pass
+        indices = list(range(21))
+        random.shuffle(indices)
+        
+        # Optimize each circle multiple times
+        for idx in indices:
+            updated_circles = refine_one_circle(idx, best_circles, rect_width, rect_height)
+            new_sum = calculate_radius_sum(updated_circles)
+            
+            if new_sum > best_sum:
+                best_circles = updated_circles.copy()
+                best_sum = new_sum
+        
+        # Occasionally reinitialize with better hexagonal pattern
+        if pass_num % 3 == 0 and pass_num > 0:
+            # Create a slightly different hexagonal arrangement
+            temp_circles = create_hexagonal_grid(21, rect_width, rect_height)
+            temp_sum = calculate_radius_sum(temp_circles)
+            if temp_sum > best_sum:
+                best_circles = temp_circles.copy()
+                best_sum = temp_sum
+    
+    # Final validation and tightening
+    final_circles = best_circles.copy()
+    for _ in range(50):  # Extra refinement iterations
+        # Try to improve all circles one by one
+        for i in range(21):
+            updated_circles = refine_one_circle(i, final_circles, rect_width, rect_height)
+            new_sum = calculate_radius_sum(updated_circles)
+            if new_sum > calculate_radius_sum(final_circles):
+                final_circles = updated_circles.copy()
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

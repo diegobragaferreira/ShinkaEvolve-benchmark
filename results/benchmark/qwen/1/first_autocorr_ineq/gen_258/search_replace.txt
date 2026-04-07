@@ -1,0 +1,152 @@
+<NAME>
+add_gradient_ascent_mutation
+</NAME>
+
+<DESCRIPTION>
+I'm proposing an enhancement to the current adaptive evolutionary optimizer that incorporates gradient ascent-based mutation to refine promising sequences during evolution. This technique will leverage the computed gradients to guide mutations in a way that directly attempts to improve the autocorrelation constant C₁, rather than relying solely on random mutations. This approach is inspired by the success of gradient-based optimization in similar mathematical contexts and could provide significant improvements to the search process.
+
+The key changes include:
+1. Adding a new mutation operator that uses gradient information
+2. Updating the core optimization loop to utilize this enhanced mutation
+3. Improving the gradient refinement process to ensure numerical stability
+
+This modification aims to significantly boost the optimizer's ability to escape local optima and converge toward better solutions by incorporating direct gradient guidance into the evolutionary framework.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate_sequence_cauchy(sequence: List[float], scale: float = 100.0) -> List[float]:
+        """Mutate a sequence with Cauchy noise for heavy-tailed exploration."""
+        mutated = copy.deepcopy(sequence)
+        for i in range(len(mutated)):
+            # Use Cauchy distribution instead of Gaussian for more diverse mutations
+            mutated[i] += np.random.standard_cauchy() * scale
+            mutated[i] = max(0, mutated[i])  # Ensure non-negative
+        return mutated
+=======
+    @staticmethod
+    def mutate_sequence_gradient_ascent(sequence: List[float], steps: int = 10, lr: float = 1e-3) -> List[float]:
+        """Mutate a sequence using gradient ascent to improve C₁ directly."""
+        seq = np.array(sequence, dtype=float)
+        n = len(seq)
+
+        # Normalize to avoid numerical issues
+        sum_seq = np.sum(seq)
+        if sum_seq < 1e-10:
+            seq += 1e-5
+            sum_seq = np.sum(seq)
+        seq /= sum_seq
+
+        for step in range(steps):
+            # Compute convolution
+            conv = fftconvolve(seq, seq, mode='full')
+            conv = conv[n-1:2*n-1]
+            max_conv = np.max(conv)
+
+            # Compute gradient estimate using finite differences
+            grad = np.zeros_like(seq)
+            epsilon = 1e-6
+            for i in range(n):
+                # Perturb forward
+                seq_forward = seq.copy()
+                seq_forward[i] += epsilon
+                seq_forward /= np.sum(seq_forward)
+
+                # Perturb backward
+                seq_backward = seq.copy()
+                seq_backward[i] -= epsilon
+                seq_backward /= np.sum(seq_backward)
+
+                # Compute convolution for both perturbed sequences
+                conv_forward = fftconvolve(seq_forward, seq_forward, mode='full')
+                conv_forward = conv_forward[n-1:2*n-1]
+                max_forward = np.max(conv_forward)
+
+                conv_backward = fftconvolve(seq_backward, seq_backward, mode='full')
+                conv_backward = conv_backward[n-1:2*n-1]
+                max_backward = np.max(conv_backward)
+
+                # Central difference gradient estimate
+                grad[i] = (max_forward - max_backward) / (2 * epsilon)
+
+            # Update using gradient ascent (note: we want to maximize 1/C1, so we maximize -C1)
+            # This effectively minimizes C1 which maximizes 1/C1
+            seq += lr * grad
+            seq = np.maximum(seq, 0)  # Ensure non-negative
+
+            # Renormalize
+            sum_seq = np.sum(seq)
+            if sum_seq > 0:
+                seq /= sum_seq
+
+        return seq.tolist()
+
+    @staticmethod
+    def mutate_sequence_cauchy(sequence: List[float], scale: float = 100.0) -> List[float]:
+        """Mutate a sequence with Cauchy noise for heavy-tailed exploration."""
+        mutated = copy.deepcopy(sequence)
+        for i in range(len(mutated)):
+            # Use Cauchy distribution instead of Gaussian for more diverse mutations
+            mutated[i] += np.random.standard_cauchy() * scale
+            mutated[i] = max(0, mutated[i])  # Ensure non-negative
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply Cauchy mutation
+                    child1 = self.mutate_sequence_cauchy(child1)
+                    child2 = self.mutate_sequence_cauchy(child2)
+                    offspring.extend([child1, child2])
+                else:
+                    # Handle odd population size
+                    offspring.append(self.mutate_sequence_cauchy(selected[i]))
+=======
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply gradient ascent mutation to the better of the two children
+                    fitness_child1 = self.evaluate_sequence(child1)[1]
+                    fitness_child2 = self.evaluate_sequence(child2)[1]
+                    if fitness_child1 > fitness_child2:
+                        child1 = self.mutate_sequence_gradient_ascent(child1)
+                        offspring.append(child1)
+                        offspring.append(child2)
+                    else:
+                        child2 = self.mutate_sequence_gradient_ascent(child2)
+                        offspring.append(child1)
+                        offspring.append(child2)
+                else:
+                    # Handle odd population size
+                    offspring.append(self.mutate_sequence_cauchy(selected[i]))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Adaptive gradient refinement based on current performance
+            top_individuals = np.argsort(fitnesses)[-min(10, len(offspring)):][::-1]
+            refine_count = max(1, int(0.3 * len(top_individuals)))
+            for i in range(refine_count):
+                idx = top_individuals[i]
+                offspring[idx] = self.gradient_refine(offspring[idx])
+=======
+            # Adaptive gradient refinement based on current performance
+            top_individuals = np.argsort(fitnesses)[-min(10, len(offspring)):][::-1]
+            refine_count = max(1, int(0.3 * len(top_individuals)))
+            for i in range(refine_count):
+                idx = top_individuals[i]
+                offspring[idx] = self.gradient_refine(offspring[idx])
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,317 @@
+--- a/original.py
++++ b/original.py
+@@ -1,83 +1,253 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
++from scipy.optimize import differential_evolution
++from scipy.ndimage import gaussian_filter1d
+ import math
+-
+-def compute_autoconvolution_norms(f_values):
++import random
++from typing import List, Tuple
++import time
++
++def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+     """
+     Compute the three norms needed for C2 calculation.
+-    f_values: list of step heights
+-    Returns: ||g||₂², ||g||₁, ||g||∞ where g = f*f
+-    """
++    Returns (||g||₂², ||g||₁, ||g||∞) where g = f*f
++    """
++    if not f_values:
++        return 0.0, 0.0, 0.0
++        
+     # Convert to numpy array
+     f = np.array(f_values)
+-
+-    # Perform convolution (autoconvolution)
+-    # Using 'full' mode to get complete convolution result
++    
++    # Compute autoconvolution g = f * f
+     g = signal.convolve(f, f, mode='full')
+-
+-    # The convolution result has length 2*n - 1 where n is length of f
+-    # We're interested in the central portion that corresponds to the actual autoconvolution
+-    # For our problem setup, we expect the result to be centered
+-
+-    # Calculate the norms
+-    # ||g||₂² = sum(gᵢ²)
++    
++    # Extract central portion (valid autoconvolution)
++    half_len = len(f) - 1
++    g = g[half_len:]  # Take right half
++    
++    # Compute norms
+     g_squared = g * g
+-    norm_g_2_squared = np.sum(g_squared)
+-
+-    # ||g||₁ = sum(|gᵢ|)
+-    norm_g_1 = np.sum(np.abs(g))
+-
+-    # ||g||∞ = max(|gᵢ|)
+-    norm_g_inf = np.max(np.abs(g))
+-
+-    return norm_g_2_squared, norm_g_1, norm_g_inf
+-
+-def construct_function() -> list[float]:
++    norm_2_sq = np.sum(g_squared)
++    
++    norm_1 = np.sum(np.abs(g))
++    norm_inf = np.max(np.abs(g))
++    
++    return norm_2_sq, norm_1, norm_inf
++
++def compute_c2(f_values: List[float]) -> float:
++    """Compute C2 value for given function"""
++    norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
++    
++    # Avoid division by zero
++    if norm_1 <= 1e-12 or norm_inf <= 1e-12:
++        return 0.0
++    
++    c2 = norm_2_sq / (norm_1 * norm_inf)
++    return c2
++
++def create_structured_gaussian_function(n_steps: int) -> List[float]:
++    """
++    Create a structured step function using Gaussian peaks with controlled spacing
++    """
++    # Define domain for step function
++    x = np.linspace(-0.25, 0.25, n_steps)
++    
++    # Number of peaks based on function length
++    n_peaks = max(3, min(20, n_steps // 50))
++    
++    # Use logarithmic spacing to distribute peaks across multiple scales
++    # This helps avoid clustering and creates more diverse structures
++    peak_positions = []
++    peak_widths = []
++    peak_heights = []
++    
++    # Generate peak positions using logarithmic distribution
++    # Spread peaks more uniformly across the domain
++    for i in range(n_peaks):
++        if i == 0:
++            # First peak near left edge
++            pos = np.random.uniform(-0.25, -0.1)
++        elif i == n_peaks - 1:
++            # Last peak near right edge
++            pos = np.random.uniform(0.1, 0.25)
++        else:
++            # Intermediate peaks with logarithmic spacing
++            # Use log-uniform distribution to ensure even spread
++            log_min = np.log(0.05)  # Minimum relative position
++            log_max = np.log(0.45)  # Maximum relative position
++            log_pos = np.random.uniform(log_min, log_max)
++            rel_pos = np.exp(log_pos)  # Transform back to linear
++            pos = -0.25 + rel_pos * 0.5  # Map back to [-0.25, 0.25]
++        
++        peak_positions.append(pos)
++        
++        # Set peak widths with some variation but keep them reasonable
++        width = np.random.uniform(0.005, 0.02)
++        peak_widths.append(width)
++        
++        # Set peak heights with inverse scaling to avoid overly sharp peaks
++        height = np.random.uniform(0.5, 2.0)
++        peak_heights.append(height)
++    
++    # Create the function as sum of Gaussian peaks
++    f_values = np.zeros(n_steps)
++    for pos, width, height in zip(peak_positions, peak_widths, peak_heights):
++        gaussian = height * np.exp(-0.5 * ((x - pos) / width) ** 2)
++        f_values += gaussian
++    
++    # Ensure non-negativity
++    f_values = np.maximum(f_values, 0)
++    
++    # Apply mathematical principled smoothing with Gaussian kernel
++    # This replaces the Savitzky-Golay smoothing for better numerical stability
++    if n_steps > 50:
++        f_values = gaussian_filter1d(f_values, sigma=0.8)
++        f_values = np.maximum(f_values, 0)
++    
++    # Normalize to reasonable range but preserve structure
++    if np.max(f_values) > 0:
++        f_values = f_values / np.max(f_values) * 1.5
++    
++    return f_values.tolist()
++
++def adaptive_peak_adjustment(initial_function: List[float], max_iterations: int = 10) -> List[float]:
++    """
++    Apply real-time feedback-controlled amplitude adjustment during peak construction
++    """
++    current_func = list(initial_function)
++    
++    # Monitor intermediate C2 values to detect when peaks become too dominant
++    for iteration in range(max_iterations):
++        try:
++            # Compute current C2
++            c2_current = compute_c2(current_func)
++            
++            if c2_current < 0.1:
++                # If we're getting poor results, apply stronger adjustments
++                current_func = [max(0, val * 0.9) for val in current_func]
++            elif c2_current < 0.5:
++                # Moderate adjustment
++                current_func = [max(0, val * 0.98) for val in current_func]
++            
++            # If we have high C2, we might want to slightly increase values
++            # to see if we can push it even higher
++            if c2_current > 0.5:
++                # Add small perturbations to explore neighborhood
++                noise_factor = 0.05
++                for i in range(len(current_func)):
++                    if np.random.random() < 0.1:  # 10% chance to modify
++                        noise = np.random.normal(0, noise_factor * current_func[i])
++                        current_func[i] = max(0, current_func[i] + noise)
++                        
++        except Exception:
++            break
++    
++    return current_func
++
++def selective_differential_evolution(f_values: List[float], n_steps: int) -> List[float]:
++    """
++    Apply targeted differential evolution on key peak parameters to reduce optimization overhead
++    """
++    try:
++        # First create a copy of the original function
++        original_func = np.array(f_values)
++        
++        # For optimization, we'll focus on a smaller subset to reduce complexity
++        # Extract peaks and their characteristics for optimization
++        
++        # Simple approach: optimize selected parameters that have most impact
++        # Use a subset of function values for faster optimization
++        sample_size = min(100, n_steps // 2)
++        sample_indices = sorted(random.sample(range(n_steps), sample_size))
++        
++        # Extract current values for optimization
++        sample_params = [original_func[i] for i in sample_indices]
++        
++        # Create objective function that works with the sampled parameters
++        def objective(params):
++            # Reconstruct function with updated parameters
++            temp_func = original_func.copy()
++            for i, idx in enumerate(sample_indices):
++                if i < len(params):
++                    temp_func[idx] = max(0, params[i])
++            
++            try:
++                c2_val = compute_c2(temp_func.tolist())
++                return -c2_val  # Negative because we want to maximize
++            except Exception:
++                return 1e10
++        
++        # Boundaries for the parameters
++        bounds = [(0.0, 3.0) for _ in range(sample_size)]
++        
++        # Perform differential evolution on the subset
++        result = differential_evolution(
++            objective,
++            bounds,
++            maxiter=20,
++            popsize=5,
++            seed=42,
++            disp=False
++        )
++        
++        if result.success and len(result.x) >= sample_size:
++            # Update the function with optimized values
++            final_func = original_func.copy()
++            for i, idx in enumerate(sample_indices):
++                if i < len(result.x):
++                    final_func[idx] = max(0, result.x[i])
++            
++            return final_func.tolist()
++            
++    except Exception:
++        pass
++    
++    return f_values
++
++def construct_function() -> List[float]:
+     """
+     Function to construct step-function with high C2 value.
+-    Uses a more sophisticated approach than pure randomness.
++    Uses a hybrid approach combining structured initialization with adaptive feedback.
+     """
+     # Set seed for reproducibility
+     np.random.seed(42)
+-
+-    # Choose a reasonable number of steps (between 100 and 1000)
+-    n_steps = np.random.randint(100, 1000)
+-
+-    # Create a step function that should have good C2 properties
+-    # Use a pattern that typically performs well:
+-    # - High values in center regions
+-    # - Gradual decay toward edges
+-    # - Avoid extreme spikes that might make ||g||∞ too dominant
+-
+-    # Generate a smooth distribution for step heights
+-    f_values = []
+-
+-    # Create a bell-shaped distribution for initial values
+-    # This often produces good results for autocorrelation
+-    x = np.linspace(-1, 1, n_steps)
+-    # Use a Gaussian-like shape but clipped to [0,1]
+-    gaussian_shape = np.exp(-x**2 / 2)
+-    # Normalize to have mean around 0.5 and scale appropriately
+-    gaussian_shape = 0.5 * (gaussian_shape / np.max(gaussian_shape)) + 0.25
+-
+-    # Add some randomness while maintaining structure
+-    for i in range(n_steps):
+-        base_val = gaussian_shape[i]
+-        # Add slight noise to encourage exploration
+-        noise = np.random.normal(0, 0.05) if i > 0 else 0
+-        val = max(0, base_val + noise)  # Ensure non-negative
+-        f_values.append(val)
+-
+-    # Alternative approach: try to create a function that's more likely to have a flatter convolution
+-    # This involves balancing peak height with overall distribution
+-    # Try to avoid very high peaks that would dominate the infinity norm
+-
+-    return f_values
++    random.seed(42)
++    
++    # Choose a reasonable number of steps (between 500 and 2000 for better performance)
++    n_steps = np.random.randint(500, 2000)
++    
++    # Phase 1: Create structured Gaussian-based initialization
++    structured_function = create_structured_gaussian_function(n_steps)
++    
++    # Phase 2: Apply real-time feedback-controlled amplitude adjustment
++    adjusted_function = adaptive_peak_adjustment(structured_function)
++    
++    # Phase 3: Apply selective differential evolution for fine-tuning
++    final_function = selective_differential_evolution(adjusted_function, n_steps)
++    
++    # Final validation and adjustment
++    try:
++        # Compute C2 for final function
++        final_c2 = compute_c2(final_function)
++        
++        # If we got a very poor result, fall back to a better constructed function
++        if final_c2 < 0.2:
++            # Recreate with different parameters
++            alternative_function = create_structured_gaussian_function(n_steps)
++            alt_c2 = compute_c2(alternative_function)
++            if alt_c2 > final_c2:
++                final_function = alternative_function
++                
++    except Exception:
++        # Fallback to simple approach if something goes wrong
++        final_function = [0.5] * n_steps
++    
++    return final_function
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

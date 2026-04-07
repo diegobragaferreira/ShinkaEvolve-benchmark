@@ -1,0 +1,176 @@
+<NAME>
+implement_spatial_indexing_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a brute-force approach with cKDTree.query_pairs for overlap detection, which has O(n²) complexity. I'll implement a grid-based spatial indexing system that divides the unit square into cells and only checks circles within adjacent cells for overlaps. This will significantly reduce the computational complexity of overlap checking from O(n²) to O(n) average case, allowing for faster evaluation of larger populations and more generations.
+
+The key insight is that circles with centers far apart cannot overlap, so we only need to check nearby cells. This approach leverages the successful pattern of efficient constraint checking identified in the problem requirements while addressing the scalability limitations observed in current implementations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from typing import Tuple
+
+# Global constants
+POPULATION_SIZE = 100
+GENERATIONS = 200
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.15
+MUTATION_RATE_END = 0.01
+ELITISM_COUNT = 5
+BOUNDARY_MARGIN = 0.01
+MAX_EVAL_TIME = 60.0
+=======
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from typing import Tuple
+
+# Global constants
+POPULATION_SIZE = 100
+GENERATIONS = 200
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.15
+MUTATION_RATE_END = 0.01
+ELITISM_COUNT = 5
+BOUNDARY_MARGIN = 0.01
+MAX_EVAL_TIME = 60.0
+GRID_CELL_SIZE = 0.1  # Size of grid cells for spatial indexing
+>>>>>>> REPLACE
+</DIFF>
+</file>
+
+<DIFF>
+<<<<<<< SEARCH
+def is_valid_configuration(circles: np.ndarray) -> bool:
+    """Check if configuration is valid (no overlaps, fully contained)"""
+    n_circles = len(circles)
+
+    # Check boundary containment
+    for i in range(n_circles):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check overlaps using KDTree for efficiency
+    points = circles[:, :2]
+    tree = cKDTree(points)
+
+    # Find all pairs within distance of (r_i + r_j)
+    pairs = tree.query_pairs(2 * np.max(circles[:, 2]), p=np.inf)
+
+    for i, j in pairs:
+        if i != j:
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            if distance < r1 + r2:
+                return False
+
+    return True
+=======
+def is_valid_configuration(circles: np.ndarray) -> bool:
+    """Check if configuration is valid (no overlaps, fully contained)"""
+    n_circles = len(circles)
+
+    # Check boundary containment
+    for i in range(n_circles):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check overlaps using grid-based spatial indexing for efficiency
+    return is_valid_with_grid_indexing(circles)
+
+def is_valid_with_grid_indexing(circles: np.ndarray) -> bool:
+    """Check overlaps using grid-based spatial indexing"""
+    n_circles = len(circles)
+    if n_circles <= 1:
+        return True
+
+    # Create grid cells
+    grid = {}
+    cell_size = GRID_CELL_SIZE
+
+    # Place each circle into grid cells it occupies
+    for i, (x, y, r) in enumerate(circles):
+        # Determine which cells this circle affects
+        min_x_cell = int((x - r) / cell_size)
+        max_x_cell = int((x + r) / cell_size)
+        min_y_cell = int((y - r) / cell_size)
+        max_y_cell = int((y + r) / cell_size)
+
+        for cx in range(min_x_cell, max_x_cell + 1):
+            for cy in range(min_y_cell, max_y_cell + 1):
+                if (cx, cy) not in grid:
+                    grid[(cx, cy)] = []
+                grid[(cx, cy)].append(i)
+
+    # Check for overlaps within each cell and neighboring cells
+    for (cx, cy), circle_indices in grid.items():
+        # Check overlaps within same cell
+        for i in range(len(circle_indices)):
+            for j in range(i + 1, len(circle_indices)):
+                idx1, idx2 = circle_indices[i], circle_indices[j]
+                x1, y1, r1 = circles[idx1]
+                x2, y2, r2 = circles[idx2]
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    return False
+
+        # Check overlaps with neighboring cells (only check if circle radius is large enough)
+        # We only need to check 8 neighbors plus the center cell
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor_cell = (cx + dx, cy + dy)
+                if neighbor_cell in grid:
+                    for idx1 in circle_indices:
+                        for idx2 in grid[neighbor_cell]:
+                            x1, y1, r1 = circles[idx1]
+                            x2, y2, r2 = circles[idx2]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            if distance < r1 + r2:
+                                return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>
+</file>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_fitness(circles: np.ndarray) -> Tuple[float, float]:
+    """
+    Calculate fitness with penalty for constraint violations
+    Returns (total_radius, penalty_score)
+    """
+    total_radius = np.sum(circles[:, 2])
+
+    if not is_valid_configuration(circles):
+        # Large penalty for constraint violations
+        penalty = 10000
+        return total_radius - penalty, penalty
+
+    return total_radius, 0.0
+=======
+def calculate_fitness(circles: np.ndarray) -> Tuple[float, float]:
+    """
+    Calculate fitness with penalty for constraint violations
+    Returns (total_radius, penalty_score)
+    """
+    total_radius = np.sum(circles[:, 2])
+
+    if not is_valid_configuration(circles):
+        # Large penalty for constraint violations
+        penalty = 10000
+        return total_radius - penalty, penalty
+
+    return total_radius, 0.0
+>>>>>>> REPLACE
+</file>

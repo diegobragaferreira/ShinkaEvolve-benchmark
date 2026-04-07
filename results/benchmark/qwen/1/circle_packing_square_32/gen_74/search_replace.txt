@@ -1,0 +1,297 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic greedy initialization that places circles at predefined positions but doesn't leverage Voronoi diagrams effectively. I'll enhance the initialization by using a more sophisticated Voronoi-based approach that creates better starting configurations, which should lead to faster convergence and higher quality solutions. The key improvement is to generate Voronoi cells in a way that maximizes potential circle radii while respecting boundary constraints.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from typing import Tuple
+import time
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def initialize_circles_greedy(n: int) -> np.ndarray:
+    """Initialize circles using a greedy approach prioritizing corner placements."""
+    circles = np.zeros((n, 3))
+
+    # Predefined corner and edge positions for initial placement
+    corner_positions = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+    edge_positions = [(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)]
+
+    # Place first 8 circles at corners and edges
+    placed = 0
+    for x, y in corner_positions + edge_positions:
+        if placed < n:
+            # Initial radius is set to a reasonable fraction of unit square
+            max_radius = min(x, 1-x, y, 1-y)
+            circles[placed] = [x, y, max_radius * 0.4]
+            placed += 1
+
+    # Fill remaining positions with greedy placement
+    for i in range(placed, n):
+        best_radius = 0
+        best_x, best_y = 0.5, 0.5
+
+        # Try several candidate positions
+        candidates = []
+        for dx in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+            for dy in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                candidates.append((dx, dy))
+
+        # Check each candidate position
+        for x, y in candidates:
+            if x <= 0.05 or x >= 0.95 or y <= 0.05 or y >= 0.95:
+                continue  # Skip positions too close to boundaries
+
+            max_radius = min(x, 1-x, y, 1-y)
+
+            # Check overlap with existing circles
+            valid_position = True
+            for j in range(i):
+                cx, cy, cr = circles[j]
+                distance_sq = (x - cx)**2 + (y - cy)**2
+                if distance_sq < (max_radius + cr)**2:
+                    valid_position = False
+                    break
+
+            if valid_position and max_radius > best_radius:
+                best_radius = max_radius
+                best_x, best_y = x, y
+
+        circles[i] = [best_x, best_y, best_radius]
+
+    return circles
+=======
+import numpy as np
+from typing import Tuple
+import time
+from scipy.spatial import Voronoi, voronoi_plot_2d
+import matplotlib.pyplot as plt
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def initialize_circles_voronoi(n: int) -> np.ndarray:
+    """Initialize circles using a Voronoi-based approach for better distribution."""
+    circles = np.zeros((n, 3))
+
+    # Generate more initial points for Voronoi diagram
+    # Use a combination of strategic points and random points
+    initial_points = []
+
+    # Corner points
+    initial_points.extend([(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)])
+
+    # Edge midpoints with some offset to avoid perfect symmetry
+    initial_points.extend([(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)])
+
+    # Center points with slight variations
+    initial_points.extend([(0.3, 0.3), (0.7, 0.3), (0.3, 0.7), (0.7, 0.7)])
+
+    # Additional random points to increase diversity
+    for _ in range(n - len(initial_points)):
+        initial_points.append((np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)))
+
+    # Ensure we have exactly n points
+    if len(initial_points) < n:
+        for _ in range(n - len(initial_points)):
+            initial_points.append((np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)))
+    elif len(initial_points) > n:
+        initial_points = initial_points[:n]
+
+    # Create Voronoi diagram
+    vor = Voronoi(np.array(initial_points))
+
+    # Get Voronoi vertices that are inside the unit square
+    valid_vertices = []
+    for vertex in vor.vertices:
+        if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+            valid_vertices.append(vertex)
+
+    # If we don't have enough vertices, add random points
+    while len(valid_vertices) < n:
+        valid_vertices.append([np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)])
+
+    # Sample the first n vertices as circle centers
+    sample_vertices = np.array(valid_vertices[:n])
+
+    # For each Voronoi vertex, calculate the maximum possible radius
+    for i in range(n):
+        x, y = sample_vertices[i]
+
+        # Calculate the minimum distance to any other point (not just vertices)
+        # This gives us a good estimate of how large a circle can be at this location
+        min_distance = float('inf')
+
+        # Check distance to all original points
+        for j, point in enumerate(initial_points):
+            if i != j:
+                dist = np.sqrt((x - point[0])**2 + (y - point[1])**2)
+                min_distance = min(min_distance, dist)
+
+        # Calculate maximum radius that fits in the unit square
+        max_square_radius = min(x, 1-x, y, 1-y)
+
+        # Take the minimum of both constraints
+        max_radius = min(min_distance/2, max_square_radius)
+        max_radius = max(0.001, max_radius)  # Ensure positive radius
+
+        circles[i] = [x, y, max_radius]
+
+    # Refine the initial configuration with a local search
+    # This helps to slightly improve the initial configuration
+    for _ in range(5):
+        improved = False
+        for i in range(n):
+            # Try small adjustments to position
+            old_x, old_y, old_r = circles[i]
+
+            # Try small perturbations
+            for dx, dy in [(-0.02, -0.02), (-0.02, 0.02), (0.02, -0.02), (0.02, 0.02)]:
+                new_x = old_x + dx
+                new_y = old_y + dy
+
+                # Check if new position is valid
+                if 0.001 <= new_x <= 0.999 and 0.001 <= new_y <= 0.999:
+                    new_r = min(new_x, 1-new_x, new_y, 1-new_y)
+
+                    # Check overlap with neighbors
+                    valid = True
+                    for j in range(n):
+                        if i != j:
+                            cx, cy, cr = circles[j]
+                            dist_sq = (new_x - cx)**2 + (new_y - cy)**2
+                            if dist_sq < (new_r + cr)**2:
+                                valid = False
+                                break
+
+                    if valid and new_r > old_r:
+                        circles[i] = [new_x, new_y, new_r]
+                        improved = True
+
+        if not improved:
+            break
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_greedy_initialization
+</NAME>
+
+<DESCRIPTION>
+Replace the simple greedy initialization with the enhanced Voronoi-based initialization. This should provide much better starting configurations that lead to improved evolutionary convergence and higher final fitness scores.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Initialize population with greedy starting points
+    population = []
+    for _ in range(population_size):
+        individual = initialize_circles_greedy(n)
+        population.append(individual)
+=======
+    # Initialize population with Voronoi-based starting points
+    population = []
+    for _ in range(population_size):
+        individual = initialize_circles_voronoi(n)
+        population.append(individual)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_fitness_calculation
+</NAME>
+
+<DESCRIPTION>
+Improve the fitness calculation to better handle constraint violations. The current penalty system might not be optimal for guiding evolution. I'll implement a more sophisticated penalty system that differentiates between boundary violations (which make solutions invalid) and overlap violations (which can sometimes be tolerated in early stages).
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_fitness(circles: np.ndarray) -> float:
+    """Calculate fitness with penalty for constraint violations."""
+    total_radius = np.sum(circles[:, 2])
+
+    # Penalty for constraint violations
+    penalty = 0
+
+    # Containment penalty
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        if r > x or r > 1-x or r > y or r > 1-y:
+            # Quadratic penalty for constraint violations
+            penalty += 1000 * (r - x)**2 + 1000 * (r - (1-x))**2 + \
+                      1000 * (r - y)**2 + 1000 * (r - (1-y))**2
+
+    # Overlap penalty
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+            if distance_sq < (r1 + r2)**2:
+                overlap = (r1 + r2)**2 - distance_sq
+                penalty += 10000 * overlap
+
+    return total_radius - penalty
+=======
+def calculate_fitness(circles: np.ndarray) -> float:
+    """Calculate fitness with penalty for constraint violations."""
+    total_radius = np.sum(circles[:, 2])
+
+    # Penalty for constraint violations
+    penalty = 0
+
+    # Containment penalty - stronger penalty for severe violations
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        violation_penalty = 0
+        if r > x:
+            violation_penalty += 5000 * (r - x)**2
+        if r > 1-x:
+            violation_penalty += 5000 * (r - (1-x))**2
+        if r > y:
+            violation_penalty += 5000 * (r - y)**2
+        if r > 1-y:
+            violation_penalty += 5000 * (r - (1-y))**2
+        penalty += violation_penalty
+
+    # Overlap penalty - linear penalty scaled by overlap amount
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+            if distance_sq < (r1 + r2)**2:
+                overlap = (r1 + r2)**2 - distance_sq
+                penalty += 5000 * overlap  # Stronger penalty for overlaps
+
+    # Add a bonus for well-distributed circles (encourage spread)
+    bonus = 0
+    if len(circles) > 1:
+        # Calculate average distance between centers to encourage spreading
+        distances = []
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                distances.append(dist)
+
+        if distances:
+            avg_dist = np.mean(distances)
+            # Bonus for having larger average distances between centers
+            bonus = avg_dist * 0.1
+
+    return total_radius - penalty + bonus
+>>>>>>> REPLACE
+</DIFF>

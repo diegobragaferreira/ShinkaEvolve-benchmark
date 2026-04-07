@@ -1,0 +1,227 @@
+<NAME>
+add_local_search_refinement
+</NAME>
+
+<DESCRIPTION>
+Adding a local search refinement step that applies gradient-based optimization specifically targeting the min/max distance ratio. This enhancement will improve the quality of solutions found by the simulated annealing process by performing more precise local optimizations at key points during the search.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def simulated_annealing_multiple_starts():
+        """Run simulated annealing multiple times with different random seeds."""
+        best_points = None
+        best_ratio = 0.0
+
+        # Try multiple restarts with different seeds
+        seeds = [42, 123, 456, 789, 999]
+        for seed in seeds:
+            np.random.seed(seed)
+
+            # Initialize with Fibonacci sphere arrangement
+            points = fibonacci_sphere(14)
+
+            # Add controlled noise
+            noise = np.random.normal(0, 0.01, points.shape)
+            points += noise
+
+            # Normalize to unit sphere
+            norms = np.linalg.norm(points, axis=1)
+            if np.max(norms) > 0:
+                points = points / np.max(norms) * 0.9
+
+            # Project to unit sphere
+            points = project_to_sphere(points)
+
+            # Simulated Annealing parameters
+            current_temp = 1.0
+            min_temp = 1e-8
+            base_cooling_rate = 0.9995
+            max_iter = 20000  # Reduced iterations for faster execution
+
+            # Initialize best solution
+            sa_best_points = points.copy()
+            sa_best_ratio = compute_min_max_ratio(sa_best_points)
+
+            last_improvement = 0
+
+            for iteration in range(max_iter):
+                # Adaptive cooling schedule
+                cooling_rate = base_cooling_rate
+                if iteration < 5000:
+                    cooling_rate = min(cooling_rate, 0.9998)
+                elif iteration < 15000:
+                    cooling_rate = min(cooling_rate, 0.9997)
+                else:
+                    cooling_rate = min(cooling_rate, 0.9996)
+
+                # Cool down temperature
+                current_temp *= cooling_rate
+
+                if current_temp < min_temp:
+                    break
+
+                # Try to make a small random move
+                test_points = sa_best_points.copy()
+
+                # Select random point to perturb
+                point_idx = np.random.randint(0, 14)
+
+                # Make small random perturbation - adapt to current temp
+                delta = np.random.normal(0, 0.001 * current_temp, 3)
+                test_points[point_idx] += delta
+
+                # Project back to sphere
+                test_points = project_to_sphere(test_points)
+
+                # Compute new ratio
+                test_ratio = compute_min_max_ratio(test_points)
+
+                # Accept or reject based on Metropolis criterion
+                if test_ratio > sa_best_ratio:
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                elif np.random.random() < np.exp((test_ratio - sa_best_ratio) / current_temp):
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+
+                # Early stopping if no improvement for long time
+                if iteration - last_improvement > 5000:
+                    break
+
+            if sa_best_ratio > best_ratio:
+                best_ratio = sa_best_ratio
+                best_points = sa_best_points.copy()
+
+        return best_points, best_ratio
+=======
+    def simulated_annealing_multiple_starts():
+        """Run simulated annealing multiple times with different random seeds."""
+        best_points = None
+        best_ratio = 0.0
+
+        # Try multiple restarts with different seeds
+        seeds = [42, 123, 456, 789, 999]
+        for seed in seeds:
+            np.random.seed(seed)
+
+            # Initialize with Fibonacci sphere arrangement
+            points = fibonacci_sphere(14)
+
+            # Add controlled noise
+            noise = np.random.normal(0, 0.01, points.shape)
+            points += noise
+
+            # Normalize to unit sphere
+            norms = np.linalg.norm(points, axis=1)
+            if np.max(norms) > 0:
+                points = points / np.max(norms) * 0.9
+
+            # Project to unit sphere
+            points = project_to_sphere(points)
+
+            # Simulated Annealing parameters
+            current_temp = 1.0
+            min_temp = 1e-8
+            base_cooling_rate = 0.9995
+            max_iter = 20000  # Reduced iterations for faster execution
+
+            # Initialize best solution
+            sa_best_points = points.copy()
+            sa_best_ratio = compute_min_max_ratio(sa_best_points)
+
+            last_improvement = 0
+
+            for iteration in range(max_iter):
+                # Adaptive cooling schedule
+                cooling_rate = base_cooling_rate
+                if iteration < 5000:
+                    cooling_rate = min(cooling_rate, 0.9998)
+                elif iteration < 15000:
+                    cooling_rate = min(cooling_rate, 0.9997)
+                else:
+                    cooling_rate = min(cooling_rate, 0.9996)
+
+                # Cool down temperature
+                current_temp *= cooling_rate
+
+                if current_temp < min_temp:
+                    break
+
+                # Try to make a small random move
+                test_points = sa_best_points.copy()
+
+                # Select random point to perturb
+                point_idx = np.random.randint(0, 14)
+
+                # Make small random perturbation - adapt to current temp
+                delta = np.random.normal(0, 0.001 * current_temp, 3)
+                test_points[point_idx] += delta
+
+                # Project back to sphere
+                test_points = project_to_sphere(test_points)
+
+                # Compute new ratio
+                test_ratio = compute_min_max_ratio(test_points)
+
+                # Accept or reject based on Metropolis criterion
+                if test_ratio > sa_best_ratio:
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                elif np.random.random() < np.exp((test_ratio - sa_best_ratio) / current_temp):
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+
+                # Early stopping if no improvement for long time
+                if iteration - last_improvement > 5000:
+                    break
+
+                # Apply local refinement every 2000 iterations
+                if iteration > 0 and iteration % 2000 == 0:
+                    # Perform local optimization on current best points
+                    try:
+                        # Flatten points for optimization
+                        x0 = sa_best_points.flatten()
+
+                        def constraint_func(x):
+                            # Ensure points stay within unit sphere
+                            points = x.reshape(-1, 3)
+                            norms = np.linalg.norm(points, axis=1)
+                            return 1.0 - norms
+
+                        # Use SLSQP for local refinement
+                        result = minimize(
+                            lambda x: -compute_min_max_ratio(x.reshape(-1, 3)),
+                            x0,
+                            method='SLSQP',
+                            constraints={'type': 'ineq', 'fun': constraint_func},
+                            options={'maxiter': 100, 'ftol': 1e-6},
+                            bounds=[(-1, 1)] * 42
+                        )
+
+                        if result.success:
+                            refined_points = result.x.reshape(-1, 3)
+                            # Ensure points stay on unit sphere
+                            norms_refined = np.linalg.norm(refined_points, axis=1)
+                            if np.max(norms_refined) > 1:
+                                refined_points = refined_points / np.max(norms_refined) * 0.99
+
+                            refined_ratio = compute_min_max_ratio(refined_points)
+                            if refined_ratio > sa_best_ratio:
+                                sa_best_points = refined_points.copy()
+                                sa_best_ratio = refined_ratio
+                                last_improvement = iteration
+                    except:
+                        pass
+
+            if sa_best_ratio > best_ratio:
+                best_ratio = sa_best_ratio
+                best_points = sa_best_points.copy()
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

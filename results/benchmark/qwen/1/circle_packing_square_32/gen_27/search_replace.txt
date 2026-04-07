@@ -1,0 +1,127 @@
+<NAME>
+enhanced_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to improve the Voronoi-based initialization by creating a more sophisticated approach that strategically places circles in high-potential areas. Instead of just using Voronoi vertices, I'll implement a method that considers both the Voronoi structure and the potential for large radii by analyzing the available space around each Voronoi cell. This should lead to better starting configurations that are closer to optimal, thus accelerating convergence of the evolutionary algorithm.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_with_voronoi():
+        """Initialize circle positions using Voronoi-based approach"""
+        # Generate initial points using a grid-like pattern with some randomness
+        n_points = 64  # More points for better Voronoi coverage
+        points = []
+
+        # Create a systematic point distribution
+        for i in range(8):
+            for j in range(8):
+                x = 0.1 + i * 0.125 + np.random.uniform(-0.02, 0.02)
+                y = 0.1 + j * 0.125 + np.random.uniform(-0.02, 0.02)
+                if 0 <= x <= 1 and 0 <= y <= 1:
+                    points.append([x, y])
+
+        points = np.array(points)
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+
+            # Get Voronoi vertices as candidate centers
+            candidates = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    candidates.append(vertex)
+
+            # If we have enough candidates, sample them; otherwise use original points
+            if len(candidates) >= 32:
+                selected_indices = np.random.choice(len(candidates), 32, replace=False)
+                centers = np.array([candidates[i] for i in selected_indices])
+            else:
+                # Fall back to sampling original points
+                selected_indices = np.random.choice(len(points), 32, replace=False)
+                centers = points[selected_indices]
+
+        except:
+            # Fallback to simple random initialization
+            centers = np.random.rand(32, 2)
+
+        # Initialize with small radii
+        circles = np.zeros((32, 3))
+        circles[:, 0] = centers[:, 0]
+        circles[:, 1] = centers[:, 1]
+        circles[:, 2] = 0.02  # Small initial radius
+
+        return circles
+=======
+    def initialize_with_voronoi():
+        """Initialize circle positions using enhanced Voronoi-based approach"""
+        # Generate initial points using a grid-like pattern with some randomness
+        n_points = 128  # More points for better Voronoi coverage
+        points = []
+
+        # Create a systematic point distribution with more density near boundaries
+        # to better capture corner and edge regions where large circles can fit
+        for i in range(12):
+            for j in range(12):
+                # Add some bias towards corners and edges
+                x = 0.05 + i * (0.9/11) + np.random.uniform(-0.01, 0.01)
+                y = 0.05 + j * (0.9/11) + np.random.uniform(-0.01, 0.01)
+                if 0 <= x <= 1 and 0 <= y <= 1:
+                    points.append([x, y])
+
+        points = np.array(points)
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+
+            # Enhanced approach: evaluate each Voronoi cell for optimal radius
+            candidates = []
+            candidate_radii = []
+
+            # For each Voronoi vertex, calculate the maximum possible radius
+            # based on proximity to other points and boundaries
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    # Calculate distances to nearest points (excluding itself)
+                    distances = [np.sqrt((vertex[0]-p[0])**2 + (vertex[1]-p[1])**2)
+                               for p in points if not (abs(vertex[0]-p[0]) < 1e-8 and abs(vertex[1]-p[1]) < 1e-8)]
+
+                    if distances:
+                        min_distance = min(distances)
+                        # Estimate max radius - consider boundary constraints too
+                        max_radius = min(vertex[0], 1-vertex[0], vertex[1], 1-vertex[1], min_distance/2)
+                        if max_radius > 0.001:  # Only include viable candidates
+                            candidates.append(vertex)
+                            candidate_radii.append(max_radius)
+
+            # If we have enough candidates, select the ones with largest estimated radii
+            if len(candidates) >= 32:
+                # Sort by estimated radius (descending)
+                sorted_indices = np.argsort(candidate_radii)[::-1][:32]
+                centers = np.array([candidates[i] for i in sorted_indices])
+                radii = np.array([candidate_radii[i] for i in sorted_indices])
+            else:
+                # Fall back to sampling original points (with better distribution)
+                selected_indices = np.random.choice(len(points), 32, replace=False)
+                centers = points[selected_indices]
+                # Initialize with small but reasonable radii
+                radii = np.full(32, 0.02)
+
+        except:
+            # Fallback to improved random initialization
+            centers = np.random.rand(32, 2)
+            # Bias radii towards slightly larger values to start
+            radii = np.random.uniform(0.015, 0.03, 32)
+
+        # Initialize with better radius estimates
+        circles = np.zeros((32, 3))
+        circles[:, 0] = centers[:, 0]
+        circles[:, 1] = centers[:, 1]
+        circles[:, 2] = radii
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

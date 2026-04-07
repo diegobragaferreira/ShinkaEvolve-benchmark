@@ -1,0 +1,399 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import random
+from typing import List, Tuple, Optional
+import time
+import warnings
+
+# Suppress scientific notation for cleaner output
+np.set_printoptions(suppress=True)
+
+# Historical sequences for seeding the algorithm
+HISTORICAL_SEQUENCES = [
+    [1.0] * 100,
+    [1.0] * 50 + [0.0] * 50,
+    [1.0, 0.0] * 50,
+    [0.0] * 25 + [1.0] * 50 + [0.0] * 25,
+    [1.0, 1.0, 0.0, 0.0] * 25,
+    [1.0, 0.5, 0.25, 0.125] * 25,
+    [1.0, 0.8, 0.6, 0.4, 0.2] * 20,
+    [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1] * 10,
+]
+
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')
+
+def assess_numerical_stability(a: np.ndarray, b: np.ndarray) -> bool:
+    """
+    Assess whether FFT convolution would be numerically stable for given inputs.
+    Returns True if using FFT is likely to be stable, False otherwise.
+    """
+    # Check the condition number of the convolution matrix
+    # This is a rough indicator of numerical stability issues
+    n = len(a)
+
+    # For small sequences, prefer direct convolution to avoid potential FFT artifacts
+    if n < 50:
+        return False
+
+    # Compute a sample of the convolution and examine its properties
+    # If there are extreme variations, FFT might be unstable
+    try:
+        # Direct convolution for comparison
+        direct_conv = convolve_direct(a, b)
+        fft_conv = convolve_fft(a, b)
+
+        # Compare magnitudes
+        direct_max = np.max(np.abs(direct_conv))
+        fft_max = np.max(np.abs(fft_conv))
+
+        # If the magnitudes are very different, FFT may be unstable
+        if direct_max > 0 and abs(direct_max - fft_max) / direct_max > 0.1:
+            return False
+
+        return True
+    except:
+        return False
+
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence."""
+    a = np.array(sequence)
+    n = len(a)
+
+    # Determine best convolution method based on stability assessment
+    use_fft = n > 100 and assess_numerical_stability(a, a)
+
+    if use_fft:
+        b = convolve_fft(a, a)
+    else:
+        b = convolve_direct(a, a)
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+
+def solve_convolution_lp(f_sequence: List[float], rhs: float) -> Optional[List[float]]:
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        n = len(f_sequence)
+        c = -np.ones(n)
+        a_ub = []
+        b_ub = []
+
+        # Build constraint matrix for convolution constraints
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_sequence[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Solve the linear program with multiple methods as fallback
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', options={'maxiter': 1000})
+
+        if not result.success:
+            # Try different method if highs fails
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='revised simplex', options={'maxiter': 1000})
+
+        if result.success:
+            return result.x.tolist()
+        else:
+            return None
+
+    except Exception:
+        return None
+
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with curvature awareness."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware directional bias correction with more robust method
+    # Estimate curvature using a more stable second-order approximation
+    if n > 10:
+        # Use a more stable approach for curvature estimation using finite differences
+        epsilon = 1e-4  # Reduce epsilon for better numerical stability
+
+        # Instead of estimating full Hessian, estimate curvature along the current direction
+        # and apply a more principled correction
+        try:
+            # Compute directional derivative using centered differences with a better epsilon
+            directional_derivative = 0.0
+
+            # For numerical stability, compute curvature in a more robust way
+            # by taking the difference between successive gradients
+
+            # Get original gradient direction vector
+            grad_vector = np.array(normalized_g_fun)
+            # Perturb along this direction to estimate curvature
+            perturbed_seq1 = normalized_sequence.copy()
+            perturbed_seq2 = normalized_sequence.copy()
+
+            # Forward perturbation
+            perturbed_seq1 = [x + epsilon * y for x, y in zip(perturbed_seq1, grad_vector)]
+
+            # Backward perturbation
+            perturbed_seq2 = [x - epsilon * y for x, y in zip(perturbed_seq2, grad_vector)]
+
+            # Recompute convolution with perturbed sequences
+            if n > 100:
+                b_forward = convolve_fft(np.array(perturbed_seq1), np.array(perturbed_seq1))
+                b_backward = convolve_fft(np.array(perturbed_seq2), np.array(perturbed_seq2))
+            else:
+                b_forward = convolve_direct(np.array(perturbed_seq1), np.array(perturbed_seq1))
+                b_backward = convolve_direct(np.array(perturbed_seq2), np.array(perturbed_seq2))
+
+            # Estimate curvature directly from max convolution values
+            curv_forward = np.max(b_forward)
+            curv_backward = np.max(b_backward)
+            curv_center = np.max(b)
+
+            # More accurate second derivative approximation
+            curvature = (curv_forward + curv_backward - 2 * curv_center) / (epsilon ** 2)
+
+            # Only apply curvature correction if it's meaningful and positive
+            if curvature > 0:
+                # Apply curvature correction to improve convergence
+                curvature_correction = curvature * 0.01 * grad_vector
+
+                # Prevent over-correction
+                curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction) * 0.1)
+
+                # Adjust the direction with curvature bias
+                corrected_direction = np.array(normalized_g_fun) + curvature_correction
+                normalized_g_fun = corrected_direction.tolist()
+        except Exception:
+            # Fall back to simple approach if curvature estimation fails
+            pass
+
+    # Apply small perturbation for exploration
+    t = 0.05
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+
+def mutate_sequence(sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
+    """Apply random mutation to a sequence."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Use larger variance for better exploration
+            mutated[i] = max(0, mutated[i] + np.random.normal(0, 0.5 * mutated[i]))
+    return mutated
+
+def crossover_sequences(seq1: List[float], seq2: List[float]) -> List[float]:
+    """Perform uniform crossover between two sequences."""
+    # Ensure both sequences are of same length
+    min_len = min(len(seq1), len(seq2))
+    child = []
+    for i in range(min_len):
+        if random.random() < 0.5:
+            child.append(seq1[i])
+        else:
+            child.append(seq2[i])
+
+    # Handle length differences
+    if len(seq1) > len(seq2):
+        child.extend(seq1[min_len:])
+    elif len(seq2) > len(seq1):
+        child.extend(seq2[min_len:])
+
+    return child
+
+def initialize_population_with_historical_samples(
+    population_size: int,
+    initial_length_range: Tuple[int, int],
+    historical_samples: int = 3
+) -> List[List[float]]:
+    """Initialize population by sampling from historical sequences."""
+    population = []
+
+    # Add some historical sequences
+    for _ in range(historical_samples):
+        idx = random.randrange(len(HISTORICAL_SEQUENCES))
+        seq = HISTORICAL_SEQUENCES[idx].copy()
+        # Adjust length to fit range
+        n = random.randint(*initial_length_range)
+        if n < len(seq):
+            seq = seq[:n]
+        elif n > len(seq):
+            seq = seq + [0.0] * (n - len(seq))
+        population.append(seq)
+
+    # Fill the rest with random sequences
+    for _ in range(population_size - historical_samples):
+        n = random.randint(*initial_length_range)
+        individual = [random.random() * 100 for _ in range(n)]
+        population.append(individual)
+
+    return population
+
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 20,
+    generations: int = 50,
+    elite_fraction: float = 0.2,
+    patience_limit: int = 10
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using improved evolutionary approach."""
+    start_time = time.time()
+
+    # Initialize population with historical sequences for better starting points
+    population = initialize_population_with_historical_samples(
+        population_size, initial_length_range
+    )
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    patience_counter = 0
+
+    for generation in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            _, inv_c1 = compute_c1_constant(individual)
+            fitness_scores.append((individual, inv_c1))
+
+        # Sort by fitness (descending order)
+        fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Update best solution
+        current_best, current_best_inv_c1 = fitness_scores[0]
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = current_best.copy()
+            patience_counter = 0  # Reset patience counter
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement for too long
+        if patience_counter > patience_limit:
+            break
+
+        # Select elite individuals
+        elite_count = int(elite_fraction * population_size)
+        elite_individuals = [ind for ind, _ in fitness_scores[:elite_count]]
+
+        # Generate new population
+        new_population = elite_individuals.copy()
+
+        # Create offspring through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = random.choice(elite_individuals)
+            parent2 = random.choice(elite_individuals)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation
+            child = mutate_sequence(child)
+
+            # Random initialization for diversity
+            if random.random() < 0.1:
+                n = random.randint(*initial_length_range)
+                child = [random.random() * 100 for _ in range(n)]
+
+            new_population.append(child)
+
+        population = new_population
+
+    # Final optimization of best solution
+    if best_sequence is not None:
+        prev_inv_c1 = 0.0
+        for _ in range(20):  # Additional fine-tuning iterations
+            improved = get_good_direction_to_move_into(best_sequence)
+            if improved is None:
+                break
+            _, inv_c1_new = compute_c1_constant(improved)
+            _, inv_c1_old = compute_c1_constant(best_sequence)
+            if inv_c1_new > inv_c1_old:
+                best_sequence = improved
+                prev_inv_c1 = inv_c1_new
+            else:
+                break
+
+    return best_sequence if best_sequence is not None else [1.0]
+
+def search_for_best_sequence() -> List[float]:
+    """Function to search for the best coefficient sequence."""
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    return adaptive_search_for_best_sequence()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

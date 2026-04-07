@@ -1,0 +1,458 @@
+--- a/original.py
++++ b/original.py
+@@ -1,229 +1,354 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from deap import base, creator, tools, algorithms
++from typing import List
++from numba import jit
+ import random
+ import time
+ from scipy import signal
+-from typing import List
+-from numba import jit
++from scipy.optimize import differential_evolution
++import warnings
++warnings.filterwarnings('ignore')
+ 
+ # Set random seeds for reproducibility
+ random.seed(42)
+ np.random.seed(42)
+ 
+ @jit(nopython=True)
+ def compute_autoconvolution_numba(f_vals):
+     """
+     Compute autoconvolution using numba for speed
+     """
+     n = len(f_vals)
+     # Autoconvolution size is 2*n - 1
+     g_size = 2 * n - 1
+     g_vals = np.zeros(g_size)
+ 
+     # Compute convolution directly with numba optimization
+     for i in range(n):
+         for j in range(n):
+             idx = i + j
+             if 0 <= idx < g_size:
+                 g_vals[idx] += f_vals[i] * f_vals[j]
+ 
+     return g_vals
+ 
+ @jit(nopython=True)
+ def compute_norms_numba(g_vals, dx):
+     """
+     Compute norms efficiently with numba
+     """
+     n = len(g_vals)
+ 
+     # Compute L1 norm (sum of absolute values)
+     l1_norm = 0.0
+     for i in range(n):
+         l1_norm += abs(g_vals[i])
+ 
+     # Compute L2 norm squared
+     l2_norm_sq = 0.0
+     for i in range(n):
+         l2_norm_sq += g_vals[i] * g_vals[i]
+ 
+     # Compute infinity norm
+     linf_norm = 0.0
+     for i in range(n):
+         val = abs(g_vals[i])
+         if val > linf_norm:
+             linf_norm = val
+ 
+     return l1_norm, l2_norm_sq, linf_norm
+ 
+ def compute_autoconvolution_norms(f_values: List[float]):
+     """
+     Compute the three norms needed for C₂ calculation:
+     ||g||₂², ||g||₁, ||g||∞ where g = f*f
+     """
+     if not f_values:
+         return 0.0, 0.0, 0.0
+ 
+     # Create step function on [-1/4, 1/4]
+     n_steps = len(f_values)
+     if n_steps == 0:
+         return 0.0, 0.0, 0.0
+ 
+     dx = 0.5 / n_steps  # Step size
+ 
+     # Create piecewise constant function from step heights
+     f = np.array(f_values)
+ 
+     # Compute autoconvolution g = f * f using numba optimized version
+     g = compute_autoconvolution_numba(f)
+ 
+     # Adjust indices for the correct domain
+     # Result has length 2*n_steps - 1
+     g_len = len(g)
+ 
+     # Extract the central region corresponding to [-1/4, 1/4]
+     # This takes the middle n_steps elements of the full convolution
+     central_start = (g_len - n_steps) // 2
+     central_end = central_start + n_steps
+     g_centered = g[central_start:central_end]
+ 
+-    # Normalize to match step width - note: we don't multiply by dx here
+-    # since we'll handle normalization in norm calculations
+-    # g_centered = g_centered * dx  # Commented out to avoid double normalization
+-
+     # Compute norms using numba optimized version
+     g_abs = np.abs(g_centered)
+ 
+     # Compute norms using numba
+     norm_1, norm_2_sq, norm_inf = compute_norms_numba(g_abs, dx)
+ 
+     # Normalize for the trapezoidal integration that will happen below
+     # The actual integral should be scaled properly
+     # Since we're using trapezoidal integration, and we have dx spacing,
+     # we multiply by dx the norms that represent integrals
+     norm_1 *= dx
+     norm_2_sq *= dx
+ 
+     return norm_2_sq, norm_1, norm_inf
+ 
+ def evaluate_c2(individual):
+     """Evaluate fitness for individual (step function heights)"""
+     try:
+         # Convert individual to list of floats
+         f_values = [max(0.0, float(x)) for x in individual]  # Ensure non-negative
+ 
+         # Compute the norms
+         norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+ 
+         # Avoid division by zero
+         if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+-            return (0.0,)
++            return 0.0
+ 
+         # Calculate C₂
+         c2 = norm_2_sq / (norm_1 * norm_inf)
+-        return (c2,)
++        return c2
+     except Exception as e:
+-        return (0.0,)
++        return 0.0
++
++def generate_neural_pattern_individual():
++    """
++    Generate an individual using a neural-inspired pattern that promotes high C2 values.
++    This pattern combines multiple overlapping Gaussian components with strategic spacing
++    to enhance autoconvolution properties.
++    """
++    # Start with a base structure that favors high C2
++    n_steps = random.randint(100, 1000)
++    
++    # Create a structured pattern inspired by optimal step functions
++    individual = np.zeros(n_steps)
++    
++    # Add multiple components that create favorable convolution behavior
++    num_components = random.randint(3, 8)
++    
++    for i in range(num_components):
++        # Determine component characteristics
++        # Position: strategic placement for convolution enhancement
++        pos = 0.3 + 0.4 * (i / max(1, num_components - 1))
++        
++        # Width: vary to create different convolution signatures
++        width = 0.05 + random.random() * 0.15
++        
++        # Height: vary to create different energy distributions
++        height = 0.7 + random.random() * 0.8
++        
++        # Create Gaussian component
++        x = np.linspace(0, 1, n_steps)
++        gaussian = height * np.exp(-0.5 * ((x - pos) / width) ** 2)
++        
++        # Apply a smooth envelope to create better convolution properties
++        envelope = 1.0 - 0.3 * np.sin(2 * np.pi * x * (i + 1))
++        gaussian *= envelope
++        
++        individual += gaussian
++    
++    # Add some structured variation
++    variation_strength = 0.15
++    for i in range(n_steps):
++        individual[i] = max(0.0, individual[i] + random.gauss(0, variation_strength))
++    
++    # Apply smoothing to encourage better autoconvolution properties
++    smoothed = np.zeros_like(individual)
++    kernel_size = max(3, n_steps // 50)
++    for i in range(n_steps):
++        start_idx = max(0, i - kernel_size//2)
++        end_idx = min(n_steps, i + kernel_size//2 + 1)
++        smoothed[i] = np.mean(individual[start_idx:end_idx])
++    
++    individual = smoothed
++    
++    # Convert to list
++    return individual.tolist()
++
++def adaptive_neural_local_search(individual: List[float], max_iterations: int = 100) -> tuple:
++    """
++    Perform adaptive local search using neural-network-inspired mutations.
++    """
++    best_individual = individual.copy()
++    best_c2 = evaluate_c2(best_individual)
++    
++    for iteration in range(max_iterations):
++        # Create candidate using adaptive neural-inspired mutation
++        candidate = individual.copy()
++        
++        # Select mutation strategy based on iteration
++        mutation_type = random.choices(
++            ['local', 'global', 'structured'], 
++            weights=[0.4, 0.3, 0.3]
++        )[0]
++        
++        if mutation_type == 'local':
++            # Localized changes with small perturbations
++            num_changes = max(1, len(candidate) // 20)
++            indices = random.sample(range(len(candidate)), num_changes)
++            for i in indices:
++                # Smaller perturbations around existing values
++                current_val = candidate[i]
++                if current_val > 0:
++                    perturbation = random.gauss(0, 0.03 * current_val)
++                else:
++                    perturbation = random.gauss(0, 0.05)
++                candidate[i] = max(0.0, current_val + perturbation)
++                
++        elif mutation_type == 'global':
++            # More significant changes - global adjustment
++            scale_factor = 0.8 + random.random() * 0.4
++            for i in range(len(candidate)):
++                candidate[i] = max(0.0, candidate[i] * scale_factor)
++                
++        else:  # structured
++            # Structural changes - modify entire regions
++            region_start = random.randint(0, len(candidate) - 10)
++            region_end = min(len(candidate), region_start + random.randint(10, 50))
++            
++            # Apply a transformation to the region
++            region_mean = np.mean(candidate[region_start:region_end])
++            region_std = np.std(candidate[region_start:region_end])
++            
++            # Modify region with pattern that improves convolution
++            for i in range(region_start, region_end):
++                base_val = candidate[i]
++                # Apply pattern that reduces sharp transitions
++                pattern_factor = 1.0 + 0.3 * np.sin(2 * np.pi * i / len(candidate))
++                candidate[i] = max(0.0, base_val * pattern_factor)
++        
++        # Evaluate candidate
++        candidate_c2 = evaluate_c2(candidate)
++        
++        if candidate_c2 > best_c2:
++            best_c2 = candidate_c2
++            best_individual = candidate.copy()
++    
++    return best_individual, best_c2
++
++def neural_evolution_strategy():
++    """
++    Main optimization strategy using neural-inspired evolutionary approach.
++    """
++    # Phase 1: Generate diverse initial population with neural patterns
++    population_size = 50
++    population = []
++    
++    # Generate diverse individuals using neural-inspired patterns
++    for i in range(population_size):
++        individual = generate_neural_pattern_individual()
++        population.append(individual)
++    
++    # Evaluate initial population
++    fitness_scores = [evaluate_c2(ind) for ind in population]
++    
++    # Track best solution
++    best_idx = np.argmax(fitness_scores)
++    best_individual = population[best_idx]
++    best_fitness = fitness_scores[best_idx]
++    
++    # Phase 2: Iterative improvement with neural-inspired refinement
++    max_generations = 200
++    start_time = time.time()
++    
++    for generation in range(max_generations):
++        if time.time() - start_time > 85:  # Time limit
++            break
++            
++        # Selection: choose top performers
++        sorted_indices = np.argsort(fitness_scores)[::-1][:population_size//3]
++        selected_population = [population[i] for i in sorted_indices]
++        selected_fitness = [fitness_scores[i] for i in sorted_indices]
++        
++        # Generate new population through neural-inspired crossover
++        new_population = selected_population.copy()
++        
++        # Elitism: carry forward the best individuals
++        elite_count = max(1, population_size // 10)
++        elites = selected_population[:elite_count]
++        new_population.extend(elites)
++        
++        # Generate offspring through neural-inspired operations
++        while len(new_population) < population_size:
++            # Select parents
++            parent1 = random.choice(selected_population)
++            parent2 = random.choice(selected_population)
++            
++            # Neural-inspired crossover: blend components with pattern preservation
++            child = []
++            for i in range(len(parent1)):
++                # Blend with preference for stronger parent
++                if random.random() < 0.5:
++                    child.append(parent1[i])
++                else:
++                    child.append(parent2[i])
++                
++                # Add neural-inspired variation
++                if random.random() < 0.1:  # 10% chance of structural variation
++                    child[-1] = max(0.0, child[-1] * (0.8 + random.random() * 0.4))
++            
++            new_population.append(child)
++        
++        # Trim to exact population size
++        new_population = new_population[:population_size]
++        
++        # Local refinement using neural-inspired search
++        refined_population = []
++        for i, individual in enumerate(new_population):
++            # Apply neural-inspired local search to some individuals
++            if random.random() < 0.6:  # Apply to 60% of population
++                refined_individual, refined_fitness = adaptive_neural_local_search(individual)
++                refined_population.append(refined_individual)
++            else:
++                refined_population.append(individual)
++        
++        # Re-evaluate population
++        population = refined_population
++        fitness_scores = [evaluate_c2(ind) for ind in population]
++        
++        # Update best solution
++        current_best_idx = np.argmax(fitness_scores)
++        current_best_fitness = fitness_scores[current_best_idx]
++        if current_best_fitness > best_fitness:
++            best_fitness = current_best_fitness
++            best_individual = population[current_best_idx].copy()
++    
++    return best_individual, best_fitness
+ 
+ def construct_function() -> List[float]:
+-    """Function to construct step-function with high C₂ value using evolutionary optimization."""
+-
+-    # Algorithm parameters
+-    POPSIZE = 50
+-    NGEN = 200
+-    MUTPB = 0.3
+-    CXPB = 0.5
+-    TOURNAMENT_SIZE = 3
+-    TIME_LIMIT = 85  # seconds
+-
+-    start_time = time.time()
+-
+-    # Define problem
+-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+-    creator.create("Individual", list, fitness=creator.FitnessMax)
+-
+-    toolbox = base.Toolbox()
+-
+-    # Initialize individuals with random positive values (non-negative)
+-    def random_height():
+-        return abs(random.gauss(0.5, 0.3))
+-
+-    def create_individual():
+-        # Random number of steps between 100 and 1000
+-        n_steps = random.randint(100, 1000)
+-        return creator.Individual([random_height() for _ in range(n_steps)])
+-
+-    toolbox.register("individual", create_individual)
+-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+-    toolbox.register("evaluate", evaluate_c2)
+-    toolbox.register("mate", tools.cxUniform, indpb=0.05)
+-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+-    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+-
+-    # Initialize population
+-    pop = toolbox.population(n=POPSIZE)
+-
+-    # Evaluate initial population
+-    fitnesses = list(map(toolbox.evaluate, pop))
+-    for ind, fit in zip(pop, fitnesses):
+-        ind.fitness.values = fit
+-
+-    # Main evolution loop
+-    best_fitness = 0.0
+-    best_individual = None
+-    generation_counter = 0
+-
+-    for gen in range(NGEN):
+-        if time.time() - start_time > TIME_LIMIT:
+-            break
+-
+-        generation_counter += 1
+-
+-        # Select the next generation individuals
+-        offspring = toolbox.select(pop, len(pop))
+-        offspring = list(map(toolbox.clone, offspring))
+-
+-        # Apply crossover and mutation
+-        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+-            if random.random() < CXPB:
+-                toolbox.mate(child1, child2)
+-                del child1.fitness.values
+-                del child2.fitness.values
+-
+-        for mutant in offspring:
+-            if random.random() < MUTPB:
+-                toolbox.mutate(mutant)
+-                del mutant.fitness.values
+-
+-        # Evaluate the individuals with an invalid fitness
+-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+-        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+-        for ind, fit in zip(invalid_ind, fitnesses):
+-            ind.fitness.values = fit
+-
+-        # Replace population
+-        pop[:] = offspring
+-
+-        # Track best solution
+-        best_in_gen = max(pop, key=lambda x: x.fitness.values[0])
+-        if best_in_gen.fitness.values[0] > best_fitness:
+-            best_fitness = best_in_gen.fitness.values[0]
+-            best_individual = list(best_in_gen)
+-
+-    # Final evaluation of best individual
+-    if best_individual is not None:
+-        final_fitness = evaluate_c2(best_individual)[0]
+-        if final_fitness > 0.0:
+-            # Return the best individual found
+-            return [max(0.0, float(x)) for x in best_individual]
+-
++    """Function to construct step-function with high C2 value using neural-inspired optimization."""
++    try:
++        # Run neural evolution strategy
++        best_individual, best_fitness = neural_evolution_strategy()
++        
++        # Final validation and cleanup
++        if best_individual is not None and best_fitness > 0.0:
++            # Ensure all values are non-negative and convert to float
++            result = [max(0.0, float(x)) for x in best_individual]
++            return result
++            
++    except Exception as e:
++        pass
++    
+     # Fallback: return reasonable random solution
+     fallback_size = random.randint(100, 1000)
+     return [abs(random.gauss(0.5, 0.3)) for _ in range(fallback_size)]
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

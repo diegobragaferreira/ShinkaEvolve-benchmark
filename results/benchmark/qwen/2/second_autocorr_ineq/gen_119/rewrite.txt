@@ -1,0 +1,366 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import warnings
+from numba import jit
+import time
+import random
+import logging
+from typing import List, Tuple, Callable, Optional
+import math
+
+# Configure logging to reduce verbosity
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values):
+    """
+    Fast computation of autoconvolution norms using Numba JIT compilation.
+    """
+    n = len(f_values)
+    if n < 1:
+        return 0.0, 0.0, 0.0
+
+    # Convert to numpy array for fast operations
+    f = np.array(f_values, dtype=np.float64)
+    
+    # Create the step function on [-1/4, 1/4] with equal spacing
+    dx = 0.5 / (n - 1) if n > 1 else 0.5
+    
+    # Precompute convolution manually for efficiency
+    # Autoconvolution g[k] = sum f[i] * f[k-i] for valid indices
+    g = np.zeros(2 * n - 1)
+    
+    # Manual convolution loop (optimized for autoconvolution)
+    for i in range(n):
+        for j in range(n):
+            k = i + j
+            if 0 <= k < len(g):
+                g[k] += f[i] * f[j]
+    
+    # Keep only the middle part (proper autoconvolution)
+    g_middle = g[n-1:2*n-1]
+    
+    # Create x-axis for g (interval [-0.5, 0.5])
+    g_x = np.linspace(-0.5, 0.5, len(g_middle))
+    
+    # Compute the required norms
+    # ||g||₂² (L2 norm squared)
+    # Using trapezoidal integration approximation 
+    g_sq = g_middle * g_middle
+    area = 0.0
+    for i in range(len(g_middle) - 1):
+        h = g_x[i+1] - g_x[i]
+        area += h * (g_sq[i] + g_sq[i+1]) / 2
+    
+    norm_2_sq = area
+
+    # ||g||₁ (L1 norm) - approximate via summation
+    norm_1 = np.sum(np.abs(g_middle)) * dx  # dx is the step size
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(np.abs(g_middle))
+
+    return norm_2_sq, norm_1, norm_inf
+
+class SpectralGaussianOptimizer:
+    """Main optimizer class with optimized strategy selection and execution."""
+    
+    def __init__(self):
+        self.best_c2 = -1.0
+        self.best_function = None
+        self.start_time = None
+        self.max_attempts = 30
+        self.max_time_seconds = 85
+        self.min_points = 1000
+        self.max_points = 3000
+        self.strategy_weights = [0.35, 0.35, 0.25, 0.05]  # spectral, gaussian, mixed, adaptive_gaussian
+        
+    def evaluate_fitness(self, f_values: List[float]) -> float:
+        """Calculate C2 value for given function with error handling."""
+        try:
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
+            
+            # Avoid division by zero with numerical stability
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                return 0.0
+            
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            return c2
+        except Exception as e:
+            logging.warning(f"Error in evaluate_fitness: {e}")
+            return 0.0
+    
+    def spectral_peak_optimization(self, n_points: int = 2000) -> List[float]:
+        """Optimize function in spectral domain to improve C2."""
+        # Generate initial spectral representation
+        # Start with a smooth, structured spectrum
+        frequencies = np.fft.fftfreq(n_points, 0.5/n_points)
+        
+        # Create initial spectral profile that promotes good autoconvolution properties
+        # Use band-limited approach with multiple frequency components
+        magnitudes = np.zeros(n_points)
+        
+        # Add several peak frequencies with varying strengths
+        # This favors flat autoconvolution profiles which maximize C2
+        n_peaks = 8
+        for i in range(n_peaks):
+            # Position peaks logarithmically spaced in frequency domain
+            freq_pos = 10**(np.log10(1) + i * (np.log10(n_points//2) - np.log10(1)) / (n_peaks - 1))
+            freq_idx = int(freq_pos)
+            if freq_idx < n_points//2:
+                # Add energy at this frequency
+                strength = np.random.gamma(2, 1.0)  # Gamma distribution for varied amplitudes
+                magnitudes[freq_idx] = strength
+                if freq_idx > 0:
+                    magnitudes[-freq_idx] = strength  # Conjugate symmetry
+        
+        # Add some low-frequency components for smoothness
+        magnitudes[0] = np.random.gamma(1, 2.0)  # DC component
+        
+        # Add some random phase variations to avoid local minima
+        phases = np.random.uniform(0, 2*np.pi, n_points)
+        
+        # Convert back to time domain
+        fft_result = magnitudes * np.exp(1j * phases)
+        
+        # Use inverse FFT to get real-valued function
+        f_real = np.real(np.fft.ifft(fft_result))
+        
+        # Ensure non-negativity and normalize
+        f_real = np.maximum(f_real, 0.0)
+        max_val = np.max(f_real)
+        if max_val > 0:
+            f_real = f_real / (max_val * 2.0)
+        
+        # Apply post-processing to enhance quality
+        # Smooth with Gaussian kernel
+        window_size = min(51, n_points // 10)
+        if window_size % 2 == 0:
+            window_size += 1
+        if window_size > 1:
+            kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/4)**2)
+            kernel = kernel / np.sum(kernel)
+            f_smooth = np.convolve(f_real, kernel, mode='same')
+            f_real = f_smooth
+        
+        # Final clip to ensure non-negativity
+        f_real = np.maximum(f_real, 0.0)
+        
+        return f_real.tolist()
+    
+    def gaussian_peak_construction(self, n_points: int = 2000) -> List[float]:
+        """Construct step function based on adaptive Gaussian peaks."""
+        # Create x-axis evenly spaced
+        x = np.linspace(-0.25, 0.25, n_points)
+
+        # Initialize function
+        f = np.zeros(n_points)
+
+        # Place peaks strategically to optimize autoconvolution properties
+        n_peaks = 10
+        peak_positions = []
+        peak_amplitudes = []
+        
+        # Generate positions with better spacing strategy
+        for i in range(n_peaks):
+            # Prefer placing peaks away from edges for better smoothness
+            pos = np.random.beta(0.8, 0.8) * 0.4 - 0.2  # Map to [-0.2, 0.2] with preference for center
+            
+            # Check distance from existing peaks to avoid too close proximity
+            min_dist = min([abs(pos - p) for p in peak_positions] + [1.0])
+            if min_dist < 0.015:  # Tighter minimum distance threshold
+                continue
+
+            # Determine amplitude with exponential decay
+            amp = np.random.exponential(1.0)  
+
+            peak_positions.append(pos)
+            peak_amplitudes.append(amp)
+
+        # Create Gaussian peaks with better control over shapes
+        for pos, amp in zip(peak_positions, peak_amplitudes):
+            # Width of Gaussian - smaller values make sharper peaks, but avoid too sharp
+            sigma = np.random.uniform(0.015, 0.04)
+            gaussian = amp * np.exp(-0.5 * ((x - pos) / sigma) ** 2)
+            f += gaussian
+
+        # Ensure non-negativity
+        f = np.maximum(f, 0.0)
+
+        # Normalize to prevent extremely large values that cause numerical issues  
+        max_val = np.max(f)
+        if max_val > 0:
+            f /= (max_val * 2.0)  # Scale down for stability
+
+        # Apply more sophisticated smoothing with larger window
+        window_size = min(101, n_points // 10)
+        if window_size % 2 == 0:
+            window_size += 1
+        if window_size > 1:
+            # Apply Gaussian-like smoothing kernel
+            kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/4)**2)
+            kernel = kernel / np.sum(kernel)
+            f_smooth = np.convolve(f, kernel, mode='same')
+            f = f_smooth
+
+        # Final check for any remaining negative values due to edge effects
+        f = np.maximum(f, 0.0)
+
+        # Add some noise to escape local minima if needed
+        noise_level = 0.001
+        f += np.random.normal(0, noise_level, len(f))
+
+        # Ensure non-negativity again after noise addition
+        f = np.maximum(f, 0.0)
+
+        return f.tolist()
+
+    def adaptive_gaussian_construction(self, n_points: int = 2000) -> List[float]:
+        """Enhanced adaptive Gaussian construction."""
+        # Use fewer points to keep it efficient but maintain resolution
+        # Create x-axis evenly spaced
+        x = np.linspace(-0.25, 0.25, n_points)
+
+        # Initialize function
+        f = np.zeros(n_points)
+
+        # Place peaks strategically to optimize autoconvolution properties
+        # Use log-uniform distribution for peak positions to avoid clustering
+        n_peaks = 15  # Fixed number for better consistency
+        peak_positions = []
+        peak_amplitudes = []
+        
+        # Generate positions with better spacing strategy
+        # Using inverse transform sampling to distribute peaks more evenly
+        for i in range(n_peaks):
+            # Prefer placing peaks away from edges for better smoothness
+            # Use a distribution that favors central positions with some variability
+            pos = np.random.beta(0.8, 0.8) * 0.4 - 0.2  # Map to [-0.2, 0.2] with preference for center
+            
+            # Check distance from existing peaks to avoid too close proximity
+            min_dist = min([abs(pos - p) for p in peak_positions] + [1.0])
+            if min_dist < 0.015:  # Tighter minimum distance threshold
+                continue
+
+            # Determine amplitude with exponential decay
+            amp = np.random.exponential(1.0)  
+
+            peak_positions.append(pos)
+            peak_amplitudes.append(amp)
+
+        # Create Gaussian peaks with better control over shapes
+        for pos, amp in zip(peak_positions, peak_amplitudes):
+            # Width of Gaussian - smaller values make sharper peaks, but avoid too sharp
+            sigma = np.random.uniform(0.015, 0.04)
+            gaussian = amp * np.exp(-0.5 * ((x - pos) / sigma) ** 2)
+            f += gaussian
+
+        # Ensure non-negativity
+        f = np.maximum(f, 0.0)
+
+        # Normalize to prevent extremely large values that cause numerical issues  
+        max_val = np.max(f)
+        if max_val > 0:
+            f /= (max_val * 2.0)  # Scale down for stability
+
+        # Apply more sophisticated smoothing with larger window
+        window_size = min(101, n_points // 10)
+        if window_size % 2 == 0:
+            window_size += 1
+        if window_size > 1:
+            # Apply Gaussian-like smoothing kernel
+            kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/4)**2)
+            kernel = kernel / np.sum(kernel)
+            f_smooth = np.convolve(f, kernel, mode='same')
+            f = f_smooth
+
+        # Final check for any remaining negative values due to edge effects
+        f = np.maximum(f, 0.0)
+
+        # Add some noise to escape local minima if needed
+        noise_level = 0.001
+        f += np.random.normal(0, noise_level, len(f))
+
+        # Ensure non-negativity again after noise addition
+        f = np.maximum(f, 0.0)
+
+        return f.tolist()
+    
+    def mixed_strategy(self, n_points: int = 2000) -> List[float]:
+        """Combine spectral and random approaches."""
+        # Start with spectral approach
+        base_func = self.spectral_peak_optimization(n_points)
+        
+        # Add some random noise for diversity
+        noise_level = 0.005
+        f_array = np.array(base_func)
+        noise = np.random.normal(0, noise_level, len(f_array))
+        f_array += noise
+        f_array = np.maximum(f_array, 0.0)
+        
+        return f_array.tolist()
+
+    def select_strategy(self) -> Callable[[int], List[float]]:
+        """Dynamically select the best generation strategy."""
+        strategies = [
+            self.spectral_peak_optimization,
+            self.gaussian_peak_construction,
+            self.mixed_strategy,
+            self.adaptive_gaussian_construction
+        ]
+        return random.choices(strategies, weights=self.strategy_weights)[0]
+    
+    def run_optimization(self) -> List[float]:
+        """Main optimization loop with improved performance."""
+        self.start_time = time.time()
+        
+        for attempt in range(self.max_attempts):
+            if time.time() - self.start_time > self.max_time_seconds:
+                break
+                
+            try:
+                # Select optimization strategy
+                strategy_func = self.select_strategy()
+                
+                # Dynamic point count for exploration
+                n_points = random.randint(self.min_points, self.max_points)
+                
+                # Generate function using selected strategy
+                f_values = strategy_func(n_points)
+                
+                # Evaluate C2
+                c2 = self.evaluate_fitness(f_values)
+                
+                # Update best solution
+                if c2 > self.best_c2:
+                    self.best_c2 = c2
+                    self.best_function = f_values.copy()
+                    
+                    # Log improvement
+                    elapsed = time.time() - self.start_time
+                    logging.info(f"New best C2: {c2:.6f} at {elapsed:.1f}s")
+                    
+            except Exception as e:
+                logging.warning(f"Attempt {attempt} failed with error: {str(e)}")
+                continue
+        
+        # Return the best function found
+        if self.best_function is not None:
+            return self.best_function
+        else:
+            # Fallback to simple uniform distribution
+            return [0.5] * 1000
+
+def construct_function() -> List[float]:
+    """Main function interface - constructs step-function with high C2 value."""
+    optimizer = SpectralGaussianOptimizer()
+    return optimizer.run_optimization()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

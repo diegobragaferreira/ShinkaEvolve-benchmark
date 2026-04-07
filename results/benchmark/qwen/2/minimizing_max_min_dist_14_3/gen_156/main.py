@@ -1,0 +1,185 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+
+
+class PointOptimizer:
+    """Optimizes point distribution to maximize min/max distance ratio using adaptive simulated annealing."""
+    
+    def __init__(self, n_points=14, seed=42):
+        self.n_points = n_points
+        self.seed = seed
+        np.random.seed(seed)
+        self.settings = self._initialize_settings()
+        
+    def _initialize_settings(self):
+        """Initialize optimization parameters and settings."""
+        return {
+            'initial_temperature': 0.1,
+            'final_temperature': 1e-6,
+            'cooling_rate': 0.9995,
+            'max_iterations': 100000,
+            'stagnation_threshold': 5000,
+            'perturbation_scale': 0.01,
+            'adaptive_cooling_factor': 0.95,
+            'normal_cooling_factor': 0.999,
+            'farthest_strategy_probability': 0.3,
+            'checkpoint_interval': 1000,
+            'distance_cache_enabled': True
+        }
+    
+    def fibonacci_sphere(self, n):
+        """Generate n points on a sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3.0 - np.sqrt(5.0))  # golden angle
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            theta = phi * i  # golden angle increment
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            points.append([x, y, z])
+        return np.array(points)
+    
+    def compute_min_max_ratio(self, points, cache=None):
+        """Compute the ratio of minimum to maximum pairwise distances."""
+        if len(points) < 2:
+            return 0.0
+            
+        # Use cached distances if available
+        if cache is not None and 'distances' in cache:
+            distances = cache['distances']
+        else:
+            distances = pdist(points)
+            if cache is not None:
+                cache['distances'] = distances
+                
+        if len(distances) == 0:
+            return 0.0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        # Return ratio (avoid division by zero)
+        if d_max == 0:
+            return 0.0
+        return d_min / d_max
+    
+    def _find_farthest_point_index(self, points):
+        """Find the point that is farthest from its nearest neighbor."""
+        distances = pdist(points)
+        distance_matrix = squareform(distances)
+        # Find the point with maximum minimum distance to neighbors
+        min_distances = np.min(distance_matrix + np.eye(self.n_points) * np.inf, axis=1)
+        return np.argmax(min_distances)
+    
+    def perturb_points(self, points, temperature, strategy='random'):
+        """Perturb points with temperature-dependent magnitude using different strategies."""
+        n_points = points.shape[0]
+        
+        # Select point to perturb based on strategy
+        if strategy == 'farthest':
+            idx = self._find_farthest_point_index(points)
+        else:  # random strategy
+            idx = np.random.randint(0, n_points)
+        
+        # Generate perturbation vector
+        perturbation = np.random.randn(3) * self.settings['perturbation_scale'] * temperature
+        
+        # Apply perturbation and project back to unit sphere
+        new_points = points.copy()
+        new_points[idx] += perturbation
+        
+        # Project back to unit sphere
+        norm = np.linalg.norm(new_points[idx])
+        if norm > 0:
+            new_points[idx] = new_points[idx] / norm
+            
+        return new_points
+    
+    def optimize(self):
+        """Run the adaptive simulated annealing optimization process."""
+        # Initialize points using Fibonacci sphere distribution
+        points = self.fibonacci_sphere(self.n_points)
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        if np.max(norms) > 0:
+            points = points / np.max(norms)
+        
+        # Initialize optimization variables
+        current_points = points.copy()
+        best_points = points.copy()
+        best_ratio = self.compute_min_max_ratio(current_points)
+        
+        # Checkpoint variables
+        best_checkpoint = best_points.copy()
+        best_checkpoint_ratio = best_ratio
+        last_improvement_iteration = 0
+        
+        temperature = self.settings['initial_temperature']
+        iteration = 0
+        
+        # Cache for distance calculations
+        distance_cache = {}
+        
+        # Optimization loop
+        while iteration < self.settings['max_iterations'] and temperature > self.settings['final_temperature']:
+            # Adaptive perturbation strategy
+            if iteration % 1000 == 0:
+                strategy = 'farthest' if np.random.random() < self.settings['farthest_strategy_probability'] else 'random'
+            else:
+                strategy = 'random'
+            
+            # Perturb points
+            new_points = self.perturb_points(current_points, temperature, strategy=strategy)
+            
+            # Compute new ratio
+            new_ratio = self.compute_min_max_ratio(new_points, distance_cache if self.settings['distance_cache_enabled'] else None)
+            
+            # Accept or reject the new configuration
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temperature):
+                current_points = new_points
+                
+                # Update best solution if improved
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+                    last_improvement_iteration = iteration
+                    
+                    # Update checkpoint
+                    if new_ratio > best_checkpoint_ratio:
+                        best_checkpoint = new_points.copy()
+                        best_checkpoint_ratio = new_ratio
+            
+            # Adaptive cooling schedule
+            if iteration % 1000 == 0:
+                # If we haven't improved in a while, cool faster
+                if iteration - last_improvement_iteration > self.settings['stagnation_threshold']:
+                    temperature *= self.settings['adaptive_cooling_factor']
+                else:
+                    temperature *= self.settings['normal_cooling_factor']
+            else:
+                temperature *= self.settings['cooling_rate']
+            
+            iteration += 1
+            
+            # Clear cache periodically to save memory
+            if iteration % 5000 == 0 and self.settings['distance_cache_enabled']:
+                distance_cache.clear()
+        
+        return best_checkpoint
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    optimizer = PointOptimizer(n_points=14, seed=42)
+    return optimizer.optimize()
+
+
+# EVOLVE-BLOCK-END

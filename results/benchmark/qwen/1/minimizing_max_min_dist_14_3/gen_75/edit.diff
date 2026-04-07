@@ -1,0 +1,146 @@
+--- a/original.py
++++ b/original.py
+@@ -1,41 +1,113 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial import SphericalVoronoi
++from scipy.optimize import minimize
++from scipy.spatial.distance import pdist, squareform
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
++    Uses spherical Voronoi relaxation with multi-start optimization.
+ 
+     Returns
+-        points: np.ndarray of shape (14,3) containing the (x,y) coordinates of the 14 points.
+-
++        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+-
+-    n = 14
+-
+-    # Generate points using Fibonacci spiral on sphere
+-    # This provides a good initial distribution for point dispersion
+-    points = []
+-    golden_ratio = (1 + np.sqrt(5)) / 2
+-
+-    for i in range(n):
+-        # Distribute points along the phi dimension (azimuthal angle)
+-        phi = np.arccos(1 - 2 * i / (n - 1))
+-        theta = 2 * np.pi * i / golden_ratio
+-
+-        # Convert to Cartesian coordinates
+-        x = np.sin(phi) * np.cos(theta)
+-        y = np.sin(phi) * np.sin(theta)
+-        z = np.cos(phi)
+-
+-        points.append([x, y, z])
+-
+-    points = np.array(points)
+-
+-    # Normalize to unit sphere
+-    points = points / np.linalg.norm(points[0]) if np.linalg.norm(points[0]) > 0 else points
+-
+-    return points
+-
++    
++    def spherical_lloyd_relaxation(points, max_iter=50, tol=1e-8):
++        """Apply Lloyd's relaxation on sphere using Spherical Voronoi diagrams."""
++        prev_points = points.copy()
++        
++        for _ in range(max_iter):
++            # Create spherical Voronoi diagram
++            sv = SphericalVoronoi(points, radius=1.0)
++            
++            # Calculate centroids of Voronoi cells
++            new_points = []
++            for i in range(len(sv.regions)):
++                # Get vertices of Voronoi region
++                region_vertices = sv.vertices[sv.regions[i]]
++                # Compute centroid of the spherical polygon
++                if len(region_vertices) > 0:
++                    # Average the vertices (normalized)
++                    centroid = np.mean(region_vertices, axis=0)
++                    # Project back to unit sphere
++                    centroid = centroid / np.linalg.norm(centroid)
++                    new_points.append(centroid)
++                else:
++                    new_points.append(points[i])
++            
++            new_points = np.array(new_points)
++            
++            # Check for convergence
++            if np.allclose(prev_points, new_points, atol=tol):
++                break
++                
++            prev_points = new_points.copy()
++            
++        return new_points
++    
++    def objective_ratio(points_flat):
++        """Objective function to maximize min/max distance ratio."""
++        points = points_flat.reshape(-1, 3)
++        distances = squareform(pdist(points))
++        np.fill_diagonal(distances, np.inf)
++        
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++        
++        if max_dist == 0:
++            return 0.0
++        return min_dist / max_dist
++    
++    def constraint_func(x):
++        # Ensure points are on unit sphere
++        points = x.reshape(-1, 3)
++        norms = np.linalg.norm(points, axis=1)
++        return norms - 1.0
++    
++    best_ratio = -np.inf
++    best_points = None
++    
++    # Multi-start with different random initializations
++    for iteration in range(20):
++        # Random initialization
++        np.random.seed(iteration)
++        points = np.random.randn(14, 3)
++        points = points / np.linalg.norm(points, axis=1, keepdims=True)
++        
++        # Apply spherical Lloyd relaxation
++        relaxed_points = spherical_lloyd_relaxation(points, max_iter=30)
++        
++        # Final optimization with constrained minimization of negative ratio
++        x0 = relaxed_points.flatten()
++        
++        # Use a simple approach: just evaluate the ratio at relaxed points
++        current_ratio = objective_ratio(x0)
++        
++        if current_ratio > best_ratio:
++            best_ratio = current_ratio
++            best_points = relaxed_points.copy()
++    
++    # Final refinement using local optimization on best solution
++    if best_points is not None:
++        try:
++            x0 = best_points.flatten()
++            cons = {'type': 'eq', 'fun': constraint_func}
++            
++            def neg_ratio(x):
++                return -objective_ratio(x)
++                
++            result = minimize(neg_ratio, x0, method='SLSQP', constraints=cons, 
++                            options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500})
++            
++            if result.success:
++                refined_points = result.x.reshape(-1, 3)
++                # Normalize to unit sphere one more time
++                refined_points = refined_points / np.linalg.norm(refined_points, axis=1, keepdims=True)
++                return refined_points
++        except Exception:
++            pass
++    
++    return best_points if best_points is not None else np.random.randn(14, 3)
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,268 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import njit
+import random
+import time
+from typing import List, Tuple
+
+@njit
+def compute_convolution_norms_numba(f_values: List[float], domain_length: float = 0.5) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version with correct piecewise linear integration.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size, dtype=np.float64)
+
+    # Compute autoconvolution - JIT compiled loop with proper dx scaling
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Contribution scaled by dx for proper integration
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms using trapezoidal rule for ||g||₂²
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)  
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2_numba(f_values: List[float]) -> float:
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+
+    # Avoid division by zero with small epsilon
+    epsilon = 1e-15
+    if g1 <= epsilon or ginf <= epsilon:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+
+def construct_multiscale_gaussian_pattern(n: int) -> List[float]:
+    """
+    Construct a step function using multi-scale Gaussian patterns.
+    Creates a hierarchy of Gaussian bumps with varying scales and amplitudes.
+    """
+    # Create base pattern with multiple Gaussian components
+    pattern = np.zeros(n, dtype=np.float64)
+
+    # Define multiple scales for the Gaussian bumps
+    scales = [n//8, n//16, n//32, n//64]  # Different scale levels
+    scales = [s for s in scales if s >= 2]  # Filter out too small scales
+
+    # Create Gaussian bumps at different locations and scales
+    for i, scale in enumerate(scales):
+        # Position the bump in the middle of the function
+        center = n // 2 + (i - len(scales)//2) * n // 8
+        center = max(scale, min(n - scale, center))  # Bound to valid range
+
+        # Create Gaussian with decreasing amplitude for smaller scales
+        amplitude = 1.0 / (i + 1)  # Smaller scales have lower amplitude
+
+        # Generate Gaussian curve
+        x = np.arange(n, dtype=np.float64)
+        gaussian = amplitude * np.exp(-0.5 * ((x - center) / scale)**2)
+
+        # Add to pattern
+        pattern += gaussian
+
+    # Ensure non-negativity and normalize
+    pattern = np.maximum(pattern, 0)
+
+    # Add some random variation to avoid being too deterministic
+    noise_factor = 0.1
+    noise = np.random.normal(0, noise_factor * np.std(pattern), n)
+    pattern = np.maximum(pattern + noise, 0)
+
+    # Convert to list and return
+    return pattern.tolist()
+
+def adaptive_gradient_local_search(start_point: List[float], max_evals: int = 100) -> Tuple[List[float], float]:
+    """
+    Adaptive local search using gradient estimation and coordinate-wise refinement
+    """
+    x0 = np.array(start_point, dtype=np.float64)
+    n = len(x0)
+    
+    # Initialize with current point
+    current_x = x0.copy()
+    current_c2 = compute_c2_numba(current_x.tolist())
+    
+    # Cache recent function evaluations to avoid recomputation
+    eval_cache = {}
+    
+    def cached_c2(x_tuple):
+        if x_tuple in eval_cache:
+            return eval_cache[x_tuple]
+        result = compute_c2_numba(list(x_tuple))
+        eval_cache[x_tuple] = result
+        return result
+
+    # Main optimization loop
+    iterations = 0
+    prev_c2 = current_c2 - 1e-10  # Initialize to force first iteration
+    tolerance = 1e-8
+    max_iterations = min(max_evals, 100)
+    
+    while iterations < max_iterations and abs(current_c2 - prev_c2) > tolerance:
+        prev_c2 = current_c2
+        improved = False
+        
+        # Try to estimate gradient for each variable
+        for i in range(n):
+            # Estimate gradient using finite differences
+            eps = 1e-4
+            if current_x[i] > 0:
+                # Forward difference
+                temp_x_plus = current_x.copy()
+                temp_x_plus[i] = max(0, current_x[i] + eps)
+                c2_plus = cached_c2(tuple(temp_x_plus))
+                
+                # Backward difference  
+                temp_x_minus = current_x.copy()
+                temp_x_minus[i] = max(0, current_x[i] - eps)
+                c2_minus = cached_c2(tuple(temp_x_minus))
+                
+                # Gradient estimate
+                grad_estimate = (c2_plus - c2_minus) / (2 * eps)
+                
+                # Move in direction of gradient if positive
+                if grad_estimate > 0:
+                    step_size = 0.01 * (1.0 + random.random() * 0.5)
+                    new_x = current_x.copy()
+                    new_x[i] = max(0, current_x[i] + step_size * grad_estimate)
+                    new_c2 = cached_c2(tuple(new_x))
+                    
+                    if new_c2 > current_c2:
+                        current_x = new_x
+                        current_c2 = new_c2
+                        improved = True
+        
+        # If no gradient-based improvement, try random perturbations
+        if not improved:
+            for i in range(min(5, n)):  # Try up to 5 dimensions
+                if random.random() < 0.3:  # 30% chance to perturb
+                    idx = random.randint(0, n-1)
+                    delta = (random.random() - 0.5) * 0.05 * current_x[idx]
+                    current_x[idx] = max(0, current_x[idx] + delta)
+                    current_c2 = cached_c2(tuple(current_x))
+                    improved = True
+        
+        iterations += 1
+
+    return current_x.tolist(), current_c2
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value using hybrid approach."""
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Use a fixed number of steps for reproducibility and efficiency
+    n_steps = 1000  # Increased from previous to improve resolution
+
+    # Start with a multi-scale Gaussian pattern that often produces good results
+    # This provides a more complex initial structure than simple ramps
+    f_values = construct_multiscale_gaussian_pattern(n_steps)
+
+    # Normalize to reasonable values to avoid extreme peaks that could hurt C2
+    total_area = sum(f_values) * (0.5 / n_steps)
+    if total_area > 0:
+        f_values = [x / total_area * 2.0 for x in f_values]
+
+    # Apply smoothing to make the function less sensitive to small perturbations
+    # This helps avoid getting trapped in poor local optima
+    smoothed_f = []
+    for i in range(len(f_values)):
+        # Simple averaging with neighbors to smooth the function
+        left = max(0, i - 1)
+        right = min(len(f_values), i + 2)
+        avg = sum(f_values[left:right]) / (right - left)
+        smoothed_f.append(avg)
+    f_values = smoothed_f
+
+    # Now refine using adaptive local search with gradient estimation
+    best_f = f_values.copy()
+    best_c2 = compute_c2_numba(best_f)
+
+    # Adaptive local search parameters - tuned for speed and effectiveness
+    max_iterations = 50  # Reduced to stay within time limits
+    improvement_threshold = 0.001
+    patience = 8
+
+    # Track recent improvements for adaptive behavior
+    recent_improvements = []
+    current_patience = 0
+
+    # Perform adaptive local optimization
+    for iteration in range(max_iterations):
+        # Try small random modifications with adaptive strategy
+        test_f = best_f.copy()
+
+        # Modify a few random positions with adaptive strategy
+        num_modifications = max(1, min(20, len(test_f) // 15))  # Adjusted based on performance
+        
+        if len(recent_improvements) > 5:
+            avg_improvement = np.mean(recent_improvements[-5:])
+            # Reduce modifications if we're making slow progress
+            if avg_improvement < improvement_threshold * 0.1:
+                num_modifications = max(1, num_modifications // 2)
+
+        mod_indices = np.random.choice(len(test_f), num_modifications, replace=False)
+        for idx in mod_indices:
+            # Add small random change with bounded support
+            change = np.random.normal(0, 0.05 * best_f[idx] if best_f[idx] > 0 else 0.05)
+            test_f[idx] = max(0, test_f[idx] + change)  # Ensure non-negativity
+
+        # Evaluate and accept improvement
+        test_c2 = compute_c2_numba(test_f)
+        improvement = test_c2 - best_c2
+
+        if test_c2 > best_c2:
+            best_c2 = test_c2
+            best_f = test_f
+            recent_improvements.append(improvement)
+            current_patience = 0
+        else:
+            current_patience += 1
+            recent_improvements.append(improvement)
+
+        # Early stopping if no significant improvement for several iterations
+        if current_patience >= patience:
+            break
+
+    # Final refinement using gradient-based local search for maximum precision
+    try:
+        final_f, final_c2 = adaptive_gradient_local_search(best_f, max_evals=50)
+        if final_c2 > best_c2:
+            best_f = final_f
+            best_c2 = final_c2
+    except:
+        pass
+
+    return best_f
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

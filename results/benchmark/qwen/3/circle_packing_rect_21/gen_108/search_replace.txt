@@ -1,0 +1,262 @@
+<NAME>
+add_gradient_based_local_search
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses gradient-free optimization approaches like random perturbations. I'll implement a gradient-based local search that computes approximate gradients to guide circle movements more efficiently. This approach leverages the fact that for circle packing problems, we can compute directional derivatives of the radius constraints with respect to position changes, allowing for more informed and faster convergence towards optimal solutions.
+
+The key insight is to compute how much we can increase a circle's radius by moving it in various directions, then use this information to make more strategic updates rather than purely random moves.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement with adaptive parameters"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes and parameters that change during optimization
+        initial_step_size = 0.05
+        min_step_size = 0.001
+        step_reduction_factor = 0.95
+        adaptive_threshold = 0.01  # Threshold to decide whether to reduce step size
+
+        for iter_num in range(iterations):
+            # Dynamic step size reduction
+            step_size = max(min_step_size, initial_step_size * (step_reduction_factor ** (iter_num // 5)))
+
+            # Adaptive iteration control
+            if iter_num > 0 and abs(current_sum - calculate_radius_sum(current)) < adaptive_threshold:
+                step_size *= 0.7  # Reduce step size if little improvement seen
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Better perturbation strategy with direction awareness
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Multiple perturbation strategies
+                test_moves = []
+
+                # Base Gaussian perturbations
+                test_moves.append((step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)))
+                test_moves.append((step_size * random.gauss(0, 1), 0))
+                test_moves.append((0, step_size * random.gauss(0, 1)))
+
+                # Coordinate-specific perturbations
+                test_moves.append((step_size * random.uniform(-1, 1), 0))
+                test_moves.append((0, step_size * random.uniform(-1, 1)))
+
+                # Small random moves
+                test_moves.append((random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)))
+
+                # No move (baseline)
+                test_moves.append((0, 0))
+
+                # More focused perturbations in later iterations
+                if iter_num > iterations // 3:
+                    # Add more precise movement directions
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                        (step_size, step_size),
+                        (-step_size, -step_size),
+                    ])
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+
+                    # Perturb radius with more sophisticated approach
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.03, 0.03)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+        return current
+=======
+    def compute_radius_gradient(circles: np.ndarray, idx: int, rect_width: float, rect_height: float) -> Tuple[float, float]:
+        """Compute approximate gradient of radius with respect to position"""
+        x, y, r = circles[idx]
+
+        # Compute boundary gradients
+        d_bound_dx = 1.0 if x < rect_width - x else -1.0
+        d_bound_dy = 1.0 if y < rect_height - y else -1.0
+
+        # Compute neighbor gradients
+        d_neighbor_dx = 0.0
+        d_neighbor_dy = 0.0
+        min_dist_to_neighbor = float('inf')
+
+        for i in range(len(circles)):
+            if i != idx:
+                ex, ey, er = circles[i]
+                dx = x - ex
+                dy = y - ey
+                dist = math.sqrt(dx*dx + dy*dy)
+                if dist > 0.0001:
+                    # Compute derivative of distance w.r.t. x and y
+                    d_dist_dx = dx / dist if dist > 0 else 0.0
+                    d_dist_dy = dy / dist if dist > 0 else 0.0
+
+                    # Derivative of (dist - er) w.r.t. x and y
+                    d_neighbor_dx += d_dist_dx
+                    d_neighbor_dy += d_dist_dy
+
+                    # Track minimum distance
+                    if dist - er < min_dist_to_neighbor:
+                        min_dist_to_neighbor = dist - er
+
+        # For simplicity, use the gradient from closest neighbors
+        # In practice, we'd want to compute this more precisely
+        return d_neighbor_dx, d_neighbor_dy
+
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement with adaptive parameters and gradient-based moves"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes and parameters that change during optimization
+        initial_step_size = 0.05
+        min_step_size = 0.001
+        step_reduction_factor = 0.95
+        adaptive_threshold = 0.01  # Threshold to decide whether to reduce step size
+
+        for iter_num in range(iterations):
+            # Dynamic step size reduction
+            step_size = max(min_step_size, initial_step_size * (step_reduction_factor ** (iter_num // 5)))
+
+            # Adaptive iteration control
+            if iter_num > 0 and abs(current_sum - calculate_radius_sum(current)) < adaptive_threshold:
+                step_size *= 0.7  # Reduce step size if little improvement seen
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Better perturbation strategy with direction awareness
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Multiple perturbation strategies
+                test_moves = []
+
+                # Base Gaussian perturbations
+                test_moves.append((step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)))
+                test_moves.append((step_size * random.gauss(0, 1), 0))
+                test_moves.append((0, step_size * random.gauss(0, 1)))
+
+                # Coordinate-specific perturbations
+                test_moves.append((step_size * random.uniform(-1, 1), 0))
+                test_moves.append((0, step_size * random.uniform(-1, 1)))
+
+                # Small random moves
+                test_moves.append((random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)))
+
+                # No move (baseline)
+                test_moves.append((0, 0))
+
+                # More focused perturbations in later iterations
+                if iter_num > iterations // 3:
+                    # Add more precise movement directions
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                        (step_size, step_size),
+                        (-step_size, -step_size),
+                    ])
+
+                # Add gradient-based moves in later iterations
+                if iter_num > iterations // 2:
+                    try:
+                        grad_x, grad_y = compute_radius_gradient(current, i, rect_width, rect_height)
+                        # Move in direction that maximizes radius increase (opposite of gradient)
+                        norm = math.sqrt(grad_x*grad_x + grad_y*grad_y)
+                        if norm > 0.001:
+                            # Scale gradient to step size
+                            scale = step_size / norm
+                            test_moves.append((-grad_x * scale, -grad_y * scale))
+                    except:
+                        pass
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+
+                    # Perturb radius with more sophisticated approach
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.03, 0.03)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+        return current
+>>>>>>> REPLACE
+</DIFF>

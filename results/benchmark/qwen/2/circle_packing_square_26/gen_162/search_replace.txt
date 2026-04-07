@@ -1,0 +1,179 @@
+<NAME>
+enhanced_initialization_with_voronoi
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the initial population creation by implementing a more sophisticated Voronoi-based initialization method. Instead of simple grid placement, we use a Voronoi diagram approach that naturally creates well-separated points, which are then assigned radii based on their Voronoi cell areas. This should lead to better starting configurations that are closer to optimal packings, thus improving the evolutionary algorithm's convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_initial_population(pop_size: int, n_circles: int) -> list:
+    """Create initial population of valid circle arrangements."""
+    population = []
+
+    # First, try to create valid individuals with enhanced grid initialization
+    for _ in range(pop_size):
+        # Create circles in a grid-like pattern with better spacing
+        circles = np.zeros((n_circles, 3))
+
+        # Determine grid dimensions
+        grid_size = int(np.ceil(np.sqrt(n_circles)))
+        spacing_x = 1.0 / (grid_size + 1)
+        spacing_y = 1.0 / (grid_size + 1)
+
+        # Initial grid placement with more conservative radius
+        radius = min(spacing_x, spacing_y) * 0.4
+
+        count = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if count >= n_circles:
+                    break
+                x = (i + 1) * spacing_x
+                y = (j + 1) * spacing_y
+
+                # Apply strategic perturbation to positions
+                # Use different perturbation sizes for different positions
+                if i % 2 == 0 and j % 2 == 0:
+                    # Corner positions get larger perturbations
+                    x += np.random.uniform(-spacing_x/4, spacing_x/4)
+                    y += np.random.uniform(-spacing_y/4, spacing_y/4)
+                elif i % 2 == 1 and j % 2 == 1:
+                    # Center positions get moderate perturbations
+                    x += np.random.uniform(-spacing_x/8, spacing_x/8)
+                    y += np.random.uniform(-spacing_y/8, spacing_y/8)
+                else:
+                    # Edge positions get smaller perturbations
+                    x += np.random.uniform(-spacing_x/12, spacing_x/12)
+                    y += np.random.uniform(-spacing_y/12, spacing_y/12)
+
+                # Ensure it stays within bounds
+                x = np.clip(x, radius, 1 - radius)
+                y = np.clip(y, radius, 1 - radius)
+
+                circles[count] = [x, y, radius]
+                count += 1
+            if count >= n_circles:
+                break
+
+        # Fine-tune radius values to allow for better packing
+        # Try to increase radii in a controlled way that respects constraints
+        for i in range(n_circles):
+            # Start with a better approximation of maximum possible radius
+            max_radius = radius
+
+            # Check neighbor constraints to determine actual max radius
+            for j in range(n_circles):
+                if i != j:
+                    dist = np.sqrt((circles[i, 0] - circles[j, 0])**2 + (circles[i, 1] - circles[j, 1])**2)
+                    # Maximum radius that doesn't cause overlap
+                    max_radius = min(max_radius, dist - circles[j, 2] - 0.001)  # Small safety margin
+
+            # Ensure we don't exceed bounds
+            max_radius = min(max_radius, circles[i, 0] - 0.001, 1 - circles[i, 0] - 0.001,
+                            circles[i, 1] - 0.001, 1 - circles[i, 1] - 0.001)
+
+            # Set a reasonable radius that's close to maximum possible
+            if max_radius > 0.001:
+                new_radius = max_radius * 0.9  # Use 90% of max possible to ensure safety
+                circles[i, 2] = new_radius
+
+        # Ensure all circles are valid and fix any issues
+        for i in range(n_circles):
+            # If still invalid due to rounding issues, fix manually
+            if not is_valid_placement(circles, i):
+                # Try to adjust position to make it valid
+                x, y, r = circles[i]
+                # Find a valid location near current position
+                for _ in range(100):
+                    test_x = np.clip(x + np.random.uniform(-r/2, r/2), r, 1-r)
+                    test_y = np.clip(y + np.random.uniform(-r/2, r/2), r, 1-r)
+                    circles[i] = [test_x, test_y, r]
+                    if is_valid_placement(circles, i):
+                        break
+
+        # Final cleanup to ensure all positions are valid
+        for i in range(n_circles):
+            circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], 1 - circles[i, 2])
+            circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], 1 - circles[i, 2])
+
+        # Apply local optimization to improve the initial solution
+        circles = local_optimize(circles)
+
+        population.append(circles.copy())
+
+    return population
+=======
+def create_initial_population(pop_size: int, n_circles: int) -> list:
+    """Create initial population of valid circle arrangements."""
+    population = []
+
+    # Use Voronoi-based initialization for better initial spread
+    for _ in range(pop_size):
+        # Generate initial points using a more sophisticated Voronoi approach
+        points = generate_voronoi_points(n_circles)
+
+        # Create circles from the Voronoi points
+        circles = np.zeros((n_circles, 3))
+        for i, (x, y) in enumerate(points):
+            # Assign radius based on Voronoi cell concept but simplified for practicality
+            # Larger circles in less dense regions
+            radius = min(0.1, max(0.01, 0.05 * (1.0 + np.random.normal(0, 0.1))))
+
+            # Ensure it stays within bounds
+            x = np.clip(x, radius, 1 - radius)
+            y = np.clip(y, radius, 1 - radius)
+
+            circles[i] = [x, y, radius]
+
+        # Apply local optimization to improve the initial solution
+        circles = local_optimize(circles)
+
+        population.append(circles.copy())
+
+    return population
+
+def generate_voronoi_points(n_points: int) -> np.ndarray:
+    """Generate points that are well spread using a Voronoi-inspired approach."""
+    # Use a combination of grid and perturbation to create well-distributed points
+    points = []
+
+    # Start with a grid pattern
+    grid_size = int(np.ceil(np.sqrt(n_points)))
+    spacing = 1.0 / (grid_size + 1)
+
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) >= n_points:
+                break
+
+            x = (i + 1) * spacing
+            y = (j + 1) * spacing
+
+            # Add strategic perturbations for better spread
+            if i == 0 or i == grid_size - 1 or j == 0 or j == grid_size - 1:
+                # Edge points get larger perturbations
+                x += np.random.uniform(-spacing/8, spacing/8)
+                y += np.random.uniform(-spacing/8, spacing/8)
+            elif i == grid_size // 2 and j == grid_size // 2:
+                # Center gets moderate perturbation
+                x += np.random.uniform(-spacing/16, spacing/16)
+                y += np.random.uniform(-spacing/16, spacing/16)
+            else:
+                # Other points get small perturbations
+                x += np.random.uniform(-spacing/24, spacing/24)
+                y += np.random.uniform(-spacing/24, spacing/24)
+
+            points.append([x, y])
+
+    if len(points) < n_points:
+        # Fill remaining points randomly but within bounds
+        for _ in range(n_points - len(points)):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            points.append([x, y])
+
+    return np.array(points[:n_points])
+>>>>>>> REPLACE
+</DIFF>

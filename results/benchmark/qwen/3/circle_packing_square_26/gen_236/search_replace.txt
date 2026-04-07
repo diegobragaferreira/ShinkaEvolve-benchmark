@@ -1,0 +1,191 @@
+<NAME>
+adaptive_penalty_scaling
+</NAME>
+
+<DESCRIPTION>
+The current penalty implementation uses a simple progressive scaling factor that linearly increases with generation. This doesn't adequately reflect the changing difficulty of the optimization problem as we approach the optimal solution. I'll implement a more sophisticated penalty scaling that adapts based on:
+1. How close we are to the benchmark score
+2. The stability of the population (how much fitness is changing)
+3. The severity of constraint violations
+
+This should help the algorithm focus more on constraint enforcement in later generations when the solution quality approaches the benchmark, rather than applying uniform penalty scaling.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_penalty(circles: np.ndarray, generation: int = 0, total_generations: int = 100) -> float:
+    """Compute penalty based on constraint violations with progressive scaling."""
+    penalty = 0.0
+
+    # Dynamic penalty scaling factor
+    penalty_scale = 1.0 + (generation / total_generations) * 5.0
+
+    # Check containment violations with scaled penalties
+    for x, y, r in circles:
+        # Boundary violations
+        if x - r < 0:
+            penalty += (abs(x - r) ** 2) * 10000 * penalty_scale
+        elif x + r > 1:
+            penalty += (abs(x + r - 1) ** 2) * 10000 * penalty_scale
+        if y - r < 0:
+            penalty += (abs(y - r) ** 2) * 10000 * penalty_scale
+        elif y + r > 1:
+            penalty += (abs(y + r - 1) ** 2) * 10000 * penalty_scale
+
+    # Check overlap violations with scaled penalties
+    if check_overlap_efficient(circles):
+        penalty += 10000000.0 * penalty_scale
+
+    return penalty
+=======
+def compute_penalty(circles: np.ndarray, generation: int = 0, total_generations: int = 100,
+                   population_fitness: float = 0.0, prev_fitness: float = 0.0) -> float:
+    """Compute penalty based on constraint violations with adaptive scaling."""
+    penalty = 0.0
+
+    # Adaptive penalty scaling based on multiple factors
+    # 1. Generation progress (linear as before)
+    progress_factor = 1.0 + (generation / total_generations) * 5.0
+
+    # 2. Progress toward benchmark
+    benchmark_target = 2.6358627564136983
+    current_best = population_fitness
+    target_progress = min(1.0, current_best / benchmark_target)
+
+    # 3. Population stability (how much fitness has changed)
+    fitness_change = abs(population_fitness - prev_fitness) if prev_fitness > 0 else 0.0
+    stability_factor = 1.0 + min(1.0, fitness_change * 10.0)
+
+    # Combine factors for dynamic penalty scaling
+    penalty_scale = progress_factor * (1.0 + target_progress * 2.0) * stability_factor
+
+    # Check containment violations with scaled penalties
+    for x, y, r in circles:
+        # Boundary violations
+        if x - r < 0:
+            penalty += (abs(x - r) ** 2) * 10000 * penalty_scale
+        elif x + r > 1:
+            penalty += (abs(x + r - 1) ** 2) * 10000 * penalty_scale
+        if y - r < 0:
+            penalty += (abs(y - r) ** 2) * 10000 * penalty_scale
+        elif y + r > 1:
+            penalty += (abs(y + r - 1) ** 2) * 10000 * penalty_scale
+
+    # Check overlap violations with scaled penalties
+    if check_overlap_efficient(circles):
+        penalty += 10000000.0 * penalty_scale
+
+    return penalty
+>>>>>>> REPLACE
+
+</DIFF>
+
+<NAME>
+enhanced_fitness_evaluation
+</NAME>
+
+<DESCRIPTION>
+I'll modify the fitness evaluation to make better use of the penalty system by tracking previous fitness values and passing them into the penalty calculation. This allows for more informed penalty adjustments that respond to the optimization dynamics.
+
+The key change is to modify the fitness evaluation to track the previous best fitness and pass it to the penalty calculation for better adaptive behavior.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(circles: np.ndarray, generation: int = 0, total_generations: int = 100) -> float:
+    """Evaluate fitness of a circle configuration."""
+    # If invalid, heavily penalize
+    if not check_containment(circles) or check_overlap_efficient(circles):
+        penalty = compute_penalty(circles, generation, total_generations)
+        return -penalty
+
+    # Otherwise, return total radius
+    total_radius = np.sum(circles[:, 2])
+    return total_radius
+=======
+def evaluate_fitness(circles: np.ndarray, generation: int = 0, total_generations: int = 100,
+                    prev_fitness: float = 0.0, population_fitness: float = 0.0) -> float:
+    """Evaluate fitness of a circle configuration."""
+    # If invalid, heavily penalize
+    if not check_containment(circles) or check_overlap_efficient(circles):
+        penalty = compute_penalty(circles, generation, total_generations, population_fitness, prev_fitness)
+        return -penalty
+
+    # Otherwise, return total radius
+    total_radius = np.sum(circles[:, 2])
+    return total_radius
+>>>>>>> REPLACE
+
+</DIFF>
+
+<NAME>
+improved_population_tracking
+</NAME>
+
+<DESCRIPTION>
+The main evolution loop needs to track previous fitness values to enable the adaptive penalty system. I'll modify the evolution loop to keep track of the best fitness from the previous generation and pass this information through to the fitness evaluation functions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Evolution loop
+    for gen in range(GENERATIONS):
+        # Selection, crossover, and mutation
+        new_population = []
+
+        for _ in range(POPULATION_SIZE):
+            # Tournament selection
+            parent1 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+            parent2 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate(child, gen, GENERATIONS)
+
+            new_population.append(child)
+
+        # Evaluate new population
+        population = np.array(new_population)
+        fitnesses = [evaluate_fitness(individual, gen, GENERATIONS) for individual in population]
+
+        # Print progress
+        best_fitness = max(fitnesses)
+        if gen % 25 == 0:
+            print(f"Generation {gen}: Best fitness = {best_fitness}")
+=======
+    # Evolution loop
+    prev_best_fitness = 0.0
+    for gen in range(GENERATIONS):
+        # Selection, crossover, and mutation
+        new_population = []
+
+        for _ in range(POPULATION_SIZE):
+            # Tournament selection
+            parent1 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+            parent2 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate(child, gen, GENERATIONS)
+
+            new_population.append(child)
+
+        # Evaluate new population
+        population = np.array(new_population)
+        # Pass previous best fitness to enable adaptive penalty calculation
+        fitnesses = [evaluate_fitness(individual, gen, GENERATIONS, prev_best_fitness, np.max(fitnesses)) for individual in population]
+
+        # Print progress
+        best_fitness = max(fitnesses)
+        if gen % 25 == 0:
+            print(f"Generation {gen}: Best fitness = {best_fitness}")
+
+        # Update previous best fitness for next iteration
+        prev_best_fitness = best_fitness
+>>>>>>> REPLACE
+
+</DIFF>

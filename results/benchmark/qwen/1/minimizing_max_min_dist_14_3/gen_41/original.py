@@ -1,0 +1,93 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist, squareform
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        """Objective function to maximize min/max distance ratio"""
+        # Reshape x into 14 points of 3D coordinates
+        points = x.reshape(-1, 3)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -np.inf
+
+        # Return negative because we want to maximize (min/max ratio)
+        # We negate because scipy minimizes by default
+        return -d_min / d_max
+
+    def constraint_bounds(x):
+        """Ensure points stay within [0,1]^3 bounds"""
+        points = x.reshape(-1, 3)
+        # Check that all coordinates are within [0,1]
+        return np.concatenate([points.min(axis=0), 1 - points.max(axis=0)])
+
+    # Set up optimization problem
+    n_points = 14
+    n_vars = n_points * 3  # 14 points * 3 coordinates each
+
+    # Bounds for each coordinate: [0, 1]
+    bounds = [(0, 1) for _ in range(n_vars)]
+
+    # Initial guess - use a more structured initial arrangement
+    np.random.seed(42)
+    initial_guess = np.random.rand(n_vars)
+
+    # For better results, try multiple starting points
+    best_result = None
+    best_ratio = -np.inf
+
+    # Try several random initializations
+    for i in range(5):
+        np.random.seed(42 + i)
+        x0 = np.random.rand(n_vars)
+
+        # Optimize
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42 + i,
+            maxiter=1000,
+            popsize=15,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            callback=None
+        )
+
+        # Check if this is better than our current best
+        if -result.fun > best_ratio:
+            best_ratio = -result.fun
+            best_result = result
+
+    # If we found a solution, return the optimized points
+    if best_result is not None:
+        points = best_result.x.reshape(-1, 3)
+        # Ensure points are within bounds
+        points = np.clip(points, 0, 1)
+        return points
+    else:
+        # Fallback to random initialization if optimization failed
+        np.random.seed(42)
+        return np.random.rand(14, 3)
+
+
+# EVOLVE-BLOCK-END

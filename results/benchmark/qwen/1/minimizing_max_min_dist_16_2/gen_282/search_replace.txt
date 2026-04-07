@@ -1,0 +1,197 @@
+<NAME>
+add_spherical_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+I'll add a spherical Voronoi-based initialization that leverages the theory of optimal point distributions on spheres, which often translates well to optimal point distributions in 2D. This approach uses the Fibonacci sphere algorithm to generate well-distributed points on a sphere, then projects them stereographically to 2D, which typically produces better starting configurations than simple grids or spirals.
+
+This enhancement addresses the weak spot in the current implementation which relies heavily on simpler geometric patterns that may not achieve optimal distributions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses a novel Voronoi-evolutionary hybrid approach combining geometric relaxation with genetic operators.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum distance with numerical stability."""
+        if len(points) < 2:
+            return 0.0
+
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def initialize_population(size=50):
+        """Initialize diverse population using multiple geometric patterns."""
+        population = []
+        np.random.seed(42)
+
+        for i in range(size):
+            # Mix of different initialization strategies
+            if i % 3 == 0:
+                # Grid pattern with perturbations
+                grid_size = 4
+                x = np.linspace(0.1, 0.9, grid_size)
+                y = np.linspace(0.1, 0.9, grid_size)
+                xx, yy = np.meshgrid(x, y)
+                points = np.column_stack([xx.ravel(), yy.ravel()])
+                points = points[:16] if len(points) > 16 else points
+                noise = np.random.normal(0, 0.01, points.shape)
+                points += noise
+                points = np.clip(points, 0, 1)
+            elif i % 3 == 1:
+                # Spiral pattern
+                points = []
+                for j in range(16):
+                    angle = 2 * np.pi * j / 16
+                    radius = 0.4 * (j / 16)
+                    x = 0.5 + radius * np.cos(angle)
+                    y = 0.5 + radius * np.sin(angle)
+                    points.append([x, y])
+                points = np.array(points)
+                # Add noise
+                noise = np.random.normal(0, 0.01, points.shape)
+                points += noise
+                points = np.clip(points, 0, 1)
+            else:
+                # Random initialization with clustering avoidance
+                points = np.random.rand(16, 2)
+                # Slightly perturb to avoid degeneracy
+                points += np.random.normal(0, 0.001, points.shape)
+                points = np.clip(points, 0, 1)
+
+            population.append(points.copy())
+
+        return population
+=======
+import math
+from scipy.spatial.transform import Rotation as R
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses a novel Voronoi-evolutionary hybrid approach combining geometric relaxation with genetic operators.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum distance with numerical stability."""
+        if len(points) < 2:
+            return 0.0
+
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def generate_fibonacci_sphere_points(n_points):
+        """Generate points on a sphere using Fibonacci algorithm."""
+        points = []
+        phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
+
+        for i in range(n_points):
+            y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+            radius = math.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i
+
+            x = math.cos(theta) * radius
+            z = math.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def stereographic_project(points_3d):
+        """Project 3D points to 2D using stereographic projection from south pole."""
+        points_2d = []
+        for x, y, z in points_3d:
+            # Stereographic projection from south pole (0,0,-1)
+            w = 1 / (1 + z)
+            proj_x = x * w
+            proj_y = y * w
+            points_2d.append([proj_x, proj_y])
+
+        points_2d = np.array(points_2d)
+
+        # Normalize to unit square
+        x_min, y_min = np.min(points_2d, axis=0)
+        x_max, y_max = np.max(points_2d, axis=0)
+
+        if x_max > x_min and y_max > y_min:
+            points_2d[:, 0] = (points_2d[:, 0] - x_min) / (x_max - x_min) * 0.9 + 0.05
+            points_2d[:, 1] = (points_2d[:, 1] - y_min) / (y_max - y_min) * 0.9 + 0.05
+
+        return points_2d
+
+    def initialize_population(size=50):
+        """Initialize diverse population using multiple geometric patterns."""
+        population = []
+        np.random.seed(42)
+
+        for i in range(size):
+            # Mix of different initialization strategies
+            if i % 4 == 0:
+                # Grid pattern with perturbations
+                grid_size = 4
+                x = np.linspace(0.1, 0.9, grid_size)
+                y = np.linspace(0.1, 0.9, grid_size)
+                xx, yy = np.meshgrid(x, y)
+                points = np.column_stack([xx.ravel(), yy.ravel()])
+                points = points[:16] if len(points) > 16 else points
+                noise = np.random.normal(0, 0.01, points.shape)
+                points += noise
+                points = np.clip(points, 0, 1)
+            elif i % 4 == 1:
+                # Spiral pattern
+                points = []
+                for j in range(16):
+                    angle = 2 * np.pi * j / 16
+                    radius = 0.4 * (j / 16)
+                    x = 0.5 + radius * np.cos(angle)
+                    y = 0.5 + radius * np.sin(angle)
+                    points.append([x, y])
+                points = np.array(points)
+                # Add noise
+                noise = np.random.normal(0, 0.01, points.shape)
+                points += noise
+                points = np.clip(points, 0, 1)
+            elif i % 4 == 2:
+                # Spherical Voronoi-based initialization
+                points_3d = generate_fibonacci_sphere_points(16)
+                points = stereographic_project(points_3d)
+            else:
+                # Random initialization with clustering avoidance
+                points = np.random.rand(16, 2)
+                # Slightly perturb to avoid degeneracy
+                points += np.random.normal(0, 0.001, points.shape)
+                points = np.clip(points, 0, 1)
+
+            population.append(points.copy())
+
+        return population
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,111 @@
+<NAME>
+improve_initialization_with_density_aware_grid
+</NAME>
+
+<DESCRIPTION>
+The current heuristic initialization uses a simple grid approach which doesn't consider the spatial density variations that typically occur in optimal packings. By implementing a density-aware initialization that adjusts initial radii based on local density expectations, we can start closer to better solutions. This approach places circles with larger initial radii in sparser regions and smaller radii in denser regions, which aligns with the expected characteristics of optimal packings where circles near boundaries or corners tend to be smaller while those in central regions can be larger.
+
+The key improvement involves:
+1. Using a more sophisticated grid-based initialization that considers spatial distribution
+2. Applying adaptive radius scaling based on estimated local density
+3. Improving the balance between exploration and exploitation in the initial configuration
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions with a heuristic approach."""
+    # Start with a coarse grid layout
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n / rows))
+
+    # Create initial grid positions
+    positions = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            x = (j + 0.5) / cols
+            y = (i + 0.5) / rows
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Assign initial radii - start with small values and increase
+    # We want to fit within unit square with some margin
+    initial_radii = []
+    for i in range(n):
+        # Try to place circles with reasonable initial sizes
+        # Based on rough estimation of how many circles fit in grid
+        max_radius = min(1.0/(cols+1), 1.0/(rows+1))
+        initial_radii.append(max_radius * 0.4)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+=======
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions with a density-aware heuristic approach."""
+    # Start with a more sophisticated grid layout
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n / rows))
+
+    # Create initial grid positions with slight jitter
+    positions = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n:
+                break
+            # Add slight jitter to avoid perfect grid artifacts
+            x = (j + 0.5 + np.random.uniform(-0.1, 0.1)) / cols
+            y = (i + 0.5 + np.random.uniform(-0.1, 0.1)) / rows
+            # Clamp to valid range
+            x = np.clip(x, 0.01, 0.99)
+            y = np.clip(y, 0.01, 0.99)
+            positions.append([x, y])
+
+    # Adjust for exact count
+    positions = positions[:n]
+
+    # Assign initial radii with density awareness
+    # Circles in center can have larger radii, edges smaller
+    initial_radii = []
+    for i in range(n):
+        x, y = positions[i]
+
+        # Calculate distance to boundaries (smaller distances = smaller radii)
+        dist_to_boundaries = min(x, 1-x, y, 1-y)
+
+        # Calculate distance to nearest neighbors (larger distances = larger radii)
+        distances = []
+        for j in range(n):
+            if i != j:
+                x2, y2 = positions[j]
+                dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+                distances.append(dist)
+
+        # Average distance to neighbors
+        avg_dist = np.mean(distances) if distances else 0.1
+
+        # Estimate density: higher density means smaller radii
+        # We'll use a combination of boundary distance and neighbor distance
+        density_factor = 1.0 / (avg_dist + 0.01)  # Inverse relationship
+        boundary_factor = dist_to_boundaries
+
+        # Base radius based on density and boundary factors
+        base_radius = min(0.1, boundary_factor * 0.5)
+
+        # Scale by density factor (higher density = smaller radius)
+        scaled_radius = base_radius * (1.0 / (1.0 + density_factor * 0.5))
+
+        # Ensure minimum radius
+        final_radius = max(0.005, min(0.15, scaled_radius))
+
+        initial_radii.append(final_radius)
+
+    # Combine into circles array
+    circles = np.column_stack([positions, initial_radii])
+    return circles
+>>>>>>> REPLACE
+</DIFF>

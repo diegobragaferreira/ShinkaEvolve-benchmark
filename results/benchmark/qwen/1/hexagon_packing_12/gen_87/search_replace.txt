@@ -1,0 +1,311 @@
+<NAME>
+add_parallel_constraint_checking
+</NAME>
+
+<DESCRIPTION>
+The current implementation performs constraint checking sequentially, which becomes a bottleneck as the optimization progresses. I'll implement parallel constraint checking for both containment and overlap validation to significantly speed up the evaluation process. This follows the same pattern used in the previous generations that achieved better performance through parallelization of geometric operations.
+
+The key insight is to leverage joblib's parallel processing capabilities to check all containment and overlap constraints simultaneously rather than sequentially, which should provide substantial performance gains during the evolutionary optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+
+class HexagonGeometry:
+    """Handles all geometric computations related to hexagons."""
+
+    def __init__(self):
+        self._base_vertices = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+    @staticmethod
+    @jit(nopython=True)
+    def vertices(x, y, angle_deg, side_length=1):
+        """Compute vertices of a hexagon given center, rotation, and side length."""
+        angle_rad = np.radians(angle_deg)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+
+        base_verts = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+        rotated_verts = np.empty_like(base_verts)
+        for i in range(6):
+            x_orig, y_orig = base_verts[i]
+            rotated_verts[i] = [
+                x + side_length * (x_orig * cos_a - y_orig * sin_a),
+                y + side_length * (x_orig * sin_a + y_orig * cos_a)
+            ]
+
+        return rotated_verts
+
+    @staticmethod
+    @jit(nopython=True)
+    def is_point_inside_hexagon(px, py, hx, hy, angle_deg, side_length=1):
+        """Fast point-in-hexagon test using winding number approach."""
+        vertices = HexagonGeometry.vertices(hx, hy, angle_deg, side_length)
+        n = len(vertices)
+        inside = False
+        p1x, p1y = vertices[0]
+        for i in range(1, n + 1):
+            p2x, p2y = vertices[i % n]
+            if py > min(p1y, p2y):
+                if py <= max(p1y, p2y):
+                    if px <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or px <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+
+class HexagonConstraintValidator:
+    """Validates spatial constraints for hexagon arrangements."""
+
+    def __init__(self, geom_handler):
+        self.geom = geom_handler
+
+    def check_containment(self, inner_hex_data, outer_radius):
+        """Check if all inner hexagons are contained within outer hexagon."""
+        outer_hex_vertices = self.geom.vertices(0, 0, 0, outer_radius)
+        outer_polygon = Polygon(outer_hex_vertices)
+
+        for i in range(len(inner_hex_data)):
+            x, y, angle = inner_hex_data[i]
+            inner_vertices = self.geom.vertices(x, y, angle)
+            inner_polygon = Polygon(inner_vertices)
+
+            # Early exit if any hexagon is not contained
+            if not outer_polygon.contains(inner_polygon):
+                return False
+        return True
+
+    def compute_overlap_penalty(self, inner_hex_data):
+        """Compute penalty based on overlap areas."""
+        penalty = 0.0
+        n = len(inner_hex_data)
+
+        # Pre-compute polygons for efficiency
+        polygons = []
+        for i in range(n):
+            x, y, angle = inner_hex_data[i]
+            vertices = self.geom.vertices(x, y, angle)
+            polygons.append(Polygon(vertices))
+
+        # Check all pairs for overlaps
+        for i in range(n):
+            for j in range(i+1, n):
+                if polygons[i].intersects(polygons[j]) and not polygons[i].touches(polygons[j]):
+                    try:
+                        overlap = polygons[i].intersection(polygons[j])
+                        if hasattr(overlap, 'area') and overlap.area > 0:
+                            penalty += overlap.area
+                    except:
+                        penalty += 1000  # Large penalty for calculation errors
+
+        return penalty
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+
+class HexagonGeometry:
+    """Handles all geometric computations related to hexagons."""
+
+    def __init__(self):
+        self._base_vertices = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+    @staticmethod
+    @jit(nopython=True)
+    def vertices(x, y, angle_deg, side_length=1):
+        """Compute vertices of a hexagon given center, rotation, and side length."""
+        angle_rad = np.radians(angle_deg)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+
+        base_verts = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+        rotated_verts = np.empty_like(base_verts)
+        for i in range(6):
+            x_orig, y_orig = base_verts[i]
+            rotated_verts[i] = [
+                x + side_length * (x_orig * cos_a - y_orig * sin_a),
+                y + side_length * (x_orig * sin_a + y_orig * cos_a)
+            ]
+
+        return rotated_verts
+
+    @staticmethod
+    @jit(nopython=True)
+    def is_point_inside_hexagon(px, py, hx, hy, angle_deg, side_length=1):
+        """Fast point-in-hexagon test using winding number approach."""
+        vertices = HexagonGeometry.vertices(hx, hy, angle_deg, side_length)
+        n = len(vertices)
+        inside = False
+        p1x, p1y = vertices[0]
+        for i in range(1, n + 1):
+            p2x, p2y = vertices[i % n]
+            if py > min(p1y, p2y):
+                if py <= max(p1y, p2y):
+                    if px <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or px <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+
+class HexagonConstraintValidator:
+    """Validates spatial constraints for hexagon arrangements."""
+
+    def __init__(self, geom_handler):
+        self.geom = geom_handler
+
+    def check_containment_parallel(self, inner_hex_data, outer_radius, n_jobs=-1):
+        """Parallel check if all inner hexagons are contained within outer hexagon."""
+        outer_hex_vertices = self.geom.vertices(0, 0, 0, outer_radius)
+        outer_polygon = Polygon(outer_hex_vertices)
+
+        def check_single_containment(i):
+            x, y, angle = inner_hex_data[i]
+            inner_vertices = self.geom.vertices(x, y, angle)
+            inner_polygon = Polygon(inner_vertices)
+            return outer_polygon.contains(inner_polygon) or outer_polygon.covers(inner_polygon)
+
+        # Use parallel processing for containment checks
+        containment_results = Parallel(n_jobs=n_jobs)(
+            delayed(check_single_containment)(i) for i in range(len(inner_hex_data))
+        )
+
+        return all(containment_results)
+
+    def compute_overlap_penalty_parallel(self, inner_hex_data, n_jobs=-1):
+        """Compute penalty based on overlap areas using parallel processing."""
+        penalty = 0.0
+        n = len(inner_hex_data)
+
+        # Pre-compute polygons for efficiency
+        def create_polygon(i):
+            x, y, angle = inner_hex_data[i]
+            vertices = self.geom.vertices(x, y, angle)
+            return Polygon(vertices)
+
+        # Create all polygons in parallel
+        polygons = Parallel(n_jobs=n_jobs)(
+            delayed(create_polygon)(i) for i in range(n)
+        )
+
+        # Check all pairs for overlaps in parallel
+        def check_overlap_pair(indices):
+            i, j = indices
+            poly_i, poly_j = polygons[i], polygons[j]
+            if poly_i.intersects(poly_j) and not poly_i.touches(poly_j):
+                try:
+                    overlap = poly_i.intersection(poly_j)
+                    if hasattr(overlap, 'area') and overlap.area > 0:
+                        return overlap.area
+                except:
+                    return 1000  # Large penalty for calculation errors
+            return 0.0
+
+        # Check overlaps in parallel
+        overlap_pairs = [(i, j) for i in range(n) for j in range(i+1, n)]
+        overlap_results = Parallel(n_jobs=n_jobs)(
+            delayed(check_overlap_pair)(pair) for pair in overlap_pairs
+        )
+
+        # Sum all overlap areas
+        penalty = sum(overlap_results)
+        return penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_configuration(self, params):
+        """Evaluate a configuration for validity and quality."""
+        try:
+            # Extract inner hexagon data and outer radius
+            inner_hex_data = params[:-1].reshape(12, 3)
+            outer_hex_side_length = params[-1]
+
+            # Check containment early (fast check)
+            if not self.validator.check_containment(inner_hex_data, outer_hex_side_length):
+                return 1e10  # Large penalty for containment violation
+
+            # Compute overlap penalty
+            overlap_penalty = self.validator.compute_overlap_penalty(inner_hex_data)
+
+            if overlap_penalty > 0:
+                return overlap_penalty * 10000  # Apply penalty for overlaps
+
+            # If valid, return inverse of outer hexagon side length (negative for minimization)
+            return -1.0 / outer_hex_side_length
+
+        except Exception as e:
+            # In case of any computation error, return large penalty
+            return 1e10
+=======
+    def evaluate_configuration(self, params):
+        """Evaluate a configuration for validity and quality."""
+        try:
+            # Extract inner hexagon data and outer radius
+            inner_hex_data = params[:-1].reshape(12, 3)
+            outer_hex_side_length = params[-1]
+
+            # Check containment early (fast check) - now parallel
+            if not self.validator.check_containment_parallel(inner_hex_data, outer_hex_side_length):
+                return 1e10  # Large penalty for containment violation
+
+            # Compute overlap penalty - now parallel
+            overlap_penalty = self.validator.compute_overlap_penalty_parallel(inner_hex_data)
+
+            if overlap_penalty > 0:
+                return overlap_penalty * 10000  # Apply penalty for overlaps
+
+            # If valid, return inverse of outer hexagon side length (negative for minimization)
+            return -1.0 / outer_hex_side_length
+
+        except Exception as e:
+            # In case of any computation error, return large penalty
+            return 1e10
+>>>>>>> REPLACE
+</DIFF>

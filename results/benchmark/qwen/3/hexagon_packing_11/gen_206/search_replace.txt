@@ -1,0 +1,385 @@
+<NAME>
+improve_initialization_and_local_optimization
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the hexagon packing algorithm by improving both the initial configuration generation and the local optimization strategy. The key improvements are:
+
+1. Replace the simple heuristic initialization with a more sophisticated hierarchical tiling approach that better respects geometric constraints
+2. Enhance the local optimization to use multiple refinement stages with adaptive parameters based on convergence behavior
+3. Add geometric validation during the evolutionary process to filter out invalid individuals early
+
+These changes should help achieve better packing densities and more robust convergence toward the optimal solution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_hierarchical_initial_config(self, max_radius: float = 10.0) -> np.ndarray:
+        """Generate a hierarchical initial configuration based on hexagonal tiling pattern"""
+        # Create a structured layout that respects geometric constraints
+        # Based on a 3x4 lattice with some geometric optimization
+
+        # Calculate spacing based on hexagon geometry
+        # Distance between centers of adjacent hexagons is 2 (unit hexagons)
+        spacing = 2.0
+
+        # Create a more sophisticated initial layout
+        # Central hexagon plus surrounding ones arranged in layers
+        config = []
+
+        # Central hexagon
+        config.append([0.0, 0.0, 0.0])
+
+        # First ring around center (6 hexagons)
+        for i in range(6):
+            angle = i * 60  # 60 degree increments
+            x = spacing * np.cos(np.radians(angle))
+            y = spacing * np.sin(np.radians(angle))
+            config.append([x, y, 0.0])
+
+        # Second ring (12 hexagons)
+        for i in range(12):
+            angle = i * 30  # 30 degree increments
+            # Place at greater distance
+            distance = 2 * spacing
+            x = distance * np.cos(np.radians(angle))
+            y = distance * np.sin(np.radians(angle))
+            config.append([x, y, 0.0])
+
+        # Trim to exactly 11 hexagons and add small perturbations for diversity
+        if len(config) > 11:
+            config = config[:11]
+        elif len(config) < 11:
+            # Fill remaining slots with random positions but keep structure
+            for i in range(11 - len(config)):
+                x = np.random.uniform(-max_radius/2, max_radius/2)
+                y = np.random.uniform(-max_radius/2, max_radius/2)
+                angle = np.random.uniform(0, 360)
+                config.append([x, y, angle])
+
+        # Add small random perturbations to avoid degenerate cases
+        result = np.array(config)
+        for i in range(len(result)):
+            # Small random displacements
+            result[i][0] += np.random.normal(0, 0.1)
+            result[i][1] += np.random.normal(0, 0.1)
+            # Random rotations
+            result[i][2] += np.random.normal(0, 10)
+            result[i][2] = result[i][2] % 360
+
+        return result
+=======
+    def generate_hierarchical_initial_config(self, max_radius: float = 10.0) -> np.ndarray:
+        """Generate a hierarchical initial configuration based on hexagonal tiling pattern"""
+        # Create a structured layout that respects geometric constraints
+        # Using a more systematic approach for optimal hexagon placement
+
+        # Start with a hexagonal lattice arrangement
+        # Hexagon centers form a triangular lattice with spacing of 2 units
+        config = []
+
+        # Central hexagon
+        config.append([0.0, 0.0, 0.0])
+
+        # First ring (6 hexagons) - spaced at distance 2
+        for i in range(6):
+            angle = i * 60  # 60 degree increments
+            x = 2.0 * np.cos(np.radians(angle))
+            y = 2.0 * np.sin(np.radians(angle))
+            config.append([x, y, 0.0])
+
+        # Second ring (12 hexagons) - spaced at distance 4
+        for i in range(12):
+            angle = i * 30  # 30 degree increments for second ring
+            distance = 4.0
+            x = distance * np.cos(np.radians(angle))
+            y = distance * np.sin(np.radians(angle))
+            config.append([x, y, 0.0])
+
+        # Third ring (18 hexagons) - spaced at distance 6, but we'll only need 11-1-6=4 more
+        # Actually, let's just trim to 11 hexagons and make it more strategic
+
+        # Trim to exactly 11 hexagons using the most effective arrangement
+        if len(config) > 11:
+            # Keep central, first ring, and some from second ring
+            config = [config[0]] + config[1:7] + config[7:11]  # Take first 6 from ring 1, and 4 from ring 2
+            config = config[:11]
+        else:
+            # Fill up to 11 with carefully chosen positions
+            while len(config) < 11:
+                # Add positions along the outer ring of existing hexagons
+                # This ensures good coverage without creating overlaps
+                config.append([np.random.uniform(-max_radius/2, max_radius/2),
+                              np.random.uniform(-max_radius/2, max_radius/2),
+                              np.random.uniform(0, 360)])
+
+        # Add small random perturbations to escape local minima
+        result = np.array(config)
+        for i in range(len(result)):
+            # Add slightly larger perturbations to encourage diversity
+            result[i][0] += np.random.normal(0, 0.3)
+            result[i][1] += np.random.normal(0, 0.3)
+            result[i][2] += np.random.normal(0, 20)  # Larger angle variations
+            result[i][2] = result[i][2] % 360
+
+        return result
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_local(self, individual: np.ndarray, outer_radius: float) -> np.ndarray:
+        """Refine solution locally using optimization"""
+        def objective(params):
+            # Reshape params back to hexagon data
+            new_data = individual.copy()
+            for i in range(len(new_data)):
+                new_data[i][0] = params[i*3]
+                new_data[i][1] = params[i*3+1]
+                new_data[i][2] = params[i*3+2]
+
+            # Convert to hexagon objects for evaluation
+            hexagons = self.create_hexagons_from_array(new_data)
+
+            # Evaluate fitness
+            fitness = self.evaluator.evaluate_fitness(hexagons, outer_radius)
+            return -fitness  # minimize negative fitness
+
+        # Flatten the data for optimization
+        initial_params = []
+        for i in range(len(individual)):
+            initial_params.extend([individual[i][0], individual[i][1], individual[i][2]])
+
+        # Optimize using L-BFGS-B
+        try:
+            result = minimize(objective, initial_params, method='L-BFGS-B',
+                            bounds=[(-10, 10), (-10, 10), (0, 360)] * len(individual),
+                            options={'maxiter': 100})
+            if result.success:
+                # Reshape optimized result back
+                refined_data = individual.copy()
+                for i in range(len(refined_data)):
+                    refined_data[i][0] = result.x[i*3]
+                    refined_data[i][1] = result.x[i*3+1]
+                    refined_data[i][2] = result.x[i*3+2]
+                return refined_data
+        except:
+            pass
+        return individual
+=======
+    def optimize_local(self, individual: np.ndarray, outer_radius: float) -> np.ndarray:
+        """Refine solution locally using multi-stage optimization with adaptive parameters"""
+        def objective(params):
+            # Reshape params back to hexagon data
+            new_data = individual.copy()
+            for i in range(len(new_data)):
+                new_data[i][0] = params[i*3]
+                new_data[i][1] = params[i*3+1]
+                new_data[i][2] = params[i*3+2]
+
+            # Convert to hexagon objects for evaluation
+            hexagons = self.create_hexagons_from_array(new_data)
+
+            # Evaluate fitness
+            fitness = self.evaluator.evaluate_fitness(hexagons, outer_radius)
+            return -fitness  # minimize negative fitness
+
+        # Flatten the data for optimization
+        initial_params = []
+        for i in range(len(individual)):
+            initial_params.extend([individual[i][0], individual[i][1], individual[i][2]])
+
+        # Multi-stage optimization with adaptive parameters
+        # Stage 1: Coarse optimization
+        try:
+            result1 = minimize(objective, initial_params, method='L-BFGS-B',
+                             bounds=[(-10, 10), (-10, 10), (0, 360)] * len(individual),
+                             options={'maxiter': 50})
+
+            if result1.success:
+                # Stage 2: Fine-grained optimization with tighter bounds
+                refined_params = result1.x.copy()
+                result2 = minimize(objective, refined_params, method='L-BFGS-B',
+                                 bounds=[(-5, 5), (-5, 5), (0, 360)] * len(individual),
+                                 options={'maxiter': 75})
+
+                if result2.success:
+                    # Stage 3: Very fine-grained optimization
+                    final_params = result2.x.copy()
+                    result3 = minimize(objective, final_params, method='L-BFGS-B',
+                                     bounds=[(-2, 2), (-2, 2), (0, 360)] * len(individual),
+                                     options={'maxiter': 100})
+
+                    if result3.success:
+                        # Reshape optimized result back
+                        refined_data = individual.copy()
+                        for i in range(len(refined_data)):
+                            refined_data[i][0] = result3.x[i*3]
+                            refined_data[i][1] = result3.x[i*3+1]
+                            refined_data[i][2] = result3.x[i*3+2]
+                        return refined_data
+                    else:
+                        # If stage 3 fails, return stage 2 result
+                        refined_data = individual.copy()
+                        for i in range(len(refined_data)):
+                            refined_data[i][0] = result2.x[i*3]
+                            refined_data[i][1] = result2.x[i*3+1]
+                            refined_data[i][2] = result2.x[i*3+2]
+                        return refined_data
+                else:
+                    # If stage 2 fails, return stage 1 result
+                    refined_data = individual.copy()
+                    for i in range(len(refined_data)):
+                        refined_data[i][0] = result1.x[i*3]
+                        refined_data[i][1] = result1.x[i*3+1]
+                        refined_data[i][2] = result1.x[i*3+2]
+                    return refined_data
+        except:
+            pass
+        # Fallback to original individual if optimization fails
+        return individual
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_evolutionary_local_search(self,
+                                         initial_config: np.ndarray,
+                                         max_generations: int = 50,
+                                         population_size: int = 30,
+                                         mutation_rate: float = 0.1,
+                                         local_optimization_frequency: int = 5) -> tuple[np.ndarray, float]:
+        """Adaptive evolutionary-local optimization loop with alternating refinement levels"""
+        # Generate initial population
+        population = [initial_config]  # Start with our heuristic config
+        population.extend(self.generate_initial_population(population_size - 1))
+
+        best_fitness = -np.inf
+        best_config = None
+        best_radius = 10.0
+
+        for gen in range(max_generations):
+            # Evaluate fitness of population
+            fitness_scores = []
+            for individual in population:
+                hexagons = self.create_hexagons_from_array(individual)
+                radius = self.find_optimal_radius(hexagons)
+                fitness = self.evaluator.evaluate_fitness(hexagons, radius)
+                fitness_scores.append(fitness)
+
+            # Update best solution
+            max_idx = np.argmax(fitness_scores)
+            if fitness_scores[max_idx] > best_fitness:
+                best_fitness = fitness_scores[max_idx]
+                best_config = population[max_idx].copy()
+                best_radius = self.find_optimal_radius(self.create_hexagons_from_array(best_config))
+
+            # Perform local optimization periodically to refine the best solution
+            if gen % local_optimization_frequency == 0 and best_config is not None:
+                refined_config = self.optimize_local(best_config, best_radius)
+                refined_hexagons = self.create_hexagons_from_array(refined_config)
+                refined_radius = self.find_optimal_radius(refined_hexagons)
+                refined_fitness = self.evaluator.evaluate_fitness(refined_hexagons, refined_radius)
+
+                if refined_fitness > best_fitness:
+                    best_fitness = refined_fitness
+                    best_config = refined_config
+                    best_radius = refined_radius
+
+            # Selection and reproduction
+            sorted_indices = np.argsort(fitness_scores)[::-1][:population_size//2]
+            selected = [population[i] for i in sorted_indices]
+
+            # Generate new population
+            new_population = selected.copy()
+            for _ in range(population_size - len(selected)):
+                parent1 = selected[np.random.randint(len(selected))]
+                parent2 = selected[np.random.randint(len(selected))]
+                child = self.crossover_individuals(parent1, parent2)
+                child = self.mutate_individual(child, mutation_rate)
+                new_population.append(child)
+
+            population = new_population
+
+        return best_config, best_radius
+=======
+    def adaptive_evolutionary_local_search(self,
+                                         initial_config: np.ndarray,
+                                         max_generations: int = 50,
+                                         population_size: int = 30,
+                                         mutation_rate: float = 0.1,
+                                         local_optimization_frequency: int = 5) -> tuple[np.ndarray, float]:
+        """Adaptive evolutionary-local optimization loop with alternating refinement levels"""
+        # Generate initial population
+        population = [initial_config]  # Start with our heuristic config
+        population.extend(self.generate_initial_population(population_size - 1))
+
+        best_fitness = -np.inf
+        best_config = None
+        best_radius = 10.0
+
+        for gen in range(max_generations):
+            # Evaluate fitness of population with validation
+            fitness_scores = []
+            valid_individuals = []
+
+            for individual in population:
+                hexagons = self.create_hexagons_from_array(individual)
+
+                # Quick geometric validation to filter out obviously invalid configurations
+                if self.evaluator.check_overlap(hexagons):
+                    fitness_scores.append(-np.inf)  # Penalize overlaps severely
+                    continue
+
+                radius = self.find_optimal_radius(hexagons)
+                fitness = self.evaluator.evaluate_fitness(hexagons, radius)
+                fitness_scores.append(fitness)
+                valid_individuals.append(individual)
+
+            # Update best solution
+            if len(fitness_scores) > 0:
+                max_idx = np.argmax(fitness_scores)
+                if fitness_scores[max_idx] > best_fitness:
+                    best_fitness = fitness_scores[max_idx]
+                    best_config = population[max_idx].copy()
+                    best_radius = self.find_optimal_radius(self.create_hexagons_from_array(best_config))
+
+            # Perform local optimization periodically to refine the best solution
+            if gen % local_optimization_frequency == 0 and best_config is not None:
+                refined_config = self.optimize_local(best_config, best_radius)
+                refined_hexagons = self.create_hexagons_from_array(refined_config)
+                refined_radius = self.find_optimal_radius(refined_hexagons)
+                refined_fitness = self.evaluator.evaluate_fitness(refined_hexagons, refined_radius)
+
+                if refined_fitness > best_fitness:
+                    best_fitness = refined_fitness
+                    best_config = refined_config
+                    best_radius = refined_radius
+
+            # Selection and reproduction
+            if len(fitness_scores) > 0:
+                sorted_indices = np.argsort(fitness_scores)[::-1][:population_size//2]
+                selected = [population[i] for i in sorted_indices if fitness_scores[i] > -np.inf]
+            else:
+                selected = []
+
+            # Generate new population - keep a mix of elite and new individuals
+            new_population = selected.copy()
+            for _ in range(population_size - len(selected)):
+                if len(selected) > 0:
+                    parent1 = selected[np.random.randint(len(selected))]
+                    parent2 = selected[np.random.randint(len(selected))]
+                    child = self.crossover_individuals(parent1, parent2)
+                    child = self.mutate_individual(child, mutation_rate)
+                else:
+                    # If no valid individuals, create completely new individuals
+                    child = self.generate_initial_population(1)[0]
+                new_population.append(child)
+
+            population = new_population
+
+        return best_config, best_radius
+>>>>>>> REPLACE
+</DIFF>

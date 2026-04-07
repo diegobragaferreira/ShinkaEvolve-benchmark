@@ -1,0 +1,92 @@
+<NAME>
+optimize_step_function_with_gradient_free_optimization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a simple hill-climbing approach for refinement, which is limited in its ability to escape local optima. I'll implement a more sophisticated gradient-free optimization approach using differential evolution for the peak refinement phase, which should better explore the parameter space and potentially find higher C₂ values than the current local search method.
+
+This change focuses on replacing the simple multi-pass refinement with a more robust global optimization technique that can better handle the non-convex nature of the C₂ optimization problem while staying within the 90-second time constraint.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def refine_function_spectral_guided(initial_func: List[float], n_steps: int) -> List[float]:
+    """
+    Multi-scale refinement approach guided by spectral properties.
+    """
+    x = np.linspace(-0.25, 0.25, n_steps)
+    current_func = np.array(initial_func)
+
+    # Multi-pass refinement with decreasing step sizes
+    for pass_num in range(3):
+        # Pass 1: Large adjustments
+        if pass_num == 0:
+            step_size = 0.05
+            iterations = 100
+        # Pass 2: Medium adjustments
+        elif pass_num == 1:
+            step_size = 0.02
+            iterations = 50
+        # Pass 3: Fine adjustments
+        else:
+            step_size = 0.01
+            iterations = 30
+
+        for _ in range(iterations):
+            test_func = current_func.copy()
+
+            # Select random index to adjust
+            idx = np.random.randint(0, len(test_func))
+            adjustment = np.random.normal(0, step_size)
+            test_func[idx] = max(0, test_func[idx] + adjustment)
+
+            # Test if improvement
+            if compute_c2(test_func) > compute_c2(current_func):
+                current_func = test_func.copy()
+
+    return current_func.tolist()
+=======
+def refine_function_spectral_guided(initial_func: List[float], n_steps: int) -> List[float]:
+    """
+    Global optimization refinement approach using differential evolution.
+    """
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Convert to array for easier manipulation
+    initial_array = np.array(initial_func)
+
+    # Define objective function for optimization
+    def objective(params):
+        # Reshape the flat parameters back to function values
+        func_values = np.array(params)
+        # Ensure non-negativity
+        func_values = np.maximum(func_values, 0)
+        return -compute_c2(func_values)  # Negative because we minimize
+
+    # Use differential evolution for global optimization
+    # Set bounds for each parameter (function values)
+    bounds = [(0, np.max(initial_array) * 3) for _ in range(len(initial_array))]
+
+    # Run differential evolution with appropriate settings for time constraints
+    try:
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=50,      # Limit iterations to stay within time constraints
+            popsize=10,      # Population size
+            mutation=(0.5, 1.0),  # Mutation factor
+            recombination=0.7,    # Crossover probability
+            seed=42,
+            polish=True,     # Improve final result
+            disp=False       # Suppress output
+        )
+
+        # Return the optimized function values
+        optimized_func = np.maximum(result.x, 0)
+        return optimized_func.tolist()
+
+    except Exception:
+        # Fallback to original if optimization fails
+        return initial_func
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,226 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,220 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from typing import Tuple
++import time
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
++
++def initialize_circles_greedy(n: int) -> np.ndarray:
++    """Initialize circles using a greedy approach prioritizing corner placements."""
++    circles = np.zeros((n, 3))
++
++    # Predefined corner and edge positions for initial placement
++    corner_positions = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
++    edge_positions = [(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)]
++
++    # Place first 8 circles at corners and edges
++    placed = 0
++    for x, y in corner_positions + edge_positions:
++        if placed < n:
++            # Initial radius is set to a reasonable fraction of unit square
++            max_radius = min(x, 1-x, y, 1-y)
++            circles[placed] = [x, y, max_radius * 0.4]
++            placed += 1
++
++    # Fill remaining positions with greedy placement
++    for i in range(placed, n):
++        best_radius = 0
++        best_x, best_y = 0.5, 0.5
++
++        # Try several candidate positions
++        candidates = []
++        for dx in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
++            for dy in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
++                candidates.append((dx, dy))
++
++        # Check each candidate position
++        for x, y in candidates:
++            if x <= 0.05 or x >= 0.95 or y <= 0.05 or y >= 0.95:
++                continue  # Skip positions too close to boundaries
++
++            max_radius = min(x, 1-x, y, 1-y)
++
++            # Check overlap with existing circles
++            valid_position = True
++            for j in range(i):
++                cx, cy, cr = circles[j]
++                distance_sq = (x - cx)**2 + (y - cy)**2
++                if distance_sq < (max_radius + cr)**2:
++                    valid_position = False
++                    break
++
++            if valid_position and max_radius > best_radius:
++                best_radius = max_radius
++                best_x, best_y = x, y
++
++        circles[i] = [best_x, best_y, best_radius]
++
++    return circles
++
++def is_valid_configuration(circles: np.ndarray) -> bool:
++    """Check if the configuration satisfies all constraints."""
++    n = len(circles)
++
++    # Check containment constraints
++    for i in range(n):
++        x, y, r = circles[i]
++        if r > x or r > 1-x or r > y or r > 1-y:
++            return False
++
++    # Check non-overlap constraints
++    for i in range(n):
++        for j in range(i+1, n):
++            x1, y1, r1 = circles[i]
++            x2, y2, r2 = circles[j]
++            distance_sq = (x1 - x2)**2 + (y1 - y2)**2
++            if distance_sq < (r1 + r2)**2:
++                return False
++
++    return True
++
++def calculate_fitness(circles: np.ndarray) -> float:
++    """Calculate fitness with penalty for constraint violations."""
++    total_radius = np.sum(circles[:, 2])
++
++    # Penalty for constraint violations
++    penalty = 0
++
++    # Containment penalty
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        if r > x or r > 1-x or r > y or r > 1-y:
++            # Quadratic penalty for constraint violations
++            penalty += 1000 * (r - x)**2 + 1000 * (r - (1-x))**2 + \
++                      1000 * (r - y)**2 + 1000 * (r - (1-y))**2
++
++    # Overlap penalty
++    for i in range(len(circles)):
++        for j in range(i+1, len(circles)):
++            x1, y1, r1 = circles[i]
++            x2, y2, r2 = circles[j]
++            distance_sq = (x1 - x2)**2 + (y1 - y2)**2
++            if distance_sq < (r1 + r2)**2:
++                overlap = (r1 + r2)**2 - distance_sq
++                penalty += 10000 * overlap
++
++    return total_radius - penalty
++
++def mutate_circles(circles: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
++    """Apply mutation to circle configuration."""
++    new_circles = circles.copy()
++
++    for i in range(len(circles)):
++        if np.random.random() < mutation_rate:
++            # Mutate position
++            new_circles[i, 0] += np.random.normal(0, 0.01)
++            new_circles[i, 1] += np.random.normal(0, 0.01)
++
++            # Ensure validity of new position
++            new_circles[i, 0] = np.clip(new_circles[i, 0], 0.01, 0.99)
++            new_circles[i, 1] = np.clip(new_circles[i, 1], 0.01, 0.99)
++
++            # Mutate radius
++            new_circles[i, 2] += np.random.normal(0, 0.005)
++            new_circles[i, 2] = max(0.001, new_circles[i, 2])  # Ensure positive radius
++
++    return new_circles
++
++def crossover_circles(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
++    """Perform crossover between two circle configurations."""
++    child = parent1.copy()
++    n = len(parent1)
++
++    # Single point crossover for positions and radii
++    crossover_point = np.random.randint(1, n)
++
++    # Crossover for positions and radii
++    for i in range(crossover_point, n):
++        child[i] = parent2[i]
++
++    return child
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
++    np.random.seed(42)  # For reproducibility
++
+     n = 32
+-    circles = np.zeros((n, 3))
+-
+-    return circles
++    max_generations = 1000
++    population_size = 50
++    elite_size = 5
++
++    # Initialize population with greedy starting points
++    population = []
++    for _ in range(population_size):
++        individual = initialize_circles_greedy(n)
++        population.append(individual)
++
++    best_fitness = -np.inf
++    best_individual = None
++
++    # Evolutionary algorithm
++    for generation in range(max_generations):
++        # Calculate fitness for all individuals
++        fitness_scores = []
++        for individual in population:
++            fitness = calculate_fitness(individual)
++            fitness_scores.append(fitness)
++
++            if fitness > best_fitness:
++                best_fitness = fitness
++                best_individual = individual.copy()
++
++        # Print progress every 100 generations
++        if generation % 100 == 0:
++            print(f"Generation {generation}: Best fitness = {best_fitness}")
++
++        # Sort population by fitness
++        sorted_indices = np.argsort(fitness_scores)[::-1]
++        population = [population[i] for i in sorted_indices]
++
++        # Keep elite individuals
++        new_population = population[:elite_size]
++
++        # Generate offspring through crossover and mutation
++        while len(new_population) < population_size:
++            # Tournament selection
++            parent1_idx = np.random.randint(0, population_size//2)
++            parent2_idx = np.random.randint(0, population_size//2)
++
++            parent1 = population[parent1_idx]
++            parent2 = population[parent2_idx]
++
++            # Crossover
++            child = crossover_circles(parent1, parent2)
++
++            # Mutation
++            child = mutate_circles(child)
++
++            new_population.append(child)
++
++        population = new_population
++
++    # Final validation and return
++    if best_individual is not None and is_valid_configuration(best_individual):
++        return best_individual
++    else:
++        # Return the best valid configuration found during evolution
++        for individual in population:
++            if is_valid_configuration(individual):
++                return individual
++        # If no valid configuration was found, return a default greedy configuration
++        return initialize_circles_greedy(n)
+ 
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,243 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import random
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Rectangle dimensions: width + height = 2
+    # Optimized aspect ratio based on experiments
+    rect_width = 1.3
+    rect_height = 0.7
+
+    n = 21
+
+    # Create fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define the bounds for each variable (x, y, r for each circle)
+    # Individual format: [cx1, cy1, r1, cx2, cy2, r2, ..., cxn, cyn, rn]
+    def create_individual():
+        individual = []
+        for i in range(n):
+            # Better initial positioning using hexagonal grid pattern
+            row = i // 5
+            col = i % 5
+            x = 0.1 + col * (rect_width - 0.2) / 4
+            y = 0.1 + row * (rect_height - 0.2) / 4
+            # Add slight randomization to avoid perfect grid
+            x += np.random.uniform(-0.02, 0.02)
+            y += np.random.uniform(-0.02, 0.02)
+            # Small initial radius
+            r = np.random.uniform(0.02, 0.08)
+            individual.extend([x, y, r])
+        return creator.Individual(individual)
+
+    def evaluate(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Calculate sum of radii (we want to maximize this)
+        total_radius = np.sum(circles[:, 2])
+
+        # Constraint penalty
+        penalty = 0
+
+        # Boundary constraints - stronger penalties for severe violations
+        for i in range(n):
+            cx, cy, r = circles[i]
+            # Penalty for going outside (stronger penalties for severe violations)
+            if cx - r < 0:
+                penalty += 10000 * (r - cx)**2
+            if cx + r > rect_width:
+                penalty += 10000 * (cx + r - rect_width)**2
+            if cy - r < 0:
+                penalty += 10000 * (r - cy)**2
+            if cy + r > rect_height:
+                penalty += 10000 * (cy + r - rect_height)**2
+
+        # Overlap constraints - more aggressive penalty for overlaps
+        # Use spatial indexing for efficient overlap checking
+        points = circles[:, :2]
+        tree = cKDTree(points)
+
+        # Find neighbors within a reasonable distance to avoid full pairwise comparison
+        # Using a small epsilon to avoid issues with identical points
+        pairs = tree.query_pairs(0.001, p=2)  # Very small distance threshold
+        for i, j in pairs:
+            if i < j:  # Only process each pair once
+                cx1, cy1, r1 = circles[i]
+                cx2, cy2, r2 = circles[j]
+
+                dist = np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+                overlap = (r1 + r2) - dist
+
+                if overlap > 0:  # Overlapping
+                    penalty += 50000 * overlap**2
+
+        # Return fitness (total radius minus penalty)
+        return (total_radius - penalty,)  # Return tuple
+
+    def adaptive_mutate(individual, generation, max_generations):
+        # Adaptive mutation rate that decreases over time
+        base_mutation_rate = 0.1
+        adaptive_rate = base_mutation_rate * (1.0 - generation / max_generations)
+        adaptive_rate = max(0.02, adaptive_rate)  # Minimum mutation rate
+
+        # Also adapt mutation strength based on generation
+        mutation_strength = 0.05 * (1.0 - generation / max_generations) + 0.005
+
+        # Mutate some genes with adaptive Gaussian noise
+        for i in range(len(individual)):
+            if random.random() < adaptive_rate:  # Adaptive mutation rate
+                if i % 3 == 2:  # Radius mutation
+                    individual[i] = max(0.001, individual[i] + random.gauss(0, mutation_strength))
+                else:  # Position mutation
+                    individual[i] = max(0.05, min(rect_width - 0.05 if i % 3 == 0 else rect_height - 0.05,
+                                                individual[i] + random.gauss(0, mutation_strength)))
+        return individual,
+
+    # Initialize population
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", tools.cxUniform, indpb=0.1)
+
+    # Create initial population
+    pop = toolbox.population(n=50)
+
+    # Statistics
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    # Custom evolutionary algorithm with adaptive parameters
+    try:
+        hof = tools.HallOfFame(1)
+
+        # Run evolution with adaptive parameters
+        max_generations = 100
+        prev_best_fitness = float('-inf')
+        consecutive_no_improvement = 0
+        max_no_improvement = 10
+
+        for gen in range(max_generations):
+            # Adjust selection pressure based on generation (more selective as evolution progresses)
+            if gen > max_generations * 0.6:
+                toolbox.register("select", tools.selTournament, tournsize=5)
+            elif gen > max_generations * 0.3:
+                toolbox.register("select", tools.selTournament, tournsize=4)
+            else:
+                toolbox.register("select", tools.selTournament, tournsize=3)
+
+            # Update mutation function with generation info
+            def adaptive_mutate_with_gen(individual):
+                return adaptive_mutate(individual, gen, max_generations)
+
+            toolbox.register("mutate", adaptive_mutate_with_gen)
+
+            # Run one generation
+            pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.3,
+                                             ngen=1, stats=stats, halloffame=hof, verbose=False)
+
+            # Early stopping if improvement is minimal
+            current_best_fitness = hof[0].fitness.values[0]
+            if current_best_fitness > prev_best_fitness:
+                prev_best_fitness = current_best_fitness
+                consecutive_no_improvement = 0
+            else:
+                consecutive_no_improvement += 1
+                if consecutive_no_improvement >= max_no_improvement:
+                    break
+
+        best_individual = hof[0]
+    except Exception as e:
+        # Fallback to optimized initial solution
+        print(f"Evolution failed: {e}")
+        best_individual = create_individual()
+
+    # Convert best individual to circles array
+    circles = np.array(best_individual).reshape(-1, 3)
+
+    # Local refinement to further optimize
+    max_refinement_iter = 100
+    for iteration in range(max_refinement_iter):
+        improved = False
+
+        # Try to increase each circle's radius
+        for i in range(n):
+            cx, cy, r = circles[i]
+
+            # Compute max allowable radius
+            max_radius = float('inf')
+
+            # Boundary constraints
+            max_radius = min(max_radius, cx)
+            max_radius = min(max_radius, rect_width - cx)
+            max_radius = min(max_radius, cy)
+            max_radius = min(max_radius, rect_height - cy)
+
+            # Overlap constraints with all other circles using spatial indexing
+            points = circles[:, :2]
+            tree = cKDTree(points)
+            # Query nearby points for more efficient overlap checking
+            neighbors = tree.query_ball_point([cx, cy], 2 * r, p=2)
+            for j in neighbors:
+                if i != j:
+                    other_cx, other_cy, other_r = circles[j]
+                    dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                    max_radius = min(max_radius, dist - other_r)
+
+            # Increase radius if beneficial
+            if max_radius > r and max_radius > 0:
+                # Try to increase radius by small amount
+                new_r = min(r + 0.005, max_radius)
+                # Check if the new radius is valid
+                valid = True
+                # Perform overlap validation with neighbor circles
+                for j in neighbors:
+                    if i != j:
+                        other_cx, other_cy, other_r = circles[j]
+                        dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                        if dist < new_r + other_r:
+                            valid = False
+                            break
+                if valid:
+                    circles[i, 2] = new_r
+                    improved = True
+
+        if not improved:
+            break
+
+    # Final check and correction
+    for i in range(n):
+        cx, cy, r = circles[i]
+        # Ensure radius is positive
+        circles[i, 2] = max(0.001, r)
+
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

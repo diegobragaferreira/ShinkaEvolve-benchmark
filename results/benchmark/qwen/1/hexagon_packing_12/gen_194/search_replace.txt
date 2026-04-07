@@ -1,0 +1,127 @@
+<NAME>
+add_bvh_acceleration
+</NAME>
+
+<DESCRIPTION>
+Adding a Bounding Volume Hierarchy (BVH) acceleration structure to improve overlap detection performance. This addresses the computational bottleneck in the overlap checking phase by using a hierarchical bounding volume structure that allows for faster neighbor queries and overlap detection compared to the current cKDTree approach. This is particularly important for the 12-hexagon case where we need to check many pairwise overlaps efficiently.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+from numba import jit, prange
+from joblib import Parallel, delayed
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+from numba import jit, prange
+from joblib import Parallel, delayed
+
+# BVH implementation for efficient spatial queries
+class BVHNode:
+    def __init__(self, bounds, objects=None, left=None, right=None):
+        self.bounds = bounds  # (min_x, min_y, max_x, max_y)
+        self.objects = objects or []
+        self.left = left
+        self.right = right
+        self.is_leaf = left is None and right is None
+
+    def get_bounds(self):
+        return self.bounds
+
+    def insert(self, obj, obj_bounds, max_objects_per_node=4):
+        # If leaf node and not full, add object
+        if self.is_leaf and len(self.objects) < max_objects_per_node:
+            self.objects.append((obj, obj_bounds))
+            return True
+
+        # If leaf node but full, subdivide
+        if self.is_leaf:
+            # Store existing objects
+            old_objects = self.objects[:]
+            self.objects = []
+            self.is_leaf = False
+
+            # Create children
+            mid_x = (self.bounds[0] + self.bounds[2]) / 2
+            mid_y = (self.bounds[1] + self.bounds[3]) / 2
+
+            self.left = BVHNode((self.bounds[0], self.bounds[1], mid_x, mid_y))
+            self.right = BVHNode((mid_x, mid_y, self.bounds[2], self.bounds[3]))
+
+            # Insert all existing objects
+            for old_obj, old_bounds in old_objects:
+                self.insert(old_obj, old_bounds, max_objects_per_node)
+
+            # Insert new object
+            return self.insert(obj, obj_bounds, max_objects_per_node)
+
+        # Not a leaf - recursively insert into appropriate child
+        left_bounds = self.left.get_bounds()
+        right_bounds = self.right.get_bounds()
+
+        # Simple heuristic: prefer insertion in the child that would require less expansion
+        left_area = (left_bounds[2] - left_bounds[0]) * (left_bounds[3] - left_bounds[1])
+        right_area = (right_bounds[2] - right_bounds[0]) * (right_bounds[3] - right_bounds[1])
+
+        if left_area < right_area:
+            if self.left.insert(obj, obj_bounds, max_objects_per_node):
+                return True
+            elif self.right.insert(obj, obj_bounds, max_objects_per_node):
+                return True
+        else:
+            if self.right.insert(obj, obj_bounds, max_objects_per_node):
+                return True
+            elif self.left.insert(obj, obj_bounds, max_objects_per_node):
+                return True
+
+        return False
+
+    def query(self, query_bounds):
+        """Query for objects intersecting with query_bounds"""
+        if not self._bounds_intersect(query_bounds):
+            return []
+
+        results = []
+
+        if self.is_leaf:
+            for obj, obj_bounds in self.objects:
+                if self._bounds_intersect(obj_bounds, query_bounds):
+                    results.append(obj)
+        else:
+            results.extend(self.left.query(query_bounds))
+            results.extend(self.right.query(query_bounds))
+
+        return results
+
+    def _bounds_intersect(self, bounds1, bounds2=None):
+        """Check if two bounding boxes intersect"""
+        if bounds2 is None:
+            bounds2 = self.bounds
+
+        return not (bounds1[2] < bounds2[0] or bounds1[0] > bounds2[2] or
+                   bounds1[3] < bounds2[1] or bounds1[1] > bounds2[3])
+
+    def update_bounds(self):
+        """Update bounding box to encompass all children"""
+        if not self.is_leaf:
+            left_bounds = self.left.update_bounds()
+            right_bounds = self.right.update_bounds()
+
+            self.bounds = (
+                min(left_bounds[0], right_bounds[0]),
+                min(left_bounds[1], right_bounds[1]),
+                max(left_bounds[2], right_bounds[2]),
+                max(left_bounds[3], right_bounds[3])
+            )
+
+        return self.bounds
+>>>>>>> REPLACE
+</DIFF>

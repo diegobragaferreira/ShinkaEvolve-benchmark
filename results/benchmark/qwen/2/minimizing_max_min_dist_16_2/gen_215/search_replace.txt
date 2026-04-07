@@ -1,0 +1,369 @@
+<NAME>
+add_symmetry_breaking_constraints
+</NAME>
+
+<DESCRIPTION>
+Adding symmetry-breaking constraints to avoid degenerate solutions and improve optimization convergence. The idea is to impose explicit constraints that force unique relative arrangements between points, such as fixing positions of corner points or enforcing specific ordering constraints. This addresses the issue of convergence to degenerate configurations that may trap the optimization process, helping escape symmetrically equivalent but suboptimal configurations. Specifically, I'll add constraints that fix the position of the bottom-left point and enforce lexicographic ordering of point coordinates to ensure each optimization path explores distinct solution spaces.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def __init__(self, num_points: int = 16, dimension: int = 2):
+        self.num_points = num_points
+        self.dimension = dimension
+        self.bounds = [(0.001, 0.999) for _ in range(num_points * dimension)]
+        self.max_evaluations = 10000
+=======
+    def __init__(self, num_points: int = 16, dimension: int = 2):
+        self.num_points = num_points
+        self.dimension = dimension
+        self.bounds = [(0.001, 0.999) for _ in range(num_points * dimension)]
+        self.max_evaluations = 10000
+        # Add symmetry-breaking constraints
+        self.symmetry_constraints = self._setup_symmetry_constraints()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_ratio(self, points: np.ndarray) -> Tuple[float, float, float]:
+        """Calculate min/max distance ratio along with actual values."""
+        if len(points) < 2:
+            return 0.0, 0.0, 0.0
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0, 0.0, 0.0
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return 0.0, min_dist, max_dist
+
+        ratio = min_dist / max_dist
+        return ratio, min_dist, max_dist
+=======
+    def _setup_symmetry_constraints(self):
+        """Setup symmetry-breaking constraints to avoid degenerate solutions."""
+        # Constraint functions for symmetry breaking:
+        # 1. Fix the bottom-left point to (0.001, 0.001)
+        # 2. Enforce lexicographic ordering of points to break permutation symmetry
+
+        def constraint1(x):
+            # Fix first point to be at bottom-left corner
+            points = x.reshape(-1, self.dimension)
+            return points[0, 0] - 0.001  # x-coordinate should be 0.001
+
+        def constraint2(x):
+            # Fix second point to be at bottom-left corner, but slightly offset
+            points = x.reshape(-1, self.dimension)
+            return points[0, 1] - 0.001  # y-coordinate should be 0.001
+
+        def constraint3(x):
+            # Ensure first point is lexicographically smaller than second point
+            points = x.reshape(-1, self.dimension)
+            return points[0, 0] - points[1, 0]  # First point's x should be <= second point's x
+
+        def constraint4(x):
+            # Lexicographic ordering by y coordinate when x coordinates are equal
+            points = x.reshape(-1, self.dimension)
+            if points[0, 0] == points[1, 0]:
+                return points[0, 1] - points[1, 1]
+            return 0.0
+
+        return [constraint1, constraint2, constraint3, constraint4]
+
+    def calculate_ratio(self, points: np.ndarray) -> Tuple[float, float, float]:
+        """Calculate min/max distance ratio along with actual values."""
+        if len(points) < 2:
+            return 0.0, 0.0, 0.0
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0, 0.0, 0.0
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return 0.0, min_dist, max_dist
+
+        ratio = min_dist / max_dist
+        return ratio, min_dist, max_dist
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_stage_optimization(self, x0: np.ndarray) -> Optional[np.ndarray]:
+        """Multi-stage optimization with adaptive approaches."""
+        try:
+            # Stage 1: Quick coarse optimization with L-BFGS-B
+            result1 = minimize(
+                self.objective_function,
+                x0,
+                method='L-BFGS-B',
+                bounds=self.bounds,
+                options={'maxiter': 100, 'ftol': 1e-6, 'gtol': 1e-4}
+            )
+
+            if result1.success:
+                # Stage 2: Refinement with SLSQP
+                refined_x = result1.x
+                result2 = minimize(
+                    self.objective_function,
+                    refined_x,
+                    method='SLSQP',
+                    bounds=self.bounds,
+                    options={'maxiter': 150}
+                )
+
+                if result2.success:
+                    return result2.x.reshape(-1, self.dimension)
+                else:
+                    # Fallback to the previous result
+                    return result1.x.reshape(-1, self.dimension)
+            else:
+                # Fallback to direct optimization with different method
+                result3 = minimize(
+                    self.objective_function,
+                    x0,
+                    method='TNC',
+                    bounds=self.bounds,
+                    options={'maxiter': 200}
+                )
+
+                if result3.success:
+                    return result3.x.reshape(-1, self.dimension)
+
+        except Exception as e:
+            # If all optimization fails, return original points
+            return x0.reshape(-1, self.dimension)
+
+        # Last resort - return original points
+        return x0.reshape(-1, self.dimension)
+=======
+    def multi_stage_optimization(self, x0: np.ndarray) -> Optional[np.ndarray]:
+        """Multi-stage optimization with adaptive approaches."""
+        try:
+            # Stage 1: Quick coarse optimization with L-BFGS-B
+            result1 = minimize(
+                self.objective_function,
+                x0,
+                method='L-BFGS-B',
+                bounds=self.bounds,
+                options={'maxiter': 100, 'ftol': 1e-6, 'gtol': 1e-4}
+            )
+
+            if result1.success:
+                # Stage 2: Refinement with SLSQP
+                refined_x = result1.x
+                # Add symmetry-breaking constraints to SLSQP
+                cons = [{'type': 'eq', 'fun': lambda x: x[0] - 0.001},  # Fix x of first point
+                        {'type': 'eq', 'fun': lambda x: x[1] - 0.001}]  # Fix y of first point
+
+                result2 = minimize(
+                    self.objective_function,
+                    refined_x,
+                    method='SLSQP',
+                    bounds=self.bounds,
+                    constraints=cons,
+                    options={'maxiter': 150}
+                )
+
+                if result2.success:
+                    return result2.x.reshape(-1, self.dimension)
+                else:
+                    # Fallback to the previous result
+                    return result1.x.reshape(-1, self.dimension)
+            else:
+                # Fallback to direct optimization with different method
+                result3 = minimize(
+                    self.objective_function,
+                    x0,
+                    method='TNC',
+                    bounds=self.bounds,
+                    options={'maxiter': 200}
+                )
+
+                if result3.success:
+                    return result3.x.reshape(-1, self.dimension)
+
+        except Exception as e:
+            # If all optimization fails, return original points
+            return x0.reshape(-1, self.dimension)
+
+        # Last resort - return original points
+        return x0.reshape(-1, self.dimension)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+        """Find best solution among all starting configurations with hierarchical multi-start optimization."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Hierarchical optimization approach:
+        # Phase 1: Coarse screening with fast optimization
+        coarse_configs = []
+        coarse_ratios = []
+
+        for i, config in enumerate(configs):
+            # Fast optimization for initial screening
+            try:
+                result = minimize(
+                    self.objective_function,
+                    config.flatten(),
+                    method='L-BFGS-B',
+                    bounds=self.bounds,
+                    options={'maxiter': 50, 'ftol': 1e-4, 'gtol': 1e-3}
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, self.dimension)
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+
+                    coarse_configs.append(optimized_points)
+                    coarse_ratios.append(ratio)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+            except Exception:
+                continue
+
+        # Phase 2: Adaptive refinement of top performers
+        if best_points is not None:
+            # Select top 3 configurations from coarse screening
+            top_indices = sorted(range(len(coarse_ratios)), key=lambda i: coarse_ratios[i], reverse=True)[:3]
+            top_configs = [coarse_configs[i] for i in top_indices]
+
+            # Thorough optimization of top performers
+            for config in top_configs:
+                refined_points = self.multi_stage_optimization(config.flatten())
+                if refined_points is not None:
+                    ratio, _, _ = self.calculate_ratio(refined_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = refined_points.copy()
+
+            # Phase 3: Local search around the best solution
+            # Use a more aggressive refinement strategy
+            local_configs = []
+
+            # Create diverse perturbations around the current best
+            for _ in range(8):
+                # Mix of different perturbation strategies
+                perturbation_type = np.random.choice(['uniform', 'gaussian', 'adaptive'])
+
+                if perturbation_type == 'uniform':
+                    perturbed = best_points + np.random.uniform(-0.02, 0.02, best_points.shape)
+                elif perturbation_type == 'gaussian':
+                    perturbed = best_points + np.random.normal(0, 0.015, best_points.shape)
+                else:  # adaptive
+                    perturbed = self.adaptive_perturbation(best_points, iteration=0)
+
+                perturbed = np.clip(perturbed, 0.001, 0.999)
+                local_configs.append(perturbed)
+
+            # Optimize the local configurations
+            for config in local_configs:
+                local_points = self.multi_stage_optimization(config.flatten())
+                if local_points is not None:
+                    ratio, _, _ = self.calculate_ratio(local_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = local_points.copy()
+
+        return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+=======
+    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+        """Find best solution among all starting configurations with hierarchical multi-start optimization."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Hierarchical optimization approach:
+        # Phase 1: Coarse screening with fast optimization
+        coarse_configs = []
+        coarse_ratios = []
+
+        for i, config in enumerate(configs):
+            # Fast optimization for initial screening
+            try:
+                # Add symmetry-breaking constraints for better convergence
+                cons = [{'type': 'eq', 'fun': lambda x: x[0] - 0.001},  # Fix x of first point
+                        {'type': 'eq', 'fun': lambda x: x[1] - 0.001}]  # Fix y of first point
+                result = minimize(
+                    self.objective_function,
+                    config.flatten(),
+                    method='L-BFGS-B',
+                    bounds=self.bounds,
+                    constraints=cons,
+                    options={'maxiter': 50, 'ftol': 1e-4, 'gtol': 1e-3}
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, self.dimension)
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+
+                    coarse_configs.append(optimized_points)
+                    coarse_ratios.append(ratio)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+            except Exception:
+                continue
+
+        # Phase 2: Adaptive refinement of top performers
+        if best_points is not None:
+            # Select top 3 configurations from coarse screening
+            top_indices = sorted(range(len(coarse_ratios)), key=lambda i: coarse_ratios[i], reverse=True)[:3]
+            top_configs = [coarse_configs[i] for i in top_indices]
+
+            # Thorough optimization of top performers
+            for config in top_configs:
+                refined_points = self.multi_stage_optimization(config.flatten())
+                if refined_points is not None:
+                    ratio, _, _ = self.calculate_ratio(refined_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = refined_points.copy()
+
+            # Phase 3: Local search around the best solution
+            # Use a more aggressive refinement strategy
+            local_configs = []
+
+            # Create diverse perturbations around the current best
+            for _ in range(8):
+                # Mix of different perturbation strategies
+                perturbation_type = np.random.choice(['uniform', 'gaussian', 'adaptive'])
+
+                if perturbation_type == 'uniform':
+                    perturbed = best_points + np.random.uniform(-0.02, 0.02, best_points.shape)
+                elif perturbation_type == 'gaussian':
+                    perturbed = best_points + np.random.normal(0, 0.015, best_points.shape)
+                else:  # adaptive
+                    perturbed = self.adaptive_perturbation(best_points, iteration=0)
+
+                perturbed = np.clip(perturbed, 0.001, 0.999)
+                local_configs.append(perturbed)
+
+            # Optimize the local configurations
+            for config in local_configs:
+                local_points = self.multi_stage_optimization(config.flatten())
+                if local_points is not None:
+                    ratio, _, _ = self.calculate_ratio(local_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = local_points.copy()
+
+        return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+>>>>>>> REPLACE
+</DIFF>

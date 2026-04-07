@@ -1,0 +1,157 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based initialization is basic and doesn't leverage the full potential of Voronoi diagrams for optimal circle packing. I'll enhance the initialization by implementing a more sophisticated Voronoi-based approach that creates a better starting configuration for the optimization process. This involves generating points that naturally lead to a more uniform distribution and better initial spacing, which will help the evolutionary algorithm converge faster to higher-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_hybrid_initial_config(self):
+        """Generate initial circle configuration using hybrid approach."""
+        circles = np.zeros((self.N_CIRCLES, 3))
+
+        # Use golden spiral for spatial distribution
+        golden_angle = np.pi * (3 - np.sqrt(5))
+
+        # Calculate Voronoi-like densities for radius assignment
+        # First create a coarse grid to estimate density
+        grid_size = 8
+        density_grid = np.zeros((grid_size, grid_size))
+
+        # Sample points for density estimation
+        sample_points = []
+        for i in range(100):
+            r = np.sqrt(i / 99) if i < 99 else 0
+            theta = i * golden_angle
+            x = 0.4 * r * np.cos(theta) + 0.5
+            y = 0.4 * r * np.sin(theta) + 0.5
+            if 0.01 <= x <= 0.99 and 0.01 <= y <= 0.99:
+                sample_points.append([x, y])
+
+        # Estimate density in grid cells
+        for point in sample_points:
+            x, y = point
+            grid_x = int(x * grid_size)
+            grid_y = int(y * grid_size)
+            grid_x = min(grid_x, grid_size - 1)
+            grid_y = min(grid_y, grid_size - 1)
+            density_grid[grid_y, grid_x] += 1
+
+        # Create main configuration using spiral with density-aware radius assignment
+        for i in range(self.N_CIRCLES):
+            # Spiral layout with better distribution
+            r = np.sqrt(i / (self.N_CIRCLES - 1)) if self.N_CIRCLES > 1 else 0
+            theta = i * golden_angle
+
+            # Convert to Cartesian coordinates in [0.1, 0.9] range
+            x = 0.4 * r * np.cos(theta) + 0.5
+            y = 0.4 * r * np.sin(theta) + 0.5
+
+            # Apply small random perturbations
+            x += random.uniform(-0.015, 0.015)
+            y += random.uniform(-0.015, 0.015)
+
+            # Clamp to valid range
+            x = max(0.01, min(0.99, x))
+            y = max(0.01, min(0.99, y))
+
+            # Calculate density-based initial radius
+            grid_x = int(x * grid_size)
+            grid_y = int(y * grid_size)
+            grid_x = min(grid_x, grid_size - 1)
+            grid_y = min(grid_y, grid_size - 1)
+
+            # Density factor: lower density = higher radius potential
+            density_factor = 1.0 / (density_grid[grid_y, grid_x] + 1)
+
+            # Base radius with randomness and density consideration
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+            base_radius = min(min_dist_to_edge, 0.15) * random.uniform(0.5, 0.8) * density_factor
+
+            r = max(0.005, base_radius)
+
+            circles[i] = [x, y, r]
+
+        return circles
+=======
+    def _generate_voronoi_initial_config(self):
+        """Generate initial circle configuration using enhanced Voronoi-based approach."""
+        circles = np.zeros((self.N_CIRCLES, 3))
+
+        # Generate points using a more sophisticated approach that creates better Voronoi cells
+        # Using a Poisson disk sampling approach in concentric rings for better distribution
+
+        # Generate points in concentric rings to create good spatial distribution
+        points = []
+        num_points_per_ring = max(3, self.N_CIRCLES // 6)
+        num_rings = max(2, int(np.ceil(np.sqrt(self.N_CIRCLES))))
+
+        # Create points in rings
+        for ring_idx in range(num_rings):
+            ring_radius = 0.1 + 0.8 * (ring_idx / (num_rings - 1)) if num_rings > 1 else 0.4
+            angular_spacing = 2 * np.pi / (num_points_per_ring * (ring_idx + 1))
+            num_points_in_ring = max(1, num_points_per_ring * (ring_idx + 1))
+
+            for i in range(num_points_in_ring):
+                angle = i * angular_spacing
+                x = 0.5 + ring_radius * np.cos(angle)
+                y = 0.5 + ring_radius * np.sin(angle)
+
+                # Add small random perturbation to avoid regular patterns
+                x += random.uniform(-0.02, 0.02)
+                y += random.uniform(-0.02, 0.02)
+
+                # Keep within bounds
+                x = max(0.02, min(0.98, x))
+                y = max(0.02, min(0.98, y))
+
+                points.append([x, y])
+
+        # Limit to required number of points
+        points = points[:self.N_CIRCLES]
+
+        # Add extra points to ensure we have enough for Voronoi analysis
+        if len(points) < self.N_CIRCLES:
+            # Fill remaining with random points in valid region
+            while len(points) < self.N_CIRCLES:
+                x = random.uniform(0.02, 0.98)
+                y = random.uniform(0.02, 0.98)
+                points.append([x, y])
+
+        points = points[:self.N_CIRCLES]
+
+        # Now assign radii based on Voronoi cell areas (larger cells = larger potential radii)
+        points_array = np.array(points)
+
+        # Use a more efficient approach for Voronoi cell area estimation
+        # For now, use a simpler density-based approach but with better distribution
+        for i, (x, y) in enumerate(points_array):
+            # Calculate minimum distance to edges to determine max possible radius
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+
+            # Calculate average distance to neighbors for density-based radius assignment
+            distances = []
+            if len(points_array) > 1:
+                for j, (other_x, other_y) in enumerate(points_array):
+                    if i != j:
+                        dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                        distances.append(dist)
+
+            # Base radius calculation
+            if distances:
+                avg_distance = np.mean(distances)
+                # Larger average distance between neighbors means more space for larger radius
+                base_radius = min(min_dist_to_edge, avg_distance * 0.3) * random.uniform(0.6, 0.9)
+            else:
+                # No neighbors, just use edge distance
+                base_radius = min(min_dist_to_edge, 0.15) * random.uniform(0.6, 0.9)
+
+            r = max(0.005, base_radius)
+
+            circles[i] = [x, y, r]
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,137 @@
+<NAME>
+enhanced_convolution_sampling
+</NAME>
+
+<DESCRIPTION>
+This edit improves the convolution constraint sampling in the LP solver to make it more efficient and effective. Instead of uniformly sampling convolution indices, it now uses a weighted sampling approach that gives more importance to indices near the peak convolution value. This allows the LP solver to focus on the most critical constraints while maintaining computational efficiency.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def solve_convolution_lp(f_sequence, rhs, prev_solution=None):
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        # Sample key convolution indices instead of generating all 2*n-1 constraints
+        # This dramatically reduces memory usage and computation time
+        max_constraints = min(5000, 2 * n)  # Cap at reasonable number
+        constraint_indices = np.linspace(0, 2 * n - 2, min(max_constraints, 2 * n - 1), dtype=int)
+
+        # Sort indices to help with memory access patterns
+        constraint_indices = np.sort(constraint_indices)
+
+        # Precompute convolution constraints efficiently
+        a_ub = np.zeros((len(constraint_indices), n))
+        b_ub = np.zeros(len(constraint_indices))
+
+        for idx, k in enumerate(constraint_indices):
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    a_ub[idx, j] = f_sequence[i]
+            b_ub[idx] = rhs
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Define objective function (minimize -sum x)
+        c = -np.ones(n)
+
+        # Solve with warm-start if provided
+        if prev_solution is not None:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', x0=prev_solution)
+        else:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+        if result.success:
+            return result.x
+        else:
+            # Try alternative solver
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+                if result.success:
+                    return result.x
+            except:
+                pass
+            return None
+
+    except Exception:
+        return None
+=======
+def solve_convolution_lp(f_sequence, rhs, prev_solution=None):
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        # Sample key convolution indices with weighted sampling towards peak
+        # Compute full convolution to determine peak location
+        full_conv = fftconvolve(f_sequence, f_sequence, mode='full')
+        peak_location = np.argmax(full_conv)
+
+        max_constraints = min(5000, 2 * n)  # Cap at reasonable number
+
+        # Use weighted sampling: prioritize indices near the peak
+        if n > 100:  # Only apply weighting for larger sequences
+            # Create a Gaussian weight centered on peak
+            weights = np.exp(-0.5 * ((np.arange(2*n-1) - peak_location) / (n//4))**2)
+            # Sample with replacement based on weights
+            constraint_indices = np.random.choice(2*n-1, size=max_constraints, p=weights/weights.sum())
+        else:
+            # For smaller sequences, use uniform sampling
+            constraint_indices = np.random.choice(2*n-1, size=max_constraints, replace=False)
+
+        # Sort indices to help with memory access patterns
+        constraint_indices = np.sort(constraint_indices)
+
+        # Precompute convolution constraints efficiently
+        a_ub = np.zeros((len(constraint_indices), n))
+        b_ub = np.zeros(len(constraint_indices))
+
+        for idx, k in enumerate(constraint_indices):
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    a_ub[idx, j] = f_sequence[i]
+            b_ub[idx] = rhs
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Define objective function (minimize -sum x)
+        c = -np.ones(n)
+
+        # Solve with warm-start if provided
+        if prev_solution is not None:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', x0=prev_solution)
+        else:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+        if result.success:
+            return result.x
+        else:
+            # Try alternative solver
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+                if result.success:
+                    return result.x
+            except:
+                pass
+            return None
+
+    except Exception:
+        return None
+>>>>>>> REPLACE
+</DIFF>

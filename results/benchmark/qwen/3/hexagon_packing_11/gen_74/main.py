@@ -1,0 +1,343 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+import math
+from scipy.optimize import minimize
+import time
+
+def create_regular_hexagon(center_x, center_y, side_length=1, rotation_deg=0):
+    """Create a regular hexagon as a Shapely polygon"""
+    rotation_rad = math.radians(rotation_deg)
+    points = []
+    for i in range(6):
+        angle = rotation_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+def check_containment_and_overlap(inner_hexagons, outer_hexagon):
+    """Check if all inner hexagons are contained in outer hexagon and don't overlap"""
+    # Check containment
+    for hex_poly in inner_hexagons:
+        if not outer_hexagon.contains(hex_poly):
+            return False
+    
+    # Check pairwise overlaps
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if inner_hexagons[i].intersects(inner_hexagons[j]):
+                return False
+    
+    return True
+
+def compute_outer_hexagon_radius(inner_hexagons, padding=0.01):
+    """Compute minimum radius needed to contain all inner hexagons with some padding"""
+    # Get all vertices of all hexagons
+    all_vertices = []
+    for hex_poly in inner_hexagons:
+        all_vertices.extend(list(hex_poly.exterior.coords))
+    
+    # Find center of bounding box
+    xs = [p[0] for p in all_vertices]
+    ys = [p[1] for p in all_vertices]
+    center_x = (min(xs) + max(xs)) / 2
+    center_y = (min(ys) + max(ys)) / 2
+    
+    # Compute max distance from center to any vertex
+    max_dist = 0
+    for x, y in all_vertices:
+        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_dist = max(max_dist, dist)
+    
+    # Add padding and convert to side length
+    # For a regular hexagon, radius = side_length
+    return max_dist + padding
+
+def evaluate_layout(inner_positions_angles, outer_center=(0, 0), initial_outer_radius=8):
+    """Evaluate the layout quality"""
+    # Convert to hexagon polygons
+    inner_hexagons = []
+    for pos_angle in inner_positions_angles:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+    
+    # Create outer hexagon with current radius
+    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    outer_hexagon = create_regular_hexagon(outer_center[0], outer_center[1], outer_radius, 0)
+    
+    # Validate constraints
+    valid = check_containment_and_overlap(inner_hexagons, outer_hexagon)
+    
+    # Return negative because we want to maximize 1/R (minimize R)
+    outer_side_length = outer_radius
+    inv_radius = 1.0 / outer_side_length if valid else 0.0
+    
+    return -inv_radius, outer_side_length, valid
+
+def generate_initial_config():
+    """Generate a random initial configuration for 11 hexagons"""
+    np.random.seed(42)
+    initial_positions = []
+    
+    # Generate random positions within a reasonable range
+    for i in range(11):
+        x = np.random.uniform(-5, 5)
+        y = np.random.uniform(-5, 5)
+        angle = np.random.uniform(0, 360)
+        initial_positions.append([x, y, angle])
+    
+    return np.array(initial_positions)
+
+def compute_forces(hex_pos_angles, outer_radius):
+    """Compute forces acting on each hexagon based on physics simulation"""
+    n = len(hex_pos_angles)
+    forces = np.zeros((n, 2))  # (fx, fy) for each hexagon
+    
+    # Convert to polygon representations for easier distance calculation
+    hexagons = []
+    for i, pos_angle in enumerate(hex_pos_angles):
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        hexagons.append(hex_poly)
+    
+    # Repulsion forces between overlapping hexagons
+    for i in range(n):
+        for j in range(i+1, n):
+            if hexagons[i].intersects(hexagons[j]):
+                # Compute vector between centers
+                x1, y1, _ = hex_pos_angles[i]
+                x2, y2, _ = hex_pos_angles[j]
+                dx = x2 - x1
+                dy = y2 - y1
+                
+                # Normalize and apply repulsion force
+                dist_sq = dx*dx + dy*dy
+                if dist_sq > 0.01:  # Avoid division by zero
+                    dist = math.sqrt(dist_sq)
+                    force_magnitude = 100.0 / (dist * dist)  # Strong repulsion at close distances
+                    forces[i][0] -= force_magnitude * dx / dist
+                    forces[i][1] -= force_magnitude * dy / dist
+                    forces[j][0] += force_magnitude * dx / dist
+                    forces[j][1] += force_magnitude * dy / dist
+    
+    # Attraction to center (gravity)
+    center_x, center_y = 0.0, 0.0
+    for i in range(n):
+        x, y, _ = hex_pos_angles[i]
+        dx = center_x - x
+        dy = center_y - y
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist > 0.01:
+            force_magnitude = 0.5 / (dist * dist)  # Weak attraction
+            forces[i][0] -= force_magnitude * dx / dist
+            forces[i][1] -= force_magnitude * dy / dist
+    
+    # Boundary avoidance - repel hexagons that get too close to outer boundary
+    outer_hexagon = create_regular_hexagon(0, 0, outer_radius, 0)
+    for i in range(n):
+        x, y, _ = hex_pos_angles[i]
+        hex_poly = create_regular_hexagon(x, y, 1, 0)
+        if not outer_hexagon.contains(hex_poly):
+            # Calculate distance to boundary
+            closest_point = outer_hexagon.boundary.closest_point(hex_poly.centroid)
+            bx, by = closest_point.x, closest_point.y
+            dx = x - bx
+            dy = y - by
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist < outer_radius * 0.1:  # Close to boundary
+                force_magnitude = 50.0 / (dist * dist + 0.01)  # Strong repulsion
+                forces[i][0] += force_magnitude * dx / dist
+                forces[i][1] += force_magnitude * dy / dist
+    
+    return forces
+
+def simulate_physics(hex_pos_angles, outer_radius, steps=50, cooling_factor=0.95):
+    """Simulate physics-based packing optimization"""
+    current_state = hex_pos_angles.copy()
+    
+    for step in range(steps):
+        # Compute forces
+        forces = compute_forces(current_state, outer_radius)
+        
+        # Apply forces with cooling
+        alpha = cooling_factor ** step
+        for i in range(len(current_state)):
+            current_state[i][0] += forces[i][0] * alpha * 0.1
+            current_state[i][1] += forces[i][1] * alpha * 0.1
+            
+    return current_state
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    # Generate initial configuration
+    initial_positions = generate_initial_config()
+    inner_hex_data = initial_positions.copy()
+    
+    # Start with a reasonably large outer hexagon
+    outer_radius = 10.0
+    
+    # Physics simulation parameters
+    max_iterations = 50
+    min_radius = 2.0
+    
+    # Initialize best solution
+    best_inner_data = inner_hex_data.copy()
+    best_outer_radius = outer_radius
+    best_inv_radius = 0.0
+    best_valid = False
+    
+    # Try multiple random restarts to avoid local minima
+    for restart in range(3):
+        # Randomize seed for this restart
+        np.random.seed(42 + restart)
+        
+        # Start with initial configuration
+        current_positions = initial_positions.copy()
+        
+        # Try to find a valid configuration by simulating physics
+        for iteration in range(max_iterations):
+            # Update outer radius based on current configuration
+            inner_hexagons = []
+            for pos_angle in current_positions:
+                x, y, angle = pos_angle
+                hex_poly = create_regular_hexagon(x, y, 1, angle)
+                inner_hexagons.append(hex_poly)
+            
+            outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+            outer_hexagon = create_regular_hexagon(0, 0, outer_radius, 0)
+            
+            # Check if current configuration is valid
+            valid = check_containment_and_overlap(inner_hexagons, outer_hexagon)
+            
+            if valid:
+                # Current configuration is valid, evaluate and store as best
+                inv_radius, _, _ = evaluate_layout(current_positions)
+                if inv_radius > best_inv_radius:
+                    best_inv_radius = inv_radius
+                    best_inner_data = current_positions.copy()
+                    best_outer_radius = outer_radius
+                    best_valid = True
+                    
+                # Try to make the outer radius even smaller
+                # Use a more aggressive approach to reduce the outer radius
+                test_radius = outer_radius - 0.1
+                if test_radius > min_radius:
+                    # Try to see if we can fit with smaller radius
+                    temp_positions = current_positions.copy()
+                    temp_hexagons = []
+                    for pos_angle in temp_positions:
+                        x, y, angle = pos_angle
+                        hex_poly = create_regular_hexagon(x, y, 1, angle)
+                        temp_hexagons.append(hex_poly)
+                    
+                    temp_outer_hexagon = create_regular_hexagon(0, 0, test_radius, 0)
+                    temp_valid = check_containment_and_overlap(temp_hexagons, temp_outer_hexagon)
+                    if temp_valid:
+                        # Accept this smaller radius
+                        best_inv_radius = 1.0 / test_radius
+                        best_inner_data = temp_positions.copy()
+                        best_outer_radius = test_radius
+                        best_valid = True
+            
+            # Apply physics simulation
+            current_positions = simulate_physics(current_positions, outer_radius, 20, 0.98)
+            
+            # Early stopping if we've found a good solution
+            if best_valid and best_inv_radius > 0.25:  # Already better than target
+                break
+    
+    # Final refinement with local optimization if we have a valid solution
+    if best_valid:
+        # Use scipy minimize for final fine-tuning
+        try:
+            def objective(params):
+                positions_angles = []
+                for i in range(11):
+                    x = params[i*3]
+                    y = params[i*3 + 1]
+                    angle = params[i*3 + 2]
+                    positions_angles.append([x, y, angle])
+                
+                score, _, valid = evaluate_layout(positions_angles)
+                # If invalid, penalize heavily
+                if not valid:
+                    return -score + 1000.0  # Heavy penalty for invalid solutions
+                return -score  # Negative because we want to maximize
+            
+            # Flatten current best solution
+            initial_flat = []
+            for pos_angle in best_inner_data:
+                initial_flat.extend(pos_angle)
+            
+            # Boundaries for optimization
+            bounds = []
+            for i in range(11):
+                bounds.extend([(-15, 15), (-15, 15), (0, 360)])
+            
+            # Local optimization with L-BFGS-B
+            result = minimize(
+                objective,
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+            
+            # Extract refined solution
+            if result.success:
+                refined_positions_angles = []
+                for i in range(11):
+                    x = result.x[i*3]
+                    y = result.x[i*3 + 1]
+                    angle = result.x[i*3 + 2]
+                    refined_positions_angles.append([x, y, angle])
+                
+                # Evaluate refined solution
+                refined_score, refined_side_length, refined_valid = evaluate_layout(refined_positions_angles)
+                if refined_valid and refined_score > best_inv_radius:
+                    best_inner_data = np.array(refined_positions_angles)
+                    best_inv_radius = refined_score
+                    best_outer_radius = refined_side_length
+                    
+        except Exception:
+            # If optimization fails, continue with current best
+            pass
+    
+    # Final validation
+    inner_hexagons = []
+    for pos_angle in best_inner_data:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+    
+    # Ensure outer radius is computed correctly
+    final_outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    final_outer_hexagon = create_regular_hexagon(0, 0, final_outer_radius, 0)
+    
+    # Double-check validity
+    if not check_containment_and_overlap(inner_hexagons, final_outer_hexagon):
+        # Fallback to initial configuration
+        best_inner_data = initial_positions.copy()
+        inner_hexagons = []
+        for pos_angle in best_inner_data:
+            x, y, angle = pos_angle
+            hex_poly = create_regular_hexagon(x, y, 1, angle)
+            inner_hexagons.append(hex_poly)
+        final_outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    
+    # Ensure we're returning the correct data format
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    
+    # Return results
+    return best_inner_data, outer_hex_data, final_outer_radius
+
+# EVOLVE-BLOCK-END

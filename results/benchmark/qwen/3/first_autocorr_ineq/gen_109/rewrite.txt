@@ -1,0 +1,175 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from deap import base, creator, tools, algorithms
+import random
+import time
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def convolve_fft(a, b):
+    """Fast convolution using FFT"""
+    n = len(a)
+    # Pad to avoid circular convolution effects
+    padded_len = 2 * n - 1
+    a_padded = np.pad(a, (0, padded_len - n), 'constant')
+    b_padded = np.pad(b, (0, padded_len - n), 'constant')
+    # Use FFT for fast convolution
+    conv_result = np.fft.irfft(np.fft.rfft(a_padded) * np.fft.rfft(b_padded))
+    return conv_result[:padded_len]
+
+def compute_c1(sequence):
+    """Compute C1 constant for the sequence"""
+    if len(sequence) == 0 or np.sum(sequence) < 0.01:
+        return float('inf')
+    
+    # Compute autoconvolution
+    autoconv = convolve_fft(sequence, sequence)
+    
+    # Normalize
+    sum_a = np.sum(sequence)
+    max_b = np.max(autoconv)
+    
+    # Compute C1
+    c1 = 2 * len(sequence) * max_b / (sum_a ** 2)
+    
+    return c1
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual (minimize C1)"""
+    # Convert to numpy array and ensure constraints
+    seq = np.array(individual)
+    
+    # Clip to [0, 1000]
+    seq = np.clip(seq, 0, 1000)
+    
+    # Check if sum is too small
+    if np.sum(seq) < 0.01:
+        return (float('inf'),)  # Penalize invalid sequences
+    
+    # Compute C1
+    c1 = compute_c1(seq)
+    
+    # Return negative C1 (since we want to maximize 1/C1, which means minimizing C1)
+    return (-c1,)
+
+def mutate_individual(individual, indpb=0.1):
+    """Mutate an individual"""
+    for i in range(len(individual)):
+        if random.random() < indpb:
+            # Add small Gaussian noise
+            individual[i] += np.random.normal(0, 0.1 * individual[i] if individual[i] != 0 else 1)
+            # Ensure non-negative
+            individual[i] = max(0, individual[i])
+    return individual,
+
+def create_toolbox():
+    """Create DEAP toolbox"""
+    creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMin)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("attr_float", random.random)
+    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, n=random.randint(100, 1000))
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    return toolbox
+
+def local_refinement(sequence, max_iter=50):
+    """Refine sequence using local optimization"""
+    def objective(x):
+        # Ensure non-negative
+        x = np.maximum(x, 0)
+        c1 = compute_c1(x)
+        return c1 if not np.isnan(c1) and not np.isinf(c1) else 1e10
+    
+    def constraint_sum(x):
+        return np.sum(x) - 1.0  # Normalize sum to 1 for easier optimization
+    
+    try:
+        # Start with current sequence
+        x0 = np.array(sequence)
+        x0 = x0 / np.sum(x0)  # Normalize
+        
+        # Use L-BFGS for local refinement
+        res = minimize(objective, x0, method='L-BFGS-B', bounds=[(0, 1000)] * len(x0), options={'maxiter': max_iter})
+        
+        if res.success:
+            refined = res.x * np.sum(sequence)  # Scale back to original magnitude
+            refined = np.clip(refined, 0, 1000)
+            return refined
+    except:
+        pass
+    
+    return sequence
+
+def search_for_best_sequence():
+    """Main evolutionary search function"""
+    toolbox = create_toolbox()
+    
+    # Create initial population
+    population = toolbox.population(n=50)
+    
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, population))
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = fit
+    
+    # Evolution parameters
+    cxpb = 0.7  # Crossover probability
+    mutpb = 0.3  # Mutation probability
+    ngen = 20   # Number of generations
+    
+    # Main evolution loop
+    for gen in range(ngen):
+        # Select the next generation individuals
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < mutpb:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace population
+        population[:] = offspring
+        
+        # Local refinement of best individual
+        best_ind = tools.selBest(population, 1)[0]
+        refined = local_refinement(best_ind)
+        
+        # Update best if refined is better
+        refined_fitness = evaluate_individual(refined)[0]
+        if refined_fitness < best_ind.fitness.values[0]:
+            best_ind[:] = refined
+            best_ind.fitness.values = refined_fitness
+    
+    # Get final best individual
+    best_individual = tools.selBest(population, 1)[0]
+    
+    # Final local refinement
+    final_sequence = local_refinement(best_individual)
+    
+    return final_sequence
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,203 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+    
+    n = 32
+    circles = np.zeros((n, 3))
+    
+    # Step 1: Improved hexagonal initialization with better packing density
+    def generate_hexagonal_grid():
+        # Try to fit circles in a hexagonal lattice pattern
+        # For 32 circles, a good approximation is a 6x6 grid with slight offset
+        rows = 6
+        cols = 6
+        
+        # Calculate spacing to fit within unit square
+        # Hexagonal packing uses sqrt(3)/2 spacing vertically
+        spacing_x = 0.95 / cols  # Leave some margin
+        spacing_y = 0.95 / (rows - 0.5)  # Account for hexagonal offset
+        
+        positions = []
+        for i in range(rows):
+            for j in range(cols):
+                if len(positions) >= n:
+                    break
+                # Offset every other row for hexagonal pattern
+                x = (j + (i % 2) * 0.5) * spacing_x + 0.025
+                y = i * spacing_y + 0.025
+                
+                # Only add if within bounds
+                if x <= 1.0 - 0.025 and y <= 1.0 - 0.025:
+                    positions.append([x, y])
+                
+            if len(positions) >= n:
+                break
+        
+        # Fill remaining positions randomly if needed
+        while len(positions) < n:
+            x = np.random.uniform(0.025, 0.975)
+            y = np.random.uniform(0.025, 0.975)
+            positions.append([x, y])
+            
+        return positions[:n]
+    
+    # Generate initial hexagonal positions
+    positions = generate_hexagonal_grid()
+    
+    # Initialize with moderate radii
+    for i in range(n):
+        circles[i, 0] = positions[i][0]  # x
+        circles[i, 1] = positions[i][1]  # y
+        circles[i, 2] = 0.03  # initial medium radius
+    
+    # Step 2: Two-phase optimization approach
+    
+    # Phase 1: Global repulsion-based positioning
+    max_repulsion_iterations = 1000
+    for iteration in range(max_repulsion_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Vectorized repulsion force calculation
+        if n > 1:
+            # Compute all pairwise distances
+            dist_matrix = cdist(positions, positions)
+            
+            # Create masks for overlapping pairs
+            radii_matrix = np.add.outer(radii, radii)  # Sum of radii for all pairs
+            overlap_mask = dist_matrix < radii_matrix
+            
+            # Set diagonal to False to ignore self-overlaps
+            np.fill_diagonal(overlap_mask, False)
+            
+            # Compute repulsion forces
+            forces = np.zeros_like(positions)
+            for i in range(n):
+                overlapped_indices = np.where(overlap_mask[i])[0]
+                if len(overlapped_indices) > 0:
+                    for j in overlapped_indices:
+                        dx = positions[i, 0] - positions[j, 0]
+                        dy = positions[i, 1] - positions[j, 1]
+                        dist = max(np.sqrt(dx*dx + dy*dy), 1e-8)
+                        
+                        # Repulsion force magnitude
+                        overlap = radii[i] + radii[j] - dist
+                        force_mag = overlap * 0.02
+                        
+                        # Normalize and apply force
+                        forces[i, 0] += force_mag * dx / dist
+                        forces[i, 1] += force_mag * dy / dist
+            
+            # Apply forces
+            step_size = 0.01 * (1.0 - iteration/max_repulsion_iterations*0.5)  # Adaptive step size
+            new_positions = positions + forces * step_size
+            
+            # Constrain positions within bounds
+            for i in range(n):
+                min_r = radii[i]
+                new_positions[i, 0] = np.clip(new_positions[i, 0], min_r, 1.0 - min_r)
+                new_positions[i, 1] = np.clip(new_positions[i, 1], min_r, 1.0 - min_r)
+            
+            circles[:, :2] = new_positions
+    
+    # Phase 2: Local optimization for radius maximization
+    max_radius_iterations = 500
+    for iteration in range(max_radius_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Attempt to increase all radii simultaneously
+        new_radii = radii.copy()
+        improved = False
+        
+        # Try to grow each radius individually
+        for i in range(n):
+            # Start with a conservative growth
+            test_radius = radii[i] * 1.05
+            if test_radius > 0.2:  # Cap maximum radius
+                test_radius = 0.2
+            
+            # Check containment constraints
+            if (test_radius > positions[i, 0] or 
+                test_radius > 1.0 - positions[i, 0] or
+                test_radius > positions[i, 1] or
+                test_radius > 1.0 - positions[i, 1]):
+                continue
+            
+            # Check overlap constraints with all other circles
+            valid = True
+            for j in range(n):
+                if i == j:
+                    continue
+                dx = positions[i, 0] - positions[j, 0]
+                dy = positions[i, 1] - positions[j, 1]
+                dist_ij = np.sqrt(dx*dx + dy*dy)
+                
+                if dist_ij < (test_radius + radii[j]):
+                    valid = False
+                    break
+            
+            if valid:
+                new_radii[i] = test_radius
+                improved = True
+        
+        # Update if any improvements were made
+        if improved:
+            circles[:, 2] = new_radii
+        else:
+            # If no improvements, try more aggressive shrinkage to resolve overlaps
+            for i in range(n):
+                if radii[i] > 0.005:  # Only shrink if radius is substantial
+                    test_radius = radii[i] * 0.99
+                    # Check if shrunk radius would help
+                    valid = True
+                    for j in range(n):
+                        if i == j:
+                            continue
+                        dx = positions[i, 0] - positions[j, 0]
+                        dy = positions[i, 1] - positions[j, 1]
+                        dist_ij = np.sqrt(dx*dx + dy*dy)
+                        
+                        if dist_ij < (test_radius + radii[j]):
+                            valid = False
+                            break
+                    
+                    if valid:
+                        new_radii[i] = test_radius
+                        improved = True
+            
+            if improved:
+                circles[:, 2] = new_radii
+            else:
+                break  # No more improvements possible
+    
+    # Final validation and cleanup
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+    
+    # Ensure all circles respect boundary constraints
+    for i in range(n):
+        # Enforce minimum radius
+        if radii[i] < 0.001:
+            radii[i] = 0.001
+            
+        # Correct positions to maintain boundary constraints
+        min_r = radii[i]
+        positions[i, 0] = np.clip(positions[i, 0], min_r, 1.0 - min_r)
+        positions[i, 1] = np.clip(positions[i, 1], min_r, 1.0 - min_r)
+    
+    circles[:, 2] = radii
+    
+    return circles
+
+# EVOLVE-BLOCK-END

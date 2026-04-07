@@ -1,0 +1,164 @@
+<NAME>
+enhanced_convolution_computation
+</NAME>
+
+<DESCRIPTION>
+The main improvement focuses on enhancing the autoconvolution computation by implementing a more efficient approach using NumPy's built-in convolution operations, which should provide both better numerical accuracy and performance compared to the manual loop implementation. This change addresses the core computational bottleneck in the evaluation process and should lead to better convergence during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals, n_steps):
+    """Compute autoconvolution g = f*f efficiently using Numba"""
+    # Initialize output array
+    g = np.zeros(2*n_steps - 1)
+
+    # Compute convolution manually with proper indexing
+    for i in range(len(f_vals)):
+        for j in range(len(f_vals)):
+            idx = i + j
+            if 0 <= idx < len(g):
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+=======
+def compute_autoconvolution(f_vals):
+    """Compute autoconvolution g = f*f using NumPy's convolve function for better efficiency"""
+    # Using 'full' mode to get complete convolution result
+    # This is equivalent to manual double sum but much faster and numerically stable
+    g = np.convolve(f_vals, f_vals, mode='full')
+    return g
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+corrected_norm_computation
+</NAME>
+
+<DESCRIPTION>
+This change corrects the L1 norm computation to properly approximate the integral using trapezoidal rule rather than dividing by (n+1) which was incorrect. The L1 norm should simply be the sum of absolute values without any normalization factor. This correction ensures mathematically correct norm calculations affecting the final C2 score.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L2, L1, and L-infinity norms efficiently"""
+    # L2 norm squared (using trapezoidal-like approximation)
+    l2_squared = 0.0
+    n = len(g_vals)
+    if n >= 2:
+        # For piecewise linear integration: integrate over intervals
+        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1
+        for i in range(n-1):
+            y1 = g_vals[i]
+            y2 = g_vals[i+1]
+            l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+    # L1 norm (sum of absolute values divided by number of intervals)
+    l1 = 0.0
+    for val in g_vals:
+        l1 += abs(val)
+    l1 /= (n + 1)  # Approximate integral via piecewise constant approximation
+
+    # L-infinity norm (maximum absolute value)
+    l_inf = 0.0
+    for val in g_vals:
+        abs_val = abs(val)
+        if abs_val > l_inf:
+            l_inf = abs_val
+
+    return l2_squared, l1, l_inf
+=======
+def compute_norms(g_vals):
+    """Compute L2, L1, and L-infinity norms correctly"""
+    # L2 norm squared (using trapezoidal-like approximation)
+    l2_squared = 0.0
+    n = len(g_vals)
+    if n >= 2:
+        # For piecewise linear integration: integrate over intervals
+        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1
+        for i in range(n-1):
+            y1 = g_vals[i]
+            y2 = g_vals[i+1]
+            l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+    # L1 norm (sum of absolute values - correctly computed)
+    l1 = 0.0
+    for val in g_vals:
+        l1 += abs(val)
+
+    # L-infinity norm (maximum absolute value)
+    l_inf = np.max(np.abs(g_vals))
+
+    return l2_squared, l1, l_inf
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+updated_evaluation_function
+</NAME>
+
+<DESCRIPTION>
+This change updates the main evaluation function to use the corrected convolution and norm computation functions, along with ensuring proper handling of edge cases including empty arrays and numerical stability checks. It also replaces the Numba-compiled version with a cleaner, direct implementation that leverages NumPy's optimized routines.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_c2(f_vals):
+    """Evaluate C2 for a given set of step heights"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Compute autoconvolution
+        n_steps = len(f_vals)
+        g_vals = compute_autoconvolution_numba(f_vals, n_steps)
+
+        # Compute norms
+        l2_squared, l1, l_inf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-15 or l_inf <= 1e-15:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_squared / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+=======
+def evaluate_c2(f_vals):
+    """Evaluate C2 for a given set of step heights"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution(f_vals)
+
+        # Compute norms
+        l2_squared, l1, l_inf = compute_norms(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-15 or l_inf <= 1e-15:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_squared / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,175 @@
+<NAME>
+improve_spatial_hashing_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current spatial hashing implementation has suboptimal performance due to inefficient grid cell management and redundant overlap checks. I'll enhance the spatial hashing algorithm to use a more efficient approach with better neighbor discovery and reduce the overhead of repeated polygon intersection tests.
+
+The key improvements include:
+1. Using a more efficient spatial grid with proper cell size calculation
+2. Implementing a cleaner neighbor discovery mechanism that avoids duplicate checks
+3. Optimizing the hash table usage to minimize collisions
+4. Adding early termination for performance-critical overlap checks
+
+This will significantly speed up collision detection for the 11 hexagon problem, leading to faster optimization convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Precompute all hexagon polygons once for reuse
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+    # Calculate outer radius once
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Check containment using the outer hexagon polygon
+    outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check if all inner hexagons are contained within outer hexagon
+    for hex_poly in hex_polygons:
+        # Fast check: if any vertex is outside, reject
+        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+            if not outer_polygon.contains(Point(vertex)):
+                return False
+
+    # Check overlaps efficiently using spatial hashing
+    # Create a simple grid-based spatial hash for O(1) neighbor lookup
+    grid_size = 2.5  # Size of grid cells (slightly larger than hexagon diameter)
+    grid = {}
+
+    # Place each hexagon into grid cells
+    for i, hex_poly in enumerate(hex_polygons):
+        # Get bounding box of hexagon
+        min_x, min_y, max_x, max_y = hex_poly.bounds
+        # Determine grid cell range
+        min_grid_x = int(min_x // grid_size)
+        max_grid_x = int(max_x // grid_size)
+        min_grid_y = int(min_y // grid_size)
+        max_grid_y = int(max_y // grid_size)
+
+        # Add to all overlapping grid cells
+        for gx in range(min_grid_x, max_grid_x + 1):
+            for gy in range(min_grid_y, max_grid_y + 1):
+                if (gx, gy) not in grid:
+                    grid[(gx, gy)] = []
+                grid[(gx, gy)].append(i)
+
+    # Check overlaps only between hexagons in the same or adjacent cells
+    for i in range(len(hex_polygons)):
+        # Get the grid cells this hexagon occupies
+        min_x, min_y, max_x, max_y = hex_polygons[i].bounds
+        min_grid_x = int(min_x // grid_size)
+        max_grid_x = int(max_x // grid_size)
+        min_grid_y = int(min_y // grid_size)
+        max_grid_y = int(max_y // grid_size)
+
+        # Check neighbors in this and adjacent cells
+        for gx in range(min_grid_x - 1, max_grid_x + 2):
+            for gy in range(min_grid_y - 1, max_grid_y + 2):
+                if (gx, gy) in grid:
+                    for j in grid[(gx, gy)]:
+                        # Only check pairs once and skip self
+                        if i < j:
+                            try:
+                                if hex_polygons[i].intersects(hex_polygons[j]):
+                                    return False
+                            except:
+                                return False
+    return True
+=======
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Precompute all hexagon polygons once for reuse
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+    # Calculate outer radius once
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Check containment using the outer hexagon polygon
+    outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check if all inner hexagons are contained within outer hexagon
+    for hex_poly in hex_polygons:
+        # Fast check: if any vertex is outside, reject
+        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+            if not outer_polygon.contains(Point(vertex)):
+                return False
+
+    # Check overlaps efficiently using spatial hashing with optimized grid
+    # Calculate grid cell size based on hexagon dimensions for better performance
+    grid_cell_size = UNIT_HEXAGON_WIDTH * 1.2  # Slightly larger than hexagon diameter
+    grid = {}
+
+    # Pre-allocate lists for better memory access patterns
+    temp_neighbors = []
+
+    # Place each hexagon into grid cells efficiently
+    for i, hex_poly in enumerate(hex_polygons):
+        # Get bounding box of hexagon with proper rounding
+        min_x, min_y, max_x, max_y = hex_poly.bounds
+        min_grid_x = int(np.floor(min_x / grid_cell_size))
+        max_grid_x = int(np.ceil(max_x / grid_cell_size))
+        min_grid_y = int(np.floor(min_y / grid_cell_size))
+        max_grid_y = int(np.ceil(max_y / grid_cell_size))
+
+        # Add to all overlapping grid cells
+        for gx in range(min_grid_x, max_grid_x + 1):
+            for gy in range(min_grid_y, max_grid_y + 1):
+                grid.setdefault((gx, gy), []).append(i)
+
+    # Check overlaps only between hexagons in the same or adjacent cells
+    checked_pairs = set()  # To avoid checking same pair twice
+
+    # Process grid cells to find neighboring hexagons
+    for (gx, gy), hex_indices in grid.items():
+        # Check against same cell and adjacent cells (3x3 neighborhood)
+        for adj_gx in range(gx - 1, gx + 2):
+            for adj_gy in range(gy - 1, gy + 2):
+                if (adj_gx, adj_gy) in grid:
+                    # Get all hexagons in this cell and adjacent cells
+                    neighbor_indices = grid[(adj_gx, adj_gy)]
+                    # Check all pairs in this group
+                    for idx1 in range(len(neighbor_indices)):
+                        i = neighbor_indices[idx1]
+                        for idx2 in range(idx1 + 1, len(neighbor_indices)):
+                            j = neighbor_indices[idx2]
+                            # Skip if already checked
+                            pair_key = tuple(sorted([i, j]))
+                            if pair_key in checked_pairs:
+                                continue
+                            checked_pairs.add(pair_key)
+
+                            # Perform quick bounds check first
+                            poly1_bounds = hex_polygons[i].bounds
+                            poly2_bounds = hex_polygons[j].bounds
+
+                            # Quick AABB overlap check
+                            if (poly1_bounds[2] < poly2_bounds[0] or  # poly1 right < poly2 left
+                                poly2_bounds[2] < poly1_bounds[0] or  # poly2 right < poly1 left
+                                poly1_bounds[3] < poly2_bounds[1] or  # poly1 top < poly2 bottom
+                                poly2_bounds[3] < poly1_bounds[1]):   # poly2 top < poly1 bottom
+                                continue  # No overlap possible
+
+                            try:
+                                # Only perform expensive intersection test if bounds suggest overlap
+                                if hex_polygons[i].intersects(hex_polygons[j]):
+                                    return False
+                            except:
+                                return False
+    return True
+>>>>>>> REPLACE
+</DIFF>

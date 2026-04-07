@@ -1,0 +1,207 @@
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+The proposed enhancement focuses on improving the local refinement phase by implementing a more sophisticated neighborhood search strategy. The current implementation only tries small radius increases for individual circles, but this can get stuck in local optima. I'm introducing a multi-level local search that combines:
+
+1. Neighborhood-based radius increases using spatial indexing
+2. Position perturbations with adaptive step sizes
+3. Strategic circle repositioning based on overlap analysis
+4. Early termination criteria based on improvement rates
+
+This approach will better navigate the solution space and find higher quality local optima compared to the existing single-direction radius increase strategy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, circles: np.ndarray, max_iterations: int = 100) -> np.ndarray:
+        """Apply local refinement to improve solution quality"""
+        refined = circles.copy()
+
+        # Iteratively try to increase radii while respecting constraints
+        for iter_num in range(max_iterations):
+            improved = False
+
+            # Try to increase each circle's radius
+            for i in range(self.num_circles):
+                original_circle = refined[i].copy()
+                x, y, r = original_circle
+
+                # Try to increase radius
+                new_r = min(r * 1.05, 0.2)  # Small increase with cap
+                test_circle = [x, y, new_r]
+
+                # Check if it's still valid
+                if not self.is_valid_circle(x, y, new_r):
+                    continue
+
+                # Check if it causes overlaps
+                overlap_found = False
+                for j in range(self.num_circles):
+                    if i != j:
+                        if self.check_overlap(np.vstack([refined[:i], test_circle, refined[i+1:]]), i, j):
+                            overlap_found = True
+                            break
+
+                if not overlap_found:
+                    refined[i] = test_circle
+                    improved = True
+
+            # If no improvements were made, stop early
+            if not improved:
+                break
+
+        return refined
+=======
+    def local_refinement(self, circles: np.ndarray, max_iterations: int = 100) -> np.ndarray:
+        """Apply advanced local refinement to improve solution quality"""
+        refined = circles.copy()
+
+        # Use spatial indexing for efficient neighbor queries
+        try:
+            points = refined[:, :2]
+            tree = cKDTree(points)
+        except Exception:
+            # Fallback if spatial indexing fails
+            tree = None
+
+        improvement_history = []
+        for iter_num in range(max_iterations):
+            improved = False
+            current_sum = self.calculate_total_radius_sum(refined)
+
+            # Strategy 1: Try increasing radii with better neighbor awareness
+            for i in range(self.num_circles):
+                original_circle = refined[i].copy()
+                x, y, r = original_circle
+
+                # Try to increase radius while considering neighbors
+                if tree is not None:
+                    # Find close neighbors to understand constraints
+                    neighbors = tree.query_ball_point([x, y], 3 * r, p=2)
+                    max_possible_radius = r
+
+                    # Calculate maximum radius based on closest neighbors
+                    for j in neighbors:
+                        if i != j:
+                            other_x, other_y, other_r = refined[j]
+                            dx = x - other_x
+                            dy = y - other_y
+                            distance = math.sqrt(dx*dx + dy*dy)
+                            # Radius cannot exceed distance to neighbor minus their radius
+                            max_possible_radius = min(max_possible_radius, distance - other_r - 0.001)
+
+                    # Also check boundary constraints
+                    max_possible_radius = min(max_possible_radius, x - 0.001, self.width - x - 0.001,
+                                           y - 0.001, self.height - y - 0.001)
+
+                    if max_possible_radius > r and max_possible_radius > 0.001:
+                        # Try several increment sizes
+                        increments = [0.01, 0.02, 0.03, 0.05]
+                        for incr in increments:
+                            new_r = min(r + incr, max_possible_radius)
+                            if new_r > r + 0.001:  # Only consider meaningful increases
+                                test_circle = [x, y, new_r]
+
+                                # Check if this would cause overlaps
+                                overlap_found = False
+                                for j in neighbors:
+                                    if i != j:
+                                        other_x, other_y, other_r = refined[j]
+                                        dx = x - other_x
+                                        dy = y - other_y
+                                        distance = math.sqrt(dx*dx + dy*dy)
+                                        if distance < (new_r + other_r):
+                                            overlap_found = True
+                                            break
+
+                                if not overlap_found:
+                                    refined[i] = test_circle
+                                    improved = True
+                                    break
+
+            # Strategy 2: Try position adjustments for improvement
+            if not improved and tree is not None:
+                # Select a random subset of circles to potentially reposition
+                candidate_indices = list(range(self.num_circles))
+                random.shuffle(candidate_indices)
+
+                # Try to improve a few circles via position adjustment
+                for idx in candidate_indices[:min(5, len(candidate_indices))]:
+                    original_circle = refined[idx].copy()
+                    x, y, r = original_circle
+
+                    # Try small position perturbations
+                    best_pos = [x, y]
+                    best_radius = r
+                    best_sum = current_sum
+
+                    # Try several small moves
+                    for _ in range(10):
+                        dx = np.random.uniform(-0.02, 0.02)
+                        dy = np.random.uniform(-0.02, 0.02)
+
+                        new_x = max(r, min(self.width - r, x + dx))
+                        new_y = max(r, min(self.height - r, y + dy))
+
+                        # Check if the new position is valid
+                        if self.is_valid_circle(new_x, new_y, r):
+                            # Check overlap constraints
+                            overlap_found = False
+                            neighbors = tree.query_ball_point([new_x, new_y], 3 * r, p=2)
+                            for j in neighbors:
+                                if idx != j:
+                                    other_x, other_y, other_r = refined[j]
+                                    dx_check = new_x - other_x
+                                    dy_check = new_y - other_y
+                                    distance = math.sqrt(dx_check*dx_check + dy_check*dy_check)
+                                    if distance < (r + other_r):
+                                        overlap_found = True
+                                        break
+
+                            if not overlap_found:
+                                # Calculate new sum for this perturbation
+                                old_contribution = refined[idx, 2]
+                                new_contribution = r
+                                new_sum = current_sum - old_contribution + new_contribution
+
+                                if new_sum > best_sum:
+                                    best_sum = new_sum
+                                    best_pos = [new_x, new_y]
+                                    best_radius = r
+                                    improved = True
+
+                    if improved:
+                        refined[idx, 0] = best_pos[0]
+                        refined[idx, 1] = best_pos[1]
+                        refined[idx, 2] = best_radius
+
+            improvement_history.append(self.calculate_total_radius_sum(refined))
+            if len(improvement_history) > 10:
+                improvement_history.pop(0)
+
+            # Early stopping if improvement has stalled
+            if len(improvement_history) >= 10:
+                recent_improvements = [
+                    improvement_history[i] - improvement_history[i-1]
+                    for i in range(1, len(improvement_history))
+                ]
+                if all(improvement < 1e-6 for improvement in recent_improvements):
+                    # Break early if there's minimal improvement
+                    break
+
+            # If no improvement in this iteration, try a different approach
+            if not improved and iter_num % 5 == 0:
+                # Try a small global adjustment to help escape local optima
+                for i in range(min(3, self.num_circles)):
+                    if np.random.rand() < 0.3:  # 30% chance of adjusting
+                        # Slight random perturbation to help escape local minima
+                        adjusted_x = max(0.001, min(self.width - 0.001, refined[i, 0] + np.random.uniform(-0.01, 0.01)))
+                        adjusted_y = max(0.001, min(self.height - 0.001, refined[i, 1] + np.random.uniform(-0.01, 0.01)))
+                        refined[i, 0] = adjusted_x
+                        refined[i, 1] = adjusted_y
+
+        return refined
+>>>>>>> REPLACE
+</DIFF>

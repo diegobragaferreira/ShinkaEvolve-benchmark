@@ -1,0 +1,237 @@
+<NAME>
+enhance_multi_objective_optimization
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces a multi-objective optimization framework that considers both the C2 value and the flatness of the autoconvolution function. The idea is based on the mathematical insight that to maximize C2 = ||g||₂² / (||g||₁ · ||g||∞), we want to maximize ||g||₂² while minimizing the product ||g||₁ · ||g||∞. However, we also want to avoid solutions where ||g||∞ dominates the denominator, which happens when there are very sharp peaks in g. By encouraging more uniform (flat) autoconvolution profiles, we can achieve better ratios. This approach builds on the existing multi-scale initialization and adds a dedicated multi-objective component to the optimization process, which should help escape local optima that favor sharp peaks over flat distributions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_evolutionary_optimization(initial_population):
+    """
+    Adaptive evolutionary optimization with dynamic population sizing
+    """
+    # Track convergence
+    best_scores = []
+    patience_counter = 0
+    max_patience = 10
+    population_size = POPULATION_SIZE_BASE
+
+    # Start with initial population
+    population = initial_population.copy()
+    current_best = max(population, key=evaluate_step_function)
+    best_scores.append(evaluate_step_function(current_best))
+
+    # Adaptive parameters based on convergence behavior
+    for generation in range(150):  # Limited to prevent timeout
+        if len(population) < 10:
+            population_size = 10
+        elif len(population) > 30:
+            population_size = 20
+        else:
+            population_size = len(population) // 2 + 5
+
+        # Evaluate all individuals
+        fitnesses = [evaluate_step_function(ind) for ind in population]
+
+        # Sort by fitness
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+
+        # Update best
+        current_best = sorted_population[0]
+        best_scores.append(sorted_fitnesses[0])
+
+        # Check for convergence
+        if len(best_scores) >= 5:
+            recent_improvement = best_scores[-1] - best_scores[-5]
+            if recent_improvement < 1e-6:
+                patience_counter += 1
+            else:
+                patience_counter = 0
+
+            if patience_counter >= max_patience:
+                # Increase population size to escape local minimum
+                population_size = min(population_size * 2, 50)
+                patience_counter = 0
+
+        # Create offspring using tournament selection and crossover
+        new_population = []
+
+        # Elitism: keep the best 20%
+        elite_count = max(1, int(0.2 * population_size))
+        new_population.extend(sorted_population[:elite_count])
+
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection
+            tournament_size = 3
+            tournament_indices = np.random.choice(len(sorted_population), tournament_size)
+            tournament_fitnesses = [sorted_fitnesses[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+
+            # Clone selected parent
+            parent = sorted_population[winner_index].copy()
+
+            # Mutation (add noise)
+            mutation_strength = 0.1 * (1 - generation / 150.0)  # Decrease over time
+            for i in range(len(parent)):
+                if np.random.random() < 0.2:  # 20% chance to mutate each element
+                    noise = np.random.normal(0, mutation_strength)
+                    parent[i] = max(0, parent[i] + noise)
+
+            new_population.append(parent)
+
+        # Replace population
+        population = new_population
+
+        # Early termination based on time
+        if time.time() - start_time > MAX_TIME_SECONDS * 0.9:
+            break
+
+    return current_best
+=======
+def compute_flatness_penalty(g_vals):
+    """
+    Compute penalty based on variance of g_vals to encourage flatness in autoconvolution
+    """
+    if len(g_vals) < 2:
+        return 0.0
+    mean_val = np.mean(g_vals)
+    if mean_val <= 1e-15:
+        return 0.0
+    variance = np.var(g_vals)
+    # Return normalized variance as penalty (lower is better)
+    return variance / (mean_val * mean_val)
+
+def multi_objective_evaluate(f_vals):
+    """
+    Multi-objective evaluation combining C2 and flatness penalty
+    """
+    try:
+        # Ensure non-negative values
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals, 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001)
+
+        # Compute norms
+        l1, l2_sq, linf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-15 or linf <= 1e-15:
+            return 0.0, 0.0  # Return a very poor score for invalid cases
+
+        # Calculate C2
+        c2 = l2_sq / (l1 * linf)
+
+        # Calculate flatness penalty (higher flatness means lower penalty)
+        flatness_penalty = compute_flatness_penalty(g_vals)
+
+        # Return (C2, flatness_penalty) - we want to maximize C2 and minimize flatness_penalty
+        return c2, flatness_penalty
+    except Exception as e:
+        return 0.0, 0.0
+
+def adaptive_evolutionary_optimization(initial_population):
+    """
+    Enhanced adaptive evolutionary optimization using multi-objective fitness
+    """
+    # Track convergence
+    best_scores = []
+    patience_counter = 0
+    max_patience = 10
+    population_size = POPULATION_SIZE_BASE
+
+    # Start with initial population
+    population = initial_population.copy()
+    # Use multi-objective evaluation to get both C2 and flatness
+    objectives = [multi_objective_evaluate(ind) for ind in population]
+    fitnesses = [obj[0] for obj in objectives]  # C2 values for primary fitness
+    flatness_penalties = [obj[1] for obj in objectives]  # Flatness penalties
+
+    # Sort by C2 fitness (primary objective)
+    sorted_indices = np.argsort(fitnesses)[::-1]
+    sorted_population = [population[i] for i in sorted_indices]
+    sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+    sorted_flatness = [flatness_penalties[i] for i in sorted_indices]
+
+    current_best = sorted_population[0]
+    best_scores.append(sorted_fitnesses[0])
+
+    # Adaptive parameters based on convergence behavior
+    for generation in range(150):  # Limited to prevent timeout
+        if len(population) < 10:
+            population_size = 10
+        elif len(population) > 30:
+            population_size = 20
+        else:
+            population_size = len(population) // 2 + 5
+
+        # Evaluate all individuals with multi-objective scoring
+        objectives = [multi_objective_evaluate(ind) for ind in population]
+        fitnesses = [obj[0] for obj in objectives]  # C2 values for primary fitness
+        flatness_penalties = [obj[1] for obj in objectives]  # Flatness penalties
+
+        # Sort by C2 fitness
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+        sorted_flatness = [flatness_penalties[i] for i in sorted_indices]
+
+        # Update best
+        current_best = sorted_population[0]
+        best_scores.append(sorted_fitnesses[0])
+
+        # Check for convergence
+        if len(best_scores) >= 5:
+            recent_improvement = best_scores[-1] - best_scores[-5]
+            if recent_improvement < 1e-6:
+                patience_counter += 1
+            else:
+                patience_counter = 0
+
+            if patience_counter >= max_patience:
+                # Increase population size to escape local minimum
+                population_size = min(population_size * 2, 50)
+                patience_counter = 0
+
+        # Create offspring using tournament selection and crossover
+        new_population = []
+
+        # Elitism: keep the best 20%
+        elite_count = max(1, int(0.2 * population_size))
+        new_population.extend(sorted_population[:elite_count])
+
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection based on C2 fitness
+            tournament_size = 3
+            tournament_indices = np.random.choice(len(sorted_population), tournament_size)
+            tournament_fitnesses = [sorted_fitnesses[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+
+            # Clone selected parent
+            parent = sorted_population[winner_index].copy()
+
+            # Mutation (add noise)
+            mutation_strength = 0.1 * (1 - generation / 150.0)  # Decrease over time
+            for i in range(len(parent)):
+                if np.random.random() < 0.2:  # 20% chance to mutate each element
+                    noise = np.random.normal(0, mutation_strength)
+                    parent[i] = max(0, parent[i] + noise)
+
+            new_population.append(parent)
+
+        # Replace population
+        population = new_population
+
+        # Early termination based on time
+        if time.time() - start_time > MAX_TIME_SECONDS * 0.9:
+            break
+
+    return current_best
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,350 @@
+<NAME>
+enhance_hexagonal_initialization
+</NAME>
+
+<DESCRIPTION>
+The current hexagonal grid initialization doesn't fully leverage the geometric properties of optimal point distributions. I'll enhance the initialization by creating a more sophisticated hexagonal arrangement that better approximates the optimal configuration, which should provide a stronger starting point for optimization. The key insight is to use a more accurate hexagonal packing with proper spacing and add better symmetry breaking.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Sphere packing-inspired initialization with geometric constraints
+    def initialize_sphere_packing():
+        # Start with a regular hexagonal grid
+        points = []
+        rows = 4
+        cols = 4
+        spacing = 0.25
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * spacing + (i % 2) * spacing * 0.5
+                y = i * spacing
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Add slight perturbations to break symmetry and improve optimization
+        noise = np.random.normal(0, 0.01, points.shape)
+        points += noise
+        points = np.clip(points, 0, 1)
+
+        return points
+=======
+    # Enhanced hexagonal initialization with better spacing and symmetry breaking
+    def initialize_enhanced_hexagonal():
+        # Create a more optimal hexagonal arrangement
+        # For 16 points, we can arrange them in 4 rows with staggered positions
+        points = []
+
+        # Use sqrt(3)/2 spacing for true hexagonal packing
+        row_spacing = np.sqrt(3) / 2
+        col_spacing = 1.0
+
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                # Offset every other row for hexagonal packing
+                x = j * col_spacing + (i % 2) * col_spacing * 0.5
+                y = i * row_spacing
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Normalize to fit in [0,1] x [0,1]
+        max_x = (cols - 1) + 0.5  # Account for offset in last row
+        max_y = (rows - 1) * row_spacing
+
+        points[:, 0] = points[:, 0] / max_x
+        points[:, 1] = points[:, 1] / max_y
+
+        # Add strategic perturbations to break symmetry
+        # Use different noise levels for different points
+        noise = np.random.normal(0, 0.015, points.shape)
+
+        # Apply more aggressive perturbation to corner points to break symmetry
+        corner_indices = [0, 3, 12, 15]  # Four corners of 4x4 grid
+        noise[corner_indices] *= 2.0
+
+        points += noise
+        points = np.clip(points, 0, 1)
+
+        return points
+>>>>>>> REPLACE
+</DIFF>
+
+<NAME>
+refine_optimization_strategy
+</NAME>
+
+<DESCRIPTION>
+The current multi-scale optimization approach is good but can be improved by implementing a more adaptive cooling schedule that responds to the optimization dynamics, and by using more sophisticated neighborhood moves that consider the geometric relationships between points. This will help escape local optima more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Generate neighbor solution using sphere packing constraints
+    def generate_neighbor(points, step_size=0.02):
+        new_points = points.copy()
+
+        # Select multiple points to move for better exploration
+        num_moves = min(3, len(points))
+        move_indices = np.random.choice(len(points), num_moves, replace=False)
+
+        for idx in move_indices:
+            # Move point with adaptive step size
+            movement = np.random.normal(0, step_size, 2)
+            new_points[idx] += movement
+
+        # Apply boundary constraints with reflection
+        for i in range(len(new_points)):
+            for j in range(2):
+                if new_points[i, j] < 0:
+                    new_points[i, j] = -new_points[i, j]  # Reflect
+                elif new_points[i, j] > 1:
+                    new_points[i, j] = 2 - new_points[i, j]  # Reflect
+
+        return new_points
+
+    # Advanced multi-scale optimization
+    def multi_scale_optimization(initial_points):
+        best_points = initial_points.copy()
+        best_ratio = compute_ratio(best_points)
+
+        # Scale 1: Coarse-grained optimization with large steps
+        points = initial_points.copy()
+        for iter_coarse in range(500):
+            # Large step size for broad search
+            new_points = generate_neighbor(points, step_size=0.05)
+            new_ratio = compute_ratio(new_points)
+
+            # Accept with Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 100):
+                points = new_points.copy()
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = points.copy()
+
+        # Scale 2: Medium-grained optimization
+        for iter_medium in range(1000):
+            # Medium step size for local refinement
+            new_points = generate_neighbor(points, step_size=0.01)
+            new_ratio = compute_ratio(new_points)
+
+            # Accept with Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 500):
+                points = new_points.copy()
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = points.copy()
+
+        # Scale 3: Fine-grained optimization with small steps
+        for iter_fine in range(1500):
+            # Small step size for fine adjustment
+            new_points = generate_neighbor(points, step_size=0.002)
+            new_ratio = compute_ratio(new_points)
+
+            # Accept with Metropolis criterion (higher acceptance probability)
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 1000):
+                points = new_points.copy()
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = points.copy()
+
+        return best_points
+=======
+    # Generate neighbor solution with adaptive moves and better boundary handling
+    def generate_neighbor_adaptive(points, step_size=0.02):
+        new_points = points.copy()
+
+        # Choose move type: single point, pair move, or cluster move
+        move_type = np.random.choice(['single', 'pair', 'cluster'], p=[0.6, 0.3, 0.1])
+
+        if move_type == 'single':
+            # Single point move
+            idx = np.random.randint(len(points))
+            movement = np.random.normal(0, step_size, 2)
+            new_points[idx] += movement
+
+        elif move_type == 'pair':
+            # Move two nearby points together
+            # Find two nearby points
+            distances = cdist(points, points)
+            np.fill_diagonal(distances, np.inf)
+
+            # Get indices of two closest points
+            min_indices = np.unravel_index(np.argmin(distances), distances.shape)
+            idx1, idx2 = min_indices
+
+            # Move them in coordinated way
+            movement = np.random.normal(0, step_size * 0.8, 2)
+            new_points[idx1] += movement
+            new_points[idx2] += movement
+
+        else:  # cluster
+            # Move a small cluster of points together
+            num_cluster = min(3, len(points))
+            cluster_indices = np.random.choice(len(points), num_cluster, replace=False)
+
+            # Move them towards their centroid
+            centroid = np.mean(new_points[cluster_indices], axis=0)
+            movement = np.random.normal(0, step_size * 0.5, 2)
+
+            for idx in cluster_indices:
+                new_points[idx] += movement
+
+        # Apply boundary constraints with better handling
+        # For better boundary handling, use clipping instead of reflection
+        new_points = np.clip(new_points, 0, 1)
+
+        return new_points
+
+    # Advanced adaptive optimization with cooling schedule
+    def adaptive_optimization(initial_points):
+        points = initial_points.copy()
+        current_ratio = compute_ratio(points)
+        best_points = points.copy()
+        best_ratio = current_ratio
+
+        # Adaptive cooling schedule
+        temp = 0.1  # Start with higher temperature
+        cooling_rate = 0.999  # Slightly faster cooling
+        min_temp = 1e-6
+
+        # Track improvement for adaptive cooling
+        improvement_window = 100
+        recent_improvements = []
+
+        max_iterations = 3000
+        for iteration in range(max_iterations):
+            # Adjust temperature based on recent performance
+            if len(recent_improvements) >= improvement_window:
+                avg_improvement = np.mean(recent_improvements[-improvement_window:])
+                if avg_improvement < 1e-6:
+                    temp *= 0.95  # Cool faster if stagnating
+                elif avg_improvement > 1e-4:
+                    temp *= 1.01  # Warm up if making good progress
+
+            temp = max(temp * cooling_rate, min_temp)
+
+            if temp < min_temp:
+                break
+
+            # Generate neighbor solution
+            new_points = generate_neighbor_adaptive(points, step_size=temp)
+            new_ratio = compute_ratio(new_points)
+
+            # Track recent improvements
+            if new_ratio > current_ratio:
+                recent_improvements.append(new_ratio - current_ratio)
+                if len(recent_improvements) > improvement_window * 2:
+                    recent_improvements.pop(0)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temp):
+                points = new_points.copy()
+                current_ratio = new_ratio
+
+                if current_ratio > best_ratio:
+                    best_ratio = current_ratio
+                    best_points = points.copy()
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>
+
+<NAME>
+update_main_logic
+</NAME>
+
+<DESCRIPTION>
+I need to update the main logic to use the enhanced initialization and the adaptive optimization method instead of the previous multi-scale approach. This will streamline the code and potentially improve performance by using a more sophisticated optimization strategy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Initialize with sphere packing approach
+    points = initialize_sphere_packing()
+
+    # Try multiple restarts to escape local optima
+    best_solution = points.copy()
+    best_ratio = compute_ratio(points)
+
+    # Multiple restarts with different random seeds
+    for restart in range(5):
+        # Different initialization for each restart
+        points = initialize_sphere_packing()
+
+        # Apply multi-scale optimization
+        optimized_points = multi_scale_optimization(points)
+        ratio = compute_ratio(optimized_points)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_solution = optimized_points.copy()
+
+    # Final local refinement using gradient approximation
+    final_points = best_solution.copy()
+
+    # Simple gradient-based refinement
+    for refinement_iter in range(500):
+        current_ratio = compute_ratio(final_points)
+
+        # Estimate gradient using finite differences
+        gradient = np.zeros_like(final_points)
+        eps = 1e-5
+
+        for i in range(len(final_points)):
+            for j in range(2):
+                # Perturb point coordinate
+                points_plus = final_points.copy()
+                points_plus[i, j] += eps
+                points_plus = np.clip(points_plus, 0, 1)
+
+                points_minus = final_points.copy()
+                points_minus[i, j] -= eps
+                points_minus = np.clip(points_minus, 0, 1)
+
+                ratio_plus = compute_ratio(points_plus)
+                ratio_minus = compute_ratio(points_minus)
+
+                gradient[i, j] = (ratio_plus - ratio_minus) / (2 * eps)
+
+        # Update with gradient ascent
+        step_size = 0.005
+        final_points = final_points + step_size * gradient
+
+        # Ensure bounds
+        final_points = np.clip(final_points, 0, 1)
+
+        # Early stopping condition
+        if np.all(np.abs(gradient) < 1e-6):
+            break
+
+    return final_points
+=======
+    # Initialize with enhanced hexagonal approach
+    points = initialize_enhanced_hexagonal()
+
+    # Try multiple restarts to escape local optima
+    best_solution = points.copy()
+    best_ratio = compute_ratio(points)
+
+    # Multiple restarts with different random seeds
+    for restart in range(5):
+        # Different initialization for each restart
+        points = initialize_enhanced_hexagonal()
+
+        # Apply adaptive optimization
+        optimized_points, ratio = adaptive_optimization(points)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_solution = optimized_points.copy()
+
+    # Return the best solution found
+    return best_solution
+>>>>>>> REPLACE
+</DIFF>

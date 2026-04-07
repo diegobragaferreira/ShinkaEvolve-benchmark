@@ -1,0 +1,289 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+from typing import List, Tuple
+
+def construct_function() -> List[float]:
+    """
+    Enhanced adaptive peak optimizer for maximizing C₂ constant.
+    Implements improved peak placement, smarter optimization, and better numerical stability.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    # Parameters
+    n_steps = np.random.randint(2000, 8000)
+    domain_length = 0.5  # [-0.25, 0.25]
+    dx = domain_length / (n_steps - 1)
+
+    # Create x-axis grid
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Initialize function
+    f_values = np.zeros(n_steps)
+
+    # Multi-scale peak placement strategy with improved spacing
+    # Scale 1: Fine scale peaks (high frequency details)
+    fine_count = np.random.randint(12, 28)
+    # Use log-spaced distribution for better coverage
+    fine_positions = np.logspace(np.log10(0.005), np.log10(0.05), fine_count)
+    fine_positions = np.concatenate([fine_positions, -fine_positions[::-1]])
+    fine_positions = fine_positions[(fine_positions >= -0.05) & (fine_positions <= 0.05)]
+    fine_heights = np.random.uniform(1.5, 2.5, len(fine_positions))
+    fine_widths = np.random.uniform(0.005, 0.015, len(fine_positions))
+
+    # Scale 2: Medium scale peaks (mid frequency content)
+    medium_count = np.random.randint(18, 35)
+    medium_positions = np.logspace(np.log10(0.05), np.log10(0.15), medium_count)
+    medium_positions = np.concatenate([medium_positions, -medium_positions[::-1]])
+    medium_positions = medium_positions[(medium_positions >= -0.15) & (medium_positions <= 0.15)]
+    medium_heights = np.random.uniform(1.2, 2.0, len(medium_positions))
+    medium_widths = np.random.uniform(0.015, 0.035, len(medium_positions))
+
+    # Scale 3: Coarse scale peaks (low frequency structure)
+    coarse_count = np.random.randint(10, 20)
+    coarse_positions = np.array([-0.2, -0.18, -0.16, -0.14, -0.12, -0.1,
+                               -0.08, -0.06, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2])
+    coarse_heights = np.random.uniform(1.0, 1.8, len(coarse_positions))
+    coarse_widths = np.random.uniform(0.025, 0.055, len(coarse_positions))
+
+    # Combine all peak scales
+    all_positions = np.concatenate([fine_positions, medium_positions, coarse_positions])
+    all_heights = np.concatenate([fine_heights, medium_heights, coarse_heights])
+    all_widths = np.concatenate([fine_widths, medium_widths, coarse_widths])
+
+    # Apply adaptive minimum gap constraint based on peak characteristics
+    filtered_positions = []
+    filtered_heights = []
+    filtered_widths = []
+
+    # Calculate adaptive minimum gaps based on peak heights and widths
+    for pos, height, width in zip(all_positions, all_heights, all_widths):
+        # Minimum gap increases with peak height to avoid sharp interference
+        min_gap = max(0.005, 0.002 + height * 0.001 + width * 0.005)
+        
+        # Check if this peak is far enough from existing peaks
+        valid = True
+        for existing_pos in filtered_positions:
+            if abs(pos - existing_pos) < min_gap:
+                valid = False
+                break
+        if valid:
+            filtered_positions.append(pos)
+            filtered_heights.append(height)
+            filtered_widths.append(width)
+
+    # Create peaks with filtered positions
+    for pos, height, width in zip(filtered_positions, filtered_heights, filtered_widths):
+        # Adjust height based on position to avoid very sharp peaks near edges
+        if abs(pos) > 0.15:
+            height *= 0.8
+
+        # Create Gaussian peak with improved width scaling
+        gaussian = height * np.exp(-0.5 * ((x - pos) / width)**2)
+        f_values += gaussian
+
+    # Add supplementary structure for better autoconvolution
+    # Create beneficial interference patterns with more strategic placement
+    for i in range(0, n_steps, max(1, n_steps//50)):
+        if np.random.random() > 0.85:
+            bump_center = x[i]
+            bump_height = np.random.uniform(0.05, 0.3)
+            bump_width = np.random.uniform(0.008, 0.018)
+            bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+            f_values += bump
+
+    # Ensure non-negativity and normalization
+    f_values = np.maximum(f_values, 0)
+    if np.max(f_values) > 0:
+        f_values = f_values / np.max(f_values) * 1.8
+
+    # Apply improved smoothing using Gaussian kernel instead of simple averaging
+    # This preserves shape better and reduces artifacts
+    if n_steps > 100:
+        # Use larger kernel for better smoothing
+        kernel_size = min(101, max(5, n_steps // 100))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        if kernel_size > 1:
+            # Create Gaussian kernel
+            kernel_sigma = kernel_size / 6.0  # Approximately 3 std devs
+            kernel = np.exp(-0.5 * np.square(np.arange(kernel_size) - kernel_size//2) / (kernel_sigma**2))
+            kernel = kernel / np.sum(kernel)
+            f_values = np.convolve(f_values, kernel, mode='same')
+
+    # Convert to list
+    f_list = f_values.tolist()
+
+    # Enhanced autoconvolution computation with improved numerical integration
+    def compute_autoconvolution_norms(func_vals):
+        """Compute the three norms needed for C2 calculation with improved accuracy"""
+        f = np.array(func_vals)
+
+        # Autoconvolution using convolution
+        g = np.convolve(f, f, mode='full')
+        g = g[len(g)//2:]  # Take middle portion
+
+        # Adjust for correct length
+        if len(g) > len(f):
+            g = g[:len(f)]
+
+        # ||g||₂² (L2 norm squared) - using trapezoidal-like integration  
+        # More accurate quadratic integration formula for piecewise segments
+        norm_2_sq = 0
+        for i in range(len(g)-1):
+            # Using trapezoidal rule for g^2 integral: (dx/3)*(y1^2 + y1*y2 + y2^2)
+            y1, y2 = g[i], g[i+1]
+            area = (dx / 3.0) * (y1**2 + y1*y2 + y2**2)
+            norm_2_sq += area
+
+        # ||g||₁ (L1 norm) - via summation with proper normalization
+        norm_1 = np.sum(np.abs(g)) * dx
+
+        # ||g||∞ (infinity norm)
+        norm_inf = np.max(np.abs(g))
+
+        return norm_2_sq, norm_1, norm_inf
+
+    def compute_c2(func_vals):
+        """Compute C₂ value with numerical stability"""
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(func_vals)
+
+        # Add small epsilon to prevent division by zero
+        epsilon = 1e-15
+        if norm_1 <= epsilon or norm_inf <= epsilon:
+            return 0.0
+
+        return norm_2_sq / (norm_1 * norm_inf)
+
+    # Enhanced optimization using selective parameter tuning
+    def selective_optimization(initial_func):
+        """Optimize function using selective differential evolution"""
+        # Convert to numpy array for easier manipulation
+        current_func = np.array(initial_func)
+        best_c2 = compute_c2(current_func)
+        best_func = current_func.copy()
+
+        # Extract peak locations (simple heuristic: find local maxima)
+        peaks = []
+        for i in range(1, len(current_func)-1):
+            if current_func[i] > current_func[i-1] and current_func[i] > current_func[i+1]:
+                peaks.append(i)
+        
+        # Keep top peaks for optimization
+        if len(peaks) > 0:
+            # Sort by height
+            peaks_sorted = sorted([(i, current_func[i]) for i in peaks], key=lambda x: x[1], reverse=True)
+            top_peaks = [idx for idx, _ in peaks_sorted[:min(10, len(peaks_sorted))]]
+            
+            # Define bounds for differential evolution
+            bounds = []
+            for peak_idx in top_peaks:
+                bounds.extend([(-0.05, 0.05), (-0.3, 0.3)])  # Position and height adjustments
+            
+            # Selective optimization function
+            def obj_func(params):
+                # Create a copy of the current function
+                test_func = current_func.copy()
+                param_idx = 0
+                
+                # Apply adjustments to selected peaks
+                for peak_idx in top_peaks:
+                    # Adjust peak position
+                    pos_adjust = params[param_idx]
+                    new_pos = max(-0.25, min(0.25, x[peak_idx] + pos_adjust))
+                    
+                    # Adjust peak height
+                    height_adjust = params[param_idx+1]
+                    new_height = max(0, test_func[peak_idx] * (1.0 + height_adjust))
+                    
+                    # Recreate peak with adjusted parameters
+                    old_peak = test_func[peak_idx]
+                    test_func[peak_idx] = max(0, new_height)
+                    
+                    param_idx += 2
+                
+                return -compute_c2(test_func)  # Negative because we minimize
+            
+            # Try optimization with fewer iterations for speed
+            try:
+                # For better performance, use just a few iterations
+                result = differential_evolution(obj_func, bounds, maxiter=20, popsize=5, seed=42, polish=False)
+                if not result.success:
+                    # Fallback to simple hill climbing if DE fails
+                    return simple_hill_climb(initial_func)
+                
+                optimized_params = result.x
+                test_func = current_func.copy()
+                param_idx = 0
+                
+                for peak_idx in top_peaks:
+                    pos_adjust = optimized_params[param_idx]
+                    height_adjust = optimized_params[param_idx+1]
+                    new_pos = max(-0.25, min(0.25, x[peak_idx] + pos_adjust))
+                    new_height = max(0, test_func[peak_idx] * (1.0 + height_adjust))
+                    test_func[peak_idx] = max(0, new_height)
+                    param_idx += 2
+                
+                # Evaluate and update best
+                test_c2 = compute_c2(test_func)
+                if test_c2 > best_c2:
+                    best_c2 = test_c2
+                    best_func = test_func.copy()
+                    
+            except:
+                # Fallback to simple hill climbing
+                return simple_hill_climb(initial_func)
+        
+        return best_func.tolist()
+
+    def simple_hill_climb(initial_func):
+        """Simple hill-climbing optimization as fallback"""
+        current_func = np.array(initial_func)
+        best_c2 = compute_c2(current_func)
+        best_func = current_func.copy()
+        
+        # Multiple passes of hill climbing
+        for pass_num in range(3):
+            for _ in range(100):
+                test_func = current_func.copy()
+                
+                # Randomly select index and perturb
+                idx = np.random.randint(0, len(test_func))
+                adjustment = np.random.normal(0, 0.02)
+                test_func[idx] = max(0, test_func[idx] + adjustment)
+                
+                # Evaluate
+                test_c2 = compute_c2(test_func)
+                if test_c2 > best_c2:
+                    best_c2 = test_c2
+                    best_func = test_func.copy()
+                    
+            current_func = best_func.copy()
+        
+        return best_func.tolist()
+
+    # Perform optimization
+    try:
+        optimized_func = selective_optimization(f_list)
+        final_func = np.array(optimized_func)
+
+        # Add small amount of noise for robustness
+        noise = np.random.normal(0, 0.005, len(final_func))
+        final_func = final_func + noise
+        final_func = np.maximum(final_func, 0)
+
+        return final_func.tolist()
+
+    except Exception as e:
+        # Fallback to simple approach if anything fails
+        return f_list
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

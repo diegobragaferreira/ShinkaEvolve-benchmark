@@ -1,0 +1,247 @@
+<NAME>
+enhance_simulated_annealing_with_adaptive_temperature
+</NAME>
+
+<DESCRIPTION>
+I'm going to enhance the simulated annealing component of the code with a more sophisticated adaptive cooling schedule that dynamically adjusts the cooling rate based on the optimization progress. The current implementation uses a fixed exponential cooling rate with some minor adaptations, but a more intelligent approach will better balance exploration and exploitation throughout the optimization process. This should help overcome plateaus and find better local maxima.
+
+The key improvements are:
+1. Implement dynamic temperature adjustment based on recent improvement rates
+2. Add more aggressive cooling when progress stalls
+3. Introduce a more responsive adaptation mechanism that monitors convergence behavior
+4. Maintain the existing multi-start strategy but make it more effective
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Simulated Annealing parameters
+            current_temp = 1.0
+            min_temp = 1e-8
+            base_cooling_rate = 0.9995
+            max_iter = 30000
+            accept_threshold = 0.01
+
+            # Initialize best solution
+            sa_best_points = points.copy()
+            sa_best_ratio = compute_min_max_ratio(sa_best_points)
+
+            start_time = time.time()
+            last_improvement = 0
+
+            for iteration in range(max_iter):
+                # Adaptive cooling schedule
+                cooling_rate = base_cooling_rate
+                if iteration - last_improvement > 3000:
+                    # Increase cooling rate if no improvement for a while
+                    cooling_rate = 0.9999
+                elif iteration > 15000:
+                    # Slow down cooling later in optimization for fine-tuning
+                    cooling_rate = 0.9997
+
+                # Cool down temperature
+                current_temp *= cooling_rate
+
+                if current_temp < min_temp:
+                    break
+
+                # Try to make a small random move
+                test_points = sa_best_points.copy()
+
+                # Select random point to perturb
+                point_idx = np.random.randint(0, 14)
+
+                # Make small random perturbation
+                delta = np.random.normal(0, 0.001, 3)
+                test_points[point_idx] += delta
+
+                # Project back to sphere
+                test_points = project_to_sphere(test_points)
+
+                # Compute new ratio
+                test_ratio = compute_min_max_ratio(test_points)
+
+                # Accept or reject based on Metropolis criterion
+                if test_ratio > sa_best_ratio:
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                elif np.random.random() < np.exp((test_ratio - sa_best_ratio) / current_temp):
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+
+                # Local refinement every 3000 iterations
+                if iteration > 0 and iteration % 3000 == 0:
+                    # Apply local optimization to current best solution
+                    def objective(x_flat):
+                        points_test = x_flat.reshape(-1, 3)
+                        distances = pdist(points_test)
+                        min_dist = np.min(distances)
+                        max_dist = np.max(distances)
+                        if max_dist == 0:
+                            return float('inf')
+                        return -min_dist / max_dist
+
+                    def constraint_func(x_flat):
+                        points_test = x_flat.reshape(-1, 3)
+                        norms = np.linalg.norm(points_test, axis=1)
+                        return 1.0 - norms
+
+                    x0 = sa_best_points.flatten()
+                    cons = {'type': 'ineq', 'fun': constraint_func}
+
+                    try:
+                        result = minimize(objective, x0, method='SLSQP',
+                                         constraints=cons,
+                                         options={'maxiter': 100, 'ftol': 1e-6})
+
+                        if result.success:
+                            refined_points = result.x.reshape(-1, 3)
+                            refined_norms = np.linalg.norm(refined_points, axis=1)
+                            if np.max(refined_norms) > 1:
+                                refined_points = refined_points / np.max(refined_norms) * 0.99
+
+                            refined_ratio = compute_min_max_ratio(refined_points)
+                            if refined_ratio > sa_best_ratio:
+                                sa_best_points = refined_points.copy()
+                                sa_best_ratio = refined_ratio
+                                last_improvement = iteration
+                    except:
+                        pass
+
+                # Early stopping if no improvement for long time
+                if iteration - last_improvement > 8000:
+                    break
+=======
+            # Simulated Annealing parameters
+            current_temp = 1.0
+            min_temp = 1e-8
+            base_cooling_rate = 0.9995
+            max_iter = 30000
+            accept_threshold = 0.01
+
+            # Track recent improvements for adaptive cooling
+            recent_improvements = []
+            improvement_window = 1000
+            max_improvement_window = 5000
+
+            # Initialize best solution
+            sa_best_points = points.copy()
+            sa_best_ratio = compute_min_max_ratio(sa_best_points)
+
+            start_time = time.time()
+            last_improvement = 0
+
+            for iteration in range(max_iter):
+                # Adaptive cooling schedule with dynamic adjustment
+                cooling_rate = base_cooling_rate
+
+                # Monitor recent improvements to adjust cooling rate
+                if len(recent_improvements) >= improvement_window:
+                    # Calculate improvement rate in recent iterations
+                    recent_improvement_count = sum(recent_improvements[-improvement_window:])
+                    improvement_rate = recent_improvement_count / improvement_window
+
+                    # If improvement rate is low, increase cooling rate to escape local optima
+                    if improvement_rate < 0.05:  # Less than 5% accepted improvements
+                        cooling_rate = min(0.99995, cooling_rate * 1.05)  # Aggressive cooling
+                    elif improvement_rate < 0.15:  # Between 5% and 15% improvement rate
+                        cooling_rate = min(0.9998, cooling_rate * 1.02)  # Medium cooling
+                    else:  # High improvement rate
+                        cooling_rate = max(0.9994, cooling_rate * 0.98)  # Slower cooling
+
+                # More aggressive early cooling, slower later
+                if iteration < 10000:
+                    cooling_rate = min(cooling_rate, 0.9998)
+                elif iteration < 20000:
+                    cooling_rate = min(cooling_rate, 0.9997)
+                else:
+                    cooling_rate = min(cooling_rate, 0.9996)
+
+                # Cool down temperature
+                current_temp *= cooling_rate
+
+                if current_temp < min_temp:
+                    break
+
+                # Try to make a small random move
+                test_points = sa_best_points.copy()
+
+                # Select random point to perturb
+                point_idx = np.random.randint(0, 14)
+
+                # Make small random perturbation - adapt to current temp
+                delta = np.random.normal(0, 0.001 * current_temp, 3)
+                test_points[point_idx] += delta
+
+                # Project back to sphere
+                test_points = project_to_sphere(test_points)
+
+                # Compute new ratio
+                test_ratio = compute_min_max_ratio(test_points)
+
+                # Accept or reject based on Metropolis criterion
+                if test_ratio > sa_best_ratio:
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                    # Record improvement
+                    recent_improvements.append(1)
+                elif np.random.random() < np.exp((test_ratio - sa_best_ratio) / current_temp):
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                    # Record improvement
+                    recent_improvements.append(1)
+                else:
+                    # Record no improvement
+                    recent_improvements.append(0)
+
+                # Keep recent improvements window fixed
+                if len(recent_improvements) > max_improvement_window:
+                    recent_improvements.pop(0)
+
+                # Local refinement every 2000 iterations
+                if iteration > 0 and iteration % 2000 == 0:
+                    # Apply local optimization to current best solution
+                    def objective(x_flat):
+                        points_test = x_flat.reshape(-1, 3)
+                        distances = pdist(points_test)
+                        min_dist = np.min(distances)
+                        max_dist = np.max(distances)
+                        if max_dist == 0:
+                            return float('inf')
+                        return -min_dist / max_dist
+
+                    def constraint_func(x_flat):
+                        points_test = x_flat.reshape(-1, 3)
+                        norms = np.linalg.norm(points_test, axis=1)
+                        return 1.0 - norms
+
+                    x0 = sa_best_points.flatten()
+                    cons = {'type': 'ineq', 'fun': constraint_func}
+
+                    try:
+                        result = minimize(objective, x0, method='SLSQP',
+                                         constraints=cons,
+                                         options={'maxiter': 100, 'ftol': 1e-6})
+
+                        if result.success:
+                            refined_points = result.x.reshape(-1, 3)
+                            refined_norms = np.linalg.norm(refined_points, axis=1)
+                            if np.max(refined_norms) > 1:
+                                refined_points = refined_points / np.max(refined_norms) * 0.99
+
+                            refined_ratio = compute_min_max_ratio(refined_points)
+                            if refined_ratio > sa_best_ratio:
+                                sa_best_points = refined_points.copy()
+                                sa_best_ratio = refined_ratio
+                                last_improvement = iteration
+                    except:
+                        pass
+
+                # Early stopping if no improvement for long time
+                if iteration - last_improvement > 10000:
+                    break
+>>>>>>> REPLACE
+</DIFF>

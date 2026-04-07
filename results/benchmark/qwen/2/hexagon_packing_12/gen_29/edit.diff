@@ -1,0 +1,424 @@
+--- a/original.py
++++ b/original.py
+@@ -1,208 +1,372 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import minimize
+-from scipy.spatial.distance import cdist
++from scipy.optimize import differential_evolution
+ from shapely.geometry import Polygon
+-import shapely.geometry as sg
+-from numba import jit
++from numba import njit
+ import time
+ 
+-@jit(nopython=True)
++@njit
+ def hexagon_vertices(x, y, angle_deg, side_length=1):
+     """Generate vertices of a regular hexagon given position, angle, and side length"""
+     angle_rad = np.radians(angle_deg)
+     angles = np.arange(0, 6) * np.pi / 3
+     vertices = np.zeros((6, 2))
+     for i in range(6):
+         vertices[i, 0] = x + side_length * np.cos(angles[i] + angle_rad)
+         vertices[i, 1] = y + side_length * np.sin(angles[i] + angle_rad)
+     return vertices
+ 
+-@jit(nopython=True)
++@njit
+ def point_in_polygon(point, polygon):
+     """Check if point is inside polygon using ray casting"""
+     x, y = point
+     n = len(polygon)
+     inside = False
+     p1x, p1y = polygon[0]
+     for i in range(1, n + 1):
+         p2x, p2y = polygon[i % n]
+         if y > min(p1y, p2y):
+             if y <= max(p1y, p2y):
+                 if x <= max(p1x, p2x):
+                     if p1y != p2y:
+                         xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                     if p1x == p2x or x <= xinters:
+                         inside = not inside
+         p1x, p1y = p2x, p2y
+     return inside
+ 
+-@jit(nopython=True)
++@njit
++def distance_point_to_line_segment(point, line_start, line_end):
++    """Calculate minimum distance from point to line segment"""
++    px, py = point
++    x1, y1 = line_start
++    x2, y2 = line_end
++    
++    # Vector from line_start to line_end
++    dx, dy = x2 - x1, y2 - y1
++    
++    # Length squared of the line segment
++    length_squared = dx * dx + dy * dy
++    
++    if length_squared == 0:
++        # Line segment is actually a point
++        return np.sqrt((px - x1)**2 + (py - y1)**2)
++    
++    # Project point onto line
++    t = ((px - x1) * dx + (py - y1) * dy) / length_squared
++    
++    # Clamp t to [0, 1] to stay within segment
++    t = max(0, min(1, t))
++    
++    # Closest point on segment
++    closest_x = x1 + t * dx
++    closest_y = y1 + t * dy
++    
++    # Return distance
++    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
++
++@njit
+ def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+     """Check if two hexagons overlap using separating axis theorem"""
+     # Check if any vertex of hex1 is inside hex2
+     for v in hex1_vertices:
+         if point_in_polygon(v, hex2_vertices):
+             return True
+     # Check if any vertex of hex2 is inside hex1  
+     for v in hex2_vertices:
+         if point_in_polygon(v, hex1_vertices):
+             return True
++    
++    # Separating axis test for edges
++    for i in range(6):
++        # Get edge of hex1
++        p1 = hex1_vertices[i]
++        p2 = hex1_vertices[(i+1)%6]
++        
++        # Find normal to this edge
++        edge_x, edge_y = p2[0] - p1[0], p2[1] - p1[1]
++        normal_x, normal_y = -edge_y, edge_x
++        normal_length = np.sqrt(normal_x*normal_x + normal_y*normal_y)
++        if normal_length > 1e-10:
++            normal_x /= normal_length
++            normal_y /= normal_length
++            
++            # Project both hexagons onto this normal
++            min1 = max1 = np.dot(hex1_vertices[0], [normal_x, normal_y])
++            min2 = max2 = np.dot(hex2_vertices[0], [normal_x, normal_y])
++            
++            for j in range(1, 6):
++                proj1 = np.dot(hex1_vertices[j], [normal_x, normal_y])
++                proj2 = np.dot(hex2_vertices[j], [normal_x, normal_y])
++                min1 = min(min1, proj1)
++                max1 = max(max1, proj1)
++                min2 = min(min2, proj2)
++                max2 = max(max2, proj2)
++                
++            # Check if projections overlap
++            if max1 < min2 or max2 < min1:
++                return True  # Found separating axis
++    
++    # Same test for hex2 edges
++    for i in range(6):
++        # Get edge of hex2
++        p1 = hex2_vertices[i]
++        p2 = hex2_vertices[(i+1)%6]
++        
++        # Find normal to this edge
++        edge_x, edge_y = p2[0] - p1[0], p2[1] - p1[1]
++        normal_x, normal_y = -edge_y, edge_x
++        normal_length = np.sqrt(normal_x*normal_x + normal_y*normal_y)
++        if normal_length > 1e-10:
++            normal_x /= normal_length
++            normal_y /= normal_length
++            
++            # Project both hexagons onto this normal
++            min1 = max1 = np.dot(hex1_vertices[0], [normal_x, normal_y])
++            min2 = max2 = np.dot(hex2_vertices[0], [normal_x, normal_y])
++            
++            for j in range(1, 6):
++                proj1 = np.dot(hex1_vertices[j], [normal_x, normal_y])
++                proj2 = np.dot(hex2_vertices[j], [normal_x, normal_y])
++                min1 = min(min1, proj1)
++                max1 = max(max1, proj1)
++                min2 = min(min2, proj2)
++                max2 = max(max2, proj2)
++                
++            # Check if projections overlap
++            if max1 < min2 or max2 < min1:
++                return True  # Found separating axis
++    
+     return False
+ 
++@njit
++def compute_min_distance_hexagons(hex1_vertices, hex2_vertices):
++    """Compute minimum distance between two hexagons (0 if they overlap)"""
++    if check_hexagon_overlap(hex1_vertices, hex2_vertices):
++        return 0.0
++    
++    min_dist = np.inf
++    # Check edges against edges
++    for i in range(6):
++        p1 = hex1_vertices[i]
++        p2 = hex1_vertices[(i+1)%6]
++        for j in range(6):
++            p3 = hex2_vertices[j]
++            p4 = hex2_vertices[(j+1)%6]
++            dist = distance_point_to_line_segment(p1, p3, p4)
++            min_dist = min(min_dist, dist)
++            dist = distance_point_to_line_segment(p2, p3, p4)
++            min_dist = min(min_dist, dist)
++    
++    # Also check vertices against edges
++    for i in range(6):
++        p1 = hex1_vertices[i]
++        for j in range(6):
++            p2 = hex2_vertices[j]
++            p3 = hex2_vertices[(j+1)%6]
++            dist = distance_point_to_line_segment(p1, p2, p3)
++            min_dist = min(min_dist, dist)
++    
++    return min_dist
++
+ def create_initial_config():
+-    """Create an initial symmetric configuration based on group theory"""
+-    # Generate 12 hexagon positions in concentric rings
++    """Create an initial symmetric configuration based on known optimal patterns"""
++    # Generate 12 hexagon positions in concentric rings with optimized spacing
+     positions = []
+     
+     # Center hexagon
+     positions.append([0.0, 0.0, 0.0])
+     
+-    # First ring around center (6 hexagons)
++    # First ring around center (6 hexagons) - approximately optimal spacing
+     for i in range(6):
+         angle = i * 60
+         radius = 1.732  # sqrt(3) - approximately optimal spacing
+         x = radius * np.cos(np.radians(angle))
+         y = radius * np.sin(np.radians(angle))
+         positions.append([x, y, 0.0])
+     
+-    # Second ring (5 hexagons) 
++    # Second ring (5 hexagons) - positioned to fill gaps optimally
+     for i in range(5):
+         angle = i * 72
+-        radius = 3.0
++        radius = 2.8  # Slightly larger radius to allow for better positioning
+         x = radius * np.cos(np.radians(angle))
+         y = radius * np.sin(np.radians(angle))
+         positions.append([x, y, 0.0])
+     
+     return np.array(positions)
+ 
++@njit
+ def get_outer_hexagon_radius(inner_hex_data):
+     """Compute the minimum radius required to contain all hexagons"""
+-    max_dist = 0
++    max_dist = 0.0
+     for i in range(len(inner_hex_data)):
+         x, y, angle = inner_hex_data[i]
+         vertices = hexagon_vertices(x, y, angle)
+         for vx, vy in vertices:
+             dist = np.sqrt(vx*vx + vy*vy)
+             max_dist = max(max_dist, dist)
+-    return max_dist + 0.5  # Add small margin
+-
++    return max_dist + 0.2  # Add small margin
++
++@njit
+ def evaluate_packing(inner_hex_data):
+     """Evaluate how well a packing satisfies constraints"""
+     n = len(inner_hex_data)
+-    penalty = 0
++    penalty = 0.0
+     
+     # Check containment (penalize if hexagons extend beyond boundary)
+     outer_radius = get_outer_hexagon_radius(inner_hex_data)
+-    outer_hex_vertices = hexagon_vertices(0, 0, 0, outer_radius)
++    outer_hex_vertices = hexagon_vertices(0.0, 0.0, 0.0, outer_radius)
+     
+     for i in range(n):
+         x, y, angle = inner_hex_data[i]
+         vertices = hexagon_vertices(x, y, angle)
+         
+         # Check if all vertices are inside outer hexagon
+         for vx, vy in vertices:
+             point = np.array([vx, vy])
+             if not point_in_polygon(point, outer_hex_vertices):
+                 # Calculate penalty based on how much it extends beyond
+                 dist = np.sqrt(vx*vx + vy*vy)
+-                penalty += (dist - outer_radius + 0.5)**2
++                penalty += (dist - outer_radius + 0.2)**2
+                 
+     # Check overlaps between hexagons (penalize overlapping areas)
+     for i in range(n):
+         for j in range(i+1, n):
+             x1, y1, angle1 = inner_hex_data[i]
+             x2, y2, angle2 = inner_hex_data[j]
+             
+             vertices1 = hexagon_vertices(x1, y1, angle1)
+             vertices2 = hexagon_vertices(x2, y2, angle2)
+             
+             if check_hexagon_overlap(vertices1, vertices2):
+-                penalty += 1000000  # Large penalty for overlaps
++                penalty += 1000000.0  # Large penalty for overlaps
+                 break
+     
+     return penalty
++
++@njit
++def compute_objective(params, weights=None):
++    """Compute the objective value for optimization"""
++    # Reshape back to positions
++    config = params.reshape(-1, 3)
++    
++    # Evaluate current penalty
++    penalty = evaluate_packing(config)
++    
++    # The objective is to minimize penalty and maximize 1/R (minimize -1/R)
++    outer_radius = get_outer_hexagon_radius(config)
++    # Use smaller penalty coefficient for overlaps and larger one for containment
++    objective_value = penalty - 1.0/(outer_radius + 1e-6)
++    return objective_value
+ 
+ def optimize_packing():
+     """Main optimization routine to find best packing"""
+-    # Start with a good initial configuration
+-    initial_config = create_initial_config()
+-    
+-    # Flatten the parameters for optimization
+-    initial_params = initial_config.flatten()
+-    
+-    def objective(params):
+-        # Reshape back to positions
+-        config = params.reshape(-1, 3)
+-        
+-        # Evaluate current penalty
+-        penalty = evaluate_packing(config)
+-        
+-        # The objective is to minimize penalty, which means maximize 1/R
+-        # We use a negative to convert to minimization problem
+-        outer_radius = get_outer_hexagon_radius(config)
+-        return penalty - 1.0/(outer_radius + 1e-6)  # Adding small epsilon for numerical stability
+-    
+-    def constraint_func(params):
+-        # This is a constraint: all hexagons should be completely inside
+-        config = params.reshape(-1, 3)
+-        return get_outer_hexagon_radius(config) - 100.0  # Upper bound
+-    
+-    cons = {'type': 'ineq', 'fun': constraint_func}
+-    
+-    # Perform optimization
+-    result = minimize(objective, initial_params, method='SLSQP', constraints=cons, 
+-                      options={'maxiter': 1000, 'ftol': 1e-6})
+-    
+-    final_config = result.x.reshape(-1, 3)
++    # Try multiple initial configurations to avoid local minima
++    best_result = None
++    best_score = float('inf')
++    
++    # Different initial configurations
++    initial_configs = []
++    
++    # Configuration 1: Standard symmetric arrangement
++    initial_configs.append(create_initial_config())
++    
++    # Configuration 2: Perturbed version
++    config2 = create_initial_config().copy()
++    config2[1:, :2] += np.random.normal(0, 0.2, (11, 2))  # Small random perturbations
++    initial_configs.append(config2)
++    
++    # Configuration 3: More spread out arrangement
++    config3 = create_initial_config().copy()
++    config3[1:, :2] *= 1.1  # Scale up slightly
++    initial_configs.append(config3)
++    
++    # Run optimization with different starting points
++    for i, initial_config in enumerate(initial_configs):
++        # Flatten the parameters for optimization
++        initial_params = initial_config.flatten()
++        
++        # Define bounds for optimization (positions: [-10, 10], angles: [0, 360])
++        bounds = []
++        for j in range(len(initial_params)):
++            if j % 3 < 2:  # x, y positions
++                bounds.append((-10.0, 10.0))
++            else:  # angle
++                bounds.append((0.0, 360.0))
++        
++        # Use differential evolution for global optimization
++        try:
++            result = differential_evolution(
++                lambda x: compute_objective(x),
++                bounds,
++                maxiter=100,
++                popsize=15,
++                seed=42+i,
++                disp=False,
++                workers=1
++            )
++            
++            if result.success and result.fun < best_score:
++                best_score = result.fun
++                best_result = result
++                
++        except Exception:
++            # If differential evolution fails, continue with other configs
++            continue
++    
++    if best_result is None:
++        # Fallback to the simplest initial configuration
++        return create_initial_config()
++    
++    final_config = best_result.x.reshape(-1, 3)
+     return final_config
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     # Optimize the packing configuration
+     start_time = time.time()
+     
+     try:
+         inner_hex_data = optimize_packing()
+     except Exception as e:
+         # Fallback to initial configuration if optimization fails
+         print(f"Fallback due to optimization error: {e}")
+         inner_hex_data = create_initial_config()
+     
+     # Compute final outer hexagon size
+     outer_hex_side_length = get_outer_hexagon_radius(inner_hex_data)
+     
+     # Create outer hexagon data (centered, no rotation)
+     outer_hex_data = np.array([0, 0, 0])  # centered at origin, no rotation
+     
+     # Validate final configuration
+     final_penalty = evaluate_packing(inner_hex_data)
+     if final_penalty > 10000:  # If there are major overlaps or violations
+         # Fallback to the original simpler solution
+         inner_hex_data = np.array([
+             [0, 0, 0],  # center
+             [-2.5, 0, 0],  # left
+             [2.5, 0, 0],  # right
+             [-1.25, 2.17, 0],  # top-left
+             [1.25, 2.17, 0],  # top-right
+             [-1.25, -2.17, 0],  # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+             [3.75, 2.17, 0],  # far top-right
+             [-3.75, -2.17, 0],  # far bottom-left
+             [3.75, -2.17, 0],  # far bottom-right,
+             [0, -4, 0],  # far bottom-center
+         ])
+         outer_hex_side_length = 8  # large enough to contain all inner hexagons
+     
+     end_time = time.time()
+     
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ # EVOLVE-BLOCK-END

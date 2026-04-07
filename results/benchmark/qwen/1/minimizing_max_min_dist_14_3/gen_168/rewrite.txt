@@ -1,0 +1,219 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+from scipy.spatial import SphericalVoronoi
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    def fibonacci_spiral_on_sphere(n):
+        """Generate points on sphere using Fibonacci spiral method"""
+        points = []
+        golden_angle = np.pi * (3 - np.sqrt(5))
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            theta = golden_angle * i  # golden angle increment
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            points.append([x, y, z])
+        return np.array(points)
+    
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        safe_norms = np.where(norms == 0, 1, norms)
+        return points / safe_norms
+    
+    def calculate_min_max_ratio(points):
+        """Calculate the minimum-to-maximum distance ratio"""
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return min_dist / max_dist
+    
+    def spherical_voronoi_quality(points):
+        """Evaluate quality based on spherical Voronoi diagram properties"""
+        # Normalize points
+        points = normalize_to_unit_sphere(points)
+        
+        try:
+            # Create spherical Voronoi diagram
+            sv = SphericalVoronoi(points, radius=1.0, center=np.zeros(3))
+            
+            # Calculate Voronoi cell areas
+            cell_areas = sv.voronoi_regions_area()
+            
+            # Return variance of cell areas (lower variance = more uniform distribution)
+            return np.var(cell_areas)
+        except:
+            # Fallback if Voronoi computation fails
+            return np.inf
+    
+    def adaptive_objective_with_regularization(points_flat, phase=1):
+        """Objective function with adaptive regularization based on optimization phase"""
+        points = points_flat.reshape(-1, 3)
+        points = normalize_to_unit_sphere(points)
+        
+        # Standard distance ratio
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0:
+            ratio = 0.0
+        else:
+            ratio = min_dist / max_dist
+            
+        # Add regularization term based on Voronoi quality
+        voronoi_penalty = spherical_voronoi_quality(points)
+        
+        # Phase-dependent regularization weight
+        if phase == 1:  # Initial coarse phase
+            regularization_weight = 0.005
+        elif phase == 2:  # Middle refinement phase  
+            regularization_weight = 0.01
+        else:  # Final fine-tune phase
+            regularization_weight = 0.02
+            
+        # Combine objective (minimize negative ratio + regularization)
+        return -(ratio - regularization_weight * voronoi_penalty)
+    
+    def constraint_sphere(points_flat):
+        """Constraint function for unit sphere constraint"""
+        points = points_flat.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0  # Should be zero for unit sphere
+    
+    def multi_phase_optimization(initial_points):
+        """Perform multi-phase optimization for better convergence"""
+        points = initial_points.copy()
+        points_flat = points.flatten()
+        
+        # Phase 1: Coarse global search with relaxed tolerances
+        bounds = [(-1, 1) for _ in range(42)]
+        
+        result1 = minimize(
+            lambda x: adaptive_objective_with_regularization(x, phase=1),
+            points_flat,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 100, 'ftol': 1e-6, 'gtol': 1e-6},
+            tol=1e-6
+        )
+        
+        # Phase 2: Medium refinement with stricter tolerances
+        points_flat2 = result1.x
+        result2 = minimize(
+            lambda x: adaptive_objective_with_regularization(x, phase=2),
+            points_flat2,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 200, 'ftol': 1e-9, 'gtol': 1e-9},
+            tol=1e-9
+        )
+        
+        # Phase 3: Fine-tuned optimization with highest precision
+        points_flat3 = result2.x
+        result3 = minimize(
+            lambda x: adaptive_objective_with_regularization(x, phase=3),
+            points_flat3,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+            tol=1e-12
+        )
+        
+        return result3.x.reshape(-1, 3)
+    
+    # Multi-start approach with diverse initializations
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Initialization strategies
+    np.random.seed(42)
+    
+    # Strategy 1: Fibonacci spiral
+    init_fibonacci = fibonacci_spiral_on_sphere(14)
+    
+    # Strategy 2: Random points on sphere
+    init_random = np.random.rand(14, 3) * 2 - 1
+    init_random = normalize_to_unit_sphere(init_random)
+    
+    # Strategy 3: Perturbed Fibonacci
+    init_perturbed = init_fibonacci + np.random.normal(0, 0.05, init_fibonacci.shape)
+    init_perturbed = normalize_to_unit_sphere(init_perturbed)
+    
+    # Strategy 4: Sobol sequence points (if available)
+    try:
+        from scipy.stats import qmc
+        sampler = qmc.Sobol(d=3, seed=42)
+        sobol_points = sampler.random(14)
+        sobol_points = sobol_points * 2 - 1
+        init_sobol = normalize_to_unit_sphere(sobol_points)
+    except ImportError:
+        # Fallback if qmc not available
+        init_sobol = init_fibonacci
+    
+    # Strategy 5: Grid-based initialization
+    grid_points = []
+    for i in range(3):
+        for j in range(3):
+            for k in range(3):
+                if len(grid_points) < 14:
+                    x = i / 2.0
+                    y = j / 2.0
+                    z = k / 2.0
+                    grid_points.append([x, y, z])
+    init_grid = np.array(grid_points[:14])
+    init_grid = normalize_to_unit_sphere(init_grid)
+    
+    initializations = [
+        ("fibonacci", init_fibonacci),
+        ("random", init_random),
+        ("perturbed", init_perturbed),
+        ("sobol", init_sobol),
+        ("grid", init_grid)
+    ]
+    
+    # Run optimization from each initialization
+    for init_name, initial_points in initializations:
+        try:
+            # Multi-phase optimization for this initialization
+            refined_points = multi_phase_optimization(initial_points)
+            
+            # Evaluate final performance
+            final_ratio = calculate_min_max_ratio(refined_points)
+            
+            if final_ratio > best_ratio:
+                best_ratio = final_ratio
+                best_points = refined_points.copy()
+                
+        except Exception as e:
+            # Continue with other initializations if one fails
+            continue
+    
+    # If no good solution found, fallback to default
+    if best_points is None:
+        # Simple Fibonacci approach with multi-phase optimization
+        initial_points = fibonacci_spiral_on_sphere(14)
+        best_points = multi_phase_optimization(initial_points)
+    
+    # Final normalization to ensure points are on unit sphere
+    final_points = normalize_to_unit_sphere(best_points)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

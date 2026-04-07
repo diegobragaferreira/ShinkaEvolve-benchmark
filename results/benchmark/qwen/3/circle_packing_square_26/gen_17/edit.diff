@@ -1,0 +1,280 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,266 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial import Voronoi, distance_matrix
++from scipy.optimize import minimize
++from sklearn.cluster import KMeans
++import random
+ 
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
+-
+-def circle_packing26() -> np.ndarray:
++def voronoi_guided_evolution() -> np.ndarray:
+     """
+-    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+-
++    Places 26 non-overlapping circles in the unit square to maximize the sum of radii.
++    
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    np.random.seed(42)
++    random.seed(42)
++    
++    n_circles = 26
++    max_iterations = 1000
++    population_size = 50
++    
++    # Generate initial Voronoi-based configuration
++    def generate_voronoi_initial_population():
++        # Create a grid of seed points
++        grid_points = []
++        n_grid = int(np.ceil(np.sqrt(n_circles)))
++        
++        for i in range(n_grid):
++            for j in range(n_grid):
++                x = (i + 0.5) / n_grid
++                y = (j + 0.5) / n_grid
++                # Add slight randomness to avoid perfect grid
++                x += (np.random.random() - 0.5) * 0.1
++                y += (np.random.random() - 0.5) * 0.1
++                # Keep within bounds
++                x = max(0.01, min(0.99, x))
++                y = max(0.01, min(0.99, y))
++                grid_points.append([x, y])
++        
++        # Ensure we have enough points
++        while len(grid_points) < n_circles:
++            grid_points.append([np.random.random(), np.random.random()])
++            
++        # Generate Voronoi diagram
++        vor = Voronoi(grid_points[:n_circles])
++        
++        # Extract centroids as initial positions
++        positions = []
++        for i in range(n_circles):
++            if i < len(vor.points):
++                positions.append(vor.points[i])
++            else:
++                # Fallback to random positions
++                positions.append([np.random.random(), np.random.random()])
++        
++        # Initial radii based on Voronoi cell areas
++        radii = []
++        for i in range(n_circles):
++            # Estimate radius based on distance to neighbors or area
++            if i < len(vor.points):
++                # Simple heuristic: use minimum distance to neighbors
++                min_dist = float('inf')
++                for j in range(len(vor.points)):
++                    if i != j:
++                        dist = np.linalg.norm(np.array(positions[i]) - np.array(positions[j]))
++                        min_dist = min(min_dist, dist)
++                # Set initial radius as 1/4 of minimum neighbor distance, bounded by containment constraints
++                radius = min(0.1, min_dist/4)
++                radius = max(0.001, min(0.5, radius))
++            else:
++                radius = 0.05
++            radii.append(radius)
++            
++        return np.array(positions), np.array(radii)
++    
++    # Check if circles are valid (within bounds and non-overlapping)
++    def is_valid(circles):
++        # Check containment
++        for i in range(len(circles)):
++            x, y, r = circles[i]
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                return False
++        
++        # Check overlaps
++        for i in range(len(circles)):
++            for j in range(i+1, len(circles)):
++                x1, y1, r1 = circles[i]
++                x2, y2, r2 = circles[j]
++                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                if dist < r1 + r2:
++                    return False
++        return True
++    
++    # Calculate total radius sum
++    def total_radius_sum(circles):
++        return sum(circles[:, 2])
++    
++    # Objective function for local optimization
++    def objective(params, positions, radii):
++        # params = [x1, y1, r1, x2, y2, r2, ...]
++        circles = []
++        for i in range(0, len(params), 3):
++            circles.append([params[i], params[i+1], params[i+2]])
++        circles = np.array(circles)
++        
++        # Check validity
++        if not is_valid(circles):
++            return 1e10  # Large penalty for invalid configurations
++            
++        return -total_radius_sum(circles)  # Negative because we want to maximize
++    
++    # Constraints for optimization
++    def containment_constraint(params, i):
++        x, y, r = params[3*i:3*i+3]
++        return [
++            x - r,           # x - r >= 0
++            1 - x - r,       # 1 - x - r >= 0
++            y - r,           # y - r >= 0
++            1 - y - r        # 1 - y - r >= 0
++        ]
++    
++    # Generate initial population
++    initial_positions, initial_radii = generate_voronoi_initial_population()
++    
++    # Create initial population
++    population = []
++    for _ in range(population_size):
++        # Slightly perturb the initial configuration
++        perturbed_positions = initial_positions + (np.random.random((n_circles, 2)) - 0.5) * 0.05
++        perturbed_radii = initial_radii * (0.9 + np.random.random(n_circles) * 0.2)
++        
++        # Keep within bounds
++        perturbed_positions = np.clip(perturbed_positions, 0.001, 0.999)
++        
++        # Refine radii to ensure containment
++        for i in range(n_circles):
++            max_radius = min(perturbed_positions[i][0], 1-perturbed_positions[i][0],
++                           perturbed_positions[i][1], 1-perturbed_positions[i][1])
++            perturbed_radii[i] = min(max_radius, perturbed_radii[i])
++        
++        individual = np.column_stack([perturbed_positions, perturbed_radii])
++        population.append(individual)
++    
++    # Evolutionary process
++    best_individual = None
++    best_score = -float('inf')
++    
++    # Use a simplified evolutionary approach with local refinement
++    for iteration in range(max_iterations):
++        # Evaluate current population
++        scores = []
++        for individual in population:
++            if is_valid(individual):
++                score = total_radius_sum(individual)
++                scores.append(score)
++            else:
++                scores.append(-1000)  # Penalty for invalid configurations
++        
++        # Find best individual
++        max_score_idx = np.argmax(scores)
++        if scores[max_score_idx] > best_score:
++            best_score = scores[max_score_idx]
++            best_individual = population[max_score_idx].copy()
++        
++        # Create new population through selection and mutation
++        selected_indices = np.argsort(scores)[-population_size//2:]
++        new_population = [population[i] for i in selected_indices]
++        
++        # Generate new individuals through mutation
++        while len(new_population) < population_size:
++            # Select two parents
++            parent1_idx = np.random.choice(selected_indices)
++            parent2_idx = np.random.choice(selected_indices)
++            
++            parent1 = population[parent1_idx]
++            parent2 = population[parent2_idx]
++            
++            # Crossover (blend)
++            alpha = np.random.random()
++            child = parent1.copy()
++            for i in range(n_circles):
++                # Blend positions and radii
++                child[i, 0] = alpha * parent1[i, 0] + (1 - alpha) * parent2[i, 0]
++                child[i, 1] = alpha * parent1[i, 1] + (1 - alpha) * parent2[i, 1]
++                child[i, 2] = alpha * parent1[i, 2] + (1 - alpha) * parent2[i, 2]
++            
++            # Mutation (add small random changes)
++            mutation_strength = 0.02
++            for i in range(n_circles):
++                child[i, 0] += (np.random.random() - 0.5) * mutation_strength
++                child[i, 1] += (np.random.random() - 0.5) * mutation_strength
++                child[i, 2] += (np.random.random() - 0.5) * mutation_strength * 0.5
++                
++                # Keep within bounds
++                child[i, 0] = np.clip(child[i, 0], 0.001, 0.999)
++                child[i, 1] = np.clip(child[i, 1], 0.001, 0.999)
++                max_radius = min(child[i, 0], 1-child[i, 0], child[i, 1], 1-child[i, 1])
++                child[i, 2] = np.clip(child[i, 2], 0.001, max_radius)
++            
++            # Local optimization
++            try:
++                # Flatten parameters
++                flat_params = []
++                for i in range(n_circles):
++                    flat_params.extend([child[i, 0], child[i, 1], child[i, 2]])
++                
++                # Optimize with constraints
++                result = minimize(objective, flat_params, args=(child[:, :2], child[:, 2]),
++                                method='SLSQP', 
++                                constraints=[{'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[0]},
++                                           {'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[1]},
++                                           {'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[2]},
++                                           {'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[3]}],
++                                options={'maxiter': 50})
++                
++                # Reconstruct optimized individual
++                optimized_child = child.copy()
++                for i in range(n_circles):
++                    optimized_child[i, 0] = result.x[3*i]
++                    optimized_child[i, 1] = result.x[3*i+1]
++                    optimized_child[i, 2] = result.x[3*i+2]
++                
++                # If valid, add to population
++                if is_valid(optimized_child):
++                    new_population.append(optimized_child)
++                else:
++                    # Fall back to regular child
++                    new_population.append(child)
++                    
++            except Exception as e:
++                # If optimization fails, just add the child
++                new_population.append(child)
++        
++        population = new_population[:population_size]
++    
++    # Final refinement on best solution
++    if best_individual is not None:
++        # Local optimization on best solution
++        try:
++            flat_params = []
++            for i in range(n_circles):
++                flat_params.extend([best_individual[i, 0], best_individual[i, 1], best_individual[i, 2]])
++            
++            result = minimize(objective, flat_params, args=(best_individual[:, :2], best_individual[:, 2]),
++                            method='SLSQP',
++                            constraints=[{'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[0]},
++                                       {'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[1]},
++                                       {'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[2]},
++                                       {'type': 'ineq', 'fun': lambda p, idx=i: containment_constraint(p, idx)[3]}],
++                            options={'maxiter': 100})
++            
++            final_individual = best_individual.copy()
++            for i in range(n_circles):
++                final_individual[i, 0] = result.x[3*i]
++                final_individual[i, 1] = result.x[3*i+1]
++                final_individual[i, 2] = result.x[3*i+2]
++            
++            if is_valid(final_individual):
++                return final_individual
++        except:
++            pass
++    
++    # Return the best found solution
++    return best_individual if best_individual is not None else np.zeros((n_circles, 3))
+ 
+ # EVOLVE-BLOCK-END

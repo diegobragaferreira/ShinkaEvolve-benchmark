@@ -1,0 +1,269 @@
+<NAME>
+enhance_gaussian_peak_distribution
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a simple logarithmic distribution for peak positions, but we can improve this by implementing a more sophisticated distribution that better covers the domain while maintaining the beneficial properties of Gaussian peaks. The key insight is to use a combination of strategic placement (to avoid clustering) and adaptive sampling that concentrates more peaks in regions where they're likely to contribute most to the autoconvolution profile.
+
+This change enhances the peak distribution strategy by:
+1. Using a more sophisticated spacing scheme that balances coverage and avoids clustering
+2. Adding diversity to peak parameters through better randomization
+3. Incorporating a more adaptive approach that considers the expected contribution of each peak
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_gaussian_construction(n_steps: int = 1000) -> List[float]:
+    """
+    Construct step function using adaptive Gaussian peak building approach.
+    This method builds peaks strategically to maximize C2 while maintaining
+    good numerical properties.
+    """
+    # Domain setup
+    domain_width = 0.5
+    domain_center = 0.0
+    step_width = domain_width / n_steps
+
+    # Start with a few well-placed Gaussian peaks
+    # Using logarithmic spacing to distribute peaks effectively
+    n_peaks = 5  # Start with 5 peaks
+
+    # Initialize peaks with positions based on logarithmic distribution
+    # to avoid clustering at edges
+    peak_positions = []
+    for i in range(n_peaks):
+        # Logarithmic distribution to get more points near center and fewer at edges
+        # Map from 0-1 to -0.25 to 0.25 with logarithmic spacing
+        ratio = (i + 1) / (n_peaks + 1)
+        # Apply exponential mapping to concentrate points near center
+        pos = domain_center + (ratio ** 1.5) * domain_width/2
+        if i % 2 == 0:
+            pos = -pos  # Alternate sides to balance
+        peak_positions.append(pos)
+
+    # Initialize peak parameters [amplitude, center, width]
+    peak_params = []
+    for i in range(n_peaks):
+        amplitude = 50.0
+        center = peak_positions[i]
+        width = 0.05  # Initial width
+        peak_params.extend([amplitude, center, width])
+
+    # Build the function progressively
+    domain_points = np.linspace(-domain_width/2, domain_width/2, n_steps)
+
+    # Helper function to generate Gaussian peaks
+    def gaussian_peak_function(x: np.ndarray, params: List[float]) -> np.ndarray:
+        result = np.zeros_like(x)
+        for i in range(0, len(params), 3):
+            amp, center, width = params[i], params[i+1], params[i+2]
+            width = max(width, 1e-6)  # Ensure positive width
+            result += amp * np.exp(-0.5 * ((x - center) / width)**2)
+        return result
+
+    # Adaptive optimization loop
+    best_c2 = -1.0
+    best_params = list(peak_params)
+    best_function = None
+
+    max_iterations = 500
+    for iteration in range(max_iterations):
+        # Create function from current peak parameters
+        func_values = gaussian_peak_function(domain_points, peak_params)
+
+        # Convert to step function by taking samples
+        step_values = func_values.tolist()
+
+        # Compute C2
+        c2_val = compute_c2(step_values)
+
+        # Check if this is our best result so far
+        if c2_val > best_c2:
+            best_c2 = c2_val
+            best_params = list(peak_params)
+            best_function = step_values.copy()
+
+        # Stop if we're getting close to convergence
+        if iteration > 10 and abs(c2_val - best_c2) < 1e-8:
+            break
+
+        # Apply adaptive adjustments to peak parameters
+        # Only adjust the parameters that are most likely to improve C2
+        for i in range(0, len(peak_params), 3):
+            # Perturb amplitude slightly
+            if i < len(peak_params):  # amplitude
+                old_amp = peak_params[i]
+                # Small random change
+                change_factor = 1.0 + np.random.normal(0, 0.1)
+                new_amp = max(0, old_amp * change_factor)
+                peak_params[i] = new_amp
+
+            # Perturb width slightly
+            if i+2 < len(peak_params):  # width
+                old_width = peak_params[i+2]
+                # Change width by a factor
+                change_factor = 1.0 + np.random.normal(0, 0.1)
+                new_width = max(0.001, old_width * change_factor)
+                peak_params[i+2] = new_width
+
+        # Enforce minimum spacing between peaks to avoid narrow autoconvolution
+        # This helps maintain a flatter autoconvolution profile which improves C2
+        enforce_peak_spacing(peak_params, domain_width)
+
+        # If we're approaching a plateau, make larger adjustments
+        if iteration > 50 and iteration % 20 == 0:
+            # Occasionally do larger changes to explore more space
+            for i in range(0, len(peak_params), 3):
+                if i < len(peak_params):  # amplitude
+                    change_factor = 1.0 + np.random.normal(0, 0.2)  # Larger change
+                    new_amp = max(0, peak_params[i] * change_factor)
+                    peak_params[i] = new_amp
+
+        # Occasionally reduce amplitudes if we see signs of growing ||g||_∞ too much
+        # This prevents overly sharp peaks that hurt C2
+        if iteration > 20 and np.random.rand() < 0.1:
+            # Check if we're getting very peaked g (high ||g||_∞)
+            func_values = gaussian_peak_function(domain_points, peak_params)
+            g = compute_autoconvolution(func_values.tolist())
+            if len(g) > 0:
+                norm_inf = np.max(np.abs(g))
+                if norm_inf > 200:  # If autoconvolution is too peaked
+                    # Reduce all peak amplitudes moderately
+                    for j in range(0, len(peak_params), 3):
+                        if j < len(peak_params):
+                            peak_params[j] *= 0.95
+
+    # Final refinement - use the best parameters found
+    final_func_values = gaussian_peak_function(domain_points, best_params)
+    return final_func_values.tolist()
+=======
+def adaptive_gaussian_construction(n_steps: int = 1000) -> List[float]:
+    """
+    Construct step function using adaptive Gaussian peak building approach.
+    This method builds peaks strategically to maximize C2 while maintaining
+    good numerical properties.
+    """
+    # Domain setup
+    domain_width = 0.5
+    domain_center = 0.0
+    step_width = domain_width / n_steps
+
+    # Start with a few well-placed Gaussian peaks
+    # Using a more sophisticated distribution that improves coverage and avoids clustering
+    n_peaks = 8  # Increased to provide better resolution
+
+    # Initialize peaks with a hybrid distribution:
+    # 1. Concentrate some peaks near center for broad coverage
+    # 2. Distribute others using inverse square root spacing for better edge coverage
+    # 3. Ensure alternating sides for symmetry
+    peak_positions = []
+    for i in range(n_peaks):
+        # Hybrid approach: start with center concentration then edge coverage
+        ratio = (i + 1) / (n_peaks + 1)
+
+        # Use inverse square root for better distribution across domain
+        # This emphasizes points near center and edges while keeping middle sparse
+        pos = domain_center + (np.sqrt(ratio) * domain_width/2) * (-1 if i % 2 == 0 else 1)
+
+        # Add some randomness to break deterministic patterns
+        pos += np.random.uniform(-0.01, 0.01)
+        peak_positions.append(pos)
+
+    # Initialize peak parameters [amplitude, center, width]
+    peak_params = []
+    for i in range(n_peaks):
+        # Better amplitude distribution: vary more widely for better optimization landscape
+        amplitude = 20.0 + np.random.random() * 80.0  # Wider range
+        center = peak_positions[i]
+        # Width should be varied more to explore different scales
+        width = 0.02 + np.random.random() * 0.08  # More varied widths
+        peak_params.extend([amplitude, center, width])
+
+    # Build the function progressively
+    domain_points = np.linspace(-domain_width/2, domain_width/2, n_steps)
+
+    # Helper function to generate Gaussian peaks
+    def gaussian_peak_function(x: np.ndarray, params: List[float]) -> np.ndarray:
+        result = np.zeros_like(x)
+        for i in range(0, len(params), 3):
+            amp, center, width = params[i], params[i+1], params[i+2]
+            width = max(width, 1e-6)  # Ensure positive width
+            result += amp * np.exp(-0.5 * ((x - center) / width)**2)
+        return result
+
+    # Adaptive optimization loop with improved convergence strategies
+    best_c2 = -1.0
+    best_params = list(peak_params)
+    best_function = None
+
+    max_iterations = 500
+    for iteration in range(max_iterations):
+        # Create function from current peak parameters
+        func_values = gaussian_peak_function(domain_points, peak_params)
+
+        # Convert to step function by taking samples
+        step_values = func_values.tolist()
+
+        # Compute C2
+        c2_val = compute_c2(step_values)
+
+        # Check if this is our best result so far
+        if c2_val > best_c2:
+            best_c2 = c2_val
+            best_params = list(peak_params)
+            best_function = step_values.copy()
+
+        # Stop if we're getting close to convergence
+        if iteration > 10 and abs(c2_val - best_c2) < 1e-8:
+            break
+
+        # Apply adaptive adjustments to peak parameters with smarter perturbations
+        # Different parameters get different treatment for better optimization
+        for i in range(0, len(peak_params), 3):
+            # Perturb amplitude with more aggressive variations
+            if i < len(peak_params):  # amplitude
+                old_amp = peak_params[i]
+                # Use larger variance for better exploration
+                change_factor = 1.0 + np.random.normal(0, 0.15)
+                new_amp = max(0, old_amp * change_factor)
+                peak_params[i] = new_amp
+
+            # Perturb width with adaptive scaling
+            if i+2 < len(peak_params):  # width
+                old_width = peak_params[i+2]
+                # Change width by a factor with wider range
+                change_factor = 1.0 + np.random.normal(0, 0.12)  # Slightly larger variance
+                new_width = max(0.001, old_width * change_factor)
+                peak_params[i+2] = new_width
+
+        # Apply minimum spacing constraint more effectively
+        enforce_peak_spacing(peak_params, domain_width, min_distance_ratio=0.08)
+
+        # If we're approaching a plateau, make larger adjustments with more aggressive changes
+        if iteration > 50 and iteration % 20 == 0:
+            # Occasionally do larger changes to explore more space
+            for i in range(0, len(peak_params), 3):
+                if i < len(peak_params):  # amplitude
+                    change_factor = 1.0 + np.random.normal(0, 0.25)  # Even larger change
+                    new_amp = max(0, peak_params[i] * change_factor)
+                    peak_params[i] = new_amp
+
+        # Occasionally reduce amplitudes if we see signs of growing ||g||_∞ too much
+        # This prevents overly sharp peaks that hurt C2
+        if iteration > 20 and np.random.rand() < 0.1:
+            # Check if we're getting very peaked g (high ||g||_∞)
+            func_values = gaussian_peak_function(domain_points, peak_params)
+            g = compute_autoconvolution(func_values.tolist())
+            if len(g) > 0:
+                norm_inf = np.max(np.abs(g))
+                if norm_inf > 200:  # If autoconvolution is too peaked
+                    # Reduce all peak amplitudes moderately
+                    for j in range(0, len(peak_params), 3):
+                        if j < len(peak_params):
+                            peak_params[j] *= 0.93
+
+    # Final refinement - use the best parameters found
+    final_func_values = gaussian_peak_function(domain_points, best_params)
+    return final_func_values.tolist()
+>>>>>>> REPLACE
+</DIFF>

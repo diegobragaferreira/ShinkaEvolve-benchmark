@@ -1,0 +1,139 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import SphericalVoronoi
+from scipy.optimize import minimize
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    np.random.seed(42)
+    
+    def distance_matrix(points):
+        """Compute pairwise Euclidean distances efficiently."""
+        diff = points[:, np.newaxis, :] - points[np.newaxis, :, :]
+        return np.sqrt(np.sum(diff**2, axis=2))
+    
+    def min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum distance."""
+        dist_mat = distance_matrix(points)
+        # Set diagonal to large value to ignore self-distances
+        np.fill_diagonal(dist_mat, np.inf)
+        dmin = np.min(dist_mat)
+        dmax = np.max(dist_mat)
+        return dmin / dmax if dmax > 0 else 0
+    
+    def spherical_voronoi_initialization(n_points):
+        """Initialize points using spherical Voronoi construction."""
+        # Generate points on sphere using Fibonacci-like method
+        points = []
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        
+        for i in range(n_points):
+            z = 1 - (i / (n_points - 1)) * 2  # z goes from 1 to -1
+            radius = np.sqrt(1 - z*z)
+            
+            theta = np.arctan2(np.sin(i * 2 * np.pi / phi), np.cos(i * 2 * np.pi / phi))
+            x = radius * np.cos(theta)
+            y = radius * np.sin(theta)
+            points.append([x, y, z])
+            
+        points = np.array(points)
+        
+        # Normalize to unit sphere and scale to fit in unit cube
+        # First normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+        
+        # Then map to unit cube [-1,1]^3 and scale appropriately
+        # We'll scale to make sure all points are within [0,1]^3
+        points = (points + 1) / 2  # Now in [0,1]^3
+        
+        return points
+    
+    def optimize_points(initial_points, max_iter=5000):
+        """Optimize points using hybrid approach."""
+        current_points = initial_points.copy()
+        current_ratio = min_max_ratio(current_points)
+        
+        # Adaptive cooling parameters
+        temperature = 0.1
+        cooling_rate = 0.9995
+        min_temp = 1e-6
+        stagnation_count = 0
+        max_stagnation = 100
+        
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        last_improvement = 0
+        
+        for iteration in range(max_iter):
+            # Perturb one point randomly
+            idx = np.random.randint(len(current_points))
+            old_point = current_points[idx].copy()
+            
+            # Small random perturbation
+            perturbation = np.random.normal(0, 0.01, 3)
+            current_points[idx] += perturbation
+            
+            # Project back to unit cube
+            current_points[idx] = np.clip(current_points[idx], 0, 1)
+            
+            new_ratio = min_max_ratio(current_points)
+            
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = current_points.copy()
+                    last_improvement = iteration
+            else:
+                # Accept with probability based on temperature
+                delta = new_ratio - current_ratio
+                acceptance_prob = np.exp(delta / temperature)
+                if np.random.random() < acceptance_prob:
+                    current_ratio = new_ratio
+                else:
+                    # Revert change
+                    current_points[idx] = old_point
+            
+            # Adjust temperature dynamically
+            temperature *= cooling_rate
+            
+            # Check for stagnation and adjust cooling rate
+            if iteration - last_improvement > max_stagnation:
+                temperature = max(min_temp, temperature * 0.8)
+                last_improvement = iteration
+                
+            # Occasionally do local optimization on a subset
+            if iteration % 100 == 0 and iteration > 0:
+                # Local refinement on a sample of points
+                sample_indices = np.random.choice(len(current_points), size=min(5, len(current_points)), replace=False)
+                for idx in sample_indices:
+                    # Simple gradient ascent step - just move towards neighbors that increase ratio
+                    neighbor_idx = (idx + 1) % len(current_points)
+                    current_points[idx] += 0.0001 * (current_points[neighbor_idx] - current_points[idx])
+                    current_points[idx] = np.clip(current_points[idx], 0, 1)
+                
+                # Update ratio after local refinement
+                current_ratio = min_max_ratio(current_points)
+                if current_ratio > best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+        
+        return best_points
+    
+    # Generate initial configuration
+    initial_points = spherical_voronoi_initialization(14)
+    
+    # Optimize
+    optimized_points = optimize_points(initial_points)
+    
+    return optimized_points
+
+# EVOLVE-BLOCK-END

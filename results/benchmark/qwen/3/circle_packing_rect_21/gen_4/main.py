@@ -1,0 +1,142 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from deap import base, creator, tools, algorithms
+from scipy.spatial.distance import cdist
+import time
+from typing import Tuple
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    # Using width=1.2 and height=0.8 for a good aspect ratio
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Number of circles
+    n_circles = 21
+    
+    # Define the fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Define bounds for each variable
+    # Each individual has 3*n_circles variables: [x1, y1, r1, x2, y2, r2, ..., x21, y21, r21]
+    # Bounds: x in [r, rect_width-r], y in [r, rect_height-r], r in [0, min(rect_width, rect_height)/2]
+    bounds = []
+    for i in range(n_circles):
+        # x coordinate
+        bounds.append((0.001, rect_width - 0.001))  # Avoid exact boundaries
+        # y coordinate  
+        bounds.append((0.001, rect_height - 0.001))
+        # radius
+        bounds.append((0.001, min(rect_width, rect_height) / 2.0 - 0.001))
+    
+    def eval_circle_placement(individual):
+        # Extract circles from individual
+        circles = []
+        for i in range(n_circles):
+            x = individual[3*i]
+            y = individual[3*i+1]  
+            r = individual[3*i+2]
+            circles.append([x, y, r])
+        
+        # Convert to numpy array for easier calculations
+        circles_array = np.array(circles)
+        
+        # Check boundary constraints (all circles must be within rectangle)
+        valid = True
+        for circle in circles_array:
+            x, y, r = circle
+            if (x - r < 0 or x + r > rect_width or 
+                y - r < 0 or y + r > rect_height):
+                valid = False
+                break
+                
+        if not valid:
+            return (0,)  # Invalid placement
+        
+        # Calculate total radius sum
+        total_radius = np.sum(circles_array[:, 2])
+        
+        # Check overlaps (penalty for overlapping circles)
+        penalty = 0
+        for i in range(len(circles_array)):
+            for j in range(i+1, len(circles_array)):
+                cx1, cy1, r1 = circles_array[i]
+                cx2, cy2, r2 = circles_array[j]
+                
+                # Distance between centers
+                dist = np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+                
+                # Overlap penalty (if circles overlap)
+                if dist < (r1 + r2):
+                    overlap = (r1 + r2) - dist
+                    penalty += overlap ** 2  # Square penalty for severe overlaps
+                    
+        # Return fitness (total radius minus penalty)
+        return (total_radius - penalty * 1000,)
+    
+    # Create individual and population
+    def create_individual():
+        individual = []
+        for bound in bounds:
+            individual.append(random.uniform(bound[0], bound[1]))
+        return creator.Individual(individual)
+    
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", eval_circle_placement)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.05, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initialize population
+    pop = toolbox.population(n=100)
+    
+    # Statistics
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Run evolution
+    try:
+        pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, 
+                                     ngen=50, stats=stats, verbose=False)
+    except Exception:
+        # Fallback to a simpler approach if evolution fails
+        pass
+    
+    # Select best individual
+    best_ind = tools.selBest(pop, 1)[0]
+    
+    # Convert best individual to circles array
+    circles = []
+    for i in range(n_circles):
+        x = best_ind[3*i]
+        y = best_ind[3*i+1]  
+        r = best_ind[3*i+2]
+        circles.append([x, y, r])
+    
+    return np.array(circles)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

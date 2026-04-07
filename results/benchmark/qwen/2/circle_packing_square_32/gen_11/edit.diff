@@ -1,0 +1,244 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,233 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.optimize import minimize
++from scipy.spatial import cKDTree
++import random
++from itertools import combinations
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    
++    def get_initial_config():
++        """Generate initial configuration using hexagonal packing with boundary adjustments"""
++        # Try to place circles in a hexagonal pattern
++        n = 32
++        circles = np.zeros((n, 3))
++        
++        # Hexagonal packing parameters
++        sqrt3 = np.sqrt(3)
++        rows = int(np.ceil(np.sqrt(n * 2 / sqrt3)))
++        cols = int(np.ceil(n / rows))
++        
++        # Adjust spacing to fit in unit square
++        spacing_x = 0.8 / cols
++        spacing_y = 0.8 / rows
++        
++        # Ensure circles fit within boundaries
++        min_spacing = 0.05
++        spacing_x = max(spacing_x, min_spacing)
++        spacing_y = max(spacing_y, min_spacing)
++        
++        # Create hexagonal grid
++        y_offset = 0.1
++        x_offset = 0.1
++        
++        idx = 0
++        for i in range(rows):
++            y = y_offset + i * spacing_y
++            for j in range(cols):
++                if idx >= n:
++                    break
++                x = x_offset + j * spacing_x + (i % 2) * spacing_x / 2
++                # Ensure circles stay within bounds
++                if x > 0.9 or y > 0.9:
++                    continue
++                    
++                # Initial radius is limited by proximity to edges and other circles
++                max_radius = min(x, 1-x, y, 1-y)
++                if max_radius <= 0:
++                    continue
++                    
++                circles[idx] = [x, y, max_radius * 0.4]  # Start with smaller radius
++                idx += 1
++            if idx >= n:
++                break
++                
++        # Fill remaining positions if needed
++        while idx < n:
++            # Random placement for remaining circles
++            x = random.uniform(0.05, 0.95)
++            y = random.uniform(0.05, 0.95)
++            max_radius = min(x, 1-x, y, 1-y)
++            circles[idx] = [x, y, max_radius * 0.3]
++            idx += 1
++            
++        return circles
++    
++    def check_constraints(circles):
++        """Check if all circles satisfy containment and non-overlap constraints"""
++        n = len(circles)
++        # Check containment constraints (radius limits)
++        for i in range(n):
++            x, y, r = circles[i]
++            if r <= 0 or x <= r or x >= 1-r or y <= r or y >= 1-r:
++                return False
++        
++        # Check overlap constraints using KDTree for efficiency
++        coords = circles[:, :2]
++        tree = cKDTree(coords)
++        
++        # Find neighbors within 2*r distance for each circle
++        pairs = tree.query_pairs(2.0, output_type='ndarray')
++        
++        for i, j in pairs:
++            x1, y1, r1 = circles[i]
++            x2, y2, r2 = circles[j]
++            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
++            if distance < r1 + r2:
++                return False
++                
++        return True
++    
++    def evaluate_fitness(circles_flat):
++        """Evaluate fitness with smooth penalties"""
++        # Reshape flat array back to circles
++        circles = circles_flat.reshape(-1, 3)
++        
++        # Extract parameters
++        radii = circles[:, 2]
++        total_radius = np.sum(radii)
++        
++        # Penalty for constraint violations
++        penalty = 0
++        
++        # Containment constraints
++        for i in range(len(circles)):
++            x, y, r = circles[i]
++            if r <= 0:
++                penalty += 1000 * (0 - r)**2
++            if x <= r or x >= 1 - r:
++                penalty += 1000 * (r - x)**2 if x <= r else 1000 * (x - (1 - r))**2
++            if y <= r or y >= 1 - r:
++                penalty += 1000 * (r - y)**2 if y <= r else 1000 * (y - (1 - r))**2
++        
++        # Overlap constraints (smoothed)
++        coords = circles[:, :2]
++        tree = cKDTree(coords)
++        pairs = tree.query_pairs(2.0, output_type='ndarray')
++        
++        for i, j in pairs:
++            x1, y1, r1 = circles[i]
++            x2, y2, r2 = circles[j]
++            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
++            overlap = r1 + r2 - distance
++            if overlap > 0:
++                penalty += 1000 * overlap**2  # Quadratic penalty for overlap
++        
++        # Return negative because we want to maximize sum of radii
++        return -(total_radius - penalty/10000)
++    
++    def optimize_circles(initial_circles):
++        """Optimize the circle configuration using L-BFGS-B"""
++        # Flatten initial configuration
++        initial_flat = initial_circles.flatten()
++        
++        # Define bounds: each circle has (x, y, r) with bounds
++        bounds = []
++        for i in range(len(initial_circles)):
++            bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.499)])  # x, y, r bounds
++        
++        # Optimization settings
++        options = {'maxiter': 1000, 'ftol': 1e-6, 'gtol': 1e-6}
++        
++        # Run optimization
++        result = minimize(
++            evaluate_fitness,
++            initial_flat,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options=options,
++            tol=1e-6
++        )
++        
++        # Reshape and return optimized circles
++        optimized_circles = result.x.reshape(-1, 3)
++        
++        # Verify constraints and adjust if needed
++        if not check_constraints(optimized_circles):
++            # If constraints violated, try a simpler approach
++            # Just ensure boundaries are respected and return the best valid configuration
++            for i in range(len(optimized_circles)):
++                x, y, r = optimized_circles[i]
++                # Clamp coordinates to valid ranges
++                x = np.clip(x, r, 1-r)
++                y = np.clip(y, r, 1-r)
++                r = min(r, x, 1-x, y, 1-y)
++                optimized_circles[i] = [x, y, r]
++                
++        return optimized_circles
++    
++    def multi_start_optimization():
++        """Run optimization from multiple starting configurations"""
++        best_circles = None
++        best_sum = -np.inf
++        
++        # Try several different initial configurations
++        for attempt in range(5):
++            # Get initial configuration (randomize slightly each time)
++            initial_config = get_initial_config()
++            
++            # Add some randomness to initial positions
++            for i in range(len(initial_config)):
++                initial_config[i][0] += random.gauss(0, 0.02) * (0.5 if attempt > 0 else 1.0)
++                initial_config[i][1] += random.gauss(0, 0.02) * (0.5 if attempt > 0 else 1.0)
++                initial_config[i][2] *= (0.8 + random.random() * 0.4)  # Randomize radii
++            
++            # Ensure bounds are respected
++            for i in range(len(initial_config)):
++                x, y, r = initial_config[i]
++                initial_config[i] = [
++                    np.clip(x, r, 1-r),
++                    np.clip(y, r, 1-r),
++                    np.clip(r, 0.001, min(x, 1-x, y, 1-y) - 0.001)
++                ]
++            
++            try:
++                optimized = optimize_circles(initial_config)
++                total_radius = np.sum(optimized[:, 2])
++                if total_radius > best_sum:
++                    best_sum = total_radius
++                    best_circles = optimized.copy()
++            except Exception as e:
++                # If optimization fails, continue with another attempt
++                continue
++                
++        return best_circles if best_circles is not None else get_initial_config()
++    
++    # Main execution
++    try:
++        # Run multi-start optimization
++        circles = multi_start_optimization()
++        
++        # Final verification and cleanup
++        for i in range(len(circles)):
++            x, y, r = circles[i]
++            # Ensure final constraints
++            x = np.clip(x, r, 1-r)
++            y = np.clip(y, r, 1-r)
++            r = np.clip(r, 0.001, min(x, 1-x, y, 1-y) - 0.001)
++            circles[i] = [x, y, r]
++            
++        return circles
++        
++    except Exception as e:
++        # Fallback to simple initial configuration if anything goes wrong
++        print(f"Fallback due to error: {e}")
++        return get_initial_config()
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,37 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Improved initial configuration based on hexagonal lattice principles
+    # Using a 3x4 rectangular arrangement with strategic offsetting
+    inner_hex_data = np.array([
+        [0.0, 0.0, 0],      # center
+        [2.0, 0.0, 0],      # right
+        [-2.0, 0.0, 0],     # left
+        [1.0, 1.732, 0],    # top-right
+        [-1.0, 1.732, 0],   # top-left
+        [1.0, -1.732, 0],   # bottom-right
+        [-1.0, -1.732, 0],  # bottom-left
+        [3.0, 1.732, 0],    # far top-right
+        [-3.0, 1.732, 0],   # far top-left
+        [3.0, -1.732, 0],   # far bottom-right
+        [-3.0, -1.732, 0],  # far bottom-left
+        [0.0, -3.464, 0],   # bottom-center
+    ])
+
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    # Estimate outer hexagon side length based on the arrangement
+    outer_hex_side_length = 5.0  # This will be refined by optimization
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

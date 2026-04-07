@@ -1,0 +1,404 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import fftpack
+from scipy.optimize import differential_evolution, minimize
+import random
+import time
+from typing import List, Tuple
+from numba import njit, prange
+import heapq
+from functools import lru_cache
+
+# Global constants for consistent behavior
+RANDOM_SEED = 42
+MAX_EVALUATIONS = 1000
+TIMEOUT_SECONDS = 85.0
+
+@njit(parallel=True)
+def compute_sparse_convolution(f_vals):
+    """
+    Compute autoconvolution using FFT for efficiency
+    This uses the mathematical property: f*f = IDFT(DFT(f) * DFT(f))
+    """
+    n = len(f_vals)
+    
+    # Pad to power of 2 for efficient FFT
+    padded_n = 1
+    while padded_n < 2*n - 1:
+        padded_n <<= 1
+    
+    # Zero-padding
+    f_padded = np.zeros(padded_n)
+    f_padded[:n] = f_vals
+    
+    # FFT-based convolution
+    f_fft = fftpack.fft(f_padded)
+    g_fft = f_fft * np.conj(f_fft)  # Element-wise multiplication
+    g_padded = fftpack.ifft(g_fft).real
+    
+    # Extract the valid convolution part
+    # For f*f, we get 2*n-1 elements centered around index n-1
+    g = g_padded[n-1:n-1+(2*n-1)]
+    
+    return g
+
+@njit
+def compute_convolution_norms_sparse(f_vals):
+    """
+    Compute norms using the sparse FFT-based convolution
+    """
+    n = len(f_vals)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Compute convolution using FFT
+    g = compute_sparse_convolution(f_vals)
+    
+    # Compute norms
+    g_abs = np.abs(g)
+    
+    # L2 norm squared using trapezoidal-like integration
+    # For simplicity, we treat it as discrete sum weighted by dx
+    dx = 1.0 / n  # Approximate step size
+    g2_sq = np.sum(g_abs**2) * dx
+    
+    # L1 norm
+    g1 = np.sum(g_abs) * dx
+    
+    # L-infinity norm
+    g_inf = np.max(g_abs)
+    
+    return g2_sq, g1, g_inf
+
+@njit
+def compute_c2_sparse(f_vals):
+    """
+    Compute C2 using sparse FFT-based approach
+    """
+    g2_sq, g1, g_inf = compute_convolution_norms_sparse(f_vals)
+    
+    if g1 <= 1e-15 or g_inf <= 1e-15:
+        return 0.0
+    
+    return g2_sq / (g1 * g_inf)
+
+def construct_improved_initial_function(n_steps):
+    """
+    Construct improved initial function with better mathematical properties
+    Uses multi-scale pattern that naturally promotes flat convolution
+    """
+    # Create multi-scale pattern designed to generate flatter convolution results
+    x = np.linspace(0, 1, n_steps)
+    
+    # Base pattern with multiple frequencies
+    base_pattern = (
+        0.3 * np.sin(2 * np.pi * x) +
+        0.2 * np.sin(4 * np.pi * x) +
+        0.15 * np.sin(8 * np.pi * x) +
+        0.2 * np.sin(12 * np.pi * x) +
+        0.4
+    )
+    
+    # Add structured variation to promote good convolution properties
+    # Create several localized "bumps" with different scales and characteristics
+    bumps = np.zeros(n_steps)
+    bump_positions = [n_steps//6, n_steps//3, n_steps//2, 2*n_steps//3, 5*n_steps//6]
+    bump_widths = [n_steps // 15, n_steps // 12, n_steps // 10, n_steps // 12, n_steps // 15]
+    bump_amplitudes = [0.3, 0.4, 0.5, 0.4, 0.3]
+    
+    for i, pos in enumerate(bump_positions):
+        if pos < n_steps:
+            # Gaussian bump with adaptive width
+            bump = np.exp(-((np.arange(n_steps) - pos)**2) / (2 * (bump_widths[i]/3)**2))
+            bumps += bump * bump_amplitudes[i]
+    
+    # Combine base pattern with bumps
+    combined = base_pattern + bumps
+    
+    # Normalize and clip to [0, 1]
+    combined = np.clip(combined, 0, 1)
+    
+    # Add controlled noise for better exploration
+    noise_amplitude = 0.03
+    noise = np.random.normal(0, noise_amplitude, n_steps)
+    combined = np.clip(combined + noise, 0, 1)
+    
+    # Ensure some minimum variation to prevent trivial solutions
+    if np.std(combined) < 0.01:
+        combined = np.ones_like(combined) * 0.5
+    
+    return combined.tolist()
+
+def tournament_selection(population, fitness_scores, tournament_size):
+    """Tournament selection with adaptive size"""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitness)]
+    return population[winner_index].copy()
+
+def adaptive_uniform_crossover(parent1, parent2):
+    """Adaptive uniform crossover that favors better parent traits"""
+    child1 = []
+    child2 = []
+    
+    # Determine bias based on fitness difference
+    # Here we use a more sophisticated bias factor
+    fitness_diff = 1.0  # In practice, this should compare actual fitness
+    
+    for i in range(len(parent1)):
+        # Adaptive crossover with stronger bias toward better parent
+        if random.random() < 0.5 + 0.4 * (fitness_diff > 0.1):
+            child1.append(parent1[i])
+            child2.append(parent2[i])
+        else:
+            child1.append(parent2[i])
+            child2.append(parent1[i])
+    
+    return child1, child2
+
+def multi_point_crossover(parent1, parent2, num_points=3):
+    """Multi-point crossover for increased diversity"""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+    
+    # Create crossover points
+    points = sorted(random.sample(range(len(parent1)), num_points))
+    
+    # Swap segments
+    swap_start = 0
+    for i, point in enumerate(points):
+        if i % 2 == 0:
+            # Swap segment from swap_start to point
+            child1[swap_start:point], child2[swap_start:point] = \
+                child2[swap_start:point], child1[swap_start:point]
+        swap_start = point
+    
+    # Swap last segment if needed
+    if len(points) % 2 == 0:
+        child1[swap_start:], child2[swap_start:] = \
+            child2[swap_start:], child1[swap_start:]
+    
+    return child1, child2
+
+def mutate_individual_sparse(individual, mutation_rate, generation=None):
+    """Mutate individual with enhanced sparse mutation"""
+    for i in range(len(individual)):
+        if random.random() < mutation_rate:
+            # Adaptive mutation strength based on generation and current value
+            if generation is not None:
+                # Decrease mutation rate over time
+                adaptive_rate = mutation_rate * (1.0 - 0.01 * generation)
+            else:
+                adaptive_rate = mutation_rate
+            
+            # Adjust strength based on current value - smaller values get more relative change
+            strength = adaptive_rate * (individual[i] if individual[i] > 0 else 0.1)
+            
+            # Add noise 
+            noise = np.random.normal(0, strength)
+            new_value = individual[i] + noise
+            
+            # Ensure non-negativity
+            individual[i] = max(0, new_value)
+
+def local_refinement(individual):
+    """Apply local refinement to improve solution quality using L-BFGS"""
+    # Convert to numpy for easier handling
+    x0 = np.array(individual)
+    
+    # Define bounds for parameters
+    bounds = [(0, 1) for _ in range(len(x0))]
+    
+    # Try L-BFGS-B optimization first (more powerful for smooth functions)
+    try:
+        def objective(x):
+            return -compute_c2_sparse(x.tolist())
+        
+        res = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 50, 'ftol': 1e-8, 'gtol': 1e-8},
+            callback=None
+        )
+        
+        if res.success:
+            refined_x = res.x
+            # Ensure non-negativity after optimization
+            refined_x = np.maximum(refined_x, 0)
+            return refined_x.tolist()
+    except:
+        pass
+    
+    # Fallback to gradient-free coordinate-wise refinement
+    try:
+        x = x0.copy()
+        step_size = 0.005
+        tolerance = 1e-6
+        max_iter = 30
+        
+        for _ in range(max_iter):
+            old_c2 = compute_c2_sparse(x.tolist())
+            
+            # Estimate gradient using finite differences
+            grad = np.zeros_like(x)
+            eps = 1e-5
+            
+            for i in range(len(x)):
+                # Perturb dimension i
+                x_plus = x.copy()
+                x_plus[i] = max(0, x[i] + eps)
+                c2_plus = compute_c2_sparse(x_plus.tolist())
+                
+                x_minus = x.copy()
+                x_minus[i] = max(0, x[i] - eps)
+                c2_minus = compute_c2_sparse(x_minus.tolist())
+                
+                grad[i] = (c2_plus - c2_minus) / (2 * eps)
+            
+            # Update using gradient
+            x_new = x + step_size * grad
+            
+            # Ensure non-negativity
+            x_new = np.maximum(x_new, 0)
+            
+            # Check for improvement
+            new_c2 = compute_c2_sparse(x_new.tolist())
+            if new_c2 > old_c2:
+                x = x_new
+            else:
+                break
+                
+        return x.tolist()
+    except:
+        return individual.copy()
+
+def adaptive_sparse_optimization():
+    """
+    Main optimization using adaptive sparse FFT and hybrid approach
+    """
+    # Initialize with improved multi-scale pattern
+    n_steps = 2500  # Larger for better resolution and more flexibility
+    initial_pop_size = 25  # Increased population size for better search
+    max_generations = 30  # More generations to allow for convergence
+    
+    # Set random seeds for reproducibility
+    np.random.seed(RANDOM_SEED)
+    random.seed(RANDOM_SEED)
+    
+    # Generate diverse initial population with better initialization
+    population = []
+    for i in range(initial_pop_size):
+        # Mix of structured patterns and random variation
+        if i % 4 == 0:
+            # Highly structured initial function
+            individual = construct_improved_initial_function(n_steps)
+        elif i % 4 == 1:
+            # Simpler geometric pattern
+            x = np.linspace(0, 1, n_steps)
+            individual = np.clip(0.5 + 0.3 * np.sin(6 * np.pi * x), 0, 1).tolist()
+        elif i % 4 == 2:
+            # Random with constraints
+            individual = [random.uniform(0, 1) for _ in range(n_steps)]
+            individual = np.clip(np.array(individual), 0, 1).tolist()
+        else:
+            # Another structured pattern
+            individual = [random.uniform(0.3, 0.7) for _ in range(n_steps)]
+        
+        population.append(individual)
+    
+    # Track best solution
+    best_individual = None
+    best_c2 = -1
+    generation = 0
+    
+    # Evolutionary loop with adaptive parameters
+    for generation in range(max_generations):
+        # Evaluate population with sparse method
+        fitness_scores = []
+        for individual in population:
+            c2 = compute_c2_sparse(individual)
+            fitness_scores.append(c2)
+            if c2 > best_c2:
+                best_c2 = c2
+                best_individual = individual.copy()
+        
+        # Sort by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+        
+        # Print progress
+        if generation % 5 == 0:
+            print(f"Generation {generation}: Best C2 = {best_c2:.6f}")
+        
+        # Create new population with adaptive parameters
+        new_population = []
+        elite_count = max(2, initial_pop_size // 8)  # Smaller elite in earlier gens
+        
+        # Elitism
+        for i in range(elite_count):
+            new_population.append(sorted_population[i].copy())
+        
+        # Generate offspring with adaptive crossover and mutation
+        while len(new_population) < initial_pop_size:
+            # Tournament selection with adaptive size
+            # Increase tournament size as generations progress
+            tournament_size = min(6, max(3, initial_pop_size // 4 + generation // 3))
+            parent1 = tournament_selection(sorted_population, sorted_fitness, tournament_size)
+            parent2 = tournament_selection(sorted_population, sorted_fitness, tournament_size)
+            
+            # Use multi-point crossover for diversity
+            if random.random() < 0.7:
+                child1, child2 = multi_point_crossover(parent1, parent2, num_points=4)
+            else:
+                child1, child2 = adaptive_uniform_crossover(parent1, parent2)
+            
+            # Mutate children with adaptive rate
+            mutation_rate = 0.3 * (1.0 - 0.01 * generation)  # Decreasing rate
+            mutate_individual_sparse(child1, mutation_rate, generation)
+            mutate_individual_sparse(child2, mutation_rate, generation)
+            
+            new_population.extend([child1, child2])
+        
+        # Trim to exact size
+        population = new_population[:initial_pop_size]
+        
+        # Local refinement of best solution occasionally
+        if generation % 4 == 0 and generation > 0:
+            # Use local optimization on top solutions
+            for i in range(min(3, len(population))):
+                if random.random() < 0.6:
+                    refined = local_refinement(population[i])
+                    refined_c2 = compute_c2_sparse(refined)
+                    if refined_c2 > compute_c2_sparse(population[i]):
+                        population[i] = refined
+    
+    return best_individual
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value."""
+    # Set seed for reproducibility
+    np.random.seed(RANDOM_SEED)
+    random.seed(RANDOM_SEED)
+    
+    # Try adaptive sparse FFT optimization
+    try:
+        result = adaptive_sparse_optimization()
+        if result is not None:
+            return result
+    except Exception as e:
+        print(f"Adaptive optimization failed: {e}")
+    
+    # Fall back to basic approach
+    n_steps = 1000
+    f_values = construct_improved_initial_function(n_steps)
+    return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,283 @@
+<NAME>
+evolve_circle_packing
+</NAME>
+
+<DESCRIPTION>
+I'll implement an evolutionary algorithm approach to solve the circle packing problem. This involves creating a population of candidate solutions and iteratively improving them through selection, crossover, and mutation operations. The key insight is to use a genetic algorithm with specialized operators for circle packing constraints.
+
+The approach will:
+1. Initialize a population of random valid circle configurations
+2. Evaluate fitness based on sum of radii
+3. Apply selection, crossover, and mutation operators that respect circle packing constraints
+4. Use local optimization to refine promising solutions
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple
+
+# Global constants for the optimization
+POPULATION_SIZE = 50
+GENERATIONS = 100
+MUTATION_RATE = 0.1
+TOURNAMENT_SIZE = 5
+ELITISM_COUNT = 5
+
+def is_valid_circle_placement(circles: np.ndarray, idx: int, new_x: float, new_y: float, new_r: float) -> bool:
+    """Check if placing a circle at (new_x, new_y) with radius new_r is valid"""
+    # Check containment constraints
+    if new_r > new_x or new_r > (1 - new_x) or new_r > new_y or new_r > (1 - new_y):
+        return False
+
+    # Check overlap with existing circles
+    for i in range(len(circles)):
+        if i == idx:
+            continue
+        old_x, old_y, old_r = circles[i]
+        distance = np.sqrt((new_x - old_x)**2 + (new_y - old_y)**2)
+        if distance < (new_r + old_r):
+            return False
+
+    return True
+
+def generate_random_circles(n: int) -> np.ndarray:
+    """Generate a valid random configuration of n circles"""
+    circles = np.zeros((n, 3))
+
+    # Try to place circles one by one
+    for i in range(n):
+        placed = False
+        attempts = 0
+        while not placed and attempts < 1000:
+            # Random position and radius
+            x = np.random.uniform(0.01, 0.99)
+            y = np.random.uniform(0.01, 0.99)
+            r = np.random.uniform(0.01, min(0.5, min(x, 1-x, y, 1-y)))
+
+            # Check if this placement is valid
+            valid = True
+            for j in range(i):
+                old_x, old_y, old_r = circles[j]
+                distance = np.sqrt((x - old_x)**2 + (y - old_y)**2)
+                if distance < (r + old_r):
+                    valid = False
+                    break
+
+            if valid:
+                circles[i] = [x, y, r]
+                placed = True
+            attempts += 1
+
+    return circles
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate the fitness as the sum of all radii"""
+    return np.sum(circles[:, 2])
+
+def mutate_circles(circles: np.ndarray) -> np.ndarray:
+    """Apply mutation to a set of circles"""
+    mutated = circles.copy()
+
+    # Mutate some circles
+    for i in range(len(mutated)):
+        if np.random.random() < MUTATION_RATE:
+            # Try to slightly perturb the circle
+            orig_x, orig_y, orig_r = mutated[i]
+
+            # Generate small perturbations
+            delta_x = np.random.normal(0, 0.02)
+            delta_y = np.random.normal(0, 0.02)
+            delta_r = np.random.normal(0, 0.01)
+
+            new_x = max(0.01, min(0.99, orig_x + delta_x))
+            new_y = max(0.01, min(0.99, orig_y + delta_y))
+            new_r = max(0.005, min(0.49, orig_r + delta_r))
+
+            # Check if this new configuration is valid
+            if is_valid_circle_placement(mutated, i, new_x, new_y, new_r):
+                mutated[i] = [new_x, new_y, new_r]
+
+    return mutated
+
+def crossover_circles(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Perform crossover between two circle configurations"""
+    # Simple uniform crossover
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+
+    for i in range(len(parent1)):
+        if np.random.random() < 0.5:
+            child1[i] = parent2[i].copy()
+            child2[i] = parent1[i].copy()
+
+    return child1, child2
+
+def tournament_selection(population: list, fitnesses: list) -> np.ndarray:
+    """Select a parent using tournament selection"""
+    tournament_indices = random.sample(range(len(population)), TOURNAMENT_SIZE)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_idx]
+
+def optimize_circles(initial_circles: np.ndarray, max_evaluations: int = 5000) -> np.ndarray:
+    """Use a simple local optimization approach to improve circle packing"""
+    circles = initial_circles.copy()
+    current_fitness = evaluate_fitness(circles)
+
+    evaluations = 0
+    improvement_threshold = 1e-6
+
+    while evaluations < max_evaluations:
+        improved = False
+
+        # Try to improve each circle individually
+        for i in range(len(circles)):
+            if evaluations >= max_evaluations:
+                break
+
+            best_circles = circles.copy()
+            best_fitness = current_fitness
+
+            # Try small adjustments to this circle
+            for _ in range(100):  # Limited number of tries per circle
+                if evaluations >= max_evaluations:
+                    break
+
+                orig_x, orig_y, orig_r = circles[i]
+
+                # Perturb coordinates and radius
+                delta_x = np.random.normal(0, 0.005)
+                delta_y = np.random.normal(0, 0.005)
+                delta_r = np.random.normal(0, 0.002)
+
+                new_x = max(0.01, min(0.99, orig_x + delta_x))
+                new_y = max(0.01, min(0.99, orig_y + delta_y))
+                new_r = max(0.005, min(0.49, orig_r + delta_r))
+
+                # Test if new configuration is valid
+                if is_valid_circle_placement(circles, i, new_x, new_y, new_r):
+                    # Temporarily update
+                    temp_circles = circles.copy()
+                    temp_circles[i] = [new_x, new_y, new_r]
+
+                    # Check if this improves fitness
+                    temp_fitness = evaluate_fitness(temp_circles)
+                    if temp_fitness > best_fitness:
+                        best_circles = temp_circles
+                        best_fitness = temp_fitness
+                        improved = True
+
+                evaluations += 1
+
+            # If we found an improvement, update circles
+            if improved:
+                circles = best_circles
+                current_fitness = best_fitness
+
+        # If no improvement was found, stop
+        if not improved:
+            break
+
+    return circles
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates
+                 of the i-th circle of radius r.
+    """
+    # Seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Initialize population
+    population = []
+    for _ in range(POPULATION_SIZE):
+        circles = generate_random_circles(26)
+        population.append(circles)
+
+    best_solution = None
+    best_fitness = 0
+
+    # Evolutionary loop
+    for generation in range(GENERATIONS):
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(circles) for circles in population]
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitnesses)
+        if fitnesses[max_fitness_idx] > best_fitness:
+            best_fitness = fitnesses[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Create new population
+        new_population = []
+
+        # Elitism - keep the best individuals
+        elite_indices = np.argsort(fitnesses)[-ELITISM_COUNT:]
+        for idx in elite_indices:
+            new_population.append(population[idx].copy())
+
+        # Generate offspring through selection, crossover, and mutation
+        while len(new_population) < POPULATION_SIZE:
+            # Selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover_circles(parent1, parent2)
+
+            # Mutation
+            child1 = mutate_circles(child1)
+            child2 = mutate_circles(child2)
+
+            # Local optimization
+            child1 = optimize_circles(child1)
+            child2 = optimize_circles(child2)
+
+            new_population.extend([child1, child2])
+
+        # Trim population to exact size
+        population = new_population[:POPULATION_SIZE]
+
+        # Print progress
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+    # Final optimization of the best solution
+    if best_solution is not None:
+        final_solution = optimize_circles(best_solution, max_evaluations=1000)
+        return final_solution
+    else:
+        # Fallback to a good heuristic solution
+        return generate_random_circles(26)
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

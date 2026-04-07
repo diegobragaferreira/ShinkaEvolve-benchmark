@@ -1,0 +1,173 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import math
+import time
+
+class PointDispersionOptimizer:
+    """Optimizes point distribution to maximize min/max distance ratio using hexagonal grid initialization and simulated annealing."""
+    
+    def __init__(self, n_points=16, dimension=2, seed=42):
+        self.n_points = n_points
+        self.dimension = dimension
+        self.seed = seed
+        np.random.seed(seed)
+    
+    def _compute_min_max_ratio(self, points):
+        """Computes the ratio of minimum to maximum pairwise distances."""
+        if len(points) < 2:
+            return 0.0
+            
+        try:
+            # Compute pairwise distances
+            distances = pdist(points)
+            dmin = np.min(distances)
+            dmax = np.max(distances)
+            
+            # Handle edge case where all points are identical
+            if dmax == 0:
+                return 0.0
+                
+            return dmin / dmax
+        except Exception:
+            return 0.0
+    
+    def _initialize_hexagonal_grid(self):
+        """Initialize points on a hexagonal grid pattern with precise mathematical arrangement."""
+        # Create a hexagonal lattice arrangement with 4 rows and 4 columns
+        # Using mathematical constants for proper hexagonal packing
+        
+        sqrt3 = math.sqrt(3)
+        row_spacing = sqrt3 / 2  # Vertical spacing between rows
+        col_spacing = 1.0        # Horizontal spacing between columns
+        
+        points = []
+        
+        # Generate points in a hexagonal pattern
+        for i in range(4):  # 4 rows
+            for j in range(4):  # 4 columns
+                # Alternate column offset for hexagonal packing
+                x_offset = (i % 2) * 0.5
+                x = j * col_spacing + x_offset
+                y = i * row_spacing
+                points.append([x, y])
+        
+        # Convert to numpy array
+        points = np.array(points[:self.n_points])
+        
+        # Normalize to fit within [0,1] bounds
+        if len(points) > 0:
+            x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+            y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+            
+            if x_range > 0:
+                points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+            if y_range > 0:
+                points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+        
+        # Apply systematic perturbations to break symmetry
+        # Different noise intensity for each point to avoid symmetric traps
+        for i in range(self.n_points):
+            # Varying noise magnitude based on position index
+            noise_intensity = 0.01 + (i * 0.001)
+            noise_x = np.random.normal(0, noise_intensity, 1)[0]
+            noise_y = np.random.normal(0, noise_intensity, 1)[0]
+            points[i] += [noise_x, noise_y]
+        
+        # Clip to [0,1] bounds
+        points = np.clip(points, 0, 1)
+        
+        return points
+    
+    def _perturb_neighbor(self, points, indices, step_size=0.005):
+        """Perturb a group of points together (neighborhood move) to preserve local structure."""
+        new_points = points.copy()
+        
+        # Apply coordinated perturbations to selected points
+        for idx in indices:
+            delta = np.random.uniform(-step_size, step_size, self.dimension)
+            new_points[idx] = points[idx] + delta
+            # Boundary check
+            new_points[idx] = np.clip(new_points[idx], 0, 1)
+            
+        return new_points
+    
+    def _optimize_with_simulated_annealing(self, initial_points, max_iterations=5000):
+        """Optimize point configuration using enhanced simulated annealing with adaptive cooling."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = self._compute_min_max_ratio(current_points)
+        
+        # Enhanced cooling schedule with adaptive behavior
+        temperature = 1.0
+        cooling_rate = 0.9995
+        stagnation_counter = 0
+        previous_best = best_ratio
+        
+        for iteration in range(max_iterations):
+            # Decide between single point and neighborhood perturbation
+            if np.random.random() < 0.7:  # 70% chance of neighborhood move
+                # Choose a random group of points to perturb together (2-4 points)
+                neighborhood_size = np.random.randint(2, min(5, self.n_points))
+                indices = np.random.choice(self.n_points, neighborhood_size, replace=False).tolist()
+                neighbor_points = self._perturb_neighbor(current_points, indices)
+            else:
+                # Single point perturbation (traditional approach)
+                neighbor_points = current_points.copy()
+                point_idx = np.random.randint(len(neighbor_points))
+                delta = np.random.uniform(-0.005, 0.005, self.dimension)
+                neighbor_points[point_idx] = current_points[point_idx] + delta
+                # Boundary check
+                neighbor_points[point_idx] = np.clip(neighbor_points[point_idx], 0, 1)
+            
+            # Evaluate neighbor
+            neighbor_ratio = self._compute_min_max_ratio(neighbor_points)
+            
+            # Accept or reject based on Metropolis criterion
+            if neighbor_ratio > best_ratio:
+                current_points = neighbor_points
+                best_points = neighbor_points
+                best_ratio = neighbor_ratio
+                stagnation_counter = 0  # Reset stagnation counter
+            elif np.random.rand() < math.exp((neighbor_ratio - best_ratio) / temperature):
+                current_points = neighbor_points
+                stagnation_counter = 0  # Reset stagnation counter
+            else:
+                stagnation_counter += 1
+            
+            # Adaptive cooling schedule
+            if stagnation_counter > 50:
+                # If we're stagnating, cool faster to escape local optima
+                temperature *= 0.995
+                stagnation_counter = 0
+            else:
+                temperature *= cooling_rate
+            
+            # Early stopping if improvement is minimal
+            if iteration % 100 == 0 and iteration > 0:
+                current_ratio = self._compute_min_max_ratio(best_points)
+                if abs(previous_best - current_ratio) < 1e-8:
+                    break
+                previous_best = current_ratio
+                
+        return best_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    # Create optimizer instance
+    optimizer = PointDispersionOptimizer(n_points=16, dimension=2, seed=42)
+    
+    # Initialize points using hexagonal grid method
+    initial_points = optimizer._initialize_hexagonal_grid()
+    
+    # Optimize using enhanced simulated annealing
+    optimized_points = optimizer._optimize_with_simulated_annealing(initial_points)
+    
+    return optimized_points
+
+# EVOLVE-BLOCK-END

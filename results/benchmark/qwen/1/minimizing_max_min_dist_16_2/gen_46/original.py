@@ -1,0 +1,97 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape flat array back to 16x2 points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Avoid division by zero
+        if len(distances) == 0:
+            return -np.inf
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Handle case where all points are coincident
+        if d_max <= 1e-10:
+            return -np.inf
+
+        # Return negative ratio since we're minimizing
+        return -d_min / d_max
+
+    def constraint_func(x):
+        # Ensure all points are within [0,1]^2
+        points = x.reshape(-1, 2)
+        return np.concatenate([points.flatten(), (1 - points).flatten()])
+
+    # Define bounds for all coordinates: [0, 1] for each coordinate
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Multi-start approach with differential evolution for global search
+    best_result = None
+    best_ratio = -np.inf
+
+    # Try multiple random initializations
+    for i in range(5):
+        # Use differential evolution for global search
+        de_result = differential_evolution(
+            objective,
+            bounds,
+            seed=42+i,
+            maxiter=100,
+            popsize=15,
+            tol=1e-6,
+            recombination=0.7,
+            mutation=(0.5, 1.0)
+        )
+
+        # Refine with local optimization
+        refined_result = minimize(
+            objective,
+            de_result.x,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'ftol': 1e-9, 'gtol': 1e-9}
+        )
+
+        # Check if this is better
+        if -refined_result.fun > best_ratio:
+            best_ratio = -refined_result.fun
+            best_result = refined_result.x
+
+    # Final refinement with L-BFGS-B
+    final_result = minimize(
+        objective,
+        best_result,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'ftol': 1e-12, 'gtol': 1e-12}
+    )
+
+    # Return final points
+    points = final_result.x.reshape(-1, 2)
+
+    # Ensure all points are within [0,1]^2 (handle any boundary issues)
+    points = np.clip(points, 0, 1)
+
+    return points
+
+
+# EVOLVE-BLOCK-END

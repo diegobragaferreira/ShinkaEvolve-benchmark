@@ -1,0 +1,216 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+from scipy.spatial import SphericalVoronoi
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    def generate_icosahedron_points():
+        """Generate points of a regular icosahedron"""
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        vertices = np.array([
+            [-1,  phi,  0],
+            [ 1,  phi,  0],
+            [-1, -phi,  0],
+            [ 1, -phi,  0],
+            [ 0, -1,  phi],
+            [ 0,  1,  phi],
+            [ 0, -1, -phi],
+            [ 0,  1, -phi],
+            [ phi,  0, -1],
+            [ phi,  0,  1],
+            [-phi,  0, -1],
+            [-phi,  0,  1]
+        ])
+        # Normalize to unit sphere
+        norms = np.linalg.norm(vertices, axis=1, keepdims=True)
+        return vertices / norms
+    
+    def refine_to_14_points(ico_points):
+        """Refine icosahedron to get 14 points using barycentric subdivision and normalization"""
+        # Start with 12 vertices of icosahedron
+        points = ico_points.copy()
+        
+        # Add 2 more points by placing them at specific locations to create 14 total
+        # These are chosen to maintain good distribution properties
+        extra_point1 = np.array([0, 0, 1])  # North pole
+        extra_point2 = np.array([0, 0, -1])  # South pole
+        
+        # Normalize the extra points
+        extra_point1 = extra_point1 / np.linalg.norm(extra_point1)
+        extra_point2 = extra_point2 / np.linalg.norm(extra_point2)
+        
+        points = np.vstack([points, extra_point1, extra_point2])
+        
+        # Apply a small random perturbation to break symmetries and improve optimization
+        np.random.seed(42)
+        perturbation = np.random.normal(0, 0.01, points.shape)
+        points = points + perturbation
+        
+        # Normalize again to maintain unit sphere constraint
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points = points / norms
+        
+        return points
+    
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        safe_norms = np.where(norms == 0, 1, norms)
+        return points / safe_norms
+    
+    def calculate_min_max_ratio(points):
+        """Calculate the minimum-to-maximum distance ratio"""
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return min_dist / max_dist
+    
+    def distance_weighted_gradient(points_flat):
+        """Compute a specialized gradient that respects spherical constraints and maximizes min/max ratio"""
+        points = points_flat.reshape(-1, 3)
+        points = normalize_to_unit_sphere(points)
+        
+        # Compute all pairwise distances
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0:
+            return np.zeros_like(points_flat)
+        
+        # Create gradient based on relative distances
+        n = len(points)
+        grad = np.zeros_like(points)
+        
+        # For each point, compute influence from all other points
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    diff = points[i] - points[j]
+                    dist_ij = np.linalg.norm(diff)
+                    
+                    # Normalize difference vector
+                    if dist_ij > 1e-10:
+                        diff_norm = diff / dist_ij
+                    
+                        # Weight by inverse square of distance to encourage spacing
+                        weight = 1.0 / (dist_ij * dist_ij + 1e-10)
+                        
+                        # Add to gradient with sign based on whether we want to increase or decrease distance
+                        if dist_ij < min_dist:
+                            # We're too close to some point, push away
+                            grad[i] -= weight * diff_norm
+                        elif dist_ij > max_dist:
+                            # We're too far from some point, pull closer
+                            grad[i] += weight * diff_norm
+                        else:
+                            # In intermediate range, just push to avoid local minima
+                            grad[i] += weight * diff_norm
+        
+        # Project gradient onto tangent space of sphere to respect constraint
+        # This keeps the gradient perpendicular to position vector
+        for i in range(n):
+            grad[i] = grad[i] - np.dot(grad[i], points[i]) * points[i]
+        
+        return grad.flatten()
+    
+    def sphere_tiling_objective(points_flat):
+        """Custom objective function designed for sphere tiling optimization"""
+        points = points_flat.reshape(-1, 3)
+        points = normalize_to_unit_sphere(points)
+        
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0:
+            ratio = 0.0
+        else:
+            ratio = min_dist / max_dist
+            
+        # Add penalty for irregularities in the distribution
+        # Use average distance deviation from mean as regularization
+        mean_dist = np.mean(distances[distances != np.inf])
+        std_dist = np.std(distances[distances != np.inf])
+        
+        # Penalty for high variation (uniformity)
+        uniformity_penalty = std_dist / (mean_dist + 1e-10)
+        
+        # Combine objective: maximize ratio with uniformity consideration
+        return -(ratio - 0.1 * uniformity_penalty)
+    
+    # Initialize with icosahedron-based approach
+    ico_points = generate_icosahedron_points()
+    points = refine_to_14_points(ico_points)
+    
+    # Convert to flat array for optimization
+    points_flat = points.flatten()
+    
+    # Phase 1: Large step optimization using custom distance-weighted approach
+    # Apply multiple optimization passes with different learning rates
+    current_points = points_flat.copy()
+    
+    # Custom optimization loop with adaptive step sizes
+    for iteration in range(100):
+        # Compute custom gradient
+        grad = distance_weighted_gradient(current_points)
+        
+        # Adaptive step size based on iteration
+        step_size = 0.01 / (1.0 + iteration * 0.001)
+        
+        # Update points
+        new_points = current_points + step_size * grad
+        
+        # Project back to sphere
+        new_points = normalize_to_unit_sphere(new_points.reshape(-1, 3)).flatten()
+        
+        # Check convergence
+        if np.linalg.norm(new_points - current_points) < 1e-8:
+            break
+            
+        current_points = new_points
+    
+    # Phase 2: Final refinement with standard optimization
+    # Convert back to proper format
+    final_points = current_points.reshape(-1, 3)
+    
+    # Final optimization using L-BFGS-B for fine-tuning
+    bounds = [(-1, 1) for _ in range(42)]
+    
+    def final_objective(x):
+        return sphere_tiling_objective(x)
+    
+    result = minimize(
+        lambda x: final_objective(x),
+        current_points,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12},
+        tol=1e-12
+    )
+    
+    # Extract final optimized points
+    refined_points = result.x.reshape(-1, 3)
+    
+    # Final normalization to unit sphere
+    final_points = normalize_to_unit_sphere(refined_points)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

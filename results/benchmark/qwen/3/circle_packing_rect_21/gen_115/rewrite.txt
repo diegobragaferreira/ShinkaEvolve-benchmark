@@ -1,0 +1,255 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance_matrix
+from scipy.spatial.distance import cdist
+import random
+from sklearn.cluster import KMeans
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    # Using width = 1.5, height = 0.5 for optimal packing
+    width, height = 1.5, 0.5
+    
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Initialize with Voronoi-based force simulation
+    circles = initialize_voronoi_force_layout(width, height, 21)
+    
+    # Apply force-based optimization
+    circles = optimize_with_voronoi_forces(circles, width, height)
+    
+    # Final refinement with local search
+    circles = local_search_refinement(circles, width, height)
+    
+    return circles
+
+def initialize_voronoi_force_layout(width: float, height: float, n: int) -> np.ndarray:
+    """Initialize circles using Voronoi vertices for better distribution."""
+    # Generate initial points using k-means clustering to get good spread
+    # We'll generate more points than needed to ensure good coverage
+    n_initial_points = max(50, n * 3)
+    
+    # Generate random points within bounds
+    points = np.random.rand(n_initial_points, 2)
+    points[:, 0] *= (width - 0.2) + 0.1  # Scale to width range
+    points[:, 1] *= (height - 0.2) + 0.1  # Scale to height range
+    
+    # Use k-means to cluster points for better distribution
+    kmeans = KMeans(n_clusters=n, random_state=42)
+    kmeans.fit(points)
+    centroids = kmeans.cluster_centers_
+    
+    # Create Voronoi diagram from centroids
+    try:
+        vor = Voronoi(centroids)
+        # Use Voronoi vertices as initial candidate positions
+        valid_vertices = []
+        for vertex in vor.vertices:
+            if 0.1 <= vertex[0] <= width - 0.1 and 0.1 <= vertex[1] <= height - 0.1:
+                valid_vertices.append(vertex)
+        
+        # If we have enough vertices, use them
+        if len(valid_vertices) >= n:
+            init_positions = valid_vertices[:n]
+        else:
+            # Fall back to centroids if not enough vertices
+            init_positions = centroids[:n]
+    except:
+        # Fallback to simple centroid initialization
+        init_positions = centroids[:n]
+    
+    # Initialize circles with computed max radii
+    circles = np.zeros((n, 3))
+    for i, (x, y) in enumerate(init_positions):
+        max_radius = compute_max_radius_force(x, y, width, height, circles[:i])
+        circles[i] = [x, y, max_radius]
+    
+    return circles
+
+def compute_max_radius_force(x: float, y: float, width: float, height: float, existing_circles: np.ndarray) -> float:
+    """Compute maximum radius with force-based constraints."""
+    # Boundary constraints
+    min_dist_from_edge = min(x, width - x, y, height - y)
+    
+    if min_dist_from_edge <= 0:
+        return 0
+    
+    # Overlap constraints with existing circles
+    min_dist_from_others = float('inf')
+    
+    for circle in existing_circles:
+        if circle[2] > 0:
+            cx, cy, cr = circle
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            min_dist_from_others = min(min_dist_from_others, dist - cr)
+    
+    # Take minimum of boundary and overlap constraints
+    max_radius = min(min_dist_from_edge, min_dist_from_others)
+    
+    return max(0.001, max_radius)
+
+def optimize_with_voronoi_forces(circles: np.ndarray, width: float, height: float) -> np.ndarray:
+    """Optimize using Voronoi-based force simulation."""
+    current_circles = circles.copy()
+    num_circles = len(current_circles)
+    
+    # Parameters for force simulation
+    max_iterations = 1000
+    damping = 0.95
+    repulsion_strength = 100.0
+    attraction_strength = 0.1
+    boundary_strength = 50.0
+    
+    for iteration in range(max_iterations):
+        # Calculate forces on each circle
+        forces = np.zeros((num_circles, 2))
+        
+        # Repulsion forces between circles (stronger at closer distances)
+        for i in range(num_circles):
+            x_i, y_i, r_i = current_circles[i]
+            force_x, force_y = 0.0, 0.0
+            
+            for j in range(num_circles):
+                if i != j:
+                    x_j, y_j, r_j = current_circles[j]
+                    dx = x_i - x_j
+                    dy = y_i - y_j
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    
+                    # Only apply force if circles are close enough to interact
+                    if dist < (r_i + r_j) * 2.0:
+                        # Repulsion force that decreases with distance
+                        if dist > 1e-6:
+                            # Normalize and scale appropriately
+                            force_magnitude = repulsion_strength / (dist * dist)
+                            # Apply force in direction away from other circle
+                            force_x += force_magnitude * dx / dist
+                            force_y += force_magnitude * dy / dist
+                        else:
+                            # Small random push if they're too close
+                            force_x += np.random.uniform(-0.1, 0.1)
+                            force_y += np.random.uniform(-0.1, 0.1)
+            
+            # Boundary forces (push circles back towards center)
+            boundary_force_x, boundary_force_y = 0.0, 0.0
+            
+            # Force pushing towards center for boundary control
+            if x_i < 0.2:
+                boundary_force_x += boundary_strength * (0.2 - x_i)
+            elif x_i > width - 0.2:
+                boundary_force_x += boundary_strength * (width - 0.2 - x_i)
+                
+            if y_i < 0.2:
+                boundary_force_y += boundary_strength * (0.2 - y_i)
+            elif y_i > height - 0.2:
+                boundary_force_y += boundary_strength * (height - 0.2 - y_i)
+            
+            force_x += boundary_force_x
+            force_y += boundary_force_y
+            
+            forces[i] = [force_x, force_y]
+        
+        # Apply forces to update positions
+        for i in range(num_circles):
+            force_x, force_y = forces[i]
+            
+            # Update position with damping
+            current_circles[i][0] += force_x * 0.01 * damping
+            current_circles[i][1] += force_y * 0.01 * damping
+            
+            # Enforce bounds with slight buffer
+            current_circles[i][0] = np.clip(current_circles[i][0], 0.1, width - 0.1)
+            current_circles[i][1] = np.clip(current_circles[i][1], 0.1, height - 0.1)
+            
+            # Recompute maximum radius for updated position
+            x_new, y_new = current_circles[i][0], current_circles[i][1]
+            max_radius = compute_max_radius_force(x_new, y_new, width, height, 
+                                                np.vstack([current_circles[:i], current_circles[i+1:]]))
+            current_circles[i][2] = max_radius
+            
+        # Early stopping if improvement is minimal
+        if iteration % 100 == 0:
+            # Check if configuration has stabilized
+            pass
+    
+    return current_circles
+
+def local_search_refinement(circles: np.ndarray, width: float, height: float) -> np.ndarray:
+    """Perform local search refinement to improve radii."""
+    current_circles = circles.copy()
+    
+    # Multiple rounds of local search
+    for round_num in range(3):
+        # Try to improve each circle individually
+        improved = True
+        iterations = 0
+        
+        while improved and iterations < 1000:
+            improved = False
+            iterations += 1
+            
+            # Shuffle circle order for better exploration
+            indices = list(range(len(current_circles)))
+            random.shuffle(indices)
+            
+            for i in indices:
+                old_x, old_y, old_r = current_circles[i]
+                
+                # Try to find better position and radius
+                best_x, best_y, best_r = old_x, old_y, old_r
+                
+                # Grid search around current position for better spot
+                step = 0.05 if round_num < 2 else 0.02
+                best_radius = old_r
+                
+                for dx in [-step*2, -step, 0, step, step*2]:
+                    for dy in [-step*2, -step, 0, step, step*2]:
+                        new_x = old_x + dx
+                        new_y = old_y + dy
+                        
+                        # Ensure within bounds
+                        if 0.1 <= new_x <= width - 0.1 and 0.1 <= new_y <= height - 0.1:
+                            # Compute max radius at new position
+                            max_radius = compute_max_radius_force(
+                                new_x, new_y, width, height,
+                                np.vstack([current_circles[:i], current_circles[i+1:]])
+                            )
+                            
+                            # Prefer positions that increase radius more significantly
+                            if max_radius > best_radius + 1e-6:
+                                best_radius = max_radius
+                                best_x, best_y = new_x, new_y
+                                improved = True
+                
+                # Update if we found a better position/radius
+                if best_radius > current_circles[i][2] + 1e-6:
+                    current_circles[i] = [best_x, best_y, best_radius]
+            
+            # If no improvement after a certain number of iterations, stop
+            if not improved:
+                break
+    
+    # Final boundary adjustment
+    for i in range(len(current_circles)):
+        x, y, r = current_circles[i]
+        # Ensure circle stays within bounds with safety margin
+        r = min(r, x - 0.01, width - x - 0.01, y - 0.01, height - y - 0.01)
+        r = max(r, 0.001)
+        current_circles[i] = [x, y, r]
+    
+    return current_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

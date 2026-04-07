@@ -1,0 +1,215 @@
+--- a/original.py
++++ b/original.py
+@@ -1,61 +1,170 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import signal
++from scipy.optimize import differential_evolution
++from scipy.signal import convolve
++import time
++
++def compute_autoconvolution_norms(f_values):
++    """Compute the norms needed for C2 calculation with proper numerical handling."""
++    # Convert to numpy array
++    f = np.array(f_values)
++
++    # Compute autoconvolution using discrete convolution
++    # This computes the full convolution, but we only need the valid part
++    g_full = convolve(f, f, mode='full')
++    g = g_full[len(f)-1:]  # Take the part corresponding to valid convolution
++
++    # Compute L2 norm squared
++    norm_2_sq = np.sum(g**2)
++
++    # Compute L1 norm
++    norm_1 = np.sum(np.abs(g))
++
++    # Compute L-infinity norm
++    norm_inf = np.max(np.abs(g))
++
++    return norm_2_sq, norm_1, norm_inf, g
++
++def compute_c2(f_values):
++    """Compute C2 value for given function values."""
++    try:
++        norm_2_sq, norm_1, norm_inf, _ = compute_autoconvolution_norms(f_values)
++
++        # Avoid division by zero or very small numbers
++        if norm_1 <= 1e-12 or norm_inf <= 1e-12:
++            return 0.0
++
++        c2 = norm_2_sq / (norm_1 * norm_inf)
++        return c2
++    except Exception:
++        return 0.0
++
++def sophisticated_initialization(n_steps):
++    """Create a sophisticated initial pattern for optimization."""
++    # Create alternating high/low segments
++    f_values = []
++
++    # Create segments with alternating high/low values
++    segment_length = max(1, n_steps // 20)
++
++    for i in range(n_steps):
++        segment_idx = i // segment_length
++        if segment_idx % 2 == 0:
++            # High amplitude segments
++            amplitude = np.random.uniform(0.7, 1.0)
++        else:
++            # Low amplitude segments
++            amplitude = np.random.uniform(0.0, 0.3)
++        f_values.append(amplitude)
++
++    # Add some random noise to make it less structured initially
++    noise_level = 0.1
++    f_values = [max(0, val + np.random.normal(0, noise_level)) for val in f_values]
++
++    return f_values
++
++def evolutionary_optimization(n_steps):
++    """Use evolutionary optimization to find high C2 values."""
++
++    def objective(params):
++        # Clip values to ensure they are non-negative
++        f_values = np.clip(params, 0, None)
++        c2 = compute_c2(f_values)
++        # Return negative because we want to maximize C2
++        return -c2
++
++    # Set bounds for optimization (0 to 1 for each parameter)
++    bounds = [(0, 1) for _ in range(n_steps)]
++
++    # Run differential evolution with multiple attempts
++    best_c2 = -np.inf
++    best_solution = None
++
++    # Try multiple restarts to avoid local optima
++    for restart in range(3):
++        # Use a more sophisticated initialization
++        initial_guess = sophisticated_initialization(n_steps)
++
++        try:
++            # Run differential evolution with more iterations for better exploration
++            result = differential_evolution(
++                objective,
++                bounds,
++                maxiter=100 + restart * 50,  # Increase iterations with restarts
++                popsize=max(10, n_steps // 10),  # Adaptive population size
++                mutation=(0.5, 1.0),
++                recombination=0.7,
++                seed=42 + restart,
++                disp=False
++            )
++
++            if result.success and -result.fun > best_c2:
++                best_c2 = -result.fun
++                best_solution = result.x.copy()
++
++        except Exception:
++            continue
++
++    # If no good solution found, return the initial guess
++    if best_solution is None:
++        best_solution = sophisticated_initialization(n_steps)
++
++    # Local refinement around the best solution
++    try:
++        refined_result = differential_evolution(
++            objective,
++            bounds,
++            maxiter=50,
++            popsize=max(5, n_steps // 20),
++            mutation=(0.8, 1.0),
++            recombination=0.9,
++            seed=42,
++            x0=best_solution,
++            disp=False
++        )
++
++        if refined_result.success and -refined_result.fun > best_c2:
++            best_c2 = -refined_result.fun
++            best_solution = refined_result.x.copy()
++
++    except Exception:
++        pass
++
++    # Ensure non-negativity and return
++    final_solution = np.clip(best_solution, 0, None)
++
++    # Normalize for better conditioning
++    max_val = np.max(final_solution)
++    if max_val > 0:
++        final_solution = final_solution / max_val
++
++    return final_solution.tolist()
+ 
+ def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value using sophisticated strategy."""
++    """Function to construct step-function with high C2 value using evolutionary optimization."""
+     # Set seed for reproducibility
+     np.random.seed(42)
+ 
+     # Determine number of steps (within reasonable bounds)
+     n_steps = np.random.randint(500, 5000)
+ 
+-    # Create a sophisticated pattern based on mathematical intuition
+-    # We'll use alternating high/low regions with smoothing
++    # Use evolutionary optimization with multiple restarts
++    try:
++        f_values = evolutionary_optimization(n_steps)
++    except Exception:
++        # Fallback to simpler approach if optimization fails
++        f_values = sophisticated_initialization(n_steps)
+ 
+-    # Generate base alternating pattern
+-    f_values = []
++        # Normalize
++        max_val = np.max(f_values)
++        if max_val > 0:
++            f_values = [val / max_val for val in f_values]
+ 
+-    # Define regions with high and low values
+-    high_value = np.random.uniform(0.7, 1.0)
+-    low_value = np.random.uniform(0.0, 0.3)
+-
+-    # Create base alternating pattern
+-    for i in range(n_steps):
+-        if i % 2 == 0:
+-            f_values.append(high_value)
+-        else:
+-            f_values.append(low_value)
+-
+-    # Apply Gaussian smoothing to create smoother transitions
+-    # This helps avoid sharp discontinuities that might hurt convolution properties
+-    if len(f_values) >= 3:
+-        # Create Gaussian kernel for smoothing
+-        kernel_size = min(21, len(f_values) // 10)
+-        if kernel_size % 2 == 0:
+-            kernel_size += 1
+-        sigma = kernel_size / 6.0
+-        x = np.arange(kernel_size) - kernel_size // 2
+-        gaussian_kernel = np.exp(-x**2 / (2 * sigma**2))
+-        gaussian_kernel /= np.sum(gaussian_kernel)
+-
+-        # Apply convolution to smooth the function
+-        f_values = np.convolve(f_values, gaussian_kernel, mode='same')
+-
+-    # Ensure all values are non-negative
+-    f_values = np.maximum(f_values, 0)
+-
+-    # Normalize to prevent extreme peaks that might hurt C₂
+-    max_val = np.max(f_values)
+-    if max_val > 0:
+-        f_values = f_values / max_val
+-
+-    # Convert to list
+-    return f_values.tolist()
++    return f_values
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

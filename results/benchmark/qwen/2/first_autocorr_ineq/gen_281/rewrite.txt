@@ -1,0 +1,277 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import fftconvolve
+import random
+import time
+from collections import deque
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+def compute_c1_constant(sequence):
+    """Computes the C1 constant for a given sequence."""
+    a = np.array(sequence)
+    sum_a = np.sum(a)
+    if sum_a < 0.01:
+        return float('inf')
+    conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+    max_conv = np.max(conv)
+    n = len(a)
+    c1 = (2 * n * max_conv) / (sum_a ** 2)
+    return c1
+
+def evaluate_sequence(sequence):
+    """Evaluates a sequence and returns 1/C1 (the objective to maximize)."""
+    try:
+        c1 = compute_c1_constant(sequence)
+        if c1 == float('inf'):
+            return 0.0
+        return 1.0 / c1
+    except Exception:
+        return 0.0
+
+def generate_random_sequence(length=None, min_length=10, max_length=1000):
+    """Generate a random sequence with specified or random length."""
+    if length is None:
+        length = random.randint(min_length, max_length)
+    sequence = [random.uniform(0, 1000) for _ in range(length)]
+    if all(x == 0 for x in sequence):
+        sequence[0] = 1.0
+    return sequence
+
+def generate_step_function(n, step_position=None, step_height=1000.0):
+    """Generates a step function which often performs well for autocorrelation."""
+    if step_position is None:
+        step_position = n // 2
+    sequence = [0.0] * n
+    for i in range(step_position):
+        sequence[i] = step_height
+    return sequence
+
+def generate_power_law_sequence(n, alpha=0.95):
+    """Generates a power-law decay sequence which often performs well."""
+    sequence = [alpha ** i for i in range(n)]
+    # Normalize to ensure sum is reasonable
+    total = sum(sequence)
+    if total > 0:
+        sequence = [x / total * 1000 for x in sequence]
+    return sequence
+
+def mutate_sequence(sequence, mutation_rate=0.1, max_mutation=0.5):
+    """Mutate a sequence by randomly modifying elements."""
+    new_sequence = sequence.copy()
+    for i in range(len(new_sequence)):
+        if random.random() < mutation_rate:
+            new_sequence[i] *= random.uniform(1 - max_mutation, 1 + max_mutation)
+            new_sequence[i] = max(0, min(1000, new_sequence[i]))
+    if all(x == 0 for x in new_sequence):
+        new_sequence[0] = max(0.1, new_sequence[0])
+    return new_sequence
+
+def crossover_sequences(seq1, seq2):
+    """Perform uniform crossover between two sequences."""
+    min_len = min(len(seq1), len(seq2))
+    max_len = max(len(seq1), len(seq2))
+    padded_seq1 = seq1 + [0] * (max_len - len(seq1))
+    padded_seq2 = seq2 + [0] * (max_len - len(seq2))
+    new_seq = []
+    for i in range(max_len):
+        if random.random() < 0.5:
+            new_seq.append(padded_seq1[i])
+        else:
+            new_seq.append(padded_seq2[i])
+    return new_seq
+
+def get_elite_sequences(population, fitness_scores, top_k=10):
+    """Return the top performing individuals from the population."""
+    sorted_indices = np.argsort(fitness_scores)[::-1][:top_k]
+    elites = [population[i] for i in sorted_indices]
+    return elites
+
+def genetic_algorithm_search(max_time_seconds=180, pop_size=100):
+    """Enhanced genetic algorithm approach with adaptive parameters."""
+    start_time = time.time()
+    # Adaptive population size
+    adaptive_pop_size = max(50, int(pop_size * 0.8))
+    # Start with a mix of step functions and power law sequences
+    population = [generate_step_function(random.randint(50, 500)) for _ in range(adaptive_pop_size // 2)]
+    population.extend([generate_power_law_sequence(random.randint(50, 500)) for _ in range(adaptive_pop_size // 2)])
+    best_individual = None
+    best_fitness = 0.0
+    generation = 0
+
+    # Track recent improvements for early stopping
+    recent_improvements = deque(maxlen=5)
+
+    while time.time() - start_time < max_time_seconds:
+        generation += 1
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_sequence(individual)
+            fitness_scores.append(fitness)
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = individual.copy()
+
+        # Record recent improvements
+        recent_improvements.append(best_fitness)
+
+        # Check if we're stagnating
+        if len(recent_improvements) == recent_improvements.maxlen:
+            if all(x <= recent_improvements[0] * 1.001 for x in recent_improvements):
+                # Stagnation detected, introduce diversity
+                for i in range(len(population) // 5):
+                    population[i] = generate_power_law_sequence(random.randint(50, 500))
+
+        # Selection: tournament selection
+        selected = []
+        for _ in range(adaptive_pop_size):
+            tournament_indices = random.sample(range(adaptive_pop_size), 3)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]
+            selected.append(population[winner_index].copy())
+
+        # Elite preservation: keep top 10%
+        elites = get_elite_sequences(population, fitness_scores, top_k=max(10, adaptive_pop_size // 10))
+        new_population = elites[:]
+
+        # Crossover and mutation
+        while len(new_population) < adaptive_pop_size:
+            parent1 = selected[random.randint(0, len(selected)-1)]
+            parent2 = selected[random.randint(0, len(selected)-1)]
+            child1 = crossover_sequences(parent1, parent2)
+            child2 = crossover_sequences(parent2, parent1)
+            child1 = mutate_sequence(child1, mutation_rate=0.2, max_mutation=0.3)
+            child2 = mutate_sequence(child2, mutation_rate=0.2, max_mutation=0.3)
+            new_population.extend([child1, child2])
+
+        population = new_population[:adaptive_pop_size]
+
+        # Occasionally inject new random sequences to avoid local minima
+        if generation % 5 == 0:
+            for i in range(0, adaptive_pop_size, 10):
+                if i < adaptive_pop_size:
+                    population[i] = generate_power_law_sequence(random.randint(50, 500))
+
+    return (best_individual, best_fitness)
+
+def simulated_annealing_search(initial_sequence, max_iter=200):
+    """Improved simulated annealing with adaptive cooling schedule."""
+    current_sequence = initial_sequence.copy()
+    current_fitness = evaluate_sequence(current_sequence)
+    best_sequence = current_sequence.copy()
+    best_fitness = current_fitness
+    temp = 100.0
+    # Aggressive cooling schedule for faster convergence
+    cooling_rate = 0.999
+    min_temp = 0.1
+
+    for iteration in range(max_iter):
+        mutated = mutate_sequence(current_sequence, mutation_rate=0.3, max_mutation=0.3)
+        mutated_fitness = evaluate_sequence(mutated)
+
+        # Accept or reject based on Metropolis criterion
+        if mutated_fitness > current_fitness or random.random() < np.exp((mutated_fitness - current_fitness) / (temp + 1e-10)):
+            current_sequence = mutated
+            current_fitness = mutated_fitness
+
+        if current_fitness > best_fitness:
+            best_sequence = current_sequence.copy()
+            best_fitness = current_fitness
+
+        temp = max(temp * cooling_rate, min_temp)
+
+    return best_sequence, best_fitness
+
+def quadratic_programming_optimization(initial_sequence, max_iter=200):
+    """Improved quadratic programming approach with better initial guesses."""
+    def objective(x):
+        seq = np.abs(x)
+        if np.sum(seq) < 0.01:
+            return float('inf')
+        c1 = compute_c1_constant(seq)
+        if c1 == float('inf'):
+            return float('inf')
+        return -1.0 / c1
+
+    bounds = [(0, 1000) for _ in range(len(initial_sequence))]
+    # Use a better initial guess based on the input sequence
+    x0 = np.array(initial_sequence) * random.uniform(0.9, 1.1)
+    x0 = np.maximum(x0, 0)
+
+    try:
+        res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={'maxiter': max_iter})
+        if res.success:
+            optimized_seq = np.abs(res.x)
+            return optimized_seq.tolist(), evaluate_sequence(optimized_seq)
+    except:
+        pass
+    return initial_sequence, evaluate_sequence(initial_sequence)
+
+def hybrid_search_strategy(max_time_seconds=180):
+    """Combines multiple strategies in a smart order to maximize exploration."""
+    start_time = time.time()
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    # Strategy 1: Genetic Algorithm (explorative)
+    ga_seq, ga_fitness = genetic_algorithm_search(5, pop_size=80)
+    if ga_fitness > best_inv_c1:
+        best_inv_c1 = ga_fitness
+        best_sequence = ga_seq
+
+    # Strategy 2: Simulated Annealing on best GA result (exploitative)
+    if best_sequence is not None:
+        sa_seq, sa_fitness = simulated_annealing_search(best_sequence, 100)
+        if sa_fitness > best_inv_c1:
+            best_inv_c1 = sa_fitness
+            best_sequence = sa_seq
+
+    # Strategy 3: Quadratic Programming Optimization on best result (fine-tuning)
+    if best_sequence is not None:
+        qp_seq, qp_fitness = quadratic_programming_optimization(best_sequence, 100)
+        if qp_fitness > best_inv_c1:
+            best_inv_c1 = qp_fitness
+            best_sequence = qp_seq
+
+    # Strategy 4: Local search from many different starting points
+    for _ in range(5):
+        if time.time() - start_time > max_time_seconds - 10:  # Prevent timeout
+            break
+        random_start = generate_step_function(random.randint(50, 500))
+        sa_seq, sa_fitness = simulated_annealing_search(random_start, 50)
+        if sa_fitness > best_inv_c1:
+            best_inv_c1 = sa_fitness
+            best_sequence = sa_seq
+
+    # Strategy 5: Try to generate step functions with varying parameters
+    for _ in range(5):
+        if time.time() - start_time > max_time_seconds - 10:
+            break
+        # Create step function with randomized parameters
+        length = random.randint(50, 500)
+        step_pos = random.randint(1, length - 1)
+        step_height = random.uniform(500, 1000)
+        step_seq = generate_step_function(length, step_pos, step_height)
+        test_fitness = evaluate_sequence(step_seq)
+        if test_fitness > best_inv_c1:
+            best_inv_c1 = test_fitness
+            best_sequence = step_seq
+
+    # Return final best if exists, otherwise use default generator
+    if best_sequence is None:
+        best_sequence = generate_step_function(200)
+
+    return best_sequence
+
+def search_for_best_sequence():
+    """Main search function to find the best sequence."""
+    return hybrid_search_strategy(170)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

@@ -1,0 +1,225 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import warnings
+
+def _generate_hexagonal_grid(n_circles: int, square_size: float = 1.0) -> np.ndarray:
+    """Generate initial hexagonal grid configuration."""
+    # Determine grid dimensions
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+    
+    # Adjust to fit exactly n_circles
+    while rows * cols < n_circles:
+        rows += 1
+    
+    # Calculate spacing
+    spacing_x = square_size / (cols + 1)
+    spacing_y = square_size / (rows + 1)
+    
+    # Generate positions
+    positions = []
+    hex_offset = spacing_x * 0.5
+    
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n_circles:
+                break
+            x = (j + 0.5) * spacing_x
+            y = (i + 0.5) * spacing_y
+            
+            if i % 2 == 1:
+                x += hex_offset
+                
+            # Ensure within bounds
+            x = np.clip(x, 0.01, square_size - 0.01)
+            y = np.clip(y, 0.01, square_size - 0.01)
+            
+            positions.append([x, y])
+        if len(positions) >= n_circles:
+            break
+    
+    return np.array(positions[:n_circles])
+
+def _calculate_initial_radii(positions: np.ndarray, min_radius: float = 0.01) -> np.ndarray:
+    """Calculate initial radii based on local density."""
+    if len(positions) <= 1:
+        return np.full(len(positions), min_radius)
+    
+    # Use k-nearest neighbors to estimate local density
+    # For small sets, compute pairwise distances
+    if len(positions) < 10:
+        distances = cdist(positions, positions)
+        # Exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+        min_distances = np.min(distances, axis=1)
+    else:
+        # Use approximate nearest neighbors for efficiency
+        from scipy.spatial import cKDTree
+        tree = cKDTree(positions)
+        # Find 5 nearest neighbors for each point
+        _, indices = tree.query(positions, k=min(6, len(positions)), workers=-1)
+        # Compute minimum distance to neighbors
+        min_distances = np.array([
+            np.min([np.linalg.norm(positions[i] - positions[j]) 
+                   for j in indices[i] if j != i]) 
+            for i in range(len(positions))
+        ])
+    
+    # Inverse relationship with density (closer neighbors = smaller radius)
+    min_distances = np.maximum(min_distances, 0.01)  # Avoid division by zero
+    
+    # Calculate radii inversely proportional to local density
+    radii = min_radius * 5.0 / min_distances
+    # Clip to reasonable ranges
+    radii = np.clip(radii, min_radius, 0.2)
+    
+    return radii
+
+def _validate_solution(circles: np.ndarray, square_size: float = 1.0) -> tuple[float, bool]:
+    """Validate solution and calculate total radius."""
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+    
+    # Check containment
+    containment_ok = True
+    for i, (pos, r) in enumerate(zip(positions, radii)):
+        x, y = pos
+        if (x - r < 0 or x + r > square_size or 
+            y - r < 0 or y + r > square_size):
+            containment_ok = False
+            break
+    
+    # Check overlaps
+    overlap_ok = True
+    if len(circles) > 1:
+        distances = cdist(positions, positions)
+        # Set diagonal to infinity to avoid self-comparison
+        np.fill_diagonal(distances, np.inf)
+        
+        # Check if any circles overlap
+        min_distances = np.min(distances, axis=1)
+        for i, (r, d) in enumerate(zip(radii, min_distances)):
+            if d < 2 * r:
+                overlap_ok = False
+                break
+    
+    # Calculate total radius
+    total_radius = np.sum(radii)
+    
+    return total_radius, (containment_ok and overlap_ok)
+
+def _objective_function(params: np.ndarray, circles: np.ndarray) -> float:
+    """Objective function to maximize (negative sum of radii)."""
+    # Reshape params back to circles format
+    n_circles = len(circles)
+    positions = params[:2*n_circles].reshape(-1, 2)
+    radii = params[2*n_circles:]
+    
+    # Clip radii to valid range
+    radii = np.clip(radii, 0.001, 0.4)
+    
+    # Reconstruct full circles array
+    circles_new = np.column_stack([positions, radii])
+    
+    # Calculate total radius
+    total_radius = np.sum(radii)
+    
+    # Penalty for constraint violations
+    _, valid = _validate_solution(circles_new)
+    
+    if not valid:
+        # Heavy penalty for invalid solutions
+        total_radius -= 1000.0
+    
+    return -total_radius  # Negative because we want to maximize
+
+def _constraint_function(params: np.ndarray, circles: np.ndarray) -> float:
+    """Constraint function for optimization."""
+    n_circles = len(circles)
+    positions = params[:2*n_circles].reshape(-1, 2)
+    radii = params[2*n_circles:]
+    
+    # Ensure all radii are positive
+    return np.min(radii)
+
+def _optimize_circles(initial_circles: np.ndarray) -> np.ndarray:
+    """Optimize circle placement using scipy optimization."""
+    n_circles = len(initial_circles)
+    
+    # Flatten initial configuration
+    initial_params = np.concatenate([
+        initial_circles[:, :2].flatten(),
+        initial_circles[:, 2]
+    ])
+    
+    # Define bounds (allow positions to move slightly and radii to vary)
+    bounds = []
+    for i in range(n_circles):
+        # Position bounds
+        bounds.append((0.01, 0.99))  # x coordinate
+        bounds.append((0.01, 0.99))  # y coordinate
+        # Radius bounds
+        bounds.append((0.001, 0.4))  # radius
+    
+    # Constraints
+    def containment_constraint(params):
+        return _constraint_function(params, initial_circles)
+    
+    try:
+        # Use L-BFGS-B as it's good for bound-constrained problems
+        result = minimize(
+            _objective_function,
+            initial_params,
+            args=(initial_circles,),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-6},
+            callback=lambda x: None  # We don't need callbacks
+        )
+        
+        if result.success:
+            # Reconstruct final circles
+            final_positions = result.x[:2*n_circles].reshape(-1, 2)
+            final_radii = np.clip(result.x[2*n_circles:], 0.001, 0.4)
+            
+            return np.column_stack([final_positions, final_radii])
+        else:
+            # Return initial if optimization fails
+            warnings.warn("Optimization failed, returning initial configuration")
+            return initial_circles
+            
+    except Exception as e:
+        warnings.warn(f"Optimization error: {str(e)}, returning initial configuration")
+        return initial_circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    
+    # Step 1: Generate hexagonal grid
+    positions = _generate_hexagonal_grid(n)
+    
+    # Step 2: Calculate initial radii based on density
+    radii = _calculate_initial_radii(positions)
+    
+    # Step 3: Create initial circles array
+    circles = np.column_stack([positions, radii])
+    
+    # Step 4: Optimize the configuration
+    optimized_circles = _optimize_circles(circles)
+    
+    # Final validation
+    total_radius, valid = _validate_solution(optimized_circles)
+    if not valid:
+        warnings.warn("Final solution validation failed")
+        
+    return optimized_circles
+
+# EVOLVE-BLOCK-END

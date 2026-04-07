@@ -1,0 +1,199 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.optimize import minimize
+import math
+import random
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+    
+    Uses Voronoi-based initialization followed by simulated annealing optimization.
+    
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    
+    # Step 1: Generate initial configuration using Voronoi-based approach
+    # Create initial points for Voronoi tesselation
+    np.random.seed(42)
+    initial_points = np.random.rand(n+10, 2)  # Extra points to ensure good Voronoi coverage
+    
+    # Add boundary points to ensure better coverage of corners and edges
+    boundary_points = np.array([
+        [0, 0], [0, 1], [1, 0], [1, 1],
+        [0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]
+    ])
+    initial_points = np.vstack([initial_points, boundary_points])
+    
+    # Generate Voronoi diagram
+    vor = Voronoi(initial_points)
+    
+    # Get Voronoi vertices and regions
+    # Select n most central points that form valid Voronoi cells
+    candidate_centers = []
+    for i in range(len(vor.points)):
+        # Only consider points that are inside the unit square
+        if (0 <= vor.points[i][0] <= 1 and 0 <= vor.points[i][1] <= 1):
+            candidate_centers.append(vor.points[i])
+    
+    # If we don't have enough candidates, add more random points
+    if len(candidate_centers) < n:
+        additional_points = np.random.rand(n - len(candidate_centers) + 5, 2)
+        candidate_centers.extend(additional_points)
+    
+    # Take the first n valid centers
+    centers = np.array(candidate_centers[:n])
+    
+    # Step 2: Initialize circles with radii based on Voronoi proximity
+    circles = np.zeros((n, 3))
+    
+    # Compute Voronoi regions and determine radii
+    for i in range(n):
+        x, y = centers[i]
+        
+        # Find distances to all other centers
+        distances = [np.sqrt((x - cx)**2 + (y - cy)**2) for cx, cy in centers]
+        
+        # Radius is half the minimum distance to any other center (minus some buffer)
+        min_dist = min(d for d in distances if d > 0) if any(d > 0 for d in distances) else 0.5
+        
+        # Ensure the circle fits within the unit square
+        max_radius = min(x, 1-x, y, 1-y)
+        radius = min(min_dist/2, max_radius)
+        
+        circles[i] = [x, y, radius]
+    
+    # Step 3: Optimize using simulated annealing
+    def objective(circles_flat):
+        """Calculate negative sum of radii (we minimize this)"""
+        total_radius = 0
+        circles_array = circles_flat.reshape(-1, 3)
+        for i in range(len(circles_array)):
+            total_radius += circles_array[i, 2]
+        return -total_radius
+    
+    def is_valid(config):
+        """Check if configuration is valid (no overlaps, all within bounds)"""
+        circles_array = config.reshape(-1, 3)
+        
+        # Check containment
+        for i in range(len(circles_array)):
+            x, y, r = circles_array[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+                
+        # Check overlaps
+        for i in range(len(circles_array)):
+            for j in range(i+1, len(circles_array)):
+                x1, y1, r1 = circles_array[i]
+                x2, y2, r2 = circles_array[j]
+                dist = math.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if dist < r1 + r2:
+                    return False
+        return True
+    
+    # Simulated Annealing parameters
+    current_config = circles.flatten()
+    
+    # Initial temperature and cooling schedule
+    temp = 0.1
+    cooling_rate = 0.999
+    min_temp = 1e-6
+    
+    # Perturbation parameters
+    max_perturbation = 0.01
+    
+    best_config = current_config.copy()
+    best_objective = objective(current_config)
+    
+    iterations = 0
+    max_iterations = 10000
+    
+    while temp > min_temp and iterations < max_iterations:
+        # Generate neighbor solution by perturbing one circle
+        new_config = current_config.copy()
+        
+        # Choose a random circle to modify
+        circle_idx = random.randint(0, n-1)
+        x_idx = circle_idx * 3
+        y_idx = x_idx + 1
+        r_idx = x_idx + 2
+        
+        # Randomly perturb position and radius
+        new_config[x_idx] += random.uniform(-max_perturbation, max_perturbation)
+        new_config[y_idx] += random.uniform(-max_perturbation, max_perturbation)
+        new_config[r_idx] += random.uniform(-max_perturbation/2, max_perturbation/2)
+        
+        # Ensure new configuration stays within bounds
+        new_config[x_idx] = max(0 + new_config[r_idx], min(1 - new_config[r_idx], new_config[x_idx]))
+        new_config[y_idx] = max(0 + new_config[r_idx], min(1 - new_config[r_idx], new_config[y_idx]))
+        new_config[r_idx] = max(0.001, min(0.5, new_config[r_idx]))
+        
+        # Accept or reject based on Metropolis criterion
+        new_objective = objective(new_config)
+        delta = new_objective - objective(current_config)
+        
+        if delta < 0 or random.random() < math.exp(-delta / temp):
+            current_config = new_config
+            
+            # Update best solution if better
+            if new_objective < best_objective:
+                best_config = new_config.copy()
+                best_objective = new_objective
+        
+        temp *= cooling_rate
+        iterations += 1
+    
+    # Convert back to final result format
+    result = best_config.reshape(-1, 3)
+    
+    # Final validation check
+    try:
+        if not is_valid(result.flatten()):
+            # If invalid, fall back to a simple greedy approach
+            result = create_fallback_configuration()
+    except:
+        result = create_fallback_configuration()
+    
+    return result
+
+def create_fallback_configuration():
+    """A simple fallback configuration if optimization fails"""
+    circles = np.zeros((26, 3))
+    
+    # Place circles in a grid-like pattern with decreasing radii
+    rows, cols = 5, 6  # 30 positions, we'll take first 26
+    spacing_x = 1.0 / cols
+    spacing_y = 1.0 / rows
+    
+    count = 0
+    for i in range(rows):
+        for j in range(cols):
+            if count >= 26:
+                break
+            x = spacing_x * (j + 0.5)
+            y = spacing_y * (i + 0.5)
+            
+            # Calculate maximum possible radius
+            min_dist = min(x, 1-x, y, 1-y)
+            radius = min_dist * 0.8  # Leave some margin
+            
+            # Adjust radius to avoid overlap with neighbors
+            if count == 0:
+                pass  # First circle, set default
+            elif count < 26:
+                # Set reasonable radius
+                radius = min(radius, 0.15)
+                
+            circles[count] = [x, y, max(radius, 0.01)]
+            count += 1
+            
+        if count >= 26:
+            break
+    
+    return circles
+
+# EVOLVE-BLOCK-END

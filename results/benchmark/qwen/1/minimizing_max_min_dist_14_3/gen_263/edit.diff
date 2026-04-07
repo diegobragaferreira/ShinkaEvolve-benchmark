@@ -1,0 +1,515 @@
+--- a/original.py
++++ b/original.py
+@@ -1,173 +1,383 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
++from scipy.spatial.distance import pdist, cdist
+ from scipy.spatial import SphericalVoronoi
+-from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist
++from sklearn.cluster import KMeans
+ import time
+ 
+-def compute_voronoi_energy(points):
+-    """Compute electrostatic energy of points on sphere"""
+-    distances = pdist(points)
+-    # Energy is sum of inverse distances (electrostatic repulsion)
+-    energy = np.sum(1.0 / (distances + 1e-12))
+-    return energy
++def torus_points(n_points, R=1.0, r=0.5):
++    """Generate points on a torus surface"""
++    points = []
++    for i in range(n_points):
++        # Parameterize torus using angles
++        theta = 2 * np.pi * i / n_points  # Major circle angle
++        phi = 2 * np.pi * np.random.random()  # Minor circle angle
++
++        # Torus coordinates
++        x = (R + r * np.cos(phi)) * np.cos(theta)
++        y = (R + r * np.cos(phi)) * np.sin(theta)
++        z = r * np.sin(phi)
++
++        points.append([x, y, z])
++
++    return np.array(points)
++
++def torus_to_sphere_mapping(torus_points):
++    """Map torus points to sphere while preserving relative distances as much as possible"""
++    # Normalize to unit sphere
++    norms = np.linalg.norm(torus_points, axis=1, keepdims=True)
++    sphere_points = torus_points / np.maximum(norms, 1e-12)
++
++    # Apply slight adjustment to spread points more evenly
++    # This helps reduce clustering that might occur from direct mapping
++    adjustment_factor = 0.1
++    for i in range(len(sphere_points)):
++        # Perturb based on normalized coordinates
++        perturbation = adjustment_factor * sphere_points[i] * np.random.random()
++        sphere_points[i] += perturbation
++
++    # Renormalize
++    norms = np.linalg.norm(sphere_points, axis=1, keepdims=True)
++    sphere_points = sphere_points / np.maximum(norms, 1e-12)
++
++    return sphere_points
+ 
+ def min_max_dist_ratio(points):
+     """Calculate the ratio of minimum to maximum distance."""
+     if len(points) < 2:
+         return 0.0
+     distances = pdist(points)
+     if len(distances) == 0:
+         return 0.0
+     min_dist = np.min(distances)
+     max_dist = np.max(distances)
+     if max_dist < 1e-12:
+         return 0.0
+     return min_dist / max_dist
+ 
+-def spherical_voronoi_initialization(n_points):
+-    """Initialize points using spherical Voronoi construction approach"""
+-    # Start with a simple geometric configuration
+-    points = np.zeros((n_points, 3))
+-    
+-    # Use a modified Fibonacci approach with better coverage
+-    golden_angle = np.pi * (3 - np.sqrt(5))
+-    
+-    # Distribute points more evenly using modified spiral
+-    for i in range(n_points):
+-        # Modified distribution to avoid clustering
+-        y = 1 - (i / max(1, n_points - 1)) * 2  # y from 1 to -1
+-        radius = np.sqrt(max(0, 1 - y * y))
+-        
+-        # Add perturbation to avoid perfect symmetry
+-        theta = golden_angle * i + np.sin(i * 0.5) * 0.1
+-        
+-        x = np.cos(theta) * radius
+-        z = np.sin(theta) * radius
+-        
+-        points[i] = [x, y, z]
+-    
++def initialize_with_clustering(n_points):
++    """Initialize points using k-means clustering approach for even distribution"""
++    # Start with random points
++    np.random.seed(42)
++    points = np.random.rand(n_points, 3) * 2 - 1  # [-1, 1]
++
+     # Normalize to unit sphere
+     norms = np.linalg.norm(points, axis=1, keepdims=True)
+     points = points / np.maximum(norms, 1e-12)
++
++    # Apply k-means clustering to identify natural groupings
++    # and adjust points to spread them out
++    if n_points > 1:
++        kmeans = KMeans(n_clusters=min(n_points, 8), random_state=42, n_init=10)
++        labels = kmeans.fit_predict(points)
++
++        # Adjust points to increase separation
++        centers = kmeans.cluster_centers_
++        for i in range(n_points):
++            if n_points > 1:
++                # Move points away from cluster centers
++                center_idx = labels[i]
++                direction = points[i] - centers[center_idx]
++                distance_from_center = np.linalg.norm(direction)
++                if distance_from_center > 1e-12:
++                    # Push points outward slightly
++                    push_strength = 0.02 / (distance_from_center + 1e-12)
++                    points[i] += direction * push_strength
++
++    return points
++
++def fibonacci_spiral_sphere(n_points):
++    """Generate points on a sphere using Fibonacci spiral method."""
++    points = []
++    phi = np.pi * (3 - np.sqrt(5))  # golden angle
++
++    for i in range(n_points):
++        y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
++        radius = np.sqrt(1 - y * y)  # radius at y
++
++        theta = phi * i  # golden angle increment
++
++        x = np.cos(theta) * radius
++        z = np.sin(theta) * radius
++
++        points.append([x, y, z])
++
++    return np.array(points)
++
++def enhanced_fibonacci_initialization(n_points):
++    """Enhanced Fibonacci initialization with better distribution properties."""
++    points = []
++    phi = np.pi * (3 - np.sqrt(5))
+     
+-    # Slight random perturbation to break symmetries
++    # Generate points with small perturbations to avoid perfect patterns
++    for i in range(n_points):
++        y = 1 - (i / float(n_points - 1)) * 2
++        radius = np.sqrt(max(0, 1 - y * y))
++        theta = phi * i + np.sin(i * 0.7) * 0.05  # Add perturbation
++        x = np.cos(theta) * radius
++        z = np.sin(theta) * radius
++        points.append([x, y, z])
++    
++    fib_points = np.array(points)
++    norms = np.linalg.norm(fib_points, axis=1, keepdims=True)
++    return fib_points / np.maximum(norms, 1e-12)
++
++def icosahedron_points(n=14):
++    """Generate points using icosahedron-based construction."""
++    # Vertices of a regular icosahedron
++    phi = (1 + np.sqrt(5)) / 2  # golden ratio
++    vertices = np.array([
++        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
++        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
++        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
++    ])
++
++    # Normalize to unit sphere
++    vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
++
++    # If we need more than 12 points, distribute additional points
++    if n <= 12:
++        # Just return subset of vertices
++        return vertices[:n]
++    else:
++        # For 14 points, we'll start with icosahedron vertices and add two more
++        points = vertices.copy()
++
++        # Add two more points that are well-distributed
++        points = np.vstack([points, [[0, 0, 1], [0, 0, -1]]])
++
++        # Apply slight random perturbation to ensure good distribution
++        np.random.seed(42)
++        points += np.random.normal(0, 0.05, (points.shape[0], 3))
++
++        # Normalize again to maintain unit sphere
++        norms = np.linalg.norm(points, axis=1)
++        points = points / np.maximum(norms[:, np.newaxis], 1e-12)
++
++        return points[:n]
++
++def voronoi_regularization_penalty(points, alpha=0.1):
++    """Add penalty for non-uniform Voronoi cell areas."""
++    try:
++        sv = SphericalVoronoi(points)
++        areas = sv.voronoi_cell_areas()
++        # Return variance of areas as penalty (higher variance = less uniform)
++        return np.var(areas)
++    except:
++        return 0.0
++
++def enhanced_objective_function(x_flat, points_count=14, iteration_step=0, max_steps=1000):
++    """Enhanced objective function incorporating multiple optimization criteria."""
++    points_reshaped = x_flat.reshape(points_count, 3)
++
++    # Ensure points are on unit sphere
++    norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
++    normalized_points = points_reshaped / np.maximum(norms, 1e-12)
++
++    # Calculate pairwise distances
++    distances = cdist(normalized_points, normalized_points)
++    np.fill_diagonal(distances, np.inf)
++
++    if distances.size == 0:
++        return 1e10
++
++    # Get min and max distances
++    d_min = np.min(distances)
++    d_max = np.max(distances)
++
++    if d_max < 1e-12:
++        return 1e10
++
++    # Calculate ratio
++    ratio = d_min / d_max
++
++    # Add regularization penalty for distance variance
++    # This encourages more uniform spacing
++    distance_var = np.var(distances[distances != np.inf])
++    dist_mean = np.mean(distances[distances != np.inf])
++
++    if dist_mean > 1e-12:
++        variance_penalty = distance_var / (dist_mean ** 2)
++        # Penalize high variance while maximizing ratio
++        # Higher lambda means stronger emphasis on uniformity
++        lambda_reg = 0.2  # Increased regularization strength
++        adjusted_ratio = ratio - lambda_reg * variance_penalty
++    else:
++        adjusted_ratio = ratio
++
++    # Adaptive constraint tightening - gradually move toward tighter constraints
++    # Start with looser bounds (allowing larger diameters) and tighten over time
++    if iteration_step < max_steps:
++        # Linear decay from 2.8 to 2.0 diameter constraint
++        max_diameter = 2.8 - (iteration_step / max_steps) * 0.8
++        # Only apply the constraint if the current max distance exceeds the target
++        if d_max > max_diameter:
++            # Penalize solutions that exceed the constraint
++            penalty = (d_max - max_diameter) * 1000
++            adjusted_ratio -= penalty
++
++    # Add Voronoi regularization penalty to encourage uniform distribution
++    voronoi_penalty = voronoi_regularization_penalty(normalized_points, alpha=0.1)
++    adjusted_ratio -= 0.05 * voronoi_penalty
++
++    # Return negative for minimization (since we want to maximize ratio)
++    return -adjusted_ratio
++
++def adaptive_optimization_stage(points, max_iter=500, stage=1, iteration_offset=0):
++    """Perform adaptive optimization stage with varying parameters."""
++    n = len(points)
++
++    def constraint_sphere(x_flat):
++        points_reshaped = x_flat.reshape(n, 3)
++        norms = np.linalg.norm(points_reshaped, axis=1)
++        return norms - 1.0
++
++    constraints = {'type': 'eq', 'fun': constraint_sphere}
++    bounds = [(-2, 2) for _ in range(n * 3)]
++
++    # Adaptive parameters based on stage
++    if stage == 1:  # Coarse optimization
++        method = 'SLSQP'
++        options = {'maxiter': max_iter//3, 'ftol': 1e-6, 'gtol': 1e-6}
++        tol = 1e-6
++    elif stage == 2:  # Medium optimization
++        method = 'trust-constr'
++        options = {'maxiter': max_iter//3, 'xtol': 1e-9, 'gtol': 1e-9}
++        tol = 1e-9
++    else:  # Fine optimization
++        method = 'L-BFGS-B'
++        options = {'maxiter': max_iter//3, 'ftol': 1e-12, 'gtol': 1e-12}
++        tol = 1e-12
++
++    try:
++        # Create wrapper to pass iteration info
++        def objective_wrapper(x_flat):
++            return enhanced_objective_function(x_flat, n, iteration_offset, max_iter)
++
++        result = minimize(
++            objective_wrapper,
++            points.flatten(),
++            method=method,
++            bounds=bounds,
++            constraints=constraints,
++            options=options,
++            tol=tol
++        )
++
++        if result.success:
++            optimized_points = result.x.reshape(n, 3)
++            # Ensure points are on unit sphere
++            norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
++            normalized_points = optimized_points / np.maximum(norms, 1e-12)
++            return normalized_points
++    except Exception:
++        pass
++
++    return points
++
++def initialize_multiple_strategies(n_points=14):
++    """Initialize 14 points using multiple strategies."""
++    strategies = []
++
++    # Strategy 1: Enhanced Fibonacci spiral initialization
++    fib_points = enhanced_fibonacci_initialization(n_points)
++    strategies.append(("enhanced_fibonacci", fib_points))
++
++    # Strategy 2: Icosahedron-based initialization
++    ico_points = icosahedron_points(n_points)
++    strategies.append(("icosahedron", ico_points))
++
++    # Strategy 3: Torus-based initialization
++    torus_points_arr = torus_points(n_points)
++    torus_mapped = torus_to_sphere_mapping(torus_points_arr)
++    strategies.append(("torus", torus_mapped))
++
++    # Strategy 4: Clustering-based initialization
++    clustered_points = initialize_with_clustering(n_points)
++    strategies.append(("clustering", clustered_points))
++
++    # Strategy 5: Random initialization with perturbation
+     np.random.seed(42)
+-    perturbation = np.random.normal(0, 0.03, (n_points, 3))
+-    points += perturbation
+-    
+-    # Project back to sphere
+-    norms = np.linalg.norm(points, axis=1, keepdims=True)
+-    points = points / np.maximum(norms, 1e-12)
+-    
+-    return points
+-
+-def spherical_gradient_descent(initial_points, max_iter=1000):
+-    """Optimize points on sphere using gradient descent with spherical projection"""
+-    
+-    def objective(x_flat):
+-        points = x_flat.reshape(-1, 3)
+-        # Ensure points are on unit sphere
+-        norms = np.linalg.norm(points, axis=1, keepdims=True)
+-        normalized_points = points / np.maximum(norms, 1e-12)
+-        
+-        # Maximize min/max ratio (minimize negative)
+-        ratio = min_max_dist_ratio(normalized_points)
+-        return -ratio if ratio > 0 else 1e10
+-    
+-    def constraint_sphere(x_flat):
+-        points = x_flat.reshape(-1, 3)
+-        norms = np.linalg.norm(points, axis=1)
+-        return norms - 1.0
+-    
+-    # Use trust-constr method which handles constraints well
+-    constraints = {'type': 'eq', 'fun': constraint_sphere}
+-    
+-    # Bounds are not needed as we're using constraint
+-    bounds = [(-2, 2) for _ in range(len(initial_points) * 3)]
+-    
+-    # First pass with L-BFGS-B for coarse optimization
+-    result = minimize(
+-        objective,
+-        initial_points.flatten(),
+-        method='L-BFGS-B',
+-        bounds=bounds,
+-        options={'maxiter': max_iter//2, 'ftol': 1e-8, 'gtol': 1e-8}
+-    )
+-    
+-    if result.success:
+-        # Refine with trust-constr for better constraint handling
+-        result = minimize(
+-            objective,
+-            result.x,
+-            method='trust-constr',
+-            constraints=constraints,
+-            options={'maxiter': max_iter//2, 'xtol': 1e-10, 'gtol': 1e-10}
+-        )
+-    
+-    optimized_points = result.x.reshape(-1, 3)
+-    
+-    # Ensure final points are on sphere
+-    norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+-    final_points = optimized_points / np.maximum(norms, 1e-12)
+-    
+-    return final_points
++    random_points = np.random.randn(n_points, 3)
++    norms = np.linalg.norm(random_points, axis=1, keepdims=True)
++    rand_points = random_points / np.maximum(norms, 1e-12)
++    strategies.append(("random", rand_points))
++
++    # Strategy 6: Hybrid Fibonacci + random perturbation
++    hybrid_points = enhanced_fibonacci_initialization(n_points)
++    np.random.seed(42)
++    hybrid_points += np.random.normal(0, 0.03, (n_points, 3))
++    norms = np.linalg.norm(hybrid_points, axis=1, keepdims=True)
++    hybrid_points = hybrid_points / np.maximum(norms, 1e-12)
++    strategies.append(("hybrid_fibonacci", hybrid_points))
++
++    return strategies
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+-    Uses spherical Voronoi and energy-based optimization approach.
+-    
++
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     n = 14
+     d = 3
+-    
+-    # Multi-start approach with Voronoi-based initialization
++
++    # Initialize multiple strategies
++    strategies = initialize_multiple_strategies(n)
++
+     best_ratio = -np.inf
+     best_points = None
+-    
+-    # Strategy 1: Voronoi-inspired initialization with multiple restarts
+-    for restart in range(10):
+-        np.random.seed(restart * 100)  # Different seed for each restart
+-        
+-        # Initialize with spherical Voronoi-inspired approach
+-        initial_points = spherical_voronoi_initialization(n)
+-        
+-        # Optimize using our specialized spherical gradient descent
+-        optimized_points = spherical_gradient_descent(initial_points, max_iter=800)
+-        
+-        # Evaluate the result
++
++    # Try each strategy with optimized multi-stage approach
++    for strategy_name, initial_points in strategies:
++        # Add slight random noise to break symmetry
++        np.random.seed(42)
++        noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
++
++        # Ensure all points are on unit sphere
++        norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
++        normalized_points = noisy_points / np.maximum(norms, 1e-12)
++
++        # Multi-stage optimization with iteration tracking
++        iteration_counter = 0
++        max_total_iterations = 1500  # 500 per stage
++        optimized_points = adaptive_optimization_stage(
++            normalized_points,
++            max_iter=500,
++            stage=1,
++            iteration_offset=iteration_counter
++        )
++        iteration_counter += 500
++        optimized_points = adaptive_optimization_stage(
++            optimized_points,
++            max_iter=500,
++            stage=2,
++            iteration_offset=iteration_counter
++        )
++        iteration_counter += 500
++        optimized_points = adaptive_optimization_stage(
++            optimized_points,
++            max_iter=500,
++            stage=3,
++            iteration_offset=iteration_counter
++        )
++
++        # Evaluate solution
+         ratio = min_max_dist_ratio(optimized_points)
+-        
++
+         if ratio > best_ratio:
+             best_ratio = ratio
+             best_points = optimized_points.copy()
+-    
+-    # Strategy 2: If first strategy failed, try with completely random initialization
+-    if best_points is None or best_ratio < 0.01:
+-        np.random.seed(42)
+-        random_points = np.random.rand(n, d) * 2 - 1  # [-1, 1]
+-        norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+-        normalized_points = random_points / np.maximum(norms, 1e-12)
+-        
+-        # Optimize this random configuration
+-        optimized_points = spherical_gradient_descent(normalized_points, max_iter=600)
+-        
+-        ratio = min_max_dist_ratio(optimized_points)
+-        
+-        if ratio > best_ratio:
+-            best_ratio = ratio
+-            best_points = optimized_points.copy()
+-    
+-    # Final safeguard - return random points if nothing worked
++
++    # Fallback to random if no good solution found
+     if best_points is None:
+         np.random.seed(42)
+-        points = np.random.rand(n, d) * 2 - 1
+-        norms = np.linalg.norm(points, axis=1, keepdims=True)
+-        best_points = points / np.maximum(norms, 1e-12)
+-    
++        random_points = np.random.randn(n, d)
++        norms = np.linalg.norm(random_points, axis=1, keepdims=True)
++        best_points = random_points / np.maximum(norms, 1e-12)
++
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

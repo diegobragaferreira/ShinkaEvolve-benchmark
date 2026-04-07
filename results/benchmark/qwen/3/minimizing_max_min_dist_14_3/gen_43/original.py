@@ -1,0 +1,114 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    n = 14
+    d = 3
+
+    def objective(x):
+        """Minimize negative of min/max distance ratio (maximize the ratio)"""
+        # Reshape x back to points
+        points = x.reshape(n, d)
+
+        # Calculate distance matrix
+        distances = cdist(points, points, 'euclidean')
+
+        # Zero out diagonal (distance to self)
+        np.fill_diagonal(distances, np.inf)
+
+        # Find min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        # Return negative ratio to minimize (since differential_evolution minimizes)
+        return -min_dist / max_dist
+
+    def constraint_func(x):
+        """Constraint to ensure all points are within [0,1]^3"""
+        points = x.reshape(n, d)
+        # Check if any point is outside the unit cube
+        return np.concatenate([
+            points.flatten() - 1,  # points should be <= 1
+            -points.flatten()     # points should be >= 0
+        ])
+
+    # Create initial guess using spherical arrangement
+    np.random.seed(42)
+
+    # Generate points on a sphere first (good starting configuration)
+    # Using fibonacci sphere algorithm for even distribution
+    points_sphere = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n):
+        y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points_sphere.append([x, y, z])
+
+    # Scale and shift to [0,1]^3
+    points_sphere = np.array(points_sphere)
+    points_sphere = (points_sphere + 1) / 2  # Now in [0,1]^3
+
+    # Add some random perturbation to break perfect symmetry
+    points_sphere += np.random.normal(0, 0.05, points_sphere.shape)
+
+    # Clip to [0,1] bounds
+    points_sphere = np.clip(points_sphere, 0, 1)
+
+    # Flatten for optimization
+    initial_guess = points_sphere.flatten()
+
+    # Define bounds for each variable (each coordinate in [0,1])
+    bounds = [(0, 1) for _ in range(n * d)]
+
+    # Set up differential evolution with reasonable parameters
+    # Limit evaluation time to fit within 360 seconds
+    max_time = 300  # seconds
+    start_time = time.time()
+
+    # Run differential evolution
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=1000,  # reasonable iteration limit
+        popsize=15,    # good population size for this problem
+        mutation=(0.5, 1),
+        recombination=0.7,
+        disp=False,
+        tol=1e-6,
+        callback=lambda x, convergence: time.time() - start_time > max_time
+    )
+
+    # Extract the best solution
+    best_points = result.x.reshape(n, d)
+
+    # Ensure points are within bounds (just in case)
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

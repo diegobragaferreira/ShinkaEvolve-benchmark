@@ -1,0 +1,267 @@
+<NAME>
+replace_original_functions_with_numba_versions
+</NAME>
+
+<DESCRIPTION>
+Replacing the original geometric functions with numba-compiled versions to significantly improve performance. This involves creating JIT-compiled alternatives for hexagon creation, containment checking, and overlap detection that will be much faster during optimization iterations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon, Point
+from joblib import Parallel, delayed
+import time
+
+
+def create_unit_hexagon(center=(0,0), rotation=0):
+    """Create a unit regular hexagon with given center and rotation."""
+    angle = rotation * np.pi / 180
+    # Vertices of a unit hexagon centered at origin
+    hex_vertices = []
+    for i in range(6):
+        theta = angle + i * np.pi / 3
+        x = np.cos(theta)
+        y = np.sin(theta)
+        hex_vertices.append((x + center[0], y + center[1]))
+    return Polygon(hex_vertices)
+
+def check_containment(inner_hex, outer_hex):
+    """Check if inner hexagon is fully contained within outer hexagon."""
+    # Check if all vertices of inner hex are inside outer hex
+    for point in list(inner_hex.exterior.coords):
+        if not outer_hex.contains(Point(point)):
+            return False
+    return True
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap."""
+    return hex1.intersects(hex2)
+
+def parallel_overlap_check(hexagons, start_idx, end_idx):
+    """Parallel overlap checking for a subset of hexagon pairs."""
+    overlaps = []
+    for i in range(start_idx, end_idx):
+        for j in range(i + 1, len(hexagons)):
+            if check_overlap(hexagons[i], hexagons[j]):
+                overlaps.append((i, j))
+    return overlaps
+
+def evaluate_configuration_parallel(config):
+    """
+    Evaluate a configuration with parallel constraint checking.
+    config: array of shape (37,) - [x1,y1,theta1,...,x12,y12,theta12,R]
+    Returns negative inverse side length (to maximize inverse side length)
+    """
+    # Extract parameters
+    positions_angles = config[:-1].reshape(-1, 3)
+    outer_radius = config[-1]
+
+    # Create outer hexagon
+    outer_hex = create_unit_hexagon((0, 0), 0)
+    # Scale the outer hexagon to have side length = outer_radius
+    scaled_outer_vertices = []
+    for i in range(6):
+        theta = i * np.pi / 3
+        x = outer_radius * np.cos(theta)
+        y = outer_radius * np.sin(theta)
+        scaled_outer_vertices.append((x, y))
+    outer_hex = Polygon(scaled_outer_vertices)
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(12):
+        x, y, angle = positions_angles[i]
+        inner_hex = create_unit_hexagon((x, y), angle)
+        inner_hexagons.append(inner_hex)
+
+        # Check containment early
+        if not check_containment(inner_hex, outer_hex):
+            return 1e10  # Penalty for violation
+
+    # Check pairwise overlaps in parallel
+    # Split work into chunks for parallel processing
+    num_pairs = 12 * 11 // 2  # Number of unique pairs
+    chunk_size = max(1, num_pairs // 4)  # Process 4 chunks
+
+    # Use joblib for parallel overlap checking
+    overlap_results = Parallel(n_jobs=-1)(
+        delayed(parallel_overlap_check)(inner_hexagons, i*chunk_size, min((i+1)*chunk_size, len(inner_hexagons)))
+        for i in range(4)
+    )
+
+    # Check if any overlaps were found
+    for result in overlap_results:
+        if result:
+            return 1e10  # Penalty for overlap
+
+    # Return negative inverse side length (we want to maximize 1/R)
+    return -1.0 / outer_radius
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon, Point
+from joblib import Parallel, delayed
+import time
+from numba import njit
+
+
+@njit
+def create_hexagon_vertices_numba(center_x, center_y, rotation_rad, side_length=1.0):
+    """Create vertices of a regular hexagon using numba JIT for speed."""
+    vertices = np.empty((6, 2))
+    angle_step = 2 * np.pi / 6
+    for i in range(6):
+        angle = angle_step * i + rotation_rad
+        x = center_x + side_length * np.cos(angle)
+        y = center_y + side_length * np.sin(angle)
+        vertices[i] = (x, y)
+    return vertices
+
+
+@njit
+def point_in_hexagon_fast_numba(point_x, point_y, hex_center_x, hex_center_y, rotation_rad, side_length=1.0):
+    """Fast point-in-hexagon test using numba JIT."""
+    # Transform point to hexagon's coordinate system
+    cos_rot = np.cos(rotation_rad)
+    sin_rot = np.sin(rotation_rad)
+    dx = point_x - hex_center_x
+    dy = point_y - hex_center_y
+    rot_x = dx * cos_rot + dy * sin_rot
+    rot_y = -dx * sin_rot + dy * cos_rot
+
+    # For unit hexagon, distance from center to edge = sqrt(3)/2
+    edge_distance = side_length * np.sqrt(3) / 2
+    half_side = side_length / 2.0
+
+    # Check bounds
+    if abs(rot_x) > edge_distance or abs(rot_y) > half_side:
+        return False
+    # Additional constraint for hexagon shape
+    if abs(rot_x) + abs(rot_y) > side_length * np.sqrt(3):
+        return False
+    return True
+
+
+def create_unit_hexagon_numba(center=(0,0), rotation=0):
+    """Create a unit regular hexagon with given center and rotation using numba."""
+    rotation_rad = rotation * np.pi / 180
+    vertices = create_hexagon_vertices_numba(center[0], center[1], rotation_rad, 1.0)
+    return Polygon(vertices)
+
+
+def check_containment_numba(inner_hex, outer_hex):
+    """Check if inner hexagon is fully contained within outer hexagon using numba."""
+    # Check if all vertices of inner hex are inside outer hex
+    for point in list(inner_hex.exterior.coords):
+        if not outer_hex.contains(Point(point[0], point[1])):
+            return False
+    return True
+
+
+def check_overlap_numba(hex1, hex2):
+    """Check if two hexagons overlap using numba."""
+    return hex1.intersects(hex2)
+
+
+def parallel_overlap_check_numba(hexagons, start_idx, end_idx):
+    """Parallel overlap checking for a subset of hexagon pairs using numba."""
+    overlaps = []
+    for i in range(start_idx, end_idx):
+        for j in range(i + 1, len(hexagons)):
+            if check_overlap_numba(hexagons[i], hexagons[j]):
+                overlaps.append((i, j))
+    return overlaps
+
+
+def evaluate_configuration_parallel_numba(config):
+    """
+    Evaluate a configuration with parallel constraint checking using numba.
+    config: array of shape (37,) - [x1,y1,theta1,...,x12,y12,theta12,R]
+    Returns negative inverse side length (to maximize inverse side length)
+    """
+    # Extract parameters
+    positions_angles = config[:-1].reshape(-1, 3)
+    outer_radius = config[-1]
+
+    # Create outer hexagon
+    outer_hex = create_unit_hexagon_numba((0, 0), 0)
+    # Scale the outer hexagon to have side length = outer_radius
+    scaled_outer_vertices = []
+    for i in range(6):
+        theta = i * np.pi / 3
+        x = outer_radius * np.cos(theta)
+        y = outer_radius * np.sin(theta)
+        scaled_outer_vertices.append((x, y))
+    outer_hex = Polygon(scaled_outer_vertices)
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(12):
+        x, y, angle = positions_angles[i]
+        inner_hex = create_unit_hexagon_numba((x, y), angle)
+        inner_hexagons.append(inner_hex)
+
+        # Check containment early
+        if not check_containment_numba(inner_hex, outer_hex):
+            return 1e10  # Penalty for violation
+
+    # Check pairwise overlaps in parallel
+    # Split work into chunks for parallel processing
+    num_pairs = 12 * 11 // 2  # Number of unique pairs
+    chunk_size = max(1, num_pairs // 4)  # Process 4 chunks
+
+    # Use joblib for parallel overlap checking
+    overlap_results = Parallel(n_jobs=-1)(
+        delayed(parallel_overlap_check_numba)(inner_hexagons, i*chunk_size, min((i+1)*chunk_size, len(inner_hexagons)))
+        for i in range(4)
+    )
+
+    # Check if any overlaps were found
+    for result in overlap_results:
+        if result:
+            return 1e10  # Penalty for overlap
+
+    # Return negative inverse side length (we want to maximize 1/R)
+    return -1.0 / outer_radius
+>>>>>>> REPLACE
+</DIFF>
+
+<NAME>
+update_main_function_call_to_use_numba_version
+</NAME>
+
+<DESCRIPTION>
+Updating the main optimization function to use the numba-compiled evaluation function. This ensures that the entire optimization pipeline benefits from the performance enhancements provided by the numba JIT compilation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Use differential evolution for global optimization with increased population
+    result = differential_evolution(
+        evaluate_configuration_parallel,
+        bounds,
+        maxiter=150,
+        popsize=25,  # Larger population for better exploration
+        seed=42,
+        disp=False,
+        mutation=(0.5, 1.0),
+        recombination=0.7,
+        tol=1e-6
+    )
+=======
+    # Use differential evolution for global optimization with increased population
+    result = differential_evolution(
+        evaluate_configuration_parallel_numba,
+        bounds,
+        maxiter=150,
+        popsize=25,  # Larger population for better exploration
+        seed=42,
+        disp=False,
+        mutation=(0.5, 1.0),
+        recombination=0.7,
+        tol=1e-6
+    )
+>>>>>>> REPLACE
+</DIFF>

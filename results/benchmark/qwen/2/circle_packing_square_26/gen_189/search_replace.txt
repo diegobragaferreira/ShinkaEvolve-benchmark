@@ -1,0 +1,117 @@
+<NAME>
+add_constraint_aware_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll implement a constraint-aware mutation strategy that takes into account the current overlap status of circles when deciding how to mutate them. This approach will help maintain feasibility while exploring the search space more effectively by adapting mutation behavior based on constraint violations.
+
+The key idea is to identify which circles are currently violating constraints and apply more careful mutations to these critical areas, while allowing more aggressive mutations in unconstrained regions. This should lead to better convergence towards high-quality feasible solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate(self, circles: np.ndarray, mutation_rate: float = MUTATION_RATE_INITIAL) -> np.ndarray:
+        """Apply adaptive mutation with improved strategies."""
+        mutated = circles.copy()
+        n = len(mutated)
+
+        # Calculate diversity metric for adaptive mutation
+        radii = mutated[:, 2]
+        diversity = np.std(radii) if len(radii) > 1 else 0.0
+
+        # Adaptive mutation rate based on diversity and generation
+        adaptive_rate = mutation_rate
+        if diversity > 0.15:
+            # High diversity - maintain higher mutation rate
+            adaptive_rate *= 1.1
+        elif diversity < 0.05:
+            # Low diversity - reduce mutation rate to exploit
+            adaptive_rate *= 0.9
+
+        for i in range(n):
+            if np.random.random() < adaptive_rate:
+                # Mutate either position or radius with adaptive probabilities
+                if np.random.random() < 0.75:  # 75% chance to mutate position
+                    # Mutate position with adaptive magnitude
+                    mutation_magnitude = 0.04 * (1 - adaptive_rate)
+                    mutated[i][0] = np.clip(mutated[i][0] + np.random.normal(0, mutation_magnitude), 0, 1)
+                    mutated[i][1] = np.clip(mutated[i][1] + np.random.normal(0, mutation_magnitude), 0, 1)
+                else:
+                    # Mutate radius with smaller magnitude
+                    mutated[i][2] = np.clip(mutated[i][2] + np.random.normal(0, 0.015), 0.01, 0.5)
+
+        # Optimize the mutated configuration
+        mutated = self.optimize_placement(mutated)
+
+        return mutated
+=======
+    def mutate(self, circles: np.ndarray, mutation_rate: float = MUTATION_RATE_INITIAL) -> np.ndarray:
+        """Apply adaptive constraint-aware mutation with improved strategies."""
+        mutated = circles.copy()
+        n = len(mutated)
+
+        # Calculate diversity metric for adaptive mutation
+        radii = mutated[:, 2]
+        diversity = np.std(radii) if len(radii) > 1 else 0.0
+
+        # Adaptive mutation rate based on diversity and generation
+        adaptive_rate = mutation_rate
+        if diversity > 0.15:
+            # High diversity - maintain higher mutation rate
+            adaptive_rate *= 1.1
+        elif diversity < 0.05:
+            # Low diversity - reduce mutation rate to exploit
+            adaptive_rate *= 0.9
+
+        # Identify overlapping circles for constraint-aware mutation
+        overlapping_pairs = []
+        if n > 1:
+            # Use KDTree for efficient overlap detection
+            tree = KDTree(mutated[:, :2])
+            max_radius = np.max(mutated[:, 2]) if len(mutated[:, 2]) > 0 else 0
+
+            for i in range(n):
+                # Find neighbors that could potentially overlap
+                potential_neighbors = tree.query_ball_point(mutated[i, :2], 2 * max_radius)
+                # Skip self
+                potential_neighbors = [idx for idx in potential_neighbors if idx != i]
+
+                for j in potential_neighbors:
+                    # Use squared distances for performance
+                    dx = mutated[i, 0] - mutated[j, 0]
+                    dy = mutated[i, 1] - mutated[j, 1]
+                    dist_sq = dx * dx + dy * dy
+                    min_dist_sq = (mutated[i, 2] + mutated[j, 2]) * (mutated[i, 2] + mutated[j, 2])
+
+                    if dist_sq < min_dist_sq:
+                        overlapping_pairs.append((i, j))
+
+        # Count overlaps per circle to prioritize constraint-aware mutations
+        overlap_count = np.zeros(n)
+        for i, j in overlapping_pairs:
+            overlap_count[i] += 1
+            overlap_count[j] += 1
+
+        for i in range(n):
+            if np.random.random() < adaptive_rate:
+                # Constraint-aware mutation probability based on overlap status
+                overlap_factor = min(1.0, overlap_count[i] * 0.3)  # More conservative for highly overlapping circles
+                mutation_prob = 0.75 * (1 - overlap_factor) + 0.25 * overlap_factor  # Balance between aggressive and conservative
+
+                # Mutate either position or radius with constraint-aware probabilities
+                if np.random.random() < mutation_prob:  # Adjust based on overlap status
+                    # Mutate position with adaptive magnitude
+                    mutation_magnitude = 0.04 * (1 - adaptive_rate) * (1 + overlap_factor * 0.5)
+                    mutated[i][0] = np.clip(mutated[i][0] + np.random.normal(0, mutation_magnitude), 0, 1)
+                    mutated[i][1] = np.clip(mutated[i][1] + np.random.normal(0, mutation_magnitude), 0, 1)
+                else:
+                    # Mutate radius with adaptive magnitude based on overlap status
+                    radius_mutation_magnitude = 0.015 * (1 + overlap_factor * 0.5)
+                    mutated[i][2] = np.clip(mutated[i][2] + np.random.normal(0, radius_mutation_magnitude), 0.01, 0.5)
+
+        # Optimize the mutated configuration
+        mutated = self.optimize_placement(mutated)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

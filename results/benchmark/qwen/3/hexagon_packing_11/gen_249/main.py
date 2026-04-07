@@ -1,0 +1,230 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon
+import time
+import math
+from itertools import combinations
+
+# Set seed for reproducibility
+np.random.seed(42)
+
+class Hexagon:
+    """Represents a regular hexagon with center, rotation and side length"""
+    
+    @staticmethod
+    def _generate_base_vertices(side_length: float) -> np.ndarray:
+        """Generate base vertices of a unit hexagon centered at origin"""
+        sqrt3 = np.sqrt(3)
+        return np.array([
+            [side_length, 0.0],
+            [side_length/2.0, sqrt3/2.0 * side_length],
+            [-side_length/2.0, sqrt3/2.0 * side_length],
+            [-side_length, 0.0],
+            [-side_length/2.0, -sqrt3/2.0 * side_length],
+            [side_length/2.0, -sqrt3/2.0 * side_length]
+        ], dtype=np.float64)
+    
+    @staticmethod
+    def get_vertices(center_x: float, center_y: float, angle_degrees: float, side_length: float = 1.0) -> np.ndarray:
+        """Get vertices of the hexagon with current transformation"""
+        # Get base vertices
+        base_vertices = Hexagon._generate_base_vertices(side_length)
+        
+        # Apply rotation
+        angle_rad = np.radians(angle_degrees)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]], dtype=np.float64)
+        
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        
+        # Apply translation
+        return rotated_vertices + np.array([center_x, center_y], dtype=np.float64)
+    
+    @staticmethod
+    def to_polygon(center_x: float, center_y: float, angle_degrees: float, side_length: float = 1.0) -> Polygon:
+        """Convert hexagon to shapely polygon"""
+        return Polygon(Hexagon.get_vertices(center_x, center_y, angle_degrees, side_length))
+
+def check_overlap(hex1_params, hex2_params):
+    """Check if two hexagons overlap using Shapely."""
+    poly1 = Hexagon.to_polygon(hex1_params[0], hex1_params[1], hex1_params[2])
+    poly2 = Hexagon.to_polygon(hex2_params[0], hex2_params[1], hex2_params[2])
+    return poly1.intersects(poly2)
+
+def check_containment(hex_params, outer_radius):
+    """Check if a hexagon is contained within outer hexagon."""
+    outer_poly = Hexagon.to_polygon(0, 0, 0, outer_radius)
+    inner_poly = Hexagon.to_polygon(hex_params[0], hex_params[1], hex_params[2])
+    return outer_poly.contains(inner_poly)
+
+def compute_outer_hexagon_radius(hex_data):
+    """Compute minimum outer hexagon radius that contains all inner hexagons."""
+    # Find maximum distance from center to any vertex across all hexagons
+    max_dist = 0
+    for hex_params in hex_data:
+        vertices = Hexagon.get_vertices(hex_params[0], hex_params[1], hex_params[2], 1.0)
+        for x, y in vertices:
+            dist = math.sqrt(x*x + y*y)
+            max_dist = max(max_dist, dist)
+    
+    # Add small buffer to ensure containment
+    return max_dist + 1e-6
+
+def evaluate_fitness(hex_data):
+    """Evaluate the fitness of a hexagon packing."""
+    # Check containment for all hexagons
+    outer_radius = compute_outer_hexagon_radius(hex_data)
+    
+    # Check for overlaps
+    for i in range(len(hex_data)):
+        for j in range(i+1, len(hex_data)):
+            if check_overlap(hex_data[i], hex_data[j]):
+                return -np.inf  # Invalid - penalty
+    
+    # Check if all hexagons are contained
+    for hex_params in hex_data:
+        if not check_containment(hex_params, outer_radius):
+            return -np.inf  # Invalid - penalty
+    
+    # Valid configuration - maximize 1/outer_radius (minimize outer_radius)
+    return 1.0 / outer_radius
+
+def generate_hexagonal_lattice_initial_config():
+    """Generate a structured initial configuration based on hexagonal lattice principles."""
+    # Create a hexagonal arrangement that tends to be more efficient
+    # Central hexagon
+    config = [[0.0, 0.0, 0.0]]
+    
+    # First ring of 6 hexagons around center
+    hex_spacing = 2.0  # Distance between centers
+    angles = [i * 60 for i in range(6)]
+    
+    for angle in angles:
+        rad = math.radians(angle)
+        x = hex_spacing * math.cos(rad)
+        y = hex_spacing * math.sin(rad)
+        config.append([x, y, 0.0])
+    
+    # Second ring of 12 hexagons
+    hex_spacing_2 = 4.0
+    angles_2 = [i * 30 for i in range(12)]
+    
+    for angle in angles_2:
+        rad = math.radians(angle)
+        x = hex_spacing_2 * math.cos(rad)
+        y = hex_spacing_2 * math.sin(rad)
+        config.append([x, y, 0.0])
+    
+    # Trim to exactly 11 hexagons
+    # Take first 11 from our structured configuration
+    return np.array(config[:11])
+
+def smart_local_optimization(initial_config, max_iter=100):
+    """Apply a multi-stage local optimization with adaptive parameters."""
+    best_config = initial_config.copy()
+    best_fitness = evaluate_fitness(best_config)
+    
+    # Multi-stage optimization with varying perturbation magnitudes
+    stages = [
+        {'perturbation': 1.0, 'iter': 20},
+        {'perturbation': 0.5, 'iter': 30}, 
+        {'perturbation': 0.1, 'iter': 50}
+    ]
+    
+    for stage in stages:
+        perturbation = stage['perturbation']
+        iter_count = stage['iter']
+        
+        for _ in range(iter_count):
+            # Create candidate by perturbing current best
+            candidate = best_config.copy()
+            
+            # Perturb positions and angles
+            for i in range(len(candidate)):
+                # Position perturbation
+                candidate[i][0] += np.random.normal(0, perturbation)
+                candidate[i][1] += np.random.normal(0, perturbation)
+                # Angle perturbation  
+                candidate[i][2] += np.random.normal(0, perturbation * 10)
+                # Keep angle in [0, 360)
+                candidate[i][2] = candidate[i][2] % 360
+            
+            # Evaluate candidate
+            candidate_fitness = evaluate_fitness(candidate)
+            
+            # Accept better solution
+            if candidate_fitness > best_fitness:
+                best_config = candidate
+                best_fitness = candidate_fitness
+    
+    return best_config
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Phase 1: Generate structured initial configuration
+    initial_config = generate_hexagonal_lattice_initial_config()
+    
+    # Phase 2: Apply smart local optimization to refine the configuration
+    refined_config = smart_local_optimization(initial_config)
+    
+    # Phase 3: Final validation and optimization
+    final_fitness = evaluate_fitness(refined_config)
+    
+    # If we have a valid configuration, try to refine further
+    if final_fitness > -np.inf:
+        # Try one more round of optimization with very small perturbations
+        try:
+            # Create a more aggressive optimization version
+            candidate = refined_config.copy()
+            
+            # Small random perturbations to see if we can improve
+            for _ in range(20):  # Few iterations but more targeted
+                # Only perturb some hexagons to reduce risk of disruption
+                idx = np.random.randint(0, len(candidate))
+                # Position perturbation
+                candidate[idx][0] += np.random.normal(0, 0.05)
+                candidate[idx][1] += np.random.normal(0, 0.05)
+                # Angle perturbation  
+                candidate[idx][2] += np.random.normal(0, 2)
+                # Keep angle in [0, 360)
+                candidate[idx][2] = candidate[idx][2] % 360
+            
+            candidate_fitness = evaluate_fitness(candidate)
+            if candidate_fitness > final_fitness:
+                refined_config = candidate
+                final_fitness = candidate_fitness
+        except:
+            pass
+    
+    # Final validation
+    final_radius = compute_outer_hexagon_radius(refined_config)
+    
+    # Ensure all hexagons are still contained
+    for hex_params in refined_config:
+        if not check_containment(hex_params, final_radius):
+            # If somehow containment is lost, revert to initial
+            refined_config = initial_config
+            final_radius = compute_outer_hexagon_radius(refined_config)
+            break
+    
+    # Prepare output
+    inner_hex_data = refined_config
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = final_radius
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

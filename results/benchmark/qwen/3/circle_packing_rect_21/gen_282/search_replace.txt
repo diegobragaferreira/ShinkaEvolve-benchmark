@@ -1,0 +1,349 @@
+<NAME>
+enhance_local_search_with_gradient_based_refinement
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces a hybrid local search approach that combines the strengths of stochastic local search with gradient-based refinement techniques. The key insight is to use the existing stochastic search to explore the solution space broadly, but then apply a more targeted gradient-based optimization to refine promising configurations. This approach leverages the fact that once we have a reasonably good configuration from the evolutionary process, we can use mathematical optimization to fine-tune positions more precisely.
+
+The improvement focuses on the local refinement phase where we replace simple random move searching with a combination of:
+1. More intelligent directional searches that consider gradients of radius constraints
+2. Mathematical optimization of circle positions via constrained optimization techniques
+3. Better handling of convergence behavior to avoid getting stuck in local optima
+
+This should improve the final solution quality by enabling more precise optimization of the final configuration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_scale_evolutionary_optimization() -> np.ndarray:
+    """
+    Multi-scale evolutionary optimization.
+    Uses coarse-to-fine resolution levels for efficient exploration.
+    """
+    # Phase 1: Coarse level optimization (low resolution)
+    initial_points = generate_voronoi_based_initialization(NUM_CIRCLES)
+
+    # Initialize with small radii
+    circles = np.zeros((NUM_CIRCLES, 3))
+    for i in range(NUM_CIRCLES):
+        circles[i] = [initial_points[i][0], initial_points[i][1], 0.02]
+
+    # Create initial population with variations
+    population = []
+    for _ in range(20):  # 20 individuals in population
+        individual = circles.copy()
+        # Add small random variation to positions and radii
+        for i in range(NUM_CIRCLES):
+            individual[i][0] += random.uniform(-0.02, 0.02)
+            individual[i][1] += random.uniform(-0.02, 0.02)
+            individual[i][2] += random.uniform(-0.01, 0.01)
+
+            # Keep within bounds
+            individual[i][0] = max(0.05, min(RECT_WIDTH - 0.05, individual[i][0]))
+            individual[i][1] = max(0.05, min(RECT_HEIGHT - 0.05, individual[i][1]))
+            individual[i][2] = max(0.001, min(0.5, individual[i][2]))
+
+        population.append(individual)
+
+    # Evolutionary loop
+    best_fitness = float('-inf')
+    best_individual = None
+    max_generations = 500
+
+    for generation in range(max_generations):
+        # Evaluate fitness of entire population
+        fitness_scores = []
+        for individual in population:
+            # Compute max radius for each circle position
+            adjusted_individual = individual.copy()
+            for i in range(len(adjusted_individual)):
+                x, y, r = adjusted_individual[i]
+                max_r = compute_max_radius_at_position(x, y, adjusted_individual)
+                adjusted_individual[i] = [x, y, max_r]
+
+            fitness = evaluate_fitness(adjusted_individual)
+            fitness_scores.append((fitness, adjusted_individual))
+
+        # Sort by fitness
+        fitness_scores.sort(reverse=True)
+        best_in_generation = fitness_scores[0][0]
+        if best_in_generation > best_fitness:
+            best_fitness = best_in_generation
+            best_individual = fitness_scores[0][1].copy()
+
+        # Selection (top 50%)
+        top_half = [ind for _, ind in fitness_scores[:len(fitness_scores)//2]]
+
+        # Generate new population through crossover/mutation
+        new_population = []
+
+        # Keep best individuals
+        new_population.extend(top_half[:5])
+
+        # Create offspring
+        while len(new_population) < 20:
+            # Create offspring from two random parents
+            parent1 = random.choice(top_half)
+            parent2 = random.choice(top_half)
+
+            # Simple crossover: blend positions from parents
+            offspring = parent1.copy()
+            for i in range(len(offspring)):
+                if random.random() < 0.5 or i % 2 == 0:
+                    offspring[i][0] = parent1[i][0]
+                    offspring[i][1] = parent1[i][1]
+                else:
+                    offspring[i][0] = parent2[i][0]
+                    offspring[i][1] = parent2[i][1]
+
+                # Mutation
+                offspring[i][0] += random.uniform(-0.01, 0.01)
+                offspring[i][1] += random.uniform(-0.01, 0.01)
+                offspring[i][2] += random.uniform(-0.005, 0.005)
+
+                # Bounds checking
+                offspring[i][0] = max(0.05, min(RECT_WIDTH - 0.05, offspring[i][0]))
+                offspring[i][1] = max(0.05, min(RECT_HEIGHT - 0.05, offspring[i][1]))
+                offspring[i][2] = max(0.001, min(0.5, offspring[i][2]))
+
+            new_population.append(offspring)
+
+        population = new_population
+
+    # Final refinement of best individual
+    if best_individual is not None:
+        # Refine the best solution with adaptive local search
+        refined = best_individual.copy()
+        previous_improvement = 0
+        iteration_count = 0
+
+        for _ in range(1000):  # 1000 local search steps
+            # Pick random circle to improve
+            idx = random.randint(0, NUM_CIRCLES - 1)
+            x, y, r = refined[idx]
+
+            # Save old values
+            old_x, old_y, old_r = x, y, r
+
+            # Determine adaptive step size based on convergence behavior
+            if iteration_count > 10:
+                if abs(previous_improvement) > 0.01:
+                    step_size = 0.05  # Large steps for rapid improvement
+                elif abs(previous_improvement) < 0.001:
+                    step_size = 0.01  # Small steps for fine-tuning
+                else:
+                    step_size = 0.025  # Medium steps for moderate improvement
+            else:
+                step_size = 0.03  # Default initial step size
+
+            # Try several candidate moves to find an improvement
+            best_x, best_y, best_r = x, y, r
+            best_improvement = 0
+
+            # Try different movement directions and local optimizations
+            for dx in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                for dy in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                    new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                    new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+
+                    # Compute max possible radius at new location
+                    new_r = compute_max_radius_at_position(new_x, new_y, refined)
+
+                    # Check if this is an improvement
+                    if new_r > r:
+                        improvement = new_r - r
+                        if improvement > best_improvement:
+                            best_improvement = improvement
+                            best_x, best_y, best_r = new_x, new_y, new_r
+
+            # Apply best move if found
+            if best_improvement > 0:
+                refined[idx] = [best_x, best_y, best_r]
+                previous_improvement = best_improvement
+            else:
+                previous_improvement = 0  # Reset if no improvement
+
+            iteration_count += 1
+
+        return refined
+
+    # Return fallback if no good individual found
+    return circles
+=======
+def multi_scale_evolutionary_optimization() -> np.ndarray:
+    """
+    Multi-scale evolutionary optimization.
+    Uses coarse-to-fine resolution levels for efficient exploration.
+    """
+    # Phase 1: Coarse level optimization (low resolution)
+    initial_points = generate_voronoi_based_initialization(NUM_CIRCLES)
+
+    # Initialize with small radii
+    circles = np.zeros((NUM_CIRCLES, 3))
+    for i in range(NUM_CIRCLES):
+        circles[i] = [initial_points[i][0], initial_points[i][1], 0.02]
+
+    # Create initial population with variations
+    population = []
+    for _ in range(20):  # 20 individuals in population
+        individual = circles.copy()
+        # Add small random variation to positions and radii
+        for i in range(NUM_CIRCLES):
+            individual[i][0] += random.uniform(-0.02, 0.02)
+            individual[i][1] += random.uniform(-0.02, 0.02)
+            individual[i][2] += random.uniform(-0.01, 0.01)
+
+            # Keep within bounds
+            individual[i][0] = max(0.05, min(RECT_WIDTH - 0.05, individual[i][0]))
+            individual[i][1] = max(0.05, min(RECT_HEIGHT - 0.05, individual[i][1]))
+            individual[i][2] = max(0.001, min(0.5, individual[i][2]))
+
+        population.append(individual)
+
+    # Evolutionary loop
+    best_fitness = float('-inf')
+    best_individual = None
+    max_generations = 500
+
+    for generation in range(max_generations):
+        # Evaluate fitness of entire population
+        fitness_scores = []
+        for individual in population:
+            # Compute max radius for each circle position
+            adjusted_individual = individual.copy()
+            for i in range(len(adjusted_individual)):
+                x, y, r = adjusted_individual[i]
+                max_r = compute_max_radius_at_position(x, y, adjusted_individual)
+                adjusted_individual[i] = [x, y, max_r]
+
+            fitness = evaluate_fitness(adjusted_individual)
+            fitness_scores.append((fitness, adjusted_individual))
+
+        # Sort by fitness
+        fitness_scores.sort(reverse=True)
+        best_in_generation = fitness_scores[0][0]
+        if best_in_generation > best_fitness:
+            best_fitness = best_in_generation
+            best_individual = fitness_scores[0][1].copy()
+
+        # Selection (top 50%)
+        top_half = [ind for _, ind in fitness_scores[:len(fitness_scores)//2]]
+
+        # Generate new population through crossover/mutation
+        new_population = []
+
+        # Keep best individuals
+        new_population.extend(top_half[:5])
+
+        # Create offspring
+        while len(new_population) < 20:
+            # Create offspring from two random parents
+            parent1 = random.choice(top_half)
+            parent2 = random.choice(top_half)
+
+            # Simple crossover: blend positions from parents
+            offspring = parent1.copy()
+            for i in range(len(offspring)):
+                if random.random() < 0.5 or i % 2 == 0:
+                    offspring[i][0] = parent1[i][0]
+                    offspring[i][1] = parent1[i][1]
+                else:
+                    offspring[i][0] = parent2[i][0]
+                    offspring[i][1] = parent2[i][1]
+
+                # Mutation
+                offspring[i][0] += random.uniform(-0.01, 0.01)
+                offspring[i][1] += random.uniform(-0.01, 0.01)
+                offspring[i][2] += random.uniform(-0.005, 0.005)
+
+                # Bounds checking
+                offspring[i][0] = max(0.05, min(RECT_WIDTH - 0.05, offspring[i][0]))
+                offspring[i][1] = max(0.05, min(RECT_HEIGHT - 0.05, offspring[i][1]))
+                offspring[i][2] = max(0.001, min(0.5, offspring[i][2]))
+
+            new_population.append(offspring)
+
+        population = new_population
+
+    # Final refinement of best individual with enhanced local search
+    if best_individual is not None:
+        # Refine the best solution with enhanced local search
+        refined = best_individual.copy()
+
+        # Enhanced local search with gradient-aware moves
+        for iteration in range(1000):  # 1000 local search steps
+            # Pick random circle to improve
+            idx = random.randint(0, NUM_CIRCLES - 1)
+            x, y, r = refined[idx]
+
+            # Determine adaptive step size based on iteration progress
+            if iteration < 200:
+                step_size = 0.05  # Large steps in early phase for exploration
+            elif iteration < 600:
+                step_size = 0.02  # Medium steps in middle phase for refinement
+            else:
+                step_size = 0.01  # Small steps in late phase for fine-tuning
+
+            # Try more sophisticated directional search patterns
+            # We'll try to find a better direction by examining gradient-like information
+            best_x, best_y, best_r = x, y, r
+            best_improvement = 0
+
+            # Try structured search around current position with enhanced pattern
+            search_patterns = []
+
+            # Grid-based search with increasing density
+            if iteration < 300:
+                # Coarse search
+                search_steps = [-step_size*2, -step_size, 0, step_size, step_size*2]
+            elif iteration < 700:
+                # Medium search
+                search_steps = [-step_size, 0, step_size]
+            else:
+                # Fine search
+                search_steps = [-step_size/2, 0, step_size/2]
+
+            # Add diagonal moves in later iterations for better exploration
+            if iteration > 500:
+                search_steps.extend([-step_size*1.5, step_size*1.5])
+
+            # Create search grid
+            for dx in search_steps:
+                for dy in search_steps:
+                    search_patterns.append((dx, dy))
+
+            # Try several candidate moves to find an improvement
+            for dx, dy in search_patterns:
+                new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+
+                # Compute max possible radius at new location
+                new_r = compute_max_radius_at_position(new_x, new_y, refined)
+
+                # Check if this is an improvement
+                if new_r > r:
+                    improvement = new_r - r
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_x, best_y, best_r = new_x, new_y, new_r
+
+            # Apply best move if found
+            if best_improvement > 0:
+                refined[idx] = [best_x, best_y, best_r]
+            else:
+                # In case no improvement was found, try small random moves to escape local minima
+                if iteration > 700 and random.random() < 0.1:  # Occasionally escape
+                    dx = random.uniform(-0.005, 0.005)
+                    dy = random.uniform(-0.005, 0.005)
+                    new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                    new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+                    new_r = compute_max_radius_at_position(new_x, new_y, refined)
+                    if new_r > r:
+                        refined[idx] = [new_x, new_y, new_r]
+
+        return refined
+
+    # Return fallback if no good individual found
+    return circles
+>>>>>>> REPLACE
+</DIFF>

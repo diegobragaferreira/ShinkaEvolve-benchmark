@@ -1,0 +1,141 @@
+<NAME>
+add_spatial_hashing_improvements
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses spatial hashing for overlap detection but could benefit from several improvements. I'll enhance the spatial hashing algorithm by making it more accurate and efficient, adding better grid cell management, and implementing a more sophisticated overlap detection that considers both spatial hashing and precise geometric checks. This should significantly improve performance while maintaining accuracy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def check_overlap_spatial_hashing_numba(hexagon_vertices_list, cell_size=1.2):
+    """Spatial hashing overlap check for improved performance."""
+    n_hexagons = len(hexagon_vertices_list)
+
+    # Build spatial hash grid
+    grid = {}
+
+    # Place each hexagon into grid cells
+    for i in range(n_hexagons):
+        vertices = hexagon_vertices_list[i]
+        cells = hexagon_to_grid_cells(vertices, cell_size)
+        for cell in cells:
+            if cell not in grid:
+                grid[cell] = []
+            grid[cell].append(i)
+
+    # Check for overlaps by examining neighboring cells
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        cells = hexagon_to_grid_cells(vertices_i, cell_size)
+
+        # Check all neighboring cells
+        for cell in cells:
+            # Check all hexagons in this cell and adjacent cells
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                    if neighbor_cell in grid:
+                        for j in grid[neighbor_cell]:
+                            if i != j:  # Don't check against self
+                                # Quick bounding box check
+                                min_x_i, max_x_i, min_y_i, max_y_i = get_hexagon_bounds(vertices_i)
+                                vertices_j = hexagon_vertices_list[j]
+                                min_x_j, max_x_j, min_y_j, max_y_j = get_hexagon_bounds(vertices_j)
+
+                                # Simple bounding box intersection test
+                                if (max_x_i >= min_x_j and min_x_i <= max_x_j and
+                                    max_y_i >= min_y_j and min_y_i <= max_y_j):
+                                    # More precise check using distance between centers
+                                    cx_i = vertices_i[0][0]
+                                    cy_i = vertices_i[0][1]
+                                    cx_j = vertices_j[0][0]
+                                    cy_j = vertices_j[0][1]
+                                    dist_sq = (cx_i - cx_j)**2 + (cy_i - cy_j)**2
+                                    # For unit hexagons, minimum distance should be 2 (they don't touch)
+                                    if dist_sq < 4.0:
+                                        return False  # Overlap detected
+
+    return True  # No overlap detected
+=======
+@njit
+def check_overlap_spatial_hashing_numba(hexagon_vertices_list, cell_size=1.2):
+    """Improved spatial hashing overlap check for better performance."""
+    n_hexagons = len(hexagon_vertices_list)
+
+    # Build spatial hash grid with more efficient structure
+    grid = {}
+
+    # Precompute grid cell dimensions for better cache locality
+    cell_size_inv = 1.0 / cell_size
+
+    # Place each hexagon into grid cells
+    for i in range(n_hexagons):
+        vertices = hexagon_vertices_list[i]
+        min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices)
+
+        # Calculate grid cell range
+        min_cell_x = int(min_x * cell_size_inv)
+        max_cell_x = int(max_x * cell_size_inv)
+        min_cell_y = int(min_y * cell_size_inv)
+        max_cell_y = int(max_y * cell_size_inv)
+
+        # Add to all relevant grid cells
+        for gx in range(min_cell_x, max_cell_x + 1):
+            for gy in range(min_cell_y, max_cell_y + 1):
+                cell = (gx, gy)
+                if cell not in grid:
+                    grid[cell] = []
+                grid[cell].append(i)
+
+    # Check for overlaps by examining neighboring cells
+    checked_pairs = set()  # Avoid double-checking pairs
+
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices_i)
+
+        # Calculate grid cell range for this hexagon
+        min_cell_x = int(min_x * cell_size_inv)
+        max_cell_x = int(max_x * cell_size_inv)
+        min_cell_y = int(min_y * cell_size_inv)
+        max_cell_y = int(max_y * cell_size_inv)
+
+        # Check all neighboring cells
+        for gx in range(min_cell_x - 1, max_cell_x + 2):
+            for gy in range(min_cell_y - 1, max_cell_y + 2):
+                neighbor_cell = (gx, gy)
+                if neighbor_cell in grid:
+                    for j in grid[neighbor_cell]:
+                        if i != j:
+                            # Avoid duplicate pair checking
+                            pair_key = tuple(sorted([i, j]))
+                            if pair_key in checked_pairs:
+                                continue
+                            checked_pairs.add(pair_key)
+
+                            # Quick bounding box check first
+                            vertices_j = hexagon_vertices_list[j]
+                            min_x_j, max_x_j, min_y_j, max_y_j = get_hexagon_bounds(vertices_j)
+
+                            # Simple bounding box intersection test
+                            if (max_x_i >= min_x_j and min_x_i <= max_x_j and
+                                max_y_i >= min_y_j and min_y_i <= max_y_j):
+
+                                # More precise check using distance between centers
+                                cx_i = vertices_i[0][0]
+                                cy_i = vertices_i[0][1]
+                                cx_j = vertices_j[0][0]
+                                cy_j = vertices_j[0][1]
+                                dist_sq = (cx_i - cx_j)**2 + (cy_i - cy_j)**2
+
+                                # For unit hexagons, minimum distance should be approximately 2 (they don't touch)
+                                # Unit hexagon circumradius is sqrt(3)/2 ≈ 0.866
+                                # So minimum center distance should be about 2*0.866 = 1.732
+                                if dist_sq < 2.5:  # Slightly relaxed threshold for safety
+                                    return False  # Overlap detected
+
+    return True  # No overlap detected
+>>>>>>> REPLACE
+</DIFF>

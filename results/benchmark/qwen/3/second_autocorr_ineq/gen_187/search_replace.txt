@@ -1,0 +1,198 @@
+<NAME>
+add_latin_hypercube_sampling
+</NAME>
+
+<DESCRIPTION>
+Adding Latin Hypercube Sampling (LHS) to improve the diversity of initial function generation. This will replace the simple geometric pattern initialization with a more systematic sampling approach that ensures better coverage of the search space, potentially discovering higher-value local optima that uniform random sampling might miss. LHS helps maintain the beneficial geometric structure while exploring different regions of the optimization landscape more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import random
+import time
+from typing import List, Tuple
+import numba
+from numba import jit
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import random
+import time
+from typing import List, Tuple
+import numba
+from numba import jit
+from scipy.stats import qmc
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhance_initialization_with_lhs
+</NAME>
+
+<DESCRIPTION>
+Replacing the simple geometric initialization with Latin Hypercube Sampling to generate more diverse and systematically varied initial configurations. This approach maintains the beneficial geometric structure while ensuring better coverage of the search space, which should help discover higher-value local optima that uniform random sampling might miss. The LHS will create more strategically placed initial functions that can lead to better convergence in the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def construct_geometric_initial_function(n: int) -> List[float]:
+    """
+    Create initial function with geometric patterns that are likely to produce good C2 values
+    """
+    # Create a pattern that balances high peaks with spread-out structure
+    f_vals = []
+
+    # Base pattern: alternating high/low with some smooth transitions
+    for i in range(n):
+        # Create a base geometric structure
+        x = i / (n - 1) if n > 1 else 0.5
+        # Add some smooth variation around a geometric base
+        base_val = 0.5 + 0.5 * np.sin(4 * np.pi * x)
+        # Add some randomization but keep values positive
+        noise = 0.1 * (np.random.random() - 0.5)
+        val = max(0, base_val + noise)
+        f_vals.append(val)
+
+    # Occasionally add a few strong peaks for convolution enhancement
+    num_peaks = max(1, n // 20)
+    for _ in range(num_peaks):
+        peak_pos = random.randint(0, n-1)
+        f_vals[peak_pos] = max(f_vals[peak_pos], 2.0 * random.random())
+
+    return f_vals
+=======
+def construct_lhs_initial_function(n: int) -> List[float]:
+    """
+    Create initial function using Latin Hypercube Sampling for better diversity
+    """
+    # Create Latin Hypercube Sampler
+    sampler = qmc.LatinHypercube(d=1, seed=42)
+
+    # Generate samples in [0, 1]
+    samples = sampler.random(n)
+
+    # Transform to appropriate range and add variation
+    f_vals = []
+
+    # Create a base pattern with some structure
+    for i in range(n):
+        # Use LHS sample as base with some sinusoidal modulation
+        x = samples[i][0]
+
+        # Create structured pattern with LHS influence
+        base_val = 0.3 + 0.7 * np.sin(2 * np.pi * x + np.pi/4) * np.cos(4 * np.pi * x)
+
+        # Add some random component but keep positive
+        noise = 0.1 * (np.random.random() - 0.5)
+        val = max(0.01, base_val + noise)
+
+        f_vals.append(val)
+
+    # Occasionally add stronger peaks for convolution enhancement
+    num_peaks = max(1, n // 25)
+    for _ in range(num_peaks):
+        peak_pos = random.randint(0, n-1)
+        f_vals[peak_pos] = max(f_vals[peak_pos], 1.5 + 0.5 * random.random())
+
+    return f_vals
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_multi_start_optimization_for_lhs
+</NAME>
+
+<DESCRIPTION>
+Updating the multi-start optimization function to use the new Latin Hypercube Sampling based initialization instead of the old geometric pattern. This ensures that all initial starting points in the multi-start approach leverage the improved sampling strategy for better exploration of the search space and potentially finding higher C2 values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_start_optimization(max_starts: int = 20, max_evals_per_start: int = 1000) -> Tuple[List[float], float]:
+    """
+    Multi-start optimization with adaptive sampling around promising regions
+    """
+    best_overall_c2 = 0.0
+    best_overall_solution = None
+
+    # Track good solutions for adaptive sampling
+    good_solutions = []
+    good_c2_scores = []
+
+    # Start with geometric patterns
+    for i in range(max_starts):
+        # Generate different initial patterns
+        n = random.randint(200, 800)  # Vary the length for exploration
+        initial_solution = construct_geometric_initial_function(n)
+
+        # Local optimization from this starting point
+        solution, c2 = adaptive_local_search(initial_solution, max_evals_per_start)
+
+        if c2 > best_overall_c2:
+            best_overall_c2 = c2
+            best_overall_solution = solution.copy()
+
+        # Keep track of good solutions for reseeding
+        if c2 > best_overall_c2 * 0.95:  # Keep top 5% solutions
+            good_solutions.append(solution.copy())
+            good_c2_scores.append(c2)
+
+    # Use good solutions as seeds for further refinement
+    for i, sol in enumerate(good_solutions[:5]):  # Refine top few
+        if i < 5:  # Limit additional refinements
+            refined_sol, refined_c2 = adaptive_local_search(sol, max_evals_per_start//2)
+            if refined_c2 > best_overall_c2:
+                best_overall_c2 = refined_c2
+                best_overall_solution = refined_sol.copy()
+
+    return best_overall_solution, best_overall_c2
+=======
+def multi_start_optimization(max_starts: int = 20, max_evals_per_start: int = 1000) -> Tuple[List[float], float]:
+    """
+    Multi-start optimization with adaptive sampling around promising regions
+    """
+    best_overall_c2 = 0.0
+    best_overall_solution = None
+
+    # Track good solutions for adaptive sampling
+    good_solutions = []
+    good_c2_scores = []
+
+    # Start with Latin Hypercube Sampling patterns
+    for i in range(max_starts):
+        # Generate different initial patterns
+        n = random.randint(200, 800)  # Vary the length for exploration
+        initial_solution = construct_lhs_initial_function(n)
+
+        # Local optimization from this starting point
+        solution, c2 = adaptive_local_search(initial_solution, max_evals_per_start)
+
+        if c2 > best_overall_c2:
+            best_overall_c2 = c2
+            best_overall_solution = solution.copy()
+
+        # Keep track of good solutions for reseeding
+        if c2 > best_overall_c2 * 0.95:  # Keep top 5% solutions
+            good_solutions.append(solution.copy())
+            good_c2_scores.append(c2)
+
+    # Use good solutions as seeds for further refinement
+    for i, sol in enumerate(good_solutions[:5]):  # Refine top few
+        if i < 5:  # Limit additional refinements
+            refined_sol, refined_c2 = adaptive_local_search(sol, max_evals_per_start//2)
+            if refined_c2 > best_overall_c2:
+                best_overall_c2 = refined_c2
+                best_overall_solution = refined_sol.copy()
+
+    return best_overall_solution, best_overall_c2
+>>>>>>> REPLACE
+
+</DIFF>

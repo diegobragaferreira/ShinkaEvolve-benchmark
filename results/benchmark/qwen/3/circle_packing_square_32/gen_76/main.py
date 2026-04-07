@@ -1,0 +1,259 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import differential_evolution
+import math
+import random
+from typing import Tuple
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For deterministic behavior
+    random.seed(42)
+    
+    n = 32
+    
+    class CirclePackingOptimizer:
+        def __init__(self, n_circles=32):
+            self.n_circles = n_circles
+            self.best_solution = None
+            self.best_sum_radii = 0
+            
+        def initialize_hexagonal_grid(self, scale_factor=0.8):
+            """Create initial configuration using hexagonal packing with better density"""
+            # Calculate grid dimensions based on circle packing density
+            rows = int(math.sqrt(self.n_circles))
+            cols = int(math.ceil(self.n_circles / rows))
+            
+            # Adjust spacing to fit within unit square with better utilization
+            spacing_x = 1.0 / cols
+            spacing_y = 1.0 / rows
+            
+            # Use adjusted hexagon radius for better packing
+            hex_radius = min(spacing_x, spacing_y) * scale_factor
+            
+            circles = []
+            
+            # Fill grid with circles in hexagonal pattern
+            for i in range(rows):
+                for j in range(cols):
+                    if len(circles) >= self.n_circles:
+                        break
+                        
+                    # Offset every other row for hexagonal pattern
+                    x_offset = (i % 2) * (spacing_x / 2)
+                    x = (j * spacing_x) + x_offset + hex_radius
+                    y = (i * spacing_y) + hex_radius
+                    
+                    # Ensure circle stays within bounds
+                    if x <= 1 - hex_radius and y <= 1 - hex_radius:
+                        circles.append([x, y, hex_radius])
+                        
+            # Fill remaining circles with small radii if needed
+            while len(circles) < self.n_circles:
+                circles.append([0.5, 0.5, 0.01])
+                
+            return np.array(circles[:self.n_circles])
+        
+        def initialize_random_config(self):
+            """Create random initial configuration"""
+            circles = []
+            for _ in range(self.n_circles):
+                # Random positions with minimum radius constraints
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.01, 0.1)
+                circles.append([x, y, r])
+            return np.array(circles)
+        
+        def initialize_perturbed_hexagonal(self):
+            """Create hexagonal grid with random perturbations"""
+            base_config = self.initialize_hexagonal_grid(scale_factor=0.7)
+            perturbed_config = base_config.copy()
+            
+            # Add small random perturbations to positions
+            for i in range(self.n_circles):
+                # Perturb position slightly
+                perturbed_config[i, 0] += np.random.normal(0, 0.02)
+                perturbed_config[i, 1] += np.random.normal(0, 0.02)
+                # Keep radius roughly the same but allow small changes
+                perturbed_config[i, 2] *= (1 + np.random.normal(0, 0.05))
+                
+                # Ensure bounds
+                perturbed_config[i, 0] = np.clip(perturbed_config[i, 0], 0.01, 0.99)
+                perturbed_config[i, 1] = np.clip(perturbed_config[i, 1], 0.01, 0.99)
+                perturbed_config[i, 2] = np.clip(perturbed_config[i, 2], 0.001, 0.49)
+                
+            return perturbed_config
+        
+        def check_boundary_constraints(self, circles):
+            """Check if all circles are within the unit square"""
+            positions = circles[:, :2]
+            radii = circles[:, 2]
+            
+            # Vectorized checks
+            left_valid = np.all(radii <= positions[:, 0])
+            right_valid = np.all(radii <= 1 - positions[:, 0])
+            bottom_valid = np.all(radii <= positions[:, 1])
+            top_valid = np.all(radii <= 1 - positions[:, 1])
+            
+            return left_valid and right_valid and bottom_valid and top_valid
+        
+        def check_overlap_constraints(self, circles, threshold=1e-8):
+            """Efficiently check for circle overlaps using KDTree"""
+            if len(circles) < 2:
+                return True
+                
+            positions = circles[:, :2]
+            radii = circles[:, 2]
+            
+            # Build KDTree for fast neighbor search
+            tree = cKDTree(positions)
+            
+            # For each circle, find neighbors within sum of radii + threshold
+            total_overlaps = 0
+            
+            for i, (pos, rad) in enumerate(zip(positions, radii)):
+                # Find nearby points within double the radius
+                neighbors = tree.query_ball_point(pos, 2 * rad + threshold)
+                
+                # Check actual distance to neighbors (excluding self)
+                for j in neighbors:
+                    if i != j:
+                        distance = np.linalg.norm(pos - positions[j])
+                        if distance < (rad + radii[j] + threshold):
+                            total_overlaps += 1
+                            break  # Early termination for efficiency
+                if total_overlaps > 0:
+                    break  # Early termination if any overlap found
+                    
+            return total_overlaps == 0
+        
+        def calculate_objective(self, circles):
+            """Calculate negative sum of radii for minimization"""
+            return -np.sum(circles[:, 2])
+        
+        def evaluate_fitness(self, circles):
+            """Evaluate fitness: negative sum of radii if valid, otherwise very poor value"""
+            # Check constraints
+            if not self.check_boundary_constraints(circles):
+                return float('inf')  # Invalid solution
+            
+            if not self.check_overlap_constraints(circles):
+                return float('inf')  # Invalid solution
+                
+            # Valid solution: return negative sum of radii
+            return self.calculate_objective(circles)
+        
+        def adaptive_optimize_with_de(self, initial_circles, max_iter=1500):
+            """Use differential evolution with adaptive parameters"""
+            # Flatten for optimization
+            x0 = initial_circles.flatten()
+            
+            # Define bounds for each parameter
+            bounds = []
+            for i in range(self.n_circles):
+                # x, y, r bounds
+                bounds.extend([
+                    (0.001, 0.999),  # x coordinate
+                    (0.001, 0.999),  # y coordinate  
+                    (0.001, 0.49)    # radius
+                ])
+            
+            def objective_wrapper(x):
+                # Reshape back to circles format
+                circles = x.reshape(-1, 3)
+                return self.evaluate_fitness(circles)
+            
+            # Use increased population size and more iterations
+            try:
+                # Increase popsize for better exploration
+                popsize = min(50, 10 + self.n_circles // 2)  # Pop size between 10 and 50
+                
+                result = differential_evolution(
+                    objective_wrapper,
+                    bounds,
+                    maxiter=max_iter,
+                    popsize=popsize,
+                    tol=1e-8,
+                    seed=42,
+                    disp=False,
+                    init='latinhypercube'  # Better initial sampling
+                )
+                
+                if result.success:
+                    optimized_circles = result.x.reshape(-1, 3)
+                    return optimized_circles
+                else:
+                    return initial_circles
+                    
+            except Exception as e:
+                return initial_circles
+        
+        def run_optimization(self):
+            """Main optimization routine with multiple starting points"""
+            best_circles = None
+            best_sum = 0
+            
+            # Try multiple initialization strategies
+            initial_configs = [
+                self.initialize_hexagonal_grid(scale_factor=0.75),
+                self.initialize_hexagonal_grid(scale_factor=0.8),
+                self.initialize_random_config(),
+                self.initialize_perturbed_hexagonal()
+            ]
+            
+            # Also try with different seed values for randomness
+            for i, initial_config in enumerate(initial_configs):
+                try:
+                    # Use different maximum iterations for different starts
+                    max_iter = 1200 if i < 2 else 1500  # More iterations for random configs
+                    
+                    circles = self.adaptive_optimize_with_de(initial_config, max_iter)
+                    current_sum = np.sum(circles[:, 2])
+                    
+                    if current_sum > best_sum:
+                        best_sum = current_sum
+                        best_circles = circles.copy()
+                        
+                except Exception as e:
+                    continue
+            
+            # If we still don't have a good solution, try one more optimization
+            if best_circles is None:
+                # Try with a more aggressive hexagonal grid
+                final_initial = self.initialize_hexagonal_grid(scale_factor=0.7)
+                try:
+                    circles = self.adaptive_optimize_with_de(final_initial, 1000)
+                    current_sum = np.sum(circles[:, 2])
+                    
+                    if current_sum > best_sum:
+                        best_sum = current_sum
+                        best_circles = circles.copy()
+                except Exception as e:
+                    pass
+            
+            # Return best found solution or default
+            if best_circles is None:
+                return self.initialize_hexagonal_grid()
+                
+            return best_circles
+    
+    # Run optimization
+    optimizer = CirclePackingOptimizer(n)
+    result = optimizer.run_optimization()
+    
+    # Final validation
+    if (optimizer.check_boundary_constraints(result) and 
+        optimizer.check_overlap_constraints(result)):
+        return result
+    else:
+        # Fallback to initial configuration
+        return optimizer.initialize_hexagonal_grid()
+
+# EVOLVE-BLOCK-END

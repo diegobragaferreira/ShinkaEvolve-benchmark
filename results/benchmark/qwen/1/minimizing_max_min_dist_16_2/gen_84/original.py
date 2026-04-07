@@ -1,0 +1,89 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances using squareform for better numerical stability
+        distances = pdist(points)
+
+        # Avoid division by zero or invalid cases
+        if len(distances) == 0 or len(distances) < 2:
+            return -np.inf
+
+        # Compute min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        if d_max <= 1e-12:
+            return -np.inf
+        return -d_min / d_max
+
+    # Define bounds for each coordinate (0 to 1 for both x and y)
+    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    best_result = None
+    best_ratio = -np.inf
+
+    # Multi-start approach with different random initializations
+    for i in range(5):
+        # Set different random seeds for diversity
+        np.random.seed(42 + i)
+
+        # Use differential evolution for global optimization
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42 + i,
+            maxiter=200,      # Increased iterations
+            popsize=30,       # Larger population size
+            tol=1e-8,         # Tighter tolerance
+            recombination=0.9, # Higher recombination rate
+            mutation=(0.8, 1.0), # Different mutation strategy
+            disp=False
+        )
+
+        # Post-process with local optimization to refine the solution
+        local_result = minimize(
+            objective,
+            result.x,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 500}
+        )
+
+        # Keep track of the best solution found
+        if -local_result.fun > best_ratio:
+            best_ratio = -local_result.fun
+            best_result = local_result.x
+
+    # Ensure we have a valid result
+    if best_result is None:
+        # Fallback to simple random initialization
+        np.random.seed(42)
+        best_result = np.random.rand(32)
+
+    # Return the optimized points
+    points = best_result.reshape(-1, 2)
+
+    # Ensure all points are within [0,1]^2 bounds
+    points = np.clip(points, 0, 1)
+
+    return points
+
+
+# EVOLVE-BLOCK-END

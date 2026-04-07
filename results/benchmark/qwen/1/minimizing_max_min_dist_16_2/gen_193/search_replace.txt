@@ -1,0 +1,100 @@
+<NAME>
+add_voronoi_relaxation
+</NAME>
+
+<DESCRIPTION>
+Adding Voronoi relaxation as a post-processing step to improve point distribution quality. This technique helps to further optimize the point configuration by iteratively moving points towards the centroids of their Voronoi cells, which tends to create more uniform distributions and can improve the min/max distance ratio.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def validate_and_update_best(self, points):
+        """Validate solution and update best if better."""
+        ratio = self.compute_distance_ratio(points)
+        if ratio > self.best_ratio:
+            self.best_ratio = ratio
+            self.best_solution = points.copy()
+
+    def has_timed_out(self):
+        """Check if maximum time has been exceeded."""
+        return time.time() - self.start_time > self.max_time * 0.95
+=======
+    def voronoi_relaxation(self, points, max_iter=50):
+        """Perform Voronoi relaxation to improve point distribution."""
+        from scipy.spatial import Voronoi
+
+        current_points = points.copy()
+
+        for iteration in range(max_iter):
+            try:
+                # Compute Voronoi diagram
+                vor = Voronoi(current_points)
+
+                # Calculate new positions as centroids of Voronoi cells
+                new_points = np.zeros_like(current_points)
+                converged = True
+
+                # Process each point
+                for i in range(len(current_points)):
+                    # Get vertices of Voronoi cell for point i
+                    region = vor.regions[vor.point_region[i]]
+
+                    if -1 in region or len(region) < 3:
+                        # Handle unbounded regions (use current position with slight adjustment)
+                        new_points[i] = current_points[i] + np.random.normal(0, 0.001, 2)
+                        continue
+
+                    # Extract vertices of the Voronoi cell
+                    vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+
+                    if len(vertices) < 3:
+                        # Not enough vertices, use current position
+                        new_points[i] = current_points[i]
+                        continue
+
+                    # Compute centroid of polygon (Voronoi cell)
+                    centroid = np.mean(vertices, axis=0)
+
+                    # Apply boundary constraints with epsilon padding
+                    centroid = np.clip(centroid, 1e-8, 1-1e-8)
+
+                    # Update point position
+                    new_points[i] = centroid
+
+                    # Check for convergence
+                    if np.linalg.norm(new_points[i] - current_points[i]) > 1e-6:
+                        converged = False
+
+                # Apply damping factor for stable convergence
+                damping = 0.9
+                current_points = current_points + damping * (new_points - current_points)
+
+                # Ensure points stay within bounds
+                current_points = np.clip(current_points, 0, 1)
+
+                # Early stopping if converged
+                if converged:
+                    break
+
+            except Exception:
+                # If Voronoi computation fails, use simple perturbation
+                current_points = current_points + np.random.normal(0, 0.001, current_points.shape)
+                current_points = np.clip(current_points, 0, 1)
+
+        return current_points
+
+    def validate_and_update_best(self, points):
+        """Validate solution and update best if better."""
+        # Apply Voronoi relaxation to potentially improve the solution
+        relaxed_points = self.voronoi_relaxation(points)
+        ratio = self.compute_distance_ratio(relaxed_points)
+        if ratio > self.best_ratio:
+            self.best_ratio = ratio
+            self.best_solution = relaxed_points.copy()
+
+    def has_timed_out(self):
+        """Check if maximum time has been exceeded."""
+        return time.time() - self.start_time > self.max_time * 0.95
+>>>>>>> REPLACE
+
+</DIFF>

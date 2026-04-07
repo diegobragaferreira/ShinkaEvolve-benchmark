@@ -1,0 +1,216 @@
+<NAME>
+add_evolutionary_optimization
+</NAME>
+
+<DESCRIPTION>
+This edit introduces an evolutionary strategy to enhance the optimization process. The improvement adds a genetic algorithm component that maintains a population of sequences and evolves them over generations. This approach helps escape local minima and explores the solution space more thoroughly, potentially finding better sequences than the current gradient-based methods alone. The evolutionary component includes selection, crossover, and mutation operators tailored for this specific problem domain. It also incorporates adaptive parameters like decreasing mutation rates and elitism to balance exploration and exploitation effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_start_optimization(initial_sequences, max_time):
+    """
+    Performs multi-start optimization to avoid local minima.
+    """
+    best_inv_C1 = 0.0
+    best_sequence = None
+    best_C1 = float('inf')
+    start_time = time.time()
+
+    # Try multiple starting points
+    for i, init_seq in enumerate(initial_sequences):
+        if time.time() - start_time > max_time - 5:
+            break
+
+        current_seq = init_seq.copy()
+        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+
+        if current_inv_C1 > best_inv_C1:
+            best_inv_C1 = current_inv_C1
+            best_sequence = current_seq.copy()
+            best_C1 = current_C1
+
+        # Multiple rounds of optimization with different strategies
+        for round_num in range(3):  # Multiple rounds
+            if time.time() - start_time > max_time - 5:
+                break
+
+            # Use different optimization strategies
+            if round_num == 0:
+                # Direct optimization
+                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=30)
+            elif round_num == 1:
+                # LP-based direction
+                lp_direction = get_good_direction_to_move_into(current_seq)
+                if lp_direction is not None:
+                    improved_seq = lp_direction
+                else:
+                    improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+            else:
+                # Random perturbation followed by optimization
+                perturbed_seq = current_seq.copy()
+                idx = np.random.randint(0, len(current_seq))
+                perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+                improved_seq = adaptive_frequency_optimize(perturbed_seq, max_iter=20)
+
+            improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+
+            if improved_inv_C1 > current_inv_C1:
+                current_seq = improved_seq
+                current_C1 = improved_C1
+                current_inv_C1 = improved_inv_C1
+
+                if current_inv_C1 > best_inv_C1:
+                    best_inv_C1 = current_inv_C1
+                    best_sequence = current_seq.copy()
+                    best_C1 = current_C1
+
+    return best_sequence, best_C1, best_inv_C1
+
+def search_for_best_sequence():
+=======
+def evolve_population(population, fitness_scores, elite_count=5, mutation_rate=0.1):
+    """Perform evolution on the population."""
+    # Sort population by fitness (ascending order, since we minimize -1/C1)
+    sorted_indices = np.argsort(fitness_scores)
+    sorted_population = [population[i] for i in sorted_indices]
+    sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+    # Keep elite individuals
+    elite = sorted_population[:elite_count]
+
+    # Create next generation
+    next_generation = elite.copy()
+
+    # Generate offspring through selection, crossover, and mutation
+    while len(next_generation) < len(population):
+        # Tournament selection
+        tournament_size = 3
+        selected_parents = []
+        for _ in range(2):
+            tournament_indices = random.sample(range(len(sorted_population)), tournament_size)
+            tournament_fitness = [sorted_fitness[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitness)]  # Maximize fitness
+            selected_parents.append(sorted_population[winner_index])
+
+        # Uniform crossover
+        child1, child2 = [], []
+        for i in range(len(selected_parents[0])):
+            if random.random() < 0.5:
+                child1.append(selected_parents[0][i])
+                child2.append(selected_parents[1][i])
+            else:
+                child1.append(selected_parents[1][i])
+                child2.append(selected_parents[0][i])
+
+        # Mutation
+        for i in range(len(child1)):
+            if random.random() < mutation_rate:
+                child1[i] = max(0, child1[i] + random.gauss(0, 0.1 * child1[i] + 0.01))
+        for i in range(len(child2)):
+            if random.random() < mutation_rate:
+                child2[i] = max(0, child2[i] + random.gauss(0, 0.1 * child2[i] + 0.01))
+
+        next_generation.extend([child1, child2])
+
+    return next_generation[:len(population)]
+
+def multi_start_optimization(initial_sequences, max_time):
+    """
+    Performs multi-start optimization using both traditional methods and evolutionary strategy.
+    """
+    best_inv_C1 = 0.0
+    best_sequence = None
+    best_C1 = float('inf')
+    start_time = time.time()
+
+    # Try multiple starting points with evolutionary approach
+    population_size = 20
+    generations = 30
+    elite_count = 5
+
+    # Initialize population with diverse sequences
+    population = initial_sequences[:population_size] if len(initial_sequences) >= population_size else initial_sequences
+    while len(population) < population_size:
+        n = np.random.randint(50, 200)
+        seq = np.random.uniform(0.1, 1.0, n).tolist()
+        population.append(seq)
+
+    # Evolutionary optimization loop
+    for gen in range(generations):
+        if time.time() - start_time > max_time - 10:
+            break
+
+        # Evaluate fitness of current population
+        fitness_scores = []
+        for seq in population:
+            _, inv_c1 = compute_autocorrelation_constant(seq)
+            fitness_scores.append(-inv_c1)  # Negative because we want to maximize 1/C1
+
+        # Update best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > -best_inv_C1:  # Note: we stored negative values
+            best_inv_C1 = -fitness_scores[max_fitness_idx]
+            best_sequence = population[max_fitness_idx].copy()
+            best_C1 = compute_autocorrelation_constant(best_sequence)[0]
+
+        # Evolve population
+        population = evolve_population(population, fitness_scores, elite_count, 0.1)
+
+        # Apply local optimization to some individuals
+        for i in range(0, len(population), 2):
+            population[i] = adaptive_frequency_optimize(population[i], max_iter=20)
+
+    # Finish with traditional multi-start optimization for final refinement
+    for i, init_seq in enumerate(initial_sequences):
+        if time.time() - start_time > max_time - 5:
+            break
+
+        current_seq = init_seq.copy()
+        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+
+        if current_inv_C1 > best_inv_C1:
+            best_inv_C1 = current_inv_C1
+            best_sequence = current_seq.copy()
+            best_C1 = current_C1
+
+        # Multiple rounds of optimization with different strategies
+        for round_num in range(3):  # Multiple rounds
+            if time.time() - start_time > max_time - 5:
+                break
+
+            # Use different optimization strategies
+            if round_num == 0:
+                # Direct optimization
+                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=30)
+            elif round_num == 1:
+                # LP-based direction
+                lp_direction = get_good_direction_to_move_into(current_seq)
+                if lp_direction is not None:
+                    improved_seq = lp_direction
+                else:
+                    improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+            else:
+                # Random perturbation followed by optimization
+                perturbed_seq = current_seq.copy()
+                idx = np.random.randint(0, len(current_seq))
+                perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+                improved_seq = adaptive_frequency_optimize(perturbed_seq, max_iter=20)
+
+            improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+
+            if improved_inv_C1 > current_inv_C1:
+                current_seq = improved_seq
+                current_C1 = improved_C1
+                current_inv_C1 = improved_inv_C1
+
+                if current_inv_C1 > best_inv_C1:
+                    best_inv_C1 = current_inv_C1
+                    best_sequence = current_seq.copy()
+                    best_C1 = current_C1
+
+    return best_sequence, best_C1, best_inv_C1
+
+def search_for_best_sequence():
+>>>>>>> REPLACE
+</DIFF>

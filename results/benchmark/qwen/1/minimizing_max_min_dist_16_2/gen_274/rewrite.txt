@@ -1,0 +1,466 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import pdist, squareform, cdist
+from scipy.optimize import differential_evolution, minimize
+import warnings
+import time
+warnings.filterwarnings('ignore')
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Combines Voronoi relaxation with differential evolution optimization for optimal results.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum distance with numerical stability."""
+        if len(points) < 2:
+            return 0.0
+
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def initialize_diverse_points():
+        """Initialize points using multiple diverse strategies for better starting configuration."""
+        np.random.seed(42)
+        
+        # Strategy 1: Hexagonal grid pattern
+        grid_size = 4
+        x = np.linspace(0.1, 0.9, grid_size)
+        y = np.linspace(0.1, 0.9, grid_size)
+        xx, yy = np.meshgrid(x, y)
+        points = np.column_stack([xx.ravel(), yy.ravel()])
+        noise = np.random.normal(0, 0.01, points.shape)
+        points += noise
+        points = np.clip(points, 0, 1)
+        strategies = [points[:16].copy()]
+        
+        # Strategy 2: Golden spiral pattern
+        points = []
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        for i in range(16):
+            theta = 2 * np.pi * i / phi
+            r = np.sqrt(i / 15) if i > 0 else 0.5
+            x = 0.5 + r * np.cos(theta)
+            y = 0.5 + r * np.sin(theta)
+            points.append([x, y])
+        strategies.append(np.array(points))
+        
+        # Strategy 3: Random initialization
+        strategies.append(np.random.rand(16, 2))
+        
+        # Strategy 4: Grid pattern
+        grid_points = []
+        for i in range(4):
+            for j in range(4):
+                if len(grid_points) >= 16:
+                    break
+                grid_points.append([i * 0.25 + 0.125, j * 0.25 + 0.125])
+        strategies.append(np.array(grid_points[:16]))
+        
+        # Strategy 5: Fibonacci sphere-inspired pattern
+        import math
+        sph_points = []
+        phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
+        for i in range(16):
+            y = 1 - (i / float(16 - 1)) * 2  # y goes from 1 to -1
+            radius = math.sqrt(1 - y * y)  # radius at y
+            theta = phi * i
+            x = math.cos(theta) * radius
+            z = math.sin(theta) * radius
+            sph_points.append([x, y])
+        sph_points = np.array(sph_points)
+        # Normalize to unit square
+        x_min, y_min = np.min(sph_points, axis=0)
+        x_max, y_max = np.max(sph_points, axis=0)
+        if x_max > x_min and y_max > y_min:
+            sph_points[:, 0] = (sph_points[:, 0] - x_min) / (x_max - x_min) * 0.9 + 0.05
+            sph_points[:, 1] = (sph_points[:, 1] - y_min) / (y_max - y_min) * 0.9 + 0.05
+        strategies.append(sph_points.copy())
+        
+        # Strategy 6: Clustered pattern
+        clustered = np.random.rand(16, 2)
+        clustered[0:4] = clustered[0:4] * 0.3  # Top-left cluster
+        clustered[4:8] = clustered[4:8] * 0.3 + [0.7, 0]  # Top-right cluster
+        clustered[8:12] = clustered[8:12] * 0.3 + [0, 0.7]  # Bottom-left cluster
+        clustered[12:16] = clustered[12:16] * 0.3 + [0.7, 0.7]  # Bottom-right cluster
+        strategies.append(clustered)
+        
+        # Select the best initial configuration based on ratio
+        best_ratio = -1
+        best_points = None
+        
+        for strategy in strategies:
+            ratio = calculate_min_max_ratio(strategy)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = strategy.copy()
+                
+        return best_points
+
+    def voronoi_relaxation(points, max_iterations=100, tolerance=1e-6):
+        """Perform Voronoi relaxation to improve point distribution."""
+        current_points = points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+        prev_ratio = -np.inf
+        no_improvement_count = 0
+
+        for iteration in range(max_iterations):
+            try:
+                # Compute Voronoi diagram
+                vor = Voronoi(current_points)
+
+                # Calculate new positions as centroids of Voronoi cells
+                new_points = np.zeros_like(current_points)
+                converged = True
+
+                # Process each point
+                for i in range(len(current_points)):
+                    # Get vertices of Voronoi cell for point i
+                    region = vor.regions[vor.point_region[i]]
+
+                    if -1 in region or len(region) < 3:
+                        # Handle unbounded regions (use current position with slight adjustment)
+                        new_points[i] = current_points[i] + np.random.normal(0, 0.001, 2)
+                        continue
+
+                    # Extract vertices of the Voronoi cell
+                    vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+
+                    if len(vertices) < 3:
+                        # Not enough vertices, use current position
+                        new_points[i] = current_points[i]
+                        continue
+
+                    # Compute centroid of polygon (Voronoi cell)
+                    centroid = np.mean(vertices, axis=0)
+
+                    # Apply boundary constraints with epsilon padding
+                    centroid = np.clip(centroid, 1e-8, 1-1e-8)
+
+                    # Update point position
+                    new_points[i] = centroid
+
+                    # Check for convergence
+                    if np.linalg.norm(new_points[i] - current_points[i]) > tolerance:
+                        converged = False
+
+                # Apply cooling schedule for better convergence
+                cooling_factor = 0.95 ** iteration
+                current_points = current_points + cooling_factor * (new_points - current_points)
+
+                # Ensure points stay within bounds
+                current_points = np.clip(current_points, 0, 1)
+
+                # Track best solution
+                if iteration % 10 == 0:
+                    ratio = calculate_min_max_ratio(current_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = current_points.copy()
+                        no_improvement_count = 0
+                    else:
+                        no_improvement_count += 1
+                        
+                    # Early stopping if no improvement for 20 iterations
+                    if no_improvement_count >= 20:
+                        break
+
+                # Early stopping if converged
+                if converged:
+                    break
+
+            except Exception as e:
+                # Fallback to simple perturbation
+                current_points += np.random.normal(0, 0.001, current_points.shape)
+                current_points = np.clip(current_points, 0, 1)
+
+        return best_points
+
+    def adaptive_local_search(points, bounds):
+        """Apply adaptive local search with multiple refinement strategies."""
+        best_points = points.copy()
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Strategy 1: L-BFGS-B with strict tolerances
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15, 'gtol': 1e-15}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 2: SLSQP as alternative
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 3: Additional random perturbations followed by L-BFGS-B
+        np.random.seed(999)
+        for _ in range(3):
+            perturbed = best_points + np.random.normal(0, 0.005, best_points.shape)
+            perturbed = np.clip(perturbed, 0, 1)
+            try:
+                refined = minimize(
+                    objective,
+                    perturbed.flatten(),
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    ratio = calculate_min_max_ratio(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+            except Exception:
+                continue
+
+        return best_points
+
+    def objective(x):
+        """Objective function to minimize (negative ratio to maximize ratio)."""
+        # Reshape into points
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances using squareform for numerical stability
+        distances = squareform(pdist(points))
+
+        # Set diagonal to large value to ignore self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -1e10
+
+        # Return negative ratio to minimize (we want to maximize ratio)
+        return -d_min / d_max
+
+    def simulated_annealing(points, max_iter=1000):
+        """Simulated annealing as fallback for escaping local optima."""
+        current_points = points.copy()
+        current_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        # Cooling schedule
+        T = 1.0
+        Tmin = 1e-8
+        alpha = 0.95
+        
+        for i in range(max_iter):
+            # Generate neighbor solution
+            neighbor = current_points + np.random.normal(0, 0.01, current_points.shape)
+            neighbor = np.clip(neighbor, 0, 1)
+            
+            # Calculate energy difference
+            neighbor_ratio = calculate_min_max_ratio(neighbor)
+            delta = neighbor_ratio - current_ratio
+            
+            # Accept or reject
+            if delta > 0 or np.random.rand() < np.exp(delta / T):
+                current_points = neighbor
+                current_ratio = neighbor_ratio
+                
+                if current_ratio > best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+            
+            # Cool down
+            T = max(Tmin, T * alpha)
+            
+        return best_points
+
+    # Set up bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1)] * 32
+
+    # Method 1: Multi-start with diverse initializations
+    try:
+        # Try multiple initializations
+        best_global_points = None
+        best_global_ratio = -np.inf
+        
+        # Test 6 diverse initial configurations
+        for i in range(6):
+            np.random.seed(i * 100 + 42)
+            initial_points = initialize_diverse_points()
+            
+            # Apply Voronoi relaxation for global optimization
+            relaxed_points = voronoi_relaxation(initial_points, max_iterations=50)
+
+            # Fine-tune with differential evolution using progressive tightening
+            de_params_history = [
+                {'maxiter': 50, 'popsize': 20, 'atol': 1e-6, 'rtol': 1e-6, 'mutation': (0.8, 1.0), 'recombination': 0.8},
+                {'maxiter': 100, 'popsize': 25, 'atol': 1e-8, 'rtol': 1e-8, 'mutation': (0.9, 1.0), 'recombination': 0.9},
+                {'maxiter': 150, 'popsize': 30, 'atol': 1e-10, 'rtol': 1e-10, 'mutation': (0.95, 1.0), 'recombination': 0.95}
+            ]
+            
+            best_de_points = None
+            best_de_ratio = -np.inf
+            
+            for params in de_params_history:
+                try:
+                    result_de = differential_evolution(
+                        objective,
+                        bounds,
+                        seed=42+i,
+                        maxiter=params['maxiter'],
+                        popsize=params['popsize'],
+                        atol=params['atol'],
+                        rtol=params['rtol'],
+                        mutation=params['mutation'],
+                        recombination=params['recombination'],
+                        disp=False
+                    )
+                    
+                    if result_de.success:
+                        # Apply adaptive local search
+                        refined_points = adaptive_local_search(result_de.x.reshape(-1, 2), bounds)
+                        ratio = calculate_min_max_ratio(refined_points)
+                        
+                        if ratio > best_de_ratio:
+                            best_de_ratio = ratio
+                            best_de_points = refined_points.copy()
+                            
+                except Exception:
+                    continue
+            
+            # If DE failed, try simulated annealing as fallback
+            if best_de_points is None:
+                try:
+                    sa_points = simulated_annealing(relaxed_points, max_iter=500)
+                    sa_ratio = calculate_min_max_ratio(sa_points)
+                    if sa_ratio > best_de_ratio:
+                        best_de_ratio = sa_ratio
+                        best_de_points = sa_points
+                except Exception:
+                    pass
+            
+            # Update global best
+            if best_de_ratio > best_global_ratio:
+                best_global_ratio = best_de_ratio
+                best_global_points = best_de_points.copy()
+                
+        if best_global_points is not None:
+            return best_global_points
+            
+    except Exception as e:
+        pass
+
+    # Method 2: Direct optimization with enhanced strategies
+    try:
+        # Try aggressive initial optimization
+        np.random.seed(42)
+        initial_points = initialize_diverse_points()
+        
+        # Run multiple DE configurations
+        strategies = [
+            {
+                'method': 'Differential Evolution',
+                'params': {
+                    'maxiter': 100,
+                    'popsize': 25,
+                    'mutation': (0.8, 1.0),
+                    'recombination': 0.9
+                }
+            },
+            {
+                'method': 'Differential Evolution',
+                'params': {
+                    'maxiter': 150,
+                    'popsize': 30,
+                    'mutation': (0.9, 1.0),
+                    'recombination': 0.95
+                }
+            }
+        ]
+
+        best_points = None
+        best_ratio = -np.inf
+
+        for strategy in strategies:
+            try:
+                # Initialize with diverse points
+                x0 = initialize_diverse_points().flatten()
+
+                # Run differential evolution
+                result = differential_evolution(
+                    objective,
+                    bounds,
+                    x0=x0,
+                    seed=42,
+                    maxiter=strategy['params']['maxiter'],
+                    popsize=strategy['params']['popsize'],
+                    mutation=strategy['params']['mutation'],
+                    recombination=strategy['params']['recombination'],
+                    atol=1e-12,
+                    rtol=1e-12
+                )
+
+                if result.success:
+                    # Apply adaptive local search for better refinement
+                    final_points = adaptive_local_search(result.x.reshape(-1, 2), bounds)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception:
+                continue
+
+        if best_points is not None:
+            return best_points
+
+    except Exception:
+        pass
+
+    # Fallback to basic structured initialization
+    points = initialize_diverse_points()
+    return points
+
+# EVOLVE-BLOCK-END

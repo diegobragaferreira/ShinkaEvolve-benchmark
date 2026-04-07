@@ -1,0 +1,108 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,101 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import pdist, squareform
++from scipy.optimize import differential_evolution, minimize
++import time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+-    n = 16
+-    d = 2
++    n_points = 16
++    dimension = 2
++    bounds = (0, 1)
+ 
+-    # places points randomly
++    # Set seed for reproducibility
+     np.random.seed(42)
+-    points = np.random.randn(n, d)
++
++    def calculate_distance_matrix(points):
++        """Calculate pairwise distance matrix"""
++        return squareform(pdist(points))
++
++    def fitness_function(points_flat):
++        """Calculate fitness as min/max distance ratio"""
++        # Reshape flat array back to points
++        points = points_flat.reshape(-1, dimension)
++
++        # Ensure points are within bounds
++        points = np.clip(points, bounds[0], bounds[1])
++
++        # Calculate distance matrix
++        try:
++            dist_matrix = calculate_distance_matrix(points)
++
++            # Set diagonal to large value to avoid zero distances
++            np.fill_diagonal(dist_matrix, np.inf)
++
++            # Calculate min and max distances
++            min_dist = np.min(dist_matrix)
++            max_dist = np.max(dist_matrix)
++
++            # Avoid division by zero
++            if max_dist == 0:
++                return 0
++
++            # Return ratio (we want to maximize this)
++            ratio = min_dist / max_dist
++
++            return ratio
++
++        except Exception:
++            return 0
++
++    # Method 1: Try differential evolution for global search
++    try:
++        # Flatten bounds for scipy
++        flat_bounds = [(bounds[0], bounds[1]) for _ in range(n_points * dimension)]
++
++        # Use differential evolution for global search
++        de_result = differential_evolution(
++            fitness_function,
++            flat_bounds,
++            maxiter=100,
++            popsize=15,
++            tol=1e-6,
++            mutation=(0.5, 1),
++            recombination=0.7,
++            seed=42,
++            disp=False
++        )
++
++        # Local refinement with L-BFGS-B
++        bounds_list = [(bounds[0], bounds[1]) for _ in range(n_points * dimension)]
++        lbfgs_result = minimize(
++            fitness_function,
++            de_result.x,
++            method='L-BFGS-B',
++            bounds=bounds_list,
++            options={'maxiter': 200, 'ftol': 1e-8}
++        )
++
++        # Reshape result
++        points = lbfgs_result.x.reshape(-1, 2)
++
++    except Exception as e:
++        # Fallback to random initialization if optimization fails
++        print(f"Optimization failed: {e}")
++        points = np.random.uniform(bounds[0], bounds[1], (n_points, dimension))
++
++    # Ensure points are within bounds
++    points = np.clip(points, bounds[0], bounds[1])
+ 
+     return points
+ 
+ 
+ # EVOLVE-BLOCK-END

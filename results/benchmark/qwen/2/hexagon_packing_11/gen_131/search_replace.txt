@@ -1,0 +1,173 @@
+<NAME>
+enhance_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current collision detection approach uses pairwise Shapely polygon intersection checks which can be computationally expensive. I'll implement a more efficient collision detection system using spatial indexing with scipy's cKDTree to quickly identify potentially colliding pairs, followed by precise Shapely checks only for candidates. This will significantly reduce the number of expensive polygon intersection tests.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon, Point
+from shapely.prepared import prep
+import time
+import math
+=======
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+from shapely.geometry import Polygon, Point
+from shapely.prepared import prep
+import time
+import math
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def check_collision_single(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def estimate_min_outer_radius(inner_hex_params):
+=======
+def check_collision_single(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def get_hexagon_centroids_and_bounding_boxes(hex_params):
+    """Get centroids and bounding boxes for all hexagons for spatial indexing."""
+    centroids = []
+    bbox_centers = []
+    bbox_half_sizes = []
+
+    for i in range(11):
+        x, y, rot = hex_params[3*i], hex_params[3*i+1], hex_params[3*i+2]
+        # For unit hexagon, approximate bounding box size
+        half_size = 1.0  # approximate
+        centroids.append([x, y])
+        bbox_centers.append([x, y])
+        bbox_half_sizes.append([half_size, half_size])
+
+    return np.array(centroids), np.array(bbox_centers), np.array(bbox_half_sizes)
+
+def efficient_collision_check(hex_params):
+    """Efficiently check for collisions using spatial indexing."""
+    # Get centroids for spatial indexing
+    centroids, _, _ = get_hexagon_centroids_and_bounding_boxes(hex_params)
+
+    # Build KDTree for fast nearest neighbor search
+    tree = cKDTree(centroids)
+
+    # Find pairs within a certain distance threshold (simplified approach)
+    # We'll check all pairs but with early termination for obvious non-collisions
+    total_penalty = 0
+    n = 11
+
+    # Precompute hexagon vertices for all hexagons
+    hex_vertices_list = []
+    for i in range(n):
+        x, y, rot = hex_params[3*i], hex_params[3*i+1], hex_params[3*i+2]
+        vertices = hexagon_vertices(x, y, rot, 1)
+        hex_vertices_list.append(vertices)
+
+    # Check for collisions using spatial indexing approach
+    for i in range(n):
+        for j in range(i+1, n):
+            # Quick distance check first (bounding box approximation)
+            dist = np.linalg.norm(centroids[i] - centroids[j])
+            # If distance is greater than 2 (sum of radii), they can't collide
+            if dist > 2.0:
+                continue
+
+            # Precise collision check
+            if check_collision_single(hex_vertices_list[i], hex_vertices_list[j]):
+                total_penalty += 1e8
+
+    return total_penalty
+
+def estimate_min_outer_radius(inner_hex_params):
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_total_penalty(params):
+    """Calculate penalty for constraint violations."""
+    # Extract parameters
+    n = 11
+    inner_params = params[:-1]
+    outer_radius = params[-1]
+
+    # Check if outer hexagon is large enough
+    if outer_radius <= 0:
+        return 1e10
+
+    # Create outer hexagon vertices once
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+    outer_polygon = prep(Polygon(outer_vertices))
+
+    # Check containment and collisions
+    total_penalty = 0
+
+    # Check containment of all inner hexagons
+    for i in range(n):
+        x, y, rot = inner_params[3*i], inner_params[3*i+1], inner_params[3*i+2]
+        hex_vertices = hexagon_vertices(x, y, rot, 1)
+        if not check_containment_single(hex_vertices, outer_polygon):
+            total_penalty += 1e8
+
+    # Check collisions between all pairs of inner hexagons
+    if total_penalty == 0:
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, rot1 = inner_params[3*i], inner_params[3*i+1], inner_params[3*i+2]
+                x2, y2, rot2 = inner_params[3*j], inner_params[3*j+1], inner_params[3*j+2]
+                hex1_vertices = hexagon_vertices(x1, y1, rot1, 1)
+                hex2_vertices = hexagon_vertices(x2, y2, rot2, 1)
+                if check_collision_single(hex1_vertices, hex2_vertices):
+                    total_penalty += 1e8
+
+    return total_penalty
+=======
+def calculate_total_penalty(params):
+    """Calculate penalty for constraint violations."""
+    # Extract parameters
+    n = 11
+    inner_params = params[:-1]
+    outer_radius = params[-1]
+
+    # Check if outer hexagon is large enough
+    if outer_radius <= 0:
+        return 1e10
+
+    # Create outer hexagon vertices once
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+    outer_polygon = prep(Polygon(outer_vertices))
+
+    # Check containment and collisions
+    total_penalty = 0
+
+    # Check containment of all inner hexagons
+    for i in range(n):
+        x, y, rot = inner_params[3*i], inner_params[3*i+1], inner_params[3*i+2]
+        hex_vertices = hexagon_vertices(x, y, rot, 1)
+        if not check_containment_single(hex_vertices, outer_polygon):
+            total_penalty += 1e8
+
+    # Check collisions between all pairs of inner hexagons using efficient method
+    if total_penalty == 0:
+        total_penalty = efficient_collision_check(inner_params)
+
+    return total_penalty
+>>>>>>> REPLACE
+
+</DIFF>

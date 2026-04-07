@@ -1,0 +1,281 @@
+<NAME>
+add_numba_jit_compilation
+</NAME>
+
+<DESCRIPTION>
+Adding Numba JIT compilation to the most computationally intensive functions will significantly speed up the execution. The key functions that benefit from JIT compilation are the autoconvolution norm computations and the fitness calculation. This will allow us to run more generations or use larger populations within the time constraint, leading to better optimization results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from typing import List, Tuple, Optional
+import time
+from dataclasses import dataclass
+from functools import lru_cache
+
+@dataclass
+class AutoconvolutionResult:
+    """Container for autoconvolution norm results."""
+    norm2_sq: float
+    norm1: float
+    norm_inf: float
+
+class StepFunction:
+    """Represents a step function with optimized operations."""
+
+    def __init__(self, heights: List[float]):
+        self.heights = np.array(heights, dtype=np.float64)
+        self.length = len(heights)
+
+    def get_heights(self) -> np.ndarray:
+        return self.heights.copy()
+
+    def get_length(self) -> int:
+        return self.length
+
+class AutoconvolutionEvaluator:
+    """Handles computation of autoconvolution norms with optimized numerical methods."""
+
+    @staticmethod
+    def compute_autoconvolution_norms(step_func: StepFunction) -> AutoconvolutionResult:
+        """
+        Compute the L2, L1, and L-infinity norms of the autoconvolution of f.
+
+        Args:
+            step_func: StepFunction object containing step heights
+
+        Returns:
+            AutoconvolutionResult containing the three norms
+        """
+        heights = step_func.get_heights()
+        length = step_func.get_length()
+
+        if length == 0:
+            return AutoconvolutionResult(0.0, 0.0, 0.0)
+
+        # Compute autoconvolution g = f * f (discrete convolution)
+        # Using numpy's convolution - it computes cross-correlation with flipped kernel
+        g = np.convolve(heights, heights, mode='full')
+
+        # Compute norms using optimized piecewise integration
+        # ||g||₂² - integrate g² using trapezoidal rule approximation
+        g_squared = g * g
+        norm2_sq = AutoconvolutionEvaluator._compute_trapz_norm2(g_squared)
+
+        # ||g||₁ - integrate |g| using trapezoidal rule
+        g_abs = np.abs(g)
+        norm1 = AutoconvolutionEvaluator._compute_trapz_norm1(g_abs)
+
+        # ||g||∞ - infinity norm (maximum absolute value)
+        norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+
+        return AutoconvolutionResult(norm2_sq, norm1, norm_inf)
+
+    @staticmethod
+    def _compute_trapz_norm2(g_values: np.ndarray) -> float:
+        """Compute L2 norm squared using piecewise linear integration."""
+        if len(g_values) < 2:
+            return g_values[0] * g_values[0] if len(g_values) > 0 else 0.0
+
+        # Simplified trapezoidal integration for g²
+        h = 1.0 / (len(g_values) - 1)  # Normalized spacing
+        total = 0.0
+
+        # For piecewise linear integration of g², use (y₁² + y₁y₂ + y₂²)/3 * h per segment
+        for i in range(len(g_values) - 1):
+            y1, y2 = g_values[i], g_values[i+1]
+            total += (y1*y1 + y1*y2 + y2*y2) * h / 3.0
+
+        return total
+
+    @staticmethod
+    def _compute_trapz_norm1(g_values: np.ndarray) -> float:
+        """Compute L1 norm using trapezoidal rule."""
+        if len(g_values) < 2:
+            return g_values[0] if len(g_values) > 0 else 0.0
+
+        h = 1.0 / (len(g_values) - 1)  # Normalized spacing
+        total = 0.0
+
+        # Trapezoidal rule for ∫|g|
+        for i in range(len(g_values) - 1):
+            y1, y2 = g_values[i], g_values[i+1]
+            total += (y1 + y2) * h / 2.0
+
+        return total
+
+class FitnessCalculator:
+    """Computes fitness (C2 values) with proper error handling."""
+
+    @staticmethod
+    def calculate_c2(step_func: StepFunction) -> float:
+        """
+        Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) where g = f * f.
+
+        Args:
+            step_func: StepFunction object
+
+        Returns:
+            C₂ value
+        """
+        try:
+            result = AutoconvolutionEvaluator.compute_autoconvolution_norms(step_func)
+
+            # Avoid division by zero
+            if result.norm1 <= 1e-12 or result.norm_inf <= 1e-12:
+                return 0.0
+
+            return result.norm2_sq / (result.norm1 * result.norm_inf)
+        except Exception as e:
+            return 0.0
+=======
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from typing import List, Tuple, Optional
+import time
+from dataclasses import dataclass
+from functools import lru_cache
+from numba import jit, float64
+
+@dataclass
+class AutoconvolutionResult:
+    """Container for autoconvolution norm results."""
+    norm2_sq: float
+    norm1: float
+    norm_inf: float
+
+class StepFunction:
+    """Represents a step function with optimized operations."""
+
+    def __init__(self, heights: List[float]):
+        self.heights = np.array(heights, dtype=np.float64)
+        self.length = len(heights)
+
+    def get_heights(self) -> np.ndarray:
+        return self.heights.copy()
+
+    def get_length(self) -> int:
+        return self.length
+
+class AutoconvolutionEvaluator:
+    """Handles computation of autoconvolution norms with optimized numerical methods."""
+
+    @staticmethod
+    @jit(nopython=True)
+    def _compute_trapz_norm2_jit(g_values: np.ndarray) -> float:
+        """Compute L2 norm squared using piecewise linear integration (JIT compiled)."""
+        if len(g_values) < 2:
+            return g_values[0] * g_values[0] if len(g_values) > 0 else 0.0
+
+        # Simplified trapezoidal integration for g²
+        h = 1.0 / (len(g_values) - 1)  # Normalized spacing
+        total = 0.0
+
+        # For piecewise linear integration of g², use (y₁² + y₁y₂ + y₂²)/3 * h per segment
+        for i in range(len(g_values) - 1):
+            y1, y2 = g_values[i], g_values[i+1]
+            total += (y1*y1 + y1*y2 + y2*y2) * h / 3.0
+
+        return total
+
+    @staticmethod
+    @jit(nopython=True)
+    def _compute_trapz_norm1_jit(g_values: np.ndarray) -> float:
+        """Compute L1 norm using trapezoidal rule (JIT compiled)."""
+        if len(g_values) < 2:
+            return g_values[0] if len(g_values) > 0 else 0.0
+
+        h = 1.0 / (len(g_values) - 1)  # Normalized spacing
+        total = 0.0
+
+        # Trapezoidal rule for ∫|g|
+        for i in range(len(g_values) - 1):
+            y1, y2 = g_values[i], g_values[i+1]
+            total += (y1 + y2) * h / 2.0
+
+        return total
+
+    @staticmethod
+    def compute_autoconvolution_norms(step_func: StepFunction) -> AutoconvolutionResult:
+        """
+        Compute the L2, L1, and L-infinity norms of the autoconvolution of f.
+
+        Args:
+            step_func: StepFunction object containing step heights
+
+        Returns:
+            AutoconvolutionResult containing the three norms
+        """
+        heights = step_func.get_heights()
+        length = step_func.get_length()
+
+        if length == 0:
+            return AutoconvolutionResult(0.0, 0.0, 0.0)
+
+        # Compute autoconvolution g = f * f (discrete convolution)
+        # Using numpy's convolution - it computes cross-correlation with flipped kernel
+        g = np.convolve(heights, heights, mode='full')
+
+        # Compute norms using optimized piecewise integration
+        # ||g||₂² - integrate g² using trapezoidal rule approximation
+        g_squared = g * g
+        norm2_sq = AutoconvolutionEvaluator._compute_trapz_norm2_jit(g_squared)
+
+        # ||g||₁ - integrate |g| using trapezoidal rule
+        g_abs = np.abs(g)
+        norm1 = AutoconvolutionEvaluator._compute_trapz_norm1_jit(g_abs)
+
+        # ||g||∞ - infinity norm (maximum absolute value)
+        norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+
+        return AutoconvolutionResult(norm2_sq, norm1, norm_inf)
+
+    @staticmethod
+    def _compute_trapz_norm2(g_values: np.ndarray) -> float:
+        """Fallback for non-JIT version - but won't be called due to JIT decorator."""
+        pass
+
+    @staticmethod
+    def _compute_trapz_norm1(g_values: np.ndarray) -> float:
+        """Fallback for non-JIT version - but won't be called due to JIT decorator."""
+        pass
+
+class FitnessCalculator:
+    """Computes fitness (C2 values) with proper error handling."""
+
+    @staticmethod
+    @jit(nopython=True)
+    def calculate_c2_jit(norm2_sq: float, norm1: float, norm_inf: float) -> float:
+        """
+        Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) (JIT compiled).
+        """
+        # Avoid division by zero
+        if norm1 <= 1e-12 or norm_inf <= 1e-12:
+            return 0.0
+
+        return norm2_sq / (norm1 * norm_inf)
+
+    @staticmethod
+    def calculate_c2(step_func: StepFunction) -> float:
+        """
+        Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) where g = f * f.
+
+        Args:
+            step_func: StepFunction object
+
+        Returns:
+            C₂ value
+        """
+        try:
+            result = AutoconvolutionEvaluator.compute_autoconvolution_norms(step_func)
+
+            # Use JIT-compiled version for calculation
+            return FitnessCalculator.calculate_c2_jit(result.norm2_sq, result.norm1, result.norm_inf)
+        except Exception as e:
+            return 0.0
+>>>>>>> REPLACE
+</DIFF>

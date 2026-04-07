@@ -1,0 +1,782 @@
+--- a/original.py
++++ b/original.py
+@@ -1,473 +1,328 @@
+ # EVOLVE-BLOCK-START
+-
+ import numpy as np
+ from scipy.fft import fft, ifft
+ from scipy.optimize import minimize
+ import time
+ import random
+ from scipy import optimize
+-from deap import base, creator, tools, algorithms
+-import copy
+-
+-np.random.seed(42)
+-random.seed(42)
+-
+-def compute_autocorrelation_constant(sequence):
+-    """
+-    Computes the autocorrelation constant C₁ for a given sequence with improved numerical stability.
+-    """
+-    if len(sequence) == 0:
+-        return float('inf'), 0.0
+-
+-    a = np.array(sequence, dtype=np.float64)
+-    n = len(a)
+-
+-    # Compute convolution using FFT for efficiency
+-    # Using proper padding to ensure correct convolution
+-    padded_len = 2 * n - 1
+-    a_padded = np.pad(a, (0, padded_len - n), 'constant')
+-
+-    # FFT-based convolution
+-    fft_a = fft(a_padded)
+-    conv_fft = fft_a * np.conj(fft_a)
+-    conv_result = ifft(conv_fft).real[:n]
+-
+-    max_b = np.max(conv_result)
+-    sum_a = np.sum(a)
+-
+-    if sum_a < 0.01:
+-        return float('inf'), 0.0
+-
+-    # Clamp to avoid numerical issues with very small sums
+-    sum_a = max(sum_a, 1e-12)
+-
+-    C1 = 2 * n * max_b / (sum_a ** 2)
+-    inv_C1 = 1 / C1
+-
+-    return C1, inv_C1
+-
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP with improved numerical stability."""
+-    n = len(f_sequence)
+-    if n == 0:
+-        return None
+-
+-    try:
+-        # Create constraint matrix efficiently
+-        a_ub = []
+-        b_ub = []
+-
+-        # Generate convolution constraints
+-        for k in range(2 * n - 1):
+-            row = np.zeros(n)
+-            for i in range(n):
+-                j = k - i
+-                if 0 <= j < n:
+-                    row[j] = f_sequence[i]
+-            a_ub.append(row)
+-            b_ub.append(rhs)
+-
+-        # Non-negativity constraints
+-        a_ub_nonneg = -np.eye(n)
+-        b_ub_nonneg = np.zeros(n)
+-
+-        a_ub = np.vstack([a_ub, a_ub_nonneg])
+-        b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-        # Objective: minimize sum of variables (which corresponds to maximizing 1/C1)
+-        c = np.ones(n)
+-
+-        # Solve with bounds - use more robust solver settings
+-        bounds = [(0, 1000) for _ in range(n)]  # Clip values to reasonable bounds
+-
+-        # Use different solver options for better stability
+-        result = optimize.linprog(
+-            c,
+-            A_ub=a_ub,
+-            b_ub=b_ub,
+-            bounds=bounds,
+-            method='highs',
+-            options={'presolve': True, 'time_limit': 10}
+-        )
+-
+-        if result.success:
+-            return result.x
+-        else:
+-            return None
+-
+-    except Exception as e:
+-        return None
+-
+-def get_good_direction_to_move_into(sequence):
+-    """
+-    Returns the direction to move into the sequence using LP optimization.
+-    """
+-    n = len(sequence)
+-    if n == 0:
+-        return None
+-
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / max(sum_sequence, 1e-10)
+-
+-    try:
+-        # Compute maximum convolution value
+-        # More precise convolution calculation
+-        padded_len = 2 * n - 1
+-        a_padded = np.pad(normalized_sequence, (0, padded_len - n), 'constant')
+-        fft_a = fft(a_padded)
+-        conv_fft = fft_a * np.conj(fft_a)
+-        conv_result = ifft(conv_fft).real[:n]
+-        rhs = np.max(conv_result)
+-
+-        # Solve LP optimization
+-        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-
+-        if g_fun is None or np.any(np.isnan(g_fun)):
+-            return None
+-
+-        # Normalize the resulting sequence
+-        sum_g = np.sum(g_fun)
+-        if sum_g < 1e-8:
+-            return None
+-
+-        normalized_g_fun = g_fun * np.sqrt(2 * n) / max(sum_g, 1e-10)
+-
+-        # Apply small perturbation to maintain diversity
+-        t = 0.05  # Increased from 0.01 to provide more aggressive movement
+-        new_sequence = [
+-            (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-        ]
+-
+-        # Ensure non-negativity
+-        new_sequence = [max(0, x) for x in new_sequence]
+-
++
++class SequenceOptimizer:
++    """Main class to encapsulate sequence optimization functionality."""
++    
++    def __init__(self):
++        self.best_inv_C1 = 0.0
++        self.best_sequence = None
++        self.best_C1 = float('inf')
++        self.start_time = time.time()
++        self.max_time = 180  # seconds
++        
++    def compute_convolution_fft(self, seq):
++        """Compute convolution using FFT for better performance."""
++        n = len(seq)
++        padded_len = 1 << (n - 1).bit_length()  # Next power of 2
++        padded_seq = np.pad(seq, (0, padded_len - n), 'constant')
++        fft_seq = fft(padded_seq)
++        conv_fft = fft_seq * fft_seq.conj()
++        conv_result = ifft(conv_fft).real[:2*n-1]
++        return conv_result
++
++    def compute_autocorrelation_constant(self, sequence):
++        """
++        Computes the autocorrelation constant C₁ for a given sequence.
++        """
++        if len(sequence) == 0:
++            return float('inf'), 0.0
++
++        a = np.array(sequence, dtype=np.float64)
++        n = len(a)
++
++        # Compute convolution using FFT for efficiency
++        conv = self.compute_convolution_fft(a)
++        max_b = np.max(conv)
++        sum_a = np.sum(a)
++
++        if sum_a < 0.01:
++            return float('inf'), 0.0
++
++        C1 = 2 * n * max_b / (sum_a ** 2)
++        inv_C1 = 1 / C1
++
++        return C1, inv_C1
++
++    def solve_convolution_lp(self, f_sequence, rhs):
++        """Solves the convolution LP with improved numerical stability."""
++        n = len(f_sequence)
++        if n == 0:
++            return None
++
++        try:
++            # Efficiently construct constraint matrix
++            a_ub = []
++            b_ub = []
++
++            # Generate convolution constraints
++            for k in range(2 * n - 1):
++                row = np.zeros(n)
++                for i in range(n):
++                    j = k - i
++                    if 0 <= j < n:
++                        row[j] = f_sequence[i]
++                a_ub.append(row)
++                b_ub.append(rhs)
++
++            # Non-negativity constraints
++            a_ub_nonneg = -np.eye(n)
++            b_ub_nonneg = np.zeros(n)
++
++            a_ub = np.vstack([a_ub, a_ub_nonneg])
++            b_ub = np.hstack([b_ub, b_ub_nonneg])
++
++            # Objective: minimize sum of variables (which corresponds to maximizing 1/C1)
++            c = np.ones(n)
++
++            # Solve with bounds - clip values to reasonable bounds
++            bounds = [(0, 1000) for _ in range(n)]
++
++            # Use 'highs' solver for better performance
++            result = optimize.linprog(
++                c,
++                A_ub=a_ub,
++                b_ub=b_ub,
++                bounds=bounds,
++                method='highs',
++                options={'presolve': True, 'time_limit': 5}
++            )
++
++            if result.success:
++                return result.x
++            else:
++                return None
++
++        except Exception as e:
++            return None
++
++    def get_good_direction_to_move_into(self, sequence):
++        """
++        Returns the direction to move into the sequence using LP optimization.
++        """
++        n = len(sequence)
++        if n == 0:
++            return None
++
++        sum_sequence = np.sum(sequence)
++        # Prevent division by zero or near-zero sums
++        if sum_sequence < 1e-10:
++            return None
++
++        # Normalize sequence to have a specific scale
++        normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
++
++        try:
++            # Compute maximum convolution value using FFT
++            conv = self.compute_convolution_fft(normalized_sequence)
++            rhs = np.max(conv)
++
++            # Solve LP optimization
++            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
++
++            if g_fun is None or np.any(np.isnan(g_fun)):
++                return None
++
++            # Normalize the resulting sequence
++            sum_g = np.sum(g_fun)
++            if sum_g < 1e-8:
++                return None
++
++            normalized_g_fun = g_fun * np.sqrt(2 * n) / max(sum_g, 1e-10)
++
++            # Apply small perturbation to maintain diversity
++            t = 0.02  # Slightly increased perturbation for better exploration
++            new_sequence = [
++                (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
++            ]
++
++            # Ensure non-negativity
++            new_sequence = [max(0, x) for x in new_sequence]
++
++            return new_sequence
++
++        except Exception as e:
++            return None
++
++    def adaptive_frequency_optimize(self, current_sequence, max_iter=50):
++        """
++        Optimizes sequence using a hybrid approach combining frequency and time-domain optimization.
++        """
++        n = len(current_sequence)
++        if n == 0:
++            return current_sequence
++
++        # Ensure minimal positive values to prevent numerical issues
++        a = np.array(current_sequence, dtype=float)
++        a = np.maximum(a, 1e-10)
++
++        # First, try the LP-based optimization approach
++        lp_direction = self.get_good_direction_to_move_into(current_sequence)
++        if lp_direction is not None:
++            # Use LP direction as a good starting point
++            current_sequence = lp_direction
++
++        # Convert to frequency domain
++        a_fft = fft(a, 2*n-1)
++
++        # Objective function in frequency domain
++        def objective(freq_vals):
++            # Convert back to time domain
++            reconstructed = ifft(freq_vals, 2*n-1).real[:n]
++            reconstructed = np.maximum(reconstructed, 1e-10)
++            
++            # Compute convolution
++            conv = self.compute_convolution_fft(reconstructed)
++            max_conv = np.max(conv)
++            sum_reconstructed = np.sum(reconstructed)
++            
++            if sum_reconstructed < 0.01:
++                return float('inf')
++
++            # Minimize max(conv) / (sum^2) to maximize 1/C1
++            C1 = 2 * n * max_conv / (sum_reconstructed ** 2)
++            return C1
++
++        # Use L-BFGS-B for better convergence
++        try:
++            initial_freq = a_fft.copy()
++            result = minimize(objective, initial_freq, method='L-BFGS-B', options={'maxiter': max_iter})
++            if result.success:
++                optimized_freq = result.x
++                optimized_time = ifft(optimized_freq, 2*n-1).real[:n]
++                optimized_time = np.maximum(optimized_time, 1e-10)
++                return optimized_time.tolist()
++        except Exception as e:
++            pass
++
++        # Fallback to simple perturbation if optimization fails
++        new_sequence = current_sequence.copy()
++        idx = np.random.randint(0, n)
++        new_sequence[idx] = max(1e-10, new_sequence[idx] + np.random.normal(0, 0.1))
+         return new_sequence
+ 
+-    except Exception as e:
+-        return None
+-
+-def adaptive_frequency_optimize(current_sequence, max_iter=50):
+-    """
+-    Optimizes sequence using a hybrid approach combining frequency and time-domain optimization.
+-    """
+-    n = len(current_sequence)
+-    if n == 0:
+-        return current_sequence
+-
+-    # Ensure minimal positive values to prevent numerical issues
+-    a = np.array(current_sequence, dtype=float)
+-    a = np.maximum(a, 1e-10)
+-
+-    # First, try the LP-based optimization approach
+-    lp_direction = get_good_direction_to_move_into(current_sequence)
+-    if lp_direction is not None:
+-        # Use LP direction as a good starting point
+-        current_sequence = lp_direction
+-
+-    # Convert to frequency domain
+-    a_fft = fft(a, 2*n-1)
+-
+-    # Objective function in frequency domain
+-    def objective(freq_vals):
+-        # Convert back to time domain
+-        reconstructed = ifft(freq_vals, 2*n-1).real[:n]
+-        reconstructed = np.maximum(reconstructed, 1e-10)
+-
+-        # Compute convolution
+-        # More precise convolution calculation
+-        padded_len = 2 * n - 1
+-        a_padded = np.pad(reconstructed, (0, padded_len - n), 'constant')
+-        fft_a = fft(a_padded)
+-        conv_fft = fft_a * np.conj(fft_a)
+-        conv_result = ifft(conv_fft).real[:n]
+-
+-        max_conv = np.max(conv_result)
+-        sum_reconstructed = np.sum(reconstructed)
+-
+-        if sum_reconstructed < 0.01:
+-            return float('inf')
+-
+-        # Minimize max(conv) / (sum^2) to maximize 1/C1
+-        C1 = 2 * n * max_conv / (sum_reconstructed ** 2)
+-        return C1
+-
+-    # Use L-BFGS-B for better convergence
+-    try:
+-        initial_freq = a_fft.copy()
+-        result = minimize(objective, initial_freq, method='L-BFGS-B', options={'maxiter': max_iter})
+-        if result.success:
+-            optimized_freq = result.x
+-            optimized_time = ifft(optimized_freq, 2*n-1).real[:n]
+-            optimized_time = np.maximum(optimized_time, 1e-10)
+-            return optimized_time.tolist()
+-    except Exception as e:
+-        pass
+-
+-    # Fallback to simple perturbation if optimization fails
+-    new_sequence = current_sequence.copy()
+-    idx = np.random.randint(0, n)
+-    new_sequence[idx] = max(1e-10, new_sequence[idx] + np.random.normal(0, 0.1))
+-    return new_sequence
+-
+-def genetic_algorithm_optimize(initial_sequences, max_time):
+-    """
+-    Uses a genetic algorithm to explore the search space more effectively.
+-    """
+-    start_time = time.time()
+-
+-    # Define fitness function
+-    def eval_fitness(individual):
+-        c1, inv_c1 = compute_autocorrelation_constant(individual)
+-        return inv_c1,  # Maximize 1/C1
+-
+-    # Setup DEAP
+-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+-    creator.create("Individual", list, fitness=creator.FitnessMax)
+-
+-    toolbox = base.Toolbox()
+-    toolbox.register("individual", tools.initRepeat, creator.Individual,
+-                     lambda: np.random.uniform(0.1, 10.0), n=200)  # Fixed length for simplicity
+-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+-    toolbox.register("evaluate", eval_fitness)
+-    toolbox.register("mate", tools.cxTwoPoint)
+-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+-    toolbox.register("select", tools.selTournament, tournsize=3)
+-
+-    # Create initial population
+-    pop = toolbox.population(n=50)
+-
+-    # Evaluate initial population
+-    invalid_ind = [ind for ind in pop if not ind.fitness.valid]
+-    fitnesses = map(toolbox.evaluate, invalid_ind)
+-    for ind, fit in zip(invalid_ind, fitnesses):
+-        ind.fitness.values = fit
+-
+-    # Begin evolution
+-    for gen in range(50):  # Number of generations
+-        if time.time() - start_time > max_time - 5:
+-            break
+-
+-        # Select the next generation individuals
+-        offspring = toolbox.select(pop, len(pop))
+-        offspring = list(map(toolbox.clone, offspring))
+-
+-        # Apply crossover and mutation
+-        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+-            if random.random() < 0.5:
+-                toolbox.mate(child1, child2)
+-                del child1.fitness.values
+-                del child2.fitness.values
+-
+-        for mutant in offspring:
+-            if random.random() < 0.2:
+-                toolbox.mutate(mutant)
+-                del mutant.fitness.values
+-
+-        # Evaluate the individuals with an invalid fitness
+-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+-        fitnesses = map(toolbox.evaluate, invalid_ind)
+-        for ind, fit in zip(invalid_ind, fitnesses):
+-            ind.fitness.values = fit
+-
+-        # Replace the old population with the new one
+-        pop[:] = offspring
+-
+-        # Keep track of best individual
+-        best_ind = tools.selBest(pop, 1)[0]
+-        _, inv_c1 = eval_fitness(best_ind)
+-
+-    # Return the best individual found
+-    final_pop = tools.selBest(pop, 1)
+-    if final_pop:
+-        return final_pop[0]
+-    else:
+-        return initial_sequences[0] if initial_sequences else [1.0]
+-
+-def multi_start_optimization(initial_sequences, max_time):
+-    """
+-    Performs multi-start optimization with genetic algorithm integration.
+-    """
+-    best_inv_C1 = 0.0
+-    best_sequence = None
+-    best_C1 = float('inf')
+-    start_time = time.time()
+-
+-    # Combine traditional approaches with genetic algorithm
+-    combined_sequences = []
+-
+-    # Add some sequences from the initial pool
+-    for i, init_seq in enumerate(initial_sequences[:5]):  # Limit to first few
+-        if time.time() - start_time > max_time - 5:
+-            break
+-        combined_sequences.append(init_seq)
+-
+-    # Run genetic algorithm on a subset of sequences
+-    if len(initial_sequences) > 0:
+-        ga_best = genetic_algorithm_optimize(initial_sequences[:3], max_time - 5)
+-        combined_sequences.append(ga_best)
+-
+-    # Try multiple starting points
+-    for i, init_seq in enumerate(combined_sequences):
+-        if time.time() - start_time > max_time - 5:
+-            break
+-
+-        current_seq = init_seq.copy()
+-        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+-
+-        if current_inv_C1 > best_inv_C1:
+-            best_inv_C1 = current_inv_C1
+-            best_sequence = current_seq.copy()
+-            best_C1 = current_C1
+-
+-        # Multiple rounds of optimization with different strategies
+-        for round_num in range(3):  # Multiple rounds
+-            if time.time() - start_time > max_time - 5:
++    def generate_initial_sequences(self):
++        """Generate diverse initial sequences."""
++        initial_sequences = []
++        
++        # Random sequences
++        for _ in range(2):
++            n = np.random.randint(50, 200)
++            seq = np.random.uniform(0.1, 1.0, n).tolist()
++            initial_sequences.append(seq)
++
++        # Exponential decay sequences
++        for _ in range(2):
++            n = np.random.randint(100, 500)
++            seq = [0.8 ** i for i in range(n)]
++            initial_sequences.append(seq)
++
++        # Spike sequences
++        for _ in range(2):
++            n = np.random.randint(100, 500)
++            seq = [0.0] * n
++            spike_idx = np.random.randint(0, n)
++            seq[spike_idx] = 1.0
++            initial_sequences.append(seq)
++
++        # Gaussian-like sequences
++        for _ in range(2):
++            n = np.random.randint(100, 500)
++            center = n // 2
++            seq = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
++            initial_sequences.append(seq)
++            
++        return initial_sequences
++
++    def multi_start_optimization(self, initial_sequences):
++        """
++        Performs multi-start optimization to avoid local minima.
++        """
++        for i, init_seq in enumerate(initial_sequences):
++            if time.time() - self.start_time > self.max_time - 5:
+                 break
+ 
+-            # Use different optimization strategies
+-            if round_num == 0:
+-                # Direct optimization
+-                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=30)
+-            elif round_num == 1:
+-                # LP-based direction
+-                lp_direction = get_good_direction_to_move_into(current_seq)
+-                if lp_direction is not None:
+-                    improved_seq = lp_direction
++            current_seq = init_seq.copy()
++            current_C1, current_inv_C1 = self.compute_autocorrelation_constant(current_seq)
++
++            if current_inv_C1 > self.best_inv_C1:
++                self.best_inv_C1 = current_inv_C1
++                self.best_sequence = current_seq.copy()
++                self.best_C1 = current_C1
++
++            # Multiple rounds of optimization with different strategies
++            for round_num in range(3):  # Multiple rounds
++                if time.time() - self.start_time > self.max_time - 5:
++                    break
++
++                # Use different optimization strategies
++                if round_num == 0:
++                    # Direct optimization
++                    improved_seq = self.adaptive_frequency_optimize(current_seq, max_iter=30)
++                elif round_num == 1:
++                    # LP-based direction
++                    lp_direction = self.get_good_direction_to_move_into(current_seq)
++                    if lp_direction is not None:
++                        improved_seq = lp_direction
++                    else:
++                        improved_seq = self.adaptive_frequency_optimize(current_seq, max_iter=20)
+                 else:
+-                    improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+-            else:
+-                # Random perturbation followed by optimization
+-                perturbed_seq = current_seq.copy()
+-                idx = np.random.randint(0, len(current_seq))
+-                perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+-                improved_seq = adaptive_frequency_optimize(perturbed_seq, max_iter=20)
+-
+-            improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+-
+-            if improved_inv_C1 > current_inv_C1:
+-                current_seq = improved_seq
+-                current_C1 = improved_C1
+-                current_inv_C1 = improved_inv_C1
+-
+-                if current_inv_C1 > best_inv_C1:
+-                    best_inv_C1 = current_inv_C1
+-                    best_sequence = current_seq.copy()
+-                    best_C1 = current_C1
+-
+-    return best_sequence, best_C1, best_inv_C1
+-
+-def multi_start_optimization(initial_sequences, max_time):
+-    """
+-    Performs multi-start optimization to avoid local minima.
+-    """
+-    best_inv_C1 = 0.0
+-    best_sequence = None
+-    best_C1 = float('inf')
+-    start_time = time.time()
+-
+-    # Try multiple starting points
+-    for i, init_seq in enumerate(initial_sequences):
+-        if time.time() - start_time > max_time - 5:
+-            break
+-
+-        current_seq = init_seq.copy()
+-        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+-
+-        if current_inv_C1 > best_inv_C1:
+-            best_inv_C1 = current_inv_C1
+-            best_sequence = current_seq.copy()
+-            best_C1 = current_C1
+-
+-        # Multiple rounds of optimization with different strategies
+-        for round_num in range(3):  # Multiple rounds
+-            if time.time() - start_time > max_time - 5:
+-                break
+-
+-            # Use different optimization strategies
+-            if round_num == 0:
+-                # Direct optimization
+-                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=30)
+-            elif round_num == 1:
+-                # LP-based direction
+-                lp_direction = get_good_direction_to_move_into(current_seq)
+-                if lp_direction is not None:
+-                    improved_seq = lp_direction
+-                else:
+-                    improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+-            else:
+-                # Random perturbation followed by optimization
+-                perturbed_seq = current_seq.copy()
+-                idx = np.random.randint(0, len(current_seq))
+-                perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+-                improved_seq = adaptive_frequency_optimize(perturbed_seq, max_iter=20)
+-
+-            improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+-
+-            if improved_inv_C1 > current_inv_C1:
+-                current_seq = improved_seq
+-                current_C1 = improved_C1
+-                current_inv_C1 = improved_inv_C1
+-
+-                if current_inv_C1 > best_inv_C1:
+-                    best_inv_C1 = current_inv_C1
+-                    best_sequence = current_seq.copy()
+-                    best_C1 = current_C1
+-
+-    return best_sequence, best_C1, best_inv_C1
++                    # Random perturbation followed by optimization
++                    perturbed_seq = current_seq.copy()
++                    idx = np.random.randint(0, len(current_seq))
++                    perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
++                    improved_seq = self.adaptive_frequency_optimize(perturbed_seq, max_iter=20)
++
++                improved_C1, improved_inv_C1 = self.compute_autocorrelation_constant(improved_seq)
++
++                if improved_inv_C1 > current_inv_C1:
++                    current_seq = improved_seq
++                    current_C1 = improved_C1
++                    current_inv_C1 = improved_inv_C1
++
++                    if current_inv_C1 > self.best_inv_C1:
++                        self.best_inv_C1 = current_inv_C1
++                        self.best_sequence = current_seq.copy()
++                        self.best_C1 = current_C1
++
++    def search_for_best_sequence(self):
++        """
++        Main function to search for the best coefficient sequence.
++        """
++        # Generate diverse initial sequences
++        initial_sequences = self.generate_initial_sequences()
++        
++        # Multi-start optimization
++        self.multi_start_optimization(initial_sequences)
++        
++        # Final optimization with enhanced parameters
++        if self.best_sequence is not None:
++            final_seq = self.adaptive_frequency_optimize(self.best_sequence, max_iter=100)
++            final_C1, final_inv_C1 = self.compute_autocorrelation_constant(final_seq)
++            if final_inv_C1 > self.best_inv_C1:
++                self.best_sequence = final_seq
++                self.best_C1 = final_C1
++                self.best_inv_C1 = final_inv_C1
++
++        return self.best_sequence if self.best_sequence is not None else [1.0]
+ 
+ def search_for_best_sequence():
+     """
+-    Main function to search for the best coefficient sequence.
++    Entry point for sequence optimization.
+     """
+-    start_time = time.time()
+-    max_time = 180  # seconds
+-
+-    # Generate diverse initial sequences at different scales
+-    initial_sequences = []
+-
+-    # Random sequences
+-    for _ in range(2):
+-        n = np.random.randint(50, 200)
+-        seq = np.random.uniform(0.1, 1.0, n).tolist()
+-        initial_sequences.append(seq)
+-
+-    # Exponential decay sequences
+-    for _ in range(2):
+-        n = np.random.randint(100, 500)
+-        seq = [0.8 ** i for i in range(n)]
+-        initial_sequences.append(seq)
+-
+-    # Spike sequences
+-    for _ in range(2):
+-        n = np.random.randint(100, 500)
+-        seq = [0.0] * n
+-        spike_idx = np.random.randint(0, n)
+-        seq[spike_idx] = 1.0
+-        initial_sequences.append(seq)
+-
+-    # Gaussian-like sequences
+-    for _ in range(2):
+-        n = np.random.randint(100, 500)
+-        center = n // 2
+-        seq = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
+-        initial_sequences.append(seq)
+-
+-    # Multi-start optimization
+-    best_sequence, best_C1, best_inv_C1 = multi_start_optimization(initial_sequences, max_time)
+-
+-    # Final optimization with enhanced parameters
+-    if best_sequence is not None:
+-        final_seq = adaptive_frequency_optimize(best_sequence, max_iter=100)
+-        final_C1, final_inv_C1 = compute_autocorrelation_constant(final_seq)
+-        if final_inv_C1 > best_inv_C1:
+-            best_sequence = final_seq
+-            best_C1 = final_C1
+-            best_inv_C1 = final_inv_C1
+-
+-    return best_sequence if best_sequence is not None else [1.0]
++    np.random.seed(42)
++    random.seed(42)
++    
++    optimizer = SequenceOptimizer()
++    return optimizer.search_for_best_sequence()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

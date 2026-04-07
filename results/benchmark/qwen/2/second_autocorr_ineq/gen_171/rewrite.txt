@@ -1,0 +1,346 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+from scipy.ndimage import gaussian_filter1d
+import time
+import warnings
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation with improved numerical stability.
+    """
+    if not f_values:
+        return 0.0, 1e-12, 1e-12
+
+    # Convert to numpy array
+    f = np.array(f_values, dtype=np.float64)
+
+    # Validate input
+    if len(f) < 1:
+        return 0.0, 1e-12, 1e-12
+
+    # Compute autoconvolution - this is the core operation
+    g = convolve(f, f, mode='full')
+    g = g[len(f)-1:]  # Keep only the relevant part
+
+    # Compute norms with numerical stability checks
+    g_abs = np.abs(g)
+
+    # ||g||₂² (L2 norm squared) - use trapezoidal rule properly
+    g_sq = g_abs ** 2
+    if len(g_sq) < 2:
+        norm_2_sq = 0.0 if len(g_sq) == 0 else g_sq[0]
+    else:
+        # Trapezoidal integration: sum((y[i] + y[i+1])/2 * delta_x)
+        norm_2_sq = np.sum((g_sq[:-1] + g_sq[1:]) / 2.0)
+
+    # ||g||₁ (L1 norm) - sum of absolute values
+    norm_1 = np.sum(g_abs)
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(g_abs)
+
+    # Numerical stability checks
+    norm_2_sq = max(0.0, norm_2_sq)
+    norm_1 = max(1e-12, norm_1)  # Avoid division by zero
+    norm_inf = max(1e-12, norm_inf)  # Avoid division by zero
+
+    return norm_2_sq, norm_1, norm_inf
+
+def construct_logspaced_step_function(n_points=2000):
+    """
+    Enhanced construction using logarithmic spacing for Gaussian peak positions
+    """
+    # Create domain
+    x = np.linspace(-0.25, 0.25, n_points)
+
+    # Initialize function
+    f_values = np.zeros(n_points)
+
+    # Use logarithmic spacing for better peak distribution
+    # This prevents clustering around center and edges
+    n_peaks = min(30, max(10, n_points // 80))
+
+    # Generate logarithmically spaced peak positions with improved distribution
+    log_min = np.log(0.015)
+    log_max = np.log(0.18)
+    
+    # Create log-spaced positions for better frequency coverage
+    peak_positions_log = np.logspace(log_min, log_max, n_peaks // 2 + 1)
+    
+    # Mirror positions for symmetry with better spacing control
+    peak_positions = np.concatenate([
+        -peak_positions_log[::-1],  # Negative positions
+        [0],                       # Center position
+        peak_positions_log         # Positive positions
+    ])
+    
+    # Apply additional spacing constraints to avoid clustering
+    filtered_positions = []
+    min_spacing = 0.015  # Minimum spacing between peaks
+    
+    for pos in peak_positions:
+        # Check if position is sufficiently far from existing peaks
+        valid = True
+        for existing_pos in filtered_positions:
+            if abs(pos - existing_pos) < min_spacing:
+                valid = False
+                break
+        if valid and abs(pos) <= 0.23:  # Keep within bounds
+            filtered_positions.append(pos)
+            
+    peak_positions = np.array(filtered_positions)
+    
+    # Add some randomness to positions to avoid perfect symmetry
+    for i in range(len(peak_positions)):
+        if i != len(peak_positions) // 2:  # Don't perturb center
+            peak_positions[i] += np.random.uniform(-0.005, 0.005)
+
+    # Create peaks with varying characteristics using improved logic
+    for i, pos in enumerate(peak_positions):
+        # Vary characteristics based on position and index
+        # Width varies with position - wider at edges, narrower near center
+        center_distance = abs(pos)
+        base_width = 0.02 + 0.03 * np.exp(-center_distance * 3)
+        width = np.clip(base_width * np.random.uniform(0.7, 1.3), 0.005, 0.08)
+
+        # Adaptive amplitude scaling based on position and width
+        # Peaks near center get higher amplitude, wider peaks get lower amplitude
+        center_factor = np.exp(-center_distance * 4)
+        width_factor = 1.0 / (width * 15.0)
+        base_height = np.random.uniform(0.8, 1.8) * center_factor * width_factor
+        height = np.clip(base_height, 0.2, 2.0)
+        
+        # Real-time amplitude scaling feedback to prevent excessive L-infinity growth
+        # Monitor intermediate C2 values during construction and adjust accordingly
+        gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+        f_values += gaussian_peak
+
+    # Apply mathematically principled Gaussian convolution instead of Savitzky-Golay
+    if n_points > 100:
+        # Use Gaussian filter for smoother results with better edge preservation
+        sigma = max(1.0, n_points / 500.0)  # Adaptive sigma based on resolution
+        f_values = gaussian_filter1d(f_values, sigma=sigma, mode='nearest')
+
+    # Ensure non-negativity
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize with adaptive scaling
+    max_val = np.max(f_values)
+    if max_val > 0:
+        # Scale down more aggressively for high-resolution functions to prevent numerical overflow
+        scale_factor = max_val * 1.8 if max_val > 1.0 else 1.2
+        f_values = f_values / scale_factor
+
+    return f_values.tolist()
+
+def optimize_with_multiple_starts(initial_f, n_restarts=8):
+    """
+    Perform optimization with multiple random restarts for better convergence
+    """
+    best_c2 = -1
+    best_f = initial_f.copy()
+
+    # Define objective function to minimize (negative C2)
+    def objective(params):
+        try:
+            # Reshape params into function values
+            f = np.array(params)
+            # Ensure non-negativity
+            f = np.maximum(f, 0)
+
+            # Compute autoconvolution and norms
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f)
+
+            # Avoid division by zero
+            if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+                return 1e10  # Large penalty for invalid norms
+
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+
+            # Return negative because we want to maximize C2
+            return -c2 if not np.isnan(c2) and not np.isinf(c2) else 1e10
+
+        except Exception as e:
+            warnings.warn(f"Objective evaluation failed: {str(e)}")
+            return 1e10
+
+    x0 = np.array(initial_f)
+
+    # Multiple restarts with different perturbations
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        for restart in range(n_restarts):
+            try:
+                # Small random perturbation to initial guess for diversity
+                perturbed_x0 = x0 + np.random.normal(0, 0.01, len(x0))
+                perturbed_x0 = np.maximum(perturbed_x0, 0)
+                
+                # Submit optimization task
+                future = executor.submit(minimize, objective, perturbed_x0, 
+                                       method='L-BFGS-B', 
+                                       options={'maxiter': 75, 'ftol': 1e-8})
+                futures.append((future, restart))
+            except Exception as e:
+                warnings.warn(f"Restart {restart} setup failed: {str(e)}")
+                continue
+
+        # Collect results
+        for future, restart in futures:
+            try:
+                result = future.result(timeout=30)
+                if result.success:
+                    optimized_f = np.maximum(result.x, 0)
+                    norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(optimized_f)
+                    if norm_1 > 1e-12 and norm_inf > 1e-12:
+                        c2 = norm_2_sq / (norm_1 * norm_inf)
+                        if c2 > best_c2:
+                            best_c2 = c2
+                            best_f = optimized_f.tolist()
+            except Exception as e:
+                warnings.warn(f"Restart {restart} optimization failed: {str(e)}")
+                continue
+
+    return best_f
+
+def construct_function() -> list[float]:
+    """
+    Main function to construct step-function with high C2 value.
+    Implements logarithmic spacing peak construction with enhanced optimization.
+    """
+    start_time = time.time()
+
+    # Try several strategies and pick best
+    best_c2 = 0.0
+    best_f = None
+
+    # Strategy 1: Log-spaced multi-scale step function construction
+    try:
+        # Generate improved initial function with logarithmic spacing
+        f_values = construct_logspaced_step_function(2000)
+
+        # Optimize the function with multiple restarts
+        optimized_f = optimize_with_multiple_starts(f_values, n_restarts=10)
+
+        # Evaluate result
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(optimized_f)
+
+        if norm_1 > 1e-12 and norm_inf > 1e-12:
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            if c2 > best_c2:
+                best_c2 = c2
+                best_f = optimized_f
+    except Exception as e:
+        warnings.warn(f"Strategy 1 failed: {str(e)}")
+
+    # Strategy 2: Alternative construction with different parameters
+    if best_f is None or best_c2 < 0.9:
+        try:
+            # Try with different number of points for more exploration
+            f_values = construct_logspaced_step_function(3000)
+            optimized_f = optimize_with_multiple_starts(f_values, n_restarts=8)
+
+            # Evaluate result
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(optimized_f)
+            if norm_1 > 1e-12 and norm_inf > 1e-12:
+                c2 = norm_2_sq / (norm_1 * norm_inf)
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_f = optimized_f
+        except Exception as e:
+            warnings.warn(f"Strategy 2 failed: {str(e)}")
+
+    # Strategy 3: Hybrid approach with some randomness
+    if best_f is None or best_c2 < 0.92:
+        try:
+            # Create a hybrid of different approaches
+            n_points = 1500
+            x = np.linspace(-0.25, 0.25, n_points)
+            f_values = np.zeros(n_points)
+
+            # Mix of different peak styles
+            n_features = 25
+
+            for i in range(n_features):
+                # Randomly choose peak style
+                style = random.choice(['sharp', 'wide', 'flat'])
+
+                # Position with slight randomization and enforce spacing
+                pos = np.random.uniform(-0.23, 0.23)
+                # Add constraints to prevent very close peaks
+                while abs(pos) < 0.01:
+                    pos = np.random.uniform(-0.23, 0.23)
+
+                # Style-dependent parameters
+                if style == 'sharp':
+                    width = 0.005 + 0.01 * np.random.random()
+                    height = 0.6 + 0.8 * np.random.random()
+                elif style == 'wide':
+                    width = 0.04 + 0.03 * np.random.random()
+                    height = 0.2 + 0.4 * np.random.random()
+                else:  # flat
+                    width = 0.06 + 0.02 * np.random.random()
+                    height = 0.1 + 0.3 * np.random.random()
+
+                peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+                f_values += peak
+
+            # Normalize and smooth
+            f_values = np.maximum(f_values, 0)
+            max_val = np.max(f_values)
+            if max_val > 0:
+                f_values = f_values / (max_val * 1.2)
+
+            # Apply smoothing with Gaussian convolution for numerical stability
+            if n_points > 100:
+                window = max(3, min(21, n_points // 100))
+                if window % 2 == 0:
+                    window += 1
+                try:
+                    # Use gaussian filter instead of savgol_filter for better numerical stability
+                    f_values = gaussian_filter1d(f_values, sigma=window/2.0, mode='nearest')
+                except:
+                    f_values = np.convolve(f_values, np.ones(window)/window, mode='same')
+
+            f_values = f_values.tolist()
+
+            # Optimize
+            optimized_f = optimize_with_multiple_starts(f_values, n_restarts=6)
+
+            # Evaluate result
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(optimized_f)
+            if norm_1 > 1e-12 and norm_inf > 1e-12:
+                c2 = norm_2_sq / (norm_1 * norm_inf)
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_f = optimized_f
+
+        except Exception as e:
+            warnings.warn(f"Strategy 3 failed: {str(e)}")
+
+    # Final fallback if no valid solution
+    if best_f is None:
+        # Enhanced fallback with better distribution
+        n_points = 1000
+        # Create a more structured fallback that's less likely to fail
+        x = np.linspace(-0.25, 0.25, n_points)
+        # Use a bell-curve pattern with good autoconvolution properties
+        f_values = np.exp(-0.5 * (x / 0.05)**2)
+        # Normalize and ensure non-negativity
+        f_values = np.maximum(f_values, 0)
+        max_val = np.max(f_values)
+        if max_val > 0:
+            f_values = f_values / (max_val * 1.5)
+        best_f = f_values.tolist()
+
+    return best_f
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

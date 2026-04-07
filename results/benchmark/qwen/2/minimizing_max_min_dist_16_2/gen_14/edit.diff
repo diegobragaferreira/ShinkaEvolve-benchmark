@@ -1,0 +1,120 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,111 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
++from scipy.spatial.distance import pdist, squareform
++import time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+ 
+-    n = 16
+-    d = 2
++    def objective_function(points_flat):
++        # Reshape flat array back to 16x2 points
++        points = points_flat.reshape(-1, 2)
+ 
+-    # places points randomly
++        # Ensure points are within unit square
++        points = np.clip(points, 0, 1)
++
++        # Compute pairwise distances
++        distances = squareform(pdist(points))
++
++        # Set diagonal to large value so it doesn't affect min
++        np.fill_diagonal(distances, np.inf)
++
++        # Get minimum and maximum distances
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++
++        # Return negative ratio since we want to maximize
++        if max_dist > 0:
++            return -min_dist / max_dist
++        else:
++            return -np.inf
++
++    # Create initial guess using a hexagonal grid pattern
+     np.random.seed(42)
+-    points = np.random.randn(n, d)
+ 
+-    return points
++    # Generate a hexagonal lattice pattern (4x4 grid)
++    points = []
++    row_spacing = 1.0 / 3.0  # Spacing to fit in unit square
++    col_spacing = row_spacing * np.sqrt(3) / 2.0
++
++    for i in range(4):
++        for j in range(4):
++            # Offset every other row
++            x = j * row_spacing + (i % 2) * row_spacing / 2.0
++            y = i * col_spacing
++
++            # Add small random perturbation to break symmetry
++            x += (np.random.random() - 0.5) * 0.05
++            y += (np.random.random() - 0.5) * 0.05
++
++            points.append([x, y])
++
++    # Clip to unit square
++    initial_points = np.array(points)
++    initial_points = np.clip(initial_points, 0, 1)
++
++    # Flatten for optimization
++    initial_flat = initial_points.flatten()
++
++    # Use local optimization to refine the solution
++    # We try multiple random restarts to avoid local optima
++    best_result = None
++    best_ratio = -np.inf
++
++    # Multiple restarts with different initializations
++    for restart in range(10):
++        # Perturb the initial solution slightly for each restart
++        restart_points = initial_points.copy()
++        np.random.seed(restart)  # Different seed for each restart
++
++        # Add small random perturbations
++        perturbations = (np.random.random((16, 2)) - 0.5) * 0.02
++        restart_points += perturbations
++        restart_points = np.clip(restart_points, 0, 1)
++
++        restart_flat = restart_points.flatten()
++
++        # Local optimization
++        result = minimize(
++            objective_function,
++            restart_flat,
++            method='L-BFGS-B',
++            bounds=[(0, 1) for _ in range(32)],
++            options={'maxiter': 1000, 'ftol': 1e-8, 'gtol': 1e-5},
++            callback=None
++        )
++
++        # Evaluate final result
++        final_obj = objective_function(result.x)
++        if final_obj > best_ratio:
++            best_ratio = final_obj
++            best_result = result
++
++    # Extract the best solution
++    if best_result is not None:
++        best_points = best_result.x.reshape(-1, 2)
++        # Ensure they're still in bounds
++        best_points = np.clip(best_points, 0, 1)
++        return best_points
++    else:
++        # Fallback to initial points if optimization fails
++        return initial_points
+ 
+ 
+ # EVOLVE-BLOCK-END

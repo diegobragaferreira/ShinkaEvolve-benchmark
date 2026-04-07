@@ -1,0 +1,191 @@
+<NAME>
+implement_sobol_sequence_initialization
+</NAME>
+
+<DESCRIPTION>
+Implement 3D Sobol sequence initialization to improve the space-filling properties of the initial point distribution. This approach leverages low-discrepancy sequences that provide more uniform coverage of the solution space compared to traditional Fibonacci spirals, which helps avoid local minima and improves convergence to better global solutions. The Sobol sequence will be used alongside existing initialization methods to create a more diverse and effective multi-start strategy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import warnings
+from typing import Tuple, Optional
+import time
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+from scipy.stats import qmc
+import warnings
+from typing import Tuple, Optional
+import time
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+add_sobol_initialization_method
+</NAME>
+
+<DESCRIPTION>
+Add a new method `_generate_sobol_points()` that creates initial point configurations using Sobol sequences for superior space-filling properties. This method will generate points distributed more uniformly across the sphere compared to Fibonacci spirals, providing better exploration of the search space and helping avoid convergence to poor local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_spherical_code_points(self) -> np.ndarray:
+        """Generate points based on known spherical code configurations for 14 points."""
+        # Use an icosahedral-based configuration with modifications for 14 points
+        # Vertices of regular icosahedron (12 vertices)
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+        ])
+
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+
+        # Add 2 additional points to make 14 total
+        # Place them at poles for better symmetry
+        additional_points = np.array([[0, 0, 1], [0, 0, -1]])
+
+        # Combine and adjust for better distribution
+        points = np.vstack([vertices, additional_points])
+
+        # Apply small random perturbations to break perfect symmetry
+        np.random.seed(42)
+        noise_magnitude = 0.015
+        points += np.random.normal(0, noise_magnitude, points.shape)
+
+        # Ensure normalization
+        points = points / np.linalg.norm(points, axis=1, keepdims=True)
+        return points
+=======
+    def _generate_sobol_points(self) -> np.ndarray:
+        """Generate points using Sobol sequence for better space-filling properties."""
+        # Create Sobol sequence sampler
+        sampler = qmc.Sobol(d=3, seed=42)
+
+        # Generate more points than needed to ensure good distribution
+        n_samples = max(self.n * 2, 32)
+        points = sampler.random(n=n_samples)
+
+        # Scale to [-1, 1]^3 cube
+        points = points * 2 - 1
+
+        # Project to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        points = points / norms
+
+        # Take first n points and ensure they are properly normalized
+        points = points[:self.n]
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        points = points / norms
+
+        # Apply small perturbations to break symmetry
+        np.random.seed(42)
+        noise_magnitude = 0.01
+        points += np.random.normal(0, noise_magnitude, points.shape)
+
+        # Renormalize after perturbation
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        points = points / norms
+
+        return points
+
+    def _generate_spherical_code_points(self) -> np.ndarray:
+        """Generate points based on known spherical code configurations for 14 points."""
+        # Use an icosahedral-based configuration with modifications for 14 points
+        # Vertices of regular icosahedron (12 vertices)
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+        ])
+
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+
+        # Add 2 additional points to make 14 total
+        # Place them at poles for better symmetry
+        additional_points = np.array([[0, 0, 1], [0, 0, -1]])
+
+        # Combine and adjust for better distribution
+        points = np.vstack([vertices, additional_points])
+
+        # Apply small random perturbations to break perfect symmetry
+        np.random.seed(42)
+        noise_magnitude = 0.015
+        points += np.random.normal(0, noise_magnitude, points.shape)
+
+        # Ensure normalization
+        points = points / np.linalg.norm(points, axis=1, keepdims=True)
+        return points
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_initialization_strategies
+</NAME>
+
+<DESCRIPTION>
+Update the initialization strategies in the adaptive restart strategy to include the new Sobol sequence initialization method. This adds a fourth initialization method alongside Fibonacci, spherical code, and perturbed versions, increasing the diversity of starting points and improving the chances of finding better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Phase 1: Initial population with enhanced Fibonacci + spherical code + perturbations
+        initial_points_fib = self._generate_enhanced_fibonacci_points()
+        initial_points_code = self._generate_spherical_code_points()
+
+        # Evaluate both initializations
+        self._evaluate_and_update_best(initial_points_fib)
+        self._evaluate_and_update_best(initial_points_code)
+
+        # Create diverse initial population
+        population = [initial_points_fib, initial_points_code]
+        for i in range(3):  # Create 3 perturbed versions of each
+            np.random.seed(i)
+            perturbed_fib = self._perturb_points(initial_points_fib, 0.01)
+            perturbed_code = self._perturb_points(initial_points_code, 0.01)
+            population.append(perturbed_fib)
+            population.append(perturbed_code)
+=======
+        # Phase 1: Initial population with enhanced Fibonacci + spherical code + sobol + perturbations
+        initial_points_fib = self._generate_enhanced_fibonacci_points()
+        initial_points_code = self._generate_spherical_code_points()
+        initial_points_sobol = self._generate_sobol_points()
+
+        # Evaluate all initializations
+        self._evaluate_and_update_best(initial_points_fib)
+        self._evaluate_and_update_best(initial_points_code)
+        self._evaluate_and_update_best(initial_points_sobol)
+
+        # Create diverse initial population
+        population = [initial_points_fib, initial_points_code, initial_points_sobol]
+        for i in range(3):  # Create 3 perturbed versions of each
+            np.random.seed(i)
+            perturbed_fib = self._perturb_points(initial_points_fib, 0.01)
+            perturbed_code = self._perturb_points(initial_points_code, 0.01)
+            perturbed_sobol = self._perturb_points(initial_points_sobol, 0.01)
+            population.append(perturbed_fib)
+            population.append(perturbed_code)
+            population.append(perturbed_sobol)
+>>>>>>> REPLACE
+
+</DIFF>

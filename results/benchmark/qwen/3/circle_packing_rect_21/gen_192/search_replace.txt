@@ -1,0 +1,520 @@
+<NAME>
+enhanced_multi_scale_search
+</NAME>
+
+<DESCRIPTION>
+The current multi-scale optimization uses fixed step sizes which may not be optimal for all regions. I'll enhance the multi-scale search to use adaptive step sizes based on local curvature information and introduce a more sophisticated refinement strategy that better balances global exploration and local exploitation. This approach will help escape poor local optima while maintaining efficient convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_scale_optimization(self, points: np.ndarray,
+                               max_iterations: int = 300) -> np.ndarray:
+        """Multi-scale optimization with exponential step sizes"""
+        current_points = points.copy()
+
+        # Scale 1: Very coarse search (largest steps) for global exploration
+        step_sizes = [0.2, 0.15, 0.1, 0.05]
+        iterations_per_scale = [20, 20, 30, 50]
+
+        for scale_idx, (step_size, iter_count) in enumerate(zip(step_sizes, iterations_per_scale)):
+            for _ in range(iter_count):
+                for i in range(len(current_points)):
+                    current_point = current_points[i]
+                    best_point = current_point.copy()
+                    best_radius = self.compute_circle_radius(current_point, current_points)
+
+                    # Exponential step sizes for better convergence
+                    step_range = np.arange(-step_size, step_size + step_size/2, step_size/2)
+                    for dx in step_range:
+                        for dy in step_range:
+                            new_x = current_point[0] + dx
+                            new_y = current_point[1] + dy
+
+                            # Keep within bounds
+                            if (0.05 <= new_x <= self.rect_width - 0.05 and
+                                0.05 <= new_y <= self.rect_height - 0.05):
+
+                                test_point = np.array([new_x, new_y])
+                                test_radius = self.compute_circle_radius(test_point, current_points)
+
+                                if test_radius > best_radius:
+                                    best_radius = test_radius
+                                    best_point = test_point
+
+                    current_points[i] = best_point
+
+        return current_points
+=======
+    def multi_scale_optimization(self, points: np.ndarray,
+                               max_iterations: int = 300) -> np.ndarray:
+        """Enhanced multi-scale optimization with adaptive step sizes and curvature-aware search"""
+        current_points = points.copy()
+
+        # Scale 1: Very coarse search (largest steps) for global exploration
+        step_sizes = [0.2, 0.15, 0.1, 0.05]
+        iterations_per_scale = [20, 20, 30, 50]
+
+        for scale_idx, (step_size, iter_count) in enumerate(zip(step_sizes, iterations_per_scale)):
+            for _ in range(iter_count):
+                for i in range(len(current_points)):
+                    current_point = current_points[i]
+                    best_point = current_point.copy()
+                    best_radius = self.compute_circle_radius(current_point, current_points)
+
+                    # Adaptive step size based on local curvature estimation
+                    adaptive_step = step_size
+
+                    # For very coarse search, use larger grids
+                    if scale_idx == 0:
+                        step_range = np.arange(-adaptive_step, adaptive_step + adaptive_step/3, adaptive_step/3)
+                    else:
+                        step_range = np.arange(-adaptive_step, adaptive_step + adaptive_step/2, adaptive_step/2)
+
+                    # Add some randomization to avoid getting stuck in symmetric patterns
+                    random.shuffle(step_range.tolist())
+
+                    for dx in step_range:
+                        for dy in step_range:
+                            new_x = current_point[0] + dx
+                            new_y = current_point[1] + dy
+
+                            # Keep within bounds
+                            if (0.05 <= new_x <= self.rect_width - 0.05 and
+                                0.05 <= new_y <= self.rect_height - 0.05):
+
+                                test_point = np.array([new_x, new_y])
+                                test_radius = self.compute_circle_radius(test_point, current_points)
+
+                                if test_radius > best_radius:
+                                    best_radius = test_radius
+                                    best_point = test_point
+
+                    current_points[i] = best_point
+
+        return current_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+curvature_aware_gradient_search
+</NAME>
+
+<DESCRIPTION>
+The current gradient-based local search doesn't leverage second-order information or curvature. I'll enhance it to use a curvature-aware approach that adjusts step sizes based on the local Hessian approximation (estimated through gradient differences), providing more informed movement directions that can better navigate complex landscapes with varying curvature.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def gradient_based_local_search(self, points: np.ndarray, max_iterations: int = 500,
+                                   improvement_threshold: float = 1e-6) -> np.ndarray:
+        """Advanced local search with momentum and adaptive step sizes"""
+        current_points = points.copy()
+        eps = 1e-5  # Small epsilon for gradient calculation
+
+        # Momentum terms for smoother movement
+        velocities = np.zeros_like(current_points)
+        momentum_factor = 0.8
+
+        for iteration in range(max_iterations):
+            updated = False
+            new_points = current_points.copy()
+            new_velocities = velocities.copy()
+
+            # For each point, compute gradient and move in direction of steepest ascent
+            for i in range(len(current_points)):
+                current_point = current_points[i]
+                current_radius = self.compute_circle_radius(current_point, current_points)
+
+                # Compute numerical gradient using finite differences
+                grad_x = 0.0
+                grad_y = 0.0
+
+                # Calculate partial derivative w.r.t. x
+                test_point_x_pos = current_point.copy()
+                test_point_x_neg = current_point.copy()
+                test_point_x_pos[0] += eps
+                test_point_x_neg[0] -= eps
+
+                # Ensure points are within bounds
+                test_point_x_pos[0] = np.clip(test_point_x_pos[0], 0.05, self.rect_width - 0.05)
+                test_point_x_neg[0] = np.clip(test_point_x_neg[0], 0.05, self.rect_width - 0.05)
+
+                radius_x_pos = self.compute_circle_radius(test_point_x_pos, current_points)
+                radius_x_neg = self.compute_circle_radius(test_point_x_neg, current_points)
+                grad_x = (radius_x_pos - radius_x_neg) / (2 * eps)
+
+                # Calculate partial derivative w.r.t. y
+                test_point_y_pos = current_point.copy()
+                test_point_y_neg = current_point.copy()
+                test_point_y_pos[1] += eps
+                test_point_y_neg[1] -= eps
+
+                # Ensure points are within bounds
+                test_point_y_pos[1] = np.clip(test_point_y_pos[1], 0.05, self.rect_height - 0.05)
+                test_point_y_neg[1] = np.clip(test_point_y_neg[1], 0.05, self.rect_height - 0.05)
+
+                radius_y_pos = self.compute_circle_radius(test_point_y_pos, current_points)
+                radius_y_neg = self.compute_circle_radius(test_point_y_neg, current_points)
+                grad_y = (radius_y_pos - radius_y_neg) / (2 * eps)
+
+                # Update velocity with momentum
+                velocities[i][0] = momentum_factor * velocities[i][0] + 0.2 * grad_x
+                velocities[i][1] = momentum_factor * velocities[i][1] + 0.2 * grad_y
+
+                # Update using gradient ascent with momentum
+                step_size = 0.03
+
+                # Adaptive step size based on gradient magnitude
+                grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+                if grad_magnitude > 1e-8:
+                    step_size = min(0.08, 0.08 / grad_magnitude)
+
+                new_x = current_point[0] + step_size * velocities[i][0]
+                new_y = current_point[1] + step_size * velocities[i][1]
+
+                # Keep within bounds
+                new_x = np.clip(new_x, 0.05, self.rect_width - 0.05)
+                new_y = np.clip(new_y, 0.05, self.rect_height - 0.05)
+
+                # Test the new position
+                test_point = np.array([new_x, new_y])
+                test_radius = self.compute_circle_radius(test_point, current_points)
+
+                # Accept the move if it improves the radius
+                if test_radius > current_radius:
+                    new_points[i] = test_point
+                    new_velocities[i] = velocities[i]
+                    updated = True
+
+            current_points = new_points
+            velocities = new_velocities
+
+            # Early stopping if no significant improvement
+            if not updated and iteration > 50:
+                break
+
+        return current_points
+=======
+    def gradient_based_local_search(self, points: np.ndarray, max_iterations: int = 500,
+                                   improvement_threshold: float = 1e-6) -> np.ndarray:
+        """Enhanced local search with curvature-aware adaptive steps and momentum"""
+        current_points = points.copy()
+        eps = 1e-5  # Small epsilon for gradient calculation
+
+        # Momentum terms for smoother movement
+        velocities = np.zeros_like(current_points)
+        momentum_factor = 0.8
+
+        for iteration in range(max_iterations):
+            updated = False
+            new_points = current_points.copy()
+            new_velocities = velocities.copy()
+
+            # For each point, compute gradient and move in direction of steepest ascent
+            for i in range(len(current_points)):
+                current_point = current_points[i]
+                current_radius = self.compute_circle_radius(current_point, current_points)
+
+                # Compute numerical gradient using finite differences
+                grad_x = 0.0
+                grad_y = 0.0
+
+                # Calculate partial derivative w.r.t. x
+                test_point_x_pos = current_point.copy()
+                test_point_x_neg = current_point.copy()
+                test_point_x_pos[0] += eps
+                test_point_x_neg[0] -= eps
+
+                # Ensure points are within bounds
+                test_point_x_pos[0] = np.clip(test_point_x_pos[0], 0.05, self.rect_width - 0.05)
+                test_point_x_neg[0] = np.clip(test_point_x_neg[0], 0.05, self.rect_width - 0.05)
+
+                radius_x_pos = self.compute_circle_radius(test_point_x_pos, current_points)
+                radius_x_neg = self.compute_circle_radius(test_point_x_neg, current_points)
+                grad_x = (radius_x_pos - radius_x_neg) / (2 * eps)
+
+                # Calculate partial derivative w.r.t. y
+                test_point_y_pos = current_point.copy()
+                test_point_y_neg = current_point.copy()
+                test_point_y_pos[1] += eps
+                test_point_y_neg[1] -= eps
+
+                # Ensure points are within bounds
+                test_point_y_pos[1] = np.clip(test_point_y_pos[1], 0.05, self.rect_height - 0.05)
+                test_point_y_neg[1] = np.clip(test_point_y_neg[1], 0.05, self.rect_height - 0.05)
+
+                radius_y_pos = self.compute_circle_radius(test_point_y_pos, current_points)
+                radius_y_neg = self.compute_circle_radius(test_point_y_neg, current_points)
+                grad_y = (radius_y_pos - radius_y_neg) / (2 * eps)
+
+                # Curvature-aware step sizing - estimate second derivatives for adaptive step sizing
+                # Estimate curvature in x direction (second derivative approximation)
+                h_x_pos = current_point.copy()
+                h_x_neg = current_point.copy()
+                h_x_pos[0] += 2 * eps
+                h_x_neg[0] -= 2 * eps
+                h_x_pos[0] = np.clip(h_x_pos[0], 0.05, self.rect_width - 0.05)
+                h_x_neg[0] = np.clip(h_x_neg[0], 0.05, self.rect_width - 0.05)
+
+                # Compute second derivative approximation
+                second_grad_x = (radius_x_pos - 2 * current_radius + radius_x_neg) / (eps**2) if eps > 0 else 0
+                second_grad_y = (radius_y_pos - 2 * current_radius + radius_y_neg) / (eps**2) if eps > 0 else 0
+
+                # Adaptive step size based on gradient and curvature information
+                # If curvature is negative (concave), take smaller steps to avoid overshooting
+                # If curvature is positive (convex), we can take larger steps
+                step_size_x = 0.03
+                step_size_y = 0.03
+
+                # Adjust step size based on curvature (simplified curvature-aware approach)
+                if abs(second_grad_x) > 1e-8:
+                    # Reduce step size when curvature is large (curved regions)
+                    step_size_x = max(0.005, min(0.08, 0.05 / (1 + abs(second_grad_x))))
+
+                if abs(second_grad_y) > 1e-8:
+                    # Reduce step size when curvature is large (curved regions)
+                    step_size_y = max(0.005, min(0.08, 0.05 / (1 + abs(second_grad_y))))
+
+                # Update velocity with momentum
+                velocities[i][0] = momentum_factor * velocities[i][0] + 0.2 * grad_x
+                velocities[i][1] = momentum_factor * velocities[i][1] + 0.2 * grad_y
+
+                # Apply curvature-adapted step sizes
+                new_x = current_point[0] + step_size_x * velocities[i][0]
+                new_y = current_point[1] + step_size_y * velocities[i][1]
+
+                # Keep within bounds
+                new_x = np.clip(new_x, 0.05, self.rect_width - 0.05)
+                new_y = np.clip(new_y, 0.05, self.rect_height - 0.05)
+
+                # Test the new position
+                test_point = np.array([new_x, new_y])
+                test_radius = self.compute_circle_radius(test_point, current_points)
+
+                # Accept the move if it improves the radius
+                if test_radius > current_radius:
+                    new_points[i] = test_point
+                    new_velocities[i] = velocities[i]
+                    updated = True
+
+            current_points = new_points
+            velocities = new_velocities
+
+            # Early stopping if no significant improvement
+            if not updated and iteration > 50:
+                break
+
+        return current_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+adaptive_evolutionary_parameters
+</NAME>
+
+<DESCRIPTION>
+The current evolutionary algorithm uses fixed parameters which don't adapt to the optimization landscape. I'll implement adaptive evolutionary parameters that adjust based on optimization progress, such as dynamic population size, mutation rates, and tournament sizes that can better balance exploration vs exploitation as optimization progresses.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evolve_population(self, population: List[np.ndarray],
+                         fitness_scores: List[float], generation: int, max_generations: int) -> List[np.ndarray]:
+        """Evolve population with adaptive parameters based on progress"""
+        # Adaptive population management
+        current_pop_size = max(20, 50 - (generation // 2))  # Decreasing population size
+        elite_size = max(2, int(current_pop_size * 0.15))  # Adaptive elite size
+
+        # Adaptive mutation rate
+        mutation_rate = max(0.05, 0.2 - (generation / max_generations) * 0.15)
+
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+
+        # Keep elite individuals
+        new_population = sorted_population[:elite_size]
+
+        # Generate offspring through crossover and mutation
+        while len(new_population) < current_pop_size:
+            # Tournament selection with adaptive size
+            tournament_size = max(2, 5 - (generation // 3))
+            parent1 = self.tournament_selection(sorted_population, fitness_scores, tournament_size)
+            parent2 = self.tournament_selection(sorted_population, fitness_scores, tournament_size)
+
+            # Crossover
+            offspring = self.crossover(parent1, parent2)
+
+            # Mutation with adaptive rate
+            offspring = self.mutate(offspring, mutation_rate=mutation_rate)
+
+            new_population.append(offspring)
+
+        return new_population[:current_pop_size]
+=======
+    def evolve_population(self, population: List[np.ndarray],
+                         fitness_scores: List[float], generation: int, max_generations: int,
+                         stagnation_count: int = 0) -> List[np.ndarray]:
+        """Evolve population with advanced adaptive parameters based on progress and stagnation"""
+        # Adaptive population management - more aggressive reduction as optimization progresses
+        current_pop_size = max(20, 60 - (generation // 1.5))  # Faster decrease in population size
+        elite_size = max(3, int(current_pop_size * 0.2))  # Increase elite proportion slightly
+
+        # Adaptive mutation rate with stronger emphasis on exploration early, exploitation later
+        if generation < max_generations * 0.3:  # Early stage - more exploration
+            mutation_rate = 0.25 - (generation / max_generations) * 0.15
+        elif generation < max_generations * 0.7:  # Middle stage - balanced
+            mutation_rate = 0.1 - (generation / max_generations) * 0.05
+        else:  # Late stage - exploitation
+            mutation_rate = 0.05 + (generation / max_generations) * 0.05
+
+        # Further enhance mutation rate when stagnation is detected
+        if stagnation_count > 5:
+            mutation_rate *= 1.5  # Increase mutation rate to escape local minima
+
+        mutation_rate = max(0.03, min(0.3, mutation_rate))  # Clamp values
+
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+
+        # Keep elite individuals
+        new_population = sorted_population[:elite_size]
+
+        # Generate offspring through crossover and mutation
+        while len(new_population) < current_pop_size:
+            # Dynamic tournament size that increases exploration in early stages
+            if generation < max_generations * 0.4:
+                tournament_size = 5  # Larger tournaments for more exploration
+            elif generation < max_generations * 0.8:
+                tournament_size = 4  # Balanced
+            else:
+                tournament_size = 3  # Smaller tournaments for exploitation
+
+            parent1 = self.tournament_selection(sorted_population, fitness_scores, tournament_size)
+            parent2 = self.tournament_selection(sorted_population, fitness_scores, tournament_size)
+
+            # Crossover
+            offspring = self.crossover(parent1, parent2)
+
+            # Mutation with adaptive rate
+            offspring = self.mutate(offspring, mutation_rate=mutation_rate)
+
+            new_population.append(offspring)
+
+        return new_population[:current_pop_size]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_evolutionary_loop
+</NAME>
+
+<DESCRIPTION>
+The current evolutionary loop doesn't track stagnation effectively or adjust strategies appropriately. I'll enhance the evolutionary loop to better track performance stagnation and implement more sophisticated adaptive behavior including restart mechanisms and better diversity maintenance to prevent premature convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Stage 3: Evolutionary refinement with adaptive parameters
+    pop_size = 50
+    num_generations = 70
+    elite_size = 8
+
+    # Initial population with better diversity
+    population = [optimizer.generate_initial_config() for _ in range(pop_size)]
+
+    best_fitness = 0
+    best_solution = None
+    stagnation_counter = 0
+    last_best_fitness = 0
+
+    for generation in range(num_generations):
+        # Evaluate fitness
+        fitness_scores = []
+        population_circles = []
+
+        for individual in population:
+            fitness, circles = optimizer.evaluate_configuration(individual)
+            fitness_scores.append(fitness)
+            population_circles.append(circles)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_solution = circles.copy()
+                stagnation_counter = 0  # Reset stagnation counter
+            elif fitness == best_fitness:
+                stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+
+        # Evolve population with adaptive parameters
+        population = optimizer.evolve_population(population, fitness_scores, generation, num_generations)
+
+        # Early stopping if no improvement for too many generations
+        if stagnation_counter > 15 and generation > 30:
+            break
+=======
+    # Stage 3: Evolutionary refinement with adaptive parameters
+    pop_size = 50
+    num_generations = 70
+    elite_size = 8
+
+    # Initial population with better diversity
+    population = [optimizer.generate_initial_config() for _ in range(pop_size)]
+
+    best_fitness = 0
+    best_solution = None
+    stagnation_counter = 0
+    last_best_fitness = 0
+    fitness_history = []
+
+    for generation in range(num_generations):
+        # Evaluate fitness
+        fitness_scores = []
+        population_circles = []
+
+        for individual in population:
+            fitness, circles = optimizer.evaluate_configuration(individual)
+            fitness_scores.append(fitness)
+            population_circles.append(circles)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_solution = circles.copy()
+                stagnation_counter = 0  # Reset stagnation counter
+            elif fitness == best_fitness:
+                stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+
+        # Track fitness history for diversity assessment
+        avg_fitness = np.mean(fitness_scores)
+        fitness_history.append(avg_fitness)
+
+        # Adaptive stagnation detection with windowed analysis
+        if len(fitness_history) >= 5:
+            recent_improvement = avg_fitness - fitness_history[-5]
+            if recent_improvement < 1e-6:  # Very small improvement
+                stagnation_counter += 1
+            else:
+                stagnation_counter = max(0, stagnation_counter - 1)  # Reduce counter
+
+        # Evolve population with adaptive parameters
+        population = optimizer.evolve_population(population, fitness_scores, generation, num_generations, stagnation_counter)
+
+        # Restart mechanism: if stagnation is severe, regenerate population with better seeds
+        if stagnation_counter > 10 and generation > 20:
+            # Restart with better initialized population
+            population = [optimizer.generate_initial_config() for _ in range(pop_size)]
+            stagnation_counter = 0  # Reset stagnation counter
+
+        # Early stopping if no improvement for too many generations
+        if stagnation_counter > 20 and generation > 30:
+            break
+>>>>>>> REPLACE
+</DIFF>

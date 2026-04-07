@@ -1,0 +1,320 @@
+--- a/original.py
++++ b/original.py
+@@ -1,192 +1,281 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+ from scipy.optimize import differential_evolution
+ import warnings
+ from typing import List, Tuple
++import random
+ 
+ def construct_function() -> list[float]:
+     """
+     Spectral-guided step function optimizer that leverages frequency domain analysis
+     to construct optimal step functions for maximizing C₂ constant.
++    Implements selective evolutionary optimization for peak parameters.
+     """
+     np.random.seed(42)
+ 
+     # Determine number of steps with reasonable resolution
+     n_steps = 5000  # Fixed at 5000 to match AlphaEvolve benchmark
+ 
+     # Create x-axis points in [-1/4, 1/4]
+     x = np.linspace(-0.25, 0.25, n_steps)
+ 
+-    # Phase 1: Spectral-guided initialization
++    # Phase 1: Spectral-guided initialization with peak identification
+     # Analyze what spectral properties lead to good autoconvolution behavior
+     spectral_peaks = generate_spectral_guided_peaks(n_steps)
+ 
+     # Build function from spectral-guided peaks
+     base_function = np.zeros_like(x)
+ 
+     # Apply the generated peaks with optimized parameters
+     for peak_info in spectral_peaks:
+         pos, height, width = peak_info
+         gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+         base_function += gaussian_peak
+ 
+     # Add supplementary structure for better autoconvolution properties
+     add_supplementary_structure(base_function, x)
+ 
+     # Ensure non-negative values and normalize
+     base_function = np.maximum(base_function, 0)
+     if np.max(base_function) > 0:
+         base_function = base_function / np.max(base_function) * 2.0
+ 
+     # Apply smoothing to reduce sharp transitions
+     window_size = min(51, max(3, n_steps // 100))
+     if window_size % 2 == 0:
+         window_size += 1
+     if window_size > 1:
+         window = np.ones(window_size) / window_size
+         base_function = np.convolve(base_function, window, mode='same')
+ 
+-    # Convert to list and apply final refinement
++    # Convert to list and apply final refinement using selective evolutionary approach
+     step_values = base_function.tolist()
+ 
+-    # Phase 2: Multi-scale refinement using targeted optimization
++    # Phase 2: Selective evolutionary optimization of peak parameters
+     try:
+-        refined_values = refine_function_spectral_guided(step_values, n_steps)
++        refined_values = evolve_peak_parameters(step_values, n_steps)
+         step_values = refined_values
+     except Exception as e:
+-        warnings.warn(f"Refinement failed: {str(e)}")
++        warnings.warn(f"Evolutionary refinement failed: {str(e)}")
+         pass
+ 
+     # Add final robustness noise
+     final_noise = np.random.normal(0, 0.005, len(step_values))
+     final_func = np.array(step_values) + final_noise
+     final_func = np.maximum(final_func, 0)
+ 
+     return final_func.tolist()
+ 
+ def generate_spectral_guided_peaks(n_steps: int) -> List[Tuple[float, float, float]]:
+     """
+     Generate peaks guided by spectral analysis to optimize autoconvolution properties.
+     """
+     x = np.linspace(-0.25, 0.25, n_steps)
+     peaks = []
+ 
+     # Create peaks with strategic distribution based on spectral optimization principles
+     # Central region - dense peaks for smooth autoconvolution
+     central_count = 12
+     for i in range(central_count):
+         pos = np.random.uniform(-0.1, 0.1)
+         height = np.random.uniform(1.8, 2.5)
+         width = np.random.uniform(0.015, 0.035)
+         peaks.append((pos, height, width))
+ 
+     # Mid-region - moderate density
+     mid_count = 8
+     for i in range(mid_count):
+         pos = np.random.choice([-0.2, -0.18, -0.16, -0.14, -0.12, -0.1,
+                                0.1, 0.12, 0.14, 0.16, 0.18, 0.2])
+         height = np.random.uniform(1.5, 2.2)
+         width = np.random.uniform(0.025, 0.045)
+         peaks.append((pos, height, width))
+ 
+     # Outer region - sparse peaks
+     outer_count = 5
+     for i in range(outer_count):
+         pos = np.random.choice([-0.24, -0.22, -0.2, 0.2, 0.22, 0.24])
+         height = np.random.uniform(1.2, 1.8)
+         width = np.random.uniform(0.035, 0.06)
+         peaks.append((pos, height, width))
+ 
+     return peaks
+ 
+ def add_supplementary_structure(f_values: np.ndarray, x: np.ndarray):
+     """
+     Add supplementary structure to enhance autoconvolution properties.
+     """
+     n_steps = len(f_values)
+     for i in range(0, n_steps, max(1, n_steps//30)):
+         if np.random.random() > 0.85:
+             bump_center = x[i]
+             bump_height = np.random.uniform(0.05, 0.2)
+             bump_width = np.random.uniform(0.008, 0.018)
+             bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+             f_values += bump
+ 
+-def refine_function_spectral_guided(initial_func: List[float], n_steps: int) -> List[float]:
+-    """
+-    Multi-scale refinement approach guided by spectral properties.
++def evolve_peak_parameters(initial_func: List[float], n_steps: int) -> List[float]:
++    """
++    Selective evolutionary optimization focusing only on peak parameters (positions and heights)
++    rather than all function values to improve convergence speed and quality.
+     """
+     x = np.linspace(-0.25, 0.25, n_steps)
+     current_func = np.array(initial_func)
+ 
+-    # Multi-pass refinement with decreasing step sizes
+-    for pass_num in range(3):
+-        # Pass 1: Large adjustments
+-        if pass_num == 0:
+-            step_size = 0.05
+-            iterations = 100
+-        # Pass 2: Medium adjustments
+-        elif pass_num == 1:
+-            step_size = 0.02
+-            iterations = 50
+-        # Pass 3: Fine adjustments
+-        else:
+-            step_size = 0.01
+-            iterations = 30
+-
+-        for _ in range(iterations):
+-            test_func = current_func.copy()
+-
+-            # Select random index to adjust
+-            idx = np.random.randint(0, len(test_func))
+-            adjustment = np.random.normal(0, step_size)
+-            test_func[idx] = max(0, test_func[idx] + adjustment)
+-
+-            # Test if improvement
+-            if compute_c2(test_func) > compute_c2(current_func):
+-                current_func = test_func.copy()
+-
+-    return current_func.tolist()
++    # First, identify key peak characteristics from the current function
++    # This helps us understand which parameters matter most for autoconvolution
++    peak_locations = identify_key_peaks(current_func, x)
++
++    # Create a representative peak parameter vector
++    # Format: [position_1, height_1, width_1, position_2, height_2, width_2, ...]
++    peak_params = []
++    for loc in peak_locations:
++        # Find the peak height at this location
++        idx = np.argmin(np.abs(x - loc))
++        height = current_func[idx]
++        # Use a typical width for initial guess
++        width = 0.025
++        peak_params.extend([loc, height, width])
++
++    # Evolutionary optimization of peak parameters only
++    best_params = peak_params.copy()
++    best_c2 = compute_c2(current_func)
++
++    # Simple evolutionary algorithm focused on peak parameters
++    population_size = 20
++    generations = 50
++    mutation_rate = 0.1
++
++    # Initialize population
++    population = [best_params.copy()]
++    for _ in range(population_size - 1):
++        individual = [p + random.gauss(0, 0.05 * abs(p) if p != 0 else 0.05)
++                     for p in best_params]
++        population.append(individual)
++
++    for generation in range(generations):
++        # Evaluate population
++        fitness_scores = []
++        evaluated_individuals = []
++
++        for individual in population:
++            # Reconstruct function from peak parameters
++            reconstructed_func = reconstruct_from_peaks(individual, x)
++            reconstructed_func = np.maximum(reconstructed_func, 0)
++
++            # Compute C2 for this individual
++            c2 = compute_c2(reconstructed_func)
++            fitness_scores.append(c2)
++            evaluated_individuals.append((individual, c2))
++
++        # Find best individual in this generation
++        best_idx = np.argmax(fitness_scores)
++        if fitness_scores[best_idx] > best_c2:
++            best_c2 = fitness_scores[best_idx]
++            best_params = evaluated_individuals[best_idx][0].copy()
++
++        # Create new population through selection and mutation
++        # Tournament selection
++        new_population = []
++        for _ in range(population_size):
++            # Select two individuals
++            tournament_size = 3
++            tournament_indices = random.choices(range(population_size), k=tournament_size)
++            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
++            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
++
++            # Clone and mutate
++            new_individual = population[winner_idx].copy()
++            for i in range(len(new_individual)):
++                if random.random() < mutation_rate:
++                    # Apply mutation with appropriate scaling
++                    mutation_strength = 0.1 * abs(new_individual[i]) if new_individual[i] != 0 else 0.1
++                    new_individual[i] += random.gauss(0, mutation_strength)
++
++            new_population.append(new_individual)
++
++        population = new_population
++
++    # Return the best reconstructed function
++    best_function = reconstruct_from_peaks(best_params, x)
++    return best_function.tolist()
++
++def identify_key_peaks(func_vals: np.ndarray, x: np.ndarray, min_height_ratio: float = 0.1) -> List[float]:
++    """
++    Identify key peak locations in the function for evolutionary optimization.
++    """
++    # Find local maxima
++    peaks = []
++    for i in range(1, len(func_vals)-1):
++        if func_vals[i] > func_vals[i-1] and func_vals[i] > func_vals[i+1]:
++            # Only consider significant peaks
++            if func_vals[i] > min_height_ratio * np.max(func_vals):
++                peaks.append(x[i])
++
++    # If no peaks found, return some strategic positions
++    if not peaks:
++        peaks = [x[len(x)//2], x[len(x)//4], x[3*len(x)//4]]
++
++    return sorted(set(peaks))  # Remove duplicates and sort
++
++def reconstruct_from_peaks(peak_params: List[float], x: np.ndarray) -> np.ndarray:
++    """
++    Reconstruct function from peak parameters.
++    """
++    func = np.zeros_like(x)
++
++    # Peak parameters come in groups of 3: [position, height, width]
++    for i in range(0, len(peak_params), 3):
++        if i + 2 < len(peak_params):
++            pos = peak_params[i]
++            height = peak_params[i+1]
++            width = peak_params[i+2]
++
++            # Create Gaussian peak
++            gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
++            func += gaussian_peak
++
++    return func
+ 
+ def compute_c2(func_vals: List[float]) -> float:
+     """
+     Compute C₂ value with optimized numerical integration.
+     """
+     f = np.array(func_vals)
+ 
+     # Autoconvolution using convolution
+     g = np.convolve(f, f, mode='full')
+     g = g[len(g)//2:]  # Take middle portion
+ 
+     # Adjust for correct length
+     if len(g) > len(f):
+         g = g[:len(f)]
+ 
+     # Compute norms with improved numerical accuracy
+     # ||g||₂² (L2 norm squared) - using piecewise quadratic integration
+     dx = 0.5 / (len(f) - 1) if len(f) > 1 else 0.5
+     norm_2_sq = 0
+     for i in range(len(g)-1):
+         # Trapezoidal rule for better precision
+         area = dx * (g[i]**2 + g[i+1]**2) / 2
+         norm_2_sq += area
+ 
+     # ||g||₁ (L1 norm)
+     norm_1 = np.sum(np.abs(g)) * dx
+ 
+     # ||g||∞ (infinity norm)
+     norm_inf = np.max(np.abs(g))
+ 
+     # Prevent division by zero or extremely small values
+     if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+         return 0.0
+ 
+     return norm_2_sq / (norm_1 * norm_inf)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

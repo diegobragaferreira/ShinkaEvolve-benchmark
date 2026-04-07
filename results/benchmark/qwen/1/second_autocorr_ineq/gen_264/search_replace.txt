@@ -1,0 +1,149 @@
+<NAME>
+add_vectorized_convolution_and_norm_computation
+</NAME>
+
+<DESCRIPTION>
+This improvement addresses the computational bottleneck in the autoconvolution and norm calculations by implementing vectorized operations using NumPy's broadcasting capabilities. The current implementation uses nested loops which are inefficient. By replacing these with vectorized operations, we can significantly speed up the computation of autoconvolution and norms, allowing for more iterations within the time constraint and potentially better optimization outcomes.
+
+The key insight is that instead of manually computing the autoconvolution with nested loops, we can leverage NumPy's `einsum` or direct broadcasting operations which are much faster. Additionally, the norm computations can be vectorized to avoid explicit Python loops.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm using trapezoidal integration
+    if len(g_vals) >= 2:
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        # Correct step width for domain [-1/2, 1/2] with len(g_vals) points
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2 with improved numerical stability
+    epsilon = 1e-16
+    if g_l1 > epsilon and g_max > epsilon:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L1, L2^2, and L-infinity norms efficiently"""
+    n = len(g_vals)
+
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_sq_norm, linf_norm
+=======
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast vectorized Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Vectorized approach using broadcasting
+    f_array = np.array(f_vals)
+    # Create indices for the convolution
+    for i in range(n):
+        # Broadcasting multiplication for convolution
+        g[i:i+n] += f_array[i] * f_array
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast vectorized Numba implementation"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using vectorized operations
+    g_l1 = np.sum(np.abs(g_vals))
+    g_max = np.max(np.abs(g_vals))
+
+    # Compute L2^2 norm using vectorized sum of squares
+    g_l2_sq = np.sum(g_vals * g_vals)
+
+    # Compute C2 with improved numerical stability
+    epsilon = 1e-16
+    if g_l1 > epsilon and g_max > epsilon:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L1, L2^2, and L-infinity norms efficiently using vectorized operations"""
+    n = len(g_vals)
+
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = np.sum(np.abs(g_vals))
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = np.sum(g_vals * g_vals)
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = np.max(np.abs(g_vals))
+
+    return l1_norm, l2_sq_norm, linf_norm
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,147 @@
+<NAME>
+improve_voronoi_based_mutation
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the Voronoi-based criticality calculation and use it more effectively in the mutation process. The current implementation uses a simple minimum distance metric which doesn't accurately capture the true constraint density. I'll implement a more sophisticated Voronoi-based approach that computes actual Voronoi cell areas to better identify constraint-dense regions, then use this information to guide adaptive mutations with higher precision.
+
+This approach will:
+1. Replace the simple distance-based criticality with proper Voronoi cell area computation
+2. Improve the mutation strength adaptation based on actual constraint density
+3. Implement proper boundary-aware Voronoi computation with better error handling
+4. Enhance the local optimization strategy to better exploit the constraint information
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on minimum distance to neighbors"""
+        circles = individual.copy()
+        n = len(circles)
+
+        if n <= 1:
+            return np.ones(n) * 0.01
+
+        # Vectorized computation of distances to all others
+        coords = circles[:, :2]
+        distances = cdist(coords, coords)
+
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # Minimum distances for each circle
+        min_distances = np.min(distances, axis=1)
+
+        # Criticality is inverse of minimum distance
+        # Add small epsilon to avoid division by zero
+        criticality_scores = 1.0 / (min_distances + 1e-8)
+
+        # Also consider boundary constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to nearest boundary
+            min_boundary_dist = min(x, y, 1-x, 1-y)
+            # If very close to boundary, increase criticality
+            if min_boundary_dist < 0.05:
+                criticality_scores[i] *= (1 + 5 * (0.05 - min_boundary_dist))
+
+        # Normalize
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        # Ensure minimum values
+        criticality_scores = np.maximum(criticality_scores, 0.01)
+
+        return criticality_scores
+=======
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on Voronoi cell areas - more accurate constraint density measure"""
+        circles = individual.copy()
+        n = len(circles)
+
+        if n <= 1:
+            return np.ones(n) * 0.01
+
+        try:
+            # Use scipy's Voronoi for better reliability
+            from scipy.spatial import Voronoi
+
+            # Add boundary points to create bounded Voronoi diagram
+            points = circles[:, :2].copy()
+
+            # Add corner and edge points to properly bound the Voronoi regions
+            boundary_margin = 0.01
+            boundary_points = [
+                [boundary_margin, boundary_margin],
+                [1-boundary_margin, boundary_margin],
+                [boundary_margin, 1-boundary_margin],
+                [1-boundary_margin, 1-boundary_margin],
+                [0.5, boundary_margin],
+                [0.5, 1-boundary_margin],
+                [boundary_margin, 0.5],
+                [1-boundary_margin, 0.5]
+            ]
+            points = np.vstack([points, boundary_points])
+
+            vor = Voronoi(points)
+
+            # Compute Voronoi cell areas for each original circle
+            criticality_scores = np.zeros(n)
+
+            for i in range(n):
+                # Find the Voronoi region for this circle
+                region_idx = np.where(vor.point_region == i)[0]
+                if len(region_idx) > 0 and region_idx[0] < len(vor.regions):
+                    region = vor.regions[region_idx[0]]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute area of Voronoi cell using shoelace formula
+                        vertices = np.array([vor.vertices[j] for j in region if j >= 0 and j < len(vor.vertices)])
+                        if len(vertices) >= 3:
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            # Criticality inversely proportional to cell area (smaller = more constrained)
+                            criticality_scores[i] = 1.0 / (area + 1e-10)
+                        else:
+                            criticality_scores[i] = 1.0
+                    else:
+                        criticality_scores[i] = 1.0
+                else:
+                    criticality_scores[i] = 1.0
+
+        except Exception as e:
+            # Fallback to distance-based criticality if Voronoi fails
+            print(f"Voronoi failure: {e}")
+            # Vectorized computation of distances to all others
+            coords = circles[:, :2]
+            distances = cdist(coords, coords)
+
+            # Set diagonal to infinity to exclude self-distances
+            np.fill_diagonal(distances, np.inf)
+
+            # Minimum distances for each circle
+            min_distances = np.min(distances, axis=1)
+
+            # Criticality is inverse of minimum distance
+            # Add small epsilon to avoid division by zero
+            criticality_scores = 1.0 / (min_distances + 1e-8)
+
+        # Also consider boundary constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to nearest boundary
+            min_boundary_dist = min(x, y, 1-x, 1-y)
+            # If very close to boundary, increase criticality
+            if min_boundary_dist < 0.05:
+                criticality_scores[i] *= (1 + 10 * (0.05 - min_boundary_dist))
+
+        # Normalize
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        # Ensure minimum values
+        criticality_scores = np.maximum(criticality_scores, 0.01)
+
+        return criticality_scores
+>>>>>>> REPLACE
+</DIFF>

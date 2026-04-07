@@ -1,0 +1,334 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import random
+from typing import List, Tuple, Optional
+import time
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing as mp
+
+# Library of historically successful sequences
+HISTORICAL_SEQUENCES = [
+    [1.0] * 100,  # Uniform sequence
+    [1.0, 0.5] * 50,  # Alternating sequence
+    [0.1, 0.2, 0.3, 0.4, 0.5] * 20,  # Increasing sequence
+    [0.5 ** i for i in range(100)],  # Geometric decay
+    [1.0 if i % 2 == 0 else 0.1 for i in range(100)],  # Sparse sequence
+]
+
+def convolve_fft(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Efficient FFT-based convolution for large sequences."""
+    return fftconvolve(a, b, mode='full')
+
+def convolve_direct(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Direct convolution for small sequences."""
+    return np.convolve(a, b, mode='full')
+
+def compute_c1_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 constant and 1/C1 value for a given sequence with numerical stability."""
+    a = np.array(sequence, dtype=np.float64)
+    n = len(a)
+
+    # Use FFT for efficiency when sequence is large
+    if n > 100:
+        b = convolve_fft(a, a)
+    else:
+        b = convolve_direct(a, a)
+
+    max_conv = np.max(b)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    # Avoid numerical issues with very small sums
+    sum_a = max(sum_a, 1e-12)
+
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+    return c1, inv_c1
+
+def solve_convolution_lp(f_sequence: List[float], rhs: float) -> Optional[List[float]]:
+    """Solves the convolution LP for a given sequence and RHS with fallbacks."""
+    try:
+        n = len(f_sequence)
+        c = -np.ones(n)
+        a_ub = []
+        b_ub = []
+
+        # Build constraint matrix for convolution constraints
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_sequence[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Try different solver methods with increasing robustness
+        solver_configs = [
+            {'method': 'highs', 'options': {'presolve': True, 'time_limit': 5}},
+            {'method': 'interior-point', 'options': {'maxiter': 1000}},
+            {'method': 'simplex', 'options': {'maxiter': 1000}}
+        ]
+
+        for config in solver_configs:
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, **config)
+                if result.success:
+                    return result.x.tolist()
+            except:
+                continue
+
+        return None
+
+    except Exception as e:
+        return None
+
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    iteration: int = 0,
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with curvature awareness."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    # Normalize for stability
+    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(normalized_sequence, normalized_sequence)
+    else:
+        b = convolve_direct(normalized_sequence, normalized_sequence)
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence.tolist(), rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        # Fallback to simple gradient ascent
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware adjustment for better convergence
+    if n > 10:
+        # Compute an approximate curvature correction
+        eps = 1e-3
+        hessian_approx = np.zeros((n, n))
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += eps
+            if i > 0:
+                perturbed_seq[i-1] -= eps / 2
+            if i < n-1:
+                perturbed_seq[i+1] -= eps / 2
+
+            if n > 100:
+                b_perturbed = convolve_fft(perturbed_seq, perturbed_seq)
+            else:
+                b_perturbed = convolve_direct(perturbed_seq, perturbed_seq)
+                
+            second_deriv = (np.max(b_perturbed) - np.max(b)) / (eps**2)
+            hessian_approx[i, i] = max(0, second_deriv)
+
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+        adjusted_direction = np.array(normalized_g_fun) + 0.1 * curvature_correction
+        normalized_g_fun = adjusted_direction.tolist()
+
+    # Adaptive perturbation rate based on iteration
+    base_t = 0.05
+    dynamic_t = base_t * (1 - min(iteration / 100, 0.9))
+    
+    # Apply the adjusted direction
+    new_sequence = [
+        (1 - dynamic_t) * x + dynamic_t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+
+def mutate_sequence(sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
+    """Apply random mutation to a sequence with adaptive variance."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Use larger variance for better exploration
+            variance = 0.5 * mutated[i] if mutated[i] > 0 else 0.5
+            mutated[i] = max(0, mutated[i] + np.random.normal(0, variance))
+    return mutated
+
+def crossover_sequences(seq1: List[float], seq2: List[float]) -> List[float]:
+    """Perform uniform crossover between two sequences."""
+    min_len = min(len(seq1), len(seq2))
+    child = []
+    for i in range(min_len):
+        if random.random() < 0.5:
+            child.append(seq1[i])
+        else:
+            child.append(seq2[i])
+
+    # Handle length differences
+    if len(seq1) > len(seq2):
+        child.extend(seq1[min_len:])
+    elif len(seq2) > len(seq1):
+        child.extend(seq2[min_len:])
+
+    return child
+
+def initialize_sequence():
+    """Initialize a sequence using historical sampling combined with randomness."""
+    # 70% chance to use historical sequence, 30% chance for random
+    if random.random() < 0.7 and HISTORICAL_SEQUENCES:
+        # Sample from historical sequences with slight perturbation
+        historical = random.choice(HISTORICAL_SEQUENCES)
+        # Apply small random perturbation with adaptive scale
+        perturbed = [max(0.0, x + np.random.normal(0, 0.1 * x)) for x in historical]
+        return perturbed
+    else:
+        # Purely random initialization
+        n = random.randint(100, 500)
+        return [random.random() * 100 for _ in range(n)]
+
+def evaluate_populations(population: List[List[float]]) -> List[Tuple[List[float], float]]:
+    """Evaluate a population in parallel."""
+    with ThreadPoolExecutor(max_workers=min(mp.cpu_count(), 4)) as executor:
+        futures = [executor.submit(lambda x: (x, compute_c1_constant(x)[1]), individual) for individual in population]
+        results = [future.result() for future in futures]
+    return results
+
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 20,
+    generations: int = 50,
+    elite_fraction: float = 0.2,
+    patience_limit: int = 10
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using improved evolutionary approach."""
+    start_time = time.time()
+
+    # Initialize population with diverse sequences
+    population = []
+    for _ in range(population_size):
+        individual = initialize_sequence()
+        population.append(individual)
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    patience_counter = 0
+
+    for generation in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Evaluate fitness in parallel
+        results = evaluate_populations(population)
+        fitness_scores = [(ind, inv_c1) for ind, inv_c1 in results]
+        fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Update best solution
+        current_best, current_best_inv_c1 = fitness_scores[0]
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = current_best.copy()
+            patience_counter = 0  # Reset patience counter
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement for too long
+        if patience_counter > patience_limit:
+            break
+
+        # Select elite individuals
+        elite_count = int(elite_fraction * population_size)
+        elite_individuals = [ind for ind, _ in fitness_scores[:elite_count]]
+
+        # Generate new population
+        new_population = elite_individuals.copy()
+
+        # Create offspring through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = random.choice(elite_individuals)
+            parent2 = random.choice(elite_individuals)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation
+            child = mutate_sequence(child)
+
+            # Random initialization for diversity
+            if random.random() < 0.1:
+                n = random.randint(*initial_length_range)
+                child = [random.random() * 100 for _ in range(n)]
+
+            new_population.append(child)
+
+        population = new_population
+
+    # Final optimization of best solution
+    if best_sequence is not None:
+        prev_inv_c1 = 0.0
+        for i in range(20):  # Additional fine-tuning iterations
+            improved = get_good_direction_to_move_into(best_sequence, iteration=i)
+            if improved is None:
+                break
+            _, inv_c1_new = compute_c1_constant(improved)
+            _, inv_c1_old = compute_c1_constant(best_sequence)
+            if inv_c1_new > inv_c1_old:
+                best_sequence = improved
+                prev_inv_c1 = inv_c1_new
+            else:
+                break
+
+    return best_sequence if best_sequence is not None else [1.0]
+
+def search_for_best_sequence() -> List[float]:
+    """Function to search for the best coefficient sequence."""
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    return adaptive_search_for_best_sequence()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

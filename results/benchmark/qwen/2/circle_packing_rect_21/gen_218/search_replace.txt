@@ -1,0 +1,99 @@
+<NAME>
+add_constraint_aware_fitness
+</NAME>
+
+<DESCRIPTION>
+The current fitness function uses a fixed penalty approach that doesn't properly account for the severity of constraint violations. I'll implement a constraint-aware fitness evaluation that scales penalties based on violation magnitudes, making the optimization more robust and guiding towards valid solutions more effectively.
+
+This approach addresses recommendation #3 by adding constraint violation-aware penalties to the objective function for more robust optimization guidance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 100  # Heavy penalty for boundary violations
+
+        # Check overlap violations using optimized spatial indexing
+        violations += self.efficient_overlap_check(circles)
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance - make it adaptive based on violations
+        penalty_weight = 1000.0 + (violations * 150.0)  # Dynamic penalty based on constraint violations
+        return total_radius - (penalty_weight * violations), violations
+=======
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+        Uses constraint-aware penalties scaled by violation severity
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Calculate constraint violations with severity measures
+        total_penalty = 0
+        violations = 0
+
+        # Check boundary violations with severity scaling
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                # Calculate how severe the boundary violation is
+                boundary_violation = 0
+                if x < r:
+                    boundary_violation += (r - x)
+                elif x > self.width - r:
+                    boundary_violation += (x - (self.width - r))
+                if y < r:
+                    boundary_violation += (r - y)
+                elif y > self.height - r:
+                    boundary_violation += (y - (self.height - r))
+
+                total_penalty += boundary_violation * 5000  # Heavier penalty for boundary violations
+                violations += 1
+
+        # Check overlap violations with severity scaling
+        overlap_violations = 0
+        tree = cKDTree(circles[:, :2])
+
+        for i in range(self.num_circles):
+            x1, y1, r1 = circles[i]
+            # Find nearby circles to check overlaps
+            nearby_indices = tree.query_ball_point([x1, y1], 2 * (r1 + 1e-6))
+
+            for j in nearby_indices:
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    overlap = (r1 + r2) - distance
+
+                    if overlap > 0:  # Overlapping
+                        # Scale penalty by severity of overlap
+                        overlap_penalty = overlap * 10000
+                        total_penalty += overlap_penalty
+                        overlap_violations += 1
+
+        violations += overlap_violations
+
+        # Return fitness with constraint-aware penalties
+        # Use a more sophisticated penalty system that prevents optimization from getting stuck
+        # in regions with severe constraint violations
+        return total_radius - total_penalty, violations
+>>>>>>> REPLACE
+</DIFF>

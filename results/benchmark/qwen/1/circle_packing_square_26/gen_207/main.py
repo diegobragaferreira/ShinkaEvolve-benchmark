@@ -1,0 +1,401 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import random
+from sklearn.cluster import KMeans
+import copy
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Enhanced Voronoi-inspired initialization using k-means clustering
+    def create_enhanced_voronoi_initialization():
+        # Generate many candidate points and use k-means to find good seed locations
+        candidate_points = []
+        n_candidates = 200
+
+        # Generate more diverse points using stratified sampling
+        for _ in range(n_candidates):
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            candidate_points.append([x, y])
+
+        candidate_points = np.array(candidate_points)
+
+        # Use KMeans to cluster points into roughly n clusters
+        kmeans = KMeans(n_clusters=n, random_state=42, n_init=10)
+        kmeans.fit(candidate_points)
+        centroids = kmeans.cluster_centers_
+
+        # Create circles at centroids with intelligent radius assignment
+        circles_list = []
+        for i, (cx, cy) in enumerate(centroids):
+            # Compute max radius at this position (boundary constraints)
+            max_r = min(cx, cy, 1-cx, 1-cy)
+
+            # Find nearest neighbor distance to determine appropriate radius
+            distances = np.sqrt(np.sum((candidate_points - [cx, cy])**2, axis=1))
+            # Exclude the point itself by setting its distance to infinity
+            distances[np.argmin(distances)] = float('inf')
+            nearest_dist = np.min(distances) if len(distances) > 0 else 0
+
+            # Determine radius based on both boundary and neighbor constraints
+            if nearest_dist > 0:
+                r = min(max_r, nearest_dist * 0.3)
+            else:
+                r = max_r * 0.2
+
+            # Ensure reasonable minimum and maximum radius
+            r = max(0.01, min(0.3, r))
+            circles_list.append([cx, cy, r])
+
+        # If we don't have enough circles due to clustering issues, add more
+        while len(circles_list) < n:
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+
+            # Check distance to existing circles
+            valid_pos = True
+            for cx, cy, cr in circles_list:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                if dist < cr + 0.02:  # Minimum spacing
+                    valid_pos = False
+                    break
+
+            if valid_pos:
+                max_r = min(x, y, 1-x, 1-y)
+                if max_r > 0.01:
+                    r = max_r * 0.2
+                    circles_list.append([x, y, r])
+
+        # Trim to exactly n circles
+        circles_list = circles_list[:n]
+
+        return circles_list
+
+    # Speciation helper functions
+    def calculate_geometric_distance(ind1, ind2):
+        """Calculate geometric similarity between two individuals"""
+        # Use Euclidean distance between all circle centers
+        centers1 = ind1[:, :2]
+        centers2 = ind2[:, :2]
+        dist_matrix = cdist(centers1, centers2)
+        # Average minimum distance (more robust than sum)
+        return np.mean(np.min(dist_matrix, axis=0))
+
+    def speciate_population(population, threshold=0.05):
+        """Group similar individuals into species"""
+        if len(population) == 0:
+            return []
+
+        species = []
+        unassigned = list(range(len(population)))
+
+        while unassigned:
+            # Start a new species with the first individual
+            current_species = [unassigned.pop(0)]
+            current_individual = population[current_species[0]]
+
+            # Find similar individuals
+            i = 0
+            while i < len(unassigned):
+                j = unassigned[i]
+                if calculate_geometric_distance(current_individual, population[j]) < threshold:
+                    current_species.append(j)
+                    unassigned.pop(i)
+                else:
+                    i += 1
+
+            species.append(current_species)
+
+        return species
+
+    def evaluate_species_individual(individual):
+        """Evaluate an individual with penalty for constraint violations"""
+        # Just the sum of radii for now
+        return np.sum(individual[:, 2])
+
+    # Step 1: Initialize with enhanced Voronoi-inspired placement
+    circles_list = create_enhanced_voronoi_initialization()
+    for i, (x, y, r) in enumerate(circles_list):
+        circles[i] = [x, y, r]
+
+    # Step 2: Advanced local optimization using gradient-based approach with smarter update rules
+    def is_valid(circs):
+        """Check if all circles are valid (containment and non-overlap)"""
+        for i in range(len(circs)):
+            x, y, r = circs[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+
+        # Check non-overlap with KDTree for efficiency
+        try:
+            points = circs[:, :2]
+            tree = cKDTree(points)
+            pairs = tree.query_pairs(0, return_distance=False)
+            for i, j in pairs:
+                if i < j:
+                    x1, y1, r1 = circs[i]
+                    x2, y2, r2 = circs[j]
+                    dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if dist < r1 + r2:
+                        return False
+        except Exception:
+            # Fallback to brute force if KDTree fails
+            for i in range(len(circs)):
+                x1, y1, r1 = circs[i]
+                for j in range(i+1, len(circs)):
+                    x2, y2, r2 = circs[j]
+                    dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if dist < r1 + r2:
+                        return False
+
+        return True
+
+    def calculate_forces_and_gradients(circs):
+        """Calculate repulsive forces and gradient information for optimization"""
+        forces = np.zeros_like(circs[:, :2])
+        gradients = np.zeros_like(circs[:, :2])  # For radius adjustments
+
+        for i in range(len(circs)):
+            x1, y1, r1 = circs[i]
+            for j in range(len(circs)):
+                if i != j:
+                    x2, y2, r2 = circs[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    dist = np.sqrt(dx*dx + dy*dy)
+
+                    if dist < r1 + r2:
+                        # Strong repel force - overlap case
+                        if dist > 0.001:
+                            force_magnitude = (r1 + r2 - dist) * 0.2
+                            forces[i, 0] += dx / dist * force_magnitude
+                            forces[i, 1] += dy / dist * force_magnitude
+                            # Gradients for radius increase (if we can safely increase)
+                            if dist > 0.01:  # Only adjust gradient if not very tight
+                                gradients[i, 0] += dx / dist * 0.01
+                                gradients[i, 1] += dy / dist * 0.01
+                    elif dist < (r1 + r2 + 0.03):  # Near-contact case
+                        if dist > 0.001:
+                            force_magnitude = (r1 + r2 + 0.03 - dist) * 0.05
+                            forces[i, 0] -= dx / dist * force_magnitude
+                            forces[i, 1] -= dy / dist * force_magnitude
+
+        return forces, gradients
+
+    def advanced_optimize_step(circs, learning_rate=0.01, max_iterations=150):
+        """Perform advanced gradient-based optimization to maximize radii sum"""
+        for iteration in range(max_iterations):
+            # Calculate forces and gradients
+            forces, gradients = calculate_forces_and_gradients(circs)
+
+            improved = False
+
+            # Process circles in random order for better exploration
+            indices = list(range(len(circs)))
+            random.shuffle(indices)
+
+            for i in indices:
+                x, y, r = circs[i]
+                fx, fy = forces[i]
+                gx, gy = gradients[i]  # Gradient for potential radius increase
+
+                # Try to improve by moving position
+                new_x = x + fx * learning_rate
+                new_y = y + fy * learning_rate
+
+                # Try to improve by increasing radius (only if beneficial and safe)
+                new_r = r + gx * learning_rate * 0.5  # Smaller effect for radius change
+
+                # Ensure radius stays within bounds
+                new_r = max(0.005, min(0.5, new_r))
+
+                # Clip position to valid area
+                new_x = np.clip(new_x, new_r, 1 - new_r)
+                new_y = np.clip(new_y, new_r, 1 - new_r)
+
+                # Test if this change helps
+                temp_circs = circs.copy()
+                temp_circs[i] = [new_x, new_y, new_r]
+
+                if is_valid(temp_circs):
+                    circs[i] = [new_x, new_y, new_r]
+                    improved = True
+
+                # Alternative: try just moving position without changing radius
+                elif abs(fx) > 0.0001 or abs(fy) > 0.0001:
+                    temp_circs[i] = [new_x, new_y, r]
+                    if is_valid(temp_circs):
+                        circs[i] = [new_x, new_y, r]
+                        improved = True
+
+            # Break early if no improvement
+            if not improved and iteration > 50:  # Allow more iterations initially
+                break
+
+            # Decrease learning rate over time for fine-tuning
+            learning_rate *= 0.99
+
+        return circs
+
+    # Apply advanced optimization
+    circles = advanced_optimize_step(circles)
+
+    # Apply speciation-based evolution for further improvement
+    def speciation_evolution(circles, max_generations=50):
+        """Use speciation to maintain diversity and enhance optimization"""
+        population_size = 50
+        population = []
+
+        # Initialize population with variations of the current solution
+        for _ in range(population_size):
+            # Start with current solution and add small random mutations
+            mutated = circles.copy()
+            for i in range(len(mutated)):
+                # Small random perturbations to positions
+                mutated[i][0] += random.uniform(-0.01, 0.01)
+                mutated[i][1] += random.uniform(-0.01, 0.01)
+                # Small random perturbations to radii
+                mutated[i][2] += random.uniform(-0.01, 0.01)
+                # Keep within bounds
+                mutated[i][0] = np.clip(mutated[i][0], mutated[i][2], 1 - mutated[i][2])
+                mutated[i][1] = np.clip(mutated[i][1], mutated[i][2], 1 - mutated[i][2])
+                mutated[i][2] = np.clip(mutated[i][2], 0.005, 0.5)
+            population.append(mutated)
+
+        # Evolution loop
+        for gen in range(max_generations):
+            # Evaluate population
+            fitness_scores = [evaluate_species_individual(ind) for ind in population]
+
+            # Speciate population
+            species = speciate_population(population)
+
+            if len(species) > 1:
+                # For each species, perform specialized selection and breeding
+                new_population = []
+
+                # Keep top individuals from each species
+                for specie in species:
+                    if specie:  # If species has members
+                        # Get fitnesses for this species
+                        specie_fitness = [fitness_scores[i] for i in specie]
+                        # Keep top 10% of this species
+                        top_indices = sorted(range(len(specie_fitness)),
+                                            key=lambda i: specie_fitness[i], reverse=True)[:max(1, len(specie)//10)]
+
+                        # Add top individuals to new population
+                        for idx in top_indices:
+                            new_population.append(copy.deepcopy(population[specie[idx]]))
+
+                # For each generation, keep some elite and breed new individuals
+                # Use tournament selection within each species for diversity
+                # Create new individuals through crossover and mutation
+
+                # Generate offspring through crossover and mutation
+                while len(new_population) < population_size:
+                    # Simple selection - choose two random individuals from population
+                    parent1_idx = random.randint(0, len(population)-1)
+                    parent2_idx = random.randint(0, len(population)-1)
+
+                    # Crossover: average positions and radii
+                    child = (population[parent1_idx] + population[parent2_idx]) / 2
+
+                    # Mutation: add small random changes
+                    for i in range(len(child)):
+                        if random.random() < 0.3:  # Mutation probability
+                            child[i][0] += random.uniform(-0.01, 0.01)
+                            child[i][1] += random.uniform(-0.01, 0.01)
+                            child[i][2] += random.uniform(-0.01, 0.01)
+                            # Keep within bounds
+                            child[i][0] = np.clip(child[i][0], child[i][2], 1 - child[i][2])
+                            child[i][1] = np.clip(child[i][1], child[i][2], 1 - child[i][2])
+                            child[i][2] = np.clip(child[i][2], 0.005, 0.5)
+
+                    new_population.append(child)
+
+                # Trim to exact population size
+                population = new_population[:population_size]
+
+                # Keep the best individual from the population
+                best_idx = np.argmax([evaluate_species_individual(ind) for ind in population])
+                best_individual = population[best_idx]
+
+                # Update circles to best found so far
+                if is_valid(best_individual):
+                    circles[:] = best_individual[:]
+            else:
+                # If no speciation or only one species, just do regular evolution
+                break
+
+        return circles
+
+    # Run speciation-enhanced evolution
+    try:
+        circles = speciation_evolution(circles)
+    except Exception as e:
+        # If speciation fails, fall back to original optimization
+        pass
+
+    # Final validation and repair
+    if not is_valid(circles):
+        # Simple repair - adjust positions to satisfy constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Fix containment
+            x = np.clip(x, r, 1 - r)
+            y = np.clip(y, r, 1 - r)
+            circles[i] = [x, y, r]
+
+        # Ensure no overlaps with more careful separation
+        for iter_count in range(20):
+            changed = False
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                for j in range(i):
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
+                    if dist < r1 + r2:
+                        # Separate circles with weighted movement based on radii
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        if dx == 0 and dy == 0:
+                            dx = 1
+                            dy = 1
+                        length = np.sqrt(dx*dx + dy*dy)
+                        dx /= length
+                        dy /= length
+
+                        separation = (r1 + r2) - dist
+
+                        # Weighted separation based on relative radii
+                        weight1 = r1 / (r1 + r2) if (r1 + r2) > 0 else 0.5
+                        weight2 = r2 / (r1 + r2) if (r1 + r2) > 0 else 0.5
+
+                        circles[i][0] -= dx * separation * weight1 * 0.5
+                        circles[i][1] -= dy * separation * weight1 * 0.5
+                        circles[j][0] += dx * separation * weight2 * 0.5
+                        circles[j][1] += dy * separation * weight2 * 0.5
+                        changed = True
+
+            if not changed:
+                break
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

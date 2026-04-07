@@ -1,0 +1,321 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, cKDTree
+from scipy.optimize import minimize
+import math
+
+def _compute_initial_radii(positions, n_circles):
+    """Compute initial radii based on local density using k-nearest neighbors"""
+    if n_circles <= 1:
+        return np.full(n_circles, 0.05)
+    
+    # Use KDTree for efficient nearest neighbor search
+    tree = cKDTree(positions)
+    
+    # Find 5 nearest neighbors for each point
+    _, indices = tree.query(positions, k=min(6, n_circles), eps=0)
+    
+    # Compute average distance to neighbors for each point
+    avg_distances = []
+    for i in range(n_circles):
+        if len(indices[i]) > 1:  # Exclude self
+            dists = []
+            for idx in indices[i][1:]:  # Skip the point itself
+                if idx < n_circles:
+                    dist = np.linalg.norm(positions[i] - positions[idx])
+                    dists.append(dist)
+            avg_dist = np.mean(dists) if dists else 0.1
+            avg_distances.append(avg_dist)
+        else:
+            avg_distances.append(0.1)
+    
+    # Scale radii inversely with local density (smaller radii in denser regions)
+    avg_distances = np.array(avg_distances)
+    # Normalize and convert to radii
+    max_dist = np.max(avg_distances)
+    if max_dist > 0:
+        radii = 0.05 * (max_dist / (avg_distances + 1e-8))
+    else:
+        radii = np.full(n_circles, 0.05)
+    
+    # Cap radii to reasonable bounds
+    radii = np.clip(radii, 0.01, 0.2)
+    
+    return radii
+
+def _generate_hexagonal_grid(n_circles):
+    """Generate initial circle positions using hexagonal grid with improved spacing"""
+    # Determine grid dimensions
+    sqrt_n = math.ceil(math.sqrt(n_circles))
+    rows = math.ceil(n_circles / sqrt_n)
+    cols = math.ceil(n_circles / rows)
+    
+    positions = []
+    spacing = 0.15  # Slightly increased spacing for better optimization
+    hex_height = spacing * math.sqrt(3) / 2
+    
+    for i in range(rows):
+        for j in range(cols):
+            x_offset = 0.5 * (i % 2)
+            x = (j + x_offset) * spacing
+            y = i * hex_height
+            
+            # Only add if within bounds
+            if x <= 1 - spacing/2 and y <= 1 - spacing/2:
+                positions.append([x, y])
+            
+            if len(positions) >= n_circles:
+                break
+        if len(positions) >= n_circles:
+            break
+    
+    positions = positions[:n_circles]
+    
+    # Ensure positions stay within bounds
+    for pos in positions:
+        pos[0] = max(spacing/2, min(1 - spacing/2, pos[0]))
+        pos[1] = max(spacing/2, min(1 - spacing/2, pos[1]))
+    
+    return np.array(positions)
+
+def _voronoi_based_placement(circles, max_attempts=3):
+    """Refine positions using Voronoi-based approach with better neighbor consideration"""
+    n = len(circles)
+    if n == 0:
+        return circles
+    
+    # Get current positions
+    positions = circles[:, :2]
+    
+    # Create Voronoi diagram
+    try:
+        vor = Voronoi(positions)
+    except:
+        # If Voronoi fails, return unchanged
+        return circles.copy()
+    
+    new_circles = circles.copy()
+    
+    # Pre-compute distances for faster overlap checking
+    tree = cKDTree(positions)
+    
+    for i in range(n):
+        x, y, r = circles[i]
+        old_r = r
+        
+        # Compute maximum possible radius at current position
+        max_radius = min(x, 1-x, y, 1-y)
+        
+        if max_radius <= 0:
+            continue
+            
+        # Find nearby circles (within 3x max radius)
+        nearby_indices = tree.query_ball_point([x, y], 3 * max_radius)
+        nearby_indices = [idx for idx in nearby_indices if idx != i]
+        
+        # Try to increase radius considering only nearby circles
+        valid_radius = max_radius
+        for j in nearby_indices:
+            x2, y2, r2 = circles[j]
+            dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+            if dist < r2 + valid_radius:
+                valid_radius = max(0.001, dist - r2)
+        
+        # Try to find a better position with increased radius
+        best_r = min(old_r, valid_radius)
+        best_pos = [x, y]
+        
+        # Sample around current position for better location
+        best_score = -float('inf')
+        candidates = []
+        
+        # Generate a more refined search grid
+        for dx in [-0.05, -0.025, 0, 0.025, 0.05]:
+            for dy in [-0.05, -0.025, 0, 0.025, 0.05]:
+                candidates.append([x + dx, y + dy])
+        
+        # Also consider the center of the Voronoi cell if available
+        # (This is a simplified version - we'd use actual Voronoi centroids in practice)
+        
+        for cx, cy in candidates:
+            # Skip if out of bounds
+            if cx < 0.001 or cx > 0.999 or cy < 0.001 or cy > 0.999:
+                continue
+            
+            # Check if this position is valid (within bounds)
+            max_rad_at_pos = min(cx, 1-cx, cy, 1-cy)
+            if max_rad_at_pos <= 0.001:
+                continue
+                
+            # Check overlap with nearby circles
+            valid = True
+            for j in nearby_indices:
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((cx-x2)**2 + (cy-y2)**2)
+                if dist < r2 + max_rad_at_pos:
+                    valid = False
+                    break
+            
+            if valid:
+                # Score based on maximum achievable radius plus neighborhood quality
+                score = max_rad_at_pos  # Simple scoring for now
+                
+                # Bonus for being far from neighbors
+                min_dist_to_neighbors = float('inf')
+                for j in nearby_indices:
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((cx-x2)**2 + (cy-y2)**2)
+                    min_dist_to_neighbors = min(min_dist_to_neighbors, dist)
+                
+                # Prefer positions with good spacing
+                spacing_bonus = min_dist_to_neighbors / (max_rad_at_pos + 1e-8)
+                score += spacing_bonus * 0.5
+                
+                if score > best_score:
+                    best_score = score
+                    best_pos = [cx, cy]
+                    best_r = max_rad_at_pos
+        
+        # Final check to ensure we don't exceed valid bounds
+        best_r = min(best_r, 0.45)  # Cap at reasonable value
+        best_pos[0] = max(best_r, min(1-best_r, best_pos[0]))
+        best_pos[1] = max(best_r, min(1-best_r, best_pos[1]))
+        
+        new_circles[i] = [best_pos[0], best_pos[1], best_r]
+    
+    return new_circles
+
+def _smooth_violation_penalty(circles, penalty_weight=1000.0):
+    """Calculate smooth penalty for constraint violations"""
+    n = len(circles)
+    penalty = 0.0
+
+    # Boundary penalties using smooth exponential function
+    for i in range(n):
+        x, y, r = circles[i]
+        # Exponential penalty for boundary violations
+        if x - r < 0:
+            penalty += penalty_weight * np.exp(10 * (x - r))
+        elif x + r > 1:
+            penalty += penalty_weight * np.exp(10 * (x + r - 1))
+        if y - r < 0:
+            penalty += penalty_weight * np.exp(10 * (y - r))
+        elif y + r > 1:
+            penalty += penalty_weight * np.exp(10 * (y + r - 1))
+
+    # Overlap penalties using smooth exponential function
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            if dist < r1 + r2:
+                violation = r1 + r2 - dist
+                penalty += penalty_weight * np.exp(10 * violation)
+
+    return penalty
+
+def _evaluate_fitness_smooth(circles_flat):
+    """Evaluate fitness with smooth penalties for constraint violations"""
+    n = len(circles_flat) // 3
+    circles = circles_flat.reshape((n, 3))
+
+    # Sum of radii (negative because we're minimizing)
+    sum_radii = -np.sum(circles[:, 2])
+
+    # Add smooth penalty for constraint violations
+    penalty = _smooth_violation_penalty(circles)
+
+    return sum_radii + penalty
+
+def _optimize_individual_circle(circles, i, max_iter=20):
+    """Optimize a single circle using local optimization"""
+    n = len(circles)
+    if n == 0:
+        return circles
+    
+    # Start with current values
+    x0, y0, r0 = circles[i]
+    
+    # Define bounds for optimization
+    bounds = [(r0*0.5, 1-r0*0.5), (r0*0.5, 1-r0*0.5), (0.001, min(0.45, 1-x0, x0, 1-y0, y0))]
+    
+    # Function to optimize
+    def obj_func(params):
+        x, y, r = params
+        # Create temporary circles array
+        temp_circles = circles.copy()
+        temp_circles[i] = [x, y, r]
+        
+        # Calculate fitness with smooth penalty
+        return _evaluate_fitness_smooth(temp_circles.flatten())
+    
+    # Use L-BFGS-B for optimization
+    try:
+        from scipy.optimize import minimize
+        # Use bounds for parameter constraints
+        res = minimize(obj_func, [x0, y0, r0], method='L-BFGS-B', bounds=bounds, options={'maxiter': max_iter})
+        if res.success:
+            return res.x
+    except:
+        # Return original if optimization fails
+        pass
+    
+    return [x0, y0, r0]
+
+def _improved_circle_packing():
+    """Improved circle packing algorithm using hybrid approach with smooth penalties"""
+    n = 32
+    
+    # Phase 1: Initial placement with hexagonal grid and density-aware radii
+    initial_positions = _generate_hexagonal_grid(n)
+    initial_radii = _compute_initial_radii(initial_positions, n)
+    circles = np.column_stack([initial_positions, initial_radii])
+    
+    # Phase 2: Iterative refinement
+    best_circles = circles.copy()
+    best_sum = np.sum(circles[:, 2])
+    
+    # Multiple refinement rounds
+    for round_num in range(20):  # Increased iterations
+        # Voronoi-based repositioning
+        circles = _voronoi_based_placement(circles)
+        
+        # Local optimization for each circle using smooth penalty
+        for i in range(n):
+            # Optimize individual circle
+            optimized_params = _optimize_individual_circle(circles, i, max_iter=10)
+            circles[i] = optimized_params
+            
+        # Evaluate current solution
+        current_sum = np.sum(circles[:, 2])
+        if current_sum > best_sum:
+            best_sum = current_sum
+            best_circles = circles.copy()
+            
+        # Early stopping if improvement is minimal
+        if round_num > 5 and abs(current_sum - best_sum) < 1e-6:
+            break
+    
+    # Final cleanup and validation
+    final_circles = best_circles.copy()
+    for i in range(n):
+        x, y, r = final_circles[i]
+        # Ensure validity
+        r = max(0.001, min(0.45, r))
+        x = max(r, min(1-r, x))
+        y = max(r, min(1-r, y))
+        final_circles[i] = [x, y, r]
+    
+    return final_circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    return _improved_circle_packing()
+
+# EVOLVE-BLOCK-END

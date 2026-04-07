@@ -1,0 +1,292 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon, Point
+from numba import njit
+import time
+import random
+from collections import defaultdict
+
+# Numba-compiled functions for performance
+@njit
+def generate_hexagon_vertices(x, y, angle_degrees, side_length=1):
+    """Generate vertices of a regular hexagon given center, rotation, and side length"""
+    angle_rad = np.radians(angle_degrees)
+    vertices = np.empty((6, 2))
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vertices[i, 0] = x + side_length * np.cos(theta)
+        vertices[i, 1] = y + side_length * np.sin(theta)
+    return vertices
+
+@njit
+def create_hexagon_polygon(x, y, angle_degrees, side_length=1):
+    """Create shapely polygon representation of hexagon"""
+    vertices = generate_hexagon_vertices(x, y, angle_degrees, side_length)
+    return Polygon(vertices)
+
+@njit
+def check_containment_inner_to_outer(inner_x, inner_y, inner_angle, outer_x, outer_y, outer_angle, outer_side_length):
+    """Check if inner hexagon is fully contained within outer hexagon"""
+    inner_vertices = generate_hexagon_vertices(inner_x, inner_y, inner_angle, 1.0)
+    
+    # Create outer hexagon vertices
+    outer_vertices = generate_hexagon_vertices(outer_x, outer_y, outer_angle, outer_side_length)
+    outer_polygon = Polygon(outer_vertices)
+    
+    # Check if all vertices of inner hexagon are inside outer hexagon
+    for i in range(6):
+        if not outer_polygon.contains(Point(inner_vertices[i, 0], inner_vertices[i, 1])):
+            return False
+    
+    return True
+
+@njit
+def check_overlap_hexagons(x1, y1, angle1, x2, y2, angle2):
+    """Check if two hexagons overlap using vertex-based collision detection"""
+    vertices1 = generate_hexagon_vertices(x1, y1, angle1, 1.0)
+    vertices2 = generate_hexagon_vertices(x2, y2, angle2, 1.0)
+    
+    # Simple bounding box check first
+    min1 = np.min(vertices1, axis=0)
+    max1 = np.max(vertices1, axis=0)
+    min2 = np.min(vertices2, axis=0)
+    max2 = np.max(vertices2, axis=0)
+    
+    if max1[0] < min2[0] or max2[0] < min1[0] or max1[1] < min2[1] or max2[1] < min1[1]:
+        return False
+    
+    # Create polygons and check intersection
+    poly1 = Polygon(vertices1)
+    poly2 = Polygon(vertices2)
+    
+    # If intersection exists, they overlap
+    return poly1.intersects(poly2)
+
+@njit
+def calculate_penalty(packed_hexagons, outer_hexagon_params, penalty_weights=(1e6, 1e5)):
+    """Calculate penalty based on constraint violations with adaptive weights"""
+    penalty = 0.0
+    n = len(packed_hexagons)
+    
+    outer_x, outer_y, outer_angle, outer_side_length = outer_hexagon_params
+    
+    # Check containment penalties (higher priority)
+    containment_penalty_weight = penalty_weights[0]
+    overlap_penalty_weight = penalty_weights[1]
+    
+    for i in range(n):
+        if not check_containment_inner_to_outer(
+            packed_hexagons[i][0], packed_hexagons[i][1], packed_hexagons[i][2],
+            outer_x, outer_y, outer_angle, outer_side_length
+        ):
+            penalty += containment_penalty_weight
+    
+    # Check overlap penalties (lower priority)
+    for i in range(n):
+        for j in range(i+1, n):
+            if check_overlap_hexagons(
+                packed_hexagons[i][0], packed_hexagons[i][1], packed_hexagons[i][2],
+                packed_hexagons[j][0], packed_hexagons[j][1], packed_hexagons[j][2]
+            ):
+                penalty += overlap_penalty_weight
+                
+    return penalty
+
+@njit
+def compute_hexagon_bounds(center_x, center_y, angle_deg, side_length=1):
+    """Compute tight bounds for a hexagon to optimize containment checking"""
+    vertices = generate_hexagon_vertices(center_x, center_y, angle_deg, side_length)
+    min_x = np.min(vertices[:, 0])
+    max_x = np.max(vertices[:, 0])
+    min_y = np.min(vertices[:, 1])
+    max_y = np.max(vertices[:, 1])
+    return min_x, max_x, min_y, max_y
+
+@njit
+def estimate_min_outer_radius(hex_centers):
+    """Estimate minimum outer hexagon radius needed to contain all inner hexagons"""
+    # Find the maximum distance from origin to any hexagon center
+    max_dist = 0.0
+    for i in range(len(hex_centers)):
+        x, y = hex_centers[i][0], hex_centers[i][1]
+        dist = np.sqrt(x*x + y*y)
+        if dist > max_dist:
+            max_dist = dist
+    # Add buffer for hexagon size
+    return max_dist + 1.5
+
+@njit
+def generate_symmetric_base_config():
+    """Generate a highly symmetric base configuration for 12 hexagons"""
+    # 12-hexagon symmetric pattern
+    # Pattern based on 3 layers: center, middle ring, outer ring, and bottom
+    base_config = [
+        # Layer 1: Center
+        [0.0, 0.0, 0.0],
+        
+        # Layer 2: Ring around center (6 hexagons)
+        [2.0, 0.0, 0.0],       # Right center
+        [-2.0, 0.0, 0.0],      # Left center
+        [1.0, 1.732, 0.0],     # Top-right
+        [-1.0, 1.732, 0.0],    # Top-left
+        [1.0, -1.732, 0.0],    # Bottom-right
+        [-1.0, -1.732, 0.0],   # Bottom-left
+        
+        # Layer 3: Outer ring (4 hexagons)
+        [3.0, 0.0, 0.0],       # Far right
+        [-3.0, 0.0, 0.0],      # Far left
+        [0.0, 3.0, 0.0],       # Top center
+        [0.0, -3.0, 0.0],      # Bottom center
+        
+        # Special bottom hexagon
+        [0.0, -4.0, 0.0],      # Bottom far
+    ]
+    
+    # Convert to numpy array
+    return np.array(base_config)
+
+def evaluate_configuration(params):
+    """Evaluate the fitness of a given configuration"""
+    # Extract parameters
+    packed_hexagons = []
+    idx = 0
+    for i in range(12):
+        packed_hexagons.append([params[idx], params[idx+1], params[idx+2]])
+        idx += 3
+    
+    outer_side_length = params[-1]
+    
+    # Calculate penalty
+    penalty = calculate_penalty(packed_hexagons, [0, 0, 0, outer_side_length])
+    
+    # Inverse side length (negative because we minimize)
+    # We want to maximize inverse side length, so minimize negative value
+    objective_value = -1.0 / outer_side_length + penalty
+    
+    return objective_value
+
+def generate_symmetric_population(pop_size=25):
+    """Generate highly symmetric configurations with controlled variance"""
+    population = []
+    
+    # Start with base symmetric configuration
+    base_config = generate_symmetric_base_config()
+    
+    for _ in range(pop_size):
+        # Create variation of base configuration
+        config = []
+        
+        # Add small random perturbations to base positions
+        for i in range(len(base_config)):
+            x, y, angle = base_config[i]
+            # Perturb position slightly
+            perturbed_x = x + random.uniform(-0.2, 0.2)
+            perturbed_y = y + random.uniform(-0.2, 0.2)
+            perturbed_angle = angle + random.uniform(-5, 5)  # Small angle variation
+            
+            config.extend([perturbed_x, perturbed_y, perturbed_angle])
+        
+        # Add outer side length (start with reasonable value)
+        config.append(6.0 + random.uniform(0.5, 2.0))
+        
+        population.append(config)
+    
+    return population
+
+def coordinate_descent_refinement(initial_params, max_iter=50):
+    """Perform local coordinate descent refinement"""
+    current_params = np.array(initial_params.copy())
+    best_params = current_params.copy()
+    best_value = evaluate_configuration(current_params)
+    
+    # Coordinate descent on positions only (not outer side length)
+    for iteration in range(max_iter):
+        improved = False
+        # Try updating each hexagon's position
+        for hex_idx in range(12):
+            for param_idx in range(2):  # Only x and y, not angle
+                original_val = current_params[hex_idx * 3 + param_idx]
+                best_original = original_val
+                
+                # Try small moves
+                for delta in [-0.05, -0.02, 0.02, 0.05]:
+                    current_params[hex_idx * 3 + param_idx] = original_val + delta
+                    new_value = evaluate_configuration(current_params)
+                    
+                    if new_value < best_value:
+                        best_value = new_value
+                        best_params = current_params.copy()
+                        improved = True
+                    else:
+                        current_params[hex_idx * 3 + param_idx] = original_val  # Revert
+            
+            # Check if improvement was made in this hexagon
+            if improved:
+                break
+            
+        if not improved:
+            break
+    
+    return best_params
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Generate symmetric initial population
+    initial_pop = generate_symmetric_population(20)
+    
+    # Try multiple configurations to find one that works well
+    best_score = float('inf')
+    best_config = None
+    
+    # Perform multiple optimization runs with different starting points
+    for run in range(5):
+        # Start with a good symmetric configuration
+        initial_params = initial_pop[run % len(initial_pop)]
+        
+        # Coordinate descent refinement to fine-tune
+        refined_params = coordinate_descent_refinement(initial_params, 30)
+        
+        # Evaluate final configuration
+        score = evaluate_configuration(refined_params)
+        
+        if score < best_score:
+            best_score = score
+            best_config = refined_params.copy()
+    
+    # Final refinement with coordinate descent
+    if best_config is not None:
+        best_config = coordinate_descent_refinement(best_config, 50)
+    
+    # Extract configuration
+    inner_hex_data = []
+    idx = 0
+    for i in range(12):
+        inner_hex_data.append([
+            best_config[idx], 
+            best_config[idx+1], 
+            best_config[idx+2]
+        ])
+        idx += 3
+        
+    outer_side_length = best_config[-1]
+    
+    # Store results
+    inner_hex_data = np.array(inner_hex_data)
+    outer_hex_data = np.array([0, 0, 0])
+    
+    # Ensure all computations completed within time limit
+    elapsed_time = time.time() - start_time
+    if elapsed_time > 175:  # Leave buffer
+        print("Warning: Time limit approaching")
+    
+    return inner_hex_data, outer_hex_data, outer_side_length
+
+# EVOLVE-BLOCK-END

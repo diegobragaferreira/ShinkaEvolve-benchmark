@@ -1,0 +1,244 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+import time
+import random
+import math
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+class AutocorrelationOptimizer:
+    def __init__(self, max_iterations=1000, timeout_seconds=180):
+        self.max_iterations = max_iterations
+        self.timeout_seconds = timeout_seconds
+        self.best_sequence = None
+        self.best_inv_c1 = 0.0
+        self.momentum_buffer = []
+        self.elite_sequences = []
+        self.elite_scores = []
+        self.max_elite_size = 10
+        
+    def convolve_fft(self, a, b):
+        """Compute convolution using FFT for better performance."""
+        n = len(a)
+        # Zero-pad to avoid circular convolution effects
+        padded_length = 2 * n - 1
+        fa = fft(a, padded_length)
+        fb = fft(b, padded_length)
+        result = ifft(fa * fb).real
+        return result[:n]
+    
+    def compute_c1(self, sequence):
+        """Compute the C1 constant from the sequence."""
+        if len(sequence) == 0:
+            return float('inf')
+        sum_a = np.sum(sequence)
+        if sum_a < 1e-10:
+            return float('inf')
+        
+        convolved = self.convolve_fft(sequence, sequence)
+        max_conv = np.max(convolved)
+        n = len(sequence)
+        c1 = (2 * n * max_conv) / (sum_a ** 2)
+        return c1
+    
+    def compute_inv_c1(self, sequence):
+        """Compute inverse of C1 (the value we want to maximize)."""
+        c1 = self.compute_c1(sequence)
+        return 1.0 / c1 if c1 > 0 else 0.0
+    
+    def compute_entropy(self, sequence):
+        """Compute entropy of the sequence to guide exploration."""
+        sum_seq = np.sum(sequence)
+        if sum_seq < 1e-10:
+            return 0.0
+        p = np.array(sequence) / sum_seq
+        # Avoid log(0)
+        p = p[p > 1e-10]
+        entropy = -np.sum(p * np.log(p + 1e-10))
+        return entropy
+    
+    def solve_convolution_lp(self, f_sequence, rhs):
+        """Solves the convolution LP for a given sequence and RHS."""
+        try:
+            n = len(f_sequence)
+            c = -np.ones(n)
+            a_ub = []
+            b_ub = []
+            
+            # Build convolution constraints
+            for k in range(2 * n - 1):
+                row = np.zeros(n)
+                for i in range(n):
+                    j = k - i
+                    if 0 <= j < n:
+                        row[j] = f_sequence[i]
+                a_ub.append(row)
+                b_ub.append(rhs)
+
+            # Add non-negativity constraints
+            a_ub_nonneg = -np.eye(n)
+            b_ub_nonneg = np.zeros(n)
+            
+            a_ub = np.vstack([a_ub, a_ub_nonneg])
+            b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+            # Solve linear program
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+            
+            if result.success:
+                return result.x
+            else:
+                return None
+                
+        except Exception:
+            return None
+    
+    def get_good_direction_to_move_into(self, sequence, iteration):
+        """Returns the direction to move into the sequence with adaptive momentum and learning rate."""
+        try:
+            n = len(sequence)
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 1e-10:
+                return None
+            
+            # Normalize sequence
+            normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+            
+            # Compute maximum convolution value
+            convolved = self.convolve_fft(normalized_sequence, normalized_sequence)
+            rhs = np.max(convolved)
+            
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+            if g_fun is None:
+                return None
+                
+            # Normalize g_fun
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 1e-10:
+                return None
+                
+            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+            
+            # Adaptive learning rate with momentum
+            adaptive_lr = 0.05 * math.exp(-iteration / 100)
+            
+            # Apply momentum if available
+            if self.momentum_buffer:
+                prev_sequence = self.momentum_buffer[-1]
+                momentum_factor = 0.9
+                new_sequence = [
+                    (1 - adaptive_lr) * x + adaptive_lr * y + momentum_factor * (y - prev_sequence[i])
+                    for i, (x, y) in enumerate(zip(sequence, normalized_g_fun))
+                ]
+            else:
+                new_sequence = [
+                    (1 - adaptive_lr) * x + adaptive_lr * y for x, y in zip(sequence, normalized_g_fun)
+                ]
+            
+            # Store current sequence for momentum
+            self.momentum_buffer.append(new_sequence)
+            if len(self.momentum_buffer) > 5:  # Keep only recent 5
+                self.momentum_buffer.pop(0)
+            
+            return new_sequence
+            
+        except Exception as e:
+            # Log error or handle gracefully 
+            return None
+    
+    def generate_initial_sequence(self):
+        """Generate an initial sequence with multi-scale diversity."""
+        n = random.randint(100, 1000)
+        # Choose initialization type
+        init_type = random.choice(['uniform', 'exponential', 'gaussian'])
+        
+        if init_type == 'uniform':
+            sequence = [random.random() for _ in range(n)]
+        elif init_type == 'exponential':
+            sequence = [1.0 * (0.95 ** i) + random.uniform(0, 0.1) for i in range(n)]
+        else:  # gaussian
+            sequence = [abs(np.random.normal(0, 1)) + random.uniform(0, 0.1) for _ in range(n)]
+            
+        # Ensure no negative values
+        sequence = [max(x, 0.01) for x in sequence]
+        return sequence
+    
+    def update_elite(self, sequence, inv_c1):
+        """Maintain a set of elite sequences."""
+        if len(self.elite_sequences) < self.max_elite_size:
+            self.elite_sequences.append(sequence.copy())
+            self.elite_scores.append(inv_c1)
+        else:
+            # Replace worst elite if current is better
+            worst_idx = min(range(len(self.elite_sequences)), key=lambda i: self.elite_scores[i])
+            if inv_c1 > self.elite_scores[worst_idx]:
+                self.elite_sequences[worst_idx] = sequence.copy()
+                self.elite_scores[worst_idx] = inv_c1
+    
+    def fallback_strategy(self, current_sequence):
+        """Apply multi-level fallback strategies when optimization fails."""
+        # Tier 1: Symmetric sequence
+        mirrored_seq = current_sequence[::-1]
+        inv_c1_mirrored = self.compute_inv_c1(mirrored_seq)
+        if inv_c1_mirrored > self.compute_inv_c1(current_sequence):
+            return mirrored_seq
+            
+        # Tier 2: Perturbation with noise
+        perturbed_seq = [
+            max(0.01, x + random.uniform(-0.05, 0.05)) 
+            for x in current_sequence
+        ]
+        inv_c1_perturbed = self.compute_inv_c1(perturbed_seq)
+        if inv_c1_perturbed > self.compute_inv_c1(current_sequence):
+            return perturbed_seq
+            
+        # Tier 3: Random initialization
+        return self.generate_initial_sequence()
+    
+    def optimize_sequence(self):
+        """Main optimization loop."""
+        start_time = time.time()
+        
+        # Generate initial sequence
+        current_sequence = self.generate_initial_sequence()
+        
+        for iteration in range(self.max_iterations):
+            if time.time() - start_time > self.timeout_seconds:
+                break
+                
+            # Compute current performance
+            inv_c1 = self.compute_inv_c1(current_sequence)
+            if inv_c1 > self.best_inv_c1:
+                self.best_inv_c1 = inv_c1
+                self.best_sequence = current_sequence.copy()
+            
+            # Update elite sequences
+            self.update_elite(current_sequence, inv_c1)
+            
+            # Attempt to find better direction
+            new_sequence = self.get_good_direction_to_move_into(current_sequence, iteration)
+            
+            if new_sequence is not None:
+                current_sequence = new_sequence
+            else:
+                # Fallback to multi-level strategy
+                current_sequence = self.fallback_strategy(current_sequence)
+                
+        return self.best_sequence
+
+def search_for_best_sequence():
+    """Function to search for the best coefficient sequence."""
+    optimizer = AutocorrelationOptimizer()
+    return optimizer.optimize_sequence()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

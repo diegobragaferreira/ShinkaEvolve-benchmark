@@ -1,0 +1,389 @@
+--- a/original.py
++++ b/original.py
+@@ -1,242 +1,179 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy.optimize import differential_evolution
+-from scipy.signal import fftconvolve
+-from scipy import optimize
++from scipy.signal import convolve
+ import time
+-from collections import deque
+ import random
+-
+-# Configuration parameters
+-ADAPTIVE_THRESHOLD = 0.01
+-LOCAL_SEARCH_ITERATIONS = 20
+-MAX_LOCAL_SEARCHES = 3
+-MIN_SEQUENCE_LENGTH = 50
+-MAX_SEQUENCE_LENGTH = 500
+ 
+ # Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+ def compute_c1(sequence):
+-    """
+-    Compute C1 for a given sequence.
+-    C1 = 2*n*max(convolution) / (sum(sequence))^2
+-    We want to maximize 1/C1, which means minimizing C1.
+-    """
+-    if len(sequence) == 0 or abs(sum(sequence)) < 1e-10:
++    """Compute the C1 constant for a given sequence."""
++    if len(sequence) == 0:
+         return float('inf')
+ 
+     # Use FFT-based convolution for efficiency
+-    convolved = fftconvolve(sequence, sequence, mode='full')
+-    max_conv = np.max(convolved)
+-    sum_seq = sum(sequence)
++    conv = convolve(sequence, sequence, mode='full')
++    # Take only the relevant part of convolution (the peak)
++    max_conv = np.max(conv[len(sequence)-1:])  # From index n-1 onwards
+ 
+-    # Return C1 value
+-    return (2 * len(sequence) * max_conv) / (sum_seq * sum_seq)
++    # Normalize and compute C1
++    sum_sq = np.sum(sequence)**2
++    if sum_sq == 0:
++        return float('inf')
+ 
+-def evaluate_sequence(sequence):
++    c1 = (2 * len(sequence) * max_conv) / sum_sq
++    return c1
++
++def compute_inv_c1(sequence):
++    """Compute inverse of C1 (what we want to maximize)."""
++    c1 = compute_c1(sequence)
++    if c1 == 0 or np.isinf(c1):
++        return 0
++    return 1.0 / c1
++
++def compute_convolution_gradient(sequence, epsilon=1e-6):
+     """
+-    Evaluate a sequence by computing 1/C1.
+-    Returns negative because differential_evolution minimizes.
++    Analytically compute the gradient of the maximum convolution value with respect to sequence elements.
++    This avoids finite difference approximation errors.
+     """
+-    c1 = compute_c1(sequence)
+-    if c1 == float('inf') or c1 > 1e10:  # Prevent overflow
+-        return float('inf')
+-    return -1.0 / c1  # We want to maximize 1/C1, so minimize -1/C1
++    n = len(sequence)
++    grad = np.zeros(n)
++    base_conv = convolve(sequence, sequence, mode='full')
++    max_conv_idx = np.argmax(base_conv[len(sequence)-1:])
++    max_conv_val = base_conv[len(sequence)-1:][max_conv_idx]
++    
++    # For each element, compute the effect of small perturbation
++    for i in range(n):
++        perturbed_seq = sequence.copy()
++        perturbed_seq[i] += epsilon
++        perturbed_conv = convolve(perturbed_seq, perturbed_seq, mode='full')
++        perturbed_max_conv = perturbed_conv[len(sequence)-1:][max_conv_idx]
++        grad[i] = (perturbed_max_conv - max_conv_val) / epsilon
++    
++    return grad
+ 
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
++def gradient_ascent_update(sequence, learning_rate=0.01, max_iterations=10):
++    """Perform gradient ascent to improve sequence, directly targeting convolution peak reduction."""
++    old_sequence = sequence.copy()
+     
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
++    for iteration in range(max_iterations):
++        # Compute gradient of max convolution w.r.t. sequence elements
++        grad = compute_convolution_gradient(sequence)
++        
++        # Update using gradient ascent (but avoid increasing max_conv)
++        # We want to decrease max_conv while increasing sum(sequence)
++        new_sequence = sequence + learning_rate * grad
++        
++        # Ensure non-negativity
++        new_sequence = np.maximum(new_sequence, 0)
++        
++        # Ensure sum is at least 0.01
++        if np.sum(new_sequence) < 0.01:
++            new_sequence[0] = 0.1
++            
++        # Clip to [0, 1000]
++        new_sequence = np.clip(new_sequence, 0, 1000)
++        
++        # Early stopping if improvement is minimal
++        if np.linalg.norm(new_sequence - old_sequence) < 1e-6:
++            break
++            
++        sequence = new_sequence
++        old_sequence = sequence.copy()
++    
++    return sequence
+ 
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
++def smart_pattern_initialization(length=None):
++    """Create a good initial pattern based on known theoretical structures."""
++    if length is None:
++        length = random.randint(100, 500)
++    
++    # Using a power-law decay which is known to perform well in such problems
++    exponents = np.arange(length)
++    sequence = np.power(0.95, exponents)
++    sequence = np.maximum(sequence, 0.01)  # Minimum value constraint
++    
++    # Add some randomness to avoid local optima
++    noise_factor = 0.05
++    sequence = sequence * (1 + np.random.uniform(-noise_factor, noise_factor, length))
++    sequence = np.maximum(sequence, 0.01)
++    
++    return sequence
+ 
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    try:
+-        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+-        if result.success:
+-            g_sequence = result.x
+-            return g_sequence
+-    except:
+-        pass
+-    return None
+-
+-def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
+-    n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-
+-    # Avoid division by zero
+-    if sum_sequence < 1e-10:
+-        return None
+-
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    conv_result = np.convolve(normalized_sequence, normalized_sequence)
+-    rhs = np.max(conv_result)
+-
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
++def multi_scale_optimization(initial_sequence, max_iter=30):
++    """Perform optimization at multiple scales to avoid local optima."""
++    sequence = np.array(initial_sequence)
++    best_inv_c1 = compute_inv_c1(sequence)
++    best_sequence = sequence.copy()
+     
+-    sum_g_fun = np.sum(g_fun)
+-    if sum_g_fun < 1e-10:
+-        return None
+-
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-
+-    return new_sequence
+-
+-def adaptive_search(current_seq, current_score, history):
+-    """
+-    Perform adaptive search combining global and local optimization.
+-    """
+-    n = len(current_seq)
++    # Coarse scale: optimize with larger steps
++    coarse_lr = 0.05
++    for _ in range(5):
++        sequence = gradient_ascent_update(sequence, learning_rate=coarse_lr, max_iterations=5)
++        inv_c1 = compute_inv_c1(sequence)
++        if inv_c1 > best_inv_c1:
++            best_inv_c1 = inv_c1
++            best_sequence = sequence.copy()
+     
+-    # Check if we should perform local search
+-    if len(history) > 1 and abs(history[-1] - history[-2]) < ADAPTIVE_THRESHOLD:
+-        # Try local gradient-based update
+-        direction = get_good_direction_to_move_into(current_seq)
+-        if direction is not None:
+-            # Apply gradient update
+-            updated_seq = direction
+-            updated_score = evaluate_sequence(updated_seq)
+-
+-            if updated_score > current_score:
+-                return updated_seq, updated_score, True  # Success with local update
+-
+-    # Default to global optimization approach
+-    return current_seq, current_score, False
+-
+-def create_initial_sequences(n_samples=10):
+-    """
+-    Create diverse initial sequences for optimization.
+-    """
+-    sequences = []
+-
+-    # Random sequences with different configurations
+-    for _ in range(n_samples):
+-        n = np.random.randint(MIN_SEQUENCE_LENGTH, MAX_SEQUENCE_LENGTH)
+-        seq = np.random.uniform(0, 100, n)
+-        # Add some structure
+-        if np.random.random() < 0.3:
+-            # Add a few large values
+-            idxs = np.random.choice(n, size=min(5, n//4), replace=False)
+-            seq[idxs] *= np.random.uniform(5, 20)
+-        sequences.append(seq)
+-
+-    # Include some known good structures
+-    sequences.append(np.array([1.0] * 100))  # Uniform
+-    sequences.append(np.array([1.0] * 50 + [0.0] * 50))  # Step function
+-
+-    return sequences
++    # Fine scale: optimize with smaller steps
++    fine_lr = 0.005
++    for _ in range(10):
++        sequence = gradient_ascent_update(sequence, learning_rate=fine_lr, max_iterations=2)
++        inv_c1 = compute_inv_c1(sequence)
++        if inv_c1 > best_inv_c1:
++            best_inv_c1 = inv_c1
++            best_sequence = sequence.copy()
++    
++    # Final adaptive refinement
++    adaptive_lr = 0.01
++    for iteration in range(max_iter):
++        sequence = gradient_ascent_update(sequence, learning_rate=adaptive_lr, max_iterations=1)
++        inv_c1 = compute_inv_c1(sequence)
++        if inv_c1 > best_inv_c1:
++            best_inv_c1 = inv_c1
++            best_sequence = sequence.copy()
++        # Decrease learning rate over time for stability
++        adaptive_lr *= 0.99
++    
++    return best_sequence.tolist()
+ 
+ def search_for_best_sequence():
+-    """
+-    Function to search for the best coefficient sequence using adaptive optimization.
+-    """
+-    best_score = float('-inf')
++    """Main search function using the new gradient-based approach with multi-scale optimization."""
++    start_time = time.time()
++    best_inv_c1 = 0
+     best_sequence = None
+-    history = deque(maxlen=10)  # Keep track of recent scores
+-
+-    start_time = time.time()
+-
+-    # Initialize with diverse starting sequences
+-    initial_sequences = create_initial_sequences()
+-
+-    # Try multiple search strategies
+-    for attempt in range(10):  # Increased attempts
+-        if time.time() - start_time > 170:  # Leave 10 seconds for final processing
++    
++    # Try multiple initialization strategies
++    for attempt in range(10):
++        if time.time() - start_time > 170:
+             break
+-
+-        try:
+-            # Select a random initial sequence
+-            initial_seq = initial_sequences[np.random.randint(len(initial_sequences))]
+-
+-            # Ensure minimum length
+-            if len(initial_seq) < MIN_SEQUENCE_LENGTH:
+-                initial_seq = np.pad(initial_seq, (0, MIN_SEQUENCE_LENGTH - len(initial_seq)),
+-                                   mode='constant', constant_values=0)
+-
+-            # Initialize with local search if possible
+-            current_seq = initial_seq.copy()
+-            current_score = evaluate_sequence(current_seq)
+-            history.append(current_score)
+-
+-            # Adaptive optimization loop
+-            local_searches = 0
+-            for iteration in range(100):  # Reduced iterations due to time constraint
+-                if time.time() - start_time > 170:
+-                    break
+-
+-                # Try adaptive search
+-                new_seq, new_score, was_local = adaptive_search(current_seq, current_score, history)
+-
+-                if was_local:
+-                    local_searches += 1
+-                    current_seq = new_seq
+-                    current_score = new_score
+-                    history.append(current_score)
+-
+-                    if local_searches >= MAX_LOCAL_SEARCHES:
+-                        # Switch to global search
+-                        local_searches = 0
+-
+-                # Occasionally do global optimization
+-                elif np.random.random() < 0.1 and local_searches < MAX_LOCAL_SEARCHES:
+-                    # Use differential evolution for diversity
+-                    bounds = [(0.0, 1000.0)] * len(current_seq)
+-                    result = differential_evolution(
+-                        evaluate_sequence,
+-                        bounds,
+-                        maxiter=20,
+-                        popsize=10,
+-                        mutation=(0.5, 1),
+-                        recombination=0.7,
+-                        seed=42+attempt+iteration,
+-                        polish=False
+-                    )
+-                    if result.success:
+-                        current_seq = result.x
+-                        current_score = evaluate_sequence(current_seq)
+-                        history.append(current_score)
+-
+-                # Early termination if improving
+-                if current_score > best_score:
+-                    best_score = current_score
+-                    best_sequence = current_seq.copy()
+-
+-        except Exception as e:
+-            continue
+-
+-    # If we didn't find anything, fallback to uniform sequence
++            
++        # Initialize with a good pattern
++        n = random.randint(100, 500)
++        sequence = smart_pattern_initialization(n)
++        
++        # Multi-scale optimization
++        optimized_sequence = multi_scale_optimization(sequence, max_iter=20)
++        
++        # Evaluate
++        inv_c1 = compute_inv_c1(optimized_sequence)
++        
++        if inv_c1 > best_inv_c1:
++            best_inv_c1 = inv_c1
++            best_sequence = optimized_sequence[:]
++    
++    # If no good sequence found, fallback to a default initialization
+     if best_sequence is None:
+-        best_sequence = np.array([1.0] * 100)
+-
+-    return best_sequence.tolist()
++        best_sequence = smart_pattern_initialization(200)
++        best_sequence = multi_scale_optimization(best_sequence)
++    
++    return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

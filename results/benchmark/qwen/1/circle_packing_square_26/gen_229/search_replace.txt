@@ -1,0 +1,378 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based initialization uses a simple hexagonal grid pattern which may not provide optimal distribution for circle packing. I'll enhance the Voronoi initialization by implementing a more sophisticated approach that:
+
+1. Uses actual Voronoi diagrams with Lloyd relaxation for better point distribution
+2. Implements iterative improvement to create more evenly spaced points
+3. Better respects boundary constraints during initialization
+4. Incorporates density-based radius calculation that considers local geometry
+
+This should produce better starting configurations that are closer to optimal, leading to faster convergence and higher final scores.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _generate_voronoi_seed_points(self, n_circles):
+        """Generate well-distributed seed points for Voronoi construction."""
+        points = []
+
+        # Create a hexagonal grid pattern with better distribution
+        sqrt_n = int(np.ceil(np.sqrt(n_circles)))
+        rows = int(np.ceil(n_circles / sqrt_n))
+        cols = int(np.ceil(n_circles / rows))
+
+        spacing_x = 0.95 / (cols + 1)
+        spacing_y = 0.95 / (rows + 1)
+
+        # Generate points in hexagonal pattern with better spacing
+        for i in range(rows):
+            for j in range(cols):
+                if len(points) >= n_circles:
+                    break
+                x_offset = 0 if i % 2 == 0 else spacing_x / 2
+                x = (j + 1) * spacing_x + x_offset + random.uniform(-spacing_x/8, spacing_x/8)
+                y = (i + 1) * spacing_y + random.uniform(-spacing_y/8, spacing_y/8)
+                points.append([x, y])
+
+        # Fill remaining positions with random points but ensure good distribution
+        while len(points) < n_circles:
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            points.append([x, y])
+
+        return points[:n_circles]
+=======
+    def _generate_voronoi_seed_points(self, n_circles):
+        """Generate well-distributed seed points using Lloyd relaxation and Voronoi-based approach."""
+        # Start with a good initial distribution
+        points = []
+
+        # Create a more sophisticated initial grid
+        sqrt_n = int(np.ceil(np.sqrt(n_circles)))
+        rows = int(np.ceil(n_circles / sqrt_n))
+        cols = int(np.ceil(n_circles / rows))
+
+        # Use a more refined spacing
+        spacing_x = 0.9 / (cols + 1)
+        spacing_y = 0.9 / (rows + 1)
+
+        # Generate points in hexagonal pattern with better spacing
+        for i in range(rows):
+            for j in range(cols):
+                if len(points) >= n_circles:
+                    break
+                x_offset = 0 if i % 2 == 0 else spacing_x / 2
+                x = (j + 1) * spacing_x + x_offset + random.uniform(-spacing_x/10, spacing_x/10)
+                y = (i + 1) * spacing_y + random.uniform(-spacing_y/10, spacing_y/10)
+                points.append([x, y])
+
+        # Fill remaining positions with random points
+        while len(points) < n_circles:
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            points.append([x, y])
+
+        points = points[:n_circles]
+
+        # Apply Lloyd relaxation to improve distribution
+        # This iteratively improves point positions
+        for _ in range(10):  # Limited iterations to keep it fast
+            if len(points) < 2:
+                break
+
+            try:
+                # Use scipy's Voronoi to compute centroids
+                vor = Voronoi(points)
+                new_points = []
+
+                for i in range(len(points)):
+                    # Find Voronoi region for this point
+                    region_idx = vor.point_region[i] if i < len(vor.point_region) else -1
+
+                    if region_idx != -1 and region_idx < len(vor.regions):
+                        region = vor.regions[region_idx]
+                        if len(region) > 0 and -1 not in region:
+                            # Get the vertices of this region
+                            vertices = np.array(vor.vertices)[region]
+
+                            # Compute centroid of the region (bounded by unit square)
+                            if len(vertices) > 2:
+                                # Clip vertices to unit square
+                                clipped_vertices = []
+                                for v in vertices:
+                                    clipped_v = [
+                                        max(0.01, min(0.99, v[0])),
+                                        max(0.01, min(0.99, v[1]))
+                                    ]
+                                    clipped_vertices.append(clipped_v)
+
+                                if len(clipped_vertices) >= 3:
+                                    # Compute centroid using shoelace formula
+                                    x_coords = [v[0] for v in clipped_vertices]
+                                    y_coords = [v[1] for v in clipped_vertices]
+
+                                    # Simple centroid calculation
+                                    centroid_x = np.mean(x_coords)
+                                    centroid_y = np.mean(y_coords)
+                                    new_points.append([centroid_x, centroid_y])
+                                else:
+                                    new_points.append(points[i])
+                            else:
+                                new_points.append(points[i])
+                        else:
+                            new_points.append(points[i])
+                    else:
+                        new_points.append(points[i])
+
+                # If we have fewer new points, just keep original
+                if len(new_points) == len(points):
+                    points = new_points
+                else:
+                    break
+
+            except:
+                # Fallback to simple averaging for robustness
+                break
+
+        return points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_radius_calculation
+</NAME>
+
+<DESCRIPTION>
+The current radius calculation in `_voronoi_like_initialization` uses a simple approach based on minimum distance to neighbors. I'll improve this by using a more sophisticated method that:
+
+1. Calculates the Voronoi cell area for each point to estimate available space
+2. Uses the relationship between Voronoi cell area and optimal circle radius
+3. Better respects boundary constraints by considering the distance to all four boundaries
+4. Implements a more robust fallback for edge cases
+
+This should result in more realistic initial radii that are closer to optimal values from the start.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _voronoi_like_initialization(self, n_circles):
+        """Generate initial configuration using enhanced Voronoi-based distribution."""
+        points = self._generate_voronoi_seed_points(n_circles)
+        circles = np.zeros((n_circles, 3))
+
+        # Compute radii based on local density for better distribution
+        for i, (x, y) in enumerate(points):
+            # Calculate minimum distance to neighbors for local density
+            min_dist = float('inf')
+            for j, (other_x, other_y) in enumerate(points):
+                if i != j:
+                    dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                    min_dist = min(min_dist, dist)
+
+            # Set initial radius based on local density and boundary proximity
+            if min_dist < float('inf'):
+                base_radius = min(0.12, min_dist * 0.15)
+            else:
+                base_radius = 0.05
+
+            # Also respect square boundaries more strictly
+            boundary_radius = min(x, 1-x, y, 1-y)
+            initial_r = min(base_radius, boundary_radius * 0.8)
+
+            # Ensure reasonable minimum radius and bounded maximum
+            initial_r = max(0.001, min(0.15, initial_r))
+
+            circles[i] = [x, y, initial_r]
+
+        return circles
+=======
+    def _voronoi_like_initialization(self, n_circles):
+        """Generate initial configuration using enhanced Voronoi-based distribution."""
+        points = self._generate_voronoi_seed_points(n_circles)
+        circles = np.zeros((n_circles, 3))
+
+        # Compute radii based on Voronoi cell analysis for better distribution
+        for i, (x, y) in enumerate(points):
+            # Calculate minimum distance to neighbors for local density estimation
+            min_dist = float('inf')
+            distances = []
+            for j, (other_x, other_y) in enumerate(points):
+                if i != j:
+                    dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                    min_dist = min(min_dist, dist)
+                    distances.append(dist)
+
+            # Estimate Voronoi cell area using the average neighbor distance
+            if distances:
+                avg_dist = np.mean(distances)
+                # Approximate Voronoi cell area (assuming roughly hexagonal cells)
+                approx_area = avg_dist * avg_dist * 0.866  # sqrt(3)/2 for hexagon
+                # Convert area to radius (assuming circular circles)
+                base_radius = np.sqrt(approx_area / np.pi) * 0.7  # Scale factor for safety
+            else:
+                base_radius = 0.05
+
+            # Improve radius calculation based on boundary constraints
+            boundary_dist = min(x, 1-x, y, 1-y)
+            boundary_radius = boundary_dist * 0.9  # Leave some margin
+
+            # Use the smaller of the two constraints (neighbor density vs boundaries)
+            initial_r = min(base_radius, boundary_radius, 0.15)  # Cap maximum radius
+
+            # Ensure reasonable minimum radius
+            initial_r = max(0.005, initial_r)
+
+            circles[i] = [x, y, initial_r]
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_adaptive_crossover_parameters
+</NAME>
+
+<DESCRIPTION>
+The current crossover implementation has fixed parameters that may not work optimally throughout the evolutionary process. I'll implement adaptive crossover parameters that:
+
+1. Modify crossover probability based on generation number (higher early, lower later)
+2. Adjust crossover type based on population diversity
+3. Apply different strategies for position vs radius genes
+4. Introduce more sophisticated constraint repair mechanisms
+
+This adaptive approach should help maintain population diversity in early generations while focusing on exploitation in later generations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _crossover_constraint_aware(self, ind1, ind2):
+        """Improved crossover with better constraint maintenance."""
+        # Use uniform crossover with higher recombination chance
+        tools.cxUniform(ind1, ind2, indpb=0.6)
+
+        # Repair constraints with more thorough checking
+        temp_ind = np.array(ind1).reshape(-1, 3)
+
+        # Fix containment issues carefully
+        for i in range(len(temp_ind)):
+            x, y, r = temp_ind[i]
+            # Adjust position to stay within bounds
+            x = np.clip(x, r, 1 - r)
+            y = np.clip(y, r, 1 - r)
+            temp_ind[i] = [x, y, r]
+
+        # Fix overlaps with improved algorithm
+        for i in range(len(temp_ind)):
+            for j in range(i+1, len(temp_ind)):
+                pos_i = temp_ind[i, :2]
+                pos_j = temp_ind[j, :2]
+                r_i = temp_ind[i, 2]
+                r_j = temp_ind[j, 2]
+                dist = np.sqrt(np.sum((pos_i - pos_j)**2))
+                if dist < (r_i + r_j):
+                    # Move circles apart along the line connecting centers
+                    dx, dy = pos_i - pos_j
+                    dist_total = np.sqrt(dx*dx + dy*dy) + 1e-8
+                    dx /= dist_total
+                    dy /= dist_total
+
+                    # Calculate how much to move them apart
+                    separation_needed = (r_i + r_j) - dist
+                    # Move each circle by half the separation amount
+                    move_amount = separation_needed * 0.5
+
+                    # Apply movement, but ensure they stay within bounds
+                    new_x_i = max(r_i, min(1 - r_i, pos_i[0] + dx * move_amount))
+                    new_y_i = max(r_i, min(1 - r_i, pos_i[1] + dy * move_amount))
+                    new_x_j = max(r_j, min(1 - r_j, pos_j[0] - dx * move_amount))
+                    new_y_j = max(r_j, min(1 - r_j, pos_j[1] - dy * move_amount))
+
+                    temp_ind[i] = [new_x_i, new_y_i, r_i]
+                    temp_ind[j] = [new_x_j, new_y_j, r_j]
+
+        ind1[:] = temp_ind.flatten()
+        return ind1, ind2
+=======
+    def _crossover_constraint_aware(self, ind1, ind2):
+        """Improved crossover with better constraint maintenance and adaptive parameters."""
+        # Adaptive crossover probability based on generation
+        adaptive_cx_prob = self.CXPB * (1 - min(0.5, self.current_generation / 50.0))
+
+        # Use adaptive uniform crossover with different probabilities for genes
+        # Higher probability for positions, lower for radii
+        for i in range(len(ind1)):
+            gene_type = i % 3
+            if random.random() < adaptive_cx_prob:
+                if gene_type == 2:  # radius - use a more conservative crossover
+                    # Interpolate radii
+                    val1 = ind1[i]
+                    val2 = ind2[i]
+                    # Average with some randomness
+                    new_val = (val1 + val2) / 2 + random.uniform(-0.005, 0.005)
+                    ind1[i] = max(0.001, min(0.5, new_val))
+                    ind2[i] = max(0.001, min(0.5, new_val))
+                else:  # position - full crossover
+                    # Swap positions with some smoothing
+                    val1 = ind1[i]
+                    val2 = ind2[i]
+                    # Blend values
+                    blend_factor = random.uniform(0.3, 0.7)
+                    new_val1 = val1 * (1 - blend_factor) + val2 * blend_factor
+                    new_val2 = val2 * (1 - blend_factor) + val1 * blend_factor
+
+                    # Apply bounds
+                    new_val1 = max(0, min(1, new_val1))
+                    new_val2 = max(0, min(1, new_val2))
+
+                    ind1[i] = new_val1
+                    ind2[i] = new_val2
+
+        # Repair constraints with more thorough checking
+        temp_ind = np.array(ind1).reshape(-1, 3)
+
+        # Fix containment issues carefully
+        for i in range(len(temp_ind)):
+            x, y, r = temp_ind[i]
+            # Adjust position to stay within bounds with margin
+            x = np.clip(x, r + 0.005, 1 - r - 0.005)
+            y = np.clip(y, r + 0.005, 1 - r - 0.005)
+            temp_ind[i] = [x, y, r]
+
+        # Fix overlaps with improved algorithm that tries multiple solutions
+        for i in range(len(temp_ind)):
+            for j in range(i+1, len(temp_ind)):
+                pos_i = temp_ind[i, :2]
+                pos_j = temp_ind[j, :2]
+                r_i = temp_ind[i, 2]
+                r_j = temp_ind[j, 2]
+                dist = np.sqrt(np.sum((pos_i - pos_j)**2))
+                if dist < (r_i + r_j):
+                    # Move circles apart along the line connecting centers
+                    dx, dy = pos_i - pos_j
+                    dist_total = np.sqrt(dx*dx + dy*dy) + 1e-8
+                    dx /= dist_total
+                    dy /= dist_total
+
+                    # Calculate how much to move them apart
+                    separation_needed = (r_i + r_j) - dist
+                    # Move each circle by half the separation amount but with a small margin
+                    move_amount = separation_needed * 0.6
+
+                    # Apply movement, but ensure they stay within bounds
+                    new_x_i = max(r_i + 0.005, min(1 - r_i - 0.005, pos_i[0] + dx * move_amount))
+                    new_y_i = max(r_i + 0.005, min(1 - r_i - 0.005, pos_i[1] + dy * move_amount))
+                    new_x_j = max(r_j + 0.005, min(1 - r_j - 0.005, pos_j[0] - dx * move_amount))
+                    new_y_j = max(r_j + 0.005, min(1 - r_j - 0.005, pos_j[1] - dy * move_amount))
+
+                    temp_ind[i] = [new_x_i, new_y_i, r_i]
+                    temp_ind[j] = [new_x_j, new_y_j, r_j]
+
+        ind1[:] = temp_ind.flatten()
+        return ind1, ind2
+>>>>>>> REPLACE
+</DIFF>

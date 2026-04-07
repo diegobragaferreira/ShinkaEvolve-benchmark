@@ -1,0 +1,350 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+from deap import base, creator, tools, algorithms
+import random
+import time
+from numba import jit, prange
+
+# Constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH_HEIGHT_RATIO = 1.0  # Square container for simplicity
+RECT_WIDTH = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
+RECT_HEIGHT = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
+N_CIRCLES = 21
+MAX_EVALS = 50000
+POP_SIZE = 50
+NGEN = 100
+CXPB = 0.8
+MUTPB = 0.2
+
+@jit(nopython=True)
+def check_collision_fast(circle1, circle2):
+    """Fast collision check between two circles"""
+    dx = circle1[0] - circle2[0]
+    dy = circle1[1] - circle2[1]
+    distance_squared = dx * dx + dy * dy
+    radii_sum = circle1[2] + circle2[2]
+    return distance_squared < radii_sum * radii_sum
+
+@jit(nopython=True)
+def check_boundaries_fast(circle):
+    """Fast boundary check for a circle"""
+    x, y, r = circle
+    return (r <= x <= RECT_WIDTH - r) and (r <= y <= RECT_HEIGHT - r)
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual solution"""
+    circles = individual.reshape(-1, 3)
+    
+    # Check boundary constraints
+    for circle in circles:
+        if not check_boundaries_fast(circle):
+            return -np.inf,
+    
+    # Check collision constraints
+    for i in range(len(circles)):
+        for j in range(i + 1, len(circles)):
+            if check_collision_fast(circles[i], circles[j]):
+                return -np.inf,
+    
+    # Return negative sum of radii (since DEAP minimizes)
+    total_radius = np.sum(circles[:, 2])
+    return -total_radius,
+
+def create_initial_population(pop_size):
+    """Create initial population using multiple strategies"""
+    population = []
+    
+    # Strategy 1: Hexagonal packing
+    def hexagonal_packing():
+        circles = np.zeros((N_CIRCLES, 3))
+        
+        # Parameters for hexagonal lattice
+        radius = 0.1
+        spacing_x = radius * 2 * 0.866  # sqrt(3)/2
+        spacing_y = radius * 1.5
+        rows = int(np.sqrt(N_CIRCLES)) + 1
+        cols = int(N_CIRCLES / rows) + 1
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= N_CIRCLES:
+                    break
+                x = (j * spacing_x) + radius
+                y = (i * spacing_y) + radius
+                if x > RECT_WIDTH - radius or y > RECT_HEIGHT - radius:
+                    continue
+                circles[idx] = [x, y, radius]
+                idx += 1
+                if idx >= N_CIRCLES:
+                    break
+        return circles.flatten()
+    
+    # Strategy 2: Grid packing
+    def grid_packing():
+        circles = np.zeros((N_CIRCLES, 3))
+        side_length = np.sqrt(RECT_WIDTH * RECT_HEIGHT / N_CIRCLES)
+        radius = side_length / 2.0
+        
+        idx = 0
+        for i in range(int(RECT_HEIGHT / side_length)):
+            for j in range(int(RECT_WIDTH / side_length)):
+                if idx >= N_CIRCLES:
+                    break
+                x = j * side_length + radius
+                y = i * side_length + radius
+                if x > RECT_WIDTH - radius or y > RECT_HEIGHT - radius:
+                    continue
+                circles[idx] = [x, y, radius]
+                idx += 1
+                if idx >= N_CIRCLES:
+                    break
+        return circles.flatten()
+    
+    # Strategy 3: Random with constraints
+    def random_packing():
+        circles = np.zeros((N_CIRCLES, 3))
+        for i in range(N_CIRCLES):
+            # Try to place circle with random position and radius
+            max_attempts = 100
+            placed = False
+            for _ in range(max_attempts):
+                radius = np.random.uniform(0.01, min(RECT_WIDTH, RECT_HEIGHT) / 4)
+                x = np.random.uniform(radius, RECT_WIDTH - radius)
+                y = np.random.uniform(radius, RECT_HEIGHT - radius)
+                
+                # Check if placement is valid (doesn't collide with existing circles)
+                valid = True
+                test_circle = [x, y, radius]
+                for circle in circles[:i]:
+                    if check_collision_fast(circle, test_circle):
+                        valid = False
+                        break
+                
+                if valid:
+                    circles[i] = [x, y, radius]
+                    placed = True
+                    break
+            
+            # If couldn't place, use minimum radius
+            if not placed:
+                circles[i] = [RECT_WIDTH/2, RECT_HEIGHT/2, 0.01]
+        return circles.flatten()
+    
+    # Generate population with different strategies
+    for _ in range(pop_size // 3):
+        population.append(hexagonal_packing())
+    for _ in range(pop_size // 3):
+        population.append(grid_packing())
+    for _ in range(pop_size - 2 * (pop_size // 3)):
+        population.append(random_packing())
+    
+    return population
+
+def mutate_individual(individual, indpb=0.1):
+    """Mutate an individual by changing positions and radii"""
+    circles = individual.reshape(-1, 3)
+    for i in range(len(circles)):
+        if random.random() < indpb:
+            # Mutate position
+            circles[i][0] = np.clip(circles[i][0] + np.random.normal(0, 0.05), 
+                                   circles[i][2], RECT_WIDTH - circles[i][2])
+            circles[i][1] = np.clip(circles[i][1] + np.random.normal(0, 0.05), 
+                                   circles[i][2], RECT_HEIGHT - circles[i][2])
+        if random.random() < indpb:
+            # Mutate radius
+            # Add small perturbation to radius
+            delta = np.random.normal(0, 0.02) 
+            old_radius = circles[i][2]
+            new_radius = old_radius + delta
+            if new_radius > 0.01 and new_radius < min(RECT_WIDTH, RECT_HEIGHT) / 2:
+                circles[i][2] = new_radius
+    
+    return individual,
+
+def cx_two_point(ind1, ind2):
+    """Two-point crossover"""
+    size = len(ind1)
+    cxpoint1 = random.randint(1, size // 2)
+    cxpoint2 = random.randint(cxpoint1, size)
+    
+    ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2], ind1[cxpoint1:cxpoint2]
+    return ind1, ind2
+
+def local_optimize_solution(solution):
+    """Apply local optimization to improve a solution"""
+    circles = solution.reshape(-1, 3)
+    
+    def objective(params):
+        # Update circles with new params
+        temp_circles = circles.copy()
+        for i in range(len(temp_circles)):
+            temp_circles[i][0] = params[i*3]
+            temp_circles[i][1] = params[i*3+1]
+            temp_circles[i][2] = params[i*3+2]
+        
+        # Check constraints
+        penalty = 0
+        
+        # Boundary penalty
+        for circle in temp_circles:
+            if not check_boundaries_fast(circle):
+                penalty += 1000
+        
+        # Collision penalty
+        for i in range(len(temp_circles)):
+            for j in range(i+1, len(temp_circles)):
+                if check_collision_fast(temp_circles[i], temp_circles[j]):
+                    penalty += 1000
+        
+        # Return negative sum of radii plus penalties
+        return -np.sum(temp_circles[:, 2]) + penalty
+    
+    # Simple gradient descent-like optimization
+    learning_rate = 0.1
+    max_iters = 100
+    current_params = circles.flatten()
+    
+    # Gradient descent with constraint checking
+    for _ in range(max_iters):
+        # Compute gradient numerically
+        epsilon = 1e-4
+        grad = np.zeros_like(current_params)
+        
+        for i in range(len(current_params)):
+            params_plus = current_params.copy()
+            params_minus = current_params.copy()
+            
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+            
+            f_plus = objective(params_plus)
+            f_minus = objective(params_minus)
+            
+            grad[i] = (f_plus - f_minus) / (2 * epsilon)
+        
+        # Update parameters
+        current_params -= learning_rate * grad
+        
+        # Project back to valid ranges
+        temp_circles = current_params.reshape(-1, 3)
+        for i in range(len(temp_circles)):
+            temp_circles[i][0] = np.clip(temp_circles[i][0], 
+                                       temp_circles[i][2], RECT_WIDTH - temp_circles[i][2])
+            temp_circles[i][1] = np.clip(temp_circles[i][1], 
+                                       temp_circles[i][2], RECT_HEIGHT - temp_circles[i][2])
+            temp_circles[i][2] = np.clip(temp_circles[i][2], 0.01, min(RECT_WIDTH, RECT_HEIGHT)/2)
+        
+        current_params = temp_circles.flatten()
+    
+    return current_params
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set up DEAP framework
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("population", create_initial_population)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", cx_two_point)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initial population
+    pop = toolbox.population(POP_SIZE)
+    
+    # Statistics
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Evolution
+    best_ind = None
+    best_fitness = float('-inf')
+    
+    for gen in range(NGEN):
+        # Evaluate population
+        for ind in pop:
+            ind.fitness.values = toolbox.evaluate(ind)
+        
+        # Update best solution
+        for ind in pop:
+            if ind.fitness.values[0] > best_fitness:
+                best_fitness = ind.fitness.values[0]
+                best_ind = ind.copy()
+        
+        # Selection
+        offspring = toolbox.select(pop, len(pop))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Local optimization for elite individuals
+        elites = sorted(pop, key=lambda x: x.fitness.values[0], reverse=True)[:POP_SIZE//10]
+        for elite in elites:
+            elite_params = local_optimize_solution(elite)
+            elite[:] = elite_params[:]
+            elite.fitness.values = toolbox.evaluate(elite)
+        
+        # Replace population
+        pop[:] = offspring
+    
+    # Final local optimization on best individual
+    if best_ind is not None:
+        best_params = local_optimize_solution(best_ind)
+        best_ind[:] = best_params[:]
+        best_ind.fitness.values = toolbox.evaluate(best_ind)
+    
+    # Return best solution
+    if best_ind is not None:
+        return best_ind.reshape(-1, 3)
+    else:
+        # Fallback to simple hexagonal packing if evolution fails
+        circles = np.zeros((N_CIRCLES, 3))
+        radius = 0.1
+        spacing_x = radius * 2 * 0.866
+        spacing_y = radius * 1.5
+        rows = int(np.sqrt(N_CIRCLES)) + 1
+        cols = int(N_CIRCLES / rows) + 1
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= N_CIRCLES:
+                    break
+                x = (j * spacing_x) + radius
+                y = (i * spacing_y) + radius
+                if x > RECT_WIDTH - radius or y > RECT_HEIGHT - radius:
+                    continue
+                circles[idx] = [x, y, radius]
+                idx += 1
+                if idx >= N_CIRCLES:
+                    break
+        return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

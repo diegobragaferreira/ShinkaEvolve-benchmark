@@ -1,0 +1,314 @@
+<NAME>
+enhanced_3d_point_placement
+</NAME>
+
+<DESCRIPTION>
+The main issue with the current implementation is that it uses a simple simulated annealing approach with basic random perturbations. I'll implement a more sophisticated approach that combines multiple strategies:
+
+1. Use a better initialization strategy (Fibonacci sphere + perturbation)
+2. Implement a hybrid optimization approach combining global search (differential evolution) with local refinement
+3. Add proper constraint handling and better convergence detection
+4. Improve the objective function evaluation by using more efficient distance computations
+
+This approach leverages the fact that good 3D point distributions often follow geometric principles like those found on spheres, and combines global optimization with local refinement for better results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    np.random.seed(42)
+
+    def compute_min_max_ratio(points):
+        """Compute the min/max distance ratio for given points."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return 0.0
+
+        return d_min / d_max
+
+    def optimize_points(initial_points, max_iter=1000, temp_start=1.0, cooling_rate=0.995):
+        """Optimize point placement using simulated annealing."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+
+        # Temperature schedule
+        temp = temp_start
+
+        for iteration in range(max_iter):
+            # Perturb one point at random
+            idx = np.random.randint(len(current_points))
+            new_points = current_points.copy()
+
+            # Add small random perturbation
+            perturbation = np.random.normal(0, 0.01, 3)
+            new_points[idx] = current_points[idx] + perturbation
+
+            # Keep within bounds [0,1]
+            new_points[idx] = np.clip(new_points[idx], 0, 1)
+
+            # Compute new ratio
+            new_ratio = compute_min_max_ratio(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temp):
+                current_points = new_points
+                if new_ratio > best_ratio:
+                    best_points = new_points
+                    best_ratio = new_ratio
+
+            # Cool down temperature
+            temp *= cooling_rate
+
+            # Early stopping if barely improving
+            if iteration > 100 and abs(new_ratio - best_ratio) < 1e-8:
+                break
+
+        return best_points, best_ratio
+
+    # Multiple restart strategy
+    best_solution = None
+    best_ratio = 0.0
+
+    # Try multiple random initializations
+    for restart in range(10):
+        # Create initial points with different strategies
+        if restart == 0:
+            # Random initialization
+            points = np.random.rand(14, 3)
+        else:
+            # Slightly perturbed version of previous best
+            points = np.random.rand(14, 3) * 0.8 + 0.1
+            # Add some structure to avoid too random
+            if restart % 3 == 0:
+                # Add some regular pattern
+                points[0:3] = np.random.rand(3, 3) * 0.5
+                points[3:6] = np.random.rand(3, 3) * 0.5 + 0.5
+                points[6:9] = np.random.rand(3, 3) * 0.3 + 0.35
+                points[9:11] = np.random.rand(2, 3) * 0.2 + 0.4
+                points[11:] = np.random.rand(3, 3) * 0.2 + 0.8
+
+        # Optimize this initialization
+        optimized_points, ratio = optimize_points(points, max_iter=1000)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_solution = optimized_points.copy()
+
+    # Final optimization with the best found solution
+    if best_solution is not None:
+        final_points, _ = optimize_points(best_solution, max_iter=500)
+        return final_points
+
+    # Fallback to the best random solution if no optimization worked
+    return best_solution if best_solution is not None else np.random.rand(14, 3)
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    np.random.seed(42)
+
+    def compute_min_max_ratio(points):
+        """Compute the min/max distance ratio for given points."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances efficiently
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return 0.0
+
+        return d_min / d_max
+
+    def fibonacci_sphere(n):
+        """Generate points on sphere using Fibonacci spiral (good initial distribution)"""
+        points = []
+        golden_angle = np.pi * (3 - np.sqrt(5))
+
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = golden_angle * i  # Golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def hybrid_optimization(initial_points, max_iter=200):
+        """Combine global and local optimization strategies"""
+        points = initial_points.copy()
+
+        # First, try global optimization with differential evolution
+        def objective_function(points_flat):
+            points = points_flat.reshape(-1, 3)
+            # Ensure points are in valid range [0,1]
+            points = np.clip(points, 0, 1)
+            ratio = compute_min_max_ratio(points)
+            return -ratio  # Negative because we minimize
+
+        # Define bounds for differential evolution
+        bounds = [(0, 1)] * (14 * 3)
+
+        # Global optimization with differential evolution
+        try:
+            result = differential_evolution(
+                objective_function,
+                bounds,
+                maxiter=50,
+                popsize=15,
+                seed=42,
+                disp=False,
+                polish=True
+            )
+            if result.success:
+                points = result.x.reshape(-1, 3)
+                points = np.clip(points, 0, 1)
+        except:
+            pass
+
+        # Local refinement with L-BFGS-B
+        def obj_func(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = np.clip(points, 0, 1)
+            ratio = compute_min_max_ratio(points)
+            return -ratio  # Negative because we minimize
+
+        try:
+            x0 = points.flatten()
+            result = minimize(obj_func, x0, method='L-BFGS-B', bounds=[(0, 1)] * (14 * 3),
+                            options={'maxiter': 100, 'disp': False})
+            if result.success:
+                points = result.x.reshape(-1, 3)
+                points = np.clip(points, 0, 1)
+        except:
+            pass
+
+        return points
+
+    def strategic_initialization():
+        """Generate strategically placed initial points"""
+        # Start with Fibonacci sphere distribution
+        fib_points = fibonacci_sphere(14)
+
+        # Slightly perturb to avoid symmetries
+        np.random.seed(42)
+        perturbation = np.random.normal(0, 0.05, fib_points.shape)
+        points = fib_points + perturbation
+
+        # Normalize and scale to [0,1] cube
+        # Find bounding box
+        min_vals = np.min(points, axis=0)
+        max_vals = np.max(points, axis=0)
+
+        # Normalize to [0,1]
+        if max_vals[0] != min_vals[0]:
+            points[:, 0] = (points[:, 0] - min_vals[0]) / (max_vals[0] - min_vals[0])
+        if max_vals[1] != min_vals[1]:
+            points[:, 1] = (points[:, 1] - min_vals[1]) / (max_vals[1] - min_vals[1])
+        if max_vals[2] != min_vals[2]:
+            points[:, 2] = (points[:, 2] - min_vals[2]) / (max_vals[2] - min_vals[2])
+
+        # Scale to [0,1] range (in case normalization didn't fully work)
+        points = np.clip(points, 0, 1)
+
+        return points
+
+    # Multiple restart strategy with better initialization
+    best_solution = None
+    best_ratio = 0.0
+
+    # Try multiple restart configurations with different strategies
+    for restart in range(20):  # More restarts for better exploration
+        # Different initialization strategies
+        if restart == 0:
+            # High-quality Fibonacci-based initialization
+            points = strategic_initialization()
+        elif restart < 5:
+            # Random initialization within bounds
+            points = np.random.rand(14, 3)
+        elif restart < 10:
+            # Slightly perturbed Fibonacci
+            fib_points = fibonacci_sphere(14)
+            np.random.seed(42 + restart)
+            perturbation = np.random.normal(0, 0.03, fib_points.shape)
+            points = fib_points + perturbation
+            # Normalize to [0,1]
+            min_vals = np.min(points, axis=0)
+            max_vals = np.max(points, axis=0)
+            if max_vals[0] != min_vals[0]:
+                points[:, 0] = (points[:, 0] - min_vals[0]) / (max_vals[0] - min_vals[0])
+            if max_vals[1] != min_vals[1]:
+                points[:, 1] = (points[:, 1] - min_vals[1]) / (max_vals[1] - min_vals[1])
+            if max_vals[2] != min_vals[2]:
+                points[:, 2] = (points[:, 2] - min_vals[2]) / (max_vals[2] - min_vals[2])
+            points = np.clip(points, 0, 1)
+        else:
+            # Another random approach
+            points = np.random.rand(14, 3) * 0.8 + 0.1  # Centered distribution
+
+        # Hybrid optimization
+        optimized_points = hybrid_optimization(points, max_iter=200)
+        ratio = compute_min_max_ratio(optimized_points)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_solution = optimized_points.copy()
+
+    # Final refinement if we have a good solution
+    if best_solution is not None:
+        # Try one more round of focused optimization
+        final_points = hybrid_optimization(best_solution, max_iter=100)
+        return final_points
+
+    # Fallback to strategic initialization if nothing worked
+    return strategic_initialization()
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

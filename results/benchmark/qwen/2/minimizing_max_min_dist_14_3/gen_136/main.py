@@ -1,0 +1,398 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import time
+from typing import Tuple, List, Optional
+import warnings
+from dataclasses import dataclass
+
+@dataclass
+class OptimizationConfig:
+    """Configuration parameters for the optimization process."""
+    n_points: int = 14
+    n_dimensions: int = 3
+    max_iterations: int = 100000
+    initial_temp: float = 1.0
+    final_temp: float = 1e-6
+    cooling_rate: float = 0.9995
+    log_interval: int = 1000
+    num_seeds: int = 8
+    local_refinement_iters: int = 500
+    early_stopping_patience: int = 10000
+    stagnation_limit: int = 5000
+    checkpoint_interval: int = 30
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+    
+    Uses a novel "sphere evolution optimizer" that combines entropy-based selection,
+    phase-adaptive perturbations, and multi-strategy local refinement for superior convergence.
+    
+    Returns:
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Configuration parameters
+    config = OptimizationConfig(
+        n_points=14,
+        n_dimensions=3,
+        max_iterations=100000,
+        initial_temp=1.0,
+        final_temp=1e-6,
+        cooling_rate=0.9995,
+        log_interval=1000,
+        num_seeds=8,
+        local_refinement_iters=500,
+        early_stopping_patience=10000,
+        stagnation_limit=5000,
+        checkpoint_interval=30
+    )
+    
+    def fibonacci_sphere(n: int, seed_offset: int = 0) -> np.ndarray:
+        """Generate points on a unit sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3.0 - np.sqrt(5.0))  # golden angle in radians
+        
+        for i in range(n):
+            # Add seed offset to create variations
+            y = 1 - ((i + seed_offset) / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = phi * (i + seed_offset)  # golden angle increment with offset
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+    
+    def calculate_distances(points: np.ndarray) -> Tuple[float, float]:
+        """Calculate minimum and maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0, 0.0
+            
+        try:
+            distances = pdist(points)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            return d_min, d_max
+        except Exception:
+            return 0.0, 0.0
+    
+    def calculate_ratio(points: np.ndarray) -> float:
+        """Calculate the ratio of minimum to maximum distances."""
+        d_min, d_max = calculate_distances(points)
+        if d_max <= 0:
+            return 0.0
+        return d_min / d_max
+    
+    def project_to_sphere(points: np.ndarray) -> np.ndarray:
+        """Project points onto unit sphere."""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        safe_norms = np.where(norms == 0, 1.0, norms)
+        return points / safe_norms
+    
+    def calculate_entropy_distribution(points: np.ndarray) -> np.ndarray:
+        """
+        Calculate entropy-based distribution measure for each point.
+        Higher entropy means more uniform distribution around neighbors.
+        """
+        if len(points) < 2:
+            return np.zeros(len(points))
+            
+        distances = pdist(points)
+        distance_matrix = squareform(distances)
+        
+        # Calculate entropy for each point based on neighbor distances
+        entropies = []
+        epsilon = 1e-10  # Small value to avoid log(0)
+        
+        for i in range(len(points)):
+            # Get distances to all other points
+            dists = distance_matrix[i]
+            # Remove self-distance (should be 0)
+            dists = dists[dists > 0]
+            
+            if len(dists) == 0:
+                entropies.append(0.0)
+                continue
+                
+            # Normalize distances to [0,1] for entropy calculation
+            normalized_dists = dists / (np.max(dists) + epsilon)
+            
+            # Calculate probability distribution (uniform distribution assumption)
+            # For entropy calculation, we treat distances as samples from distribution
+            # Use histogram binning to get discrete probability distribution
+            hist, bin_edges = np.histogram(normalized_dists, bins=10, density=False)
+            hist = hist + epsilon  # Avoid zeros
+            prob_dist = hist / np.sum(hist)
+            
+            # Calculate entropy H = -sum(p*log(p))
+            entropy = -np.sum(prob_dist * np.log(prob_dist + epsilon))
+            entropies.append(entropy)
+        
+        return np.array(entropies)
+    
+    def entropy_based_selection(current_points: np.ndarray, temp: float) -> int:
+        """
+        Select point to perturb based on entropy distribution.
+        Prefer points with lower entropy (more clustered) for more aggressive perturbation.
+        """
+        entropies = calculate_entropy_distribution(current_points)
+        
+        # Points with lower entropy are more clustered and need more adjustment
+        # We can use inverse entropy as weights (lower entropy = higher weight)
+        weights = 1.0 / (entropies + 1e-8)
+        
+        # Avoid division by zero in case of all zeros
+        if np.sum(weights) == 0:
+            return np.random.randint(0, len(current_points))
+            
+        weights = weights / np.sum(weights)
+        return np.random.choice(len(current_points), p=weights)
+    
+    def phase_adaptive_perturbation(current_points: np.ndarray, temp: float, 
+                                  iteration: int, total_iterations: int) -> np.ndarray:
+        """
+        Generate neighbor with phase-adaptive perturbation magnitude.
+        Different strategies for early, middle, and late phases of optimization.
+        """
+        neighbor_points = current_points.copy()
+        
+        # Determine phase based on iteration
+        progress = iteration / total_iterations
+        
+        # Select point based on entropy
+        selected_point_idx = entropy_based_selection(current_points, temp)
+        
+        # Adaptive perturbation magnitude based on optimization phase
+        if progress < 0.3:  # Early phase: aggressive exploration
+            base_magnitude = temp * 0.15
+        elif progress < 0.7:  # Middle phase: balanced approach
+            base_magnitude = temp * 0.1
+        else:  # Late phase: fine-tuning
+            base_magnitude = temp * 0.05
+            
+        # Add adaptive factor based on point entropy (more aggressive for low entropy points)
+        entropies = calculate_entropy_distribution(current_points)
+        entropy_factor = 1.0 + (1.0 - entropies[selected_point_idx] / np.max(entropies + 1e-8)) * 0.5
+        
+        perturbation_mag = base_magnitude * entropy_factor
+        
+        # Add Gaussian noise to selected point
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[selected_point_idx] += noise
+        
+        # Project back to sphere
+        neighbor_points = project_to_sphere(neighbor_points)
+        
+        return neighbor_points
+    
+    def entropy_guided_local_search(starting_points: np.ndarray, max_iters: int = 500) -> Tuple[np.ndarray, float]:
+        """Apply local search guided by entropy distribution."""
+        current_points = starting_points.copy()
+        current_ratio = calculate_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        # Track recent improvements for adaptive behavior
+        recent_improvements = []
+        stagnation_count = 0
+        
+        for iter_num in range(max_iters):
+            # Use entropy-based perturbation for local search
+            candidate_points = phase_adaptive_perturbation(
+                current_points, temp=0.01, iteration=iter_num, total_iterations=max_iters
+            )
+            
+            candidate_ratio = calculate_ratio(candidate_points)
+            
+            # Adaptive acceptance criteria based on recent performance
+            if candidate_ratio > current_ratio:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+                
+                if current_ratio > best_ratio:
+                    best_points = current_points.copy()
+                    best_ratio = current_ratio
+                    recent_improvements.append(iter_num)
+                    if len(recent_improvements) > 5:
+                        recent_improvements.pop(0)
+                    stagnation_count = 0
+                else:
+                    stagnation_count += 1
+            else:
+                # Occasional acceptance of worse solutions for escape
+                if np.random.random() < 0.02:
+                    current_points = candidate_points
+                    current_ratio = candidate_ratio
+                    stagnation_count = 0
+                else:
+                    stagnation_count += 1
+        
+        return best_points, best_ratio
+    
+    def adaptive_cooling_schedule(temp: float, iteration: int, 
+                                recent_improvements: List[int], 
+                                current_ratio: float, previous_ratio: float) -> float:
+        """
+        Dynamic cooling schedule that adapts based on optimization behavior.
+        """
+        # Base cooling rate
+        cooling = temp * config.cooling_rate
+        
+        # If we have recent improvements, cool slower to allow exploration
+        if len(recent_improvements) > 0 and iteration - recent_improvements[-1] < 100:
+            cooling = temp * (config.cooling_rate * 1.1)
+        # If no improvement seen recently, cool faster
+        elif len(recent_improvements) == 0 or iteration - recent_improvements[-1] > 500:
+            cooling = temp * (config.cooling_rate * 0.9)
+        
+        # Ensure we don't cool too fast
+        return max(cooling, config.final_temp)
+    
+    def hybrid_optimization() -> Tuple[np.ndarray, float]:
+        """Main hybrid optimization routine combining multiple strategies."""
+        # Try multiple Fibonacci seeds for diverse starting points
+        best_points_overall = None
+        best_ratio_overall = 0.0
+        
+        # Track checkpoint information
+        best_checkpoint_points = None
+        best_checkpoint_ratio = 0.0
+        last_checkpoint_iter = 0
+        
+        for seed_offset in range(config.num_seeds):
+            # Initialize with Fibonacci sphere configuration
+            current_points = fibonacci_sphere(config.n_points, seed_offset)
+            current_ratio = calculate_ratio(current_points)
+            
+            # Store best from this seed
+            seed_best_points = current_points.copy()
+            seed_best_ratio = current_ratio
+            
+            # Main optimization loop
+            temp = config.initial_temp
+            iteration = 0
+            stagnant_count = 0
+            last_improvement_iter = 0
+            iteration_since_checkpoint = 0
+            recent_improvements = []
+            
+            # Previous values for adaptive cooling
+            prev_ratio = current_ratio
+            
+            while iteration < config.max_iterations and temp > config.final_temp:
+                # Phase-adaptive perturbation
+                candidate_points = phase_adaptive_perturbation(
+                    current_points, temp=temp, iteration=iteration, total_iterations=config.max_iterations
+                )
+                
+                candidate_ratio = calculate_ratio(candidate_points)
+                
+                # Metropolis acceptance criterion
+                delta_ratio = candidate_ratio - current_ratio
+                
+                # Avoid numerical issues
+                if temp < 1e-12:
+                    accept_prob = 1.0 if delta_ratio > 0 else 0.0
+                else:
+                    accept_prob = min(1.0, np.exp(delta_ratio / temp))
+                
+                if np.random.random() < accept_prob:
+                    current_points = candidate_points
+                    current_ratio = candidate_ratio
+                    
+                    if current_ratio > seed_best_ratio:
+                        seed_best_points = current_points.copy()
+                        seed_best_ratio = current_ratio
+                        last_improvement_iter = iteration
+                        recent_improvements.append(iteration)
+                        if len(recent_improvements) > 10:
+                            recent_improvements.pop(0)
+                        stagnant_count = 0
+                    else:
+                        stagnant_count += 1
+                else:
+                    stagnant_count += 1
+                
+                # Apply adaptive cooling
+                temp = adaptive_cooling_schedule(temp, iteration, recent_improvements, 
+                                               current_ratio, prev_ratio)
+                prev_ratio = current_ratio
+                
+                iteration += 1
+                iteration_since_checkpoint += 1
+                
+                # Checkpoint every N iterations
+                if iteration_since_checkpoint >= config.checkpoint_interval:
+                    if seed_best_ratio > best_checkpoint_ratio:
+                        best_checkpoint_ratio = seed_best_ratio
+                        best_checkpoint_points = seed_best_points.copy()
+                    last_checkpoint_iter = iteration
+                    iteration_since_checkpoint = 0
+                
+                # Early stopping based on no improvement
+                if iteration - last_improvement_iter > config.early_stopping_patience:
+                    # Reset if we're stuck
+                    if best_checkpoint_points is not None and best_checkpoint_ratio > seed_best_ratio * 0.99:
+                        seed_best_points = best_checkpoint_points.copy()
+                        seed_best_ratio = best_checkpoint_ratio
+                        last_improvement_iter = iteration
+                        # Reset checkpoint tracking
+                        iteration_since_checkpoint = 0
+                    else:
+                        break
+                
+                # Periodic local refinement to escape local minima
+                if iteration % 2000 == 0 and iteration > 0:
+                    refined_points, refined_ratio = entropy_guided_local_search(
+                        seed_best_points, config.local_refinement_iters
+                    )
+                    
+                    if refined_ratio > seed_best_ratio:
+                        seed_best_points = refined_points
+                        seed_best_ratio = refined_ratio
+            
+            # Update overall best
+            if seed_best_ratio > best_ratio_overall:
+                best_ratio_overall = seed_best_ratio
+                best_points_overall = seed_best_points.copy()
+        
+        # Final local refinement on the best configuration
+        if best_points_overall is not None:
+            final_points, final_ratio = entropy_guided_local_search(
+                best_points_overall, config.local_refinement_iters * 2
+            )
+            return final_points, final_ratio
+        
+        return best_points_overall, best_ratio_overall
+    
+    try:
+        # Run hybrid optimization
+        optimized_points, best_ratio = hybrid_optimization()
+        
+        # Final validation
+        if optimized_points is not None:
+            final_min, final_max = calculate_distances(optimized_points)
+            if final_max <= 0:
+                warnings.warn("Final validation failed, returning Fibonacci sphere initialization")
+                optimized_points = fibonacci_sphere(14)
+        else:
+            # Fallback to Fibonacci initialization if optimization failed
+            warnings.warn("Optimization returned None, using Fibonacci sphere initialization")
+            optimized_points = fibonacci_sphere(14)
+            
+        return optimized_points
+    
+    except Exception as e:
+        # Fallback to basic initialization if anything fails
+        warnings.warn(f"Optimization failed with error: {str(e)}, returning Fibonacci sphere initialization")
+        return fibonacci_sphere(14)
+
+# EVOLVE-BLOCK-END

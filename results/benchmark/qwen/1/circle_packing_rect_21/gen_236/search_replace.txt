@@ -1,0 +1,157 @@
+<NAME>
+improve_constraint_density_calculation
+</NAME>
+
+<DESCRIPTION>
+The current constraint density calculation using Voronoi diagrams is overly complex and falls back to inefficient methods. I'll simplify and optimize this by creating a more reliable and efficient constraint density metric based purely on neighbor counting with proper spatial indexing, which will make the adaptive mutation more effective and reduce computational overhead.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi cell areas and neighbor relationships.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        Array of constraint densities for each circle
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Create Voronoi diagram
+    try:
+        vor = Voronoi(centers)
+    except:
+        # Fallback to simpler constraint calculation
+        return np.ones(n) * 0.5
+
+    # Compute Voronoi cell areas for each region
+    # This gives us a measure of constraint density in local neighborhoods
+    constraint_density = np.zeros(n)
+
+    # For each Voronoi region, compute area (smaller areas = higher constraint density)
+    for i in range(len(vor.regions)):
+        if len(vor.regions[i]) > 0 and -1 not in vor.regions[i]:
+            # Extract vertices of the Voronoi cell
+            vertices = np.array([vor.vertices[j] for j in vor.regions[i]])
+
+            # Project vertices to bounding box to handle infinite regions
+            # Simple approach: filter out vertices too far from the container bounds
+            valid_vertices = vertices[
+                (vertices[:, 0] >= -rect_width/2) & (vertices[:, 0] <= 2*rect_width) &
+                (vertices[:, 1] >= -rect_height/2) & (vertices[:, 1] <= 2*rect_height)
+            ]
+
+            if len(valid_vertices) >= 3:
+                # Compute area of polygon using shoelace formula
+                # But this is complex, let's use a simpler approach
+
+                # Instead of computing exact areas, use a proxy:
+                # inverse of the number of neighboring circles
+                # This will still give us meaningful constraint information
+
+                # For now, fall back to neighbor counting method which works better for our purposes
+                pass
+
+    # Fall back to a more practical approach using neighbor distances
+    # Count neighbors within a certain distance threshold
+    constraint_density = np.zeros(n)
+    max_radius = np.max(circles[:, 2])
+    threshold = 3 * max_radius
+
+    # Use a KDTree for efficient neighbor finding
+    try:
+        tree = cKDTree(centers)
+        # For each point, count neighbors within threshold
+        for i in range(n):
+            neighbors = tree.query_ball_point(centers[i], threshold)
+            constraint_density[i] = len(neighbors) - 1  # Subtract 1 for self
+    except:
+        # Fallback to explicit computation
+        for i in range(n):
+            count = 0
+            center_i = centers[i]
+            for j in range(n):
+                if i != j:
+                    dist = distance.euclidean(center_i, centers[j])
+                    if dist < threshold:
+                        count += 1
+            constraint_density[i] = count
+
+    # Normalize constraint density to [0, 1] range
+    max_density = np.max(constraint_density)
+    if max_density > 0:
+        constraint_density = constraint_density / max_density
+    else:
+        constraint_density = np.ones(n) * 0.5
+
+    return constraint_density
+=======
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on neighbor relationships.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        Array of constraint densities for each circle
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Use spatial indexing for efficient neighbor finding
+    constraint_density = np.zeros(n)
+    max_radius = np.max(circles[:, 2])
+
+    # For better performance, use a larger threshold to capture more neighbors
+    # but still maintain reasonable computational complexity
+    threshold = 4 * max_radius
+
+    # Use KDTree for efficient neighbor queries
+    try:
+        tree = cKDTree(centers)
+
+        # For each point, count neighbors within threshold
+        # This approach is more efficient than pairwise checks for large populations
+        for i in range(n):
+            neighbors = tree.query_ball_point(centers[i], threshold)
+            constraint_density[i] = len(neighbors) - 1  # Subtract 1 for self
+
+    except:
+        # Fallback to explicit computation if KDTree fails
+        for i in range(n):
+            count = 0
+            center_i = centers[i]
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        count += 1
+            constraint_density[i] = count
+
+    # Normalize constraint density to [0, 1] range
+    max_density = np.max(constraint_density)
+    if max_density > 0:
+        constraint_density = constraint_density / max_density
+    else:
+        constraint_density = np.zeros(n)
+
+    return constraint_density
+>>>>>>> REPLACE
+</DIFF>

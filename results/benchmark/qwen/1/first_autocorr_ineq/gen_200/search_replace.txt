@@ -1,0 +1,140 @@
+<NAME>
+enhance_gradient_refinement_with_second_order_info
+</NAME>
+
+<DESCRIPTION>
+The current gradient refinement uses first-order gradients estimated via complex step differentiation. However, incorporating second-order information can significantly improve convergence speed and solution quality. By using curvature estimates, we can adjust the learning rate adaptively and potentially escape local minima more effectively. This modification aims to enhance the gradient refinement component of the optimizer.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def gradient_refine(sequence: List[float], steps: int = 50, lr: float = 1e-4) -> List[float]:
+        """Apply enhanced gradient-based refinement using second-order information."""
+        seq = np.array(sequence, dtype=float)
+        n = len(seq)
+        # Normalize to avoid numerical issues
+        sum_seq = np.sum(seq)
+        if sum_seq < 1e-10:
+            seq += 1e-5
+            sum_seq = np.sum(seq)
+        seq /= sum_seq
+
+        prev_max_conv = float('inf')
+
+        for step in range(steps):
+            # Compute convolution
+            conv = fftconvolve(seq, seq, mode='full')
+            conv = conv[n-1:2*n-1]
+            max_conv = np.max(conv)
+
+            # Early stopping if improvement is minimal
+            if abs(prev_max_conv - max_conv) < 1e-10:
+                break
+            prev_max_conv = max_conv
+
+            # Enhanced gradient estimation using complex step differentiation for improved accuracy
+            grad = np.zeros_like(seq)
+            epsilon = 1e-10
+            for i in range(n):
+                # Complex step differentiation for gradient estimation
+                seq_perturbed = seq.copy()
+                seq_perturbed[i] += 1j * epsilon
+                seq_perturbed /= np.sum(seq_perturbed.real)  # Renormalize real part
+
+                conv_perturbed = fftconvolve(seq_perturbed, seq_perturbed, mode='full')
+                conv_perturbed = conv_perturbed[n-1:2*n-1]
+                max_perturbed = np.max(conv_perturbed)
+
+                # Extract imaginary part for gradient
+                grad[i] = max_perturbed.imag / epsilon
+
+            # Adaptive learning rate with momentum-like behavior
+            adaptive_lr = lr * (1.0 - 0.9 * (step / steps))
+
+            # Update using gradient ascent with momentum
+            seq += adaptive_lr * grad
+            seq = np.maximum(seq, 0)  # Ensure non-negative
+
+            # Renormalize
+            sum_seq = np.sum(seq)
+            if sum_seq > 0:
+                seq /= sum_seq
+
+        return seq.tolist()
+=======
+    @staticmethod
+    def gradient_refine(sequence: List[float], steps: int = 50, lr: float = 1e-4) -> List[float]:
+        """Apply enhanced gradient-based refinement using curvature information for better convergence."""
+        seq = np.array(sequence, dtype=float)
+        n = len(seq)
+        # Normalize to avoid numerical issues
+        sum_seq = np.sum(seq)
+        if sum_seq < 1e-10:
+            seq += 1e-5
+            sum_seq = np.sum(seq)
+        seq /= sum_seq
+
+        prev_max_conv = float('inf')
+
+        for step in range(steps):
+            # Compute convolution
+            conv = fftconvolve(seq, seq, mode='full')
+            conv = conv[n-1:2*n-1]
+            max_conv = np.max(conv)
+
+            # Early stopping if improvement is minimal
+            if abs(prev_max_conv - max_conv) < 1e-10:
+                break
+            prev_max_conv = max_conv
+
+            # Enhanced gradient estimation using complex step differentiation for improved accuracy
+            grad = np.zeros_like(seq)
+            epsilon = 1e-10
+            for i in range(n):
+                # Complex step differentiation for gradient estimation
+                seq_perturbed = seq.copy()
+                seq_perturbed[i] += 1j * epsilon
+                seq_perturbed /= np.sum(seq_perturbed.real)  # Renormalize real part
+
+                conv_perturbed = fftconvolve(seq_perturbed, seq_perturbed, mode='full')
+                conv_perturbed = conv_perturbed[n-1:2*n-1]
+                max_perturbed = np.max(conv_perturbed)
+
+                # Extract imaginary part for gradient
+                grad[i] = max_perturbed.imag / epsilon
+
+            # Compute curvature approximation using finite differences for adaptive learning rate
+            curvature = np.zeros_like(seq)
+            for i in range(n):
+                # Perturb in the opposite direction
+                seq_neg_perturbed = seq.copy()
+                seq_neg_perturbed[i] -= 1j * epsilon
+                seq_neg_perturbed /= np.sum(seq_neg_perturbed.real)
+
+                conv_neg_perturbed = fftconvolve(seq_neg_perturbed, seq_neg_perturbed, mode='full')
+                conv_neg_perturbed = conv_neg_perturbed[n-1:2*n-1]
+                max_neg_perturbed = np.max(conv_neg_perturbed)
+
+                # Curvature estimate
+                curvature[i] = (max_perturbed.imag - max_neg_perturbed.imag) / (2 * epsilon)
+
+            # Adaptive learning rate with curvature-aware adjustment
+            adaptive_lr = lr * (1.0 - 0.9 * (step / steps))
+
+            # Adjust learning rate based on curvature for stable convergence
+            curvature_adjustment = 1.0 + 0.1 * np.abs(curvature)
+            adaptive_lr *= curvature_adjustment
+
+            # Update using gradient ascent with curvature-aware learning rate
+            seq += adaptive_lr * grad
+            seq = np.maximum(seq, 0)  # Ensure non-negative
+
+            # Renormalize
+            sum_seq = np.sum(seq)
+            if sum_seq > 0:
+                seq /= sum_seq
+
+        return seq.tolist()
+>>>>>>> REPLACE
+</DIFF>

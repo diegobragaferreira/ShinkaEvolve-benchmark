@@ -1,0 +1,143 @@
+<NAME>
+enhanced_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+This change enhances the Voronoi-based initialization by incorporating a probabilistic weighting scheme that favors candidate positions near square boundaries and corners, where larger circles can potentially be placed. The key insight is that circles placed near edges or corners can achieve larger radii since they have more room to grow in the direction away from the boundary. This builds upon the successful pattern of leveraging geometric constraints effectively.
+
+The modification involves:
+1. Adding a scoring mechanism that rewards positions closer to boundaries and corners
+2. Using this scoring to weight the probability of selecting candidate positions during initialization
+3. This should lead to better starting configurations that naturally allow for larger radii
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_voronoi_seeds(n_points=50):
+        """Generate initial seed points using Voronoi diagram approach."""
+        # Generate more points than needed to ensure good distribution
+        points = []
+
+        # Add corner points for better boundary coverage
+        for x in [0, 0.5, 1]:
+            for y in [0, 0.5, 1]:
+                points.append([x, y])
+
+        # Add edge midpoints
+        for x in [0.25, 0.5, 0.75]:
+            points.append([x, 0])
+            points.append([x, 1])
+            points.append([0, x])
+            points.append([1, x])
+
+        # Add interior points
+        for _ in range(20):
+            points.append([np.random.random(), np.random.random()])
+
+        # Generate Voronoi diagram
+        vor = Voronoi(np.array(points))
+
+        # Get Voronoi vertices and centroids as candidate positions
+        candidates = []
+
+        # Add vertices
+        for vertex in vor.vertices:
+            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                candidates.append(vertex)
+
+        # Add centroids of regions
+        for region in vor.regions:
+            if len(region) > 0 and -1 not in region:
+                centroid_x = np.mean([vor.vertices[i][0] for i in region])
+                centroid_y = np.mean([vor.vertices[i][1] for i in region])
+                if 0 <= centroid_x <= 1 and 0 <= centroid_y <= 1:
+                    candidates.append([centroid_x, centroid_y])
+
+        # Remove duplicates
+        unique_candidates = []
+        seen = set()
+        for cand in candidates:
+            coord_tuple = (round(cand[0], 5), round(cand[1], 5))
+            if coord_tuple not in seen:
+                seen.add(coord_tuple)
+                unique_candidates.append(cand)
+
+        return unique_candidates[:n_points]
+=======
+    def initialize_voronoi_seeds(n_points=50):
+        """Generate initial seed points using Voronoi diagram approach with boundary-weighted sampling."""
+        # Generate more points than needed to ensure good distribution
+        points = []
+
+        # Add corner points for better boundary coverage
+        for x in [0, 0.5, 1]:
+            for y in [0, 0.5, 1]:
+                points.append([x, y])
+
+        # Add edge midpoints
+        for x in [0.25, 0.5, 0.75]:
+            points.append([x, 0])
+            points.append([x, 1])
+            points.append([0, x])
+            points.append([1, x])
+
+        # Add interior points
+        for _ in range(20):
+            points.append([np.random.random(), np.random.random()])
+
+        # Generate Voronoi diagram
+        vor = Voronoi(np.array(points))
+
+        # Get Voronoi vertices and centroids as candidate positions
+        candidates = []
+
+        # Add vertices
+        for vertex in vor.vertices:
+            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                candidates.append(vertex)
+
+        # Add centroids of regions
+        for region in vor.regions:
+            if len(region) > 0 and -1 not in region:
+                centroid_x = np.mean([vor.vertices[i][0] for i in region])
+                centroid_y = np.mean([vor.vertices[i][1] for i in region])
+                if 0 <= centroid_x <= 1 and 0 <= centroid_y <= 1:
+                    candidates.append([centroid_x, centroid_y])
+
+        # Remove duplicates
+        unique_candidates = []
+        seen = set()
+        for cand in candidates:
+            coord_tuple = (round(cand[0], 5), round(cand[1], 5))
+            if coord_tuple not in seen:
+                seen.add(coord_tuple)
+                unique_candidates.append(cand)
+
+        # Weight candidates based on proximity to boundaries/corners to encourage larger radii
+        def boundary_weight(x, y):
+            # Distance to nearest boundary
+            dist_to_boundary = min(x, 1-x, y, 1-y)
+            # Bonus for being near corners (closer to 0.25 distance is better)
+            corner_dist = min(
+                np.sqrt((x-0)**2 + (y-0)**2),
+                np.sqrt((x-1)**2 + (y-0)**2),
+                np.sqrt((x-0)**2 + (y-1)**2),
+                np.sqrt((x-1)**2 + (y-1)**2)
+            )
+            # Weight: higher for closer to boundaries but especially corners
+            return 1.0 + 0.5 * (1.0 - dist_to_boundary) + 2.0 * (1.0 - corner_dist/np.sqrt(2))
+
+        # Apply weights and select top candidates
+        weighted_candidates = []
+        for cand in unique_candidates[:min(n_points*2, len(unique_candidates))]:  # Consider more candidates
+            x, y = cand
+            weight = boundary_weight(x, y)
+            weighted_candidates.append((cand, weight))
+
+        # Sort by weight (descending) and take top n_points
+        weighted_candidates.sort(key=lambda x: x[1], reverse=True)
+        selected_candidates = [cand for cand, _ in weighted_candidates[:n_points]]
+
+        return selected_candidates
+>>>>>>> REPLACE
+</DIFF>

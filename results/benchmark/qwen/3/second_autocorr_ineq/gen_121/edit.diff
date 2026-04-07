@@ -1,0 +1,229 @@
+--- a/original.py
++++ b/original.py
+@@ -1,223 +1,225 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.optimize import minimize
+ from numba import njit
+ import random
+ from typing import List
+ 
+ @njit
+ def compute_autoconvolution_norms(f_vals):
+     """
+     Compute the autoconvolution g = f*f and return its norms.
+     Uses fast numba-compiled operations.
+     """
+     n = len(f_vals)
+     # Autoconvolution using direct computation
+     g = np.zeros(2*n - 1)
+ 
+     # Compute convolution manually for efficiency
++    # Optimized loop order for better performance
+     for i in range(n):
++        f_i = f_vals[i]
+         for j in range(n):
+-            g[i + j] += f_vals[i] * f_vals[j]
++            g[i + j] += f_i * f_vals[j]
+ 
+     # Compute norms
+     g_squared = g * g
+     norm_g2_squared = np.sum(g_squared)
+     norm_g1 = np.sum(np.abs(g))
+     norm_g_inf = np.max(np.abs(g))
+ 
+     return norm_g2_squared, norm_g1, norm_g_inf
+ 
+ @njit
+ def calculate_c2(f_vals):
+     """
+     Calculate C2 value for given step function values.
+     """
+     norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+ 
+     # Avoid division by zero
+     if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+         return 0.0
+ 
+     c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+     return c2
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value using hybrid optimization approach."""
+ 
+     # Set seed for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+ 
+     # Try multiple initialization strategies and optimization approaches
+     best_solution = None
+     best_c2 = -float('inf')
+ 
+     # Strategy 1: Gradient-free optimization with gamma initialization
+     try:
+         n_steps = np.random.randint(200, 1000)  # Broader range for better exploration
+ 
+         # Initialize with gamma distribution which often works well for positive values
+         initial_f_vals = np.random.gamma(2.0, 2.0, n_steps)
+ 
+         # Normalize to prevent extreme values that might cause numerical issues
+         if np.sum(initial_f_vals) > 0:
+             initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+ 
+         # Convert to list for optimization compatibility
+         initial_f_vals_list = initial_f_vals.tolist()
+ 
+         # Define objective function for minimization (we minimize negative C2)
+         def objective(f_vals):
+             return -calculate_c2(f_vals)
+ 
+         # Use Nelder-Mead optimization for gradient-free optimization
+         result = minimize(
+             objective,
+             initial_f_vals_list,
+             method='Nelder-Mead',
+             options={'maxiter': 1000, 'maxfev': 2000, 'xtol': 1e-6, 'ftol': 1e-6}
+         )
+ 
+         if result.success:
+             optimized_values = result.x
+             # Clip negative values to zero (non-negativity constraint)
+             optimized_values = np.maximum(optimized_values, 0.0)
+ 
+             # Calculate final C2 value
+             final_c2 = calculate_c2(optimized_values.tolist())
+             if final_c2 > best_c2:
+                 best_c2 = final_c2
+                 best_solution = optimized_values.tolist()
+     except Exception as e:
+         pass
+ 
+     # Strategy 2: Different initialization approach (exponential)
+     try:
+         if best_solution is None:
+             n_steps = np.random.randint(200, 1000)
+             initial_f_vals = np.random.exponential(scale=0.5, size=n_steps)
+ 
+             # Ensure non-negativity (though exponential should already be positive)
+             initial_f_vals = np.maximum(initial_f_vals, 0.0)
+ 
+             # Normalize to avoid extremely large values
+             if np.sum(initial_f_vals) > 0:
+                 initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+ 
+             initial_f_vals_list = initial_f_vals.tolist()
+ 
+             def objective(f_vals):
+                 return -calculate_c2(f_vals)
+ 
+             result = minimize(
+                 objective,
+                 initial_f_vals_list,
+                 method='Nelder-Mead',
+                 options={'maxiter': 500, 'maxfev': 1000, 'xtol': 1e-6, 'ftol': 1e-6}
+             )
+ 
+             if result.success:
+                 optimized_values = result.x
+                 optimized_values = np.maximum(optimized_values, 0.0)
+ 
+                 final_c2 = calculate_c2(optimized_values.tolist())
+                 if final_c2 > best_c2:
+                     best_c2 = final_c2
+                     best_solution = optimized_values.tolist()
+     except Exception as e:
+         pass
+ 
+     # Strategy 3: Pattern-based initialization with peaks
+     try:
+         if best_solution is None:
+             n_steps = np.random.randint(300, 1500)  # Even broader range
+ 
+             # Create base geometric distribution
+             base_vals = np.geomspace(1, 0.01, num=n_steps // 2)
+ 
+             # Add peaks at symmetric positions
+             peaks = np.zeros(n_steps)
+             peak_positions = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+             for pos in peak_positions:
+                 if pos < n_steps:
+                     peaks[pos] = 2.0  # High amplitude peaks
+ 
+             # Combine base and peaks
+             combined = base_vals[:n_steps // 2] + peaks[:n_steps // 2]
+ 
+             # Fill remaining with geometric decay
+             if len(combined) < n_steps:
+                 remaining = n_steps - len(combined)
+                 tail_vals = np.geomspace(0.01, 0.001, num=remaining)
+                 combined = np.concatenate([combined, tail_vals])
+ 
+             # Ensure we have exactly n_steps elements
+             if len(combined) > n_steps:
+                 combined = combined[:n_steps]
+             elif len(combined) < n_steps:
+                 combined = np.pad(combined, (0, n_steps - len(combined)), 'constant')
+ 
+             # Apply a soft threshold to make it more numerically stable
+             combined = np.maximum(combined, 0.0)
+ 
+             # Normalize to prevent extreme values
+             if np.sum(combined) > 0:
+                 combined = combined / np.sum(combined) * 50
+ 
+             initial_f_vals_list = combined.tolist()
+ 
+             def objective(f_vals):
+                 return -calculate_c2(f_vals)
+ 
+             # Multiple optimization attempts
+             results = []
+ 
+             # Try Nelder-Mead
+             try:
+                 result = minimize(objective, initial_f_vals_list, method='Nelder-Mead',
+                                 options={'maxiter': 300, 'xtol': 1e-6})
+                 if result.success:
+                     results.append(result.x)
+             except:
+                 pass
+ 
+             # Try L-BFGS if available
+             try:
+                 result = minimize(objective, initial_f_vals_list, method='L-BFGS-B',
+                                 options={'maxiter': 300})
+                 if result.success:
+                     results.append(result.x)
+             except:
+                 pass
+ 
+             # Return best result among all attempts
+             if results:
+                 best_result = min(results, key=lambda x: -calculate_c2(x))
+                 best_result = np.maximum(best_result, 0.0)
+                 final_c2 = calculate_c2(best_result.tolist())
+                 if final_c2 > best_c2:
+                     best_c2 = final_c2
+                     best_solution = best_result.tolist()
+             else:
+                 # Fallback to initial configuration
+                 final_c2 = calculate_c2(initial_f_vals_list)
+                 if final_c2 > best_c2:
+                     best_c2 = final_c2
+                     best_solution = initial_f_vals_list
+     except Exception as e:
+         pass
+ 
+     # Fallback to simple uniform distribution if all strategies fail
+     if best_solution is None:
+         n_steps = 500
+         best_solution = [1.0] * n_steps
+ 
+     return best_solution
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

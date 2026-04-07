@@ -1,0 +1,328 @@
+<NAME>
+adaptive_evolutionary_approach
+</NAME>
+
+<DESCRIPTION>
+I'll implement an evolutionary algorithm approach that starts with a good initialization strategy and evolves solutions to maximize the sum of radii. This approach uses a combination of grid initialization, local optimization, and genetic operators to explore the solution space effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+import time
+
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = 1.0  # Assuming width = height = 1 for square (perimeter = 4)
+RECT_HEIGHT = 1.0
+MAX_RADIUS = 0.5  # Maximum possible radius (when width and height are 1)
+
+
+def check_constraints(circles, width=RECT_WIDTH, height=RECT_HEIGHT):
+    """Check if all circles are within bounds and non-overlapping."""
+    n = len(circles)
+
+    # Check boundary constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+            return False
+
+    # Check overlap constraints
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+    distances = cdist(positions, positions)
+
+    for i in range(n):
+        for j in range(i+1, n):
+            distance = distances[i, j]
+            if distance < radii[i] + radii[j]:
+                return False
+
+    return True
+
+
+def calculate_radius_sum(circles):
+    """Calculate sum of all circle radii."""
+    return np.sum(circles[:, 2])
+
+
+def initialize_population(pop_size, n_circles, width=RECT_WIDTH, height=RECT_HEIGHT):
+    """Initialize a population of circle arrangements."""
+    population = []
+    for _ in range(pop_size):
+        # Start with grid placement
+        circles = np.zeros((n_circles, 3))
+
+        # Grid-like initialization
+        sqrt_n = int(np.ceil(np.sqrt(n_circles)))
+        rows = sqrt_n
+        cols = (n_circles + rows - 1) // rows
+
+        cell_width = width / cols
+        cell_height = height / rows
+
+        placed = 0
+        for i in range(rows):
+            for j in range(cols):
+                if placed >= n_circles:
+                    break
+                x = (j + 0.5) * cell_width + random.uniform(-cell_width*0.1, cell_width*0.1)
+                y = (i + 0.5) * cell_height + random.uniform(-cell_height*0.1, cell_height*0.1)
+
+                # Set radius to small value with some variation
+                r = random.uniform(0.01, min(cell_width, cell_height) * 0.3)
+                circles[placed] = [x, y, r]
+                placed += 1
+
+            if placed >= n_circles:
+                break
+
+        # Fill any remaining slots
+        for i in range(placed, n_circles):
+            x = random.uniform(0.01, width - 0.01)
+            y = random.uniform(0.01, height - 0.01)
+            r = random.uniform(0.01, 0.1)
+            circles[i] = [x, y, r]
+
+        population.append(circles)
+
+    return population
+
+
+def mutate_solution(solution, width=RECT_WIDTH, height=RECT_HEIGHT, mutation_rate=0.1):
+    """Mutate a solution by slightly changing circle positions and radii."""
+    mutated = solution.copy()
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Randomly decide what to change
+            change_type = random.choice(['position', 'radius', 'both'])
+
+            x, y, r = mutated[i]
+
+            if change_type in ['position', 'both']:
+                # Mutate position
+                delta_x = random.uniform(-0.05, 0.05)
+                delta_y = random.uniform(-0.05, 0.05)
+                new_x = max(0.01, min(width - 0.01, x + delta_x))
+                new_y = max(0.01, min(height - 0.01, y + delta_y))
+                mutated[i][0] = new_x
+                mutated[i][1] = new_y
+
+            if change_type in ['radius', 'both']:
+                # Mutate radius
+                delta_r = random.uniform(-0.02, 0.02)
+                new_r = max(0.001, r + delta_r)
+                mutated[i][2] = new_r
+
+    return mutated
+
+
+def crossover(parent1, parent2, width=RECT_WIDTH, height=RECT_HEIGHT):
+    """Create offspring through crossover of two parents."""
+    child = parent1.copy()
+
+    # Take half of the circles from parent1 and half from parent2
+    n = len(parent1)
+    split_point = n // 2
+
+    for i in range(split_point, n):
+        child[i] = parent2[i].copy()
+
+    return child
+
+
+def evaluate_fitness(circles):
+    """Evaluate fitness based on sum of radii with penalties for constraint violations."""
+    if not check_constraints(circles):
+        # Return very low fitness for invalid solutions
+        return -1000000.0
+
+    return calculate_radius_sum(circles)
+
+
+def evolve_circles():
+    """Main evolutionary algorithm to find optimal circle packing."""
+    n_circles = 21
+    pop_size = 20
+    generations = 50
+    mutation_rate = 0.1
+
+    # Initialize population
+    population = initialize_population(pop_size, n_circles)
+
+    best_solution = None
+    best_fitness = float('-inf')
+
+    # Evolution loop
+    for generation in range(generations):
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_solution = individual.copy()
+
+        # Select top performers (tournament selection)
+        sorted_indices = np.argsort(fitness_scores)[::-1][:pop_size//2]
+        selected = [population[i] for i in sorted_indices]
+
+        # Create new population through crossover and mutation
+        new_population = selected.copy()
+
+        while len(new_population) < pop_size:
+            # Tournament selection for parents
+            parent1 = random.choice(selected)
+            parent2 = random.choice(selected)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate_solution(child, mutation_rate=mutation_rate)
+
+            new_population.append(child)
+
+        population = new_population[:pop_size]
+
+        # Adaptive mutation rate
+        if generation > 20:
+            mutation_rate = max(0.05, mutation_rate * 0.98)
+
+    return best_solution if best_solution is not None else population[0]
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Run evolutionary optimization
+    start_time = time.time()
+    circles = evolve_circles()
+    end_time = time.time()
+
+    # Final validation and refinement
+    if not check_constraints(circles):
+        # If constraints violated, try local optimization
+        circles = refine_solution(circles)
+
+    # Ensure we have valid solution with correct shape
+    if len(circles) != 21:
+        # Re-initialize if needed
+        circles = np.zeros((21, 3))
+        # Use a sensible grid initialization
+        sqrt_n = int(np.ceil(np.sqrt(21)))
+        rows = sqrt_n
+        cols = (21 + rows - 1) // rows
+        cell_width = RECT_WIDTH / cols
+        cell_height = RECT_HEIGHT / rows
+
+        placed = 0
+        for i in range(rows):
+            for j in range(cols):
+                if placed >= 21:
+                    break
+                x = (j + 0.5) * cell_width + random.uniform(-cell_width*0.1, cell_width*0.1)
+                y = (i + 0.5) * cell_height + random.uniform(-cell_height*0.1, cell_height*0.1)
+                r = random.uniform(0.01, min(cell_width, cell_height) * 0.3)
+                circles[placed] = [x, y, r]
+                placed += 1
+            if placed >= 21:
+                break
+
+    return circles
+
+
+def refine_solution(circles):
+    """Refine solution using local search heuristics."""
+    # Simple local optimization step
+    n = len(circles)
+    best_circles = circles.copy()
+    best_sum = calculate_radius_sum(best_circles)
+
+    # Try to improve by adjusting each circle individually
+    for iteration in range(100):  # Limited iterations
+        improved = False
+        for i in range(n):
+            original_x, original_y, original_r = best_circles[i]
+
+            # Try several small adjustments
+            attempts = [
+                (0, 0, 0.01),  # Increase radius slightly
+                (0, 0, -0.01), # Decrease radius slightly
+                (0.01, 0, 0),  # Move right
+                (-0.01, 0, 0), # Move left
+                (0, 0.01, 0),  # Move up
+                (0, -0.01, 0), # Move down
+            ]
+
+            for dx, dy, dr in attempts:
+                new_x = original_x + dx
+                new_y = original_y + dy
+                new_r = original_r + dr
+
+                # Boundary checks
+                if new_x - new_r < 0 or new_x + new_r > RECT_WIDTH or \
+                   new_y - new_r < 0 or new_y + new_r > RECT_HEIGHT:
+                    continue
+
+                # Radius check
+                if new_r <= 0:
+                    continue
+
+                # Test this adjustment
+                test_circles = best_circles.copy()
+                test_circles[i] = [new_x, new_y, new_r]
+
+                # Check constraint
+                if check_constraints(test_circles):
+                    test_sum = calculate_radius_sum(test_circles)
+                    if test_sum > best_sum:
+                        best_sum = test_sum
+                        best_circles = test_circles.copy()
+                        improved = True
+
+        # If no improvement, stop early
+        if not improved:
+            break
+
+    return best_circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

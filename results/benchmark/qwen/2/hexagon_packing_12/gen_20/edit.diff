@@ -1,0 +1,204 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,177 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from scipy.optimize import differential_evolution
++import time
+ 
++def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
++    """Generate vertices of a regular hexagon given center, angle, and side length."""
++    angle_rad = np.radians(angle_deg)
++    # Vertices of unit hexagon centered at origin
++    base_vertices = np.array([
++        [1, 0],
++        [0.5, np.sqrt(3)/2],
++        [-0.5, np.sqrt(3)/2],
++        [-1, 0],
++        [-0.5, -np.sqrt(3)/2],
++        [0.5, -np.sqrt(3)/2]
++    ])
++    # Rotate and translate
++    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
++    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
++    rotated_vertices = base_vertices @ rotation_matrix.T
++    return rotated_vertices * side_length + np.array([center_x, center_y])
++
++def check_overlap(hex1, hex2):
++    """Check if two hexagons overlap using Shapely polygons."""
++    poly1 = Polygon(hex1)
++    poly2 = Polygon(hex2)
++    return poly1.intersects(poly2)
++
++def check_containment(hex_vertices, outer_hex_vertices):
++    """Check if all vertices of inner hexagon are within outer hexagon."""
++    outer_poly = Polygon(outer_hex_vertices)
++    for vertex in hex_vertices:
++        point = Point(vertex[0], vertex[1])
++        if not outer_poly.contains(point):
++            return False
++    return True
++
++def evaluate_config(positions, angles, outer_radius):
++    """Evaluate a configuration and return the inverse of outer radius."""
++    # Generate all hexagon vertices
++    hex_vertices_list = []
++    for i in range(12):
++        hex_vertices = hexagon_vertices(positions[i][0], positions[i][1], angles[i])
++        hex_vertices_list.append(hex_vertices)
++    
++    # Check for overlaps between all pairs
++    overlap_penalty = 0
++    for i in range(12):
++        for j in range(i+1, 12):
++            if check_overlap(hex_vertices_list[i], hex_vertices_list[j]):
++                overlap_penalty += 10000
++    
++    # Check containment
++    outer_hex_vertices = hexagon_vertices(0, 0, 0, outer_radius)
++    containment_penalty = 0
++    for i in range(12):
++        if not check_containment(hex_vertices_list[i], outer_hex_vertices):
++            containment_penalty += 10000
++    
++    # Objective: maximize 1/outer_radius (minimize outer_radius)
++    objective = 1.0 / outer_radius + overlap_penalty + containment_penalty
++    
++    return objective
++
++def generate_symmetric_initial_population(n_individuals=20, outer_radius_range=(1.5, 5.0)):
++    """Generate symmetric initial population around hexagonal pattern."""
++    population = []
++    
++    # Base symmetric pattern - 12 hexagons arranged in concentric rings
++    # Central hexagon + 6 surrounding + 6 outer ring
++    base_positions = [
++        [0, 0],  # center
++        [2, 0],  # right
++        [1, np.sqrt(3)],  # upper right
++        [-1, np.sqrt(3)],  # upper left
++        [-2, 0],  # left
++        [-1, -np.sqrt(3)],  # lower left
++        [1, -np.sqrt(3)],  # lower right
++        [2.5, np.sqrt(3)/2],  # far upper right
++        [-2.5, np.sqrt(3)/2],  # far upper left
++        [-2.5, -np.sqrt(3)/2],  # far lower left
++        [2.5, -np.sqrt(3)/2],  # far lower right
++        [0, -2]  # bottom center
++    ]
++    
++    # Create multiple variations with random perturbations
++    for _ in range(n_individuals):
++        # Randomize the outer radius slightly
++        outer_radius = np.random.uniform(*outer_radius_range)
++        
++        # Add small random perturbations to positions
++        perturbed_positions = []
++        for pos in base_positions:
++            perturbed_pos = [
++                pos[0] + np.random.normal(0, 0.1),
++                pos[1] + np.random.normal(0, 0.1)
++            ]
++            perturbed_positions.append(perturbed_pos)
++        
++        # Generate random angles for each hexagon
++        angles = [np.random.uniform(0, 360) for _ in range(12)]
++        
++        population.append((perturbed_positions, angles, outer_radius))
++    
++    return population
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+-    Returns
++    Returns:
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++    start_time = time.time()
++    
++    # Initialize with good symmetric configuration
++    initial_positions = [
++        [0, 0],                    # center
++        [2, 0],                    # right
++        [1, np.sqrt(3)],           # upper right  
++        [-1, np.sqrt(3)],          # upper left
++        [-2, 0],                   # left
++        [-1, -np.sqrt(3)],         # lower left
++        [1, -np.sqrt(3)],          # lower right
++        [2.5, np.sqrt(3)/2],       # far upper right
++        [-2.5, np.sqrt(3)/2],      # far upper left
++        [-2.5, -np.sqrt(3)/2],     # far lower left
++        [2.5, -np.sqrt(3)/2],      # far lower right
++        [0, -2]                    # bottom center
++    ]
++    
++    # Start with a reasonable outer radius
++    outer_radius = 3.5
++    angles = [0]*12  # All horizontal for simplicity
++    
++    # Optimization bounds
++    bounds = [(-5, 5)]*24 + [(-180, 180)]*12 + [(1.5, 6.0)]  # x, y, angle, radius
++    
++    # Use differential evolution for global optimization  
++    def objective(x):
++        # Extract positions, angles, and outer radius
++        positions = [[x[i], x[i+1]] for i in range(0, 24, 2)]
++        angles = x[24:36]
++        outer_radius = x[36]
++        
++        return -evaluate_config(positions, angles, outer_radius)  # Negative because we want to maximize
++    
++    # Run optimization with time constraint
++    result = differential_evolution(objective, bounds, maxiter=100, popsize=15, 
++                                  tol=1e-6, mutation=(0.5, 1), recombination=0.7,
++                                  seed=42, disp=False)
++    
++    # Extract best solution
++    best_positions = [[result.x[i], result.x[i+1]] for i in range(0, 24, 2)]
++    best_angles = result.x[24:36]
++    best_radius = result.x[36]
++    
++    # Convert to required format
++    inner_hex_data = np.array([[pos[0], pos[1], angle] for pos, angle in zip(best_positions, best_angles)])
++    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
++    outer_hex_side_length = best_radius
++    
++    eval_time = time.time() - start_time
++    
++    # Verify solution
++    # Check final objective value
++    final_objective = evaluate_config(best_positions, best_angles, best_radius)
++    inv_outer_hex_side_length = 1.0 / outer_hex_side_length
++    benchmark_ratio = inv_outer_hex_side_length / 0.2537
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

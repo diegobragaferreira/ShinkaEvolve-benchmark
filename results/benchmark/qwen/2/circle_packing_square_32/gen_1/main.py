@@ -1,0 +1,218 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+from typing import Tuple
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+# Problem parameters
+N_CIRCLES = 32
+BOUNDARY_MARGIN = 1e-6  # Small margin to ensure proper containment
+MAX_RADIUS = 0.5  # Maximum possible radius for any circle
+POPULATION_SIZE = 100
+NGEN = 50
+MUTPB = 0.2
+CXPB = 0.8
+
+def evaluate_individual(individual):
+    """Evaluate fitness of individual (circles arrangement)"""
+    # Convert flat list to circles array
+    circles = np.array(individual).reshape(-1, 3)
+
+    # Extract positions and radii
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+
+    # Check containment constraints (return very negative fitness if violated)
+    for i, (pos, r) in enumerate(zip(positions, radii)):
+        x, y = pos
+        if (x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1):
+            return (-1000000,)  # Invalid solution
+
+    # Calculate overlap penalty - sum of squared distances between overlapping circles
+    total_penalty = 0.0
+
+    for i in range(len(circles)):
+        for j in range(i + 1, len(circles)):
+            pos_i = positions[i]
+            pos_j = positions[j]
+            r_i = radii[i]
+            r_j = radii[j]
+
+            # Distance between circle centers
+            dist = np.sqrt(np.sum((pos_i - pos_j)**2))
+
+            # Overlap penalty
+            if dist < (r_i + r_j):
+                overlap = (r_i + r_j) - dist
+                total_penalty += overlap**2 * 10000  # Large penalty for overlaps
+
+    # Objective: maximize sum of radii, but penalize overlaps
+    objective = np.sum(radii) - total_penalty
+
+    return (objective,)
+
+def create_initial_individual():
+    """Create a valid initial individual"""
+    individual = []
+    max_attempts = 1000
+
+    # Generate circles one by one with rejection sampling
+    for _ in range(N_CIRCLES):
+        attempts = 0
+        valid_circle = False
+
+        while not valid_circle and attempts < max_attempts:
+            # Random position
+            x = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            y = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+            # Random radius (smaller than boundary margin to allow for containment)
+            r = np.random.uniform(0.001, min(0.2, 0.5 - max(x, 1-x, y, 1-y)))
+
+            # Check if this circle overlaps with any existing circles
+            valid_circle = True
+
+            # Check containment
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                valid_circle = False
+
+            # Check overlaps with existing circles
+            for existing_x, existing_y, existing_r in individual:
+                dist = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                if dist < (r + existing_r):
+                    valid_circle = False
+                    break
+
+            if valid_circle:
+                individual.append([x, y, r])
+            else:
+                attempts += 1
+
+        # If we couldn't place a circle, try smaller radius
+        if not valid_circle:
+            if len(individual) > 0:
+                # Try to place with much smaller radius
+                x = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+                y = np.random.uniform(BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+                r = 0.01
+                individual.append([x, y, r])
+            else:
+                # If still no luck, just place some circle in the center
+                individual.append([0.5, 0.5, 0.01])
+
+    return individual
+
+def mutate_individual(individual):
+    """Mutate an individual"""
+    # Convert to array for easier manipulation
+    arr = np.array(individual)
+
+    # Mutate one circle at a time
+    for i in range(len(arr)):
+        # Randomly choose what to mutate
+        if random.random() < 0.6:  # Mutate position
+            # Add small random displacement
+            arr[i, 0] += np.random.normal(0, 0.02)
+            arr[i, 1] += np.random.normal(0, 0.02)
+
+            # Ensure it stays within bounds
+            arr[i, 0] = np.clip(arr[i, 0], BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+            arr[i, 1] = np.clip(arr[i, 1], BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+        else:  # Mutate radius
+            # Adjust radius with small change
+            arr[i, 2] += np.random.normal(0, 0.01)
+            arr[i, 2] = max(0.001, arr[i, 2])  # Ensure positive radius
+
+            # Ensure the circle still fits within the square
+            x, y, r = arr[i]
+            max_radius_allowed = min(x, 1-x, y, 1-y)
+            arr[i, 2] = min(r, max_radius_allowed - BOUNDARY_MARGIN)
+
+    return [tuple(row) for row in arr]
+
+def crossover_individuals(ind1, ind2):
+    """Crossover two individuals"""
+    # Simple uniform crossover
+    child1 = []
+    child2 = []
+
+    for i in range(len(ind1)):
+        if random.random() < 0.5:
+            child1.append(ind1[i])
+            child2.append(ind2[i])
+        else:
+            child1.append(ind2[i])
+            child2.append(ind1[i])
+
+    return child1, child2
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates
+                 of the i-th circle of radius r.
+    """
+
+    # Register DEAP types
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_initial_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population
+    population = toolbox.population(n=POPULATION_SIZE)
+
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, population))
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = fit
+
+    # Evolution loop
+    for generation in range(NGEN):
+        # Select the next generation individuals
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                child1, child2 = toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                mutant = toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Replace the old population with the new one
+        population[:] = offspring
+
+    # Find the best individual
+    best_individual = tools.selBest(population, 1)[0]
+
+    # Convert back to numpy array
+    circles = np.array(best_individual).reshape(-1, 3)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,447 @@
+<NAME>
+enhanced_evolutionary_optimization
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the evolutionary optimization approach by implementing a multi-start differential evolution strategy with diverse initializations and adaptive population sizing. The key changes include:
+1. Adding a more sophisticated multi-scale initialization that combines different patterns (sine wave, alternating, smooth)
+2. Implementing adaptive population sizing that starts small and increases if convergence stalls
+3. Using a multi-start approach with different random seeds to explore more of the solution space
+4. Adding early stopping criteria to prevent unnecessary computation
+5. Improving the refinement strategy to be more effective
+
+These changes should help escape local optima, improve exploration of the solution space, and potentially find higher C₂ values than previously attempted approaches.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def sophisticated_initialization(dim):
+    """Create a sophisticated initial step function using Sobol sequences and pattern recognition"""
+    # Generate points using Sobol sequence for better space-filling
+    try:
+        sampler = qmc.Sobol(d=dim, seed=42)
+        points = sampler.random(n=100)
+    except:
+        # Fallback to regular random if Sobol fails
+        points = np.random.random((100, dim))
+
+    # Create a pattern that has shown success in previous implementations
+    init_params = []
+    for i in range(dim):
+        # Create structured pattern: alternating high/low with sinusoidal modulation
+        pattern_val = 0.5 + 0.3 * np.sin(i * 0.7)
+        # Add variation from Sobol sampling
+        variation = points[i % 100][0] * 0.2 if i < 100 else np.random.random() * 0.2
+        init_params.append(max(0, pattern_val + variation - 0.1))
+
+    return init_params
+
+def evolutionary_optimization(initial_dim):
+    """Perform evolutionary optimization with adaptive parameters"""
+    # Start with good initialization
+    x0 = sophisticated_initialization(initial_dim)
+
+    # Set bounds for optimization
+    bounds = [(0, 10)] * len(x0)
+
+    # Parameters for differential evolution
+    de_params = {
+        'mutation': (0.5, 1),
+        'recombination': 0.7,
+        'popsize': 15,
+        'maxiter': 100,
+        'seed': 42,
+        'tol': 1e-6,
+        'init': 'latinhypercube',
+        'disp': False
+    }
+
+    # Run optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        **de_params
+    )
+
+    return result.x
+
+def generate_multi_scale_initialization(dim):
+    """Generate initialization at multiple scales to enhance exploration"""
+    # Create base initializations
+    base_init = sophisticated_initialization(dim)
+
+    # Add some variations
+    variations = []
+
+    # Variation 1: Random shuffle with some preservation
+    shuffled = base_init.copy()
+    np.random.shuffle(shuffled)
+    variations.append(shuffled)
+
+    # Variation 2: Smoothed version
+    smoothed = np.array(base_init)
+    if len(smoothed) > 10:
+        # Apply simple smoothing filter
+        for i in range(1, len(smoothed)-1):
+            smoothed[i] = 0.3 * smoothed[i-1] + 0.4 * smoothed[i] + 0.3 * smoothed[i+1]
+    variations.append(smoothed.tolist())
+
+    # Variation 3: High-low alternating pattern
+    alternating = []
+    for i in range(len(base_init)):
+        if i % 2 == 0:
+            alternating.append(max(0, base_init[i] + 0.2 * np.random.random()))
+        else:
+            alternating.append(max(0, base_init[i] * 0.3 * np.random.random()))
+    variations.append(alternating)
+
+    return variations
+
+def advanced_refinement_strategy(initial_params, max_iter=50):
+    """Apply advanced local refinement to polish the solution"""
+    # Simple gradient-free local search with perturbation
+    current_params = np.array(initial_params)
+    best_params = current_params.copy()
+    best_c2 = -np.inf
+
+    for iteration in range(max_iter):
+        # Perturb current solution slightly
+        perturbed = current_params + np.random.normal(0, 0.01, len(current_params)) * current_params
+        perturbed = np.clip(perturbed, 0, None)
+
+        # Evaluate
+        f_vals = perturbed
+        if len(f_vals) > 0:
+            g_vals = compute_autoconvolution_numba(f_vals)
+            c2 = compute_c2_numba(g_vals)
+
+            if c2 > best_c2:
+                best_c2 = c2
+                best_params = perturbed.copy()
+
+        # Update current solution
+        current_params = best_params.copy()
+
+    return best_params
+=======
+def generate_multi_scale_initialization(dim):
+    """Generate initialization at multiple scales to enhance exploration"""
+    # Create base initializations
+    init_params = []
+
+    # Pattern 1: Sine wave pattern
+    sine_pattern = [0.5 + 0.3 * np.sin(i * 0.7) for i in range(dim)]
+
+    # Pattern 2: Alternating high/low pattern
+    alternating = [0.8 if i % 2 == 0 else 0.2 for i in range(dim)]
+
+    # Pattern 3: Smoothed version of sine pattern
+    smoothed = sine_pattern.copy()
+    if len(smoothed) > 10:
+        # Apply simple smoothing filter
+        for i in range(1, len(smoothed)-1):
+            smoothed[i] = 0.3 * smoothed[i-1] + 0.4 * smoothed[i] + 0.3 * smoothed[i+1]
+
+    # Pattern 4: Random pattern
+    random_pattern = np.random.random(dim) * 0.8 + 0.1
+
+    # Combine patterns with weights
+    combined = []
+    for i in range(dim):
+        # Mix different patterns
+        val = 0.3 * sine_pattern[i] + 0.3 * alternating[i] + 0.2 * smoothed[i] + 0.2 * random_pattern[i]
+        combined.append(max(0, val))
+
+    # Return multiple variations
+    variations = [
+        sine_pattern,
+        alternating,
+        smoothed,
+        random_pattern,
+        combined
+    ]
+
+    # Add some random noise to ensure diversity
+    for i in range(len(variations)):
+        noise = np.random.normal(0, 0.05, dim)
+        variations[i] = np.clip(np.array(variations[i]) + noise, 0, 1).tolist()
+
+    return variations
+
+def adaptive_evolutionary_optimization(initial_dim, max_iter=200, max_stall_iter=20, min_popsize=5, max_popsize=30):
+    """
+    Perform evolutionary optimization with adaptive population sizing and early stopping
+    """
+    # Track convergence
+    best_c2_history = []
+    stall_count = 0
+    prev_best_c2 = -np.inf
+
+    # Start with small population
+    popsize = min_popsize
+
+    while popsize <= max_popsize:
+        # Set bounds for optimization
+        bounds = [(0, 1.0)] * initial_dim
+
+        # Parameters for differential evolution
+        de_params = {
+            'mutation': (0.5, 1),
+            'recombination': 0.7,
+            'popsize': popsize,
+            'maxiter': min(max_iter // 2, 100),  # Reduce iterations with larger popsize
+            'seed': np.random.randint(1000, 9999),
+            'tol': 1e-6,
+            'disp': False,
+            'callback': None
+        }
+
+        # Try multiple initializations
+        best_result = None
+        best_c2 = -np.inf
+
+        # Try 3 different initializations
+        for init_seed in [42, 123, 456]:
+            try:
+                # Create specific initialization for this run
+                np.random.seed(init_seed)
+
+                # Create different types of initializations
+                init_variations = generate_multi_scale_initialization(initial_dim)
+                best_variation_c2 = -np.inf
+                best_variation_params = None
+
+                for var_idx, init_params in enumerate(init_variations):
+                    try:
+                        # Run optimization with current initialization
+                        result = differential_evolution(
+                            objective_function,
+                            bounds,
+                            x0=init_params,
+                            **de_params
+                        )
+
+                        # Evaluate the result
+                        f_vals = np.clip(result.x, 0, None)
+                        if len(f_vals) > 0:
+                            g_vals = compute_autoconvolution_numba(f_vals)
+                            c2 = compute_c2_numba(g_vals)
+
+                            if c2 > best_variation_c2:
+                                best_variation_c2 = c2
+                                best_variation_params = result.x.copy()
+                    except:
+                        continue
+
+                if best_variation_c2 > best_c2:
+                    best_c2 = best_variation_c2
+                    best_result = best_variation_params
+            except:
+                continue
+
+        if best_result is not None:
+            # Check for convergence
+            if best_c2 > prev_best_c2:
+                best_c2_history.append(best_c2)
+                prev_best_c2 = best_c2
+                stall_count = 0
+            else:
+                stall_count += 1
+
+            # Early stopping if stalled for too long
+            if stall_count >= max_stall_iter:
+                break
+        else:
+            stall_count += 1
+            if stall_count >= max_stall_iter:
+                break
+
+        # Increase population size for next iteration
+        popsize = min(popsize * 2, max_popsize)
+
+    return best_result if best_result is not None else np.random.random(initial_dim) * 0.5
+
+def advanced_refinement_strategy(initial_params, max_iter=100):
+    """Apply advanced local refinement to polish the solution"""
+    current_params = np.array(initial_params)
+    best_params = current_params.copy()
+    best_c2 = -np.inf
+
+    # Track history for early stopping
+    recent_improvements = []
+
+    for iteration in range(max_iter):
+        # Perturb current solution with adaptive noise
+        noise_level = max(0.001, 0.05 * (1.0 - iteration / max_iter))
+        perturbed = current_params + np.random.normal(0, noise_level, len(current_params)) * current_params
+        perturbed = np.clip(perturbed, 0, None)
+
+        # Evaluate
+        f_vals = perturbed
+        if len(f_vals) > 0:
+            try:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = perturbed.copy()
+                    recent_improvements = [c2]  # Reset history
+                else:
+                    recent_improvements.append(c2)
+                    # Early stopping if no significant improvement in last 10 iterations
+                    if len(recent_improvements) > 10 and all(c2 <= recent_improvements[-10] for c2 in recent_improvements[-10:]):
+                        break
+            except:
+                pass
+
+        # Update current solution
+        current_params = best_params.copy()
+
+    return best_params
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_multi_start_strategy
+</NAME>
+
+<DESCRIPTION>
+This improvement refactors the main optimization loop to implement a more effective multi-start strategy. Instead of running evolutionary optimization multiple times with different dimensions, we now use a more targeted approach that:
+1. Uses a fixed, larger dimension (to allow more flexibility)
+2. Runs multiple independent optimization attempts with different seeds
+3. Implements a more aggressive refinement strategy
+4. Adds better tracking and selection of the best result found
+This should provide more consistent exploration of the solution space and better chance of finding high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Multi-start approach with different random seeds and dimensions
+    best_c2 = -np.inf
+    best_params = None
+
+    # Try multiple optimizations with different configurations
+    configs = [
+        (500, 42),
+        (700, 123),
+        (900, 456),
+        (1100, 789)
+    ]
+
+    # Also try a few random configurations
+    for _ in range(3):
+        dim = np.random.randint(500, 1200)
+        seed = np.random.randint(1000, 9999)
+        configs.append((dim, seed))
+
+    # Add multi-scale initialization
+    multi_scale_configs = []
+    for dim, seed in configs:
+        multi_scale_configs.extend([(dim, seed, i) for i in range(3)])
+
+    for dim, seed, scale_idx in multi_scale_configs:
+        if time.time() - start_time > 85:  # Leave buffer for cleanup
+            break
+
+        try:
+            np.random.seed(seed)
+
+            # Get initializations
+            initializations = generate_multi_scale_initialization(dim)
+
+            # Try each initialization
+            for init_idx, init_params in enumerate(initializations):
+                if time.time() - start_time > 85:
+                    break
+
+                try:
+                    # Run evolutionary optimization
+                    params = evolutionary_optimization(dim)
+
+                    # Refine the result
+                    refined_params = advanced_refinement_strategy(params, max_iter=30)
+
+                    # Compute actual C2 value
+                    f_vals = np.clip(refined_params, 0, None)
+                    if len(f_vals) > 0:
+                        g_vals = compute_autoconvolution_numba(f_vals)
+                        c2 = compute_c2_numba(g_vals)
+
+                        if c2 > best_c2:
+                            best_c2 = c2
+                            best_params = refined_params.copy()
+                except Exception as e:
+                    continue
+        except Exception as e:
+            continue
+
+    # If no valid parameters found, return default
+    if best_params is None:
+        return [0.5] * 100
+
+    # Final check and conversion to list
+    final_f_vals = np.clip(best_params, 0, None)
+    return final_f_vals.tolist()
+=======
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Fixed dimension that allows good resolution for optimal step function
+    FIXED_DIM = 1000
+
+    # Multi-start approach with multiple independent optimizations
+    best_c2 = -np.inf
+    best_params = None
+
+    # Run multiple independent optimization attempts
+    num_attempts = 15  # Increased from previous versions
+
+    for attempt in range(num_attempts):
+        if time.time() - start_time > 85:  # Leave buffer for cleanup
+            break
+
+        try:
+            # Use a different seed for each attempt
+            np.random.seed(42 + attempt * 17)  # Different seeds for each attempt
+
+            # Run adaptive evolutionary optimization
+            params = adaptive_evolutionary_optimization(
+                FIXED_DIM,
+                max_iter=150,
+                max_stall_iter=15,
+                min_popsize=5,
+                max_popsize=25
+            )
+
+            # Refine the result with more aggressive refinement
+            refined_params = advanced_refinement_strategy(params, max_iter=50)
+
+            # Compute actual C2 value
+            f_vals = np.clip(refined_params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = refined_params.copy()
+        except Exception as e:
+            # Continue with other attempts if one fails
+            continue
+
+    # If no valid parameters found, return default
+    if best_params is None:
+        return [0.5] * 100
+
+    # Final check and conversion to list
+    final_f_vals = np.clip(best_params, 0, None)
+    return final_f_vals.tolist()
+>>>>>>> REPLACE
+</DIFF>

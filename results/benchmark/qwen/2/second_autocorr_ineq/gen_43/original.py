@@ -1,0 +1,102 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using adaptive Gaussian construction."""
+    np.random.seed(42)  # For reproducibility
+
+    # Determine number of steps
+    n_steps = np.random.randint(1000, 10000)  # Increased range for better resolution
+
+    # Create x-axis points in [-1/4, 1/4]
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Initialize with base multi-peak Gaussian structure
+    base_function = np.zeros_like(x)
+
+    # Use logarithmic spacing for peak positions to avoid clustering
+    num_peaks = np.random.randint(10, 30)
+
+    # Generate logarithmically spaced peak positions to avoid narrow interference
+    log_positions = np.logspace(np.log10(0.01), np.log10(0.24), num_peaks)
+    peak_positions = np.concatenate([log_positions, -log_positions[::-1]])
+    peak_positions = peak_positions[peak_positions <= 0.25]
+    peak_positions = peak_positions[peak_positions >= -0.25]
+
+    # Ensure minimum gap between peaks to prevent narrow autoconvolution
+    min_gap = 0.1 * 0.5  # 10% of domain width
+    safe_positions = []
+    for pos in sorted(peak_positions):
+        if not safe_positions or abs(pos - safe_positions[-1]) >= min_gap:
+            safe_positions.append(pos)
+
+    num_peaks = len(safe_positions)
+
+    # Construct peaks with optimized parameters
+    for i in range(num_peaks):
+        # Set peak center
+        peak_center = safe_positions[i]
+
+        # Adjust peak height based on position to avoid very sharp peaks
+        # Peaks near edges get reduced height to prevent excessive autoconvolution peaks
+        if abs(peak_center) > 0.15:
+            peak_height = np.random.uniform(1.0, 1.5)
+        else:
+            peak_height = np.random.uniform(1.2, 2.0)
+
+        # Use narrower widths for central peaks, wider for outer ones
+        if abs(peak_center) < 0.05:
+            peak_width = np.random.uniform(0.015, 0.03)
+        elif abs(peak_center) < 0.15:
+            peak_width = np.random.uniform(0.025, 0.05)
+        else:
+            peak_width = np.random.uniform(0.03, 0.07)
+
+        # Create Gaussian peak
+        gaussian_peak = peak_height * np.exp(-0.5 * ((x - peak_center) / peak_width)**2)
+        base_function += gaussian_peak
+
+    # Add some additional structure with controlled randomness
+    # This helps create better autoconvolution properties
+    for i in range(0, len(x), max(1, len(x)//20)):  # More frequent bumps
+        if np.random.random() > 0.8:  # 20% chance to add small bump
+            bump_center = x[i]
+            bump_height = np.random.uniform(0.05, 0.3)
+            bump_width = np.random.uniform(0.005, 0.015)
+            bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+            base_function += bump
+
+    # Ensure non-negative values
+    base_function = np.maximum(base_function, 0)
+
+    # Normalize to avoid extreme values that might hurt the C2 calculation
+    if np.max(base_function) > 0:
+        base_function = base_function / np.max(base_function) * 1.5
+
+    # Apply light noise for robustness (but preserve structure)
+    noise_level = 0.02  # Reduced noise level
+    noisy_function = base_function + np.random.normal(0, noise_level, len(base_function))
+    noisy_function = np.maximum(noisy_function, 0)
+
+    # Smooth the function to reduce sharp transitions that could hurt C2
+    # Use a simple moving average smoothing
+    window_size = max(1, n_steps // 200)  # Dynamic window size
+    if window_size % 2 == 0:
+        window_size += 1  # Must be odd for symmetric filter
+    if window_size > 1:
+        smoothed_function = signal.savgol_filter(noisy_function, window_size, 1)
+        smoothed_function = np.maximum(smoothed_function, 0)
+        noisy_function = smoothed_function
+
+    # Convert to step values ensuring proper format
+    step_values = noisy_function.tolist()
+
+    return step_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

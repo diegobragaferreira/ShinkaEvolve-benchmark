@@ -1,0 +1,216 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from deap import base, creator, tools, algorithms
+from numba import njit
+import time
+import random
+from scipy.optimize import differential_evolution
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+@njit
+def compute_autoconvolution_norms(f_vals):
+    """
+    Compute the autoconvolution g = f*f and return its norms.
+    Uses fast numba-compiled operations.
+    """
+    n = len(f_vals)
+    # Autoconvolution using direct computation
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    # Compute norms
+    g_squared = g * g
+    norm_g2_squared = np.sum(g_squared)
+    norm_g1 = np.sum(np.abs(g))
+    norm_g_inf = np.max(np.abs(g))
+
+    return norm_g2_squared, norm_g1, norm_g_inf
+
+@njit
+def calculate_c2(f_vals):
+    """
+    Calculate C2 value for given step function values.
+    """
+    norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+        return 0.0
+
+    c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+    return c2
+
+def create_individual(n_steps):
+    """Create a random individual with alternating pattern"""
+    # Create alternating high/low pattern
+    individual = []
+    for i in range(n_steps):
+        if i % 2 == 0:
+            individual.append(np.random.gamma(2.0, 2.0))
+        else:
+            individual.append(np.random.exponential(1.0))
+    
+    # Normalize to prevent extreme values
+    total = sum(individual)
+    if total > 0:
+        individual = [x * 100 / total for x in individual]
+    
+    return individual
+
+def evaluate_individual(individual):
+    """Evaluate fitness of individual"""
+    # Ensure non-negativity
+    individual = [max(x, 0.0) for x in individual]
+    try:
+        c2_value = calculate_c2(individual)
+        # Add penalty for very sharp peaks or flat regions
+        g = np.convolve(individual, individual, mode='full')
+        g_max = np.max(np.abs(g))
+        g_mean = np.mean(np.abs(g))
+        # Penalize if peak is too high relative to mean
+        if g_max > 0 and g_mean > 0:
+            penalty = min(0.1 * (g_max / g_mean - 1.0), 1.0)
+            c2_value = max(0.0, c2_value - penalty)
+        return (c2_value,)
+    except:
+        return (0.0,)
+
+def mutate_individual(individual, indpb=0.1, generation=0):
+    """Mutate individual with adaptive rate"""
+    # Decrease mutation rate as generations progress
+    adaptive_indpb = max(0.05, indpb * (1.0 - generation * 0.02))
+    
+    for i in range(len(individual)):
+        if random.random() < adaptive_indpb:
+            # Apply Gaussian mutation with decreasing variance
+            individual[i] *= random.gauss(1.0, 0.1 * (1.0 - generation * 0.05))
+            individual[i] = max(0.0, individual[i])
+    return individual,
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using adaptive evolutionary optimization."""
+    
+    start_time = time.time()
+    
+    # Parameters
+    max_time = 85  # Leave 5 seconds for cleanup
+    
+    # Start with a reasonable initial configuration
+    n_steps = 300  # Fixed size for stability
+    
+    # Initialize population with hybrid approach
+    population_size = 20
+    population = []
+    for _ in range(population_size):
+        individual = create_individual(n_steps)
+        population.append(individual)
+    
+    # Set up evolutionary framework
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual, n_steps)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", mutate_individual, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initialize statistics
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Main evolutionary loop
+    best_fitness_history = []
+    stagnation_count = 0
+    max_stagnation = 10
+    
+    for generation in range(30):  # Limited generations to stay within time
+        if time.time() - start_time > max_time:
+            break
+            
+        # Selection
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.8:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < 0.2:
+                toolbox.mutate(mutant, generation=generation)
+                del mutant.fitness.values
+        
+        # Evaluate fitness for new individuals
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace population
+        population[:] = offspring
+        
+        # Track best fitness
+        best_fitness = max(ind.fitness.values[0] for ind in population)
+        best_fitness_history.append(best_fitness)
+        
+        # Check for stagnation
+        if len(best_fitness_history) > 5:
+            recent_avg = np.mean(best_fitness_history[-5:])
+            prev_avg = np.mean(best_fitness_history[-10:-5])
+            if abs(recent_avg - prev_avg) < 1e-6:
+                stagnation_count += 1
+                if stagnation_count >= max_stagnation:
+                    break
+            else:
+                stagnation_count = 0
+    
+    # Final best individual
+    best_individual = max(population, key=lambda ind: ind.fitness.values[0])
+    best_individual = [max(x, 0.0) for x in best_individual]
+    
+    # Local refinement on top individuals
+    top_individuals = sorted(population, key=lambda ind: ind.fitness.values[0], reverse=True)[:5]
+    for ind in top_individuals:
+        if time.time() - start_time > max_time:
+            break
+        try:
+            # Simple local search around top individuals
+            result = differential_evolution(
+                lambda x: -calculate_c2(list(x)), 
+                bounds=[(0, 1000) for _ in range(n_steps)],
+                maxiter=20,
+                popsize=5,
+                tol=1e-6,
+                seed=42
+            )
+            if -result.fun > calculate_c2(list(best_individual)):
+                best_individual = list(result.x)
+        except:
+            pass
+    
+    # Final clipping to ensure non-negativity
+    best_individual = [max(x, 0.0) for x in best_individual]
+    
+    return best_individual
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

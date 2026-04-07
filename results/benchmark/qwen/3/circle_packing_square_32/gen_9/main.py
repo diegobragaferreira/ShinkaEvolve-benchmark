@@ -1,0 +1,130 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from itertools import combinations
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _check_constraints(circles):
+    """Check if all circles are within bounds and non-overlapping."""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check overlap constraints
+    for i, j in combinations(range(n), 2):
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+        if dist_sq < (r1 + r2)**2:
+            return False
+
+    return True
+
+def _objective_sum_radii(circles):
+    """Objective function to maximize sum of radii."""
+    return -np.sum(circles[:, 2])  # Negative because we minimize
+
+def _constraint_containment(circles):
+    """Constraint function for containment."""
+    constraints = []
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # r <= x <= 1-r and r <= y <= 1-r
+        constraints.append(x - r)  # x - r >= 0
+        constraints.append(1 - x - r)  # 1 - x - r >= 0
+        constraints.append(y - r)  # y - r >= 0
+        constraints.append(1 - y - r)  # 1 - y - r >= 0
+    return np.array(constraints)
+
+def _constraint_overlap(circles):
+    """Constraint function for non-overlap."""
+    constraints = []
+    n = len(circles)
+    for i, j in combinations(range(n), 2):
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        # sqrt((x1-x2)^2 + (y1-y2)^2) >= r1 + r2
+        # Or equivalently: (x1-x2)^2 + (y1-y2)^2 >= (r1+r2)^2
+        dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+        constraints.append(dist_sq - (r1 + r2)**2)
+    return np.array(constraints)
+
+def _initialize_grid_config(n):
+    """Initialize with a regular grid pattern."""
+    # Try to fit n circles in a grid
+    grid_size = int(np.ceil(np.sqrt(n)))
+    spacing_x = 1.0 / (grid_size + 1)
+    spacing_y = 1.0 / (grid_size + 1)
+
+    circles = np.zeros((n, 3))
+
+    idx = 0
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if idx >= n:
+                break
+            x = (i + 1) * spacing_x
+            y = (j + 1) * spacing_y
+            # Initial radius guess based on available space
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+            r = min_dist_to_edge / 2.0
+            circles[idx] = [x, y, r]
+            idx += 1
+
+    return circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+
+    # Initialize with a good heuristic
+    circles = _initialize_grid_config(n)
+
+    # Simple local optimization to increase radii while respecting constraints
+    for attempt in range(5):
+        # Try to maximize individual radii
+        improved = False
+        for i in range(n):
+            original_r = circles[i, 2]
+            # Increase radius as much as possible while maintaining constraints
+            max_radius = min(
+                circles[i, 0], 1 - circles[i, 0],
+                circles[i, 1], 1 - circles[i, 1]
+            )
+
+            # Check what's the maximum we can increase this radius to
+            min_distance = float('inf')
+            for j in range(n):
+                if i != j:
+                    dx = circles[i, 0] - circles[j, 0]
+                    dy = circles[i, 1] - circles[j, 1]
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    min_distance = min(min_distance, dist)
+
+            if min_distance > 0:  # Avoid division by zero?
+                max_allowed_radius = min_distance / 2.0
+                max_radius = min(max_radius, max_allowed_radius)
+
+            if max_radius > original_r:
+                circles[i, 2] = max_radius
+                improved = True
+
+        # If no improvement was made, stop early
+        if not improved:
+            break
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

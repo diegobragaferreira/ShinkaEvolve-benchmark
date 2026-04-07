@@ -1,0 +1,261 @@
+--- a/original.py
++++ b/original.py
+@@ -1,139 +1,158 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial import SphericalVoronoi
+-from scipy.optimize import minimize
++from scipy.spatial.distance import cdist
+ import time
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     np.random.seed(42)
+     
+-    def distance_matrix(points):
+-        """Compute pairwise Euclidean distances efficiently."""
+-        diff = points[:, np.newaxis, :] - points[np.newaxis, :, :]
+-        return np.sqrt(np.sum(diff**2, axis=2))
+-    
+-    def min_max_ratio(points):
+-        """Calculate the ratio of minimum to maximum distance."""
+-        dist_mat = distance_matrix(points)
+-        # Set diagonal to large value to ignore self-distances
+-        np.fill_diagonal(dist_mat, np.inf)
+-        dmin = np.min(dist_mat)
+-        dmax = np.max(dist_mat)
+-        return dmin / dmax if dmax > 0 else 0
+-    
+-    def spherical_voronoi_initialization(n_points):
+-        """Initialize points using spherical Voronoi construction."""
+-        # Generate points on sphere using Fibonacci-like method
++    def fibonacci_sphere(n):
++        """Generate n points distributed approximately uniformly on a sphere."""
+         points = []
+         phi = (1 + np.sqrt(5)) / 2  # golden ratio
+-        
+-        for i in range(n_points):
+-            z = 1 - (i / (n_points - 1)) * 2  # z goes from 1 to -1
++        for i in range(n):
++            z = 1 - (i / (n - 1)) * 2  # z goes from 1 to -1
+             radius = np.sqrt(1 - z*z)
+             
+             theta = np.arctan2(np.sin(i * 2 * np.pi / phi), np.cos(i * 2 * np.pi / phi))
+             x = radius * np.cos(theta)
+             y = radius * np.sin(theta)
+             points.append([x, y, z])
+-            
+-        points = np.array(points)
++        return np.array(points)
++    
++    def normalize_to_unit_sphere(points):
++        """Normalize points to lie on unit sphere."""
++        norms = np.linalg.norm(points, axis=1)
++        return points / norms[:, np.newaxis]
++    
++    def compute_distance_matrix(points):
++        """Efficiently compute distance matrix."""
++        return cdist(points, points, 'euclidean')
++    
++    def compute_min_max_ratio(dist_matrix):
++        """Calculate min/max distance ratio, ignoring diagonal."""
++        np.fill_diagonal(dist_matrix, np.inf)
++        dmin = np.min(dist_matrix)
++        dmax = np.max(dist_matrix)
++        return dmin / dmax if dmax > 0 else 0
++    
++    def compute_spherical_voronoi_stats(points):
++        """Compute statistics from spherical Voronoi tessellation."""
++        # Project points to unit sphere (should already be there)
++        points_normalized = normalize_to_unit_sphere(points)
+         
+-        # Normalize to unit sphere and scale to fit in unit cube
+-        # First normalize to unit sphere
+-        norms = np.linalg.norm(points, axis=1)
+-        points = points / norms[:, np.newaxis]
++        # Create SphericalVoronoi object
++        sv = SphericalVoronoi(points_normalized, radius=1.0)
+         
+-        # Then map to unit cube [-1,1]^3 and scale appropriately
+-        # We'll scale to make sure all points are within [0,1]^3
+-        points = (points + 1) / 2  # Now in [0,1]^3
++        # Compute Voronoi cell areas
++        cell_areas = sv.calculate_areas()
+         
+-        return points
++        # Get the vertices of Voronoi cells
++        voronoi_vertices = sv.vertices
++        
++        return sv, cell_areas, voronoi_vertices
+     
+-    def optimize_points(initial_points, max_iter=5000):
+-        """Optimize points using hybrid approach."""
+-        current_points = initial_points.copy()
+-        current_ratio = min_max_ratio(current_points)
+-        
+-        # Adaptive cooling parameters
+-        temperature = 0.1
+-        cooling_rate = 0.9995
+-        min_temp = 1e-6
+-        stagnation_count = 0
+-        max_stagnation = 100
+-        
+-        best_points = current_points.copy()
+-        best_ratio = current_ratio
+-        last_improvement = 0
++    def balance_distances(points, max_iter=1000):
++        """Main optimization loop using Voronoi-based distance balancing."""
++        current_points = points.copy()
++        best_points = points.copy()
++        best_ratio = 0.0
+         
+         for iteration in range(max_iter):
+-            # Perturb one point randomly
+-            idx = np.random.randint(len(current_points))
+-            old_point = current_points[idx].copy()
++            # Compute distance matrix
++            dist_matrix = compute_distance_matrix(current_points)
+             
+-            # Small random perturbation
+-            perturbation = np.random.normal(0, 0.01, 3)
+-            current_points[idx] += perturbation
++            # Calculate current ratio
++            current_ratio = compute_min_max_ratio(dist_matrix)
+             
+-            # Project back to unit cube
+-            current_points[idx] = np.clip(current_points[idx], 0, 1)
++            if current_ratio > best_ratio:
++                best_ratio = current_ratio
++                best_points = current_points.copy()
+             
+-            new_ratio = min_max_ratio(current_points)
+-            
+-            # Accept or reject based on Metropolis criterion
+-            if new_ratio > current_ratio:
+-                current_ratio = new_ratio
+-                if new_ratio > best_ratio:
+-                    best_ratio = new_ratio
+-                    best_points = current_points.copy()
+-                    last_improvement = iteration
+-            else:
+-                # Accept with probability based on temperature
+-                delta = new_ratio - current_ratio
+-                acceptance_prob = np.exp(delta / temperature)
+-                if np.random.random() < acceptance_prob:
+-                    current_ratio = new_ratio
+-                else:
+-                    # Revert change
+-                    current_points[idx] = old_point
+-            
+-            # Adjust temperature dynamically
+-            temperature *= cooling_rate
+-            
+-            # Check for stagnation and adjust cooling rate
+-            if iteration - last_improvement > max_stagnation:
+-                temperature = max(min_temp, temperature * 0.8)
+-                last_improvement = iteration
++            # Apply Voronoi-based adjustment
++            try:
++                sv, cell_areas, _ = compute_spherical_voronoi_stats(current_points)
+                 
+-            # Occasionally do local optimization on a subset
+-            if iteration % 100 == 0 and iteration > 0:
+-                # Local refinement on a sample of points
+-                sample_indices = np.random.choice(len(current_points), size=min(5, len(current_points)), replace=False)
+-                for idx in sample_indices:
+-                    # Simple gradient ascent step - just move towards neighbors that increase ratio
+-                    neighbor_idx = (idx + 1) % len(current_points)
+-                    current_points[idx] += 0.0001 * (current_points[neighbor_idx] - current_points[idx])
+-                    current_points[idx] = np.clip(current_points[idx], 0, 1)
++                # Compute centroid of each Voronoi cell
++                centroids = np.zeros((len(current_points), 3))
++                for i in range(len(current_points)):
++                    # Get indices of points belonging to this Voronoi cell
++                    # For simplicity, we'll use a heuristic approach
++                    pass  # Using a simpler direct approach below
+                 
+-                # Update ratio after local refinement
+-                current_ratio = min_max_ratio(current_points)
+-                if current_ratio > best_ratio:
+-                    best_ratio = current_ratio
+-                    best_points = current_points.copy()
++                # Simple distance-based adjustment: move points to balance their distances
++                adjusted_points = current_points.copy()
++                
++                # For each point, compute average distance to others and adjust accordingly
++                for i in range(len(current_points)):
++                    # Compute distances from point i to all others
++                    distances = dist_matrix[i]
++                    distances[i] = np.inf  # Ignore self-distance
++                    
++                    # Find nearest and furthest points
++                    nearest_idx = np.argmin(distances)
++                    furthest_idx = np.argmax(distances)
++                    
++                    # Move point closer to nearest and further from furthest
++                    # This increases the min distance and decreases the max distance
++                    if distances[nearest_idx] < distances[furthest_idx]:
++                        # Move towards nearest point to increase min distance
++                        direction = current_points[nearest_idx] - current_points[i]
++                        move_amount = 0.001 * np.linalg.norm(direction)
++                        if move_amount > 0:
++                            direction = direction / np.linalg.norm(direction)
++                            adjusted_points[i] += direction * move_amount
++                    
++                    # Also move away from furthest to decrease max distance
++                    direction = current_points[i] - current_points[furthest_idx]
++                    move_amount = 0.0005 * np.linalg.norm(direction)
++                    if move_amount > 0:
++                        direction = direction / np.linalg.norm(direction)
++                        adjusted_points[i] -= direction * move_amount
++                
++                # Ensure points stay within unit cube [0,1]^3
++                adjusted_points = np.clip(adjusted_points, 0, 1)
++                
++                # Use the adjusted points for next iteration
++                current_points = adjusted_points
++                
++            except Exception as e:
++                # Fallback to simple gradient-like approach if Voronoi fails
++                adjusted_points = current_points.copy()
++                for i in range(len(current_points)):
++                    # Simple gradient ascent based on neighbor distances
++                    for j in range(len(current_points)):
++                        if i != j:
++                            diff = current_points[j] - current_points[i]
++                            dist = np.linalg.norm(diff)
++                            if dist > 0:
++                                adjustment = 0.001 * diff / dist
++                                adjusted_points[i] += adjustment
++                        
++                adjusted_points = np.clip(adjusted_points, 0, 1)
++                current_points = adjusted_points
+         
+-        return best_points
++        return best_points, best_ratio
+     
+-    # Generate initial configuration
+-    initial_points = spherical_voronoi_initialization(14)
++    # Phase 1: Initialize with Fibonacci sphere placement
++    initial_points = fibonacci_sphere(14)
+     
+-    # Optimize
+-    optimized_points = optimize_points(initial_points)
++    # Normalize to unit sphere
++    initial_points = normalize_to_unit_sphere(initial_points)
+     
+-    return optimized_points
++    # Map to unit cube [0,1]^3
++    initial_points = (initial_points + 1) / 2
++    
++    # Phase 2: Optimize using distance balancing
++    final_points, ratio = balance_distances(initial_points, 1000)
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

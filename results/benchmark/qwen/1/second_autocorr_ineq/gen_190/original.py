@@ -1,0 +1,310 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.signal import convolve
+import time
+from numba import jit, prange
+import numba
+import jax.numpy as jnp
+from jax import jit as jax_jit, grad
+import jax
+from functools import partial
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+MAX_TIME_SECONDS = 85
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal-like integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm correctly using trapezoidal-like integration
+    if len(g_vals) >= 2:
+        # For piecewise linear integration: integrate over intervals
+        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1 in convolution domain
+        for i in range(len(g_vals) - 1):
+            y1 = g_vals[i]
+            y2 = g_vals[i + 1]
+            g_l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def evaluate_c2_manual(f_vals):
+    """Manual C2 evaluation with numerical stability"""
+    # Ensure non-negative values
+    f_vals = np.maximum(f_vals, 0)
+
+    if len(f_vals) == 0:
+        return 0.0
+
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_numba(f_vals)
+
+    # Compute C2
+    c2 = compute_c2_numba(g_vals)
+    return c2
+
+@jax_jit
+def evaluate_c2_jax(f_vals):
+    """JAX-based C2 computation for gradient-based optimization"""
+    try:
+        # Ensure non-negative values
+        f_vals = jnp.maximum(f_vals, 0.0)
+
+        # Compute autoconvolution using JAX's convolution
+        g_vals = jnp.convolve(f_vals, f_vals, mode='full')
+
+        # Compute norms using JAX operations
+        # L2^2 norm using piecewise linear integration
+        l2_squared = 0.0
+        if len(g_vals) >= 2:
+            for i in range(len(g_vals)-1):
+                y1 = g_vals[i]
+                y2 = g_vals[i+1]
+                l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+        # L1 norm (piecewise constant approximation)
+        l1 = jnp.sum(jnp.abs(g_vals)) / (len(g_vals) + 1) if len(g_vals) + 1 > 0 else 0.0
+
+        # L-infinity norm
+        l_inf = jnp.max(jnp.abs(g_vals))
+
+        # Avoid division by zero
+        l1_safe = jnp.where(l1 <= 1e-15, 1e-15, l1)
+        l_inf_safe = jnp.where(l_inf <= 1e-15, 1e-15, l_inf)
+
+        # Compute C2
+        c2 = l2_squared / (l1_safe * l_inf_safe)
+        return c2
+    except:
+        return 0.0
+
+@partial(jax_jit, static_argnums=(0,))
+def compute_gradients_jax(f_vals, num_steps):
+    """Compute gradients of C2 w.r.t. input using JAX"""
+    # Create a wrapper for jax.grad
+    def c2_wrapper(f_vals_vec):
+        f_vals = f_vals_vec.reshape(num_steps)
+        return evaluate_c2_jax(f_vals)
+
+    # Compute gradients
+    grad_fn = jax.grad(c2_wrapper)
+    gradients = grad_fn(jnp.array(f_vals))
+    return gradients
+
+def adaptive_gradient_optimization(initial_params):
+    """Adaptive gradient-based optimization approach"""
+    # Convert to JAX array for gradient computation
+    x0 = jnp.array(initial_params)
+
+    # Adaptive learning rate and iterations
+    learning_rate = 0.01
+    max_iter = 200
+
+    # Track best solution
+    best_x = x0
+    best_c2 = evaluate_c2_jax(x0)
+
+    # Store history for convergence monitoring
+    history = [best_c2]
+
+    for iteration in range(max_iter):
+        # Compute gradients
+        try:
+            grads = compute_gradients_jax(x0, len(initial_params))
+
+            # Update parameters with gradient ascent (since we want to maximize C2)
+            x_new = x0 + learning_rate * grads
+
+            # Project back to feasible space [0, 1]
+            x_new = jnp.clip(x_new, 0.0, 1.0)
+
+            # Evaluate new solution
+            new_c2 = evaluate_c2_jax(x_new)
+
+            # Accept improvement
+            if new_c2 > best_c2:
+                best_c2 = new_c2
+                best_x = x_new
+                history.append(best_c2)
+
+            # Update for next iteration
+            x0 = x_new
+
+            # Reduce learning rate over time
+            learning_rate *= 0.995
+
+        except Exception as e:
+            # If gradient computation fails, fall back to differential evolution
+            break
+
+    return np.array(best_x)
+
+def generate_harmonic_initialization(n_steps):
+    """Generate initial step function using harmonic patterns that are known to work well"""
+    # Create a combination of harmonics that produce good autoconvolution properties
+    initial = np.zeros(n_steps)
+
+    # Base pattern: cosine wave with multiple frequencies
+    freqs = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]  # Different frequencies
+    amplitudes = [0.8, 0.6, 0.4, 0.3, 0.2, 0.1]
+
+    for i in range(n_steps):
+        # Sum of cosines with different frequencies and amplitudes
+        pattern_sum = 0.0
+        for freq, amp in zip(freqs, amplitudes):
+            pattern_sum += amp * np.cos(i * freq)
+        initial[i] = max(0, 0.3 + 0.5 * pattern_sum)
+
+    # Add some random variation
+    noise = np.random.normal(0, 0.05, n_steps)
+    initial += noise
+
+    # Ensure non-negative
+    initial = np.maximum(initial, 0)
+
+    # Apply some smoothing to reduce sharp transitions
+    if n_steps > 10:
+        smoothed = initial.copy()
+        for i in range(1, n_steps-1):
+            smoothed[i] = 0.3 * initial[i-1] + 0.4 * initial[i] + 0.3 * initial[i+1]
+        initial = smoothed
+
+    return initial
+
+def hybrid_optimization_strategy():
+    """Hybrid approach combining global and local optimization"""
+    n_steps = 1000
+
+    # Phase 1: Global search with multi-start
+    best_c2 = -np.inf
+    best_params = None
+
+    # Try multiple initializations
+    initializations = []
+
+    # Different initialization patterns
+    np.random.seed(42)
+    initializations.append(generate_harmonic_initialization(n_steps))
+
+    np.random.seed(123)
+    initializations.append(generate_harmonic_initialization(n_steps))
+
+    # Add some random but structured initializations
+    for i in range(2):
+        np.random.seed(456 + i)
+        pattern = np.random.random(n_steps) * 0.5 + 0.25
+        initializations.append(pattern)
+
+    # Run evolutionary optimization on each initialization
+    for i, x0 in enumerate(initializations):
+        try:
+            # Use differential evolution for global search
+            bounds = [(0.0, 1.0) for _ in range(n_steps)]
+
+            result = differential_evolution(
+                lambda x: -evaluate_c2_manual(x),
+                bounds,
+                x0=x0,
+                seed=i + 42,
+                maxiter=100,
+                popsize=max(15, min(30, n_steps // 50)),
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                disp=False,
+                tol=1e-6
+            )
+
+            c2 = -result.fun
+            if c2 > best_c2:
+                best_c2 = c2
+                best_params = result.x.copy()
+
+        except Exception:
+            continue
+
+    # Phase 2: Local refinement using gradient-based optimization
+    if best_params is not None:
+        try:
+            refined_params = adaptive_gradient_optimization(best_params)
+            refined_c2 = evaluate_c2_manual(refined_params)
+
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_params = refined_params
+        except Exception:
+            pass
+
+    # Return best solution
+    return best_params if best_params is not None else np.ones(n_steps) * 0.5
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using hybrid optimization."""
+    start_time = time.time()
+
+    # Use hybrid optimization strategy
+    optimized_params = hybrid_optimization_strategy()
+
+    # Ensure non-negative values and convert to list
+    f_values = np.maximum(optimized_params, 0).tolist()
+
+    end_time = time.time()
+
+    # Final verification of C2 value
+    try:
+        final_c2 = evaluate_c2_manual(optimized_params)
+    except:
+        final_c2 = 0.0
+
+    print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+    print(f"C2 achieved: {final_c2}")
+
+    return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

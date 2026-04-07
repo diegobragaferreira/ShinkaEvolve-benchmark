@@ -1,0 +1,329 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+from copy import deepcopy
+import time
+from scipy.optimize import minimize
+from numba import jit
+
+# Constants
+UNIT_HEX_RADIUS = 1.0
+HEXAGON_VERTICES = 6
+ROTATION_STEPS = 12  # 30 degree increments for rotation
+
+@jit(nopython=True)
+def get_hexagon_vertices(x, y, angle_deg, radius=UNIT_HEX_RADIUS):
+    """Generate vertices of a regular hexagon"""
+    vertices = np.zeros((6, 2))
+    angle_rad = np.radians(angle_deg)
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vertices[i] = [x + radius * np.cos(theta), y + radius * np.sin(theta)]
+    return vertices
+
+@jit(nopython=True)
+def distance_point_to_line(point, line_start, line_end):
+    """Calculate distance from point to line segment"""
+    # Vector from line_start to line_end
+    line_vec = line_end - line_start
+    # Vector from line_start to point
+    point_vec = point - line_start
+    
+    line_len_sq = np.dot(line_vec, line_vec)
+    if line_len_sq == 0:
+        return np.linalg.norm(point_vec)
+    
+    # Project point onto line
+    t = max(0, min(1, np.dot(point_vec, line_vec) / line_len_sq))
+    
+    # Closest point on line segment
+    closest = line_start + t * line_vec
+    
+    return np.linalg.norm(point - closest)
+
+@jit(nopython=True)
+def point_in_hexagon(point, hex_vertices):
+    """Check if a point is inside a hexagon using ray casting"""
+    x, y = point
+    n = len(hex_vertices)
+    inside = False
+    
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    
+    return inside
+
+@jit(nopython=True)
+def hexagon_overlap(h1_vertices, h2_vertices):
+    """Simple check for hexagon overlap using vertex inclusion"""
+    # Check if any vertex of h1 is inside h2
+    for vertex in h1_vertices:
+        if point_in_hexagon(vertex, h2_vertices):
+            return True
+    # Check if any vertex of h2 is inside h1
+    for vertex in h2_vertices:
+        if point_in_hexagon(vertex, h1_vertices):
+            return True
+    return False
+
+def compute_outer_hexagon_radius(inner_configs, outer_center=(0, 0), initial_radius=5.0):
+    """Compute minimum outer hexagon radius that contains all inner hexagons"""
+    # Create hexagon vertices for all inner hexagons
+    hex_vertices_list = []
+    for config in inner_configs:
+        x, y, angle = config
+        vertices = get_hexagon_vertices(x, y, angle)
+        hex_vertices_list.append(vertices)
+    
+    # Find all vertices of inner hexagons
+    all_vertices = []
+    for vertices in hex_vertices_list:
+        for vertex in vertices:
+            all_vertices.append(vertex)
+    
+    # Calculate distances from center to all vertices
+    distances = []
+    for vertex in all_vertices:
+        dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+        distances.append(dist)
+    
+    # Maximum distance plus some safety margin
+    max_dist = max(distances) if distances else 0
+    return max_dist + UNIT_HEX_RADIUS * 1.1  # Add buffer
+
+def evaluate_fitness(configs, outer_radius=None):
+    """Evaluate how well a configuration fits"""
+    if outer_radius is None:
+        outer_radius = compute_outer_hexagon_radius(configs)
+    
+    # Get vertices for each hexagon
+    hex_vertices_list = []
+    for config in configs:
+        x, y, angle = config
+        vertices = get_hexagon_vertices(x, y, angle)
+        hex_vertices_list.append(vertices)
+    
+    # Check for overlaps
+    overlap_penalty = 0
+    for i in range(len(hex_vertices_list)):
+        for j in range(i+1, len(hex_vertices_list)):
+            if hexagon_overlap(hex_vertices_list[i], hex_vertices_list[j]):
+                overlap_penalty += 1000  # Heavy penalty for overlaps
+    
+    # Check containment
+    containment_penalty = 0
+    outer_hex_vertices = get_hexagon_vertices(0, 0, 0, outer_radius)
+    
+    for vertices in hex_vertices_list:
+        for vertex in vertices:
+            # Check if vertex is outside outer hexagon
+            if not point_in_hexagon(vertex, outer_hex_vertices):
+                # Calculate distance from vertex to nearest edge
+                min_dist = float('inf')
+                for k in range(6):
+                    start = outer_hex_vertices[k]
+                    end = outer_hex_vertices[(k+1)%6]
+                    dist = distance_point_to_line(vertex, start, end)
+                    min_dist = min(min_dist, dist)
+                
+                containment_penalty += min_dist * 100  # Penalty for containment violations
+    
+    # Base fitness is negative of overlap + containment penalties
+    base_fitness = -(overlap_penalty + containment_penalty)
+    
+    # We want to maximize 1/outer_radius, so minimize outer_radius
+    size_penalty = outer_radius * 1000  # Large penalty to prioritize smaller outer hexagon
+    
+    total_fitness = base_fitness - size_penalty
+    
+    return total_fitness
+
+def mutate_config(config, mutation_rate=0.1):
+    """Mutate a single hexagon configuration"""
+    new_config = config.copy()
+    
+    # Mutate position
+    if random.random() < mutation_rate:
+        new_config[0] += np.random.normal(0, 0.2)  # x position
+    if random.random() < mutation_rate:
+        new_config[1] += np.random.normal(0, 0.2)  # y position
+    
+    # Mutate angle (discrete rotation steps)
+    if random.random() < mutation_rate:
+        # Randomly choose a new angle step
+        new_angle = ((config[2] // 30) + random.randint(-2, 2)) * 30
+        new_config[2] = new_angle % 360
+    
+    return new_config
+
+def crossover_configs(parent1, parent2):
+    """Create offspring from two parent configurations"""
+    child1 = []
+    child2 = []
+    
+    for i in range(len(parent1)):
+        # Single point crossover for each hexagon
+        if random.random() < 0.5:
+            child1.append(parent1[i])
+            child2.append(parent2[i])
+        else:
+            child1.append(parent2[i])
+            child2.append(parent1[i])
+    
+    return np.array(child1), np.array(child2)
+
+def local_optimization(configs, max_iter=100):
+    """Refine configurations using local optimization"""
+    # Convert to flattened array for scipy optimize
+    flat_config = configs.flatten()
+    
+    def objective(flat_params):
+        # Reshape back to configs
+        trial_configs = flat_params.reshape(-1, 3)
+        
+        # Evaluate fitness
+        return -evaluate_fitness(trial_configs)  # Negate because minimize
+    
+    # Use L-BFGS-B to refine positions
+    try:
+        result = minimize(objective, flat_config, method='L-BFGS-B', 
+                         options={'maxiter': max_iter})
+        refined_configs = result.x.reshape(-1, 3)
+        return refined_configs
+    except:
+        # If optimization fails, return original
+        return configs
+
+def evolutionary_search(num_generations=200, pop_size=50):
+    """Main evolutionary search loop"""
+    # Initialize population with diverse configurations
+    population = []
+    
+    for _ in range(pop_size):
+        # Start with randomized positions around a central area
+        configs = []
+        for i in range(11):
+            x = np.random.uniform(-3, 3)
+            y = np.random.uniform(-3, 3)
+            angle = np.random.choice([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330])
+            configs.append([x, y, angle])
+        population.append(np.array(configs))
+    
+    best_fitness = float('-inf')
+    best_individual = None
+    best_radius = float('inf')
+    
+    # Adaptive mutation rates
+    mutation_rates = [0.15, 0.1, 0.05, 0.01]
+    
+    for gen in range(num_generations):
+        # Evaluate all individuals
+        fitness_scores = []
+        
+        for individual in population:
+            fit = evaluate_fitness(individual)
+            fitness_scores.append((fit, individual))
+        
+        # Sort by fitness
+        fitness_scores.sort(key=lambda x: x[0], reverse=True)
+        
+        # Track best
+        current_best_score = fitness_scores[0][0]
+        current_best_individual = fitness_scores[0][1]
+        
+        # Compute actual outer radius for best individual
+        test_radius = compute_outer_hexagon_radius(current_best_individual)
+        
+        if current_best_score > best_fitness:
+            best_fitness = current_best_score
+            best_individual = current_best_individual.copy()
+            best_radius = test_radius
+            
+        print(f"Generation {gen}: Best Fitness = {current_best_score:.2f}, "
+              f"Outer Radius = {test_radius:.3f}")
+        
+        # Selection - keep top 30%
+        selected = [ind for _, ind in fitness_scores[:pop_size//3]]
+        
+        # Create new population through crossover and mutation
+        new_population = selected.copy()
+        
+        # Elitism - keep best individual
+        new_population.append(best_individual)
+        
+        # Generate offspring
+        while len(new_population) < pop_size:
+            # Tournament selection
+            parent1 = random.choice(selected)
+            parent2 = random.choice(selected)
+            
+            # Crossover
+            child1, child2 = crossover_configs(parent1, parent2)
+            
+            # Mutate
+            mutation_rate_idx = min(gen // 50, len(mutation_rates)-1)
+            child1 = np.array([mutate_config(c, mutation_rates[mutation_rate_idx]) for c in child1])
+            child2 = np.array([mutate_config(c, mutation_rates[mutation_rate_idx]) for c in child2])
+            
+            new_population.extend([child1, child2])
+        
+        # Trim population to exact size
+        population = new_population[:pop_size]
+        
+        # Apply local optimization to top individuals
+        for i in range(len(population)//5):  # Optimize top 20%
+            population[i] = local_optimization(population[i])
+    
+    return best_individual, best_radius
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Run evolutionary search
+    best_configs, outer_radius = evolutionary_search(num_generations=200, pop_size=50)
+    
+    # Final local optimization to fine-tune
+    final_configs = local_optimization(best_configs, max_iter=100)
+    
+    # Compute final outer radius
+    final_radius = compute_outer_hexagon_radius(final_configs)
+    
+    # Return results
+    # We don't actually need to rotate the outer hexagon, so just return center at origin
+    inner_hex_data = final_configs
+    outer_hex_data = np.array([0, 0, 0])
+    outer_hex_side_length = final_radius
+    
+    eval_time = time.time() - start_time
+    
+    # Compute benchmark ratio (1/outer_radius vs 0.2544)
+    inv_outer_side_length = 1.0 / outer_radius
+    benchmark_ratio = inv_outer_side_length / 0.2544
+    
+    print(f"\nFinal Results:")
+    print(f"1/outer_hex_side_length = {inv_outer_side_length:.6f}")
+    print(f"Benchmark Ratio = {benchmark_ratio:.6f}")
+    print(f"Evaluation Time = {eval_time:.2f} seconds")
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

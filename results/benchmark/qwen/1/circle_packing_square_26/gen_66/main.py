@@ -1,0 +1,109 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def create_voronoi_initialization(n_circles=26):
+    """Create initial circle placement using Voronoi diagram approach"""
+    # Generate random points for Voronoi
+    np.random.seed(42)  # For reproducibility
+    points = np.random.rand(n_circles, 2)
+
+    # Create Voronoi diagram
+    vor = Voronoi(points)
+
+    # Get Voronoi vertices and regions
+    vertices = vor.vertices
+
+    # Create circles centered at Voronoi vertices with appropriate radii
+    circles = []
+
+    # For each Voronoi region, we'll place a circle
+    for i in range(n_circles):
+        if i < len(vor.point_region) and vor.point_region[i] >= 0:
+            # Find the region corresponding to this point
+            region = vor.regions[vor.point_region[i]]
+            if len(region) > 0 and -1 not in region:
+                # Calculate the radius based on distance to nearest neighbors
+                center = points[i]
+
+                # Compute minimum distance to other points to determine max radius
+                distances = cdist([center], points)[0]
+                distances = np.sort(distances)
+                min_distance = distances[1] if len(distances) > 1 else 1.0
+
+                # Set radius to be half the minimum distance, bounded by unit square
+                max_radius = min(min_distance / 2.0,
+                               min(center[0], 1-center[0], center[1], 1-center[1]))
+
+                # Ensure we don't exceed reasonable bounds
+                max_radius = max(0.01, min(max_radius, 0.4))
+
+                circles.append((center[0], center[1], max_radius))
+            else:
+                # Fallback to simple uniform distribution
+                x = np.random.uniform(0.1, 0.9)
+                y = np.random.uniform(0.1, 0.9)
+                r = np.random.uniform(0.02, 0.15)
+                circles.append((x, y, r))
+        else:
+            # Fallback to simple uniform distribution
+            x = np.random.uniform(0.1, 0.9)
+            y = np.random.uniform(0.1, 0.9)
+            r = np.random.uniform(0.02, 0.15)
+            circles.append((x, y, r))
+
+    return np.array(circles)
+
+def check_overlap(circles):
+    """Check if any circles overlap"""
+    n = len(circles)
+    for i in range(n):
+        for j in range(i+1, n):
+            dx = circles[i][0] - circles[j][0]
+            dy = circles[i][1] - circles[j][1]
+            distance = np.sqrt(dx*dx + dy*dy)
+            if distance < circles[i][2] + circles[j][2]:
+                return False
+    return True
+
+def validate_circle_position(circle, circles):
+    """Validate that a circle fits within the unit square and doesn't overlap"""
+    x, y, r = circle
+    # Check containment
+    if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+        return False
+    # Check overlap with existing circles
+    for c in circles:
+        dx = x - c[0]
+        dy = y - c[1]
+        distance = np.sqrt(dx*dx + dy*dy)
+        if distance < r + c[2]:
+            return False
+    return True
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = create_voronoi_initialization(n)
+
+    # Refine initialization to ensure all circles fit properly
+    for i in range(n):
+        x, y, r = circles[i]
+        # Adjust radius if needed to ensure containment
+        r_adjusted = min(r, x, 1-x, y, 1-y)
+        if r_adjusted < r:
+            circles[i] = (x, y, r_adjusted)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

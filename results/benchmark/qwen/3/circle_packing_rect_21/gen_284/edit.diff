@@ -1,0 +1,420 @@
+--- a/original.py
++++ b/original.py
+@@ -1,396 +1,411 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import cdist
+ from sklearn.cluster import KMeans
+ from scipy.spatial import Voronoi
+ import math
+ import random
+ from numba import jit
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     # Container setup (perimeter = 4, so width + height = 2)
+     # Using 1.2 x 0.8 ratio which often works well for circle packing
+     container_width, container_height = 1.2, 0.8
+ 
+     # Number of circles
+     n = 21
+ 
+     # Initialize circles array
+     circles = np.zeros((n, 3))
+ 
+     # Phase 1: Enhanced Initialization with Hybrid Approach
+     # Generate strategic anchor points (corners and edges)
+     anchors = []
+     # Corners
+     anchors.extend([(0.05, 0.05), (container_width - 0.05, 0.05),
+                    (0.05, container_height - 0.05), (container_width - 0.05, container_height - 0.05)])
+     # Edge centers
+     anchors.extend([(container_width/2, 0.05), (container_width/2, container_height - 0.05),
+                    (0.05, container_height/2), (container_width - 0.05, container_height/2)])
+ 
+     # Generate a denser set of candidate points for Voronoi-based selection
+     candidate_points = []
+     grid_density = 64  # Increased density for better Voronoi distribution
+     for i in range(grid_density):
+         for j in range(grid_density):
+             x = (i + 0.5) / grid_density * container_width
+             y = (j + 0.5) / grid_density * container_height
+             candidate_points.append((x, y))
+ 
+     # Add some random points to avoid regular grid bias
+     np.random.seed(42)
+     for _ in range(100):  # Increased random points
+         x = np.random.uniform(0.05, container_width - 0.05)
+         y = np.random.uniform(0.05, container_height - 0.05)
+         candidate_points.append((x, y))
+ 
+     # Use Voronoi approach to select well-distributed points
+     # First, combine anchors with candidates
+     all_points = anchors + candidate_points
+ 
+     # Use k-means++ to get initial centroids for Voronoi
+     kmeans = KMeans(n_clusters=min(len(all_points), n), init='k-means++', n_init=10, random_state=42)
+     all_array = np.array(all_points)
+     kmeans.fit(all_array)
+     selected_centroids = kmeans.cluster_centers_
+ 
+     # Now, for each centroid, find the closest actual candidate point
+     selected_positions = []
+     for centroid in selected_centroids:
+         distances = np.linalg.norm(all_array - centroid, axis=1)
+         closest_idx = np.argmin(distances)
+         selected_positions.append(tuple(all_array[closest_idx]))
+ 
+     # Ensure we have exactly n positions
+     if len(selected_positions) < n:
+         # Fill with additional points from candidates
+         remaining_needed = n - len(selected_positions)
+         for i in range(min(remaining_needed, len(candidate_points))):
+             selected_positions.append(candidate_points[i])
+     elif len(selected_positions) > n:
+         selected_positions = selected_positions[:n]
+ 
+     initial_positions = selected_positions
+ 
+     # Initialize circles with positions and small radii
+     for i in range(n):
+         x, y = initial_positions[i]
+         circles[i] = [x, y, 0.02]
+ 
+     # Phase 2: Multi-phase Optimization with Adaptive Parameters
+     max_iterations = 5000
+     best_sum_radii = 0
+     best_circles = None
+ 
+     # Parameters that adapt during optimization
+     learning_rate = 0.2  # More aggressive start
+     penalty_weight = 1.0
+     max_radius_limit = 0.4  # Prevent extremely large radii
+ 
+     # Optimization phases - optimized parameters
+     phase_1_iterations = 1000
+     phase_2_iterations = 2000
+     phase_3_iterations = 2000
+ 
+     # Helper function for gradient-based updates
+     @jit(nopython=True)
+     def calculate_forces_numba(positions, radii, n):
+         """Calculate forces between circles using numba for speed"""
+         forces = np.zeros((n, 2))
+         for i in range(n):
+             for j in range(n):
+                 if i != j:
+                     dx = positions[j, 0] - positions[i, 0]
+                     dy = positions[j, 1] - positions[i, 1]
+                     dist = np.sqrt(dx*dx + dy*dy)
+ 
+                     if dist > 1e-8 and dist < (radii[i] + radii[j]):
+                         # Repulsive force
+                         force_magnitude = (radii[i] + radii[j] - dist) / (dist + 1e-8)
+                         forces[i, 0] -= force_magnitude * dx
+                         forces[i, 1] -= force_magnitude * dy
+         return forces
+ 
+     @jit(nopython=True)
+     def calculate_max_radius_fast(positions, radii, index, width, height, n):
+         """Fast calculation of max radius for circle at index"""
+         x, y = positions[index, 0], positions[index, 1]
+ 
+         # Boundary constraints
+         max_radius = min(x, y, width - x, height - y)
+ 
+         # Overlap constraints
+         for i in range(n):
+             if i != index:
+                 dx = x - positions[i, 0]
+                 dy = y - positions[i, 1]
+                 dist = np.sqrt(dx*dx + dy*dy)
+                 if dist > 1e-8:
+                     max_radius_for_this_circle = dist - radii[i]
+                     if max_radius_for_this_circle < max_radius:
+                         max_radius = max_radius_for_this_circle
+ 
+         return max(max_radius, 0.001)
+ 
+     # Phase 1: Aggressive exploration with large steps
+     for iteration in range(phase_1_iterations):
+         positions = circles[:, :2]
+         radii = circles[:, 2]
+ 
+         # Early termination if already optimal
+         if iteration > 100 and iteration % 100 == 0:
+             current_sum = np.sum(radii)
+             if current_sum > best_sum_radii:
+                 best_sum_radii = current_sum
+                 best_circles = circles.copy()
+ 
+         # Compute distance matrix efficiently
+         distances = cdist(positions, positions)
+ 
+-        # Check for violations with adaptive early exit
++        # Check for violations with adaptive early exit and dynamic sensitivity
+         violation_count = 0
+         total_violation_severity = 0.0
+-        adaptive_threshold = max(5, 50 - iteration // 10)  # Decreasing threshold faster
++
++        # Adaptive threshold that considers optimization phase and solution quality
++        base_threshold = 50
++        phase_factor = 1.0 - (iteration / phase_1_iterations)
++        quality_factor = 1.0 if best_sum_radii < 1.0 else 1.0 - (best_sum_radii / 3.0)
++        adaptive_threshold = max(1, int(base_threshold * phase_factor * quality_factor))
+ 
+         for i in range(n):
+             for j in range(i+1, n):
+                 dist = distances[i, j]
+                 min_dist = radii[i] + radii[j]
+                 if dist < min_dist:
+                     violation_severity = (min_dist - dist) / (min_dist + 1e-8)  # Normalize
+                     total_violation_severity += violation_severity
+                     violation_count += 1
+                     if violation_count > adaptive_threshold:  # Dynamic threshold
+                         break
+             if violation_count > adaptive_threshold:
+                 break
+ 
+         # Adaptive penalty weight based on violation severity and phase
+         penalty_weight = 1.0 + min(0.5, total_violation_severity * 0.01)
+ 
+         # If few violations or later iterations, proceed with optimization
+         if violation_count <= 5 or iteration > phase_1_iterations // 2:
+             # Update radii based on available space using fast numba calculation
+             for i in range(n):
+                 max_radius = calculate_max_radius_fast(positions, radii, i, container_width, container_height, n)
+ 
+                 if max_radius > radii[i] and max_radius < float('inf'):
+                     # Adaptive radius increase
+                     circles[i, 2] = min(radii[i] + learning_rate * 0.5 * (max_radius - radii[i]), max_radius)
+ 
+             # Position optimization with better repulsion and gradient-based refinement
+             # Calculate forces using numba-optimized version
+             forces = calculate_forces_numba(positions, radii, n)
+ 
+             for i in range(n):
+                 x, y, r = circles[i]
+ 
+                 # Apply forces with gradient-based refinement
+                 fx, fy = forces[i, 0], forces[i, 1]
+ 
+                 # Boundary forces - stronger repulsion near boundaries
+                 if x < r:
+                     fx += (r - x) * 3.0
+                 if x + r > container_width:
+                     fx -= (x + r - container_width) * 3.0
+                 if y < r:
+                     fy += (r - y) * 3.0
+                 if y + r > container_height:
+                     fy -= (y + r - container_height) * 3.0
+ 
+                 # Apply movement with bounds checking - using gradient-based approach
+                 new_x = max(r, min(container_width - r, x + learning_rate * fx))
+                 new_y = max(r, min(container_height - r, y + learning_rate * fy))
+ 
+                 circles[i, 0] = new_x
+                 circles[i, 1] = new_y
+ 
+         # Decay learning rate more aggressively in early iterations
+         if iteration < phase_1_iterations // 2:
+             learning_rate *= 0.999
+         else:
+             learning_rate *= 0.9995
+ 
+         # Global refinement occasionally (more frequent in early iterations)
+         if iteration % 100 == 0 and iteration > 0:
+             # Perturb positions with larger jumps in early iterations
+             perturbation_scale = 0.02 if iteration < 500 else 0.01
+             for i in range(n):
+                 x, y, r = circles[i]
+                 circles[i] = [max(r, min(container_width - r, x + np.random.normal(0, perturbation_scale))),
+                               max(r, min(container_height - r, y + np.random.normal(0, perturbation_scale))),
+                               r]
+ 
+     # Phase 2: Refinement with smaller steps
+     learning_rate = 0.05
+     for iteration in range(phase_2_iterations):
+         positions = circles[:, :2]
+         radii = circles[:, 2]
+ 
+         # Compute distance matrix efficiently
+         distances = cdist(positions, positions)
+ 
+-        # Check for violations with adaptive early exit
++        # Check for violations with adaptive early exit and dynamic sensitivity
+         violation_count = 0
+         total_violation_severity = 0.0
+-        adaptive_threshold = max(3, 30 - iteration // 40)  # Decreasing threshold
++
++        # Adaptive threshold that considers optimization phase and solution quality
++        base_threshold = 30
++        phase_factor = 1.0 - (iteration / phase_2_iterations)
++        quality_factor = 1.0 if best_sum_radii < 1.0 else 1.0 - (best_sum_radii / 3.0)
++        adaptive_threshold = max(1, int(base_threshold * phase_factor * quality_factor))
+ 
+         for i in range(n):
+             for j in range(i+1, n):
+                 dist = distances[i, j]
+                 min_dist = radii[i] + radii[j]
+                 if dist < min_dist:
+                     violation_severity = (min_dist - dist) / (min_dist + 1e-8)  # Normalize
+                     total_violation_severity += violation_severity
+                     violation_count += 1
+                     if violation_count > adaptive_threshold:  # Dynamic threshold
+                         break
+             if violation_count > adaptive_threshold:
+                 break
+ 
+         # Adaptive penalty weight based on violation severity and phase
+         penalty_weight = 1.0 + min(0.3, total_violation_severity * 0.02)
+ 
+         # Update radii with more careful adjustments
+         for i in range(n):
+             max_radius = calculate_max_radius_fast(positions, radii, i, container_width, container_height, n)
+ 
+             if max_radius > radii[i] and max_radius < float('inf'):
+                 # More conservative radius increase
+                 circles[i, 2] = min(radii[i] + learning_rate * 0.3 * (max_radius - radii[i]), max_radius)
+ 
+         # Position optimization with gradient-based refinement
+         forces = calculate_forces_numba(positions, radii, n)
+ 
+         for i in range(n):
+             x, y, r = circles[i]
+ 
+             # Apply forces with gradient-based approach
+             fx, fy = forces[i, 0], forces[i, 1]
+ 
+             # Boundary forces - strong repulsion
+             if x < r:
+                 fx += (r - x) * 4.0
+             if x + r > container_width:
+                 fx -= (x + r - container_width) * 4.0
+             if y < r:
+                 fy += (r - y) * 4.0
+             if y + r > container_height:
+                 fy -= (y + r - container_height) * 4.0
+ 
+             # Apply movement with bounds checking
+             new_x = max(r, min(container_width - r, x + learning_rate * fx))
+             new_y = max(r, min(container_height - r, y + learning_rate * fy))
+ 
+             circles[i, 0] = new_x
+             circles[i, 1] = new_y
+ 
+         # Decay learning rate
+         learning_rate *= 0.9997
+ 
+         # Save best configuration
+         current_sum = np.sum(radii)
+         if current_sum > best_sum_radii:
+             best_sum_radii = current_sum
+             best_circles = circles.copy()
+ 
+     # Phase 3: Fine-tuning
+     learning_rate = 0.01
+     for iteration in range(phase_3_iterations):
+         positions = circles[:, :2]
+         radii = circles[:, 2]
+ 
+         distances = cdist(positions, positions)
+ 
+-        # Check for violations with very strict early exit
++        # Check for violations with very strict early exit and dynamic sensitivity
+         violation_count = 0
+         total_violation_severity = 0.0
+-        adaptive_threshold = max(1, 5 - iteration // 200)  # Very strict threshold
++
++        # Adaptive threshold that considers optimization phase and solution quality
++        base_threshold = 5
++        phase_factor = 1.0 - (iteration / phase_3_iterations)
++        quality_factor = 1.0 if best_sum_radii < 1.0 else 1.0 - (best_sum_radii / 3.0)
++        adaptive_threshold = max(1, int(base_threshold * phase_factor * quality_factor))
+ 
+         for i in range(n):
+             for j in range(i+1, n):
+                 dist = distances[i, j]
+                 min_dist = radii[i] + radii[j]
+                 if dist < min_dist:
+                     violation_severity = (min_dist - dist) / (min_dist + 1e-8)  # Normalize
+                     total_violation_severity += violation_severity
+                     violation_count += 1
+                     if violation_count > adaptive_threshold:  # Very strict threshold
+                         break
+             if violation_count > adaptive_threshold:
+                 break
+ 
+         # Very strict penalty weight in fine-tuning phase
+         penalty_weight = 1.0 + min(0.1, total_violation_severity * 0.05)
+ 
+         # Update radii with fine adjustments
+         for i in range(n):
+             max_radius = calculate_max_radius_fast(positions, radii, i, container_width, container_height, n)
+ 
+             if max_radius > radii[i] and max_radius < float('inf'):
+                 # Very slow radius increase
+                 circles[i, 2] = min(radii[i] + learning_rate * 0.1 * (max_radius - radii[i]), max_radius)
+ 
+         # Position optimization with gradient-based fine-grained movements
+         forces = calculate_forces_numba(positions, radii, n)
+ 
+         for i in range(n):
+             x, y, r = circles[i]
+ 
+             # Apply forces with gradient-based approach
+             fx, fy = forces[i, 0], forces[i, 1]
+ 
+             # Boundary forces - even stronger
+             if x < r:
+                 fx += (r - x) * 6.0
+             if x + r > container_width:
+                 fx -= (x + r - container_width) * 6.0
+             if y < r:
+                 fy += (r - y) * 6.0
+             if y + r > container_height:
+                 fy -= (y + r - container_height) * 6.0
+ 
+             # Apply small movements
+             new_x = max(r, min(container_width - r, x + learning_rate * fx))
+             new_y = max(r, min(container_height - r, y + learning_rate * fy))
+ 
+             circles[i, 0] = new_x
+             circles[i, 1] = new_y
+ 
+         # Decay learning rate
+         learning_rate *= 0.99995
+ 
+         # Save best configuration
+         current_sum = np.sum(radii)
+         if current_sum > best_sum_radii:
+             best_sum_radii = current_sum
+             best_circles = circles.copy()
+ 
+     # Return the best configuration found
+     if best_circles is not None:
+         return best_circles
+ 
+     # Final cleanup
+     for i in range(n):
+         x, y, r = circles[i]
+         # Ensure circles stay within bounds
+         x = max(r, min(container_width - r, x))
+         y = max(r, min(container_height - r, y))
+         circles[i] = [x, y, r]
+ 
+     return circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

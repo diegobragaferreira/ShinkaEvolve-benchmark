@@ -1,0 +1,246 @@
+<NAME>
+add_numba_compilation_to_hexagon_operations
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses numba JIT compilation for some functions but not all geometric operations. I'll enhance the numba compilation to cover more critical geometric computations, particularly the hexagon overlap detection and spatial hash operations, which are called frequently during optimization. This will provide significant performance improvements for the core computational bottlenecks.
+
+The key improvements include:
+1. Adding numba JIT decorators to the overlap checking functions
+2. Optimizing the spatial hash creation and lookup functions
+3. Making the distance calculations more efficient with numba
+4. Ensuring all geometric operations benefit from JIT compilation for better performance during evolutionary optimization cycles
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def point_in_polygon(point, polygon):
+    """Check if point is inside polygon using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line_segment(point, line_start, line_end):
+    """Calculate distance from point to line segment"""
+    A = point[0] - line_start[0]
+    B = point[1] - line_start[1]
+    C = line_end[0] - line_start[0]
+    D = line_end[1] - line_start[1]
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start[0] + param * C
+    yy = line_start[1] + param * D
+    dx = point[0] - xx
+    dy = point[1] - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+
+def create_spatial_hash(hex_vertices_list, cell_size=2.0):
+    """Create spatial hash grid for fast overlap checking"""
+    hash_grid = {}
+    for i, vertices in enumerate(hex_vertices_list):
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Add to all relevant cells
+        start_col = int(min_x // cell_size)
+        end_col = int(max_x // cell_size) + 1
+        start_row = int(min_y // cell_size)
+        end_row = int(max_y // cell_size) + 1
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                cell_key = (col, row)
+                if cell_key not in hash_grid:
+                    hash_grid[cell_key] = []
+                hash_grid[cell_key].append(i)
+    return hash_grid
+
+def get_overlapping_indices(hash_grid, hex_index, hex_vertices, cell_size=2.0):
+    """Get indices of potentially overlapping hexagons using spatial hash"""
+    overlapping = set()
+    # Get bounding box of hexagon
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+
+    # Check all relevant cells
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            cell_key = (col, row)
+            if cell_key in hash_grid:
+                for idx in hash_grid[cell_key]:
+                    if idx != hex_index:
+                        overlapping.add(idx)
+    return overlapping
+=======
+@jit(nopython=True)
+def point_in_polygon(point, polygon):
+    """Check if point is inside polygon using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line_segment(point, line_start, line_end):
+    """Calculate distance from point to line segment"""
+    A = point[0] - line_start[0]
+    B = point[1] - line_start[1]
+    C = line_end[0] - line_start[0]
+    D = line_end[1] - line_start[1]
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start[0] + param * C
+    yy = line_start[1] + param * D
+    dx = point[0] - xx
+    dy = point[1] - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+
+@jit(nopython=True)
+def create_spatial_hash(hex_vertices_list, cell_size=2.0):
+    """Create spatial hash grid for fast overlap checking"""
+    # Pre-calculate array sizes to avoid repeated allocation
+    hash_grid = {}
+    n_hexagons = len(hex_vertices_list)
+
+    for i in range(n_hexagons):
+        vertices = hex_vertices_list[i]
+        # Get bounding box of hexagon using numba-friendly approach
+        min_x = vertices[0][0]
+        max_x = vertices[0][0]
+        min_y = vertices[0][1]
+        max_y = vertices[0][1]
+
+        for j in range(1, 6):
+            vx, vy = vertices[j]
+            if vx < min_x:
+                min_x = vx
+            if vx > max_x:
+                max_x = vx
+            if vy < min_y:
+                min_y = vy
+            if vy > max_y:
+                max_y = vy
+
+        # Add to all relevant cells
+        start_col = int(min_x // cell_size)
+        end_col = int(max_x // cell_size) + 1
+        start_row = int(min_y // cell_size)
+        end_row = int(max_y // cell_size) + 1
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                cell_key = (col, row)
+                if cell_key not in hash_grid:
+                    hash_grid[cell_key] = []
+                hash_grid[cell_key].append(i)
+    return hash_grid
+
+@jit(nopython=True)
+def get_overlapping_indices(hash_grid, hex_index, hex_vertices, cell_size=2.0):
+    """Get indices of potentially overlapping hexagons using spatial hash"""
+    overlapping = set()
+    # Get bounding box of hexagon
+    min_x = hex_vertices[0][0]
+    max_x = hex_vertices[0][0]
+    min_y = hex_vertices[0][1]
+    max_y = hex_vertices[0][1]
+
+    for j in range(1, 6):
+        vx, vy = hex_vertices[j]
+        if vx < min_x:
+            min_x = vx
+        if vx > max_x:
+            max_x = vx
+        if vy < min_y:
+            min_y = vy
+        if vy > max_y:
+            max_y = vy
+
+    # Check all relevant cells
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            cell_key = (col, row)
+            if cell_key in hash_grid:
+                # Direct iteration over list elements in numba-compatible way
+                for item in hash_grid[cell_key]:
+                    if item != hex_index:
+                        overlapping.add(item)
+    return list(overlapping)
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,220 @@
+<NAME>
+log_spaced_peak_spacing
+</NAME>
+
+<DESCRIPTION>
+The current logarithmic peak spacing implementation has suboptimal distribution that doesn't fully exploit the mathematical properties of maximizing C2. I'll improve the peak positioning strategy to use a more sophisticated approach that considers both the mathematical structure of autoconvolution and the need for balanced peak distribution.
+
+The main improvements include:
+1. Using a Chebyshev distribution for better peak spacing
+2. Adding adaptive peak height adjustment based on expected interference
+3. Implementing a more robust constraint system to prevent numerical instability
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class LogSpacedStepFunctionStrategy:
+    """Enhanced strategy for generating step functions with logarithmic spacing."""
+
+    @staticmethod
+    def gaussian_peaks_log_spaced(n_steps: int, seed: int) -> np.ndarray:
+        """Generate Gaussian peak structure with logarithmic spacing and constraints."""
+        np.random.seed(seed)
+        x = np.linspace(-0.25, 0.25, n_steps)
+        base_function = np.zeros_like(x)
+
+        # Logarithmic peak distribution with better coverage
+        num_peaks = np.random.randint(12, 25)  # Increased peak count for better coverage
+
+        # Use log-spaced distribution across the domain
+        log_min = np.log(0.005)  # Smaller minimum to capture fine details
+        log_max = np.log(0.25)   # Maximum half-width
+        log_spacings = np.logspace(log_min, log_max, num_peaks + 2)[1:-1]  # Exclude endpoints
+
+        # Distribute peaks more evenly with log spacing
+        peak_positions = []
+        for i in range(num_peaks):
+            # Position based on logarithmic distribution
+            pos = -0.25 + np.sum(log_spacings[:i+1])  # cumulative log spacing
+            # Add small randomness to avoid perfect periodicity
+            pos += np.random.uniform(-0.004, 0.004)
+            peak_positions.append(pos)
+
+        # Ensure minimum spacing between peaks (0.05 of domain width = 0.0125)
+        min_spacing = 0.0125
+        adjusted_positions = []
+        for i, pos in enumerate(peak_positions):
+            # Check against previous peaks
+            if i > 0:
+                prev_pos = adjusted_positions[-1]
+                min_allowed = prev_pos + min_spacing
+                pos = max(pos, min_allowed)
+            # Also ensure we don't go outside the domain
+            pos = max(-0.25, min(0.25, pos))
+            adjusted_positions.append(pos)
+
+        # Create peaks with adaptive height adjustment based on intermediate evaluation
+        temp_f = np.zeros_like(x)
+
+        # Track intermediate performance to prevent unstable configurations
+        intermediate_scores = []
+
+        for i, pos in enumerate(adjusted_positions):
+            # Start with moderate amplitude and adjust based on feedback
+            # Use adaptive heights that consider proximity to other peaks
+            peak_height = 0.9 + np.random.random() * 0.6  # Range: 0.9-1.5
+
+            # Adjust height to avoid numerical instability
+            proximity_factor = 1.0
+            for other_pos in adjusted_positions[:i]:
+                dist = abs(pos - other_pos)
+                if dist < 0.03:  # Close peaks
+                    proximity_factor *= 0.8  # Reduce height for close peaks
+
+            peak_height *= proximity_factor
+
+            # Use varied widths for better autoconvolution properties
+            peak_width = 0.015 + np.random.random() * 0.03  # Range: 0.015-0.045
+
+            gaussian = peak_height * np.exp(-0.5 * ((x - pos) / peak_width)**2)
+            temp_f += gaussian
+
+            # Real-time performance monitoring (check intermediate scores)
+            if i > 0 and i % 3 == 0:  # Check every few peaks
+                # Evaluate intermediate function
+                try:
+                    g = compute_autoconvolution_fast(temp_f)
+                    norm_1, norm_2_sq, norm_inf = compute_norms_fast(g)
+                    c2_intermediate = compute_c2_fast(norm_1, norm_2_sq, norm_inf)
+                    intermediate_scores.append(c2_intermediate)
+
+                    # If we're getting too aggressive with heights, back off
+                    if len(intermediate_scores) > 2 and c2_intermediate < 0.1:
+                        # Scale down recent peaks
+                        temp_f = temp_f * 0.8  # Reduction factor
+                        # Re-evaluate and re-adjust heights for the last few peaks
+                        break_point = max(0, len(adjusted_positions) - 3)
+                        for j in range(break_point, i):
+                            # Recalculate peak with reduced height
+                            pos_j = adjusted_positions[j]
+                            new_height = 0.9 + np.random.random() * 0.6  # New random height
+                            new_height *= proximity_factor * 0.7
+                            temp_f -= peak_height * np.exp(-0.5 * ((x - pos_j) / peak_width)**2)
+                            temp_f += new_height * np.exp(-0.5 * ((x - pos_j) / peak_width)**2)
+                except Exception:
+                    continue
+
+        # Ensure non-negative and normalize properly
+        temp_f = np.maximum(temp_f, 0)
+        if np.sum(temp_f) > 0:
+            temp_f = temp_f / np.sum(temp_f) * 10  # Scale appropriately
+        else:
+            temp_f = np.ones_like(temp_f) * 0.1
+
+        return temp_f
+=======
+class LogSpacedStepFunctionStrategy:
+    """Enhanced strategy for generating step functions with optimized peak spacing."""
+
+    @staticmethod
+    def gaussian_peaks_log_spaced(n_steps: int, seed: int) -> np.ndarray:
+        """Generate Gaussian peak structure with optimized spacing and constraints."""
+        np.random.seed(seed)
+        x = np.linspace(-0.25, 0.25, n_steps)
+        base_function = np.zeros_like(x)
+
+        # Use Chebyshev distribution for optimal peak placement
+        # This provides better distribution than simple logarithmic spacing
+        num_peaks = np.random.randint(12, 25)  # Increased peak count for better coverage
+
+        # Generate Chebyshev nodes for better distribution
+        chebyshev_angles = np.pi * (2 * np.arange(num_peaks) + 1) / (2 * num_peaks)
+        # Map to [-0.25, 0.25] interval with proper spacing
+        peak_positions = -0.25 + 0.5 * (1 + np.cos(chebyshev_angles)) * 0.5
+
+        # Add small random perturbations to avoid degeneracy
+        perturbation_scale = 0.01
+        peak_positions += np.random.uniform(-perturbation_scale, perturbation_scale, len(peak_positions))
+
+        # Ensure all peaks are within bounds
+        peak_positions = np.clip(peak_positions, -0.25, 0.25)
+
+        # Sort positions to ensure proper ordering
+        peak_positions = np.sort(peak_positions)
+
+        # Ensure minimum spacing between peaks (0.05 of domain width = 0.0125)
+        min_spacing = 0.0125
+        adjusted_positions = []
+        for i, pos in enumerate(peak_positions):
+            if i == 0:
+                adjusted_positions.append(pos)
+            else:
+                # Ensure minimum spacing from previous peak
+                min_allowed = adjusted_positions[-1] + min_spacing
+                adjusted_positions.append(max(pos, min_allowed))
+
+        # If we went over the boundary, adjust the last few peaks
+        if len(adjusted_positions) > 0 and adjusted_positions[-1] > 0.25:
+            # Scale down positions to fit within domain
+            excess = adjusted_positions[-1] - 0.25
+            for i in range(len(adjusted_positions) - 1, -1, -1):
+                adjusted_positions[i] -= excess * (i / len(adjusted_positions)) if len(adjusted_positions) > 1 else 0
+                if adjusted_positions[i] < -0.25:
+                    adjusted_positions[i] = -0.25
+                if i == 0:
+                    break
+
+        # Create peaks with adaptive height adjustment
+        temp_f = np.zeros_like(x)
+
+        # Pre-calculate peak heights to avoid interference
+        peak_heights = []
+        for i, pos in enumerate(adjusted_positions):
+            # Base height based on position (central peaks get higher heights)
+            if abs(pos) < 0.05:
+                # Central region gets high amplitudes
+                base_height = 1.5 + np.random.random() * 1.0
+            elif abs(pos) < 0.15:
+                # Middle region
+                base_height = 1.0 + np.random.random() * 0.8
+            else:
+                # Outer regions
+                base_height = 0.6 + np.random.random() * 0.5
+
+            # Adjust for proximity to other peaks to prevent numerical instability
+            proximity_factor = 1.0
+            for j, other_pos in enumerate(adjusted_positions):
+                if i != j:
+                    dist = abs(pos - other_pos)
+                    if dist < 0.05:  # Very close peaks
+                        proximity_factor *= 0.7  # Reduce height significantly
+                    elif dist < 0.1:  # Moderately close
+                        proximity_factor *= 0.85
+
+            peak_height = base_height * proximity_factor
+            peak_heights.append(peak_height)
+
+        # Now create the actual peaks
+        for i, (pos, height) in enumerate(zip(adjusted_positions, peak_heights)):
+            # Use consistent widths that provide good autoconvolution properties
+            # Central peaks get narrower widths, outer ones wider
+            if abs(pos) < 0.05:
+                peak_width = 0.015 + np.random.random() * 0.01  # Narrower for center
+            elif abs(pos) < 0.15:
+                peak_width = 0.025 + np.random.random() * 0.02  # Medium width
+            else:
+                peak_width = 0.035 + np.random.random() * 0.02  # Wider for edges
+
+            gaussian = height * np.exp(-0.5 * ((x - pos) / peak_width)**2)
+            temp_f += gaussian
+
+        # Ensure non-negative and normalize properly
+        temp_f = np.maximum(temp_f, 0)
+        if np.sum(temp_f) > 0:
+            temp_f = temp_f / np.sum(temp_f) * 10  # Scale appropriately
+        else:
+            temp_f = np.ones_like(temp_f) * 0.1
+
+        return temp_f
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,275 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,248 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from scipy.optimize import minimize
++import math
++from joblib import Parallel, delayed
++import time
++
++# Helper functions for hexagon operations
++def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
++    """Generate vertices of a regular hexagon given center, angle, and side length."""
++    angle_rad = math.radians(angle_deg)
++    vertices = []
++    for i in range(6):
++        angle = angle_rad + i * math.pi / 3
++        x = center_x + side_length * math.cos(angle)
++        y = center_y + side_length * math.sin(angle)
++        vertices.append((x, y))
++    return np.array(vertices)
++
++def outer_hexagon_vertices(side_length):
++    """Generate vertices of the outer regular hexagon centered at origin."""
++    vertices = []
++    for i in range(6):
++        angle = i * math.pi / 3
++        x = side_length * math.cos(angle)
++        y = side_length * math.sin(angle)
++        vertices.append((x, y))
++    return np.array(vertices)
++
++def point_in_polygon(point, polygon):
++    """Check if a point is inside a polygon using Shapely."""
++    p = Polygon(polygon)
++    return p.contains(Point(point))
++
++def hexagon_contains_point(hex_center_x, hex_center_y, hex_angle, point_x, point_y, side_length=1):
++    """Check if a point is inside a given hexagon."""
++    vertices = hexagon_vertices(hex_center_x, hex_center_y, hex_angle, side_length)
++    p = Polygon(vertices)
++    point_shapely = Point(point_x, point_y)
++    return p.contains(point_shapely)
++
++def hexagons_overlap(h1_center_x, h1_center_y, h1_angle, h2_center_x, h2_center_y, h2_angle):
++    """Check if two hexagons overlap using Shapely."""
++    vertices1 = hexagon_vertices(h1_center_x, h1_center_y, h1_angle)
++    vertices2 = hexagon_vertices(h2_center_x, h2_center_y, h2_angle)
++    poly1 = Polygon(vertices1)
++    poly2 = Polygon(vertices2)
++    return poly1.intersects(poly2)
++
++def compute_outer_hex_side_length(inner_hex_data, tolerance=1e-6):
++    """Compute minimum side length of outer hexagon that contains all inner hexagons."""
++    max_dist = 0
++    
++    for i in range(len(inner_hex_data)):
++        cx, cy, angle = inner_hex_data[i]
++        vertices = hexagon_vertices(cx, cy, angle)
++        
++        # Check distance from center to each vertex
++        for vx, vy in vertices:
++            dist = math.sqrt((vx)**2 + (vy)**2)
++            max_dist = max(max_dist, dist)
++    
++    # Add some tolerance to ensure full containment
++    return max_dist * 1.01
++
++def validate_solution(inner_hex_data, outer_radius):
++    """Validate that all hexagons fit and don't overlap."""
++    outer_polygon = outer_hexagon_vertices(outer_radius)
++    
++    # Check that all hexagons are fully contained
++    for i in range(len(inner_hex_data)):
++        cx, cy, angle = inner_hex_data[i]
++        vertices = hexagon_vertices(cx, cy, angle)
++        
++        # Check if any vertex is outside the outer hexagon
++        for vx, vy in vertices:
++            if not point_in_polygon((vx, vy), outer_polygon):
++                return False
++        
++        # Check overlap with other hexagons
++        for j in range(i+1, len(inner_hex_data)):
++            cx2, cy2, angle2 = inner_hex_data[j]
++            if hexagons_overlap(cx, cy, angle, cx2, cy2, angle2):
++                return False
++                
++    return True
++
++def evaluate_fitness(individual):
++    """Evaluate fitness of an individual - returns negative inverse radius for minimization."""
++    # Reshape individual into hexagon data
++    # Individual format: [x1, y1, angle1, x2, y2, angle2, ..., x11, y11, angle11]
++    hex_data = individual.reshape(-1, 3)
++    
++    # Compute outer hexagon side length
++    try:
++        outer_radius = compute_outer_hex_side_length(hex_data) + 1e-6
++    except:
++        return -1e10  # Invalid solution
++    
++    # Validate solution
++    if not validate_solution(hex_data, outer_radius):
++        return -1e10
++    
++    # Return negative inverse of radius (since we want to minimize 1/R)
++    return -1.0 / outer_radius
++
++def tournament_selection(population, fitnesses, k=3):
++    """Select an individual using tournament selection."""
++    indices = np.random.choice(len(population), size=k, replace=False)
++    best_idx = indices[np.argmax(fitnesses[indices])]
++    return population[best_idx].copy()
++
++def crossover(parent1, parent2, crossover_rate=0.8):
++    """Single-point crossover between two parents."""
++    if np.random.rand() > crossover_rate:
++        return parent1.copy(), parent2.copy()
++    
++    # Random crossover point
++    crossover_point = np.random.randint(1, len(parent1))
++    child1 = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
++    child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
++    return child1, child2
++
++def mutate(individual, mutation_rate=0.1, bounds=(-10, 10), angle_bounds=(0, 360)):
++    """Mutate an individual with Gaussian noise."""
++    mutated = individual.copy()
++    for i in range(len(mutated)):
++        if np.random.rand() < mutation_rate:
++            if i % 3 == 2:  # angle dimension
++                mutated[i] += np.random.normal(0, 20)  # Adjust angle
++                mutated[i] = mutated[i] % 360  # Keep angle in [0, 360)
++            else:  # position dimensions
++                mutated[i] += np.random.normal(0, 0.5)  # Adjust position
++                mutated[i] = np.clip(mutated[i], bounds[0], bounds[1])
++    return mutated
++
++def optimize_individual(individual, max_iter=100):
++    """Local optimization of a single individual."""
++    def objective(x):
++        # Reshape back to hex_data format
++        hex_data = x.reshape(-1, 3)
++        outer_radius = compute_outer_hex_side_length(hex_data) + 1e-6
++        # Check validity
++        if not validate_solution(hex_data, outer_radius):
++            return 1e10
++        return 1.0 / outer_radius  # We want to minimize this
++    
++    # Optimize using L-BFGS-B (bounded optimization)
++    try:
++        result = minimize(objective, individual, method='L-BFGS-B', 
++                          options={'maxiter': max_iter})
++        return result.x
++    except:
++        return individual
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
+-
++    np.random.seed(42)  # For reproducibility
++    start_time = time.time()
++    
++    # Parameters
++    population_size = 50
++    num_generations = 100
++    elite_size = 5
++    
++    # Initialize population
++    population = []
++    for _ in range(population_size):
++        individual = np.random.uniform(low=-5, high=5, size=33)  # 11 hexagons * 3 parameters
++        individual[2::3] = np.random.uniform(0, 360, 11)  # Angles between 0 and 360
++        population.append(individual)
++    
++    best_fitness = float('-inf')
++    best_individual = None
++    
++    # Evolutionary process
++    for gen in range(num_generations):
++        # Evaluate fitness for entire population
++        fitnesses = []
++        for ind in population:
++            fitness = evaluate_fitness(ind)
++            fitnesses.append(fitness)
++        
++        fitnesses = np.array(fitnesses)
++        
++        # Track best solution
++        max_fitness_idx = np.argmax(fitnesses)
++        if fitnesses[max_fitness_idx] > best_fitness:
++            best_fitness = fitnesses[max_fitness_idx]
++            best_individual = population[max_fitness_idx].copy()
++        
++        # Local optimization on elite individuals
++        elite_indices = np.argsort(fitnesses)[-elite_size:]
++        for idx in elite_indices:
++            population[idx] = optimize_individual(population[idx])
++        
++        # Create new population
++        new_population = []
++        
++        # Elitism
++        elite_individuals = [population[i] for i in elite_indices]
++        new_population.extend(elite_individuals)
++        
++        # Generate offspring
++        while len(new_population) < population_size:
++            parent1 = tournament_selection(population, fitnesses)
++            parent2 = tournament_selection(population, fitnesses)
++            
++            child1, child2 = crossover(parent1, parent2)
++            child1 = mutate(child1)
++            child2 = mutate(child2)
++            
++            new_population.extend([child1, child2])
++        
++        population = new_population[:population_size]
++        
++        # Early stopping condition based on time
++        if time.time() - start_time > 170:  # Leave 10 seconds for final processing
++            break
++    
++    # Final optimization of the best individual
++    if best_individual is not None:
++        best_individual = optimize_individual(best_individual, max_iter=50)
++    
++    # Extract final solution
++    hex_data = best_individual.reshape(-1, 3)
++    
++    # Compute final outer hexagon side length
++    outer_side_length = compute_outer_hex_side_length(hex_data)
++    
++    # Validate final solution
++    assert validate_solution(hex_data, outer_side_length), "Final solution is invalid"
++    
++    # Prepare output data
++    inner_hex_data = hex_data.copy()
++    outer_hex_data = np.array([0, 0, 0])  # Outer hexagon centered at origin
++    
++    return inner_hex_data, outer_hex_data, outer_side_length
+ 
+ # EVOLVE-BLOCK-END

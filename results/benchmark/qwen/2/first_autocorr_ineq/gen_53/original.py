@@ -1,0 +1,235 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.signal import convolve
+import cvxpy as cp
+import time
+import random
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+def compute_c1(sequence):
+    """Compute the C1 constant for a given sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+
+    # Use FFT-based convolution for efficiency
+    conv = convolve(sequence, sequence, mode='full')
+    # Take only the relevant part of convolution (the peak)
+    max_conv = np.max(conv[len(sequence)-1:])  # From index n-1 onwards
+
+    # Normalize and compute C1
+    sum_sq = np.sum(sequence)**2
+    if sum_sq == 0:
+        return float('inf')
+
+    c1 = (2 * len(sequence) * max_conv) / sum_sq
+    return c1
+
+def compute_inv_c1(sequence):
+    """Compute inverse of C1 (what we want to maximize)."""
+    c1 = compute_c1(sequence)
+    if c1 == 0 or np.isinf(c1):
+        return 0
+    return 1.0 / c1
+
+def create_convex_optimization_problem(sequence_length):
+    """
+    Create a convex optimization problem for maximizing 1/C1.
+    Variables represent sequence heights.
+    """
+    # Decision variables
+    a = cp.Variable(sequence_length, nonneg=True)
+    
+    # Create convolution constraint matrix
+    # This matrix represents the convolution operation in a linear form
+    # We'll build this to represent b = a * a (autoconvolution)
+    
+    # For simplicity, we'll directly constrain the maximum convolution value
+    # using a relaxation technique that maintains convexity
+    
+    # We'll add a quadratic constraint that approximates the desired behavior
+    # by constraining a weighted sum to be below a threshold
+    # In practice, we can constrain the maximum convolution to stay within bounds
+    
+    # Since direct constraint on max(b) is non-convex, we'll approximate it
+    # by constraining the sum of squared terms in the convolution to be bounded
+    
+    # Objective: maximize (sum(a))^2 / (2*n*max_conv)
+    # Equivalently: minimize (2*n*max_conv) / (sum(a))^2
+    # But since sum(a) is fixed in the optimization context, we focus on maximizing sum(a)^2
+    
+    # Simplified approach: maximize sum(a) subject to convex constraints
+    # The actual max_conv constraint is handled indirectly via the structure
+    
+    # The key insight: for fixed sequence length n, we want to balance:
+    # 1. Large sum(a) 
+    # 2. Small max(b) where b = a*a
+    
+    # We will formulate a proxy for this tradeoff using quadratic programming
+    
+    # For now, let's define a simplified approach:
+    # Maximize sum(a) under a relaxed constraint
+    # We'll use a quadratic penalty term to encourage sparsity and small max_conv
+    
+    objective = cp.Maximize(cp.sum(a))
+    
+    # Constraints to ensure feasibility and meaningful optimization
+    # Constraint 1: Sum is reasonably large (to avoid trivial solutions)
+    sum_constraint = cp.sum(a) >= 0.01
+    
+    # Constraint 2: Individual elements bounded
+    bound_constraints = [a[i] <= 1000 for i in range(sequence_length)]
+    
+    # Constraint 3: A simple quadratic constraint to encourage sparse patterns
+    # This encourages sequences that reduce convolution peaks
+    # We'll add a quadratic penalty that discourages large elements
+    quadratic_penalty = cp.sum_squares(a) <= 1e6  # Arbitrary large bound
+    
+    # Assemble constraints
+    constraints = [sum_constraint] + bound_constraints + [quadratic_penalty]
+    
+    # Construct problem
+    problem = cp.Problem(objective, constraints)
+    
+    return problem, a
+
+def optimize_convex_approach(sequence_length):
+    """
+    Solve the convex optimization problem to find a good sequence.
+    """
+    try:
+        problem, a_var = create_convex_optimization_problem(sequence_length)
+        
+        # Solve the problem
+        problem.solve(solver=cp.ECOS, verbose=False)
+        
+        if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+            solution = a_var.value
+            # Clip to [0, 1000]
+            solution = np.clip(solution, 0, 1000)
+            return solution.tolist()
+        else:
+            # Fallback to a decent sequence
+            return np.random.uniform(0.01, 1.0, sequence_length).tolist()
+            
+    except Exception as e:
+        # If anything goes wrong, return a random sequence
+        return np.random.uniform(0.01, 1.0, sequence_length).tolist()
+
+def generate_initial_sequence(length=None):
+    """Generate a good initial sequence using theoretical insights."""
+    if length is None:
+        length = random.randint(100, 500)
+    
+    # Generate a sequence using a known good pattern
+    # Exponential decay often works well for this type of problem
+    decay_factor = 0.95
+    sequence = [1.0 * (decay_factor ** i) for i in range(length)]
+    
+    # Ensure minimum value
+    sequence = [max(x, 0.01) for x in sequence]
+    
+    # Add slight random noise to avoid degenerate cases
+    noise_factor = 0.05
+    sequence = [x * (1 + random.uniform(-noise_factor, noise_factor)) for x in sequence]
+    sequence = [max(x, 0.01) for x in sequence]
+    
+    return sequence
+
+def refine_solution_better(sequence):
+    """
+    Apply better refinement techniques using a combination of:
+    1. Convolution-aware adjustments
+    2. Gradient-like updates based on convolution structure
+    """
+    # Clone sequence to avoid modifying original
+    seq = np.array(sequence)
+    n = len(seq)
+    
+    # Compute convolution to understand structure
+    conv = convolve(seq, seq, mode='full')
+    conv_part = conv[n-1:]  # Relevant part
+    max_conv = np.max(conv_part)
+    
+    # Identify positions that contribute significantly to max convolution
+    # These are likely the source of high convolution peaks
+    max_indices = np.where(conv_part >= 0.9 * max_conv)[0]
+    
+    # Reduce elements that are contributing to high convolution
+    # This mimics a gradient descent step in the right direction
+    new_seq = seq.copy()
+    
+    # For each significant peak position, reduce nearby elements
+    for idx in max_indices:
+        # Reduce elements around the peak to flatten the convolution
+        for offset in [-2, -1, 0, 1, 2]:
+            pos = idx + offset
+            if 0 <= pos < n:
+                new_seq[pos] *= 0.95
+    
+    # Ensure non-negativity
+    new_seq = np.maximum(new_seq, 0)
+    
+    # If sum is too low, restore minimum sum
+    if np.sum(new_seq) < 0.01:
+        new_seq[0] = 0.1
+    
+    return new_seq.tolist()
+
+def quadratic_search_approach():
+    """
+    Main search approach using quadratic convex optimization.
+    """
+    best_inv_c1 = 0
+    best_sequence = None
+    
+    # Try different sequence lengths
+    lengths_to_try = [50, 100, 150, 200, 250, 300, 350, 400, 450, 500]
+    
+    # For each length, solve the convex optimization problem
+    for length in lengths_to_try:
+        # Solve convex optimization problem for this length
+        sequence = optimize_convex_approach(length)
+        
+        # Refine sequence
+        refined_sequence = refine_solution_better(sequence)
+        
+        # Evaluate
+        inv_c1 = compute_inv_c1(refined_sequence)
+        
+        # Track best result
+        if inv_c1 > best_inv_c1:
+            best_inv_c1 = inv_c1
+            best_sequence = refined_sequence[:]
+    
+    # If nothing worked, fall back to a good initialization
+    if best_sequence is None:
+        best_sequence = generate_initial_sequence(200)
+    
+    return best_sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Main entry point for finding the best sequence."""
+    # Add a time limit check to ensure we don't exceed budget
+    start_time = time.time()
+    
+    # Perform convex optimization search
+    best_sequence = quadratic_search_approach()
+    
+    # Final refinement
+    refined_sequence = refine_solution_better(best_sequence)
+    final_inv_c1 = compute_inv_c1(refined_sequence)
+    
+    # Choose better between original and refined
+    if final_inv_c1 > compute_inv_c1(best_sequence):
+        best_sequence = refined_sequence
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

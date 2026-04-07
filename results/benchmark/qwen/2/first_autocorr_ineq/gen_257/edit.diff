@@ -1,0 +1,357 @@
+--- a/original.py
++++ b/original.py
+@@ -1,197 +1,314 @@
+ # EVOLVE-BLOCK-START
+-
+ import numpy as np
+ from scipy import optimize
+ from scipy.signal import fftconvolve
+ import random
+ import time
++from collections import deque
++
++# Set seeds for reproducibility
++np.random.seed(42)
++random.seed(42)
+ 
+ def compute_c1_constant(sequence):
+     """Computes the C1 constant for a given sequence."""
+     a = np.array(sequence)
+     sum_a = np.sum(a)
+     if sum_a < 0.01:
+         return float('inf')
+     conv = fftconvolve(a, a, mode='full')[:len(a)*2-1]
+     max_conv = np.max(conv)
+     n = len(a)
+     c1 = (2 * n * max_conv) / (sum_a ** 2)
+     return c1
+ 
+ def evaluate_sequence(sequence):
+     """Evaluates a sequence and returns 1/C1 (the objective to maximize)."""
+     try:
+         c1 = compute_c1_constant(sequence)
+         if c1 == float('inf'):
+             return 0.0
+         return 1.0 / c1
+     except Exception:
+         return 0.0
+ 
+ def generate_random_sequence(length=None, min_length=10, max_length=1000):
+     """Generate a random sequence with specified or random length."""
+     if length is None:
+         length = random.randint(min_length, max_length)
+     sequence = [random.uniform(0, 1000) for _ in range(length)]
+     if all(x == 0 for x in sequence):
+         sequence[0] = 1.0
+     return sequence
+ 
++def generate_power_law_sequence(n, alpha=0.95):
++    """Generates a power-law decay sequence which often performs well."""
++    sequence = [alpha ** i for i in range(n)]
++    # Normalize to ensure sum is reasonable
++    total = sum(sequence)
++    if total > 0:
++        sequence = [x / total * 1000 for x in sequence]
++    return sequence
++
+ def mutate_sequence(sequence, mutation_rate=0.1, max_mutation=0.5):
+-    """Mutate a sequence by randomly modifying elements."""
++    """Mutate a sequence using Gaussian noise with adaptive variance."""
+     new_sequence = sequence.copy()
+     for i in range(len(new_sequence)):
+         if random.random() < mutation_rate:
+-            new_sequence[i] *= random.uniform(1 - max_mutation, 1 + max_mutation)
++            # Use Gaussian noise with adaptive variance
++            noise = random.gauss(0, max_mutation * 0.2)
++            new_sequence[i] *= (1 + noise)
+             new_sequence[i] = max(0, min(1000, new_sequence[i]))
+     if all(x == 0 for x in new_sequence):
+         new_sequence[0] = max(0.1, new_sequence[0])
+     return new_sequence
+ 
+ def crossover_sequences(seq1, seq2):
+     """Perform uniform crossover between two sequences."""
+     min_len = min(len(seq1), len(seq2))
+     max_len = max(len(seq1), len(seq2))
+     padded_seq1 = seq1 + [0] * (max_len - len(seq1))
+     padded_seq2 = seq2 + [0] * (max_len - len(seq2))
+     new_seq = []
+     for i in range(max_len):
+         if random.random() < 0.5:
+             new_seq.append(padded_seq1[i])
+         else:
+             new_seq.append(padded_seq2[i])
+     return new_seq
+ 
+ def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+     """Returns the direction to move into the sequence using LP optimization."""
+     n = len(sequence)
+     sum_sequence = np.sum(sequence)
+     if sum_sequence < 0.01:
+         return None
+     normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+     rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+     g_fun = solve_convolution_lp(normalized_sequence, rhs)
+     if g_fun is None:
+         return None
+     sum_sequence = np.sum(g_fun)
+     if sum_sequence < 0.01:
+         return None
+     normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+     t = 0.01
+     new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+     return new_sequence
+ 
+ def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
++    """Solves the convolution LP for a given sequence and RHS with fallback."""
+     n = len(f_sequence)
+     c = -np.ones(n)
+     a_ub = []
+     b_ub = []
+     for k in range(2 * n - 1):
+         row = np.zeros(n)
+         for i in range(n):
+             j = k - i
+             if 0 <= j < n:
+                 row[j] = f_sequence[i]
+         a_ub.append(row)
+         b_ub.append(rhs)
+     a_ub_nonneg = -np.eye(n)
+     b_ub_nonneg = np.zeros(n)
+     a_ub = np.vstack([a_ub, a_ub_nonneg])
+     b_ub = np.hstack([b_ub, b_ub_nonneg])
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        return None
++    
++    try:
++        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
++        if result.success:
++            g_sequence = result.x
++            return g_sequence
++    except:
++        pass
++    
++    # Fallback: Return a modified version of the input sequence
++    return np.array(f_sequence) * 0.95
++
++def get_elite_sequences(population, fitness_scores, top_k=10):
++    """Return the top performing individuals from the population."""
++    sorted_indices = np.argsort(fitness_scores)[::-1][:top_k]
++    elites = [population[i] for i in sorted_indices]
++    return elites
+ 
+ def genetic_algorithm_search(max_time_seconds=180):
+-    """Search using genetic algorithm approach with LP-based enhancements."""
++    """Enhanced genetic algorithm with adaptive parameters and diversity maintenance."""
+     start_time = time.time()
+-    pop_size = 50
+-    population = [generate_random_sequence() for _ in range(pop_size)]
++    base_pop_size = 50
++    population = []
++    
++    # Generate diverse initial population
++    for _ in range(base_pop_size // 2):
++        population.append(generate_power_law_sequence(random.randint(50, 500)))
++    for _ in range(base_pop_size // 2):
++        population.append(generate_random_sequence(random.randint(50, 500)))
++    
+     best_individual = None
+     best_fitness = 0.0
+     generation = 0
++    stagnation_count = 0
++    recent_improvements = deque(maxlen=10)
++    
+     while time.time() - start_time < max_time_seconds:
+         generation += 1
+         fitness_scores = []
+         for individual in population:
+             fitness = evaluate_sequence(individual)
+             fitness_scores.append(fitness)
+             if fitness > best_fitness:
+                 best_fitness = fitness
+                 best_individual = individual.copy()
++        
++        # Track recent improvements for early stopping
++        recent_improvements.append(best_fitness)
++        
++        # Check for stagnation and adjust population size
++        if len(recent_improvements) == 10:
++            if all(x <= recent_improvements[0] * 1.005 for x in recent_improvements):
++                stagnation_count += 1
++                if stagnation_count > 2:
++                    # Increase population size to boost diversity
++                    base_pop_size = min(base_pop_size * 1.2, 200)
++                    # Add new random sequences
++                    for _ in range(int(base_pop_size * 0.1)):
++                        population.append(generate_random_sequence(random.randint(50, 500)))
++                    # Remove worst individuals
++                    worst_indices = np.argsort(fitness_scores)[:int(base_pop_size * 0.1)]
++                    new_population = [population[i] for i in range(len(population)) if i not in worst_indices]
++                    population = new_population
++                    stagnation_count = 0
++        else:
++            stagnation_count = 0
++        
++        # Selection: tournament selection
+         selected = []
+-        for _ in range(pop_size):
+-            tournament_indices = random.sample(range(pop_size), 3)
++        for _ in range(base_pop_size):
++            tournament_indices = random.sample(range(len(population)), 3)
+             tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+             winner_index = tournament_indices[np.argmax(tournament_fitness)]
+             selected.append(population[winner_index].copy())
+-        new_population = []
+-        for i in range(0, pop_size, 2):
+-            parent1 = selected[i]
+-            parent2 = selected[(i + 1) % pop_size]
++        
++        # Elite preservation: keep top 10%
++        elites = get_elite_sequences(population, fitness_scores, top_k=max(5, base_pop_size // 10))
++        new_population = elites[:]
++        
++        # Crossover and mutation
++        while len(new_population) < base_pop_size:
++            parent1 = selected[random.randint(0, len(selected)-1)]
++            parent2 = selected[random.randint(0, len(selected)-1)]
+             child1 = crossover_sequences(parent1, parent2)
+             child2 = crossover_sequences(parent2, parent1)
+-            child1 = mutate_sequence(child1)
+-            child2 = mutate_sequence(child2)
++            child1 = mutate_sequence(child1, mutation_rate=0.2, max_mutation=0.3)
++            child2 = mutate_sequence(child2, mutation_rate=0.2, max_mutation=0.3)
++            # Enhanced with LP-based direction
+             enhanced_child1 = get_good_direction_to_move_into(child1)
+             if enhanced_child1 is not None:
+                 child1 = enhanced_child1
+             enhanced_child2 = get_good_direction_to_move_into(child2)
+             if enhanced_child2 is not None:
+                 child2 = enhanced_child2
+             new_population.extend([child1, child2])
+-        population = new_population[:pop_size]
+-        if generation % 10 == 0:
+-            for i in range(0, pop_size, 5):
+-                if i < pop_size:
+-                    population[i] = generate_random_sequence()
++        
++        population = new_population[:base_pop_size]
++        
++        # Occasionally inject new random sequences to avoid local minima
++        if generation % 5 == 0:
++            for i in range(0, base_pop_size, 10):
++                if i < base_pop_size:
++                    population[i] = generate_random_sequence(random.randint(50, 500))
++    
+     return (best_individual, best_fitness)
+ 
+ def local_improvement_search(initial_sequence, max_iter=100):
+-    """Improve a sequence using local search around it."""
++    """Enhanced local search with more sophisticated mutation and direction guidance."""
+     current_sequence = initial_sequence.copy()
+     current_fitness = evaluate_sequence(current_sequence)
+     for _ in range(max_iter):
+-        mutated = mutate_sequence(current_sequence, mutation_rate=0.3, max_mutation=0.2)
++        # Try Gaussian-based mutation
++        mutated = [x * random.uniform(0.9, 1.1) for x in current_sequence]
++        mutated = [max(0, min(1000, x)) for x in mutated]
+         mutated_fitness = evaluate_sequence(mutated)
+         if mutated_fitness > current_fitness:
+             current_sequence = mutated
+             current_fitness = mutated_fitness
++            
++        # Try direction guidance
+         enhanced = get_good_direction_to_move_into(current_sequence)
+         if enhanced is not None:
+             enhanced_fitness = evaluate_sequence(enhanced)
+             if enhanced_fitness > current_fitness:
+                 current_sequence = enhanced
+                 current_fitness = enhanced_fitness
++    
+     return current_sequence, current_fitness
++
++def quadratic_programming_optimization(initial_sequence, max_iter=200):
++    """Improved quadratic programming approach with better initial guesses."""
++    def objective(x):
++        seq = np.abs(x)
++        if np.sum(seq) < 0.01:
++            return float('inf')
++        c1 = compute_c1_constant(seq)
++        if c1 == float('inf'):
++            return float('inf')
++        return -1.0 / c1
++
++    bounds = [(0, 1000) for _ in range(len(initial_sequence))]
++    # Use a better initial guess based on the input sequence
++    x0 = np.array(initial_sequence) * random.uniform(0.9, 1.1)
++    x0 = np.maximum(x0, 0)
++    
++    try:
++        res = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={'maxiter': max_iter})
++        if res.success:
++            optimized_seq = np.abs(res.x)
++            return optimized_seq.tolist(), evaluate_sequence(optimized_seq)
++    except:
++        pass
++    return initial_sequence, evaluate_sequence(initial_sequence)
+ 
+ def search_for_best_sequence():
+     """Main search function to find the best sequence."""
++    start_time = time.time()
+     best_sequence = None
+     best_inv_c1 = 0.0
+-    for attempt in range(5):
+-        initial_sequence = generate_random_sequence()
+-        improved_seq, improved_fitness = local_improvement_search(initial_sequence, 100)
+-        if improved_fitness > best_inv_c1:
+-            best_inv_c1 = improved_fitness
+-            best_sequence = improved_seq
+-        ga_seq, ga_fitness = genetic_algorithm_search(10)
+-        if ga_fitness > best_inv_c1:
+-            best_inv_c1 = ga_fitness
+-            best_sequence = ga_seq
++    
++    # Strategy 1: Genetic Algorithm
++    ga_seq, ga_fitness = genetic_algorithm_search(100)
++    if ga_fitness > best_inv_c1:
++        best_inv_c1 = ga_fitness
++        best_sequence = ga_seq
++    
++    # Strategy 2: Quadratic Programming Optimization
+     if best_sequence is not None:
+-        final_seq, final_fitness = local_improvement_search(best_sequence, 500)
++        qp_seq, qp_fitness = quadratic_programming_optimization(best_sequence, 100)
++        if qp_fitness > best_inv_c1:
++            best_inv_c1 = qp_fitness
++            best_sequence = qp_seq
++    
++    # Strategy 3: Local Search with Enhanced Mutation
++    if best_sequence is not None:
++        ls_seq, ls_fitness = local_improvement_search(best_sequence, 100)
++        if ls_fitness > best_inv_c1:
++            best_inv_c1 = ls_fitness
++            best_sequence = ls_seq
++    
++    # Strategy 4: Fallback to Random Initialization if needed
++    if best_sequence is None:
++        best_sequence = generate_random_sequence()
++    
++    # Final refinement with strong local search
++    if best_sequence is not None:
++        final_seq, final_fitness = local_improvement_search(best_sequence, 200)
+         if final_fitness > best_inv_c1:
+             best_inv_c1 = final_fitness
+             best_sequence = final_seq
+-    return best_sequence if best_sequence is not None else generate_random_sequence()
++    
++    return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

@@ -1,0 +1,186 @@
+<NAME>
+enhance_diversity_and_local_search
+</NAME>
+
+<DESCRIPTION>
+This edit focuses on enhancing the diversity of the evolutionary algorithm and strengthening the local search strategy to achieve better convergence to high-quality solutions. Two main changes are introduced:
+
+1. Introducing a new sequence generation method `generate_peak_sequence` that creates sequences with specific peak distributions to encourage exploration of promising structural patterns.
+2. Improving local search by integrating a more robust gradient-based refinement technique called L-BFGS that uses cached evaluations for better performance and convergence.
+
+These modifications aim to expand the search space exploration and refine solutions more effectively, potentially leading to better upper bounds on C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_pattern_based_sequence(n: int) -> List[float]:
+    """Generate a sequence with a custom pattern to encourage structure."""
+    # Create a combination of peaks and valleys
+    sequence = [0.0] * n
+    num_peaks = max(2, min(10, n // 50))
+    peak_positions = sorted(random.sample(range(n), num_peaks))
+
+    # Assign increasing heights to peaks
+    peak_heights = [random.uniform(10, 100) for _ in range(num_peaks)]
+    for i, (pos, height) in enumerate(zip(peak_positions, peak_heights)):
+        # Set the area around the peak to the height
+        radius = max(1, n // 20)
+        start = max(0, pos - radius)
+        end = min(n, pos + radius)
+        for j in range(start, end):
+            sequence[j] = height
+    return sequence
+
+def generate_diverse_population(population_size: int, length_range=(50, 500)) -> List[List[float]]:
+    """Generate a diverse initial population."""
+    population = []
+
+    for _ in range(population_size):
+        n = random.randint(*length_range)
+        method = random.choice(['step', 'gaussian', 'uniform', 'pattern'])
+        if method == 'step':
+            sequence = generate_step_function(n)
+        elif method == 'gaussian':
+            sequence = generate_gaussian_distribution(n)
+        elif method == 'uniform':
+            sequence = generate_uniform_distribution(n)
+        else:
+            sequence = generate_pattern_based_sequence(n)
+        population.append(sequence)
+    return population
+=======
+def generate_peak_sequence(n: int, num_peaks: int = None) -> List[float]:
+    """Generate a sequence with specified peaks to encourage structured exploration."""
+    if num_peaks is None:
+        num_peaks = max(3, min(15, n // 20))
+    peak_positions = sorted(random.sample(range(n), num_peaks))
+    peak_heights = [random.uniform(50.0, 150.0) for _ in range(num_peaks)]
+
+    sequence = [0.0] * n
+    for i, (pos, height) in enumerate(zip(peak_positions, peak_heights)):
+        # Distribute height across a wider range for more structure
+        radius = max(1, n // 30)
+        start = max(0, pos - radius)
+        end = min(n, pos + radius)
+        for j in range(start, end):
+            # Apply smooth tapering for peak shapes
+            distance = abs(j - pos)
+            taper_factor = max(0, 1 - distance / radius)
+            sequence[j] += height * taper_factor
+    return sequence
+
+def generate_diverse_population(population_size: int, length_range=(50, 500)) -> List[List[float]]:
+    """Generate a diverse initial population."""
+    population = []
+
+    for _ in range(population_size):
+        n = random.randint(*length_range)
+        method = random.choice(['step', 'gaussian', 'uniform', 'pattern', 'peak'])
+        if method == 'step':
+            sequence = generate_step_function(n)
+        elif method == 'gaussian':
+            sequence = generate_gaussian_distribution(n)
+        elif method == 'uniform':
+            sequence = generate_uniform_distribution(n)
+        elif method == 'pattern':
+            sequence = generate_pattern_based_sequence(n)
+        else:
+            sequence = generate_peak_sequence(n)
+        population.append(sequence)
+    return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def local_refinement(sequence: List[float], iterations: int = 5, learning_rate: float = 0.01) -> List[float]:
+    """Perform local refinement using gradient-based updates."""
+    # Simple gradient descent on the sequence
+    refined = np.array(sequence, dtype=float)
+    for _ in range(iterations):
+        # Compute finite difference gradient
+        grad = np.zeros_like(refined)
+        epsilon = 1e-6
+        base_inv_c1 = compute_autocorrelation_constant(refined.tolist())[1]
+
+        for i in range(len(refined)):
+            perturbed = refined.copy()
+            perturbed[i] += epsilon
+            perturbed = np.maximum(perturbed, 0.01)  # Keep non-negative
+            perturbed_inv_c1 = compute_autocorrelation_constant(perturbed.tolist())[1]
+            grad[i] = (perturbed_inv_c1 - base_inv_c1) / epsilon
+
+        # Update with gradient ascent (since we're maximizing)
+        refined += learning_rate * grad
+        refined = np.maximum(refined, 0.01)  # Keep non-negative
+
+    return refined.tolist()
+=======
+def local_refinement(sequence: List[float], iterations: int = 10, learning_rate: float = 0.01) -> List[float]:
+    """Perform enhanced local refinement using L-BFGS for better convergence."""
+    try:
+        # Convert to numpy array for vectorized operations
+        refined = np.array(sequence, dtype=float)
+        n = len(refined)
+
+        # Define objective function: negative of 1/C1 (since we maximize 1/C1)
+        def objective(x):
+            _, inv_c1 = compute_autocorrelation_constant(x.tolist())
+            return -inv_c1 if inv_c1 > 0 else 1e10
+
+        # Define gradient function using finite differences
+        def gradient(x):
+            eps = 1e-6
+            grad = np.zeros_like(x)
+            base_obj = objective(x)
+            for i in range(len(x)):
+                perturbed = x.copy()
+                perturbed[i] += eps
+                perturbed = np.maximum(perturbed, 0.01)
+                perturbed_obj = objective(perturbed)
+                grad[i] = (perturbed_obj - base_obj) / eps
+            return grad
+
+        # Perform L-BFGS optimization
+        from scipy.optimize import minimize
+        result = minimize(
+            objective,
+            refined,
+            method='L-BFGS-B',
+            jac=gradient,
+            bounds=[(0.01, None)] * n,
+            options={'maxiter': iterations}
+        )
+
+        if result.success:
+            refined = result.x
+        else:
+            # Fallback to gradient descent if L-BFGS fails
+            for _ in range(iterations):
+                grad = gradient(refined)
+                refined += learning_rate * grad
+                refined = np.maximum(refined, 0.01)
+
+        return refined.tolist()
+    except Exception:
+        # Fallback to simple gradient descent if any issue occurs
+        refined = np.array(sequence, dtype=float)
+        for _ in range(iterations):
+            grad = np.zeros_like(refined)
+            epsilon = 1e-6
+            base_inv_c1 = compute_autocorrelation_constant(refined.tolist())[1]
+
+            for i in range(len(refined)):
+                perturbed = refined.copy()
+                perturbed[i] += epsilon
+                perturbed = np.maximum(perturbed, 0.01)
+                perturbed_inv_c1 = compute_autocorrelation_constant(perturbed.tolist())[1]
+                grad[i] = (perturbed_inv_c1 - base_inv_c1) / epsilon
+
+            refined += learning_rate * grad
+            refined = np.maximum(refined, 0.01)
+
+        return refined.tolist()
+>>>>>>> REPLACE
+</DIFF>

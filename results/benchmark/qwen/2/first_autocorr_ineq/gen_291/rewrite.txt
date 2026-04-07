@@ -1,0 +1,276 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy import signal
+from scipy.fft import fft, ifft
+import random
+import time
+from typing import List, Tuple, Optional
+import warnings
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+class SpectralSequenceOptimizer:
+    """Advanced optimizer that combines spectral analysis with evolutionary techniques."""
+
+    def __init__(self, max_time_seconds: int = 180):
+        self.max_time_seconds = max_time_seconds
+        self.best_sequence = None
+        self.best_inv_c1 = 0.0
+
+    @staticmethod
+    def compute_c1_constant(sequence: List[float]) -> float:
+        """Compute C1 constant for a sequence."""
+        a = np.array(sequence)
+        sum_a = np.sum(a)
+        if sum_a < 0.01:
+            return float('inf')
+        
+        # Use FFT-based convolution for efficiency
+        conv = signal.fftconvolve(a, a, mode='full')[:len(a)*2-1]
+        max_conv = np.max(conv)
+        n = len(a)
+        c1 = (2 * n * max_conv) / (sum_a ** 2)
+        return c1 if c1 > 0 else float('inf')
+
+    @staticmethod
+    def compute_inv_c1(sequence: List[float]) -> float:
+        """Compute 1/C1 for maximizing."""
+        c1 = SpectralSequenceOptimizer.compute_c1_constant(sequence)
+        return 1.0 / c1 if c1 != float('inf') else 0.0
+
+    @staticmethod
+    def spectral_analysis(sequence: List[float]) -> Tuple[np.ndarray, np.ndarray]:
+        """Analyze frequency characteristics of a sequence."""
+        n = len(sequence)
+        if n < 1:
+            return np.array([]), np.array([])
+        
+        fft_coeffs = fft(sequence)
+        power_spectrum = np.abs(fft_coeffs)**2
+        freq_indices = np.arange(n)
+        return freq_indices, power_spectrum
+
+    @staticmethod
+    def spectral_filter(sequence: List[float], alpha: float = 0.3) -> List[float]:
+        """Filter sequence in frequency domain for better autoconvolution."""
+        try:
+            n = len(sequence)
+            if n < 1:
+                return sequence
+                
+            # Analyze spectrum
+            _, power_spectrum = SpectralSequenceOptimizer.spectral_analysis(sequence)
+            
+            # Identify and emphasize dominant frequencies
+            threshold = np.percentile(power_spectrum, 70)
+            dominant_freqs = np.where(power_spectrum > threshold)[0]
+            
+            # Create spectral filter
+            filtered_spectrum = np.zeros(n)
+            filtered_spectrum[dominant_freqs] = 1.0
+            
+            # Smooth the filter
+            filtered_spectrum = signal.savgol_filter(filtered_spectrum, 5, 1)
+            filtered_spectrum = np.maximum(filtered_spectrum, 0)
+            
+            # Apply filter to sequence
+            seq_fft = fft(sequence)
+            filtered_fft = seq_fft * filtered_spectrum
+            filtered_seq = np.real(ifft(filtered_fft))
+            
+            # Normalize and clip
+            filtered_seq = np.maximum(filtered_seq, 0)
+            filtered_seq = filtered_seq / np.sum(filtered_seq) * 10
+            filtered_seq = np.clip(filtered_seq, 0, 1000)
+            
+            return filtered_seq.tolist()
+            
+        except Exception:
+            return sequence
+
+    @staticmethod
+    def create_structured_sequence(n: int) -> List[float]:
+        """Create a structured sequence to start optimization with."""
+        # Use exponential decay mixed with periodic patterns
+        t = np.linspace(0, 4*np.pi, n)
+        exp_decay = np.exp(-t/2)
+        sine_mod = 0.5 + 0.5 * np.sin(t)
+        random_part = np.random.rand(n)
+        
+        # Blend with weights
+        base_seq = 0.3 * exp_decay + 0.4 * sine_mod + 0.3 * random_part
+        
+        # Normalize and rescale
+        base_seq = base_seq / np.sum(base_seq) * 10
+        base_seq = np.clip(base_seq, 0, 1000)
+        
+        return base_seq.tolist()
+
+    @staticmethod
+    def mutate_sequence(sequence: List[float], mutation_rate: float = 0.1) -> List[float]:
+        """Apply multiplicative mutation to a sequence."""
+        mutated = sequence.copy()
+        n = len(mutated)
+        
+        # Determine number of mutations
+        num_mutations = max(1, int(n * mutation_rate))
+        
+        for _ in range(num_mutations):
+            idx = random.randint(0, n - 1)
+            # Apply multiplicative change
+            delta = random.uniform(0.8, 1.2)
+            mutated[idx] *= delta
+            mutated[idx] = max(0, mutated[idx])
+        
+        return mutated
+
+    @staticmethod
+    def crossover_sequences(parent1: List[float], parent2: List[float]) -> List[float]:
+        """Perform uniform crossover between two sequences."""
+        min_len = min(len(parent1), len(parent2))
+        
+        # Uniform crossover
+        child = []
+        for i in range(min_len):
+            if random.random() < 0.5:
+                child.append(parent1[i])
+            else:
+                child.append(parent2[i])
+        
+        # Extend with remaining elements
+        if len(parent1) > min_len:
+            child.extend(parent1[min_len:])
+        elif len(parent2) > min_len:
+            child.extend(parent2[min_len:])
+            
+        return child
+
+    @staticmethod
+    def tournament_selection(population: List[List[float]], 
+                             fitnesses: List[float], 
+                             k: int = 3) -> List[float]:
+        """Tournament selection for evolutionary process."""
+        if len(population) < k:
+            selected_idx = np.argmax(fitnesses)
+            return population[selected_idx]
+
+        tournament_indices = random.sample(range(len(population)), k)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_idx]
+
+    def evolve_population(self, population: List[List[float]], 
+                         generation: int) -> List[List[float]]:
+        """Evolve population with adaptive mutation rates."""
+        if len(population) < 2:
+            return population
+            
+        # Evaluate fitness
+        fitnesses = [self.compute_inv_c1(seq) for seq in population]
+        
+        # Preserve top 30% as elites
+        elite_count = max(1, len(population) // 3)
+        elite_indices = np.argsort(fitnesses)[-elite_count:]
+        elite_individuals = [population[i] for i in elite_indices]
+        
+        # Create new population
+        new_population = elite_individuals[:]
+        
+        # Generate offspring
+        while len(new_population) < len(population):
+            parent1 = self.tournament_selection(population, fitnesses)
+            parent2 = self.tournament_selection(population, fitnesses)
+            
+            # Crossover
+            child = self.crossover_sequences(parent1, parent2)
+            
+            # Apply spectral filtering
+            filtered_child = self.spectral_filter(child)
+            
+            # Adaptive mutation rate based on generation
+            mutation_rate = max(0.05, 0.15 * np.exp(-generation / 10))
+            mutated_child = self.mutate_sequence(filtered_child, mutation_rate)
+            
+            # Ensure valid sum
+            if sum(mutated_child) < 0.01:
+                mutated_child[0] = 0.1
+                
+            new_population.append(mutated_child)
+            
+        return new_population
+
+    def local_refinement(self, sequence: List[float], max_iter: int = 20) -> List[float]:
+        """Fast local refinement using perturbations and spectral filtering."""
+        current = sequence.copy()
+        current_fitness = self.compute_inv_c1(current)
+        
+        for _ in range(max_iter):
+            # Try different perturbation strategies
+            candidates = []
+            
+            # Small random perturbations
+            for _ in range(3):
+                perturbed = current.copy()
+                idx = random.randint(0, len(perturbed) - 1)
+                delta = random.uniform(-0.03, 0.03) * perturbed[idx] if perturbed[idx] > 0 else random.uniform(-5, 5)
+                perturbed[idx] = max(0, min(1000, perturbed[idx] + delta))
+                candidates.append(perturbed)
+            
+            # Spectral-guided perturbation
+            try:
+                spectral_perturbed = self.spectral_filter(current)
+                candidates.append(spectral_perturbed)
+            except:
+                pass
+            
+            # Evaluate and accept best
+            for candidate in candidates:
+                fitness = self.compute_inv_c1(candidate)
+                if fitness > current_fitness:
+                    current = candidate
+                    current_fitness = fitness
+                    
+        return current
+
+    def optimize(self) -> List[float]:
+        """Main optimization routine."""
+        start_time = time.time()
+        
+        # Initial population generation
+        population_size = 25
+        population = []
+        for _ in range(population_size):
+            n = random.randint(80, 800)
+            sequence = self.create_structured_sequence(n)
+            population.append(sequence)
+
+        # Evolutionary loop
+        for generation in range(50):
+            if time.time() - start_time > self.max_time_seconds - 5:
+                break
+                
+            population = self.evolve_population(population, generation)
+            
+            # Track best solution
+            fitnesses = [self.compute_inv_c1(seq) for seq in population]
+            current_best_fitness = max(fitnesses)
+            
+            if current_best_fitness > self.best_inv_c1:
+                self.best_inv_c1 = current_best_fitness
+                best_idx = np.argmax(fitnesses)
+                self.best_sequence = population[best_idx].copy()
+
+        # Final refinement
+        if self.best_sequence is not None:
+            self.best_sequence = self.local_refinement(self.best_sequence, 30)
+            
+        return self.best_sequence if self.best_sequence is not None else [random.random() for _ in range(100)]
+
+def search_for_best_sequence() -> List[float]:
+    """Main function to search for the best coefficient sequence."""
+    optimizer = SpectralSequenceOptimizer(max_time_seconds=180)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

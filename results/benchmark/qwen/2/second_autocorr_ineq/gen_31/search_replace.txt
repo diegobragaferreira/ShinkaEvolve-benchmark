@@ -1,0 +1,129 @@
+<NAME>
+enhance_peak_spacing_and_gaussian_construction
+</NAME>
+
+<DESCRIPTION>
+The main idea is to improve the peak positioning strategy in the geometric step function construction. The current approach places peaks randomly which may lead to poor autoconvolution behavior due to interference effects. I'll implement a more sophisticated approach that ensures proper spacing between peaks and uses a more principled Gaussian-based construction that naturally leads to better C2 values.
+
+The key insights are:
+1. Peaks that are too close together create destructive interference in autoconvolution
+2. Properly spaced Gaussian peaks with varying widths can create flatter autoconvolution profiles that improve C2
+3. We should enforce minimum spacing constraints between peaks
+4. Use a more controlled approach for generating peak parameters rather than random sampling
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def construct_geometric_step_function(n_steps):
+    """Construct a step function using geometric principles for better C2"""
+    # Create a base function with multiple components
+    # This combines smooth peaks with geometric spacing to encourage good autoconvolution behavior
+
+    # Different geometric patterns
+    pattern_type = random.choice(['sine_wave', 'exponential_decay', 'piecewise_linear'])
+
+    if pattern_type == 'sine_wave':
+        # Sine wave pattern
+        t = np.linspace(0, 4*np.pi, n_steps)
+        base_pattern = 0.5 + 0.5 * np.sin(t)
+    elif pattern_type == 'exponential_decay':
+        # Exponential decay pattern
+        t = np.linspace(0, 3, n_steps)
+        base_pattern = np.exp(-t) * (1 + 0.5 * np.sin(2*t))
+    else:  # piecewise_linear
+        # Piecewise linear segments
+        segments = random.randint(3, 8)
+        segment_length = n_steps // segments
+        base_pattern = np.zeros(n_steps)
+        for i in range(segments):
+            start_idx = i * segment_length
+            end_idx = min((i+1) * segment_length, n_steps)
+            if i % 2 == 0:
+                base_pattern[start_idx:end_idx] = np.linspace(0, 1, end_idx-start_idx)
+            else:
+                base_pattern[start_idx:end_idx] = np.linspace(1, 0, end_idx-start_idx)
+
+    # Add some variation and scaling
+    f_vals = base_pattern * np.random.uniform(1.0, 3.0)
+
+    # Add occasional high peaks to enhance optimization landscape
+    if random.random() < 0.3:
+        peak_positions = np.random.randint(0, n_steps, random.randint(1, 3))
+        peak_heights = np.random.uniform(0.5, 2.0, len(peak_positions))
+        for pos, height in zip(peak_positions, peak_heights):
+            # Create soft peaks
+            window = min(50, n_steps//10)
+            for i in range(max(0, pos-window), min(n_steps, pos+window)):
+                dist = abs(i - pos)
+                f_vals[i] += height * np.exp(-0.5 * (dist/window)**2)
+
+    return f_vals
+=======
+def construct_geometric_step_function(n_steps):
+    """Construct a step function using optimized Gaussian peak placement for better C2"""
+    # Create a more structured approach with properly spaced Gaussian peaks
+    # This aims to avoid destructive interference while creating favorable autoconvolution profiles
+
+    # Determine number of peaks based on function length
+    n_peaks = max(2, min(12, n_steps // 100))
+
+    # Create evenly spaced base positions but add some randomness for diversity
+    base_positions = np.linspace(0.1 * n_steps, 0.9 * n_steps, n_peaks)
+
+    # Add small random perturbations to positions
+    for i in range(len(base_positions)):
+        if i > 0 and i < len(base_positions) - 1:
+            # Keep interior peaks somewhat spaced
+            max_perturbation = max(10, n_steps // 50)
+            base_positions[i] += random.uniform(-max_perturbation, max_perturbation)
+        elif i == 0:
+            # First peak near left boundary with some variation
+            base_positions[i] += random.uniform(0, n_steps // 20)
+        else:
+            # Last peak near right boundary with some variation
+            base_positions[i] += random.uniform(-n_steps // 20, 0)
+
+    # Ensure positions are within bounds
+    base_positions = np.clip(base_positions, 0, n_steps - 1)
+
+    # Create the function with Gaussian peaks
+    f_vals = np.zeros(n_steps)
+
+    # For each peak, generate different parameters to create variety
+    for i, center in enumerate(base_positions):
+        # Width inversely related to peak importance for balance
+        width = max(5, min(n_steps // 10, random.randint(n_steps // 50, n_steps // 20)))
+
+        # Height with controlled variation
+        height = random.uniform(0.8, 2.5)
+
+        # Generate Gaussian curve
+        x = np.arange(n_steps)
+        gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_vals += gaussian
+
+    # Apply smoothing to reduce extreme variations and prevent numerical issues
+    if n_steps > 50:
+        # Use Savitzky-Golay filter with appropriate parameters
+        window_length = min(51, n_steps - 1)
+        if window_length % 2 == 0:
+            window_length -= 1  # Must be odd
+        if window_length > 1:
+            f_vals = signal.savgol_filter(f_vals, window_length, 3)
+
+    # Ensure non-negativity
+    f_vals = np.maximum(f_vals, 0)
+
+    # Add some additional structure to make the function more interesting for optimization
+    # Apply a gentle envelope to create a more balanced profile
+    envelope = 0.5 + 0.5 * np.sin(np.linspace(0, 2*np.pi, n_steps))
+    f_vals = f_vals * envelope
+
+    # Normalize to reasonable range
+    if np.max(f_vals) > 0:
+        f_vals = f_vals / np.max(f_vals) * 2.0
+
+    return f_vals
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,125 @@
+--- a/original.py
++++ b/original.py
+@@ -1,25 +1,117 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.optimize import differential_evolution
++from scipy.spatial.distance import cdist
++import time
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 21
+-    circles = np.zeros((n, 3))
+-
++    # Rectangle dimensions: width + height = 2, let's use 1x1 for simplicity (perimeter = 4)
++    rect_width = 1.0
++    rect_height = 1.0
++    
++    # Objective function to maximize (negative because we minimize)
++    def objective(x):
++        # x contains [cx1, cy1, r1, cx2, cy2, r2, ..., cx21, cy21, r21]
++        # Extract centers and radii
++        centers = x[::3].reshape(-1, 1), x[1::3].reshape(-1, 1)
++        radii = x[2::3]
++        
++        # Calculate total radius sum (we want to maximize this)
++        total_radius = np.sum(radii)
++        
++        # Penalty for circles outside bounds
++        penalty = 0
++        
++        # Check bounds
++        for i in range(21):
++            cx, cy, r = centers[0][i], centers[1][i], radii[i]
++            if cx - r < 0 or cx + r > rect_width or cy - r < 0 or cy + r > rect_height:
++                penalty += 1000000  # Large penalty for out of bounds
++        
++        # Calculate distance matrix between circle centers
++        center_points = np.column_stack((centers[0].flatten(), centers[1].flatten()))
++        distances = cdist(center_points, center_points)
++        
++        # Add penalty for overlapping circles (distance < sum of radii)
++        for i in range(21):
++            for j in range(i+1, 21):
++                distance = distances[i, j]
++                sum_radii = radii[i] + radii[j]
++                if distance < sum_radii:
++                    penalty += 1000000 * (sum_radii - distance)
++        
++        return -(total_radius - penalty)
++    
++    # Constraints for optimization
++    def constraint_bounds(x):
++        # Ensure all circles fit inside rectangle
++        centers = x[::3].reshape(-1, 1), x[1::3].reshape(-1, 1)
++        radii = x[2::3]
++        
++        for i in range(21):
++            cx, cy, r = centers[0][i], centers[1][i], radii[i]
++            if cx - r < 0 or cx + r > rect_width or cy - r < 0 or cy + r > rect_height:
++                return False
++        return True
++    
++    # Bounds for optimization: [x1, y1, r1, x2, y2, r2, ..., x21, y21, r21]
++    bounds = []
++    for i in range(21):
++        bounds.extend([(0, rect_width), (0, rect_height), (0.001, 0.5)])  # radius upper bound set to 0.5 for reasonable limit
++    
++    # Initial guess - spread circles reasonably
++    initial_guess = []
++    # Distribute circles in a grid-like pattern
++    grid_size = int(np.ceil(np.sqrt(21)))
++    spacing_x = rect_width / (grid_size + 1)
++    spacing_y = rect_height / (grid_size + 1)
++    radius = 0.1
++    
++    for i in range(21):
++        row = i // grid_size
++        col = i % grid_size
++        cx = (col + 1) * spacing_x
++        cy = (row + 1) * spacing_y
++        initial_guess.extend([cx, cy, radius])
++    
++    # Run optimization
++    start_time = time.time()
++    
++    # Use differential evolution for global optimization
++    result = differential_evolution(
++        objective,
++        bounds,
++        seed=42,
++        maxiter=1000,
++        popsize=15,
++        tol=1e-6,
++        recombination=0.7,
++        mutation=(0.5, 1),
++        disp=False,
++        callback=lambda x, convergence: None  # Suppress output
++    )
++    
++    end_time = time.time()
++    
++    # Extract final solution
++    best_x = result.x
++    circles = np.zeros((21, 3))
++    for i in range(21):
++        circles[i] = [best_x[3*i], best_x[3*i+1], best_x[3*i+2]]
++    
+     return circles
+-
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

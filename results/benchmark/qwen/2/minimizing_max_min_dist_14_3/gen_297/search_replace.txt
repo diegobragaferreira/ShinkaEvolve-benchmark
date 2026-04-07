@@ -1,0 +1,292 @@
+<NAME>
+enhance_voronoi_guidance
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the Voronoi-based guidance by implementing a more sophisticated approach that analyzes both local Voronoi cell properties and global distance distribution patterns. The key improvements include:
+1. Enhancing the constraint region analysis to prioritize points in non-uniform regions
+2. Adding a more intelligent point selection mechanism that considers both local density and global distribution
+3. Improving the perturbation magnitude calculation to be more context-aware
+4. Adding a hybrid perturbation strategy that combines geometric insights with random exploration
+
+These changes aim to better exploit the Voronoi structure for more effective point distribution while maintaining the optimization's adaptability.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class VoronoiAnalyzer:
+    @staticmethod
+    def analyze_constraint_regions(points: np.ndarray, threshold_ratio: float = 0.3) -> np.ndarray:
+        """Analyze current configuration using spherical Voronoi to identify constraints"""
+        try:
+            # Create spherical Voronoi diagram with error handling
+            sv = SphericalVoronoi(points)
+
+            # Compute Voronoi cell areas and identify small cells (indicating dense regions)
+            cell_areas = sv.volume
+            mean_area = np.mean(cell_areas)
+
+            # Find points in cells that are below 20% of average area (dense regions)
+            dense_point_indices = np.where(cell_areas < 0.2 * mean_area)[0]
+
+            # Also identify points that have many close neighbors using percentiles
+            distances = pdist(points)
+            if len(distances) == 0:
+                return np.ones(len(points)) * 0.5
+
+            distance_matrix = squareform(distances)
+            percentile_10 = np.percentile(distances, 10)
+            close_neighbor_counts = np.sum(distance_matrix < percentile_10, axis=1)
+
+            # Combine criteria for constraint identification
+            constraint_scores = np.zeros(len(points))
+
+            # Score based on close neighbors
+            constraint_scores += close_neighbor_counts * 0.5
+
+            # Bonus for being in a dense region
+            for idx in dense_point_indices:
+                constraint_scores[idx] += 2.0
+
+            return constraint_scores
+
+        except Exception:
+            # Fallback if Voronoi computation fails
+            return np.ones(len(points)) * 0.5
+=======
+class VoronoiAnalyzer:
+    @staticmethod
+    def analyze_constraint_regions(points: np.ndarray, threshold_ratio: float = 0.3) -> np.ndarray:
+        """Analyze current configuration using spherical Voronoi to identify constraints"""
+        try:
+            # Create spherical Voronoi diagram with error handling
+            sv = SphericalVoronoi(points)
+
+            # Compute Voronoi cell areas and identify small cells (indicating dense regions)
+            cell_areas = sv.volume
+            mean_area = np.mean(cell_areas)
+            std_area = np.std(cell_areas)
+
+            # Find points in cells that deviate significantly from mean area
+            # Points in cells that are more than 2 std devs from mean are highly constrained
+            dense_point_indices = np.where(cell_areas < mean_area - 2*std_area)[0]
+            sparse_point_indices = np.where(cell_areas > mean_area + 2*std_area)[0]
+
+            # Also identify points that have many close neighbors using percentiles
+            distances = pdist(points)
+            if len(distances) == 0:
+                return np.ones(len(points)) * 0.5
+
+            distance_matrix = squareform(distances)
+            # Use tighter thresholds for what constitutes "close"
+            percentile_5 = np.percentile(distances, 5)
+            percentile_95 = np.percentile(distances, 95)
+            close_neighbor_counts = np.sum(distance_matrix < percentile_5, axis=1)
+            far_neighbor_counts = np.sum(distance_matrix > percentile_95, axis=1)
+
+            # Combine criteria for constraint identification with better weighting
+            constraint_scores = np.zeros(len(points))
+
+            # Score based on close neighbors (strong penalty for being too close)
+            constraint_scores += close_neighbor_counts * 1.0
+
+            # Score based on far neighbors (penalty for being too far)
+            constraint_scores += far_neighbor_counts * 0.5
+
+            # Bonus for being in very dense regions (more constrained)
+            for idx in dense_point_indices:
+                constraint_scores[idx] += 3.0
+
+            # Penalty for being in very sparse regions (less constrained but still important)
+            for idx in sparse_point_indices:
+                constraint_scores[idx] += 1.0
+
+            return constraint_scores
+
+        except Exception:
+            # Fallback if Voronoi computation fails
+            return np.ones(len(points)) * 0.5
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def _select_point_for_perturbation(self, points: np.ndarray) -> int:
+        """Select point to perturb based on constraint analysis"""
+        # Use Voronoi analysis for constraint scoring
+        constraint_scores = VoronoiAnalyzer.analyze_constraint_regions(points)
+
+        # Choose point with highest constraint score (but with some randomness)
+        if np.random.random() < 0.7:
+            # 70% chance to select the most constrained point
+            chosen_idx = np.argmax(constraint_scores)
+        else:
+            # 30% chance to select randomly from top 3 constrained
+            top_indices = np.argsort(constraint_scores)[-3:]
+            chosen_idx = np.random.choice(top_indices)
+
+        return chosen_idx
+=======
+    def _select_point_for_perturbation(self, points: np.ndarray) -> int:
+        """Select point to perturb based on constraint analysis with hybrid approach"""
+        # Use Voronoi analysis for constraint scoring
+        constraint_scores = VoronoiAnalyzer.analyze_constraint_regions(points)
+
+        # Normalize constraint scores to [0,1] range
+        if np.max(constraint_scores) > 0:
+            normalized_scores = constraint_scores / np.max(constraint_scores)
+        else:
+            normalized_scores = constraint_scores
+
+        # Add some randomness to prevent getting stuck in local optima
+        # Use softmax to convert scores to probabilities with temperature control
+        temperature = 0.5  # Lower temperature = more greedy, higher = more random
+        exp_scores = np.exp(normalized_scores / temperature)
+        probabilities = exp_scores / np.sum(exp_scores)
+
+        # Choose point based on probabilities but with some greedy selection
+        if np.random.random() < 0.8:
+            # 80% chance: select based on probability distribution
+            chosen_idx = np.random.choice(len(points), p=probabilities)
+        else:
+            # 20% chance: select greedily from top 3 or randomly from top 5
+            top_indices = np.argsort(constraint_scores)[-5:]
+            chosen_idx = np.random.choice(top_indices)
+
+        return chosen_idx
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def _compute_targeted_perturbation(self, points: np.ndarray, point_idx: int) -> np.ndarray:
+        """Compute a targeted perturbation that should improve the configuration"""
+        try:
+            # Analyze local geometry around the selected point
+            distances = cdist([points[point_idx]], points)[0]
+            # Remove self-distance and ensure we have valid distances
+            valid_distances = distances[distances > 0]
+
+            if len(valid_distances) == 0:
+                # No neighbors, random perturb with small magnitude
+                return np.random.normal(0, 0.01, 3)
+
+            avg_distance = np.mean(valid_distances)
+            min_distance = np.min(valid_distances)
+
+            # Determine perturbation type based on local density
+            if min_distance < avg_distance * 0.4:
+                # Point is too close to neighbors - repel it strongly
+                repulsion = np.zeros(3)
+                for i in range(len(points)):
+                    if i != point_idx and distances[i] < avg_distance * 0.7:
+                        diff = points[point_idx] - points[i]
+                        dist = np.linalg.norm(diff)
+                        if dist > 0:
+                            repulsion += diff / dist * (1.0/(dist * dist + 1e-8))
+
+                if np.linalg.norm(repulsion) > 0:
+                    repulsion = repulsion / np.linalg.norm(repulsion)
+                    # Scale by how close we are to ideal spacing
+                    proximity_factor = min_distance / avg_distance
+                    magnitude = 0.03 * (1.0 + proximity_factor * 2.0)
+                    return repulsion * magnitude
+                else:
+                    # Fallback to random perturbation
+                    return np.random.normal(0, 0.015, 3)
+            else:
+                # Point is relatively well-spaced - make small adjustment
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+                # Magnitude inversely proportional to distance from center
+                center_dist = np.linalg.norm(points[point_idx])
+                distance_factor = 1.0 - min(abs(center_dist - 0.5), 0.5)
+                magnitude = 0.01 * distance_factor
+                return direction * magnitude
+
+        except Exception:
+            # Fallback to simple random perturbation
+            direction = np.random.randn(3)
+            direction /= np.linalg.norm(direction)
+            return direction * 0.015
+=======
+    def _compute_targeted_perturbation(self, points: np.ndarray, point_idx: int) -> np.ndarray:
+        """Compute a targeted perturbation that should improve the configuration with hybrid strategy"""
+        try:
+            # Analyze local geometry around the selected point
+            distances = cdist([points[point_idx]], points)[0]
+            # Remove self-distance and ensure we have valid distances
+            valid_distances = distances[distances > 0]
+
+            if len(valid_distances) == 0:
+                # No neighbors, random perturb with small magnitude
+                return np.random.normal(0, 0.01, 3)
+
+            avg_distance = np.mean(valid_distances)
+            min_distance = np.min(valid_distances)
+            max_distance = np.max(valid_distances)
+
+            # Hybrid perturbation strategy that combines multiple approaches
+            if np.random.random() < 0.7:
+                # 70% chance: Geometry-based repulsion/attraction
+                if min_distance < avg_distance * 0.3:
+                    # Point is too close to neighbors - repel it strongly
+                    repulsion = np.zeros(3)
+                    repulsion_magnitude = 0.0
+                    for i in range(len(points)):
+                        if i != point_idx and distances[i] < avg_distance * 0.6:
+                            diff = points[point_idx] - points[i]
+                            dist = np.linalg.norm(diff)
+                            if dist > 0:
+                                repulsion += diff / dist * (1.0/(dist * dist + 1e-8))
+                                repulsion_magnitude += 1.0/(dist * dist + 1e-8)
+
+                    if np.linalg.norm(repulsion) > 0 and repulsion_magnitude > 0:
+                        repulsion = repulsion / np.linalg.norm(repulsion)
+                        # Scale by how close we are to ideal spacing
+                        proximity_factor = min_distance / avg_distance
+                        magnitude = 0.04 * (1.0 + proximity_factor * 3.0)
+                        return repulsion * magnitude
+                    else:
+                        # Fallback to geometric-based perturbation
+                        direction = np.random.randn(3)
+                        direction /= np.linalg.norm(direction)
+                        return direction * 0.02
+                else:
+                    # Point is relatively well-spaced - make small adjustment
+                    direction = np.random.randn(3)
+                    direction /= np.linalg.norm(direction)
+                    # Magnitude inversely proportional to distance from center
+                    center_dist = np.linalg.norm(points[point_idx])
+                    distance_factor = 1.0 - min(abs(center_dist - 0.5), 0.5)
+                    magnitude = 0.008 * distance_factor
+                    return direction * magnitude
+            else:
+                # 30% chance: Random perturbation with adaptive magnitude
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+
+                # Adaptive magnitude based on global statistics
+                global_density = len(valid_distances) / (len(points) - 1)  # Proportion of neighbors
+                if global_density > 0.7:
+                    # Dense region - smaller perturbation
+                    magnitude = 0.015
+                elif global_density < 0.3:
+                    # Sparse region - larger perturbation to explore
+                    magnitude = 0.025
+                else:
+                    # Normal density - medium perturbation
+                    magnitude = 0.02
+
+                return direction * magnitude
+
+        except Exception:
+            # Fallback to simple random perturbation with adaptive scale
+            direction = np.random.randn(3)
+            direction /= np.linalg.norm(direction)
+            # Scale based on expected global behavior
+            return direction * 0.02
+>>>>>>> REPLACE
+</DIFF>

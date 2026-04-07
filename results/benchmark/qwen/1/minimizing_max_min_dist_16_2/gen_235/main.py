@@ -1,0 +1,204 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Compute min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        if d_max == 0:
+            return -1.0
+        return -d_min / d_max
+
+    def generate_hexagonal_pattern():
+        """Generate a more mathematically sound hexagonal pattern for 16 points."""
+        # For 16 points, we want to create a hexagonal grid pattern with 4 rows
+        # Using hexagonal packing principles: closest packed spheres in 2D
+
+        # Define hexagonal lattice parameters
+        sqrt3 = np.sqrt(3)
+        # For a hexagonal grid with 4 rows, we can arrange it as:
+        # Row 1: 4 points (columns 0,1,2,3)
+        # Row 2: 4 points (offset by 0.5, columns 0.5,1.5,2.5,3.5)
+        # Row 3: 4 points (offset by 0, columns 0,1,2,3)
+        # Row 4: 4 points (offset by 0.5, columns 0.5,1.5,2.5,3.5)
+
+        # Position points in a hexagonal pattern
+        points = []
+        row_offset = 0.25  # Adjust to fill the unit square properly
+
+        for row in range(4):
+            # Each row has 4 points
+            for col in range(4):
+                if len(points) >= 16:
+                    break
+
+                # Calculate x and y positions according to hexagonal grid
+                x = col * 0.25 + (row % 2) * 0.125  # Offset every other row
+                y = row * 0.25 * sqrt3 / 2  # Vertical spacing for hexagon
+
+                points.append([x, y])
+
+            if len(points) >= 16:
+                break
+
+        points = np.array(points[:16])
+
+        # Scale to fit nicely in [0.05, 0.95] range to maintain boundaries
+        points[:, 0] = 0.05 + points[:, 0] * 0.9
+        points[:, 1] = 0.05 + points[:, 1] * 0.9
+
+        # Add small random jitter to break symmetry
+        noise_level = 0.01
+        points += np.random.normal(0, noise_level, points.shape)
+
+        return np.clip(points, 0, 1)
+
+    def generate_spiral_pattern():
+        """Generate a spiral pattern that distributes points more evenly."""
+        points = []
+        # Create a spiral pattern centered at (0.5, 0.5)
+        center = np.array([0.5, 0.5])
+        # Use Fibonacci spiral approach for better distribution
+
+        for i in range(16):
+            angle = i * 0.785  # Approximately π/4 radians per point
+            radius = i * 0.05  # Increase radius gradually
+            x = center[0] + radius * np.cos(angle)
+            y = center[1] + radius * np.sin(angle)
+            points.append([x, y])
+
+        points = np.array(points)
+        return np.clip(points, 0, 1)
+
+    def generate_random_configurations():
+        """Generate multiple random configurations with different seeds."""
+        configs = []
+        for seed_val in [123, 456, 789, 321]:
+            np.random.seed(seed_val)
+            rand_points = np.random.rand(16, 2)
+            configs.append(rand_points)
+        return configs
+
+    def generate_grid_with_perturbation():
+        """Create a grid pattern with systematic perturbations."""
+        points = []
+        # Create a 4x4 grid
+        for i in range(4):
+            for j in range(4):
+                x = 0.1 + j * 0.225
+                y = 0.1 + i * 0.225
+                points.append([x, y])
+
+        points = np.array(points[:16])
+
+        # Add systematic perturbations
+        np.random.seed(999)
+        perturbation = np.random.normal(0, 0.015, points.shape)
+        points += perturbation
+
+        return np.clip(points, 0, 1)
+
+    # Generate multiple initial configurations
+    initial_configs = []
+
+    # 1. Hexagonal pattern (better than current)
+    initial_configs.append(generate_hexagonal_pattern())
+
+    # 2. Spiral pattern
+    initial_configs.append(generate_spiral_pattern())
+
+    # 3. Grid with perturbations
+    initial_configs.append(generate_grid_with_perturbation())
+
+    # 4. Multiple random configurations
+    initial_configs.extend(generate_random_configurations())
+
+    # Define bounds for optimization
+    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    best_ratio = float('inf')
+    best_points = None
+
+    # Try optimization from each initial configuration
+    for i, initial_config in enumerate(initial_configs):
+        try:
+            x0 = initial_config.flatten()
+
+            # Use differential evolution for global optimization
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=42+i,  # Different seed for each run
+                maxiter=150,  # Reduce iterations for faster execution
+                popsize=25,   # Larger population for better search
+                tol=1e-8,     # Tight tolerance
+                recombination=0.9,  # High recombination rate
+                mutation=(0.8, 1.0),  # Good balance of exploration and exploitation
+                disp=False
+            )
+
+            if result.success:
+                # Evaluate the result
+                optimized_points = result.x.reshape(-1, 2)
+                distances = pdist(optimized_points)
+                if len(distances) > 0 and np.max(distances) > 0:
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+                    ratio = min_dist / max_dist
+
+                    # Keep the best solution found so far
+                    if ratio < best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        except Exception as e:
+            # Continue to next configuration if this one fails
+            continue
+
+    # Fallback to the last configured initial if no success
+    if best_points is None:
+        np.random.seed(42)
+        fallback_points = np.random.rand(16, 2)
+        x0 = fallback_points.flatten()
+
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=100,
+            popsize=20,
+            tol=1e-6,
+            recombination=0.8,
+            mutation=(0.5, 1.0),
+            disp=False
+        )
+
+        if result.success:
+            best_points = result.x.reshape(-1, 2)
+        else:
+            # Final fallback to random points
+            best_points = np.random.rand(16, 2)
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

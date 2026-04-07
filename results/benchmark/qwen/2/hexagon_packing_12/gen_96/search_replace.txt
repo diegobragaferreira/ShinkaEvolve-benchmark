@@ -1,0 +1,146 @@
+<NAME>
+implement_adaptive_penalty_method
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive penalty method that dynamically adjusts penalty weights based on constraint violation severity. This approach will assign higher penalties for containment violations than overlap violations since containment is more fundamental to the problem formulation. The adaptive weighting should make the optimization landscape smoother for convergence while still strongly discouraging constraint violations.
+
+The key changes include:
+1. Adding an adaptive penalty calculation mechanism
+2. Modifying the fitness function to use dynamic penalty weights
+3. Improving the penalty structure to prioritize containment over overlap violations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution with optimized overlap checking."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Create polygons for all inner hexagons
+    inner_polygons = []
+    for i in range(len(positions)):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        inner_polygons.append(poly)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length_fast(positions)
+
+    # Check containment and overlaps efficiently using spatial hashing
+    total_penalty = 0
+    num_inner = len(inner_polygons)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Build spatial hash for fast neighbor lookup
+    spatial_grid = SpatialHashGrid(cell_size=3.0)
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        spatial_grid.insert(i, center_x, center_y)
+
+    # Check containment
+    for i in range(num_inner):
+        if not check_containment_fast(inner_polygons[i], outer_poly):
+            # Large penalty for containment violations
+            total_penalty += 1e6
+
+    # Check overlaps using spatial hash for efficiency
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        neighbors = spatial_grid.get_neighbors(center_x, center_y)
+
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks and self-checking
+                continue
+            if check_overlap_fast(inner_polygons[i], inner_polygons[j]):
+                # Penalize overlap more heavily
+                total_penalty += 1e5
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    if side_length < 1e-6:
+        fitness = -1e10 - total_penalty
+    else:
+        fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+=======
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution with optimized overlap checking and adaptive penalties."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Create polygons for all inner hexagons
+    inner_polygons = []
+    for i in range(len(positions)):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        inner_polygons.append(poly)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length_fast(positions)
+
+    # Check containment and overlaps efficiently using spatial hashing
+    total_penalty = 0
+    num_inner = len(inner_polygons)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Build spatial hash for fast neighbor lookup
+    spatial_grid = SpatialHashGrid(cell_size=3.0)
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        spatial_grid.insert(i, center_x, center_y)
+
+    # Track constraint violations
+    containment_violations = 0
+    overlap_violations = 0
+
+    # Check containment
+    for i in range(num_inner):
+        if not check_containment_fast(inner_polygons[i], outer_poly):
+            # Severe penalty for containment violations - these are fundamental
+            containment_violations += 1
+            total_penalty += 1e8  # Much higher penalty for containment
+
+    # Check overlaps using spatial hash for efficiency
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        neighbors = spatial_grid.get_neighbors(center_x, center_y)
+
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks and self-checking
+                continue
+            if check_overlap_fast(inner_polygons[i], inner_polygons[j]):
+                # Penalize overlap violations
+                overlap_violations += 1
+                total_penalty += 1e6  # High penalty for overlaps
+
+    # Adaptive penalty adjustment based on violation severity
+    # The idea is to make the penalty scheme more sensitive to serious violations
+    if containment_violations > 0:
+        # If there are containment violations, make penalty even stronger
+        total_penalty *= (1 + containment_violations * 0.5)
+
+    if overlap_violations > 0:
+        # Apply some scaling to overlap penalties
+        total_penalty *= (1 + overlap_violations * 0.2)
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    if side_length < 1e-6:
+        fitness = -1e10 - total_penalty
+    else:
+        # Apply adaptive weight to the main objective
+        # We want to balance between getting a smaller outer hexagon
+        # and satisfying all constraints
+        fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+>>>>>>> REPLACE
+
+</DIFF>

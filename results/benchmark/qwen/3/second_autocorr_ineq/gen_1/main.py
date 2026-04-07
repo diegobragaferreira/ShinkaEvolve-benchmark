@@ -1,0 +1,146 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import time
+import numba
+from numba import jit
+
+# Constants
+DOMAIN = [-0.25, 0.25]
+N_MIN, N_MAX = 100, 2000
+N_BEST = 1000  # Best candidate size
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using numba-optimized approach"""
+    n = len(f_vals)
+    # Initialize result array
+    g = np.zeros(2*n - 1)
+    
+    # Compute autoconvolution manually for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently using numba"""
+    n = len(g_vals)
+    
+    # L2 norm squared
+    l2_sq = 0.0
+    # L1 norm
+    l1 = 0.0
+    # Infinity norm
+    l_inf = 0.0
+    
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+    
+    return l2_sq, l1, l_inf
+
+def compute_c2(f_vals):
+    """Compute C2 value for given function values"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+        
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+        
+        # Compute norms
+        l2_sq, l1, l_inf = compute_norms_numba(g_vals)
+        
+        # Avoid division by zero
+        if l1 <= 1e-12 or l_inf <= 1e-12:
+            return 0.0
+        
+        # Compute C2
+        c2 = l2_sq / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def generate_candidate_solution(n):
+    """Generate a candidate solution with n steps"""
+    # Generate random positive values
+    return np.random.exponential(1, n)
+
+def evaluate_solution(f_vals):
+    """Evaluate a candidate solution"""
+    return compute_c2(f_vals)
+
+def evolve_step_function():
+    """Main evolution function to find optimal step function"""
+    best_c2 = 0.0
+    best_f_vals = None
+    
+    # Try several random configurations to get started
+    for _ in range(100):
+        # Randomly sample number of steps
+        n_steps = np.random.randint(N_MIN, N_MAX + 1)
+        
+        # Generate candidate
+        f_vals = generate_candidate_solution(n_steps)
+        
+        # Evaluate
+        c2 = evaluate_solution(f_vals)
+        
+        if c2 > best_c2:
+            best_c2 = c2
+            best_f_vals = f_vals.copy()
+    
+    # If we found something better than baseline, let's use it as starting point
+    if best_c2 > 0:
+        # Fine-tune the best configuration with local search
+        n_steps = len(best_f_vals)
+        
+        def objective(x):
+            # Normalize x to 0-1 scale and rescale to reasonable range
+            f_vals = np.abs(x) * 5.0  # Scale up to avoid very small values
+            return -evaluate_solution(f_vals)  # Negative because we're minimizing
+        
+        # Use differential evolution for local optimization
+        try:
+            bounds = [(0, 10) for _ in range(n_steps)]
+            result = differential_evolution(objective, bounds, maxiter=100, popsize=15, seed=42)
+            
+            if result.success:
+                final_f_vals = np.abs(result.x) * 5.0
+                final_c2 = evaluate_solution(final_f_vals)
+                
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_f_vals = final_f_vals
+        except:
+            pass  # Fall back to initial solution if optimization fails
+    
+    return best_f_vals.tolist() if best_f_vals is not None else [0.5]*100
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Try to beat the benchmark
+    result = evolve_step_function()
+    
+    # Limit execution time
+    end_time = time.time()
+    if end_time - start_time > 85:  # Leave some buffer
+        return result
+    
+    return result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,314 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import random
+from typing import List, Tuple, Optional
+import time
+
+# Configuration parameters
+POPULATION_SIZE = 50
+GENERATIONS = 100
+TOURNAMENT_SIZE = 5
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+DIVERSITY_THRESHOLD = 0.01
+MAX_NO_IMPROVEMENT = 20
+
+def compute_c1(sequence: List[float]) -> float:
+    """Computes the C1 constant from the sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+
+    # Normalize the sequence for fair comparison
+    s = sum(sequence)
+    if s < 0.01:
+        return float('inf')
+
+    # Compute convolution using FFT for efficiency
+    conv = fftconvolve(sequence, sequence, mode='full')
+    max_conv = np.max(conv)
+
+    # C1 = 2n * max(convolution) / (sum(sequence))^2
+    n = len(sequence)
+    c1 = 2 * n * max_conv / (s ** 2)
+    return c1
+
+def compute_inv_c1(sequence: List[float]) -> float:
+    """Computes the inverse of C1 (what we want to maximize)."""
+    c1 = compute_c1(sequence)
+    return 1.0 / c1 if c1 > 0 else 0.0
+
+def normalize_sequence(sequence: List[float]) -> List[float]:
+    """Normalize sequence to unit sum, but avoid division by zero."""
+    s = sum(sequence)
+    if s < 0.01:
+        # Add small epsilon to prevent division by zero
+        s = 0.01
+    return [x / s for x in sequence]
+
+def create_individual(length: int) -> List[float]:
+    """Create a random individual with specified length."""
+    return [random.uniform(0, 1000) for _ in range(length)]
+
+def create_population(pop_size: int, min_length: int = 10, max_length: int = 500) -> List[List[float]]:
+    """Create an initial population."""
+    population = []
+    for _ in range(pop_size):
+        length = random.randint(min_length, max_length)
+        individual = create_individual(length)
+        population.append(individual)
+    return population
+
+def evaluate_fitness(individual: List[float]) -> float:
+    """Evaluate fitness of an individual (inverse C1)."""
+    return compute_inv_c1(individual)
+
+def tournament_selection(population: List[List[float]], fitnesses: List[float]) -> List[float]:
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), TOURNAMENT_SIZE)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_idx].copy()
+
+def crossover(parent1: List[float], parent2: List[float]) -> Tuple[List[float], List[float]]:
+    """Perform uniform crossover between two parents."""
+    if len(parent1) == 0 or len(parent2) == 0:
+        return parent1, parent2
+
+    # Uniform crossover
+    child1, child2 = [], []
+    for i in range(max(len(parent1), len(parent2))):
+        if random.random() < CROSSOVER_RATE:
+            # Take gene from parent1, if available, otherwise from parent2
+            if i < len(parent1) and i < len(parent2):
+                child1.append(parent1[i])
+                child2.append(parent2[i])
+            elif i < len(parent1):
+                child1.append(parent1[i])
+                child2.append(random.uniform(0, 1000))
+            else:
+                child1.append(random.uniform(0, 1000))
+                child2.append(parent2[i])
+        else:
+            # Take gene from parent2, if available, otherwise from parent1
+            if i < len(parent1) and i < len(parent2):
+                child1.append(parent2[i])
+                child2.append(parent1[i])
+            elif i < len(parent1):
+                child1.append(random.uniform(0, 1000))
+                child2.append(parent1[i])
+            else:
+                child1.append(parent1[i])
+                child2.append(random.uniform(0, 1000))
+
+    return child1, child2
+
+def mutate(individual: List[float]) -> List[float]:
+    """Mutate an individual by adding small random changes."""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < MUTATION_RATE:
+            mutated[i] = max(0, mutated[i] + random.gauss(0, 100))
+    return mutated
+
+def solve_convolution_lp(f_sequence: List[float], rhs: float) -> Optional[List[float]]:
+    """Solves the convolution LP for a given sequence and RHS with better error handling."""
+    try:
+        n = len(f_sequence)
+        if n == 0:
+            return None
+
+        # Convert to numpy arrays for stability
+        f_array = np.array(f_sequence)
+
+        # Create constraint matrix efficiently
+        a_ub = []
+        b_ub = []
+
+        # Convolution matrix construction via FFT for efficiency
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_array[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Solve with bounds to prevent numerical issues
+        bounds = [(0, 1000) for _ in range(n)]
+        result = optimize.linprog(
+            c=-np.ones(n),
+            A_ub=a_ub,
+            b_ub=b_ub,
+            bounds=bounds,
+            method='highs'
+        )
+
+        if result.success:
+            return result.x.tolist()
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Returns the direction to move into the sequence using improved optimization."""
+    try:
+        n = len(sequence)
+        if n == 0:
+            return None
+
+        # Normalize the sequence
+        normalized_sequence = normalize_sequence(sequence)
+
+        # Compute the maximum convolution value (constraint)
+        conv = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+        rhs = np.max(conv)
+
+        # Try to solve the LP for optimization
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is None:
+            return None
+
+        # Normalize the optimized sequence
+        normalized_g_fun = normalize_sequence(g_fun)
+
+        # Apply small perturbation to explore neighborhood
+        t = 0.02  # Increased step size
+        new_sequence = [
+            (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+        ]
+
+        return new_sequence
+    except Exception as e:
+        return None
+
+def compute_diversity(population: List[List[float]]) -> float:
+    """Compute the average diversity in the population."""
+    if len(population) < 2:
+        return 0.0
+
+    distances = []
+    for i in range(len(population)):
+        for j in range(i+1, len(population)):
+            # Compute Manhattan distance between individuals
+            p1, p2 = population[i], population[j]
+            min_len = min(len(p1), len(p2))
+
+            dist = 0
+            for k in range(min_len):
+                dist += abs(p1[k] - p2[k])
+
+            # Normalize by sequence length
+            if min_len > 0:
+                dist /= min_len
+
+            distances.append(dist)
+
+    return np.mean(distances) if distances else 0.0
+
+def search_for_best_sequence() -> List[float]:
+    """Enhanced function to search for the best coefficient sequence."""
+    start_time = time.time()
+    max_time = 180  # seconds
+
+    # Initialize population with adaptive sequence lengths
+    population = create_population(POPULATION_SIZE, 50, 300)
+
+    best_sequence = None
+    best_fitness = -float('inf')
+    no_improvement_count = 0
+    last_best_fitness = -float('inf')
+
+    # Track convergence
+    fitness_history = []
+
+    for generation in range(GENERATIONS):
+        if time.time() - start_time > max_time - 1:
+            break
+
+        # Evaluate fitness for all individuals
+        fitnesses = [evaluate_fitness(individual) for individual in population]
+
+        # Track best
+        max_fitness_idx = np.argmax(fitnesses)
+        current_best_fitness = fitnesses[max_fitness_idx]
+
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_sequence = population[max_fitness_idx].copy()
+            no_improvement_count = 0
+        else:
+            no_improvement_count += 1
+
+        # Early stopping if no improvement
+        if no_improvement_count > MAX_NO_IMPROVEMENT:
+            break
+
+        # Update history for diversity check
+        fitness_history.append(current_best_fitness)
+        if len(fitness_history) > 10:
+            fitness_history.pop(0)
+
+        # Check for convergence
+        if len(fitness_history) >= 10:
+            recent_change = np.std(fitness_history[-5:])
+            if recent_change < DIVERSITY_THRESHOLD:
+                # Inject some randomness to escape local optima
+                for i in range(POPULATION_SIZE // 5):
+                    idx = random.choice(range(POPULATION_SIZE))
+                    population[idx] = create_individual(random.randint(50, 300))
+
+        # Create new population through selection, crossover, and mutation
+        new_population = []
+
+        # Elitism: keep the best individual
+        elite_idx = max_fitness_idx
+        new_population.append(population[elite_idx].copy())
+
+        # Generate offspring
+        while len(new_population) < POPULATION_SIZE:
+            # Selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutation
+            child1 = mutate(child1)
+            child2 = mutate(child2)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:POPULATION_SIZE]
+
+        # Print progress
+        if generation % 20 == 0:
+            print(f"Generation {generation}: Best inv_C1 = {best_fitness:.6f}")
+
+    # Final evaluation of the best sequence found
+    if best_sequence is not None:
+        final_fitness = compute_inv_c1(best_sequence)
+        print(f"Final evaluation - inv_C1 = {final_fitness:.6f}")
+        return best_sequence
+    else:
+        # Return a reasonable default if nothing was found
+        return [1.0] * 100
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

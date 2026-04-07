@@ -1,0 +1,206 @@
+--- a/original.py
++++ b/original.py
+@@ -1,25 +1,200 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.optimize import minimize
++from scipy.spatial.distance import cdist
++import random
++from typing import Tuple
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 21
++    # Rectangle dimensions: width + height = 2
++    # Let's use width=1.5, height=0.5 for a good balance
++    width, height = 1.5, 0.5
++    
++    # Initialize with hexagonal lattice arrangement
++    circles = initialize_hexagonal_pack(width, height, 21)
++    
++    # Refine using hybrid optimization
++    circles = optimize_circles(circles, width, height)
++    
++    return circles
++
++def initialize_hexagonal_pack(width: float, height: float, n: int) -> np.ndarray:
++    """Initialize circles in a hexagonal pattern to avoid overlaps"""
+     circles = np.zeros((n, 3))
+-
++    
++    # Calculate approximate hexagonal packing parameters
++    # We'll pack in rows with alternating offset
++    row_height = np.sqrt(3) / 2  # Height between rows of hexagons
++    col_width = 1.0  # Width between centers
++    
++    rows = max(1, int(height / row_height))
++    cols = max(1, int(width / col_width))
++    
++    # If we have too many circles, adjust spacing
++    if rows * cols < n:
++        # Increase spacing
++        col_width = width / (n / rows + 1) if rows > 0 else 1.0
++        row_height = height / (rows + 1) if rows > 0 else 1.0
++    
++    # Generate hexagonal grid
++    positions = []
++    for i in range(rows):
++        for j in range(cols):
++            if len(positions) >= n:
++                break
++            x = (j + 0.5 + (i % 2) * 0.5) * col_width
++            y = (i + 0.5) * row_height
++            # Ensure within bounds
++            if x <= width and y <= height:
++                positions.append([x, y])
++        if len(positions) >= n:
++            break
++    
++    # Adjust to fit exactly n circles
++    while len(positions) < n:
++        # Add some padding positions if needed
++        positions.append([random.uniform(0.1, width - 0.1), random.uniform(0.1, height - 0.1)])
++    
++    positions = positions[:n]
++    
++    # Initial assignment with equal small radii
++    initial_radius = min(width, height) / (2 * max(rows, cols)) * 0.9
++    for i in range(n):
++        circles[i] = [positions[i][0], positions[i][1], initial_radius]
++    
+     return circles
+ 
++def validate_and_fix(circles: np.ndarray, width: float, height: float) -> np.ndarray:
++    """Ensure all circles are within bounds and adjust invalid ones"""
++    circles = circles.copy()
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        # Ensure circles are within bounds
++        x = max(r, min(width - r, x))
++        y = max(r, min(height - r, y))
++        circles[i] = [x, y, r]
++    return circles
++
++def calculate_overlaps(circles: np.ndarray) -> float:
++    """Calculate total overlap penalty"""
++    if len(circles) < 2:
++        return 0.0
++        
++    distances = cdist(circles[:, :2], circles[:, :2])
++    overlaps = 0.0
++    for i in range(len(circles)):
++        for j in range(i+1, len(circles)):
++            d = distances[i, j]
++            r_sum = circles[i, 2] + circles[j, 2]
++            if d < r_sum:
++                overlaps += (r_sum - d)**2
++    return overlaps
++
++def fitness_function(circles: np.ndarray, width: float, height: float) -> float:
++    """Calculate fitness: negative sum of radii plus penalties for overlaps/boundary violations"""
++    # Sum of radii (to maximize)
++    sum_radii = np.sum(circles[:, 2])
++    
++    # Penalty for overlaps
++    overlap_penalty = calculate_overlaps(circles) * 1000
++    
++    # Penalty for boundary violations
++    boundary_penalty = 0
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
++            boundary_penalty += 10000
++    
++    # Combined fitness (higher is better)
++    return sum_radii - overlap_penalty - boundary_penalty
++
++def optimize_circles(circles: np.ndarray, width: float, height: float) -> np.ndarray:
++    """Use local optimization to refine initial configuration"""
++    # First, let's do a simpler version with more direct control
++    # Convert circles to flat array for optimization
++    params = circles.flatten()
++    
++    def objective(params_flat):
++        # Reconstruct circles from flattened params
++        circles_local = params_flat.reshape(-1, 3)
++        circles_local = validate_and_fix(circles_local, width, height)
++        return -fitness_function(circles_local, width, height)
++    
++    def constraint_func(params_flat):
++        # Constraint: circles must be within bounds and not overlap beyond margin
++        circles_local = params_flat.reshape(-1, 3)
++        circles_local = validate_and_fix(circles_local, width, height)
++        
++        # Simple hard constraint checking
++        penalty = 0
++        for i in range(len(circles_local)):
++            x, y, r = circles_local[i]
++            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
++                penalty += 100000
++                
++        # Check for overlaps
++        distances = cdist(circles_local[:, :2], circles_local[:, :2])
++        for i in range(len(circles_local)):
++            for j in range(i+1, len(circles_local)):
++                d = distances[i, j]
++                r_sum = circles_local[i, 2] + circles_local[j, 2]
++                if d < r_sum:
++                    penalty += 1000000 * (r_sum - d)**2
++                    
++        return penalty
++    
++    # Try a few rounds of local optimization
++    best_circles = circles.copy()
++    best_fitness = fitness_function(best_circles, width, height)
++    
++    # Simple evolutionary approach: generate variations and select best
++    for _ in range(100):  # Limited iterations for speed
++        # Mutation: slightly perturb positions and radii
++        new_circles = best_circles.copy()
++        for i in range(len(new_circles)):
++            # Small random perturbation
++            if random.random() < 0.7:  # 70% chance of mutation
++                dx = random.gauss(0, 0.02)
++                dy = random.gauss(0, 0.02)
++                dr = random.gauss(0, 0.01)
++                
++                new_circles[i, 0] += dx
++                new_circles[i, 1] += dy
++                new_circles[i, 2] += dr
++                
++                # Ensure positive radius
++                if new_circles[i, 2] < 0.001:
++                    new_circles[i, 2] = 0.001
++                    
++                # Keep within bounds
++                new_circles[i, 0] = max(new_circles[i, 2], 
++                                      min(width - new_circles[i, 2], 
++                                          new_circles[i, 0]))
++                new_circles[i, 1] = max(new_circles[i, 2], 
++                                      min(height - new_circles[i, 2], 
++                                          new_circles[i, 1]))
++        
++        # Evaluate
++        new_fitness = fitness_function(new_circles, width, height)
++        if new_fitness > best_fitness:
++            best_circles = new_circles
++            best_fitness = new_fitness
++    
++    # Final validation
++    best_circles = validate_and_fix(best_circles, width, height)
++    return best_circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

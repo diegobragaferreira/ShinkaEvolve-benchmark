@@ -1,0 +1,300 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import differential_evolution, minimize
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    n = 14
+    d = 3
+
+    def compute_min_max_ratio(points_flat):
+        """Compute negative of min/max distance ratio for optimization"""
+        points = points_flat.reshape(n, d)
+        distances = cdist(points, points, 'euclidean')
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    def objective_with_penalty(x):
+        """Objective function with penalty for boundary violations"""
+        # Reshape x back to points
+        points = x.reshape(n, d)
+
+        # Apply soft penalty for boundary violations
+        penalty = 0
+        for i in range(n):
+            for j in range(d):
+                if points[i,j] < 0:
+                    penalty += 1e6 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1e6 * (points[i,j] - 1)**2
+
+        # Calculate distance matrix
+        distances = cdist(points, points, 'euclidean')
+        np.fill_diagonal(distances, np.inf)
+
+        # Find min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf + penalty
+
+        # Return negative ratio plus penalty (to minimize)
+        return -(min_dist / max_dist) + penalty
+
+    # Phase 1: Generate initial configuration using enhanced electrostatic repulsion method
+    # This provides a much better starting configuration than basic Fibonacci sphere
+    np.random.seed(42)
+
+    # Initialize points randomly on unit sphere using spherical coordinates
+    points = []
+    for i in range(n):
+        # Uniform distribution on sphere using spherical coordinates
+        theta = np.random.uniform(0, 2 * np.pi)
+        phi = np.arccos(2 * np.random.uniform(0, 1) - 1)
+
+        x = np.sin(phi) * np.cos(theta)
+        y = np.sin(phi) * np.sin(theta)
+        z = np.cos(phi)
+
+        points.append([x, y, z])
+
+    points = np.array(points)
+
+    # Apply electrostatic repulsion to distribute points more uniformly
+    # This simulates repelling charges on a sphere
+    for iteration in range(100):
+        forces = np.zeros_like(points)
+
+        # Calculate pairwise forces (repulsion)
+        for i in range(n):
+            for j in range(i+1, n):
+                diff = points[i] - points[j]
+                dist_sq = np.sum(diff**2)
+
+                if dist_sq > 1e-10:  # Avoid division by zero
+                    force_magnitude = 1.0 / (dist_sq * np.sqrt(dist_sq))
+                    force = force_magnitude * diff
+                    forces[i] += force
+                    forces[j] -= force
+
+        # Update positions using forces
+        step_size = 0.01
+        points += step_size * forces
+
+        # Project back to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        points = points / norms
+
+    # Project to [0,1]^3 cube
+    points = (points + 1) / 2
+
+    # Add structured perturbation to break symmetries
+    # Use a more controlled perturbation that maintains good distribution
+    perturbation_magnitude = 0.01
+    points += np.random.normal(0, perturbation_magnitude, points.shape)
+
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+
+    # Phase 2: Global optimization with differential evolution
+    bounds = [(0, 1) for _ in range(n * d)]
+
+    # Run differential evolution with enhanced adaptive population sizing
+    max_time = 280  # Leave some time for final refinement
+    start_time = time.time()
+
+    # Enhanced adaptive population size control with better convergence tracking
+    initial_popsize = 15
+    max_popsize = 40
+    popsize = initial_popsize
+    stagnant_generations = 0
+    max_stagnant_generations = 15
+    previous_best = float('inf')
+    improvement_threshold = 1e-8
+
+    def enhanced_adaptive_callback(x, convergence):
+        nonlocal popsize, stagnant_generations, previous_best
+
+        current_time = time.time()
+        if current_time - start_time > max_time:
+            return True
+
+        # Check for stagnation by comparing convergence values
+        current_best = -convergence  # Convert back to ratio (negative because minimization)
+
+        if abs(previous_best - current_best) < improvement_threshold:
+            stagnant_generations += 1
+            if stagnant_generations > max_stagnant_generations and popsize < max_popsize:
+                popsize = min(popsize + 3, max_popsize)
+                stagnant_generations = 0  # Reset counter after increasing popsize
+        else:
+            stagnant_generations = 0  # Reset if there's significant improvement
+            previous_best = current_best
+
+        # Also reduce population size if we've stagnated too long
+        if stagnant_generations > max_stagnant_generations * 2 and popsize > initial_popsize:
+            popsize = max(popsize - 2, initial_popsize)
+            stagnant_generations = 0
+
+        return False
+
+    # Use a more robust differential evolution setup with enhanced callback
+    result = differential_evolution(
+        objective_with_penalty,
+        bounds,
+        seed=42,
+        maxiter=300,
+        popsize=popsize,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        disp=False,
+        tol=1e-7,
+        callback=enhanced_adaptive_callback
+    )
+
+    # Extract and refine the best solution
+    best_points = result.x.reshape(n, d)
+
+    # Phase 3: Local refinement with enhanced strategies
+    def enhanced_local_refinement(points):
+        """Refine using multiple local optimization approaches with smart fallback"""
+        # Strategy 1: L-BFGS-B with bounds (primary method)
+        def lbfgsb_refinement():
+            def obj(x):
+                points_temp = x.reshape(n, d)
+                distances = cdist(points_temp, points_temp, 'euclidean')
+                np.fill_diagonal(distances, np.inf)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist == 0:
+                    return 1e10
+                return -min_dist / max_dist  # Negative for maximization
+
+            bounds = [(0, 1) for _ in range(n * d)]
+            try:
+                res = minimize(obj, points.flatten(), method='L-BFGS-B', bounds=bounds,
+                             options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10})
+                if res.success:
+                    return res.x.reshape(n, d)
+            except:
+                pass
+            return points
+
+        # Strategy 2: SLSQP as secondary method
+        def slsqp_refinement():
+            def obj(x):
+                points_temp = x.reshape(n, d)
+                distances = cdist(points_temp, points_temp, 'euclidean')
+                np.fill_diagonal(distances, np.inf)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist == 0:
+                    return 1e10
+                return -min_dist / max_dist  # Negative for maximization
+
+            bounds = [(0, 1) for _ in range(n * d)]
+            try:
+                res = minimize(obj, points.flatten(), method='SLSQP', bounds=bounds,
+                             options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10})
+                if res.success:
+                    return res.x.reshape(n, d)
+            except:
+                pass
+            return points
+
+        # Strategy 3: Nelder-Mead as fallback
+        def nelder_mead_refinement():
+            def obj(x):
+                points_temp = x.reshape(n, d)
+                distances = cdist(points_temp, points_temp, 'euclidean')
+                np.fill_diagonal(distances, np.inf)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist == 0:
+                    return 1e10
+                return -min_dist / max_dist  # Negative for maximization
+
+            try:
+                res = minimize(obj, points.flatten(), method='Nelder-Mead',
+                             options={'maxiter': 300, 'disp': False})
+                if res.success:
+                    return res.x.reshape(n, d)
+            except:
+                pass
+            return points
+
+        # Apply refinement strategies in order of preference
+        refined_points = lbfgsb_refinement()
+
+        # Try SLSQP if L-BFGS didn't work well
+        if compute_min_max_ratio(refined_points.flatten()) > -1e-5:  # If very poor result
+            refined_points = slsqp_refinement()
+
+        # Final fallback to Nelder-Mead
+        if compute_min_max_ratio(refined_points.flatten()) > -1e-5:  # If still poor
+            refined_points = nelder_mead_refinement()
+
+        return refined_points
+
+    # Apply local refinement
+    refined_points = enhanced_local_refinement(best_points)
+
+    # Phase 4: Multiple restarts for better exploration with adaptive perturbation
+    best_final_points = refined_points.copy()
+    best_final_ratio = compute_min_max_ratio(refined_points.flatten())
+
+    # Try several random restarts with varying perturbation magnitudes
+    perturbation_magnitudes = [0.005, 0.01, 0.015]
+
+    for restart in range(3):
+        # Select perturbation magnitude for this restart
+        mag_idx = restart % len(perturbation_magnitudes)
+        mag = perturbation_magnitudes[mag_idx]
+
+        np.random.seed(restart * 1000 + 42)
+
+        # Create slightly perturbed starting point
+        perturbed = refined_points + np.random.normal(0, mag, refined_points.shape)
+        perturbed = np.clip(perturbed, 0, 1)
+
+        # Refine the perturbed point
+        restarted_points = enhanced_local_refinement(perturbed)
+        restarted_ratio = compute_min_max_ratio(restarted_points.flatten())
+
+        if restarted_ratio < best_final_ratio:  # Better ratio
+            best_final_ratio = restarted_ratio
+            best_final_points = restarted_points.copy()
+
+    # Final verification
+    final_points = best_final_points
+
+    # Ensure bounds are respected
+    final_points = np.clip(final_points, 0, 1)
+
+    # Verify we have correct shape
+    assert final_points.shape == (14, 3), f"Expected shape (14, 3), got {final_points.shape}"
+
+    return final_points
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,162 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy import linalg
+from numba import njit
+import time
+import warnings
+
+# Set seeds for reproducibility
+np.random.seed(42)
+
+@njit
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the autoconvolution g = f*f and return its L2, L1, and L-infinity norms.
+    Uses piecewise linear integration for L2 norm.
+    """
+    n = len(f_values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Use FFT-based convolution for better performance with large arrays
+    # Pad to avoid circular convolution effects
+    padded_length = 2 * n - 1
+    padded_f = np.pad(f_values, (0, padded_length - n), mode='constant')
+
+    # Compute autoconvolution using FFT - much faster for large arrays
+    # FFT convolution: f * f = ifft(fft(f) * fft(f))
+    fft_f = np.fft.fft(padded_f)
+    conv_fft = fft_f * fft_f
+    g = np.fft.ifft(conv_fft).real
+
+    # Take only the linear portion (non-circular part)
+    g = g[:padded_length]
+
+    # Compute norms
+    # L2 norm squared
+    l2_norm_squared = 0.0
+    if len(g) >= 2:
+        # Piecewise linear integration using trapezoidal rule approximation
+        # For intervals, we use (h/3)(y1^2 + y1*y2 + y2^2) for each adjacent pair
+        h = 1.0  # Since step size is normalized to 1 for simplicity
+        for i in range(len(g) - 1):
+            y1 = g[i]
+            y2 = g[i+1]
+            l2_norm_squared += (h/3.0) * (y1*y1 + y1*y2 + y2*y2)
+
+    # L1 norm
+    l1_norm = np.sum(np.abs(g)) / (len(g) + 1)  # Normalize by number of intervals
+
+    # L-infinity norm
+    l_inf_norm = np.max(np.abs(g))
+
+    return l2_norm_squared, l1_norm, l_inf_norm
+
+@njit
+def calculate_c2(l2_norm_squared, l1_norm, l_inf_norm):
+    """Calculate C2 = ||g||₂² / (||g||₁ · ||g||∞)"""
+    if l1_norm <= 1e-15 or l_inf_norm <= 1e-15:
+        return 0.0
+    return l2_norm_squared / (l1_norm * l_inf_norm)
+
+def adaptive_initialization(n):
+    """Create an adaptive initial function based on mathematical insight."""
+    # Create a function that alternates between high and low values
+    # to encourage a flatter autoconvolution profile
+    initial_guess = np.zeros(n)
+
+    # Create a pattern that balances high and low values
+    for i in range(n):
+        # Create structured pattern
+        pattern = i % 8
+        if pattern < 2:  # High peaks
+            initial_guess[i] = np.random.uniform(0.8, 1.0)
+        elif pattern < 4:  # Medium peaks
+            initial_guess[i] = np.random.uniform(0.4, 0.8)
+        elif pattern < 6:  # Low valleys
+            initial_guess[i] = np.random.uniform(0.1, 0.4)
+        else:  # Very low
+            initial_guess[i] = np.random.uniform(0.0, 0.2)
+
+    # Apply some smoothing to reduce sharp transitions that could cause numerical issues
+    smoothed = np.zeros_like(initial_guess)
+    for i in range(n):
+        # Simple moving average for smoothing
+        window_start = max(0, i - 2)
+        window_end = min(n, i + 3)
+        smoothed[i] = np.mean(initial_guess[window_start:window_end])
+
+    return smoothed
+
+def construct_function() -> list[float]:
+    """
+    Quadratic Programming Approach to maximize C2.
+    Enhanced version using FFT convolution for better performance and adaptive initialization.
+    """
+    start_time = time.time()
+
+    # Problem dimensions - increased for better resolution
+    n = 1500  # Number of steps - increased for better optimization
+
+    # Initialize with adaptive pattern
+    initial_guess = adaptive_initialization(n)
+
+    # Add some randomness to escape local minima
+    initial_guess += np.random.normal(0, 0.05, n)
+    initial_guess = np.maximum(initial_guess, 0.0)  # Ensure non-negative
+
+    # Define the objective function to maximize C2
+    # We'll minimize the negative of C2, which is equivalent to maximizing C2
+    def objective(x):
+        try:
+            l2_sq, l1, l_inf = compute_autoconvolution_norms(x)
+            c2 = calculate_c2(l2_sq, l1, l_inf)
+            return -c2  # Negative because we want to maximize
+        except:
+            return 1e10  # Large penalty for invalid solutions
+
+    # Define constraints
+    # All values must be non-negative (this is handled by bounds)
+    bounds = [(0.0, None) for _ in range(n)]
+
+    # Solve the optimization problem using SLSQP method which handles bounds well
+    try:
+        # Use a combination of initial guess and optimization
+        result = minimize(
+            objective,
+            initial_guess,
+            method='SLSQP',
+            bounds=bounds,
+            options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9},
+            tol=1e-9
+        )
+
+        # If optimization failed, return initial guess
+        if not result.success:
+            warnings.warn("Optimization failed, returning initial guess")
+            final_solution = initial_guess
+        else:
+            final_solution = result.x
+
+        # Ensure non-negativity in final result
+        final_solution = np.maximum(final_solution, 0.0)
+
+    except Exception as e:
+        warnings.warn(f"Optimization error: {e}, returning initial guess")
+        final_solution = initial_guess
+
+    elapsed = time.time() - start_time
+    if elapsed > 85:
+        # Return a basic heuristic if time limit approached
+        return [np.random.random() for _ in range(500)]
+
+    # Convert back to list format
+    return final_solution.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

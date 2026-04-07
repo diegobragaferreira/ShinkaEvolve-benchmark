@@ -1,0 +1,110 @@
+<NAME>
+enhance_spatial_hashing_with_bounding_box_pruning
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses spatial hashing for overlap detection but doesn't leverage bounding box pruning effectively. By adding tight bounding box checks before expensive SAT tests, we can significantly reduce the number of pairwise overlap computations. This optimization will particularly benefit the multi-start differential evolution approach by making each fitness evaluation faster, allowing more evaluations within the time budget.
+
+The key insight is that we can quickly eliminate most hexagon pairs using axis-aligned bounding boxes (AABB) before resorting to the more expensive Separating Axis Theorem (SAT) test. This creates a two-tier filtering system: first AABB overlap check, then SAT for candidates.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlaps_spatial_hash(hex_data, vertices_cache=None):
+    """Check overlaps using spatial hashing to reduce comparisons."""
+    if len(hex_data) <= 1:
+        return False
+
+    # Create spatial hash grid
+    grid, cell_size = spatial_hash_grid(hex_data)
+
+    # Check overlaps efficiently using neighbor lists
+    for i in range(len(hex_data)):
+        cx1, cy1, angle1 = hex_data[i]
+
+        # Get grid cell coordinates for this hexagon
+        grid_x = int(cx1 // cell_size)
+        grid_y = int(cy1 // cell_size)
+
+        # Get potential neighbors
+        neighbors = get_neighbors(grid, grid_x, grid_y, cell_size)
+
+        # Check overlap only with neighbors
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks
+                continue
+
+            cx2, cy2, angle2 = hex_data[j]
+
+            # Use cached vertices if available
+            if vertices_cache is not None:
+                vertices1 = vertices_cache[i]
+                vertices2 = vertices_cache[j]
+            else:
+                vertices1 = hexagon_vertices_jit(cx1, cy1, angle1)
+                vertices2 = hexagon_vertices_jit(cx2, cy2, angle2)
+
+            # Perform overlap test
+            if separate_axis_test_jit(vertices1, vertices2):
+                return True
+
+    return False
+=======
+def check_overlaps_spatial_hash(hex_data, vertices_cache=None):
+    """Check overlaps using spatial hashing to reduce comparisons."""
+    if len(hex_data) <= 1:
+        return False
+
+    # Create spatial hash grid
+    grid, cell_size = spatial_hash_grid(hex_data)
+
+    # Check overlaps efficiently using neighbor lists
+    for i in range(len(hex_data)):
+        cx1, cy1, angle1 = hex_data[i]
+
+        # Get grid cell coordinates for this hexagon
+        grid_x = int(cx1 // cell_size)
+        grid_y = int(cy1 // cell_size)
+
+        # Get potential neighbors
+        neighbors = get_neighbors(grid, grid_x, grid_y, cell_size)
+
+        # Check overlap only with neighbors
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks
+                continue
+
+            cx2, cy2, angle2 = hex_data[j]
+
+            # Quick AABB bounding box test before expensive SAT test
+            # Get approximate bounding boxes for both hexagons
+            if vertices_cache is not None:
+                vertices1 = vertices_cache[i]
+                vertices2 = vertices_cache[j]
+            else:
+                vertices1 = hexagon_vertices_jit(cx1, cy1, angle1)
+                vertices2 = hexagon_vertices_jit(cx2, cy2, angle2)
+
+            # Calculate AABB for first hexagon
+            min_x1 = vertices1[:, 0].min()
+            max_x1 = vertices1[:, 0].max()
+            min_y1 = vertices1[:, 1].min()
+            max_y1 = vertices1[:, 1].max()
+
+            # Calculate AABB for second hexagon
+            min_x2 = vertices2[:, 0].min()
+            max_x2 = vertices2[:, 0].max()
+            min_y2 = vertices2[:, 1].min()
+            max_y2 = vertices2[:, 1].max()
+
+            # Quick AABB overlap check
+            if (max_x1 >= min_x2 and min_x1 <= max_x2 and
+                max_y1 >= min_y2 and min_y1 <= max_y2):
+
+                # AABB overlap detected, now perform SAT test
+                if separate_axis_test_jit(vertices1, vertices2):
+                    return True
+
+    return False
+>>>>>>> REPLACE
+</DIFF>

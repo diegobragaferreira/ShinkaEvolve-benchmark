@@ -1,0 +1,297 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into 16 points
+        points = x.reshape(-1, 2)
+        # Calculate pairwise distances
+        distances = pdist(points)
+        # Avoid division by zero
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        # Minimize negative of min/max ratio (equivalent to maximizing min/max ratio)
+        return -min_dist / max_dist
+
+    def calculate_distance_ratio(points):
+        """Calculate the ratio of minimum to maximum distances."""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        return min_dist / max_dist
+
+    def generate_hexagonal_initial():
+        """Generate initial configuration based on hexagonal lattice for better spacing"""
+        # For 16 points, create a 4x4 hexagonal pattern
+        points = []
+
+        # Create hexagonal grid with appropriate spacing
+        rows = 4
+        cols = 4
+        spacing_x = 1.0 / (cols - 1)
+        spacing_y = 1.0 / (rows - 1)
+
+        for i in range(rows):
+            for j in range(cols):
+                # Offset every other row for hexagonal packing
+                x_offset = 0.0 if i % 2 == 0 else spacing_x * 0.5
+                x = (j * spacing_x) + x_offset
+                y = i * spacing_y
+
+                # Ensure points are within bounds
+                x = max(0.001, min(0.999, x))
+                y = max(0.001, min(0.999, y))
+
+                points.append([x, y])
+
+        return np.array(points)
+
+    def generate_fibonacci_spiral():
+        """Generate points using Fibonacci spiral for good distribution"""
+        points = []
+        phi = (1 + math.sqrt(5)) / 2  # golden ratio
+        for i in range(16):
+            theta = math.acos(-1 + (2 * i) / 15)  # elevation angle
+            phi_angle = (i * 2 * math.pi) / (phi * phi)  # azimuthal angle
+
+            # Convert to cartesian coordinates
+            x = math.sin(theta) * math.cos(phi_angle)
+            y = math.sin(theta) * math.sin(phi_angle)
+
+            # Map to [0.05, 0.95] range to avoid boundaries
+            x = 0.05 + 0.9 * (x + 1) / 2
+            y = 0.05 + 0.9 * (y + 1) / 2
+
+            points.append([x, y])
+
+        return np.array(points)
+
+    def generate_grid_initial():
+        """Generate regular grid initial configuration"""
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                points.append([x, y])
+        return np.array(points)
+
+    def generate_ring_initial():
+        """Generate points in concentric rings for better coverage"""
+        points = []
+        # Two concentric rings
+        radii = [0.3, 0.7]
+        angles_per_ring = [8, 8]  # 8 points per ring
+
+        for r_idx, (radius, num_angles) in enumerate(zip(radii, angles_per_ring)):
+            for i in range(num_angles):
+                angle = 2 * math.pi * i / num_angles
+                x = 0.5 + radius * math.cos(angle) * 0.4
+                y = 0.5 + radius * math.sin(angle) * 0.4
+                # Ensure within bounds
+                x = max(0.001, min(0.999, x))
+                y = max(0.001, min(0.999, y))
+                points.append([x, y])
+
+        return np.array(points)
+
+    def generate_adaptive_grid_initial():
+        """Generate a structured 4x4 grid with adaptive perturbation based on distance distribution"""
+        # Create a regular 4x4 grid
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Calculate current distance distribution
+        distances = pdist(points)
+        if len(distances) > 0:
+            current_ratio = np.min(distances) / np.max(distances) if np.max(distances) > 0 else 0
+
+            # Adjust perturbation magnitude based on how balanced the distance distribution is
+            # If distances are already well-balanced, perturb less; otherwise perturb more
+            # The scaling factor is inversely proportional to the ratio to encourage exploration
+            if current_ratio > 0:
+                # Scale perturbation inversely with the current ratio -  
+                # smaller ratios (more unbalanced) get more exploration
+                perturbation_magnitude = max(0.005, 0.08 * (1.0 - current_ratio) * 2.0)
+            else:
+                perturbation_magnitude = 0.04
+
+            # Add adaptive perturbation
+            np.random.seed(42)
+            perturbation = np.random.normal(0, perturbation_magnitude, points.shape)
+            points += perturbation
+
+            # Clip to valid range
+            points = np.clip(points, 0.001, 0.999)
+
+        return points
+
+    def generate_perturbed_grid_initial():
+        """Generate a perturbed regular grid initial configuration"""
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Add controlled random perturbation with adaptive magnitude
+        np.random.seed(42)
+        # Base magnitude adjusted for better exploration
+        base_magnitude = 0.025
+        perturbation = np.random.normal(0, base_magnitude, points.shape)
+        points += perturbation
+
+        # Clip to valid range
+        points = np.clip(points, 0.001, 0.999)
+
+        return points
+
+    def hybrid_local_search(x0, bounds, maxiter=50):
+        """
+        Hybrid local search combining gradient-based refinement with adaptive tolerance
+        """
+        # First try L-BFGS-B with stringent tolerances for precision
+        try:
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': maxiter, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            if result.success:
+                return result.x
+        except:
+            pass
+
+        # If that fails, try the original x0 as fallback
+        return x0
+
+    # Generate multiple initial configurations with enhanced diversity
+    initial_configs = [
+        generate_hexagonal_initial(),
+        generate_fibonacci_spiral(),
+        generate_grid_initial(),
+        generate_ring_initial(),
+        generate_adaptive_grid_initial(),  # Enhanced structured initialization
+        generate_perturbed_grid_initial(),   # Better perturbed grid
+    ]
+
+    # Add diverse perturbed versions with enhanced variance
+    np.random.seed(42)
+    perturbed_configs = []
+    for config in initial_configs:
+        # Create multiple perturbed versions with different strategies
+        for j in range(4):
+            perturbed = config.copy()
+            
+            # Apply different perturbation patterns for enhanced diversity
+            if j == 0:
+                # Standard small perturbation
+                perturbation = np.random.normal(0, 0.015, config.shape)
+            elif j == 1:
+                # Medium perturbation
+                perturbation = np.random.normal(0, 0.025, config.shape)
+            elif j == 2:
+                # Larger perturbation with some directional bias
+                perturbation = np.random.normal(0, 0.03, config.shape)
+                # Add slight bias towards center to maintain reasonable spread
+                center = np.array([0.5, 0.5])
+                for k in range(len(perturbed)):
+                    perturbed[k] += (center - perturbed[k]) * 0.015
+            else:
+                # Very aggressive perturbation for exploration
+                perturbation = np.random.normal(0, 0.04, config.shape)
+
+            perturbed += perturbation
+            # Clip to valid range
+            perturbed = np.clip(perturbed, 0.001, 0.999)
+            perturbed_configs.append(perturbed)
+
+    # Also add aggressive perturbation for exploration
+    np.random.seed(42)
+    aggressive_perturbed = generate_perturbed_grid_initial() + np.random.normal(0, 0.05, (16, 2))
+    aggressive_perturbed = np.clip(aggressive_perturbed, 0.001, 0.999)
+    perturbed_configs.append(aggressive_perturbed)
+
+    # Try optimization from different starting points
+    best_ratio = -np.inf
+    best_points = None
+
+    # Define bounds for coordinates
+    bounds = [(0.001, 0.999) for _ in range(32)]
+
+    # Multi-stage optimization approach with enhanced strategy
+    for i, initial_config in enumerate(perturbed_configs):
+        # Early exit if we've already achieved a very good solution
+        if best_ratio > 0.26:  # Early stopping threshold slightly below benchmark
+            break
+
+        # Stage 1: Global optimization with differential evolution
+        try:
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=25,  # Slightly reduced iterations for speed
+                popsize=6,   # Smaller population for faster execution
+                seed=42+i,   # Different seed for each config
+                tol=1e-6,
+                mutation=(0.5, 1),
+                recombination=0.7
+            )
+
+            # Stage 2: Hybrid local refinement with higher precision
+            refined_x = hybrid_local_search(de_result.x, bounds, maxiter=150)
+
+            # Check the refined result
+            final_points = refined_x.reshape(-1, 2)
+            ratio = calculate_distance_ratio(final_points)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = final_points.copy()
+
+        except Exception as e:
+            # If optimization fails, continue to next initial config
+            continue
+
+    # If no good solution was found, return the last attempted configuration
+    if best_points is None:
+        # Fallback to the best performing initial configuration
+        fallback_points = generate_adaptive_grid_initial()
+        # Add small random noise to break symmetry
+        np.random.seed(42)
+        fallback_points += np.random.normal(0, 0.01, fallback_points.shape)
+        fallback_points = np.clip(fallback_points, 0.001, 0.999)
+        best_points = fallback_points
+
+    return best_points
+
+# EVOLVE-BLOCK-END

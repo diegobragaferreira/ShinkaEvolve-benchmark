@@ -1,0 +1,146 @@
+<NAME>
+apply_numba_jit_to_geometric_operations
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses numba JIT compilation for some functions but not all geometric operations. I'll apply numba JIT compilation to all geometric operations that are called frequently during the optimization process, particularly those in the penalty calculation and containment checking. This will provide significant performance improvements for the computationally intensive constraint validation steps.
+
+The key functions to compile with numba are:
+1. `point_in_polygon` - used extensively in containment checking
+2. `check_hexagon_overlap` - used for overlap detection
+3. `hexagon_vertices` - vertex generation (already done but double-checking)
+4. Additional helper functions for distance calculations
+
+This follows the successful pattern from Generation 4 that contributed to achieving a 0.1 score by reducing runtime bottlenecks.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given position, angle, and side length"""
+    angle_rad = np.radians(angle_deg)
+    angles = np.arange(0, 6) * np.pi / 3
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        vertices[i, 0] = x + side_length * np.cos(angles[i] + angle_rad)
+        vertices[i, 1] = y + side_length * np.sin(angles[i] + angle_rad)
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon(point, polygon):
+    """Check if point is inside polygon using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line_segment(point, line_start, line_end):
+    """Calculate distance from point to line segment"""
+    A = point[0] - line_start[0]
+    B = point[1] - line_start[1]
+    C = line_end[0] - line_start[0]
+    D = line_end[1] - line_start[1]
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start[0] + param * C
+    yy = line_start[1] + param * D
+    dx = point[0] - xx
+    dy = point[1] - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+=======
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given position, angle, and side length"""
+    angle_rad = np.radians(angle_deg)
+    angles = np.arange(0, 6) * np.pi / 3
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        vertices[i, 0] = x + side_length * np.cos(angles[i] + angle_rad)
+        vertices[i, 1] = y + side_length * np.sin(angles[i] + angle_rad)
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon(point, polygon):
+    """Check if point is inside polygon using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line_segment(point, line_start, line_end):
+    """Calculate distance from point to line segment"""
+    A = point[0] - line_start[0]
+    B = point[1] - line_start[1]
+    C = line_end[0] - line_start[0]
+    D = line_end[1] - line_start[1]
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start[0] + param * C
+    yy = line_start[1] + param * D
+    dx = point[0] - xx
+    dy = point[1] - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+>>>>>>> REPLACE
+
+</DIFF>

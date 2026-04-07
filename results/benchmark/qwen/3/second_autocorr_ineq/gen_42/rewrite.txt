@@ -1,0 +1,242 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import minimize
+import time
+
+# Global constants
+MAX_STEPS = 50000
+MIN_STEPS = 100
+SEED = 42
+NUM_LOCAL_OPTIMIZATIONS = 10
+MAX_EVAL_TIME = 90
+
+# Set seed for reproducibility
+np.random.seed(SEED)
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation from step function values.
+    Uses piecewise linear integration method as specified in requirements.
+    """
+    f = np.array(f_values)
+    
+    # Create step function on [-1/4, 1/4]
+    n_steps = len(f)
+    step_width = 0.5 / n_steps
+    step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps)
+    
+    # Build piecewise constant function
+    x = np.linspace(-0.25, 0.25, 10000)  # High resolution for accurate convolution
+    dx = x[1] - x[0]
+    
+    f_func = np.zeros_like(x)
+    for i, (pos, height) in enumerate(zip(step_positions, f)):
+        left = pos - step_width/2
+        right = pos + step_width/2
+        mask = (x >= left) & (x <= right)
+        f_func[mask] = height
+    
+    # Perform autoconvolution efficiently using FFT
+    g = signal.convolve(f_func, f_func, mode='full')
+    g = g[:len(g)//2 + 1]  # Take only first half (since it's symmetric)
+    
+    # Adjust for proper scaling due to discretization
+    g = g * dx
+    
+    # Compute the required norms using trapezoidal integration for ||g||₂²
+    # But for better accuracy, we'll use piecewise linear integration method as described
+    g_squared = g**2
+    g_abs = np.abs(g)
+    
+    # Compute ||g||₂² using piecewise linear integration (trapezoidal rule)
+    # For piecewise linear segments, we use: integral = (width/3)(y1^2 + y1*y2 + y2^2)
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        y1 = g[i]
+        y2 = g[i+1]
+        width = dx
+        # Trapezoidal contribution: (width/3)(y1^2 + y1*y2 + y2^2)
+        contribution = (width/3.0) * (y1**2 + y1*y2 + y2**2)
+        norm_2_squared += contribution
+    
+    # ||g||₁ (L1 norm) - approximate using trapezoidal rule
+    norm_1 = np.trapz(g_abs, dx=dx)
+    
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(g_abs)
+    
+    return norm_2_squared, norm_1, norm_inf
+
+def calculate_c2(f_values):
+    """Calculate C₂ from step function values"""
+    try:
+        norm_2_squared, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+        
+        # Avoid division by zero
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            return 0.0
+            
+        c2 = norm_2_squared / (norm_1 * norm_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def adaptive_gradient_optimization(initial_guess, max_iter=200):
+    """
+    Performs gradient-based optimization with adaptive learning rate
+    """
+    # Use scipy's L-BFGS-B optimizer with bounds
+    bounds = [(0, None) for _ in range(len(initial_guess))]
+    
+    def objective(x):
+        # Negate because we want to maximize C2
+        return -calculate_c2(x)
+    
+    def gradient(x):
+        # Simple finite difference gradient approximation
+        eps = 1e-6
+        grad = np.zeros_like(x)
+        base_val = objective(x)
+        for i in range(len(x)):
+            x_plus = x.copy()
+            x_plus[i] += eps
+            grad[i] = (objective(x_plus) - base_val) / eps
+        return grad
+    
+    result = minimize(
+        objective,
+        initial_guess,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': max_iter},
+        jac=gradient
+    )
+    
+    return -result.fun, result.x
+
+def generate_patterned_initial_population(num_individuals, min_steps, max_steps):
+    """
+    Generate diverse initial step functions using patterned strategies
+    """
+    population = []
+    
+    for _ in range(num_individuals):
+        # Random number of steps
+        n_steps = np.random.randint(min_steps, max_steps)
+        
+        # Mix of strategies to create good starting points
+        strategy = np.random.choice(['alternating', 'peak', 'uniform', 'exponential'])
+        
+        if strategy == 'alternating':
+            heights = []
+            for i in range(n_steps):
+                heights.append(1.0 if i % 2 == 0 else 0.1)
+        elif strategy == 'peak':
+            heights = np.ones(n_steps) * 0.5
+            # Add a strong peak in the center
+            center_idx = n_steps // 2
+            heights[center_idx] = 2.0
+        elif strategy == 'uniform':
+            heights = np.ones(n_steps) * 1.0
+        else:
+            # Exponential decay pattern
+            heights = np.exp(-np.linspace(0, 3, n_steps))
+        
+        # Add small random noise to make it less deterministic
+        noise_factor = 0.1
+        heights = np.maximum(heights + np.random.normal(0, noise_factor, len(heights)), 0)
+        population.append(heights.tolist())
+    
+    return population
+
+def local_search_with_adaptation(f_values, num_iterations=50):
+    """
+    Performs multiple local optimizations with varying strategies
+    """
+    best_c2 = calculate_c2(f_values)
+    best_solution = f_values.copy()
+    
+    # Try several local searches with different starting points
+    for _ in range(NUM_LOCAL_OPTIMIZATIONS):
+        try:
+            # Add small noise to break symmetry
+            perturbed = [max(0, x + np.random.normal(0, 0.05 * x if x > 0 else 0.01)) 
+                        for x in f_values]
+            
+            # Optimize with gradient method
+            c2_val, optimized = adaptive_gradient_optimization(perturbed, num_iterations//2)
+            
+            if c2_val > best_c2:
+                best_c2 = c2_val
+                best_solution = optimized.tolist()
+        except:
+            continue
+    
+    return best_solution
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Multi-stage optimization approach
+    best_individual = None
+    best_c2 = -float('inf')
+    
+    # Stage 1: Generate diverse initial population
+    initial_population = generate_patterned_initial_population(20, MIN_STEPS, MAX_STEPS)
+    
+    # Stage 2: Local optimization on best candidates
+    for individual in initial_population:
+        # First refine with local search
+        refined = local_search_with_adaptation(individual)
+        c2_val = calculate_c2(refined)
+        
+        if c2_val > best_c2:
+            best_c2 = c2_val
+            best_individual = refined.copy()
+    
+    # Stage 3: Final global refinement
+    if best_individual is not None:
+        # Try some additional optimization rounds
+        for _ in range(10):
+            try:
+                # Perturb slightly and optimize again
+                perturbed = [max(0, x + np.random.normal(0, 0.02 * x if x > 0 else 0.005)) 
+                            for x in best_individual]
+                
+                # Local optimization
+                new_c2, optimized = adaptive_gradient_optimization(perturbed, 50)
+                
+                if new_c2 > best_c2:
+                    best_c2 = new_c2
+                    best_individual = optimized.tolist()
+            except:
+                continue
+    
+    # If no success, fall back to good random pattern
+    if best_individual is None:
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        # Use exponential decay pattern
+        heights = np.exp(-np.linspace(0, 3, n_steps))
+        # Clip negative values
+        heights = np.maximum(heights, 0)
+        best_individual = heights.tolist()
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    # Verify final result
+    final_c2 = calculate_c2(best_individual)
+    
+    print(f"Evaluated in {eval_time:.2f} seconds")
+    print(f"Best C2 found: {final_c2:.6f}")
+    
+    return best_individual
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

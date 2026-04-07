@@ -61,7 +61,7 @@ get_required_slots() {
 
 # Build the task queue: All rounds for Qwen first, then all rounds for Gemini
 PENDING_TASKS=()
-for variant in "qwen" "gemini"; do
+for variant in "qwen"; do #"gemini"
     for ((round=1; round<=NUM_ROUNDS; round++)); do
         for task in "${TASKS[@]}"; do
             PENDING_TASKS+=("$task|$variant|${task}_${variant}|$round")

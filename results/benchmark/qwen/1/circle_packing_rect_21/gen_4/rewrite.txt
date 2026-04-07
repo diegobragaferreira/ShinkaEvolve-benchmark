@@ -1,0 +1,158 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from itertools import combinations
+import multiprocessing as mp
+from functools import partial
+import time
+
+# Global variables for constraint handling
+RECT_WIDTH = 1.0
+RECT_HEIGHT = 1.0
+RECT_AREA = RECT_WIDTH * RECT_HEIGHT
+
+def check_collision(circle1, circle2):
+    """Check if two circles collide"""
+    x1, y1, r1 = circle1
+    x2, y2, r2 = circle2
+    distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+    return distance < (r1 + r2)
+
+def check_boundaries(circle):
+    """Check if circle is within rectangle boundaries"""
+    x, y, r = circle
+    return (r <= x <= RECT_WIDTH - r and 
+            r <= y <= RECT_HEIGHT - r)
+
+def calculate_total_radius(circles):
+    """Calculate total sum of radii"""
+    return np.sum(circles[:, 2])
+
+def constraint_func(circles_flat, n_circles=21):
+    """Constraint function for optimization"""
+    circles = circles_flat.reshape(n_circles, 3)
+    
+    # Check boundary constraints
+    for circle in circles:
+        if not check_boundaries(circle):
+            return 1e6  # Large penalty for boundary violations
+    
+    # Check overlap constraints
+    for i, j in combinations(range(n_circles), 2):
+        if check_collision(circles[i], circles[j]):
+            return 1e6  # Large penalty for overlaps
+    
+    return 0
+
+def objective_func(circles_flat, n_circles=21):
+    """Objective function to minimize negative sum of radii"""
+    circles = circles_flat.reshape(n_circles, 3)
+    return -calculate_total_radius(circles)
+
+def generate_initial_placement(n_circles):
+    """Generate good initial placement using hexagonal packing approach"""
+    # Try to place circles in a grid-like pattern
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+    
+    # Calculate spacing
+    max_radius = min(RECT_WIDTH, RECT_HEIGHT) / (2 * max(rows, cols))
+    
+    circles = []
+    for i in range(n_circles):
+        row = i // cols
+        col = i % cols
+        
+        # Offset every other row for better packing
+        x_offset = 0.5 if row % 2 == 1 else 0.0
+        x = (col + x_offset) * (RECT_WIDTH / cols) * 0.9 + max_radius
+        y = (row + 0.5) * (RECT_HEIGHT / rows) * 0.9 + max_radius
+        r = max_radius * 0.8  # Slightly smaller to allow for optimization
+        
+        # Ensure within bounds
+        x = np.clip(x, max_radius, RECT_WIDTH - max_radius)
+        y = np.clip(y, max_radius, RECT_HEIGHT - max_radius)
+        
+        circles.append([x, y, r])
+    
+    return np.array(circles)
+
+def refine_solution(initial_circles):
+    """Refine initial solution using local optimization"""
+    # Flatten circles for optimization
+    initial_flat = initial_circles.flatten()
+    
+    # Define bounds for x, y, r
+    bounds = []
+    for i in range(len(initial_circles)):
+        bounds.extend([
+            (1e-6, RECT_WIDTH - 1e-6),   # x bounds
+            (1e-6, RECT_HEIGHT - 1e-6),  # y bounds
+            (1e-6, min(RECT_WIDTH, RECT_HEIGHT)/2)  # r bounds
+        ])
+    
+    # Minimize negative total radius (maximize total radius)
+    result = minimize(
+        objective_func,
+        initial_flat,
+        args=(len(initial_circles),),
+        method='L-BFGS-B',
+        bounds=bounds,
+        constraints={'type': 'eq', 'fun': lambda x: constraint_func(x, len(initial_circles))},
+        options={'maxiter': 1000, 'ftol': 1e-8}
+    )
+    
+    if result.success:
+        refined_circles = result.x.reshape(-1, 3)
+        # Ensure all circles respect boundaries and constraints
+        for i, circle in enumerate(refined_circles):
+            x, y, r = circle
+            x = np.clip(x, r, RECT_WIDTH - r)
+            y = np.clip(y, r, RECT_HEIGHT - r)
+            refined_circles[i] = [x, y, r]
+        return refined_circles
+    else:
+        return initial_circles
+
+def attempt_optimization(seed):
+    """Attempt optimization from a given seed"""
+    np.random.seed(seed)
+    initial_circles = generate_initial_placement(21)
+    refined_circles = refine_solution(initial_circles)
+    total_radius = calculate_total_radius(refined_circles)
+    return refined_circles, total_radius
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Use multiple random seeds for better exploration
+    seeds = list(range(10))
+    
+    # Use multiprocessing to try multiple starting points
+    with mp.Pool(min(mp.cpu_count(), 10)) as pool:
+        results = pool.map(attempt_optimization, seeds)
+    
+    # Find best result
+    best_solution = max(results, key=lambda x: x[1])
+    best_circles = best_solution[0]
+    
+    return best_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    start_time = time.time()
+    circles = circle_packing21()
+    end_time = time.time()
+    
+    total_radius = np.sum(circles[:,-1])
+    benchmark_ratio = total_radius / 2.3658321334167627
+    
+    print(f"Radii sum: {total_radius}")
+    print(f"Benchmark ratio: {benchmark_ratio}")
+    print(f"Execution time: {end_time - start_time:.4f} seconds")

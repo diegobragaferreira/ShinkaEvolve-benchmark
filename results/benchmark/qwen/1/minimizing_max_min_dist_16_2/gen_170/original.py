@@ -1,0 +1,182 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances using squareform for better numerical stability
+        distances = squareform(pdist(points))
+
+        # Zero out diagonal elements (distance to self)
+        np.fill_diagonal(distances, np.inf)
+
+        # Compute min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        if d_max == 0:
+            return -1.0
+        return -d_min / d_max
+
+    def adaptive_objective_with_penalty(x, penalty_weight=1000.0):
+        """
+        Enhanced objective with built-in geometric penalties for better convergence
+        """
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances using squareform for better numerical stability
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # If all points are identical or near identical, penalize heavily
+        if d_max == 0:
+            return -1.0
+
+        # Calculate ratio to maximize
+        ratio = d_min / d_max
+
+        # Add penalty for points near boundaries to avoid numerical issues
+        boundary_penalty = 0.0
+        margin = 0.01
+        for point in points:
+            if (point[0] < margin or point[0] > 1-margin or
+                point[1] < margin or point[1] > 1-margin):
+                boundary_penalty += penalty_weight * (margin - min(point[0], 1-point[0], point[1], 1-point[1]))
+
+        # Add penalty for very small distances (close point clustering)
+        min_distance_penalty = 0.0
+        if d_min < 0.05:  # Threshold for clustering penalty
+            min_distance_penalty = penalty_weight * (0.05 - d_min)
+
+        total_penalty = boundary_penalty + min_distance_penalty
+        return -(ratio - total_penalty / penalty_weight)
+
+    # Create an improved initial good configuration using hexagonal pattern
+    np.random.seed(42)
+
+    # Generate a structured initial configuration that's close to optimal
+    # Using a modified hexagonal grid pattern with better spacing
+    n_points = 16
+    points = np.zeros((n_points, 2))
+
+    # Create a hexagonal-like arrangement with boundary padding
+    rows = 4
+    cols = 4
+
+    # Hexagonal grid with offset rows for better packing
+    row_spacing = 0.8 / (rows - 1) if rows > 1 else 0.8
+    col_spacing = 0.8 / (cols - 1) if cols > 1 else 0.8
+
+    for i in range(rows):
+        for j in range(cols):
+            if i * cols + j >= n_points:
+                break
+            x = j * col_spacing + (i % 2) * col_spacing * 0.5  # Offset every other row
+            y = i * row_spacing
+            # Add slight random perturbation to avoid perfect symmetry
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+            points[i * cols + j] = [x, y]
+
+    # Apply boundary padding to avoid hitting edges and ensure valid range
+    points[:, 0] = np.clip(points[:, 0], 0.01, 0.99)
+    points[:, 1] = np.clip(points[:, 1], 0.01, 0.99)
+
+    # Flatten for optimization
+    x0 = points.flatten()
+
+    # Define bounds for each coordinate with boundary padding
+    bounds = [(0.01, 0.99) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    # First stage: Use differential evolution for global optimization with enhanced parameters
+    try:
+        de_result = differential_evolution(
+            adaptive_objective_with_penalty,
+            bounds,
+            seed=42,
+            maxiter=200,
+            popsize=25,
+            tol=1e-9,
+            recombination=0.9,
+            mutation=(0.8, 1.0),
+            disp=False
+        )
+
+        # Update x0 with better solution from DE
+        x0 = de_result.x.copy()
+
+    except Exception as e:
+        warnings.warn(f"Differential evolution failed: {e}")
+        pass
+
+    # Second stage: Local refinement with L-BFGS-B
+    try:
+        lbfgs_result = minimize(
+            adaptive_objective_with_penalty,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 1000, 'ftol': 1e-14, 'gtol': 1e-14},
+            callback=None
+        )
+
+        if lbfgs_result.success:
+            x0 = lbfgs_result.x.copy()
+        else:
+            # Fallback to SLSQP if L-BFGS-B fails
+            slsqp_result = minimize(
+                adaptive_objective_with_penalty,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+            if slsqp_result.success:
+                x0 = slsqp_result.x.copy()
+
+    except Exception as e:
+        warnings.warn(f"Local optimization failed: {e}")
+        pass
+
+    # Final refinement with standard objective to ensure proper output
+    try:
+        final_result = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12},
+            callback=None
+        )
+
+        if final_result.success:
+            points = final_result.x.reshape(-1, 2)
+        else:
+            points = x0.reshape(-1, 2)
+    except Exception as e:
+        warnings.warn(f"Final optimization failed: {e}")
+        points = x0.reshape(-1, 2)
+
+    # Ensure final points are within bounds
+    points = np.clip(points, 0.01, 0.99)
+
+    return points
+
+# EVOLVE-BLOCK-END

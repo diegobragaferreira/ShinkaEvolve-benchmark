@@ -1,0 +1,312 @@
+--- a/original.py
++++ b/original.py
+@@ -1,120 +1,234 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist, squareform
+-import itertools
++from scipy.spatial.distance import pdist
++from scipy.optimize import differential_evolution
++import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     def objective(x):
+         # Reshape x into 16 points
+         points = x.reshape(-1, 2)
+         # Calculate pairwise distances
+         distances = pdist(points)
+         # Minimize negative of min/max ratio (equivalent to maximizing min/max ratio)
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         if max_dist == 0:
+             return 0  # Avoid division by zero
+         return -min_dist / max_dist
+ 
+-    def constraint_func(x):
+-        # Ensure points stay within [0,1] x [0,1]
+-        points = x.reshape(-1, 2)
+-        return np.concatenate([points.flatten() - 1, -points.flatten()])
+-
+-    # Start with a structured grid initialization
+-    # Create a 4x4 grid pattern within [0,1] x [0,1]
++    def evaluate_solution(points):
++        """Evaluate the quality of a solution"""
++        distances = pdist(points)
++        if len(distances) == 0:
++            return 0
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++        if max_dist == 0:
++            return 0
++        return min_dist / max_dist
++
++    def create_hexagonal_pattern():
++        """Create a hexagonal pattern with adaptive spacing"""
++        points = []
++        # Create a 4x4 hexagonal pattern
++        rows = 4
++        cols = 4
++        spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
++        spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
++
++        # Adjust spacing for better distribution
++        spacing_x *= 0.9
++        spacing_y *= 0.9
++
++        for i in range(rows):
++            for j in range(cols):
++                if len(points) >= 16:
++                    break
++                # Hexagonal offset
++                x_offset = spacing_x * 0.25 if i % 2 == 1 else 0.0
++                x = (j * spacing_x) + x_offset
++                y = i * spacing_y
++
++                # Ensure bounds
++                x = max(0.001, min(0.999, x))
++                y = max(0.001, min(0.999, y))
++
++                points.append([x, y])
++
++        return np.array(points[:16])
++
++    def create_spiral_pattern():
++        """Create a spiral-like initial pattern"""
++        points = []
++        # Fibonacci spiral approach
++        golden_ratio = (1 + math.sqrt(5)) / 2.0
++        for i in range(16):
++            theta = 2 * math.pi * i / golden_ratio
++            r = math.sqrt(i / 15.0)  # Normalize to [0,1]
++            x = 0.5 + r * math.cos(theta) * 0.8
++            y = 0.5 + r * math.sin(theta) * 0.8
++            points.append([x, y])
++        return np.array(points)
++
++    def create_ring_pattern():
++        """Create points in concentric rings"""
++        points = []
++        # Two concentric rings: inner and outer
++        radii = [0.25, 0.75]
++        angles_per_ring = [8, 8]
++
++        for r_idx, (radius, num_angles) in enumerate(zip(radii, angles_per_ring)):
++            for i in range(num_angles):
++                if len(points) >= 16:
++                    break
++                angle = 2 * math.pi * i / num_angles
++                x = 0.5 + radius * math.cos(angle)
++                y = 0.5 + radius * math.sin(angle)
++                # Ensure within bounds
++                x = max(0.001, min(0.999, x))
++                y = max(0.001, min(0.999, y))
++                points.append([x, y])
++
++        # Fill remaining spots with random points
++        while len(points) < 16:
++            x = np.random.uniform(0.001, 0.999)
++            y = np.random.uniform(0.001, 0.999)
++            points.append([x, y])
++
++        return np.array(points)
++
++    def create_adaptive_perturbation(points, current_ratio):
++        """Add adaptive perturbation based on current solution quality"""
++        # Scale perturbation based on how well distributed the points are
++        if current_ratio > 0.1:  # Well-distributed
++            perturbation_magnitude = 0.005
++        elif current_ratio > 0.05:  # Moderately distributed
++            perturbation_magnitude = 0.01
++        else:  # Poorly distributed
++            perturbation_magnitude = 0.02
++
++        np.random.seed(42)
++        perturbed = points + np.random.normal(0, perturbation_magnitude, points.shape)
++        perturbed = np.clip(perturbed, 0.001, 0.999)
++        return perturbed
++
++    # Define bounds for each coordinate (between 0 and 1)
++    bounds = [(0, 1) for _ in range(32)]
++
++    # Generate multiple initial configurations
++    initial_configs = []
++
++    # 1. Regular grid (original approach)
+     grid_points = []
+     for i in range(4):
+         for j in range(4):
+             grid_points.append([(i+0.5)/4, (j+0.5)/4])
+-
+-    initial_points = np.array(grid_points)
+-
+-    # Add small random perturbations to avoid degenerate cases
++    initial_configs.append(np.array(grid_points))
++
++    # 2. Hexagonal pattern
++    initial_configs.append(create_hexagonal_pattern())
++
++    # 3. Spiral pattern
++    initial_configs.append(create_spiral_pattern())
++
++    # 4. Ring pattern
++    initial_configs.append(create_ring_pattern())
++
++    # 5. Enhanced grid with perturbations
+     np.random.seed(42)
+-    initial_points += np.random.normal(0, 0.01, initial_points.shape)
+-
+-    # Clip points to valid range
+-    initial_points = np.clip(initial_points, 0, 1)
+-
+-    # Flatten for optimization
+-    x0 = initial_points.flatten()
+-
+-    # Define bounds for each coordinate (between 0 and 1)
+-    bounds = [(0, 1) for _ in range(32)]
+-
+-    # Define constraints for boundary
+-    cons = [{'type': 'ineq', 'fun': lambda x: 1 - x[::2]},  # x <= 1
+-            {'type': 'ineq', 'fun': lambda x: x[::2]},     # x >= 0
+-            {'type': 'ineq', 'fun': lambda x: 1 - x[1::2]}, # y <= 1
+-            {'type': 'ineq', 'fun': lambda x: x[1::2]}]    # y >= 0
++    enhanced_grid = np.array(grid_points) + np.random.normal(0, 0.015, (16, 2))
++    enhanced_grid = np.clip(enhanced_grid, 0, 1)
++    initial_configs.append(enhanced_grid)
++
++    # Try differential evolution for global search to find better starting point
++    try:
++        de_bounds = [(0, 1) for _ in range(32)]
++        de_result = differential_evolution(
++            objective,
++            de_bounds,
++            maxiter=25,
++            popsize=10,
++            seed=42,
++            tol=1e-6,
++            mutation=(0.5, 1),
++            recombination=0.7
++        )
++        if de_result.success:
++            de_points = de_result.x.reshape(-1, 2)
++            initial_configs.append(de_points)
++    except:
++        pass
+ 
+     # Try multiple local optimizations from different starting points
+     best_ratio = -np.inf
+     best_points = None
+ 
+-    # Grid search over 5x5 uniform grid for better starting points
+-    test_grid = np.linspace(0.05, 0.95, 5)
+-    for i in range(5):
+-        for j in range(5):
+-            # Create a perturbed version of the grid point
+-            base_x = test_grid[i]
+-            base_y = test_grid[j]
+-
+-            # Create a random perturbation around this grid point
+-            perturbation = np.random.normal(0, 0.05, (16, 2))
+-            perturbed_points = np.array([[base_x, base_y]] * 16) + perturbation
+-            perturbed_points = np.clip(perturbed_points, 0, 1)
+-            x_start = perturbed_points.flatten()
+-
+-            try:
+-                result = minimize(objective, x_start, method='SLSQP', bounds=bounds,
+-                                constraints=cons, options={'maxiter': 100})
+-                if result.success:
+-                    # Calculate the actual ratio
+-                    final_points = result.x.reshape(-1, 2)
+-                    distances = pdist(final_points)
+-                    min_dist = np.min(distances)
+-                    max_dist = np.max(distances)
+-                    if max_dist > 0:
+-                        ratio = min_dist / max_dist
+-                        if ratio > best_ratio:
+-                            best_ratio = ratio
+-                            best_points = final_points.copy()
+-            except:
+-                continue
+-
+-    # Final optimization with the best starting point
+-    if best_points is not None:
+-        x_final = best_points.flatten()
++    # Multi-start optimization with enhanced strategy
++    for i, initial_config in enumerate(initial_configs):
+         try:
+-            result = minimize(objective, x_final, method='SLSQP', bounds=bounds,
+-                            constraints=cons, options={'maxiter': 200})
++            # First, evaluate the initial configuration
++            initial_ratio = evaluate_solution(initial_config)
++
++            # Apply adaptive perturbation for better exploration
++            # We'll use the ratio to determine perturbation magnitude
++            perturbed_config = create_adaptive_perturbation(initial_config, initial_ratio)
++
++            # Optimization with SLSQP
++            result = minimize(objective, perturbed_config.flatten(), method='SLSQP',
++                            bounds=bounds, options={'maxiter': 100})
++
+             if result.success:
+                 final_points = result.x.reshape(-1, 2)
+-                distances = pdist(final_points)
+-                min_dist = np.min(distances)
+-                max_dist = np.max(distances)
+-                if max_dist > 0 and min_dist / max_dist > best_ratio:
+-                    best_points = final_points
+-
+-        except:
+-            pass
++                ratio = evaluate_solution(final_points)
++
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_points = final_points.copy()
++
++        except Exception as e:
++            continue
++
++    # Additional refinement step with enhanced optimization
++    if best_points is not None:
++        # Try multiple optimization methods on the best solution
++        methods = ['L-BFGS-B', 'SLSQP']
++
++        for method in methods:
++            try:
++                x0 = best_points.flatten()
++                result = minimize(objective, x0, method=method, bounds=bounds,
++                                options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12})
++
++                if result.success:
++                    final_points = result.x.reshape(-1, 2)
++                    ratio = evaluate_solution(final_points)
++
++                    if ratio > best_ratio:
++                        best_ratio = ratio
++                        best_points = final_points.copy()
++
++            except Exception as e:
++                continue
+ 
+     # Return the best solution found
+     if best_points is None:
+-        # Fallback to the grid initialization if nothing worked
+-        best_points = initial_points
++        # Fallback to the regular grid if nothing worked
++        grid_points = []
++        for i in range(4):
++            for j in range(4):
++                grid_points.append([(i+0.5)/4, (j+0.5)/4])
++        best_points = np.array(grid_points)
+ 
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

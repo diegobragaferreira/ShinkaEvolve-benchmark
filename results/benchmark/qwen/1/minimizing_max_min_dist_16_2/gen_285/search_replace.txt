@@ -1,0 +1,355 @@
+<NAME>
+add_simulated_annealing_fallback
+</NAME>
+
+<DESCRIPTION>
+Adding a simulated annealing fallback mechanism to improve convergence to global optimum. This approach will help escape local optima that standard optimizers might get stuck in, particularly important for the challenging point dispersion problem with many local maxima. The simulated annealing will use a cooling schedule to gradually reduce acceptance probability of worse solutions, allowing exploration of the solution space before exploitation.
+
+This enhancement addresses the limitations mentioned in the recommendations where fallback mechanisms are needed when primary solvers fail to achieve sufficient convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import warnings
+warnings.filterwarnings('ignore')
+=======
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import warnings
+import random
+warnings.filterwarnings('ignore')
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_local_search(points, bounds):
+        """Apply adaptive local search with multiple refinement strategies."""
+        best_points = points.copy()
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Strategy 1: L-BFGS-B with strict tolerances
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15, 'gtol': 1e-15}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 2: SLSQP as alternative
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 3: Additional random perturbations followed by L-BFGS-B
+        np.random.seed(999)
+        for _ in range(3):
+            perturbed = best_points + np.random.normal(0, 0.005, best_points.shape)
+            perturbed = np.clip(perturbed, 0, 1)
+            try:
+                refined = minimize(
+                    objective,
+                    perturbed.flatten(),
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    ratio = calculate_min_max_ratio(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+            except Exception:
+                continue
+
+        return best_points
+=======
+    def adaptive_local_search(points, bounds):
+        """Apply adaptive local search with multiple refinement strategies."""
+        best_points = points.copy()
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Strategy 1: L-BFGS-B with strict tolerances
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15, 'gtol': 1e-15}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 2: SLSQP as alternative
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 3: Additional random perturbations followed by L-BFGS-B
+        np.random.seed(999)
+        for _ in range(3):
+            perturbed = best_points + np.random.normal(0, 0.005, best_points.shape)
+            perturbed = np.clip(perturbed, 0, 1)
+            try:
+                refined = minimize(
+                    objective,
+                    perturbed.flatten(),
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    ratio = calculate_min_max_ratio(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+            except Exception:
+                continue
+
+        return best_points
+
+    def simulated_annealing(points, max_iter=1000, initial_temp=1.0, cooling_rate=0.95):
+        """Simulated annealing optimization to escape local optima."""
+        current_points = points.copy()
+        current_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        temperature = initial_temp
+
+        for iteration in range(max_iter):
+            # Generate neighbor solution by perturbing current points
+            neighbor_points = current_points + np.random.normal(0, temperature * 0.01, current_points.shape)
+            neighbor_points = np.clip(neighbor_points, 0, 1)
+
+            # Evaluate neighbor
+            neighbor_ratio = calculate_min_max_ratio(neighbor_points)
+
+            # Accept or reject based on Metropolis criterion
+            if neighbor_ratio > current_ratio:
+                current_points = neighbor_points
+                current_ratio = neighbor_ratio
+            else:
+                # Accept with probability based on temperature
+                delta = neighbor_ratio - current_ratio
+                acceptance_prob = np.exp(delta / temperature)
+                if random.random() < acceptance_prob:
+                    current_points = neighbor_points
+                    current_ratio = neighbor_ratio
+
+            # Update best solution
+            if current_ratio > best_ratio:
+                best_ratio = current_ratio
+                best_points = current_points.copy()
+
+            # Cool down
+            temperature *= cooling_rate
+
+            # Early stopping if temperature gets too low
+            if temperature < 1e-8:
+                break
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Fine-tune with differential evolution
+        result_de = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=150,
+            popsize=25,
+            atol=1e-10,
+            rtol=1e-10,
+            mutation=(0.8, 1.0),
+            recombination=0.9
+        )
+
+        if result_de.success:
+            # Apply adaptive local search
+            final_points = adaptive_local_search(result_de.x.reshape(-1, 2), bounds)
+            ratio = calculate_min_max_ratio(final_points)
+
+            # Return the better of the two approaches
+            if ratio > calculate_min_max_ratio(relaxed_points):
+                return final_points
+            else:
+                return relaxed_points
+    except Exception:
+        pass
+=======
+        # Fine-tune with differential evolution
+        result_de = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=150,
+            popsize=25,
+            atol=1e-10,
+            rtol=1e-10,
+            mutation=(0.8, 1.0),
+            recombination=0.9
+        )
+
+        if result_de.success:
+            # Apply adaptive local search
+            final_points = adaptive_local_search(result_de.x.reshape(-1, 2), bounds)
+            ratio = calculate_min_max_ratio(final_points)
+
+            # Try simulated annealing as fallback if the ratio isn't great
+            if ratio < 0.25:  # If we're not doing well, try SA
+                sa_points, sa_ratio = simulated_annealing(final_points)
+                if sa_ratio > ratio:
+                    final_points = sa_points
+                    ratio = sa_ratio
+
+            # Return the better of the two approaches
+            if ratio > calculate_min_max_ratio(relaxed_points):
+                return final_points
+            else:
+                return relaxed_points
+    except Exception:
+        pass
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        for strategy in strategies:
+            try:
+                # Initialize with structured points
+                x0 = initialize_geometric_points().flatten()
+
+                # Run differential evolution
+                result = differential_evolution(
+                    objective,
+                    bounds,
+                    x0=x0,
+                    seed=42,
+                    maxiter=strategy['params']['maxiter'],
+                    popsize=strategy['params']['popsize'],
+                    mutation=strategy['params']['mutation'],
+                    recombination=strategy['params']['recombination'],
+                    atol=1e-12,
+                    rtol=1e-12
+                )
+
+                if result.success:
+                    # Apply adaptive local search for better refinement
+                    final_points = adaptive_local_search(result.x.reshape(-1, 2), bounds)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception:
+                continue
+
+        if best_points is not None:
+            return best_points
+=======
+        for strategy in strategies:
+            try:
+                # Initialize with structured points
+                x0 = initialize_geometric_points().flatten()
+
+                # Run differential evolution
+                result = differential_evolution(
+                    objective,
+                    bounds,
+                    x0=x0,
+                    seed=42,
+                    maxiter=strategy['params']['maxiter'],
+                    popsize=strategy['params']['popsize'],
+                    mutation=strategy['params']['mutation'],
+                    recombination=strategy['params']['recombination'],
+                    atol=1e-12,
+                    rtol=1e-12
+                )
+
+                if result.success:
+                    # Apply adaptive local search for better refinement
+                    final_points = adaptive_local_search(result.x.reshape(-1, 2), bounds)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    # Try simulated annealing as fallback
+                    if ratio < 0.25:  # If we're not doing well, try SA
+                        sa_points, sa_ratio = simulated_annealing(final_points)
+                        if sa_ratio > ratio:
+                            final_points = sa_points
+                            ratio = sa_ratio
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception:
+                continue
+
+        if best_points is not None:
+            return best_points
+>>>>>>> REPLACE
+</DIFF>

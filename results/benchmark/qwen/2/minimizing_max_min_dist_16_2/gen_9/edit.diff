@@ -1,0 +1,112 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,105 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import differential_evolution
++from scipy.spatial.distance import pdist, squareform
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+-    n = 16
+-    d = 2
++    def objective(x):
++        # Reshape x into points array
++        points = x.reshape(-1, 2)
+ 
+-    # places points randomly
++        # Calculate pairwise distances
++        distances = pdist(points)
++
++        # Calculate min and max distances
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++
++        # Return negative ratio to minimize (since we want to maximize the ratio)
++        # Also add penalty if any points go out of bounds
++        if d_max == 0:
++            return -np.inf
++
++        # Avoid division by zero and penalize out-of-bounds points
++        ratio = d_min / d_max if d_max > 0 else 0
++
++        # Add penalty for points outside [0,1] bounds
++        penalty = 0
++        for i in range(16):
++            if points[i, 0] < 0 or points[i, 0] > 1 or points[i, 1] < 0 or points[i, 1] > 1:
++                penalty += 1000
++
++        return -(ratio - penalty / 10000)
++
++    # Create bounds for each coordinate (0 to 1 for both x and y)
++    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
++
++    # Try different starting configurations
++    best_result = None
++    best_ratio = -np.inf
++
++    # Initialize with a good starting configuration (regular grid with noise)
+     np.random.seed(42)
+-    points = np.random.randn(n, d)
++
++    # Start with a regular grid pattern plus small random perturbations
++    initial_points = np.zeros((16, 2))
++    for i in range(16):
++        row = i // 4
++        col = i % 4
++        initial_points[i, 0] = col / 3.0 + np.random.normal(0, 0.05)
++        initial_points[i, 1] = row / 3.0 + np.random.normal(0, 0.05)
++
++    # Clip points to stay within bounds
++    initial_points[:, 0] = np.clip(initial_points[:, 0], 0, 1)
++    initial_points[:, 1] = np.clip(initial_points[:, 1], 0, 1)
++
++    # Flatten for optimization
++    initial_flat = initial_points.flatten()
++
++    try:
++        # Use differential evolution with a reasonable number of iterations
++        result = differential_evolution(
++            objective,
++            bounds,
++            maxiter=100,
++            popsize=15,
++            seed=42,
++            tol=1e-6,
++            mutation=(0.5, 1),
++            recombination=0.7
++        )
++
++        # Get the best solution
++        if result.success and result.fun < best_ratio:
++            best_ratio = result.fun
++            best_result = result.x
++
++    except Exception as e:
++        print(f"Optimization failed: {e}")
++        # Fallback to initial configuration
++        best_result = initial_flat
++
++    # If optimization didn't work, use initial configuration
++    if best_result is None:
++        best_result = initial_flat
++
++    # Convert back to points array
++    points = best_result.reshape(-1, 2)
++
++    # Ensure all points are within bounds
++    points[:, 0] = np.clip(points[:, 0], 0, 1)
++    points[:, 1] = np.clip(points[:, 1], 0, 1)
+ 
+     return points
+ 
+ 
+ # EVOLVE-BLOCK-END

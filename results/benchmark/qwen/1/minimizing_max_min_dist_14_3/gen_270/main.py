@@ -1,0 +1,175 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import warnings
+import time
+
+class SphericalOptimizer3D:
+    """A robust 3D spherical point optimizer for maximizing min/max distance ratio."""
+    
+    def __init__(self, num_points=14, max_time=350):
+        self.num_points = num_points
+        self.max_time = max_time
+        self.best_ratio = -np.inf
+        self.best_points = None
+        np.random.seed(42)
+    
+    def fibonacci_spiral_on_sphere(self) -> np.ndarray:
+        """Generate points on sphere using Fibonacci spiral with golden angle."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+        
+        for i in range(self.num_points):
+            y = 1 - (i / (self.num_points - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = phi * i  # golden angle increment
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+    
+    def perturbed_fibonacci_points(self, base_points: np.ndarray, noise_level=0.05) -> np.ndarray:
+        """Create perturbed versions of Fibonacci points."""
+        perturbed = base_points + np.random.normal(0, noise_level, base_points.shape)
+        # Normalize to unit sphere
+        norms = np.linalg.norm(perturbed, axis=1, keepdims=True)
+        return perturbed / np.where(norms > 0, norms, 1)
+    
+    def random_sphere_points(self) -> np.ndarray:
+        """Generate random points distributed on unit sphere."""
+        points = np.random.randn(self.num_points, 3)
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        return points / np.where(norms > 0, norms, 1)
+    
+    def generate_initial_strategies(self) -> list:
+        """Generate multiple initial point configurations."""
+        strategies = []
+        
+        # Strategy 1: Standard Fibonacci spiral
+        fib_points = self.fibonacci_spiral_on_sphere()
+        strategies.append(("fibonacci", fib_points))
+        
+        # Strategy 2: Perturbed Fibonacci points
+        perturbed_fib = self.perturbed_fibonacci_points(fib_points)
+        strategies.append(("perturbed_fibonacci", perturbed_fib))
+        
+        # Strategy 3: Random points on unit sphere
+        random_points = self.random_sphere_points()
+        strategies.append(("random_sphere", random_points))
+        
+        return strategies
+    
+    def distance_ratio_objective(self, points_flat: np.ndarray) -> float:
+        """Calculate negative of min/max distance ratio to minimize."""
+        points = points_flat.reshape(-1, 3)
+        
+        # Ensure points are on unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points_normalized = points / np.where(norms > 0, norms, 1)
+        
+        # Calculate pairwise distances
+        distances = pdist(points_normalized)
+        
+        if len(distances) == 0:
+            return -1.0
+            
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Avoid division by zero
+        if max_dist <= 0:
+            return -1.0
+            
+        # Return negative ratio to convert maximization to minimization
+        return -min_dist / max_dist
+    
+    def sphere_constraint(self, points_flat: np.ndarray) -> float:
+        """Constraint function ensuring all points lie on unit sphere."""
+        points = points_flat.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        # Return mean squared deviation from unit radius
+        return np.mean((norms - 1.0) ** 2)
+    
+    def optimize_single_strategy(self, initial_points: np.ndarray, strategy_name: str) -> tuple:
+        """Optimize a single initial point configuration."""
+        try:
+            # Flatten initial points
+            x0 = initial_points.flatten()
+            
+            # Define constraints for optimization
+            constraints = {'type': 'eq', 'fun': self.sphere_constraint}
+            
+            # Set bounds for optimization (within reasonable limits)
+            bounds = [(-1.5, 1.5) for _ in range(len(x0))]
+            
+            # Optimize using SLSQP method
+            result = minimize(
+                self.distance_ratio_objective,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'ftol': 1e-12, 'maxiter': 500, 'disp': False}
+            )
+            
+            if result.success:
+                # Extract and normalize optimized points
+                optimized_points = result.x.reshape(-1, 3)
+                norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                final_points = optimized_points / np.where(norms > 0, norms, 1)
+                
+                # Calculate final ratio
+                distances = pdist(final_points)
+                if len(distances) > 0:
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+                    if max_dist > 0:
+                        ratio = min_dist / max_dist
+                        return ratio, final_points
+                
+        except Exception as e:
+            warnings.warn(f"Strategy {strategy_name} failed: {str(e)}")
+        
+        return None, None
+    
+    def run_optimization(self) -> np.ndarray:
+        """Main optimization loop with multiple strategies."""
+        start_time = time.time()
+        
+        # Generate all initial strategies
+        initial_strategies = self.generate_initial_strategies()
+        
+        # Try each initial strategy
+        for strategy_name, initial_points in initial_strategies:
+            if time.time() - start_time > self.max_time:
+                break
+                
+            ratio, optimized_points = self.optimize_single_strategy(initial_points, strategy_name)
+            
+            if ratio is not None and ratio > self.best_ratio:
+                self.best_ratio = ratio
+                self.best_points = optimized_points.copy()
+        
+        # Fallback to best available result or first strategy
+        if self.best_points is None:
+            self.best_points = initial_strategies[0][1]
+        
+        return self.best_points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    optimizer = SphericalOptimizer3D(num_points=14, max_time=350)
+    return optimizer.run_optimization()
+
+# EVOLVE-BLOCK-END

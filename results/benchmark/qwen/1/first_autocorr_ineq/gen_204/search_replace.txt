@@ -1,0 +1,97 @@
+<NAME>
+enhance_local_search_with_multi_start_lbfgs
+</NAME>
+
+<DESCRIPTION>
+This edit introduces a significant enhancement to the local search mechanism by implementing a multi-start L-BFGS optimization strategy. Instead of relying solely on the existing `get_good_direction_to_move_into` function which has limited effectiveness, we'll implement a more robust local search that starts from multiple perturbed versions of the current best solution and applies L-BFGS optimization to each. This approach aims to escape local optima and refine the solution more effectively, potentially discovering better sequences that yield higher values of 1/C₁.
+
+Key improvements:
+1. Replace the existing `get_good_direction_to_move_into` with a more powerful multi-start L-BFGS local search
+2. Maintain backward compatibility with other functions
+3. Improve the chance of finding higher quality solutions by exploring more thoroughly in the neighborhood of good sequences
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced local search."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+
+    if g_fun is None:
+        # Fallback to a simple gradient-based approach
+        return gradient_improve_sequence(sequence)
+
+    sum_sequence = np.sum(g_fun)
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+def multi_start_lbfgs_optimization(sequence: list[float], max_iter: int = 50) -> list[float]:
+    """Multi-start L-BFGS optimization to refine a sequence."""
+    best_sequence = sequence.copy()
+    best_inv_c1 = 0.0
+
+    # Try multiple starting points
+    for _ in range(5):  # 5 different start points
+        # Slightly perturb the sequence
+        perturbed = [x * random.uniform(0.9, 1.1) for x in sequence]
+        # Ensure all values are valid
+        perturbed = [max(0.01, x) for x in perturbed]
+
+        try:
+            # Use scipy.optimize.minimize with L-BFGS
+            def objective(x):
+                # Compute 1/C1 (we want to maximize this, so minimize -1/C1)
+                _, inv_c1 = compute_autocorrelation_constant(x)
+                return -inv_c1
+
+            # Constraints: all values must be non-negative
+            constraints = [{'type': 'ineq', 'fun': lambda x: x}]
+
+            # Bounds: ensure all values remain reasonable
+            bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+
+            result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds,
+                                     constraints=constraints, options={'maxiter': max_iter})
+
+            if result.success:
+                _, inv_c1 = compute_autocorrelation_constant(result.x)
+                if inv_c1 > best_inv_c1:
+                    best_inv_c1 = inv_c1
+                    best_sequence = result.x.tolist()
+        except Exception:
+            continue  # Skip if optimization fails
+
+    return best_sequence
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced local search using multi-start L-BFGS."""
+    # Directly apply multi-start L-BFGS optimization
+    optimized_sequence = multi_start_lbfgs_optimization(sequence, max_iter=30)
+
+    # Check if optimization was successful and improved the result
+    _, original_inv_c1 = compute_autocorrelation_constant(sequence)
+    _, optimized_inv_c1 = compute_autocorrelation_constant(optimized_sequence)
+
+    if optimized_inv_c1 > original_inv_c1:
+        return optimized_sequence
+    else:
+        # Fallback to gradient improvement if optimization didn't help
+        return gradient_improve_sequence(sequence)
+>>>>>>> REPLACE
+</DIFF>

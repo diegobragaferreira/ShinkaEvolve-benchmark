@@ -1,0 +1,420 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import time
+from typing import Tuple
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses an adaptive evolutionary approach with diverse initialization and smart optimization strategies.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    np.random.seed(42)
+
+    # Adaptive evolutionary optimization approach with diverse initialization
+    def adaptive_evolutionary_optimization() -> np.ndarray:
+        # Multiple initialization strategies with different noise characteristics
+        initial_configurations = []
+
+        # Strategy 1: Optimized hexagonal grid with enhanced symmetry breaking
+        hex_points = create_optimized_hexagonal_pattern()
+        # Add multiple variants with different noise levels
+        for noise_level in [0.015, 0.025, 0.035]:
+            noisy_points = hex_points.copy()
+            noise = np.random.normal(0, noise_level, noisy_points.shape)
+            noisy_points += noise
+            noisy_points = np.clip(noisy_points, 0, 1)
+            initial_configurations.append(noisy_points.copy())
+
+        # Strategy 2: Triangular lattice pattern
+        triangular_points = create_triangular_pattern()
+        initial_configurations.append(triangular_points)
+
+        # Strategy 3: Random points with boundary awareness
+        random_points = create_boundary_aware_random_points()
+        initial_configurations.append(random_points)
+
+        # Strategy 4: Perturbed uniform grid
+        uniform_points = create_perturbed_uniform_grid()
+        initial_configurations.append(uniform_points)
+
+        best_solution = None
+        best_ratio = 0
+        best_config_idx = 0
+
+        # Test each initial configuration with optimization
+        for config_idx, initial_points in enumerate(initial_configurations):
+            # Run optimization on this configuration
+            optimized_points = run_adaptive_optimization(initial_points)
+            ratio = calculate_ratio(optimized_points)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_solution = optimized_points.copy()
+                best_config_idx = config_idx
+
+        # Final refinement with enhanced local search
+        if best_solution is not None:
+            refined_solution = enhanced_local_refinement(best_solution)
+            final_ratio = calculate_ratio(refined_solution)
+            if final_ratio > best_ratio:
+                best_ratio = final_ratio
+                best_solution = refined_solution
+
+        return best_solution if best_solution is not None else create_optimized_hexagonal_pattern()
+
+    def create_optimized_hexagonal_pattern() -> np.ndarray:
+        """Create optimized hexagonal pattern for 16 points with better spacing"""
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                # Enhanced hexagonal arrangement with better distribution
+                x = j + 0.5 * (i % 2)
+                y = i * np.sqrt(3)/2
+
+                # Add subtle perturbations to break perfect symmetry
+                if (i + j) % 3 == 0:
+                    x += 0.01 * np.random.randn()
+                    y += 0.01 * np.random.randn()
+                elif (i + j) % 3 == 1:
+                    x -= 0.005 * np.random.randn()
+                    y += 0.005 * np.random.randn()
+
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Normalize to [0,1] x [0,1] with better scaling
+        max_x = cols - 0.5
+        max_y = (rows - 1) * np.sqrt(3)/2
+
+        points[:, 0] = points[:, 0] / max_x
+        points[:, 1] = points[:, 1] / max_y
+
+        return points
+
+    def create_triangular_pattern() -> np.ndarray:
+        """Create points arranged in a triangular lattice pattern"""
+        # Create triangular lattice with appropriate spacing
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j + (i % 2) * 0.5  # Triangular offset
+                y = i * np.sqrt(3)/2
+                points.append([x, y])
+
+        points = np.array(points)
+
+        # Normalize to [0,1] x [0,1]
+        max_x = cols - 0.5
+        max_y = (rows - 1) * np.sqrt(3)/2
+
+        points[:, 0] = points[:, 0] / max_x
+        points[:, 1] = points[:, 1] / max_y
+
+        # Add noise and bound constraints
+        points += np.random.normal(0, 0.015, points.shape)
+        points = np.clip(points, 0, 1)
+
+        return points
+
+    def create_boundary_aware_random_points() -> np.ndarray:
+        """Create random points with special handling near boundaries to encourage better distribution"""
+        points = np.random.rand(16, 2)
+
+        # Apply boundary-aware adjustments to prevent clustering at boundaries
+        boundary_threshold = 0.02
+        for i in range(len(points)):
+            # If too close to boundary, push away from it
+            if points[i, 0] < boundary_threshold:
+                points[i, 0] = boundary_threshold + np.random.uniform(0, boundary_threshold/2)
+            elif points[i, 0] > 1 - boundary_threshold:
+                points[i, 0] = 1 - boundary_threshold - np.random.uniform(0, boundary_threshold/2)
+
+            if points[i, 1] < boundary_threshold:
+                points[i, 1] = boundary_threshold + np.random.uniform(0, boundary_threshold/2)
+            elif points[i, 1] > 1 - boundary_threshold:
+                points[i, 1] = 1 - boundary_threshold - np.random.uniform(0, boundary_threshold/2)
+
+        return points
+
+    def create_perturbed_uniform_grid() -> np.ndarray:
+        """Create a uniform grid with significant perturbations to break symmetry"""
+        # Create uniform 4x4 grid
+        points = []
+        for i in range(4):
+            for j in range(4):
+                points.append([i/3, j/3])
+
+        points = np.array(points)
+
+        # Add substantial perturbation with decay
+        noise_magnitude = 0.03
+        for i in range(len(points)):
+            # Each point gets a different noise magnitude to increase diversity
+            noise = np.random.normal(0, noise_magnitude * (1 + 0.1*i), 2)
+            points[i] += noise
+
+        points = np.clip(points, 0, 1)
+        return points
+
+    def run_adaptive_optimization(initial_points: np.ndarray) -> np.ndarray:
+        """Run adaptive optimization with self-adjusting parameters"""
+        current_points = initial_points.copy()
+        current_ratio = calculate_ratio(current_points)
+
+        # Adaptive parameters that change during optimization
+        T = 0.2  # Initial temperature (higher for better exploration)
+        cooling_rate = 0.9994  # Moderate cooling rate
+        min_temp = 1e-6
+
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        # Tracking variables for adaptive adjustments
+        recent_improvements = []
+        improvement_window = 100
+        stagnation_counter = 0
+        max_stagnation = 300
+
+        # Early stopping threshold
+        last_improvement_iteration = 0
+        patience = 500
+
+        for iteration in range(2000):  # More iterations for thorough search
+            # Adaptive temperature adjustment based on performance
+            if len(recent_improvements) >= improvement_window:
+                avg_improvement = np.mean(recent_improvements[-improvement_window:])
+
+                # If stagnating, cool more aggressively
+                if avg_improvement < 1e-6:
+                    stagnation_counter += 1
+                    if stagnation_counter > max_stagnation:
+                        T *= 0.95  # Aggressive cooling
+                        stagnation_counter = 0
+                else:
+                    stagnation_counter = 0
+                    # If improving well, potentially warm up to explore more
+                    if avg_improvement > 1e-4 and np.random.rand() < 0.02:
+                        T = min(T * 1.05, 0.5)
+
+            # Standard cooling
+            T *= cooling_rate
+
+            if T < min_temp:
+                break
+
+            # Determine perturbation type based on current state
+            perturbation_type = 'neighborhood' if np.random.rand() < 0.25 else 'single'
+
+            new_points = current_points.copy()
+            accepted = False
+
+            if perturbation_type == 'single':
+                # Single point perturbation with adaptive magnitude
+                idx = np.random.randint(len(current_points))
+
+                # Calculate local density to adapt perturbation size
+                local_density = estimate_local_density(current_points, idx, 0.2)
+                base_magnitude = T * 0.08
+
+                # Adjust magnitude based on density
+                if local_density > 4:  # Dense region
+                    perturbation_magnitude = base_magnitude * 0.5  # Smaller perturbations
+                elif local_density < 2:  # Sparse region
+                    perturbation_magnitude = base_magnitude * 1.5  # Larger perturbations
+                else:
+                    perturbation_magnitude = base_magnitude
+
+                new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
+                new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
+
+                # Boundary enforcement with soft reflection
+                enforce_boundaries(new_points, idx, soft_boundary=True)
+                accepted = True
+
+            else:
+                # Neighborhood-based perturbation with coordination
+                # Select two nearby points for coordinated movement
+                selected_points = select_nearby_points(current_points, 0.15)
+
+                if selected_points:
+                    idx1, idx2 = selected_points[0], selected_points[1]
+                    perturbation_magnitude = T * 0.06
+
+                    # Add some correlation between movements
+                    correlation_factor = 0.3
+                    delta1 = np.random.normal(0, perturbation_magnitude, 2)
+                    delta2 = np.random.normal(0, perturbation_magnitude, 2)
+
+                    # Correlate the movements
+                    delta1 = delta1 * (1 - correlation_factor) + delta2 * correlation_factor
+                    delta2 = delta2 * (1 - correlation_factor) + delta1 * correlation_factor
+
+                    new_points[idx1, :] += delta1
+                    new_points[idx2, :] += delta2
+
+                    # Enforce boundaries for both points
+                    enforce_boundaries(new_points, idx1)
+                    enforce_boundaries(new_points, idx2)
+                    accepted = True
+                else:
+                    # Fallback to single point if no nearby pair found
+                    idx = np.random.randint(len(current_points))
+                    perturbation_magnitude = T * 0.08
+                    new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
+                    new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
+                    enforce_boundaries(new_points, idx)
+                    accepted = True
+
+            if accepted:
+                # Accept or reject the new solution
+                new_ratio = calculate_ratio(new_points)
+
+                # Track recent improvements
+                if new_ratio > current_ratio:
+                    recent_improvements.append(new_ratio - current_ratio)
+                    if len(recent_improvements) > improvement_window * 2:
+                        recent_improvements.pop(0)
+
+                # Metropolis acceptance criterion
+                if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
+                    current_points = new_points
+                    current_ratio = new_ratio
+
+                    if current_ratio > best_ratio:
+                        best_ratio = current_ratio
+                        best_points = current_points.copy()
+                        last_improvement_iteration = iteration
+
+                # Check for early stopping if no improvement in a while
+                if iteration - last_improvement_iteration > patience:
+                    break
+
+        return best_points
+
+    def estimate_local_density(points: np.ndarray, center_idx: int, radius: float) -> float:
+        """Estimate local density around a point"""
+        count = 0
+        center_point = points[center_idx]
+
+        for i, point in enumerate(points):
+            if i != center_idx:
+                distance = np.sqrt(np.sum((center_point - point)**2))
+                if distance <= radius:
+                    count += 1
+
+        return count
+
+    def select_nearby_points(points: np.ndarray, max_distance: float) -> list:
+        """Select a pair of nearby points for coordinated perturbation"""
+        candidates = list(range(len(points)))
+        np.random.shuffle(candidates)
+
+        # Find a pair within the specified distance
+        for i in range(len(candidates)-1):
+            idx1 = candidates[i]
+            for j in range(i+1, len(candidates)):
+                idx2 = candidates[j]
+                dist = np.sqrt(np.sum((points[idx1] - points[idx2])**2))
+                if dist <= max_distance:
+                    return [idx1, idx2]
+
+        return []
+
+    def enforce_boundaries(points: np.ndarray, idx: int, soft_boundary: bool = False):
+        """Enforce boundary constraints with optional soft reflection"""
+        point = points[idx]
+
+        # Simple clipping for hard boundaries
+        points[idx, 0] = np.clip(point[0], 0, 1)
+        points[idx, 1] = np.clip(point[1], 0, 1)
+
+        # Add soft boundary adjustment for better distribution
+        if soft_boundary:
+            boundary_buffer = 0.01
+            if point[0] < boundary_buffer:
+                points[idx, 0] = boundary_buffer + np.random.uniform(0, boundary_buffer/2)
+            elif point[0] > 1 - boundary_buffer:
+                points[idx, 0] = 1 - boundary_buffer - np.random.uniform(0, boundary_buffer/2)
+
+            if point[1] < boundary_buffer:
+                points[idx, 1] = boundary_buffer + np.random.uniform(0, boundary_buffer/2)
+            elif point[1] > 1 - boundary_buffer:
+                points[idx, 1] = 1 - boundary_buffer - np.random.uniform(0, boundary_buffer/2)
+
+    def calculate_ratio(points: np.ndarray) -> float:
+        """Calculate min/max distance ratio"""
+        if len(points) < 2:
+            return 0
+
+        # Compute pairwise distances using scipy
+        distances = pdist(points)
+
+        if len(distances) == 0:
+            return 0
+
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        if d_max <= 0:
+            return 0
+
+        return d_min / d_max
+
+    def enhanced_local_refinement(points: np.ndarray) -> np.ndarray:
+        """Enhanced local refinement with smarter perturbations"""
+        best_points = points.copy()
+        best_ratio = calculate_ratio(best_points)
+
+        # Multiple refinement phases with decreasing step sizes
+        step_sizes = [0.02, 0.01, 0.005, 0.002]
+
+        for phase, step_size in enumerate(step_sizes):
+            # Phase-specific number of iterations
+            iterations = 2000 // (phase + 1)  # More iterations in earlier phases
+
+            for _ in range(iterations):
+                # Select multiple points to perturb in each iteration
+                num_perturbations = min(4, len(best_points))
+                indices = np.random.choice(len(best_points), num_perturbations, replace=False)
+
+                new_points = best_points.copy()
+
+                # Apply perturbations
+                for idx in indices:
+                    # Adjust perturbation based on local density
+                    local_density = estimate_local_density(best_points, idx, 0.15)
+                    adaptive_step = step_size * (1.0 if local_density < 3 else 0.5)
+
+                    new_points[idx, 0] += np.random.normal(0, adaptive_step)
+                    new_points[idx, 1] += np.random.normal(0, adaptive_step)
+
+                    # Enforce boundaries
+                    enforce_boundaries(new_points, idx)
+
+                # Evaluate
+                new_ratio = calculate_ratio(new_points)
+
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+
+        return best_points
+
+    # Execute adaptive evolutionary optimization
+    result = adaptive_evolutionary_optimization()
+    return result
+
+# EVOLVE-BLOCK-END

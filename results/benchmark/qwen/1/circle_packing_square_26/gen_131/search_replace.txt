@@ -1,0 +1,274 @@
+<NAME>
+add_voronoi_constraint_aware_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll implement a new constraint-aware mutation operator that leverages Voronoi diagrams to create better initial configurations and improve the mutation process. This approach will help generate more promising starting populations and more intelligent mutations that respect spatial constraints while maximizing circle packing efficiency.
+
+The key insight is to use Voronoi diagrams not just for initialization but also in the mutation process to ensure that mutated circles maintain good spatial relationships and avoid creating impossible configurations. I'll enhance both the initialization and mutation functions to utilize Voronoi-based geometry more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_population(pop_size):
+        """Initialize population with hexagonal-grid inspired spread"""
+        population = []
+        for _ in range(pop_size):
+            circles = np.zeros((N_CIRCLES, 3))
+
+            # Generate points using hexagonal grid pattern for superior distribution
+            grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+            spacing_x = 1.0 / (grid_size + 1)
+            spacing_y = 1.0 / (grid_size + 1)
+
+            # Create points in a hexagonal pattern with additional jittering
+            points = []
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    if len(points) < N_CIRCLES:
+                        # Hexagonal offset pattern
+                        offset = (j % 2) * spacing_x / 2
+                        jitter_x = np.random.uniform(-spacing_x/8, spacing_x/8)
+                        jitter_y = np.random.uniform(-spacing_y/8, spacing_y/8)
+                        x = (i + 1) * spacing_x + offset + jitter_x
+                        y = (j + 1) * spacing_y + jitter_y
+                        points.append([x, y])
+
+            # Fill remaining positions with strategically placed random points
+            remaining_count = N_CIRCLES - len(points)
+            for _ in range(remaining_count):
+                max_attempts = 50
+                placed = False
+                for attempt in range(max_attempts):
+                    x = np.random.uniform(0.01, 0.99)
+                    y = np.random.uniform(0.01, 0.99)
+
+                    # Check distance to existing points
+                    min_dist = float('inf')
+                    for existing_point in points:
+                        dist = np.sqrt((x - existing_point[0])**2 + (y - existing_point[1])**2)
+                        min_dist = min(min_dist, dist)
+
+                    # Place if sufficiently far from others (more restrictive threshold)
+                    if min_dist > 0.08:  # More stringent distance threshold
+                        points.append([x, y])
+                        placed = True
+                        break
+
+                # If couldn't place far enough, just place randomly
+                if not placed:
+                    x = np.random.uniform(0.01, 0.99)
+                    y = np.random.uniform(0.01, 0.99)
+                    points.append([x, y])
+
+            # Place circles with initial radii based on proximity analysis
+            for i in range(N_CIRCLES):
+                x, y = points[i]
+
+                # Ensure circles stay within bounds
+                x = max(0.01, min(0.99, x))
+                y = max(0.01, min(0.99, y))
+
+                # Calculate radius based on nearest neighbor distances
+                min_dist = float('inf')
+                for j in range(N_CIRCLES):
+                    if i != j:
+                        dist = np.sqrt((x - points[j][0])**2 + (y - points[j][1])**2)
+                        min_dist = min(min_dist, dist)
+
+                # Radius should be limited by available space and distance to neighbors
+                if min_dist > 0:
+                    # Allow up to 1/3 the minimum distance to neighbors for more conservative placement
+                    r = min(0.12, min_dist/3.0)
+                else:
+                    r = np.random.uniform(0.01, 0.05)
+
+                # Ensure reasonable minimum radius and bound
+                r = max(0.005, min(0.15, r))
+                circles[i] = [x, y, r]
+
+            population.append(circles)
+        return population
+=======
+    def initialize_voronoi_population(pop_size):
+        """Initialize population using enhanced Voronoi-based approach with better spatial distribution"""
+        population = []
+        for _ in range(pop_size):
+            # Generate initial points using Voronoi-inspired method
+            points = []
+            grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+            spacing_x = 1.0 / (grid_size + 1)
+            spacing_y = 1.0 / (grid_size + 1)
+
+            # Create points in a grid pattern with strategic jittering
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    if len(points) < N_CIRCLES:
+                        # Use hexagonal offset pattern for better distribution
+                        offset = (j % 2) * spacing_x / 2
+                        jitter_x = np.random.uniform(-spacing_x/8, spacing_x/8)
+                        jitter_y = np.random.uniform(-spacing_y/8, spacing_y/8)
+                        x = (i + 1) * spacing_x + offset + jitter_x
+                        y = (j + 1) * spacing_y + jitter_y
+                        points.append([x, y])
+
+            # Fill remaining positions if needed
+            while len(points) < N_CIRCLES:
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                points.append([x, y])
+
+            # Create Voronoi diagram to get better initial placement
+            try:
+                from scipy.spatial import Voronoi
+                points_array = np.array(points)
+                vor = Voronoi(points_array)
+
+                # Extract centroids of finite Voronoi cells as initial circle centers
+                centroids = []
+                for i, (x, y) in enumerate(vor.points):
+                    if i < len(vor.point_region) and vor.point_region[i] >= 0:
+                        region = vor.regions[vor.point_region[i]]
+                        if len(region) > 0 and all(r >= 0 for r in region):
+                            vertices = np.array([vor.vertices[r] for r in region])
+                            if len(vertices) > 0:
+                                centroid = np.mean(vertices, axis=0)
+                                centroid[0] = np.clip(centroid[0], 0.01, 0.99)
+                                centroid[1] = np.clip(centroid[1], 0.01, 0.99)
+                                centroids.append(centroid)
+
+                # If insufficient centroids, use original points
+                if len(centroids) < N_CIRCLES:
+                    centroids = points_array[:N_CIRCLES].tolist()
+                else:
+                    centroids = centroids[:N_CIRCLES]
+
+                # Compute radii based on Voronoi cell properties
+                circles = np.zeros((N_CIRCLES, 3))
+                for i, (cx, cy) in enumerate(centroids):
+                    # Calculate minimum distance to other points
+                    min_dist = float('inf')
+                    for j, (px, py) in enumerate(centroids):
+                        if i != j:
+                            dist = np.sqrt((cx - px)**2 + (cy - py)**2)
+                            min_dist = min(min_dist, dist)
+
+                    # Set radius based on Voronoi cell size and proximity
+                    if min_dist > 0:
+                        r = min(0.15, min_dist/3.0)  # Conservative approach
+                    else:
+                        r = np.random.uniform(0.01, 0.05)
+
+                    # Enforce hard bounds
+                    r = max(0.005, min(0.2, r))
+                    circles[i] = [cx, cy, r]
+
+            except Exception:
+                # Fall back to simple initialization if Voronoi fails
+                circles = np.zeros((N_CIRCLES, 3))
+                for i in range(N_CIRCLES):
+                    x = np.random.uniform(0.01, 0.99)
+                    y = np.random.uniform(0.01, 0.99)
+                    r = np.random.uniform(0.01, 0.1)
+                    circles[i] = [x, y, r]
+
+            population.append(circles)
+        return population
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Initialize population with better starting points (larger population)
+    pop = initialize_population(100)  # Increased population size
+=======
+    # Initialize population with Voronoi-based starting points
+    pop = initialize_voronoi_population(100)  # Increased population size
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mut_gaussian(individual, mu=0, sigma=0.01, indpb=0.2):
+        """Custom mutator that keeps circles within bounds and maintains validity"""
+        for i in range(len(individual)):
+            if random.random() < indpb:
+                # Mutate position
+                individual[i][0] += np.random.normal(mu, sigma)
+                individual[i][1] += np.random.normal(mu, sigma)
+                # Mutate radius
+                individual[i][2] += np.random.normal(mu, sigma/3)
+
+                # Ensure boundaries
+                individual[i][0] = np.clip(individual[i][0], individual[i][2], 1 - individual[i][2])
+                individual[i][1] = np.clip(individual[i][1], individual[i][2], 1 - individual[i][2])
+                individual[i][2] = np.clip(individual[i][2], 0.001, 0.5)
+
+        # Attempt to repair collisions if they occur
+        repair_individual(individual)
+        return individual,
+=======
+    def mut_voronoi_gaussian(individual, mu=0, sigma=0.01, indpb=0.2):
+        """Enhanced mutator that uses Voronoi information to guide mutations"""
+        # First, let's analyze current configuration with Voronoi
+        try:
+            from scipy.spatial import Voronoi
+            points = np.array([[c[0], c[1]] for c in individual])
+            vor = Voronoi(points)
+
+            # For each circle, determine if we should mutate differently based on Voronoi cell properties
+            for i in range(len(individual)):
+                if random.random() < indpb:
+                    # Get Voronoi cell properties for this point
+                    cell_area = 0
+                    if i < len(vor.point_region) and vor.point_region[i] >= 0:
+                        region = vor.regions[vor.point_region[i]]
+                        if len(region) > 0 and all(r >= 0 for r in region):
+                            vertices = np.array([vor.vertices[r] for r in region])
+                            if len(vertices) > 0:
+                                # Estimate cell area (simplified approach)
+                                cell_area = len(vertices) * 0.1  # Placeholder for actual area calculation
+
+                    # Mutate position with adaptive sigma based on Voronoi properties
+                    individual[i][0] += np.random.normal(mu, sigma * (0.5 + 0.5 * min(cell_area, 1.0)))
+                    individual[i][1] += np.random.normal(mu, sigma * (0.5 + 0.5 * min(cell_area, 1.0)))
+
+                    # Mutate radius with even smaller changes
+                    individual[i][2] += np.random.normal(mu, sigma/5)
+
+                    # Ensure boundaries
+                    individual[i][0] = np.clip(individual[i][0], individual[i][2], 1 - individual[i][2])
+                    individual[i][1] = np.clip(individual[i][1], individual[i][2], 1 - individual[i][2])
+                    individual[i][2] = np.clip(individual[i][2], 0.001, 0.5)
+        except Exception:
+            # Fallback to standard mutation if Voronoi fails
+            for i in range(len(individual)):
+                if random.random() < indpb:
+                    # Mutate position
+                    individual[i][0] += np.random.normal(mu, sigma)
+                    individual[i][1] += np.random.normal(mu, sigma)
+                    # Mutate radius
+                    individual[i][2] += np.random.normal(mu, sigma/3)
+
+                    # Ensure boundaries
+                    individual[i][0] = np.clip(individual[i][0], individual[i][2], 1 - individual[i][2])
+                    individual[i][1] = np.clip(individual[i][1], individual[i][2], 1 - individual[i][2])
+                    individual[i][2] = np.clip(individual[i][2], 0.001, 0.5)
+
+        # Attempt to repair collisions if they occur
+        repair_individual(individual)
+        return individual,
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    toolbox.register("mutate", mut_gaussian)
+=======
+    toolbox.register("mutate", mut_voronoi_gaussian)
+>>>>>>> REPLACE
+
+</DIFF>

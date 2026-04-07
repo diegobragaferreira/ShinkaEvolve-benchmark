@@ -1,0 +1,402 @@
+--- a/original.py
++++ b/original.py
+@@ -1,247 +1,322 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+ from joblib import Parallel, delayed
+ import random
+ from typing import List, Tuple
+ import time
++from scipy import optimize
++from scipy.ndimage import gaussian_filter1d
+ 
+ # Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+ def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+     """
+     Compute the autoconvolution g = f*f and its norms efficiently.
+     Returns (||g||₂², ||g||₁, ||g||∞)
+     """
+     if not f_values:
+         return 0.0, 0.0, 0.0
+ 
+     # Create step function on [-1/4, 1/4] with equal spacing
+     n = len(f_values)
+     if n == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # Step size in x domain [-1/4, 1/4]
+     dx = 0.5 / (n - 1) if n > 1 else 0.5
+ 
+     # Compute autoconvolution using numpy's convolution
+-    # This computes discrete convolution which approximates f*f
+     g = np.convolve(f_values, f_values, mode='full')
+ 
+-    # Trim to proper range [-1/2, 1/2] (corresponding to [-1/4, 1/4] + [-1/4, 1/4])
+-    # The result should be of length 2*n - 1
+-    g_len = len(g)
+-    half_len = g_len // 2
+-
+-    # Take center part to approximate [-1/2, 1/2] range
+-    g_centered = g[half_len:half_len+1]
+-
+-    # However, for accurate representation, we do it properly:
+-    # We know that f is defined on [-1/4, 1/4] with n points, which means
+-    # spacing is dx = 0.5/(n-1). Autoconvolution spans [-1/2, 1/2].
+-    # So the result should be 2n-1 points, covering [-1/2, 1/2].
+-    # But we'll use the more accurate approach by manually computing
+-    # the convolution integral with appropriate sampling
+-
+-    # Let's redefine the approach: use discrete convolution properly
+-    # and then integrate properly for the L2 norm using trapezoidal rule
+-
+-    # Compute the actual convolution
+-    g = np.convolve(f_values, f_values, mode='full')
+-
+-    # Center the convolution (this gives us a symmetric result)
+-    g_centered = g[len(g)//2:]
+-
+-    # But we want to focus on the main region [-1/2, 1/2], so:
+-    # g is convolved from two functions each on [-1/4, 1/4]
+-    # So result support is [-1/2, 1/2] with 2*n-1 points
+-    g_full = g
+-    g = g_full[len(g_full)//2 : len(g_full)//2 + n + n - 1]
++    # Properly extract the convolution result on [-1/2, 1/2]
++    # For two functions of length n on [-1/4, 1/4], convolution produces 2*n-1 points
++    center_start = len(g) // 2 - (n - 1)
++    center_end = center_start + (2 * n - 1)
++    g = g[center_start:center_end]
+ 
+     # Now we compute the three norms
+     # ||g||∞ = max of |g|
+     norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+ 
+     # ||g||₁ = sum of |g| * dx
+     if len(g) <= 1:
+         norm_1 = 0.0
+     else:
+         # Trapezoidal approximation for ||g||₁
+         norm_1 = np.sum(np.abs(g)) * dx
+ 
+     # ||g||₂² = ∫ g² dx ≈ (dx/3) * Σ (y_i^2 + y_i*y_{i+1} + y_{i+1}^2)
+     if len(g) <= 1:
+         norm_2_squared = 0.0
+     else:
+         # Piecewise linear integration (trapezoidal-like for quadratic form)
+-        # Use the formula for piecewise integration of g^2
+-        # For each segment [x_i, x_{i+1}] with values y_i, y_{i+1}:
+-        # ∫ y^2 dx ≈ (dx/3) * (y_i^2 + y_i*y_{i+1} + y_{i+1}^2)
+-        g_squares = g**2
+         norm_2_squared = 0.0
+         for i in range(len(g)-1):
+-            # dx is the step size from the original function
+-            dx_segment = 0.5 / (n - 1) if n > 1 else 0.5
+             y1, y2 = g[i], g[i+1]
+-            norm_2_squared += (dx_segment / 3.0) * (y1**2 + y1*y2 + y2**2)
++            norm_2_squared += (dx / 3.0) * (y1**2 + y1*y2 + y2**2)
+ 
+     return norm_2_squared, norm_1, norm_inf
+ 
+ def compute_c2(f_values: List[float]) -> float:
+     """Compute the C2 value for given step function."""
+     norm_2_squared, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+ 
+     # Avoid division by zero
+-    if norm_1 == 0 or norm_inf == 0:
++    if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+         return 0.0
+ 
+     c2 = norm_2_squared / (norm_1 * norm_inf)
+     return c2
+ 
+-def mutate_individual(individual: List[float], mutation_rate: float = 0.1) -> List[float]:
+-    """Apply mutation to individual with adaptive strategy."""
++def adaptive_gaussian_construction(n_points: int = None) -> List[float]:
++    """
++    Construct step function using adaptive Gaussian shaping with strategic positioning
++    and dynamic amplitude adjustment.
++    """
++    if n_points is None:
++        n_points = np.random.randint(200, 2000)  # Increased range for better exploration
++
++    # Generate x coordinates from -1/4 to 1/4
++    x = np.linspace(-0.25, 0.25, n_points)
++
++    # Create multiple Gaussian peaks with strategic positioning
++    f_values = np.zeros(n_points)
++
++    # Use logarithmic spacing for peak positions to avoid clustering
++    num_peaks = np.random.randint(3, 8)
++    peak_positions = []
++
++    # Generate logarithmically spaced positions to ensure good distribution
++    log_min = np.log(0.01)
++    log_max = np.log(0.2)
++    log_positions = np.logspace(log_min, log_max, num_peaks)
++
++    # Distribute peaks along the domain with some randomness
++    for i in range(num_peaks):
++        # Place peaks in the middle third of domain to avoid edge effects
++        base_pos = np.random.choice([-1, 1]) * log_positions[i] * 0.5
++        # Add slight variation to avoid perfect symmetry
++        peak_pos = base_pos + np.random.uniform(-0.02, 0.02)
++        peak_positions.append(peak_pos)
++
++    # Generate peaks with adaptive amplitudes
++    peak_width = 0.05  # Fixed peak width for consistency
++
++    for peak_pos in peak_positions:
++        # Adaptive amplitude based on peak position and strategy to avoid sharp autoconvolutions
++        # Peaks near center contribute more to flat autoconvolution profiles
++        center_distance = abs(peak_pos)
++        if center_distance < 0.05:  # Near center
++            amp_factor = 1.5
++        elif center_distance < 0.1:  # Middle area
++            amp_factor = 1.2
++        else:  # Outer areas
++            amp_factor = 0.8
++
++        peak_amplitude = np.random.uniform(0.8, 1.5) * amp_factor
++
++        # Create Gaussian peak with dynamic width adjustment
++        gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - peak_pos) / peak_width)**2)
++        f_values += gaussian_peak
++
++    # Apply adaptive smoothing with optimized Gaussian kernel
++    if len(f_values) > 10:
++        # Use Gaussian filtering for smooth transitions
++        sigma = max(1.0, len(f_values) / 100)  # Dynamic smoothing strength
++        f_values = gaussian_filter1d(f_values, sigma=sigma, mode='constant', cval=0.0)
++
++    # Ensure non-negative values
++    f_values = np.clip(f_values, 0, None)
++
++    # Normalize to control overall magnitude
++    if np.max(f_values) > 1e-6:
++        f_values = f_values / np.max(f_values) * 5.0  # Scale to reasonable range
++
++    return f_values.tolist()
++
++def selective_local_optimization(individual: List[float], max_iter: int = 50) -> List[float]:
++    """
++    Apply selective differential evolution targeting only key parameters
++    that influence the autoconvolution shape.
++    """
++    # Convert to numpy for easier manipulation
++    x = np.array(individual)
++    n = len(x)
++
++    # For now, simply apply smoothing and clipping
++    if n > 20:
++        # Apply a selective smoothing operation that preserves important features
++        # but reduces noise that might hurt C2
++        smoothed = np.convolve(x, np.ones(5)/5, mode='same')
++        # Keep original values in regions where there are clear peaks
++        # Use threshold-based approach to preserve significant features
++        threshold = np.percentile(x, 75)
++        mask = x > threshold * 0.3
++        result = np.where(mask, smoothed, x)
++        # Ensure non-negativity
++        result = np.clip(result, 0, None)
++        return result.tolist()
++
++    return individual
++
++def adaptive_mutation(individual: List[float], generation: int, best_c2: float) -> List[float]:
++    """Enhanced mutation strategy with adaptive parameters."""
+     mutated = individual.copy()
+     n = len(mutated)
+ 
+-    # Apply Gaussian perturbation to some elements
++    # Dynamic mutation parameters based on generation and performance
++    if best_c2 > 0.95:
++        mutation_rate = 0.05
++        noise_sigma = 0.02
++    elif best_c2 > 0.9:
++        mutation_rate = 0.08
++        noise_sigma = 0.03
++    else:
++        mutation_rate = 0.1
++        noise_sigma = 0.05
++
++    # Apply Gaussian perturbation to elements
+     for i in range(n):
+         if random.random() < mutation_rate:
+-            # Add small Gaussian noise to element
+-            mutated[i] += np.random.normal(0, 0.05 * np.mean(mutated) if np.mean(mutated) > 0 else 0.01)
++            # Add Gaussian noise with adaptive scale
++            mutated[i] += np.random.normal(0, noise_sigma * np.mean(mutated) if np.mean(mutated) > 0 else 0.01)
+             # Ensure non-negativity
+             mutated[i] = max(0.0, mutated[i])
+ 
+-    # Occasionally perform a local search mutation
+-    if random.random() < 0.3:  # 30% chance of local search
+-        # Take a few adjacent elements and average them to smooth
+-        start_idx = random.randint(0, max(0, n-5))
+-        end_idx = min(start_idx + 5, n)
+-        avg_val = np.mean(mutated[start_idx:end_idx]) if end_idx > start_idx else 0.0
+-        for i in range(start_idx, end_idx):
+-            mutated[i] = avg_val
++    # Occasionally apply more aggressive local search
++    if random.random() < 0.2 and n > 20:
++        # Apply selective smoothing
++        window_size = min(5, max(1, n // 20))
++        if window_size > 1:
++            smoothed = np.convolve(mutated, np.ones(window_size)/window_size, mode='same')
++            # Mix with original for balance
++            alpha = random.uniform(0.3, 0.7)
++            mutated = [alpha * old + (1 - alpha) * new for old, new in zip(mutated, smoothed)]
+ 
+     return mutated
+ 
+ def evolve_population(population: List[List[float]],
+                       fitnesses: List[float],
+                       generation: int,
+-                      population_size: int) -> List[List[float]]:
+-    """Generate next generation using tournament selection and mutation."""
++                      population_size: int,
++                      best_fitness: float) -> List[List[float]]:
++    """Generate next generation using tournament selection and enhanced mutation."""
+     # Sort by fitness
+     sorted_indices = np.argsort(fitnesses)[::-1]
+ 
+     # Keep top 30%
+     elite_count = max(1, population_size // 3)
+     elites = [population[i] for i in sorted_indices[:elite_count]]
+ 
+-    # Generate offspring through tournament selection and mutation
++    # Generate offspring through tournament selection and enhanced mutation
+     offspring = []
+ 
+     while len(offspring) < population_size - elite_count:
+         # Tournament selection
+         tournament_size = 3
+         tournament_indices = random.sample(range(len(population)), tournament_size)
+         tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+         winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+ 
+-        # Mutate the winner
+-        mutated = mutate_individual(population[winner_index])
++        # Mutate the winner with adaptive strategy
++        mutated = adaptive_mutation(population[winner_index], generation, best_fitness)
+         offspring.append(mutated)
+ 
+     # Combine elites and offspring
+     new_population = elites + offspring
+ 
+-    # Possibly adapt population size based on diversity
+     return new_population
+ 
+ def evaluate_population(population: List[List[float]]) -> List[float]:
+     """Evaluate fitness for entire population in parallel."""
+     def evaluate_single(individual):
+         try:
+             return compute_c2(individual)
+         except Exception:
+             return 0.0
+ 
+     # Parallel evaluation
+     fitnesses = Parallel(n_jobs=-1, backend='threading')(
+         delayed(evaluate_single)(ind) for ind in population
+     )
+ 
+     return fitnesses
+ 
+ def construct_function() -> List[float]:
+     """Optimized function to construct step-function with high C2 value."""
+     # Parameters for evolution
+     population_size = 50
+     generations = 200
+     max_time_seconds = 85  # Leave room for finalization
+ 
+     start_time = time.time()
+ 
+-    # Initialize population with structured approach inspired by successful patterns
+-    def create_structured_individual():
+-        # Create a base shape that tends to work well (e.g., Gaussian-like)
+-        length = np.random.randint(100, 1000)
+-        # Generate base with decreasing amplitudes to create smoother autoconvolutions
+-        base_shape = np.exp(-np.linspace(-2, 2, length)**2 / 2)
+-        # Add some controlled randomness to avoid local optima trapping
+-        noise_factor = 0.1
+-        noise = np.random.normal(0, noise_factor * np.mean(base_shape) if np.mean(base_shape) > 0 else 0.01, length)
+-        individual = np.clip(base_shape + noise, 0, 10.0)
+-        return individual.tolist()
+-
+-    # Also initialize with some random individuals for diversity
+-    population = [create_structured_individual() for _ in range(population_size // 2)]
+-    population.extend([np.clip(np.random.exponential(scale=0.5, size=np.random.randint(100, 1000)), 0, 10.0).tolist()
+-                       for _ in range(population_size // 2)])
++    # Initialize population with adaptive Gaussian constructions
++    def create_adaptive_individual():
++        return adaptive_gaussian_construction()
++
++    # Generate initial population with varied strategies
++    population = [create_adaptive_individual() for _ in range(population_size)]
+ 
+     best_fitness = -float('inf')
+     best_individual = None
+ 
+     # Precompute initial fitnesses
+     fitnesses = evaluate_population(population)
+ 
+     for gen in range(generations):
+         if time.time() - start_time > max_time_seconds:
+             break
+ 
+         # Update best solution
+         current_best_idx = np.argmax(fitnesses)
+         if fitnesses[current_best_idx] > best_fitness:
+             best_fitness = fitnesses[current_best_idx]
+             best_individual = population[current_best_idx].copy()
+ 
++        # Apply local optimization to best individual before evolution
++        if best_fitness > 0.95 and best_individual is not None:
++            optimized = selective_local_optimization(best_individual)
++            optimized_c2 = compute_c2(optimized)
++            if optimized_c2 > best_fitness:
++                best_individual = optimized
++                # Update fitness in population
++                for i, individual in enumerate(population):
++                    if individual == population[current_best_idx]:
++                        fitnesses[i] = optimized_c2
++                        break
++
+         # Evolve population
+-        population = evolve_population(population, fitnesses, gen, population_size)
++        population = evolve_population(population, fitnesses, gen, population_size, best_fitness)
+ 
+         # Evaluate new population
+         fitnesses = evaluate_population(population)
+ 
+         # Early stopping if no improvement
+         if gen > 10 and abs(best_fitness - fitnesses[current_best_idx]) < 1e-6:
+             break
+ 
+         # Adaptive population size adjustment
+         if gen % 50 == 0 and gen > 0:
+             population_size = max(20, min(200, population_size + (10 if gen % 100 == 0 else 0)))
+ 
+-    # Final evaluation of best individual to get precise value
++    # Final refinement of best individual if it looks promising
+     if best_individual is not None:
+         final_c2 = compute_c2(best_individual)
+-        # If it looks good, try one more local refinement with adaptive noise
+         if final_c2 > 0.95:
+-            refined = mutate_individual(best_individual, mutation_rate=0.05)
++            refined = selective_local_optimization(best_individual)
+             refined_c2 = compute_c2(refined)
+             if refined_c2 > final_c2:
+                 best_individual = refined
+ 
+     return best_individual if best_individual is not None else []
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

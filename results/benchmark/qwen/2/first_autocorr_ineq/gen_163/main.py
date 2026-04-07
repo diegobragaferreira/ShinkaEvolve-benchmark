@@ -1,0 +1,204 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.signal import fftconvolve
+import time
+from collections import deque
+import random
+
+# Configuration parameters
+MAX_ITERATIONS = 1000
+STAGNATION_THRESHOLD = 1e-6
+HISTORY_SIZE = 10
+INITIAL_STEP_SIZE = 0.01
+ADAPTIVE_DECAY = 0.95
+GRADIENT_EPSILON = 1e-5
+LOCAL_SEARCH_STEPS = 50
+
+def compute_c1(sequence):
+    """
+    Compute C1 for a given sequence.
+    C1 = 2*n*max(convolution) / (sum(sequence))^2
+    We want to maximize 1/C1, which means minimizing C1.
+    """
+    if len(sequence) == 0 or abs(sum(sequence)) < 1e-10:
+        return float('inf')
+
+    # Use FFT-based convolution for efficiency
+    convolved = fftconvolve(sequence, sequence, mode='full')
+    max_conv = np.max(convolved)
+    sum_seq = sum(sequence)
+
+    # Return C1 value
+    return (2 * len(sequence) * max_conv) / (sum_seq * sum_seq)
+
+def evaluate_sequence(sequence):
+    """
+    Evaluate a sequence by computing 1/C1.
+    Returns negative because differential_evolution minimizes.
+    """
+    c1 = compute_c1(sequence)
+    if c1 == float('inf'):
+        return float('inf')
+    return -1.0 / c1  # We want to maximize 1/C1, so minimize -1/C1
+
+def compute_gradient_numerically(sequence, epsilon=GRADIENT_EPSILON):
+    """
+    Compute a numerical gradient of the objective function.
+    """
+    n = len(sequence)
+    grad = np.zeros(n)
+    base_score = evaluate_sequence(sequence)
+
+    for i in range(n):
+        perturbed = sequence.copy()
+        perturbed[i] += epsilon
+        perturbed_score = evaluate_sequence(perturbed)
+        grad[i] = (perturbed_score - base_score) / epsilon
+
+    return grad
+
+def adaptive_gradient_step(sequence, step_size=INITIAL_STEP_SIZE):
+    """
+    Perform an adaptive gradient step to improve the sequence.
+    """
+    try:
+        grad = compute_gradient_numerically(sequence)
+        # Apply gradient ascent
+        updated_sequence = np.array(sequence) + step_size * grad
+        # Ensure non-negativity
+        updated_sequence = np.maximum(updated_sequence, 0.0)
+        # Normalize if necessary
+        sum_updated = np.sum(updated_sequence)
+        if sum_updated > 0.01:
+            updated_sequence = updated_sequence / sum_updated
+        else:
+            # Re-normalize with a minimal correction
+            updated_sequence = updated_sequence + 0.01
+            updated_sequence = updated_sequence / np.sum(updated_sequence)
+        return updated_sequence.tolist()
+    except Exception:
+        # Fallback to simple random perturbation if gradient computation fails
+        new_sequence = sequence.copy()
+        for i in range(len(new_sequence)):
+            if random.random() < 0.1:
+                new_sequence[i] = max(0, new_sequence[i] + random.uniform(-10, 10))
+        return new_sequence
+
+def search_for_best_sequence():
+    """
+    Function to search for the best coefficient sequence.
+    Uses hybrid optimization combining adaptive gradient steps and global search.
+    """
+    # Track history for stagnation detection
+    history = deque(maxlen=HISTORY_SIZE)
+
+    best_score = float('-inf')
+    best_sequence = None
+
+    # Initialize with diverse sequences
+    initial_sequences = []
+
+    # Add known good structures
+    initial_sequences.append(np.array([1.0] * 100))  # Uniform
+    initial_sequences.append(np.array([1.0] * 50 + [0.0] * 50))  # Step function
+
+    # Add random structured sequences
+    for _ in range(5):
+        n = np.random.randint(100, 500)
+        seq = np.random.uniform(0, 100, n)
+        if np.random.random() < 0.3:
+            # Add some large values for diversity
+            idxs = np.random.choice(n, size=min(10, n//4), replace=False)
+            seq[idxs] *= np.random.uniform(5, 20)
+        initial_sequences.append(seq)
+
+    start_time = time.time()
+
+    # Multi-start strategy
+    num_starts = 10
+
+    for start_idx in range(num_starts):
+        if time.time() - start_time > 170:  # Leave 10 seconds for final processing
+            break
+
+        # Choose a random initial sequence
+        current_sequence = initial_sequences[np.random.randint(len(initial_sequences))].tolist()
+        current_score = evaluate_sequence(current_sequence)
+
+        # Track best so far
+        if current_score > best_score:
+            best_score = current_score
+            best_sequence = current_sequence.copy()
+
+        # Local optimization loop
+        for iter_idx in range(LOCAL_SEARCH_STEPS):
+            if time.time() - start_time > 170:
+                break
+
+            # Adaptive gradient step
+            step_size = INITIAL_STEP_SIZE * (ADAPTIVE_DECAY ** iter_idx)
+            new_sequence = adaptive_gradient_step(current_sequence, step_size=step_size)
+            new_score = evaluate_sequence(new_sequence)
+
+            # Accept improvement
+            if new_score > current_score:
+                current_sequence = new_sequence
+                current_score = new_score
+            else:
+                # Occasionally escape local minima with random perturbation
+                if random.random() < 0.05:
+                    current_sequence = [max(0, x + random.uniform(-10, 10)) for x in current_sequence]
+                    current_score = evaluate_sequence(current_sequence)
+
+            # Update global best
+            if current_score > best_score:
+                best_score = current_score
+                best_sequence = current_sequence.copy()
+
+            # Track history for stagnation detection
+            history.append(current_score)
+
+            # Check for stagnation and reset if necessary
+            if len(history) == history.maxlen:
+                recent_change = abs(history[-1] - history[0])
+                if recent_change < STAGNATION_THRESHOLD:
+                    # Reset to a new random sequence
+                    n = np.random.randint(100, 500)
+                    current_sequence = np.random.uniform(0, 100, n).tolist()
+                    current_score = evaluate_sequence(current_sequence)
+                    history.clear()
+
+    # Final DE optimization for refinement
+    if best_sequence is not None:
+        try:
+            bounds = [(0.0, 1000.0)] * len(best_sequence)
+            result = differential_evolution(
+                evaluate_sequence,
+                bounds,
+                maxiter=30,
+                popsize=10,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                polish=True
+            )
+            if result.success:
+                final_score = evaluate_sequence(result.x)
+                if final_score > best_score:
+                    best_sequence = result.x.tolist()
+        except Exception:
+            pass
+
+    # Fallback if no valid sequence found
+    if best_sequence is None:
+        best_sequence = [1.0] * 100
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

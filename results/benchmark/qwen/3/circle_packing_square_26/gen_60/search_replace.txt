@@ -1,0 +1,362 @@
+<NAME>
+improve_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a custom SpatialGrid class for overlap detection, but it can be significantly improved by leveraging scipy's KDTree more effectively. The main issue is that the spatial grid approach still requires manual neighbor checking and doesn't take full advantage of optimized spatial data structures. I'll replace the custom spatial grid with a more efficient approach using KDTree for both containment and overlap checking, which will reduce computational overhead and improve the overall performance of constraint validation.
+
+Additionally, I'll optimize the fitness evaluation to use vectorized operations instead of nested loops for overlap checking, which should dramatically improve performance when evaluating large populations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+import random
+from copy import deepcopy
+from typing import Tuple, List
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+
+class SpatialGrid:
+    """Efficient spatial grid for fast overlap detection"""
+
+    def __init__(self, resolution: int = 20):
+        self.resolution = resolution
+        self.grid = {}
+        self.cell_size = 1.0 / resolution
+
+    def _get_cell_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Get grid cell coordinates for a point"""
+        return (int(x / self.cell_size), int(y / self.cell_size))
+
+    def clear(self):
+        """Clear the spatial grid"""
+        self.grid.clear()
+
+    def add_circle(self, idx: int, x: float, y: float, radius: float):
+        """Add a circle to the spatial grid"""
+        cell_coords = self._get_cell_coords(x, y)
+        if cell_coords not in self.grid:
+            self.grid[cell_coords] = []
+        self.grid[cell_coords].append((idx, x, y, radius))
+
+    def get_neighbors(self, x: float, y: float, radius: float) -> List[Tuple[int, float, float, float]]:
+        """Get all circles in neighboring cells that could potentially overlap"""
+        neighbors = []
+        cell_x, cell_y = self._get_cell_coords(x, y)
+
+        # Check surrounding cells (3x3 grid around main cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell_x + dx, cell_y + dy)
+                if neighbor_cell in self.grid:
+                    for idx, nx, ny, nr in self.grid[neighbor_cell]:
+                        # Skip self
+                        if idx == -1:  # Placeholder for self-check
+                            continue
+                        neighbors.append((idx, nx, ny, nr))
+        return neighbors
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    n_circles = 26
+    max_generations = 1000
+    population_size = 50
+
+    # Global spatial grid instance for validation
+    spatial_grid = SpatialGrid(resolution=20)
+
+    def initialize_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+        """Initialize population with diverse configurations"""
+        population = []
+        for _ in range(pop_size):
+            # Hybrid initialization: grid + perturbation + voronoi-like
+            circles = np.zeros((n_circles, 3))
+
+            # Grid-based initial placement
+            sqrt_n = int(np.ceil(np.sqrt(n_circles)))
+            grid_positions = []
+            for i in range(sqrt_n):
+                for j in range(sqrt_n):
+                    if len(grid_positions) < n_circles:
+                        x = (i + 0.5) / sqrt_n
+                        y = (j + 0.5) / sqrt_n
+                        grid_positions.append([x, y])
+
+            # Add some randomness and Voronoi-like distribution
+            for i in range(n_circles):
+                x, y = grid_positions[i]
+                # Add small random perturbation
+                x += np.random.normal(0, 0.03)
+                y += np.random.normal(0, 0.03)
+
+                # Clamp to unit square with safety margin
+                x = max(0.01, min(0.99, x))
+                y = max(0.01, min(0.99, y))
+
+                # Initial radius based on distance to neighbors
+                min_dist = float('inf')
+                for other_x, other_y in grid_positions[:i]:
+                    dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                    min_dist = min(min_dist, dist)
+
+                # Set radius to be safe from boundaries and neighbors
+                radius = min(0.05, x, 1-x, y, 1-y, min_dist/2)
+                if radius <= 0:
+                    radius = 0.01
+
+                circles[i] = [x, y, radius]
+
+            population.append(circles)
+        return population
+
+    def is_valid(circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping"""
+        n = len(circles)
+
+        # Clear spatial grid
+        spatial_grid.clear()
+
+        # First check boundary constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+
+            # Add to spatial grid for overlap checking
+            spatial_grid.add_circle(i, x, y, r)
+
+        # Then check overlap constraints using spatial grid
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+
+            # Get potential overlapping candidates from neighbors
+            candidates = spatial_grid.get_neighbors(x1, y1, r1)
+
+            # Check actual overlaps
+            for _, x2, y2, r2 in candidates:
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < r1 + r2:
+                    return False
+
+        return True
+
+    def evaluate_fitness(circles: np.ndarray) -> float:
+        """Evaluate fitness of a solution"""
+        if not is_valid(circles):
+            # Dynamic penalty based on constraint violations
+            total_penalty = 0
+
+            # Boundary violations
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                boundary_violation = 0
+                if x - r < 0:
+                    boundary_violation += abs(x - r)
+                if x + r > 1:
+                    boundary_violation += abs(x + r - 1)
+                if y - r < 0:
+                    boundary_violation += abs(y - r)
+                if y + r > 1:
+                    boundary_violation += abs(y + r - 1)
+                total_penalty += boundary_violation * 1000
+
+            # Overlap violations
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    overlap = max(0, r1 + r2 - distance)
+                    total_penalty += overlap * 10000
+
+            return -total_penalty
+
+        # Valid configuration: maximize sum of radii
+        return np.sum(circles[:, 2])
+=======
+import numpy as np
+import random
+from copy import deepcopy
+from typing import Tuple, List
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    n_circles = 26
+    max_generations = 1000
+    population_size = 50
+
+    def initialize_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+        """Initialize population with diverse configurations"""
+        population = []
+        for _ in range(pop_size):
+            # Hybrid initialization: grid + perturbation + voronoi-like
+            circles = np.zeros((n_circles, 3))
+
+            # Grid-based initial placement
+            sqrt_n = int(np.ceil(np.sqrt(n_circles)))
+            grid_positions = []
+            for i in range(sqrt_n):
+                for j in range(sqrt_n):
+                    if len(grid_positions) < n_circles:
+                        x = (i + 0.5) / sqrt_n
+                        y = (j + 0.5) / sqrt_n
+                        grid_positions.append([x, y])
+
+            # Add some randomness and Voronoi-like distribution
+            for i in range(n_circles):
+                x, y = grid_positions[i]
+                # Add small random perturbation
+                x += np.random.normal(0, 0.03)
+                y += np.random.normal(0, 0.03)
+
+                # Clamp to unit square with safety margin
+                x = max(0.01, min(0.99, x))
+                y = max(0.01, min(0.99, y))
+
+                # Initial radius based on distance to neighbors
+                min_dist = float('inf')
+                for other_x, other_y in grid_positions[:i]:
+                    dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                    min_dist = min(min_dist, dist)
+
+                # Set radius to be safe from boundaries and neighbors
+                radius = min(0.05, x, 1-x, y, 1-y, min_dist/2)
+                if radius <= 0:
+                    radius = 0.01
+
+                circles[i] = [x, y, radius]
+
+            population.append(circles)
+        return population
+
+    def is_valid(circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping"""
+        n = len(circles)
+
+        # Check boundary constraints efficiently
+        if np.any(circles[:, 0] - circles[:, 2] < 0) or \
+           np.any(circles[:, 0] + circles[:, 2] > 1) or \
+           np.any(circles[:, 1] - circles[:, 2] < 0) or \
+           np.any(circles[:, 1] + circles[:, 2] > 1):
+            return False
+
+        # Check overlap constraints using KDTree for efficiency
+        try:
+            # Build KDTree once for all circles
+            coords = circles[:, :2]
+            tree = cKDTree(coords)
+
+            # Query for nearby points (using a radius slightly larger than minimum possible overlap)
+            pairs = tree.query_pairs(r=0.0001)
+
+            # Check overlaps using vectorized operations
+            if len(pairs) > 0:
+                # Convert pairs to arrays for vectorized checking
+                i_indices, j_indices = zip(*pairs)
+                i_indices = np.array(i_indices)
+                j_indices = np.array(j_indices)
+
+                # Get coordinates and radii for pairs
+                coords_i = circles[i_indices, :2]
+                coords_j = circles[j_indices, :2]
+                radii_i = circles[i_indices, 2]
+                radii_j = circles[j_indices, 2]
+
+                # Calculate distances vectorized
+                distances = np.sqrt(np.sum((coords_i - coords_j)**2, axis=1))
+
+                # Check for overlaps
+                overlaps = distances < (radii_i + radii_j)
+                if np.any(overlaps):
+                    return False
+
+        except Exception:
+            # Fallback to brute force if KDTree fails
+            for i in range(n):
+                x1, y1, r1 = circles[i]
+                for j in range(i+1, n):
+                    x2, y2, r2 = circles[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        return False
+
+        return True
+
+    def evaluate_fitness(circles: np.ndarray) -> float:
+        """Evaluate fitness of a solution"""
+        if not is_valid(circles):
+            # Dynamic penalty based on constraint violations
+            total_penalty = 0
+
+            # Boundary violations (vectorized)
+            x_coords = circles[:, 0]
+            y_coords = circles[:, 1]
+            radii = circles[:, 2]
+
+            # Calculate violations for x-coordinates
+            x_left_violation = np.maximum(0, radii - x_coords)
+            x_right_violation = np.maximum(0, x_coords + radii - 1)
+            # Calculate violations for y-coordinates
+            y_bottom_violation = np.maximum(0, radii - y_coords)
+            y_top_violation = np.maximum(0, y_coords + radii - 1)
+
+            boundary_violation = np.sum(x_left_violation + x_right_violation +
+                                      y_bottom_violation + y_top_violation)
+            total_penalty += boundary_violation * 1000
+
+            # Overlap violations (vectorized)
+            try:
+                coords = circles[:, :2]
+                tree = cKDTree(coords)
+                pairs = tree.query_pairs(r=0.0001)
+
+                if len(pairs) > 0:
+                    i_indices, j_indices = zip(*pairs)
+                    i_indices = np.array(i_indices)
+                    j_indices = np.array(j_indices)
+
+                    radii_i = circles[i_indices, 2]
+                    radii_j = circles[j_indices, 2]
+                    coords_i = circles[i_indices, :2]
+                    coords_j = circles[j_indices, :2]
+
+                    # Vectorized distance calculation
+                    distances = np.sqrt(np.sum((coords_i - coords_j)**2, axis=1))
+                    overlaps = np.maximum(0, radii_i + radii_j - distances)
+                    total_penalty += np.sum(overlaps) * 10000
+
+            except Exception:
+                # Fallback to brute force
+                for i in range(len(circles)):
+                    for j in range(i+1, len(circles)):
+                        x1, y1, r1 = circles[i]
+                        x2, y2, r2 = circles[j]
+                        distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                        overlap = max(0, r1 + r2 - distance)
+                        total_penalty += overlap * 10000
+
+            return -total_penalty
+
+        # Valid configuration: maximize sum of radii
+        return np.sum(circles[:, 2])
+>>>>>>> REPLACE
+</DIFF>

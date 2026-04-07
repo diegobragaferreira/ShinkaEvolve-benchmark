@@ -1,0 +1,71 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Use a more efficient hexagonal arrangement based on hexagonal lattice
+    # Hexagon side length
+    side_length = 1.0
+    # Distance between centers of adjacent hexagons
+    center_distance = side_length * np.sqrt(3)
+
+    # Define positions in a hexagonal lattice pattern
+    # Layer 1: center hexagon
+    positions = [[0.0, 0.0]]
+
+    # Layer 2: 6 surrounding hexagons
+    for i in range(6):
+        angle = i * np.pi/3
+        x = center_distance * np.cos(angle)
+        y = center_distance * np.sin(angle)
+        positions.append([x, y])
+
+    # Layer 3: 6 more hexagons forming an outer ring
+    for i in range(6):
+        angle = i * np.pi/3 + np.pi/6  # offset by 30 degrees
+        x = 2 * center_distance * np.cos(angle)
+        y = 2 * center_distance * np.sin(angle)
+        positions.append([x, y])
+
+    # Convert to array and make sure we have exactly 12 positions
+    inner_hex_data = np.array(positions[:12])
+
+    # Add angles (all zero for now, as hexagons are oriented the same way)
+    angles = np.zeros(12)
+    inner_hex_data = np.column_stack([inner_hex_data, angles])
+
+    # Calculate the minimum bounding hexagon
+    # For a hexagon with radius r, the side length of the circumscribing hexagon is r
+    # We need to find the maximum distance from origin to any vertex of our hexagons
+    max_radius = 0
+
+    # Each inner hexagon has a radius of sqrt(3)/2 (distance from center to corner)
+    hex_radius = np.sqrt(3)/2
+
+    # Find the maximum distance to any corner of any hexagon
+    for i in range(12):
+        cx, cy = inner_hex_data[i, 0], inner_hex_data[i, 1]
+        # Check all 6 corners of this hexagon
+        for j in range(6):
+            angle = j * np.pi/3
+            px = cx + hex_radius * np.cos(angle)
+            py = cy + hex_radius * np.sin(angle)
+            dist = np.sqrt(px**2 + py**2)
+            max_radius = max(max_radius, dist)
+
+    # Outer hexagon side length needs to be slightly larger to account for precision
+    outer_hex_side_length = max_radius * 1.05  # 5% margin
+
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

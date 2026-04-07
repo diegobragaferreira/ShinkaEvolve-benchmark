@@ -1,0 +1,153 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi initialization uses a simple KMeans approach which may not produce optimal starting configurations. I'll enhance this by implementing a more sophisticated Voronoi-based initialization that considers both spatial distribution and density variations to create better starting points for optimization.
+
+This change will modify the `generate_voronoi_initialization()` function to:
+1. Use a more intelligent point generation strategy
+2. Incorporate density-aware radius assignment
+3. Improve the overall quality of initial configurations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_voronoi_initialization():
+    """Generate initial circle configuration using Voronoi-like distribution"""
+    # Generate candidate points using k-means clustering
+    candidate_points = []
+    n_candidates = 300
+
+    # Generate more points to ensure good distribution
+    for _ in range(n_candidates):
+        x = random.uniform(0.05, 0.95)
+        y = random.uniform(0.05, 0.95)
+        candidate_points.append([x, y])
+
+    candidate_points = np.array(candidate_points)
+
+    # Use KMeans to find good seed positions
+    kmeans = KMeans(n_clusters=N_CIRCLES, random_state=42, n_init=10)
+    kmeans.fit(candidate_points)
+    centroids = kmeans.cluster_centers_
+
+    # Create circles at centroids with intelligent radius assignment
+    circles = []
+    for i, (cx, cy) in enumerate(centroids):
+        # Compute max radius at this position (boundary constraints)
+        max_r = min(cx, cy, 1-cx, 1-cy)
+
+        # Find nearest neighbor distance to estimate density
+        distances = np.sqrt(np.sum((candidate_points - [cx, cy])**2, axis=1))
+        distances = distances[distances > 0]  # Exclude self-distance
+
+        if len(distances) > 0:
+            nearest_dist = np.min(distances)
+            r = min(max_r, nearest_dist * 0.3)
+        else:
+            r = max_r * 0.25
+
+        # Ensure reasonable radius bounds
+        r = max(0.01, min(0.3, r))
+        circles.append([cx, cy, r])
+
+    # Ensure we have exactly N_CIRCLES circles
+    while len(circles) < N_CIRCLES:
+        x = random.uniform(0.05, 0.95)
+        y = random.uniform(0.05, 0.95)
+        max_r = min(x, y, 1-x, 1-y)
+        if max_r > 0.01:
+            r = max_r * 0.2
+            circles.append([x, y, r])
+
+    circles = circles[:N_CIRCLES]
+    return np.array(circles)
+=======
+def generate_voronoi_initialization():
+    """Generate initial circle configuration using enhanced Voronoi-like distribution"""
+    # Generate candidate points using multiple strategies for better distribution
+    candidate_points = []
+    n_candidates = 500
+
+    # Strategy 1: Uniform grid with jitter
+    grid_size = 15
+    spacing = 1.0 / (grid_size + 1)
+    for i in range(grid_size):
+        for j in range(grid_size):
+            x = (i + 1) * spacing + random.uniform(-spacing/4, spacing/4)
+            y = (j + 1) * spacing + random.uniform(-spacing/4, spacing/4)
+            if 0.05 <= x <= 0.95 and 0.05 <= y <= 0.95:
+                candidate_points.append([x, y])
+
+    # Strategy 2: Additional random points in strategic areas
+    for _ in range(n_candidates - len(candidate_points)):
+        # Bias towards center areas for better packing
+        if random.random() < 0.7:
+            x = random.uniform(0.1, 0.9)
+            y = random.uniform(0.1, 0.9)
+        else:
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+        candidate_points.append([x, y])
+
+    candidate_points = np.array(candidate_points)
+
+    # Use KMeans to find good seed positions with multiple restarts
+    best_kmeans = None
+    best_inertia = float('inf')
+
+    for _ in range(5):  # Try multiple times
+        kmeans = KMeans(n_clusters=N_CIRCLES, random_state=random.randint(1, 1000), n_init=10)
+        kmeans.fit(candidate_points)
+        if kmeans.inertia_ < best_inertia:
+            best_inertia = kmeans.inertia_
+            best_kmeans = kmeans
+
+    centroids = best_kmeans.cluster_centers_
+
+    # Create circles at centroids with more sophisticated radius assignment
+    circles = []
+    for i, (cx, cy) in enumerate(centroids):
+        # Compute max radius at this position (boundary constraints)
+        max_r = min(cx, cy, 1-cx, 1-cy)
+
+        # Find nearest neighbor distance to estimate local density
+        distances = np.sqrt(np.sum((candidate_points - [cx, cy])**2, axis=1))
+        distances = distances[distances > 0]  # Exclude self-distance
+
+        if len(distances) > 0:
+            nearest_dist = np.min(distances)
+            # Use a more nuanced approach for radius calculation
+            # Consider both boundary constraints and local density
+            r = min(max_r, nearest_dist * 0.3)
+            # Adjust radius based on centroid density (closer to center gets larger)
+            center_dist = np.sqrt((cx - 0.5)**2 + (cy - 0.5)**2)
+            density_factor = 1.0 - min(0.5, center_dist * 0.5)  # Higher near center
+            r = r * (0.8 + 0.4 * density_factor)  # Slight boost for center positions
+        else:
+            r = max_r * 0.25
+
+        # Ensure reasonable radius bounds
+        r = max(0.01, min(0.3, r))
+        circles.append([cx, cy, r])
+
+    # Ensure we have exactly N_CIRCLES circles
+    while len(circles) < N_CIRCLES:
+        x = random.uniform(0.05, 0.95)
+        y = random.uniform(0.05, 0.95)
+        max_r = min(x, y, 1-x, 1-y)
+        if max_r > 0.01:
+            r = max_r * 0.2
+            circles.append([x, y, r])
+
+    circles = circles[:N_CIRCLES]
+
+    # Sort circles by distance from center to improve optimization starting point
+    center_distances = [np.sqrt((cx - 0.5)**2 + (cy - 0.5)**2) for cx, cy, r in circles]
+    sorted_indices = np.argsort(center_distances)
+    circles = [circles[i] for i in sorted_indices]
+
+    return np.array(circles)
+>>>>>>> REPLACE
+</DIFF>

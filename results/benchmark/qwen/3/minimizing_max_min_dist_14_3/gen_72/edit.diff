@@ -1,0 +1,482 @@
+--- a/original.py
++++ b/original.py
+@@ -1,353 +1,199 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import pdist, cdist
+-from scipy.spatial import SphericalVoronoi
+-from scipy.optimize import minimize
++from scipy.spatial.distance import pdist
++from scipy.optimize import differential_evolution, minimize
+ import time
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+ 
+     """
+ 
+     np.random.seed(42)
+ 
+     def compute_min_max_ratio(points):
+         """Compute the min/max distance ratio for given points."""
+         if len(points) < 2:
+             return 0.0
+ 
+         # Compute pairwise distances efficiently
+         distances = pdist(points)
+ 
+         # Get min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         # Avoid division by zero
+         if d_max == 0:
+             return 0.0
+ 
+         return d_min / d_max
+ 
+-    def compute_voronoi_cell_volumes(points):
+-        """Compute approximate Voronoi cell volumes for points on unit sphere."""
+-        if len(points) < 2:
+-            return np.array([])
+-
+-        # Normalize points to unit sphere (important for spherical Voronoi)
+-        norms = np.linalg.norm(points, axis=1, keepdims=True)
+-        normalized_points = points / np.maximum(norms, 1e-10)
+-
+-        try:
+-            # For spherical Voronoi, we need a proper setup
+-            sv = SphericalVoronoi(normalized_points, radius=1.0, center=np.array([0,0,0]))
+-
+-            # Get cell volumes (approximate) - for points on unit sphere,
+-            # volumes can be computed from the spherical polygons
+-            volumes = sv.calculate_volumes()
+-            return volumes
+-        except:
+-            # Fallback: compute approximate volumes based on neighbor distances
+-            distances = cdist(normalized_points, normalized_points)
+-            np.fill_diagonal(distances, np.inf)
+-
+-            # Use minimum distance as proxy for cell size
+-            min_distances = np.min(distances, axis=1)
+-            # Inverse relationship - smaller distances mean larger cells
+-            volumes = 1.0 / (min_distances + 1e-10)
+-            return volumes
+-
+-    def spherical_voronoi_fitness(points):
+-        """Fitness function based on Voronoi cell uniformity and distance ratio."""
+-        ratio = compute_min_max_ratio(points)
+-
+-        # Also consider Voronoi cell uniformity
+-        try:
+-            volumes = compute_voronoi_cell_volumes(points)
+-            if len(volumes) > 0:
+-                # Encourage uniform cell volumes (low variance)
+-                volume_variance = np.var(volumes)
+-                # High variance means poor uniformity, so we penalize it
+-                uniformity_penalty = volume_variance * 1000.0
+-                return ratio - uniformity_penalty
+-            else:
+-                return ratio
+-        except:
+-            return ratio
+-
+     def fibonacci_sphere(n):
+         """Generate points on sphere using Fibonacci spiral."""
+         points = []
+         golden_angle = np.pi * (3 - np.sqrt(5))
+ 
+         for i in range(n):
+             y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = golden_angle * i  # Golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         return np.array(points)
+ 
+-    def generate_spherical_voronoi_initialization():
+-        """Generate initial points using spherical Voronoi-based approach."""
+-        # Start with Fibonacci distribution
+-        points = fibonacci_sphere(14)
++    def spherical_constraint(points):
++        """Normalize points to lie on the unit sphere."""
++        norms = np.linalg.norm(points, axis=1, keepdims=True)
++        # Avoid division by zero
++        norms = np.where(norms == 0, 1, norms)
++        return points / norms
+ 
+-        # Add small random perturbations to break symmetry
+-        perturbation_magnitude = 0.05
+-        points += np.random.normal(0, perturbation_magnitude, points.shape)
++    def objective_function(points_flat):
++        """Objective function to maximize - negative of min/max ratio."""
++        # Reshape flat array to 2D points array
++        points = points_flat.reshape(-1, 3)
+ 
+-        # Normalize to unit sphere
+-        norms = np.linalg.norm(points, axis=1, keepdims=True)
+-        points = points / np.maximum(norms, 1e-10)
++        # Apply spherical constraint to keep points on unit sphere
++        points = spherical_constraint(points)
+ 
+-        # Apply iterative improvement
+-        for iteration in range(20):
+-            # Compute current fitness
+-            current_fitness = spherical_voronoi_fitness(points)
++        # Compute ratio
++        ratio = compute_min_max_ratio(points)
+ 
+-            # Try small perturbations and accept improvements
+-            best_points = points.copy()
+-            best_fitness = current_fitness
++        # Return negative because we want to maximize ratio, but optimizers minimize
++        return -ratio
+ 
+-            # Test several perturbations
+-            for i in range(14):
+-                for dim in range(3):
+-                    # Try small moves in both directions
+-                    for move_dir in [-1, 1]:
+-                        test_points = points.copy()
+-                        step_size = 0.01
+-                        test_points[i, dim] += move_dir * step_size
++    def generate_diverse_initializations():
++        """Generate multiple diverse initial point sets."""
++        initial_sets = []
+ 
+-                        # Project back onto sphere
+-                        norm = np.linalg.norm(test_points[i])
+-                        if norm > 0:
+-                            test_points[i] = test_points[i] / norm
++        # Strategy 1: Fibonacci sphere distribution
++        fib_points = fibonacci_sphere(14)
++        # Add small perturbations
++        perturbed = fib_points + np.random.normal(0, 0.03, fib_points.shape)
++        initial_sets.append(spherical_constraint(perturbed))
+ 
+-                        fitness = spherical_voronoi_fitness(test_points)
+-                        if fitness > best_fitness:
+-                            best_fitness = fitness
+-                            best_points = test_points.copy()
++        # Strategy 2: Random points on sphere
++        random_points = np.random.randn(14, 3)
++        initial_sets.append(spherical_constraint(random_points))
+ 
+-            # If we found an improvement, update points
+-            if best_fitness > current_fitness:
+-                points = best_points
++        # Strategy 3: Pseudo-random distribution with some structure
++        # Place points along axes and in between
++        struct_points = np.zeros((14, 3))
++        for i in range(14):
++            if i < 3:
++                # Along axes
++                struct_points[i] = [1 if j==i else 0 for j in range(3)]
++            elif i < 6:
++                # Opposite axes
++                struct_points[i] = [-1 if j==i-3 else 0 for j in range(3)]
++            elif i < 9:
++                # Diagonal combinations
++                j = i - 6
++                struct_points[i] = [1 if k==j else -1 if k==(j+1)%3 else 0 for k in range(3)]
+             else:
+-                # No improvement, reduce perturbation
+-                break
++                # Random points on sphere
++                struct_points[i] = np.random.randn(3)
++        initial_sets.append(spherical_constraint(struct_points))
++
++        # Strategy 4: Slightly perturbed Fibonacci with larger variance
++        fib_perturbed = fib_points + np.random.normal(0, 0.07, fib_points.shape)
++        initial_sets.append(spherical_constraint(fib_perturbed))
++
++        return initial_sets
++
++    def hybrid_optimization(initial_points, maxiter=100):
++        """Perform hybrid optimization combining global and local methods."""
++        points = initial_points.copy()
++
++        # Global optimization using differential evolution
++        bounds = [(-1, 1)] * (14 * 3)
++
++        try:
++            result = differential_evolution(
++                objective_function,
++                bounds,
++                maxiter=maxiter,
++                popsize=25,
++                seed=42,
++                disp=False,
++                polish=True,
++                strategy='best1bin'
++            )
++
++            if result.success:
++                points = result.x.reshape(-1, 3)
++                points = spherical_constraint(points)
++        except:
++            pass
++
++        # Local refinement with L-BFGS-B
++        def local_obj(x_flat):
++            points = x_flat.reshape(-1, 3)
++            points = spherical_constraint(points)
++            ratio = compute_min_max_ratio(points)
++            return -ratio  # Negative for minimization
++
++        try:
++            x0 = points.flatten()
++            bounds = [(-1, 1)] * (14 * 3)
++            result = minimize(
++                local_obj,
++                x0,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 50, 'ftol': 1e-9, 'gtol': 1e-9, 'disp': False}
++            )
++            if result.success:
++                points = result.x.reshape(-1, 3)
++                points = spherical_constraint(points)
++        except:
++            pass
+ 
+         return points
+ 
+-    def evolve_population(population, fitness_function, mutation_rate=0.1, elite_fraction=0.2):
+-        """Evolutionary operator for point sets."""
+-        # Sort population by fitness
+-        fitness_scores = [fitness_function(individual) for individual in population]
+-        sorted_indices = np.argsort(fitness_scores)[::-1]  # Descending order
+-
+-        # Elite selection
+-        num_elite = int(len(population) * elite_fraction)
+-        elites = [population[i] for i in sorted_indices[:num_elite]]
+-
+-        # Create new population
+-        new_population = elites.copy()
+-
+-        # Generate offspring through crossover and mutation
+-        while len(new_population) < len(population):
+-            # Select parents
+-            parent1_idx = np.random.choice(sorted_indices[:len(sorted_indices)//2])
+-            parent2_idx = np.random.choice(sorted_indices[:len(sorted_indices)//2])
+-
+-            parent1 = population[parent1_idx]
+-            parent2 = population[parent2_idx]
+-
+-            # Crossover: blend points from both parents
+-            alpha = np.random.random()
+-            child = parent1 * alpha + parent2 * (1 - alpha)
+-
+-            # Mutation: perturb some points
+-            if np.random.random() < mutation_rate:
+-                mut_idx = np.random.randint(0, 14)
+-                child[mut_idx] += np.random.normal(0, 0.02, 3)
+-
+-                # Project back to unit sphere
+-                norm = np.linalg.norm(child[mut_idx])
+-                if norm > 0:
+-                    child[mut_idx] = child[mut_idx] / norm
+-
+-            # Ensure all points are on unit sphere
+-            for i in range(14):
+-                norm = np.linalg.norm(child[i])
+-                if norm > 0:
+-                    child[i] = child[i] / norm
+-
+-            new_population.append(child)
+-
+-        return new_population
+-
+-    def project_to_cube(points, bounds=(-1, 1)):
+-        """Project points to cube bounds keeping unit sphere property."""
+-        # First normalize to unit sphere
+-        norms = np.linalg.norm(points, axis=1, keepdims=True)
+-        normalized_points = points / np.maximum(norms, 1e-10)
+-
+-        # Then project to cube bounds
+-        scaled_points = normalized_points * 0.9  # Keep within bounds
+-        return scaled_points
+-
+-    # Phase 1: Multi-initialization with spherical Voronoi focus
+-    initial_populations = []
+-
+-    # Strategy 1: Spherical Voronoi initialization
+-    initial_populations.append(generate_spherical_voronoi_initialization())
+-
+-    # Strategy 2: Perturbed Fibonacci
+-    fib_points = fibonacci_sphere(14)
+-    perturbed = fib_points + np.random.normal(0, 0.03, fib_points.shape)
+-    norms = np.linalg.norm(perturbed, axis=1, keepdims=True)
+-    perturbed = perturbed / np.maximum(norms, 1e-10)
+-    initial_populations.append(perturbed)
+-
+-    # Strategy 3: Random but constrained
+-    random_points = np.random.rand(14, 3) * 2 - 1  # [-1, 1]
+-    norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+-    random_points = random_points / np.maximum(norms, 1e-10) * 0.9
+-    initial_populations.append(random_points)
+-
+-    # Strategy 4: Structured distribution
+-    structured = np.random.randn(14, 3)
+-    norms = np.linalg.norm(structured, axis=1, keepdims=True)
+-    structured = structured / np.maximum(norms, 1e-10) * 0.9
+-    initial_populations.append(structured)
+-
+-    # Phase 2: Evolutionary optimization with adaptive parameters
++    # Multi-start optimization with diverse initializations
+     best_solution = None
+     best_ratio = 0.0
+ 
++    # Generate multiple initial sets
++    initial_sets = generate_diverse_initializations()
++
+     # Try each initialization
+-    for init_idx, initial_points in enumerate(initial_populations):
+-        # Create initial population of 10 individuals
+-        population = [initial_points.copy()]
+-        for i in range(9):
+-            # Mutate the initial point
+-            mutated = initial_points + np.random.normal(0, 0.02, initial_points.shape)
+-            norms = np.linalg.norm(mutated, axis=1, keepdims=True)
+-            mutated = mutated / np.maximum(norms, 1e-10)
+-            population.append(mutated)
++    for i, initial_points in enumerate(initial_sets):
++        # Perform hybrid optimization
++        optimized_points = hybrid_optimization(initial_points, maxiter=50)
++        ratio = compute_min_max_ratio(optimized_points)
+ 
+-        # Evolution loop
+-        for generation in range(30):
+-            # Evaluate fitness
+-            fitness_scores = []
+-            for individual in population:
+-                score = spherical_voronoi_fitness(individual)
+-                fitness_scores.append(score)
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_solution = optimized_points.copy()
+ 
+-            # Track best
+-            best_in_gen = np.max(fitness_scores)
+-            best_idx = np.argmax(fitness_scores)
+-            if best_in_gen > best_ratio:
+-                best_ratio = best_in_gen
+-                best_solution = population[best_idx].copy()
++    # Additional refinement with multiple restarts
++    if best_solution is not None:
++        # Try more focused optimization from the best solution
++        refined_points = hybrid_optimization(best_solution, maxiter=30)
++        ratio = compute_min_max_ratio(refined_points)
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_solution = refined_points.copy()
+ 
+-            # Evolution
+-            if generation < 25:  # More exploration early
+-                population = evolve_population(population, spherical_voronoi_fitness,
+-                                             mutation_rate=0.15, elite_fraction=0.2)
+-            else:  # More exploitation later
+-                population = evolve_population(population, spherical_voronoi_fitness,
+-                                             mutation_rate=0.05, elite_fraction=0.4)
++    # If nothing worked, return the best initialization
++    if best_solution is None:
++        # Fallback to Fibonacci with small perturbation
++        fib_points = fibonacci_sphere(14)
++        fib_points = fib_points + np.random.normal(0, 0.05, fib_points.shape)
++        best_solution = spherical_constraint(fib_points)
+ 
+-        # Local refinement around the best in this initialization
+-        if best_solution is not None:
+-            refined_points = best_solution.copy()
+-
+-            # Try hill-climbing on this best
+-            for _ in range(20):
+-                current_ratio = compute_min_max_ratio(refined_points)
+-                best_points = refined_points.copy()
+-                best_ratio_local = current_ratio
+-
+-                for i in range(14):
+-                    for dim in range(3):
+-                        # Try small perturbations
+-                        for step_size in [0.005, 0.01, 0.02]:
+-                            test_points = refined_points.copy()
+-                            test_points[i, dim] += step_size
+-
+-                            # Project back to unit sphere
+-                            norm = np.linalg.norm(test_points[i])
+-                            if norm > 0:
+-                                test_points[i] = test_points[i] / norm
+-
+-                            test_ratio = compute_min_max_ratio(test_points)
+-
+-                            if test_ratio > best_ratio_local:
+-                                best_ratio_local = test_ratio
+-                                best_points = test_points.copy()
+-
+-                            test_points = refined_points.copy()
+-                            test_points[i, dim] -= step_size
+-
+-                            # Project back to unit sphere
+-                            norm = np.linalg.norm(test_points[i])
+-                            if norm > 0:
+-                                test_points[i] = test_points[i] / norm
+-
+-                            test_ratio = compute_min_max_ratio(test_points)
+-
+-                            if test_ratio > best_ratio_local:
+-                                best_ratio_local = test_ratio
+-                                best_points = test_points.copy()
+-
+-                if best_ratio_local <= current_ratio:
+-                    break
+-                refined_points = best_points
+-
+-            # Update global best
+-            final_ratio = compute_min_max_ratio(refined_points)
+-            if final_ratio > best_ratio:
+-                best_ratio = final_ratio
+-                best_solution = refined_points.copy()
+-
+-    # Phase 3: Final polishing
+-    if best_solution is not None:
+-        # Apply final L-BFGS refinement
+-        def final_obj(x_flat):
+-            points = x_flat.reshape(-1, 3)
+-            # Normalize to unit sphere
+-            norms = np.linalg.norm(points, axis=1, keepdims=True)
+-            normalized = points / np.maximum(norms, 1e-10)
+-            ratio = compute_min_max_ratio(normalized)
+-            return -ratio  # Negative because we minimize
+-
+-        try:
+-            x0 = best_solution.flatten()
+-            bounds = [(-1, 1)] * (14 * 3)
+-            result = minimize(final_obj, x0, method='L-BFGS-B', bounds=bounds,
+-                            options={'maxiter': 50, 'disp': False})
+-            if result.success:
+-                final_points = result.x.reshape(-1, 3)
+-                norms = np.linalg.norm(final_points, axis=1, keepdims=True)
+-                final_points = final_points / np.maximum(norms, 1e-10)
+-                return final_points
+-        except:
+-            pass
+-
+-    # Return best solution found
+-    if best_solution is not None:
+-        return best_solution
+-
+-    # Fallback to spherical Voronoi initialization
+-    return generate_spherical_voronoi_initialization()
++    return best_solution
+ 
+ # EVOLVE-BLOCK-END

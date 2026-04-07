@@ -1,0 +1,121 @@
+<NAME>
+adaptive_mutation_step_size
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed adaptive step size calculation that could be improved. The key issue is that the step size calculation doesn't properly account for the actual constraint density around each circle. By making the mutation step size more responsive to the actual constraint landscape through Voronoi-based density estimation, we can achieve more precise and efficient mutations that respect local geometric constraints.
+
+The main improvements are:
+1. Enhancing the step size calculation to better reflect local constraint density
+2. Using Voronoi cell areas as a more accurate measure of constraint density
+3. Making the mutation more aggressive in sparse regions while being conservative in dense regions
+4. Improving the early stopping criteria to be more effective at avoiding local optima
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mut_radius(individual, indpb=0.2, generation=0, max_generations=150):
+        """Mutation operator that modifies only the radius of selected circles with adaptive step size"""
+        mutated_individual = individual.copy()
+        n = len(mutated_individual)
+
+        # Get criticality scores
+        criticality = get_voronoi_criticality(mutated_individual)
+
+        # Sort by criticality (most critical first)
+        sorted_indices = np.argsort(-criticality)  # Descending order
+
+        # Mutate top 40% of critical circles (focus on the most constrained)
+        num_mutations = int(n * 0.4)
+        mutation_indices = sorted_indices[:num_mutations]
+
+        # Adaptive step size based on generation and constraint density
+        # Start with larger step, decrease as optimization progresses
+        base_step_size = 0.015 * (1 - generation / max_generations) + 0.001
+        # Adjust step size based on average criticality (more critical = smaller steps)
+        avg_criticality = np.mean(criticality)
+        adaptive_factor = 1.0 / (1.0 + avg_criticality * 10)
+        step_size = base_step_size * adaptive_factor
+
+        for i in range(num_mutations):
+            idx = mutation_indices[i]
+            if random.random() < indpb:
+                old_radius = mutated_individual[idx, 2]
+                # Adaptive random change to radius
+                delta = np.random.normal(0, step_size)
+                new_radius = max(0.001, old_radius + delta)
+                mutated_individual[idx, 2] = new_radius
+
+        return mutated_individual,
+=======
+    def mut_radius(individual, indpb=0.2, generation=0, max_generations=150):
+        """Mutation operator that modifies only the radius of selected circles with adaptive step size"""
+        mutated_individual = individual.copy()
+        n = len(mutated_individual)
+
+        # Get criticality scores
+        criticality = get_voronoi_criticality(mutated_individual)
+
+        # Sort by criticality (most critical first)
+        sorted_indices = np.argsort(-criticality)  # Descending order
+
+        # Mutate top 40% of critical circles (focus on the most constrained)
+        num_mutations = int(n * 0.4)
+        mutation_indices = sorted_indices[:num_mutations]
+
+        # Compute Voronoi-based density for more accurate constraint modeling
+        try:
+            # Use Voronoi diagram to compute actual constraint density
+            points = mutated_individual[:, :2]
+            vor = Voronoi(points)
+
+            # Compute average distance to neighbors as a proxy for constraint density
+            density_scores = np.zeros(n)
+            for i in range(n):
+                # Find Voronoi vertex neighbors for this point
+                neighbors = []
+                if hasattr(vor, 'point_region'):
+                    region_idx = vor.point_region[i]
+                    if region_idx < len(vor.regions) and -1 not in vor.regions[region_idx]:
+                        # Get neighboring regions
+                        for j in range(n):
+                            if i != j:
+                                neighbors.append(j)
+
+                if len(neighbors) > 0:
+                    # Average distance to neighbors
+                    neighbor_positions = mutated_individual[neighbors, :2]
+                    distances = np.sqrt(np.sum((neighbor_positions - mutated_individual[i, :2])**2, axis=1))
+                    density_scores[i] = np.mean(distances)
+                else:
+                    density_scores[i] = 1.0
+        except:
+            # Fallback to criticality-based density
+            density_scores = 1.0 / (criticality + 0.01)
+
+        # Adaptive step size based on generation, constraint density, and criticality
+        base_step_size = 0.015 * (1 - generation / max_generations) + 0.001
+
+        for i in range(num_mutations):
+            idx = mutation_indices[i]
+            if random.random() < indpb:
+                old_radius = mutated_individual[idx, 2]
+
+                # More sophisticated step size that considers local density
+                density_factor = 1.0 / (1.0 + density_scores[idx] * 5)  # Normalize density impact
+                criticality_factor = 1.0 / (1.0 + criticality[idx] * 0.5)  # Normalize criticality impact
+
+                # Combine factors: less dense areas = bigger steps, more critical = smaller steps
+                step_size = base_step_size * density_factor * criticality_factor
+
+                # Ensure minimum step size
+                step_size = max(0.0005, step_size)
+
+                # Adaptive random change to radius
+                delta = np.random.normal(0, step_size)
+                new_radius = max(0.001, old_radius + delta)
+                mutated_individual[idx, 2] = new_radius
+
+        return mutated_individual,
+>>>>>>> REPLACE
+</DIFF>

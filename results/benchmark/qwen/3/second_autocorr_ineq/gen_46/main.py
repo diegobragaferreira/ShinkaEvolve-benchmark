@@ -1,0 +1,210 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+import random
+from typing import List, Tuple, Optional
+import time
+import math
+
+# Global constants for deterministic behavior
+RANDOM_SEED = 42
+TIMEOUT_SECONDS = 85.0
+MAX_PARTICLES = 50
+MAX_ITERATIONS = 100
+
+class AutoconvolutionCalculator:
+    """Efficient computation of autoconvolution norms"""
+    
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the three norms needed for C2 calculation:
+        ||g||₂², ||g||₁, ||g||∞ where g = f*f
+        """
+        # Convert to numpy array for efficient computation
+        f = np.array(f_values)
+
+        # Compute autoconvolution g = f * f using fast convolution
+        g = signal.convolve(f, f, mode='full')
+
+        # Only keep the middle portion corresponding to valid convolution
+        center_idx = len(g) // 2
+        half_len = len(f)
+        g = g[center_idx - half_len + 1:center_idx + half_len]
+
+        # Compute norms
+        g_squared = g * g
+        norm_l2_sq = np.sum(g_squared)
+
+        norm_l1 = np.sum(np.abs(g))
+        norm_linf = np.max(np.abs(g))
+
+        return norm_l2_sq, norm_l1, norm_linf
+
+    @staticmethod
+    def calculate_c2(f_values: List[float]) -> float:
+        """Calculate C2 value for given step function"""
+        try:
+            norm_l2_sq, norm_l1, norm_linf = AutoconvolutionCalculator.compute_autoconvolution_norms(f_values)
+
+            # Avoid division by zero
+            if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+                return 0.0
+
+            c2 = norm_l2_sq / (norm_l1 * norm_linf)
+            return c2
+        except Exception:
+            return 0.0
+
+class Particle:
+    """Represents a particle in the swarm"""
+    def __init__(self, dimensions: int, min_val: float = 0.0, max_val: float = 1.0):
+        self.dimensions = dimensions
+        self.position = np.random.uniform(min_val, max_val, dimensions)
+        self.velocity = np.random.uniform(-0.1, 0.1, dimensions)
+        self.personal_best_position = self.position.copy()
+        self.personal_best_value = -float('inf')
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def update_velocity(self, global_best_position: np.ndarray, w: float = 0.7, c1: float = 1.5, c2: float = 1.5):
+        """Update particle velocity using PSO formula"""
+        r1, r2 = np.random.random(self.dimensions), np.random.random(self.dimensions)
+        cognitive_component = c1 * r1 * (self.personal_best_position - self.position)
+        social_component = c2 * r2 * (global_best_position - self.position)
+        self.velocity = w * self.velocity + cognitive_component + social_component
+
+    def update_position(self):
+        """Update particle position and enforce boundaries"""
+        self.position += self.velocity
+        # Enforce boundaries
+        self.position = np.clip(self.position, self.min_val, self.max_val)
+
+class PSOOptimizer:
+    """Particle Swarm Optimization for step function optimization"""
+    
+    def __init__(self, dimensions: int, num_particles: int = 30):
+        self.dimensions = dimensions
+        self.num_particles = min(num_particles, MAX_PARTICLES)
+        self.particles = [Particle(dimensions) for _ in range(self.num_particles)]
+        self.global_best_position = None
+        self.global_best_value = -float('inf')
+        self.iteration = 0
+        
+    def optimize(self, max_iterations: int = 50) -> Tuple[float, List[float]]:
+        """Run PSO optimization"""
+        best_c2 = 0.0
+        best_individual = None
+        
+        # Initialize global best
+        for particle in self.particles:
+            c2 = AutoconvolutionCalculator.calculate_c2(particle.position.tolist())
+            if c2 > best_c2:
+                best_c2 = c2
+                best_individual = particle.position.tolist()
+                
+        # PSO main loop
+        for iteration in range(max_iterations):
+            # Update each particle
+            for particle in self.particles:
+                # Evaluate current position
+                c2 = AutoconvolutionCalculator.calculate_c2(particle.position.tolist())
+                
+                # Update personal best
+                if c2 > particle.personal_best_value:
+                    particle.personal_best_value = c2
+                    particle.personal_best_position = particle.position.copy()
+                
+                # Update global best
+                if c2 > self.global_best_value:
+                    self.global_best_value = c2
+                    self.global_best_position = particle.position.copy()
+                    if c2 > best_c2:
+                        best_c2 = c2
+                        best_individual = particle.position.tolist()
+            
+            # Update velocities and positions
+            for particle in self.particles:
+                # Adaptive inertia weight: decreases over time
+                w = 0.9 - (0.5 * iteration / max_iterations)
+                particle.update_velocity(self.global_best_position, w=w)
+                particle.update_position()
+                
+            self.iteration = iteration
+            
+        return best_c2, best_individual
+
+class HybridOptimizer:
+    """Main hybrid optimizer combining multiple strategies"""
+    
+    def __init__(self):
+        random.seed(RANDOM_SEED)
+        np.random.seed(RANDOM_SEED)
+    
+    def run_pso_optimization(self, individual_size: int = 150) -> List[float]:
+        """Run PSO optimization with adaptive parameters"""
+        start_time = time.time()
+        
+        # Try different PSO configurations
+        configs = [
+            {"dimensions": individual_size, "num_particles": 25, "max_iterations": 30},
+            {"dimensions": individual_size, "num_particles": 35, "max_iterations": 25},
+            {"dimensions": individual_size, "num_particles": 20, "max_iterations": 40}
+        ]
+        
+        best_c2 = 0.0
+        best_individual = None
+        
+        for config in configs:
+            # Check if enough time remains
+            if time.time() - start_time > TIMEOUT_SECONDS - 10:
+                break
+                
+            try:
+                pso = PSOOptimizer(**config)
+                current_c2, current_individual = pso.optimize(config["max_iterations"])
+                
+                if current_c2 > best_c2:
+                    best_c2 = current_c2
+                    best_individual = current_individual
+                    
+            except Exception:
+                continue
+                
+        # If no good solution found, fallback to random initialization
+        if best_individual is None:
+            best_individual = [random.uniform(0, 1) for _ in range(individual_size)]
+        
+        return best_individual
+
+def optimized_construct_function() -> List[float]:
+    """Construct step function using PSO optimization"""
+    try:
+        optimizer = HybridOptimizer()
+        result = optimizer.run_pso_optimization(150)
+        return result
+    except Exception as e:
+        # Fallback to simpler approach if optimization fails
+        return [random.uniform(0, 1) for _ in range(100)]
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value."""
+    # Try PSO optimization first
+    start_time = time.time()
+    try:
+        result = optimized_construct_function()
+        elapsed = time.time() - start_time
+        if elapsed < TIMEOUT_SECONDS:
+            return result
+    except Exception:
+        pass
+
+    # Fallback to simpler approach if optimization fails or times out
+    return [random.uniform(0, 1) for _ in range(100)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

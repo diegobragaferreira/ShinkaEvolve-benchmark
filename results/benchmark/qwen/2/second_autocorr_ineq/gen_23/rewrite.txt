@@ -1,0 +1,382 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import numba
+from scipy import signal
+from deap import base, creator, tools, algorithms
+import random
+import time
+from scipy.optimize import differential_evolution
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+@numba.jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution efficiently using numba"""
+    n = len(f_vals)
+    # Create output array for autoconvolution
+    g = np.zeros(2*n - 1)
+    
+    # Compute convolution manually with numba optimization
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@numba.jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently with numba"""
+    n = len(g_vals)
+    
+    # L2 norm squared (using trapezoidal-like scheme)
+    l2_sq = 0.0
+    for i in range(n - 1):
+        y1 = g_vals[i]
+        y2 = g_vals[i + 1]
+        l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+    
+    # L1 norm
+    l1 = 0.0
+    for i in range(n):
+        l1 += abs(g_vals[i])
+    
+    # L-infinity norm
+    linf = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf:
+            linf = abs_val
+    
+    return l2_sq, l1, linf
+
+def adaptive_gaussian_construction(n_steps=None):
+    """Create initial population with Gaussian peaks for better structure"""
+    if n_steps is None:
+        n_steps = random.randint(200, 1000)
+    
+    # Start with a base structure of Gaussian peaks
+    f_vals = np.zeros(n_steps)
+    
+    # Add multiple Gaussian peaks in different locations
+    n_peaks = random.randint(3, 8)
+    for _ in range(n_peaks):
+        # Random peak position
+        center = random.uniform(0, n_steps - 1)
+        # Random width (standard deviation)
+        width = random.uniform(10, 50)
+        # Random height
+        height = random.uniform(0.5, 2.0)
+        
+        # Generate Gaussian curve
+        x = np.arange(n_steps)
+        gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_vals += gaussian
+    
+    # Apply mild smoothing to avoid extreme variations
+    if n_steps > 50:
+        # Use Savitzky-Golay filter for better preservation of shape
+        f_vals = signal.savgol_filter(f_vals, min(51, n_steps-1), 3)
+    
+    # Ensure non-negativity
+    f_vals = np.maximum(f_vals, 0)
+    
+    # Normalize to reasonable range
+    if np.max(f_vals) > 0:
+        f_vals = f_vals / np.max(f_vals) * 2.0
+    
+    # Apply constraint-aware normalization to prevent extreme autoconvolution spikes
+    # This helps avoid numerical instability in later processing
+    max_allowed = np.percentile(f_vals, 90) if len(f_vals) > 10 else 1.0
+    if max_allowed > 0:
+        f_vals = np.minimum(f_vals, max_allowed * 2.0)
+    
+    return f_vals.tolist()
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual (step function)"""
+    try:
+        # Convert to numpy array and ensure non-negative
+        f_vals = np.array(individual, dtype=np.float64)
+        f_vals = np.maximum(f_vals, 0.0)
+        
+        # Skip if all zeros
+        if np.sum(f_vals) == 0:
+            return (0.0,)
+            
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+        
+        # Compute norms
+        l2_sq, l1, linf = compute_norms_numba(g_vals)
+        
+        # Avoid division by zero
+        if l1 <= 1e-15 or linf <= 1e-15:
+            return (0.0,)
+        
+        # Compute C2
+        c2 = l2_sq / (l1 * linf)
+        return (c2,)
+    except:
+        return (0.0,)
+
+def create_structured_initial_population(pop_size, min_size, max_size):
+    """Create structured initial population with various techniques"""
+    population = []
+    for _ in range(pop_size):
+        # Use a mix of techniques:
+        # 1. Gaussian-based construction (more structured)
+        # 2. Simple random (for diversity)
+        if random.random() < 0.7:
+            # Structured approach
+            size = random.randint(min_size, max_size)
+            f_vals = adaptive_gaussian_construction(size)
+        else:
+            # Simple random approach
+            size = random.randint(min_size, max_size)
+            f_vals = [random.uniform(0, 1) for _ in range(size)]
+        
+        population.append(f_vals)
+    return population
+
+def adaptive_evolution_phase(initial_pop, pop_size, n_generations):
+    """Perform evolutionary optimization with adaptive parameters"""
+    # Create toolbox
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Define operators
+    def create_individual():
+        # Use adaptive creation based on performance history
+        size = random.randint(200, 1000)
+        f_vals = adaptive_gaussian_construction(size)
+        return f_vals
+    
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initialize population
+    if initial_pop and len(initial_pop) > 0:
+        population = initial_pop
+    else:
+        population = toolbox.population(n=pop_size)
+    
+    # Evolve
+    best_individual = None
+    best_fitness = 0
+    best_generation = 0
+    
+    for generation in range(n_generations):
+        # Evaluate population
+        fitnesses = list(map(toolbox.evaluate, population))
+        for ind, fit in zip(population, fitnesses):
+            ind.fitness.values = fit
+        
+        # Track best
+        for ind in population:
+            if ind.fitness.values[0] > best_fitness and len(ind) > 0:
+                best_fitness = ind.fitness.values[0]
+                best_individual = list(ind)
+                best_generation = generation
+        
+        # Early stopping if no improvement for several generations
+        if generation - best_generation > 20:
+            break
+        
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < 0.2:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Replace old population
+        population[:] = offspring
+    
+    return best_individual if best_individual is not None else []
+
+def local_refinement(individual, max_iterations=100):
+    """Refine solution using local optimization"""
+    if not individual or len(individual) < 10:
+        return individual
+    
+    # Simple local search approach - modify small portions for better exploration
+    best_individual = individual.copy()
+    best_score = evaluate_individual(best_individual)[0]
+    
+    # Try different mutations
+    for _ in range(min(max_iterations, 50)):
+        mutated = individual.copy()
+        
+        # Apply small perturbations
+        for i in range(len(mutated)):
+            if random.random() < 0.1:
+                mutated[i] = max(0, mutated[i] + random.gauss(0, 0.05 * max(1, mutated[i])))
+        
+        # Clamp values to reasonable bounds
+        mutated = [max(0, min(5.0, x)) for x in mutated]
+        
+        score = evaluate_individual(mutated)[0]
+        if score > best_score:
+            best_score = score
+            best_individual = mutated
+            
+    return best_individual
+
+def differential_evolution_refinement(individual, max_evals=500):
+    """Use differential evolution for more advanced local refinement"""
+    try:
+        # Convert individual to array for optimization
+        x0 = np.array(individual)
+        
+        # Define bounds for each parameter (clamped between 0 and 5)
+        bounds = [(0, 5) for _ in range(len(x0))]
+        
+        # Objective function for differential evolution
+        def obj_func(x):
+            # Ensure non-negative values
+            x = np.maximum(x, 0)
+            # Evaluate it
+            score = evaluate_individual(x.tolist())[0]
+            # Minimize negative of score (since we want to maximize)
+            return -score if score > 0 else 1e10
+        
+        # Run differential evolution
+        result = differential_evolution(
+            obj_func, 
+            bounds, 
+            maxiter=max_evals,
+            popsize=10,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+        
+        if result.success:
+            refined = np.maximum(result.x, 0).tolist()
+            # Verify the result
+            score = evaluate_individual(refined)[0]
+            if score > evaluate_individual(individual)[0]:
+                return refined
+                
+    except Exception as e:
+        pass
+    
+    return individual
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Phase 1: Fast initial sampling with structured approach
+    best_result = []
+    best_c2 = 0
+    
+    # Create structured initial population
+    initial_pop = create_structured_initial_population(20, 100, 1000)
+    
+    # Phase 2: Evolutionary optimization with adaptive parameters
+    try:
+        evolved_result = adaptive_evolution_phase(initial_pop, 30, 50)
+        if evolved_result:
+            # Evaluate evolved result
+            f_vals = np.array(evolved_result, dtype=np.float64)
+            f_vals = np.maximum(f_vals, 0.0)
+            if np.sum(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                l2_sq, l1, linf = compute_norms_numba(g_vals)
+                
+                if l1 > 1e-15 and linf > 1e-15:
+                    c2 = l2_sq / (l1 * linf)
+                    if c2 > best_c2:
+                        best_c2 = c2
+                        best_result = evolved_result
+    except Exception as e:
+        pass
+    
+    # Phase 3: Local refinement if we have a candidate
+    if best_result and time.time() - start_time < 70:  # Leave time for refinement
+        # Try both simple refinement and differential evolution
+        refined_result = local_refinement(best_result)
+        # Evaluate the refined result
+        f_vals = np.array(refined_result, dtype=np.float64)
+        f_vals = np.maximum(f_vals, 0.0)
+        if np.sum(f_vals) > 0:
+            g_vals = compute_autoconvolution_numba(f_vals)
+            l2_sq, l1, linf = compute_norms_numba(g_vals)
+            if l1 > 1e-15 and linf > 1e-15:
+                c2 = l2_sq / (l1 * linf)
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_result = refined_result
+        
+        # Try differential evolution refinement (more intensive but potentially better)
+        if time.time() - start_time < 75:
+            de_result = differential_evolution_refinement(best_result)
+            f_vals = np.array(de_result, dtype=np.float64)
+            f_vals = np.maximum(f_vals, 0.0)
+            if np.sum(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                l2_sq, l1, linf = compute_norms_numba(g_vals)
+                if l1 > 1e-15 and linf > 1e-15:
+                    c2 = l2_sq / (l1 * linf)
+                    if c2 > best_c2:
+                        best_c2 = c2
+                        best_result = de_result
+    
+    # Phase 4: Fallback to well-structured approach if nothing worked
+    if len(best_result) == 0 or best_c2 < 0.7:
+        # Use a more principled heuristic approach
+        n_steps = random.randint(500, 800)
+        # Create a step function with multiple Gaussian peaks
+        best_result = adaptive_gaussian_construction(n_steps)
+    
+    # Final evaluation and time management
+    if best_result:
+        try:
+            f_vals = np.array(best_result, dtype=np.float64)
+            f_vals = np.maximum(f_vals, 0.0)
+            if np.sum(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                l2_sq, l1, linf = compute_norms_numba(g_vals)
+                if l1 > 1e-15 and linf > 1e-15:
+                    final_c2 = l2_sq / (l1 * linf)
+                    if final_c2 > best_c2:
+                        best_c2 = final_c2
+        except:
+            pass
+    
+    # Limit execution time
+    elapsed = time.time() - start_time
+    if elapsed > 85:  # Leave buffer for cleanup
+        return best_result[:1000]  # Truncate if needed
+    
+    return best_result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

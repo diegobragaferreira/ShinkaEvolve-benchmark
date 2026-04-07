@@ -1,0 +1,126 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 3)
+        # Compute pairwise distances
+        distances = cdist(points, points)
+        # Set diagonal to large value to ignore self-distances
+        np.fill_diagonal(distances, np.inf)
+        # Minimize negative of minimum distance (maximize minimum distance)
+        return -np.min(distances)
+
+    def constraint_sphere(x):
+        # Ensure points stay within unit sphere
+        points = x.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return 1 - norms  # Should be >= 0
+
+    def constraint_max_distance(x):
+        # Ensure maximum distance doesn't exceed some reasonable bound
+        points = x.reshape(-1, 3)
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, 0)
+        max_dist = np.max(distances)
+        return 2 - max_dist  # Should be >= 0 (allowing up to diameter 2)
+
+    def generate_fibonacci_points(n):
+        """Generate points using Fibonacci spiral on sphere"""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            theta = np.arccos(1 - 2*(i/(n-1)))
+            phi = np.arctan2(np.sin(i * 2 * np.pi / golden_ratio), np.cos(i * 2 * np.pi / golden_ratio))
+            x = np.sin(theta) * np.cos(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def generate_random_points(n):
+        """Generate random points on unit sphere"""
+        points = np.random.randn(n, 3)
+        points = points / np.linalg.norm(points, axis=1, keepdims=True)
+        return points
+
+    def generate_perturbed_fibonacci_points(n, perturbation_strength=0.05):
+        """Generate fibonacci points with small random perturbations"""
+        base_points = generate_fibonacci_points(n)
+        perturbations = np.random.normal(0, perturbation_strength, (n, 3))
+        perturbed_points = base_points + perturbations
+        # Normalize back to unit sphere
+        perturbed_points = perturbed_points / np.linalg.norm(perturbed_points, axis=1, keepdims=True)
+        return perturbed_points
+
+    n = 14
+    d = 3
+
+    # Store best result
+    best_points = None
+    best_min_dist = -np.inf
+    best_max_dist = np.inf
+
+    # Try multiple starting configurations
+    start_configs = [
+        generate_fibonacci_points(n),
+        generate_random_points(n),
+        generate_perturbed_fibonacci_points(n, 0.05),
+        generate_perturbed_fibonacci_points(n, 0.1),
+    ]
+
+    # Also try some additional random configurations
+    np.random.seed(42)
+    for i in range(2):
+        start_configs.append(generate_random_points(n))
+
+    for i, initial_points in enumerate(start_configs):
+        # Flatten for optimization
+        x0 = initial_points.flatten()
+
+        # Define constraints
+        cons = [
+            {'type': 'ineq', 'fun': constraint_sphere},
+            {'type': 'ineq', 'fun': constraint_max_distance}
+        ]
+
+        # Optimize
+        result = minimize(objective, x0, method='SLSQP', constraints=cons,
+                          options={'ftol': 1e-8, 'maxiter': 1000})
+
+        # Extract results and compute min/max distances
+        optimized_points = result.x.reshape(-1, 3)
+        distances = cdist(optimized_points, optimized_points)
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # We want to maximize min/max ratio
+        if max_dist > 0:
+            ratio = min_dist / max_dist
+            if ratio > best_min_dist / best_max_dist:
+                best_min_dist = min_dist
+                best_max_dist = max_dist
+                best_points = optimized_points.copy()
+
+    # If we didn't find any valid solution, return the last attempt
+    if best_points is None:
+        return initial_points
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

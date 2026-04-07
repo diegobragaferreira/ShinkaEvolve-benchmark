@@ -1,0 +1,270 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+import time
+from typing import List, Tuple
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂² (L2 norm squared), ||g||₁ (L1 norm), ||g||∞ (L-infinity norm)
+    
+    Args:
+        f_values: list of step function heights
+        
+    Returns:
+        tuple: (norm_g2_sq, norm_g1, norm_ginf)
+    """
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values)
+    
+    # Ensure non-negative values
+    f = np.maximum(f, 0)
+    
+    # Compute autoconvolution g = f * f (discrete convolution)
+    # Using 'full' mode to get complete convolution result
+    g = convolve(f, f, mode='full')
+    
+    # Extract the central portion that represents the main interval
+    n = len(f)
+    middle_idx = n - 1
+    half_width = n  # This should capture the main convolution support
+    
+    # Take the central part of the convolution
+    g_centered = g[middle_idx - half_width + 1 : middle_idx + half_width]
+    
+    # Compute the norms properly using piecewise linear integration approach
+    # For L2 norm squared (correct piecewise integration)
+    g_squared = g_centered ** 2
+    g_abs = np.abs(g_centered)
+    
+    # Using trapezoidal-like approach for better integration accuracy
+    # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) 
+    # For unit spacing, h = 1, so we use this formula directly
+    norm_g2_sq = 0.0
+    n_vals = len(g_centered)
+    if n_vals >= 2:
+        for i in range(n_vals - 1):
+            y1 = g_centered[i]
+            y2 = g_centered[i+1]
+            norm_g2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+    elif n_vals == 1:
+        norm_g2_sq = g_centered[0] * g_centered[0]
+    
+    # ||g||₁ - sum of absolute values
+    norm_g1 = np.sum(g_abs)
+    
+    # ||g||∞ - maximum absolute value
+    norm_ginf = np.max(g_abs)
+    
+    return norm_g2_sq, norm_g1, norm_ginf
+
+def evaluate_c2(f_values):
+    """Evaluate C2 for a given set of step heights"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_values, 0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Compute norms
+        norm_g2_sq, norm_g1, norm_ginf = compute_autoconvolution_norms(f_vals)
+
+        # Avoid division by zero
+        if norm_g1 <= 1e-15 or norm_ginf <= 1e-15:
+            return 0.0
+
+        # Compute C2
+        c2 = norm_g2_sq / (norm_g1 * norm_ginf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def objective_function(x):
+    """Objective function to minimize (negative C2)"""
+    c2 = evaluate_c2(x)
+    return -c2
+
+def generate_adaptive_pattern(n_steps):
+    """
+    Generate an adaptive step function pattern that leverages mathematical 
+    insights for maximizing C2 values.
+    """
+    # Generate a Gaussian-like pattern with adjustable parameters
+    x = np.linspace(-1, 1, n_steps)
+    
+    # Parameters for the Gaussian pattern
+    mu = 0.0  
+    sigma = 0.2  
+    amplitude = 1.0  
+    
+    # Create the Gaussian shaped pattern
+    gaussian = amplitude * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    
+    # Add some structured variation to encourage better convolution properties
+    secondary_amplitude = 0.3 * amplitude
+    secondary_sigma = 0.4
+    secondary_mu = 0.4
+    
+    secondary_peak = secondary_amplitude * np.exp(-0.5 * ((x - secondary_mu) / secondary_sigma) ** 2)
+    
+    # Combine main and secondary peaks
+    combined_pattern = gaussian + secondary_peak
+    
+    # Ensure the pattern is well-behaved
+    combined_pattern = np.maximum(combined_pattern, 0.0)
+    
+    # Normalize to prevent extremely large values
+    max_val = np.max(combined_pattern)
+    if max_val > 0:
+        combined_pattern = combined_pattern / max_val * 2.0
+    
+    # Add small amount of noise for additional exploration 
+    noise_scale = 0.02
+    noise = np.random.normal(0, noise_scale, n_steps)
+    noisy_pattern = combined_pattern + noise
+    noisy_pattern = np.maximum(noisy_pattern, 0.0)
+    
+    # Normalize again after adding noise
+    max_val = np.max(noisy_pattern)
+    if max_val > 0:
+        noisy_pattern = noisy_pattern / max_val * 2.0
+    
+    return noisy_pattern.tolist()
+
+def generate_sophisticated_initialization(n_steps):
+    """
+    Create a sophisticated initial population using multiple strategies
+    """
+    # Strategy 1: Alternating high/low pattern 
+    pattern1 = []
+    for i in range(n_steps):
+        if i % 2 == 0:
+            pattern1.append(np.random.uniform(0.7, 1.0))
+        else:
+            pattern1.append(np.random.uniform(0.0, 0.3))
+    
+    # Strategy 2: Gaussian pattern
+    pattern2 = generate_adaptive_pattern(n_steps)
+    
+    # Strategy 3: Uniform pattern
+    pattern3 = [0.5] * n_steps
+    
+    # Strategy 4: Mixed pattern with peaks
+    pattern4 = []
+    for i in range(n_steps):
+        if i % 3 == 0:
+            pattern4.append(np.random.uniform(0.8, 1.0))
+        elif i % 3 == 1:
+            pattern4.append(np.random.uniform(0.2, 0.4))
+        else:
+            pattern4.append(np.random.uniform(0.0, 0.2))
+    
+    # Select the best performing pattern
+    patterns = [pattern1, pattern2, pattern3, pattern4]
+    best_pattern = max(patterns, key=evaluate_c2)
+    
+    return best_pattern
+
+def evolutionary_optimization_with_refinement(n_steps):
+    """
+    Use differential evolution for global search followed by local refinement
+    """
+    # Define bounds for each parameter (step height)
+    bounds = [(0.0, 3.0) for _ in range(n_steps)]
+    
+    # Use sophisticated initialization
+    x0 = generate_sophisticated_initialization(n_steps)
+    
+    # Phase 1: Differential Evolution (Global Search)
+    try:
+        result_de = differential_evolution(
+            objective_function,
+            bounds,
+            seed=42,
+            maxiter=50,
+            popsize=15,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            disp=False,
+            tol=1e-6
+        )
+        
+        if result_de.success:
+            best_solution = result_de.x
+        else:
+            best_solution = x0
+            
+    except Exception:
+        best_solution = x0
+    
+    # Phase 2: Local Refinement (Fine-tuning) with L-BFGS-B
+    try:
+        result_lbfgs = minimize(
+            objective_function,
+            best_solution,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 50, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+        
+        if result_lbfgs.success:
+            final_solution = result_lbfgs.x
+        else:
+            final_solution = best_solution
+            
+    except Exception:
+        final_solution = best_solution
+    
+    return final_solution
+
+def construct_function() -> list[float]:
+    """
+    Main entry point for constructing step-function with high C2 value.
+    Uses evolutionary optimization approach with hybrid global+local search.
+    """
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    
+    # Use evolutionary optimization with refinement
+    try:
+        # Try different sizes to find good solutions
+        sizes_to_try = [500, 1000, 2000, 3000]
+        best_c2 = -np.inf
+        best_solution = None
+        
+        for n_steps in sizes_to_try:
+            try:
+                # Ensure we don't exceed time limits
+                optimized_params = evolutionary_optimization_with_refinement(n_steps)
+                c2_value = evaluate_c2(optimized_params)
+                
+                if c2_value > best_c2:
+                    best_c2 = c2_value
+                    best_solution = optimized_params.tolist()
+                    
+            except Exception:
+                continue
+                
+        # If nothing worked, fallback to simple initialization
+        if best_solution is None:
+            n_steps = np.random.randint(1000, 5000)
+            best_solution = generate_adaptive_pattern(n_steps)
+            
+    except Exception as e:
+        # Fallback to simple initialization if optimization fails
+        print(f"Optimization failed with error: {e}. Using fallback.")
+        n_steps = np.random.randint(1000, 5000)
+        best_solution = generate_adaptive_pattern(n_steps)
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

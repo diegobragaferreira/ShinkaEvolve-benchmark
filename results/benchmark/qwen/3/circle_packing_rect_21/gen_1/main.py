@@ -1,0 +1,180 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from deap import base, creator, tools, algorithms
+from scipy.spatial.distance import cdist
+import time
+from typing import Tuple
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (width + height = 2)
+    # We'll optimize both dimensions for better packing
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Problem parameters
+    n_circles = 21
+    max_radius = min(rect_width, rect_height) / 2.0
+    
+    # Create fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Define bounds for each parameter:
+    # For each circle: [x, y, radius] where x,y in [0,width], [0,height], radius in [0,max_radius]
+    def create_individual():
+        individual = []
+        for _ in range(n_circles):
+            x = random.uniform(0, rect_width)
+            y = random.uniform(0, rect_height)
+            r = random.uniform(0.001, max_radius)
+            individual.extend([x, y, r])
+        return creator.Individual(individual)
+    
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    def eval_individual(individual):
+        circles = np.array(individual).reshape(-1, 3)
+        total_radius = np.sum(circles[:, 2])
+        penalty = 0
+        
+        # Check boundary constraints
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                penalty += 1000000  # Large penalty for going out of bounds
+        
+        # Check overlap constraints
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                if dist < (r1 + r2):  # Circles overlapping
+                    # Penalty based on how much they overlap
+                    overlap = (r1 + r2) - dist
+                    penalty += overlap * 100000
+        
+        return (total_radius - penalty,)
+    
+    toolbox.register("evaluate", eval_individual)
+    toolbox.register("mate", tools.cxUniform, indpb=0.2)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.02, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Run evolutionary algorithm
+    population_size = 100
+    generations = 100
+    
+    # Create initial population
+    pop = toolbox.population(n=population_size)
+    
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, pop))
+    for ind, fit in zip(pop, fitnesses):
+        ind.fitness.values = fit
+    
+    # Evolution loop
+    for gen in range(generations):
+        # Select the next generation individuals
+        offspring = toolbox.select(pop, len(pop))
+        # Clone the selected individuals
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.5:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < 0.2:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace population
+        pop[:] = offspring
+    
+    # Get best individual
+    best_ind = tools.selBest(pop, 1)[0]
+    circles = np.array(best_ind).reshape(-1, 3)
+    
+    # Ensure we have exactly 21 circles
+    if circles.shape[0] != 21:
+        # Try again with simple heuristic if needed
+        circles = simple_heuristic_pack()
+    
+    return circles
+
+def simple_heuristic_pack():
+    """Fallback method for circle packing using a hexagonal pattern"""
+    n = 21
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    circles = np.zeros((n, 3))
+    
+    # Try a simple hexagonal packing approach
+    rows = 4
+    cols = 6
+    if rows * cols < n:
+        rows = 5
+        cols = 5
+    
+    # Calculate spacing
+    cell_width = rect_width / cols
+    cell_height = rect_height / rows
+    min_spacing = min(cell_width, cell_height)
+    radius = min_spacing / 2.0 * 0.9  # Slightly smaller to avoid edge issues
+    
+    idx = 0
+    for row in range(rows):
+        for col in range(cols):
+            if idx >= n:
+                break
+            x = col * cell_width + cell_width/2
+            y = row * cell_height + cell_height/2
+            circles[idx] = [x, y, radius]
+            idx += 1
+            
+            if idx >= n:
+                break
+    
+    # Adjust positions and radii to stay within bounds and add some randomness
+    for i in range(n):
+        x, y, r = circles[i]
+        # Keep within bounds
+        x = max(r, min(rect_width - r, x))
+        y = max(r, min(rect_height - r, y))
+        circles[i] = [x, y, r]
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

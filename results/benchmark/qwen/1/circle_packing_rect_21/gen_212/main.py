@@ -1,0 +1,294 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import random
+import time
+
+# Set seeds for determinism
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: perimeter = 4 => width + height = 2
+    # Using 1.2 width and 0.8 height for better packing efficiency
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    def compute_voronoi_forces(circles, rect_width, rect_height):
+        """Compute forces on each circle based on Voronoi cell sizes."""
+        n = len(circles)
+        forces = np.zeros((n, 2))
+        
+        # Add boundary points for proper Voronoi calculation
+        points = circles[:, :2].copy()
+        
+        # Add boundary points to make Voronoi more meaningful
+        boundary_points = [
+            [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+            [rect_width/2, 0], [rect_width/2, rect_height],
+            [0, rect_height/2], [rect_width, rect_height/2]
+        ]
+        points = np.vstack([points, boundary_points])
+        
+        try:
+            vor = Voronoi(points)
+            
+            # For each original point, compute Voronoi cell area and force
+            for i in range(len(circles)):
+                region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+                
+                if region_idx != -1 and region_idx < len(vor.regions):
+                    region = vor.regions[region_idx]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute area of Voronoi cell
+                        vertices = np.array([vor.vertices[j] for j in region])
+                        if len(vertices) >= 3:
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            
+                            # Forces are inversely proportional to Voronoi area (smaller = more constrained)
+                            # Larger area = more freedom to expand
+                            force_magnitude = 1.0 / (area + 1e-8)
+                            
+                            # Add small random component to avoid getting stuck
+                            random_force = np.random.normal(0, 0.001, 2)
+                            
+                            # Add force in direction of expansion (away from neighbors)
+                            center_x, center_y = circles[i, 0], circles[i, 1]
+                            # Compute average position of neighbors
+                            neighbor_positions = []
+                            for j in range(n):
+                                if i != j:
+                                    neighbor_positions.append([circles[j, 0], circles[j, 1]])
+                            
+                            if neighbor_positions:
+                                neighbors = np.array(neighbor_positions)
+                                avg_neighbor_x = np.mean(neighbors[:, 0])
+                                avg_neighbor_y = np.mean(neighbors[:, 1])
+                                
+                                # Force away from neighbors
+                                force_direction = np.array([center_x - avg_neighbor_x, center_y - avg_neighbor_y])
+                                norm = np.linalg.norm(force_direction)
+                                if norm > 1e-8:
+                                    force_direction = force_direction / norm
+                                    force = force_magnitude * 0.01 * force_direction + random_force
+                                    forces[i] = force
+                                else:
+                                    forces[i] = random_force
+                            else:
+                                forces[i] = random_force
+                        else:
+                            forces[i] = np.random.normal(0, 0.001, 2)
+                    else:
+                        forces[i] = np.random.normal(0, 0.001, 2)
+                else:
+                    forces[i] = np.random.normal(0, 0.001, 2)
+        except:
+            # Fallback to simple repulsion forces
+            for i in range(n):
+                forces[i] = np.random.normal(0, 0.001, 2)
+                
+        return forces
+    
+    def compute_boundary_forces(circles, rect_width, rect_height):
+        """Compute boundary forces to keep circles within bounds."""
+        forces = np.zeros((len(circles), 2))
+        
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            
+            # Calculate forces from boundaries
+            left_force = max(0, r - x) * 100  # Force pushing right
+            right_force = max(0, x + r - rect_width) * 100  # Force pushing left
+            bottom_force = max(0, r - y) * 100  # Force pushing up
+            top_force = max(0, y + r - rect_height) * 100  # Force pushing down
+            
+            # Convert to forces (positive = push away from boundary)
+            forces[i] = np.array([
+                (right_force - left_force) * 0.001,
+                (top_force - bottom_force) * 0.001
+            ])
+            
+        return forces
+    
+    def update_circles(circles, dt=0.01):
+        """Update circle positions based on computed forces."""
+        n = len(circles)
+        
+        # Compute forces
+        voronoi_forces = compute_voronoi_forces(circles, rect_width, rect_height)
+        boundary_forces = compute_boundary_forces(circles, rect_width, rect_height)
+        
+        # Total forces
+        total_forces = voronoi_forces + boundary_forces
+        
+        # Update positions
+        new_circles = circles.copy()
+        for i in range(n):
+            # Apply forces with some damping
+            damping = 0.9
+            velocity = total_forces[i] * dt * damping
+            
+            new_circles[i, 0] += velocity[0]
+            new_circles[i, 1] += velocity[1]
+            
+            # Ensure circles stay within bounds (with some margin)
+            new_circles[i, 0] = np.clip(new_circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+            new_circles[i, 1] = np.clip(new_circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+            
+        return new_circles
+    
+    def is_valid_solution(circles, rect_width, rect_height):
+        """Check if solution is valid - fast version using spatial hash."""
+        n = len(circles)
+        
+        # Check bounds
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+                
+        # Check overlaps using spatial hashing
+        if n > 1:
+            # Simple but fast method
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            distances = cdist(coords, coords)
+            
+            # Set diagonal to infinity to exclude self-distances
+            np.fill_diagonal(distances, np.inf)
+            
+            # Check if any pair is overlapping
+            min_distances = np.min(distances, axis=1)
+            min_radii_sum = radii[:, None] + radii[None, :]
+            min_radii_sum = np.triu(min_radii_sum, k=1)  # Upper triangle only
+            
+            if np.any(min_distances < np.min(min_radii_sum, axis=1)):
+                return False
+                
+        return True
+    
+    def evaluate_fitness(circles):
+        """Evaluate fitness as sum of radii."""
+        return np.sum(circles[:, 2])
+    
+    def generate_initial_hexagonal_pattern(n, rect_width, rect_height):
+        """Generate initial hexagonal pattern."""
+        circles = np.zeros((n, 3))
+        
+        # Determine grid parameters for hexagonal packing
+        aspect_ratio = rect_width / rect_height
+        rows = int(np.ceil(np.sqrt(n / aspect_ratio)) + 1)
+        cols = int(np.ceil(n / rows) + 1)
+        
+        # Calculate spacing for hexagonal packing
+        max_radius = min(rect_width, rect_height) * 0.05
+        spacing_x = max_radius * 2.0
+        spacing_y = max_radius * np.sqrt(3.0)
+        
+        # Adjust for rectangle dimensions
+        actual_spacing_x = min(rect_width / (cols + 1), spacing_x)
+        actual_spacing_y = min(rect_height / (rows + 1), spacing_y)
+        
+        placed = 0
+        for row in range(rows):
+            if placed >= n:
+                break
+            for col in range(cols):
+                if placed >= n:
+                    break
+                    
+                # Offset every other row for hexagonal arrangement
+                offset = (row % 2) * (actual_spacing_x / 2)
+                x = offset + col * actual_spacing_x + actual_spacing_x / 2
+                y = row * actual_spacing_y + actual_spacing_y / 2
+                
+                # Ensure within bounds
+                x = np.clip(x, max_radius, rect_width - max_radius)
+                y = np.clip(y, max_radius, rect_height - max_radius)
+                
+                # Adjust radius to prevent boundary issues
+                max_radius_for_pos = min(x, y, rect_width - x, rect_height - y)
+                r = min(max_radius, max_radius_for_pos * 0.9)
+                
+                circles[placed] = [x, y, r]
+                placed += 1
+                
+        # Fill remaining positions with random circles
+        for i in range(placed, n):
+            x = np.random.uniform(max_radius, rect_width - max_radius)
+            y = np.random.uniform(max_radius, rect_height - max_radius)
+            r = np.random.uniform(0.005, max_radius * 0.5)
+            circles[i] = [x, y, r]
+            
+        return circles
+    
+    # Start with a good initial configuration
+    circles = generate_initial_hexagonal_pattern(21, rect_width, rect_height)
+    
+    # Simulate physics-based optimization for 1000 steps
+    for step in range(1000):
+        # Apply updates
+        circles = update_circles(circles, dt=0.001)
+        
+        # Occasionally re-evaluate and fix overlaps
+        if step % 50 == 0:
+            if not is_valid_solution(circles, rect_width, rect_height):
+                # If invalid, slightly perturb and try again
+                for i in range(len(circles)):
+                    circles[i, 0] += np.random.normal(0, 0.001)
+                    circles[i, 1] += np.random.normal(0, 0.001)
+                    circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+                    circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+    
+    # Final validation and refinement
+    if not is_valid_solution(circles, rect_width, rect_height):
+        # Try to repair if necessary
+        circles = generate_initial_hexagonal_pattern(21, rect_width, rect_height)
+        for step in range(500):
+            circles = update_circles(circles, dt=0.001)
+    
+    # Final local optimization with small perturbations
+    best_fitness = evaluate_fitness(circles)
+    best_circles = circles.copy()
+    
+    # Try several small refinements
+    for _ in range(100):
+        test_circles = circles.copy()
+        
+        # Slightly perturb some circles
+        for i in np.random.choice(len(circles), 5, replace=False):
+            # Slight position and radius changes
+            test_circles[i, 0] += np.random.normal(0, 0.001)
+            test_circles[i, 1] += np.random.normal(0, 0.001)
+            test_circles[i, 2] += np.random.normal(0, 0.001)
+            
+            # Clamp to valid ranges
+            test_circles[i, 0] = np.clip(test_circles[i, 0], test_circles[i, 2], rect_width - test_circles[i, 2])
+            test_circles[i, 1] = np.clip(test_circles[i, 1], test_circles[i, 2], rect_height - test_circles[i, 2])
+            test_circles[i, 2] = max(0.001, test_circles[i, 2])
+            
+        if is_valid_solution(test_circles, rect_width, rect_height):
+            test_fitness = evaluate_fitness(test_circles)
+            if test_fitness > best_fitness:
+                best_fitness = test_fitness
+                best_circles = test_circles.copy()
+    
+    return best_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

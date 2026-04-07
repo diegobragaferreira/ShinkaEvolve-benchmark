@@ -1,0 +1,225 @@
+<NAME>
+enhance_convolution_computation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def convolve_fft(self, a, b):
+        """Compute convolution using FFT for better performance."""
+        n = len(a)
+        # Zero-pad to avoid circular convolution effects
+        padded_length = 2 * n - 1
+        fa = fft(a, padded_length)
+        fb = fft(b, padded_length)
+        result = ifft(fa * fb).real
+        return result[:n]
+=======
+    def convolve_fft(self, a, b):
+        """Compute convolution using FFT for better performance."""
+        n = len(a)
+        # Zero-pad to avoid circular convolution effects
+        padded_length = 2 * n - 1
+        fa = fft(a, padded_length)
+        fb = fft(b, padded_length)
+        result = ifft(fa * fb).real
+        return result[:n]
+
+    def convolve_fast(self, sequence):
+        """Fast convolution using FFT with proper handling."""
+        n = len(sequence)
+        if n == 0:
+            return np.array([])
+        padded_length = 2 * n - 1
+        fa = fft(sequence, padded_length)
+        result = ifft(fa * fa.conj()).real
+        return result[:n]
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+add_gradient_based_update
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Attempt to find better direction
+            new_sequence = self.get_good_direction_to_move_into(current_sequence, iteration)
+
+            if new_sequence is not None:
+                current_sequence = new_sequence
+            else:
+                # Three-tiered fallback strategy
+                # Tier 1: Try mirrored sequence
+                mirrored_seq = current_sequence[::-1]
+                mirrored_inv_c1 = self.compute_inv_c1(mirrored_seq)
+                if mirrored_inv_c1 > inv_c1:
+                    current_sequence = mirrored_seq
+                else:
+                    # Tier 2: Apply bounded random perturbations
+                    perturbed_seq = [
+                        max(0, x + random.uniform(-0.05, 0.05))
+                        for x in current_sequence
+                    ]
+                    perturbed_inv_c1 = self.compute_inv_c1(perturbed_seq)
+                    if perturbed_inv_c1 > inv_c1:
+                        current_sequence = perturbed_seq
+                    else:
+                        # Tier 3: Resort to randomization
+                        current_sequence = [
+                            random.random()
+                            for _ in range(len(current_sequence))
+                        ]
+=======
+            # Attempt to find better direction
+            new_sequence = self.get_good_direction_to_move_into(current_sequence, iteration)
+
+            if new_sequence is not None:
+                current_sequence = new_sequence
+            else:
+                # Gradient-based update as a fallback
+                try:
+                    grad = self.compute_gradient(current_sequence)
+                    if grad is not None:
+                        # Apply gradient ascent with adaptive step size
+                        step_size = 0.01 * np.exp(-iteration / 100)
+                        updated_seq = np.array(current_sequence) + step_size * grad
+                        updated_seq = np.maximum(updated_seq, 0)
+                        sum_updated = np.sum(updated_seq)
+                        if sum_updated > 0.01:
+                            updated_seq = updated_seq / sum_updated
+                        current_sequence = updated_seq.tolist()
+                    else:
+                        # Three-tiered fallback strategy
+                        # Tier 1: Try mirrored sequence
+                        mirrored_seq = current_sequence[::-1]
+                        mirrored_inv_c1 = self.compute_inv_c1(mirrored_seq)
+                        if mirrored_inv_c1 > inv_c1:
+                            current_sequence = mirrored_seq
+                        else:
+                            # Tier 2: Apply bounded random perturbations
+                            perturbed_seq = [
+                                max(0, x + random.uniform(-0.05, 0.05))
+                                for x in current_sequence
+                            ]
+                            perturbed_inv_c1 = self.compute_inv_c1(perturbed_seq)
+                            if perturbed_inv_c1 > inv_c1:
+                                current_sequence = perturbed_seq
+                            else:
+                                # Tier 3: Resort to randomization
+                                current_sequence = [
+                                    random.random()
+                                    for _ in range(len(current_sequence))
+                                ]
+                except Exception:
+                    # Fallback to randomization if any error occurs
+                    current_sequence = [
+                        random.random()
+                        for _ in range(len(current_sequence))
+                    ]
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+implement_gradient_computation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_good_direction_to_move_into(self, sequence, iteration):
+        """Returns the direction to move into the sequence."""
+        try:
+            n = len(sequence)
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 1e-10:
+                return None
+
+            # Normalize sequence
+            normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+            # Compute maximum convolution value
+            convolved = self.convolve_fft(normalized_sequence, normalized_sequence)
+            rhs = np.max(convolved)
+
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+            if g_fun is None:
+                return None
+
+            # Normalize g_fun
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 1e-10:
+                return None
+
+            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+            # Enhanced adaptive learning rate with more aggressive decay
+            t = 0.05 * np.exp(-iteration / 50)
+            new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+            return new_sequence
+
+        except Exception:
+            return None
+=======
+    def compute_gradient(self, sequence, epsilon=1e-5):
+        """Compute gradient using finite differences."""
+        seq_array = np.array(sequence, dtype=float)
+        n = len(seq_array)
+
+        # Compute base convolution
+        convolved = self.convolve_fast(seq_array)
+        base_max = np.max(convolved)
+
+        # Compute gradients for each element
+        grad_dir = np.zeros(n)
+        for i in range(n):
+            temp_seq = seq_array.copy()
+            temp_seq[i] += epsilon
+            temp_conv = self.convolve_fast(temp_seq)
+            temp_max = np.max(temp_conv)
+            grad_dir[i] = -(temp_max - base_max) / epsilon  # Negative because we want to minimize
+
+        return grad_dir
+
+    def get_good_direction_to_move_into(self, sequence, iteration):
+        """Returns the direction to move into the sequence."""
+        try:
+            n = len(sequence)
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 1e-10:
+                return None
+
+            # Normalize sequence
+            normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+            # Compute maximum convolution value
+            convolved = self.convolve_fft(normalized_sequence, normalized_sequence)
+            rhs = np.max(convolved)
+
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+            if g_fun is None:
+                return None
+
+            # Normalize g_fun
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 1e-10:
+                return None
+
+            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+            # Enhanced adaptive learning rate with more aggressive decay
+            t = 0.05 * np.exp(-iteration / 50)
+            new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+            return new_sequence
+
+        except Exception:
+            return None
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,253 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.optimize import minimize
+import math
+from itertools import combinations
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2
+    # Using width=1.2, height=0.8 for a reasonable aspect ratio
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Initial setup with improved Voronoi-based approach
+    np.random.seed(42)  # For reproducibility
+
+    # Generate better initial points using a more strategic method
+    num_points = 21
+    points = []
+
+    # Strategy 1: Distribute points more evenly across the rectangle
+    # Use hexagonal grid pattern for better initial distribution
+    rows, cols = 5, 5
+    grid_x = np.linspace(0.1, rect_width - 0.1, cols)
+    grid_y = np.linspace(0.1, rect_height - 0.1, rows)
+
+    # Add some randomness to break perfect symmetry
+    for i, x in enumerate(grid_x):
+        for j, y in enumerate(grid_y):
+            if len(points) < num_points:
+                # Add small random perturbation with more control
+                pert_x = np.random.uniform(-0.03, 0.03)
+                pert_y = np.random.uniform(-0.03, 0.03)
+                points.append([x + pert_x, y + pert_y])
+
+    # Trim to exactly 21 points
+    points = points[:num_points]
+
+    # Convert to numpy array
+    points = np.array(points)
+
+    # Iterative optimization using Voronoi-guided refinement
+    best_sum = 0
+    best_circles = None
+
+    for iteration in range(1000):  # Limited iterations to respect time constraint
+        # Construct Voronoi diagram
+        vor = Voronoi(points)
+
+        # Calculate circle parameters for each Voronoi cell
+        circles = []
+
+        # Process each Voronoi region
+        for i, point in enumerate(points):
+            # Get vertices of the Voronoi cell for this generator
+            region_indices = np.where(vor.point_region == i)[0]
+
+            if len(region_indices) > 0:
+                # Find vertices belonging to this region
+                region_vertices = vor.vertices[vor.regions[region_indices[0]]]
+
+                # Filter vertices that are within the rectangle bounds
+                valid_vertices = []
+                for vertex in region_vertices:
+                    if (0 <= vertex[0] <= rect_width and 0 <= vertex[1] <= rect_height):
+                        valid_vertices.append(vertex)
+
+                # If we have valid vertices, calculate center and radius
+                if len(valid_vertices) >= 3:
+                    # Use the point itself as circle center (more stable)
+                    center_x, center_y = point
+                    # Compute minimum distance to rectangle edges
+                    dist_to_edges = [
+                        center_x,  # distance to left edge
+                        rect_width - center_x,  # distance to right edge
+                        center_y,  # distance to bottom edge
+                        rect_height - center_y   # distance to top edge
+                    ]
+                    # Compute minimum distance to other circles
+                    min_dist_to_others = float('inf')
+                    for j, other_point in enumerate(points):
+                        if i != j:
+                            dist = distance.euclidean(point, other_point)
+                            min_dist_to_others = min(min_dist_to_others, dist)
+
+                    # Radius is limited by distance to edges and other circles
+                    max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+                    radius = max(0.001, max_radius)
+                    circles.append([center_x, center_y, radius])
+                else:
+                    # Fallback to simple calculation if Voronoi geometry is degenerate
+                    center_x, center_y = point
+                    dist_to_edges = [
+                        center_x,
+                        rect_width - center_x,
+                        center_y,
+                        rect_height - center_y
+                    ]
+                    min_dist_to_others = float('inf')
+                    for j, other_point in enumerate(points):
+                        if i != j:
+                            dist = distance.euclidean(point, other_point)
+                            min_dist_to_others = min(min_dist_to_others, dist)
+
+                    max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+                    radius = max(0.001, max_radius)
+                    circles.append([center_x, center_y, radius])
+            else:
+                # Fallback case
+                center_x, center_y = point
+                dist_to_edges = [
+                    center_x,
+                    rect_width - center_x,
+                    center_y,
+                    rect_height - center_y
+                ]
+                min_dist_to_others = float('inf')
+                for j, other_point in enumerate(points):
+                    if i != j:
+                        dist = distance.euclidean(point, other_point)
+                        min_dist_to_others = min(min_dist_to_others, dist)
+
+                max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+                radius = max(0.001, max_radius)
+                circles.append([center_x, center_y, radius])
+
+        # Convert to numpy array
+        circles = np.array(circles)
+
+        # Validate configuration - check for overlaps
+        valid = True
+        total_radius = np.sum(circles[:, 2])
+
+        # Check overlaps
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                dist = distance.euclidean(circles[i][:2], circles[j][:2])
+                if dist < (circles[i][2] + circles[j][2]):
+                    valid = False
+                    break
+            if not valid:
+                break
+
+        # Accept better configurations
+        if valid and total_radius > best_sum:
+            best_sum = total_radius
+            best_circles = circles.copy()
+
+        # Apply small perturbations to points for evolution
+        new_points = points.copy()
+        for i in range(num_points):
+            # Small random perturbation
+            new_points[i, 0] += np.random.normal(0, 0.02)
+            new_points[i, 1] += np.random.normal(0, 0.02)
+
+            # Keep within bounds
+            new_points[i, 0] = np.clip(new_points[i, 0], 0.01, rect_width - 0.01)
+            new_points[i, 1] = np.clip(new_points[i, 1], 0.01, rect_height - 0.01)
+
+        points = new_points
+
+    # Final refinement step with neighbor-based optimization
+    if best_circles is not None:
+        refined_circles = best_circles.copy()
+
+        # Local optimization around each circle
+        for _ in range(200):  # Limited iterations for time constraint
+            # Select a random circle to optimize
+            idx = np.random.randint(0, len(refined_circles))
+
+            # Get current circle
+            cx, cy, cr = refined_circles[idx]
+
+            # Store original values
+            original_cx, original_cy, original_cr = cx, cy, cr
+
+            # Try to find a better position
+            best_cx, best_cy, best_cr = cx, cy, cr
+            best_radius = cr
+
+            # Sample nearby positions
+            for dx in [-0.03, -0.015, 0, 0.015, 0.03]:
+                for dy in [-0.03, -0.015, 0, 0.015, 0.03]:
+                    ncx = cx + dx
+                    ncy = cy + dy
+
+                    # Check bounds
+                    if (ncx < 0.01 or ncx > rect_width - 0.01 or
+                        ncy < 0.01 or ncy > rect_height - 0.01):
+                        continue
+
+                    # Compute max radius at new position
+                    max_r = min(ncx, rect_width - ncx, ncy, rect_height - ncy)
+
+                    # Check overlap with others
+                    overlap = False
+                    for j in range(len(refined_circles)):
+                        if j != idx:
+                            dist = math.sqrt((ncx - refined_circles[j, 0])**2 + (ncy - refined_circles[j, 1])**2)
+                            if dist < max_r + refined_circles[j, 2]:  # Overlap
+                                overlap = True
+                                break
+
+                    if not overlap and max_r > best_radius:
+                        best_radius = max_r
+                        best_cx, best_cy = ncx, ncy
+
+            # Update if improvement found
+            if best_radius > refined_circles[idx, 2]:
+                refined_circles[idx, 0] = best_cx
+                refined_circles[idx, 1] = best_cy
+                refined_circles[idx, 2] = best_radius
+
+    # Ensure we return exactly 21 circles
+    if best_circles is None:
+        # Fallback to a simple initial configuration
+        circles = np.zeros((21, 3))
+        # Place in a simple grid pattern
+        row_size = int(np.ceil(np.sqrt(21)))
+        col_size = int(np.ceil(21 / row_size))
+
+        spacing_x = rect_width / (col_size + 1)
+        spacing_y = rect_height / (row_size + 1)
+
+        count = 0
+        for i in range(row_size):
+            for j in range(col_size):
+                if count < 21:
+                    x = spacing_x * (j + 1)
+                    y = spacing_y * (i + 1)
+                    # Set radius to be proportional to available space
+                    radius = min(x, rect_width - x, y, rect_height - y) * 0.4
+                    circles[count] = [x, y, max(radius, 0.001)]
+                    count += 1
+
+        return circles
+
+    return refined_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

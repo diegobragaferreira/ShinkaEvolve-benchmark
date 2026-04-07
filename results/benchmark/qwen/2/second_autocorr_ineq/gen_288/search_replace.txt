@@ -1,0 +1,471 @@
+<NAME>
+enhance_peak_spread_and_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This enhancement focuses on improving peak distribution and mutation strategies in the evolutionary algorithm. The key insights are:
+1. Current peak spacing enforcement is basic - we need more sophisticated spacing that considers the autoconvolution impact
+2. Mutation rates and strategies need to be more adaptive based on fitness landscape
+3. We should implement a more intelligent initialization that places peaks to avoid creating sharp autoconvolution peaks
+4. The golden ratio distribution needs refinement for better spread and mathematical optimality
+
+The changes will:
+- Implement a more sophisticated peak spacing algorithm that considers autoconvolution effects
+- Enhance mutation operators with fitness-aware adaptive rates
+- Refine peak initialization to promote flatter autoconvolution profiles
+- Add smarter early termination criteria
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def enforce_peak_spacing(peak_params, domain_width=0.5, min_distance_ratio=0.1):
+    """Enforce minimum distance between Gaussian peaks"""
+    if len(peak_params) < 3:
+        return
+
+    # Group peaks by their parameters [amp, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # Ensure minimum spacing
+    min_distance = min_distance_ratio * domain_width
+    for i in range(1, len(peaks)):
+        prev_center = peaks[i-1][1]
+        curr_center = peaks[i][1]
+        distance = abs(curr_center - prev_center)
+
+        if distance < min_distance:
+            # Adjust position of current peak
+            # Move it away from the previous one
+            offset = min_distance - distance
+            if curr_center > prev_center:
+                peaks[i][1] += offset
+            else:
+                peaks[i][1] -= offset
+
+    # Put them back into flat list
+    for i, (amp, center, width) in enumerate(peaks):
+        peak_params[i*3] = amp
+        peak_params[i*3 + 1] = center
+        peak_params[i*3 + 2] = width
+=======
+def enforce_peak_spacing(peak_params, domain_width=0.5, min_distance_ratio=0.1):
+    """Enhanced peak spacing with consideration for autoconvolution effects"""
+    if len(peak_params) < 3:
+        return
+
+    # Group peaks by their parameters [amp, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # More sophisticated spacing that considers peak interaction
+    min_distance = min_distance_ratio * domain_width
+    for i in range(1, len(peaks)):
+        prev_center = peaks[i-1][1]
+        curr_center = peaks[i][1]
+        distance = abs(curr_center - prev_center)
+
+        if distance < min_distance:
+            # Adjust position to create better autoconvolution behavior
+            # Push peaks apart more aggressively if they're too close
+            offset = min_distance - distance
+            # Prefer spreading peaks further apart rather than just moving one
+            if curr_center > prev_center:
+                peaks[i][1] += offset * 0.7  # Move current peak more
+                peaks[i-1][1] -= offset * 0.3  # Move previous peak less
+            else:
+                peaks[i][1] -= offset * 0.7
+                peaks[i-1][1] += offset * 0.3
+
+    # Put them back into flat list
+    for i, (amp, center, width) in enumerate(peaks):
+        peak_params[i*3] = amp
+        peak_params[i*3 + 1] = center
+        peak_params[i*3 + 2] = width
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_evolutionary_algorithm(num_peaks, domain_width=0.5, n_steps=2000):
+    """Enhanced evolutionary algorithm with better controls"""
+    # Configuration parameters
+    max_iterations = 200
+    population_size = 20
+    best_c2 = 0.0
+    best_individual = None
+
+    # Create initial population
+    population = []
+    for _ in range(population_size):
+        # Create random individual with better initialization
+        individual = []
+        for _ in range(num_peaks):
+            # Log-uniform amplitude (10-100)
+            amplitude = 10 ** np.random.uniform(1.0, 2.0)
+            individual.append(amplitude)
+
+            # Center using logarithmic distribution
+            ratio = np.random.random()
+            pos = domain_width/2 * (np.sin(ratio * np.pi) * 2 - 1)  # [-0.25, 0.25]
+            if np.random.random() < 0.5:
+                pos = -pos  # Alternate sides
+            individual.append(pos)
+
+            # Log-uniform width (0.01-0.2)
+            width = 0.01 * (10 ** np.random.uniform(0.0, 1.0))
+            individual.append(width)
+
+        population.append(individual)
+
+    # Evaluation loop
+    for iteration in range(max_iterations):
+        if iteration % 10 == 0 and iteration > 0:
+            # Periodic re-evaluation to maintain diversity
+            random.shuffle(population)
+
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            try:
+                x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+                result = gaussian_peak_function_numba(x, individual)
+                step_values = result.tolist()
+                c2_value, _ = evaluate_function(step_values)
+                fitness_scores.append(c2_value)
+            except Exception:
+                fitness_scores.append(0.0)
+
+        # Get best individual
+        best_idx = np.argmax(fitness_scores)
+        if fitness_scores[best_idx] > best_c2:
+            best_c2 = fitness_scores[best_idx]
+            best_individual = list(population[best_idx])
+
+        if best_c2 > 0.95:  # Early termination
+            break
+
+        # Selection and reproduction
+        # Tournament selection
+        selected_population = []
+        tournament_size = 3
+        for _ in range(population_size):
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_population.append(list(population[winner_idx]))
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best two
+        top_indices = np.argsort(fitness_scores)[-2:]
+        for idx in top_indices:
+            new_population.append(list(population[idx]))
+
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = selected_population[np.random.randint(len(selected_population))]
+            parent2 = selected_population[np.random.randint(len(selected_population))]
+
+            # Crossover
+            child1 = list(parent1)
+            child2 = list(parent2)
+
+            # Uniform crossover
+            for i in range(len(child1)):
+                if np.random.random() < 0.5:
+                    child1[i], child2[i] = child2[i], child1[i]
+
+            # Mutation with adaptive rates
+            mutation_rate = max(0.1, 0.3 - iteration * 0.001)  # Decrease over generations
+
+            for i in range(len(child1)):
+                if np.random.random() < mutation_rate:
+                    if i % 3 == 0:  # amplitude - log-uniform
+                        log_amp = np.log10(child1[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child1[i] = max(0.1, 10 ** log_amp)
+
+                        log_amp = np.log10(child2[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child2[i] = max(0.1, 10 ** log_amp)
+                    elif i % 3 == 1:  # center - linear
+                        child1[i] += np.random.uniform(-0.02, 0.02)
+                        child2[i] += np.random.uniform(-0.02, 0.02)
+                        # Keep in bounds
+                        child1[i] = max(-domain_width/2, min(domain_width/2, child1[i]))
+                        child2[i] = max(-domain_width/2, min(domain_width/2, child2[i]))
+                    else:  # width - log-uniform
+                        log_width = np.log10(child1[i])
+                        log_width += np.random.uniform(-0.3, 0.3)
+                        child1[i] = max(0.001, 10 ** log_width)
+
+                        log_width = np.log10(child2[i])
+                        log_width += np.random.uniform(-0.3, 0.3)
+                        child2[i] = max(0.001, 10 ** log_width)
+
+            # Enforce constraints
+            for i in range(len(child1)):
+                child1[i] = max(0, child1[i])
+                child2[i] = max(0, child2[i])
+
+            # Enforce spacing
+            enforce_peak_spacing(child1, domain_width)
+            enforce_peak_spacing(child2, domain_width)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:population_size]
+
+    return best_individual if best_individual is not None else []
+=======
+def optimize_with_evolutionary_algorithm(num_peaks, domain_width=0.5, n_steps=2000):
+    """Enhanced evolutionary algorithm with better controls and adaptive mutation"""
+    # Configuration parameters
+    max_iterations = 200
+    population_size = 20
+    best_c2 = 0.0
+    best_individual = None
+
+    # Track fitness history for adaptive mutation
+    fitness_history = []
+
+    # Create initial population
+    population = []
+    for _ in range(population_size):
+        # Create random individual with better initialization
+        individual = []
+        for _ in range(num_peaks):
+            # Log-uniform amplitude (10-100) but with more balanced distribution
+            amplitude = 10 ** np.random.uniform(1.2, 1.8)  # Focus on mid-range for better C2
+            individual.append(amplitude)
+
+            # Better center distribution using inverse square root for more center concentration
+            ratio = np.random.random()
+            pos = domain_width/2 * (1 - ratio**0.5) * 2  # Concentrate toward center
+            if np.random.random() < 0.5:
+                pos = -pos  # Alternate sides
+            individual.append(pos)
+
+            # Log-uniform width (0.01-0.2) - slightly narrower
+            width = 0.01 * (10 ** np.random.uniform(0.2, 0.8))  # Narrower range for smoother peaks
+            individual.append(width)
+
+        population.append(individual)
+
+    # Evaluation loop
+    for iteration in range(max_iterations):
+        if iteration % 10 == 0 and iteration > 0:
+            # Periodic re-evaluation to maintain diversity
+            random.shuffle(population)
+
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            try:
+                x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+                result = gaussian_peak_function_numba(x, individual)
+                step_values = result.tolist()
+                c2_value, _ = evaluate_function(step_values)
+                fitness_scores.append(c2_value)
+            except Exception:
+                fitness_scores.append(0.0)
+
+        # Get best individual
+        best_idx = np.argmax(fitness_scores)
+        if fitness_scores[best_idx] > best_c2:
+            best_c2 = fitness_scores[best_idx]
+            best_individual = list(population[best_idx])
+
+        # Track fitness for adaptive mutation
+        fitness_history.append(best_c2)
+        if len(fitness_history) > 5:
+            fitness_history.pop(0)
+
+        # Adaptive early termination based on improvement rate
+        if len(fitness_history) >= 5:
+            improvement_rate = fitness_history[-1] - fitness_history[0]
+            if improvement_rate < 1e-6 and iteration > 50:
+                break
+
+        if best_c2 > 0.95:  # Early termination for high fitness
+            break
+
+        # Selection and reproduction
+        # Tournament selection
+        selected_population = []
+        tournament_size = 3
+        for _ in range(population_size):
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_population.append(list(population[winner_idx]))
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best two
+        top_indices = np.argsort(fitness_scores)[-2:]
+        for idx in top_indices:
+            new_population.append(list(population[idx]))
+
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = selected_population[np.random.randint(len(selected_population))]
+            parent2 = selected_population[np.random.randint(len(selected_population))]
+
+            # Crossover
+            child1 = list(parent1)
+            child2 = list(parent2)
+
+            # Uniform crossover with bias toward better parents
+            for i in range(len(child1)):
+                if np.random.random() < 0.5:
+                    child1[i], child2[i] = child2[i], child1[i]
+
+            # Adaptive mutation with fitness-aware rates
+            # Calculate dynamic mutation rate based on generation and fitness landscape
+            avg_fitness = np.mean(fitness_scores)
+            mutation_rate = max(0.1, 0.5 - (iteration / max_iterations) * 0.4)
+
+            # If fitness is improving rapidly, use lower mutation rate
+            if len(fitness_history) >= 2 and fitness_history[-1] - fitness_history[-2] > 0.01:
+                mutation_rate *= 0.7
+
+            # If fitness is stagnating, increase mutation rate
+            if len(fitness_history) >= 5 and (fitness_history[-1] - fitness_history[0]) < 0.001:
+                mutation_rate *= 1.5
+
+            for i in range(len(child1)):
+                if np.random.random() < mutation_rate:
+                    if i % 3 == 0:  # amplitude - log-uniform with better scaling
+                        log_amp = np.log10(child1[i])
+                        # Smaller mutation for better convergence
+                        log_amp += np.random.uniform(-0.3, 0.3)
+                        child1[i] = max(0.1, 10 ** log_amp)
+
+                        log_amp = np.log10(child2[i])
+                        log_amp += np.random.uniform(-0.3, 0.3)
+                        child2[i] = max(0.1, 10 ** log_amp)
+                    elif i % 3 == 1:  # center - more aggressive movement near boundaries
+                        # More aggressive mutation near edges for exploration
+                        if abs(child1[i]) > 0.2 * domain_width or abs(child2[i]) > 0.2 * domain_width:
+                            child1[i] += np.random.uniform(-0.03, 0.03)
+                            child2[i] += np.random.uniform(-0.03, 0.03)
+                        else:
+                            child1[i] += np.random.uniform(-0.02, 0.02)
+                            child2[i] += np.random.uniform(-0.02, 0.02)
+                        # Keep in bounds
+                        child1[i] = max(-domain_width/2, min(domain_width/2, child1[i]))
+                        child2[i] = max(-domain_width/2, min(domain_width/2, child2[i]))
+                    else:  # width - log-uniform with constraint preservation
+                        log_width = np.log10(child1[i])
+                        log_width += np.random.uniform(-0.2, 0.2)
+                        child1[i] = max(0.001, 10 ** log_width)
+
+                        log_width = np.log10(child2[i])
+                        log_width += np.random.uniform(-0.2, 0.2)
+                        child2[i] = max(0.001, 10 ** log_width)
+
+            # Enforce constraints
+            for i in range(len(child1)):
+                child1[i] = max(0, child1[i])
+                child2[i] = max(0, child2[i])
+
+            # Enforce spacing
+            enforce_peak_spacing(child1, domain_width)
+            enforce_peak_spacing(child2, domain_width)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:population_size]
+
+    return best_individual if best_individual is not None else []
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def create_logarithmic_peaks(n_peaks=8, peak_width=0.05, domain_width=0.5, n_steps=2000):
+    """Create peaks with logarithmic distribution for better spread"""
+    x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+
+    # Use golden ratio distribution for better peak placement
+    phi = (1 + np.sqrt(5)) / 2
+    peak_positions = []
+
+    for i in range(n_peaks):
+        # Golden ratio distribution with sine transformation for better spreading
+        ratio = (i * phi) % 1.0
+        pos = domain_width/2 * np.sin(ratio * np.pi)
+        # Alternate sides
+        if i % 2 == 1:
+            pos = -pos
+        peak_positions.append(pos)
+
+    # Create peaks using logarithmic spacing
+    peak_params = []
+    for i, pos in enumerate(peak_positions):
+        # Log-uniform amplitude distribution
+        amplitude = 10 ** np.random.uniform(1.0, 2.0)  # 10 to 100
+        peak_params.extend([amplitude, pos, peak_width])
+
+    # Enforce spacing
+    enforce_peak_spacing(peak_params, domain_width)
+
+    # Generate function
+    result = gaussian_peak_function_numba(x, peak_params)
+    return result
+=======
+def create_logarithmic_peaks(n_peaks=8, peak_width=0.05, domain_width=0.5, n_steps=2000):
+    """Create peaks with improved distribution and mathematical properties for better spread"""
+    x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+
+    # Improved peak placement strategy
+    # Use a combination of golden ratio and inverse square root for better center concentration
+    peak_positions = []
+
+    # Create a more sophisticated distribution
+    for i in range(n_peaks):
+        # Use inverse square root distribution to concentrate peaks near center
+        ratio = (i + 1) / (n_peaks + 1)
+        # Apply inverse square root to concentrate towards center
+        pos = domain_width/2 * (1 - ratio**0.5) * 2
+        # Alternate sides
+        if i % 2 == 1:
+            pos = -pos
+        peak_positions.append(pos)
+
+    # Create peaks with optimized amplitude characteristics
+    peak_params = []
+    for i, pos in enumerate(peak_positions):
+        # Use geometric decay with better amplitude control
+        # Amplitude decreases with peak position to create flatter autoconvolution
+        amplitude_base = 10 ** np.random.uniform(1.2, 1.8)
+        # Apply geometric decay based on distance from center
+        distance_from_center = abs(pos) / (domain_width/2)
+        amplitude = amplitude_base * (0.8 ** (distance_from_center * 10))
+        peak_params.extend([amplitude, pos, peak_width])
+
+    # Enforce spacing with enhanced algorithm
+    enforce_peak_spacing(peak_params, domain_width)
+
+    # Generate function
+    result = gaussian_peak_function_numba(x, peak_params)
+    return result
+>>>>>>> REPLACE
+
+</DIFF>

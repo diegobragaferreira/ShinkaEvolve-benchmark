@@ -1,0 +1,299 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, voronoi_plot_2d
+from scipy.spatial.distance import pdist, cdist
+import math
+import time
+from sklearn.cluster import KMeans
+import warnings
+
+class VoronoiGuidedEvolution:
+    """Voronoi-guided optimization that maximizes min/max distance ratio using geometric insights."""
+
+    def __init__(self, n_points=16, dimension=2, seed=42):
+        self.n_points = n_points
+        self.dimension = dimension
+        self.seed = seed
+        np.random.seed(seed)
+
+    def _initialize_voronoi_friendly(self) -> np.ndarray:
+        """Create initial points suitable for Voronoi-based optimization."""
+        sqrt3 = math.sqrt(3)
+        row_spacing = sqrt3 / 2
+        col_spacing = 1.0
+
+        # Create hexagonal pattern with 4x4 grid
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * col_spacing + (i % 2) * 0.5
+                y = i * row_spacing
+                points.append([x, y])
+
+        points = np.array(points[:self.n_points])
+
+        # Normalize to [0,1] with better bounds
+        if len(points) > 0:
+            x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+            y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+
+            if x_range > 0:
+                points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range * 0.9 + 0.05
+            if y_range > 0:
+                points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range * 0.9 + 0.05
+
+        # Apply sophisticated perturbations to break symmetry with Voronoi-friendly patterns
+        for i in range(self.n_points):
+            # Use mathematical patterns that work well with Voronoi geometry
+            pattern_factor = 1.0 + 0.01 * np.sin(i * 2.5) * np.cos(i * 1.3)
+            noise_intensity = 0.01 * pattern_factor
+            noise_x = np.random.normal(0, noise_intensity, 1)[0]
+            noise_y = np.random.normal(0, noise_intensity, 1)[0]
+            points[i] += [noise_x, noise_y]
+
+        points = np.clip(points, 0, 1)
+        return points
+
+    def _calculate_voronoi_metrics(self, points: np.ndarray) -> tuple:
+        """Calculate Voronoi-based metrics for point distribution quality."""
+        if len(points) < 2:
+            return 0, 0, 0
+
+        try:
+            # Compute Voronoi diagram
+            vor = Voronoi(points)
+            
+            # Calculate cell areas (for distribution assessment)
+            cell_areas = []
+            for i in range(len(points)):
+                if i < len(vor.point_region) and vor.point_region[i] < len(vor.regions):
+                    region = vor.regions[vor.point_region[i]]
+                    if len(region) > 0 and all(r >= 0 for r in region):
+                        # Approximate area using triangulation
+                        try:
+                            vertices = np.array([vor.vertices[r] for r in region])
+                            if len(vertices) >= 3:
+                                # Simple polygon area calculation (assumes convexity for simplicity)
+                                area = 0.5 * abs(sum(vertices[i][0] * vertices[(i+1)%len(vertices)][1] - 
+                                                   vertices[(i+1)%len(vertices)][0] * vertices[i][1] 
+                                                   for i in range(len(vertices))))
+                                cell_areas.append(area)
+                            else:
+                                cell_areas.append(0)
+                        except:
+                            cell_areas.append(0)
+                    else:
+                        cell_areas.append(0)
+                else:
+                    cell_areas.append(0)
+            
+            # Get actual distances
+            distances = pdist(points)
+            if len(distances) == 0:
+                return 0, 0, 0
+            
+            min_distance = np.min(distances)
+            max_distance = np.max(distances)
+            avg_area = np.mean(cell_areas) if cell_areas else 0
+            
+            return min_distance, max_distance, avg_area
+        except Exception:
+            # Fallback to simple distance calculation
+            distances = pdist(points)
+            if len(distances) == 0:
+                return 0, 0, 0
+            min_distance = np.min(distances)
+            max_distance = np.max(distances)
+            return min_distance, max_distance, 0
+
+    def _evaluate_ratio(self, points: np.ndarray) -> float:
+        """Evaluate the min/max distance ratio with Voronoi-enhanced metrics."""
+        min_d, max_d, _ = self._calculate_voronoi_metrics(points)
+        
+        if max_d <= 1e-12:
+            return 0
+
+        return min_d / max_d
+
+    def _voronoi_guided_perturb(self, points: np.ndarray, step_size: float = 0.01) -> np.ndarray:
+        """Perturb points based on Voronoi analysis for better distribution."""
+        new_points = points.copy()
+        
+        # Analyze Voronoi structure to determine which points need movement
+        try:
+            vor = Voronoi(points)
+            move_candidates = []
+            
+            # Identify points with very small Voronoi cells (indicating crowding)
+            for i in range(len(points)):
+                if i < len(vor.point_region) and vor.point_region[i] < len(vor.regions):
+                    region = vor.regions[vor.point_region[i]]
+                    if len(region) > 0 and all(r >= 0 for r in region):
+                        try:
+                            vertices = np.array([vor.vertices[r] for r in region])
+                            if len(vertices) >= 3:
+                                # Calculate area using cross product method
+                                area = 0.5 * abs(sum(vertices[i][0] * vertices[(i+1)%len(vertices)][1] - 
+                                                   vertices[(i+1)%len(vertices)][0] * vertices[i][1] 
+                                                   for i in range(len(vertices))))
+                                
+                                # Point with small area needs attention
+                                if area < 0.01:  # Threshold for crowded regions
+                                    move_candidates.append(i)
+                        except:
+                            pass
+            
+            # For points in crowded regions, move them away from neighbors
+            if move_candidates:
+                for idx in move_candidates:
+                    # Find nearest neighbors
+                    distances_to_others = cdist([points[idx]], points)[0]
+                    nearest_indices = np.argsort(distances_to_others)[:4]  # Top 4 nearest
+                    
+                    # Move away from nearest neighbors
+                    direction = np.zeros(self.dimension)
+                    for neighbor_idx in nearest_indices:
+                        if neighbor_idx != idx:
+                            diff = points[idx] - points[neighbor_idx]
+                            if np.linalg.norm(diff) > 1e-10:
+                                direction += diff / np.linalg.norm(diff)
+                    
+                    # Apply movement if there's a clear direction
+                    if np.linalg.norm(direction) > 1e-10:
+                        direction = direction / np.linalg.norm(direction)
+                        new_points[idx] += direction * step_size * 0.5
+                    else:
+                        # Default perturbation for isolated cases
+                        delta = np.random.uniform(-step_size, step_size, self.dimension)
+                        new_points[idx] = points[idx] + delta
+                        
+            else:
+                # No obvious crowding, apply normal random perturbation
+                for i in range(self.n_points):
+                    delta = np.random.uniform(-step_size, step_size, self.dimension)
+                    new_points[i] = points[i] + delta
+                    
+        except Exception:
+            # Fallback to standard perturbation
+            for i in range(self.n_points):
+                delta = np.random.uniform(-step_size, step_size, self.dimension)
+                new_points[i] = points[i] + delta
+        
+        # Ensure all points stay within bounds
+        new_points = np.clip(new_points, 0, 1)
+        return new_points
+
+    def _population_based_refinement(self, initial_points: np.ndarray, max_iterations: int = 1000) -> np.ndarray:
+        """Use population-based approach with Voronoi-guided mutations."""
+        # Create population of candidate solutions
+        population_size = min(20, max(5, self.n_points))
+        population = []
+        fitness_scores = []
+        
+        # Initialize population with diverse starting points
+        for i in range(population_size):
+            if i == 0:
+                # First member: original hexagonal approach
+                individual = self._initialize_voronoi_friendly()
+            else:
+                # Generate variations with different noise patterns
+                individual = initial_points.copy()
+                np.random.seed(self.seed + i)  # Different seed for variety
+                for j in range(self.n_points):
+                    noise_intensity = 0.005 + 0.002 * np.sin(j * 0.3)
+                    noise_x = np.random.normal(0, noise_intensity, 1)[0]
+                    noise_y = np.random.normal(0, noise_intensity, 1)[0]
+                    individual[j] += [noise_x, noise_y]
+                individual = np.clip(individual, 0, 1)
+            
+            population.append(individual)
+            fitness_scores.append(self._evaluate_ratio(individual))
+        
+        # Evolution loop
+        best_solution = population[np.argmax(fitness_scores)]
+        best_fitness = max(fitness_scores)
+        
+        for generation in range(max_iterations):
+            # Sort population by fitness
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+            
+            # Keep top 50% and generate new individuals
+            elite_count = max(2, population_size // 2)
+            new_population = population[:elite_count]
+            new_fitness = fitness_scores[:elite_count]
+            
+            # Create offspring through crossover and mutation
+            for i in range(elite_count, population_size):
+                # Select parents randomly from top 50%
+                parent1_idx = np.random.randint(0, elite_count)
+                parent2_idx = np.random.randint(0, elite_count)
+                
+                # Crossover: blend points from parents
+                parent1 = population[parent1_idx]
+                parent2 = population[parent2_idx]
+                
+                # Blend with probability
+                blend_prob = 0.7
+                child = np.copy(parent1)
+                mask = np.random.random(self.n_points) < blend_prob
+                child[mask] = parent2[mask]
+                
+                # Mutation with Voronoi guidance
+                child = self._voronoi_guided_perturb(child, step_size=0.005 + 0.001 * (generation / max_iterations))
+                
+                new_population.append(child)
+                new_fitness.append(self._evaluate_ratio(child))
+            
+            population = new_population
+            fitness_scores = new_fitness
+            
+            # Update best solution
+            current_best_idx = np.argmax(fitness_scores)
+            if fitness_scores[current_best_idx] > best_fitness:
+                best_fitness = fitness_scores[current_best_idx]
+                best_solution = population[current_best_idx].copy()
+            
+            # Early stopping based on improvement
+            if generation > 100 and abs(fitness_scores[current_best_idx] - best_fitness) < 1e-8:
+                break
+        
+        return best_solution
+
+    def optimize(self, max_iterations: int = 1000) -> np.ndarray:
+        """Main optimization routine using Voronoi-guided evolution."""
+        # Start with a good initial configuration
+        initial_points = self._initialize_voronoi_friendly()
+        
+        # Use population-based refinement with Voronoi guidance
+        best_points = self._population_based_refinement(initial_points, max_iterations)
+        
+        return best_points
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Create optimizer instance
+    optimizer = VoronoiGuidedEvolution(n_points=16, dimension=2, seed=42)
+
+    # Run optimization
+    start_time = time.time()
+    optimized_points = optimizer.optimize(max_iterations=2000)
+    end_time = time.time()
+
+    # Debug output
+    final_ratio = optimizer._evaluate_ratio(optimized_points)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

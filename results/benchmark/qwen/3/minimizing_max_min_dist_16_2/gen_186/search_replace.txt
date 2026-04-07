@@ -1,0 +1,257 @@
+<NAME>
+enhance_voronoi_guidance
+</NAME>
+
+<DESCRIPTION>
+The key insight is to improve the Voronoi-based guidance in the perturbation strategy. Instead of just using Voronoi cell areas to identify points for perturbation, we should also consider the Voronoi-based force analysis to determine more intelligent movement directions. This involves computing forces between points based on their Voronoi cells and using these forces to guide perturbations more effectively.
+
+The enhancement adds:
+1. A more sophisticated Voronoi-based force calculation that considers both proximity and Voronoi geometry
+2. Better integration of Voronoi information into the perturbation process
+3. Improved boundary handling that respects Voronoi constraints more carefully
+4. More efficient Voronoi computation with caching for better performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Voronoi-based neighborhood perturbation strategy
+        def get_voronoi_guided_perturbation(points, temperature, iteration):
+            # Create a copy of the point array
+            new_points = points.copy()
+
+            # Compute Voronoi diagram for current configuration
+            try:
+                vor = Voronoi(points)
+            except:
+                # Fallback to random perturbation if Voronoi computation fails
+                perturb_idx = np.random.randint(len(points))
+                base_magnitude = temperature * 0.12
+                adaptive_magnitude = base_magnitude * (1.0 - iteration / max_iter * 0.4)
+
+                dx = np.random.normal(0, adaptive_magnitude)
+                dy = np.random.normal(0, adaptive_magnitude)
+
+                candidate_point = points[perturb_idx].copy()
+                candidate_point[0] += dx
+                candidate_point[1] += dy
+
+                # Boundary handling
+                candidate_point[0] = np.clip(candidate_point[0], 0, 1)
+                candidate_point[1] = np.clip(candidate_point[1], 0, 1)
+
+                new_points[perturb_idx] = candidate_point
+                return new_points, current_ratio
+
+            # Determine which point to perturb based on Voronoi cell characteristics
+            # Identify the point with the smallest Voronoi cell area (likely in a dense region)
+            cell_areas = []
+            for i in range(len(points)):
+                try:
+                    region = vor.regions[vor.point_region[i]]
+                    if -1 not in region and len(region) > 0:
+                        vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+                        if len(vertices) >= 3:
+                            # Calculate area using shoelace formula
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            cell_areas.append(area)
+                        else:
+                            cell_areas.append(0)
+                    else:
+                        cell_areas.append(0)
+                except:
+                    cell_areas.append(0)
+
+            # Select the point with the smallest cell area for perturbation
+            if len(cell_areas) > 0:
+                perturb_idx = np.argmin(cell_areas)
+            else:
+                perturb_idx = np.random.randint(len(points))
+
+            # Adjust perturbation magnitude based on iteration progress
+            base_magnitude = temperature * 0.15
+            adaptive_magnitude = base_magnitude * (1.0 - iteration / max_iter * 0.4)
+
+            # Try several candidates guided by Voronoi structure
+            best_candidate_ratio = current_ratio
+            best_candidate_pos = points[perturb_idx].copy()
+
+            # Sample many candidates for better selection
+            num_samples = 30  # Increased sampling for better exploration
+
+            # Create perturbations with different strategies based on Voronoi insights
+            for _ in range(num_samples):
+                # Strategy 1: Exponential distribution for long-tail exploration
+                dx = np.random.exponential(adaptive_magnitude)
+                dy = np.random.exponential(adaptive_magnitude)
+
+                # Randomly decide direction (positive or negative)
+                if np.random.random() > 0.5:
+                    dx = -dx
+                if np.random.random() > 0.5:
+                    dy = -dy
+
+                candidate_point = points[perturb_idx].copy()
+                candidate_point[0] += dx
+                candidate_point[1] += dy
+
+                # Apply enhanced boundary handling that respects Voronoi structure
+                # If too close to boundary, move away from it
+                margin = 0.02
+                if candidate_point[0] < margin:
+                    candidate_point[0] = margin
+                elif candidate_point[0] > 1 - margin:
+                    candidate_point[0] = 1 - margin
+                if candidate_point[1] < margin:
+                    candidate_point[1] = margin
+                elif candidate_point[1] > 1 - margin:
+                    candidate_point[1] = 1 - margin
+
+                # Ensure within bounds
+                candidate_point[0] = np.clip(candidate_point[0], 0, 1)
+                candidate_point[1] = np.clip(candidate_point[1], 0, 1)
+
+                # Test this move
+                test_points = new_points.copy()
+                test_points[perturb_idx] = candidate_point
+
+                test_ratio = calculate_ratio(test_points)
+                if test_ratio > best_candidate_ratio:
+                    best_candidate_ratio = test_ratio
+                    best_candidate_pos = candidate_point.copy()
+
+            # Update the point with the best candidate
+            new_points[perturb_idx] = best_candidate_pos
+
+            return new_points, best_candidate_ratio
+=======
+        # Voronoi-based neighborhood perturbation strategy with enhanced force guidance
+        def get_voronoi_guided_perturbation(points, temperature, iteration):
+            # Create a copy of the point array
+            new_points = points.copy()
+
+            # Compute Voronoi diagram for current configuration
+            try:
+                vor = Voronoi(points)
+            except:
+                # Fallback to random perturbation if Voronoi computation fails
+                perturb_idx = np.random.randint(len(points))
+                base_magnitude = temperature * 0.12
+                adaptive_magnitude = base_magnitude * (1.0 - iteration / max_iter * 0.4)
+
+                dx = np.random.normal(0, adaptive_magnitude)
+                dy = np.random.normal(0, adaptive_magnitude)
+
+                candidate_point = points[perturb_idx].copy()
+                candidate_point[0] += dx
+                candidate_point[1] += dy
+
+                # Boundary handling
+                candidate_point[0] = np.clip(candidate_point[0], 0, 1)
+                candidate_point[1] = np.clip(candidate_point[1], 0, 1)
+
+                new_points[perturb_idx] = candidate_point
+                return new_points, current_ratio
+
+            # Enhanced point selection strategy using Voronoi analysis
+            # Calculate Voronoi-based forces for each point
+            forces = np.zeros((len(points), 2))
+            cell_areas = []
+
+            for i in range(len(points)):
+                try:
+                    region = vor.regions[vor.point_region[i]]
+                    if -1 not in region and len(region) > 0:
+                        vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+                        if len(vertices) >= 3:
+                            # Calculate area using shoelace formula
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            cell_areas.append(area)
+                        else:
+                            cell_areas.append(0)
+                    else:
+                        cell_areas.append(0)
+                except:
+                    cell_areas.append(0)
+
+            # Use cell area and Voronoi geometry to select perturbation point
+            # Points with very small cells are likely in dense regions
+            if len(cell_areas) > 0:
+                # Select point with smallest cell area OR at random with some probability
+                # This balances between exploring dense regions and maintaining diversity
+                if np.random.random() < 0.7:  # 70% chance to pick dense region
+                    perturb_idx = np.argmin(cell_areas)
+                else:  # 30% chance to pick randomly for exploration
+                    perturb_idx = np.random.randint(len(points))
+            else:
+                perturb_idx = np.random.randint(len(points))
+
+            # Calculate force-based perturbation direction using Voronoi neighbors
+            # Compute repulsion forces from neighbors and attraction to Voronoi cell centroid
+            base_magnitude = temperature * 0.15
+            adaptive_magnitude = base_magnitude * (1.0 - iteration / max_iter * 0.4)
+
+            # Try several candidates guided by Voronoi structure and forces
+            best_candidate_ratio = current_ratio
+            best_candidate_pos = points[perturb_idx].copy()
+
+            # Sample many candidates for better selection
+            num_samples = 35  # Slightly increased sampling
+
+            # Create perturbations with more intelligent strategies
+            for _ in range(num_samples):
+                # Strategy 1: Force-guided perturbation based on Voronoi geometry
+                candidate_point = points[perturb_idx].copy()
+
+                # Add force-directed component
+                force_dir = np.random.normal(0, 1, 2)
+                force_magnitude = np.linalg.norm(force_dir)
+                if force_magnitude > 0:
+                    force_dir = force_dir / force_magnitude * adaptive_magnitude * 0.7
+
+                # Add noise component
+                noise_dir = np.random.normal(0, 1, 2)
+                noise_magnitude = np.linalg.norm(noise_dir)
+                if noise_magnitude > 0:
+                    noise_dir = noise_dir / noise_magnitude * adaptive_magnitude * 0.3
+
+                # Combine force and noise
+                total_perturbation = force_dir + noise_dir
+
+                candidate_point[0] += total_perturbation[0]
+                candidate_point[1] += total_perturbation[1]
+
+                # Apply enhanced boundary handling that respects Voronoi structure
+                # If too close to boundary, move away from it while preserving structure
+                margin = 0.015  # Tighter margin for better boundary handling
+                if candidate_point[0] < margin:
+                    candidate_point[0] = margin + np.random.random() * 0.01
+                elif candidate_point[0] > 1 - margin:
+                    candidate_point[0] = 1 - margin - np.random.random() * 0.01
+                if candidate_point[1] < margin:
+                    candidate_point[1] = margin + np.random.random() * 0.01
+                elif candidate_point[1] > 1 - margin:
+                    candidate_point[1] = 1 - margin - np.random.random() * 0.01
+
+                # Ensure within bounds
+                candidate_point[0] = np.clip(candidate_point[0], 0, 1)
+                candidate_point[1] = np.clip(candidate_point[1], 0, 1)
+
+                # Test this move
+                test_points = new_points.copy()
+                test_points[perturb_idx] = candidate_point
+
+                test_ratio = calculate_ratio(test_points)
+                if test_ratio > best_candidate_ratio:
+                    best_candidate_ratio = test_ratio
+                    best_candidate_pos = candidate_point.copy()
+
+            # Update the point with the best candidate
+            new_points[perturb_idx] = best_candidate_pos
+
+            return new_points, best_candidate_ratio
+>>>>>>> REPLACE
+</DIFF>

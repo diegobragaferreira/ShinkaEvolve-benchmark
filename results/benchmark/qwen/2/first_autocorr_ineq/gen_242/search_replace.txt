@@ -1,0 +1,151 @@
+<NAME>
+improve_fft_convolution_and_constraint_solver
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_convolution_fft(seq1, seq2):
+    """Compute convolution using FFT for efficiency."""
+    n = len(seq1)
+    padded_length = 2 * n - 1
+    fft_seq1 = fft(seq1, padded_length)
+    fft_seq2 = fft(seq2, padded_length)
+    conv_result = ifft(fft_seq1 * np.conj(fft_seq2)).real
+    return conv_result[:n]
+=======
+def compute_convolution_fft(seq1, seq2):
+    """Compute convolution using FFT for efficiency."""
+    n = len(seq1)
+    # Use a more conservative padding that's still sufficient
+    padded_length = 2 * n - 1
+    # Pad with zeros to prevent circular convolution artifacts
+    fft_seq1 = fft(np.pad(seq1, (0, padded_length - n), 'constant'), padded_length)
+    fft_seq2 = fft(np.pad(seq2, (0, padded_length - n), 'constant'), padded_length)
+    conv_result = ifft(fft_seq1 * np.conj(fft_seq2)).real
+    return conv_result[:n]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_lp_solver_with_fft_based_constraints
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP with enhanced constraints handling."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        # Precompute constraint matrix efficiently
+        num_constraints = 2 * n - 1
+        a_ub = np.zeros((num_constraints, n))
+        b_ub = np.zeros(num_constraints)
+
+        # Vectorized constraint generation for performance
+        for k in range(num_constraints):
+            coefficients = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    coefficients[j] = f_sequence[i]
+            a_ub[k] = coefficients
+            b_ub[k] = rhs
+
+        # Non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        c = -np.ones(n)
+
+        # Solve with multiple fallback methods
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+        if result.success:
+            return result.x
+        else:
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+                if result.success:
+                    return result.x
+            except:
+                pass
+            return None
+
+    except Exception as e:
+        warnings.warn(f"Error in solve_convolution_lp: {str(e)}")
+        return None
+=======
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP with enhanced constraints handling using FFT-based approach."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        # For larger sequences, use FFT for constraint generation to reduce memory usage
+        if n > 200:
+            # Sample key convolution constraints instead of full matrix
+            sample_indices = np.arange(0, 2*n-1, max(1, n//20))  # Sample ~20 constraints
+            num_samples = len(sample_indices)
+
+            a_ub = np.zeros((num_samples, n))
+            b_ub = np.full(num_samples, rhs)
+
+            for i, k in enumerate(sample_indices):
+                coefficients = np.zeros(n)
+                # Efficiently compute convolution coefficient using FFT logic
+                for j in range(n):
+                    idx = k - j
+                    if 0 <= idx < n:
+                        coefficients[idx] = f_sequence[j]
+                a_ub[i] = coefficients
+
+        else:
+            # For smaller sequences, use full constraint matrix
+            num_constraints = 2 * n - 1
+            a_ub = np.zeros((num_constraints, n))
+            b_ub = np.zeros(num_constraints)
+
+            # Vectorized constraint generation for performance
+            for k in range(num_constraints):
+                coefficients = np.zeros(n)
+                for i in range(n):
+                    j = k - i
+                    if 0 <= j < n:
+                        coefficients[j] = f_sequence[i]
+                a_ub[k] = coefficients
+                b_ub[k] = rhs
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        c = -np.ones(n)
+
+        # Try multiple solver methods with early exit on success
+        methods = ['highs', 'interior-point', 'revised simplex']
+        for method in methods:
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method=method)
+                if result.success:
+                    return result.x
+            except:
+                continue
+
+        return None
+
+    except Exception as e:
+        warnings.warn(f"Error in solve_convolution_lp: {str(e)}")
+        return None
+>>>>>>> REPLACE
+</DIFF>

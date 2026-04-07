@@ -1,0 +1,293 @@
+--- a/original.py
++++ b/original.py
+@@ -1,25 +1,284 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from sklearn.cluster import KMeans
++import random
++from typing import Tuple
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 21
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    np.random.seed(42)
++    random.seed(42)
++    
++    # Define container dimensions (perimeter = 4, so width + height = 2)
++    # Using 1:1 ratio for simplicity (square container)
++    container_width = 1.0
++    container_height = 1.0
++    
++    def check_validity(circles_array):
++        """Check if all circles are within bounds and non-overlapping."""
++        if len(circles_array) == 0:
++            return False
++            
++        # Check boundary constraints
++        for x, y, r in circles_array:
++            if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
++                return False
++        
++        # Check overlap constraints
++        if len(circles_array) < 2:
++            return True
++            
++        positions = circles_array[:, :2]
++        radii = circles_array[:, 2]
++        
++        # Compute pairwise distances
++        distances = cdist(positions, positions)
++        
++        # For each pair of circles, check if they overlap
++        n = len(circles_array)
++        for i in range(n):
++            for j in range(i+1, n):
++                dist = distances[i, j]
++                if dist < (radii[i] + radii[j]):
++                    return False
++                    
++        return True
++
++    def compute_total_radius(circles_array):
++        """Compute sum of all radii."""
++        return np.sum(circles_array[:, 2])
++
++    def initialize_with_force_placement(n_circles: int, width: float, height: float) -> np.ndarray:
++        """Initialize circles using a force-based approach."""
++        # Start with some random positions
++        circles = []
++        
++        # Use clustering to get roughly evenly distributed initial positions
++        kmeans = KMeans(n_clusters=n_circles, random_state=42, n_init=10)
++        initial_positions = np.random.rand(n_circles, 2) * [width, height]
++        kmeans.fit(initial_positions)
++        cluster_centers = kmeans.cluster_centers_
++        
++        max_attempts = 1000
++        attempts = 0
++        
++        # Try placing circles one by one with repulsion
++        while len(circles) < n_circles and attempts < max_attempts:
++            # Generate candidate circles around cluster centers
++            for i, center in enumerate(cluster_centers):
++                if len(circles) >= n_circles:
++                    break
++                    
++                # Initial radius suggestion based on proximity to others
++                min_distance_to_others = float('inf')
++                for other_circle in circles:
++                    dx = center[0] - other_circle[0]
++                    dy = center[1] - other_circle[1]
++                    dist = np.sqrt(dx*dx + dy*dy)
++                    min_distance_to_others = min(min_distance_to_others, dist)
++                
++                # Set reasonable initial radius
++                if min_distance_to_others > 0:
++                    max_radius = min(center[0], width - center[0], center[1], height - center[1])
++                    max_radius = min(max_radius, min_distance_to_others / 2.0)
++                else:
++                    max_radius = min(center[0], width - center[0], center[1], height - center[1]) * 0.2
++                
++                # Ensure we have at least some radius
++                if max_radius <= 0:
++                    max_radius = 0.02
++                    
++                # Try with a few radius candidates
++                for attempt in range(10):
++                    radius = max_radius * (1.0 - 0.1 * attempt)
++                    if radius <= 0:
++                        continue
++                        
++                    candidate = [center[0], center[1], radius]
++                    
++                    # Check if valid (within bounds and doesn't overlap with existing)
++                    test_circles = circles + [candidate]
++                    test_array = np.array(test_circles)
++                    if check_validity(test_array):
++                        circles.append(candidate)
++                        break
++        
++            attempts += 1
++            
++        # If not enough circles placed, try adding some more randomly with constraints
++        if len(circles) < n_circles:
++            remaining = n_circles - len(circles)
++            for _ in range(remaining):
++                # Place randomly but respecting bounds
++                while True:
++                    x = np.random.uniform(0.05, width - 0.05)
++                    y = np.random.uniform(0.05, height - 0.05)
++                    max_radius = min(x, width - x, y, height - y)
++                    
++                    if max_radius > 0.01:
++                        # Find minimum distance to existing circles
++                        min_dist = float('inf')
++                        for cx, cy, cr in circles:
++                            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
++                            min_dist = min(min_dist, dist)
++                        
++                        # Allow small radius if far enough
++                        if min_dist > 0.01:
++                            radius = min(max_radius, min_dist * 0.4)
++                            if radius > 0.01:
++                                circles.append([x, y, radius])
++                                break
++                    else:
++                        # Try again if too constrained
++                        continue
++                        
++        return np.array(circles)
++
++    def optimize_with_evolution(circles: np.ndarray, max_iter: int = 1000) -> np.ndarray:
++        """Refine the circle packing using an evolutionary approach."""
++        best_solution = circles.copy()
++        best_fitness = compute_total_radius(best_solution)
++        
++        # Parameters for evolution
++        n_individuals = 20
++        mutation_rate = 0.1
++        elite_size = 4
++        
++        for iteration in range(max_iter):
++            # Generate offspring through mutation
++            population = []
++            
++            # Keep elite individuals
++            current_fitnesses = [compute_total_radius(ind) for ind in [best_solution]]
++            population.extend([best_solution])
++            
++            # Generate mutated versions
++            for _ in range(n_individuals - 1):
++                # Create modified version of current best
++                individual = best_solution.copy()
++                
++                # Randomly select circles to modify
++                n_modify = max(1, int(len(individual) * mutation_rate))
++                to_modify = np.random.choice(len(individual), size=n_modify, replace=False)
++                
++                for idx in to_modify:
++                    # Mutate position
++                    individual[idx][0] = max(0.01, min(container_width - 0.01, individual[idx][0] + np.random.normal(0, 0.02)))
++                    individual[idx][1] = max(0.01, min(container_height - 0.01, individual[idx][1] + np.random.normal(0, 0.02)))
++                    
++                    # Mutate radius (with careful attention to feasibility)
++                    old_r = individual[idx][2]
++                    new_r = old_r + np.random.normal(0, old_r * 0.1)
++                    if new_r > 0.01:
++                        individual[idx][2] = new_r
++                    else:
++                        individual[idx][2] = 0.01
++                
++                # Ensure validity
++                if check_validity(individual):
++                    population.append(individual)
++                else:
++                    # If invalid, try to fix it
++                    fixed_individual = repair_invalid_config(individual)
++                    if check_validity(fixed_individual):
++                        population.append(fixed_individual)
++            
++            # Select best individuals
++            fitnesses = [compute_total_radius(ind) for ind in population]
++            sorted_indices = np.argsort(fitnesses)[::-1]  # Descending order
++            
++            # Update best solution
++            if fitnesses[sorted_indices[0]] > best_fitness:
++                best_fitness = fitnesses[sorted_indices[0]]
++                best_solution = population[sorted_indices[0]].copy()
++            
++            # Keep top individuals for next generation
++            selected = [population[i] for i in sorted_indices[:elite_size]]
++            best_solution = selected[0].copy()
++            
++            # Adjust mutation rate
++            if iteration > 500:
++                mutation_rate = 0.05
++        
++        return best_solution
++
++    def repair_invalid_config(circles: np.ndarray) -> np.ndarray:
++        """Try to make an invalid configuration valid by adjusting parameters."""
++        repaired = circles.copy()
++        
++        # First pass: adjust radii to ensure no overlaps
++        max_attempts = 100
++        attempt = 0
++        
++        while attempt < max_attempts:
++            valid = True
++            
++            # Check overlaps and reduce radii if needed
++            for i in range(len(repaired)):
++                x1, y1, r1 = repaired[i]
++                
++                # Make sure circle is within bounds
++                if x1 - r1 < 0:
++                    x1 = r1
++                elif x1 + r1 > container_width:
++                    x1 = container_width - r1
++                if y1 - r1 < 0:
++                    y1 = r1
++                elif y1 + r1 > container_height:
++                    y1 = container_height - r1
++                    
++                repaired[i][0] = x1
++                repaired[i][1] = y1
++                
++                # Check overlaps with other circles
++                for j in range(len(repaired)):
++                    if i != j:
++                        x2, y2, r2 = repaired[j]
++                        dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                        
++                        if dist < (r1 + r2):
++                            # Reduce radius of the circle with larger radius
++                            if r1 > r2:
++                                # Reduce r1
++                                new_r1 = max(0.001, r1 - (dist - r1 - r2) * 0.5)
++                                repaired[i][2] = new_r1
++                            else:
++                                # Reduce r2
++                                new_r2 = max(0.001, r2 - (dist - r1 - r2) * 0.5)
++                                repaired[j][2] = new_r2
++                            valid = False
++                            
++            if valid:
++                break
++                
++            attempt += 1
++            
++        return repaired
++
++    # Main algorithm
++    # Phase 1: Force-based initialization
++    circles = initialize_with_force_placement(21, container_width, container_height)
++    
++    # Phase 2: Optimization using evolutionary approach
++    optimized_circles = optimize_with_evolution(circles, max_iter=800)
++    
++    # Final quality check and cleanup
++    if not check_validity(optimized_circles):
++        optimized_circles = repair_invalid_config(optimized_circles)
++        
++    return optimized_circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

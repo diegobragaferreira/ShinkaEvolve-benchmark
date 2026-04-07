@@ -1,0 +1,156 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import SphericalVoronoi
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+import random
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    n = 14
+    
+    def objective(x):
+        points = x.reshape(-1, 3)
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        return -min_dist / max_dist
+    
+    def constraint_func(x):
+        points = x.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0
+    
+    # Generate initial points using spherical Voronoi-based approach
+    def generate_voronoi_initial():
+        # Start with a simple icosahedron and refine
+        # Generate vertices of an icosahedron
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+        ])
+        
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+        
+        # Add additional points using spherical Voronoi
+        # Generate more points through random sampling with rejection
+        additional_points = []
+        attempts = 0
+        max_attempts = 1000
+        
+        # Sample points uniformly on sphere
+        while len(additional_points) < n - 12 and attempts < max_attempts:
+            # Generate random point on unit sphere
+            point = np.random.randn(3)
+            point = point / np.linalg.norm(point)
+            
+            # Check if it's sufficiently far from existing points
+            if len(additional_points) == 0:
+                additional_points.append(point)
+            else:
+                min_distance = min(np.linalg.norm(point - p) for p in additional_points)
+                if min_distance > 0.3:  # threshold for minimum distance
+                    additional_points.append(point)
+            
+            attempts += 1
+        
+        # Fill remaining points with random samples near existing ones
+        final_points = vertices.tolist()
+        for i in range(len(additional_points)):
+            if len(final_points) < n:
+                final_points.append(additional_points[i].tolist())
+        
+        # Fill remaining positions with random points on sphere
+        while len(final_points) < n:
+            point = np.random.randn(3)
+            point = point / np.linalg.norm(point)
+            final_points.append(point.tolist())
+        
+        points = np.array(final_points[:n])
+        return points
+    
+    # Try multiple initialization strategies
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Strategy 1: Voronoi-based initialization
+    initial_points = generate_voronoi_initial()
+    initial_points = initial_points / np.linalg.norm(initial_points, axis=1, keepdims=True)
+    
+    # Apply hybrid optimization: first global search with simulated annealing style approach,
+    # then local refinement with L-BFGS-B
+    np.random.seed(42)
+    
+    # Global optimization using coordinate descent with random perturbations
+    x0 = initial_points.flatten()
+    
+    # First phase: coarse optimization
+    cons = {'type': 'eq', 'fun': constraint_func}
+    
+    # Use a combination of optimization techniques
+    try:
+        # Try L-BFGS-B optimization
+        result = minimize(objective, x0, method='L-BFGS-B', constraints=cons, 
+                         options={'ftol': 1e-10, 'gtol': 1e-10, 'maxiter': 500})
+        
+        if result.success:
+            optimized_points = result.x.reshape(-1, 3)
+            optimized_points = optimized_points / np.linalg.norm(optimized_points, axis=1, keepdims=True)
+            
+            # Calculate final ratio
+            distances = squareform(pdist(optimized_points))
+            np.fill_diagonal(distances, np.inf)
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            
+            if max_dist > 0:
+                ratio = min_dist / max_dist
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+    except Exception:
+        pass
+    
+    # If no success, use just the Voronoi initialization
+    if best_points is None:
+        best_points = initial_points
+    
+    # Final local refinement using a more precise optimization
+    try:
+        # Refine with L-BFGS-B using tighter tolerances
+        x0_refine = best_points.flatten()
+        result = minimize(objective, x0_refine, method='L-BFGS-B', constraints=cons,
+                         options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 200})
+        
+        if result.success:
+            refined_points = result.x.reshape(-1, 3)
+            refined_points = refined_points / np.linalg.norm(refined_points, axis=1, keepdims=True)
+            
+            # Calculate final ratio
+            distances = squareform(pdist(refined_points))
+            np.fill_diagonal(distances, np.inf)
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            
+            if max_dist > 0:
+                ratio = min_dist / max_dist
+                if ratio > best_ratio:
+                    best_points = refined_points
+    except Exception:
+        pass
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

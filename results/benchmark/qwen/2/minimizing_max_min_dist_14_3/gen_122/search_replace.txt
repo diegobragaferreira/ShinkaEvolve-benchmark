@@ -1,0 +1,99 @@
+<NAME>
+enhanced_local_search_with_distance_guided_mutation
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the local search refinement by implementing a distance-guided mutation strategy. Instead of uniformly perturbing all coordinates, it analyzes the current distance distribution to identify points that would most benefit from adjustment. Specifically, it focuses on points that are either very close (to encourage expansion) or very far (to encourage contraction) in the current configuration. This targeted approach should lead to more effective local optimizations and help escape local optima more efficiently.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_search_refinement(self, points: np.ndarray, iterations: int = 100) -> np.ndarray:
+        """Perform local search refinement."""
+        current_points = points.copy()
+        current_ratio = self.compute_min_max_ratio(current_points)
+
+        for _ in range(iterations):
+            # Try small adjustments to each coordinate
+            for i in range(len(current_points)):
+                for j in range(3):
+                    old_val = current_points[i, j]
+                    for delta in [-0.0005, 0.0005]:
+                        current_points[i, j] = old_val + delta
+                        current_points[i] = self.project_to_sphere(current_points[i:i+1])[0]
+                        new_ratio = self.compute_min_max_ratio(current_points)
+                        if new_ratio > current_ratio:
+                            current_ratio = new_ratio
+                        else:
+                            current_points[i, j] = old_val  # Revert
+
+        return current_points
+=======
+    def local_search_refinement(self, points: np.ndarray, iterations: int = 100) -> np.ndarray:
+        """Perform enhanced local search refinement with distance-guided mutation."""
+        current_points = points.copy()
+        current_ratio = self.compute_min_max_ratio(current_points)
+
+        # Compute distance matrix once for analysis
+        distances = pdist(current_points)
+        distance_matrix = squareform(distances)
+
+        for _ in range(iterations):
+            # Select point based on distance analysis
+            # Focus on points that are either very close or very far from others
+            min_distances = np.min(distance_matrix, axis=1)
+            max_distances = np.max(distance_matrix, axis=1)
+
+            # Score points: prefer those with extreme distances (either very close or very far)
+            # Normalize scores to prioritize points that are closest to being optimal
+            score = (max_distances - min_distances) / (max_distances + min_distances + 1e-10)
+
+            # Choose point with higher score (more promising for improvement)
+            # Use weighted selection where more extreme distances get higher probability
+            weights = score - np.min(score) + 1e-10  # Ensure all weights are positive
+            weights = weights / np.sum(weights)  # Normalize to probabilities
+
+            idx = np.random.choice(len(current_points), p=weights)
+
+            # Apply distance-guided perturbation
+            # If point is too close to others, expand it
+            # If point is too far from others, contract it
+            current_distances = distance_matrix[idx]
+            mean_dist = np.mean(current_distances)
+            median_dist = np.median(current_distances)
+
+            # Determine perturbation strategy based on how the point's distances compare to average
+            # This helps distinguish between expansion needs (close points) vs contraction needs (distant points)
+            if mean_dist < np.percentile(distances, 25):  # Point is generally close to others
+                # Expand: make larger positive perturbations
+                delta_magnitude = 0.002
+            elif mean_dist > np.percentile(distances, 75):  # Point is generally far from others
+                # Contract: make smaller perturbations
+                delta_magnitude = 0.0005
+            else:  # Point is in middle range
+                # Regular perturbation
+                delta_magnitude = 0.001
+
+            # Apply perturbation to selected point
+            delta = np.random.normal(0, delta_magnitude, 3)
+
+            # Project to tangent plane
+            current_point = current_points[idx]
+            projection_factor = np.dot(delta, current_point)
+            perturbation_tangent = delta - projection_factor * current_point
+
+            old_points = current_points[idx].copy()
+            current_points[idx] += perturbation_tangent
+            current_points[idx] = self.project_to_sphere(current_points[idx:idx+1])[0]
+
+            # Check if this improved the ratio
+            new_ratio = self.compute_min_max_ratio(current_points)
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+            else:
+                # Revert if not helpful
+                current_points[idx] = old_points
+
+        return current_points
+>>>>>>> REPLACE
+</DIFF>

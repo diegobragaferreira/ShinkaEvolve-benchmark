@@ -1,0 +1,291 @@
+<NAME>
+enhance_local_search_with_gradient_descent
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the local search algorithm by incorporating gradient-based optimization techniques. The key insight is to compute gradient information from overlapping circle forces and use it to guide the search direction, which will help escape local optima and converge faster to better solutions. This builds upon the existing local search but adds a more sophisticated movement strategy that considers the physical forces between circles.
+
+The change modifies the `local_refinement_step` function to incorporate gradient computation and gradient-guided moves, replacing some of the purely random search strategies with more informed directional updates.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement to improve circle configuration with enhanced strategies"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes with dynamic adjustments
+        initial_step_size = 0.05
+
+        for iter_num in range(iterations):
+            # Gradually tighten overlap constraints over time
+            overlap_tolerance_factor = 1.0 if not relax_overlap else max(0.1, 1.0 - (iter_num / iterations) * 0.8)
+
+            # Dynamic step size based on iteration count
+            step_size = initial_step_size * (1.0 - (iter_num / iterations) * 0.7)
+            step_size = max(0.001, step_size)
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Try several moves with random directions
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Enhanced perturbation strategy with multiple directions
+                test_moves = [
+                    # Standard Gaussian perturbations
+                    (step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)),
+                    (step_size * random.gauss(0, 1), 0),
+                    (0, step_size * random.gauss(0, 1)),
+                    # Coordinate-specific perturbations
+                    (step_size * random.uniform(-1, 1), 0),
+                    (0, step_size * random.uniform(-1, 1)),
+                    # Small random moves
+                    (random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)),
+                    # No move (for baseline)
+                    (0, 0)
+                ]
+
+                # Add gradient-guided moves for better convergence in later iterations
+                if iter_num > iterations // 4 and len(current) > 1:
+                    # Compute gradient based on forces from overlapping circles
+                    gradient_x, gradient_y = 0.0, 0.0
+                    positions = current[:, :2]
+                    radii = current[:, 2]
+
+                    # Calculate repulsive forces from overlapping neighbors
+                    for j in range(len(current)):
+                        if i != j:
+                            dx = positions[i, 0] - positions[j, 0]
+                            dy = positions[i, 1] - positions[j, 1]
+                            dist = np.sqrt(dx*dx + dy*dy)
+
+                            # Only consider if circles are close enough to potentially overlap
+                            if dist < (radii[i] + radii[j]) and dist > 0.001:
+                                # Repulsive force (inverse proportion to distance squared)
+                                force_magnitude = 1.0 / (dist * dist + 0.001)
+                                gradient_x += force_magnitude * dx / dist
+                                gradient_y += force_magnitude * dy / dist
+
+                    # Normalize gradient and apply to moves
+                    grad_magnitude = np.sqrt(gradient_x*gradient_x + gradient_y*gradient_y)
+                    if grad_magnitude > 0.001:
+                        # Normalize gradient for consistent magnitude
+                        grad_x_norm = gradient_x / grad_magnitude
+                        grad_y_norm = gradient_y / grad_magnitude
+
+                        # Add gradient-guided move with decreasing strength over time
+                        guided_dx = grad_x_norm * step_size * (1.0 - iter_num / iterations)
+                        guided_dy = grad_y_norm * step_size * (1.0 - iter_num / iterations)
+
+                        test_moves.append((guided_dx, guided_dy))
+
+                        # Also add opposite direction for escaping local minima
+                        test_moves.append((-guided_dx * 0.5, -guided_dy * 0.5))
+
+                # Add directional bias for strategic improvement in later iterations
+                if iter_num > iterations // 3:  # Later iterations
+                    # Add more systematic searches
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                    ])
+
+                # Add learning-based adaptive moves in final iterations
+                if iter_num > iterations * 0.8:
+                    # Add moves that favor expanding the smallest circles
+                    # to encourage balanced growth
+                    if original_r < 0.03:  # Small radius circles get more expansion push
+                        test_moves.append((step_size * 0.2, 0))  # Push right
+                        test_moves.append((0, step_size * 0.2))  # Push up
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+        return current
+=======
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement to improve circle configuration with enhanced strategies"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Adaptive step sizes with dynamic adjustments
+        initial_step_size = 0.05
+
+        for iter_num in range(iterations):
+            # Gradually tighten overlap constraints over time
+            overlap_tolerance_factor = 1.0 if not relax_overlap else max(0.1, 1.0 - (iter_num / iterations) * 0.8)
+
+            # Dynamic step size based on iteration count
+            step_size = initial_step_size * (1.0 - (iter_num / iterations) * 0.7)
+            step_size = max(0.001, step_size)
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Try several moves with random directions
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Enhanced perturbation strategy with multiple directions
+                test_moves = [
+                    # Standard Gaussian perturbations
+                    (step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)),
+                    (step_size * random.gauss(0, 1), 0),
+                    (0, step_size * random.gauss(0, 1)),
+                    # Coordinate-specific perturbations
+                    (step_size * random.uniform(-1, 1), 0),
+                    (0, step_size * random.uniform(-1, 1)),
+                    # Small random moves
+                    (random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)),
+                    # No move (for baseline)
+                    (0, 0)
+                ]
+
+                # Add gradient-guided moves for better convergence in later iterations
+                if iter_num > iterations // 4 and len(current) > 1:
+                    # Compute gradient based on forces from overlapping circles
+                    gradient_x, gradient_y = 0.0, 0.0
+                    positions = current[:, :2]
+                    radii = current[:, 2]
+
+                    # Calculate repulsive forces from overlapping neighbors
+                    for j in range(len(current)):
+                        if i != j:
+                            dx = positions[i, 0] - positions[j, 0]
+                            dy = positions[i, 1] - positions[j, 1]
+                            dist = np.sqrt(dx*dx + dy*dy)
+
+                            # Only consider if circles are close enough to potentially overlap
+                            if dist < (radii[i] + radii[j]) and dist > 0.001:
+                                # Repulsive force (inverse proportion to distance squared)
+                                force_magnitude = 1.0 / (dist * dist + 0.001)
+                                gradient_x += force_magnitude * dx / dist
+                                gradient_y += force_magnitude * dy / dist
+
+                    # Normalize gradient and apply to moves
+                    grad_magnitude = np.sqrt(gradient_x*gradient_x + gradient_y*gradient_y)
+                    if grad_magnitude > 0.001:
+                        # Normalize gradient for consistent magnitude
+                        grad_x_norm = gradient_x / grad_magnitude
+                        grad_y_norm = gradient_y / grad_magnitude
+
+                        # Add gradient-guided move with decreasing strength over time
+                        guided_dx = grad_x_norm * step_size * (1.0 - iter_num / iterations)
+                        guided_dy = grad_y_norm * step_size * (1.0 - iter_num / iterations)
+
+                        test_moves.append((guided_dx, guided_dy))
+
+                        # Also add opposite direction for escaping local minima
+                        test_moves.append((-guided_dx * 0.5, -guided_dy * 0.5))
+
+                # Add directional bias for strategic improvement in later iterations
+                if iter_num > iterations // 3:  # Later iterations
+                    # Add more systematic searches
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                    ])
+
+                # Add learning-based adaptive moves in final iterations
+                if iter_num > iterations * 0.8:
+                    # Add moves that favor expanding the smallest circles
+                    # to encourage balanced growth
+                    if original_r < 0.03:  # Small radius circles get more expansion push
+                        test_moves.append((step_size * 0.2, 0))  # Push right
+                        test_moves.append((0, step_size * 0.2))  # Push up
+
+                # Add momentum-based moves for better exploration
+                if iter_num > 10:
+                    # Use previous improvement direction as momentum
+                    prev_move_x = best_x - original_x
+                    prev_move_y = best_y - original_y
+                    momentum_factor = 0.3
+                    test_moves.append((prev_move_x * momentum_factor, prev_move_y * momentum_factor))
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+        return current
+>>>>>>> REPLACE
+</DIFF>

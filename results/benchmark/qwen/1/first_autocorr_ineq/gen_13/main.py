@@ -1,0 +1,207 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+import random
+
+def convolve_fft(a, b):
+    """Compute convolution using FFT for better performance."""
+    n = len(a)
+    # Pad to length 2*n - 1 for full convolution
+    padded_length = 2 * n - 1
+    fa = fft(a, padded_length)
+    fb = fft(b, padded_length)
+    result = ifft(fa * fb.conj()).real
+    # Return only the valid convolution part
+    return result[:n]
+
+def evaluate_c1(sequence):
+    """Evaluate C₁ for a given sequence."""
+    if not sequence or np.sum(sequence) < 1e-10:
+        return float('inf')
+    n = len(sequence)
+    conv = convolve_fft(sequence, sequence)
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence)**2
+    return (2 * n * max_conv) / sum_sq if sum_sq != 0 else float('inf')
+
+def evaluate_inv_c1(sequence):
+    """Evaluate 1/C₁ for a given sequence."""
+    c1 = evaluate_c1(sequence)
+    return 1.0 / c1 if c1 != 0 else 0.0
+
+def gradient_estimate(sequence, epsilon=1e-5):
+    """Estimate gradient using finite differences."""
+    n = len(sequence)
+    grad = np.zeros(n)
+    base_c1 = evaluate_c1(sequence)
+    
+    for i in range(n):
+        perturbed = sequence.copy()
+        perturbed[i] += epsilon
+        perturbed = np.maximum(perturbed, 0)  # Ensure non-negative
+        c1_pert = evaluate_c1(perturbed)
+        grad[i] = (c1_pert - base_c1) / epsilon
+    
+    return grad
+
+def gradient_descent_step(sequence, learning_rate=0.01, max_iter=10):
+    """Perform gradient descent to refine a sequence."""
+    current_seq = np.array(sequence, dtype=float)
+    for _ in range(max_iter):
+        grad = gradient_estimate(current_seq)
+        current_seq -= learning_rate * grad
+        current_seq = np.maximum(current_seq, 0)  # Ensure non-negative
+    return current_seq.tolist()
+
+def mutate_sequence(sequence, mutation_rate=0.1):
+    """Mutate a sequence by randomly changing elements."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            mutated[i] = max(0, mutated[i] + np.random.normal(0, 0.1))
+    return mutated
+
+def crossover_sequences(seq1, seq2):
+    """Crossover two sequences at a random point."""
+    if len(seq1) == 0 or len(seq2) == 0:
+        return seq1 if len(seq1) > 0 else seq2
+    crossover_point = random.randint(1, min(len(seq1), len(seq2)) - 1)
+    child = seq1[:crossover_point] + seq2[crossover_point:]
+    return child
+
+def select_parents(population, fitnesses, num_parents=5):
+    """Select parents based on fitness scores."""
+    sorted_indices = np.argsort(fitnesses)
+    return [population[i] for i in sorted_indices[:num_parents]]
+
+def genetic_algorithm_step(population, fitnesses, num_children=10):
+    """Generate children via crossover and mutation."""
+    parents = select_parents(population, fitnesses)
+    children = []
+    for _ in range(num_children):
+        parent1 = random.choice(parents)
+        parent2 = random.choice(parents)
+        child = crossover_sequences(parent1, parent2)
+        child = mutate_sequence(child)
+        children.append(child)
+    return children
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+    # Precompute convolution matrix using FFT for efficiency
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints: b_i >= 0
+    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+    b_ub_nonneg = np.zeros(n)  # Zero vector
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    try:
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+    except Exception:
+        print('LP optimization failed.')
+        return None
+
+    if result.success:
+        g_sequence = result.x
+        return g_sequence
+    else:
+        print('LP optimization failed.')
+        return None
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(convolve_fft(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    if sum_sequence < 1e-10:
+        return None
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    # Initialize population with diverse sequences
+    population_size = 20
+    population = []
+    for _ in range(population_size):
+        n = random.randint(100, 1000)
+        seq = [random.uniform(0, 1) for _ in range(n)]
+        population.append(seq)
+    
+    # Evaluate fitness for each individual
+    fitness_scores = [evaluate_inv_c1(seq) for seq in population]
+    
+    # Perform evolutionary steps
+    for generation in range(50):  # Limit number of generations
+        # Generate offspring
+        children = genetic_algorithm_step(population, fitness_scores, population_size)
+        
+        # Evaluate offspring
+        child_fitnesses = [evaluate_inv_c1(seq) for seq in children]
+        
+        # Combine population and offspring
+        combined_population = population + children
+        combined_fitness = fitness_scores + child_fitnesses
+        
+        # Select top individuals to form next generation
+        top_indices = np.argsort(combined_fitness)[-population_size:]
+        population = [combined_population[i] for i in top_indices]
+        fitness_scores = [combined_fitness[i] for i in top_indices]
+        
+        # Apply gradient descent to top performers
+        top_individuals = [population[i] for i in range(min(5, len(population)))]
+        refined_individuals = []
+        for ind in top_individuals:
+            refined = gradient_descent_step(ind)
+            refined_individuals.append(refined)
+            
+        # Update population with refined individuals
+        for i, refined in enumerate(refined_individuals):
+            if i < len(population):
+                population[i] = refined
+
+    # Final selection of best sequence
+    final_fitness = [evaluate_inv_c1(seq) for seq in population]
+    best_index = np.argmax(final_fitness)
+    best_sequence = population[best_index]
+    
+    # Apply final refinement
+    h_function = get_good_direction_to_move_into(best_sequence)
+    if h_function is not None:
+        best_sequence = h_function
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

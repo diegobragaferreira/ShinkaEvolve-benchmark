@@ -1,0 +1,367 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon, Point
+from shapely.validation import make_valid
+from deap import base, creator, tools, algorithms
+import multiprocessing as mp
+import time
+from joblib import Parallel, delayed
+import warnings
+import math
+
+# Constants
+UNIT_HEX_RADIUS = 1.0
+UNIT_HEX_APOGEE = np.sqrt(3)/2
+BENCHMARK_RATIO = 0.2544
+
+# Global variables for parallel processing
+global_hex_packers = []
+
+class HexagonPacker:
+    def __init__(self, num_inner=11):
+        self.num_inner = num_inner
+        self.unit_hex_radius = UNIT_HEX_RADIUS
+        self.unit_hex_apogee = UNIT_HEX_APOGEE
+        
+    def create_unit_hexagon(self, center=(0,0), rotation=0):
+        """Create a unit regular hexagon as a Shapely Polygon"""
+        angle_offset = np.deg2rad(rotation)
+        points = []
+        for i in range(6):
+            angle = angle_offset + i * np.pi/3
+            x = center[0] + self.unit_hex_radius * np.cos(angle)
+            y = center[1] + self.unit_hex_radius * np.sin(angle)
+            points.append((x, y))
+        return Polygon(points)
+    
+    def validate_polygon(self, polygon):
+        """Ensure polygon is valid for geometric operations"""
+        if not polygon.is_valid:
+            return make_valid(polygon)
+        return polygon
+    
+    def check_containment(self, inner_hexagon, outer_hexagon, buffer=1e-6):
+        """Check if inner hexagon is fully contained within outer hexagon with buffer"""
+        # Add small buffer to prevent floating-point precision issues
+        buffered_outer = outer_hexagon.buffer(buffer)
+        for point in inner_hexagon.exterior.coords[:-1]:
+            if not buffered_outer.contains(Point(point)):
+                return False
+        return True
+    
+    def check_overlap(self, hex1, hex2, buffer=1e-6):
+        """Check if two hexagons overlap with buffer"""
+        # Add small buffer to both polygons to prevent floating-point precision issues
+        buffered_hex1 = hex1.buffer(buffer)
+        buffered_hex2 = hex2.buffer(buffer)
+        return buffered_hex1.intersects(buffered_hex2)
+    
+    def calculate_outer_hex_radius(self, inner_hex_data, outer_center=(0,0)):
+        """Calculate minimum outer hexagon radius needed to contain all inner hexagons"""
+        max_dist = 0
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            dist = np.linalg.norm(np.array(center) - np.array(outer_center))
+            # Add distance from center to corner of unit hexagon
+            dist += self.unit_hex_apogee
+            max_dist = max(max_dist, dist)
+        return max_dist
+
+    def evaluate_constraints_parallel(self, inner_params, outer_radius):
+        """Parallel constraint evaluation with early termination"""
+        inner_hexagons = []
+        
+        # Create inner hexagons
+        for i in range(self.num_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.create_unit_hexagon((x, y), angle)
+            inner_hexagons.append(hexagon)
+            
+        # Create outer hexagon
+        outer_hexagon = self.create_unit_hexagon((0, 0), 0)
+        outer_coords = list(outer_hexagon.exterior.coords)
+        scaled_coords = [(x*outer_radius, y*outer_radius) for x, y in outer_coords]
+        outer_hexagon_scaled = Polygon(scaled_coords)
+        
+        # Check containment (early termination)
+        for hexagon in inner_hexagons:
+            if not self.check_containment(hexagon, outer_hexagon_scaled):
+                return False, False, 0.0  # containment violated
+            
+        # Check overlaps (early termination)
+        for i in range(self.num_inner):
+            for j in range(i+1, self.num_inner):
+                if self.check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                    return False, False, 0.0  # overlap violated
+                    
+        return True, True, 1.0 / outer_radius  # valid solution
+
+def evaluate_individual(individual, packer):
+    """Evaluate a single individual with geometric validation"""
+    try:
+        # Extract parameters
+        n = packer.num_inner
+        inner_params = individual[:-1]
+        outer_radius = individual[-1]
+        
+        # Check constraints in parallel
+        containment_ok, overlap_ok, inv_radius = packer.evaluate_constraints_parallel(inner_params, outer_radius)
+        
+        # If any constraint violated, return large penalty
+        if not (containment_ok and overlap_ok):
+            return 10000.0 + abs(outer_radius)  # penalty for constraint violations
+        
+        # Return negative of inverse radius to minimize (maximize 1/outer_radius)
+        return -inv_radius
+    
+    except Exception as e:
+        return 10000.0  # penalty for exceptions
+
+def generate_voronoi_initialization(packer, num_samples=20):
+    """Generate diverse initial configurations using Voronoi-based approach"""
+    configs = []
+    
+    # Base positions for Voronoi pattern
+    base_positions = [
+        (0, 0),           # center
+        (-2.0, 0),        # left
+        (2.0, 0),         # right
+        (0, 2.0),         # top
+        (0, -2.0),        # bottom
+        (-1.0, 1.0),      # top-left
+        (1.0, 1.0),       # top-right
+        (-1.0, -1.0),     # bottom-left
+        (1.0, -1.0),      # bottom-right
+        (-2.5, 1.5),      # far top-left
+        (2.5, 1.5),       # far top-right
+        (-2.5, -1.5),     # far bottom-left
+        (2.5, -1.5),      # far bottom-right
+    ]
+    
+    # Use only 11 positions
+    selected_positions = base_positions[:11]
+    
+    for _ in range(num_samples):
+        config = []
+        for i, (cx, cy) in enumerate(selected_positions):
+            # Add jitter to positions with more variation
+            jitter_x = np.random.normal(0, 0.4)
+            jitter_y = np.random.normal(0, 0.4)
+            config.extend([cx + jitter_x, cy + jitter_y, np.random.uniform(0, 360)])
+        
+        # Add outer radius estimate
+        config.append(4.0 + np.random.uniform(0, 3.0))
+        configs.append(config)
+    
+    return configs
+
+def hexagon_packing_evolutionary():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses evolutionary optimization with parallel constraint checking and hierarchical refinement.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Initialize packer
+    packer = HexagonPacker()
+    
+    # Generate initial population
+    population = generate_voronoi_initialization(packer, 30)
+    
+    # Set up parallel processing
+    num_workers = min(mp.cpu_count(), 4)
+    
+    # Track best solution
+    best_inv_radius = -float('inf')
+    best_individual = None
+    
+    # Multi-start evolutionary search
+    for seed in [42, 123, 456, 789]:
+        try:
+            # Set random seed for reproducibility
+            np.random.seed(seed)
+            
+            # Create toolbox for DEAP
+            creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+            creator.create("Individual", list, fitness=creator.FitnessMin)
+            
+            toolbox = base.Toolbox()
+            
+            # Define bounds for each parameter
+            bounds = []
+            for _ in range(packer.num_inner):
+                bounds.extend([(-8.0, 8.0), (-8.0, 8.0), (0, 360)])  # x, y, angle
+            bounds.append((3.0, 12.0))  # outer radius
+            
+            # Individual creation
+            def create_individual():
+                individual = []
+                for i in range(packer.num_inner):
+                    individual.extend([np.random.uniform(-8.0, 8.0), np.random.uniform(-8.0, 8.0), np.random.uniform(0, 360)])
+                individual.append(np.random.uniform(3.0, 12.0))
+                return creator.Individual(individual)
+            
+            toolbox.register("individual", create_individual)
+            toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+            
+            # Evaluation function (parallel)
+            def evaluate(individual):
+                return evaluate_individual(individual, packer)
+            
+            toolbox.register("evaluate", evaluate)
+            toolbox.register("mate", tools.cxTwoPoint)
+            toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.5, indpb=0.1)
+            toolbox.register("select", tools.selTournament, tournsize=3)
+            
+            # Run one evolutionary generation
+            pop = toolbox.population(n=20)
+            
+            # Evaluate initial population
+            fitnesses = Parallel(n_jobs=num_workers)(delayed(evaluate_individual)(ind, packer) for ind in pop)
+            for ind, fit in zip(pop, fitnesses):
+                ind.fitness.values = (fit,)
+            
+            # Evolutionary process
+            for gen in range(10):
+                offspring = toolbox.select(pop, len(pop))
+                offspring = list(map(toolbox.clone, offspring))
+                
+                # Apply crossover and mutation
+                for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                    if np.random.random() < 0.8:
+                        toolbox.mate(child1, child2)
+                        del child1.fitness.values
+                        del child2.fitness.values
+                
+                for mutant in offspring:
+                    if np.random.random() < 0.2:
+                        toolbox.mutate(mutant)
+                        del mutant.fitness.values
+                
+                # Evaluate new individuals
+                invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+                fitnesses = Parallel(n_jobs=num_workers)(delayed(evaluate_individual)(ind, packer) for ind in invalid_ind)
+                for ind, fit in zip(invalid_ind, fitnesses):
+                    ind.fitness.values = (fit,)
+                
+                # Replace population
+                pop[:] = offspring
+            
+            # Find best individual from this run
+            best_in_run = tools.selBest(pop, 1)[0]
+            if best_in_run.fitness.values[0] < -best_inv_radius:
+                best_inv_radius = -best_in_run.fitness.values[0]
+                best_individual = list(best_in_run)
+                
+        except Exception as e:
+            warnings.warn(f"Evolutionary run failed: {str(e)}")
+            continue
+    
+    # Local refinement with L-BFGS-B if we have a good candidate
+    if best_individual is not None:
+        try:
+            # Prepare bounds for local optimization
+            bounds = []
+            for _ in range(packer.num_inner):
+                bounds.extend([(-8.0, 8.0), (-8.0, 8.0), (0, 360)])
+            bounds.append((3.0, 12.0))
+            
+            # Define objective function for local optimization
+            def local_objective(params):
+                return evaluate_individual(params, packer)
+            
+            # Run local optimization
+            result = minimize(
+                local_objective, 
+                best_individual, 
+                method='L-BFGS-B', 
+                bounds=bounds,
+                options={'maxiter': 50}
+            )
+            
+            if result.success:
+                refined_individual = result.x
+                # Check if refined solution is better
+                current_inv_radius = -best_inv_radius
+                refined_inv_radius = -local_objective(refined_individual)
+                
+                if refined_inv_radius > current_inv_radius:
+                    best_individual = refined_individual
+                    best_inv_radius = -refined_inv_radius
+                    
+        except Exception as e:
+            warnings.warn(f"Local refinement failed: {str(e)}")
+    
+    # Final evaluation and formatting
+    if best_individual is not None:
+        inner_params = best_individual[:-1]
+        outer_radius = best_individual[-1]
+        
+        # Validate final solution
+        containment_ok, overlap_ok, inv_radius = packer.evaluate_constraints_parallel(inner_params, outer_radius)
+        
+        if containment_ok and overlap_ok:
+            # Format output
+            inner_hex_data = np.zeros((packer.num_inner, 3))
+            for i in range(packer.num_inner):
+                inner_hex_data[i] = inner_params[3*i:3*i+3]
+            
+            outer_hex_data = np.array([0, 0, 0])
+            
+            return inner_hex_data, outer_hex_data, outer_radius
+    
+    # Fallback to best available configuration from initial samples
+    best_sample = None
+    best_score = -float('inf')
+    
+    for sample in population:
+        try:
+            inner_params = sample[:-1]
+            outer_radius = sample[-1]
+            containment_ok, overlap_ok, inv_radius = packer.evaluate_constraints_parallel(inner_params, outer_radius)
+            
+            if containment_ok and overlap_ok and inv_radius > best_score:
+                best_score = inv_radius
+                best_sample = sample
+        except Exception:
+            continue
+    
+    if best_sample is not None:
+        inner_params = best_sample[:-1]
+        outer_radius = best_sample[-1]
+        
+        inner_hex_data = np.zeros((packer.num_inner, 3))
+        for i in range(packer.num_inner):
+            inner_hex_data[i] = inner_params[3*i:3*i+3]
+        
+        outer_hex_data = np.array([0, 0, 0])
+        return inner_hex_data, outer_hex_data, outer_radius
+    
+    # Ultimate fallback
+    inner_hex_data = np.array([
+        [0, 0, 0],        # center
+        [-2.5, 0, 0],     # left
+        [2.5, 0, 0],      # right
+        [-1.25, 2.17, 0], # top-left
+        [1.25, 2.17, 0],  # top-right
+        [-1.25, -2.17, 0], # bottom-left
+        [1.25, -2.17, 0], # bottom-right
+        [-3.75, 2.17, 0], # far top-left
+        [3.75, 2.17, 0],  # far top-right
+        [-3.75, -2.17, 0], # far bottom-left
+        [3.75, -2.17, 0], # far bottom-right
+    ])
+
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+def hexagon_packing_11():
+    return hexagon_packing_evolutionary()
+
+# EVOLVE-BLOCK-END

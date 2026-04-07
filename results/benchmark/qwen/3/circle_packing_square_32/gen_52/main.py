@@ -1,0 +1,177 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+
+    # Improved hexagonal grid initialization with better space filling
+    def create_hexagonal_grid(n_circles):
+        # Create a more systematic hexagonal grid for better space utilization
+        sqrt3 = np.sqrt(3)
+
+        # Use a more dense grid pattern
+        rows = int(np.ceil(np.sqrt(n_circles) * 1.2))
+        cols = int(np.ceil(n_circles / rows))
+
+        # Ensure we have enough space
+        while rows * cols < n_circles:
+            rows += 1
+
+        # Calculate spacing to fill the unit square properly
+        spacing = 0.12  # Slightly smaller spacing
+        grid_points = []
+
+        for i in range(rows):
+            for j in range(cols):
+                if len(grid_points) >= n_circles:
+                    break
+                # Offset every other row for hexagonal packing
+                x = (j + 0.5 * (i % 2)) * spacing + 0.03
+                y = i * spacing * sqrt3 / 2 + 0.03
+
+                # Only include points that fit in the unit square with better margins
+                if x <= 1 - spacing and y <= 1 - spacing:
+                    grid_points.append([x, y])
+
+        # Trim to exact number needed
+        grid_points = grid_points[:n_circles]
+
+        return np.array(grid_points)
+
+    # Initialize with hexagonal grid
+    grid_points = create_hexagonal_grid(n)
+
+    # Initialize circles with small uniform radii
+    circles = np.zeros((n, 3))
+    initial_radius = 0.025
+
+    for i in range(n):
+        circles[i] = [grid_points[i][0], grid_points[i][1], initial_radius]
+
+    # Enhanced optimization: iteratively increase radii with better prioritization
+    improvement_threshold = 1e-6
+    max_iterations = 300
+
+    for iteration in range(max_iterations):
+        improved = False
+
+        # Process circles in order of decreasing radius to prioritize larger ones
+        sorted_indices = np.argsort(circles[:, 2])[::-1]
+
+        for i in sorted_indices:
+            old_radius = circles[i][2]
+
+            # Calculate maximum possible radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left boundary
+                1 - circles[i][0],  # Distance to right boundary
+                circles[i][1],  # Distance to bottom boundary
+                1 - circles[i][1]  # Distance to top boundary
+            )
+
+            # Find minimum distance to other circles using vectorized operations for efficiency
+            if len(circles) > 1:
+                # Vectorized distance calculation
+                other_centers = circles[sorted_indices[:i] + sorted_indices[i+1:], :2]
+                distances = np.sqrt(np.sum((other_centers - circles[i][:2])**2, axis=1))
+                min_distance = np.min(distances) if len(distances) > 0 else float('inf')
+
+                # Maximum radius is limited by distance to neighbors minus current radius
+                if min_distance < float('inf'):
+                    max_radius = min(max_radius, min_distance - old_radius)
+
+            # Increase radius with a more conservative approach
+            # Use a slightly larger increment but stay within safe bounds
+            increment = min(0.0015, max_radius - old_radius)
+            new_radius = old_radius + increment
+
+            # Only update if there's meaningful improvement
+            if new_radius > old_radius + improvement_threshold:
+                circles[i][2] = new_radius
+                improved = True
+
+        # Early stopping if no significant improvement
+        if not improved:
+            break
+
+    # Final comprehensive validation and refinement
+    def validate_and_correct(circles_array):
+        # Step 1: Ensure all circles respect boundary constraints
+        for i in range(len(circles_array)):
+            x, y, r = circles_array[i]
+            # Ensure circle fits in unit square
+            r = min(r, x, 1-x, y, 1-y)
+            circles_array[i] = [x, y, r]
+
+        # Step 2: Resolve overlaps with more sophisticated handling
+        max_overlap_iterations = 100
+        for iteration in range(max_overlap_iterations):
+            changed = False
+
+            # Calculate all pairwise distances efficiently
+            distances = cdist(circles_array[:, :2], circles_array[:, :2])
+
+            # Process pairs by overlap amount for effective correction
+            overlap_pairs = []
+            for i in range(len(circles_array)):
+                for j in range(i+1, len(circles_array)):
+                    dist = distances[i, j]
+                    r_i, r_j = circles_array[i, 2], circles_array[j, 2]
+                    overlap = r_i + r_j - dist
+
+                    if overlap > 0:
+                        # Store overlap info with indices
+                        overlap_pairs.append((overlap, i, j, r_i, r_j))
+
+            # Sort by overlap amount (largest first)
+            overlap_pairs.sort(reverse=True)
+
+            # Process overlaps
+            for overlap, i, j, r_i, r_j in overlap_pairs:
+                # Reduce radii of both circles proportionally but prioritize larger ones
+                total_reduction = overlap * 0.6  # Moderate aggression
+                if (r_i + r_j) > 0:
+                    reduction_i = total_reduction * (r_i / (r_i + r_j))
+                    reduction_j = total_reduction * (r_j / (r_i + r_j))
+                else:
+                    reduction_i = reduction_j = total_reduction / 2
+
+                # Apply reductions
+                new_r_i = max(0.001, r_i - reduction_i)
+                new_r_j = max(0.001, r_j - reduction_j)
+
+                if new_r_i < r_i or new_r_j < r_j:
+                    circles_array[i, 2] = new_r_i
+                    circles_array[j, 2] = new_r_j
+                    changed = True
+
+            # Stop if no changes made
+            if not changed:
+                break
+
+        # Step 3: Final cleanup of boundary constraints and edge cases
+        for i in range(len(circles_array)):
+            x, y, r = circles_array[i]
+            # Ensure circle fits in unit square
+            r = min(r, x, 1-x, y, 1-y)
+            circles_array[i] = [x, y, r]
+
+        # Ensure no negative or zero radii
+        for i in range(len(circles_array)):
+            circles_array[i, 2] = max(circles_array[i, 2], 0.001)
+
+        return circles_array
+
+    circles = validate_and_correct(circles)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

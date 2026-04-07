@@ -1,0 +1,226 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from functools import lru_cache
+
+def generate_hexagon_vertices(center_x, center_y, side_length=1, rotation_degrees=0):
+    """Generate vertices of a regular hexagon."""
+    rotation_rad = np.radians(rotation_degrees)
+    angles = np.linspace(0, 2*np.pi, 7) + rotation_rad
+    vertices = np.column_stack([
+        center_x + side_length * np.cos(angles),
+        center_y + side_length * np.sin(angles)
+    ])
+    return vertices
+
+def create_hexagon_polygon(center_x, center_y, side_length=1, rotation_degrees=0):
+    """Create Shapely polygon for a hexagon."""
+    vertices = generate_hexagon_vertices(center_x, center_y, side_length, rotation_degrees)
+    return Polygon(vertices)
+
+def check_containment(hexagon_polygon, outer_hexagon_polygon):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hexagon_polygon.contains(hexagon_polygon)
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap."""
+    return hex1.intersects(hex2)
+
+def evaluate_fitness(individual, outer_hex_side_length):
+    """Evaluate fitness of an individual (configuration)."""
+    # Extract parameters
+    num_hexagons = len(individual) // 3
+    inner_hex_data = individual.reshape(num_hexagons, 3)
+    
+    # Create outer hexagon polygon
+    outer_hex = create_hexagon_polygon(0, 0, outer_hex_side_length, 0)
+    
+    # Check containment and overlap
+    total_penalty = 0
+    hex_polygons = []
+    
+    for i, (cx, cy, rot) in enumerate(inner_hex_data):
+        inner_hex = create_hexagon_polygon(cx, cy, 1, rot)
+        hex_polygons.append(inner_hex)
+        
+        # Check containment penalty
+        if not check_containment(inner_hex, outer_hex):
+            total_penalty += 1000
+            
+        # Check overlap penalties
+        for j in range(i):
+            if check_overlap(hex_polygons[i], hex_polygons[j]):
+                total_penalty += 100
+    
+    # If any constraint violated, penalize heavily
+    if total_penalty > 0:
+        return -total_penalty
+    
+    # Otherwise, maximize 1/outer_hex_side_length (minimize outer radius)
+    return 1.0 / outer_hex_side_length
+
+def initialize_population(pop_size, num_hexagons=12):
+    """Initialize population with diverse configurations."""
+    population = []
+    
+    # Generate diverse initial configurations
+    for _ in range(pop_size):
+        # Random positions within a reasonable area
+        positions = np.random.uniform(-3, 3, (num_hexagons, 2))
+        rotations = np.random.uniform(0, 360, num_hexagons)
+        
+        # Combine into individual
+        individual = np.column_stack([positions, rotations]).flatten()
+        population.append(individual)
+    
+    return population
+
+def mutate_individual(individual, mutation_rate=0.1, max_rotation_change=30):
+    """Mutate individual with special hexagon-aware mutations."""
+    mutated = individual.copy()
+    num_hexagons = len(individual) // 3
+    
+    # Apply mutation to positions and rotations
+    for i in range(num_hexagons):
+        if np.random.random() < mutation_rate:
+            # Mutate x position
+            mutated[i*3] += np.random.normal(0, 0.2)
+            
+        if np.random.random() < mutation_rate:
+            # Mutate y position
+            mutated[i*3+1] += np.random.normal(0, 0.2)
+            
+        if np.random.random() < mutation_rate:
+            # Mutate rotation
+            mutated[i*3+2] += np.random.normal(0, max_rotation_change)
+            mutated[i*3+2] = mutated[i*3+2] % 360
+    
+    return mutated
+
+def crossover_parents(parent1, parent2, crossover_rate=0.8):
+    """Crossover parents with hexagon-aware recombination."""
+    if np.random.random() > crossover_rate:
+        return parent1.copy(), parent2.copy()
+    
+    # Simple uniform crossover but maintain geometric constraints
+    offspring1 = parent1.copy()
+    offspring2 = parent2.copy()
+    
+    # Swap segments between parents
+    split_point = np.random.randint(1, len(parent1))
+    offspring1[split_point:] = parent2[split_point:]
+    offspring2[split_point:] = parent1[split_point:]
+    
+    return offspring1, offspring2
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    start_time = time.time()
+    
+    # Algorithm parameters
+    pop_size = 50
+    generations = 1000
+    elite_size = 5
+    mutation_rate = 0.1
+    
+    # Initialize population
+    population = initialize_population(pop_size)
+    
+    best_fitness = -np.inf
+    best_individual = None
+    
+    # Main evolutionary loop
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            # Try different outer hexagon sizes and find the best
+            current_best_fitness = -np.inf
+            best_size = 10
+            
+            # Test several sizes around expected range
+            test_sizes = [3.5, 3.6, 3.7, 3.8, 3.9, 4.0]
+            for size in test_sizes:
+                fitness = evaluate_fitness(individual, size)
+                if fitness > current_best_fitness:
+                    current_best_fitness = fitness
+                    best_size = size
+                    
+            fitness_scores.append(current_best_fitness)
+            
+            if current_best_fitness > best_fitness:
+                best_fitness = current_best_fitness
+                best_individual = individual.copy()
+                best_outer_size = best_size
+                
+        # Keep track of best solution
+        if gen % 100 == 0:
+            print(f"Generation {gen}: Best fitness = {best_fitness:.6f}")
+        
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+        
+        # Create new population with elitism
+        new_population = sorted_population[:elite_size]
+        
+        # Generate offspring through selection and crossover
+        while len(new_population) < pop_size:
+            # Tournament selection
+            tournament_size = 5
+            selected_indices = np.random.choice(len(sorted_population), tournament_size)
+            winner_idx = selected_indices[np.argmax([sorted_fitness[i] for i in selected_indices])]
+            
+            # Select another parent
+            selected_indices2 = np.random.choice(len(sorted_population), tournament_size)
+            winner_idx2 = selected_indices2[np.argmax([sorted_fitness[i] for i in selected_indices2])]
+            
+            # Crossover
+            child1, child2 = crossover_parents(sorted_population[winner_idx], sorted_population[winner_idx2])
+            
+            # Mutate children
+            child1 = mutate_individual(child1, mutation_rate)
+            child2 = mutate_individual(child2, mutation_rate)
+            
+            new_population.extend([child1, child2])
+            
+        population = new_population[:pop_size]
+        
+        # Early termination if we're getting very good results
+        if time.time() - start_time > 170:  # Leave some buffer for final processing
+            break
+    
+    # Final evaluation of best individual
+    final_size = 4.0  # Start with a reasonable guess
+    best_fitness = -np.inf
+    
+    # Fine tune the size
+    test_sizes = [3.9, 3.92, 3.94, 3.96, 3.98, 4.0]
+    for size in test_sizes:
+        fitness = evaluate_fitness(best_individual, size)
+        if fitness > best_fitness:
+            best_fitness = fitness
+            final_size = size
+    
+    # Convert best individual to proper format
+    num_hexagons = 12
+    inner_hex_data = best_individual.reshape(num_hexagons, 3)
+    
+    # Set outer hexagon at the center with rotation 0
+    outer_hex_data = np.array([0, 0, 0])
+    outer_hex_side_length = final_size
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

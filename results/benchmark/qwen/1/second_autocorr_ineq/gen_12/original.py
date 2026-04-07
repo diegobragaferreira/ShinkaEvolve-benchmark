@@ -1,0 +1,248 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import jit, prange
+import time
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals, dx):
+    """
+    Efficiently compute autoconvolution using Numba JIT compilation
+    """
+    n = len(f_vals)
+    # Autoconvolution using discrete convolution formula
+    # For step functions, we can use a more efficient approach
+    g = np.zeros(2*n - 1)
+    
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < len(g):
+                g[idx] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """
+    Compute L1, L2^2, and L-infinity norms efficiently
+    """
+    n = len(g_vals)
+    
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+    
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+    
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+    
+    return l1_norm, l2_sq_norm, linf_norm
+
+@jit(nopython=True)
+def compute_c2_numba(f_vals, dx):
+    """
+    Compute C2 value using optimized numba functions
+    """
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_numba(f_vals, dx)
+    
+    # Compute norms
+    l1, l2_sq, linf = compute_norms_numba(g_vals)
+    
+    # Avoid division by zero
+    if l1 <= 1e-15 or linf <= 1e-15:
+        return 0.0
+    
+    # Return C2 value
+    return l2_sq / (l1 * linf)
+
+def evaluate_step_function(f_vals):
+    """
+    Evaluate a step function and return C2 value
+    """
+    try:
+        # Ensure non-negative values
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+        
+        # Use a fixed dx for consistent spacing
+        dx = 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001
+        
+        # Compute C2 value
+        c2 = compute_c2_numba(f_vals, dx)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def create_initial_population(pop_size, min_steps, max_steps):
+    """
+    Create initial population of step functions
+    """
+    population = []
+    for _ in range(pop_size):
+        n_steps = np.random.randint(min_steps, max_steps)
+        # Generate random step heights
+        step_heights = np.random.exponential(scale=1.0, size=n_steps)
+        population.append(step_heights.tolist())
+    return population
+
+def mutate_individual(individual, mutation_rate=0.1):
+    """
+    Mutate an individual step function
+    """
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if np.random.random() < mutation_rate:
+            # Add small random perturbation
+            mutated[i] = max(0.0, mutated[i] + np.random.normal(0, 0.1))
+        # Small chance to adjust step count
+        if np.random.random() < 0.05 and len(mutated) > 1:
+            # Remove a step randomly
+            removed_idx = np.random.randint(len(mutated))
+            mutated.pop(removed_idx)
+        elif np.random.random() < 0.05:
+            # Add a new step
+            insert_idx = np.random.randint(len(mutated) + 1)
+            mutated.insert(insert_idx, np.random.exponential(scale=1.0))
+    return mutated
+
+def crossover_individuals(parent1, parent2):
+    """
+    Perform crossover between two individuals
+    """
+    # Simple uniform crossover
+    child1, child2 = [], []
+    min_len = min(len(parent1), len(parent2))
+    
+    for i in range(max(len(parent1), len(parent2))):
+        if i < min_len:
+            if np.random.random() < 0.5:
+                child1.append(parent1[i])
+                child2.append(parent2[i])
+            else:
+                child1.append(parent2[i])
+                child2.append(parent1[i])
+        elif i < len(parent1):
+            child1.append(parent1[i])
+            child2.append(np.random.exponential(scale=1.0))
+        else:
+            child2.append(parent2[i])
+            child1.append(np.random.exponential(scale=1.0))
+            
+    return child1, child2
+
+def evolve_steps():
+    """
+    Evolve step functions to maximize C2
+    """
+    # Parameters
+    pop_size = 50
+    generations = 200
+    min_steps = 50
+    max_steps = 5000
+    elite_size = 5
+    
+    # Create initial population
+    population = create_initial_population(pop_size, min_steps, max_steps)
+    
+    best_fitness = 0.0
+    best_individual = None
+    
+    # Evolution loop
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_step_function(individual)
+            fitness_scores.append((fitness, individual))
+        
+        # Sort by fitness
+        fitness_scores.sort(reverse=True)
+        
+        # Update best solution
+        current_best_fitness, current_best_individual = fitness_scores[0]
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_individual = current_best_individual.copy()
+        
+        # Select elite
+        elite = [ind for _, ind in fitness_scores[:elite_size]]
+        
+        # Create new population
+        new_population = elite.copy()
+        
+        # Fill rest with offspring
+        while len(new_population) < pop_size:
+            # Tournament selection
+            parent1 = tournament_selection(fitness_scores, 3)
+            parent2 = tournament_selection(fitness_scores, 3)
+            
+            # Crossover
+            child1, child2 = crossover_individuals(parent1, parent2)
+            
+            # Mutate
+            child1 = mutate_individual(child1)
+            child2 = mutate_individual(child2)
+            
+            new_population.extend([child1, child2])
+        
+        # Trim population to exact size
+        population = new_population[:pop_size]
+    
+    return best_individual if best_individual is not None else []
+
+def tournament_selection(fitness_scores, k):
+    """
+    Select individual using tournament selection
+    """
+    tournament = random.sample(fitness_scores, min(k, len(fitness_scores)))
+    return max(tournament, key=lambda x: x[0])[1]
+
+def construct_function() -> list[float]:
+    """
+    Function to construct step-function with high C2 value.
+    Uses evolutionary optimization to find better solutions than random initialization.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Run evolution
+    start_time = time.time()
+    try:
+        best_solution = evolve_steps()
+    except Exception as e:
+        # Fallback to simple approach if evolution fails
+        print(f"Evolution failed with error: {e}")
+        best_solution = [1.0] * 100  # Default case
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    # Ensure the solution is valid
+    if not best_solution:
+        best_solution = [1.0] * 100
+    
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Best C2 found: {evaluate_step_function(best_solution):.6f}")
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

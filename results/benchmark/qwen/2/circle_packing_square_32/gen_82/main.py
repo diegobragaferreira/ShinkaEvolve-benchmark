@@ -1,0 +1,380 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial import cKDTree
+import math
+from typing import Tuple, List, Optional
+import random
+from collections import defaultdict
+
+class DensityGuidedEvolutionOptimizer:
+    def __init__(self, n_circles: int = 32):
+        self.n_circles = n_circles
+        self.best_solution = None
+        self.best_sum_radii = -float('inf')
+        self.seed = 42  # Fixed seed for reproducibility
+        
+    def _initialize_density_aware_positions(self) -> np.ndarray:
+        """Initialize positions using density-aware placement strategy."""
+        positions = []
+        max_attempts = 10000
+        
+        # Start with a regular hexagonal grid as base
+        cols = int(math.ceil(math.sqrt(self.n_circles)))
+        rows = int(math.ceil(self.n_circles / cols))
+        
+        base_positions = []
+        for i in range(rows):
+            for j in range(cols):
+                x_offset = j + 0.5 * (i % 2)
+                y_offset = i * math.sqrt(3) / 2
+                base_positions.append([x_offset, y_offset])
+        
+        # Normalize base grid to [0.1, 0.9] range
+        if len(base_positions) > 0:
+            base_positions = np.array(base_positions)
+            min_x, min_y = base_positions.min(axis=0)
+            max_x, max_y = base_positions.max(axis=0)
+            
+            if max_x - min_x > 0 and max_y - min_y > 0:
+                scale_x = 0.8 / (max_x - min_x)
+                scale_y = 0.8 / (max_y - min_y)
+                base_positions[:, 0] = (base_positions[:, 0] - min_x) * scale_x + 0.1
+                base_positions[:, 1] = (base_positions[:, 1] - min_y) * scale_y + 0.1
+        
+        # Fill with base positions
+        for i in range(min(self.n_circles, len(base_positions))):
+            positions.append([base_positions[i][0], base_positions[i][1]])
+        
+        # Fill remaining positions with density-aware placement
+        if len(positions) < self.n_circles:
+            # Build initial k-d tree for density estimation
+            tree = None
+            if len(positions) > 1:
+                tree = cKDTree(np.array(positions))
+            
+            for _ in range(self.n_circles - len(positions)):
+                # Find candidates that are more spread out (higher density)
+                candidate_positions = []
+                for _ in range(100):
+                    x = np.random.uniform(0.05, 0.95)
+                    y = np.random.uniform(0.05, 0.95)
+                    
+                    # Check if it's far enough from existing positions
+                    min_dist = float('inf')
+                    if len(positions) > 0:
+                        if tree is not None:
+                            distances, _ = tree.query([x, y], k=min(5, len(positions)))
+                            if isinstance(distances, np.ndarray):
+                                min_dist = np.min(distances)
+                            else:
+                                min_dist = distances
+                        else:
+                            for px, py in positions:
+                                dist = np.sqrt((x - px)**2 + (y - py)**2)
+                                min_dist = min(min_dist, dist)
+                    
+                    # Prefer positions that are farther from existing circles
+                    if min_dist > 0.02:  # Minimum separation constraint
+                        candidate_positions.append([x, y, min_dist])
+                
+                if candidate_positions:
+                    # Choose the one with maximum minimum distance to existing circles
+                    best_candidate = max(candidate_positions, key=lambda p: p[2])
+                    positions.append([best_candidate[0], best_candidate[1]])
+                    
+                    # Update tree for next iteration
+                    if len(positions) > 1 and tree is None:
+                        tree = cKDTree(np.array(positions))
+                else:
+                    # Fallback to regular grid
+                    if len(base_positions) > len(positions):
+                        positions.append([base_positions[len(positions)][0], base_positions[len(positions)][1]])
+        
+        return np.array(positions[:self.n_circles])
+
+    def _compute_initial_radii(self, positions: np.ndarray) -> np.ndarray:
+        """Compute initial radii based on density-aware placement and constraints."""
+        radii = np.zeros(self.n_circles)
+        
+        # Build k-d tree once for efficient neighbor queries
+        tree = None
+        if len(positions) > 1:
+            tree = cKDTree(positions)
+        
+        for i, pos in enumerate(positions):
+            x, y = pos
+            # Boundary constraint
+            r_boundary = min(x, 1-x, y, 1-y)
+            
+            if r_boundary <= 0.001:
+                radii[i] = 0.001
+                continue
+            
+            # For density-adaptive radius calculations
+            min_dist = float('inf')
+            if i > 0:
+                # Check overlap with already placed circles
+                for j in range(i):
+                    if j < len(positions):
+                        circ_x, circ_y, circ_r = positions[j][0], positions[j][1], radii[j]
+                        dist = np.sqrt((x - circ_x)**2 + (y - circ_y)**2)
+                        min_dist = min(min_dist, dist)
+            
+            # Density estimation using k-d tree
+            r_density = 0.0
+            if tree is not None and i > 0:
+                # Find 5 nearest neighbors
+                k = min(5, i)
+                distances, indices = tree.query(pos, k=k+1)  # +1 to include the point itself
+                # Remove self-reference
+                distances = distances[1:] if indices[0] == i else distances
+                if len(distances) > 0:
+                    avg_dist = np.mean(distances)
+                    # Set radius inversely proportional to local density
+                    r_density = max(0.001, min(0.5, avg_dist / 4.0))
+            
+            # Take the minimum of boundary, overlap, and density-based constraints
+            if min_dist != float('inf'):
+                r_overlap = min_dist / 2.0 - 0.001
+                final_radius = min(r_boundary, r_overlap)
+            else:
+                final_radius = r_boundary
+            
+            # Adjust with density consideration
+            if r_density > 0:
+                final_radius = min(final_radius, r_density)
+            
+            radii[i] = max(0.001, min(0.5, final_radius))
+            
+        return radii
+
+    def _evaluate_fitness(self, circles_flat: np.ndarray) -> float:
+        """Evaluate the fitness of a circle configuration with adaptive penalties."""
+        # Reshape flat array back into circles
+        circles = circles_flat.reshape((self.n_circles, 3))
+        
+        # Calculate sum of radii (this is what we want to maximize)
+        total_radius = np.sum(circles[:, 2])
+        
+        penalty = 0.0
+        
+        # Boundary penalties with adaptive scaling
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            # Penalties for boundary violations
+            b_penalties = []
+            if x - r < 0:
+                violation = 0.0 - (x - r)
+                b_penalties.append(violation * 1000.0 * (1.0 + violation * 5.0))
+            if x + r > 1:
+                violation = (x + r) - 1.0
+                b_penalties.append(violation * 1000.0 * (1.0 + violation * 5.0))
+            if y - r < 0:
+                violation = 0.0 - (y - r)
+                b_penalties.append(violation * 1000.0 * (1.0 + violation * 5.0))
+            if y + r > 1:
+                violation = (y + r) - 1.0
+                b_penalties.append(violation * 1000.0 * (1.0 + violation * 5.0))
+            
+            penalty += sum(b_penalties)
+        
+        # Overlap penalties with adaptive scaling and spatial indexing
+        if len(circles) > 1:
+            # Build k-d tree for fast neighbor search
+            positions = circles[:, :2]
+            tree = cKDTree(positions)
+            
+            # Search for nearby points to reduce pairwise comparisons
+            for i in range(self.n_circles):
+                x1, y1, r1 = circles[i]
+                
+                # Query nearby circles (within 4*(r1 + r_max) distance)
+                r_max = np.max(circles[:, 2]) if len(circles) > 0 else 0.5
+                query_radius = 4 * (r1 + r_max)
+                
+                neighbors = tree.query_ball_point([x1, y1], query_radius)
+                
+                for j in neighbors:
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                        
+                        # Adaptive penalty for overlap
+                        overlap = (r1 + r2) - distance
+                        if overlap > 0:
+                            # Scale penalty based on overlap severity
+                            penalty_weight = 1000.0 * (1.0 + overlap * 10.0)
+                            penalty += penalty_weight * (1.0 - np.exp(-overlap * 20.0))
+        
+        # Return negative because we minimize in scipy but want to maximize radius sum
+        return -(total_radius - penalty)
+
+    def _optimize_stage(self, initial_solution: np.ndarray, 
+                       bounds: List[Tuple[float, float]], 
+                       max_iter: int = 1000) -> Optional[np.ndarray]:
+        """Perform optimization stage with specified parameters."""
+        try:
+            # Use scipy's L-BFGS-B for fine optimization
+            result = minimize(
+                self._evaluate_fitness, 
+                initial_solution, 
+                method='L-BFGS-B', 
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-6, 'gtol': 1e-6}
+            )
+            
+            if result.success:
+                final_fitness = self._evaluate_fitness(result.x)
+                sum_radii = -final_fitness
+                
+                if sum_radii > self.best_sum_radii:
+                    self.best_sum_radii = sum_radii
+                    self.best_solution = result.x.copy()
+                
+                return result.x
+        except Exception as e:
+            print(f"Optimization stage failed: {e}")
+            return None
+            
+        return None
+
+    def _mutate_solution(self, solution: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+        """Mutate solution with density-aware constraints preservation."""
+        mutated = solution.copy()
+        
+        # Reshape to circles format
+        circles = mutated.reshape((self.n_circles, 3))
+        
+        # Mutate positions and radii with careful constraint handling
+        for i in range(self.n_circles):
+            if np.random.random() < mutation_rate:
+                # Mutate position
+                circles[i, 0] = np.clip(circles[i, 0] + np.random.normal(0, 0.01), 0.05, 0.95)
+                circles[i, 1] = np.clip(circles[i, 1] + np.random.normal(0, 0.01), 0.05, 0.95)
+                
+                # Mutate radius with respect to constraints
+                delta_r = np.random.normal(0, 0.005)
+                new_r = circles[i, 2] + delta_r
+                # Respect boundary constraints
+                x, y, r = circles[i]
+                boundary_constraint = min(x, 1-x, y, 1-y)
+                new_r = min(new_r, boundary_constraint)
+                new_r = max(new_r, 0.001)
+                circles[i, 2] = new_r
+        
+        return circles.flatten()
+
+    def _generate_population(self, population_size: int) -> List[np.ndarray]:
+        """Generate diverse initial population using multiple strategies."""
+        population = []
+        for i in range(population_size):
+            np.random.seed(self.seed + i)
+            
+            # Strategy 1: Hexagonal grid + noise
+            positions = self._initialize_density_aware_positions()
+            noise_scale = 0.03
+            positions += np.random.uniform(-noise_scale, noise_scale, positions.shape)
+            positions = np.clip(positions, 0.05, 0.95)
+            radii = self._compute_initial_radii(positions)
+            
+            # Combine into flat array
+            solution = np.column_stack([positions, radii]).flatten()
+            population.append(solution)
+        
+        return population
+
+    def _select_best_individuals(self, population: List[np.ndarray], 
+                               fitness_scores: List[float], 
+                               num_select: int) -> List[np.ndarray]:
+        """Select top individuals based on fitness scores."""
+        # Sort by fitness (ascending since we minimize negative fitness)
+        sorted_indices = np.argsort(fitness_scores)
+        selected = [population[i] for i in sorted_indices[:num_select]]
+        return selected
+
+    def _evolve_population(self, population: List[np.ndarray], 
+                          generation: int) -> List[np.ndarray]:
+        """Evolve population with selection and mutation."""
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = self._evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+        
+        # Select best individuals
+        num_selected = max(2, len(population) // 2)
+        selected = self._select_best_individuals(population, fitness_scores, num_selected)
+        
+        # Create new population through mutation
+        new_population = selected.copy()
+        while len(new_population) < len(population):
+            # Select a parent
+            parent = random.choice(selected)
+            # Mutate
+            child = self._mutate_solution(parent, mutation_rate=0.15)
+            new_population.append(child)
+        
+        return new_population[:len(population)]
+
+    def optimize(self) -> np.ndarray:
+        """Main optimization routine using density-guided evolution."""
+        print("Starting density-guided evolution optimization...")
+        
+        # Phase 1: Population-based evolution with diverse initializations
+        population_size = 8
+        max_generations = 10
+        
+        # Generate initial population
+        population = self._generate_population(population_size)
+        
+        # Evolve population
+        bounds = [(0.001, 0.999), (0.001, 0.999), (0.001, 0.5)] * self.n_circles
+        
+        for gen in range(max_generations):
+            print(f"Evolving generation {gen + 1}...")
+            population = self._evolve_population(population, gen)
+            
+            # Check progress
+            current_best_fitness = min([self._evaluate_fitness(ind) for ind in population])
+            current_best_radii = -current_best_fitness
+            print(f"Generation {gen + 1} best sum_radii: {current_best_radii:.6f}")
+            
+            if current_best_radii > self.best_sum_radii:
+                self.best_sum_radii = current_best_radii
+                # Get the actual best individual from population
+                best_individual_idx = np.argmin([self._evaluate_fitness(ind) for ind in population])
+                self.best_solution = population[best_individual_idx].copy()
+        
+        # Phase 2: Refinement using local optimization
+        print("Starting refinement phase...")
+        if self.best_solution is not None:
+            # Local refinement with L-BFGS-B
+            self._optimize_stage(self.best_solution, bounds, max_iter=1000)
+        else:
+            # Fallback to single initialization
+            positions = self._initialize_density_aware_positions()
+            radii = self._compute_initial_radii(positions)
+            initial_solution = np.column_stack([positions, radii]).flatten()
+            self._optimize_stage(initial_solution, bounds, max_iter=1000)
+        
+        # Return best solution found
+        if self.best_solution is not None:
+            return self.best_solution.reshape((self.n_circles, 3))
+        else:
+            # Final fallback
+            fallback_positions = self._initialize_density_aware_positions()
+            fallback_radii = np.full(self.n_circles, 0.02)
+            return np.column_stack([fallback_positions, fallback_radii])
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    optimizer = DensityGuidedEvolutionOptimizer(32)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,417 @@
+<NAME>
+enhance_perturbation_strategies
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the perturbation strategies by implementing a more sophisticated multi-phase approach that combines different perturbation techniques based on the current optimization phase and configuration characteristics. This includes introducing a "smart perturbation" that analyzes the current point distribution and selects the most appropriate perturbation method dynamically.
+
+The key improvements are:
+1. Adding a smart perturbation selector that chooses between Voronoi-guided, distance-weighted, and random perturbations based on configuration analysis
+2. Improving the adaptive cooling schedule to be more responsive to optimization progress
+3. Enhancing the checkpoint/restart mechanism with more intelligent conditions
+4. Adding a final refinement phase that applies specialized optimization techniques
+
+These changes should help escape local optima more effectively and achieve better convergence toward the target ratio.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> Tuple[np.ndarray, float]:
+        """Main optimization loop with improved architecture."""
+        # Initialize population with multiple seeds
+        self.state_manager.initialize_population(
+            self.point_generator,
+            self.distance_calculator,
+            self.config.num_seeds,
+            self.config.n_points
+        )
+
+        # Run optimization loop
+        current_points = self.state_manager.current_points
+        current_ratio = self.state_manager.current_ratio
+
+        temp = self.config.initial_temp
+        iteration_count = 0
+        last_improvement_iter = 0
+        stagnation_counter = 0
+        recent_improvements = []
+
+        # Checkpoint tracking
+        checkpoint_points = None
+        checkpoint_ratio = 0.0
+        last_checkpoint_iter = 0
+
+        while iteration_count < self.config.max_iterations and temp > self.config.final_temp:
+            # Generate candidate solution
+            if iteration_count % 3 == 0:
+                candidate_points = self.perturbation_engine.voronoi_guided_perturbation(
+                    current_points, temp, self.voronoi_computer, self.config.voronoi_threshold
+                )
+            else:
+                candidate_points = self.perturbation_engine.distance_weighted_perturbation(
+                    current_points, temp, self.distance_calculator
+                )
+
+            candidate_ratio = self.distance_calculator.calculate_ratio(candidate_points)
+
+            # Accept or reject based on Metropolis criterion
+            delta_ratio = candidate_ratio - current_ratio
+
+            # Temperature-based acceptance
+            if temp < 1e-12:
+                accept_prob = 1.0 if delta_ratio > 0 else 0.0
+            else:
+                accept_prob = min(1.0, np.exp(delta_ratio / temp))
+
+            accepted = np.random.random() < accept_prob
+
+            if accepted:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+
+                # Update best solution
+                if current_ratio > self.state_manager.best_ratio:
+                    self.state_manager.best_points = current_points.copy()
+                    self.state_manager.best_ratio = current_ratio
+                    recent_improvements.append(iteration_count)
+                    if len(recent_improvements) > 10:
+                        recent_improvements.pop(0)
+                    stagnation_counter = 0
+                    last_improvement_iter = iteration_count
+                else:
+                    stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+
+            # Apply adaptive cooling
+            if accepted or stagnation_counter < 1000:
+                temp = self.optimization_controller.adaptive_cooling_schedule(
+                    temp, accepted, len(recent_improvements)
+                )
+
+            iteration_count += 1
+
+            # Checkpoint management
+            if iteration_count % self.config.checkpoint_interval == 0:
+                # Save checkpoint if improvement
+                if current_ratio > checkpoint_ratio:
+                    checkpoint_ratio = current_ratio
+                    checkpoint_points = current_points.copy()
+                    last_checkpoint_iter = iteration_count
+
+                # Restart from checkpoint if stagnated
+                if iteration_count - last_improvement_iter > self.config.early_stopping_patience // 2:
+                    if (checkpoint_points is not None and
+                        checkpoint_ratio > current_ratio * 0.99):
+                        current_points = checkpoint_points.copy()
+                        current_ratio = checkpoint_ratio
+                        last_improvement_iter = iteration_count
+                        last_checkpoint_iter = iteration_count
+
+            # Early stopping
+            if iteration_count - last_improvement_iter > self.config.early_stopping_patience:
+                break
+
+            # Additional cooling when stagnated
+            if stagnation_counter > self.config.stagnation_limit:
+                temp = max(temp * 0.95, self.config.final_temp)
+                stagnation_counter = 0
+
+            # Periodic local refinement
+            if iteration_count % self.config.refinement_frequency == 0 and iteration_count > 0:
+                refined_points, refined_ratio = self._adaptive_local_refinement(
+                    self.state_manager.best_points, self.config.local_refinement_iters
+                )
+
+                if refined_ratio > self.state_manager.best_ratio:
+                    self.state_manager.best_points = refined_points
+                    self.state_manager.best_ratio = refined_ratio
+
+        return self.state_manager.best_points, self.state_manager.best_ratio
+=======
+    def optimize(self) -> Tuple[np.ndarray, float]:
+        """Main optimization loop with improved architecture."""
+        # Initialize population with multiple seeds
+        self.state_manager.initialize_population(
+            self.point_generator,
+            self.distance_calculator,
+            self.config.num_seeds,
+            self.config.n_points
+        )
+
+        # Run optimization loop
+        current_points = self.state_manager.current_points
+        current_ratio = self.state_manager.current_ratio
+
+        temp = self.config.initial_temp
+        iteration_count = 0
+        last_improvement_iter = 0
+        stagnation_counter = 0
+        recent_improvements = []
+
+        # Checkpoint tracking
+        checkpoint_points = None
+        checkpoint_ratio = 0.0
+        last_checkpoint_iter = 0
+
+        # Phase tracking for adaptive strategies
+        phase = "exploration"  # exploration, exploitation, refinement
+
+        while iteration_count < self.config.max_iterations and temp > self.config.final_temp:
+            # Dynamic perturbation selection based on optimization phase and configuration
+            candidate_points = self._select_and_apply_perturbation(
+                current_points, temp, iteration_count, phase
+            )
+
+            candidate_ratio = self.distance_calculator.calculate_ratio(candidate_points)
+
+            # Accept or reject based on Metropolis criterion
+            delta_ratio = candidate_ratio - current_ratio
+
+            # Temperature-based acceptance
+            if temp < 1e-12:
+                accept_prob = 1.0 if delta_ratio > 0 else 0.0
+            else:
+                accept_prob = min(1.0, np.exp(delta_ratio / temp))
+
+            accepted = np.random.random() < accept_prob
+
+            if accepted:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+
+                # Update best solution
+                if current_ratio > self.state_manager.best_ratio:
+                    self.state_manager.best_points = current_points.copy()
+                    self.state_manager.best_ratio = current_ratio
+                    recent_improvements.append(iteration_count)
+                    if len(recent_improvements) > 10:
+                        recent_improvements.pop(0)
+                    stagnation_counter = 0
+                    last_improvement_iter = iteration_count
+                    # Change phase to exploitation when we find a good solution
+                    if phase == "exploration" and current_ratio > 0.3:
+                        phase = "exploitation"
+                else:
+                    stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+
+            # Apply adaptive cooling with improved responsiveness
+            temp = self.optimization_controller.adaptive_cooling_schedule(
+                temp, accepted, len(recent_improvements), stagnation_counter
+            )
+
+            iteration_count += 1
+
+            # Checkpoint management with smarter conditions
+            if iteration_count % self.config.checkpoint_interval == 0:
+                # Save checkpoint if significant improvement
+                if current_ratio > checkpoint_ratio:
+                    checkpoint_ratio = current_ratio
+                    checkpoint_points = current_points.copy()
+                    last_checkpoint_iter = iteration_count
+
+                # Restart from checkpoint if stagnated significantly and we're in later phases
+                if (iteration_count - last_improvement_iter > self.config.early_stopping_patience // 2 and
+                    phase != "exploration"):
+                    if (checkpoint_points is not None and
+                        checkpoint_ratio > current_ratio * 0.99):
+                        current_points = checkpoint_points.copy()
+                        current_ratio = checkpoint_ratio
+                        last_improvement_iter = iteration_count
+                        last_checkpoint_iter = iteration_count
+
+            # Early stopping
+            if iteration_count - last_improvement_iter > self.config.early_stopping_patience:
+                break
+
+            # Additional cooling when stagnated
+            if stagnation_counter > self.config.stagnation_limit:
+                temp = max(temp * 0.95, self.config.final_temp)
+                stagnation_counter = 0
+
+            # Periodic local refinement with enhanced strategy
+            if iteration_count % self.config.refinement_frequency == 0 and iteration_count > 0:
+                refined_points, refined_ratio = self._adaptive_local_refinement(
+                    self.state_manager.best_points, self.config.local_refinement_iters
+                )
+
+                if refined_ratio > self.state_manager.best_ratio:
+                    self.state_manager.best_points = refined_points
+                    self.state_manager.best_ratio = refined_ratio
+
+        # Final refinement phase for maximum improvement
+        final_refinement_points, final_refinement_ratio = self._final_refinement(
+            self.state_manager.best_points, 1000
+        )
+
+        if final_refinement_ratio > self.state_manager.best_ratio:
+            self.state_manager.best_points = final_refinement_points
+            self.state_manager.best_ratio = final_refinement_ratio
+
+        return self.state_manager.best_points, self.state_manager.best_ratio
+
+    def _select_and_apply_perturbation(self, current_points: np.ndarray, temp: float,
+                                     iteration_count: int, phase: str) -> np.ndarray:
+        """Select and apply the most appropriate perturbation based on context."""
+
+        # Determine which perturbation strategy to use
+        if phase == "exploration":
+            # In early phases, use more diverse strategies to explore space
+            if iteration_count % 4 == 0:
+                return self.perturbation_engine.voronoi_guided_perturbation(
+                    current_points, temp, self.voronoi_computer, self.config.voronoi_threshold
+                )
+            else:
+                return self.perturbation_engine.distance_weighted_perturbation(
+                    current_points, temp, self.distance_calculator
+                )
+        elif phase == "exploitation":
+            # In middle phases, focus on exploitation with careful balance
+            if iteration_count % 3 == 0:
+                return self.perturbation_engine.voronoi_guided_perturbation(
+                    current_points, temp, self.voronoi_computer, self.config.voronoi_threshold
+                )
+            else:
+                return self.perturbation_engine.distance_weighted_perturbation(
+                    current_points, temp, self.distance_calculator
+                )
+        else:  # refinement phase
+            # In late phases, be more selective and aggressive
+            return self.perturbation_engine.voronoi_guided_perturbation(
+                current_points, temp, self.voronoi_computer, self.config.voronoi_threshold
+            )
+
+    def _final_refinement(self, starting_points: np.ndarray, max_iters: int = 1000) -> Tuple[np.ndarray, float]:
+        """Apply intensive final refinement to squeeze out remaining improvements."""
+        current_points = starting_points.copy()
+        current_ratio = self.distance_calculator.calculate_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        # More aggressive refinement with different perturbation patterns
+        for iter_num in range(max_iters):
+            # Use a more focused approach: perturb 3 points at a time
+            num_perturbed = min(3, len(current_points) // 2)
+            indices_to_perturb = np.random.choice(len(current_points), num_perturbed, replace=False)
+
+            candidate_points = current_points.copy()
+
+            for idx in indices_to_perturb:
+                # Much larger perturbations in final refinement
+                perturbation = np.random.normal(0, 0.02, 3)
+                candidate_points[idx] += perturbation
+
+            # Project back to sphere
+            candidate_points = self.perturbation_engine.project_to_sphere(candidate_points)
+
+            candidate_ratio = self.distance_calculator.calculate_ratio(candidate_points)
+
+            # Accept improvement or sometimes accept worse solutions to escape local minima
+            if candidate_ratio > current_ratio:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+
+                if current_ratio > best_ratio:
+                    best_points = current_points.copy()
+                    best_ratio = current_ratio
+            else:
+                # Accept worse solution with higher probability in final phase
+                if np.random.rand() < 0.05:
+                    current_points = candidate_points
+                    current_ratio = candidate_ratio
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_cooling_schedule(self, temp: float, improvement: bool,
+                                recent_improvements_count: int) -> float:
+        """Apply adaptive cooling schedule based on recent improvements."""
+        if recent_improvements_count < 2:
+            # Very aggressive cooling if no recent improvements
+            return temp * 0.999
+        elif recent_improvements_count >= 6:
+            # Faster cooling for consistent improvements
+            return temp * (self.config.cooling_rate * 0.9)
+        else:
+            # Normal cooling
+            return temp * self.config.cooling_rate
+=======
+    def adaptive_cooling_schedule(self, temp: float, improvement: bool,
+                                recent_improvements_count: int, stagnation_count: int) -> float:
+        """Apply adaptive cooling schedule based on recent improvements and stagnation."""
+        if recent_improvements_count < 2 and stagnation_count > 500:
+            # Very aggressive cooling if no recent improvements AND significant stagnation
+            return temp * 0.998
+        elif recent_improvements_count >= 6:
+            # Faster cooling for consistent improvements
+            return temp * (self.config.cooling_rate * 0.95)
+        elif stagnation_count > 1000:
+            # Accelerate cooling when stuck
+            return temp * 0.99
+        else:
+            # Normal cooling
+            return temp * self.config.cooling_rate
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class OptimizationConfig:
+    """Configuration parameters for the optimization process."""
+    n_points: int = 14
+    n_dimensions: int = 3
+    max_iterations: int = 100000
+    initial_temp: float = 1.0
+    final_temp: float = 1e-6
+    cooling_rate: float = 0.9995
+    log_interval: int = 1000
+    num_seeds: int = 8
+    voronoi_threshold: float = 0.1
+    local_refinement_iters: int = 500
+    early_stopping_patience: int = 10000
+    stagnation_limit: int = 5000
+    refinement_frequency: int = 2000
+    checkpoint_interval: int = 30
+=======
+class OptimizationConfig:
+    """Configuration parameters for the optimization process."""
+    n_points: int = 14
+    n_dimensions: int = 3
+    max_iterations: int = 100000
+    initial_temp: float = 1.0
+    final_temp: float = 1e-6
+    cooling_rate: float = 0.9995
+    log_interval: int = 1000
+    num_seeds: int = 8
+    voronoi_threshold: float = 0.1
+    local_refinement_iters: int = 500
+    early_stopping_patience: int = 10000
+    stagnation_limit: int = 5000
+    refinement_frequency: int = 2000
+    checkpoint_interval: int = 30
+    final_refinement_iters: int = 1000
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        early_stopping_patience=10000,
+        stagnation_limit=5000,
+        refinement_frequency=2000,
+        checkpoint_interval=30
+=======
+        early_stopping_patience=10000,
+        stagnation_limit=5000,
+        refinement_frequency=2000,
+        checkpoint_interval=30,
+        final_refinement_iters=1000
+>>>>>>> REPLACE
+</DIFF>

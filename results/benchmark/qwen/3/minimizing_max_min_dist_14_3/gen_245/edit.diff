@@ -1,0 +1,577 @@
+--- a/original.py
++++ b/original.py
+@@ -1,316 +1,381 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist
+ from scipy.spatial import SphericalVoronoi
+-
++from numba import jit
++import warnings
++
++@jit(nopython=True)
++def fast_pdist_matrix(points):
++    """Fast computation of pairwise distances using Numba."""
++    n = points.shape[0]
++    distances = np.zeros((n, n))
++    for i in range(n):
++        for j in range(i+1, n):
++            dist = 0.0
++            for k in range(3):
++                diff = points[i, k] - points[j, k]
++                dist += diff * diff
++            dist = np.sqrt(dist)
++            distances[i, j] = dist
++            distances[j, i] = dist
++    return distances
+ 
+ def fibonacci_sphere(n):
+     """Generate n points evenly distributed on a unit sphere using Fibonacci spiral method."""
+     points = []
+     phi = np.pi * (3 - np.sqrt(5))  # golden angle
+ 
+     for i in range(n):
+         y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+         radius = np.sqrt(1 - y * y)  # radius at y
+ 
+         theta = phi * i  # golden angle increment
+ 
+         x = np.cos(theta) * radius
+         z = np.sin(theta) * radius
+ 
+         points.append([x, y, z])
+ 
+     return np.array(points)
+ 
+-
+-def latin_hypercube_sampling(n, d, seed=42):
+-    """Generate n points using Latin Hypercube Sampling in d dimensions."""
+-    np.random.seed(seed)
+-    samples = np.zeros((n, d))
+-
+-    for i in range(d):
+-        # Generate random permutation for each dimension
+-        perm = np.random.permutation(n)
+-        samples[:, i] = perm
+-
+-    # Normalize to [0, 1]
+-    samples = samples / (n - 1)
+-
+-    return samples
+-
++def icosahedral_initialization(n_points):
++    """Initialize points using icosahedral symmetry for better uniformity."""
++    # Golden ratio
++    phi = (1 + np.sqrt(5)) / 2
++
++    # Vertices of icosahedron scaled to unit sphere
++    vertices = []
++    # Add vertices at (±1, 0, ±φ) and permutations
++    for i in [1, -1]:
++        for j in [0, 1, -1]:
++            for k in [0, 1, -1]:
++                if i*j*k != 0:
++                    vertices.append([i, j*phi, k/phi])
++                elif i*j != 0:
++                    vertices.append([i, j, k*phi])
++                elif i*k != 0:
++                    vertices.append([i, j*phi, k])
++                elif j*k != 0:
++                    vertices.append([i*phi, j, k])
++
++    # Normalize to unit sphere and take first n_points
++    vertices = np.array(vertices)
++    norms = np.linalg.norm(vertices, axis=1, keepdims=True)
++    vertices = vertices / norms
++
++    # For 14 points, we'll use a modified approach
++    # Generate points on icosahedron faces
++    points = []
++
++    # Add vertices of icosahedron
++    ico_vertices = np.array([
++        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
++        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
++        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
++    ])
++
++    # Normalize to unit sphere
++    norms = np.linalg.norm(ico_vertices, axis=1, keepdims=True)
++    ico_vertices = ico_vertices / norms
++
++    # For 14 points, we can start with 12 vertices and add 2 more
++    selected_vertices = ico_vertices[[0,2,4,6,8,10,1,3,5,7,9,11]]
++
++    # Add additional points in strategic locations
++    additional_points = []
++    for i in range(n_points - len(selected_vertices)):
++        # Add points along great circles
++        angle = 2 * np.pi * i / (n_points - len(selected_vertices))
++        point = [np.cos(angle), np.sin(angle), 0]
++        additional_points.append(point)
++
++    points = np.vstack([selected_vertices, additional_points])
++
++    # Normalize to unit sphere
++    norms = np.linalg.norm(points, axis=1, keepdims=True)
++    points = points / norms
++
++    # Apply slight random perturbations to avoid perfect symmetry
++    np.random.seed(42)
++    perturbations = np.random.normal(0, 0.02, (len(points), 3))
++    points += perturbations
++    # Project back to sphere
++    norms = np.linalg.norm(points, axis=1, keepdims=True)
++    points = points / norms
++
++    # Scale to unit cube [0,1]^3
++    points = (points + 1) / 2
++    return points
+ 
+ def spherical_map(points):
+     """Map points from 3D space to unit sphere using normalization."""
+     norms = np.linalg.norm(points, axis=1, keepdims=True)
+     # Avoid division by zero
+     norms = np.where(norms == 0, 1, norms)
+     return points / norms
+-
+ 
+ def spherical_voronoi_quality(sphere_points):
+     """Calculate quality based on Voronoi cell areas on sphere."""
+     if len(sphere_points) < 2:
+         return 0
+ 
+     # Create spherical Voronoi diagram
+     try:
+         sv = SphericalVoronoi(sphere_points)
+         # Calculate total area of Voronoi cells
+         cell_areas = sv.calculate_areas()
+         # Quality is inversely related to variance of cell areas
+         # More uniform areas indicate better distribution
+         if len(cell_areas) > 0:
+             mean_area = np.mean(cell_areas)
+             if mean_area > 0:
+                 variance = np.var(cell_areas)
+                 # Return inverse variance (higher is better)
+                 return 1.0 / (1.0 + variance / mean_area**2)
+     except Exception:
+         pass
+     return 0
+ 
+-
+ def min_max_ratio(points):
+     """Calculate the ratio of minimum to maximum pairwise distances."""
+     if len(points) < 2:
+         return 0
+ 
+     # Calculate pairwise distances
+     distances = pdist(points)
+ 
+     # Get min and max distances
+     d_min = np.min(distances)
+     d_max = np.max(distances)
+ 
+     # Avoid division by zero
+     if d_max == 0:
+         return 0
+ 
+     return d_min / d_max
+ 
+-
+-def penalty_objective(x_flat, penalty_weight=1e6):
+-    """Objective function with penalty for out-of-bounds points."""
+-    # Reshape flat array back to points
+-    n_points = 14
+-    points = x_flat.reshape((n_points, 3))
+-
+-    # Apply penalty for constraint violations
++def constraint_penalty(points, penalty_weight=1000.0):
++    """Calculate penalty for constraint violations."""
+     penalty = 0
+-    for i in range(n_points):
++    for i in range(len(points)):
+         for j in range(3):  # x, y, z coordinates
+             if points[i, j] < 0:
+                 penalty += penalty_weight * (0 - points[i, j])**2
+             elif points[i, j] > 1:
+                 penalty += penalty_weight * (points[i, j] - 1)**2
+-
+-    # Calculate min/max ratio
++    return penalty
++
++def energy_based_refinement(points, max_iter=1000, learning_rate=0.01):
++    """Refine point distribution using an energy-based approach with repulsive forces."""
++    # Create a copy to avoid modifying original points
++    current_points = points.copy()
++    
++    for iteration in range(max_iter):
++        # Calculate pairwise distances
++        distances = fast_pdist_matrix(current_points)
++        
++        # Calculate forces (repulsive between all points)
++        forces = np.zeros_like(current_points)
++        n_points = len(current_points)
++        
++        # Compute repulsive forces
++        for i in range(n_points):
++            for j in range(n_points):
++                if i != j:
++                    # Calculate vector from point j to point i
++                    diff = current_points[i] - current_points[j]
++                    dist_sq = np.sum(diff ** 2)
++                    
++                    # Avoid division by zero and very close points
++                    if dist_sq > 1e-10:
++                        force_magnitude = 1.0 / dist_sq
++                        forces[i] += force_magnitude * diff
++        
++        # Apply forces with learning rate
++        current_points -= learning_rate * forces
++        
++        # Constrain points to [0,1]^3
++        current_points = np.clip(current_points, 0, 1)
++        
++        # Simple convergence check
++        if iteration > 10 and np.all(np.abs(forces) < 1e-8):
++            break
++            
++    return current_points
++
++def combine_objectives(x_flat, weights=(1.0, 0.1, 0.05)):
++    """
++    Combined objective function that balances multiple criteria:
++    1. Min/max ratio 
++    2. Spherical Voronoi quality
++    3. Energy-based uniformity
++    """
++    # Reshape flat array back to points
++    n_points = 14
++    points = x_flat.reshape((n_points, 3))
++
++    # Calculate individual components
+     ratio = min_max_ratio(points)
+-
+-    # Return value to minimize (negative ratio + penalty)
+-    return -ratio + penalty
+-
++    sphere_points = spherical_map(points)
++    voronoi_quality = spherical_voronoi_quality(sphere_points)
++    
++    # Basic penalty for constraint violations
++    penalty = constraint_penalty(points)
++
++    # Combine objectives
++    # We want to maximize ratio, maximize voronoi quality, and minimize penalty
++    # But we also want to ensure points are well-distributed
++    combined = weights[0] * ratio + weights[1] * voronoi_quality - weights[2] * penalty
++    
++    # Return negative because we minimize in scipy.optimize
++    return -combined
+ 
+ def adaptive_penalty_objective(x_flat, penalty_weight=1e6, iteration=0):
+     """Objective function with adaptive penalty for out-of-bounds points."""
+     # Reshape flat array back to points
+     n_points = 14
+     points = x_flat.reshape((n_points, 3))
+ 
+     # Apply penalty for constraint violations
+     penalty = 0
+     for i in range(n_points):
+         for j in range(3):  # x, y, z coordinates
+             if points[i, j] < 0:
+                 penalty += penalty_weight * (0 - points[i, j])**2 * (1 + iteration * 0.1)
+             elif points[i, j] > 1:
+                 penalty += penalty_weight * (points[i, j] - 1)**2 * (1 + iteration * 0.1)
+ 
+     # Calculate min/max ratio
+     ratio = min_max_ratio(points)
+ 
+     # Return value to minimize (negative ratio + penalty)
+     return -ratio + penalty
+ 
+-
+-def objective_function(x_flat, use_spherical_quality=True):
+-    """Objective function to maximize the min/max distance ratio."""
+-    # Reshape flat array back to points
+-    n_points = 14
+-    points = x_flat.reshape((n_points, 3))
+-
+-    # Normalize points to unit sphere
+-    sphere_points = spherical_map(points)
+-
+-    # Calculate min/max ratio
+-    ratio = min_max_ratio(points)
+-
+-    # Calculate spherical Voronoi quality
+-    voronoi_quality = spherical_voronoi_quality(sphere_points)
+-
+-    # Combine objectives: prioritize min/max ratio but also consider geometric distribution
+-    combined = ratio + 0.1 * voronoi_quality
+-
+-    # Return negative because we want to maximize (minimize negative)
+-    return -combined
+-
+-
+ def create_initial_placement():
+     """Create initial point placement using enhanced spherical code approach."""
+-    # Method: Generate points using Fibonacci-like distribution but with better uniformity
+-    points = []
+-    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+-
+-    for i in range(14):
+-        y = 1 - (i / float(14 - 1)) * 2  # y goes from 1 to -1
+-        radius = np.sqrt(1 - y * y)  # radius at y
+-
+-        theta = phi * i  # golden angle increment
+-
+-        x = np.cos(theta) * radius
+-        z = np.sin(theta) * radius
+-
+-        points.append([x, y, z])
+-
+-    initial_points = np.array(points)
+-
++    # Start with icosahedral initialization for better distribution
++    points = icosahedral_initialization(14)
++    
+     # Improve distribution by applying multiple small perturbations
+     np.random.seed(42)
+-    for _ in range(15):  # More perturbations for better uniformity
++    for _ in range(20):  # More perturbations for better uniformity
+         # Add small random perturbations
+-        perturbation = np.random.normal(0, 0.015, (14, 3))
+-        initial_points += perturbation
++        perturbation = np.random.normal(0, 0.01, (14, 3))
++        points += perturbation
+ 
+         # Project back to sphere surface
+-        initial_points = spherical_map(initial_points)
+-
+-    # Normalize to unit sphere and scale to unit cube [0,1]^3
+-    initial_points = (initial_points + 1) / 2
+-
+-    return initial_points
+-
++        points = spherical_map(points)
++
++    # Scale to unit cube [0,1]^3
++    points = (points + 1) / 2
++    
++    return points
++
++def multi_stage_optimization(initial_points, max_time_seconds=360):
++    """Perform multi-stage optimization with progressive refinement."""
++    current_points = initial_points.copy()
++    
++    # Stage 1: Coarse global optimization with differential evolution
++    try:
++        x0 = current_points.flatten()
++        bounds = [(0, 1) for _ in range(14 * 3)]
++        
++        # Coarse optimization with fewer iterations
++        result = differential_evolution(
++            combine_objectives,
++            bounds,
++            seed=42,
++            maxiter=50,
++            popsize=15,
++            tol=1e-6,
++            mutation=(0.5, 1),
++            recombination=0.7,
++            disp=False
++        )
++        
++        current_points = result.x.reshape((14, 3))
++        
++    except Exception:
++        pass
++
++    # Stage 2: Energy-based refinement (physics-inspired)  
++    try:
++        current_points = energy_based_refinement(current_points, max_iter=500, learning_rate=0.02)
++    except Exception:
++        pass
++
++    # Stage 3: Fine-grained local optimization with L-BFGS-B
++    try:
++        x0 = current_points.flatten()
++        bounds = [(0, 1) for _ in range(14 * 3)]
++        
++        # Tighter tolerances for final refinement
++        result = minimize(
++            adaptive_penalty_objective,
++            x0,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'ftol': 1e-10, 'gtol': 1e-10},
++            tol=1e-10
++        )
++        
++        current_points = result.x.reshape((14, 3))
++        
++    except Exception:
++        pass
++
++    # Stage 4: Final energy refinement to polish
++    try:
++        current_points = energy_based_refinement(current_points, max_iter=300, learning_rate=0.01)
++    except Exception:
++        pass
++
++    return current_points
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
++    # Try multiple initialization strategies
++    initial_strategies = [
++        lambda: create_initial_placement(),  # Our custom enhanced strategy
++        lambda: (fibonacci_sphere(14) + 1) / 2,  # Standard Fibonacci
++        lambda: np.random.rand(14, 3),  # Random
++        lambda: icosahedral_initialization(14)  # Icosahedral
++    ]
++    
++    best_points = None
+     best_ratio = 0
+-    best_points = None
+-
+-    # Multiple initialization strategies
+-    initialization_strategies = [
+-        # Strategy 1: Enhanced Fibonacci sphere scaled to unit cube
+-        lambda: create_initial_placement(),
+-
+-        # Strategy 2: Fibonacci sphere scaled to unit cube
+-        lambda: (fibonacci_sphere(14) + 1) / 2,
+-
+-        # Strategy 3: Latin Hypercube Sampling
+-        lambda: latin_hypercube_sampling(14, 3, seed=42),
+-
+-        # Strategy 4: Random initialization
+-        lambda: np.random.rand(14, 3)
+-    ]
+-
+-    # Track improvement for early stopping
+-    previous_best = -1
+-    improvement_streak = 0
+-    max_improvement_streak = 8
+-
+-    # Try different combinations of strategies with multiple restarts
+-    for restart in range(2):  # 2 restart rounds for better exploration
+-        for i, init_func in enumerate(initialization_strategies):
+-            # Generate initial points
++    
++    # Test different initialization strategies
++    for i, init_func in enumerate(initial_strategies):
++        try:
+             initial_points = init_func()
+-
+-            # Flatten initial points for optimization
+-            x0 = initial_points.flatten()
+-
+-            # Define bounds for each coordinate (0 to 1)
+-            bounds = [(0, 1) for _ in range(14 * 3)]
+-
+-            # Phase 1: Global optimization with differential evolution
+-            try:
+-                # Use adaptive population size and mutation strategy based on restart round
+-                base_popsize = 15 + restart * 5  # Increase population size with restarts
+-                maxiter = 100 + restart * 50  # More iterations with restarts
+-
+-                # Adaptive mutation strategy based on convergence
+-                mutation_rates = [(0.5, 1.0), (0.7, 1.0), (0.8, 1.0)]
+-                mutation_strategy = mutation_rates[min(restart, len(mutation_rates)-1)]
+-
+-                # Try different recombination rates
+-                recombination_rates = [0.7, 0.8, 0.9]
+-                recombination_rate = recombination_rates[min(restart, len(recombination_rates)-1)]
+-
+-                result = differential_evolution(
+-                    lambda x: adaptive_penalty_objective(x, iteration=restart),
+-                    bounds,
+-                    seed=42 + restart * 10 + i,
+-                    maxiter=maxiter,
+-                    popsize=base_popsize,
+-                    tol=1e-6,
+-                    mutation=mutation_strategy,
+-                    recombination=recombination_rate,
+-                    disp=False
+-                )
+-
+-                # Extract optimized points
+-                optimized_points = result.x.reshape((14, 3))
+-
+-                # Calculate final ratio
+-                final_ratio = min_max_ratio(optimized_points)
+-
+-                # Store best result
+-                if final_ratio > best_ratio:
+-                    best_ratio = final_ratio
+-                    best_points = optimized_points.copy()
+-                    improvement_streak = 0  # Reset streak
+-                else:
+-                    improvement_streak += 1
+-
+-                # Early stopping if no improvement for too many attempts
+-                if improvement_streak >= max_improvement_streak:
+-                    break
+-
+-            except Exception as e:
+-                continue  # Skip this strategy if optimization fails
+-
+-    # Phase 2: Local refinement with L-BFGS-B if we found a good candidate
+-    if best_points is not None and best_ratio > 0:
+-        try:
+-            # Flatten the best points
+-            x0_refine = best_points.flatten()
+-
+-            # Refinement with L-BFGS-B
+-            result_refined = minimize(
+-                lambda x: adaptive_penalty_objective(x, iteration=10),
+-                x0_refine,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                options={'ftol': 1e-9, 'gtol': 1e-9},
+-                tol=1e-9
+-            )
+-
+-            refined_points = result_refined.x.reshape((14, 3))
+-            final_ratio = min_max_ratio(refined_points)
+-
+-            # Update if improved
+-            if final_ratio > best_ratio:
+-                best_points = refined_points
+-
++            ratio = min_max_ratio(initial_points)
++            
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = initial_points.copy()
+         except Exception as e:
+-            pass  # Keep original best points if refinement fails
+-
+-    # Ensure we return valid points even if optimization failed
++            continue
++    
++    # If no good initialization worked, use fallback
+     if best_points is None:
+-        # Fallback to enhanced Fibonacci initialization
+         best_points = create_initial_placement()
+-
+-    return best_points
++    
++    # Apply multi-stage optimization
++    optimized_points = multi_stage_optimization(best_points)
++    optimized_ratio = min_max_ratio(optimized_points)
++    
++    # Return the better of the two
++    if optimized_ratio > best_ratio:
++        return optimized_points
++    else:
++        return best_points
+ 
+ # EVOLVE-BLOCK-END

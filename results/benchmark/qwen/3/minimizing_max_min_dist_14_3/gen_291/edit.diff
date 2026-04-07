@@ -1,0 +1,442 @@
+--- a/original.py
++++ b/original.py
+@@ -1,432 +1,438 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize, basinhopping
+ from scipy.spatial.distance import pdist
+ from scipy.spatial import SphericalVoronoi
+ from sklearn.cluster import KMeans
+ import warnings
+ warnings.filterwarnings('ignore')
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+ 
+     """
+ 
+     def objective(x):
+         # Reshape x into 14 points in 3D
+         points = x.reshape(-1, 3)
+ 
+         # Calculate pairwise distances
+         distances = pdist(points)
+ 
+         # Handle edge cases
+         if len(distances) == 0:
+             return -1.0
+ 
+         # Remove any NaN or infinite values
+         distances = distances[np.isfinite(distances)]
+ 
+         if len(distances) == 0:
+             return -1.0
+ 
+         # Calculate min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         # Return negative ratio to maximize (since we're minimizing)
+         if d_max <= 0:
+             return -1.0
+-        return -d_min / d_max
++
++        # Add spherical constraint component to guide optimization
++        # This encourages points to stay near unit sphere which typically improves min/max ratios
++        norms = np.linalg.norm(points, axis=1)
++        spherical_penalty = np.sum((norms - 1.0)**2) * 1e-3
++
++        return -(d_min / d_max) + spherical_penalty
+ 
+     def penalty_objective(x, penalty_weight=1e6):
+         """Objective with penalty for boundary violations - vectorized version"""
+         points = x.reshape(-1, 3)
+ 
+         # Vectorized penalty calculation
+         below_penalty = np.sum(np.maximum(0, -points)**2) * penalty_weight
+         above_penalty = np.sum(np.maximum(0, points - 1)**2) * penalty_weight
+ 
+         # Original objective
+         original_obj = objective(x)
+ 
+         return original_obj + below_penalty + above_penalty
+ 
+     def spherical_voronoi_points(n):
+         """Generate points using spherical Voronoi diagram for even distribution"""
+         # Start with random points on sphere
+         np.random.seed(42)
+         points = np.random.randn(n, 3)
+         points = points / np.linalg.norm(points, axis=1, keepdims=True)
+ 
+         # Use spherical Voronoi to get more uniform distribution
+         try:
+             sv = SphericalVoronoi(points)
+             # Get the centers of the Voronoi cells as new candidates
+             voronoi_centers = sv.vertices
+             # Normalize to unit sphere again
+             voronoi_centers = voronoi_centers / np.linalg.norm(voronoi_centers, axis=1, keepdims=True)
+ 
+             # Take first n points, or generate more if needed
+             if len(voronoi_centers) >= n:
+                 selected = voronoi_centers[:n]
+             else:
+                 # If not enough, use a combination of original and Voronoi points
+                 selected = np.vstack([voronoi_centers, points[:n-len(voronoi_centers)]])
+ 
+             return selected
+         except:
+             # Fallback to fibonacci if spherical voronoi fails
+             return spherical_fibonacci_points(n)
+ 
+     def spherical_fibonacci_points(n):
+         """Generate points on sphere using Fibonacci spiral method"""
+         points = []
+         phi = np.pi * (3. - np.sqrt(5.))  # golden angle
+ 
+         for i in range(n):
+             y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = phi * i  # golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         return np.array(points)
+ 
+     def initialize_cube_grid_points(n_points):
+         """Initialize points in a 3D cube grid"""
+         # Find appropriate grid size
+         grid_size = int(np.ceil(n_points**(1/3)))
+         coords = np.linspace(0, 1, grid_size)
+         grid_points = []
+ 
+         for i in range(grid_size):
+             for j in range(grid_size):
+                 for k in range(grid_size):
+                     if len(grid_points) < n_points:
+                         grid_points.append([coords[i], coords[j], coords[k]])
+ 
+         return np.array(grid_points[:n_points])
+ 
+     def create_enhanced_initialization():
+         """Create multiple enhanced initial configurations"""
+         configs = []
+ 
+         # Configuration 1: Enhanced spherical Fibonacci with jitter
+         np.random.seed(42)
+         fib_points = spherical_fibonacci_points(14)
+ 
+         # Add small jitter to escape local minima
+         jitter = np.random.normal(0, 0.02, fib_points.shape)
+         config1 = fib_points + jitter
+         # Normalize to unit sphere
+         norms = np.linalg.norm(config1, axis=1, keepdims=True)
+         norms = np.where(norms == 0, 1, norms)
+         config1 = config1 / norms
+ 
+         # Scale to fit within unit cube [0,1]^3
+         config1 = config1 - np.mean(config1, axis=0)
+         max_coord = np.max(np.abs(config1))
+         if max_coord > 0:
+             config1 = config1 / (2 * max_coord) + 0.5
+         configs.append(config1)
+ 
+         # Configuration 2: Random uniform distribution
+         np.random.seed(123)
+         config2 = np.random.rand(14, 3)
+         configs.append(config2)
+ 
+         # Configuration 3: Another Fibonacci with different scaling
+         np.random.seed(456)
+         config3 = spherical_fibonacci_points(14)
+         # Apply different transformation
+         config3 = config3 * 0.8 + 0.1  # Scale and shift
+         configs.append(config3)
+ 
+         # Configuration 4: Grid-based initialization
+         np.random.seed(789)
+         # Create a 3x3x3 grid and take 14 points
+         grid = np.mgrid[0:1:3j, 0:1:3j, 0:1:3j].reshape(3, -1).T
+         # Take first 14 points and add jitter
+         config4 = grid[:14] + np.random.normal(0, 0.03, (14, 3))
+         # Clamp to [0,1]^3
+         config4 = np.clip(config4, 0, 1)
+         configs.append(config4)
+ 
+         # Configuration 5: Spherical Voronoi points
+         voronoi_points = spherical_voronoi_points(14)
+         voronoi_points = (voronoi_points + 1) / 2  # Normalize to [0,1]^3
+         configs.append(voronoi_points)
+ 
+         # Configuration 6: KMeans clustering approach with more samples
+         np.random.seed(999)
+         kmeans_points = np.random.rand(50, 3)  # More samples for better clustering
+         kmeans = KMeans(n_clusters=14, random_state=42, n_init=20)
+         kmeans.fit(kmeans_points)
+         kmeans_centers = kmeans.cluster_centers_
+         configs.append(kmeans_centers)
+ 
+         return configs
+ 
+     def adaptive_differential_evolution(objective_func, bounds, initial_popsize=25, maxiter=300):
+         """Enhanced differential evolution with adaptive population sizing and early stopping"""
+         current_popsize = initial_popsize
+         prev_best = -np.inf
+         stagnation_count = 0
+         improvement_threshold = 1e-8
+         min_improvement = 1e-12
+ 
+         # Track improvement for early stopping
+         recent_improvements = []
+ 
+         for iteration in range(maxiter // 10):  # Reduced iterations per batch
+             # Adjust population size based on convergence
+             if stagnation_count > 3 and current_popsize < 35:
+                 current_popsize = min(current_popsize + 5, 35)
+ 
+             # Run differential evolution with current parameters
+             try:
+                 result = differential_evolution(
+                     objective_func,
+                     bounds,
+                     seed=42 + iteration,
+                     maxiter=10,  # Fewer iterations per batch
+                     popsize=current_popsize,
+                     tol=1e-9,   # Tighter tolerance
+                     mutation=(0.7, 1.0),  # More aggressive exploration
+                     recombination=0.85,   # Higher recombination for better exploration
+                     disp=False
+                 )
+             except:
+                 # Fall back to smaller population if needed
+                 try:
+                     result = differential_evolution(
+                         objective_func,
+                         bounds,
+                         seed=42 + iteration,
+                         maxiter=10,
+                         popsize=max(5, current_popsize - 5),
+                         tol=1e-9,
+                         mutation=(0.7, 1.0),
+                         recombination=0.85,
+                         disp=False
+                     )
+                 except:
+                     # Last resort - use basic differential evolution
+                     result = differential_evolution(
+                         objective_func,
+                         bounds,
+                         seed=42 + iteration,
+                         maxiter=10,
+                         popsize=10,
+                         tol=1e-9,
+                         mutation=(0.7, 1.0),
+                         recombination=0.7,
+                         disp=False
+                     )
+ 
+             # Check for improvement
+             current_best = -result.fun
+             improvement = current_best - prev_best
+ 
+             recent_improvements.append(improvement)
+             if len(recent_improvements) > 5:
+                 recent_improvements.pop(0)
+ 
+             # Early stopping if improvement is minimal
+             if len(recent_improvements) == 5 and all(abs(impr) < min_improvement for impr in recent_improvements):
+                 break
+ 
+             if improvement > improvement_threshold:
+                 stagnation_count = 0
+             else:
+                 stagnation_count += 1
+ 
+             prev_best = current_best
+ 
+         return result
+ 
+     def improved_local_refinement(objective_func, initial_points):
+         """Apply multiple local optimization refinement approaches"""
+         # Try Basin-hopping first - very effective for this kind of problem
+         try:
+             # Basin-hopping with better parameters
+             minimizer_kwargs = {"method": "L-BFGS-B", "bounds": [(0, 1) for _ in range(42)]}
+             result_bh = basinhopping(
+                 objective_func,
+                 initial_points,
+                 niter=20,
+                 T=1.0,
+                 stepsize=0.1,
+                 minimizer_kwargs=minimizer_kwargs,
+                 seed=42
+             )
+ 
+             if result_bh.success:
+                 return result_bh.x
+         except Exception as e:
+             warnings.warn(f"Basin-hopping optimization failed: {e}")
+ 
+         # Fall back to L-BFGS-B if basin-hopping failed
+         try:
+             result = minimize(
+                 objective_func,
+                 initial_points,
+                 method='L-BFGS-B',
+                 bounds=[(0, 1) for _ in range(42)],
+                 options={'maxiter': 150, 'ftol': 1e-10, 'gtol': 1e-10}
+             )
+ 
+             if result.success:
+                 return result.x
+         except Exception as e:
+             warnings.warn(f"L-BFGS optimization failed: {e}")
+ 
+         return initial_points
+ 
+     def multi_stage_lbfgs_refinement(points):
+         """Apply local refinement using L-BFGS-B with multiple stages"""
+         refined_points = points.copy()
+ 
+         # Stage 1: Coarse refinement with moderate tolerance
+         try:
+             x0_refine = refined_points.flatten()
+             def obj_for_lbfgs(x):
+                 points_refined = x.reshape(-1, 3)
+                 distances = pdist(points_refined)
+ 
+                 if len(distances) == 0:
+                     return -np.inf
+ 
+                 d_min = np.min(distances)
+                 d_max = np.max(distances)
+ 
+                 if d_max > 1e-12:
+                     return -(d_min / d_max)
+                 else:
+                     return -np.inf
+ 
+             result_refine = minimize(
+                 obj_for_lbfgs,
+                 x0_refine,
+                 method='L-BFGS-B',
+                 bounds=[(0, 1)] * 42,
+                 options={'ftol': 1e-9, 'gtol': 1e-9},  # Moderate tolerances
+                 tol=1e-9
+             )
+ 
+             refined_points = result_refine.x.reshape(-1, 3)
+             refined_points = np.clip(refined_points, 0, 1)
+         except:
+             pass
+ 
+         # Stage 2: Fine refinement with strict tolerance
+         try:
+             x0_refine = refined_points.flatten()
+             def obj_for_lbfgs_fine(x):
+                 points_refined = x.reshape(-1, 3)
+                 distances = pdist(points_refined)
+ 
+                 if len(distances) == 0:
+                     return -np.inf
+ 
+                 d_min = np.min(distances)
+                 d_max = np.max(distances)
+ 
+                 if d_max > 1e-12:
+                     return -(d_min / d_max)
+                 else:
+                     return -np.inf
+ 
+             result_refine = minimize(
+                 obj_for_lbfgs_fine,
+                 x0_refine,
+                 method='L-BFGS-B',
+                 bounds=[(0, 1)] * 42,
+                 options={'ftol': 1e-12, 'gtol': 1e-12},  # Very tight tolerances
+                 tol=1e-12
+             )
+ 
+             refined_points = result_refine.x.reshape(-1, 3)
+             refined_points = np.clip(refined_points, 0, 1)
+         except:
+             pass
+ 
+         return refined_points
+ 
+     # Main optimization loop
+     np.random.seed(42)
+ 
+     # Generate initial configurations using enhanced initialization
+     configs = create_enhanced_initialization()
+ 
+     # Select best initial configuration
+     best_config = None
+     best_ratio = float('-inf')
+ 
+     for i, config in enumerate(configs):
+         try:
+             ratio = -objective(config.flatten())  # Convert back to positive ratio
+             if ratio > best_ratio:
+                 best_ratio = ratio
+                 best_config = config.copy()
+         except:
+             continue
+ 
+     if best_config is None:
+         # Fallback to simple initialization
+         best_config = np.random.rand(14, 3)
+ 
+     # Define bounds for each coordinate (0 to 1)
+     bounds = [(0, 1) for _ in range(42)]
+ 
+     # Run adaptive differential evolution optimization with multiple restarts
+     best_result = None
+     best_value = float('inf')
+ 
+     # Try 5 different random seeds for better exploration
+     seeds = [42, 123, 456, 789, 999]
+     for seed_val in seeds:
+         np.random.seed(seed_val)
+ 
+         # Use adaptive differential evolution
+         try:
+             result = adaptive_differential_evolution(
+                 penalty_objective,
+                 bounds,
+                 initial_popsize=25,  # Increased from 20
+                 maxiter=300  # Increased from 200
+             )
+ 
+             if result.success and result.fun < best_value:
+                 best_value = result.fun
+                 best_result = result
+         except:
+             continue
+ 
+     # Extract optimized points
+     if best_result is not None:
+         optimized_points = best_result.x.reshape(-1, 3)
+     else:
+         optimized_points = best_config
+ 
+     # Apply improved local refinement
+     refined_points = improved_local_refinement(objective, optimized_points.flatten())
+     optimized_points = refined_points.reshape(-1, 3)
+ 
+     # Apply multi-stage LBFGS refinement
+     optimized_points = multi_stage_lbfgs_refinement(optimized_points)
+ 
+     # Final clipping to ensure bounds are respected
+     optimized_points = np.clip(optimized_points, 0, 1)
+ 
+     return optimized_points
+ 
+ # EVOLVE-BLOCK-END

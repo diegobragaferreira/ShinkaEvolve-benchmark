@@ -1,0 +1,192 @@
+<NAME>
+enhance_step_function_generation
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the step function generation process by creating more structured and potentially optimal step sequences. Instead of generating random step functions, this modification creates sequences with specific mathematical properties that are known to yield better autocorrelation bounds. It introduces a new method that generates sequences with fewer, taller steps arranged strategically to maximize autocorrelation efficiency. This directly targets the core optimization problem by providing better initial candidates that are more likely to lead to improved upper bounds on C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_step_sequence(length: int, num_steps: int) -> List[float]:
+    """Generate a step function sequence."""
+    step_positions = sorted(random.sample(range(length), num_steps))
+    step_heights = [random.uniform(10.0, 100.0) for _ in range(num_steps)]
+
+    sequence = [0.0] * length
+    for i, (pos, height) in enumerate(zip(step_positions, step_heights)):
+        if i < len(step_positions) - 1:
+            end_pos = step_positions[i+1]
+        else:
+            end_pos = length
+        sequence[pos:end_pos] = [height] * (end_pos - pos)
+    return sequence
+=======
+def generate_structured_step_sequence(length: int, num_steps: int) -> List[float]:
+    """Generate a structured step function sequence designed to improve autocorrelation properties."""
+    # Create steps that are more evenly distributed and have strategic heights
+    # Use fewer steps with larger heights to reduce peak convolution
+
+    # Ensure we don't have more steps than positions
+    num_steps = min(num_steps, length)
+
+    # Place steps at regular intervals to spread out the mass
+    step_positions = [int(i * length / num_steps) for i in range(num_steps)]
+    # Ensure unique positions and handle edge cases
+    step_positions = sorted(set(step_positions))
+    if len(step_positions) < num_steps:
+        # Fill missing positions
+        while len(step_positions) < num_steps:
+            # Insert a position where there's maximum gap
+            gaps = [(step_positions[i+1] - step_positions[i], i)
+                   for i in range(len(step_positions)-1)]
+            if gaps:
+                max_gap, idx = max(gaps)
+                insert_pos = (step_positions[idx] + step_positions[idx+1]) // 2
+                step_positions.append(insert_pos)
+            else:
+                step_positions.append(length//2)
+            step_positions = sorted(set(step_positions))
+
+    # Use heights that decrease with distance to encourage structure
+    step_heights = []
+    for i in range(num_steps):
+        # Use a decreasing exponential pattern for heights
+        height = 100 * np.exp(-i * 0.5)
+        step_heights.append(max(0.1, height))
+
+    # Ensure last step covers to end
+    if step_positions[-1] < length - 1:
+        step_positions.append(length - 1)
+        step_heights.append(step_heights[-1] * 0.5)  # Slight tapering
+
+    # Now generate the final sequence
+    sequence = [0.0] * length
+    for i, (pos, height) in enumerate(zip(step_positions[:-1], step_heights[:-1])):
+        end_pos = step_positions[i+1]
+        sequence[pos:end_pos] = [height] * (end_pos - pos)
+
+    # Handle last segment properly
+    if step_positions[-1] < length:
+        sequence[step_positions[-1]:] = [step_heights[-1]] * (length - step_positions[-1])
+
+    return sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_generation_method
+</NAME>
+
+<DESCRIPTION>
+This edit updates the population generation to use the new structured step sequence generator. By replacing the random step sequence generation with the more carefully designed structured step sequences, we provide better initial candidates that are more likely to produce improved results in our evolutionary optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Generate sequences using different methods
+    for _ in range(population_size // 6):
+        n = random.randint(*length_range)
+        population.append(generate_harmonic_sequence(n))
+
+    for _ in range(population_size // 6):
+        n = random.randint(*length_range)
+        population.append(generate_exponential_sequence(n))
+
+    for _ in range(population_size // 6):
+        n = random.randint(*length_range)
+        num_steps = max(2, min(20, n // 10))
+        population.append(generate_step_sequence(n, num_steps))
+
+    # Add some step-function examples to encourage structure finding
+    for _ in range(population_size // 6):
+        population.append(generate_random_valid_sequence(length_range, 'step'))
+
+    # Add some Gaussian examples
+    for _ in range(population_size // 6):
+        population.append(generate_random_valid_sequence(length_range, 'gaussian'))
+
+    # Fill remaining with standard random
+    while len(population) < population_size:
+        population.append(generate_random_valid_sequence(length_range, 'uniform'))
+=======
+    # Generate sequences using different methods
+    for _ in range(population_size // 6):
+        n = random.randint(*length_range)
+        population.append(generate_harmonic_sequence(n))
+
+    for _ in range(population_size // 6):
+        n = random.randint(*length_range)
+        population.append(generate_exponential_sequence(n))
+
+    for _ in range(population_size // 6):
+        n = random.randint(*length_range)
+        num_steps = max(2, min(20, n // 10))
+        population.append(generate_structured_step_sequence(n, num_steps))
+
+    # Add some step-function examples to encourage structure finding
+    for _ in range(population_size // 6):
+        population.append(generate_random_valid_sequence(length_range, 'step'))
+
+    # Add some Gaussian examples
+    for _ in range(population_size // 6):
+        population.append(generate_random_valid_sequence(length_range, 'gaussian'))
+
+    # Fill remaining with standard random
+    while len(population) < population_size:
+        population.append(generate_random_valid_sequence(length_range, 'uniform'))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+adjust_mutation_strategy
+</NAME>
+
+<DESCRIPTION>
+This edit modifies the mutation strategy to be more adaptive to the characteristics of step functions. Instead of applying mutation uniformly, it now applies different mutation strengths depending on whether the sequence has step-like properties. This helps preserve beneficial structural aspects of good sequences while allowing for adaptive exploration in less structured areas.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_sequence(sequence: List[float], generation: int, population_size: int, mutation_strength=0.3) -> List[float]:
+    """Apply adaptive mutation to a sequence with decreasing rate over generations."""
+    mutated = sequence.copy()
+    # Adaptive mutation rate that decreases with generation and increases with diversity
+    mutation_rate = max(0.05, 0.3 * (1 - generation / (population_size * 2)))
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian noise scaled by mutation strength
+            noise = random.gauss(0, mutation_strength * mutated[i])
+            mutated[i] = max(0.01, mutated[i] + noise)
+    return mutated
+=======
+def mutate_sequence(sequence: List[float], generation: int, population_size: int, mutation_strength=0.3) -> List[float]:
+    """Apply adaptive mutation to a sequence with decreasing rate over generations."""
+    mutated = sequence.copy()
+    # Adaptive mutation rate that decreases with generation and increases with diversity
+    mutation_rate = max(0.05, 0.3 * (1 - generation / (population_size * 2)))
+
+    # Determine if sequence looks like a step function for tailored mutation
+    is_step_like = False
+    if len(sequence) > 10:
+        # Check for few distinct values indicating step-like nature
+        unique_vals = set(sequence)
+        if len(unique_vals) < len(sequence) / 5:  # Less than 20% distinct values
+            is_step_like = True
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply different mutation strategies
+            if is_step_like:
+                # For step functions, prefer smaller mutations to maintain structure
+                noise = random.gauss(0, mutation_strength * mutated[i] * 0.1)
+            else:
+                # For more general sequences, use normal mutation
+                noise = random.gauss(0, mutation_strength * mutated[i])
+
+            mutated[i] = max(0.01, mutated[i] + noise)
+    return mutated
+>>>>>>> REPLACE
+</DIFF>

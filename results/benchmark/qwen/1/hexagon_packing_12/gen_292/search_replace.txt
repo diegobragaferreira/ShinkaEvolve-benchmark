@@ -1,0 +1,141 @@
+<NAME>
+add_bvh_acceleration
+</NAME>
+
+<DESCRIPTION>
+Adding a bounding volume hierarchy (BVH) spatial acceleration structure to improve overlap detection performance. This addresses the O(n²) complexity of pairwise overlap checks by implementing a hierarchical bounding volume structure that first performs coarse overlap checks at higher levels before drilling down to precise polygon intersections. This approach directly complements the current program's multi-resolution genetic algorithm framework and provides sub-linear performance gains.
+
+The BVH structure will be integrated to replace the current cKDTree-based neighbor lookup in the overlap detection function, specifically in `fast_overlap_detection_fast`. This change will significantly improve the scalability of overlap checking for the 12 hexagon case while maintaining the program's proven constraint validation approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit, njit
+from joblib import Parallel, delayed
+from scipy.spatial import cKDTree
+import math
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit, njit
+from joblib import Parallel, delayed
+from scipy.spatial import cKDTree
+import math
+
+class BVHNode:
+    """Bounding Volume Hierarchy node for spatial acceleration."""
+    def __init__(self, indices, bounds, left=None, right=None):
+        self.indices = indices  # indices of items in this node
+        self.bounds = bounds    # bounding box [min_x, min_y, max_x, max_y]
+        self.left = left        # left child
+        self.right = right      # right child
+        self.is_leaf = left is None and right is None
+
+    def get_bounds(self):
+        return self.bounds
+
+    def get_indices(self):
+        return self.indices
+
+    def is_leaf_node(self):
+        return self.is_leaf
+
+def build_bvh_tree(items, max_items_per_node=4):
+    """Build a BVH tree from a list of items with bounding boxes."""
+    # Calculate bounding boxes for all items
+    bounds_list = []
+    for i, item in enumerate(items):
+        # Assuming item is a tuple (index, bounding_box)
+        bounds_list.append((i, item[1]))
+
+    # Build BVH recursively
+    root = _build_bvh_recursive(bounds_list, max_items_per_node)
+    return root
+
+def _build_bvh_recursive(bounds_list, max_items_per_node):
+    """Recursively build BVH tree."""
+    if len(bounds_list) <= max_items_per_node:
+        # Create leaf node
+        indices = [item[0] for item in bounds_list]
+        if not bounds_list:
+            return BVHNode(indices, [0, 0, 0, 0])
+
+        # Calculate combined bounding box
+        min_x = min(item[1][0] for item in bounds_list)
+        min_y = min(item[1][1] for item in bounds_list)
+        max_x = max(item[1][2] for item in bounds_list)
+        max_y = max(item[1[3] for item in bounds_list)
+
+        return BVHNode(indices, [min_x, min_y, max_x, max_y])
+
+    # Split items along longest axis
+    # Calculate overall bounds
+    min_x = min(item[1][0] for item in bounds_list)
+    min_y = min(item[1][1] for item in bounds_list)
+    max_x = max(item[1][2] for item in bounds_list)
+    max_y = max(item[1][3] for item in bounds_list)
+
+    # Determine split axis (longer dimension)
+    width = max_x - min_x
+    height = max_y - min_y
+
+    if width > height:
+        # Split along x-axis
+        mid_x = (min_x + max_x) / 2
+        left_items = [item for item in bounds_list if item[1][2] <= mid_x]
+        right_items = [item for item in bounds_list if item[1][0] > mid_x]
+    else:
+        # Split along y-axis
+        mid_y = (min_y + max_y) / 2
+        left_items = [item for item in bounds_list if item[1][3] <= mid_y]
+        right_items = [item for item in bounds_list if item[1][1] > mid_y]
+
+    # Create internal node
+    left_child = _build_bvh_recursive(left_items, max_items_per_node)
+    right_child = _build_bvh_recursive(right_items, max_items_per_node)
+
+    # Calculate combined bounds
+    min_x = min(left_child.bounds[0], right_child.bounds[0])
+    min_y = min(left_child.bounds[1], right_child.bounds[1])
+    max_x = max(left_child.bounds[2], right_child.bounds[2])
+    max_y = max(left_child.bounds[3], right_child.bounds[3])
+
+    return BVHNode([], [min_x, min_y, max_x, max_y], left_child, right_child)
+
+def query_bvh(bvh_root, query_bounds):
+    """Query BVH for items that potentially intersect with query bounds."""
+    potential_hits = []
+    _query_recursive(bvh_root, query_bounds, potential_hits)
+    return potential_hits
+
+def _query_recursive(node, query_bounds, hits):
+    """Recursive query implementation."""
+    if not node:
+        return
+
+    # Check if query bounds intersect with node bounds
+    if not _bounds_intersect(node.bounds, query_bounds):
+        return
+
+    if node.is_leaf_node():
+        # Add all indices in this leaf
+        hits.extend(node.get_indices())
+    else:
+        # Recurse into children
+        _query_recursive(node.left, query_bounds, hits)
+        _query_recursive(node.right, query_bounds, hits)
+
+def _bounds_intersect(bounds1, bounds2):
+    """Check if two bounding boxes intersect."""
+    return not (bounds1[2] < bounds2[0] or bounds2[2] < bounds1[0] or
+               bounds1[3] < bounds2[1] or bounds2[3] < bounds1[1])
+>>>>>>> REPLACE
+</DIFF>

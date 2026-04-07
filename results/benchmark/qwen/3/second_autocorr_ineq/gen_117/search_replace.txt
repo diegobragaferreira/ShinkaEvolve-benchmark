@@ -1,0 +1,218 @@
+<NAME>
+implement_numba_jit_for_core_functions
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+from typing import List, Tuple
+import time
+import numba
+from numba import jit
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Fast computation of autoconvolution norms using numba-compiled loop
+    """
+    n = len(f_values)
+    # Pre-allocate convolution result
+    g = np.zeros(2*n - 1)
+
+    # Manual convolution computation for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_values[i] * f_values[j]
+
+    # Extract valid convolution (center part)
+    center = len(g) // 2
+    g_valid = g[center - n + 1:center + n]
+
+    # Compute norms
+    norm_l2_sq = 0.0
+    norm_l1 = 0.0
+    norm_linf = 0.0
+
+    for val in g_valid:
+        norm_l2_sq += val * val
+        norm_l1 += abs(val)
+        if abs(val) > norm_linf:
+            norm_linf = abs(val)
+
+    return norm_l2_sq, norm_l1, norm_linf
+
+@jit(nopython=True)
+def calculate_c2_fast(f_values: np.ndarray) -> float:
+    """Fast calculation of C2 with numerical stability"""
+    norm_l2_sq, norm_l1, norm_linf = compute_autoconvolution_norms_fast(f_values)
+
+    # Avoid division by zero
+    if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+        return 0.0
+
+    c2 = norm_l2_sq / (norm_l1 * norm_linf)
+    return c2
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂², ||g||₁, ||g||∞ where g = f*f
+    """
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values)
+
+    # Compute autoconvolution g = f * f using fast convolution
+    g = signal.convolve(f, f, mode='full')
+
+    # Only keep the middle portion corresponding to valid convolution
+    center_idx = len(g) // 2
+    half_len = len(f)
+    g = g[center_idx - half_len + 1:center_idx + half_len]
+
+    # Compute norms
+    g_squared = g * g
+    norm_l2_sq = np.sum(g_squared)
+
+    norm_l1 = np.sum(np.abs(g))
+    norm_linf = np.max(np.abs(g))
+
+    return norm_l2_sq, norm_l1, norm_linf
+
+def calculate_c2(f_values: List[float]) -> float:
+    """Calculate C2 value for given step function"""
+    try:
+        norm_l2_sq, norm_l1, norm_linf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+            return 0.0
+
+        c2 = norm_l2_sq / (norm_l1 * norm_linf)
+        return c2
+    except Exception:
+        return 0.0
+=======
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+from typing import List, Tuple
+import time
+import numba
+from numba import jit
+
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """Fast numba-based autoconvolution computation"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_convolution_norms_fast(g_vals):
+    """Fast computation of convolution norms"""
+    n = len(g_vals)
+    l2_sq = 0.0
+    l1 = 0.0
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Fast computation of autoconvolution norms using numba-compiled loop
+    """
+    n = len(f_values)
+    # Pre-allocate convolution result
+    g = np.zeros(2*n - 1)
+
+    # Manual convolution computation for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_values[i] * f_values[j]
+
+    # Extract valid convolution (center part)
+    center = len(g) // 2
+    g_valid = g[center - n + 1:center + n]
+
+    # Compute norms
+    norm_l2_sq = 0.0
+    norm_l1 = 0.0
+    norm_linf = 0.0
+
+    for val in g_valid:
+        norm_l2_sq += val * val
+        norm_l1 += abs(val)
+        if abs(val) > norm_linf:
+            norm_linf = abs(val)
+
+    return norm_l2_sq, norm_l1, norm_linf
+
+@jit(nopython=True)
+def calculate_c2_fast(f_values: np.ndarray) -> float:
+    """Fast calculation of C2 with numerical stability"""
+    norm_l2_sq, norm_l1, norm_linf = compute_autoconvolution_norms_fast(f_values)
+
+    # Avoid division by zero
+    if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+        return 0.0
+
+    c2 = norm_l2_sq / (norm_l1 * norm_linf)
+    return c2
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂², ||g||₁, ||g||∞ where g = f*f
+    """
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values)
+
+    # Compute autoconvolution g = f * f using fast convolution
+    g = signal.convolve(f, f, mode='full')
+
+    # Only keep the middle portion corresponding to valid convolution
+    center_idx = len(g) // 2
+    half_len = len(f)
+    g = g[center_idx - half_len + 1:center_idx + half_len]
+
+    # Compute norms
+    g_squared = g * g
+    norm_l2_sq = np.sum(g_squared)
+
+    norm_l1 = np.sum(np.abs(g))
+    norm_linf = np.max(np.abs(g))
+
+    return norm_l2_sq, norm_l1, norm_linf
+
+def calculate_c2(f_values: List[float]) -> float:
+    """Calculate C2 value for given step function"""
+    try:
+        norm_l2_sq, norm_l1, norm_linf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+            return 0.0
+
+        c2 = norm_l2_sq / (norm_l1 * norm_linf)
+        return c2
+    except Exception:
+        return 0.0
+>>>>>>> REPLACE
+</DIFF>

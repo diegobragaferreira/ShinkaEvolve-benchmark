@@ -1,0 +1,261 @@
+<NAME>
+enhance_perturbation_strategy
+</NAME>
+
+<DESCRIPTION>
+The current perturbation strategy in the guided perturbation function is somewhat basic. I'll enhance the perturbation mechanism by implementing a more sophisticated approach that considers:
+
+1. The geometric relationship between points more carefully
+2. Using the Voronoi diagram properties to understand local density
+3. Adding a more intelligent force calculation based on distance distributions
+4. Improving the momentum-based approach for smoother exploration
+
+This should lead to better convergence and potentially exceed the benchmark ratio.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def perturb_point_guided(self, points: np.ndarray, idx: int,
+                           current_ratio: float, temp: float,
+                           iteration: int = 0, prev_delta: Optional[np.ndarray] = None) -> np.ndarray:
+        """Enhanced perturb point with adaptive magnitude and momentum."""
+        try:
+            # Get distances to all other points
+            distances = cdist([points[idx]], points)[0]
+            distances = distances[distances > 0]  # Remove self-distance
+
+            if len(distances) == 0:
+                # Fallback to random perturbation
+                delta = np.random.randn(3)
+                delta = delta - np.dot(delta, points[idx]) * points[idx]
+                return points[idx] + 0.03 * temp * delta / np.linalg.norm(delta)
+
+            avg_distance = np.mean(distances)
+            min_distance = np.min(distances)
+            max_distance = np.max(distances)
+
+            # Determine perturbation magnitude based on iteration and optimization phase
+            phase_factor = 1.0
+            if temp > 0.5:  # Exploration phase
+                phase_factor = 1.0
+            elif temp > 0.1:  # Exploitation phase
+                phase_factor = 0.7
+            else:  # Fine tuning phase
+                phase_factor = 0.3
+
+            # Base magnitude with temperature dependence
+            base_magnitude = 0.02 * phase_factor * temp
+
+            # Adaptive magnitude based on local conditions
+            if min_distance < avg_distance * 0.4:
+                # Point too close to others - strong repulsion
+                magnitude = 0.1 * phase_factor * temp
+                # Compute repulsion force from close neighbors
+                repulsion = np.zeros(3)
+                for i in range(len(points)):
+                    if i != idx:
+                        diff = points[idx] - points[i]
+                        dist = np.linalg.norm(diff)
+                        if dist > 0 and dist < avg_distance * 0.7:
+                            # Inverse distance weighted repulsion
+                            repulsion += diff / dist * (1.0 / dist**2)
+
+                # If there's repulsion, normalize and apply
+                if np.linalg.norm(repulsion) > 0:
+                    repulsion = repulsion / np.linalg.norm(repulsion)
+                    return points[idx] + repulsion * magnitude
+                else:
+                    # Fallback to random perturbation
+                    delta = np.random.randn(3)
+                    delta = delta - np.dot(delta, points[idx]) * points[idx]
+                    return points[idx] + base_magnitude * delta / np.linalg.norm(delta)
+
+            elif max_distance > avg_distance * 1.5:
+                # Point too far from others - gentle attraction
+                magnitude = 0.05 * phase_factor * temp
+                # Compute attraction toward average position
+                attraction = np.mean(points, axis=0) - points[idx]
+                attraction_norm = np.linalg.norm(attraction)
+                if attraction_norm > 0:
+                    attraction = attraction / attraction_norm
+                    # Magnitude inversely related to distance from center
+                    center_distance = np.linalg.norm(points[idx])
+                    magnitude = 0.02 * (1.0 - center_distance * 0.5) * phase_factor * temp
+                    return points[idx] - attraction * magnitude
+                else:
+                    # Fallback to random perturbation
+                    delta = np.random.randn(3)
+                    delta = delta - np.dot(delta, points[idx]) * points[idx]
+                    return points[idx] + base_magnitude * delta / np.linalg.norm(delta)
+
+            # Default case - moderate perturbation with momentum consideration
+            delta = np.random.randn(3)
+            delta = delta - np.dot(delta, points[idx]) * points[idx]
+
+            # Add momentum from previous perturbation for smoother exploration
+            if prev_delta is not None and iteration > 0:
+                momentum_factor = 0.3
+                delta = momentum_factor * prev_delta + (1 - momentum_factor) * delta
+
+            # Normalize and apply perturbation
+            normalized_delta = delta / np.linalg.norm(delta)
+            return points[idx] + base_magnitude * normalized_delta
+
+        except Exception:
+            # Fallback to simple random perturbation with better magnitude
+            delta = np.random.randn(3)
+            delta = delta - np.dot(delta, points[idx]) * points[idx]
+            return points[idx] + 0.03 * temp * delta / np.linalg.norm(delta)
+=======
+    def perturb_point_guided(self, points: np.ndarray, idx: int,
+                           current_ratio: float, temp: float,
+                           iteration: int = 0, prev_delta: Optional[np.ndarray] = None) -> np.ndarray:
+        """Enhanced perturb point with adaptive magnitude, momentum, and geometric awareness."""
+        try:
+            # Get distances to all other points
+            distances = cdist([points[idx]], points)[0]
+            distances = distances[distances > 0]  # Remove self-distance
+
+            if len(distances) == 0:
+                # Fallback to random perturbation
+                delta = np.random.randn(3)
+                delta = delta - np.dot(delta, points[idx]) * points[idx]
+                return points[idx] + 0.03 * temp * delta / np.linalg.norm(delta)
+
+            avg_distance = np.mean(distances)
+            min_distance = np.min(distances)
+            max_distance = np.max(distances)
+
+            # Statistical analysis of distance distribution
+            std_distance = np.std(distances)
+            percentile_10 = np.percentile(distances, 10)
+            percentile_90 = np.percentile(distances, 90)
+
+            # Determine perturbation magnitude based on iteration and optimization phase
+            phase_factor = 1.0
+            if temp > 0.5:  # Exploration phase
+                phase_factor = 1.0
+            elif temp > 0.1:  # Exploitation phase
+                phase_factor = 0.7
+            else:  # Fine tuning phase
+                phase_factor = 0.3
+
+            # Base magnitude with temperature dependence and statistical context
+            # Use standard deviation to adapt to local variance
+            base_magnitude = 0.01 * phase_factor * temp * (1.0 + std_distance / avg_distance)
+
+            # Smart perturbation based on local geometric context
+            if min_distance < avg_distance * 0.3:
+                # Point is in a very dense region - strong repulsion needed
+                # More sophisticated repulsion calculation considering multiple near neighbors
+                repulsion = np.zeros(3)
+                close_neighbors = 0
+
+                for i in range(len(points)):
+                    if i != idx:
+                        diff = points[idx] - points[i]
+                        dist = np.linalg.norm(diff)
+                        if dist > 0 and dist < avg_distance * 0.6:
+                            # Weight repulsion by inverse square of distance
+                            weight = 1.0 / (dist * dist + 1e-8)
+                            repulsion += diff / dist * weight
+                            close_neighbors += 1
+
+                # Add more aggression if very clustered
+                if close_neighbors > 3:
+                    base_magnitude *= 1.5
+
+                if np.linalg.norm(repulsion) > 0:
+                    repulsion = repulsion / np.linalg.norm(repulsion)
+                    magnitude = base_magnitude * 2.0
+                    return points[idx] + repulsion * magnitude
+                else:
+                    # Fallback to random with increased magnitude
+                    delta = np.random.randn(3)
+                    delta = delta - np.dot(delta, points[idx]) * points[idx]
+                    return points[idx] + base_magnitude * 3.0 * delta / np.linalg.norm(delta)
+
+            elif max_distance > avg_distance * 1.8:
+                # Point is isolated in sparse region - consider attraction to cluster
+                # But be careful not to pull too aggressively
+                attraction = np.zeros(3)
+                neighbor_count = 0
+
+                for i in range(len(points)):
+                    if i != idx:
+                        diff = points[i] - points[idx]
+                        dist = np.linalg.norm(diff)
+                        if dist > 0 and dist < avg_distance * 1.2:
+                            # Attract towards nearby points with inverse distance weighting
+                            weight = 1.0 / (dist * dist + 1e-8)
+                            attraction += diff / dist * weight
+                            neighbor_count += 1
+
+                if neighbor_count > 0 and np.linalg.norm(attraction) > 0:
+                    attraction = attraction / np.linalg.norm(attraction)
+                    magnitude = base_magnitude * 0.8
+                    return points[idx] + attraction * magnitude
+                else:
+                    # Fallback to controlled random perturbation
+                    delta = np.random.randn(3)
+                    delta = delta - np.dot(delta, points[idx]) * points[idx]
+                    return points[idx] + base_magnitude * delta / np.linalg.norm(delta)
+
+            # Medium spacing case - more nuanced approach
+            # Compute force from all neighbors for balanced perturbation
+            net_force = np.zeros(3)
+            total_weight = 0.0
+
+            for i in range(len(points)):
+                if i != idx:
+                    diff = points[idx] - points[i]
+                    dist = np.linalg.norm(diff)
+                    if dist > 0:
+                        # Weight by distance - closer points have stronger influence
+                        weight = 1.0 / (dist * dist + 1e-8)
+
+                        # Prefer repulsion for close neighbors, attraction for far ones
+                        if dist < avg_distance * 0.7:
+                            # Strong repulsion for very close neighbors
+                            net_force += diff / dist * weight * 2.0
+                            total_weight += weight * 2.0
+                        elif dist > avg_distance * 1.3:
+                            # Mild attraction for distant neighbors
+                            net_force -= diff / dist * weight * 0.5
+                            total_weight += weight * 0.5
+                        else:
+                            # Moderate interaction for medium distances
+                            net_force += diff / dist * weight * 0.5
+                            total_weight += weight * 0.5
+
+            # Compute final perturbation with momentum consideration
+            delta = np.random.randn(3)
+            delta = delta - np.dot(delta, points[idx]) * points[idx]
+
+            # Add momentum from previous perturbation for smoother exploration
+            if prev_delta is not None and iteration > 0:
+                momentum_factor = 0.25
+                delta = momentum_factor * prev_delta + (1 - momentum_factor) * delta
+
+            # Apply net force if significant
+            if total_weight > 0 and np.linalg.norm(net_force) > 0:
+                net_force = net_force / np.linalg.norm(net_force)
+                final_delta = net_force * base_magnitude * 1.5 + delta * 0.5
+            else:
+                final_delta = delta * base_magnitude
+
+            # Normalize and apply perturbation
+            if np.linalg.norm(final_delta) > 0:
+                normalized_delta = final_delta / np.linalg.norm(final_delta)
+            else:
+                normalized_delta = delta / np.linalg.norm(delta) if np.linalg.norm(delta) > 0 else delta
+
+            return points[idx] + normalized_delta
+
+        except Exception:
+            # Fallback to simple random perturbation with better magnitude
+            delta = np.random.randn(3)
+            delta = delta - np.dot(delta, points[idx]) * points[idx]
+            return points[idx] + 0.03 * temp * delta / np.linalg.norm(delta)
+>>>>>>> REPLACE
+</DIFF>

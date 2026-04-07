@@ -1,0 +1,711 @@
+--- a/original.py
++++ b/original.py
+@@ -1,338 +1,386 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import minimize
++from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist
+ from scipy.spatial import SphericalVoronoi
++from sklearn.cluster import KMeans
+ import warnings
+-from numba import jit
+-
+-@jit(nopython=True)
+-def fast_pdist_matrix(points):
+-    """Fast computation of pairwise distances using Numba."""
+-    n = points.shape[0]
+-    distances = np.zeros((n, n))
+-    for i in range(n):
+-        for j in range(i+1, n):
+-            dist = 0.0
+-            for k in range(3):
+-                diff = points[i, k] - points[j, k]
+-                dist += diff * diff
+-            dist = np.sqrt(dist)
+-            distances[i, j] = dist
+-            distances[j, i] = dist
+-    return distances
+-
+-def fibonacci_sphere(n):
+-    """Generate n points evenly distributed on a unit sphere using Fibonacci spiral method."""
+-    points = []
+-    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+-
+-    for i in range(n):
+-        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+-        radius = np.sqrt(1 - y * y)  # radius at y
+-
+-        theta = phi * i  # golden angle increment
+-
+-        x = np.cos(theta) * radius
+-        z = np.sin(theta) * radius
+-
+-        points.append([x, y, z])
+-
+-    return np.array(points)
+-
+-def icosahedral_initialization(n_points):
+-    """Initialize points using icosahedral symmetry for better uniformity."""
+-    # Golden ratio
+-    phi = (1 + np.sqrt(5)) / 2
+-
+-    # Vertices of icosahedron scaled to unit sphere
+-    vertices = []
+-    # Add vertices at (±1, 0, ±φ) and permutations
+-    for i in [1, -1]:
+-        for j in [0, 1, -1]:
+-            for k in [0, 1, -1]:
+-                if i*j*k != 0:
+-                    vertices.append([i, j*phi, k/phi])
+-                elif i*j != 0:
+-                    vertices.append([i, j, k*phi])
+-                elif i*k != 0:
+-                    vertices.append([i, j*phi, k])
+-                elif j*k != 0:
+-                    vertices.append([i*phi, j, k])
+-
+-    # Normalize to unit sphere and take first n_points
+-    vertices = np.array(vertices)
+-    norms = np.linalg.norm(vertices, axis=1, keepdims=True)
+-    vertices = vertices / norms
+-
+-    # For 14 points, we'll use a modified approach
+-    # Generate points on icosahedron faces
+-    points = []
+-
+-    # Add vertices of icosahedron
+-    ico_vertices = np.array([
+-        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+-        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+-        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+-    ])
+-
+-    # Normalize to unit sphere
+-    norms = np.linalg.norm(ico_vertices, axis=1, keepdims=True)
+-    ico_vertices = ico_vertices / norms
+-
+-    # For 14 points, we can start with 12 vertices and add 2 more
+-    # Or use a carefully chosen subset of icosahedral points
+-    selected_vertices = ico_vertices[[0,2,4,6,8,10,1,3,5,7,9,11]]
+-
+-    # Add additional points in strategic locations
+-    additional_points = []
+-    for i in range(n_points - len(selected_vertices)):
+-        # Add points along great circles
+-        angle = 2 * np.pi * i / (n_points - len(selected_vertices))
+-        point = [np.cos(angle), np.sin(angle), 0]
+-        additional_points.append(point)
+-
+-    points = np.vstack([selected_vertices, additional_points])
+-
+-    # Normalize to unit sphere
+-    norms = np.linalg.norm(points, axis=1, keepdims=True)
+-    points = points / norms
+-
+-    # Apply slight random perturbations to avoid perfect symmetry
+-    np.random.seed(42)
+-    perturbations = np.random.normal(0, 0.02, (len(points), 3))
+-    points += perturbations
+-    # Project back to sphere
+-    norms = np.linalg.norm(points, axis=1, keepdims=True)
+-    points = points / norms
+-
+-    # Scale to unit cube [0,1]^3
+-    points = (points + 1) / 2
+-    return points
+-
+-def spherical_voronoi_initialization(n_points):
+-    """Create initial points using spherical Voronoi uniformity principle."""
+-    # Start with Fibonacci distribution
+-    points = fibonacci_sphere(n_points)
+-
+-    # Apply iterative adjustment to improve uniformity
+-    np.random.seed(42)
+-    for _ in range(20):
+-        # Perturb points slightly
+-        perturbations = np.random.normal(0, 0.01, (n_points, 3))
+-        points += perturbations
+-
+-        # Project back to sphere surface
+-        norms = np.linalg.norm(points, axis=1, keepdims=True)
+-        norms = np.where(norms == 0, 1, norms)
+-        points = points / norms
+-
+-    # Scale to unit cube [0,1]^3
+-    points = (points + 1) / 2
+-    return points
+-
+-def spherical_map(points):
+-    """Map points from 3D space to unit sphere using normalization."""
+-    norms = np.linalg.norm(points, axis=1, keepdims=True)
+-    # Avoid division by zero
+-    norms = np.where(norms == 0, 1, norms)
+-    return points / norms
+-
+-def spherical_voronoi_quality(sphere_points):
+-    """Calculate quality based on Voronoi cell areas on sphere."""
+-    if len(sphere_points) < 2:
++import time
++from typing import Tuple, List, Callable, Optional
++import logging
++
++# Set up logging
++logging.basicConfig(level=logging.INFO)
++logger = logging.getLogger(__name__)
++
++class PointDistributionOptimizer:
++    """
++    A modular optimizer for distributing 14 points in 3D space to maximize
++    the ratio of minimum to maximum pairwise distances.
++    """
++    
++    def __init__(self, n_points: int = 14, dimensions: int = 3, seed: int = 42):
++        self.n_points = n_points
++        self.dimensions = dimensions
++        self.seed = seed
++        np.random.seed(seed)
++        
++    def _initialize_spherical_fibonacci(self) -> np.ndarray:
++        """Generate points on sphere using Fibonacci spiral method"""
++        points = []
++        golden_ratio = (1 + np.sqrt(5)) / 2
++        
++        for i in range(self.n_points):
++            # Latitude
++            phi = np.arccos(1 - 2*i/(self.n_points-1))
++            # Longitude
++            theta = 2 * np.pi * i / golden_ratio
++            
++            # Convert to Cartesian coordinates
++            x = np.sin(phi) * np.cos(theta)
++            y = np.sin(phi) * np.sin(theta)
++            z = np.cos(phi)
++            
++            points.append([x, y, z])
++            
++        return np.array(points)
++    
++    def _initialize_cube_grid(self) -> np.ndarray:
++        """Initialize points in a 3D cube grid"""
++        # Find appropriate grid size
++        grid_size = int(np.ceil(self.n_points**(1/3)))
++        coords = np.linspace(0, 1, grid_size)
++        grid_points = []
++        
++        for i in range(grid_size):
++            for j in range(grid_size):
++                for k in range(grid_size):
++                    if len(grid_points) < self.n_points:
++                        grid_points.append([coords[i], coords[j], coords[k]])
++                        
++        return np.array(grid_points[:self.n_points])
++    
++    def _initialize_spherical_code(self) -> np.ndarray:
++        """Initialize using known spherical code configurations"""
++        # Known good configuration for 14 points on sphere
++        spherical_points = np.array([
++            [0.0000, 0.0000, 1.0000],
++            [0.0000, 0.0000, -1.0000],
++            [0.9343, 0.0000, 0.3564],
++            [-0.9343, 0.0000, 0.3564],
++            [0.0000, 0.9343, 0.3564],
++            [0.0000, -0.9343, 0.3564],
++            [0.0000, 0.9343, -0.3564],
++            [0.0000, -0.9343, -0.3564],
++            [0.9343, 0.0000, -0.3564],
++            [-0.9343, 0.0000, -0.3564],
++            [0.3564, 0.9343, 0.0000],
++            [-0.3564, 0.9343, 0.0000],
++            [0.3564, -0.9343, 0.0000],
++            [-0.3564, -0.9343, 0.0000]
++        ])
++        
++        # Normalize to unit sphere
++        norms = np.linalg.norm(spherical_points, axis=1, keepdims=True)
++        spherical_points = spherical_points / np.where(norms == 0, 1, norms)
++        
++        # Add small perturbations
++        perturbation = np.random.normal(0, 0.01, spherical_points.shape)
++        spherical_points = spherical_points + perturbation
++        
++        # Normalize again after perturbation
++        norms = np.linalg.norm(spherical_points, axis=1, keepdims=True)
++        spherical_points = spherical_points / np.where(norms == 0, 1, norms)
++        
++        return spherical_points
++    
++    def _initialize_kmeans(self) -> np.ndarray:
++        """Initialize using KMeans clustering"""
++        # Generate more samples for better clustering
++        kmeans_points = np.random.rand(50, self.dimensions)
++        kmeans = KMeans(n_clusters=self.n_points, random_state=self.seed, n_init=20)
++        kmeans.fit(kmeans_points)
++        return kmeans.cluster_centers_
++    
++    def _initialize_random(self) -> np.ndarray:
++        """Initialize with random points"""
++        return np.random.rand(self.n_points, self.dimensions)
++    
++    def _initialize_perturbed(self, base_points: np.ndarray) -> np.ndarray:
++        """Apply perturbations to base points"""
++        perturbed = base_points + np.random.normal(0, 0.03, base_points.shape)
++        return np.clip(perturbed, 0, 1)
++    
++    def _evaluate_initialization(self, points: np.ndarray) -> float:
++        """Fast evaluation of initialization quality"""
++        if len(points) < 2:
++            return 0
++            
++        distances = pdist(points)
++        if len(distances) == 0:
++            return 0
++            
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max > 1e-12:
++            return d_min / d_max
+         return 0
+-
+-    # Create spherical Voronoi diagram
+-    try:
+-        sv = SphericalVoronoi(sphere_points)
+-        # Calculate total area of Voronoi cells
+-        cell_areas = sv.calculate_areas()
+-        # Quality is inversely related to variance of cell areas
+-        # More uniform areas indicate better distribution
+-        if len(cell_areas) > 0:
+-            mean_area = np.mean(cell_areas)
+-            if mean_area > 0:
+-                variance = np.var(cell_areas)
+-                # Return inverse variance (higher is better)
+-                return 1.0 / (1.0 + variance / mean_area**2)
+-    except Exception:
+-        pass
+-    return 0
+-
+-def min_max_ratio(points):
+-    """Calculate the ratio of minimum to maximum pairwise distances."""
+-    if len(points) < 2:
+-        return 0
+-
+-    # Calculate pairwise distances
+-    distances = pdist(points)
+-
+-    # Get min and max distances
+-    d_min = np.min(distances)
+-    d_max = np.max(distances)
+-
+-    # Avoid division by zero
+-    if d_max == 0:
+-        return 0
+-
+-    return d_min / d_max
+-
+-def constraint_penalty(points, penalty_weight=1000.0):
+-    """Calculate penalty for constraint violations."""
+-    penalty = 0
+-    for i in range(len(points)):
+-        for j in range(3):  # x, y, z coordinates
+-            if points[i, j] < 0:
+-                penalty += penalty_weight * (0 - points[i, j])**2
+-            elif points[i, j] > 1:
+-                penalty += penalty_weight * (points[i, j] - 1)**2
+-    return penalty
+-
+-def objective_with_penalty(x_flat, penalty_weight=1000.0):
+-    """Objective function combining min/max ratio with penalties."""
+-    # Reshape flat array back to points
+-    n_points = 14
+-    points = x_flat.reshape((n_points, 3))
+-
+-    # Calculate min/max ratio
+-    ratio = min_max_ratio(points)
+-
+-    # Calculate penalty for constraints
+-    penalty = constraint_penalty(points, penalty_weight)
+-
+-    # Return negative ratio plus penalty (since we minimize)
+-    return -ratio + penalty
+-
+-def adaptive_gradient_descent(initial_points, max_iterations=500, tolerance=1e-9):
+-    """Custom adaptive gradient descent with penalty handling."""
+-    points = initial_points.copy()
+-    prev_ratio = min_max_ratio(points)
+-    improvement_threshold = 1e-8
+-
+-    for iteration in range(max_iterations):
+-        # Calculate gradients with finite differences
+-        grad = np.zeros_like(points)
+-        epsilon = 1e-6
+-
+-        current_ratio = min_max_ratio(points)
+-
+-        for i in range(len(points)):
+-            for j in range(3):
+-                # Forward difference
+-                test_points = points.copy()
+-                test_points[i, j] += epsilon
+-
+-                # Clip to valid range
+-                test_points = np.clip(test_points, 0, 1)
+-
+-                new_ratio = min_max_ratio(test_points)
+-                grad[i, j] = (new_ratio - current_ratio) / epsilon
+-
+-        # Apply gradient descent step
+-        learning_rate = 0.01 * (1.0 - iteration / max_iterations)  # Adaptive learning rate
+-        new_points = points - learning_rate * grad
+-
+-        # Enforce constraints
+-        new_points = np.clip(new_points, 0, 1)
+-
+-        # Check for improvement
+-        new_ratio = min_max_ratio(new_points)
+-        if new_ratio > current_ratio:
+-            points = new_points
+-            prev_ratio = new_ratio
+-        else:
+-            # Reduce learning rate on stagnation
+-            learning_rate *= 0.9
+-
+-        # Early stopping condition
+-        if abs(new_ratio - prev_ratio) < tolerance:
+-            break
+-
+-        # Very small improvement threshold
+-        if abs(new_ratio - prev_ratio) < improvement_threshold:
+-            break
+-
+-    return points
+-
+-def multi_scale_optimization(initial_points, max_time_seconds=360):
+-    """Perform multi-scale optimization for better convergence."""
+-    # Phase 1: Coarse grained optimization with simple steps
+-    coarse_points = initial_points.copy()
+-
+-    # Take a few large steps with high learning rate
+-    coarse_points = adaptive_gradient_descent(coarse_points, max_iterations=100, tolerance=1e-6)
+-
+-    # Phase 2: Fine grained optimization with smaller steps
+-    fine_points = coarse_points.copy()
+-    fine_points = adaptive_gradient_descent(fine_points, max_iterations=300, tolerance=1e-9)
+-
+-    return fine_points
++    
++    def _generate_initial_strategies(self) -> List[Tuple[str, np.ndarray]]:
++        """Generate multiple initialization strategies"""
++        strategies = []
++        
++        # Strategy 1: Spherical Fibonacci points
++        fib_points = self._initialize_spherical_fibonacci()
++        fib_points = (fib_points + 1) / 2  # Normalize to [0,1]^3
++        strategies.append(("fibonacci", fib_points.copy()))
++        
++        # Strategy 2: Spherical code points
++        sph_code_points = self._initialize_spherical_code()
++        sph_code_points = (sph_code_points + 1) / 2  # Normalize to [0,1]^3
++        strategies.append(("spherical_code", sph_code_points.copy()))
++        
++        # Strategy 3: Cube grid points
++        cube_points = self._initialize_cube_grid()
++        strategies.append(("cube_grid", cube_points.copy()))
++        
++        # Strategy 4: Random points
++        random_points = self._initialize_random()
++        strategies.append(("random", random_points.copy()))
++        
++        # Strategy 5: Perturbed Fibonacci points
++        perturbed_points = self._initialize_perturbed(fib_points)
++        strategies.append(("perturbed_fibonacci", perturbed_points.copy()))
++        
++        # Strategy 6: KMeans points
++        kmeans_points = self._initialize_kmeans()
++        strategies.append(("kmeans", kmeans_points.copy()))
++        
++        # Strategy 7: Perturbed spherical code points
++        alt_perturbed_points = self._initialize_perturbed(sph_code_points)
++        strategies.append(("perturbed_spherical_code", alt_perturbed_points.copy()))
++        
++        return strategies
++    
++    def _adaptive_differential_evolution(self, objective_func: Callable, bounds: List[Tuple[float, float]], 
++                                      maxiter: int = 300) -> Tuple[np.ndarray, float]:
++        """Enhanced differential evolution with adaptive parameters"""
++        # Starting parameters
++        current_popsize = 20
++        current_tol = 1e-6
++        current_mutation = (0.5, 1.0)
++        current_recombination = 0.7
++        
++        # Track performance for adaptive adjustments
++        prev_obj_values = []
++        improvement_threshold = 1e-8
++        max_stagnation = 10
++        
++        try:
++            for iteration in range(maxiter // 10):
++                try:
++                    result = differential_evolution(
++                        objective_func,
++                        bounds,
++                        seed=self.seed + iteration,
++                        maxiter=10,
++                        popsize=current_popsize,
++                        tol=current_tol,
++                        mutation=current_mutation,
++                        recombination=current_recombination,
++                        disp=False
++                    )
++                    
++                    # Track objective values
++                    prev_obj_values.append(-result.fun)
++                    if len(prev_obj_values) > 5:
++                        prev_obj_values.pop(0)
++                    
++                    # Adaptive adjustments based on progress
++                    if len(prev_obj_values) >= 2:
++                        improvement = prev_obj_values[-1] - prev_obj_values[-2]
++                        if improvement < improvement_threshold:
++                            # Reduce population size for faster convergence if stagnating
++                            current_popsize = max(10, current_popsize - 2)
++                        else:
++                            # Increase population size for better exploration
++                            current_popsize = min(30, current_popsize + 1)
++                            
++                        # Tighten tolerance for better precision
++                        current_tol = max(1e-12, current_tol * 0.9)
++                        
++                    # Early stopping if progress is minimal
++                    if len(prev_obj_values) >= 5:
++                        recent_improvements = [prev_obj_values[i+1] - prev_obj_values[i] 
++                                             for i in range(len(prev_obj_values)-1)]
++                        if all(abs(imp) < improvement_threshold for imp in recent_improvements):
++                            break
++                            
++                    # Update parameters for next iteration
++                    current_mutation = (0.5, 1.0)  # Reset to standard
++                    current_recombination = 0.7
++                    
++                except Exception as e:
++                    logger.warning(f"Differential evolution iteration {iteration} failed: {e}")
++                    # Fallback to simpler parameters if something goes wrong
++                    current_popsize = max(10, current_popsize - 5)
++                    current_tol = max(1e-10, current_tol * 2)
++                    if current_popsize < 10:
++                        break
++                    continue
++                    
++            return result.x, -result.fun
++            
++        except Exception as e:
++            logger.error(f"Optimization failed completely: {e}")
++            # Return a reasonable fallback
++            return np.random.rand(self.n_points * self.dimensions), 0.0
++    
++    def _calculate_min_max_ratio(self, points: np.ndarray) -> Tuple[float, float, float]:
++        """Calculate minimum, maximum, and ratio of distances"""
++        if len(points) < 2:
++            return 0.0, 0.0, 0.0
++            
++        distances = pdist(points)
++        
++        if len(distances) == 0:
++            return 0.0, 0.0, 0.0
++            
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max <= 0:
++            return 0.0, 0.0, 0.0
++            
++        ratio = d_min / d_max
++        return d_min, d_max, ratio
++    
++    def _penalty_objective(self, x: np.ndarray, penalty_weight: float = 1e6) -> float:
++        """Objective with penalty for boundary violations"""
++        points = x.reshape(-1, 3)
++        
++        # Vectorized penalty calculation
++        below_penalty = np.sum(np.maximum(0, -points)**2) * penalty_weight
++        above_penalty = np.sum(np.maximum(0, points - 1)**2) * penalty_weight
++        
++        # Calculate main objective
++        distances = pdist(points)
++        
++        if len(distances) == 0:
++            return float('inf') + below_penalty + above_penalty
++            
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max <= 0:
++            return float('inf') + below_penalty + above_penalty
++            
++        # Return negative ratio plus penalty (to minimize)
++        return -(d_min / d_max) + below_penalty + above_penalty
++    
++    def _local_refinement(self, points: np.ndarray, max_iter: int = 300) -> np.ndarray:
++        """Apply local refinement to improve final solution"""
++        def objective_local(x):
++            points_local = x.reshape(-1, 3)
++            distances = pdist(points_local)
++            
++            if len(distances) == 0:
++                return float('inf')
++                
++            d_min = np.min(distances)
++            d_max = np.max(distances)
++            
++            if d_max > 1e-12:
++                return -(d_min / d_max)  # Negative because we minimize
++            else:
++                return float('inf')
++                
++        try:
++            x0_refine = points.flatten()
++            bounds = [(0, 1)] * self.n_points * 3
++            
++            result_refine = minimize(
++                objective_local,
++                x0_refine,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'ftol': 1e-12, 'gtol': 1e-12},
++                tol=1e-12
++            )
++            
++            refined_points = result_refine.x.reshape(-1, 3)
++            refined_points = np.clip(refined_points, 0, 1)
++            return refined_points
++        except Exception as e:
++            logger.warning(f"Local refinement failed: {e}")
++            return points
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+-    # Try multiple initialization strategies and select the best starting point
+-    initial_strategies = [
+-        lambda: icosahedral_initialization(14),
+-        lambda: spherical_voronoi_initialization(14),
+-        lambda: (fibonacci_sphere(14) + 1) / 2,
+-        lambda: np.random.rand(14, 3)
+-    ]
+-
+-    best_points = None
+-    best_ratio = 0
+-
+-    for i, init_func in enumerate(initial_strategies):
+-        try:
+-            initial_points = init_func()
+-            ratio = min_max_ratio(initial_points)
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = initial_points.copy()
+-        except Exception:
+-            continue
+-
+-    if best_points is None:
+-        # Fallback to spherical Voronoi if all strategies fail
+-        best_points = spherical_voronoi_initialization(14)
+-
+-    # Multi-scale optimization
+-    optimized_points = multi_scale_optimization(best_points)
+-    optimized_ratio = min_max_ratio(optimized_points)
+-
+-    if optimized_ratio > best_ratio:
+-        best_points = optimized_points
+-        best_ratio = optimized_ratio
+-
+-    # Additional refinement using scipy minimize with L-BFGS-B
+-    try:
+-        x0 = best_points.flatten()
+-        bounds = [(0, 1) for _ in range(14 * 3)]
+-
+-        # Use scipy minimize for final refinement with tightened tolerances
+-        result = minimize(
+-            objective_with_penalty,
+-            x0,
+-            method='L-BFGS-B',
+-            bounds=bounds,
+-            options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 1000},
+-            tol=1e-12
+-        )
+-
+-        final_points = result.x.reshape((14, 3))
+-        final_ratio = min_max_ratio(final_points)
+-
+-        if final_ratio > best_ratio:
+-            best_points = final_points
+-    except Exception:
+-        # Keep the best points found so far if scipy fails
+-        pass
+-
+-    return best_points
++    
++    # Initialize optimizer
++    optimizer = PointDistributionOptimizer(n_points=14, dimensions=3, seed=42)
++    
++    # Phase 1: Generate all initialization strategies
++    logger.info("Generating initialization strategies...")
++    strategies = optimizer._generate_initial_strategies()
++    
++    # Phase 2: Evaluate all strategies and select the best
++    logger.info("Evaluating initial strategies...")
++    best_initialization = None
++    best_ratio = -np.inf
++    
++    for name, points in strategies:
++        ratio = optimizer._evaluate_initialization(points)
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_initialization = points.copy()
++    
++    if best_initialization is None:
++        # Fallback to random initialization
++        best_initialization = optimizer._initialize_random()
++        best_ratio = optimizer._evaluate_initialization(best_initialization)
++    
++    logger.info(f"Best initial strategy ratio: {best_ratio}")
++    
++    # Phase 3: Setup bounds for optimization
++    bounds = [(0, 1)] * 14 * 3
++    x0 = best_initialization.flatten()
++    
++    # Phase 4: Run adaptive differential evolution optimization
++    logger.info("Running adaptive differential evolution...")
++    start_time = time.time()
++    
++    # Use the custom objective with penalty
++    best_result_x, best_result_ratio = optimizer._adaptive_differential_evolution(
++        optimizer._penalty_objective, 
++        bounds, 
++        maxiter=200
++    )
++    
++    # Extract optimized points
++    optimized_points = best_result_x.reshape(-1, 3)
++    
++    logger.info(f"Optimization completed in {time.time() - start_time:.2f}s")
++    logger.info(f"Ratio after optimization: {best_result_ratio}")
++    
++    # Phase 5: Apply local refinement
++    logger.info("Applying local refinement...")
++    final_points = optimizer._local_refinement(optimized_points)
++    
++    # Final clipping to ensure bounds are respected
++    final_points = np.clip(final_points, 0, 1)
++    
++    # Final validation
++    final_min, final_max, final_ratio = optimizer._calculate_min_max_ratio(final_points)
++    logger.info(f"Final validation - Min: {final_min:.6f}, Max: {final_max:.6f}, Ratio: {final_ratio:.6f}")
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

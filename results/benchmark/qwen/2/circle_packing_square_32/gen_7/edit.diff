@@ -1,0 +1,278 @@
+--- a/original.py
++++ b/original.py
+@@ -1,142 +1,224 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from deap import base, creator, tools, algorithms
++from scipy.spatial.distance import cdist
++import random
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import cdist
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial import KDTree
++
++# Set seeds for reproducibility
++np.random.seed(42)
++random.seed(42)
+ 
+ def initialize_circles_heuristic(n=32):
+-    """Initialize circle positions with a heuristic approach."""
+-    # Start with a coarse grid layout
++    """Initialize circle positions with a heuristic approach using hexagonal packing approximation."""
++    # Create a hexagonal grid pattern for better initial distribution
+     rows = int(np.ceil(np.sqrt(n)))
+     cols = int(np.ceil(n / rows))
+-
+-    # Create initial grid positions
++    
++    # Use hexagonal packing for better space utilization
+     positions = []
+     for i in range(rows):
+         for j in range(cols):
+             if len(positions) >= n:
+                 break
+-            x = (j + 0.5) / cols
++            # Offset every other row for hexagonal packing
++            x_offset = (j + 0.5) / cols
++            if i % 2 == 1:
++                x_offset += 0.5 / cols
+             y = (i + 0.5) / rows
++            x = x_offset
++            # Clamp to [0,1] range
++            x = max(0.001, min(0.999, x))
++            y = max(0.001, min(0.999, y))
+             positions.append([x, y])
+-
++    
+     # Adjust for exact count
+     positions = positions[:n]
+-
+-    # Assign initial radii - start with small values and increase
+-    # We want to fit within unit square with some margin
++    
++    # Assign initial radii based on spacing
+     initial_radii = []
+     for i in range(n):
+-        # Try to place circles with reasonable initial sizes
+-        # Based on rough estimation of how many circles fit in grid
+-        max_radius = min(1.0/(cols+1), 1.0/(rows+1))
+-        initial_radii.append(max_radius * 0.4)
+-
++        # Calculate minimum spacing needed for a circle to fit
++        min_spacing = 1.0 / max(rows, cols)
++        max_radius = min_spacing * 0.4
++        # Add some randomness while keeping reasonable values
++        initial_radii.append(max(0.005, min(0.3, max_radius + np.random.normal(0, max_radius*0.1))))
++    
+     # Combine into circles array
+     circles = np.column_stack([positions, initial_radii])
+     return circles
+ 
+-def evaluate_fitness(circles):
+-    """Evaluate fitness of circle configuration."""
++def evaluate_fitness_deap(individual):
++    """Evaluate fitness of circle configuration for DEAP."""
++    # Reshape individual back to circles array
++    circles = np.array(individual).reshape(-1, 3)
+     n = len(circles)
++    
+     total_radius = np.sum(circles[:, 2])
+-
++    
+     # Penalty for overlaps and containment violations
+     penalty = 0
+-
++    
+     # Check containment constraints
+     for i in range(n):
+         x, y, r = circles[i]
+         if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+-            penalty += 1000  # Large penalty for containment violation
+-
+-    # Check overlap constraints
+-    for i in range(n):
+-        for j in range(i+1, n):
++            penalty += 10000  # Large penalty for containment violation
++    
++    # Check overlap constraints using efficient distance calculation
++    # Only check pairs that could potentially overlap based on distance
++    tree = KDTree(circles[:, :2])
++    pairs = tree.query_pairs(r=0.001, output_type='ndarray')
++    
++    for i, j in pairs:
++        if i < j:  # Avoid duplicate checks
+             x1, y1, r1 = circles[i]
+             x2, y2, r2 = circles[j]
+             distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+             if distance < r1 + r2:
+-                penalty += 1000 * (r1 + r2 - distance)
+-
+-    return total_radius - penalty
+-
+-def optimize_circles(circles):
+-    """Optimize circle positions using scipy optimization."""
++                penalty += 10000 * (r1 + r2 - distance)
++    
++    return total_radius - penalty,
++
++def optimize_with_evolution(circles, max_generations=50):
++    """Optimize using evolutionary algorithm."""
++    n = len(circles)
++    
++    # Create DEAP individual and fitness classes
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    # Attribute generator
++    def generate_individual():
++        # Generate flattened individual with appropriate bounds
++        individual = []
++        for i in range(n):
++            # x coordinate
++            individual.append(random.uniform(0.001, 0.999))
++            # y coordinate  
++            individual.append(random.uniform(0.001, 0.999))
++            # radius
++            individual.append(random.uniform(0.001, 0.5))
++        return creator.Individual(individual)
++    
++    toolbox.register("individual", generate_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    
++    # Register evaluation and operators
++    toolbox.register("evaluate", evaluate_fitness_deap)
++    toolbox.register("mate", tools.cxTwoPoint)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.01, indpb=0.1)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Create initial population
++    pop = toolbox.population(n=30)
++    
++    # Evaluate initial population
++    fitnesses = list(map(toolbox.evaluate, pop))
++    for ind, fit in zip(pop, fitnesses):
++        ind.fitness.values = fit
++    
++    # Evolve
++    hof = tools.HallOfFame(1)
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    try:
++        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, 
++                                          ngen=max_generations, stats=stats, 
++                                          halloffame=hof, verbose=False)
++        
++        if hof:
++            best_individual = hof[0]
++            optimized_circles = np.array(best_individual).reshape(-1, 3)
++            return optimized_circles
++    except Exception as e:
++        print(f"Evolution error: {e}")
++    
++    # Return original if evolution failed
++    return circles
++
++def refine_with_local_optimization(circles):
++    """Refine solution using local optimization with proper constraints."""
+     def objective(params):
+         # Reshape params back to circles array
+         circles_flat = params.reshape(-1, 3)
+-        return -evaluate_fitness(circles_flat)  # Negative because we maximize
+-
++        # Calculate negative fitness since we minimize in scipy
++        return -evaluate_fitness_deap(circles_flat)[0]
++    
+     def constraint_func(params):
+         # Constraints for non-overlap and containment
+         circles_flat = params.reshape(-1, 3)
+         n = len(circles_flat)
+ 
+-        # Containment constraints (should be within [r, 1-r] for x and y)
++        # Containment constraints
+         bounds_violation = 0
+-
+         for i in range(n):
+             x, y, r = circles_flat[i]
+             if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                 bounds_violation += 1000
+ 
+-        # Overlap constraints
++        # Overlap constraints  
+         overlap_violation = 0
+         for i in range(n):
+             for j in range(i+1, n):
+                 x1, y1, r1 = circles_flat[i]
+                 x2, y2, r2 = circles_flat[j]
+                 distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                 if distance < r1 + r2:
+                     overlap_violation += 1000 * (r1 + r2 - distance)
+-
++        
+         return bounds_violation + overlap_violation
+-
++    
+     # Flatten the circles array for optimization
+     initial_params = circles.flatten()
+-
++    
+     # Define bounds for optimization
+     bounds = []
+     for i in range(len(initial_params)):
+         if i % 3 == 2:  # radius parameter
+             bounds.append((0.001, 0.5))  # Radius between 0.001 and 0.5
+         else:  # x and y parameters
+             bounds.append((0.001, 0.999))  # Position within the unit square
+-
++    
+     try:
+         # Use L-BFGS-B which handles bounds well
+         result = minimize(objective, initial_params, method='L-BFGS-B',
+-                         bounds=bounds, options={'maxiter': 1000})
+-
++                         bounds=bounds, options={'maxiter': 500})
++        
+         if result.success:
+             optimized_circles = result.x.reshape(-1, 3)
+             return optimized_circles
+     except Exception as e:
+-        print(f"Optimization error: {e}")
+-
++        print(f"Local optimization error: {e}")
++    
+     # Return original if optimization failed
+     return circles
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+     circles = np.zeros((n, 3))
+ 
+     # Initialize with heuristic approach
+     circles = initialize_circles_heuristic(n)
+ 
+-    # Optimize the configuration
+-    circles = optimize_circles(circles)
+-
+-    return circles
+-
++    # First, use evolutionary algorithm for global search
++    circles = optimize_with_evolution(circles, max_generations=30)
++    
++    # Then refine with local optimization
++    circles = refine_with_local_optimization(circles)
++
++    return circles
+ 
+ # EVOLVE-BLOCK-END

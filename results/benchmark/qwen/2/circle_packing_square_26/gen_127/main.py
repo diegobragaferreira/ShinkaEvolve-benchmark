@@ -1,0 +1,420 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import random
+import time
+from typing import Tuple, List, Optional
+import warnings
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+class CircleInitializer:
+    """Handles various circle initialization strategies."""
+    
+    @staticmethod
+    def grid_with_jitter(n_circles: int) -> np.ndarray:
+        """Generate initial circle positions using grid with jitter."""
+        grid_size = int(np.ceil(np.sqrt(n_circles)))
+        positions = []
+        
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if len(positions) >= n_circles:
+                    break
+                # Add jitter to avoid perfect grid alignment
+                x = (i + 0.5 + np.random.uniform(-0.15, 0.15)) / grid_size
+                y = (j + 0.5 + np.random.uniform(-0.15, 0.15)) / grid_size
+                # Clip to valid range to ensure bounds
+                x = np.clip(x, 0.01, 0.99)
+                y = np.clip(y, 0.01, 0.99)
+                positions.append([x, y])
+        
+        return np.array(positions[:n_circles])
+    
+    @staticmethod
+    def multi_scale_grid(n_circles: int) -> np.ndarray:
+        """Generate initial positions using multiple grid scales."""
+        grid_sizes = [int(np.ceil(np.sqrt(n_circles))),
+                     max(1, int(np.ceil(np.sqrt(n_circles)) * 0.7)),
+                     max(1, int(np.ceil(np.sqrt(n_circles)) * 1.3))]
+        
+        positions = []
+        for grid_size in grid_sizes:
+            if len(positions) >= n_circles:
+                break
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    if len(positions) >= n_circles:
+                        break
+                    # Add jitter to avoid perfect grid alignment issues
+                    x = (i + 0.5 + np.random.uniform(-0.15, 0.15)) / grid_size
+                    y = (j + 0.5 + np.random.uniform(-0.15, 0.15)) / grid_size
+                    # Clip to valid range to ensure bounds
+                    x = np.clip(x, 0.01, 0.99)
+                    y = np.clip(y, 0.01, 0.99)
+                    positions.append([x, y])
+        
+        # Ensure we have exactly n_circles
+        result = np.array(positions[:n_circles])
+        return result
+
+class ConstraintValidator:
+    """Validates circle configurations for containment and overlap constraints."""
+    
+    @staticmethod
+    def validate_bounds(circles: np.ndarray) -> bool:
+        """Validate that all circles are within bounds."""
+        # Vectorized bound check
+        valid_bounds = (
+            (circles[:, 2] <= circles[:, 0]) &
+            (circles[:, 0] <= 1 - circles[:, 2]) &
+            (circles[:, 2] <= circles[:, 1]) &
+            (circles[:, 1] <= 1 - circles[:, 2])
+        )
+        return np.all(valid_bounds)
+    
+    @staticmethod
+    def check_overlap_fast(circles_arr: np.ndarray, idx: int, tree: Optional[cKDTree] = None) -> bool:
+        """Fast overlap checking using spatial indexing."""
+        if len(circles_arr) <= 1:
+            return False
+        
+        # Build tree excluding the circle we're checking
+        if tree is None:
+            other_circles = np.delete(circles_arr, idx, axis=0)
+            if len(other_circles) == 0:
+                return False
+            tree = cKDTree(other_circles[:, :2])  # Only positions for spatial indexing
+        
+        # Query neighbors within distance 2*(r1+r2) to find potential overlaps
+        query_radius = 2 * (circles_arr[idx, 2] + 0.01)  # Add buffer for numerical stability
+        neighbors = tree.query_ball_point(circles_arr[idx, :2], query_radius)
+        
+        # Check actual overlap for neighbors
+        for neighbor_idx in neighbors:
+            # Since we removed one element, neighbor indices might be shifted
+            if neighbor_idx >= idx:  # Adjust index since we deleted elements
+                neighbor_idx += 1
+            if neighbor_idx >= len(circles_arr):
+                continue
+            
+            neighbor_pos = circles_arr[neighbor_idx, :2]
+            neighbor_radius = circles_arr[neighbor_idx, 2]
+            
+            # Calculate squared distance for efficiency
+            dx = circles_arr[idx, 0] - neighbor_pos[0]
+            dy = circles_arr[idx, 1] - neighbor_pos[1]
+            dist_sq = dx*dx + dy*dy
+            min_dist_sq = (circles_arr[idx, 2] + neighbor_radius)**2
+            
+            if dist_sq < min_dist_sq:
+                return True
+        return False
+    
+    @staticmethod
+    def is_valid_config(config: np.ndarray) -> bool:
+        """Check if a configuration is valid."""
+        # Check bounds first (vectorized)
+        if not ConstraintValidator.validate_bounds(config):
+            return False
+        
+        # Check overlaps efficiently using KDTree
+        for i in range(len(config)):
+            if ConstraintValidator.check_overlap_fast(config, i):
+                return False
+        return True
+
+class EvolutionaryOperators:
+    """Contains all evolutionary operators for circle packing."""
+    
+    @staticmethod
+    def mutate_individual(individual: np.ndarray, indpb: float = 0.15, max_radius: float = 0.49) -> tuple:
+        """Mutation operator with improved parameters."""
+        individual = individual.reshape(-1, 3)
+        mut_count = 0
+        
+        for i in range(len(individual)):
+            if random.random() < indpb:
+                mut_count += 1
+                # Mutate one of x, y, or r with different strengths
+                choice = random.randint(0, 2)
+                if choice == 0:  # x coordinate
+                    individual[i, 0] += np.random.normal(0, 0.04)
+                    individual[i, 0] = np.clip(individual[i, 0], 0.01, 0.99)
+                elif choice == 1:  # y coordinate
+                    individual[i, 1] += np.random.normal(0, 0.04)
+                    individual[i, 1] = np.clip(individual[i, 1], 0.01, 0.99)
+                else:  # radius
+                    # Smaller mutations for radius to preserve feasibility
+                    individual[i, 2] += np.random.normal(0, 0.015)
+                    individual[i, 2] = np.clip(individual[i, 2], 0.001, max_radius)
+        
+        return (individual.flatten(),)
+    
+    @staticmethod
+    def cx_uniform(ind1: np.ndarray, ind2: np.ndarray) -> tuple:
+        """Uniform crossover with better probability."""
+        ind1 = ind1.reshape(-1, 3)
+        ind2 = ind2.reshape(-1, 3)
+        
+        for i in range(len(ind1)):
+            if random.random() < 0.6:  # Increased crossover probability
+                ind1[i] = ind2[i].copy()
+        
+        return (ind1.flatten(), ind2.flatten())
+
+class LocalOptimizer:
+    """Handles local optimization and refinement strategies."""
+    
+    @staticmethod
+    def refine_configuration(config: np.ndarray, max_iterations: int = 100) -> np.ndarray:
+        """Enhanced local optimization refinement function with gradient descent inspired approach."""
+        improvement_threshold = 1e-6
+        
+        for iteration in range(max_iterations):
+            # Track improvement
+            prev_total_radius = np.sum(config[:, 2])
+            improved = False
+            
+            # For each circle, try to maximize its radius while satisfying all constraints
+            for i in range(len(config)):
+                # Store original values
+                orig_x, orig_y, orig_r = config[i, 0], config[i, 1], config[i, 2]
+                
+                # Calculate maximum possible radius at current position
+                max_radius = min(orig_x, 1-orig_x, orig_y, 1-orig_y)
+                
+                # Find minimum distance to other circles to determine how much we can increase radius
+                min_distance = float('inf')
+                for j in range(len(config)):
+                    if i != j:
+                        dx = orig_x - config[j, 0]
+                        dy = orig_y - config[j, 1]
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        # Distance to center minus sum of radii equals minimum gap for non-overlap
+                        min_gap = distance - (orig_r + config[j, 2])
+                        if min_gap < min_distance:
+                            min_distance = min_gap
+                
+                # Maximum achievable radius is bounded by both boundary and overlap constraints
+                if min_distance < 0:  # Overlapping - reduce radius
+                    max_radius = min(max_radius, orig_r + min_distance)
+                else:  # Not overlapping - can increase radius up to boundary limit
+                    max_radius = min(max_radius, orig_r + min_distance)
+                
+                # Actually try to increase radius by a small amount if beneficial
+                # But make sure it's not too aggressive to maintain feasibility
+                test_r = min(orig_r + 0.002, max_radius)
+                
+                # If we can increase the radius, do it
+                if test_r > orig_r + improvement_threshold:
+                    config[i, 2] = test_r
+                    improved = True
+                elif test_r > orig_r:
+                    config[i, 2] = test_r
+                    improved = True
+            
+            # Also try to fine-tune positions if we're not making big improvements
+            if not improved and iteration > 10:
+                # Try subtle position adjustments to free up space for larger radii
+                for i in range(len(config)):
+                    # Only adjust if there could be a benefit
+                    orig_x, orig_y, orig_r = config[i, 0], config[i, 1], config[i, 2]
+                    original_radius = orig_r
+                    
+                    # Check if we can safely increase radius by moving
+                    max_radius = min(orig_x, 1-orig_x, orig_y, 1-orig_y)
+                    
+                    # Calculate overlap constraints
+                    min_distance = float('inf')
+                    for j in range(len(config)):
+                        if i != j:
+                            dx = orig_x - config[j, 0]
+                            dy = orig_y - config[j, 1]
+                            distance = np.sqrt(dx*dx + dy*dy)
+                            min_gap = distance - (orig_r + config[j, 2])
+                            if min_gap < min_distance:
+                                min_distance = min_gap
+                    
+                    # Try small position adjustments to create space
+                    if min_distance <= 0 or (min_distance < 0.005 and max_radius > orig_r):
+                        # Try moving in direction of least constraint
+                        move_x, move_y = 0.0, 0.0
+                        
+                        # Calculate net force from nearby circles (simplified repulsion)
+                        force_x, force_y = 0.0, 0.0
+                        for j in range(len(config)):
+                            if i != j:
+                                dx = orig_x - config[j, 0]
+                                dy = orig_y - config[j, 1]
+                                distance = np.sqrt(dx*dx + dy*dy)
+                                if distance > 0:
+                                    # Repulsive force inversely proportional to squared distance
+                                    force = 1.0 / (distance * distance + 1e-10)
+                                    force_x += force * dx / distance
+                                    force_y += force * dy / distance
+                        
+                        # Apply small movement
+                        move_x = -force_x * 0.001
+                        move_y = -force_y * 0.001
+                        
+                        new_x = np.clip(orig_x + move_x, orig_r, 1 - orig_r)
+                        new_y = np.clip(orig_y + move_y, orig_r, 1 - orig_r)
+                        
+                        # Only accept movement if it helps the configuration
+                        config[i, 0] = new_x
+                        config[i, 1] = new_y
+                        
+                        # After movement, try to increase radius again
+                        new_max_radius = min(new_x, 1-new_x, new_y, 1-new_y)
+                        config[i, 2] = min(new_max_radius, config[i, 2] + 0.001)
+                        improved = True
+            
+            # Break if minimal improvement
+            current_total_radius = np.sum(config[:, 2])
+            if current_total_radius - prev_total_radius < improvement_threshold:
+                break
+        
+        return config
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    
+    # Create toolboxes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Initialize individuals with better starting configuration
+    def init_individual():
+        # Generate initial grid using multi-scale approach
+        positions = CircleInitializer.multi_scale_grid(n)
+        
+        # Add more structured randomness to positions and set initial radii
+        individual = np.zeros((n, 3))
+        for i in range(n):
+            # Apply positional perturbations but keep within reasonable bounds
+            individual[i, 0] = np.clip(positions[i, 0] + np.random.normal(0, 0.03), 0.01, 0.99)
+            individual[i, 1] = np.clip(positions[i, 1] + np.random.normal(0, 0.03), 0.01, 0.99)
+            # Start with slightly larger initial radii but ensure they fit
+            max_radius = min(
+                individual[i, 0],
+                1 - individual[i, 0],
+                individual[i, 1],
+                1 - individual[i, 1]
+            ) * 0.95
+            individual[i, 2] = np.clip(np.random.uniform(0.03, max_radius * 0.8), 0.001, 0.49)
+        
+        return creator.Individual(individual.flatten())
+    
+    toolbox.register("individual", init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    # Register genetic operators with improved parameters
+    toolbox.register("evaluate", lambda ind: (np.sum(ind.reshape(n, 3)[:, 2]),) if ConstraintValidator.is_valid_config(ind.reshape(n, 3)) else (-1e6,))
+    toolbox.register("mate", EvolutionaryOperators.cx_uniform)
+    toolbox.register("mutate", EvolutionaryOperators.mutate_individual)
+    
+    # Tournament selection with adaptive sizing based on diversity
+    def sel_tournament_varsize(individuals, k, tournsize=None):
+        if tournsize is None:
+            # Calculate tournament size based on fitness diversity
+            fitnesses = [ind.fitness.values[0] for ind in individuals]
+            if len(fitnesses) > 1:
+                fitness_std = np.std(fitnesses)
+                # Normalize tournament size - higher diversity means more aggressive selection
+                tournsize = max(3, min(len(individuals), int(5 + fitness_std * 20)))
+            else:
+                tournsize = 3
+        
+        return tools.selTournament(individuals, k, tournsize)
+    
+    toolbox.register("select", sel_tournament_varsize)
+    
+    # Run evolution
+    pop = toolbox.population(n=60)  # Slightly larger population
+    hof = tools.HallOfFame(1)
+    
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Run the evolutionary algorithm
+    try:
+        # Initial evaluation
+        for individual in pop:
+            individual.fitness.values = toolbox.evaluate(individual)
+        
+        # Record best solution before evolution
+        best_individual = tools.selBest(pop, 1)[0]
+        best_solution = best_individual.reshape(n, 3).copy()
+        
+        # Evolution parameters - reduced number of generations but increased efficiency
+        n_generations = 40
+        # Adaptive mutation rate with exponential decay
+        mutation_rates = [0.15 * (0.9 ** i) for i in range(n_generations)]
+        
+        # Main evolutionary loop
+        for gen in range(n_generations):
+            # Current mutation rate
+            current_mutation_rate = mutation_rates[gen]
+            
+            # Select
+            offspring = toolbox.select(pop, len(pop))
+            offspring = list(map(toolbox.clone, offspring))
+            
+            # Crossover and mutation
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < 0.8:
+                    toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+            
+            for mutant in offspring:
+                if random.random() < current_mutation_rate:
+                    toolbox.mutate(mutant)
+                    del mutant.fitness.values
+            
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            for ind in invalid_ind:
+                ind.fitness.values = toolbox.evaluate(ind)
+            
+            # Replace the current population with the offspring
+            pop[:] = offspring
+            
+            # Update hall of fame
+            hof.update(pop)
+            
+            # Keep track of best solution found so far
+            current_best = tools.selBest(pop, 1)[0]
+            if current_best.fitness.values > best_solution.fitness.values:
+                best_solution = current_best.reshape(n, 3).copy()
+        
+        # Final refinement of best solution
+        refined_solution = LocalOptimizer.refine_configuration(best_solution.copy())
+        return refined_solution
+        
+    except Exception as e:
+        # Fallback to simple grid-based solution if evolutionary fails
+        print(f"Evolution failed: {e}")
+        positions = CircleInitializer.grid_with_jitter(n)
+        final_solution = np.zeros((n, 3))
+        for i in range(n):
+            final_solution[i, 0] = positions[i, 0]
+            final_solution[i, 1] = positions[i, 1]
+            final_solution[i, 2] = 0.05  # Set small but equal radii
+        return final_solution
+
+# EVOLVE-BLOCK-END

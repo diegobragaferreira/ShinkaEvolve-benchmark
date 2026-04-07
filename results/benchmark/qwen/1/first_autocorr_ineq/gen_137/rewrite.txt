@@ -1,0 +1,247 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+from joblib import Parallel, delayed
+import time
+import random
+from numba import jit
+
+# Set random seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+@jit(nopython=True)
+def fast_convolve(a, b):
+    """Fast convolution using Numba JIT for speed."""
+    n = len(a)
+    result = np.zeros(n)
+    for i in range(n):
+        for j in range(n):
+            if 0 <= i+j < n:
+                result[i+j] += a[i] * b[j]
+    return result
+
+def compute_convolution_fft(seq):
+    """Compute convolution using FFT for better efficiency"""
+    n = len(seq)
+    padded_seq = np.pad(seq, (0, n-1), mode='constant')
+    fft_seq = fft(padded_seq)
+    conv_result = ifft(fft_seq * np.conj(fft_seq)).real[:n]
+    return conv_result
+
+def compute_autocorrelation_constant(sequence):
+    """Compute the C1 constant for a given sequence"""
+    if len(sequence) == 0:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+
+    # Use FFT for efficient convolution
+    conv_result = compute_convolution_fft(sequence)
+    max_conv = np.max(conv_result)
+
+    # Compute C1 = 2n * max(conv) / (sum(a))^2
+    n = len(sequence)
+    c1 = (2 * n * max_conv) / (sum_a ** 2)
+
+    return c1
+
+def evaluate_sequence(sequence):
+    """Evaluate a sequence by computing its inverse C1"""
+    c1 = compute_autocorrelation_constant(sequence)
+    if c1 == float('inf'):
+        return 0.0  # Invalid sequence
+    return 1.0 / c1  # Return 1/C1 as the objective
+
+def evaluate_sequence_batch(sequences):
+    """Batch evaluation of sequences to leverage parallelism"""
+    return Parallel(n_jobs=-1)(delayed(evaluate_sequence)(seq) for seq in sequences)
+
+def generate_sine_sequence(n):
+    """Generate a structured sine-based sequence for better initialization"""
+    return [abs(np.sin(np.pi * i / n)) * 100 for i in range(n)]
+
+def generate_structured_sequence(n):
+    """Generate a structured sequence using sine waves and random components"""
+    base = generate_sine_sequence(n)
+    noise = [np.random.random() * 10 for _ in range(n)]
+    return [max(0, b + n) for b, n in zip(base, noise)]
+
+def get_gradient_estimate(sequence, epsilon=1e-4):
+    """Estimate gradient using finite differences"""
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    grad = []
+    for i in range(n):
+        # Create perturbed sequences
+        seq_plus = sequence.copy()
+        seq_minus = sequence.copy()
+
+        seq_plus[i] += epsilon
+        seq_minus[i] -= epsilon
+
+        # Evaluate both and estimate derivative
+        val_plus = evaluate_sequence(seq_plus)
+        val_minus = evaluate_sequence(seq_minus)
+
+        grad_i = (val_plus - val_minus) / (2 * epsilon)
+        grad.append(grad_i)
+
+    return np.array(grad)
+
+def adaptive_mutate(sequence, mutation_strength=0.1):
+    """Apply adaptive mutation using gradient estimates."""
+    mutated = sequence.copy()
+    grad = get_gradient_estimate(sequence)
+    
+    if grad is None:
+        # Fallback to random mutation if gradient estimation fails
+        for i in range(len(mutated)):
+            if np.random.rand() < 0.1:
+                mutated[i] *= np.random.normal(1.0, mutation_strength)
+                mutated[i] = max(0, min(1000, mutated[i]))
+        return mutated
+
+    # Use gradient to inform mutation direction
+    for i in range(len(mutated)):
+        # Adjust mutation strength based on gradient magnitude
+        grad_mag = abs(grad[i])
+        local_mutation = mutation_strength * (1.0 + grad_mag/100.0) if grad_mag > 0 else mutation_strength
+        if np.random.rand() < 0.1:
+            # Apply mutation in direction of gradient
+            mutated[i] += grad[i] * local_mutation
+            mutated[i] = max(0, min(1000, mutated[i]))
+    return mutated
+
+def crossover_sequences(parent1, parent2):
+    """Perform crossover between two sequences."""
+    n1, n2 = len(parent1), len(parent2)
+    n = min(n1, n2)
+
+    if n == 0:
+        return []
+
+    # Random crossover point
+    crossover_point = np.random.randint(1, n)
+
+    # Create offspring
+    child = parent1[:crossover_point] + parent2[crossover_point:]
+
+    # Extend if needed
+    if n1 > n:
+        child.extend(parent1[n:])
+    elif n2 > n:
+        child.extend(parent2[n:])
+
+    return child
+
+def tournament_selection(population, fitness_scores, tournament_size=3):
+    """Select an individual using tournament selection."""
+    selected_indices = np.random.choice(len(population), size=tournament_size)
+    best_index = selected_indices[np.argmax([fitness_scores[i] for i in selected_indices])]
+    return population[best_index].copy()
+
+def adaptive_evolutionary_search(max_time_seconds=180):
+    """Perform adaptive evolutionary search using gradient-guided mutations."""
+    start_time = time.time()
+
+    # Parameters
+    population_size = 50
+    max_generations = 1000
+    elite_size = 5
+    min_sequence_length = 100
+    max_sequence_length = 2000
+    stagnation_threshold = 100
+
+    # Initialize population with structured sequences
+    population = []
+    for _ in range(population_size):
+        n = np.random.randint(min_sequence_length, max_sequence_length)
+        seq = generate_structured_sequence(n)
+        population.append(seq)
+
+    best_fitness = 0.0
+    best_sequence = None
+    generation = 0
+    stagnation_count = 0
+
+    while time.time() - start_time < max_time_seconds and generation < max_generations:
+        # Evaluate fitness for all individuals
+        fitness_scores = evaluate_sequence_batch(population)
+
+        # Sort by fitness (descending order)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+        # Track best individual
+        current_best_fitness = sorted_fitness[0]
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_sequence = sorted_population[0].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Check for stagnation
+        if stagnation_count > stagnation_threshold:
+            # Introduce diversity by randomizing elites
+            for i in range(elite_size, len(population)):
+                n = np.random.randint(min_sequence_length, max_sequence_length)
+                population[i] = generate_structured_sequence(n)
+            stagnation_count = 0
+
+        # Create new population
+        new_population = sorted_population[:elite_size]  # Keep elites
+
+        # Generate offspring through tournament selection and adaptive mutation
+        while len(new_population) < len(population):
+            # Tournament selection for parents
+            parent1 = tournament_selection(sorted_population, sorted_fitness)
+            parent2 = tournament_selection(sorted_population, sorted_fitness)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with gradient guidance
+            child = adaptive_mutate(child)
+
+            # Ensure valid range
+            child = [max(0, min(1000, x)) for x in child]
+
+            new_population.append(child)
+
+        population = new_population
+        generation += 1
+
+    return best_sequence if best_sequence is not None else generate_structured_sequence(1000)
+
+def search_for_best_sequence(max_time=180) -> list[float]:
+    """Main function to search for the best coefficient sequence."""
+    start_time = time.time()
+    
+    # Perform adaptive evolutionary search
+    best_sequence = adaptive_evolutionary_search(max_time)
+    
+    # Final evaluation
+    final_score = evaluate_sequence(best_sequence)
+    final_c1 = compute_autocorrelation_constant(best_sequence)
+    benchmark_ratio = 1.5031 / final_c1
+
+    print(f"Final result:")
+    print(f"  Score: {final_score:.6f}")
+    print(f"  C1: {final_c1:.6f}")
+    print(f"  Benchmark ratio: {benchmark_ratio:.6f}")
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

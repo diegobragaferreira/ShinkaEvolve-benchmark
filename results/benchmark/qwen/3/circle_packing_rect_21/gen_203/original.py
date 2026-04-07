@@ -1,0 +1,353 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+import math
+from typing import Tuple, List
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, using 1.5 x 0.5 for good aspect ratio
+    rect_width, rect_height = 1.5, 0.5
+
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    def create_hybrid_initialization(n_circles: int, width: float, height: float) -> np.ndarray:
+        """Create initial configuration using a hybrid approach combining corner placements and hexagonal grid"""
+        circles = np.zeros((n_circles, 3))
+
+        # Corner and edge positions to establish boundaries
+        corner_positions = [
+            (width * 0.1, height * 0.1),    # bottom-left
+            (width * 0.9, height * 0.1),    # bottom-right
+            (width * 0.1, height * 0.9),    # top-left
+            (width * 0.9, height * 0.9),    # top-right
+            (width * 0.5, height * 0.1),    # bottom-middle
+            (width * 0.5, height * 0.9),    # top-middle
+            (width * 0.1, height * 0.5),    # left-middle
+            (width * 0.9, height * 0.5),    # right-middle
+        ]
+
+        # Place some circles at strategic positions
+        for i in range(min(len(corner_positions), n_circles)):
+            x, y = corner_positions[i]
+            circles[i] = [x, y, 0.03]
+
+        # Fill remaining positions with hexagonal grid
+        remaining = n_circles - len(corner_positions)
+        if remaining > 0:
+            rows = int(math.ceil(math.sqrt(remaining)))
+            cols = int(math.ceil(remaining / rows))
+
+            cell_width = width / (cols + 1)
+            cell_height = height / (rows + 1)
+
+            idx = len(corner_positions)
+            for i in range(rows):
+                for j in range(cols):
+                    if idx >= n_circles:
+                        break
+                    x_offset = 0.0 if i % 2 == 0 else 0.5
+                    x = (j + 1 + x_offset) * cell_width
+                    y = (i + 1) * cell_height
+                    # Ensure within bounds
+                    x = max(0.01, min(width - 0.01, x))
+                    y = max(0.01, min(height - 0.01, y))
+                    circles[idx] = [x, y, 0.02]
+                    idx += 1
+                    if idx >= n_circles:
+                        break
+
+        return circles
+
+    def compute_max_radius_at_position_vectorized(x: float, y: float, existing_circles: np.ndarray,
+                                                rect_width: float, rect_height: float) -> float:
+        """Vectorized computation of maximum possible radius for a circle at given position"""
+        # Distance to boundaries
+        min_bound = min(x, rect_width - x, y, rect_height - y)
+
+        # Vectorized distance calculation to all existing circles
+        if len(existing_circles) > 0:
+            positions = existing_circles[:, :2]
+            radii = existing_circles[:, 2]
+
+            # Calculate distances to all existing circles
+            dx = positions[:, 0] - x
+            dy = positions[:, 1] - y
+            distances = np.sqrt(dx*dx + dy*dy)
+
+            # Avoid self-distance and compute min distance to other circles
+            # Set self-distances to infinity to avoid them
+            distances = np.where(distances == 0, float('inf'), distances)
+
+            # Min distance minus sum of radii
+            min_dist = np.min(distances)
+            if len(distances) > 0:
+                # Calculate min distance to other circles (not self)
+                min_dist_to_others = np.min(distances - radii)
+                actual_min_dist = min(min_dist, min_dist_to_others)
+            else:
+                actual_min_dist = min_dist
+        else:
+            actual_min_dist = float('inf')
+
+        # Take minimum of boundary and other-circle distances
+        max_radius = min(min_bound, actual_min_dist if actual_min_dist < float('inf') else float('inf'))
+        return max(0.001, max_radius)
+
+    def is_valid_configuration_vectorized(circles: np.ndarray, rect_width: float, rect_height: float) -> bool:
+        """Vectorized validation of circle configuration"""
+        # Check boundary constraints efficiently
+        if np.any(circles[:, 0] - circles[:, 2] < 0) or \
+           np.any(circles[:, 0] + circles[:, 2] > rect_width) or \
+           np.any(circles[:, 1] - circles[:, 2] < 0) or \
+           np.any(circles[:, 1] + circles[:, 2] > rect_height):
+            return False
+
+        # Check overlap constraints efficiently using vectorized computation
+        if len(circles) < 2:
+            return True
+
+        # Use vectorized computation for overlap detection
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Create distance matrix
+        dist_matrix = cdist(positions, positions)
+
+        # Set diagonal to infinity (self-distances)
+        np.fill_diagonal(dist_matrix, float('inf'))
+
+        # Minimum distances between circles
+        min_distances = np.min(dist_matrix, axis=1)
+
+        # Minimum sum of radii for each circle pair
+        radii_sums = radii[:, np.newaxis] + radii[np.newaxis, :]
+
+        # Check overlaps - vectorized operation
+        overlap_mask = min_distances < np.min(radii_sums, axis=0)
+
+        return not np.any(overlap_mask)
+
+    def calculate_radius_sum(circles: np.ndarray) -> float:
+        """Calculate sum of all radii"""
+        return np.sum(circles[:, 2])
+
+    def local_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+                            iterations: int = 100, relax_overlap: bool = True) -> np.ndarray:
+        """Perform local refinement to improve circle configuration with enhanced strategies"""
+        current = circles.copy()
+        current_sum = calculate_radius_sum(current)
+
+        # Store recent improvements for adaptive step sizing
+        recent_improvements = []
+        adaptive_threshold = 0.001  # Threshold to detect slow convergence
+
+        # Initial step size and parameters
+        initial_step_size = 0.05
+        min_step_size = 0.001
+        step_reduction_factor = 0.95
+        step_increase_factor = 1.1
+
+        for iter_num in range(iterations):
+            # Dynamic step size adjustment based on convergence behavior
+            step_size = initial_step_size
+
+            # Adjust based on recent improvement history
+            if len(recent_improvements) > 10:
+                avg_improvement = np.mean(recent_improvements[-10:])
+                if avg_improvement < adaptive_threshold:
+                    # Slow improvement - reduce step size for fine-tuning
+                    step_size *= step_reduction_factor
+                elif avg_improvement > adaptive_threshold * 2:
+                    # Fast improvement - increase step size for exploration
+                    step_size *= step_increase_factor
+
+            step_size = max(min_step_size, step_size)
+
+            # Gradually tighten overlap constraints over time
+            overlap_tolerance_factor = 1.0 if not relax_overlap else max(0.1, 1.0 - (iter_num / iterations) * 0.8)
+
+            # Try to improve each circle
+            for i in range(len(current)):
+                original_x, original_y, original_r = current[i]
+
+                # Try several moves with random directions
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_sum = current_sum
+
+                # Enhanced perturbation strategy with multiple directions
+                test_moves = [
+                    # Standard Gaussian perturbations
+                    (step_size * random.gauss(0, 1), step_size * random.gauss(0, 1)),
+                    (step_size * random.gauss(0, 1), 0),
+                    (0, step_size * random.gauss(0, 1)),
+                    # Coordinate-specific perturbations
+                    (step_size * random.uniform(-1, 1), 0),
+                    (0, step_size * random.uniform(-1, 1)),
+                    # Small random moves
+                    (random.uniform(-step_size/2, step_size/2), random.uniform(-step_size/2, step_size/2)),
+                    # No move (for baseline)
+                    (0, 0)
+                ]
+
+                # Add directional bias for strategic improvement in later iterations
+                if iter_num > iterations // 3:  # Later iterations
+                    # Add more systematic searches
+                    test_moves.extend([
+                        (step_size * random.choice([-1, 1]), 0),
+                        (0, step_size * random.choice([-1, 1])),
+                    ])
+
+                for dx, dy in test_moves:
+                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+
+                    # Compute maximum possible radius at new position
+                    temp_circles = current.copy()
+                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporarily small
+                    max_r = compute_max_radius_at_position_vectorized(test_x, test_y, temp_circles, rect_width, rect_height)
+                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+
+                    # Apply final adjustment
+                    temp_circles[i] = [test_x, test_y, test_r]
+
+                    # Validate and calculate new sum
+                    if relax_overlap and iter_num < iterations // 2:
+                        # With relaxed overlap checking in early phase
+                        valid = True
+                        # Just check boundary constraints
+                        if (test_x - test_r < 0 or test_x + test_r > rect_width or
+                            test_y - test_r < 0 or test_y + test_r > rect_height):
+                            valid = False
+
+                        if valid:
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+                    else:
+                        # Strict validation in later phases
+                        if is_valid_configuration_vectorized(temp_circles, rect_width, rect_height):
+                            new_sum = calculate_radius_sum(temp_circles)
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_x, best_y, best_r = test_x, test_y, test_r
+
+                # Update if improvement found
+                if best_sum > current_sum:
+                    current[i] = [best_x, best_y, best_r]
+                    current_sum = best_sum
+
+            # Track recent improvements for adaptive step sizing
+            recent_improvements.append(current_sum - calculate_radius_sum(current))
+            if len(recent_improvements) > 20:
+                recent_improvements.pop(0)
+
+        return current
+
+    def multi_start_optimization(n_starts: int = 5) -> np.ndarray:
+        """Run multiple optimization starts to find better solutions"""
+        best_circles = None
+        best_sum = -float('inf')
+
+        for start_num in range(n_starts):
+            # Create different initial configurations
+            if start_num == 0:
+                # Use hybrid initialization
+                circles = create_hybrid_initialization(21, rect_width, rect_height)
+            elif start_num == 1:
+                # Create hexagonal grid initialization
+                circles = np.zeros((21, 3))
+                rows = int(math.ceil(math.sqrt(21)))
+                cols = int(math.ceil(21 / rows))
+                cell_width = rect_width / (cols + 1)
+                cell_height = rect_height / (rows + 1)
+                idx = 0
+                for i in range(rows):
+                    for j in range(cols):
+                        if idx >= 21:
+                            break
+                        x_offset = 0.0 if i % 2 == 0 else 0.5
+                        x = (j + 1 + x_offset) * cell_width
+                        y = (i + 1) * cell_height
+                        x = max(0.01, min(rect_width - 0.01, x))
+                        y = max(0.01, min(rect_height - 0.01, y))
+                        circles[idx] = [x, y, 0.02]
+                        idx += 1
+                        if idx >= 21:
+                            break
+            else:
+                # Create random initial configuration with better placement
+                circles = np.zeros((21, 3))
+                for i in range(21):
+                    x = random.uniform(0.01, rect_width - 0.01)
+                    y = random.uniform(0.01, rect_height - 0.01)
+                    circles[i] = [x, y, 0.02]
+
+            # Phase 1: Coarse refinement with fewer iterations
+            refined_1 = local_refinement_step(circles, rect_width, rect_height, 30)
+
+            # Phase 2: Medium refinement
+            refined_2 = local_refinement_step(refined_1, rect_width, rect_height, 70)
+
+            # Phase 3: Fine refinement with more iterations
+            refined_3 = local_refinement_step(refined_2, rect_width, rect_height, 70, relax_overlap=False)
+
+            final_sum = calculate_radius_sum(refined_3)
+
+            if final_sum > best_sum:
+                best_sum = final_sum
+                best_circles = refined_3.copy()
+
+        return best_circles
+
+    # Main optimization workflow
+    # Multi-start optimization to avoid local optima
+    final_circles = multi_start_optimization(5)
+
+    # Final validation and cleanup
+    if final_circles is not None:
+        # Double-check validity and ensure all constraints
+        while True:
+            valid = True
+
+            # Check boundaries and overlaps using vectorized method
+            if not is_valid_configuration_vectorized(final_circles, rect_width, rect_height):
+                valid = False
+
+            if not valid:
+                # Reinitialize if invalid
+                final_circles = create_hybrid_initialization(21, rect_width, rect_height)
+                final_circles = local_refinement_step(final_circles, rect_width, rect_height, 50)
+                continue
+
+            # Final validation check
+            if is_valid_configuration_vectorized(final_circles, rect_width, rect_height):
+                break
+            else:
+                # Retry with different initialization
+                final_circles = create_hybrid_initialization(21, rect_width, rect_height)
+                final_circles = local_refinement_step(final_circles, rect_width, rect_height, 50)
+
+    # Final optimization pass to fine-tune
+    if final_circles is not None:
+        final_circles = local_refinement_step(final_circles, rect_width, rect_height, 30, relax_overlap=False)
+
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

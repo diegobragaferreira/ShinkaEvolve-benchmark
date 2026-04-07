@@ -1,0 +1,343 @@
+--- a/original.py
++++ b/original.py
+@@ -1,187 +1,257 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial import Voronoi
+ from scipy.spatial.distance import cdist
+ import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+-
++    
+     np.random.seed(42)
+     n = 16
+     d = 2
+-
+-    # Create structured initial lattice configuration
++    
++    # Create structured initial lattice configuration with better hexagonal arrangement
+     def create_lattice_initialization():
+-        # Create a 4x4 grid with slight perturbations
+-        rows, cols = 4, 4
++        # Create a 4x4 grid with proper hexagonal spacing
+         points = []
+-
+-        for i in range(rows):
+-            for j in range(cols):
+-                x = j + 0.5 * (i % 2)
+-                y = i * np.sqrt(3)/2
++        
++        # Hexagonal parameters
++        sqrt3 = np.sqrt(3)
++        spacing_x = 1.0 / 3.0
++        spacing_y = sqrt3 / 4.0  # Vertical spacing for hexagon
++        
++        # Generate hexagonal pattern
++        for i in range(4):
++            for j in range(4):
++                # Hexagonal coordination
++                x = j * spacing_x
++                y = i * spacing_y
++                
++                # Offset odd rows
++                if i % 2 == 1:
++                    x += spacing_x / 2
++                
++                # Add some randomness to break symmetry
++                noise_scale = 0.01
++                x += (np.random.random() - 0.5) * noise_scale
++                y += (np.random.random() - 0.5) * noise_scale
++                
++                # Ensure within bounds
++                x = np.clip(x, 0, 1)
++                y = np.clip(y, 0, 1)
++                
+                 points.append([x, y])
+-
+-        points = np.array(points)
+-
+-        # Normalize to [0,1] x [0,1]
+-        max_x = cols - 0.5
+-        max_y = (rows - 1) * np.sqrt(3)/2
+-
+-        points[:, 0] = points[:, 0] / max_x
+-        points[:, 1] = points[:, 1] / max_y
+-
+-        # Add structured perturbations to break symmetry
+-        noise_scale = 0.015
+-        points += np.random.normal(0, noise_scale, points.shape)
+-
+-        # Ensure points stay within bounds
++        
++        return np.array(points)
++    
++    # Create random initialization
++    def create_random_initialization():
++        return np.random.rand(16, 2)
++    
++    # Create grid initialization with different spacing
++    def create_grid_initialization():
++        points = []
++        for i in range(4):
++            for j in range(4):
++                x = i * 0.3333
++                y = j * 0.3333
++                # Add noise
++                x += (np.random.random() - 0.5) * 0.02
++                y += (np.random.random() - 0.5) * 0.02
++                x = np.clip(x, 0, 1)
++                y = np.clip(y, 0, 1)
++                points.append([x, y])
++        return np.array(points)
++    
++    # Create perturbed hexagonal initialization
++    def create_perturbed_hex_initialization():
++        points = create_lattice_initialization()
++        points += np.random.normal(0, 0.01, points.shape)
++        # Reflect points that go out of bounds
+         points[:, 0] = np.clip(points[:, 0], 0, 1)
+         points[:, 1] = np.clip(points[:, 1], 0, 1)
+-
+         return points
+-
++    
++    # Create alternative hexagonal arrangement
++    def create_alternative_hex_initialization():
++        points = []
++        # Create a more spread-out hexagonal pattern
++        for i in range(4):
++            for j in range(4):
++                x = j * 0.25 + (i % 2) * 0.125
++                y = i * 0.25
++                # Add noise
++                x += (np.random.random() - 0.5) * 0.015
++                y += (np.random.random() - 0.5) * 0.015
++                x = np.clip(x, 0, 1)
++                y = np.clip(y, 0, 1)
++                points.append([x, y])
++        return np.array(points)
++    
+     # Calculate min/max distance ratio efficiently
+     def calculate_ratio(points):
+         if len(points) < 2:
+             return 0
+-
++        
+         # Compute pairwise distances
+         distances = cdist(points, points)
+         np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+-
++        
+         if distances.size == 0:
+             return 0
+-
++            
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+-
++        
+         if d_max <= 0:
+             return 0
+-
++            
+         return d_min / d_max
+-
+-    # Enhanced optimization using improved approach
+-    def optimize_points(initial_points, max_iter=10000):
++    
++    # Enhanced optimization using improved simulated annealing
++    def optimize_points(initial_points, max_iter=8000):
+         current_points = initial_points.copy()
+         current_ratio = calculate_ratio(current_points)
+-
++        
+         # Improved parameters for this approach
+-        T = 0.3  # Higher initial temperature
+-        cooling_rate = 0.9997  # Faster cooling rate
+-        min_temp = 1e-6
+-
++        T = 0.5  # Higher initial temperature for broader exploration
++        cooling_rate = 0.9995  # Balanced cooling rate
++        min_temp = 1e-8  # Lower minimum temperature for better convergence
++        
+         best_points = current_points.copy()
+         best_ratio = current_ratio
+-
++        
+         # Track recent improvements for adaptive cooling
+         recent_improvements = []
+-        improvement_window = 50
+-
+-        # Simplified perturbation approach
++        improvement_window = 100
++        
++        # Simplified perturbation approach with better sampling
+         def get_targeted_perturbation(points, temperature, iteration):
+             # Select a random point to perturb
+             perturb_idx = np.random.randint(len(points))
+-
++            
+             # Adjust perturbation magnitude based on iteration progress
+-            base_magnitude = temperature * 0.08
+-            adaptive_magnitude = base_magnitude * (1.0 - iteration / max_iter * 0.5)
+-
+-            # Create perturbation with exponential distribution
++            base_magnitude = temperature * 0.06
++            adaptive_magnitude = base_magnitude * (1.0 - iteration / max_iter * 0.3)
++            
++            # Create perturbation with exponential distribution for longer tails
+             new_points = points.copy()
+-
++            
+             # Try several candidates and pick the best one
+             best_candidate_ratio = current_ratio
+             best_candidate_pos = points[perturb_idx].copy()
+-
+-            # Try multiple perturbation attempts
+-            num_samples = 15
++            
++            # Try more samples for better candidate selection
++            num_samples = 25  # Increased from 15 to 25 for better exploration
+             for _ in range(num_samples):
+-                # Create perturbation with exponential distribution for longer tails
++                # Create perturbation with exponential distribution
+                 dx = np.random.exponential(adaptive_magnitude)
+                 dy = np.random.exponential(adaptive_magnitude)
+-
++                
+                 # Randomly decide direction
+                 if np.random.random() > 0.5:
+                     dx = -dx
+                 if np.random.random() > 0.5:
+                     dy = -dy
+-
++                
+                 candidate_point = points[perturb_idx].copy()
+                 candidate_point[0] += dx
+                 candidate_point[1] += dy
+-
+-                # Apply boundary reflection
++                
++                # Apply boundary reflection for better point distribution
+                 if candidate_point[0] < 0:
+                     candidate_point[0] = -candidate_point[0]
+                 elif candidate_point[0] > 1:
+                     candidate_point[0] = 2 - candidate_point[0]
+                 if candidate_point[1] < 0:
+                     candidate_point[1] = -candidate_point[1]
+                 elif candidate_point[1] > 1:
+                     candidate_point[1] = 2 - candidate_point[1]
+-
++                
+                 # Test this move
+                 test_points = new_points.copy()
+                 test_points[perturb_idx] = candidate_point
+-
++                
+                 test_ratio = calculate_ratio(test_points)
+                 if test_ratio > best_candidate_ratio:
+                     best_candidate_ratio = test_ratio
+                     best_candidate_pos = candidate_point.copy()
+-
++            
+             # Update the point with the best candidate
+             new_points[perturb_idx] = best_candidate_pos
+-
++            
+             return new_points, best_candidate_ratio
+-
++        
+         for iteration in range(max_iter):
+             # Adaptive cooling based on recent improvements
+             if len(recent_improvements) > improvement_window:
+                 recent_improvements.pop(0)
+-
+-            # Cooling schedule with adaptation
+-            if len(recent_improvements) > 0 and sum(recent_improvements[-10:]) == 0:
+-                # If no improvements recently, cool slower
+-                T *= 0.9999
++            
++            # Cooling schedule with adaptation - accelerate cooling when improvements are detected
++            if len(recent_improvements) > 0 and sum(recent_improvements[-50:]) < 5:
++                # If very few improvements recently, cool slower to allow more exploration
++                T *= 0.9998
++            elif len(recent_improvements) > 0 and sum(recent_improvements[-20:]) > 10:
++                # If many improvements recently, cool faster to exploit good regions
++                T *= 0.9993
+             else:
+                 T *= cooling_rate
+-
++            
+             if T < min_temp:
+                 break
+-
++            
+             # Get targeted perturbation
+             new_points, new_ratio = get_targeted_perturbation(current_points, T, iteration)
+-
++            
+             # Accept or reject the new solution using Metropolis criterion
+             if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
+                 current_points = new_points
+                 current_ratio = new_ratio
+-
++                
+                 # Track improvement
+                 recent_improvements.append(1 if new_ratio > current_ratio else 0)
+-
++                
+                 if current_ratio > best_ratio:
+                     best_ratio = current_ratio
+                     best_points = current_points.copy()
+             else:
+                 recent_improvements.append(0)
+-
++        
+         return best_points, best_ratio
+-
+-    # Generate initial configuration
+-    initial_points = create_lattice_initialization()
+-
+-    # Optimize using Voronoi-based approach
+-    optimized_points, final_ratio = optimize_points(initial_points)
+-
+-    return optimized_points
++    
++    # Multi-start optimization with diverse initializations
++    initial_configs = [
++        create_lattice_initialization(),
++        create_random_initialization(),
++        create_grid_initialization(),
++        create_perturbed_hex_initialization(),
++        create_alternative_hex_initialization()
++    ]
++    
++    best_final_points = None
++    best_ratio = -np.inf
++    
++    # Run optimization from each initial configuration
++    for i, initial_config in enumerate(initial_configs):
++        # Optimize using simulated annealing
++        final_points, ratio = optimize_points(initial_config, max_iter=5000)
++        
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_final_points = final_points
++    
++    # Final refinement with best configuration
++    if best_final_points is not None:
++        final_points, final_ratio = optimize_points(best_final_points, max_iter=2000)
++        return final_points
++    else:
++        # Fallback to the hexagonal initialization if nothing worked
++        return create_lattice_initialization()
+ 
+ # EVOLVE-BLOCK-END

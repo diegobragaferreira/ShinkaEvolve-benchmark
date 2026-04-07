@@ -1,0 +1,198 @@
+<NAME>
+simple_improvement
+</NAME>
+
+<DESCRIPTION>
+Implement a simple but effective improvement to the circle packing algorithm. The key enhancement is to use a more intelligent initialization strategy that places circles in a structured pattern (like hexagonal packing) rather than random placement, combined with a local optimization approach. This addresses the fundamental issue of poor initial configurations that lead to suboptimal results.
+
+The approach:
+1. Use a hexagonal grid pattern for initial circle placement
+2. Apply local optimization to refine positions and radii
+3. Maintain all constraints properly
+4. Focus on maximizing the sum of radii while ensuring no overlaps
+
+This maintains deterministic behavior and should significantly outperform the baseline zero-radius solution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+
+
+def calculate_max_radius(x, y, circles, width, height):
+    """Calculate the maximum radius for a circle at position (x,y) without overlapping others"""
+    min_distance = float('inf')
+
+    # Distance to boundaries
+    min_distance = min(min_distance, x, width - x, y, height - y)
+
+    # Distance to existing circles
+    for cx, cy, cr in circles:
+        if (cx != x) or (cy != y):  # Skip self
+            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+            min_distance = min(min_distance, distance - cr)
+
+    return max(0, min_distance)
+
+
+def pack_circles_hexagonal(width, height, n):
+    """Pack circles using a hexagonal pattern for better initial distribution"""
+    circles = []
+
+    # Hexagonal packing parameters
+    # Try to fit circles in a grid pattern
+    radius_estimate = min(width, height) / 10.0
+
+    # Create a hexagonal grid
+    rows = int(height / (radius_estimate * 2)) + 2
+    cols = int(width / (radius_estimate * 1.732)) + 2  # sqrt(3) ~ 1.732
+
+    for i in range(rows):
+        for j in range(cols):
+            # Offset every other row
+            x_offset = (j + 0.5 * (i % 2)) * radius_estimate * 2
+            y_offset = i * radius_estimate * 1.732
+
+            x = x_offset + radius_estimate
+            y = y_offset + radius_estimate
+
+            # Ensure within bounds
+            if x >= radius_estimate and x <= width - radius_estimate and \
+               y >= radius_estimate and y <= height - radius_estimate:
+
+                # Find maximum radius at this position
+                radius = calculate_max_radius(x, y, circles, width, height)
+                if radius > 0:
+                    circles.append([x, y, radius])
+
+            if len(circles) >= n:
+                break
+        if len(circles) >= n:
+            break
+
+    # If not enough circles, fill with more
+    if len(circles) < n:
+        # Add more circles in strategic locations
+        while len(circles) < n:
+            # Try placing in random positions
+            x = np.random.uniform(radius_estimate, width - radius_estimate)
+            y = np.random.uniform(radius_estimate, height - radius_estimate)
+            radius = calculate_max_radius(x, y, circles, width, height)
+            if radius > 0:
+                circles.append([x, y, radius])
+
+    # Truncate to exactly n circles
+    circles = circles[:n]
+
+    return np.array(circles)
+
+
+def optimize_circle_placement(circles, width, height, max_iter=1000):
+    """Refine circle positions using local optimization"""
+    current = circles.copy()
+
+    for _ in range(max_iter):
+        improved = False
+        for i in range(len(current)):
+            # Save current state
+            old_x, old_y, old_r = current[i]
+
+            # Try small moves in different directions
+            best_pos = (old_x, old_y, old_r)
+            best_radius = old_r
+            best_sum = np.sum(current[:, 2])
+
+            # Try several small displacements
+            for dx in [-0.05, -0.02, 0, 0.02, 0.05]:
+                for dy in [-0.05, -0.02, 0, 0.02, 0.05]:
+                    new_x = old_x + dx
+                    new_y = old_y + dy
+
+                    # Keep within bounds
+                    if (new_x >= old_r and new_x <= width - old_r and
+                        new_y >= old_r and new_y <= height - old_r):
+
+                        # Calculate new radius
+                        new_radius = calculate_max_radius(new_x, new_y,
+                                                        np.vstack([current[:i], current[i+1:]]),
+                                                        width, height)
+
+                        if new_radius > 0:
+                            # Temporarily update
+                            current[i] = [new_x, new_y, new_radius]
+
+                            # Check if this improves the sum
+                            new_sum = np.sum(current[:, 2])
+                            if new_sum > best_sum:
+                                best_sum = new_sum
+                                best_pos = (new_x, new_y, new_radius)
+
+                            # Restore original
+                            current[i] = [old_x, old_y, old_r]
+
+            # Apply the best move found
+            current[i] = list(best_pos)
+
+        # Early stopping if no significant improvement
+        if not improved:
+            break
+
+    return current
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle with perimeter 4, so width + height = 2
+    # Using a 1:1 ratio for simplicity (square)
+    width, height = 1.0, 1.0
+
+    # Initial placement using hexagonal packing
+    circles = pack_circles_hexagonal(width, height, 21)
+
+    # Refine the positions
+    circles = optimize_circle_placement(circles, width, height)
+
+    # Final check to ensure all constraints are met
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # Ensure the circle is fully inside
+        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+            return np.zeros((21, 3))  # Return default if invalid
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

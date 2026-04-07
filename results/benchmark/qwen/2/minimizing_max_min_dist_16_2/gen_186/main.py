@@ -1,0 +1,288 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+        
+        # Calculate pairwise distances
+        distances = pdist(points)
+        
+        # Calculate min and max distances
+        if len(distances) == 0:
+            return 0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        # Avoid division by zero
+        if d_max <= 1e-12:
+            return 0
+            
+        ratio = d_min / d_max
+        return -ratio  # Negative because we want to maximize ratio
+    
+    class InitialConfigurationGenerator:
+        """Generates diverse initial configurations for optimization."""
+        
+        @staticmethod
+        def generate_hexagonal_grid():
+            """Generate points in a hexagonal lattice pattern"""
+            points = []
+            rows = 4
+            cols = 4
+            
+            for i in range(rows):
+                for j in range(cols):
+                    # Offset every other row for hexagonal packing
+                    x_offset = 0.5 if i % 2 == 1 else 0.0
+                    x = (j + x_offset) / 3.0
+                    y = i / 3.0
+                    
+                    # Ensure points are within bounds
+                    x = max(0.001, min(0.999, x))
+                    y = max(0.001, min(0.999, y))
+                    
+                    points.append([x, y])
+            
+            return np.array(points)
+        
+        @staticmethod
+        def generate_ring_distribution():
+            """Generate points in concentric rings"""
+            points = []
+            # Two rings with 8 points each
+            radii = [0.3, 0.7]
+            angles_per_ring = [8, 8]
+            
+            for r_idx, (radius, num_angles) in enumerate(zip(radii, angles_per_ring)):
+                for i in range(num_angles):
+                    angle = 2 * math.pi * i / num_angles
+                    x = 0.5 + radius * math.cos(angle) * 0.4
+                    y = 0.5 + radius * math.sin(angle) * 0.4
+                    
+                    # Ensure within bounds
+                    x = max(0.001, min(0.999, x))
+                    y = max(0.001, min(0.999, y))
+                    
+                    points.append([x, y])
+            
+            return np.array(points)
+        
+        @staticmethod
+        def generate_fibonacci_spiral():
+            """Generate points using Fibonacci spiral-like arrangement"""
+            points = []
+            phi = (1 + math.sqrt(5)) / 2  # golden ratio
+            
+            for i in range(16):
+                # Modified Fibonacci approach for better distribution
+                theta = math.acos(-1 + (2 * i) / 15)  # elevation angle
+                phi_angle = (i * 2 * math.pi) / (phi * phi)  # azimuthal angle
+                
+                # Convert to cartesian coordinates
+                x = math.sin(theta) * math.cos(phi_angle)
+                y = math.sin(theta) * math.sin(phi_angle)
+                
+                # Map to [0.05, 0.95] range to avoid boundaries
+                x = 0.05 + 0.9 * (x + 1) / 2
+                y = 0.05 + 0.9 * (y + 1) / 2
+                
+                points.append([x, y])
+            
+            return np.array(points)
+        
+        @staticmethod
+        def generate_perturbed_grid():
+            """Generate a regular grid with controlled perturbations"""
+            points = []
+            for i in range(4):
+                for j in range(4):
+                    x = (i + 0.5) / 4.0
+                    y = (j + 0.5) / 4.0
+                    points.append([x, y])
+            return np.array(points)
+        
+        @staticmethod
+        def generate_central_spread():
+            """Generate points with central concentration and peripheral spread"""
+            points = []
+            # Central cluster
+            for i in range(4):
+                for j in range(4):
+                    x = 0.2 + 0.1 * (i - 1.5)
+                    y = 0.2 + 0.1 * (j - 1.5)
+                    points.append([x, y])
+            
+            # Peripheral points
+            for i in range(12):
+                angle = 2 * math.pi * i / 12
+                radius = 0.8
+                x = 0.5 + radius * math.cos(angle) * 0.4
+                y = 0.5 + radius * math.sin(angle) * 0.4
+                points.append([x, y])
+            
+            return np.array(points[:16])  # Take first 16 points
+    
+    class GridSearchOptimizer:
+        """Implements a hierarchical grid search optimization strategy."""
+        
+        def __init__(self):
+            self.generator = InitialConfigurationGenerator()
+            self.bounds = [(0.001, 0.999) for _ in range(32)]
+            
+        def get_initial_configs(self):
+            """Generate diverse initial configurations with perturbations."""
+            initial_configs = [
+                self.generator.generate_hexagonal_grid(),
+                self.generator.generate_ring_distribution(),
+                self.generator.generate_fibonacci_spiral(),
+                self.generator.generate_perturbed_grid(),
+                self.generator.generate_central_spread()
+            ]
+            
+            # Add random perturbations to each configuration
+            np.random.seed(42)
+            perturbed_configs = []
+            for config in initial_configs:
+                # Adaptive perturbation based on configuration type
+                base_perturbation = 0.03 
+                perturbed = config + np.random.normal(0, base_perturbation, config.shape)
+                # Clip to valid range
+                perturbed = np.clip(perturbed, 0.001, 0.999)
+                perturbed_configs.append(perturbed)
+            
+            return perturbed_configs
+        
+        def optimize_single_config(self, initial_config, max_iter=100):
+            """Optimize a single configuration with adaptive strategy."""
+            try:
+                # Stage 1: Coarse optimization with fewer iterations
+                coarse_result = minimize(
+                    objective,
+                    initial_config.flatten(),
+                    method='L-BFGS-B',
+                    bounds=self.bounds,
+                    options={'maxiter': 30, 'ftol': 1e-6, 'gtol': 1e-6}
+                )
+                
+                if not coarse_result.success:
+                    return None
+                
+                coarse_points = coarse_result.x.reshape(-1, 2)
+                distances = pdist(coarse_points)
+                
+                if len(distances) == 0:
+                    return None
+                
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                
+                if max_dist <= 1e-12:
+                    return None
+                
+                coarse_ratio = min_dist / max_dist
+                
+                # If coarse solution is reasonable, do finer optimization
+                if coarse_ratio > 0.1:  # Only proceed if not too bad
+                    fine_result = minimize(
+                        objective,
+                        coarse_points.flatten(),
+                        method='L-BFGS-B',
+                        bounds=self.bounds,
+                        options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-9}
+                    )
+                    
+                    if fine_result.success:
+                        return fine_result.x.reshape(-1, 2)
+                
+                # Even if coarse wasn't good, return coarse result
+                return coarse_points
+                
+            except Exception:
+                return None
+        
+        def grid_search_optimization(self):
+            """Perform hierarchical grid search optimization."""
+            # Get initial configurations
+            initial_configs = self.get_initial_configs()
+            
+            best_ratio = -np.inf
+            best_points = None
+            
+            # Phase 1: Quick optimization from multiple starting points
+            for i, initial_config in enumerate(initial_configs):
+                optimized_points = self.optimize_single_config(initial_config, max_iter=50)
+                if optimized_points is not None:
+                    distances = pdist(optimized_points)
+                    if len(distances) > 0:
+                        min_dist = np.min(distances)
+                        max_dist = np.max(distances)
+                        if max_dist > 0:
+                            ratio = min_dist / max_dist
+                            if ratio > best_ratio:
+                                best_ratio = ratio
+                                best_points = optimized_points.copy()
+            
+            # Phase 2: Enhanced grid-based exploration if needed
+            if best_points is None or best_ratio < 0.2:  # Only if we need improvement
+                # Try multiple grid points in a structured way
+                grid_points = np.linspace(0.1, 0.9, 5)  # Focus on interior region
+                for i, x_base in enumerate(grid_points):
+                    for j, y_base in enumerate(grid_points):
+                        # Create structured starting point
+                        np.random.seed(42 + i * 5 + j)
+                        base_points = np.array([[x_base, y_base]] * 16)
+                        perturbation = np.random.normal(0, 0.05, (16, 2))
+                        perturbed_points = base_points + perturbation
+                        perturbed_points = np.clip(perturbed_points, 0.001, 0.999)
+                        
+                        optimized_points = self.optimize_single_config(perturbed_points, max_iter=75)
+                        if optimized_points is not None:
+                            distances = pdist(optimized_points)
+                            if len(distances) > 0:
+                                min_dist = np.min(distances)
+                                max_dist = np.max(distances)
+                                if max_dist > 0:
+                                    ratio = min_dist / max_dist
+                                    if ratio > best_ratio:
+                                        best_ratio = ratio
+                                        best_points = optimized_points.copy()
+            
+            return best_points, best_ratio
+        
+        def solve(self):
+            """Main solving method with fallback strategy."""
+            # Try hierarchical optimization first
+            try:
+                best_points, best_ratio = self.grid_search_optimization()
+                
+                # If still no good solution, use fallback
+                if best_points is None:
+                    raise ValueError("No good solution found")
+                
+                return best_points
+                
+            except Exception:
+                # Fallback to hexagonal grid with small perturbations
+                fallback_points = self.generator.generate_hexagonal_grid()
+                fallback_points += np.random.normal(0, 0.005, fallback_points.shape)
+                fallback_points = np.clip(fallback_points, 0.001, 0.999)
+                return fallback_points
+    
+    # Execute the optimized approach
+    optimizer = GridSearchOptimizer()
+    return optimizer.solve()
+
+# EVOLVE-BLOCK-END

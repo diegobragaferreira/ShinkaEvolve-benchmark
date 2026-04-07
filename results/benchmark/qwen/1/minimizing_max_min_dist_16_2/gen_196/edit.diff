@@ -1,0 +1,390 @@
+--- a/original.py
++++ b/original.py
+@@ -1,150 +1,266 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
+ import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+     
+-    # Set seed for reproducibility
+     np.random.seed(42)
+     
+-    # Phase 1: Initialize points using enhanced hexagonal grid pattern
+-    n = 16
+-    points = np.zeros((n, 2))
+-    
+-    # Create enhanced hexagonal grid pattern with better distribution
+-    rows = 4
+-    cols = 4
+-    spacing = 0.25
+-    
+-    idx = 0
+-    for row in range(rows):
+-        for col in range(cols):
+-            if idx < n:
+-                # Offset every other row for hexagonal packing
+-                x = col * spacing + (row % 2) * spacing * 0.5
+-                y = row * spacing * math.sqrt(3) / 2
+-                points[idx] = [x, y]
+-                idx += 1
+-    
+-    # Scale and shift points to fit within [0.1, 0.9] x [0.1, 0.9] with some initial randomness
+-    points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
+-    points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
+-    
+-    # Phase 2: Enhanced Simulated Annealing optimization with adaptive cooling
+-    def compute_energy_and_ratio(points):
+-        # Compute pairwise distances
++    def compute_distance_ratio(points):
++        """Compute the ratio of minimum to maximum distance between all point pairs."""
++        if len(points) < 2:
++            return 0.0
++
++        # Compute pairwise distances efficiently using squareform
+         distances = squareform(pdist(points))
+         
+         # Mask diagonal elements (distance to self is 0)
+         np.fill_diagonal(distances, np.inf)
+-        
++
+         # Get min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
++
++        # Handle case where all points might be coincident
++        if max_dist == 0:
++            return 0.0
++
++        return min_dist / max_dist
++    
++    def initialize_geometric_pattern():
++        """Initialize points using a geometric pattern that promotes balanced distribution."""
++        # Create initial hexagonal-like pattern with enhanced spread
++        n = 16
++        points = np.zeros((n, 2))
++        
++        # Generate points in a diamond/hexagonal pattern
++        row_indices = []
++        col_indices = []
++        
++        for i in range(4):
++            for j in range(4):
++                row_indices.append(i)
++                col_indices.append(j)
++        
++        # Apply offset pattern for better distribution
++        for k in range(n):
++            i, j = row_indices[k], col_indices[k]
++            # Create triangular offset pattern with better spacing
++            x = j * 0.25 + (i % 2) * 0.125
++            y = i * 0.25 * math.sqrt(3) / 2
++            
++            points[k] = [x, y]
++        
++        # Normalize to [0.1, 0.9] range with some randomization
++        points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
++        points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
++        
++        # Add slight random perturbations to break symmetry and avoid degenerate cases
++        noise = np.random.normal(0, 0.008, points.shape)
++        points += noise
++        
++        # Clamp to bounds
++        points = np.clip(points, 0.01, 0.99)
++        
++        return points
++    
++    def compute_force_fields(points):
++        """Compute repulsive force fields for all points based on distance relationships."""
++        n = len(points)
++        forces = np.zeros_like(points)
++        
++        # Compute all pairwise distances
++        distances = squareform(pdist(points))
++        np.fill_diagonal(distances, np.inf)
++        
++        # Get min and max distances for normalization
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
+         
+         # Avoid division by zero
+         if max_dist == 0:
+-            ratio = 0
+-        else:
+-            ratio = min_dist / max_dist
+-            
+-        # Energy is negative ratio (we want to maximize ratio, so minimize negative ratio)
+-        # Add penalty for points outside bounds with epsilon padding
+-        penalty = 0
+-        epsilon = 1e-8
+-        for pt in points:
+-            if pt[0] < 0+epsilon or pt[0] > 1-epsilon or pt[1] < 0+epsilon or pt[1] > 1-epsilon:
+-                penalty += 1000
+-        
+-        return -ratio + penalty, ratio
+-    
+-    # Simulated Annealing parameters with intelligent adaptation
+-    temp = 1.0
+-    min_temp = 1e-8
+-    cooling_rate = 0.9999
+-    max_iter = 100000  # Increased iteration limit
+-    
+-    current_energy, current_ratio = compute_energy_and_ratio(points)
+-    best_points = points.copy()
+-    best_ratio = current_ratio
+-    
+-    # Track convergence for adaptive cooling
+-    last_improvement = 0
+-    patience = 2000
+-    improvement_count = 0
+-    recent_improvements = []
+-    
+-    # Main optimization loop
+-    for iteration in range(max_iter):
+-        # Generate neighbor solution (random perturbation)
+-        neighbor_points = points.copy()
+-        # Pick a random point to move
+-        move_idx = np.random.randint(0, n)
+-        # Small random displacement with adaptive magnitude based on temperature
+-        displacement_magnitude = 0.005 * temp
+-        displacement = np.random.normal(0, displacement_magnitude, 2)
+-        neighbor_points[move_idx] += displacement
+-        
+-        # Apply boundary constraints with epsilon padding
+-        epsilon = 1e-8
+-        neighbor_points[move_idx, 0] = np.clip(neighbor_points[move_idx, 0], 0+epsilon, 1-epsilon)
+-        neighbor_points[move_idx, 1] = np.clip(neighbor_points[move_idx, 1], 0+epsilon, 1-epsilon)
+-        
+-        # Compute energy of neighbor
+-        neighbor_energy, neighbor_ratio = compute_energy_and_ratio(neighbor_points)
+-        
+-        # Accept or reject move
+-        if neighbor_energy < current_energy:
+-            # Always accept better solutions
+-            points = neighbor_points
+-            current_energy = neighbor_energy
+-            current_ratio = neighbor_ratio
+-        else:
+-            # Accept worse solutions with probability based on temperature
+-            delta = neighbor_energy - current_energy
+-            if np.random.rand() < np.exp(-delta / temp):
+-                points = neighbor_points
+-                current_energy = neighbor_energy
+-                current_ratio = neighbor_ratio
+-        
+-        # Update best solution
+-        if current_ratio > best_ratio:
++            return forces
++            
++        # Normalize distances for force computation
++        normalized_distances = distances / max_dist
++        
++        # Apply force field: inverse square law with distance-dependent scaling
++        # Points should repel each other when they're too close
++        for i in range(n):
++            for j in range(n):
++                if i != j:
++                    dist = distances[i, j]
++                    # Only consider points that are relatively close (within a threshold)
++                    if dist < max_dist * 0.7:
++                        # Normalized distance (0 to 1)
++                        norm_dist = dist / max_dist
++                        
++                        # Force magnitude inversely proportional to squared distance
++                        # But with a minimum force to maintain some influence
++                        force_magnitude = 1.0 / (norm_dist * norm_dist + 0.01) * 0.01
++                        
++                        # Direction vector
++                        direction = points[i] - points[j]
++                        distance_norm = np.linalg.norm(direction)
++                        
++                        if distance_norm > 0:
++                            direction = direction / distance_norm
++                            forces[i] += force_magnitude * direction
++        
++        # Normalize forces to prevent extreme movements
++        force_magnitudes = np.linalg.norm(forces, axis=1)
++        for i in range(n):
++            if force_magnitudes[i] > 0:
++                forces[i] = forces[i] / force_magnitudes[i] * 0.01
++        
++        return forces
++    
++    def geometric_particle_optimization(initial_points, max_iterations=3000):
++        """Optimize using geometric particle interactions."""
++        points = initial_points.copy()
++        current_ratio = compute_distance_ratio(points)
++        
++        # Track best solution
++        best_points = points.copy()
++        best_ratio = current_ratio
++        
++        # Adaptive optimization parameters
++        learning_rate = 0.05
++        momentum = 0.9
++        velocity = np.zeros_like(points)
++        prev_velocity = np.zeros_like(points)
++        
++        # Track convergence
++        last_improvement = 0
++        improvement_threshold = 500
++        
++        for iteration in range(max_iterations):
++            # Compute forces
++            forces = compute_force_fields(points)
++            
++            # Update velocity with momentum and forces
++            velocity = momentum * velocity - learning_rate * forces
++            
++            # Apply velocity to points
++            points += velocity
++            
++            # Apply boundary constraints with epsilon padding
++            epsilon = 1e-6
++            points[:, 0] = np.clip(points[:, 0], epsilon, 1 - epsilon)
++            points[:, 1] = np.clip(points[:, 1], epsilon, 1 - epsilon)
++            
++            # Compute new ratio
++            new_ratio = compute_distance_ratio(points)
++            
++            # Update best solution if improved
++            if new_ratio > best_ratio:
++                best_ratio = new_ratio
++                best_points = points.copy()
++                last_improvement = iteration
++            
++            # Adaptive learning rate adjustment
++            if iteration % 500 == 0 and iteration > 0:
++                learning_rate *= 0.95
++                
++            # Early stopping condition
++            if iteration - last_improvement > improvement_threshold:
++                # Check if we've reached plateau
++                if iteration > 1000 and abs(new_ratio - current_ratio) < 1e-8:
++                    break
++                    
++            current_ratio = new_ratio
++            
++        return best_points, best_ratio
++    
++    def local_gradient_refinement(points, max_iterations=500):
++        """Improve solution using local gradient-based refinement."""
++        current_points = points.copy()
++        current_ratio = compute_distance_ratio(current_points)
++        
++        for iteration in range(max_iterations):
++            # Estimate gradient using finite differences
++            eps = 1e-5
++            best_points = current_points.copy()
+             best_ratio = current_ratio
+-            best_points = points.copy()
+-            last_improvement = iteration
+-            improvement_count += 1
+-            recent_improvements.append(iteration)
+-            if len(recent_improvements) > 10:
+-                recent_improvements.pop(0)
+-        
+-        # Adaptive cooling schedule
+-        temp *= cooling_rate
+-        
+-        # Gradually cool down more aggressively if not improving
+-        if iteration % 1000 == 0 and temp > min_temp:
+-            temp *= 0.98
+-        
+-        # Early stopping based on patience and convergence
+-        if iteration - last_improvement > patience:
+-            # Check if recent improvements have stalled
+-            if len(recent_improvements) >= 5:
+-                if recent_improvements[-1] - recent_improvements[0] < 500:
++            
++            improved = False
++            
++            # Try small perturbations to each point
++            for i in range(len(current_points)):
++                for dim in range(2):
++                    # Try both positive and negative small steps
++                    for sign in [-1, 1]:
++                        test_points = current_points.copy()
++                        test_points[i, dim] += sign * eps
++                        
++                        # Clamp to bounds
++                        test_points[i, 0] = np.clip(test_points[i, 0], 0.001, 0.999)
++                        test_points[i, 1] = np.clip(test_points[i, 1], 0.001, 0.999)
++                        
++                        test_ratio = compute_distance_ratio(test_points)
++                        
++                        if test_ratio > best_ratio:
++                            best_ratio = test_ratio
++                            best_points = test_points.copy()
++                            improved = True
++            
++            # If improvement found, update current solution
++            if improved:
++                current_points = best_points
++                current_ratio = best_ratio
++            else:
++                # Reduce step size
++                eps *= 0.5
++                
++                # Early termination if improvement becomes negligible
++                if eps < 1e-10:
+                     break
+-            else:
+-                break
+-            
+-        # Very aggressive early stopping if barely improving
+-        if temp < min_temp * 10 and improvement_count < 5:
+-            break
+-    
+-    return best_points
++        
++        return current_points
++    
++    def symmetry_breaking(points):
++        """Apply symmetry breaking operations to avoid degenerate solutions."""
++        # Try small random perturbations to break exact symmetries
++        perturbed = points.copy()
++        
++        # Apply different types of noise to different subsets of points
++        # This prevents exact symmetric solutions
++        
++        # Perturb first 8 points with one noise pattern
++        noise1 = np.random.normal(0, 0.002, (8, 2))
++        perturbed[:8] += noise1
++        
++        # Perturb last 8 points with another pattern
++        noise2 = np.random.normal(0, 0.001, (8, 2))
++        perturbed[8:] += noise2
++        
++        # Clamp to bounds
++        perturbed = np.clip(perturbed, 0.01, 0.99)
++        
++        return perturbed
++    
++    # Phase 1: Initialize with geometric pattern
++    initial_points = initialize_geometric_pattern()
++    
++    # Phase 2: Apply geometric particle optimization
++    optimized_points, _ = geometric_particle_optimization(initial_points, max_iterations=2000)
++    
++    # Phase 3: Apply symmetry breaking
++    sym_break_points = symmetry_breaking(optimized_points)
++    
++    # Phase 4: Local gradient refinement
++    refined_points = local_gradient_refinement(sym_break_points, max_iterations=300)
++    
++    # Phase 5: Final optimization pass
++    final_points, final_ratio = geometric_particle_optimization(refined_points, max_iterations=1000)
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,513 @@
+--- a/original.py
++++ b/original.py
+@@ -1,487 +1,508 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from shapely.geometry import Polygon
+ from shapely.ops import unary_union
+ import time
+ from typing import Tuple, List, Optional, NamedTuple
+ import random
+ import warnings
++from numba import jit, prange
+ 
+ # Data structure definitions
+ class HexagonConfig(NamedTuple):
+     center_x: float
+     center_y: float
+     angle_deg: float
+ 
+ class PackingResult(NamedTuple):
+     inner_hex_data: np.ndarray
+     outer_hex_data: np.ndarray
+     outer_hex_side_length: float
+ 
+ class GeometryHandler:
+     """Handles all geometric computations for hexagon operations."""
+ 
+     def __init__(self):
+         self.hex_radius = 1.0
+         self.hex_apothem = np.sqrt(3) / 2
+         self.hex_height = 2 * self.hex_apothem
+         self.hex_width = 2 * self.hex_radius
+ 
+-    def generate_hexagon_vertices(self, center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
+-        """Generate vertices of a regular hexagon given center and rotation."""
++    @staticmethod
++    @jit(nopython=True)
++    def generate_hexagon_vertices_numba(center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
++        """Generate vertices of a regular hexagon given center and rotation (Numba JIT version)."""
+         angle_rad = np.deg2rad(angle_deg)
+         # Vertices of a unit hexagon centered at origin
+         base_vertices = np.array([
+             [1, 0],
+             [0.5, np.sqrt(3)/2],
+             [-0.5, np.sqrt(3)/2],
+             [-1, 0],
+             [-0.5, -np.sqrt(3)/2],
+             [0.5, -np.sqrt(3)/2]
+         ])
+         # Rotate and translate
+         cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+         rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+         rotated_vertices = base_vertices @ rotation_matrix.T
+         return rotated_vertices + np.array([center_x, center_y])
+ 
++    def generate_hexagon_vertices(self, center_x: float, center_y: float, angle_deg: float) -> np.ndarray:
++        """Generate vertices of a regular hexagon given center and rotation."""
++        return self.generate_hexagon_vertices_numba(center_x, center_y, angle_deg)
++
+     def create_hexagon_polygon(self, center_x: float, center_y: float, angle_deg: float) -> Polygon:
+         """Create Shapely polygon representation of a hexagon."""
+         vertices = self.generate_hexagon_vertices(center_x, center_y, angle_deg)
+         return Polygon(vertices)
+ 
+ class ConstraintChecker:
+     """Handles all constraint validation logic."""
+ 
+     def __init__(self, geometry_handler: GeometryHandler):
+         self.geo = geometry_handler
++
++    @staticmethod
++    @jit(nopython=True)
++    def check_containment_numba(hex_poly_area: float, outer_hex_area: float, intersection_area: float) -> bool:
++        """Check if hexagon is fully contained within outer hexagon (Numba JIT version)."""
++        # Simplified logic: if intersection area equals hex area, then it's fully contained
++        # This is a rough approximation but works for the purpose of fast checking
++        return intersection_area >= hex_poly_area * 0.99  # Allow for numerical tolerance
++
++    @staticmethod
++    @jit(nopython=True)
++    def check_overlap_numba(intersection_area: float) -> bool:
++        """Check if two hexagons overlap (Numba JIT version)."""
++        return intersection_area > 1e-10  # Small threshold to detect overlap
+ 
+     def check_containment(self, hexagon: Polygon, outer_hex: Polygon) -> bool:
+         """Check if hexagon is fully contained within outer hexagon."""
+         return outer_hex.contains(hexagon) or outer_hex.touches(hexagon)
+ 
+     def check_overlap(self, hex1: Polygon, hex2: Polygon) -> bool:
+         """Check if two hexagons overlap."""
+         return hex1.intersects(hex2) and not hex1.touches(hex2)
+ 
+     def calculate_overlap_area(self, hex1: Polygon, hex2: Polygon) -> float:
+         """Calculate the overlap area between two hexagons."""
+         try:
+             intersection = hex1.intersection(hex2)
+             return intersection.area if not intersection.is_empty else 0.0
+         except:
+             return 0.0
+ 
+     def compute_constraint_violations(self, hex_configs: List[HexagonConfig],
+                                     outer_radius: float) -> Tuple[bool, float]:
+         """Compute constraint violations for a configuration."""
+         # Create outer hexagon (scaled appropriately)
+         outer_vertices = self.geo.generate_hexagon_vertices(0, 0, 0)
+         outer_vertices *= outer_radius / self.geo.hex_radius
+         outer_hex = Polygon(outer_vertices)
+ 
+         # Check containment and overlap efficiently
+         total_violation = 0.0
+         inner_polygons = []
+ 
+         for i, config in enumerate(hex_configs):
+             inner_hex = self.geo.create_hexagon_polygon(config.center_x, config.center_y, config.angle_deg)
+             inner_polygons.append(inner_hex)
+ 
+             # Check containment - more robust way
+             if not self.check_containment(inner_hex, outer_hex):
+                 # For containment violations, we measure the extent of violation
+                 try:
+                     intersection = outer_hex.intersection(inner_hex)
+                     if intersection.is_empty:
+                         # Complete violation
+                         total_violation += 10000.0
+                     else:
+                         # Partial violation
+                         contained_area = intersection.area
+                         total_violation += (inner_hex.area - contained_area) * 100.0
+                 except:
+                     total_violation += 10000.0
+ 
+             # Check overlaps with previously processed hexagons only
+             # (We're iterating in order so we avoid redundant checks)
+             for j in range(i):
+                 if self.check_overlap(inner_hex, inner_polygons[j]):
+                     try:
+                         intersection_area = self.calculate_overlap_area(inner_hex, inner_polygons[j])
+                         # Penalty based on the amount of overlapping area
+                         overlap_penalty = (inner_hex.area + inner_polygons[j].area - 2 * intersection_area) * 500.0
+                         total_violation += overlap_penalty
+                     except:
+                         total_violation += 50000.0
+ 
+         return total_violation == 0, total_violation
+ 
+ class EvolutionaryOptimizer:
+     """Handles the evolutionary optimization process with improved operators."""
+ 
+     def __init__(self, geometry_handler: GeometryHandler, constraint_checker: ConstraintChecker):
+         self.geo = geometry_handler
+         self.constraint_checker = constraint_checker
+         self.n_hexagons = 12
+         self.max_time = 180.0
+         self.pop_size = 50
+         self.max_generations = 100
+         self.mutation_rate = 0.1
+ 
+     def compute_fitness(self, positions_and_radius: np.ndarray) -> Tuple[float, bool]:
+         """Compute fitness for a single configuration with better penalty handling."""
+         # Extract parameters
+         positions = positions_and_radius[:-1].reshape(-1, 3)
+         outer_radius = positions_and_radius[-1]
+ 
+         # Convert to list of configs
+         hex_configs = [HexagonConfig(pos[0], pos[1], pos[2]) for pos in positions]
+ 
+         # Check constraints
+         valid, violation = self.constraint_checker.compute_constraint_violations(hex_configs, outer_radius)
+ 
+         if not valid:
+             # Return very poor fitness for invalid configurations with better penalty
+             return 1e12 + violation, False
+ 
+         # Return negative inverse of outer radius (we want to maximize 1/R)
+         return -1.0 / outer_radius, True
+ 
+     def initialize_population(self) -> np.ndarray:
+         """Initialize population with diverse configurations."""
+         population = []
+         for _ in range(self.pop_size):
+             # Start with symmetric base configuration (more refined than basic)
+             positions = np.array([
+                 [0, 0, 0],  # center
+                 [-2.5, 0, 0],  # left
+                 [2.5, 0, 0],  # right
+                 [-1.25, 2.17, 0],  # top-left
+                 [1.25, 2.17, 0],  # top-right
+                 [-1.25, -2.17, 0],  # bottom-left
+                 [1.25, -2.17, 0],  # bottom-right
+                 [-3.75, 2.17, 0],  # far top-left
+                 [3.75, 2.17, 0],  # far top-right
+                 [-3.75, -2.17, 0],  # far bottom-left
+                 [3.75, -2.17, 0],  # far bottom-right
+                 [0, -4, 0],  # far bottom-center
+             ], dtype=float)
+ 
+             # Add small random perturbations
+             noise_magnitude = 0.5
+             positions[:, 0] += np.random.uniform(-noise_magnitude, noise_magnitude, self.n_hexagons)
+             positions[:, 1] += np.random.uniform(-noise_magnitude, noise_magnitude, self.n_hexagons)
+             positions[:, 2] += np.random.uniform(-30, 30, self.n_hexagons)  # Random rotations
+ 
+             # Random outer radius (in reasonable range)
+             outer_radius = np.random.uniform(3.0, 8.0)
+ 
+             individual = np.concatenate([positions.flatten(), [outer_radius]])
+             population.append(individual)
+ 
+         return np.array(population)
+ 
+     def selection(self, population: np.ndarray, fitness_scores: np.ndarray) -> np.ndarray:
+         """Tournament selection with better diversity preservation."""
+         selected = []
+         tournament_size = min(3, len(population) // 2)
+         if tournament_size < 2:
+             tournament_size = 2
+ 
+         for _ in range(len(population)):
+             tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+             tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+             winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+             selected.append(population[winner_idx])
+         return np.array(selected)
+ 
+     def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+         """Uniform crossover with symmetry awareness."""
+         child1 = parent1.copy()
+         child2 = parent2.copy()
+ 
+         # Crossover points for positions (every 3 elements for x, y, angle)
+         for i in range(0, len(parent1)-1, 3):
+             if random.random() < 0.5:
+                 # Swap positions
+                 child1[i:i+3] = parent2[i:i+3]
+                 child2[i:i+3] = parent1[i:i+3]
+ 
+         # For outer radius, blend values with some randomness
+         alpha = random.random()
+         child1[-1] = alpha * parent1[-1] + (1 - alpha) * parent2[-1]
+         child2[-1] = (1 - alpha) * parent1[-1] + alpha * parent2[-1]
+ 
+         return child1, child2
+ 
+     def mutate(self, individual: np.ndarray) -> np.ndarray:
+         """Mutation with adaptive scaling and symmetry preservation."""
+         mutated = individual.copy()
+ 
+         # Mutate positions with different scales for different parameters
+         for i in range(0, len(mutated)-1, 3):
+             if random.random() < self.mutation_rate:
+                 # Perturb position with appropriate scales
+                 mutated[i] += np.random.normal(0, 0.3)  # x
+                 mutated[i+1] += np.random.normal(0, 0.3)  # y
+                 mutated[i+2] += np.random.normal(0, 10)  # angle
+ 
+         # Mutate outer radius with appropriate bounds
+         if random.random() < self.mutation_rate:
+             mutated[-1] += np.random.normal(0, 0.2)
+             mutated[-1] = max(2.0, mutated[-1])  # Keep positive and reasonable
+ 
+         return mutated
+ 
+     def optimize(self) -> Tuple[np.ndarray, np.ndarray, float]:
+         """Main evolutionary optimization routine."""
+         start_time = time.time()
+ 
+         # Initialize population
+         population = self.initialize_population()
+         best_fitness = -np.inf
+         best_individual = None
+ 
+         # Evolutionary loop
+         for generation in range(self.max_generations):
+             # Evaluate fitness
+             fitness_scores = []
+             valid_count = 0
+ 
+             for individual in population:
+                 fitness, is_valid = self.compute_fitness(individual)
+                 fitness_scores.append(fitness)
+                 if is_valid:
+                     valid_count += 1
+ 
+             fitness_scores = np.array(fitness_scores)
+ 
+             # Track best
+             current_best_idx = np.argmax(fitness_scores)
+             current_best_fitness = fitness_scores[current_best_idx]
+             if current_best_fitness > best_fitness:
+                 best_fitness = current_best_fitness
+                 best_individual = population[current_best_idx].copy()
+ 
+             # Early stopping if we have a good solution
+             if valid_count > self.pop_size * 0.8 and abs(best_fitness) > 0.25:
+                 break
+ 
+             # Selection
+             selected = self.selection(population, fitness_scores)
+ 
+             # Create new population through crossover and mutation
+             new_population = []
+             for i in range(0, len(selected), 2):
+                 parent1 = selected[i]
+                 parent2 = selected[(i+1) % len(selected)]
+ 
+                 child1, child2 = self.crossover(parent1, parent2)
+                 child1 = self.mutate(child1)
+                 child2 = self.mutate(child2)
+ 
+                 new_population.extend([child1, child2])
+ 
+             population = np.array(new_population[:self.pop_size])
+ 
+             # Occasionally add diversity with new initialization
+             if generation % 10 == 0:
+                 population[0] = self.initialize_population()[0]
+ 
+             # Break if time limit is approaching
+             if time.time() - start_time > self.max_time * 0.9:
+                 break
+ 
+         # Final refinement with deterministic optimization
+         if best_individual is not None:
+             refined_result = self.refine_solution(best_individual)
+         else:
+             refined_result = self.refine_solution(population[0])
+ 
+         # Extract positions and radius
+         positions = refined_result[:-1].reshape(-1, 3)
+         outer_radius = refined_result[-1]
+ 
+         # Convert back to requested format
+         inner_hex_data = positions.copy()
+         outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+ 
+         return inner_hex_data, outer_hex_data, outer_radius
+ 
+     def refine_solution(self, initial_config: np.ndarray) -> np.ndarray:
+         """Refine the solution with deterministic optimization."""
+         bounds = []
+         # Position bounds
+         for _ in range(self.n_hexagons):
+             bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+         # Outer radius bound
+         bounds.append((1.0, 15.0))
+ 
+         # First try with DE
+         try:
+             de_result = differential_evolution(
+                 lambda x: self.compute_fitness(x)[0],
+                 bounds,
+                 maxiter=100,
+                 popsize=15,
+                 mutation=(0.5, 1),
+                 recombination=0.7,
+                 seed=42,
+                 disp=False,
+                 tol=1e-6
+             )
+             return de_result.x
+         except:
+             pass
+ 
+         # Fall back to L-BFGS-B
+         try:
+             lbfgs_result = minimize(
+                 lambda x: self.compute_fitness(x)[0],
+                 initial_config,
+                 method='L-BFGS-B',
+                 bounds=bounds,
+                 options={'maxiter': 50, 'ftol': 1e-8}
+             )
+             if lbfgs_result.success:
+                 return lbfgs_result.x
+         except:
+             pass
+ 
+         return initial_config
+ 
+ class Optimizer:
+     """Handles the main optimization process combining evolutionary and deterministic methods."""
+ 
+     def __init__(self, geometry_handler: GeometryHandler, constraint_checker: ConstraintChecker):
+         self.geo = geometry_handler
+         self.constraint_checker = constraint_checker
+ 
+     def get_initial_guess(self) -> np.ndarray:
+         """Generate a highly symmetric initial configuration."""
+         # Start with a 2D hexagonal lattice pattern with 12 positions
+         adjusted_positions = [
+             [0, 0],           # Center
+             [-2.5, 0],        # Left
+             [2.5, 0],         # Right
+             [-1.25, 2.17],    # Top-left
+             [1.25, 2.17],     # Top-right
+             [-1.25, -2.17],   # Bottom-left
+             [1.25, -2.17],    # Bottom-right
+             [-3.75, 2.17],    # Far top-left
+             [3.75, 2.17],     # Far top-right
+             [-3.75, -2.17],   # Far bottom-left
+             [3.75, -2.17],    # Far bottom-right
+             [0, -4],          # Far bottom
+         ]
+ 
+         # Flatten and add outer radius
+         initial_positions = np.array(adjusted_positions)
+         # Add rotation angles (all zero for now, we'll optimize them)
+         positions_with_angles = np.column_stack([initial_positions, np.zeros(initial_positions.shape[0])])
+ 
+         # Initial outer radius estimate (based on the arrangement)
+         outer_radius_guess = 4.0
+ 
+         return np.concatenate([positions_with_angles.flatten(), [outer_radius_guess]])
+ 
+     def optimize(self) -> Tuple[np.ndarray, np.ndarray, float]:
+         """Execute the optimization process."""
+         # Try evolutionary approach first
+         try:
+             evolutionary_optimizer = EvolutionaryOptimizer(self.geo, self.constraint_checker)
+             return evolutionary_optimizer.optimize()
+         except Exception as e:
+             warnings.warn(f"Evolutionary optimization failed: {e}")
+ 
+         # Fallback to deterministic approach
+         # Get initial configuration
+         initial_config = self.get_initial_guess()
+ 
+         bounds = []
+         # Position bounds
+         for _ in range(12):
+             bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+         # Outer radius bound
+         bounds.append((1.0, 15.0))
+ 
+         def evaluate_fitness(positions_and_radius: np.ndarray) -> float:
+             positions = positions_and_radius[:-1].reshape(-1, 3)
+             outer_radius = positions_and_radius[-1]
+ 
+             # Convert to list of configs
+             hex_configs = [HexagonConfig(pos[0], pos[1], pos[2]) for pos in positions]
+ 
+             # Check constraints
+             valid, violation = self.constraint_checker.compute_constraint_violations(hex_configs, outer_radius)
+ 
+             if not valid:
+                 return 1e12 + violation
+ 
+             return -1.0 / outer_radius
+ 
+         # First, do a global optimization step
+         try:
+             de_result = differential_evolution(
+                 evaluate_fitness,
+                 bounds,
+                 maxiter=200,
+                 popsize=15,
+                 mutation=(0.5, 1),
+                 recombination=0.7,
+                 seed=42,
+                 disp=False,
+                 tol=1e-6
+             )
+         except Exception as e:
+             warnings.warn(f"Differential evolution failed: {e}")
+             return initial_config[:-1].reshape(-1, 3), np.array([0, 0, 0]), initial_config[-1]
+ 
+         # Then, local refinement
+         try:
+             refined_result = minimize(
+                 evaluate_fitness,
+                 de_result.x,
+                 method='L-BFGS-B',
+                 bounds=bounds,
+                 options={'maxiter': 100, 'ftol': 1e-8}
+             )
+             if refined_result.success:
+                 final_config = refined_result.x
+             else:
+                 final_config = de_result.x
+         except Exception as e:
+             warnings.warn(f"Local optimization failed: {e}")
+             final_config = de_result.x
+ 
+         # Extract positions and radius
+         positions = final_config[:-1].reshape(-1, 3)
+         outer_radius = final_config[-1]
+ 
+         # Convert back to requested format
+         inner_hex_data = positions.copy()
+         outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+ 
+         return inner_hex_data, outer_hex_data, outer_radius
+ 
+ def hexagon_packing_12() -> PackingResult:
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     # Initialize components
+     geo_handler = GeometryHandler()
+     constraint_checker = ConstraintChecker(geo_handler)
+     optimizer = Optimizer(geo_handler, constraint_checker)
+ 
+     # Execute optimization
+     inner_hex_data, outer_hex_data, outer_hex_side_length = optimizer.optimize()
+ 
+     return PackingResult(inner_hex_data, outer_hex_data, outer_hex_side_length)
+ 
+ # EVOLVE-BLOCK-END

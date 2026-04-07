@@ -1,0 +1,196 @@
+<NAME>
+add_numba_optimizations
+</NAME>
+
+<DESCRIPTION>
+Adding Numba JIT compilation to critical geometric functions to significantly speed up the evaluation process. The key functions that benefit most from JIT compilation are those that perform repetitive geometric calculations like vertex creation, distance computations, and overlap checking. This will allow for faster constraint validation and enable more iterations within the time budget, leading to better optimization results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+from joblib import Parallel, delayed
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+from joblib import Parallel, delayed
+from numba import njit
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def create_hexagon_vertices(center, side_length, rotation_degrees):
+    """Create vertices of a regular hexagon."""
+    angle_rad = np.radians(rotation_degrees)
+    angle_step = 2 * np.pi / 6
+    vertices = []
+    for i in range(6):
+        angle = angle_step * i + angle_rad
+        x = center[0] + side_length * np.cos(angle)
+        y = center[1] + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return np.array(vertices)
+=======
+@njit
+def create_hexagon_vertices_numba(center_x, center_y, side_length, rotation_degrees):
+    """Create vertices of a regular hexagon using numba for speed."""
+    angle_rad = np.radians(rotation_degrees)
+    angle_step = 2 * np.pi / 6
+    vertices = np.empty((6, 2))
+    for i in range(6):
+        angle = angle_step * i + angle_rad
+        x = center_x + side_length * np.cos(angle)
+        y = center_y + side_length * np.sin(angle)
+        vertices[i] = (x, y)
+    return vertices
+
+def create_hexagon_vertices(center, side_length, rotation_degrees):
+    """Create vertices of a regular hexagon."""
+    return create_hexagon_vertices_numba(center[0], center[1], side_length, rotation_degrees)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_outer_hex_side_from_config(inner_hex_data, center=(0,0)):
+    """Compute the minimum required outer hexagon side length from current configuration."""
+    if len(inner_hex_data) == 0:
+        return 100
+
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, _ = inner_hex_data[i]
+        dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
+        # Add the circumradius of inner hexagon (1 for unit hexagon)
+        dist_to_edge = dist + 1.0
+        max_dist = max(max_dist, dist_to_edge)
+
+    return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+=======
+@njit
+def compute_outer_hex_side_from_config_fast(inner_hex_data, center_x=0, center_y=0):
+    """Fast computation of outer hexagon side length."""
+    if len(inner_hex_data) == 0:
+        return 100.0
+
+    max_dist = 0.0
+    for i in range(len(inner_hex_data)):
+        cx = inner_hex_data[i, 0]
+        cy = inner_hex_data[i, 1]
+        dx = cx - center_x
+        dy = cy - center_y
+        dist = np.sqrt(dx * dx + dy * dy)
+        # Add the circumradius of inner hexagon (1 for unit hexagon)
+        dist_to_edge = dist + 1.0
+        if dist_to_edge > max_dist:
+            max_dist = dist_to_edge
+
+    return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+
+def compute_outer_hex_side_from_config(inner_hex_data, center=(0,0)):
+    """Compute the minimum required outer hexagon side length from current configuration."""
+    return compute_outer_hex_side_from_config_fast(inner_hex_data, center[0], center[1])
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap_pair(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    hex1_polygon = Polygon(hex1_vertices)
+    hex2_polygon = Polygon(hex2_vertices)
+    return hex1_polygon.intersects(hex2_polygon)
+=======
+@njit
+def fast_distance_point_to_point(x1, y1, x2, y2):
+    """Fast Euclidean distance calculation."""
+    dx = x1 - x2
+    dy = y1 - y2
+    return np.sqrt(dx * dx + dy * dy)
+
+def check_overlap_pair(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    # For very tight performance, we could add a fast bounding circle check here
+    # but keeping existing logic for accuracy
+    hex1_polygon = Polygon(hex1_vertices)
+    hex2_polygon = Polygon(hex2_vertices)
+    return hex1_polygon.intersects(hex2_polygon)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration(inner_hex_data, outer_hex_center=(0,0)):
+    """Evaluate a configuration for validity and return inverse side length."""
+    if len(inner_hex_data) != 12:
+        return 1e-10
+
+    # Create all hexagon polygons
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices((cx, cy), 1.0, angle)
+        hex_polygons.append(Polygon(vertices))
+
+    # Check containment: all hexagon vertices must be within outer hexagon
+    outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, outer_hex_center)
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check containment for all vertices in parallel
+    if not check_containment_parallel(hex_polygons, outer_polygon):
+        return 1e-10
+
+    # Check overlaps between all pairs of hexagons in parallel
+    if check_overlap_parallel(hex_polygons):
+        return 1e-10
+
+    # If we reach here, the configuration is valid
+    return 1.0 / outer_side_length
+=======
+def evaluate_configuration(inner_hex_data, outer_hex_center=(0,0)):
+    """Evaluate a configuration for validity and return inverse side length."""
+    if len(inner_hex_data) != 12:
+        return 1e-10
+
+    # Precompute all hexagon vertices efficiently with numba
+    hex_vertices_list = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices((cx, cy), 1.0, angle)
+        hex_vertices_list.append(vertices)
+
+    # Check containment: all hexagon vertices must be within outer hexagon
+    outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, outer_hex_center)
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check containment for all vertices in parallel
+    # Convert to polygon objects for compatibility with parallel checker
+    hex_polygons = []
+    for vertices in hex_vertices_list:
+        hex_polygons.append(Polygon(vertices))
+
+    if not check_containment_parallel(hex_polygons, outer_polygon):
+        return 1e-10
+
+    # Check overlaps between all pairs of hexagons in parallel
+    if check_overlap_parallel(hex_polygons):
+        return 1e-10
+
+    # If we reach here, the configuration is valid
+    return 1.0 / outer_side_length
+>>>>>>> REPLACE
+</DIFF>

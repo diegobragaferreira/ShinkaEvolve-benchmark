@@ -1,0 +1,192 @@
+--- a/original.py
++++ b/original.py
+@@ -1,146 +1,103 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ import random
+ from scipy.signal import fftconvolve
+-from deap import base, creator, tools, algorithms
+ import nevergrad as ng
++import time
+ from functools import partial
+-import time
+ 
+ def compute_autocorrelation_constant(sequence):
+     """
+     Computes the autocorrelation constant C₁ for a given sequence.
+     Returns 1/C₁ which we want to maximize.
+     """
+     if len(sequence) == 0 or np.sum(sequence) < 0.01:
+         return 0.0
+     
+     # Compute convolution using FFT for efficiency
+     conv = fftconvolve(sequence, sequence, mode='full')
+     # Take the maximum of the convolution (excluding the zero-padding)
+     max_conv = np.max(conv[len(sequence)-1:])
+     
+     # Calculate C₁ = 2*n*max(b) / (sum(a))^2
+     sum_a = np.sum(sequence)
+     n = len(sequence)
+     
+     if sum_a == 0:
+         return 0.0
+         
+     C1 = 2 * n * max_conv / (sum_a ** 2)
+     return 1 / C1  # Return reciprocal for maximization
+ 
+ def evaluate_individual(individual):
+     """Evaluate an individual (sequence) and return fitness."""
+     try:
+         fitness = compute_autocorrelation_constant(individual)
+         return (fitness,)
+     except Exception as e:
+         return (0.0,)
+ 
+ def generate_random_sequence(min_length=10, max_length=1000):
+     """Generate a random sequence within specified constraints."""
+     length = random.randint(min_length, max_length)
+     # Generate heights in [0, 1000]
+     sequence = [random.uniform(0, 1000) for _ in range(length)]
+     return sequence
+ 
+-def evolve_sequences():
+-    """Evolve sequences to maximize the inverse autocorrelation constant."""
+-    # Define DEAP structures
+-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+-    creator.create("Individual", list, fitness=creator.FitnessMax)
+-    
+-    toolbox = base.Toolbox()
+-    
+-    # Define gene generation and individual creation
+-    def create_individual():
+-        return creator.Individual(generate_random_sequence())
+-    
+-    toolbox.register("individual", create_individual)
+-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+-    
+-    # Register evaluation and operators
+-    toolbox.register("evaluate", evaluate_individual)
+-    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=100, indpb=0.2)
+-    toolbox.register("select", tools.selTournament, tournsize=3)
+-    
+-    # Set up evolutionary algorithm parameters
+-    pop_size = 50
+-    n_generations = 200
+-    
+-    # Initialize population
+-    population = toolbox.population(pop_size)
+-    
+-    # Evolution loop
+-    for gen in range(n_generations):
+-        # Select next generation
+-        offspring = toolbox.select(population, len(population))
+-        offspring = list(map(toolbox.clone, offspring))
+-        
+-        # Apply crossover and mutation
+-        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+-            if random.random() < 0.5:
+-                toolbox.mate(child1, child2)
+-                del child1.fitness.values
+-                del child2.fitness.values
+-        
+-        for mutant in offspring:
+-            if random.random() < 0.2:
+-                toolbox.mutate(mutant)
+-                del mutant.fitness.values
+-        
+-        # Evaluate fitness for new individuals
+-        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+-        fitnesses = map(toolbox.evaluate, invalid_ind)
+-        for ind, fit in zip(invalid_ind, fitnesses):
+-            ind.fitness.values = fit
+-            
+-        # Replace population
+-        population[:] = offspring
+-    
+-    # Get best individual
+-    best_individual = tools.selBest(population, 1)[0]
+-    return list(best_individual)
+-
+ def search_for_best_sequence() -> list[float]:
+     """Main function to find the best sequence."""
+-    # Use nevergrad for direct optimization
+-    # This is a hybrid approach combining evolutionary and gradient-free methods
+-    
+     start_time = time.time()
+     
+-    # Try evolving sequences using DEAP
+-    try:
+-        sequence = evolve_sequences()
+-        # Ensure we have a valid sequence
+-        if len(sequence) == 0 or np.sum(sequence) < 0.01:
+-            sequence = [1.0]  # fallback to simple case
+-    except Exception as e:
+-        # Fallback to a basic random approach if evolution fails
++    # Use Nevergrad for direct optimization with adaptive parameters
++    # Multi-start strategy to find better solutions
++    best_score = 0.0
++    best_sequence = [1.0]  # Default fallback
++    
++    # Run multiple optimization attempts with different strategies
++    for attempt in range(5):
++        # Initialize a random sequence
+         sequence = generate_random_sequence()
++        
++        # Define the optimization problem
++        dimension = len(sequence)
++        instrumentation = ng.p.Array(shape=(dimension,), lower=0, upper=1000)
++        
++        # Use a suitable optimizer (e.g., DE, CMA, or PSO)
++        optimizer = ng.optimizers.DifferentialEvolution(popsize=20, crossover=0.7)
++        # optimizer = ng.optimizers.PSO(popsize=20)
++        # optimizer = ng.optimizers.CMA()
++        
++        # Set up the optimization problem
++        problem = ng.p.Instrumentation(instrumentation)
++        func = lambda x: -compute_autocorrelation_constant(x)  # Negate for minimization
++        
++        # Optimize the function
++        recommendation = optimizer.minimize(func, verbosity=0)
++        
++        # Extract best sequence
++        final_sequence = recommendation.value
++        score = compute_autocorrelation_constant(final_sequence)
++        
++        # Update best if this attempt was better
++        if score > best_score:
++            best_score = score
++            best_sequence = list(final_sequence)
++            
++        # Check remaining time
++        if time.time() - start_time > 170:
++            break
+     
+-    # Final verification
+-    if len(sequence) == 0 or np.sum(sequence) < 0.01:
+-        sequence = [1.0]
+-    
+-    # Limit size to prevent excessive computation
+-    if len(sequence) > 1000:
+-        sequence = sequence[:1000]
++    # Final verification and clipping
++    if len(best_sequence) == 0 or np.sum(best_sequence) < 0.01:
++        best_sequence = [1.0]
+     
+     # Clip values to [0, 1000] for practicality
+-    sequence = [max(0, min(1000, x)) for x in sequence]
++    best_sequence = [max(0, min(1000, x)) for x in best_sequence]
+     
+-    elapsed = time.time() - start_time
+-    # Early exit if time is almost up
+-    if elapsed > 170:
+-        return sequence
+-    
+-    return sequence
++    return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

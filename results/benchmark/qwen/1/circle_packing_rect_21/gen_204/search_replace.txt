@@ -1,0 +1,475 @@
+<NAME>
+improve_voronoi_criticality_calculation
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi criticality calculation has several issues:
+1. It's computationally expensive and unreliable
+2. It doesn't properly handle edge cases
+3. The criticality score normalization is inconsistent
+4. The approach to measuring constraint density is suboptimal
+
+I'll replace the Voronoi-based criticality calculation with a more robust and efficient approach that:
+- Uses direct geometric analysis instead of Voronoi diagrams
+- Better estimates local constraint density
+- Improves performance with vectorized operations
+- Provides more stable criticality scoring
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on Voronoi diagram - how much room each circle has"""
+        circles = individual.copy()
+        n = len(circles)
+
+        # Generate Voronoi diagram
+        points = circles[:, :2]  # x,y coordinates
+
+        try:
+            vor = Voronoi(points)
+        except:
+            # Fallback: return uniform criticality if Voronoi fails
+            return np.ones(n) * 0.1
+
+        criticality_scores = np.zeros(n)
+
+        # For each circle, calculate minimum distance to Voronoi edges
+        # This represents how constrained the circle is
+        for i in range(n):
+            # Get Voronoi regions for this point
+            try:
+                region_indices = np.where(vor.point_region == i)[0]
+                if len(region_indices) > 0:
+                    # Calculate minimum distance to region boundaries
+                    min_dist_to_edge = float('inf')
+
+                    # Check distance to all Voronoi vertices for this region
+                    region_vertices = vor.regions[vor.point_region[i]]
+                    if -1 not in region_vertices and len(region_vertices) > 0:
+                        for vertex_idx in region_vertices:
+                            if vertex_idx != -1 and vertex_idx < len(vor.vertices):
+                                vertex = vor.vertices[vertex_idx]
+                                dist = np.sqrt((circles[i,0] - vertex[0])**2 + (circles[i,1] - vertex[1])**2)
+                                min_dist_to_edge = min(min_dist_to_edge, dist)
+
+                    if min_dist_to_edge < float('inf') and min_dist_to_edge > 0:
+                        # Criticality increases with proximity to boundaries
+                        # Smaller distances mean less room for growth
+                        # Normalize by max possible distance to avoid extreme values
+                        criticality_scores[i] = min_dist_to_edge
+                    else:
+                        criticality_scores[i] = 0.01  # Default when distance is invalid
+                else:
+                    criticality_scores[i] = 0.01
+            except:
+                criticality_scores[i] = 0.01
+
+        # Normalize criticality scores to [0,1] range for consistency
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        return criticality_scores
+=======
+    def get_constraint_density_criticality(individual):
+        """Calculate criticality based on local constraint density - how much space is available around each circle"""
+        circles = individual.copy()
+        n = len(circles)
+
+        # Vectorized approach to compute minimum distances to neighbors
+        if n <= 1:
+            return np.ones(n) * 0.5
+
+        # Get all centers
+        centers = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute pairwise distances between all centers
+        # Using broadcasting for efficiency
+        diff = centers[:, np.newaxis, :] - centers[np.newaxis, :, :]
+        distances = np.sqrt(np.sum(diff**2, axis=2))
+
+        # Mask to exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # For each circle, find the minimum distance to any other circle
+        min_distances = np.min(distances, axis=1)
+
+        # Also compute minimum distance to boundaries
+        boundary_distances = np.minimum(
+            centers[:, 0],  # distance to left boundary
+            np.minimum(
+                1.0 - centers[:, 0],  # distance to right boundary
+                np.minimum(
+                    centers[:, 1],  # distance to bottom boundary
+                    1.0 - centers[:, 1]  # distance to top boundary
+                )
+            )
+        )
+
+        # Combine boundary and neighbor distances to get overall constraint measure
+        # Circles that are close to boundaries or neighbors are more constrained
+        # Criticality = 1/(1 + scaled_min_distances) where lower values = more constrained
+        combined_constraints = np.minimum(min_distances, boundary_distances)
+
+        # Normalize: circles with smaller combined constraints are more critical
+        # We want to map constraint levels to criticality [0,1] where 0 = most constrained
+        if np.max(combined_constraints) > 0:
+            # Invert so that smaller distances (more constrained) get higher criticality values
+            normalized = 1.0 / (1.0 + combined_constraints / np.max(combined_constraints) * 10.0)
+        else:
+            normalized = np.ones(n) * 0.5
+
+        return normalized
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_mutation_operator_with_new_criticality
+</NAME>
+
+<DESCRIPTION>
+Update the mutation operator to use the new constraint density criticality calculation instead of the old Voronoi-based approach. This will provide more accurate and consistent criticality scores that better reflect how constrained each circle actually is, leading to smarter mutation decisions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mut_radius(individual, indpb=0.2):
+        """Mutation operator that modifies only the radius of selected circles with adaptive scaling"""
+        mutated_individual = individual.copy()
+        n = len(mutated_individual)
+
+        # Get criticality scores
+        criticality = get_voronoi_criticality(mutated_individual)
+
+        # Sort by criticality (most critical first)
+        sorted_indices = np.argsort(-criticality)  # Descending order
+
+        # Mutate top 40% of critical circles (focus on the most constrained)
+        num_mutations = int(n * 0.4)
+        mutation_indices = sorted_indices[:num_mutations]
+
+        for i in range(num_mutations):
+            idx = mutation_indices[i]
+            if random.random() < indpb:
+                old_radius = mutated_individual[idx, 2]
+                # Adaptive mutation based on criticality - more aggressive in low-criticality regions
+                adaptive_scale = 0.01 + (1.0 - criticality[idx]/np.max(criticality)) * 0.02
+
+                # Small random change to radius with adaptive scale
+                delta = np.random.normal(0, adaptive_scale)
+                new_radius = max(0.001, old_radius + delta)
+                mutated_individual[idx, 2] = new_radius
+
+        return mutated_individual,
+=======
+    def mut_radius(individual, indpb=0.2):
+        """Mutation operator that modifies only the radius of selected circles with adaptive scaling"""
+        mutated_individual = individual.copy()
+        n = len(mutated_individual)
+
+        # Get criticality scores based on constraint density
+        criticality = get_constraint_density_criticality(mutated_individual)
+
+        # Sort by criticality (most critical first - lowest values = most constrained)
+        sorted_indices = np.argsort(criticality)  # Ascending order (0 = most constrained)
+
+        # Mutate top 40% of critical circles (focus on the most constrained)
+        num_mutations = int(n * 0.4)
+        mutation_indices = sorted_indices[:num_mutations]
+
+        for i in range(num_mutations):
+            idx = mutation_indices[i]
+            if random.random() < indpb:
+                old_radius = mutated_individual[idx, 2]
+                # Adaptive mutation based on criticality - more aggressive in low-criticality regions
+                # Circles with low criticality (well-constrained) get more aggressive mutations
+                adaptive_scale = 0.01 + (1.0 - criticality[idx]) * 0.03
+
+                # Small random change to radius with adaptive scale
+                delta = np.random.normal(0, adaptive_scale)
+                new_radius = max(0.001, old_radius + delta)
+                mutated_individual[idx, 2] = new_radius
+
+        return mutated_individual,
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_crossover_operator_with_new_criticality
+</NAME>
+
+<DESCRIPTION>
+Update the crossover operator to use the new constraint density criticality calculation. This ensures that the crossover operation considers the actual constraint levels when deciding which circles to swap between parents, leading to more effective genetic recombination.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def crossover(parent1, parent2):
+        """Crossover operator that exchanges radii of most critical circles with enhanced logic"""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Get criticality scores for both parents
+        crit1 = get_voronoi_criticality(parent1)
+        crit2 = get_voronoi_criticality(parent2)
+
+        # Exchange radii of circles with highest criticality
+        combined_criticality = np.maximum(crit1, crit2)
+        sorted_indices = np.argsort(-combined_criticality)
+
+        # Exchange radii for top 30% of circles with probabilistic selection
+        num_exchanges = int(len(parent1) * 0.3)
+        for i in range(num_exchanges):
+            idx = sorted_indices[i]
+            # Apply crossover with probability based on criticality
+            # More critical circles have higher chance of exchange
+            crossover_prob = 0.7 + 0.3 * (crit1[idx] + crit2[idx]) / 2  # Max prob = 1.0
+            if random.random() < crossover_prob:
+                child1[idx, 2], child2[idx, 2] = child2[idx, 2], child1[idx, 2]
+
+        return child1, child2
+=======
+    def crossover(parent1, parent2):
+        """Crossover operator that exchanges radii of most critical circles with enhanced logic"""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Get criticality scores for both parents based on constraint density
+        crit1 = get_constraint_density_criticality(parent1)
+        crit2 = get_constraint_density_criticality(parent2)
+
+        # Exchange radii of circles with lowest criticality (most constrained)
+        # Combined criticality: circles that are constrained in either parent should be more likely to swap
+        combined_criticality = np.minimum(crit1, crit2)  # Lower = more constrained
+        sorted_indices = np.argsort(combined_criticality)  # Ascending order
+
+        # Exchange radii for top 30% of circles with probabilistic selection
+        num_exchanges = int(len(parent1) * 0.3)
+        for i in range(num_exchanges):
+            idx = sorted_indices[i]
+            # Apply crossover with probability based on criticality
+            # More constrained circles (lower criticality) have higher chance of exchange
+            crossover_prob = 0.7 + 0.3 * (1.0 - combined_criticality[idx])  # Higher prob for more constrained
+            if random.random() < crossover_prob:
+                child1[idx, 2], child2[idx, 2] = child2[idx, 2], child1[idx, 2]
+
+        return child1, child2
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+refine_local_optimization_strategy
+</NAME>
+
+<DESCRIPTION>
+Improve the local optimization strategy to be more sophisticated and effective. Instead of just randomly perturbing a few circles, we'll implement a more intelligent approach that uses the constraint information to guide improvements.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Local optimization to improve the initial solution
+    for _ in range(200):
+        # Create a copy to work with
+        test_individual = best_individual.copy()
+
+        # Try small perturbations
+        # Select 5 circles to adjust
+        selected_indices = np.random.choice(len(test_individual), 5, replace=False)
+
+        for idx in selected_indices:
+            old_x, old_y, old_r = test_individual[idx]
+            # Small random adjustments
+            new_x = max(0.01, min(0.99, old_x + np.random.normal(0, 0.01)))
+            new_y = max(0.01, min(0.99, old_y + np.random.normal(0, 0.01)))
+            new_r = max(0.001, old_r + np.random.normal(0, 0.005))
+
+            # Check if this violates constraints
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                    if dist < (new_r + oradius):
+                        valid = False
+                        break
+
+            # If valid, update
+            if valid:
+                test_individual[idx] = [new_x, new_y, new_r]
+
+        # If this improves the fitness, accept it
+        old_fitness = evaluate_fitness(best_individual, rect_width, rect_height)
+        new_fitness = evaluate_fitness(test_individual, rect_width, rect_height)
+
+        if new_fitness > old_fitness:
+            best_individual = test_individual.copy()
+=======
+    # Local optimization to improve the initial solution
+    for _ in range(200):
+        # Create a copy to work with
+        test_individual = best_individual.copy()
+
+        # Get constraint density criticality to identify most constrained circles
+        criticality = get_constraint_density_criticality(test_individual)
+
+        # Select circles that are most constrained (lowest criticality) to try to improve
+        # These are the circles that would benefit most from optimization
+        sorted_indices = np.argsort(criticality)  # Ascending order (0 = most constrained)
+        num_to_improve = min(10, len(test_individual))  # Improve up to 10 most constrained circles
+        selected_indices = sorted_indices[:num_to_improve]
+
+        # Try small improvements for selected circles
+        for idx in selected_indices:
+            old_x, old_y, old_r = test_individual[idx]
+
+            # For constrained circles, try to increase radius first (they're more likely to benefit)
+            # Then try small position adjustments if that doesn't work
+            test_r = old_r * 1.05  # Try increasing radius by 5%
+            test_r = min(test_r, min(old_x, old_y, 1.0-old_x, 1.0-old_y) * 0.95)  # Respect bounds
+
+            # Check if increased radius is valid
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((old_x - ox)**2 + (old_y - oy)**2)
+                    if dist < (test_r + oradius):
+                        valid = False
+                        break
+
+            if valid and test_r > old_r:
+                # Accept radius increase
+                test_individual[idx] = [old_x, old_y, test_r]
+                continue
+
+            # If we couldn't increase radius, try position adjustments
+            # Make adjustments that help avoid collisions or stay within bounds
+            new_x = max(0.01, min(0.99, old_x + np.random.normal(0, 0.005)))
+            new_y = max(0.01, min(0.99, old_y + np.random.normal(0, 0.005)))
+            new_r = old_r
+
+            # Check if this adjustment helps
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                    if dist < (new_r + oradius):
+                        valid = False
+                        break
+
+            # If valid, update
+            if valid:
+                test_individual[idx] = [new_x, new_y, new_r]
+
+        # If this improves the fitness, accept it
+        old_fitness = evaluate_fitness(best_individual, rect_width, rect_height)
+        new_fitness = evaluate_fitness(test_individual, rect_width, rect_height)
+
+        if new_fitness > old_fitness:
+            best_individual = test_individual.copy()
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhance_final_local_optimization
+</NAME>
+
+<DESCRIPTION>
+Improve the final local optimization phase to be more thorough and effective. The current approach is basic, but we can make it more sophisticated by using more selective perturbations guided by constraint information rather than just random adjustments.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final local fine-tuning
+    for _ in range(100):
+        test_individual = best_individual.copy()
+
+        # Focus on most critical circles
+        criticality = get_voronoi_criticality(test_individual)
+        sorted_indices = np.argsort(-criticality)
+
+        # Perturb top 10 circles
+        for i in range(min(10, len(test_individual))):
+            idx = sorted_indices[i]
+            old_x, old_y, old_r = test_individual[idx]
+
+            # Make small adjustments
+            new_x = max(0.01, min(0.99, old_x + np.random.normal(0, 0.005)))
+            new_y = max(0.01, min(0.99, old_y + np.random.normal(0, 0.005)))
+            new_r = max(0.001, old_r + np.random.normal(0, 0.002))
+
+            test_individual[idx] = [new_x, new_y, new_r]
+
+        # Validate and accept improvement
+        if evaluate_fitness(test_individual, rect_width, rect_height) > evaluate_fitness(best_individual, rect_width, rect_height):
+            best_individual = test_individual.copy()
+=======
+    # Final local fine-tuning
+    for _ in range(100):
+        test_individual = best_individual.copy()
+
+        # Get constraint density criticality to focus on the most constrained circles
+        criticality = get_constraint_density_criticality(test_individual)
+
+        # Sort by criticality (ascending = most constrained first)
+        sorted_indices = np.argsort(criticality)
+
+        # Perturb top 10 most constrained circles, but with smarter approach
+        for i in range(min(10, len(test_individual))):
+            idx = sorted_indices[i]
+            old_x, old_y, old_r = test_individual[idx]
+
+            # Strategy 1: Try to increase radius first (these are most constrained)
+            test_r = old_r * 1.02  # Small increase
+            test_r = min(test_r, min(old_x, old_y, 1.0-old_x, 1.0-old_y) * 0.9)  # Respect bounds
+
+            # Check if this works without conflicts
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((old_x - ox)**2 + (old_y - oy)**2)
+                    if dist < (test_r + oradius):
+                        valid = False
+                        break
+
+            if valid and test_r > old_r:
+                test_individual[idx] = [old_x, old_y, test_r]
+                continue
+
+            # Strategy 2: If cannot increase radius, try small position adjustments to reduce conflicts
+            step_x = np.random.normal(0, 0.003)  # Smaller step
+            step_y = np.random.normal(0, 0.003)  # Smaller step
+            new_x = max(0.01, min(0.99, old_x + step_x))
+            new_y = max(0.01, min(0.99, old_y + step_y))
+            new_r = old_r
+
+            # Check if this adjustment helps avoid collisions
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                    if dist < (new_r + oradius):
+                        valid = False
+                        break
+
+            if valid:
+                test_individual[idx] = [new_x, new_y, new_r]
+
+        # Validate and accept improvement
+        if evaluate_fitness(test_individual, rect_width, rect_height) > evaluate_fitness(best_individual, rect_width, rect_height):
+            best_individual = test_individual.copy()
+>>>>>>> REPLACE
+
+</DIFF>

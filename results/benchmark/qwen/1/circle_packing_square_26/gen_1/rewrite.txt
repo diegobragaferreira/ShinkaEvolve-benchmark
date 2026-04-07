@@ -1,0 +1,147 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+    
+    n_circles = 26
+    circles = np.zeros((n_circles, 3))
+    
+    # Initialize using a grid-based approach
+    # Create a coarse grid and sample points
+    grid_size = 5
+    positions = []
+    
+    # Generate candidate positions on a grid with padding
+    spacing = 1.0 / (grid_size + 1)
+    for i in range(1, grid_size):
+        for j in range(1, grid_size):
+            x = i * spacing
+            y = j * spacing
+            positions.append([x, y])
+    
+    # Add some random positions near boundaries for better coverage
+    for _ in range(5):
+        x = np.random.uniform(0.1, 0.9)
+        y = np.random.uniform(0.1, 0.9)
+        positions.append([x, y])
+    
+    # Select initial positions for circles
+    selected_positions = positions[:n_circles]
+    selected_positions = np.array(selected_positions)
+    
+    # Initialize radii to small values
+    radii = np.full(n_circles, 0.02)
+    
+    # Set up optimization variables (positions and radii)
+    # Flatten into single array for optimization: [x1,y1,r1,x2,y2,r2,...]
+    initial_vars = []
+    for i in range(n_circles):
+        initial_vars.extend([selected_positions[i][0], selected_positions[i][1], radii[i]])
+    initial_vars = np.array(initial_vars)
+    
+    def objective(vars):
+        # Extract radii from variables
+        total_radius = 0
+        for i in range(n_circles):
+            idx = 3*i + 2
+            total_radius += vars[idx]
+        return -total_radius  # Negative because we want to maximize
+    
+    def constraints(vars):
+        # Check containment and non-overlap constraints
+        constraints_list = []
+        
+        # Containment constraints: radius <= x <= 1-radius and radius <= y <= 1-radius
+        for i in range(n_circles):
+            x_idx = 3*i
+            y_idx = 3*i + 1
+            r_idx = 3*i + 2
+            
+            x = vars[x_idx]
+            y = vars[y_idx]
+            r = vars[r_idx]
+            
+            # Boundary constraints
+            constraints_list.append(x - r)          # x >= r
+            constraints_list.append(y - r)          # y >= r
+            constraints_list.append(1 - r - x)      # x <= 1 - r
+            constraints_list.append(1 - r - y)      # y <= 1 - r
+        
+        # Non-overlap constraints
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                x1_idx = 3*i
+                y1_idx = 3*i + 1
+                r1_idx = 3*i + 2
+                
+                x2_idx = 3*j
+                y2_idx = 3*j + 1
+                r2_idx = 3*j + 2
+                
+                x1 = vars[x1_idx]
+                y1 = vars[y1_idx]
+                r1 = vars[r1_idx]
+                
+                x2 = vars[x2_idx]
+                y2 = vars[y2_idx]
+                r2 = vars[r2_idx]
+                
+                # Distance between centers should be >= sum of radii
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_dist_sq = (r1 + r2)**2
+                
+                # We want dist >= r1 + r2, so we add the constraint: (r1 + r2)^2 - dist^2 <= 0
+                constraints_list.append(min_dist_sq - dist_sq)
+        
+        return np.array(constraints_list)
+    
+    # Define bounds: 
+    # x in [r, 1-r], y in [r, 1-r], r in [0, 0.5]
+    bounds = []
+    for i in range(n_circles):
+        # x bounds
+        bounds.append((0.001, 0.999))  # Small padding to avoid numerical issues
+        # y bounds
+        bounds.append((0.001, 0.999))
+        # r bounds
+        bounds.append((0.001, 0.499))  # Max radius limited to prevent overlapping
+    
+    # Run optimization
+    try:
+        result = minimize(
+            objective,
+            initial_vars,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraints},
+            options={'maxiter': 1000, 'ftol': 1e-6}
+        )
+        
+        if result.success:
+            final_vars = result.x
+        else:
+            # If optimization fails, use the initial configuration
+            final_vars = initial_vars
+    except Exception as e:
+        # Fallback to initial configuration if optimization crashes
+        final_vars = initial_vars
+    
+    # Extract results
+    for i in range(n_circles):
+        circles[i][0] = final_vars[3*i]      # x coordinate
+        circles[i][1] = final_vars[3*i + 1]  # y coordinate
+        circles[i][2] = final_vars[3*i + 2]  # radius
+    
+    return circles
+
+# EVOLVE-BLOCK-END

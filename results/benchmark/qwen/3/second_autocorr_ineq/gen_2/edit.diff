@@ -1,0 +1,269 @@
+--- a/original.py
++++ b/original.py
+@@ -1,14 +1,261 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
+-    f_values = [np.random.random()] * np.random.randint(100,1000)
+-    return f_values
++from typing import List
++import random
++import time
++
++def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
++    """
++    Compute the three norms needed for C2 calculation.
++    Returns (||g||₂², ||g||₁, ||g||∞)
++    """
++    n = len(f_values)
++    if n == 0:
++        return 0.0, 0.0, 0.0
++    
++    # Create step function with proper spacing on [-1/4, 1/4]
++    step_size = 0.5 / n
++    x_points = np.linspace(-0.25, 0.25, n, endpoint=False) + step_size/2
++    
++    # Compute autoconvolution g = f * f using discrete convolution
++    # We'll use the fact that g[x] = sum_{i+j=x} f[i] * f[j]
++    # For simplicity, we'll compute this directly as a discrete convolution
++    
++    # Construct the autoconvolution using piecewise linear integration
++    # This is a simplified version that computes the convolution properly
++    g = np.zeros(2*n - 1)
++    
++    # Proper discrete convolution computation
++    for i in range(n):
++        for j in range(n):
++            idx = i + j
++            g[idx] += f_values[i] * f_values[j]
++    
++    # Compute norms
++    # ||g||₂² using trapezoidal-like piecewise linear integration
++    g_squared = g * g
++    # Approximate integral with trapezoidal rule
++    # For a piecewise linear function, we can use 1/3*(y1^2 + y1*y2 + y2^2)*h
++    # But since our step size is uniform, we can simplify to sum of y_i^2 * h
++    # Actually, let's compute it correctly with the trapezoidal approach
++    if len(g) <= 1:
++        g_norm_2_sq = 0.0
++    else:
++        g_norm_2_sq = 0.0
++        for i in range(len(g)-1):
++            # Trapezoidal approximation with weights
++            y1 = g[i]
++            y2 = g[i+1]
++            # Area under piecewise linear segments: (y1 + y2)/2 * step_width  
++            # But we need to treat this like our custom formula
++            # Using: (h/3)(y1² + y1y2 + y2²) for each segment
++            h = 2*step_size  # width of the domain, so step for autoconvolution 
++            # Actually, let's reconsider the domain - the autoconvolution has domain [-1/2, 1/2]
++            # So the step size for the autoconvolution should be the same as for the source
++            # But we have 2n-1 points, so spacing is 0.5/(2n-1) = 0.25/(n-0.5)
++            # Let's reconsider the integration approach
++            
++            g_norm_2_sq += (y1*y1 + y1*y2 + y2*y2) * step_size  # Simplified version
++            
++    # ||g||₁ = sum(|g|) * step_size (since we're approximating continuous integral)
++    g_norm_1 = np.sum(np.abs(g)) * step_size
++    
++    # ||g||∞ = max(|g|)
++    g_norm_inf = np.max(np.abs(g))
++    
++    # Handle edge cases
++    if g_norm_1 == 0:
++        g_norm_1 = 1e-12
++    if g_norm_inf == 0:
++        g_norm_inf = 1e-12
++        
++    return g_norm_2_sq, g_norm_1, g_norm_inf
++
++def calculate_c2(f_values: List[float]) -> float:
++    """
++    Calculate the C2 constant from the step function values.
++    """
++    try:
++        g_norm_2_sq, g_norm_1, g_norm_inf = compute_autoconvolution_norms(f_values)
++        c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
++        return c2
++    except:
++        return 0.0
++
++def mutate_individual(individual: List[float], mutation_rate: float = 0.1) -> List[float]:
++    """
++    Mutate an individual by slightly perturbing some values.
++    """
++    mutated = individual.copy()
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Add small Gaussian noise
++            mutated[i] += random.gauss(0, 0.05) * mutated[i] if mutated[i] > 0 else 0.01
++            mutated[i] = max(0, mutated[i])  # Ensure non-negative
++    return mutated
++
++def crossover(parent1: List[float], parent2: List[float]) -> List[float]:
++    """
++    Perform uniform crossover between two parents.
++    """
++    child = []
++    min_len = min(len(parent1), len(parent2))
++    
++    # Crossover at positions
++    for i in range(min_len):
++        if random.random() < 0.5:
++            child.append(parent1[i])
++        else:
++            child.append(parent2[i])
++    
++    # Add remaining elements from longer parent (if any)
++    if len(parent1) > min_len:
++        child.extend(parent1[min_len:])
++    elif len(parent2) > min_len:
++        child.extend(parent2[min_len:])
++        
++    return child
++
++def initialize_population(population_size: int, min_steps: int = 100, max_steps: int = 1000) -> List[List[float]]:
++    """
++    Initialize a diverse population, mixing several strategies.
++    """
++    population = []
++    
++    # Strategy 1: Random initialization
++    for _ in range(population_size // 2):
++        n = random.randint(min_steps, max_steps)
++        # Make some steps higher to create peaks
++        individual = [random.uniform(0.1, 1.0) for _ in range(n)]
++        # Add some structured behavior - maybe a peak
++        if len(individual) > 5:
++            peak_pos = len(individual) // 2
++            individual[peak_pos] *= 2.0
++        population.append(individual)
++    
++    # Strategy 2: Structured initialization
++    for _ in range(population_size // 4):
++        n = random.randint(min_steps, max_steps)
++        # Try creating more uniform distribution
++        individual = [0.5] * n
++        # Add some variation
++        for i in range(n):
++            if random.random() < 0.3:
++                individual[i] += random.uniform(-0.2, 0.2)
++                individual[i] = max(0, individual[i])
++        population.append(individual)
++        
++    # Strategy 3: Sparse initialization with concentrated mass
++    for _ in range(population_size // 4):
++        n = random.randint(min_steps, max_steps)
++        individual = [0.0] * n
++        # Place a few large values
++        num_peaks = max(1, min(5, n // 20))
++        for _ in range(num_peaks):
++            pos = random.randint(0, n-1)
++            individual[pos] = random.uniform(1.0, 3.0)
++        population.append(individual)
++        
++    return population[:population_size]
++
++def evolve_step_function(max_generations: int = 100, population_size: int = 50, 
++                        elite_fraction: float = 0.1) -> List[float]:
++    """
++    Evolve a step function to maximize C2.
++    """
++    # Set random seed for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
++    # Initialize population
++    population = initialize_population(population_size)
++    
++    best_fitness = 0.0
++    best_individual = None
++    stale_generations = 0
++    max_stale_generations = 20
++    
++    for generation in range(max_generations):
++        # Evaluate fitness of each individual
++        fitness_scores = []
++        for individual in population:
++            fitness = calculate_c2(individual)
++            fitness_scores.append((fitness, individual))
++            
++        # Sort by fitness descending
++        fitness_scores.sort(key=lambda x: x[0], reverse=True)
++        
++        # Track best
++        current_best = fitness_scores[0][0]
++        if current_best > best_fitness:
++            best_fitness = current_best
++            best_individual = fitness_scores[0][1].copy()
++            stale_generations = 0
++        else:
++            stale_generations += 1
++            
++        # Early stopping
++        if stale_generations >= max_stale_generations:
++            break
++            
++        # Selection: keep top elite_fraction
++        elite_count = max(1, int(elite_fraction * population_size))
++        elites = [ind for _, ind in fitness_scores[:elite_count]]
++        
++        # Create new generation
++        new_population = elites[:]
++        
++        # Generate offspring
++        while len(new_population) < population_size:
++            # Tournament selection
++            tournament_size = 3
++            selected_parents = []
++            for _ in range(2):
++                tournament = random.sample(fitness_scores, min(tournament_size, len(fitness_scores)))
++                winner = max(tournament, key=lambda x: x[0])
++                selected_parents.append(winner[1])
++                
++            # Crossover
++            if len(selected_parents) >= 2:
++                child = crossover(selected_parents[0], selected_parents[1])
++                # Mutation
++                child = mutate_individual(child, mutation_rate=0.1)
++                new_population.append(child)
++            else:
++                # If no valid crossover, just mutate one parent
++                if selected_parents:
++                    child = mutate_individual(selected_parents[0], mutation_rate=0.1)
++                    new_population.append(child)
++                    
++        population = new_population[:population_size]
++        
++    return best_individual if best_individual is not None else []
++
++def construct_function() -> List[float]:
++    """
++    Function to construct step-function with high C2 value.
++    """
++    # Run evolution to find optimal step function
++    start_time = time.time()
++    
++    # Use fewer generations for speed, but still effective evolution
++    evolved_function = evolve_step_function(
++        max_generations=50,      # Fewer generations for speed
++        population_size=30,      # Smaller population for efficiency
++        elite_fraction=0.2       # More exploration
++    )
++    
++    end_time = time.time()
++    
++    # Ensure we always return a valid function (at least one step)
++    if not evolved_function:
++        evolved_function = [1.0]  # Fallback to single unit step
++        
++    return evolved_function
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

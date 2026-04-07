@@ -1,0 +1,310 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using enhanced adaptive Gaussian optimization."""
+    np.random.seed(42)  # For reproducibility
+
+    # Determine number of steps with higher resolution
+    n_steps = np.random.randint(1000, 10000)  # Increased range for better resolution
+
+    # Create x-axis points in [-1/4, 1/4]
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Initialize with base multi-peak Gaussian structure
+    base_function = np.zeros_like(x)
+
+    # Use enhanced logarithmic spacing with better gap enforcement
+    num_peaks = np.random.randint(10, 30)
+
+    # Generate more evenly distributed peak positions using modified logarithmic spacing
+    # to avoid clustering and ensure better spread
+    peak_positions = []
+    for i in range(num_peaks):
+        # Use a more sophisticated distribution that ensures minimum separation
+        # by sampling from different segments of the logarithmic space
+        log_min = np.log(0.01)
+        log_max = np.log(0.24)
+
+        # Distribute peaks across different log segments to avoid clustering
+        segment = i / max(1, num_peaks - 1) if num_peaks > 1 else 0
+        pos_log = log_min + (log_max - log_min) * segment * (0.8 + 0.4 * np.random.random())
+        pos = np.exp(pos_log)
+        peak_positions.append(pos)
+
+    # Mirror positions to both sides of center
+    mirrored_positions = [-p for p in peak_positions if p != 0]
+    peak_positions = peak_positions + mirrored_positions
+
+    # Remove duplicates and sort
+    peak_positions = sorted(list(set(peak_positions)))
+
+    # Ensure minimum gap between peaks to prevent narrow autoconvolution
+    min_gap = 0.05 * 0.5  # 5% of domain width for tighter control
+    safe_positions = []
+    for pos in peak_positions:
+        if not safe_positions or abs(pos - safe_positions[-1]) >= min_gap:
+            safe_positions.append(pos)
+
+    # Limit to reasonable number of peaks to prevent overfitting
+    safe_positions = safe_positions[:num_peaks]
+    num_peaks = len(safe_positions)
+
+    # Construct peaks with optimized parameters
+    for i in range(num_peaks):
+        # Set peak center
+        peak_center = safe_positions[i]
+
+        # Adjust peak height based on position to avoid very sharp peaks
+        # Peaks near edges get reduced height to prevent excessive autoconvolution peaks
+        if abs(peak_center) > 0.15:
+            peak_height = np.random.uniform(1.0, 1.5)
+        elif abs(peak_center) > 0.1:
+            peak_height = np.random.uniform(1.2, 1.8)
+        else:
+            peak_height = np.random.uniform(1.4, 2.2)
+
+        # Use narrower widths for central peaks, wider for outer ones
+        if abs(peak_center) < 0.05:
+            peak_width = np.random.uniform(0.015, 0.025)
+        elif abs(peak_center) < 0.15:
+            peak_width = np.random.uniform(0.025, 0.04)
+        else:
+            peak_width = np.random.uniform(0.03, 0.06)
+
+        # Create Gaussian peak
+        gaussian_peak = peak_height * np.exp(-0.5 * ((x - peak_center) / peak_width)**2)
+        base_function += gaussian_peak
+
+    # Add some additional structure with controlled randomness
+    # This helps create better autoconvolution properties
+    for i in range(0, len(x), max(1, len(x)//20)):  # More frequent bumps
+        if np.random.random() > 0.8:  # 20% chance to add small bump
+            bump_center = x[i]
+            bump_height = np.random.uniform(0.05, 0.3)
+            bump_width = np.random.uniform(0.005, 0.015)
+            bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+            base_function += bump
+
+    # Ensure non-negative values
+    base_function = np.maximum(base_function, 0)
+
+    # Normalize to avoid extreme values that might hurt the C2 calculation
+    if np.max(base_function) > 0:
+        base_function = base_function / np.max(base_function) * 1.5
+
+    # Apply light noise for robustness (but preserve structure)
+    noise_level = 0.02  # Reduced noise level
+    noisy_function = base_function + np.random.normal(0, noise_level, len(base_function))
+    noisy_function = np.maximum(noisy_function, 0)
+
+    # Smooth the function to reduce sharp transitions that could hurt C2
+    # Use a simple moving average smoothing
+    window_size = max(1, n_steps // 200)  # Dynamic window size
+    if window_size % 2 == 0:
+        window_size += 1  # Must be odd for symmetric filter
+    if window_size > 1:
+        smoothed_function = signal.savgol_filter(noisy_function, window_size, 1)
+        smoothed_function = np.maximum(smoothed_function, 0)
+        noisy_function = smoothed_function
+
+    # Convert to step values ensuring proper format
+    step_values = noisy_function.tolist()
+
+    # Phase 2: Improved Local Optimization of Peak Parameters
+    def optimize_peaks(initial_func, n_steps):
+        # Extract peak information with better peak detection
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Better peak detection using second derivative analysis
+        peaks = []
+        # Look for local maxima with minimum height threshold
+        for i in range(1, len(initial_func)-1):
+            if (initial_func[i] > initial_func[i-1] and
+                initial_func[i] > initial_func[i+1] and
+                initial_func[i] > 0.05):  # Lower threshold for better sensitivity
+                peaks.append((i, initial_func[i]))
+
+        # Take top peaks based on height but also consider spatial distribution
+        # Sort by height first, then add spatial diversity consideration
+        peaks.sort(key=lambda x: x[1], reverse=True)
+
+        # Select top peaks but ensure they're well-distributed
+        if len(peaks) > 0:
+            selected_peaks = [peaks[0]]  # Always include the highest peak
+            for i in range(1, len(peaks)):
+                peak_pos_idx, peak_height = peaks[i]
+                # Check distance from already selected peaks
+                is_far_enough = True
+                for sel_pos_idx, _ in selected_peaks:
+                    if abs(x[peak_pos_idx] - x[sel_pos_idx]) < 0.03:  # Minimum spatial distance
+                        is_far_enough = False
+                        break
+                if is_far_enough and len(selected_peaks) < 10:  # Limit to avoid overfitting
+                    selected_peaks.append((peak_pos_idx, peak_height))
+        else:
+            selected_peaks = []
+
+        if len(selected_peaks) == 0:
+            return np.array(initial_func)
+
+        # Selectively optimize only the most impactful peaks to reduce complexity
+        # Consider only the top 6 peaks for optimization to maintain efficiency
+        top_selected_peaks = selected_peaks[:6] if len(selected_peaks) > 6 else selected_peaks
+
+        # Use a more efficient and robust optimization approach
+        # Focus on the top peaks only for optimization to reduce search space
+        def objective_selective(params):
+            # Reconstruct function with given params
+            temp_func = np.zeros_like(x)
+
+            # Only optimize specified peaks (index by position in top_selected_peaks)
+            for i, (pos_idx, height) in enumerate(top_selected_peaks):
+                if i * 2 + 1 < len(params):  # Ensure we have enough parameters
+                    # Position adjustment
+                    max_pos_adjust = min(0.03, 0.05 * (1 - abs(x[pos_idx])/0.25))
+                    center_pos = x[pos_idx] + (params[i*2] - 0.5) * max_pos_adjust
+
+                    # Height adjustment
+                    max_height_adjust = 0.5 * (height / np.max([p[1] for p in top_selected_peaks])) if len(top_selected_peaks) > 0 else 1.0
+                    peak_height = height * (1.0 + params[i*2+1] * max_height_adjust)
+
+                    # Determine appropriate width based on position
+                    width = max(0.01, 0.02 + 0.015 * (1 - abs(center_pos)/0.25))
+                    temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+                else:
+                    # If insufficient parameters, just use the original
+                    width = max(0.01, 0.02 + 0.015 * (1 - abs(x[pos_idx])/0.25))
+                    temp_func += height * np.exp(-0.5 * ((x - x[pos_idx]) / width)**2)
+
+            # Add contributions from remaining peaks with reduced weight
+            for i in range(len(initial_func)):
+                if not any(abs(x[i] - x[pos_idx]) < 0.01 for pos_idx, _ in top_selected_peaks):
+                    # Add scaled down contribution from original
+                    temp_func[i] += initial_func[i] * 0.4
+
+            c2 = compute_c2(temp_func)
+            return -c2  # Negative because we minimize
+
+        # Try multiple optimization approaches for robustness
+        best_c2 = -np.inf
+        best_func = np.array(initial_func)
+        best_params = None
+
+        # Approach 1: Direct optimization of selected peaks using DE with reduced complexity
+        try:
+            # Create simplified bounds for selected peaks only
+            bounds = []
+            for i in range(len(top_selected_peaks)):
+                bounds.extend([(-0.5, 0.5)])  # Position adjustment
+                bounds.extend([(-0.5, 0.5)])  # Height adjustment
+
+            if len(bounds) > 0:
+                # Run with fewer iterations for speed since we're optimizing fewer parameters
+                result = differential_evolution(objective_selective,
+                                              bounds=bounds,
+                                              maxiter=30,  # Reduced iterations due to fewer parameters
+                                              popsize=8,   # Smaller population
+                                              seed=42,
+                                              polish=True)
+
+                # Evaluate the result
+                temp_func = np.zeros_like(x)
+                for i, (pos_idx, height) in enumerate(top_selected_peaks):
+                    if i * 2 + 1 < len(result.x):  # Ensure we have enough parameters
+                        max_pos_adjust = min(0.03, 0.05 * (1 - abs(x[pos_idx])/0.25))
+                        center_pos = x[pos_idx] + (result.x[i*2] - 0.5) * max_pos_adjust
+                        max_height_adjust = 0.5 * (height / np.max([p[1] for p in top_selected_peaks])) if len(top_selected_peaks) > 0 else 1.0
+                        peak_height = height * (1.0 + result.x[i*2+1] * max_height_adjust)
+                        width = max(0.01, 0.02 + 0.015 * (1 - abs(center_pos)/0.25))
+                        temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+                    else:
+                        width = max(0.01, 0.02 + 0.015 * (1 - abs(x[pos_idx])/0.25))
+                        temp_func += height * np.exp(-0.5 * ((x - x[pos_idx]) / width)**2)
+
+                # Add contributions from remaining peaks with reduced weight
+                for i in range(len(initial_func)):
+                    if not any(abs(x[i] - x[pos_idx]) < 0.01 for pos_idx, _ in top_selected_peaks):
+                        temp_func[i] += initial_func[i] * 0.4
+
+                c2_result = compute_c2(temp_func)
+                if c2_result > best_c2:
+                    best_c2 = c2_result
+                    best_func = temp_func.copy()
+                    best_params = result.x.copy()
+
+        except Exception as e:
+            pass
+
+        # If no good result from DE, fallback to simple gradient-based refinement
+        if best_params is None or best_c2 <= -np.inf:
+            # Simple gradient-based adjustment for peak parameters
+            current_func = np.zeros_like(x)
+            for i, (pos_idx, height) in enumerate(top_selected_peaks):
+                # Base reconstruction using original parameters
+                width = max(0.01, 0.02 + 0.015 * (1 - abs(x[pos_idx])/0.25))
+                current_func += height * np.exp(-0.5 * ((x - x[pos_idx]) / width)**2)
+
+            # Add remaining peaks with reduced influence
+            for i in range(len(initial_func)):
+                if not any(abs(x[i] - x[pos_idx]) < 0.01 for pos_idx, _ in top_selected_peaks):
+                    current_func[i] += initial_func[i] * 0.4
+
+            current_c2 = compute_c2(current_func)
+            if current_c2 > best_c2:
+                best_c2 = current_c2
+                best_func = current_func.copy()
+
+        return best_func
+
+    # Phase 3: Final C2 Computation and Return (enhanced)
+    def compute_c2(func):
+        # Compute autoconvolution g = f * f
+        # Using discrete convolution with proper handling of edge effects
+        g = np.convolve(func, func, mode='full')
+        g = g[len(g)//2:]  # Take positive part
+
+        # Truncate if necessary to match original length
+        if len(g) > len(func):
+            g = g[:len(func)]
+
+        # Compute norms using more accurate methods
+        norm_2_sq = np.sum(g**2) * (0.5 / len(func))  # Approximate integral
+        norm_1 = np.sum(np.abs(g)) / (len(g) + 1)
+        norm_inf = np.max(np.abs(g))
+
+        if norm_1 == 0 or norm_inf == 0:
+            return 0.0
+
+        return norm_2_sq / (norm_1 * norm_inf)
+
+    # Apply optimization if possible and beneficial
+    try:
+        # Optimize peak parameters
+        optimized_func = optimize_peaks(step_values, n_steps)
+
+        # Final check
+        final_func = np.maximum(optimized_func, 0)
+
+        # Add slight noise for robustness
+        noise_level = 0.01
+        noisy_func = final_func + np.random.normal(0, noise_level, len(final_func))
+        noisy_func = np.maximum(noisy_func, 0)
+
+        # Convert to step values
+        step_values = noisy_func.tolist()
+
+    except Exception as e:
+        # Fallback to base construction if optimization fails
+        pass
+
+    return step_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

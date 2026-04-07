@@ -1,0 +1,156 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import warnings
+import itertools
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        # Reshape to points
+        points = x.reshape(-1, 3)
+
+        # Compute pairwise distances
+        distances = squareform(pdist(points))
+
+        # Zero out diagonal
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (min/max)
+        if d_max == 0:
+            return -np.inf
+        return -d_min / d_max
+
+    def normalize_points(points):
+        """Normalize points to unit sphere"""
+        norms = np.linalg.norm(points, axis=1)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms[:, np.newaxis]
+
+    def generate_initial_config():
+        """Generate multiple good initial configurations and pick best"""
+        configs = []
+        best_ratio = -np.inf
+
+        # Try different initialization methods
+        np.random.seed(42)
+
+        # Method 1: Fibonacci sphere sampling (already implemented)
+        n = 14
+        points1 = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = np.arccos(y)  # angle from z-axis
+            phi = (i * 2 * np.pi) / golden_ratio  # azimuthal angle
+
+            x = radius * np.cos(phi)
+            z = radius * np.sin(phi)
+
+            points1.append([x, y, z])
+
+        points1 = np.array(points1)
+        points1 = normalize_points(points1)
+        configs.append(points1)
+
+        # Method 2: Random points with normalization
+        points2 = np.random.rand(n, 3) * 2 - 1  # Range [-1, 1]
+        points2 = normalize_points(points2)
+        configs.append(points2)
+
+        # Method 3: Slightly perturbed Fibonacci points
+        points3 = points1.copy()
+        points3 += np.random.normal(0, 0.01, points3.shape)
+        points3 = normalize_points(points3)
+        configs.append(points3)
+
+        # Evaluate all initial configs
+        best_config = None
+        for config in configs:
+            # Flatten for objective calculation
+            flat_config = config.flatten()
+            try:
+                ratio = -objective(flat_config)  # Negate since objective returns negative
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_config = config.copy()
+            except:
+                continue
+
+        return best_config if best_config is not None else points1
+
+    # Generate initial configuration
+    points = generate_initial_config()
+
+    # Flatten for optimization
+    x0 = points.flatten()
+
+    # Use multiple optimization attempts to avoid local minima
+    best_result = None
+    best_ratio = -np.inf
+
+    # Try multiple starting points with slight perturbations
+    for attempt in range(5):
+        # Create perturbed version of current solution
+        if attempt > 0:
+            np.random.seed(attempt * 42)
+            perturbation = np.random.normal(0, 0.05, x0.shape)
+            x0_perturbed = x0 + perturbation
+            # Keep within bounds
+            x0_perturbed = np.clip(x0_perturbed, -1, 1)
+        else:
+            x0_perturbed = x0.copy()
+
+        try:
+            # Use L-BFGS-B method which handles bounds well
+            # We don't use explicit constraints for sphere because we normalize after optimization
+            result = minimize(
+                objective,
+                x0_perturbed,
+                method='L-BFGS-B',
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10}
+            )
+
+            # Check if this result is better
+            if result.success:
+                optimized_points = result.x.reshape(-1, 3)
+                # Normalize to unit sphere
+                optimized_points = normalize_points(optimized_points)
+
+                # Calculate ratio for this solution
+                ratio = -objective(result.x)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_result = optimized_points
+
+        except Exception as e:
+            continue
+
+    # If we found a better solution, return it; otherwise return the original
+    if best_result is not None:
+        final_points = best_result
+    else:
+        final_points = points
+
+    # Final normalization and cleanup
+    final_points = normalize_points(final_points)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

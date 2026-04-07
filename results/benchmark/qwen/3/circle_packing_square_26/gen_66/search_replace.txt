@@ -1,0 +1,319 @@
+<NAME>
+enhance_grid_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current grid-based overlap detection can be optimized by using a more efficient spatial data structure. Instead of using a dictionary-based grid, I'll implement a KDTree-based approach which provides faster neighbor searches and better performance for the overlap checking. This should significantly improve the evaluation time while maintaining correctness.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+from collections import defaultdict
+import math
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import random
+from typing import Tuple, List
+import math
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_overlap_checking
+</NAME>
+
+<DESCRIPTION>
+Replace the grid-based overlap checking with a more efficient KDTree-based approach. The KDTree allows for faster nearest neighbor queries which will significantly speed up the overlap detection process. This should lead to better performance without sacrificing accuracy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _check_overlap_constraints(self, individual: np.ndarray) -> float:
+        """Check overlap constraints efficiently using spatial grid"""
+        penalty = 0.0
+
+        if len(individual) <= 1:
+            return penalty
+
+        # Create grid mapping using integer indexing
+        grid_cells = defaultdict(list)
+
+        # Precompute grid dimensions
+        grid_width = int(1.0 / self.grid_size) + 1
+        grid_height = int(1.0 / self.grid_size) + 1
+
+        # Place circles in grid cells
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            # Get grid cell indices
+            gx_min = max(0, int((x - r) / self.grid_size))
+            gx_max = min(grid_width, int((x + r) / self.grid_size) + 1)
+            gy_min = max(0, int((y - r) / self.grid_size))
+            gy_max = min(grid_height, int((y + r) / self.grid_size) + 1)
+
+            # Add circle to all relevant grid cells
+            for gx in range(gx_min, gx_max):
+                for gy in range(gy_min, gy_max):
+                    grid_cells[(gx, gy)].append(i)
+
+        # Check overlaps within and between adjacent cells
+        visited_pairs = set()
+
+        for cell_key, circle_indices in grid_cells.items():
+            if len(circle_indices) < 2:
+                continue
+
+            # Check all pairs in this cell
+            for i in range(len(circle_indices)):
+                idx1 = circle_indices[i]
+                x1, y1, r1 = individual[idx1]
+
+                # Only compare each pair once
+                for j in range(i + 1, len(circle_indices)):
+                    idx2 = circle_indices[j]
+
+                    if (idx1, idx2) in visited_pairs or (idx2, idx1) in visited_pairs:
+                        continue
+
+                    visited_pairs.add((idx1, idx2))
+                    x2, y2, r2 = individual[idx2]
+
+                    # Fast distance check using squared distance
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    distance_squared = dx*dx + dy*dy
+
+                    # Check if circles are close enough to potentially overlap
+                    if distance_squared < (r1 + r2)**2:
+                        actual_distance = math.sqrt(distance_squared)
+                        if actual_distance < r1 + r2:
+                            overlap = (r1 + r2) - actual_distance
+                            # Scale penalty based on overlap severity
+                            penalty += overlap * 1000 * (1 + overlap * 0.1)
+
+        return penalty
+=======
+    def _check_overlap_constraints(self, individual: np.ndarray) -> float:
+        """Check overlap constraints efficiently using KDTree"""
+        penalty = 0.0
+
+        if len(individual) <= 1:
+            return penalty
+
+        # Build KDTree for efficient neighbor queries
+        tree = cKDTree(individual[:, :2])
+
+        # Query for neighbors within distance of (r1 + r2) for each circle
+        # We iterate through each point and query neighbors
+        for i in range(len(individual)):
+            x1, y1, r1 = individual[i]
+
+            # Find all neighbors within distance 2*(r1 + max_radius) to optimize search
+            # In practice, we'll search for neighbors within r1 + max possible radius
+            # This ensures we catch all potential overlaps
+            max_radius = np.max(individual[:, 2])
+            neighbors = tree.query_ball_point([x1, y1], 2 * (r1 + max_radius), p=2)
+
+            # Check overlaps with neighbors
+            for j in neighbors:
+                if i >= j:  # Skip self-comparison and duplicate pairs
+                    continue
+
+                x2, y2, r2 = individual[j]
+
+                # Fast distance check using squared distance
+                dx = x2 - x1
+                dy = y2 - y1
+                distance_squared = dx*dx + dy*dy
+
+                # Check if circles are close enough to potentially overlap
+                if distance_squared < (r1 + r2)**2:
+                    actual_distance = math.sqrt(distance_squared)
+                    if actual_distance < r1 + r2:
+                        overlap = (r1 + r2) - actual_distance
+                        # Scale penalty based on overlap severity
+                        penalty += overlap * 1000 * (1 + overlap * 0.1)
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_mutation_strategy
+</NAME>
+
+<DESCRIPTION>
+Modify the mutation strategy to be more adaptive. Instead of using a fixed mutation rate, I'll implement an adaptive mutation rate that decreases over generations, allowing for broader exploration in early generations and finer tuning in later generations. This should help find better solutions more efficiently.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def run_evolution(self) -> np.ndarray:
+        """Run the evolutionary optimization process"""
+        # Initialize population
+        population = []
+        for _ in range(self.population_size):
+            individual = self.initialize_individual()
+            population.append(individual)
+
+        # Evolutionary loop
+        best_fitness_history = []
+        for generation in range(self.generations):
+            # Evaluate fitness
+            fitness_scores = []
+            for individual in population:
+                fitness = self.evaluate_fitness(individual)
+                fitness_scores.append(fitness)
+
+            # Track best fitness
+            best_fitness = max(fitness_scores)
+            best_fitness_history.append(best_fitness)
+
+            # Select top individuals (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite = [population[i] for i in sorted_indices[:self.elite_size]]
+
+            # Generate new population
+            new_population = elite.copy()
+
+            # Fill rest of population through crossover and mutation
+            while len(new_population) < self.population_size:
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                if random.random() < 0.8:  # Crossover probability
+                    child1, child2 = self.crossover(parent1, parent2)
+                else:
+                    child1, child2 = parent1.copy(), parent2.copy()
+
+                # Apply mutation
+                if random.random() < self.mutation_rate:
+                    self.mutate_individual(child1, self.mutation_rate)
+                if random.random() < self.mutation_rate:
+                    self.mutate_individual(child2, self.mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+            # Print progress
+            if generation % 50 == 0:
+                print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+        # Return best solution
+        final_fitness_scores = [self.evaluate_fitness(ind) for ind in population]
+        best_index = np.argmax(final_fitness_scores)
+        return population[best_index]
+=======
+    def run_evolution(self) -> np.ndarray:
+        """Run the evolutionary optimization process"""
+        # Initialize population
+        population = []
+        for _ in range(self.population_size):
+            individual = self.initialize_individual()
+            population.append(individual)
+
+        # Evolutionary loop
+        best_fitness_history = []
+        for generation in range(self.generations):
+            # Evaluate fitness
+            fitness_scores = []
+            for individual in population:
+                fitness = self.evaluate_fitness(individual)
+                fitness_scores.append(fitness)
+
+            # Track best fitness
+            best_fitness = max(fitness_scores)
+            best_fitness_history.append(best_fitness)
+
+            # Select top individuals (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite = [population[i] for i in sorted_indices[:self.elite_size]]
+
+            # Generate new population
+            new_population = elite.copy()
+
+            # Adaptive mutation rate: decrease over time
+            adaptive_mutation_rate = self.mutation_rate * (1 - generation / self.generations)
+            if adaptive_mutation_rate < 0.01:
+                adaptive_mutation_rate = 0.01
+
+            # Fill rest of population through crossover and mutation
+            while len(new_population) < self.population_size:
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                if random.random() < 0.8:  # Crossover probability
+                    child1, child2 = self.crossover(parent1, parent2)
+                else:
+                    child1, child2 = parent1.copy(), parent2.copy()
+
+                # Apply mutation with adaptive rate
+                if random.random() < adaptive_mutation_rate:
+                    self.mutate_individual(child1, adaptive_mutation_rate)
+                if random.random() < adaptive_mutation_rate:
+                    self.mutate_individual(child2, adaptive_mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+            # Print progress
+            if generation % 50 == 0:
+                print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+        # Return best solution
+        final_fitness_scores = [self.evaluate_fitness(ind) for ind in population]
+        best_index = np.argmax(final_fitness_scores)
+        return population[best_index]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+increase_population_size
+</NAME>
+
+<DESCRIPTION>
+Increase the population size to allow for better exploration of the search space. A larger population should lead to finding better solutions by maintaining more diverse candidates and reducing the chance of getting stuck in local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class CirclePackingOptimizer:
+    def __init__(self, n_circles: int = 26):
+        self.n_circles = n_circles
+        self.population_size = 100
+        self.generations = 500
+        self.mutation_rate = 0.1
+        self.elite_size = 10
+        self.grid_size = 0.1
+=======
+class CirclePackingOptimizer:
+    def __init__(self, n_circles: int = 26):
+        self.n_circles = n_circles
+        self.population_size = 200
+        self.generations = 500
+        self.mutation_rate = 0.1
+        self.elite_size = 20
+        self.grid_size = 0.1
+>>>>>>> REPLACE
+</DIFF>

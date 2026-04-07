@@ -1,0 +1,358 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon
+import time
+from numba import jit
+import warnings
+warnings.filterwarnings('ignore')
+
+# Constants
+UNIT_HEX_RADIUS = 1.0  # radius of unit hexagon circumcircle
+UNIT_HEX_SIDE = 1.0    # side length of unit hexagon
+PI = np.pi
+
+class HexagonPackingOptimizer:
+    """Structured optimizer for 11-unit hexagon packing problem."""
+    
+    def __init__(self):
+        self.best_solution = None
+        self.best_score = 0.0
+        self.eval_time = 0.0
+        
+    @staticmethod
+    @jit(nopython=True)
+    def hexagon_vertices_jit(center_x, center_y, angle_rad, side_length):
+        """Compute hexagon vertices efficiently using numba"""
+        vertices = np.zeros((6, 2))
+        for i in range(6):
+            angle = angle_rad + i * PI / 3
+            vertices[i, 0] = center_x + side_length * np.cos(angle)
+            vertices[i, 1] = center_y + side_length * np.sin(angle)
+        return vertices
+    
+    @staticmethod
+    @jit(nopython=True)
+    def compute_outer_hexagon_radius(inner_hex_data, outer_hex_center=(0,0)):
+        """Estimate minimum outer hexagon radius needed to contain all inner hexagons"""
+        max_distance = 0
+        for i in range(len(inner_hex_data)):
+            cx, cy, angle = inner_hex_data[i]
+            # Get all vertices of this hexagon
+            vertices = HexagonPackingOptimizer.hexagon_vertices_jit(cx, cy, np.radians(angle), UNIT_HEX_SIDE)
+            # Find maximum distance from center
+            for vx, vy in vertices:
+                dist = np.sqrt((vx - outer_hex_center[0])**2 + (vy - outer_hex_center[1])**2)
+                max_distance = max(max_distance, dist)
+        return max_distance * 1.05
+    
+    @staticmethod
+    def hexagon_vertices(center_x, center_y, angle_rad, side_length):
+        """Compute hexagon vertices"""
+        return HexagonPackingOptimizer.hexagon_vertices_jit(center_x, center_y, angle_rad, side_length)
+    
+    @staticmethod
+    def check_overlap_hexagons(h1_center_x, h1_center_y, h1_angle, h1_side,
+                              h2_center_x, h2_center_y, h2_angle, h2_side):
+        """Check if two hexagons overlap using vertices inclusion test"""
+        vertices1 = HexagonPackingOptimizer.hexagon_vertices(h1_center_x, h1_center_y, np.radians(h1_angle), h1_side)
+        vertices2 = HexagonPackingOptimizer.hexagon_vertices(h2_center_x, h2_center_y, np.radians(h2_angle), h2_side)
+        
+        # Create shapely polygons
+        poly1 = Polygon(vertices1)
+        poly2 = Polygon(vertices2)
+        
+        # Check if they intersect
+        return poly1.intersects(poly2)
+    
+    @staticmethod
+    def check_all_overlaps(inner_hex_data):
+        """Check all pairs of hexagons for overlaps"""
+        n = len(inner_hex_data)
+        # Early return if too few hexagons
+        if n < 2:
+            return False
+        
+        # Check only unique pairs
+        for i in range(n):
+            for j in range(i+1, n):
+                cx1, cy1, angle1 = inner_hex_data[i]
+                cx2, cy2, angle2 = inner_hex_data[j]
+                
+                if HexagonPackingOptimizer.check_overlap_hexagons(cx1, cy1, angle1, UNIT_HEX_SIDE,
+                                                                cx2, cy2, angle2, UNIT_HEX_SIDE):
+                    return True
+        return False
+    
+    @staticmethod
+    def check_containment(inner_hex_data, outer_center=(0,0), outer_side=10):
+        """Check if all inner hexagons are contained in outer hexagon"""
+        outer_vertices = HexagonPackingOptimizer.hexagon_vertices(outer_center[0], outer_center[1], 0, outer_side)
+        outer_polygon = Polygon(outer_vertices)
+        
+        for i in range(len(inner_hex_data)):
+            cx, cy, angle = inner_hex_data[i]
+            vertices = HexagonPackingOptimizer.hexagon_vertices(cx, cy, np.radians(angle), UNIT_HEX_SIDE)
+            
+            # Create hexagon polygon
+            inner_polygon = Polygon(vertices)
+            
+            # Check if it's contained
+            if not outer_polygon.contains(inner_polygon):
+                return False
+        
+        return True
+    
+    @classmethod
+    def evaluate_layout(cls, inner_hex_data, outer_side_estimate=None):
+        """Evaluate the quality of a given hexagon layout"""
+        # Check overlaps first (early rejection)
+        if cls.check_all_overlaps(inner_hex_data):
+            return 1e10  # Large penalty for overlaps
+        
+        # Estimate outer hexagon size
+        if outer_side_estimate is None:
+            estimated_outer_radius = cls.compute_outer_hexagon_radius(inner_hex_data)
+            outer_side = estimated_outer_radius * 2  # rough estimate
+        else:
+            outer_side = outer_side_estimate
+        
+        # Check containment
+        if not cls.check_containment(inner_hex_data, (0,0), outer_side):
+            return 1e10  # Large penalty for containment violations
+        
+        # Return inverse of outer hexagon side length (we want to maximize 1/outer_side)
+        return 1.0 / outer_side
+    
+    @staticmethod
+    def generate_initial_config():
+        """
+        Generate initial configuration using structured approach.
+        Creates a configuration based on mathematical insights for 11 hexagons.
+        """
+        # Generate a configuration with mathematical structure based on hexagonal packing
+        # This is designed to be a good starting point with minimal overlap issues
+        
+        # Core structure: central hexagon surrounded by a hexagonal ring
+        # Plus strategic positions to fill gaps effectively
+        
+        config = [
+            [0.0, 0.0, 0.0],           # Center hexagon
+            [-2.0, 0.0, 0.0],          # Left hexagon  
+            [2.0, 0.0, 0.0],           # Right hexagon
+            [0.0, 3.464, 0.0],         # Top hexagon (sqrt(3)*2)
+            [0.0, -3.464, 0.0],        # Bottom hexagon
+            [-3.464, 1.732, 0.0],      # Top-left hexagon
+            [3.464, 1.732, 0.0],       # Top-right hexagon
+            [-3.464, -1.732, 0.0],     # Bottom-left hexagon
+            [3.464, -1.732, 0.0],      # Bottom-right hexagon
+            [-1.732, 3.464, 0.0],      # Far top-left
+            [1.732, 3.464, 0.0],       # Far top-right
+        ]
+        
+        # Convert to numpy array and add small random perturbation
+        config = np.array(config)
+        
+        # Add small jitter to break symmetry while maintaining structure
+        np.random.seed(42)  # For reproducibility
+        noise_scale = 0.02  # Reduced noise for better convergence properties
+        config[:, 0] += np.random.normal(0, noise_scale, config.shape[0])
+        config[:, 1] += np.random.normal(0, noise_scale, config.shape[0])
+        
+        return config
+    
+    @staticmethod
+    def adaptive_optimization_step(current_config, iteration, max_iter):
+        """Perform one step of adaptive optimization with dynamic parameters"""
+        # Adaptive parameters based on iteration progress
+        progress = iteration / max_iter
+        # Decreasing mutation rate to focus on refinement in later stages
+        adaptive_mutation_rate = max(0.05, 0.3 * (1 - progress * 0.8))
+        
+        perturbed = current_config.copy()
+        
+        # Determine number of hexagons to perturb based on progress
+        n_to_perturb = max(1, int(len(perturbed) * (0.2 + 0.3 * (1 - progress))))
+        indices_to_perturb = np.random.choice(len(perturbed), n_to_perturb, replace=False)
+        
+        for idx in indices_to_perturb:
+            # Apply adaptive perturbations
+            perturbed[idx][0] += np.random.normal(0, 0.1 * adaptive_mutation_rate)
+            perturbed[idx][1] += np.random.normal(0, 0.1 * adaptive_mutation_rate)
+            perturbed[idx][2] += np.random.normal(0, 15 * adaptive_mutation_rate) % 360
+        
+        return perturbed
+    
+    @staticmethod
+    def multi_stage_optimization():
+        """Multi-stage optimization approach with strategic phases"""
+        # Stage 1: Generate good initial configuration
+        current_config = HexagonPackingOptimizer.generate_initial_config()
+        
+        best_eval = HexagonPackingOptimizer.evaluate_layout(current_config)
+        best_config = current_config.copy()
+        
+        # Stage 2: Evolutionary search phase
+        max_iterations = 60  # More iterations for better convergence
+        stagnation_count = 0
+        max_stagnation = 12
+        
+        for epoch in range(max_iterations):
+            # Create offspring through adaptive mutation
+            offspring = []
+            offspring_size = max(10, 20 - epoch // 5)  # Decreasing population size
+            
+            for _ in range(offspring_size):
+                mutated = HexagonPackingOptimizer.adaptive_optimization_step(
+                    current_config, epoch, max_iterations)
+                offspring.append(mutated)
+            
+            # Evaluate all offspring
+            evaluations = []
+            for candidate in offspring:
+                eval_val = HexagonPackingOptimizer.evaluate_layout(candidate)
+                evaluations.append(eval_val)
+            
+            # Select best offspring
+            min_idx = np.argmin(evaluations)
+            if evaluations[min_idx] < best_eval:
+                best_eval = evaluations[min_idx]
+                best_config = offspring[min_idx].copy()
+                stagnation_count = 0  # Reset stagnation counter
+            else:
+                stagnation_count += 1
+            
+            # Early stopping if no improvement for too long
+            if stagnation_count > max_stagnation:
+                break
+            
+            # Update current config
+            current_config = offspring[min_idx]
+        
+        return best_config, best_eval
+    
+    @staticmethod
+    def local_refinement(initial_config):
+        """Apply local optimization to refine the solution"""
+        def objective_func(params):
+            # Reshape parameters back into hexagon data
+            hex_data = params.reshape(-1, 3)
+            return HexagonPackingOptimizer.evaluate_layout(hex_data)
+        
+        # Flatten current configuration for optimization
+        flat_params = initial_config.flatten()
+        
+        # Local optimization using L-BFGS-B with enhanced convergence criteria
+        try:
+            result = minimize(objective_func, flat_params, method='L-BFGS-B', 
+                            options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-8})
+            
+            # Reshape back to 2D array
+            refined_config = result.x.reshape(-1, 3)
+            return refined_config
+        except:
+            # If local optimization fails, return original
+            return initial_config
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Create optimizer instance
+        optimizer = HexagonPackingOptimizer()
+        
+        # Multi-stage optimization with adaptive parameters
+        initial_config, initial_eval = optimizer.multi_stage_optimization()
+        
+        # Local refinement with enhanced settings
+        refined_config = optimizer.local_refinement(initial_config)
+        
+        # Final evaluation
+        final_eval = optimizer.evaluate_layout(refined_config)
+        
+        # Ensure we have a valid solution
+        if final_eval >= 1e9:
+            # Fall back to original method if optimization fails
+            print("Optimization failed, falling back to basic configuration")
+            inner_hex_data = np.array([
+                [0, 0, 0],          # center
+                [-2.5, 0, 0],       # left
+                [2.5, 0, 0],        # right
+                [-1.25, 2.17, 0],   # top-left
+                [1.25, 2.17, 0],    # top-right
+                [-1.25, -2.17, 0],  # bottom-left
+                [1.25, -2.17, 0],   # bottom-right
+                [-3.75, 2.17, 0],   # far top-left
+                [3.75, 2.17, 0],    # far top-right
+                [-3.75, -2.17, 0],  # far bottom-left
+                [3.75, -2.17, 0],   # far bottom-right
+            ])
+            outer_hex_side_length = 8.0
+        else:
+            # Extract the best configuration found
+            inner_hex_data = refined_config
+            
+            # Compute actual outer hexagon size
+            estimated_outer_radius = HexagonPackingOptimizer.compute_outer_hexagon_radius(inner_hex_data)
+            outer_hex_side_length = estimated_outer_radius * 2.0
+        
+        # Set outer hexagon at center with zero rotation
+        outer_hex_data = np.array([0, 0, 0])
+        
+        # Validate solution
+        if not HexagonPackingOptimizer.check_all_overlaps(inner_hex_data) and \
+           HexagonPackingOptimizer.check_containment(inner_hex_data, (0,0), outer_hex_side_length):
+            pass
+        else:
+            # If validation fails, fall back to a known good configuration
+            inner_hex_data = np.array([
+                [0, 0, 0],
+                [-2.5, 0, 0],
+                [2.5, 0, 0],
+                [-1.25, 2.17, 0],
+                [1.25, 2.17, 0],
+                [-1.25, -2.17, 0],
+                [1.25, -2.17, 0],
+                [-3.75, 2.17, 0],
+                [3.75, 2.17, 0],
+                [-3.75, -2.17, 0],
+                [3.75, -2.17, 0],
+            ])
+            outer_hex_side_length = 8.0
+            outer_hex_data = np.array([0, 0, 0])
+            
+    except Exception as e:
+        print(f"Exception in optimization: {e}")
+        # Fallback to baseline approach
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0, 0, 0])
+    
+    elapsed = time.time() - start_time
+    print(f"Eval time: {elapsed:.4f}s")
+    
+    # Calculate benchmark ratio
+    benchmark_ratio = (1.0 / outer_hex_side_length) / 0.2544
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

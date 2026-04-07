@@ -1,0 +1,241 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    
+    # Initial strategic placement using a combination of grid and radial distribution
+    def initialize_strategic_placement():
+        circles = np.zeros((n, 3))
+        
+        # Place some circles near corners to utilize boundary constraints effectively
+        corner_positions = [(0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9)]
+        for i, (x, y) in enumerate(corner_positions):
+            if i < n:
+                circles[i] = [x, y, 0.05]
+        
+        # Fill remaining positions with radial distribution
+        remaining = n - len(corner_positions)
+        center = np.array([0.5, 0.5])
+        
+        # Distribute remaining circles around the center in radial pattern
+        angles = np.linspace(0, 2*np.pi, remaining+1)[:-1]
+        distances = np.linspace(0.15, 0.35, remaining)
+        
+        for i in range(remaining):
+            angle = angles[i]
+            dist = distances[i]
+            x = center[0] + dist * np.cos(angle)
+            y = center[1] + dist * np.sin(angle)
+            circles[len(corner_positions)+i] = [x, y, 0.03]
+            
+        # Ensure all circles are within bounds and set initial radii
+        for i in range(n):
+            x, y, r = circles[i]
+            # Enforce boundary constraints
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+            circles[i] = [x, y, r]
+            
+        return circles
+    
+    # Initialize
+    circles = initialize_strategic_placement()
+    
+    # Helper function to check if circles violate constraints
+    def validate_circles(circles):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Check boundary violations
+        if np.any(radii > positions[:, 0]) or \
+           np.any(radii > 1 - positions[:, 0]) or \
+           np.any(radii > positions[:, 1]) or \
+           np.any(radii > 1 - positions[:, 1]):
+            return False
+            
+        # Check overlap violations
+        if circles.shape[0] < 2:
+            return True
+            
+        dist_matrix = cdist(positions, positions)
+        overlap_matrix = dist_matrix < (radii.reshape(-1, 1) + radii.reshape(1, -1))
+        np.fill_diagonal(overlap_matrix, False)
+        
+        return not np.any(overlap_matrix)
+    
+    # Helper function to calculate total radius sum
+    def calculate_sum_radii(circles):
+        return np.sum(circles[:, 2])
+    
+    # Helper function to expand radii while respecting constraints
+    def expand_radii(circles, max_iter=50):
+        # Save initial state
+        best_circles = circles.copy()
+        best_sum = calculate_sum_radii(circles)
+        
+        for iteration in range(max_iter):
+            # Copy current state
+            current_circles = best_circles.copy()
+            changed = False
+            
+            # Try to increase each circle's radius
+            for i in range(n):
+                # Get current circle info
+                x, y, r = current_circles[i]
+                
+                # Compute maximum possible radius
+                max_radius = min(x, 1-x, y, 1-y)
+                
+                # Find closest neighbor
+                distances = np.sqrt(np.sum((current_circles[:, :2] - [x, y])**2, axis=1))
+                distances[i] = np.inf  # Ignore self-distance
+                
+                if len(distances) > 0:
+                    nearest_dist = np.min(distances)
+                    max_radius = min(max_radius, nearest_dist - 0.001)  # Small buffer
+                    
+                # Increase radius as much as possible while maintaining feasibility
+                if max_radius > r + 0.0001:
+                    # Try to increase radius up to max
+                    test_r = min(max_radius, r + 0.01)
+                    temp_circles = current_circles.copy()
+                    temp_circles[i, 2] = test_r
+                    
+                    if validate_circles(temp_circles):
+                        current_circles[i, 2] = test_r
+                        changed = True
+            
+            # Update best if improvement
+            current_sum = calculate_sum_radii(current_circles)
+            if current_sum > best_sum:
+                best_circles = current_circles
+                best_sum = current_sum
+            else:
+                # If no improvement, reduce step size gradually
+                break
+                
+        return best_circles
+    
+    # Helper function to perform Voronoi-based optimization
+    def voronoi_optimize(circles, max_iter=100):
+        # Create a copy to work with
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_sum = calculate_sum_radii(current_circles)
+        
+        for iteration in range(max_iter):
+            # Compute Voronoi diagram
+            positions = current_circles[:, :2]
+            
+            try:
+                vor = Voronoi(positions)
+            except:
+                # Fall back to simple adjustment if Voronoi fails
+                break
+                
+            # For each circle, adjust position to improve Voronoi cell properties
+            new_positions = positions.copy()
+            moved = False
+            
+            # Simple centroid-based approach for Voronoi optimization
+            for i in range(len(positions)):
+                # Find vertices of Voronoi cell for this site
+                cell_vertices = []
+                
+                # Get ridges for this point
+                ridge_indices = [j for j, ridge in enumerate(vor.ridge_vertices) if i in ridge and -1 not in ridge]
+                
+                if len(ridge_indices) > 0:
+                    # Compute barycenter of cell vertices as a good target
+                    vertex_indices = []
+                    for ridge in [vor.ridge_vertices[j] for j in ridge_indices]:
+                        vertex_indices.extend([v for v in ridge if v != -1])
+                    
+                    if len(vertex_indices) > 0:
+                        cell_vertices = [vor.vertices[v] for v in vertex_indices]
+                        
+                        if len(cell_vertices) > 0:
+                            # Move to centroid of the Voronoi cell
+                            centroid = np.mean(cell_vertices, axis=0)
+                            
+                            # Apply boundary constraints
+                            # Don't move too close to edges
+                            new_x = np.clip(centroid[0], current_circles[i, 2], 1 - current_circles[i, 2])
+                            new_y = np.clip(centroid[1], current_circles[i, 2], 1 - current_circles[i, 2])
+                            
+                            if abs(new_x - positions[i, 0]) > 0.0001 or abs(new_y - positions[i, 1]) > 0.0001:
+                                new_positions[i, 0] = new_x
+                                new_positions[i, 1] = new_y
+                                moved = True
+            
+            # If any movement occurred, create new circles array
+            if moved:
+                temp_circles = current_circles.copy()
+                temp_circles[:, :2] = new_positions
+                
+                # Check if new configuration is valid
+                if validate_circles(temp_circles):
+                    current_circles = temp_circles
+                    current_sum = calculate_sum_radii(current_circles)
+                    if current_sum > best_sum:
+                        best_circles = current_circles.copy()
+                        best_sum = current_sum
+                        
+            # Break if no more improvement
+            if not moved:
+                break
+                
+        return best_circles
+    
+    # Main optimization loop
+    current_circles = circles.copy()
+    best_circles = current_circles.copy()
+    best_sum = calculate_sum_radii(best_circles)
+    
+    # Try several iterations of different optimization strategies
+    for iteration in range(10):
+        # Strategy 1: Expand radii
+        expanded = expand_radii(current_circles)
+        expanded_sum = calculate_sum_radii(expanded)
+        
+        # Strategy 2: Voronoi optimization
+        voronoi_optimized = voronoi_optimize(current_circles)
+        voronoi_sum = calculate_sum_radii(voronoi_optimized)
+        
+        # Choose better strategy
+        if expanded_sum > voronoi_sum:
+            current_circles = expanded
+        else:
+            current_circles = voronoi_optimized
+            
+        # Update best if improved
+        current_sum = calculate_sum_radii(current_circles)
+        if current_sum > best_sum:
+            best_circles = current_circles.copy()
+            best_sum = current_sum
+            
+        # Early stopping if improvement is minimal
+        if iteration > 0 and abs(best_sum - calculate_sum_radii(best_circles)) < 0.001:
+            break
+            
+    # Final refinement using pure radius expansion
+    final_circles = expand_radii(best_circles, max_iter=100)
+    final_sum = calculate_sum_radii(final_circles)
+    
+    # Return the best configuration found
+    if final_sum > best_sum:
+        return final_circles
+    else:
+        return best_circles
+
+# EVOLVE-BLOCK-END

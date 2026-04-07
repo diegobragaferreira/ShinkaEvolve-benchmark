@@ -1,0 +1,317 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, Delaunay
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+import random
+from copy import deepcopy
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    Uses Voronoi-based geometric optimization with constraint satisfaction.
+    """
+    # Rectangle dimensions - perimeter = 4, so width + height = 2
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    n_circles = 21
+
+    # Initial setup with corner points and random interior points
+    def generate_initial_voronoi_points():
+        # Start with rectangle corners and some random points
+        points = []
+
+        # Add rectangle corners
+        points.extend([[0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height]])
+
+        # Add some random interior points
+        for _ in range(n_circles - 4):
+            points.append([
+                np.random.uniform(0.1, rect_width - 0.1),
+                np.random.uniform(0.1, rect_height - 0.1)
+            ])
+
+        return np.array(points)
+
+    # Calculate circle radii from Voronoi diagram vertices
+    def calculate_circle_radii(vor, points):
+        circles = []
+        n_points = len(points)
+
+        # For each point, find its Voronoi cell
+        for i in range(n_points):
+            # Get Voronoi vertices for this cell
+            region = vor.regions[vor.point_region[i]]
+
+            # Skip infinite regions
+            if -1 in region:
+                continue
+
+            # Get the vertices of this region
+            vertices = [vor.vertices[j] for j in region if j >= 0]
+
+            if len(vertices) < 3:
+                continue
+
+            # Calculate radius as minimum distance to boundary
+            min_distance_to_boundary = float('inf')
+
+            # Check distance to rectangle boundaries
+            for v in vertices:
+                # Distance to left boundary
+                dist_left = v[0]
+                # Distance to right boundary
+                dist_right = rect_width - v[0]
+                # Distance to bottom boundary
+                dist_bottom = v[1]
+                # Distance to top boundary
+                dist_top = rect_height - v[1]
+
+                min_boundary_distance = min(dist_left, dist_right, dist_bottom, dist_top)
+                min_distance_to_boundary = min(min_distance_to_boundary, min_boundary_distance)
+
+            # Also check distance to other points
+            for j in range(n_points):
+                if i != j:
+                    # Distance to other points (we want largest possible circle)
+                    dist_to_point = np.sqrt((points[i][0] - points[j][0])**2 +
+                                          (points[i][1] - points[j][1])**2)
+                    min_distance_to_boundary = min(min_distance_to_boundary, dist_to_point)
+
+            # Safe minimum radius calculation
+            if min_distance_to_boundary > 0.001:
+                radius = min_distance_to_boundary * 0.45  # Safety factor
+                # Ensure within reasonable bounds
+                radius = max(0.01, min(radius, 0.3))
+                circles.append([points[i][0], points[i][1], radius])
+            else:
+                # Fallback to small radius if calculation failed
+                circles.append([points[i][0], points[i][1], 0.01])
+
+        # If we got fewer than n_circles, pad with copies of the last one
+        while len(circles) < n_circles:
+            if circles:
+                circles.append(circles[-1][:])  # Copy last circle
+            else:
+                circles.append([rect_width/2, rect_height/2, 0.05])
+
+        return np.array(circles[:n_circles])
+
+    # Validate that circles don't overlap and are within bounds
+    def validate_solution(circles):
+        # Check boundary constraints
+        for circle in circles:
+            x, y, r = circle
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+
+        # Check pairwise collisions
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+
+                dx = x1 - x2
+                dy = y1 - y2
+                dist = np.sqrt(dx*dx + dy*dy)
+
+                if dist < r1 + r2:
+                    return False
+
+        return True
+
+    # Create constraint satisfaction function for optimization
+    def create_constraint_function(circles):
+        def constraint(x):
+            # Reconstruct circles from flattened input
+            new_circles = circles.copy()
+            for i in range(len(circles)):
+                new_circles[i, 0] = x[2*i]
+                new_circles[i, 1] = x[2*i+1]
+
+            # Check if all circles are valid
+            if not validate_solution(new_circles):
+                return 1.0  # Violation
+            return 0.0   # Valid
+
+        return constraint
+
+    # Objective function to maximize sum of radii
+    def objective_function(points_flattened):
+        # Reconstruct points from flattened input
+        points = points_flattened.reshape(-1, 2)
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+        except Exception:
+            # Fallback to simple calculation if Voronoi fails
+            return -np.sum([0.01]*n_circles)  # Minimal value
+
+        # Calculate radii using the Voronoi structure
+        circles = calculate_circle_radii(vor, points)
+
+        # Return negative sum (since we want to maximize)
+        return -np.sum(circles[:, 2])
+
+    # Constraint function for optimization
+    def constraint_function(points_flattened):
+        points = points_flattened.reshape(-1, 2)
+        # Check if points are within bounds
+        for point in points:
+            if point[0] < 0.01 or point[0] > rect_width - 0.01 or \
+               point[1] < 0.01 or point[1] > rect_height - 0.01:
+                return 1.0  # Invalid
+        return 0.0  # Valid
+
+    # Main optimization loop
+    best_sum = 0.0
+    best_circles = None
+
+    # Try multiple random initializations to find good starting points
+    for _ in range(10):
+        # Generate initial Voronoi points
+        initial_points = generate_initial_voronoi_points()
+
+        # Flatten the points for optimization
+        initial_flat = initial_points.flatten()
+
+        # Bounds for optimization
+        bounds = []
+        for _ in range(len(initial_flat)):
+            bounds.append((0.05, rect_width - 0.05))
+
+        # Create custom optimizer that works with Voronoi structure
+        try:
+            # Run optimization with bounds
+            result = minimize(
+                objective_function,
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 200, 'ftol': 1e-6, 'gtol': 1e-6}
+            )
+
+            if result.success:
+                # Reconstruct points
+                optimized_points = result.x.reshape(-1, 2)
+
+                # Create Voronoi diagram and calculate circles
+                try:
+                    vor = Voronoi(optimized_points)
+                    circles = calculate_circle_radii(vor, optimized_points)
+
+                    # Validate solution
+                    if validate_solution(circles):
+                        current_sum = np.sum(circles[:, 2])
+                        if current_sum > best_sum:
+                            best_sum = current_sum
+                            best_circles = circles.copy()
+
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+    # If we didn't find anything better, use a direct approach
+    if best_circles is None:
+        # Create initial grid-based solution
+        sqrt_n = np.sqrt(n_circles)
+        rows = int(np.ceil(sqrt_n))
+        cols = int(np.ceil(n_circles / rows))
+
+        cell_width = rect_width / cols
+        cell_height = rect_height / rows
+
+        max_radius = min(cell_width, cell_height) * 0.4
+
+        circles = []
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                x = (j + 0.5) * cell_width
+                y = (i + 0.5) * cell_height
+                circles.append([x, y, max_radius])
+                idx += 1
+
+        best_circles = np.array(circles[:n_circles])
+
+    # Final refinement using local optimization
+    def refine_solution(circles):
+        # Create an improved version by adjusting positions to increase radii
+        refined = circles.copy()
+        max_attempts = 20
+
+        for attempt in range(max_attempts):
+            improved = False
+            for i in range(len(refined)):
+                # Try to increase radius while maintaining constraints
+                current_radius = refined[i, 2]
+                best_radius = current_radius
+
+                # Try various radius values
+                test_radii = np.linspace(current_radius * 0.9, current_radius * 1.2, 10)
+
+                for test_radius in test_radii:
+                    # Create temporary circles
+                    temp_circles = refined.copy()
+                    temp_circles[i, 2] = test_radius
+
+                    # Check if valid
+                    if validate_solution(temp_circles):
+                        if test_radius > best_radius:
+                            best_radius = test_radius
+                            improved = True
+
+                refined[i, 2] = best_radius
+
+            if not improved:
+                break
+
+        return refined
+
+    # Final refinement
+    final_circles = refine_solution(best_circles)
+
+    # Final validation
+    if not validate_solution(final_circles):
+        # If still invalid, fall back to grid solution
+        sqrt_n = np.sqrt(n_circles)
+        rows = int(np.ceil(sqrt_n))
+        cols = int(np.ceil(n_circles / rows))
+
+        cell_width = rect_width / cols
+        cell_height = rect_height / rows
+
+        max_radius = min(cell_width, cell_height) * 0.4
+
+        circles = []
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                x = (j + 0.5) * cell_width
+                y = (i + 0.5) * cell_height
+                circles.append([x, y, max_radius])
+                idx += 1
+
+        final_circles = np.array(circles[:n_circles])
+
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

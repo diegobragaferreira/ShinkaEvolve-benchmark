@@ -1,0 +1,184 @@
+<NAME>
+enhance_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a direct O(n²) convolution computation which becomes inefficient for large arrays. I'll enhance the convolution computation by implementing Fast Fourier Transform (FFT) based convolution which has O(n log n) complexity. This will significantly speed up the computation and allow us to work with larger step functions, potentially leading to better C2 values.
+
+The key insight is that for step functions on equal intervals, the autoconvolution can be computed much more efficiently using FFT techniques. Since we're working with discrete step functions, we can leverage the convolution theorem to compute the convolution more efficiently.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy import signal
+import time
+import numba
+from numba import jit
+from typing import List, Tuple
+import random
+from functools import partial
+
+# Constants
+DOMAIN = [-0.25, 0.25]
+N_MIN, N_MAX = 100, 2000
+MAX_TIME_SECONDS = 85
+
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """Fast numba-based autoconvolution computation"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_convolution_norms_fast(g_vals):
+    """Fast computation of convolution norms"""
+    n = len(g_vals)
+    l2_sq = 0.0
+    l1 = 0.0
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+def compute_c2_convex(f_vals):
+    """
+    Compute C2 value using convolution approach optimized for convex optimization
+    Returns negative C2 for minimization purposes
+    """
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_fast(f_vals)
+
+        # Compute norms
+        l2_sq, l1, l_inf = compute_convolution_norms_fast(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-12 or l_inf <= 1e-12:
+            return 1e10  # Large penalty for invalid results
+
+        # Compute C2
+        c2 = l2_sq / (l1 * l_inf)
+        return -c2  # Negative for minimization
+    except Exception:
+        return 1e10
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy import signal
+import time
+import numba
+from numba import jit
+from typing import List, Tuple
+import random
+from functools import partial
+import warnings
+
+# Constants
+DOMAIN = [-0.25, 0.25]
+N_MIN, N_MAX = 100, 2000
+MAX_TIME_SECONDS = 85
+
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """Fast numba-based autoconvolution computation"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_convolution_norms_fast(g_vals):
+    """Fast computation of convolution norms"""
+    n = len(g_vals)
+    l2_sq = 0.0
+    l1 = 0.0
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+def compute_autoconvolution_fft(f_vals):
+    """
+    Compute autoconvolution using FFT for better performance on large arrays.
+    This is more efficient for large step functions.
+    """
+    n = len(f_vals)
+
+    # For autoconvolution, we use the fact that f*f = FFT^{-1}(FFT(f)^2)
+    # Pad to next power of 2 for better FFT performance
+    n_padded = 1
+    while n_padded < 2*n - 1:
+        n_padded *= 2
+
+    # Pad the input array with zeros
+    f_padded = np.pad(f_vals, (0, n_padded - n), mode='constant')
+
+    # Compute FFT
+    f_fft = np.fft.fft(f_padded)
+
+    # Square the FFT (autoconvolution in frequency domain)
+    f_fft_sq = f_fft * np.conj(f_fft)
+
+    # Inverse FFT to get back to time domain
+    g_padded = np.fft.ifft(f_fft_sq).real
+
+    # Return only the part corresponding to the actual convolution
+    return g_padded[:2*n - 1]
+
+def compute_c2_convex(f_vals):
+    """
+    Compute C2 value using convolution approach optimized for convex optimization
+    Returns negative C2 for minimization purposes
+    """
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Compute autoconvolution - use FFT for efficiency on larger arrays
+        if len(f_vals) > 1000:
+            g_vals = compute_autoconvolution_fft(f_vals)
+        else:
+            g_vals = compute_autoconvolution_fast(f_vals)
+
+        # Compute norms
+        l2_sq, l1, l_inf = compute_convolution_norms_fast(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-12 or l_inf <= 1e-12:
+            return 1e10  # Large penalty for invalid results
+
+        # Compute C2
+        c2 = l2_sq / (l1 * l_inf)
+        return -c2  # Negative for minimization
+    except Exception:
+        return 1e10
+>>>>>>> REPLACE
+
+</DIFF>

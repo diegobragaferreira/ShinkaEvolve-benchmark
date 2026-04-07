@@ -1,0 +1,64 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def objective(x):
+        # Reshape x into 14 points in 3D
+        points = x.reshape(-1, 3)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio since we want to maximize
+        # We add a small epsilon to avoid division by zero
+        if d_max < 1e-10:
+            return -1e10
+        return -d_min / d_max
+
+    # Initialize with a better starting configuration
+    np.random.seed(42)
+    
+    # Start with a structured initial configuration
+    # Using a simple grid-based approach with some randomization
+    points = np.random.rand(14, 3) * 0.8 + 0.1  # Scale to [0.1, 0.9] range
+    
+    # Flatten for optimization
+    x0 = points.flatten()
+    
+    # Set up bounds for optimization (0 to 1 for all coordinates)
+    bounds = [(0.0, 1.0)] * 14 * 3
+
+    # Use differential evolution for global optimization
+    # This is more robust for this type of problem
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=500,  # Reduced iterations for faster execution
+        popsize=10,   # Smaller population for efficiency
+        tol=1e-6,
+        mutation=(0.5, 1.0),
+        recombination=0.7,
+        disp=False
+    )
+
+    # Return the optimized points
+    return result.x.reshape(-1, 3)
+
+
+# EVOLVE-BLOCK-END

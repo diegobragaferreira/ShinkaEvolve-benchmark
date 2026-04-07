@@ -1,0 +1,415 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, cdist
+from scipy.spatial import SphericalVoronoi
+import warnings
+warnings.filterwarnings('ignore')
+from sklearn.cluster import KMeans
+
+class SphereVoronoiOptimizer:
+    def __init__(self, n_points=14, dimensions=3, seed=42):
+        self.n_points = n_points
+        self.dimensions = dimensions
+        self.seed = seed
+        np.random.seed(seed)
+    
+    def _generate_sphere_fibonacci_points(self):
+        """Generate highly uniform points on unit sphere using enhanced Fibonacci method"""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        
+        # Use a more sophisticated distribution that improves uniformity
+        for i in range(self.n_points):
+            # Improved latitude distribution using inverse cumulative distribution
+            # This creates better spacing than simple linear distribution
+            y = 1 - (i / (self.n_points - 1)) * 2  # y from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            # Use modified golden angle with small perturbation for better spread
+            phi = (i * 2 * np.pi) / golden_ratio + np.sin(i * 0.1) * 0.1
+            
+            x = radius * np.cos(phi)
+            z = radius * np.sin(phi)
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+    
+    def _project_to_cube(self, points):
+        """Project spherical points to unit cube [0,1]^3"""
+        # Normalize to unit sphere first (should already be normalized)
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        normalized = points / np.where(norms == 0, 1.0, norms)
+        
+        # Map from [-1,1]^3 to [0,1]^3
+        return (normalized + 1) / 2
+    
+    def _generate_voronoi_uniform_points(self):
+        """Generate points using a Voronoi-based iterative method"""
+        # Start with random points
+        points = np.random.rand(self.n_points, 3)
+        
+        # Voronoi-based iterative improvement
+        for _ in range(30):
+            # Compute pairwise distances
+            distances = pdist(points)
+            if len(distances) == 0:
+                break
+                
+            # For each point, compute repulsion force from neighbors
+            new_points = points.copy()
+            for i in range(self.n_points):
+                # Find all neighbors within some threshold (approximate)
+                dist_row = distances[i*(self.n_points-1):(i+1)*(self.n_points-1)]
+                if len(dist_row) > 0:
+                    # Move away from nearby points
+                    forces = np.zeros(3)
+                    for j, dist in enumerate(dist_row):
+                        if j >= i:
+                            j_actual = j + 1
+                        else:
+                            j_actual = j
+                            
+                        if dist > 1e-12 and dist < 0.3:  # Only consider nearby points
+                            diff = points[i] - points[j_actual]
+                            force_magnitude = 1.0 / (dist * dist + 1e-12)
+                            forces += force_magnitude * diff / (np.linalg.norm(diff) + 1e-12)
+                    
+                    # Apply force with damping
+                    new_points[i] += 0.02 * forces
+                    
+            # Keep within bounds
+            points = np.clip(new_points, 0, 1)
+            
+        return points
+    
+    def _generate_clustered_points(self):
+        """Generate points using clustering approach to ensure good distribution"""
+        # Generate more points and cluster down
+        temp_points = self._generate_sphere_fibonacci_points()
+        temp_points = (temp_points + 1) / 2  # To cube
+        
+        # Use k-means to get representative subset
+        try:
+            kmeans = KMeans(n_clusters=self.n_points, random_state=self.seed, n_init=20)
+            kmeans.fit(temp_points)
+            return kmeans.cluster_centers_
+        except:
+            return temp_points[:self.n_points]
+    
+    def _compute_energy_score(self, points):
+        """Compute a comprehensive energy-based score for point distribution"""
+        if len(points) < 2:
+            return 0
+            
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        # Avoid division by zero
+        if d_max <= 1e-12:
+            return 0
+            
+        # Combined score: distance ratio plus uniformity measure
+        ratio = d_min / d_max
+        
+        # Add uniformity penalty - low variance in distances is better
+        if len(distances) > 0:
+            var_distances = np.var(distances)
+            # Inverse of variance (higher is better uniformity)
+            uniformity = 1.0 / (var_distances + 1e-12)
+            # Blend ratio and uniformity
+            return 0.7 * ratio + 0.3 * uniformity
+        else:
+            return ratio
+    
+    def _compute_voronoi_score(self, points):
+        """Compute Voronoi-based score"""
+        try:
+            # Create Voronoi diagram (this is computationally expensive, so let's simplify)
+            # For a rough approximation, we'll use distance variance
+            distances = pdist(points)
+            if len(distances) == 0:
+                return 0
+                
+            # Lower variance in distances = more uniform distribution
+            var_distances = np.var(distances)
+            # Higher uniformity score = better distribution
+            return 1.0 / (var_distances + 1e-12)
+        except:
+            return 0
+    
+    def _objective_function(self, x):
+        """Custom objective function combining distance ratio and uniformity"""
+        points = x.reshape(-1, 3)
+        
+        # Ensure points are within bounds [0,1]^3
+        points = np.clip(points, 0, 1)
+        
+        # Compute distances
+        distances = pdist(points)
+        
+        if len(distances) == 0:
+            return -np.inf
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        # Avoid division by zero
+        if d_max <= 1e-12:
+            return -np.inf
+            
+        # Main ratio objective
+        ratio = d_min / d_max
+        
+        # Uniformity bonus - based on variance of distances
+        var_distances = np.var(distances) if len(distances) > 0 else 1e12
+        uniformity_bonus = 1.0 / (var_distances + 1e-12)
+        
+        # Combined objective with weight balancing
+        combined = 0.8 * ratio + 0.2 * uniformity_bonus
+        
+        # Return negative because we want to maximize
+        return -combined
+    
+    def _penalty_objective(self, x, penalty_weight=1e6):
+        """Objective with penalty for boundary violations"""
+        points = x.reshape(-1, 3)
+        
+        # Apply penalty for points outside bounds using vectorized operations
+        penalty = 0
+        penalty += np.sum(np.maximum(0, -points)**2) * penalty_weight  # Below 0
+        penalty += np.sum(np.maximum(0, points - 1)**2) * penalty_weight  # Above 1
+        
+        # Original objective
+        original_obj = self._objective_function(x)
+        
+        return original_obj + penalty
+    
+    def _adaptive_differential_evolution(self, objective_func, bounds, maxiter=300):
+        """Enhanced differential evolution with adaptive parameters and early stopping"""
+        current_popsize = 20
+        prev_best = -np.inf
+        stagnation_count = 0
+        improvement_threshold = 1e-8
+        min_improvement = 1e-12
+        recent_improvements = []
+        
+        for iteration in range(maxiter // 10):
+            # Adjust population size based on convergence
+            if stagnation_count > 3 and current_popsize < 30:
+                current_popsize = min(current_popsize + 5, 30)
+            
+            try:
+                result = differential_evolution(
+                    objective_func,
+                    bounds,
+                    seed=self.seed + iteration,
+                    maxiter=10,
+                    popsize=current_popsize,
+                    tol=1e-12,
+                    mutation=(0.5, 1.0),
+                    recombination=0.9,
+                    disp=False
+                )
+            except Exception as e:
+                # Fallback to smaller population if needed
+                try:
+                    result = differential_evolution(
+                        objective_func,
+                        bounds,
+                        seed=self.seed + iteration,
+                        maxiter=10,
+                        popsize=max(5, current_popsize - 5),
+                        tol=1e-12,
+                        mutation=(0.5, 1.0),
+                        recombination=0.9,
+                        disp=False
+                    )
+                except Exception:
+                    # Last resort - use basic differential evolution
+                    result = differential_evolution(
+                        objective_func,
+                        bounds,
+                        seed=self.seed + iteration,
+                        maxiter=10,
+                        popsize=10,
+                        tol=1e-12,
+                        mutation=(0.5, 1.0),
+                        recombination=0.7,
+                        disp=False
+                    )
+            
+            # Check for improvement
+            current_best = -result.fun
+            improvement = current_best - prev_best
+            
+            recent_improvements.append(improvement)
+            if len(recent_improvements) > 5:
+                recent_improvements.pop(0)
+            
+            # Early stopping if improvement is minimal
+            if len(recent_improvements) == 5 and all(abs(impr) < min_improvement for impr in recent_improvements):
+                break
+                
+            if improvement > improvement_threshold:
+                stagnation_count = 0
+            else:
+                stagnation_count += 1
+                
+            prev_best = current_best
+            
+        return result
+    
+    def _local_refinement(self, points):
+        """Apply local refinement to improve final solution"""
+        def objective_local(x):
+            points_local = x.reshape(-1, 3)
+            distances = pdist(points_local)
+            
+            if len(distances) == 0:
+                return -np.inf
+                
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            
+            if d_max > 1e-12:
+                # Use the energy-based metric for refinement
+                ratio = d_min / d_max
+                var_distances = np.var(distances) if len(distances) > 0 else 1e12
+                uniformity = 1.0 / (var_distances + 1e-12)
+                combined = 0.8 * ratio + 0.2 * uniformity
+                return -combined
+            else:
+                return -np.inf
+                
+        try:
+            x0_refine = points.flatten()
+            bounds = [(0, 1)] * self.n_points * 3
+            
+            result_refine = minimize(
+                objective_local,
+                x0_refine,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+            
+            refined_points = result_refine.x.reshape(-1, 3)
+            refined_points = np.clip(refined_points, 0, 1)
+            return refined_points
+        except Exception:
+            return points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Initialize optimizer
+    optimizer = SphereVoronoiOptimizer(n_points=14, dimensions=3, seed=42)
+    
+    # Generate multiple initialization strategies focused on spherical geometry
+    strategies = []
+    
+    # Strategy 1: Enhanced Fibonacci points on sphere
+    fib_points = optimizer._generate_sphere_fibonacci_points()
+    fib_points_cube = optimizer._project_to_cube(fib_points)
+    strategies.append(("enhanced_fibonacci", fib_points_cube))
+    
+    # Strategy 2: Voronoi uniform points (iterative improvement)
+    voronoi_points = optimizer._generate_voronoi_uniform_points()
+    strategies.append(("voronoi_uniform", voronoi_points))
+    
+    # Strategy 3: Random points
+    random_points = np.random.rand(14, 3)
+    strategies.append(("random", random_points))
+    
+    # Strategy 4: Clustered points from sphere
+    clustered_points = optimizer._generate_clustered_points()
+    strategies.append(("clustered", clustered_points))
+    
+    # Strategy 5: Slightly perturbed Fibonacci
+    perturbed_fib = fib_points_cube + np.random.normal(0, 0.03, fib_points_cube.shape)
+    perturbed_fib = np.clip(perturbed_fib, 0, 1)
+    strategies.append(("perturbed_fibonacci", perturbed_fib))
+    
+    # Strategy 6: Another Voronoi approach with different initialization
+    np.random.seed(123)
+    voronoi_points2 = np.random.rand(14, 3)
+    # More aggressive Voronoi-style refinement
+    for _ in range(40):
+        distances = pdist(voronoi_points2)
+        if len(distances) > 0:
+            new_points = voronoi_points2.copy()
+            for i in range(14):
+                dist_row = distances[i*13:(i+1)*13] if i < 13 else distances[i*13:]
+                if len(dist_row) > 0:
+                    # Move away from closest neighbors
+                    closest_idx = np.argmin(dist_row)
+                    if closest_idx < i:
+                        neighbor = voronoi_points2[closest_idx]
+                    else:
+                        neighbor = voronoi_points2[closest_idx + 1]
+                    direction = voronoi_points2[i] - neighbor
+                    norm_dir = np.linalg.norm(direction)
+                    if norm_dir > 1e-12:
+                        new_points[i] += 0.015 * direction / norm_dir
+            voronoi_points2 = np.clip(new_points, 0, 1)
+    strategies.append(("aggressive_voronoi", voronoi_points2))
+    
+    # Evaluate all strategies and select the best based on energy-based score
+    best_initialization = None
+    best_score = -np.inf
+
+    for name, points in strategies:
+        score = optimizer._compute_energy_score(points)
+        if score > best_score:
+            best_score = score
+            best_initialization = points.copy()
+
+    # Use the best initialization as starting point
+    x0 = best_initialization.flatten()
+
+    # Bounds for each coordinate: [0, 1] for all 14 points × 3 coordinates
+    bounds = [(0, 1)] * 14 * 3
+
+    # Run adaptive differential evolution optimization
+    best_result = None
+    best_score = -np.inf
+
+    # Try 3 different random seeds for better exploration
+    for seed_val in [42, 123, 456]:
+        np.random.seed(seed_val)
+        
+        # Use adaptive differential evolution
+        result = optimizer._adaptive_differential_evolution(
+            optimizer._penalty_objective, 
+            bounds, 
+            maxiter=200
+        )
+        
+        # Check if this result is better
+        if -result.fun > best_score:
+            best_score = -result.fun
+            best_result = result
+
+    # Extract optimized points
+    optimized_points = best_result.x.reshape(-1, 3)
+
+    # Apply local refinement
+    final_points = optimizer._local_refinement(optimized_points)
+
+    # Final clipping to ensure bounds are respected
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

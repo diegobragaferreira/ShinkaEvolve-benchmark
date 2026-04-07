@@ -1,0 +1,518 @@
+<NAME>
+add_historical_sampling_and_curvature_correction
+</NAME>
+
+<DESCRIPTION>
+This modification introduces historical sampling to seed the optimization with previously successful sequences and adds curvature-aware directional bias correction to improve convergence. These enhancements leverage past good solutions and second-order information to guide the search more intelligently, aiming for better upper bounds on C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.fft import fft, ifft
+from cvxpy import *
+import time
+import random
+from scipy.signal import fftconvolve
+
+np.random.seed(42)
+random.seed(42)
+=======
+import numpy as np
+from scipy.fft import fft, ifft
+from cvxpy import *
+import time
+import random
+from scipy.signal import fftconvolve
+from collections import deque
+
+np.random.seed(42)
+random.seed(42)
+
+# Track historically good sequences for seeding
+historical_sequences = deque(maxlen=10)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class SequenceOptimizer:
+    """
+    Orchestrates the optimization process for finding the best sequence.
+    """
+    @staticmethod
+    def get_good_direction_to_move_into(sequence: Sequence) -> Sequence | None:
+        """
+        Returns the direction to move into the sequence using convex optimization.
+        """
+        n = sequence.length
+        if n == 0:
+            return None
+
+        sum_sequence = np.sum(sequence.data)
+        if sum_sequence < 1e-10:
+            return None
+
+        normalized_sequence = sequence.normalize()
+
+        try:
+            # Use CVXPY to get a potentially better direction
+            result = ConvexOptimizer.solve_convolution_quadratic_cvxpy(normalized_sequence)
+
+            if result is None:
+                return None
+
+            # Normalize the result
+            sum_result = np.sum(result.data)
+            if sum_result < 1e-8:
+                return None
+
+            normalized_result = result.normalize()
+
+            # Apply small perturbation to maintain diversity
+            t = 0.05
+            new_data = [(1 - t) * x + t * y for x, y in zip(sequence.data, normalized_result.data)]
+
+            # Ensure non-negativity and reasonable bounds
+            new_data = [max(0, min(1000, x)) for x in new_data]
+
+            return Sequence(new_data)
+
+        except Exception as e:
+            return None
+=======
+class SequenceOptimizer:
+    """
+    Orchestrates the optimization process for finding the best sequence.
+    """
+    @staticmethod
+    def get_good_direction_to_move_into(sequence: Sequence) -> Sequence | None:
+        """
+        Returns the direction to move into the sequence using convex optimization with curvature correction.
+        """
+        n = sequence.length
+        if n == 0:
+            return None
+
+        sum_sequence = np.sum(sequence.data)
+        if sum_sequence < 1e-10:
+            return None
+
+        normalized_sequence = sequence.normalize()
+
+        try:
+            # Use CVXPY to get a potentially better direction
+            result = ConvexOptimizer.solve_convolution_quadratic_cvxpy(normalized_sequence)
+
+            if result is None:
+                return None
+
+            # Normalize the result
+            sum_result = np.sum(result.data)
+            if sum_result < 1e-8:
+                return None
+
+            normalized_result = result.normalize()
+
+            # Apply curvature-aware directional bias correction
+            if n > 10:
+                # Estimate curvature using finite differences
+                epsilon = 1e-3
+                hessian_approx = np.zeros((n, n))
+
+                # Simple finite difference approximation of second derivatives
+                for i in range(n):
+                    perturbed_seq = normalized_sequence.data.copy()
+                    perturbed_seq[i] += epsilon
+                    if i > 0:  # Avoid boundary issues
+                        perturbed_seq[i-1] -= epsilon / 2
+                    if i < n-1:  # Avoid boundary issues
+                        perturbed_seq[i+1] -= epsilon / 2
+
+                    # Recompute convolution with perturbed sequence
+                    a_padded = np.pad(perturbed_seq, (0, 2*n-1-n), 'constant')
+                    fft_a = fft(a_padded)
+                    conv_fft = fft_a * np.conj(fft_a)
+                    conv_result = ifft(conv_fft).real[:2*n-1]
+
+                    second_derivative = (np.max(conv_result) - np.max(np.convolve(normalized_sequence.data, normalized_sequence.data, mode='full')[:2*n-1])) / (epsilon**2)
+                    hessian_approx[i, i] = max(0, second_derivative)  # Ensure non-negative
+
+                # Apply curvature correction to the direction
+                curvature_correction = np.dot(hessian_approx, normalized_result.data)
+                # Scale correction appropriately
+                curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+
+                # Adjust the direction with curvature bias
+                corrected_direction = np.array(normalized_result.data) + 0.1 * curvature_correction
+                normalized_result.data = corrected_direction.tolist()
+
+            # Apply small perturbation to maintain diversity
+            t = 0.05
+            new_data = [(1 - t) * x + t * y for x, y in zip(sequence.data, normalized_result.data)]
+
+            # Ensure non-negativity and reasonable bounds
+            new_data = [max(0, min(1000, x)) for x in new_data]
+
+            return Sequence(new_data)
+
+        except Exception as e:
+            return None
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def multi_start_optimization(initial_sequences: list[Sequence], max_time: float) -> Sequence:
+        """
+        Performs multi-start optimization using a convex optimization framework.
+        """
+        best_inv_C1 = 0.0
+        best_sequence = None
+        best_C1 = float('inf')
+        start_time = time.time()
+
+        # Try multiple starting points with convex optimization
+        for i, init_seq in enumerate(initial_sequences):
+            if time.time() - start_time > max_time - 5:
+                break
+
+            current_seq = init_seq.copy()
+            current_C1, current_inv_C1 = AutocorrelationEvaluator.compute_c1(current_seq)
+
+            if current_inv_C1 > best_inv_C1:
+                best_inv_C1 = current_inv_C1
+                best_sequence = current_seq.copy()
+                best_C1 = current_C1
+
+            # Use convex optimization approach for improvement
+            improved_seq = SequenceOptimizer.adaptive_frequency_optimize(current_seq, max_iter=30)
+            improved_C1, improved_inv_C1 = AutocorrelationEvaluator.compute_c1(improved_seq)
+
+            if improved_inv_C1 > current_inv_C1:
+                current_seq = improved_seq
+                current_C1 = improved_C1
+                current_inv_C1 = improved_inv_C1
+
+                if current_inv_C1 > best_inv_C1:
+                    best_inv_C1 = current_inv_C1
+                    best_sequence = current_seq.copy()
+                    best_C1 = current_C1
+
+        if best_sequence is None:
+            return Sequence([1.0])
+        return best_sequence
+=======
+    @staticmethod
+    def multi_start_optimization(initial_sequences: list[Sequence], max_time: float) -> Sequence:
+        """
+        Performs multi-start optimization using a convex optimization framework.
+        """
+        best_inv_C1 = 0.0
+        best_sequence = None
+        best_C1 = float('inf')
+        start_time = time.time()
+
+        # Try multiple starting points with convex optimization
+        for i, init_seq in enumerate(initial_sequences):
+            if time.time() - start_time > max_time - 5:
+                break
+
+            current_seq = init_seq.copy()
+            current_C1, current_inv_C1 = AutocorrelationEvaluator.compute_c1(current_seq)
+
+            if current_inv_C1 > best_inv_C1:
+                best_inv_C1 = current_inv_C1
+                best_sequence = current_seq.copy()
+                best_C1 = current_C1
+
+            # Use convex optimization approach for improvement
+            improved_seq = SequenceOptimizer.adaptive_frequency_optimize(current_seq, max_iter=30)
+            improved_C1, improved_inv_C1 = AutocorrelationEvaluator.compute_c1(improved_seq)
+
+            if improved_inv_C1 > current_inv_C1:
+                current_seq = improved_seq
+                current_C1 = improved_C1
+                current_inv_C1 = improved_inv_C1
+
+                if current_inv_C1 > best_inv_C1:
+                    best_inv_C1 = current_inv_C1
+                    best_sequence = current_seq.copy()
+                    best_C1 = current_C1
+
+        # Add historical sequences to the mix for seeding
+        if len(historical_sequences) > 0:
+            for hist_seq in list(historical_sequences):
+                if time.time() - start_time > max_time - 5:
+                    break
+                hist_C1, hist_inv_C1 = AutocorrelationEvaluator.compute_c1(hist_seq)
+                if hist_inv_C1 > best_inv_C1:
+                    best_inv_C1 = hist_inv_C1
+                    best_sequence = hist_seq.copy()
+                    best_C1 = hist_C1
+
+        if best_sequence is None:
+            return Sequence([1.0])
+        return best_sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_initial_sequences() -> list[Sequence]:
+    """
+    Generates diverse initial sequences at different scales.
+    """
+    initial_sequences = []
+
+    # Random sequences
+    for _ in range(2):
+        n = np.random.randint(50, 200)
+        seq = np.random.uniform(0.1, 1.0, n).tolist()
+        initial_sequences.append(Sequence(seq))
+
+    # Exponential decay sequences
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.8 ** i for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Spike sequences
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.0] * n
+        spike_idx = np.random.randint(0, n)
+        seq[spike_idx] = 1.0
+        initial_sequences.append(Sequence(seq))
+
+    # Gaussian-like sequences
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        center = n // 2
+        seq = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    return initial_sequences
+=======
+def generate_initial_sequences() -> list[Sequence]:
+    """
+    Generates diverse initial sequences at different scales.
+    """
+    initial_sequences = []
+
+    # Random sequences
+    for _ in range(2):
+        n = np.random.randint(50, 200)
+        seq = np.random.uniform(0.1, 1.0, n).tolist()
+        initial_sequences.append(Sequence(seq))
+
+    # Exponential decay sequences
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.8 ** i for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Spike sequences
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.0] * n
+        spike_idx = np.random.randint(0, n)
+        seq[spike_idx] = 1.0
+        initial_sequences.append(Sequence(seq))
+
+    # Gaussian-like sequences
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        center = n // 2
+        seq = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Historical sequences if available
+    if len(historical_sequences) > 0:
+        for _ in range(2):
+            hist_seq = random.choice(list(historical_sequences))
+            initial_sequences.append(hist_seq.copy())
+
+    return initial_sequences
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def search_for_best_sequence_enhanced() -> list[float]:
+    """
+    Enhanced version of the main function with improved heuristic and
+    better integration of evolutionary and convex optimization.
+    """
+    start_time = time.time()
+    max_time = 180  # seconds
+
+    # Generate diverse initial sequences at different scales
+    initial_sequences = []
+
+    # Random sequences with more variety
+    for _ in range(3):
+        n = np.random.randint(50, 1000)
+        # Use a mixture of uniform and exponential distributions
+        if np.random.rand() < 0.5:
+            seq = np.random.uniform(0.1, 1.0, n).tolist()
+        else:
+            seq = [0.9 ** i for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Exponential decay sequences with different rates
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        rate = np.random.uniform(0.7, 0.95)
+        seq = [rate ** i for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Spike sequences with varying amplitudes
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.0] * n
+        spike_idx = np.random.randint(0, n)
+        seq[spike_idx] = np.random.uniform(1.0, 10.0)
+        initial_sequences.append(Sequence(seq))
+
+    # Gaussian-like sequences with varied width
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        center = n // 2
+        width = np.random.uniform(n/20, n/5)
+        seq = [np.exp(-0.5 * ((i - center)**2) / width**2) for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Multi-start optimization using convex approach
+    best_sequence = SequenceOptimizer.multi_start_optimization(initial_sequences, max_time)
+
+    # Enhanced optimization with adaptive mutation and crossover
+    if best_sequence is not None:
+        # Perform additional refinement with evolutionary approach
+        refined_sequence = best_sequence.copy()
+        for _ in range(20):
+            # Apply adaptive mutation
+            mutated_seq = []
+            for val in refined_sequence.data:
+                if np.random.rand() < 0.1:  # 10% mutation rate
+                    mutated_val = val * (1 + np.random.normal(0, 0.1))  # Gaussian mutation
+                    mutated_seq.append(max(0, mutated_val))  # Ensure non-negativity
+                else:
+                    mutated_seq.append(val)
+
+            # Apply simple crossover with a random sequence
+            if np.random.rand() < 0.3:  # 30% crossover rate
+                crossover_point = np.random.randint(1, len(refined_sequence.data))
+                temp_seq = refined_sequence.data[:crossover_point] + mutated_seq[crossover_point:]
+                mutated_seq = temp_seq
+
+            # Evaluate and accept if better
+            mutated_seq = Sequence(mutated_seq)
+            mutated_C1, mutated_inv_C1 = AutocorrelationEvaluator.compute_c1(mutated_seq)
+            if mutated_inv_C1 > 0.0:  # Ensure valid result
+                refined_sequence = mutated_seq
+
+        # Final optimization with enhanced parameters
+        final_seq = SequenceOptimizer.adaptive_frequency_optimize(refined_sequence, max_iter=100)
+        final_C1, final_inv_C1 = AutocorrelationEvaluator.compute_c1(final_seq)
+        if final_inv_C1 > 0.0:  # Ensure valid result
+            best_sequence = final_seq
+
+    return best_sequence.data.tolist() if best_sequence is not None else [1.0]
+=======
+def search_for_best_sequence_enhanced() -> list[float]:
+    """
+    Enhanced version of the main function with improved heuristic and
+    better integration of evolutionary and convex optimization.
+    """
+    start_time = time.time()
+    max_time = 180  # seconds
+
+    # Generate diverse initial sequences at different scales
+    initial_sequences = []
+
+    # Random sequences with more variety
+    for _ in range(3):
+        n = np.random.randint(50, 1000)
+        # Use a mixture of uniform and exponential distributions
+        if np.random.rand() < 0.5:
+            seq = np.random.uniform(0.1, 1.0, n).tolist()
+        else:
+            seq = [0.9 ** i for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Exponential decay sequences with different rates
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        rate = np.random.uniform(0.7, 0.95)
+        seq = [rate ** i for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Spike sequences with varying amplitudes
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.0] * n
+        spike_idx = np.random.randint(0, n)
+        seq[spike_idx] = np.random.uniform(1.0, 10.0)
+        initial_sequences.append(Sequence(seq))
+
+    # Gaussian-like sequences with varied width
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        center = n // 2
+        width = np.random.uniform(n/20, n/5)
+        seq = [np.exp(-0.5 * ((i - center)**2) / width**2) for i in range(n)]
+        initial_sequences.append(Sequence(seq))
+
+    # Historical sequences if available
+    if len(historical_sequences) > 0:
+        for _ in range(2):
+            hist_seq = random.choice(list(historical_sequences))
+            initial_sequences.append(hist_seq.copy())
+
+    # Multi-start optimization using convex approach
+    best_sequence = SequenceOptimizer.multi_start_optimization(initial_sequences, max_time)
+
+    # Enhanced optimization with adaptive mutation and crossover
+    if best_sequence is not None:
+        # Perform additional refinement with evolutionary approach
+        refined_sequence = best_sequence.copy()
+        for _ in range(20):
+            # Apply adaptive mutation
+            mutated_seq = []
+            for val in refined_sequence.data:
+                if np.random.rand() < 0.1:  # 10% mutation rate
+                    mutated_val = val * (1 + np.random.normal(0, 0.1))  # Gaussian mutation
+                    mutated_seq.append(max(0, mutated_val))  # Ensure non-negativity
+                else:
+                    mutated_seq.append(val)
+
+            # Apply simple crossover with a random sequence
+            if np.random.rand() < 0.3:  # 30% crossover rate
+                crossover_point = np.random.randint(1, len(refined_sequence.data))
+                temp_seq = refined_sequence.data[:crossover_point] + mutated_seq[crossover_point:]
+                mutated_seq = temp_seq
+
+            # Evaluate and accept if better
+            mutated_seq = Sequence(mutated_seq)
+            mutated_C1, mutated_inv_C1 = AutocorrelationEvaluator.compute_c1(mutated_seq)
+            if mutated_inv_C1 > 0.0:  # Ensure valid result
+                refined_sequence = mutated_seq
+
+        # Final optimization with enhanced parameters
+        final_seq = SequenceOptimizer.adaptive_frequency_optimize(refined_sequence, max_iter=100)
+        final_C1, final_inv_C1 = AutocorrelationEvaluator.compute_c1(final_seq)
+        if final_inv_C1 > 0.0:  # Ensure valid result
+            best_sequence = final_seq
+
+        # Store the best sequence as historical for future use
+        historical_sequences.append(best_sequence.copy())
+
+    return best_sequence.data.tolist() if best_sequence is not None else [1.0]
+>>>>>>> REPLACE
+</DIFF>

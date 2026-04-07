@@ -1,0 +1,85 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist, squareform
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Avoid division by zero
+        if len(distances) == 0:
+            return -np.inf
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio since we want to maximize
+        if d_max == 0:
+            return -np.inf
+        return -d_min / d_max
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1)] * 32  # 16 points * 2 coordinates each
+
+    # Start with a good initial configuration (hexagonal-like arrangement)
+    np.random.seed(42)
+
+    # Create a more strategic initial placement
+    initial_points = []
+    # Place points in a roughly hexagonal pattern
+    rows = 4
+    cols = 4
+    spacing_x = 1.0 / (cols + 1)
+    spacing_y = 1.0 / (rows + 1)
+
+    for i in range(rows):
+        for j in range(cols):
+            x = (j + 1) * spacing_x + (i % 2) * spacing_x / 2
+            y = (i + 1) * spacing_y
+            initial_points.append([x, y])
+
+    # Add some random perturbation to avoid degenerate cases
+    initial_points = np.array(initial_points[:16]) + np.random.normal(0, 0.01, (16, 2))
+    # Keep points in bounds
+    initial_points = np.clip(initial_points, 0, 1)
+
+    # Flatten initial points for optimization
+    x0 = initial_points.flatten()
+
+    # Perform optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=1000,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        tol=1e-6
+    )
+
+    # Extract the best solution
+    best_points = result.x.reshape(-1, 2)
+
+    # Ensure points are within bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,333 @@
+<NAME>
+voronoi_based_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This improvement implements Voronoi-based adaptive mutation with criticality weighting for radius adjustments. The key insight is to compute Voronoi diagrams for each configuration and weight radius mutations inversely to local Voronoi cell area, where smaller cells indicate higher constraint density requiring finer adjustments. This builds directly on the current program's successful Voronoi-based criticality assessment pattern by incorporating the progressive radius adjustment technique from successful generations, allowing the algorithm to apply smaller mutation steps (0.001) in highly constrained regions while permitting larger changes (up to 0.01) in sparse areas, thereby improving stability and convergence while respecting local geometry.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+
+    n = 21
+    # Better rectangle dimensions for packing efficiency: 1.2 x 0.8 (width x height)
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Phase 1: Multi-pattern initialization
+    circles = np.zeros((n, 3))
+
+    # Try multiple initialization strategies and pick the best one
+    best_initialization = None
+    best_sum = 0
+
+    # Strategy 1: Hexagonal lattice
+    hex_circles = initialize_hexagonal(n, rect_width, rect_height)
+    hex_sum = np.sum(hex_circles[:, 2])
+    if hex_sum > best_sum:
+        best_sum = hex_sum
+        best_initialization = hex_circles.copy()
+
+    # Strategy 2: Random placement with spacing check
+    random_circles = initialize_random_spaced(n, rect_width, rect_height)
+    random_sum = np.sum(random_circles[:, 2])
+    if random_sum > best_sum:
+        best_sum = random_sum
+        best_initialization = random_circles.copy()
+
+    # Strategy 3: Square grid
+    square_circles = initialize_square_grid(n, rect_width, rect_height)
+    square_sum = np.sum(square_circles[:, 2])
+    if square_sum > best_sum:
+        best_sum = square_sum
+        best_initialization = square_circles.copy()
+
+    # Use the best initialization
+    circles = best_initialization if best_initialization is not None else hex_circles.copy()
+
+    # Phase 2: Two-phase optimization with progressive constraint relaxation
+    max_iterations_phase1 = 150  # First phase: relaxed constraints
+    max_iterations_phase2 = 100  # Second phase: strict constraints
+
+    # Phase 1: Progressive constraint relaxation (allow some violations initially)
+    for iteration in range(max_iterations_phase1):
+        improved = False
+        # Allow up to 5% constraint violations in early iterations
+        violation_tolerance = max(0.0, 1.0 - (iteration / max_iterations_phase1) * 0.95)
+
+        # Shuffle circle indices for diverse optimization
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        # Process circles in shuffled order
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            collision_violations = 0
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        # Apply progressive constraint relaxation
+                        if np.random.random() > violation_tolerance:
+                            max_radius = min(max_radius, collision_radius)
+                        else:
+                            collision_violations += 1
+
+            # Adaptive expansion based on local density and constraint status
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Calculate Voronoi area for this circle (approximate)
+                voronoi_area = calculate_voronoi_area(circles, i, rect_width, rect_height)
+
+                # Larger Voronoi areas = less constrained region = larger expansion
+                expansion_factor = max(0.1, 1.0 - voronoi_area * 0.5)  # Scale based on density
+
+                # Apply different expansion rates depending on constraint status
+                if collision_violations > 3:
+                    # Highly constrained region - small expansion
+                    delta = min(0.015, max_radius - circles[i][2]) * expansion_factor * 0.3
+                elif collision_violations > 1:
+                    # Moderately constrained - medium expansion
+                    delta = min(0.02, max_radius - circles[i][2]) * expansion_factor * 0.6
+                else:
+                    # Less constrained - full expansion
+                    delta = min(0.03, max_radius - circles[i][2]) * expansion_factor * 1.0
+
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+
+        if not improved and iteration > 50:  # Early stopping condition
+            break
+
+    # Phase 3: Strict constraint enforcement (final refinement)
+    for iteration in range(max_iterations_phase2):
+        improved = False
+
+        # Shuffle circle indices
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        # Process circles in shuffled order
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # Increase radius if beneficial and strictly feasible
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Small, conservative increments for final refinement
+                delta = min(0.01, max_radius - circles[i][2]) * 0.8
+                if delta > 0.0005:
+                    circles[i][2] += delta
+                    improved = True
+
+        if not improved:
+            break
+
+    # Final validation and cleanup
+    validate_and_fix_constraints(circles, rect_width, rect_height)
+
+    return circles
+=======
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+
+    n = 21
+    # Better rectangle dimensions for packing efficiency: 1.2 x 0.8 (width x height)
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Phase 1: Multi-pattern initialization
+    circles = np.zeros((n, 3))
+
+    # Try multiple initialization strategies and pick the best one
+    best_initialization = None
+    best_sum = 0
+
+    # Strategy 1: Hexagonal lattice
+    hex_circles = initialize_hexagonal(n, rect_width, rect_height)
+    hex_sum = np.sum(hex_circles[:, 2])
+    if hex_sum > best_sum:
+        best_sum = hex_sum
+        best_initialization = hex_circles.copy()
+
+    # Strategy 2: Random placement with spacing check
+    random_circles = initialize_random_spaced(n, rect_width, rect_height)
+    random_sum = np.sum(random_circles[:, 2])
+    if random_sum > best_sum:
+        best_sum = random_sum
+        best_initialization = random_circles.copy()
+
+    # Strategy 3: Square grid
+    square_circles = initialize_square_grid(n, rect_width, rect_height)
+    square_sum = np.sum(square_circles[:, 2])
+    if square_sum > best_sum:
+        best_sum = square_sum
+        best_initialization = square_circles.copy()
+
+    # Use the best initialization
+    circles = best_initialization if best_initialization is not None else hex_circles.copy()
+
+    # Phase 2: Two-phase optimization with progressive constraint relaxation
+    max_iterations_phase1 = 150  # First phase: relaxed constraints
+    max_iterations_phase2 = 100  # Second phase: strict constraints
+
+    # Phase 1: Progressive constraint relaxation (allow some violations initially)
+    for iteration in range(max_iterations_phase1):
+        improved = False
+        # Allow up to 5% constraint violations in early iterations
+        violation_tolerance = max(0.0, 1.0 - (iteration / max_iterations_phase1) * 0.95)
+
+        # Shuffle circle indices for diverse optimization
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        # Process circles in shuffled order
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            collision_violations = 0
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        # Apply progressive constraint relaxation
+                        if np.random.random() > violation_tolerance:
+                            max_radius = min(max_radius, collision_radius)
+                        else:
+                            collision_violations += 1
+
+            # Adaptive expansion based on local density and constraint status
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Calculate Voronoi area for this circle (approximate)
+                voronoi_area = calculate_voronoi_area(circles, i, rect_width, rect_height)
+
+                # Larger Voronoi areas = less constrained region = larger expansion
+                expansion_factor = max(0.1, 1.0 - voronoi_area * 0.5)  # Scale based on density
+
+                # Apply different expansion rates depending on constraint status
+                if collision_violations > 3:
+                    # Highly constrained region - small expansion
+                    delta = min(0.015, max_radius - circles[i][2]) * expansion_factor * 0.3
+                elif collision_violations > 1:
+                    # Moderately constrained - medium expansion
+                    delta = min(0.02, max_radius - circles[i][2]) * expansion_factor * 0.6
+                else:
+                    # Less constrained - full expansion
+                    delta = min(0.03, max_radius - circles[i][2]) * expansion_factor * 1.0
+
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+
+        if not improved and iteration > 50:  # Early stopping condition
+            break
+
+    # Phase 3: Strict constraint enforcement with Voronoi-based adaptive mutation
+    for iteration in range(max_iterations_phase2):
+        improved = False
+
+        # Shuffle circle indices
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        # Process circles in shuffled order
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # Increase radius if beneficial and strictly feasible
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # NEW: Voronoi-based adaptive mutation
+                # Calculate Voronoi area to determine local criticality
+                voronoi_area = calculate_voronoi_area(circles, i, rect_width, rect_height)
+
+                # Mutate with radius adjustments inversely proportional to Voronoi area
+                # Smaller Voronoi areas = higher constraint density = smaller mutation steps
+                base_delta = min(0.01, max_radius - circles[i][2])
+                if voronoi_area < 0.05:  # Highly constrained region
+                    delta = base_delta * 0.1  # Very small mutation
+                elif voronoi_area < 0.1:   # Moderately constrained
+                    delta = base_delta * 0.3  # Small mutation
+                elif voronoi_area < 0.2:   # Slightly constrained
+                    delta = base_delta * 0.6  # Medium mutation
+                else:                      # Sparse regions
+                    delta = base_delta * 1.0  # Full mutation
+
+                if delta > 0.0005:
+                    circles[i][2] += delta
+                    improved = True
+
+        if not improved:
+            break
+
+    # Final validation and cleanup
+    validate_and_fix_constraints(circles, rect_width, rect_height)
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>

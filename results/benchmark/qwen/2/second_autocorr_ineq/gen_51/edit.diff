@@ -1,0 +1,170 @@
+--- a/original.py
++++ b/original.py
+@@ -1,159 +1,164 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
+ from scipy.optimize import differential_evolution
+ import warnings
+ 
+ def compute_autoconvolution_norms(f_values):
+     """
+     Compute the three norms needed for C2 calculation.
+     """
+     # Create step function with proper spacing
+     n = len(f_values)
+     if n < 1:
+         return 0.0, 0.0, 0.0
+ 
+     # Convert to numpy array
+     f = np.array(f_values)
+ 
+     # Create the step function on [-1/4, 1/4] with equal spacing
+     dx = 0.5 / (n - 1) if n > 1 else 0.5
+     x = np.linspace(-0.25, 0.25, n)
+ 
+     # We'll use convolution to get g = f * f
+     # Create extended arrays for proper convolution
+     extended_f = np.concatenate([f[::-1], f, f[::-1]])
+ 
+     # Use discrete convolution
+     g = np.convolve(f, f, mode='full')
+ 
+     # Keep only the middle part (proper autoconvolution)
+     mid_idx = len(g) // 2
+     g = g[mid_idx - (n-1):mid_idx + n]
+ 
+     # Adjust for the fact that our function is defined on [-1/4, 1/4]
+     # The actual convolution interval is [-1/2, 1/2]
+     g_x = np.linspace(-0.5, 0.5, len(g))
+ 
+     # Now compute the required norms
+     # ||g||₂² (L2 norm squared)
+     # Using trapezoidal integration approximation
+     g_sq = g * g
+     area = np.sum((g_sq[:-1] + g_sq[1:]) * (g_x[1:] - g_x[:-1])) / 2
+     norm_2_sq = area
+ 
+     # ||g||₁ (L1 norm) - approximate via summation
+     norm_1 = np.sum(np.abs(g)) * dx  # dx is the step size
+ 
+     # ||g||∞ (infinity norm)
+     norm_inf = np.max(np.abs(g))
+ 
+     return norm_2_sq, norm_1, norm_inf
+ 
+ def adaptive_gaussian_construction():
+     """
+     Construct step function based on adaptive Gaussian peaks.
+     """
+     # Generate initial parameters
+     n_peaks = np.random.randint(5, 20)
+     n_points = np.random.randint(200, 5000)  # More points for better resolution
+ 
+     # Create x-axis evenly spaced
+     x = np.linspace(-0.25, 0.25, n_points)
+ 
+     # Initialize function
+     f = np.zeros(n_points)
+ 
+     # Place peaks with some randomness but avoid clustering
+     peak_positions = []
+     peak_amplitudes = []
+ 
+-    for _ in range(n_peaks):
+-        # Determine peak position (avoid edges)
+-        pos = np.random.uniform(-0.2, 0.2)
++    # Use logarithmic spacing to ensure good distribution
++    # We'll place peaks more densely near edges and sparser in center
++    for i in range(n_peaks):
++        # Determine peak position using stratified sampling to avoid clustering
++        # Place peaks more densely towards edges to create better autoconvolution profile
++
++        # Use beta distribution to bias towards edges
++        pos = np.random.beta(0.5, 0.5) * 0.4 - 0.2  # Map to [-0.2, 0.2]
+ 
+         # Check distance from existing peaks to avoid too close proximity
+         min_dist = min([abs(pos - p) for p in peak_positions] + [1.0])
+         if min_dist < 0.02:  # Minimum distance threshold
+             continue
+ 
+         # Determine amplitude
+         amp = np.random.exponential(0.5)  # Exponential distribution for varied amplitudes
+ 
+         peak_positions.append(pos)
+         peak_amplitudes.append(amp)
+ 
+     # Create Gaussian peaks
+     for pos, amp in zip(peak_positions, peak_amplitudes):
+         # Width of Gaussian (smaller makes sharper peaks)
+         sigma = np.random.uniform(0.01, 0.05)
+         gaussian = amp * np.exp(-0.5 * ((x - pos) / sigma) ** 2)
+         f += gaussian
+ 
+     # Ensure non-negativity
+     f = np.maximum(f, 0.0)
+ 
+     # Normalize to prevent extremely large values that cause numerical issues
+     max_val = np.max(f)
+     if max_val > 0:
+         f /= (max_val * 2.0)  # Scale down for stability
+ 
+     # Apply gentle smoothing to reduce sharp transitions
+     window_size = min(51, n_points // 20)
+     if window_size % 2 == 0:
+         window_size += 1
+     if window_size > 1:
+         # Simple moving average smoothing
+         f_smooth = np.convolve(f, np.ones(window_size)/window_size, mode='same')
+         f = f_smooth
+ 
+     # Final check for any remaining negative values due to edge effects
+     f = np.maximum(f, 0.0)
+ 
+     return f.tolist()
+ 
+ def construct_function() -> list[float]:
+     """
+     Construct step-function with high C2 value using adaptive Gaussian method.
+     """
+     # Try multiple attempts to get a good function
+     best_c2 = -1
+     best_f = None
+     num_attempts = 5
+ 
+     for attempt in range(num_attempts):
+         try:
+             # Generate function using adaptive Gaussian construction
+             f_values = adaptive_gaussian_construction()
+ 
+             # Calculate norms
+             norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+ 
+             # Avoid division by zero
+             if norm_1 <= 0 or norm_inf <= 0:
+                 continue
+ 
+             # Compute C2
+             c2 = norm_2_sq / (norm_1 * norm_inf)
+ 
+             if c2 > best_c2:
+                 best_c2 = c2
+                 best_f = f_values.copy()
+ 
+         except Exception as e:
+             warnings.warn(f"Attempt {attempt} failed with error: {str(e)}")
+             continue
+ 
+     # Return the best function found
+     if best_f is not None:
+         return best_f
+     else:
+         # Fallback to original if nothing works
+         return [np.random.random()] * np.random.randint(100, 1000)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

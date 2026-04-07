@@ -1,0 +1,427 @@
+<NAME>
+add_voronoi_based_constraint_relaxation
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces a progressive constraint relaxation mechanism during evolution. The idea is to start with relaxed constraints (allowing up to 5% constraint violations) to enable faster exploration of promising regions, then gradually tighten constraints to enforce strict feasibility. This addresses the challenge that overly strict constraints can trap optimization in local minima while still maintaining solution quality. The approach mirrors successful strategies from earlier generations that balanced exploration vs exploitation effectively.
+
+The key insight is that early-stage exploration benefits from being able to temporarily violate constraints to escape poor local optima, while later stages require strict enforcement of all constraints. This creates a more robust optimization trajectory that can better navigate the complex landscape of circle packing problems.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class CirclePackingProblem:
+    def __init__(self, n_circles: int = 21, rect_width: float = 1.0, rect_height: float = 1.0):
+        self.n_circles = n_circles
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+=======
+class CirclePackingProblem:
+    def __init__(self, n_circles: int = 21, rect_width: float = 1.0, rect_height: float = 1.0):
+        self.n_circles = n_circles
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+        self.constraint_relaxation_threshold = 0.05  # Allow up to 5% constraint violations initially
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def is_valid_solution(self, circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping using efficient spatial hashing."""
+        n = len(circles)
+
+        if n == 0:
+            return True
+
+        # Check bounds - vectorized
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+
+        if np.any(x_coords - radii < 0) or np.any(x_coords + radii > self.rect_width) or \
+           np.any(y_coords - radii < 0) or np.any(y_coords + radii > self.rect_height):
+            return False
+
+        # Use spatial indexing to detect overlaps efficiently
+        if len(radii) > 0:
+            avg_radius = np.mean(radii)
+            # Dynamic cell size based on average radius - more efficient than min radius
+            cell_size = max(0.001, avg_radius * 1.2)  # Slightly larger than average radius for efficiency
+        else:
+            cell_size = 0.01  # Fallback
+
+        # Grid dimensions
+        grid_width = int(np.ceil(self.rect_width / cell_size)) + 1
+        grid_height = int(np.ceil(self.rect_height / cell_size)) + 1
+
+        # Initialize grid with lists for each cell
+        grid = {}
+
+        # Place circles into grid cells
+        for i in range(n):
+            x, y, r = circles[i]
+            # Calculate grid bounds for this circle
+            min_cell_x = max(0, int((x - r) / cell_size))
+            max_cell_x = min(grid_width - 1, int((x + r) / cell_size))
+            min_cell_y = max(0, int((y - r) / cell_size))
+            max_cell_y = min(grid_height - 1, int((y + r) / cell_size))
+
+            # Add circle to all relevant grid cells
+            for gx in range(min_cell_x, max_cell_x + 1):
+                for gy in range(min_cell_y, max_cell_y + 1):
+                    if (gx, gy) not in grid:
+                        grid[(gx, gy)] = []
+                    grid[(gx, gy)].append(i)
+
+        # Check for overlaps within each grid cell and adjacent cells
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            # Get grid cell coordinates
+            cell_x = int(x1 / cell_size)
+            cell_y = int(y1 / cell_size)
+
+            # Check nearby cells (3x3 neighborhood)
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    nx, ny = cell_x + dx, cell_y + dy
+                    if (nx, ny) in grid:
+                        for j in grid[(nx, ny)]:
+                            # Skip self-comparison and ensure we don't double-check
+                            if i >= j:
+                                continue
+                            x2, y2, r2 = circles[j]
+                            # Check if circles overlap using squared distances for efficiency
+                            dx_squared = (x1 - x2)**2
+                            dy_squared = (y1 - y2)**2
+                            distance_squared = dx_squared + dy_squared
+                            radii_sum = r1 + r2
+                            if distance_squared < radii_sum * radii_sum:
+                                return False
+
+        return True
+=======
+    def is_valid_solution(self, circles: np.ndarray, allow_violations: bool = False) -> bool:
+        """Check if all circles are within bounds and non-overlapping using efficient spatial hashing."""
+        n = len(circles)
+
+        if n == 0:
+            return True
+
+        # Check bounds - vectorized
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+
+        # Count boundary violations
+        boundary_violations = (x_coords - radii < 0).sum() + (x_coords + radii > self.rect_width).sum() + \
+                              (y_coords - radii < 0).sum() + (y_coords + radii > self.rect_height).sum()
+
+        # If we're allowing violations and boundary violations are within threshold, proceed
+        if allow_violations and boundary_violations > 0:
+            violation_ratio = boundary_violations / (len(circles) * 4)
+            if violation_ratio <= self.constraint_relaxation_threshold:
+                pass  # Allow some boundary violations
+            else:
+                return False  # Too many violations
+
+        # Use spatial indexing to detect overlaps efficiently
+        if len(radii) > 0:
+            avg_radius = np.mean(radii)
+            # Dynamic cell size based on average radius - more efficient than min radius
+            cell_size = max(0.001, avg_radius * 1.2)  # Slightly larger than average radius for efficiency
+        else:
+            cell_size = 0.01  # Fallback
+
+        # Grid dimensions
+        grid_width = int(np.ceil(self.rect_width / cell_size)) + 1
+        grid_height = int(np.ceil(self.rect_height / cell_size)) + 1
+
+        # Initialize grid with lists for each cell
+        grid = {}
+
+        # Place circles into grid cells
+        for i in range(n):
+            x, y, r = circles[i]
+            # Calculate grid bounds for this circle
+            min_cell_x = max(0, int((x - r) / cell_size))
+            max_cell_x = min(grid_width - 1, int((x + r) / cell_size))
+            min_cell_y = max(0, int((y - r) / cell_size))
+            max_cell_y = min(grid_height - 1, int((y + r) / cell_size))
+
+            # Add circle to all relevant grid cells
+            for gx in range(min_cell_x, max_cell_x + 1):
+                for gy in range(min_cell_y, max_cell_y + 1):
+                    if (gx, gy) not in grid:
+                        grid[(gx, gy)] = []
+                    grid[(gx, gy)].append(i)
+
+        # Check for overlaps within each grid cell and adjacent cells
+        overlap_violations = 0
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            # Get grid cell coordinates
+            cell_x = int(x1 / cell_size)
+            cell_y = int(y1 / cell_size)
+
+            # Check nearby cells (3x3 neighborhood)
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    nx, ny = cell_x + dx, cell_y + dy
+                    if (nx, ny) in grid:
+                        for j in grid[(nx, ny)]:
+                            # Skip self-comparison and ensure we don't double-check
+                            if i >= j:
+                                continue
+                            x2, y2, r2 = circles[j]
+                            # Check if circles overlap using squared distances for efficiency
+                            dx_squared = (x1 - x2)**2
+                            dy_squared = (y1 - y2)**2
+                            distance_squared = dx_squared + dy_squared
+                            radii_sum = r1 + r2
+                            if distance_squared < radii_sum * radii_sum:
+                                overlap_violations += 1
+
+        # If we're allowing violations and overlap violations are within threshold, proceed
+        if allow_violations and overlap_violations > 0:
+            violation_ratio = overlap_violations / (len(circles) * (len(circles) - 1) / 2)
+            if violation_ratio <= self.constraint_relaxation_threshold:
+                return True  # Allow overlaps within threshold
+            else:
+                return False  # Too many overlaps
+
+        # If we're not allowing violations, return true only if no violations exist
+        return overlap_violations == 0 and boundary_violations == 0
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_fitness(self, circles: np.ndarray) -> float:
+        """Evaluate fitness as sum of radii."""
+        return np.sum(circles[:, 2])
+=======
+    def evaluate_fitness(self, circles: np.ndarray, allow_violations: bool = False) -> float:
+        """Evaluate fitness as sum of radii with optional constraint relaxation."""
+        # If violations are allowed, we might want to penalize them differently
+        if allow_violations:
+            # For now, just return sum of radii but we'll track violations separately
+            return np.sum(circles[:, 2])
+        else:
+            return np.sum(circles[:, 2])
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class LocalOptimizer:
+    """Performs local optimization with Voronoi-aware strategies."""
+
+    def __init__(self, problem: CirclePackingProblem, mutation_engine: CircleMutationEngine):
+        self.problem = problem
+        self.mutation_engine = mutation_engine
+
+    def optimize(self, circles: np.ndarray, max_iter: int = 50, patience: int = 10) -> np.ndarray:
+        """Perform enhanced local optimization."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.problem.evaluate_fitness(current_circles)
+
+        patience_counter = 0
+        last_improvement = 0
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Compute Voronoi densities once per iteration for consistency
+            density_scores = self.problem.compute_voronoi_density(current_circles)
+
+            # Mutate each circle
+            for i in range(len(current_circles)):
+                # Try position mutation with adaptive parameters
+                mutated_pos = self.mutation_engine.mutate_position(current_circles, i, density_scores)
+
+                # Try radius mutation with adaptive parameters
+                mutated_rad = self.mutation_engine.mutate_radius(current_circles, i, density_scores)
+
+                # Evaluate both mutations
+                pos_fitness = self.problem.evaluate_fitness(mutated_pos)
+                rad_fitness = self.problem.evaluate_fitness(mutated_rad)
+
+                # Choose the better one
+                if pos_fitness > rad_fitness:
+                    if self.problem.is_valid_solution(mutated_pos):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.problem.is_valid_solution(mutated_rad):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution
+            current_fitness = self.problem.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+                patience_counter = 0
+                last_improvement = iteration
+            else:
+                patience_counter += 1
+
+            # Early stopping if no improvement
+            if patience_counter >= patience or (iteration - last_improvement > max_iter // 2):
+                break
+
+        return best_circles
+=======
+class LocalOptimizer:
+    """Performs local optimization with Voronoi-aware strategies."""
+
+    def __init__(self, problem: CirclePackingProblem, mutation_engine: CircleMutationEngine):
+        self.problem = problem
+        self.mutation_engine = mutation_engine
+
+    def optimize(self, circles: np.ndarray, max_iter: int = 50, patience: int = 10,
+                allow_constraint_relaxation: bool = False, relaxation_steps: int = 10) -> np.ndarray:
+        """Perform enhanced local optimization with optional constraint relaxation."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.problem.evaluate_fitness(current_circles)
+
+        patience_counter = 0
+        last_improvement = 0
+
+        # For constraint relaxation, we start with relaxed constraints and gradually tighten
+        if allow_constraint_relaxation:
+            # Start with relaxed constraints for first few steps
+            relaxation_progress = 0
+            current_relaxation_threshold = self.problem.constraint_relaxation_threshold
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Adjust relaxation threshold if needed
+            if allow_constraint_relaxation:
+                if iteration < relaxation_steps:
+                    # Gradually reduce relaxation threshold
+                    current_relaxation_threshold = self.problem.constraint_relaxation_threshold * (1.0 - iteration / relaxation_steps)
+                else:
+                    current_relaxation_threshold = 0.0  # No relaxation for rest of optimization
+
+            # Compute Voronoi densities once per iteration for consistency
+            density_scores = self.problem.compute_voronoi_density(current_circles)
+
+            # Mutate each circle
+            for i in range(len(current_circles)):
+                # Try position mutation with adaptive parameters
+                mutated_pos = self.mutation_engine.mutate_position(current_circles, i, density_scores)
+
+                # Try radius mutation with adaptive parameters
+                mutated_rad = self.mutation_engine.mutate_radius(current_circles, i, density_scores)
+
+                # Evaluate both mutations - allow constraint relaxation during evaluation
+                allow_violations = (allow_constraint_relaxation and
+                                  (iteration < relaxation_steps or current_relaxation_threshold > 0.0))
+
+                pos_fitness = self.problem.evaluate_fitness(mutated_pos, allow_violations)
+                rad_fitness = self.problem.evaluate_fitness(mutated_rad, allow_violations)
+
+                # Choose the better one
+                if pos_fitness > rad_fitness:
+                    if self.problem.is_valid_solution(mutated_pos, allow_violations):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.problem.is_valid_solution(mutated_rad, allow_violations):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution
+            current_fitness = self.problem.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+                patience_counter = 0
+                last_improvement = iteration
+            else:
+                patience_counter += 1
+
+            # Early stopping if no improvement
+            if patience_counter >= patience or (iteration - last_improvement > max_iter // 2):
+                break
+
+        return best_circles
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    best_solution = None
+    best_score = -float('inf')
+
+    # Multi-start optimization with different strategies
+    for seed_pattern in initial_patterns:
+        # Apply local optimization to get better starting points
+        optimized_pattern = optimizer.optimize(seed_pattern, max_iter=30)
+
+        # Further refine using a few rounds of local search
+        final_circles = optimizer.optimize(optimized_pattern, max_iter=20)
+
+        score = problem.evaluate_fitness(final_circles)
+        if score > best_score and problem.is_valid_solution(final_circles):
+            best_score = score
+            best_solution = final_circles.copy()
+
+    # Final fine-tuning
+    if best_solution is not None:
+        # Apply more extensive local optimization
+        best_solution = optimizer.optimize(best_solution, max_iter=50)
+
+    # Ensure final validity
+    if best_solution is None:
+        # Fallback to random initialization
+        best_solution = problem._generate_random_pattern()
+        best_solution = optimizer.optimize(best_solution, max_iter=100)
+
+    return best_solution
+=======
+    best_solution = None
+    best_score = -float('inf')
+
+    # Multi-start optimization with different strategies
+    for seed_pattern in initial_patterns:
+        # Apply local optimization to get better starting points with constraint relaxation
+        optimized_pattern = optimizer.optimize(seed_pattern, max_iter=30,
+                                              allow_constraint_relaxation=True, relaxation_steps=10)
+
+        # Further refine using a few rounds of local search
+        final_circles = optimizer.optimize(optimized_pattern, max_iter=20,
+                                          allow_constraint_relaxation=True, relaxation_steps=5)
+
+        score = problem.evaluate_fitness(final_circles)
+        if score > best_score and problem.is_valid_solution(final_circles):
+            best_score = score
+            best_solution = final_circles.copy()
+
+    # Final fine-tuning with strict constraint enforcement
+    if best_solution is not None:
+        # Apply more extensive local optimization with strict constraints
+        best_solution = optimizer.optimize(best_solution, max_iter=50,
+                                          allow_constraint_relaxation=False)
+
+    # Ensure final validity
+    if best_solution is None:
+        # Fallback to random initialization
+        best_solution = problem._generate_random_pattern()
+        best_solution = optimizer.optimize(best_solution, max_iter=100)
+
+    return best_solution
+>>>>>>> REPLACE

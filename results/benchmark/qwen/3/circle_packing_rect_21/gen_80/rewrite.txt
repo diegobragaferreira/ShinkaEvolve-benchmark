@@ -1,0 +1,339 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH_HEIGHT_RATIO = 1.0  # Square rectangle for simplicity
+RECT_WIDTH = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
+RECT_HEIGHT = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
+MAX_RADIUS = min(RECT_WIDTH, RECT_HEIGHT) / 2.0
+
+# Spatial indexing for fast collision detection with adaptive cell sizing
+class AdaptiveSpatialIndex:
+    def __init__(self, cell_size: float = 0.1):
+        self.base_cell_size = cell_size
+        self.grid = {}
+        self.cell_size = cell_size
+        
+    def _get_cell(self, x: float, y: float) -> Tuple[int, int]:
+        return (int(x // self.cell_size), int(y // self.cell_size))
+    
+    def insert(self, idx: int, x: float, y: float, r: float):
+        cell = self._get_cell(x, y)
+        if cell not in self.grid:
+            self.grid[cell] = []
+        self.grid[cell].append((idx, x, y, r))
+    
+    def get_candidates(self, x: float, y: float, r: float) -> List[Tuple[int, float, float, float]]:
+        candidates = []
+        cell = self._get_cell(x, y)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                if neighbor_cell in self.grid:
+                    candidates.extend(self.grid[neighbor_cell])
+        return candidates
+    
+    def update_cell_size(self, circles: np.ndarray):
+        """Adaptively adjust cell size based on current circle density and spread"""
+        if len(circles) == 0:
+            self.cell_size = self.base_cell_size
+            return
+            
+        # Calculate average distance between circles
+        if len(circles) > 1:
+            # Create coordinate matrix
+            coords = circles[:, :2]  # Get x,y coordinates
+            distances = cdist(coords, coords)
+            # Zero out diagonal elements
+            np.fill_diagonal(distances, np.inf)
+            # Get minimum distances
+            min_distances = np.min(distances, axis=1)
+            avg_distance = np.mean(min_distances[min_distances > 0])
+            # Adjust cell size based on average circle spacing
+            self.cell_size = max(self.base_cell_size, avg_distance / 2.0)
+        else:
+            self.cell_size = self.base_cell_size
+
+def validate_placement(circles: np.ndarray, idx: int, x: float, y: float, r: float, 
+                      spatial_index: AdaptiveSpatialIndex) -> bool:
+    """Check if placing a circle at (x,y) with radius r is valid."""
+    # Check boundary constraints
+    if x - r < 0 or x + r > RECT_WIDTH or y - r < 0 or y + r > RECT_HEIGHT:
+        return False
+    
+    # Check collisions with existing circles using spatial index
+    candidates = spatial_index.get_candidates(x, y, r)
+    for i, cx, cy, cr in candidates:
+        # Calculate distance between centers
+        dx = x - cx
+        dy = y - cy
+        distance = np.sqrt(dx * dx + dy * dy)
+        # Check if circles overlap
+        if distance < (r + cr):
+            return False
+            
+    return True
+
+def compute_max_radius(circles: np.ndarray, x: float, y: float, 
+                      spatial_index: AdaptiveSpatialIndex) -> float:
+    """Compute maximum radius for a circle at position (x,y) without overlap."""
+    max_r = min(x, RECT_WIDTH - x, y, RECT_HEIGHT - y)
+    
+    # Check collisions with existing circles
+    candidates = spatial_index.get_candidates(x, y, max_r)
+    for i, cx, cy, cr in candidates:
+        dx = x - cx
+        dy = y - cy
+        distance = np.sqrt(dx * dx + dy * dy)
+        max_r = min(max_r, distance - cr)
+        
+    return max(max_r, 0.001)  # Ensure positive radius
+
+def evaluate_solution(circles: np.ndarray) -> float:
+    """Evaluate fitness (sum of radii) for a solution."""
+    return np.sum(circles[:, 2])
+
+def initialize_circles(n: int) -> np.ndarray:
+    """Initialize circles using a strategic hybrid placement approach."""
+    circles = np.zeros((n, 3))
+    
+    # Strategic points: corners and center
+    strategic_positions = [
+        (RECT_WIDTH * 0.1, RECT_HEIGHT * 0.1),          # Bottom-left
+        (RECT_WIDTH * 0.9, RECT_HEIGHT * 0.1),          # Bottom-right
+        (RECT_WIDTH * 0.1, RECT_HEIGHT * 0.9),          # Top-left
+        (RECT_WIDTH * 0.9, RECT_HEIGHT * 0.9),          # Top-right
+        (RECT_WIDTH / 2, RECT_HEIGHT / 2),              # Center
+    ]
+    
+    # Place strategic circles with small but meaningful radii
+    for i, (x, y) in enumerate(strategic_positions[:min(len(strategic_positions), n)]):
+        circles[i] = [x, y, 0.025]
+    
+    # Fill remaining positions with distributed sampling
+    # For better distribution, we'll sample systematically in grid-like fashion
+    remaining_slots = n - len(strategic_positions)
+    if remaining_slots > 0:
+        # Calculate grid dimensions
+        rows = int(np.ceil(np.sqrt(remaining_slots))) + 2
+        cols = int(np.ceil(remaining_slots / rows)) + 2
+        
+        # Create a grid of sample points with padding
+        x_samples = np.linspace(0.1, RECT_WIDTH - 0.1, cols)
+        y_samples = np.linspace(0.1, RECT_HEIGHT - 0.1, rows)
+        
+        idx = len(strategic_positions)
+        for i, x in enumerate(x_samples):
+            for j, y in enumerate(y_samples):
+                if idx >= n:
+                    break
+                # Skip points too close to strategic positions
+                skip = False
+                for sx, sy in strategic_positions:
+                    if np.sqrt((x - sx)**2 + (y - sy)**2) < 0.1:
+                        skip = True
+                        break
+                if not skip:
+                    circles[idx] = [x, y, 0.01]
+                    idx += 1
+                if idx >= n:
+                    break
+    
+    # Ensure we have exactly n circles
+    for i in range(len(circles), n):
+        x = random.uniform(0.05, RECT_WIDTH - 0.05)
+        y = random.uniform(0.05, RECT_HEIGHT - 0.05)
+        circles[i] = [x, y, 0.01]
+        
+    return circles
+
+def local_search_step(circles: np.ndarray, spatial_index: AdaptiveSpatialIndex) -> np.ndarray:
+    """Perform one step of enhanced local search improving the current solution."""
+    new_circles = circles.copy()
+    n = len(new_circles)
+    
+    # Select multiple circles to potentially improve (not just one)
+    selected_indices = random.sample(range(n), min(5, n))
+    
+    for idx in selected_indices:
+        old_x, old_y, old_r = new_circles[idx]
+        
+        # Try to improve this circle's position and radius
+        best_x, best_y, best_r = old_x, old_y, old_r
+        best_improvement = 0
+        
+        # First, try to increase radius at current position
+        new_r = compute_max_radius(new_circles, old_x, old_y, spatial_index)
+        if new_r > old_r:
+            best_r = new_r
+            best_improvement = new_r - old_r
+        
+        # Then, try different positions with different movement strategies
+        move_strategies = [
+            # Small random movements
+            [(dx, dy) for dx in [-0.01, 0, 0.01] for dy in [-0.01, 0, 0.01]],
+            # Larger movements
+            [(dx, dy) for dx in [-0.03, -0.015, 0, 0.015, 0.03] for dy in [-0.03, -0.015, 0, 0.015, 0.03]],
+            # Diagonal movements
+            [(dx, dx) for dx in [-0.02, -0.01, 0, 0.01, 0.02]]
+        ]
+        
+        for strategy in move_strategies:
+            for dx, dy in strategy:
+                new_x = old_x + dx
+                new_y = old_y + dy
+                
+                # Keep within bounds
+                new_x = max(0.01, min(RECT_WIDTH - 0.01, new_x))
+                new_y = max(0.01, min(RECT_HEIGHT - 0.01, new_y))
+                
+                # Compute max radius at new location
+                new_r = compute_max_radius(new_circles, new_x, new_y, spatial_index)
+                
+                # Check if this is a valid improvement
+                if new_r > old_r:
+                    improvement = new_r - old_r
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_x, best_y, best_r = new_x, new_y, new_r
+        
+        # Apply best improvement if found
+        if best_improvement > 0:
+            new_circles[idx] = [best_x, best_y, best_r]
+    
+    return new_circles
+
+def adaptive_optimization(initial_circles: np.ndarray, max_iter: int = 10000) -> np.ndarray:
+    """Run a multi-stage adaptive optimization approach."""
+    circles = initial_circles.copy()
+    spatial_index = AdaptiveSpatialIndex()
+    
+    # Initialize spatial index
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        spatial_index.insert(i, x, y, r)
+    
+    current_fitness = evaluate_solution(circles)
+    best_fitness = current_fitness
+    best_circles = circles.copy()
+    
+    # Stage 1: Coarse global optimization (large moves)
+    stage1_iter = max_iter // 4
+    temp = 1.0
+    cooling_rate = 0.999
+    min_temp = 1e-6
+    
+    for iteration in range(stage1_iter):
+        # Update spatial index cell size for better performance
+        spatial_index.update_cell_size(circles)
+        
+        # Take multiple steps at current temperature
+        for step in range(50):  # Fewer steps due to large moves
+            new_circles = local_search_step(circles, spatial_index)
+            
+            new_fitness = evaluate_solution(new_circles)
+            
+            # Accept or reject the move
+            delta = new_fitness - current_fitness
+            if delta > 0 or random.random() < np.exp(delta / temp):
+                circles = new_circles
+                current_fitness = new_fitness
+                
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_circles = circles.copy()
+        
+        temp *= cooling_rate
+    
+    # Stage 2: Medium-scale refinement 
+    stage2_iter = max_iter // 4
+    temp = 0.3
+    cooling_rate = 0.9995
+    min_temp = 1e-6
+    
+    for iteration in range(stage2_iter):
+        # Update spatial index cell size
+        spatial_index.update_cell_size(circles)
+        
+        # Take multiple steps at current temperature
+        for step in range(100):  # More steps for fine tuning
+            new_circles = local_search_step(circles, spatial_index)
+            
+            new_fitness = evaluate_solution(new_circles)
+            
+            # Accept or reject the move
+            delta = new_fitness - current_fitness
+            if delta > 0 or random.random() < np.exp(delta / temp):
+                circles = new_circles
+                current_fitness = new_fitness
+                
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_circles = circles.copy()
+        
+        temp *= cooling_rate
+    
+    # Stage 3: Fine-grained local optimization
+    stage3_iter = max_iter // 2
+    temp = 0.05
+    cooling_rate = 0.9999
+    min_temp = 1e-8
+    
+    for iteration in range(stage3_iter):
+        # Update spatial index cell size
+        spatial_index.update_cell_size(circles)
+        
+        # Take multiple steps at current temperature
+        for step in range(200):  # Many steps for very fine tuning
+            new_circles = local_search_step(circles, spatial_index)
+            
+            new_fitness = evaluate_solution(new_circles)
+            
+            # Accept or reject the move
+            delta = new_fitness - current_fitness
+            if delta > 0 or random.random() < np.exp(delta / temp):
+                circles = new_circles
+                current_fitness = new_fitness
+                
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_circles = circles.copy()
+        
+        temp *= cooling_rate
+    
+    return best_circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Initialize circles using the hybrid approach
+    circles = initialize_circles(21)
+    
+    # Run adaptive multi-stage optimization
+    optimized_circles = adaptive_optimization(circles, max_iter=8000)
+    
+    # Final fine-tuning with additional local search
+    spatial_index = AdaptiveSpatialIndex()
+    for i in range(len(optimized_circles)):
+        x, y, r = optimized_circles[i]
+        spatial_index.insert(i, x, y, r)
+    
+    # Perform additional targeted local searches
+    for i in range(2000):
+        optimized_circles = local_search_step(optimized_circles, spatial_index)
+        # Occasionally update spatial index for better performance
+        if i % 100 == 0:
+            spatial_index.update_cell_size(optimized_circles)
+    
+    return optimized_circles
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,257 @@
+--- a/original.py
++++ b/original.py
+@@ -1,25 +1,249 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial import Voronoi, distance_matrix
++from scipy.spatial.distance import cdist
++from sklearn.cluster import KMeans
++import math
++from typing import Tuple, List
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
++    
++    # Rectangle dimensions: width + height = 2, let's use 1.5 x 0.5 for good aspect ratio
++    width = 1.5
++    height = 0.5
++    
++    # Maximum possible sum of radii when circles are just touching would be width + height = 2
++    # Our target is to get close to this optimal value
+     n = 21
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    
++    # Initialize with hexagonal packing pattern for good spatial distribution
++    circles = generate_hexagonal_initialization(n, width, height)
++    
++    # Set up spatial indexing for efficient collision detection
++    def check_collision(circle_a, circle_b):
++        """Check if two circles collide"""
++        dist = np.sqrt((circle_a[0] - circle_b[0])**2 + (circle_a[1] - circle_b[1])**2)
++        return dist < (circle_a[2] + circle_b[2])
++    
++    def is_valid_placement(circle, existing_circles, w, h):
++        """Check if a circle is within bounds and doesn't collide with others"""
++        # Check boundary constraints
++        if (circle[0] - circle[2] < 0 or circle[0] + circle[2] > w or 
++            circle[1] - circle[2] < 0 or circle[1] + circle[2] > h):
++            return False
++        
++        # Check collision with existing circles
++        for existing_circle in existing_circles:
++            if check_collision(circle, existing_circle):
++                return False
++        return True
++    
++    def compute_voronoi_constraints(circles_list):
++        """Compute constraint scores based on Voronoi diagram"""
++        if len(circles_list) < 2:
++            return [0.0] * len(circles_list)
++        
++        # Get circle centers
++        centers = np.array([[c[0], c[1]] for c in circles_list])
++        
++        try:
++            vor = Voronoi(centers)
++            # Calculate constraint scores based on minimum distances
++            scores = []
++            for i, center in enumerate(centers):
++                # Find neighboring vertices in Voronoi diagram
++                neighbors = []
++                for j, vertex in enumerate(vor.vertices):
++                    if i in vor.ridge_points[j]:
++                        neighbors.append(vertex)
++                
++                # For simplicity, just measure minimum distance to other centers
++                distances = [np.linalg.norm(center - other_center) 
++                           for j, other_center in enumerate(centers) if j != i]
++                if distances:
++                    min_dist = min(distances)
++                    # Score inversely proportional to available space (lower is better)
++                    scores.append(min_dist)
++                else:
++                    scores.append(float('inf'))
++            return scores
++        except:
++            # Fallback: use simple density-based scoring
++            distances = distance_matrix(centers, centers)
++            # Ignore diagonal
++            np.fill_diagonal(distances, float('inf'))
++            min_distances = np.min(distances, axis=1)
++            return [1.0/(d+1e-9) for d in min_distances]  # Convert to constraint score
++    
++    def adaptive_local_optimization(circles_array, w, h, max_iter=50):
++        """Perform adaptive local optimization with Voronoi-guided prioritization"""
++        circles_list = [list(circle) for circle in circles_array]
++        
++        for iteration in range(max_iter):
++            # Compute constraint scores for all circles
++            constraint_scores = compute_voronoi_constraints(circles_list)
++            
++            # Sort circles by constraint score (most constrained first)
++            sorted_indices = sorted(range(len(constraint_scores)), 
++                                  key=lambda i: constraint_scores[i])
++            
++            # Try to increase radii of most constrained circles first
++            improved = False
++            
++            for idx in reversed(sorted_indices):  # Process from most constrained to least
++                if idx >= len(circles_list):
++                    continue
++                    
++                circle = circles_list[idx]
++                old_radius = circle[2]
++                
++                # Adaptive step size based on local constraints
++                # More constrained areas get smaller steps
++                step_size = max(0.001, 0.01 * (1.0 / (constraint_scores[idx] + 1e-9)))
++                
++                # Try to increase radius
++                new_radius = min(old_radius + step_size, 
++                               min(circle[0], w - circle[0], circle[1], h - circle[1]))
++                
++                # If we can increase the radius without collisions
++                test_circle = [circle[0], circle[1], new_radius]
++                if is_valid_placement(test_circle, circles_list, w, h):
++                    # Update circle
++                    circle[2] = new_radius
++                    circles_list[idx] = circle
++                    improved = True
++                
++                # Also try shrinking other circles to create space
++                if improved and iteration % 5 == 0:  # Periodically try shrinking
++                    shrink_factor = 0.9
++                    for other_idx in range(len(circles_list)):
++                        if other_idx != idx:
++                            other_circle = circles_list[other_idx]
++                            old_other_radius = other_circle[2]
++                            new_other_radius = max(0.001, old_other_radius * shrink_factor)
++                            test_other_circle = [other_circle[0], other_circle[1], new_other_radius]
++                            
++                            if is_valid_placement(test_other_circle, circles_list, w, h):
++                                other_circle[2] = new_other_radius
++                                circles_list[other_idx] = other_circle
++                                break
++            
++            # If no improvements were made, break early
++            if not improved:
++                break
++                
++        # Return as numpy array
++        return np.array(circles_list)
++    
++    def generate_hexagonal_initialization(n, w, h):
++        """Generate initial circle positions in a hexagonal pattern"""
++        circles = []
++        
++        # Hexagonally packed circles with some randomness
++        rows = int(np.ceil(np.sqrt(n)))
++        cols = int(np.ceil(n / rows))
++        
++        # Adjust grid size for rectangular container
++        spacing_x = w / (cols + 1)
++        spacing_y = h / (rows + 1)
++        
++        # Start placement slightly within bounds
++        offset_x = spacing_x * 0.5
++        offset_y = spacing_y * 0.5
++        
++        for i in range(rows):
++            y_pos = offset_y + i * spacing_y
++            for j in range(cols):
++                x_pos = offset_x + j * spacing_x + (i % 2) * (spacing_x * 0.5)  # staggered rows
++                
++                if len(circles) >= n:
++                    break
++                    
++                # Add slight randomness to positions to avoid perfect patterns
++                x_pos += np.random.uniform(-spacing_x * 0.1, spacing_x * 0.1)
++                y_pos += np.random.uniform(-spacing_y * 0.1, spacing_y * 0.1)
++                
++                # Ensure within bounds
++                if 0 <= x_pos <= w and 0 <= y_pos <= h:
++                    # Start with small radius
++                    radius = min(x_pos, w-x_pos, y_pos, h-y_pos) * 0.3
++                    circles.append([x_pos, y_pos, radius])
++        
++        # Fill remaining slots if needed
++        while len(circles) < n:
++            # Random placement
++            x = np.random.uniform(0.01, w - 0.01)
++            y = np.random.uniform(0.01, h - 0.01)
++            radius = min(x, w-x, y, h-y) * 0.3
++            circles.append([x, y, radius])
++            
++        return np.array(circles[:n])
++    
++    # Multi-start optimization with multiple initializations
++    best_result = None
++    best_sum = 0
++    
++    # Try multiple random configurations
++    for attempt in range(5):
++        # Generate different initializations
++        if attempt == 0:
++            # First attempt: hexagonal
++            temp_circles = generate_hexagonal_initialization(n, width, height)
++        elif attempt == 1:
++            # Second attempt: random placement with constraints
++            temp_circles = np.zeros((n, 3))
++            for i in range(n):
++                temp_circles[i] = [
++                    np.random.uniform(0.01, width - 0.01),
++                    np.random.uniform(0.01, height - 0.01),
++                    0.05
++                ]
++        elif attempt == 2:
++            # Third attempt: grid pattern
++            temp_circles = np.zeros((n, 3))
++            rows = int(np.sqrt(n)) + 1
++            cols = int(np.ceil(n / rows))
++            dx = width / (cols + 1)
++            dy = height / (rows + 1)
++            
++            for i in range(n):
++                row = i // cols
++                col = i % cols
++                x = dx * (col + 1) + (row % 2) * (dx * 0.5) if row < rows else np.random.uniform(0.01, width - 0.01)
++                y = dy * (row + 1) if row < rows else np.random.uniform(0.01, height - 0.01)
++                temp_circles[i] = [x, y, 0.05]
++        else:
++            # Remaining attempts: random with better initial radii
++            temp_circles = np.zeros((n, 3))
++            for i in range(n):
++                temp_circles[i] = [
++                    np.random.uniform(0.01, width - 0.01),
++                    np.random.uniform(0.01, height - 0.01),
++                    np.random.uniform(0.02, 0.1)
++                ]
++        
++        # Apply local optimization to current initialization
++        optimized_circles = adaptive_local_optimization(temp_circles, width, height)
++        
++        # Validate the result
++        total_radius = np.sum(optimized_circles[:, 2])
++        if total_radius > best_sum:
++            best_sum = total_radius
++            best_result = optimized_circles.copy()
++    
++    return best_result if best_result is not None else np.zeros((n, 3))
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,343 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist
+from scipy.spatial import SphericalVoronoi
+import time
+from copy import deepcopy
+from typing import Tuple, Optional, Callable
+
+class SphericalPointOptimizer:
+    """Modular optimizer for 3D point dispersion with enhanced performance."""
+    
+    def __init__(self, n_points: int = 14, d: int = 3):
+        self.n_points = n_points
+        self.d = d
+        self.best_ratio = -np.inf
+        self.best_points = None
+        
+    def fibonacci_sphere(self, n: int) -> np.ndarray:
+        """Generate n points on a sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+    
+    def normalize_to_unit_sphere(self, points: np.ndarray) -> np.ndarray:
+        """Normalize points to lie exactly on unit sphere."""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms
+    
+    def calculate_ratio(self, points: np.ndarray) -> Tuple[float, float, float]:
+        """Calculate distance ratio and statistics efficiently."""
+        if len(points) < 2:
+            return 0.0, 0.0, 0.0
+            
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0, 0.0, 0.0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        if d_max < 1e-10:
+            return 0.0, 0.0, 0.0
+            
+        ratio = d_min / d_max
+        return ratio, d_min, d_max
+    
+    def spherical_voronoi_uniformity(self, points: np.ndarray) -> float:
+        """Calculate uniformity score based on spherical Voronoi cell areas."""
+        try:
+            sv = SphericalVoronoi(points)
+            areas = sv.voronoi_cell_areas()
+            # Return variance of areas - lower is better (more uniform)
+            return np.var(areas)
+        except:
+            return np.inf
+    
+    def initialize_population(self, pop_size: int) -> list:
+        """Initialize diverse population with spherical constraints."""
+        population = []
+        for i in range(pop_size):
+            np.random.seed(i * 42)
+            # Use Fibonacci for base, add different noise patterns
+            if i == 0:
+                # Pure Fibonacci
+                points = self.fibonacci_sphere(self.n_points)
+            elif i == 1:
+                # Perturbed Fibonacci with larger noise
+                points = self.fibonacci_sphere(self.n_points)
+                noise = np.random.normal(0, 0.1, points.shape)
+                points = points + noise
+            else:
+                # Random on sphere
+                points = np.random.randn(self.n_points, self.d)
+            
+            # Normalize to sphere and add small random noise
+            points = self.normalize_to_unit_sphere(points)
+            if i > 0:
+                noise = np.random.normal(0, 0.02, points.shape)
+                points = points + noise
+                points = self.normalize_to_unit_sphere(points)
+            
+            population.append(points)
+        return population
+    
+    def evaluate_individual(self, points: np.ndarray) -> Tuple[float, float]:
+        """Evaluate individual with comprehensive metrics."""
+        # Ensure points are on unit sphere
+        points = self.normalize_to_unit_sphere(points)
+        
+        # Calculate distances and ratio
+        ratio, d_min, d_max = self.calculate_ratio(points)
+        
+        if d_max < 1e-10:
+            return -np.inf, 0
+        
+        # Add penalty for non-uniform Voronoi distribution
+        uniformity_penalty = self.spherical_voronoi_uniformity(points)
+        # Weight this penalty heavily to encourage uniformity
+        total_score = ratio - 0.5 * uniformity_penalty
+        
+        return total_score, ratio
+    
+    def evolutionary_search(self, max_generations: int = 50, pop_size: int = 20) -> Tuple[Optional[np.ndarray], float]:
+        """Perform evolutionary search on spherical points."""
+        # Initialize population
+        population = self.initialize_population(pop_size)
+        
+        best_fitness = -np.inf
+        best_individual = None
+        
+        for gen in range(max_generations):
+            # Evaluate population
+            fitness_scores = []
+            ratios = []
+            
+            for individual in population:
+                fitness, ratio = self.evaluate_individual(individual)
+                fitness_scores.append(fitness)
+                ratios.append(ratio)
+            
+            # Find best individuals
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            best_idx = sorted_indices[0]
+            
+            if fitness_scores[best_idx] > best_fitness:
+                best_fitness = fitness_scores[best_idx]
+                best_individual = deepcopy(population[best_idx])
+            
+            # Create next generation
+            new_population = []
+            elite_size = min(4, len(population) // 2)
+            
+            # Elitism - keep best individuals
+            for i in range(elite_size):
+                new_population.append(deepcopy(population[sorted_indices[i]]))
+            
+            # Generate offspring through crossover and mutation
+            while len(new_population) < pop_size:
+                # Tournament selection
+                tournament_size = 3
+                selected_indices = np.random.choice(len(population), tournament_size)
+                tournament_fitness = [fitness_scores[i] for i in selected_indices]
+                winner_idx = selected_indices[np.argmax(tournament_fitness)]
+                
+                # Select second parent
+                selected_indices2 = np.random.choice(len(population), tournament_size)
+                tournament_fitness2 = [fitness_scores[i] for i in selected_indices2]
+                winner_idx2 = selected_indices2[np.argmax(tournament_fitness2)]
+                
+                # Simple average crossover
+                offspring = (population[winner_idx] + population[winner_idx2]) / 2.0
+                # Ensure offspring stays on unit sphere
+                offspring = self.normalize_to_unit_sphere(offspring)
+                
+                # Mutation
+                mutated = deepcopy(offspring)
+                mutation_rate = 0.15
+                for i in range(len(mutated)):
+                    if np.random.random() < mutation_rate:
+                        # Add noise and renormalize
+                        noise = np.random.normal(0, 0.05, 3)
+                        mutated[i] = mutated[i] + noise
+                        mutated[i] = self.normalize_to_unit_sphere(mutated[i:i+1])[0]
+                
+                new_population.append(mutated)
+            
+            population = new_population[:pop_size]
+        
+        return best_individual, best_fitness
+
+class HybridOptimizer:
+    """Handles multi-stage optimization approach."""
+    
+    @staticmethod
+    def setup_objective_function() -> Callable:
+        """Create objective function for distance ratio maximization."""
+        def objective(x):
+            # Reshape x into points in 3D
+            points = x.reshape(-1, 3)
+
+            # Calculate pairwise distances
+            distances = pdist(points)
+
+            # Get min and max distances
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+
+            # Return negative ratio since we want to maximize
+            # We add a small epsilon to avoid division by zero
+            if d_max < 1e-10:
+                return -1e10
+            return -d_min / d_max
+        return objective
+    
+    @staticmethod
+    def refine_with_methods(initial_points: np.ndarray, bounds: list, 
+                          max_iter: int = 300) -> np.ndarray:
+        """Apply multiple refinement methods with progressive tightening."""
+        # Stage 1: Coarse optimization
+        coarse_result = minimize(
+            HybridOptimizer.setup_objective_function(),
+            initial_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': max_iter // 3},
+            callback=None
+        )
+        
+        # Stage 2: Fine optimization with tighter tolerances
+        if coarse_result.success:
+            fine_result = minimize(
+                HybridOptimizer.setup_objective_function(),
+                coarse_result.x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': max_iter // 2},
+                callback=None
+            )
+            return fine_result.x.reshape(-1, 3)
+        
+        return initial_points.reshape(-1, 3)
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Initialize optimizer
+    optimizer = SphericalPointOptimizer(n_points=14, d=3)
+    
+    # Track time to prevent exceeding budget
+    start_time = time.time()
+    timeout_seconds = 350  # 10 seconds buffer for cleanup
+    
+    # Multi-stage approach: Evolutionary → Traditional Multi-start
+    
+    # Stage 1: Evolutionary search (if time allows)
+    try:
+        if time.time() - start_time < timeout_seconds:
+            evolved_points, evolved_fitness = optimizer.evolutionary_search()
+            if evolved_points is not None:
+                ratio, _, _ = optimizer.calculate_ratio(evolved_points)
+                if ratio > optimizer.best_ratio:
+                    optimizer.best_ratio = ratio
+                    optimizer.best_points = evolved_points.copy()
+    except Exception as e:
+        pass
+    
+    # Stage 2: Traditional multi-start with enhanced initialization
+    # Use various initializations to find global optimum
+    init_seeds = [42, 123, 456, 789, 999]
+    init_methods = ['fibonacci', 'sobol', 'random']
+    
+    for seed in init_seeds:
+        if time.time() - start_time > timeout_seconds:
+            break
+            
+        try:
+            np.random.seed(seed)
+            
+            # Different initialization strategies
+            if seed % 3 == 0:
+                # Fibonacci approach
+                initial_points = optimizer.fibonacci_sphere(14)
+                # Scale to fit within [0.1, 0.9] range to avoid boundary issues
+                initial_points = (initial_points + 1) / 2 * 0.8 + 0.1
+            else:
+                # Random approach
+                initial_points = np.random.rand(14, 3) * 0.8 + 0.1
+                
+            # Add slight random perturbation to break symmetry
+            initial_points += np.random.normal(0, 0.01, initial_points.shape)
+            
+            # Ensure all points stay within bounds
+            initial_points = np.clip(initial_points, 0.0, 1.0)
+            
+            # Set up bounds for optimization (0 to 1 for all coordinates)
+            bounds = [(0.0, 1.0)] * 14 * 3
+
+            # First stage: Differential Evolution for global search
+            de_result = differential_evolution(
+                HybridOptimizer.setup_objective_function(),
+                bounds,
+                seed=seed,
+                maxiter=250,
+                popsize=12,
+                tol=1e-8,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                disp=False
+            )
+            
+            # Second stage: Local refinement with progressive tightening
+            refined_points = HybridOptimizer.refine_with_methods(de_result.x, bounds, max_iter=300)
+            
+            # Evaluate final result
+            ratio, _, _ = optimizer.calculate_ratio(refined_points)
+            
+            if ratio > optimizer.best_ratio:
+                optimizer.best_ratio = ratio
+                optimizer.best_points = refined_points.copy()
+                    
+        except Exception as e:
+            continue
+    
+    # Fallback to simple initialization if needed
+    if optimizer.best_points is None:
+        np.random.seed(42)
+        points = np.random.rand(14, 3) * 0.8 + 0.1
+        bounds = [(0.0, 1.0)] * 14 * 3
+        
+        result = differential_evolution(
+            HybridOptimizer.setup_objective_function(),
+            bounds,
+            seed=42,
+            maxiter=200,
+            popsize=10,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            disp=False
+        )
+        return result.x.reshape(-1, 3)
+    
+    return optimizer.best_points
+
+# EVOLVE-BLOCK-END

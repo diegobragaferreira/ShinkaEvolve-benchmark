@@ -1,0 +1,209 @@
+<NAME>
+add_curvature_aware_optimization
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the program by implementing a more sophisticated curvature-aware optimization technique that leverages second-order information to improve convergence. Instead of just using finite differences for curvature estimation, I'll implement a more robust curvature-aware directional bias correction that considers the actual Hessian structure and uses better numerical approximations for curvature detection.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with curvature awareness."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware directional bias correction
+    # Estimate curvature using finite differences
+    if n > 10:
+        # Create small perturbations to estimate Hessian
+        epsilon = 1e-3
+        hessian_approx = np.zeros((n, n))
+
+        # Simple finite difference approximation of second derivatives
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += epsilon
+            if i > 0:  # Avoid boundary issues
+                perturbed_seq[i-1] -= epsilon / 2
+            if i < n-1:  # Avoid boundary issues
+                perturbed_seq[i+1] -= epsilon / 2
+
+            # Recompute convolution with perturbed sequence
+            if n > 100:
+                b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+            else:
+                b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+            second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon**2)
+            hessian_approx[i, i] = max(0, second_derivative)  # Ensure non-negative
+
+        # Apply curvature correction to the direction
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        # Scale correction appropriately
+        curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+
+        # Adjust the direction with curvature bias
+        corrected_direction = np.array(normalized_g_fun) + 0.1 * curvature_correction
+        normalized_g_fun = corrected_direction.tolist()
+
+    # Apply small perturbation for exploration
+    t = 0.05
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with curvature awareness."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware directional bias correction with more robust method
+    # Estimate curvature using a more stable second-order approximation
+    if n > 10:
+        # Use a more stable approach for curvature estimation using finite differences
+        epsilon = 1e-4  # Reduce epsilon for better numerical stability
+
+        # Instead of estimating full Hessian, estimate curvature along the current direction
+        # and apply a more principled correction
+        try:
+            # Compute directional derivative using centered differences with a better epsilon
+            directional_derivative = 0.0
+
+            # For numerical stability, compute curvature in a more robust way
+            # by taking the difference between successive gradients
+
+            # Get original gradient direction vector
+            grad_vector = np.array(normalized_g_fun)
+            # Perturb along this direction to estimate curvature
+            perturbed_seq1 = normalized_sequence.copy()
+            perturbed_seq2 = normalized_sequence.copy()
+
+            # Forward perturbation
+            perturbed_seq1 = [x + epsilon * y for x, y in zip(perturbed_seq1, grad_vector)]
+
+            # Backward perturbation
+            perturbed_seq2 = [x - epsilon * y for x, y in zip(perturbed_seq2, grad_vector)]
+
+            # Recompute convolution with perturbed sequences
+            if n > 100:
+                b_forward = convolve_fft(np.array(perturbed_seq1), np.array(perturbed_seq1))
+                b_backward = convolve_fft(np.array(perturbed_seq2), np.array(perturbed_seq2))
+            else:
+                b_forward = convolve_direct(np.array(perturbed_seq1), np.array(perturbed_seq1))
+                b_backward = convolve_direct(np.array(perturbed_seq2), np.array(perturbed_seq2))
+
+            # Estimate curvature directly from max convolution values
+            curv_forward = np.max(b_forward)
+            curv_backward = np.max(b_backward)
+            curv_center = np.max(b)
+
+            # More accurate second derivative approximation
+            curvature = (curv_forward + curv_backward - 2 * curv_center) / (epsilon ** 2)
+
+            # Only apply curvature correction if it's meaningful and positive
+            if curvature > 0:
+                # Apply curvature correction to improve convergence
+                curvature_correction = curvature * 0.01 * grad_vector
+
+                # Prevent over-correction
+                curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction) * 0.1)
+
+                # Adjust the direction with curvature bias
+                corrected_direction = np.array(normalized_g_fun) + curvature_correction
+                normalized_g_fun = corrected_direction.tolist()
+        except Exception:
+            # Fall back to simple approach if curvature estimation fails
+            pass
+
+    # Apply small perturbation for exploration
+    t = 0.05
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

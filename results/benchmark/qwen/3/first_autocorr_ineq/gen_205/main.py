@@ -1,0 +1,257 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.fft import fft, ifft
+from scipy.signal import convolve
+from cvxpy import *
+import time
+import random
+
+np.random.seed(42)
+random.seed(42)
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    """
+    if len(sequence) == 0:
+        return float('inf'), 0.0
+
+    a = np.array(sequence, dtype=np.float64)
+    n = len(a)
+
+    # Use direct convolution for small sequences and FFT for large
+    if n < 100:
+        conv_result = convolve(a, a, mode='full')[:2*n-1]
+    else:
+        # Compute convolution using FFT for efficiency
+        padded_len = 2 * n - 1
+        a_padded = np.pad(a, (0, padded_len - n), 'constant')
+        fft_a = fft(a_padded)
+        conv_fft = fft_a * np.conj(fft_a)
+        conv_result = ifft(conv_fft).real[:2*n-1]
+
+    max_b = np.max(conv_result)
+    sum_a = np.sum(a)
+
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+
+    C1 = 2 * n * max_b / (sum_a ** 2)
+    inv_C1 = 1 / C1
+
+    return C1, inv_C1
+
+def solve_convolution_quadratic_cvxpy(sequence):
+    """
+    Solves the optimization problem using convex optimization with appropriate constraints.
+    """
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    # Define variables
+    a = Variable(n, nonneg=True)
+
+    # Use direct convolution to extract constraints
+    a_arr = np.array(sequence)
+    conv = convolve(a_arr, a_arr, mode='full')[:2*n-1]
+    max_conv = np.max(conv)
+
+    # Objective: minimize sum(a) to keep total mass low
+    objective = Minimize(sum(a))
+
+    # Constraints
+    constraints = [a >= 0, sum(a) <= 1000]  # Non-negativity and bounded sum
+
+    # Solve the problem
+    prob = Problem(objective, constraints)
+
+    # Try to solve with multiple solvers
+    try:
+        prob.solve(solver=ECOS, verbose=False)
+    except:
+        try:
+            prob.solve(solver=SCS, verbose=False)
+        except:
+            return None
+
+    if prob.status == "optimal":
+        return a.value
+    else:
+        return None
+
+def get_good_direction_to_move_into(sequence):
+    """
+    Returns the direction to move into the sequence using improved optimization.
+    """
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+
+    normalized_sequence = np.array(sequence) / sum_sequence
+
+    try:
+        # Use CVXPY to get a potentially better direction
+        result = solve_convolution_quadratic_cvxpy(normalized_sequence)
+
+        if result is None:
+            return None
+
+        # Normalize the result
+        sum_result = np.sum(result)
+        if sum_result < 1e-8:
+            return None
+
+        normalized_result = result / sum_result
+
+        # Apply small perturbation to maintain diversity
+        t = 0.05
+        new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_result)]
+
+        # Ensure non-negativity
+        new_sequence = [max(0, x) for x in new_sequence]
+
+        return new_sequence
+
+    except Exception as e:
+        return None
+
+def adaptive_frequency_optimize(current_sequence, max_iter=50):
+    """
+    Optimizes sequence using a better gradient-based approach.
+    """
+    n = len(current_sequence)
+    if n == 0:
+        return current_sequence
+
+    # Start with a simple convex optimization approach
+    try:
+        # Try convex optimization approach
+        result = solve_convolution_quadratic_cvxpy(current_sequence)
+        if result is not None:
+            return result.tolist()
+    except Exception as e:
+        pass
+
+    # Fallback to gradient-based improvement with smarter handling
+    a = np.array(current_sequence, dtype=float)
+    a = np.maximum(a, 1e-10)
+
+    # Use gradient information from convolution to guide update
+    conv = convolve(a, a, mode='full')[:2*n-1]
+    max_conv = np.max(conv)
+    sum_a = np.sum(a)
+
+    # Compute gradients manually
+    grad = np.ones_like(a)  # Simple gradient
+
+    # Update step with careful consideration of convergence
+    lr = 0.01
+    new_sequence = a - lr * grad
+    new_sequence = np.maximum(new_sequence, 1e-10)
+
+    return new_sequence.tolist()
+
+def multi_start_optimization(initial_sequences, max_time):
+    """
+    Performs multi-start optimization using a better initial sequence generation and optimization.
+    """
+    best_inv_C1 = 0.0
+    best_sequence = None
+    best_C1 = float('inf')
+    start_time = time.time()
+
+    # Try multiple starting points with improved initializations
+    for i, init_seq in enumerate(initial_sequences):
+        if time.time() - start_time > max_time - 5:
+            break
+
+        current_seq = init_seq.copy()
+        current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+
+        if current_inv_C1 > best_inv_C1:
+            best_inv_C1 = current_inv_C1
+            best_sequence = current_seq.copy()
+            best_C1 = current_C1
+
+        # Use improved optimization approach for improvement
+        improved_seq = adaptive_frequency_optimize(current_seq, max_iter=50)
+        improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+
+        if improved_inv_C1 > current_inv_C1:
+            current_seq = improved_seq
+            current_C1 = improved_C1
+            current_inv_C1 = improved_inv_C1
+
+            if current_inv_C1 > best_inv_C1:
+                best_inv_C1 = current_inv_C1
+                best_sequence = current_seq.copy()
+                best_C1 = current_C1
+
+    return best_sequence, best_C1, best_inv_C1
+
+def search_for_best_sequence():
+    """
+    Main function to search for the best coefficient sequence.
+    """
+    start_time = time.time()
+    max_time = 180  # seconds
+
+    # Generate diverse initial sequences with emphasis on structure
+    initial_sequences = []
+
+    # Random sequences with different distributions
+    for _ in range(3):
+        n = np.random.randint(50, 1000)
+        # Use mixture of distributions for better exploration
+        if np.random.rand() < 0.5:
+            seq = np.random.exponential(1, n).tolist()
+        else:
+            seq = np.random.uniform(0.1, 1.0, n).tolist()
+        initial_sequences.append(seq)
+
+    # Exponential decay sequences (more structured)
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        decay_factor = 0.9
+        seq = [decay_factor ** i for i in range(n)]
+        initial_sequences.append(seq)
+
+    # Spike sequences (focus on maximizing peak convolution)
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.0] * n
+        spike_idx = np.random.randint(0, n)
+        seq[spike_idx] = 1.0
+        initial_sequences.append(seq)
+
+    # Gaussian-like sequences (smooth but concentrated)
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        center = n // 2
+        seq = [np.exp(-0.5 * ((i - center)**2) / (n/10)**2) for i in range(n)]
+        initial_sequences.append(seq)
+
+    # Multi-start optimization using improved approach
+    best_sequence, best_C1, best_inv_C1 = multi_start_optimization(initial_sequences, max_time)
+
+    # Final optimization with enhanced parameters
+    if best_sequence is not None:
+        final_seq = adaptive_frequency_optimize(best_sequence, max_iter=100)
+        final_C1, final_inv_C1 = compute_autocorrelation_constant(final_seq)
+        if final_inv_C1 > best_inv_C1:
+            best_sequence = final_seq
+            best_C1 = final_C1
+            best_inv_C1 = final_inv_C1
+
+    return best_sequence if best_sequence is not None else [1.0]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

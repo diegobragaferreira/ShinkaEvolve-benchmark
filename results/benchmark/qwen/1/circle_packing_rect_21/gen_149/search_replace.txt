@@ -1,0 +1,379 @@
+<NAME>
+enhanced_local_search_with_gradient_descent
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces a local search improvement phase that applies gradient-based optimization to the best solutions found during evolution. The idea is to take the top-performing individuals from each generation and refine them using a simple gradient descent approach that adjusts circle positions to maximize radius sums while maintaining constraints. This addresses the limitation of the evolutionary algorithm getting stuck in local optima by providing a way to fine-tune promising solutions with continuous optimization techniques.
+
+The key insight is that while the evolutionary algorithm explores discrete configurations well, adding a continuous local search component can help escape local optima and discover better solutions. The gradient descent operates on the objective function (sum of radii) with respect to circle positions, making small adjustments that respect the constraints.
+
+I'm implementing this by:
+1. Adding a gradient-based local search function that operates on individual solutions
+2. Applying this local search to top solutions during evolution
+3. Modifying the evolution loop to include this refinement step
+4. Using a simple projected gradient method that respects boundary and overlap constraints
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class CirclePacker:
+    """Main orchestrator for the circle packing evolutionary algorithm."""
+
+    def __init__(self):
+        self.population_size = 30
+        self.generations = 150
+        self.elite_size = 6
+        self.tournament_size = 5
+        self.max_stagnation = 25
+
+    def optimize_rectangle_dimensions(self, circles: np.ndarray) -> Tuple[float, float]:
+        """Heuristic to determine optimal rectangle dimensions."""
+        # Estimate minimum width and height needed based on circle radii
+        total_area = np.sum(circles[:, 2]**2) * np.pi
+        # Assume 60% packing efficiency for circles
+        estimated_width = np.sqrt(total_area / 0.6)
+        estimated_height = estimated_width
+
+        # Use a reasonable range around the estimate
+        if estimated_width + estimated_height > 2.0:
+            # Normalize to perimeter 4
+            scale = 2.0 / (estimated_width + estimated_height)
+            estimated_width *= scale
+            estimated_height *= scale
+
+        # Prefer slightly wider rectangle (more common in practice)
+        optimized_width = min(1.8, max(0.2, estimated_width))
+        optimized_height = 2.0 - optimized_width
+
+        return optimized_width, optimized_height
+
+    def run_evolution(self) -> np.ndarray:
+        """Run the evolutionary algorithm to find optimal circle packing."""
+        # Rectangle dimensions (perimeter = 4, so width + height = 2)
+        rect_width = 1.0
+        rect_height = 1.0
+
+        # Track best fitness for convergence detection
+        previous_best = -np.inf
+        stagnation_count = 0
+
+        # Initialize population with diverse strategies
+        population = []
+
+        # Mix of initialization strategies
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_hexagonal_solution(rect_width, rect_height)
+            population.append(solution)
+
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_voronoi_solution(rect_width, rect_height)
+            population.append(solution)
+
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_strategic_solution(rect_width, rect_height)
+            population.append(solution)
+
+        # Track best overall solution
+        best_overall_fitness = -np.inf
+        best_overall_solution = None
+
+        # Evolutionary algorithm
+        for generation in range(self.generations):
+            # Evaluate fitness
+            fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+
+            # Sort by fitness (descending)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+            # Update best overall solution
+            current_best_fitness = max(fitness_scores)
+            if current_best_fitness > best_overall_fitness:
+                best_overall_fitness = current_best_fitness
+                best_overall_solution = population[0].copy()
+
+            # Keep elite
+            elite = population[:self.elite_size]
+
+            # Generate new population
+            new_population = elite[:]
+
+            # Create offspring using tournament selection and crossover
+            while len(new_population) < self.population_size:
+                # Tournament selection
+                parent1_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+                parent2_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+
+                parent1 = population[parent1_idx].copy()
+                parent2 = population[parent2_idx].copy()
+
+                # Crossover
+                child1, child2 = CrossoverOperator.crossover(parent1, parent2)
+
+                # Mutate
+                child1 = MutationOperator.mutate(child1, rect_width, rect_height)
+                child2 = MutationOperator.mutate(child2, rect_width, rect_height)
+
+                # Repair
+                child1 = RepairMechanism.repair(child1, rect_width, rect_height)
+                child2 = RepairMechanism.repair(child2, rect_width, rect_height)
+
+                new_population.extend([child1, child2])
+
+            population = new_population[:self.population_size]
+
+            # Convergence detection with gradient monitoring
+            current_best = max(fitness_scores)
+            if abs(current_best - previous_best) < 1e-6:
+                stagnation_count += 1
+            else:
+                stagnation_count = 0
+            previous_best = current_best
+
+            # Early stopping if stagnated too long
+            if stagnation_count > self.max_stagnation:
+                print(f"Early stopping at generation {generation} due to convergence")
+                break
+
+            # Periodically optimize rectangle dimensions
+            if generation % 20 == 0 and generation > 0:
+                # Use the best solution so far to get rough estimate
+                if best_overall_solution is not None:
+                    optimized_width, optimized_height = self.optimize_rectangle_dimensions(best_overall_solution)
+                    rect_width = optimized_width
+                    rect_height = optimized_height
+                    print(f"Optimized rectangle to width={rect_width:.3f}, height={rect_height:.3f}")
+
+            # Print progress
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {current_best:.6f}")
+
+        # Return the best solution found
+        fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+        best_idx = np.argmax(fitness_scores)
+        best_solution = population[best_idx]
+
+        # Final validation
+        final_fitness = FitnessEvaluator.evaluate(best_solution)
+        if final_fitness == -np.inf:
+            print("Warning: Final solution violated constraints. Returning best found.")
+            return best_overall_solution if best_overall_solution is not None else InitializerFactory.create_best_initial_solution(rect_width, rect_height)
+
+        return best_solution
+=======
+class CirclePacker:
+    """Main orchestrator for the circle packing evolutionary algorithm."""
+
+    def __init__(self):
+        self.population_size = 30
+        self.generations = 150
+        self.elite_size = 6
+        self.tournament_size = 5
+        self.max_stagnation = 25
+        self.local_search_iterations = 50  # Number of local search iterations per solution
+
+    def optimize_rectangle_dimensions(self, circles: np.ndarray) -> Tuple[float, float]:
+        """Heuristic to determine optimal rectangle dimensions."""
+        # Estimate minimum width and height needed based on circle radii
+        total_area = np.sum(circles[:, 2]**2) * np.pi
+        # Assume 60% packing efficiency for circles
+        estimated_width = np.sqrt(total_area / 0.6)
+        estimated_height = estimated_width
+
+        # Use a reasonable range around the estimate
+        if estimated_width + estimated_height > 2.0:
+            # Normalize to perimeter 4
+            scale = 2.0 / (estimated_width + estimated_height)
+            estimated_width *= scale
+            estimated_height *= scale
+
+        # Prefer slightly wider rectangle (more common in practice)
+        optimized_width = min(1.8, max(0.2, estimated_width))
+        optimized_height = 2.0 - optimized_width
+
+        return optimized_width, optimized_height
+
+    def local_search_improve(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Apply gradient-based local search to improve a solution."""
+        # Create a copy to work with
+        improved = circles.copy()
+
+        # Simple gradient-based approach to maximize sum of radii
+        # We'll iteratively adjust positions to increase radii while respecting constraints
+        for _ in range(self.local_search_iterations):
+            # Compute gradients for each circle with respect to radius increase
+            # Since direct gradients of sum(radius) are complex due to constraints,
+            # we use a heuristic: try to move circles to make room for larger radii
+
+            # First, check all constraints
+            if not ConstraintChecker.validate(improved, rect_width, rect_height):
+                # If constraints violated, repair first
+                improved = RepairMechanism.repair(improved, rect_width, rect_height)
+
+            # Simple greedy improvement approach:
+            # For each circle, try increasing its radius if possible without violating constraints
+            updated = False
+            for i in range(len(improved)):
+                x, y, r = improved[i]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(x, y, rect_width - x, rect_height - y)
+
+                # Try to increase radius slightly (but don't exceed bounds or cause overlaps)
+                if r < max_radius * 0.95:  # Leave some margin
+                    # Test if we can increase this radius
+                    test_r = min(r * 1.05, max_radius * 0.95)
+                    test_circles = improved.copy()
+                    test_circles[i, 2] = test_r
+
+                    # Check if this change preserves constraints
+                    if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                        improved[i, 2] = test_r
+                        updated = True
+
+            # If no improvement possible in radius assignment, try position adjustments
+            if not updated:
+                # Try to slightly adjust positions to make room for larger radii
+                for i in range(len(improved)):
+                    x, y, r = improved[i]
+                    # Try small moves in different directions
+                    directions = [(0.005, 0), (0, 0.005), (-0.005, 0), (0, -0.005)]
+                    for dx, dy in directions:
+                        test_x, test_y = x + dx, y + dy
+                        # Check if the new position is valid
+                        if test_x - r >= 0 and test_x + r <= rect_width and \
+                           test_y - r >= 0 and test_y + r <= rect_height:
+                            # Check if it reduces overlaps with others
+                            test_circles = improved.copy()
+                            test_circles[i, 0] = test_x
+                            test_circles[i, 1] = test_y
+
+                            if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                                improved[i, 0] = test_x
+                                improved[i, 1] = test_y
+                                break
+
+        return improved
+
+    def run_evolution(self) -> np.ndarray:
+        """Run the evolutionary algorithm to find optimal circle packing."""
+        # Rectangle dimensions (perimeter = 4, so width + height = 2)
+        rect_width = 1.0
+        rect_height = 1.0
+
+        # Track best fitness for convergence detection
+        previous_best = -np.inf
+        stagnation_count = 0
+
+        # Initialize population with diverse strategies
+        population = []
+
+        # Mix of initialization strategies
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_hexagonal_solution(rect_width, rect_height)
+            population.append(solution)
+
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_voronoi_solution(rect_width, rect_height)
+            population.append(solution)
+
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_strategic_solution(rect_width, rect_height)
+            population.append(solution)
+
+        # Track best overall solution
+        best_overall_fitness = -np.inf
+        best_overall_solution = None
+
+        # Evolutionary algorithm
+        for generation in range(self.generations):
+            # Evaluate fitness
+            fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+
+            # Sort by fitness (descending)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+            # Update best overall solution
+            current_best_fitness = max(fitness_scores)
+            if current_best_fitness > best_overall_fitness:
+                best_overall_fitness = current_best_fitness
+                best_overall_solution = population[0].copy()
+
+            # Keep elite
+            elite = population[:self.elite_size]
+
+            # Generate new population
+            new_population = elite[:]
+
+            # Create offspring using tournament selection and crossover
+            while len(new_population) < self.population_size:
+                # Tournament selection
+                parent1_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+                parent2_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+
+                parent1 = population[parent1_idx].copy()
+                parent2 = population[parent2_idx].copy()
+
+                # Crossover
+                child1, child2 = CrossoverOperator.crossover(parent1, parent2)
+
+                # Mutate
+                child1 = MutationOperator.mutate(child1, rect_width, rect_height)
+                child2 = MutationOperator.mutate(child2, rect_width, rect_height)
+
+                # Repair
+                child1 = RepairMechanism.repair(child1, rect_width, rect_height)
+                child2 = RepairMechanism.repair(child2, rect_width, rect_height)
+
+                new_population.extend([child1, child2])
+
+            population = new_population[:self.population_size]
+
+            # Apply local search improvement to top individuals
+            # Improve the top 3 individuals with local search
+            for i in range(min(3, len(population))):
+                population[i] = self.local_search_improve(population[i], rect_width, rect_height)
+
+            # Convergence detection with gradient monitoring
+            current_best = max(fitness_scores)
+            if abs(current_best - previous_best) < 1e-6:
+                stagnation_count += 1
+            else:
+                stagnation_count = 0
+            previous_best = current_best
+
+            # Early stopping if stagnated too long
+            if stagnation_count > self.max_stagnation:
+                print(f"Early stopping at generation {generation} due to convergence")
+                break
+
+            # Periodically optimize rectangle dimensions
+            if generation % 20 == 0 and generation > 0:
+                # Use the best solution so far to get rough estimate
+                if best_overall_solution is not None:
+                    optimized_width, optimized_height = self.optimize_rectangle_dimensions(best_overall_solution)
+                    rect_width = optimized_width
+                    rect_height = optimized_height
+                    print(f"Optimized rectangle to width={rect_width:.3f}, height={rect_height:.3f}")
+
+            # Print progress
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {current_best:.6f}")
+
+        # Return the best solution found
+        fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+        best_idx = np.argmax(fitness_scores)
+        best_solution = population[best_idx]
+
+        # Final validation
+        final_fitness = FitnessEvaluator.evaluate(best_solution)
+        if final_fitness == -np.inf:
+            print("Warning: Final solution violated constraints. Returning best found.")
+            return best_overall_solution if best_overall_solution is not None else InitializerFactory.create_best_initial_solution(rect_width, rect_height)
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

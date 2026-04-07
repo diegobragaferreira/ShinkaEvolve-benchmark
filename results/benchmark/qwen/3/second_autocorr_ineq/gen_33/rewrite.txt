@@ -1,0 +1,177 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import njit
+
+@njit
+def compute_autoconvolution_norms(f_vals):
+    """
+    Compute the norms of the autoconvolution g = f*f
+    """
+    n = len(f_vals)
+    # Create convolution result array - size 2*n-1
+    g = np.zeros(2 * n - 1)
+
+    # Compute convolution manually (f*f)
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    # Compute norms
+    g_squared = g * g
+    norm_2_sq = np.sum(g_squared)
+    norm_1 = np.sum(np.abs(g))
+    norm_inf = np.max(np.abs(g))
+
+    return norm_2_sq, norm_1, norm_inf
+
+@njit
+def calculate_c2(f_vals):
+    """
+    Calculate C2 = ||g||₂² / (||g||₁ · ||g||∞)
+    """
+    norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+        return 0.0
+
+    return norm_2_sq / (norm_1 * norm_inf)
+
+def construct_function() -> list[float]:
+    """
+    Construct a step-function with high C2 value using adaptive optimization
+    """
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    # Multi-stage optimization approach
+    best_c2 = 0.0
+    best_f_vals = None
+    
+    # Stage 1: Coarse optimization with simple patterns
+    for stage in range(3):
+        # Determine pattern complexity for this stage
+        if stage == 0:
+            n = 100  # Coarse resolution
+            pattern_type = "alternating"
+        elif stage == 1:
+            n = 500  # Medium resolution  
+            pattern_type = "uniform"
+        else:
+            n = 2000  # Fine resolution
+            pattern_type = "optimized"
+        
+        # Generate initial pattern based on type
+        f_values = generate_pattern(n, pattern_type)
+        
+        # Apply local optimization with adaptive step sizes
+        optimized_vals = local_optimize(f_values, iterations=200 if stage < 2 else 500)
+        
+        # Evaluate and keep track of best result
+        current_c2 = calculate_c2(optimized_vals)
+        if current_c2 > best_c2:
+            best_c2 = current_c2
+            best_f_vals = optimized_vals.copy()
+    
+    # Final refinement stage
+    if best_f_vals is not None:
+        final_vals = local_optimize(best_f_vals, iterations=1000)
+        final_c2 = calculate_c2(final_vals)
+        if final_c2 > best_c2:
+            best_c2 = final_c2
+            best_f_vals = final_vals
+            
+    # Return result (ensure at least 100 elements)
+    if best_f_vals is None:
+        # Fallback to basic approach
+        n = max(100, np.random.randint(100, 1000))
+        best_f_vals = [np.random.random() for _ in range(n)]
+    
+    return best_f_vals.tolist()
+
+def generate_pattern(n, pattern_type):
+    """Generate initial pattern based on type"""
+    if pattern_type == "alternating":
+        # Create alternating high-low pattern
+        f_vals = np.zeros(n)
+        for i in range(n):
+            if i % 2 == 0:
+                f_vals[i] = np.random.uniform(0.7, 1.0)
+            else:
+                f_vals[i] = np.random.uniform(0.0, 0.3)
+    elif pattern_type == "uniform":
+        # Create uniformly distributed values
+        f_vals = np.random.uniform(0.3, 0.8, n)
+    else:  # optimized
+        # Start with a more sophisticated pattern
+        f_vals = np.zeros(n)
+        # Create a wave-like pattern that tends to produce flat convolutions
+        for i in range(n):
+            # Create a pattern that balances peaks and valleys
+            f_vals[i] = 0.5 + 0.4 * np.sin(2 * np.pi * i / n)
+            # Ensure non-negativity
+            f_vals[i] = max(0, f_vals[i])
+    
+    # Add some noise to break symmetry
+    noise = np.random.normal(0, 0.05, n)
+    f_vals = np.clip(f_vals + noise, 0, None)
+    
+    return f_vals
+
+def local_optimize(f_vals, iterations):
+    """Perform local optimization on the function values"""
+    # Convert to numpy array for easier manipulation
+    vals = np.array(f_vals)
+    n = len(vals)
+    
+    # Adaptive learning rates
+    lr_base = 0.01
+    lr_decay = 0.995
+    
+    for iteration in range(iterations):
+        # Calculate current C2
+        current_c2 = calculate_c2(vals)
+        
+        # Simple gradient estimation using finite differences
+        eps = 1e-4
+        gradients = np.zeros(n)
+        
+        for i in range(n):
+            # Perturb dimension i
+            vals_plus = vals.copy()
+            vals_minus = vals.copy()
+            
+            vals_plus[i] = max(0, vals[i] + eps)
+            vals_minus[i] = max(0, vals[i] - eps)
+            
+            c2_plus = calculate_c2(vals_plus)
+            c2_minus = calculate_c2(vals_minus)
+            
+            gradients[i] = (c2_plus - c2_minus) / (2 * eps)
+        
+        # Update using gradient ascent
+        # Adaptive learning rate
+        lr = lr_base * (lr_decay ** iteration)
+        
+        # Update values
+        new_vals = vals + lr * gradients
+        
+        # Ensure non-negativity
+        new_vals = np.maximum(new_vals, 0)
+        
+        # Occasionally add some random variation to escape local minima
+        if iteration % 50 == 0 and iteration > 0:
+            noise_scale = 0.01 * lr
+            new_vals += np.random.normal(0, noise_scale, n)
+            new_vals = np.maximum(new_vals, 0)
+            
+        vals = new_vals
+    
+    return vals
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

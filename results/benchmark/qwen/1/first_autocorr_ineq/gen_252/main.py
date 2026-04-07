@@ -1,0 +1,311 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+import random
+import time
+from typing import List, Tuple
+from joblib import Parallel, delayed
+import copy
+from scipy.optimize import differential_evolution
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings("ignore")
+
+def convolve_fft(a: List[float], b: List[float]) -> List[float]:
+    """Compute convolution using FFT for better performance."""
+    n = len(a)
+    if n == 0:
+        return []
+
+    # Pad to length 2*n - 1 for full convolution
+    padded_length = 2 * n - 1
+    fa = fft(a, padded_length)
+    fb = fft(b, padded_length)
+    result = ifft(fa * fb.conj()).real
+    # Return only the valid convolution part
+    return result[:n].tolist()
+
+def compute_c1(sequence: List[float]) -> float:
+    """Compute the C1 constant for a given sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 1e-10:
+        return float('inf')
+
+    # Compute convolution using FFT
+    conv = convolve_fft(sequence, sequence)
+    max_conv = np.max(conv)
+
+    # Compute C1 = 2n * max(conv) / (sum(a))^2
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+def evaluate_fitness(sequence: List[float]) -> float:
+    """Evaluate fitness as inverse of C1 (higher is better)."""
+    c1 = compute_c1(sequence)
+    if c1 == float('inf') or c1 <= 0:
+        return 0.0
+    return 1.0 / c1
+
+def generate_pattern_sequence(n: int) -> List[float]:
+    """
+    Generate a sequence with a specific pattern designed to minimize autocorrelation.
+    Uses a combination of geometric decay and sparse step functions.
+    """
+    # Use a hybrid of geometric decay and sparsely placed steps
+    sequence = [0.0] * n
+    
+    # Create sparse steps with geometrically decreasing heights
+    num_steps = max(2, min(15, n // 10))
+    
+    # Positions spaced logarithmically to maximize spread
+    step_positions = []
+    step_width = n / (num_steps + 1)
+    for i in range(num_steps):
+        pos = int(step_width * (i + 1))
+        # Add some jitter to positions to avoid regularity
+        jitter = int(np.random.normal(0, 2))
+        actual_pos = max(0, min(n-1, pos + jitter))
+        step_positions.append(actual_pos)
+    
+    step_positions = sorted(set(step_positions))
+    if len(step_positions) < num_steps:
+        # Fill missing positions
+        while len(step_positions) < num_steps:
+            new_pos = random.randint(0, n-1)
+            if new_pos not in step_positions:
+                step_positions.append(new_pos)
+        step_positions = sorted(step_positions[:num_steps])
+
+    # Heights with geometric decay and randomized variations
+    heights = []
+    base_height = 100.0
+    decay_factor = 0.85
+    
+    for i in range(len(step_positions)):
+        height = base_height * (decay_factor ** i)
+        # Add randomness to break symmetry
+        variance = random.uniform(0.8, 1.2)
+        heights.append(height * variance)
+    
+    # Assign heights to positions
+    for i, (pos, height) in enumerate(zip(step_positions, heights)):
+        if i < len(step_positions) - 1:
+            end_pos = step_positions[i+1]
+        else:
+            end_pos = n
+
+        pos = max(0, min(n-1, pos))
+        end_pos = max(pos+1, min(n, end_pos))
+
+        if end_pos > pos:
+            sequence[pos:end_pos] = [height] * (end_pos - pos)
+    
+    # Apply a smoothing factor to reduce sharp transitions
+    smoothed = [0.0] * n
+    kernel_size = max(1, n // 50)
+    for i in range(n):
+        start = max(0, i - kernel_size)
+        end = min(n, i + kernel_size + 1)
+        smoothed[i] = np.mean(sequence[start:end])
+    
+    # Clip very small values to avoid numerical issues
+    smoothed = [max(0.01, x) for x in smoothed]
+    return smoothed
+
+def generate_sine_sequence(n: int) -> List[float]:
+    """Generate a sequence based on sine wave patterns."""
+    # Create a sequence with sine wave components to reduce autocorrelation
+    sequence = []
+    for i in range(n):
+        # Combine multiple sine waves with different frequencies and amplitudes
+        val = 50.0 + 30.0 * np.sin(0.1 * i) + 15.0 * np.sin(0.3 * i) + 10.0 * np.sin(0.5 * i)
+        sequence.append(max(0.01, val))
+    return sequence
+
+def generate_population(population_size: int, min_n: int = 50, max_n: int = 1000) -> List[List[float]]:
+    """Generate diverse initial population with specialized sequences."""
+    population = []
+    for _ in range(population_size):
+        n = random.randint(min_n, max_n)
+        # Use a mix of specialized sequence generators
+        choice = random.random()
+        if choice < 0.4:
+            # Pattern sequence
+            individual = generate_pattern_sequence(n)
+        elif choice < 0.7:
+            # Sine sequence
+            individual = generate_sine_sequence(n)
+        else:
+            # Random with some structure
+            individual = [random.uniform(0.1, 100) for _ in range(n)]
+        population.append(individual)
+    return population
+
+def local_search_optimize(sequence: List[float], max_iter: int = 20) -> List[float]:
+    """
+    Enhanced local search that uses a more sophisticated gradient-free optimization.
+    """
+    def objective_func(x):
+        # Minimize negative fitness (since we want to maximize fitness)
+        return -evaluate_fitness(x)
+    
+    # Use differential evolution for local optimization
+    bounds = [(0.01, 1000.0)] * len(sequence)
+    
+    try:
+        # Run differential evolution with a custom number of iterations
+        result = differential_evolution(
+            objective_func, 
+            bounds, 
+            maxiter=max_iter, 
+            popsize=10,
+            seed=42
+        )
+        if result.success:
+            return result.x.tolist()
+    except:
+        pass
+    
+    # Fallback to simple mutation if DE fails
+    best_seq = sequence.copy()
+    best_fitness = evaluate_fitness(best_seq)
+    
+    for _ in range(max_iter):
+        # Mutate with adaptive rate
+        mutated = best_seq.copy()
+        for i in range(len(mutated)):
+            if random.random() < 0.1:
+                mutated[i] = max(0.01, mutated[i] * random.gauss(1, 0.1))
+        
+        mutated_fitness = evaluate_fitness(mutated)
+        if mutated_fitness > best_fitness:
+            best_seq = mutated
+            best_fitness = mutated_fitness
+    
+    return best_seq
+
+def adaptive_mutation_rate(population_fitnesses: List[float]) -> float:
+    """Calculate adaptive mutation rate based on population diversity."""
+    if len(population_fitnesses) < 2:
+        return 0.1
+
+    std_dev = np.std(population_fitnesses)
+    avg_fitness = np.mean(population_fitnesses)
+
+    # Higher diversity = higher mutation rate
+    if avg_fitness > 0:
+        mutation_rate = min(0.3, max(0.01, 0.1 + std_dev / avg_fitness))
+    else:
+        mutation_rate = 0.1
+
+    return mutation_rate
+
+def search_for_best_sequence() -> List[float]:
+    """
+    Main function to search for the best coefficient sequence.
+    Uses a hybrid evolutionary and gradient-free optimization approach.
+    """
+    start_time = time.time()
+    max_time = 175  # Leave some time for cleanup
+
+    # Configuration
+    population_size = 50
+    generations = 100
+    max_stagnation = 20
+    elite_size = 5
+
+    # Initialize population with specialized sequences
+    population = generate_population(population_size)
+
+    best_solution = None
+    best_fitness = 0.0
+    stagnation_counter = 0
+    fitness_history = []
+
+    for generation in range(generations):
+        # Check time limit
+        if time.time() - start_time > max_time:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_solution = individual.copy()
+
+        fitness_history.append(best_fitness)
+
+        # Check for stagnation using multi-generational trend analysis
+        if len(fitness_history) > 10:
+            recent_improvement = np.mean(fitness_history[-10:]) - np.mean(fitness_history[:-10])
+            if recent_improvement < 0.0001:
+                stagnation_counter += 1
+                if stagnation_counter >= max_stagnation:
+                    # Reset with new diverse population
+                    population = generate_population(population_size)
+                    stagnation_counter = 0
+        else:
+            stagnation_counter = 0
+
+        # Calculate adaptive mutation rate
+        mutation_rate = adaptive_mutation_rate(fitness_scores)
+
+        # Selection: keep top individuals
+        sorted_indices = np.argsort(fitness_scores)[::-1][:elite_size]
+        elite = [population[i] for i in sorted_indices]
+
+        # Apply enhanced local search to elite members
+        refined_elite = []
+        for ind in elite:
+            refined = local_search_optimize(ind, max_iter=10)
+            refined_elite.append(refined)
+        elite = refined_elite
+
+        # Create new population through selection, crossover, and mutation
+        new_population = elite.copy()
+
+        while len(new_population) < population_size:
+            # Tournament selection with larger size for stronger selection pressure
+            tournament_size = 5
+            tournament_indices = random.sample(range(len(elite)), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            parents = [elite[winner_idx]]
+            
+            # Second parent
+            second_parent_idx = random.choice([i for i in range(len(elite)) if i != winner_idx])
+            parents.append(elite[second_parent_idx])
+            
+            child = parents[0][:len(parents[0])//2] + parents[1][len(parents[1])//2:]
+            
+            # Mutate with adaptive rate
+            mutated_child = child.copy()
+            for i in range(len(mutated_child)):
+                if random.random() < mutation_rate:
+                    mutated_child[i] = max(0.01, mutated_child[i] * random.gauss(1, 0.1))
+            
+            new_population.append(mutated_child)
+
+        population = new_population
+
+    # Final local optimization on best solution
+    if best_solution is not None:
+        best_solution = local_search_optimize(best_solution, max_iter=20)
+
+    return best_solution if best_solution is not None else generate_sine_sequence(100)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

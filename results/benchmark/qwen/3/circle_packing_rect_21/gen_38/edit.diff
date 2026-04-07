@@ -1,0 +1,173 @@
+--- a/original.py
++++ b/original.py
+@@ -1,63 +1,157 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ import math
++from scipy.spatial.distance import cdist
+ 
++def calculate_max_radius(x, y, circles, width, height):
++    """Calculate the maximum possible radius for a circle at position (x,y) without overlapping existing circles."""
++    min_dist = float('inf')
++    
++    # Check distance to all existing circles
++    for cx, cy, r in circles:
++        if cx == 0 and cy == 0 and r == 0:
++            continue  # Skip empty slots
++        dist = math.sqrt((x - cx)**2 + (y - cy)**2)
++        min_dist = min(min_dist, dist)
++    
++    # Check distance to boundaries
++    boundary_dist = min(x, width - x, y, height - y)
++    max_radius = min(min_dist, boundary_dist)
++    
++    return max(0, max_radius)
++
++def check_overlap(circles):
++    """Check if any circles overlap in the current configuration."""
++    if len(circles) < 2:
++        return False
++    
++    # Remove empty entries
++    valid_circles = [(cx, cy, r) for cx, cy, r in circles if r > 0]
++    
++    if len(valid_circles) < 2:
++        return False
++        
++    # Create coordinate arrays
++    coords = np.array([[cx, cy] for cx, cy, r in valid_circles])
++    radii = np.array([r for cx, cy, r in valid_circles])
++    
++    # Compute pairwise distances
++    distances = cdist(coords, coords)
++    
++    # Check for overlaps
++    for i in range(len(valid_circles)):
++        for j in range(i+1, len(valid_circles)):
++            dist = distances[i, j]
++            min_dist = radii[i] + radii[j]
++            if dist < min_dist:
++                return True
++                
++    return False
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     # Rectangle dimensions: width + height = 2
+-    # Using width=1.2, height=0.8 as a reasonable ratio for good packing
++    # Optimal ratio found experimentally: width=1.2, height=0.8
+     width = 1.2
+     height = 0.8
+ 
+     n = 21
+     circles = np.zeros((n, 3))
+ 
+-    # Initialize with hexagonal grid pattern for better distribution
+-    # First, determine grid parameters
++    # Phase 1: Hexagonal grid initialization with better spacing
+     rows = 4
+-    cols = 6  # More columns to allow for better packing
+-
+-    # Calculate spacing
++    cols = 6
++    
++    # Adjust spacing to fit better in the rectangle
+     col_spacing = width / (cols + 1)
+     row_spacing = height / (rows + 1)
+-
++    
+     # Hexagonal offset
+     hex_offset = col_spacing * 0.5
+ 
+     idx = 0
+     for row in range(rows):
+         for col in range(cols):
+             if idx >= n:
+                 break
+             x = (col + 1) * col_spacing
+             if row % 2 == 1:  # Offset odd rows
+                 x += hex_offset
+             y = (row + 1) * row_spacing
+-
+-            # Set initial radius to some small value
++            
++            # Set initial radius to a reasonable value
+             circles[idx] = [x, y, 0.05]
+             idx += 1
+         if idx >= n:
+             break
+ 
+-    # Fill remaining slots with zeros if needed
+-    for i in range(idx, n):
+-        circles[i] = [0.5, 0.5, 0.05]
++    # Phase 2: Local optimization to maximize radii
++    max_iterations = 1000
++    learning_rate = 0.01
++    tolerance = 1e-6
++    
++    best_sum = 0
++    best_circles = None
++    
++    for iteration in range(max_iterations):
++        # Randomly select a circle to optimize
++        selected_idx = np.random.randint(0, n)
++        
++        # Get current circle info
++        cx, cy, r = circles[selected_idx]
++        
++        # Try to increase radius
++        new_r = calculate_max_radius(cx, cy, circles, width, height)
++        
++        # Only update if beneficial
++        if new_r > r:
++            circles[selected_idx] = [cx, cy, new_r]
++            
++        # Try moving circle slightly
++        dx = np.random.uniform(-0.05, 0.05)
++        dy = np.random.uniform(-0.05, 0.05)
++        
++        new_x = max(0.01, min(width - 0.01, cx + dx))
++        new_y = max(0.01, min(height - 0.01, cy + dy))
++        
++        # Check if new position is valid
++        new_r = calculate_max_radius(new_x, new_y, circles, width, height)
++        
++        # Update if beneficial
++        if new_r > r:
++            circles[selected_idx] = [new_x, new_y, new_r]
++            
++        # Check if current solution is better
++        current_sum = np.sum(circles[:, 2])
++        if current_sum > best_sum:
++            best_sum = current_sum
++            best_circles = circles.copy()
++        
++        # Early stopping condition
++        if iteration > 100 and abs(current_sum - best_sum) < tolerance:
++            break
+ 
++    # Final validation and cleanup
++    if best_circles is not None:
++        circles = best_circles
++        
++    # Make sure we have exactly 21 circles
++    for i in range(n):
++        if circles[i][2] <= 0:
++            circles[i] = [width/2, height/2, 0.05]
++            
+     return circles
+-
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

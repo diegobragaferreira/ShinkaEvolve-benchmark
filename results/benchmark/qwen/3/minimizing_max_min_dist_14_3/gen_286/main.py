@@ -1,0 +1,198 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import differential_evolution, minimize
+import warnings
+warnings.filterwarnings('ignore')
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def objective_function(x):
+        # Reshape flat array back to 14x3 points
+        points = x.reshape((14, 3))
+
+        # Compute pairwise distances efficiently
+        distances = pdist(points)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        # Return negative because we want to maximize the ratio
+        return -min_dist / max_dist
+
+    def penalty_objective(x, penalty_weight=1e6):
+        """Objective function with penalty for boundary violations"""
+        points = x.reshape((14, 3))
+
+        # Calculate base objective
+        ratio = -objective_function(x)
+        base_obj = ratio
+
+        # Add penalty for points outside [0,1]^3 bounds
+        penalty = 0
+        for i in range(14):
+            for j in range(3):
+                coord = points[i, j]
+                if coord < 0:
+                    penalty += penalty_weight * (0 - coord) ** 2
+                elif coord > 1:
+                    penalty += penalty_weight * (coord - 1) ** 2
+
+        return base_obj + penalty
+
+    def fibonacci_sphere_sampling(n):
+        """Generate points on a unit sphere using Fibonacci spiral method with better distribution"""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(n):
+            y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def initialize_points():
+        """Initialize points using improved spherical sampling with multiple strategies"""
+        # Strategy 1: Fibonacci sphere sampling
+        points1 = fibonacci_sphere_sampling(14)
+
+        # Strategy 2: Random uniform initialization
+        np.random.seed(42)
+        points2 = np.random.rand(14, 3)
+
+        # Strategy 3: Perturbed Fibonacci
+        np.random.seed(42)
+        points3 = points1 + np.random.normal(0, 0.05, points1.shape)
+
+        # Normalize all strategies to unit sphere
+        for points in [points1, points3]:
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            points /= norms
+
+        # Scale appropriately
+        points1 *= 0.8
+        points3 *= 0.8
+
+        # Transform to [0,1]^3 space
+        points1 = (points1 + 1) / 2
+        points3 = (points3 + 1) / 2
+
+        # Evaluate all initializations
+        eval_points = [points1, points2, points3]
+        ratios = []
+
+        for points in eval_points:
+            distances = pdist(points)
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            if max_dist > 0:
+                ratio = min_dist / max_dist
+            else:
+                ratio = 0
+            ratios.append(ratio)
+
+        # Select the best initialization
+        best_idx = np.argmax(ratios)
+        return eval_points[best_idx].flatten()
+
+    def adaptive_differential_evolution(initial_points):
+        """Perform differential evolution with adaptive population sizing"""
+        bounds = [(0, 1)] * 14 * 3
+
+        # Start with smaller population and adapt based on convergence
+        popsize = 15
+        maxiter = 300
+
+        # Track improvement for adaptive population sizing
+        prev_best = -np.inf
+        stagnation_count = 0
+        max_stagnation = 5
+
+        try:
+            # Run differential evolution with adaptive population sizing
+            for iter_num in range(maxiter // 10):  # Reduced iterations per batch
+                # Adjust population size based on convergence history
+                if stagnation_count > max_stagnation and popsize < 30:
+                    popsize = min(popsize + 5, 30)
+                    stagnation_count = 0  # Reset stagnation counter
+
+                result = differential_evolution(
+                    penalty_objective,
+                    bounds,
+                    seed=42 + iter_num,
+                    maxiter=10,  # Fewer iterations per batch
+                    popsize=popsize,
+                    mutation=(0.5, 1.0),
+                    recombination=0.7,
+                    tol=1e-8,
+                    callback=None
+                )
+
+                # Check improvement
+                current_best = -result.fun
+                if current_best > prev_best:
+                    prev_best = current_best
+                    stagnation_count = 0
+                else:
+                    stagnation_count += 1
+
+            return result.x.reshape((14, 3))
+
+        except Exception:
+            # Fallback to basic optimization
+            return initial_points.reshape((14, 3))
+
+    def local_refinement(points):
+        """Apply local optimization refinement using L-BFGS-B"""
+        try:
+            # Use L-BFGS-B for fine-tuning
+            result = minimize(
+                objective_function,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=[(0, 1)] * 14 * 3,
+                options={'ftol': 1e-9, 'gtol': 1e-9}
+            )
+
+            refined_points = result.x.reshape((14, 3))
+            return refined_points
+
+        except Exception:
+            return points
+
+    def validate_and_correct_bounds(points):
+        """Ensure all points are within [0,1]^3 bounds"""
+        corrected_points = np.clip(points, 0, 1)
+        return corrected_points
+
+    # Initialize with better spherical configuration
+    initial_points = initialize_points()
+
+    # Phase 1: Global optimization with differential evolution
+    global_optimized = adaptive_differential_evolution(initial_points)
+
+    # Phase 2: Local refinement
+    local_optimized = local_refinement(global_optimized)
+
+    # Final validation
+    final_points = validate_and_correct_bounds(local_optimized)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

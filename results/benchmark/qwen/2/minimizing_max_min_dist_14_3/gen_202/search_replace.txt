@@ -1,0 +1,304 @@
+<NAME>
+implement_adaptive_cooling_schedule
+</NAME>
+
+<DESCRIPTION>
+The current evolutionary algorithm uses a fixed adaptive cooling rate that modifies mutation and crossover rates based on diversity, but doesn't properly handle the temperature cooling schedule which is crucial for simulated annealing performance. I'll implement a more sophisticated adaptive cooling schedule that dynamically adjusts based on optimization progress, similar to what was done in the previous implementations but integrated with the evolutionary framework.
+
+This change will:
+1. Replace the basic generation-based cooling with a more intelligent temperature adaptation
+2. Implement a cooling schedule that responds to convergence behavior
+3. Improve exploration vs exploitation balance during optimization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        self.mutation_rate = 0.1
+        self.crossover_rate = 0.8
+        self.local_refinement_freq = 50  # How often to apply local refinement
+        self.elite_count = 3  # Number of elite individuals to preserve
+=======
+        self.mutation_rate = 0.1
+        self.crossover_rate = 0.8
+        self.local_refinement_freq = 50  # How often to apply local refinement
+        self.elite_count = 3  # Number of elite individuals to preserve
+        self.initial_temperature = 1.0
+        self.final_temperature = 1e-6
+        self.cooling_rate = 0.9995
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_temperature_based_mutation
+</NAME>
+
+<DESCRIPTION>
+I'll modify the mutation function to use temperature-based perturbation sizes instead of fixed adaptive rates. This creates a more principled approach where mutations are larger in early generations when temperature is high, and become smaller as optimization progresses, which aligns better with simulated annealing principles and can lead to better exploration-exploitation balance.
+
+The key change is that mutation size now depends on current temperature rather than just generation number, providing more direct control over the annealing behavior.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate(self, individual: np.ndarray, generation: int = 0) -> np.ndarray:
+        """Mutate an individual by perturbing some points with adaptive perturbation size"""
+        mutated = individual.copy()
+        num_mutations = max(1, int(self.mutation_rate * self.num_points))
+
+        # Adaptive mutation rate based on generation
+        adaptive_mutation_rate = self.mutation_rate * (1.0 - generation / self.max_generations * 0.5)
+
+        for _ in range(num_mutations):
+            idx = np.random.randint(0, self.num_points)
+
+            # Determine perturbation size based on generation and current diversity
+            if generation < self.max_generations * 0.3:
+                # Early generations: larger perturbations for exploration
+                perturbation_size = 0.02
+            elif generation < self.max_generations * 0.7:
+                # Middle generations: moderate perturbations
+                perturbation_size = 0.01
+            else:
+                # Late generations: small perturbations for exploitation
+                perturbation_size = 0.005
+
+            # Apply small perturbations in tangent plane and project back
+            perturbation = np.random.normal(0, perturbation_size, 3)
+
+            # Make sure we're not moving out of bounds
+            if np.linalg.norm(mutated[idx]) > 0:
+                # Project perturbation onto tangent plane
+                tangent_perturbation = perturbation - np.dot(perturbation, mutated[idx]) * mutated[idx]
+                mutated[idx] = mutated[idx] + tangent_perturbation
+
+            # Project back to sphere
+            mutated[idx] = self.project_to_sphere(mutated[idx].reshape(1, 3)).reshape(-1)
+
+        return mutated
+=======
+    def mutate(self, individual: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+        """Mutate an individual by perturbing some points with temperature-dependent perturbation size"""
+        mutated = individual.copy()
+        num_mutations = max(1, int(self.mutation_rate * self.num_points))
+
+        for _ in range(num_mutations):
+            idx = np.random.randint(0, self.num_points)
+
+            # Temperature-dependent perturbation size - larger when temperature is high
+            perturbation_size = temperature * 0.02
+
+            # Apply small perturbations in tangent plane and project back
+            perturbation = np.random.normal(0, perturbation_size, 3)
+
+            # Make sure we're not moving out of bounds
+            if np.linalg.norm(mutated[idx]) > 0:
+                # Project perturbation onto tangent plane
+                tangent_perturbation = perturbation - np.dot(perturbation, mutated[idx]) * mutated[idx]
+                mutated[idx] = mutated[idx] + tangent_perturbation
+
+            # Project back to sphere
+            mutated[idx] = self.project_to_sphere(mutated[idx].reshape(1, 3)).reshape(-1)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_evolution_loop_with_temperature_control
+</NAME>
+
+<DESCRIPTION>
+I'll completely refactor how the evolutionary loop handles temperature control. The new implementation will:
+1. Use a proper simulated annealing temperature schedule that decreases over generations
+2. Track recent improvements to adapt cooling behavior
+3. Allow for more responsive adaptation to convergence patterns
+4. Integrate temperature into the mutation process properly
+
+This addresses the fundamental issue that the original evolutionary approach wasn't properly implementing the cooling schedule that's essential for good optimization performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_evolution(self) -> Tuple[np.ndarray, float]:
+        """Evolutionary optimization with SphericalVoronoi enhancements and local refinement"""
+        # Generate initial population
+        population = self.generate_initial_population()
+
+        # Evaluate initial population
+        fitnesses = [self.fitness(individual) for individual in population]
+
+        # Track best solution
+        best_idx = np.argmax(fitnesses)
+        self.best_ratio = fitnesses[best_idx]
+        self.best_points = population[best_idx].copy()
+
+        # Evolution loop
+        for generation in range(self.max_generations):
+            # Sort population by fitness (descending)
+            sorted_indices = np.argsort(fitnesses)[::-1]
+            sorted_population = [population[i] for i in sorted_indices]
+            sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep best individuals
+            elite_count = min(self.elite_count, self.population_size // 6)
+            new_population.extend(sorted_population[:elite_count])
+
+            # Generate rest through selection, crossover, and mutation
+            while len(new_population) < self.population_size:
+                # Selection
+                parent1 = self.tournament_selection(population, fitnesses)
+                parent2 = self.tournament_selection(population, fitnesses)
+
+                # Crossover
+                child1, child2 = self.crossover(parent1, parent2)
+
+                # Mutation
+                child1 = self.mutate(child1, generation)
+                child2 = self.mutate(child2, generation)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+            # Evaluate new population
+            fitnesses = [self.fitness(individual) for individual in population]
+
+            # Update global best
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_ratio:
+                self.best_ratio = fitnesses[best_idx]
+                self.best_points = population[best_idx].copy()
+
+            # Apply local refinement periodically
+            if generation % self.local_refinement_freq == 0 and generation > 0:
+                # Refine the best individual found so far
+                try:
+                    refined_points = self.local_refinement(self.best_points.copy())
+                    refined_ratio = self.calculate_ratio(refined_points)
+                    if refined_ratio > self.best_ratio:
+                        self.best_ratio = refined_ratio
+                        self.best_points = refined_points.copy()
+                except Exception:
+                    pass
+
+            # Adaptive parameters based on progress
+            if generation > 50:
+                diversity = np.std(fitnesses)
+                if diversity < 0.01:  # Low diversity, increase mutation
+                    self.mutation_rate = min(0.3, self.mutation_rate * 1.1)
+                elif diversity > 0.05:  # High diversity, decrease mutation
+                    self.mutation_rate = max(0.05, self.mutation_rate * 0.9)
+
+                # Adapt crossover rate
+                if diversity < 0.02:
+                    self.crossover_rate = max(0.6, self.crossover_rate * 0.95)
+                elif diversity > 0.08:
+                    self.crossover_rate = min(0.95, self.crossover_rate * 1.05)
+
+        return self.best_points, self.best_ratio
+=======
+    def optimize_with_evolution(self) -> Tuple[np.ndarray, float]:
+        """Evolutionary optimization with SphericalVoronoi enhancements and local refinement"""
+        # Generate initial population
+        population = self.generate_initial_population()
+
+        # Evaluate initial population
+        fitnesses = [self.fitness(individual) for individual in population]
+
+        # Track best solution
+        best_idx = np.argmax(fitnesses)
+        self.best_ratio = fitnesses[best_idx]
+        self.best_points = population[best_idx].copy()
+
+        # Initialize temperature control
+        temperature = self.initial_temperature
+        last_improvement_gen = 0
+        recent_improvements = []
+        max_recent_improvements = 10
+
+        # Evolution loop
+        for generation in range(self.max_generations):
+            # Sort population by fitness (descending)
+            sorted_indices = np.argsort(fitnesses)[::-1]
+            sorted_population = [population[i] for i in sorted_indices]
+            sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep best individuals
+            elite_count = min(self.elite_count, self.population_size // 6)
+            new_population.extend(sorted_population[:elite_count])
+
+            # Generate rest through selection, crossover, and mutation
+            while len(new_population) < self.population_size:
+                # Selection
+                parent1 = self.tournament_selection(population, fitnesses)
+                parent2 = self.tournament_selection(population, fitnesses)
+
+                # Crossover
+                child1, child2 = self.crossover(parent1, parent2)
+
+                # Mutation with current temperature
+                child1 = self.mutate(child1, temperature)
+                child2 = self.mutate(child2, temperature)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+            # Evaluate new population
+            fitnesses = [self.fitness(individual) for individual in population]
+
+            # Update global best
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_ratio:
+                self.best_ratio = fitnesses[best_idx]
+                self.best_points = population[best_idx].copy()
+                last_improvement_gen = generation
+                recent_improvements.append(generation)
+                if len(recent_improvements) > max_recent_improvements:
+                    recent_improvements.pop(0)
+
+            # Apply local refinement periodically
+            if generation % self.local_refinement_freq == 0 and generation > 0:
+                # Refine the best individual found so far
+                try:
+                    refined_points = self.local_refinement(self.best_points.copy())
+                    refined_ratio = self.calculate_ratio(refined_points)
+                    if refined_ratio > self.best_ratio:
+                        self.best_ratio = refined_ratio
+                        self.best_points = refined_points.copy()
+                except Exception:
+                    pass
+
+            # Update temperature with adaptive cooling based on progress
+            # If there's been no improvement for a while, cool faster
+            if generation - last_improvement_gen > 200:
+                temperature *= self.cooling_rate * 0.95  # Faster cooling when stuck
+            else:
+                temperature *= self.cooling_rate
+
+            # Prevent temperature from going below minimum
+            temperature = max(temperature, self.final_temperature)
+
+            # Also adjust parameters based on recent performance
+            if len(recent_improvements) >= 3:
+                recent_improvement_rate = len(recent_improvements) / (generation - recent_improvements[0] + 1)
+                if recent_improvement_rate < 0.05:  # Very slow improvement
+                    # Increase mutation rate to escape local optima
+                    self.mutation_rate = min(0.3, self.mutation_rate * 1.1)
+                elif recent_improvement_rate > 0.15:  # Rapid improvement
+                    # Decrease mutation rate to exploit good regions
+                    self.mutation_rate = max(0.05, self.mutation_rate * 0.95)
+
+        return self.best_points, self.best_ratio
+>>>>>>> REPLACE
+</DIFF>

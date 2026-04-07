@@ -1,0 +1,159 @@
+<NAME>
+enhanced_spherical_initialization
+</NAME>
+
+<DESCRIPTION>
+The current program uses a modified Fibonacci sphere approach for initialization, but we can significantly improve the initial configuration quality by implementing a more sophisticated spherical tiling method. The key insight is that better initial point distributions lead to faster convergence and higher final scores. I'll replace the simple spherical initialization with a more robust method that creates points with superior uniformity on the sphere, then projects them to the unit cube.
+
+This change focuses on the initialization phase where we can make a substantial impact before any optimization begins. The enhanced initialization will provide points that are already closer to optimal distributions, making subsequent optimization more effective.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 1: Generate initial configuration using spherical Voronoi-inspired approach
+    # This provides a better starting configuration than basic Fibonacci sphere
+    np.random.seed(42)
+
+    # Generate points using a more sophisticated approach based on spherical Voronoi concepts
+    # We'll create points that are more uniformly distributed on the sphere
+    points = []
+
+    # Use a modified Fibonacci approach with better spacing
+    golden_ratio = (1 + np.sqrt(5)) / 2
+    for i in range(n):
+        # Distribute points more evenly using spherical coordinates
+        y = 1 - (i / (n - 1)) * 2  # y from 1 to -1
+        radius = np.sqrt(1 - y*y)
+
+        # Use golden ratio for better angular distribution
+        theta = np.arctan2(y, radius) + (i * 2 * np.pi / golden_ratio)
+
+        x = radius * np.cos(theta)
+        z = radius * np.sin(theta)
+
+        points.append([x, y, z])
+
+    points = np.array(points)
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    points = points / np.maximum(norms, 1e-10)
+
+    # Project to [0,1]^3 cube
+    points = (points + 1) / 2
+
+    # Add structured perturbation to break symmetries
+    # Use a more controlled perturbation that maintains good distribution
+    perturbation_magnitude = 0.015
+    points += np.random.normal(0, perturbation_magnitude, points.shape)
+
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+=======
+    # Phase 1: Generate initial configuration using enhanced spherical tiling approach
+    # This provides a much better starting configuration than basic methods
+    np.random.seed(42)
+
+    # Generate points using icosahedral subdivision for maximal uniformity
+    # This creates a high-quality spherical point distribution that's ideal for our problem
+    def icosahedron_points():
+        """Generate vertices of a regular icosahedron"""
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [-1,  phi,  0],
+            [ 1,  phi,  0],
+            [-1, -phi,  0],
+            [ 1, -phi,  0],
+            [ 0, -1,  phi],
+            [ 0,  1,  phi],
+            [ 0, -1, -phi],
+            [ 0,  1, -phi],
+            [ phi,  0, -1],
+            [ phi,  0,  1],
+            [-phi,  0, -1],
+            [-phi,  0,  1]
+        ])
+        # Normalize to unit sphere
+        return vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+
+    def subdivide_triangle(v1, v2, v3, depth):
+        """Recursively subdivide a triangle on the sphere"""
+        if depth == 0:
+            return [v1, v2, v3]
+
+        # Find midpoints and normalize to sphere
+        m1 = (v1 + v2) / 2
+        m2 = (v2 + v3) / 2
+        m3 = (v3 + v1) / 2
+
+        m1 = m1 / np.linalg.norm(m1)
+        m2 = m2 / np.linalg.norm(m2)
+        m3 = m3 / np.linalg.norm(m3)
+
+        # Recursively subdivide
+        triangles = []
+        triangles.extend(subdivide_triangle(v1, m1, m3, depth-1))
+        triangles.extend(subdivide_triangle(m1, v2, m2, depth-1))
+        triangles.extend(subdivide_triangle(m3, m2, v3, depth-1))
+        triangles.extend(subdivide_triangle(m1, m2, m3, depth-1))
+
+        return triangles
+
+    # Create high-quality spherical distribution using icosahedral subdivision
+    # Start with icosahedron vertices (12 points)
+    vertices = icosahedron_points()
+
+    # Subdivide to get more points - adjust depth to get ~14 points
+    # Depth 1 gives 80 points, depth 0 gives 12 points
+    # We want something close to 14, so let's use depth 1 but take a subset
+    depth = 1
+
+    # Generate subdivided triangles
+    faces = [
+        [0,1,2], [0,2,3], [0,3,4], [0,4,5], [0,5,1],
+        [1,6,2], [2,7,3], [3,8,4], [4,9,5], [5,10,1],
+        [6,1,11], [7,2,11], [8,3,11], [9,4,11], [10,5,11],
+        [6,7,8], [7,8,9], [8,9,10], [9,10,6], [10,6,7]
+    ]
+
+    all_vertices = vertices.tolist()
+    for face in faces:
+        tri = subdivide_triangle(vertices[face[0]], vertices[face[1]], vertices[face[2]], depth)
+        all_vertices.extend(tri)
+
+    # Remove duplicates and normalize
+    seen = set()
+    unique_vertices = []
+    for v in all_vertices:
+        v_tuple = tuple([round(x, 10) for x in v])  # Round for comparison
+        if v_tuple not in seen:
+            seen.add(v_tuple)
+            unique_vertices.append(v)
+
+    # Take first 14 points and pad if needed, or sample properly
+    if len(unique_vertices) >= 14:
+        points_sphere = np.array(unique_vertices[:14])
+    else:
+        # If we have fewer points, duplicate some
+        points_sphere = np.array(unique_vertices + [unique_vertices[i % len(unique_vertices)]
+                                                   for i in range(14-len(unique_vertices))])
+
+    # Ensure we have exactly 14 points
+    points_sphere = points_sphere[:14]
+
+    # Normalize to unit sphere (should already be normalized, but just in case)
+    norms = np.linalg.norm(points_sphere, axis=1, keepdims=True)
+    points_sphere = points_sphere / np.maximum(norms, 1e-10)
+
+    # Project to [0,1]^3 cube
+    points = (points_sphere + 1) / 2
+
+    # Add structured perturbation to break symmetries while preserving good distribution
+    # Use smaller perturbation magnitude for better convergence
+    perturbation_magnitude = 0.01
+    points += np.random.normal(0, perturbation_magnitude, points.shape)
+
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+>>>>>>> REPLACE
+</DIFF>

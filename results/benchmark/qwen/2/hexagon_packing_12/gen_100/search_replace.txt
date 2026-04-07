@@ -1,0 +1,205 @@
+<NAME>
+add_numba_jit_compilation
+</NAME>
+
+<DESCRIPTION>
+Adding Numba JIT compilation to the computationally intensive geometric functions will significantly improve performance. The key functions that benefit from JIT compilation are:
+1. `hexagon_vertices` - generates hexagon vertices repeatedly during optimization
+2. `check_overlap` - performs many pairwise overlap checks
+3. `calculate_min_enclosing_hexagon` - computes distances and centroids frequently
+
+This will reduce evaluation time per iteration, allowing more thorough exploration of the solution space within the 180-second time constraint.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+
+
+def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+    """Return vertices of a regular hexagon with given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    # Vertices of a regular hexagon with side length 1, centered at origin
+    base_vertices = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    rotated_vertices = base_vertices @ rotation_matrix.T
+
+    return rotated_vertices + np.array([center_x, center_y])
+
+
+def check_containment(hex_vertices, outer_center_x, outer_center_y, outer_side_length):
+    """Check if all vertices of hex are inside the outer hexagon."""
+    # Vertices of outer hexagon
+    outer_vertices = hexagon_vertices(outer_center_x, outer_center_y, 0, outer_side_length)
+
+    # Check if each vertex of inner hex is inside outer hexagon
+    for vertex in hex_vertices:
+        # Simple point-in-polygon test using winding number or cross product method
+        # For a regular hexagon, we can check distance from center
+        dist_from_center = np.sqrt((vertex[0] - outer_center_x)**2 + (vertex[1] - outer_center_y)**2)
+        if dist_from_center >= outer_side_length * np.sqrt(3) / 2:
+            return False
+    return True
+
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagon vertices overlap using separating axis theorem."""
+    # Get all edges of both hexagons
+    def get_edges(vertices):
+        edges = []
+        n = len(vertices)
+        for i in range(n):
+            edges.append(vertices[i] - vertices[(i+1)%n])
+        return edges
+
+    edges1 = get_edges(hex1_vertices)
+    edges2 = get_edges(hex2_vertices)
+
+    # Project both hexagons onto each edge direction
+    all_axes = edges1 + edges2
+    for axis in all_axes:
+        # Normalize axis
+        norm_axis = axis / np.linalg.norm(axis)
+
+        # Project both polygons onto this axis
+        proj1 = [np.dot(vertex, norm_axis) for vertex in hex1_vertices]
+        proj2 = [np.dot(vertex, norm_axis) for vertex in hex2_vertices]
+
+        # Check for overlap
+        min1, max1 = min(proj1), max(proj1)
+        min2, max2 = min(proj2), max(proj2)
+
+        # If no overlap, then they don't intersect
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+
+def calculate_min_enclosing_hexagon(inner_hex_data, scale_factor=1.0):
+    """Calculate the minimum side length of the hexagon needed to contain all inner hexagons."""
+    # Get all vertices of all inner hexagons
+    all_vertices = []
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        vertices = hexagon_vertices(center_x, center_y, angle)
+        all_vertices.extend(vertices)
+
+    all_vertices = np.array(all_vertices)
+
+    # Find bounding circle radius
+    centroid = np.mean(all_vertices, axis=0)
+    distances = np.sqrt(np.sum((all_vertices - centroid)**2, axis=1))
+    max_distance = np.max(distances)
+
+    # For a regular hexagon, side length = max_distance * sqrt(3)/2
+    # But we also want to ensure we have enough margin for the hexagon itself
+    # Scale factor is used to ensure we have room for proper containment
+    side_length = max_distance * 2 / np.sqrt(3) * scale_factor
+
+    return side_length, centroid
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+from numba import jit
+
+
+@jit(nopython=True)
+def hexagon_vertices_jit(center_x, center_y, angle_deg, side_length=1):
+    """Return vertices of a regular hexagon with given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    # Vertices of a regular hexagon with side length 1, centered at origin
+    base_vertices = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    rotated_vertices = base_vertices @ rotation_matrix.T
+
+    return rotated_vertices + np.array([center_x, center_y])
+
+
+@jit(nopython=True)
+def check_overlap_jit(hex1_vertices, hex2_vertices):
+    """Check if two hexagon vertices overlap using separating axis theorem."""
+    # Get all edges of both hexagons
+    def get_edges(vertices):
+        edges = []
+        n = len(vertices)
+        for i in range(n):
+            edges.append(vertices[i] - vertices[(i+1)%n])
+        return edges
+
+    edges1 = get_edges(hex1_vertices)
+    edges2 = get_edges(hex2_vertices)
+
+    # Project both hexagons onto each edge direction
+    all_axes = edges1 + edges2
+    for axis in all_axes:
+        # Normalize axis
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm == 0:
+            continue
+        norm_axis = axis / axis_norm
+
+        # Project both polygons onto this axis
+        proj1 = [np.dot(vertex, norm_axis) for vertex in hex1_vertices]
+        proj2 = [np.dot(vertex, norm_axis) for vertex in hex2_vertices]
+
+        # Check for overlap
+        min1, max1 = min(proj1), max(proj1)
+        min2, max2 = min(proj2), max(proj2)
+
+        # If no overlap, then they don't intersect
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+
+@jit(nopython=True)
+def calculate_min_enclosing_hexagon_jit(inner_hex_data, scale_factor=1.0):
+    """Calculate the minimum side length of the hexagon needed to contain all inner hexagons."""
+    # Get all vertices of all inner hexagons
+    all_vertices = np.empty((len(inner_hex_data) * 6, 2))
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        vertices = hexagon_vertices_jit(center_x, center_y, angle)
+        all_vertices[i*6:(i+1)*6] = vertices
+
+    # Find bounding circle radius
+    centroid_x = np.mean(all_vertices[:, 0])
+    centroid_y = np.mean(all_vertices[:, 1])
+    distances = np.sqrt(np.sum((all_vertices - np.array([centroid_x, centroid_y]))**2, axis=1))
+    max_distance = np.max(distances)
+
+    # For a regular hexagon, side length = max_distance * sqrt(3)/2
+    # But we also want to ensure we have enough margin for the hexagon itself
+    # Scale factor is used to ensure we have room for proper containment
+    side_length = max_distance * 2 / np.sqrt(3) * scale_factor
+
+    return side_length, centroid_x, centroid_y
+>>>>>>> REPLACE
+</DIFF>

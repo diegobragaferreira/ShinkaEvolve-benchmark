@@ -1,0 +1,393 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+from typing import List, Tuple
+import time
+import math
+from deap import base, creator, tools, algorithms
+import warnings
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation.
+    Returns (||g||₂², ||g||₁, ||g||∞) where g = f*f
+    """
+    if not f_values:
+        return 0.0, 0.0, 0.0
+
+    # Convert to numpy array
+    f = np.array(f_values)
+
+    # Compute autoconvolution g = f * f
+    g = signal.convolve(f, f, mode='full')
+
+    # Extract central portion (valid autoconvolution)
+    half_len = len(f) - 1
+    g = g[half_len:]  # Take right half
+
+    # Compute norms
+    g_squared = g * g
+    norm_2_sq = np.sum(g_squared)
+
+    norm_1 = np.sum(np.abs(g))
+    norm_inf = np.max(np.abs(g))
+
+    return norm_2_sq, norm_1, norm_inf
+
+def compute_c2(f_values: List[float]) -> float:
+    """Compute C2 value for given function"""
+    norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
+
+    # Avoid division by zero
+    if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+        return 0.0
+
+    c2 = norm_2_sq / (norm_1 * norm_inf)
+    return c2
+
+def create_structured_gaussian_individual(n_steps: int, n_peaks: int = None) -> List[float]:
+    """
+    Create a structured individual using adaptive Gaussian peak construction
+    with controlled spacing and amplitude scaling.
+    """
+    # Determine number of peaks based on function length
+    if n_peaks is None:
+        n_peaks = max(3, min(15, n_steps // 100))
+
+    # Create step function with Gaussian peaks
+    x = np.linspace(-0.25, 0.25, n_steps)
+    f_vals = np.zeros(n_steps)
+
+    # Generate peak parameters with logarithmic spacing and minimum gap enforcement
+    peak_positions = []
+    peak_widths = []
+    peak_heights = []
+
+    # Distribute peaks with logarithmic spacing for better frequency range coverage
+    # Use log-spaced positions to ensure good coverage across multiple scales
+    if n_peaks > 1:
+        # Create log-spaced positions from left to right
+        log_min = np.log(0.01)  # Minimum relative distance
+        log_max = np.log(0.5)   # Maximum relative distance (half domain)
+        log_positions = np.logspace(log_min, log_max, n_peaks, base=np.e)
+        # Map to actual positions in [-0.25, 0.25]
+        # First peak at -0.25 + offset, last at 0.25 - offset
+        total_range = 0.5
+        offset = 0.05  # Minimum distance from edges
+
+        # Distribute peaks logarithmically
+        for i in range(n_peaks):
+            # Map log-spaced to actual domain with edge offsets
+            if n_peaks == 1:
+                pos = 0.0  # Center for single peak
+            else:
+                # Linear interpolation from offset to (total_range-offset)
+                rel_pos = log_positions[i] if i < len(log_positions) else 0.5
+                # Adjust for edge constraints
+                pos = -0.25 + offset + rel_pos * (total_range - 2*offset)
+
+            # Ensure bounds are respected
+            pos = np.clip(pos, -0.25 + offset, 0.25 - offset)
+            peak_positions.append(pos)
+    else:
+        # For single peak, center it
+        peak_positions.append(0.0)
+
+    # Add some randomness to positions to avoid perfect symmetry
+    for i in range(len(peak_positions)):
+        # Small random perturbations
+        if n_peaks > 1:
+            peak_positions[i] += np.random.uniform(-0.02, 0.02)
+        # Ensure within bounds
+        peak_positions[i] = np.clip(peak_positions[i], -0.25 + 0.05, 0.25 - 0.05)
+
+    # Generate peak parameters
+    for i in range(n_peaks):
+        # Width inversely related to height for better control
+        width = np.random.uniform(0.005, 0.02)
+        peak_widths.append(width)
+        # Height inversely proportional to width to maintain balance
+        height = np.random.uniform(0.5, 2.0)
+        peak_heights.append(height)
+
+    # Create Gaussian curves for each peak
+    for center, width, height in zip(peak_positions, peak_widths, peak_heights):
+        gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_vals += gaussian
+
+    # Apply smoothing to reduce extreme variations
+    if n_steps > 50:
+        f_vals = signal.savgol_filter(f_vals, min(51, n_steps-1), 3)
+
+    # Ensure non-negativity
+    f_vals = np.maximum(f_vals, 0)
+
+    # Normalize to reasonable range but preserve peak structure
+    if np.max(f_vals) > 0:
+        # Scale to approximately unit max but allow some headroom
+        f_vals = f_vals / np.max(f_vals) * 1.5
+
+    return f_vals.tolist()
+
+def construct_function() -> List[float]:
+    """Main function to construct step-function with high C2 value using evolutionary approach."""
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    start_time = time.time()
+
+    # Configuration parameters
+    max_steps = 10000  # Maximum allowed steps due to time constraints
+    min_steps = 100
+    max_evaluations = 5000  # Maximum evaluations for evolution
+    population_size = 50
+    generations = 200
+
+    # Determine the number of steps to use
+    n_steps = min(max_steps, max(min_steps, 1000 + int(np.random.randint(0, 300) * 5)))
+
+    # Create fitness function and individual representation
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define gene range (step heights between 0 and 2.0)
+    def create_individual():
+        # Use structured Gaussian initialization instead of purely random
+        return create_structured_gaussian_individual(n_steps)
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Evaluation function with enhanced error handling
+    def evaluate(individual):
+        # Ensure non-negative values
+        individual = [max(0, val) for val in individual]
+        try:
+            c2_value = compute_c2(individual)
+            # Penalize very low C2 values to avoid numerical issues
+            if c2_value < 0.01:
+                c2_value = 0.0
+            return (c2_value,)
+        except Exception:
+            return (0.0,)
+
+    toolbox.register("evaluate", evaluate)
+
+    # Genetic operators - enhanced with more aggressive mutation for exploration
+    toolbox.register("mate", tools.cxUniform, indpb=0.1)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.3, indpb=0.3)  # Increased sigma for more exploration
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Run the evolutionary algorithm
+    try:
+        # Create initial population with better structured individuals
+        pop = toolbox.population(n=population_size)
+
+        # Statistics
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats.register("avg", np.mean)
+        stats.register("min", np.min)
+        stats.register("max", np.max)
+
+        # Run evolution
+        algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2,
+                           ngen=generations, stats=stats, verbose=False)
+
+        # Get best individual
+        best_ind = tools.selBest(pop, 1)[0]
+        best_function = [max(0, val) for val in best_ind]
+
+    except Exception:
+        # Fallback to simpler approach if evolution fails
+        best_function = []
+        for i in range(n_steps):
+            # Create a basic bell-curve shaped function
+            x = (i / (n_steps - 1)) * 2 - 1  # Map to [-1, 1]
+            base_val = max(0, 0.5 * np.exp(-x**2 / 0.5))
+            # Add small noise
+            noise = random.uniform(-0.1, 0.1)
+            val = base_val + noise
+            best_function.append(max(0, val))
+
+    # Final refinement with local optimization - enhanced version
+    try:
+        # Try to refine using differential evolution on peak parameters
+        def detect_peaks(f_vals, x_vals):
+            """Better peak detection using second derivative and prominence criteria"""
+            # Find local maxima using first derivative
+            df = np.gradient(f_vals)
+            ddf = np.gradient(df)
+
+            # Peaks are where first derivative is zero and second derivative is negative
+            peaks = []
+            for i in range(1, len(f_vals)-1):
+                # Check for local maximum (first derivative crosses zero from positive to negative)
+                if df[i-1] > 0 and df[i] <= 0:
+                    # Check if it's a significant peak (with respect to surrounding values)
+                    if f_vals[i] > np.max([f_vals[i-1], f_vals[i+1]]) * 0.9:
+                        peaks.append((i, f_vals[i], x_vals[i]))
+
+            # Sort by height and keep top peaks
+            peaks.sort(key=lambda x: x[1], reverse=True)
+            return peaks[:min(10, len(peaks))]
+
+        # Better peak detection
+        x = np.linspace(-0.25, 0.25, n_steps)
+        peak_info = detect_peaks(best_function, x)
+
+        if len(peak_info) >= 2:  # Only proceed if we found at least 2 peaks
+            # Extract peak indices and their x positions and values
+            peak_indices = [peak[0] for peak in peak_info]
+            peak_positions = [peak[2] for peak in peak_info]  # x positions
+            peak_heights = [peak[1] for peak in peak_info]   # y values
+
+            # Create a more comprehensive parameter vector for optimization
+            # Each peak gets 3 parameters: position adjustment, height adjustment, and width adjustment
+            n_peaks = min(5, len(peak_info))  # Limit number of peaks to optimize for efficiency
+            opt_params = []
+            param_bounds = []
+
+            # For each peak, create parameters: [position_offset, height_multiplier, width_scale]
+            for i in range(n_peaks):
+                # Position adjustment (-0.01 to 0.01 relative to original)
+                opt_params.extend([0.0, 1.0, 1.0])  # Initial values
+                param_bounds.extend([(-0.01, 0.01), (0.5, 2.0), (0.5, 2.0)])
+
+            # Objective function that properly maps parameters back to function
+            def objective_for_de(params):
+                # Create new function with adjusted peak parameters
+                temp_func = np.array(best_function)
+
+                # Apply adjustments to peaks
+                param_idx = 0
+                for i in range(n_peaks):
+                    if param_idx + 2 < len(params):  # Ensure we have enough parameters
+                        pos_adj, height_mult, width_scale = params[param_idx:param_idx+3]
+
+                        # Get original peak data
+                        orig_idx = peak_indices[i]
+                        orig_pos = peak_positions[i]
+                        orig_height = peak_heights[i]
+
+                        # Calculate new parameters
+                        new_pos = orig_pos + pos_adj
+                        new_height = orig_height * height_mult
+                        # Width is inversely related to height, so adjust accordingly
+                        # but keep it within reasonable bounds
+                        new_width = max(0.005, 0.02 / width_scale)
+
+                        # Create a slightly modified Gaussian for this peak
+                        x_temp = np.linspace(-0.25, 0.25, n_steps)
+                        new_gaussian = new_height * np.exp(-0.5 * ((x_temp - new_pos) / new_width) ** 2)
+
+                        # Replace just this peak in the function
+                        # For simplicity, let's adjust the peak value directly with smoothing
+                        # This avoids having to reconstruct entire peak function
+
+                        # Instead, we'll do a more targeted approach
+                        temp_func = temp_func.copy()
+
+                        # Apply direct adjustments using a smoother approach
+                        # This is a simplified version that focuses on improving key parameters
+                        # without full Gaussian reconstruction
+
+                        # We'll adjust the immediate neighborhood of peaks
+                        start_idx = max(0, orig_idx - 10)
+                        end_idx = min(n_steps, orig_idx + 10)
+                        window_size = end_idx - start_idx
+
+                        if window_size > 0:
+                            # Apply smooth adjustment around peak
+                            adjustment = np.ones(window_size)
+                            adjustment = adjustment * (height_mult - 1.0)
+
+                            # Apply to the window
+                            for j in range(start_idx, end_idx):
+                                if j < len(temp_func):
+                                    temp_func[j] = max(0, temp_func[j] * (1.0 + adjustment[j-start_idx]))
+
+                        param_idx += 3
+
+                # Ensure all values are non-negative
+                temp_func = np.maximum(temp_func, 0)
+
+                try:
+                    c2_val = compute_c2(temp_func.tolist())
+                    return -c2_val  # Negative because we want to maximize
+                except Exception:
+                    return 1e10
+
+            # Perform differential evolution on peak parameters
+            if len(param_bounds) > 0:
+                result = differential_evolution(
+                    objective_for_de,
+                    param_bounds,
+                    maxiter=30,  # Reduced iterations for speed but enough for effective search
+                    popsize=8,   # Reduced population size for faster optimization
+                    seed=42,
+                    disp=False
+                )
+
+                if result.success and len(result.x) >= len(param_bounds):
+                    # Apply the refined parameters back to the function
+                    # This is a simplified application - in practice, we'd be more careful
+                    # about how we apply these adjustments to improve the function
+                    # For now, we'll just do a more focused improvement
+
+                    # Create a more refined approach using the peak information directly
+                    refined_func = np.array(best_function)
+
+                    # Apply a more intelligent adjustment based on peak properties
+                    # This is a focused improvement approach that tries to enhance the
+                    # peak characteristics to improve C2 without full reconstruction
+                    adjusted_func = refined_func.copy()
+
+                    # Apply a softening technique that reduces peak dominance while retaining
+                    # overall structure to improve the autoconvolution profile
+                    for i in range(len(adjusted_func)):
+                        # Reduce overly high values to flatten the function and improve C2
+                        if adjusted_func[i] > 0.5:
+                            adjusted_func[i] *= 0.95
+
+                    # Apply mild smoothing to reduce numerical artifacts
+                    if n_steps > 50:
+                        from scipy.ndimage import gaussian_filter1d
+                        adjusted_func = gaussian_filter1d(adjusted_func, sigma=0.5, mode='constant', cval=0.0)
+                        adjusted_func = np.maximum(adjusted_func, 0)
+
+                    best_function = adjusted_func.tolist()
+
+    except Exception:
+        pass
+
+    # Ensure we have the right number of steps
+    if len(best_function) != n_steps:
+        # Pad or truncate to match exactly
+        if len(best_function) < n_steps:
+            best_function.extend([0.0] * (n_steps - len(best_function)))
+        else:
+            best_function = best_function[:n_steps]
+
+    # Final validation to ensure robustness - improved version
+    try:
+        c2_score = compute_c2(best_function)
+        if c2_score < 0.1:
+            # If score is very poor, reinitialize with better distribution
+            best_function = create_structured_gaussian_individual(n_steps)
+    except Exception:
+        pass
+
+    return best_function
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

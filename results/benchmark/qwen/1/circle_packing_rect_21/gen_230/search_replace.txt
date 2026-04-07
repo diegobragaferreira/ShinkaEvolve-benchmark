@@ -1,0 +1,277 @@
+<NAME>
+voronoi_based_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+I'm going to implement a more sophisticated Voronoi-based adaptive mutation that incorporates actual Voronoi diagram computation to better understand local geometry and constraint density. This approach will compute true Voronoi cell areas for each circle to determine how much space is available around each circle, which will guide the mutation parameters more accurately.
+
+The key insight is that we want to:
+1. Give larger mutation steps to circles in sparse regions with large Voronoi cells
+2. Give smaller mutation steps to circles in dense regions with small Voronoi cells
+3. This should be more accurate than our current approximation that uses neighbor counts
+
+This will help improve convergence and avoid getting stuck in poor local optima by making the mutation process more geometrically informed.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute refined constraint density for each circle based on Voronoi neighbors and geometric properties.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Compute neighbor density using spatial indexing for efficiency
+    constraint_density = np.zeros(n)
+
+    # Use KDTree for efficient neighbor queries
+    try:
+        tree = cKDTree(centers)
+
+        # For each circle, compute multiple constraint indicators
+        for i in range(n):
+            center_i = centers[i]
+
+            # 1. Direct neighbor count within a reasonable distance
+            # Use 3x the maximum radius as threshold for neighbors
+            max_radius = np.max(circles[:, 2])
+            threshold = max_radius * 3.0
+
+            # Query neighbors efficiently
+            neighbors = tree.query_ball_point(center_i, threshold)
+            neighbor_count = len(neighbors) - 1  # Exclude self
+
+            # 2. Consider Voronoi cell area (approximated using neighbor distances)
+            # If we have enough neighbors, compute approximate Voronoi density
+            if len(neighbors) >= 3:
+                # Get distances to neighbors
+                neighbor_distances = []
+                for j in neighbors:
+                    if i != j:
+                        dist = np.linalg.norm(center_i - centers[j])
+                        neighbor_distances.append(dist)
+
+                if neighbor_distances:
+                    avg_neighbor_dist = np.mean(neighbor_distances)
+                    # Smaller average distances suggest denser packing
+                    voronoi_density = 1.0 / (avg_neighbor_dist + 1e-8)
+                else:
+                    voronoi_density = 1.0
+            else:
+                voronoi_density = 1.0
+
+            # Combine both measures with appropriate weights
+            # Weight neighbor count more heavily for dense regions
+            neighbor_weight = 0.7
+            voronoi_weight = 0.3
+
+            combined_density = (neighbor_weight * (neighbor_count / max(1, n - 1)) +
+                              voronoi_weight * min(voronoi_density / 10.0, 1.0))
+
+            # Normalize and bound the density value
+            constraint_density[i] = min(combined_density, 3.0)  # Cap at reasonable level
+
+    except Exception as e:
+        # Fallback to simple neighbor counting if Voronoi fails
+        for i in range(n):
+            center_i = centers[i]
+            nearby_count = 0
+
+            # Check nearby circles (within 3x max radius)
+            max_radius = np.max(circles[:, 2])
+            threshold = 3 * max_radius
+
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        nearby_count += 1
+
+            constraint_density[i] = nearby_count / max(1, n - 1)
+
+    return constraint_density
+=======
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute refined constraint density for each circle based on actual Voronoi cell areas and geometric properties.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Compute Voronoi-based constraint density using actual Voronoi diagrams
+    constraint_density = np.zeros(n)
+
+    try:
+        # For each circle, compute Voronoi cell area and constraint density
+        for i in range(n):
+            # Extract the current circle's center
+            current_center = centers[i]
+
+            # For Voronoi computation, we need to include boundary constraints
+            # Create extended set of points to simulate bounded Voronoi
+            # We'll add artificial points around the rectangle to simulate boundaries
+            extended_centers = centers.copy()
+
+            # Add boundary points if not already included
+            # These represent the rectangle boundaries
+            boundary_points = []
+
+            # Add some boundary points to help compute proper Voronoi regions
+            # Only add if we don't already have points near boundaries
+            boundary_margin = 0.1  # Margin to avoid placing points too close to real boundaries
+
+            # Add corner points
+            corners = [
+                [boundary_margin, boundary_margin],
+                [rect_width - boundary_margin, boundary_margin],
+                [boundary_margin, rect_height - boundary_margin],
+                [rect_width - boundary_margin, rect_height - boundary_margin]
+            ]
+
+            # Add edge points
+            edges = [
+                [rect_width/2, boundary_margin],
+                [rect_width/2, rect_height - boundary_margin],
+                [boundary_margin, rect_height/2],
+                [rect_width - boundary_margin, rect_height/2]
+            ]
+
+            # Only add boundary points that aren't too close to existing circles
+            for point in corners + edges:
+                # Check if this point is too close to any existing circle
+                is_far_enough = True
+                for j in range(n):
+                    dist = np.linalg.norm(np.array(point) - centers[j])
+                    if dist < circles[j, 2] * 2:  # Too close to existing circle
+                        is_far_enough = False
+                        break
+
+                if is_far_enough:
+                    boundary_points.append(point)
+
+            # Only proceed with Voronoi if we can form meaningful regions
+            if len(extended_centers) + len(boundary_points) >= 3:
+                # Try to compute Voronoi but with a fallback logic
+                try:
+                    # Create extended points list
+                    all_points = np.vstack([extended_centers, np.array(boundary_points)])
+
+                    # Compute Voronoi (may fail in some edge cases)
+                    vor = Voronoi(all_points)
+
+                    # Find the Voronoi region for the current point
+                    region_index = None
+                    for idx, region in enumerate(vor.point_region):
+                        if region < len(vor.regions) and len(vor.regions[region]) > 0:
+                            # Check if this region corresponds to our point
+                            if idx == i:
+                                region_index = region
+                                break
+
+                    # If we found a valid region, compute the area
+                    if region_index is not None and region_index < len(vor.regions):
+                        region = vor.regions[region_index]
+                        if len(region) > 0 and -1 not in region:
+                            # Extract the vertices of the Voronoi cell
+                            vertices = [vor.vertices[k] for k in region if k < len(vor.vertices)]
+                            if len(vertices) >= 3:
+                                # Calculate the area of the polygon (Voronoi cell)
+                                # Using shoelace formula for polygon area
+                                vertices = np.array(vertices)
+                                # Close the polygon
+                                vertices = np.vstack([vertices, vertices[0]])
+                                area = 0.5 * np.abs(np.dot(vertices[:-1, 0], vertices[1:, 1]) -
+                                                   np.dot(vertices[:-1, 1], vertices[1:, 0]))
+                                # Convert area to constraint measure
+                                # Area inversely relates to constraint density
+                                # Large areas = more space = less constraint
+                                # Small areas = less space = more constraint
+                                if area > 1e-8:
+                                    constraint_density[i] = 1.0 / area
+                                else:
+                                    # Fall back to neighbor-based approach if area is tiny
+                                    constraint_density[i] = 1.0
+                            else:
+                                # Not enough vertices, fall back to neighbor-based
+                                constraint_density[i] = 1.0
+                        else:
+                            # Invalid region, fall back to neighbor-based approach
+                            constraint_density[i] = 1.0
+                    else:
+                        # Could not locate region, fall back to neighbor-based
+                        constraint_density[i] = 1.0
+
+                except:
+                    # Voronoi computation failed, fall back to simple approach
+                    constraint_density[i] = 1.0
+            else:
+                # Not enough points for meaningful Voronoi, use neighbor-based approach
+                constraint_density[i] = 1.0
+
+    except Exception as e:
+        # If Voronoi computation fails entirely for any reason, fall back to neighbor counting
+        constraint_density.fill(1.0)  # Default to uniform constraint density
+
+    # Fallback: always include neighbor-based density for robustness
+    try:
+        # Compute neighbor density as backup
+        tree = cKDTree(centers)
+
+        # For each circle, compute neighbor-based constraint density
+        neighbor_constraint_density = np.zeros(n)
+
+        for i in range(n):
+            center_i = centers[i]
+            # Use 3x the maximum radius as threshold for neighbors
+            max_radius = np.max(circles[:, 2])
+            threshold = max_radius * 3.0
+
+            # Query neighbors efficiently
+            neighbors = tree.query_ball_point(center_i, threshold)
+            neighbor_count = len(neighbors) - 1  # Exclude self
+
+            # Normalize neighbor count
+            normalized_neighbors = neighbor_count / max(1, n - 1)
+
+            # Convert to constraint density (higher neighbor count = higher constraint)
+            neighbor_constraint_density[i] = normalized_neighbors
+
+        # Combine both approaches with weighted average
+        # Use Voronoi-based approach as primary, neighbor-based as backup
+        combined_density = np.zeros(n)
+        for i in range(n):
+            # If Voronoi failed, use neighbor-based
+            if constraint_density[i] <= 1e-8:  # Invalid Voronoi density
+                combined_density[i] = neighbor_constraint_density[i]
+            else:
+                # Blend both approaches with 70% Voronoi, 30% neighbor
+                combined_density[i] = 0.7 * constraint_density[i] + 0.3 * neighbor_constraint_density[i]
+
+        constraint_density = combined_density
+
+    except Exception as e:
+        # If everything fails, return simple neighbor density
+        pass
+
+    # Normalize and ensure reasonable values
+    if np.any(constraint_density > 0):
+        # Normalize using max value (but cap at 10.0 to avoid extreme values)
+        max_density = np.max(constraint_density)
+        if max_density > 0:
+            constraint_density = np.minimum(constraint_density / max_density, 10.0)
+
+    # Ensure minimum constraint density to avoid zero values that could cause issues
+    constraint_density = np.maximum(constraint_density, 0.01)
+
+    return constraint_density
+>>>>>>> REPLACE
+</DIFF>

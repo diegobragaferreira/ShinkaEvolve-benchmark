@@ -1,0 +1,227 @@
+--- a/original.py
++++ b/original.py
+@@ -1,110 +1,202 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial import Voronoi
+ import random
++
++# Set seeds for deterministic behavior
++random.seed(42)
++np.random.seed(42)
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ def check_collision(circle1, circle2):
+     """Check if two circles collide"""
+     x1, y1, r1 = circle1
+     x2, y2, r2 = circle2
+     distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+     return distance_squared < (r1 + r2)**2
+ 
+ def is_valid_position(circle, circles):
+     """Check if a circle position is valid (within bounds and no collisions)"""
+     x, y, r = circle
+ 
+     # Check boundary constraints
+     if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+         return False
+ 
+     # Check collision with existing circles
+     for existing_circle in circles:
+         if check_collision(circle, existing_circle):
+             return False
+ 
+     return True
+ 
+-def place_circle_greedy(circles, max_circles):
+-    """Place circles greedily with maximum radius"""
++def initialize_voronoi_seeds(n_points=50):
++    """Generate initial seed points using Voronoi diagram approach with boundary weighting."""
++    # Generate more points than needed to ensure good distribution
++    points = []
++
++    # Add corner points for better boundary coverage
++    for x in [0, 0.5, 1]:
++        for y in [0, 0.5, 1]:
++            points.append([x, y])
++
++    # Add edge midpoints
++    for x in [0.25, 0.5, 0.75]:
++        points.append([x, 0])
++        points.append([x, 1])
++        points.append([0, x])
++        points.append([1, x])
++
++    # Add interior points
++    for _ in range(20):
++        points.append([np.random.random(), np.random.random()])
++
++    # Generate Voronoi diagram
++    vor = Voronoi(np.array(points))
++
++    # Get Voronoi vertices and centroids as candidate positions
++    candidates = []
++    weights = []
++
++    # Add vertices with boundary weighting
++    for vertex in vor.vertices:
++        if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
++            # Calculate distance to boundaries
++            dist_to_left = vertex[0]
++            dist_to_right = 1 - vertex[0]
++            dist_to_bottom = vertex[1]
++            dist_to_top = 1 - vertex[1]
++
++            # Weight based on proximity to boundaries (1.5x weight for near-boundary points)
++            min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
++            weight = 1.0
++            if min_dist <= 0.1:
++                weight = 1.5  # Higher weight for points near boundaries
++
++            candidates.append(vertex)
++            weights.append(weight)
++
++    # Add centroids of regions with boundary weighting
++    for region in vor.regions:
++        if len(region) > 0 and -1 not in region:
++            centroid_x = np.mean([vor.vertices[i][0] for i in region])
++            centroid_y = np.mean([vor.vertices[i][1] for i in region])
++            if 0 <= centroid_x <= 1 and 0 <= centroid_y <= 1:
++                # Calculate distance to boundaries
++                dist_to_left = centroid_x
++                dist_to_right = 1 - centroid_x
++                dist_to_bottom = centroid_y
++                dist_to_top = 1 - centroid_y
++
++                # Weight based on proximity to boundaries
++                min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
++                weight = 1.0
++                if min_dist <= 0.1:
++                    weight = 1.5  # Higher weight for points near boundaries
++
++                candidates.append([centroid_x, centroid_y])
++                weights.append(weight)
++
++    # Remove duplicates
++    unique_candidates = []
++    unique_weights = []
++    seen = set()
++    for i, cand in enumerate(candidates):
++        coord_tuple = (round(cand[0], 5), round(cand[1], 5))
++        if coord_tuple not in seen:
++            seen.add(coord_tuple)
++            unique_candidates.append(cand)
++            unique_weights.append(weights[i])
++
++    # Sort by weights (descending) and take top n_points
++    sorted_indices = np.argsort(unique_weights)[::-1]
++    selected_candidates = [unique_candidates[i] for i in sorted_indices[:n_points]]
++
++    return selected_candidates
++
++def place_circle_greedy_voronoi(circles, max_circles):
++    """Improved greedy placement using Voronoi-based seeding"""
+     new_circles = circles.copy()
+ 
+-    # Predefined strategic positions for initial placement
+-    strategic_positions = [
+-        (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),  # corners
+-        (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),  # edges
+-        (0.5, 0.5),  # center
+-    ]
+-
+-    # Place initial strategic circles
++    # Get Voronoi-based seed points
++    seed_points = initialize_voronoi_seeds(100)
++
+     placed = 0
+-    for i, (x, y) in enumerate(strategic_positions[:min(9, max_circles)]):
++
++    # Place circles at Voronoi seed points first
++    for i, (x, y) in enumerate(seed_points[:min(max_circles, len(seed_points))]):
+         if placed >= max_circles:
+             break
+         # Try to place with maximum possible radius
+         max_radius = min(x, 1-x, y, 1-y)
+         new_circle = (x, y, max_radius)
+-        if is_valid_position(new_circle, new_circles):
++        if is_valid_position(new_circle, new_circles[:placed]):
+             new_circles[placed] = new_circle
+             placed += 1
+ 
+-    # Fill remaining spots with greedy approach
++    # Fill remaining spots using improved greedy method
+     while placed < max_circles:
+         best_circle = None
+         best_radius = 0
+ 
+         # Try to place circles in multiple candidate positions
+         candidates = []
+-        # Sample random positions in the square
++        # Sample random positions in the square with preference for boundary regions
+         for _ in range(1000):
+-            x = random.uniform(0.01, 0.99)
+-            y = random.uniform(0.01, 0.99)
++            # Bias sampling towards boundary regions for larger potential radii
++            if np.random.random() < 0.3:  # 30% chance to sample near boundary
++                x = np.random.choice([0.01, 0.05, 0.1, 0.9, 0.95, 0.99])
++                y = np.random.uniform(0.01, 0.99)
++            else:
++                x = np.random.uniform(0.01, 0.99)
++                y = np.random.uniform(0.01, 0.99)
++
+             # Estimate maximum radius for this position
+             max_radius = min(x, 1-x, y, 1-y)
+             candidates.append((x, y, max_radius))
+ 
+         # Find the best valid circle among candidates
+         for x, y, max_radius in candidates:
+             if max_radius <= best_radius:
+                 continue
+             test_circle = (x, y, max_radius)
+             if is_valid_position(test_circle, new_circles[:placed]):
+                 best_circle = test_circle
+                 best_radius = max_radius
+ 
+         if best_circle is None:
+-            # If we can't find a valid circle, use a small radius and place anyway
+-            # This shouldn't happen often with good initialization
+-            x = random.uniform(0.01, 0.99)
+-            y = random.uniform(0.01, 0.99)
++            # If we can't find a valid circle, try to place with adjusted parameters
++            # Try placing a small circle in a valid location
++            x = np.random.uniform(0.01, 0.99)
++            y = np.random.uniform(0.01, 0.99)
+             test_circle = (x, y, 0.01)
+             if is_valid_position(test_circle, new_circles[:placed]):
+                 new_circles[placed] = test_circle
+                 placed += 1
+             else:
+                 break  # Can't place more circles
+         else:
+             new_circles[placed] = best_circle
+             placed += 1
+ 
+     return new_circles
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+     circles = np.zeros((n, 3))
+ 
+-    # Use greedy initialization to get a good starting point
+-    circles = place_circle_greedy(circles, n)
++    # Use improved Voronoi-based greedy initialization to get a better starting point
++    circles = place_circle_greedy_voronoi(circles, n)
+ 
+     return circles
+ 
+ 
+ # EVOLVE-BLOCK-END

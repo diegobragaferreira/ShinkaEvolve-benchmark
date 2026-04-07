@@ -1,0 +1,169 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,118 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import optimize
++import random
++from scipy.signal import convolve
++
++def compute_convolution_slow(seq):
++    """Compute convolution using direct method for correctness."""
++    return convolve(seq, seq, mode='full')[:2*len(seq)-1]
+ 
+ def get_good_direction_to_move_into(
+     sequence: list[float],
+ ) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
++    """Implements adaptive gradient evolution for sequence optimization."""
+     n = len(sequence)
++    if n < 1:
++        return None
++        
++    # Compute current convolution and normalize
++    try:
++        conv_result = compute_convolution_slow(sequence)
++        max_conv = np.max(conv_result)
++    except Exception:
++        return None
++    
+     sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
++    if sum_sequence < 1e-10:
+         return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
++
++    # Gradient estimation using finite differences
++    epsilon = 1e-5
++    gradient = np.zeros(n)
++    
++    for i in range(n):
++        # Perturb dimension i
++        perturbed_seq = sequence.copy()
++        perturbed_seq[i] += epsilon
++        perturbed_conv = compute_convolution_slow(perturbed_seq)
++        perturbed_max = np.max(perturbed_conv)
++        
++        # Estimate gradient
++        gradient[i] = (perturbed_max - max_conv) / epsilon
++    
++    # Normalize gradient
++    grad_norm = np.linalg.norm(gradient)
++    if grad_norm > 1e-10:
++        gradient = gradient / grad_norm
++    
++    # Adaptive learning rate
++    adaptive_lr = 0.01 / (1.0 + 0.001 * len(sequence))
++    
++    # Update sequence using gradient ascent
+     new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
++        max(0, x + adaptive_lr * gradient[i]) 
++        for i, x in enumerate(sequence)
+     ]
++    
++    # Normalize new sequence
++    new_sum = np.sum(new_sequence)
++    if new_sum > 0:
++        new_sequence = [x / new_sum for x in new_sequence]
++    
+     return new_sequence
+ 
+ def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
+-
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
+-
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
+-     
++    """Dummy function - not used in this approach."""
++    return None
+ 
+ def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
+-
++    """Search for best sequence using adaptive gradient evolution."""
++    # Initialize diverse set of sequences
++    n = random.randint(100, 1000)
++    best_sequence = [random.random() * 10 for _ in range(n)]
++    
++    # Evolutionary parameters
++    max_iterations = 50
++    patience = 10
++    
++    # Track best solution
++    best_inv_c1 = 0.0
++    consecutive_failures = 0
++    
++    for iteration in range(max_iterations):
++        # Get improved sequence
++        improved_sequence = get_good_direction_to_move_into(best_sequence)
++        
++        if improved_sequence is not None:
++            # Check if improvement is significant
++            try:
++                conv_result = compute_convolution_slow(improved_sequence)
++                max_conv = np.max(conv_result)
++                sum_sq = np.sum(improved_sequence)**2
++                inv_c1 = sum_sq / (2 * len(improved_sequence) * max_conv)
++                
++                if inv_c1 > best_inv_c1:
++                    best_inv_c1 = inv_c1
++                    best_sequence = improved_sequence
++                    consecutive_failures = 0
++                else:
++                    consecutive_failures += 1
++            except:
++                consecutive_failures += 1
++        else:
++            consecutive_failures += 1
++            
++        # Reset if too many failures
++        if consecutive_failures > patience:
++            n = random.randint(100, 1000)
++            best_sequence = [random.random() * 10 for _ in range(n)]
++            consecutive_failures = 0
++    
+     return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

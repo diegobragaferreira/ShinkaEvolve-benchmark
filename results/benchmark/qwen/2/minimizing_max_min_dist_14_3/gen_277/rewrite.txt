@@ -1,0 +1,495 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import time
+from typing import Tuple, List, Optional, Callable
+import warnings
+from dataclasses import dataclass
+from functools import lru_cache
+
+@dataclass
+class OptimizationConfig:
+    """Configuration parameters for the optimization process."""
+    n_points: int = 14
+    n_dimensions: int = 3
+    max_iterations: int = 100000
+    initial_temp: float = 1.0
+    final_temp: float = 1e-6
+    cooling_rate: float = 0.9995
+    log_interval: int = 1000
+    num_seeds: int = 8
+    voronoi_threshold: float = 0.1
+    local_refinement_iters: int = 500
+    early_stopping_patience: int = 10000
+    stagnation_limit: int = 5000
+    refinement_frequency: int = 2000
+    checkpoint_interval: int = 30
+
+class VoronoiFibonacciOptimizer:
+    """Main optimizer class that orchestrates the Voronoi-based evolution approach."""
+    
+    def __init__(self, config: OptimizationConfig):
+        self.config = config
+        self.state_manager = StateManager()
+        self.point_generator = PointGenerator()
+        self.distance_calculator = DistanceCalculator()
+        self.voronoi_computer = VoronoiComputer()
+        self.perturbation_engine = PerturbationEngine()
+        self.optimization_controller = OptimizationController(config)
+    
+    def optimize(self) -> Tuple[np.ndarray, float]:
+        """Main optimization loop with improved architecture."""
+        # Initialize population with multiple seeds
+        self.state_manager.initialize_population(
+            self.point_generator,
+            self.distance_calculator,
+            self.config.num_seeds,
+            self.config.n_points
+        )
+        
+        # Run optimization loop
+        current_points = self.state_manager.current_points
+        current_ratio = self.state_manager.current_ratio
+        
+        temp = self.config.initial_temp
+        iteration_count = 0
+        last_improvement_iter = 0
+        stagnation_counter = 0
+        recent_improvements = []
+        
+        # Checkpoint tracking
+        checkpoint_points = None
+        checkpoint_ratio = 0.0
+        last_checkpoint_iter = 0
+        
+        while iteration_count < self.config.max_iterations and temp > self.config.final_temp:
+            # Generate candidate solution
+            if iteration_count % 3 == 0:
+                candidate_points = self.perturbation_engine.voronoi_guided_perturbation(
+                    current_points, temp, self.voronoi_computer, self.config.voronoi_threshold
+                )
+            else:
+                candidate_points = self.perturbation_engine.distance_weighted_perturbation(
+                    current_points, temp, self.distance_calculator
+                )
+            
+            candidate_ratio = self.distance_calculator.calculate_ratio(candidate_points)
+            
+            # Accept or reject based on Metropolis criterion
+            delta_ratio = candidate_ratio - current_ratio
+            
+            # Temperature-based acceptance
+            if temp < 1e-12:
+                accept_prob = 1.0 if delta_ratio > 0 else 0.0
+            else:
+                accept_prob = min(1.0, np.exp(delta_ratio / temp))
+            
+            accepted = np.random.random() < accept_prob
+            
+            if accepted:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+                
+                # Update best solution
+                if current_ratio > self.state_manager.best_ratio:
+                    self.state_manager.best_points = current_points.copy()
+                    self.state_manager.best_ratio = current_ratio
+                    recent_improvements.append(iteration_count)
+                    if len(recent_improvements) > 10:
+                        recent_improvements.pop(0)
+                    stagnation_counter = 0
+                    last_improvement_iter = iteration_count
+                else:
+                    stagnation_counter += 1
+            else:
+                stagnation_counter += 1
+            
+            # Apply adaptive cooling
+            if accepted or stagnation_counter < 1000:
+                temp = self.optimization_controller.adaptive_cooling_schedule(
+                    temp, accepted, len(recent_improvements)
+                )
+            
+            iteration_count += 1
+            
+            # Checkpoint management
+            if iteration_count % self.config.checkpoint_interval == 0:
+                # Save checkpoint if improvement
+                if current_ratio > checkpoint_ratio:
+                    checkpoint_ratio = current_ratio
+                    checkpoint_points = current_points.copy()
+                    last_checkpoint_iter = iteration_count
+                
+                # Restart from checkpoint if stagnated
+                if iteration_count - last_improvement_iter > self.config.early_stopping_patience // 2:
+                    if (checkpoint_points is not None and 
+                        checkpoint_ratio > current_ratio * 0.99):
+                        current_points = checkpoint_points.copy()
+                        current_ratio = checkpoint_ratio
+                        last_improvement_iter = iteration_count
+                        last_checkpoint_iter = iteration_count
+            
+            # Early stopping
+            if iteration_count - last_improvement_iter > self.config.early_stopping_patience:
+                break
+            
+            # Additional cooling when stagnated
+            if stagnation_counter > self.config.stagnation_limit:
+                temp = max(temp * 0.95, self.config.final_temp)
+                stagnation_counter = 0
+            
+            # Periodic local refinement
+            if iteration_count % self.config.refinement_frequency == 0 and iteration_count > 0:
+                refined_points, refined_ratio = self._adaptive_local_refinement(
+                    self.state_manager.best_points, self.config.local_refinement_iters
+                )
+                
+                if refined_ratio > self.state_manager.best_ratio:
+                    self.state_manager.best_points = refined_points
+                    self.state_manager.best_ratio = refined_ratio
+        
+        return self.state_manager.best_points, self.state_manager.best_ratio
+    
+    def _adaptive_local_refinement(self, starting_points: np.ndarray,
+                                 max_iters: int = 500) -> Tuple[np.ndarray, float]:
+        """Apply local refinement with alternating perturbation strategies."""
+        current_points = starting_points.copy()
+        current_ratio = self.distance_calculator.calculate_ratio(current_points)
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        for iter_num in range(max_iters):
+            # Alternate between perturbation strategies
+            if iter_num % 2 == 0:
+                candidate_points = self.perturbation_engine.voronoi_guided_perturbation(
+                    current_points,
+                    0.005,
+                    self.voronoi_computer,
+                    0.05
+                )
+            else:
+                candidate_points = self.perturbation_engine.distance_weighted_perturbation(
+                    current_points, 0.005, self.distance_calculator
+                )
+            
+            candidate_ratio = self.distance_calculator.calculate_ratio(candidate_points)
+            
+            # Accept improvement or with small probability for escape
+            if candidate_ratio > current_ratio:
+                current_points = candidate_points
+                current_ratio = candidate_ratio
+                
+                if current_ratio > best_ratio:
+                    best_points = current_points.copy()
+                    best_ratio = current_ratio
+            else:
+                if np.random.rand() < 0.01:
+                    current_points = candidate_points
+                    current_ratio = candidate_ratio
+        
+        return best_points, best_ratio
+
+class StateManager:
+    """Manages the optimization state including best points and ratios."""
+    
+    def __init__(self):
+        self.best_points: Optional[np.ndarray] = None
+        self.best_ratio: float = 0.0
+        self.current_points: Optional[np.ndarray] = None
+        self.current_ratio: float = 0.0
+    
+    def initialize_population(self, point_generator, distance_calculator, 
+                            num_seeds: int, n_points: int):
+        """Initialize with multiple Fibonacci sphere seeds."""
+        best_seed_points = None
+        best_seed_ratio = 0.0
+        
+        for seed_offset in range(num_seeds):
+            seed_points = point_generator.fibonacci_sphere(n_points, seed_offset)
+            seed_ratio = distance_calculator.calculate_ratio(seed_points)
+            
+            if seed_ratio > best_seed_ratio:
+                best_seed_ratio = seed_ratio
+                best_seed_points = seed_points.copy()
+        
+        self.current_points = best_seed_points
+        self.current_ratio = best_seed_ratio
+        self.best_points = self.current_points.copy()
+        self.best_ratio = self.current_ratio
+
+class PointGenerator:
+    """Generates initial point configurations."""
+    
+    @staticmethod
+    def fibonacci_sphere(n: int, seed_offset: int = 0) -> np.ndarray:
+        """Generate points on a unit sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3.0 - np.sqrt(5.0))  # golden angle in radians
+        
+        for i in range(n):
+            y = 1 - ((i + seed_offset) / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = phi * (i + seed_offset)  # golden angle increment with offset
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+
+class DistanceCalculator:
+    """Handles distance calculations and ratio computations."""
+    
+    @staticmethod
+    def calculate_distances_fast(points: np.ndarray) -> Tuple[float, float]:
+        """Calculate minimum and maximum distances efficiently."""
+        if len(points) < 2:
+            return 0.0, 0.0
+            
+        try:
+            distances = pdist(points)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            return d_min, d_max
+        except Exception:
+            return 0.0, 0.0
+    
+    def calculate_ratio(self, points: np.ndarray) -> float:
+        """Calculate the ratio of minimum to maximum distances."""
+        d_min, d_max = self.calculate_distances_fast(points)
+        if d_max <= 0:
+            return 0.0
+        return d_min / d_max
+
+class VoronoiComputer:
+    """Computes Voronoi-related statistics and information."""
+    
+    @staticmethod
+    def compute_voronoi_stats(points: np.ndarray) -> Tuple[float, float, float]:
+        """
+        Compute Voronoi-based statistics to guide optimization.
+        Returns: (mean_area, std_area, max_deviation_from_mean)
+        """
+        if len(points) < 3:
+            return 0.0, 0.0, 0.0
+            
+        try:
+            # Create spherical Voronoi diagram
+            sv = SphericalVoronoi(points, radius=1.0)
+            
+            # Compute areas of Voronoi cells
+            areas = sv.calculate_areas()
+            
+            if len(areas) == 0:
+                return 0.0, 0.0, 0.0
+                
+            mean_area = np.mean(areas)
+            std_area = np.std(areas)
+            max_deviation = np.max(np.abs(areas - mean_area))
+            
+            return mean_area, std_area, max_deviation
+        except Exception:
+            return 0.0, 0.0, 0.0
+
+class PerturbationEngine:
+    """Generates candidate solutions through various perturbation strategies."""
+    
+    @staticmethod
+    def project_to_sphere(points: np.ndarray) -> np.ndarray:
+        """Project points onto unit sphere."""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        safe_norms = np.where(norms == 0, 1.0, norms)
+        return points / safe_norms
+    
+    @classmethod
+    def voronoi_guided_perturbation(cls, current_points: np.ndarray, temp: float,
+                                  voronoi_computer: VoronoiComputer,
+                                  voronoi_threshold: float = 0.1) -> np.ndarray:
+        """Generate neighbor using Voronoi-based guidance."""
+        neighbor_points = current_points.copy()
+        
+        # Compute Voronoi statistics
+        mean_area, std_area, max_deviation = voronoi_computer.compute_voronoi_stats(current_points)
+        
+        try:
+            # Compute areas for probabilistic selection
+            sv = SphericalVoronoi(current_points, radius=1.0)
+            areas = sv.calculate_areas()
+            
+            # Enhanced selection strategy with better probabilistic weighting
+            if len(areas) > 0 and max_deviation > voronoi_threshold:
+                # Select point that maximizes deviation from mean area
+                deviations = np.abs(areas - mean_area)
+                exp_deviations = np.exp(-deviations / (std_area + 1e-8))
+                weights = exp_deviations / np.sum(exp_deviations)
+                idx = np.random.choice(len(current_points), p=weights)
+            else:
+                # Standard weighted selection
+                if len(areas) > 0:
+                    normalized_areas = (areas - np.mean(areas)) / (np.std(areas) + 1e-8)
+                    exp_areas = np.exp(normalized_areas * 4)
+                    weights = exp_areas / np.sum(exp_areas)
+                    idx = np.random.choice(len(current_points), p=weights)
+                else:
+                    idx = np.random.randint(0, len(current_points))
+        except Exception:
+            idx = np.random.randint(0, len(current_points))
+        
+        # Determine perturbation magnitude
+        base_perturbation = temp * 0.05
+        
+        if max_deviation > voronoi_threshold:
+            perturbation_mag = base_perturbation * (1.0 + max_deviation / (mean_area + 1e-8))
+            if max_deviation > 2.0 * std_area:
+                perturbation_mag *= 2.0
+        else:
+            perturbation_mag = base_perturbation
+        
+        # Adjust based on cell type
+        if len(areas) > 0:
+            area_ratio = areas[idx] / (mean_area + 1e-8)
+            if area_ratio > 2.0 or area_ratio < 0.5:
+                perturbation_mag *= 2.0
+            elif area_ratio > 1.5 or area_ratio < 0.67:
+                perturbation_mag *= 1.5
+        
+        # Add Gaussian noise and project back
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[idx] += noise
+        neighbor_points = cls.project_to_sphere(neighbor_points)
+        
+        return neighbor_points
+    
+    @classmethod
+    def distance_weighted_perturbation(cls, current_points: np.ndarray, temp: float,
+                                     distance_calculator: DistanceCalculator) -> np.ndarray:
+        """Perturb points based on distance characteristics."""
+        neighbor_points = current_points.copy()
+        
+        # Calculate pairwise distances
+        if len(current_points) < 2:
+            return neighbor_points
+            
+        try:
+            distances = pdist(current_points)
+            distance_matrix = squareform(distances)
+        except Exception:
+            # Fallback to random perturbation if distance calculation fails
+            idx = np.random.randint(0, len(current_points))
+            noise = np.random.normal(0, temp * 0.1, 3)
+            neighbor_points[idx] += noise
+            return cls.project_to_sphere(neighbor_points)
+        
+        # For each point, determine if it's too close to others
+        mean_distances = np.mean(distance_matrix, axis=1)
+        median_distance = np.median(mean_distances)
+        
+        # Select points that are closer than median to their neighbors
+        points_to_perturb = np.where(mean_distances < median_distance)[0]
+        
+        # If no points are too close, just pick a random one
+        if len(points_to_perturb) == 0:
+            points_to_perturb = [np.random.randint(0, len(current_points))]
+        
+        # Pick one point to perturb (weighted by how much it needs fixing)
+        if len(points_to_perturb) > 1:
+            weights = 1.0 / (mean_distances[points_to_perturb] + 1e-8)
+            weights = weights / np.sum(weights)
+            idx = np.random.choice(points_to_perturb, p=weights)
+        else:
+            idx = points_to_perturb[0]
+        
+        # Determine perturbation magnitude
+        perturbation_mag = temp * 0.1
+        
+        # If point is really close to others, perturb more aggressively
+        if mean_distances[idx] < median_distance * 0.5:
+            perturbation_mag *= 2.0
+            
+        # Add Gaussian noise and project back
+        noise = np.random.normal(0, perturbation_mag, 3)
+        neighbor_points[idx] += noise
+        neighbor_points = cls.project_to_sphere(neighbor_points)
+        
+        return neighbor_points
+
+class OptimizationController:
+    """Controls the optimization process including cooling schedules."""
+    
+    def __init__(self, config: OptimizationConfig):
+        self.config = config
+    
+    def adaptive_cooling_schedule(self, temp: float, improvement: bool, 
+                                recent_improvements_count: int) -> float:
+        """Apply adaptive cooling schedule based on recent improvements."""
+        if recent_improvements_count < 2:
+            # Very aggressive cooling if no recent improvements
+            return temp * 0.999
+        elif recent_improvements_count >= 6:
+            # Faster cooling for consistent improvements
+            return temp * (self.config.cooling_rate * 0.9)
+        else:
+            # Normal cooling
+            return temp * self.config.cooling_rate
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+    
+    Uses an enhanced spherical Voronoi-based evolution approach with optimized adaptive strategies,
+    combining Fibonacci initialization with checkpoint-restart mechanisms for superior convergence.
+
+    Returns:
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Create configuration
+    config = OptimizationConfig(
+        n_points=14,
+        n_dimensions=3,
+        max_iterations=100000,
+        initial_temp=1.0,
+        final_temp=1e-6,
+        cooling_rate=0.9995,
+        log_interval=1000,
+        num_seeds=8,
+        voronoi_threshold=0.1,
+        local_refinement_iters=500,
+        early_stopping_patience=10000,
+        stagnation_limit=5000,
+        refinement_frequency=2000,
+        checkpoint_interval=30
+    )
+    
+    try:
+        # Initialize optimizer
+        optimizer = VoronoiFibonacciOptimizer(config)
+        
+        # Run optimization
+        optimized_points, best_ratio = optimizer.optimize()
+        
+        # Final validation
+        if optimized_points is not None:
+            final_min, final_max = optimizer.distance_calculator.calculate_distances_fast(optimized_points)
+            if final_max <= 0:
+                warnings.warn("Final validation failed, returning Fibonacci sphere initialization")
+                optimized_points = optimizer.point_generator.fibonacci_sphere(14)
+        else:
+            # Fallback to Fibonacci initialization if optimization failed
+            warnings.warn("Optimization returned None, using Fibonacci sphere initialization")
+            optimized_points = optimizer.point_generator.fibonacci_sphere(14)
+            
+        return optimized_points
+    
+    except Exception as e:
+        # Fallback to basic initialization if anything fails
+        warnings.warn(f"Optimization failed with error: {str(e)}, returning Fibonacci sphere initialization")
+        return PointGenerator.fibonacci_sphere(14)
+
+# EVOLVE-BLOCK-END

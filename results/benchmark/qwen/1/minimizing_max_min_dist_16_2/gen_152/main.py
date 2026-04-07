@@ -1,0 +1,237 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape into points
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances using squareform for numerical stability
+        distances = squareform(pdist(points))
+
+        # Set diagonal to large value to ignore self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -1e10
+
+        # Return negative ratio to minimize (we want to maximize ratio)
+        return -d_min / d_max
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum distance with explicit numerical stability."""
+        if len(points) < 2:
+            return 0.0
+
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def initialize_points(method='grid'):
+        """Initialize points using different structured approaches for improved starting configuration."""
+        np.random.seed(42)
+
+        if method == 'grid':
+            # Create a 4x4 grid pattern (16 points) with controlled perturbations
+            grid_size = 4
+            x = np.linspace(0.1, 0.9, grid_size)
+            y = np.linspace(0.1, 0.9, grid_size)
+
+            # Generate grid points
+            xx, yy = np.meshgrid(x, y)
+            points = np.column_stack([xx.ravel(), yy.ravel()])
+
+            # Add small random perturbations to break symmetry while maintaining structure
+            noise_magnitude = 0.01
+            noise = np.random.normal(0, noise_magnitude, points.shape)
+            points += noise
+
+        elif method == 'hexagonal':
+            # Create a hexagonal grid pattern for better point distribution
+            points = []
+            rows = 4
+            cols = 4
+
+            for i in range(rows):
+                for j in range(cols):
+                    if len(points) >= 16:
+                        break
+                    x = j * 0.25 + (i % 2) * 0.125
+                    y = i * 0.25
+
+                    # Add small random perturbation
+                    x += np.random.normal(0, 0.01)
+                    y += np.random.normal(0, 0.01)
+                    points.append([x, y])
+
+            points = np.array(points[:16])
+
+        elif method == 'spiral':
+            # Create a spiral arrangement
+            points = []
+            for i in range(16):
+                if i == 0:
+                    x, y = 0.5, 0.5
+                else:
+                    angle = 2 * np.pi * i / 16
+                    radius = 0.4 * (i / 16)
+                    x = 0.5 + radius * np.cos(angle)
+                    y = 0.5 + radius * np.sin(angle)
+                    # Add small random perturbation
+                    x += np.random.normal(0, 0.01)
+                    y += np.random.normal(0, 0.01)
+                points.append([x, y])
+            points = np.array(points)
+
+        elif method == 'random':
+            # Purely random initialization
+            points = np.random.rand(16, 2)
+
+        else:
+            # Default grid method
+            points = initialize_points('grid')
+
+        # Clip to ensure points stay within bounds
+        points = np.clip(points, 0, 1)
+        return points
+
+    # Set up bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1)] * 32
+
+    # Multi-start optimization with different initializations
+    best_points = None
+    best_ratio = -np.inf
+
+    # Try different initialization methods
+    init_methods = ['grid', 'hexagonal', 'spiral', 'random']
+
+    for method in init_methods:
+        try:
+            # Initialize with different methods
+            initial_points = initialize_points(method)
+
+            # Try multiple global optimization strategies with different parameters
+            de_params_list = [
+                {'maxiter': 150, 'popsize': 25, 'mutation': (0.8, 1.0), 'recombination': 0.9},
+                {'maxiter': 200, 'popsize': 30, 'mutation': (0.7, 1.0), 'recombination': 0.8},
+                {'maxiter': 100, 'popsize': 20, 'mutation': (0.9, 1.0), 'recombination': 0.7}
+            ]
+
+            for de_params in de_params_list:
+                try:
+                    result_de = differential_evolution(
+                        objective,
+                        bounds,
+                        seed=42,
+                        **de_params
+                    )
+
+                    if result_de.success:
+                        # Phase 2: Local refinement with multiple strategies
+                        refinement_strategies = [
+                            {
+                                'method': 'L-BFGS-B',
+                                'options': {'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
+                            },
+                            {
+                                'method': 'SLSQP',
+                                'options': {'maxiter': 200, 'ftol': 1e-12}
+                            }
+                        ]
+
+                        for strategy in refinement_strategies:
+                            try:
+                                refined = minimize(
+                                    objective,
+                                    result_de.x,
+                                    method=strategy['method'],
+                                    bounds=bounds,
+                                    options=strategy['options']
+                                )
+
+                                if refined.success:
+                                    final_points = refined.x.reshape(-1, 2)
+                                    ratio = calculate_min_max_ratio(final_points)
+
+                                    if ratio > best_ratio:
+                                        best_ratio = ratio
+                                        best_points = final_points.copy()
+
+                            except Exception:
+                                continue
+
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    # If we still don't have a good solution, fallback to single optimization
+    if best_points is None:
+        # Initialize with grid approach as fallback
+        best_points = initialize_points('grid')
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Single optimization approach for fallback
+        try:
+            result_de = differential_evolution(
+                objective,
+                bounds,
+                seed=42,
+                maxiter=150,
+                popsize=25,
+                atol=1e-12,
+                rtol=1e-12,
+                mutation=(0.8, 1.0),
+                recombination=0.9
+            )
+
+            if result_de.success:
+                refined = minimize(
+                    objective,
+                    result_de.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
+                )
+
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+        except Exception:
+            pass
+
+    # Ensure final points are within valid bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+# EVOLVE-BLOCK-END

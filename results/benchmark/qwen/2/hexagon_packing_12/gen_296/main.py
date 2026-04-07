@@ -1,0 +1,261 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+from numba import njit
+import time
+import random
+from math import cos, sin, pi, sqrt
+
+@njit
+def generate_hexagon_vertices_numba(center_x, center_y, angle_deg, side_length=1):
+    """Numba-compiled function to generate hexagon vertices"""
+    angle_rad = np.radians(angle_deg)
+    vertices = np.empty((6, 2))
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        vertices[i, 0] = center_x + side_length * cos(angle)
+        vertices[i, 1] = center_y + side_length * sin(angle)
+    return vertices
+
+@njit
+def point_in_hexagon_fast(px, py, center_x, center_y, angle_deg, side_length=1):
+    """Fast point-in-hexagon check using distance from center"""
+    # Transform point to hexagon's coordinate system
+    dx = px - center_x
+    dy = py - center_y
+    angle_rad = np.radians(angle_deg)
+    
+    # Rotate point to align with hexagon axes
+    rotated_x = dx * cos(-angle_rad) - dy * sin(-angle_rad)
+    rotated_y = dx * sin(-angle_rad) + dy * cos(-angle_rad)
+    
+    # For unit hexagons, maximum distance from center is sqrt(3)/2 ~ 0.866
+    max_radius = side_length * sqrt(3) / 2
+    return abs(rotated_x) <= max_radius and abs(rotated_y) <= max_radius
+
+@njit
+def check_overlap_fast(x1, y1, angle1, x2, y2, angle2):
+    """Fast overlap check using distance between centers"""
+    # For unit regular hexagons, minimum separation distance is roughly 2
+    distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+    # Minimum distance for non-overlapping hexagons (circumradius = sqrt(3)/2)
+    min_dist_sq = 3.0  # About (sqrt(3))^2 = 3
+    return distance_sq < min_dist_sq
+
+def create_hexagon_polygon(center_x, center_y, side_length=1, rotation_deg=0):
+    """Create a shapely polygon for a hexagon."""
+    vertices = generate_hexagon_vertices(center_x, center_y, side_length, rotation_deg)
+    return Polygon(vertices.tolist())
+
+def check_containment_shapely(hexagon_poly, outer_hex_poly):
+    """Check if hexagon is fully contained using Shapely operations."""
+    vertices = list(hexagon_poly.exterior.coords)
+    for point in vertices:
+        if not outer_hex_poly.contains(Point(point[0], point[1])):
+            return False
+    return True
+
+def check_overlap_shapely(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap using Shapely intersection."""
+    return hex1_poly.intersects(hex2_poly) and not hex1_poly.touches(hex2_poly)
+
+def calculate_outer_hex_side_length(inner_hex_data, buffer=0.01):
+    """Calculate minimum side length of outer hexagon that contains all inner hexagons."""
+    # Get all vertices of all inner hexagons
+    all_vertices = []
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, rotation = inner_hex_data[i]
+        vertices = generate_hexagon_vertices_numba(center_x, center_y, rotation, 1.0)
+        all_vertices.extend(vertices.tolist())
+    
+    # Find bounding box
+    if not all_vertices:
+        return 1
+        
+    xs = [v[0] for v in all_vertices]
+    ys = [v[1] for v in all_vertices]
+    
+    # Calculate distance from center to farthest vertex
+    max_dist = 0
+    center_x = sum(xs) / len(xs)
+    center_y = sum(ys) / len(ys)
+    
+    for x, y in all_vertices:
+        dist = sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_dist = max(max_dist, dist)
+    
+    # Add buffer for numerical stability
+    return max_dist + buffer
+
+def evaluate_fitness(individual, outer_hex_side_length):
+    """Evaluate fitness of individual configuration."""
+    # Convert individual to hex data format
+    hex_data = individual.reshape(-1, 3)
+    
+    # Create all inner hexagon polygons
+    inner_hexagons = []
+    for i in range(len(hex_data)):
+        cx, cy, rot = hex_data[i]
+        hex_poly = create_hexagon_polygon(cx, cy, 1, rot)
+        inner_hexagons.append(hex_poly)
+    
+    # Check containment and overlap
+    outer_hex = create_hexagon_polygon(0, 0, outer_hex_side_length, 0)
+    
+    # Count violations
+    overlap_count = 0
+    containment_count = 0
+    
+    # Check overlaps between all pairs (with optimization for early termination)
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap_shapely(inner_hexagons[i], inner_hexagons[j]):
+                overlap_count += 1
+                if overlap_count > 10:  # Early termination threshold
+                    break
+        if overlap_count > 10:
+            break
+    
+    # Check containment
+    for hex_poly in inner_hexagons:
+        if not check_containment_shapely(hex_poly, outer_hex):
+            containment_count += 1
+            if containment_count > 10:  # Early termination threshold
+                break
+    
+    # Penalty for constraint violations
+    penalty = overlap_count * 1000 + containment_count * 1000
+    
+    # Fitness is inverse of outer hex side length minus penalties
+    if overlap_count > 0 or containment_count > 0:
+        return -penalty  # Very bad fitness if constraints violated
+    else:
+        return 1.0 / outer_hex_side_length
+
+def create_advanced_symmetric_pattern():
+    """Create a scientifically designed symmetric pattern."""
+    # Known good arrangement based on mathematical principles
+    pattern = [
+        [0.0, 0.0, 0.0],         # Center
+        [-1.732, 0.0, 0.0],      # Left
+        [1.732, 0.0, 0.0],       # Right
+        [0.0, 1.732, 0.0],       # Top
+        [0.0, -1.732, 0.0],      # Bottom
+        [-0.866, 0.866, 0.0],    # Top-left
+        [0.866, 0.866, 0.0],     # Top-right
+        [-0.866, -0.866, 0.0],   # Bottom-left
+        [0.866, -0.866, 0.0],    # Bottom-right
+        [-2.598, 0.0, 0.0],      # Far left
+        [2.598, 0.0, 0.0],       # Far right
+        [0.0, 2.598, 0.0],       # Far top
+    ]
+    return np.array(pattern)
+
+def generate_enhanced_initial_population(pop_size, num_hexagons=12):
+    """Generate enhanced initial population with multiple pattern types."""
+    population = []
+
+    # Create base patterns
+    base_patterns = [
+        create_advanced_symmetric_pattern(),
+    ]
+
+    # Generate variations from each base pattern
+    for i in range(pop_size):
+        # Alternate between base patterns to ensure diversity
+        base_pattern = base_patterns[i % len(base_patterns)]
+        individual = base_pattern.copy().astype(float)
+
+        # Add controlled variation to positions
+        for j in range(num_hexagons):
+            # Add small random variation to position
+            individual[j, 0] += np.random.uniform(-0.3, 0.3)
+            individual[j, 1] += np.random.uniform(-0.3, 0.3)
+            # Random angle variation
+            individual[j, 2] += np.random.uniform(-10, 10)
+            # Keep angle in [0, 360)
+            individual[j, 2] = individual[j, 2] % 360
+
+        population.append(individual.flatten())
+
+    return population
+
+def multi_stage_optimization():
+    """Perform multi-stage optimization for better results."""
+    # Define bounds
+    bounds = []
+    for _ in range(12):
+        bounds.extend([(-5.0, 5.0), (-5.0, 5.0), (0.0, 360.0)])
+    bounds.append((3.5, 4.5))  # Outer side length bounds
+
+    # Initial population
+    initial_pop = generate_enhanced_initial_population(15)
+
+    # Stage 1: Coarse optimization with higher population
+    try:
+        opt_result = differential_evolution(
+            lambda x: -evaluate_fitness(x, x[-1]),  # Minimize negative fitness
+            bounds,
+            seed=random.randint(0, 1000),
+            maxiter=50,
+            popsize=20,
+            disp=False,
+            strategy='best1bin',
+            tol=1e-5,
+            init=initial_pop
+        )
+        
+        if opt_result.success:
+            return opt_result.x
+    except Exception as e:
+        print(f"Stage 1 error: {e}")
+
+    # Fallback to basic pattern
+    return create_advanced_symmetric_pattern().flatten()
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Run multi-stage optimization
+    best_params = multi_stage_optimization()
+    
+    # Extract the configuration
+    inner_hex_data = best_params[:-1].reshape(-1, 3)
+    outer_hex_side_length = best_params[-1]
+    
+    # Validate and refine the solution
+    try:
+        # Re-evaluate with precise outer side length
+        hex_data = inner_hex_data.reshape(-1, 3)
+        outer_side_length = calculate_outer_hex_side_length(hex_data)
+        
+        # Final fitness evaluation
+        final_fitness = evaluate_fitness(inner_hex_data.flatten(), outer_side_length)
+        
+        # Ensure we're getting the correct result
+        if outer_side_length > 0:
+            outer_hex_side_length = outer_side_length
+    except Exception as e:
+        print(f"Validation error: {e}")
+        pass  # Keep existing values
+
+    # Create outer hexagon data
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    
+    # Ensure we don't exceed the time limit
+    elapsed_time = time.time() - start_time
+    if elapsed_time > 175:  # Leave buffer
+        print("Warning: Time limit approaching")
+        
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

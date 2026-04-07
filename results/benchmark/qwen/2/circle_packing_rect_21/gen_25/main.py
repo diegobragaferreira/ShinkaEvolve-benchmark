@@ -1,0 +1,273 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions - perimeter = 4, so width + height = 2
+    # Using a 1:1 ratio for simplicity (square-like shape)
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Physics parameters
+    n_circles = 21
+    max_iterations = 10000
+    dt = 0.01
+    damping = 0.9
+    boundary_repulsion = 100.0
+    circle_repulsion = 500.0
+    min_radius = 0.01
+    max_radius = 0.3
+    
+    # Initialize circles with random positions and reasonable radii
+    circles = np.zeros((n_circles, 3))
+    
+    # Start with a grid-like initialization for better convergence
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+    
+    cell_width = rect_width / cols
+    cell_height = rect_height / rows
+    
+    radius = min(cell_width, cell_height) * 0.3
+    
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n_circles:
+                break
+            x = (j + 0.5) * cell_width
+            y = (i + 0.5) * cell_height
+            
+            # Add slight randomization to avoid perfect grid
+            x += np.random.uniform(-cell_width*0.1, cell_width*0.1)
+            y += np.random.uniform(-cell_height*0.1, cell_height*0.1)
+            
+            # Clamp to bounds
+            x = np.clip(x, 0.05, rect_width - 0.05)
+            y = np.clip(y, 0.05, rect_height - 0.05)
+            
+            circles[idx] = [x, y, radius]
+            idx += 1
+            
+    # Make sure we have exactly 21 circles
+    if idx < n_circles:
+        # Fill remaining slots with random valid positions
+        for i in range(idx, n_circles):
+            attempts = 0
+            while attempts < 1000:
+                x = np.random.uniform(0.05, rect_width - 0.05)
+                y = np.random.uniform(0.05, rect_height - 0.05)
+                r = np.random.uniform(min_radius, max_radius)
+                
+                # Check if this would cause overlap
+                valid = True
+                for j in range(i):
+                    existing_x, existing_y, existing_r = circles[j]
+                    dx = x - existing_x
+                    dy = y - existing_y
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    if dist < (r + existing_r):
+                        valid = False
+                        break
+                
+                if valid:
+                    circles[i] = [x, y, r]
+                    break
+                attempts += 1
+    
+    # Physics simulation
+    velocities = np.zeros((n_circles, 2))
+    
+    # For performance, we'll track the best configuration during optimization
+    best_total_radius = 0.0
+    best_circles = circles.copy()
+    
+    for iteration in range(max_iterations):
+        # Calculate forces
+        forces = np.zeros((n_circles, 2))
+        
+        # Circle-to-circle forces
+        if n_circles > 1:
+            positions = circles[:, :2]
+            radii = circles[:, 2]
+            
+            # Compute pairwise distances
+            diff_matrix = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
+            distance_matrix = np.sqrt(np.sum(diff_matrix**2, axis=2))
+            
+            # Avoid division by zero
+            mask = distance_matrix > 0
+            distance_matrix = np.maximum(distance_matrix, 1e-10)
+            
+            # Normalize direction vectors
+            directions = diff_matrix / distance_matrix[..., np.newaxis]
+            
+            # Calculate repulsion forces (inverse square law)
+            radii_sum = radii[:, np.newaxis] + radii[np.newaxis, :]
+            force_magnitudes = circle_repulsion / (distance_matrix**2)
+            force_magnitudes = np.where(mask, force_magnitudes, 0)
+            
+            # Apply forces
+            for i in range(n_circles):
+                for j in range(n_circles):
+                    if i != j and mask[i,j]:
+                        forces[i] += force_magnitudes[i,j] * directions[i,j]
+        
+        # Boundary forces
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Repulsion from boundaries
+            left_force = max(0, (0.05 - x) * boundary_repulsion)
+            right_force = max(0, (x - (rect_width - 0.05)) * boundary_repulsion)
+            bottom_force = max(0, (0.05 - y) * boundary_repulsion)
+            top_force = max(0, (y - (rect_height - 0.05)) * boundary_repulsion)
+            
+            forces[i][0] += left_force - right_force
+            forces[i][1] += bottom_force - top_force
+        
+        # Update velocities and positions
+        for i in range(n_circles):
+            # Apply force to velocity
+            velocities[i] += forces[i] * dt
+            
+            # Apply damping
+            velocities[i] *= damping
+            
+            # Update position
+            circles[i, 0] += velocities[i, 0] * dt
+            circles[i, 1] += velocities[i, 1] * dt
+        
+        # Enforce boundary constraints
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            # Clamp positions to valid range
+            circles[i, 0] = np.clip(x, r + 0.05, rect_width - r - 0.05)
+            circles[i, 1] = np.clip(y, r + 0.05, rect_height - r - 0.05)
+        
+        # Enforce non-overlap constraints
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                
+                dx = x1 - x2
+                dy = y1 - y2
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                # If overlapping, push them apart
+                if dist < (r1 + r2):
+                    # Prevent division by zero
+                    if dist > 1e-10:
+                        # Push along the line connecting centers
+                        separation = (r1 + r2) - dist
+                        move_distance = separation / 2.0
+                        move_x = move_distance * dx / dist
+                        move_y = move_distance * dy / dist
+                        
+                        # Move both circles away from each other
+                        circles[i, 0] += move_x
+                        circles[i, 1] += move_y
+                        circles[j, 0] -= move_x
+                        circles[j, 1] -= move_y
+        
+        # Periodically check and store the best solution
+        if iteration % 100 == 0:
+            total_radius = np.sum(circles[:, 2])
+            if total_radius > best_total_radius:
+                best_total_radius = total_radius
+                best_circles = circles.copy()
+    
+    # Final constraint enforcement
+    for i in range(n_circles):
+        x, y, r = best_circles[i]
+        # Ensure circles stay within bounds
+        best_circles[i, 0] = np.clip(x, r + 0.05, rect_width - r - 0.05)
+        best_circles[i, 1] = np.clip(y, r + 0.05, rect_height - r - 0.05)
+    
+    # Final optimization with gradient ascent on radii
+    # Simple iterative adjustment to maximize sum of radii
+    for _ in range(500):
+        # Store current radii
+        current_radii = best_circles[:, 2].copy()
+        
+        # Slightly adjust each radius to see improvement
+        for i in range(n_circles):
+            old_radius = current_radii[i]
+            # Try small increases/decreases
+            test_radii = current_radii.copy()
+            
+            # Test decreasing radius
+            test_radii[i] = max(min_radius, old_radius - 0.001)
+            if check_validity(best_circles, test_radii, rect_width, rect_height):
+                test_circles = best_circles.copy()
+                test_circles[:, 2] = test_radii
+                if np.sum(test_circles[:, 2]) > np.sum(current_radii):
+                    current_radii[i] = test_radii[i]
+            
+            # Test increasing radius
+            test_radii[i] = min(max_radius, old_radius + 0.001)
+            if check_validity(best_circles, test_radii, rect_width, rect_height):
+                test_circles = best_circles.copy()
+                test_circles[:, 2] = test_radii
+                if np.sum(test_circles[:, 2]) > np.sum(current_radii):
+                    current_radii[i] = test_radii[i]
+        
+        # Update the radii in the best configuration
+        if not np.allclose(best_circles[:, 2], current_radii):
+            best_circles[:, 2] = current_radii
+        
+        # Reapply constraint enforcement
+        for i in range(n_circles):
+            x, y, r = best_circles[i]
+            best_circles[i, 0] = np.clip(x, r + 0.05, rect_width - r - 0.05)
+            best_circles[i, 1] = np.clip(y, r + 0.05, rect_height - r - 0.05)
+    
+    return best_circles
+
+def check_validity(circles, test_radii, width, height):
+    """Check if given radii create a valid configuration."""
+    temp_circles = circles.copy()
+    temp_circles[:, 2] = test_radii
+    
+    # Check boundary constraints
+    for circle in temp_circles:
+        x, y, r = circle
+        if x - r < 0.05 or x + r > width - 0.05 or y - r < 0.05 or y + r > height - 0.05:
+            return False
+    
+    # Check pairwise collisions
+    for i in range(len(temp_circles)):
+        for j in range(i+1, len(temp_circles)):
+            x1, y1, r1 = temp_circles[i]
+            x2, y2, r2 = temp_circles[j]
+            
+            # Distance between centers
+            dx = x1 - x2
+            dy = y1 - y2
+            dist = np.sqrt(dx*dx + dy*dy)
+            
+            # Circles should not overlap
+            if dist < r1 + r2:
+                return False
+                
+    return True
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

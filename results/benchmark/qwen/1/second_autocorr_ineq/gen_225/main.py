@@ -1,0 +1,422 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.stats import qmc
+import time
+from numba import jit, prange
+import numba
+from scipy.optimize import minimize
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+import math
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with improved integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm using improved trapezoidal integration
+    # For discrete convolution on [-1/2, 1/2] with len(g_vals) samples
+    # Step width h = 1.0 / (len(g_vals) - 1)
+    if len(g_vals) >= 2:
+        # Trapezoidal rule: h * (y0^2 + 2*y1^2 + ... + yn-1^2)/2
+        # But we use the more accurate piece-wise quadratic integration
+        g_l2_sq = 0.0
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+
+        # Using trapezoidal rule for integral of g^2
+        # Sum of (h/2) * (g[i]^2 + g[i+1]^2) for all adjacent pairs
+        for i in range(len(g_vals) - 1):
+            g_l2_sq += (h/2) * (g_vals[i]*g_vals[i] + g_vals[i+1]*g_vals[i+1])
+
+        # For exact quadratic integration over piecewise linear segments:
+        # We can also compute this using the more accurate formula for piecewise integration
+        # But the basic trapezoidal rule approach works well here
+        pass  # Already computed above correctly
+
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+@jax_jit
+def compute_autoconvolution_jax(f_vals):
+    """Compute autoconvolution using JAX for better gradient computation"""
+    # Using JAX's convolution with proper padding
+    f = jnp.array(f_vals)
+    # Use explicit convolution to match the mathematical definition
+    # Padding to avoid circular effects
+    pad_width = len(f) - 1
+    padded_f = jnp.pad(f, (pad_width, pad_width), mode='constant', constant_values=0)
+    # Manual convolution using JAX operations
+    result = jnp.convolve(padded_f, f, mode='valid')
+    return result
+
+@jax_jit
+def evaluate_c2_jax(f_vals):
+    """Evaluate C2 using JAX for automatic differentiation"""
+    g_vals = compute_autoconvolution_jax(f_vals)
+
+    # Compute norms
+    g_l2_sq = jnp.sum(g_vals ** 2)
+    g_l1 = jnp.sum(jnp.abs(g_vals))
+    g_max = jnp.max(jnp.abs(g_vals))
+
+    # Avoid division by zero
+    epsilon = 1e-16
+    g_l1 = jnp.maximum(g_l1, epsilon)
+    g_max = jnp.maximum(g_max, epsilon)
+
+    c2 = g_l2_sq / (g_l1 * g_max)
+    return c2
+
+def compute_c2_for_params(params):
+    """Wrapper function for optimization with error handling"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        return c2
+    except Exception as e:
+        return 0.0
+
+def gaussian_pattern_initialization(dim):
+    """Initialize with a Gaussian-shaped pattern"""
+    x = np.linspace(-1.0, 1.0, dim)
+    # Create two overlapping Gaussians with different widths
+    g1 = np.exp(-x**2 / 0.1) * 0.8
+    g2 = np.exp(-(x - 0.4)**2 / 0.2) * 0.6
+    g3 = np.exp(-(x + 0.4)**2 / 0.2) * 0.6
+    pattern = np.maximum(g1, np.maximum(g2, g3))
+    return pattern.tolist()
+
+def fractal_like_initialization(dim):
+    """Initialize with fractal-like self-similar pattern"""
+    pattern = []
+    # Generate multiple scales of pattern to create complexity
+    for i in range(dim):
+        # Base pattern with multiple frequencies
+        pos = i / dim
+        base = 0.5 + 0.3 * np.sin(pos * np.pi * 8)
+        base += 0.2 * np.sin(pos * np.pi * 16)
+        base += 0.1 * np.sin(pos * np.pi * 32)
+        pattern.append(max(0, base))
+    return pattern
+
+def structured_initialization(dim):
+    """Create a structured pattern with alternating peaks and valleys"""
+    pattern = []
+    for i in range(dim):
+        if i % 5 == 0:
+            pattern.append(1.0)
+        elif i % 5 == 2:
+            pattern.append(0.3)
+        else:
+            pattern.append(0.7)
+    return pattern
+
+def multi_objective_initialization(dim):
+    """Create diverse initializations using multiple strategies"""
+    strategies = [
+        gaussian_pattern_initialization,
+        fractal_like_initialization,
+        structured_initialization
+    ]
+
+    candidates = []
+    for strategy in strategies:
+        try:
+            candidate = strategy(dim)
+            candidates.append(candidate)
+        except:
+            continue
+
+    # Add random initialization for diversity
+    try:
+        random_init = np.random.random(dim) * 0.8 + 0.1
+        candidates.append(random_init.tolist())
+    except:
+        pass
+
+    # Evaluate candidates and return the best
+    best_candidate = candidates[0] if candidates else [0.5] * dim
+    best_score = -1.0
+
+    for candidate in candidates:
+        try:
+            score = compute_c2_for_params(candidate)
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate[:]
+        except:
+            continue
+
+    return best_candidate
+
+def adaptive_differential_evolution(x0, bounds, initial_popsize, maxiter):
+    """Run differential evolution with adaptive parameters based on convergence"""
+    # Start with small population for exploration
+    popsize = initial_popsize
+
+    # Parameters for differential evolution
+    de_params = {
+        'mutation': (0.5, 1),
+        'recombination': 0.7,
+        'popsize': popsize,
+        'maxiter': maxiter,
+        'seed': 42,
+        'tol': 1e-6,
+        'init': 'latinhypercube',
+        'disp': False
+    }
+
+    # Run optimization
+    result = differential_evolution(
+        lambda x: -compute_c2_for_params(x),
+        bounds,
+        **de_params
+    )
+
+    return result.x
+
+def simulated_annealing_search(initial_params, max_iter=100, initial_temp=1.0):
+    """Simulated annealing local search to escape local optima"""
+    current_params = np.array(initial_params)
+    current_c2 = compute_c2_for_params(current_params)
+
+    best_params = current_params.copy()
+    best_c2 = current_c2
+
+    # Cooling schedule
+    temp = initial_temp
+    cooling_rate = 0.95
+
+    for i in range(max_iter):
+        # Generate neighbor by making small random changes
+        neighbor_params = current_params + np.random.normal(0, 0.02, len(current_params))
+        neighbor_params = np.clip(neighbor_params, 0, None)
+
+        neighbor_c2 = compute_c2_for_params(neighbor_params)
+
+        # Accept or reject based on Metropolis criterion
+        if neighbor_c2 > current_c2 or np.random.rand() < np.exp((neighbor_c2 - current_c2) / temp):
+            current_params = neighbor_params
+            current_c2 = neighbor_c2
+
+            if current_c2 > best_c2:
+                best_params = current_params.copy()
+                best_c2 = current_c2
+
+        # Cool down temperature
+        temp *= cooling_rate
+
+    return best_params
+
+def gradient_based_refinement(initial_params, max_iter=50):
+    """Use gradient-based optimization with JAX automatic differentiation"""
+    def objective(x):
+        return -evaluate_c2_jax(x)
+
+    try:
+        # Use L-BFGS-B for smooth local optimization with gradients
+        result = minimize(
+            objective,
+            initial_params,
+            method='L-BFGS-B',
+            bounds=[(0, 10) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-9},
+            tol=1e-9
+        )
+        return result.x
+    except Exception as e:
+        return initial_params
+
+def advanced_local_search(initial_params, max_iter=100):
+    """Advanced local search combining multiple techniques"""
+    # Start with the initial parameters
+    best_params = initial_params.copy()
+    best_c2 = compute_c2_for_params(best_params)
+
+    # Try gradient-based refinement
+    try:
+        grad_refined = gradient_based_refinement(best_params, max_iter//3)
+        grad_c2 = compute_c2_for_params(grad_refined)
+        if grad_c2 > best_c2:
+            best_params = grad_refined
+            best_c2 = grad_c2
+    except:
+        pass
+
+    # Try simulated annealing for escaping local minima
+    try:
+        sa_refined = simulated_annealing_search(best_params, max_iter//3, 1.0)
+        sa_c2 = compute_c2_for_params(sa_refined)
+        if sa_c2 > best_c2:
+            best_params = sa_refined
+            best_c2 = sa_c2
+    except:
+        pass
+
+    # Final gradient refinement
+    try:
+        final_refined = gradient_based_refinement(best_params, max_iter//3)
+        final_c2 = compute_c2_for_params(final_refined)
+        if final_c2 > best_c2:
+            best_params = final_refined
+            best_c2 = final_c2
+    except:
+        pass
+
+    return best_params
+
+def multi_scale_evolutionary_optimization():
+    """Perform multi-scale evolutionary optimization with adaptive parameters"""
+    start_time = time.time()
+
+    # Multi-scale approach: start with coarse optimization, then refine
+    # Scale 1: Coarse search with small population
+    coarse_dim = np.random.randint(200, 400)
+    coarse_bounds = [(0, 10)] * coarse_dim
+    coarse_x0 = multi_objective_initialization(coarse_dim)
+
+    coarse_result = adaptive_differential_evolution(
+        coarse_x0,
+        coarse_bounds,
+        initial_popsize=10,
+        maxiter=30
+    )
+
+    # Scale 2: Medium search with moderate population
+    medium_dim = np.random.randint(400, 700)
+    medium_bounds = [(0, 10)] * medium_dim
+    medium_x0 = multi_objective_initialization(medium_dim)
+
+    medium_result = adaptive_differential_evolution(
+        medium_x0,
+        medium_bounds,
+        initial_popsize=15,
+        maxiter=50
+    )
+
+    # Scale 3: Fine search with larger population
+    fine_dim = np.random.randint(700, 1000)
+    fine_bounds = [(0, 10)] * fine_dim
+    fine_x0 = multi_objective_initialization(fine_dim)
+
+    fine_result = adaptive_differential_evolution(
+        fine_x0,
+        fine_bounds,
+        initial_popsize=20,
+        maxiter=70
+    )
+
+    # Evaluate all results and select best
+    results = [
+        (coarse_result, compute_c2_for_params(coarse_result)),
+        (medium_result, compute_c2_for_params(medium_result)),
+        (fine_result, compute_c2_for_params(fine_result))
+    ]
+
+    # Refine the best initial result with local search
+    best_params, best_c2 = max(results, key=lambda x: x[1])
+
+    # Apply advanced local search for final improvement
+    refined_params = advanced_local_search(best_params, max_iter=100)
+    refined_c2 = compute_c2_for_params(refined_params)
+
+    if refined_c2 > best_c2:
+        return refined_params
+    else:
+        return best_params
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using multi-scale optimization."""
+    start_time = time.time()
+
+    # Multi-start approach with adaptive parameters
+    best_c2 = -np.inf
+    best_params = None
+
+    # Try multiple optimization runs with different approaches
+    for run in range(5):  # Run 5 different optimization attempts
+        if time.time() - start_time > 85:  # Leave buffer for cleanup
+            break
+
+        try:
+            # Run multi-scale evolutionary optimization
+            params = multi_scale_evolutionary_optimization()
+
+            # Compute actual C2 value
+            if len(params) > 0:
+                c2 = compute_c2_for_params(params)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = params.copy()
+        except Exception as e:
+            continue
+
+    # If no valid parameters found, return default
+    if best_params is None:
+        return [0.5] * 100
+
+    # Final check and conversion to list
+    final_f_vals = np.clip(best_params, 0, None)
+    return final_f_vals.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

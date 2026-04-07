@@ -1,0 +1,329 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from joblib import Parallel, delayed
+import numba
+from numba import jit
+import warnings
+warnings.filterwarnings('ignore')
+
+# Constants
+UNIT_HEX_RADIUS = 1.0  # radius of unit hexagon circumcircle
+UNIT_HEX_SIDE = 1.0    # side length of unit hexagon
+PI = np.pi
+
+@jit(nopython=True)
+def hexagon_vertices_jit(center_x, center_y, angle_rad, side_length):
+    """Compute hexagon vertices efficiently using numba"""
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        angle = angle_rad + i * PI / 3
+        vertices[i, 0] = center_x + side_length * np.cos(angle)
+        vertices[i, 1] = center_y + side_length * np.sin(angle)
+    return vertices
+
+@jit(nopython=True)
+def distance_point_to_segment(px, py, x1, y1, x2, y2):
+    """Calculate distance from point to line segment"""
+    # Vector from (x1,y1) to (x2,y2)
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    # Length squared of segment
+    len_sq = dx*dx + dy*dy
+    
+    # Avoid division by zero
+    if len_sq == 0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+    
+    # Project point onto line
+    t = ((px - x1) * dx + (py - y1) * dy) / len_sq
+    t = max(0, min(1, t))  # Clamp t to [0,1]
+    
+    # Closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    
+    # Distance squared
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+def hexagon_vertices(center_x, center_y, angle_rad, side_length):
+    """Compute hexagon vertices"""
+    return hexagon_vertices_jit(center_x, center_y, angle_rad, side_length)
+
+def compute_outer_hexagon_radius(inner_hex_data, outer_hex_center=(0,0)):
+    """Estimate minimum outer hexagon radius needed to contain all inner hexagons"""
+    max_distance = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        # Get all vertices of this hexagon
+        vertices = hexagon_vertices(cx, cy, np.radians(angle), UNIT_HEX_SIDE)
+        # Find maximum distance from center
+        for vx, vy in vertices:
+            dist = np.sqrt((vx - outer_hex_center[0])**2 + (vy - outer_hex_center[1])**2)
+            max_distance = max(max_distance, dist)
+    
+    # Add safety margin for numerical precision
+    return max_distance * 1.05
+
+def check_overlap_hexagons(h1_center_x, h1_center_y, h1_angle, h1_side,
+                          h2_center_x, h2_center_y, h2_angle, h2_side):
+    """Check if two hexagons overlap using vertices inclusion test"""
+    vertices1 = hexagon_vertices(h1_center_x, h1_center_y, np.radians(h1_angle), h1_side)
+    vertices2 = hexagon_vertices(h2_center_x, h2_center_y, np.radians(h2_angle), h2_side)
+    
+    # Create shapely polygons
+    poly1 = Polygon(vertices1)
+    poly2 = Polygon(vertices2)
+    
+    # Check if they intersect
+    return poly1.intersects(poly2)
+
+def check_all_overlaps(inner_hex_data):
+    """Check all pairs of hexagons for overlaps"""
+    n = len(inner_hex_data)
+    # Early return if too few hexagons
+    if n < 2:
+        return False
+    
+    # Check only unique pairs
+    for i in range(n):
+        for j in range(i+1, n):
+            cx1, cy1, angle1 = inner_hex_data[i]
+            cx2, cy2, angle2 = inner_hex_data[j]
+            
+            if check_overlap_hexagons(cx1, cy1, angle1, UNIT_HEX_SIDE,
+                                    cx2, cy2, angle2, UNIT_HEX_SIDE):
+                return True
+    return False
+
+def check_containment(inner_hex_data, outer_center=(0,0), outer_side=10):
+    """Check if all inner hexagons are contained in outer hexagon"""
+    outer_vertices = hexagon_vertices(outer_center[0], outer_center[1], 0, outer_side)
+    outer_polygon = Polygon(outer_vertices)
+    
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = hexagon_vertices(cx, cy, np.radians(angle), UNIT_HEX_SIDE)
+        
+        # Create hexagon polygon
+        inner_polygon = Polygon(vertices)
+        
+        # Check if it's contained
+        if not outer_polygon.contains(inner_polygon):
+            return False
+    
+    return True
+
+def adaptive_binary_search_radius(inner_hex_data, initial_guess, max_iterations=30):
+    """Adaptive binary search with dynamic precision adjustment"""
+    # Start with a reasonable range
+    low = initial_guess * 0.95
+    high = initial_guess * 1.2
+    
+    # Set initial tolerance based on problem scale
+    tolerance = 1e-5
+    
+    for iteration in range(max_iterations):
+        if high - low < tolerance:
+            break
+            
+        # Adjust precision based on iteration
+        if iteration > 15:
+            tolerance = 1e-7
+        elif iteration > 10:
+            tolerance = 1e-6
+            
+        mid = (low + high) / 2
+        
+        # Check containment with increasing precision
+        if check_containment(inner_hex_data, (0,0), mid):
+            high = mid
+        else:
+            low = mid
+    
+    return (low + high) / 2
+
+def evaluate_layout(inner_hex_data, outer_side_estimate=None):
+    """Evaluate the quality of a given hexagon layout"""
+    # Check overlaps first (early rejection)
+    if check_all_overlaps(inner_hex_data):
+        return -1e10  # Large penalty for overlaps
+    
+    # Estimate outer hexagon size
+    if outer_side_estimate is None:
+        estimated_outer_radius = compute_outer_hexagon_radius(inner_hex_data)
+        outer_side = estimated_outer_radius * 2  # rough estimate
+    else:
+        outer_side = outer_side_estimate
+    
+    # Check containment
+    if not check_containment(inner_hex_data, (0,0), outer_side):
+        return -1e10  # Large penalty for containment violations
+    
+    # Refine outer radius with binary search for tighter bound
+    try:
+        refined_radius = adaptive_binary_search_radius(inner_hex_data, outer_side)
+        # Return inverse of outer hexagon side length (we want to maximize 1/outer_side)
+        return 1.0 / refined_radius
+    except:
+        # Fallback to simple calculation
+        return 1.0 / outer_side
+
+def generate_initial_config():
+    """Generate a high-quality initial configuration based on optimized hexagonal packing patterns"""
+    # This configuration is based on research on dense hexagon packings
+    # It starts with a tight arrangement close to optimal
+    config = np.array([
+        [0.0, 0.0, 0.0],           # Center hexagon
+        [-2.0, 0.0, 0.0],          # Left hexagon
+        [2.0, 0.0, 0.0],           # Right hexagon
+        [0.0, 3.464, 0.0],         # Top hexagon
+        [0.0, -3.464, 0.0],        # Bottom hexagon
+        [-3.464, 1.732, 0.0],      # Top-left hexagon
+        [3.464, 1.732, 0.0],       # Top-right hexagon
+        [-3.464, -1.732, 0.0],     # Bottom-left hexagon
+        [3.464, -1.732, 0.0],      # Bottom-right hexagon
+        [-1.732, 3.464, 0.0],      # Far top-left
+        [1.732, 3.464, 0.0],       # Far top-right
+    ])
+    
+    # Add small random jitter to avoid degenerate cases
+    noise_scale = 0.03
+    np.random.seed(42)
+    config[:, 0] += np.random.normal(0, noise_scale, config.shape[0])
+    config[:, 1] += np.random.normal(0, noise_scale, config.shape[0])
+    
+    return config
+
+def hybrid_optimization_method():
+    """Combine global and local optimization approaches"""
+    # Stage 1: Generate good initial guess
+    current_config = generate_initial_config()
+    
+    # Use global optimization first to explore solution space
+    bounds = []
+    for i in range(11):
+        # x and y coordinates bounded reasonably  
+        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+    
+    # Global optimization with differential evolution
+    try:
+        result = differential_evolution(
+            lambda params: -evaluate_layout(params.reshape(-1, 3)),  # Negative because we maximize
+            bounds,
+            maxiter=80,
+            popsize=15,
+            seed=42,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            disp=False
+        )
+        
+        if result.success:
+            current_config = result.x.reshape(-1, 3)
+    except:
+        pass
+    
+    # Stage 2: Local refinement with L-BFGS-B
+    def objective_func(params):
+        # Reshape parameters back into hexagon data
+        hex_data = params.reshape(-1, 3)
+        return -evaluate_layout(hex_data)  # Negative for minimization
+    
+    # Flatten current configuration for optimization
+    flat_params = current_config.flatten()
+    
+    # Local optimization using L-BFGS-B
+    try:
+        result = minimize(
+            objective_func, 
+            flat_params, 
+            method='L-BFGS-B', 
+            bounds=bounds,
+            options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+        
+        # Reshape back to 2D array
+        if result.success:
+            current_config = result.x.reshape(-1, 3)
+    except:
+        pass
+    
+    return current_config
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Hybrid optimization approach
+        final_config = hybrid_optimization_method()
+        
+        # Final validation and evaluation
+        final_score = evaluate_layout(final_config)
+        
+        if final_score < -1e9:
+            # Fall back to original method if optimization fails
+            print("Optimization failed, falling back to basic configuration")
+            inner_hex_data = np.array([
+                [0, 0, 0],          # center
+                [-2.5, 0, 0],       # left
+                [2.5, 0, 0],        # right
+                [-1.25, 2.17, 0],   # top-left
+                [1.25, 2.17, 0],    # top-right
+                [-1.25, -2.17, 0],  # bottom-left
+                [1.25, -2.17, 0],   # bottom-right
+                [-3.75, 2.17, 0],   # far top-left
+                [3.75, 2.17, 0],    # far top-right
+                [-3.75, -2.17, 0],  # far bottom-left
+                [3.75, -2.17, 0],   # far bottom-right
+            ])
+            outer_hex_side_length = 8.0
+        else:
+            # Extract the best configuration found
+            inner_hex_data = final_config
+            
+            # Compute actual outer hexagon size with refined binary search
+            estimated_outer_radius = compute_outer_hexagon_radius(inner_hex_data)
+            outer_hex_side_length = adaptive_binary_search_radius(inner_hex_data, estimated_outer_radius)
+        
+        # Set outer hexagon at center with zero rotation
+        outer_hex_data = np.array([0, 0, 0])
+        
+    except Exception as e:
+        print(f"Exception in optimization: {e}")
+        # Fallback to baseline approach
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0, 0, 0])
+    
+    elapsed = time.time() - start_time
+    print(f"Eval time: {elapsed:.4f}s")
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

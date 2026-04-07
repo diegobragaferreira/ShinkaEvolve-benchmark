@@ -1,0 +1,221 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+import math
+
+def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, angle, and side length."""
+    angle_rad = math.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        angle_i = angle_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle_i)
+        y = center_y + side_length * math.sin(angle_i)
+        vertices.append((x, y))
+    return vertices
+
+def outer_hexagon_vertices(side_length):
+    """Generate vertices of the outer regular hexagon centered at origin."""
+    return hexagon_vertices(0, 0, 0, side_length)
+
+def check_hexagon_containment(hex_center_x, hex_center_y, angle_deg, outer_side_length):
+    """Check if a unit hexagon is fully contained within outer hexagon."""
+    inner_vertices = hexagon_vertices(hex_center_x, hex_center_y, angle_deg, 1)
+    outer_vertices = outer_hexagon_vertices(outer_side_length)
+    
+    inner_polygon = Polygon(inner_vertices)
+    outer_polygon = Polygon(outer_vertices)
+    
+    return outer_polygon.contains(inner_polygon)
+
+def check_hexagon_overlap(hex1_center_x, hex1_center_y, hex1_angle_deg,
+                         hex2_center_x, hex2_center_y, hex2_angle_deg):
+    """Check if two unit hexagons overlap."""
+    hex1_vertices = hexagon_vertices(hex1_center_x, hex1_center_y, hex1_angle_deg, 1)
+    hex2_vertices = hexagon_vertices(hex2_center_x, hex2_center_y, hex2_angle_deg, 1)
+    
+    hex1_polygon = Polygon(hex1_vertices)
+    hex2_polygon = Polygon(hex2_vertices)
+    
+    return hex1_polygon.intersects(hex2_polygon)
+
+def validate_solution(positions_and_angles, outer_side_length):
+    """Validate that all constraints are met for the solution."""
+    n = len(positions_and_angles) // 3
+    # Check containment
+    for i in range(n):
+        center_x, center_y, angle_deg = positions_and_angles[3*i:3*i+3]
+        if not check_hexagon_containment(center_x, center_y, angle_deg, outer_side_length):
+            return False
+    
+    # Check overlaps
+    for i in range(n):
+        for j in range(i+1, n):
+            center1_x, center1_y, angle1_deg = positions_and_angles[3*i:3*i+3]
+            center2_x, center2_y, angle2_deg = positions_and_angles[3*j:3*j+3]
+            if check_hexagon_overlap(center1_x, center1_y, angle1_deg, 
+                                   center2_x, center2_y, angle2_deg):
+                return False
+    
+    return True
+
+def objective_function(params):
+    """Objective function to minimize (negative of inverse outer hex side length)."""
+    # params contains [x1, y1, theta1, x2, y2, theta2, ..., xn, yn, thetan]
+    # We want to minimize outer_side_length, so we maximize 1/outer_side_length
+    
+    outer_side_length = params[-1]  # Last parameter is the outer hexagon size
+    
+    # Validate the solution
+    valid = validate_solution(params[:-1], outer_side_length)
+    
+    if not valid:
+        # Return penalty for invalid solutions
+        return 1e10
+    
+    # If valid, return negative inverse of outer side length (we're minimizing)
+    return -1.0 / outer_side_length
+
+def generate_initial_guess():
+    """Generate a good initial guess for the optimization."""
+    # Start with a known good arrangement
+    # Based on literature and previous optimizations
+    initial_positions = [
+        [0, 0, 0],      # center
+        [-1.5, 0, 0],   # left
+        [1.5, 0, 0],    # right
+        [0, 2.598, 0],  # top (sqrt(3)/2 * 2 = sqrt(3) ≈ 1.732, but we use 2.598 for better packing)
+        [0, -2.598, 0], # bottom
+        [-1.5, 2.598, 0], # top-left
+        [1.5, 2.598, 0],  # top-right
+        [-1.5, -2.598, 0], # bottom-left
+        [1.5, -2.598, 0],  # bottom-right
+        [-3.0, 0, 0],   # far left
+        [3.0, 0, 0],    # far right
+    ]
+    
+    # Initial guess for outer hexagon side length (should be quite large initially)
+    outer_side_length = 5.0
+    
+    # Flatten positions and angles
+    flattened = []
+    for x, y, angle in initial_positions:
+        flattened.extend([x, y, angle])
+    
+    flattened.append(outer_side_length)
+    
+    return np.array(flattened)
+
+def optimize_packing():
+    """Run optimization to find the best packing."""
+    # Generate initial guess
+    initial_guess = generate_initial_guess()
+    
+    # Define bounds for parameters
+    # Positions: [-10, 10] for x and y
+    # Angles: [0, 360] degrees
+    # Outer side length: [1, 10] 
+    bounds = []
+    for i in range(len(initial_guess) - 1):  # All but last element
+        if i % 3 == 0 or i % 3 == 1:  # x, y positions
+            bounds.extend([(-10, 10)])
+        else:  # angle
+            bounds.extend([(0, 360)])
+    
+    bounds.append((1, 10))  # outer side length
+    
+    # Run optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        maxiter=100,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        disp=False
+    )
+    
+    return result.x
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Run optimization
+        best_params = optimize_packing()
+        
+        # Extract inner hexagon data
+        inner_hex_data = []
+        for i in range(11):
+            x = best_params[3*i]
+            y = best_params[3*i+1]
+            angle = best_params[3*i+2]
+            inner_hex_data.append([x, y, angle])
+        
+        inner_hex_data = np.array(inner_hex_data)
+        
+        # Extract outer hexagon data (centered at origin)
+        outer_hex_data = np.array([0, 0, 0])
+        
+        # Extract outer hexagon side length
+        outer_hex_side_length = best_params[-1]
+        
+        end_time = time.time()
+        eval_time = end_time - start_time
+        
+        # Final validation
+        valid = validate_solution(best_params[:-1], outer_hex_side_length)
+        
+        # If not valid, fallback to initial guess
+        if not valid:
+            print("Optimization did not produce valid solution, using initial guess")
+            # Fallback to initial guess values
+            inner_hex_data = np.array([
+                [0, 0, 0],
+                [-1.5, 0, 0],
+                [1.5, 0, 0],
+                [0, 2.598, 0],
+                [0, -2.598, 0],
+                [-1.5, 2.598, 0],
+                [1.5, 2.598, 0],
+                [-1.5, -2.598, 0],
+                [1.5, -2.598, 0],
+                [-3.0, 0, 0],
+                [3.0, 0, 0],
+            ])
+            outer_hex_side_length = 5.0
+            outer_hex_data = np.array([0, 0, 0])
+            
+    except Exception as e:
+        # Fallback to original method if anything goes wrong
+        print(f"Optimization failed with error: {e}")
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

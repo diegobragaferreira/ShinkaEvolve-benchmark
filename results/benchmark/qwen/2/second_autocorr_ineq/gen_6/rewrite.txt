@@ -1,0 +1,268 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from joblib import Parallel, delayed
+import random
+import time
+from collections import deque
+
+def evaluate_c2(f):
+    """Evaluate C2 for a given step function"""
+    # Ensure f is at least 2 elements for meaningful convolution
+    if len(f) < 2:
+        return 0.0
+    
+    # Create step function with proper spacing
+    # Steps are placed on [-1/4, 1/4], so spacing is 1/(2*n)
+    n = len(f)
+    if n <= 1:
+        return 0.0
+        
+    # Compute autoconvolution g = f * f
+    g = signal.convolve(f, f, mode='full')
+    
+    # The convolution result has 2*n - 1 elements
+    # We only care about the middle part where overlap occurs most
+    # But for our purposes, we use the full convolution
+    # Apply trapezoidal-like piecewise linear integration for ||g||₂²
+    
+    # Compute norms
+    g_squared = g * g
+    # Trapezoidal approximation for L2 norm squared
+    # For piecewise linear segments, integrate using (h/3)(y1^2 + y1*y2 + y2^2)
+    # Let's compute this directly from the discrete values
+    
+    # Compute L2 norm squared using trapezoidal rule
+    # This computes sum of (h/3)(y_i^2 + y_i*y_{i+1} + y_{i+1}^2) 
+    # where h is the step width (we'll assume unit spacing for simplicity)
+    
+    # Actually, let's use the correct trapezoidal integration formula
+    # For a sequence y[0], y[1], ..., y[n-1], with step size h:
+    # integral = h*(y[0]/2 + sum_{i=1}^{n-2}(y[i]) + y[n-1]/2)
+    # But we want sum of y[i]^2 with proper weights
+    # Let's compute it properly using the definition of ||g||₂²
+    
+    # Let's recompute with correct approach for L2 norm squared 
+    # From the problem statement and our understanding, 
+    # ||g||₂² should be computed via trapezoidal integration of g^2
+    # But since g comes from convolving two discrete sequences,
+    # we can approximate the continuous case using the discrete version
+    # For now, let's just compute the sum of squares which approximates 
+    # the L2 norm squared as done in many discrete settings
+    # For proper trapezoidal integration of g^2, we'd need to know the actual
+    # spacing, but assuming unit spacing between points:
+    
+    # Simpler approach - compute sum of squares of g values (approximation)
+    l2_norm_squared = np.sum(g**2)
+    
+    # L1 norm: sum of absolute values divided by number of points
+    l1_norm = np.sum(np.abs(g)) / len(g) if len(g) > 0 else 0
+    
+    # L-infinity norm: maximum absolute value
+    linf_norm = np.max(np.abs(g)) if len(g) > 0 else 0
+    
+    # Compute C2
+    if l1_norm > 1e-12 and linf_norm > 1e-12:
+        c2 = l2_norm_squared / (l1_norm * linf_norm)
+    else:
+        c2 = 0.0
+        
+    return c2
+
+def mutate_individual(individual, mutation_rate=0.1, sigma=0.1):
+    """Apply mutation to an individual"""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Use combination of Gaussian and Cauchy for robust mutation
+            if random.random() < 0.7:  # 70% Gaussian
+                mutated[i] += np.random.normal(0, sigma)
+            else:  # 30% Cauchy for heavy-tailed exploration
+                mutated[i] += np.random.standard_cauchy() * sigma
+            
+            # Clip to ensure non-negative values
+            mutated[i] = max(0.0, mutated[i])
+            
+    return mutated
+
+def crossover(parent1, parent2):
+    """Perform crossover between two parents"""
+    if len(parent1) != len(parent2):
+        # If lengths differ, create a new one of average length
+        new_length = max(len(parent1), len(parent2))
+        child = [0.0] * new_length
+        for i in range(new_length):
+            if i < len(parent1) and i < len(parent2):
+                # Blend crossover
+                alpha = random.random()
+                child[i] = alpha * parent1[i] + (1 - alpha) * parent2[i]
+            elif i < len(parent1):
+                child[i] = parent1[i]
+            else:
+                child[i] = parent2[i]
+    else:
+        # Same length, do simple uniform crossover
+        child = []
+        for i in range(len(parent1)):
+            if random.random() < 0.5:
+                child.append(parent1[i])
+            else:
+                child.append(parent2[i])
+                
+    return child
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Select an individual using tournament selection"""
+    if len(population) < tournament_size:
+        tournament_size = len(population)
+        
+    selected_indices = random.sample(range(len(population)), tournament_size)
+    best_index = selected_indices[0]
+    best_fitness = fitnesses[selected_indices[0]]
+    
+    for i in range(1, tournament_size):
+        if fitnesses[selected_indices[i]] > best_fitness:
+            best_fitness = fitnesses[selected_indices[i]]
+            best_index = selected_indices[i]
+            
+    return population[best_index].copy()
+
+def evolve_step_function(max_time_seconds=90):
+    """Main evolutionary algorithm to optimize step function"""
+    start_time = time.time()
+    
+    # Parameters
+    pop_size = 50
+    generations = 1000
+    mutation_rate = 0.1
+    elite_size = 5
+    min_population = 20
+    max_population = 200
+    
+    # Track best solution
+    best_c2 = 0.0
+    best_individual = None
+    
+    # Initialize population with various sizes
+    population = []
+    for _ in range(pop_size):
+        # Randomly choose length between 50 and 5000 (similar to AlphaEvolve)
+        n = random.randint(50, 5000)
+        individual = [random.random() * 2 for _ in range(n)]
+        population.append(individual)
+    
+    # Evolution loop
+    generation = 0
+    stagnation_counter = 0
+    max_stagnation = 50
+    last_best_c2 = 0.0
+    
+    # Early stopping buffer
+    recent_improvements = deque(maxlen=10)
+    
+    while generation < generations and (time.time() - start_time) < max_time_seconds - 1:
+        # Evaluate fitness of entire population
+        def evaluate_fitness(indiv):
+            return evaluate_c2(indiv)
+            
+        # Parallel evaluation of fitness
+        fitnesses = Parallel(n_jobs=-1)(
+            delayed(evaluate_fitness)(indiv) for indiv in population
+        )
+        
+        # Update best solution
+        for i, fitness in enumerate(fitnesses):
+            if fitness > best_c2:
+                best_c2 = fitness
+                best_individual = population[i].copy()
+                recent_improvements.append(fitness)
+                
+        # Check for stagnation
+        if abs(best_c2 - last_best_c2) < 1e-6:
+            stagnation_counter += 1
+        else:
+            stagnation_counter = 0
+            last_best_c2 = best_c2
+            
+        # Early stop if stagnating too much
+        if stagnation_counter >= max_stagnation:
+            break
+                
+        # Sort population by fitness
+        sorted_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+        
+        # Keep elites
+        new_population = sorted_population[:elite_size]
+        
+        # Generate offspring using tournament selection and crossover
+        while len(new_population) < pop_size:
+            if (time.time() - start_time) >= max_time_seconds - 1:
+                break
+                
+            # Tournament selection
+            parent1 = tournament_selection(sorted_population, sorted_fitnesses)
+            parent2 = tournament_selection(sorted_population, sorted_fitnesses)
+            
+            # Crossover
+            child = crossover(parent1, parent2)
+            
+            # Mutation
+            child = mutate_individual(child, mutation_rate)
+            
+            # Add to new population
+            new_population.append(child)
+            
+        # Update population
+        population = new_population
+        
+        # Adjust population size dynamically
+        if len(population) < min_population:
+            pop_size = min_population
+        elif len(population) > max_population:
+            pop_size = max_population
+        else:
+            # Adaptively adjust based on diversity and improvement
+            population_diversity = np.std([np.mean(indiv) for indiv in population])
+            if population_diversity < 0.01 and len(recent_improvements) > 2:
+                # If very homogeneous, increase diversity
+                pop_size = min(max_population, int(pop_size * 1.2))
+            elif len(recent_improvements) > 2 and recent_improvements[-1] > np.mean(list(recent_improvements)[:-1]):
+                # If improving, maintain population size
+                pass
+            else:
+                # If not improving much, reduce population size slightly
+                pop_size = max(min_population, int(pop_size * 0.9))
+                
+        # Adjust mutation rate based on progress
+        if best_c2 > 0.95:  # If we're close to good solution
+            mutation_rate = 0.05
+        elif best_c2 > 0.9:
+            mutation_rate = 0.08
+        else:
+            mutation_rate = 0.1
+            
+        generation += 1
+    
+    # Return the best individual found
+    return best_individual if best_individual is not None else [0.0]
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    try:
+        # Run evolutionary algorithm
+        f_values = evolve_step_function(max_time_seconds=85)
+        return f_values
+    except Exception as e:
+        # Fallback to random generation if anything fails
+        print(f"Error in evolution: {e}")
+        f_values = [np.random.random()] * np.random.randint(100, 1000)
+        return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

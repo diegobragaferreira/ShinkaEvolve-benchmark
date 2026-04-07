@@ -1,0 +1,376 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, cKDTree
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+
+# Set seeds for determinism
+random.seed(42)
+np.random.seed(42)
+
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """
+    Fast validity check using grid-based spatial indexing for collision detection.
+    """
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    if n <= 1:
+        return True
+
+    # Use grid-based spatial indexing for efficient overlap detection
+    coords = circles[:, :2]
+    radii = circles[:, 2]
+
+    try:
+        # Build grid index
+        avg_radius = np.mean(radii) if n > 0 else 0.1
+        cell_size = avg_radius * 1.5  # Slightly larger than average radius
+
+        # Calculate grid dimensions
+        cols = max(1, int(rect_width / cell_size) + 1)
+        rows = max(1, int(rect_height / cell_size) + 1)
+
+        # Create cell dictionary mapping (row, col) to circle indices
+        cell_dict = {}
+
+        # Assign circles to grid cells
+        for i in range(n):
+            x, y, r = circles[i]
+            # Find grid cell coordinates for circle center
+            col = int(x / cell_size)
+            row = int(y / cell_size)
+
+            # Clamp to grid bounds
+            col = max(0, min(col, cols - 1))
+            row = max(0, min(row, rows - 1))
+
+            # Store in dictionary
+            key = (row, col)
+            if key not in cell_dict:
+                cell_dict[key] = []
+            cell_dict[key].append(i)
+
+        # Check for collisions
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+
+            # Find the grid cell that contains this circle
+            col = int(x1 / cell_size)
+            row = int(y1 / cell_size)
+            col = max(0, min(col, cols - 1))
+            row = max(0, min(row, rows - 1))
+
+            # Check neighboring cells (including current cell)
+            # Check 3x3 neighborhood around current cell
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    neighbor_row = row + dr
+                    neighbor_col = col + dc
+
+                    # Check bounds
+                    if 0 <= neighbor_row < rows and 0 <= neighbor_col < cols:
+                        key = (neighbor_row, neighbor_col)
+                        if key in cell_dict:
+                            # Check all circles in this cell against current circle
+                            for j in cell_dict[key]:
+                                if i != j:  # Don't compare with self
+                                    x2, y2, r2 = circles[j]
+
+                                    # Fast distance check using squared distances
+                                    dx = x1 - x2
+                                    dy = y1 - y2
+                                    distance_sq = dx*dx + dy*dy
+                                    min_distance_sq = (r1 + r2) * (r1 + r2)
+
+                                    if distance_sq < min_distance_sq:
+                                        return False
+
+        return True
+    except:
+        # Fallback to brute force if grid indexing fails
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = np.linalg.norm(coords[i] - coords[j])
+                min_distance = radii[i] + radii[j]
+
+                if distance < min_distance:
+                    return False
+        return True
+
+def compute_voronoi_cell_areas(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute Voronoi cell areas for each circle to determine constraint density.
+    Smaller areas indicate higher constraint density (more constrained regions).
+    """
+    n = len(circles)
+    if n < 2:
+        return np.ones(n) * 1.0  # Default to uniform weights
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    try:
+        # Create Voronoi diagram
+        vor = Voronoi(centers)
+
+        # Compute areas for each Voronoi cell
+        cell_areas = np.zeros(n)
+
+        # For each Voronoi cell, compute its area
+        for i in range(n):
+            # Get vertices of the Voronoi cell for circle i
+            # Find the ridges belonging to this cell
+            ridge_indices = [j for j, ridge in enumerate(vor.ridge_vertices) if i in ridge and -1 not in ridge]
+
+            if len(ridge_indices) > 0:
+                # Extract vertices of this cell
+                vertices = []
+                for idx in ridge_indices:
+                    if idx < len(vor.ridge_vertices):
+                        v1, v2 = vor.ridge_vertices[idx]
+                        if v1 >= 0 and v2 >= 0:
+                            vertices.append(vor.vertices[v1])
+                            vertices.append(vor.vertices[v2])
+
+                # Remove duplicates and create polygon
+                if len(vertices) >= 3:
+                    # Simple polygon area calculation (using shoelace formula)
+                    # But we need to ensure the vertices form a proper polygon
+                    try:
+                        vertices = np.array(vertices)
+                        # Only consider points that are within bounds
+                        valid_points = vertices[
+                            (vertices[:, 0] >= 0) & (vertices[:, 0] <= rect_width) &
+                            (vertices[:, 1] >= 0) & (vertices[:, 1] <= rect_height)
+                        ]
+                        if len(valid_points) >= 3:
+                            # Use a more robust convex hull approach
+                            from scipy.spatial import ConvexHull
+                            hull = ConvexHull(valid_points)
+                            area = hull.volume  # For 2D, volume gives area
+                            cell_areas[i] = area
+                        else:
+                            # Fall back to simple estimation
+                            cell_areas[i] = 1.0
+                    except:
+                        cell_areas[i] = 1.0
+                else:
+                    cell_areas[i] = 1.0  # Default area
+            else:
+                # If no ridges found, estimate area based on proximity
+                max_radius = np.max(circles[:, 2])
+                cell_areas[i] = max_radius * max_radius * np.pi  # Rough estimate
+
+        # Normalize cell areas, but use inverse for constraint density
+        # Smaller areas mean higher constraint density
+        min_area = np.min(cell_areas[cell_areas > 0]) if np.sum(cell_areas > 0) > 0 else 1.0
+        cell_areas = np.maximum(cell_areas, min_area)  # Avoid zero
+        constraint_density = 1.0 / cell_areas  # Inverse relationship
+
+        # Normalize to [0,1] range
+        max_constraint = np.max(constraint_density)
+        if max_constraint > 0:
+            constraint_density = constraint_density / max_constraint
+
+        return constraint_density
+    except Exception as e:
+        # Fallback to simpler constraint calculation
+        # For each circle, count how many others are close enough
+        constraint_density = np.zeros(n)
+        centers = circles[:, :2]
+
+        for i in range(n):
+            center_i = centers[i]
+            nearby_count = 0
+
+            # Check nearby circles (within 3x max radius)
+            max_radius = np.max(circles[:, 2])
+            threshold = 3 * max_radius
+
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        nearby_count += 1
+
+            constraint_density[i] = nearby_count / max(1, n - 1)
+
+        return constraint_density
+
+def generate_hexagonal_lattice(n_circles: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Initialize circle positions using a hexagonal lattice pattern with better packing.
+    """
+    # Create initial hexagonal grid
+    circles = np.zeros((n_circles, 3))
+    
+    # Estimate radius based on area
+    total_area = rect_width * rect_height
+    circle_area = total_area / n_circles * 0.8  # Leave some margin for optimization
+    estimated_radius = np.sqrt(circle_area / np.pi)
+
+    # Hexagon parameters - ensure good packing efficiency
+    side_length = 2 * estimated_radius
+
+    # Determine grid dimensions
+    cols = max(1, int(rect_width / side_length) + 2)
+    rows = max(1, int(rect_height / (side_length * np.sqrt(3) / 2)) + 2)
+
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            x = (j + (i % 2) * 0.5) * side_length
+            y = i * side_length * np.sqrt(3) / 2
+
+            # Only include points that fit within the rectangle with padding
+            if x >= estimated_radius and x <= rect_width - estimated_radius and \
+               y >= estimated_radius and y <= rect_height - estimated_radius:
+                points.append([x, y])
+
+    # If we have too few points, add more by expanding
+    while len(points) < n_circles:
+        # Add points at random locations within bounds
+        x = random.uniform(estimated_radius, rect_width - estimated_radius)
+        y = random.uniform(estimated_radius, rect_height - estimated_radius)
+        points.append([x, y])
+
+    # Trim to exact number needed
+    points = points[:n_circles]
+
+    # Create initial circles with estimated radii
+    for i, (x, y) in enumerate(points):
+        circles[i] = [x, y, estimated_radius * 0.9]  # Slightly smaller radius to allow room for growth
+
+    return circles
+
+def compute_total_radius(circles: np.ndarray) -> float:
+    """Calculate sum of all radii."""
+    return np.sum(circles[:, 2])
+
+def voronoi_guided_local_search(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0, 
+                               max_iterations: int = 500) -> np.ndarray:
+    """
+    Perform Voronoi-guided local search to optimize circle packing.
+    Each circle is updated based on its Voronoi cell size - smaller cells (denser regions) 
+    receive more conservative updates.
+    """
+    current_circles = circles.copy()
+    best_circles = current_circles.copy()
+    best_radius_sum = compute_total_radius(current_circles)
+    
+    # Pre-compute Voronoi areas for constraint density estimation
+    constraint_densities = compute_voronoi_cell_areas(current_circles, rect_width, rect_height)
+    
+    for iteration in range(max_iterations):
+        # Create a copy for testing moves
+        test_circles = current_circles.copy()
+        
+        # Process circles in random order for better exploration
+        circle_indices = list(range(len(current_circles)))
+        random.shuffle(circle_indices)
+        
+        improved = False
+        
+        # For each circle, try to improve its position and radius
+        for idx in circle_indices:
+            # Current circle data
+            x, y, r = test_circles[idx]
+            
+            # Compute adaptive step size based on Voronoi density
+            # Smaller Voronoi cells = higher constraint density = smaller moves
+            density_weight = 1.0 + constraint_densities[idx] * 5.0  # Scale from 1.0 to 6.0
+            pos_step_size = 0.02 / density_weight
+            rad_step_size = 0.01 / density_weight
+            
+            # Try position adjustment
+            new_x = x + np.random.normal(0, pos_step_size)
+            new_y = y + np.random.normal(0, pos_step_size)
+            
+            # Try radius adjustment
+            rad_change = np.random.normal(0, rad_step_size)
+            new_r = r + rad_change
+            
+            # Ensure radius stays positive
+            new_r = np.clip(new_r, 0.001, rect_width/2)
+            
+            # Ensure position stays within bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            
+            # Test this change
+            test_circles[idx] = [new_x, new_y, new_r]
+            
+            # Check if this change is valid and improves fitness
+            if is_valid_solution(test_circles, rect_width, rect_height):
+                new_radius_sum = compute_total_radius(test_circles)
+                if new_radius_sum > best_radius_sum:
+                    # Accept the change
+                    current_circles = test_circles.copy()
+                    best_radius_sum = new_radius_sum
+                    improved = True
+                    # Update constraint densities for next iteration
+                    constraint_densities = compute_voronoi_cell_areas(current_circles, rect_width, rect_height)
+                    break  # Restart iteration with updated constraints
+            else:
+                # Revert change
+                test_circles[idx] = [x, y, r]
+        
+        # Early stopping if no improvement
+        if not improved and iteration > max_iterations // 2:
+            break
+    
+    return current_circles
+
+def optimize_circle_packing(n_circles: int = 21, rect_width: float = 1.2, rect_height: float = 0.8) -> np.ndarray:
+    """
+    Main optimization function using Voronoi-guided local search.
+    """
+    # Step 1: Generate initial solution using hexagonal lattice
+    initial_circles = generate_hexagonal_lattice(n_circles, rect_width, rect_height)
+    
+    # Step 2: Apply local search with Voronoi guidance
+    optimized_circles = voronoi_guided_local_search(initial_circles, rect_width, rect_height, max_iterations=300)
+    
+    # Step 3: Additional local refinement to polish the solution
+    refined_circles = voronoi_guided_local_search(optimized_circles, rect_width, rect_height, max_iterations=200)
+    
+    # Final validation
+    if not is_valid_solution(refined_circles, rect_width, rect_height):
+        # If final solution is invalid, return the best valid solution found
+        return optimized_circles
+    
+    return refined_circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: perimeter = 4, so width + height = 2
+    # Optimized rectangle dimensions - using a wider rectangle for better packing
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Run Voronoi-guided local search optimization
+    circles = optimize_circle_packing(21, rect_width, rect_height)
+
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

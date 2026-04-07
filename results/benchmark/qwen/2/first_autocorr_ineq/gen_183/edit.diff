@@ -1,0 +1,326 @@
+--- a/original.py
++++ b/original.py
+@@ -1,152 +1,260 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import optimize
+ from scipy.fft import fft, ifft
+ import random
+ import time
++import math
+ 
+ def convolve_fft(a, b):
+     """Compute convolution using FFT for better performance."""
+     n = len(a)
+     # Zero-pad to avoid circular convolution effects
+     padded_length = 2 * n - 1
+     fa = fft(a, padded_length)
+     fb = fft(b, padded_length)
+     result = ifft(fa * fb).real
+     return result[:n]
+ 
+ def get_good_direction_to_move_into(
+     sequence: list[float],
+     iteration: int = 0,
+ ) -> list[float] | None:
+-    """Returns the direction to move into the sequence with adaptive step size."""
++    """Returns the direction to move into the sequence using a hybrid evolutionary approach."""
+     n = len(sequence)
+     sum_sequence = np.sum(sequence)
+     if sum_sequence < 1e-10:
+         return None
++        
++    # Normalize for numerical stability
+     normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
++    
++    # Compute target RHS
+     rhs = np.max(convolve_fft(normalized_sequence, normalized_sequence))
++    
++    # Attempt LP optimization
+     g_fun = solve_convolution_lp(normalized_sequence, rhs)
++    
+     if g_fun is None:
++        # Fallback: use mutation-based approach
++        return mutate_sequence(sequence, iteration)
++    
++    # Normalize the LP result
++    sum_g = np.sum(g_fun)
++    if sum_g < 1e-10:
+         return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
++    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+ 
+     # Adaptive step size with exponential decay
+     base_t = 0.01
+     t = base_t * np.exp(-iteration / 100.0)
+ 
+     new_sequence = [
+         (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+     ]
+     return new_sequence
+ 
++def mutate_sequence(sequence: list[float], iteration: int) -> list[float]:
++    """Mutation operator for exploratory moves."""
++    n = len(sequence)
++    if n < 1:
++        return sequence
++
++    # Create a mutated version
++    mutated = sequence[:]
++    
++    # Apply random changes to a few elements
++    num_mutations = max(1, n // 10)
++    for _ in range(num_mutations):
++        idx = random.randint(0, n - 1)
++        # Small random perturbation
++        mutated[idx] += random.gauss(0, 0.05) * mutated[idx] if mutated[idx] > 0 else 0.01
++        mutated[idx] = max(0, mutated[idx])  # Ensure non-negativity
++
++    # Normalize
++    sum_mut = np.sum(mutated)
++    if sum_mut > 0:
++        mutated = [x / sum_mut for x in mutated]
++    return mutated
++
+ def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
++    """Solves the convolution LP for a given sequence and RHS with enhanced robustness."""
+     n = len(f_sequence)
++    if n < 1:
++        return None
++
+     c = -np.ones(n)
+     a_ub = []
+     b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+-
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
+-
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+-
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+-
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        # print('LP optimization failed.')
+-        return None
++    
++    try:
++        # Generate convolution constraints
++        for k in range(2 * n - 1):
++            row = np.zeros(n)
++            for i in range(n):
++                j = k - i
++                if 0 <= j < n:
++                    row[j] = f_sequence[i]
++            a_ub.append(row)
++            b_ub.append(rhs)
++
++        # Non-negativity constraints
++        a_ub_nonneg = -np.eye(n)
++        b_ub_nonneg = np.zeros(n)
++
++        a_ub = np.vstack([a_ub, a_ub_nonneg])
++        b_ub = np.hstack([b_ub, b_ub_nonneg])
++
++        # Try multiple solvers in order of preference
++        solvers = ['highs', 'interior-point']
++        for method in solvers:
++            try:
++                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method=method, options={'maxiter': 1000})
++                if result.success:
++                    g_sequence = result.x
++                    return g_sequence
++            except:
++                continue
++                
++        # Fallback to simpler approach
++        return np.ones(n) / n
++        
++    except Exception as e:
++        # If everything fails, return a simple uniform distribution
++        return np.ones(n) / n
+ 
+ def calculate_fitness(sequence):
+     """Calculate fitness as inverse of C1, i.e., (sum(a))^2 / (2*n*max(conv))"""
+     n = len(sequence)
+     if n < 1:
+         return 0.0
+ 
+     sum_a = np.sum(sequence)
+     if sum_a < 1e-10:
+         return 0.0
+ 
+     conv = convolve_fft(sequence, sequence)
+     max_conv = np.max(conv)
+ 
+     if max_conv < 1e-10:
+         return 0.0
+ 
+     # Calculate fitness: (sum(a))^2 / (2*n*max(conv))
+     fitness = (sum_a ** 2) / (2 * n * max_conv)
+     return fitness
+ 
++def tournament_selection(population, fitnesses, tournament_size=3):
++    """Select an individual using tournament selection."""
++    selected_indices = random.sample(range(len(population)), tournament_size)
++    best_idx = max(selected_indices, key=lambda i: fitnesses[i])
++    return population[best_idx][:]
++
++def crossover(parent1, parent2):
++    """Single-point crossover."""
++    n = len(parent1)
++    if n < 2:
++        return parent1[:]
++        
++    crossover_point = random.randint(1, n - 1)
++    child = parent1[:crossover_point] + parent2[crossover_point:]
++    
++    # Normalize child
++    sum_child = np.sum(child)
++    if sum_child > 0:
++        child = [x / sum_child for x in child]
++    return child
++
++def mutate_individual(individual, mutation_rate=0.1):
++    """Mutate an individual with a certain probability."""
++    mutated = individual[:]
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            mutated[i] += random.gauss(0, 0.05) * mutated[i] if mutated[i] > 0 else 0.01
++            mutated[i] = max(0, mutated[i])  # Ensure non-negativity
++    
++    # Re-normalize
++    sum_mut = np.sum(mutated)
++    if sum_mut > 0:
++        mutated = [x / sum_mut for x in mutated]
++    return mutated
++
+ def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence with elite preservation."""
++    """Evolutionary algorithm-based search for the best coefficient sequence."""
+     start_time = time.time()
+     max_time = 170  # Leave some buffer for cleanup
++    
++    # Parameters
++    population_size = 20
++    generations = 50
++    elite_size = 5
++    
++    # Initialize population
++    population = []
++    for i in range(population_size):
++        n = np.random.randint(100, 1000)
++        individual = [random.random() * 10 for _ in range(n)]
++        sum_ind = np.sum(individual)
++        if sum_ind > 0:
++            individual = [x / sum_ind for x in individual]
++        population.append(individual)
++    
+     best_sequence = None
+     best_fitness = 0.0
+-    elite_sequences = []  # Store top performing sequences
+-
+-    # Multi-start strategy to avoid local minima
+-    num_starts = 15
+-    for start_idx in range(num_starts):
++    
++    for gen in range(generations):
+         if time.time() - start_time > max_time:
+             break
+-
+-        # Randomly initialize sequence length and values
+-        n = np.random.randint(100, 1000)
+-        current_sequence = [random.random() * 10 for _ in range(n)]
+-
+-        # Local search with multiple iterations
+-        local_max_iter = 50
+-        for iter_idx in range(local_max_iter):
++            
++        # Evaluate fitness
++        fitnesses = [calculate_fitness(ind) for ind in population]
++        
++        # Track best individual
++        max_fitness_idx = np.argmax(fitnesses)
++        if fitnesses[max_fitness_idx] > best_fitness:
++            best_fitness = fitnesses[max_fitness_idx]
++            best_sequence = population[max_fitness_idx][:]
++            
++        # Elitism: keep the best individuals
++        elite_indices = np.argsort(fitnesses)[-elite_size:]
++        elites = [population[i][:] for i in elite_indices]
++        
++        # Generate new population
++        new_population = elites[:]
++        
++        # Fill rest of population with offspring
++        while len(new_population) < population_size:
+             if time.time() - start_time > max_time:
+                 break
+-
+-            h_function = get_good_direction_to_move_into(current_sequence, iter_idx)
++                
++            # Tournament selection for parents
++            parent1 = tournament_selection(population, fitnesses)
++            parent2 = tournament_selection(population, fitnesses)
++            
++            # Crossover
++            child = crossover(parent1, parent2)
++            
++            # Mutation
++            child = mutate_individual(child)
++            
++            # Improvement by local search
++            h_function = get_good_direction_to_move_into(child, gen)
+             if h_function is not None:
+-                current_sequence = h_function
+-            else:
+-                # If we can't improve, try a new random sequence
+-                n = np.random.randint(100, 1000)
+-                current_sequence = [random.random() * 10 for _ in range(n)]
+-
+-            # Evaluate fitness
+-            current_fitness = calculate_fitness(current_sequence)
+-
+-            # Store elite sequences
+-            if len(elite_sequences) < 10 or current_fitness > elite_sequences[0][0]:
+-                elite_sequences.append((current_fitness, current_sequence[:]))
+-                elite_sequences.sort(key=lambda x: x[0], reverse=True)
+-                elite_sequences = elite_sequences[:10]  # Keep only top 10
+-
+-            if current_fitness > best_fitness:
+-                best_fitness = current_fitness
+-                best_sequence = current_sequence[:]
+-
++                child = h_function
++                
++            new_population.append(child)
++            
++        population = new_population[:population_size]
++        
+     # Final check to ensure we have a valid sequence
+     if best_sequence is None:
+         n = np.random.randint(100, 1000)
+         best_sequence = [random.random() * 10 for _ in range(n)]
+ 
+     return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

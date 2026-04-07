@@ -1,0 +1,451 @@
+<NAME>
+improve_voronoi_initialization_and_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the Voronoi initialization and local search strategies to improve the circle packing performance. The key improvements include:
+
+1. Using a more sophisticated Voronoi-based initialization that better distributes circles
+2. Improving the local search algorithm to be more efficient and effective at finding better solutions
+3. Adding a hybrid approach that combines global and local optimization strategies
+
+These changes should help us achieve a better sum of radii to beat the benchmark of 2.6358627564136983.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced Voronoi-based spreading."""
+    # Create a structured grid pattern with randomization
+    grid_size = int(np.ceil(np.sqrt(n_circles)))
+    grid_points = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(grid_points) < n_circles:
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                grid_points.append([x, y])
+
+    points = np.array(grid_points)
+
+    # Add some randomness to avoid perfect grids that might cause issues
+    noise_level = 0.03
+    points += np.random.uniform(-noise_level, noise_level, points.shape)
+
+    # Clip points to ensure they're within bounds
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Add boundary points for better coverage
+    boundary_points = []
+    for _ in range(10):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            boundary_points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            boundary_points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            boundary_points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            boundary_points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    points = np.vstack([points, boundary_points])
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii based on Voronoi cell sizes
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x, y = selected_centroids[i]
+
+            # Find nearest neighbor to estimate appropriate radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+            if len(distances) > 0:
+                avg_distance = np.min(distances) * 0.4
+                radius = min(avg_distance, 0.25)
+            else:
+                radius = 0.1
+
+            # Ensure it's within bounds
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            circles[i] = [x, y, max(radius, 0.001)]
+
+        return circles
+    except:
+        # Fallback to grid-based initialization if Voronoi fails
+        return generate_grid_initialization(n_circles)
+=======
+def create_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced Voronoi-based spreading."""
+    # Generate more diverse initial points using a combination of strategies
+    points = []
+
+    # 1. Grid-based points
+    grid_size = int(np.ceil(np.sqrt(n_circles)) * 1.2)  # Slightly larger grid
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) < n_circles * 2:  # Generate more points than needed
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                points.append([x, y])
+
+    # 2. Random points
+    random_points = np.random.rand(n_circles * 2, 2)
+    points.extend(random_points.tolist())
+
+    # 3. Boundary points for better edge coverage
+    for _ in range(n_circles):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    points = np.array(points)[:n_circles * 3]  # Take enough points
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii based on Voronoi cell sizes
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x, y = selected_centroids[i]
+
+            # Find nearest neighbor to estimate appropriate radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+            if len(distances) > 0:
+                avg_distance = np.min(distances) * 0.4
+                radius = min(avg_distance, 0.3)  # Increased max radius
+            else:
+                radius = 0.1
+
+            # Ensure it's within bounds
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            circles[i] = [x, y, max(radius, 0.001)]
+
+        return circles
+    except:
+        # Fallback to grid-based initialization if Voronoi fails
+        return generate_grid_initialization(n_circles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def constraint_aware_local_search(circles: np.ndarray, max_iterations: int = MAX_LOCAL_SEARCH_ITERATIONS) -> np.ndarray:
+    """
+    Apply a constrained local search optimization to improve solution quality.
+    This is a novel approach that simultaneously optimizes radii and positions.
+    """
+    # Clone input to avoid modifying original
+    current_solution = circles.copy()
+
+    for iteration in range(max_iterations):
+        improved = False
+
+        # Try to expand each circle's radius while maintaining constraints
+        for i in range(len(current_solution)):
+            original_r = current_solution[i, 2]
+            x, y, r = current_solution[i]
+
+            # Calculate maximum possible radius at this position
+            max_radius = min(x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                           y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            # Try to expand radius
+            if max_radius > r:
+                # Binary search for maximum safe expansion
+                low = 0.0
+                high = max_radius - r
+                best_expansion = 0.0
+
+                for _ in range(10):  # Binary search iterations
+                    test_expansion = (low + high) / 2
+                    test_radius = r + test_expansion
+
+                    # Check if expansion violates any constraints
+                    valid = True
+                    for j in range(len(current_solution)):
+                        if i != j:
+                            pos_j = current_solution[j, :2]
+                            r_j = current_solution[j, 2]
+                            dist = np.sqrt((x - pos_j[0])**2 + (y - pos_j[1])**2)
+                            if dist < (test_radius + r_j):
+                                valid = False
+                                break
+
+                    if valid:
+                        best_expansion = test_expansion
+                        low = test_expansion
+                    else:
+                        high = test_expansion
+
+                if best_expansion > 0:
+                    current_solution[i, 2] = r + best_expansion
+                    improved = True
+
+        # Try small position adjustments to resolve overlaps
+        for i in range(len(current_solution)):
+            x, y, r = current_solution[i]
+            original_pos = [x, y]
+
+            # Collect overlapping neighbors
+            neighbors_to_move = []
+            for j in range(len(current_solution)):
+                if i != j:
+                    pos_j = current_solution[j, :2]
+                    r_j = current_solution[j, 2]
+                    dist = np.sqrt((x - pos_j[0])**2 + (y - pos_j[1])**2)
+                    if dist < (r + r_j):
+                        neighbors_to_move.append(j)
+
+            # If there are overlaps, try adjusting position
+            if neighbors_to_move:
+                # Try several small moves
+                best_move = [0.0, 0.0]
+                best_score = -1000
+
+                for dx in [-0.01, -0.005, 0, 0.005, 0.01]:
+                    for dy in [-0.01, -0.005, 0, 0.005, 0.01]:
+                        test_x = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, x + dx))
+                        test_y = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, y + dy))
+
+                        # Check if move helps
+                        score = 0
+                        valid = True
+
+                        # Check overlap with others
+                        for j in range(len(current_solution)):
+                            if i != j:
+                                pos_j = current_solution[j, :2]
+                                r_j = current_solution[j, 2]
+                                dist = np.sqrt((test_x - pos_j[0])**2 + (test_y - pos_j[1])**2)
+                                if dist < (r + r_j):
+                                    valid = False
+                                    break
+                                # Score based on how much we improve overlap
+                                if dist < (r + r_j + 0.01):
+                                    score -= 10  # Penalty for remaining overlap
+                                else:
+                                    score += 1   # Reward for better separation
+
+                        if valid and score > best_score:
+                            best_score = score
+                            best_move = [dx, dy]
+
+                # Apply best move if beneficial
+                if best_score > -1000:
+                    current_solution[i, 0] = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, x + best_move[0]))
+                    current_solution[i, 1] = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, y + best_move[1]))
+                    improved = True
+
+        # If no improvement, try a different strategy
+        if not improved:
+            # Try aggressive adjustment by moving all circles slightly
+            for i in range(len(current_solution)):
+                x, y, r = current_solution[i]
+                dx = np.random.uniform(-0.01, 0.01)
+                dy = np.random.uniform(-0.01, 0.01)
+
+                test_x = np.clip(x + dx, r + BOUNDARY_MARGIN, 1 - r - BOUNDARY_MARGIN)
+                test_y = np.clip(y + dy, r + BOUNDARY_MARGIN, 1 - r - BOUNDARY_MARGIN)
+
+                # Check overlap
+                valid = True
+                for j in range(len(current_solution)):
+                    if i != j:
+                        pos_j = current_solution[j, :2]
+                        r_j = current_solution[j, 2]
+                        dist = np.sqrt((test_x - pos_j[0])**2 + (test_y - pos_j[1])**2)
+                        if dist < (r + r_j):
+                            valid = False
+                            break
+
+                if valid:
+                    current_solution[i, 0] = test_x
+                    current_solution[i, 1] = test_y
+                    improved = True
+
+        if not improved:
+            break
+
+    return current_solution
+=======
+def constraint_aware_local_search(circles: np.ndarray, max_iterations: int = MAX_LOCAL_SEARCH_ITERATIONS) -> np.ndarray:
+    """
+    Apply a constrained local search optimization to improve solution quality.
+    This is a novel approach that simultaneously optimizes radii and positions.
+    """
+    # Clone input to avoid modifying original
+    current_solution = circles.copy()
+
+    # Keep track of best solution found during local search
+    best_solution = current_solution.copy()
+    best_fitness = evaluate_fitness(current_solution)
+
+    for iteration in range(max_iterations):
+        improved = False
+
+        # Strategy 1: Try to expand each circle's radius while maintaining constraints
+        for i in range(len(current_solution)):
+            original_r = current_solution[i, 2]
+            x, y, r = current_solution[i]
+
+            # Calculate maximum possible radius at this position
+            max_radius = min(x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                           y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            # Try to expand radius
+            if max_radius > r:
+                # Binary search for maximum safe expansion
+                low = 0.0
+                high = max_radius - r
+                best_expansion = 0.0
+
+                for _ in range(15):  # More iterations for better precision
+                    test_expansion = (low + high) / 2
+                    test_radius = r + test_expansion
+
+                    # Check if expansion violates any constraints
+                    valid = True
+                    for j in range(len(current_solution)):
+                        if i != j:
+                            pos_j = current_solution[j, :2]
+                            r_j = current_solution[j, 2]
+                            dist = np.sqrt((x - pos_j[0])**2 + (y - pos_j[1])**2)
+                            if dist < (test_radius + r_j):
+                                valid = False
+                                break
+
+                    if valid:
+                        best_expansion = test_expansion
+                        low = test_expansion
+                    else:
+                        high = test_expansion
+
+                if best_expansion > 0:
+                    current_solution[i, 2] = r + best_expansion
+                    improved = True
+
+        # Strategy 2: Try position adjustments to resolve overlaps
+        for i in range(len(current_solution)):
+            x, y, r = current_solution[i]
+
+            # Collect overlapping neighbors
+            overlapping_pairs = []
+            for j in range(len(current_solution)):
+                if i != j:
+                    pos_j = current_solution[j, :2]
+                    r_j = current_solution[j, 2]
+                    dist = np.sqrt((x - pos_j[0])**2 + (y - pos_j[1])**2)
+                    if dist < (r + r_j):
+                        overlapping_pairs.append((j, dist))
+
+            # If there are overlaps, try adjusting position
+            if overlapping_pairs:
+                # Try several small moves
+                best_move = [0.0, 0.0]
+                best_score = -1000
+
+                # Use a more thorough search around current position
+                moves = []
+                for dx in [-0.02, -0.01, -0.005, 0, 0.005, 0.01, 0.02]:
+                    for dy in [-0.02, -0.01, -0.005, 0, 0.005, 0.01, 0.02]:
+                        moves.append((dx, dy))
+
+                for dx, dy in moves:
+                    test_x = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, x + dx))
+                    test_y = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, y + dy))
+
+                    # Check if move helps
+                    score = 0
+                    valid = True
+
+                    # Check overlap with others
+                    for j in range(len(current_solution)):
+                        if i != j:
+                            pos_j = current_solution[j, :2]
+                            r_j = current_solution[j, 2]
+                            dist = np.sqrt((test_x - pos_j[0])**2 + (test_y - pos_j[1])**2)
+                            if dist < (r + r_j):
+                                valid = False
+                                break
+                            # Score based on how much we improve overlap (closer to minimum distance)
+                            if dist < (r + r_j + 0.005):
+                                score -= 10  # Penalty for remaining overlap
+                            else:
+                                score += (dist - (r + r_j))  # Reward for better separation
+
+                    if valid and score > best_score:
+                        best_score = score
+                        best_move = [dx, dy]
+
+                # Apply best move if beneficial
+                if best_score > -1000 and best_score > 0:
+                    current_solution[i, 0] = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, x + best_move[0]))
+                    current_solution[i, 1] = max(BOUNDARY_MARGIN + r, min(1 - BOUNDARY_MARGIN - r, y + best_move[1]))
+                    improved = True
+
+        # Strategy 3: Global improvement by adjusting all positions
+        if not improved and iteration % 5 == 0:  # Only do occasionally
+            # Try small random adjustments for all circles
+            for i in range(len(current_solution)):
+                x, y, r = current_solution[i]
+                dx = np.random.normal(0, 0.005)  # Smaller perturbation
+                dy = np.random.normal(0, 0.005)
+
+                test_x = np.clip(x + dx, r + BOUNDARY_MARGIN, 1 - r - BOUNDARY_MARGIN)
+                test_y = np.clip(y + dy, r + BOUNDARY_MARGIN, 1 - r - BOUNDARY_MARGIN)
+
+                # Check overlap - be more conservative here
+                valid = True
+                for j in range(len(current_solution)):
+                    if i != j:
+                        pos_j = current_solution[j, :2]
+                        r_j = current_solution[j, 2]
+                        dist = np.sqrt((test_x - pos_j[0])**2 + (test_y - pos_j[1])**2)
+                        if dist < (r + r_j):
+                            valid = False
+                            break
+
+                if valid:
+                    current_solution[i, 0] = test_x
+                    current_solution[i, 1] = test_y
+                    improved = True
+
+        # Update best solution if current is better
+        current_fitness = evaluate_fitness(current_solution)
+        if current_fitness > best_fitness:
+            best_fitness = current_fitness
+            best_solution = current_solution.copy()
+
+        if not improved:
+            break
+
+    return best_solution
+>>>>>>> REPLACE
+</DIFF>

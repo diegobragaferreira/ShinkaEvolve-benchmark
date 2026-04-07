@@ -1,0 +1,247 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points_flat):
+        """Compute the min/max distance ratio for given flattened point coordinates."""
+        # Reshape flat array back to (16, 2)
+        points = points_flat.reshape(-1, 2)
+
+        # Compute pairwise distances
+        diff = points[:, np.newaxis, :] - points[np.newaxis, :, :]
+        distances = np.sqrt(np.sum(diff**2, axis=2))
+
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # Compute min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Return ratio (avoid division by zero)
+        if max_dist == 0:
+            return 0
+        return min_dist / max_dist
+
+    def objective(points_flat):
+        """Minimize negative of min/max ratio (equivalent to maximizing the ratio)."""
+        return -compute_min_max_ratio(points_flat)
+
+    def constraint_func(points_flat):
+        """Ensure points stay within [0,1] x [0,1]."""
+        points = points_flat.reshape(-1, 2)
+        # Each point coordinate should be between 0 and 1
+        return np.concatenate([
+            points[:, 0],  # x coordinates
+            points[:, 1],  # y coordinates
+            1 - points[:, 0],  # 1 - x coordinates
+            1 - points[:, 1]   # 1 - y coordinates
+        ])
+
+    def adaptive_hexagonal_init():
+        """Initialize points using improved hexagonal packing with adaptive perturbations."""
+        # Create a hexagonal lattice pattern with better spacing properties
+        points = []
+        rows = 4
+        cols = 4
+
+        # Use proper hexagonal spacing (sqrt(3)/2 spacing in y-direction)
+        y_spacing = 0.8 / (rows - 1) if rows > 1 else 0.8  # Reduced spacing to fit in [0.1, 0.9]
+        x_spacing = y_spacing * 0.866  # sqrt(3)/2 for hexagonal packing
+
+        for i in range(rows):
+            for j in range(cols):
+                # offset every other row for true hexagonal pattern
+                x_offset = x_spacing * 0.5 if i % 2 == 1 else 0.0
+                x = 0.1 + j * x_spacing + x_offset  # Shift to avoid boundaries
+                y = 0.1 + i * y_spacing
+
+                # Add adaptive perturbation based on position
+                # Points near corners get smaller perturbations
+                if (i == 0 or i == rows-1) and (j == 0 or j == cols-1):
+                    perturbation = 0.01
+                elif i == 0 or i == rows-1 or j == 0 or j == cols-1:
+                    perturbation = 0.015
+                else:
+                    perturbation = 0.02
+
+                # Add Gaussian noise
+                x += np.random.normal(0, perturbation)
+                y += np.random.normal(0, perturbation)
+
+                points.append([x, y])
+
+        # Clip to ensure all points stay within [0.1, 0.9] bounds (to avoid edge issues)
+        points = np.clip(points, 0.1, 0.9)
+        return np.array(points[:16])
+
+    def adaptive_perturbed_grid_init():
+        """Initialize with grid points plus adaptive random perturbations."""
+        # Start with a regular grid
+        grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+        points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+
+        # Add adaptive perturbations based on point position
+        for i in range(len(points)):
+            x, y = points[i]
+
+            # Points near corners should have smaller perturbations
+            if (abs(x - 0) < 0.1 or abs(x - 1) < 0.1) and (abs(y - 0) < 0.1 or abs(y - 1) < 0.1):
+                perturbation = 0.01
+            elif abs(x - 0.5) < 0.2 and abs(y - 0.5) < 0.2:
+                # Center points allow more variation
+                perturbation = 0.025
+            else:
+                # Edge points
+                perturbation = 0.02
+
+            points[i] += np.random.uniform(-perturbation, perturbation, 2)
+
+        # Clip to ensure within bounds
+        points = np.clip(points, 0.1, 0.9)
+        return points
+
+    def multi_start_optimization(initial_points):
+        """Run multiple optimization attempts with different strategies."""
+        best_points = initial_points.copy()
+        best_ratio = -np.inf
+
+        # Set up different optimization strategies
+        strategies = [
+            {'method': 'SLSQP', 'options': {'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10}},
+            {'method': 'L-BFGS-B', 'options': {'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10}},
+            {'method': 'TNC', 'options': {'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10}}
+        ]
+
+        # Try each initial configuration with different optimization methods
+        for i, strategy in enumerate(strategies):
+            try:
+                # Reset seed for reproducible results
+                np.random.seed(i * 1000)
+
+                # Get fresh copy of initial points
+                points = initial_points.copy()
+                initial_flat = points.flatten()
+
+                bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+                cons = {'type': 'ineq', 'fun': constraint_func}
+
+                result = minimize(
+                    objective,
+                    initial_flat,
+                    method=strategy['method'],
+                    bounds=bounds,
+                    constraints=cons,
+                    options=strategy['options']
+                )
+
+                if result.success:
+                    # Calculate ratio for this optimization run
+                    ratio = compute_min_max_ratio(result.x)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = result.x.reshape(-1, 2)
+
+            except Exception as e:
+                # Continue with other strategies if one fails
+                continue
+
+        return best_points, best_ratio
+
+    # Try multiple initialization strategies to find best starting point
+    best_ratio = -np.inf
+    best_points = None
+
+    # Strategy 1: Hexagonal packing initialization
+    try:
+        np.random.seed(42)
+        initial_points = adaptive_hexagonal_init()
+        optimized_points, ratio = multi_start_optimization(initial_points)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = optimized_points.copy()
+    except Exception as e:
+        pass
+
+    # Strategy 2: Perturbed grid initialization
+    try:
+        if best_points is None:
+            np.random.seed(42)
+            initial_points = adaptive_perturbed_grid_init()
+            optimized_points, ratio = multi_start_optimization(initial_points)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+    except Exception as e:
+        pass
+
+    # Strategy 3: Random initialization with better spread
+    try:
+        if best_points is None:
+            np.random.seed(42)
+            initial_points = np.random.rand(16, 2)
+            # Constrain to interior region to avoid edge effects
+            initial_points = 0.1 + 0.8 * initial_points
+            optimized_points, ratio = multi_start_optimization(initial_points)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+    except Exception as e:
+        pass
+
+    # If no strategy worked, fall back to the default hexagonal initialization
+    if best_points is None:
+        np.random.seed(42)
+        initial_points = adaptive_hexagonal_init()
+        best_points = initial_points.copy()
+
+    # Final adjustment with L-BFGS-B for fine-tuning
+    try:
+        np.random.seed(42)
+        bounds = [(0, 1) for _ in range(32)]
+        cons = {'type': 'ineq', 'fun': constraint_func}
+
+        result = minimize(
+            objective,
+            best_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=cons,
+            options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+
+        if result.success:
+            final_ratio = compute_min_max_ratio(result.x)
+            if final_ratio > best_ratio:
+                best_points = result.x.reshape(-1, 2)
+                best_ratio = final_ratio
+
+    except Exception as e:
+        pass
+
+    # Ensure all points are within bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    # Compute final metrics
+    final_ratio = compute_min_max_ratio(best_points.flatten())
+    benchmark_ratio = final_ratio / 0.2786  # AlphaEvolve benchmark
+
+    # Print metrics for debugging
+    print(f"Final min/max ratio: {final_ratio:.6f}")
+    print(f"Benchmark ratio: {benchmark_ratio:.6f}")
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

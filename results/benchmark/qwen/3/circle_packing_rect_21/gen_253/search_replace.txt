@@ -1,0 +1,235 @@
+<NAME>
+adaptive_multi_scale_optimization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to implement an adaptive multi-scale optimization strategy that intelligently adjusts its approach based on convergence behavior. The current implementation uses fixed iteration counts and step sizes, but we can significantly improve performance by making these adaptive. Specifically:
+1. Monitor convergence rate to detect when we're approaching a local optimum
+2. Automatically switch between exploration (larger steps, coarser grids) and exploitation (smaller steps, finer grids) phases
+3. Implement early stopping when improvement plateaus
+4. Use dynamic step sizing that responds to problem complexity
+This approach should help escape poor local optima and find better global solutions compared to the static multi-phase approach.
+
+The implementation uses a more sophisticated convergence detection system that measures improvement rates and dynamically adjusts optimization parameters to maximize the sum of radii.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Multi-stage optimization with progressive refinement
+    best_sum = 0
+    best_circles = None
+
+    # Phase 1: Coarse optimization
+    for stage in range(2):
+        current_circles = circles.copy()
+
+        # Coarse iteration with large steps
+        for iteration in range(200):
+            improved = False
+
+            # Randomly shuffle circle order for better exploration
+            indices = list(range(21))
+            random.shuffle(indices)
+
+            for i in indices:
+                # Compute max radius for current position
+                max_radius = compute_max_radius(current_circles, i, rect_width, rect_height)
+
+                if max_radius > current_circles[i, 2] + 1e-6:
+                    current_circles[i, 2] = max_radius
+                    improved = True
+
+            if not improved:
+                break
+
+        # Phase 2: Fine-grained local search
+        for iteration in range(300):
+            improved = False
+
+            # Try each circle in random order
+            indices = list(range(21))
+            random.shuffle(indices)
+
+            for i in indices:
+                old_x, old_y, old_r = current_circles[i]
+                old_r = current_circles[i, 2]
+
+                # Try to expand radius
+                max_radius = compute_max_radius(current_circles, i, rect_width, rect_height)
+
+                if max_radius > old_r + 1e-6:
+                    current_circles[i, 2] = max_radius
+                    improved = True
+
+            if not improved:
+                break
+
+        # Phase 3: Position refinement with spatial optimization
+        for iteration in range(200):
+            improved = False
+
+            # Sample potential moves
+            for i in range(21):
+                old_x, old_y, old_r = current_circles[i]
+
+                # Try several nearby positions
+                best_pos = [old_x, old_y, old_r]
+                best_radius = old_r
+
+                # Grid search around current position
+                step = 0.05 if iteration < 100 else 0.01
+                for dx in [-step, -step/2, 0, step/2, step]:
+                    for dy in [-step, -step/2, 0, step/2, step]:
+                        new_x = old_x + dx
+                        new_y = old_y + dy
+
+                        # Ensure within bounds
+                        if (0.01 <= new_x <= rect_width - 0.01 and
+                            0.01 <= new_y <= rect_height - 0.01):
+
+                            # Compute max radius at new position
+                            max_radius = compute_max_radius_at_position(
+                                current_circles, i, new_x, new_y, rect_width, rect_height
+                            )
+
+                            if max_radius > best_radius + 1e-6:
+                                best_radius = max_radius
+                                best_pos = [new_x, new_y, max_radius]
+
+                if best_pos[2] > current_circles[i, 2] + 1e-6:
+                    current_circles[i] = best_pos
+                    improved = True
+
+            if not improved:
+                break
+
+        # Final validation and update best
+        if is_valid_configuration(current_circles, rect_width, rect_height):
+            current_sum = np.sum(current_circles[:, 2])
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_circles = current_circles.copy()
+=======
+    # Adaptive multi-scale optimization with intelligent convergence detection
+    best_sum = 0
+    best_circles = None
+
+    # Track convergence metrics for adaptive control
+    prev_sum = 0
+    improvement_count = 0
+    convergence_threshold = 1e-5
+    max_convergence_streak = 20
+
+    # Main optimization loop with adaptive scaling
+    current_circles = circles.copy()
+    iteration = 0
+    max_iterations = 1000
+    convergence_streak = 0
+
+    while iteration < max_iterations:
+        improved = False
+        current_sum = np.sum(current_circles[:, 2])
+
+        # Adaptive step sizing based on iteration progress and improvement rate
+        if iteration < 200:
+            # Initial exploration phase - larger steps
+            step_size = 0.1
+            radius_steps = 50
+            position_steps = 100
+        elif iteration < 600:
+            # Mid-range optimization - moderate steps
+            step_size = 0.05
+            radius_steps = 50
+            position_steps = 50
+        else:
+            # Fine-tuning phase - small steps
+            step_size = 0.02
+            radius_steps = 25
+            position_steps = 25
+
+        # Radius maximization phase
+        indices = list(range(21))
+        random.shuffle(indices)
+
+        for i in indices:
+            # Compute max radius for current position
+            max_radius = compute_max_radius(current_circles, i, rect_width, rect_height)
+
+            if max_radius > current_circles[i, 2] + 1e-6:
+                current_circles[i, 2] = max_radius
+                improved = True
+
+        # Position refinement phase with grid search
+        indices = list(range(21))
+        random.shuffle(indices)
+
+        for i in indices:
+            old_x, old_y, old_r = current_circles[i]
+
+            # Try several nearby positions using adaptive step size
+            best_pos = [old_x, old_y, old_r]
+            best_radius = old_r
+
+            # Grid search around current position
+            for dx in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                for dy in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                    new_x = old_x + dx
+                    new_y = old_y + dy
+
+                    # Ensure within bounds
+                    if (0.01 <= new_x <= rect_width - 0.01 and
+                        0.01 <= new_y <= rect_height - 0.01):
+
+                        # Compute max radius at new position
+                        max_radius = compute_max_radius_at_position(
+                            current_circles, i, new_x, new_y, rect_width, rect_height
+                        )
+
+                        if max_radius > best_radius + 1e-6:
+                            best_radius = max_radius
+                            best_pos = [new_x, new_y, max_radius]
+
+            if best_pos[2] > current_circles[i, 2] + 1e-6:
+                current_circles[i] = best_pos
+                improved = True
+
+        # Convergence checking and adaptive response
+        if improved:
+            improvement_count += 1
+            convergence_streak = 0
+        else:
+            convergence_streak += 1
+            if convergence_streak > max_convergence_streak:
+                # If we've plateaued for too long, reduce step size
+                step_size *= 0.8
+                if step_size < 0.005:  # Minimum step size
+                    break
+                convergence_streak = 0
+
+        # Update best solution
+        if is_valid_configuration(current_circles, rect_width, rect_height):
+            new_sum = np.sum(current_circles[:, 2])
+            if new_sum > best_sum:
+                best_sum = new_sum
+                best_circles = current_circles.copy()
+
+        # Check for convergence based on improvement rate
+        improvement_rate = abs(new_sum - prev_sum) / (prev_sum + 1e-10)
+        if improvement_rate < convergence_threshold and iteration > 100:
+            # Slow progress detected - reduce step size
+            step_size *= 0.9
+            if step_size < 0.001:
+                break
+
+        prev_sum = new_sum
+        iteration += 1
+
+        # Early termination for very slow improvement
+        if convergence_streak > max_convergence_streak * 2:
+            break
+
+    # Final refinement with adaptive optimization
+    if best_circles is None:
+        best_circles = circles.copy()
+>>>>>>> REPLACE
+</DIFF>

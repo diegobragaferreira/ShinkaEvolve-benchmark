@@ -1,0 +1,134 @@
+<NAME>
+enhance_voronoi_candidate_selection
+</NAME>
+
+<DESCRIPTION>
+Enhancing the Voronoi candidate selection by implementing a weighted sampling approach that favors positions near boundaries and corners where larger circles can potentially be placed. This addresses the limitation in the current implementation where all Voronoi vertices are treated equally regardless of their potential for accommodating larger radii.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_voronoi_candidates(circles, num_candidates=1000):
+    """Generate candidate positions using Voronoi diagram of existing circles"""
+    if len(circles) == 0:
+        # Return random points if no circles exist yet
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+
+    # Get circle centers
+    points = np.array([[cx, cy] for cx, cy, cr in circles])
+
+    try:
+        # Compute Voronoi diagram
+        vor = Voronoi(points)
+
+        candidates = []
+        # Add Voronoi vertices
+        for vertex in vor.vertices:
+            x, y = vertex
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                candidates.append((float(x), float(y)))
+
+        # Add some random points around existing circles
+        for i, (cx, cy, cr) in enumerate(circles):
+            for _ in range(5):
+                angle = random.uniform(0, 2*np.pi)
+                distance = random.uniform(0.05, 0.2)
+                x = cx + distance * np.cos(angle)
+                y = cy + distance * np.sin(angle)
+                if 0 <= x <= 1 and 0 <= y <= 1:
+                    candidates.append((float(x), float(y)))
+
+        # Add corner/edge points for better boundary coverage
+        edge_points = [
+            (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),
+            (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),
+            (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75)
+        ]
+        for x, y in edge_points:
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                candidates.append((x, y))
+
+        # If we don't have enough candidates, fill with random ones
+        if len(candidates) < num_candidates:
+            additional = num_candidates - len(candidates)
+            for _ in range(additional):
+                x = random.uniform(0.01, 0.99)
+                y = random.uniform(0.01, 0.99)
+                candidates.append((x, y))
+
+        return candidates[:num_candidates]
+
+    except:
+        # Fallback to random sampling if Voronoi fails
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+=======
+def generate_voronoi_candidates(circles, num_candidates=1000):
+    """Generate candidate positions using Voronoi diagram of existing circles"""
+    if len(circles) == 0:
+        # Return random points if no circles exist yet
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+
+    # Get circle centers
+    points = np.array([[cx, cy] for cx, cy, cr in circles])
+
+    try:
+        # Compute Voronoi diagram
+        vor = Voronoi(points)
+
+        candidates = []
+        # Add Voronoi vertices with boundary weighting
+        for vertex in vor.vertices:
+            x, y = vertex
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                # Calculate distance to nearest boundary
+                dist_to_boundary = min(x, 1-x, y, 1-y)
+                # Assign higher weight to vertices close to boundaries (potential for larger circles)
+                weight = 1.0 + 4.0 * (1.0 - dist_to_boundary) if dist_to_boundary < 0.1 else 1.0
+                candidates.append((float(x), float(y), weight))
+
+        # Add some random points around existing circles
+        for i, (cx, cy, cr) in enumerate(circles):
+            for _ in range(5):
+                angle = random.uniform(0, 2*np.pi)
+                distance = random.uniform(0.05, 0.2)
+                x = cx + distance * np.cos(angle)
+                y = cy + distance * np.sin(angle)
+                if 0 <= x <= 1 and 0 <= y <= 1:
+                    # Weight these points based on proximity to boundaries
+                    dist_to_boundary = min(x, 1-x, y, 1-y)
+                    weight = 1.0 + 2.0 * (1.0 - dist_to_boundary) if dist_to_boundary < 0.1 else 1.0
+                    candidates.append((float(x), float(y), weight))
+
+        # Add corner/edge points for better boundary coverage
+        edge_points = [
+            (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),
+            (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),
+            (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75)
+        ]
+        for x, y in edge_points:
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                # Weight these points highly since they're near boundaries
+                dist_to_boundary = min(x, 1-x, y, 1-y)
+                weight = 1.0 + 4.0 * (1.0 - dist_to_boundary) if dist_to_boundary < 0.1 else 1.0
+                candidates.append((x, y, weight))
+
+        # If we don't have enough candidates, fill with random ones
+        if len(candidates) < num_candidates:
+            additional = num_candidates - len(candidates)
+            for _ in range(additional):
+                x = random.uniform(0.01, 0.99)
+                y = random.uniform(0.01, 0.99)
+                dist_to_boundary = min(x, 1-x, y, 1-y)
+                weight = 1.0 + 2.0 * (1.0 - dist_to_boundary) if dist_to_boundary < 0.1 else 1.0
+                candidates.append((x, y, weight))
+
+        # Sort by weight (descending) and take top candidates
+        candidates.sort(key=lambda p: p[2], reverse=True)
+        # Return just the coordinates (discard weights) and limit to requested number
+        return [(p[0], p[1]) for p in candidates[:num_candidates]]
+
+    except:
+        # Fallback to random sampling if Voronoi fails
+        return [(random.uniform(0.01, 0.99), random.uniform(0.01, 0.99)) for _ in range(num_candidates)]
+>>>>>>> REPLACE
+</DIFF>

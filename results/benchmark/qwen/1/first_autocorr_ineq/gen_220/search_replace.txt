@@ -1,0 +1,269 @@
+<NAME>
+add_adaptive_tournament_selection
+</NAME>
+
+<DESCRIPTION>
+I propose adding an adaptive tournament selection mechanism that dynamically adjusts the tournament size based on generation progress and population diversity. This will help maintain a better balance between exploration and exploitation throughout the evolution process. The adaptive selection will use higher tournament sizes in early generations or when diversity is high to encourage exploration, and smaller sizes in later generations or when diversity is low to focus on exploitation.
+
+This improvement addresses the observation from prior programs that tournament selection significantly impacts convergence speed and final solution quality, particularly in evolutionary algorithms targeting autocorrelation optimization problems.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _evaluator.clear_cache()
+
+    # Initialize population with more diverse strategies
+    population_size = 30
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 30
+    diversity_threshold = 0.1  # Minimum diversity to maintain exploration
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual
+        fitness_scores = []
+        for seq in population:
+            _, inv_c1 = compute_autocorrelation_constant(seq)
+            fitness_scores.append(inv_c1)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Calculate population diversity
+        if len(fitness_scores) > 1:
+            diversity = np.std(fitness_scores) / (np.mean(fitness_scores) + 1e-10)
+        else:
+            diversity = 1.0
+
+        # Apply local search to the best sequence
+        if best_sequence is not None:
+            local_search_result = get_good_direction_to_move_into(best_sequence)
+            if local_search_result is not None:
+                # Evaluate the local search result
+                _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+                if local_inv_c1 > best_inv_c1:
+                    best_inv_c1 = local_inv_c1
+                    best_sequence = local_search_result
+                    stagnation_count = 0
+
+        # Diversity maintenance: if diversity is too low, inject new variation
+        if diversity < diversity_threshold and generation > 5:
+            # Introduce some random sequences to increase diversity
+            num_new = population_size // 6
+            for _ in range(num_new):
+                new_seq = generate_random_valid_sequence((100, 1000), 'step')
+                population[random.randint(0, len(population)-1)] = new_seq
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate
+            child = mutate_sequence(child, generation, population_size, mutation_strength=0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final cleanup and validation
+    if best_sequence is not None:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        if sum_seq > 0.01:
+            best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_random_valid_sequence()
+
+def search_for_best_sequence() -> List[float]:
+    """Main function to search for the best coefficient sequence."""
+    try:
+        # Use evolutionary optimization approach
+        best_sequence = optimize_step_function_evolutionary()
+        return best_sequence
+    except Exception as e:
+        print(f"Optimization failed with error: {e}")
+        # Fallback to simple random approach
+        return generate_random_valid_sequence()
+=======
+def adaptive_tournament_selection(population: List[List[float]],
+                                  fitness_scores: List[float],
+                                  population_size: int,
+                                  generation: int,
+                                  diversity: float) -> List[List[float]]:
+    """
+    Perform adaptive tournament selection with dynamic tournament size.
+    Tournament size adapts based on generation and population diversity.
+    """
+    selected_parents = []
+
+    # Determine tournament size based on generation and diversity
+    if generation <= 10 or diversity > 0.1:
+        # Early generations or high diversity: larger tournament for stronger selection pressure
+        tournament_size = min(9, max(5, population_size // 3))
+    elif generation >= 50 or diversity < 0.05:
+        # Later generations or low diversity: smaller tournament to preserve diversity
+        tournament_size = min(4, max(2, population_size // 6))
+    else:
+        # Middle generations: moderate tournament size
+        tournament_size = 5
+
+    # Elitism: keep the top performer
+    elite_idx = np.argmax(fitness_scores)
+    selected_parents.append(population[elite_idx].copy())
+
+    # Tournament selection for rest
+    for _ in range(population_size - 1):  # -1 because we already added elite
+        tournament_indices = random.sample(range(population_size), tournament_size)
+        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+        selected_parents.append(population[winner_idx].copy())
+
+    return selected_parents
+
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _evaluator.clear_cache()
+
+    # Initialize population with more diverse strategies
+    population_size = 30
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 30
+    diversity_threshold = 0.1  # Minimum diversity to maintain exploration
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual
+        fitness_scores = []
+        for seq in population:
+            _, inv_c1 = compute_autocorrelation_constant(seq)
+            fitness_scores.append(inv_c1)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Calculate population diversity
+        if len(fitness_scores) > 1:
+            diversity = np.std(fitness_scores) / (np.mean(fitness_scores) + 1e-10)
+        else:
+            diversity = 1.0
+
+        # Apply local search to the best sequence
+        if best_sequence is not None:
+            local_search_result = get_good_direction_to_move_into(best_sequence)
+            if local_search_result is not None:
+                # Evaluate the local search result
+                _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+                if local_inv_c1 > best_inv_c1:
+                    best_inv_c1 = local_inv_c1
+                    best_sequence = local_search_result
+                    stagnation_count = 0
+
+        # Diversity maintenance: if diversity is too low, inject new variation
+        if diversity < diversity_threshold and generation > 5:
+            # Introduce some random sequences to increase diversity
+            num_new = population_size // 6
+            for _ in range(num_new):
+                new_seq = generate_random_valid_sequence((100, 1000), 'step')
+                population[random.randint(0, len(population)-1)] = new_seq
+
+        # Perform adaptive tournament selection
+        selected_parents = adaptive_tournament_selection(population, fitness_scores,
+                                                        population_size, generation, diversity)
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate
+            child = mutate_sequence(child, generation, population_size, mutation_strength=0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+    # Final cleanup and validation
+    if best_sequence is not None:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        if sum_seq > 0.01:
+            best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_random_valid_sequence()
+
+def search_for_best_sequence() -> List[float]:
+    """Main function to search for the best coefficient sequence."""
+    try:
+        # Use evolutionary optimization approach
+        best_sequence = optimize_step_function_evolutionary()
+        return best_sequence
+    except Exception as e:
+        print(f"Optimization failed with error: {e}")
+        # Fallback to simple random approach
+        return generate_random_valid_sequence()
+>>>>>>> REPLACE
+</DIFF>

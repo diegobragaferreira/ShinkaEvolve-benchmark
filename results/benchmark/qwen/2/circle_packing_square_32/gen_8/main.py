@@ -1,0 +1,143 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Problem parameters
+    n_circles = 32
+    bounds = [(0, 1), (0, 1), (0, 0.5)]  # x, y, r bounds
+    pop_size = 100
+    n_generations = 100
+
+    # Define evaluation function
+    def evaluate(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Check constraints and calculate fitness
+        sum_radii = np.sum(circles[:, 2])
+        penalty = 0
+
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x < r or x > 1-r or y < r or y > 1-r:
+                penalty += 1000  # Heavy penalty for boundary violations
+
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if distance < r1 + r2:
+                    penalty += 1000  # Heavy penalty for overlaps
+
+        # Fitness is sum of radii minus penalties
+        fitness = sum_radii - penalty
+        return (fitness,)
+
+    # Create toolbox
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("attr_x", random.uniform, 0, 1)
+    toolbox.register("attr_y", random.uniform, 0, 1)
+    toolbox.register("attr_r", random.uniform, 0, 0.5)
+    toolbox.register("individual", tools.initRepeat, creator.Individual,
+                     lambda: [toolbox.attr_x(), toolbox.attr_y(), toolbox.attr_r()], n_circles)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", tools.cxUniform, indpb=0.1)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.01, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population
+    pop = toolbox.population(n=pop_size)
+
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    try:
+        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2,
+                                           ngen=n_generations, stats=stats,
+                                           halloffame=hof, verbose=False)
+    except Exception as e:
+        print(f"Evolution failed: {e}")
+        # Fallback to simple heuristic approach
+        return _heuristic_circle_packing()
+
+    # Return the best individual
+    best_individual = hof[0]
+    circles = np.array(best_individual).reshape(-1, 3)
+
+    # Ensure final validation
+    if not _validate_solution(circles):
+        return _heuristic_circle_packing()
+
+    return circles
+
+
+def _validate_solution(circles):
+    """Validate that solution satisfies all constraints."""
+    # Check boundary constraints
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        if x < r or x > 1-r or y < r or y > 1-r:
+            return False
+
+    # Check overlap constraints
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+            if distance < r1 + r2:
+                return False
+
+    return True
+
+
+def _heuristic_circle_packing():
+    """Fallback heuristic approach for circle packing."""
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Simple heuristic: arrange circles in a grid-like pattern with decreasing radii
+    # This is just a basic fallback that should be improved
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n / rows))
+
+    # Distribute circles roughly in a grid
+    for i in range(n):
+        row = i // cols
+        col = i % cols
+        x = (col + 0.5) / cols
+        y = (row + 0.5) / rows
+        # Start with small radii that decrease
+        r = min(0.1, 0.5 / (i + 1))
+        circles[i] = [x, y, r]
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,265 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+from numba import jit, prange
+import warnings
+
+# Global constants
+MAX_STEPS = 20000  # Reduced from 50000 to balance memory and performance
+MIN_STEPS = 500    # Increased from 100 to ensure sufficient resolution
+MAX_EVAL_TIME = 85  # Seconds, slightly under time limit
+SEED = 42
+
+# Set seed for reproducibility
+np.random.seed(SEED)
+
+@jit(nopython=True, parallel=True)
+def compute_convolution_norms_fast(f_values, n_points=1000):
+    """
+    Fast computation of convolution norms using vectorized operations
+    """
+    f = np.array(f_values, dtype=np.float64)
+    n_steps = len(f)
+    
+    # Create step function on [-1/4, 1/4] 
+    step_width = 0.5 / n_steps
+    step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps)
+    
+    # Create fine grid for convolution
+    x = np.linspace(-0.25, 0.25, n_points, dtype=np.float64)
+    dx = x[1] - x[0]
+    
+    # Build piecewise constant function efficiently with numba
+    f_func = np.zeros(n_points, dtype=np.float64)
+    for i in prange(n_steps):
+        pos = step_positions[i]
+        left = pos - step_width/2
+        right = pos + step_width/2
+        # Vectorized assignment - much faster than explicit loops
+        mask = (x >= left) & (x <= right)
+        f_func[mask] = f[i]
+    
+    # Efficient convolution using direct computation (avoid FFT for speed)
+    # Manual computation of discrete convolution
+    g = np.zeros(n_points, dtype=np.float64)
+    for i in prange(n_points):
+        total = 0.0
+        for j in range(n_points):
+            if i - j >= 0 and i - j < n_points:
+                total += f_func[j] * f_func[i-j]
+        g[i] = total
+    
+    # Normalize for discretization
+    g = g * dx
+    
+    # Compute norms (vectorized)
+    g_squared = g**2
+    g_abs = np.abs(g)
+    
+    # L2^2 norm using simpson's rule approximation (more accurate than trapezoidal)
+    norm_2_squared = 0.0
+    for i in range(2, len(g)-2, 2):
+        norm_2_squared += (dx/3) * (g_squared[i-2] + 4*g_squared[i] + g_squared[i+2])
+    
+    # L1 norm (trapezoidal rule)
+    norm_1 = 0.0
+    for i in range(len(g)-1):
+        norm_1 += (dx/2) * (g_abs[i] + g_abs[i+1])
+    
+    # L-infinity norm
+    norm_inf = np.max(g_abs)
+    
+    return norm_2_squared, norm_1, norm_inf
+
+def compute_c2_fast(f_values):
+    """Fast C2 computation wrapper"""
+    try:
+        norm_2_squared, norm_1, norm_inf = compute_convolution_norms_fast(f_values)
+        
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            return 0.0
+            
+        c2 = norm_2_squared / (norm_1 * norm_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def peak_shaped_initialization(n_steps):
+    """
+    Generate initial step function with peak-shaped characteristics
+    that are known to produce good C2 values
+    """
+    # Create a 'bump' pattern with multiple peaks
+    heights = []
+    
+    # Base structure: a few dominant peaks with decreasing amplitude
+    n_peaks = min(5, max(2, n_steps // 100))
+    peak_positions = np.linspace(0.1, 0.9, n_peaks)
+    
+    # Generate heights with a decreasing pattern
+    peak_heights = np.exp(-np.arange(n_peaks) * 0.5) * 2.0
+    peak_widths = np.linspace(0.1, 0.02, n_peaks)
+    
+    for i in range(n_steps):
+        position = i / (n_steps - 1)
+        height = 0.0
+        
+        # Place peaks at strategic locations
+        for j in range(n_peaks):
+            dist = abs(position - peak_positions[j])
+            # Gaussian-like peak shape
+            height += peak_heights[j] * np.exp(-dist**2 / (2 * peak_widths[j]**2))
+        
+        # Add some randomness to make unique
+        height += np.random.exponential(0.05)
+        # Ensure non-negative
+        heights.append(max(0.0, height))
+    
+    return heights
+
+def adaptive_mesh_refinement(initial_func, max_iterations=50):
+    """
+    Adaptive refinement approach that starts with fewer steps 
+    and increases resolution when improvements are seen
+    """
+    current_func = initial_func.copy()
+    current_c2 = compute_c2_fast(current_func)
+    
+    # Track convergence behavior
+    history = [current_c2]
+    patience = 0
+    max_patience = 10
+    
+    # Start with coarser resolution
+    n_steps = len(current_func)
+    for iteration in range(max_iterations):
+        # Occasionally increase resolution if we're making progress
+        if iteration > 0 and iteration % 20 == 0:
+            if len(history) > 2 and (history[-1] - history[-2]) > 1e-6:
+                n_steps = min(MAX_STEPS, int(n_steps * 1.2))
+                
+        # Local optimization using Nelder-Mead
+        # Convert to flat array for scipy optimizer
+        x_start = np.array(current_func)
+        
+        # Minimize negative C2 (maximize C2)
+        result = minimize(
+            lambda x: -compute_c2_fast(x.tolist()),
+            x_start,
+            method='Nelder-Mead',
+            options={'maxiter': 50, 'xatol': 1e-6, 'fatol': 1e-6},
+            bounds=[(0, 100) for _ in range(len(x_start))]
+        )
+        
+        if result.success:
+            new_func = result.x.tolist()
+            # Clip negative values
+            new_func = [max(0.0, x) for x in new_func]
+            
+            new_c2 = compute_c2_fast(new_func)
+            
+            # Check if improvement
+            if new_c2 > current_c2:
+                current_func = new_func
+                current_c2 = new_c2
+                history.append(current_c2)
+                patience = 0
+                
+                # If we just added steps, keep them
+                if len(current_func) != n_steps:
+                    n_steps = len(current_func)
+            else:
+                patience += 1
+                
+                # If we're stuck, try coordinate-wise refinement
+                if patience > max_patience:
+                    # Coordinate-wise local search
+                    improved = True
+                    while improved and patience > max_patience:
+                        improved = False
+                        for i in range(len(current_func)):
+                            old_val = current_func[i]
+                            # Try small perturbations
+                            perturbations = [old_val * 0.9, old_val * 1.1, old_val * 0.95, old_val * 1.05]
+                            
+                            for new_val in perturbations:
+                                test_func = current_func.copy()
+                                test_func[i] = max(0.0, new_val)
+                                
+                                test_c2 = compute_c2_fast(test_func)
+                                if test_c2 > current_c2:
+                                    current_func = test_func
+                                    current_c2 = test_c2
+                                    improved = True
+                                    patience = 0
+                                    break
+                            
+                            if improved:
+                                break
+        else:
+            # If optimization fails, try coordinate-wise
+            improved = True
+            while improved:
+                improved = False
+                for i in range(len(current_func)):
+                    old_val = current_func[i]
+                    # Try small perturbations
+                    perturbations = [old_val * 0.9, old_val * 1.1]
+                    
+                    for new_val in perturbations:
+                        test_func = current_func.copy()
+                        test_func[i] = max(0.0, new_val)
+                        
+                        test_c2 = compute_c2_fast(test_func)
+                        if test_c2 > current_c2:
+                            current_func = test_func
+                            current_c2 = test_c2
+                            improved = True
+                            break
+                    
+                    if improved:
+                        break
+                        
+        # Check for early termination based on convergence rate
+        if len(history) >= 5:
+            recent_change = history[-1] - history[-5]
+            if recent_change < 1e-8:
+                break
+                
+    return current_func
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Create initial function with peak-shaping pattern
+    n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+    initial_func = peak_shaped_initialization(n_steps)
+    
+    # Optimize using adaptive refinement approach
+    best_func = adaptive_mesh_refinement(initial_func)
+    
+    # Final verification with local search
+    final_c2 = compute_c2_fast(best_func)
+    
+    # Time tracking
+    eval_time = time.time() - start_time
+    
+    print(f"Evaluated in {eval_time:.2f} seconds")
+    print(f"Best C2 found: {final_c2:.6f}")
+    
+    # Return the function with at least MIN_STEPS to satisfy constraints
+    if len(best_func) < MIN_STEPS:
+        best_func = best_func + [0.0] * (MIN_STEPS - len(best_func))
+    
+    return best_func
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function length: {len(f_values)}")
+    print(f"First 10 values: {f_values[:10]}")

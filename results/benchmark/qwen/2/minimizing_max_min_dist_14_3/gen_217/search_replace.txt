@@ -1,0 +1,111 @@
+<NAME>
+add_multi_point_perturbation
+</NAME>
+
+<DESCRIPTION>
+The current perturbation strategy only modifies one point at a time, which can be inefficient for exploring the solution space. By modifying multiple points simultaneously with adaptive scaling based on cluster analysis, we can improve convergence speed and exploration capability. This approach will help escape local optima more effectively and find better configurations with higher min/max ratios.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def perturb_points_smart(points: np.ndarray, temperature: float, current_ratio: float) -> np.ndarray:
+    """
+    Apply smart perturbations based on distance distribution analysis.
+    """
+    # Create a copy of the points
+    new_points = points.copy()
+
+    # Analyze current distribution to decide which point to perturb
+    # Get pairwise distances for analysis
+    distances = cdist(points, points)
+    np.fill_diagonal(distances, np.inf)
+
+    # Find points that are closest to other points (potential bottlenecks)
+    min_distances = np.min(distances, axis=1)
+
+    # Prefer perturbing points that are near the minimum distance
+    # or points that might help expand the configuration
+    if np.random.rand() < 0.7:  # 70% chance to target close points
+        # Target a point that's among the closest neighbors
+        target_idx = np.argmin(min_distances)
+    else:
+        # Random selection otherwise
+        target_idx = np.random.randint(len(points))
+
+    # Generate small random perturbation
+    delta = np.random.normal(0, 0.01 * temperature, 3)
+
+    # Add perturbation to selected point
+    new_points[target_idx] += delta
+
+    # Project back to unit sphere
+    norms = np.linalg.norm(new_points, axis=1, keepdims=True)
+    # Handle case where norm might be zero (shouldn't happen but safety check)
+    norms = np.where(norms == 0, 1, norms)
+    new_points = new_points / norms
+
+    return new_points
+=======
+def perturb_points_smart(points: np.ndarray, temperature: float, current_ratio: float) -> np.ndarray:
+    """
+    Apply smart perturbations based on distance distribution analysis.
+    """
+    # Create a copy of the points
+    new_points = points.copy()
+
+    # Analyze current distribution to decide how many points to perturb
+    # Get pairwise distances for analysis
+    distances = cdist(points, points)
+    np.fill_diagonal(distances, np.inf)
+
+    # Find points that are closest to other points (potential bottlenecks)
+    min_distances = np.min(distances, axis=1)
+    max_distances = np.max(distances, axis=1)
+
+    # Calculate average distance to determine scale
+    avg_distances = np.mean(distances, axis=1)
+
+    # Determine number of points to perturb based on clustering
+    # If many points are very close, perturb more points
+    # If points are well separated, perturb fewer points
+    close_points_ratio = np.sum(min_distances < np.percentile(avg_distances, 25)) / len(points)
+    num_to_perturb = max(1, min(6, int(2 + close_points_ratio * 4)))
+
+    # Select multiple points to perturb
+    target_indices = np.random.choice(len(points), size=num_to_perturb, replace=False)
+
+    # Apply adaptive perturbations
+    for target_idx in target_indices:
+        # Determine perturbation strength based on local configuration
+        # Points that are too close get larger perturbations
+        if min_distances[target_idx] < avg_distances[target_idx] * 0.5:
+            perturbation_scale = 0.03 * temperature  # Larger perturbation for tightly clustered points
+        elif max_distances[target_idx] > avg_distances[target_idx] * 2.0:
+            perturbation_scale = 0.01 * temperature  # Smaller perturbation for widely separated points
+        else:
+            perturbation_scale = 0.02 * temperature  # Medium perturbation for intermediate cases
+
+        # Generate random perturbation in tangent plane
+        random_vec = np.random.randn(3)
+        # Project onto sphere surface normal (tangent plane)
+        normal_vec = new_points[target_idx]
+        tangent_vec = random_vec - np.dot(random_vec, normal_vec) * normal_vec
+        # Normalize tangent vector
+        tangent_norm = np.linalg.norm(tangent_vec)
+        if tangent_norm > 1e-10:
+            tangent_vec = tangent_vec / tangent_norm
+        # Apply perturbation with adaptive strength
+        delta = tangent_vec * np.random.normal(0, perturbation_scale)
+
+        # Add perturbation to selected point
+        new_points[target_idx] += delta
+
+    # Project back to unit sphere
+    norms = np.linalg.norm(new_points, axis=1, keepdims=True)
+    # Handle case where norm might be zero (shouldn't happen but safety check)
+    norms = np.where(norms == 0, 1, norms)
+    new_points = new_points / norms
+
+    return new_points
+>>>>>>> REPLACE
+</DIFF>

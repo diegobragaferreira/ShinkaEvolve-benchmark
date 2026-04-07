@@ -1,0 +1,110 @@
+<NAME>
+numba_jit_convolution
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more aggressive JIT compilation approach for the convolution computation. The current implementation uses a nested loop structure that can benefit from further optimization with numba's @njit decorator, especially since the convolution computation is a major bottleneck in the C2 calculation. I'll apply the decorator to the core convolution computation to maximize performance gains.
+
+The key insight is that the autoconvolution computation dominates the runtime, so optimizing this critical section will give the biggest performance boost and potentially allow for larger problem sizes or more iterations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    # g[k] = integral f(x) * f(y) where x+y = k*dx - domain_length/2
+    # We'll compute this as a discrete approximation
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                # For two adjacent pieces with heights f[i] and f[j],
+                # the convolution contributes to g[k]
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+=======
+@njit
+def compute_autoconvolution(f_values):
+    """Compute autoconvolution g = f * f efficiently with numba JIT"""
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return np.array([])
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                g[k] += f_values[i] * f_values[j]
+
+    return g
+
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    g = compute_autoconvolution(f_values)
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+>>>>>>> REPLACE
+</DIFF>

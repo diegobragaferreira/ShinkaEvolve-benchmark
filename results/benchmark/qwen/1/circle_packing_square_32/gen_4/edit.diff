@@ -1,0 +1,180 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,171 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial import cKDTree
++from deap import base, creator, tools, algorithms
++import random
++import time
+ 
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++# Fixed seed for reproducibility
++np.random.seed(42)
++random.seed(42)
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
+-    circles = np.zeros((n, 3))
+-
++    N_CIRCLES = 32
++    POP_SIZE = 100
++    N_GENERATIONS = 200
++    MUT_PB = 0.1
++    CROSSOVER_PB = 0.8
++    
++    # Define individual and population types
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    def create_individual():
++        """Create a random valid individual representing circle positions and radii"""
++        individual = []
++        # Generate initial grid-based configuration
++        grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
++        spacing = 1.0 / (grid_size + 1)
++        
++        for i in range(N_CIRCLES):
++            # Place circles roughly in a grid pattern with some randomness
++            row = i // grid_size
++            col = i % grid_size
++            
++            x = (col + 1) * spacing + np.random.uniform(-spacing/4, spacing/4)
++            y = (row + 1) * spacing + np.random.uniform(-spacing/4, spacing/4)
++            
++            # Initial radius - start small to allow growth
++            r = np.random.uniform(0.01, 0.1)
++            
++            # Ensure valid initial placement
++            x = np.clip(x, r, 1-r)
++            y = np.clip(y, r, 1-r)
++            
++            individual.extend([x, y, r])
++        
++        return creator.Individual(individual)
++    
++    def check_validity(individual):
++        """Check if individual represents a valid configuration"""
++        # Check bounds
++        for i in range(0, len(individual), 3):
++            x, y, r = individual[i:i+3]
++            if x < r or x > 1-r or y < r or y > 1-r:
++                return False
++        
++        # Check pairwise collisions using KDTree for efficiency
++        coords = np.array([(individual[i], individual[i+1]) for i in range(0, len(individual), 3)])
++        radii = np.array([individual[i+2] for i in range(0, len(individual), 3)])
++        
++        tree = cKDTree(coords)
++        pairs = tree.query_pairs(radii[:, None] + radii[None, :], output_type='ndarray')
++        
++        for i, j in pairs:
++            if i != j:
++                dist_sq = (coords[i][0] - coords[j][0])**2 + (coords[i][1] - coords[j][1])**2
++                min_dist_sq = (radii[i] + radii[j])**2
++                if dist_sq < min_dist_sq:
++                    return False
++                    
++        return True
++    
++    def evaluate(individual):
++        """Evaluate fitness of individual - maximize sum of radii"""
++        if not check_validity(individual):
++            return (0,)
++        
++        total_radius = sum(individual[i+2] for i in range(0, len(individual), 3))
++        return (total_radius,)
++    
++    def mutate(individual):
++        """Mutate individual"""
++        for i in range(0, len(individual), 3):
++            if random.random() < MUT_PB:
++                # Mutate x coordinate
++                individual[i] += np.random.normal(0, 0.01)
++                individual[i] = np.clip(individual[i], individual[i+2], 1-individual[i+2])
++            
++            if random.random() < MUT_PB:
++                # Mutate y coordinate
++                individual[i+1] += np.random.normal(0, 0.01)
++                individual[i+1] = np.clip(individual[i+1], individual[i+2], 1-individual[i+2])
++                
++            if random.random() < MUT_PB:
++                # Mutate radius
++                individual[i+2] += np.random.normal(0, 0.005)
++                individual[i+2] = max(0.001, individual[i+2])
++                
++        return individual,
++    
++    def crossover(ind1, ind2):
++        """Crossover two individuals"""
++        if random.random() < CROSSOVER_PB:
++            # Simple uniform crossover
++            for i in range(len(ind1)):
++                if random.random() < 0.5:
++                    ind1[i], ind2[i] = ind2[i], ind1[i]
++        return ind1, ind2
++    
++    # Register functions with toolbox
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate)
++    toolbox.register("mate", crossover)
++    toolbox.register("mutate", mutate)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Create initial population
++    pop = toolbox.population(n=POP_SIZE)
++    
++    # Statistics
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Run evolution
++    try:
++        hof = tools.ParetoFront()
++        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CROSSOVER_PB, mutpb=MUT_PB, 
++                                          ngen=N_GENERATIONS, stats=stats, halloffame=hof, verbose=False)
++        
++        # Get best solution
++        best_individual = hof[0] if hof else pop[0]
++        
++    except Exception as e:
++        # Fallback to simple greedy approach if evolution fails
++        print(f"Evolution failed with error: {e}")
++        best_individual = create_individual()
++        
++        # Simple iterative improvement
++        for _ in range(1000):
++            current_fitness = evaluate(best_individual)[0]
++            mutated_individual = list(best_individual)
++            mutate(mutated_individual)
++            
++            if check_validity(mutated_individual):
++                new_fitness = evaluate(mutated_individual)[0]
++                if new_fitness > current_fitness:
++                    best_individual = mutated_individual
++    
++    # Convert best individual to numpy array format
++    circles = np.zeros((N_CIRCLES, 3))
++    for i in range(N_CIRCLES):
++        circles[i] = [
++            best_individual[i*3],
++            best_individual[i*3+1],
++            best_individual[i*3+2]
++        ]
++    
+     return circles
+ 
+-
+ # EVOLVE-BLOCK-END

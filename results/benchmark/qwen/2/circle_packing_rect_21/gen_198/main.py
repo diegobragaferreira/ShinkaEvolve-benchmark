@@ -1,0 +1,259 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import differential_evolution
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    
+    Uses hexagonal lattice initialization with multi-scale optimization and constraint-aware evolution.
+    
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, using optimized 1.3 x 0.7
+    width, height = 1.3, 0.7
+    
+    # Number of circles
+    n = 21
+    
+    # Step 1: Hexagonal lattice initialization for optimal packing density
+    def generate_hexagonal_lattice():
+        # Calculate the optimal packing parameters
+        # For 21 circles, we want to fill the rectangle efficiently
+        # We'll use hexagonal close packing pattern
+        
+        # Determine grid dimensions for hexagonal packing
+        rows = int(math.ceil(math.sqrt(n)))
+        cols = int(math.ceil(n / rows))
+        
+        # Adjust for rectangle aspect ratio
+        aspect_ratio = width / height
+        if aspect_ratio > 1:
+            # Landscape format - favor more columns
+            cols = max(cols, int(math.ceil(math.sqrt(n) * math.sqrt(aspect_ratio))))
+            rows = int(math.ceil(n / cols))
+        else:
+            # Portrait format - favor more rows
+            rows = max(rows, int(math.ceil(math.sqrt(n) / math.sqrt(aspect_ratio))))
+            cols = int(math.ceil(n / rows))
+        
+        # Ensure we have enough grid points
+        while rows * cols < n:
+            if aspect_ratio > 1:
+                cols += 1
+            else:
+                rows += 1
+        
+        # Calculate hexagonal packing parameters
+        # For hexagonal close packing, centers are spaced by 2*r
+        # Effective spacing in hexagonal pattern
+        target_area = width * height
+        expected_radius = math.sqrt(target_area / (n * math.pi * 0.9069))  # 0.9069 = hex packing density
+        
+        # Hexagonal spacing - centers 2*r apart in both directions
+        spacing_x = 2 * expected_radius
+        spacing_y = 2 * expected_radius * math.sqrt(3) / 2  # Vertical spacing for hexagonal
+        
+        # Adjust spacing to fit within rectangle
+        grid_width = cols * spacing_x
+        grid_height = rows * spacing_y
+        
+        # Scale down if necessary
+        scale_x = width / grid_width if grid_width > width else 1.0
+        scale_y = height / grid_height if grid_height > height else 1.0
+        scale = min(scale_x, scale_y) * 0.95  # Leave some margin
+        
+        spacing_x *= scale
+        spacing_y *= scale
+        radius = spacing_x / 2.0
+        
+        # Create hexagonal grid
+        circles = []
+        placed_count = 0
+        
+        # Offset every other row for hexagonal packing
+        for i in range(rows):
+            for j in range(cols):
+                if placed_count >= n:
+                    break
+                    
+                # Calculate position with hexagonal offset
+                x_offset = (j * spacing_x) + (spacing_x / 2) * (i % 2)
+                y_pos = i * spacing_y
+                
+                # Apply margins to avoid boundary issues
+                x = spacing_x / 2 + x_offset
+                y = spacing_y / 2 + y_pos
+                
+                # Ensure it fits within bounds
+                if (x - radius >= 0 and x + radius <= width and 
+                    y - radius >= 0 and y + radius <= height):
+                    circles.append([x, y, radius])
+                    placed_count += 1
+            
+            if placed_count >= n:
+                break
+        
+        # Fill remaining slots if needed
+        while len(circles) < n:
+            # Random positions with some smart distribution
+            x = np.random.uniform(radius, width - radius)
+            y = np.random.uniform(radius, height - radius)
+            circles.append([x, y, radius])
+            
+        return np.array(circles)
+    
+    # Step 2: Constraint-aware fitness function
+    def calculate_fitness(circles):
+        total_radius = np.sum(circles[:, 2])
+        
+        # Count constraint violations
+        violations = 0
+        
+        # Boundary violations
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                violations += 100
+        
+        # Overlap violations using spatial indexing for efficiency
+        try:
+            tree = cKDTree(circles[:, :2])
+            pairs = tree.query_pairs(2.0 * np.max(circles[:, 2]), output_type='ndarray')
+            
+            for i, j in pairs:
+                if i < j:  # Avoid double counting
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if dist < (r1 + r2):
+                        violations += 1
+        except:
+            # Fallback to brute force if spatial indexing fails
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if dist < (r1 + r2):
+                        violations += 1
+        
+        # Apply penalty with dynamic weight
+        penalty_weight = 1000.0 + violations * 100.0
+        return total_radius - (penalty_weight * violations)
+    
+    # Step 3: Smart refinement with geometric constraints
+    def refine_circles(circles):
+        # Create a copy to work with
+        refined = circles.copy()
+        
+        # Use geometric approach to maximize radii
+        improved = True
+        max_iterations = 100
+        
+        for iteration in range(max_iterations):
+            if not improved:
+                break
+                
+            improved = False
+            
+            # Try to increase each circle's radius by checking constraints
+            for i in range(n):
+                # Find maximum possible radius for this circle
+                max_radius = float('inf')
+                
+                # Check boundary constraints
+                x, y, current_r = refined[i]
+                boundary_radius = min(x, width - x, y, height - y)
+                max_radius = min(max_radius, boundary_radius)
+                
+                # Check overlap constraints with all other circles
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = refined[j]
+                        # Distance to other circle center
+                        dist = math.sqrt((x - x2)**2 + (y - y2)**2)
+                        # Maximum radius to avoid overlap
+                        if dist > 0:  # Prevent division by zero
+                            max_allowed_radius = dist - r2
+                            max_radius = min(max_radius, max_allowed_radius)
+                
+                # Try to increase radius if beneficial
+                if max_radius > current_r and max_radius > 0:
+                    # Calculate increment based on current and max
+                    new_radius = min(current_r + (max_radius - current_r) * 0.3, max_radius)
+                    
+                    # Test if this new configuration is valid
+                    temp_circles = refined.copy()
+                    temp_circles[i, 2] = new_radius
+                    
+                    # Check all constraints
+                    valid = True
+                    for k in range(n):
+                        if k != i:
+                            x1, y1, r1 = temp_circles[i]
+                            x2, y2, r2 = temp_circles[k]
+                            dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            if dist < (r1 + r2):
+                                valid = False
+                                break
+                    
+                    # Check boundary
+                    if valid and (temp_circles[i, 0] - new_radius >= 0 and 
+                                 temp_circles[i, 0] + new_radius <= width and
+                                 temp_circles[i, 1] - new_radius >= 0 and 
+                                 temp_circles[i, 1] + new_radius <= height):
+                        refined[i, 2] = new_radius
+                        improved = True
+        
+        return refined
+    
+    # Step 4: Multi-scale optimization approach
+    # First, generate initial configuration
+    initial_circles = generate_hexagonal_lattice()
+    
+    # Second, fine-tune with constraint-aware refinement
+    refined_circles = refine_circles(initial_circles)
+    
+    # Third, use a simple hill-climbing with constraint awareness
+    best_circles = refined_circles.copy()
+    best_fitness = calculate_fitness(best_circles)
+    
+    # Try several local optimizations
+    for _ in range(50):
+        # Create a small perturbation
+        candidate = best_circles.copy()
+        
+        # Perturb one circle at a time
+        idx = np.random.randint(0, n)
+        x, y, r = candidate[idx]
+        
+        # Small random changes
+        candidate[idx, 0] = max(r, min(width - r, x + np.random.normal(0, 0.02)))
+        candidate[idx, 1] = max(r, min(height - r, y + np.random.normal(0, 0.02)))
+        
+        # Try to increase radius slightly
+        candidate[idx, 2] = max(0.001, min(0.3, r + np.random.normal(0, 0.01)))
+        
+        # Check and update if better
+        candidate_fitness = calculate_fitness(candidate)
+        if candidate_fitness > best_fitness:
+            best_circles = candidate
+            best_fitness = candidate_fitness
+    
+    # Final refinement pass
+    final_circles = refine_circles(best_circles)
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

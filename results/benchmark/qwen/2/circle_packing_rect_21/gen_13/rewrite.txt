@@ -1,0 +1,248 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from deap import base, creator, tools, algorithms
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+import time
+import math
+from collections import defaultdict
+
+# Set random seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Parameters
+    POP_SIZE = 100
+    NGEN = 50
+    MUTPB = 0.15  # Initial mutation probability
+    CXPB = 0.8    # Crossover probability
+    TOURNAMENT_SIZE = 3
+    CONVERGENCE_THRESHOLD = 0.001
+    
+    # Initialize toolbox
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    
+    # Define bounds for each variable: [x, y, radius] for each of 21 circles
+    # x: [0, rect_width], y: [0, rect_height], radius: [0, min(rect_width, rect_height)/2]
+    bounds = []
+    for i in range(21):
+        bounds.extend([
+            (0, rect_width),      # x coordinate
+            (0, rect_height),     # y coordinate  
+            (0.001, min(rect_width, rect_height)/2)  # radius
+        ])
+    
+    def create_individual():
+        """Create an individual with valid constraints"""
+        individual = []
+        for i in range(21):
+            x = random.uniform(0, rect_width)
+            y = random.uniform(0, rect_height)
+            r = random.uniform(0.001, min(rect_width, rect_height)/2)
+            individual.extend([x, y, r])
+        return creator.Individual(individual)
+    
+    def check_constraints(individual):
+        """Check if individual satisfies all constraints"""
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+        
+        # Check boundary constraints
+        for x, y, r in circles:
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+        
+        # Check overlap constraints using KDTree for efficiency
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Build KDTree for efficient neighbor search
+        tree = cKDTree(positions)
+        pairs = tree.query_pairs(radii.min() * 2)
+        
+        for i, j in pairs:
+            distance = np.linalg.norm(positions[i] - positions[j])
+            if distance < (radii[i] + radii[j]):
+                return False
+        
+        return True
+    
+    def evaluate(individual):
+        """Evaluate fitness - maximize sum of radii with penalty for constraint violations"""
+        circles = np.array(individual).reshape(-1, 3)
+        radius_sum = np.sum(circles[:, 2])
+        
+        # Check constraints and apply penalty
+        if not check_constraints(individual):
+            # Heavy penalty for constraint violations
+            return (radius_sum - 1000,)
+        
+        return (radius_sum,)
+    
+    def mutate(individual):
+        """Custom mutation operator"""
+        # Apply mutation with adaptive rate
+        for i in range(len(individual)):
+            if random.random() < MUTPB:
+                # Mutate position or radius based on index
+                if i % 3 == 0:  # x coordinate
+                    individual[i] = random.uniform(0, rect_width)
+                elif i % 3 == 1:  # y coordinate
+                    individual[i] = random.uniform(0, rect_height)
+                else:  # radius
+                    individual[i] = random.uniform(0.001, min(rect_width, rect_height)/2)
+        return individual,
+    
+    def crossover(individual1, individual2):
+        """Two-point crossover"""
+        size = len(individual1)
+        cxpoint1 = random.randint(1, size//2)
+        cxpoint2 = random.randint(cxpoint1, size-1)
+        
+        individual1[cxpoint1:cxpoint2], individual2[cxpoint1:cxpoint2] = \
+            individual2[cxpoint1:cxpoint2], individual1[cxpoint1:cxpoint2]
+            
+        return individual1, individual2
+    
+    # Register operators
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", crossover)
+    toolbox.register("mutate", mutate)
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+    
+    # Initialize population with diversified starting points
+    def initialize_population():
+        population = []
+        # Add some grid-based starters for good coverage
+        for _ in range(POP_SIZE // 5):
+            individual = create_individual()
+            # Apply small local refinement to avoid overlapping
+            circles = np.array(individual).reshape(-1, 3)
+            # Simple refinement step
+            for _ in range(5):
+                refined_circles = []
+                for i, (x, y, r) in enumerate(circles):
+                    if i < 21:  # Only process valid circles
+                        # Move circles slightly to avoid overlaps
+                        if x - r < 0:
+                            x = r
+                        elif x + r > rect_width:
+                            x = rect_width - r
+                        if y - r < 0:
+                            y = r
+                        elif y + r > rect_height:
+                            y = rect_height - r
+                        refined_circles.append([x, y, r])
+                circles = np.array(refined_circles)
+                
+            population.append(creator.Individual(circles.flatten()))
+        
+        # Fill remaining with random individuals
+        remaining = POP_SIZE - len(population)
+        for _ in range(remaining):
+            population.append(toolbox.individual())
+            
+        return population
+    
+    # Run evolution
+    population = initialize_population()
+    hof = tools.ParetoFront()  # Store best individuals
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Evolution loop with adaptive parameters
+    best_fitness_history = []
+    
+    for gen in range(NGEN):
+        # Adaptive mutation rate: decay over generations
+        adaptive_mutation_rate = MUTPB * (1 - gen/NGEN) + 0.05 * (gen/NGEN)
+        toolbox.mutate = lambda ind: mutate(ind)
+        
+        # Evaluate population
+        invalid_ind = [ind for ind in population if not ind.fitness.valid]
+        fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Update hall of fame
+        hof.update(population)
+        
+        # Track best fitness
+        best_fitness = max([ind.fitness.values[0] for ind in population])
+        best_fitness_history.append(best_fitness)
+        
+        # Check for convergence
+        if len(best_fitness_history) >= 5:
+            recent_change = abs(best_fitness_history[-1] - best_fitness_history[-5])
+            if recent_change < CONVERGENCE_THRESHOLD:
+                break
+        
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < adaptive_mutation_rate:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Replace population
+        population[:] = offspring
+    
+    # Return best solution
+    if hof:
+        best_individual = hof[0]
+        circles = np.array(best_individual).reshape(-1, 3)
+        # Ensure final validation
+        if check_constraints(best_individual):
+            return circles
+    
+    # Fallback to simple greedy initialization if no good solution found
+    circles = np.zeros((21, 3))
+    # Place circles in a grid-like pattern with decreasing radii
+    rows, cols = 5, 5
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    for i in range(21):
+        row = i // cols
+        col = i % cols
+        x = (col + 1) * spacing_x
+        y = (row + 1) * spacing_y
+        # Decreasing radii based on position
+        r = min(0.1, max(0.01, 0.15 - i * 0.005))
+        circles[i] = [x, y, r]
+        
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

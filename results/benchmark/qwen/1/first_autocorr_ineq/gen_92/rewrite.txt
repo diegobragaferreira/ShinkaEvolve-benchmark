@@ -1,0 +1,155 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+import jax
+import jax.numpy as jnp
+from jax import grad, jit, vmap
+import random
+import time
+import copy
+from functools import partial
+
+# Set seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_autocorrelation_constant_jax(sequence):
+    """Compute C₁ using JAX for efficient gradient computation."""
+    seq = jnp.array(sequence, dtype=jnp.float32)
+    n = seq.shape[0]
+    
+    # Compute autoconvolution using FFT for efficiency
+    padded_seq = jnp.pad(seq, (0, n-1), constant_values=0)
+    conv_result = ifft(fft(padded_seq) * jnp.conj(fft(padded_seq)))
+    max_conv = jnp.max(jnp.real(conv_result[:2*n-1]))
+    
+    sum_seq = jnp.sum(seq)
+    
+    # Avoid division by zero
+    sum_seq = jnp.where(sum_seq < 1e-10, 1e-10, sum_seq)
+    
+    # Compute C₁ = 2n * max(b) / (sum(a))^2
+    c1 = 2 * n * max_conv / (sum_seq ** 2)
+    
+    return c1
+
+# Vectorized version for batch processing
+compute_autocorrelation_vectorized = vmap(compute_autocorrelation_constant_jax)
+
+@partial(jit, static_argnums=(1,))
+def objective_function(sequence, target=1.5031):
+    """Objective function to minimize (negative 1/C₁) to maximize 1/C₁."""
+    c1 = compute_autocorrelation_constant_jax(sequence)
+    # We want to maximize 1/C₁, so minimize -1/C₁
+    inv_c1 = 1.0 / c1
+    return -inv_c1
+
+# Gradient of the objective function
+grad_objective = jit(grad(objective_function))
+
+def adam_update(params, grads, m, v, t, lr=0.01, beta1=0.9, beta2=0.999, eps=1e-8):
+    """Adam optimizer update step."""
+    m = beta1 * m + (1 - beta1) * grads
+    v = beta2 * v + (1 - beta2) * grads ** 2
+    m_hat = m / (1 - beta1 ** t)
+    v_hat = v / (1 - beta2 ** t)
+    params = params - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+    return params, m, v
+
+def project_to_valid_space(sequence):
+    """Project sequence to ensure non-negativity and reasonable magnitudes."""
+    # Ensure non-negativity
+    sequence = jnp.maximum(sequence, 0.0)
+    # Clip to reasonable bounds
+    sequence = jnp.clip(sequence, 0, 1000.0)
+    # Ensure sum is not too small
+    sum_seq = jnp.sum(sequence)
+    if sum_seq < 1e-10:
+        # Perturb a random element
+        idx = jnp.random.randint(0, sequence.shape[0])
+        sequence = sequence.at[idx].set(jnp.maximum(sequence[idx], 0.01))
+    return sequence
+
+def optimize_sequence(initial_sequence, max_steps=1000, lr=0.01):
+    """Optimize a sequence using Adam optimizer with gradient ascent."""
+    # Convert to JAX array
+    sequence = jnp.array(initial_sequence, dtype=jnp.float32)
+    
+    # Initialize Adam moments
+    m = jnp.zeros_like(sequence)
+    v = jnp.zeros_like(sequence)
+    t = 1
+    
+    best_sequence = sequence
+    best_obj = objective_function(sequence)
+    
+    # Adaptive learning rate schedule
+    lr_schedule = lambda t: lr * (0.95 ** (t // 100))
+    
+    for step in range(max_steps):
+        # Compute gradients
+        grads = grad_objective(sequence)
+        
+        # Update learning rate
+        current_lr = lr_schedule(step)
+        
+        # Perform Adam update
+        sequence, m, v = adam_update(sequence, grads, m, v, t, lr=current_lr)
+        
+        # Project to valid space
+        sequence = project_to_valid_space(sequence)
+        
+        # Update best solution
+        obj_val = objective_function(sequence)
+        best_sequence = jnp.where(obj_val > best_obj, sequence, best_sequence)
+        best_obj = jnp.maximum(obj_val, best_obj)
+        
+        # Early stopping if improvement is small
+        if step > 10 and jnp.abs(obj_val - objective_function(sequence)) < 1e-6:
+            break
+            
+        t += 1
+        
+    return np.array(best_sequence)
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    # Use multiple random starts to avoid local minima
+    best_sequence = None
+    best_score = float('-inf')
+    
+    start_time = time.time()
+    max_time = 170  # Leave 10 seconds for cleanup
+    
+    for attempt in range(5):  # Multiple random starts
+        if time.time() - start_time > max_time:
+            break
+            
+        # Generate random sequence
+        n = random.randint(100, 1000)
+        sequence = np.random.uniform(0.01, 1000.0, n).tolist()
+        
+        # Optimize the sequence
+        optimized_sequence = optimize_sequence(sequence, max_steps=500)
+        
+        # Evaluate performance
+        c1 = compute_autocorrelation_constant_jax(optimized_sequence)
+        inv_c1 = 1.0 / c1
+        
+        if inv_c1 > best_score:
+            best_score = inv_c1
+            best_sequence = optimized_sequence.tolist()
+            
+    # Fallback in case nothing works
+    if best_sequence is None:
+        n = random.randint(100, 1000)
+        best_sequence = np.random.uniform(0.01, 1000.0, n).tolist()
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

@@ -1,0 +1,158 @@
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+The current local improvement algorithm is very basic and only tries to slightly increase radii. I'll implement a more sophisticated local search that uses geometric optimization techniques to better handle circle packing constraints. Specifically, I'll add a gradient-based local optimization step that can more effectively adjust circle positions and radii to maximize the objective while maintaining constraints.
+
+This approach will:
+1. Use a more systematic local search that can both increase radii and adjust positions
+2. Implement a constraint-aware optimization that respects bounds and overlap constraints
+3. Provide better search capabilities than the current simple iterative approach
+
+The key insight is that the current local improvement is too simplistic - it just tries to nudge radii upward without proper constraint handling. The enhanced version will use a more principled approach to local optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_improvement(circles: np.ndarray) -> np.ndarray:
+    """Apply simple local improvement to try to satisfy constraints"""
+    n = len(circles)
+    circles_copy = circles.copy()
+
+    # Try to increase radii while maintaining constraints
+    for _ in range(50):  # Limited iterations
+        for i in range(n):
+            # Store current circle
+            x, y, r = circles_copy[i]
+
+            # Try to increase radius slightly
+            max_r = min(x, 1-x, y, 1-y)
+            if max_r > r:
+                new_r = min(r + 0.001, max_r)
+
+                # Check if this works with other circles
+                valid = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles_copy[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles_copy[i, 2] = new_r
+
+    return circles_copy
+=======
+def local_improvement(circles: np.ndarray) -> np.ndarray:
+    """Apply enhanced local improvement to maximize sum of radii"""
+    n = len(circles)
+    circles_copy = circles.copy()
+
+    # More sophisticated local search using iterative improvement
+    for iteration in range(100):
+        improved = False
+
+        # Try to improve each circle
+        for i in range(n):
+            x, y, r = circles_copy[i]
+
+            # Calculate maximum possible radius at current position
+            max_r = min(x, 1-x, y, 1-y)
+
+            # If we can increase radius, try to do so
+            if max_r > r + 1e-6:
+                # Try to increase radius as much as possible while avoiding overlaps
+                new_r = max_r
+
+                # Check overlap constraints with all other circles
+                valid_radius = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles_copy[j]
+                        distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if distance < new_r + r2:
+                            valid_radius = False
+                            break
+
+                # If we can increase radius, do so
+                if valid_radius:
+                    circles_copy[i, 2] = new_r
+                    improved = True
+                else:
+                    # Try a smaller increase
+                    step_size = 0.001
+                    test_r = min(r + step_size, max_r)
+                    while test_r > r + 1e-6 and not valid_radius:
+                        valid_radius = True
+                        for j in range(n):
+                            if i != j:
+                                x2, y2, r2 = circles_copy[j]
+                                distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                                if distance < test_r + r2:
+                                    valid_radius = False
+                                    break
+
+                        if valid_radius:
+                            circles_copy[i, 2] = test_r
+                            improved = True
+                            break
+                        else:
+                            test_r -= step_size
+
+            # Try to slightly adjust position for better packing
+            if iteration % 10 == 0:  # Only adjust position occasionally
+                best_x, best_y = x, y
+                best_r = r
+                best_score = calculate_sum_radii(circles_copy)
+
+                # Try small shifts in 4 directions
+                for dx in [-0.005, 0, 0.005]:
+                    for dy in [-0.005, 0, 0.005]:
+                        if abs(dx) + abs(dy) == 0:
+                            continue
+
+                        test_x = x + dx
+                        test_y = y + dy
+
+                        # Keep within bounds
+                        if test_x < r or test_x > 1-r or test_y < r or test_y > 1-r:
+                            continue
+
+                        # Check validity of new configuration
+                        valid = True
+                        temp_circles = circles_copy.copy()
+                        temp_circles[i, 0] = test_x
+                        temp_circles[i, 1] = test_y
+
+                        for j in range(n):
+                            if i != j:
+                                x2, y2, r2 = temp_circles[j]
+                                distance = np.sqrt((test_x - x2)**2 + (test_y - y2)**2)
+                                if distance < r + r2:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            # Calculate how much we would gain by changing to this position
+                            temp_circles[i, 2] = r  # reset radius to original
+                            test_score = calculate_sum_radii(temp_circles)
+                            if test_score > best_score:
+                                best_score = test_score
+                                best_x, best_y = test_x, test_y
+
+                # Update position if beneficial
+                if best_x != x or best_y != y:
+                    circles_copy[i, 0] = best_x
+                    circles_copy[i, 1] = best_y
+                    improved = True
+
+        # Stop if no significant improvement
+        if not improved:
+            break
+
+    return circles_copy
+>>>>>>> REPLACE
+</DIFF>

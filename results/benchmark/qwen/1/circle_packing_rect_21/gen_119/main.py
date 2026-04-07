@@ -1,0 +1,323 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List, Optional
+
+class CirclePackingOptimizer:
+    def __init__(self, n_circles: int = 21, rect_width: float = 1.0, rect_height: float = 1.0):
+        self.n_circles = n_circles
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+        self.best_solution = None
+        self.best_sum = 0.0
+        
+    def initialize_hexagonal(self) -> np.ndarray:
+        """Initialize circles using hexagonal lattice pattern"""
+        circles = np.zeros((self.n_circles, 3))
+        rows = 4
+        cols = 6
+        
+        spacing_x = self.rect_width / (cols + 1)
+        spacing_y = self.rect_height / (rows + 1)
+        
+        idx = 0
+        for i in range(rows):
+            offset = spacing_x * (i % 2) * 0.5
+            for j in range(cols):
+                if idx >= self.n_circles:
+                    break
+                x = (j + 1) * spacing_x + offset
+                y = (i + 1) * spacing_y
+                
+                x = max(0.01, min(self.rect_width - 0.01, x))
+                y = max(0.01, min(self.rect_height - 0.01, y))
+                
+                circles[idx] = [x, y, 0.05]
+                idx += 1
+                
+            if idx >= self.n_circles:
+                break
+                
+        # Fill remaining circles randomly
+        while idx < self.n_circles:
+            x = np.random.uniform(0.01, self.rect_width - 0.01)
+            y = np.random.uniform(0.01, self.rect_height - 0.01)
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+            
+        return circles
+    
+    def initialize_random(self) -> np.ndarray:
+        """Initialize circles with random placement"""
+        circles = np.zeros((self.n_circles, 3))
+        for i in range(self.n_circles):
+            x = np.random.uniform(0.01, self.rect_width - 0.01)
+            y = np.random.uniform(0.01, self.rect_height - 0.01)
+            circles[i] = [x, y, 0.05]
+        return circles
+    
+    def initialize_grid(self) -> np.ndarray:
+        """Initialize circles using grid pattern"""
+        circles = np.zeros((self.n_circles, 3))
+        rows = 5
+        cols = 5
+        
+        spacing_x = self.rect_width / (cols + 1)
+        spacing_y = self.rect_height / (rows + 1)
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= self.n_circles:
+                    break
+                x = (j + 1) * spacing_x
+                y = (i + 1) * spacing_y
+                
+                x = max(0.01, min(self.rect_width - 0.01, x))
+                y = max(0.01, min(self.rect_height - 0.01, y))
+                
+                circles[idx] = [x, y, 0.05]
+                idx += 1
+                
+            if idx >= self.n_circles:
+                break
+                
+        # Fill remaining circles randomly
+        while idx < self.n_circles:
+            x = np.random.uniform(0.01, self.rect_width - 0.01)
+            y = np.random.uniform(0.01, self.rect_height - 0.01)
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+            
+        return circles
+    
+    def calculate_constraint_density(self, circles: np.ndarray) -> np.ndarray:
+        """Calculate constraint density for each circle based on Voronoi diagram"""
+        try:
+            points = circles[:, :2]
+            vor = Voronoi(points)
+            
+            # Calculate Voronoi cell areas
+            areas = []
+            for i in range(len(points)):
+                # Get vertices of Voronoi cell for circle i
+                region = vor.regions[vor.point_region[i]]
+                if -1 in region:
+                    # Skip infinite regions
+                    areas.append(float('inf'))
+                else:
+                    # Approximate area using triangulation of vertices
+                    vertices = [vor.vertices[j] for j in region if j >= 0]
+                    if len(vertices) >= 3:
+                        # Simple polygon area calculation
+                        x_coords = [v[0] for v in vertices]
+                        y_coords = [v[1] for v in vertices]
+                        area = 0.5 * abs(sum(x_coords[i] * y_coords[(i+1)%len(y_coords)] - 
+                                           x_coords[(i+1)%len(x_coords)] * y_coords[i] 
+                                           for i in range(len(x_coords))))
+                        areas.append(area)
+                    else:
+                        areas.append(float('inf'))
+            
+            # Convert to constraint density (smaller area = more constrained)
+            densities = np.array(areas)
+            # Replace inf with large values for processing
+            densities[densities == float('inf')] = np.max(densities[densities != float('inf')]) * 2
+            # Normalize to 0-1 scale
+            if np.max(densities) > 0:
+                densities = densities / np.max(densities)
+            return densities
+            
+        except Exception:
+            # Fallback to simple neighbor count
+            densities = np.zeros(len(circles))
+            for i in range(len(circles)):
+                count = 0
+                for j in range(len(circles)):
+                    if i != j:
+                        dx = circles[i, 0] - circles[j, 0]
+                        dy = circles[i, 1] - circles[j, 1]
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        if distance < (circles[i, 2] + circles[j, 2] + 0.01):
+                            count += 1
+                densities[i] = count / 20.0  # Normalize
+            return densities
+    
+    def calculate_max_radius(self, circles: np.ndarray, idx: int) -> float:
+        """Calculate maximum radius for circle at index idx"""
+        # Distance to boundaries
+        max_radius = min(
+            circles[idx][0],  # Left boundary
+            self.rect_width - circles[idx][0],  # Right boundary
+            circles[idx][1],  # Bottom boundary
+            self.rect_height - circles[idx][1]   # Top boundary
+        ) - 0.001
+        
+        # Collision constraints with all other circles
+        for j in range(self.n_circles):
+            if i != j:
+                dx = circles[idx][0] - circles[j][0]
+                dy = circles[idx][1] - circles[j][1]
+                distance = np.sqrt(dx*dx + dy*dy)
+                collision_radius = distance - circles[j][2] - 0.001
+                if collision_radius > 0:
+                    max_radius = min(max_radius, collision_radius)
+                    
+        return max(max_radius, 0.001)
+    
+    def adaptive_mutation(self, circles: np.ndarray, constraint_densities: np.ndarray, 
+                         learning_rate: float = 0.1) -> bool:
+        """Perform adaptive mutation with constraint-aware radius adjustments"""
+        improved = False
+        
+        # Sort by constraint density (most constrained first)
+        sorted_indices = np.argsort(constraint_densities)[::-1]
+        
+        for i in sorted_indices:
+            max_radius = self.calculate_max_radius(circles, i)
+            
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Adaptive expansion based on constraint density
+                # More constrained circles get smaller expansions
+                density_factor = 1.0 - constraint_densities[i]
+                delta = min(0.03, max_radius - circles[i][2]) * learning_rate * density_factor
+                
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+                    
+        return improved
+    
+    def validate_solution(self, circles: np.ndarray) -> bool:
+        """Validate that all circles fit within bounds and don't overlap"""
+        # Check boundary constraints
+        for i in range(self.n_circles):
+            x, y, r = circles[i]
+            if (x - r <= 0 or x + r >= self.rect_width or 
+                y - r <= 0 or y + r >= self.rect_height):
+                return False
+        
+        # Check overlap constraints
+        for i in range(self.n_circles):
+            for j in range(i+1, self.n_circles):
+                dx = circles[i, 0] - circles[j, 0]
+                dy = circles[i, 1] - circles[j, 1]
+                distance = np.sqrt(dx*dx + dy*dy)
+                if distance < (circles[i, 2] + circles[j, 2]):
+                    return False
+                    
+        return True
+    
+    def optimize_single_start(self, initial_circles: np.ndarray, max_iterations: int = 200) -> np.ndarray:
+        """Optimize a single starting configuration"""
+        circles = initial_circles.copy()
+        learning_rate = 0.1
+        prev_sum = 0.0
+        
+        for iteration in range(max_iterations):
+            # Calculate constraint densities
+            constraint_densities = self.calculate_constraint_density(circles)
+            
+            # Perform adaptive mutation
+            improved = self.adaptive_mutation(circles, constraint_densities, learning_rate)
+            
+            # Decrease learning rate over time
+            if iteration > 0 and iteration % 50 == 0:
+                learning_rate *= 0.9
+                
+            # Early stopping if no progress
+            current_sum = np.sum(circles[:, 2])
+            if not improved or abs(current_sum - prev_sum) < 0.0001:
+                break
+                
+            prev_sum = current_sum
+            
+        return circles
+    
+    def optimize_with_multiple_starts(self) -> np.ndarray:
+        """Run optimization with multiple initialization strategies"""
+        best_circles = None
+        best_sum = 0.0
+        
+        # Try different initialization strategies
+        initializers = [
+            self.initialize_hexagonal,
+            self.initialize_random, 
+            self.initialize_grid
+        ]
+        
+        for i, init_func in enumerate(initializers):
+            try:
+                # Different random seeds for each initializer
+                np.random.seed(i * 1000)
+                initial_circles = init_func()
+                
+                # Optimize this starting point
+                optimized_circles = self.optimize_single_start(initial_circles)
+                
+                # Validate solution
+                if self.validate_solution(optimized_circles):
+                    current_sum = np.sum(optimized_circles[:, 2])
+                    if current_sum > best_sum:
+                        best_sum = current_sum
+                        best_circles = optimized_circles
+                        
+            except Exception as e:
+                continue  # Skip failed attempts
+                
+        return best_circles if best_circles is not None else self.initialize_hexagonal()
+    
+    def run_optimization(self) -> np.ndarray:
+        """Main optimization routine"""
+        # Use multiple starts to find better solutions
+        circles = self.optimize_with_multiple_starts()
+        
+        # Final fine-tuning
+        for _ in range(50):
+            improved = False
+            # Shuffle order for better exploration
+            indices = list(range(self.n_circles))
+            random.shuffle(indices)
+            
+            for i in indices:
+                max_radius = self.calculate_max_radius(circles, i)
+                
+                if max_radius > circles[i][2] and max_radius > 0.001:
+                    # Small incremental expansion
+                    delta = min(0.01, max_radius - circles[i][2])
+                    if delta > 0.0005:
+                        circles[i][2] += delta
+                        improved = True
+                        
+            if not improved:
+                break
+                
+        return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle with perimeter = 4, so width + height = 2
+    # Using a square for simplicity: width = height = 1
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    optimizer = CirclePackingOptimizer(21, rect_width, rect_height)
+    circles = optimizer.run_optimization()
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

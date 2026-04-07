@@ -1,0 +1,171 @@
+<NAME>
+add_spatial_indexing_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a O(n²) approach for overlap detection by checking all pairs of hexagons. This becomes inefficient as we need to evaluate many configurations. I'll implement spatial indexing using cKDTree to reduce overlap checking complexity from O(n²) to near O(n) by only checking nearby hexagons instead of all pairs. This will significantly speed up the evaluation process, especially during optimization iterations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial import cKDTree
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class HexagonConstraintValidator:
+    """Validates spatial constraints for hexagon arrangements."""
+
+    def __init__(self, geom_handler):
+        self.geom = geom_handler
+
+    def check_containment_parallel(self, inner_hex_data, outer_radius, n_jobs=-1):
+        """Parallel check if all inner hexagons are contained within outer hexagon."""
+        outer_hex_vertices = self.geom.vertices(0, 0, 0, outer_radius)
+        outer_polygon = Polygon(outer_hex_vertices)
+
+        def check_single_containment(i):
+            x, y, angle = inner_hex_data[i]
+            inner_vertices = self.geom.vertices(x, y, angle)
+            inner_polygon = Polygon(inner_vertices)
+            return outer_polygon.contains(inner_polygon) or outer_polygon.covers(inner_polygon)
+
+        # Use parallel processing for containment checks
+        containment_results = Parallel(n_jobs=n_jobs)(
+            delayed(check_single_containment)(i) for i in range(len(inner_hex_data))
+        )
+
+        return all(containment_results)
+
+    def compute_overlap_penalty_parallel(self, inner_hex_data, n_jobs=-1):
+        """Compute penalty based on overlap areas using parallel processing."""
+        penalty = 0.0
+        n = len(inner_hex_data)
+
+        # Pre-compute polygons for efficiency
+        def create_polygon(i):
+            x, y, angle = inner_hex_data[i]
+            vertices = self.geom.vertices(x, y, angle)
+            return Polygon(vertices)
+
+        # Create all polygons in parallel
+        polygons = Parallel(n_jobs=n_jobs)(
+            delayed(create_polygon)(i) for i in range(n)
+        )
+
+        # Check all pairs for overlaps in parallel
+        def check_overlap_pair(indices):
+            i, j = indices
+            poly_i, poly_j = polygons[i], polygons[j]
+            if poly_i.intersects(poly_j) and not poly_i.touches(poly_j):
+                try:
+                    overlap = poly_i.intersection(poly_j)
+                    if hasattr(overlap, 'area') and overlap.area > 0:
+                        return overlap.area
+                except:
+                    return 1000  # Large penalty for calculation errors
+            return 0.0
+
+        # Check overlaps in parallel
+        overlap_pairs = [(i, j) for i in range(n) for j in range(i+1, n)]
+        overlap_results = Parallel(n_jobs=n_jobs)(
+            delayed(check_overlap_pair)(pair) for pair in overlap_pairs
+        )
+
+        # Sum all overlap areas
+        penalty = sum(overlap_results)
+        return penalty
+=======
+class HexagonConstraintValidator:
+    """Validates spatial constraints for hexagon arrangements."""
+
+    def __init__(self, geom_handler):
+        self.geom = geom_handler
+
+    def check_containment_parallel(self, inner_hex_data, outer_radius, n_jobs=-1):
+        """Parallel check if all inner hexagons are contained within outer hexagon."""
+        outer_hex_vertices = self.geom.vertices(0, 0, 0, outer_radius)
+        outer_polygon = Polygon(outer_hex_vertices)
+
+        def check_single_containment(i):
+            x, y, angle = inner_hex_data[i]
+            inner_vertices = self.geom.vertices(x, y, angle)
+            inner_polygon = Polygon(inner_vertices)
+            return outer_polygon.contains(inner_polygon) or outer_polygon.covers(inner_polygon)
+
+        # Use parallel processing for containment checks
+        containment_results = Parallel(n_jobs=n_jobs)(
+            delayed(check_single_containment)(i) for i in range(len(inner_hex_data))
+        )
+
+        return all(containment_results)
+
+    def compute_overlap_penalty_parallel(self, inner_hex_data, n_jobs=-1):
+        """Compute penalty based on overlap areas using spatial indexing for efficiency."""
+        penalty = 0.0
+        n = len(inner_hex_data)
+
+        # Pre-compute centroids for spatial indexing
+        centroids = np.array([[x, y] for x, y, _ in inner_hex_data])
+
+        # Build spatial index (cKDTree) for efficient neighbor queries
+        tree = cKDTree(centroids)
+
+        # Find nearby neighbors (within a reasonable distance threshold)
+        # This avoids checking all pairs while still catching most overlaps
+        distance_threshold = 3.0  # Hexagons this far apart are unlikely to overlap
+        pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
+
+        # Pre-compute polygons for efficiency
+        def create_polygon(i):
+            x, y, angle = inner_hex_data[i]
+            vertices = self.geom.vertices(x, y, angle)
+            return Polygon(vertices)
+
+        # Create all polygons in parallel
+        polygons = Parallel(n_jobs=n_jobs)(
+            delayed(create_polygon)(i) for i in range(n)
+        )
+
+        # Check overlaps for neighboring pairs only
+        def check_overlap_pair(indices):
+            i, j = indices
+            poly_i, poly_j = polygons[i], polygons[j]
+            if poly_i.intersects(poly_j) and not poly_i.touches(poly_j):
+                try:
+                    overlap = poly_i.intersection(poly_j)
+                    if hasattr(overlap, 'area') and overlap.area > 0:
+                        return overlap.area
+                except:
+                    return 1000  # Large penalty for calculation errors
+            return 0.0
+
+        # Check overlaps in parallel for neighboring pairs only
+        overlap_results = Parallel(n_jobs=n_jobs)(
+            delayed(check_overlap_pair)(pair) for pair in pairs
+        )
+
+        # Sum all overlap areas
+        penalty = sum(overlap_results)
+        return penalty
+>>>>>>> REPLACE
+
+</DIFF>

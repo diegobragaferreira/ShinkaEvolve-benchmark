@@ -1,0 +1,191 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import cvxpy as cp
+import time
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    # Define the optimization problem
+    def solve_circle_packing():
+        # Variables: x, y, r for each circle (3*n variables total)
+        # We'll use a more direct approach with CVXPY for better numerical stability
+        
+        # Create decision variables
+        # x, y, r for each circle
+        x = cp.Variable(n)
+        y = cp.Variable(n)
+        r = cp.Variable(n)
+        
+        # Constraints
+        constraints = []
+        
+        # Boundary constraints: radius must be within bounds
+        for i in range(n):
+            constraints.append(r[i] >= 0)
+            constraints.append(x[i] >= r[i])
+            constraints.append(x[i] <= 1 - r[i])
+            constraints.append(y[i] >= r[i])
+            constraints.append(y[i] <= 1 - r[i])
+        
+        # Non-overlap constraints
+        # We'll add these as second-order cone constraints for better numerical behavior
+        for i in range(n):
+            for j in range(i+1, n):
+                # Distance between centers must be at least sum of radii
+                # (x_i - x_j)^2 + (y_i - y_j)^2 >= (r_i + r_j)^2
+                # This is equivalent to: ||(x_i, y_i) - (x_j, y_j)|| >= r_i + r_j
+                # In second-order cone form: ||(x_i - x_j, y_i - y_j)|^2 >= (r_i + r_j)^2
+                
+                # Using the constraint that (x_i-x_j)^2 + (y_i-y_j)^2 >= (r_i+r_j)^2
+                # We add a small epsilon to make it numerically stable
+                eps = 1e-8
+                constraints.append(cp.square(x[i] - x[j]) + cp.square(y[i] - y[j]) >= cp.square(r[i] + r[j]) + eps)
+        
+        # Objective: maximize sum of radii
+        objective = cp.Maximize(cp.sum(r))
+        
+        # Create and solve the problem
+        prob = cp.Problem(objective, constraints)
+        
+        # Try to solve with different solvers
+        try:
+            prob.solve(solver=cp.ECOS, verbose=False, max_iters=1000)
+        except:
+            try:
+                prob.solve(solver=cp.SCS, verbose=False, max_iters=1000)
+            except:
+                # Fallback to a simpler approach if CVXPY fails
+                return fallback_method()
+        
+        if prob.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+            # Extract solution
+            x_sol = x.value
+            y_sol = y.value
+            r_sol = r.value
+            
+            # Return the result as array
+            circles = np.column_stack((x_sol, y_sol, r_sol))
+            return circles
+        else:
+            # If optimization fails, fall back to a good heuristic
+            return fallback_method()
+    
+    def fallback_method():
+        """Fallback method using a greedy approach"""
+        # Start with a regular grid pattern
+        grid_size = int(np.ceil(np.sqrt(n)))
+        positions = []
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if len(positions) >= n:
+                    break
+                x = (i + 0.5) / grid_size
+                y = (j + 0.5) / grid_size
+                positions.append([x, y])
+        
+        # Take first n positions and add some randomness
+        circles = np.zeros((n, 3))
+        for i in range(n):
+            circles[i, 0] = positions[i][0] + np.random.normal(0, 0.03)
+            circles[i, 1] = positions[i][1] + np.random.normal(0, 0.03)
+            circles[i, 2] = 0.05  # Start with small radii
+        
+        # Apply local optimization to improve
+        return local_optimization(circles)
+    
+    def local_optimization(initial_circles):
+        """Apply local optimization to improve the solution"""
+        # Use scipy minimize with bounds and constraints
+        def objective(radii_and_positions):
+            # Extract positions and radii
+            circles = radii_and_positions.reshape(n, 3)
+            return -np.sum(circles[:, 2])  # Negative because we want to maximize
+        
+        def constraint_func(radii_and_positions):
+            circles = radii_and_positions.reshape(n, 3)
+            
+            # Check bounds
+            bounds_valid = True
+            for i in range(n):
+                r = circles[i, 2]
+                x = circles[i, 0]
+                y = circles[i, 1]
+                if not (r <= x <= 1 - r and r <= y <= 1 - r):
+                    bounds_valid = False
+                    break
+            
+            # Check overlaps
+            overlaps_valid = True
+            for i in range(n):
+                for j in range(i+1, n):
+                    dx = circles[i, 0] - circles[j, 0]
+                    dy = circles[i, 1] - circles[j, 1]
+                    dist_sq = dx*dx + dy*dy
+                    min_dist_sq = (circles[i, 2] + circles[j, 2])**2
+                    if dist_sq < min_dist_sq:
+                        overlaps_valid = False
+                        break
+                if not overlaps_valid:
+                    break
+            
+            # Return a positive value if valid, negative otherwise
+            if bounds_valid and overlaps_valid:
+                return 1.0
+            else:
+                return -1.0
+        
+        # Initial guess
+        x0 = initial_circles.flatten()
+        
+        # Bounds
+        bounds = []
+        for i in range(n):
+            bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.49)])  # x, y, r bounds
+        
+        # Optimization
+        try:
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-6, 'gtol': 1e-6},
+                callback=lambda x: None  # No callback needed
+            )
+            
+            if result.success:
+                circles = result.x.reshape(n, 3)
+                # Ensure valid bounds
+                for i in range(n):
+                    circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], 1 - circles[i, 2])
+                    circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], 1 - circles[i, 2])
+                return circles
+        except:
+            pass
+        
+        return initial_circles
+    
+    # Try the main approach first
+    try:
+        result = solve_circle_packing()
+        if result is not None:
+            return result
+    except:
+        pass
+    
+    # Fall back to a good heuristic if the main approach fails
+    return fallback_method()
+
+# EVOLVE-BLOCK-END

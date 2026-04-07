@@ -1,0 +1,198 @@
+<NAME>
+enhance_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic overlap check that relies on Shapely's intersects method. This can be improved by implementing a more robust Separating Axis Theorem (SAT) based collision detection that specifically handles hexagon-hexagon intersections with better numerical precision. This will help avoid false positives in overlap detection that could lead to invalid solutions being accepted.
+
+Additionally, I'll add a more sophisticated initialization pattern that creates better starting configurations by using a combination of known good hexagonal arrangements and mathematical optimization principles.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def check_overlap_fast(self, hex1, hex2):
+        """Fast overlap check using direct polygon intersection"""
+        return hex1.intersects(hex2)
+=======
+    def check_overlap_fast(self, hex1, hex2):
+        """Fast overlap check using Separating Axis Theorem for better numerical precision"""
+        # Convert polygons to numpy arrays for faster computation
+        hex1_coords = np.array(hex1.exterior.coords)
+        hex2_coords = np.array(hex2.exterior.coords)
+
+        # Get edges of both polygons
+        edges1 = hex1_coords[:-1] - np.roll(hex1_coords[:-1], 1, axis=0)
+        edges2 = hex2_coords[:-1] - np.roll(hex2_coords[:-1], 1, axis=0)
+
+        # Get normals to edges (perpendicular vectors)
+        normals1 = np.column_stack([-edges1[:, 1], edges1[:, 0]])
+        normals2 = np.column_stack([-edges2[:, 1], edges2[:, 0]])
+
+        # Normalize normals
+        norms1 = np.linalg.norm(normals1, axis=1, keepdims=True)
+        norms2 = np.linalg.norm(normals2, axis=1, keepdims=True)
+        normals1 = normals1 / np.where(norms1 == 0, 1, norms1)
+        normals2 = normals2 / np.where(norms2 == 0, 1, norms2)
+
+        # Combine all separating axes
+        all_axes = np.vstack([normals1, normals2])
+
+        # Project both polygons onto each axis
+        for axis in all_axes:
+            proj1 = np.dot(hex1_coords[:-1], axis)
+            proj2 = np.dot(hex2_coords[:-1], axis)
+
+            # Check for overlap along this axis
+            if np.max(proj1) < np.min(proj2) or np.max(proj2) < np.min(proj1):
+                return False  # No overlap along this axis
+
+        return True  # Overlap detected
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_golden_spiral_initialization(packer, num_samples=25):
+    """Generate diverse initial configurations using golden spiral pattern"""
+    configs = []
+
+    # Golden spiral pattern for better spatial distribution
+    golden_angle = 2.399963229728653  # Approximation of 2*pi/(phi^2) where phi is golden ratio
+    spiral_positions = []
+    for i in range(11):
+        # Golden spiral coordinates
+        radius = 0.8 + i * 0.5
+        angle = i * golden_angle
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        spiral_positions.append((x, y))
+
+    # Create diverse samples with strategic jitter
+    for _ in range(num_samples):
+        config = []
+        for i, (cx, cy) in enumerate(spiral_positions):
+            # Add controlled jitter with decreasing amplitude
+            amp = 0.3 * (1.0 - i/10.0)  # Less jitter for outer positions
+            jitter_x = np.random.uniform(-amp, amp)
+            jitter_y = np.random.uniform(-amp, amp)
+            config.extend([cx + jitter_x, cy + jitter_y, np.random.uniform(0, 360)])
+
+        # Add outer radius with better distribution
+        config.append(3.0 + np.random.exponential(1.0))
+        configs.append(config)
+
+    return configs
+=======
+def generate_enhanced_initialization(packer, num_samples=30):
+    """Generate diverse initial configurations using enhanced techniques:
+    1. Hybrid pattern combining hexagonal and spiral arrangements
+    2. Strategic placement based on known good configurations
+    3. Better spatial distribution for improved convergence"""
+    configs = []
+
+    # Base patterns for different arrangements
+    base_patterns = [
+        # Pattern 1: Concentric hexagonal rings
+        [
+            [0, 0, 0],           # center
+            [0, 2.0, 0],         # top
+            [1.732, 1.0, 0],     # top-right
+            [1.732, -1.0, 0],    # bottom-right
+            [0, -2.0, 0],        # bottom
+            [-1.732, -1.0, 0],   # bottom-left
+            [-1.732, 1.0, 0],    # top-left
+            [3.464, 0, 0],       # far right
+            [-3.464, 0, 0],      # far left
+            [0, 3.464, 0],       # very top
+            [0, -3.464, 0],      # very bottom
+        ],
+
+        # Pattern 2: Spiral with strategic offsets
+        [
+            [0, 0, 0],
+            [-1.0, 0, 30],
+            [1.0, 0, 60],
+            [0, 1.5, 90],
+            [0, -1.5, 120],
+            [1.2, 1.2, 150],
+            [-1.2, -1.2, 180],
+            [1.2, -1.2, 210],
+            [-1.2, 1.2, 240],
+            [2.0, 0, 270],
+            [0, 2.0, 300]
+        ],
+
+        # Pattern 3: Optimized layout with strategic spacing
+        [
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.165, 0],
+            [1.25, 2.165, 0],
+            [-1.25, -2.165, 0],
+            [1.25, -2.165, 0],
+            [-3.75, 2.165, 0],
+            [3.75, 2.165, 0],
+            [-3.75, -2.165, 0],
+            [3.75, -2.165, 0],
+        ]
+    ]
+
+    for pattern_idx, base_pattern in enumerate(base_patterns):
+        # Create samples from each base pattern
+        for _ in range(num_samples // len(base_patterns)):
+            config = []
+            for i, (cx, cy, base_angle) in enumerate(base_pattern):
+                # Add strategic jitter based on pattern position
+                if i == 0:  # center hexagon - minimal jitter
+                    jitter_x = np.random.uniform(-0.1, 0.1)
+                    jitter_y = np.random.uniform(-0.1, 0.1)
+                    jitter_angle = np.random.uniform(-5, 5)
+                else:  # outer hexagons - more pronounced but controlled jitter
+                    jitter_x = np.random.uniform(-0.3, 0.3)
+                    jitter_y = np.random.uniform(-0.3, 0.3)
+                    jitter_angle = np.random.uniform(-10, 10)
+
+                config.extend([cx + jitter_x, cy + jitter_y, base_angle + jitter_angle])
+
+            # Add outer radius with better distribution
+            config.append(3.0 + np.random.exponential(1.5))
+            configs.append(config)
+
+    # Add some completely random configurations for diversity
+    for _ in range(5):
+        config = []
+        for i in range(11):
+            x = np.random.uniform(-4, 4)
+            y = np.random.uniform(-4, 4)
+            rotation = np.random.uniform(0, 360)
+            config.extend([x, y, rotation])
+        config.append(4.0 + np.random.exponential(2.0))
+        configs.append(config)
+
+    return configs
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Generate initial population using golden spiral pattern
+    population = generate_golden_spiral_initialization(packer, 30)
+=======
+    # Generate initial population using enhanced initialization
+    population = generate_enhanced_initialization(packer, 35)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Generate new population for this seed with increased diversity
+            current_population = generate_golden_spiral_initialization(packer, 25)
+=======
+            # Generate new population for this seed with increased diversity
+            current_population = generate_enhanced_initialization(packer, 25)
+>>>>>>> REPLACE
+</DIFF>

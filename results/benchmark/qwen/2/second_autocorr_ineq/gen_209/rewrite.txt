@@ -1,0 +1,407 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from typing import List, Tuple, Optional
+import time
+import random
+from scipy import signal
+import math
+from functools import lru_cache
+
+class StepFunctionOptimizer:
+    """Enhanced modular optimizer for step function construction to maximize C2."""
+
+    def __init__(self, seed: int = 42):
+        self.seed = seed
+        np.random.seed(seed)
+        random.seed(seed)
+
+        # Configuration parameters
+        self.domain_width = 0.5
+        self.domain_center = 0.0
+        self.default_step_count = 1000
+        self.max_evaluations = 1500
+
+    def compute_autoconvolution(self, f_values: List[float]) -> np.ndarray:
+        """Compute the autoconvolution g = f * f of step function f."""
+        n = len(f_values)
+        if n == 0:
+            return np.array([])
+
+        f_array = np.array(f_values)
+        g = np.convolve(f_array, f_array, mode='full')
+        g = g[n-1:-(n-1)] if n > 1 else g
+        return g
+
+    def compute_norms(self, g_values: np.ndarray) -> Tuple[float, float, float]:
+        """Compute the three required norms for C2 calculation with better integration."""
+        if len(g_values) == 0:
+            return 0.0, 0.0, 0.0
+
+        # ||g||₂² using trapezoidal-like piecewise linear integration with proper spacing
+        if len(g_values) <= 1:
+            norm_2_sq = g_values[0]**2 if len(g_values) > 0 else 0.0
+        else:
+            # Use the suggested formula for piecewise linear integration:
+            # For adjacent points y1, y2 with width h, contribution is (h/3)(y1² + y1*y2 + y2²)
+            norm_2_sq = 0.0
+            for i in range(len(g_values)-1):
+                y1, y2 = g_values[i], g_values[i+1]
+                norm_2_sq += (1.0/3.0) * (y1**2 + y1*y2 + y2**2)
+
+        # ||g||₁: L1 norm, approximated as sum(|g|) / (len(g) + 1)
+        if len(g_values) > 0:
+            norm_1 = np.sum(np.abs(g_values)) / (len(g_values) + 1)
+        else:
+            norm_1 = 0.0
+
+        # ||g||∞: Infinity-norm
+        norm_inf = np.max(np.abs(g_values)) if len(g_values) > 0 else 0.0
+
+        return norm_2_sq, norm_1, norm_inf
+
+    @lru_cache(maxsize=100)
+    def cached_compute_c2(self, tuple_values: tuple) -> float:
+        """Cached computation of C2 to avoid redundant calculations."""
+        f_values = list(tuple_values)
+        g = self.compute_autoconvolution(f_values)
+        norm_2_sq, norm_1, norm_inf = self.compute_norms(g)
+
+        if norm_1 == 0 or norm_inf == 0:
+            return 0.0
+
+        return norm_2_sq / (norm_1 * norm_inf)
+
+    def compute_c2(self, f_values: List[float]) -> float:
+        """Compute C2 for given step function values."""
+        return self.cached_compute_c2(tuple(f_values))
+
+    def gaussian_peak_function(self, x: np.ndarray, peak_params: List[float]) -> np.ndarray:
+        """Generate a function composed of multiple Gaussian peaks."""
+        result = np.zeros_like(x)
+        for i in range(0, len(peak_params), 3):
+            amp, center, width = peak_params[i], peak_params[i+1], peak_params[i+2]
+            width = max(width, 1e-6)
+            result += amp * np.exp(-0.5 * ((x - center) / width)**2)
+        return result
+
+    def enforce_peak_spacing(self, peak_params: List[float], min_distance_ratio: float = 0.08) -> None:
+        """Enforce minimum distance between Gaussian peaks to prevent narrow autoconvolution."""
+        if len(peak_params) < 3:
+            return
+
+        peaks = []
+        for i in range(0, len(peak_params), 3):
+            peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+        peaks.sort(key=lambda x: x[1])
+
+        min_distance = min_distance_ratio * self.domain_width
+        for i in range(1, len(peaks)):
+            prev_center = peaks[i-1][1]
+            curr_center = peaks[i][1]
+            distance = abs(curr_center - prev_center)
+
+            if distance < min_distance:
+                offset = min_distance - distance
+                if curr_center > prev_center:
+                    peaks[i][1] += offset
+                else:
+                    peaks[i][1] -= offset
+
+        for i, (amp, center, width) in enumerate(peaks):
+            peak_params[i*3] = amp
+            peak_params[i*3 + 1] = center
+            peak_params[i*3 + 2] = width
+
+    def create_individual(self, num_peaks: int) -> List[float]:
+        """Create a random individual with specified number of Gaussian peaks with better initialization."""
+        individual = []
+        for i in range(num_peaks):
+            # Amplitude: log-uniform between 10 and 100
+            amplitude = 10 ** random.uniform(1.0, 2.0)
+            individual.append(amplitude)
+            
+            # Center: Logarithmic distribution with improved spreading
+            ratio = (i + 1) / (num_peaks + 1)
+            # Apply sine transformation for even better peak distribution
+            pos = self.domain_center + np.sin(ratio * np.pi) * self.domain_width/2
+            # Alternate sides for better symmetry
+            if i % 2 == 0:
+                pos = -pos
+            individual.append(pos)
+            
+            # Width: log-uniform between 0.01 and 0.2
+            width = 0.01 * (10 ** random.uniform(0.0, 1.0))
+            individual.append(width)
+        return individual
+
+    def evaluate_individual(self, individual: List[float]) -> float:
+        """Evaluate the fitness of an individual (C2 value)"""
+        try:
+            # Generate function from peak parameters
+            domain_points = np.linspace(-self.domain_width/2, self.domain_width/2, self.default_step_count)
+            func_values = self.gaussian_peak_function(domain_points, individual)
+            # Convert to step function values (take discrete samples)
+            step_values = func_values.tolist()
+            # Compute C2
+            c2_value = self.compute_c2(step_values)
+            return c2_value
+        except Exception:
+            return 0.0
+    
+    def optimize_with_evolutionary_algorithm(self, num_peaks: int,
+                                           population_size: int = 25,
+                                           generations: int = 30) -> List[float]:
+        """Enhanced evolutionary algorithm with adaptive search strategies"""
+        
+        # Start with optimized initialization
+        individuals = [self.create_individual(num_peaks) for _ in range(population_size)]
+        fitness_scores = [self.evaluate_individual(ind) for ind in individuals]
+        
+        best_fitness = max(fitness_scores)
+        best_individual = individuals[fitness_scores.index(best_fitness)]
+        
+        # Track convergence and early stopping
+        stale_count = 0
+        prev_best = best_fitness
+        stagnant_generations = 0
+        
+        # Evolution loop with progressive tightening
+        for gen in range(generations):
+            # Early termination if we've seen significant improvement recently
+            if gen > 5 and abs(best_fitness - prev_best) < 1e-6:
+                stagnant_generations += 1
+                if stagnant_generations > 3:
+                    break
+            else:
+                stagnant_generations = 0
+            prev_best = best_fitness
+            
+            # Tournament selection with larger tournament size for better selection pressure
+            selected_indices = []
+            tournament_size = min(5, population_size // 2 + 1)
+            for _ in range(population_size):
+                tournament_indices = np.random.choice(len(individuals), tournament_size, replace=False)
+                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+                selected_indices.append(winner_idx)
+            
+            # Create offspring through crossover and mutation with enhanced dynamics
+            new_individuals = []
+            for i in range(0, len(selected_indices), 2):
+                parent1_idx = selected_indices[i]
+                parent2_idx = selected_indices[min(i+1, len(selected_indices)-1)]
+                
+                # Crossover with blending approach
+                child1 = list(individuals[parent1_idx])
+                child2 = list(individuals[parent2_idx])
+                
+                # Uniform crossover with blending of parameters
+                for j in range(len(child1)):
+                    if random.random() < 0.5:  # 50% chance to swap parameter
+                        child1[j], child2[j] = child2[j], child1[j]
+                
+                # Mutation with adaptive strength
+                mutation_strength = 0.2 if gen < generations//2 else 0.1
+                
+                # Apply different mutation strategies depending on parameter type
+                for j in range(len(child1)):
+                    if random.random() < 0.12:  # 12% mutation rate
+                        if j % 3 == 0:  # amplitude - log-uniform mutation
+                            log_amplitude = np.log10(child1[j])
+                            log_amplitude += random.uniform(-mutation_strength*0.5, mutation_strength*0.5)
+                            child1[j] = max(0.1, 10 ** log_amplitude)
+                            
+                            log_amplitude = np.log10(child2[j])
+                            log_amplitude += random.uniform(-mutation_strength*0.5, mutation_strength*0.5)
+                            child2[j] = max(0.1, 10 ** log_amplitude)
+                        elif j % 3 == 1:  # center - linear mutation with bounded range
+                            child1[j] += random.uniform(-mutation_strength*0.15, mutation_strength*0.15)
+                            child2[j] += random.uniform(-mutation_strength*0.15, mutation_strength*0.15)
+                            # Keep within bounds
+                            child1[j] = max(-self.domain_width/2, min(self.domain_width/2, child1[j]))
+                            child2[j] = max(-self.domain_width/2, min(self.domain_width/2, child2[j]))
+                        else:  # width - log-uniform mutation
+                            log_width = np.log10(child1[j])
+                            log_width += random.uniform(-mutation_strength*0.3, mutation_strength*0.3)
+                            child1[j] = max(0.001, 10 ** log_width)
+                            
+                            log_width = np.log10(child2[j])
+                            log_width += random.uniform(-mutation_strength*0.3, mutation_strength*0.3)
+                            child2[j] = max(0.001, 10 ** log_width)
+                
+                # Ensure non-negative values
+                for k in range(len(child1)):
+                    child1[k] = max(0, child1[k])
+                    child2[k] = max(0, child2[k])
+                
+                # Enforce spacing
+                self.enforce_peak_spacing(child1)
+                self.enforce_peak_spacing(child2)
+                
+                new_individuals.extend([child1, child2])
+            
+            # Keep top individuals (elitism) - keep best 20% plus the two best from previous generation
+            all_individuals = new_individuals + individuals
+            all_fitness = [self.evaluate_individual(ind) for ind in all_individuals]
+            
+            # Sort by fitness
+            sorted_indices = np.argsort(all_fitness)[::-1]
+            top_indices = sorted_indices[:population_size]
+            
+            individuals = [all_individuals[i] for i in top_indices]
+            fitness_scores = [all_fitness[i] for i in top_indices]
+            
+            # Update best
+            current_best = max(fitness_scores)
+            if current_best > best_fitness:
+                best_fitness = current_best
+                best_individual = individuals[fitness_scores.index(current_best)]
+                stale_count = 0
+            else:
+                stale_count += 1
+            
+            # Early stopping
+            if stale_count > 4:
+                break
+                
+            # Progressive tightening of search (reducing mutation strength over generations)
+            if gen > 0 and gen % 5 == 0:
+                mutation_strength = max(0.02, mutation_strength * 0.9)
+        
+        return best_individual
+
+    def improved_hill_climb(self, individual: List[float], max_iterations: int = 150) -> List[float]:
+        """Improved hill climbing with adaptive step sizes and multiple restarts"""
+        current_individual = list(individual)
+        current_fitness = self.evaluate_individual(current_individual)
+        
+        # Track improvement and convergence
+        improvements = 0
+        step_size = 0.08
+        stagnation = 0
+        last_improvement = 0
+        
+        for iteration in range(max_iterations):
+            # Random neighbor creation
+            mutated_individual = list(current_individual)
+            param_index = random.randint(0, len(mutated_individual) - 1)
+            
+            # Adaptive mutation based on parameter type with better scaling
+            if param_index % 3 == 0:  # amplitude - log-uniform mutation
+                log_amp = np.log10(mutated_individual[param_index])
+                scale = step_size * 0.6
+                log_amp += random.uniform(-scale, scale)
+                mutated_individual[param_index] = max(0.1, 10 ** log_amp)
+            elif param_index % 3 == 1:  # center
+                scale = step_size * 0.12
+                mutated_individual[param_index] += random.uniform(-scale, scale)
+                # Keep within bounds
+                mutated_individual[param_index] = max(-self.domain_width/2, 
+                                                    min(self.domain_width/2, mutated_individual[param_index]))
+            else:  # width - log-uniform mutation
+                log_width = np.log10(mutated_individual[param_index])
+                scale = step_size * 0.4
+                log_width += random.uniform(-scale, scale)
+                mutated_individual[param_index] = max(0.001, 10 ** log_width)
+            
+            # Ensure non-negative
+            mutated_individual[param_index] = max(0, mutated_individual[param_index])
+            
+            # Enforce spacing
+            self.enforce_peak_spacing(mutated_individual)
+            
+            # Evaluate
+            new_fitness = self.evaluate_individual(mutated_individual)
+            
+            if new_fitness > current_fitness:
+                current_individual = mutated_individual
+                current_fitness = new_fitness
+                improvements += 1
+                stagnation = 0
+                last_improvement = iteration
+            else:
+                stagnation += 1
+            
+            # Adaptive step size based on performance
+            if stagnation > 2:
+                step_size = min(0.2, step_size * 1.1)
+                stagnation = 0
+            elif improvements > 0 and improvements % 4 == 0:
+                step_size = max(0.02, step_size * 0.95)
+            
+            # Early stopping
+            if iteration - last_improvement > 20:
+                break
+                
+        return current_individual
+
+    def gaussian_step_function(self, n: int, sigma: float = 0.1) -> List[float]:
+        """Generate a Gaussian-based step function with specified number of steps."""
+        x = np.linspace(-0.25, 0.25, n, endpoint=False)
+        y = np.exp(-0.5 * (x/sigma)**2)
+        y = y / np.max(y) * 20
+        return [float(val) for val in y]
+
+    def construct_function(self) -> List[float]:
+        """Main function to construct step-function with high C2 value."""
+        best_c2 = 0.0
+        best_function = []
+        
+        # Strategy 1: Multi-start with evolutionary algorithm using different peak counts
+        peak_counts = [4, 6, 8, 10, 12]
+        
+        for num_peaks in peak_counts:
+            try:
+                peak_params = self.optimize_with_evolutionary_algorithm(
+                    num_peaks=num_peaks, 
+                    population_size=25,
+                    generations=25
+                )
+                
+                # Refine with hill climb
+                refined_params = self.improved_hill_climb(peak_params, max_iterations=75)
+                
+                domain_points = np.linspace(-self.domain_width/2, self.domain_width/2, self.default_step_count)
+                func_values = self.gaussian_peak_function(domain_points, refined_params)
+                step_values = func_values.tolist()
+                c2_val = self.compute_c2(step_values)
+                
+                if c2_val > best_c2:
+                    best_c2 = c2_val
+                    best_function = step_values
+                    
+            except Exception as e:
+                continue
+        
+        # Strategy 2: Fallback to adaptive refinement on Gaussian-based function
+        if len(best_function) == 0:
+            try:
+                n_steps = np.random.randint(200, 1200)
+                base_f = self.gaussian_step_function(n_steps)
+                refined_f = self.improved_hill_climb(base_f, max_iterations=150)
+                final_c2 = self.compute_c2(refined_f)
+                
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_function = refined_f
+            except Exception as e:
+                pass
+        
+        # Strategy 3: Final fallback to simple uniform distribution
+        if len(best_function) == 0:
+            best_function = [10.0] * 300
+            
+        return best_function
+
+def construct_function() -> List[float]:
+    """Main entry point function for constructing step function with high C2 value."""
+    optimizer = StepFunctionOptimizer()
+    return optimizer.construct_function()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

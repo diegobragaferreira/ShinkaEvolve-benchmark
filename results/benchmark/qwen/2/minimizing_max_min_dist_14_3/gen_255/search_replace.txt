@@ -1,0 +1,293 @@
+<NAME>
+add_checkpointing_and_restart_mechanism
+</NAME>
+
+<DESCRIPTION>
+Adding a checkpointing mechanism with restart capability to improve optimization robustness. This enhancement will save the best solution found so far every 30 seconds and implement a restart mechanism that initializes from the best known configuration when no improvement is observed for extended periods. This helps overcome premature convergence and ensures more thorough exploration of the solution space within the time budget.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_fitness = multi_objective_fitness(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        # Track statistics for adaptive perturbation scaling
+        recent_distances = []
+        distance_window_size = 50
+
+        # Restart tracking
+        restart_count = 0
+        max_restarts = 3
+        restart_patience = 500  # Number of iterations to wait before considering restart
+
+        for iteration in range(max_iterations):
+            # Check for restart condition every 300 iterations
+            if iteration > 0 and iteration % 300 == 0 and restart_count < max_restarts:
+                # Check if we've made little progress recently
+                if iteration - last_improvement > restart_patience:
+                    # Restart from best known solution with increased temperature
+                    current_points = best_points.copy()
+                    temperature = 0.5  # Reset temperature to higher value
+                    restart_count += 1
+                    last_improvement = iteration  # Reset improvement counter
+
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Compute current distance statistics for adaptive perturbation
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+            max_dist = np.max(distances) if len(distances) > 0 else 1.0
+            avg_dist = np.mean(distances) if len(distances) > 0 else 1.0
+
+            # Store recent distances for adaptive scaling
+            recent_distances.append(min_dist)
+            if len(recent_distances) > distance_window_size:
+                recent_distances.pop(0)
+
+            # Adaptive perturbation magnitude with enhanced scaling
+            # Base on temperature and configuration quality
+            base_perturbation = temperature * 0.05
+
+            # Enhanced scaling based on current configuration quality
+            distances = pdist(current_points)
+            if len(distances) > 0:
+                d_min = np.min(distances)
+                d_max = np.max(distances)
+                d_mean = np.mean(distances)
+
+                # Scale based on how spread out points are relative to their mean
+                spread_ratio = d_min / (d_mean + 1e-10)
+                if spread_ratio < 0.3:
+                    # Very tight cluster - large perturbation needed
+                    perturbation_magnitude = base_perturbation * 4.0
+                elif spread_ratio < 0.6:
+                    # Moderate clustering - moderate perturbation
+                    perturbation_magnitude = base_perturbation * 2.5
+                else:
+                    # Well-spaced points - small perturbation to fine-tune
+                    perturbation_magnitude = base_perturbation * 1.0
+            else:
+                perturbation_magnitude = base_perturbation
+
+            # Further adjust based on distance distribution stability
+            if len(recent_distances) > 10:
+                recent_std = np.std(recent_distances[-10:])
+                recent_avg = np.mean(recent_distances[-10:])
+                # If distances are very stable, reduce perturbation to avoid oscillation
+                if recent_std < 0.05 and recent_avg > 0.4:
+                    perturbation_magnitude *= 0.7
+                # If distances are fluctuating a lot, increase perturbation to escape local optima
+                elif recent_std > 0.1:
+                    perturbation_magnitude *= 1.3
+
+            # Cap the perturbation magnitude with more conservative bounds
+            perturbation_magnitude = min(0.15, max(0.005, perturbation_magnitude))
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+            new_fitness = multi_objective_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+=======
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_fitness = multi_objective_fitness(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        # Track statistics for adaptive perturbation scaling
+        recent_distances = []
+        distance_window_size = 50
+
+        # Restart tracking
+        restart_count = 0
+        max_restarts = 3
+        restart_patience = 500  # Number of iterations to wait before considering restart
+
+        # Checkpointing setup
+        best_checkpoint_ratio = 0.0
+        best_checkpoint_points = None
+        last_checkpoint_iteration = 0
+        checkpoint_interval = 30  # Checkpoint every 30 seconds (will be updated with actual timing)
+
+        # Time tracking for checkpointing
+        start_time = time.time()
+        checkpoint_time = start_time
+
+        for iteration in range(max_iterations):
+            # Periodic checkpointing based on time
+            current_time = time.time()
+            if current_time - checkpoint_time > checkpoint_interval:
+                # Save current best if it's better than previous checkpoint
+                if best_ratio > best_checkpoint_ratio:
+                    best_checkpoint_ratio = best_ratio
+                    best_checkpoint_points = best_points.copy()
+                checkpoint_time = current_time
+
+            # Check for restart condition every 300 iterations
+            if iteration > 0 and iteration % 300 == 0 and restart_count < max_restarts:
+                # Check if we've made little progress recently
+                if iteration - last_improvement > restart_patience:
+                    # Restart from best known solution with increased temperature
+                    current_points = best_points.copy()
+                    temperature = 0.5  # Reset temperature to higher value
+                    restart_count += 1
+                    last_improvement = iteration  # Reset improvement counter
+
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Compute current distance statistics for adaptive perturbation
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+            max_dist = np.max(distances) if len(distances) > 0 else 1.0
+            avg_dist = np.mean(distances) if len(distances) > 0 else 1.0
+
+            # Store recent distances for adaptive scaling
+            recent_distances.append(min_dist)
+            if len(recent_distances) > distance_window_size:
+                recent_distances.pop(0)
+
+            # Adaptive perturbation magnitude with enhanced scaling
+            # Base on temperature and configuration quality
+            base_perturbation = temperature * 0.05
+
+            # Enhanced scaling based on current configuration quality
+            distances = pdist(current_points)
+            if len(distances) > 0:
+                d_min = np.min(distances)
+                d_max = np.max(distances)
+                d_mean = np.mean(distances)
+
+                # Scale based on how spread out points are relative to their mean
+                spread_ratio = d_min / (d_mean + 1e-10)
+                if spread_ratio < 0.3:
+                    # Very tight cluster - large perturbation needed
+                    perturbation_magnitude = base_perturbation * 4.0
+                elif spread_ratio < 0.6:
+                    # Moderate clustering - moderate perturbation
+                    perturbation_magnitude = base_perturbation * 2.5
+                else:
+                    # Well-spaced points - small perturbation to fine-tune
+                    perturbation_magnitude = base_perturbation * 1.0
+            else:
+                perturbation_magnitude = base_perturbation
+
+            # Further adjust based on distance distribution stability
+            if len(recent_distances) > 10:
+                recent_std = np.std(recent_distances[-10:])
+                recent_avg = np.mean(recent_distances[-10:])
+                # If distances are very stable, reduce perturbation to avoid oscillation
+                if recent_std < 0.05 and recent_avg > 0.4:
+                    perturbation_magnitude *= 0.7
+                # If distances are fluctuating a lot, increase perturbation to escape local optima
+                elif recent_std > 0.1:
+                    perturbation_magnitude *= 1.3
+
+            # Cap the perturbation magnitude with more conservative bounds
+            perturbation_magnitude = min(0.15, max(0.005, perturbation_magnitude))
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+            new_fitness = multi_objective_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        # Final checkpoint save
+        if best_ratio > best_checkpoint_ratio:
+            best_checkpoint_ratio = best_ratio
+            best_checkpoint_points = best_points.copy()
+
+        # If no checkpoint was saved during optimization, use best_points
+        if best_checkpoint_points is None:
+            best_checkpoint_points = best_points.copy()
+
+        return best_checkpoint_points, best_checkpoint_ratio
+>>>>>>> REPLACE
+</DIFF>

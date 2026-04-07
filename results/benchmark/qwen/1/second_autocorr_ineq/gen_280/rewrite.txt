@@ -1,0 +1,325 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from typing import List, Tuple
+import time
+from numba import jit, prange
+import warnings
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def sparse_autoconvolution_approximation(f_values: np.ndarray, 
+                                       sample_points: np.ndarray = None) -> np.ndarray:
+    """
+    Sparse approximation of autoconvolution that only evaluates at critical points
+    """
+    n = len(f_values)
+    
+    if sample_points is None:
+        # Create sparse sampling grid that captures important features
+        # Sample more densely around potential peaks in the original function
+        sample_density = max(100, n // 10)
+        sample_indices = np.linspace(0, n-1, sample_density, dtype=np.int64)
+        sample_points = sample_indices
+    
+    # For sparse autoconvolution, we'll compute a subset of the full convolution
+    # This is a simplified approximation for performance
+    g_length = 2 * n - 1
+    g_sparse = np.zeros(len(sample_points))
+    
+    # For demonstration, we'll use a more targeted approach by focusing on areas
+    # where the original function has higher values
+    for i, sample_idx in enumerate(sample_points):
+        if sample_idx < g_length:
+            # Simplified sparse computation - just evaluate some key cross-products
+            g_sparse[i] = 0.0
+            # Sum over relevant contributions
+            for j in range(n):
+                k = sample_idx - j
+                if 0 <= k < n:
+                    g_sparse[i] += f_values[j] * f_values[k]
+    
+    return g_sparse
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_sparse(f_values: np.ndarray, 
+                                      max_points: int = 2000) -> tuple:
+    """
+    Fast sparse computation of autoconvolution norms
+    """
+    n = len(f_values)
+    
+    # Determine sparse sampling based on function density
+    # Sample more points where function values are larger
+    total_mass = np.sum(f_values)
+    if total_mass > 0:
+        # Adaptive sampling - more points where there's more mass
+        sample_density = min(max_points, max(100, int(n * 2)))
+    else:
+        sample_density = 100
+    
+    # Create sparse grid
+    if sample_density < n:
+        sample_indices = np.linspace(0, n-1, sample_density, dtype=np.int64)
+    else:
+        sample_indices = np.arange(n, dtype=np.int64)
+    
+    # Get sparse autoconvolution
+    g_sparse = sparse_autoconvolution_approximation(f_values, sample_indices)
+    
+    # Compute norms from sparse data
+    norm_g_2_squared = 0.0
+    norm_g_1 = 0.0
+    norm_g_inf = 0.0
+    
+    # For L2^2: use trapezoidal rule on sparse points
+    g_sparse_abs = np.abs(g_sparse)
+    if len(g_sparse) >= 2:
+        # Trapezoidal-like integration for sparse data
+        for i in range(len(g_sparse) - 1):
+            y1 = g_sparse_abs[i]
+            y2 = g_sparse_abs[i + 1]
+            norm_g_2_squared += (y1 * y1 + y1 * y2 + y2 * y2) / 3.0
+    
+    # L1 norm (sum of absolute values)
+    for i in range(len(g_sparse)):
+        norm_g_1 += g_sparse_abs[i]
+    
+    # L-infinity norm (max absolute value)
+    for i in range(len(g_sparse)):
+        if g_sparse_abs[i] > norm_g_inf:
+            norm_g_inf = g_sparse_abs[i]
+    
+    return norm_g_2_squared, norm_g_1, norm_g_inf
+
+def evaluate_c2_sparse(f_values: List[float]) -> float:
+    """
+    Fast evaluation of C₂ using sparse autoconvolution computation
+    """
+    try:
+        f = np.array(f_values)
+        norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms_sparse(f)
+        
+        # Avoid division by zero with stricter thresholds
+        if norm_g_1 <= 1e-15 or norm_g_inf <= 1e-15:
+            return 0.0
+            
+        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+        return c2
+    except Exception:
+        return 0.0
+
+# Multi-resolution initialization focused on key structural elements
+def multi_resolution_initialization(n_steps: int) -> List[float]:
+    """
+    Initialize function with multi-resolution approach focusing on critical regions
+    """
+    # Start with coarse resolution to identify major features
+    coarse_res = max(50, n_steps // 10)
+    
+    # Create coarse function with alternating pattern and peaks
+    coarse_f = np.zeros(coarse_res)
+    
+    # Create dominant structure
+    segment_size = max(1, coarse_res // 8)
+    for i in range(0, coarse_res, segment_size):
+        end_idx = min(i + segment_size, coarse_res)
+        if (i // segment_size) % 2 == 0:
+            coarse_f[i:end_idx] = 0.7 + np.random.random(end_idx - i) * 0.25
+        else:
+            coarse_f[i:end_idx] = 0.1 + np.random.random(end_idx - i) * 0.15
+    
+    # Add some peaks for complexity
+    n_peaks = 2 + np.random.randint(0, 3)
+    for _ in range(n_peaks):
+        peak_pos = np.random.randint(0, coarse_res)
+        peak_width = max(1, coarse_res // 15)
+        start = max(0, peak_pos - peak_width // 2)
+        end = min(coarse_res, peak_pos + peak_width // 2)
+        peak_height = 0.3 + np.random.random() * 0.4
+        coarse_f[start:end] = np.maximum(coarse_f[start:end], peak_height)
+    
+    # Interpolate to target resolution
+    coarse_x = np.linspace(-1, 1, coarse_res)
+    fine_x = np.linspace(-1, 1, n_steps)
+    
+    from scipy.interpolate import interp1d
+    interpolate_func = interp1d(coarse_x, coarse_f, kind='linear', fill_value='extrapolate')
+    f = interpolate_func(fine_x)
+    
+    # Apply smoothing envelope
+    gaussian_width = 0.2 + np.random.random() * 0.15
+    gaussian = np.exp(-0.5 * (fine_x / gaussian_width)**2)
+    f = f * gaussian * 0.6 + gaussian * 0.4
+    
+    # Ensure non-negativity and normalize
+    f = np.clip(f, 0, None)
+    if np.sum(f) > 0:
+        f = f / np.sum(f)
+    
+    return f.tolist()
+
+# Enhanced evolutionary framework with smart initialization
+def smart_evolutionary_optimization(max_generations: int = 100) -> List[float]:
+    """
+    Enhanced evolutionary optimization that starts with multi-resolution initialization
+    """
+    n_steps = 500
+    
+    # Multi-resolution approach
+    # Start with coarse resolution for global search
+    coarse_f = multi_resolution_initialization(n_steps)
+    
+    # Quick assessment of initial quality
+    initial_c2 = evaluate_c2_sparse(coarse_f)
+    
+    # Use differential evolution on the coarse initialization
+    bounds = [(0, 1.0) for _ in range(n_steps)]
+    
+    def objective(x):
+        return -evaluate_c2_sparse(x)
+    
+    try:
+        # Run evolutionary optimization with reduced population for speed
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=max_generations // 2,
+            popsize=min(10, n_steps // 50 + 5),
+            seed=42,
+            disp=False,
+            init='latinhypercube'
+        )
+        
+        if result.success:
+            optimized_f = np.maximum(result.x, 0)
+            if np.sum(optimized_f) > 0:
+                optimized_f = optimized_f / np.sum(optimized_f)
+            
+            # Check if we improved
+            final_c2 = evaluate_c2_sparse(optimized_f)
+            if final_c2 > initial_c2:
+                return optimized_f.tolist()
+        
+    except Exception:
+        pass
+    
+    # Return initial solution if optimization fails
+    return coarse_f
+
+# Adaptive local refinement focused on high-curvature regions
+def adaptive_local_refinement(initial_f: List[float], max_iter: int = 30) -> List[float]:
+    """
+    Local refinement that intelligently targets high-curvature areas
+    """
+    f = np.array(initial_f)
+    n_steps = len(f)
+    
+    # Identify high-value regions for focused refinement
+    high_value_indices = np.where(f > np.mean(f) * 0.5)[0]
+    
+    # Focus refinement on critical areas
+    for iteration in range(max_iter):
+        current_c2 = evaluate_c2_sparse(f.tolist())
+        
+        # Try focused perturbations in high-value regions
+        best_f = f.copy()
+        best_c2 = current_c2
+        
+        # Try multiple refined perturbations
+        for _ in range(50):
+            perturbed_f = f.copy()
+            
+            # Choose a region to perturb - bias toward high-value areas
+            if len(high_value_indices) > 0 and np.random.random() < 0.7:
+                # Perturb in high-value region
+                idx = np.random.choice(high_value_indices)
+            else:
+                # Random perturbation
+                idx = np.random.randint(0, n_steps)
+            
+            # Larger perturbation size in early iterations
+            scale_factor = max(0.01, 0.05 * (1.0 - iteration / max_iter))
+            delta = np.random.normal(0, scale_factor)
+            perturbed_f[idx] = max(0, perturbed_f[idx] + delta)
+            
+            # Normalize
+            if np.sum(perturbed_f) > 0:
+                perturbed_f = perturbed_f / np.sum(perturbed_f)
+            
+            new_c2 = evaluate_c2_sparse(perturbed_f.tolist())
+            
+            if new_c2 > best_c2:
+                best_c2 = new_c2
+                best_f = perturbed_f
+        
+        f = best_f
+        
+        # Early stopping for efficiency
+        if abs(best_c2 - current_c2) < 1e-8:
+            break
+    
+    return f.tolist()
+
+# Smart hybrid approach that balances speed and quality
+def smart_hybrid_optimization() -> List[float]:
+    """
+    Fast hybrid optimization using multi-resolution and sparse evaluation
+    """
+    # Strategy 1: Multi-resolution initialization
+    initial_f = multi_resolution_initialization(500)
+    initial_c2 = evaluate_c2_sparse(initial_f)
+    
+    # Strategy 2: Fast evolutionary optimization with sparse evaluation
+    evolved_f = smart_evolutionary_optimization(50)
+    evolved_c2 = evaluate_c2_sparse(evolved_f)
+    
+    # Strategy 3: Adaptive local refinement
+    if evolved_c2 > initial_c2:
+        refined_f = adaptive_local_refinement(evolved_f, 20)
+        refined_c2 = evaluate_c2_sparse(refined_f)
+        
+        if refined_c2 > evolved_c2:
+            return refined_f
+        else:
+            return evolved_f
+    else:
+        refined_f = adaptive_local_refinement(initial_f, 20)
+        refined_c2 = evaluate_c2_sparse(refined_f)
+        
+        if refined_c2 > initial_c2:
+            return refined_f
+        else:
+            return initial_f
+
+def construct_function() -> list[float]:
+    """
+    Construct step-function with high C2 value using smart multi-resolution approach
+    """
+    try:
+        # Use smart hybrid optimization
+        final_solution = smart_hybrid_optimization()
+        
+        # Final validation and normalization
+        if not final_solution:
+            final_solution = [1.0/500] * 500
+        
+        # Ensure non-negativity and normalization
+        final_solution = np.array(final_solution)
+        final_solution = np.clip(final_solution, 0, None)
+        if np.sum(final_solution) > 0:
+            final_solution = final_solution / np.sum(final_solution)
+        
+        return final_solution.tolist()
+        
+    except Exception as e:
+        print(f"Error in optimization: {e}")
+        # Fallback to simple initialization
+        return [1.0/500] * 500
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

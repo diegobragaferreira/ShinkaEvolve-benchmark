@@ -1,0 +1,276 @@
+--- a/original.py
++++ b/original.py
+@@ -1,159 +1,192 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import pdist, squareform
++import math
+ import time
+-from scipy.spatial.distance import pdist, squareform
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+ 
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum pairwise distances."""
+         if len(points) < 2:
+             return 0.0
+ 
+         # Compute pairwise distances
+         distances = pdist(points)
+ 
+         # Get min and max distances
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+ 
+         # Avoid division by zero
+         if max_dist == 0:
+             return 0.0
+ 
+         return min_dist / max_dist
+ 
+     def project_to_sphere(points):
+         """Project points onto unit sphere while maintaining relative positions."""
+         norms = np.linalg.norm(points, axis=1)
+         # Avoid division by zero
+         norms = np.where(norms == 0, 1.0, norms)
+         return points / norms[:, np.newaxis] * 0.99
+ 
+-    def simulated_annealing():
+-        # Initialize with Fibonacci sphere arrangement
+-        np.random.seed(42)
+-        golden_ratio = (1 + np.sqrt(5)) / 2
+-        points = []
++    def initialize_points_fibonacci(seed=42):
++        """Initialize points using enhanced Fibonacci sphere method."""
++        np.random.seed(seed)
++        points = np.zeros((14, 3))
++        
++        # Golden ratio
++        golden_ratio = (1 + math.sqrt(5)) / 2
++        
++        # Use a more refined Fibonacci approach with better distribution
++        for i in range(14):
++            # Adjusted Fibonacci approach for better distribution
++            # The offset helps avoid clustering near poles
++            offset = 0.5
++            y = 1 - (i / float(14 - 1)) * 2  # y goes from 1 to -1
++            radius = math.sqrt(1 - y * y)  # radius at y
++            
++            # Use a more refined phi calculation to better distribute points
++            # The golden ratio relationship helps with uniformity
++            phi = (i * golden_ratio) % 14 * (2 * math.pi / 14) + offset * (i / 14) * math.pi
++            
++            # Convert to Cartesian coordinates
++            x = radius * math.cos(phi)
++            z = radius * math.sin(phi)
++            
++            points[i] = [x, y, z]
++            
++        # Apply small random perturbations to break symmetries
++        perturbation_magnitude = 0.05
++        points += np.random.normal(0, perturbation_magnitude, points.shape)
++        
++        # Normalize to unit sphere to ensure all points are exactly on the surface
++        norms = np.linalg.norm(points, axis=1)
++        safe_norms = np.where(norms == 0, 1.0, norms)
++        points = points / safe_norms[:, np.newaxis]
++        
++        return points
+ 
+-        for i in range(14):
+-            theta = np.arccos(1 - 2 * (i / 13))
+-            phi = np.mod(i * golden_ratio, 1) * 2 * np.pi
+-
+-            x = np.sin(theta) * np.cos(phi)
+-            y = np.sin(theta) * np.sin(phi)
+-            z = np.cos(theta)
+-
+-            # Add controlled noise
+-            points.append([x + np.random.normal(0, 0.01),
+-                          y + np.random.normal(0, 0.01),
+-                          z + np.random.normal(0, 0.01)])
+-
+-        points = np.array(points)
+-
+-        # Project to unit sphere
+-        points = project_to_sphere(points)
+-
+-        # Simulated Annealing parameters
++    def adaptive_simulated_annealing(initial_points, max_iterations=100000):
++        """Optimize point placement using enhanced simulated annealing with adaptive strategies."""
++        current_points = initial_points.copy()
++        best_points = current_points.copy()
++        best_ratio = compute_min_max_ratio(current_points)
++        
++        # Enhanced adaptive cooling parameters
+         current_temp = 1.0
+         min_temp = 1e-8
+         cooling_rate = 0.9995
+-        max_iter = 100000
+-        accept_threshold = 0.01
+-
+-        # Initialize best solution
+-        best_points = points.copy()
+-        best_ratio = compute_min_max_ratio(best_points)
+-
++        max_stagnation = 500
++        stagnation_counter = 0
++        
++        # Track recent ratios for adaptive cooling
++        recent_ratios = []
++        last_improvement_iter = 0
++        
+         start_time = time.time()
+-
+-        for iteration in range(max_iter):
+-            # Cool down temperature
+-            current_temp *= cooling_rate
+-
++        
++        for iteration in range(max_iterations):
++            # Adaptive temperature cooling based on convergence
++            if stagnation_counter > max_stagnation and current_temp > min_temp:
++                current_temp *= 0.95  # Faster cooling when stagnating
++                stagnation_counter = 0
++                
+             if current_temp < min_temp:
+                 break
+ 
+-            # Try to make a small random move
+-            test_points = best_points.copy()
++            # Adaptive perturbation based on current distribution quality
++            distances = pdist(current_points)
++            min_dist = np.min(distances)
++            max_dist = np.max(distances)
++            mean_dist = np.mean(distances) if len(distances) > 0 else 1.0
++            
++            # Choose perturbation size adaptively
++            if len(recent_ratios) > 10:
++                recent_improved = np.mean(np.array(recent_ratios[-10:]) > recent_ratios[-11]) if len(recent_ratios) >= 11 else 0
++                if recent_improved > 0.5 and np.random.rand() < 0.3:
++                    # More aggressive perturbations when recently improved
++                    perturbation_scale = current_temp * 0.02
++                else:
++                    perturbation_scale = current_temp * 0.01
++            else:
++                perturbation_scale = current_temp * 0.01
+ 
+-            # Select random point to perturb
++            # Make a small random perturbation to one random point
++            test_points = current_points.copy()
+             point_idx = np.random.randint(0, 14)
+-
+-            # Make small random perturbation
+-            delta = np.random.normal(0, 0.001, 3)
++            
++            # Create perturbation vector with adaptive scale
++            delta = np.random.normal(0, perturbation_scale, 3)
+             test_points[point_idx] += delta
+-
++            
+             # Project back to sphere
+             test_points = project_to_sphere(test_points)
+-
++            
+             # Compute new ratio
+             test_ratio = compute_min_max_ratio(test_points)
+-
++            
+             # Accept or reject based on Metropolis criterion
+-            if test_ratio > best_ratio:
+-                best_points = test_points.copy()
+-                best_ratio = test_ratio
+-            elif np.random.random() < np.exp((test_ratio - best_ratio) / current_temp):
+-                best_points = test_points.copy()
+-                best_ratio = test_ratio
+-
++            if test_ratio > best_ratio or np.random.random() < math.exp((test_ratio - best_ratio) / current_temp):
++                current_points = test_points.copy()
++                if test_ratio > best_ratio:
++                    best_ratio = test_ratio
++                    best_points = test_points.copy()
++                    last_improvement_iter = iteration
++                    stagnation_counter = 0
++                else:
++                    stagnation_counter += 1
++            else:
++                stagnation_counter += 1
++                
++            # Track recent ratios for adaptive cooling
++            recent_ratios.append(test_ratio)
++            if len(recent_ratios) > 20:
++                recent_ratios.pop(0)
++                
+             # Occasionally print progress
+             if iteration % 10000 == 0:
+                 elapsed = time.time() - start_time
+                 #print(f"Iteration {iteration}, Ratio: {best_ratio:.6f}, Temp: {current_temp:.6f}, Time: {elapsed:.2f}s")
+-
++        
+         return best_points, best_ratio
+ 
+     def multi_start_optimization():
+-        """Run simulated annealing multiple times with different random seeds."""
++        """Run adaptive simulated annealing multiple times with different random seeds."""
+         best_points = None
+         best_ratio = 0.0
+         best_seed = 0
+-
++        
+         # Try multiple restarts with different seeds
+-        for seed in [42, 123, 456, 789]:
++        seeds = [42, 123, 456, 789]
++        
++        for seed in seeds:
+             np.random.seed(seed)
+-            points, ratio = simulated_annealing()
+-
++            initial_points = initialize_points_fibonacci(seed)
++            points, ratio = adaptive_simulated_annealing(initial_points, max_iterations=100000)
++            
+             if ratio > best_ratio:
+                 best_ratio = ratio
+                 best_points = points.copy()
+                 best_seed = seed
+-
++                
+         return best_points, best_ratio
+ 
+-    # Run optimization
++    # Run optimization with multi-start approach
+     points, ratio = multi_start_optimization()
+-
++    
+     # Final check and normalization
+     if points is None:
+         # Fallback to initial configuration
+-        np.random.seed(42)
+-        golden_ratio = (1 + np.sqrt(5)) / 2
+-        points = []
+-        for i in range(14):
+-            theta = np.arccos(1 - 2 * (i / 13))
+-            phi = np.mod(i * golden_ratio, 1) * 2 * np.pi
+-
+-            x = np.sin(theta) * np.cos(phi)
+-            y = np.sin(theta) * np.sin(phi)
+-            z = np.cos(theta)
+-
+-            points.append([x + np.random.normal(0, 0.01),
+-                          y + np.random.normal(0, 0.01),
+-                          z + np.random.normal(0, 0.01)])
+-
+-        points = np.array(points)
+-        points = project_to_sphere(points)
+-
++        points = initialize_points_fibonacci(42)
++    
+     return points
+ 
+-
+ # EVOLVE-BLOCK-END

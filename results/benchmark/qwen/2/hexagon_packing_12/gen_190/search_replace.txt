@@ -1,0 +1,183 @@
+<NAME>
+enhance_spatial_hashing_with_bounding_boxes
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the spatial hashing implementation by adding bounding box caching and more efficient neighbor detection. This will significantly improve the overlap checking performance, especially when dealing with many hexagon pairs. The key insight is to store bounding boxes for each hexagon and use them as an early rejection test before doing the expensive SAT overlap test.
+
+This optimization addresses the main bottleneck in the overlap detection system where we're currently checking all pairs of hexagons inefficiently. By using bounding boxes for quick rejection, we can dramatically reduce the number of expensive SAT tests needed.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def spatial_hash_grid(hex_data, cell_size=None):
+    """Create spatial hash grid for fast neighbor lookup."""
+    if cell_size is None:
+        # Estimate cell size based on hexagon size
+        cell_size = 2.0  # Size of grid cells, roughly 2x the hexagon diameter
+
+    grid = {}
+
+    for i, (cx, cy, _) in enumerate(hex_data):
+        # Calculate grid cell indices
+        grid_x = int(cx // cell_size)
+        grid_y = int(cy // cell_size)
+
+        # Store hex index in grid cell
+        if (grid_x, grid_y) not in grid:
+            grid[(grid_x, grid_y)] = []
+        grid[(grid_x, grid_y)].append(i)
+
+    return grid, cell_size
+
+
+def get_neighbors(grid, grid_x, grid_y, cell_size):
+    """Get all neighbors in the spatial hash grid."""
+    neighbors = []
+    # Check the cell and its 8 neighbors
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            nx, ny = grid_x + dx, grid_y + dy
+            if (nx, ny) in grid:
+                neighbors.extend(grid[(nx, ny)])
+    return neighbors
+
+
+def check_overlaps_spatial_hash(hex_data, vertices_cache=None):
+    """Check overlaps using spatial hashing to reduce comparisons."""
+    if len(hex_data) <= 1:
+        return False
+
+    # Create spatial hash grid
+    grid, cell_size = spatial_hash_grid(hex_data)
+
+    # Check overlaps efficiently using neighbor lists
+    for i in range(len(hex_data)):
+        cx1, cy1, angle1 = hex_data[i]
+
+        # Get grid cell coordinates for this hexagon
+        grid_x = int(cx1 // cell_size)
+        grid_y = int(cy1 // cell_size)
+
+        # Get potential neighbors
+        neighbors = get_neighbors(grid, grid_x, grid_y, cell_size)
+
+        # Check overlap only with neighbors
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks
+                continue
+
+            cx2, cy2, angle2 = hex_data[j]
+
+            # Use cached vertices if available
+            if vertices_cache is not None:
+                vertices1 = vertices_cache[i]
+                vertices2 = vertices_cache[j]
+            else:
+                vertices1 = hexagon_vertices_jit(cx1, cy1, angle1)
+                vertices2 = hexagon_vertices_jit(cx2, cy2, angle2)
+
+            # Perform overlap test
+            if separate_axis_test_jit(vertices1, vertices2):
+                return True
+
+    return False
+=======
+def spatial_hash_grid(hex_data, cell_size=None):
+    """Create spatial hash grid for fast neighbor lookup."""
+    if cell_size is None:
+        # Estimate cell size based on hexagon size
+        cell_size = 2.0  # Size of grid cells, roughly 2x the hexagon diameter
+
+    grid = {}
+    bounding_boxes = {}  # Cache bounding boxes for each hexagon
+
+    for i, (cx, cy, angle) in enumerate(hex_data):
+        # Calculate grid cell indices
+        grid_x = int(cx // cell_size)
+        grid_y = int(cy // cell_size)
+
+        # Store hex index in grid cell
+        if (grid_x, grid_y) not in grid:
+            grid[(grid_x, grid_y)] = []
+        grid[(grid_x, grid_y)].append(i)
+
+        # Compute and cache bounding box for this hexagon
+        vertices = hexagon_vertices_jit(cx, cy, angle)
+        min_x = vertices[:, 0].min()
+        max_x = vertices[:, 0].max()
+        min_y = vertices[:, 1].min()
+        max_y = vertices[:, 1].max()
+        bounding_boxes[i] = (min_x, max_x, min_y, max_y)
+
+    return grid, cell_size, bounding_boxes
+
+
+def get_neighbors(grid, grid_x, grid_y, cell_size):
+    """Get all neighbors in the spatial hash grid."""
+    neighbors = []
+    # Check the cell and its 8 neighbors
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            nx, ny = grid_x + dx, grid_y + dy
+            if (nx, ny) in grid:
+                neighbors.extend(grid[(nx, ny)])
+    return neighbors
+
+
+def check_overlaps_spatial_hash(hex_data, vertices_cache=None, bounding_boxes_cache=None):
+    """Check overlaps using spatial hashing to reduce comparisons."""
+    if len(hex_data) <= 1:
+        return False
+
+    # Create spatial hash grid
+    grid, cell_size, bounding_boxes = spatial_hash_grid(hex_data)
+
+    # Check overlaps efficiently using neighbor lists
+    for i in range(len(hex_data)):
+        cx1, cy1, angle1 = hex_data[i]
+
+        # Get grid cell coordinates for this hexagon
+        grid_x = int(cx1 // cell_size)
+        grid_y = int(cy1 // cell_size)
+
+        # Get potential neighbors
+        neighbors = get_neighbors(grid, grid_x, grid_y, cell_size)
+
+        # Check overlap only with neighbors
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks
+                continue
+
+            cx2, cy2, angle2 = hex_data[j]
+
+            # Early rejection using bounding boxes
+            if bounding_boxes_cache is not None:
+                bb1 = bounding_boxes_cache[i]
+                bb2 = bounding_boxes_cache[j]
+            else:
+                bb1 = bounding_boxes[i]
+                bb2 = bounding_boxes[j]
+
+            # Check if bounding boxes intersect
+            if (bb1[1] < bb2[0] or bb2[1] < bb1[0] or
+                bb1[3] < bb2[2] or bb2[3] < bb1[2]):
+                # Bounding boxes don't overlap, skip expensive SAT test
+                continue
+
+            # Use cached vertices if available
+            if vertices_cache is not None:
+                vertices1 = vertices_cache[i]
+                vertices2 = vertices_cache[j]
+            else:
+                vertices1 = hexagon_vertices_jit(cx1, cy1, angle1)
+                vertices2 = hexagon_vertices_jit(cx2, cy2, angle2)
+
+            # Perform overlap test
+            if separate_axis_test_jit(vertices1, vertices2):
+                return True
+
+    return False
+>>>>>>> REPLACE
+
+</DIFF>

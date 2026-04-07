@@ -1,0 +1,317 @@
+--- a/original.py
++++ b/original.py
+@@ -1,130 +1,209 @@
+ # EVOLVE-BLOCK-START
+-
+ import numpy as np
+-from scipy.optimize import differential_evolution
++from scipy.optimize import minimize
++from scipy.signal import convolve
++from scipy.interpolate import interp1d
++import time
+ from numba import jit
+-import time
+-
+-def compute_autoconvolution(f_vals):
+-    """Compute autoconvolution g = f*f using NumPy's convolve function for better efficiency"""
+-    # Using 'full' mode to get complete convolution result
+-    # This is equivalent to manual double sum but much faster and numerically stable
+-    g = np.convolve(f_vals, f_vals, mode='full')
++
++@jit(nopython=True)
++def compute_autoconvolution_numba(f_vals):
++    """Fast autoconvolution computation using Numba"""
++    n = len(f_vals)
++    g = np.zeros(2*n - 1)
++    for i in range(n):
++        for j in range(n):
++            k = i + j
++            g[k] += f_vals[i] * f_vals[j]
+     return g
+ 
+-def compute_norms(g_vals):
+-    """Compute L2, L1, and L-infinity norms correctly"""
+-    # L2 norm squared (using trapezoidal-like approximation)
+-    l2_squared = 0.0
++@jit(nopython=True)
++def compute_norms_numba(g_vals):
++    """Fast norm computation using Numba"""
+     n = len(g_vals)
++    
++    # L2 norm squared using trapezoidal-like approximation
++    l2_sq = 0.0
+     if n >= 2:
+-        # For piecewise linear integration: integrate over intervals
+-        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1
+         for i in range(n-1):
+             y1 = g_vals[i]
+             y2 = g_vals[i+1]
+-            l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+-
+-    # L1 norm (sum of absolute values - correctly computed)
++            l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
++
++    # L1 norm
+     l1 = 0.0
+-    for val in g_vals:
+-        l1 += abs(val)
+-
+-    # L-infinity norm (maximum absolute value)
+-    l_inf = np.max(np.abs(g_vals))
+-
+-    return l2_squared, l1, l_inf
+-
+-def evaluate_c2(f_vals):
+-    """Evaluate C2 for a given set of step heights"""
++    for i in range(n):
++        l1 += abs(g_vals[i])
++
++    # L-infinity norm
++    linf = 0.0
++    for i in range(n):
++        if abs(g_vals[i]) > linf:
++            linf = abs(g_vals[i])
++
++    return l2_sq, l1, linf
++
++def evaluate_c2_fast(f_vals):
++    """Fast C2 evaluation with proper error handling"""
+     try:
+-        # Ensure non-negative values
+         f_vals = np.maximum(f_vals, 0)
+-
+-        # Skip empty sequences
+         if len(f_vals) == 0:
+             return 0.0
+-
+-        # Compute autoconvolution
+-        g_vals = compute_autoconvolution(f_vals)
+-
+-        # Compute norms
+-        l2_squared, l1, l_inf = compute_norms(g_vals)
+-
+-        # Avoid division by zero
++        
++        g_vals = compute_autoconvolution_numba(f_vals)
++        l2_sq, l1, l_inf = compute_norms_numba(g_vals)
++        
+         if l1 <= 1e-15 or l_inf <= 1e-15:
+             return 0.0
+-
+-        # Compute C2
+-        c2 = l2_squared / (l1 * l_inf)
++            
++        c2 = l2_sq / (l1 * l_inf)
+         return c2
++    except Exception:
++        return 0.0
++
++def create_initial_pattern(n_steps):
++    """Create a sophisticated initial pattern based on mathematical intuition"""
++    # Create a pattern that balances high and low values strategically
++    # This pattern favors structure that leads to flatter autoconvolutions
++    pattern = []
++    
++    # Use sine wave modulation to create oscillatory behavior
++    x = np.linspace(0, 4*np.pi, n_steps)
++    base_pattern = 0.5 + 0.3 * np.sin(x)
++    
++    # Introduce strategic high/low regions
++    for i in range(n_steps):
++        if i % 4 == 0:
++            # High value region
++            pattern.append(1.0 + np.random.random() * 0.5)
++        elif i % 4 == 2:
++            # Low value region  
++            pattern.append(0.1 + np.random.random() * 0.2)
++        else:
++            # Intermediate values based on sine
++            pattern.append(max(0.0, base_pattern[i] + 0.1 * np.random.random() - 0.05))
++    
++    # Add some additional structure
++    for i in range(0, n_steps, 8):
++        if i < n_steps:
++            pattern[i] = 1.0 + np.random.random() * 0.3
++    
++    return np.array(pattern)
++
++def adaptive_refinement_step(current_params, target_c2, max_iter=50):
++    """Perform adaptive refinement using gradient information"""
++    # Create smoother representation for better gradient estimation
++    n_orig = len(current_params)
++    
++    # Interpolate to higher resolution for better gradient estimation
++    if n_orig < 100:
++        # Create fine grid
++        fine_points = np.linspace(0, n_orig-1, 2*n_orig)
++        interpolator = interp1d(np.arange(n_orig), current_params, kind='linear', fill_value='extrapolate')
++        current_params_fine = interpolator(fine_points)
++        n_fine = len(current_params_fine)
++    else:
++        current_params_fine = current_params
++        n_fine = n_orig
++    
++    # Use scipy's optimization with bounds
++    bounds = [(0.0, 3.0) for _ in range(n_fine)]
++    
++    def objective(x):
++        # Convert back to original resolution if needed
++        if n_fine != n_orig:
++            interpolator = interp1d(fine_points, x, kind='linear', fill_value='extrapolate')
++            x_original = interpolator(np.arange(n_orig))
++        else:
++            x_original = x
++            
++        return -evaluate_c2_fast(x_original)  # Negative for minimization
++    
++    # Use L-BFGS-B for local refinement
++    try:
++        result = minimize(objective, current_params_fine, method='L-BFGS-B', 
++                         bounds=bounds, options={'maxiter': max_iter, 'ftol': 1e-8})
++        if result.success:
++            refined_params = result.x
++            if n_fine != n_orig:
++                interpolator = interp1d(fine_points, refined_params, kind='linear', fill_value='extrapolate')
++                refined_params = interpolator(np.arange(n_orig))
++            return np.maximum(refined_params, 0)
++    except:
++        pass
++    
++    # If optimization fails, return current with slight perturbation
++    return np.maximum(current_params + np.random.normal(0, 0.01, len(current_params)), 0)
++
++def multi_resolution_optimization():
++    """Multi-resolution optimization approach"""
++    # Start with coarse resolution
++    n_steps = 500
++    current_params = create_initial_pattern(n_steps)
++    
++    # First stage: coarse optimization
++    current_params = adaptive_refinement_step(current_params, 0.9, max_iter=30)
++    
++    # Second stage: medium resolution
++    if n_steps > 100:
++        n_medium = min(1000, n_steps * 2)
++        # Interpolate to medium resolution
++        if n_medium > n_steps:
++            x_orig = np.linspace(0, n_steps-1, n_steps)
++            x_new = np.linspace(0, n_steps-1, n_medium)
++            interpolator = interp1d(x_orig, current_params, kind='linear', fill_value='extrapolate')
++            current_params = interpolator(x_new)
++        
++        current_params = adaptive_refinement_step(current_params, 0.92, max_iter=50)
++        
++        # Third stage: fine resolution
++        if n_medium > 100:
++            n_fine = min(2000, n_medium * 2)
++            if n_fine > n_medium:
++                x_orig = np.linspace(0, n_medium-1, n_medium)
++                x_new = np.linspace(0, n_medium-1, n_fine)
++                interpolator = interp1d(x_orig, current_params, kind='linear', fill_value='extrapolate')
++                current_params = interpolator(x_new)
++            
++            current_params = adaptive_refinement_step(current_params, 0.94, max_iter=70)
++    
++    # Final refinement
++    current_params = adaptive_refinement_step(current_params, 0.96, max_iter=100)
++    
++    return current_params
++
++def construct_function() -> list[float]:
++    """Main function to construct step-function with high C2 value"""
++    start_time = time.time()
++    
++    try:
++        # Multi-resolution optimization approach
++        f_values = multi_resolution_optimization()
++        
++        # Ensure we don't exceed time limit
++        elapsed = time.time() - start_time
++        if elapsed > 85:  # Leave 5 seconds buffer
++            pass
++            
++        # Final verification and cleanup
++        f_values = np.maximum(f_values, 0)
++        
++        # Report final result
++        final_c2 = evaluate_c2_fast(f_values)
++        print(f"Optimization completed in {elapsed:.2f} seconds")
++        print(f"Final C2 achieved: {final_c2}")
++        
++        return f_values.tolist()
++        
+     except Exception as e:
+-        return 0.0
+-
+-def objective_function(x):
+-    """Objective function to minimize (negative C2)"""
+-    c2 = evaluate_c2(x)
+-    return -c2
+-
+-def sophisticated_initialization(n_steps):
+-    """Create a sophisticated initial population"""
+-    # Create alternating high/low pattern with some randomness
+-    initial = []
+-    for i in range(n_steps):
+-        if i % 2 == 0:
+-            initial.append(np.random.uniform(0.5, 1.0))
+-        else:
+-            initial.append(np.random.uniform(0.0, 0.2))
+-    return np.array(initial)
+-
+-def evolutionary_optimization():
+-    """Use differential evolution to optimize step function"""
+-    # Start with a reasonable initial size
+-    n_steps = 500
+-
+-    # Define bounds for each parameter (step height)
+-    bounds = [(0.0, 1.0) for _ in range(n_steps)]
+-
+-    # Use sophisticated initialization
+-    x0 = sophisticated_initialization(n_steps)
+-
+-    # Run differential evolution with constraints
+-    result = differential_evolution(
+-        objective_function,
+-        bounds,
+-        seed=42,
+-        maxiter=100,
+-        popsize=10,
+-        mutation=(0.5, 1.0),
+-        recombination=0.7,
+-        disp=False,
+-        tol=1e-6
+-    )
+-
+-    return result.x
+-
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value using evolutionary optimization."""
+-    start_time = time.time()
+-
+-    # Use evolutionary optimization to find optimal step heights
+-    optimized_params = evolutionary_optimization()
+-
+-    # Clip negative values to zero (though DE should maintain bounds)
+-    f_values = np.maximum(optimized_params, 0).tolist()
+-
+-    end_time = time.time()
+-
+-    # Verify the result
+-    c2_value = evaluate_c2(optimized_params)
+-
+-    print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+-    print(f"C2 achieved: {c2_value}")
+-
+-    return f_values
++        # Fallback to simple pattern if anything goes wrong
++        print(f"Fallback due to error: {e}")
++        n_steps = 500
++        fallback_pattern = [0.5 + 0.3 * np.sin(i * 0.2) for i in range(n_steps)]
++        return np.maximum(fallback_pattern, 0).tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

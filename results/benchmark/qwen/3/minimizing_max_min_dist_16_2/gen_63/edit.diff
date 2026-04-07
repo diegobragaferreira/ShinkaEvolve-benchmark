@@ -1,0 +1,470 @@
+--- a/original.py
++++ b/original.py
+@@ -1,233 +1,263 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import cdist
+-from scipy.spatial import cKDTree
++from scipy.spatial.distance import pdist
+ import time
+-import math
++from typing import Tuple
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
++    Uses a grid-based evolutionary approach for improved optimization.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+-
++    
+     np.random.seed(42)
+-
+-    # Enhanced hexagonal initialization with better spacing and symmetry breaking
+-    def initialize_enhanced_hexagonal():
+-        # Create a more optimal hexagonal arrangement
+-        # For 16 points, we can arrange them in 4 rows with staggered positions
++    
++    # Grid-based evolutionary optimization approach
++    def grid_evolutionary_optimization() -> np.ndarray:
++        # Define grid resolution levels for coarse-to-fine evolution
++        resolution_levels = [4, 8, 16]  # Start with 4x4, then 8x8, finally 16x16 grid
++        current_resolution = 0
++        
++        # Initialize population with multiple diverse starting configurations
++        population_size = 20
++        population = []
++        
++        # Create initial diverse configurations using different grid patterns
++        for _ in range(population_size):
++            # Start with structured hexagonal-like pattern
++            points = create_hexagonal_pattern()
++            
++            # Add random perturbation
++            noise = np.random.normal(0, 0.02, points.shape)
++            points += noise
++            points = np.clip(points, 0, 1)
++            population.append(points.copy())
++        
++        best_solution = None
++        best_ratio = 0
++        
++        # Evolution across different resolution levels
++        for level_idx, resolution in enumerate(resolution_levels):
++            current_resolution = resolution
++            
++            # For first level, do more generations to establish good structures
++            generations = 100 if level_idx == 0 else 50
++            
++            # Create grid-based population at current resolution
++            grid_population = []
++            
++            # Convert existing population to grid representation and expand
++            for individual in population[:10]:  # Take top half for grid conversion
++                # Create grid representation
++                grid_points = convert_to_grid_representation(individual, resolution)
++                grid_population.append(grid_points)
++            
++            # Fill remaining with random variations
++            for _ in range(10):
++                base_points = create_hexagonal_pattern()
++                noise = np.random.normal(0, 0.03, base_points.shape)
++                base_points += noise
++                base_points = np.clip(base_points, 0, 1)
++                grid_points = convert_to_grid_representation(base_points, resolution)
++                grid_population.append(grid_points)
++            
++            # Evolve at current resolution
++            evolved_population = evolve_at_resolution(grid_population, resolution, generations)
++            
++            # Convert back to continuous points
++            continuous_population = []
++            for grid_points in evolved_population:
++                continuous_points = convert_from_grid_representation(grid_points, resolution)
++                continuous_population.append(continuous_points)
++            
++            # Evaluate fitness
++            fitness_scores = []
++            for points in continuous_population:
++                ratio = calculate_ratio(points)
++                fitness_scores.append(ratio)
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_solution = points.copy()
++            
++            # Select top individuals for next generation
++            sorted_indices = np.argsort(fitness_scores)[::-1][:10]
++            population = [continuous_population[i] for i in sorted_indices]
++        
++        # Final refinement with local optimization
++        if best_solution is not None:
++            refined_solution = local_refinement(best_solution)
++            final_ratio = calculate_ratio(refined_solution)
++            if final_ratio > best_ratio:
++                best_ratio = final_ratio
++                best_solution = refined_solution
++        
++        return best_solution if best_solution is not None else create_hexagonal_pattern()
++    
++    def create_hexagonal_pattern() -> np.ndarray:
++        """Create initial hexagonal pattern for 16 points"""
+         points = []
+-
+-        # Use sqrt(3)/2 spacing for true hexagonal packing
+-        row_spacing = np.sqrt(3) / 2
+-        col_spacing = 1.0
+-
+         rows = 4
+         cols = 4
+-
++        
+         for i in range(rows):
+             for j in range(cols):
+-                # Offset every other row for hexagonal packing
+-                x = j * col_spacing + (i % 2) * col_spacing * 0.5
+-                y = i * row_spacing
++                x = j + 0.5 * (i % 2)
++                y = i * np.sqrt(3)/2
+                 points.append([x, y])
+-
++        
+         points = np.array(points)
+-
+-        # Normalize to fit in [0,1] x [0,1]
+-        max_x = (cols - 1) + 0.5  # Account for offset in last row
+-        max_y = (rows - 1) * row_spacing
+-
++        
++        # Normalize to [0,1] x [0,1]
++        max_x = cols - 0.5
++        max_y = (rows - 1) * np.sqrt(3)/2
++        
+         points[:, 0] = points[:, 0] / max_x
+         points[:, 1] = points[:, 1] / max_y
+-
+-        # Add strategic perturbations to break symmetry
+-        # Use different noise levels for different points
+-        noise = np.random.normal(0, 0.015, points.shape)
+-
+-        # Apply more aggressive perturbation to corner points to break symmetry
+-        corner_indices = [0, 3, 12, 15]  # Four corners of 4x4 grid
+-        noise[corner_indices] *= 2.0
+-
+-        points += noise
+-        points = np.clip(points, 0, 1)
+-
++        
+         return points
+-
+-    # Compute min/max distance ratio with efficient distance matrix
+-    def compute_ratio(points):
++    
++    def convert_to_grid_representation(points: np.ndarray, resolution: int) -> np.ndarray:
++        """Convert continuous points to discrete grid representation"""
++        grid_points = np.zeros((len(points), 2), dtype=int)
++        
++        for i, point in enumerate(points):
++            x = int(point[0] * resolution)
++            y = int(point[1] * resolution)
++            # Clamp to valid grid indices
++            x = max(0, min(x, resolution - 1))
++            y = max(0, min(y, resolution - 1))
++            grid_points[i] = [x, y]
++            
++        return grid_points
++    
++    def convert_from_grid_representation(grid_points: np.ndarray, resolution: int) -> np.ndarray:
++        """Convert discrete grid points back to continuous coordinates"""
++        points = np.zeros((len(grid_points), 2))
++        
++        for i, (x, y) in enumerate(grid_points):
++            points[i, 0] = x / (resolution - 1) if resolution > 1 else 0
++            points[i, 1] = y / (resolution - 1) if resolution > 1 else 0
++            
++        return points
++    
++    def evolve_at_resolution(population: list, resolution: int, generations: int) -> list:
++        """Evolve population at specific grid resolution"""
++        for gen in range(generations):
++            # Evaluate fitness
++            fitness_scores = []
++            for individual in population:
++                points = convert_from_grid_representation(individual, resolution)
++                ratio = calculate_ratio(points)
++                fitness_scores.append(ratio)
++            
++            # Sort by fitness
++            sorted_indices = np.argsort(fitness_scores)[::-1]
++            top_individuals = [population[i] for i in sorted_indices[:len(population)//2]]
++            
++            # Create new population
++            new_population = top_individuals[:]
++            
++            # Elitism: keep best individual
++            if len(top_individuals) > 0:
++                new_population.append(top_individuals[0].copy())
++            
++            # Create offspring through crossover and mutation
++            while len(new_population) < len(population):
++                parent1_idx = np.random.randint(len(top_individuals))
++                parent2_idx = np.random.randint(len(top_individuals))
++                
++                # Crossover: combine grid positions
++                child = crossover(parents=(top_individuals[parent1_idx], top_individuals[parent2_idx]))
++                
++                # Mutation: slightly modify some grid positions  
++                child = mutate(child, resolution, mutation_rate=0.1)
++                
++                new_population.append(child)
++            
++            population = new_population[:len(population)]
++            
++        return population
++    
++    def crossover(parents: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
++        """Perform crossover between two grid representations"""
++        p1, p2 = parents
++        child = p1.copy()
++        
++        # Randomly swap some points between parents
++        for i in range(len(child)):
++            if np.random.rand() < 0.5:
++                child[i] = p2[i].copy()
++                
++        return child
++    
++    def mutate(grid_points: np.ndarray, resolution: int, mutation_rate: float) -> np.ndarray:
++        """Mutate grid representation with random movement"""
++        mutated = grid_points.copy()
++        
++        for i in range(len(mutated)):
++            if np.random.rand() < mutation_rate:
++                # Randomly shift point position
++                dx = np.random.randint(-2, 3)  # -2 to 2
++                dy = np.random.randint(-2, 3)
++                
++                mutated[i, 0] = max(0, min(mutated[i, 0] + dx, resolution - 1))
++                mutated[i, 1] = max(0, min(mutated[i, 1] + dy, resolution - 1))
++                
++        return mutated
++    
++    def calculate_ratio(points: np.ndarray) -> float:
++        """Calculate min/max distance ratio"""
+         if len(points) < 2:
+             return 0
+-
+-        # Use cKDTree for efficient nearest neighbor search
+-        tree = cKDTree(points)
+-
+-        # Find minimum distance (excluding self-distance)
+-        # Query for second closest point since first is self
+-        distances, indices = tree.query(points, k=2)
+-        d_min = np.min(distances[:, 1])  # Second closest (not self)
+-
+-        # Find maximum distance
+-        # For large point sets, find max distance more efficiently
+-        if len(points) <= 100:
+-            # Direct computation for small sets
+-            distances = cdist(points, points)
+-            np.fill_diagonal(distances, np.inf)
+-            d_max = np.min(distances[distances != np.inf]) if np.any(distances != np.inf) else 0
+-        else:
+-            # For larger sets, use pairwise maximum
+-            distances = cdist(points, points)
+-            np.fill_diagonal(distances, 0)
+-            d_max = np.max(distances)
+-
+-        if d_max == 0:
++        
++        # Compute pairwise distances using scipy
++        distances = pdist(points)
++        
++        if len(distances) == 0:
+             return 0
+-
++            
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max <= 0:
++            return 0
++            
+         return d_min / d_max
+-
+-    # Sphere packing objective function with geometric constraints
+-    def sphere_packing_objective(points):
+-        """Objective based on maximizing minimum distance (equivalent to maximum sphere radius)"""
+-        if len(points) < 2:
+-            return 0
+-
+-        # Use cKDTree for efficient computation
+-        tree = cKDTree(points)
+-        distances, indices = tree.query(points, k=2)
+-        min_distance = np.min(distances[:, 1])
+-
+-        # Penalize if any points are too close to boundaries
+-        boundary_penalty = 0
+-        boundary_threshold = 0.02
+-        for point in points:
+-            if (point[0] < boundary_threshold or point[0] > 1-boundary_threshold or
+-                point[1] < boundary_threshold or point[1] > 1-boundary_threshold):
+-                boundary_penalty += 1000 * boundary_threshold
+-
+-        return min_distance - boundary_penalty
+-
+-    # Generate neighbor solution with adaptive moves and better boundary handling
+-    def generate_neighbor_adaptive(points, step_size=0.02):
+-        new_points = points.copy()
+-
+-        # Choose move type: single point, pair move, or cluster move
+-        move_type = np.random.choice(['single', 'pair', 'cluster'], p=[0.6, 0.3, 0.1])
+-
+-        if move_type == 'single':
+-            # Single point move
+-            idx = np.random.randint(len(points))
+-            movement = np.random.normal(0, step_size, 2)
+-            new_points[idx] += movement
+-
+-        elif move_type == 'pair':
+-            # Move two nearby points together
+-            # Find two nearby points
+-            distances = cdist(points, points)
+-            np.fill_diagonal(distances, np.inf)
+-
+-            # Get indices of two closest points
+-            min_indices = np.unravel_index(np.argmin(distances), distances.shape)
+-            idx1, idx2 = min_indices
+-
+-            # Move them in coordinated way
+-            movement = np.random.normal(0, step_size * 0.8, 2)
+-            new_points[idx1] += movement
+-            new_points[idx2] += movement
+-
+-        else:  # cluster
+-            # Move a small cluster of points together
+-            num_cluster = min(3, len(points))
+-            cluster_indices = np.random.choice(len(points), num_cluster, replace=False)
+-
+-            # Move them towards their centroid
+-            centroid = np.mean(new_points[cluster_indices], axis=0)
+-            movement = np.random.normal(0, step_size * 0.5, 2)
+-
+-            for idx in cluster_indices:
+-                new_points[idx] += movement
+-
+-        # Apply boundary constraints with better handling
+-        # For better boundary handling, use clipping instead of reflection
+-        new_points = np.clip(new_points, 0, 1)
+-
+-        return new_points
+-
+-    # Advanced adaptive optimization with cooling schedule
+-    def adaptive_optimization(initial_points):
+-        points = initial_points.copy()
+-        current_ratio = compute_ratio(points)
++    
++    def local_refinement(points: np.ndarray) -> np.ndarray:
++        """Perform local refinement around the best solution"""
++        # Use a simple gradient-inspired method with small local perturbations
+         best_points = points.copy()
+-        best_ratio = current_ratio
+-
+-        # Adaptive cooling schedule
+-        temp = 0.1  # Start with higher temperature
+-        cooling_rate = 0.999  # Slightly faster cooling
+-        min_temp = 1e-6
+-
+-        # Track improvement for adaptive cooling
+-        improvement_window = 100
+-        recent_improvements = []
+-
+-        max_iterations = 3000
+-        for iteration in range(max_iterations):
+-            # Adjust temperature based on recent performance
+-            if len(recent_improvements) >= improvement_window:
+-                avg_improvement = np.mean(recent_improvements[-improvement_window:])
+-                if avg_improvement < 1e-6:
+-                    temp *= 0.95  # Cool faster if stagnating
+-                elif avg_improvement > 1e-4:
+-                    temp *= 1.01  # Warm up if making good progress
+-
+-            temp = max(temp * cooling_rate, min_temp)
+-
+-            if temp < min_temp:
+-                break
+-
+-            # Generate neighbor solution
+-            new_points = generate_neighbor_adaptive(points, step_size=temp)
+-            new_ratio = compute_ratio(new_points)
+-
+-            # Track recent improvements
+-            if new_ratio > current_ratio:
+-                recent_improvements.append(new_ratio - current_ratio)
+-                if len(recent_improvements) > improvement_window * 2:
+-                    recent_improvements.pop(0)
+-
+-            # Accept or reject based on Metropolis criterion
+-            if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temp):
+-                points = new_points.copy()
+-                current_ratio = new_ratio
+-
+-                if current_ratio > best_ratio:
+-                    best_ratio = current_ratio
+-                    best_points = points.copy()
+-
+-        return best_points, best_ratio
+-
+-    # Initialize with enhanced hexagonal approach
+-    points = initialize_enhanced_hexagonal()
+-
+-    # Try multiple restarts to escape local optima
+-    best_solution = points.copy()
+-    best_ratio = compute_ratio(points)
+-
+-    # Multiple restarts with different random seeds
+-    for restart in range(5):
+-        # Different initialization for each restart
+-        points = initialize_enhanced_hexagonal()
+-
+-        # Apply adaptive optimization
+-        optimized_points, ratio = adaptive_optimization(points)
+-
+-        if ratio > best_ratio:
+-            best_ratio = ratio
+-            best_solution = optimized_points.copy()
+-
+-    # Return the best solution found
+-    return best_solution
++        best_ratio = calculate_ratio(best_points)
++        
++        # Try small perturbations to improve solution
++        for _ in range(1000):
++            # Select a random point to perturb
++            idx = np.random.randint(len(best_points))
++            
++            # Small perturbation
++            new_points = best_points.copy()
++            new_points[idx, 0] += np.random.normal(0, 0.005)
++            new_points[idx, 1] += np.random.normal(0, 0.005)
++            
++            # Ensure within bounds
++            new_points[idx, 0] = np.clip(new_points[idx, 0], 0, 1)
++            new_points[idx, 1] = np.clip(new_points[idx, 1], 0, 1)
++            
++            # Evaluate
++            new_ratio = calculate_ratio(new_points)
++            
++            if new_ratio > best_ratio:
++                best_ratio = new_ratio
++                best_points = new_points.copy()
++        
++        return best_points
++    
++    # Execute grid-based evolutionary optimization
++    result = grid_evolutionary_optimization()
++    return result
+ 
+ # EVOLVE-BLOCK-END

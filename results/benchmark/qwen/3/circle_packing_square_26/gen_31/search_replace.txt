@@ -1,0 +1,241 @@
+<NAME>
+evolutionary_circle_packing
+</NAME>
+
+<DESCRIPTION>
+I'll implement an evolutionary algorithm approach to solve the circle packing problem. This approach will:
+1. Initialize a population of random valid circle configurations
+2. Use tournament selection to choose parents
+3. Apply crossover and mutation operators to generate new solutions
+4. Implement proper overlap and containment checking
+5. Track the best solution found
+
+This method should be able to significantly outperform a simple initialization approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def check_containment(circle, boundary_min=0, boundary_max=1):
+    """Check if a circle is fully contained within the unit square."""
+    x, y, r = circle
+    return (r <= x <= boundary_max - r and
+            r <= y <= boundary_max - r)
+
+def check_overlap(circle1, circle2):
+    """Check if two circles overlap."""
+    x1, y1, r1 = circle1
+    x2, y2, r2 = circle2
+    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+    return distance < (r1 + r2)
+
+def is_valid_configuration(circles, boundary_min=0, boundary_max=1):
+    """Check if all circles are contained and non-overlapping."""
+    n = len(circles)
+
+    # Check containment
+    for circle in circles:
+        if not check_containment(circle, boundary_min, boundary_max):
+            return False
+
+    # Check overlaps
+    for i in range(n):
+        for j in range(i + 1, n):
+            if check_overlap(circles[i], circles[j]):
+                return False
+
+    return True
+
+def calculate_sum_radii(circles):
+    """Calculate the sum of all radii."""
+    return sum(circle[2] for circle in circles)
+
+def initialize_population(pop_size, n_circles, boundary_min=0, boundary_max=1):
+    """Initialize a population of random valid circle configurations."""
+    population = []
+    max_attempts = 10000
+
+    for _ in range(pop_size):
+        attempts = 0
+        while attempts < max_attempts:
+            # Generate random circles
+            circles = []
+            for _ in range(n_circles):
+                # Random position and radius
+                r = random.uniform(0.01, 0.2)  # Reasonable radius range
+                x = random.uniform(r, boundary_max - r)
+                y = random.uniform(r, boundary_max - r)
+                circles.append([x, y, r])
+
+            # Check if configuration is valid
+            if is_valid_configuration(circles, boundary_min, boundary_max):
+                population.append(np.array(circles))
+                break
+
+            attempts += 1
+
+    # If we couldn't generate a valid population, return the best we got
+    if len(population) == 0:
+        # Return a basic configuration for fallback
+        circles = [[0.5, 0.5, 0.1]] * n_circles
+        population.append(np.array(circles))
+
+    return population
+
+def mutate(circles, mutation_rate=0.1, boundary_min=0, boundary_max=1):
+    """Mutate a circle configuration."""
+    mutated = circles.copy()
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Randomly decide what to mutate
+            if random.random() < 0.33:  # Mutate radius
+                old_r = mutated[i][2]
+                new_r = max(0.01, min(0.5, old_r + random.gauss(0, 0.02)))
+                mutated[i][2] = new_r
+            elif random.random() < 0.66:  # Mutate position
+                mutated[i][0] = max(boundary_min + mutated[i][2],
+                                  min(boundary_max - mutated[i][2],
+                                      mutated[i][0] + random.gauss(0, 0.02)))
+                mutated[i][1] = max(boundary_min + mutated[i][2],
+                                  min(boundary_max - mutated[i][2],
+                                      mutated[i][1] + random.gauss(0, 0.02)))
+            else:  # Mutate both position and radius
+                mutated[i][0] = max(boundary_min + mutated[i][2],
+                                  min(boundary_max - mutated[i][2],
+                                      mutated[i][0] + random.gauss(0, 0.02)))
+                mutated[i][1] = max(boundary_min + mutated[i][2],
+                                  min(boundary_max - mutated[i][2],
+                                      mutated[i][1] + random.gauss(0, 0.02)))
+                mutated[i][2] = max(0.01, min(0.5, mutated[i][2] + random.gauss(0, 0.02)))
+
+    return mutated
+
+def crossover(parent1, parent2, boundary_min=0, boundary_max=1):
+    """Create offspring through crossover of two parents."""
+    n_circles = len(parent1)
+    crossover_point = random.randint(1, n_circles - 1)
+
+    # Create offspring by combining parts of parents
+    child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+    child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+
+    # Ensure children are valid configurations
+    if not is_valid_configuration(child1, boundary_min, boundary_max):
+        # Try to repair by applying mutations
+        child1 = mutate(child1, mutation_rate=0.5)
+
+    if not is_valid_configuration(child2, boundary_min, boundary_max):
+        # Try to repair by applying mutations
+        child2 = mutate(child2, mutation_rate=0.5)
+
+    return child1, child2
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_index]
+
+def optimize_circles_evolutionary(n_circles=26, pop_size=50, generations=1000,
+                                 boundary_min=0, boundary_max=1):
+    """Optimize circle packing using evolutionary algorithm."""
+    # Initialize population
+    population = initialize_population(pop_size, n_circles, boundary_min, boundary_max)
+
+    best_solution = None
+    best_fitness = float('-inf')
+
+    for gen in range(generations):
+        # Evaluate fitness for all individuals
+        fitnesses = []
+        for circles in population:
+            if is_valid_configuration(circles, boundary_min, boundary_max):
+                fitness = calculate_sum_radii(circles)
+            else:
+                # Penalize invalid configurations
+                fitness = -1000 + calculate_sum_radii(circles)  # Still reward large radii but heavily penalize invalidity
+            fitnesses.append(fitness)
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitnesses)
+        if fitnesses[max_fitness_idx] > best_fitness:
+            best_fitness = fitnesses[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Create new population
+        new_population = []
+
+        # Keep best individual (elitism)
+        new_population.append(best_solution)
+
+        # Generate rest of population through selection, crossover, and mutation
+        while len(new_population) < pop_size:
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            child1, child2 = crossover(parent1, parent2, boundary_min, boundary_max)
+
+            child1 = mutate(child1, boundary_rate=0.1, boundary_min, boundary_max)
+            child2 = mutate(child2, boundary_rate=0.1, boundary_min, boundary_max)
+
+            new_population.extend([child1, child2])
+
+        # Trim population to exact size
+        population = new_population[:pop_size]
+
+        # Print progress
+        if gen % 100 == 0:
+            print(f"Generation {gen}: Best fitness = {best_fitness:.6f}")
+
+    return best_solution
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Run evolutionary optimization
+    try:
+        circles = optimize_circles_evolutionary(n_circles=26, pop_size=50, generations=1000)
+        return circles
+    except Exception as e:
+        print(f"Error in optimization: {e}")
+        # Fallback to a reasonable configuration
+        circles = np.array([[0.5, 0.5, 0.1]] * 26)
+        return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

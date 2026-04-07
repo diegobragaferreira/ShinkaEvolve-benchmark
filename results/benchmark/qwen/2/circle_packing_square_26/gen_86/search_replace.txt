@@ -1,0 +1,134 @@
+<NAME>
+add_constraint_aware_crossover
+</NAME>
+
+<DESCRIPTION>
+I'll implement a constraint-aware crossover operator that ensures offspring solutions respect the containment and non-overlap constraints. This addresses the issue in Generation 11 where basic crossover created invalid configurations that required extensive repair. By making the crossover operator aware of constraints, we can generate better-quality offspring from the start, reducing the need for expensive repair operations and improving overall convergence.
+
+The key insight is to modify the crossover operation to check for constraint violations after creating offspring, and if violations exist, apply targeted repairs rather than accepting invalid solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_individual(individual):
+    """Mutate an individual with adaptive mutation rates"""
+    # Exponential decay for mutation rate
+    gen_rate = MUTPB * (0.1 ** (1.0 * 150 / NGEN))  # Exponential decay
+
+    for i in range(len(individual)):
+        if random.random() < gen_rate:
+            if i % 3 == 2:  # This is a radius
+                # Mutate radius with bounded adjustment
+                individual[i] = max(0.001, min(0.4, individual[i] * random.uniform(0.85, 1.15)))
+            else:  # This is x or y coordinate
+                # Mutate position with bounded adjustment
+                individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i] + random.gauss(0, 0.025)))
+
+    return individual,
+=======
+def mutate_individual(individual):
+    """Mutate an individual with adaptive mutation rates"""
+    # Exponential decay for mutation rate
+    gen_rate = MUTPB * (0.1 ** (1.0 * 150 / NGEN))  # Exponential decay
+
+    for i in range(len(individual)):
+        if random.random() < gen_rate:
+            if i % 3 == 2:  # This is a radius
+                # Mutate radius with bounded adjustment
+                individual[i] = max(0.001, min(0.4, individual[i] * random.uniform(0.85, 1.15)))
+            else:  # This is x or y coordinate
+                # Mutate position with bounded adjustment
+                individual[i] = max(BOUND_LOW, min(BOUND_UP, individual[i] + random.gauss(0, 0.025)))
+
+    return individual,
+
+def constraint_aware_crossover(ind1, ind2):
+    """Perform crossover that respects constraints"""
+    # Perform uniform crossover
+    tools.cxUniform(ind1, ind2, indpb=0.1)
+
+    # Convert to numpy arrays for easier manipulation
+    arr1 = np.array(ind1).reshape(-1, 3)
+    arr2 = np.array(ind2).reshape(-1, 3)
+
+    # Check if offspring violate constraints and repair if needed
+    def repair_if_needed(circles):
+        # Repair containment violations
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Bound the circle to stay within unit square
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+            circles[i] = [x, y, r]
+
+        # Repair overlap violations through iterative adjustment
+        changed = True
+        iterations = 0
+        while changed and iterations < 20:
+            changed = False
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                        if distance < r1 + r2:
+                            # Adjust positions to resolve overlap
+                            overlap = (r1 + r2) - distance
+                            # Move circles apart along the line connecting their centers
+                            dx = x2 - x1
+                            dy = y2 - y1
+                            if dx == 0 and dy == 0:
+                                # Random movement if they're at the same point
+                                angle = random.uniform(0, 2*math.pi)
+                                dx = math.cos(angle)
+                                dy = math.sin(angle)
+
+                            # Normalize
+                            norm = math.sqrt(dx*dx + dy*dy)
+                            dx /= norm
+                            dy /= norm
+
+                            # Move both circles apart
+                            move_amount = overlap / 2.0
+                            circles[i][0] -= dx * move_amount
+                            circles[i][1] -= dy * move_amount
+                            circles[j][0] += dx * move_amount
+                            circles[j][1] += dy * move_amount
+
+                            changed = True
+
+            iterations += 1
+
+        return circles
+
+    # Repair both offspring
+    repaired_ind1 = repair_if_needed(arr1.copy())
+    repaired_ind2 = repair_if_needed(arr2.copy())
+
+    # Convert back to individual format
+    ind1[:] = repaired_ind1.flatten().tolist()
+    ind2[:] = repaired_ind2.flatten().tolist()
+
+    return ind1, ind2
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    toolbox.register("individual", tools.initIterate, creator.Individual, init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", eval_circles)
+    toolbox.register("mate", tools.cxUniform, indpb=0.1)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", adaptive_tournament_selection)
+=======
+    toolbox.register("individual", tools.initIterate, creator.Individual, init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", eval_circles)
+    toolbox.register("mate", constraint_aware_crossover)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", adaptive_tournament_selection)
+>>>>>>> REPLACE
+</DIFF>

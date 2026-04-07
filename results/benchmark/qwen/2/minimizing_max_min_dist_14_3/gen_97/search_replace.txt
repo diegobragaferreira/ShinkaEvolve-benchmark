@@ -1,0 +1,233 @@
+<NAME>
+add_adaptive_perturbation_scheme
+</NAME>
+
+<DESCRIPTION>
+I'll implement an enhanced adaptive perturbation scheme that dynamically adjusts the perturbation strategy based on the current optimization landscape. The key insight is to identify whether points are too close together (clustering) or too far apart (spreading) and apply different perturbation magnitudes accordingly.
+
+This approach addresses the issue that the current implementation might not be sufficiently adaptive in its perturbation strategy, especially during early stages when points are randomly distributed and later stages when they're converging towards optimal positions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_fitness = multi_objective_fitness(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        # Track statistics for adaptive perturbation scaling
+        recent_distances = []
+        distance_window_size = 50
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Compute current distance statistics for adaptive perturbation
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+            max_dist = np.max(distances) if len(distances) > 0 else 1.0
+            avg_dist = np.mean(distances) if len(distances) > 0 else 1.0
+
+            # Store recent distances for adaptive scaling
+            recent_distances.append(min_dist)
+            if len(recent_distances) > distance_window_size:
+                recent_distances.pop(0)
+
+            # Adaptive perturbation magnitude based on current state
+            # Start with temperature-based perturbation
+            base_perturbation = temperature * 0.05
+
+            # Scale perturbation based on current minimum distance
+            # If points are clustered together (small min_dist), use larger perturbations
+            # If points are well-separated (large min_dist), use smaller perturbations
+            if min_dist < 0.2:
+                perturbation_magnitude = base_perturbation * 3.0  # Large perturbations for clustering
+            elif min_dist < 0.5:
+                perturbation_magnitude = base_perturbation * 2.0  # Medium perturbations
+            else:
+                perturbation_magnitude = base_perturbation * 0.5  # Small perturbations for well-separated
+
+            # Further adjust based on recent clustering behavior
+            if len(recent_distances) > 10:
+                recent_avg = np.mean(recent_distances[-10:])
+                if recent_avg < 0.3:
+                    perturbation_magnitude *= 1.5  # Increase when recently clustered
+                elif recent_avg > 0.6:
+                    perturbation_magnitude *= 0.7  # Decrease when recently well-separated
+
+            # Cap the perturbation magnitude
+            perturbation_magnitude = min(0.1, max(0.001, perturbation_magnitude))
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+            new_fitness = multi_objective_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+=======
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_fitness = multi_objective_fitness(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        # Track statistics for adaptive perturbation scaling
+        recent_distances = []
+        distance_window_size = 50
+
+        # Track performance trends
+        improvement_history = []
+        history_window = 100
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Compute current distance statistics for adaptive perturbation
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+            max_dist = np.max(distances) if len(distances) > 0 else 1.0
+            avg_dist = np.mean(distances) if len(distances) > 0 else 1.0
+
+            # Calculate distance distribution statistics
+            if len(distances) > 0:
+                std_dist = np.std(distances)
+                dist_ratio = min_dist / (max_dist + 1e-10)  # Avoid division by zero
+            else:
+                std_dist = 1.0
+                dist_ratio = 0.5
+
+            # Store recent distances for adaptive scaling
+            recent_distances.append(min_dist)
+            if len(recent_distances) > distance_window_size:
+                recent_distances.pop(0)
+
+            # Enhanced adaptive perturbation scheme
+            base_perturbation = temperature * 0.05
+
+            # Determine perturbation strategy based on current configuration
+            if min_dist < 0.15:  # Very close - aggressive perturbation to break clusters
+                perturbation_magnitude = base_perturbation * 4.0
+            elif min_dist < 0.3:  # Close - moderate perturbation
+                perturbation_magnitude = base_perturbation * 3.0
+            elif min_dist < 0.5:  # Moderate - standard perturbation
+                perturbation_magnitude = base_perturbation * 2.0
+            elif min_dist < 0.7:  # Well separated - small perturbation
+                perturbation_magnitude = base_perturbation * 1.0
+            else:  # Well spread - minimal perturbation
+                perturbation_magnitude = base_perturbation * 0.5
+
+            # Adjust perturbation based on distance distribution variability
+            if std_dist > 0.3:  # High variance in distances - encourage exploration
+                perturbation_magnitude *= 1.2
+            elif std_dist < 0.1:  # Low variance in distances - encourage exploitation
+                perturbation_magnitude *= 0.8
+
+            # Adjust based on recent performance
+            improvement_history.append(best_ratio)
+            if len(improvement_history) > history_window:
+                improvement_history.pop(0)
+
+            recent_improvement = np.mean(improvement_history[-min(history_window//2, len(improvement_history)):]) if len(improvement_history) >= history_window//2 else best_ratio
+            if best_ratio > recent_improvement:
+                # Recent improvements, reduce perturbation for fine-tuning
+                perturbation_magnitude *= 0.7
+            else:
+                # No recent improvement, increase perturbation for exploration
+                perturbation_magnitude *= 1.3
+
+            # Cap the perturbation magnitude
+            perturbation_magnitude = min(0.2, max(0.001, perturbation_magnitude))
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+            new_fitness = multi_objective_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

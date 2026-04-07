@@ -1,0 +1,131 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,120 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import pdist, squareform
++import math
++from typing import Tuple
+ 
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+-        points: np.ndarray of shape (14,3) containing the (x,y) coordinates of the 14 points.
+-
++        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+ 
+-    n = 14
+-    d = 3
++    # Use a more informed initial configuration - try to start near a good solution
++    # Start with vertices of a truncated octahedron or similar structure
++    np.random.seed(42)
+ 
+-    # places points randomly
+-    np.random.seed(42)
+-    points = np.random.randn(n, d)
++    # Generate initial points around a sphere (more evenly distributed than pure random)
++    points = generate_initial_points(14)
+ 
+-    return points
++    # Optimize using simulated annealing
++    optimized_points = optimize_points(points)
++
++    return optimized_points
++
++
++def generate_initial_points(n: int) -> np.ndarray:
++    """Generate initial point configuration"""
++    # Try to create a good starting configuration
++    # Use Fibonacci spiral on sphere for even distribution
++    points = []
++    phi = math.acos(-1 + (2 * 1) / n)  # angle between points
++
++    for i in range(n):
++        theta = math.sqrt(n * math.pi) * phi
++        x = math.sin(theta) * math.cos(i * 2 * math.pi / math.sqrt(n))
++        y = math.sin(theta) * math.sin(i * 2 * math.pi / math.sqrt(n))
++        z = math.cos(theta)
++        points.append([x, y, z])
++
++    return np.array(points)
++
++
++def compute_min_max_ratio(points: np.ndarray) -> Tuple[float, float]:
++    """Compute min/max distance ratio for given points"""
++    distances = pdist(points)
++    min_dist = np.min(distances)
++    max_dist = np.max(distances)
++
++    if max_dist > 0:
++        return min_dist / max_dist, min_dist / max_dist
++    else:
++        return 0.0, 0.0
++
++
++def optimize_points(initial_points: np.ndarray, max_iter: int = 10000) -> np.ndarray:
++    """Optimize point configuration using simulated annealing"""
++    points = initial_points.copy()
++    current_ratio, _ = compute_min_max_ratio(points)
++
++    # Annealing parameters
++    temp = 1.0
++    cooling_rate = 0.9995
++    min_temp = 1e-8
++
++    best_points = points.copy()
++    best_ratio = current_ratio
++
++    # Keep track of recent improvements
++    improvement_threshold = 1e-6
++    no_improvement_count = 0
++    max_no_improvement = 500
++
++    for iteration in range(max_iter):
++        # Create a small perturbation
++        new_points = points.copy()
++
++        # Randomly select one point to move
++        idx = np.random.randint(0, len(new_points))
++
++        # Move the point slightly in a random direction
++        move_vector = np.random.normal(0, 0.01, 3)
++        new_points[idx] += move_vector
++
++        # Keep points on the unit sphere (normalization)
++        norm = np.linalg.norm(new_points[idx])
++        if norm > 0:
++            new_points[idx] = new_points[idx] / norm
++
++        # Compute new ratio
++        new_ratio, _ = compute_min_max_ratio(new_points)
++
++        # Accept or reject based on Metropolis criterion
++        if new_ratio > current_ratio or np.random.random() < np.exp((new_ratio - current_ratio) / temp):
++            points = new_points
++            current_ratio = new_ratio
++
++            # Update best solution
++            if current_ratio > best_ratio:
++                best_ratio = current_ratio
++                best_points = points.copy()
++                no_improvement_count = 0
++            else:
++                no_improvement_count += 1
++        else:
++            no_improvement_count += 1
++
++        # Cool down temperature
++        temp *= cooling_rate
++
++        # Check for early stopping
++        if temp < min_temp or no_improvement_count > max_no_improvement:
++            break
++
++    return best_points
+ 
+ 
+ # EVOLVE-BLOCK-END

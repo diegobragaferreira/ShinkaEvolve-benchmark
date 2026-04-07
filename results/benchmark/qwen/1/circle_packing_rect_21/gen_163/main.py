@@ -1,0 +1,417 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import time
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For reproducibility
+
+    n = 21
+    # Better rectangle dimensions for packing efficiency: 1.2 x 0.8 (width x height)
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Phase 1: Multi-pattern initialization
+    circles = np.zeros((n, 3))
+
+    # Try multiple initialization strategies and pick the best one
+    best_initialization = None
+    best_sum = 0
+
+    # Strategy 1: Hexagonal lattice
+    hex_circles = initialize_hexagonal(n, rect_width, rect_height)
+    hex_sum = np.sum(hex_circles[:, 2])
+    if hex_sum > best_sum:
+        best_sum = hex_sum
+        best_initialization = hex_circles.copy()
+
+    # Strategy 2: Random placement with spacing check
+    random_circles = initialize_random_spaced(n, rect_width, rect_height)
+    random_sum = np.sum(random_circles[:, 2])
+    if random_sum > best_sum:
+        best_sum = random_sum
+        best_initialization = random_circles.copy()
+
+    # Strategy 3: Square grid
+    square_circles = initialize_square_grid(n, rect_width, rect_height)
+    square_sum = np.sum(square_circles[:, 2])
+    if square_sum > best_sum:
+        best_sum = square_sum
+        best_initialization = square_circles.copy()
+
+    # Use the best initialization
+    circles = best_initialization if best_initialization is not None else hex_circles.copy()
+
+    # Phase 2: Two-phase optimization with progressive constraint relaxation
+    max_iterations_phase1 = 150  # First phase: relaxed constraints
+    max_iterations_phase2 = 100  # Second phase: strict constraints
+
+    # Phase 1: Progressive constraint relaxation (allow some violations initially)
+    for iteration in range(max_iterations_phase1):
+        improved = False
+        # Allow up to 5% constraint violations in early iterations
+        violation_tolerance = max(0.0, 1.0 - (iteration / max_iterations_phase1) * 0.95)
+
+        # Shuffle circle indices for diverse optimization
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        # Process circles in shuffled order
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            collision_violations = 0
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        # Apply progressive constraint relaxation
+                        if np.random.random() > violation_tolerance:
+                            max_radius = min(max_radius, collision_radius)
+                        else:
+                            collision_violations += 1
+
+            # Adaptive expansion based on local density and constraint status
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Calculate Voronoi area for this circle (real Voronoi computation)
+                try:
+                    voronoi_area = compute_voronoi_area_for_circle(circles, i, rect_width, rect_height)
+                except:
+                    # Fallback to approximation if Voronoi fails
+                    voronoi_area = calculate_voronoi_area(circles, i, rect_width, rect_height)
+
+                # Larger Voronoi areas = less constrained region = larger expansion
+                # Normalize voronoi area and scale expansion factor
+                if voronoi_area > 0:
+                    normalized_area = voronoi_area / (rect_width * rect_height)
+                    expansion_factor = max(0.1, 1.0 - normalized_area * 5.0)  # More sensitive scaling
+                else:
+                    expansion_factor = 0.5
+
+                # Apply different expansion rates depending on constraint status
+                if collision_violations > 3:
+                    # Highly constrained region - small expansion
+                    delta = min(0.015, max_radius - circles[i][2]) * expansion_factor * 0.3
+                elif collision_violations > 1:
+                    # Moderately constrained - medium expansion
+                    delta = min(0.02, max_radius - circles[i][2]) * expansion_factor * 0.6
+                else:
+                    # Less constrained - full expansion
+                    delta = min(0.03, max_radius - circles[i][2]) * expansion_factor * 1.0
+
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+
+        if not improved and iteration > 50:  # Early stopping condition
+            break
+
+    # Phase 3: Strict constraint enforcement with Voronoi-based adaptive mutation
+    for iteration in range(max_iterations_phase2):
+        improved = False
+
+        # Compute Voronoi diagram for current configuration
+        points = circles[:, :2]  # x, y coordinates only
+        try:
+            vor = Voronoi(points)
+            # Calculate Voronoi cell areas for each point
+            voronoi_areas = np.zeros(n)
+            for i in range(n):
+                region = vor.regions[vor.point_region[i]]
+                if -1 not in region and len(region) > 2:
+                    # Calculate area of polygon using shoelace formula
+                    vertices = np.array([vor.vertices[j] for j in region])
+                    x = vertices[:, 0]
+                    y = vertices[:, 1]
+                    area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                    voronoi_areas[i] = area
+                else:
+                    voronoi_areas[i] = 0.0  # Default for infinite or invalid regions
+        except:
+            # Fallback to simple estimation if Voronoi fails
+            voronoi_areas = np.ones(n) * 100.0
+
+        # Shuffle circle indices
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        # Process circles in shuffled order
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # Increase radius if beneficial and strictly feasible
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Voronoi-based adaptive mutation: smaller steps in dense regions, larger in sparse
+                # Use actual Voronoi areas computed above
+                voronoi_area = voronoi_areas[i]
+
+                # Normalize Voronoi area relative to total area
+                normalized_area = voronoi_area / (rect_width * rect_height) if voronoi_area > 0 else 0.01
+
+                # Determine mutation step size based on local constraint density
+                # Smaller Voronoi areas = high constraint density = small mutation steps
+                # Larger Voronoi areas = low constraint density = large mutation steps
+                if normalized_area < 0.01:  # Very dense region
+                    max_delta = 0.005  # Very small mutation
+                elif normalized_area < 0.05:  # Dense region
+                    max_delta = 0.01   # Small mutation
+                elif normalized_area < 0.1:   # Moderate region
+                    max_delta = 0.015  # Medium mutation
+                else:                         # Sparse region
+                    max_delta = 0.02   # Large mutation
+
+                delta = min(max_delta, max_radius - circles[i][2])
+                if delta > 0.0005:
+                    circles[i][2] += delta
+                    improved = True
+
+        if not improved:
+            break
+
+    # Final validation and cleanup
+    validate_and_fix_constraints(circles, rect_width, rect_height)
+
+    return circles
+
+def initialize_hexagonal(n: int, width: float, height: float) -> np.ndarray:
+    """Initialize circles using hexagonal packing pattern."""
+    circles = np.zeros((n, 3))
+
+    # Hexagonal packing arrangement
+    rows = 4
+    cols = 6
+
+    # Calculate spacing
+    spacing_x = width / (cols + 1)
+    spacing_y = height / (rows + 1)
+
+    # Place circles in hexagonal pattern
+    idx = 0
+    for i in range(rows):
+        offset = spacing_x * (i % 2) * 0.5  # Offset every other row
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x + offset
+            y = (i + 1) * spacing_y
+
+            # Ensure position is within bounds
+            x = max(0.01, min(width - 0.01, x))
+            y = max(0.01, min(height - 0.01, y))
+
+            # Set initial radius to a small value
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+
+        if idx >= n:
+            break
+
+    # Fill remaining circles if needed
+    while idx < n:
+        x = np.random.uniform(0.01, width - 0.01)
+        y = np.random.uniform(0.01, height - 0.01)
+        circles[idx] = [x, y, 0.05]
+        idx += 1
+
+    return circles
+
+def initialize_random_spaced(n: int, width: float, height: float) -> np.ndarray:
+    """Initialize circles using random placement with basic spacing checks."""
+    circles = np.zeros((n, 3))
+
+    for i in range(n):
+        # Generate random positions until we find a good one
+        attempts = 0
+        while attempts < 100:
+            x = np.random.uniform(0.01, width - 0.01)
+            y = np.random.uniform(0.01, height - 0.01)
+
+            # Basic check against existing circles (not comprehensive)
+            valid = True
+            for j in range(i):
+                dx = x - circles[j, 0]
+                dy = y - circles[j, 1]
+                distance = np.sqrt(dx*dx + dy*dy)
+                if distance < (circles[j, 2] + 0.05) * 1.5:  # Safety margin
+                    valid = False
+                    break
+
+            if valid:
+                circles[i] = [x, y, 0.05]
+                break
+            attempts += 1
+
+        # If we couldn't find a good spot, just place randomly
+        if attempts >= 100:
+            x = np.random.uniform(0.01, width - 0.01)
+            y = np.random.uniform(0.01, height - 0.01)
+            circles[i] = [x, y, 0.05]
+
+    return circles
+
+def initialize_square_grid(n: int, width: float, height: float) -> np.ndarray:
+    """Initialize circles using square grid pattern."""
+    circles = np.zeros((n, 3))
+
+    # Square grid arrangement
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n / rows))
+
+    spacing_x = width / (cols + 1)
+    spacing_y = height / (rows + 1)
+
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+
+            # Ensure position is within bounds
+            x = max(0.01, min(width - 0.01, x))
+            y = max(0.01, min(height - 0.01, y))
+
+            # Set initial radius to a small value
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+
+        if idx >= n:
+            break
+
+    # Fill remaining circles if needed
+    while idx < n:
+        x = np.random.uniform(0.01, width - 0.01)
+        y = np.random.uniform(0.01, height - 0.01)
+        circles[idx] = [x, y, 0.05]
+        idx += 1
+
+    return circles
+
+def compute_voronoi_area_for_circle(circles: np.ndarray, center_idx: int, width: float, height: float) -> float:
+    """Compute precise Voronoi cell area for a given circle."""
+    # Create points including boundaries for better Voronoi calculation
+    points = circles[:, :2].copy()
+
+    # Add boundary points to ensure proper Voronoi calculation
+    boundary_points = [
+        [0, 0], [width, 0], [0, height], [width, height],
+        [width/2, 0], [width/2, height],
+        [0, height/2], [width, height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # Find the Voronoi region for the specific circle
+        region_idx = np.where(vor.point_region == center_idx)[0][0] if center_idx in vor.point_region else -1
+
+        if region_idx != -1 and region_idx < len(vor.regions):
+            region = vor.regions[region_idx]
+            if -1 not in region and len(region) >= 3:
+                # Compute area of polygon using shoelace formula
+                vertices = np.array([vor.vertices[i] for i in region])
+                if len(vertices) >= 3:
+                    x = vertices[:, 0]
+                    y = vertices[:, 1]
+                    area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                    return area
+                else:
+                    return 1.0
+            else:
+                return 1.0
+        else:
+            return 1.0
+    except:
+        # Fallback to approximation if Voronoi fails
+        return calculate_voronoi_area(circles, center_idx, width, height)
+
+def validate_and_fix_constraints(circles: np.ndarray, width: float, height: float):
+    """Ensure all circles satisfy boundary and collision constraints."""
+    n = len(circles)
+
+    # Check boundary violations and fix them
+    for i in range(n):
+        # Ensure circles are within bounds
+        circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], width - circles[i, 2])
+        circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], height - circles[i, 2])
+
+    # Resolve collision violations iteratively
+    for _ in range(50):
+        improved = False
+        for i in range(n):
+            # Check collisions with all others
+            for j in range(n):
+                if i != j:
+                    dx = circles[i, 0] - circles[j, 0]
+                    dy = circles[i, 1] - circles[j, 1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    required_distance = circles[i, 2] + circles[j, 2] + 0.001
+
+                    if distance < required_distance:
+                        # Move circles apart (simple approach)
+                        if distance > 0.001:
+                            move_distance = (required_distance - distance) / 2.0
+                            direction_x = dx / distance
+                            direction_y = dy / distance
+
+                            # Move both circles away from each other
+                            circles[i, 0] += direction_x * move_distance * 0.5
+                            circles[i, 1] += direction_y * move_distance * 0.5
+                            circles[j, 0] -= direction_x * move_distance * 0.5
+                            circles[j, 1] -= direction_y * move_distance * 0.5
+
+                            # Clip back to bounds
+                            circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], width - circles[i, 2])
+                            circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], height - circles[i, 2])
+                            circles[j, 0] = np.clip(circles[j, 0], circles[j, 2], width - circles[j, 2])
+                            circles[j, 1] = np.clip(circles[j, 1], circles[j, 2], height - circles[j, 2])
+
+                        improved = True
+
+        if not improved:
+            break
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,200 @@
+<NAME>
+add_evolutionary_restart_strategy
+</NAME>
+
+<DESCRIPTION>
+Adding an evolutionary algorithm restart strategy will improve the optimization by providing more diverse starting points and better escaping local optima. I'll implement a differential evolution component that runs alongside the existing local optimization to provide multiple independent restart strategies, similar to what was suggested in the recommendations but implemented in a practical way.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import math
+from typing import Tuple, List, Optional
+from numba import jit
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import math
+from typing import Tuple, List, Optional
+from numba import jit
+from scipy.optimize import differential_evolution
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+        """Find best solution among all starting configurations with hierarchical optimization."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Phase 1: Coarse evaluation of all configurations
+        # Keep track of top configurations for fine-grained optimization
+        top_configs = []
+        top_ratios = []
+
+        # Evaluate all configurations with coarse optimization
+        for i, config in enumerate(configs):
+            # Use lighter optimization for coarse evaluation
+            try:
+                result = minimize(
+                    self.objective_function,
+                    config.flatten(),
+                    method='L-BFGS-B',
+                    bounds=self.bounds,
+                    options={'maxiter': 50, 'ftol': 1e-4, 'gtol': 1e-3}
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, self.dimension)
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+
+                    # Keep track of top configurations
+                    if len(top_ratios) < 5 or ratio > min(top_ratios):
+                        top_configs.append(optimized_points)
+                        top_ratios.append(ratio)
+                        # Keep only top 5
+                        if len(top_ratios) > 5:
+                            min_idx = np.argmin(top_ratios)
+                            top_ratios.pop(min_idx)
+                            top_configs.pop(min_idx)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+            except Exception:
+                continue
+
+        # Phase 2: Fine-grained optimization on top configurations
+        if best_points is not None:
+            # Now do thorough optimization on top performers
+            for i, config in enumerate(top_configs):
+                # Use full optimization for top candidates
+                optimized_points = self.multi_stage_optimization(config.flatten())
+
+                if optimized_points is not None:
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        # Early stopping if we're close to target
+        if best_ratio > 0.25:  # Early stopping threshold
+            return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+
+        # Phase 3: Additional refinement if needed
+        if best_points is not None:
+            # Try one final intensive refinement
+            final_points = self.multi_stage_optimization(best_points.flatten(), max_iter=200)
+            final_ratio, _, _ = self.calculate_ratio(final_points)
+
+            if final_ratio > best_ratio:
+                best_points = final_points
+
+        return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+=======
+    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+        """Find best solution among all starting configurations with hierarchical optimization."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Phase 1: Coarse evaluation of all configurations
+        # Keep track of top configurations for fine-grained optimization
+        top_configs = []
+        top_ratios = []
+
+        # Evaluate all configurations with coarse optimization
+        for i, config in enumerate(configs):
+            # Use lighter optimization for coarse evaluation
+            try:
+                result = minimize(
+                    self.objective_function,
+                    config.flatten(),
+                    method='L-BFGS-B',
+                    bounds=self.bounds,
+                    options={'maxiter': 50, 'ftol': 1e-4, 'gtol': 1e-3}
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, self.dimension)
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+
+                    # Keep track of top configurations
+                    if len(top_ratios) < 5 or ratio > min(top_ratios):
+                        top_configs.append(optimized_points)
+                        top_ratios.append(ratio)
+                        # Keep only top 5
+                        if len(top_ratios) > 5:
+                            min_idx = np.argmin(top_ratios)
+                            top_ratios.pop(min_idx)
+                            top_configs.pop(min_idx)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+            except Exception:
+                continue
+
+        # Phase 2: Evolutionary algorithm restarts to find better solutions
+        try:
+            # Run differential evolution as a global optimization method
+            # This provides additional diverse starting points
+            de_bounds = [(0.001, 0.999) for _ in range(32)]
+            de_result = differential_evolution(
+                self.objective_function,
+                de_bounds,
+                maxiter=50,
+                popsize=10,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                disp=False
+            )
+
+            if de_result.success:
+                de_points = de_result.x.reshape(-1, self.dimension)
+                de_ratio, _, _ = self.calculate_ratio(de_points)
+
+                if de_ratio > best_ratio:
+                    best_ratio = de_ratio
+                    best_points = de_points.copy()
+
+        except Exception:
+            pass
+
+        # Phase 3: Fine-grained optimization on top configurations
+        if best_points is not None:
+            # Now do thorough optimization on top performers
+            for i, config in enumerate(top_configs):
+                # Use full optimization for top candidates
+                optimized_points = self.multi_stage_optimization(config.flatten())
+
+                if optimized_points is not None:
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        # Early stopping if we're close to target
+        if best_ratio > 0.25:  # Early stopping threshold
+            return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+
+        # Phase 4: Additional refinement if needed
+        if best_points is not None:
+            # Try one final intensive refinement
+            final_points = self.multi_stage_optimization(best_points.flatten(), max_iter=200)
+            final_ratio, _, _ = self.calculate_ratio(final_points)
+
+            if final_ratio > best_ratio:
+                best_points = final_points
+
+        return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+>>>>>>> REPLACE
+
+</DIFF>

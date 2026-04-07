@@ -1,0 +1,180 @@
+<NAME>
+refine_spherical_constraint_and_checkpointing
+</NAME>
+
+<DESCRIPTION>
+Let me examine the exact code structure and make a more precise edit. The issue is that I need to match the exact code structure. Looking at the code more carefully, I see that the loop structure is a bit different. I'll target the specific lines that need to be modified.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Cooling schedule parameters
+        T = 1.0  # Initial temperature
+        T_min = 1e-8  # Minimum temperature
+        alpha = 0.999  # Cooling rate
+        max_iter = 10000  # Max iterations
+        iter_without_improvement = 0
+        max_no_improvement = 1000  # Early stopping threshold
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 50
+
+        # Local refinement parameters
+        refine_frequency = 1000  # How often to attempt local refinement
+        refine_iterations = 50   # Number of local refinement steps
+
+        for iteration in range(max_iter):
+            # Perturb one random point
+            idx = np.random.randint(0, self.num_points)
+            old_point = points[idx].copy()
+
+            # Create new candidate point with adaptive perturbation size
+            # Use smaller perturbations initially, larger ones later to escape local minima
+            perturbation_size = 0.005 * (1.0 + 0.5 * (T / 1.0))  # Adaptive based on temperature
+            new_point = self.perturb_point(old_point, perturbation_size)
+            points[idx] = new_point
+
+            # Apply constraints
+            points = self.apply_constraints(points)
+
+            # Calculate new ratio
+            new_ratio = self.calculate_ratio(points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio_local:
+                    best_ratio_local = new_ratio
+                    best_points_local = points.copy()
+                iter_without_improvement = 0
+                recent_improvements.append(True)
+            else:
+                # Accept with probability based on temperature
+                delta = new_ratio - current_ratio
+                if np.random.rand() < np.exp(delta / T):
+                    current_ratio = new_ratio
+                    if new_ratio > best_ratio_local:
+                        best_ratio_local = new_ratio
+                        best_points_local = points.copy()
+                    iter_without_improvement = 0
+                    recent_improvements.append(True)
+                else:
+                    # Revert the change
+                    points[idx] = old_point
+                    recent_improvements.append(False)
+
+            # Update temperature with adaptive cooling
+            # If we've had too many non-improvements recently, cool faster
+            if len(recent_improvements) > improvement_window:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < improvement_window * 0.2:  # Less than 20% improvements
+                    alpha = max(0.9995, alpha * 1.02)  # Accelerate cooling
+                elif sum(recent_improvements) > improvement_window * 0.6:  # More than 60% improvements
+                    alpha = min(0.9999, alpha * 0.98)  # Slow down cooling
+
+            T = max(T * alpha, T_min)
+
+            # Periodic local refinement to polish the solution
+            if iteration % refine_frequency == 0 and iteration > 0:
+                refined_points = self.local_refinement(best_points_local.copy(), refine_iterations)
+                refined_ratio = self.calculate_ratio(refined_points)
+                if refined_ratio > best_ratio_local:
+                    best_ratio_local = refined_ratio
+                    best_points_local = refined_points.copy()
+
+            # Early stopping if no improvement
+            iter_without_improvement += 1
+            if iter_without_improvement > max_no_improvement:
+                break
+=======
+        # Cooling schedule parameters
+        T = 1.0  # Initial temperature
+        T_min = 1e-8  # Minimum temperature
+        alpha = 0.999  # Cooling rate
+        max_iter = 10000  # Max iterations
+        iter_without_improvement = 0
+        max_no_improvement = 1000  # Early stopping threshold
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 50
+
+        # Local refinement parameters
+        refine_frequency = 1000  # How often to attempt local refinement
+        refine_iterations = 50   # Number of local refinement steps
+
+        # Checkpointing
+        best_checkpoint_ratio = 0.0
+        best_checkpoint_points = None
+
+        for iteration in range(max_iter):
+            # Perturb one random point
+            idx = np.random.randint(0, self.num_points)
+            old_point = points[idx].copy()
+
+            # Create new candidate point with adaptive perturbation size
+            # Use smaller perturbations initially, larger ones later to escape local minima
+            perturbation_size = 0.005 * (1.0 + 0.5 * (T / 1.0))  # Adaptive based on temperature
+            new_point = self.perturb_point(old_point, perturbation_size)
+            points[idx] = new_point
+
+            # Apply constraints
+            points = self.apply_constraints(points)
+
+            # Calculate new ratio
+            new_ratio = self.calculate_ratio(points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio_local:
+                    best_ratio_local = new_ratio
+                    best_points_local = points.copy()
+                iter_without_improvement = 0
+                recent_improvements.append(True)
+            else:
+                # Accept with probability based on temperature
+                delta = new_ratio - current_ratio
+                if np.random.rand() < np.exp(delta / T):
+                    current_ratio = new_ratio
+                    if new_ratio > best_ratio_local:
+                        best_ratio_local = new_ratio
+                        best_points_local = points.copy()
+                    iter_without_improvement = 0
+                    recent_improvements.append(True)
+                else:
+                    # Revert the change
+                    points[idx] = old_point
+                    recent_improvements.append(False)
+
+            # Update temperature with adaptive cooling
+            # If we've had too many non-improvements recently, cool faster
+            if len(recent_improvements) > improvement_window:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < improvement_window * 0.2:  # Less than 20% improvements
+                    alpha = max(0.9995, alpha * 1.02)  # Accelerate cooling
+                elif sum(recent_improvements) > improvement_window * 0.6:  # More than 60% improvements
+                    alpha = min(0.9999, alpha * 0.98)  # Slow down cooling
+
+            T = max(T * alpha, T_min)
+
+            # Periodic checkpointing
+            if current_ratio > best_checkpoint_ratio:
+                best_checkpoint_ratio = current_ratio
+                best_checkpoint_points = points.copy()
+
+            # Periodic local refinement to polish the solution
+            if iteration % refine_frequency == 0 and iteration > 0:
+                refined_points = self.local_refinement(best_points_local.copy(), refine_iterations)
+                refined_ratio = self.calculate_ratio(refined_points)
+                if refined_ratio > best_ratio_local:
+                    best_ratio_local = refined_ratio
+                    best_points_local = refined_points.copy()
+
+            # Early stopping if no improvement
+            iter_without_improvement += 1
+            if iter_without_improvement > max_no_improvement:
+                break
+>>>>>>> REPLACE
+</_DIFF>

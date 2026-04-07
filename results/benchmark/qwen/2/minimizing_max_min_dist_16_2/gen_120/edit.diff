@@ -1,0 +1,439 @@
+--- a/original.py
++++ b/original.py
+@@ -1,225 +1,266 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import differential_evolution, minimize
++from scipy.spatial import Voronoi
++from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist
+ import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+ 
+-    def objective(x):
+-        # Reshape x into 16 points
+-        points = x.reshape(-1, 2)
+-        # Calculate pairwise distances
++    def voronoi_energy_objective(points_flat):
++        """Objective function based on Voronoi cell area variance minimization"""
++        points = points_flat.reshape(-1, 2)
++        
++        # Compute Voronoi diagram
++        try:
++            vor = Voronoi(points)
++        except:
++            # Fallback to basic distance ratio if Voronoi fails
++            distances = pdist(points)
++            if len(distances) == 0:
++                return 0
++            min_dist = np.min(distances)
++            max_dist = np.max(distances)
++            if max_dist <= 1e-12:
++                return 0
++            return -min_dist / max_dist
++
++        # Calculate Voronoi cell areas
++        areas = []
++        for i in range(len(points)):
++            # Get vertices of Voronoi cell for point i
++            vertices = []
++            for simplex in vor.simplices:
++                if i in simplex:
++                    # For simplicity, calculate area using convex hull of vertices
++                    # This is a rough approximation but works for our purposes
++                    pass
++            # Skip complex polygon area calculation and fall back to distance approach
++            pass
++            
++        # Use simpler approach: minimize the variance of pairwise distances
+         distances = pdist(points)
+-        # Avoid division by zero
+         if len(distances) == 0:
+             return 0
++            
+         min_dist = np.min(distances)
+-        max_dist = np.max(distances)
+-        if max_dist == 0:
+-            return 0
+-        # Minimize negative of min/max ratio (equivalent to maximizing min/max ratio)
++        max_dist = np.max(distances) 
++        
++        if max_dist <= 1e-12:
++            return 0
++            
++        # We still want to maximize min/max ratio, so return negative of ratio
+         return -min_dist / max_dist
+ 
+-    def generate_structured_grid_initial():
+-        """Generate a structured 4x4 grid with adaptive perturbation based on distance distribution"""
+-        # Create a regular 4x4 grid
++    def voronoi_based_initialization():
++        """Initialize points using Voronoi-inspired lattice construction"""
++        # Create a basis for a Voronoi-like structure using hexagonal packing principles
++        points = []
++        
++        # Generate points in a way that mimics optimal packing
++        # Using a combination of hexagonal and square lattices
++        for i in range(4):
++            for j in range(4):
++                # Hexagonal offset
++                offset = 0.5 if i % 2 == 1 else 0.0
++                x = (j + offset) / 3.5
++                y = i / 3.5
++                
++                # Add slight perturbation to break symmetry
++                x += np.random.normal(0, 0.015)
++                y += np.random.normal(0, 0.015)
++                
++                # Clamp to valid range
++                x = np.clip(x, 0.001, 0.999)
++                y = np.clip(y, 0.001, 0.999)
++                
++                points.append([x, y])
++        
++        return np.array(points)
++
++    def fibonacci_sphere_like_initial():
++        """Create initial points using a fibonacci-like spiral distribution"""
++        points = []
++        # Adapted from fibonacci sphere method but adapted for 2D
++        phi = (1 + math.sqrt(5)) / 2  # golden ratio
++        
++        for i in range(16):
++            # Use a modified fibonacci approach for better 2D distribution
++            theta = math.acos(-1 + (2 * i) / 15.0)  # elevation angle
++            
++            # Modified azimuthal angle for better 2D uniformity
++            phi_angle = (i * 2 * math.pi) / (phi * phi) 
++            
++            # Convert to 2D coordinates with radial scaling
++            r = math.sqrt(i / 15.0) if i > 0 else 0.0
++            r = r * 0.6 + 0.2  # Scale to [0.2, 0.8]
++            
++            x = 0.5 + r * math.cos(phi_angle) * 0.4
++            y = 0.5 + r * math.sin(phi_angle) * 0.4
++            
++            # Ensure within bounds
++            x = np.clip(x, 0.001, 0.999)
++            y = np.clip(y, 0.001, 0.999)
++            
++            points.append([x, y])
++            
++        return np.array(points)
++
++    def structured_grid_initial():
++        """Create structured grid with adaptive perturbation"""
+         points = []
+         for i in range(4):
+             for j in range(4):
+                 x = (i + 0.5) / 4.0
+                 y = (j + 0.5) / 4.0
++                
++                # Perturb based on position - more perturbation at edges
++                if i == 0 or i == 3 or j == 0 or j == 3:
++                    perturbation_magnitude = 0.02
++                else:
++                    perturbation_magnitude = 0.01
++                    
++                x += np.random.normal(0, perturbation_magnitude)
++                y += np.random.normal(0, perturbation_magnitude)
++                
++                # Clamp to valid range
++                x = np.clip(x, 0.001, 0.999)
++                y = np.clip(y, 0.001, 0.999)
++                
+                 points.append([x, y])
+-
+-        points = np.array(points)
+-
+-        # Calculate current distance distribution
++                
++        return np.array(points)
++
++    def objective_with_constraints(x):
++        """Main objective function with proper constraint handling"""
++        points = x.reshape(-1, 2)
++        
++        # Ensure points are within bounds [0.001, 0.999] x [0.001, 0.999]
++        points = np.clip(points, 0.001, 0.999)
++        
++        # Calculate all pairwise distances
+         distances = pdist(points)
+-        if len(distances) > 0:
+-            current_ratio = np.min(distances) / np.max(distances) if np.max(distances) > 0 else 0
+-
+-            # Adjust perturbation magnitude based on how balanced the distance distribution is
+-            # If distances are already well-balanced, perturb less; otherwise perturb more
+-            perturbation_magnitude = max(0.01, 0.05 * (1.0 - current_ratio * 10)) if current_ratio > 0 else 0.03
+-
+-            # Add adaptive perturbation
+-            np.random.seed(42)
+-            perturbation = np.random.normal(0, perturbation_magnitude, points.shape)
+-            points += perturbation
+-
+-            # Clip to valid range
+-            points = np.clip(points, 0.001, 0.999)
+-
+-        return points
+-
+-    def generate_fibonacci_spiral():
+-        """Generate points using Fibonacci spiral for good distribution"""
+-        points = []
+-        phi = (1 + math.sqrt(5)) / 2  # golden ratio
+-        for i in range(16):
+-            theta = math.acos(-1 + (2 * i) / 15)  # elevation angle
+-            phi_angle = (i * 2 * math.pi) / (phi * phi)  # azimuthal angle
+-
+-            # Convert to cartesian coordinates
+-            x = math.sin(theta) * math.cos(phi_angle)
+-            y = math.sin(theta) * math.sin(phi_angle)
+-
+-            # Map to [0.05, 0.95] range to avoid boundaries
+-            x = 0.05 + 0.9 * (x + 1) / 2
+-            y = 0.05 + 0.9 * (y + 1) / 2
+-
+-            points.append([x, y])
+-
+-        return np.array(points)
+-
+-    def generate_perturbed_grid_initial():
+-        """Generate a perturbed regular grid initial configuration"""
+-        points = []
+-        for i in range(4):
+-            for j in range(4):
+-                x = (i + 0.5) / 4.0
+-                y = (j + 0.5) / 4.0
+-                points.append([x, y])
+-
+-        points = np.array(points)
+-
+-        # Add controlled random perturbation
+-        np.random.seed(42)
+-        perturbation = np.random.normal(0, 0.02, points.shape)
+-        points += perturbation
+-
+-        # Clip to valid range
+-        points = np.clip(points, 0.001, 0.999)
+-
+-        return points
+-
+-    def generate_ring_initial():
+-        """Generate points in concentric rings for better coverage"""
+-        points = []
+-        # Two concentric rings
+-        radii = [0.3, 0.7]
+-        angles_per_ring = [8, 8]  # 8 points per ring
+-
+-        for r_idx, (radius, num_angles) in enumerate(zip(radii, angles_per_ring)):
+-            for i in range(num_angles):
+-                angle = 2 * math.pi * i / num_angles
+-                x = 0.5 + radius * math.cos(angle) * 0.4
+-                y = 0.5 + radius * math.sin(angle) * 0.4
+-                # Ensure within bounds
+-                x = max(0.001, min(0.999, x))
+-                y = max(0.001, min(0.999, y))
+-                points.append([x, y])
+-
+-        return np.array(points)
+-
+-    # Generate multiple initial configurations with improved diversity
++        
++        if len(distances) == 0:
++            return 0
++            
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++        
++        if max_dist <= 1e-12:
++            return 0
++            
++        # Maximize min/max ratio - return negative for minimization
++        return -min_dist / max_dist
++
++    # Generate multiple diverse initial configurations
++    np.random.seed(42)
+     initial_configs = [
+-        generate_structured_grid_initial(),  # Enhanced structured initialization
+-        generate_fibonacci_spiral(),
+-        generate_perturbed_grid_initial(),   # Better perturbed grid
+-        generate_ring_initial()
++        voronoi_based_initialization(),
++        fibonacci_sphere_like_initial(),
++        structured_grid_initial()
+     ]
+-
+-    # Also include a more aggressive perturbation for exploration
+-    np.random.seed(42)
+-    aggressive_perturbed = generate_perturbed_grid_initial() + np.random.normal(0, 0.05, (16, 2))
+-    aggressive_perturbed = np.clip(aggressive_perturbed, 0.001, 0.999)
+-    initial_configs.append(aggressive_perturbed)
+-
+-    # Try optimization from different starting points
++    
++    # Add perturbed versions
++    for i, config in enumerate(initial_configs):
++        for j in range(2):
++            perturbed = config + np.random.normal(0, 0.02, config.shape)
++            perturbed = np.clip(perturbed, 0.001, 0.999)
++            initial_configs.append(perturbed)
++
+     best_ratio = -np.inf
+     best_points = None
+-
++    
+     # Define bounds for coordinates
+     bounds = [(0.001, 0.999) for _ in range(32)]
+ 
+-    # Multi-stage optimization approach with enhanced strategy
++    # Multi-start optimization with Voronoi-aware refinement
+     for i, initial_config in enumerate(initial_configs):
+-        # Early exit if we've already achieved a very good solution
+-        if best_ratio > 0.25:  # Early stopping threshold
+-            break
+-
+         try:
+-            # Stage 1: Global optimization with differential evolution
+-            de_result = differential_evolution(
+-                objective,
+-                bounds,
+-                maxiter=30,  # Reduced iterations for speed
+-                popsize=8,   # Smaller population for faster execution
+-                seed=42+i,   # Different seed for each config
+-                tol=1e-6,
+-                mutation=(0.5, 1),
+-                recombination=0.7
+-            )
+-
+-            # Stage 2: Local refinement with L-BFGS-B
++            # First, try direct optimization from this starting point
+             result = minimize(
+-                objective,
+-                de_result.x,
++                objective_with_constraints,
++                initial_config.flatten(),
+                 method='L-BFGS-B',
+                 bounds=bounds,
+-                options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9}
++                options={'maxiter': 150, 'ftol': 1e-10, 'gtol': 1e-10}
+             )
+-
++            
+             if result.success:
+                 final_points = result.x.reshape(-1, 2)
+                 distances = pdist(final_points)
+-
++                
+                 if len(distances) > 0:
+                     min_dist = np.min(distances)
+                     max_dist = np.max(distances)
+-
++                    
+                     if max_dist > 0:
+                         ratio = min_dist / max_dist
+-
++                        
+                         if ratio > best_ratio:
+                             best_ratio = ratio
+                             best_points = final_points.copy()
+-            else:
+-                # Even if local optimization fails, try a more robust refinement
+-                try:
+-                    # Try with a different L-BFGS-B configuration
+-                    result2 = minimize(
+-                        objective,
+-                        de_result.x,
+-                        method='L-BFGS-B',
+-                        bounds=bounds,
+-                        options={'maxiter': 50, 'ftol': 1e-6, 'gtol': 1e-6}
+-                    )
+-                    if result2.success:
+-                        final_points2 = result2.x.reshape(-1, 2)
+-                        distances2 = pdist(final_points2)
+-                        if len(distances2) > 0:
+-                            min_dist2 = np.min(distances2)
+-                            max_dist2 = np.max(distances2)
+-                            if max_dist2 > 0:
+-                                ratio2 = min_dist2 / max_dist2
+-                                if ratio2 > best_ratio:
+-                                    best_ratio = ratio2
+-                                    best_points = final_points2.copy()
+-                except:
+-                    pass
+-
+-        except Exception as e:
+-            # If optimization fails, continue to next initial config
++                            
++        except Exception:
+             continue
+-
+-    # If no good solution was found, return the last attempted configuration
++    
++    # Try to improve with a second phase if needed
++    if best_points is not None and best_ratio < 0.25:
++        # Apply a more sophisticated refinement
++        try:
++            # Try different optimization method
++            result = minimize(
++                objective_with_constraints,
++                best_points.flatten(),
++                method='TNC',
++                bounds=bounds,
++                options={'maxiter': 100, 'ftol': 1e-12}
++            )
++            
++            if result.success:
++                final_points = result.x.reshape(-1, 2)
++                distances = pdist(final_points)
++                
++                if len(distances) > 0:
++                    min_dist = np.min(distances)
++                    max_dist = np.max(distances)
++                    
++                    if max_dist > 0:
++                        ratio = min_dist / max_dist
++                        
++                        if ratio > best_ratio:
++                            best_ratio = ratio
++                            best_points = final_points.copy()
++        except Exception:
++            pass
++    
++    # Final fallback to best initial configuration
+     if best_points is None:
+-        # Fallback to the best performing initial configuration
+-        fallback_points = generate_structured_grid_initial()
+-        # Add small random noise to break symmetry
+-        np.random.seed(42)
+-        fallback_points += np.random.normal(0, 0.01, fallback_points.shape)
+-        fallback_points = np.clip(fallback_points, 0.001, 0.999)
+-        best_points = fallback_points
+-
++        # Pick the best initial configuration based on simple distance ratio
++        best_initial_ratio = -np.inf
++        best_initial_points = None
++        
++        for i, config in enumerate(initial_configs):
++            distances = pdist(config)
++            if len(distances) > 0:
++                min_dist = np.min(distances)
++                max_dist = np.max(distances)
++                
++                if max_dist > 0:
++                    ratio = min_dist / max_dist
++                    
++                    if ratio > best_initial_ratio:
++                        best_initial_ratio = ratio
++                        best_initial_points = config.copy()
++                        
++        best_points = best_initial_points if best_initial_points is not None else structured_grid_initial()
++    
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

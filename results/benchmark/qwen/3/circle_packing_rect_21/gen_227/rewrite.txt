@@ -1,0 +1,257 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import math
+import random
+from typing import Tuple, List
+
+class CirclePackingOptimizer:
+    def __init__(self, width: float = 1.0, height: float = 1.0, num_circles: int = 21):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.population_size = 50
+        self.max_generations = 200
+        self.mutation_rate = 0.1
+        self.elite_size = 5
+        
+    def initialize_population(self) -> np.ndarray:
+        """Generate initial population using enhanced hexagonal packing"""
+        population = []
+        
+        # Create hexagonal grid pattern
+        rows = 5
+        cols = 5
+        spacing_x = self.width / (cols + 1)
+        spacing_y = self.height / (rows + 1)
+        offset = spacing_x * 0.5
+        
+        # Generate hexagonal grid points
+        hex_points = []
+        for i in range(rows):
+            for j in range(cols):
+                x = (j + 1) * spacing_x
+                if i % 2 == 1:
+                    x += offset
+                y = (i + 1) * spacing_y
+                if 0 <= x <= self.width and 0 <= y <= self.height:
+                    hex_points.append([x, y])
+        
+        # Add strategic corner and edge points
+        corner_points = [
+            [0.1, 0.1], [self.width-0.1, 0.1], [0.1, self.height-0.1], [self.width-0.1, self.height-0.1],
+            [self.width/2, 0.1], [self.width/2, self.height-0.1], [0.1, self.height/2], [self.width-0.1, self.height/2]
+        ]
+        
+        # Combine and ensure sufficient points
+        all_points = hex_points + corner_points
+        if len(all_points) < self.num_circles:
+            # Fill with random points
+            for _ in range(self.num_circles - len(all_points)):
+                x = np.random.uniform(0.1, self.width - 0.1)
+                y = np.random.uniform(0.1, self.height - 0.1)
+                all_points.append([x, y])
+        
+        # Generate population
+        for _ in range(self.population_size):
+            # Select random subset of points
+            selected_points = random.sample(all_points, self.num_circles)
+            individual = np.zeros((self.num_circles, 3))
+            
+            for i, (x, y) in enumerate(selected_points):
+                # Compute max radius that fits at this location
+                max_radius = self._compute_max_radius(x, y, individual[:i])
+                individual[i] = [x, y, max(max_radius, 0.001)]
+                
+            population.append(individual)
+            
+        return np.array(population)
+    
+    def _compute_max_radius(self, x: float, y: float, existing_circles: np.ndarray) -> float:
+        """Compute maximum radius for a circle at (x,y) given existing circles and container boundaries."""
+        # Boundary constraints
+        min_dist_from_edge = min(x, self.width - x, y, self.height - y)
+        
+        if min_dist_from_edge <= 0:
+            return 0
+            
+        # Overlap constraints with existing circles
+        min_dist_from_others = float('inf')
+        
+        for circle in existing_circles:
+            if circle[2] > 0:  # Only consider placed circles
+                cx, cy, cr = circle
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                min_dist_from_others = min(min_dist_from_others, dist - cr)
+        
+        # Take minimum of boundary and overlap constraints
+        max_radius = min(min_dist_from_edge, min_dist_from_others)
+        
+        return max(0.001, max_radius)
+    
+    def _calculate_fitness(self, individual: np.ndarray) -> Tuple[float, float]:
+        """Calculate fitness for an individual (sum of radii, penalty for overlaps)"""
+        radii = individual[:, 2]
+        total_radius = np.sum(radii)
+        
+        # Calculate overlap penalty
+        penalty = 0.0
+        positions = individual[:, :2]
+        
+        # Use pairwise comparison to check overlaps
+        for i in range(len(individual)):
+            for j in range(i + 1, len(individual)):
+                xi, yi = positions[i]
+                xj, yj = positions[j]
+                ri, rj = radii[i], radii[j]
+                
+                distance = np.sqrt((xi - xj)**2 + (yi - yj)**2)
+                overlap = max(0, ri + rj - distance)
+                
+                if overlap > 0:
+                    penalty += overlap**2  # Quadratic penalty for severe overlaps
+                    
+        # High penalty for boundary violations
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            if x - r < 0 or x + r > self.width or y - r < 0 or y + r > self.height:
+                penalty += 100.0  # Large penalty for boundary violations
+                
+        # The fitness is total radius minus penalty (higher fitness = better)
+        return total_radius - penalty, penalty
+    
+    def _tournament_selection(self, population: np.ndarray, fitnesses: np.ndarray, tournament_size: int = 3) -> np.ndarray:
+        """Select parent using tournament selection"""
+        selected_indices = []
+        for _ in range(len(population)):
+            # Tournament selection
+            tournament_indices = random.sample(range(len(population)), tournament_size)
+            tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+            selected_indices.append(winner_index)
+            
+        return population[selected_indices]
+    
+    def _crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """Perform crossover between two parents"""
+        # Uniform crossover
+        child = np.zeros_like(parent1)
+        for i in range(len(parent1)):
+            if random.random() < 0.5:
+                child[i] = parent1[i].copy()
+            else:
+                child[i] = parent2[i].copy()
+                
+        return child
+    
+    def _mutate(self, individual: np.ndarray) -> np.ndarray:
+        """Apply mutation to individual"""
+        mutated = individual.copy()
+        
+        for i in range(len(individual)):
+            if random.random() < self.mutation_rate:
+                # Mutate position
+                x, y, r = individual[i]
+                
+                # Small random perturbation to position
+                dx = np.random.normal(0, 0.05)
+                dy = np.random.normal(0, 0.05)
+                
+                new_x = max(r, min(self.width - r, x + dx))
+                new_y = max(r, min(self.height - r, y + dy))
+                
+                # Recalculate radius at new position
+                max_radius = self._compute_max_radius(new_x, new_y, 
+                                                    np.vstack([mutated[:i], mutated[i+1:]]))
+                
+                mutated[i] = [new_x, new_y, max(max_radius, 0.001)]
+                
+        return mutated
+    
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop"""
+        # Initialize population
+        population = self.initialize_population()
+        
+        best_individual = None
+        best_fitness = float('-inf')
+        
+        for generation in range(self.max_generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            penalties = []
+            
+            for individual in population:
+                fitness, penalty = self._calculate_fitness(individual)
+                fitness_scores.append(fitness)
+                penalties.append(penalty)
+            
+            # Track best individual
+            max_fitness_idx = np.argmax(fitness_scores)
+            if fitness_scores[max_fitness_idx] > best_fitness:
+                best_fitness = fitness_scores[max_fitness_idx]
+                best_individual = population[max_fitness_idx].copy()
+            
+            # Sort population by fitness
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = population[sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+            
+            # Elitism: keep best individuals
+            elite = population[:self.elite_size]
+            
+            # Selection and reproduction
+            selected_parents = self._tournament_selection(population, fitness_scores)
+            
+            # Generate new population
+            new_population = [elite[i] for i in range(self.elite_size)]
+            
+            while len(new_population) < self.population_size:
+                parent1 = selected_parents[random.randint(0, len(selected_parents)-1)]
+                parent2 = selected_parents[random.randint(0, len(selected_parents)-1)]
+                
+                child = self._crossover(parent1, parent2)
+                child = self._mutate(child)
+                
+                new_population.append(child)
+                
+            population = np.array(new_population)
+            
+            # Early stopping if improvement is minimal
+            if generation > 10 and abs(fitness_scores[0] - fitness_scores[10]) < 1e-6:
+                break
+                
+        return best_individual
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Test multiple aspect ratios to find optimal configuration
+    test_ratios = [(1.2, 0.8), (1.5, 0.5), (1.0, 1.0)]
+    best_sum = 0
+    best_circles = None
+    
+    # Multi-start approach to find best configuration
+    for width, height in test_ratios:
+        np.random.seed(42)
+        optimizer = CirclePackingOptimizer(width, height)
+        circles = optimizer.optimize()
+        
+        # Check if this is better than our previous best
+        current_sum = np.sum(circles[:, 2])
+        if current_sum > best_sum:
+            best_sum = current_sum
+            best_circles = circles.copy()
+    
+    return best_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

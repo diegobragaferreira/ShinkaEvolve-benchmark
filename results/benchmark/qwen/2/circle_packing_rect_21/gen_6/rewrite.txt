@@ -1,0 +1,228 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.neighbors import NearestNeighbors
+import random
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Problem setup
+    n_circles = 21
+    container_perimeter = 4
+    container_width = container_height = container_perimeter / 2
+    
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Initialize parameters for evolution
+    max_generations = 200
+    initial_pop_size = 100
+    final_pop_size = 200
+    initial_mutation_rate = 0.3
+    final_mutation_rate = 0.05
+    tournament_size = 5
+    
+    # Helper functions
+    def create_individual():
+        """Create a valid individual (set of circles)"""
+        # Initialize circles with random positions and radii
+        circles = np.zeros((n_circles, 3))
+        
+        # Grid-based initialization to avoid overlaps initially
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+        
+        x_spacing = container_width / (cols + 1)
+        y_spacing = container_height / (rows + 1)
+        
+        for i in range(n_circles):
+            row = i // cols
+            col = i % cols
+            x = (col + 1) * x_spacing
+            y = (row + 1) * y_spacing
+            
+            # Add small random perturbation
+            max_perturbation = min(x_spacing, y_spacing) * 0.3
+            x += np.random.uniform(-max_perturbation, max_perturbation)
+            y += np.random.uniform(-max_perturbation, max_perturbation)
+            
+            # Set initial radius
+            radius = min(0.1, x_spacing / 4, y_spacing / 4)
+            circles[i] = [x, y, radius]
+        
+        return circles
+    
+    def is_valid(circles: np.ndarray) -> bool:
+        """Check if all circles are within bounds and non-overlapping"""
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
+                return False
+        
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i + 1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                
+                # Distance between centers
+                dx = x1 - x2
+                dy = y1 - y2
+                dist = np.sqrt(dx*dx + dy*dy)
+                
+                # Circles should not overlap
+                if dist < r1 + r2:
+                    return False
+        return True
+    
+    def evaluate_fitness(circles: np.ndarray) -> float:
+        """Evaluate fitness (sum of radii) with penalty for violations"""
+        if not is_valid(circles):
+            # Apply penalty for constraint violations
+            return -np.sum(circles[:, 2])
+        return np.sum(circles[:, 2])
+    
+    def mutate(individual: np.ndarray, generation: int, max_generations: int) -> np.ndarray:
+        """Apply mutation to an individual"""
+        # Adaptive mutation rate
+        mutation_rate = initial_mutation_rate + (final_mutation_rate - initial_mutation_rate) * (generation / max_generations)
+        
+        mutated = individual.copy()
+        
+        # Mutate each circle
+        for i in range(len(mutated)):
+            if np.random.random() < mutation_rate:
+                # Random displacement
+                dx = np.random.normal(0, 0.05)
+                dy = np.random.normal(0, 0.05)
+                
+                # Adjust position with boundary checks
+                x, y, r = mutated[i]
+                new_x = np.clip(x + dx, r, container_width - r)
+                new_y = np.clip(y + dy, r, container_height - r)
+                
+                # Small radius adjustment
+                dr = np.random.normal(0, 0.01)
+                new_r = np.clip(r + dr, 0.001, min(container_width, container_height) / 4)
+                
+                mutated[i] = [new_x, new_y, new_r]
+        
+        return mutated
+    
+    def crossover(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """Create offspring via uniform crossover"""
+        offspring = parent1.copy()
+        
+        for i in range(len(offspring)):
+            if np.random.random() < 0.5:
+                offspring[i] = parent2[i].copy()
+        
+        return offspring
+    
+    def select_parents(population: list, fitnesses: list, tournament_size: int) -> list:
+        """Select parents using tournament selection"""
+        selected = []
+        for _ in range(len(population)):
+            # Tournament selection
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+            selected.append(population[winner_idx].copy())
+        
+        return selected
+    
+    # Evolutionary algorithm
+    population = [create_individual() for _ in range(initial_pop_size)]
+    
+    best_fitness = float('-inf')
+    best_individual = None
+    stagnation_counter = 0
+    max_stagnation = 20
+    
+    # Main evolutionary loop
+    for generation in range(max_generations):
+        # Evaluate fitness
+        fitnesses = [evaluate_fitness(ind) for ind in population]
+        
+        # Track best solution
+        current_best_idx = np.argmax(fitnesses)
+        current_best_fitness = fitnesses[current_best_idx]
+        
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_individual = population[current_best_idx].copy()
+            stagnation_counter = 0
+        else:
+            stagnation_counter += 1
+        
+        # Early stopping if no improvement
+        if stagnation_counter >= max_stagnation:
+            break
+            
+        # Adjust parameters based on progress
+        if generation > max_generations * 0.5:
+            tournament_size = max(3, 10 - int(generation / 10))
+        
+        # Selection
+        parents = select_parents(population, fitnesses, tournament_size)
+        
+        # Create new population through crossover and mutation
+        new_population = []
+        
+        # Elitism: keep best individual
+        if best_individual is not None:
+            new_population.append(best_individual)
+        
+        # Generate rest of population
+        while len(new_population) < final_pop_size:
+            parent1, parent2 = np.random.choice(parents, 2, replace=False)
+            offspring = crossover(parent1, parent2)
+            mutated_offspring = mutate(offspring, generation, max_generations)
+            new_population.append(mutated_offspring)
+        
+        population = new_population[:final_pop_size]
+    
+    # Final validation
+    if best_individual is not None and is_valid(best_individual):
+        return best_individual
+    else:
+        # Return the best valid individual found
+        valid_individuals = []
+        for ind in population:
+            if is_valid(ind):
+                valid_individuals.append((ind, evaluate_fitness(ind)))
+        
+        if valid_individuals:
+            best_valid = max(valid_individuals, key=lambda x: x[1])
+            return best_valid[0]
+        else:
+            # Fallback to simple initialization
+            circles = np.zeros((n_circles, 3))
+            rows = int(np.ceil(np.sqrt(n_circles)))
+            cols = int(np.ceil(n_circles / rows))
+            x_spacing = container_width / (cols + 1)
+            y_spacing = container_height / (rows + 1)
+            
+            for i in range(n_circles):
+                row = i // cols
+                col = i % cols
+                x = (col + 1) * x_spacing
+                y = (row + 1) * y_spacing
+                radius = min(0.1, x_spacing / 4, y_spacing / 4)
+                circles[i] = [x, y, radius]
+            
+            return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,503 @@
+--- a/original.py
++++ b/original.py
+@@ -1,275 +1,348 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist
+-from scipy.optimize import minimize
++from scipy.optimize import differential_evolution, minimize
+ import time
++import random
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+ 
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum pairwise distances"""
++        if len(points) < 2:
++            return 0.0
+         distances = pdist(points)
+-        return np.min(distances) / np.max(distances)
++        max_dist = np.max(distances)
++        if max_dist == 0:
++            return 0.0
++        return np.min(distances) / max_dist
+ 
+     def objective_function(x_flat):
+         """Objective function to maximize (negative because we minimize)"""
+-        # Reshape flat array back to points
+         points = x_flat.reshape(-1, 2)
+         return -compute_min_max_ratio(points)
+ 
+     def constraint_function(x_flat):
+         """Constraint to keep points within unit square"""
+         points = x_flat.reshape(-1, 2)
+-        # Return negative values for constraint violations (we want >= 0)
+         violations = np.concatenate([
+             np.minimum(points[:, 0], 0),
+             np.minimum(points[:, 1], 0),
+             np.maximum(points[:, 0] - 1, 0),
+             np.maximum(points[:, 1] - 1, 0)
+         ])
+         return violations
+ 
+-    # Multi-start optimization with different initialization strategies
+-    best_ratio = -np.inf
+-    best_points = None
+-
+-    # Strategy 1: Enhanced hexagonal grid with true hexagonal lattice
++    # Strategy 1: Enhanced hexagonal grid with proper triangular packing
+     def hexagonal_grid_init():
+-        # Create points in a true hexagonal lattice pattern
+-        # Using the mathematical relationship: spacing_y = spacing_x * sqrt(3)/2
+-        # Better approach: start with a hexagonal tiling that naturally fits 16 points
+-
+-        # Generate points in a hexagonal pattern with radius adjustment
+-        # Hexagonal packing with 4 rows and 4 columns (but adjusted for better distribution)
++        # Create a proper hexagonal lattice arrangement for 16 points
+         points = []
+-
+-        # Define hexagonal grid parameters
+-        # For 16 points, we can use a 4x4 grid with proper hexagonal spacing
+-        spacing = 0.8  # Slightly reduced spacing to allow for better packing
++        
++        # Use mathematical relationship for hexagonal packing
++        # For triangular lattice, spacing = 1/sqrt(16/pi) ≈ 0.44
++        spacing = 0.45  # Slightly adjusted for better fit in unit square
+         row_spacing = spacing * np.sqrt(3) / 2.0
+         col_spacing = spacing
+ 
+-        # Create hexagonal grid
+-        rows = 4
+-        cols = 4
+-
+-        for row in range(rows):
+-            for col in range(cols):
++        # Create points in hexagonal pattern (4 rows, 4 columns)
++        for row in range(4):
++            for col in range(4):
+                 if len(points) >= 16:
+                     break
+-                # Calculate position
+                 x = col * col_spacing
+                 # Offset odd rows
+                 if row % 2 == 1:
+                     x += col_spacing / 2.0
+                 y = row * row_spacing
+                 points.append([x, y])
+ 
+         # Convert to numpy array
+         points = np.array(points[:16])
+ 
+-        # Normalize to fit within [0,1] x [0,1] with better fitting approach
++        # Normalize to fit exactly within unit square [0,1] x [0,1]
+         min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+         min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+ 
+-        # Avoid division by zero
++        # Avoid division by zero and normalize
+         if max_x > min_x and max_y > min_y:
+-            scale_x = 1.0 / (max_x - min_x) if max_x > min_x else 1.0
+-            scale_y = 1.0 / (max_y - min_y) if max_y > min_y else 1.0
+-
+-            # Apply scaling and centering
+-            points[:, 0] = (points[:, 0] - min_x) * scale_x
+-            points[:, 1] = (points[:, 1] - min_y) * scale_y
+-
+-            # Ensure we don't exceed bounds after scaling
+-            points[:, 0] = np.clip(points[:, 0], 0, 1)
+-            points[:, 1] = np.clip(points[:, 1], 0, 1)
+-
+-        # Better centering approach
++            scale_x = 1.0 / (max_x - min_x)
++            scale_y = 1.0 / (max_y - min_y)
++            scale = min(scale_x, scale_y, 1.0)
++            
++            points[:, 0] = (points[:, 0] - min_x) * scale
++            points[:, 1] = (points[:, 1] - min_y) * scale
++
++        # Center the points in the unit square
+         center_shift = 0.5 - np.mean(points, axis=0)
+         points = points + center_shift
+ 
+-        # Ensure within bounds after centering
+-        points = np.clip(points, 0, 1)
+-
+-        # Apply sophisticated perturbation strategy
+-        np.random.seed(42)
+-
+-        # Calculate distances to center and boundaries for adaptive perturbations
++        # Ensure all points are within bounds
++        points = np.clip(points, 0, 1)
++
++        # Apply sophisticated perturbations to break symmetries
++        np.random.seed(42)
++        
++        # Calculate key geometric properties for adaptive perturbations
+         center = np.mean(points, axis=0)
+         distances_from_center = np.sqrt(np.sum((points - center)**2, axis=1))
+         max_center_distance = np.max(distances_from_center)
+-
++        
++        # Calculate boundary distances
++        distances_to_boundaries = np.minimum(
++            np.minimum(points[:, 0], 1 - points[:, 0]),
++            np.minimum(points[:, 1], 1 - points[:, 1])
++        )
++
++        # Apply adaptive perturbations
++        for i in range(len(points)):
++            # Adaptive perturbation based on distance from center and boundary proximity
++            base_perturbation = 0.015
++            
++            # Distance-based component: points further from center get more freedom
++            distance_factor = 1.0
++            if max_center_distance > 0:
++                distance_factor = 1.0 - (distances_from_center[i] / max_center_distance) * 0.5
++            
++            # Boundary proximity component: points near boundaries get constrained
++            boundary_factor = np.clip(distances_to_boundaries[i] * 2.0, 0.0, 1.0)
++            
++            # Combine for effective perturbation
++            pert_magnitude = base_perturbation * distance_factor * boundary_factor
++            
++            # Add Gaussian noise
++            noise = np.random.normal(0, pert_magnitude, 2)
++            points[i] += noise
++
++        # Final clipping to ensure bounds
++        points = np.clip(points, 0, 1)
++
++        # Apply symmetry breaking through rotation patterns
++        rotation_angles = [
++            0, np.pi/12, np.pi/8, np.pi/6, 
++            np.pi/4, np.pi/3, np.pi*2/3, np.pi*3/4
++        ]
++        
++        # Apply rotations to break rotational symmetry
++        for i in range(len(points)):
++            # Select rotation angle based on position
++            angle_idx = (i * 7 + i * 3) % len(rotation_angles)
++            angle = rotation_angles[angle_idx]
++            
++            if angle != 0:
++                cos_a = np.cos(angle)
++                sin_a = np.sin(angle)
++                rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
++                points[i] = rotation_matrix @ (points[i] - center) + center
++
++        return points
++
++    # Strategy 2: Random initialization with improved distribution
++    def random_init():
++        np.random.seed(42)
++        points = np.random.rand(16, 2)
++        return points
++
++    # Strategy 3: Perturbed hexagonal grid
++    def perturbed_hexagonal_init():
++        points = hexagonal_grid_init()
++        np.random.seed(42)
++        # Add controlled perturbations
++        points += np.random.normal(0, 0.015, points.shape)
++        points = np.clip(points, 0, 1)
++        return points
++
++    # Strategy 4: Fibonacci-inspired pattern
++    def fibonacci_init():
++        points = []
++        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
++        for i in range(16):
++            # Golden angle approach adapted for 2D
++            theta = i * 2 * np.pi / phi
++            r = np.sqrt(i / 15.0)  # Radial distance scaled to fit circle
++            x = 0.5 + r * np.cos(theta) * 0.45
++            y = 0.5 + r * np.sin(theta) * 0.45
++            points.append([x, y])
++        return np.array(points)
++
++    # Strategy 5: Adaptive hexagonal pattern with boundary awareness
++    def adaptive_hexagonal_init():
++        points = hexagonal_grid_init()
++        
++        # Apply boundary-aware adaptive perturbations
++        np.random.seed(42)
++        center = np.mean(points, axis=0)
++        distances_from_center = np.sqrt(np.sum((points - center)**2, axis=1))
++        max_center_distance = np.max(distances_from_center)
++        
+         # Calculate distances to boundaries
+         distances_to_boundaries = np.minimum(
+             np.minimum(points[:, 0], 1 - points[:, 0]),
+             np.minimum(points[:, 1], 1 - points[:, 1])
+         )
+-
+-        # Apply adaptive perturbation based on position and boundary proximity
++        
++        # Apply adaptive perturbations
+         for i in range(len(points)):
+-            # Base perturbation magnitude
++            # Base perturbation
+             base_perturbation = 0.01
+-
+-            # Distance-based factor (points further from center get more freedom)
+-            if max_center_distance > 0:
+-                distance_factor = 1.0 - (distances_from_center[i] / max_center_distance)
+-            else:
+-                distance_factor = 0.5
+-
+-            # Boundary proximity factor (points near boundaries get smaller perturbations)
+-            boundary_factor = np.clip(distances_to_boundaries[i] * 2.0, 0.0, 1.0)
+-
+-            # Combine factors for adaptive perturbation
++            
++            # Position-based perturbation
++            distance_factor = 1.0 - (distances_from_center[i] / max_center_distance) * 0.7 if max_center_distance > 0 else 0.5
++            boundary_factor = np.clip(distances_to_boundaries[i] * 1.5, 0.0, 1.0)
+             pert_magnitude = base_perturbation * distance_factor * boundary_factor
+-
+-            # Add 2D Gaussian noise
++            
+             noise = np.random.normal(0, pert_magnitude, 2)
+             points[i] += noise
+-
+-        # Final clipping to ensure bounds
+-        points = np.clip(points, 0, 1)
+-
+-        # Apply additional symmetry breaking with multiple small rotations
+-        # Create a more sophisticated rotation pattern that breaks rotational symmetry more effectively
+-        rotation_angles = [
+-            0,
+-            np.pi/12,      # 15 degrees
+-            np.pi/8,       # 22.5 degrees
+-            np.pi/6,       # 30 degrees
+-            np.pi/4,       # 45 degrees
+-            np.pi/3,       # 60 degrees
+-            np.pi*2/3,     # 120 degrees
+-            np.pi*3/4      # 135 degrees
+-        ]
+-
+-        # Apply rotation to specific points in a pattern that avoids rotational symmetry
+-        for i in range(len(points)):
+-            # Apply rotation to points in a way that breaks symmetry more thoroughly
+-            # Use a more complex indexing scheme
+-            rotation_idx = (i * 7 + i * 3) % len(rotation_angles)
+-            angle = rotation_angles[rotation_idx]
+-
+-            cos_a = np.cos(angle)
+-            sin_a = np.sin(angle)
+-            rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+-
+-            # Only apply rotation if it makes a meaningful change
+-            if angle != 0:
+-                points[i] = rotation_matrix @ (points[i] - center) + center
+-
+-        return points
+-
+-    # Strategy 2: Random with clustering avoidance
+-    def random_init():
+-        np.random.seed(42)
+-        points = np.random.rand(16, 2)
+-        return points
+-
+-    # Strategy 3: Perturbed hexagonal grid (more structured)
+-    def perturbed_hexagonal_init():
+-        points = hexagonal_grid_init()
+-        np.random.seed(42)
+-        # Add small random perturbations
+-        points += np.random.normal(0, 0.02, points.shape)
+-        # Ensure all points are within bounds
++            
++        points = np.clip(points, 0, 1)
++        return points
++
++    # Strategy 6: Grid-based with strategic asymmetry
++    def grid_asymmetry_init():
++        # Create a 4x4 grid with strategic asymmetry
++        points = []
++        for i in range(4):
++            for j in range(4):
++                x = j * 0.25 + 0.01 * (i % 2) + 0.005 * (j % 2)  # Adds small asymmetry
++                y = i * 0.25 + 0.01 * (j % 2) + 0.005 * (i % 2)
++                points.append([x, y])
++        
++        points = np.array(points[:16])
++        
++        # Add small random jitter
++        np.random.seed(42)
++        points += np.random.normal(0, 0.01, points.shape)
++        
++        # Clip to bounds
+         points = np.clip(points, 0, 1)
+         return points
+ 
+     initial_strategies = [
+         hexagonal_grid_init,
+         random_init,
+-        perturbed_hexagonal_init
++        perturbed_hexagonal_init,
++        fibonacci_init,
++        adaptive_hexagonal_init,
++        grid_asymmetry_init
+     ]
+ 
+-    # Try multiple random restarts with adaptive optimization
+-    num_restarts = 5
++    # Multi-start optimization with different initialization strategies
++    best_ratio = -np.inf
++    best_points = None
++
++    # Try multiple restarts with adaptive optimization
++    num_restarts = 6
+     for restart in range(num_restarts):
+         # Select initialization strategy
+         init_func = initial_strategies[restart % len(initial_strategies)]
+         points = init_func()
+ 
+         # Flatten for optimization
+         x0 = points.flatten()
+ 
+-        # Set up constraints
++        # Set up bounds
+         bounds = [(0, 1) for _ in range(32)]
+-        constraints = {'type': 'ineq', 'fun': constraint_function}
+-
+-        # Adaptive optimization with intelligent cooling schedule
++
++        # Use different optimization approaches based on restart
++        optimized_points = None
++        
+         try:
+-            # Use different optimization methods based on restart count
+             if restart < 3:
+-                # More thorough optimization for early restarts
++                # Use differential evolution for global search (more thorough)
++                result = differential_evolution(
++                    objective_function,
++                    bounds,
++                    maxiter=600,
++                    popsize=15,
++                    tol=1e-8,
++                    seed=42 + restart,
++                    callback=None
++                )
++                if result.success:
++                    optimized_points = result.x.reshape(-1, 2)
++                    optimized_points = np.clip(optimized_points, 0, 1)
++            else:
++                # Use local optimization for faster convergence
+                 result = minimize(
+                     objective_function,
+                     x0,
+-                    method='SLSQP',
++                    method='L-BFGS-B',  # Changed from SLSQP for better performance
+                     bounds=bounds,
+-                    constraints=constraints,
+-                    options={'maxiter': 1000, 'ftol': 1e-8, 'eps': 1e-6}
++                    options={'maxiter': 800, 'ftol': 1e-8, 'gtol': 1e-8}
+                 )
+-            else:
+-                # Faster optimization for later restarts
++                if result.success:
++                    optimized_points = result.x.reshape(-1, 2)
++        except Exception:
++            # Fall back to simple local optimization
++            try:
+                 result = minimize(
+                     objective_function,
+                     x0,
+-                    method='SLSQP',
++                    method='L-BFGS-B',
+                     bounds=bounds,
+-                    constraints=constraints,
+-                    options={'maxiter': 500, 'ftol': 1e-6, 'eps': 1e-4}
++                    options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6}
+                 )
+-
++                if result.success:
++                    optimized_points = result.x.reshape(-1, 2)
++            except Exception:
++                continue
++
++        # Evaluate result
++        if optimized_points is not None:
++            current_ratio = compute_min_max_ratio(optimized_points)
++            if current_ratio > best_ratio:
++                best_ratio = current_ratio
++                best_points = optimized_points.copy()
++
++    # Final refinement if needed
++    if best_points is not None:
++        try:
++            # Perform final refinement with L-BFGS-B
++            x0 = best_points.flatten()
++            result = minimize(
++                objective_function,
++                x0,
++                method='L-BFGS-B',
++                bounds=[(0, 1) for _ in range(32)],
++                options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
++            )
+             if result.success:
+                 final_points = result.x.reshape(-1, 2)
+-                ratio = compute_min_max_ratio(final_points)
+-
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = final_points.copy()
+-
+-        except Exception as e:
+-            continue
+-
+-    # If none worked, fallback to simple approach
++                final_ratio = compute_min_max_ratio(final_points)
++                if final_ratio > best_ratio:
++                    best_points = final_points
++        except Exception:
++            pass
++
++    # If no good solution was found, fallback to hexagonal grid with refinement
+     if best_points is None:
+-        # Fallback to the original approach with better settings
+         points = hexagonal_grid_init()
+-        np.random.seed(42)
+-        points += np.random.normal(0, 0.01, points.shape)
+-        points = np.clip(points, 0, 1)
+         x0 = points.flatten()
+-
+-        bounds = [(0, 1) for _ in range(32)]
+-        constraints = {'type': 'ineq', 'fun': constraint_function}
+-
++        
+         try:
+             result = minimize(
+                 objective_function,
+                 x0,
+-                method='SLSQP',
+-                bounds=bounds,
+-                constraints=constraints,
+-                options={'maxiter': 1000, 'ftol': 1e-8, 'eps': 1e-6}
++                method='L-BFGS-B',
++                bounds=[(0, 1) for _ in range(32)],
++                options={'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+             )
+-
+             if result.success:
+                 best_points = result.x.reshape(-1, 2)
+             else:
+                 # Final fallback to random points
+                 np.random.seed(42)
+                 best_points = np.random.rand(16, 2)
+         except:
+             # Final fallback
+             np.random.seed(42)
+             best_points = np.random.rand(16, 2)
+ 
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

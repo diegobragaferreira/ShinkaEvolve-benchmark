@@ -1,0 +1,223 @@
+<NAME>
+add_voronoi_based_mutation_weights
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Voronoi density for adaptive mutation scaling, but we can enhance this by incorporating Voronoi cell areas directly into the mutation weights for more precise control. This approach will allow circles in smaller Voronoi cells (higher constraint density) to receive more careful, smaller mutations while circles in larger cells can undergo bigger changes. The key insight is to use the inverse of Voronoi area as a weight for determining mutation step sizes - this creates a natural balance between exploration and exploitation based on local constraint density.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_radius(circles: np.ndarray, idx: int, density_scores: np.ndarray = None) -> np.ndarray:
+    """Mutate radius with adaptive delta based on Voronoi density."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Adaptive delta based on density - more sophisticated
+    max_delta = 0.01
+    if density_scores is not None and len(density_scores) > idx:
+        # High density means more constraints, use smaller deltas
+        # Normalize density to [0,1] range and invert for delta scaling
+        normalized_density = min(1.0, density_scores[idx] / 10.0)  # Cap at 10 for stability
+        delta_factor = 1.0 - 0.8 * normalized_density  # Reduce delta by up to 80% in dense regions
+        delta = max_delta * delta_factor
+    else:
+        delta = max_delta
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius with better clamping
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+=======
+def mutate_radius(circles: np.ndarray, idx: int, voronoi_areas: np.ndarray = None) -> np.ndarray:
+    """Mutate radius with adaptive delta based on Voronoi cell areas."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Adaptive delta based on Voronoi cell area - smaller cells mean higher constraint density
+    max_delta = 0.01
+    if voronoi_areas is not None and len(voronoi_areas) > idx:
+        # Use inverse of Voronoi area as weight - smaller areas (more constrained) get smaller deltas
+        # Normalize to prevent extreme variations
+        normalized_area = max(0.001, voronoi_areas[idx])  # Avoid division by zero or very small numbers
+        # Inverse relationship: smaller area → smaller delta
+        delta_factor = 1.0 / (1.0 + normalized_area * 2.0)  # Scale to keep factor reasonable
+        delta = max_delta * delta_factor
+    else:
+        delta = max_delta
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius with better clamping
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_position(circles: np.ndarray, idx: int) -> np.ndarray:
+    """Mutate position with small random perturbation."""
+    new_circles = circles.copy()
+    old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+    # Small random perturbation with boundary awareness
+    max_delta = 0.05
+    delta_x = np.random.uniform(-max_delta, max_delta)
+    delta_y = np.random.uniform(-max_delta, max_delta)
+
+    new_x = old_x + delta_x
+    new_y = old_y + delta_y
+
+    # Ensure within bounds with margin
+    margin = 0.01
+    new_x = np.clip(new_x, margin, 1.0 - margin)
+    new_y = np.clip(new_y, margin, 1.0 - margin)
+
+    new_circles[idx, 0] = new_x
+    new_circles[idx, 1] = new_y
+
+    return new_circles
+=======
+def mutate_position(circles: np.ndarray, idx: int, voronoi_areas: np.ndarray = None) -> np.ndarray:
+    """Mutate position with small random perturbation."""
+    new_circles = circles.copy()
+    old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+    # Adaptive delta based on Voronoi cell area for position mutations too
+    max_delta = 0.05
+    if voronoi_areas is not None and len(voronoi_areas) > idx:
+        # Use inverse of Voronoi area as weight for position mutations too
+        normalized_area = max(0.001, voronoi_areas[idx])
+        delta_factor = 1.0 / (1.0 + normalized_area * 2.0)
+        delta = max_delta * delta_factor
+    else:
+        delta = max_delta
+
+    # Small random perturbation with boundary awareness
+    delta_x = np.random.uniform(-delta, delta)
+    delta_y = np.random.uniform(-delta, delta)
+
+    new_x = old_x + delta_x
+    new_y = old_y + delta_y
+
+    # Ensure within bounds with margin
+    margin = 0.01
+    new_x = np.clip(new_x, margin, 1.0 - margin)
+    new_y = np.clip(new_y, margin, 1.0 - margin)
+
+    new_circles[idx, 0] = new_x
+    new_circles[idx, 1] = new_y
+
+    return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    for iteration in range(max_iter):
+        improved = False
+
+        # Process boundary circles first (they're more constrained)
+        if boundary_indices:
+            for i in boundary_indices:
+                # Special handling for boundary circles with smaller deltas
+                mutated_rad = mutate_radius(current_circles, i, density_scores)
+                mutated_pos = mutate_position(current_circles, i)
+
+                # Test both mutations
+                rad_fitness = evaluate_fitness(mutated_rad)
+                pos_fitness = evaluate_fitness(mutated_pos)
+
+                # Choose better mutation
+                if rad_fitness > pos_fitness:
+                    if is_valid_solution(mutated_rad, rect_width, rect_height):
+                        current_circles = mutated_rad
+                        improved = True
+                else:
+                    if is_valid_solution(mutated_pos, rect_width, rect_height):
+                        current_circles = mutated_pos
+                        improved = True
+
+        # Process remaining circles
+        remaining_indices = [i for i in range(len(current_circles)) if i not in boundary_indices]
+        for i in remaining_indices:
+            # Try position mutation with standard delta
+            mutated_pos = mutate_position(current_circles, i)
+
+            # Try radius mutation with adaptive delta
+            mutated_rad = mutate_radius(current_circles, i, density_scores)
+
+            # Evaluate both mutations
+            pos_fitness = evaluate_fitness(mutated_pos)
+            rad_fitness = evaluate_fitness(mutated_rad)
+
+            # Choose the better one
+            if pos_fitness > rad_fitness:
+                if is_valid_solution(mutated_pos, rect_width, rect_height):
+                    current_circles = mutated_pos
+                    improved = True
+            else:
+                if is_valid_solution(mutated_rad, rect_width, rect_height):
+                    current_circles = mutated_rad
+                    improved = True
+=======
+    for iteration in range(max_iter):
+        improved = False
+
+        # Process boundary circles first (they're more constrained)
+        if boundary_indices:
+            for i in boundary_indices:
+                # Special handling for boundary circles with smaller deltas
+                mutated_rad = mutate_radius(current_circles, i, voronoi_areas)
+                mutated_pos = mutate_position(current_circles, i, voronoi_areas)
+
+                # Test both mutations
+                rad_fitness = evaluate_fitness(mutated_rad)
+                pos_fitness = evaluate_fitness(mutated_pos)
+
+                # Choose better mutation
+                if rad_fitness > pos_fitness:
+                    if is_valid_solution(mutated_rad, rect_width, rect_height):
+                        current_circles = mutated_rad
+                        improved = True
+                else:
+                    if is_valid_solution(mutated_pos, rect_width, rect_height):
+                        current_circles = mutated_pos
+                        improved = True
+
+        # Process remaining circles
+        remaining_indices = [i for i in range(len(current_circles)) if i not in boundary_indices]
+        for i in remaining_indices:
+            # Try position mutation with adaptive delta
+            mutated_pos = mutate_position(current_circles, i, voronoi_areas)
+
+            # Try radius mutation with adaptive delta
+            mutated_rad = mutate_radius(current_circles, i, voronoi_areas)
+
+            # Evaluate both mutations
+            pos_fitness = evaluate_fitness(mutated_pos)
+            rad_fitness = evaluate_fitness(mutated_rad)
+
+            # Choose the better one
+            if pos_fitness > rad_fitness:
+                if is_valid_solution(mutated_pos, rect_width, rect_height):
+                    current_circles = mutated_pos
+                    improved = True
+            else:
+                if is_valid_solution(mutated_rad, rect_width, rect_height):
+                    current_circles = mutated_rad
+                    improved = True
+>>>>>>> REPLACE
+</DIFF>

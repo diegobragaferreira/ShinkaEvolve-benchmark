@@ -1,0 +1,312 @@
+<NAME>
+add_symmetric_variants_and_enhanced_local_refinement
+</NAME>
+
+<DESCRIPTION>
+This improvement adds two key enhancements to boost the optimization performance:
+1. Symmetric variants generation to explore better configurations systematically
+2. Enhanced local refinement with adaptive tolerance tightening to improve convergence precision
+
+The symmetric variants help escape local optima by providing multiple starting points with different rotational symmetries. The enhanced local refinement uses progressive tightening of tolerances during L-BFGS-B optimization to achieve better convergence accuracy without excessive computational cost.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_optimization(initial_points: np.ndarray, max_time: float = 350.0) -> np.ndarray:
+    """
+    Perform adaptive optimization with changing population sizes and strategies.
+    Implements progressive optimization approach.
+
+    Args:
+        initial_points: Starting point configuration
+        max_time: Maximum optimization time in seconds
+
+    Returns:
+        Optimized point configuration
+    """
+    start_time = time.time()
+
+    # Flatten initial points for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0.0, 1.0)] * len(initial_flat)
+
+    # Track convergence history
+    prev_best = float('inf')
+    stagnant_count = 0
+    max_stagnant = 15
+    population_history = []
+    current_popsize = 20
+
+    def adaptive_objective(x_flat):
+        result = objective_function(x_flat)
+        population_history.append(result)
+        return result
+
+    # Progressive optimization phases
+    # Phase 1: Global search with large population
+    try:
+        result = differential_evolution(
+            adaptive_objective,
+            bounds,
+            maxiter=200,
+            popsize=25,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+        prev_best = result.fun
+
+    except Exception as e:
+        pass
+
+    # Phase 2: Refinement with smaller population
+    try:
+        result = differential_evolution(
+            adaptive_objective,
+            bounds,
+            maxiter=250,
+            popsize=15,
+            tol=1e-7,
+            mutation=(0.7, 1.0),
+            recombination=0.8,
+            seed=43,
+            disp=False
+        )
+        prev_best = result.fun
+
+    except Exception as e:
+        pass
+
+    # Phase 3: Local refinement using L-BFGS-B with tighter tolerances
+    def local_objective(x_flat):
+        points = x_flat.reshape(-1, 3)
+        # Add penalty for out-of-bounds
+        penalty = 0.0
+        for i in range(14):
+            for j in range(3):
+                if points[i,j] < 0:
+                    penalty += 1000 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1000 * (points[i,j] - 1)**2
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return float('inf') + penalty
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 0:
+            return float('inf') + penalty
+        return -min_dist / max_dist + penalty
+
+    try:
+        x0 = result.x.reshape(-1, 3).flatten()
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+        result = local_result
+    except:
+        pass
+
+    # Reshape optimized result
+    optimized_points = result.x.reshape(14, 3)
+
+    # Ensure all points are within valid range (final safety check)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+=======
+def create_symmetric_variants(points: np.ndarray, num_variants: int = 4) -> np.ndarray:
+    """
+    Create symmetric variants by rotating around different axes.
+    """
+    variants = [points]
+
+    # Create rotations around different axes
+    for i in range(num_variants):
+        angle = 2 * np.pi * (i + 1) / (num_variants + 1)
+
+        # Rotation around z-axis
+        rot_z = np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+
+        rotated = points @ rot_z.T
+        variants.append(rotated)
+
+        # Rotation around x-axis
+        rot_x = np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+        rotated_x = points @ rot_x.T
+        variants.append(rotated_x)
+
+        # Rotation around y-axis
+        rot_y = np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+        rotated_y = points @ rot_y.T
+        variants.append(rotated_y)
+
+    return np.vstack(variants)
+
+def adaptive_optimization(initial_points: np.ndarray, max_time: float = 350.0) -> np.ndarray:
+    """
+    Perform adaptive optimization with changing population sizes and strategies.
+    Implements progressive optimization approach with symmetric variants and enhanced local refinement.
+
+    Args:
+        initial_points: Starting point configuration
+        max_time: Maximum optimization time in seconds
+
+    Returns:
+        Optimized point configuration
+    """
+    start_time = time.time()
+
+    # Flatten initial points for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0.0, 1.0)] * len(initial_flat)
+
+    # Track convergence history
+    prev_best = float('inf')
+    stagnant_count = 0
+    max_stagnant = 15
+    population_history = []
+    current_popsize = 20
+
+    def adaptive_objective(x_flat):
+        result = objective_function(x_flat)
+        population_history.append(result)
+        return result
+
+    # Progressive optimization phases
+    # Phase 1: Global search with large population
+    try:
+        result = differential_evolution(
+            adaptive_objective,
+            bounds,
+            maxiter=200,
+            popsize=25,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+        prev_best = result.fun
+
+    except Exception as e:
+        pass
+
+    # Phase 2: Refinement with smaller population
+    try:
+        result = differential_evolution(
+            adaptive_objective,
+            bounds,
+            maxiter=250,
+            popsize=15,
+            tol=1e-7,
+            mutation=(0.7, 1.0),
+            recombination=0.8,
+            seed=43,
+            disp=False
+        )
+        prev_best = result.fun
+
+    except Exception as e:
+        pass
+
+    # Phase 3: Local refinement using L-BFGS-B with adaptive tolerance tightening
+    def local_objective(x_flat):
+        points = x_flat.reshape(-1, 3)
+        # Add penalty for out-of-bounds
+        penalty = 0.0
+        for i in range(14):
+            for j in range(3):
+                if points[i,j] < 0:
+                    penalty += 1000 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1000 * (points[i,j] - 1)**2
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return float('inf') + penalty
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 0:
+            return float('inf') + penalty
+        return -min_dist / max_dist + penalty
+
+    try:
+        x0 = result.x.reshape(-1, 3).flatten()
+
+        # Adaptive tolerance tightening for L-BFGS-B
+        # Start with loose tolerances for faster initial convergence
+        looser_options = {'maxiter': 100, 'ftol': 1e-6, 'gtol': 1e-6}
+        tighter_options = {'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9}
+
+        # First run with looser tolerances
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options=looser_options
+        )
+
+        # If improvement was significant, try with tighter tolerances
+        if abs(local_result.fun - result.fun) > 1e-8:
+            local_result = minimize(
+                local_objective,
+                local_result.x,
+                method='L-BFGS-B',
+                options=tighter_options
+            )
+
+        result = local_result
+    except:
+        pass
+
+    # Reshape optimized result
+    optimized_points = result.x.reshape(14, 3)
+
+    # Ensure all points are within valid range (final safety check)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    # Explore symmetric variants to find potentially better solutions
+    try:
+        variants = create_symmetric_variants(optimized_points, num_variants=3)
+        best_variant_points = optimized_points.copy()
+        _, _, best_ratio = calculate_distance_metrics(best_variant_points)
+
+        # Evaluate all variants
+        for i in range(len(variants) // 14):
+            variant_points = variants[i*14:(i+1)*14]
+            _, _, ratio = calculate_distance_metrics(variant_points)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_variant_points = variant_points.copy()
+
+        optimized_points = best_variant_points.copy()
+    except:
+        pass
+
+    return optimized_points
+>>>>>>> REPLACE
+</DIFF>

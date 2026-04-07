@@ -1,0 +1,565 @@
+--- a/original.py
++++ b/original.py
+@@ -1,322 +1,331 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import cdist
++from scipy.spatial import Voronoi, distance
+ import random
+ import math
+ from typing import Tuple, List
++from scipy.spatial.distance import cdist
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     # Rectangle dimensions: width + height = 2, using 1.5 x 0.5 for good aspect ratio
+     rect_width, rect_height = 1.5, 0.5
+ 
+     # Set seed for reproducibility
+     random.seed(42)
+     np.random.seed(42)
+ 
+-    def create_hybrid_initialization(n_circles: int, width: float, height: float) -> np.ndarray:
+-        """Create initial configuration using a hybrid approach combining corner placements and hexagonal grid"""
++    def create_voronoi_initialization(n_circles: int, width: float, height: float) -> np.ndarray:
++        """Create initial configuration using Voronoi-based spatial distribution"""
+         circles = np.zeros((n_circles, 3))
+-
+-        # Corner and edge positions to establish boundaries
+-        corner_positions = [
++        
++        # Generate initial points for Voronoi diagram
++        # Start with corner and edge positions
++        initial_points = [
+             (width * 0.1, height * 0.1),    # bottom-left
+             (width * 0.9, height * 0.1),    # bottom-right
+             (width * 0.1, height * 0.9),    # top-left
+             (width * 0.9, height * 0.9),    # top-right
+             (width * 0.5, height * 0.1),    # bottom-middle
+             (width * 0.5, height * 0.9),    # top-middle
+             (width * 0.1, height * 0.5),    # left-middle
+             (width * 0.9, height * 0.5),    # right-middle
+         ]
+-
+-        # Place some circles at strategic positions
+-        for i in range(min(len(corner_positions), n_circles)):
+-            x, y = corner_positions[i]
+-            circles[i] = [x, y, 0.03]
+-
+-        # Fill remaining positions with hexagonal grid
+-        remaining = n_circles - len(corner_positions)
+-        if remaining > 0:
+-            rows = int(math.ceil(math.sqrt(remaining)))
+-            cols = int(math.ceil(remaining / rows))
+-
+-            cell_width = width / (cols + 1)
+-            cell_height = height / (rows + 1)
+-
+-            idx = len(corner_positions)
+-            for i in range(rows):
+-                for j in range(cols):
+-                    if idx >= n_circles:
+-                        break
+-                    x_offset = 0.0 if i % 2 == 0 else 0.5
+-                    x = (j + 1 + x_offset) * cell_width
+-                    y = (i + 1) * cell_height
+-                    # Ensure within bounds
+-                    x = max(0.01, min(width - 0.01, x))
+-                    y = max(0.01, min(height - 0.01, y))
+-                    circles[idx] = [x, y, 0.02]
+-                    idx += 1
+-                    if idx >= n_circles:
+-                        break
+-
++        
++        # Add random points to ensure good coverage
++        additional_points = []
++        for _ in range(n_circles - len(initial_points)):
++            x = random.uniform(0.05 * width, 0.95 * width)
++            y = random.uniform(0.05 * height, 0.95 * height)
++            additional_points.append([x, y])
++        
++        # Combine all points
++        all_points = initial_points + additional_points[:n_circles - len(initial_points)]
++        
++        # Create Voronoi diagram
++        try:
++            vor = Voronoi(all_points)
++            
++            # Get Voronoi vertices that are inside our rectangle
++            valid_vertices = []
++            for vertex in vor.vertices:
++                if (0 <= vertex[0] <= width) and (0 <= vertex[1] <= height):
++                    valid_vertices.append(vertex)
++            
++            # Use Voronoi vertices as center points
++            chosen_centers = valid_vertices[:min(n_circles, len(valid_vertices))]
++            if len(chosen_centers) < n_circles:
++                # Fill missing circles with random points
++                for i in range(len(chosen_centers), n_circles):
++                    x = random.uniform(0.05 * width, 0.95 * width)
++                    y = random.uniform(0.05 * height, 0.95 * height)
++                    chosen_centers.append([x, y])
++            
++            # Assign positions with initial small radii
++            for i, (x, y) in enumerate(chosen_centers[:n_circles]):
++                circles[i] = [x, y, 0.02]
++                
++        except Exception:
++            # Fallback to simple initialization if Voronoi fails
++            for i in range(n_circles):
++                x = random.uniform(0.05 * width, 0.95 * width)
++                y = random.uniform(0.05 * height, 0.95 * height)
++                circles[i] = [x, y, 0.02]
++        
+         return circles
+ 
+-    def compute_max_radius_at_position(x: float, y: float, existing_circles: np.ndarray,
+-                                     rect_width: float, rect_height: float) -> float:
+-        """Compute maximum possible radius for a circle at given position"""
++    def compute_max_radius_at_position_voronoi(x: float, y: float, existing_circles: np.ndarray,
++                                             rect_width: float, rect_height: float) -> float:
++        """Compute maximum possible radius using Voronoi-like proximity analysis"""
+         # Distance to boundaries
+         min_bound = min(x, rect_width - x, y, rect_height - y)
+ 
+-        # Distance to other circles (with early termination if already very close)
++        # Distance to other circles using Voronoi-inspired approach
+         min_dist = float('inf')
+         for i in range(len(existing_circles)):
+             ex, ey, er = existing_circles[i]
++            
++            # Calculate distance to circle center
+             dx = x - ex
+             dy = y - ey
+             dist = math.sqrt(dx*dx + dy*dy)
++            
+             if dist > 0.0001:  # Avoid self-distance
+-                min_dist = min(min_dist, dist - er)
+-                # Early termination if already too close to another circle
++                # Minimum distance from point to circle circumference
++                dist_to_edge = dist - er
++                min_dist = min(min_dist, dist_to_edge)
++                
++                # Early termination for very close circles
+                 if min_dist < 0.001:
+                     break
+ 
+         # Take minimum of boundary and other-circle distances
+         max_radius = min(min_bound, min_dist if min_dist < float('inf') else float('inf'))
+         return max(0.001, max_radius)
+ 
+-    def is_valid_configuration(circles: np.ndarray, rect_width: float, rect_height: float) -> bool:
+-        """Check if configuration is valid (no overlaps, all within bounds)"""
++    def validate_configuration_voronoi(circles: np.ndarray, rect_width: float, rect_height: float) -> bool:
++        """Validate configuration using vectorized approach with Voronoi insights"""
+         # Check boundary constraints
+-        for i in range(len(circles)):
+-            x, y, r = circles[i]
+-            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+-                return False
+-
+-        # Check overlap constraints with early termination
+-        for i in range(len(circles)):
+-            for j in range(i+1, len(circles)):
+-                x1, y1, r1 = circles[i]
+-                x2, y2, r2 = circles[j]
+-                dx = x1 - x2
+-                dy = y1 - y2
+-                dist_squared = dx*dx + dy*dy
+-                min_dist_squared = (r1 + r2) * (r1 + r2)
+-                if dist_squared < min_dist_squared:
+-                    return False
+-        return True
++        if np.any(circles[:, 0] - circles[:, 2] < 0) or \
++           np.any(circles[:, 0] + circles[:, 2] > rect_width) or \
++           np.any(circles[:, 1] - circles[:, 2] < 0) or \
++           np.any(circles[:, 1] + circles[:, 2] > rect_height):
++            return False
++
++        # Check overlap constraints using more efficient vectorized approach
++        if len(circles) < 2:
++            return True
++            
++        # Use distance matrix for overlap detection
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++        
++        # Create distance matrix
++        dist_matrix = cdist(positions, positions)
++        
++        # Set diagonal to infinity (self-distances)
++        np.fill_diagonal(dist_matrix, float('inf'))
++        
++        # Minimum distances between all pairs
++        min_distances = np.min(dist_matrix, axis=1)
++        
++        # Required minimum distances (sum of radii)
++        required_distances = radii[:, np.newaxis] + radii[np.newaxis, :]
++        
++        # Check if any pair violates overlap constraint
++        overlap_violations = min_distances < np.min(required_distances, axis=0)
++        
++        return not np.any(overlap_violations)
+ 
+     def calculate_radius_sum(circles: np.ndarray) -> float:
+         """Calculate sum of all radii"""
+         return np.sum(circles[:, 2])
+ 
+-    def multi_scale_refinement_step(circles: np.ndarray, rect_width: float, rect_height: float,
+-                                  coarse_iters: int = 20, medium_iters: int = 50,
+-                                  fine_iters: int = 100, ultra_fine_iters: int = 50) -> np.ndarray:
+-        """Perform multi-scale refinement for better global optimization"""
++    def voronoi_guided_local_search(circles: np.ndarray, rect_width: float, rect_height: float,
++                                  iterations: int = 200) -> np.ndarray:
++        """Local search guided by Voronoi spatial relationships"""
+         current = circles.copy()
+         current_sum = calculate_radius_sum(current)
+-
+-        # Level 1: Very coarse refinement (quick exploration)
+-        if coarse_iters > 0:
+-            step_size = 0.1
+-            for iter_num in range(coarse_iters):
+-                for i in range(len(current)):
+-                    original_x, original_y, original_r = current[i]
+-
+-                    # Larger perturbations for coarse search
+-                    dx = random.uniform(-step_size, step_size)
+-                    dy = random.uniform(-step_size, step_size)
++        
++        # Track recent improvements for adaptive search
++        recent_improvements = []
++        max_recent = 10
++        
++        for iter_num in range(iterations):
++            # Adaptive step size based on convergence
++            base_step_size = 0.05
++            if len(recent_improvements) > 5:
++                avg_improvement = np.mean(recent_improvements[-5:])
++                if avg_improvement < 0.001:
++                    current_step_size = base_step_size * 0.8  # Reduce step size
++                else:
++                    current_step_size = base_step_size * 1.1  # Increase step size
++            else:
++                current_step_size = base_step_size
++            
++            # Randomly select circles to update
++            update_order = list(range(len(current)))
++            random.shuffle(update_order)
++            
++            # Update circles in random order
++            for i in update_order:
++                original_x, original_y, original_r = current[i]
++                
++                # Use Voronoi-inspired move strategies
++                # Strategy 1: Move toward nearest neighbors
++                best_x, best_y, best_r = original_x, original_y, original_r
++                best_sum = current_sum
++                
++                # Collect information about neighbors
++                neighbor_distances = []
++                for j in range(len(current)):
++                    if i != j:
++                        dx = current[j, 0] - original_x
++                        dy = current[j, 1] - original_y
++                        dist = math.sqrt(dx*dx + dy*dy)
++                        neighbor_distances.append((dist, j))
++                
++                # Sort neighbors by distance
++                neighbor_distances.sort(key=lambda x: x[0])
++                
++                # Try several moves
++                moves = []
++                
++                # Move towards closest neighbor
++                if len(neighbor_distances) > 0:
++                    closest_j = neighbor_distances[0][1]
++                    dx = current[closest_j, 0] - original_x
++                    dy = current[closest_j, 1] - original_y
++                    moves.append((dx * 0.05, dy * 0.05))  # Small move toward neighbor
++                
++                # Add random moves
++                moves.extend([
++                    (current_step_size * random.gauss(0, 1), current_step_size * random.gauss(0, 1)),
++                    (current_step_size * random.uniform(-1, 1), 0),
++                    (0, current_step_size * random.uniform(-1, 1)),
++                    (current_step_size * random.choice([-1, 1]), 0),
++                    (0, current_step_size * random.choice([-1, 1])),
++                    (random.uniform(-current_step_size/2, current_step_size/2), 
++                     random.uniform(-current_step_size/2, current_step_size/2)),
++                    (0, 0)  # No move baseline
++                ])
++                
++                # Try each move
++                for dx, dy in moves:
+                     test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+                     test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+-
++                    
++                    # Compute maximum possible radius at new location
+                     temp_circles = current.copy()
+-                    temp_circles[i] = [test_x, test_y, 0.01]
+-                    max_r = compute_max_radius_at_position(test_x, test_y, temp_circles, rect_width, rect_height)
+-                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.05, 0.05)))
++                    temp_circles[i] = [test_x, test_y, 0.01]  # Temporary small radius
++                    
++                    max_r = compute_max_radius_at_position_voronoi(test_x, test_y, temp_circles, rect_width, rect_height)
++                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.03, 0.03)))
++                    
++                    # Final adjustment
+                     temp_circles[i] = [test_x, test_y, test_r]
+-
+-                    if is_valid_configuration(temp_circles, rect_width, rect_height):
++                    
++                    # Validate and calculate sum
++                    if validate_configuration_voronoi(temp_circles, rect_width, rect_height):
+                         new_sum = calculate_radius_sum(temp_circles)
+-                        if new_sum > current_sum:
+-                            current[i] = [test_x, test_y, test_r]
+-                            current_sum = new_sum
+-
+-        # Level 2: Coarse refinement
+-        if medium_iters > 0:
+-            step_size = 0.05
+-            for iter_num in range(medium_iters):
+-                for i in range(len(current)):
+-                    original_x, original_y, original_r = current[i]
+-
+-                    # Medium perturbations
+-                    dx = random.uniform(-step_size, step_size)
+-                    dy = random.uniform(-step_size, step_size)
+-                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+-                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+-
+-                    temp_circles = current.copy()
+-                    temp_circles[i] = [test_x, test_y, 0.01]
+-                    max_r = compute_max_radius_at_position(test_x, test_y, temp_circles, rect_width, rect_height)
+-                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.03, 0.03)))
+-                    temp_circles[i] = [test_x, test_y, test_r]
+-
+-                    if is_valid_configuration(temp_circles, rect_width, rect_height):
+-                        new_sum = calculate_radius_sum(temp_circles)
+-                        if new_sum > current_sum:
+-                            current[i] = [test_x, test_y, test_r]
+-                            current_sum = new_sum
+-
+-        # Level 3: Fine refinement
+-        if fine_iters > 0:
+-            step_size = 0.02
+-            for iter_num in range(fine_iters):
+-                for i in range(len(current)):
+-                    original_x, original_y, original_r = current[i]
+-
+-                    # Smaller perturbations
+-                    dx = random.uniform(-step_size, step_size)
+-                    dy = random.uniform(-step_size, step_size)
+-                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+-                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+-
+-                    temp_circles = current.copy()
+-                    temp_circles[i] = [test_x, test_y, 0.01]
+-                    max_r = compute_max_radius_at_position(test_x, test_y, temp_circles, rect_width, rect_height)
+-                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.02, 0.02)))
+-                    temp_circles[i] = [test_x, test_y, test_r]
+-
+-                    if is_valid_configuration(temp_circles, rect_width, rect_height):
+-                        new_sum = calculate_radius_sum(temp_circles)
+-                        if new_sum > current_sum:
+-                            current[i] = [test_x, test_y, test_r]
+-                            current_sum = new_sum
+-
+-        # Level 4: Ultra-fine refinement for final polish
+-        if ultra_fine_iters > 0:
+-            step_size = 0.005
+-            for iter_num in range(ultra_fine_iters):
+-                for i in range(len(current)):
+-                    original_x, original_y, original_r = current[i]
+-
+-                    # Very small perturbations for fine tuning
+-                    dx = random.uniform(-step_size, step_size)
+-                    dy = random.uniform(-step_size, step_size)
+-                    test_x = max(0.001, min(rect_width - 0.001, original_x + dx))
+-                    test_y = max(0.001, min(rect_height - 0.001, original_y + dy))
+-
+-                    temp_circles = current.copy()
+-                    temp_circles[i] = [test_x, test_y, 0.01]
+-                    max_r = compute_max_radius_at_position(test_x, test_y, temp_circles, rect_width, rect_height)
+-                    test_r = min(max_r, max(0.001, original_r + random.uniform(-0.01, 0.01)))
+-                    temp_circles[i] = [test_x, test_y, test_r]
+-
+-                    if is_valid_configuration(temp_circles, rect_width, rect_height):
+-                        new_sum = calculate_radius_sum(temp_circles)
+-                        if new_sum > current_sum:
+-                            current[i] = [test_x, test_y, test_r]
+-                            current_sum = new_sum
+-
++                        if new_sum > best_sum:
++                            best_sum = new_sum
++                            best_x, best_y, best_r = test_x, test_y, test_r
++                
++                # Update if improvement found
++                if best_sum > current_sum:
++                    current[i] = [best_x, best_y, best_r]
++                    current_sum = best_sum
++                    
++                    # Track improvement for adaptive behavior
++                    recent_improvements.append(best_sum - calculate_radius_sum(current))
++                    if len(recent_improvements) > max_recent:
++                        recent_improvements.pop(0)
++        
+         return current
+ 
+-    def multi_start_optimization(n_starts: int = 5) -> np.ndarray:
+-        """Run multiple optimization starts to find better solutions"""
++    def multi_stage_voronoi_optimization(n_starts: int = 6) -> np.ndarray:
++        """Multi-stage optimization using Voronoi guidance"""
+         best_circles = None
+         best_sum = -float('inf')
+-
++        
+         for start_num in range(n_starts):
+-            # Create different initial configurations
++            # Different initialization strategies
+             if start_num == 0:
+-                # Use hybrid initialization
+-                circles = create_hybrid_initialization(21, rect_width, rect_height)
+-            else:
+-                # Create random initial configuration with better placement
++                # Voronoi-based initialization
++                circles = create_voronoi_initialization(21, rect_width, rect_height)
++            elif start_num == 1:
++                # Simple random initialization
+                 circles = np.zeros((21, 3))
+                 for i in range(21):
+                     x = random.uniform(0.01, rect_width - 0.01)
+                     y = random.uniform(0.01, rect_height - 0.01)
+                     circles[i] = [x, y, 0.02]
+-
+-            # Phase 1: Multi-scale refinement starting with coarse exploration
+-            refined_1 = multi_scale_refinement_step(circles, rect_width, rect_height,
+-                                                  coarse_iters=20, medium_iters=30,
+-                                                  fine_iters=40, ultra_fine_iters=10)
+-
+-            # Phase 2: Multi-scale refinement with more detailed search
+-            refined_2 = multi_scale_refinement_step(refined_1, rect_width, rect_height,
+-                                                  coarse_iters=10, medium_iters=20,
+-                                                  fine_iters=50, ultra_fine_iters=20)
+-
+-            # Phase 3: Final multi-scale refinement for maximum precision
+-            refined_3 = multi_scale_refinement_step(refined_2, rect_width, rect_height,
+-                                                  coarse_iters=5, medium_iters=15,
+-                                                  fine_iters=30, ultra_fine_iters=30)
+-
++            else:
++                # Hexagonal grid initialization  
++                circles = np.zeros((21, 3))
++                rows = int(math.ceil(math.sqrt(21)))
++                cols = int(math.ceil(21 / rows))
++                cell_width = rect_width / (cols + 1)
++                cell_height = rect_height / (rows + 1)
++                idx = 0
++                for i in range(rows):
++                    for j in range(cols):
++                        if idx >= 21:
++                            break
++                        x_offset = 0.0 if i % 2 == 0 else 0.5
++                        x = (j + 1 + x_offset) * cell_width
++                        y = (i + 1) * cell_height
++                        x = max(0.01, min(rect_width - 0.01, x))
++                        y = max(0.01, min(rect_height - 0.01, y))
++                        circles[idx] = [x, y, 0.02]
++                        idx += 1
++                        if idx >= 21:
++                            break
++            
++            # Stage 1: Coarse Voronoi-guided search
++            refined_1 = voronoi_guided_local_search(circles, rect_width, rect_height, 50)
++            
++            # Stage 2: Medium refinement
++            refined_2 = voronoi_guided_local_search(refined_1, rect_width, rect_height, 100)
++            
++            # Stage 3: Fine refinement with more iterations
++            refined_3 = voronoi_guided_local_search(refined_2, rect_width, rect_height, 150)
++            
+             final_sum = calculate_radius_sum(refined_3)
+-
++            
+             if final_sum > best_sum:
+                 best_sum = final_sum
+                 best_circles = refined_3.copy()
+-
++                
+         return best_circles
+ 
+     # Main optimization workflow
+-    # Multi-start optimization to avoid local optima
+-    final_circles = multi_start_optimization(5)
+-
+-    # Final validation and cleanup
++    final_circles = multi_stage_voronoi_optimization(6)
++    
++    # Final validation
+     if final_circles is not None:
+-        # Double-check validity and ensure all constraints
+-        while True:
+-            valid = True
+-
+-            # Check boundaries and overlaps
+-            for i in range(len(final_circles)):
+-                x, y, r = final_circles[i]
+-                if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+-                    valid = False
+-                    break
+-
+-            if not valid:
+-                # Reinitialize if invalid
+-                final_circles = create_hybrid_initialization(21, rect_width, rect_height)
+-                final_circles = local_refinement_step(final_circles, rect_width, rect_height, 50)
+-                continue
+-
+-            # Check overlaps
+-            for i in range(len(final_circles)):
+-                for j in range(i+1, len(final_circles)):
+-                    x1, y1, r1 = final_circles[i]
+-                    x2, y2, r2 = final_circles[j]
+-                    dx = x1 - x2
+-                    dy = y1 - y2
+-                    dist_squared = dx*dx + dy*dy
+-                    min_dist_squared = (r1 + r2) * (r1 + r2)
+-                    if dist_squared < min_dist_squared:
+-                        valid = False
+-                        break
+-                if not valid:
+-                    break
+-
+-            if valid:
+-                break
+-            else:
+-                # Retry with different initialization
+-                final_circles = create_hybrid_initialization(21, rect_width, rect_height)
+-                final_circles = local_refinement_step(final_circles, rect_width, rect_height, 50)
+-
++        # Ensure final configuration is valid
++        iterations = 0
++        max_iterations = 10
++        while not validate_configuration_voronoi(final_circles, rect_width, rect_height) and iterations < max_iterations:
++            # Regenerate if invalid
++            final_circles = create_voronoi_initialization(21, rect_width, rect_height)
++            final_circles = voronoi_guided_local_search(final_circles, rect_width, rect_height, 100)
++            iterations += 1
++    
+     return final_circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

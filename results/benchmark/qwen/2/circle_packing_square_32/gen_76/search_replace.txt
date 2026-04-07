@@ -1,0 +1,110 @@
+<NAME>
+enhance_density_adaptation_with_knn
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the density adaptation mechanism by implementing k-nearest neighbor clustering analysis to compute more accurate initial radii. The key insight is to use cKDTree to find the 5 nearest neighbors for each circle and compute the average distance to these neighbors, then scale initial radii inversely with this density measure. This approach builds directly on the current best's hexagonal grid foundation by adding spatial intelligence that reduces optimization iterations needed to achieve high-quality packings, aligning with successful patterns from previous generations.
+
+The change modifies the `_compute_initial_radii` method to:
+1. Use k-nearest neighbors (k=5) via cKDTree for density estimation
+2. Compute average distance to neighboring circles for each candidate position
+3. Scale initial radii inversely with this density measure
+4. Apply better density-aware radius computation that prevents overly large radii in dense regions
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _compute_initial_radii(self, positions: np.ndarray) -> np.ndarray:
+        """Compute initial radii for circles based on available space and density."""
+        radii = np.zeros(self.n_circles)
+
+        for i, pos in enumerate(positions):
+            x, y = pos
+            # Initial estimate of radius based on distance to nearest boundary
+            r_boundary = min(x, 1-x, y, 1-y)
+
+            if r_boundary <= 0.001:
+                radii[i] = 0.001
+                continue
+
+            # Check overlap with existing circles
+            min_dist = float('inf')
+            for j in range(i):
+                circ_x, circ_y, circ_r = positions[j][0], positions[j][1], radii[j]
+                dist = np.sqrt((x - circ_x)**2 + (y - circ_y)**2)
+                min_dist = min(min_dist, dist)
+
+            # Maximum radius is limited by both boundary and existing circles
+            if min_dist != float('inf'):
+                r = min(r_boundary, min_dist/2 - 0.001)
+            else:
+                r = r_boundary
+
+            radii[i] = max(0.001, min(0.5, r))
+
+        return radii
+=======
+    def _compute_initial_radii(self, positions: np.ndarray) -> np.ndarray:
+        """Compute initial radii for circles based on available space and density using k-nearest neighbors."""
+        radii = np.zeros(self.n_circles)
+
+        # Build KDTree for efficient neighbor queries
+        if len(positions) > 1:
+            tree = cKDTree(positions)
+
+        for i, pos in enumerate(positions):
+            x, y = pos
+            # Initial estimate of radius based on distance to nearest boundary
+            r_boundary = min(x, 1-x, y, 1-y)
+
+            if r_boundary <= 0.001:
+                radii[i] = 0.001
+                continue
+
+            # Check overlap with existing circles (only for previously placed circles)
+            min_dist = float('inf')
+            for j in range(i):
+                circ_x, circ_y, circ_r = positions[j][0], positions[j][1], radii[j]
+                dist = np.sqrt((x - circ_x)**2 + (y - circ_y)**2)
+                min_dist = min(min_dist, dist)
+
+            # For density adaptation, find nearby neighbors using k-d tree
+            if len(positions) > 1 and i > 0:
+                # Find k nearest neighbors (k=5) to estimate local density
+                k = min(5, i)
+                _, indices = tree.query(pos, k=k+1)  # +1 to include the point itself
+                # Remove the point itself from neighbors
+                indices = indices[1:] if indices[0] == i else indices
+
+                if len(indices) > 0:
+                    # Compute average distance to neighbors
+                    neighbor_positions = positions[indices]
+                    distances_to_neighbors = np.sqrt(np.sum((neighbor_positions - pos)**2, axis=1))
+                    avg_neighbor_dist = np.mean(distances_to_neighbors)
+                    # Scale radius inversely with density (lower radius in dense regions)
+                    density_factor = 1.0 / (avg_neighbor_dist + 1e-10)
+                    # Combine boundary constraint with density-aware adjustment
+                    r_density_based = min(r_boundary, avg_neighbor_dist/4)
+                    # Prefer the boundary-based estimate but adapt to density
+                    if min_dist != float('inf'):
+                        r = min(r_boundary, r_density_based, min_dist/2 - 0.001)
+                    else:
+                        r = min(r_boundary, r_density_based)
+                else:
+                    # Fall back to simple case with existing circles only
+                    if min_dist != float('inf'):
+                        r = min(r_boundary, min_dist/2 - 0.001)
+                    else:
+                        r = r_boundary
+            else:
+                # No neighbors yet, use simple case
+                if min_dist != float('inf'):
+                    r = min(r_boundary, min_dist/2 - 0.001)
+                else:
+                    r = r_boundary
+
+            radii[i] = max(0.001, min(0.5, r))
+
+        return radii
+>>>>>>> REPLACE
+</DIFF>

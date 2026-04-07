@@ -1,0 +1,267 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import time
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+from deap import base, creator, tools, algorithms
+from joblib import Parallel, delayed
+import random
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+# Constants
+NUM_INNER_HEXAGONS = 11
+UNIT_HEXAGON_RADIUS = 1.0
+HEXAGON_ANGLE_STEPS = 30  # degrees
+
+def create_unit_hexagon(center=(0, 0), rotation=0):
+    """Create a unit regular hexagon centered at 'center' with given rotation."""
+    angle_rad = np.radians(rotation)
+    # Vertices of a unit hexagon centered at origin
+    hex_vertices = []
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        x = UNIT_HEXAGON_RADIUS * np.cos(angle)
+        y = UNIT_HEXAGON_RADIUS * np.sin(angle)
+        hex_vertices.append((x + center[0], y + center[1]))
+    return Polygon(hex_vertices)
+
+def check_containment(hexagon, outer_hexagon):
+    """Check if hexagon is fully contained within outer_hexagon."""
+    return outer_hexagon.contains(hexagon)
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap."""
+    return hex1.intersects(hex2)
+
+def compute_outer_hexagon_radius(inner_positions, rotations):
+    """Compute minimal outer hexagon radius that contains all inner hexagons."""
+    # Start with a reasonable guess
+    min_radius = 2.0
+    max_radius = 20.0
+    
+    def is_valid_radius(radius):
+        outer_hex = create_unit_hexagon((0, 0), 0)
+        # Scale outer hexagon to have given radius
+        outer_points = []
+        for i in range(6):
+            angle = i * np.pi / 3
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            outer_points.append((x, y))
+        outer_hex = Polygon(outer_points)
+        
+        # Check all inner hexagons
+        for pos, rot in zip(inner_positions, rotations):
+            inner_hex = create_unit_hexagon(pos, rot)
+            if not check_containment(inner_hex, outer_hex):
+                return False
+        return True
+    
+    # Binary search for minimal radius
+    while abs(max_radius - min_radius) > 1e-6:
+        mid_radius = (min_radius + max_radius) / 2
+        if is_valid_radius(mid_radius):
+            max_radius = mid_radius
+        else:
+            min_radius = mid_radius
+            
+    return (min_radius + max_radius) / 2
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual configuration."""
+    # Individual format: [x1, y1, rot1, x2, y2, rot2, ..., x11, y11, rot11]
+    positions = [(individual[i], individual[i+1]) for i in range(0, len(individual), 3)]
+    rotations = [individual[i] for i in range(2, len(individual), 3)]
+    
+    # Check for overlaps
+    inner_hexagons = []
+    for pos, rot in zip(positions, rotations):
+        hexagon = create_unit_hexagon(pos, rot)
+        inner_hexagons.append(hexagon)
+    
+    # Check if any hexagons overlap
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                return float('inf')  # Invalid configuration
+    
+    # Compute required outer hexagon size
+    try:
+        radius = compute_outer_hexagon_radius(positions, rotations)
+        return 1.0 / radius  # Maximize 1/radius (minimize radius)
+    except Exception:
+        return float('inf')
+
+def create_random_individual():
+    """Create a random valid individual."""
+    # Generate random positions and rotations for the 11 hexagons
+    individual = []
+    for _ in range(NUM_INNER_HEXAGONS):
+        # Random position within a reasonable area
+        x = np.random.uniform(-5, 5)
+        y = np.random.uniform(-5, 5)
+        # Random rotation in steps of HEXAGON_ANGLE_STEPS
+        rot = np.random.choice(range(0, 360, HEXAGON_ANGLE_STEPS))
+        individual.extend([x, y, rot])
+    return individual
+
+def mutate_individual(individual, indpb=0.1):
+    """Mutate an individual."""
+    for i in range(len(individual)):
+        if random.random() < indpb:
+            if i % 3 == 0:  # x coordinate
+                individual[i] += np.random.normal(0, 0.5)
+            elif i % 3 == 1:  # y coordinate
+                individual[i] += np.random.normal(0, 0.5)
+            else:  # rotation
+                individual[i] = (individual[i] + np.random.randint(-30, 31)) % 360
+    return individual,
+
+def crossover_individuals(ind1, ind2):
+    """Crossover two individuals."""
+    # Simple uniform crossover
+    for i in range(len(ind1)):
+        if random.random() < 0.5:
+            ind1[i], ind2[i] = ind2[i], ind1[i]
+    return ind1, ind2
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Create DEAP fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_random_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population
+    pop = toolbox.population(n=50)
+    
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("max", np.max)
+    stats.register("avg", np.mean)
+    
+    # Evolution parameters
+    CXPB = 0.7  # Crossover probability
+    MUTPB = 0.3  # Mutation probability
+    NGEN = 20   # Number of generations
+    
+    # Run evolution with early stopping
+    start_time = time.time()
+    best_fitness = -float('inf')
+    stagnation_count = 0
+    max_stagnation = 5
+    
+    for gen in range(NGEN):
+        if time.time() - start_time > 170:  # Leave some buffer time
+            break
+            
+        # Evaluate the entire population
+        fitnesses = Parallel(n_jobs=-1)(delayed(toolbox.evaluate)(ind) for ind in pop)
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = (fit,)
+            
+        # Update hall of fame
+        hof.update(pop)
+        best_in_gen = max(fitnesses)
+        
+        if best_in_gen > best_fitness:
+            best_fitness = best_in_gen
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+            
+        if stagnation_count >= max_stagnation:
+            break
+            
+        # Select the next generation
+        offspring = toolbox.select(pop, len(pop))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+                
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+                
+        # Replace the old population with the new one
+        pop[:] = offspring
+    
+    # Get the best individual
+    best_ind = hof[0]
+    positions = [(best_ind[i], best_ind[i+1]) for i in range(0, len(best_ind), 3)]
+    rotations = [best_ind[i] for i in range(2, len(best_ind), 3)]
+    
+    # Calculate final outer hexagon radius
+    outer_radius = 1.0 / best_fitness if best_fitness != float('inf') else 100.0
+    
+    # Prepare return values
+    inner_hex_data = np.array([(pos[0], pos[1], rot) for pos, rot in zip(positions, rotations)])
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    outer_hex_side_length = outer_radius
+    
+    # Validate final solution
+    inner_hexagons = []
+    for pos, rot in zip(positions, rotations):
+        hexagon = create_unit_hexagon(pos, rot)
+        inner_hexagons.append(hexagon)
+    
+    # Check containment
+    outer_hex = create_unit_hexagon((0, 0), 0)
+    # Scale to appropriate size
+    outer_points = []
+    for i in range(6):
+        angle = i * np.pi / 3
+        x = outer_radius * np.cos(angle)
+        y = outer_radius * np.sin(angle)
+        outer_points.append((x, y))
+    outer_hex = Polygon(outer_points)
+    
+    containment_ok = all(check_containment(h, outer_hex) for h in inner_hexagons)
+    overlap_ok = not any(check_overlap(h1, h2) for i, h1 in enumerate(inner_hexagons) 
+                         for j, h2 in enumerate(inner_hexagons) if i < j)
+    
+    if not (containment_ok and overlap_ok):
+        # If invalid, revert to a known good configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],      # center
+            [-2.5, 0, 0],   # left
+            [2.5, 0, 0],    # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],   # top-right
+            [-1.25, -2.17, 0], # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],   # far top-right
+            [-3.75, -2.17, 0], # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        outer_hex_side_length = 8.0  # large enough to contain all inner hexagons
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

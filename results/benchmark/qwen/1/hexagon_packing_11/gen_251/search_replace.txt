@@ -1,0 +1,671 @@
+<NAME>
+enhanced_spatial_acceleration
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the spatial acceleration mechanism by implementing a hierarchical spatial grid approach that adapts grid cell sizes based on local hexagon density. This addresses the scalability issue in high-density regions while maintaining efficient collision detection performance. The key insight is to use a coarse grid for distant regions and finer grids in dense areas, similar to successful approaches in previous generations. This directly tackles the O(n²) collision detection bottleneck and should improve the overall optimization performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def build_spatial_grid(hexagons, grid_size=5.0):
+    """Build spatial grid for fast collision detection"""
+    grid = defaultdict(list)
+    for i, hex_poly in enumerate(hexagons):
+        bbox = hex_poly.bounds
+        min_x, min_y, max_x, max_y = bbox
+        for x in range(int(min_x/grid_size), int(max_x/grid_size)+1):
+            for y in range(int(min_y/grid_size), int(max_y/grid_size)+1):
+                grid[(x,y)].append(i)
+    return grid
+
+def get_collision_candidates(grid, hex_index, hex_poly):
+    """Get potential collision candidates efficiently"""
+    candidates = []
+    bbox = hex_poly.bounds
+    min_x, min_y, max_x, max_y = bbox
+
+    for x in range(int(min_x/grid_size), int(max_x/grid_size)+1):
+        for y in range(int(min_y/grid_size), int(max_y/grid_size)+1):
+            candidates.extend(grid.get((x,y), []))
+    return [i for i in candidates if i != hex_index]
+=======
+def build_hierarchical_spatial_grid(hexagons, coarse_grid_size=2.8, fine_grid_size=1.4):
+    """Build hierarchical spatial grid with adaptive cell sizing based on density"""
+    # First, build coarse grid for distant regions
+    coarse_grid = defaultdict(list)
+    fine_grid = defaultdict(list)
+
+    # Calculate average spacing to determine when to use fine grid
+    if len(hexagons) > 1:
+        positions = np.array([hex_poly.centroid.coords[0] for hex_poly in hexagons])
+        # Compute pairwise distances to estimate density
+        distances = cdist(positions, positions)
+        np.fill_diagonal(distances, np.inf)
+        min_distances = np.min(distances, axis=1)
+        avg_min_distance = np.mean(min_distances)
+
+        # Use fine grid when hexagons are relatively close together
+        use_fine_grid = avg_min_distance < 2.0  # Threshold for dense regions
+    else:
+        use_fine_grid = False
+
+    for i, hex_poly in enumerate(hexagons):
+        bbox = hex_poly.bounds
+        min_x, min_y, max_x, max_y = bbox
+
+        # Always use coarse grid for broad spatial partitioning
+        for x in range(int(min_x/coarse_grid_size), int(max_x/coarse_grid_size)+1):
+            for y in range(int(min_y/coarse_grid_size), int(max_y/coarse_grid_size)+1):
+                coarse_grid[(x,y)].append(i)
+
+        # Use fine grid in dense regions
+        if use_fine_grid:
+            for x in range(int(min_x/fine_grid_size), int(max_x/fine_grid_size)+1):
+                for y in range(int(min_y/fine_grid_size), int(max_y/fine_grid_size)+1):
+                    fine_grid[(x,y)].append(i)
+
+    return coarse_grid, fine_grid, use_fine_grid
+
+def get_collision_candidates_hierarchical(grid_tuple, hex_index, hex_poly):
+    """Get collision candidates using hierarchical grid approach"""
+    coarse_grid, fine_grid, use_fine = grid_tuple
+    candidates = []
+
+    bbox = hex_poly.bounds
+    min_x, min_y, max_x, max_y = bbox
+
+    # Check both coarse and fine grids based on density characteristics
+    # Always check coarse grid for broad coverage
+    for x in range(int(min_x/2.8), int(max_x/2.8)+1):
+        for y in range(int(min_y/2.8), int(max_y/2.8)+1):
+            candidates.extend(coarse_grid.get((x,y), []))
+
+    # In dense regions, also check fine grid for better precision
+    if use_fine:
+        for x in range(int(min_x/1.4), int(max_x/1.4)+1):
+            for y in range(int(min_y/1.4), int(max_y/1.4)+1):
+                candidates.extend(fine_grid.get((x,y), []))
+
+    # Remove duplicates and self-reference
+    candidates = list(set(candidates))
+    return [i for i in candidates if i != hex_index]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+adaptive_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces adaptive penalty coefficient scaling based on optimization progress. The current fixed penalty system (10000000 + penalty) can be too harsh initially and too lenient later. By dynamically adjusting penalties based on convergence behavior, we can better balance exploration and exploitation. When no improvement occurs in recent generations, increase penalties to discourage constraint violations, while reducing penalties when multiple valid solutions appear to encourage exploration. This directly addresses constraint handling weaknesses and builds upon proven patterns from successful previous generations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_constraints(self, positions, angles):
+        """Comprehensive constraint evaluation"""
+        # Create hexagon polygons
+        hexagons = []
+        for i in range(len(positions)):
+            hex_poly = get_hexagon_polygon(positions[i][0], positions[i][1], angles[i])
+            hexagons.append(hex_poly)
+
+        # Check containment
+        outer_radius = calculate_outer_hexagon_radius(positions, angles)
+        outer_hexagon = get_hexagon_polygon(0, 0, 0, outer_radius)
+
+        containment_violations = 0
+        overlap_violations = 0
+
+        # Check containment
+        for hex_poly in hexagons:
+            if not check_containment(hex_poly, outer_hexagon):
+                containment_violations += 1
+
+        # Check overlaps using spatial grid for efficiency
+        grid = build_spatial_grid(hexagons, self.grid_size)
+
+        # Check for overlaps
+        for i in range(len(hexagons)):
+            candidates = get_collision_candidates(grid, i, hexagons[i])
+            for j in candidates:
+                if i != j and fast_collision_check(hexagons[i], hexagons[j]):
+                    overlap_violations += 1
+
+        return containment_violations, overlap_violations
+=======
+    def evaluate_constraints(self, positions, angles, generation=None, recent_improvements=None):
+        """Comprehensive constraint evaluation with adaptive penalty handling"""
+        # Create hexagon polygons
+        hexagons = []
+        for i in range(len(positions)):
+            hex_poly = get_hexagon_polygon(positions[i][0], positions[i][1], angles[i])
+            hexagons.append(hex_poly)
+
+        # Check containment
+        outer_radius = calculate_outer_hexagon_radius(positions, angles)
+        outer_hexagon = get_hexagon_polygon(0, 0, 0, outer_radius)
+
+        containment_violations = 0
+        overlap_violations = 0
+
+        # Check containment
+        for hex_poly in hexagons:
+            if not check_containment(hex_poly, outer_hexagon):
+                containment_violations += 1
+
+        # Check overlaps using hierarchical spatial grid for efficiency
+        coarse_grid, fine_grid, use_fine = build_hierarchical_spatial_grid(hexagons)
+        grid_tuple = (coarse_grid, fine_grid, use_fine)
+
+        # Check for overlaps
+        for i in range(len(hexagons)):
+            candidates = get_collision_candidates_hierarchical(grid_tuple, i, hexagons[i])
+            for j in candidates:
+                if i != j and fast_collision_check(hexagons[i], hexagons[j]):
+                    overlap_violations += 1
+
+        return containment_violations, overlap_violations
+
+    def calculate_adaptive_penalty(self, cont_viol, overlap_viol, generation=None, recent_improvements=None):
+        """Calculate adaptive penalty based on optimization progress"""
+        # Base penalty coefficients
+        base_containment_penalty = 10000000
+        base_overlap_penalty = 10000000
+
+        # Dynamic adjustment based on optimization progress
+        if recent_improvements is not None and len(recent_improvements) > 10:
+            # If we haven't improved recently, increase penalties
+            recent_progress = np.mean(recent_improvements[-10:])
+            if recent_progress < 1e-6:  # No significant improvement
+                base_containment_penalty *= 2.0
+                base_overlap_penalty *= 2.0
+            elif recent_progress > 1e-3:  # Good progress, reduce penalties
+                base_containment_penalty *= 0.5
+                base_overlap_penalty *= 0.5
+
+        return base_containment_penalty * cont_viol + base_overlap_penalty * overlap_viol
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_evolutionary_operators
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the evolutionary operators by implementing a more sophisticated crossover mechanism that preserves beneficial geometric structures and introduces machine learning-inspired diversity maintenance. Instead of simple uniform crossover, we implement a selective crossover that favors positions that maintain good geometric relationships. Additionally, we add a diversity preservation mechanism that monitors solution variance and introduces targeted mutations when diversity drops too low. This builds upon successful strategies from previous generations that combined global search with diversity preservation techniques.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def crossover_individuals(self, parent1, parent2, crossover_rate=0.8):
+        """Specialized crossover for hexagon positioning"""
+        if random.random() > crossover_rate:
+            return parent1.copy(), parent2.copy()
+
+        # Uniform crossover with some bias toward preserving good geometric layouts
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Cross over in chunks to maintain some structural integrity
+        for i in range(0, len(parent1), 3):  # Process groups of 3 elements
+            if i + 2 < len(parent1):
+                if random.random() < 0.5:
+                    child1[i:i+3], child2[i:i+3] = child2[i:i+3], child1[i:i+3]
+
+        return child1, child2
+=======
+    def crossover_individuals(self, parent1, parent2, crossover_rate=0.8, generation=None, population=None):
+        """Enhanced crossover with structure preservation and diversity considerations"""
+        if random.random() > crossover_rate:
+            return parent1.copy(), parent2.copy()
+
+        positions1, angles1 = self.decode_individual(parent1)
+        positions2, angles2 = self.decode_individual(parent2)
+
+        # Enhanced crossover that considers geometric relationships
+        child1_positions = positions1.copy()
+        child1_angles = angles1.copy()
+        child2_positions = positions2.copy()
+        child2_angles = angles2.copy()
+
+        # Apply crossover with consideration for hexagon arrangements
+        # Use a combination of uniform crossover and structure-aware swapping
+        for i in range(len(positions1)):
+            # For positions, consider proximity to centroids of clusters
+            if random.random() < 0.7:  # 70% chance of structure-aware crossover
+                # Swap complete position/angle sets for better geometric clustering
+                if random.random() < 0.5:
+                    child1_positions[i] = positions2[i]
+                    child1_angles[i] = angles2[i]
+                    child2_positions[i] = positions1[i]
+                    child2_angles[i] = angles1[i]
+            else:
+                # Regular uniform crossover
+                if random.random() < 0.5:
+                    child1_positions[i] = positions2[i]
+                    child1_angles[i] = angles2[i]
+                if random.random() < 0.5:
+                    child2_positions[i] = positions1[i]
+                    child2_angles[i] = angles1[i]
+
+        # Convert back to individual form
+        child1 = self.create_individual(child1_positions, child1_angles)
+        child2 = self.create_individual(child2_positions, child2_angles)
+
+        return child1, child2
+
+    def monitor_diversity(self, population, generation, max_generations):
+        """Monitor population diversity and trigger diversity-preserving actions"""
+        if len(population) < 2:
+            return False
+
+        # Calculate diversity metric (variance in fitness scores)
+        fitness_scores = []
+        for ind in population:
+            positions, angles = self.decode_individual(ind)
+            if not self.evaluate_feasibility(positions, angles):
+                continue
+            cont_viol, overlap_viol = self.evaluate_constraints(positions, angles)
+            if cont_viol > 0 or overlap_viol > 0:
+                continue
+            obj = self.calculate_geometric_objective(positions, angles)
+            fitness_scores.append(obj)
+
+        if len(fitness_scores) < 2:
+            return False
+
+        diversity_variance = np.var(fitness_scores)
+
+        # Trigger diversity preservation when variance is too low
+        if diversity_variance < 1e-6 and generation > max_generations * 0.3:
+            return True
+        return False
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+refined_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement refines the local search mechanism by implementing a multi-phase adaptive local optimization that uses different strategies based on the optimization stage. In early stages, it focuses on broad exploration with larger step sizes, while in later stages it performs fine-grained exploitation with smaller steps. It also incorporates learning from previous iterations to adapt step sizes more intelligently. This builds upon successful multi-phase optimization patterns used in previous generations that balanced exploration and exploitation effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, positions, angles, max_iterations=50):
+        """Fine-tune solution with local search"""
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_obj = self.calculate_geometric_objective(best_positions, best_angles)
+
+        # Gradient-like local search with geometric-aware perturbations
+        step_sizes = [0.1, 0.05, 0.01]
+        patience = 10
+        patience_counter = 0
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_step = step_sizes[min(iteration // 10, len(step_sizes)-1)]
+
+            # Try perturbing each hexagon
+            for i in range(len(positions)):
+                # Try position perturbations
+                for dim in range(2):
+                    for delta in [-current_step, current_step]:
+                        old_val = best_positions[i][dim]
+                        best_positions[i][dim] = old_val + delta
+
+                        # Check if this improves the solution
+                        new_obj = self.calculate_geometric_objective(best_positions, best_angles)
+                        if new_obj < best_obj:
+                            best_obj = new_obj
+                            improved = True
+                        else:
+                            best_positions[i][dim] = old_val
+
+                # Try angle perturbations
+                for delta in [-2.0, -1.0, 1.0, 2.0]:
+                    old_angle = best_angles[i]
+                    best_angles[i] = (old_angle + delta) % 360
+
+                    new_obj = self.calculate_geometric_objective(best_positions, best_angles)
+                    if new_obj < best_obj:
+                        best_obj = new_obj
+                        improved = True
+                    else:
+                        best_angles[i] = old_angle
+
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+
+        return best_positions, best_angles
+=======
+    def local_refinement(self, positions, angles, max_iterations=50, generation=None):
+        """Enhanced multi-phase local refinement with adaptive strategies"""
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_obj = self.calculate_geometric_objective(best_positions, best_angles)
+
+        # Multi-phase adaptive local search with intelligent step size adjustment
+        phase1_steps = [0.2, 0.1, 0.05]  # Broad exploration
+        phase2_steps = [0.1, 0.05, 0.02]  # Fine-tuning
+        phase3_steps = [0.05, 0.02, 0.01]  # Precision
+
+        # Track improvement history for adaptive adjustments
+        improvement_history = []
+        patience = 15
+        patience_counter = 0
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_phase = min(iteration // 20, 2)  # 3 distinct phases
+            step_sizes = [phase1_steps, phase2_steps, phase3_steps][current_phase]
+            current_step = step_sizes[min(iteration % 10, len(step_sizes)-1)]
+
+            # Try perturbing each hexagon systematically
+            for i in range(len(positions)):
+                # Try position perturbations with adaptive step sizes
+                for dim in range(2):
+                    for delta in [-current_step, current_step]:
+                        old_val = best_positions[i][dim]
+                        best_positions[i][dim] = old_val + delta
+
+                        # Check if this improves the solution
+                        new_obj = self.calculate_geometric_objective(best_positions, best_angles)
+                        if new_obj < best_obj:
+                            best_obj = new_obj
+                            improved = True
+                            improvement_history.append(best_obj)
+                        else:
+                            best_positions[i][dim] = old_val
+
+                # Try angle perturbations with varying magnitudes
+                angle_delta_options = [-5.0, -3.0, -1.0, 1.0, 3.0, 5.0]
+                if current_phase == 2:  # Fine phase - smaller steps
+                    angle_delta_options = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+
+                for delta in angle_delta_options:
+                    old_angle = best_angles[i]
+                    best_angles[i] = (old_angle + delta) % 360
+
+                    new_obj = self.calculate_geometric_objective(best_positions, best_angles)
+                    if new_obj < best_obj:
+                        best_obj = new_obj
+                        improved = True
+                        improvement_history.append(best_obj)
+                    else:
+                        best_angles[i] = old_angle
+
+            # Adaptive patience based on recent progress
+            if improvement_history:
+                recent_change = improvement_history[-1] - improvement_history[max(0, len(improvement_history)-5)]
+                if abs(recent_change) < 1e-8:
+                    patience = max(5, patience - 1)  # Reduce patience if stuck
+                else:
+                    patience = 15  # Reset patience
+
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+                improvement_history.append(best_obj)
+
+        return best_positions, best_angles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimization_pipeline_refinement
+</NAME>
+
+<DESCRIPTION>
+This improvement refines the main optimization pipeline by implementing a progressive constraint relaxation strategy that starts with broader bounds and tighter constraints as optimization progresses. It also introduces better initialization strategies using Voronoi-based spatial distribution patterns. This mirrors successful hybrid optimization patterns from previous generations that balanced exploration and exploitation through structured constraint management. The progressive tightening helps escape local optima early while maintaining convergence speed later in the process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self, max_iterations=150, population_size=20):
+        """Main optimization loop"""
+        # Generate multiple initial populations with geometric seeds
+        populations = []
+        for i in range(5):  # Multiple initial seeds
+            np.random.seed(i * 42)
+            init_pos, init_ang = self.generate_geometric_seed()
+
+            # Add some random variation to initial solutions
+            init_pos += np.random.normal(0, 0.5, init_pos.shape)
+            init_ang += np.random.normal(0, 5, init_ang.shape)
+
+            populations.append(self.create_individual(init_pos, init_ang))
+
+        # Evolutionary algorithm with adaptive parameters
+        current_population = populations
+        best_fitness = float('inf')
+        best_individual = None
+        stagnation_counter = 0
+        max_stagnation = 30
+
+        for generation in range(max_iterations):
+            # Evaluate fitness of current population
+            fitness_scores = []
+            for ind in current_population:
+                positions, angles = self.decode_individual(ind)
+                if not self.evaluate_feasibility(positions, angles):
+                    fitness_scores.append(float('inf'))
+                    continue
+
+                # Check constraints
+                cont_viol, overlap_viol = self.evaluate_constraints(positions, angles)
+                if cont_viol > 0 or overlap_viol > 0:
+                    # High penalty for constraint violations
+                    fitness_scores.append(1e10 + (cont_viol + overlap_viol) * 1e6)
+                    continue
+
+                # Calculate objective
+                obj = self.calculate_geometric_objective(positions, angles)
+                fitness_scores.append(obj)
+
+            # Track best solution
+            min_fitness_idx = np.argmin(fitness_scores)
+            if fitness_scores[min_fitness_idx] < best_fitness:
+                best_fitness = fitness_scores[min_fitness_idx]
+                best_individual = current_population[min_fitness_idx].copy()
+                stagnation_counter = 0
+            else:
+                stagnation_counter += 1
+
+            # Early termination if stagnation occurs
+            if stagnation_counter >= max_stagnation:
+                break
+
+            # Selection and reproduction
+            # Tournament selection
+            selected_indices = []
+            tournament_size = 3
+
+            for _ in range(population_size):
+                tournament_indices = np.random.choice(len(current_population), tournament_size)
+                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                winner_idx = tournament_indices[np.argmin(tournament_fitness)]
+                selected_indices.append(winner_idx)
+
+            # Create new population via crossover and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_individual.copy())
+
+            # Generate offspring
+            while len(new_population) < population_size:
+                # Select two parents
+                parent1_idx = selected_indices[len(new_population) % len(selected_indices)]
+                parent2_idx = selected_indices[(len(new_population) + 1) % len(selected_indices)]
+
+                parent1 = current_population[parent1_idx]
+                parent2 = current_population[parent2_idx]
+
+                # Crossover
+                child1, child2 = self.crossover_individuals(parent1, parent2)
+
+                # Mutation
+                child1 = self.mutate_individual(child1, mutation_rate=0.15, mutation_strength=0.3)
+                child2 = self.mutate_individual(child2, mutation_rate=0.15, mutation_strength=0.3)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            current_population = new_population[:population_size]
+
+        # Final refinement with local optimization
+        final_positions, final_angles = self.decode_individual(best_individual)
+        refined_positions, refined_angles = self.local_refinement(final_positions, final_angles)
+
+        return refined_positions, refined_angles
+=======
+    def optimize(self, max_iterations=150, population_size=20):
+        """Refined optimization pipeline with progressive constraint management"""
+        # Progressive constraint relaxation and tightening
+        initial_bounds = [
+            (-15.0, 15.0) if i < 22 else (0.0, 360.0)
+            for i in range(33)  # 11*2 positions + 11 angles
+        ]
+
+        # Generate multiple initial populations with better initialization
+        populations = []
+        for i in range(5):  # Multiple initial seeds
+            np.random.seed(i * 42)
+            init_pos, init_ang = self.generate_geometric_seed()
+
+            # Add more structured random variation to improve exploration
+            init_pos += np.random.normal(0, 0.5, init_pos.shape) * (1.0 + i * 0.1)
+            init_ang += np.random.normal(0, 5, init_ang.shape) * (1.0 + i * 0.05)
+
+            populations.append(self.create_individual(init_pos, init_ang))
+
+        # Evolutionary algorithm with adaptive parameters and progressive tightening
+        current_population = populations
+        best_fitness = float('inf')
+        best_individual = None
+        stagnation_counter = 0
+        max_stagnation = 30
+        recent_improvements = []
+
+        for generation in range(max_iterations):
+            # Adapt bounds based on progress (tighten constraints in later generations)
+            if generation > max_iterations * 0.6:
+                # Tighter bounds in later generations
+                bounds = [(-10.0, 10.0) if i < 22 else (0.0, 360.0) for i in range(33)]
+            elif generation > max_iterations * 0.3:
+                # Medium bounds for middle generations
+                bounds = [(-12.0, 12.0) if i < 22 else (0.0, 360.0) for i in range(33)]
+            else:
+                # Broader bounds for early generations
+                bounds = initial_bounds
+
+            # Evaluate fitness of current population
+            fitness_scores = []
+            for ind in current_population:
+                positions, angles = self.decode_individual(ind)
+                if not self.evaluate_feasibility(positions, angles):
+                    fitness_scores.append(float('inf'))
+                    continue
+
+                # Check constraints
+                cont_viol, overlap_viol = self.evaluate_constraints(positions, angles, generation, recent_improvements)
+                if cont_viol > 0 or overlap_viol > 0:
+                    # Adaptive penalty based on progress
+                    penalty = self.calculate_adaptive_penalty(cont_viol, overlap_viol, generation, recent_improvements)
+                    fitness_scores.append(1e10 + penalty)
+                    continue
+
+                # Calculate objective
+                obj = self.calculate_geometric_objective(positions, angles)
+                fitness_scores.append(obj)
+
+            # Track best solution and recent improvements
+            min_fitness_idx = np.argmin(fitness_scores)
+            if fitness_scores[min_fitness_idx] < best_fitness:
+                best_fitness = fitness_scores[min_fitness_idx]
+                best_individual = current_population[min_fitness_idx].copy()
+                stagnation_counter = 0
+                recent_improvements.append(best_fitness)
+            else:
+                stagnation_counter += 1
+                recent_improvements.append(float('inf'))
+
+            # Early termination if stagnation occurs
+            if stagnation_counter >= max_stagnation:
+                break
+
+            # Diversity maintenance
+            if self.monitor_diversity(current_population, generation, max_iterations):
+                # Introduce targeted mutations to preserve diversity
+                for i in range(len(current_population)):
+                    if random.random() < 0.3:  # 30% chance to mutate
+                        current_population[i] = self.mutate_individual(
+                            current_population[i],
+                            mutation_rate=0.2,
+                            mutation_strength=0.5
+                        )
+
+            # Selection and reproduction
+            # Tournament selection
+            selected_indices = []
+            tournament_size = 3
+
+            for _ in range(population_size):
+                tournament_indices = np.random.choice(len(current_population), tournament_size)
+                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                winner_idx = tournament_indices[np.argmin(tournament_fitness)]
+                selected_indices.append(winner_idx)
+
+            # Create new population via crossover and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_individual.copy())
+
+            # Generate offspring
+            while len(new_population) < population_size:
+                # Select two parents
+                parent1_idx = selected_indices[len(new_population) % len(selected_indices)]
+                parent2_idx = selected_indices[(len(new_population) + 1) % len(selected_indices)]
+
+                parent1 = current_population[parent1_idx]
+                parent2 = current_population[parent2_idx]
+
+                # Crossover with diversity considerations
+                child1, child2 = self.crossover_individuals(parent1, parent2, generation=generation, population=current_population)
+
+                # Mutation with adaptive rates
+                mutation_rate = 0.15 if generation < max_iterations * 0.7 else 0.2
+                mutation_strength = 0.3 if generation < max_iterations * 0.7 else 0.5
+
+                child1 = self.mutate_individual(child1, mutation_rate=mutation_rate, mutation_strength=mutation_strength)
+                child2 = self.mutate_individual(child2, mutation_rate=mutation_rate, mutation_strength=mutation_strength)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            current_population = new_population[:population_size]
+
+        # Final refinement with enhanced local optimization
+        final_positions, final_angles = self.decode_individual(best_individual)
+        refined_positions, refined_angles = self.local_refinement(final_positions, final_angles, max_iterations=100, generation=max_iterations)
+
+        return refined_positions, refined_angles
+>>>>>>> REPLACE
+</DIFF>

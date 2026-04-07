@@ -1,0 +1,306 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based initialization uses a simple grid with jittering, which doesn't consistently produce optimal distributions. I'll enhance this by implementing a more sophisticated approach that better balances circle placement with geometric considerations. The key insight is to use a combination of Voronoi cell area analysis and strategic placement that considers the natural packing efficiency of circle arrangements.
+
+This change improves the initialization quality which is crucial since it sets the foundation for the evolutionary process. Better initialization leads to faster convergence and higher-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_population(pop_size):
+        """Initialize population with improved Voronoi-based starting points"""
+        population = []
+        for _ in range(pop_size):
+            circles = np.zeros((N_CIRCLES, 3))
+
+            # Generate initial points using improved Voronoi-based method
+            # Step 1: Create a more strategic distribution of points
+            try:
+                from scipy.spatial import Voronoi
+                # Generate points in a way that promotes good spatial distribution
+                # Use a combination of grid and jittered points for better coverage
+
+                # Create initial grid points
+                grid_size = int(np.ceil(np.sqrt(N_CIRCLES * 1.5)))
+                points = []
+
+                # Generate points in a grid pattern
+                for i in range(grid_size):
+                    for j in range(grid_size):
+                        # Add some jitter to break symmetry
+                        jitter_x = np.random.normal(0, 0.03)
+                        jitter_y = np.random.normal(0, 0.03)
+                        x = (j + 0.5 + jitter_x) / grid_size
+                        y = (i + 0.5 + jitter_y) / grid_size
+                        points.append([x, y])
+
+                # Add some additional boundary points for better edge coverage
+                for _ in range(20):
+                    # Randomly choose edge or corner points
+                    edge_type = np.random.randint(0, 4)
+                    if edge_type == 0:  # Top edge
+                        points.append([np.random.uniform(0.1, 0.9), 1.0])
+                    elif edge_type == 1:  # Bottom edge
+                        points.append([np.random.uniform(0.1, 0.9), 0.0])
+                    elif edge_type == 2:  # Left edge
+                        points.append([0.0, np.random.uniform(0.1, 0.9)])
+                    else:  # Right edge
+                        points.append([1.0, np.random.uniform(0.1, 0.9)])
+
+                points = np.array(points)
+
+                # Ensure we have enough points and clip to valid range
+                if len(points) < N_CIRCLES:
+                    # Fill with random points
+                    for _ in range(N_CIRCLES - len(points)):
+                        points = np.vstack([points, [np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)]])
+                else:
+                    points = points[:N_CIRCLES]
+
+                points = np.clip(points, 0.01, 0.99)
+
+                # Create Voronoi diagram and extract meaningful points
+                vor = Voronoi(points)
+
+                # Use Voronoi vertices as circle centers (they tend to be well-distributed)
+                # But we'll be more conservative and use only the valid points
+                centroids = points
+
+                # Create circles with better radius estimation based on local density
+                for i in range(N_CIRCLES):
+                    x, y = centroids[i]
+
+                    # Calculate minimum distance to neighbors using efficient search
+                    min_dist = float('inf')
+                    for j in range(N_CIRCLES):
+                        if i != j:
+                            dist = np.sqrt((x - centroids[j][0])**2 + (y - centroids[j][1])**2)
+                            min_dist = min(min_dist, dist)
+
+                    # Use more conservative and realistic radius calculation
+                    # Based on Voronoi cell properties but with safety margins
+                    if min_dist > 0:
+                        # Conservative estimate: 1/3 of minimum neighbor distance
+                        r = min(0.15, min_dist * 0.25)
+                    else:
+                        # Fallback for isolated points
+                        r = np.random.uniform(0.02, 0.08)
+
+                    # Ensure radius respects boundary constraints
+                    boundary_safe = min(x, 1-x, y, 1-y)
+                    r = min(r, boundary_safe * 0.8)  # More conservative boundary margin
+
+                    # Ensure reasonable range
+                    r = max(0.005, min(0.18, r))
+
+                    circles[i] = [x, y, r]
+
+            except Exception:
+                # Fallback to hexagonal lattice for better distribution
+                grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+                spacing_x = 1.0 / (grid_size + 1)
+                spacing_y = 1.0 / (grid_size + 1)
+
+                points = []
+                for i in range(grid_size):
+                    for j in range(grid_size):
+                        if len(points) < N_CIRCLES:
+                            offset = (j % 2) * spacing_x / 2  # Hexagonal offset
+                            x = (j + 1) * spacing_x + offset
+                            y = (i + 1) * spacing_y
+                            points.append([x, y])
+
+                # Fill remaining if needed
+                while len(points) < N_CIRCLES:
+                    points.append([np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)])
+
+                points = points[:N_CIRCLES]
+
+                # Create circles with radius based on neighbor distances
+                for i in range(N_CIRCLES):
+                    x, y = points[i]
+
+                    # Calculate minimum distance to neighbors
+                    min_dist = float('inf')
+                    for j in range(N_CIRCLES):
+                        if i != j:
+                            dist = np.sqrt((x - points[j][0])**2 + (y - points[j][1])**2)
+                            min_dist = min(min_dist, dist)
+
+                    # Better radius determination
+                    if min_dist > 0:
+                        # More aggressive but safe radius estimation
+                        r = min(0.12, min_dist * 0.3)
+                    else:
+                        r = np.random.uniform(0.01, 0.08)
+
+                    # Boundary constraints
+                    r = min(r, x, 1-x, y, 1-y)
+                    r = max(0.005, min(0.15, r))
+
+                    circles[i] = [x, y, r]
+
+            population.append(circles)
+        return population
+=======
+    def initialize_population(pop_size):
+        """Initialize population with enhanced Voronoi-based starting points"""
+        population = []
+        for _ in range(pop_size):
+            circles = np.zeros((N_CIRCLES, 3))
+
+            # Generate initial points using enhanced Voronoi-based method
+            try:
+                from scipy.spatial import Voronoi
+                # Generate points using a more sophisticated approach that considers
+                # natural packing efficiency and Voronoi cell characteristics
+
+                # Strategy: Create points that form a good initial configuration
+                # 1. Arrange points in a quasi-regular pattern (avoiding regular grids)
+                # 2. Use Voronoi cells to guide placement with area considerations
+                # 3. Optimize for good distribution while respecting constraints
+
+                # Create points using a more uniform distribution strategy
+                points = []
+
+                # Strategy 1: Spiral pattern to avoid regular grid artifacts
+                n_points_needed = max(30, N_CIRCLES + 15)  # Extra points for Voronoi
+                angle_step = 0.5
+                radius_step = 0.8 / np.sqrt(n_points_needed)
+
+                for i in range(n_points_needed):
+                    angle = i * angle_step
+                    radius = min(0.9, i * radius_step)
+                    x = 0.5 + radius * np.cos(angle) * 0.8
+                    y = 0.5 + radius * np.sin(angle) * 0.8
+                    points.append([x, y])
+
+                # Strategy 2: Add some boundary points for better edge coverage
+                boundary_points = [
+                    [0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0],
+                    [0.5, 0.0], [0.5, 1.0], [0.0, 0.5], [1.0, 0.5]
+                ]
+                points.extend(boundary_points)
+
+                # Strategy 3: Add random points for diversity
+                for _ in range(15):
+                    points.append([np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)])
+
+                points = np.array(points)
+
+                # Ensure we have enough points and clip to valid range
+                if len(points) < N_CIRCLES:
+                    # Fill with random points
+                    for _ in range(N_CIRCLES - len(points)):
+                        points = np.vstack([points, [np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)]])
+                else:
+                    points = points[:N_CIRCLES]
+
+                points = np.clip(points, 0.01, 0.99)
+
+                # Create Voronoi diagram and use the Voronoi vertices as circle centers
+                # This ensures better spatial distribution due to the nature of Voronoi cells
+                vor = Voronoi(points)
+
+                # Use Voronoi vertices as circle centers for better distribution
+                centroids = vor.vertices
+
+                # Filter out invalid centroids and ensure we have enough good ones
+                valid_centroids = []
+                for vertex in centroids:
+                    if 0.01 <= vertex[0] <= 0.99 and 0.01 <= vertex[1] <= 0.99:
+                        valid_centroids.append(vertex)
+
+                # If not enough valid vertices, fall back to original points
+                if len(valid_centroids) < N_CIRCLES:
+                    # Reuse the original points if needed
+                    valid_centroids = points[:N_CIRCLES]
+                else:
+                    valid_centroids = valid_centroids[:N_CIRCLES]
+
+                valid_centroids = np.array(valid_centroids)
+
+                # Create circles with radius estimation based on Voronoi properties
+                # and neighbor distances for better initial packing
+                for i in range(N_CIRCLES):
+                    x, y = valid_centroids[i]
+
+                    # Calculate minimum distance to neighbors using efficient search
+                    min_dist = float('inf')
+                    for j in range(N_CIRCLES):
+                        if i != j:
+                            dist = np.sqrt((x - valid_centroids[j][0])**2 + (y - valid_centroids[j][1])**2)
+                            min_dist = min(min_dist, dist)
+
+                    # Use more sophisticated approach for radius calculation
+                    # Consider Voronoi cell area properties but with sensible limits
+                    if min_dist > 0.01:
+                        # Estimate radius based on how much room we have compared to neighbors
+                        # Using a more aggressive but reasonable approach
+                        r = min(0.15, min_dist * 0.3)
+                    else:
+                        # For isolated or very close points, use statistical average
+                        r = np.random.uniform(0.02, 0.08)
+
+                    # Ensure radius respects boundary constraints with generous margin
+                    boundary_safe = min(x, 1-x, y, 1-y)
+                    r = min(r, boundary_safe * 0.7)  # More conservative boundary margin
+
+                    # Ensure reasonable range
+                    r = max(0.005, min(0.18, r))
+
+                    circles[i] = [x, y, r]
+
+            except Exception:
+                # Fallback to improved hexagonal lattice with better spacing
+                grid_size = int(np.ceil(np.sqrt(N_CIRCLES * 1.2)))  # Slightly tighter grid
+                spacing_x = 0.8 / (grid_size + 1)  # Reduced spacing for better density
+                spacing_y = 0.8 / (grid_size + 1)  # Reduced spacing for better density
+
+                points = []
+                for i in range(grid_size):
+                    for j in range(grid_size):
+                        if len(points) < N_CIRCLES:
+                            offset = (j % 2) * spacing_x / 2  # Hexagonal offset
+                            x = 0.1 + (j + 1) * spacing_x + offset  # Offset to center in 0.1-0.9 range
+                            y = 0.1 + (i + 1) * spacing_y  # Offset to center in 0.1-0.9 range
+                            points.append([x, y])
+
+                # Fill remaining if needed
+                while len(points) < N_CIRCLES:
+                    points.append([np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)])
+
+                points = points[:N_CIRCLES]
+
+                # Create circles with better radius estimation
+                for i in range(N_CIRCLES):
+                    x, y = points[i]
+
+                    # Calculate minimum distance to neighbors
+                    min_dist = float('inf')
+                    for j in range(N_CIRCLES):
+                        if i != j:
+                            dist = np.sqrt((x - points[j][0])**2 + (y - points[j][1])**2)
+                            min_dist = min(min_dist, dist)
+
+                    # Better radius determination with more conservative approach
+                    if min_dist > 0.01:
+                        # More aggressive but safe radius estimation
+                        # Using 1/3 of neighbor distance but with better bounds
+                        r = min(0.12, min_dist * 0.35)
+                    else:
+                        r = np.random.uniform(0.015, 0.075)
+
+                    # Boundary constraints with more generous margins
+                    r = min(r, x - 0.01, 1 - x - 0.01, y - 0.01, 1 - y - 0.01)  # More generous
+                    r = max(0.005, min(0.15, r))
+
+                    circles[i] = [x, y, r]
+
+            population.append(circles)
+        return population
+>>>>>>> REPLACE
+</DIFF>

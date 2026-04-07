@@ -1,0 +1,321 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,294 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-
+-def hexagon_packing_12():
++from scipy.optimize import differential_evolution
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon, Point
++from shapely.ops import unary_union
++import matplotlib.pyplot as plt
++from matplotlib.patches import RegularPolygon
++import time
++from typing import Tuple, List, Optional
++import warnings
++
++# Constants
++UNIT_HEX_RADIUS = 1.0
++UNIT_HEX_APOGEE = UNIT_HEX_RADIUS * np.sqrt(3) / 2
++DEFAULT_OUTER_HEX_RADIUS = 10.0
++MAX_EVALUATIONS = 1000
++TIME_LIMIT_SECONDS = 180
++PENALTY_WEIGHT = 1e6
++
++# Hexagon utility functions
++def hexagon_vertices(center_x: float, center_y: float, angle_deg: float, side_length: float = UNIT_HEX_RADIUS) -> np.ndarray:
++    """Calculate vertices of a regular hexagon given center, angle and side length."""
++    angle_rad = np.radians(angle_deg)
++    # Unit hexagon vertices (assuming side length = 1)
++    unit_vertices = np.array([
++        [1, 0],
++        [0.5, np.sqrt(3)/2],
++        [-0.5, np.sqrt(3)/2],
++        [-1, 0],
++        [-0.5, -np.sqrt(3)/2],
++        [0.5, -np.sqrt(3)/2]
++    ])
++    
++    # Rotate and translate
++    cos_a = np.cos(angle_rad)
++    sin_a = np.sin(angle_rad)
++    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
++    
++    vertices = unit_vertices @ rotation_matrix.T * side_length
++    vertices[:, 0] += center_x
++    vertices[:, 1] += center_y
++    
++    return vertices
++
++def hexagon_polygon(center_x: float, center_y: float, angle_deg: float, side_length: float = UNIT_HEX_RADIUS) -> Polygon:
++    """Create Shapely polygon representation of hexagon."""
++    vertices = hexagon_vertices(center_x, center_y, angle_deg, side_length)
++    return Polygon(vertices)
++
++def outer_hexagon_vertices(side_length: float = DEFAULT_OUTER_HEX_RADIUS) -> np.ndarray:
++    """Vertices of outer hexagon centered at origin."""
++    return hexagon_vertices(0, 0, 0, side_length)
++
++def outer_hexagon_polygon(side_length: float = DEFAULT_OUTER_HEX_RADIUS) -> Polygon:
++    """Create Shapely polygon of outer hexagon."""
++    return Polygon(outer_hexagon_vertices(side_length))
++
++def check_containment(hexagon: Polygon, outer: Polygon) -> bool:
++    """Check if hexagon is fully contained within outer hexagon."""
++    return outer.contains(hexagon) or outer.touches(hexagon)
++
++def check_overlap(hex1: Polygon, hex2: Polygon) -> bool:
++    """Check if two hexagons overlap."""
++    return hex1.intersects(hex2) and not hex1.touches(hex2)
++
++def validate_configuration(inner_configs: np.ndarray, outer_radius: float) -> Tuple[bool, float]:
++    """
++    Validate configuration for feasibility and compute penalty.
++    Returns:
++        (is_valid, total_penalty)
++    """
++    # Create outer hexagon polygon
++    outer_poly = outer_hexagon_polygon(outer_radius)
++    
++    # Create inner hexagon polygons
++    inner_polys = []
++    try:
++        for i in range(len(inner_configs)):
++            center_x, center_y, angle_deg = inner_configs[i]
++            poly = hexagon_polygon(center_x, center_y, angle_deg)
++            inner_polys.append(poly)
++    except Exception as e:
++        return False, PENALTY_WEIGHT * 1000
++        
++    # Check containment
++    total_penalty = 0
++    for poly in inner_polys:
++        if not check_containment(poly, outer_poly):
++            total_penalty += PENALTY_WEIGHT * 1000
++    
++    # Check overlaps
++    n_hex = len(inner_polys)
++    for i in range(n_hex):
++        for j in range(i+1, n_hex):
++            if check_overlap(inner_polys[i], inner_polys[j]):
++                total_penalty += PENALTY_WEIGHT * 100
++    
++    is_valid = total_penalty == 0
++    return is_valid, total_penalty
++
++def compute_outer_hex_side_length(inner_configs: np.ndarray, outer_radius_guess: float = DEFAULT_OUTER_HEX_RADIUS) -> float:
++    """
++    Compute minimal outer hexagon side length needed to contain all inner hexagons.
++    Uses binary search approach.
++    """
++    # Start with a reasonable guess
++    min_radius = outer_radius_guess
++    max_radius = 100.0
++    
++    # Binary search for minimum valid radius
++    while abs(max_radius - min_radius) > 0.001:
++        mid_radius = (min_radius + max_radius) / 2
++        is_valid, _ = validate_configuration(inner_configs, mid_radius)
++        if is_valid:
++            max_radius = mid_radius
++        else:
++            min_radius = mid_radius
++    
++    return max_radius
++
++def evaluate_objective(config: np.ndarray, debug=False) -> Tuple[float, float, bool, float]:
++    """
++    Evaluate objective function for given configuration.
++    
++    Args:
++        config: array of shape (n_inner * 3,) = [x1, y1, theta1, x2, y2, theta2, ...]
++        debug: whether to return detailed info
++        
++    Returns:
++        (inverse_side_length, side_length, is_valid, penalty)
++    """
++    n = 12
++    # Reshape config into individual hexagon parameters
++    inner_configs = config.reshape((n, 3))
++    
++    # Compute approximate outer radius needed
++    outer_radius_guess = compute_outer_hex_side_length(inner_configs, DEFAULT_OUTER_HEX_RADIUS)
++    
++    # Validate configuration
++    is_valid, penalty = validate_configuration(inner_configs, outer_radius_guess)
++    
++    if not is_valid:
++        # Return penalty if invalid
++        return -penalty, outer_radius_guess, False, penalty
++    
++    # Return inverse of outer radius as objective (maximize 1/R)
++    return 1.0 / outer_radius_guess, outer_radius_guess, True, penalty
++
++def get_initial_configuration() -> np.ndarray:
++    """
++    Generate initial configuration using symmetric arrangement.
++    """
++    # Start with a symmetric pattern
++    configs = []
++    
++    # Center hexagon
++    configs.append([0, 0, 0])
++    
++    # Ring around center
++    angles = np.linspace(0, 360, 6, endpoint=False)
++    radius = 2.0
++    
++    for angle in angles:
++        x = radius * np.cos(np.radians(angle))
++        y = radius * np.sin(np.radians(angle))
++        configs.append([x, y, 0])
++    
++    # Outer ring
++    outer_radius = 3.5
++    for angle in angles:
++        x = outer_radius * np.cos(np.radians(angle))
++        y = outer_radius * np.sin(np.radians(angle))
++        configs.append([x, y, 0])
++    
++    # Additional placements to reach 12
++    configs.append([0, -4.0, 0])  # Bottom center
++    configs.append([0, 4.0, 0])   # Top center
++    
++    return np.array(configs).flatten()
++
++def optimize_hexagon_packing() -> Tuple[np.ndarray, np.ndarray, float]:
++    """
++    Main optimization routine to find optimal hexagon packing.
++    
++    Returns:
++        inner_hex_data: np.ndarray of shape (12,3) with (x,y,angle) for each inner hexagon
++        outer_hex_data: np.ndarray of shape (3,) with (x,y,angle) for outer hexagon
++        outer_hex_side_length: float representing side length of outer hexagon
++    """
++    # Initial configuration
++    initial_config = get_initial_configuration()
++    
++    # Bounds for optimization: [x, y, angle] for each hexagon
++    bounds = []
++    for i in range(12):
++        # x, y bounds: large enough to accommodate possible placements
++        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
++    
++    # Optimization parameters
++    options = {
++        'maxiter': MAX_EVALUATIONS,
++        'popsize': 15,
++        'mutation': (0.5, 1),
++        'recombination': 0.7,
++        'tol': 1e-6,
++        'updating': 'deferred'
++    }
++    
++    def objective_wrapper(x):
++        obj_val, _, valid, _ = evaluate_objective(x)
++        # We want to maximize (minimize negative)
++        return -obj_val if valid else 1e10
++    
++    # Perform optimization
++    try:
++        result = differential_evolution(
++            objective_wrapper,
++            bounds,
++            seed=42,
++            **options
++        )
++        
++        if not result.success:
++            warnings.warn("Optimization did not converge successfully.")
++            
++        # Get final configuration
++        final_config = result.x
++        inner_configs = final_config.reshape((12, 3))
++        
++        # Final validation and computation of actual outer radius
++        _, outer_radius, _, _ = evaluate_objective(final_config)
++        
++        # Return results
++        inner_hex_data = inner_configs
++        outer_hex_data = np.array([0.0, 0.0, 0.0])
++        outer_hex_side_length = outer_radius
++        
++        return inner_hex_data, outer_hex_data, outer_hex_side_length
++        
++    except Exception as e:
++        warnings.warn(f"Optimization failed with error: {str(e)}")
++        # Return initial configuration as fallback
++        inner_hex_data = initial_config.reshape((12, 3))
++        outer_hex_data = np.array([0.0, 0.0, 0.0])
++        outer_hex_side_length = DEFAULT_OUTER_HEX_RADIUS
++        return inner_hex_data, outer_hex_data, outer_hex_side_length
++
++def hexagon_packing_12() -> Tuple[np.ndarray, np.ndarray, float]:
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+-        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
++        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degrees) containing the (x,y) coordinates and angle_degrees of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
++    start_time = time.time()
++    
++    try:
++        inner_hex_data, outer_hex_data, outer_hex_side_length = optimize_hexagon_packing()
++    except Exception as e:
++        print(f"Error during optimization: {e}")
++        # Fallback to simple initial configuration
++        inner_hex_data = np.array([
++            [0, 0, 0],      # center
++            [-2.5, 0, 0],   # left
++            [2.5, 0, 0],    # right
+             [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
++            [1.25, 2.17, 0],   # top-right
++            [-1.25, -2.17, 0], # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++            [3.75, 2.17, 0],   # far top-right
++            [-3.75, -2.17, 0], # far bottom-left
++            [3.75, -2.17, 0],  # far bottom-right
++            [0, -4, 0],       # far bottom-center
++        ])
++        outer_hex_data = np.array([0, 0, 0])
++        outer_hex_side_length = 8.0
++
++    end_time = time.time()
++    
++    # Calculate benchmark ratio
++    inv_side_length = 1.0 / outer_hex_side_length if outer_hex_side_length > 0 else 0.0
++    benchmark_ratio = inv_side_length / 0.2537
++    
++    # Print performance metrics
++    print(f"inv_outer_hex_side_length: {inv_side_length:.6f}")
++    print(f"benchmark_ratio: {benchmark_ratio:.6f}")
++    print(f"eval_time: {end_time - start_time:.2f}s")
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

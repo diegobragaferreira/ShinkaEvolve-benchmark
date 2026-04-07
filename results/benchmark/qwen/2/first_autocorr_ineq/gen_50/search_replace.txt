@@ -1,0 +1,212 @@
+<NAME>
+adaptive_learning_rate
+</NAME>
+
+<DESCRIPTION>
+The idea is to implement an adaptive learning rate that decreases exponentially as iterations progress. This allows for more aggressive exploration early in the optimization when the landscape is rough, followed by precise refinement as convergence occurs. This should help accelerate convergence while avoiding overshooting optimal solutions, similar to techniques used in successful programs.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_good_direction_to_move_into(self, sequence):
+        """Returns the direction to move into the sequence."""
+        try:
+            n = len(sequence)
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 1e-10:
+                return None
+
+            # Normalize sequence
+            normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+            # Compute maximum convolution value
+            convolved = self.convolve_fft(normalized_sequence, normalized_sequence)
+            rhs = np.max(convolved)
+
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+            if g_fun is None:
+                return None
+
+            # Normalize g_fun
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 1e-10:
+                return None
+
+            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+            # Compute new sequence
+            t = 0.01
+            new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+            return new_sequence
+
+        except Exception:
+            return None
+=======
+    def get_good_direction_to_move_into(self, sequence, iteration):
+        """Returns the direction to move into the sequence."""
+        try:
+            n = len(sequence)
+            sum_sequence = np.sum(sequence)
+            if sum_sequence < 1e-10:
+                return None
+
+            # Normalize sequence
+            normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+            # Compute maximum convolution value
+            convolved = self.convolve_fft(normalized_sequence, normalized_sequence)
+            rhs = np.max(convolved)
+
+            # Solve LP
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs)
+            if g_fun is None:
+                return None
+
+            # Normalize g_fun
+            sum_g_fun = np.sum(g_fun)
+            if sum_g_fun < 1e-10:
+                return None
+
+            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+            # Adaptive learning rate that decreases exponentially
+            t = 0.01 * np.exp(-iteration / 100)
+            new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+            return new_sequence
+
+        except Exception:
+            return None
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+elite_preservation
+</NAME>
+
+<DESCRIPTION>
+Add elite preservation mechanism to maintain high-performing sequences during evolution. This preserves good solutions from being lost due to random perturbations during fallback scenarios and maintains diversity in the population. We will keep track of top performing sequences and inject them into the next generation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class AutocorrelationOptimizer:
+    def __init__(self, max_iterations=1000, timeout_seconds=180):
+        self.max_iterations = max_iterations
+        self.timeout_seconds = timeout_seconds
+        self.best_sequence = None
+        self.best_inv_c1 = 0.0
+=======
+class AutocorrelationOptimizer:
+    def __init__(self, max_iterations=1000, timeout_seconds=180, elite_size=50):
+        self.max_iterations = max_iterations
+        self.timeout_seconds = timeout_seconds
+        self.elite_size = elite_size
+        self.best_sequence = None
+        self.best_inv_c1 = 0.0
+        self.elite_sequences = []  # Store top performing sequences
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_fallback_strategy
+</NAME>
+
+<DESCRIPTION>
+Enhance the fallback strategy into a three-tiered system inspired by successful programs. First attempt mirrored or symmetric sequence initialization if LP fails, then apply bounded random perturbations if that fails, and finally resort to randomization only as a last resort. This layered approach reduces stagnation risks by providing multiple recovery paths.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_sequence(self):
+        """Main optimization loop."""
+        start_time = time.time()
+
+        # Generate initial sequence
+        current_sequence = self.generate_initial_sequence()
+
+        for iteration in range(self.max_iterations):
+            if time.time() - start_time > self.timeout_seconds:
+                break
+
+            # Compute current performance
+            inv_c1 = self.compute_inv_c1(current_sequence)
+            if inv_c1 > self.best_inv_c1:
+                self.best_inv_c1 = inv_c1
+                self.best_sequence = current_sequence.copy()
+
+            # Attempt to find better direction
+            new_sequence = self.get_good_direction_to_move_into(current_sequence)
+
+            if new_sequence is not None:
+                current_sequence = new_sequence
+            else:
+                # Fallback to random perturbation if optimization fails
+                current_sequence = [
+                    max(0, x + random.uniform(-0.1, 0.1))
+                    for x in current_sequence
+                ]
+
+        return self.best_sequence
+=======
+    def optimize_sequence(self):
+        """Main optimization loop."""
+        start_time = time.time()
+
+        # Generate initial sequence
+        current_sequence = self.generate_initial_sequence()
+
+        for iteration in range(self.max_iterations):
+            if time.time() - start_time > self.timeout_seconds:
+                break
+
+            # Compute current performance
+            inv_c1 = self.compute_inv_c1(current_sequence)
+            if inv_c1 > self.best_inv_c1:
+                self.best_inv_c1 = inv_c1
+                self.best_sequence = current_sequence.copy()
+
+            # Store elite sequences
+            if len(self.elite_sequences) < self.elite_size:
+                self.elite_sequences.append((current_sequence.copy(), inv_c1))
+            else:
+                # Replace worst elite if current is better
+                worst_idx = min(range(len(self.elite_sequences)), key=lambda i: self.elite_sequences[i][1])
+                if inv_c1 > self.elite_sequences[worst_idx][1]:
+                    self.elite_sequences[worst_idx] = (current_sequence.copy(), inv_c1)
+
+            # Attempt to find better direction
+            new_sequence = self.get_good_direction_to_move_into(current_sequence, iteration)
+
+            if new_sequence is not None:
+                current_sequence = new_sequence
+            else:
+                # Three-tiered fallback strategy
+                # Tier 1: Try mirrored sequence
+                mirrored_seq = current_sequence[::-1]
+                mirrored_inv_c1 = self.compute_inv_c1(mirrored_seq)
+                if mirrored_inv_c1 > inv_c1:
+                    current_sequence = mirrored_seq
+                else:
+                    # Tier 2: Apply bounded random perturbations
+                    perturbed_seq = [
+                        max(0, x + random.uniform(-0.05, 0.05))
+                        for x in current_sequence
+                    ]
+                    perturbed_inv_c1 = self.compute_inv_c1(perturbed_seq)
+                    if perturbed_inv_c1 > inv_c1:
+                        current_sequence = perturbed_seq
+                    else:
+                        # Tier 3: Resort to randomization
+                        current_sequence = [
+                            random.random()
+                            for _ in range(len(current_sequence))
+                        ]
+
+        return self.best_sequence
+>>>>>>> REPLACE
+</DIFF>

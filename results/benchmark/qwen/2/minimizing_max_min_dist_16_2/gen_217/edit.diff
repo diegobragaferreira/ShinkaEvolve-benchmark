@@ -1,0 +1,451 @@
+--- a/original.py
++++ b/original.py
+@@ -1,193 +1,270 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import minimize
++from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import cdist
+-import random
+-
++import time
++from sklearn.metrics.pairwise import euclidean_distances
++import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
++    Uses spherical coding evolution approach with stereographic projection.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+-
+-    n = 16
+-    d = 2
+-    best_ratio = -np.inf
+-    best_points = None
+-
+-    # Multiple restart strategies
+-    restart_strategies = [
+-        # Strategy 1: Hexagonal packing initialization (better initial spacing)
+-        lambda: _hexagonal_packing_init(),
+-
+-        # Strategy 2: Perturbed grid initialization
+-        lambda: _perturbed_grid_init(),
+-
+-        # Strategy 3: Random initialization with better spread
+-        lambda: _random_spread_init()
+-    ]
+-
+-    # Try each initialization strategy multiple times
+-    for strategy_idx, init_func in enumerate(restart_strategies):
+-        for restart in range(3):  # 3 restarts per strategy
+-            np.random.seed(strategy_idx * 1000 + restart)
+-
+-            # Get initial points
+-            points = init_func()
+-
+-            # Apply local optimization with multiple methods
+-            optimized_points = _local_optimization(points)
+-
+-            # Calculate ratio for this optimization run
+-            ratio = _calculate_min_max_ratio(optimized_points)
+-
+-            # Keep track of best solution
+-            if ratio > best_ratio:
+-                best_ratio = ratio
+-                best_points = optimized_points.copy()
+-
+-    return best_points
+-
+-
+-def _hexagonal_packing_init():
+-    """Initialize points using hexagonal packing pattern."""
+-    # Create a hexagonal lattice pattern
+-    rows = 4
+-    cols = 4
+-    points = []
+-
+-    for i in range(rows):
+-        for j in range(cols):
+-            # offset every other row
+-            x_offset = 0.5 if i % 2 == 1 else 0.0
+-            x = (j + x_offset) * 0.25 + 0.125  # Scale and shift to [0.125, 0.875]
+-            y = i * 0.25 + 0.125
+-            points.append([x, y])
+-
+-    return np.array(points)
+-
+-
+-def _perturbed_grid_init():
+-    """Initialize with grid points plus small random perturbations."""
+-    # Start with a regular grid
+-    grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+-    points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+-
+-    # Add small random perturbations
+-    np.random.seed(42)
+-    perturbation_magnitude = 0.02
+-    points += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, points.shape)
+-
+-    # Ensure points stay within bounds
+-    points = np.clip(points, 0, 1)
+-
+-    return points
+-
+-
+-def _random_spread_init():
+-    """Initialize with random points that are intentionally spread out."""
+-    np.random.seed(42)
+-    points = np.random.rand(16, 2)
+-
+-    # Apply some basic spacing to prevent clustering
+-    for i in range(16):
+-        # Move points away from center slightly
+-        center_vec = points[i] - [0.5, 0.5]
+-        center_distance = np.linalg.norm(center_vec)
+-        if center_distance > 0:
+-            points[i] += center_vec * 0.1 / center_distance
+-
+-    # Clip to ensure within bounds
+-    points = np.clip(points, 0, 1)
+-
+-    return points
+-
+-
+-def _calculate_min_max_ratio(points):
+-    """Calculate the ratio of minimum to maximum pairwise distances."""
+-    if len(points) < 2:
+-        return 0
+-
+-    # Efficiently compute all pairwise distances
+-    distances = cdist(points, points, metric='euclidean')
+-
+-    # Set diagonal to infinity to ignore self-distances
+-    np.fill_diagonal(distances, np.inf)
+-
+-    min_dist = np.min(distances)
+-    max_dist = np.max(distances)
+-
+-    if max_dist <= 0:
+-        return 0
+-
+-    return min_dist / max_dist
+-
+-
+-def _local_optimization(initial_points):
+-    """Apply local optimization to improve the point distribution."""
+-    n = 16
+-    d = 2
+-
+-    # Define objective function: negative ratio (we'll minimize this)
+-    def objective(x):
+-        # Reshape flat array back to points
+-        pts = x.reshape(n, d)
+-
+-        # Calculate all pairwise distances efficiently
+-        distances = cdist(pts, pts, metric='euclidean')
+-        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+-
++    
++    def stereographic_project(points_2d):
++        """Project 2D points to 3D sphere using stereographic projection."""
++        # Map [0,1] x [0,1] to [-1,1] x [-1,1] 
++        points_norm = points_2d * 2 - 1
++        
++        # Stereographic projection from plane to sphere
++        # Using projection from point (0,0,-1) to unit sphere
++        x, y = points_norm[:, 0], points_norm[:, 1]
++        
++        # Convert to 3D using stereographic projection from south pole
++        denominator = 1 + x*x + y*y
++        x_3d = 2 * x / denominator
++        y_3d = 2 * y / denominator 
++        z_3d = (x*x + y*y - 1) / denominator
++        
++        return np.column_stack([x_3d, y_3d, z_3d])
++    
++    def stereographic_unproject(points_3d):
++        """Unproject 3D sphere points back to 2D plane."""
++        x, y, z = points_3d[:, 0], points_3d[:, 1], points_3d[:, 2]
++        
++        # Inverse stereographic projection from north pole
++        denominator = 1 - z
++        x_2d = x / denominator
++        y_2d = y / denominator
++        
++        # Map back from [-1,1] to [0,1]
++        points_2d = np.column_stack([x_2d, y_2d]) * 0.5 + 0.5
++        
++        return points_2d
++    
++    def sphere_distance_matrix(points_sphere):
++        """Compute distance matrix on sphere using great circle distances."""
++        # For points on unit sphere, we can use dot products
++        # Distance = arccos(dot_product) for unit vectors
++        dot_products = np.dot(points_sphere, points_sphere.T)
++        # Clamp to avoid numerical errors
++        dot_products = np.clip(dot_products, -1.0, 1.0)
++        distances = np.arccos(dot_products)
++        # Set diagonal to inf
++        np.fill_diagonal(distances, np.inf)
++        return distances
++    
++    def spherical_min_max_ratio(points_sphere):
++        """Compute min/max ratio in spherical space."""
++        if len(points_sphere) < 2:
++            return 0.0
++            
++        distances = sphere_distance_matrix(points_sphere)
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+-
+-        # Return negative ratio to maximize the ratio
+-        if max_dist <= 0:
+-            return 0
+-        return -min_dist / max_dist
+-
+-    # Define bounds (points must be in [0,1] x [0,1])
+-    bounds = [(0, 1) for _ in range(n * d)]
+-
+-    # Try multiple optimization methods
+-    best_result = None
+-    best_value = np.inf
+-
+-    # Method 1: L-BFGS-B
+-    try:
+-        result1 = minimize(objective, initial_points.flatten(), method='L-BFGS-B', bounds=bounds,
+-                          options={'ftol': 1e-12, 'gtol': 1e-12})
+-        if result1.fun < best_value:
+-            best_value = result1.fun
+-            best_result = result1
+-    except:
+-        pass
+-
+-    # Method 2: Nelder-Mead as fallback
+-    try:
+-        if best_result is None:
+-            result2 = minimize(objective, initial_points.flatten(), method='Nelder-Mead',
+-                              options={'fatol': 1e-12, 'xatol': 1e-12})
+-            if result2.fun < best_value:
+-                best_value = result2.fun
+-                best_result = result2
+-    except:
+-        pass
+-
+-    # If no optimization succeeded, return original points
+-    if best_result is None:
+-        return initial_points
+-
+-    # Extract optimized points
+-    optimized_points = best_result.x.reshape(n, d)
+-
+-    # Ensure points are within bounds
+-    optimized_points = np.clip(optimized_points, 0, 1)
+-
+-    return optimized_points
+-
++        
++        if max_dist == 0:
++            return 0.0
++            
++        return min_dist / max_dist
++    
++    def spherical_energy_objective(points_sphere):
++        """Energy function based on spherical distances."""
++        if len(points_sphere) < 2:
++            return 0.0
++            
++        distances = sphere_distance_matrix(points_sphere)
++        # Sum of inverse squared distances (repulsive potential)
++        distances = np.clip(distances, 1e-10, np.inf)  # Avoid division by zero
++        energy = np.sum(1.0 / (distances * distances))
++        return energy
++    
++    def spherical_objective(x):
++        """Objective function in spherical coordinates."""
++        # Convert flat array to 3D points
++        points_sphere = x.reshape(-1, 3)
++        
++        # Calculate min/max ratio
++        ratio = spherical_min_max_ratio(points_sphere)
++        
++        # Return negative ratio for maximization
++        return -ratio
++    
++    def constraint_spherical_bounds(x):
++        """Constraints for spherical coordinates (point must be on unit sphere)."""
++        points_sphere = x.reshape(-1, 3)
++        norms = np.linalg.norm(points_sphere, axis=1)
++        # Penalty for deviation from unit sphere
++        penalties = np.abs(norms - 1.0)
++        return np.sum(penalties) * 1e6
++    
++    def adaptive_spherical_optimization(initial_points):
++        """Perform adaptive spherical optimization."""
++        # Project to sphere
++        points_sphere = stereographic_project(initial_points)
++        
++        # Normalize to unit sphere
++        norms = np.linalg.norm(points_sphere, axis=1, keepdims=True)
++        points_sphere = points_sphere / norms
++        
++        # Flatten for optimization
++        x0 = points_sphere.flatten()
++        
++        # Define bounds (but we'll handle sphere constraint differently)
++        bounds = [(-1.5, 1.5) for _ in range(48)]  # 16 points * 3 coordinates
++        
++        # Try multiple approaches
++        best_ratio = -np.inf
++        best_solution = x0.copy()
++        
++        # Approach 1: Differential evolution
++        try:
++            de_result = differential_evolution(
++                spherical_objective,
++                bounds,
++                seed=42,
++                maxiter=200,
++                popsize=15,
++                mutation=(0.5, 1),
++                recombination=0.7,
++                tol=1e-6
++            )
++            if -de_result.fun > best_ratio:
++                best_ratio = -de_result.fun
++                best_solution = de_result.x.copy()
++        except:
++            pass
++            
++        # Approach 2: Local optimization refinement
++        try:
++            # Refine with L-BFGS-B
++            result = minimize(
++                spherical_objective,
++                best_solution,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 300}
++            )
++            if result.success and -result.fun > best_ratio:
++                best_ratio = -result.fun
++                best_solution = result.x.copy()
++        except:
++            pass
++            
++        # Unproject and return
++        final_points_sphere = best_solution.reshape(-1, 3)
++        # Ensure unit sphere constraint
++        norms = np.linalg.norm(final_points_sphere, axis=1, keepdims=True)
++        final_points_sphere = final_points_sphere / norms
++        
++        final_points_2d = stereographic_unproject(final_points_sphere)
++        
++        # Ensure within bounds
++        final_points_2d = np.clip(final_points_2d, 0, 1)
++        
++        return final_points_2d
++    
++    def create_good_initialization():
++        """Create high-quality initial configuration."""
++        # Start with hexagonal pattern
++        rows, cols = 4, 4
++        points = []
++        
++        for i in range(rows):
++            for j in range(cols):
++                # offset every other row
++                x_offset = 0.5 if i % 2 == 1 else 0.0
++                x = (j + x_offset) * 0.25 + 0.125
++                y = i * 0.25 + 0.125
++                points.append([x, y])
++        
++        # Add small random perturbations
++        points = np.array(points[:16])
++        np.random.seed(42)
++        noise_magnitude = 0.02
++        noise = np.random.normal(0, noise_magnitude, points.shape)
++        points = points + noise
++        points = np.clip(points, 0, 1)
++        
++        return points
++    
++    def hybrid_optimization():
++        """Main hybrid optimization routine."""
++        best_points = None
++        best_ratio = -np.inf
++        
++        # Try multiple initializations
++        for seed_val in [42, 123, 456]:
++            np.random.seed(seed_val)
++            
++            # Create initial configuration
++            initial_points = create_good_initialization()
++            
++            # Optimize using spherical approach
++            optimized_points = adaptive_spherical_optimization(initial_points)
++            
++            # Evaluate
++            distances = cdist(optimized_points, optimized_points)
++            np.fill_diagonal(distances, np.inf)
++            min_dist = np.min(distances)
++            max_dist = np.max(distances)
++            
++            if max_dist > 0:
++                ratio = min_dist / max_dist
++                if ratio > best_ratio:
++                    best_ratio = ratio
++                    best_points = optimized_points.copy()
++        
++        # Final refinement if we have a good solution
++        if best_points is not None:
++            # Try additional refinement with local method
++            try:
++                # Simple gradient descent refinement
++                def refined_objective(x):
++                    points = x.reshape(-1, 2)
++                    distances = cdist(points, points)
++                    np.fill_diagonal(distances, np.inf)
++                    min_dist = np.min(distances)
++                    max_dist = np.max(distances)
++                    if max_dist <= 0:
++                        return 0
++                    return -min_dist / max_dist
++                
++                bounds = [(0, 1) for _ in range(32)]
++                result = minimize(
++                    refined_objective,
++                    best_points.flatten(),
++                    method='L-BFGS-B',
++                    bounds=bounds,
++                    options={'ftol': 1e-12, 'gtol': 1e-12}
++                )
++                
++                if result.success:
++                    final_points = result.x.reshape(-1, 2)
++                    final_points = np.clip(final_points, 0, 1)
++                    
++                    # Recalculate ratio
++                    distances = cdist(final_points, final_points)
++                    np.fill_diagonal(distances, np.inf)
++                    min_dist = np.min(distances)
++                    max_dist = np.max(distances)
++                    
++                    if max_dist > 0:
++                        final_ratio = min_dist / max_dist
++                        if final_ratio > best_ratio:
++                            best_points = final_points
++            
++            except:
++                pass
++        
++        return best_points if best_points is not None else create_good_initialization()
++    
++    # Execute main optimization
++    result = hybrid_optimization()
++    return result
+ 
+ # EVOLVE-BLOCK-END

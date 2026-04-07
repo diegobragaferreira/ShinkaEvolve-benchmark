@@ -1,0 +1,82 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import math
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def generate_hexagonal_grid(n_circles, square_size=1.0):
+    """Generate initial circle positions using a hexagonal grid pattern"""
+    # Calculate how many rows and columns we need
+    rows = int(math.sqrt(n_circles / (math.sqrt(3)/2)))
+    cols = int(n_circles / rows) + 1
+
+    # Ensure we have enough space
+    if rows * cols < n_circles:
+        rows += 1
+
+    # Calculate spacing based on desired circle count
+    # Start with a fairly large radius to ensure we fit within the square
+    max_radius = 0.1
+    spacing_x = 2 * max_radius
+    spacing_y = 2 * max_radius * math.sqrt(3) / 2
+
+    # Adjust spacing to fit within square
+    while spacing_x * cols > square_size or spacing_y * rows > square_size:
+        max_radius *= 0.9
+        spacing_x = 2 * max_radius
+        spacing_y = 2 * max_radius * math.sqrt(3) / 2
+
+    # Generate positions
+    positions = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n_circles:
+                break
+            x = spacing_x * j + max_radius
+            if i % 2 == 1:  # Offset every other row
+                x += spacing_x / 2
+            y = spacing_y * i + max_radius
+            if x <= square_size - max_radius and y <= square_size - max_radius:
+                positions.append([x, y])
+        if len(positions) >= n_circles:
+            break
+
+    # If we don't have enough points, fill with random points
+    while len(positions) < n_circles:
+        positions.append([np.random.uniform(max_radius, square_size - max_radius),
+                         np.random.uniform(max_radius, square_size - max_radius)])
+
+    # Generate initial radii (they'll be optimized later)
+    radii = [max_radius] * min(len(positions), n_circles)
+
+    # Fill with remaining circles if needed
+    if len(positions) < n_circles:
+        for _ in range(n_circles - len(positions)):
+            radii.append(max_radius)
+
+    return np.array(positions[:n_circles]), radii[:n_circles]
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Initialize using hexagonal grid
+    positions, radii = generate_hexagonal_grid(n)
+
+    # Fill the result array
+    for i in range(n):
+        circles[i][0] = positions[i][0]  # x coordinate
+        circles[i][1] = positions[i][1]  # y coordinate
+        circles[i][2] = radii[i]         # radius
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

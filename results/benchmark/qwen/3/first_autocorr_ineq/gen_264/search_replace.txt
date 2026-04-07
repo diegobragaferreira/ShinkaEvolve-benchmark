@@ -1,0 +1,437 @@
+<NAME>
+enhanced_convolution_strategy
+</NAME>
+
+<DESCRIPTION>
+This change introduces an enhanced convolution strategy that dynamically adapts between FFT and direct convolution methods based on sequence length and numerical stability checks. It also improves the initialization and mutation strategies to enhance exploration of the solution space, aiming to achieve better C1 constants and thus improve the combined score.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import optimize
+import time
+import random
+
+# Global constants
+MAX_TIME_SECONDS = 180
+MIN_SEQ_LENGTH = 10
+MAX_SEQ_LENGTH = 1000
+BENCHMARK_RATIO = 1.5031
+IMPROVEMENT_THRESHOLD = 1e-6
+MAX_GENERATIONS = 500
+POPULATION_SIZE = 100
+MUTATION_RATE = 0.3
+CROSSOVER_RATE = 0.7
+
+def convolve_fft(a, b):
+    """Compute convolution using FFT for efficiency."""
+    n = len(a)
+    pad_size = 2 * n - 1
+    a_padded = np.pad(a, (0, pad_size - n), 'constant')
+    b_padded = np.pad(b, (0, pad_size - n), 'constant')
+    a_fft = np.fft.fft(a_padded)
+    b_fft = np.fft.fft(b_padded)
+    conv_result = np.fft.ifft(a_fft * np.conj(b_fft))
+    return np.real(conv_result[:pad_size])
+
+def compute_c1_constant(sequence):
+    """Computes the C1 constant for a given sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    conv = convolve_fft(sequence, sequence)
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence)**2
+
+    if sum_sq < 1e-10:
+        return float('inf')
+
+    c1 = 2 * n * max_conv / sum_sq
+    return c1
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    try:
+        n = len(sequence)
+        if n < MIN_SEQ_LENGTH:
+            return None
+
+        # Normalize sequence for processing
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 1e-10:
+            return None
+
+        # Normalize to avoid numerical issues
+        normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+        # Compute the target RHS for LP solver
+        conv = convolve_fft(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv)
+
+        # Solve the LP optimization
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is None:
+            return None
+
+        # Normalize the result and create new sequence
+        sum_g = np.sum(g_fun)
+        if sum_g < 1e-10:
+            return None
+
+        normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g
+        t = 0.01
+        new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+        return new_sequence
+    except Exception as e:
+        return None
+
+def solve_convolution_lp(f_sequence, rhs, n):
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        # Create the constraint matrix using the convolution structure
+        a_ub = []
+        b_ub = []
+
+        # Generate convolution constraints
+        f_seq = np.array(f_sequence)
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_seq[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Define objective function (we want to minimize negative sum)
+        c = -np.ones(n)
+
+        # Solve the linear program
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+        if result.success:
+            g_sequence = result.x
+            # Ensure non-negativity due to numerical errors
+            g_sequence = np.maximum(g_sequence, 0)
+            return g_sequence.tolist()
+        else:
+            return None
+    except Exception:
+        return None
+
+def initialize_sequence():
+    """Initialize a promising sequence for optimization."""
+    # Start with a structured sequence
+    n = np.random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+    # Create a sequence with decreasing values to encourage sparsity
+    sequence = [1.0 / (i + 1) for i in range(n)]
+    # Normalize to have reasonable magnitude
+    total = sum(sequence)
+    sequence = [x * 2.0 / total for x in sequence]
+    return sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Search for the best coefficient sequence."""
+    start_time = time.time()
+
+    # Initialize with a promising sequence
+    best_sequence = initialize_sequence()
+    prev_c1 = compute_c1_constant(best_sequence)
+
+    # Evolutionary loop
+    for gen in range(MAX_GENERATIONS):
+        if time.time() - start_time > MAX_TIME_SECONDS - 5:
+            break
+
+        # Try gradient-based improvement
+        improved_sequence = get_good_direction_to_move_into(best_sequence)
+
+        if improved_sequence is not None:
+            new_c1 = compute_c1_constant(improved_sequence)
+            if new_c1 < prev_c1:
+                best_sequence = improved_sequence
+                prev_c1 = new_c1
+                continue
+
+        # If gradient fails or doesn't improve, try random perturbation
+        n = max(MIN_SEQ_LENGTH, min(MAX_SEQ_LENGTH, int(len(best_sequence) * 0.95)))
+        if random.random() < 0.5:
+            # Random perturbation
+            best_sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+        else:
+            # Randomly modify some elements
+            mutated_sequence = best_sequence.copy()
+            for i in range(len(mutated_sequence)):
+                if random.random() < MUTATION_RATE:
+                    mutated_sequence[i] *= random.uniform(0.8, 1.2)
+            best_sequence = mutated_sequence
+
+    # Final check
+    final_c1 = compute_c1_constant(best_sequence)
+    if final_c1 >= 1.5031:
+        # Attempt one final optimization
+        refined = get_good_direction_to_move_into(best_sequence)
+        if refined is not None:
+            test_c1 = compute_c1_constant(refined)
+            if test_c1 < final_c1:
+                best_sequence = refined
+
+    return best_sequence
+=======
+import numpy as np
+from scipy import optimize
+import time
+import random
+import math
+
+# Global constants
+MAX_TIME_SECONDS = 180
+MIN_SEQ_LENGTH = 10
+MAX_SEQ_LENGTH = 1000
+BENCHMARK_RATIO = 1.5031
+IMPROVEMENT_THRESHOLD = 1e-6
+MAX_GENERATIONS = 500
+POPULATION_SIZE = 100
+MUTATION_RATE = 0.3
+CROSSOVER_RATE = 0.7
+NUM_INIT_STRATEGIES = 5
+
+def convolve_adaptive(a, b):
+    """Compute convolution adaptively between FFT and direct methods."""
+    n = len(a)
+
+    # For very small sequences, use direct computation for numerical stability
+    if n < 10:
+        return np.convolve(a, b, mode='full')
+
+    # For medium to large sequences, try FFT but fall back to direct if needed
+    try:
+        pad_size = 2 * n - 1
+        a_padded = np.pad(a, (0, pad_size - n), 'constant')
+        b_padded = np.pad(b, (0, pad_size - n), 'constant')
+        a_fft = np.fft.fft(a_padded)
+        b_fft = np.fft.fft(b_padded)
+        conv_result = np.fft.ifft(a_fft * np.conj(b_fft))
+        result = np.real(conv_result[:pad_size])
+
+        # Check for numerical issues
+        if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+            return np.convolve(a, b, mode='full')
+        return result
+    except Exception:
+        return np.convolve(a, b, mode='full')
+
+def compute_c1_constant(sequence):
+    """Computes the C1 constant for a given sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    conv = convolve_adaptive(sequence, sequence)
+    max_conv = np.max(conv)
+    sum_sq = np.sum(sequence)**2
+
+    if sum_sq < 1e-10:
+        return float('inf')
+
+    c1 = 2 * n * max_conv / sum_sq
+    return c1
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence with adaptive parameters."""
+    try:
+        n = len(sequence)
+        if n < MIN_SEQ_LENGTH:
+            return None
+
+        # Normalize sequence for processing
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 1e-10:
+            return None
+
+        # Adaptive normalization factor
+        adaptive_factor = np.sqrt(2 * n)
+        normalized_sequence = np.array(sequence) * adaptive_factor / sum_sequence
+
+        # Compute convolution and target RHS
+        conv = convolve_adaptive(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv)
+
+        # Solve LP optimization
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is None:
+            return None
+
+        # Normalize result and create new sequence
+        sum_g = np.sum(g_fun)
+        if sum_g < 1e-10:
+            return None
+
+        normalized_g_fun = np.array(g_fun) * adaptive_factor / sum_g
+
+        # Adaptive learning rate
+        t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+        return new_sequence
+    except Exception as e:
+        return None
+
+def solve_convolution_lp(f_sequence, rhs, n):
+    """Solves the convolution LP with enhanced error handling and fallbacks."""
+    try:
+        # Create constraint matrix with convolution structure
+        a_ub = []
+        b_ub = []
+
+        # Generate convolution constraints
+        f_seq = np.array(f_sequence)
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_seq[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Objective function
+        c = -np.ones(n)
+
+        # Try multiple LP solvers with increasing robustness
+        result = None
+        try:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        except:
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+            except:
+                # Final fallback with relaxed constraints
+                try:
+                    b_ub_relaxed = [val * 1.05 for val in b_ub[:-n]] + b_ub[-n:].tolist()
+                    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub_relaxed, method='highs')
+                except:
+                    return None
+
+        if result is not None and result.success:
+            g_sequence = result.x
+            # Ensure non-negativity
+            g_sequence = np.maximum(g_sequence, 0)
+            return g_sequence.tolist()
+        else:
+            return None
+    except Exception:
+        return None
+
+def initialize_sequence():
+    """Initialize a promising sequence with multiple strategies."""
+    # Select random strategy
+    strategy = random.choice(range(NUM_INIT_STRATEGIES))
+
+    n = np.random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+
+    if strategy == 0:
+        # Exponential decay sequence
+        sequence = [np.exp(-0.5 * i) for i in range(n)]
+        total = sum(sequence)
+        sequence = [x * 2.0 / total for x in sequence]
+    elif strategy == 1:
+        # Harmonic sequence
+        sequence = [1.0 / (i + 1) for i in range(n)]
+        total = sum(sequence)
+        sequence = [x * 2.0 / total for x in sequence]
+    elif strategy == 2:
+        # Spike sequence
+        sequence = [0.0] * n
+        spike_idx = random.randint(0, n-1)
+        sequence[spike_idx] = random.uniform(1.0, 5.0)
+    elif strategy == 3:
+        # Gaussian-like sequence
+        sequence = [np.exp(-(i - n//2)**2 / (2 * (n//4)**2)) for i in range(n)]
+        total = sum(sequence)
+        sequence = [x * 2.0 / total for x in sequence]
+    else:  # strategy == 4
+        # Random sequence
+        sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+
+    return sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Search for the best coefficient sequence with adaptive strategies."""
+    start_time = time.time()
+
+    # Run multiple initializations to increase chances of finding good solution
+    best_sequence = None
+    best_c1 = float('inf')
+
+    for _ in range(5):
+        candidate_sequence = initialize_sequence()
+        candidate_c1 = compute_c1_constant(candidate_sequence)
+        if candidate_c1 < best_c1:
+            best_c1 = candidate_c1
+            best_sequence = candidate_sequence
+
+    if best_sequence is None:
+        best_sequence = initialize_sequence()
+
+    prev_c1 = best_c1
+
+    # Evolutionary loop with enhanced mutation strategy
+    for gen in range(MAX_GENERATIONS):
+        if time.time() - start_time > MAX_TIME_SECONDS - 5:
+            break
+
+        # Try gradient-based improvement
+        improved_sequence = get_good_direction_to_move_into(best_sequence)
+
+        if improved_sequence is not None:
+            new_c1 = compute_c1_constant(improved_sequence)
+            if new_c1 < prev_c1:
+                best_sequence = improved_sequence
+                prev_c1 = new_c1
+                continue
+
+        # If gradient fails or doesn't improve, try advanced perturbations
+        n = max(MIN_SEQ_LENGTH, min(MAX_SEQ_LENGTH, int(len(best_sequence) * 0.95)))
+
+        # Try a hybrid approach: mutate some elements, and add new random elements
+        mutated_sequence = best_sequence.copy()
+        for i in range(len(mutated_sequence)):
+            if random.random() < MUTATION_RATE:
+                # Multiplicative mutation for variation
+                mutated_sequence[i] *= random.uniform(0.7, 1.3)
+
+        # Occasionally inject new random elements for exploration
+        if random.random() < 0.2:
+            new_element_idx = random.randint(0, n-1)
+            mutated_sequence[new_element_idx] = random.uniform(0.1, 2.0)
+
+        best_sequence = mutated_sequence
+
+    # Final refinement
+    final_c1 = compute_c1_constant(best_sequence)
+    if final_c1 >= 1.5031:
+        refined = get_good_direction_to_move_into(best_sequence)
+        if refined is not None:
+            test_c1 = compute_c1_constant(refined)
+            if test_c1 < final_c1:
+                best_sequence = refined
+
+    return best_sequence
+>>>>>>> REPLACE
+</DIFF>

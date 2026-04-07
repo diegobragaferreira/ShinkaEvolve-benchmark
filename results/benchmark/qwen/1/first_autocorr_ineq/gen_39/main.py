@@ -1,0 +1,184 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal, optimize
+import random
+import time
+import copy
+
+def compute_c1(sequence):
+    """Compute C₁ for a given sequence using FFT for efficiency."""
+    if len(sequence) == 0:
+        return float('inf')
+
+    # Convert to numpy array
+    a = np.array(sequence)
+
+    # Compute autoconvolution using FFT for efficiency
+    conv = signal.fftconvolve(a, a, mode='full')
+    conv = conv[len(a)-1:]  # Take the relevant part
+
+    # Max convolution value
+    max_conv = np.max(conv)
+
+    # Sum of sequence squared
+    sum_sq = np.sum(a)**2
+
+    if sum_sq == 0:
+        return float('inf')
+
+    # Compute C₁
+    c1 = 2 * len(a) * max_conv / sum_sq
+
+    return c1
+
+def compute_inv_c1(sequence):
+    """Compute 1/C₁ for a given sequence."""
+    c1 = compute_c1(sequence)
+    if c1 == 0 or np.isnan(c1):
+        return 0
+    return 1.0 / c1
+
+def generate_random_valid_sequence(min_length=10, max_length=1000, max_height=1000):
+    """Generate a random valid sequence with specified constraints."""
+    n = random.randint(min_length, max_length)
+    # Generate random heights in [0, max_height] with some sparsity
+    sequence = [random.uniform(0, max_height) if random.random() > 0.3 else 0
+                for _ in range(n)]
+    # Ensure at least one element is non-zero
+    if sum(sequence) < 0.01:
+        sequence[random.randint(0, len(sequence)-1)] = random.uniform(0.1, max_height)
+    return sequence
+
+def crossover(parent1, parent2):
+    """Perform crossover between two parents."""
+    # Uniform crossover
+    child = []
+    min_len = min(len(parent1), len(parent2))
+    for i in range(min_len):
+        if random.random() < 0.5:
+            child.append(parent1[i])
+        else:
+            child.append(parent2[i])
+
+    # Add remaining elements from longer parent
+    if len(parent1) > len(parent2):
+        child.extend(parent1[min_len:])
+    elif len(parent2) > len(parent1):
+        child.extend(parent2[min_len:])
+
+    return child
+
+def mutate(sequence, mutation_rate, max_height=1000):
+    """Mutate a sequence."""
+    mutated = copy.deepcopy(sequence)
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            mutated[i] = random.uniform(0, max_height)
+    return mutated
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return copy.deepcopy(population[winner_index])
+
+def adaptive_evolutionary_optimization(max_generations=200, population_size=100,
+                                     initial_mutation_rate=0.1, elite_size=10):
+    """Main adaptive evolutionary optimization loop."""
+    # Initialize population
+    population = [generate_random_valid_sequence()
+                  for _ in range(population_size)]
+
+    best_score = 0
+    best_individual = None
+    stagnation_counter = 0
+    max_stagnation = 30
+
+    start_time = time.time()
+
+    for generation in range(max_generations):
+        # Calculate adaptive mutation rate (decreases over generations)
+        mutation_rate = initial_mutation_rate * (1 - generation / max_generations)
+        if mutation_rate < 0.01:
+            mutation_rate = 0.01
+
+        # Evaluate fitness for all individuals
+        fitnesses = []
+        for individual in population:
+            inv_c1 = compute_inv_c1(individual)
+            # Only consider sequences with sufficient sum
+            if np.sum(individual) > 0.01:
+                fitnesses.append(inv_c1)
+            else:
+                fitnesses.append(0)
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        if fitnesses[best_idx] > best_score:
+            best_score = fitnesses[best_idx]
+            best_individual = copy.deepcopy(population[best_idx])
+            stagnation_counter = 0
+        else:
+            stagnation_counter += 1
+
+        # Check for stagnation
+        if stagnation_counter >= max_stagnation:
+            break
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        sorted_indices = np.argsort(fitnesses)[::-1][:elite_size]
+        for idx in sorted_indices:
+            new_population.append(copy.deepcopy(population[idx]))
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate(child, mutation_rate)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+        # Check time limit
+        if time.time() - start_time > 170:  # Leave some buffer
+            break
+
+    return best_individual, best_score
+
+def search_for_best_sequence():
+    """Function to search for the best coefficient sequence using evolutionary approach."""
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Run adaptive evolutionary optimization
+    best_sequence, best_score = adaptive_evolutionary_optimization(
+        max_generations=200,
+        population_size=100,
+        initial_mutation_rate=0.1,
+        elite_size=10
+    )
+
+    # Ensure we have a valid sequence
+    if best_sequence is None:
+        best_sequence = generate_random_valid_sequence()
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

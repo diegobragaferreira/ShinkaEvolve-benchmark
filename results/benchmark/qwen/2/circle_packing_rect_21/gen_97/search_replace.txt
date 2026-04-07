@@ -1,0 +1,101 @@
+<NAME>
+adaptive_grid_initialization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to use an adaptive grid initialization that dynamically adjusts spacing based on the circle count and rectangle dimensions. Instead of random initialization, we'll create a structured grid pattern that provides better initial coverage and feasibility. This addresses the limitation of the current uniform random initialization which often produces poor starting points that require many iterations to improve.
+
+The approach involves:
+1. Calculating optimal grid spacing based on container area and circle count
+2. Generating an initial grid layout that fills the space efficiently
+3. Adding small random perturbations to avoid perfect symmetry while maintaining feasibility
+4. Scaling radii appropriately to ensure the configuration is valid before optimization
+
+This should provide much better starting points for the evolutionary algorithm, reducing the number of iterations needed to reach high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_population(self):
+        """Generate diverse initial population"""
+        population = []
+        for _ in range(self.population_size):
+            circles = np.zeros((self.n_circles, 3))
+            # Random initialization with some clustering to avoid extreme sparsity
+            np.random.seed(int(time.time() * 1000) % (2**32))
+            circles[:, 0] = np.random.uniform(0.01, self.container_width - 0.01, self.n_circles)
+            circles[:, 1] = np.random.uniform(0.01, self.container_height - 0.01, self.n_circles)
+            circles[:, 2] = np.random.uniform(0.01, 0.1, self.n_circles)
+
+            # Normalize total radius to reasonable value
+            total_radius = np.sum(circles[:, 2])
+            if total_radius > 0:
+                scaling_factor = 0.5 / total_radius
+                circles[:, 2] *= scaling_factor
+
+            population.append(circles.copy())
+        return population
+=======
+    def initialize_population(self):
+        """Generate diverse initial population using adaptive grid initialization"""
+        population = []
+
+        # Calculate grid parameters based on container size and circle count
+        # This creates a more structured starting point than pure randomness
+        aspect_ratio = self.container_width / self.container_height
+        total_area = self.container_width * self.container_height
+        avg_circle_area = total_area / self.n_circles
+        avg_radius = np.sqrt(avg_circle_area / np.pi)
+
+        # Grid dimensions - adjust for rectangular container
+        cols = int(np.ceil(np.sqrt(self.n_circles / aspect_ratio)))
+        rows = int(np.ceil(self.n_circles / cols))
+
+        # Grid spacing
+        grid_width = self.container_width / cols
+        grid_height = self.container_height / rows
+
+        # Ensure minimum spacing
+        min_spacing = 2 * avg_radius
+
+        for _ in range(self.population_size):
+            circles = np.zeros((self.n_circles, 3))
+
+            # Create structured grid pattern
+            circle_idx = 0
+            for i in range(rows):
+                for j in range(cols):
+                    if circle_idx >= self.n_circles:
+                        break
+
+                    # Grid position with slight jitter to avoid perfect symmetry
+                    x = (j + 0.5) * grid_width + np.random.uniform(-grid_width/6, grid_width/6)
+                    y = (i + 0.5) * grid_height + np.random.uniform(-grid_height/6, grid_height/6)
+
+                    # Ensure positions stay within bounds
+                    x = np.clip(x, avg_radius, self.container_width - avg_radius)
+                    y = np.clip(y, avg_radius, self.container_height - avg_radius)
+
+                    circles[circle_idx, 0] = x
+                    circles[circle_idx, 1] = y
+                    circles[circle_idx, 2] = avg_radius * (0.8 + np.random.uniform(0, 0.4))  # Variable radii
+                    circle_idx += 1
+
+            # Adjust to make sure we have exactly n_circles
+            if circle_idx < self.n_circles:
+                # Fill remaining circles with random positions, but keep within bounds
+                for i in range(circle_idx, self.n_circles):
+                    circles[i, 0] = np.random.uniform(avg_radius, self.container_width - avg_radius)
+                    circles[i, 1] = np.random.uniform(avg_radius, self.container_height - avg_radius)
+                    circles[i, 2] = avg_radius * (0.8 + np.random.uniform(0, 0.4))
+
+            # Normalize radii to prevent overly large initial circles
+            total_radius = np.sum(circles[:, 2])
+            if total_radius > 0:
+                scaling_factor = 0.3 / total_radius  # Reduced scaling for better balance
+                circles[:, 2] *= scaling_factor
+
+            population.append(circles.copy())
+        return population
+>>>>>>> REPLACE
+</DIFF>

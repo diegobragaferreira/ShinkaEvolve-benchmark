@@ -1,0 +1,170 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.signal import fftconvolve
+from deap import base, creator, tools, algorithms
+import random
+import time
+import math
+
+# Fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+# Constants
+POPULATION_SIZE = 100
+GENERATIONS = 50
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.2
+CROSSOVER_RATE = 0.8
+MIN_SEQUENCE_LENGTH = 50
+MAX_SEQUENCE_LENGTH = 1000
+MIN_HEIGHT = 0
+MAX_HEIGHT = 1000
+MIN_SUM = 0.01
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    """
+    if len(sequence) == 0 or np.sum(sequence) < MIN_SUM:
+        return float('inf')
+    
+    # Compute autocorrelation using FFT for efficiency
+    autocorr = fftconvolve(sequence, sequence[::-1], mode='full')
+    # Take the second half which corresponds to the actual autocorrelation
+    autocorr = autocorr[len(sequence)-1:]
+    max_autocorr = np.max(autocorr)
+    
+    sum_sq = np.sum(sequence)**2
+    if sum_sq == 0:
+        return float('inf')
+    
+    # C₁ = 2n * max(autocorr) / (sum(sequence))^2
+    C1 = 2 * len(sequence) * max_autocorr / sum_sq
+    
+    return C1
+
+def evaluate_individual(individual):
+    """
+    Evaluates fitness of an individual (sequence) by computing negative inverse of C₁.
+    """
+    try:
+        C1 = compute_autocorrelation_constant(individual)
+        if C1 == float('inf') or math.isnan(C1):
+            return float('-inf'),
+        return (-1.0 / C1),
+    except Exception as e:
+        return float('-inf'),
+
+def create_individual():
+    """
+    Creates a new random individual (sequence) with valid constraints.
+    """
+    length = random.randint(MIN_SEQUENCE_LENGTH, MAX_SEQUENCE_LENGTH)
+    individual = np.random.uniform(MIN_HEIGHT, MAX_HEIGHT, length)
+    # Ensures the sum is above minimum threshold
+    individual = individual * (MIN_SUM / (np.sum(individual) + 1e-10))
+    return individual.tolist()
+
+def initialize_population(pop_size):
+    """
+    Initializes population with random valid individuals.
+    """
+    return [create_individual() for _ in range(pop_size)]
+
+def mutate_individual(individual):
+    """
+    Mutates an individual by randomly adjusting heights and ensuring validity.
+    """
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < MUTATION_RATE:
+            mutated[i] = max(MIN_HEIGHT, min(MAX_HEIGHT, mutated[i] + np.random.normal(0, 0.1)))
+    # Ensure minimum sum constraint
+    current_sum = sum(mutated)
+    if current_sum < MIN_SUM:
+        scale_factor = MIN_SUM / current_sum
+        mutated = [x * scale_factor for x in mutated]
+    return mutated
+
+def crossover_individuals(ind1, ind2):
+    """
+    Performs crossover between two individuals.
+    """
+    if len(ind1) != len(ind2):
+        return ind1, ind2
+    
+    cxpoint = random.randint(1, len(ind1) - 1)
+    child1 = ind1[:cxpoint] + ind2[cxpoint:]
+    child2 = ind2[:cxpoint] + ind1[cxpoint:]
+    
+    # Ensure children meet sum requirement
+    sum1 = sum(child1)
+    if sum1 < MIN_SUM:
+        scale_factor = MIN_SUM / sum1
+        child1 = [x * scale_factor for x in child1]
+        
+    sum2 = sum(child2)
+    if sum2 < MIN_SUM:
+        scale_factor = MIN_SUM / sum2
+        child2 = [x * scale_factor for x in child2]
+        
+    return child1, child2
+
+def search_for_best_sequence():
+    """
+    Main evolutionary optimization function.
+    """
+    # Setup DEAP
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", initialize_population)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+    
+    # Initialize population
+    population = toolbox.population(POPULATION_SIZE)
+    
+    # Evolution loop
+    for gen in range(GENERATIONS):
+        # Evaluate population
+        fitnesses = list(map(toolbox.evaluate, population))
+        for ind, fit in zip(population, fitnesses):
+            ind.fitness.values = fit
+        
+        # Select next generation
+        offspring = toolbox.select(population, len(population))
+        
+        # Clone the selected individuals
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CROSSOVER_RATE:
+                child1, child2 = toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < MUTATION_RATE:
+                mutant = toolbox.mutate(mutant)
+                del mutant.fitness.values
+                
+        # Replace population with offspring
+        population[:] = offspring
+    
+    # Find best individual
+    best_individual = tools.selBest(population, 1)[0]
+    return best_individual
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

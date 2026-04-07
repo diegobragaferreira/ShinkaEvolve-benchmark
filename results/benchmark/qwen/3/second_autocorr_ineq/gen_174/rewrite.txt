@@ -1,0 +1,339 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from numba import njit
+import random
+from typing import List, Tuple
+from scipy.stats import qmc
+import time
+
+@njit
+def compute_autoconvolution_norms(f_vals):
+    """
+    Compute the autoconvolution g = f*f and return its norms.
+    Uses fast numba-compiled operations.
+    """
+    n = len(f_vals)
+    # Autoconvolution using direct computation
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    # Compute norms
+    g_squared = g * g
+    norm_g2_squared = np.sum(g_squared)
+    norm_g1 = np.sum(np.abs(g))
+    norm_g_inf = np.max(np.abs(g))
+
+    return norm_g2_squared, norm_g1, norm_g_inf
+
+@njit
+def calculate_c2(f_vals):
+    """
+    Calculate C2 value for given step function values.
+    """
+    norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+        return 0.0
+
+    c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+    return c2
+
+def latin_hypercube_sample(n_samples: int, n_dims: int, seed: int = 42) -> np.ndarray:
+    """Generate Latin Hypercube Sample for diverse initialization."""
+    sampler = qmc.LatinHypercube(d=n_dims, seed=seed)
+    sample = sampler.random(n=n_samples)
+    return sample
+
+def adaptive_initialize_population(pop_size: int, min_length: int = 300, max_length: int = 2000) -> List[List[float]]:
+    """Initialize population with diverse configurations using LHS-based approach."""
+    population = []
+    
+    # Generate diverse lengths
+    lengths = np.random.randint(min_length, max_length, pop_size)
+    
+    # Create base patterns using LHS for better diversity
+    lhs_samples = latin_hypercube_sample(pop_size, 4, seed=42)
+    
+    for i in range(pop_size):
+        length = lengths[i]
+        
+        # Different pattern types based on LHS values
+        pattern_type = i % 4
+        if pattern_type == 0:  # Gaussian-like
+            base_vals = np.exp(-np.linspace(0, 3, length//2)**2)
+            vals = np.concatenate([base_vals, np.flip(base_vals)])
+        elif pattern_type == 1:  # Peaks
+            vals = np.zeros(length)
+            for peak_pos in [length//4, length//2, 3*length//4]:
+                if peak_pos < length:
+                    vals[peak_pos] = 1.0
+            # Add smoothing
+            vals = np.convolve(vals, np.ones(5)/5, mode='same')
+        elif pattern_type == 2:  # Uniform with noise
+            vals = np.ones(length) + np.random.normal(0, 0.1, length)
+        else:  # Exponential decay
+            vals = np.exp(-np.linspace(0, 4, length))
+            
+        # Normalize to reasonable range
+        vals = np.maximum(vals, 0.0)
+        if np.sum(vals) > 0:
+            vals = vals / np.sum(vals) * 20
+        
+        population.append(vals.tolist())
+    
+    return population
+
+def adaptive_local_search(initial_vals: List[float], max_iter: int = 500, tolerance: float = 1e-6) -> List[float]:
+    """Perform adaptive local optimization with dynamic step sizes."""
+    def objective(f_vals):
+        return -calculate_c2(f_vals)
+    
+    # Adaptive step sizes based on initial values
+    step_sizes = [max(0.1, val * 0.05) for val in initial_vals]
+    
+    # Try different optimization methods
+    results = []
+    
+    # Nelder-Mead with adaptive parameters
+    try:
+        result = minimize(objective, initial_vals, method='Nelder-Mead', 
+                         options={'maxiter': max_iter, 'xtol': tolerance, 'ftol': tolerance})
+        if result.success:
+            results.append(result.x)
+    except:
+        pass
+    
+    # L-BFGS with adaptive parameters
+    try:
+        result = minimize(objective, initial_vals, method='L-BFGS-B', 
+                         options={'maxiter': max_iter, 'ftol': tolerance})
+        if result.success:
+            results.append(result.x)
+    except:
+        pass
+    
+    # Coordinate-wise refinement if no optimization succeeded
+    if not results:
+        refined = initial_vals.copy()
+        for idx in range(len(refined)):
+            old_val = refined[idx]
+            best_val = old_val
+            best_score = calculate_c2(refined)
+            
+            # Try small variations
+            step_size = max(0.001, old_val * 0.01)
+            for variation in [-step_size, 0, step_size]:
+                test_vals = refined.copy()
+                test_vals[idx] = max(0, old_val + variation)
+                new_score = calculate_c2(test_vals)
+                if new_score > best_score:
+                    best_score = new_score
+                    best_val = test_vals[idx]
+                    
+            refined[idx] = best_val
+        return refined
+    
+    # Return best result
+    if results:
+        best_result = min(results, key=lambda x: -calculate_c2(x))
+        return np.maximum(best_result, 0.0).tolist()
+    
+    return initial_vals
+
+def adaptive_selection(population: List[List[float]], fitness_scores: List[float], 
+                       elite_size: int = 3, tournament_size: int = 4) -> List[List[float]]:
+    """Adaptive selection that considers both fitness and diversity."""
+    # Sort by fitness
+    sorted_indices = sorted(range(len(fitness_scores)), 
+                          key=lambda i: fitness_scores[i], reverse=True)
+    selected = [population[i] for i in sorted_indices[:elite_size]]
+    
+    # Add diverse individuals
+    remaining_indices = sorted_indices[elite_size:]
+    np.random.shuffle(remaining_indices)
+    
+    # Add tournament-selected individuals
+    for i in range(min(len(remaining_indices), len(population) - elite_size)):
+        tournament_indices = np.random.choice(remaining_indices[:10], 
+                                            min(tournament_size, len(remaining_indices[:10])), 
+                                            replace=False)
+        tournament_fitness = [fitness_scores[j] for j in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+        selected.append(population[winner_idx])
+        
+    return selected[:len(population)]
+
+def adaptive_crossover(parent1: List[float], parent2: List[float]) -> List[float]:
+    """Adaptive crossover with variable recombination."""
+    n1, n2 = len(parent1), len(parent2)
+    n = max(n1, n2)
+    
+    # Determine crossover point with adaptive randomness
+    crossover_point = random.randint(1, n-1) if n > 1 else 0
+    
+    # Create offspring with blending and random selection
+    offspring = []
+    for i in range(n):
+        if i < crossover_point and i < n1:
+            offspring.append(parent1[i])
+        elif i >= crossover_point and i < n2:
+            offspring.append(parent2[i])
+        else:
+            # Choose randomly or average
+            choices = []
+            if i < n1:
+                choices.append(parent1[i])
+            if i < n2:
+                choices.append(parent2[i])
+                
+            if choices:
+                # Weighted choice with preference for parent1
+                if random.random() < 0.7:
+                    offspring.append(random.choice(choices))
+                else:
+                    offspring.append(sum(choices) / len(choices))
+            else:
+                offspring.append(0.0)
+    
+    return offspring
+
+def adaptive_mutation(individual: List[float], generation: int, max_gen: int) -> List[float]:
+    """Adaptive mutation with decreasing strength over time."""
+    mutated = individual.copy()
+    mutation_rate = 0.3 * (1 - generation/max_gen) + 0.05  # Decreasing over generations
+    
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Adaptive noise based on current value
+            noise_std = max(0.001, mutated[i] * 0.1)
+            noise = np.random.normal(0, noise_std)
+            mutated[i] = max(0, mutated[i] + noise)
+    
+    return mutated
+
+def smart_restart_check(current_best_score: float, previous_best_scores: List[float], 
+                       patience: int = 10, improvement_threshold: float = 1e-6) -> bool:
+    """Check if we should restart based on stagnation."""
+    if len(previous_best_scores) < patience:
+        return False
+    
+    recent_scores = previous_best_scores[-patience:]
+    if len(recent_scores) < 2:
+        return False
+    
+    # Check for minimal improvement
+    if (recent_scores[-1] - recent_scores[0]) < improvement_threshold:
+        return True
+    
+    return False
+
+def adaptive_evolutionary_optimizer() -> List[float]:
+    """Main adaptive evolutionary optimization routine."""
+    start_time = time.time()
+    
+    # Parameters
+    initial_pop_size = 25
+    max_generations = 75
+    elite_size = 4
+    max_time_seconds = 85  # Leave margin for cleanup
+    
+    # Initialize population
+    population = adaptive_initialize_population(initial_pop_size)
+    best_overall = None
+    best_c2_score = -float('inf')
+    best_history = []
+    
+    # Evolution loop
+    for generation in range(max_generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+            
+        # Evaluate current population
+        fitness_scores = []
+        for individual in population:
+            score = calculate_c2(individual)
+            fitness_scores.append(score)
+            
+            # Track best overall
+            if score > best_c2_score:
+                best_c2_score = score
+                best_overall = individual.copy()
+        
+        # Update history
+        best_history.append(best_c2_score)
+        
+        # Print progress
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best C2 = {best_c2_score:.6f}")
+        
+        # Smart restart check
+        if smart_restart_check(best_c2_score, best_history, patience=15):
+            # Reinitialize with diverse patterns
+            population = adaptive_initialize_population(initial_pop_size)
+            print(f"Restart at generation {generation} due to stagnation")
+            continue
+        
+        # Selection
+        selected_population = adaptive_selection(population, fitness_scores, elite_size)
+        
+        # Create new population
+        new_population = selected_population.copy()
+        
+        # Generate offspring - keep some elite and add mutated children
+        while len(new_population) < initial_pop_size:
+            # Select parents
+            parent1 = random.choice(selected_population)
+            parent2 = random.choice(selected_population)
+            
+            # Crossover
+            offspring = adaptive_crossover(parent1, parent2)
+            
+            # Mutation
+            mutated_offspring = adaptive_mutation(offspring, generation, max_generations)
+            
+            new_population.append(mutated_offspring)
+        
+        # Keep only required population size
+        population = new_population[:initial_pop_size]
+        
+        # Local optimization on top individuals periodically
+        if generation % 5 == 0:
+            top_individuals = sorted(zip(population, fitness_scores), 
+                                   key=lambda x: x[1], reverse=True)[:3]
+            for individual, _ in top_individuals:
+                optimized = adaptive_local_search(individual)
+                score = calculate_c2(optimized)
+                if score > best_c2_score:
+                    best_c2_score = score
+                    best_overall = optimized.copy()
+    
+    # Final optimization of best individual
+    if best_overall is not None:
+        final_candidate = adaptive_local_search(best_overall)
+        final_score = calculate_c2(final_candidate)
+        if final_score > best_c2_score:
+            return final_candidate
+    
+    return best_overall if best_overall is not None else [1.0] * 500
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using adaptive evolutionary approach."""
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    try:
+        # Run adaptive evolutionary optimizer
+        return adaptive_evolutionary_optimizer()
+    except Exception as e:
+        # Fallback to simple uniform function if optimization fails
+        print(f"Optimization failed with error: {e}, using fallback")
+        return [1.0] * 500
+
+# EVOLVE-BLOCK-END

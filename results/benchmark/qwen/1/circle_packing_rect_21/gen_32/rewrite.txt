@@ -1,0 +1,213 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle with perimeter = 4, so width + height = 2
+    # Using a square for simplicity: width = height = 1
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Helper function to check if a circle fits within bounds
+    def is_valid_circle(circle):
+        x, y, r = circle
+        return (r > 0 and 
+                x - r >= 0 and x + r <= rect_width and
+                y - r >= 0 and y + r <= rect_height)
+    
+    # Helper function to compute maximum allowable radius for a circle
+    def compute_max_radius(circle, other_circles, tree=None):
+        x, y, old_r = circle
+        # Bound by rectangle edges
+        max_radius = min(x, rect_width - x, y, rect_height - y)
+        
+        # If we have a k-d tree and other_circles, use it for faster neighbor search
+        if tree is not None and len(other_circles) > 0:
+            # Find nearby circles efficiently
+            nearby_indices = tree.query_ball_point([x, y], max_radius + 0.1)
+            for idx in nearby_indices:
+                if idx >= len(other_circles):
+                    continue
+                ox, oy, oradius = other_circles[idx]
+                dist = np.sqrt((x - ox)**2 + (y - oy)**2)
+                # Constraint: distance >= sum of radii
+                constraint_radius = dist - oradius
+                if constraint_radius > 0:
+                    max_radius = min(max_radius, constraint_radius)
+        else:
+            # Fallback to brute force for small sets
+            for ox, oy, oradius in other_circles:
+                dist = np.sqrt((x - ox)**2 + (y - oy)**2)
+                constraint_radius = dist - oradius
+                if constraint_radius > 0:
+                    max_radius = min(max_radius, constraint_radius)
+        
+        return max_radius
+    
+    # Generate initial configuration using systematic hexagonal pattern
+    n = 21
+    circles = np.zeros((n, 3))
+    
+    # Systematic approach: try to fill space efficiently
+    rows = 4
+    cols = 6
+    
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    # Generate hexagonal pattern with offsets
+    idx = 0
+    for i in range(rows):
+        offset = spacing_x * (i % 2) * 0.5
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x + offset
+            y = (i + 1) * spacing_y
+            
+            # Ensure it's within bounds
+            x = np.clip(x, 0.01, rect_width - 0.01)
+            y = np.clip(y, 0.01, rect_height - 0.01)
+            
+            # Initial small radius
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+            
+        if idx >= n:
+            break
+    
+    # Fill any remaining positions randomly but with some spatial awareness
+    while idx < n:
+        # Try to place in a way that avoids immediate collisions
+        attempts = 0
+        placed = False
+        while not placed and attempts < 100:
+            x = np.random.uniform(0.01, rect_width - 0.01)
+            y = np.random.uniform(0.01, rect_height - 0.01)
+            
+            # Check potential collision with existing circles
+            collision = False
+            for i in range(idx):
+                ox, oy, oradius = circles[i]
+                dist = np.sqrt((x - ox)**2 + (y - oy)**2)
+                if dist < oradius + 0.02:  # Loose collision check
+                    collision = True
+                    break
+            
+            if not collision:
+                circles[idx] = [x, y, 0.05]
+                placed = True
+            attempts += 1
+        
+        if not placed:
+            # Final fallback
+            circles[idx] = [
+                np.random.uniform(0.01, rect_width - 0.01),
+                np.random.uniform(0.01, rect_height - 0.01),
+                0.05
+            ]
+        idx += 1
+    
+    # Phase 1: Coarse global optimization
+    tree = cKDTree(circles[:, :2])
+    
+    # Iteratively improve by adjusting radii
+    improvement = True
+    iteration = 0
+    max_iterations = 100
+    
+    while improvement and iteration < max_iterations:
+        improvement = False
+        iteration += 1
+        
+        # Update k-d tree with current positions
+        tree = cKDTree(circles[:, :2])
+        
+        # For each circle, try to increase its radius
+        for i in range(n):
+            # Get neighbors within a reasonable distance
+            neighbors = tree.query_ball_point(circles[i, :2], 0.5)
+            
+            # Create list of neighbor circles (excluding self)
+            neighbor_circles = [circles[j] for j in neighbors if j != i]
+            
+            # Compute maximum radius that respects all constraints
+            max_radius = compute_max_radius(circles[i], neighbor_circles, tree)
+            
+            # Increase radius if beneficial (but keep within reason)
+            if max_radius > circles[i, 2] and max_radius > 0.001:
+                # Adaptive step size based on constraint density
+                # More constrained circles get smaller increments
+                constraint_density = len(neighbor_circles) / 21.0
+                step_size = 0.01 * (1 - constraint_density * 0.8)  # Decrease step size with density
+                step_size = max(0.001, step_size)
+                
+                new_radius = min(max_radius, circles[i, 2] + step_size)
+                
+                if new_radius > circles[i, 2]:
+                    circles[i, 2] = new_radius
+                    improvement = True
+    
+    # Phase 2: Fine-grained local refinement
+    # Create a more refined optimization that goes through all pairs carefully
+    improvement = True
+    iteration = 0
+    max_iterations = 50
+    
+    while improvement and iteration < max_iterations:
+        improvement = False
+        iteration += 1
+        
+        # Update k-d tree
+        tree = cKDTree(circles[:, :2])
+        
+        # Process all circles again
+        for i in range(n):
+            # Find neighbors more precisely
+            neighbors = tree.query_ball_point(circles[i, :2], 0.3)
+            neighbor_circles = [circles[j] for j in neighbors if j != i]
+            
+            # Compute maximum radius
+            max_radius = compute_max_radius(circles[i], neighbor_circles, tree)
+            
+            # Try to increase radius
+            if max_radius > circles[i, 2] and max_radius > 0.001:
+                # Use smaller increments for fine-tuning
+                new_radius = min(max_radius, circles[i, 2] + 0.005)
+                
+                if new_radius > circles[i, 2]:
+                    circles[i, 2] = new_radius
+                    improvement = True
+    
+    # Phase 3: Final constraint verification and minor adjustments
+    # Ensure all circles are within bounds and not overlapping
+    tree = cKDTree(circles[:, :2])
+    
+    # Try one final round of careful optimization
+    for i in range(n):
+        # Find all potentially conflicting circles
+        neighbors = tree.query_ball_point(circles[i, :2], 0.4)
+        neighbor_circles = [circles[j] for j in neighbors if j != i]
+        
+        # Recalculate the maximum possible radius
+        max_radius = compute_max_radius(circles[i], neighbor_circles, tree)
+        
+        # Clamp to ensure validity
+        max_radius = max(0.001, min(max_radius, circles[i, 2] + 0.01))
+        circles[i, 2] = max_radius
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

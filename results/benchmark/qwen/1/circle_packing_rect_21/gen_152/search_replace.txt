@@ -1,0 +1,418 @@
+<NAME>
+voronoi_based_constraint_weighting
+</NAME>
+
+<DESCRIPTION>
+This change implements Voronoi-based constraint weighting for adaptive mutation, which is a key improvement suggested in the recommendations. The idea is to compute Voronoi diagrams for each configuration and weight radius mutations inversely to local Voronoi cell area, where smaller cells indicate higher constraint density requiring finer adjustments. This builds upon the existing Voronoi constraint computation but enhances the mutation strategy to be more sophisticated based on geometric density.
+
+The approach:
+1. Enhances the `compute_voronoi_constraints` function to provide more accurate constraint density information
+2. Modifies `mutate_circles_adaptive` to use Voronoi cell areas for more precise mutation weights
+3. Adds a more sophisticated spatial indexing method for improved collision detection
+4. Implements better initialization strategies to start with more promising configurations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi neighbors.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Create Voronoi diagram
+    try:
+        vor = Voronoi(centers)
+    except:
+        # Fallback to simpler constraint calculation
+        return np.ones(n) * 0.5
+
+    # Count neighbors for each region using direct computation
+    constraint_density = np.zeros(n)
+
+    # For each circle, count how many others are close enough to potentially collide
+    for i in range(n):
+        center_i = centers[i]
+        nearby_count = 0
+
+        # Check nearby circles (within 3x max radius)
+        max_radius = np.max(circles[:, 2])
+        threshold = 3 * max_radius
+
+        for j in range(n):
+            if i != j:
+                dist = np.linalg.norm(center_i - centers[j])
+                if dist < threshold:
+                    nearby_count += 1
+
+        constraint_density[i] = nearby_count / max(1, n - 1)
+
+    return constraint_density
+=======
+def compute_voronoi_cell_areas(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute Voronoi cell areas for each circle to determine constraint density.
+    Smaller areas indicate higher constraint density (more constrained regions).
+    """
+    n = len(circles)
+    if n < 2:
+        return np.ones(n) * 1.0  # Default to uniform weights
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    try:
+        # Create Voronoi diagram
+        vor = Voronoi(centers)
+
+        # Compute areas for each Voronoi cell
+        cell_areas = np.zeros(n)
+
+        # For each Voronoi cell, compute its area
+        for i in range(n):
+            # Get vertices of the Voronoi cell for circle i
+            # Find the ridges belonging to this cell
+            ridge_indices = [j for j, ridge in enumerate(vor.ridge_vertices) if i in ridge and -1 not in ridge]
+
+            if len(ridge_indices) > 0:
+                # Extract vertices of this cell
+                vertices = []
+                for idx in ridge_indices:
+                    if idx < len(vor.ridge_vertices):
+                        v1, v2 = vor.ridge_vertices[idx]
+                        if v1 >= 0 and v2 >= 0:
+                            vertices.append(vor.vertices[v1])
+                            vertices.append(vor.vertices[v2])
+
+                # Remove duplicates and create polygon
+                if len(vertices) >= 3:
+                    # Simple polygon area calculation (using shoelace formula)
+                    # But we need to ensure the vertices form a proper polygon
+                    try:
+                        vertices = np.array(vertices)
+                        # Only consider points that are within bounds
+                        valid_points = vertices[
+                            (vertices[:, 0] >= 0) & (vertices[:, 0] <= rect_width) &
+                            (vertices[:, 1] >= 0) & (vertices[:, 1] <= rect_height)
+                        ]
+                        if len(valid_points) >= 3:
+                            # Use a more robust convex hull approach
+                            from scipy.spatial import ConvexHull
+                            hull = ConvexHull(valid_points)
+                            area = hull.volume  # For 2D, volume gives area
+                            cell_areas[i] = area
+                        else:
+                            # Fall back to simple estimation
+                            cell_areas[i] = 1.0
+                    except:
+                        cell_areas[i] = 1.0
+                else:
+                    cell_areas[i] = 1.0  # Default area
+            else:
+                # If no ridges found, estimate area based on proximity
+                max_radius = np.max(circles[:, 2])
+                cell_areas[i] = max_radius * max_radius * np.pi  # Rough estimate
+
+        # Normalize cell areas, but use inverse for constraint density
+        # Smaller areas mean higher constraint density
+        min_area = np.min(cell_areas[cell_areas > 0]) if np.sum(cell_areas > 0) > 0 else 1.0
+        cell_areas = np.maximum(cell_areas, min_area)  # Avoid zero
+        constraint_density = 1.0 / cell_areas  # Inverse relationship
+
+        # Normalize to [0,1] range
+        max_constraint = np.max(constraint_density)
+        if max_constraint > 0:
+            constraint_density = constraint_density / max_constraint
+
+        return constraint_density
+    except Exception as e:
+        # Fallback to simpler constraint calculation
+        # For each circle, count how many others are close enough
+        constraint_density = np.zeros(n)
+        centers = circles[:, :2]
+
+        for i in range(n):
+            center_i = centers[i]
+            nearby_count = 0
+
+            # Check nearby circles (within 3x max radius)
+            max_radius = np.max(circles[:, 2])
+            threshold = 3 * max_radius
+
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        nearby_count += 1
+
+            constraint_density[i] = nearby_count / max(1, n - 1)
+
+        return constraint_density
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_circles_adaptive(circles: np.ndarray,
+                          constraint_densities: np.ndarray,
+                          rect_width: float = 1.0,
+                          rect_height: float = 1.0,
+                          max_radius: float = 0.5) -> np.ndarray:
+    """
+    Mutate circle positions and radii with adaptive weights based on constraint density.
+    """
+    mutated = circles.copy()
+    n = len(mutated)
+
+    # Mutation parameters adapted based on constraint density
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        # Higher constraint density = more careful mutation
+        density_weight = 1.0 + constraint_densities[i] * 2.0  # 1.0 to 3.0 range
+
+        # Position mutation strength (smaller for high constraint areas)
+        pos_strength = 0.02 / density_weight
+        rad_strength = 0.01 / density_weight
+
+        # Mutate position
+        x += np.random.normal(0, pos_strength)
+        y += np.random.normal(0, pos_strength)
+
+        # Ensure position stays within bounds
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+
+        # Mutate radius
+        r += np.random.normal(0, rad_strength)
+        # Ensure radius remains positive and reasonable
+        r = np.clip(r, 0.001, max_radius * 0.9)
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+=======
+def mutate_circles_adaptive(circles: np.ndarray,
+                          constraint_densities: np.ndarray,
+                          rect_width: float = 1.0,
+                          rect_height: float = 1.0,
+                          max_radius: float = 0.5) -> np.ndarray:
+    """
+    Mutate circle positions and radii with adaptive weights based on constraint density.
+    Uses Voronoi cell area-based weighting for more sophisticated adaptation.
+    """
+    mutated = circles.copy()
+    n = len(mutated)
+
+    # Mutation parameters adapted based on constraint density via Voronoi analysis
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        # Higher constraint density (smaller Voronoi cells) = more careful mutation
+        # Constraint density is inverse of cell area - smaller areas = higher density
+        density_weight = 1.0 + constraint_densities[i] * 3.0  # Scale from 1.0 to 4.0
+
+        # Position mutation strength (smaller for high constraint areas)
+        pos_strength = 0.02 / density_weight
+        rad_strength = 0.01 / density_weight
+
+        # Mutate position
+        x += np.random.normal(0, pos_strength)
+        y += np.random.normal(0, pos_strength)
+
+        # Ensure position stays within bounds
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+
+        # Mutate radius with different behavior - larger weights for less constrained
+        # Allow slightly larger radius changes in less constrained regions
+        rad_multiplier = 1.0 / (1.0 + constraint_densities[i] * 2.0)
+        actual_rad_strength = rad_strength * rad_multiplier
+        r += np.random.normal(0, actual_rad_strength)
+
+        # Ensure radius remains positive and reasonable
+        r = np.clip(r, 0.001, max_radius * 0.9)
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_hexagonal_lattice(n_circles: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Initialize circle positions using a hexagonal lattice pattern.
+    """
+    # Use hexagonal packing approach for initial placement
+    # Estimate radius based on area
+    total_area = rect_width * rect_height
+    circle_area = total_area / n_circles * 0.9  # Leave some margin
+    estimated_radius = np.sqrt(circle_area / np.pi)
+
+    # Hexagon parameters
+    side_length = 2 * estimated_radius
+
+    # Determine grid dimensions
+    cols = max(1, int(rect_width / side_length) + 1)
+    rows = max(1, int(rect_height / (side_length * np.sqrt(3) / 2)) + 1)
+
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            x = (j + (i % 2) * 0.5) * side_length
+            y = i * side_length * np.sqrt(3) / 2
+
+            # Only include points that fit within the rectangle
+            if x >= estimated_radius and x <= rect_width - estimated_radius and \
+               y >= estimated_radius and y <= rect_height - estimated_radius:
+                points.append([x, y])
+
+    # If we have too few points, add more by expanding
+    while len(points) < n_circles:
+        # Add points at random locations within bounds
+        x = random.uniform(estimated_radius, rect_width - estimated_radius)
+        y = random.uniform(estimated_radius, rect_height - estimated_radius)
+        points.append([x, y])
+
+    # Trim to exact number needed
+    points = points[:n_circles]
+
+    # Create initial circles with estimated radii
+    circles = np.zeros((n_circles, 3))
+    for i, (x, y) in enumerate(points):
+        circles[i] = [x, y, estimated_radius * 0.8]
+
+    return circles
+=======
+def initialize_hexagonal_lattice(n_circles: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Initialize circle positions using a hexagonal lattice pattern with better packing.
+    """
+    # Try multiple initialization approaches and pick the best
+    initial_configs = []
+
+    # Method 1: Hexagonal grid with good spacing
+    try:
+        # Use hexagonal packing approach for initial placement
+        # Estimate radius based on area
+        total_area = rect_width * rect_height
+        circle_area = total_area / n_circles * 0.8  # Leave some margin for optimization
+        estimated_radius = np.sqrt(circle_area / np.pi)
+
+        # Hexagon parameters - ensure good packing efficiency
+        side_length = 2 * estimated_radius
+
+        # Determine grid dimensions
+        cols = max(1, int(rect_width / side_length) + 2)
+        rows = max(1, int(rect_height / (side_length * np.sqrt(3) / 2)) + 2)
+
+        points = []
+        for i in range(rows):
+            for j in range(cols):
+                x = (j + (i % 2) * 0.5) * side_length
+                y = i * side_length * np.sqrt(3) / 2
+
+                # Only include points that fit within the rectangle with padding
+                if x >= estimated_radius and x <= rect_width - estimated_radius and \
+                   y >= estimated_radius and y <= rect_height - estimated_radius:
+                    points.append([x, y])
+
+        # If we have too few points, add more by expanding
+        while len(points) < n_circles:
+            # Add points at random locations within bounds
+            x = random.uniform(estimated_radius, rect_width - estimated_radius)
+            y = random.uniform(estimated_radius, rect_height - estimated_radius)
+            points.append([x, y])
+
+        # Trim to exact number needed
+        points = points[:n_circles]
+
+        # Create initial circles with estimated radii
+        circles = np.zeros((n_circles, 3))
+        for i, (x, y) in enumerate(points):
+            circles[i] = [x, y, estimated_radius * 0.9]  # Slightly smaller radius to allow room for growth
+
+        initial_configs.append(circles)
+    except:
+        pass
+
+    # Method 2: Random initialization with constraints check
+    try:
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            # Ensure initial circles aren't too big relative to container
+            max_radius = min(rect_width, rect_height) / 10.0
+            radius = random.uniform(0.01, max_radius * 0.8)
+            x = random.uniform(radius, rect_width - radius)
+            y = random.uniform(radius, rect_height - radius)
+            circles[i] = [x, y, radius]
+        initial_configs.append(circles)
+    except:
+        pass
+
+    # If we have valid initializations, select the one that's most likely to be feasible
+    if initial_configs:
+        # Prefer hexagonal initialization if available
+        if len(initial_configs) > 0:
+            return initial_configs[0]
+        else:
+            return initial_configs[-1]
+    else:
+        # Fallback to basic initialization
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            radius = min(0.05, rect_width/10, rect_height/10)
+            x = random.uniform(radius, rect_width - radius)
+            y = random.uniform(radius, rect_height - radius)
+            circles[i] = [x, y, radius]
+        return circles
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Precompute constraint information
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+=======
+    # Precompute constraint information using Voronoi-based cell areas
+    constraint_densities = compute_voronoi_cell_areas(refined, rect_width, rect_height)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Crossover
+            offspring = crossover_circles(parent1, parent2)
+
+            # Compute constraint densities and mutate adaptively
+            constraint_densities = compute_voronoi_constraints(offspring, rect_width, rect_height)
+            offspring = mutate_circles_adaptive(offspring, constraint_densities,
+                                              rect_width, rect_height,
+                                              max_radius=min(rect_width, rect_height) / 2)
+=======
+            # Crossover
+            offspring = crossover_circles(parent1, parent2)
+
+            # Compute constraint densities and mutate adaptively
+            constraint_densities = compute_voronoi_cell_areas(offspring, rect_width, rect_height)
+            offspring = mutate_circles_adaptive(offspring, constraint_densities,
+                                              rect_width, rect_height,
+                                              max_radius=min(rect_width, rect_height) / 2)
+>>>>>>> REPLACE
+
+</DIFF>

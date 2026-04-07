@@ -1,0 +1,241 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+
+# Precomputed values for efficiency
+SQRT3 = np.sqrt(3)
+HEX_HEIGHT = SQRT3 / 2
+HEX_WIDTH = 1.0
+HEX_RADIUS = 1.0  # Distance from center to corner for unit hexagon
+INNER_HEX_VERTICES = np.array([
+    [1.0, 0.0],
+    [0.5, HEX_HEIGHT],
+    [-0.5, HEX_HEIGHT],
+    [-1.0, 0.0],
+    [-0.5, -HEX_HEIGHT],
+    [0.5, -HEX_HEIGHT]
+])
+
+def get_hexagon_vertices(center_x, center_y, angle_deg, scale=1.0):
+    """Get vertices of a regular hexagon given center, angle, and scale."""
+    angle_rad = np.radians(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    
+    # Rotate and translate vertices
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        x, y = INNER_HEX_VERTICES[i] * scale
+        vertices[i] = [
+            center_x + x * cos_a - y * sin_a,
+            center_y + x * sin_a + y * cos_a
+        ]
+    return vertices
+
+@jit(nopython=True)
+def point_in_hexagon(px, py, hex_center_x, hex_center_y, hex_angle, hex_radius):
+    """Fast check if point is inside a hexagon using Numba."""
+    # Convert to hexagon coordinate system
+    dx = px - hex_center_x
+    dy = py - hex_center_y
+    
+    # Rotate point to hexagon reference frame
+    angle_rad = np.radians(hex_angle)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    rx = dx * cos_a + dy * sin_a
+    ry = -dx * sin_a + dy * cos_a
+    
+    # Check if point is within hexagon bounds
+    # Hexagon has radius = hex_radius, so check against scaled boundaries
+    abs_rx = abs(rx)
+    abs_ry = abs(ry)
+    
+    # In a regular hexagon with circumradius r, the bounds are:
+    # |x| <= r and |y| <= sqrt(3)/2 * r
+    # But also, we need to check that it doesn't exceed the "flat" sides
+    # Max distance in x-direction is r, in y-direction is sqrt(3)/2 * r
+    if abs_rx > hex_radius:
+        return False
+    if abs_ry > hex_radius * SQRT3 / 2:
+        return False
+    
+    # Additional check for slanted edges of hexagon
+    # Using the fact that max width is 2*r and height is sqrt(3)*r
+    # Check using the line equations of the sides
+    max_y = hex_radius * SQRT3 / 2
+    if abs_ry > max_y:
+        return False
+    
+    # More precise check: distance to nearest edge
+    # For simplicity, use the bounding box approximation for speed
+    return True
+
+def check_containment(hex_vertices, outer_hex_vertices):
+    """Check if all vertices of inner hexagon are inside outer hexagon using shapely."""
+    inner_poly = Polygon(hex_vertices)
+    outer_poly = Polygon(outer_hex_vertices)
+    return outer_poly.contains(inner_poly)
+
+def check_overlaps(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def compute_outer_hex_side_length(inner_hex_data, outer_hex_data):
+    """Compute the minimum side length needed for outer hexagon to contain all inner hexagons."""
+    # Get outer hexagon vertices for containment checking
+    outer_center_x, outer_center_y, outer_angle = outer_hex_data
+    outer_vertices = get_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, HEX_RADIUS)
+    
+    # Find the maximum distance from center to any vertex of any inner hexagon
+    max_radius = 0.0
+    
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = get_hexagon_vertices(cx, cy, angle, HEX_RADIUS)
+        
+        # Check containment
+        if not check_containment(vertices, outer_vertices):
+            return None
+        
+        # Update max radius
+        for vx, vy in vertices:
+            dist_sq = (vx - outer_center_x)**2 + (vy - outer_center_y)**2
+            max_radius = max(max_radius, np.sqrt(dist_sq))
+    
+    # The side length of outer hexagon should be at least max_radius
+    # For a regular hexagon with circumradius R, side length = R
+    return max_radius
+
+def evaluate_solution(params):
+    """Evaluate a candidate solution and return negative inverse side length."""
+    # Reshape parameters into 11 hexagons with (x, y, angle) each
+    inner_positions_angles = params.reshape(-1, 3)
+    
+    # Set up initial outer hexagon at origin
+    outer_center_x, outer_center_y, outer_angle = 0.0, 0.0, 0.0
+    outer_hex_data = np.array([outer_center_x, outer_center_y, outer_angle])
+    
+    # Calculate outer hexagon side length necessary to contain all
+    try:
+        side_length = compute_outer_hex_side_length(inner_positions_angles, outer_hex_data)
+        if side_length is None:
+            # Invalid configuration - penalize heavily
+            return 1e10
+            
+        # We want to maximize 1/side_length, so we minimize -1/side_length
+        # However, we're going to return the inverse side length directly,
+        # which we want to maximize, so we'll just return -1/side_length
+        # to satisfy scipy's minimization convention, but the final value
+        # we care about is 1/side_length
+        return -1.0 / side_length
+    except Exception:
+        return 1e10  # Penalty for invalid configurations
+
+def validate_solution(inner_hex_data, outer_hex_data):
+    """Validate that all constraints are met."""
+    outer_center_x, outer_center_y, outer_angle = outer_hex_data
+    outer_vertices = get_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, HEX_RADIUS)
+    
+    # Check containment and overlaps
+    n = len(inner_hex_data)
+    
+    # Check containment of all hexagons
+    for i in range(n):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = get_hexagon_vertices(cx, cy, angle, HEX_RADIUS)
+        if not check_containment(vertices, outer_vertices):
+            return False
+
+    # Check overlaps between all pairs of hexagons
+    for i in range(n):
+        for j in range(i+1, n):
+            cx1, cy1, angle1 = inner_hex_data[i]
+            cx2, cy2, angle2 = inner_hex_data[j]
+            
+            vertices1 = get_hexagon_vertices(cx1, cy1, angle1, HEX_RADIUS)
+            vertices2 = get_hexagon_vertices(cx2, cy2, angle2, HEX_RADIUS)
+            
+            if check_overlaps(vertices1, vertices2):
+                return False
+                
+    return True
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    # Initial guess: compact hexagonal arrangement
+    # Start with central hexagon, then place others in a hexagonal pattern
+    initial_guess = np.array([
+        [0.0, 0.0, 0.0],       # center hexagon
+        [2.0, 0.0, 0.0],       # right
+        [-2.0, 0.0, 0.0],      # left
+        [1.0, 1.732, 0.0],     # upper right
+        [-1.0, 1.732, 0.0],    # upper left
+        [1.0, -1.732, 0.0],    # lower right
+        [-1.0, -1.732, 0.0],   # lower left
+        [3.0, 1.732, 0.0],     # upper far right
+        [-3.0, 1.732, 0.0],    # upper far left
+        [3.0, -1.732, 0.0],    # lower far right
+        [-3.0, -1.732, 0.0],   # lower far left
+    ])
+    
+    # Flatten to 1D array for optimization
+    initial_flat = initial_guess.flatten()
+    
+    # Define bounds for (x, y, angle) for each of the 11 hexagons
+    bounds = []
+    for _ in range(11):
+        bounds.extend([(-10.0, 10.0), (-10.0, 10.0), (-180.0, 180.0)])
+    
+    # Optimization using differential evolution - good for global search
+    start_time = time.time()
+    
+    result = differential_evolution(
+        func=evaluate_solution,
+        bounds=bounds,
+        strategy='best1bin',
+        maxiter=500,
+        popsize=15,
+        tol=1e-6,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42,
+        callback=None,
+        disp=False,
+        polish=True
+    )
+    
+    end_time = time.time()
+    
+    # Extract best solution
+    best_params = result.x
+    inner_positions_angles = best_params.reshape(-1, 3)
+    
+    # Final validation
+    if not validate_solution(inner_positions_angles, [0.0, 0.0, 0.0]):
+        # If validation fails, return initial guess
+        inner_positions_angles = initial_guess.copy()
+    
+    # Compute final side length
+    side_length = compute_outer_hex_side_length(inner_positions_angles, [0.0, 0.0, 0.0])
+    
+    # Return final data
+    outer_hex_data = np.array([0.0, 0.0, 0.0])
+    
+    return inner_positions_angles, outer_hex_data, side_length
+
+# EVOLVE-BLOCK-END

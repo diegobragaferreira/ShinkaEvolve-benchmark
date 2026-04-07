@@ -1,0 +1,165 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from numba import jit
+import time
+
+@jit(nopython=True)
+def compute_autoconvolution_jit(f_vals, step_width):
+    """
+    Compute autoconvolution using numba for speed
+    """
+    n = len(f_vals)
+    # Autoconvolution size is 2*n - 1
+    g_size = 2 * n - 1
+    g_vals = np.zeros(g_size)
+    
+    # Compute convolution directly
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_size:
+                g_vals[idx] += f_vals[i] * f_vals[j]
+    
+    return g_vals
+
+@jit(nopython=True)
+def compute_norms_jit(g_vals):
+    """
+    Compute norms efficiently with numba
+    """
+    n = len(g_vals)
+    
+    # Compute L1 norm (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+    
+    # Compute L2 norm squared
+    l2_norm_sq = 0.0
+    for i in range(n):
+        l2_norm_sq += g_vals[i] * g_vals[i]
+    
+    # Compute infinity norm
+    linf_norm = 0.0
+    for i in range(n):
+        val = abs(g_vals[i])
+        if val > linf_norm:
+            linf_norm = val
+    
+    return l1_norm, l2_norm_sq, linf_norm
+
+def compute_c2(f_vals):
+    """
+    Compute C2 value for given step function
+    """
+    if not f_vals or len(f_vals) == 0:
+        return 0.0
+    
+    # Ensure non-negative values
+    f_vals = np.array([max(0.0, x) for x in f_vals])
+    
+    # Step width for convolution (assuming interval [-1/4, 1/4])
+    step_width = 0.5 / len(f_vals)
+    
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_jit(f_vals, step_width)
+    
+    # Compute norms
+    l1_norm, l2_norm_sq, linf_norm = compute_norms_jit(g_vals)
+    
+    # Handle edge case where norms are zero
+    if l1_norm == 0 or linf_norm == 0:
+        return 0.0
+    
+    # Compute C2
+    c2 = l2_norm_sq / (l1_norm * linf_norm)
+    return c2
+
+def objective_function(params):
+    """
+    Objective function to minimize (negative C2 to maximize it)
+    """
+    # Convert params to step heights
+    f_vals = np.array(params)
+    
+    # Ensure non-negative
+    f_vals = np.maximum(0.0, f_vals)
+    
+    # Compute C2 (we negate because we're minimizing)
+    try:
+        c2 = compute_c2(f_vals)
+        return -c2  # Negative because we want to maximize C2
+    except:
+        return 1e10  # Large penalty for invalid results
+
+def construct_function() -> list[float]:
+    """
+    Function to construct step-function with high C2 value.
+    Uses adaptive evolutionary optimization approach.
+    """
+    np.random.seed(42)  # For reproducibility
+    
+    best_c2 = -np.inf
+    best_solution = None
+    
+    # Try multiple random initializations with different parameters
+    for attempt in range(10):  # Reduced attempts for time efficiency
+        # Randomly determine number of steps within reasonable range
+        n_steps = np.random.randint(100, 1000)
+        
+        # Initialize with random values
+        initial_guess = np.random.uniform(0, 1, n_steps)
+        
+        # Use differential evolution for optimization
+        try:
+            # Set bounds for each variable (0 to 10 for safety)
+            bounds = [(0, 10) for _ in range(n_steps)]
+            
+            # Run differential evolution
+            result = differential_evolution(
+                objective_function,
+                bounds,
+                maxiter=50,  # Reduced iterations for time constraints
+                popsize=15,  # Population size
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=42 + attempt,
+                disp=False
+            )
+            
+            if result.success:
+                # Check if this is better than our current best
+                current_c2 = -result.fun
+                if current_c2 > best_c2:
+                    best_c2 = current_c2
+                    best_solution = result.x.copy()
+                    
+        except Exception as e:
+            continue  # Skip failed optimization attempts
+            
+        # Early stopping if we're getting good results
+        if best_c2 > 0.95:
+            break
+    
+    # If no good solution found, use a simple heuristic
+    if best_solution is None:
+        # Return a simple pattern that might work well
+        n_steps = 500
+        best_solution = np.ones(n_steps) * 0.5  # Flat distribution
+    
+    # Final validation and cleanup
+    final_solution = np.maximum(0.0, best_solution)
+    
+    # Normalize for better numerical behavior
+    if np.sum(final_solution) > 0:
+        final_solution = final_solution / np.sum(final_solution) * 10
+        
+    return final_solution.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

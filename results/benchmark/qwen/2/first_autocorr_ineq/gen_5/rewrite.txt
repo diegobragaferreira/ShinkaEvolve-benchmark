@@ -1,0 +1,142 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import nevergrad as ng
+from scipy import signal
+from scipy.fft import fft, ifft
+import random
+import time
+
+def compute_convolution_fft(seq):
+    """Compute the autoconvolution using FFT for efficiency."""
+    n = len(seq)
+    padded_seq = np.pad(seq, (0, n-1), mode='constant')
+    conv_result = ifft(fft(padded_seq) * np.conj(fft(padded_seq)))
+    return np.real(conv_result[:n])
+
+def calculate_c1(sequence):
+    """Calculate the C1 constant for a given sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+    
+    sequence = np.array(sequence)
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('inf')
+    
+    conv = compute_convolution_fft(sequence)
+    max_b = np.max(conv)
+    n = len(sequence)
+    
+    # Avoid division by zero or very small numbers
+    if max_b <= 1e-12:
+        return float('inf')
+        
+    c1 = (2 * n * max_b) / (sum_a ** 2)
+    return c1
+
+def evaluate_fitness(sequence):
+    """Evaluate the inverse of C1 as fitness (we want to maximize 1/C1)."""
+    c1 = calculate_c1(sequence)
+    if c1 == float('inf'):
+        return 0.0  # Penalty for invalid sequences
+    return 1.0 / c1
+
+def mutate_sequence(sequence, mutation_rate=0.1):
+    """Apply mutation to a sequence."""
+    new_sequence = sequence.copy()
+    for i in range(len(new_sequence)):
+        if random.random() < mutation_rate:
+            # Slightly perturb the value
+            delta = random.uniform(-0.1, 0.1)
+            new_sequence[i] = max(0.0, new_sequence[i] + delta)
+    return new_sequence
+
+def crossover_sequences(seq1, seq2):
+    """Perform crossover between two sequences."""
+    if len(seq1) != len(seq2):
+        # Adjust lengths by padding or truncating
+        min_len = min(len(seq1), len(seq2))
+        seq1 = seq1[:min_len]
+        seq2 = seq2[:min_len]
+    
+    point = random.randint(1, len(seq1)-1)
+    new_seq = seq1[:point] + seq2[point:]
+    return new_seq
+
+def generate_initial_population(pop_size, min_length, max_length):
+    """Generate an initial population of sequences."""
+    population = []
+    for _ in range(pop_size):
+        length = random.randint(min_length, max_length)
+        sequence = [random.uniform(0, 1000) for _ in range(length)]
+        population.append(sequence)
+    return population
+
+def evolutionary_search(max_time_seconds=170):
+    """Run evolutionary search to find the best sequence."""
+    start_time = time.time()
+    
+    # Parameters
+    pop_size = 20
+    min_length = 10
+    max_length = 1000
+    generations = 1000
+    
+    # Generate initial population
+    population = generate_initial_population(pop_size, min_length, max_length)
+    
+    # Evaluate initial population
+    fitness_scores = [evaluate_fitness(seq) for seq in population]
+    
+    best_sequence = population[np.argmax(fitness_scores)]
+    best_fitness = max(fitness_scores)
+    
+    # Start evolutionary process
+    for gen in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+            
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        top_half = [population[i] for i in sorted_indices[:pop_size//2]]
+        
+        # Create new population through crossover and mutation
+        new_population = []
+        for i in range(pop_size):
+            parent1 = random.choice(top_half)
+            parent2 = random.choice(top_half)
+            
+            child = crossover_sequences(parent1, parent2)
+            child = mutate_sequence(child)
+            new_population.append(child)
+            
+        # Replace old population with new one
+        population = new_population
+        
+        # Evaluate new population
+        fitness_scores = [evaluate_fitness(seq) for seq in population]
+        
+        # Update best solution
+        current_best_idx = np.argmax(fitness_scores)
+        if fitness_scores[current_best_idx] > best_fitness:
+            best_fitness = fitness_scores[current_best_idx]
+            best_sequence = population[current_best_idx]
+    
+    return best_sequence
+
+def search_for_best_sequence():
+    """Main function to search for the best coefficient sequence."""
+    try:
+        # Run evolutionary search
+        sequence = evolutionary_search()
+        return sequence
+    except Exception as e:
+        print(f"Error during search: {e}")
+        # Fallback to a simple random sequence
+        return [random.uniform(0.1, 1000) for _ in range(100)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

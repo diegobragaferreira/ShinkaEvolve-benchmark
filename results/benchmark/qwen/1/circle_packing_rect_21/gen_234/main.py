@@ -1,0 +1,345 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import random
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Rectangle dimensions (width + height = 2)
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Number of circles
+    n = 21
+
+    def compute_voronoi_criticality(circles, width, height):
+        """Compute criticality based on Voronoi cell areas and boundary distances"""
+        n_circles = len(circles)
+        criticality = np.zeros(n_circles)
+        
+        # Add boundary points for Voronoi computation
+        boundary_points = [
+            [0, 0], [width, 0], [0, height], [width, height],
+            [width/2, 0], [width/2, height],
+            [0, height/2], [width, height/2]
+        ]
+        
+        # Extend circle positions with boundary points
+        extended_points = np.vstack([circles[:, :2], boundary_points])
+        
+        try:
+            vor = Voronoi(extended_points)
+            
+            # For each original circle, compute Voronoi cell metrics
+            for i in range(n_circles):
+                region_idx = vor.point_region[i]
+                if region_idx != -1 and region_idx < len(vor.regions):
+                    region = vor.regions[region_idx]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute Voronoi cell area (inverse of constraint density)
+                        try:
+                            vertices = np.array([vor.vertices[j] for j in region if j < len(vor.vertices)])
+                            if len(vertices) >= 3:
+                                x = vertices[:, 0]
+                                y = vertices[:, 1]
+                                area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                                # Inverse relationship: smaller area = more constrained
+                                area_score = 1.0 / (area + 0.001) 
+                            else:
+                                area_score = 1.0
+                        except:
+                            area_score = 1.0
+                    else:
+                        area_score = 1.0
+                else:
+                    area_score = 1.0
+                
+                # Add boundary constraint component
+                x, y, r = circles[i]
+                boundary_dist = min(x, y, width - x, height - y)
+                boundary_score = 1.0 / (boundary_dist + 0.001) if boundary_dist < 0.1 else 0.1
+                
+                # Combine scores
+                criticality[i] = area_score + boundary_score
+                
+        except:
+            # Fallback to simple distance-based criticality
+            coords = circles[:, :2]
+            for i in range(n_circles):
+                distances = np.sqrt(np.sum((coords - coords[i])**2, axis=1))
+                distances[i] = float('inf')  # Exclude self
+                min_dist = np.min(distances)
+                # Inverse relationship with distance
+                criticality[i] = 1.0 / (min_dist + 0.001)
+        
+        return criticality
+
+    def compute_forces(circles, width, height):
+        """Compute net forces on each circle based on Voronoi and constraint geometry"""
+        n_circles = len(circles)
+        forces = np.zeros((n_circles, 2))
+        
+        # Get Voronoi-based criticality
+        criticality = compute_voronoi_criticality(circles, width, height)
+        
+        # Normalize criticality for force scaling
+        if np.max(criticality) > 0:
+            normalized_criticality = criticality / np.max(criticality)
+        else:
+            normalized_criticality = np.ones(n_circles)
+        
+        # Compute pairwise forces
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Vectorized distance computation
+        diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
+        distances = np.sqrt(np.sum(diff**2, axis=2))
+        
+        # Create overlap mask
+        overlap_matrix = distances < (radii[:, np.newaxis] + radii[np.newaxis, :])
+        np.fill_diagonal(overlap_matrix, False)
+        
+        # Compute repulsion forces for overlapping circles
+        overlap_mask = np.triu(overlap_matrix, k=1)
+        if np.any(overlap_mask):
+            # Forces between overlapping circles
+            overlap_pairs = np.where(overlap_mask)
+            for i, j in zip(overlap_pairs[0], overlap_pairs[1]):
+                dx = diff[i, j, 0]
+                dy = diff[i, j, 1]
+                dist = distances[i, j] + 0.0001  # Avoid division by zero
+                
+                # Repulsion force magnitude (stronger when more overlapping)
+                overlap_amount = (radii[i] + radii[j] - dist) / (radii[i] + radii[j] + 0.0001)
+                force_mag = 100.0 * overlap_amount / dist
+                
+                # Apply force
+                fx = force_mag * dx / dist
+                fy = force_mag * dy / dist
+                
+                # Scale by criticality
+                forces[i] += np.array([fx, fy]) * normalized_criticality[i]
+                forces[j] -= np.array([fx, fy]) * normalized_criticality[j]
+        
+        # Weak attraction forces to encourage spreading
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                if not overlap_matrix[i, j]:
+                    dx = diff[i, j, 0]
+                    dy = diff[i, j, 1]
+                    dist = distances[i, j] + 0.0001
+                    
+                    # Attraction when far apart
+                    if dist > 1.5 * (radii[i] + radii[j]):
+                        force_mag = 0.01 / (dist * dist)
+                        fx = force_mag * dx / dist
+                        fy = force_mag * dy / dist
+                        forces[i] += np.array([fx, fy]) * normalized_criticality[i]
+                        forces[j] -= np.array([fx, fy]) * normalized_criticality[j]
+        
+        # Boundary forces
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            boundary_force = 5.0 * normalized_criticality[i]
+            
+            # Left boundary
+            if x < r:
+                forces[i][0] += boundary_force * (r - x)
+            # Right boundary  
+            if x > width - r:
+                forces[i][0] -= boundary_force * (x - (width - r))
+            # Bottom boundary
+            if y < r:
+                forces[i][1] += boundary_force * (r - y)
+            # Top boundary
+            if y > height - r:
+                forces[i][1] -= boundary_force * (y - (height - r))
+        
+        return forces
+
+    def generate_initial_pattern():
+        """Generate initial pattern using hexagonal packing with small randomness"""
+        circles = np.zeros((n, 3))
+        
+        # Hexagonal packing parameters
+        rows = int(np.sqrt(n)) + 1
+        cols = int(np.ceil(n / rows))
+        
+        # Calculate spacing
+        max_radius = 0.08
+        margin = 0.05
+        x_spacing = max_radius * 2.5
+        y_spacing = max_radius * 2.165  # sqrt(3)/2 * 2
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = margin + j * x_spacing + np.random.uniform(-0.01, 0.01)
+                y = margin + i * y_spacing + np.random.uniform(-0.01, 0.01)
+                
+                if i % 2 == 1:
+                    x += x_spacing / 2 + np.random.uniform(-0.01, 0.01)
+                
+                # Adjust for bounds
+                x = max(max_radius, min(rect_width - max_radius, x))
+                y = max(max_radius, min(rect_height - max_radius, y))
+                
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+                
+        return circles
+
+    def is_valid_solution(circles, width, height):
+        """Check if solution is valid"""
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                return False
+        
+        # Check overlap constraints - vectorized
+        if len(circles) > 1:
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            distances = cdist(coords, coords)
+            # Create mask for upper triangle (avoid double counting)
+            mask = np.triu(np.ones_like(distances, dtype=bool), k=1)
+            # Check overlaps
+            overlap_distances = distances[mask]
+            overlap_radii = (radii[:, None] + radii[None, :])[mask]
+            if np.any(overlap_distances < overlap_radii):
+                return False
+        
+        return True
+
+    def adaptive_update(circles, width, height, iterations=100):
+        """Adaptive gradient descent with Voronoi-based guidance"""
+        current = circles.copy()
+        best_solution = current.copy()
+        best_score = np.sum(current[:, 2])
+        
+        # Adaptive step sizes
+        decay_rate = 0.98
+        initial_step_size = 0.05
+        
+        for iter_num in range(iterations):
+            # Reduce step size over time
+            step_size = initial_step_size * (decay_rate ** iter_num)
+            
+            # Get forces
+            forces = compute_forces(current, width, height)
+            
+            # Update positions with adaptive damping
+            damping = 0.5 + 0.5 * (1.0 - iter_num / iterations)  # Less damping later
+            
+            for i in range(len(current)):
+                x, y, r = current[i]
+                
+                # Apply force to position
+                new_x = x + forces[i][0] * step_size * damping
+                new_y = y + forces[i][1] * step_size * damping
+                
+                # Keep within bounds
+                new_x = np.clip(new_x, r, width - r)
+                new_y = np.clip(new_y, r, height - r)
+                
+                current[i] = [new_x, new_y, r]
+            
+            # Occasionally perform radius optimization
+            if iter_num % 5 == 0:
+                # Greedy radius optimization
+                for i in range(len(current)):
+                    x, y, r = current[i]
+                    old_radius = r
+                    
+                    # Compute safe maximum radius
+                    safe_radius = min(x, y, width - x, height - y)
+                    
+                    # Try to increase radius safely
+                    for dr in [0.005, 0.002, 0.001]:
+                        new_r = min(safe_radius, r + dr)
+                        if new_r > r:
+                            # Check if this is still valid
+                            valid = True
+                            coords = current[:, :2]
+                            radii = current[:, 2]
+                            for j in range(len(current)):
+                                if i != j:
+                                    dist = np.sqrt((x - coords[j, 0])**2 + (y - coords[j, 1])**2)
+                                    if dist < (new_r + radii[j]):
+                                        valid = False
+                                        break
+                            
+                            if valid and new_r > r:
+                                current[i] = [x, y, new_r]
+                                break
+            
+            # Update best solution
+            current_score = np.sum(current[:, 2])
+            if current_score > best_score:
+                best_score = current_score
+                best_solution = current.copy()
+        
+        return best_solution
+
+    def local_refinement(circles, width, height, refinements=3):
+        """Multiple rounds of local refinement"""
+        current = circles.copy()
+        
+        for i in range(refinements):
+            # Coarse optimization
+            current = adaptive_update(current, width, height, iterations=50)
+            
+            # Medium optimization
+            current = adaptive_update(current, width, height, iterations=75)
+            
+            # Fine optimization
+            current = adaptive_update(current, width, height, iterations=100)
+            
+            # Check validity and fix if necessary
+            if not is_valid_solution(current, width, height):
+                # Fallback to hexagonal pattern for invalid solutions
+                current = generate_initial_pattern()
+                current = adaptive_update(current, width, height, iterations=100)
+                
+        return current
+
+    # Generate initial configuration
+    initial_circles = generate_initial_pattern()
+    
+    # Multi-stage optimization
+    optimized_circles = local_refinement(initial_circles, rect_width, rect_height, refinements=2)
+    
+    # Final validation and refinement
+    if not is_valid_solution(optimized_circles, rect_width, rect_height):
+        # Use fallback pattern
+        optimized_circles = generate_initial_pattern()
+        optimized_circles = adaptive_update(optimized_circles, rect_width, rect_height, iterations=150)
+    
+    # Final polishing
+    optimized_circles = local_refinement(optimized_circles, rect_width, rect_height, refinements=1)
+    
+    return optimized_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

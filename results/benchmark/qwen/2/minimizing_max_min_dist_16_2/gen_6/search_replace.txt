@@ -1,0 +1,247 @@
+<NAME>
+improved_point_arrangement
+</NAME>
+
+<DESCRIPTION>
+The main issue with the current implementation is that it's using a complex optimization approach that's computationally expensive and not very effective at finding good solutions. The suggested improvement replaces the complex optimization with a more direct approach based on known optimal configurations for point distributions, specifically using a hexagonal lattice arrangement which is known to provide good point dispersion. This approach leverages mathematical knowledge about optimal point arrangements rather than relying on black-box optimization.
+
+Key improvements:
+1. Use a hexagonal lattice arrangement which provides better initial configuration
+2. Apply geometric constraints properly to maintain points within [0,1]²
+3. Simplify the optimization to just fine-tuning the positions rather than full optimization
+4. Add proper handling of edge cases and numerical stability
+5. Remove unnecessary complexity while maintaining reproducibility
+
+This approach should significantly improve performance and quality compared to the previous grid-based optimization approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+import itertools
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into 16 points
+        points = x.reshape(-1, 2)
+        # Calculate pairwise distances
+        distances = pdist(points)
+        # Minimize negative of min/max ratio (equivalent to maximizing min/max ratio)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0  # Avoid division by zero
+        return -min_dist / max_dist
+
+    def constraint_func(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        return np.concatenate([points.flatten() - 1, -points.flatten()])
+
+    # Start with a structured grid initialization
+    # Create a 4x4 grid pattern within [0,1] x [0,1]
+    grid_points = []
+    for i in range(4):
+        for j in range(4):
+            grid_points.append([(i+0.5)/4, (j+0.5)/4])
+
+    initial_points = np.array(grid_points)
+
+    # Add small random perturbations to avoid degenerate cases
+    np.random.seed(42)
+    initial_points += np.random.normal(0, 0.01, initial_points.shape)
+
+    # Clip points to valid range
+    initial_points = np.clip(initial_points, 0, 1)
+
+    # Flatten for optimization
+    x0 = initial_points.flatten()
+
+    # Define bounds for each coordinate (between 0 and 1)
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Define constraints for boundary
+    cons = [{'type': 'ineq', 'fun': lambda x: 1 - x[::2]},  # x <= 1
+            {'type': 'ineq', 'fun': lambda x: x[::2]},     # x >= 0
+            {'type': 'ineq', 'fun': lambda x: 1 - x[1::2]}, # y <= 1
+            {'type': 'ineq', 'fun': lambda x: x[1::2]}]    # y >= 0
+
+    # Try multiple local optimizations from different starting points
+    best_ratio = -np.inf
+    best_points = None
+
+    # Grid search over 5x5 uniform grid for better starting points
+    test_grid = np.linspace(0.05, 0.95, 5)
+    for i in range(5):
+        for j in range(5):
+            # Create a perturbed version of the grid point
+            base_x = test_grid[i]
+            base_y = test_grid[j]
+
+            # Create a random perturbation around this grid point
+            perturbation = np.random.normal(0, 0.05, (16, 2))
+            perturbed_points = np.array([[base_x, base_y]] * 16) + perturbation
+            perturbed_points = np.clip(perturbed_points, 0, 1)
+            x_start = perturbed_points.flatten()
+
+            try:
+                result = minimize(objective, x_start, method='SLSQP', bounds=bounds,
+                                constraints=cons, options={'maxiter': 100})
+                if result.success:
+                    # Calculate the actual ratio
+                    final_points = result.x.reshape(-1, 2)
+                    distances = pdist(final_points)
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+                    if max_dist > 0:
+                        ratio = min_dist / max_dist
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = final_points.copy()
+            except:
+                continue
+
+    # Final optimization with the best starting point
+    if best_points is not None:
+        x_final = best_points.flatten()
+        try:
+            result = minimize(objective, x_final, method='SLSQP', bounds=bounds,
+                            constraints=cons, options={'maxiter': 200})
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                distances = pdist(final_points)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist > 0 and min_dist / max_dist > best_ratio:
+                    best_points = final_points
+
+        except:
+            pass
+
+    # Return the best solution found
+    if best_points is None:
+        # Fallback to the grid initialization if nothing worked
+        best_points = initial_points
+
+    return best_points
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses hexagonal lattice arrangement optimized for point dispersion.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Known optimal configuration for 16 points in a square - hexagonal lattice arrangement
+    # Arrange points in a 4x4 hexagonal pattern scaled to fit in [0,1]x[0,1]
+
+    # Create a hexagonal lattice with appropriate spacing
+    # For 16 points, we can arrange them in 4 rows of 4 points each in a hexagonal pattern
+
+    # Hexagonal lattice parameters
+    rows = 4
+    cols = 4
+
+    # Calculate spacing to fill unit square effectively
+    spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+    spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
+
+    # Adjust spacing to get good dispersion
+    # Using golden ratio-inspired approach for better distribution
+    points = []
+
+    # Create hexagonal pattern
+    for i in range(rows):
+        for j in range(cols):
+            # Offset every other row for hexagonal packing
+            x = j * spacing_x
+            y = i * spacing_y
+
+            # Apply slight offset to create hexagonal structure
+            if i % 2 == 1:
+                x += spacing_x * 0.5
+
+            points.append([x, y])
+
+    # Convert to numpy array and adjust to fit within [0,1]x[0,1]
+    points = np.array(points)
+
+    # Normalize to unit square
+    # Find bounding box and scale appropriately
+    x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
+    y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
+
+    if x_max > x_min:
+        points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
+    if y_max > y_min:
+        points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
+
+    # Scale to fit nicely in [0,1]x[0,1] with some margin
+    points = np.clip(points, 0, 1)
+
+    # Fine-tune positions using simple gradient ascent approach
+    # This is a much simpler but effective way to improve the configuration
+    np.random.seed(42)
+
+    # Perform a few iterations of local optimization
+    for _ in range(100):
+        # Calculate distances
+        distances = []
+        for i in range(16):
+            for j in range(i+1, 16):
+                dist = np.sqrt((points[i, 0] - points[j, 0])**2 + (points[i, 1] - points[j, 1])**2)
+                distances.append(dist)
+
+        if len(distances) > 0:
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+
+            if max_dist > 0:
+                # Simple heuristic: move points away from each other
+                step_size = 0.001
+                for i in range(16):
+                    # Compute forces from nearby points
+                    force_x, force_y = 0.0, 0.0
+                    for j in range(16):
+                        if i != j:
+                            dx = points[i, 0] - points[j, 0]
+                            dy = points[i, 1] - points[j, 1]
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            if dist > 0:
+                                # Repulsive force
+                                force_x += dx / (dist * dist + 0.001)
+                                force_y += dy / (dist * dist + 0.001)
+
+                    # Move point
+                    points[i, 0] += step_size * force_x
+                    points[i, 1] += step_size * force_y
+
+                    # Keep within bounds
+                    points[i, 0] = np.clip(points[i, 0], 0, 1)
+                    points[i, 1] = np.clip(points[i, 1], 0, 1)
+
+    # Ensure we're returning a clean array
+    points = np.array(points)
+
+    return points
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

@@ -1,0 +1,219 @@
+<NAME>
+circle_packing_evolutionary
+</NAME>
+
+<DESCRIPTION>
+I'll create a more efficient evolutionary approach for circle packing that directly addresses the specific requirements. I'll use a hybrid method combining global optimization with local refinement to maximize the sum of radii while maintaining constraints.
+
+Key improvements:
+1. Use a smarter initialization strategy with better distribution of circles
+2. Implement proper constraint handling
+3. Add local optimization to refine solutions
+4. Use efficient collision detection
+5. Optimize the evolutionary algorithm parameters for faster convergence
+
+This approach should significantly outperform the baseline and beat the benchmark.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+import time
+
+# Constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = RECT_PERIMETER / 2.0  # Assuming square for simplicity
+RECT_HEIGHT = RECT_PERIMETER / 2.0
+NUM_CIRCLES = 21
+
+def validate_configuration(circles: np.ndarray) -> bool:
+    """Validate that all circles fit within the rectangle and don't overlap."""
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # Check boundary constraints
+        if x - r < 0 or x + r > RECT_WIDTH or y - r < 0 or y + r > RECT_HEIGHT:
+            return False
+
+    # Check pairwise overlaps
+    positions = circles[:, :2]
+    radii = circles[:, 2]
+    distances = cdist(positions, positions)
+
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            distance = distances[i, j]
+            min_distance = radii[i] + radii[j]
+            if distance < min_distance:
+                return False
+
+    return True
+
+def calculate_total_radius(circles: np.ndarray) -> float:
+    """Calculate sum of all circle radii."""
+    return np.sum(circles[:, 2])
+
+def initialize_circles() -> np.ndarray:
+    """Initialize circles with a good starting configuration."""
+    circles = np.zeros((NUM_CIRCLES, 3))
+
+    # Try a hexagonal packing pattern for good initial distribution
+    rows = 5
+    cols = 5
+    if NUM_CIRCLES < rows * cols:
+        rows = (NUM_CIRCLES + 2) // 3
+        cols = (NUM_CIRCLES + rows - 1) // rows
+
+    # Calculate spacing to fit within rectangle
+    spacing_x = RECT_WIDTH / (cols + 1)
+    spacing_y = RECT_HEIGHT / (rows + 1)
+
+    # Distribute circles in a grid pattern with slight randomness
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= NUM_CIRCLES:
+                break
+            x = spacing_x * (j + 1) + np.random.uniform(-spacing_x/4, spacing_x/4)
+            y = spacing_y * (i + 1) + np.random.uniform(-spacing_y/4, spacing_y/4)
+            # Initial radius - try to make them reasonably large but not overlapping
+            r = min(spacing_x, spacing_y) * 0.3
+            circles[idx] = [x, y, r]
+            idx += 1
+        if idx >= NUM_CIRCLES:
+            break
+
+    # Ensure we have exactly NUM_CIRCLES
+    circles = circles[:NUM_CIRCLES]
+
+    # Adjust radii to prevent initial overlaps
+    for i in range(len(circles)):
+        circles[i, 2] = min(circles[i, 2],
+                           min(circles[i, 0], RECT_WIDTH - circles[i, 0]),
+                           min(circles[i, 1], RECT_HEIGHT - circles[i, 1]))
+
+    return circles
+
+def local_improvement(circles: np.ndarray, max_iterations: int = 20) -> np.ndarray:
+    """Apply local optimization to improve circle configuration."""
+    current = circles.copy()
+
+    for iteration in range(max_iterations):
+        # Try to increase radii while maintaining constraints
+        improved = False
+        for i in range(len(current)):
+            # Store original values
+            orig_x, orig_y, orig_r = current[i]
+
+            # Try to increase radius
+            new_r = min(orig_r * 1.05,
+                       min(orig_x, RECT_WIDTH - orig_x),
+                       min(orig_y, RECT_HEIGHT - orig_y))
+
+            # Check if this improves the solution without conflicts
+            current[i, 2] = new_r
+
+            if validate_configuration(current):
+                improved = True
+            else:
+                # Revert if invalid
+                current[i, 2] = orig_r
+
+        if not improved:
+            break
+
+    return current
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    start_time = time.time()
+
+    # Initialize with a good configuration
+    best_circles = initialize_circles()
+    best_sum = calculate_total_radius(best_circles)
+
+    print(f"Initial sum of radii: {best_sum:.6f}")
+
+    # Apply local improvement to get a better starting point
+    best_circles = local_improvement(best_circles)
+    best_sum = calculate_total_radius(best_circles)
+    print(f"After local improvement: {best_sum:.6f}")
+
+    # Iterative refinement process
+    for iteration in range(100):
+        # Create candidate solution by making small random changes
+        candidate = best_circles.copy()
+
+        # Randomly select a circle to modify
+        idx = np.random.randint(0, len(candidate))
+
+        # Make small random perturbation to position and radius
+        candidate[idx, 0] += np.random.normal(0, 0.02)
+        candidate[idx, 1] += np.random.normal(0, 0.02)
+        candidate[idx, 2] *= np.random.uniform(0.95, 1.05)
+
+        # Keep within bounds
+        candidate[idx, 0] = np.clip(candidate[idx, 0],
+                                  candidate[idx, 2],
+                                  RECT_WIDTH - candidate[idx, 2])
+        candidate[idx, 1] = np.clip(candidate[idx, 1],
+                                  candidate[idx, 2],
+                                  RECT_HEIGHT - candidate[idx, 2])
+        candidate[idx, 2] = np.clip(candidate[idx, 2], 0.01, min(RECT_WIDTH, RECT_HEIGHT) * 0.3)
+
+        # Apply local improvement to the candidate
+        candidate = local_improvement(candidate, 5)
+
+        # Check if candidate is valid and better
+        if validate_configuration(candidate):
+            candidate_sum = calculate_total_radius(candidate)
+            if candidate_sum > best_sum:
+                best_circles = candidate
+                best_sum = candidate_sum
+                print(f"Iteration {iteration}: Improved sum to {best_sum:.6f}")
+
+    # Final validation and cleanup
+    if not validate_configuration(best_circles):
+        # If validation fails, try one more optimization cycle
+        best_circles = local_improvement(best_circles)
+
+    end_time = time.time()
+    print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+    print(f"Final sum of radii: {best_sum:.6f}")
+
+    return best_circles
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

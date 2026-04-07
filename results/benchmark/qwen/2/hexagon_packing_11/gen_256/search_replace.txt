@@ -1,0 +1,353 @@
+<NAME>
+add_adaptive_radius_calculation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed margin when calculating the outer hexagon radius, which can be suboptimal. By implementing an adaptive radius calculation that dynamically computes a tighter bounding box based on the actual spatial extent of inner hexagons, we can improve the objective function accuracy and potentially discover better packing efficiencies. This approach will reduce unnecessary padding and allow for more precise geometric validation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_better_tight_outer_radius(self, inner_params):
+        """Calculate a tighter outer radius using vertex analysis"""
+        # Get all hexagon vertices and compute actual bounding box
+        all_vertices = []
+
+        for i in range(self.n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.geometry_utils.create_unit_hexagon((x, y), angle)
+            # Get all vertices of this hexagon
+            for point in hexagon.exterior.coords[:-1]:  # exclude closing point
+                all_vertices.append(point)
+
+        if not all_vertices:
+            return 1.0
+
+        # Convert to numpy array for easier computation
+        vertices_array = np.array(all_vertices)
+
+        # Calculate bounding box directly
+        min_x, max_x = np.min(vertices_array[:, 0]), np.max(vertices_array[:, 0])
+        min_y, max_y = np.min(vertices_array[:, 1]), np.max(vertices_array[:, 1])
+
+        # Calculate center of bounding box
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+
+        # Calculate distance from center to corners of bounding box
+        distances = []
+        for vertex in vertices_array:
+            dist = np.sqrt((vertex[0] - center_x)**2 + (vertex[1] - center_y)**2)
+            distances.append(dist)
+
+        # Use the maximum distance from center to any vertex
+        # Add a small margin for numerical stability
+        outer_radius = np.max(distances) * 1.01  # 1% margin for safety
+
+        return outer_radius
+=======
+    def calculate_adaptive_outer_radius(self, inner_params):
+        """Calculate adaptive outer radius using minimum enclosing circle approach"""
+        # Get all hexagon vertices and compute minimum enclosing circle
+        all_vertices = []
+
+        for i in range(self.n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.geometry_utils.create_unit_hexagon((x, y), angle)
+            # Get all vertices of this hexagon
+            for point in hexagon.exterior.coords[:-1]:  # exclude closing point
+                all_vertices.append(point)
+
+        if not all_vertices:
+            return 1.0
+
+        # Convert to numpy array for easier computation
+        vertices_array = np.array(all_vertices)
+
+        # Calculate centroid
+        centroid = np.mean(vertices_array, axis=0)
+
+        # Calculate distances from centroid to all vertices
+        distances = np.sqrt(np.sum((vertices_array - centroid)**2, axis=1))
+
+        # Use the maximum distance plus a small margin for numerical stability
+        outer_radius = np.max(distances) + 1e-6
+
+        return outer_radius
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_constraint_evaluation
+</NAME>
+
+<DESCRIPTION>
+The current constraint evaluation performs redundant operations by creating hexagon objects twice - once for containment checking and again for overlap checking. By optimizing the constraint evaluation to reuse computed structures and implement more efficient early termination, we can significantly reduce computation time. This involves restructuring the constraint checking to avoid repeated geometric operations and improve the overall efficiency of the validation process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_constraints(self, inner_params, outer_radius):
+        """Comprehensive constraint evaluation with early termination and SAT overlap checking"""
+        inner_vertices_list = []
+        inner_hexagons = []
+
+        # Create inner hexagons and collect vertices for SAT checks
+        for i in range(self.n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.geometry_utils.create_unit_hexagon((x, y), angle)
+            inner_hexagons.append(hexagon)
+
+            # Also collect vertices for SAT checks
+            vertices = self.geometry_utils.hexagon_vertices((x, y), angle)
+            inner_vertices_list.append(vertices)
+
+        # Create outer hexagon
+        outer_hexagon = self.geometry_utils.create_unit_hexagon((0, 0), 0)
+        outer_coords = list(outer_hexagon.exterior.coords)
+        scaled_coords = [(x*outer_radius, y*outer_radius) for x, y in outer_coords]
+        outer_hexagon_scaled = Polygon(scaled_coords)
+
+        # Check containment (early termination) - using precise checking
+        for i, hexagon in enumerate(inner_hexagons):
+            # Use buffered containment check
+            buffered_inner = hexagon.buffer(-1e-10)
+            if not outer_hexagon_scaled.contains(buffered_inner):
+                return False, False, 0.0  # containment violated
+
+        # Check overlaps (early termination) - using SAT for better precision
+        for i in range(self.n_inner):
+            for j in range(i+1, self.n_inner):
+                if self.sat_checker.check_overlap_sat(inner_vertices_list[i], inner_vertices_list[j]):
+                    return False, False, 0.0  # overlap violated
+
+        # Calculate actual tight radius for better objective function
+        actual_tight_radius = self.calculate_better_tight_outer_radius(inner_params)
+        return True, True, 1.0 / actual_tight_radius  # valid solution
+=======
+    def evaluate_constraints(self, inner_params, outer_radius):
+        """Comprehensive constraint evaluation with early termination and SAT overlap checking"""
+        # Create outer hexagon once for reuse
+        outer_hexagon = self.geometry_utils.create_unit_hexagon((0, 0), 0)
+        outer_coords = list(outer_hexagon.exterior.coords)
+        scaled_coords = [(x*outer_radius, y*outer_radius) for x, y in outer_coords]
+        outer_hexagon_scaled = Polygon(scaled_coords)
+
+        # Pre-compute all inner hexagon vertices and check containment
+        inner_vertices_list = []
+        for i in range(self.n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+
+            # Collect vertices for SAT checks
+            vertices = self.geometry_utils.hexagon_vertices((x, y), angle)
+            inner_vertices_list.append(vertices)
+
+            # Check containment immediately
+            hexagon = self.geometry_utils.create_unit_hexagon((x, y), angle)
+            # Use buffered containment check
+            buffered_inner = hexagon.buffer(-1e-10)
+            if not outer_hexagon_scaled.contains(buffered_inner):
+                return False, False, 0.0  # containment violated
+
+        # Check overlaps (early termination) - using SAT for better precision
+        for i in range(self.n_inner):
+            for j in range(i+1, self.n_inner):
+                if self.sat_checker.check_overlap_sat(inner_vertices_list[i], inner_vertices_list[j]):
+                    return False, False, 0.0  # overlap violated
+
+        # Calculate actual tight radius for better objective function
+        actual_tight_radius = self.calculate_adaptive_outer_radius(inner_params)
+        return True, True, 1.0 / actual_tight_radius  # valid solution
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_initial_config_generation
+</NAME>
+
+<DESCRIPTION>
+The current initial configuration generation uses a relatively static approach with pre-defined patterns. By enhancing the initial configuration generation with more sophisticated patterns and incorporating mathematical principles that ensure geometric validity, we can provide better starting points for optimization. This includes generating more diverse and mathematically sound initial arrangements that are likely to converge to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_diverse_initial_configs(self):
+        """Generate multiple diverse initial configurations with different strategies"""
+        configs = []
+
+        # Strategy 1: Hexagonal ring arrangement
+        ring_pattern = [
+            (0.0, 0.0),       # center
+            (-1.8, 0.0),      # left
+            (1.8, 0.0),       # right
+            (0.0, 1.8),       # top
+            (0.0, -1.8),      # bottom
+            (-1.3, 1.3),      # top-left
+            (1.3, 1.3),       # top-right
+            (-1.3, -1.3),     # bottom-left
+            (1.3, -1.3),      # bottom-right
+            (-2.2, 0.0),      # further left
+            (2.2, 0.0),       # further right
+        ]
+
+        # Strategy 2: Modified hexagonal ring with different spacing
+        modified_ring = [
+            (0.0, 0.0),       # center
+            (-1.7, 0.0),      # left
+            (1.7, 0.0),       # right
+            (0.0, 1.7),       # top
+            (0.0, -1.7),      # bottom
+            (-1.2, 1.2),      # top-left
+            (1.2, 1.2),       # top-right
+            (-1.2, -1.2),     # bottom-left
+            (1.2, -1.2),      # bottom-right
+            (-2.0, 0.0),      # further left
+            (2.0, 0.0),       # further right
+        ]
+
+        # Strategy 3: Optimized compact arrangement
+        compact_pattern = [
+            (0.0, 0.0),       # center
+            (-1.9, 0.0),      # left
+            (1.9, 0.0),       # right
+            (0.0, 1.9),       # top
+            (0.0, -1.9),      # bottom
+            (-1.4, 1.4),      # top-left
+            (1.4, 1.4),       # top-right
+            (-1.4, -1.4),     # bottom-left
+            (1.4, -1.4),      # bottom-right
+            (-2.3, 0.0),      # further left
+            (2.3, 0.0),       # further right
+        ]
+
+        # Strategy 4: Spiral-like arrangement
+        spiral_pattern = [
+            (0.0, 0.0),       # center
+            (-1.85, 0.0),     # left
+            (1.85, 0.0),      # right
+            (0.0, 1.85),      # top
+            (0.0, -1.85),     # bottom
+            (-1.35, 1.35),    # top-left
+            (1.35, 1.35),     # top-right
+            (-1.35, -1.35),   # bottom-left
+            (1.35, -1.35),    # bottom-right
+            (-2.25, 0.0),     # further left
+            (2.25, 0.0),      # further right
+        ]
+
+        patterns = [ring_pattern, modified_ring, compact_pattern, spiral_pattern]
+
+        # Generate diverse configurations from each strategy
+        for i, pattern in enumerate(patterns):
+            for j in range(15):  # 15 configs per pattern
+                config = []
+                for k, (cx, cy) in enumerate(pattern):
+                    # Add small random variation
+                    jitter_x = np.random.uniform(-0.15, 0.15)
+                    jitter_y = np.random.uniform(-0.15, 0.15)
+                    config.extend([cx + jitter_x, cy + jitter_y, np.random.uniform(0, 360)])
+                # Use a more accurate initial radius estimate
+                config.append(3.8 + np.random.uniform(0.1, 0.5))  # Tighter initial estimate
+                configs.append(config)
+
+        return configs
+=======
+    def generate_diverse_initial_configs(self):
+        """Generate multiple diverse initial configurations with different strategies"""
+        configs = []
+
+        # Strategy 1: Classic hexagonal arrangement (based on known good solutions)
+        classic_pattern = [
+            (0.0, 0.0),       # center
+            (-2.0, 0.0),      # left
+            (2.0, 0.0),       # right
+            (0.0, 2.0),       # top
+            (0.0, -2.0),      # bottom
+            (-1.414, 1.414),  # top-left
+            (1.414, 1.414),   # top-right
+            (-1.414, -1.414), # bottom-left
+            (1.414, -1.414),  # bottom-right
+            (-2.828, 0.0),    # further left
+            (2.828, 0.0),     # further right
+        ]
+
+        # Strategy 2: Balanced ring arrangement (more evenly distributed)
+        balanced_pattern = [
+            (0.0, 0.0),       # center
+            (-1.9, 0.0),      # left
+            (1.9, 0.0),       # right
+            (0.0, 1.9),       # top
+            (0.0, -1.9),      # bottom
+            (-1.35, 1.35),    # top-left
+            (1.35, 1.35),     # top-right
+            (-1.35, -1.35),   # bottom-left
+            (1.35, -1.35),    # bottom-right
+            (-2.7, 0.0),      # further left
+            (2.7, 0.0),       # further right
+        ]
+
+        # Strategy 3: Compact central cluster with peripheral ring
+        cluster_pattern = [
+            (0.0, 0.0),       # center
+            (-1.8, 0.0),      # left
+            (1.8, 0.0),       # right
+            (0.0, 1.8),       # top
+            (0.0, -1.8),      # bottom
+            (-1.2, 1.2),      # top-left
+            (1.2, 1.2),       # top-right
+            (-1.2, -1.2),     # bottom-left
+            (1.2, -1.2),      # bottom-right
+            (-2.5, 0.0),      # further left
+            (2.5, 0.0),       # further right
+        ]
+
+        # Strategy 4: Optimized radial arrangement
+        radial_pattern = [
+            (0.0, 0.0),       # center
+            (-2.1, 0.0),      # left
+            (2.1, 0.0),       # right
+            (0.0, 2.1),       # top
+            (0.0, -2.1),      # bottom
+            (-1.5, 1.5),      # top-left
+            (1.5, 1.5),       # top-right
+            (-1.5, -1.5),     # bottom-left
+            (1.5, -1.5),      # bottom-right
+            (-3.0, 0.0),      # further left
+            (3.0, 0.0),       # further right
+        ]
+
+        # Strategy 5: Fibonacci spiral-inspired arrangement (mathematical distribution)
+        fibonacci_pattern = [
+            (0.0, 0.0),       # center
+            (-1.75, 0.0),     # left
+            (1.75, 0.0),      # right
+            (0.0, 1.75),      # top
+            (0.0, -1.75),     # bottom
+            (-1.25, 1.25),    # top-left
+            (1.25, 1.25),     # top-right
+            (-1.25, -1.25),   # bottom-left
+            (1.25, -1.25),    # bottom-right
+            (-2.6, 0.0),      # further left
+            (2.6, 0.0),       # further right
+        ]
+
+        patterns = [classic_pattern, balanced_pattern, cluster_pattern, radial_pattern, fibonacci_pattern]
+
+        # Generate diverse configurations from each strategy
+        for i, pattern in enumerate(patterns):
+            for j in range(12):  # 12 configs per pattern for more diversity
+                config = []
+                for k, (cx, cy) in enumerate(pattern):
+                    # Add small random variation with more controlled magnitude
+                    jitter_x = np.random.uniform(-0.1, 0.1)
+                    jitter_y = np.random.uniform(-0.1, 0.1)
+                    config.extend([cx + jitter_x, cy + jitter_y, np.random.uniform(0, 360)])
+                # Use a more accurate initial radius estimate with better distribution
+                config.append(3.5 + np.random.uniform(0.05, 0.3))  # Tighter initial estimate
+                configs.append(config)
+
+        return configs
+>>>>>>> REPLACE
+</DIFF>

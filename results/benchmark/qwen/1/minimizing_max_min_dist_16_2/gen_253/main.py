@@ -1,0 +1,281 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial import ConvexHull
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if len(points) < 2:
+            return 0
+
+        # Compute pairwise distances with enhanced numerical stability using squareform
+        try:
+            distance_matrix = squareform(pdist(points))
+
+            # Set diagonal to infinity to exclude self-distances
+            np.fill_diagonal(distance_matrix, np.inf)
+
+            # Get all finite distances (excluding NaN and inf values)
+            finite_distances = distance_matrix[np.isfinite(distance_matrix)]
+
+            if len(finite_distances) == 0:
+                return 0
+
+            # Get min and max distances
+            dmin = np.min(finite_distances)
+            dmax = np.max(finite_distances)
+
+            # Avoid division by zero or near-zero values
+            if dmax < 1e-12:
+                return 0
+
+            return dmin / dmax
+        except Exception:
+            return 0
+
+    def generate_optimized_initial_strategies():
+        """Generate highly optimized initial point configurations."""
+        strategies = {}
+
+        # Strategy 1: Heuristic hexagonal grid with better spacing
+        points = []
+        rows = 4
+        cols = 4
+        spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+        spacing_y = np.sqrt(3) / 2 / (rows - 1) if rows > 1 else 1.0
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * spacing_x
+                y = i * spacing_y
+                # Offset every other row to create hexagonal packing
+                if i % 2 == 1:
+                    x += spacing_x / 2
+                points.append([x, y])
+
+        # Trim to exactly 16 points if needed
+        points = points[:16]
+        strategies['hex'] = np.array(points)
+
+        # Strategy 2: Perturbed hexagonal grid with careful scaling
+        np.random.seed(42)
+        perturbed_hex = strategies['hex'] + np.random.normal(0, 0.015, strategies['hex'].shape)
+        strategies['hex_perturbed'] = np.clip(perturbed_hex, 0, 1)
+
+        # Strategy 3: Golden spiral with improved radial distribution
+        indices = np.arange(16)
+        golden_angle = 2.399963229728653
+        angles = golden_angle * indices
+        # Use more uniform distribution
+        radii = np.sqrt(indices / 15.0)  # Square root for better spacing
+        golden_spiral = np.column_stack([
+            0.5 + 0.45 * radii * np.cos(angles),
+            0.5 + 0.45 * radii * np.sin(angles)
+        ])
+        strategies['spiral'] = np.clip(golden_spiral, 0, 1)
+
+        # Strategy 4: Circle arrangement for balanced spread
+        angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+        circle_points = np.column_stack([
+            0.5 + 0.4 * np.cos(angles),
+            0.5 + 0.4 * np.sin(angles)
+        ])
+        strategies['circle'] = circle_points
+
+        # Strategy 5: Random with smart initialization to avoid clustering
+        np.random.seed(123)
+        # Create initial points with some structure to avoid poor starting conditions
+        base_random = np.random.rand(16, 2)
+        # Add some structure - place points along grid lines
+        structured_random = np.zeros((16, 2))
+        for i in range(16):
+            structured_random[i, 0] = (i % 4) / 3.0
+            structured_random[i, 1] = (i // 4) / 3.0
+        # Add noise but keep them away from boundaries
+        final_random = structured_random + np.random.normal(0, 0.01, structured_random.shape)
+        strategies['structured_random'] = np.clip(final_random, 0.05, 0.95)
+
+        # Strategy 6: Optimized grid with better corner placement
+        # Arrange points in a way that maximizes chances of good distribution
+        optimized_grid = np.array([
+            [0.1, 0.1], [0.5, 0.1], [0.9, 0.1],
+            [0.1, 0.3], [0.5, 0.3], [0.9, 0.3],
+            [0.1, 0.5], [0.5, 0.5], [0.9, 0.5],
+            [0.1, 0.7], [0.5, 0.7], [0.9, 0.7],
+            [0.1, 0.9], [0.5, 0.9], [0.9, 0.9],
+            [0.3, 0.3]  # Extra point in center area
+        ])
+        # If too many points, remove last ones
+        if len(optimized_grid) > 16:
+            optimized_grid = optimized_grid[:16]
+        # If too few points, fill with random points
+        elif len(optimized_grid) < 16:
+            extra_points = np.random.rand(16 - len(optimized_grid), 2)
+            optimized_grid = np.vstack([optimized_grid, extra_points])
+        strategies['optimized_grid'] = np.clip(optimized_grid, 0, 1)
+
+        return strategies
+
+    def evaluate_all_strategies(strategies):
+        """Evaluate all initial strategies and return the best one."""
+        best_strategy = None
+        best_ratio = 0
+
+        for name, points in strategies.items():
+            ratio = compute_min_max_ratio(points)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_strategy = points.copy()
+
+        return best_strategy, best_ratio
+
+    def adaptive_optimization(initial_points, max_evaluations=1000):
+        """Perform adaptive optimization with multiple phases."""
+        # Flatten for optimization
+        x0 = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(32)]
+
+        try:
+            # Phase 1: Global search with aggressive differential evolution
+            de_result = differential_evolution(
+                lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
+                bounds,
+                maxiter=max_evaluations // 8,
+                popsize=30,  # Larger population for better exploration
+                mutation=(0.8, 1.0),  # Higher mutation rate for diversity
+                recombination=0.9,    # High recombination for good mixing
+                seed=42,
+                disp=False,
+                tol=1e-9,
+                strategy='best1bin'
+            )
+
+            # Phase 2: Local refinement with multiple methods
+            if de_result.success:
+                # Try L-BFGS-B first (more accurate for smooth problems)
+                refined_result = minimize(
+                    lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
+                    de_result.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1000},
+                    tol=1e-13
+                )
+
+                # If L-BFGS-B fails, fallback to SLSQP
+                if not refined_result.success:
+                    refined_result = minimize(
+                        lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
+                        de_result.x,
+                        method='SLSQP',
+                        bounds=bounds,
+                        options={'ftol': 1e-13, 'gtol': 1e-13, 'maxiter': 1000}
+                    )
+
+                # If both fail, use Nelder-Mead as final fallback
+                if not refined_result.success:
+                    refined_result = minimize(
+                        lambda x: -compute_min_max_ratio(x.reshape(-1, 2)),
+                        de_result.x,
+                        method='Nelder-Mead',
+                        options={'ftol': 1e-13, 'xtol': 1e-13, 'maxiter': 500}
+                    )
+
+                if refined_result.success:
+                    final_points = refined_result.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    return final_points
+
+            # If all local refinement fails, return DE result as fallback
+            final_points = de_result.x.reshape(-1, 2)
+            final_points = np.clip(final_points, 0, 1)
+            return final_points
+
+        except Exception:
+            # If all else fails, return the initial points
+            return initial_points
+
+    def multi_phase_optimization(initial_points):
+        """Run optimization through multiple phases to improve convergence."""
+        # Phase 1: Coarse optimization
+        coarse_points = adaptive_optimization(initial_points, max_evaluations=500)
+        coarse_ratio = compute_min_max_ratio(coarse_points)
+
+        # Phase 2: Fine-tune with higher resolution
+        fine_points = adaptive_optimization(coarse_points, max_evaluations=800)
+        fine_ratio = compute_min_max_ratio(fine_points)
+
+        # Phase 3: Final aggressive refinement
+        final_points = adaptive_optimization(fine_points, max_evaluations=600)
+        final_ratio = compute_min_max_ratio(final_points)
+
+        # Return the best of all phases
+        best_points = coarse_points
+        best_ratio = coarse_ratio
+
+        if fine_ratio > best_ratio:
+            best_points = fine_points
+            best_ratio = fine_ratio
+
+        if final_ratio > best_ratio:
+            best_points = final_points
+            best_ratio = final_ratio
+
+        return best_points
+
+    # Generate optimized initial strategies
+    strategies = generate_optimized_initial_strategies()
+
+    # Find the best initial configuration
+    best_initial, initial_ratio = evaluate_all_strategies(strategies)
+
+    # Initialize best results
+    best_points = best_initial.copy()
+    best_ratio = initial_ratio
+
+    # Multi-start optimization with different initial variations
+    for restart in range(5):
+        # Generate new variation of the initial points
+        np.random.seed(restart + 1000)
+        perturbed_points = best_initial.copy()
+        noise_level = 0.03 + restart * 0.005  # Gradually increasing noise
+        perturbed_points += np.random.normal(0, noise_level, best_initial.shape)
+        perturbed_points = np.clip(perturbed_points, 0, 1)
+
+        # Optimize this variant
+        optimized_points = multi_phase_optimization(perturbed_points)
+        optimized_ratio = compute_min_max_ratio(optimized_points)
+
+        if optimized_ratio > best_ratio:
+            best_ratio = optimized_ratio
+            best_points = optimized_points.copy()
+
+    # Final aggressive optimization on the best configuration found
+    final_points = multi_phase_optimization(best_points)
+    final_ratio = compute_min_max_ratio(final_points)
+
+    # Additional fine-tuning with extreme refinement
+    np.random.seed(9999)
+    last_attempt = final_points + np.random.normal(0, 0.003, final_points.shape)
+    last_attempt = np.clip(last_attempt, 0, 1)
+    final_refinement = multi_phase_optimization(last_attempt)
+    refined_ratio = compute_min_max_ratio(final_refinement)
+
+    if refined_ratio > final_ratio:
+        return final_refinement
+    else:
+        return final_points
+
+# EVOLVE-BLOCK-END

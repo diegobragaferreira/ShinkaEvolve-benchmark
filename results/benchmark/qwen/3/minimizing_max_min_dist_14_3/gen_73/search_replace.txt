@@ -1,0 +1,126 @@
+<NAME>
+add_adaptive_tolerance_tightening
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive tolerance tightening to the local refinement phase based on improvement rate. This enhancement modifies the L-BFGS-B optimization to progressively tighten tolerances when continued improvement is observed, allowing for faster initial convergence while maintaining precision in later stages. This follows successful patterns from previous generations that showed local refinement alone was insufficient without proper tolerance management.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def improved_local_refinement(objective_func, initial_points, time_limit):
+        """Apply multiple local optimization refinement approaches"""
+        start_time = time.time()
+
+        # Try Basin-hopping first - very effective for this kind of problem
+        try:
+            # Basin-hopping with better parameters
+            minimizer_kwargs = {"method": "L-BFGS-B", "bounds": [(0, 1) for _ in range(42)]}
+            result_bh = basinhopping(
+                objective_func,
+                initial_points,
+                niter=20,
+                T=1.0,
+                stepsize=0.1,
+                minimizer_kwargs=minimizer_kwargs,
+                seed=42,
+                callback=lambda x, f, accepted: time.time() - start_time > time_limit - 10
+            )
+
+            if result_bh.success:
+                return result_bh.x
+        except Exception as e:
+            warnings.warn(f"Basin-hopping optimization failed: {e}")
+
+        # Fall back to L-BFGS-B if basin-hopping failed
+        try:
+            result = minimize(
+                objective_func,
+                initial_points,
+                method='L-BFGS-B',
+                bounds=[(0, 1) for _ in range(42)],
+                options={'maxiter': 150, 'ftol': 1e-10, 'gtol': 1e-10},
+                callback=lambda x: time.time() - start_time > time_limit - 10
+            )
+
+            if result.success:
+                return result.x
+        except Exception as e:
+            warnings.warn(f"L-BFGS optimization failed: {e}")
+
+        return initial_points
+=======
+    def improved_local_refinement(objective_func, initial_points, time_limit):
+        """Apply multiple local optimization refinement approaches"""
+        start_time = time.time()
+
+        # Try Basin-hopping first - very effective for this kind of problem
+        try:
+            # Basin-hopping with better parameters
+            minimizer_kwargs = {"method": "L-BFGS-B", "bounds": [(0, 1) for _ in range(42)]}
+            result_bh = basinhopping(
+                objective_func,
+                initial_points,
+                niter=20,
+                T=1.0,
+                stepsize=0.1,
+                minimizer_kwargs=minimizer_kwargs,
+                seed=42,
+                callback=lambda x, f, accepted: time.time() - start_time > time_limit - 10
+            )
+
+            if result_bh.success:
+                return result_bh.x
+        except Exception as e:
+            warnings.warn(f"Basin-hopping optimization failed: {e}")
+
+        # Fall back to L-BFGS-B with adaptive tolerance tightening
+        try:
+            # Track improvement to adaptively tighten tolerances
+            last_obj_value = float('inf')
+            improvement_count = 0
+            max_improvement_streak = 5
+
+            # Start with looser tolerances for faster initial convergence
+            ftol = 1e-6
+            gtol = 1e-6
+
+            # Try with initial loose tolerances
+            result = minimize(
+                objective_func,
+                initial_points,
+                method='L-BFGS-B',
+                bounds=[(0, 1) for _ in range(42)],
+                options={'maxiter': 150, 'ftol': ftol, 'gtol': gtol},
+                callback=lambda x: time.time() - start_time > time_limit - 10
+            )
+
+            # If we have room and significant improvement, try tighter tolerances
+            if time.time() - start_time < time_limit - 10 and result.success:
+                # Check if we're still making progress
+                current_obj = result.fun
+                if abs(current_obj - last_obj_value) > 1e-8:  # If there's significant improvement
+                    improvement_count += 1
+                    if improvement_count >= 2:  # After seeing consistent improvement
+                        # Tighten tolerances for more precise final result
+                        tightened_result = minimize(
+                            objective_func,
+                            result.x,
+                            method='L-BFGS-B',
+                            bounds=[(0, 1) for _ in range(42)],
+                            options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9},
+                            callback=lambda x: time.time() - start_time > time_limit - 10
+                        )
+                        if tightened_result.success:
+                            return tightened_result.x
+                else:
+                    improvement_count = 0  # Reset if no improvement
+
+            if result.success:
+                return result.x
+        except Exception as e:
+            warnings.warn(f"L-BFGS optimization failed: {e}")
+
+        return initial_points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,272 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import Voronoi
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Implements a novel geometric optimization approach with Voronoi-based initialization.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances using squareform for better numerical stability
+        distances = squareform(pdist(points))
+
+        # Zero out diagonal elements (distance to self)
+        np.fill_diagonal(distances, np.inf)
+
+        # Compute min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        if d_max == 0:
+            return -1.0
+        return -d_min / d_max
+
+    def adaptive_objective_with_penalty(x, penalty_weight=1000.0):
+        """
+        Enhanced objective with built-in geometric penalties for better convergence
+        """
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # If all points are identical or near identical, penalize heavily
+        if d_max == 0:
+            return -1.0
+
+        # Calculate ratio to maximize
+        ratio = d_min / d_max
+
+        # Add penalty for points near boundaries to avoid numerical issues
+        boundary_penalty = 0.0
+        margin = 0.01
+        for point in points:
+            if (point[0] < margin or point[0] > 1-margin or
+                point[1] < margin or point[1] > 1-margin):
+                boundary_penalty += penalty_weight * (margin - min(point[0], 1-point[0], point[1], 1-point[1]))
+
+        # Add penalty for very small distances (close point clustering)
+        min_distance_penalty = 0.0
+        if d_min < 0.05:  # Threshold for clustering penalty
+            min_distance_penalty = penalty_weight * (0.05 - d_min)
+
+        # Add Voronoi-based penalty to encourage uniform distribution
+        voronoi_penalty = 0.0
+        try:
+            # Compute Voronoi diagram for current point configuration
+            vor = Voronoi(points)
+            # Calculate area of each Voronoi cell
+            cell_areas = []
+            for i, region in enumerate(vor.regions):
+                if len(region) > 0 and -1 not in region:  # Skip infinite regions
+                    # Approximate cell area using centroid method
+                    vertices = vor.vertices[region]
+                    if len(vertices) >= 3:
+                        # Simple polygon area calculation
+                        x_coords = vertices[:, 0]
+                        y_coords = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x_coords, np.roll(y_coords, 1)) - np.dot(y_coords, np.roll(x_coords, 1)))
+                        cell_areas.append(area)
+
+            # Penalize very small cell areas (indicates clustering)
+            if cell_areas:
+                min_cell_area = np.min(cell_areas)
+                if min_cell_area < 0.001:  # Threshold for small cells
+                    voronoi_penalty = penalty_weight * (0.001 - min_cell_area)
+        except:
+            # If Voronoi computation fails, skip penalty
+            pass
+
+        total_penalty = boundary_penalty + min_distance_penalty + voronoi_penalty
+        return -(ratio - total_penalty / penalty_weight)
+
+    # Phase 1: Voronoi-inspired geometric initialization
+    np.random.seed(42)
+
+    # Create initial configuration based on hexagonal tiling with perturbations
+    # This creates a more uniform initial distribution than simple grids
+    points = []
+
+    # Generate points in a hexagonal pattern with slight randomness
+    rows, cols = 4, 4
+    sqrt3 = np.sqrt(3)
+    spacing = 0.8  # Adjust spacing to fit better in [0,1] square
+    row_spacing = spacing / sqrt3
+    col_spacing = spacing
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(points) >= 16:
+                break
+            # Offset every other row for hexagonal packing
+            x = j * col_spacing + (i % 2) * col_spacing * 0.5
+            y = i * row_spacing
+
+            # Scale to fit within unit square [0,1]
+            x_scaled = 0.1 + (x / (col_spacing * cols)) * 0.8
+            y_scaled = 0.1 + (y / (row_spacing * rows)) * 0.8
+
+            # Add slight random perturbation
+            x_scaled += np.random.normal(0, 0.02)
+            y_scaled += np.random.normal(0, 0.02)
+
+            points.append([x_scaled, y_scaled])
+
+    points = np.array(points[:16])
+
+    # Ensure points are within bounds
+    points = np.clip(points, 0.01, 0.99)
+
+    # Phase 2: Multi-start optimization with diverse initial configurations
+    best_points = None
+    best_ratio = float('inf')
+
+    # Define multiple diverse initial configurations
+    initial_configs = []
+
+    # Configuration 1: Hexagonal grid (existing approach)
+    config1 = points.copy()
+
+    # Configuration 2: Circle arrangement
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    radii = 0.4 + 0.1 * np.sin(np.arange(16) * np.pi / 8)
+    center = np.array([0.5, 0.5])
+    config2 = np.column_stack([center[0] + radii * np.cos(angles),
+                              center[1] + radii * np.sin(angles)])
+    config2 += np.random.normal(0, 0.01, config2.shape)
+    config2 = np.clip(config2, 0.01, 0.99)
+
+    # Configuration 3: Grid with offset
+    config3 = np.zeros((16, 2))
+    rows, cols = 4, 4
+    row_spacing = 0.9 / (rows - 1) if rows > 1 else 0.9
+    col_spacing = 0.9 / (cols - 1) if cols > 1 else 0.9
+    for i in range(rows):
+        for j in range(cols):
+            if i * cols + j >= 16:
+                break
+            x = j * col_spacing + (i % 2) * col_spacing * 0.5
+            y = i * row_spacing
+            config3[i * cols + j] = [x + np.random.normal(0, 0.005), y + np.random.normal(0, 0.005)]
+    config3 = np.clip(config3, 0.01, 0.99)
+
+    # Configuration 4: Spiral pattern
+    config4 = np.zeros((16, 2))
+    for i in range(16):
+        angle = i * 0.4
+        radius = i * 0.04
+        config4[i] = [0.5 + radius * np.cos(angle), 0.5 + radius * np.sin(angle)]
+    config4 = np.clip(config4, 0.01, 0.99)
+
+    initial_configs.extend([config1, config2, config3, config4])
+
+    # Run optimization from each initial configuration
+    for i, initial_config in enumerate(initial_configs):
+        x0 = initial_config.flatten()
+        bounds = [(0.01, 0.99) for _ in range(32)]
+
+        # First stage: Differential Evolution
+        try:
+            de_result = differential_evolution(
+                adaptive_objective_with_penalty,
+                bounds,
+                seed=42+i,
+                maxiter=150,
+                popsize=20,
+                tol=1e-9,
+                recombination=0.9,
+                mutation=(0.8, 1.0),
+                disp=False
+            )
+            x0 = de_result.x.copy()
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed for config {i}: {e}")
+            pass
+
+        # Second stage: Local optimization with L-BFGS-B
+        try:
+            lbfgs_result = minimize(
+                adaptive_objective_with_penalty,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-14, 'gtol': 1e-14},
+                callback=None
+            )
+
+            if lbfgs_result.success:
+                x0 = lbfgs_result.x.copy()
+        except Exception as e:
+            warnings.warn(f"L-BFGS-B failed for config {i}: {e}")
+            pass
+
+        # Final refinement with standard objective
+        try:
+            final_result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+
+            if final_result.success:
+                current_points = final_result.x.reshape(-1, 2)
+            else:
+                current_points = x0.reshape(-1, 2)
+        except Exception as e:
+            warnings.warn(f"Final refinement failed for config {i}: {e}")
+            current_points = x0.reshape(-1, 2)
+
+        # Evaluate current configuration
+        current_points = np.clip(current_points, 0.01, 0.99)
+        distances = squareform(pdist(current_points))
+        np.fill_diagonal(distances, np.inf)
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        if d_max > 0:
+            current_ratio = d_min / d_max
+            if current_ratio < best_ratio:
+                best_ratio = current_ratio
+                best_points = current_points.copy()
+
+    # If no successful optimization, return the best of our initial configurations
+    if best_points is None:
+        # Evaluate all initial configs with the basic objective
+        configs_evaluated = []
+        for i, config in enumerate(initial_configs):
+            distances = squareform(pdist(config))
+            np.fill_diagonal(distances, np.inf)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            if d_max > 0:
+                ratio = d_min / d_max
+                configs_evaluated.append((ratio, config))
+
+        if configs_evaluated:
+            best_ratio_idx = np.argmin([r for r, _ in configs_evaluated])
+            best_points = configs_evaluated[best_ratio_idx][1]
+        else:
+            best_points = initial_configs[0]
+
+    return best_points
+
+# EVOLVE-BLOCK-END

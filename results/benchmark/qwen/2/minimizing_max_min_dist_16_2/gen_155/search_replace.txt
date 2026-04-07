@@ -1,0 +1,224 @@
+<NAME>
+add_symmetry_breaking_constraints
+</NAME>
+
+<DESCRIPTION>
+Adding symmetry-breaking constraints to avoid degenerate solutions and help the optimizer escape symmetrically equivalent but suboptimal configurations. This approach fixes specific constraints on point positions to ensure each optimization path explores distinct solution spaces rather than cycling between identical structures due to inherent symmetries in the geometric arrangement.
+
+The key insight is that the optimization landscape can have many symmetric local optima that are indistinguishable from the optimal solution. By imposing constraints that break these symmetries - such as fixing the position of corner points or enforcing lexicographic ordering - we guide the optimizer toward genuinely distinct solutions and prevent it from getting trapped in symmetric degeneracies.
+
+This follows the principle from the recommendations that symmetry-breaking constraints can significantly improve convergence behavior and solution quality in geometric optimization problems like this one.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def constraint(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        return np.concatenate([
+            points[:, 0],           # x coordinates >= 0
+            1 - points[:, 0],       # x coordinates <= 1
+            points[:, 1],           # y coordinates >= 0
+            1 - points[:, 1]        # y coordinates <= 1
+        ])
+=======
+    def constraint(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        return np.concatenate([
+            points[:, 0],           # x coordinates >= 0
+            1 - points[:, 0],       # x coordinates <= 1
+            points[:, 1],           # y coordinates >= 0
+            1 - points[:, 1]        # y coordinates <= 1
+        ])
+
+    def symmetry_breaking_constraint(x):
+        """Add symmetry-breaking constraints to avoid degenerate solutions."""
+        points = x.reshape(-1, 2)
+
+        # Fix the position of the bottom-left point (first point) to (0,0)
+        # This breaks rotational and translational symmetries
+        con1 = points[0, 0]  # x-coordinate of first point should be 0
+        con2 = points[0, 1]  # y-coordinate of first point should be 0
+
+        # Enforce lexicographic ordering of points to break permutation symmetries
+        # This ensures that points are ordered in a way that prevents symmetric rearrangements
+        ordering_constraints = []
+        for i in range(1, 16):
+            # Each point should have x-coordinate >= previous point's x-coordinate
+            # If x-coordinates are equal, y-coordinate should be >= previous point's y-coordinate
+            if i > 0:
+                ordering_constraints.append(points[i, 0] - points[i-1, 0])
+                if points[i, 0] == points[i-1, 0]:
+                    ordering_constraints.append(points[i, 1] - points[i-1, 1])
+
+        return np.array([con1, con2] + ordering_constraints)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_refinement(x0):
+        """Perform sequential optimization with refinement stages."""
+        # Stage 1: Fast optimization with L-BFGS-B
+        bounds = [(0, 1) for _ in range(32)]
+        result1 = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 300, 'ftol': 1e-6, 'gtol': 1e-6}
+        )
+
+        if not result1.success:
+            return None
+
+        # Stage 2: Precise optimization with SLSQP
+        result2 = minimize(
+            objective,
+            result1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraint},
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+
+        if result2.success:
+            return result2.x
+        return None
+=======
+    def optimize_with_refinement(x0):
+        """Perform sequential optimization with refinement stages."""
+        # Stage 1: Fast optimization with L-BFGS-B
+        bounds = [(0, 1) for _ in range(32)]
+        result1 = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 300, 'ftol': 1e-6, 'gtol': 1e-6}
+        )
+
+        if not result1.success:
+            return None
+
+        # Stage 2: Precise optimization with SLSQP
+        result2 = minimize(
+            objective,
+            result1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=[{'type': 'ineq', 'fun': constraint},
+                       {'type': 'eq', 'fun': symmetry_breaking_constraint}],
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+
+        if result2.success:
+            return result2.x
+        return None
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Multi-start optimization with improved initializations and evolutionary restarts
+    best_ratio = -np.inf
+    best_points = None
+
+    # Generate multiple initial configurations
+    initial_configs = create_initial_configurations()
+
+    # Integrate evolutionary algorithm restarts
+    try:
+        bounds = [(0, 1) for _ in range(32)]
+        de_result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=30,
+            popsize=8,
+            seed=42,
+            tol=1e-5,
+            mutation=(0.5, 1),
+            recombination=0.7
+        )
+
+        if de_result.success:
+            de_points = de_result.x.reshape(-1, 2)
+            # Add evolutionary result as another initial configuration
+            initial_configs.append(de_points)
+    except Exception:
+        pass
+
+    # Run hierarchical optimization for better efficiency
+    best_points = hierarchical_optimization(initial_configs, max_time=170)
+
+    # Final refinement of the best result
+    if best_points is not None:
+        try:
+            final_x = optimize_with_refinement(best_points.flatten())
+            if final_x is not None:
+                final_points = final_x.reshape(-1, 2)
+                final_ratio = compute_ratio(final_points)
+                if final_ratio > best_ratio:
+                    best_points = final_points
+        except Exception:
+            pass
+
+    # If no successful optimization, return the best initial configuration
+    if best_points is None:
+        best_points = initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+
+    return best_points
+=======
+    # Multi-start optimization with improved initializations and evolutionary restarts
+    best_ratio = -np.inf
+    best_points = None
+
+    # Generate multiple initial configurations
+    initial_configs = create_initial_configurations()
+
+    # Integrate evolutionary algorithm restarts
+    try:
+        bounds = [(0, 1) for _ in range(32)]
+        de_result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=30,
+            popsize=8,
+            seed=42,
+            tol=1e-5,
+            mutation=(0.5, 1),
+            recombination=0.7
+        )
+
+        if de_result.success:
+            de_points = de_result.x.reshape(-1, 2)
+            # Add evolutionary result as another initial configuration
+            initial_configs.append(de_points)
+    except Exception:
+        pass
+
+    # Run hierarchical optimization for better efficiency
+    best_points = hierarchical_optimization(initial_configs, max_time=170)
+
+    # Final refinement of the best result with symmetry breaking
+    if best_points is not None:
+        try:
+            final_x = optimize_with_refinement(best_points.flatten())
+            if final_x is not None:
+                final_points = final_x.reshape(-1, 2)
+                final_ratio = compute_ratio(final_points)
+                if final_ratio > best_ratio:
+                    best_points = final_points
+        except Exception:
+            pass
+
+    # If no successful optimization, return the best initial configuration
+    if best_points is None:
+        best_points = initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+
+    return best_points
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,413 @@
+<NAME>
+add_multi_level_spatial_indexing
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SpatialIndexer:
+    """Efficient spatial indexing for circle overlap detection."""
+
+    def __init__(self, grid_size: int = INITIAL_GRID_SIZE):
+        self.grid_size = grid_size
+        self.grid_cells = {}
+        self.cell_size = 1.0 / grid_size
+
+    def _get_grid_key(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert coordinates to grid cell indices."""
+        return (int(x * self.grid_size), int(y * self.grid_size))
+
+    def build_index(self, circles: List[Circle]) -> Dict[Tuple[int, int], List[int]]:
+        """Build spatial grid index for efficient neighbor queries."""
+        self.grid_cells.clear()
+        for i, circle in enumerate(circles):
+            # Determine which grid cells this circle might occupy
+            min_x = max(0, int((circle.x - circle.r) / self.cell_size))
+            max_x = min(self.grid_size - 1, int((circle.x + circle.r) / self.cell_size))
+            min_y = max(0, int((circle.y - circle.r) / self.cell_size))
+            max_y = min(self.grid_size - 1, int((circle.y + circle.r) / self.cell_size))
+
+            for gx in range(min_x, max_x + 1):
+                for gy in range(min_y, max_y + 1):
+                    key = (gx, gy)
+                    if key not in self.grid_cells:
+                        self.grid_cells[key] = []
+                    self.grid_cells[key].append(i)
+        return self.grid_cells
+
+    def get_neighbors(self, circle: Circle) -> List[int]:
+        """Get candidate neighbors within a search radius."""
+        neighbors = []
+        center_cell = self._get_grid_key(circle.x, circle.y)
+
+        # Check nearby cells in a 3x3 grid around center
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (center_cell[0] + dx, center_cell[1] + dy)
+                if cell in self.grid_cells:
+                    neighbors.extend(self.grid_cells[cell])
+
+        return neighbors
+=======
+class SpatialIndexer:
+    """Efficient spatial indexing for circle overlap detection."""
+
+    def __init__(self, grid_size: int = INITIAL_GRID_SIZE):
+        self.grid_size = grid_size
+        self.grid_cells = {}
+        self.cell_size = 1.0 / grid_size
+
+    def _get_grid_key(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert coordinates to grid cell indices."""
+        return (int(x * self.grid_size), int(y * self.grid_size))
+
+    def build_index(self, circles: List[Circle]) -> Dict[Tuple[int, int], List[int]]:
+        """Build spatial grid index for efficient neighbor queries."""
+        self.grid_cells.clear()
+        for i, circle in enumerate(circles):
+            # Determine which grid cells this circle might occupy
+            min_x = max(0, int((circle.x - circle.r) / self.cell_size))
+            max_x = min(self.grid_size - 1, int((circle.x + circle.r) / self.cell_size))
+            min_y = max(0, int((circle.y - circle.r) / self.cell_size))
+            max_y = min(self.grid_size - 1, int((circle.y + circle.r) / self.cell_size))
+
+            for gx in range(min_x, max_x + 1):
+                for gy in range(min_y, max_y + 1):
+                    key = (gx, gy)
+                    if key not in self.grid_cells:
+                        self.grid_cells[key] = []
+                    self.grid_cells[key].append(i)
+        return self.grid_cells
+
+    def get_neighbors(self, circle: Circle) -> List[int]:
+        """Get candidate neighbors within a search radius."""
+        neighbors = []
+        center_cell = self._get_grid_key(circle.x, circle.y)
+
+        # Check nearby cells in a 3x3 grid around center
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (center_cell[0] + dx, center_cell[1] + dy)
+                if cell in self.grid_cells:
+                    neighbors.extend(self.grid_cells[cell])
+
+        return neighbors
+
+    def get_neighbors_advanced(self, circle: Circle, search_radius: float = None) -> List[int]:
+        """Get neighbors using multi-level spatial indexing for better performance."""
+        if search_radius is None:
+            search_radius = circle.r * 2
+
+        neighbors = []
+        center_cell = self._get_grid_key(circle.x, circle.y)
+
+        # For small searches, use direct grid lookup
+        if search_radius <= self.cell_size * 1.5:
+            # Check only the immediate cell
+            if center_cell in self.grid_cells:
+                neighbors.extend(self.grid_cells[center_cell])
+        else:
+            # For larger searches, check nearby cells in a wider range
+            search_range = int(math.ceil(search_radius / self.cell_size)) + 1
+            for dx in range(-search_range, search_range + 1):
+                for dy in range(-search_range, search_range + 1):
+                    cell = (center_cell[0] + dx, center_cell[1] + dy)
+                    if cell in self.grid_cells:
+                        neighbors.extend(self.grid_cells[cell])
+
+        return neighbors
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_overlap_detection_with_multi_scale_indexing
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def validate_overlap(circles: List[Circle], spatial_indexer: SpatialIndexer = None) -> bool:
+        """Check for circle overlaps using spatial indexing for efficiency."""
+        n = len(circles)
+        if n <= 1:
+            return True
+
+        # Use spatial indexing for efficiency
+        if spatial_indexer is not None and n > SPATIAL_INDEXING_THRESHOLD:
+            positions = [(c.x, c.y) for c in circles]
+            tree = cKDTree(positions)
+
+            # Check each circle against its neighbors
+            for i, circle in enumerate(circles):
+                # Query nearby points with search radius slightly larger than max possible overlap
+                indices = tree.query_ball_point([circle.x, circle.y], 2 * (circle.r + 0.01))
+
+                for j in indices:
+                    if i != j:
+                        other = circles[j]
+                        distance = math.sqrt((circle.x - other.x)**2 + (circle.y - other.y)**2)
+
+                        if distance < (circle.r + other.r - 1e-8):  # Validity threshold
+                            return False
+        else:
+            # Brute force for small populations or when spatial indexer not used
+            for i in range(n):
+                for j in range(i+1, n):
+                    circle1, circle2 = circles[i], circles[j]
+                    distance = math.sqrt((circle1.x - circle2.x)**2 + (circle1.y - circle2.y)**2)
+
+                    if distance < (circle1.r + circle2.r - 1e-8):
+                        return False
+
+        return True
+=======
+    @staticmethod
+    def validate_overlap(circles: List[Circle], spatial_indexer: SpatialIndexer = None) -> bool:
+        """Check for circle overlaps using spatial indexing for efficiency."""
+        n = len(circles)
+        if n <= 1:
+            return True
+
+        # Use spatial indexing for efficiency
+        if spatial_indexer is not None and n > SPATIAL_INDEXING_THRESHOLD:
+            # Multi-scale approach: use KDTree for large populations with adaptive search radii
+            positions = [(c.x, c.y) for c in circles]
+            tree = cKDTree(positions)
+
+            # For very large populations, use a different strategy
+            if n > SPATIAL_INDEXING_THRESHOLD * 2:
+                # Use a hybrid approach: first check direct neighbors via spatial grid,
+                # then verify with KDTree for any remaining potential overlaps
+                for i, circle in enumerate(circles):
+                    # Get neighbors from spatial index
+                    neighbor_indices = spatial_indexer.get_neighbors_advanced(circle)
+                    # Check against actual neighbors in tree with small search radius
+                    indices = tree.query_ball_point([circle.x, circle.y], circle.r * 2.5)
+                    # Combine and deduplicate
+                    combined_indices = list(set(neighbor_indices + indices))
+
+                    for j in combined_indices:
+                        if i != j:
+                            other = circles[j]
+                            distance = math.sqrt((circle.x - other.x)**2 + (circle.y - other.y)**2)
+
+                            if distance < (circle.r + other.r - 1e-8):  # Validity threshold
+                                return False
+            else:
+                # Regular KDTree approach with modified search radius
+                for i, circle in enumerate(circles):
+                    # Query nearby points with search radius adjusted by circle sizes
+                    # Use a slightly conservative estimate to avoid missing overlaps
+                    search_radius = circle.r * 2.0 + 0.01
+                    indices = tree.query_ball_point([circle.x, circle.y], search_radius)
+
+                    for j in indices:
+                        if i != j:
+                            other = circles[j]
+                            distance = math.sqrt((circle.x - other.x)**2 + (circle.y - other.y)**2)
+
+                            if distance < (circle.r + other.r - 1e-8):  # Validity threshold
+                                return False
+        else:
+            # Brute force for small populations or when spatial indexer not used
+            for i in range(n):
+                for j in range(i+1, n):
+                    circle1, circle2 = circles[i], circles[j]
+                    distance = math.sqrt((circle1.x - circle2.x)**2 + (circle1.y - circle2.y)**2)
+
+                    if distance < (circle1.r + circle2.r - 1e-8):
+                        return False
+
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_constraint_validation_performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def validate_containment(circles: List[Circle]) -> bool:
+        """Check if all circles are fully contained in the unit square."""
+        for circle in circles:
+            if circle.x - circle.r < 0 or circle.x + circle.r > 1 or \
+               circle.y - circle.r < 0 or circle.y + circle.r > 1:
+                return False
+        return True
+=======
+    @staticmethod
+    def validate_containment(circles: List[Circle]) -> bool:
+        """Check if all circles are fully contained in the unit square."""
+        # Vectorized check for better performance with many circles
+        if len(circles) == 0:
+            return True
+
+        # Extract all relevant values at once
+        positions = np.array([(c.x, c.y, c.r) for c in circles])
+        x_vals, y_vals, r_vals = positions[:, 0], positions[:, 1], positions[:, 2]
+
+        # Check containment in vectorized form
+        # Circle is out of bounds if any of these conditions hold:
+        # x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1
+        invalid_mask = (x_vals - r_vals < 0) | (x_vals + r_vals > 1) | \
+                      (y_vals - r_vals < 0) | (y_vals + r_vals > 1)
+
+        return not np.any(invalid_mask)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_fitness_evaluation_with_cache
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class FitnessEvaluator:
+    """Evaluates fitness with optimized penalty system."""
+
+    def __init__(self, boundary_weight: float = 1000.0, overlap_weight: float = 100000.0):
+        self.boundary_weight = boundary_weight
+        self.overlap_weight = overlap_weight
+
+    def evaluate(self, circles: List[Circle], spatial_indexer: SpatialIndexer = None) -> float:
+        """Evaluate fitness with constraint penalties."""
+        # Check constraints
+        if not ConstraintValidator.validate_containment(circles):
+            penalty = self._compute_boundary_penalty(circles)
+            return -penalty
+
+        if not ConstraintValidator.validate_overlap(circles, spatial_indexer):
+            penalty = self._compute_overlap_penalty(circles)
+            return -penalty
+
+        # Valid solution - return sum of radii
+        return float(sum(c.r for c in circles))
+
+    def _compute_boundary_penalty(self, circles: List[Circle]) -> float:
+        """Compute penalty based on boundary violations."""
+        penalty = 0.0
+
+        for circle in circles:
+            # Calculate boundary violations
+            if circle.x - circle.r < 0:
+                penalty += abs(circle.x - circle.r) * self.boundary_weight
+            elif circle.x + circle.r > 1:
+                penalty += abs(circle.x + circle.r - 1) * self.boundary_weight
+            if circle.y - circle.r < 0:
+                penalty += abs(circle.y - circle.r) * self.boundary_weight
+            elif circle.y + circle.r > 1:
+                penalty += abs(circle.y + circle.r - 1) * self.boundary_weight
+
+        return penalty
+
+    def _compute_overlap_penalty(self, circles: List[Circle]) -> float:
+        """Compute penalty based on overlap violations."""
+        penalty = 0.0
+
+        # Compute actual overlap amounts for more accurate penalty
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                circle1, circle2 = circles[i], circles[j]
+                distance = math.sqrt((circle1.x - circle2.x)**2 + (circle1.y - circle2.y)**2)
+
+                if distance < (circle1.r + circle2.r):
+                    overlap = (circle1.r + circle2.r - distance)
+                    penalty += overlap * self.overlap_weight
+
+        return penalty
+=======
+class FitnessEvaluator:
+    """Evaluates fitness with optimized penalty system."""
+
+    def __init__(self, boundary_weight: float = 1000.0, overlap_weight: float = 100000.0):
+        self.boundary_weight = boundary_weight
+        self.overlap_weight = overlap_weight
+        self._cache = {}  # Simple caching for repeated evaluations
+
+    def evaluate(self, circles: List[Circle], spatial_indexer: SpatialIndexer = None) -> float:
+        """Evaluate fitness with constraint penalties."""
+        # Create a hashable representation for caching
+        cache_key = tuple((c.x, c.y, c.r) for c in circles)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        # Check constraints
+        if not ConstraintValidator.validate_containment(circles):
+            penalty = self._compute_boundary_penalty(circles)
+            result = -penalty
+            self._cache[cache_key] = result
+            return result
+
+        if not ConstraintValidator.validate_overlap(circles, spatial_indexer):
+            penalty = self._compute_overlap_penalty(circles)
+            result = -penalty
+            self._cache[cache_key] = result
+            return result
+
+        # Valid solution - return sum of radii
+        result = float(sum(c.r for c in circles))
+        self._cache[cache_key] = result
+        return result
+
+    def _compute_boundary_penalty(self, circles: List[Circle]) -> float:
+        """Compute penalty based on boundary violations."""
+        penalty = 0.0
+
+        # Vectorized computation for better performance
+        positions = np.array([(c.x, c.y, c.r) for c in circles])
+        x_vals, y_vals, r_vals = positions[:, 0], positions[:, 1], positions[:, 2]
+
+        # Calculate violations for all circles at once
+        left_violation = np.maximum(0, r_vals - x_vals)
+        right_violation = np.maximum(0, r_vals - (1 - x_vals))
+        bottom_violation = np.maximum(0, r_vals - y_vals)
+        top_violation = np.maximum(0, r_vals - (1 - y_vals))
+
+        penalty = (np.sum(left_violation) + np.sum(right_violation) +
+                  np.sum(bottom_violation) + np.sum(top_violation)) * self.boundary_weight
+
+        return penalty
+
+    def _compute_overlap_penalty(self, circles: List[Circle]) -> float:
+        """Compute penalty based on overlap violations."""
+        penalty = 0.0
+
+        # Use spatial indexing for efficiency when possible
+        if len(circles) > SPATIAL_INDEXING_THRESHOLD:
+            # Build spatial index for efficient neighbor search
+            indexer = SpatialIndexer()
+            indexer.build_index(circles)
+
+            # Only check pairs that could possibly overlap based on spatial index
+            checked_pairs = set()
+            for i, circle in enumerate(circles):
+                neighbors = indexer.get_neighbors_advanced(circle, circle.r * 2)
+                for j in neighbors:
+                    if i < j and (i, j) not in checked_pairs:
+                        circle1, circle2 = circles[i], circles[j]
+                        distance = math.sqrt((circle1.x - circle2.x)**2 + (circle1.y - circle2.y)**2)
+
+                        if distance < (circle1.r + circle2.r):
+                            overlap = (circle1.r + circle2.r - distance)
+                            penalty += overlap * self.overlap_weight
+                            checked_pairs.add((i, j))
+        else:
+            # Brute force for smaller populations
+            n = len(circles)
+            for i in range(n):
+                for j in range(i+1, n):
+                    circle1, circle2 = circles[i], circles[j]
+                    distance = math.sqrt((circle1.x - circle2.x)**2 + (circle1.y - circle2.y)**2)
+
+                    if distance < (circle1.r + circle2.r):
+                        overlap = (circle1.r + circle2.r - distance)
+                        penalty += overlap * self.overlap_weight
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>

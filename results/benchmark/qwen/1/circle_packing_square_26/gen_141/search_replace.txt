@@ -1,0 +1,318 @@
+<NAME>
+add_constraint_aware_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more sophisticated constraint-aware local search that focuses on improving the sum of radii by more effectively handling overlap resolution and radius maximization. The key insight is to enhance the local search to better balance between expanding radii and maintaining constraints, particularly focusing on the most constrained circles first.
+
+This improvement will:
+1. Prioritize circles that are most constrained (smaller radii or surrounded by many neighbors)
+2. Use iterative refinement with better overlap resolution
+3. Implement more aggressive radius expansion techniques
+4. Improve position adjustment logic to be more systematic
+
+The change targets the `_local_search_improvement` function to make it more effective at finding better local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def _local_search_improvement(circles: np.ndarray, max_iterations: int = 500) -> np.ndarray:
+    """
+    Apply constraint-aware local search to improve the solution.
+    This attempts to iteratively improve the configuration by:
+    1. Resolving overlap constraints through position adjustments
+    2. Maximizing radii while maintaining constraints
+    """
+    # Make a copy to avoid modifying the original
+    improved_circles = circles.copy()
+
+    n = len(improved_circles)
+
+    for iteration in range(max_iterations):
+        # Track if any improvement was made
+        improved = False
+
+        # Try to increase radii first (while maintaining constraints)
+        for i in range(n):
+            x, y, r = improved_circles[i]
+
+            # Calculate maximum possible radius at this position
+            max_radius = min(x, 1-x, y, 1-y)
+
+            # Find neighboring circles to check constraints
+            neighbors = []
+            for j in range(n):
+                if i != j:
+                    x2, y2, r2 = improved_circles[j]
+                    dist_sq = (x - x2)**2 + (y - y2)**2
+                    min_dist_sq = (r + r2)**2
+                    neighbors.append((j, dist_sq, min_dist_sq))
+
+            # Calculate how much we can increase radius
+            min_dist_to_neighbor = float('inf')
+            for _, dist_sq, min_dist_sq in neighbors:
+                if dist_sq < min_dist_sq:
+                    min_dist_to_neighbor = min(min_dist_to_neighbor, dist_sq)
+
+            # If there's overlap, reduce radius
+            if min_dist_to_neighbor < (r + 0.001)**2:
+                # This circle is overlapping - reduce its radius
+                max_possible_r = min(max_radius,
+                                   min(neighbor[2] for neighbor in neighbors if neighbor[1] < neighbor[2])) - 0.001
+                if max_possible_r > 0.005:
+                    improved_circles[i, 2] = max(0.005, max_possible_r)
+                    improved = True
+            else:
+                # Try to increase radius if we have space
+                if r < max_radius:
+                    # Check if we can safely increase radius without violating other constraints
+                    safe_increase = True
+                    for j, dist_sq, min_dist_sq in neighbors:
+                        if dist_sq < (r + 0.01)**2:
+                            safe_increase = False
+                            break
+
+                    if safe_increase and r < max_radius - 0.001:
+                        new_radius = min(max_radius, r + 0.005)
+                        improved_circles[i, 2] = new_radius
+                        improved = True
+
+        # If no significant improvement in radii, try position adjustments
+        if not improved:
+            for i in range(n):
+                x, y, r = improved_circles[i]
+
+                # Try to move circle to reduce overlaps
+                best_x, best_y = x, y
+                best_radius = r
+
+                # Try small movements in 8 directions
+                movements = [(-0.005, -0.005), (-0.005, 0), (-0.005, 0.005),
+                           (0, -0.005),              (0, 0.005),
+                           (0.005, -0.005), (0.005, 0), (0.005, 0.005)]
+
+                best_move_score = -float('inf')
+
+                for dx, dy in movements:
+                    new_x, new_y = x + dx, y + dy
+
+                    # Check bounds
+                    if new_x - r < 0 or new_x + r > 1 or new_y - r < 0 or new_y + r > 1:
+                        continue
+
+                    # Check overlap with neighbors
+                    overlap_penalty = 0
+                    valid = True
+                    for j in range(n):
+                        if i != j:
+                            x2, y2, r2 = improved_circles[j]
+                            dist_sq = (new_x - x2)**2 + (new_y - y2)**2
+                            min_dist_sq = (r + r2)**2
+                            if dist_sq < min_dist_sq:
+                                overlap_penalty += (min_dist_sq - dist_sq) * 1000
+                                valid = False
+
+                    if valid:
+                        # Score based on overlap reduction and radius maximization
+                        score = -overlap_penalty + r
+                        if score > best_move_score:
+                            best_move_score = score
+                            best_x, best_y = new_x, new_y
+
+                # Apply the best movement if it improves the situation
+                if best_x != x or best_y != y:
+                    improved_circles[i, 0] = best_x
+                    improved_circles[i, 1] = best_y
+                    improved = True
+
+        # If no improvement was made, stop
+        if not improved:
+            break
+
+    return improved_circles
+=======
+def _local_search_improvement(circles: np.ndarray, max_iterations: int = 500) -> np.ndarray:
+    """
+    Apply constraint-aware local search to improve the solution.
+    This attempts to iteratively improve the configuration by:
+    1. Resolving overlap constraints through position adjustments
+    2. Maximizing radii while maintaining constraints
+    """
+    # Make a copy to avoid modifying the original
+    improved_circles = circles.copy()
+
+    n = len(improved_circles)
+
+    for iteration in range(max_iterations):
+        # Track if any improvement was made
+        improved = False
+
+        # Sort circles by how constrained they are (smaller radii or more neighbors)
+        # This prioritizes fixing the most problematic circles first
+        circle_constraints = []
+        for i in range(n):
+            x, y, r = improved_circles[i]
+
+            # Count overlapping neighbors
+            overlap_count = 0
+            max_radius = min(x, 1-x, y, 1-y)
+            neighbors = []
+
+            for j in range(n):
+                if i != j:
+                    x2, y2, r2 = improved_circles[j]
+                    dist_sq = (x - x2)**2 + (y - y2)**2
+                    min_dist_sq = (r + r2)**2
+                    if dist_sq < min_dist_sq:
+                        overlap_count += 1
+                        neighbors.append((j, dist_sq, min_dist_sq))
+
+            # Circle constraint score: higher means more constrained
+            constraint_score = overlap_count + (0.5 if r < 0.05 else 0)
+            circle_constraints.append((constraint_score, i))
+
+        # Sort by constraint score (descending - most constrained first)
+        circle_constraints.sort(reverse=True)
+
+        # Process circles in order of constraint
+        for _, i in circle_constraints:
+            x, y, r = improved_circles[i]
+
+            # Calculate maximum possible radius at this position
+            max_radius = min(x, 1-x, y, 1-y)
+
+            # Find neighboring circles to check constraints
+            neighbors = []
+            for j in range(n):
+                if i != j:
+                    x2, y2, r2 = improved_circles[j]
+                    dist_sq = (x - x2)**2 + (y - y2)**2
+                    min_dist_sq = (r + r2)**2
+                    neighbors.append((j, dist_sq, min_dist_sq))
+
+            # First, handle overlaps by reducing radius if necessary
+            min_dist_to_neighbor = float('inf')
+            for _, dist_sq, min_dist_sq in neighbors:
+                if dist_sq < min_dist_sq:
+                    min_dist_to_neighbor = min(min_dist_to_neighbor, dist_sq)
+
+            if min_dist_to_neighbor < (r + 1e-6)**2:
+                # Circle is overlapping - reduce radius to resolve
+                max_possible_r = 0
+                if neighbors:
+                    # Find minimum radius that would resolve overlap with all neighbors
+                    min_radius_from_neighbors = min(
+                        (neighbor[2] + np.sqrt(neighbor[1]) - 1e-6)
+                        for neighbor in neighbors if neighbor[1] < neighbor[2]**2
+                    )
+                    max_possible_r = max(0.005, min_radius_from_neighbors)
+                else:
+                    max_possible_r = max_radius
+
+                # Only reduce if it makes sense
+                if max_possible_r < r and max_possible_r > 0.005:
+                    improved_circles[i, 2] = max_possible_r
+                    improved = True
+            else:
+                # Try to increase radius if we have space and it won't cause overlaps
+                if r < max_radius - 1e-4:
+                    # Check if we can safely increase radius without violating other constraints
+                    safe_increase = True
+                    for j, dist_sq, min_dist_sq in neighbors:
+                        if dist_sq < (r + 0.02)**2:  # Allow some buffer
+                            safe_increase = False
+                            break
+
+                    # Also check if increasing radius would help in terms of total sum
+                    if safe_increase:
+                        # Try to expand radius as much as possible
+                        candidate_radius = min(max_radius, r + 0.01)
+
+                        # Verify no new overlaps are introduced
+                        no_new_overlaps = True
+                        for j, dist_sq, min_dist_sq in neighbors:
+                            if dist_sq < (candidate_radius + improved_circles[j, 2])**2:
+                                no_new_overlaps = False
+                                break
+
+                        if no_new_overlaps and candidate_radius > r:
+                            improved_circles[i, 2] = candidate_radius
+                            improved = True
+
+        # If no significant improvement in radii, try position adjustments
+        if not improved:
+            # For circles with overlaps, prioritize those with highest overlap count
+            overlap_candidates = []
+            for i in range(n):
+                x, y, r = improved_circles[i]
+                overlap_count = 0
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = improved_circles[j]
+                        dist_sq = (x - x2)**2 + (y - y2)**2
+                        min_dist_sq = (r + r2)**2
+                        if dist_sq < min_dist_sq:
+                            overlap_count += 1
+
+                if overlap_count > 0:
+                    overlap_candidates.append((overlap_count, i))
+
+            # Sort by overlap count descending
+            overlap_candidates.sort(reverse=True)
+
+            # Try to adjust positions of most overlapped circles
+            for _, i in overlap_candidates[:3]:  # Focus on top 3 most overlapped
+                x, y, r = improved_circles[i]
+
+                # Try small movements in several directions for better optimization
+                movements = [
+                    (-0.01, -0.01), (-0.01, 0), (-0.01, 0.01),
+                    (0, -0.01),                (0, 0.01),
+                    (0.01, -0.01), (0.01, 0), (0.01, 0.01),
+                    (-0.005, -0.005), (-0.005, 0), (-0.005, 0.005),
+                    (0, -0.005),                (0, 0.005),
+                    (0.005, -0.005), (0.005, 0), (0.005, 0.005)
+                ]
+
+                best_x, best_y = x, y
+                best_score = -float('inf')
+                best_radius = r
+
+                for dx, dy in movements:
+                    new_x, new_y = x + dx, y + dy
+
+                    # Check bounds
+                    if new_x - r < 0 or new_x + r > 1 or new_y - r < 0 or new_y + r > 1:
+                        continue
+
+                    # Check overlap with neighbors
+                    overlap_penalty = 0
+                    valid = True
+                    for j in range(n):
+                        if i != j:
+                            x2, y2, r2 = improved_circles[j]
+                            dist_sq = (new_x - x2)**2 + (new_y - y2)**2
+                            min_dist_sq = (r + r2)**2
+                            if dist_sq < min_dist_sq:
+                                overlap_penalty += (min_dist_sq - dist_sq) * 1000
+                                valid = False
+
+                    if valid:
+                        # Score based on overlap reduction and radius maximization
+                        score = -overlap_penalty + r
+                        if score > best_score:
+                            best_score = score
+                            best_x, best_y = new_x, new_y
+
+                # Apply the best movement if it helps
+                if best_x != x or best_y != y:
+                    improved_circles[i, 0] = best_x
+                    improved_circles[i, 1] = best_y
+                    improved = True
+
+        # If no improvement was made, stop
+        if not improved:
+            break
+
+    return improved_circles
+>>>>>>> REPLACE

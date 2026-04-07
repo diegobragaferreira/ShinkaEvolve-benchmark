@@ -1,0 +1,171 @@
+<NAME>
+implement_numba_jit_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Shapely for overlap detection which is computationally expensive. By implementing a JIT-compiled separating axis theorem (SAT) overlap detection algorithm using Numba, we can significantly speed up the constraint validation process, especially during evolutionary optimization where overlap checking happens frequently. This will enable faster fitness evaluations and allow for more extensive exploration of the solution space within the 180-second time limit.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def distance_point_to_line_segment(point_x: float, point_y: float,
+                                   line_start_x: float, line_start_y: float,
+                                   line_end_x: float, line_end_y: float) -> float:
+    """JIT compiled function to compute distance from point to line segment"""
+    A = point_x - line_start_x
+    B = point_y - line_start_y
+    C = line_end_x - line_start_x
+    D = line_end_y - line_start_y
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start_x + param * C
+    yy = line_start_y + param * D
+    dx = point_x - xx
+    dy = point_y - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        return hexagon_vertices_jit(self.center[0], self.center[1], self.rotation)
+
+    def area(self) -> float:
+        """Return area of hexagon"""
+        return (3 * np.sqrt(3) / 2) * self.side_length ** 2
+=======
+@jit(nopython=True)
+def distance_point_to_line_segment(point_x: float, point_y: float,
+                                   line_start_x: float, line_start_y: float,
+                                   line_end_x: float, line_end_y: float) -> float:
+    """JIT compiled function to compute distance from point to line segment"""
+    A = point_x - line_start_x
+    B = point_y - line_start_y
+    C = line_end_x - line_start_x
+    D = line_end_y - line_start_y
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start_x + param * C
+    yy = line_start_y + param * D
+    dx = point_x - xx
+    dy = point_y - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def get_edges(vertices: np.ndarray) -> np.ndarray:
+    """Get edges from vertices"""
+    edges = np.empty((len(vertices), 2))
+    for i in range(len(vertices)):
+        edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+    return edges
+
+@jit(nopython=True)
+def project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+    """Project polygon vertices onto an axis and return min/max projections"""
+    projections = np.empty(len(vertices))
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@jit(nopython=True)
+def hexagon_overlap_sat(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """Separating Axis Theorem for hexagon overlap detection"""
+    # Get edges of both hexagons
+    edges1 = get_edges(hex1_vertices)
+    edges2 = get_edges(hex2_vertices)
+
+    # Combine all axes (edges perpendicular to edges)
+    all_axes = np.empty((len(edges1) + len(edges2), 2))
+    for i in range(len(edges1)):
+        # Normal vector to edge (perpendicular)
+        all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+        if norm > 1e-10:
+            all_axes[i] /= norm
+    for i in range(len(edges2)):
+        # Normal vector to edge (perpendicular)
+        all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+        if norm > 1e-10:
+            all_axes[len(edges1) + i] /= norm
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = project_polygon_onto_axis(hex2_vertices, axis)
+
+        # If no overlap on this axis, polygons don't overlap
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        return hexagon_vertices_jit(self.center[0], self.center[1], self.rotation)
+
+    def area(self) -> float:
+        """Return area of hexagon"""
+        return (3 * np.sqrt(3) / 2) * self.side_length ** 2
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_shapely_overlap_check_with_sat
+</NAME>
+
+<DESCRIPTION>
+Replace the Shapely-based overlap checking with the newly implemented JIT-compiled Separating Axis Theorem (SAT) overlap detection. This will dramatically speed up the constraint validation process by eliminating the overhead of creating Shapely polygon objects and using efficient Numba-accelerated geometric operations. The SAT approach is mathematically sound for convex polygons like regular hexagons and provides a significant performance boost for the high-frequency overlap checks performed during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap_jit(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = Polygon(hex1.vertices())
+    poly2 = Polygon(hex2.vertices())
+    return poly1.intersects(poly2)
+
+def check_overlap(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = Polygon(hex1.vertices())
+    poly2 = Polygon(hex2.vertices())
+    return poly1.intersects(poly2)
+=======
+def check_overlap_jit(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Check if two hexagons overlap using JIT-compiled SAT"""
+    return hexagon_overlap_sat(hex1.vertices(), hex2.vertices())
+
+def check_overlap(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Check if two hexagons overlap using JIT-compiled SAT"""
+    return hexagon_overlap_sat(hex1.vertices(), hex2.vertices())
+>>>>>>> REPLACE
+</DIFF>

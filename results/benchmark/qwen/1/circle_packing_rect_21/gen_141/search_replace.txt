@@ -1,0 +1,287 @@
+<NAME>
+improve_voronoi_density_calculation
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based constraint density calculation is overly simplified and computationally expensive. I'll replace it with a more accurate and efficient method that uses direct neighbor counting with spatial indexing, which will better guide the adaptive mutation process and lead to better optimization results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_voronoi_constraints(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate Voronoi-based constraint information"""
+        if len(circles_list) < 2:
+            return {}
+
+        points = np.array([[x, y] for x, y, r in circles_list])
+        try:
+            vor = Voronoi(points)
+            # For each circle, compute its Voronoi cell area as a measure of local density
+            cell_areas = {}
+            for i, (x, y, r) in enumerate(circles_list):
+                # Find which Voronoi region this point belongs to
+                region_idx = None
+                for j, region in enumerate(vor.regions):
+                    if len(region) > 0 and -1 not in region:
+                        # Simple check if point is inside this region
+                        region_points = [vor.vertices[k] for k in region if k < len(vor.vertices)]
+                        if len(region_points) >= 3:
+                            # Check if point is inside the polygon (simplified)
+                            cx, cy = np.mean(region_points, axis=0)
+                            dist_to_center = np.sqrt((x - cx)**2 + (y - cy)**2)
+                            if dist_to_center < 2:  # Simplified test
+                                region_idx = j
+                                break
+                # Area inverse gives us a constraint density indicator
+                if region_idx is not None and len(vor.regions[region_idx]) > 0:
+                    area = np.sum(np.abs(np.diff(vor.regions[region_idx])))  # Simplified area calc
+                    cell_areas[i] = 1.0 / max(area, 1e-6)
+                else:
+                    cell_areas[i] = 1.0  # Default to high constraint
+            return cell_areas
+        except:
+            return {i: 1.0 for i in range(len(circles_list))}
+=======
+    def calculate_constraint_density(circles_list: List[Tuple[float, float, float]]) -> dict:
+        """Calculate constraint density for each circle based on neighbor count and distances"""
+        if len(circles_list) < 2:
+            return {}
+
+        points = np.array([[x, y] for x, y, r in circles_list])
+        try:
+            # Build spatial index for efficient neighbor queries
+            tree = cKDTree(points)
+
+            # For each circle, count neighbors within a reasonable distance
+            # and compute average distance to neighbors
+            density_info = {}
+            for i, (x, y, r) in enumerate(circles_list):
+                # Query neighbors within 3x radius (should be sufficient for most cases)
+                # Using a larger radius to capture more neighbors for density estimation
+                neighbors = tree.query_ball_point([x, y], r * 3.0)
+
+                # Exclude the circle itself
+                neighbors = [n for n in neighbors if n != i]
+
+                # Count neighbors and compute average distance
+                neighbor_count = len(neighbors)
+                avg_distance = 0.0
+
+                if neighbor_count > 0:
+                    # Compute distances to all neighbors
+                    neighbor_points = points[neighbors]
+                    distances = np.sqrt(np.sum((neighbor_points - [x, y])**2, axis=1))
+                    avg_distance = np.mean(distances)
+
+                # Density is inversely related to average distance and directly related to neighbor count
+                # Lower average distance = higher density = more constrained
+                # More neighbors = higher density = more constrained
+                if avg_distance > 0:
+                    density = neighbor_count / avg_distance
+                else:
+                    density = neighbor_count  # If no neighbors, just use count
+
+                # Normalize density to make it comparable across different configurations
+                density_info[i] = max(0.1, density)  # Minimum density to avoid division by zero issues
+
+            return density_info
+        except:
+            # Fallback to simple neighbor counting if Voronoi fails
+            density_info = {}
+            for i, (x, y, r) in enumerate(circles_list):
+                # Simple approach: count neighbors within 3x radius
+                neighbor_count = 0
+                for j, (ox, oy, oradius) in enumerate(circles_list):
+                    if i != j:
+                        distance = np.sqrt((x - ox)**2 + (y - oy)**2)
+                        if distance < (r + oradius) * 3:  # Within 3x combined radius
+                            neighbor_count += 1
+                density_info[i] = max(0.1, neighbor_count)
+            return density_info
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_mutation_function_call
+</NAME>
+
+<DESCRIPTION>
+Update the call to the constraint calculation function to use the new improved version that I just added, which provides more accurate constraint density information for adaptive mutation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Add constraint density information
+            constraint_density = calculate_voronoi_constraints([(x, y, r) for x, y, r in parent])
+=======
+            # Add constraint density information
+            constraint_density = calculate_constraint_density([(x, y, r) for x, y, r in parent])
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhance_local_optimization_with_radius_adjustment
+</NAME>
+
+<DESCRIPTION>
+Improve the local optimization process to better handle radius adjustments by incorporating a more sophisticated approach that considers both boundary constraints and neighbor interactions. This will help achieve better packing efficiency.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_optimization(circles: np.ndarray, max_iterations: int = 30) -> np.ndarray:
+        """Perform local optimization focusing on improving radii"""
+        current = circles.copy()
+        best_fitness = evaluate_fitness(current)[0]
+
+        for iteration in range(max_iterations):
+            improved = False
+            # Try small adjustments to each circle
+            for i in range(len(current)):
+                x, y, r = current[i]
+                best_r = r
+                best_x, best_y = x, y
+                best_fitness_local = best_fitness
+
+                # Test nearby positions with different resolution based on radius
+                resolution = max(0.002, r * 0.1)  # Finer resolution for smaller circles
+                steps = int(0.02 / resolution)
+                if steps < 1:
+                    steps = 1
+
+                for dx in np.linspace(-0.02, 0.02, steps * 2 + 1):
+                    for dy in np.linspace(-0.02, 0.02, steps * 2 + 1):
+                        new_x, new_y = x + dx, y + dy
+                        new_r = r
+
+                        # Check if new position is valid
+                        if is_valid_position(new_x, new_y, new_r):
+                            # Check collision with others
+                            valid = True
+                            for j in range(len(current)):
+                                if i != j:
+                                    ox, oy, oradius = current[j]
+                                    distance = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                                    if distance < (new_r + oradius):
+                                        valid = False
+                                        break
+
+                            if valid:
+                                # Test if we can increase radius
+                                test_r = min(
+                                    new_r,
+                                    new_x, width - new_x,
+                                    new_y, height - new_y
+                                )
+
+                                test_circles = current.copy()
+                                test_circles[i] = [new_x, new_y, test_r]
+
+                                new_fitness, _ = evaluate_fitness(test_circles)
+
+                                if new_fitness > best_fitness_local:
+                                    best_fitness_local = new_fitness
+                                    best_r = test_r
+                                    best_x, best_y = new_x, new_y
+                                    improved = True
+
+                current[i] = [best_x, best_y, best_r]
+
+            # Update best fitness
+            new_fitness, _ = evaluate_fitness(current)
+            if new_fitness > best_fitness:
+                best_fitness = new_fitness
+            elif not improved:
+                break  # No improvement, stop early
+
+        return current
+=======
+    def local_optimization(circles: np.ndarray, max_iterations: int = 30) -> np.ndarray:
+        """Perform local optimization focusing on improving radii"""
+        current = circles.copy()
+        best_fitness = evaluate_fitness(current)[0]
+
+        for iteration in range(max_iterations):
+            improved = False
+            # Try small adjustments to each circle
+            for i in range(len(current)):
+                x, y, r = current[i]
+                best_r = r
+                best_x, best_y = x, y
+                best_fitness_local = best_fitness
+
+                # Test nearby positions with different resolution based on radius
+                resolution = max(0.002, r * 0.1)  # Finer resolution for smaller circles
+                steps = int(0.02 / resolution)
+                if steps < 1:
+                    steps = 1
+
+                # Test a wider range of positions for better optimization
+                dx_range = np.linspace(-0.02, 0.02, steps * 2 + 1)
+                dy_range = np.linspace(-0.02, 0.02, steps * 2 + 1)
+
+                for dx in dx_range:
+                    for dy in dy_range:
+                        new_x, new_y = x + dx, y + dy
+                        new_r = r
+
+                        # Check if new position is valid
+                        if is_valid_position(new_x, new_y, new_r):
+                            # Check collision with others
+                            valid = True
+                            for j in range(len(current)):
+                                if i != j:
+                                    ox, oy, oradius = current[j]
+                                    distance = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                                    if distance < (new_r + oradius):
+                                        valid = False
+                                        break
+
+                            if valid:
+                                # Test if we can increase radius
+                                # Calculate maximum possible radius at new position
+                                max_radius_x = min(new_x, width - new_x)
+                                max_radius_y = min(new_y, height - new_y)
+
+                                # Consider neighbor interactions when determining max radius
+                                # Make sure we don't create overlaps with neighbors
+                                max_radius = min(max_radius_x, max_radius_y)
+
+                                # Add safety margin to ensure no overlaps with neighbors
+                                for j in range(len(current)):
+                                    if i != j:
+                                        ox, oy, oradius = current[j]
+                                        distance = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                                        # Reduce radius to maintain minimum distance from neighbors
+                                        max_radius = min(max_radius, distance - oradius - 0.001)
+
+                                test_r = max(0.001, min(new_r, max_radius))
+
+                                test_circles = current.copy()
+                                test_circles[i] = [new_x, new_y, test_r]
+
+                                new_fitness, _ = evaluate_fitness(test_circles)
+
+                                if new_fitness > best_fitness_local:
+                                    best_fitness_local = new_fitness
+                                    best_r = test_r
+                                    best_x, best_y = new_x, new_y
+                                    improved = True
+
+                current[i] = [best_x, best_y, best_r]
+
+            # Update best fitness
+            new_fitness, _ = evaluate_fitness(current)
+            if new_fitness > best_fitness:
+                best_fitness = new_fitness
+            elif not improved:
+                break  # No improvement, stop early
+
+        return current
+>>>>>>> REPLACE
+
+</DIFF>

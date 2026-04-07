@@ -1,0 +1,145 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+import time
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates
+                 of the i-th circle of radius r.
+    """
+    def evaluate(individual):
+        """Evaluate fitness of an individual (set of circles)"""
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Calculate sum of radii
+        total_radius = np.sum(circles[:, 2])
+
+        # Check constraints
+        penalty = 0
+
+        # Check containment constraints
+        for x, y, r in circles:
+            if x < r or x > 1 - r or y < r or y > 1 - r:
+                penalty += 1000  # Large penalty for containment violation
+
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+
+                # Distance between centers
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_dist_sq = (r1 + r2)**2
+
+                if dist_sq < min_dist_sq:
+                    # Overlap penalty increases with how much they overlap
+                    overlap = min_dist_sq - dist_sq
+                    penalty += overlap * 1000
+
+        # Return negative total radius (since we want to maximize) plus penalties
+        return (-total_radius - penalty,),
+
+    def mutate_individual(individual, indpb=0.1):
+        """Mutate a single individual"""
+        mutated = list(individual)
+        for i in range(len(mutated)):
+            if random.random() < indpb:
+                if i % 3 == 2:  # Radius
+                    # Mutate radius with small random change
+                    mutated[i] = max(0.001, mutated[i] + random.gauss(0, 0.01))
+                else:  # x or y coordinate
+                    # Mutate position with small random change
+                    mutated[i] = max(0.001, min(0.999, mutated[i] + random.gauss(0, 0.01)))
+        return tuple(mutated),
+
+    def create_individual():
+        """Create a random individual (set of circles)"""
+        individual = []
+        for _ in range(26):
+            # Random positions and radii
+            x = random.uniform(0.001, 0.999)
+            y = random.uniform(0.001, 0.999)
+            r = random.uniform(0.001, 0.1)
+            individual.extend([x, y, r])
+        return tuple(individual)
+
+    # Setup DEAP framework
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population
+    population_size = 50
+    generations = 100
+
+    population = toolbox.population(n=population_size)
+
+    # Run evolution
+    start_time = time.time()
+
+    try:
+        for gen in range(generations):
+            # Select the next generation individuals
+            offspring = toolbox.select(population, len(population))
+            offspring = list(map(toolbox.clone, offspring))
+
+            # Apply crossover and mutation on the offspring
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < 0.5:
+                    toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if random.random() < 0.2:
+                    toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = map(toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            # The population is entirely replaced by the offspring
+            population[:] = offspring
+
+            # Print progress
+            if gen % 10 == 0:
+                best_ind = tools.selBest(population, 1)[0]
+                best_fitness = -best_ind.fitness.values[0]
+                print(f"Generation {gen}: Best fitness = {best_fitness}")
+
+            # Early stopping if we've exceeded time limit
+            if time.time() - start_time > 55:  # Leave some buffer for cleanup
+                break
+
+    except Exception as e:
+        print(f"Evolution failed: {e}")
+
+    # Get final result
+    best_individual = tools.selBest(population, 1)[0]
+    circles = np.array(best_individual).reshape(-1, 3)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

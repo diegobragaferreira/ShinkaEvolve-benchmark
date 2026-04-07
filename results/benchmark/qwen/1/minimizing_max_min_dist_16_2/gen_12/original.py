@@ -1,0 +1,54 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist, squareform
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into points
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Compute min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing the negative)
+        if d_max == 0:
+            return -1.0
+        return -d_min / d_max
+
+    # Define bounds for each coordinate (0 to 1 for both x and y)
+    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        recombination=0.7,
+        mutation=(0.5, 1.0),
+        disp=False
+    )
+
+    # Return the optimized points
+    points = result.x.reshape(-1, 2)
+
+    return points
+
+
+# EVOLVE-BLOCK-END

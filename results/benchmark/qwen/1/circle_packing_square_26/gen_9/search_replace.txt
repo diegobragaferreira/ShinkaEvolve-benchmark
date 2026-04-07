@@ -1,0 +1,253 @@
+<NAME>
+evolutionary_circle_packing
+</NAME>
+
+<DESCRIPTION>
+Implement an evolutionary algorithm approach to optimize circle packing. This approach will:
+1. Use a genetic algorithm to evolve circle placements
+2. Implement proper constraint checking for containment and non-overlap
+3. Use a fitness function based on sum of radii
+4. Include mutation and crossover operators specific to circle packing
+5. Maintain deterministic behavior with fixed seeds
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+import random
+import math
+
+# Fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Uses evolutionary algorithm approach:
+    - Each individual represents 26 circles (x, y, r)
+    - Fitness is the sum of radii
+    - Constraints checked via penalty method
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    N_CIRCLES = 26
+    POP_SIZE = 100
+    GEN_COUNT = 50
+    MUTPB = 0.3
+    CXPB = 0.5
+
+    # Define bounds for each circle: (min_x, max_x, min_y, max_y, min_r, max_r)
+    bounds = []
+    for _ in range(N_CIRCLES):
+        bounds.append((0.0, 1.0, 0.0, 1.0, 0.0, 0.5))  # x, y, r limits
+
+    # Create fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    def eval_circle_placement(individual):
+        """Evaluate placement fitness with penalty for constraints"""
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+
+        # Extract positions and radii
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Calculate total radius (objective)
+        total_radius = np.sum(radii)
+
+        # Penalty for constraint violations
+        penalty = 0
+
+        # Check containment constraints
+        for i, (pos, r) in enumerate(zip(positions, radii)):
+            x, y = pos
+            # Circle must be fully inside unit square
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                penalty += 1000
+
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                pos_i = circles[i, :2]
+                pos_j = circles[j, :2]
+                r_i = circles[i, 2]
+                r_j = circles[j, 2]
+
+                # Distance between centers
+                dist = np.sqrt(np.sum((pos_i - pos_j)**2))
+
+                # Must not overlap (distance >= sum of radii)
+                if dist < (r_i + r_j):
+                    penalty += 1000 * (r_i + r_j - dist)
+
+        # Return fitness (total_radius - penalty)
+        return (total_radius - penalty,)
+
+    def mutate_circle(individual):
+        """Mutate a circle placement"""
+        for i in range(len(individual)):
+            # Only mutate radii sometimes
+            if random.random() < 0.3:
+                # Mutate radius
+                idx = i % 3
+                if idx == 2:  # radius index
+                    old_r = individual[i]
+                    new_r = old_r + random.gauss(0, 0.01)
+                    individual[i] = max(0.001, min(0.5, new_r))
+            else:
+                # Mutate position
+                idx = i % 3
+                if idx < 2:  # position indices (x, y)
+                    old_val = individual[i]
+                    new_val = old_val + random.gauss(0, 0.01)
+                    individual[i] = max(0, min(1, new_val))
+        return individual,
+
+    def create_individual():
+        """Create a random valid individual"""
+        individual = []
+        for i in range(N_CIRCLES):
+            # Start with random positions and small radii
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            # Ensure initial radius is reasonable
+            r = random.uniform(0.01, 0.1)
+            individual.extend([x, y, r])
+        return creator.Individual(individual)
+
+    # Initialize toolbox
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", eval_circle_placement)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", mutate_circle)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population
+    population = toolbox.population(n=POP_SIZE)
+
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    try:
+        population, logbook = algorithms.eaSimple(
+            population, toolbox, cxpb=CXPB, mutpb=MUTPB,
+            ngen=GEN_COUNT, stats=stats, halloffame=hof, verbose=False
+        )
+    except Exception as e:
+        # Fallback to simple heuristic if GA fails
+        print(f"GA failed with error: {e}")
+        return heuristic_circle_packing()
+
+    # Return best solution
+    best_individual = hof[0]
+    result = np.array(best_individual).reshape(-1, 3)
+    return result
+
+def heuristic_circle_packing() -> np.ndarray:
+    """Fallback method using a more structured approach"""
+    # Simple grid-based arrangement with some refinement
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Try a hexagonal packing pattern
+    rows = 5
+    cols = 5
+    if n < rows * cols:
+        rows = math.ceil(n / cols)
+
+    # Create regular grid points
+    spacing_x = 0.9 / (cols + 1)
+    spacing_y = 0.9 / (rows + 1)
+
+    count = 0
+    for i in range(rows):
+        for j in range(cols):
+            if count >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            # Set reasonable initial radius
+            r = min(spacing_x, spacing_y) * 0.4
+            circles[count] = [x, y, r]
+            count += 1
+
+    # Refine positions to avoid overlaps
+    # Simple iterative improvement
+    for _ in range(100):
+        improved = False
+        for i in range(n):
+            # Try to move circle to reduce overlaps
+            best_pos = circles[i, :2].copy()
+            best_rad = circles[i, 2]
+            best_score = -1000
+
+            # Check nearby positions
+            for dx in [-0.02, -0.01, 0, 0.01, 0.02]:
+                for dy in [-0.02, -0.01, 0, 0.01, 0.02]:
+                    test_x = max(0.01, min(0.99, circles[i, 0] + dx))
+                    test_y = max(0.01, min(0.99, circles[i, 1] + dy))
+                    test_r = circles[i, 2]
+
+                    # Check constraint violations
+                    valid = True
+                    for j in range(n):
+                        if i != j:
+                            dist = np.sqrt((test_x - circles[j, 0])**2 + (test_y - circles[j, 1])**2)
+                            if dist < (test_r + circles[j, 2]):
+                                valid = False
+                                break
+
+                    if valid:
+                        score = test_r  # Just maximize radius for now
+                        if score > best_score:
+                            best_score = score
+                            best_pos = [test_x, test_y]
+
+            # Apply best improvement if found
+            if best_score > circles[i, 2]:
+                circles[i, :2] = best_pos
+                circles[i, 2] = best_score
+                improved = True
+
+        if not improved:
+            break
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

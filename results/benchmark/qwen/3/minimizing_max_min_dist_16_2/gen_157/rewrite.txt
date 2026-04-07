@@ -1,0 +1,441 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import Voronoi
+import time
+from typing import Tuple, List
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+        
+        # Compute pairwise distances
+        distances = pdist(points)
+        
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Avoid division by zero
+        if max_dist == 0:
+            return 0.0
+            
+        return min_dist / max_dist
+
+    def compute_voronoi_uniformity(points) -> float:
+        """Compute a measure of Voronoi cell uniformity to guide optimization."""
+        try:
+            vor = Voronoi(points)
+            
+            # Calculate areas of finite Voronoi regions
+            areas = []
+            for region in vor.regions:
+                if not any(v == -1 for v in region):  # Skip infinite regions
+                    polygon = [vor.vertices[i] for i in region]
+                    if len(polygon) >= 3:
+                        # Calculate polygon area using shoelace formula
+                        area = 0.5 * abs(sum(polygon[i][0] * polygon[(i+1)%len(polygon)][1] - 
+                                           polygon[(i+1)%len(polygon)][0] * polygon[i][1] 
+                                           for i in range(len(polygon))))
+                        areas.append(area)
+            
+            if not areas:
+                return 0.0
+                
+            # Return coefficient of variation of areas (lower is better)
+            mean_area = np.mean(areas)
+            if mean_area == 0:
+                return 0.0
+                
+            std_area = np.std(areas)
+            return std_area / mean_area if mean_area > 0 else 0.0
+        except:
+            return 0.0
+
+    def compute_combined_fitness(points) -> float:
+        """Compute fitness combining distance ratio and Voronoi uniformity."""
+        ratio = compute_min_max_ratio(points)
+        uniformity = compute_voronoi_uniformity(points)
+        
+        # Weighted combination: prioritize distance ratio but penalize poor uniformity
+        # Uniformity penalty: higher coefficient of variation = worse uniformity
+        uniformity_penalty = uniformity * 0.1
+        return ratio - uniformity_penalty
+
+    def generate_voronoi_based_initial_populations(pop_size: int = 30) -> List[np.ndarray]:
+        """Generate diverse initial populations based on Voronoi patterns."""
+        populations = []
+        
+        # Strategy 1: Regular grid with Voronoi-inspired perturbations
+        for _ in range(pop_size // 6):
+            points = []
+            for i in range(4):
+                for j in range(4):
+                    # Base square grid
+                    x = j * 0.25 + (i % 2) * 0.125
+                    y = i * 0.25
+                    
+                    # Add Voronoi-informed perturbations to encourage uniformity
+                    perturbation_magnitude = 0.01
+                    x += np.random.normal(0, perturbation_magnitude * 0.3)
+                    y += np.random.normal(0, perturbation_magnitude * 0.3)
+                    
+                    points.append([x, y])
+            
+            points = np.array(points)
+            points = np.clip(points, 0, 1)
+            populations.append(points.copy())
+        
+        # Strategy 2: Fibonacci spiral with Voronoi optimization
+        for _ in range(pop_size // 6):
+            points = []
+            golden_ratio = (1 + np.sqrt(5)) / 2
+            
+            for i in range(16):
+                # Fibonacci spiral projection onto 2D square
+                z = 1 - (i / 15.0) * 2
+                radius = np.sqrt(1 - z*z)
+                theta = np.arccos(z)
+                phi = (i * golden_ratio) % (2 * np.pi)
+                
+                # Convert to Cartesian on unit sphere
+                x = radius * np.cos(phi)
+                y = radius * np.sin(phi)
+                
+                # Project to [0,1]x[0,1] using affine transformation
+                x_norm = (x + 1) / 2
+                y_norm = (y + 1) / 2
+                
+                # Add Voronoi-inspired noise
+                x_norm += np.random.normal(0, 0.005)
+                y_norm += np.random.normal(0, 0.005)
+                
+                points.append([x_norm, y_norm])
+            
+            points = np.array(points)
+            points = np.clip(points, 0, 1)
+            populations.append(points.copy())
+        
+        # Strategy 3: Triangular lattice with systematic perturbations  
+        for _ in range(pop_size // 6):
+            points = []
+            spacing_x = 0.25
+            spacing_y = 0.25 * np.sqrt(3) / 2
+            
+            for i in range(4):
+                for j in range(4):
+                    # Triangular lattice pattern
+                    x = j * spacing_x + (i % 2) * spacing_x / 2
+                    y = i * spacing_y
+                    
+                    # Add Voronoi-sensitive perturbation
+                    x += np.random.normal(0, 0.01)
+                    y += np.random.normal(0, 0.01)
+                    
+                    points.append([x, y])
+            
+            points = np.array(points)
+            points = np.clip(points, 0, 1)
+            populations.append(points.copy())
+        
+        # Strategy 4: Random with Voronoi-based selection criteria
+        for _ in range(pop_size // 6):
+            points = np.random.rand(16, 2)
+            # Slightly bias towards more uniform distribution
+            for i in range(16):
+                # Use rejection sampling to favor more uniform configurations
+                attempts = 0
+                while attempts < 100:
+                    new_points = np.random.rand(16, 2)
+                    # Check if this configuration has reasonable uniformity
+                    test_uniformity = compute_voronoi_uniformity(new_points)
+                    if test_uniformity < 0.8:  # Prefer less uniform initially, let evolution improve
+                        points = new_points
+                        break
+                    attempts += 1
+            
+            populations.append(points.copy())
+        
+        # Strategy 5: Checkerboard with Voronoi awareness
+        for _ in range(pop_size // 6):
+            points = []
+            for i in range(4):
+                for j in range(4):
+                    x = j * 0.25 + (i % 2) * 0.125 + np.random.normal(0, 0.005)
+                    y = i * 0.25 + np.random.normal(0, 0.005)
+                    
+                    # Add Voronoi-aware asymmetry
+                    asym_x = np.sin(i * 1.5) * 0.003 * (j + 1)
+                    asym_y = np.cos(j * 1.3) * 0.003 * (i + 1)
+                    
+                    x += asym_x
+                    y += asym_y
+                    
+                    points.append([x, y])
+            
+            points = np.array(points)
+            points = np.clip(points, 0, 1)
+            populations.append(points.copy())
+        
+        # Strategy 6: Hexagonal with Voronoi perturbations
+        for _ in range(pop_size // 6):
+            points = []
+            # Create hexagonal lattice with proper spacing
+            rows = 4
+            cols = 4
+            
+            # Proper hexagonal spacing
+            spacing = 0.25
+            height = spacing * np.sqrt(3) / 2
+            
+            for i in range(rows):
+                for j in range(cols):
+                    if len(points) < 16:
+                        x = j * spacing + (i % 2) * spacing / 2
+                        y = i * height
+                        
+                        # Add Voronoi-informed perturbations
+                        x += np.random.normal(0, 0.01)
+                        y += np.random.normal(0, 0.01)
+                        
+                        points.append([x, y])
+            
+            points = np.array(points[:16])  # Ensure exactly 16 points
+            points = np.clip(points, 0, 1)
+            populations.append(points.copy())
+        
+        return populations
+
+    def adaptive_evolution_step(population: List[np.ndarray], fitness_scores: List[float]) -> List[np.ndarray]:
+        """Perform one step of evolutionary optimization with Voronoi awareness."""
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+        
+        # New population
+        new_population = []
+        
+        # Elitism: keep top 20%
+        elite_count = max(1, len(population) // 5)
+        new_population.extend(sorted_population[:elite_count])
+        
+        # Tournament selection and crossover
+        while len(new_population) < len(population):
+            # Tournament selection
+            tournament_size = min(5, len(population) // 3)
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            
+            # Select second parent
+            tournament_indices2 = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness2 = [fitness_scores[i] for i in tournament_indices2]
+            winner_idx2 = tournament_indices2[np.argmax(tournament_fitness2)]
+            
+            # Crossover: blend parent configurations with Voronoi-aware blending
+            parent1, parent2 = sorted_population[winner_idx], sorted_population[winner_idx2]
+            
+            # Blend with 50% weight and Voronoi structure preservation
+            mask = np.random.rand(16, 2) > 0.5
+            child = np.where(mask, parent1, parent2).copy()
+            
+            # Add small Voronoi-preserved mutation
+            if np.random.rand() < 0.3:
+                # Select a few points to reposition based on surrounding Voronoi neighbors
+                mutation_points = np.random.choice(16, size=max(1, 16 // 8), replace=False)
+                for idx in mutation_points:
+                    # Move point slightly in direction that improves local Voronoi uniformity
+                    neighbor_indices = np.random.choice(16, size=min(5, 16), replace=False)
+                    neighbor_indices = neighbor_indices[neighbor_indices != idx]
+                    
+                    if len(neighbor_indices) > 0:
+                        # Move towards centroid of neighbors
+                        centroid = np.mean(parent1[neighbor_indices], axis=0)
+                        direction = centroid - parent1[idx]
+                        # Normalize and scale
+                        norm_dir = np.linalg.norm(direction)
+                        if norm_dir > 0:
+                            direction = direction / norm_dir
+                            # Perturb in this direction with small magnitude
+                            child[idx] += direction * np.random.normal(0, 0.005)
+            
+            # Apply boundary constraints
+            child = np.clip(child, 0, 1)
+            new_population.append(child)
+        
+        return new_population
+
+    def voronoi_adaptive_local_search(points: np.ndarray, max_iter: int = 300) -> np.ndarray:
+        """Perform adaptive local search leveraging Voronoi structure."""
+        current_points = points.copy()
+        current_fitness = compute_combined_fitness(current_points)
+        
+        # Track improvement for adaptive cooling
+        best_points = current_points.copy()
+        best_fitness = current_fitness
+        
+        # Adaptive step sizes based on Voronoi structure
+        step_size = 0.02
+        min_step_size = 0.001
+        decay_factor = 0.99
+        
+        for iteration in range(max_iter):
+            # Create candidate by moving points in directions that improve Voronoi uniformity
+            candidate_points = current_points.copy()
+            
+            # Select points to modify based on contribution to Voronoi uniformity
+            # Points in poorly shaped Voronoi cells are prioritized for modification
+            try:
+                vor = Voronoi(current_points)
+                areas = []
+                for region in vor.regions:
+                    if not any(v == -1 for v in region):
+                        polygon = [vor.vertices[i] for i in region]
+                        if len(polygon) >= 3:
+                            area = 0.5 * abs(sum(polygon[i][0] * polygon[(i+1)%len(polygon)][1] - 
+                                               polygon[(i+1)%len(polygon)][0] * polygon[i][1] 
+                                               for i in range(len(polygon))))
+                            areas.append(area)
+                
+                # If we have good Voronoi structure, move all points
+                if len(areas) >= 16:
+                    mean_area = np.mean(areas) if np.mean(areas) > 0 else 1.0
+                    var_area = np.var(areas) if len(areas) > 1 else 0.0
+                    
+                    # Move all points with informed perturbation
+                    for i in range(len(candidate_points)):
+                        # Direction based on Voronoi geometry
+                        perturbation = np.random.normal(0, step_size, 2)
+                        candidate_points[i] += perturbation
+                        
+                        # Ensure within bounds
+                        candidate_points[i] = np.clip(candidate_points[i], 0, 1)
+                else:
+                    # Fallback to random movement if Voronoi structure is poor
+                    idx = np.random.randint(0, len(candidate_points))
+                    candidate_points[idx] += np.random.normal(0, step_size, 2)
+                    candidate_points[idx] = np.clip(candidate_points[idx], 0, 1)
+                    
+            except Exception:
+                # If Voronoi computation fails, fall back to simple perturbation
+                idx = np.random.randint(0, len(candidate_points))
+                candidate_points[idx] += np.random.normal(0, step_size, 2)
+                candidate_points[idx] = np.clip(candidate_points[idx], 0, 1)
+            
+            # Evaluate candidate
+            candidate_fitness = compute_combined_fitness(candidate_points)
+            
+            # Accept or reject
+            if candidate_fitness > current_fitness:
+                current_points = candidate_points.copy()
+                current_fitness = candidate_fitness
+                
+                if candidate_fitness > best_fitness:
+                    best_points = current_points.copy()
+                    best_fitness = candidate_fitness
+            else:
+                # Occasionally accept worse solutions to escape local minima
+                if np.random.rand() < 0.05:
+                    current_points = candidate_points.copy()
+                    current_fitness = candidate_fitness
+            
+            # Adaptive step size reduction
+            step_size = max(min_step_size, step_size * decay_factor)
+            
+            # Early stopping if no improvement in last 50 iterations
+            if iteration > 0 and iteration % 50 == 0:
+                # Simple check if we've plateaued
+                if abs(current_fitness - best_fitness) < 1e-8:
+                    break
+        
+        return best_points
+
+    def run_evolutionary_optimization(max_generations: int = 150) -> np.ndarray:
+        """Run the main evolutionary optimization process."""
+        np.random.seed(42)
+        
+        # Initialize population with Voronoi-based strategies
+        population = generate_voronoi_based_initial_populations(30)
+        
+        best_overall_points = None
+        best_overall_fitness = -np.inf
+        
+        # Evolution loop
+        for generation in range(max_generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                # Evaluate combined fitness with Voronoi awareness
+                fitness = compute_combined_fitness(individual)
+                fitness_scores.append(fitness)
+                
+                if fitness > best_overall_fitness:
+                    best_overall_fitness = fitness
+                    best_overall_points = individual.copy()
+            
+            # Perform evolutionary step
+            population = adaptive_evolution_step(population, fitness_scores)
+            
+            # Occasionally refine best individuals with local search
+            if generation % 10 == 0 and generation > 0:
+                for i in range(min(5, len(population))):
+                    if np.random.rand() < 0.5:  # 50% chance to refine
+                        refinement = voronoi_adaptive_local_search(population[i], max_iter=50)
+                        refined_fitness = compute_combined_fitness(refinement)
+                        current_fitness = compute_combined_fitness(population[i])
+                        if refined_fitness > current_fitness:
+                            population[i] = refinement.copy()
+        
+        return best_overall_points
+
+    # Execute the optimization
+    try:
+        # Run evolutionary optimization
+        final_points = run_evolutionary_optimization(max_generations=150)
+        
+        # Final refinement with Voronoi-aware local search
+        refined_points = voronoi_adaptive_local_search(final_points, max_iter=200)
+        
+        # Verify and return result
+        if refined_points is not None:
+            return refined_points
+        else:
+            # Fallback to previous approach
+            points = []
+            for i in range(4):
+                for j in range(4):
+                    x = j * 0.25 + (i % 2) * 0.125
+                    y = i * 0.25
+                    points.append([x, y])
+            
+            points = np.array(points) + np.random.normal(0, 0.005, (16, 2))
+            points = np.clip(points, 0, 1)
+            return points
+            
+    except Exception as e:
+        # Final fallback
+        warnings.warn(f"Evolutionary optimization failed: {e}")
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+                points.append([x, y])
+        
+        points = np.array(points) + np.random.normal(0, 0.005, (16, 2))
+        points = np.clip(points, 0, 1)
+        return points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,250 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon, Point
+import time
+import random
+
+def hexagon_vertices(center_x, center_y, size=1, angle_deg=0):
+    """Generate vertices of a regular hexagon given center, size, and rotation."""
+    angle_rad = np.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        x = center_x + size * np.cos(angle)
+        y = center_y + size * np.sin(angle)
+        vertices.append((x, y))
+    return np.array(vertices)
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely with buffer for precision."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    # Use small buffer to handle floating point precision issues
+    return poly1.buffer(1e-10).intersects(poly2.buffer(1e-10))
+
+def compute_outer_hex_radius(inner_hex_data, outer_center_x, outer_center_y):
+    """Compute minimum outer hexagon radius that contains all inner hexagons."""
+    max_distance = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, _ = inner_hex_data[i]
+        distance = np.sqrt((cx - outer_center_x)**2 + (cy - outer_center_y)**2)
+        max_distance = max(max_distance, distance + 1)  # Add radius of unit hexagon
+    return max_distance
+
+def evaluate_configuration(inner_hex_data, outer_center_x, outer_center_y):
+    """Evaluate current configuration: returns (validity, inv_radius)."""
+    # Check for overlaps
+    for i in range(len(inner_hex_data)):
+        hex1_vertices = hexagon_vertices(inner_hex_data[i][0], inner_hex_data[i][1], 1, inner_hex_data[i][2])
+        for j in range(i+1, len(inner_hex_data)):
+            hex2_vertices = hexagon_vertices(inner_hex_data[j][0], inner_hex_data[j][1], 1, inner_hex_data[j][2])
+            if check_overlap(hex1_vertices, hex2_vertices):
+                return False, 0
+
+    # Check containment
+    outer_radius = compute_outer_hex_radius(inner_hex_data, outer_center_x, outer_center_y)
+    outer_vertices = hexagon_vertices(outer_center_x, outer_center_y, outer_radius, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    for i in range(len(inner_hex_data)):
+        hex_vertices = hexagon_vertices(inner_hex_data[i][0], inner_hex_data[i][1], 1, inner_hex_data[i][2])
+        for vertex in hex_vertices:
+            point = Point(vertex[0], vertex[1])
+            if not outer_polygon.contains(point):
+                return False, 0
+
+    # Return inverse of outer radius
+    return True, 1.0 / outer_radius
+
+def generate_initial_config():
+    """Generate an improved initial configuration based on hexagonal tiling principles."""
+    # Start with a better initial arrangement that follows known optimal patterns
+    config = []
+
+    # Central hexagon
+    config.append([0, 0, 0])
+
+    # First ring - 6 hexagons arranged at equal spacing
+    for i in range(6):
+        angle = i * 60
+        radius = 2.0
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        config.append([x, y, 0])
+
+    # Second ring - 5 hexagons arranged in a quasi-regular pattern
+    # Use golden ratio-inspired spacing to maximize packing efficiency
+    angles = [0, 72, 144, 216, 288]
+    radius = 3.4  # Slightly adjusted from previous attempts
+    for i, angle in enumerate(angles):
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        config.append([x, y, 0])
+
+    # Add one more hexagon to make 12 total - positioned to balance the pattern
+    config.append([0, -radius - 1.0, 0])
+
+    return np.array(config)
+
+def hybrid_optimize_positions(initial_config, outer_center_x, outer_center_y, max_time_seconds=170):
+    """Hybrid optimization using simulated annealing-inspired approach with local refinement."""
+    start_time = time.time()
+
+    # Initial configuration
+    current_config = initial_config.copy()
+    current_validity, current_inv_radius = evaluate_configuration(current_config, outer_center_x, outer_center_y)
+
+    # Track best solution found so far
+    best_config = current_config.copy()
+    best_inv_radius = current_inv_radius if current_validity else 0
+
+    # Simulated Annealing parameters
+    temp = 1.0  # Initial temperature
+    cooling_rate = 0.995  # Cooling rate
+    min_temp = 1e-6  # Minimum temperature
+    iterations_per_temp = 10  # Number of iterations at each temperature level
+
+    # Main hybrid optimization loop
+    iteration = 0
+    while temp > min_temp and (time.time() - start_time) < max_time_seconds:
+        for _ in range(iterations_per_temp):
+            # Create neighbor configuration by making small random changes
+            neighbor_config = current_config.copy()
+
+            # Randomly select some hexagons to perturb
+            num_changes = random.randint(1, min(5, len(neighbor_config)))
+            indices_to_change = random.sample(range(len(neighbor_config)), num_changes)
+
+            for idx in indices_to_change:
+                # Perturb position
+                neighbor_config[idx][0] += np.random.normal(0, 0.1)
+                neighbor_config[idx][1] += np.random.normal(0, 0.1)
+
+            # Evaluate neighbor
+            neighbor_validity, neighbor_inv_radius = evaluate_configuration(neighbor_config, outer_center_x, outer_center_y)
+
+            # Accept or reject based on SA criteria
+            if neighbor_validity:
+                delta = neighbor_inv_radius - current_inv_radius
+
+                if delta > 0 or random.random() < np.exp(delta / temp):
+                    current_config = neighbor_config.copy()
+                    current_inv_radius = neighbor_inv_radius
+
+                    # Update best solution if improved
+                    if neighbor_inv_radius > best_inv_radius:
+                        best_config = neighbor_config.copy()
+                        best_inv_radius = neighbor_inv_radius
+
+            else:
+                # Even if invalid, occasionally accept with low probability
+                if random.random() < 0.01:  # 1% chance to accept invalid solution
+                    current_config = neighbor_config.copy()
+
+        # Cool down
+        temp *= cooling_rate
+        iteration += 1
+
+    # Final local refinement using scipy optimization on best solution found
+    def objective(params):
+        config = best_config.copy()
+        idx = 0
+        for i in range(len(config)):
+            config[i][0] = params[idx]
+            config[i][1] = params[idx + 1]
+            idx += 2
+
+        validity, inv_radius = evaluate_configuration(config, outer_center_x, outer_center_y)
+        if not validity:
+            return 1e10
+        return -inv_radius  # Negative because we want to maximize
+
+    # Flatten best configuration for scipy optimization
+    initial_params = []
+    for i in range(len(best_config)):
+        initial_params.extend([best_config[i][0], best_config[i][1]])
+
+    # Local optimization with tight bounds
+    bounds = [(-8, 8), (-8, 8)] * len(best_config)
+    try:
+        result = minimize(objective, initial_params, method='L-BFGS-B', bounds=bounds,
+                         options={'maxiter': 200, 'ftol': 1e-12})
+
+        # Reconstruct refined configuration
+        refined_config = best_config.copy()
+        idx = 0
+        for i in range(len(refined_config)):
+            refined_config[i][0] = result.x[idx]
+            refined_config[i][1] = result.x[idx + 1]
+            idx += 2
+
+        # Verify final refinement
+        final_validity, final_inv_radius = evaluate_configuration(refined_config, outer_center_x, outer_center_y)
+        if final_validity and final_inv_radius > best_inv_radius:
+            best_config = refined_config
+            best_inv_radius = final_inv_radius
+
+    except Exception:
+        pass  # Keep best_config if refinement fails
+
+    return best_config
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Generate improved initial configuration
+    initial_config = generate_initial_config()
+
+    # Set outer hexagon at center
+    outer_center_x, outer_center_y = 0.0, 0.0
+
+    # Hybrid optimization approach combining global and local search
+    optimized_config = hybrid_optimize_positions(initial_config, outer_center_x, outer_center_y)
+
+    # Final verification and refinement
+    max_attempts = 10
+    for attempt in range(max_attempts):
+        validity, inv_radius = evaluate_configuration(optimized_config, outer_center_x, outer_center_y)
+        if validity:
+            break
+
+        # If not valid, try small random adjustments to positions
+        for i in range(len(optimized_config)):
+            optimized_config[i][0] += np.random.normal(0, 0.03)
+            optimized_config[i][1] += np.random.normal(0, 0.03)
+
+    # Compute final outer hexagon radius
+    outer_radius = 1.0 / inv_radius if inv_radius > 0 else 10.0
+
+    # Ensure that we have exactly 12 hexagons
+    inner_hex_data = np.array(optimized_config)
+    if len(inner_hex_data) != 12:
+        # Fallback to simple configuration if needed
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        outer_radius = 8.0
+
+    outer_hex_data = np.array([outer_center_x, outer_center_y, 0])
+    outer_hex_side_length = outer_radius * 2  # approximate
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,333 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance_matrix
+from scipy.spatial.distance import cdist
+import random
+from functools import partial
+import heapq
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions - since perimeter = 4, width + height = 2
+    width, height = 1.2, 0.8
+    
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Population-based evolutionary approach
+    population_size = 50
+    generations = 100
+    elite_size = 5
+    
+    # Initialize population using Voronoi-based method for diversity
+    population = initialize_population_voronoi(population_size, width, height, 21)
+    
+    best_individual = None
+    best_fitness = -float('inf')
+    
+    for gen in range(generations):
+        # Evaluate fitness for entire population
+        fitness_scores = evaluate_population(population, width, height)
+        
+        # Track best individual
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_individual = population[max_fitness_idx].copy()
+        
+        # Elitism: keep best individuals
+        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+        elite_population = [population[i].copy() for i in elite_indices]
+        
+        # Selection and reproduction
+        selected = tournament_selection(population, fitness_scores, population_size - elite_size)
+        offspring = reproduce_population(selected, width, height, elite_size)
+        
+        # Combine elite and offspring
+        population = elite_population + offspring
+        
+        # Adaptive parameters based on convergence
+        if gen > 20 and gen % 10 == 0:
+            # Reduce mutation rate as we converge
+            pass  # Mutation handled in reproduce function
+    
+    # Final refinement of best individual
+    refined = refine_best_individual(best_individual, width, height)
+    
+    return refined
+
+def initialize_population_voronoi(population_size: int, width: float, height: float, n_circles: int) -> list:
+    """Initialize diverse population using Voronoi-based seeding."""
+    population = []
+    
+    for _ in range(population_size):
+        # Generate random points for Voronoi
+        points = []
+        for _ in range(n_circles * 2):  # Extra points for better Voronoi structure
+            x = np.random.uniform(0.05, width - 0.05)
+            y = np.random.uniform(0.05, height - 0.05)
+            points.append([x, y])
+        
+        try:
+            vor = Voronoi(points)
+            # Select valid Voronoi vertices as circle centers
+            circles = np.zeros((n_circles, 3))
+            valid_vertices = []
+            
+            # Filter vertices that are within bounds
+            for vertex in vor.vertices:
+                if 0.1 <= vertex[0] <= width - 0.1 and 0.1 <= vertex[1] <= height - 0.1:
+                    valid_vertices.append(vertex)
+            
+            # Fill with Voronoi vertices or fallback to random points
+            available_points = valid_vertices[:n_circles] + [[np.random.uniform(0.1, width-0.1), 
+                                                              np.random.uniform(0.1, height-0.1)] 
+                                                             for _ in range(n_circles - len(valid_vertices))]
+            
+            for i in range(n_circles):
+                if i < len(available_points):
+                    x, y = available_points[i]
+                else:
+                    x = np.random.uniform(0.1, width - 0.1)
+                    y = np.random.uniform(0.1, height - 0.1)
+                
+                # Compute max radius for this position
+                max_radius = compute_max_radius_safe(x, y, width, height, circles[:i])
+                circles[i] = [x, y, max_radius]
+            
+            population.append(circles)
+            
+        except Exception:
+            # Fallback to random initialization if Voronoi fails
+            circles = np.zeros((n_circles, 3))
+            for i in range(n_circles):
+                x = np.random.uniform(0.1, width - 0.1)
+                y = np.random.uniform(0.1, height - 0.1)
+                max_radius = compute_max_radius_safe(x, y, width, height, circles[:i])
+                circles[i] = [x, y, max_radius]
+            population.append(circles)
+    
+    return population
+
+def compute_max_radius_safe(x: float, y: float, width: float, height: float, existing_circles: np.ndarray) -> float:
+    """Compute maximum radius safely with error handling."""
+    # Boundary constraints
+    min_dist_from_edge = min(x, width - x, y, height - y)
+    
+    if min_dist_from_edge <= 0:
+        return 0.001
+    
+    # Overlap constraints with existing circles
+    min_dist_from_others = float('inf')
+    
+    try:
+        for circle in existing_circles:
+            if len(circle) > 2 and circle[2] > 0:
+                cx, cy, cr = circle
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                min_dist_from_others = min(min_dist_from_others, dist - cr)
+    except Exception:
+        min_dist_from_others = float('inf')
+    
+    # Take minimum of boundary and overlap constraints
+    max_radius = min(min_dist_from_edge, min_dist_from_others)
+    
+    return max(0.001, max_radius)
+
+def evaluate_population(population: list, width: float, height: float) -> np.ndarray:
+    """Evaluate fitness for entire population."""
+    fitness_scores = []
+    
+    for individual in population:
+        # Check validity
+        if is_valid_configuration(individual, width, height):
+            # Fitness is sum of radii plus penalty for overlap violations
+            fitness = np.sum(individual[:, 2])
+            fitness_scores.append(fitness)
+        else:
+            # Penalize invalid configurations heavily
+            fitness = -1000.0
+            fitness_scores.append(fitness)
+    
+    return np.array(fitness_scores)
+
+def is_valid_configuration(circles: np.ndarray, width: float, height: float) -> bool:
+    """Check if all circles satisfy constraints."""
+    n = len(circles)
+    
+    # Check boundary conditions
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+            return False
+    
+    # Check overlap constraints using efficient distance matrix
+    if n < 2:
+        return True
+    
+    positions = circles[:, :2]
+    distances = cdist(positions, positions)
+    
+    # Zero out diagonal
+    np.fill_diagonal(distances, np.inf)
+    
+    # Check if any circles overlap
+    radius_sums = circles[:, 2][:, np.newaxis] + circles[:, 2][np.newaxis, :]
+    overlaps = distances < radius_sums
+    
+    return not np.any(overlaps)
+
+def tournament_selection(population: list, fitness_scores: np.ndarray, k: int) -> list:
+    """Select individuals using tournament selection."""
+    selected = []
+    for _ in range(k):
+        # Tournament size = 3
+        tournament_indices = np.random.choice(len(population), 3, replace=False)
+        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+        selected.append(population[winner_idx].copy())
+    
+    return selected
+
+def reproduce_population(parents: list, width: float, height: float, elite_size: int) -> list:
+    """Generate offspring through crossover and mutation."""
+    offspring = []
+    
+    while len(offspring) < len(parents):
+        # Select two parents
+        parent1, parent2 = random.sample(parents, 2)
+        
+        # Crossover: blend positions and radii with some probability
+        if random.random() < 0.7:
+            child1, child2 = crossover_blend(parent1, parent2)
+        else:
+            child1 = parent1.copy()
+            child2 = parent2.copy()
+        
+        # Mutate children
+        mutate_individual(child1, width, height)
+        mutate_individual(child2, width, height)
+        
+        offspring.extend([child1, child2])
+    
+    # Trim to exact size
+    return offspring[:len(parents)]
+
+def crossover_blend(parent1: np.ndarray, parent2: np.ndarray) -> tuple:
+    """Blend parent configurations for crossover."""
+    n = len(parent1)
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+    
+    # Blend positions and radii for each circle
+    for i in range(n):
+        alpha = random.random()
+        child1[i, 0] = alpha * parent1[i, 0] + (1 - alpha) * parent2[i, 0]
+        child1[i, 1] = alpha * parent1[i, 1] + (1 - alpha) * parent2[i, 1]
+        child1[i, 2] = alpha * parent1[i, 2] + (1 - alpha) * parent2[i, 2]
+        
+        child2[i, 0] = (1 - alpha) * parent1[i, 0] + alpha * parent2[i, 0]
+        child2[i, 1] = (1 - alpha) * parent1[i, 1] + alpha * parent2[i, 1]
+        child2[i, 2] = (1 - alpha) * parent1[i, 2] + alpha * parent2[i, 2]
+    
+    return child1, child2
+
+def mutate_individual(individual: np.ndarray, width: float, height: float):
+    """Apply mutation to individual."""
+    n = len(individual)
+    
+    # Apply mutation to each circle
+    for i in range(n):
+        # Position mutation
+        if random.random() < 0.3:  # 30% chance to mutate position
+            # Gaussian noise
+            dx = np.random.normal(0, 0.05)
+            dy = np.random.normal(0, 0.05)
+            
+            new_x = individual[i, 0] + dx
+            new_y = individual[i, 1] + dy
+            
+            # Clamp to bounds
+            new_x = np.clip(new_x, 0.1, width - 0.1)
+            new_y = np.clip(new_y, 0.1, height - 0.1)
+            
+            individual[i, 0] = new_x
+            individual[i, 1] = new_y
+        
+        # Radius mutation
+        if random.random() < 0.2:  # 20% chance to mutate radius
+            # Small change to radius
+            delta = np.random.normal(0, 0.02)
+            new_radius = individual[i, 2] + delta
+            new_radius = max(0.001, new_radius)
+            individual[i, 2] = new_radius
+            
+        # Repair invalid configurations after mutation
+        if i > 0:
+            max_radius = compute_max_radius_safe(individual[i, 0], individual[i, 1], 
+                                               width, height, individual[:i])
+            individual[i, 2] = min(individual[i, 2], max_radius)
+
+def refine_best_individual(individual: np.ndarray, width: float, height: float) -> np.ndarray:
+    """Refine the best individual through local search."""
+    refined = individual.copy()
+    
+    # Multiple local optimization passes
+    for _ in range(10):
+        improved = False
+        
+        # Try to improve each circle
+        for i in range(len(refined)):
+            old_x, old_y, old_r = refined[i]
+            
+            # Try to increase radius
+            max_radius = compute_max_radius_safe(old_x, old_y, width, height, 
+                                               np.vstack([refined[:i], refined[i+1:]]))
+            
+            if max_radius > old_r + 1e-6:
+                refined[i, 2] = max_radius
+                improved = True
+            
+            # Try to move circle to better position
+            if random.random() < 0.5:
+                best_pos = [old_x, old_y, old_r]
+                best_radius = old_r
+                
+                # Grid search around position
+                step = 0.01
+                for dx in [-step*2, -step, 0, step, step*2]:
+                    for dy in [-step*2, -step, 0, step, step*2]:
+                        new_x = old_x + dx
+                        new_y = old_y + dy
+                        
+                        if 0.1 <= new_x <= width - 0.1 and 0.1 <= new_y <= height - 0.1:
+                            max_radius = compute_max_radius_safe(new_x, new_y, width, height,
+                                                               np.vstack([refined[:i], refined[i+1:]]))
+                            
+                            if max_radius > best_radius + 1e-6:
+                                best_radius = max_radius
+                                best_pos = [new_x, new_y, max_radius]
+                
+                if best_radius > refined[i, 2] + 1e-6:
+                    refined[i] = best_pos
+                    improved = True
+        
+        if not improved:
+            break
+    
+    # Final boundary and validity check
+    for i in range(len(refined)):
+        x, y, r = refined[i]
+        r = min(r, x - 0.01, width - x - 0.01, y - 0.01, height - y - 0.01)
+        r = max(r, 0.001)
+        refined[i] = [x, y, r]
+    
+    return refined
+
+# EVOLVE-BLOCK-END

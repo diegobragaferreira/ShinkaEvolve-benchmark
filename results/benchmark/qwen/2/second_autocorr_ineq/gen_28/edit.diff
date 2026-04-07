@@ -1,0 +1,172 @@
+--- a/original.py
++++ b/original.py
+@@ -1,90 +1,154 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import signal
++from numba import jit
++import time
+ 
+-def compute_autoconvolution_norms(f_values: list[float]) -> tuple[float, float, float]:
++@jit(nopython=True)
++def compute_autoconvolution_norms_fast(f_values: list[float]) -> tuple[float, float, float]:
+     """
+-    Compute the three norms needed for C2 calculation using piecewise linear integration.
++    Fast computation of the three norms needed for C2 calculation using piecewise linear integration.
+     """
+     # Convert to numpy array for easier manipulation
+     f = np.array(f_values)
+-
+-    # Create step function on [-1/4, 1/4] with equal spacing
+     n_steps = len(f)
++    
+     if n_steps == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # Step width
+     dx = 0.5 / n_steps
+ 
+     # Compute autoconvolution using discrete convolution
+     g = np.convolve(f, f, mode='full')
+     # Trim g to the correct size (this accounts for the convolution)
+     g = g[len(f)-1:2*len(f)-1]
+ 
+     # Compute L2 norm squared using piecewise linear integration
+-    # For each pair of adjacent points, integrate quadratic function
+-    g_sq = g**2
+     norm_2_squared = 0.0
+     for i in range(len(g)-1):
+         # Trapezoidal-like integration for quadratic function
+         # Using formula for integral of ax^2 + bx + c over [x0,x1]
+         # But here we approximate with piecewise linear segments
+         # So we use: (dx/3)(y0^2 + y0*y1 + y1^2)
+         y0, y1 = g[i], g[i+1]
+         norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+ 
+     # L1 norm (sum of absolute values)
+     norm_1 = np.sum(np.abs(g))
+ 
+     # Infinity norm
+     norm_inf = np.max(np.abs(g))
+ 
+     # Handle numerical edge cases
+     if norm_1 <= 1e-15:
+         norm_1 = 1e-15
+     if norm_inf <= 1e-15:
+         norm_inf = 1e-15
+ 
+     return norm_2_squared, norm_1, norm_inf
+ 
+-def construct_function() -> list[float]:
++def adaptive_gaussian_construction(n_steps: int) -> list[float]:
+     """
+-    Construct step function with optimized Gaussian-based peak placement.
++    Construct a step function with adaptive Gaussian-based peak placement.
+     """
+-    # Number of steps
+-    n_steps = np.random.randint(1000, 5000)
+-
+     # Generate positions using Gaussian distribution around center
+     # This creates a bell-curve shaped distribution of peak heights
+     positions = np.random.normal(0, 0.15, n_steps)
+     # Clip to [-0.25, 0.25] to stay within domain
+     positions = np.clip(positions, -0.25, 0.25)
+ 
+     # Sort positions for proper step function construction
+     positions = np.sort(positions)
+ 
+     # Generate amplitudes based on distance from center
+     # Peaks closer to center get higher amplitude
+     amplitudes = np.exp(-20 * positions**2)
+ 
+-    # Add some controlled noise to break symmetry but preserve structure
+-    noise_level = 0.1
+-    amplitudes += np.random.normal(0, noise_level, n_steps)
++    # Add adaptive noise to break symmetry but preserve structure
++    initial_noise_level = 0.1
++    amplitudes += np.random.normal(0, initial_noise_level, n_steps)
+ 
+     # Ensure non-negative amplitudes
+     amplitudes = np.maximum(amplitudes, 0)
++    
++    # Apply constraint-aware normalization to prevent extreme autoconvolution spikes
++    # We do a quick check first
++    test_f = amplitudes.copy()
++    if np.sum(test_f) > 0:
++        test_f = test_f / np.sum(test_f) * 10
++        
++        # Quick norm computation to check quality
++        test_g = np.convolve(test_f, test_f, mode='full')
++        test_g = test_g[len(test_f)-1:2*len(test_f)-1]
++        test_norm_1 = np.sum(np.abs(test_g))
++        test_norm_inf = np.max(np.abs(test_g)) if np.max(np.abs(test_g)) > 0 else 1e-15
++        
++        # If the peak is too dominant (which would hurt C2), reduce noise
++        if test_norm_inf > 10 * test_norm_1:
++            # Reduce noise level significantly to prevent overly dominant peaks
++            noise_level = max(0.01, initial_noise_level * 0.5)
++            amplitudes = np.random.normal(0, noise_level, n_steps)
++            amplitudes += np.exp(-20 * positions**2)
++            amplitudes = np.maximum(amplitudes, 0)
+ 
+     # Normalize amplitudes to make them reasonable
+     if np.sum(amplitudes) > 0:
+         amplitudes = amplitudes / np.sum(amplitudes) * 10
+ 
+-    # Return as list
+     return amplitudes.tolist()
++
++def construct_function() -> list[float]:
++    """
++    Construct step function with optimized Gaussian-based peak placement.
++    """
++    # Multi-attempt selection to maximize C2
++    best_c2 = -1
++    best_function = None
++    start_time = time.time()
++    
++    # Set maximum attempts to balance quality vs. time constraints
++    max_attempts = 50
++    
++    for attempt in range(max_attempts):
++        # Early termination if time is running out
++        if time.time() - start_time > 85:  # Leave 5 seconds for cleanup
++            break
++            
++        # Try different number of steps to find optimal
++        n_steps = np.random.randint(1000, 5000)
++        
++        # Generate function
++        f_values = adaptive_gaussian_construction(n_steps)
++        
++        # Evaluate the function
++        try:
++            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
++            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++                continue
++            c2 = norm_2_sq / (norm_1 * norm_inf)
++            
++            # Keep the best function
++            if c2 > best_c2:
++                best_c2 = c2
++                best_function = f_values
++                
++        except Exception:
++            # Skip invalid functions
++            continue
++    
++    # Return the best function found, or fallback
++    if best_function is not None:
++        return best_function
++    else:
++        # Fallback to a simpler construction
++        n_steps = 1000
++        f_values = [1.0] * n_steps
++        return f_values
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

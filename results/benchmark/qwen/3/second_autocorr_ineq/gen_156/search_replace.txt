@@ -1,0 +1,159 @@
+<NAME>
+add_latin_hypercube_sampling
+</NAME>
+
+<DESCRIPTION>
+Adding Latin Hypercube Sampling (LHS) to the initialization strategies will provide better coverage of the search space compared to simple random sampling. This technique ensures that the initial population is more evenly distributed across different regions of the parameter space, which should help discover better local optima. LHS works by dividing each dimension into equally probable intervals and sampling exactly one point from each interval, leading to more diverse and representative starting populations.
+
+This change modifies the multi_start_optimization function to use LHS for generating diverse initial function patterns, replacing some of the simpler random initialization strategies with more systematic sampling that maintains the beneficial geometric properties of the bump-based functions while exploring different regions of the optimization landscape.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_start_optimization(max_starts: int = 25, max_evals_per_start: int = 1000) -> Tuple[List[float], float]:
+    """
+    Multi-start optimization with diverse initialization strategies and adaptive refinement
+    """
+    best_overall_c2 = 0.0
+    best_overall_solution = None
+
+    # Track good solutions for adaptive sampling
+    good_solutions = []
+    good_c2_scores = []
+
+    # Start with diverse geometric patterns
+    for i in range(max_starts):
+        # Generate different initial patterns with varying characteristics
+        n = random.randint(150, 900)  # Vary the length for exploration
+
+        # Strategy 1: Geometric pattern
+        if i % 4 == 0:
+            initial_solution = construct_geometric_initial_function(n)
+        # Strategy 2: Sine wave pattern
+        elif i % 4 == 1:
+            initial_solution = [0.5 + 0.3 * np.sin(2 * np.pi * j / n) + random.gauss(0, 0.05)
+                              for j in range(n)]
+            initial_solution = [max(0, x) for x in initial_solution]
+        # Strategy 3: Alternating pattern
+        elif i % 4 == 2:
+            initial_solution = [random.uniform(0.7, 1.0) if j % 2 == 0
+                              else random.uniform(0.1, 0.3) for j in range(n)]
+        # Strategy 4: Gaussian-based
+        else:
+            initial_solution = [abs(random.gauss(0.5, 0.15)) for _ in range(n)]
+
+        # Local optimization from this starting point
+        solution, c2 = adaptive_local_search(initial_solution, max_evals_per_start)
+
+        if c2 > best_overall_c2:
+            best_overall_c2 = c2
+            best_overall_solution = solution.copy()
+
+        # Keep track of good solutions for reseeding
+        if c2 > best_overall_c2 * 0.9:  # Keep top 10% solutions
+            good_solutions.append(solution.copy())
+            good_c2_scores.append(c2)
+
+    # Further refine top solutions
+    top_count = min(5, len(good_solutions))
+    for i, sol in enumerate(good_solutions[:top_count]):  # Refine top few
+        if i < 5:  # Limit additional refinements
+            refined_sol, refined_c2 = adaptive_local_search(sol, max_evals_per_start//2)
+            if refined_c2 > best_overall_c2:
+                best_overall_c2 = refined_c2
+                best_overall_solution = refined_sol.copy()
+
+    return best_overall_solution, best_overall_c2
+=======
+def lhs_sample(n_samples, n_dimensions, seed=42):
+    """
+    Generate Latin Hypercube Sample for better space coverage.
+    """
+    np.random.seed(seed)
+    samples = np.zeros((n_samples, n_dimensions))
+
+    # Generate random permutations for each dimension
+    for i in range(n_dimensions):
+        samples[:, i] = np.random.permutation(n_samples)
+
+    # Scale to [0, 1] range
+    samples = (samples + 0.5) / n_samples
+
+    return samples
+
+def multi_start_optimization(max_starts: int = 25, max_evals_per_start: int = 1000) -> Tuple[List[float], float]:
+    """
+    Multi-start optimization with diverse initialization strategies and adaptive refinement
+    """
+    best_overall_c2 = 0.0
+    best_overall_solution = None
+
+    # Track good solutions for adaptive sampling
+    good_solutions = []
+    good_c2_scores = []
+
+    # Generate Latin Hypercube Samples for diverse initialization
+    lhs_samples = lhs_sample(max_starts, 3, seed=42)  # 3D sample for different parameters
+
+    # Start with diverse geometric patterns using LHS-based variations
+    for i in range(max_starts):
+        # Generate different initial patterns with varying characteristics
+        n = int(150 + lhs_samples[i][0] * 750)  # Vary the length for exploration [150, 900]
+
+        # Strategy 1: Geometric pattern with LHS-based variation
+        if i % 5 == 0:
+            initial_solution = construct_geometric_initial_function(n)
+            # Add LHS-based variation to the geometric pattern
+            for j in range(min(len(initial_solution), 50)):
+                if j < len(initial_solution):
+                    initial_solution[j] *= (0.8 + 0.4 * lhs_samples[i][1])  # Scale variation
+        # Strategy 2: Sine wave pattern with LHS-based frequency variation
+        elif i % 5 == 1:
+            freq_factor = 0.5 + 1.5 * lhs_samples[i][1]  # Vary frequency
+            initial_solution = [0.5 + 0.3 * np.sin(freq_factor * 2 * np.pi * j / n) + random.gauss(0, 0.05)
+                              for j in range(n)]
+            initial_solution = [max(0, x) for x in initial_solution]
+        # Strategy 3: Alternating pattern with LHS-based amplitude
+        elif i % 5 == 2:
+            amp_factor = 0.5 + 0.5 * lhs_samples[i][2]  # Vary amplitude
+            initial_solution = [random.uniform(0.7*amp_factor, 1.0*amp_factor) if j % 2 == 0
+                              else random.uniform(0.1, 0.3) for j in range(n)]
+        # Strategy 4: Gaussian-based with LHS-based variance
+        elif i % 5 == 3:
+            var_factor = 0.1 + 0.2 * lhs_samples[i][1]  # Vary variance
+            initial_solution = [abs(random.gauss(0.5, var_factor)) for _ in range(n)]
+        # Strategy 5: Mixed pattern with LHS-based proportion
+        else:
+            # Create mixture of high and low values
+            high_prop = lhs_samples[i][2]  # Proportion of high values
+            initial_solution = []
+            for j in range(n):
+                if random.random() < high_prop:
+                    initial_solution.append(random.uniform(0.8, 1.2))
+                else:
+                    initial_solution.append(random.uniform(0.05, 0.25))
+
+        # Local optimization from this starting point
+        solution, c2 = adaptive_local_search(initial_solution, max_evals_per_start)
+
+        if c2 > best_overall_c2:
+            best_overall_c2 = c2
+            best_overall_solution = solution.copy()
+
+        # Keep track of good solutions for reseeding
+        if c2 > best_overall_c2 * 0.9:  # Keep top 10% solutions
+            good_solutions.append(solution.copy())
+            good_c2_scores.append(c2)
+
+    # Further refine top solutions
+    top_count = min(5, len(good_solutions))
+    for i, sol in enumerate(good_solutions[:top_count]):  # Refine top few
+        if i < 5:  # Limit additional refinements
+            refined_sol, refined_c2 = adaptive_local_search(sol, max_evals_per_start//2)
+            if refined_c2 > best_overall_c2:
+                best_overall_c2 = refined_c2
+                best_overall_solution = refined_sol.copy()
+
+    return best_overall_solution, best_overall_c2
+>>>>>>> REPLACE
+</DIFF>

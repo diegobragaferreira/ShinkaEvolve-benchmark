@@ -1,0 +1,251 @@
+<NAME>
+adaptive_local_search
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces an adaptive local search mechanism that intelligently adjusts its refinement intensity based on the overlap severity of the current solution. The approach classifies solutions into three categories (low, medium, high overlap) and applies corresponding optimization strategies. This builds upon the existing local_optimize function but makes it much more sophisticated by tailoring the refinement approach to the specific problem state rather than using a uniform strategy.
+
+The key improvements include:
+1. Dynamically assessing overlap severity to determine optimization approach
+2. Applying different refinement strategies (light, moderate, intensive) based on overlap levels
+3. Using physics-based repulsion for high overlap cases
+4. Incorporating greedy radius expansion for low overlap scenarios
+5. Better handling of edge cases through intelligent strategy switching
+
+This is expected to significantly improve the final solution quality by applying the right amount of optimization effort at the right time.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_optimize(circles: np.ndarray, max_iterations: int = 20) -> np.ndarray:
+    """Apply local optimization to improve a solution by making small adjustments."""
+    optimized = circles.copy()
+
+    # Try to increase radii where possible
+    for _ in range(max_iterations):
+        improved = False
+
+        # For each circle, try to increase its radius
+        for i in range(len(optimized)):
+            current_r = optimized[i, 2]
+
+            # Try increasing radius slightly
+            new_r = min(current_r * 1.05, 0.5)  # Cap at reasonable size
+
+            # Check if we can increase radius without violating constraints
+            valid = True
+            for j in range(len(optimized)):
+                if i != j:
+                    dist = np.sqrt((optimized[i, 0] - optimized[j, 0])**2 +
+                                 (optimized[i, 1] - optimized[j, 1])**2)
+                    if dist < new_r + optimized[j, 2]:
+                        valid = False
+                        break
+
+            # Update if improvement is possible and within bounds
+            if valid and new_r <= 1 - max(optimized[i, 0], 1 - optimized[i, 0]) and \
+               new_r <= 1 - max(optimized[i, 1], 1 - optimized[i, 1]):
+                optimized[i, 2] = new_r
+                improved = True
+
+        # If no improvement made, stop early
+        if not improved:
+            break
+
+    return optimized
+=======
+def local_optimize(circles: np.ndarray, max_iterations: int = 20) -> np.ndarray:
+    """Apply adaptive local optimization to improve a solution by making smart adjustments."""
+    optimized = circles.copy()
+    n = len(optimized)
+
+    # Calculate overlap severity for adaptive strategy
+    def calculate_overlap_severity():
+        overlaps = 0
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = optimized[i]
+                x2, y2, r2 = optimized[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    overlaps += 1
+        return overlaps
+
+    overlap_severity = calculate_overlap_severity()
+
+    # Apply different optimization strategies based on overlap severity
+    if overlap_severity < 5:  # Low overlap - light refinement
+        # Try greedy radius expansion for unoccupied space
+        for _ in range(max_iterations // 2):
+            improved = False
+            for i in range(n):
+                x, y, r = optimized[i]
+                # Calculate maximum possible radius
+                max_radius = min(x, 1-x, y, 1-y)
+                if max_radius <= r:
+                    continue
+
+                # Try to increase radius
+                new_r = min(r + 0.005, max_radius)
+
+                # Check if we can actually increase radius
+                valid = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = optimized[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    optimized[i, 2] = new_r
+                    improved = True
+
+            if not improved:
+                break
+
+    elif overlap_severity < 15:  # Medium overlap - moderate refinement
+        # Radius expansion + position adjustments
+        for _ in range(max_iterations // 2):
+            improved = False
+
+            # Expand radii first
+            for i in range(n):
+                x, y, r = optimized[i]
+                max_radius = min(x, 1-x, y, 1-y)
+                if max_radius <= r:
+                    continue
+
+                new_r = min(r + 0.01, max_radius)
+
+                valid = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = optimized[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    optimized[i, 2] = new_r
+                    improved = True
+
+            if not improved:
+                break
+
+        # Then adjust positions to resolve conflicts
+        for _ in range(max_iterations // 4):
+            moved_any = False
+            for i in range(n):
+                x, y, r = optimized[i]
+
+                # Look for conflicts
+                conflicting = []
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = optimized[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < r + r2:
+                            conflicting.append(j)
+
+                if conflicting:
+                    # Apply repulsive force from conflicting circles
+                    dx = 0
+                    dy = 0
+
+                    for j in conflicting:
+                        x2, y2, r2 = optimized[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist > 0.001:
+                            dx += (x - x2) / dist * (r + r2 - dist) * 0.02
+                            dy += (y - y2) / dist * (r + r2 - dist) * 0.02
+
+                    # Apply movement
+                    new_x = x + dx
+                    new_y = y + dy
+
+                    # Bound the movement
+                    new_x = np.clip(new_x, r, 1-r)
+                    new_y = np.clip(new_y, r, 1-r)
+
+                    if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                        optimized[i, 0] = new_x
+                        optimized[i, 1] = new_y
+                        moved_any = True
+
+            if not moved_any:
+                break
+
+    else:  # High overlap - intensive refinement
+        # Multi-pass optimization for heavily overlapping solutions
+        for pass_num in range(3):
+            # Pass 1: Greedy radius expansion
+            for i in range(n):
+                x, y, r = optimized[i]
+                max_radius = min(x, 1-x, y, 1-y)
+                if max_radius <= r:
+                    continue
+
+                new_r = min(r + 0.015, max_radius)
+
+                valid = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = optimized[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    optimized[i, 2] = new_r
+
+            # Pass 2: Physics-based repulsion
+            for _ in range(max_iterations // 2):
+                moved_any = False
+                for i in range(n):
+                    x, y, r = optimized[i]
+
+                    # Collect conflicting circles
+                    conflicts = []
+                    for j in range(n):
+                        if i != j:
+                            x2, y2, r2 = optimized[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist < r + r2:
+                                conflicts.append((j, dist))
+
+                    if conflicts:
+                        # Apply repulsion from all conflicting circles
+                        dx_total = 0
+                        dy_total = 0
+                        for j, dist in conflicts:
+                            x2, y2, r2 = optimized[j]
+                            if dist > 0.001:
+                                force_magnitude = (r + r2 - dist) * 0.05
+                                dx = (x - x2) / dist
+                                dy = (y - y2) / dist
+                                dx_total += dx * force_magnitude
+                                dy_total += dy * force_magnitude
+
+                        # Apply movement
+                        new_x = x + dx_total
+                        new_y = y + dy_total
+
+                        # Bound
+                        new_x = np.clip(new_x, r, 1-r)
+                        new_y = np.clip(new_y, r, 1-r)
+
+                        if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                            optimized[i, 0] = new_x
+                            optimized[i, 1] = new_y
+                            moved_any = True
+
+                if not moved_any:
+                    break
+
+    return optimized
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,138 @@
+--- a/original.py
++++ b/original.py
+@@ -1,101 +1,122 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.optimize import differential_evolution
+ import time
++from numba import njit
+ 
+-def compute_autoconvolution(f):
+-    """Compute autoconvolution g = f * f"""
++@njit
++def compute_autoconvolution_numba(f):
++    """Compute autoconvolution g = f * f using numba JIT"""
+     n = len(f)
+     # Autoconvolution using discrete convolution
+-    g = np.convolve(f, f, mode='full')
+-    # Trim to center portion (length n-1) since we're working on [-1/4, 1/4]
++    g = np.zeros(2*n - 1)
++    for i in range(n):
++        for j in range(n):
++            g[i + j] += f[i] * f[j]
++
++    # Trim to center portion (length n-1)
+     offset = (n - 1) // 2
+-    g = g[offset:-offset]
+-    return g
++    g_trimmed = g[offset:(2*n-1)-offset]
++    return g_trimmed
+ 
+-def compute_c2(f):
+-    """Compute C2 value for given step function f"""
++@njit
++def compute_c2_numba(f):
++    """Compute C2 value for given step function f using numba JIT"""
+     if len(f) < 2:
+         return 0.0
+ 
+     # Compute autoconvolution
+-    g = compute_autoconvolution(f)
++    g = compute_autoconvolution_numba(f)
+ 
+     if len(g) == 0:
+         return 0.0
+ 
+     # Compute norms
+-    g_abs = np.abs(g)
+-    norm_l2_sq = np.sum(g_abs**2)
+-    norm_l1 = np.sum(g_abs)
+-    norm_inf = np.max(g_abs)
++    norm_l2_sq = 0.0
++    norm_l1 = 0.0
++    norm_inf = 0.0
++
++    for i in range(len(g)):
++        abs_g = abs(g[i])
++        norm_l2_sq += abs_g * abs_g
++        norm_l1 += abs_g
++        if abs_g > norm_inf:
++            norm_inf = abs_g
+ 
+     # Avoid division by zero
+     if norm_l1 < 1e-12 or norm_inf < 1e-12:
+         return 0.0
+ 
+     c2 = norm_l2_sq / (norm_l1 * norm_inf)
+     return c2
++
++def compute_autoconvolution(f):
++    """Wrapper function for autoconvolution"""
++    return compute_autoconvolution_numba(np.array(f))
++
++def compute_c2(f):
++    """Wrapper function for C2 computation"""
++    return compute_c2_numba(np.array(f))
+ 
+ def objective_function(x):
+     """Objective function to minimize (negative C2)"""
+     # x contains the step heights
+     # Need to ensure non-negativity
+     f = np.maximum(x, 0)
+     c2 = compute_c2(f)
+     return -c2  # Negative because we want to maximize
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value using optimization."""
+     # Set seed for reproducibility
+     np.random.seed(42)
+ 
+     # Try different configurations to find the best one
+     best_c2 = 0.0
+     best_f = []
+ 
+     # Try different lengths
+     for n in [100, 500, 1000]:
+         # Define bounds for each parameter (step height)
+         bounds = [(0, 10) for _ in range(n)]
+ 
+         # Run optimization
+         try:
+             result = differential_evolution(
+                 objective_function,
+                 bounds,
+                 maxiter=50,  # Reduce iterations for time constraints
+                 popsize=10,
+                 seed=42,
+                 strategy='best1bin'
+             )
+ 
+             if not result.success:
+                 continue
+ 
+             # Get optimized solution
+             f_opt = np.maximum(result.x, 0)
+             c2_value = -objective_function(f_opt)
+ 
+             if c2_value > best_c2:
+                 best_c2 = c2_value
+                 best_f = f_opt.tolist()
+ 
+         except Exception as e:
+             continue
+ 
+     # If nothing worked, fallback to simple construction
+     if len(best_f) == 0:
+         # Create a simple but reasonable step function
+         n = 500
+         best_f = [1.0] * n
+         best_c2 = compute_c2(best_f)
+ 
+     return best_f
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

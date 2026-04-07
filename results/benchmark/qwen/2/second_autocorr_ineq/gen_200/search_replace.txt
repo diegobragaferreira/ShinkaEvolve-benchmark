@@ -1,0 +1,190 @@
+<NAME>
+enhanced_gaussian_construction_with_log_spacing
+</NAME>
+
+<DESCRIPTION>
+This change implements a more sophisticated Gaussian peak construction strategy inspired by the mathematical insights from prior programs. The new approach uses logarithmic spacing for peak positions combined with adaptive amplitude and width parameters to create more effective step functions for maximizing C₂. This addresses the limitation from previous attempts that used simple random positioning which could lead to poor autoconvolution profiles.
+
+Key improvements:
+1. Uses logarithmic spacing for peak positions to avoid clustering
+2. Implements adaptive peak parameters based on position and distance from center
+3. Adds proper boundary handling to prevent edge artifacts
+4. Incorporates better amplitude scaling to balance autoconvolution peak heights
+5. Maintains numerical stability through careful parameter constraints
+
+This directly addresses the weakness of the current Gaussian-based approach which doesn't fully exploit the optimal peak distribution patterns that lead to high C₂ values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def generate_initial_population(self, min_length: int = 300, max_length: int = 1500) -> List[List[float]]:
+        """Create diverse initial population using enhanced Gaussian-based strategies"""
+        population = []
+
+        # Strategy 1: Enhanced Gaussian-based approach with strategic positioning
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+
+            # Use logarithmic spacing for peak positions with better clustering avoidance
+            num_peaks = max(3, min(12, length // 80))  # Adaptive peak count based on length
+
+            # Generate logarithmically spaced positions with better distribution
+            # Start from 0.05 to 0.45 (middle 90% of domain) to avoid edge effects
+            log_positions = np.logspace(np.log10(0.05), np.log10(0.45), num_peaks, endpoint=True)
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Initialize function
+            individual = np.zeros(length)
+
+            # Add peaks with more sophisticated positioning and characteristics
+            for i, log_pos in enumerate(log_positions):
+                # Alternate sides for better distribution
+                side = (-1) ** i  # Alternate signs to distribute evenly
+                base_pos = side * log_pos
+
+                # Add small variation to positions
+                position_variation = np.random.uniform(-0.01, 0.01) * log_pos
+                peak_pos = base_pos + position_variation
+
+                # Ensure peak stays within domain bounds with margin
+                if abs(peak_pos) <= 0.24:
+                    # Amplitude scaling: use more sophisticated pattern
+                    center_distance = abs(peak_pos)
+                    # More pronounced amplitude variation away from center
+                    if center_distance < 0.03:  # Very near center
+                        amp_factor = 2.0
+                    elif center_distance < 0.08:  # Near center
+                        amp_factor = 1.6
+                    elif center_distance < 0.15:  # Middle area
+                        amp_factor = 1.2
+                    else:  # Outer areas
+                        amp_factor = 0.8
+
+                    # Dynamic amplitude with some randomness and structured variation
+                    peak_amplitude = np.random.uniform(0.8, 1.6) * amp_factor
+
+                    # Better width control that decreases toward edges for flatter autoconvolution
+                    edge_factor = 1.0 - 2.0 * abs(center_distance - 0.125) / 0.125
+                    edge_factor = max(0.3, edge_factor)  # Minimum width
+                    peak_width = 0.015 + 0.025 * edge_factor
+
+                    # Create Gaussian peak
+                    gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - peak_pos) / peak_width)**2)
+                    individual += gaussian_peak
+
+            # Ensure non-negative values and apply additional smoothing
+            individual = np.clip(individual, 0, None)
+
+            # Add some additional smoothing to make peaks more gradual
+            if length > 100:
+                individual = gaussian_filter1d(individual, sigma=0.5)
+
+            # Normalize to control overall magnitude
+            if np.max(individual) > 1e-6:
+                individual = individual / np.max(individual) * 2.5
+
+            population.append(individual.tolist())
+
+        # Strategy 2: Random exponential approach with more diversity
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+            individual = np.clip(np.random.exponential(scale=0.5, size=length), 0, 10.0)
+            population.append(individual.tolist())
+
+        return population
+=======
+    def generate_initial_population(self, min_length: int = 300, max_length: int = 1500) -> List[List[float]]:
+        """Create diverse initial population using enhanced Gaussian-based strategies"""
+        population = []
+
+        # Strategy 1: Enhanced Gaussian-based approach with logarithmic spacing and adaptive parameters
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+
+            # Use logarithmic spacing for peak positions to avoid clustering and ensure good spectral coverage
+            num_peaks = max(3, min(20, length // 50))  # Adaptive peak count based on length
+
+            # Generate logarithmically spaced positions across the domain
+            # Using logspace from 0.05 to 0.45 (middle 90%) to avoid edge effects
+            log_positions = np.logspace(np.log10(0.05), np.log10(0.45), num_peaks, endpoint=True)
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Initialize function
+            individual = np.zeros(length)
+
+            # Add peaks with carefully designed parameters for optimal autoconvolution
+            for i, log_pos in enumerate(log_positions):
+                # Alternate sides for better distribution across the domain
+                side = (-1) ** i  # Alternate signs to distribute evenly
+                base_pos = side * log_pos
+
+                # Add small random variation to positions for diversity
+                position_variation = np.random.uniform(-0.005, 0.005) * log_pos
+                peak_pos = base_pos + position_variation
+
+                # Ensure peak stays within reasonable domain bounds to prevent edge artifacts
+                if abs(peak_pos) <= 0.24:
+                    # Distance from center determines behavior
+                    center_distance = abs(peak_pos)
+
+                    # Adaptive amplitude scaling based on position
+                    # Peaks near center: higher amplitude to create strong convolution
+                    # Peaks at edges: lower amplitude to avoid oversaturation
+                    if center_distance < 0.05:  # Very near center
+                        peak_amplitude = np.random.uniform(1.5, 2.5)
+                    elif center_distance < 0.15:  # Near center
+                        peak_amplitude = np.random.uniform(1.2, 2.0)
+                    elif center_distance < 0.20:  # Middle area
+                        peak_amplitude = np.random.uniform(0.8, 1.5)
+                    else:  # Outer areas
+                        peak_amplitude = np.random.uniform(0.5, 1.2)
+
+                    # Width varies systematically - wider near edges, narrower near center
+                    # This helps create flatter autoconvolution profiles needed for high C₂
+                    if center_distance < 0.1:  # Near center - narrower peaks
+                        peak_width = np.random.uniform(0.01, 0.025)
+                    elif center_distance < 0.2:  # Middle - medium peaks
+                        peak_width = np.random.uniform(0.015, 0.035)
+                    else:  # Far from center - wider peaks
+                        peak_width = np.random.uniform(0.02, 0.04)
+
+                    # Clamp width to reasonable range
+                    peak_width = np.clip(peak_width, 0.005, 0.05)
+
+                    # Create Gaussian peak with adaptive parameters
+                    gaussian_peak = peak_amplitude * np.exp(-0.5 * ((x - peak_pos) / peak_width)**2)
+                    individual += gaussian_peak
+
+            # Ensure non-negative values and add boundary handling
+            individual = np.clip(individual, 0, None)
+
+            # Apply boundary-preserving smoothing to reduce sharp transitions
+            if length > 50:
+                # Use Gaussian smoothing with adaptive sigma
+                sigma = max(0.5, length / 200.0)
+                individual = gaussian_filter1d(individual, sigma=sigma)
+
+            # Normalize to maintain reasonable magnitudes while preserving shape
+            # Use percentile-based normalization to handle outliers
+            if np.max(individual) > 1e-6:
+                # Cap at 95th percentile to avoid extreme values that harm stability
+                cap_value = np.percentile(individual, 95)
+                individual = np.clip(individual, 0, cap_value * 2.0)
+                # Scale to reasonable range
+                individual = individual / np.max(individual) * 2.5
+
+            population.append(individual.tolist())
+
+        # Strategy 2: Random exponential approach with more diversity
+        for _ in range(self.population_size // 2):
+            length = np.random.randint(min_length, max_length)
+            individual = np.clip(np.random.exponential(scale=0.5, size=length), 0, 10.0)
+            population.append(individual.tolist())
+
+        return population
+>>>>>>> REPLACE
+</DIFF>

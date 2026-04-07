@@ -1,0 +1,288 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances using squareform for better numerical stability
+        distances = pdist(points)
+
+        # Proper handling of edge cases
+        if len(distances) == 0 or np.allclose(distances, 0):
+            return 1e10  # Very large negative value to indicate poor configuration
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero - return large penalty if no distance
+        if max_dist == 0:
+            return 1e10
+
+        # Return negative ratio (since we want to maximize ratio, we minimize its negative)
+        return -min_dist / max_dist
+
+    def constraint_func(x):
+        # Ensure points are within [0+eps,1-eps] x [0+eps,1-eps] for numerical stability
+        eps = 1e-8
+        points = x.reshape(-1, 2)
+        constraints = []
+
+        # x coordinates in [eps, 1-eps]
+        constraints.append(points[:, 0].min() - eps)  # x_min >= eps
+        constraints.append(1 - eps - points[:, 0].max())  # x_max <= 1-eps
+
+        # y coordinates in [eps, 1-eps]
+        constraints.append(points[:, 1].min() - eps)  # y_min >= eps
+        constraints.append(1 - eps - points[:, 1].max())  # y_max <= 1-eps
+
+        return np.array(constraints)
+
+    def bounded_objective(x):
+        # Boundary checking with clamping to safe bounds
+        eps = 1e-8
+        points = np.clip(x.reshape(-1, 2), eps, 1-eps).flatten()
+        return objective(points)
+
+    def generate_hexagonal_initial_config():
+        """Generate a more sophisticated hexagonal initial configuration"""
+        np.random.seed(42)
+        points = []
+
+        # Create a more precise hexagonal lattice pattern optimized for 16 points
+        # Using 4 rows and 4 columns but with better spacing and positioning
+
+        # For 16 points arranged in hexagonal pattern, we can use a 4x4 grid with
+        # proper hexagonal offsets and mathematical spacing
+        sqrt3 = np.sqrt(3)
+
+        # Create hexagonal pattern with proper spacing
+        row_height = 0.8 * sqrt3 / 2  # Vertical spacing for hexagons
+        col_width = 0.8  # Horizontal spacing
+
+        for i in range(4):
+            for j in range(4):
+                # Hexagonal offset pattern
+                x = 0.1 + j * 0.8 / 3.0  # Even rows
+                y = 0.1 + i * row_height / 3.0
+
+                # Offset odd rows for hexagonal packing
+                if i % 2 == 1:
+                    x += 0.8 / 6.0  # Half column width offset
+
+                points.append([x, y])
+
+        # Convert to numpy array and add small random jitter to break symmetry
+        points = np.array(points[:16])
+        points += np.random.normal(0, 0.003, points.shape)  # Reduced jitter for better starting point
+
+        # Ensure all points are within bounds
+        points = np.clip(points, 0, 1)
+
+        return points
+
+    def generate_spiral_initial_config():
+        """Generate a spiral initial configuration"""
+        np.random.seed(42)
+        points = []
+
+        # Create a spiral pattern that spreads points well
+        for i in range(16):
+            if i == 0:
+                points.append([0.5, 0.5])  # Center point
+            else:
+                angle = i * 2.5  # Angle in radians
+                radius = min(0.4, i * 0.05)  # Radius increases gradually
+                x = 0.5 + radius * np.cos(angle)
+                y = 0.5 + radius * np.sin(angle)
+                points.append([x, y])
+
+        points = np.array(points)
+        points = np.clip(points, 0, 1)
+        return points
+
+    def generate_grid_initial_config():
+        """Generate a regular grid initial configuration"""
+        np.random.seed(42)
+        points = []
+
+        # Regular 4x4 grid
+        x_vals = np.linspace(0.1, 0.9, 4)
+        y_vals = np.linspace(0.1, 0.9, 4)
+
+        for i in range(4):
+            for j in range(4):
+                points.append([x_vals[i], y_vals[j]])
+
+        points = np.array(points[:16])
+        points += np.random.normal(0, 0.01, points.shape)
+        points = np.clip(points, 0, 1)
+        return points
+
+    def generate_random_initial_config():
+        """Generate a random initial configuration"""
+        np.random.seed(42)
+        return np.random.rand(16, 2)
+
+    def generate_golden_spiral_initial_config():
+        """Generate an initial configuration using golden spiral pattern"""
+        np.random.seed(42)
+        points = []
+
+        # Golden spiral pattern - points distributed along a spiral with golden ratio
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+
+        # Distribute points along a spiral in polar coordinates
+        for i in range(16):
+            angle = i * 2 * np.pi / phi  # Golden angle increment
+            radius = i * 0.4 / 15  # Radial increase
+            x = 0.5 + radius * np.cos(angle)
+            y = 0.5 + radius * np.sin(angle)
+            points.append([x, y])
+
+        points = np.array(points)
+        points = np.clip(points, 0, 1)
+        return points
+
+    def generate_corner_initial_config():
+        """Generate an initial configuration with points at corners and center"""
+        np.random.seed(42)
+        points = np.array([
+            [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+            [0.5, 0.1], [0.5, 0.9], [0.1, 0.5], [0.9, 0.5],
+            [0.25, 0.25], [0.25, 0.75], [0.75, 0.25], [0.75, 0.75],
+            [0.33, 0.33], [0.33, 0.67], [0.67, 0.33], [0.67, 0.67]
+        ])
+        points += np.random.normal(0, 0.01, points.shape)
+        points = np.clip(points, 0, 1)
+        return points
+
+    # Generate multiple diverse initial configurations
+    initial_configs = [
+        generate_hexagonal_initial_config(),
+        generate_spiral_initial_config(),
+        generate_grid_initial_config(),
+        generate_random_initial_config(),
+        generate_corner_initial_config(),
+        generate_golden_spiral_initial_config()
+    ]
+
+    best_ratio = float('inf')
+    best_points = None
+
+    # Try multiple initial configurations with optimized hybrid approach
+    for i, initial_config in enumerate(initial_configs):
+        try:
+            # Flatten for optimization
+            x0 = initial_config.flatten()
+
+            # Define bounds for each coordinate (safe bounds to avoid numerical issues)
+            bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+
+            # Phase 1: Global optimization with Differential Evolution
+            de_result = differential_evolution(
+                bounded_objective,
+                bounds,
+                seed=42+i,
+                maxiter=150,  # More iterations for better global search
+                popsize=25,   # Larger population for better exploration
+                tol=1e-6,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                disp=False
+            )
+
+            # If DE finds a good solution, refine it locally
+            if de_result.success and -de_result.fun > 0.15:
+                x0 = de_result.x
+
+            # Phase 2: Local optimization with adaptive iteration limits
+            # Use SLSQP for better constraint handling
+            result = minimize(
+                bounded_objective,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints={'type': 'ineq', 'fun': constraint_func},
+                options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9},
+                callback=None
+            )
+
+            # If SLSQP fails, try L-BFGS-B as fallback
+            if not result.success:
+                fallback_result = minimize(
+                    bounded_objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 300}
+                )
+                result = fallback_result
+
+            if result.success:
+                optimized_points = result.x.reshape(-1, 2)
+                # Calculate actual ratio for this configuration
+                distances = pdist(optimized_points)
+                if len(distances) > 0 and np.max(distances) > 0:
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+                    ratio = min_dist / max_dist
+
+                    if ratio < best_ratio:  # We want to maximize ratio, so minimize negative ratio
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If we still don't have a good solution, use a fallback approach
+    if best_points is None:
+        # Try one more time with a strong optimization approach
+        fallback_config = generate_hexagonal_initial_config()
+        x0 = fallback_config.flatten()
+        bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+
+        # More aggressive optimization with careful parameter tuning
+        try:
+            result = minimize(
+                bounded_objective,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints={'type': 'ineq', 'fun': constraint_func},
+                options={'maxiter': 800, 'ftol': 1e-10, 'gtol': 1e-10}
+            )
+
+            if result.success:
+                best_points = result.x.reshape(-1, 2)
+            else:
+                # Final fallback - just return the best initial configuration
+                best_points = generate_hexagonal_initial_config()
+        except Exception:
+            # If everything fails, return the hexagonal initial config
+            best_points = generate_hexagonal_initial_config()
+
+    # Final safety check - ensure points are within bounds
+    if best_points is not None:
+        best_points = np.clip(best_points, 1e-8, 1-1e-8)
+    else:
+        # Last resort: return a default configuration
+        best_points = generate_hexagonal_initial_config()
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

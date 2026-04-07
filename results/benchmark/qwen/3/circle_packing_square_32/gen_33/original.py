@@ -1,0 +1,70 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    max_attempts = 10000
+    attempts = 0
+
+    while attempts < max_attempts:
+        # Try to generate a valid configuration
+        valid = True
+        candidate_circles = np.zeros((n, 3))
+
+        # Generate random positions and radii
+        for i in range(n):
+            # Try to place circle i
+            placed = False
+            max_tries = 100
+
+            for _ in range(max_tries):
+                # Generate random center and radius
+                x = np.random.uniform(0.01, 0.99)  # Avoid boundary issues
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.001, 0.1)  # Reasonable initial radius
+
+                # Check containment constraint
+                if (r <= x <= 1 - r) and (r <= y <= 1 - r):
+                    # Check overlap with existing circles
+                    overlap = False
+                    for j in range(i):
+                        existing_x, existing_y, existing_r = candidate_circles[j]
+                        distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                        if distance < r + existing_r:
+                            overlap = True
+                            break
+
+                    if not overlap:
+                        candidate_circles[i] = [x, y, r]
+                        placed = True
+                        break
+
+            if not placed:
+                valid = False
+                break
+
+        if valid:
+            return candidate_circles
+
+        attempts += 1
+
+    # If we couldn't find a valid initial configuration, return the best attempt
+    print(f"Warning: Could not generate valid initial configuration after {max_attempts} attempts")
+    return circles
+
+
+# EVOLVE-BLOCK-END

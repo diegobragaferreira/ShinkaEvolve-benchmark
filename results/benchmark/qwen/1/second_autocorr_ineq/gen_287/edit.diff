@@ -1,0 +1,710 @@
+--- a/original.py
++++ b/original.py
+@@ -1,577 +1,682 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from numba import jit, prange
++from numba import jit
+ import time
+ import random
+ import jax
+ import jax.numpy as jnp
+ from jax import grad, jit as jax_jit
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.signal import convolve
+ import warnings
+ warnings.filterwarnings('ignore')
+ 
+ # Global constants for optimization
+ MAX_TIME_SECONDS = 90.0
+ DEFAULT_STEPS = 1000
+ MIN_STEPS = 100
+ MAX_STEPS = 5000
+ POPULATION_SIZE_BASE = 15
+ INITIAL_REFINEMENT_ITERATIONS = 30
+ FINAL_REFINEMENT_ITERATIONS = 20
+-STOCHASTIC_PERTURBATION_MAGNITUDE = 0.02
+ 
+ # JAX-based autoconvolution and norm computation
+ @jax_jit
+ def compute_autoconvolution_jax(f_vals):
+     """JAX-based autoconvolution computation"""
+     # Use JAX's convolution operation for better numerical stability
+     f = jnp.array(f_vals)
+     # Compute f * f with proper padding
+     result = convolve(f, f, mode='full')
+     # Trim to appropriate size (center portion)
+     center = len(result) // 2
+     trimmed = result[center - len(f) + 1:center + len(f) - 1]
+     return trimmed
+ 
+ @jax_jit
+ def compute_norms_jax(g_vals):
+     """JAX-based computation of norms"""
+     g = jnp.array(g_vals)
+     # L1 norm
+     l1_norm = jnp.sum(jnp.abs(g))
+     # L2^2 norm
+     l2_sq_norm = jnp.sum(g * g)
+     # L-infinity norm
+     linf_norm = jnp.max(jnp.abs(g))
+     return l1_norm, l2_sq_norm, linf_norm
+ 
+ @jax_jit
+ def compute_c2_jax(f_vals):
+     """Compute C2 value using JAX for automatic differentiation"""
+     g = compute_autoconvolution_jax(f_vals)
+     l1, l2_sq, linf = compute_norms_jax(g)
+ 
+     # Avoid division by zero
+     safe_l1 = jnp.where(l1 <= 1e-15, 1e-15, l1)
+     safe_linf = jnp.where(linf <= 1e-15, 1e-15, linf)
+ 
+     return l2_sq / (safe_l1 * safe_linf)
+ 
+ # Numba optimized versions for performance-critical parts
+ @jit(nopython=True)
+ def compute_autoconvolution_numba(f_vals, dx):
+     """
+     Efficiently compute autoconvolution using Numba JIT compilation
+     """
+     n = len(f_vals)
+     # Autoconvolution result has length 2*n - 1
+     g = np.zeros(2*n - 1)
+ 
+     # Direct implementation of discrete convolution
+     for i in range(n):
+         for j in range(n):
+             idx = i + j
+             if 0 <= idx < len(g):
+                 g[idx] += f_vals[i] * f_vals[j]
+ 
+     return g
+ 
+ @jit(nopython=True)
+ def compute_norms_numba(g_vals):
+     """
+     Compute L1, L2^2, and L-infinity norms efficiently
+     """
+     n = len(g_vals)
+ 
+     # L1 norm approximation (sum of absolute values)
+     l1_norm = 0.0
+     for i in range(n):
+         l1_norm += abs(g_vals[i])
+ 
+     # L2^2 norm (sum of squares)
+     l2_sq_norm = 0.0
+     for i in range(n):
+         l2_sq_norm += g_vals[i] * g_vals[i]
+ 
+     # L-infinity norm (maximum absolute value)
+     linf_norm = 0.0
+     for i in range(n):
+         abs_val = abs(g_vals[i])
+         if abs_val > linf_norm:
+             linf_norm = abs_val
+ 
+     return l1_norm, l2_sq_norm, linf_norm
+ 
+ @jit(nopython=True)
+ def compute_c2_numba(f_vals, dx):
+     """
+     Compute C2 value using optimized numba functions
+     """
+     # Compute autoconvolution
+     g_vals = compute_autoconvolution_numba(f_vals, dx)
+ 
+     # Compute norms
+     l1, l2_sq, linf = compute_norms_numba(g_vals)
+ 
+     # Avoid division by zero
+     if l1 <= 1e-15 or linf <= 1e-15:
+         return 0.0
+ 
+     # Return C2 value
+     return l2_sq / (l1 * linf)
+ 
+ def evaluate_step_function(f_vals):
+     """
+     Evaluate a step function and return C2 value
+     """
+     try:
+         # Ensure non-negative values
+         f_vals = np.array([max(0.0, x) for x in f_vals])
+ 
+         # Use a fixed dx for consistent spacing
+         dx = 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001
+ 
+         # Compute C2 value
+         c2 = compute_c2_numba(f_vals, dx)
+         return c2
+     except Exception as e:
+         return 0.0
+ 
+ def compute_autoconvolution_norms_jax(f_values):
+     """
+     Compute the three norms needed for C2 calculation using JAX
+     """
+     f = jnp.array(f_values, dtype=jnp.float64)
+     # Ensure non-negative values
+     f = jnp.maximum(f, 0.0)
+ 
+     # Compute autoconvolution using JAX
+     g_centered = compute_autoconvolution_jax(f)
+ 
+     # Compute the norms
+     g_squared = g_centered ** 2
+     g_abs = jnp.abs(g_centered)
+ 
+     # ||g||₂² - sum of squares
+     norm_g_2_squared = jnp.sum(g_squared)
+ 
+     # ||g||₁ - sum of absolute values
+     norm_g_1 = jnp.sum(g_abs)
+ 
+     # ||g||∞ - maximum absolute value
+     norm_g_inf = jnp.max(g_abs)
+ 
+     # Avoid division by zero
+     safe_norm_g_1 = jnp.where(norm_g_1 <= 1e-15, 1e-15, norm_g_1)
+     safe_norm_g_inf = jnp.where(norm_g_inf <= 1e-15, 1e-15, norm_g_inf)
+ 
+     # Return C2 value
+     c2 = norm_g_2_squared / (safe_norm_g_1 * safe_norm_g_inf)
+ 
+     return c2
+ 
+ def evaluate_step_function_jax(f_vals):
+     """
+     Evaluate step function using JAX for faster computation
+     """
+     try:
+         # Ensure non-negative values
+         f_vals = np.array([max(0.0, x) for x in f_vals])
+         c2 = compute_autoconvolution_norms_jax(f_vals)
+         return float(c2)
+     except Exception as e:
+         return 0.0
+ 
++def create_sophisticated_initialization(n_steps):
++    """
++    Create a sophisticated initial step function using Gaussian-weighted alternating segments
++    """
++    # Create alternating high/low regions with Gaussian smoothing to avoid sharp discontinuities
++    # This pattern is more mathematically informed than simple alternating
++    base_pattern = np.zeros(n_steps)
++
++    # Create alternating pattern with Gaussian weighting for smooth transitions
++    segment_size = max(1, n_steps // 12)
++
++    for i in range(0, n_steps, segment_size):
++        end_idx = min(i + segment_size, n_steps)
++        segment_center = (i + end_idx) / 2
++
++        # Create a smooth Gaussian-like transition point
++        gaussian_kernel = np.exp(-0.5 * ((np.arange(i, end_idx) - segment_center) / (segment_size/4))**2)
++
++        if (i // segment_size) % 2 == 0:
++            # High region with Gaussian weighting
++            base_pattern[i:end_idx] = 1.0 + 0.5 * gaussian_kernel
++        else:
++            # Low region with Gaussian weighting
++            base_pattern[i:end_idx] = 0.2 + 0.1 * gaussian_kernel
++
++    # Add some additional structure for better optimization
++    # Introduce slight modulation to break symmetry
++    modulation = 1.0 + 0.1 * np.sin(np.linspace(0, 4*np.pi, n_steps))
++    base_pattern = base_pattern * modulation
++
++    # Ensure non-negativity and normalize
++    base_pattern = np.clip(base_pattern, 0, None)
++    if np.sum(base_pattern) > 0:
++        base_pattern = base_pattern / np.sum(base_pattern)
++
++    return base_pattern.tolist()
++
+ def create_multi_scale_initialization(n_steps):
+     """
+     Create diverse initial solutions at multiple scales
+     """
+     # Different initialization strategies
+     strategies = [
+         create_bell_shaped_pattern,
+         create_alternating_pattern,
+         create_peak_centered_pattern,
+         create_smooth_transition_pattern,
+-        create_random_spatial_pattern
++        create_random_spatial_pattern,
++        create_sophisticated_initialization
+     ]
+ 
+     # Choose a strategy randomly
+     strategy = np.random.choice(strategies)
+     return strategy(n_steps)
+ 
+ def create_bell_shaped_pattern(n_steps):
+     """Create a bell-shaped base pattern"""
+     x = np.linspace(0, 1, n_steps)
+     # Create Gaussian-like shape with emphasis on edges
+     pattern = 1.0 + 0.8 * np.exp(-15 * (x - 0.5)**2) - 0.3 * np.exp(-5 * x**2) - 0.3 * np.exp(-5 * (1-x)**2)
+     pattern = np.clip(pattern, 0, np.inf)
+     return pattern / np.sum(pattern) * n_steps
+ 
+ def create_alternating_pattern(n_steps):
+     """Create alternating high/low pattern"""
+     pattern = []
+     for i in range(n_steps):
+         if i % 2 == 0:
+             pattern.append(1.0 + np.random.random() * 0.5)
+         else:
+             pattern.append(0.2 + np.random.random() * 0.3)
+     return np.array(pattern) / np.sum(pattern) * n_steps
+ 
+ def create_peak_centered_pattern(n_steps):
+     """Create peak-centered pattern with tapering edges"""
+     pattern = np.zeros(n_steps)
+     center = n_steps // 2
+     width = max(1, n_steps // 6 + np.random.randint(-1, 2))
+ 
+     # Create a central peak
+     pattern[max(0, center-width//2):min(n_steps, center+width//2)] = 1.0
+ 
+     # Add tapering to edges
+     for i in range(center - width//2):
+         pattern[i] *= (i / (center - width//2))
+     for i in range(center + width//2, n_steps):
+         pattern[i] *= ((n_steps - i) / (width//2 + 1))
+ 
+     # Add some noise
+     noise = np.random.normal(0, 0.05, n_steps)
+     pattern = pattern + noise
+     pattern = np.clip(pattern, 0, np.inf)
+     return pattern / np.sum(pattern) * n_steps
+ 
+ def create_smooth_transition_pattern(n_steps):
+     """Create smooth transition pattern"""
+     pattern = np.zeros(n_steps)
+     # Create smooth ramp with some random variation
+     for i in range(n_steps):
+         x = i / (n_steps - 1) if n_steps > 1 else 0.5
+         pattern[i] = 0.5 + 0.5 * np.sin(np.pi * x) + np.random.normal(0, 0.1)
+ 
+     pattern = np.clip(pattern, 0, np.inf)
+     return pattern / np.sum(pattern) * n_steps
+ 
+ def create_random_spatial_pattern(n_steps):
+     """Create random spatial pattern"""
+     pattern = np.random.random(n_steps)
+     pattern = np.clip(pattern, 0, np.inf)
+     return pattern / np.sum(pattern) * n_steps
+ 
+ def adaptive_gradient_optimization(initial_solution):
+     """
+     Use gradient-based optimization with JAX automatic differentiation
+     """
+     # Create JAX function for gradient computation
+     grad_func = grad(compute_autoconvolution_norms_jax)
+ 
+     # Convert to JAX array
+     f_jax = jnp.array(initial_solution)
+ 
+     # Set learning rate and iterations
+     learning_rate = 0.01
+     iterations = 20
+ 
+     try:
+         # Gradient descent loop
+         for _ in range(iterations):
+             # Compute gradient
+             grad_val = grad_func(f_jax)
+ 
+             # Update parameters (with clipping to prevent negative values)
+             f_jax = f_jax - learning_rate * grad_val
+             f_jax = jnp.maximum(f_jax, 0.0)
+ 
+             # Normalize to maintain reasonable scale
+             total = jnp.sum(f_jax)
+             if total > 0:
+                 f_jax = f_jax / total * len(initial_solution)
+ 
+         # Convert back to Python list
+         result = f_jax.tolist()
+         return result
+ 
+     except Exception:
+         # Fallback to original solution if gradient optimization fails
+         return initial_solution
+ 
+ def compute_flatness_penalty(g_vals):
+     """
+     Compute penalty based on variance of g_vals to encourage flatness in autoconvolution
+     """
+     if len(g_vals) < 2:
+         return 0.0
+     mean_val = np.mean(g_vals)
+     if mean_val <= 1e-15:
+         return 0.0
+     variance = np.var(g_vals)
+     # Return normalized variance as penalty (lower is better)
+     return variance / (mean_val * mean_val)
+ 
+ def multi_objective_evaluate(f_vals):
+     """
+     Multi-objective evaluation combining C2 and flatness penalty
+     """
+     try:
+         # Ensure non-negative values
+         f_vals = np.array([max(0.0, x) for x in f_vals])
+ 
+         # Compute autoconvolution
+         g_vals = compute_autoconvolution_numba(f_vals, 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001)
+ 
+         # Compute norms
+         l1, l2_sq, linf = compute_norms_numba(g_vals)
+ 
+         # Avoid division by zero
+         if l1 <= 1e-15 or linf <= 1e-15:
+             return 0.0, 0.0  # Return a very poor score for invalid cases
+ 
+         # Calculate C2
+         c2 = l2_sq / (l1 * linf)
+ 
+         # Calculate flatness penalty (higher flatness means lower penalty)
+         flatness_penalty = compute_flatness_penalty(g_vals)
+ 
+         # Return (C2, flatness_penalty) - we want to maximize C2 and minimize flatness_penalty
+         return c2, flatness_penalty
+     except Exception as e:
+         return 0.0, 0.0
+ 
+ def adaptive_evolutionary_optimization(initial_population):
+     """
+     Enhanced adaptive evolutionary optimization using multi-objective fitness
+     """
+     # Track convergence
+     best_scores = []
+     patience_counter = 0
+     max_patience = 10
+     population_size = POPULATION_SIZE_BASE
+ 
+     # Start with initial population
+     population = initial_population.copy()
+     # Use multi-objective evaluation to get both C2 and flatness
+     objectives = [multi_objective_evaluate(ind) for ind in population]
+     fitnesses = [obj[0] for obj in objectives]  # C2 values for primary fitness
+     flatness_penalties = [obj[1] for obj in objectives]  # Flatness penalties
+ 
+     # Sort by C2 fitness (primary objective)
+     sorted_indices = np.argsort(fitnesses)[::-1]
+     sorted_population = [population[i] for i in sorted_indices]
+     sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+     sorted_flatness = [flatness_penalties[i] for i in sorted_indices]
+ 
+     current_best = sorted_population[0]
+     best_scores.append(sorted_fitnesses[0])
+ 
+     # Adaptive parameters based on convergence behavior
+     for generation in range(150):  # Limited to prevent timeout
+         if len(population) < 10:
+             population_size = 10
+         elif len(population) > 30:
+             population_size = 20
+         else:
+             population_size = len(population) // 2 + 5
+ 
+         # Evaluate all individuals with multi-objective scoring
+         objectives = [multi_objective_evaluate(ind) for ind in population]
+         fitnesses = [obj[0] for obj in objectives]  # C2 values for primary fitness
+         flatness_penalties = [obj[1] for obj in objectives]  # Flatness penalties
+ 
+         # Sort by C2 fitness
+         sorted_indices = np.argsort(fitnesses)[::-1]
+         sorted_population = [population[i] for i in sorted_indices]
+         sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+         sorted_flatness = [flatness_penalties[i] for i in sorted_indices]
+ 
+         # Update best
+         current_best = sorted_population[0]
+         best_scores.append(sorted_fitnesses[0])
+ 
+         # Check for convergence
+         if len(best_scores) >= 5:
+             recent_improvement = best_scores[-1] - best_scores[-5]
+             if recent_improvement < 1e-6:
+                 patience_counter += 1
+             else:
+                 patience_counter = 0
+ 
+             if patience_counter >= max_patience:
+                 # Increase population size to escape local minimum
+                 population_size = min(population_size * 2, 50)
+                 patience_counter = 0
+ 
+         # Create offspring using tournament selection and crossover
+         new_population = []
+ 
+         # Elitism: keep the best 20%
+         elite_count = max(1, int(0.2 * population_size))
+         new_population.extend(sorted_population[:elite_count])
+ 
+         # Generate rest through crossover and mutation
+         while len(new_population) < population_size:
+             # Tournament selection based on C2 fitness
+             tournament_size = 3
+             tournament_indices = np.random.choice(len(sorted_population), tournament_size)
+             tournament_fitnesses = [sorted_fitnesses[i] for i in tournament_indices]
+             winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+ 
+             # Clone selected parent
+             parent = sorted_population[winner_index].copy()
+ 
+             # Mutation (add noise)
+             mutation_strength = 0.1 * (1 - generation / 150.0)  # Decrease over time
+             for i in range(len(parent)):
+                 if np.random.random() < 0.2:  # 20% chance to mutate each element
+                     noise = np.random.normal(0, mutation_strength)
+                     parent[i] = max(0, parent[i] + noise)
+ 
+             new_population.append(parent)
+ 
+         # Replace population
+         population = new_population
+ 
+         # Early termination based on time
+         if time.time() - start_time > MAX_TIME_SECONDS * 0.9:
+             break
+ 
+     return current_best
+ 
+ def advanced_refinement_strategy(initial_solution):
+     """
+     Advanced refinement using multiple optimization techniques with stochastic perturbations
+     """
+     # Try different optimization methods
+     best_solution = initial_solution.copy()
+     best_c2 = evaluate_step_function(best_solution)
+ 
+     # Method 1: Differential evolution on a subset
+     try:
+         # Reduce dimensionality for faster optimization
+         reduced_solution = best_solution[:min(len(best_solution), 500)]
+         bounds = [(0, 10.0) for _ in range(len(reduced_solution))]
+ 
+         def objective(x):
+             # Pad with zeros to original size
+             extended_x = list(x) + [1.0] * (len(best_solution) - len(x))
+             return -evaluate_step_function(extended_x)
+ 
+         de_result = differential_evolution(
+             objective,
+             bounds,
+             maxiter=20,
+             popsize=10,
+             seed=42,
+             disp=False
+         )
+ 
+         if de_result.success:
+             refined_solution = np.maximum(de_result.x, 0)
+             # Extend back to original size
+             extended_refined = list(refined_solution) + [1.0] * (len(best_solution) - len(refined_solution))
+             refined_c2 = evaluate_step_function(extended_refined)
+             if refined_c2 > best_c2:
+                 best_solution = extended_refined
+                 best_c2 = refined_c2
+     except Exception as e:
+         pass
+ 
+     # Method 2: Local refinement around best solution with gradient optimization
+     try:
+         # Apply gradient-based optimization
+         gradient_refined = adaptive_gradient_optimization(best_solution)
+         gradient_c2 = evaluate_step_function(gradient_refined)
+         if gradient_c2 > best_c2:
+             best_solution = gradient_refined
+             best_c2 = gradient_c2
+     except Exception as e:
+         pass
+ 
+     # Method 3: Add stochastic perturbations to escape local minima
+     try:
+         # Apply small random perturbations
+         perturbed = best_solution.copy()
+         for i in range(len(perturbed)):
+             if np.random.random() < 0.1:  # 10% chance to perturb each element
+-                perturbation = np.random.normal(0, STOCHASTIC_PERTURBATION_MAGNITUDE)
++                perturbation = np.random.normal(0, 0.01)
+                 perturbed[i] = max(0, perturbed[i] + perturbation)
+ 
+         # Normalize
+         if np.sum(perturbed) > 0:
+             perturbed = perturbed / np.sum(perturbed) * len(perturbed)
+ 
+         perturbed_c2 = evaluate_step_function(perturbed)
+         if perturbed_c2 > best_c2:
+             best_solution = perturbed
+             best_c2 = perturbed_c2
+     except Exception as e:
+         pass
+ 
+     return best_solution
+ 
++def evolutionary_optimization():
++    """
++    Use evolutionary algorithm with differential evolution for optimization
++    """
++    # Fixed parameters for reproducibility
++    np.random.seed(42)
++    random.seed(42)
++
++    # Use a reasonable range for number of steps
++    min_steps = 500
++    max_steps = 2000
++
++    # Initialize with sophisticated pattern
++    n_steps = np.random.randint(min_steps, max_steps)
++    initial_solution = create_sophisticated_initialization(n_steps)
++
++    # Define bounds for differential evolution (step heights between 0 and 10)
++    bounds = [(0.0, 10.0)] * len(initial_solution)
++
++    # Run differential evolution with increased population for better exploration
++    result = differential_evolution(
++        lambda x: -evaluate_step_function(x),  # Negative because we want to maximize
++        bounds,
++        maxiter=150,  # Increased iterations
++        popsize=20,   # Increased population size for better exploration
++        seed=42,
++        strategy='best1bin',
++        tol=1e-6,
++        recombination=0.7,
++        disp=False
++    )
++
++    # Post-process with local refinement using L-BFGS-B
++    # This helps fine-tune the solution around the global optimum
++    refined_result = result.x.copy()
++
++    # Create bounds for local optimization (same as global)
++    local_bounds = [(0.0, 10.0)] * len(refined_result)
++
++    try:
++        # Local optimization to refine the global optimum
++        local_result = minimize(
++            lambda x: -evaluate_step_function(x),
++            refined_result,
++            method='L-BFGS-B',
++            bounds=local_bounds,
++            options={'disp': False}
++        )
++
++        if local_result.success:
++            refined_result = local_result.x.copy()
++    except:
++        # If local optimization fails, use the original result
++        pass
++
++    # Final validation and normalization
++    refined_result = np.array(refined_result)
++    refined_result = np.clip(refined_result, 0, None)
++
++    # Normalize to ensure good scaling
++    if np.sum(refined_result) > 0:
++        refined_result = refined_result / np.sum(refined_result)
++
++    return refined_result.tolist()
++
+ def construct_function() -> list[float]:
+     """
+     Optimized function to construct step-function with high C2 value.
+     Uses adaptive evolutionary optimization with multi-scale initialization.
+     """
+     global start_time
+     start_time = time.time()
+ 
+     # Set seeds for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+ 
+-    # Initialize with multi-scale approach
+-    initial_solutions = []
+-    n_attempts = 8
+-    target_steps = DEFAULT_STEPS
+-
+-    for i in range(n_attempts):
+-        # Create diverse initial solutions
+-        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+-        init_solution = create_multi_scale_initialization(n_steps)
+-        initial_solutions.append(init_solution)
+-
+-    # Select best initial solution
+-    best_init = max(initial_solutions, key=evaluate_step_function)
+-
+-    # Apply adaptive evolutionary optimization
+-    evolved_solution = adaptive_evolutionary_optimization(initial_solutions)
+-
+-    # Refine the solution with advanced strategies
+-    refined_solution = advanced_refinement_strategy(evolved_solution)
++    # Try the sophisticated evolutionary approach first
++    try:
++        best_solution = evolutionary_optimization()
++    except Exception as e:
++        # Fallback to multi-scale initialization approach
++        print(f"Evolution failed with error: {e}")
++        initial_solutions = []
++        n_attempts = 8
++        target_steps = DEFAULT_STEPS
++
++        for i in range(n_attempts):
++            # Create diverse initial solutions
++            n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
++            init_solution = create_multi_scale_initialization(n_steps)
++            initial_solutions.append(init_solution)
++
++        # Select best initial solution
++        best_init = max(initial_solutions, key=evaluate_step_function)
++        best_solution = best_init
++
++    # Apply advanced refinement to the solution
++    refined_solution = advanced_refinement_strategy(best_solution)
+ 
+     # Final evaluation and return the best
+     final_c2 = evaluate_step_function(refined_solution)
+-    initial_c2 = evaluate_step_function(best_init)
++    initial_c2 = evaluate_step_function(best_solution)
+ 
+     if final_c2 > initial_c2:
+         result = refined_solution
+     else:
+-        result = best_init
++        result = best_solution
+ 
+     # Ensure proper length
+     if len(result) < MIN_STEPS:
+         result.extend([1.0] * (MIN_STEPS - len(result)))
+     elif len(result) > MAX_STEPS:
+         result = result[:MAX_STEPS]
+ 
+     # Normalize if needed
+     if np.sum(result) > 0:
+         result = np.array(result) / np.sum(result) * len(result)
+ 
+     # Ensure non-negativity and finite values
+     result = np.clip(result, 0, np.inf)
+ 
+     end_time = time.time()
+     eval_time = end_time - start_time
+ 
+     # Print debug info
+     print(f"Eval time: {eval_time:.4f}s")
+     print(f"Best C2 found: {evaluate_step_function(result):.6f}")
+ 
+     return result.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

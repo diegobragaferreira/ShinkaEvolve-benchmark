@@ -1,0 +1,139 @@
+<NAME>
+add_parallel_geometric_validation
+</NAME>
+
+<DESCRIPTION>
+The main improvement is to implement parallelized geometric validation using joblib to accelerate overlap and containment checks. This addresses the computational bottleneck in the evaluation function by distributing the 66 pairwise overlap checks and vertex containment validations across multiple CPU cores. The change replaces the sequential nested loops with parallel processing, which will significantly reduce evaluation time during optimization iterations while maintaining the same constraint handling accuracy.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration(params):
+    """Evaluate a configuration for validity and quality.
+    params: array of shape (37,) where first 36 values are (x,y,angle) for 12 hexagons
+            and the last value is the outer hexagon side length"""
+
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Check containment and overlaps
+    total_penetration = 0.0
+    valid = True
+
+    n = len(inner_hex_data)
+    inner_polys = []
+
+    # Compute all inner hexagon polygons
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        inner_poly = compute_hexagon_polygon(x, y, angle)
+        inner_polys.append(inner_poly)
+
+        # Check containment
+        if not check_containment(inner_poly, outer_hex_poly):
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_poly)
+                if hasattr(diff, 'area'):
+                    total_penetration += diff.area
+            except:
+                total_penetration += 1000  # Large penalty
+
+        # Check overlaps with previous hexagons
+        for j in range(i):
+            if check_overlap(inner_polys[i], inner_polys[j]):
+                valid = False
+                # Calculate overlap area
+                try:
+                    overlap = inner_polys[i].intersection(inner_polys[j])
+                    if hasattr(overlap, 'area'):
+                        total_penetration += overlap.area
+                except:
+                    total_penetration += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penetration * 10000 if total_penetration > 0 else 1000000
+        return penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+=======
+def evaluate_configuration(params):
+    """Evaluate a configuration for validity and quality.
+    params: array of shape (37,) where first 36 values are (x,y,angle) for 12 hexagons
+            and the last value is the outer hexagon side length"""
+
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Compute all inner hexagon polygons in parallel
+    inner_polys = Parallel(n_jobs=-1)(
+        delayed(compute_hexagon_polygon)(x, y, angle)
+        for x, y, angle in inner_hex_data
+    )
+
+    # Check containment and overlaps in parallel
+    total_penetration = 0.0
+    valid = True
+
+    # Check containment for all hexagons in parallel
+    containment_results = Parallel(n_jobs=-1)(
+        delayed(check_containment)(inner_poly, outer_hex_poly)
+        for inner_poly in inner_polys
+    )
+
+    # Check overlaps in parallel (all pairs)
+    def check_pair_overlap(i, j):
+        return check_overlap(inner_polys[i], inner_polys[j])
+
+    # Generate all pairs of hexagons to check
+    pairs = [(i, j) for i in range(12) for j in range(i)]
+
+    # Check all overlaps in parallel
+    overlap_results = Parallel(n_jobs=-1)(
+        delayed(check_pair_overlap)(i, j) for i, j in pairs
+    )
+
+    # Process containment results
+    for i, is_contained in enumerate(containment_results):
+        if not is_contained:
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_polys[i])
+                if hasattr(diff, 'area'):
+                    total_penetration += diff.area
+            except:
+                total_penetration += 1000  # Large penalty
+
+    # Process overlap results
+    for i, (pair, is_overlap) in enumerate(zip(pairs, overlap_results)):
+        if is_overlap:
+            valid = False
+            # Calculate overlap area
+            try:
+                overlap = inner_polys[pair[0]].intersection(inner_polys[pair[1]])
+                if hasattr(overlap, 'area'):
+                    total_penetration += overlap.area
+            except:
+                total_penetration += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penetration * 10000 if total_penetration > 0 else 1000000
+        return penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+>>>>>>> REPLACE
+</DIFF>

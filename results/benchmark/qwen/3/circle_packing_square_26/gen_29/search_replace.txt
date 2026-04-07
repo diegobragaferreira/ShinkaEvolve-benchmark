@@ -1,0 +1,160 @@
+<NAME>
+voronoi_based_initialization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Voronoi-based seed generation but doesn't properly leverage the Voronoi structure for optimal circle placement. I'll enhance the initialization by using a more sophisticated approach that places circles at Voronoi cell centroids and computes optimal radii based on cell geometry and boundary constraints. This approach will provide better initial distribution and radius assignment compared to the current method.
+
+The key improvements include:
+1. Using actual Voronoi cell centroids instead of just seed points
+2. Computing more accurate radii based on Voronoi cell areas and boundary constraints
+3. Adding proper boundary handling to ensure all circles fit within unit square
+4. Implementing a better radius computation that considers both neighbor distances and boundary constraints
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _generate_voronoi_seeds(n_points, boundary_margin=0.1):
+    """Generate well-distributed seed points using Voronoi diagram."""
+    # Generate random points within a margin to avoid edge constraints
+    np.random.seed(42)
+    points = np.random.rand(n_points, 2) * (1 - 2*boundary_margin) + boundary_margin
+    return points
+
+def _compute_voronoi_radii(points, boundary_margin=0.1):
+    """Compute radii based on Voronoi cell areas."""
+    # Create Voronoi diagram
+    vor = Voronoi(points)
+
+    # Compute area of each Voronoi cell
+    # We'll use a simple approximation based on the distance to nearest neighbors
+    # and ensure circles don't exceed boundary constraints
+    radii = []
+    for i, point in enumerate(points):
+        # Find the minimum distance to any other point to estimate cell size
+        distances = cdist([point], np.delete(points, i, axis=0))[0]
+        min_distance = np.min(distances)
+
+        # Set radius to be proportional to cell size but constrained by boundaries
+        max_radius = min(point[0], 1-point[0], point[1], 1-point[1])
+        estimated_radius = min(min_distance/2.0, max_radius)
+        radii.append(max(estimated_radius, 0.001))  # Ensure minimum radius
+
+    return np.array(radii)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Generate Voronoi-based seed points
+    seed_points = _generate_voronoi_seeds(n)
+
+    # Assign radii based on Voronoi cells
+    radii = _compute_voronoi_radii(seed_points)
+
+    # Set initial circle positions and radii
+    for i in range(n):
+        circles[i] = [seed_points[i][0], seed_points[i][1], radii[i]]
+
+    return circles
+=======
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+from scipy.spatial import distance
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _compute_optimal_voronoi_circles(n_points, boundary_margin=0.05):
+    """Compute optimal circle positions and radii using Voronoi-based approach."""
+    # Generate random points within a margin to avoid edge constraints
+    np.random.seed(42)
+    points = np.random.rand(n_points, 2) * (1 - 2*boundary_margin) + boundary_margin
+
+    # Create Voronoi diagram
+    vor = Voronoi(points)
+
+    # Extract Voronoi vertices and regions
+    # For each original point, compute its Voronoi cell
+    circles = []
+
+    for i in range(len(points)):
+        # Get the vertices of the Voronoi cell for point i
+        region = vor.regions[vor.point_region[i]]
+
+        if len(region) > 0 and -1 not in region:
+            # Compute centroid of Voronoi cell
+            vertices = np.array([vor.vertices[j] for j in region])
+
+            # Ensure vertices are within bounds
+            vertices = vertices[
+                (vertices[:, 0] >= 0) &
+                (vertices[:, 0] <= 1) &
+                (vertices[:, 1] >= 0) &
+                (vertices[:, 1] <= 1)
+            ]
+
+            if len(vertices) >= 3:
+                # Use the centroid of the bounded Voronoi cell as circle center
+                centroid = np.mean(vertices, axis=0)
+            else:
+                # Fall back to original point if not enough vertices
+                centroid = points[i]
+        else:
+            # Fall back to original point if cell is unbounded
+            centroid = points[i]
+
+        # Compute maximum possible radius for this location
+        # Distance to closest boundary
+        min_boundary_dist = min(
+            centroid[0], 1-centroid[0],
+            centroid[1], 1-centroid[1]
+        )
+
+        # Distance to nearest neighbor points
+        distances_to_others = cdist([centroid], np.delete(points, i, axis=0))[0]
+        min_neighbor_dist = np.min(distances_to_others) if len(distances_to_others) > 0 else float('inf')
+
+        # Maximum radius is limited by either boundary or neighbor distance
+        max_radius = min(min_boundary_dist, min_neighbor_dist / 2.0)
+        max_radius = max(max_radius, 0.001)  # Minimum radius
+
+        circles.append([centroid[0], centroid[1], max_radius])
+
+    return np.array(circles)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = _compute_optimal_voronoi_circles(n)
+
+    # Ensure all circles are within bounds
+    for i in range(n):
+        x, y, r = circles[i]
+        # Adjust position if needed to keep circle within unit square
+        x = np.clip(x, r, 1-r)
+        y = np.clip(y, r, 1-r)
+        circles[i] = [x, y, r]
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>

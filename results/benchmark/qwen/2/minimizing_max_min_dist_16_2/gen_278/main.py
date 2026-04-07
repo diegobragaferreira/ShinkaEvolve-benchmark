@@ -1,0 +1,337 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import math
+import time
+from typing import Tuple, List, Optional
+
+def calculate_ratio(points: np.ndarray) -> Tuple[float, float, float]:
+    """Calculate min/max distance ratio with proper error handling."""
+    if len(points) < 2:
+        return 0.0, 0.0, 0.0
+    
+    distances = pdist(points)
+    if len(distances) == 0:
+        return 0.0, 0.0, 0.0
+        
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+    
+    if max_dist == 0:
+        return 0.0, min_dist, max_dist
+        
+    ratio = min_dist / max_dist
+    return ratio, min_dist, max_dist
+
+def objective_function(x: np.ndarray, num_points: int = 16, dimension: int = 2) -> float:
+    """Objective function to minimize (negative ratio)."""
+    points = x.reshape(-1, dimension)
+    ratio, _, _ = calculate_ratio(points)
+    return -ratio
+
+def generate_hexagonal_lattice(num_points: int = 16) -> np.ndarray:
+    """Generate high-quality hexagonal lattice with optimized spacing."""
+    points = []
+    rows = cols = 4
+    
+    spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+    spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
+    
+    # Enhanced spacing for better distribution
+    spacing_x *= 0.88
+    spacing_y *= 0.88
+    
+    for i in range(rows):
+        for j in range(cols):
+            if len(points) >= num_points:
+                break
+            x_offset = spacing_x * 0.25 if i % 2 == 1 else 0.0
+            x = (j * spacing_x) + x_offset
+            y = i * spacing_y
+            
+            # Maintain bounds precisely
+            x = np.clip(x, 0.001, 0.999)
+            y = np.clip(y, 0.001, 0.999)
+            
+            points.append([x, y])
+    
+    return np.array(points[:num_points])
+
+def generate_fibonacci_distribution(num_points: int = 16) -> np.ndarray:
+    """Generate points using Fibonacci spiral with improved distribution."""
+    points = []
+    phi = (1 + math.sqrt(5)) / 2  # golden ratio
+    
+    for i in range(num_points):
+        # Better spiral parameterization
+        theta = math.acos(-1 + (2 * i) / (num_points - 1))
+        phi_angle = (i * 2 * math.pi) / (phi * phi)
+        
+        # Cartesian conversion with better mapping
+        x = math.sin(theta) * math.cos(phi_angle)
+        y = math.sin(theta) * math.sin(phi_angle)
+        
+        # Map to [0.05, 0.95] range with boundary safety
+        x = 0.05 + 0.9 * (x + 1) / 2
+        y = 0.05 + 0.9 * (y + 1) / 2
+        
+        points.append([x, y])
+    
+    return np.array(points)
+
+def generate_regular_grid(num_points: int = 16) -> np.ndarray:
+    """Generate regular grid with proper boundary handling."""
+    points = []
+    side_length = int(math.ceil(math.sqrt(num_points)))
+    
+    for i in range(side_length):
+        for j in range(side_length):
+            if len(points) >= num_points:
+                break
+            x = (i + 0.5) / side_length
+            y = (j + 0.5) / side_length
+            points.append([x, y])
+    
+    return np.array(points[:num_points])
+
+def generate_polar_arrangement(num_points: int = 16) -> np.ndarray:
+    """Generate polar arrangement with concentric rings."""
+    points = []
+    # Concentric circles with increasing angular density
+    radii = [0.15, 0.3, 0.45, 0.6]
+    angles_per_ring = [4, 6, 8, 10]
+    
+    # Center point
+    points.append([0.5, 0.5])
+    
+    # Ring points
+    for i, (radius, num_angles) in enumerate(zip(radii, angles_per_ring)):
+        for j in range(num_angles):
+            if len(points) >= num_points:
+                break
+            angle = (j * 2 * math.pi) / num_angles
+            x = 0.5 + radius * math.cos(angle)
+            y = 0.5 + radius * math.sin(angle)
+            points.append([x, y])
+        if len(points) >= num_points:
+            break
+    
+    # Fill remaining spots with random distribution
+    remaining = num_points - len(points)
+    for _ in range(remaining):
+        x = np.random.uniform(0.1, 0.9)
+        y = np.random.uniform(0.1, 0.9)
+        points.append([x, y])
+    
+    return np.array(points)
+
+def generate_voronoi_like(num_points: int = 16) -> np.ndarray:
+    """Generate voronoi-inspired distribution with structured perturbations."""
+    # Start with Fibonacci-like arrangement
+    points = []
+    phi = (1 + math.sqrt(5)) / 2  # golden ratio
+    
+    for i in range(num_points):
+        theta = math.acos(-1 + (2 * i) / (num_points - 1))
+        phi_angle = (i * 2 * math.pi) / (phi * phi)
+        
+        x = math.sin(theta) * math.cos(phi_angle)
+        y = math.sin(theta) * math.sin(phi_angle)
+        
+        # Map to [0.05, 0.95] range
+        x = 0.05 + 0.9 * (x + 1) / 2
+        y = 0.05 + 0.9 * (y + 1) / 2
+        
+        # Add voronoi-style clustering influence
+        if i % 4 == 0:
+            x += np.random.normal(0, 0.03)
+            y += np.random.normal(0, 0.03)
+        elif i % 4 == 1:
+            x -= np.random.normal(0, 0.02)
+            y += np.random.normal(0, 0.02)
+        elif i % 4 == 2:
+            x += np.random.normal(0, 0.015)
+            y -= np.random.normal(0, 0.015)
+        else:
+            x -= np.random.normal(0, 0.025)
+            y -= np.random.normal(0, 0.025)
+            
+        points.append([x, y])
+    
+    return np.array(points)
+
+def adaptive_perturbation(points: np.ndarray, iteration: int = 0) -> np.ndarray:
+    """Apply adaptive perturbation with sophisticated control."""
+    distances = pdist(points)
+    if len(distances) > 0:
+        avg_dist = np.mean(distances)
+        std_dist = np.std(distances)
+        
+        # Dynamic perturbation scaling
+        base_std = 0.025
+        perturbation_std = base_std * (1.0 / (1.0 + iteration * 0.1))
+        
+        # Adaptive factor based on distribution uniformity
+        uniformity_ratio = std_dist / avg_dist if avg_dist > 0 else 1.0
+        if uniformity_ratio < 0.15:  # Uniform distribution detected
+            perturbation_std *= 1.5
+        
+        # Apply perturbation
+        perturbed = points + np.random.normal(0, perturbation_std, points.shape)
+        perturbed = np.clip(perturbed, 0.001, 0.999)
+        return perturbed
+    return points
+
+def generate_diverse_initial_configs(num_points: int = 16) -> List[np.ndarray]:
+    """Generate highly diverse set of initial configurations."""
+    configs = []
+    
+    # Base configurations
+    configs.append(generate_hexagonal_lattice(num_points))
+    configs.append(generate_fibonacci_distribution(num_points))
+    configs.append(generate_regular_grid(num_points))
+    configs.append(generate_polar_arrangement(num_points))
+    configs.append(generate_voronoi_like(num_points))
+    
+    # Enhanced variations with multiple perturbation levels
+    np.random.seed(42)
+    for base_config in configs[:4]:  # Use first 4 for variations
+        # Different perturbation magnitudes
+        for mag in [0.01, 0.015, 0.02]:
+            perturbed = base_config + np.random.normal(0, mag, base_config.shape)
+            perturbed = np.clip(perturbed, 0.001, 0.999)
+            configs.append(perturbed)
+    
+    # Add structured variations
+    for _ in range(3):
+        # Grid-based with different offsets
+        grid_points = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                grid_points.append([x, y])
+        
+        # Apply some structured perturbation
+        structured = np.array(grid_points[:num_points])
+        structured += np.random.normal(0, 0.02, structured.shape)
+        structured = np.clip(structured, 0.001, 0.999)
+        configs.append(structured)
+    
+    return configs
+
+def optimize_single_config(x0: np.ndarray, num_points: int = 16, dimension: int = 2, 
+                          methods: List[str] = None) -> Optional[np.ndarray]:
+    """Perform single optimization with intelligent method selection."""
+    if methods is None:
+        methods = ['L-BFGS-B', 'SLSQP', 'TNC']
+    
+    bounds = [(0.001, 0.999) for _ in range(num_points * dimension)]
+    
+    for method in methods:
+        try:
+            result = minimize(
+                lambda x: objective_function(x, num_points, dimension),
+                x0,
+                method=method,
+                bounds=bounds,
+                options={'maxiter': 150, 'ftol': 1e-8, 'gtol': 1e-5} if method == 'L-BFGS-B' else {'maxiter': 150}
+            )
+            
+            if result.success:
+                return result.x.reshape(-1, dimension)
+        except Exception:
+            continue
+    
+    return None
+
+def multi_stage_optimization(configs: List[np.ndarray], max_time: float = 170, 
+                           num_points: int = 16, dimension: int = 2) -> np.ndarray:
+    """Multi-stage optimization with progressive refinement."""
+    best_ratio = -np.inf
+    best_points = None
+    start_time = time.time()
+    
+    # Stage 1: Coarse evaluation of all configurations
+    stage1_results = []
+    
+    for i, config in enumerate(configs):
+        if time.time() - start_time > max_time * 0.6:
+            break
+        # Light optimization for quick assessment
+        light_result = optimize_single_config(config.flatten(), num_points, dimension, ['L-BFGS-B'])
+        if light_result is not None:
+            ratio, _, _ = calculate_ratio(light_result)
+            stage1_results.append((ratio, i, light_result))
+    
+    # Sort by quality and keep top performers
+    stage1_results.sort(reverse=True)
+    top_configs = [result[2] for result in stage1_results[:5]]  # Top 5
+    
+    # Stage 2: Thorough optimization of top candidates
+    for i, config in enumerate(top_configs):
+        if time.time() - start_time > max_time:
+            break
+        # Full optimization for best candidates
+        full_result = optimize_single_config(config.flatten(), num_points, dimension, ['SLSQP'])
+        if full_result is not None:
+            ratio, _, _ = calculate_ratio(full_result)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = full_result.copy()
+    
+    # Stage 3: Additional refinement with adaptive perturbations
+    if best_points is not None:
+        for iteration in range(3):
+            if time.time() - start_time > max_time:
+                break
+            # Generate new configurations via adaptive perturbation
+            perturbed = adaptive_perturbation(best_points, iteration)
+            refined_result = optimize_single_config(perturbed.flatten(), num_points, dimension, ['SLSQP'])
+            
+            if refined_result is not None:
+                ratio, _, _ = calculate_ratio(refined_result)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = refined_result.copy()
+    
+    # Return best found or fallback
+    return best_points if best_points is not None else configs[0]
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    # Generate diverse initial configurations
+    initial_configs = generate_diverse_initial_configs(16)
+    
+    # Perform multi-stage optimization
+    best_points = multi_stage_optimization(initial_configs, max_time=170, num_points=16, dimension=2)
+    
+    # Final validation and refinement
+    if best_points is not None:
+        # Additional optimization to ensure quality
+        final_result = optimize_single_config(best_points.flatten(), 16, 2, ['SLSQP'])
+        if final_result is not None:
+            ratio, _, _ = calculate_ratio(final_result)
+            # If the improvement is significant, use the final result
+            if ratio > 0.01:  # Only accept meaningful improvements
+                best_points = final_result
+    
+    # Ensure we always return a valid configuration
+    if best_points is None:
+        # Fallback to a well-known good configuration
+        fallback_config = generate_regular_grid(16)
+        # Add small perturbation to break symmetry
+        fallback_config += np.random.normal(0, 0.01, fallback_config.shape)
+        fallback_config = np.clip(fallback_config, 0.001, 0.999)
+        best_points = fallback_config
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

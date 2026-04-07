@@ -1,0 +1,164 @@
+<NAME>
+add_adaptive_population_sizing
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive population sizing to the differential evolution optimization to improve exploration and exploitation balance. This enhances the optimization process by dynamically adjusting population size based on convergence behavior, which helps avoid premature convergence and improves the chances of finding better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_differential_evolution(self, x0, bounds, time_limit):
+        """Run differential evolution with adaptive population sizing."""
+        start_time = time.time()
+        best_solution = None
+        best_value = float('inf')
+
+        # Multi-start optimization with different initial configurations
+        configs = self.generate_initial_configurations()
+
+        # Track convergence for adaptive population sizing
+        prev_best = float('inf')
+        stagnation_counter = 0
+        max_stagnation = 5
+
+        for i, (config_name, config) in enumerate(configs):
+            if time.time() - start_time > time_limit - 15:  # Leave buffer time
+                break
+
+            x0_current = config.flatten()
+
+            # Adaptive population sizing based on iteration count
+            popsize = 15 + i * 2  # Gradually increase popsize
+
+            # Increase popsize if we detect stagnation
+            if stagnation_counter > max_stagnation:
+                popsize = min(popsize + 10, 50)  # Cap at 50
+
+            maxiter = 80 if i < 2 else 60  # More iterations for initial configs
+
+            try:
+                result = differential_evolution(
+                    self.penalty_objective,
+                    bounds,
+                    seed=42 + i,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    mutation=(0.8, 1),  # Higher mutation rate for more exploration
+                    recombination=0.9,  # Higher recombination rate
+                    atol=1e-7,
+                    tol=1e-7,
+                    callback=lambda x, convergence: time.time() - start_time > time_limit - 15,
+                    disp=False,
+                    polish=True
+                )
+
+                if result.success:
+                    current_value = result.fun
+                    if current_value < best_value:
+                        best_value = current_value
+                        best_solution = result.x
+                        prev_best = best_value
+                        stagnation_counter = 0  # Reset stagnation counter
+                    else:
+                        # Check for stagnation
+                        if abs(current_value - prev_best) < 1e-8:
+                            stagnation_counter += 1
+                        else:
+                            prev_best = current_value
+                            stagnation_counter = 0  # Reset if improvement
+
+            except Exception as e:
+                warnings.warn(f"DE optimization failed for config {config_name}: {e}")
+                continue
+
+        if best_solution is None:
+            # Fallback to initial configuration
+            return x0
+
+        return best_solution
+=======
+    def adaptive_differential_evolution(self, x0, bounds, time_limit):
+        """Run differential evolution with adaptive population sizing."""
+        start_time = time.time()
+        best_solution = None
+        best_value = float('inf')
+
+        # Multi-start optimization with different initial configurations
+        configs = self.generate_initial_configurations()
+
+        # Track convergence for adaptive population sizing
+        prev_best = float('inf')
+        stagnation_counter = 0
+        max_stagnation = 5
+        improvement_history = []
+        min_improvement_threshold = 1e-8
+
+        for i, (config_name, config) in enumerate(configs):
+            if time.time() - start_time > time_limit - 15:  # Leave buffer time
+                break
+
+            x0_current = config.flatten()
+
+            # Adaptive population sizing based on iteration count and convergence history
+            base_popsize = 15
+            popsize = base_popsize + i * 2  # Gradually increase popsize
+
+            # Further increase population size if there's stagnation or poor convergence
+            if len(improvement_history) >= 3:
+                recent_improvements = improvement_history[-3:]
+                avg_improvement = np.mean(recent_improvements)
+                if avg_improvement < min_improvement_threshold:
+                    popsize = min(popsize + 5, 50)  # Increase population for better exploration
+
+            # Even more aggressive population sizing for later iterations
+            if i >= 3:
+                popsize = min(popsize + 5, 50)
+
+            maxiter = 80 if i < 2 else 60  # More iterations for initial configs
+
+            try:
+                result = differential_evolution(
+                    self.penalty_objective,
+                    bounds,
+                    seed=42 + i,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    mutation=(0.8, 1),  # Higher mutation rate for more exploration
+                    recombination=0.9,  # Higher recombination rate
+                    atol=1e-7,
+                    tol=1e-7,
+                    callback=lambda x, convergence: time.time() - start_time > time_limit - 15,
+                    disp=False,
+                    polish=True
+                )
+
+                if result.success:
+                    current_value = result.fun
+                    improvement = prev_best - current_value
+                    improvement_history.append(improvement)
+
+                    if current_value < best_value:
+                        best_value = current_value
+                        best_solution = result.x
+                        prev_best = best_value
+                        stagnation_counter = 0  # Reset stagnation counter
+                    else:
+                        # Check for stagnation
+                        if abs(current_value - prev_best) < min_improvement_threshold:
+                            stagnation_counter += 1
+                        else:
+                            prev_best = current_value
+                            stagnation_counter = 0  # Reset if improvement
+
+            except Exception as e:
+                warnings.warn(f"DE optimization failed for config {config_name}: {e}")
+                continue
+
+        if best_solution is None:
+            # Fallback to initial configuration
+            return x0
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,119 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    
+    np.random.seed(42)
+    
+    # Initialize points using a hexagonal grid pattern for better starting configuration
+    def initialize_hexagonal_grid():
+        # Create a 4x4 grid with alternating rows offset
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+                points.append([x, y])
+        return np.array(points)
+    
+    # Compute min/max distance ratio
+    def compute_ratio(points):
+        if len(points) < 2:
+            return 0
+        
+        # Calculate all pairwise distances
+        distances = cdist(points, points)
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+        
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        if d_max == 0:
+            return 0
+            
+        return d_min / d_max
+    
+    # Get initial points
+    points = initialize_hexagonal_grid()
+    
+    # Add small random noise to break symmetry
+    points += np.random.normal(0, 0.001, points.shape)
+    
+    # Ensure points stay within bounds [0,1]
+    points = np.clip(points, 0, 1)
+    
+    # Simulated Annealing parameters
+    max_iter = 10000
+    temperature = 0.1
+    cooling_rate = 0.9995
+    min_temperature = 1e-6
+    
+    # Store best solution
+    best_points = points.copy()
+    best_ratio = compute_ratio(best_points)
+    
+    # Adaptive cooling schedule
+    progress_check_interval = max_iter // 100
+    last_improvement = 0
+    improvement_threshold = 0.0001
+    
+    # Main optimization loop
+    for iteration in range(max_iter):
+        # Check for stagnation and adjust cooling rate
+        if iteration % progress_check_interval == 0 and iteration > 0:
+            current_ratio = compute_ratio(points)
+            if abs(current_ratio - best_ratio) < improvement_threshold:
+                last_improvement += 1
+                if last_improvement > 5:
+                    # Slow down cooling if no improvement
+                    cooling_rate = min(cooling_rate * 0.99, 0.9999)
+            else:
+                last_improvement = 0
+                best_ratio = current_ratio
+                
+        # Generate neighbor solution - move one point with adaptive step size
+        new_points = points.copy()
+        move_idx = np.random.randint(len(points))
+        
+        # Adaptive step size based on temperature
+        step_size = temperature * 0.05
+        
+        # Move one point
+        new_points[move_idx] += np.random.normal(0, step_size, 2)
+        
+        # Reflect points that go out of bounds
+        new_points = np.clip(new_points, 0, 1)
+        
+        # Accept or reject based on Metropolis criterion
+        current_ratio = compute_ratio(points)
+        new_ratio = compute_ratio(new_points)
+        
+        # Accept if better or with probability based on temperature
+        if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temperature):
+            points = new_points.copy()
+            
+            # Update best if improved
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = points.copy()
+        
+        # Cool down temperature
+        temperature *= cooling_rate
+        
+        # Early stopping if temperature gets too low
+        if temperature < min_temperature:
+            break
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

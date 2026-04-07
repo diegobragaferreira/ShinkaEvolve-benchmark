@@ -1,0 +1,236 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+from typing import List, Optional
+import random
+import time
+
+# Set a fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_convolution_fft(sequence: List[float]) -> np.ndarray:
+    """Compute convolution using FFT for better performance."""
+    n = len(sequence)
+    # Pad to avoid circular convolution effects
+    padded_len = 2 * n - 1
+    padded_sequence = np.pad(sequence, (0, padded_len - n), 'constant')
+    # Compute FFT and convolution
+    fft_seq = fft(padded_sequence)
+    conv_result = ifft(fft_seq * np.conj(fft_seq))
+    # Extract valid convolution results
+    return np.real(conv_result[:padded_len])
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Use FFT for faster convolution
+    try:
+        conv_result = compute_convolution_fft(normalized_sequence)
+        rhs = np.max(conv_result)
+    except Exception as e:
+        print(f"Error during FFT convolution: {e}")
+        return None
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+
+    # Precompute the convolution constraint matrix using explicit loop
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints: b_i >= 0
+    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+    b_ub_nonneg = np.zeros(n)  # Zero vector
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    try:
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        if result.success:
+            g_sequence = result.x
+            return g_sequence
+        else:
+            print('LP optimization failed:', result.message)
+            return None
+    except Exception as e:
+        print(f'LP optimization error: {e}')
+        return None
+
+def compute_autocorrelation_constant(sequence: List[float]) -> float:
+    """Compute the autcorrelation constant C1 for a given sequence."""
+    if not sequence or sum(sequence) < 0.01:
+        return float('inf')
+
+    n = len(sequence)
+    # Compute convolution using FFT for efficiency
+    conv = compute_convolution_fft(sequence)
+    max_conv = np.max(conv)
+    sum_sq = sum(sequence) ** 2
+
+    if sum_sq == 0:
+        return float('inf')
+
+    return 2 * n * max_conv / sum_sq
+
+def compute_inv_c1(sequence: List[float]) -> float:
+    """Compute 1/C1 for the given sequence."""
+    c1 = compute_autocorrelation_constant(sequence)
+    if c1 == 0:
+        return float('inf')
+    return 1.0 / c1
+
+def adaptive_tournament_selection(population: List[List[float]],
+                                fitness_scores: List[float],
+                                generation: int,
+                                population_size: int) -> List[float]:
+    """Perform adaptive tournament selection based on diversity and generation."""
+
+    # Determine tournament size based on generation and population diversity
+    if generation <= 20:  # Early generations
+        tournament_size = min(9, max(5, population_size // 4))
+    elif generation >= 50:  # Later generations
+        tournament_size = min(4, max(3, population_size // 8))
+    else:  # Middle generations
+        tournament_size = 5
+
+    # Perform tournament selection
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+
+    return population[winner_idx].copy()
+
+def generate_structured_sequence(length: int) -> List[float]:
+    """Generate a more structured sequence that potentially performs better."""
+    # Create a sequence with some inherent structure
+    sequence = []
+
+    # Mix of exponential decay and step-like patterns
+    for i in range(length):
+        # Exponential decay component
+        exp_component = 100 * np.exp(-i * 0.01)
+        # Add some periodic variations
+        period_component = 10 * np.sin(i * 0.2) * np.cos(i * 0.05)
+        # Combine components
+        val = max(0.01, exp_component + period_component)
+        sequence.append(val)
+
+    return sequence
+
+def local_search_improvement(sequence: List[float], max_iter: int = 20) -> List[float]:
+    """Improve sequence using iterative local search."""
+    current = np.array(sequence, dtype=float)
+    best = current.copy()
+    best_score = compute_inv_c1(best)
+
+    for _ in range(max_iter):
+        # Try small perturbations to improve
+        improved = False
+        for i in range(len(current)):
+            # Try increasing the value
+            test_current = current.copy()
+            test_current[i] = max(0.01, test_current[i] + 1.0)
+            test_score = compute_inv_c1(test_current)
+            if test_score > best_score:
+                best = test_current.copy()
+                best_score = test_score
+                improved = True
+
+            # Try decreasing the value
+            test_current = current.copy()
+            test_current[i] = max(0.01, test_current[i] - 1.0)
+            test_score = compute_inv_c1(test_current)
+            if test_score > best_score:
+                best = test_current.copy()
+                best_score = test_score
+                improved = True
+
+        if not improved:
+            break
+        current = best.copy()
+
+    return best.tolist()
+
+def multi_start_local_search(initial_sequence: List[float], num_starts: int = 5) -> List[float]:
+    """Run multiple local searches from different starting points."""
+    best_sequence = initial_sequence.copy()
+    best_score = compute_inv_c1(best_sequence)
+
+    for _ in range(num_starts):
+        # Create a slightly perturbed version of the sequence
+        perturbed = [x * (1 + np.random.normal(0, 0.05)) for x in initial_sequence]
+        perturbed = [max(0.01, x) for x in perturbed]
+
+        # Run local search from this point
+        improved = local_search_improvement(perturbed)
+        score = compute_inv_c1(improved)
+
+        if score > best_score:
+            best_sequence = improved
+            best_score = score
+
+    return best_sequence
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    # Initialize with a structured sequence for better starting point
+    n = np.random.randint(100, 1000)
+    best_sequence = generate_structured_sequence(n)
+
+    # Multi-start local search for better results
+    best_sequence = multi_start_local_search(best_sequence)
+
+    # Additional local refinement
+    refined = local_search_improvement(best_sequence)
+    final_score = compute_inv_c1(refined)
+    initial_score = compute_inv_c1(best_sequence)
+
+    if final_score > initial_score:
+        best_sequence = refined
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

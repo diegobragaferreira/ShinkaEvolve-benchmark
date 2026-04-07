@@ -1,0 +1,96 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.signal import convolve
+import random
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Compute C₁ for a given sequence.
+    C₁ = 2n * max(convolution) / (sum(sequence))^2
+    """
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+    
+    # Compute convolution (auto-correlation)
+    conv = convolve(sequence, sequence, mode='full')
+    max_conv = np.max(conv)
+    
+    sum_seq = np.sum(sequence)
+    if sum_seq < 0.01:
+        return float('inf')
+        
+    c1 = 2 * n * max_conv / (sum_seq ** 2)
+    return c1
+
+def evaluate_objective(sequence):
+    """
+    Evaluate the objective function: -1/C₁ (we minimize this to maximize 1/C₁)
+    """
+    c1 = compute_autocorrelation_constant(sequence)
+    if c1 == float('inf'):
+        return float('inf')  # Invalid solution
+    return -1.0 / c1  # Negative because we want to maximize 1/C₁
+
+def generate_initial_sequence():
+    """
+    Generate a good initial random sequence.
+    """
+    n = random.randint(100, 1000)
+    return [random.uniform(0.1, 100.0) for _ in range(n)]
+
+def quadratic_optimization_step(current_seq):
+    """
+    Perform a quadratic optimization step to improve the sequence.
+    """
+    n = len(current_seq)
+    # Define bounds: all elements must be in [0, 1000]
+    bounds = [(0.0, 1000.0) for _ in range(n)]
+    
+    # Define constraints
+    def sum_constraint(x):
+        return np.sum(x) - 0.01  # Require sum >= 0.01
+    
+    constraints = [{'type': 'ineq', 'fun': sum_constraint}]
+    
+    # Objective function to minimize
+    def objective(x):
+        return evaluate_objective(x)
+    
+    # Use SLSQP method which handles both bounds and constraints well
+    result = minimize(objective, current_seq, method='SLSQP', bounds=bounds, constraints=constraints, 
+                      options={'maxiter': 50, 'ftol': 1e-6})
+    
+    if result.success:
+        return result.x.tolist()
+    else:
+        # If optimization fails, return the original sequence slightly perturbed
+        perturbed = [max(0.0, x + random.gauss(0, 0.1)) for x in current_seq]
+        if np.sum(perturbed) < 0.01:
+            perturbed[0] = max(0.0, perturbed[0] + 0.01)
+        return perturbed
+
+def search_for_best_sequence():
+    """
+    Main function to search for the best coefficient sequence.
+    """
+    # Start with a random sequence
+    sequence = generate_initial_sequence()
+    
+    # Run several optimization steps to improve the sequence
+    for _ in range(20):  # Limit iterations to stay within time budget
+        sequence = quadratic_optimization_step(sequence)
+        
+    return sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")
+    c1 = compute_autocorrelation_constant(sequence)
+    inv_c1 = 1.0 / c1 if c1 != float('inf') else 0.0
+    print(f"1/C₁ = {inv_c1:.6f}")
+    print(f"Benchmark ratio = {1.5031/c1:.6f}" if c1 != float('inf') else "Invalid sequence")

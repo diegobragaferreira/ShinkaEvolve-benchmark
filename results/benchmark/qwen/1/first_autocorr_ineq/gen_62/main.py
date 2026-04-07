@@ -1,0 +1,180 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+from typing import List, Optional, Tuple
+import time
+
+class EnhancedAutocorrelationOptimizer:
+    """
+    Enhanced optimizer for finding step functions that maximize 1/C₁,
+    improving the upper bound on the first autocorrelation inequality constant.
+    """
+
+    def __init__(self, max_iterations: int = 1000, max_time_seconds: int = 180):
+        self.max_iterations = max_iterations
+        self.max_time_seconds = max_time_seconds
+        self.seed = 42
+        np.random.seed(self.seed)
+        self.population_size = 100
+        self.stagnation_threshold = 50
+        self.diversity_threshold = 0.05
+        self.min_sequence_length = 100
+        self.max_sequence_length = 2000
+
+    def compute_convolution_fft(self, sequence: np.ndarray) -> np.ndarray:
+        """Compute autoconvolution using FFT for efficiency."""
+        n = len(sequence)
+        if n > 1000:  # Use FFT for larger sequences
+            padded_seq = np.pad(sequence, (0, n - 1), 'constant')
+            conv_result = np.real(ifft(fft(padded_seq) * np.conj(fft(sequence))))
+            return conv_result[:2*n - 1]
+        else:  # Direct convolution for smaller sequences
+            return np.convolve(sequence, sequence, mode='full')
+
+    def compute_c1(self, sequence: np.ndarray) -> float:
+        """Compute C₁ constant for the given sequence."""
+        n = len(sequence)
+        if n == 0 or np.sum(sequence) == 0:
+            return float('inf')
+
+        # Compute convolution
+        conv = self.compute_convolution_fft(sequence)
+
+        # Calculate C₁
+        max_conv = np.max(conv)
+        sum_sq = np.sum(sequence) ** 2
+        c1 = 2 * n * max_conv / sum_sq
+        return c1
+
+    def compute_inv_c1(self, sequence: np.ndarray) -> float:
+        """Compute 1/C₁ for the given sequence."""
+        c1 = self.compute_c1(sequence)
+        if c1 == 0 or not np.isfinite(c1):
+            return 0.0
+        return 1.0 / c1
+
+    def generate_initial_sequence(self, n: int = None) -> List[float]:
+        """Generate a diverse initial sequence using both random and structured approaches."""
+        if n is None:
+            n = np.random.randint(self.min_sequence_length, self.max_sequence_length)
+
+        # Use exponential distribution for better initial spread
+        sequence = np.random.exponential(scale=1.0, size=n)
+
+        # Normalize to have reasonable total weight
+        total = np.sum(sequence)
+        if total > 0:
+            sequence = sequence / total * 100
+
+        # Ensure minimum value is not too small
+        sequence = np.maximum(sequence, 1e-6)
+
+        return sequence.tolist()
+
+    def mutate_sequence(self, sequence: List[float]) -> List[float]:
+        """Apply mutation to create a new sequence."""
+        mutated = sequence.copy()
+        n = len(mutated)
+
+        # Randomly select indices to modify
+        num_mutations = max(1, n // 10)
+        indices = np.random.choice(n, size=num_mutations, replace=False)
+
+        for idx in indices:
+            # Apply small random perturbations
+            perturbation = np.random.normal(0, 0.1) * mutated[idx]
+            mutated[idx] = max(0, mutated[idx] + perturbation)
+
+        return mutated
+
+    def evaluate_fitness(self, sequence: List[float]) -> float:
+        """Evaluate the fitness of a sequence."""
+        return self.compute_inv_c1(np.array(sequence))
+
+    def optimize(self) -> Tuple[List[float], float]:
+        """Main optimization loop."""
+        start_time = time.time()
+        best_sequence = self.generate_initial_sequence()
+        best_fitness = self.evaluate_fitness(best_sequence)
+
+        print(f"Initial fitness: {best_fitness:.6f}")
+
+        # Track stagnation
+        stagnation_count = 0
+        last_improvement = 0
+
+        # Initialize population
+        population = [self.generate_initial_sequence() for _ in range(self.population_size)]
+        population_fitness = [self.evaluate_fitness(seq) for seq in population]
+
+        # Main optimization loop
+        for iteration in range(self.max_iterations):
+            if time.time() - start_time > self.max_time_seconds:
+                print(f"Time limit reached after {iteration} iterations")
+                break
+
+            # Sort population by fitness
+            sorted_indices = np.argsort(population_fitness)[::-1]
+            best_in_generation = population[sorted_indices[0]]
+            best_fitness_in_generation = population_fitness[sorted_indices[0]]
+
+            # Update global best
+            if best_fitness_in_generation > best_fitness:
+                best_sequence = best_in_generation
+                best_fitness = best_fitness_in_generation
+                last_improvement = iteration
+                print(f"Iteration {iteration}: New best fitness: {best_fitness:.6f}")
+
+                # Early exit if we beat the benchmark
+                if best_fitness > 1.0 / 1.5031:
+                    print(f"Beaten benchmark at iteration {iteration}")
+                    break
+
+            # Check for stagnation and diversity issues
+            if iteration - last_improvement > self.stagnation_threshold:
+                # Restart with new population if stagnation occurs
+                population = [self.generate_initial_sequence() for _ in range(self.population_size)]
+                population_fitness = [self.evaluate_fitness(seq) for seq in population]
+                stagnation_count += 1
+                print(f"Stagnation detected, restarting population. Stagnation count: {stagnation_count}")
+                last_improvement = iteration
+                if stagnation_count > 3:
+                    # Reduce population size if too many restarts
+                    self.population_size = max(50, self.population_size // 2)
+                    stagnation_count = 0
+
+            # Create new population through selection and mutation
+            new_population = []
+            selected_indices = np.random.choice(len(population), size=self.population_size, replace=True)
+
+            for idx in selected_indices:
+                parent = population[idx]
+                mutated = self.mutate_sequence(parent)
+                new_population.append(mutated)
+
+            # Add some elite individuals to maintain diversity
+            elite_indices = sorted_indices[:max(10, self.population_size // 10)]
+            for idx in elite_indices:
+                if len(new_population) < self.population_size:
+                    new_population.append(population[idx].copy())
+
+            # Evaluate new population
+            population = new_population
+            population_fitness = [self.evaluate_fitness(seq) for seq in population]
+
+        return best_sequence, best_fitness
+
+def search_for_best_sequence() -> List[float]:
+    """Main function to search for the best coefficient sequence."""
+    optimizer = EnhancedAutocorrelationOptimizer()
+    best_sequence, best_fitness = optimizer.optimize()
+    print(f"Final best fitness: {best_fitness:.6f}")
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

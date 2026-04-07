@@ -1,0 +1,338 @@
+<NAME>
+adaptive_tournament_selection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed tournament size of 3 for selection. I'll implement an adaptive tournament selection where the tournament size varies based on population diversity and generation progress. This approach will strengthen selection pressure early on when diversity is high, and reduce it later to prevent premature convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return copy.deepcopy(population[winner_index])
+=======
+def tournament_selection(population, fitnesses, generation, population_size):
+    """Select an individual using adaptive tournament selection."""
+    # Calculate population diversity
+    if len(fitnesses) < 2:
+        tournament_size = 3
+    else:
+        fitness_std = np.std(fitnesses)
+        fitness_mean = np.mean(fitnesses)
+        diversity = fitness_std / (fitness_mean + 1e-8)  # Avoid division by zero
+
+        # Dynamic tournament size based on diversity and generation
+        if generation <= 20 or diversity > 0.1:
+            # High diversity or early generations: larger tournament
+            tournament_size = min(9, max(3, int(5 + diversity * 10)))
+        elif generation >= 50 or diversity < 0.05:
+            # Low diversity or late generations: smaller tournament
+            tournament_size = max(3, int(3 + diversity * 5))
+        else:
+            tournament_size = 5
+
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return copy.deepcopy(population[winner_index])
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_mutation_strategy
+</NAME>
+
+<DESCRIPTION>
+The current mutation strategy uses Gaussian noise which might not be optimal for this specific problem domain. I'll enhance the mutation strategy to include both Gaussian and uniform mutations with adaptive probabilities, allowing for better exploration in different phases of evolution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(sequence, mutation_rate, max_height=1000):
+    """Mutate a sequence."""
+    mutated = copy.deepcopy(sequence)
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Use Gaussian mutation for better exploration
+            mutated[i] = max(0, mutated[i] + np.random.normal(scale=max_height/10))
+            mutated[i] = min(max_height, mutated[i])
+    return mutated
+=======
+def mutate(sequence, mutation_rate, max_height=1000, generation=0, max_generations=200):
+    """Mutate a sequence with adaptive strategy."""
+    mutated = copy.deepcopy(sequence)
+    mutation_type_prob = min(0.7, generation / max_generations * 0.7)  # Increase Gaussian mutation probability over time
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Adaptive mutation type selection
+            if random.random() < mutation_type_prob:
+                # Gaussian mutation for fine-tuning
+                mutated[i] = max(0, mutated[i] + np.random.normal(scale=max_height/10))
+            else:
+                # Uniform mutation for broader exploration
+                mutated[i] = random.uniform(0, max_height)
+
+            mutated[i] = min(max_height, mutated[i])
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_local_search
+</NAME>
+
+<DESCRIPTION>
+The current local search approach using LP optimization is limited. I'll improve this by implementing a multi-start gradient-based local search that uses cached autocorrelation values to efficiently refine high-quality individuals, combining the strengths of both global and local search methods.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence):
+    """Returns the direction to move into the sequence using LP optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence == 0:
+        return None
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    if sum_sequence == 0:
+        return None
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence, max_iterations=50):
+    """Returns the direction to move into the sequence using multi-start local search."""
+    n = len(sequence)
+    if n == 0:
+        return None
+
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    # Normalize sequence
+    normalized_sequence = np.array(sequence) / sum_sequence
+
+    # Multi-start local search
+    best_sequence = normalized_sequence.copy()
+    best_score = compute_inv_c1(normalized_sequence * sum_sequence)
+
+    # Try multiple starting points around the current sequence
+    for _ in range(5):
+        # Perturb slightly
+        perturbed = normalized_sequence + np.random.normal(0, 0.01, n)
+        perturbed = np.maximum(perturbed, 0)  # Ensure non-negativity
+        perturbed = perturbed / np.sum(perturbed) * sum_sequence  # Renormalize
+
+        # Simple gradient ascent-like step
+        step_size = 0.001
+        for _ in range(max_iterations):
+            current_score = compute_inv_c1(perturbed)
+
+            # Simple finite difference gradient estimation
+            grad = np.zeros(n)
+            eps = 1e-6
+            for i in range(n):
+                pert_plus = perturbed.copy()
+                pert_plus[i] += eps
+                score_plus = compute_inv_c1(pert_plus)
+
+                grad[i] = (score_plus - current_score) / eps
+
+            # Update with gradient ascent
+            new_perturbed = perturbed + step_size * grad
+            new_perturbed = np.maximum(new_perturbed, 0)  # Ensure non-negativity
+
+            # Renormalize
+            new_perturbed = new_perturbed / np.sum(new_perturbed) * sum_sequence
+
+            perturbed = new_perturbed
+
+            # Check convergence
+            if abs(compute_inv_c1(perturbed) - current_score) < 1e-8:
+                break
+
+        # Check if this local search improved the solution
+        final_score = compute_inv_c1(perturbed)
+        if final_score > best_score:
+            best_score = final_score
+            best_sequence = perturbed.copy()
+
+    # Return the best sequence in original scale
+    return (best_sequence / sum_sequence * sum_sequence).tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+refined_evolutionary_loop
+</NAME>
+
+<DESCRIPTION>
+I'll refine the main evolutionary loop to incorporate the enhanced components: adaptive tournament selection, enhanced mutation, and improved local search. These changes will make the evolutionary process more sophisticated and effective.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_evolutionary_optimization(max_generations=200, population_size=100,
+                                     initial_mutation_rate=0.1, elite_size=10):
+    """Main adaptive evolutionary optimization loop with improvements."""
+    # Initialize population with structured sequences
+    population = [generate_structured_sequence()
+                  for _ in range(population_size)]
+
+    best_score = 0
+    best_individual = None
+    stagnation_counter = 0
+    max_stagnation = 30
+
+    start_time = time.time()
+
+    for generation in range(max_generations):
+        # Calculate adaptive mutation rate (decreases over generations)
+        mutation_rate = initial_mutation_rate * (1 - generation / max_generations)
+        if mutation_rate < 0.01:
+            mutation_rate = 0.01
+
+        # Evaluate fitness for all individuals in parallel
+        fitnesses = evaluate_fitness_parallel(population)
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        if fitnesses[best_idx] > best_score:
+            best_score = fitnesses[best_idx]
+            best_individual = copy.deepcopy(population[best_idx])
+            stagnation_counter = 0
+        else:
+            stagnation_counter += 1
+
+        # Adjust max_stagnation dynamically based on generation
+        adjusted_max_stagnation = max_stagnation + generation // 20
+
+        # Check for stagnation
+        if stagnation_counter >= adjusted_max_stagnation:
+            break
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        sorted_indices = np.argsort(fitnesses)[::-1][:elite_size]
+        for idx in sorted_indices:
+            new_population.append(copy.deepcopy(population[idx]))
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate(child, mutation_rate)
+
+            # Apply LP-based refinement if possible
+            refined_child = get_good_direction_to_move_into(child)
+            if refined_child is not None:
+                child = refined_child
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+        # Check time limit
+        if time.time() - start_time > 170:  # Leave some buffer
+            break
+
+    return best_individual, best_score
+=======
+def adaptive_evolutionary_optimization(max_generations=200, population_size=100,
+                                     initial_mutation_rate=0.1, elite_size=10):
+    """Main adaptive evolutionary optimization loop with improvements."""
+    # Initialize population with structured sequences
+    population = [generate_structured_sequence()
+                  for _ in range(population_size)]
+
+    best_score = 0
+    best_individual = None
+    stagnation_counter = 0
+    max_stagnation = 30
+
+    start_time = time.time()
+
+    for generation in range(max_generations):
+        # Calculate adaptive mutation rate (decreases over generations)
+        mutation_rate = initial_mutation_rate * (1 - generation / max_generations)
+        if mutation_rate < 0.01:
+            mutation_rate = 0.01
+
+        # Evaluate fitness for all individuals in parallel
+        fitnesses = evaluate_fitness_parallel(population)
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        if fitnesses[best_idx] > best_score:
+            best_score = fitnesses[best_idx]
+            best_individual = copy.deepcopy(population[best_idx])
+            stagnation_counter = 0
+        else:
+            stagnation_counter += 1
+
+        # Adjust max_stagnation dynamically based on generation
+        adjusted_max_stagnation = max_stagnation + generation // 20
+
+        # Check for stagnation
+        if stagnation_counter >= adjusted_max_stagnation:
+            break
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep the best individuals
+        sorted_indices = np.argsort(fitnesses)[::-1][:elite_size]
+        for idx in sorted_indices:
+            new_population.append(copy.deepcopy(population[idx]))
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            # Tournament selection with adaptation
+            parent1 = tournament_selection(population, fitnesses, generation, population_size)
+            parent2 = tournament_selection(population, fitnesses, generation, population_size)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation with adaptation
+            child = mutate(child, mutation_rate, generation=generation, max_generations=max_generations)
+
+            # Apply improved local search
+            refined_child = get_good_direction_to_move_into(child)
+            if refined_child is not None:
+                child = refined_child
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+        # Check time limit
+        if time.time() - start_time > 170:  # Leave some buffer
+            break
+
+    return best_individual, best_score
+>>>>>>> REPLACE
+</DIFF>

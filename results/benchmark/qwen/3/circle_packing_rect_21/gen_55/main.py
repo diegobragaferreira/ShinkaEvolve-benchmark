@@ -1,0 +1,262 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    width, height = 1.0, 1.0  # Optimal square configuration
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Phase 1: Enhanced initialization with grid and strategic sampling
+    n_circles = 21
+    
+    # Generate a structured grid for initial placement
+    grid_size = 5
+    x_grid = np.linspace(0.05, width - 0.05, grid_size)
+    y_grid = np.linspace(0.05, height - 0.05, grid_size)
+    grid_points = [(x, y) for x in x_grid for y in y_grid]
+    
+    # Initialize circles array
+    circles = np.zeros((n_circles, 3))
+    
+    # Place circles strategically using grid points
+    placed_points = []
+    placed_radii = []
+    
+    # Pre-compute distances between grid points for faster conflict checking
+    grid_coords = np.array(grid_points)
+    
+    # Use a greedy selection strategy
+    available_points = list(range(len(grid_points)))
+    np.random.shuffle(available_points)
+    
+    for i in range(min(n_circles, len(grid_points))):
+        idx = available_points[i]
+        cx, cy = grid_points[idx]
+        
+        # Compute max radius for this point considering boundaries
+        max_radius = min(cx, width - cx, cy, height - cy)
+        
+        # Check for conflicts with already placed circles using vectorized operations
+        valid_placement = True
+        if len(placed_points) > 0:
+            placed_array = np.array(placed_points)
+            distances = np.sqrt(np.sum((placed_array - [cx, cy])**2, axis=1))
+            conflicts = distances < (np.array(placed_radii) + max_radius)
+            if np.any(conflicts):
+                valid_placement = False
+        
+        if valid_placement:
+            placed_points.append((cx, cy))
+            placed_radii.append(max_radius)
+    
+    # Fill remaining circles if needed with smarter random placement
+    while len(placed_points) < n_circles:
+        # Try to place in regions with high potential density
+        cx = np.random.uniform(0.05, width - 0.05)
+        cy = np.random.uniform(0.05, height - 0.05)
+        
+        # Compute max radius
+        max_radius = min(cx, width - cx, cy, height - cy)
+        
+        # Check conflicts using vectorized operation
+        valid_placement = True
+        if len(placed_points) > 0:
+            placed_array = np.array(placed_points)
+            distances = np.sqrt(np.sum((placed_array - [cx, cy])**2, axis=1))
+            conflicts = distances < (np.array(placed_radii) + max_radius)
+            if np.any(conflicts):
+                valid_placement = False
+        
+        if valid_placement:
+            placed_points.append((cx, cy))
+            placed_radii.append(max_radius)
+
+    # Initialize circles array
+    for i in range(n_circles):
+        circles[i] = [placed_points[i][0], placed_points[i][1], placed_radii[i]]
+
+    # Phase 2: Advanced local search with adaptive refinement
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+    
+    # Multi-scale optimization parameters
+    max_iterations = 1000
+    tolerance = 1e-6
+    
+    # Adaptive scales for perturbations
+    scales = [0.15, 0.1, 0.05, 0.02]  # Different scale levels
+    scale_probabilities = [0.2, 0.3, 0.3, 0.2]  # Probability of choosing each scale
+    
+    # Main optimization loop
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+        
+        # Choose scale adaptively
+        chosen_scale_idx = np.random.choice(len(scales), p=scale_probabilities)
+        move_range = scales[chosen_scale_idx]
+        
+        # Process circles in random order for better exploration
+        circle_indices = list(range(n_circles))
+        np.random.shuffle(circle_indices)
+        
+        # For each circle, try to improve it
+        improvement_made = False
+        
+        for idx in circle_indices:
+            orig_x, orig_y, orig_r = current_circles[idx]
+            
+            # Best move tracking
+            best_move_x, best_move_y, best_move_r = 0, 0, 0
+            best_new_sum = old_sum
+            
+            # Try perturbations in a structured way
+            move_steps = [-move_range, -move_range/2, 0, move_range/2, move_range]
+            
+            for dx in move_steps:
+                for dy in move_steps:
+                    new_x = orig_x + dx
+                    new_y = orig_y + dy
+                    
+                    # Boundary constraints
+                    new_x = np.clip(new_x, 0.05, width - 0.05)
+                    new_y = np.clip(new_y, 0.05, height - 0.05)
+                    
+                    # Compute max radius at new location
+                    new_r = min(new_x, width - new_x, new_y, height - new_y)
+                    
+                    # Check for conflicts efficiently
+                    valid = True
+                    if n_circles > 1:
+                        temp_circles = np.vstack([current_circles[:idx], current_circles[idx+1:]])
+                        temp_positions = temp_circles[:, :2]
+                        temp_radii = temp_circles[:, 2]
+                        
+                        distances = np.sqrt(np.sum((temp_positions - [new_x, new_y])**2, axis=1))
+                        conflicts = distances < (new_r + temp_radii)
+                        if np.any(conflicts):
+                            valid = False
+                    
+                    if valid:
+                        # Calculate new sum (more efficient calculation)
+                        new_sum = old_sum - orig_r + new_r
+                        
+                        if new_sum > best_new_sum:
+                            best_new_sum = new_sum
+                            best_move_x, best_move_y, best_move_r = dx, dy, new_r
+            
+            # Apply the best move if beneficial
+            if best_new_sum > old_sum:
+                improvement_made = True
+                current_circles[idx] = [orig_x + best_move_x, orig_y + best_move_y, best_move_r]
+        
+        # Update if improvement was made
+        if improvement_made:
+            circles = current_circles.copy()
+            new_sum = np.sum(circles[:, 2])
+            
+            if new_sum > best_sum:
+                best_sum = new_sum
+                best_circles = circles.copy()
+            else:
+                # Gradually reduce exploration if no improvement for several iterations
+                if iteration % 20 == 0 and iteration > 0:
+                    # Reduce scale probabilities
+                    scale_probabilities = np.array(scale_probabilities) * 0.95
+                    scale_probabilities = scale_probabilities / np.sum(scale_probabilities)
+        else:
+            # If no improvement, slightly adjust exploration parameters
+            if iteration % 50 == 0 and iteration > 0:
+                scale_probabilities = np.array(scale_probabilities) * 0.98
+                scale_probabilities = scale_probabilities / np.sum(scale_probabilities)
+        
+        # Early termination condition
+        if abs(new_sum - best_sum) < tolerance:
+            break
+
+    # Phase 3: Final refinement with focused optimization
+    # Use a more intensive search on promising region
+    refined_circles = best_circles.copy()
+    final_improvements = 0
+    
+    for _ in range(200):
+        # Sample circles to potentially improve
+        sample_indices = np.random.choice(n_circles, size=min(8, n_circles), replace=False)
+        
+        for idx in sample_indices:
+            old_x, old_y, old_r = refined_circles[idx]
+            
+            # Search in a smaller neighborhood around current position
+            search_range = 0.08
+            
+            best_x, best_y = old_x, old_y
+            best_r = old_r
+            best_sum = np.sum(refined_circles[:, 2])
+            
+            # Generate neighborhood points
+            neighborhood = []
+            step = 0.02
+            for dx in np.arange(-search_range, search_range + step, step):
+                for dy in np.arange(-search_range, search_range + step, step):
+                    if abs(dx) + abs(dy) <= search_range:
+                        nx, ny = old_x + dx, old_y + dy
+                        if 0.05 <= nx <= width - 0.05 and 0.05 <= ny <= height - 0.05:
+                            neighborhood.append((nx, ny))
+            
+            # Also add boundary points for better edge coverage
+            boundary_points = [
+                (0.05, old_y), (width - 0.05, old_y),
+                (old_x, 0.05), (old_x, height - 0.05)
+            ]
+            for bx, by in boundary_points:
+                if 0.05 <= bx <= width - 0.05 and 0.05 <= by <= height - 0.05:
+                    neighborhood.append((bx, by))
+            
+            for new_x, new_y in neighborhood:
+                # Compute max radius
+                new_r = min(new_x, width - new_x, new_y, height - new_y)
+                
+                # Check conflicts efficiently
+                valid = True
+                if n_circles > 1:
+                    temp_circles = np.vstack([refined_circles[:idx], refined_circles[idx+1:]])
+                    temp_positions = temp_circles[:, :2]
+                    temp_radii = temp_circles[:, 2]
+                    
+                    distances = np.sqrt(np.sum((temp_positions - [new_x, new_y])**2, axis=1))
+                    conflicts = distances < (new_r + temp_radii)
+                    if np.any(conflicts):
+                        valid = False
+                
+                if valid:
+                    new_sum = np.sum(refined_circles[:, 2]) - old_r + new_r
+                    if new_sum > best_sum:
+                        best_sum = new_sum
+                        best_x, best_y, best_r = new_x, new_y, new_r
+            
+            # Apply improvement if found
+            if best_sum > np.sum(refined_circles[:, 2]):
+                refined_circles[idx] = [best_x, best_y, best_r]
+                final_improvements += 1
+
+    return refined_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

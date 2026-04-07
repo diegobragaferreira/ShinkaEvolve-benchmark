@@ -1,0 +1,257 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import math
+import random
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances."""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances)
+
+    def initialize_points():
+        """Initialize points using a hybrid approach combining known good configurations with Fibonacci method."""
+        # Start with a known good configuration (similar to previous best)
+        points = np.array([
+            [0.000000, 0.000000, 1.000000],
+            [0.894427, 0.000000, 0.447214],
+            [0.276393, 0.850651, 0.447214],
+            [-0.723607, 0.525731, 0.447214],
+            [-0.723607, -0.525731, 0.447214],
+            [0.276393, -0.850651, 0.447214],
+            [0.000000, 0.000000, -1.000000],
+            [-0.894427, 0.000000, -0.447214],
+            [-0.276393, 0.850651, -0.447214],
+            [0.723607, 0.525731, -0.447214],
+            [0.723607, -0.525731, -0.447214],
+            [-0.276393, -0.850651, -0.447214],
+            [0.525731, 0.850651, 0.000000],
+            [-0.525731, -0.850651, 0.000000]
+        ])
+
+        # Apply small random perturbations to break symmetries
+        np.random.seed(42)  # For reproducibility
+        perturbation_magnitude = 0.02
+        points += np.random.normal(0, perturbation_magnitude, points.shape)
+
+        # Normalize to ensure points are on unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        safe_norms = np.where(norms == 0, 1.0, norms)
+        points = points / safe_norms[:, np.newaxis]
+
+        # Apply slight rotation to further break symmetries
+        angle = np.pi / 12
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        # Rotate around y-axis
+        for i in range(14):
+            x, y, z = points[i]
+            points[i] = [x * cos_a + z * sin_a, y, -x * sin_a + z * cos_a]
+
+        return points
+
+    def project_to_sphere(points):
+        """Project points onto unit sphere while maintaining exact constraint."""
+        norms = np.linalg.norm(points, axis=1)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms[:, np.newaxis]
+
+    def adaptive_perturb_point(point: np.ndarray, temp: float) -> np.ndarray:
+        """Perturb a single point on the unit sphere using adaptive method."""
+        # Generate random perturbation in tangent plane
+        delta = np.random.randn(3)
+        # Project to tangent plane (orthogonal to point)
+        delta = delta - np.dot(delta, point) * point
+        # Normalize the tangent vector
+        delta_norm = np.linalg.norm(delta)
+        if delta_norm > 1e-10:
+            delta = delta / delta_norm
+        else:
+            # If the vector is essentially zero, use a random orthogonal vector
+            perpendicular = np.array([1, 0, 0]) if abs(point[0]) < 0.9 else np.array([0, 1, 0])
+            delta = np.cross(perpendicular, point)
+            delta = delta / np.linalg.norm(delta)
+
+        # Adaptive scaling based on temperature
+        perturbation_scale = temp * 0.02
+        new_point = point + perturbation_scale * delta
+        # Project back to sphere
+        new_point = new_point / np.linalg.norm(new_point)
+        return new_point
+
+    def adaptive_simulated_annealing():
+        """Enhanced simulated annealing with adaptive cooling and perturbation."""
+        # Initialize with better starting configuration
+        points = initialize_points()
+        current_ratio = compute_min_max_ratio(points)
+        distances = pdist(points)
+
+        # Parameters
+        T = 0.5  # Initial temperature (higher than before)
+        Tmin = 1e-8  # Minimum temperature
+        alpha = 0.9995  # Cooling rate
+        max_iter = 100000  # Maximum iterations
+        step_size = 0.01  # Initial step size
+
+        # Track best solution
+        best_points = points.copy()
+        best_ratio = current_ratio
+
+        # Adaptive cooling parameters
+        last_improvement = 0
+        patience = 500
+        stagnation_count = 0
+        max_stagnation = 1000
+
+        for iteration in range(max_iter):
+            # Adaptive cooling based on recent progress
+            if stagnation_count > max_stagnation and T > Tmin:
+                T = max(Tmin, T * 0.95)  # Faster cooling when stagnating
+                stagnation_count = 0
+            else:
+                T = max(Tmin, T * alpha)
+
+            # Stop if temperature gets too low
+            if T < Tmin:
+                break
+
+            # Adaptive point selection based on current configuration
+            if len(distances) > 0:
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                mean_dist = np.mean(distances)
+
+                # If there are very small distances, focus on points that are too close
+                if min_dist < mean_dist * 0.4:
+                    # Select a point that's part of a very small distance pair
+                    dist_matrix = pdist(points)
+                    dist_square = squareform(dist_matrix)
+                    min_indices = np.unravel_index(np.argmin(dist_square), dist_square.shape)
+                    point_idx = min_indices[0] if np.random.random() < 0.5 else min_indices[1]
+                else:
+                    # Otherwise, random selection works well
+                    point_idx = random.randint(0, 13)
+            else:
+                point_idx = random.randint(0, 13)
+
+            # Save current point
+            old_point = points[point_idx].copy()
+
+            # Perturb selected point with adaptive scaling
+            points[point_idx] = adaptive_perturb_point(points[point_idx], T)
+            distances = pdist(points)
+
+            # Compute new ratio
+            new_ratio = compute_min_max_ratio(points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = points.copy()
+                    last_improvement = iteration
+                    stagnation_count = 0
+            else:
+                # Calculate acceptance probability
+                delta = new_ratio - current_ratio
+                acceptance_prob = math.exp(delta / T)
+
+                if random.random() < acceptance_prob:
+                    current_ratio = new_ratio
+                    if new_ratio > best_ratio:
+                        best_ratio = new_ratio
+                        best_points = points.copy()
+                        last_improvement = iteration
+                        stagnation_count = 0
+                else:
+                    # Revert change
+                    points[point_idx] = old_point
+                    stagnation_count += 1
+
+            # Periodic local refinement
+            if iteration % 1000 == 0 and iteration > 0:
+                # Local refinement with gradient-based approach (simplified)
+                refined_points = points.copy()
+                for _ in range(5):  # Reduced iterations for efficiency
+                    improved = False
+                    for i in range(14):
+                        # Simple gradient estimation by finite differences
+                        old_ratio = compute_min_max_ratio(refined_points)
+                        old_point = refined_points[i].copy()
+
+                        # Small perturbations to estimate gradient
+                        grad = np.zeros(3)
+                        for j in range(3):
+                            eps = 1e-4
+                            test_points = refined_points.copy()
+                            test_points[i, j] += eps
+                            test_points[i] = test_points[i] / np.linalg.norm(test_points[i])
+                            new_ratio = compute_min_max_ratio(test_points)
+                            grad[j] = (new_ratio - old_ratio) / eps
+
+                        # Move along gradient
+                        if np.linalg.norm(grad) > 1e-10:
+                            refined_points[i] = refined_points[i] + 0.05 * grad
+                            refined_points[i] = refined_points[i] / np.linalg.norm(refined_points[i])
+                            improved = True
+
+                    # Update if improved
+                    new_ratio = compute_min_max_ratio(refined_points)
+                    if new_ratio > compute_min_max_ratio(points):
+                        points = refined_points.copy()
+                        current_ratio = new_ratio
+                        if new_ratio > best_ratio:
+                            best_ratio = new_ratio
+                            best_points = points.copy()
+                            last_improvement = iteration
+                            stagnation_count = 0
+
+            # Early stopping if we're not improving
+            if iteration - last_improvement > 5000:
+                break
+
+        return best_points
+
+    def multi_start_optimization():
+        """Run optimization multiple times with different seeds for better exploration."""
+        best_points = None
+        best_ratio = 0.0
+
+        # Different seeds for better exploration
+        seeds = [42, 123, 456, 789, 999, 111, 222]
+
+        start_time = time.time()
+        for seed in seeds:
+            if time.time() - start_time > 350:  # Leave 10 seconds for cleanup
+                break
+            try:
+                np.random.seed(seed)
+                points = adaptive_simulated_annealing()
+                ratio = compute_min_max_ratio(points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = points.copy()
+            except Exception as e:
+                continue
+
+        # Fallback to the best solution if none worked
+        if best_points is None:
+            best_points = initialize_points()
+
+        return best_points
+
+    # Run multi-start optimization
+    return multi_start_optimization()
+
+# EVOLVE-BLOCK-END

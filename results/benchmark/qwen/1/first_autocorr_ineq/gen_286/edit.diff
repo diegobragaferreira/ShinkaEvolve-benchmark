@@ -1,0 +1,431 @@
+--- a/original.py
++++ b/original.py
+@@ -1,405 +1,420 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.signal import fftconvolve
+ from scipy.optimize import linprog
+ import time
+ import random
+ from numba import jit
+ from math import sin, pi
+ 
+ # Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+ def compute_autocorrelation_constant(sequence):
+     """Computes the autocorrelation constant C₁ for a given sequence."""
+     if len(sequence) == 0 or np.sum(sequence) < 0.01:
+         return float('inf')
+ 
+-    # Compute autocorrelation using FFT for efficiency
+-    # Using full convolution and extracting relevant part
+-    autocorr_full = fftconvolve(sequence, sequence[::-1], mode='full')
+-    # Take the second half which corresponds to the actual autocorrelation
+-    autocorr = autocorr_full[len(sequence)-1:]
++    n = len(sequence)
++
++    # Use direct computation for small sequences (under 500) to avoid FFT artifacts
++    if n < 500:
++        # Direct computation for better numerical stability
++        autocorr = np.zeros(2 * n - 1)
++        for i in range(n):
++            for j in range(n):
++                autocorr[i + j] += sequence[i] * sequence[j]
++        # Extract the autocorrelation values
++        autocorr = autocorr[n-1:]  # Only take the relevant part
++    else:
++        # Use FFT for larger sequences
++        autocorr_full = fftconvolve(sequence, sequence[::-1], mode='full')
++        # Take the second half which corresponds to the actual autocorrelation
++        autocorr = autocorr_full[n-1:]
+ 
+     # Early termination: check if we can skip further computation
+     max_autocorr = np.max(autocorr)
+     if max_autocorr == 0:
+         return float('inf')  # Avoid division by zero
+ 
+     sum_sq = np.sum(sequence)**2
+     if sum_sq == 0:
+         return float('inf')
+ 
+     # C₁ = 2n * max(autocorr) / (sum(sequence))^2
+-    C1 = 2 * len(sequence) * max_autocorr / sum_sq
++    C1 = 2 * n * max_autocorr / sum_sq
+ 
+     return C1
+ 
+ def objective_function(sequence):
+     """Objective function to maximize (inverse of C₁)."""
+     C1 = compute_autocorrelation_constant(sequence)
+     if C1 == float('inf'):
+         return 0.0  # Invalid sequences get penalized
+     return 1.0 / C1  # Return 1/C1 as the objective
+ 
+ def generate_structured_sequence(n):
+     """Generate a structured sequence using sine waves for better initialization."""
+     sequence = []
+     for i in range(n):
+         # Sine wave with some randomness
+         sine_component = abs(sin(pi * i / n))
+         noise_component = np.random.random() * 0.1
+         sequence.append(sine_component + noise_component)
+     return sequence
+ 
+ def generate_random_sequence(n):
+     """Generate a random sequence with normalization."""
+     seq = np.random.rand(n)
+     # Normalize to ensure sum > 0.01
+     seq = seq * (0.01 / (np.sum(seq) + 1e-10))
+     return seq.tolist()
+ 
+ def generate_population(pop_size, min_len, max_len):
+     """Generate a diverse initial population."""
+     population = []
+     for _ in range(pop_size):
+         n = np.random.randint(min_len, max_len)
+         # Alternate between structured and random sequences
+         if np.random.rand() < 0.5:
+             seq = generate_structured_sequence(n)
+         else:
+             seq = generate_random_sequence(n)
+         population.append(seq)
+     return population
+ 
+ def solve_convolution_lp(f_sequence, rhs):
+     """Solves the convolution LP for a given sequence and RHS with early termination."""
+     n = len(f_sequence)
+     if n == 0:
+         return None
+ 
+     c = -np.ones(n)
+     a_ub = []
+     b_ub = []
+ 
+     # Optimized constraint building with early termination for large sequences
+     if n > 1000:
+         # For large sequences, limit constraints to key indices
+         constraint_indices = list(range(0, 2*n-1, max(1, (2*n-1)//50)))  # Sample every ~50th index
+         for k in constraint_indices:
+             row = np.zeros(n)
+             for i in range(n):
+                 j = k - i
+                 if 0 <= j < n:
+                     row[j] = f_sequence[i]
+             a_ub.append(row)
+             b_ub.append(rhs)
+     else:
+         # For smaller sequences, include all convolution constraints
+         for k in range(2 * n - 1):
+             row = np.zeros(n)
+             for i in range(n):
+                 j = k - i
+                 if 0 <= j < n:
+                     row[j] = f_sequence[i]
+             a_ub.append(row)
+             b_ub.append(rhs)
+ 
+     # Add non-negativity constraints
+     a_ub_nonneg = -np.eye(n)
+     b_ub_nonneg = np.zeros(n)
+ 
+     a_ub = np.vstack([a_ub, a_ub_nonneg])
+     b_ub = np.hstack([b_ub, b_ub_nonneg])
+ 
+     # Add bounds to avoid numerical issues
+     bounds = [(0, 1000) for _ in range(n)]  # Clips heights to [0, 1000]
+ 
+     try:
+         # More aggressive early termination settings
+         result = linprog(c, A_ub=a_ub, b_ub=b_ub, bounds=bounds,
+                         method='highs', options={'maxiter': 500, 'presolve': True})
+ 
+         if result.success:
+             g_sequence = result.x
+             return g_sequence
+         else:
+             # Try without presolve if first attempt fails
+             result = linprog(c, A_ub=a_ub, b_ub=b_ub, bounds=bounds,
+                             method='highs', options={'maxiter': 500})
+ 
+             if result.success:
+                 return result.x
+             return None
+     except Exception:
+         return None
+ 
+ def get_gradient_based_direction(sequence):
+     """Estimate a better direction using gradient information."""
+     n = len(sequence)
+     if n == 0:
+         return None
+ 
+     sum_sequence = np.sum(sequence)
+     if sum_sequence < 0.01:
+         return None
+ 
+     # Normalize the sequence
+     normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+ 
+     # Compute the target value for the LP constraint with early termination
+     conv_result_full = fftconvolve(normalized_sequence, normalized_sequence[::-1], mode='full')
+     conv_result = conv_result_full[len(normalized_sequence)-1:]
+     rhs = np.max(conv_result)
+ 
+     # Solve the LP problem with early exit if possible
+     g_fun = solve_convolution_lp(normalized_sequence, rhs)
+     if g_fun is None:
+         return None
+ 
+     # Normalize the resulting sequence
+     sum_g_fun = np.sum(g_fun)
+     if sum_g_fun < 0.01:
+         return None
+ 
+     normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+ 
+     # Apply gradient descent-like update with momentum
+     t = 0.05
+     new_sequence = [
+         (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+     ]
+ 
+     # Ensure non-negativity
+     new_sequence = [max(0, x) for x in new_sequence]
+ 
+     return new_sequence
+ 
+-def get_gradient_estimate(sequence, epsilon=1e-4):
+-    """Enhanced gradient estimation with early exit and better handling."""
++def get_gradient_estimate(sequence, epsilon_base=1e-4):
++    """Enhanced gradient estimation with adaptive epsilon."""
+     n = len(sequence)
+     if n == 0:
+         return None
+ 
+     grad = []
+     for i in range(n):
++        # Adaptive epsilon based on sequence value to maintain numerical stability
++        sequence_value = abs(sequence[i])
++        epsilon = epsilon_base * max(1.0, sequence_value)
++
+         # Create perturbed sequences
+         seq_plus = sequence.copy()
+         seq_minus = sequence.copy()
+ 
+         seq_plus[i] += epsilon
+         seq_minus[i] -= epsilon
+ 
+         # Evaluate both and estimate derivative
+         val_plus = objective_function(seq_plus)
+         val_minus = objective_function(seq_minus)
+ 
+         grad_i = (val_plus - val_minus) / (2 * epsilon)
+         grad.append(grad_i)
+ 
+     return np.array(grad)
+ 
+ def refine_with_local_search(sequence, max_iter=100):
+     """Refine the sequence using a multi-start local search approach with cached results."""
+     from scipy.optimize import minimize
+ 
+     # Define the objective function for local optimization
+     def objective(x):
+         # Ensure non-negativity
+         x = np.maximum(x, 0)
+         # Normalize for fair comparison
+         sum_x = np.sum(x)
+         if sum_x < 1e-10:
+             return float('inf')
+         x_norm = x / sum_x
+         # Return negative because we are minimizing
+         return -objective_function(x_norm)
+ 
+     # Multi-start approach
+     best_x = np.array(sequence)
+     best_fitness = objective_function(sequence)
+ 
+     for _ in range(5):  # Multiple random starts
+         # Start from a perturbed version of the sequence
+         x_start = np.array(sequence) * (0.9 + 0.2 * np.random.rand(len(sequence)))
+         # Ensure non-negativity
+         x_start = np.maximum(x_start, 0)
+ 
+         # Local optimization using L-BFGS
+         try:
+             res = minimize(objective, x_start, method='L-BFGS-B', bounds=[(0, 1000)] * len(x_start))
+             if res.success:
+                 x_opt = res.x
+                 # Normalize
+                 sum_x = np.sum(x_opt)
+                 if sum_x > 0:
+                     x_opt = x_opt / sum_x
+                     fitness_opt = objective_function(x_opt)
+                     if fitness_opt > best_fitness:
+                         best_fitness = fitness_opt
+                         best_x = x_opt
+         except:
+             pass  # Continue if optimization fails
+ 
+     # Return best result
+     return best_x.tolist()
+ 
+ def mutate_sequence(sequence, mutation_rate=0.1):
+     """Mutate a sequence using adaptive rate."""
+     mutated = sequence.copy()
+     for i in range(len(mutated)):
+         if np.random.rand() < mutation_rate:
+             # Small perturbation
+             mutated[i] *= np.random.normal(1.0, 0.2)
+             # Clamp to reasonable bounds
+             mutated[i] = max(0, min(1000, mutated[i]))
+     return mutated
+ 
+ def crossover_sequences(parent1, parent2):
+     """Perform crossover between two sequences."""
+     n1, n2 = len(parent1), len(parent2)
+     n = min(n1, n2)
+ 
+     if n == 0:
+         return []
+ 
+     # Random crossover point
+     crossover_point = np.random.randint(1, n)
+ 
+     # Create offspring
+     child = parent1[:crossover_point] + parent2[crossover_point:]
+ 
+     # Extend if needed
+     if n1 > n:
+         child.extend(parent1[n:])
+     elif n2 > n:
+         child.extend(parent2[n:])
+ 
+     return child
+ 
+ def adaptive_evolutionary_search(max_time_seconds=180):
+     """Main adaptive evolutionary search for optimal sequence."""
+     start_time = time.time()
+ 
+     # Parameters
+     initial_pop_size = 30
+     min_sequence_length = 100
+     max_sequence_length = 2000
+     stagnation_threshold = 100
+     elite_size = 5
+     max_generations = 1000
+ 
+     # Initialize population
+     population = generate_population(initial_pop_size, min_sequence_length, max_sequence_length)
+ 
+     best_fitness = 0.0
+     best_sequence = None
+     generation = 0
+     stagnation_count = 0
+ 
+     while time.time() - start_time < max_time_seconds and generation < max_generations:
+         # Evaluate fitness for all individuals
+         fitness_scores = []
+         for seq in population:
+             fitness = objective_function(seq)
+             fitness_scores.append(fitness)
+ 
+         # Sort by fitness (descending order)
+         sorted_indices = np.argsort(fitness_scores)[::-1]
+         sorted_population = [population[i] for i in sorted_indices]
+         sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+ 
+         # Track best individual
+         current_best_fitness = sorted_fitness[0]
+         if current_best_fitness > best_fitness:
+             best_fitness = current_best_fitness
+             best_sequence = sorted_population[0].copy()
+             stagnation_count = 0
+         else:
+             stagnation_count += 1
+ 
+         # Check for stagnation
+         if stagnation_count > stagnation_threshold:
+             # Introduce diversity by creating new individuals
+             for i in range(elite_size, len(population)):
+                 # Create new individuals with mutated elites
+                 parent_idx = np.random.randint(0, elite_size)
+                 population[i] = mutate_sequence(sorted_population[parent_idx], 0.2)
+             stagnation_count = 0
+ 
+         # Create new population
+         new_population = sorted_population[:elite_size]  # Keep elites
+ 
+         # Generate offspring through crossover and mutation
+         while len(new_population) < len(population):
+             # Tournament selection for parents
+             parent1_idx = np.random.randint(0, len(sorted_population) // 2)
+             parent2_idx = np.random.randint(0, len(sorted_population) // 2)
+ 
+             parent1 = sorted_population[parent1_idx]
+             parent2 = sorted_population[parent2_idx]
+ 
+             # Crossover
+             child = crossover_sequences(parent1, parent2)
+ 
+             # Mutation
+             if np.random.rand() < 0.7:  # 70% mutation probability
+                 child = mutate_sequence(child, 0.15)
+ 
+             # Ensure valid range
+             child = [max(0, min(1000, x)) for x in child]
+ 
+             new_population.append(child)
+ 
+         population = new_population
+         generation += 1
+ 
+     return best_sequence if best_sequence is not None else generate_random_sequence(1000)
+ 
+ def refine_with_gradient_descent(sequence, max_iter=100, learning_rate=0.01):
+     """Refine the sequence using improved gradient descent."""
+     current_seq = sequence.copy()
+     for _ in range(max_iter):
+         improved_direction = get_gradient_based_direction(current_seq)
+         if improved_direction is None:
+             break
+ 
+         # Improved gradient-like update with better blending
+         current_seq = [(0.7 * a + 0.3 * b) for a, b in zip(current_seq, improved_direction)]
+ 
+         # Normalize to keep sum reasonable
+         sum_seq = np.sum(current_seq)
+         if sum_seq > 0.01:
+             current_seq = [x * 0.01 / sum_seq for x in current_seq]
+ 
+     return current_seq
+ 
+ def search_for_best_sequence():
+     """Main function to find the best coefficient sequence."""
+     try:
+         # Run adaptive evolutionary search
+         best_sequence = adaptive_evolutionary_search()
+ 
+         # Apply local refinement
+         refined_sequence = refine_with_local_search(best_sequence)
+ 
+         # Evaluate final result
+         final_fitness = objective_function(refined_sequence)
+ 
+         # If refinement improved the result, use it
+         if final_fitness > objective_function(best_sequence):
+             return refined_sequence
+         else:
+             return best_sequence
+     except Exception as e:
+         print(f"Error in optimization: {e}")
+         # Fallback to simple structured sequence
+         return generate_structured_sequence(1000)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

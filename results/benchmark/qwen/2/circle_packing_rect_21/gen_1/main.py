@@ -1,0 +1,103 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, using 1x1 for simplicity (perimeter = 4)
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Number of circles
+    n = 21
+
+    # Initialize circles with a simple grid layout
+    circles = np.zeros((n, 3))
+
+    # Grid arrangement
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n / rows))
+
+    for i in range(n):
+        row = i // cols
+        col = i % cols
+
+        # Calculate position
+        x = (col + 0.5) * rect_width / cols
+        y = (row + 0.5) * rect_height / rows
+
+        # Keep away from edges
+        x = max(0.01, min(rect_width - 0.01, x))
+        y = max(0.01, min(rect_height - 0.01, y))
+
+        # Initial radius - this will be optimized
+        radius = min(0.1, rect_width/(2*cols), rect_height/(2*rows))
+
+        circles[i] = [x, y, radius]
+
+    # Simple local optimization to improve arrangement
+    max_iter = 1000
+    learning_rate = 0.01
+
+    for iteration in range(max_iter):
+        # Calculate total radii sum
+        total_radius = np.sum(circles[:, 2])
+
+        # Calculate gradients for each circle
+        gradients = np.zeros_like(circles)
+
+        # For each circle, compute how much we can increase its radius
+        for i in range(n):
+            current_x, current_y, current_r = circles[i]
+
+            # Maximum possible radius at this location without overlapping others
+            max_radius = min(current_x, current_y, rect_width - current_x, rect_height - current_y)
+
+            # Check overlap with other circles
+            for j in range(n):
+                if i != j:
+                    other_x, other_y, other_r = circles[j]
+                    distance = np.sqrt((current_x - other_x)**2 + (current_y - other_y)**2)
+                    # We want distance >= radii sum
+                    min_distance = current_r + other_r
+                    if distance < min_distance:
+                        # Reduce maximum radius
+                        max_radius = min(max_radius, distance - other_r)
+
+            # Update radius (clamped to valid range)
+            new_r = min(max_radius, current_r + learning_rate)
+            circles[i, 2] = max(0.001, new_r)
+
+        # Apply some random perturbation to avoid local minima
+        if iteration % 50 == 0:
+            for i in range(n):
+                circles[i, 0] += np.random.normal(0, 0.001)
+                circles[i, 1] += np.random.normal(0, 0.001)
+                # Keep within bounds
+                circles[i, 0] = np.clip(circles[i, 0], 0.01, rect_width - 0.01)
+                circles[i, 1] = np.clip(circles[i, 1], 0.01, rect_height - 0.01)
+
+    # Final validation and cleanup
+    for i in range(n):
+        # Ensure circles stay within bounds
+        circles[i, 0] = np.clip(circles[i, 0], 0.01, rect_width - 0.01)
+        circles[i, 1] = np.clip(circles[i, 1], 0.01, rect_height - 0.01)
+        # Ensure minimum radius
+        circles[i, 2] = max(0.001, circles[i, 2])
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

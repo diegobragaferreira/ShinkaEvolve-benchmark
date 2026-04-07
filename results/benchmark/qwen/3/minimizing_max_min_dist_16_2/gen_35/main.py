@@ -1,0 +1,214 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    
+    np.random.seed(42)
+    n = 16
+    d = 2
+    
+    # Create structured initial lattice configuration
+    def create_lattice_initialization():
+        # Create a 4x4 grid with slight perturbations
+        rows, cols = 4, 4
+        points = []
+        
+        for i in range(rows):
+            for j in range(cols):
+                x = j + 0.5 * (i % 2)
+                y = i * np.sqrt(3)/2
+                points.append([x, y])
+        
+        points = np.array(points)
+        
+        # Normalize to [0,1] x [0,1]
+        max_x = cols - 0.5
+        max_y = (rows - 1) * np.sqrt(3)/2
+        
+        points[:, 0] = points[:, 0] / max_x
+        points[:, 1] = points[:, 1] / max_y
+        
+        # Add structured perturbations to break symmetry
+        noise_scale = 0.015
+        points += np.random.normal(0, noise_scale, points.shape)
+        
+        # Ensure points stay within bounds
+        points[:, 0] = np.clip(points[:, 0], 0, 1)
+        points[:, 1] = np.clip(points[:, 1], 0, 1)
+        
+        return points
+    
+    # Calculate min/max distance ratio efficiently
+    def calculate_ratio(points):
+        if len(points) < 2:
+            return 0
+        
+        # Compute pairwise distances
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+        
+        if distances.size == 0:
+            return 0
+            
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        
+        if d_max <= 0:
+            return 0
+            
+        return d_min / d_max
+    
+    # Enhanced optimization using Voronoi-based approach
+    def optimize_points(initial_points, max_iter=10000):
+        current_points = initial_points.copy()
+        current_ratio = calculate_ratio(current_points)
+        
+        # Better parameters for this approach
+        T = 0.2  # Initial temperature
+        cooling_rate = 0.9995
+        min_temp = 1e-6
+        
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        # Precompute distances for efficiency
+        def compute_voronoi_info(points):
+            vor = Voronoi(points)
+            return vor
+        
+        # Function to measure Voronoi cell irregularity
+        def measure_voronoi_irregularity(points):
+            try:
+                vor = Voronoi(points)
+                # Measure variance of cell areas - more uniform cells are better
+                areas = []
+                for i in range(len(points)):
+                    region = vor.regions[vor.point_region[i]]
+                    if -1 not in region and len(region) > 0:
+                        # Simple area calculation for convex polygons
+                        vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+                        if len(vertices) >= 3:
+                            # Calculate area using shoelace formula
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            areas.append(area)
+                
+                if areas:
+                    return np.var(areas)
+                return 0
+            except:
+                return 0
+        
+        # More targeted perturbations based on Voronoi analysis
+        def get_targeted_perturbation(points, temperature):
+            # Get Voronoi information
+            vor = Voronoi(points)
+            
+            # Identify the point with the smallest Voronoi cell area (likely in a dense region)
+            cell_areas = []
+            for i in range(len(points)):
+                try:
+                    region = vor.regions[vor.point_region[i]]
+                    if -1 not in region and len(region) > 0:
+                        vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+                        if len(vertices) >= 3:
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            cell_areas.append(area)
+                        else:
+                            cell_areas.append(0)
+                    else:
+                        cell_areas.append(0)
+                except:
+                    cell_areas.append(0)
+            
+            # Find the most problematic point (smallest cell area)
+            if len(cell_areas) > 0:
+                min_area_idx = np.argmin(cell_areas)
+            else:
+                min_area_idx = np.random.randint(len(points))
+            
+            # Create perturbation focused on this point
+            new_points = points.copy()
+            perturbation_magnitude = temperature * 0.05
+            
+            # Move toward a less crowded area
+            # Sample several candidate positions and choose the best one
+            best_candidate_pos = None
+            best_candidate_ratio = current_ratio
+            
+            # Sample directions from the current point
+            num_samples = 10
+            for _ in range(num_samples):
+                angle = np.random.uniform(0, 2*np.pi)
+                distance = np.random.exponential(perturbation_magnitude)
+                dx = distance * np.cos(angle)
+                dy = distance * np.sin(angle)
+                
+                candidate_point = points[min_area_idx].copy()
+                candidate_point[0] += dx
+                candidate_point[1] += dy
+                
+                # Check if within bounds
+                if 0 <= candidate_point[0] <= 1 and 0 <= candidate_point[1] <= 1:
+                    # Test this move
+                    test_points = new_points.copy()
+                    test_points[min_area_idx] = candidate_point
+                    
+                    test_ratio = calculate_ratio(test_points)
+                    if test_ratio > best_candidate_ratio:
+                        best_candidate_ratio = test_ratio
+                        best_candidate_pos = candidate_point.copy()
+            
+            if best_candidate_pos is not None:
+                new_points[min_area_idx] = best_candidate_pos
+            else:
+                # Fallback to simple perturbation
+                new_points[min_area_idx, 0] += np.random.normal(0, perturbation_magnitude)
+                new_points[min_area_idx, 1] += np.random.normal(0, perturbation_magnitude)
+                new_points[min_area_idx, 0] = np.clip(new_points[min_area_idx, 0], 0, 1)
+                new_points[min_area_idx, 1] = np.clip(new_points[min_area_idx, 1], 0, 1)
+            
+            return new_points, best_candidate_ratio
+        
+        for iteration in range(max_iter):
+            # Cooling schedule
+            T *= cooling_rate
+            if T < min_temp:
+                break
+            
+            # Get targeted perturbation
+            new_points, new_ratio = get_targeted_perturbation(current_points, T)
+            
+            # Accept or reject the new solution using Metropolis criterion
+            if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
+                current_points = new_points
+                current_ratio = new_ratio
+                
+                if current_ratio > best_ratio:
+                    best_ratio = current_ratio
+                    best_points = current_points.copy()
+        
+        return best_points, best_ratio
+    
+    # Generate initial configuration
+    initial_points = create_lattice_initialization()
+    
+    # Optimize using Voronoi-based approach
+    optimized_points, final_ratio = optimize_points(initial_points)
+    
+    return optimized_points
+
+# EVOLVE-BLOCK-END

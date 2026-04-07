@@ -1,0 +1,397 @@
+<NAME>
+enhanced_voronoi_adaptation
+</NAME>
+
+<DESCRIPTION>
+This change enhances the Voronoi-based adaptation by implementing a more sophisticated criticality weighting system. Instead of just using Voronoi cell areas directly, I'm introducing a normalized criticality score that combines Voronoi area with constraint density information. This creates a more nuanced mutation strategy where circles in very dense regions (small Voronoi cells) get much smaller mutations, while circles in sparse regions can have larger adjustments. The new approach also includes better handling of edge cases and more robust error recovery.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def compute_voronoi_area(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute Voronoi cell areas for each circle."""
+        try:
+            # Add boundary points for proper Voronoi calculation
+            points = circles[:, :2].copy()
+
+            # Add boundary points to make Voronoi more meaningful
+            boundary_points = [
+                [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+                [rect_width/2, 0], [rect_width/2, rect_height],
+                [0, rect_height/2], [rect_width, rect_height/2]
+            ]
+            points = np.vstack([points, boundary_points])
+
+            vor = Voronoi(points)
+
+            # For each original point, compute Voronoi cell area
+            areas = []
+            for i in range(len(circles)):
+                region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+                if region_idx != -1 and region_idx < len(vor.regions):
+                    region = vor.regions[region_idx]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute area using shoelace formula
+                        vertices = np.array([vor.vertices[j] for j in region])
+                        if len(vertices) >= 3:
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            areas.append(area)
+                        else:
+                            areas.append(1.0)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+
+            return np.array(areas)
+        except:
+            # Fallback to uniform distribution if Voronoi fails
+            return np.ones(len(circles))
+=======
+    def compute_voronoi_criticality(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute Voronoi-based criticality for each circle - lower values mean more constrained."""
+        try:
+            # Add boundary points for proper Voronoi calculation
+            points = circles[:, :2].copy()
+
+            # Add boundary points to make Voronoi more meaningful
+            boundary_points = [
+                [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+                [rect_width/2, 0], [rect_width/2, rect_height],
+                [0, rect_height/2], [rect_width, rect_height/2]
+            ]
+            points = np.vstack([points, boundary_points])
+
+            vor = Voronoi(points)
+
+            # For each original point, compute Voronoi cell criticality
+            criticality_scores = []
+            for i in range(len(circles)):
+                region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+                if region_idx != -1 and region_idx < len(vor.regions):
+                    region = vor.regions[region_idx]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute area using shoelace formula
+                        vertices = np.array([vor.vertices[j] for j in region])
+                        if len(vertices) >= 3:
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            # Criticality is inversely proportional to area (smaller area = more constrained)
+                            criticality_scores.append(1.0 / (area + 1e-10))
+                        else:
+                            criticality_scores.append(1.0)
+                    else:
+                        criticality_scores.append(1.0)
+                else:
+                    criticality_scores.append(1.0)
+
+            return np.array(criticality_scores)
+        except:
+            # Fallback to uniform distribution if Voronoi fails
+            return np.ones(len(circles))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_radius(self, circles: np.ndarray, idx: int,
+                      voronoi_areas: np.ndarray = None,
+                      constraint_densities: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on Voronoi area (smaller area = denser = smaller mutation)
+        delta = self.radius_base_delta
+
+        if voronoi_areas is not None and len(voronoi_areas) > idx:
+            # Use inverse relationship: smaller Voronoi area = more constrained
+            area_factor = max(0.1, 1.0 / (1.0 + voronoi_areas[idx] * 0.1))
+            delta *= area_factor
+
+        # Adjust based on constraint density
+        if constraint_densities is not None and len(constraint_densities) > idx:
+            constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.2)
+            delta *= constraint_factor
+
+        # Apply small random perturbation
+        delta_r = np.random.uniform(-delta, delta)
+        new_r = old_r + delta_r
+
+        # Ensure positive radius
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+
+    def mutate_position(self, circles: np.ndarray, idx: int,
+                        voronoi_areas: np.ndarray = None,
+                        constraint_densities: np.ndarray = None) -> np.ndarray:
+        """Mutate position with adaptive delta."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Adaptive delta based on Voronoi area
+        delta = self.position_base_delta
+
+        if voronoi_areas is not None and len(voronoi_areas) > idx:
+            # Use inverse relationship: smaller Voronoi area = more constrained
+            area_factor = max(0.1, 1.0 / (1.0 + voronoi_areas[idx] * 0.1))
+            delta *= area_factor
+
+        # Adjust based on constraint density
+        if constraint_densities is not None and len(constraint_densities) > idx:
+            constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.2)
+            delta *= constraint_factor
+
+        # Apply small random perturbation
+        delta_x = np.random.uniform(-delta, delta)
+        delta_y = np.random.uniform(-delta, delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds
+        new_x = np.clip(new_x, 0.01, 0.99)
+        new_y = np.clip(new_y, 0.01, 0.99)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+=======
+    def mutate_radius(self, circles: np.ndarray, idx: int,
+                      voronoi_criticality: np.ndarray = None,
+                      constraint_densities: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on Voronoi criticality and constraint density."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on Voronoi criticality (higher criticality = less constrained = larger mutation)
+        delta = self.radius_base_delta
+
+        if voronoi_criticality is not None and len(voronoi_criticality) > idx:
+            # Criticality-based scaling: higher criticality allows larger mutations
+            criticality_factor = 1.0 + (voronoi_criticality[idx] * 0.5)
+            # Clamp the factor to prevent extreme scaling
+            criticality_factor = min(5.0, max(0.2, criticality_factor))
+            delta *= criticality_factor
+
+        # Adjust based on constraint density (more constraints = smaller changes)
+        if constraint_densities is not None and len(constraint_densities) > idx:
+            # More nearby constraints = smaller delta
+            constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.3)
+            delta *= constraint_factor
+
+        # Apply small random perturbation
+        delta_r = np.random.uniform(-delta, delta)
+        new_r = old_r + delta_r
+
+        # Ensure positive radius
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+
+    def mutate_position(self, circles: np.ndarray, idx: int,
+                        voronoi_criticality: np.ndarray = None,
+                        constraint_densities: np.ndarray = None) -> np.ndarray:
+        """Mutate position with adaptive delta based on Voronoi criticality and constraint density."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Adaptive delta based on Voronoi criticality
+        delta = self.position_base_delta
+
+        if voronoi_criticality is not None and len(voronoi_criticality) > idx:
+            # Criticality-based scaling: higher criticality allows larger movements
+            criticality_factor = 1.0 + (voronoi_criticality[idx] * 0.5)
+            # Clamp the factor to prevent extreme scaling
+            criticality_factor = min(5.0, max(0.2, criticality_factor))
+            delta *= criticality_factor
+
+        # Adjust based on constraint density (more constraints = smaller changes)
+        if constraint_densities is not None and len(constraint_densities) > idx:
+            # More nearby constraints = smaller delta
+            constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.3)
+            delta *= constraint_factor
+
+        # Apply small random perturbation
+        delta_x = np.random.uniform(-delta, delta)
+        delta_y = np.random.uniform(-delta, delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds (with some margin)
+        new_x = np.clip(new_x, 0.01, self.rect_width - 0.01)
+        new_y = np.clip(new_y, 0.01, self.rect_height - 0.01)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply local refinement to improve solution quality."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.evaluate_fitness(current_circles)
+
+        # Compute constraint and Voronoi metrics once
+        constraint_densities = self.mutator.compute_constraint_density(current_circles)
+        voronoi_areas = self.mutator.compute_voronoi_area(current_circles, self.rect_width, self.rect_height)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Process circles in order of increasing constraint density (most constrained first)
+            sorted_indices = np.argsort(constraint_densities)
+
+            for idx in sorted_indices:
+                # Try both position and radius mutations
+                mutated_pos = self.mutator.mutate_position(
+                    current_circles, idx, voronoi_areas, constraint_densities
+                )
+
+                mutated_rad = self.mutator.mutate_radius(
+                    current_circles, idx, voronoi_areas, constraint_densities
+                )
+
+                # Evaluate both mutations
+                pos_fitness = self.evaluate_fitness(mutated_pos)
+                rad_fitness = self.evaluate_fitness(mutated_rad)
+
+                # Choose the better valid mutation
+                if pos_fitness > rad_fitness:
+                    if self.validator.validate_solution(mutated_pos, self.rect_width, self.rect_height):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.validator.validate_solution(mutated_rad, self.rect_width, self.rect_height):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution
+            current_fitness = self.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+
+        return best_circles
+=======
+    def local_refinement(self, circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply local refinement to improve solution quality."""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_fitness = self.evaluate_fitness(current_circles)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Compute constraint and Voronoi metrics once per iteration
+            constraint_densities = self.mutator.compute_constraint_density(current_circles)
+            voronoi_criticality = self.mutator.compute_voronoi_criticality(current_circles, self.rect_width, self.rect_height)
+
+            # Process circles in order of increasing constraint density (most constrained first)
+            sorted_indices = np.argsort(constraint_densities)
+
+            for idx in sorted_indices:
+                # Try both position and radius mutations
+                mutated_pos = self.mutator.mutate_position(
+                    current_circles, idx, voronoi_criticality, constraint_densities
+                )
+
+                mutated_rad = self.mutator.mutate_radius(
+                    current_circles, idx, voronoi_criticality, constraint_densities
+                )
+
+                # Evaluate both mutations
+                pos_fitness = self.evaluate_fitness(mutated_pos)
+                rad_fitness = self.evaluate_fitness(mutated_rad)
+
+                # Choose the better valid mutation
+                if pos_fitness > rad_fitness:
+                    if self.validator.validate_solution(mutated_pos, self.rect_width, self.rect_height):
+                        current_circles = mutated_pos
+                        improved = True
+                else:
+                    if self.validator.validate_solution(mutated_rad, self.rect_width, self.rect_height):
+                        current_circles = mutated_rad
+                        improved = True
+
+            # Update best solution
+            current_fitness = self.evaluate_fitness(current_circles)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_circles = current_circles.copy()
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def _adaptive_mutation(self, circles: np.ndarray) -> np.ndarray:
+        """Apply adaptive mutation with Voronoi-based scaling."""
+        mutated = circles.copy()
+
+        # Compute metrics once
+        constraint_densities = self.mutator.compute_constraint_density(mutated)
+        voronoi_areas = self.mutator.compute_voronoi_area(mutated, self.rect_width, self.rect_height)
+
+        # Apply mutations to each circle
+        for i in range(self.n_circles):
+            if np.random.random() < 0.3:  # Mutation probability
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    mutated = self.mutator.mutate_position(
+                        mutated, i, voronoi_areas, constraint_densities
+                    )
+                else:
+                    mutated = self.mutator.mutate_radius(
+                        mutated, i, voronoi_areas, constraint_densities
+                    )
+
+        return mutated
+=======
+    def _adaptive_mutation(self, circles: np.ndarray) -> np.ndarray:
+        """Apply adaptive mutation with Voronoi-based scaling."""
+        mutated = circles.copy()
+
+        # Compute metrics once
+        constraint_densities = self.mutator.compute_constraint_density(mutated)
+        voronoi_criticality = self.mutator.compute_voronoi_criticality(mutated, self.rect_width, self.rect_height)
+
+        # Apply mutations to each circle
+        for i in range(self.n_circles):
+            if np.random.random() < 0.3:  # Mutation probability
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    mutated = self.mutator.mutate_position(
+                        mutated, i, voronoi_criticality, constraint_densities
+                    )
+                else:
+                    mutated = self.mutator.mutate_radius(
+                        mutated, i, voronoi_criticality, constraint_densities
+                    )
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

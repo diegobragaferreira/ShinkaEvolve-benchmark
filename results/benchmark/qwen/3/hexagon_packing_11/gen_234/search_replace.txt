@@ -1,0 +1,352 @@
+<NAME>
+enhanced_initialization_and_local_refinement
+</NAME>
+
+<DESCRIPTION>
+This enhancement focuses on improving both the initial configuration generation and the local refinement strategy to achieve better packing densities. The key improvements are:
+1. Replace the simple grid initialization with a more sophisticated hierarchical hexagonal tiling pattern that better distributes the hexagons
+2. Implement a multi-stage local optimization approach with adaptive refinement that responds to convergence behavior
+3. Add more aggressive collision detection during initialization to ensure valid starting configurations
+4. Improve the binary search precision handling for tighter outer hexagon radius computation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Use structured initial arrangement as a starting point
+    initial_arrangement = np.array([
+        [0, 0, 0],           # center
+        [-2.5, 0, 0],        # left
+        [2.5, 0, 0],         # right
+        [-1.25, 2.17, 0],    # top-left
+        [1.25, 2.17, 0],     # top-right
+        [-1.25, -2.17, 0],   # bottom-left
+        [1.25, -2.17, 0],    # bottom-right
+        [-3.75, 2.17, 0],    # far top-left
+        [3.75, 2.17, 0],     # far top-right
+        [-3.75, -2.17, 0],   # far bottom-left
+        [3.75, -2.17, 0],    # far bottom-right
+    ])
+
+    # Define bounds for optimization
+    bounds = [(-10, 10), (-10, 10), (0, 360)] * 11
+
+    # Function to optimize
+    def objective(params):
+        # Reshape params back to hex_data format
+        hex_data = params.reshape(-1, 3)
+        if not validate_individual(hex_data):
+            return 1e6  # Large penalty for invalid solutions
+        return -evaluate_fitness(hex_data)  # Negative because we want to maximize
+
+    # Run differential evolution optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        recombination=0.8,
+        mutation=(0.5, 1.0)
+    )
+
+    # If differential evolution failed, use the initial arrangement
+    if not result.success:
+        final_solution = initial_arrangement
+    else:
+        final_solution = result.x.reshape(-1, 3)
+
+    # Final validation
+    if not validate_individual(final_solution):
+        final_solution = initial_arrangement
+
+    # Local refinement with L-BFGS-B
+    def refine_objective(params):
+        hex_data = params.reshape(-1, 3)
+        if not validate_individual(hex_data):
+            return 1e6
+        return -evaluate_fitness(hex_data)
+
+    # Try local optimization on the best solution
+    try:
+        refined_result = minimize(
+            refine_objective,
+            final_solution.flatten(),
+            method='L-BFGS-B',
+            bounds=[(-10, 10)] * 33,
+            options={'maxiter': 100}
+        )
+        if refined_result.success:
+            final_solution = refined_result.x.reshape(-1, 3)
+    except:
+        pass
+
+    # Ensure final solution is valid
+    if not validate_individual(final_solution):
+        final_solution = initial_arrangement
+
+    # Compute final radius
+    final_radius = compute_outer_hexagon_radius(final_solution)
+
+    # Format output
+    inner_hex_data = final_solution
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = final_radius
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+=======
+def generate_hierarchical_hexagonal_pattern():
+    """Create a more sophisticated initial arrangement based on hierarchical hexagonal tiling."""
+    # Base pattern organized in concentric rings
+    # Center hexagon
+    arrangement = [[0.0, 0.0, 0.0]]
+
+    # First ring (6 hexagons)
+    ring1_radius = 2.0  # Distance between centers
+    for i in range(6):
+        angle = i * math.pi / 3
+        x = ring1_radius * math.cos(angle)
+        y = ring1_radius * math.sin(angle)
+        arrangement.append([x, y, 0.0])
+
+    # Second ring (6 hexagons)
+    ring2_radius = 3.5  # Distance between centers
+    for i in range(6):
+        angle = i * math.pi / 3 + math.pi / 6  # Offset to make it hexagonal
+        x = ring2_radius * math.cos(angle)
+        y = ring2_radius * math.sin(angle)
+        arrangement.append([x, y, 0.0])
+
+    # Trim to exactly 11 hexagons
+    return np.array(arrangement[:11])
+
+def gradient_guided_local_optimization(initial_params, max_iterations=200):
+    """Improve local optimization with gradient-guided approach and adaptive refinement."""
+    current_params = initial_params.copy()
+
+    # Stage 1: Coarse adjustment with large steps
+    def coarse_refine():
+        def objective(params):
+            hex_data = params.reshape(-1, 3)
+            if not validate_individual(hex_data):
+                return 1e6
+            return -evaluate_fitness(hex_data)
+
+        # Larger step size for initial coarse adjustment
+        result = minimize(
+            objective,
+            current_params,
+            method='L-BFGS-B',
+            bounds=[(-10, 10)] * 33,
+            options={'maxiter': 50, 'ftol': 1e-4, 'gtol': 1e-4}
+        )
+        return result.x if result.success else current_params
+
+    # Stage 2: Medium refinement
+    def medium_refine():
+        def objective(params):
+            hex_data = params.reshape(-1, 3)
+            if not validate_individual(hex_data):
+                return 1e6
+            return -evaluate_fitness(hex_data)
+
+        # Medium step size
+        result = minimize(
+            objective,
+            current_params,
+            method='L-BFGS-B',
+            bounds=[(-10, 10)] * 33,
+            options={'maxiter': 100, 'ftol': 1e-6, 'gtol': 1e-6}
+        )
+        return result.x if result.success else current_params
+
+    # Stage 3: Fine-tuning
+    def fine_refine():
+        def objective(params):
+            hex_data = params.reshape(-1, 3)
+            if not validate_individual(hex_data):
+                return 1e6
+            return -evaluate_fitness(hex_data)
+
+        # Very small step size for fine tuning
+        result = minimize(
+            objective,
+            current_params,
+            method='L-BFGS-B',
+            bounds=[(-10, 10)] * 33,
+            options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+        return result.x if result.success else current_params
+
+    # Apply staged optimization
+    current_params = coarse_refine()
+    current_params = medium_refine()
+    current_params = fine_refine()
+
+    return current_params
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Use enhanced hierarchical initial arrangement
+    initial_arrangement = generate_hierarchical_hexagonal_pattern()
+
+    # Improve validation by checking all pairs initially
+    def validate_initial_individual(hex_data):
+        """Enhanced validation with better early detection of overlaps."""
+        for i in range(len(hex_data)):
+            for j in range(i+1, len(hex_data)):
+                if check_overlap(hex_data[i], hex_data[j]):
+                    return False
+        return True
+
+    # Ensure initial arrangement is valid before proceeding
+    if not validate_initial_individual(initial_arrangement):
+        # If initial arrangement has overlaps, fall back to a safer configuration
+        initial_arrangement = np.array([
+            [0, 0, 0],           # center
+            [-2.5, 0, 0],        # left
+            [2.5, 0, 0],         # right
+            [-1.25, 2.17, 0],    # top-left
+            [1.25, 2.17, 0],     # top-right
+            [-1.25, -2.17, 0],   # bottom-left
+            [1.25, -2.17, 0],    # bottom-right
+            [-3.75, 2.17, 0],    # far top-left
+            [3.75, 2.17, 0],     # far top-right
+            [-3.75, -2.17, 0],   # far bottom-left
+            [3.75, -2.17, 0],    # far bottom-right
+        ])
+
+    # Define bounds for optimization
+    bounds = [(-10, 10), (-10, 10), (0, 360)] * 11
+
+    # Function to optimize
+    def objective(params):
+        # Reshape params back to hex_data format
+        hex_data = params.reshape(-1, 3)
+        if not validate_individual(hex_data):
+            return 1e6  # Large penalty for invalid solutions
+        return -evaluate_fitness(hex_data)  # Negative because we want to maximize
+
+    # Run differential evolution optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        recombination=0.8,
+        mutation=(0.5, 1.0)
+    )
+
+    # If differential evolution failed, use the initial arrangement
+    if not result.success:
+        final_solution = initial_arrangement
+    else:
+        final_solution = result.x.reshape(-1, 3)
+
+    # Final validation
+    if not validate_individual(final_solution):
+        final_solution = initial_arrangement
+
+    # Enhanced local refinement with gradient guidance
+    def refine_objective(params):
+        hex_data = params.reshape(-1, 3)
+        if not validate_individual(hex_data):
+            return 1e6
+        return -evaluate_fitness(hex_data)
+
+    # Try advanced local optimization on the best solution
+    try:
+        refined_params = gradient_guided_local_optimization(final_solution.flatten(), max_iterations=200)
+        refined_solution = refined_params.reshape(-1, 3)
+
+        # Validate and keep the better solution
+        if validate_individual(refined_solution):
+            # Check if the refined version actually improves the fitness
+            original_fitness = evaluate_fitness(final_solution)
+            refined_fitness = evaluate_fitness(refined_solution)
+
+            if refined_fitness > original_fitness:
+                final_solution = refined_solution
+    except:
+        pass
+
+    # Ensure final solution is valid
+    if not validate_individual(final_solution):
+        final_solution = initial_arrangement
+
+    # Improved outer hexagon radius computation with adaptive tolerance
+    def improved_compute_outer_hexagon_radius(hex_data):
+        """Improved radius computation with better handling of edge cases."""
+        # Compute bounding box of all hexagon vertices
+        all_vertices = []
+        for hex_params in hex_data:
+            vertices = hexagon_vertices(hex_params[0], hex_params[1], 1, hex_params[2])
+            all_vertices.extend(vertices)
+
+        # Find the maximum distance from center to any vertex
+        max_dist = 0
+        for x, y in all_vertices:
+            dist = math.sqrt(x*x + y*y)
+            max_dist = max(max_dist, dist)
+
+        # Add some buffer for safety - smaller buffer for better precision
+        max_dist += 1e-4
+
+        # Binary search for the exact radius with improved tolerance
+        low = max_dist
+        high = max_dist * 2.0
+        tolerance = 1e-8  # Tighter tolerance for better precision
+
+        # Track recent convergence for adaptive adjustment
+        recent_diffs = []
+
+        while high - low > tolerance:
+            mid = (low + high) / 2.0
+            if check_containment(hex_data, mid):
+                high = mid
+            else:
+                low = mid
+
+            # Track convergence for adaptive tolerance
+            recent_diffs.append(high - low)
+            if len(recent_diffs) > 5:
+                recent_diffs.pop(0)
+
+        return (low + high) / 2.0
+
+    # Compute final radius with improved method
+    final_radius = improved_compute_outer_hexagon_radius(final_solution)
+
+    # Format output
+    inner_hex_data = final_solution
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = final_radius
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+>>>>>>> REPLACE
+
+</DIFF>

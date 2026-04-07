@@ -1,0 +1,191 @@
+--- a/original.py
++++ b/original.py
+@@ -1,25 +1,184 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++import math
++from typing import Tuple, List
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 21
+-    circles = np.zeros((n, 3))
+-
++    # Rectangle dimensions (perimeter = 4, so width + height = 2)
++    # We'll use width = 1.5, height = 0.5 for a 3:1 aspect ratio which often works well
++    width, height = 1.5, 0.5
++    
++    # Set random seed for reproducibility
++    np.random.seed(42)
++    
++    # Initialize with adaptive grid refinement
++    circles = initialize_adaptive_layout(width, height, 21)
++    
++    # Optimize using simulated annealing inspired approach with geometric reasoning
++    circles = optimize_layout(circles, width, height)
++    
+     return circles
+ 
++def initialize_adaptive_layout(width: float, height: float, n: int) -> np.ndarray:
++    """Initialize circles using adaptive grid refinement."""
++    # Start with a coarse grid
++    rows, cols = 5, 5
++    x_positions = np.linspace(0.1, width - 0.1, cols)
++    y_positions = np.linspace(0.1, height - 0.1, rows)
++    
++    # Create grid points
++    grid_points = []
++    for x in x_positions:
++        for y in y_positions:
++            grid_points.append([x, y])
++    
++    # Shuffle points to avoid systematic bias
++    np.random.shuffle(grid_points)
++    
++    # Initialize circles array
++    circles = np.zeros((n, 3))
++    
++    # Place circles with maximum possible radius at each point
++    for i in range(min(n, len(grid_points))):
++        x, y = grid_points[i]
++        # Compute max radius that fits at this location
++        max_radius = compute_max_radius(x, y, width, height, circles[:i])
++        circles[i] = [x, y, max_radius]
++    
++    # Fill remaining positions with random placements in valid regions
++    for i in range(len(grid_points), n):
++        attempts = 0
++        while attempts < 100:
++            x = np.random.uniform(0.1, width - 0.1)
++            y = np.random.uniform(0.1, height - 0.1)
++            max_radius = compute_max_radius(x, y, width, height, circles[:i])
++            if max_radius > 0:
++                circles[i] = [x, y, max_radius]
++                break
++            attempts += 1
++            
++    return circles
++
++def compute_max_radius(x: float, y: float, width: float, height: float, existing_circles: np.ndarray) -> float:
++    """Compute maximum radius for a circle at (x,y) given existing circles and container boundaries."""
++    # Boundary constraints
++    min_dist_from_edge = min(x, width - x, y, height - y)
++    
++    if min_dist_from_edge <= 0:
++        return 0
++    
++    # Overlap constraints with existing circles
++    min_dist_from_others = float('inf')
++    
++    for circle in existing_circles:
++        if circle[2] > 0:  # Only consider placed circles
++            cx, cy, cr = circle
++            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
++            min_dist_from_others = min(min_dist_from_others, dist - cr)
++    
++    # Take minimum of boundary and overlap constraints
++    max_radius = min(min_dist_from_edge, min_dist_from_others)
++    
++    return max(0, max_radius)
++
++def optimize_layout(circles: np.ndarray, width: float, height: float) -> np.ndarray:
++    """Optimize layout using simulated annealing-inspired approach."""
++    current_circles = circles.copy()
++    current_sum = np.sum(current_circles[:, 2])
++    
++    # Parameters for optimization
++    temp = 0.1
++    cooling_rate = 0.999
++    min_temp = 0.001
++    max_iterations = 5000
++    
++    for iteration in range(max_iterations):
++        if temp < min_temp:
++            break
++            
++        # Try to improve the solution
++        new_circles = current_circles.copy()
++        
++        # Choose a random circle to modify
++        idx = np.random.randint(0, len(new_circles))
++        
++        # Perturb the circle's position slightly
++        old_x, old_y, old_r = new_circles[idx]
++        
++        # Try to move circle with some probability
++        if np.random.random() < 0.7:
++            dx = np.random.uniform(-0.1, 0.1)
++            dy = np.random.uniform(-0.1, 0.1)
++            
++            new_x = old_x + dx
++            new_y = old_y + dy
++            
++            # Ensure it stays within bounds
++            new_x = np.clip(new_x, 0.1, width - 0.1)
++            new_y = np.clip(new_y, 0.1, height - 0.1)
++            
++            # Compute new radius
++            new_r = compute_max_radius(new_x, new_y, width, height, 
++                                    np.vstack([new_circles[:idx], new_circles[idx+1:]]))
++            
++            if new_r > 0:
++                new_circles[idx] = [new_x, new_y, new_r]
++        
++        else:
++            # Or try to change just the radius (but make it more conservative)
++            old_r = new_circles[idx][2]
++            delta_r = np.random.uniform(-0.05, 0.05)
++            new_r = old_r + delta_r
++            if new_r > 0.01:
++                new_circles[idx][2] = new_r
++        
++        # Check constraints and accept or reject
++        if is_valid_solution(new_circles, width, height):
++            new_sum = np.sum(new_circles[:, 2])
++            delta = new_sum - current_sum
++            
++            # Accept if better or with probability based on temperature
++            if delta > 0 or np.random.random() < np.exp(delta / temp):
++                current_circles = new_circles
++                current_sum = new_sum
++                
++        # Cool down temperature
++        temp *= cooling_rate
++    
++    return current_circles
++
++def is_valid_solution(circles: np.ndarray, width: float, height: float) -> bool:
++    """Check if the solution satisfies all constraints."""
++    # Check boundary constraints
++    for circle in circles:
++        x, y, r = circle
++        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
++            return False
++    
++    # Check overlap constraints
++    for i in range(len(circles)):
++        for j in range(i + 1, len(circles)):
++            ci = circles[i]
++            cj = circles[j]
++            if ci[2] > 0 and cj[2] > 0:
++                dist = np.sqrt((ci[0] - cj[0])**2 + (ci[1] - cj[1])**2)
++                if dist < ci[2] + cj[2]:
++                    return False
++    
++    return True
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

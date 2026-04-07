@@ -1,0 +1,319 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import time
+import random
+from typing import Tuple, List
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def create_grid_from_indices(indices: np.ndarray, grid_size: int = 50) -> np.ndarray:
+        """Convert discrete grid indices to continuous coordinates."""
+        points = np.zeros((len(indices), 2))
+        for i, idx in enumerate(indices):
+            points[i, 0] = (idx % grid_size) / (grid_size - 1)
+            points[i, 1] = (idx // grid_size) / (grid_size - 1)
+        return points
+
+    def generate_enhanced_initial_configs():
+        """Generate multiple enhanced initial configurations with superior symmetry breaking."""
+        configs = []
+
+        # Configuration 1: Prime-based Fibonacci spiral pattern
+        points1 = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(16):
+            # Enhanced Fibonacci spiral with prime-based asymmetry
+            angle = i * golden_ratio * np.pi * 2 + np.sin(i * 1.7) * 0.1
+            radius = i * 0.05 + np.cos(i * 0.3) * 0.01
+
+            # Prime-based perturbation for stronger asymmetry
+            prime_factor = (i * 17 + 13) % 23
+            asym_x = np.sin(prime_factor * 0.5) * 0.005 * (1 + 0.05 * np.cos(i * 0.2))
+            asym_y = np.cos(prime_factor * 0.3) * 0.005 * (1 + 0.05 * np.sin(i * 0.4))
+
+            x = 0.5 + (radius + asym_x) * np.cos(angle)
+            y = 0.5 + (radius + asym_y) * np.sin(angle)
+
+            points1.append([x, y])
+        points1 = np.array(points1)
+        points1 = np.clip(points1, 0, 1)
+        configs.append(points1)
+
+        # Configuration 2: Triangular lattice with enhanced symmetry breaking
+        points2 = []
+        # Create triangular lattice points with sophisticated asymmetry
+        for i in range(4):
+            for j in range(4):
+                # Base triangular lattice positions
+                x_base = j * 0.25 + (i % 2) * 0.125
+                y_base = i * 0.25
+
+                # Enhanced symmetry breaking using multiple mathematical functions
+                asym_x = np.sin(i * 1.3 + j * 0.7) * 0.008 * (1 + 0.05 * np.cos(j * 0.5))
+                asym_y = np.cos(i * 0.5 + j * 1.1) * 0.008 * (1 + 0.05 * np.sin(i * 0.3))
+
+                # Add prime-based complexity
+                prime_combination = (i * 19 + j * 11) % 31
+                asym_x += np.sin(prime_combination * 0.2) * 0.003 * np.cos(i * 0.1)
+                asym_y += np.cos(prime_combination * 0.3) * 0.003 * np.sin(j * 0.1)
+
+                x = x_base + asym_x + np.random.normal(0, 0.005)
+                y = y_base + asym_y + np.random.normal(0, 0.005)
+                points2.append([x, y])
+        points2 = np.array(points2)
+        points2 = np.clip(points2, 0, 1)
+        configs.append(points2)
+
+        # Configuration 3: Hybrid pattern with complex mathematical asymmetry
+        points3 = []
+        # Combining regular grid with mathematical perturbations
+        for i in range(4):
+            for j in range(4):
+                x_base = j * 0.25 + (i % 2) * 0.125
+                y_base = i * 0.25
+
+                # Complex asymmetry pattern using multiple functions
+                x_pert = np.sin(i * 0.7 + j * 0.3) * 0.006 * (1 + 0.1 * np.sin(j * 0.5))
+                y_pert = np.cos(i * 0.5 + j * 0.7) * 0.006 * (1 + 0.1 * np.cos(i * 0.3))
+
+                # Add structured randomness with prime interaction
+                prime_interaction = (i * 23 + j * 13) % 29
+                x_pert += np.sin(prime_interaction * 0.4 + np.cos(i * 0.2)) * 0.003
+                y_pert += np.cos(prime_interaction * 0.3 + np.sin(j * 0.2)) * 0.003
+
+                x = x_base + x_pert + np.random.normal(0, 0.004)
+                y = y_base + y_pert + np.random.normal(0, 0.004)
+                points3.append([x, y])
+        points3 = np.array(points3)
+        points3 = np.clip(points3, 0, 1)
+        configs.append(points3)
+
+        return configs
+
+    def compute_fitness(points: np.ndarray) -> float:
+        """Compute fitness as min/max distance ratio."""
+        return compute_min_max_ratio(points)
+
+    def crossover(parent1: np.ndarray, parent2: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+        """Perform crossover and mutation on grid indices."""
+        # Simple uniform crossover
+        mask = np.random.random(len(parent1)) < 0.5
+        child = np.where(mask, parent1, parent2).copy()
+
+        # Mutation: randomly change some indices
+        if np.random.random() < mutation_rate:
+            mutate_idx = np.random.randint(0, len(child))
+            child[mutate_idx] = np.random.randint(0, 2500)  # 50x50 grid
+
+        return child
+
+    def initialize_population(pop_size: int, grid_size: int = 50) -> List[np.ndarray]:
+        """Initialize population with random grid configurations."""
+        population = []
+        for _ in range(pop_size):
+            # Generate random unique indices
+            indices = np.random.choice(2500, size=16, replace=False)
+            population.append(indices)
+        return population
+
+    def evaluate_population(population: List[np.ndarray], grid_size: int = 50) -> List[float]:
+        """Evaluate fitness of entire population."""
+        fitnesses = []
+        for ind in population:
+            points = create_grid_from_indices(ind, grid_size)
+            points = np.clip(points, 0, 1)  # Ensure bounds
+            fitness = compute_fitness(points)
+            fitnesses.append(fitness)
+        return fitnesses
+
+    def select_parents(population: List[np.ndarray], fitnesses: List[float],
+                       tournament_size: int = 3) -> Tuple[np.ndarray, np.ndarray]:
+        """Tournament selection."""
+        # Tournament selection for first parent
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        best_idx = tournament_indices[np.argmax([fitnesses[i] for i in tournament_indices])]
+        parent1 = population[best_idx].copy()
+
+        # Tournament selection for second parent
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        best_idx = tournament_indices[np.argmax([fitnesses[i] for i in tournament_indices])]
+        parent2 = population[best_idx].copy()
+
+        return parent1, parent2
+
+    def grid_evolutionary_optimization(max_generations: int = 500, pop_size: int = 50,
+                                     grid_size: int = 50) -> np.ndarray:
+        """Main evolutionary optimization loop."""
+        # Initialize population
+        population = initialize_population(pop_size, grid_size)
+
+        best_fitness = -np.inf
+        best_individual = None
+
+        # Evolutionary process
+        for generation in range(max_generations):
+            # Evaluate population
+            fitnesses = evaluate_population(population, grid_size)
+
+            # Track best solution
+            max_fitness_idx = np.argmax(fitnesses)
+            if fitnesses[max_fitness_idx] > best_fitness:
+                best_fitness = fitnesses[max_fitness_idx]
+                best_individual = population[max_fitness_idx].copy()
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep best individuals
+            elite_count = pop_size // 10
+            sorted_indices = np.argsort(fitnesses)[::-1][:elite_count]
+            for i in sorted_indices:
+                new_population.append(population[i].copy())
+
+            # Generate offspring
+            while len(new_population) < pop_size:
+                parent1, parent2 = select_parents(population, fitnesses)
+                child = crossover(parent1, parent2)
+                new_population.append(child)
+
+            population = new_population[:pop_size]
+
+            # Adaptive mutation rate
+            if generation > max_generations // 2:
+                # Decrease mutation rate in later generations
+                mutation_rate = 0.05
+            else:
+                mutation_rate = 0.1
+
+        # Convert best individual to final points
+        best_points = create_grid_from_indices(best_individual, grid_size)
+        best_points = np.clip(best_points, 0, 1)
+
+        # Final local refinement using gradient-free method
+        return optimize_local_refinement(best_points)
+
+    def optimize_local_refinement(initial_points: np.ndarray, max_iters: int = 200) -> np.ndarray:
+        """Apply local refinement to final solution."""
+        points = initial_points.copy()
+        current_fitness = compute_fitness(points)
+
+        best_points = points.copy()
+        best_fitness = current_fitness
+
+        # Gradient-free local search using Nelder-Mead inspired approach
+        for _ in range(max_iters):
+            # Try small random perturbations
+            for i in range(len(points)):
+                # Save current point
+                original_point = points[i].copy()
+
+                # Try perturbing this point
+                new_point = original_point + np.random.normal(0, 0.005, 2)
+                new_point = np.clip(new_point, 0, 1)
+
+                # Test if this improves fitness
+                points[i] = new_point
+                new_fitness = compute_fitness(points)
+
+                if new_fitness > current_fitness:
+                    current_fitness = new_fitness
+                    if new_fitness > best_fitness:
+                        best_fitness = new_fitness
+                        best_points = points.copy()
+                else:
+                    # Revert
+                    points[i] = original_point
+
+            # Occasionally try larger perturbations
+            if np.random.random() < 0.1:
+                # Randomly select a few points to perturb more aggressively
+                indices_to_perturb = np.random.choice(len(points),
+                                                    size=max(1, len(points) // 10),
+                                                    replace=False)
+                for idx in indices_to_perturb:
+                    original_point = points[idx].copy()
+                    new_point = original_point + np.random.normal(0, 0.01, 2)
+                    new_point = np.clip(new_point, 0, 1)
+
+                    points[idx] = new_point
+                    new_fitness = compute_fitness(points)
+
+                    if new_fitness > current_fitness:
+                        current_fitness = new_fitness
+                        if new_fitness > best_fitness:
+                            best_fitness = new_fitness
+                            best_points = points.copy()
+                    else:
+                        points[idx] = original_point
+
+        return best_points
+
+    # Main execution
+    np.random.seed(42)
+
+    # Generate enhanced initial configurations
+    initial_configs = generate_enhanced_initial_configs()
+
+    # Run optimization from each enhanced initial configuration
+    best_final_points = None
+    best_final_fitness = -np.inf
+
+    # Each configuration gets a fraction of the total time budget
+    time_per_config = 175 / len(initial_configs)
+
+    for i, initial_config in enumerate(initial_configs):
+        # For each configuration, perform the full evolutionary optimization process
+        # We'll use a slightly modified version for each start to balance exploration and exploitation
+        if i == 0:
+            # First config: more extensive search
+            result = grid_evolutionary_optimization(max_generations=250, pop_size=50, grid_size=40)
+        elif i == 1:
+            # Second config: balanced approach
+            result = grid_evolutionary_optimization(max_generations=200, pop_size=40, grid_size=45)
+        else:
+            # Third config: focused refinement
+            result = grid_evolutionary_optimization(max_generations=150, pop_size=30, grid_size=50)
+
+        fitness = compute_fitness(result)
+
+        if fitness > best_final_fitness:
+            best_final_fitness = fitness
+            best_final_points = result.copy()
+
+    # Final local refinement on the best result
+    if best_final_points is not None:
+        final_points = optimize_local_refinement(best_final_points, max_iters=100)
+    else:
+        # Fallback to default approach
+        coarse_result = grid_evolutionary_optimization(max_generations=300, pop_size=40, grid_size=30)
+        final_points = optimize_local_refinement(coarse_result, max_iters=100)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

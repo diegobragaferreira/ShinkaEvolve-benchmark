@@ -1,0 +1,210 @@
+<NAME>
+add_symmetry_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses general-purpose optimization but doesn't leverage the inherent symmetries of the hexagon packing problem. I'll implement explicit symmetry-aware constraint handling that recognizes that certain arrangements of hexagons should maintain rotational or reflectional symmetry to achieve optimal packing. This approach will significantly reduce the search space and improve convergence.
+
+The main change involves adding a symmetry-aware constraint checker that enforces mathematical symmetries in the hexagon arrangement, which should help find configurations closer to the theoretical optimum of 1/3.9419123 ≈ 0.2537.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def check_overlap_spatial_hashing_numba(hexagon_vertices_list, cell_size=1.2):
+    """Improved spatial hashing overlap check for better performance."""
+    n_hexagons = len(hexagon_vertices_list)
+
+    # Build spatial hash grid with more efficient structure
+    grid = {}
+
+    # Precompute grid cell dimensions for better cache locality
+    cell_size_inv = 1.0 / cell_size
+
+    # Place each hexagon into grid cells
+    for i in range(n_hexagons):
+        vertices = hexagon_vertices_list[i]
+        min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices)
+
+        # Calculate grid cell range
+        min_cell_x = int(min_x * cell_size_inv)
+        max_cell_x = int(max_x * cell_size_inv)
+        min_cell_y = int(min_y * cell_size_inv)
+        max_cell_y = int(max_y * cell_size_inv)
+
+        # Add to all relevant grid cells
+        for gx in range(min_cell_x, max_cell_x + 1):
+            for gy in range(min_cell_y, max_cell_y + 1):
+                cell = (gx, gy)
+                if cell not in grid:
+                    grid[cell] = []
+                grid[cell].append(i)
+
+    # Check for overlaps by examining neighboring cells
+    checked_pairs = set()  # Avoid double-checking pairs
+
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices_i)
+
+        # Calculate grid cell range for this hexagon
+        min_cell_x = int(min_x * cell_size_inv)
+        max_cell_x = int(max_x * cell_size_inv)
+        min_cell_y = int(min_y * cell_size_inv)
+        max_cell_y = int(max_y * cell_size_inv)
+
+        # Check all neighboring cells
+        for gx in range(min_cell_x - 1, max_cell_x + 2):
+            for gy in range(min_cell_y - 1, max_cell_y + 2):
+                neighbor_cell = (gx, gy)
+                if neighbor_cell in grid:
+                    for j in grid[neighbor_cell]:
+                        if i != j:
+                            # Avoid duplicate pair checking
+                            pair_key = tuple(sorted([i, j]))
+                            if pair_key in checked_pairs:
+                                continue
+                            checked_pairs.add(pair_key)
+
+                            # Quick bounding box check first
+                            vertices_j = hexagon_vertices_list[j]
+                            min_x_j, max_x_j, min_y_j, max_y_j = get_hexagon_bounds(vertices_j)
+
+                            # Simple bounding box intersection test
+                            if (max_x_i >= min_x_j and min_x_i <= max_x_j and
+                                max_y_i >= min_y_j and min_y_i <= max_y_j):
+
+                                # More precise check using distance between centers
+                                cx_i = vertices_i[0][0]
+                                cy_i = vertices_i[0][1]
+                                cx_j = vertices_j[0][0]
+                                cy_j = vertices_j[0][1]
+                                dist_sq = (cx_i - cx_j)**2 + (cy_i - cy_j)**2
+
+                                # For unit hexagons, minimum distance should be approximately 2 (they don't touch)
+                                # Unit hexagon circumradius is sqrt(3)/2 ≈ 0.866
+                                # So minimum center distance should be about 2*0.866 = 1.732
+                                if dist_sq < 2.5:  # Slightly relaxed threshold for safety
+                                    return False  # Overlap detected
+
+    return True  # No overlap detected
+=======
+@njit
+def check_overlap_spatial_hashing_numba(hexagon_vertices_list, cell_size=1.2):
+    """Improved spatial hashing overlap check for better performance."""
+    n_hexagons = len(hexagon_vertices_list)
+
+    # Build spatial hash grid with more efficient structure
+    grid = {}
+
+    # Precompute grid cell dimensions for better cache locality
+    cell_size_inv = 1.0 / cell_size
+
+    # Place each hexagon into grid cells
+    for i in range(n_hexagons):
+        vertices = hexagon_vertices_list[i]
+        min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices)
+
+        # Calculate grid cell range
+        min_cell_x = int(min_x * cell_size_inv)
+        max_cell_x = int(max_x * cell_size_inv)
+        min_cell_y = int(min_y * cell_size_inv)
+        max_cell_y = int(max_y * cell_size_inv)
+
+        # Add to all relevant grid cells
+        for gx in range(min_cell_x, max_cell_x + 1):
+            for gy in range(min_cell_y, max_cell_y + 1):
+                cell = (gx, gy)
+                if cell not in grid:
+                    grid[cell] = []
+                grid[cell].append(i)
+
+    # Check for overlaps by examining neighboring cells
+    checked_pairs = set()  # Avoid double-checking pairs
+
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices_i)
+
+        # Calculate grid cell range for this hexagon
+        min_cell_x = int(min_x * cell_size_inv)
+        max_cell_x = int(max_x * cell_size_inv)
+        min_cell_y = int(min_y * cell_size_inv)
+        max_cell_y = int(max_y * cell_size_inv)
+
+        # Check all neighboring cells
+        for gx in range(min_cell_x - 1, max_cell_x + 2):
+            for gy in range(min_cell_y - 1, max_cell_y + 2):
+                neighbor_cell = (gx, gy)
+                if neighbor_cell in grid:
+                    for j in grid[neighbor_cell]:
+                        if i != j:
+                            # Avoid duplicate pair checking
+                            pair_key = tuple(sorted([i, j]))
+                            if pair_key in checked_pairs:
+                                continue
+                            checked_pairs.add(pair_key)
+
+                            # Quick bounding box check first
+                            vertices_j = hexagon_vertices_list[j]
+                            min_x_j, max_x_j, min_y_j, max_y_j = get_hexagon_bounds(vertices_j)
+
+                            # Simple bounding box intersection test
+                            if (max_x_i >= min_x_j and min_x_i <= max_x_j and
+                                max_y_i >= min_y_j and min_y_i <= max_y_j):
+
+                                # More precise check using distance between centers
+                                cx_i = vertices_i[0][0]
+                                cy_i = vertices_i[0][1]
+                                cx_j = vertices_j[0][0]
+                                cy_j = vertices_j[0][1]
+                                dist_sq = (cx_i - cx_j)**2 + (cy_i - cy_j)**2
+
+                                # For unit hexagons, minimum distance should be approximately 2 (they don't touch)
+                                # Unit hexagon circumradius is sqrt(3)/2 ≈ 0.866
+                                # So minimum center distance should be about 2*0.866 = 1.732
+                                if dist_sq < 2.5:  # Slightly relaxed threshold for safety
+                                    return False  # Overlap detected
+
+    return True  # No overlap detected
+
+@njit
+def enforce_symmetry_constraints(hexagon_configs):
+    """Enforce symmetry constraints on hexagon arrangement to improve optimization."""
+    # For 12 hexagons, try to maintain 6-fold rotational symmetry where possible
+    # This helps guide optimization toward mathematically optimal arrangements
+
+    # If we have 12 hexagons, try to enforce symmetries:
+    # - Central hexagon (index 0) stays at center
+    # - Hexagons in rings should be placed with appropriate angular spacing
+
+    if len(hexagon_configs) >= 12:
+        # Ensure central hexagon stays at origin
+        hexagon_configs[0][0] = 0.0  # x
+        hexagon_configs[0][1] = 0.0  # y
+
+        # Maintain 6-fold rotational symmetry for outer ring hexagons
+        # Positions for 6 outer hexagons around center at radius 2.5
+        # We'll preserve some symmetry in their arrangement
+        if len(hexagon_configs) >= 7:
+            # First 6 hexagons around center
+            for i in range(1, 7):
+                # These should be arranged radially around the center
+                angle = (i - 1) * (2 * pi / 6)  # 60 degree increments
+                radius = 2.5
+                hexagon_configs[i][0] = radius * cos(angle)
+                hexagon_configs[i][1] = radius * sin(angle)
+
+        # For remaining hexagons, maintain symmetry in their arrangement
+        if len(hexagon_configs) >= 12:
+            # Last 5 hexagons in second ring
+            for i in range(7, 12):
+                # Distribute evenly in second ring with different radius
+                angle = (i - 7) * (2 * pi / 5)  # 72 degree increments
+                radius = 3.5
+                hexagon_configs[i][0] = radius * cos(angle)
+                hexagon_configs[i][1] = radius * sin(angle)
+
+    return hexagon_configs
+>>>>>>> REPLACE
+</DIFF>

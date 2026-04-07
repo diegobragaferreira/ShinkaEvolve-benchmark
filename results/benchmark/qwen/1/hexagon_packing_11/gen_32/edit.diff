@@ -1,0 +1,429 @@
+--- a/original.py
++++ b/original.py
+@@ -1,145 +1,299 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution
+ from shapely.geometry import Polygon
+ import math
+-
+-
+-def generate_hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+-    """Generate vertices of a regular hexagon given center, rotation, and side length."""
+-    angle_rad = math.radians(angle_deg)
+-    # Vertices of a regular hexagon with side_length=1 centered at origin
+-    base_vertices = []
+-    for i in range(6):
+-        theta = angle_rad + i * math.pi / 3
+-        x = math.cos(theta)
+-        y = math.sin(theta)
+-        base_vertices.append((x, y))
+-
+-    # Scale and translate
+-    vertices = [(center_x + side_length * vx, center_y + side_length * vy) for vx, vy in base_vertices]
+-    return vertices
+-
+-
+-def check_containment(hexagon_vertices, outer_hexagon_vertices):
+-    """Check if all vertices of inner hexagon are inside outer hexagon."""
+-    inner_poly = Polygon(hexagon_vertices)
+-    outer_poly = Polygon(outer_hexagon_vertices)
+-    return outer_poly.contains(inner_poly)
+-
+-
+-def check_overlap(hex1_vertices, hex2_vertices):
+-    """Check if two hexagons overlap."""
+-    poly1 = Polygon(hex1_vertices)
+-    poly2 = Polygon(hex2_vertices)
+-    return poly1.intersects(poly2)
+-
+-
+-def objective_function(params):
+-    """Objective function to minimize (negative of inverse of outer hex side length)."""
+-    # Extract inner hexagon positions and rotations (x,y,theta for each of 11 hexagons)
+-    # And outer hexagon parameters (center_x, center_y, angle, side_length)
+-    inner_params = params[:-4]
+-    outer_center_x, outer_center_y, outer_angle, outer_side_length = params[-4:]
+-
+-    # Create inner hexagons
+-    inner_hexagons = []
+-    for i in range(11):
+-        x, y, theta = inner_params[3*i:3*i+3]
+-        vertices = generate_hexagon_vertices(x, y, theta, 1.0)  # unit hexagons
+-        inner_hexagons.append(vertices)
+-
+-    # Create outer hexagon
+-    outer_vertices = generate_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, outer_side_length)
+-
+-    # Check constraints
+-    penalty = 0
+-
+-    # Check containment
+-    for vertices in inner_hexagons:
+-        if not check_containment(vertices, outer_vertices):
+-            penalty += 1000000
+-
+-    # Check overlaps between inner hexagons
+-    for i in range(len(inner_hexagons)):
+-        for j in range(i+1, len(inner_hexagons)):
+-            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+-                penalty += 1000000
+-
+-    # Return negative of inverse side length plus penalties
+-    if penalty > 0:
+-        return penalty + 1.0 / outer_side_length  # Penalty makes it worse than any valid solution
+-    else:
+-        return -1.0 / outer_side_length
++from typing import Tuple, List, Optional
++import time
++
++
++class Hexagon:
++    """Represents a regular hexagon with configurable position, rotation, and size."""
++    
++    def __init__(self, center_x: float, center_y: float, angle_deg: float, side_length: float = 1.0):
++        self.center_x = center_x
++        self.center_y = center_y
++        self.angle_deg = angle_deg
++        self.side_length = side_length
++    
++    def get_vertices(self) -> List[Tuple[float, float]]:
++        """Generate vertices of the hexagon."""
++        angle_rad = math.radians(self.angle_deg)
++        base_vertices = []
++        for i in range(6):
++            theta = angle_rad + i * math.pi / 3
++            x = math.cos(theta)
++            y = math.sin(theta)
++            base_vertices.append((x, y))
++
++        # Scale and translate
++        vertices = [(self.center_x + self.side_length * vx, self.center_y + self.side_length * vy) 
++                   for vx, vy in base_vertices]
++        return vertices
++    
++    def contains_point(self, point: Tuple[float, float]) -> bool:
++        """Check if a point is inside this hexagon."""
++        vertices = self.get_vertices()
++        poly = Polygon(vertices)
++        return poly.contains(Point(point[0], point[1]))
++
++
++class OuterHexagon(Hexagon):
++    """Specialized hexagon for the outer container."""
++    
++    def __init__(self, center_x: float, center_y: float, angle_deg: float, side_length: float):
++        super().__init__(center_x, center_y, angle_deg, side_length)
++    
++    def contains_hexagon(self, inner_hex: Hexagon) -> bool:
++        """Check if an inner hexagon is completely contained within this outer hexagon."""
++        inner_vertices = inner_hex.get_vertices()
++        outer_vertices = self.get_vertices()
++        inner_poly = Polygon(inner_vertices)
++        outer_poly = Polygon(outer_vertices)
++        return outer_poly.contains(inner_poly)
++    
++    def get_bounding_box(self) -> Tuple[float, float, float, float]:
++        """Get the axis-aligned bounding box (min_x, max_x, min_y, max_y)."""
++        vertices = self.get_vertices()
++        xs = [v[0] for v in vertices]
++        ys = [v[1] for v in vertices]
++        return (min(xs), max(xs), min(ys), max(ys))
++
++
++class GridSpatialIndex:
++    """Spatial index for efficient collision detection using a grid-based approach."""
++    
++    def __init__(self, cell_size: float = 2.0):
++        self.cell_size = cell_size
++        self.grid = {}
++    
++    def _get_cell_key(self, x: float, y: float) -> Tuple[int, int]:
++        """Get grid cell key for a point."""
++        return (int(x // self.cell_size), int(y // self.cell_size))
++    
++    def insert(self, hexagon: Hexagon, hex_id: int):
++        """Insert a hexagon into the spatial index."""
++        vertices = hexagon.get_vertices()
++        xs = [v[0] for v in vertices]
++        ys = [v[1] for v in vertices]
++        
++        min_x, max_x = min(xs), max(xs)
++        min_y, max_y = min(ys), max(ys)
++        
++        # Insert into all overlapping cells
++        start_col = int(min_x // self.cell_size)
++        end_col = int(max_x // self.cell_size)
++        start_row = int(min_y // self.cell_size)
++        end_row = int(max_y // self.cell_size)
++        
++        for col in range(start_col, end_col + 1):
++            for row in range(start_row, end_row + 1):
++                if (col, row) not in self.grid:
++                    self.grid[(col, row)] = []
++                self.grid[(col, row)].append(hex_id)
++    
++    def query(self, hexagon: Hexagon) -> List[int]:
++        """Query potential collisions for a hexagon."""
++        vertices = hexagon.get_vertices()
++        xs = [v[0] for v in vertices]
++        ys = [v[1] for v in vertices]
++        
++        min_x, max_x = min(xs), max(xs)
++        min_y, max_y = min(ys), max(ys)
++        
++        candidates = set()
++        start_col = int(min_x // self.cell_size)
++        end_col = int(max_x // self.cell_size)
++        start_row = int(min_y // self.cell_size)
++        end_row = int(max_y // self.cell_size)
++        
++        for col in range(start_col, end_col + 1):
++            for row in range(start_row, end_row + 1):
++                if (col, row) in self.grid:
++                    candidates.update(self.grid[(col, row)])
++        
++        return list(candidates)
++
++
++class HexagonPackOptimizer:
++    """Main optimizer class for packing 11 unit hexagons."""
++    
++    def __init__(self):
++        self.spatial_index = GridSpatialIndex(cell_size=2.0)
++        self.hexagon_count = 11
++        
++    def generate_initial_guess(self) -> np.ndarray:
++        """Generate initial configuration based on honeycomb pattern."""
++        initial_guess = []
++        
++        # Center hexagon
++        initial_guess.extend([0.0, 0.0, 0.0])
++        
++        # Surrounding hexagons in honeycomb pattern (approximate)
++        positions = [
++            (-1.732, 0, 0),      # Left
++            (1.732, 0, 0),       # Right
++            (0, 1.732, 0),       # Top
++            (0, -1.732, 0),      # Bottom
++            (-0.866, 0.866, 0),  # Top-left
++            (0.866, 0.866, 0),   # Top-right
++            (-0.866, -0.866, 0), # Bottom-left
++            (0.866, -0.866, 0),  # Bottom-right
++            (-1.732, 1.732, 0),  # Far top-left
++            (1.732, 1.732, 0),   # Far top-right
++            (-1.732, -1.732, 0), # Far bottom-left
++            (1.732, -1.732, 0),  # Far bottom-right
++        ]
++        
++        # Add all positions and rotations
++        for x, y, rot in positions:
++            initial_guess.extend([x, y, rot])
++        
++        # Add outer hexagon parameters (center, angle, side_length)
++        initial_guess.extend([0.0, 0.0, 0.0, 4.0])  # reasonable starting side length
++        
++        return np.array(initial_guess)
++    
++    def validate_parameters(self, params: np.ndarray) -> Tuple[bool, str]:
++        """Validate parameter ranges."""
++        inner_params = params[:-4]
++        outer_center_x, outer_center_y, outer_angle, outer_side_length = params[-4:]
++        
++        # Check outer hexagon side length
++        if outer_side_length < 1.0 or outer_side_length > 20.0:
++            return False, f"Invalid outer hexagon side length: {outer_side_length}"
++        
++        return True, ""
++    
++    def compute_inner_hexagons(self, inner_params: np.ndarray) -> List[Hexagon]:
++        """Create inner hexagon objects from parameters."""
++        inner_hexagons = []
++        for i in range(self.hexagon_count):
++            x, y, theta = inner_params[3*i:3*i+3]
++            inner_hexagons.append(Hexagon(x, y, theta, 1.0))
++        return inner_hexagons
++    
++    def check_constraints(self, inner_hexagons: List[Hexagon], outer_hexagon: OuterHexagon) -> Tuple[bool, float]:
++        """Check all constraints with early termination."""
++        penalty = 0.0
++        
++        # Check containment for all inner hexagons
++        for hexagon in inner_hexagons:
++            if not outer_hexagon.contains_hexagon(hexagon):
++                penalty += 1000000.0
++                return False, penalty
++        
++        # Check overlaps using spatial index for efficiency
++        self.spatial_index.grid.clear()  # Clear previous entries
++        
++        # Insert all hexagons into spatial index
++        for i, hexagon in enumerate(inner_hexagons):
++            self.spatial_index.insert(hexagon, i)
++        
++        # Check for overlaps
++        for i, hexagon in enumerate(inner_hexagons):
++            candidates = self.spatial_index.query(hexagon)
++            # Check only those that might collide
++            for j in candidates:
++                if i >= j:  # Only check each pair once
++                    continue
++                if self._check_hexagon_overlap(hexagon, inner_hexagons[j]):
++                    penalty += 1000000.0
++                    return False, penalty
++        
++        return True, penalty
++    
++    def _check_hexagon_overlap(self, hex1: Hexagon, hex2: Hexagon) -> bool:
++        """Check if two hexagons overlap using Shapely."""
++        try:
++            poly1 = Polygon(hex1.get_vertices())
++            poly2 = Polygon(hex2.get_vertices())
++            return poly1.intersects(poly2)
++        except Exception:
++            # Fallback in case of geometry issues
++            return False
++    
++    def evaluate_fitness(self, params: np.ndarray) -> float:
++        """Evaluate fitness of a configuration."""
++        # Validate parameters first
++        is_valid, error_msg = self.validate_parameters(params)
++        if not is_valid:
++            return 1000000.0  # Large penalty for invalid params
++        
++        # Extract parameters
++        inner_params = params[:-4]
++        outer_center_x, outer_center_y, outer_angle, outer_side_length = params[-4:]
++        
++        # Create hexagon objects
++        inner_hexagons = self.compute_inner_hexagons(inner_params)
++        outer_hexagon = OuterHexagon(outer_center_x, outer_center_y, outer_angle, outer_side_length)
++        
++        # Check constraints
++        is_valid, penalty = self.check_constraints(inner_hexagons, outer_hexagon)
++        
++        # Return fitness value (negative of inverse side length + penalty)
++        if is_valid:
++            return -1.0 / outer_side_length
++        else:
++            return penalty + 1.0 / outer_side_length
++    
++    def optimize(self) -> Tuple[np.ndarray, np.ndarray, float]:
++        """Perform the optimization process."""
++        # Generate initial guess
++        initial_guess = self.generate_initial_guess()
++        
++        # Set bounds for optimization
++        bounds = []
++        
++        # Bounds for inner hexagon positions (x,y) and rotations (theta)
++        for _ in range(self.hexagon_count):
++            bounds.extend([(-10.0, 10.0), (-10.0, 10.0), (-180.0, 180.0)])
++        
++        # Bounds for outer hexagon (center x, center y, angle, side_length)
++        bounds.extend([(-10.0, 10.0), (-10.0, 10.0), (-180.0, 180.0), (1.0, 10.0)])
++        
++        # Perform optimization
++        start_time = time.time()
++        result = differential_evolution(
++            self.evaluate_fitness, 
++            bounds, 
++            maxiter=100, 
++            popsize=15, 
++            seed=42,
++            callback=self._callback_function,
++            disp=False
++        )
++        end_time = time.time()
++        
++        # Extract best solution
++        best_params = result.x
++        inner_params = best_params[:-4]
++        outer_center_x, outer_center_y, outer_angle, outer_side_length = best_params[-4:]
++        
++        # Format inner hexagon data
++        inner_hex_data = np.zeros((self.hexagon_count, 3))
++        for i in range(self.hexagon_count):
++            inner_hex_data[i] = [inner_params[3*i], inner_params[3*i+1], inner_params[3*i+2]]
++        
++        outer_hex_data = np.array([outer_center_x, outer_center_y, outer_angle])
++        
++        return inner_hex_data, outer_hex_data, outer_side_length
++    
++    def _callback_function(self, xk, convergence):
++        """Callback function for optimization progress tracking."""
++        pass  # Can be extended for logging or debugging
+ 
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    # Initial guess based on a known good configuration (approximate)
+-    # Inner hexagons positions and rotations (11 * 3 parameters)
+-    # Outer hexagon center, rotation, and side length (4 parameters)
+-
+-    # Start with a better initial configuration
+-    initial_guess = []
+-
+-    # Center hexagon
+-    initial_guess.extend([0.0, 0.0, 0.0])
+-
+-    # Surrounding hexagons in honeycomb pattern (approximate)
+-    positions = [
+-        (-1.732, 0, 0),      # Left
+-        (1.732, 0, 0),       # Right
+-        (0, 1.732, 0),       # Top
+-        (0, -1.732, 0),      # Bottom
+-        (-0.866, 0.866, 0),  # Top-left
+-        (0.866, 0.866, 0),   # Top-right
+-        (-0.866, -0.866, 0), # Bottom-left
+-        (0.866, -0.866, 0),  # Bottom-right
+-        (-1.732, 1.732, 0),  # Far top-left
+-        (1.732, 1.732, 0),   # Far top-right
+-        (-1.732, -1.732, 0), # Far bottom-left
+-        (1.732, -1.732, 0),  # Far bottom-right
+-    ]
+-
+-    # Add all positions and rotations
+-    for x, y, rot in positions:
+-        initial_guess.extend([x, y, rot])
+-
+-    # Add outer hexagon parameters (center, angle, side_length)
+-    initial_guess.extend([0.0, 0.0, 0.0, 4.0])  # reasonable starting side length
+-
+-    # Set bounds for optimization
+-    bounds = []
+-
+-    # Bounds for inner hexagon positions (x,y) and rotations (theta)
+-    for _ in range(11):
+-        bounds.extend([(-10.0, 10.0), (-10.0, 10.0), (-180.0, 180.0)])
+-
+-    # Bounds for outer hexagon (center x, center y, angle, side_length)
+-    bounds.extend([(-10.0, 10.0), (-10.0, 10.0), (-180.0, 180.0), (1.0, 10.0)])
+-
+-    # Perform optimization
+-    result = differential_evolution(objective_function, bounds, maxiter=100, popsize=15, seed=42)
+-
+-    # Extract best solution
+-    best_params = result.x
+-    inner_params = best_params[:-4]
+-    outer_center_x, outer_center_y, outer_angle, outer_side_length = best_params[-4:]
+-
+-    # Format inner hexagon data
+-    inner_hex_data = np.zeros((11, 3))
+-    for i in range(11):
+-        inner_hex_data[i] = [inner_params[3*i], inner_params[3*i+1], inner_params[3*i+2]]
+-
+-    outer_hex_data = np.array([outer_center_x, outer_center_y, outer_angle])
+-
+-    return inner_hex_data, outer_hex_data, outer_side_length
++    optimizer = HexagonPackOptimizer()
++    return optimizer.optimize()
+ 
+ 
+ # EVOLVE-BLOCK-END

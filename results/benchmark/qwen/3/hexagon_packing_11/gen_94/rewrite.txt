@@ -1,0 +1,335 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+import random
+from collections import defaultdict
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+@jit(nopython=True)
+def distance_point_to_hexagon_vertices(px, py, hex_vertices):
+    """Calculate minimum distance from point to hexagon vertices (for fast collision detection)"""
+    min_dist_sq = 1e30
+    for i in range(len(hex_vertices)):
+        dx = px - hex_vertices[i][0]
+        dy = py - hex_vertices[i][1]
+        dist_sq = dx*dx + dy*dy
+        min_dist_sq = min(min_dist_sq, dist_sq)
+    return np.sqrt(min_dist_sq)
+
+@jit(nopython=True)
+def point_in_hexagon_fast(px, py, hex_vertices):
+    """Fast point-in-polygon test using ray casting"""
+    n = len(hex_vertices)
+    inside = False
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if py > min(p1y, p2y):
+            if py <= max(p1y, p2y):
+                if px <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or px <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+class Hexagon:
+    def __init__(self, center_x, center_y, angle_degrees, side_length=1.0):
+        self.center_x = center_x
+        self.center_y = center_y
+        self.angle_degrees = angle_degrees
+        self.side_length = side_length
+        self.vertices = None
+        self._update_vertices()
+    
+    def _update_vertices(self):
+        """Update vertex cache for current position and rotation"""
+        sqrt3 = np.sqrt(3)
+        base_vertices = np.array([
+            [self.side_length, 0.0],
+            [self.side_length/2.0, sqrt3/2.0 * self.side_length],
+            [-self.side_length/2.0, sqrt3/2.0 * self.side_length],
+            [-self.side_length, 0.0],
+            [-self.side_length/2.0, -sqrt3/2.0 * self.side_length],
+            [self.side_length/2.0, -sqrt3/2.0 * self.side_length]
+        ])
+        
+        angle_rad = np.radians(self.angle_degrees)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        self.vertices = rotated_vertices + np.array([self.center_x, self.center_y])
+        
+    def to_polygon(self):
+        """Convert to shapely polygon"""
+        return Polygon(self.vertices)
+    
+    def get_bounding_box(self):
+        """Get axis-aligned bounding box"""
+        xs = self.vertices[:, 0]
+        ys = self.vertices[:, 1]
+        return np.min(xs), np.max(xs), np.min(ys), np.max(ys)
+
+class GravityHexagonPacker:
+    def __init__(self, n_hexagons=11, hex_side_length=1.0):
+        self.n_hexagons = n_hexagons
+        self.hex_side_length = hex_side_length
+        self.hexagons = []
+        self.outer_radius = 10.0
+        self.gravity_strength = 0.5
+        self.repulsion_strength = 1.0
+        self.time_step = 0.1
+    
+    def create_initial_layout(self):
+        """Create initial configuration based on good hexagonal packing"""
+        # Start with a central hexagon
+        hexagons = [Hexagon(0.0, 0.0, 0.0)]
+        
+        # Place 6 surrounding hexagons in first ring
+        ring_positions = [(2.0, 0.0), (1.0, np.sqrt(3)), (-1.0, np.sqrt(3)), 
+                         (-2.0, 0.0), (-1.0, -np.sqrt(3)), (1.0, -np.sqrt(3))]
+        for x, y in ring_positions:
+            hexagons.append(Hexagon(x, y, 0.0))
+        
+        # Place additional hexagons in second ring
+        ring2_positions = [(3.0, np.sqrt(3)), (0.0, 2.0*np.sqrt(3)), 
+                          (-3.0, np.sqrt(3)), (-3.0, -np.sqrt(3)), 
+                          (0.0, -2.0*np.sqrt(3)), (3.0, -np.sqrt(3))]
+        for x, y in ring2_positions[:5]:  # Only 5 since we have 11 total
+            hexagons.append(Hexagon(x, y, 0.0))
+        
+        # Add one more hexagon to make 11 total
+        hexagons.append(Hexagon(0.0, -2.0*np.sqrt(3), 0.0))
+        
+        return hexagons
+    
+    def calculate_forces(self, hexagons):
+        """Calculate repulsive forces between hexagons and attractive forces to boundaries"""
+        forces = np.zeros((len(hexagons), 2))  # (dx, dy) for each hexagon
+        
+        # Repulsive forces between hexagons
+        for i in range(len(hexagons)):
+            for j in range(i+1, len(hexagons)):
+                h1 = hexagons[i]
+                h2 = hexagons[j]
+                
+                # Calculate center distance
+                dx = h2.center_x - h1.center_x
+                dy = h2.center_y - h1.center_y
+                distance = np.sqrt(dx*dx + dy*dy)
+                
+                if distance > 0.01:  # Avoid division by zero
+                    # Repulsion force (inverse square law)
+                    force_magnitude = self.repulsion_strength / (distance * distance)
+                    forces[i][0] += force_magnitude * dx / distance
+                    forces[i][1] += force_magnitude * dy / distance
+                    forces[j][0] -= force_magnitude * dx / distance
+                    forces[j][1] -= force_magnitude * dy / distance
+        
+        # Attractive forces to outer boundary (gravitational pull)
+        outer_radius = self.outer_radius
+        for i, hexagon in enumerate(hexagons):
+            dx = hexagon.center_x
+            dy = hexagon.center_y
+            distance = np.sqrt(dx*dx + dy*dy)
+            
+            if distance > 0.01:
+                # Pull toward center with decreasing strength
+                force_magnitude = self.gravity_strength * (1.0 / (distance + 0.1))
+                forces[i][0] -= force_magnitude * dx / distance
+                forces[i][1] -= force_magnitude * dy / distance
+        
+        return forces
+    
+    def update_positions(self, hexagons, forces):
+        """Update hexagon positions based on calculated forces"""
+        for i, hexagon in enumerate(hexagons):
+            # Apply forces
+            hexagon.center_x += forces[i][0] * self.time_step
+            hexagon.center_y += forces[i][1] * self.time_step
+            
+            # Update vertices cache
+            hexagon._update_vertices()
+    
+    def check_overlap(self, hexagons):
+        """Fast overlap checking using spatial indexing"""
+        # Simple pairwise overlap check for now (more sophisticated version could use spatial trees)
+        for i in range(len(hexagons)):
+            for j in range(i+1, len(hexagons)):
+                h1 = hexagons[i]
+                h2 = hexagons[j]
+                
+                # Quick bounding box check first
+                x1_min, x1_max, y1_min, y1_max = h1.get_bounding_box()
+                x2_min, x2_max, y2_min, y2_max = h2.get_bounding_box()
+                
+                if (x1_max < x2_min or x2_max < x1_min or 
+                    y1_max < y2_min or y2_max < y1_min):
+                    continue  # No overlap possible
+                
+                # Detailed overlap check
+                poly1 = h1.to_polygon()
+                poly2 = h2.to_polygon()
+                if poly1.intersects(poly2):
+                    return True
+        return False
+    
+    def check_containment(self, hexagons, outer_radius):
+        """Check if all hexagons are within outer hexagon"""
+        # Create outer hexagon
+        outer_hex = Hexagon(0.0, 0.0, 0.0, outer_radius)
+        outer_polygon = outer_hex.to_polygon()
+        
+        for hexagon in hexagons:
+            hex_polygon = hexagon.to_polygon()
+            if not outer_polygon.contains(hex_polygon):
+                return False
+        return True
+    
+    def compute_outer_radius(self, hexagons):
+        """Compute minimum outer radius needed to contain all hexagons"""
+        max_dist = 0.0
+        for hexagon in hexagons:
+            # Calculate distance from origin to furthest vertex
+            for vertex in hexagon.vertices:
+                dist = np.sqrt(vertex[0]**2 + vertex[1]**2)
+                max_dist = max(max_dist, dist)
+        return max_dist * 1.1  # Safety margin
+    
+    def simulate_gravity(self, max_iterations=1000, tolerance=1e-6):
+        """Run gravity-based optimization"""
+        self.hexagons = self.create_initial_layout()
+        previous_total_force = float('inf')
+        
+        for iteration in range(max_iterations):
+            # Calculate forces
+            forces = self.calculate_forces(self.hexagons)
+            
+            # Calculate total force magnitude
+            total_force = sum(np.sqrt(f[0]**2 + f[1]**2) for f in forces)
+            
+            # Check for convergence
+            if abs(previous_total_force - total_force) < tolerance:
+                break
+            previous_total_force = total_force
+            
+            # Update positions
+            self.update_positions(self.hexagons, forces)
+            
+            # Adjust time step adaptively
+            if iteration > 10:
+                self.time_step *= 0.999  # Gradually decrease time step
+        
+        # Refine through local optimization
+        return self.refine_solution()
+    
+    def refine_solution(self):
+        """Use local optimization to improve final solution"""
+        # Simple local search: adjust positions iteratively
+        best_hexagons = self.hexagons[:]
+        best_radius = self.compute_outer_radius(best_hexagons)
+        
+        # Try slight perturbations
+        for _ in range(100):
+            # Pick a random hexagon to perturb
+            idx = np.random.randint(len(best_hexagons))
+            old_hex = best_hexagons[idx]
+            
+            # Slight perturbation
+            new_hex = Hexagon(
+                old_hex.center_x + np.random.normal(0, 0.05),
+                old_hex.center_y + np.random.normal(0, 0.05),
+                old_hex.angle_degrees,
+                old_hex.side_length
+            )
+            
+            # Replace and check
+            temp_hexagons = best_hexagons[:]
+            temp_hexagons[idx] = new_hex
+            
+            if not self.check_overlap(temp_hexagons):
+                new_radius = self.compute_outer_radius(temp_hexagons)
+                if new_radius < best_radius:
+                    best_hexagons = temp_hexagons
+                    best_radius = new_radius
+        
+        self.hexagons = best_hexagons
+        self.outer_radius = best_radius
+        return best_hexagons
+    
+    def evaluate_fitness(self, hexagons):
+        """Evaluate fitness of current configuration"""
+        if self.check_overlap(hexagons):
+            return -np.inf  # Penalty for overlaps
+        
+        if not self.check_containment(hexagons, self.outer_radius):
+            return -np.inf  # Penalty for containment violation
+        
+        # Return inverse of outer radius (maximize 1/outer_radius)
+        return 1.0 / self.outer_radius
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Initialize gravity-based packer
+        packer = GravityHexagonPacker(n_hexagons=11, hex_side_length=1.0)
+        
+        # Run gravity simulation
+        hexagons = packer.simulate_gravity(max_iterations=500)
+        
+        # Convert to required format
+        inner_hex_data = np.array([
+            [h.center_x, h.center_y, h.angle_degrees] for h in hexagons
+        ])
+        
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+        outer_hex_side_length = packer.outer_radius
+        
+        # Validate result
+        if packer.check_overlap(hexagons):
+            print("Warning: Overlapping hexagons detected!")
+        if not packer.check_containment(hexagons, outer_hex_side_length):
+            print("Warning: Hexagons not contained in outer hexagon!")
+            
+    except Exception as e:
+        print(f"Gravity simulation failed: {e}")
+        # Fallback to original configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],        # center
+            [-2.5, 0, 0],     # left
+            [2.5, 0, 0],      # right
+            [-1.25, 2.17, 0], # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],# bottom-left
+            [1.25, -2.17, 0], # bottom-right
+            [-3.75, 2.17, 0], # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],# far bottom-left
+            [3.75, -2.17, 0], # far bottom-right
+        ])
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+        outer_hex_side_length = 8.0  # large enough to contain all inner hexagons
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

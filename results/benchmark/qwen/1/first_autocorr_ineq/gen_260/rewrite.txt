@@ -1,0 +1,462 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import random
+from typing import List, Tuple
+import time
+from collections import defaultdict
+from joblib import Parallel, delayed
+
+# Fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+class FastAutocorrelationEvaluator:
+    """Efficient evaluator for autocorrelation constants using FFT with caching."""
+
+    def __init__(self, cache_size: int = 512):
+        self._cache = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_size = cache_size
+
+    def clear_cache(self):
+        """Clear the evaluation cache."""
+        self._cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    def _get_cache_key(self, sequence: List[float]) -> tuple:
+        """Generate a hashable cache key with rounding to avoid FP precision issues."""
+        rounded_seq = tuple(round(x, 8) for x in sequence)
+        return rounded_seq
+
+    def evaluate(self, sequence: List[float]) -> Tuple[float, float]:
+        """
+        Computes the autocorrelation constant C1 and its reciprocal 1/C1.
+        Uses caching and FFT convolution for efficiency.
+        """
+        key = self._get_cache_key(sequence)
+
+        if key in self._cache:
+            self._cache_hits += 1
+            return self._cache[key]
+
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= self._cache_size:
+            oldest_key = next(iter(self._cache))
+            del self._cache[oldest_key]
+
+        self._cache_misses += 1
+
+        if not sequence or sum(sequence) < 0.01:
+            result = (float('inf'), 0.0)
+            self._cache[key] = result
+            return result
+
+        n = len(sequence)
+        # Use FFT-based convolution for efficiency O(n log n)
+        conv = fftconvolve(sequence, sequence, mode='full')
+        max_conv = np.max(conv)
+        sum_seq = sum(sequence)
+
+        if sum_seq == 0:
+            result = (float('inf'), 0.0)
+            self._cache[key] = result
+            return result
+
+        c1 = 2 * n * max_conv / (sum_seq ** 2)
+        inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+
+        result = (c1, inv_c1)
+        self._cache[key] = result
+        return result
+
+# Global evaluator instance
+_evaluator = FastAutocorrelationEvaluator()
+
+def compute_autocorrelation_constant(sequence: List[float]) -> Tuple[float, float]:
+    """Compute C1 and 1/C1 using global cached evaluator."""
+    return _evaluator.evaluate(sequence)
+
+def compute_fitness_parallel(seqs: List[List[float]]) -> List[float]:
+    """Compute fitness scores for a batch of sequences in parallel."""
+    return Parallel(n_jobs=-1, backend='threading')(delayed(lambda s: compute_autocorrelation_constant(s)[1])(seq) for seq in seqs)
+
+def generate_pattern_aware_sequence(length: int) -> List[float]:
+    """Generate a sequence that incorporates known good patterns."""
+    # Create a base pattern with exponentially decaying peaks
+    sequence = [0.0] * length
+    num_peaks = max(2, min(15, length // 50))
+
+    # Place peaks with exponentially decaying heights
+    for i in range(num_peaks):
+        pos = random.randint(0, length - 1)
+        height = random.uniform(50.0, 150.0) * (0.8 ** i)
+        sequence[pos] = max(0.01, height)
+
+    # Smooth the sequence using moving average
+    smoothed = sequence.copy()
+    window_size = max(3, length // 100)
+    for i in range(len(sequence)):
+        start = max(0, i - window_size // 2)
+        end = min(len(sequence), i + window_size // 2 + 1)
+        smoothed[i] = np.mean(sequence[start:end])
+
+    # Ensure all values are positive
+    sequence = [max(0.01, x) for x in smoothed]
+    return sequence
+
+def generate_step_sequence(length: int, num_steps: int = None) -> List[float]:
+    """Generate a step function sequence with random heights."""
+    if num_steps is None:
+        num_steps = max(2, min(20, length // 10))
+    step_positions = sorted(random.sample(range(length), num_steps))
+    step_heights = [random.uniform(10.0, 100.0) for _ in range(num_steps)]
+
+    sequence = [0.0] * length
+    for i, (pos, height) in enumerate(zip(step_positions, step_heights)):
+        if i < len(step_positions) - 1:
+            end_pos = step_positions[i+1]
+        else:
+            end_pos = length
+        sequence[pos:end_pos] = [height] * (end_pos - pos)
+    return sequence
+
+def generate_diverse_population(population_size: int, length_range=(100, 1000)) -> List[List[float]]:
+    """Generate a diverse initial population."""
+    population = []
+
+    # Add pattern-aware examples
+    for _ in range(population_size // 4):
+        n = random.randint(*length_range)
+        population.append(generate_pattern_aware_sequence(n))
+
+    # Add step-function examples
+    for _ in range(population_size // 4):
+        n = random.randint(*length_range)
+        population.append(generate_step_sequence(n))
+
+    # Add Gaussian examples
+    for _ in range(population_size // 4):
+        n = random.randint(*length_range)
+        sequence = [random.gauss(50.0, 20.0) for _ in range(n)]
+        population.append([max(0.01, x) for x in sequence])
+
+    # Fill remaining with uniform random
+    while len(population) < population_size:
+        n = random.randint(*length_range)
+        sequence = [random.uniform(0.1, 100.0) for _ in range(n)]
+        population.append(sequence)
+
+    return population
+
+def mutate_sequence(sequence: List[float], generation: int,
+                   population_size: int, diversity_factor: float = 1.0) -> List[float]:
+    """Apply adaptive mutation with enhanced perturbation."""
+    mutated = sequence.copy()
+
+    # Adaptive mutation rate
+    base_mutation_rate = 0.3 * (1 - generation / (population_size * 2))
+    mutation_rate = max(0.05, base_mutation_rate * diversity_factor)
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply various types of noise based on position
+            if i % 5 == 0:  # Occasional large perturbations
+                noise = random.gauss(0, 0.5 * mutated[i])
+            elif i % 3 == 0:  # Moderate change
+                noise = random.gauss(0, 0.2 * mutated[i])
+            else:  # Small change
+                noise = random.gauss(0, 0.05 * mutated[i])
+            mutated[i] = max(0.01, mutated[i] + noise)
+
+    return mutated
+
+def crossover_sequences(seq1: List[float], seq2: List[float]) -> List[float]:
+    """Perform crossover with enhanced structure preservation."""
+    min_len = min(len(seq1), len(seq2))
+    if min_len == 0:
+        return seq1 if seq1 else seq2
+
+    # Multiple crossover points with preference for preserving structure
+    num_crossovers = min(5, min_len // 10)
+    crossover_points = sorted(random.sample(range(1, min_len), num_crossovers))
+
+    child = seq1.copy()
+    current_parent = seq1
+
+    # Alternate between parents based on crossover points
+    for i in range(min_len):
+        if i in crossover_points:
+            current_parent = seq2 if current_parent is seq1 else seq1
+        child[i] = current_parent[i]
+
+    # Apply smoothing to reduce sharp transitions
+    window_size = max(3, min_len // 50)
+    smoothed_child = child.copy()
+    for i in range(len(child)):
+        start = max(0, i - window_size // 2)
+        end = min(len(child), i + window_size // 2 + 1)
+        smoothed_child[i] = np.mean(child[start:end])
+
+    # Ensure minimum positive value for all elements
+    child = [max(0.01, x) for x in smoothed_child]
+    return child
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    if n == 0:
+        return None
+
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+
+    # Build constraint matrix for convolution
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints
+    a_ub_nonneg = -np.eye(n)
+    b_ub_nonneg = np.zeros(n)
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    try:
+        # Use high accuracy solver
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        if result.success:
+            g_sequence = result.x
+            return g_sequence
+        else:
+            return None
+    except Exception:
+        # Fallback if optimization fails
+        return None
+
+def gradient_improve_sequence(sequence: list[float], step_size: float = 0.02) -> list[float]:
+    """Apply gradient-like improvement with smoothing."""
+    improved = sequence.copy()
+
+    # Apply smoothing with weighted averages
+    for i in range(len(improved)):
+        neighbors = []
+        if i > 0:
+            neighbors.append(improved[i-1])
+        if i < len(improved) - 1:
+            neighbors.append(improved[i+1])
+
+        if neighbors:
+            avg_neighbor = np.mean(neighbors)
+            improved[i] = improved[i] * (1 - step_size) + avg_neighbor * step_size
+
+    # Apply additional local adjustments
+    for i in range(len(improved)):
+        if i > 0 and i < len(improved) - 1:
+            # Adjust based on local curvature
+            curvature = improved[i-1] - 2 * improved[i] + improved[i+1]
+            improved[i] += 0.01 * curvature
+
+    return improved
+
+def local_search_improvement(sequence: list[float]) -> list[float]:
+    """Enhanced local search combining multiple strategies."""
+    # Strategy 1: Gradient-based improvement
+    improved1 = gradient_improve_sequence(sequence, step_size=0.01)
+    _, inv_c1_1 = compute_autocorrelation_constant(improved1)
+
+    # Strategy 2: Perturbation with L-BFGS optimization
+    perturbed = sequence.copy()
+    for i in range(len(perturbed)):
+        if random.random() < 0.1:  # Small chance to perturb
+            perturbed[i] *= random.uniform(0.9, 1.1)
+    perturbed = [max(0.01, x) for x in perturbed]
+
+    # Try L-BFGS optimization on perturbed version
+    improved2 = perturbed
+    inv_c1_2 = 0.0
+    try:
+        def objective(x):
+            _, inv_c1 = compute_autocorrelation_constant(x)
+            return -inv_c1  # Minimize negative to maximize original
+
+        bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+        result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds)
+        if result.success:
+            improved2 = result.x.tolist()
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+    except:
+        pass  # Fall back to perturbed if L-BFGS fails
+
+    # Strategy 3: Nelder-Mead optimization on the same perturbed version
+    improved3 = perturbed
+    inv_c1_3 = 0.0
+    try:
+        # Even if L-BFGS succeeded, try Nelder-Mead as alternative
+        result_nm = optimize.minimize(objective, perturbed, method='Nelder-Mead')
+        if result_nm.success:
+            improved3 = result_nm.x.tolist()
+            _, inv_c1_3 = compute_autocorrelation_constant(improved3)
+    except:
+        pass  # Fall back if Nelder-Mead fails
+
+    # Choose the best result among all strategies
+    _, inv_c1_original = compute_autocorrelation_constant(sequence)
+    best_improved = sequence
+    best_inv_c1 = inv_c1_original
+
+    if inv_c1_1 > best_inv_c1:
+        best_improved = improved1
+        best_inv_c1 = inv_c1_1
+
+    if inv_c1_2 > best_inv_c1:
+        best_improved = improved2
+        best_inv_c1 = inv_c1_2
+
+    if inv_c1_3 > best_inv_c1:
+        best_improved = improved3
+        best_inv_c1 = inv_c1_3
+
+    return best_improved
+
+def optimize_step_function_evolutionary(max_time_seconds=170) -> List[float]:
+    """
+    Evolutionary optimization with adaptive strategies to find optimal step function that maximizes 1/C1.
+    """
+    start_time = time.time()
+    _evaluator.clear_cache()
+
+    # Initialize population with diverse strategies
+    population_size = 30
+    population = generate_diverse_population(population_size, (100, 1000))
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 40
+    diversity_threshold = 0.05  # Minimum diversity to maintain exploration
+
+    # Track best sequences for pattern learning
+    best_sequences_history = []
+    pattern_memory = defaultdict(list)
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual in parallel
+        fitness_scores = compute_fitness_parallel(population)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            best_sequences_history.append(best_sequence.copy())
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Apply enhanced local search to the best sequence
+        if best_sequence is not None and current_best_inv_c1 > 0.5:
+            local_search_result = local_search_improvement(best_sequence)
+            _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+            if local_inv_c1 > best_inv_c1:
+                best_inv_c1 = local_inv_c1
+                best_sequence = local_search_result
+                best_sequences_history.append(best_sequence.copy())
+                stagnation_count = 0
+
+        # Calculate population diversity
+        div = 0.0
+        if len(fitness_scores) > 1:
+            div = np.std(fitness_scores) / (np.mean(fitness_scores) + 1e-10)
+
+        # Inject new variation if diversity is too low
+        if div < diversity_threshold and generation > 5:
+            num_new = max(1, population_size // 6)
+            for _ in range(num_new):
+                # Prefer pattern-aware sequences when we have history
+                if len(best_sequences_history) > 0 and random.random() < 0.7:
+                    # Pick a random past good sequence and slightly modify it
+                    past_seq = random.choice(best_sequences_history)
+                    new_seq = mutate_sequence(past_seq, generation, population_size, 1.0)
+                    population[random.randint(0, len(population)-1)] = new_seq
+                else:
+                    new_seq = generate_pattern_aware_sequence(random.randint(100, 1000))
+                    population[random.randint(0, len(population)-1)] = new_seq
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate
+            child = mutate_sequence(child, generation, population_size, div)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+
+        # Early termination if target is reached
+        if best_inv_c1 > 0.6653:  # Benchmark value
+            break
+
+    # Final cleanup and validation
+    if best_sequence is not None and sum(best_sequence) > 0.01:
+        # Normalize sequence to make sure it's valid
+        sum_seq = sum(best_sequence)
+        best_sequence = [x / sum_seq * 100 for x in best_sequence]
+
+    return best_sequence if best_sequence else generate_pattern_aware_sequence(100)
+
+def search_for_best_sequence() -> List[float]:
+    """Main function to search for the best coefficient sequence."""
+    try:
+        # Use evolutionary optimization approach
+        best_sequence = optimize_step_function_evolutionary()
+        return best_sequence
+    except Exception as e:
+        print(f"Optimization failed with error: {e}")
+        # Fallback to simple pattern-aware approach
+        return generate_pattern_aware_sequence(100)
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

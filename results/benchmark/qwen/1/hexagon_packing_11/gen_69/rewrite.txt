@@ -1,0 +1,279 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from itertools import combinations
+
+
+def create_regular_hexagon(center=(0, 0), radius=1, rotation=0):
+    """Create a regular hexagon with given center, radius, and rotation."""
+    angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation)
+    x = center[0] + radius * np.cos(angles)
+    y = center[1] + radius * np.sin(angles)
+    return Polygon(list(zip(x, y)))
+
+
+def check_containment(hexagon, outer_hexagon):
+    """Check if hexagon is fully contained within outer_hexagon."""
+    return outer_hexagon.contains(hexagon)
+
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap."""
+    return hex1.intersects(hex2)
+
+
+def evaluate_solution(params):
+    """
+    Evaluate a solution for the hexagon packing problem.
+
+    params: array of shape (34,) - [x1,y1,a1,x2,y2,a2,...,x11,y11,a11,R]
+    Where (xi,yi,ai) are positions and angles of inner hexagons, and R is outer hexagon radius.
+    """
+    # Parse parameters
+    inner_positions_angles = params[:-1].reshape(-1, 3)
+    outer_radius = params[-1]
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(11):
+        x, y, angle = inner_positions_angles[i]
+        hexagon = create_regular_hexagon((x, y), 1, angle)
+        inner_hexagons.append(hexagon)
+
+    # Create outer hexagon
+    outer_hexagon = create_regular_hexagon((0, 0), outer_radius, 0)
+
+    # Check containment and overlap
+    total_penalty = 0
+
+    # Check containment - if any inner hexagon is not contained, add large penalty
+    for hexagon in inner_hexagons:
+        if not check_containment(hexagon, outer_hexagon):
+            total_penalty += 1000000  # Large penalty for containment violation
+
+    # Check overlaps - if any pair overlaps, add penalty
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                total_penalty += 1000000  # Large penalty for overlap
+
+    # If any violations, return very bad fitness
+    if total_penalty > 0:
+        return total_penalty + 1e6
+
+    # Otherwise, try to minimize the outer hexagon size (maximize 1/outer_radius)
+    # Return negative because we want to maximize 1/outer_radius
+    return -1.0 / outer_radius
+
+
+def generate_diverse_initial_populations():
+    """Generate multiple diverse initial population configurations."""
+    populations = []
+    
+    # Configuration 1: Hexagonal lattice arrangement
+    base_config = [
+        (0, 0, 0),  # center
+        (-2.5, 0, 0),  # left
+        (2.5, 0, 0),  # right
+        (-1.25, 2.17, 0),  # top-left
+        (1.25, 2.17, 0),  # top-right
+        (-1.25, -2.17, 0),  # bottom-left
+        (1.25, -2.17, 0),  # bottom-right
+        (-3.75, 2.17, 0),  # far top-left
+        (3.75, 2.17, 0),  # far top-right
+        (-3.75, -2.17, 0),  # far bottom-left
+        (3.75, -2.17, 0),  # far bottom-right
+    ]
+    
+    # Configuration 2: Spiral pattern
+    spiral_config = [
+        (0, 0, 0),
+        (2, 0, 0),
+        (1, 1.732, 0),
+        (-1, 1.732, 0),
+        (-2, 0, 0),
+        (-1, -1.732, 0),
+        (1, -1.732, 0),
+        (3, 0, 0),
+        (2, 2.17, 0),
+        (-2, 2.17, 0),
+        (-3, 0, 0)
+    ]
+    
+    # Configuration 3: Clustered arrangement
+    cluster_config = [
+        (0, 0, 0),
+        (1.5, 0, 0),
+        (-1.5, 0, 0),
+        (0, 1.5, 0),
+        (0, -1.5, 0),
+        (1.5, 1.5, 0),
+        (-1.5, 1.5, 0),
+        (1.5, -1.5, 0),
+        (-1.5, -1.5, 0),
+        (3, 0, 0),
+        (0, 3, 0)
+    ]
+    
+    # Configuration 4: Cross pattern
+    cross_config = [
+        (0, 0, 0),
+        (0, 2.5, 0),
+        (0, -2.5, 0),
+        (2.5, 0, 0),
+        (-2.5, 0, 0),
+        (1.25, 2.17, 0),
+        (-1.25, 2.17, 0),
+        (1.25, -2.17, 0),
+        (-1.25, -2.17, 0),
+        (3.75, 0, 0),
+        (0, 3.75, 0)
+    ]
+    
+    # Configuration 5: Random-like but structured
+    random_like_config = [
+        (0, 0, 0),
+        (2, 1, 30),
+        (-1.5, 2, 60),
+        (-2.5, -1, 90),
+        (1, -2, 120),
+        (3, 1.5, 150),
+        (-2, 1.5, 180),
+        (1.5, -2.5, 210),
+        (-1.5, -2.5, 240),
+        (3.5, -1, 270),
+        (0, 3.5, 300)
+    ]
+    
+    configs = [base_config, spiral_config, cluster_config, cross_config, random_like_config]
+    
+    for config in configs:
+        guess = []
+        for x, y, angle in config:
+            guess.extend([x, y, angle])
+        guess.append(6.0)  # Initial outer radius
+        populations.append(np.array(guess))
+    
+    return populations
+
+
+def adaptive_mutation_func(generation, max_generations, initial_rate=0.8, final_rate=0.1):
+    """
+    Adaptive mutation rate scheduler.
+    Starts high for exploration, decreases for exploitation.
+    """
+    # Linear decay from initial_rate to final_rate
+    return initial_rate - (initial_rate - final_rate) * (generation / max_generations)
+
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses optimization to find the best arrangement.
+
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Set up bounds for optimization
+    # Each inner hexagon has (x, y, angle) - 3 parameters each
+    # Outer hexagon has radius R - 1 parameter
+    # Total parameters: 3*11 + 1 = 34
+
+    # Bounds for positions (x, y): -10 to 10
+    pos_bounds = [(-10, 10)] * 22  # 11 hexagons * 2 positions each
+
+    # Bounds for angles: 0 to 360 degrees
+    angle_bounds = [(0, 360)] * 11
+
+    # Bounds for outer hexagon radius: 1 to 20 (reasonable range)
+    radius_bound = [(1, 20)]
+
+    # Combine all bounds
+    bounds = pos_bounds + angle_bounds + radius_bound
+
+    # Generate diverse initial populations
+    initial_populations = generate_diverse_initial_populations()
+    
+    best_result = None
+    best_fitness = float('inf')
+    
+    # Time limit enforcement
+    start_time = time.time()
+    
+    # Try each initial population
+    for i, initial_guess in enumerate(initial_populations):
+        if time.time() - start_time > 170:  # Leave some buffer
+            break
+            
+        # Run optimization with adaptive mutation
+        result = differential_evolution(
+            evaluate_solution,
+            bounds,
+            maxiter=300,
+            popsize=20,
+            seed=42+i,  # Different seed for each run
+            callback=lambda x, convergence: print(f"Population {i+1}: Best fitness: {-1.0/x[-1]:.6f} after {time.time()-start_time:.2f}s") if time.time() - start_time < 175 else None,
+            disp=False,
+            mutation=(0.5, 1.0)  # Default mutation range
+        )
+        
+        # Update best result if this one is better
+        if result.fun < best_fitness:
+            best_fitness = result.fun
+            best_result = result
+    
+    # If we still don't have a good result, do a fallback optimization
+    if best_result is None:
+        # Use default initial guess
+        initial_guess = []
+        initial_guess.extend([0, 0, 0])  # Center
+        hex_coords = [
+            (1.732, 0, 0),
+            (-1.732, 0, 0),
+            (0.866, 1.5, 0),
+            (-0.866, 1.5, 0),
+            (0.866, -1.5, 0),
+            (-0.866, -1.5, 0),
+            (2.598, 1.5, 0),
+            (-2.598, 1.5, 0),
+            (2.598, -1.5, 0),
+            (-2.598, -1.5, 0),
+            (0, 3, 0)
+        ]
+        for x, y, angle in hex_coords:
+            initial_guess.extend([x, y, angle])
+        initial_guess.append(5.0)
+        
+        result = differential_evolution(
+            evaluate_solution,
+            bounds,
+            maxiter=300,
+            popsize=20,
+            seed=42,
+            callback=lambda x, convergence: print(f"Fallback: Best fitness: {-1.0/x[-1]:.6f} after {time.time()-start_time:.2f}s") if time.time() - start_time < 175 else None,
+            disp=False,
+            mutation=(0.5, 1.0)
+        )
+        best_result = result
+    
+    # Extract results
+    best_params = best_result.x
+    inner_positions_angles = best_params[:-1].reshape(-1, 3)
+    outer_radius = best_params[-1]
+
+    # Convert to desired output format
+    inner_hex_data = inner_positions_angles.copy()
+
+    # Create outer hexagon data
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+
+    return inner_hex_data, outer_hex_data, outer_radius
+
+
+# EVOLVE-BLOCK-END

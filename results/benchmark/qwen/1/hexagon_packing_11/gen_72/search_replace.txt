@@ -1,0 +1,199 @@
+<NAME>
+adaptive_mutation_scheduling
+</NAME>
+
+<DESCRIPTION>
+I'll implement adaptive mutation rate scheduling in the differential evolution algorithm to improve convergence. The current implementation uses a basic differential evolution approach, but I can enhance it by implementing a time-varying mutation rate that starts high for exploration and decreases over generations to promote exploitation. This follows successful patterns from evolutionary algorithms that avoid premature convergence through dynamic parameter adjustment.
+
+This change modifies the optimization engine to use an adaptive mutation rate that decreases from 0.8 to 0.1 over the course of evolution, allowing for better exploration in early generations and focused exploitation in later generations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Main optimization function with multi-start approach"""
+        # Generate multiple initial populations
+        initial_populations = self.generate_initial_population(5)
+
+        best_result = None
+        best_score = float('inf')
+
+        # Run optimization from multiple starting points
+        for i, initial_solution in enumerate(initial_populations):
+            try:
+                logger.info(f"Starting optimization run {i+1}/{len(initial_populations)}")
+
+                # Set bounds for optimization
+                bounds = []
+                # Position bounds
+                for _ in range(22):
+                    bounds.append((-10.0, 10.0))  # X and Y coordinates
+                # Angle bounds
+                for _ in range(self.num_hexagons):
+                    bounds.append((0.0, 360.0))   # Rotation angles
+
+                # Run differential evolution
+                result = differential_evolution(
+                    lambda sol: self.evaluate_solution(sol, use_spatial_index=(i < 3)),  # Use spatial index for first 3 starts
+                    bounds,
+                    maxiter=self.max_iterations,
+                    popsize=self.population_size,
+                    seed=self.seed_base + i,  # Different seed for each start
+                    disp=False,
+                    tol=1e-6
+                )
+
+                # Evaluate final result
+                final_score = self.evaluate_solution(result.x, use_spatial_index=False)
+
+                if final_score < best_score:
+                    best_score = final_score
+                    best_result = result
+
+                logger.info(f"Run {i+1} completed with score: {final_score}")
+
+            except Exception as e:
+                logger.error(f"Start {i} failed: {e}")
+                continue
+
+        if best_result is None:
+            # Fallback to simple solution
+            raise RuntimeError("All optimization attempts failed")
+
+        # Extract final solution
+        final_positions = best_result.x[:22].reshape(-1, 2)
+        final_angles = best_result.x[22:]
+
+        # Refine the solution with local optimization
+        refined_positions, refined_angles = self.local_refinement(final_positions, final_angles)
+
+        return refined_positions, refined_angles
+=======
+    def optimize(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Main optimization function with multi-start approach"""
+        # Generate multiple initial populations
+        initial_populations = self.generate_initial_population(5)
+
+        best_result = None
+        best_score = float('inf')
+
+        # Run optimization from multiple starting points
+        for i, initial_solution in enumerate(initial_populations):
+            try:
+                logger.info(f"Starting optimization run {i+1}/{len(initial_populations)}")
+
+                # Set bounds for optimization
+                bounds = []
+                # Position bounds
+                for _ in range(22):
+                    bounds.append((-10.0, 10.0))  # X and Y coordinates
+                # Angle bounds
+                for _ in range(self.num_hexagons):
+                    bounds.append((0.0, 360.0))   # Rotation angles
+
+                # Custom adaptive differential evolution with mutation rate scheduling
+                def adaptive_differential_evolution(func, bounds, maxiter, popsize, seed=None):
+                    """Custom differential evolution with adaptive mutation rate scheduling"""
+                    # Initialize random number generator
+                    rng = np.random.default_rng(seed)
+
+                    # Generate initial population
+                    population = []
+                    for _ in range(popsize):
+                        individual = []
+                        for (min_val, max_val) in bounds:
+                            individual.append(rng.uniform(min_val, max_val))
+                        population.append(individual)
+
+                    # Track best solution
+                    best_individual = None
+                    best_fitness = float('inf')
+
+                    for generation in range(maxiter):
+                        # Adaptive mutation rate: start high (0.8) for exploration, decrease to 0.1
+                        mutation_rate = 0.8 - (0.7 * generation / maxiter)
+
+                        # Evaluate current population
+                        fitnesses = []
+                        for individual in population:
+                            fitness = func(np.array(individual))
+                            fitnesses.append(fitness)
+                            if fitness < best_fitness:
+                                best_fitness = fitness
+                                best_individual = individual[:]
+
+                        # Create new population
+                        new_population = []
+                        for j in range(popsize):
+                            # Select three different individuals
+                            candidates = list(range(popsize))
+                            candidates.remove(j)
+                            selected = rng.choice(candidates, 3, replace=False)
+
+                            # Differential evolution mutation with adaptive rate
+                            mutant = []
+                            for k in range(len(bounds)):
+                                if rng.random() < mutation_rate or generation == 0:
+                                    # Mutation using differential evolution
+                                    mutant.append(population[selected[0]][k] +
+                                                0.8 * (population[selected[1]][k] - population[selected[2]][k]))
+                                else:
+                                    mutant.append(population[j][k])
+
+                                # Ensure bounds are respected
+                                min_val, max_val = bounds[k]
+                                mutant[k] = np.clip(mutant[k], min_val, max_val)
+
+                            # Crossover
+                            trial = []
+                            for k in range(len(bounds)):
+                                if rng.random() < 0.9 or k == 0:  # Keep some randomness
+                                    trial.append(mutant[k])
+                                else:
+                                    trial.append(population[j][k])
+
+                            new_population.append(trial)
+
+                        population = new_population
+
+                    return type('Result', (), {
+                        'x': np.array(best_individual),
+                        'fun': best_fitness
+                    })()
+
+                # Run adaptive differential evolution
+                result = adaptive_differential_evolution(
+                    lambda sol: self.evaluate_solution(sol, use_spatial_index=(i < 3)),  # Use spatial index for first 3 starts
+                    bounds,
+                    maxiter=self.max_iterations,
+                    popsize=self.population_size,
+                    seed=self.seed_base + i  # Different seed for each start
+                )
+
+                # Evaluate final result
+                final_score = self.evaluate_solution(result.x, use_spatial_index=False)
+
+                if final_score < best_score:
+                    best_score = final_score
+                    best_result = result
+
+                logger.info(f"Run {i+1} completed with score: {final_score}")
+
+            except Exception as e:
+                logger.error(f"Start {i} failed: {e}")
+                continue
+
+        if best_result is None:
+            # Fallback to simple solution
+            raise RuntimeError("All optimization attempts failed")
+
+        # Extract final solution
+        final_positions = best_result.x[:22].reshape(-1, 2)
+        final_angles = best_result.x[22:]
+
+        # Refine the solution with local optimization
+        refined_positions, refined_angles = self.local_refinement(final_positions, final_angles)
+
+        return refined_positions, refined_angles
+>>>>>>> REPLACE
+</DIFF>

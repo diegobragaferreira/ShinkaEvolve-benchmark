@@ -1,0 +1,367 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+from typing import List, Tuple
+import time
+import numba
+from numba import jit
+
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """Fast numba-based autoconvolution computation"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_convolution_norms_fast(g_vals):
+    """Fast computation of convolution norms"""
+    n = len(g_vals)
+    l2_sq = 0.0
+    l1 = 0.0
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Fast computation of autoconvolution norms using numba-compiled loop
+    """
+    n = len(f_values)
+    # Pre-allocate convolution result
+    g = np.zeros(2*n - 1)
+
+    # Manual convolution computation for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_values[i] * f_values[j]
+
+    # Extract valid convolution (center part)
+    center = len(g) // 2
+    g_valid = g[center - n + 1:center + n]
+
+    # Compute norms
+    norm_l2_sq = 0.0
+    norm_l1 = 0.0
+    norm_linf = 0.0
+
+    for val in g_valid:
+        norm_l2_sq += val * val
+        norm_l1 += abs(val)
+        if abs(val) > norm_linf:
+            norm_linf = abs(val)
+
+    return norm_l2_sq, norm_l1, norm_linf
+
+@jit(nopython=True)
+def calculate_c2_fast(f_values: np.ndarray) -> float:
+    """Fast calculation of C2 with numerical stability"""
+    norm_l2_sq, norm_l1, norm_linf = compute_autoconvolution_norms_fast(f_values)
+
+    # Avoid division by zero
+    if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+        return 0.0
+
+    c2 = norm_l2_sq / (norm_l1 * norm_linf)
+    return c2
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation:
+    ||g||₂², ||g||₁, ||g||∞ where g = f*f
+    """
+    # Convert to numpy array for efficient computation
+    f = np.array(f_values)
+
+    # Compute autoconvolution g = f * f using fast convolution
+    g = signal.convolve(f, f, mode='full')
+
+    # Only keep the middle portion corresponding to valid convolution
+    center_idx = len(g) // 2
+    half_len = len(f)
+    g = g[center_idx - half_len + 1:center_idx + half_len]
+
+    # Compute norms
+    g_squared = g * g
+    norm_l2_sq = np.sum(g_squared)
+
+    norm_l1 = np.sum(np.abs(g))
+    norm_linf = np.max(np.abs(g))
+
+    return norm_l2_sq, norm_l1, norm_linf
+
+def calculate_c2(f_values: List[float]) -> float:
+    """Calculate C2 value for given step function"""
+    try:
+        norm_l2_sq, norm_l1, norm_linf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if norm_l1 <= 1e-12 or norm_linf <= 1e-12:
+            return 0.0
+
+        c2 = norm_l2_sq / (norm_l1 * norm_linf)
+        return c2
+    except Exception:
+        return 0.0
+
+def generate_multiscale_gaussian_initial_function(size: int) -> List[float]:
+    """Generate an initial function using multi-scale Gaussian pattern construction.
+
+    This creates a structured pattern with multiple Gaussian bumps at different scales
+    to encourage good convolution behavior across various spatial frequencies.
+    """
+    # Create base function with multi-scale Gaussian components
+    f_values = np.zeros(size)
+
+    # Define multiple scales of Gaussian bumps
+    scales = [size // 20, size // 15, size // 10, size // 8]
+    centers = [size // 4, size // 2, 3 * size // 4]
+
+    # Create Gaussian bumps at different scales and positions
+    for scale in scales:
+        for center in centers:
+            # Create Gaussian bump
+            x = np.arange(size)
+            gauss = np.exp(-0.5 * ((x - center) / scale) ** 2)
+            f_values += gauss * np.random.uniform(0.5, 1.5)  # Random amplitude
+
+    # Add some additional structured variation
+    # Create a base pattern that encourages uniformity in convolution
+    base_pattern = np.sin(np.linspace(0, 4*np.pi, size)) * 0.3 + 0.7
+    f_values += base_pattern * 0.5
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to control the overall magnitude
+    total = np.sum(f_values)
+    if total > 0:
+        f_values = f_values / total * 5.0
+
+    return f_values.tolist()
+
+def generate_individual(size: int, method: str = 'uniform') -> List[float]:
+    """Generate a single individual with specified initialization method"""
+    if method == 'uniform':
+        return [random.uniform(0, 1) for _ in range(size)]
+    elif method == 'gaussian':
+        return [max(0, random.gauss(0.5, 0.3)) for _ in range(size)]
+    elif method == 'spike':
+        # Create a spike-like pattern
+        individual = [0.0] * size
+        mid = size // 2
+        individual[mid] = random.uniform(0.5, 1.0)
+        return individual
+    elif method == 'multiscale_gaussian':
+        return generate_multiscale_gaussian_initial_function(size)
+    else:
+        return [random.uniform(0, 1) for _ in range(size)]
+
+def evaluate_fitness_parallel(population: List[List[float]]) -> List[float]:
+    """Parallel evaluation of fitness using numba optimized computation"""
+    fitness = []
+    for individual in population:
+        # Use numba-compiled version for speed
+        f_array = np.array(individual)
+        c2 = calculate_c2_fast(f_array)
+        fitness.append(c2)
+    return fitness
+
+@jit(nopython=True)
+def compute_local_search_step(f_vals: np.ndarray, idx: int, step_size: float) -> Tuple[np.ndarray, float]:
+    """Compute a local search step using numba JIT compilation"""
+    original_val = f_vals[idx]
+    best_val = original_val
+    best_c2 = 0.0
+
+    # Try both directions with the given step size
+    for direction in [-1, 1]:
+        new_val = original_val + direction * step_size
+        if new_val >= 0:
+            test_vals = f_vals.copy()
+            test_vals[idx] = new_val
+            # Compute C2 using fast method
+            c2 = calculate_c2_fast(test_vals)
+            if c2 > best_c2:
+                best_c2 = c2
+                best_val = new_val
+
+    return best_val, best_c2
+
+def adaptive_local_search(f_vals: List[float], max_iterations: int = 20) -> List[float]:
+    """Perform adaptive coordinate-wise local search with JIT acceleration"""
+    current_f_vals = np.array(f_vals)
+    current_c2 = calculate_c2_fast(current_f_vals)
+
+    for iteration in range(max_iterations):
+        improved = False
+        # Try small perturbations to each element
+        for i in range(len(current_f_vals)):
+            # Try different step sizes
+            step_sizes = [0.01, 0.05, 0.1]
+            for step in step_sizes:
+                # Use JIT-compiled local search step
+                new_val, new_c2 = compute_local_search_step(current_f_vals, i, step)
+                if new_c2 > current_c2:
+                    current_c2 = new_c2
+                    current_f_vals[i] = new_val
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+
+    return current_f_vals.tolist()
+
+def mutate_individual(individual: List[float], mutation_rate: float,
+                     mutation_strength: float = 0.1) -> List[float]:
+    """Mutate an individual with given mutation rate and strength"""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Add Gaussian noise with bounded result
+            mutated[i] = max(0, mutated[i] + random.gauss(0, mutation_strength))
+    return mutated
+
+def crossover(parent1: List[float], parent2: List[float],
+             crossover_rate: float = 0.8) -> List[float]:
+    """Single-point crossover between two parents"""
+    if random.random() > crossover_rate:
+        return parent1.copy()
+
+    point = random.randint(1, len(parent1) - 1)
+    child = parent1[:point] + parent2[point:]
+    return child
+
+def tournament_selection(population: List[List[float]], fitness: List[float],
+                         k: int = 3) -> List[float]:
+    """Select individual using tournament selection"""
+    selected_indices = random.sample(range(len(population)), k)
+    best_idx = max(selected_indices, key=lambda i: fitness[i])
+    return population[best_idx]
+
+def advanced_evolutionary_search(max_generations: int,
+                               population_size: int,
+                               individual_size: int,
+                               timeout_seconds: float) -> List[float]:
+    """Advanced evolutionary search with multiple strategies"""
+
+    start_time = time.time()
+
+    # Multiple initialization strategies
+    init_strategies = ['uniform', 'gaussian', 'spike', 'multiscale_gaussian']
+
+    best_c2 = 0.0
+    best_individual = None
+
+    # Try multiple random starts with different initialization strategies
+    for strategy in init_strategies:
+        if time.time() - start_time > timeout_seconds - 5:  # Leave margin
+            break
+
+        # Initialize population with specific strategy
+        population = [generate_individual(individual_size, strategy)
+                     for _ in range(population_size)]
+
+        for gen in range(max_generations):
+            if time.time() - start_time > timeout_seconds - 5:  # Leave margin
+                break
+
+            # Evaluate fitness
+            fitness = evaluate_fitness_parallel(population)
+
+            # Track best solution
+            max_fitness_idx = np.argmax(fitness)
+            current_best_c2 = fitness[max_fitness_idx]
+
+            if current_best_c2 > best_c2:
+                best_c2 = current_best_c2
+                best_individual = population[max_fitness_idx].copy()
+
+            # Evolve population with dynamic parameters
+            mutation_rate = 0.1 + 0.05 * (1 - gen / max_generations)  # Decreasing mutation rate
+            mutation_strength = 0.1 * (1 - gen / max_generations)  # Decreasing strength
+
+            # Sort by fitness (descending)
+            sorted_pairs = sorted(zip(population, fitness), key=lambda x: x[1], reverse=True)
+            elite = [pair[0] for pair in sorted_pairs[:population_size//4]]
+
+            # Generate new population
+            new_population = elite.copy()
+            while len(new_population) < population_size:
+                # Tournament selection
+                parent1 = tournament_selection(population, fitness)
+                parent2 = tournament_selection(population, fitness)
+                child = crossover(parent1, parent2)
+                child = mutate_individual(child, mutation_rate, mutation_strength)
+                new_population.append(child)
+
+            population = new_population
+
+    # Apply final local refinement to the best solution found
+    if best_individual is not None:
+        best_individual = adaptive_local_search(best_individual, max_iterations=15)
+
+    return best_individual if best_individual is not None else generate_individual(individual_size)
+
+def optimized_construct_function() -> List[float]:
+    """Construct step function using advanced evolutionary optimization"""
+    # Set seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Parameters based on time constraints
+    max_generations = 80
+    population_size = 60
+    individual_size = 150  # Reduced size for efficiency
+
+    # Use advanced evolutionary search with timeout
+    try:
+        result = advanced_evolutionary_search(
+            max_generations=max_generations,
+            population_size=population_size,
+            individual_size=individual_size,
+            timeout_seconds=85.0
+        )
+        return result
+    except Exception:
+        # Fallback to simpler approach if optimization fails
+        return generate_individual(100, 'uniform')
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value."""
+    # Try evolutionary optimization first
+    start_time = time.time()
+    try:
+        result = optimized_construct_function()
+        elapsed = time.time() - start_time
+        if elapsed < 85:  # Leave some margin for final calculations
+            return result
+    except Exception:
+        pass
+
+    # Fallback to simpler approach if optimization fails or times out
+    return [random.uniform(0, 1) for _ in range(100)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

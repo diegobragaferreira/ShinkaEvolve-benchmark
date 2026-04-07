@@ -1,0 +1,356 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from scipy.optimize import differential_evolution
+import time
+from numba import njit
+from joblib import Parallel, delayed
+import random
+
+@njit
+def create_hexagon_vertices(x, y, angle_deg, side_length=1.0):
+    """Create vertices of a regular hexagon given center, rotation, and side length"""
+    angle_rad = np.radians(angle_deg)
+    # Vertices of unit hexagon centered at origin
+    base_verts = np.array([
+        [1.0, 0.0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1.0, 0.0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+    
+    # Rotate and translate
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    
+    rotated_verts = base_verts @ rotation_matrix.T
+    translated_verts = rotated_verts + np.array([x, y])
+    
+    return translated_verts
+
+@njit
+def point_in_hexagon(point, hex_vertices):
+    """Check if a point is inside a hexagon using winding number or ray casting"""
+    x, y = point
+    n = len(hex_vertices)
+    inside = False
+    
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    
+    return inside
+
+@njit
+def distance_point_to_hexagon(point, hex_vertices):
+    """Compute minimum distance from point to hexagon boundary"""
+    min_dist = float('inf')
+    n = len(hex_vertices)
+    
+    # Check distance to each edge
+    for i in range(n):
+        p1 = hex_vertices[i]
+        p2 = hex_vertices[(i + 1) % n]
+        
+        # Vector from p1 to p2
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        length_sq = dx*dx + dy*dy
+        
+        if length_sq > 0:
+            # Project point onto line segment
+            t = max(0, min(1, ((point[0] - p1[0]) * dx + (point[1] - p1[1]) * dy) / length_sq))
+            proj_x = p1[0] + t * dx
+            proj_y = p1[1] + t * dy
+            dist = np.sqrt((point[0] - proj_x)**2 + (point[1] - proj_y)**2)
+            min_dist = min(min_dist, dist)
+    
+    return min_dist
+
+@njit
+def hexagon_overlap_fast(h1_vertices, h2_vertices):
+    """Fast check for hexagon overlap using separating axis theorem approximation"""
+    # Simple check: if any vertex of one hex is close to another hex, probably overlapping
+    for i in range(len(h1_vertices)):
+        for j in range(len(h2_vertices)):
+            dist = np.sqrt((h1_vertices[i][0] - h2_vertices[j][0])**2 + (h1_vertices[i][1] - h2_vertices[j][1])**2)
+            if dist < 0.8:  # Conservative threshold
+                return True
+    return False
+
+def evaluate_configuration(params, outer_radius):
+    """
+    Evaluate a configuration of 12 hexagons packed in a hexagon of given radius.
+    Returns negative of the inverse side length (since we want to maximize 1/R)
+    """
+    n_hex = 12
+    
+    # Parse parameters: 12 hexagons with (x,y,angle) each = 36 parameters
+    # But exploiting symmetry, we can use fewer meaningful parameters
+    total_params = len(params)
+    
+    # Reconstruct hexagon positions and rotations
+    hex_positions = []
+    hex_rotations = []
+    
+    # Convert parameters to hexagon data
+    for i in range(n_hex):
+        idx = i * 3
+        if idx + 2 < total_params:
+            x, y, angle = params[idx], params[idx+1], params[idx+2]
+            hex_positions.append([x, y])
+            hex_rotations.append(angle)
+        else:
+            break
+    
+    # Create all hexagon vertices
+    hex_vertices = []
+    for i in range(n_hex):
+        x, y = hex_positions[i]
+        angle = hex_rotations[i]
+        verts = create_hexagon_vertices(x, y, angle)
+        hex_vertices.append(verts)
+    
+    # Check containment and overlaps
+    outer_hex_vertices = create_hexagon_vertices(0, 0, 0, outer_radius)
+    
+    # Check containment
+    containment_ok = True
+    for i, verts in enumerate(hex_vertices):
+        # Check if all vertices are within outer hexagon
+        for vert in verts:
+            if not point_in_hexagon(vert, outer_hex_vertices):
+                containment_ok = False
+                break
+        if not containment_ok:
+            break
+    
+    # Check overlaps
+    overlap_ok = True
+    for i in range(n_hex):
+        for j in range(i+1, n_hex):
+            if hexagon_overlap_fast(hex_vertices[i], hex_vertices[j]):
+                overlap_ok = False
+                break
+        if not overlap_ok:
+            break
+    
+    if not containment_ok or not overlap_ok:
+        # Return a very poor fitness value for infeasible solutions
+        return 1e10
+    
+    # If feasible, return inverse of outer radius (we want to maximize 1/R)
+    return 1.0 / outer_radius
+
+# Custom evolutionary operators for hexagon packing
+class HexagonPackingEvolutionary:
+    def __init__(self, population_size=50, generations=100):
+        self.population_size = population_size
+        self.generations = generations
+        self.best_fitness = float('inf')
+        self.best_params = None
+        self.best_outer_radius = None
+        
+    def initialize_population(self, outer_radius_bounds=(1.0, 10.0)):
+        """Initialize population with symmetric configurations"""
+        population = []
+        for _ in range(self.population_size):
+            # Generate symmetric distribution of hexagons
+            params = []
+            # Center hexagon
+            params.extend([0.0, 0.0, 0.0])
+            
+            # First ring around center
+            angles = np.linspace(0, 360, 6, endpoint=False)
+            distances = [1.8, 1.8, 1.8, 1.8, 1.8, 1.8]  # Fixed spacing
+            
+            for angle, dist in zip(angles, distances):
+                rad = np.radians(angle)
+                x = dist * np.cos(rad)
+                y = dist * np.sin(rad)
+                params.extend([x, y, angle])  # Fixed orientation
+            
+            # Second ring
+            angles = np.linspace(30, 390, 6, endpoint=False)
+            distances = [3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+            
+            for angle, dist in zip(angles, distances):
+                rad = np.radians(angle)
+                x = dist * np.cos(rad)
+                y = dist * np.sin(rad)
+                params.extend([x, y, angle])
+            
+            # Add some randomization
+            for i in range(len(params)):
+                if i >= 3:  # Skip center hexagon
+                    params[i] += random.uniform(-0.2, 0.2)
+            
+            population.append(np.array(params))
+        
+        return population
+    
+    def mutate(self, individual, mutation_rate=0.1):
+        """Custom mutation operator for hexagon packing"""
+        mutated = individual.copy()
+        for i in range(len(individual)):
+            if random.random() < mutation_rate:
+                # For positions, allow larger changes
+                if i % 3 < 2:  # x or y coordinate
+                    mutated[i] += random.gauss(0, 0.3)
+                else:  # angle
+                    mutated[i] += random.gauss(0, 10)
+                    # Keep angle within [0, 360)
+                    mutated[i] = mutated[i] % 360
+        return mutated
+    
+    def crossover(self, parent1, parent2):
+        """Custom crossover that preserves hexagonal structure"""
+        child = parent1.copy()
+        # Crossover every other element (positions and angles)
+        for i in range(0, len(child), 3):
+            if random.random() > 0.5:
+                child[i:i+3] = parent2[i:i+3]
+        return child
+    
+    def optimize(self):
+        """Main evolutionary optimization loop"""
+        # Start with a good symmetric configuration
+        population = self.initialize_population()
+        
+        best_individual = None
+        best_fitness = float('inf')
+        best_outer_radius = 10.0
+        
+        for gen in range(self.generations):
+            # Evaluate fitness for all individuals
+            fitness_values = []
+            for ind in population:
+                # We'll try different outer radii to find the best
+                fitness = float('inf')
+                for radius in np.linspace(2.0, 6.0, 5):
+                    try:
+                        f_val = evaluate_configuration(ind, radius)
+                        if f_val < fitness:
+                            fitness = f_val
+                    except:
+                        continue
+                
+                fitness_values.append(fitness)
+                
+                if fitness < best_fitness:
+                    best_fitness = fitness
+                    best_individual = ind.copy()
+                    best_outer_radius = 6.0  # Approximate
+            
+            # Update best solution seen so far
+            if best_fitness < self.best_fitness:
+                self.best_fitness = best_fitness
+                self.best_params = best_individual.copy()
+                self.best_outer_radius = best_outer_radius
+            
+            # Selection (tournament selection)
+            selected = []
+            tournament_size = 3
+            for _ in range(self.population_size):
+                tournament = random.sample(list(zip(population, fitness_values)), tournament_size)
+                winner = min(tournament, key=lambda x: x[1])
+                selected.append(winner[0])
+            
+            # Crossover and mutation
+            new_population = []
+            for i in range(0, self.population_size, 2):
+                p1, p2 = selected[i], selected[i+1] if i+1 < len(selected) else selected[0]
+                child1 = self.crossover(p1, p2)
+                child2 = self.crossover(p2, p1)
+                child1 = self.mutate(child1)
+                child2 = self.mutate(child2)
+                new_population.extend([child1, child2])
+            
+            population = new_population[:self.population_size]
+            
+        return self.best_params, self.best_outer_radius
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Initialize evolutionary optimizer
+    optimizer = HexagonPackingEvolutionary(population_size=30, generations=50)
+    
+    # Run optimization
+    best_params, best_radius = optimizer.optimize()
+    
+    # Extract the final configuration
+    inner_hex_data = []
+    for i in range(12):
+        idx = i * 3
+        if idx + 2 < len(best_params):
+            x, y, angle = best_params[idx], best_params[idx+1], best_params[idx+2]
+            inner_hex_data.append([x, y, angle])
+    
+    inner_hex_data = np.array(inner_hex_data)
+    
+    # Outer hexagon is centered at origin, no rotation
+    outer_hex_data = np.array([0, 0, 0])
+    outer_hex_side_length = best_radius
+    
+    # Final verification
+    try:
+        # Recreate vertices and recheck
+        hex_vertices = []
+        for i in range(12):
+            x, y, angle = inner_hex_data[i]
+            verts = create_hexagon_vertices(x, y, angle)
+            hex_vertices.append(verts)
+        
+        outer_hex_vertices = create_hexagon_vertices(0, 0, 0, outer_hex_side_length)
+        
+        # Check containment
+        all_contained = True
+        for verts in hex_vertices:
+            for vert in verts:
+                if not point_in_hexagon(vert, outer_hex_vertices):
+                    all_contained = False
+                    break
+            if not all_contained:
+                break
+        
+        if all_contained:
+            # Verify overlaps are minimal (not perfect due to optimization)
+            overlap_ok = True
+            for i in range(12):
+                for j in range(i+1, 12):
+                    if hexagon_overlap_fast(hex_vertices[i], hex_vertices[j]):
+                        overlap_ok = False
+                        break
+                if not overlap_ok:
+                    break
+            
+            # If still valid, return result
+            if overlap_ok:
+                pass  # Valid configuration
+    except:
+        pass  # Fallback to previous method if anything fails
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

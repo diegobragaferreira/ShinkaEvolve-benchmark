@@ -1,0 +1,257 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import warnings
+warnings.filterwarnings('ignore')
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    width, height = 1.2, 0.8
+
+    # Initialize circles array
+    n = 21
+    circles = np.zeros((n, 3))
+
+    # Phase 1: Adaptive Voronoi-based initialization
+    # Generate initial points using a combination of structured and random sampling
+    init_points = []
+    
+    # Corner points
+    corner_points = [
+        [0.1, 0.1],           # Bottom-left
+        [width-0.1, 0.1],     # Bottom-right
+        [0.1, height-0.1],    # Top-left
+        [width-0.1, height-0.1], # Top-right
+    ]
+    init_points.extend(corner_points)
+    
+    # Edge midpoints
+    edge_points = [
+        [width/2, 0.1],       # Bottom-middle
+        [width/2, height-0.1], # Top-middle
+        [0.1, height/2],      # Left-middle
+        [width-0.1, height/2], # Right-middle
+    ]
+    init_points.extend(edge_points)
+    
+    # Random points to fill remaining slots
+    np.random.seed(42)
+    while len(init_points) < n:
+        x = np.random.uniform(0.05, width - 0.05)
+        y = np.random.uniform(0.05, height - 0.05)
+        init_points.append([x, y])
+    
+    # Initialize with small radii at selected positions
+    for i in range(n):
+        circles[i] = [init_points[i][0], init_points[i][1], 0.01]
+
+    # Phase 2: Adaptive Voronoi-based optimization with multi-resolution approach
+    max_iterations = 1200
+    improvement_threshold = 0.0001
+    best_sum_radii = 0
+    
+    for iteration in range(max_iterations):
+        improved = False
+        
+        # Multi-resolution phases
+        if iteration < 400:
+            # Coarse global optimization
+            resolution_level = "coarse"
+            step_size = 0.15
+            radius_multiplier = 0.95
+        elif iteration < 800:
+            # Medium resolution optimization
+            resolution_level = "medium"
+            step_size = 0.08
+            radius_multiplier = 0.8
+        else:
+            # Fine local optimization
+            resolution_level = "fine"
+            step_size = 0.03
+            radius_multiplier = 0.6
+            
+        # Compute current Voronoi diagram for constraint enforcement
+        points = circles[:, :2]
+        try:
+            vor = Voronoi(points)
+        except:
+            # Fallback to simpler approach if Voronoi fails
+            vor = None
+            
+        # Update each circle's radius using Voronoi-based approach
+        for i in range(n):
+            old_radius = circles[i][2]
+            
+            # Calculate max radius using Voronoi cell information
+            max_radius = calculate_voronoi_based_radius(
+                circles, i, width, height, vor
+            )
+            
+            # Apply adaptive radius update
+            if max_radius > old_radius:
+                new_radius = min(max_radius, old_radius * radius_multiplier)
+                circles[i][2] = new_radius
+                improved = True
+                
+        # Adaptive position refinement with Voronoi guidance
+        if resolution_level != "coarse":
+            # Only do position refinement in medium/fine phases
+            for i in range(n):
+                current_x, current_y, current_r = circles[i]
+                
+                # Determine search grid based on resolution level
+                if resolution_level == "medium":
+                    search_grid = [-step_size, -step_size/2, 0, step_size/2, step_size]
+                else:  # fine
+                    search_grid = [-step_size/2, 0, step_size/2]
+                    
+                # Find best position within search grid
+                best_pos = [current_x, current_y, current_r]
+                best_radius = current_r
+                
+                for dx in search_grid:
+                    for dy in search_grid:
+                        new_x, new_y = current_x + dx, current_y + dy
+                        
+                        # Check bounds
+                        if 0.001 <= new_x <= width - 0.001 and 0.001 <= new_y <= height - 0.001:
+                            # Calculate max radius at new position using Voronoi
+                            max_radius = calculate_voronoi_based_radius_at_position(
+                                circles, i, new_x, new_y, width, height, vor
+                            )
+                            
+                            if max_radius > best_radius:
+                                best_radius = max_radius
+                                best_pos = [new_x, new_y, max_radius]
+                                
+                # Update if improvement found
+                if best_pos[2] > circles[i][2]:
+                    circles[i] = best_pos
+                    improved = True
+                    
+        # Early stopping based on improvement
+        current_sum_radii = np.sum(circles[:, 2])
+        if current_sum_radii > best_sum_radii + improvement_threshold:
+            best_sum_radii = current_sum_radii
+        elif iteration > 500 and current_sum_radii < best_sum_radii * 1.001:
+            # Stop if no significant improvement for a while
+            break
+
+    # Phase 3: Final Voronoi-based validation and refinement
+    # Ensure final configuration respects all constraints
+    for i in range(n):
+        # Ensure minimum radius
+        circles[i][2] = max(circles[i][2], 0.001)
+        
+        # Ensure positions within bounds
+        circles[i][0] = np.clip(circles[i][0], 0.001, width - 0.001)
+        circles[i][1] = np.clip(circles[i][1], 0.001, height - 0.001)
+        
+        # Final check: make sure no overlaps exist
+        for j in range(i):
+            dist = np.sqrt((circles[i][0] - circles[j][0])**2 + (circles[i][1] - circles[j][1])**2)
+            min_dist = circles[i][2] + circles[j][2]
+            if dist < min_dist:
+                # Adjust radii to prevent overlap (conservative approach)
+                avg_radius = (circles[i][2] + circles[j][2]) / 2
+                circles[i][2] = avg_radius * 0.95
+                circles[j][2] = avg_radius * 0.95
+
+    return circles
+
+
+def calculate_voronoi_based_radius(circles, index, width, height, voronoi=None):
+    """Calculate maximum radius using Voronoi cell information for better constraint handling."""
+    x, y, current_radius = circles[index]
+    
+    # Boundary constraints
+    max_radius_bound = min(x, y, width - x, height - y)
+    
+    # Voronoi-based overlap constraints
+    max_radius_overlap = float('inf')
+    
+    if voronoi is not None and len(voronoi.points) > 1:
+        # Get Voronoi cell for this point
+        try:
+            # Find which Voronoi region corresponds to this point
+            point_idx = index
+            if point_idx < len(voronoi.points):
+                # Get Voronoi vertexes for this cell
+                # Compute distance to nearest Voronoi vertices or edges
+                current_point = np.array([x, y])
+                min_distance_to_neighbors = float('inf')
+                
+                # Check against all other points
+                for j, other_point in enumerate(voronoi.points):
+                    if j != index:
+                        dist = np.linalg.norm(current_point - other_point)
+                        min_distance_to_neighbors = min(min_distance_to_neighbors, dist)
+                        
+                if min_distance_to_neighbors != float('inf'):
+                    max_radius_overlap = min(max_radius_overlap, min_distance_to_neighbors)
+        except:
+            pass
+    
+    # Fallback to pairwise distance calculation if Voronoi fails
+    if max_radius_overlap == float('inf') and len(circles) > 1:
+        for i, (cx, cy, cr) in enumerate(circles):
+            if i != index:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                max_radius_for_this_circle = dist - cr
+                max_radius_overlap = min(max_radius_overlap, max_radius_for_this_circle)
+    
+    max_radius = min(max_radius_bound, max_radius_overlap)
+    return max(max_radius, 0.001)  # Ensure minimum radius
+
+
+def calculate_voronoi_based_radius_at_position(circles, index, x, y, width, height, voronoi=None):
+    """Calculate maximum radius at a specific position using Voronoi approach."""
+    # Boundary constraints
+    max_radius_bound = min(x, y, width - x, height - y)
+    
+    # Voronoi-based overlap constraints
+    max_radius_overlap = float('inf')
+    
+    if voronoi is not None and len(voronoi.points) > 1:
+        try:
+            # Use Voronoi information for faster constraint checking
+            current_point = np.array([x, y])
+            min_distance_to_neighbors = float('inf')
+            
+            # Check against all other points
+            for i, (cx, cy, cr) in enumerate(circles):
+                if i != index:
+                    dist = np.linalg.norm(current_point - np.array([cx, cy]))
+                    min_distance_to_neighbors = min(min_distance_to_neighbors, dist)
+                    
+            if min_distance_to_neighbors != float('inf'):
+                max_radius_overlap = min(max_radius_overlap, min_distance_to_neighbors)
+        except:
+            pass
+    
+    # Fallback to pairwise distance calculation if Voronoi fails
+    if max_radius_overlap == float('inf') and len(circles) > 1:
+        for i, (cx, cy, cr) in enumerate(circles):
+            if i != index:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                max_radius_for_this_circle = dist - cr
+                max_radius_overlap = min(max_radius_overlap, max_radius_for_this_circle)
+    
+    max_radius = min(max_radius_bound, max_radius_overlap)
+    return max(max_radius, 0.001)  # Ensure minimum radius
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

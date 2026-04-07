@@ -1,0 +1,215 @@
+<NAME>
+add_cKDTree_acceleration
+</NAME>
+
+<DESCRIPTION>
+Adding cKDTree-based spatial acceleration to improve overlap detection performance. This addresses the primary bottleneck in the current implementation where overlap checking has O(n²) complexity. By using spatial indexing, we can reduce the overlap checking from O(n²) to O(n log n) which will significantly speed up the evaluation function and allow for better optimization results within the time constraints.
+
+The key changes include:
+1. Importing scipy.spatial.cKDTree
+2. Adding a fast overlap check using cKDTree to identify candidate pairs
+3. Only performing expensive Shapely intersection tests on nearby candidates
+4. Maintaining all existing functionality while improving performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit, prange
+from joblib import Parallel, delayed
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit, prange
+from joblib import Parallel, delayed
+from scipy.spatial import cKDTree
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    return -1.0 / outer_hex_side_length
+
+def generate_symmetric_initial_guess():
+=======
+    return -1.0 / outer_hex_side_length
+
+def fast_check_overlap_pair_fast(h1_x, h1_y, h1_angle, h2_x, h2_y, h2_angle):
+    """Fast preliminary overlap check using distance between centers."""
+    # Simple distance-based early rejection
+    center_dist_sq = (h1_x - h2_x)**2 + (h1_y - h2_y)**2
+    # For unit hexagons, if centers are more than 2 units apart, no overlap
+    if center_dist_sq > 4.0:
+        return False
+    # If centers are less than 0.1 units apart, likely overlap
+    if center_dist_sq < 0.01:
+        return True
+    # Otherwise, use more precise method
+    return hexagon_distance(h1_x, h1_y, h1_angle, h2_x, h2_y, h2_angle) < 0.1
+
+def evaluate_configuration_fast(params):
+    """Fast evaluation with optimized overlap detection using cKDTree."""
+    # Extract inner hexagon data and outer radius
+    inner_hex_data = params[:-1].reshape(12, 3)
+    outer_hex_side_length = params[-1]
+
+    # Create outer hexagon polygon (centered at origin)
+    outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+
+    # Check containment and overlaps
+    valid = True
+    total_penalty = 0.0
+
+    n = len(inner_hex_data)
+    inner_polys = []
+
+    # Compute all inner hexagon polygons
+    for i in range(n):
+        x, y, angle = inner_hex_data[i]
+        inner_poly = compute_hexagon_polygon(x, y, angle)
+        inner_polys.append(inner_poly)
+
+        # Check containment
+        if not outer_hex_poly.contains(inner_poly):
+            valid = False
+            # Calculate penetration
+            try:
+                diff = outer_hex_poly.difference(inner_poly)
+                if hasattr(diff, 'area'):
+                    total_penalty += diff.area
+            except:
+                total_penalty += 1000  # Large penalty
+
+    if not valid:
+        # Adaptive penalty - scale with the severity of the constraint violation
+        penalty = total_penalty * 10000 if total_penalty > 0 else 1000000
+        return penalty
+
+    # Use cKDTree for efficient overlap detection
+    # Build KDTree of hexagon centers for fast neighbor lookups
+    centers = np.array([[inner_hex_data[i][0], inner_hex_data[i][1]] for i in range(n)])
+    tree = cKDTree(centers)
+
+    # Find pairs within a reasonable distance (2 units for potentially overlapping hexagons)
+    # This uses the tree to efficiently find neighbors rather than checking all pairs
+    pairs = tree.query_pairs(2.0, output_type='ndarray')
+
+    # Only perform expensive Shapely intersection tests on candidates
+    overlap_area_total = 0.0
+    for i, j in pairs:
+        if i < j:  # Avoid duplicate checks
+            # Fast preliminary check using distance
+            if fast_check_overlap_pair_fast(
+                inner_hex_data[i][0], inner_hex_data[i][1], inner_hex_data[i][2],
+                inner_hex_data[j][0], inner_hex_data[j][1], inner_hex_data[j][2]
+            ):
+                # Perform detailed Shapely intersection test
+                if check_overlap(inner_polys[i], inner_polys[j]):
+                    valid = False
+                    try:
+                        overlap = inner_polys[i].intersection(inner_polys[j])
+                        if hasattr(overlap, 'area'):
+                            overlap_area_total += overlap.area
+                    except:
+                        overlap_area_total += 1000  # Large penalty
+
+    if overlap_area_total > 0:
+        total_penalty += overlap_area_total * 10000  # Apply penalty for overlaps
+        valid = False
+
+    if not valid:
+        return total_penalty
+
+    # If valid, return inverse of outer hexagon side length (negative because we minimize)
+    return -1.0 / outer_hex_side_length
+
+def generate_symmetric_initial_guess():
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # First, use global optimization to explore the space broadly
+    def objective_global(params):
+        # Use smaller penalty scaling for global optimization
+        return evaluate_configuration_parallel(params)
+
+    # Run differential evolution with reduced iterations for speed
+    de_result = differential_evolution(
+        objective_global,
+        bounds,
+        maxiter=30,
+        popsize=10,
+        seed=42,
+        disp=False
+    )
+
+    # Use the best solution from global search as starting point for local refinement
+    best_params = de_result.x
+
+    # Local refinement using L-BFGS-B
+    # We need to make sure we're still within bounds for the local optimizer
+    refined_bounds = [(b[0], b[1]) for b in bounds]
+
+    # Perform local optimization
+    try:
+        local_result = minimize(
+            evaluate_configuration_parallel,
+            best_params,
+            method='L-BFGS-B',
+            bounds=refined_bounds,
+            options={'maxiter': 50, 'disp': False}
+        )
+        if local_result.success:
+            best_params = local_result.x
+    except:
+        # Fall back to previous solution if local optimization fails
+        pass
+=======
+    # First, use global optimization to explore the space broadly
+    def objective_global(params):
+        # Use smaller penalty scaling for global optimization
+        return evaluate_configuration_fast(params)
+
+    # Run differential evolution with reduced iterations for speed
+    de_result = differential_evolution(
+        objective_global,
+        bounds,
+        maxiter=30,
+        popsize=10,
+        seed=42,
+        disp=False
+    )
+
+    # Use the best solution from global search as starting point for local refinement
+    best_params = de_result.x
+
+    # Local refinement using L-BFGS-B
+    # We need to make sure we're still within bounds for the local optimizer
+    refined_bounds = [(b[0], b[1]) for b in bounds]
+
+    # Perform local optimization
+    try:
+        local_result = minimize(
+            evaluate_configuration_fast,
+            best_params,
+            method='L-BFGS-B',
+            bounds=refined_bounds,
+            options={'maxiter': 50, 'disp': False}
+        )
+        if local_result.success:
+            best_params = local_result.x
+    except:
+        # Fall back to previous solution if local optimization fails
+        pass
+>>>>>>> REPLACE
+</DIFF>

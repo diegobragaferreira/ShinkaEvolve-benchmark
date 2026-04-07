@@ -1,0 +1,271 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x into 16 points
+        points = x.reshape(-1, 2)
+        # Calculate pairwise distances
+        distances = pdist(points)
+        # Minimize negative of min/max ratio (equivalent to maximizing min/max ratio)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0  # Avoid division by zero
+        return -min_dist / max_dist
+
+    def calculate_ratio(points):
+        """Calculate min/max distance ratio for given points."""
+        if len(points) < 2:
+            return 0.0
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return min_dist / max_dist
+
+    def generate_hexagonal_initial():
+        """Generate hexagonal lattice initial configuration"""
+        points = []
+        rows = 4
+        cols = 4
+
+        spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+        spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
+
+        # Adjust spacing for better distribution
+        spacing_x *= 0.9
+        spacing_y *= 0.9
+
+        for i in range(rows):
+            for j in range(cols):
+                # Offset every other row for hexagonal packing
+                x_offset = spacing_x * 0.25 if i % 2 == 1 else 0.0
+                x = (j * spacing_x) + x_offset
+                y = i * spacing_y
+
+                # Ensure points are within bounds
+                x = max(0.001, min(0.999, x))
+                y = max(0.001, min(0.999, y))
+
+                points.append([x, y])
+
+        return np.array(points)
+
+    def generate_fibonacci_spiral():
+        """Generate points using Fibonacci spiral for good distribution"""
+        points = []
+        phi = (1 + math.sqrt(5)) / 2  # golden ratio
+        for i in range(16):
+            theta = math.acos(-1 + (2 * i) / 15)  # elevation angle
+            phi_angle = (i * 2 * math.pi) / (phi * phi)  # azimuthal angle
+
+            # Convert to cartesian coordinates
+            x = math.sin(theta) * math.cos(phi_angle)
+            y = math.sin(theta) * math.sin(phi_angle)
+
+            # Map to [0.05, 0.95] range to avoid boundaries
+            x = 0.05 + 0.9 * (x + 1) / 2
+            y = 0.05 + 0.9 * (y + 1) / 2
+
+            points.append([x, y])
+
+        return np.array(points)
+
+    def generate_polar_initial():
+        """Generate initial configuration in polar arrangement"""
+        points = []
+        # Place points in concentric circles
+        radii = [0.15, 0.3, 0.45, 0.6]
+        angles_per_ring = [4, 6, 8, 10]
+
+        # Center point
+        points.append([0.5, 0.5])
+
+        # Add points in rings
+        for i, (radius, num_angles) in enumerate(zip(radii, angles_per_ring)):
+            for j in range(num_angles):
+                if len(points) >= 16:
+                    break
+                angle = (j * 2 * math.pi) / num_angles
+                x = 0.5 + radius * math.cos(angle)
+                y = 0.5 + radius * math.sin(angle)
+                points.append([x, y])
+            if len(points) >= 16:
+                break
+
+        # Fill remaining spots
+        while len(points) < 16:
+            x = np.random.uniform(0.1, 0.9)
+            y = np.random.uniform(0.1, 0.9)
+            points.append([x, y])
+
+        return np.array(points[:16])
+
+    def generate_grid_initial():
+        """Generate regular grid initial configuration"""
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                points.append([x, y])
+        return np.array(points)
+
+    def adaptive_perturbation(points, iteration=0):
+        """Apply adaptive perturbation based on current configuration"""
+        # Calculate current distribution statistics
+        distances = pdist(points)
+        if len(distances) > 0:
+            avg_dist = np.mean(distances)
+            std_dist = np.std(distances)
+            # Perturbation magnitude decreases with iterations
+            perturbation_std = 0.02 * (1.0 / (1.0 + iteration))
+            # But increases if distribution is too uniform
+            if std_dist / avg_dist < 0.1:  # Very uniform, increase perturbation
+                perturbation_std *= 2.0
+
+            perturbed = points + np.random.normal(0, perturbation_std, points.shape)
+            # Clip to valid range
+            perturbed = np.clip(perturbed, 0.001, 0.999)
+            return perturbed
+        return points
+
+    # Generate multiple diverse initial configurations
+    initial_configs = [
+        generate_hexagonal_initial(),
+        generate_fibonacci_spiral(),
+        generate_polar_initial(),
+        generate_grid_initial()
+    ]
+
+    # Add adaptive perturbations to each initial configuration
+    np.random.seed(42)
+    perturbed_configs = []
+    for i, config in enumerate(initial_configs):
+        # Create multiple variations of each initial config
+        for j in range(3):  # 3 variations per initial config
+            if j == 0:
+                # No perturbation for first variation
+                perturbed = config.copy()
+            elif j == 1:
+                # Small perturbation
+                perturbed = config + np.random.normal(0, 0.01, config.shape)
+            else:
+                # Medium perturbation
+                perturbed = config + np.random.normal(0, 0.02, config.shape)
+
+            # Clip to valid range
+            perturbed = np.clip(perturbed, 0.001, 0.999)
+            perturbed_configs.append(perturbed)
+
+    # Define bounds for each coordinate (between 0 and 1)
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Try multiple local optimizations from different starting points
+    best_ratio = -np.inf
+    best_points = None
+
+    # Try multiple configurations with different optimization methods
+    for i, initial_config in enumerate(perturbed_configs):
+        # Try with L-BFGS-B
+        try:
+            x0 = initial_config.flatten()
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 150, 'ftol': 1e-8, 'gtol': 1e-5}
+            )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = calculate_ratio(final_points)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+
+        except Exception:
+            pass
+
+        # Also try with SLSQP for potentially better results
+        try:
+            x0 = initial_config.flatten()
+            result = minimize(
+                objective,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 150}
+            )
+
+            if result.success:
+                final_points = result.x.reshape(-1, 2)
+                ratio = calculate_ratio(final_points)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+
+        except Exception:
+            pass
+
+        # Early termination if we've found a good solution
+        if best_ratio > 0.3:  # Early stopping threshold
+            break
+
+    # If we didn't find anything good, try progressive refinement
+    if best_points is None or best_ratio < 0.001:
+        # Start with hexagonal grid and progressively refine
+        current_points = generate_hexagonal_initial()
+
+        for iteration in range(10):
+            # Try optimization from current points
+            try:
+                x0 = current_points.flatten()
+                result = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-5}
+                )
+
+                if result.success:
+                    final_points = result.x.reshape(-1, 2)
+                    ratio = calculate_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception:
+                pass
+
+            # Apply adaptive perturbation
+            current_points = adaptive_perturbation(current_points, iteration)
+
+    # Return the best solution found
+    if best_points is None:
+        # Fallback to the hexagonal initialization if nothing worked
+        best_points = generate_hexagonal_initial()
+
+    return best_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,108 @@
+<NAME>
+enhance_local_search_with_multi_start_optimization
+</NAME>
+
+<DESCRIPTION>
+This modification introduces a multi-start quasi-Newton optimization technique to enhance the local search component. Instead of relying solely on the single-direction improvement from `get_good_direction_to_move_into`, we now perform multiple local optimizations from perturbed versions of the best sequence. This approach leverages the strengths of both evolutionary search (global exploration) and local optimization (fine-tuning), aiming for better convergence to high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def multi_start_local_search(sequence: list[float], max_starts: int = 5) -> list[float]:
+    """Perform multi-start local search to find better local optima."""
+    best_sequence = sequence.copy()
+    best_fitness, _ = compute_autocorrelation_constant(best_sequence)
+    best_fitness = 1.0 / best_fitness if best_fitness > 0 else 0.0
+
+    # Try multiple perturbations and local searches
+    for _ in range(max_starts):
+        # Create a slightly perturbed version of the sequence
+        perturbed = [x * random.uniform(0.95, 1.05) for x in sequence]
+        # Ensure non-negative values
+        perturbed = [max(0.01, x) for x in perturbed]
+
+        # Apply local search to the perturbed sequence
+        improved = get_good_direction_to_move_into(perturbed)
+        if improved is not None:
+            # Evaluate the improved sequence
+            _, inv_c1 = compute_autocorrelation_constant(improved)
+            if inv_c1 > best_fitness:
+                best_fitness = inv_c1
+                best_sequence = improved
+
+    return best_sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+integrate_multi_start_local_search
+</NAME>
+
+<DESCRIPTION>
+This modification integrates the new multi-start local search into the main optimization loop. Instead of applying a single local search step to the best sequence, we now apply the enhanced multi-start local search. This should provide a more thorough local optimization and potentially find better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Apply local search to the best sequence
+        if best_sequence is not None:
+            local_search_result = get_good_direction_to_move_into(best_sequence)
+            if local_search_result is not None:
+                # Evaluate the local search result
+                _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+                if local_inv_c1 > best_inv_c1:
+                    best_inv_c1 = local_inv_c1
+                    best_sequence = local_search_result
+                    stagnation_count = 0
+=======
+        # Apply enhanced local search to the best sequence
+        if best_sequence is not None:
+            local_search_result = multi_start_local_search(best_sequence)
+            if local_search_result is not None:
+                # Evaluate the local search result
+                _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+                if local_inv_c1 > best_inv_c1:
+                    best_inv_c1 = local_inv_c1
+                    best_sequence = local_search_result
+                    stagnation_count = 0
+>>>>>>> REPLACE
+</DIFF>

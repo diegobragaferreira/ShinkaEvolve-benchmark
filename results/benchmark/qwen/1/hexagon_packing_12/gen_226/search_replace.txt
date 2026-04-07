@@ -1,0 +1,147 @@
+<NAME>
+implement_bvh_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+This change implements a more efficient bounding volume hierarchy (BVH) approach for overlap detection, which should significantly improve performance over the current cKDTree-based method. The BVH approach will provide faster overlap checking by first testing bounding boxes before doing expensive polygon intersection tests. This addresses the computational bottleneck identified in the overlap detection phase.
+
+The key improvements:
+1. Replace cKDTree-based spatial indexing with BVH approach for overlap detection
+2. Implement proper bounding box construction for hexagons
+3. Add efficient bounding box intersection tests
+4. Use the BVH for early rejection of non-colliding pairs
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+from scipy.spatial import cKDTree
+import time
+from numba import jit
+from typing import Tuple, List, Optional, Any
+=======
+from scipy.spatial import cKDTree
+import time
+from numba import jit
+from typing import Tuple, List, Optional, Any
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def _fast_check_overlaps_spatial(positions: np.ndarray, angles: np.ndarray,
+                                   tree: Optional[cKDTree] = None,
+                                   max_distance: float = 2.0) -> bool:
+        """Fast overlap checking using spatial indexing."""
+        if tree is None:
+            # Build spatial tree from centers
+            centers = HexagonPacker._get_hexagon_centers(positions, angles)
+            tree = cKDTree(centers)
+
+        # Query neighbors within max_distance
+        pairs = tree.query_pairs(max_distance, p=np.inf)
+
+        # Check actual overlaps for candidate pairs
+        for i, j in pairs:
+            # Get vertices for both hexagons
+            hex1_vertices = HexagonPacker._hexagon_vertices(positions[i][0], positions[i][1],
+                                                          np.deg2rad(angles[i]))
+            hex2_vertices = HexagonPacker._hexagon_vertices(positions[j][0], positions[j][1],
+                                                          np.deg2rad(angles[j]))
+
+            if HexagonPacker._fast_check_overlap_pair_fast(hex1_vertices, hex2_vertices):
+                return True  # Found overlap
+
+        return False  # No overlaps found
+=======
+    @staticmethod
+    def _build_bvh_for_hexagons(positions: np.ndarray, angles: np.ndarray) -> List[Tuple[Tuple[float, float], Tuple[float, float], int]]:
+        """Build a simple bounding volume hierarchy for hexagons using axis-aligned bounding boxes."""
+        # For each hexagon, compute its AABB (axis-aligned bounding box)
+        boxes = []
+        for i, (pos, angle) in enumerate(zip(positions, angles)):
+            vertices = HexagonPacker._hexagon_vertices(pos[0], pos[1], np.deg2rad(angle))
+            min_x = vertices[:, 0].min()
+            max_x = vertices[:, 0].max()
+            min_y = vertices[:, 1].min()
+            max_y = vertices[:, 1].max()
+            boxes.append(((min_x, min_y), (max_x, max_y), i))
+        return boxes
+
+    @staticmethod
+    def _bvh_intersect_boxes(box1: Tuple[Tuple[float, float], Tuple[float, float], int],
+                           box2: Tuple[Tuple[float, float], Tuple[float, float], int]) -> bool:
+        """Check if two bounding boxes intersect."""
+        (min_x1, min_y1), (max_x1, max_y1) = box1[0], box1[1]
+        (min_x2, min_y2), (max_x2, max_y2) = box2[0], box2[1]
+        return not (max_x1 < min_x2 or max_x2 < min_x1 or max_y1 < min_y2 or max_y2 < min_y1)
+
+    @staticmethod
+    def _fast_check_overlaps_bvh(positions: np.ndarray, angles: np.ndarray) -> bool:
+        """Fast overlap checking using BVH approach."""
+        # Build bounding boxes for all hexagons
+        boxes = HexagonPacker._build_bvh_for_hexagons(positions, angles)
+
+        # Use the BVH approach for overlap detection
+        n_hexagons = len(positions)
+        # Check all pairs using bounding boxes as first filter
+        for i in range(n_hexagons):
+            for j in range(i+1, n_hexagons):
+                # Early rejection using bounding boxes
+                if HexagonPacker._bvh_intersect_boxes(boxes[i], boxes[j]):
+                    # If bounding boxes overlap, do detailed polygon intersection test
+                    hex1_vertices = HexagonPacker._hexagon_vertices(positions[i][0], positions[i][1],
+                                                                  np.deg2rad(angles[i]))
+                    hex2_vertices = HexagonPacker._hexagon_vertices(positions[j][0], positions[j][1],
+                                                                  np.deg2rad(angles[j]))
+
+                    if HexagonPacker._fast_check_overlap_pair_fast(hex1_vertices, hex2_vertices):
+                        return True  # Found overlap
+
+        return False  # No overlaps found
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Check overlaps using spatial indexing (much faster)
+        centers = self._get_hexagon_centers(positions, angles)
+        tree = cKDTree(centers)
+
+        # Check all pairs using the spatial tree
+        overlap_found = False
+        try:
+            # Use spatial indexing for fast overlap checking
+            overlap_found = self._fast_check_overlaps_spatial(positions, angles, tree)
+        except Exception as e:
+            # Fallback to brute force if spatial indexing fails
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    hex1 = self._create_unit_hexagon(positions[i], angles[i])
+                    hex2 = self._create_unit_hexagon(positions[j], angles[j])
+                    if self._check_overlap(hex1, hex2):
+                        overlap_found = True
+                        break
+                if overlap_found:
+                    break
+=======
+        # Check overlaps using BVH approach (more efficient than cKDTree for this case)
+        overlap_found = False
+        try:
+            # Use BVH for fast overlap checking
+            overlap_found = self._fast_check_overlaps_bvh(positions, angles)
+        except Exception as e:
+            # Fallback to brute force if BVH fails
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    hex1 = self._create_unit_hexagon(positions[i], angles[i])
+                    hex2 = self._create_unit_hexagon(positions[j], angles[j])
+                    if self._check_overlap(hex1, hex2):
+                        overlap_found = True
+                        break
+                if overlap_found:
+                    break
+>>>>>>> REPLACE
+</DIFF>

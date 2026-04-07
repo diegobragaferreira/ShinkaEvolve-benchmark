@@ -1,0 +1,402 @@
+--- a/original.py
++++ b/original.py
+@@ -1,340 +1,394 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist
+ from scipy.spatial import SphericalVoronoi
+ import warnings
+ warnings.filterwarnings('ignore')
+ 
+ class PointDistributionOptimizer:
+     """Modular optimizer for 14-point 3D distribution with maximum min/max distance ratio."""
+ 
+     def __init__(self, num_points=14):
+         self.num_points = num_points
+         self.best_ratio = 0
+         self.best_points = None
+         self.improvement_streak = 0
+         self.max_improvement_streak = 8
+ 
+     def fibonacci_sphere(self, n):
+         """Generate n points evenly distributed on a unit sphere using Fibonacci spiral method."""
+         points = []
+         phi = np.pi * (3 - np.sqrt(5))  # golden angle
+ 
+         for i in range(n):
+             y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = phi * i  # golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         return np.array(points)
+ 
+     def latin_hypercube_sampling(self, n, d, seed=42):
+         """Generate n points using Latin Hypercube Sampling in d dimensions."""
+         np.random.seed(seed)
+         samples = np.zeros((n, d))
+ 
+         for i in range(d):
+             # Generate random permutation for each dimension
+             perm = np.random.permutation(n)
+             samples[:, i] = perm
+ 
+         # Normalize to [0, 1]
+         samples = samples / (n - 1)
+ 
+         return samples
+ 
+     def spherical_map(self, points):
+         """Map points from 3D space to unit sphere using normalization."""
+         norms = np.linalg.norm(points, axis=1, keepdims=True)
+         # Avoid division by zero
+         norms = np.where(norms == 0, 1, norms)
+         return points / norms
+ 
+     def spherical_voronoi_quality(self, sphere_points):
+         """Calculate quality based on Voronoi cell areas on sphere."""
+         if len(sphere_points) < 2:
+             return 0
+ 
+         # Create spherical Voronoi diagram
+         try:
+             sv = SphericalVoronoi(sphere_points)
+             # Calculate total area of Voronoi cells
+             cell_areas = sv.calculate_areas()
+             # Quality is inversely related to variance of cell areas
+             # More uniform areas indicate better distribution
+             if len(cell_areas) > 0:
+                 mean_area = np.mean(cell_areas)
+                 if mean_area > 0:
+                     variance = np.var(cell_areas)
+                     # Return inverse variance (higher is better)
+                     return 1.0 / (1.0 + variance / mean_area**2)
+         except Exception:
+             pass
+         return 0
+ 
+     def min_max_ratio(self, points):
+         """Calculate the ratio of minimum to maximum pairwise distances."""
+         if len(points) < 2:
+             return 0
+ 
+         # Calculate pairwise distances
+         distances = pdist(points)
+ 
+         # Get min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         # Avoid division by zero
+         if d_max == 0:
+             return 0
+ 
+         return d_min / d_max
+ 
+     def penalty_objective(self, x_flat, penalty_weight=1e6):
+         """Objective function with penalty for out-of-bounds points."""
+         # Reshape flat array back to points
+         points = x_flat.reshape((self.num_points, 3))
+ 
+         # Apply penalty for constraint violations
+         penalty = 0
+         for i in range(self.num_points):
+             for j in range(3):  # x, y, z coordinates
+                 if points[i, j] < 0:
+                     penalty += penalty_weight * (0 - points[i, j])**2
+                 elif points[i, j] > 1:
+                     penalty += penalty_weight * (points[i, j] - 1)**2
+ 
+         # Calculate min/max ratio
+         ratio = self.min_max_ratio(points)
+ 
+         # Return value to minimize (negative ratio + penalty)
+         return -ratio + penalty
+ 
+     def adaptive_penalty_objective(self, x_flat, penalty_weight=1e6, iteration=0):
+         """Objective function with adaptive penalty for out-of-bounds points."""
+         # Reshape flat array back to points
+         points = x_flat.reshape((self.num_points, 3))
+ 
+         # Apply penalty for constraint violations
+         penalty = 0
+         for i in range(self.num_points):
+             for j in range(3):  # x, y, z coordinates
+                 if points[i, j] < 0:
+                     penalty += penalty_weight * (0 - points[i, j])**2 * (1 + iteration * 0.1)
+                 elif points[i, j] > 1:
+                     penalty += penalty_weight * (points[i, j] - 1)**2 * (1 + iteration * 0.1)
+ 
+         # Calculate min/max ratio
+         ratio = self.min_max_ratio(points)
+ 
+         # Return value to minimize (negative ratio + penalty)
+         return -ratio + penalty
+ 
+     def objective_function(self, x_flat, use_spherical_quality=True):
+         """Objective function to maximize the min/max distance ratio."""
+         # Reshape flat array back to points
+         points = x_flat.reshape((self.num_points, 3))
+ 
+         # Normalize points to unit sphere
+         sphere_points = self.spherical_map(points)
+ 
+         # Calculate min/max ratio
+         ratio = self.min_max_ratio(points)
+ 
+         # Calculate spherical Voronoi quality
+         voronoi_quality = self.spherical_voronoi_quality(sphere_points)
+ 
+         # Combine objectives: prioritize min/max ratio but also consider geometric distribution
+         combined = ratio + 0.1 * voronoi_quality
+ 
+         # Return negative because we want to maximize (minimize negative)
+         return -combined
+ 
+     def create_enhanced_fibonacci_placement(self):
+         """Create enhanced Fibonacci sphere placement with better uniformity."""
+         # Generate points using Fibonacci-like distribution
+         points = []
+         phi = np.pi * (3 - np.sqrt(5))  # golden angle
+ 
+         for i in range(self.num_points):
+             y = 1 - (i / float(self.num_points - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+ 
+             theta = phi * i  # golden angle increment
+ 
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+ 
+             points.append([x, y, z])
+ 
+         initial_points = np.array(points)
+ 
+         # Improve distribution by applying multiple small perturbations
+         np.random.seed(42)
+         for _ in range(15):  # More perturbations for better uniformity
+             # Add small random perturbations
+             perturbation = np.random.normal(0, 0.015, (self.num_points, 3))
+             initial_points += perturbation
+ 
+             # Project back to sphere surface
+             initial_points = self.spherical_map(initial_points)
+ 
+         # Normalize to unit sphere and scale to unit cube [0,1]^3
+         initial_points = (initial_points + 1) / 2
+ 
+         return initial_points
+ 
+     def create_initial_placement_strategies(self):
+         """Create multiple initialization strategies."""
+         strategies = []
+ 
+         # Strategy 1: Enhanced Fibonacci sphere scaled to unit cube
+         enhanced_fib = self.create_enhanced_fibonacci_placement()
+         strategies.append(("enhanced_fibonacci", enhanced_fib))
+ 
+         # Strategy 2: Standard Fibonacci sphere scaled to unit cube
+         standard_fib = (self.fibonacci_sphere(self.num_points) + 1) / 2
+         strategies.append(("standard_fibonacci", standard_fib))
+ 
+         # Strategy 3: Latin Hypercube Sampling
+         lhs_points = self.latin_hypercube_sampling(self.num_points, 3, seed=42)
+         strategies.append(("latin_hypercube", lhs_points))
+ 
+         # Strategy 4: Random initialization
+         random_points = np.random.rand(self.num_points, 3)
+         strategies.append(("random", random_points))
+ 
++        # Strategy 5: Perturbed random points for diversity
++        perturbed_random = random_points + np.random.normal(0, 0.02, (self.num_points, 3))
++        perturbed_random = np.clip(perturbed_random, 0, 1)
++        strategies.append(("perturbed_random", perturbed_random))
++
++        # Strategy 6: Two-layered approach - spread out initial points
++        layer1 = np.random.rand(self.num_points//2, 3)
++        layer2 = np.random.rand(self.num_points//2, 3) + 0.5  # Offset to second half
++        two_layer = np.vstack([layer1, layer2])
++        strategies.append(("two_layer", two_layer))
++
+         return strategies
+ 
+     def evaluate_initialization_strategy(self, points):
+         """Fast evaluation of an initialization strategy."""
+         ratio = self.min_max_ratio(points)
+         return ratio
+ 
+     def select_best_initialization(self):
+         """Select the best initialization strategy from all candidates."""
+         strategies = self.create_initial_placement_strategies()
+ 
+         best_ratio = -np.inf
+         best_points = None
+ 
+         for name, points in strategies:
+             ratio = self.evaluate_initialization_strategy(points)
+             if ratio > best_ratio:
+                 best_ratio = ratio
+                 best_points = points.copy()
+ 
+         return best_points
+ 
+     def global_optimization_phase(self, initial_points, restart_round):
+         """Perform global differential evolution optimization."""
+         # Flatten initial points for optimization
+         x0 = initial_points.flatten()
+ 
+         # Define bounds for each coordinate (0 to 1)
+         bounds = [(0, 1) for _ in range(self.num_points * 3)]
+ 
+-        # Use adaptive population size based on restart round
+-        popsize = 15 + restart_round * 5  # Increase population size with restarts
++        # Use adaptive population size based on restart round and convergence behavior
++        base_popsize = 15 + restart_round * 5  # Increase population size with restarts
+         maxiter = 100 + restart_round * 50  # More iterations with restarts
++
++        # Dynamic population sizing based on problem difficulty
++        popsize = base_popsize
++        if restart_round > 0:
++            # If we're on a second restart and didn't improve much, increase population
++            if hasattr(self, 'prev_ratio') and self.prev_ratio > 0:
++                improvement = (self.best_ratio - self.prev_ratio) / self.prev_ratio if self.prev_ratio > 0 else 0
++                if improvement < 0.01:  # Less than 1% improvement
++                    popsize = min(40, base_popsize + 10)  # Increase population size
++
++        # Adjust mutation and recombination rates based on restart round for better exploration
++        mutation_rates = [(0.5, 1.0), (0.7, 1.0), (0.8, 1.0)]
++        mutation_strategy = mutation_rates[min(restart_round, len(mutation_rates)-1)]
++
++        recombination_rates = [0.7, 0.8, 0.9]
++        recombination_rate = recombination_rates[min(restart_round, len(recombination_rates)-1)]
+ 
+         try:
+             result = differential_evolution(
+                 lambda x: self.adaptive_penalty_objective(x, iteration=restart_round),
+                 bounds,
+                 seed=42 + restart_round * 10,
+                 maxiter=maxiter,
+                 popsize=popsize,
+                 tol=1e-6,
+-                mutation=(0.5, 1),
+-                recombination=0.7,
++                mutation=mutation_strategy,
++                recombination=recombination_rate,
+                 disp=False
+             )
+ 
+             # Extract optimized points
+             optimized_points = result.x.reshape((self.num_points, 3))
+ 
+             # Calculate final ratio
+             final_ratio = self.min_max_ratio(optimized_points)
++
++            # Store previous ratio for next iteration
++            self.prev_ratio = final_ratio
+ 
+             return optimized_points, final_ratio
+ 
+         except Exception as e:
+             return initial_points, self.min_max_ratio(initial_points)
+ 
+     def local_refinement_phase(self, points):
+         """Apply local refinement using L-BFGS-B."""
+         try:
+             # Flatten the points
+             x0_refine = points.flatten()
+ 
+             # Refinement with L-BFGS-B
+             result_refined = minimize(
+                 lambda x: self.adaptive_penalty_objective(x, iteration=10),
+                 x0_refine,
+                 method='L-BFGS-B',
+                 bounds=[(0, 1) for _ in range(self.num_points * 3)],
+                 options={'ftol': 1e-9, 'gtol': 1e-9},
+                 tol=1e-9
+             )
+ 
+             refined_points = result_refined.x.reshape((self.num_points, 3))
+             final_ratio = self.min_max_ratio(refined_points)
+ 
+             return refined_points, final_ratio
+ 
+         except Exception as e:
+             return points, self.min_max_ratio(points)
+ 
+     def optimize(self):
+         """Main optimization routine."""
+         # Multiple initialization strategies
+         initial_points = self.select_best_initialization()
+ 
++        # Store initial ratio for comparison
++        initial_ratio = self.min_max_ratio(initial_points)
++        self.best_ratio = initial_ratio
++        self.best_points = initial_points.copy()
++
++        # Track convergence history for adaptive behavior
++        convergence_history = []
++        max_history_length = 10
++
+         # Multiple restart rounds for better exploration
+-        for restart in range(2):  # 2 restart rounds for better exploration
++        for restart in range(3):  # Increase to 3 restart rounds for better exploration
+             # Global optimization
+             optimized_points, final_ratio = self.global_optimization_phase(initial_points, restart)
+ 
+             # Store best result
+             if final_ratio > self.best_ratio:
+                 self.best_ratio = final_ratio
+                 self.best_points = optimized_points.copy()
+                 self.improvement_streak = 0  # Reset streak
+             else:
+                 self.improvement_streak += 1
+ 
++            # Track convergence
++            convergence_history.append(final_ratio)
++            if len(convergence_history) > max_history_length:
++                convergence_history.pop(0)
++
++            # Adaptive early stopping based on convergence pattern
++            if len(convergence_history) >= 3:
++                recent_improvements = [convergence_history[i] - convergence_history[i-1]
++                                     for i in range(1, len(convergence_history))]
++                avg_improvement = np.mean(recent_improvements) if len(recent_improvements) > 0 else 0
++
++                # Stop if very small improvements
++                if avg_improvement < 1e-6 and restart > 1:
++                    break
++
+             # Early stopping if no improvement for too many attempts
+             if self.improvement_streak >= self.max_improvement_streak:
+                 break
+ 
+             # Use current result as starting point for next restart
+             initial_points = optimized_points
+ 
+         # Final local refinement
+         if self.best_points is not None:
+             refined_points, refined_ratio = self.local_refinement_phase(self.best_points)
+ 
+             # Update if improved
+             if refined_ratio > self.best_ratio:
+                 self.best_points = refined_points
+ 
+         return self.best_points
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     optimizer = PointDistributionOptimizer(num_points=14)
+     return optimizer.optimize()
+ 
+ # EVOLVE-BLOCK-END

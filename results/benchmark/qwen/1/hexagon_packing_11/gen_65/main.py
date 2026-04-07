@@ -1,0 +1,392 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon, Point
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import random
+import time
+from numba import jit, prange
+import math
+
+# Constants
+NUM_INNER_HEXAGONS = 11
+UNIT_HEXAGON_RADIUS = 1.0
+UNIT_HEXAGON_WIDTH = 2.0
+MAX_EVAL_TIME = 180.0
+NUM_STARTS = 5
+
+# Precomputed unit hexagon vertices (centered at origin)
+@jit(nopython=True)
+def get_unit_hexagon_vertices_numba():
+    angles = np.linspace(0, 2*np.pi, 7)[:-1]
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        vertices[i, 0] = np.cos(angles[i])
+        vertices[i, 1] = np.sin(angles[i])
+    return vertices
+
+UNIT_HEXAGON_VERTICES = get_unit_hexagon_vertices_numba()
+
+@jit(nopython=True)
+def rotate_point_numba(point, angle_rad):
+    """Fast rotation of a point around origin"""
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    return np.array([point[0]*cos_a - point[1]*sin_a, point[0]*sin_a + point[1]*cos_a])
+
+@jit(nopython=True)
+def hexagon_vertices_numba(center, angle_rad, scale=1.0):
+    """Fast computation of hexagon vertices"""
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        rotated = rotate_point_numba(UNIT_HEXAGON_VERTICES[i], angle_rad)
+        vertices[i] = rotated * scale + center
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon_fast(point, polygon_vertices):
+    """Fast point-in-polygon test using ray casting"""
+    x, y = point
+    n = len(polygon_vertices)
+    inside = False
+    
+    p1x, p1y = polygon_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon_vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+def get_outer_hexagon_vertices(center, angle_rad, radius):
+    """Get vertices of outer hexagon"""
+    return hexagon_vertices_numba(center, angle_rad, radius)
+
+@jit(nopython=True)
+def distance_point_to_segment(point, seg_start, seg_end):
+    """Compute distance from point to line segment"""
+    px, py = point
+    x1, y1 = seg_start
+    x2, y2 = seg_end
+    
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx*dx + dy*dy
+    
+    if length_sq == 0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+    
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    
+    return np.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+
+@jit(nopython=True)
+def polygon_distance_fast(p1, p2):
+    """Fast distance between two polygons using vertex-to-edge distances"""
+    min_dist = np.inf
+    
+    # Check distance from vertices of p1 to edges of p2
+    for i in range(len(p1)):
+        for j in range(len(p2)):
+            edge_start = p2[j]
+            edge_end = p2[(j+1) % len(p2)]
+            dist = distance_point_to_segment(p1[i], edge_start, edge_end)
+            if dist < min_dist:
+                min_dist = dist
+                
+    # Check distance from vertices of p2 to edges of p1
+    for i in range(len(p2)):
+        for j in range(len(p1)):
+            edge_start = p1[j]
+            edge_end = p1[(j+1) % len(p1)]
+            dist = distance_point_to_segment(p2[i], edge_start, edge_end)
+            if dist < min_dist:
+                min_dist = dist
+                
+    return min_dist
+
+def fast_check_overlap_fast(hex1_vertices, hex2_vertices):
+    """Fast overlap check using bounding boxes and minimal distance"""
+    # Quick bounding box check first
+    min1 = np.min(hex1_vertices, axis=0)
+    max1 = np.max(hex1_vertices, axis=0)
+    min2 = np.min(hex2_vertices, axis=0)
+    max2 = np.max(hex2_vertices, axis=0)
+    
+    # If bounding boxes don't intersect, no overlap
+    if max1[0] < min2[0] or max2[0] < min1[0] or max1[1] < min2[1] or max2[1] < min1[1]:
+        return False
+    
+    # Compute minimal distance
+    min_dist = polygon_distance_fast(hex1_vertices, hex2_vertices)
+    return min_dist < 1e-6  # Consider overlapping if distance is very small
+
+def calculate_outer_radius_fast(inner_hex_data, outer_center=(0,0), outer_angle=0):
+    """Fast calculation of outer radius"""
+    max_dist = 0.0
+    outer_center_np = np.array(outer_center)
+    
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices_numba(center, angle, UNIT_HEXAGON_RADIUS)
+        
+        for vertex in vertices:
+            dist = np.linalg.norm(np.array(vertex) - outer_center_np)
+            if dist > max_dist:
+                max_dist = dist
+                
+    return max_dist
+
+def validate_solution_fast(inner_hex_data, outer_center=(0,0), outer_angle=0):
+    """Fast validation of solution"""
+    # Check containment first
+    outer_radius = calculate_outer_radius_fast(inner_hex_data, outer_center, outer_angle)
+    outer_vertices = get_outer_hexagon_vertices(outer_center, outer_angle, outer_radius)
+    
+    # Check each hexagon
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices_numba(center, angle, UNIT_HEXAGON_RADIUS)
+        
+        # Check containment
+        for vertex in vertices:
+            if not point_in_polygon_fast(vertex, outer_vertices):
+                return False
+                
+    # Check overlaps using KDTree for efficiency
+    tree_data = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices_numba(center, angle, UNIT_HEXAGON_RADIUS)
+        # Use centroid for tree lookup
+        centroid = np.mean(vertices, axis=0)
+        tree_data.append((centroid[0], centroid[1], i, vertices))
+    
+    # Build kdtree for faster neighbor search
+    tree_points = [(p[0], p[1]) for p in tree_data]
+    if len(tree_points) > 1:
+        tree = cKDTree(tree_points)
+        for i, (cx, cy, idx, vertices) in enumerate(tree_data):
+            # Find nearby hexagons
+            neighbors = tree.query_ball_point([cx, cy], 2.5)  # Approximate diameter
+            for j in neighbors:
+                if i != j:
+                    _, _, _, other_vertices = tree_data[j]
+                    if fast_check_overlap_fast(vertices, other_vertices):
+                        return False
+                        
+    return True
+
+def evaluate_fitness_fast(inner_hex_data, outer_center=(0,0), outer_angle=0):
+    """Fast fitness evaluation"""
+    # Check validity first
+    if not validate_solution_fast(inner_hex_data, outer_center, outer_angle):
+        return -1e10
+        
+    # Calculate outer radius
+    outer_radius = calculate_outer_radius_fast(inner_hex_data, outer_center, outer_angle)
+    return -outer_radius  # Negative because we want to minimize radius
+
+def create_valid_initial_individual():
+    """Create a more intelligent initial individual"""
+    # Start with a central hexagon
+    individual = [[0, 0, 0]]  # center hexagon
+    
+    # Place others in a pattern that reduces overlap probability
+    angles = np.linspace(0, 2*np.pi, 10)[:-1]  # 10 positions around circle
+    radii = [2.0, 2.5, 3.0, 3.5]  # Different ring sizes
+    
+    for i, (angle, radius) in enumerate(zip(angles, radii * 2)):
+        if i >= 10:
+            break
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        angle_deg = random.uniform(0, 360)
+        individual.append([x, y, angle_deg])
+    
+    # Fill remaining spots with random positions
+    while len(individual) < NUM_INNER_HEXAGONS:
+        x = random.uniform(-5.0, 5.0)
+        y = random.uniform(-5.0, 5.0)
+        angle_deg = random.uniform(0, 360)
+        individual.append([x, y, angle_deg])
+        
+    return np.array(individual[:NUM_INNER_HEXAGONS])
+
+def create_initial_population(pop_size):
+    """Create diverse initial population"""
+    population = []
+    
+    # Add some predetermined good arrangements
+    for _ in range(pop_size // 3):
+        individual = create_valid_initial_individual()
+        population.append(individual)
+        
+    # Add random ones
+    for _ in range(pop_size - len(population)):
+        individual = create_valid_initial_individual()
+        population.append(individual)
+        
+    return population
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Tournament selection"""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_idx]
+
+def crossover(parent1, parent2):
+    """Single point crossover"""
+    crossover_point = random.randint(1, len(parent1)-1)
+    child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+    child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+    return child1, child2
+
+def mutate(individual, mutation_rate, max_step=0.5):
+    """Enhanced mutation with variable step sizes"""
+    mutated = individual.copy()
+    
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Mutate position
+            mutated[i][0] += random.uniform(-max_step, max_step)
+            mutated[i][1] += random.uniform(-max_step, max_step)
+            
+            # Mutate angle
+            mutated[i][2] += random.uniform(-30, 30)
+            mutated[i][2] %= 360
+            
+    return mutated
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Multi-start optimization
+    best_fitness = float('-inf')
+    best_individual = None
+    
+    for start_idx in range(NUM_STARTS):
+        if time.time() - start_time > MAX_EVAL_TIME - 2:
+            break
+            
+        # Configuration parameters
+        pop_size = 60
+        generations = 1500
+        elite_size = 8
+        tournament_size = 5
+        
+        # Create initial population
+        population = create_initial_population(pop_size)
+        
+        # Evolution loop
+        for gen in range(generations):
+            if time.time() - start_time > MAX_EVAL_TIME - 2:
+                break
+                
+            # Adaptive mutation rate
+            mutation_rate = max(0.02, 0.3 * (1 - gen/generations))
+            
+            # Evaluate fitness for entire population
+            fitnesses = []
+            for individual in population:
+                fit = evaluate_fitness_fast(individual)
+                fitnesses.append(fit)
+            
+            # Track best solution
+            current_best_idx = np.argmax(fitnesses)
+            current_best_fitness = fitnesses[current_best_idx]
+            
+            if current_best_fitness > best_fitness:
+                best_fitness = current_best_fitness
+                best_individual = population[current_best_idx].copy()
+                
+            # Elitism
+            elite_indices = np.argsort(fitnesses)[-elite_size:]
+            elites = [population[i] for i in elite_indices]
+            
+            # Create new population
+            new_population = elites.copy()
+            
+            # Fill rest with offspring
+            while len(new_population) < pop_size:
+                parent1 = tournament_selection(population, fitnesses, tournament_size)
+                parent2 = tournament_selection(population, fitnesses, tournament_size)
+                
+                child1, child2 = crossover(parent1, parent2)
+                child1 = mutate(child1, mutation_rate)
+                child2 = mutate(child2, mutation_rate)
+                
+                new_population.extend([child1, child2])
+                
+            # Trim to exact population size
+            population = new_population[:pop_size]
+    
+    # Final validation and calculation
+    if best_individual is None:
+        # Fallback to simple arrangement
+        fallback = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        best_individual = fallback
+    
+    # Final validation
+    outer_radius = -best_fitness if best_fitness != float('-inf') else 8.0
+    
+    # Ensure the solution is actually valid
+    if not validate_solution_fast(best_individual):
+        # If not valid, use simple fallback
+        fallback = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        best_individual = fallback
+        outer_radius = 8.0
+    
+    # Final recalculation to be safe
+    if validate_solution_fast(best_individual):
+        outer_radius = calculate_outer_radius_fast(best_individual)
+    
+    # Return result
+    inner_hex_data = best_individual
+    outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+    outer_hex_side_length = outer_radius
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

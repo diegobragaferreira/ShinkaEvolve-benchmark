@@ -1,0 +1,174 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+def fibonacci_spiral_sphere(n_points):
+    """Generate points on a sphere using Fibonacci spiral method."""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n_points):
+        y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+def min_max_dist_ratio(points):
+    """Calculate the ratio of minimum to maximum distance."""
+    if len(points) < 2:
+        return 0.0
+    distances = pdist(points)
+    if len(distances) == 0:
+        return 0.0
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+    if max_dist < 1e-12:
+        return 0.0
+    return min_dist / max_dist
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    n = 14
+    d = 3
+
+    # Multi-start optimization with different initial configurations
+    best_ratio = -np.inf
+    best_points = None
+
+    # Strategy 1: Fibonacci spiral with small random perturbations
+    base_points = fibonacci_spiral_sphere(n)
+    for trial in range(5):  # Multiple random restarts
+        np.random.seed(trial * 1000)  # Different seed for each trial
+        perturbed_points = base_points + np.random.normal(0, 0.05, (n, d))
+
+        # Normalize to unit sphere
+        norms = np.linalg.norm(perturbed_points, axis=1, keepdims=True)
+        normalized_points = perturbed_points / np.maximum(norms, 1e-12)
+
+        # Flatten for optimization
+        x0 = normalized_points.flatten()
+
+        # Define objective function for optimization (negative because we want to maximize)
+        def objective(x_flat):
+            points_reshaped = x_flat.reshape(n, d)
+            # Ensure points are on unit sphere
+            norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+            normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+            return -min_max_dist_ratio(normalized_points)
+
+        # Define constraint function for unit sphere
+        def constraint_sphere(x_flat):
+            points_reshaped = x_flat.reshape(n, d)
+            norms = np.linalg.norm(points_reshaped, axis=1)
+            return norms - 1.0
+
+        # Set up constraints and bounds
+        constraints = {'type': 'eq', 'fun': constraint_sphere}
+        bounds = [(-2, 2) for _ in range(n * d)]
+
+        # First optimization with L-BFGS-B
+        try:
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+
+            # Extract optimized points and evaluate
+            if result.success:
+                optimized_points = result.x.reshape(n, d)
+                # Normalize to ensure they're on unit sphere
+                norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                normalized_points = optimized_points / np.maximum(norms, 1e-12)
+
+                ratio = min_max_dist_ratio(normalized_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = normalized_points.copy()
+
+        except Exception:
+            continue
+
+    # Strategy 2: Additional random initialization with refinement
+    if best_points is None:
+        np.random.seed(42)  # Fixed seed for consistency
+        random_points = np.random.rand(n, d) * 2 - 1  # [-1, 1]
+        norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+        normalized_points = random_points / np.maximum(norms, 1e-12)
+
+        # Flatten for optimization
+        x0 = normalized_points.flatten()
+
+        # Define objective function for optimization (negative because we want to maximize)
+        def objective(x_flat):
+            points_reshaped = x_flat.reshape(n, d)
+            # Ensure points are on unit sphere
+            norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+            normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+            return -min_max_dist_ratio(normalized_points)
+
+        # Define constraint function for unit sphere
+        def constraint_sphere(x_flat):
+            points_reshaped = x_flat.reshape(n, d)
+            norms = np.linalg.norm(points_reshaped, axis=1)
+            return norms - 1.0
+
+        # Set up constraints and bounds
+        constraints = {'type': 'eq', 'fun': constraint_sphere}
+        bounds = [(-2, 2) for _ in range(n * d)]
+
+        # First optimization with L-BFGS-B
+        try:
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+
+            # Extract optimized points and evaluate
+            if result.success:
+                optimized_points = result.x.reshape(n, d)
+                # Normalize to ensure they're on unit sphere
+                norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                normalized_points = optimized_points / np.maximum(norms, 1e-12)
+
+                ratio = min_max_dist_ratio(normalized_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = normalized_points.copy()
+
+        except Exception:
+            pass
+
+    # If we still don't have a solution, return a random configuration
+    if best_points is None:
+        np.random.seed(42)
+        points = np.random.rand(n, d) * 2 - 1
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        best_points = points / np.maximum(norms, 1e-12)
+
+    return best_points
+
+# EVOLVE-BLOCK-END

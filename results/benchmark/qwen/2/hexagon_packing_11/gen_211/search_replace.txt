@@ -1,0 +1,94 @@
+<NAME>
+add_sat_collision_detection
+</NAME>
+
+<DESCRIPTION>
+Adding Separating Axis Theorem (SAT) collision detection for improved performance and numerical stability. The current implementation uses Shapely's buffer-based intersection checks which can be inefficient and numerically unstable. SAT provides a more robust and faster method for detecting hexagon overlaps by projecting polygons onto potential separating axes and checking for overlap intervals.
+
+This change replaces the `check_collision` method in `HexagonUtils` with a more efficient SAT-based implementation that should significantly improve performance during collision checking and provide better numerical stability.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def check_collision(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons collide using Shapely with buffer for robustness"""
+        poly1 = Polygon(hex1_vertices)
+        poly2 = Polygon(hex2_vertices)
+        # Use small buffer to avoid floating-point precision issues
+        return poly1.buffer(1e-6).intersects(poly2.buffer(1e-6))
+=======
+    @staticmethod
+    def check_collision(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons collide using Separating Axis Theorem (SAT)"""
+        # Get edges for both polygons
+        edges1 = []
+        edges2 = []
+
+        # Compute edges for first hexagon
+        for i in range(len(hex1_vertices)):
+            edge = hex1_vertices[(i + 1) % len(hex1_vertices)] - hex1_vertices[i]
+            edges1.append(edge)
+
+        # Compute edges for second hexagon
+        for i in range(len(hex2_vertices)):
+            edge = hex2_vertices[(i + 1) % len(hex2_vertices)] - hex2_vertices[i]
+            edges2.append(edge)
+
+        # Get normals to all edges (perpendicular vectors)
+        normals1 = []
+        normals2 = []
+
+        # Compute normals for first hexagon
+        for edge in edges1:
+            # Normal vector (perpendicular to edge): (-edge.y, edge.x)
+            normal = np.array([-edge[1], edge[0]])
+            # Normalize the normal vector
+            norm_len = np.linalg.norm(normal)
+            if norm_len > 1e-12:  # Prevent division by zero
+                normal = normal / norm_len
+            else:
+                continue  # Skip zero-length edges
+            normals1.append(normal)
+
+        # Compute normals for second hexagon
+        for edge in edges2:
+            # Normal vector (perpendicular to edge): (-edge.y, edge.x)
+            normal = np.array([-edge[1], edge[0]])
+            # Normalize the normal vector
+            norm_len = np.linalg.norm(normal)
+            if norm_len > 1e-12:  # Prevent division by zero
+                normal = normal / norm_len
+            else:
+                continue  # Skip zero-length edges
+            normals2.append(normal)
+
+        # Test all axes - early termination optimization
+        all_normals = normals1 + normals2
+
+        # Test each potential separating axis
+        for axis in all_normals:
+            # Project both polygons onto the axis
+            projections1 = []
+            for vertex in hex1_vertices:
+                proj = np.dot(vertex, axis)
+                projections1.append(proj)
+
+            projections2 = []
+            for vertex in hex2_vertices:
+                proj = np.dot(vertex, axis)
+                projections2.append(proj)
+
+            # Get min and max projections for each polygon
+            min1, max1 = min(projections1), max(projections1)
+            min2, max2 = min(projections2), max(projections2)
+
+            # Check for overlap along this axis
+            # If there's no overlap, the polygons are separated
+            if max1 < min2 or max2 < min1:
+                return False  # No collision - found separating axis
+
+        # If we get here, no separating axis was found - polygons overlap
+        return True
+>>>>>>> REPLACE
+</DIFF>

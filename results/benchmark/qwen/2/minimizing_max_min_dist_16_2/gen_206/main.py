@@ -1,0 +1,396 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import differential_evolution, minimize
+import time
+from typing import Tuple, List, Optional
+import warnings
+
+
+class PointDispersionOptimizer:
+    """Hierarchical optimizer for point arrangement to maximize min/max distance ratio."""
+    
+    def __init__(self, seed: int = 42):
+        self.seed = seed
+        np.random.seed(seed)
+        self.benchmark_ratio = 1.0 / np.sqrt(12.889266112)
+        
+    def calculate_min_max_ratio(self, points: np.ndarray) -> float:
+        """Calculate the ratio of minimum to maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        distances = pdist(points)
+        dmin = np.min(distances)
+        dmax = np.max(distances)
+
+        if dmax == 0:
+            return 0.0
+
+        return dmin / dmax
+
+    def _validate_points(self, points: np.ndarray) -> bool:
+        """Validate that points are within valid bounds."""
+        return np.all((points >= 0) & (points <= 1))
+
+    def create_hexagonal_initialization(self) -> np.ndarray:
+        """Create a hexagonal-like arrangement of points."""
+        points = np.zeros((16, 2))
+        
+        # Create a roughly hexagonal arrangement with 4 rows and 4 columns
+        rows, cols = 4, 4
+        spacing_x = 1.0 / (cols + 1)
+        spacing_y = spacing_x * np.sqrt(3) / 2.0
+
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx < 16:
+                    # Offset every other row
+                    x = (j + 0.5 * (i % 2)) * spacing_x
+                    y = i * spacing_y
+                    points[idx] = [x, y]
+                    idx += 1
+        
+        return points
+
+    def create_ring_initialization(self) -> np.ndarray:
+        """Create a concentric ring-like arrangement."""
+        points = np.zeros((16, 2))
+
+        # Place points in concentric rings with 4 layers of 4 points each
+        angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+        radii = np.linspace(0.1, 0.8, 4)  # Four layers
+        layer_points = [4, 4, 4, 4]  # 4 points per layer
+
+        idx = 0
+        for i, radius in enumerate(radii):
+            num_points_in_layer = layer_points[i]
+            layer_angles = np.linspace(0, 2*np.pi, num_points_in_layer, endpoint=False)
+            for angle in layer_angles:
+                if idx < 16:
+                    x = 0.5 + radius * np.cos(angle)
+                    y = 0.5 + radius * np.sin(angle)
+                    points[idx] = [x, y]
+                    idx += 1
+
+        return points
+
+    def create_fibonacci_initialization(self) -> np.ndarray:
+        """Create a Fibonacci-like arrangement for better point distribution."""
+        points = np.zeros((16, 2))
+
+        # Use Fibonacci-inspired pattern in 2D
+        golden_ratio = (1 + np.sqrt(5)) / 2.0
+        for i in range(16):
+            theta = 2 * np.pi * i / golden_ratio
+            r = np.sqrt(i / 15.0)  # Normalize to [0,1]
+            x = 0.5 + r * np.cos(theta) * 0.8
+            y = 0.5 + r * np.sin(theta) * 0.8
+            points[i] = [x, y]
+
+        return points
+
+    def create_grid_initialization(self) -> np.ndarray:
+        """Create a regular grid initialization."""
+        points = np.zeros((16, 2))
+        idx = 0
+        
+        # Create 4x4 grid
+        for i in range(4):
+            for j in range(4):
+                if idx < 16:
+                    x = j / 3.0 if j > 0 else 0.0
+                    y = i / 3.0 if i > 0 else 0.0
+                    points[idx] = [x, y]
+                    idx += 1
+        
+        return points
+
+    def create_random_initialization(self) -> np.ndarray:
+        """Create a random initialization."""
+        np.random.seed(self.seed)
+        return np.random.rand(16, 2)
+
+    def create_initial_configurations(self) -> List[Tuple[str, np.ndarray]]:
+        """Generate diverse initial configurations with perturbations."""
+        configs = []
+        
+        # Different initialization strategies
+        strategies = [
+            ("hexagonal", self.create_hexagonal_initialization),
+            ("ring", self.create_ring_initialization),
+            ("fibonacci", self.create_fibonacci_initialization),
+            ("grid", self.create_grid_initialization),
+            ("random", self.create_random_initialization)
+        ]
+        
+        # Add base configurations
+        for name, func in strategies:
+            try:
+                config = func()
+                if self._validate_points(config):
+                    configs.append((name, config))
+            except Exception:
+                continue
+        
+        # Add perturbed versions to increase diversity
+        perturbed_configs = []
+        for name, config in configs:
+            try:
+                # Apply multiple perturbations with different magnitudes
+                for perturbation_magnitude in [0.01, 0.02, 0.03]:
+                    perturbed = config + np.random.normal(0, perturbation_magnitude, config.shape)
+                    perturbed = np.clip(perturbed, 0, 1)
+                    if self._validate_points(perturbed):
+                        perturbed_configs.append((f"{name}_perturbed", perturbed))
+            except Exception:
+                continue
+        
+        configs.extend(perturbed_configs)
+        
+        return configs
+
+    def _adaptive_perturbation_magnitude(self, initial_ratio: float, iteration: int = 0, 
+                                       max_iterations: int = 100) -> float:
+        """Calculate adaptive perturbation magnitude based on solution quality."""
+        # Base perturbation scale
+        base_perturbation = 0.015
+        
+        # Scale based on current solution quality
+        if initial_ratio < 0.1:
+            # Poor initial solution - use larger perturbations
+            scale = 1.5
+        elif initial_ratio < 0.2:
+            # Moderate solution - medium perturbations
+            scale = 1.0
+        elif initial_ratio < 0.3:
+            # Good solution - smaller perturbations
+            scale = 0.6
+        else:
+            # Excellent solution - smallest perturbations
+            scale = 0.3
+            
+        # Further reduce perturbation over iterations
+        decay_factor = 1.0 - (iteration / max_iterations)
+        scale *= max(0.1, decay_factor)
+        
+        return base_perturbation * max(0.1, scale)
+
+    def _multi_method_optimization(self, initial_points: np.ndarray, 
+                                 max_iter: int = 500) -> np.ndarray:
+        """Perform multi-method optimization with fallback strategies."""
+        best_result = initial_points.copy()
+        best_ratio = self.calculate_min_max_ratio(best_result)
+        
+        # Method 1: L-BFGS-B (fast and effective for smooth functions)
+        try:
+            initial_flat = initial_points.flatten()
+            bounds = [(0, 1) for _ in range(len(initial_flat))]
+            
+            result = minimize(
+                lambda flat_points: -self.calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12},
+                callback=None
+            )
+            
+            if result.success:
+                optimized_points = result.x.reshape(-1, 2)
+                optimized_points = np.clip(optimized_points, 0, 1)
+                ratio = self.calculate_min_max_ratio(optimized_points)
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_result = optimized_points
+        except Exception:
+            pass
+        
+        # Method 2: SLSQP (good for constrained problems)
+        try:
+            initial_flat = initial_points.flatten()
+            bounds = [(0, 1) for _ in range(len(initial_flat))]
+            
+            result = minimize(
+                lambda flat_points: -self.calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                initial_flat,
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': max_iter//2, 'ftol': 1e-10, 'gtol': 1e-10},
+                callback=None
+            )
+            
+            if result.success:
+                optimized_points = result.x.reshape(-1, 2)
+                optimized_points = np.clip(optimized_points, 0, 1)
+                ratio = self.calculate_min_max_ratio(optimized_points)
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_result = optimized_points
+        except Exception:
+            pass
+            
+        # Method 3: TNC (trust-region Newton-CG)
+        try:
+            initial_flat = initial_points.flatten()
+            bounds = [(0, 1) for _ in range(len(initial_flat))]
+            
+            result = minimize(
+                lambda flat_points: -self.calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                initial_flat,
+                method='TNC',
+                bounds=bounds,
+                options={'maxiter': max_iter//2, 'ftol': 1e-10, 'gtol': 1e-10},
+                callback=None
+            )
+            
+            if result.success:
+                optimized_points = result.x.reshape(-1, 2)
+                optimized_points = np.clip(optimized_points, 0, 1)
+                ratio = self.calculate_min_max_ratio(optimized_points)
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_result = optimized_points
+        except Exception:
+            pass
+            
+        return best_result
+
+    def _global_optimization(self, initial_points: np.ndarray, max_iter: int = 300) -> np.ndarray:
+        """Perform global optimization using differential evolution."""
+        try:
+            flat_points = initial_points.flatten()
+            bounds = [(0, 1) for _ in range(len(flat_points))]
+            
+            de_result = differential_evolution(
+                lambda x: -self.calculate_min_max_ratio(x.reshape(-1, 2)),
+                bounds,
+                seed=self.seed,
+                maxiter=max_iter,
+                popsize=25,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                tol=1e-8,
+                disp=False
+            )
+            
+            return de_result.x.reshape(-1, 2)
+        except Exception:
+            # Return initial points if optimization fails
+            return initial_points
+
+    def _hierarchical_refinement(self, initial_points: np.ndarray) -> np.ndarray:
+        """Perform hierarchical refinement of the solution."""
+        # Stage 1: Global optimization
+        global_result = self._global_optimization(initial_points, max_iter=200)
+        
+        # Stage 2: Multi-method local refinement
+        refined_result = self._multi_method_optimization(global_result, max_iter=300)
+        
+        # Stage 3: Final validation and cleanup
+        final_result = refined_result.copy()
+        final_ratio = self.calculate_min_max_ratio(final_result)
+        
+        # If we haven't made progress, try a more aggressive local refinement
+        if abs(final_ratio - self.calculate_min_max_ratio(initial_points)) < 1e-10:
+            # Try more aggressive local optimization
+            aggressive_refinement = self._multi_method_optimization(
+                initial_points, max_iter=500
+            )
+            aggressive_ratio = self.calculate_min_max_ratio(aggressive_refinement)
+            if aggressive_ratio > final_ratio:
+                final_result = aggressive_refinement
+                
+        return final_result
+
+    def _evaluate_configuration(self, name: str, initial_points: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Evaluate a single configuration through hierarchical optimization."""
+        try:
+            # Perform hierarchical optimization
+            optimized_points = self._hierarchical_refinement(initial_points)
+            ratio = self.calculate_min_max_ratio(optimized_points)
+            
+            return ratio, optimized_points
+        except Exception:
+            # Return original points if optimization fails
+            ratio = self.calculate_min_max_ratio(initial_points)
+            return ratio, initial_points
+
+    def optimize_all_configurations(self) -> np.ndarray:
+        """Perform multi-start optimization across all configurations with hierarchical approach."""
+        # Get all initial configurations
+        configurations = self.create_initial_configurations()
+        
+        best_ratio = -np.inf
+        best_points = None
+        best_config_name = ""
+        
+        # Sort configurations by initial quality to prioritize better ones
+        initial_ratios = []
+        sorted_configs = []
+        
+        for name, config in configurations:
+            try:
+                ratio = self.calculate_min_max_ratio(config)
+                initial_ratios.append((ratio, name, config))
+            except Exception:
+                continue
+        
+        # Sort by ratio descending
+        initial_ratios.sort(reverse=True)
+        sorted_configs = [(name, config) for _, name, config in initial_ratios]
+        
+        # Optimization loop with early termination
+        optimization_results = []
+        for i, (name, initial_config) in enumerate(sorted_configs):
+            try:
+                # Skip if we've already found a very good solution
+                if best_ratio > 0.28:  # Early stopping threshold
+                    break
+                    
+                ratio, result = self._evaluate_configuration(name, initial_config)
+                optimization_results.append((ratio, name, result))
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = result
+                    best_config_name = name
+                    
+            except Exception as e:
+                continue
+        
+        # Final check to make sure we have a valid result
+        if best_points is None:
+            # Fallback to the best initial configuration
+            if sorted_configs:
+                _, initial_config = sorted_configs[0]
+                best_points = self._hierarchical_refinement(initial_config)
+            
+        return best_points if best_points is not None else self.create_hexagonal_initialization()
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+    # Create optimizer instance
+    optimizer = PointDispersionOptimizer(seed=42)
+    
+    # Perform optimization
+    result = optimizer.optimize_all_configurations()
+    
+    # Ensure result is within bounds
+    result = np.clip(result, 0, 1)
+    
+    return result
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,214 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from sobol import sobol_sequence
+import math
+from typing import Tuple, Optional, List
+import warnings
+
+class PointDispersionOptimizer:
+    """Optimizes point distribution to maximize min/max distance ratio."""
+    
+    def __init__(self, n_points: int = 14, dimension: int = 3):
+        self.n_points = n_points
+        self.dimension = dimension
+        self.best_ratio = -np.inf
+        self.best_points = None
+        self.target_ratio = 1.0 / math.sqrt(4.165849767)  # Benchmark value
+        
+    def _distance_ratio(self, points: np.ndarray) -> float:
+        """Calculate the ratio of minimum to maximum distance."""
+        if points.shape[0] < 2:
+            return 0.0
+            
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist <= 0:
+            return 0.0
+            
+        return min_dist / max_dist
+    
+    def _objective_function(self, points_flat: np.ndarray) -> float:
+        """Minimize negative of distance ratio (since we want to maximize)."""
+        points = points_flat.reshape(-1, self.dimension)
+        return -self._distance_ratio(points)
+    
+    def _sobol_points(self) -> np.ndarray:
+        """Generate points using 3D Sobol sequence and map to unit sphere."""
+        # Generate Sobol sequence points in [0,1]^3
+        sobol_points = sobol_sequence(self.n_points, 3)
+        
+        # Map to unit sphere using inverse transform sampling
+        # Scale to [-1,1]^3 first
+        sobol_points = sobol_points * 2 - 1
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(sobol_points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1, norms)
+        normalized_points = sobol_points / norms
+        
+        return normalized_points
+    
+    def _get_initial_points(self) -> np.ndarray:
+        """Get good initial point configuration using Sobol-based strategy."""
+        # Strategy 1: 3D Sobol sequence points
+        sobol_points = self._sobol_points()
+        
+        # Strategy 2: Add small random perturbation for diversity
+        np.random.seed(42)
+        noise = np.random.normal(0, 0.02, (self.n_points, self.dimension))
+        perturbed_points = sobol_points + noise
+        
+        # Strategy 3: Normalize to unit sphere
+        norms = np.linalg.norm(perturbed_points, axis=1)
+        normalized_points = perturbed_points / norms[:, np.newaxis]
+        
+        # Return flattened array
+        return normalized_points.flatten()
+    
+    def _create_constraints(self, iteration: int = 0) -> List[dict]:
+        """Create constraints with adaptive tightening."""
+        constraints = []
+        
+        # Always enforce unit sphere constraint
+        def sphere_constraint(x):
+            points = x.reshape(-1, self.dimension)
+            norms = np.linalg.norm(points, axis=1)
+            return norms - 1.0  # Should equal 0 for unit sphere
+        
+        # Add constraint for each point to lie on unit sphere
+        for i in range(self.n_points):
+            constraints.append({
+                'type': 'eq', 
+                'fun': lambda x, i=i: sphere_constraint(x)[i]
+            })
+        
+        return constraints
+    
+    def _adaptive_bounds(self, iteration: int = 0) -> List[Tuple[float, float]]:
+        """Adaptive bounds that tighten over iterations."""
+        # Start with relaxed bounds for exploration
+        bounds = [(-1.2, 1.2) for _ in range(self.n_points * self.dimension)]
+        return bounds
+    
+    def _optimize_with_hybrid_method(self, x0: np.ndarray, maxiter: int = 500) -> Tuple[np.ndarray, float]:
+        """Optimize with SLSQP first, then L-BFGS-B for refinement."""
+        # Phase 1: SLSQP for global search with adaptive constraints
+        constraints = self._create_constraints(0)
+        bounds = self._adaptive_bounds(0)
+        
+        options_slsqp = {'maxiter': maxiter // 2, 'ftol': 1e-6, 'gtol': 1e-6}
+        
+        try:
+            result_slsqp = minimize(
+                self._objective_function,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options=options_slsqp,
+                tol=1e-6
+            )
+            
+            if not result_slsqp.success:
+                # If SLSQP fails, return initial points
+                return x0, self._distance_ratio(x0.reshape(-1, self.dimension))
+                
+            # Phase 2: L-BFGS-B for fine-tuning with tighter constraints
+            refined_x0 = result_slsqp.x
+            
+            # Tighten constraints for L-BFGS-B
+            options_l_bfgs = {'maxiter': maxiter // 2, 'ftol': 1e-10, 'gtol': 1e-10}
+            
+            result_l_bfgs = minimize(
+                self._objective_function,
+                refined_x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                constraints=constraints,
+                options=options_l_bfgs,
+                tol=1e-10
+            )
+            
+            if result_l_bfgs.success:
+                optimized_points = result_l_bfgs.x
+                ratio = self._distance_ratio(optimized_points.reshape(-1, self.dimension))
+                return optimized_points, ratio
+            else:
+                # Return SLSQP result if L-BFGS fails
+                ratio = self._distance_ratio(result_slsqp.x.reshape(-1, self.dimension))
+                return result_slsqp.x, ratio
+                
+        except Exception as e:
+            warnings.warn(f"Hybrid optimization failed: {str(e)}")
+            return x0, self._distance_ratio(x0.reshape(-1, self.dimension))
+    
+    def optimize(self, max_restarts: int = 8, maxiter: int = 500) -> np.ndarray:
+        """Main optimization loop with enhanced multi-start approach."""
+        self.best_ratio = -np.inf
+        self.best_points = None
+        
+        # Additional initial configurations using different strategies
+        configurations = []
+        
+        # Base Sobol configuration
+        configurations.append(self._get_initial_points())
+        
+        # Different random seeds for more diversity
+        for i in range(7):
+            np.random.seed(100 + i)
+            # Generate new Sobol points with different randomization
+            sobol_points = self._sobol_points()
+            noise = np.random.normal(0, 0.01, (self.n_points, self.dimension))
+            perturbed_points = sobol_points + noise
+            norms = np.linalg.norm(perturbed_points, axis=1)
+            normalized_points = perturbed_points / norms[:, np.newaxis]
+            configurations.append(normalized_points.flatten())
+        
+        # Multi-start optimization
+        for restart, x0 in enumerate(configurations):
+            try:
+                # Set seed for reproducibility
+                np.random.seed(42 + restart)
+                
+                # Optimize with hybrid method
+                optimized_points, ratio = self._optimize_with_hybrid_method(x0, maxiter)
+                
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_points = optimized_points.copy()
+                    
+            except Exception as e:
+                warnings.warn(f"Restart {restart} failed: {str(e)}")
+                continue
+        
+        # Fallback to first configuration if no improvement found
+        if self.best_points is None:
+            self.best_points = configurations[0]
+        
+        # Convert back to n_points x dimension array
+        final_points = self.best_points.reshape(self.n_points, self.dimension)
+        
+        return final_points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Initialize the optimizer
+    optimizer = PointDispersionOptimizer(n_points=14, dimension=3)
+    
+    # Perform optimization
+    points = optimizer.optimize(max_restarts=8, maxiter=500)
+    
+    return points
+
+# EVOLVE-BLOCK-END

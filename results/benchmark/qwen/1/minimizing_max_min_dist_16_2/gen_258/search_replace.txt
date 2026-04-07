@@ -1,0 +1,381 @@
+<NAME>
+add_adaptive_local_search
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive local search with diverse refinement strategies to improve convergence and escape local optima. This enhancement addresses the limitation in the current implementation where only basic L-BFGS-B refinement is used, potentially missing better solutions that could be found with more sophisticated local search techniques.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def voronoi_relaxation(points, max_iterations=100, tolerance=1e-6):
+        """Perform Voronoi relaxation to improve point distribution."""
+        current_points = points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+
+        for iteration in range(max_iterations):
+            try:
+                # Compute Voronoi diagram
+                vor = Voronoi(current_points)
+
+                # Calculate new positions as centroids of Voronoi cells
+                new_points = np.zeros_like(current_points)
+                converged = True
+
+                # Process each point
+                for i in range(len(current_points)):
+                    # Get vertices of Voronoi cell for point i
+                    region = vor.regions[vor.point_region[i]]
+
+                    if -1 in region or len(region) < 3:
+                        # Handle unbounded regions (use current position with slight adjustment)
+                        new_points[i] = current_points[i] + np.random.normal(0, 0.001, 2)
+                        continue
+
+                    # Extract vertices of the Voronoi cell
+                    vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+
+                    if len(vertices) < 3:
+                        # Not enough vertices, use current position
+                        new_points[i] = current_points[i]
+                        continue
+
+                    # Compute centroid of polygon (Voronoi cell)
+                    centroid = np.mean(vertices, axis=0)
+
+                    # Apply boundary constraints
+                    centroid = np.clip(centroid, 0, 1)
+
+                    # Update point position
+                    new_points[i] = centroid
+
+                    # Check for convergence
+                    if np.linalg.norm(new_points[i] - current_points[i]) > tolerance:
+                        converged = False
+
+                # Apply cooling schedule for better convergence
+                cooling_factor = 0.95 ** iteration
+                current_points = current_points + cooling_factor * (new_points - current_points)
+
+                # Ensure points stay within bounds
+                current_points = np.clip(current_points, 0, 1)
+
+                # Track best solution
+                if iteration % 10 == 0:
+                    ratio = calculate_min_max_ratio(current_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = current_points.copy()
+
+                # Early stopping if converged
+                if converged:
+                    break
+
+            except Exception as e:
+                # Fallback to simple perturbation
+                current_points += np.random.normal(0, 0.001, current_points.shape)
+                current_points = np.clip(current_points, 0, 1)
+
+        return best_points
+=======
+    def voronoi_relaxation(points, max_iterations=100, tolerance=1e-6):
+        """Perform Voronoi relaxation to improve point distribution."""
+        current_points = points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+
+        for iteration in range(max_iterations):
+            try:
+                # Compute Voronoi diagram
+                vor = Voronoi(current_points)
+
+                # Calculate new positions as centroids of Voronoi cells
+                new_points = np.zeros_like(current_points)
+                converged = True
+
+                # Process each point
+                for i in range(len(current_points)):
+                    # Get vertices of Voronoi cell for point i
+                    region = vor.regions[vor.point_region[i]]
+
+                    if -1 in region or len(region) < 3:
+                        # Handle unbounded regions (use current position with slight adjustment)
+                        new_points[i] = current_points[i] + np.random.normal(0, 0.001, 2)
+                        continue
+
+                    # Extract vertices of the Voronoi cell
+                    vertices = np.array([vor.vertices[j] for j in region if j >= 0])
+
+                    if len(vertices) < 3:
+                        # Not enough vertices, use current position
+                        new_points[i] = current_points[i]
+                        continue
+
+                    # Compute centroid of polygon (Voronoi cell)
+                    centroid = np.mean(vertices, axis=0)
+
+                    # Apply boundary constraints
+                    centroid = np.clip(centroid, 0, 1)
+
+                    # Update point position
+                    new_points[i] = centroid
+
+                    # Check for convergence
+                    if np.linalg.norm(new_points[i] - current_points[i]) > tolerance:
+                        converged = False
+
+                # Apply cooling schedule for better convergence
+                cooling_factor = 0.95 ** iteration
+                current_points = current_points + cooling_factor * (new_points - current_points)
+
+                # Ensure points stay within bounds
+                current_points = np.clip(current_points, 0, 1)
+
+                # Track best solution
+                if iteration % 10 == 0:
+                    ratio = calculate_min_max_ratio(current_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = current_points.copy()
+
+                # Early stopping if converged
+                if converged:
+                    break
+
+            except Exception as e:
+                # Fallback to simple perturbation
+                current_points += np.random.normal(0, 0.001, current_points.shape)
+                current_points = np.clip(current_points, 0, 1)
+
+        return best_points
+
+    def adaptive_local_search(points, bounds):
+        """Apply adaptive local search with multiple refinement strategies."""
+        best_points = points.copy()
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Strategy 1: L-BFGS-B with strict tolerances
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15, 'gtol': 1e-15}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 2: SLSQP as alternative
+        try:
+            refined = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12}
+            )
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+        except Exception:
+            pass
+
+        # Strategy 3: Additional random perturbations followed by L-BFGS-B
+        np.random.seed(999)
+        for _ in range(3):
+            perturbed = best_points + np.random.normal(0, 0.005, best_points.shape)
+            perturbed = np.clip(perturbed, 0, 1)
+            try:
+                refined = minimize(
+                    objective,
+                    perturbed.flatten(),
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    ratio = calculate_min_max_ratio(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+            except Exception:
+                continue
+
+        return best_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Method 1: Voronoi relaxation + differential evolution
+    try:
+        # Initialize with structured points
+        initial_points = initialize_structured_points()
+
+        # Apply Voronoi relaxation for global optimization
+        relaxed_points = voronoi_relaxation(initial_points, max_iterations=50)
+
+        # Fine-tune with differential evolution
+        result_de = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=150,
+            popsize=25,
+            atol=1e-10,
+            rtol=1e-10,
+            mutation=(0.8, 1.0),
+            recombination=0.9
+        )
+
+        if result_de.success:
+            # Apply local refinement with L-BFGS-B
+            refined = minimize(
+                objective,
+                result_de.x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
+            )
+
+            if refined.success:
+                final_points = refined.x.reshape(-1, 2)
+                final_points = np.clip(final_points, 0, 1)
+                ratio = calculate_min_max_ratio(final_points)
+
+                # Return the better of the two approaches
+                if ratio > calculate_min_max_ratio(relaxed_points):
+                    return final_points
+                else:
+                    return relaxed_points
+    except Exception:
+        pass
+=======
+    # Method 1: Voronoi relaxation + differential evolution
+    try:
+        # Initialize with structured points
+        initial_points = initialize_structured_points()
+
+        # Apply Voronoi relaxation for global optimization
+        relaxed_points = voronoi_relaxation(initial_points, max_iterations=50)
+
+        # Fine-tune with differential evolution
+        result_de = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=150,
+            popsize=25,
+            atol=1e-10,
+            rtol=1e-10,
+            mutation=(0.8, 1.0),
+            recombination=0.9
+        )
+
+        if result_de.success:
+            # Apply adaptive local search
+            final_points = adaptive_local_search(result_de.x.reshape(-1, 2), bounds)
+            ratio = calculate_min_max_ratio(final_points)
+
+            # Return the better of the two approaches
+            if ratio > calculate_min_max_ratio(relaxed_points):
+                return final_points
+            else:
+                return relaxed_points
+    except Exception:
+        pass
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        for strategy in strategies:
+            try:
+                # Initialize with structured points
+                x0 = initialize_structured_points().flatten()
+
+                # Run differential evolution
+                result = differential_evolution(
+                    objective,
+                    bounds,
+                    x0=x0,
+                    seed=42,
+                    maxiter=strategy['params']['maxiter'],
+                    popsize=strategy['params']['popsize'],
+                    mutation=strategy['params']['mutation'],
+                    recombination=strategy['params']['recombination'],
+                    atol=1e-12,
+                    rtol=1e-12
+                )
+
+                if result.success:
+                    # Local refinement
+                    refined = minimize(
+                        objective,
+                        result.x,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                    )
+
+                    if refined.success:
+                        final_points = refined.x.reshape(-1, 2)
+                        final_points = np.clip(final_points, 0, 1)
+                        ratio = calculate_min_max_ratio(final_points)
+
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = final_points.copy()
+
+            except Exception:
+                continue
+=======
+        for strategy in strategies:
+            try:
+                # Initialize with structured points
+                x0 = initialize_structured_points().flatten()
+
+                # Run differential evolution
+                result = differential_evolution(
+                    objective,
+                    bounds,
+                    x0=x0,
+                    seed=42,
+                    maxiter=strategy['params']['maxiter'],
+                    popsize=strategy['params']['popsize'],
+                    mutation=strategy['params']['mutation'],
+                    recombination=strategy['params']['recombination'],
+                    atol=1e-12,
+                    rtol=1e-12
+                )
+
+                if result.success:
+                    # Apply adaptive local search for better refinement
+                    final_points = adaptive_local_search(result.x.reshape(-1, 2), bounds)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+            except Exception:
+                continue
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,217 @@
+<NAME>
+refine_peak_optimization
+</NAME>
+
+<DESCRIPTION>
+The current peak optimization approach uses differential evolution with limited iterations and suboptimal bounds, which doesn't fully exploit the structure of the problem. I'll improve the peak optimization by implementing a more sophisticated multi-level refinement approach that focuses specifically on peak parameters while using adaptive bounds and multiple optimization strategies to better maximize C₂.
+
+The key insight is that we should focus on optimizing peak positions and heights more carefully, using a combination of local search techniques and adaptive parameter tuning to avoid getting stuck in poor local optima while maintaining computational efficiency.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 2: Local Optimization of Peak Parameters (simplified version)
+    def optimize_peaks(initial_func, n_steps):
+        # Extract peak information
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Identify approximate peak locations (more precise detection)
+        peaks = []
+        for i in range(1, len(initial_func)-1):
+            if initial_func[i] > initial_func[i-1] and initial_func[i] > initial_func[i+1]:
+                peaks.append((i, initial_func[i]))
+
+        # Take top peaks
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        selected_peaks = peaks[:min(8, len(peaks))]
+
+        # Refine only peak positions and heights
+        def objective(params):
+            # Reconstruct function with given params
+            temp_func = np.zeros_like(x)
+            for i, (pos_idx, height) in enumerate(selected_peaks):
+                center_pos = x[pos_idx] + (params[i*2] - 0.5) * 0.05  # Adjust by up to 0.05
+                peak_height = height * (1.0 + params[i*2+1] * 0.5)  # Adjust by up to 50%
+                width = np.random.uniform(0.02, 0.06)
+                temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+            return -compute_c2(temp_func)  # Negative because we minimize
+
+        # Initial parameter guess
+        params0 = [0.0] * (len(selected_peaks) * 2)  # [delta_pos, delta_height] pairs
+
+        # Optimize with fewer iterations for speed but sufficient convergence
+        try:
+            result = differential_evolution(objective,
+                                          bounds=[(-0.5, 0.5)] * (len(selected_peaks) * 2),
+                                          maxiter=20, popsize=5, seed=42, polish=True)
+            optimized_params = result.x
+        except:
+            optimized_params = params0
+
+        # Apply optimization results
+        final_func = np.zeros_like(x)
+        for i, (pos_idx, height) in enumerate(selected_peaks):
+            center_pos = x[pos_idx] + (optimized_params[i*2] - 0.5) * 0.05
+            peak_height = height * (1.0 + optimized_params[i*2+1] * 0.5)
+            width = np.random.uniform(0.02, 0.06)
+            final_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+
+        # Add remaining peaks from original
+        for i in range(len(initial_func)):
+            if not any(abs(x[i] - x[pos_idx]) < 0.01 for _, pos_idx in selected_peaks):
+                final_func[i] += initial_func[i] * 0.5
+
+        return final_func
+=======
+    # Phase 2: Improved Local Optimization of Peak Parameters
+    def optimize_peaks(initial_func, n_steps):
+        # Extract peak information with better peak detection
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Better peak detection using second derivative analysis
+        peaks = []
+        # Look for local maxima with minimum height threshold
+        for i in range(1, len(initial_func)-1):
+            if (initial_func[i] > initial_func[i-1] and
+                initial_func[i] > initial_func[i+1] and
+                initial_func[i] > 0.1):  # Only consider significant peaks
+                peaks.append((i, initial_func[i]))
+
+        # Take top peaks based on height
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        selected_peaks = peaks[:min(8, len(peaks))]
+
+        if len(selected_peaks) == 0:
+            return np.array(initial_func)
+
+        # Use a hybrid optimization approach
+        # First, try a simpler approach with adaptive parameters
+        def objective_with_adaptive_bounds(params):
+            # Reconstruct function with given params
+            temp_func = np.zeros_like(x)
+            for i, (pos_idx, height) in enumerate(selected_peaks):
+                # Adaptive bounds based on peak position and height
+                max_pos_adjust = min(0.05, 0.1 * (1 - abs(x[pos_idx])/0.25))  # Smaller adjustments near edges
+                max_height_adjust = 0.3 * (height / np.max([p[1] for p in selected_peaks]))  # Relative adjustment
+
+                center_pos = x[pos_idx] + (params[i*2] - 0.5) * max_pos_adjust
+                peak_height = height * (1.0 + params[i*2+1] * max_height_adjust)
+
+                # Determine appropriate width based on position and height
+                width = max(0.01, 0.02 + 0.01 * (1 - abs(center_pos)/0.25))
+                temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+
+            c2 = compute_c2(temp_func)
+            return -c2  # Negative because we minimize
+
+        # Try multiple optimization approaches
+        best_params = None
+        best_c2 = -np.inf
+        best_func = np.array(initial_func)
+
+        # Approach 1: Differential Evolution with adaptive settings
+        try:
+            # Create bounds that are adaptive to peak positions and heights
+            bounds = []
+            for i, (pos_idx, height) in enumerate(selected_peaks):
+                max_pos_adjust = min(0.05, 0.1 * (1 - abs(x[pos_idx])/0.25))
+                max_height_adjust = 0.3 * (height / np.max([p[1] for p in selected_peaks]))
+                bounds.extend([(-0.5, 0.5)])  # Position adjustment
+                bounds.extend([(-0.5, 0.5)])  # Height adjustment
+
+            # Run with more iterations for better convergence
+            result = differential_evolution(objective_with_adaptive_bounds,
+                                          bounds=bounds,
+                                          maxiter=50,
+                                          popsize=10,
+                                          seed=42,
+                                          polish=True)
+
+            # Evaluate the result
+            temp_func = np.zeros_like(x)
+            for i, (pos_idx, height) in enumerate(selected_peaks):
+                max_pos_adjust = min(0.05, 0.1 * (1 - abs(x[pos_idx])/0.25))
+                max_height_adjust = 0.3 * (height / np.max([p[1] for p in selected_peaks]))
+                center_pos = x[pos_idx] + (result.x[i*2] - 0.5) * max_pos_adjust
+                peak_height = height * (1.0 + result.x[i*2+1] * max_height_adjust)
+                width = max(0.01, 0.02 + 0.01 * (1 - abs(center_pos)/0.25))
+                temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+
+            c2_result = compute_c2(temp_func)
+            if c2_result > best_c2:
+                best_c2 = c2_result
+                best_func = temp_func.copy()
+                best_params = result.x.copy()
+
+        except Exception:
+            pass
+
+        # If no good result from DE, fall back to simple local search with careful bounds
+        if best_params is None:
+            # Simple simulated annealing approach for peak refinement
+            current_params = np.zeros(len(selected_peaks) * 2)
+            current_func = np.zeros_like(x)
+            for i, (pos_idx, height) in enumerate(selected_peaks):
+                center_pos = x[pos_idx]
+                peak_height = height
+                width = max(0.01, 0.02 + 0.01 * (1 - abs(center_pos)/0.25))
+                current_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+
+            current_c2 = compute_c2(current_func)
+            best_c2 = current_c2
+            best_func = current_func.copy()
+
+            # Fine-grained optimization with cooling schedule
+            temp = 1.0
+            cooling_rate = 0.995
+            max_iterations = 100
+
+            for _ in range(max_iterations):
+                if temp < 1e-6:
+                    break
+
+                # Generate neighbor
+                neighbor_params = current_params.copy()
+                for i in range(len(neighbor_params)):
+                    if np.random.random() < 0.7:  # 70% chance to perturb
+                        # Adaptive perturbation based on parameter importance
+                        max_adjust = 0.2 if i % 2 == 0 else 0.1  # Position vs height
+                        neighbor_params[i] += np.random.normal(0, max_adjust * temp)
+                        # Clamp to reasonable bounds
+                        if i % 2 == 0:
+                            neighbor_params[i] = np.clip(neighbor_params[i], -0.5, 0.5)
+                        else:
+                            neighbor_params[i] = np.clip(neighbor_params[i], -0.5, 0.5)
+
+                # Calculate new function
+                temp_func = np.zeros_like(x)
+                for i, (pos_idx, height) in enumerate(selected_peaks):
+                    max_pos_adjust = min(0.05, 0.1 * (1 - abs(x[pos_idx])/0.25))
+                    max_height_adjust = 0.3 * (height / np.max([p[1] for p in selected_peaks]))
+                    center_pos = x[pos_idx] + (neighbor_params[i*2] - 0.5) * max_pos_adjust
+                    peak_height = height * (1.0 + neighbor_params[i*2+1] * max_height_adjust)
+                    width = max(0.01, 0.02 + 0.01 * (1 - abs(center_pos)/0.25))
+                    temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+
+                # Accept or reject based on Metropolis criterion
+                new_c2 = compute_c2(temp_func)
+                if new_c2 > current_c2 or np.random.random() < np.exp((new_c2 - current_c2) / temp):
+                    current_c2 = new_c2
+                    current_params = neighbor_params.copy()
+                    if new_c2 > best_c2:
+                        best_c2 = new_c2
+                        best_func = temp_func.copy()
+
+                temp *= cooling_rate
+
+        # Add remaining peaks from original if they exist and contribute meaningfully
+        if len(selected_peaks) < len(peaks):
+            # Add some of the remaining peaks with reduced influence
+            for i in range(len(initial_func)):
+                if not any(abs(x[i] - x[pos_idx]) < 0.01 for _, pos_idx in selected_peaks):
+                    # Add scaled down contribution from original
+                    best_func[i] += initial_func[i] * 0.3
+
+        return best_func
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,300 @@
+<NAME>
+enhance_evolutionary_algorithm
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the evolutionary algorithm by implementing a more sophisticated multi-start strategy that includes different initialization methods and adaptive parameters. The key improvements include:
+1. Adding multiple initialization strategies (Fibonacci, icosahedron, random on sphere)
+2. Implementing adaptive mutation rates that decrease with generations
+3. Introducing a more sophisticated selection mechanism
+4. Adding diversity preservation techniques
+5. Using better local optimization with multiple restarts
+These changes should help escape local optima and achieve better convergence toward the benchmark ratio.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def spherical_voronoi_evolution() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses evolutionary algorithm with Voronoi-based fitness evaluation.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Evolutionary parameters
+    population_size = 30
+    generations = 1000
+    elite_size = 5
+    mutation_rate = 0.1
+    crossover_rate = 0.8
+
+    # Initialize population with Fibonacci sphere and random configurations
+    population = []
+    for i in range(population_size):
+        if i % 2 == 0:
+            # Fibonacci initialization
+            points = fibonacci_sphere(14)
+        else:
+            # Random initialization
+            points = create_individual(14)
+        population.append(points)
+
+    best_solution = None
+    best_fitness = -np.inf
+    best_ratio = 0.0
+
+    # Main evolution loop
+    for generation in range(generations):
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        ratios = []
+
+        for individual in population:
+            fitness, ratio = generate_voronoi_fitness(individual)
+            fitness_scores.append(fitness)
+            ratios.append(ratio)
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_ratio = ratios[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Print progress
+        if generation % 100 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}, Ratio = {best_ratio:.6f}")
+
+        # Create new population
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+        new_population = [population[i].copy() for i in elite_indices]
+
+        # Selection, crossover, and mutation
+        selected_parents = tournament_selection(population, fitness_scores)
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            parent1, parent2 = random.sample(selected_parents, 2)
+            child1, child2 = crossover(parent1, parent2, crossover_rate)
+
+            child1 = mutate(child1, mutation_rate, 0.03)
+            child2 = mutate(child2, mutation_rate, 0.03)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+    # Final refinement using local optimization
+    if best_solution is not None:
+        # Try to improve the best solution further with local search
+        try:
+            from scipy.optimize import minimize
+
+            def objective(x_flat):
+                points_test = x_flat.reshape(-1, 3)
+                min_dist, max_dist, _ = compute_min_max_ratio(points_test)
+                if max_dist == 0:
+                    return 0.0
+                return -min_dist / max_dist  # Negative because we minimize
+
+            def constraint_func(x_flat):
+                points_test = x_flat.reshape(-1, 3)
+                norms = np.linalg.norm(points_test, axis=1)
+                return norms - 1.0  # Should equal zero for unit sphere
+
+            x0 = best_solution.flatten()
+            cons = {'type': 'eq', 'fun': constraint_func}
+
+            result = minimize(objective, x0, method='SLSQP', constraints=cons,
+                             options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8})
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 3)
+                _, _, final_ratio = compute_min_max_ratio(refined_points)
+                if final_ratio > best_ratio:
+                    best_solution = refined_points
+        except:
+            pass
+
+    return best_solution if best_solution is not None else fibonacci_sphere(14)
+=======
+def spherical_voronoi_evolution() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses evolutionary algorithm with Voronoi-based fitness evaluation.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Evolutionary parameters
+    population_size = 40
+    generations = 1500
+    elite_size = 8
+    initial_mutation_rate = 0.15
+    crossover_rate = 0.8
+
+    # Different initialization strategies
+    def initialize_population():
+        population = []
+        strategies = [
+            ("fibonacci", lambda: fibonacci_sphere(14)),
+            ("icosahedron", lambda: initialize_icosahedron_points(14)),
+            ("random_sphere", lambda: create_individual(14)),
+        ]
+
+        # Create population with different initialization strategies
+        for i in range(population_size):
+            strategy_name, initializer = strategies[i % len(strategies)]
+            points = initializer()
+            population.append(points)
+        return population
+
+    def initialize_icosahedron_points(n):
+        """Initialize points based on regular icosahedron vertices"""
+        # Regular icosahedron vertices (normalized)
+        phi = (1 + np.sqrt(5)) / 2
+        vertices = np.array([
+            [-1, 0, phi], [1, 0, phi], [-1, 0, -phi], [1, 0, -phi],
+            [0, phi, 1], [0, phi, -1], [0, -phi, 1], [0, -phi, -1],
+            [phi, 1, 0], [-phi, 1, 0], [phi, -1, 0], [-phi, -1, 0]
+        ])
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices[0])
+
+        # For 14 points, use 12 vertices plus 2 additional points
+        if n == 14:
+            # Add two more points for better coverage
+            additional_points = []
+            additional_points.append([0, 0, 1])  # North pole
+            additional_points.append([0, 0, -1])  # South pole
+            return np.vstack([vertices, additional_points])
+        elif n == 12:
+            return vertices
+        else:
+            return fibonacci_sphere(n)
+
+    # Initialize population
+    population = initialize_population()
+
+    best_solution = None
+    best_fitness = -np.inf
+    best_ratio = 0.0
+
+    # Main evolution loop
+    for generation in range(generations):
+        # Adaptive mutation rate - decreases over time
+        mutation_rate = initial_mutation_rate * (1 - generation / generations)
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        ratios = []
+
+        for individual in population:
+            fitness, ratio = generate_voronoi_fitness(individual)
+            fitness_scores.append(fitness)
+            ratios.append(ratio)
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_ratio = ratios[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Print progress
+        if generation % 100 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}, Ratio = {best_ratio:.6f}")
+
+        # Create new population
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+        new_population = [population[i].copy() for i in elite_indices]
+
+        # Selection with diversity consideration
+        # Better selection mechanism
+        scores_array = np.array(fitness_scores)
+        # Convert to positive values for selection
+        normalized_scores = scores_array - np.min(scores_array) + 1e-10
+        probabilities = normalized_scores / np.sum(normalized_scores)
+        selected_indices = np.random.choice(len(population), size=len(population)-elite_size, p=probabilities)
+        selected_parents = [population[i] for i in selected_indices]
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            parent1, parent2 = random.sample(selected_parents, 2)
+            child1, child2 = crossover(parent1, parent2, crossover_rate)
+
+            child1 = mutate(child1, mutation_rate, 0.03)
+            child2 = mutate(child2, mutation_rate, 0.03)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+        # Diversity maintenance - periodically introduce new random individuals
+        if generation % 200 == 0 and generation > 0:
+            for i in range(2):
+                if len(population) < population_size:
+                    # Replace worst individuals with random ones
+                    worst_idx = np.argmin(fitness_scores)
+                    population[worst_idx] = create_individual(14)
+
+    # Final refinement using multiple local optimizations
+    if best_solution is not None:
+        # Try to improve the best solution further with local search
+        try:
+            from scipy.optimize import minimize
+
+            def objective(x_flat):
+                points_test = x_flat.reshape(-1, 3)
+                min_dist, max_dist, _ = compute_min_max_ratio(points_test)
+                if max_dist == 0:
+                    return 0.0
+                return -min_dist / max_dist  # Negative because we minimize
+
+            def constraint_func(x_flat):
+                points_test = x_flat.reshape(-1, 3)
+                norms = np.linalg.norm(points_test, axis=1)
+                return norms - 1.0  # Should equal zero for unit sphere
+
+            # Multiple restarts for better optimization
+            best_final_points = best_solution.copy()
+            best_final_ratio = best_ratio
+
+            for restart in range(3):
+                # Add small random perturbation to starting point
+                x0 = best_solution.flatten()
+                noise = np.random.normal(0, 0.01, len(x0))
+                x0 = x0 + noise
+
+                cons = {'type': 'eq', 'fun': constraint_func}
+
+                result = minimize(objective, x0, method='SLSQP', constraints=cons,
+                                 options={'maxiter': 200, 'ftol': 1e-9, 'gtol': 1e-9})
+
+                if result.success:
+                    refined_points = result.x.reshape(-1, 3)
+                    _, _, final_ratio = compute_min_max_ratio(refined_points)
+                    if final_ratio > best_final_ratio:
+                        best_final_ratio = final_ratio
+                        best_final_points = refined_points
+
+            best_solution = best_final_points
+        except:
+            pass
+
+    return best_solution if best_solution is not None else fibonacci_sphere(14)
+>>>>>>> REPLACE
+</DIFF>

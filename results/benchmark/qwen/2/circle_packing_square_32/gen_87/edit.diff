@@ -1,0 +1,253 @@
+--- a/original.py
++++ b/original.py
+@@ -1,118 +1,228 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial import cKDTree
++import math
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+-def is_valid_placement(circles, x, y, r):
+-    """Check if placing a circle at (x,y) with radius r is valid."""
+-    # Check boundary constraints
+-    if r > x or r > y or r > (1-x) or r > (1-y):
+-        return False
+-
+-    # Check overlap with existing circles
+-    for i in range(len(circles)):
+-        cx, cy, cr = circles[i]
+-        distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+-        if distance < (r + cr):
+-            return False
+-
+-    return True
++def is_valid_placement(circles, x, y, r, tree=None, max_radius=None):
++    """Check if placing a circle at (x,y) with radius r is valid with smooth penalties."""
++    # Check boundary constraints with smooth penalty
++    penalty = 0
++
++    # Boundary penalties using exponential function for smoothness
++    if r > x:
++        penalty += math.exp(10 * (r - x))
++    if r > y:
++        penalty += math.exp(10 * (r - y))
++    if r > (1-x):
++        penalty += math.exp(10 * (r - (1-x)))
++    if r > (1-y):
++        penalty += math.exp(10 * (r - (1-y)))
++
++    # Return early if boundary constraints are severely violated
++    if penalty > 1e6:
++        return False, penalty
++
++    # If we have a KDTree, use it for efficient overlap detection
++    if tree is not None and max_radius is not None:
++        # Find potential overlapping circles within distance 2*(r+max_radius)
++        candidates = tree.query_ball_point([x, y], 2*(r + max_radius))
++        for i in candidates:
++            cx, cy, cr = circles[i]
++            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
++            if distance < (r + cr):
++                # Add smooth penalty for overlap
++                overlap_distance = (r + cr) - distance
++                penalty += 1000 * math.exp(10 * overlap_distance)
++                return False, penalty
++    else:
++        # Fallback to original method if no tree provided
++        for i in range(len(circles)):
++            cx, cy, cr = circles[i]
++            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
++            if distance < (r + cr):
++                # Add smooth penalty for overlap
++                overlap_distance = (r + cr) - distance
++                penalty += 1000 * math.exp(10 * overlap_distance)
++                return False, penalty
++
++    return True, penalty
+ 
+ def compute_local_density(circles, point, k=5):
+     """Compute local density around a point using k nearest neighbors."""
+     if len(circles) < 2:
+         return 0
+ 
+     # Convert circles to array for KDTree query
+     circle_points = np.array([[c[0], c[1]] for c in circles])
+     tree = cKDTree(circle_points)
+ 
+     # Query k nearest neighbors
+     dists, _ = tree.query(point, k=min(k, len(circle_points)))
+ 
+     # Return average distance to nearest neighbors
+     return np.mean(dists[dists > 0]) if np.any(dists > 0) else 1.0
+ 
+ def initialize_circles_heuristic(n=32):
+     """Initialize circle positions using a density-adaptive heuristic approach."""
+     circles = []
+ 
+     # Start with a coarse grid and then refine
+     # Try to place circles in a hexagonal-like pattern
+     grid_size = int(np.ceil(np.sqrt(n)))
+     spacing = 1.0 / (grid_size + 1)
+ 
+     # Create initial placements with varying radii based on density
+     for i in range(grid_size):
+         for j in range(grid_size):
+             if len(circles) >= n:
+                 break
+             x = (i + 1) * spacing
+             y = (j + 1) * spacing
+ 
+             # Initial radius estimate based on available space
+             r_min = min(x, y, 1-x, 1-y)
+ 
+             # Density-based adjustment: circles in denser regions get smaller radii
+             point = np.array([x, y])
+             density = compute_local_density(circles, point)
+             # Adjust radius based on how dense the area is (lower density = larger radius)
+             r_factor = max(0.2, 1.0 / (1.0 + density * 5))
+             r = min(r_min * r_factor, 0.15)
+ 
+             # Only add if valid
+-            if is_valid_placement(circles, x, y, r):
++            if is_valid_placement(circles, x, y, r)[0]:
+                 circles.append([x, y, r])
+ 
+     # Fill remaining spots with smaller circles
+     while len(circles) < n:
+         best_r = 0
+         best_x, best_y = 0, 0
++        best_score = float('-inf')
+ 
+         # Sample potential positions
+-        for _ in range(1000):  # Sample many points
++        for _ in range(2000):  # Increased samples for better chance
+             x = np.random.uniform(0.05, 0.95)
+             y = np.random.uniform(0.05, 0.95)
+ 
+             # Estimate max radius at this location
+             r_max = min(x, y, 1-x, 1-y)
+             if r_max <= 0:
+                 continue
+ 
+             # Density-based radius estimation
+             point = np.array([x, y])
+             density = compute_local_density(circles, point)
+             # Adjust radius based on how dense the area is
+-            r_factor = max(0.1, 1.0 / (1.0 + density * 5))
++            r_factor = max(0.1, 1.0 / (1.0 + density * 10))  # Increased sensitivity
+             adjusted_r_max = r_max * r_factor
+ 
+-            # Try different radii
+-            test_radii = np.linspace(0.005, adjusted_r_max * 0.4, 10)
++            # Try different radii with improved spacing
++            test_radii = np.linspace(0.005, adjusted_r_max * 0.6, 20)  # More test points
+             for r in test_radii:
+-                if is_valid_placement(circles, x, y, r):
+-                    if r > best_r:
++                is_valid, penalty = is_valid_placement(circles, x, y, r)
++                if is_valid:
++                    # Score based on radius and penalty (penalty acts as a penalty factor)
++                    score = r - penalty * 0.001  # Penalty factor
++                    if score > best_score:
++                        best_score = score
+                         best_r = r
+                         best_x, best_y = x, y
+-                        break
+ 
+         if best_r > 0:
+             circles.append([best_x, best_y, best_r])
+ 
+     return np.array(circles)
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+     circles = initialize_circles_heuristic(n)
+ 
++    # Build KDTree for fast neighbor queries for final optimization
++    circle_points = np.array([[c[0], c[1]] for c in circles])
++    tree = cKDTree(circle_points)
++
++    # Find maximum radius for neighbor search optimization
++    max_radius = np.max(circles[:, 2]) if len(circles) > 0 else 0.1
++
++    # Perform final optimization with refined approach
++    best_sum = np.sum(circles[:, 2])
++
++    # Multi-start optimization approach
++    for start in range(3):  # Three different starting points
++        if start > 0:
++            # Perturb the initial solution slightly
++            perturbed_circles = circles.copy()
++            for i in range(len(perturbed_circles)):
++                # Add small random perturbations to position
++                perturbed_circles[i][0] += np.random.uniform(-0.01, 0.01)
++                perturbed_circles[i][1] += np.random.uniform(-0.01, 0.01)
++                # Ensure within bounds
++                perturbed_circles[i][0] = np.clip(perturbed_circles[i][0], 0.01, 0.99)
++                perturbed_circles[i][1] = np.clip(perturbed_circles[i][1], 0.01, 0.99)
++            current_circles = perturbed_circles
++        else:
++            current_circles = circles.copy()
++
++        # Local optimization pass
++        for iteration in range(500):
++            improved = False
++            # Try to improve by adjusting one circle at a time
++            for i in range(len(current_circles)):
++                cx, cy, cr = current_circles[i]
++
++                # Save original values
++                orig_x, orig_y, orig_r = cx, cy, cr
++
++                # Try small perturbations with adaptive step sizes
++                adaptive_step = 0.005 + 0.002 * (1.0 - iteration/500)  # Decreasing step size
++                for _ in range(50):  # Fewer attempts but more focused
++                    # Generate random perturbation
++                    dx = np.random.uniform(-adaptive_step, adaptive_step)
++                    dy = np.random.uniform(-adaptive_step, adaptive_step)
++                    dr = np.random.uniform(-adaptive_step*0.5, adaptive_step*0.5)
++
++                    new_x = orig_x + dx
++                    new_y = orig_y + dy
++                    new_r = orig_r + dr
++
++                    # Ensure new_r is positive
++                    if new_r <= 0:
++                        continue
++
++                    # Ensure new position is inside the square
++                    if new_r > new_x or new_r > new_y or new_r > (1-new_x) or new_r > (1-new_y):
++                        continue
++
++                    # Check if new placement is valid using smooth penalties
++                    is_valid, penalty = is_valid_placement(current_circles, new_x, new_y, new_r, tree, max_radius)
++                    if is_valid:
++                        # Temporarily update this circle
++                        current_circles[i] = [new_x, new_y, new_r]
++
++                        # Check if this gives a better total radius
++                        new_sum = np.sum(current_circles[:, 2])
++                        if new_sum > best_sum:
++                            best_sum = new_sum
++                            circles = current_circles.copy()
++                            improved = True
++                        else:
++                            # Revert the change
++                            current_circles[i] = [orig_x, orig_y, orig_r]
++
++            # Early stopping if no improvement was made
++            if not improved:
++                break
++
+     return circles
+ 
+ 
+ # EVOLVE-BLOCK-END

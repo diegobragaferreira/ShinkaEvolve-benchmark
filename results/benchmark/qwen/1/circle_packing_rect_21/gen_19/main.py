@@ -1,0 +1,168 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import cdist
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, using 1x1 for simplicity
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Objective function to maximize (negative because we minimize)
+    def objective(x):
+        # x contains [cx1, cy1, r1, cx2, cy2, r2, ..., cx21, cy21, r21]
+        centers = x[::3].reshape(-1, 1), x[1::3].reshape(-1, 1)
+        radii = x[2::3]
+        
+        # Calculate total radius sum (we want to maximize this)
+        total_radius = np.sum(radii)
+        
+        # Penalty for circles outside bounds
+        penalty = 0
+        
+        # Check bounds - large penalty for out of bounds
+        for i in range(21):
+            cx, cy, r = centers[0][i], centers[1][i], radii[i]
+            if cx - r < 0 or cx + r > rect_width or cy - r < 0 or cy + r > rect_height:
+                penalty += 1000000  # Large penalty for out of bounds
+        
+        # Calculate distance matrix between circle centers
+        center_points = np.column_stack((centers[0].flatten(), centers[1].flatten()))
+        distances = cdist(center_points, center_points)
+        
+        # Add penalty for overlapping circles (distance < sum of radii)
+        overlap_penalty = 0
+        for i in range(21):
+            for j in range(i+1, 21):
+                distance = distances[i, j]
+                sum_radii = radii[i] + radii[j]
+                if distance < sum_radii:
+                    overlap_penalty += 1000000 * (sum_radii - distance)
+        
+        penalty += overlap_penalty
+        
+        # Return negative since we're minimizing in scipy.optimize
+        return -(total_radius - penalty)
+    
+    # Bounds for optimization: [x1, y1, r1, x2, y2, r2, ..., x21, y21, r21]
+    bounds = []
+    for i in range(21):
+        bounds.extend([(0, rect_width), (0, rect_height), (0.001, 0.5)])
+    
+    # Multi-start approach for better optimization
+    best_result = None
+    best_sum = -np.inf
+    
+    # Try multiple random initializations
+    for attempt in range(5):
+        # Generate better initial guess using hexagonal lattice pattern
+        initial_guess = []
+        
+        # Create hexagonal grid pattern
+        rows = 4
+        cols = 6
+        spacing_x = rect_width / (cols + 1)
+        spacing_y = rect_height / (rows + 1)
+        
+        # Place circles in hexagonal pattern
+        count = 0
+        for i in range(rows):
+            offset = spacing_x * (i % 2) * 0.5
+            for j in range(cols):
+                if count >= 21:
+                    break
+                x = (j + 1) * spacing_x + offset
+                y = (i + 1) * spacing_y
+                
+                # Ensure position is within bounds
+                x = max(0.01, min(rect_width - 0.01, x))
+                y = max(0.01, min(rect_height - 0.01, y))
+                
+                # Set initial radius to a reasonable value
+                initial_guess.extend([x, y, 0.05])
+                count += 1
+            
+            if count >= 21:
+                break
+
+        # Fill remaining circles with random positions
+        while len(initial_guess) < 63:  # 21 * 3
+            x = np.random.uniform(0.01, rect_width - 0.01)
+            y = np.random.uniform(0.01, rect_height - 0.01)
+            initial_guess.extend([x, y, 0.05])
+        
+        try:
+            # Run optimization with adjusted parameters
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=42 + attempt,
+                maxiter=500,  # Reduced iterations for faster execution
+                popsize=20,   # Larger population size
+                tol=1e-6,
+                recombination=0.8,  # Higher recombination rate
+                mutation=(0.7, 1),  # Different mutation parameters
+                disp=False
+            )
+            
+            # Evaluate the result
+            current_sum = -objective(result.x)  # Convert back to positive sum
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_result = result.x.copy()
+                
+        except Exception as e:
+            continue  # Skip this attempt if it fails
+    
+    # If no good result found, use fallback with simplified approach
+    if best_result is None:
+        # Fallback to simple initialization and basic local optimization
+        initial_guess = []
+        grid_size = int(np.ceil(np.sqrt(21)))
+        spacing_x = rect_width / (grid_size + 1)
+        spacing_y = rect_height / (grid_size + 1)
+        radius = 0.1
+        
+        for i in range(21):
+            row = i // grid_size
+            col = i % grid_size
+            cx = (col + 1) * spacing_x
+            cy = (row + 1) * spacing_y
+            initial_guess.extend([cx, cy, radius])
+        
+        # Final optimization run
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=300,
+            popsize=15,
+            tol=1e-6,
+            recombination=0.7,
+            mutation=(0.5, 1),
+            disp=False
+        )
+        best_result = result.x
+    
+    # Extract final solution
+    circles = np.zeros((21, 3))
+    for i in range(21):
+        circles[i] = [best_result[3*i], best_result[3*i+1], best_result[3*i+2]]
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

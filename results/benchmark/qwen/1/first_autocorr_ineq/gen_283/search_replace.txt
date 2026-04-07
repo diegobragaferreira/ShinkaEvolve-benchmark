@@ -1,0 +1,109 @@
+<NAME>
+enhanced_local_search_with_multi_start_lbfgs
+</NAME>
+
+<DESCRIPTION>
+I propose enhancing the local search capabilities by replacing the existing `get_good_direction_to_move_into` function with a more sophisticated multi-start L-BFGS optimization approach. This will provide better local refinement, especially in areas where the LP-based approach fails or provides suboptimal results. The new method will attempt multiple L-BFGS optimizations from perturbed versions of the sequence, allowing for more thorough exploration of the local landscape and potentially discovering better directions for improvement.
+
+This approach is inspired by successful implementations in related works where multi-start local optimization significantly improved convergence properties.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: List[float]) -> List[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    try:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv_result)
+    except Exception:
+        return None
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence: List[float]) -> List[float] | None:
+    """Returns the direction to move into the sequence with enhanced local search using multi-start L-BFGS."""
+    # First try the existing LP method
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    try:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv_result)
+    except Exception:
+        return None
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        pass  # Fall through to multi-start L-BFGS
+    else:
+        sum_g_fun = np.sum(g_fun)
+        if sum_g_fun < 1e-10:
+            pass  # Fall through to multi-start L-BFGS
+        else:
+            normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+            t = 0.01
+            new_sequence = [
+                (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+            ]
+            _, new_inv_c1 = compute_autocorrelation_constant(new_sequence)
+            _, orig_inv_c1 = compute_autocorrelation_constant(sequence)
+            if new_inv_c1 > orig_inv_c1:
+                return new_sequence
+
+    # Multi-start L-BFGS optimization as fallback
+    best_sequence = sequence.copy()
+    best_inv_c1 = 0.0
+
+    # Try multiple starting points
+    for _ in range(5):  # 5 different start points
+        # Slightly perturb the sequence
+        perturbed = [x * random.uniform(0.9, 1.1) for x in sequence]
+        # Ensure all values are valid
+        perturbed = [max(0.01, x) for x in perturbed]
+
+        try:
+            # Use scipy.optimize.minimize with L-BFGS
+            def objective(x):
+                # Compute 1/C1 (we want to maximize this, so minimize -1/C1)
+                _, inv_c1 = compute_autocorrelation_constant(x)
+                return -inv_c1
+
+            # Constraints: all values must be non-negative
+            constraints = [{'type': 'ineq', 'fun': lambda x: x}]
+
+            # Bounds: ensure all values remain reasonable
+            bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+
+            result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds,
+                                     constraints=constraints, options={'maxiter': 30})
+
+            if result.success:
+                _, inv_c1 = compute_autocorrelation_constant(result.x)
+                if inv_c1 > best_inv_c1:
+                    best_inv_c1 = inv_c1
+                    best_sequence = result.x.tolist()
+        except Exception:
+            continue  # Skip if optimization fails
+
+    if best_inv_c1 > 0:
+        return best_sequence
+    else:
+        return None
+>>>>>>> REPLACE
+</DIFF>

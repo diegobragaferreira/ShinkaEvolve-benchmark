@@ -1,0 +1,166 @@
+<NAME>
+enhanced_local_optimization
+</NAME>
+
+<DESCRIPTION>
+The current local optimization approach in the `_intensive_refinement` method could be improved by implementing a more sophisticated physics-inspired approach. Instead of just moving circles away from conflicts, we could implement a force-based relaxation method that simulates physical repulsion forces between overlapping circles and attraction forces towards optimal positions. This would allow for more natural and effective resolution of complex overlap scenarios that the current approach might struggle with.
+
+The key insight is to model the circles as physical particles with forces acting on them, which should lead to better convergence to valid configurations with larger radii.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def _intensive_refinement(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Intensive refinement for configurations with many overlaps."""
+        circles = circles.copy()
+
+        # Multiple passes of refinement
+        for pass_num in range(3):
+            # Pass 1: Radius expansion
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                new_r = min(r + 0.01, max_r)
+
+                # Check constraint
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+
+            # Pass 2: Position adjustment to resolve overlaps
+            for _ in range(10):
+                moved_any = False
+                for i in range(len(circles)):
+                    x, y, r = circles[i]
+
+                    # Look for conflicts
+                    conflicting = []
+                    for j in range(len(circles)):
+                        if i != j:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist < r + r2:
+                                conflicting.append(j)
+
+                    if conflicting:
+                        # Move away from conflicting circles
+                        dx = 0
+                        dy = 0
+
+                        for j in conflicting:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist > 0:
+                                dx += (x - x2) / dist * (r + r2 - dist) * 0.01
+                                dy += (y - y2) / dist * (r + r2 - dist) * 0.01
+
+                        # Apply movement
+                        new_x = x + dx
+                        new_y = y + dy
+
+                        # Bound the movement
+                        new_x = np.clip(new_x, r, 1-r)
+                        new_y = np.clip(new_y, r, 1-r)
+
+                        if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                            circles[i, 0] = new_x
+                            circles[i, 1] = new_y
+                            moved_any = True
+
+                if not moved_any:
+                    break
+
+        return circles
+=======
+    @staticmethod
+    def _intensive_refinement(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Intensive refinement for configurations with many overlaps."""
+        circles = circles.copy()
+
+        # Physics-inspired force-based relaxation
+        n = len(circles)
+
+        # Apply multiple rounds of force relaxation
+        for round_num in range(3):
+            # Initialize forces
+            forces = np.zeros((n, 2))
+
+            # Calculate forces between all pairs of circles
+            for i in range(n):
+                for j in range(i+1, n):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    dist = np.sqrt(dx*dx + dy*dy)
+
+                    if dist > 0 and dist < r1 + r2:
+                        # Overlapping - apply repulsive force
+                        force_magnitude = (r1 + r2 - dist) / dist
+                        forces[i, 0] += dx * force_magnitude * 0.02
+                        forces[i, 1] += dy * force_magnitude * 0.02
+                        forces[j, 0] -= dx * force_magnitude * 0.02
+                        forces[j, 1] -= dy * force_magnitude * 0.02
+                    elif dist > 0:
+                        # Not overlapping - apply weak attractive force to encourage packing
+                        force_magnitude = 1.0 / (dist * dist * 0.01)
+                        forces[i, 0] -= dx * force_magnitude * 0.001
+                        forces[i, 1] -= dy * force_magnitude * 0.001
+                        forces[j, 0] += dx * force_magnitude * 0.001
+                        forces[j, 1] += dy * force_magnitude * 0.001
+
+            # Apply forces to move circles
+            for i in range(n):
+                x, y, r = circles[i]
+
+                # Apply forces with damping
+                new_x = x + forces[i, 0] * 0.5
+                new_y = y + forces[i, 1] * 0.5
+
+                # Boundary constraints
+                new_x = np.clip(new_x, r, 1-r)
+                new_y = np.clip(new_y, r, 1-r)
+
+                circles[i, 0] = new_x
+                circles[i, 1] = new_y
+
+            # Attempt to expand radii after force relaxation
+            for i in range(n):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                # Try to increase radius
+                new_r = min(r + 0.005, max_r)
+
+                # Check constraint with all other circles
+                valid = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

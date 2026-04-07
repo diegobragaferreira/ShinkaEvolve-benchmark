@@ -1,0 +1,187 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import math
+
+def initialize_hexagonal_grid(n_circles):
+    """Initialize circle positions using a hexagonal grid pattern with better scaling."""
+    # Try to arrange circles in a roughly hexagonal pattern
+    cols = int(math.ceil(math.sqrt(n_circles)))
+    rows = int(math.ceil(n_circles / cols))
+
+    # Create a hexagonal grid
+    positions = []
+    for i in range(rows):
+        for j in range(cols):
+            # Offset every other row
+            x_offset = j + 0.5 * (i % 2)
+            y_offset = i * math.sqrt(3) / 2
+            positions.append([x_offset, y_offset])
+
+    # Scale and center the positions to fit in unit square
+    if len(positions) > n_circles:
+        positions = positions[:n_circles]
+
+    # Normalize to fit in [0,1] x [0,1]
+    positions = np.array(positions)
+
+    # Find bounding box
+    min_x, min_y = positions.min(axis=0)
+    max_x, max_y = positions.max(axis=0)
+
+    # Handle edge case where all positions are same
+    if max_x == min_x:
+        max_x += 1
+    if max_y == min_y:
+        max_y += 1
+
+    # Scale to fit in unit square with padding
+    scale_x = 0.9 / (max_x - min_x)
+    scale_y = 0.9 / (max_y - min_y)
+
+    # Apply scaling and translation
+    positions[:, 0] = (positions[:, 0] - min_x) * scale_x + 0.05
+    positions[:, 1] = (positions[:, 1] - min_y) * scale_y + 0.05
+
+    return positions
+
+def compute_local_density(positions, k=5):
+    """Compute local density for each position using k-nearest neighbors."""
+    if len(positions) <= 1:
+        return np.ones(len(positions))
+
+    # Build KDTree for efficient neighbor search
+    tree = cKDTree(positions)
+
+    # Find k nearest neighbors (excluding self)
+    distances, indices = tree.query(positions, k=min(k+1, len(positions)),
+                                   eps=0, p=2, workers=-1)
+
+    # Use the distance to the kth nearest neighbor as a density metric
+    # Smaller distances indicate higher density
+    avg_distances = np.mean(distances[:, 1:], axis=1)  # Exclude self-distance
+
+    # Convert to density (inverse of distance, but avoid division by zero)
+    density = 1.0 / (avg_distances + 1e-8)
+
+    return density
+
+def initialize_radii_adaptive(positions, n_circles):
+    """Initialize radii adaptively based on local density."""
+    # Compute local density for each position
+    densities = compute_local_density(positions)
+
+    # Normalize densities to [0, 1] range
+    if np.max(densities) > np.min(densities):
+        normalized_densities = (densities - np.min(densities)) / (np.max(densities) - np.min(densities))
+    else:
+        normalized_densities = np.zeros_like(densities)
+
+    # Assign larger initial radii to less dense regions
+    # High density = low radius, Low density = high radius
+    # Map density to radius: radius = 0.05 + 0.15 * (1 - normalized_densities)
+    initial_radii = 0.05 + 0.15 * (1 - normalized_densities)
+
+    # Ensure minimum radius
+    initial_radii = np.maximum(initial_radii, 0.01)
+
+    # Cap maximum radius to avoid extreme values
+    initial_radii = np.minimum(initial_radii, 0.3)
+
+    return initial_radii
+
+def compute_radius_at_position(pos, circles, min_radius=0.001):
+    """Compute maximum possible radius at given position without overlapping existing circles."""
+    x, y = pos
+
+    # Initial estimate of radius based on distance to nearest boundary
+    r_boundary = min(x, 1-x, y, 1-y)
+
+    if r_boundary <= min_radius:
+        return min_radius
+
+    # Check overlap with existing circles
+    min_dist = float('inf')
+    for circ in circles:
+        dist = np.sqrt((x - circ[0])**2 + (y - circ[1])**2)
+        min_dist = min(min_dist, dist)
+
+    # Maximum radius is limited by both boundary and existing circles
+    r = min(r_boundary, min_dist/2 - 0.001)
+
+    return max(min_radius, r)
+
+def evaluate_fitness(circles_flat, n_circles):
+    """Evaluate the fitness of a circle configuration."""
+    # Reshape flat array back into circles
+    circles = circles_flat.reshape((n_circles, 3))
+
+    # Calculate sum of radii (this is what we want to maximize)
+    total_radius = np.sum(circles[:, 2])
+
+    # Penalty terms for constraint violations
+    penalty = 0
+
+    # Boundary penalties
+    for i in range(n_circles):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            penalty -= 1000  # Large penalty for boundary violations
+
+    # Overlap penalties - check all pairs
+    for i in range(n_circles):
+        for j in range(i+1, n_circles):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            if distance < r1 + r2:
+                penalty -= 1000  # Large penalty for overlaps
+
+    return -(total_radius + penalty)  # Negative because we minimize in scipy
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Initialize using hexagonal grid
+    initial_positions = initialize_hexagonal_grid(n)
+
+    # Initialize radii adaptively based on local density
+    initial_radii = initialize_radii_adaptive(initial_positions, n)
+
+    # Combine positions and radii into a single flat array for optimization
+    initial_solution = np.column_stack([initial_positions, initial_radii]).flatten()
+
+    # Define bounds for optimization (x, y, r for each circle)
+    bounds = []
+    for i in range(n):
+        bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.5)])  # x, y, r bounds
+
+    # Optimize using scipy minimize
+    try:
+        result = minimize(evaluate_fitness, initial_solution, args=(n,),
+                         method='L-BFGS-B', bounds=bounds,
+                         options={'maxiter': 1000, 'ftol': 1e-6, 'gtol': 1e-6})
+
+        if result.success:
+            # Extract final solution
+            final_circles = result.x.reshape((n, 3))
+            return final_circles
+        else:
+            # If optimization fails, return the initial configuration
+            print("Optimization failed:", result.message)
+            return np.column_stack([initial_positions, initial_radii])
+    except Exception as e:
+        print(f"Optimization error: {e}")
+        # Return initial configuration if anything goes wrong
+        return np.column_stack([initial_positions, initial_radii])
+
+# EVOLVE-BLOCK-END

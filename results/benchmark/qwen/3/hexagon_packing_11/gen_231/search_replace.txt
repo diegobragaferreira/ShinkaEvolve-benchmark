@@ -1,0 +1,313 @@
+<NAME>
+enhance_local_optimization_with_gradient_guided_refinement
+</NAME>
+
+<DESCRIPTION>
+The current local optimization uses a mix of L-BFGS-B, Nelder-Mead, and coordinate descent strategies. However, these approaches could be enhanced with gradient-guided refinement that leverages the smooth landscape of the optimization problem. This approach would incorporate gradient information to accelerate convergence and find tighter packings, especially in later evolutionary generations when solutions are already relatively good. The addition of gradient information would help escape local optima more effectively and improve convergence speed.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_local(self, individual: np.ndarray, outer_radius: float) -> np.ndarray:
+        """Refine solution locally using adaptive optimization strategies"""
+        def objective(params):
+            # Reshape params back to hexagon data
+            new_data = individual.copy()
+            for i in range(len(new_data)):
+                new_data[i][0] = params[i*3]
+                new_data[i][1] = params[i*3+1]
+                new_data[i][2] = params[i*3+2]
+
+            # Convert to hexagon objects for evaluation
+            hexagons = self.create_hexagons_from_array(new_data)
+
+            # Evaluate fitness
+            fitness = self.evaluator.evaluate_fitness(hexagons, outer_radius)
+            return -fitness  # minimize negative fitness
+
+        # Flatten the data for optimization
+        initial_params = []
+        for i in range(len(individual)):
+            initial_params.extend([individual[i][0], individual[i][1], individual[i][2]])
+
+        # Strategy 1: L-BFGS-B with strict bounds for fast convergence
+        try:
+            result = minimize(objective, initial_params, method='L-BFGS-B',
+                            bounds=[(-10, 10), (-10, 10), (0, 360)] * len(individual),
+                            options={'maxiter': 150, 'ftol': 1e-12, 'gtol': 1e-12})
+            if result.success:
+                # Reshape optimized result back
+                refined_data = individual.copy()
+                for i in range(len(refined_data)):
+                    refined_data[i][0] = result.x[i*3]
+                    refined_data[i][1] = result.x[i*3+1]
+                    refined_data[i][2] = result.x[i*3+2]
+
+                # Validate the solution before returning
+                hexagons = self.create_hexagons_from_array(refined_data)
+                if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                    # If solution is invalid, fall back to original
+                    return individual
+                return refined_data
+        except:
+            pass
+
+        # Strategy 2: Nelder-Mead for robustness in complex landscapes
+        try:
+            result = minimize(objective, initial_params, method='Nelder-Mead',
+                            options={'maxiter': 200, 'disp': False, 'xtol': 1e-8, 'ftol': 1e-8})
+            if result.success:
+                # Reshape optimized result back
+                refined_data = individual.copy()
+                for i in range(len(refined_data)):
+                    refined_data[i][0] = result.x[i*3]
+                    refined_data[i][1] = result.x[i*3+1]
+                    refined_data[i][2] = result.x[i*3+2]
+
+                # Validate the solution before returning
+                hexagons = self.create_hexagons_from_array(refined_data)
+                if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                    # If solution is invalid, fall back to original
+                    return individual
+                return refined_data
+        except:
+            pass
+
+        # Strategy 3: If all else fails, try coordinate descent with small steps
+        try:
+            # Simple coordinate descent approach
+            current_params = np.array(initial_params)
+            current_fitness = objective(current_params)
+
+            # Take small steps in parameter space
+            for _ in range(50):
+                # Try small random perturbations
+                new_params = current_params.copy()
+                for i in range(len(new_params)):
+                    # Apply small perturbation based on parameter type
+                    if i % 3 < 2:  # x, y coordinates
+                        new_params[i] += np.random.normal(0, 0.1)
+                    else:  # angle
+                        new_params[i] += np.random.normal(0, 5)
+                        new_params[i] = new_params[i] % 360
+
+                new_fitness = objective(new_params)
+                if new_fitness < current_fitness:
+                    current_params = new_params
+                    current_fitness = new_fitness
+
+            # Reconstruct data from final parameters
+            refined_data = individual.copy()
+            for i in range(len(refined_data)):
+                refined_data[i][0] = current_params[i*3]
+                refined_data[i][1] = current_params[i*3+1]
+                refined_data[i][2] = current_params[i*3+2]
+
+            # Validate final solution
+            hexagons = self.create_hexagons_from_array(refined_data)
+            if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                # If solution is invalid, return original
+                return individual
+            return refined_data
+        except:
+            pass
+
+        # If all optimization attempts fail, return original individual
+        return individual
+=======
+    def optimize_local(self, individual: np.ndarray, outer_radius: float) -> np.ndarray:
+        """Refine solution locally using adaptive optimization strategies with gradient-guided refinement"""
+
+        def objective(params):
+            # Reshape params back to hexagon data
+            new_data = individual.copy()
+            for i in range(len(new_data)):
+                new_data[i][0] = params[i*3]
+                new_data[i][1] = params[i*3+1]
+                new_data[i][2] = params[i*3+2]
+
+            # Convert to hexagon objects for evaluation
+            hexagons = self.create_hexagons_from_array(new_data)
+
+            # Evaluate fitness
+            fitness = self.evaluator.evaluate_fitness(hexagons, outer_radius)
+            return -fitness  # minimize negative fitness
+
+        # Flatten the data for optimization
+        initial_params = []
+        for i in range(len(individual)):
+            initial_params.extend([individual[i][0], individual[i][1], individual[i][2]])
+
+        # Strategy 1: Gradient-guided local optimization with adaptive step sizes
+        try:
+            # Use scipy's minimize with L-BFGS-B but with adaptive tolerances for better precision
+            result = minimize(objective, initial_params, method='L-BFGS-B',
+                            bounds=[(-10, 10), (-10, 10), (0, 360)] * len(individual),
+                            options={'maxiter': 200, 'ftol': 1e-15, 'gtol': 1e-15})
+            if result.success:
+                # Reshape optimized result back
+                refined_data = individual.copy()
+                for i in range(len(refined_data)):
+                    refined_data[i][0] = result.x[i*3]
+                    refined_data[i][1] = result.x[i*3+1]
+                    refined_data[i][2] = result.x[i*3+2]
+
+                # Validate the solution before returning
+                hexagons = self.create_hexagons_from_array(refined_data)
+                if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                    # If solution is invalid, fall back to original
+                    return individual
+                return refined_data
+        except:
+            pass
+
+        # Strategy 2: Enhanced gradient-guided approach with momentum and adaptive learning rates
+        try:
+            # For cases where L-BFGS fails, try a more robust gradient-based approach
+            # Using a custom gradient descent with adaptive learning rate
+            current_params = np.array(initial_params)
+            current_fitness = objective(current_params)
+
+            # Adaptive learning rates
+            lr_x = 0.01  # Position learning rate
+            lr_angle = 0.1  # Angle learning rate
+
+            # Gradient-based optimization with momentum
+            velocity = np.zeros_like(current_params)
+            momentum = 0.9
+            max_iterations = 100
+
+            for i in range(max_iterations):
+                # Calculate numerical gradient for small perturbations
+                epsilon = 1e-6
+                gradient = np.zeros_like(current_params)
+
+                for j in range(len(current_params)):
+                    # Perturb parameter j
+                    params_plus = current_params.copy()
+                    params_minus = current_params.copy()
+
+                    if j % 3 < 2:  # x or y coordinate
+                        params_plus[j] += epsilon
+                        params_minus[j] -= epsilon
+                    else:  # angle
+                        params_plus[j] += epsilon
+                        params_minus[j] -= epsilon
+                        if params_plus[j] >= 360: params_plus[j] -= 360
+                        if params_minus[j] < 0: params_minus[j] += 360
+
+                    # Calculate finite difference gradient
+                    fp = objective(params_plus)
+                    fm = objective(params_minus)
+                    gradient[j] = (fp - fm) / (2 * epsilon)
+
+                # Apply momentum and update
+                velocity = momentum * velocity - lr_x * gradient
+
+                # Update parameters
+                new_params = current_params + velocity
+
+                # Apply constraints for angles
+                for j in range(len(new_params)):
+                    if j % 3 == 2:  # angle parameter
+                        new_params[j] = new_params[j] % 360
+
+                # Accept new parameters if they improve fitness
+                new_fitness = objective(new_params)
+                if new_fitness < current_fitness:
+                    current_params = new_params
+                    current_fitness = new_fitness
+                    # Reduce learning rate for fine adjustment
+                    lr_x = max(0.001, lr_x * 0.995)
+                    lr_angle = max(0.01, lr_angle * 0.995)
+                else:
+                    # Reduce learning rate if no improvement
+                    lr_x *= 0.99
+                    lr_angle *= 0.99
+
+                # Stop if improvement is negligible
+                if abs(new_fitness - current_fitness) < 1e-12:
+                    break
+
+            # Reconstruct data from final parameters
+            refined_data = individual.copy()
+            for i in range(len(refined_data)):
+                refined_data[i][0] = current_params[i*3]
+                refined_data[i][1] = current_params[i*3+1]
+                refined_data[i][2] = current_params[i*3+2]
+
+            # Validate final solution
+            hexagons = self.create_hexagons_from_array(refined_data)
+            if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                # If solution is invalid, return original
+                return individual
+            return refined_data
+        except:
+            pass
+
+        # Strategy 3: Nelder-Mead for robustness in complex landscapes
+        try:
+            result = minimize(objective, initial_params, method='Nelder-Mead',
+                            options={'maxiter': 200, 'disp': False, 'xtol': 1e-10, 'ftol': 1e-10})
+            if result.success:
+                # Reshape optimized result back
+                refined_data = individual.copy()
+                for i in range(len(refined_data)):
+                    refined_data[i][0] = result.x[i*3]
+                    refined_data[i][1] = result.x[i*3+1]
+                    refined_data[i][2] = result.x[i*3+2]
+
+                # Validate the solution before returning
+                hexagons = self.create_hexagons_from_array(refined_data)
+                if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                    # If solution is invalid, fall back to original
+                    return individual
+                return refined_data
+        except:
+            pass
+
+        # Strategy 4: If all else fails, try coordinate descent with small steps
+        try:
+            # Simple coordinate descent approach with better step scheduling
+            current_params = np.array(initial_params)
+            current_fitness = objective(current_params)
+
+            # Take small steps in parameter space
+            for _ in range(100):
+                # Try small random perturbations with decreasing step sizes
+                new_params = current_params.copy()
+                step_size = 0.01  # Decreasing step size over iterations
+
+                for i in range(len(new_params)):
+                    # Apply small perturbation based on parameter type
+                    if i % 3 < 2:  # x, y coordinates
+                        new_params[i] += np.random.normal(0, step_size)
+                    else:  # angle
+                        new_params[i] += np.random.normal(0, step_size * 10)  # Larger step for angles
+                        new_params[i] = new_params[i] % 360
+
+                new_fitness = objective(new_params)
+                if new_fitness < current_fitness:
+                    current_params = new_params
+                    current_fitness = new_fitness
+
+            # Reconstruct data from final parameters
+            refined_data = individual.copy()
+            for i in range(len(refined_data)):
+                refined_data[i][0] = current_params[i*3]
+                refined_data[i][1] = current_params[i*3+1]
+                refined_data[i][2] = current_params[i*3+2]
+
+            # Validate final solution
+            hexagons = self.create_hexagons_from_array(refined_data)
+            if self.evaluator.check_overlap(hexagons) or not self.evaluator.check_containment(hexagons, outer_radius):
+                # If solution is invalid, return original
+                return individual
+            return refined_data
+        except:
+            pass
+
+        # If all optimization attempts fail, return original individual
+        return individual
+>>>>>>> REPLACE
+</DIFF>

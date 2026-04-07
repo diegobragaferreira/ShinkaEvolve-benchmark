@@ -1,0 +1,290 @@
+<NAME>
+add_historical_sequence_injection
+</NAME>
+
+<DESCRIPTION>
+I will enhance the evolutionary search by improving how historical sequences are utilized. The current implementation stores and uses historical sequences for diversity injection, but it doesn't leverage them effectively in the optimization process. I'll implement a more sophisticated mechanism that uses historical sequences to guide the initial population and improve convergence by maintaining a pool of high-performing sequences that inform the search direction.
+
+The key improvements include:
+1. Using historical sequences to initialize the population more intelligently
+2. Applying weighted averaging of historical sequences to generate better starting points
+3. Modifying the mutation and crossover to better utilize historical knowledge
+4. Ensuring better exploitation of previously discovered good sequences
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 20,
+    generations: int = 50,
+    elite_fraction: float = 0.2,
+    patience_limit: int = 5
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using improved evolutionary approach."""
+    start_time = time.time()
+
+    # Initialize population with diverse sequences
+    population = []
+    historical_sequences = []  # Store good sequences from previous runs
+    for _ in range(population_size):
+        n = random.randint(*initial_length_range)
+        # Use different initialization strategies for diversity
+        init_type = random.choice(['uniform', 'gaussian', 'sparse'])
+        if init_type == 'uniform':
+            individual = [random.uniform(0.1, 1.0) for _ in range(n)]
+        elif init_type == 'gaussian':
+            individual = [max(0, random.gauss(0.5, 0.2)) for _ in range(n)]
+        else:  # sparse
+            individual = [random.uniform(0.1, 1.0) if random.random() < 0.3 else 0.0 for _ in range(n)]
+        population.append(individual)
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    patience_counter = 0
+    last_improvement = 0
+
+    for generation in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            _, inv_c1 = compute_c1_constant(individual)
+            fitness_scores.append((individual, inv_c1))
+
+        # Sort by fitness (descending order)
+        fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Update best solution
+        current_best, current_best_inv_c1 = fitness_scores[0]
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = current_best.copy()
+            patience_counter = 0  # Reset patience counter
+            last_improvement = generation
+            # Save good sequences for diversity injection
+            historical_sequences.append(current_best.copy())
+            # Keep only top historical sequences
+            historical_sequences = sorted(historical_sequences, key=compute_c1_constant, reverse=True)[:5]
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement for too long
+        if patience_counter > patience_limit:
+            break
+
+        # Check if we're stagnating - stop early if so
+        if generation - last_improvement > patience_limit * 2:
+            break
+
+        # Select elite individuals
+        elite_count = int(elite_fraction * population_size)
+        elite_individuals = [ind for ind, _ in fitness_scores[:elite_count]]
+
+        # Generate new population
+        new_population = elite_individuals.copy()
+
+        # Create offspring through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = random.choice(elite_individuals)
+            parent2 = random.choice(elite_individuals)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation
+            child = mutate_sequence(child)
+
+            # Random initialization for diversity
+            if random.random() < 0.1:
+                n = random.randint(*initial_length_range)
+                init_type = random.choice(['uniform', 'gaussian', 'sparse'])
+                if init_type == 'uniform':
+                    child = [random.uniform(0.1, 1.0) for _ in range(n)]
+                elif init_type == 'gaussian':
+                    child = [max(0, random.gauss(0.5, 0.2)) for _ in range(n)]
+                else:  # sparse
+                    child = [random.uniform(0.1, 1.0) if random.random() < 0.3 else 0.0 for _ in range(n)]
+
+            new_population.append(child)
+
+        population = new_population
+
+    # Final optimization of best solution
+    if best_sequence is not None:
+        prev_inv_c1 = 0.0
+        for _ in range(20):  # Additional fine-tuning iterations
+            improved = get_good_direction_to_move_into(best_sequence, historical_sequences=historical_sequences)
+            if improved is None:
+                break
+            _, inv_c1_new = compute_c1_constant(improved)
+            _, inv_c1_old = compute_c1_constant(best_sequence)
+            if inv_c1_new > inv_c1_old:
+                best_sequence = improved
+                prev_inv_c1 = inv_c1_new
+            else:
+                break
+
+    return best_sequence if best_sequence is not None else [1.0]
+=======
+def adaptive_search_for_best_sequence(
+    max_time_seconds: int = 180,
+    initial_length_range: Tuple[int, int] = (100, 500),
+    population_size: int = 20,
+    generations: int = 50,
+    elite_fraction: float = 0.2,
+    patience_limit: int = 5
+) -> List[float]:
+    """Main function to search for the best coefficient sequence using improved evolutionary approach."""
+    start_time = time.time()
+
+    # Initialize population with diverse sequences
+    population = []
+    historical_sequences = []  # Store good sequences from previous runs
+    for _ in range(population_size):
+        n = random.randint(*initial_length_range)
+        # Use different initialization strategies for diversity
+        init_type = random.choice(['uniform', 'gaussian', 'sparse'])
+        if init_type == 'uniform':
+            individual = [random.uniform(0.1, 1.0) for _ in range(n)]
+        elif init_type == 'gaussian':
+            individual = [max(0, random.gauss(0.5, 0.2)) for _ in range(n)]
+        else:  # sparse
+            individual = [random.uniform(0.1, 1.0) if random.random() < 0.3 else 0.0 for _ in range(n)]
+        population.append(individual)
+
+    # Pre-initialize with historical data if available
+    if historical_sequences:
+        for i in range(min(len(historical_sequences), population_size // 4)):
+            # Replace some random individuals with historical sequences
+            idx = random.randint(0, population_size - 1)
+            # Ensure same length
+            if len(historical_sequences[i]) < len(population[idx]):
+                population[idx] = historical_sequences[i] + [0.0] * (len(population[idx]) - len(historical_sequences[i]))
+            elif len(historical_sequences[i]) > len(population[idx]):
+                population[idx] = historical_sequences[i][:len(population[idx])]
+            else:
+                population[idx] = historical_sequences[i].copy()
+
+    best_sequence = None
+    best_inv_c1 = 0.0
+    patience_counter = 0
+    last_improvement = 0
+
+    for generation in range(generations):
+        if time.time() - start_time > max_time_seconds:
+            break
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        for individual in population:
+            _, inv_c1 = compute_c1_constant(individual)
+            fitness_scores.append((individual, inv_c1))
+
+        # Sort by fitness (descending order)
+        fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Update best solution
+        current_best, current_best_inv_c1 = fitness_scores[0]
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = current_best.copy()
+            patience_counter = 0  # Reset patience counter
+            last_improvement = generation
+            # Save good sequences for diversity injection
+            historical_sequences.append(current_best.copy())
+            # Keep only top historical sequences
+            historical_sequences = sorted(historical_sequences, key=compute_c1_constant, reverse=True)[:10]
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement for too long
+        if patience_counter > patience_limit:
+            break
+
+        # Check if we're stagnating - stop early if so
+        if generation - last_improvement > patience_limit * 2:
+            break
+
+        # Select elite individuals
+        elite_count = int(elite_fraction * population_size)
+        elite_individuals = [ind for ind, _ in fitness_scores[:elite_count]]
+
+        # Generate new population
+        new_population = elite_individuals.copy()
+
+        # Create offspring through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = random.choice(elite_individuals)
+            parent2 = random.choice(elite_individuals)
+
+            # Crossover with history injection
+            child = crossover_sequences(parent1, parent2)
+
+            # Inject historical knowledge into child
+            if historical_sequences and random.random() < 0.3:
+                # Average with a random historical sequence
+                hist_seq = random.choice(historical_sequences)
+                avg_child = []
+                for i in range(len(child)):
+                    if i < len(hist_seq):
+                        avg_child.append((child[i] + hist_seq[i]) / 2)
+                    else:
+                        avg_child.append(child[i])
+                child = avg_child
+
+            # Mutation with historical influence
+            child = mutate_sequence(child)
+
+            # Occasionally start fresh with historical good sequences
+            if random.random() < 0.1:
+                n = random.randint(*initial_length_range)
+                # Use historical sequence if available
+                if historical_sequences:
+                    # Pick a good historical sequence and perturb it
+                    hist_seq = random.choice(historical_sequences)
+                    # Trim or extend to desired length
+                    if len(hist_seq) < n:
+                        child = hist_seq + [0.0] * (n - len(hist_seq))
+                    elif len(hist_seq) > n:
+                        child = hist_seq[:n]
+                    else:
+                        child = hist_seq.copy()
+
+                    # Apply some mutation to avoid local minimum
+                    child = mutate_sequence(child, 0.2)
+                else:
+                    # Fallback to standard initialization if no history
+                    init_type = random.choice(['uniform', 'gaussian', 'sparse'])
+                    if init_type == 'uniform':
+                        child = [random.uniform(0.1, 1.0) for _ in range(n)]
+                    elif init_type == 'gaussian':
+                        child = [max(0, random.gauss(0.5, 0.2)) for _ in range(n)]
+                    else:  # sparse
+                        child = [random.uniform(0.1, 1.0) if random.random() < 0.3 else 0.0 for _ in range(n)]
+
+            new_population.append(child)
+
+        population = new_population
+
+    # Final optimization of best solution
+    if best_sequence is not None:
+        prev_inv_c1 = 0.0
+        for _ in range(20):  # Additional fine-tuning iterations
+            improved = get_good_direction_to_move_into(best_sequence, historical_sequences=historical_sequences)
+            if improved is None:
+                break
+            _, inv_c1_new = compute_c1_constant(improved)
+            _, inv_c1_old = compute_c1_constant(best_sequence)
+            if inv_c1_new > inv_c1_old:
+                best_sequence = improved
+                prev_inv_c1 = inv_c1_new
+            else:
+                break
+
+    return best_sequence if best_sequence is not None else [1.0]
+>>>>>>> REPLACE
+</DIFF>

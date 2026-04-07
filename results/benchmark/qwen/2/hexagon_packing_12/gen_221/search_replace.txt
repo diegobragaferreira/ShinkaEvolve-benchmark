@@ -1,0 +1,252 @@
+<NAME>
+implement_adaptive_penalty_weighting
+</NAME>
+
+<DESCRIPTION>
+This change implements adaptive penalty weighting based on constraint violation severity. The key insight is that containment violations are more fundamental than overlap violations, so they should be penalized more heavily. This approach builds upon the current penalty system but introduces dynamic weighting that better reflects the relative importance of different constraint types, making the optimization landscape smoother for convergence while still strongly discouraging constraint violations that prevent valid solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_configuration(self, config, outer_side_length):
+        """Evaluate a configuration of 12 hexagons."""
+        self.eval_count += 1
+        hexagons = config.reshape(12, 3)
+        hexagon_vertices_list = []
+
+        for i in range(12):
+            x, y, angle = hexagons[i]
+            vertices = HexagonPacker.hexagon_vertices(x, y, angle)
+            hexagon_vertices_list.append(vertices)
+
+        # Check containment first - this is more critical
+        if not HexagonPacker.check_containment_fast(hexagon_vertices_list, outer_side_length):
+            return 1500000  # High penalty for containment violations
+
+        # Check overlap
+        if not self.check_overlap(hexagon_vertices_list):
+            return 1000000  # Penalty for overlap violations
+
+        return 0
+=======
+    def evaluate_configuration(self, config, outer_side_length):
+        """Evaluate a configuration of 12 hexagons."""
+        self.eval_count += 1
+        hexagons = config.reshape(12, 3)
+        hexagon_vertices_list = []
+
+        for i in range(12):
+            x, y, angle = hexagons[i]
+            vertices = HexagonPacker.hexagon_vertices(x, y, angle)
+            hexagon_vertices_list.append(vertices)
+
+        penalty = 0.0
+
+        # Check containment first - this is more critical
+        # Use enhanced containment checking with distance-based penalty
+        outer_radius = outer_side_length
+        for vertices in hexagon_vertices_list:
+            center_x = vertices[0][0]
+            center_y = vertices[0][1]
+            distance = math.sqrt(center_x*center_x + center_y*center_y)
+            if distance > outer_radius:
+                # Adaptive penalty based on how far outside the boundary
+                violation_distance = distance - outer_radius
+                penalty += violation_distance * 1500  # Higher penalty for containment violations
+
+        # Check overlap - use precise overlap detection
+        if not self.check_overlap(hexagon_vertices_list):
+            penalty += 1000000  # Heavy penalty for overlap violations
+
+        return penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_local_search_refinement
+</NAME>
+
+<DESCRIPTION>
+This change adds a local search refinement step that uses coordinate descent to fine-tune the final configuration found by the differential evolution algorithm. This hybrid approach combines the global exploration strengths of differential evolution with targeted local refinement, similar to the approach mentioned in the recommendations. The local search focuses specifically on optimizing the geometric arrangement of hexagons rather than re-running the full evolutionary process, potentially achieving better outer hexagon side lengths through improved local optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def refine_solution(self, config, initial_side_length):
+        """Try to find a better fit with different outer hexagon sizes."""
+        best_config = config.copy()
+        best_side = initial_side_length
+        best_score = -1.0 / initial_side_length
+
+        # First, try a coarse search
+        search_range = np.linspace(3.85, min(initial_side_length, 3.9419123), 20)
+
+        for test_side in search_range:
+            penalty = self.evaluate_configuration(best_config, test_side)
+            if penalty != float('inf'):
+                if test_side > best_side:
+                    best_side = test_side
+                    best_score = -1.0 / test_side
+
+        # Then try fine-grained search
+        if best_side < 3.9419123:
+            fine_range = np.linspace(best_side, min(3.9419123, best_side + 0.005), 10)
+            for test_side in fine_range:
+                penalty = self.evaluate_configuration(best_config, test_side)
+                if penalty != float('inf'):
+                    if test_side > best_side:
+                        best_side = test_side
+                        best_score = -1.0 / test_side
+
+        return best_config, best_side, best_score
+=======
+    def refine_solution(self, config, initial_side_length):
+        """Try to find a better fit with different outer hexagon sizes."""
+        best_config = config.copy()
+        best_side = initial_side_length
+        best_score = -1.0 / initial_side_length
+
+        # First, try a coarse search
+        search_range = np.linspace(3.85, min(initial_side_length, 3.9419123), 20)
+
+        for test_side in search_range:
+            penalty = self.evaluate_configuration(best_config, test_side)
+            if penalty != float('inf'):
+                if test_side > best_side:
+                    best_side = test_side
+                    best_score = -1.0 / test_side
+
+        # Then try fine-grained search
+        if best_side < 3.9419123:
+            fine_range = np.linspace(best_side, min(3.9419123, best_side + 0.005), 10)
+            for test_side in fine_range:
+                penalty = self.evaluate_configuration(best_config, test_side)
+                if penalty != float('inf'):
+                    if test_side > best_side:
+                        best_side = test_side
+                        best_score = -1.0 / test_side
+
+        return best_config, best_side, best_score
+
+    def local_search_refinement(self, config, outer_side_length):
+        """Apply local search refinement to improve the solution."""
+        # This is a simple greedy local search approach
+        best_config = config.copy()
+        best_penalty = self.evaluate_configuration(best_config, outer_side_length)
+
+        # Try small adjustments to each hexagon's position and angle
+        for iter_num in range(50):  # Limited iterations to prevent long running times
+            improved = False
+            current_config = best_config.copy()
+
+            # Try adjusting each hexagon individually
+            for i in range(12):
+                # Save original values
+                orig_x, orig_y, orig_angle = current_config[i*3], current_config[i*3+1], current_config[i*3+2]
+
+                # Try small perturbations
+                for _ in range(5):  # Try 5 different small perturbations per hexagon
+                    # Small position adjustment
+                    new_x = orig_x + np.random.uniform(-0.05, 0.05)
+                    new_y = orig_y + np.random.uniform(-0.05, 0.05)
+                    new_angle = orig_angle + np.random.uniform(-10, 10)
+                    new_angle = new_angle % 360
+
+                    # Update config temporarily
+                    current_config[i*3] = new_x
+                    current_config[i*3+1] = new_y
+                    current_config[i*3+2] = new_angle
+
+                    # Test if this improves the solution
+                    penalty = self.evaluate_configuration(current_config, outer_side_length)
+                    if penalty < best_penalty:
+                        best_penalty = penalty
+                        best_config = current_config.copy()
+                        improved = True
+                    else:
+                        # Restore original values
+                        current_config[i*3] = orig_x
+                        current_config[i*3+1] = orig_y
+                        current_config[i*3+2] = orig_angle
+
+            if not improved:
+                break  # No improvement made, stop
+
+        return best_config, best_penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_optimization_routine_with_local_search
+</NAME>
+
+<DESCRIPTION>
+This change updates the main optimization routine to incorporate the new local search refinement step. It ensures that after finding a solution with differential evolution, we apply the local search to fine-tune the configuration. This hybrid approach leverages both global exploration (differential evolution) and local exploitation (coordinate descent) to achieve better results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Phase 1: Multiple optimization attempts with different seeds
+        for run in range(self.num_runs):
+            try:
+                opt_result = differential_evolution(
+                    lambda x: -self.objective_function(x, 4.0),
+                    bounds,
+                    seed=run,
+                    maxiter=self.max_iterations,
+                    popsize=self.population_size,
+                    disp=False,
+                    strategy='best1bin',
+                    tol=1e-6
+                )
+
+                final_config = opt_result.x
+                penalty = self.evaluate_configuration(final_config, 4.0)
+
+                if penalty != float('inf'):
+                    # Refine with local search
+                    refined_config, refined_side, refined_score = self.refine_solution(final_config, 4.0)
+
+                    if refined_score > best_score:
+                        best_score = refined_score
+                        best_config = refined_config.copy()
+                        best_outer_side = refined_side
+
+            except Exception as e:
+                continue
+=======
+        # Phase 1: Multiple optimization attempts with different seeds
+        for run in range(self.num_runs):
+            try:
+                opt_result = differential_evolution(
+                    lambda x: -self.objective_function(x, 4.0),
+                    bounds,
+                    seed=run,
+                    maxiter=self.max_iterations,
+                    popsize=self.population_size,
+                    disp=False,
+                    strategy='best1bin',
+                    tol=1e-6
+                )
+
+                final_config = opt_result.x
+                penalty = self.evaluate_configuration(final_config, 4.0)
+
+                if penalty != float('inf'):
+                    # Refine with local search
+                    refined_config, refined_penalty = self.local_search_refinement(final_config, 4.0)
+
+                    # Then refine with size search
+                    refined_config, refined_side, refined_score = self.refine_solution(refined_config, 4.0)
+
+                    if refined_score > best_score:
+                        best_score = refined_score
+                        best_config = refined_config.copy()
+                        best_outer_side = refined_side
+
+            except Exception as e:
+                continue
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,400 @@
+--- a/original.py
++++ b/original.py
+@@ -1,256 +1,226 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.optimize import minimize
+ from numba import njit
+ import random
+-from typing import List, Tuple, Optional
++from typing import List, Tuple, Optional, Callable
+ import time
+-
+-class ConvolutionOptimizer:
+-    """Main optimizer class that encapsulates all functionality for maximizing C2."""
++from functools import lru_cache
++
++class AutoconvolutionComputation:
++    """Handles all autoconvolution and norm computations."""
+     
+-    def __init__(self):
+-        self.seed = 42
+-        np.random.seed(self.seed)
+-        random.seed(self.seed)
+-    
+     @staticmethod
+     @njit
+-    def compute_autoconvolution_norms(f_vals):
+-        """
+-        Compute the autoconvolution g = f*f and return its norms.
+-        Uses fast numba-compiled operations.
+-        """
++    def compute_autoconvolution(f_vals):
++        """Compute autoconvolution g = f*f efficiently."""
+         n = len(f_vals)
+-        # Autoconvolution using direct computation
+         g = np.zeros(2*n - 1)
+-
+-        # Compute convolution manually for efficiency
+-        # Optimized loop order for better performance
++        
++        # Optimized nested loop for convolution
+         for i in range(n):
+             f_i = f_vals[i]
+             for j in range(n):
+                 g[i + j] += f_i * f_vals[j]
+-
+-        # Compute norms
+-        g_squared = g * g
++        
++        return g
++
++    @staticmethod
++    @njit
++    def compute_norms(g_vals):
++        """Compute the three required norms from autoconvolution result."""
++        g_squared = g_vals * g_vals
+         norm_g2_squared = np.sum(g_squared)
+-        norm_g1 = np.sum(np.abs(g))
+-        norm_g_inf = np.max(np.abs(g))
+-
++        norm_g1 = np.sum(np.abs(g_vals))
++        norm_g_inf = np.max(np.abs(g_vals))
+         return norm_g2_squared, norm_g1, norm_g_inf
+ 
+-    @staticmethod
+-    @njit
+-    def calculate_c2(f_vals):
+-        """
+-        Calculate C2 value for given step function values.
+-        """
+-        norm_g2_squared, norm_g1, norm_g_inf = ConvolutionOptimizer.compute_autoconvolution_norms(f_vals)
+-
++    @classmethod
++    def calculate_c2(cls, f_vals):
++        """Calculate C2 value for given step function values."""
++        g = cls.compute_autoconvolution(f_vals)
++        norm_g2_squared, norm_g1, norm_g_inf = cls.compute_norms(g)
++        
+         # Avoid division by zero
+         if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+             return 0.0
+-
+-        c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+-        return c2
+-
+-    @staticmethod
+-    def generate_geometric_pattern(size: int) -> List[float]:
+-        """Generate geometric decay pattern."""
++        
++        return norm_g2_squared / (norm_g1 * norm_g_inf)
++
++class StrategyManager:
++    """Manages different initialization and optimization strategies."""
++    
++    @staticmethod
++    def generate_gamma_pattern(size: int) -> List[float]:
++        """Generate gamma-distributed pattern."""
++        initial_f_vals = np.random.gamma(2.0, 2.0, size)
++        if np.sum(initial_f_vals) > 0:
++            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
++        return initial_f_vals.tolist()
++
++    @staticmethod
++    def generate_exponential_pattern(size: int) -> List[float]:
++        """Generate exponential-distributed pattern."""
++        initial_f_vals = np.random.exponential(scale=0.5, size=size)
++        initial_f_vals = np.maximum(initial_f_vals, 0.0)
++        if np.sum(initial_f_vals) > 0:
++            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
++        return initial_f_vals.tolist()
++
++    @staticmethod
++    def generate_pattern_with_peaks(size: int) -> List[float]:
++        """Generate geometric pattern with strategic peaks."""
++        # Base geometric distribution
+         base_vals = np.geomspace(1, 0.01, num=size // 2)
+-        if len(base_vals) < size:
+-            remaining = size - len(base_vals)
+-            tail_vals = np.geomspace(0.01, 0.001, num=remaining)
+-            base_vals = np.concatenate([base_vals, tail_vals])
+-        base_vals = np.clip(base_vals, 0, 100)
+-        return base_vals.tolist()
+-    
+-    @staticmethod
+-    def generate_peak_pattern(size: int) -> List[float]:
+-        """Generate pattern with concentrated peaks."""
+-        vals = np.zeros(size)
++        
++        # Add peaks at symmetric positions
++        peaks = np.zeros(size)
+         peak_positions = [size // 4, size // 2, 3 * size // 4]
+         for pos in peak_positions:
+             if pos < size:
+-                vals[pos] = 5.0
+-        # Add some geometric decay around peaks
+-        for i in range(size):
+-            dist_from_peak = min([abs(i - pos) for pos in peak_positions])
+-            vals[i] *= max(0, 1 - dist_from_peak / (size // 8))
+-        vals = np.clip(vals, 0, 100)
+-        return vals.tolist()
+-    
++                peaks[pos] = 2.0
++        
++        # Combine base and peaks
++        combined = base_vals[:size // 2] + peaks[:size // 2]
++        
++        # Fill remaining with geometric decay
++        if len(combined) < size:
++            remaining = size - len(combined)
++            tail_vals = np.geomspace(0.01, 0.001, num=remaining)
++            combined = np.concatenate([combined, tail_vals])
++        
++        # Ensure exact size
++        if len(combined) > size:
++            combined = combined[:size]
++        elif len(combined) < size:
++            combined = np.pad(combined, (0, size - len(combined)), 'constant')
++        
++        # Apply numerical stability
++        combined = np.maximum(combined, 0.0)
++        if np.sum(combined) > 0:
++            combined = combined / np.sum(combined) * 50
++            
++        return combined.tolist()
++
+     @staticmethod
+     def generate_uniform_pattern(size: int) -> List[float]:
+         """Generate uniform pattern."""
+         return [1.0] * size
+ 
++class OptimizerOrchestrator:
++    """Coordinates the optimization process with multiple strategies."""
++    
++    def __init__(self, seed: int = 42):
++        self.seed = seed
++        np.random.seed(seed)
++        random.seed(seed)
++        
+     def _evaluate_individual(self, individual: List[float]) -> Tuple[float, bool]:
+-        """
+-        Evaluate a single individual and return (c2_score, success_flag).
+-        """
++        """Evaluate a single individual with error handling."""
+         try:
+-            c2_score = self.calculate_c2(individual)
++            c2_score = AutoconvolutionComputation.calculate_c2(individual)
+             return c2_score, True
+         except Exception:
+             return 0.0, False
+ 
+-    def _optimize_single_strategy(self, initial_values: List[float], 
+-                                 method: str = 'Nelder-Mead') -> Optional[List[float]]:
+-        """
+-        Optimize a single individual using specified method.
+-        Returns optimized individual or None if failed.
+-        """
++    def _optimize_single_method(self, initial_values: List[float], 
++                               method: str = 'Nelder-Mead') -> Optional[List[float]]:
++        """Optimize using a single method."""
+         def objective(f_vals):
+-            return -self.calculate_c2(f_vals)
++            return -AutoconvolutionComputation.calculate_c2(f_vals)
+         
+         try:
+             result = minimize(
+                 objective,
+                 initial_values,
+                 method=method,
+-                options={'maxiter': 300, 'xtol': 1e-6, 'ftol': 1e-6} if method == 'Nelder-Mead' else {'maxiter': 300}
++                options={'maxiter': 300, 'xtol': 1e-6, 'ftol': 1e-6} 
++                if method == 'Nelder-Mead' else {'maxiter': 300}
+             )
+             
+             if result.success:
+                 optimized_values = result.x
+-                # Clip negative values to zero (non-negativity constraint)
+                 optimized_values = np.maximum(optimized_values, 0.0)
+                 return optimized_values.tolist()
+         except Exception:
+             pass
+         return None
+ 
+-    def _try_strategies(self) -> List[float]:
+-        """
+-        Try multiple optimization strategies and return the best solution.
+-        """
++    def _execute_strategy(self, strategy_func: Callable[[], List[float]]) -> Optional[List[float]]:
++        """Execute a single strategy with optimization."""
++        try:
++            # Generate initial pattern
++            current_solution = strategy_func()
++            
++            # Try optimization with multiple methods
++            optimized_solutions = []
++            
++            # Try Nelder-Mead first
++            nm_opt = self._optimize_single_method(current_solution, 'Nelder-Mead')
++            if nm_opt is not None:
++                optimized_solutions.append(nm_opt)
++            
++            # Try L-BFGS-B if available
++            lbfgsb_opt = self._optimize_single_method(current_solution, 'L-BFGS-B')
++            if lbfgsb_opt is not None:
++                optimized_solutions.append(lbfgsb_opt)
++            
++            # Return best optimized solution
++            if optimized_solutions:
++                best_optimized = min(optimized_solutions, 
++                                   key=lambda x: -AutoconvolutionComputation.calculate_c2(x))
++                return best_optimized
++            
++            # If nothing optimized, return original
++            return current_solution
++            
++        except Exception:
++            return None
++
++    def _try_all_strategies(self) -> List[float]:
++        """Try all optimization strategies and return best."""
+         strategies = [
+-            ('gamma', self._gamma_strategy),
+-            ('exponential', self._exponential_strategy),
+-            ('pattern', self._pattern_strategy)
++            StrategyManager.generate_gamma_pattern,
++            StrategyManager.generate_exponential_pattern, 
++            StrategyManager.generate_pattern_with_peaks
+         ]
+         
+         best_solution = None
+         best_c2 = -float('inf')
+         
+-        for strategy_name, strategy_func in strategies:
++        # Execute each strategy with optimization
++        for i, strategy_func in enumerate(strategies):
+             try:
+-                # Execute strategy
+-                current_solution = strategy_func()
+-                
+-                # Optimize the result using multiple methods
+-                optimized_solutions = []
+-                
+-                # First try Nelder-Mead
+-                nm_opt = self._optimize_single_strategy(current_solution, 'Nelder-Mead')
+-                if nm_opt is not None:
+-                    optimized_solutions.append(nm_opt)
+-                
+-                # Then try L-BFGS-B if available
+-                lbfgsb_opt = self._optimize_single_strategy(current_solution, 'L-BFGS-B')
+-                if lbfgsb_opt is not None:
+-                    optimized_solutions.append(lbfgsb_opt)
+-                
+-                # Evaluate all optimized versions
+-                for sol in optimized_solutions:
+-                    c2_score, success = self._evaluate_individual(sol)
++                solution = self._execute_strategy(strategy_func)
++                if solution is not None:
++                    c2_score, success = self._evaluate_individual(solution)
+                     if success and c2_score > best_c2:
+                         best_c2 = c2_score
+-                        best_solution = sol
+-                        
++                        best_solution = solution
+             except Exception:
+                 continue
+-                
++        
+         # Fallback to uniform distribution if all strategies fail
+         if best_solution is None:
+             n_steps = 500
+             best_solution = [1.0] * n_steps
+             
+         return best_solution
+ 
+-    def _gamma_strategy(self) -> List[float]:
+-        """Gamma distribution initialization strategy."""
+-        n_steps = np.random.randint(200, 1000)
+-        initial_f_vals = np.random.gamma(2.0, 2.0, n_steps)
+-        
+-        # Normalize to prevent extreme values
+-        if np.sum(initial_f_vals) > 0:
+-            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+-        
+-        return initial_f_vals.tolist()
+-
+-    def _exponential_strategy(self) -> List[float]:
+-        """Exponential distribution initialization strategy."""
+-        n_steps = np.random.randint(200, 1000)
+-        initial_f_vals = np.random.exponential(scale=0.5, size=n_steps)
+-        
+-        # Ensure non-negativity
+-        initial_f_vals = np.maximum(initial_f_vals, 0.0)
+-        
+-        # Normalize to avoid extremely large values
+-        if np.sum(initial_f_vals) > 0:
+-            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+-            
+-        return initial_f_vals.tolist()
+-
+-    def _pattern_strategy(self) -> List[float]:
+-        """Pattern-based initialization with peaks."""
+-        n_steps = np.random.randint(300, 1500)
+-        
+-        # Create base geometric distribution
+-        base_vals = np.geomspace(1, 0.01, num=n_steps // 2)
+-        
+-        # Add peaks at symmetric positions
+-        peaks = np.zeros(n_steps)
+-        peak_positions = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+-        for pos in peak_positions:
+-            if pos < n_steps:
+-                peaks[pos] = 2.0  # High amplitude peaks
+-        
+-        # Combine base and peaks
+-        combined = base_vals[:n_steps // 2] + peaks[:n_steps // 2]
+-        
+-        # Fill remaining with geometric decay
+-        if len(combined) < n_steps:
+-            remaining = n_steps - len(combined)
+-            tail_vals = np.geomspace(0.01, 0.001, num=remaining)
+-            combined = np.concatenate([combined, tail_vals])
+-        
+-        # Ensure we have exactly n_steps elements
+-        if len(combined) > n_steps:
+-            combined = combined[:n_steps]
+-        elif len(combined) < n_steps:
+-            combined = np.pad(combined, (0, n_steps - len(combined)), 'constant')
+-        
+-        # Apply a soft threshold to make it more numerically stable
+-        combined = np.maximum(combined, 0.0)
+-        
+-        # Normalize to prevent extreme values
+-        if np.sum(combined) > 0:
+-            combined = combined / np.sum(combined) * 50
+-            
+-        return combined.tolist()
+-
+     def construct_function(self) -> List[float]:
+-        """
+-        Main function to construct step-function with high C2 value.
+-        Returns the best solution found.
+-        """
+-        # Try multiple strategies
+-        return self._try_strategies()
++        """Main function to construct step-function with high C2 value."""
++        return self._try_all_strategies()
+ 
+ # Global optimizer instance
+-_optimizer = ConvolutionOptimizer()
++_optimizer = OptimizerOrchestrator()
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value."""
+     return _optimizer.construct_function()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

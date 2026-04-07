@@ -1,0 +1,531 @@
+--- a/original.py
++++ b/original.py
+@@ -1,316 +1,372 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial import cKDTree
+ from deap import base, creator, tools, algorithms
+ import random
+ import time
+ 
+ # Set seeds for reproducibility
+ np.random.seed(42)
+ random.seed(42)
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 26
+ 
+-    # Precompute grid positions for better initialization
+-    def generate_grid_initialization(n_circles):
+-        # Create a grid pattern for initial placement with better distribution
+-        grid_size = int(np.ceil(np.sqrt(n_circles)))
++    # Improved spiral-based initialization for better distribution
++    def generate_spiral_initialization(n_circles):
++        # Use Fibonacci spiral for better circle distribution
+         positions = []
+-        for i in range(grid_size):
+-            for j in range(grid_size):
+-                if len(positions) >= n_circles:
+-                    break
+-                # Add jitter to avoid perfect grid alignment issues
+-                x = (i + 0.5 + np.random.uniform(-0.1, 0.1)) / grid_size
+-                y = (j + 0.5 + np.random.uniform(-0.1, 0.1)) / grid_size
+-                positions.append([x, y])
+-        # Ensure we have exactly n_circles
+-        result = np.array(positions[:n_circles])
+-        # Clip to valid range to ensure bounds
+-        result[:, 0] = np.clip(result[:, 0], 0.01, 0.99)
+-        result[:, 1] = np.clip(result[:, 1], 0.01, 0.99)
+-        return result
+-
+-    # Efficient overlap checking using KDTree
+-    def check_overlap_fast(circles_arr, idx):
+-        # Only check against existing circles, not including self
+-        if len(circles_arr) <= 1:
+-            return False
+-
+-        # Build tree excluding the circle we're checking
+-        other_circles = np.delete(circles_arr, idx, axis=0)
+-        if len(other_circles) == 0:
+-            return False
+-
+-        tree = cKDTree(other_circles[:, :2])  # Only positions for spatial indexing
+-
+-        # Query neighbors within distance 2*(r1+r2) to find potential overlaps
+-        query_radius = 2 * (circles_arr[idx, 2] + 0.01)  # Add buffer for numerical stability
+-        neighbors = tree.query_ball_point(circles_arr[idx, :2], query_radius)
+-
+-        # Check actual overlap for neighbors
+-        for neighbor_idx in neighbors:
+-            if neighbor_idx >= idx:  # Adjust index since we deleted elements
+-                neighbor_idx += 1
+-            if neighbor_idx >= len(circles_arr):
+-                continue
+-
+-            neighbor_pos = circles_arr[neighbor_idx, :2]
+-            neighbor_radius = circles_arr[neighbor_idx, 2]
+-
+-            # Calculate squared distance for efficiency
+-            dx = circles_arr[idx, 0] - neighbor_pos[0]
+-            dy = circles_arr[idx, 1] - neighbor_pos[1]
+-            dist_sq = dx*dx + dy*dy
+-            min_dist_sq = (circles_arr[idx, 2] + neighbor_radius)**2
+-
+-            if dist_sq < min_dist_sq:
+-                return True
+-        return False
+-
+-    # Check if a circle is within bounds
+-    def is_valid_circle(pos, r):
+-        return (r <= pos[0] <= 1 - r) and (r <= pos[1] <= 1 - r)
+-
+-    # Check if a configuration is valid
++        golden_ratio = (1 + np.sqrt(5)) / 2.0
++
++        for i in range(n_circles):
++            # Fibonacci spiral placement
++            theta = i * 2 * np.pi / golden_ratio
++            radius = np.sqrt(i / n_circles)
++
++            # Convert to Cartesian coordinates and normalize to [0,1] range
++            x = 0.5 + radius * np.cos(theta) * 0.4
++            y = 0.5 + radius * np.sin(theta) * 0.4
++
++            # Add jitter to avoid symmetry issues
++            x += np.random.normal(0, 0.02)
++            y += np.random.normal(0, 0.02)
++
++            # Clip to valid range
++            x = np.clip(x, 0.01, 0.99)
++            y = np.clip(y, 0.01, 0.99)
++
++            positions.append([x, y])
++
++        return np.array(positions)
++
++    # Optimized overlap checking using vectorized operations
++    def check_overlaps_vectorized(config):
++        """Vectorized overlap checking for better performance"""
++        if len(config) < 2:
++            return np.zeros(len(config), dtype=bool)
++
++        # Build KDTree for efficient neighbor search
++        points = config[:, :2]
++        tree = cKDTree(points)
++
++        # Query all points for neighbors within 2*(r1+r2) distance
++        # This creates a sparse matrix of overlaps
++        overlaps = np.zeros(len(config), dtype=bool)
++
++        for i in range(len(config)):
++            x, y, r = config[i]
++
++            # Find nearby circles (within reasonable distance)
++            nearby = tree.query_ball_point([x, y], 2 * (r + 0.01), p=np.inf)
++
++            # Check actual overlap with neighbors
++            for j in nearby:
++                if i != j:
++                    x2, y2, r2 = config[j]
++                    dx = x - x2
++                    dy = y - y2
++                    dist_sq = dx*dx + dy*dy
++                    min_dist_sq = (r + r2)**2
++
++                    if dist_sq < min_dist_sq:
++                        overlaps[i] = True
++                        break
++
++        return overlaps
++
++    # Check if a configuration is valid with better error handling
+     def is_valid_config(config):
+         # Check bounds first (vectorized)
+         valid_bounds = (
+             (config[:, 2] <= config[:, 0]) &
+             (config[:, 0] <= 1 - config[:, 2]) &
+             (config[:, 2] <= config[:, 1]) &
+             (config[:, 1] <= 1 - config[:, 2])
+         )
+ 
+         if not np.all(valid_bounds):
+             return False
+ 
+-        # Check overlaps efficiently using KDTree
+-        for i in range(len(config)):
+-            if check_overlap_fast(config, i):
+-                return False
+-        return True
+-
+-    # Calculate objective function (negative because we want to maximize sum of radii)
++        # Check overlaps
++        overlaps = check_overlaps_vectorized(config)
++        return not np.any(overlaps)
++
++    # Calculate objective function with proper constraints
+     def evaluate(individual):
+         config = individual.reshape(n, 3)
+         if not is_valid_config(config):
+-            return (-1e6,)  # Penalize invalid configurations heavily
++            return (-1e8,)  # Heavy penalty for invalid configurations
+         total_radius = np.sum(config[:, 2])
+         return (total_radius,)
+ 
+-    # Local optimization refinement function using gradient-like adjustments
+-    def refine_configuration(config):
+-        # Simple gradient ascent approach for refinement
+-        old_total = np.sum(config[:, 2])
+-        improved = True
+-        max_iterations = 100
+-
+-        for _ in range(max_iterations):
++    # Enhanced local optimization with physics-inspired repulsion
++    def local_optimization_physics(config, max_iter=50):
++        """Physics-inspired local optimization with repulsion forces"""
++        # Copy input to avoid modifying original
++        optimized = config.copy()
++        prev_total = np.sum(optimized[:, 2])
++
++        for iter_num in range(max_iter):
++            improved = False
++
++            # For each circle, compute forces from neighbors
++            for i in range(len(optimized)):
++                x, y, r = optimized[i]
++                force_x, force_y = 0.0, 0.0
++
++                # Compute repulsion forces from all other circles
++                for j in range(len(optimized)):
++                    if i != j:
++                        x2, y2, r2 = optimized[j]
++                        dx = x - x2
++                        dy = y - y2
++                        dist = np.sqrt(dx*dx + dy*dy)
++
++                        # Only consider if circles are close enough to overlap
++                        if dist < (r + r2 + 1e-6):  # Add small epsilon
++                            # Repulsion force (inverse square law)
++                            if dist > 1e-8:  # Avoid division by zero
++                                force_mag = 0.01 * (r + r2 - dist) / (dist * dist)
++                                force_x += force_mag * dx / dist
++                                force_y += force_mag * dy / dist
++
++                # Apply forces to move circle away from others
++                if abs(force_x) > 1e-8 or abs(force_y) > 1e-8:
++                    # Move with bounded velocity
++                    new_x = x + np.clip(force_x, -0.005, 0.005)
++                    new_y = y + np.clip(force_y, -0.005, 0.005)
++
++                    # Keep within bounds
++                    new_x = np.clip(new_x, r, 1 - r)
++                    new_y = np.clip(new_y, r, 1 - r)
++
++                    # Try to increase radius if possible
++                    max_radius = min(new_x, 1-new_x, new_y, 1-new_y)
++                    new_r = min(max_radius, r + 0.005)
++
++                    # Check if this change is valid
++                    temp_config = optimized.copy()
++                    temp_config[i] = [new_x, new_y, new_r]
++
++                    if is_valid_config(temp_config):
++                        optimized[i] = [new_x, new_y, new_r]
++                        improved = True
++
++            # Early stopping if no improvement
++            current_total = np.sum(optimized[:, 2])
++            if current_total <= prev_total + 1e-6:
++                break
++            prev_total = current_total
++
++        return optimized
++
++    # Advanced refinement with multiple optimization stages
++    def advanced_refinement(config):
++        """Multi-stage refinement approach"""
++        # Stage 1: Basic local optimization
++        refined = local_optimization_physics(config, max_iter=30)
++
++        # Stage 2: Radius maximization
++        for _ in range(20):
++            improved = False
++            for i in range(len(refined)):
++                orig_r = refined[i, 2]
++                # Try to increase radius
++                max_possible = min(
++                    refined[i, 0], 1 - refined[i, 0],
++                    refined[i, 1], 1 - refined[i, 1]
++                )
++
++                # Try incremental increases
++                for incr in [0.005, 0.002, 0.001]:
++                    test_r = min(orig_r + incr, max_possible * 0.99)
++                    if test_r > orig_r + 1e-6:
++                        # Test if this works
++                        temp_config = refined.copy()
++                        temp_config[i, 2] = test_r
++
++                        if is_valid_config(temp_config):
++                            refined[i, 2] = test_r
++                            improved = True
++                            break
++
+             if not improved:
+                 break
+-            improved = False
+-
+-            # Try to increase each radius slightly while maintaining constraints
+-            for i in range(n):
+-                orig_r = config[i, 2]
+-                test_r = min(orig_r + 0.002, 0.5)
+-
+-                # Check if we can increase this radius
+-                valid = True
+-
+-                # Use spatial indexing for faster overlap checking during refinement
+-                test_circle = np.array([[config[i, 0], config[i, 1], test_r]])
+-                try:
+-                    # Check against all other circles
+-                    for j in range(n):
+-                        if i != j:
+-                            dx = config[i, 0] - config[j, 0]
+-                            dy = config[i, 1] - config[j, 1]
+-                            dist_sq = dx*dx + dy*dy
+-                            min_dist_sq = (test_r + config[j, 2])**2
+-
+-                            if dist_sq < min_dist_sq:
+-                                valid = False
+-                                break
+-
+-                    # Check bounds
+-                    if valid and test_r <= 1 - config[i, 0] and test_r <= 1 - config[i, 1]:
+-                        config[i, 2] = test_r
+-                        improved = True
+-
+-                except Exception:
+-                    # If there's an issue, skip this improvement attempt
+-                    pass
+-
+-            if not improved:
+-                break
+-
+-        return config
++
++        # Stage 3: Final physics-based optimization
++        refined = local_optimization_physics(refined, max_iter=20)
++
++        return refined
+ 
+     # Create toolboxes
+     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+     creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+ 
+     toolbox = base.Toolbox()
+ 
+-    # Initialize individuals with better starting configuration
++    # Initialize individuals with improved starting configuration
+     def init_individual():
+-        # Generate initial grid
+-        positions = generate_grid_initialization(n)
+-
+-        # Add more structured randomness to positions and set initial radii
++        # Generate spiral-based initial positions
++        positions = generate_spiral_initialization(n)
++
++        # Set initial radii and positions
+         individual = np.zeros((n, 3))
+         for i in range(n):
+-            # Apply some positional perturbations but keep within reasonable bounds
+-            individual[i, 0] = np.clip(positions[i, 0] + np.random.normal(0, 0.03), 0.01, 0.99)
+-            individual[i, 1] = np.clip(positions[i, 1] + np.random.normal(0, 0.03), 0.01, 0.99)
+-            # Start with slightly larger initial radii but ensure they fit
++            individual[i, 0] = positions[i, 0]
++            individual[i, 1] = positions[i, 1]
++            # Start with more reasonable initial radii
++            individual[i, 2] = 0.02 + np.random.random() * 0.03
++
++        # Ensure all are within bounds
++        for i in range(n):
+             max_radius = min(
+                 individual[i, 0],
+                 1 - individual[i, 0],
+                 individual[i, 1],
+                 1 - individual[i, 1]
+-            ) * 0.95
+-            individual[i, 2] = np.clip(np.random.uniform(0.03, max_radius * 0.8), 0.001, 0.49)
++            )
++            individual[i, 2] = min(individual[i, 2], max_radius * 0.95)
+ 
+         return creator.Individual(individual.flatten())
+ 
+     toolbox.register("individual", init_individual)
+     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+ 
+-    # Register genetic operators with improved parameters
+-    def mutate_individual(individual, indpb=0.15):
++    # Enhanced genetic operators with better parameters
++    def mutate_individual(individual, indpb=0.2):
+         individual = individual.reshape(n, 3)
+         mut_count = 0
+ 
+         for i in range(n):
+             if random.random() < indpb:
+                 mut_count += 1
+-                # Mutate one of x, y, or r with different strengths
+-                choice = random.randint(0, 2)
+-                if choice == 0:  # x coordinate
+-                    individual[i, 0] += np.random.normal(0, 0.04)
++                # Choice of mutation type with weighted probabilities
++                choice = random.choices([0, 1, 2], weights=[0.4, 0.4, 0.2])[0]
++
++                if choice == 0:  # x coordinate - larger mutation
++                    individual[i, 0] += np.random.normal(0, 0.03)
+                     individual[i, 0] = np.clip(individual[i, 0], 0.01, 0.99)
+-                elif choice == 1:  # y coordinate
+-                    individual[i, 1] += np.random.normal(0, 0.04)
++                elif choice == 1:  # y coordinate - larger mutation
++                    individual[i, 1] += np.random.normal(0, 0.03)
+                     individual[i, 1] = np.clip(individual[i, 1], 0.01, 0.99)
+-                else:  # radius
+-                    # Smaller mutations for radius to preserve feasibility
+-                    individual[i, 2] += np.random.normal(0, 0.015)
++                else:  # radius - smaller mutation
++                    individual[i, 2] += np.random.normal(0, 0.01)
+                     individual[i, 2] = np.clip(individual[i, 2], 0.001, 0.49)
+ 
+         return (individual.flatten(),)
+ 
+     def cx_uniform(ind1, ind2):
+-        # Uniform crossover with better probability
++        # Uniform crossover with higher probability for better mixing
+         ind1 = ind1.reshape(n, 3)
+         ind2 = ind2.reshape(n, 3)
+ 
+-        for i in range(n):
+-            if random.random() < 0.6:  # Increased crossover probability
++        # More thorough crossover with better probability
++        for i in range(n):
++            if random.random() < 0.7:  # Increased crossover probability
+                 ind1[i] = ind2[i].copy()
+ 
+         return (ind1.flatten(), ind2.flatten())
+ 
+     toolbox.register("evaluate", evaluate)
+     toolbox.register("mate", cx_uniform)
+     toolbox.register("mutate", mutate_individual)
+ 
+-    # Tournament selection with fitness variance based sizing
+-    def sel_tournament_varsize(individuals, k, tournsize=None):
++    # Improved tournament selection
++    def sel_tournament_adaptive(individuals, k, tournsize=None):
+         if tournsize is None:
+-            # Calculate tournament size based on fitness variance
++            # Adaptive tournament size based on population diversity
+             fitnesses = [ind.fitness.values[0] for ind in individuals]
+-            var_fitness = np.var(fitnesses)
+-            # Normalize tournament size - larger variance means more aggressive selection
+-            tournsize = max(2, min(len(individuals), int(3 + var_fitness * 10)))
++            if len(fitnesses) > 1:
++                var_fitness = np.var(fitnesses)
++                # Larger tournaments for diverse populations, smaller for homogeneous
++                tournsize = max(2, min(len(individuals), int(3 + var_fitness * 15)))
++            else:
++                tournsize = 3
+ 
+         return tools.selTournament(individuals, k, tournsize)
+ 
+-    toolbox.register("select", sel_tournament_varsize)
++    toolbox.register("select", sel_tournament_adaptive)
+ 
+     # Run evolution
+-    pop = toolbox.population(n=60)  # Slightly larger population
++    pop = toolbox.population(n=80)  # Larger population
+     hof = tools.HallOfFame(1)
+ 
+     stats = tools.Statistics(lambda ind: ind.fitness.values)
+     stats.register("avg", np.mean)
+     stats.register("min", np.min)
+     stats.register("max", np.max)
+ 
+     # Run the evolutionary algorithm
+     try:
+         # Initial evaluation
+         for individual in pop:
+             individual.fitness.values = toolbox.evaluate(individual)
+ 
+         # Record best solution before evolution
+         best_individual = tools.selBest(pop, 1)[0]
+         best_solution = best_individual.reshape(n, 3).copy()
+ 
+-        # Evolution parameters - reduced number of generations but increased efficiency
+-        n_generations = 40
+-        # Adaptive mutation rate with exponential decay
+-        mutation_rates = [0.15 * (0.9 ** i) for i in range(n_generations)]
++        # Evolution parameters with better progression
++        n_generations = 60
++        # More aggressive initial mutation, then decay
++        mutation_rates = [0.2 * (0.92 ** i) for i in range(n_generations)]
+ 
+         # Main evolutionary loop
+         for gen in range(n_generations):
+             # Current mutation rate
+             current_mutation_rate = mutation_rates[gen]
+ 
+             # Select
+             offspring = toolbox.select(pop, len(pop))
+             offspring = list(map(toolbox.clone, offspring))
+ 
+             # Crossover and mutation
+             for child1, child2 in zip(offspring[::2], offspring[1::2]):
+-                if random.random() < 0.8:
++                if random.random() < 0.85:  # Higher crossover rate
+                     toolbox.mate(child1, child2)
+                     del child1.fitness.values
+                     del child2.fitness.values
+ 
+             for mutant in offspring:
+                 if random.random() < current_mutation_rate:
+                     toolbox.mutate(mutant)
+                     del mutant.fitness.values
+ 
+             # Evaluate the individuals with an invalid fitness
+             invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+             for ind in invalid_ind:
+                 ind.fitness.values = toolbox.evaluate(ind)
+ 
+             # Replace the current population with the offspring
+             pop[:] = offspring
+ 
+             # Update hall of fame
+             hof.update(pop)
+ 
+             # Keep track of best solution found so far
+             current_best = tools.selBest(pop, 1)[0]
+             if current_best.fitness.values > best_solution.fitness.values:
+                 best_solution = current_best.reshape(n, 3).copy()
+ 
+-        # Final refinement of best solution
+-        refined_solution = refine_configuration(best_solution.copy())
++        # Final advanced refinement
++        refined_solution = advanced_refinement(best_solution.copy())
+         return refined_solution
+ 
+     except Exception as e:
+         # Fallback to simple grid-based solution if evolutionary fails
+         print(f"Evolution failed: {e}")
+-        positions = generate_grid_initialization(n)
++        positions = generate_spiral_initialization(n)
+         final_solution = np.zeros((n, 3))
+         for i in range(n):
+             final_solution[i, 0] = positions[i, 0]
+             final_solution[i, 1] = positions[i, 1]
+             final_solution[i, 2] = 0.05  # Set small but equal radii
+         return final_solution
+ 
+ # EVOLVE-BLOCK-END

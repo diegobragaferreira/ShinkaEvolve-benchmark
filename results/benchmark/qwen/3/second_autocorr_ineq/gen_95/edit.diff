@@ -1,0 +1,451 @@
+--- a/original.py
++++ b/original.py
+@@ -1,251 +1,223 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import signal
+-from scipy.optimize import differential_evolution
++from scipy.optimize import minimize
++from numba import njit
+ import random
+ from typing import List
+-import numba
+-from numba import jit
+-
+-@jit(nopython=True)
+-def compute_autoconvolution_fast(f_vals):
+-    """
+-    Fast numba-based autoconvolution computation for step functions
+-    This correctly computes the convolution assuming piecewise constant
+-    functions on equal intervals.
++
++@njit
++def compute_autoconvolution_norms(f_vals):
++    """
++    Compute the autoconvolution g = f*f and return its norms.
++    Uses fast numba-compiled operations.
+     """
+     n = len(f_vals)
+-    # Result has length 2*n-1
++    # Autoconvolution using direct computation
+     g = np.zeros(2*n - 1)
+ 
+-    # Manual computation of the convolution sum for step functions
+-    # Each term contributes to the convolution according to the overlap
++    # Compute convolution manually for efficiency
+     for i in range(n):
+         for j in range(n):
+-            # In convolution, the value at index i+j comes from f[i] * f[j]
+             g[i + j] += f_vals[i] * f_vals[j]
+ 
+-    return g
+-
+-def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+-    """Compute the three norms needed for C2 calculation with improved accuracy"""
+-    # Create step function with appropriate spacing
+-    n = len(f_values)
+-    if n == 0:
+-        return 0.0, 0.0, 0.0
+-
+-    # Generate step positions [-1/4, 1/4] - these are the left edges of steps
+-    dx = 0.5 / n  # Width of each step
+-
+-    # Convert to numpy array and ensure non-negative
+-    f_array = np.array(f_values, dtype=np.float64)
+-    f_array = np.maximum(f_array, 0.0)  # Clip negative values
+-
+-    # Compute autoconvolution using fast numba implementation
+-    g = compute_autoconvolution_fast(f_array)
+-
+-    # We need to properly scale the result
+-    # The convolution result represents the integral of the product
+-    # But we want the actual function values at the resulting grid points
+-    # For step functions, the result g[k] corresponds to the integral
+-    # of f(x)*f(k*dx-x) over all overlapping regions
+-
+-    # Scale by step width for proper normalization
+-    g = g * dx
+-
+     # Compute norms
+-    g_abs = np.abs(g)
+-
+-    # L2 norm squared (sum of squares times dx)
+-    g2_squared = np.sum(g_abs**2) * dx
+-
+-    # L1 norm (sum of absolute values times dx)
+-    g1 = np.sum(g_abs) * dx
+-
+-    # L-infinity norm
+-    g_inf = np.max(g_abs)
+-
+-    return g2_squared, g1, g_inf
+-
+-def calculate_c2(f_values: List[float]) -> float:
+-    """Calculate C2 value for given step function"""
+-    g2_squared, g1, g_inf = compute_autoconvolution_norms(f_values)
++    g_squared = g * g
++    norm_g2_squared = np.sum(g_squared)
++    norm_g1 = np.sum(np.abs(g))
++    norm_g_inf = np.max(np.abs(g))
++
++    return norm_g2_squared, norm_g1, norm_g_inf
++
++@njit
++def calculate_c2(f_vals):
++    """
++    Calculate C2 value for given step function values.
++    """
++    norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+ 
+     # Avoid division by zero
+-    if g1 <= 1e-15 or g_inf <= 1e-15:
++    if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+         return 0.0
+ 
+-    return g2_squared / (g1 * g_inf)
+-
+-def gaussian_mutate(parent: List[float], strength: float = 0.3) -> List[float]:
+-    """Apply Gaussian perturbations to create offspring"""
+-    child = parent.copy()
+-    n = len(child)
+-
+-    if n == 0:
+-        return child
+-
+-    # Apply small Gaussian noise to each element
+-    for i in range(n):
+-        # Add Gaussian noise scaled by strength and current value
+-        noise = np.random.normal(0, strength * max(1e-6, child[i]))
+-        child[i] = max(0, child[i] + noise)  # Keep non-negative
+-
+-    return child
+-
+-def adaptive_crossover(parent1: List[float], parent2: List[float]) -> List[float]:
+-    """Create offspring through adaptive crossover"""
+-    n1, n2 = len(parent1), len(parent2)
+-    n = max(n1, n2)
+-
+-    # Determine crossover points
+-    point1 = random.randint(1, min(n1, n)) if n1 > 0 else 0
+-    point2 = random.randint(1, min(n2, n)) if n2 > 0 else 0
+-
+-    # Alternate between parents based on some criteria
+-    # Here we use a simple alternating strategy with probability
+-    offspring = []
+-
+-    for i in range(n):
+-        if i < point1 and i < n1:
+-            offspring.append(parent1[i])
+-        elif i < point2 and i < n2:
+-            offspring.append(parent2[i])
+-        else:
+-            # Randomly choose from either parent or average
+-            if random.random() < 0.7:  # 70% chance to pick from parents
+-                choices = []
+-                if i < n1:
+-                    choices.append(parent1[i])
+-                if i < n2:
+-                    choices.append(parent2[i])
+-
+-                if choices:
+-                    offspring.append(random.choice(choices))
+-                else:
+-                    offspring.append(0.0)
++    c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
++    return c2
++
++def construct_function() -> list[float]:
++    """Function to construct step-function with high C2 value using hybrid optimization approach."""
++    
++    # Set seed for reproducibility
++    np.random.seed(42)
++    random.seed(42)
++    
++    # Try multiple initialization strategies and optimization approaches
++    best_solution = None
++    best_c2 = -float('inf')
++    
++    # Strategy 1: Gradient-free optimization with gamma initialization
++    try:
++        n_steps = np.random.randint(200, 1000)  # Broader range for better exploration
++        
++        # Initialize with gamma distribution which often works well for positive values
++        initial_f_vals = np.random.gamma(2.0, 2.0, n_steps)
++        
++        # Normalize to prevent extreme values that might cause numerical issues
++        if np.sum(initial_f_vals) > 0:
++            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
++        
++        # Convert to list for optimization compatibility
++        initial_f_vals_list = initial_f_vals.tolist()
++        
++        # Define objective function for minimization (we minimize negative C2)
++        def objective(f_vals):
++            return -calculate_c2(f_vals)
++        
++        # Use Nelder-Mead optimization for gradient-free optimization
++        result = minimize(
++            objective, 
++            initial_f_vals_list, 
++            method='Nelder-Mead',
++            options={'maxiter': 1000, 'maxfev': 2000, 'xtol': 1e-6, 'ftol': 1e-6}
++        )
++        
++        if result.success:
++            optimized_values = result.x
++            # Clip negative values to zero (non-negativity constraint)
++            optimized_values = np.maximum(optimized_values, 0.0)
++            
++            # Calculate final C2 value
++            final_c2 = calculate_c2(optimized_values.tolist())
++            if final_c2 > best_c2:
++                best_c2 = final_c2
++                best_solution = optimized_values.tolist()
++    except Exception as e:
++        pass
++    
++    # Strategy 2: Different initialization approach (exponential)
++    try:
++        if best_solution is None:
++            n_steps = np.random.randint(200, 1000)
++            initial_f_vals = np.random.exponential(scale=0.5, size=n_steps)
++            
++            # Ensure non-negativity (though exponential should already be positive)
++            initial_f_vals = np.maximum(initial_f_vals, 0.0)
++            
++            # Normalize to avoid extremely large values
++            if np.sum(initial_f_vals) > 0:
++                initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
++            
++            initial_f_vals_list = initial_f_vals.tolist()
++            
++            def objective(f_vals):
++                return -calculate_c2(f_vals)
++            
++            result = minimize(
++                objective, 
++                initial_f_vals_list, 
++                method='Nelder-Mead',
++                options={'maxiter': 500, 'maxfev': 1000, 'xtol': 1e-6, 'ftol': 1e-6}
++            )
++            
++            if result.success:
++                optimized_values = result.x
++                optimized_values = np.maximum(optimized_values, 0.0)
++                
++                final_c2 = calculate_c2(optimized_values.tolist())
++                if final_c2 > best_c2:
++                    best_c2 = final_c2
++                    best_solution = optimized_values.tolist()
++    except Exception as e:
++        pass
++    
++    # Strategy 3: Pattern-based initialization with peaks
++    try:
++        if best_solution is None:
++            n_steps = np.random.randint(300, 1500)  # Even broader range
++            
++            # Create base geometric distribution
++            base_vals = np.geomspace(1, 0.01, num=n_steps // 2)
++            
++            # Add peaks at symmetric positions
++            peaks = np.zeros(n_steps)
++            peak_positions = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
++            for pos in peak_positions:
++                if pos < n_steps:
++                    peaks[pos] = 2.0  # High amplitude peaks
++            
++            # Combine base and peaks
++            combined = base_vals[:n_steps // 2] + peaks[:n_steps // 2]
++            
++            # Fill remaining with geometric decay
++            if len(combined) < n_steps:
++                remaining = n_steps - len(combined)
++                tail_vals = np.geomspace(0.01, 0.001, num=remaining)
++                combined = np.concatenate([combined, tail_vals])
++            
++            # Ensure we have exactly n_steps elements
++            if len(combined) > n_steps:
++                combined = combined[:n_steps]
++            elif len(combined) < n_steps:
++                combined = np.pad(combined, (0, n_steps - len(combined)), 'constant')
++            
++            # Apply a soft threshold to make it more numerically stable
++            combined = np.maximum(combined, 0.0)
++            
++            # Normalize to prevent extreme values
++            if np.sum(combined) > 0:
++                combined = combined / np.sum(combined) * 50
++            
++            initial_f_vals_list = combined.tolist()
++            
++            def objective(f_vals):
++                return -calculate_c2(f_vals)
++            
++            # Multiple optimization attempts
++            results = []
++            
++            # Try Nelder-Mead
++            try:
++                result = minimize(objective, initial_f_vals_list, method='Nelder-Mead', 
++                                options={'maxiter': 300, 'xtol': 1e-6})
++                if result.success:
++                    results.append(result.x)
++            except:
++                pass
++            
++            # Try L-BFGS if available
++            try:
++                result = minimize(objective, initial_f_vals_list, method='L-BFGS-B', 
++                                options={'maxiter': 300})
++                if result.success:
++                    results.append(result.x)
++            except:
++                pass
++            
++            # Return best result among all attempts
++            if results:
++                best_result = min(results, key=lambda x: -calculate_c2(x))
++                best_result = np.maximum(best_result, 0.0)
++                final_c2 = calculate_c2(best_result.tolist())
++                if final_c2 > best_c2:
++                    best_c2 = final_c2
++                    best_solution = best_result.tolist()
+             else:
+-                # Average the two values if available
+-                val1 = parent1[i] if i < n1 else 0
+-                val2 = parent2[i] if i < n2 else 0
+-                offspring.append((val1 + val2) / 2.0)
+-
+-    return offspring
+-
+-def initialize_population(pop_size: int, min_length: int = 100, max_length: int = 1000) -> List[List[float]]:
+-    """Initialize population with diverse solutions"""
+-    population = []
+-
+-    # Start with some well-known good configurations
+-    # Basic uniform step function
+-    uniform_length = random.randint(min_length, max_length)
+-    uniform = [1.0] * uniform_length
+-    population.append(uniform)
+-
+-    # Random step functions
+-    for _ in range(pop_size - 1):
+-        length = random.randint(min_length, max_length)
+-        # Start with a few peaks
+-        individual = [random.random() for _ in range(length)]
+-        population.append(individual)
+-
+-    return population
+-
+-def select_parents(population: List[List[float]], fitnesses: List[float], tournament_size: int = 3) -> List[List[float]]:
+-    """Tournament selection for parent selection"""
+-    selected = []
+-    for _ in range(len(population)):
+-        # Tournament selection
+-        tournament_indices = random.sample(range(len(population)), tournament_size)
+-        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+-        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+-        selected.append(population[winner_index].copy())
+-
+-    return selected
+-
+-def optimize_step_function() -> List[float]:
+-    """Main optimization routine using genetic algorithm approach"""
+-    # Parameters
+-    pop_size = 20
+-    generations = 50
+-    elite_size = 2
+-
+-    # Initialize population
+-    population = initialize_population(pop_size)
+-
+-    best_fitness_history = []
+-
+-    for gen in range(generations):
+-        # Evaluate fitness
+-        fitnesses = [calculate_c2(individual) for individual in population]
+-
+-        # Track best fitness
+-        best_fitness = max(fitnesses)
+-        best_fitness_history.append(best_fitness)
+-
+-        # Print progress every 10 generations
+-        if gen % 10 == 0:
+-            print(f"Generation {gen}: Best C2 = {best_fitness:.6f}")
+-
+-        # Sort by fitness (descending)
+-        sorted_indices = np.argsort(fitnesses)[::-1]
+-        population = [population[i] for i in sorted_indices]
+-        fitnesses = [fitnesses[i] for i in sorted_indices]
+-
+-        # Keep elite
+-        elite = population[:elite_size]
+-
+-        # Select parents
+-        parents = select_parents(population, fitnesses)
+-
+-        # Create new population through crossover and mutation
+-        new_population = elite.copy()
+-
+-        # Adaptive mutation rate - decreases over generations
+-        # Start with higher mutation rate for exploration, then decrease for exploitation
+-        mutation_rate = 0.3 * (1 - gen / generations) + 0.05
+-
+-        while len(new_population) < pop_size:
+-            # Select two parents
+-            p1_idx, p2_idx = random.sample(range(len(parents)), 2)
+-            p1, p2 = parents[p1_idx], parents[p2_idx]
+-
+-            # Crossover
+-            offspring = adaptive_crossover(p1, p2)
+-
+-            # Mutation with adaptive rate
+-            mutated_offspring = gaussian_mutate(offspring, mutation_rate)
+-
+-            new_population.append(mutated_offspring)
+-
+-        population = new_population[:pop_size]
+-
+-    # Final evaluation
+-    final_fitnesses = [calculate_c2(individual) for individual in population]
+-    best_individual = population[np.argmax(final_fitnesses)]
+-
+-    return best_individual
+-
+-def construct_function() -> List[float]:
+-    """Function to construct step-function with high C2 value."""
+-    # Use more sophisticated optimization approach
+-    try:
+-        # Set seed for reproducibility
+-        np.random.seed(42)
+-        random.seed(42)
+-
+-        # Run optimization
+-        best_solution = optimize_step_function()
+-
+-        return best_solution
++                # Fallback to initial configuration
++                final_c2 = calculate_c2(initial_f_vals_list)
++                if final_c2 > best_c2:
++                    best_c2 = final_c2
++                    best_solution = initial_f_vals_list
+     except Exception as e:
+-        # Fallback to basic approach if optimization fails
+-        print(f"Optimization failed with error: {e}, using fallback")
+-        return [1.0] * 500  # Return simple uniform function as fallback
++        pass
++    
++    # Fallback to simple uniform distribution if all strategies fail
++    if best_solution is None:
++        n_steps = 500
++        best_solution = [1.0] * n_steps
++    
++    return best_solution
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

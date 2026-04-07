@@ -1,0 +1,195 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+import warnings
+import time
+
+def compute_autoconvolution_numba(f_vals, dx):
+    """
+    Compute autoconvolution with trapezoidal integration
+    """
+    n = len(f_vals)
+    if n == 0:
+        return np.array([])
+
+    # Create the convolution result
+    g = np.zeros(2*n - 1)
+
+    # Manual computation of discrete convolution
+    for i in range(2*n - 1):
+        start_idx = max(0, i - n + 1)
+        end_idx = min(i, n - 1) + 1
+
+        # Compute convolution integral using trapezoidal rule
+        integral = 0.0
+        for j in range(start_idx, end_idx):
+            k = i - j
+            if k >= 0 and k < n:
+                # Trapezoidal integration for piecewise linear segments
+                if j == start_idx:
+                    integral += f_vals[j] * f_vals[k]
+                elif j == end_idx - 1:
+                    integral += f_vals[j] * f_vals[k]
+                else:
+                    integral += 0.5 * (f_vals[j] + f_vals[j+1]) * f_vals[k]
+
+        g[i] = integral
+
+    return g
+
+def compute_c2_metrics(f_vals):
+    """
+    Compute C2 metrics for given step function values
+    """
+    try:
+        # Define domain
+        n = len(f_vals)
+        if n == 0:
+            return 0.0
+
+        # Domain spacing
+        dx = 0.5 / (n - 1) if n > 1 else 0.5
+
+        # Compute autoconvolution
+        g = compute_autoconvolution_numba(f_vals, dx)
+
+        if len(g) == 0:
+            return 0.0
+
+        # Compute norms
+        g_norm_2_sq = np.sum(g**2) * dx / 3  # Using trapezoidal approximation
+        g_norm_1 = np.sum(np.abs(g)) * dx / (len(g) + 1)
+        g_norm_inf = np.max(np.abs(g))
+
+        # Avoid division by zero
+        if g_norm_1 <= 1e-12 or g_norm_inf <= 1e-12:
+            return 0.0
+
+        c2 = g_norm_2_sq / (g_norm_1 * g_norm_inf)
+        return c2
+
+    except Exception as e:
+        warnings.warn(f"Error in C2 computation: {e}")
+        return 0.0
+
+def sophisticated_initialization(n_points):
+    """
+    Create a sophisticated initialization pattern
+    """
+    # Start with alternating high/low segments
+    pattern = []
+    for i in range(n_points):
+        if i % 2 == 0:
+            pattern.append(max(0, 0.8 + 0.2 * np.sin(i * 0.1)))
+        else:
+            pattern.append(max(0, 0.2 + 0.1 * np.cos(i * 0.15)))
+
+    # Add some Gaussian weighting to smooth transitions
+    gaussian_window = np.exp(-np.linspace(-2, 2, n_points)**2 / 2)
+    pattern = [max(0, p * g) for p, g in zip(pattern, gaussian_window)]
+
+    return pattern
+
+def evolutionary_optimization():
+    """
+    Main evolutionary optimization function
+    """
+    # Time limit enforcement
+    start_time = time.time()
+
+    # Initial parameters
+    n_points_list = [500, 1000, 2000]  # Try different resolutions
+
+    best_c2 = 0.0
+    best_solution = None
+
+    # Multi-start approach
+    for seed in [42, 123, 456, 789, 999]:  # Different seeds for diversity
+        np.random.seed(seed)
+
+        # Try different point counts
+        for n_points in n_points_list:
+            if time.time() - start_time > 85:  # Leave 5 seconds for cleanup
+                break
+
+            # Initialize
+            x0 = sophisticated_initialization(n_points)
+
+            # Define bounds (non-negative)
+            bounds = [(0, 1.0) for _ in range(n_points)]
+
+            # Use differential evolution for global optimization
+            try:
+                # Run DE with adaptive parameters
+                de_result = differential_evolution(
+                    lambda x: -compute_c2_metrics(x),  # Minimize negative C2
+                    bounds,
+                    maxiter=200,
+                    popsize=15,
+                    mutation=(0.5, 1.0),
+                    recombination=0.7,
+                    seed=seed,
+                    disp=False,
+                    tol=1e-6
+                )
+
+                if not de_result.success:
+                    continue
+
+                current_c2 = compute_c2_metrics(de_result.x)
+
+                if current_c2 > best_c2:
+                    best_c2 = current_c2
+                    best_solution = de_result.x.copy()
+
+            except Exception as e:
+                warnings.warn(f"DE optimization failed: {e}")
+                continue
+
+    # Local refinement if we found good solution
+    if best_solution is not None and best_c2 > 0.8:
+        try:
+            # Apply local refinement with L-BFGS-B
+            bounds = [(0, 1.0) for _ in range(len(best_solution))]
+            ref_result = minimize(
+                lambda x: -compute_c2_metrics(x),
+                best_solution,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50}
+            )
+
+            refined_c2 = compute_c2_metrics(ref_result.x)
+            if refined_c2 > best_c2:
+                best_c2 = refined_c2
+                best_solution = ref_result.x.copy()
+
+        except Exception as e:
+            warnings.warn(f"Local refinement failed: {e}")
+
+    return best_solution if best_solution is not None else sophisticated_initialization(1000)
+
+def construct_function() -> list[float]:
+    """
+    Function to construct step-function with high C2 value.
+    Uses sophisticated evolutionary optimization.
+    """
+    # Set global random seed for reproducibility
+    np.random.seed(42)
+
+    # Run optimization
+    best_solution = evolutionary_optimization()
+
+    # Ensure non-negative values and reasonable magnitudes
+    final_solution = [max(0.0, float(x)) for x in best_solution]
+
+    # Return the solution
+    return final_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

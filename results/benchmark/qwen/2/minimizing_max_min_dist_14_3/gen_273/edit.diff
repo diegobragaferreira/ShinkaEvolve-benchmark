@@ -1,0 +1,696 @@
+--- a/original.py
++++ b/original.py
+@@ -1,371 +1,336 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, cdist
+-from scipy.spatial import SphericalVoronoi
+ import math
+ import random
+-from numba import jit
+ import time
+-
+-@jit(nopython=True)
+-def compute_min_max_ratio_numba(points):
+-    """Fast computation of min/max distance ratio using numba"""
+-    n = points.shape[0]
+-    min_dist = np.inf
+-    max_dist = 0.0
+-    
+-    for i in range(n):
+-        for j in range(i+1, n):
+-            # Compute squared distance to avoid sqrt computation
+-            dist_sq = (points[i,0]-points[j,0])**2 + (points[i,1]-points[j,1])**2 + (points[i,2]-points[j,2])**2
+-            dist = np.sqrt(dist_sq)
+-            if dist < min_dist:
+-                min_dist = dist
+-            if dist > max_dist:
+-                max_dist = dist
+-    
+-    if max_dist == 0:
+-        return 0.0
+-    return min_dist / max_dist
+-
+-def fibonacci_sphere(n: int, seed: int = 42) -> np.ndarray:
+-    """Generate n points distributed approximately uniformly on a sphere using Fibonacci spiral method."""
+-    np.random.seed(seed)
+-    points = []
+-    phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
+-
+-    for i in range(n):
+-        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+-        radius = math.sqrt(1 - y * y)  # radius at y
+-
+-        theta = phi * i  # golden angle increment
+-
+-        x = math.cos(theta) * radius
+-        z = math.sin(theta) * radius
+-
+-        points.append([x, y, z])
+-
+-    return np.array(points)
+-
+-def project_to_sphere(points):
+-    """Project points onto unit sphere."""
+-    norms = np.linalg.norm(points, axis=1)
+-    # Avoid division by zero
+-    norms = np.where(norms == 0, 1, norms)
+-    return points / norms[:, np.newaxis]
+-
+-def voronoi_uniformity_score(points):
+-    """Calculate Voronoi uniformity score based on cell area variance."""
+-    try:
+-        sv = SphericalVoronoi(points)
+-        areas = sv.calculate_areas()
+-        if len(areas) == 0:
++from typing import Tuple, List
++
++class PointGenerator:
++    """Handles generation and initialization of points on a sphere."""
++    
++    @staticmethod
++    def fibonacci_sphere(n: int, seed: int = 42) -> np.ndarray:
++        """Generate n points on a sphere using Fibonacci spiral method."""
++        np.random.seed(seed)
++        points = []
++        phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
++
++        for i in range(n):
++            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
++            radius = math.sqrt(1 - y * y)  # radius at y
++
++            theta = phi * i  # golden angle increment
++
++            x = math.cos(theta) * radius
++            z = math.sin(theta) * radius
++
++            points.append([x, y, z])
++
++        return np.array(points)
++    
++    @classmethod
++    def initialize_points(cls, n: int, seed: int = 42) -> np.ndarray:
++        """Initialize points using Fibonacci sphere and perturbation."""
++        # Start with Fibonacci sphere points
++        points = cls.fibonacci_sphere(n, seed)
++
++        # Add some randomness to avoid perfect symmetry issues
++        np.random.seed(seed)
++        points += 0.01 * np.random.randn(n, 3)
++
++        # Normalize to unit sphere
++        points = points / np.linalg.norm(points, axis=1, keepdims=True)
++
++        return points
++
++class Evaluation:
++    """Handles evaluation of point configurations."""
++    
++    @staticmethod
++    def compute_min_max_ratio(points: np.ndarray) -> float:
++        """Compute the ratio of minimum to maximum distances."""
++        if len(points) < 2:
+             return 0.0
+-        # Lower variance = more uniform distribution
+-        return 1.0 / (1e-10 + np.var(areas))
+-    except:
+-        return 0.0
+-
+-def combined_fitness(points, ratio_weight=1.0, uniformity_weight=0.3):
+-    """Combined fitness function using both distance ratio and Voronoi uniformity."""
+-    ratio = compute_min_max_ratio_numba(points)
+-    uniformity = voronoi_uniformity_score(points)
+-    return ratio_weight * ratio + uniformity_weight * uniformity
+-
+-def adaptive_crossover(parent1, parent2, diversity_score):
+-    """Adaptive crossover that varies based on population diversity."""
+-    if diversity_score < 0.3:  # Low diversity - more exploratory crossover
+-        crossover_rate = 0.9
+-    elif diversity_score < 0.6:  # Medium diversity - balanced crossover
+-        crossover_rate = 0.7
+-    else:  # High diversity - more exploitative crossover
+-        crossover_rate = 0.4
+-    
+-    if random.random() > crossover_rate:
+-        return parent1.copy(), parent2.copy()
+-    
+-    # Uniform crossover
+-    num_points = parent1.shape[0]
+-    crossover_point = random.randint(1, num_points-1)
+-    
+-    child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+-    child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+-    
+-    return child1, child2
+-
+-def adaptive_mutation(individual, diversity_score, generation):
+-    """Adaptive mutation that varies based on diversity and generation."""
+-    if diversity_score < 0.3:  # Low diversity - high mutation rate
+-        mutation_rate = 0.2
+-        mutation_strength = 0.08
+-    elif diversity_score < 0.6:  # Medium diversity - moderate mutation
+-        mutation_rate = 0.1
+-        mutation_strength = 0.05
+-    else:  # High diversity - low mutation rate
+-        mutation_rate = 0.05
+-        mutation_strength = 0.02
+-    
+-    # Adjust based on generation (decrease over time)
+-    generation_factor = max(0.1, 1.0 - generation / 1000.0)
+-    mutation_rate *= generation_factor
+-    mutation_strength *= generation_factor
+-    
+-    mutated = individual.copy()
+-    
+-    for i in range(len(mutated)):
+-        if random.random() < mutation_rate:
+-            # Add small random perturbation
+-            delta = np.random.normal(0, mutation_strength, 3)
+-            mutated[i] += delta
+-            
+-            # Project back to sphere
+-            mutated[i] = project_to_sphere(mutated[i:i+1])[0]
+-    
+-    return mutated
+-
+-def evaluate_diversity(population):
+-    """Evaluate population diversity using standard deviation of pairwise distances."""
+-    if len(population) < 2:
+-        return 0.0
+-    
+-    distances = []
+-    for i in range(len(population)):
+-        for j in range(i+1, len(population)):
+-            dist = np.linalg.norm(population[i] - population[j])
+-            distances.append(dist)
+-    
+-    if not distances:
+-        return 0.0
+-    
+-    return np.std(distances) / (np.mean(distances) + 1e-10)
+-
+-def multi_resolution_initialization(n: int = 14, seed: int = 42):
+-    """Generate multiple initial configurations at different resolutions."""
+-    initial_configs = []
+-    
+-    # Different initialization strategies
+-    strategies = [
+-        ("fibonacci", fibonacci_sphere(n, seed)),
+-        ("random", np.random.uniform(-1, 1, (n, 3))),
+-        ("icosahedron", generate_icosahedron_points(n, seed))
+-    ]
+-    
+-    for name, points in strategies:
+-        # Apply some perturbation to avoid perfect symmetry
+-        points = points + 0.01 * np.random.randn(*points.shape)
+-        points = project_to_sphere(points)
+-        initial_configs.append(points)
+-    
+-    return initial_configs
+-
+-def generate_icosahedron_points(n: int, seed: int = 42):
+-    """Generate points resembling an icosahedron."""
+-    np.random.seed(seed)
+-    # Icosahedron vertices scaled to unit sphere
+-    phi = (1 + math.sqrt(5)) / 2  # golden ratio
+-    points = [
+-        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+-        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+-        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+-    ]
+-    
+-    # Normalize
+-    points = np.array(points)
+-    norms = np.linalg.norm(points, axis=1)
+-    points = points / norms[:, np.newaxis]
+-    
+-    # Return n points (either originals or interpolated)
+-    if n <= 12:
+-        return points[:n]
+-    else:
+-        # For more than 12 points, sample and add extra points
+-        # We'll create additional points by averaging and normalizing
+-        extra_points = []
+-        for _ in range(n - 12):
+-            # Sample two random points and create midpoint
+-            idx1, idx2 = random.sample(range(12), 2)
+-            midpoint = (points[idx1] + points[idx2]) / 2
+-            norm = np.linalg.norm(midpoint)
+-            if norm > 0:
+-                midpoint = midpoint / norm
+-            extra_points.append(midpoint)
+-        
+-        return np.vstack([points, extra_points])
+-
+-def local_geometric_refinement(points, max_iter=50):
+-    """Refine points using geometric optimization techniques."""
+-    current_points = points.copy()
+-    best_points = current_points.copy()
+-    best_ratio = compute_min_max_ratio_numba(current_points)
+-    
+-    for iteration in range(max_iter):
+-        improved = False
+-        
+-        # Try to improve each point individually
+-        for i in range(len(current_points)):
+-            old_point = current_points[i].copy()
+-            old_ratio = compute_min_max_ratio_numba(current_points)
+-            
+-            # Estimate gradient for point i using finite differences
+-            grad = np.zeros(3)
+-            eps = 1e-5
+-            
+-            for j in range(3):
+-                test_points = current_points.copy()
+-                test_points[i, j] += eps
+-                # Project to sphere
+-                test_points[i] = project_to_sphere(test_points[i:i+1])[0]
+-                new_ratio = compute_min_max_ratio_numba(test_points)
+-                grad[j] = (new_ratio - old_ratio) / eps
+-            
+-            # Move in gradient direction
+-            if np.linalg.norm(grad) > 1e-10:
+-                current_points[i] = current_points[i] + 0.01 * grad
+-                # Project back to sphere
+-                current_points[i] = project_to_sphere(current_points[i:i+1])[0]
+-                improved = True
+-        
+-        # If no improvement, stop early
+-        if not improved:
+-            break
+-            
+-        # Update best solution
+-        new_ratio = compute_min_max_ratio_numba(current_points)
+-        if new_ratio > best_ratio:
+-            best_ratio = new_ratio
+-            best_points = current_points.copy()
+-    
+-    return best_points, best_ratio
+-
+-def spherical_voronoi_evolution() -> np.ndarray:
++        
++        distances = pdist(points)
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max == 0:
++            return 0.0
++            
++        return d_min / d_max
++
++class Optimizer:
++    """Handles the optimization process using simulated annealing with enhancements."""
++    
++    def __init__(self, max_iterations: int = 15000, initial_temp: float = 0.1, 
++                 min_temp: float = 1e-8, cooling_rate: float = 0.9995):
++        self.max_iterations = max_iterations
++        self.initial_temp = initial_temp
++        self.min_temp = min_temp
++        self.cooling_rate = cooling_rate
++        self.patience = 500
++        
++    def perturb_point_guided(self, points: np.ndarray, idx: int, 
++                           current_ratio: float, temp: float) -> np.ndarray:
++        """Perturb a point based on its local geometric context."""
++        try:
++            # Get distances to all other points
++            distances = cdist([points[idx]], points)[0]
++            distances = distances[distances > 0]  # Remove self-distance
++            
++            if len(distances) == 0:
++                # Fallback to random perturbation
++                delta = np.random.randn(3)
++                delta = delta - np.dot(delta, points[idx]) * points[idx]
++                return points[idx] + 0.02 * temp * delta / np.linalg.norm(delta)
++            
++            avg_distance = np.mean(distances)
++            min_distance = np.min(distances)
++            max_distance = np.max(distances)
++            
++            # Analyze the point's local geometry
++            # If point is too close to others, push it away
++            if min_distance < avg_distance * 0.4:
++                # Compute repulsion force from close neighbors
++                repulsion = np.zeros(3)
++                for i in range(len(points)):
++                    if i != idx:
++                        diff = points[idx] - points[i]
++                        dist = np.linalg.norm(diff)
++                        if dist > 0 and dist < avg_distance * 0.7:
++                            # Inverse distance weighted repulsion
++                            repulsion += diff / dist * (1.0 / dist**2)
++                
++                # If there's repulsion, normalize and apply
++                if np.linalg.norm(repulsion) > 0:
++                    repulsion = repulsion / np.linalg.norm(repulsion)
++                    # Magnitude depends on how close it is
++                    magnitude = 0.05 * (1.0 - min_distance / avg_distance) * temp
++                    return points[idx] + repulsion * magnitude
++                
++            elif max_distance > avg_distance * 1.5:
++                # If point is far from others, maybe pull it closer to balance
++                # Compute attraction toward average position
++                attraction = np.mean(points, axis=0) - points[idx]
++                attraction_norm = np.linalg.norm(attraction)
++                if attraction_norm > 0:
++                    attraction = attraction / attraction_norm
++                    # Magnitude inversely related to distance from center
++                    center_distance = np.linalg.norm(points[idx])
++                    magnitude = 0.01 * (1.0 - center_distance * 0.5) * temp
++                    return points[idx] - attraction * magnitude
++                    
++            # Default: small random perturbation guided by temperature
++            delta = np.random.randn(3)
++            delta = delta - np.dot(delta, points[idx]) * points[idx]
++            magnitude = 0.02 * temp
++            return points[idx] + magnitude * delta / np.linalg.norm(delta)
++            
++        except Exception:
++            # Fallback to simple random perturbation
++            delta = np.random.randn(3)
++            delta = delta - np.dot(delta, points[idx]) * points[idx]
++            return points[idx] + 0.02 * temp * delta / np.linalg.norm(delta)
++    
++    def adaptive_cooling(self, temperature: float, iteration: int, 
++                        last_improvement: int, recent_ratios: list) -> float:
++        """Apply adaptive cooling based on recent performance trends."""
++        # Check for stagnation
++        if len(recent_ratios) >= 5:
++            recent_change = recent_ratios[-1] - recent_ratios[0]
++            if recent_change < 1e-8:
++                # Very slow progress, cool faster
++                return max(self.min_temp, temperature * 0.98)
++            elif recent_change > 1e-5:
++                # Fast progress, cool slower but not in final phase
++                return max(self.min_temp, temperature * 0.995)
++        
++        # Regular cooling with dynamic adjustment
++        if iteration - last_improvement > self.patience:
++            # Slow progress detected, increase cooling rate
++            return max(self.min_temp, temperature * 0.95)
++        
++        # Normal cooling rate
++        return max(self.min_temp, temperature * self.cooling_rate)
++    
++    def local_refinement(self, points: np.ndarray, max_iter: int = 20, 
++                        step_size: float = 0.05) -> Tuple[np.ndarray, float]:
++        """Perform local refinement using gradient estimation."""
++        refined_points = points.copy()
++        current_ratio = Evaluation.compute_min_max_ratio(refined_points)
++        
++        for _ in range(max_iter):
++            improved = False
++            for i in range(len(refined_points)):
++                old_ratio = Evaluation.compute_min_max_ratio(refined_points)
++                old_point = refined_points[i].copy()
++                
++                # Estimate gradient using finite differences
++                grad = np.zeros(3)
++                for j in range(3):
++                    eps = 1e-5
++                    test_points = refined_points.copy()
++                    test_points[i, j] += eps
++                    # Project back to sphere
++                    norm = np.linalg.norm(test_points[i])
++                    if norm > 0:
++                        test_points[i] = test_points[i] / norm
++                    new_ratio = Evaluation.compute_min_max_ratio(test_points)
++                    grad[j] = (new_ratio - old_ratio) / eps
++                
++                # Move along gradient
++                if np.linalg.norm(grad) > 1e-10:
++                    refined_points[i] = refined_points[i] + step_size * grad
++                    # Project back to sphere
++                    norm = np.linalg.norm(refined_points[i])
++                    if norm > 0:
++                        refined_points[i] = refined_points[i] / norm
++                    improved = True
++            
++            # If no improvement, stop early
++            if not improved:
++                break
++        
++        new_ratio = Evaluation.compute_min_max_ratio(refined_points)
++        return refined_points, new_ratio
++    
++    def optimize_single(self, initial_points: np.ndarray, 
++                       max_iter_override: int = None) -> Tuple[np.ndarray, float]:
++        """Run simulated annealing optimization for one instance."""
++        # Initialize
++        points = initial_points.copy()
++        current_ratio = Evaluation.compute_min_max_ratio(points)
++        
++        T = self.initial_temp
++        best_points = points.copy()
++        best_ratio = current_ratio
++        last_improvement = 0
++        iteration = 0
++        recent_ratios = []
++        max_iter = max_iter_override if max_iter_override is not None else self.max_iterations
++        
++        # Vectorized operations for efficiency
++        all_indices = list(range(len(points)))
++        
++        while iteration < max_iter:
++            # Adaptive cooling
++            T = self.adaptive_cooling(T, iteration, last_improvement, recent_ratios)
++            
++            # Select random point to perturb
++            idx = random.choice(all_indices)
++            
++            # Save current point
++            old_point = points[idx].copy()
++            
++            # Perturb selected point using guided mechanism
++            points[idx] = self.perturb_point_guided(points, idx, current_ratio, T)
++            
++            # Compute new ratio
++            new_ratio = Evaluation.compute_min_max_ratio(points)
++            
++            # Accept or reject based on Metropolis criterion
++            if new_ratio > current_ratio:
++                current_ratio = new_ratio
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++                    last_improvement = iteration
++            else:
++                # Calculate acceptance probability
++                delta = new_ratio - current_ratio
++                if T > 0:
++                    acceptance_prob = math.exp(delta / T)
++                else:
++                    acceptance_prob = 0.0
++                    
++                if random.random() < acceptance_prob:
++                    current_ratio = new_ratio
++                    if new_ratio > best_ratio:
++                        best_ratio = new_ratio
++                        best_points = points.copy()
++                        last_improvement = iteration
++                else:
++                    # Revert change
++                    points[idx] = old_point
++            
++            # Track recent ratios for adaptive cooling
++            recent_ratios.append(current_ratio)
++            if len(recent_ratios) > 30:
++                recent_ratios.pop(0)
++            
++            # Periodic local refinement
++            if iteration % 1000 == 0 and iteration > 0:
++                refined_points, refined_ratio = self.local_refinement(points.copy())
++                if refined_ratio > current_ratio:
++                    points = refined_points.copy()
++                    current_ratio = refined_ratio
++                    if refined_ratio > best_ratio:
++                        best_ratio = refined_ratio
++                        best_points = points.copy()
++                        last_improvement = iteration
++            
++            # Early stopping if we're not improving
++            if iteration - last_improvement > 10000:
++                break
++                
++            iteration += 1
++        
++        return best_points, best_ratio
++    
++    def optimize_multi_start(self, initial_points: np.ndarray, 
++                           num_starts: int = 5) -> Tuple[np.ndarray, float]:
++        """Run multiple optimization instances to find better solutions."""
++        best_points = None
++        best_ratio = 0.0
++        
++        for start in range(num_starts):
++            # Use different random seed for each start
++            np.random.seed(start * 1000 + 42)
++            
++            # Create fresh initial points for this run
++            if start == 0:
++                # First start with provided points
++                points = initial_points.copy()
++            else:
++                # Generate new initialization with different seed
++                points = PointGenerator.initialize_points(14, start * 1000 + 42)
++            
++            # Run optimization for this start
++            current_points, current_ratio = self.optimize_single(points, max_iter_override=10000)
++            
++            if current_ratio > best_ratio:
++                best_ratio = current_ratio
++                best_points = current_points.copy()
++        
++        # Run final refinement on best solution found
++        if best_points is not None:
++            final_points, final_ratio = self.local_refinement(best_points.copy(), max_iter=50)
++            if final_ratio > best_ratio:
++                best_ratio = final_ratio
++                best_points = final_points.copy()
++        
++        return best_points, best_ratio
++
++def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+-    Uses a hybrid evolutionary algorithm with adaptive operators and multi-resolution approach.
+-    
++
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+-    # Set seed for reproducibility
+-    np.random.seed(42)
+-    random.seed(42)
+-    
+-    # Multi-resolution initialization
+-    initial_configs = multi_resolution_initialization(14, 42)
+-    
+-    # Best solution tracking
+-    best_solution = None
+-    best_ratio = 0.0
+-    
+-    # Try all initial configurations
+-    for i, initial_points in enumerate(initial_configs):
+-        # Run evolutionary optimization for each initialization
+-        config_best_sol, config_best_ratio = evolutionary_optimization(initial_points, f"config_{i}")
+-        
+-        if config_best_ratio > best_ratio:
+-            best_ratio = config_best_ratio
+-            best_solution = config_best_sol.copy()
+-    
+-    # Final refinement of best solution
+-    if best_solution is not None:
+-        final_points, final_ratio = local_geometric_refinement(best_solution, 100)
+-        if final_ratio > best_ratio:
+-            best_solution = final_points
+-            best_ratio = final_ratio
+-    
+-    return best_solution if best_solution is not None else fibonacci_sphere(14, 42)
+-
+-def evolutionary_optimization(initial_points, config_name="default"):
+-    """Main evolutionary optimization loop with adaptive operators."""
+-    # Evolutionary parameters
+-    population_size = 25
+-    generations = 1000
+-    elite_size = 5
+-    max_time = 360  # seconds
+-    
+-    start_time = time.time()
+-    
+-    # Initialize population
+-    population = []
+-    for i in range(population_size):
+-        if i == 0:
+-            # First individual from given initialization
+-            individual = initial_points.copy()
+-        else:
+-            # Create variants with small perturbations
+-            individual = initial_points.copy()
+-            individual += 0.01 * np.random.randn(*individual.shape)
+-            individual = project_to_sphere(individual)
+-        population.append(individual)
+-    
+-    best_solution = None
+-    best_fitness = -np.inf
+-    best_ratio = 0.0
+-    
+-    # Main evolution loop
+-    for generation in range(generations):
+-        if time.time() - start_time > max_time:
+-            break
+-            
+-        # Evaluate fitness for all individuals
+-        fitness_scores = []
+-        ratios = []
+-        
+-        for individual in population:
+-            fitness = combined_fitness(individual)
+-            ratio = compute_min_max_ratio_numba(individual)
+-            fitness_scores.append(fitness)
+-            ratios.append(ratio)
+-        
+-        # Track best solution
+-        max_fitness_idx = np.argmax(fitness_scores)
+-        if fitness_scores[max_fitness_idx] > best_fitness:
+-            best_fitness = fitness_scores[max_fitness_idx]
+-            best_ratio = ratios[max_fitness_idx]
+-            best_solution = population[max_fitness_idx].copy()
+-        
+-        # Print progress periodically
+-        if generation % 100 == 0:
+-            print(f"Gen {generation}: Best ratio = {best_ratio:.6f}")
+-        
+-        # Calculate population diversity
+-        diversity = evaluate_diversity(population)
+-        
+-        # Create new population
+-        # Elitism: keep the best individuals
+-        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+-        new_population = [population[i].copy() for i in elite_indices]
+-        
+-        # Selection, crossover, and mutation
+-        # Tournament selection
+-        selected_parents = []
+-        for _ in range(population_size - elite_size):
+-            tournament_indices = random.sample(range(len(population)), 3)
+-            tournament_fitnesses = [fitness_scores[i] for i in tournament_indices]
+-            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+-            selected_parents.append(population[winner_index])
+-        
+-        # Generate offspring
+-        while len(new_population) < population_size:
+-            parent1, parent2 = random.sample(selected_parents, 2)
+-            child1, child2 = adaptive_crossover(parent1, parent2, diversity)
+-            
+-            child1 = adaptive_mutation(child1, diversity, generation)
+-            child2 = adaptive_mutation(child2, diversity, generation)
+-            
+-            new_population.extend([child1, child2])
+-        
+-        # Trim to exact population size
+-        population = new_population[:population_size]
+-    
+-    return best_solution, best_ratio
+-
+-def min_max_dist_dim3_14() -> np.ndarray:
+-    """
+-    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+-
+-    Returns
+-        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+-    """
+-    return spherical_voronoi_evolution()
++    # Initialize components
++    generator = PointGenerator()
++    optimizer = Optimizer()
++    
++    # Generate initial points using Fibonacci sphere
++    initial_points = generator.initialize_points(14)
++    
++    # Optimize using multi-start simulated annealing
++    best_points, _ = optimizer.optimize_multi_start(initial_points)
++    
++    return best_points
+ 
+ # EVOLVE-BLOCK-END

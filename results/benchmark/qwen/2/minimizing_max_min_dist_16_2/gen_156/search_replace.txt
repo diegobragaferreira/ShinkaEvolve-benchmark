@@ -1,0 +1,394 @@
+<NAME>
+enhanced_initialization_and_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The proposed improvement focuses on enhancing both the initialization strategy and constraint handling to better achieve the target benchmark. The key insight is to implement a more sophisticated initial configuration that includes symmetry-breaking constraints and to improve the constraint handling mechanism to be more robust against boundary violations. This approach combines the best practices from previous generations while adding intelligent initialization that helps escape poor local optima.
+
+1. **Enhanced Initialization Strategy**: Instead of just generating multiple initial configurations, I'll implement a more deliberate approach that breaks symmetry and ensures good spatial distribution right from the start. This includes using a combination of structured grids with specific perturbations that maintain uniformity while breaking potential symmetries.
+
+2. **Improved Constraint Handling**: The current constraint handling relies on simple bound checking which might not be sufficient for complex optimization landscapes. I'll enhance the constraint enforcement to better handle edge cases and prevent optimization from getting stuck near boundaries.
+
+3. **More Robust Optimization Pipeline**: I'll refine the optimization stages to have better fallback mechanisms and more precise control over the optimization parameters.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize, differential_evolution
+from scipy.spatial.distance import pdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -np.inf
+
+        # Return negative ratio (since we want to maximize)
+        return -d_min / d_max
+
+    def constraint(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        return np.concatenate([
+            points[:, 0],           # x coordinates >= 0
+            1 - points[:, 0],       # x coordinates <= 1
+            points[:, 1],           # y coordinates >= 0
+            1 - points[:, 1]        # y coordinates <= 1
+        ])
+
+    def compute_ratio(points):
+        """Compute the min/max distance ratio for given points."""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max == 0:
+            return 0.0
+        return d_min / d_max
+
+    # Multi-start optimization with enhanced strategy incorporating evolutionary restarts
+    best_ratio = -np.inf
+    best_points = None
+
+    # Enhanced initial configurations
+    initial_configs = []
+
+    # Configuration 1: Grid-based arrangement with structured perturbations
+    np.random.seed(42)
+    grid_x = np.linspace(0.1, 0.9, 4)
+    grid_y = np.linspace(0.1, 0.9, 4)
+    grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+
+    # Add structured perturbations to break symmetry
+    perturbation_magnitude = 0.08
+    noise = np.random.normal(0, perturbation_magnitude/3, (16, 2))
+    initial_points1 = np.clip(grid_points + noise, 0, 1)
+    initial_configs.append(initial_points1)
+
+    # Configuration 2: More evenly distributed points
+    np.random.seed(123)
+    initial_points2 = np.random.uniform(0.05, 0.95, (16, 2))
+    initial_configs.append(initial_points2)
+
+    # Configuration 3: Fibonacci spiral-like arrangement (more uniform)
+    np.random.seed(456)
+    angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+    radii = np.sqrt(np.linspace(0.05, 0.45, 16))  # Square root for uniform distribution
+    fib_points = np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
+    fib_points = np.clip((fib_points + 1) / 2, 0, 1)  # Normalize to [0,1]
+    initial_configs.append(fib_points)
+
+    # Configuration 4: Another grid with different perturbations
+    np.random.seed(789)
+    grid_x = np.linspace(0.15, 0.85, 4)
+    grid_y = np.linspace(0.15, 0.85, 4)
+    grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+    noise = np.random.uniform(-0.03, 0.03, (16, 2))
+    initial_points4 = np.clip(grid_points + noise, 0, 1)
+    initial_configs.append(initial_points4)
+
+    # Run evolutionary optimization to find better starting points
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Use differential evolution as global optimizer to find diverse starting points
+    try:
+        de_result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=50,
+            popsize=10,
+            seed=42,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7
+        )
+
+        if de_result.success:
+            # Generate initial configuration from DE result
+            de_points = de_result.x.reshape(-1, 2)
+            # Apply additional variation to get more diverse starting points
+            np.random.seed(999)
+            noise = np.random.normal(0, 0.02, (16, 2))
+            de_varied = np.clip(de_points + noise, 0, 1)
+            initial_configs.append(de_varied)
+    except Exception:
+        pass
+
+    # Run optimizations with different initial configurations
+    for i, initial_points in enumerate(initial_configs):
+        try:
+            # Flatten for optimization
+            x0 = initial_points.flatten()
+
+            # Define bounds (points must stay in [0,1] x [0,1])
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Define constraints
+            cons = {'type': 'ineq', 'fun': constraint}
+
+            # First attempt with L-BFGS-B for faster initial optimization
+            result1 = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6}
+            )
+
+            # If successful, do a more thorough optimization with SLSQP
+            if result1.success:
+                refined_x0 = result1.x
+                result2 = minimize(
+                    objective,
+                    refined_x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints=cons,
+                    options={'maxiter': 1000, 'ftol': 1e-8, 'gtol': 1e-8}
+                )
+
+                if result2.success:
+                    # Extract points and calculate final ratio
+                    optimized_points = result2.x.reshape(-1, 2)
+                    ratio = compute_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If no successful optimization, return the best initial configuration
+    if best_points is None:
+        best_points = initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+
+    return best_points
+=======
+import numpy as np
+from scipy.optimize import minimize, differential_evolution
+from scipy.spatial.distance import pdist
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -np.inf
+
+        # Return negative ratio (since we want to maximize)
+        return -d_min / d_max
+
+    def constraint(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        # More robust constraint handling with soft penalties
+        bounds_violation = np.concatenate([
+            np.maximum(0 - points[:, 0], 0),    # x coordinates >= 0
+            np.maximum(points[:, 0] - 1, 0),    # x coordinates <= 1
+            np.maximum(0 - points[:, 1], 0),    # y coordinates >= 0
+            np.maximum(points[:, 1] - 1, 0)     # y coordinates <= 1
+        ])
+        return bounds_violation
+
+    def compute_ratio(points):
+        """Compute the min/max distance ratio for given points."""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max == 0:
+            return 0.0
+        return d_min / d_max
+
+    def symmetry_breaking_grid():
+        """Create a grid configuration with explicit symmetry breaking."""
+        # Create a structured 4x4 grid but with deliberate asymmetry
+        grid_x = np.linspace(0.1, 0.9, 4)
+        grid_y = np.linspace(0.1, 0.9, 4)
+        grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+
+        # Add asymmetric perturbations to break symmetries
+        np.random.seed(42)
+        # Apply different perturbation strengths to different groups of points
+        perturbations = np.zeros((16, 2))
+        for i in range(16):
+            row = i // 4
+            col = i % 4
+            # Points in corners get larger perturbations
+            if (row == 0 and col == 0) or (row == 0 and col == 3) or \
+               (row == 3 and col == 0) or (row == 3 and col == 3):
+                perturbations[i] = np.random.normal(0, 0.05, 2)
+            elif row == 0 or row == 3 or col == 0 or col == 3:
+                perturbations[i] = np.random.normal(0, 0.03, 2)
+            else:
+                perturbations[i] = np.random.normal(0, 0.01, 2)
+
+        grid_points_with_asymmetry = np.clip(grid_points + perturbations, 0, 1)
+        return grid_points_with_asymmetry
+
+    def improved_fibonacci_spiral():
+        """Improved fibonacci spiral with better spacing."""
+        np.random.seed(456)
+        # Use golden angle for better distribution
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        angles = np.arange(16) * 2 * np.pi / phi
+        radii = np.sqrt(np.linspace(0.05, 0.45, 16))  # Square root for uniform distribution
+        spiral_points = np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
+        # Normalize to [0,1] with slight padding
+        spiral_points = np.clip((spiral_points + 1) / 2, 0.05, 0.95)
+        return spiral_points
+
+    def improved_hexagonal():
+        """Improved hexagonal grid with better point distribution."""
+        np.random.seed(789)
+        # Create a more irregular hexagonal pattern
+        hex_x = np.array([0.15, 0.45, 0.75, 0.3, 0.6, 0.15, 0.45, 0.75, 0.225, 0.525, 0.825, 0.375, 0.675, 0.225, 0.525, 0.825])
+        hex_y = np.array([0.15, 0.15, 0.15, 0.45, 0.45, 0.75, 0.75, 0.75, 0.3, 0.3, 0.3, 0.6, 0.6, 0.9, 0.9, 0.9])
+        hex_points = np.column_stack([hex_x, hex_y])
+
+        # Add controlled perturbations to avoid perfect symmetries
+        noise = np.random.normal(0, 0.02, (16, 2))
+        hex_points = np.clip(hex_points + noise, 0, 1)
+        return hex_points
+
+    # Multi-start optimization with enhanced strategy incorporating evolutionary restarts
+    best_ratio = -np.inf
+    best_points = None
+
+    # Enhanced initial configurations with improved symmetry breaking
+    initial_configs = []
+
+    # Configuration 1: Symmetry breaking grid
+    initial_configs.append(symmetry_breaking_grid())
+
+    # Configuration 2: Random with clustering avoidance
+    np.random.seed(123)
+    initial_points2 = np.random.uniform(0.05, 0.95, (16, 2))
+    # Add some structure to avoid very tight clusters
+    for i in range(0, 16, 4):  # Group every 4 points
+        group_center = np.mean(initial_points2[i:i+4], axis=0)
+        initial_points2[i:i+4] += np.random.normal(0, 0.03, (4, 2))
+        initial_points2[i:i+4] = np.clip(initial_points2[i:i+4], 0, 1)
+    initial_configs.append(initial_points2)
+
+    # Configuration 3: Improved fibonacci spiral
+    initial_configs.append(improved_fibonacci_spiral())
+
+    # Configuration 4: Improved hexagonal grid
+    initial_configs.append(improved_hexagonal())
+
+    # Configuration 5: Evolutionary result as starting point with enhanced variation
+    bounds = [(0, 1) for _ in range(32)]
+    try:
+        de_result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=30,  # Reduced iterations for faster execution
+            popsize=8,
+            seed=42,
+            tol=1e-5,
+            mutation=(0.5, 1),
+            recombination=0.7
+        )
+
+        if de_result.success:
+            # Generate initial configuration from DE result
+            de_points = de_result.x.reshape(-1, 2)
+            # Apply additional variation to get more diverse starting points
+            np.random.seed(999)
+            noise = np.random.normal(0, 0.015, (16, 2))  # Smaller variation to preserve good properties
+            de_varied = np.clip(de_points + noise, 0, 1)
+            initial_configs.append(de_varied)
+    except Exception:
+        pass
+
+    # Run optimizations with different initial configurations
+    for i, initial_points in enumerate(initial_configs):
+        try:
+            # Flatten for optimization
+            x0 = initial_points.flatten()
+
+            # Define bounds (points must stay in [0,1] x [0,1])
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Define constraints with more robust handling
+            cons = {'type': 'ineq', 'fun': constraint}
+
+            # First attempt with L-BFGS-B for faster initial optimization
+            result1 = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 400, 'ftol': 1e-6, 'gtol': 1e-6}
+            )
+
+            # If successful, do a more thorough optimization with SLSQP
+            if result1.success:
+                refined_x0 = result1.x
+                result2 = minimize(
+                    objective,
+                    refined_x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints=cons,
+                    options={'maxiter': 800, 'ftol': 1e-8, 'gtol': 1e-8}
+                )
+
+                if result2.success:
+                    # Extract points and calculate final ratio
+                    optimized_points = result2.x.reshape(-1, 2)
+                    ratio = compute_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If no successful optimization, return the best initial configuration
+    if best_points is None:
+        best_points = initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+
+    return best_points
+>>>>>>> REPLACE

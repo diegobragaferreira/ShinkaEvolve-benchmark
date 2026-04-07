@@ -1,0 +1,388 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import KDTree
+import random
+import time
+from collections import defaultdict
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Rectangle dimensions: width + height = 2, optimized ratio
+    rect_width = 1.2
+    rect_height = 0.8
+
+    n = 21
+
+    # Generate adaptive grid initialization with better spacing
+    def generate_adaptive_grid_initialization(num_circles, width, height):
+        # Calculate optimal grid dimensions based on container aspect ratio
+        aspect_ratio = width / height
+        ideal_cols = max(1, int(np.ceil(np.sqrt(num_circles * aspect_ratio))))
+        ideal_rows = max(1, int(np.ceil(num_circles / ideal_cols)))
+
+        # Ensure we have sufficient grid cells
+        while ideal_cols * ideal_rows < num_circles:
+            if ideal_cols <= ideal_rows:
+                ideal_cols += 1
+            else:
+                ideal_rows += 1
+
+        # Calculate spacing based on container dimensions and circle count
+        spacing_x = width / (ideal_cols + 1) if ideal_cols > 0 else width
+        spacing_y = height / (ideal_rows + 1) if ideal_rows > 0 else height
+
+        # Calculate average circle radius to fit in grid
+        avg_radius = min(spacing_x, spacing_y) * 0.3
+
+        circles = []
+        # Create regular grid with slight randomness for better distribution
+        for i in range(ideal_rows):
+            y = (i + 1) * spacing_y * 0.95  # Slight offset from edges
+            for j in range(ideal_cols):
+                if len(circles) >= num_circles:
+                    break
+                x = (j + 1) * spacing_x * 0.95  # Slight offset from edges
+
+                # Add some randomization to avoid perfect grid artifacts
+                x += np.random.uniform(-spacing_x * 0.05, spacing_x * 0.05)
+                y += np.random.uniform(-spacing_y * 0.05, spacing_y * 0.05)
+
+                # Ensure circle stays within bounds
+                if x >= avg_radius and x <= width - avg_radius and \
+                   y >= avg_radius and y <= height - avg_radius:
+                    r = min(avg_radius, 0.15)
+                    circles.append([x, y, r])
+
+        # Fill remaining slots with carefully placed random circles
+        while len(circles) < num_circles:
+            # Use a more strategic random placement
+            margin = 0.05 * max(width, height)
+            x = np.random.uniform(margin, width - margin)
+            y = np.random.uniform(margin, height - margin)
+            r = np.random.uniform(0.01, min(0.1, avg_radius * 0.8))
+            circles.append([x, y, r])
+
+        return np.array(circles)
+
+    # Initial configuration
+    circles = generate_adaptive_grid_initialization(n, rect_width, rect_height)
+
+    # Efficient constraint validation with spatial indexing and enhanced penalties
+    def calculate_fitness_with_spatial_indexing(circles_array):
+        total_radius = np.sum(circles_array[:, 2])
+
+        penalty = 0
+
+        # Boundary penalties with enhanced quadratic scaling
+        for i in range(n):
+            cx, cy, r = circles_array[i]
+            boundary_violation = 0
+
+            # Check all four boundaries and accumulate violations
+            if cx - r < 0.001:
+                boundary_violation += (r - cx)**2
+            if cx + r > rect_width - 0.001:
+                boundary_violation += (cx + r - rect_width)**2
+            if cy - r < 0.001:
+                boundary_violation += (r - cy)**2
+            if cy + r > rect_height - 0.001:
+                boundary_violation += (cy + r - rect_height)**2
+
+            # Apply enhanced penalty - scale with violation magnitude
+            if boundary_violation > 0:
+                penalty += 150000 * boundary_violation
+
+        # Overlap penalties using spatial indexing for efficiency
+        points = circles_array[:, :2]
+        tree = KDTree(points)
+
+        # Query for all possible overlapping pairs efficiently
+        for i in range(n):
+            cx, cy, r = circles_array[i]
+
+            # Find neighbors within 2*(r + safety_margin) distance
+            neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+
+            for j in neighbor_indices:
+                if i != j:
+                    other_cx, other_cy, other_r = circles_array[j]
+                    dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                    overlap = (r + other_r) - dist
+
+                    if overlap > 0:
+                        # Apply enhanced penalty that scales with overlap magnitude
+                        penalty += 1500000 * overlap**2
+
+        # Additional penalty for very small radii that might cause numerical issues
+        constraint_penalty = 0
+        for i in range(n):
+            cx, cy, r = circles_array[i]
+            # Penalize very small radii that might cause numerical instability
+            if r < 0.0005:
+                constraint_penalty += 2000000 * (0.0005 - r)**2
+
+        return total_radius - penalty - constraint_penalty
+
+    # Smart local refinement focused on improvement regions with gradient-aware approach
+    def smart_refinement_step(circles_array, max_iter=80):
+        best_circles = circles_array.copy()
+        best_fitness = calculate_fitness_with_spatial_indexing(best_circles)
+
+        # Use KDTree for efficient neighbor lookups
+        points = best_circles[:, :2]
+        tree = KDTree(points)
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Randomly shuffle circles to avoid systematic bias
+            circle_indices = list(range(n))
+            random.shuffle(circle_indices)
+
+            # Process circles in batches for efficiency
+            for i in circle_indices[:min(15, len(circle_indices))]:  # Limit batch size
+                cx, cy, r = best_circles[i]
+
+                # Compute max allowable radius
+                max_radius = float('inf')
+
+                # Boundary constraints
+                max_radius = min(max_radius, cx - 0.001)
+                max_radius = min(max_radius, rect_width - cx - 0.001)
+                max_radius = min(max_radius, cy - 0.001)
+                max_radius = min(max_radius, rect_height - cy - 0.001)
+
+                # Overlap constraints using spatial indexing
+                neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+                for j in neighbor_indices:
+                    if i != j:
+                        other_cx, other_cy, other_r = best_circles[j]
+                        dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                        max_radius = min(max_radius, dist - other_r - 0.001)
+
+                # Try to improve radius
+                if max_radius > r and max_radius > 0.0005:
+                    # Test multiple increments to find best improvement
+                    test_increments = [0.001, 0.002, 0.003, 0.005, 0.01]
+                    best_new_r = r
+                    best_improvement = 0
+
+                    for incr in test_increments:
+                        new_r = min(r + incr, max_radius)
+                        if new_r <= r:
+                            continue
+
+                        # Quick validation
+                        temp_circles = best_circles.copy()
+                        temp_circles[i, 2] = new_r
+
+                        # Spatial check for overlaps
+                        valid = True
+                        temp_points = temp_circles[:, :2]
+                        temp_tree = KDTree(temp_points)
+                        temp_neighbor_indices = temp_tree.query_ball_point([cx, cy], 2*(new_r + 0.01) + 0.001)
+
+                        for k in temp_neighbor_indices:
+                            if k != i:
+                                other_cx, other_cy, other_r = temp_circles[k]
+                                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                                if dist < new_r + other_r:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            test_circles = best_circles.copy()
+                            test_circles[i, 2] = new_r
+                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+
+                            improvement = test_fitness - best_fitness
+                            if improvement > best_improvement:
+                                best_improvement = improvement
+                                best_new_r = new_r
+
+                    # Apply the best improvement if found
+                    if best_improvement > 0:
+                        best_circles[i, 2] = best_new_r
+                        best_fitness += best_improvement
+                        improved = True
+
+            if not improved:
+                break  # Stop early if no improvement found
+
+        return best_circles
+
+    # Multi-stage optimization approach with enhanced strategies
+    # Stage 1: Coarse refinement with basic local search
+    coarse_solution = smart_refinement_step(circles, max_iter=25)
+    stage1_fitness = calculate_fitness_with_spatial_indexing(coarse_solution)
+
+    # Stage 2: Enhanced refinement focusing on specific problem areas
+    enhanced_solution = smart_refinement_step(coarse_solution, max_iter=50)
+    stage2_fitness = calculate_fitness_with_spatial_indexing(enhanced_solution)
+
+    # Use the best of the two stages
+    best_solution = enhanced_solution if stage2_fitness > stage1_fitness else coarse_solution
+    best_fitness = max(stage1_fitness, stage2_fitness)
+
+    # Stage 3: Selective evolutionary optimization with improved genetic operators
+    def enhanced_evolution():
+        # Identify most constrained circles (those with tight space or many neighbors)
+        constrained_circles = []
+        points = best_solution[:, :2]
+        tree = KDTree(points)
+
+        for i in range(n):
+            cx, cy, r = best_solution[i]
+            neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+            if len(neighbor_indices) > 3:  # Circle surrounded by many others
+                constrained_circles.append(i)
+
+        # If we have few constrained circles, pick randomly
+        if len(constrained_circles) < 5:
+            constrained_circles = random.sample(list(range(n)), min(12, n))
+
+        # Create enhanced evolutionary approach with better parameters
+        population_size = 30
+        generations = 20
+        population = [best_solution.copy()]
+
+        # Add diverse individuals around current solution with improved perturbation
+        for _ in range(population_size - 1):
+            individual = best_solution.copy()
+            # Perturb a few selected circles with better variance
+            for idx in random.sample(constrained_circles, min(8, len(constrained_circles))):
+                # More aggressive position perturbation
+                individual[idx, 0] += np.random.normal(0, 0.04)
+                individual[idx, 1] += np.random.normal(0, 0.04)
+                # More varied radius modification
+                individual[idx, 2] *= np.random.uniform(0.85, 1.15)
+
+                # Clamp values
+                individual[idx, 0] = np.clip(individual[idx, 0], 0.01, rect_width - 0.01)
+                individual[idx, 1] = np.clip(individual[idx, 1], 0.01, rect_height - 0.01)
+                individual[idx, 2] = max(0.0005, individual[idx, 2])
+
+            population.append(individual)
+
+        # Evolutionary process with improved selection and crossover
+        for gen in range(generations):
+            fitnesses = [calculate_fitness_with_spatial_indexing(ind) for ind in population]
+            best_idx = np.argmax(fitnesses)
+
+            if fitnesses[best_idx] > best_fitness:
+                best_fitness = fitnesses[best_idx]
+                best_solution = population[best_idx].copy()
+
+            # Tournament selection with higher selection pressure
+            def tournament_selection(tournament_size=5):
+                selected_indices = random.sample(range(len(population)), tournament_size)
+                selected_fitnesses = [fitnesses[i] for i in selected_indices]
+                winner_index = selected_indices[np.argmax(selected_fitnesses)]
+                return population[winner_index]
+
+            # Selection with rank-based approach
+            sorted_indices = np.argsort(fitnesses)[::-1][:population_size//2]
+            selected_population = [population[i] for i in sorted_indices]
+
+            # Create offspring with better crossover strategy
+            new_population = [selected_population[0]]  # Elitism
+
+            while len(new_population) < population_size:
+                parent1 = tournament_selection()
+                parent2 = tournament_selection()
+
+                # Uniform crossover (more diverse)
+                child = parent1.copy()
+                for i in range(n):
+                    if random.random() < 0.5:  # Equal probability crossover
+                        child[i, 0] = parent2[i, 0]
+                        child[i, 1] = parent2[i, 1]
+                        child[i, 2] = parent2[i, 2]
+
+                # Mutation with variable rates based on generation
+                mutation_rate = 0.15 + (0.05 * (1.0 - gen/generations))  # Decreasing rate
+                for i in range(n):
+                    if random.random() < mutation_rate:
+                        if random.random() < 0.6:  # Position mutation
+                            child[i, 0] += np.random.normal(0, 0.01)
+                            child[i, 1] += np.random.normal(0, 0.01)
+                            child[i, 0] = np.clip(child[i, 0], 0.01, rect_width - 0.01)
+                            child[i, 1] = np.clip(child[i, 1], 0.01, rect_height - 0.01)
+                        else:  # Radius mutation
+                            child[i, 2] *= np.random.uniform(0.9, 1.1)
+                            child[i, 2] = max(0.0005, child[i, 2])
+
+                new_population.append(child)
+
+            population = new_population[:population_size]
+
+        return best_solution
+
+    # Run enhanced evolutionary optimization
+    try:
+        evolved_solution = enhanced_evolution()
+        final_fitness = calculate_fitness_with_spatial_indexing(evolved_solution)
+
+        if final_fitness > best_fitness:
+            best_solution = evolved_solution
+            best_fitness = final_fitness
+
+    except Exception:
+        # If evolution fails, proceed with current best
+        pass
+
+    # Final fine-tuning with more intensive refinement
+    final_solution = smart_refinement_step(best_solution, max_iter=40)
+    final_fitness = calculate_fitness_with_spatial_indexing(final_solution)
+
+    if final_fitness > best_fitness:
+        best_solution = final_solution
+
+    # Ensure all constraints are satisfied one final time
+    final_points = best_solution[:, :2]
+    final_tree = KDTree(final_points)
+
+    # Do a final validation pass
+    valid = True
+    for i in range(n):
+        cx, cy, r = best_solution[i]
+
+        # Check boundary constraints
+        if cx - r < 0.01 or cx + r > rect_width - 0.01 or \
+           cy - r < 0.01 or cy + r > rect_height - 0.01:
+            valid = False
+            break
+
+        # Check overlap constraints
+        neighbor_indices = final_tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+        for j in neighbor_indices:
+            if i != j:
+                other_cx, other_cy, other_r = best_solution[j]
+                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                if dist < r + other_r:
+                    valid = False
+                    break
+
+    # If validation fails, do one last adaptive refinement
+    if not valid:
+        best_solution = adaptive_refinement(best_solution, max_iter=40)
+
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

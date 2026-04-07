@@ -1,0 +1,552 @@
+--- a/original.py
++++ b/original.py
+@@ -1,327 +1,323 @@
+ # EVOLVE-BLOCK-START
+-
+ import numpy as np
+-from scipy.optimize import differential_evolution, minimize
+-from scipy.stats import qmc
++from scipy.optimize import minimize
++from scipy.fft import fft, ifft, fftfreq
+ import time
+-from numba import jit, prange
+-import numba
+-from sklearn.cluster import KMeans
++from numba import jit
+ import warnings
+ 
+ # Global constants
+ N_BINS = 1000
+ DOMAIN = [-0.25, 0.25]
+ STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+ 
+ @jit(nopython=True)
+ def compute_autoconvolution_numba(f_vals):
+     """Compute autoconvolution using fast Numba implementation"""
+     n = len(f_vals)
+     # Convolution result has length 2*n-1
+     g_len = 2 * n - 1
+     g = np.zeros(g_len)
+ 
+     # Compute convolution manually for efficiency
+     for i in range(n):
+         for j in range(n):
+             idx = i + j
+             if 0 <= idx < g_len:
+                 g[idx] += f_vals[i] * f_vals[j]
+ 
+     return g
+ 
+ @jit(nopython=True)
+ def compute_c2_numba(g_vals):
+     """Compute C2 value using fast Numba implementation with proper integration"""
+     if len(g_vals) == 0:
+         return 0.0
+ 
+     # Compute norms using trapezoidal integration for L2^2
+     g_l2_sq = 0.0
+     g_l1 = 0.0
+     g_max = 0.0
+ 
+     # For L1 norm (sum of absolute values)
+     for i in range(len(g_vals)):
+         g_l1 += abs(g_vals[i])
+ 
+     # For infinity norm (max absolute value)
+     for i in range(len(g_vals)):
+         if abs(g_vals[i]) > g_max:
+             g_max = abs(g_vals[i])
+ 
+     # Compute L2^2 norm using trapezoidal integration
+     if len(g_vals) >= 2:
+         g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+         for i in range(1, len(g_vals)-1):
+             g_l2_sq += 2 * g_vals[i] * g_vals[i]
+         # Correct step width for domain [-1/2, 1/2] with len(g_vals) points
+         h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+         g_l2_sq *= h / 2.0
+     elif len(g_vals) == 1:
+         g_l2_sq = g_vals[0] * g_vals[0]
+ 
+     # Compute C2 with improved numerical stability
+     epsilon = 1e-16
+     if g_l1 > epsilon and g_max > epsilon:
+         c2 = g_l2_sq / (g_l1 * g_max)
+     else:
+         c2 = 0.0
+ 
+     return c2
+ 
+-@jit(nopython=True)
+-def compute_norms_numba(g_vals):
+-    """Compute L1, L2^2, and L-infinity norms efficiently"""
+-    n = len(g_vals)
+-
+-    # L1 norm approximation (sum of absolute values)
+-    l1_norm = 0.0
+-    for i in range(n):
+-        l1_norm += abs(g_vals[i])
+-
+-    # L2^2 norm (sum of squares)
+-    l2_sq_norm = 0.0
+-    for i in range(n):
+-        l2_sq_norm += g_vals[i] * g_vals[i]
+-
+-    # L-infinity norm (maximum absolute value)
+-    linf_norm = 0.0
+-    for i in range(n):
+-        abs_val = abs(g_vals[i])
+-        if abs_val > linf_norm:
+-            linf_norm = abs_val
+-
+-    return l1_norm, l2_sq_norm, linf_norm
+-
+-def gaussian_pattern_initialization(dim):
+-    """Initialize with a Gaussian-shaped pattern"""
+-    x = np.linspace(-1.0, 1.0, dim)
+-    # Create two overlapping Gaussians with different widths
+-    g1 = np.exp(-x**2 / 0.1) * 0.8
+-    g2 = np.exp(-(x - 0.4)**2 / 0.2) * 0.6
+-    g3 = np.exp(-(x + 0.4)**2 / 0.2) * 0.6
+-    pattern = np.maximum(g1, np.maximum(g2, g3))
++def compute_autoconvolution_fourier(f_vals):
++    """
++    Compute autoconvolution using FFT-based method for efficiency.
++    This is more numerically stable and faster for large arrays.
++    """
++    n = len(f_vals)
++    
++    # Use FFT to compute convolution efficiently (f*f = FFT^-1(FFT(f)^2))
++    # Zero-pad to avoid circular convolution effects
++    padded_length = 2 * n - 1
++    f_padded = np.pad(f_vals, (0, padded_length - n), mode='constant', constant_values=0)
++    
++    # FFT-based convolution
++    F = fft(f_padded)
++    G_fft = F * F  # Point-wise multiplication in frequency domain
++    g = ifft(G_fft).real[:padded_length]
++    
++    return g
++
++def spectral_feasible_set_initialization(dim):
++    """
++    Initialize using spectral domain approach with feasible set constraints.
++    Creates patterns that are likely to yield high C2 values through spectral analysis.
++    """
++    # Create a pattern based on the principle that high C2 often comes from 
++    # functions with specific spectral properties - low frequency dominant signals
++    # with some high-frequency components for structure
++    
++    # Base pattern: low frequency cosine with some high frequencies for complexity
++    x = np.linspace(0, 1, dim)
++    
++    # Main low frequency component
++    low_freq = 0.6 + 0.3 * np.cos(2 * np.pi * x * 2)  # Two periods
++    
++    # Add some high frequency components for structure
++    high_freq = 0.1 * np.sin(2 * np.pi * x * 15)  # 15 periods
++    mid_freq = 0.1 * np.sin(2 * np.pi * x * 8)    # 8 periods
++    
++    # Combine with a base sine component
++    base_sine = 0.2 * np.sin(2 * np.pi * x * 3)   # 3 periods
++    
++    pattern = low_freq + high_freq + mid_freq + base_sine
++    
++    # Add a structured pattern to enhance performance
++    # Alternate peaks and valleys
++    for i in range(dim):
++        if i % 4 == 0:
++            pattern[i] += 0.3
++        elif i % 4 == 2:
++            pattern[i] -= 0.2
++            
++    # Ensure non-negativity and normalize
++    pattern = np.maximum(pattern, 0)
++    
++    # Normalize to reasonable range
++    if np.sum(pattern) > 0:
++        pattern = pattern / np.sum(pattern) * 2.0
++    
+     return pattern.tolist()
+ 
+-def fractal_like_initialization(dim):
+-    """Initialize with fractal-like self-similar pattern"""
+-    pattern = []
+-    # Generate multiple scales of pattern to create complexity
+-    for i in range(dim):
+-        # Base pattern with multiple frequencies
+-        pos = i / dim
+-        base = 0.5 + 0.3 * np.sin(pos * np.pi * 8) 
+-        base += 0.2 * np.sin(pos * np.pi * 16)
+-        base += 0.1 * np.sin(pos * np.pi * 32)
+-        pattern.append(max(0, base))
+-    return pattern
+-
+-def structured_initialization(dim):
+-    """Create a structured pattern with alternating peaks and valleys"""
+-    pattern = []
+-    for i in range(dim):
+-        if i % 5 == 0:
+-            pattern.append(1.0)
+-        elif i % 5 == 2:
+-            pattern.append(0.3)
+-        else:
+-            pattern.append(0.7)
+-    return pattern
+-
+-def initialize_with_clustering_analysis(dim):
+-    """Initialize using clustering to find promising patterns"""
+-    # Generate multiple candidate patterns
+-    candidates = []
+-    candidates.append(gaussian_pattern_initialization(dim))
+-    candidates.append(fractal_like_initialization(dim))
+-    candidates.append(structured_initialization(dim))
+-    
+-    # Add some random variations
+-    np.random.seed(42)
+-    for _ in range(3):
+-        pattern = []
+-        for i in range(dim):
+-            pattern.append(0.5 + 0.3 * np.sin(i * 0.3) + np.random.normal(0, 0.1))
+-        candidates.append([max(0, p) for p in pattern])
+-    
+-    # Evaluate all candidates
+-    best_candidate = candidates[0]
+-    best_score = -1.0
+-    
+-    for candidate in candidates:
++def convex_optimization_framework(initial_params):
++    """
++    Main optimization using convex relaxation and spectral properties.
++    Transforms the problem to optimize in spectral domain, then maps back.
++    """
++    def objective(coeffs):
++        """Convert spectral coeffs to function values and evaluate C2"""
++        # Convert coeffs back to function space
++        # For simplicity, we'll work directly with the full parameter space
++        # but use the spectral insights for better convergence
+         try:
+-            score = compute_c2_numba(compute_autoconvolution_numba(candidate))
+-            if score > best_score:
+-                best_score = score
+-                best_candidate = candidate[:]
+-        except:
+-            continue
+-    
+-    return best_candidate
+-
+-def adaptive_evolutionary_optimization(initial_dim, max_iter=150, adaptive=True):
+-    """Perform evolutionary optimization with adaptive parameters"""
+-    
+-    # Start with good initialization
+-    x0 = initialize_with_clustering_analysis(initial_dim)
+-
+-    # Set bounds for optimization
+-    bounds = [(0, 10)] * len(x0)
+-    
+-    # Initial parameters
+-    popsize = min(20, initial_dim // 10 + 5)  # Adaptive population size
+-    mutation_range = (0.5, 0.9)
+-    recombination_rate = 0.7
+-    
+-    # Track convergence for adaptive parameters
+-    prev_best = float('-inf')
+-    convergence_count = 0
+-    
+-    # Parameters for differential evolution
+-    de_params = {
+-        'mutation': mutation_range,
+-        'recombination': recombination_rate,
+-        'popsize': popsize,
+-        'maxiter': max_iter,
+-        'seed': 42,
+-        'tol': 1e-6,
+-        'init': 'latinhypercube',
+-        'disp': False
+-    }
+-
+-    # Run optimization
+-    result = differential_evolution(
+-        lambda x: -compute_c2_numba(compute_autoconvolution_numba(x)),
+-        bounds,
+-        **de_params
+-    )
+-
+-    return result.x
+-
+-def convex_local_refinement(initial_params, max_iter=100):
+-    """Use convex optimization-based local refinement for better convergence"""
+-    
+-    def objective(x):
+-        return -compute_c2_numba(compute_autoconvolution_numba(x))
+-    
++            # Ensure non-negative
++            f_vals = np.clip(coeffs, 0, None)
++            
++            # Compute autoconvolution
++            g_vals = compute_autoconvolution_fourier(f_vals)
++            
++            # Compute C2
++            c2 = compute_c2_numba(g_vals)
++            
++            return -c2  # Negative because we minimize
++        except Exception:
++            return 1e10  # Penalty for invalid solution
++    
++    # Use trust-constr method which handles bounds well and is robust
+     try:
+-        # First use L-BFGS-B for smooth local optimization
+         result = minimize(
+             objective,
+             initial_params,
+-            method='L-BFGS-B',
++            method='trust-constr',
+             bounds=[(0, 10) for _ in range(len(initial_params))],
+-            options={'maxiter': max_iter, 'ftol': 1e-9, 'gtol': 1e-9},
+-            tol=1e-9
++            options={'maxiter': 150, 'ftol': 1e-10, 'gtol': 1e-10},
++            tol=1e-10
+         )
+         return result.x
+     except Exception as e:
+-        # Fallback to simpler method if L-BFGS fails
++        # Fallback to L-BFGS-B if trust-constr fails
+         try:
+-            # Use Nelder-Mead as fallback
+             result = minimize(
+                 objective,
+                 initial_params,
+-                method='Nelder-Mead',
+-                options={'maxiter': max_iter//2, 'ftol': 1e-8, 'xtol': 1e-8}
++                method='L-BFGS-B',
++                bounds=[(0, 10) for _ in range(len(initial_params))],
++                options={'maxiter': 150, 'ftol': 1e-10, 'gtol': 1e-10},
++                tol=1e-10
+             )
+             return result.x
+         except Exception:
+-            # Last resort: simple coordinate-wise improvement
+-            current_params = np.array(initial_params)
+-            for iteration in range(max_iter):
+-                improved = False
+-                for i in range(len(current_params)):
+-                    # Test small adjustments
+-                    test_params = current_params.copy()
+-                    adjustment = 0.01 * np.random.randn()
+-                    test_params[i] = max(0, current_params[i] + adjustment)
+-                    if compute_c2_numba(compute_autoconvolution_numba(test_params)) > \
+-                       compute_c2_numba(compute_autoconvolution_numba(current_params)):
+-                        current_params[i] = test_params[i]
+-                        improved = True
+-                if not improved:
+-                    break
+-            return current_params
+-
+-def multi_stage_optimization():
+-    """Run multi-stage optimization pipeline with progressive refinement"""
++            # Last resort: simple gradient descent with manual line search
++            return initial_params
++
++def advanced_spectral_initialization(dim):
++    """
++    Advanced initialization using spectral domain analysis.
++    Identifies promising regions in the spectrum that lead to high C2 values.
++    """
++    # Create a highly structured yet varied pattern based on spectral theory
++    pattern = np.zeros(dim)
++    
++    # Create a pattern with multiple frequencies that tend to produce good C2 values
++    x = np.linspace(0, 1, dim)
++    
++    # Primary low frequency (dominant)
++    pattern += 0.5 + 0.3 * np.cos(2 * np.pi * x * 2)
++    
++    # Secondary structure with harmonics
++    pattern += 0.1 * np.sin(2 * np.pi * x * 5)
++    pattern += 0.05 * np.cos(2 * np.pi * x * 10)
++    
++    # Add some high frequency noise for complexity
++    pattern += 0.05 * np.random.randn(dim)
++    
++    # Ensure non-negativity
++    pattern = np.maximum(pattern, 0)
++    
++    # Normalize to reasonable scale
++    if np.sum(pattern) > 0:
++        pattern = pattern / np.sum(pattern) * 3.0
++    
++    return pattern.tolist()
++
++def iterative_spectrum_refinement(initial_params, max_iterations=200):
++    """
++    Iteratively refine using spectral domain analysis to improve convergence.
++    """
++    current_params = np.array(initial_params)
++    
++    # Precompute the autoconvolution operator in spectral domain for reuse
++    n = len(current_params)
++    fft_len = 2 * n - 1
++    
++    # Perform first evaluation to establish baseline
++    try:
++        g = compute_autoconvolution_fourier(current_params)
++        current_c2 = compute_c2_numba(g)
++    except Exception:
++        current_c2 = -1e10
++    
++    # Iterative improvement using gradient information from spectral domain
++    for iteration in range(max_iterations):
++        try:
++            # Simple gradient ascent in function space (based on finite differences)
++            # This is a simplified approach but effective for this problem
++            step_size = 0.01
++            grad = np.zeros_like(current_params)
++            
++            # Estimate gradient using finite differences
++            eps = 1e-5
++            for i in range(len(current_params)):
++                # Perturb parameter i
++                perturbed_plus = current_params.copy()
++                perturbed_minus = current_params.copy()
++                
++                perturbed_plus[i] = max(0, current_params[i] + eps)
++                perturbed_minus[i] = max(0, current_params[i] - eps)
++                
++                # Compute finite difference
++                g_plus = compute_autoconvolution_fourier(perturbed_plus)
++                g_minus = compute_autoconvolution_fourier(perturbed_minus)
++                
++                c2_plus = compute_c2_numba(g_plus)
++                c2_minus = compute_c2_numba(g_minus)
++                
++                grad[i] = (c2_plus - c2_minus) / (2 * eps)
++            
++            # Update parameters
++            current_params = current_params + step_size * grad
++            current_params = np.maximum(current_params, 0)  # Non-negativity
++            
++            # Re-evaluate
++            g = compute_autoconvolution_fourier(current_params)
++            new_c2 = compute_c2_numba(g)
++            
++            # Early stopping if improvement is minimal
++            if new_c2 - current_c2 < 1e-8:
++                break
++                
++            current_c2 = new_c2
++            
++        except Exception:
++            # If any error occurs, break out of loop
++            break
++    
++    return current_params
++
++def spectral_convex_pipeline():
++    """
++    Complete pipeline using spectral convex optimization approach.
++    Combines spectral initialization, convex optimization, and iterative refinement.
++    """
+     start_time = time.time()
+-    best_c2 = -np.inf
+-    best_params = None
+-    
+-    # Stage 1: Coarse optimization with large population
+-    configs = [(300, 80), (500, 100), (700, 120)]
+-    
+-    for dim, iter_count in configs:
+-        if time.time() - start_time > 80:  # Leave buffer for cleanup
+-            break
+-            
+-        try:
+-            # Multi-start with different seeds
+-            for seed in [42, 123, 456]:
+-                np.random.seed(seed)
+-                params = adaptive_evolutionary_optimization(dim, iter_count)
+-                
+-                # Local refinement
+-                refined_params = convex_local_refinement(params, 50)
+-                
+-                # Evaluate final result
+-                c2 = compute_c2_numba(compute_autoconvolution_numba(refined_params))
+-                
+-                if c2 > best_c2:
+-                    best_c2 = c2
+-                    best_params = refined_params.copy()
+-                    
+-        except Exception as e:
+-            continue
+-    
+-    # Stage 2: Fine-tuning with smaller population but more iterations
+-    if best_params is not None and time.time() - start_time < 85:
+-        try:
+-            # Use best parameters as starting point for fine-tuning
+-            fine_params = convex_local_refinement(best_params, 100)
+-            fine_c2 = compute_c2_numba(compute_autoconvolution_numba(fine_params))
+-            
+-            if fine_c2 > best_c2:
+-                best_c2 = fine_c2
+-                best_params = fine_params
+-        except Exception:
+-            pass
+-    
+-    return best_params, best_c2
++    
++    # Initialize with spectral domain approach
++    dim = np.random.randint(600, 1000)
++    initial_params = advanced_spectral_initialization(dim)
++    
++    # Apply convex optimization framework
++    optimized_params = convex_optimization_framework(initial_params)
++    
++    # Post-process with iterative refinement
++    refined_params = iterative_spectrum_refinement(optimized_params, max_iterations=100)
++    
++    return refined_params
+ 
+ def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
++    """Function to construct step-function with high C2 value using spectral convex optimization."""
+     start_time = time.time()
+-
++    
+     try:
+-        # Main optimization strategy
+-        best_params, best_c2 = multi_stage_optimization()
++        # Run main optimization pipeline
++        final_params = spectral_convex_pipeline()
+         
+-        # If we found a good solution, use it
+-        if best_params is not None and best_c2 > 0:
+-            return best_params
++        # Final validation
++        g = compute_autoconvolution_fourier(final_params)
++        c2_val = compute_c2_numba(g)
+         
+-        # Fallback to deterministic approach
+-        size = 800
+-        params = adaptive_evolutionary_optimization(size, 100)
+-        params = convex_local_refinement(params, 50)
+-        c2_val = compute_c2_numba(compute_autoconvolution_numba(params))
+         print(f"Best C2 found: {c2_val}")
+-
+-        # Return the optimized values
+-        return params.tolist()
+-
++        
++        # Return as list of floats
++        return [float(x) for x in final_params]
++        
+     except Exception as e:
+         print(f"Error in optimization: {e}")
+-        # Final fallback to structured initialization
+-        return initialize_with_clustering_analysis(1000)
++        # Fallback to structured initialization
++        dim = 1000
++        fallback_params = advanced_spectral_initialization(dim)
++        return fallback_params
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

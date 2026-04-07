@@ -1,0 +1,228 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import warnings
+import time
+
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = 1.2  # Optimized rectangle dimensions
+RECT_HEIGHT = 0.8
+NUM_CIRCLES = 21
+SEED = 42
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(SEED)
+    
+    # Rectangle dimensions
+    width, height = RECT_WIDTH, RECT_HEIGHT
+    
+    # Create initial grid-based configuration inspired by hexagonal packing
+    def create_initial_grid():
+        # Arrange circles in a hexagonal pattern
+        rows = int(np.ceil(np.sqrt(NUM_CIRCLES * 1.2)))
+        cols = int(np.ceil(NUM_CIRCLES / rows))
+        
+        # Ensure we have enough cells
+        while rows * cols < NUM_CIRCLES:
+            rows += 1
+            
+        cell_width = width / (cols + 1)
+        cell_height = height / (rows + 1)
+        
+        circles = []
+        idx = 0
+        
+        # Create hexagonal grid
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= NUM_CIRCLES:
+                    break
+                # Apply hexagonal offset
+                offset = (i % 2) * cell_width * 0.5
+                x = (j + 1) * cell_width + offset + np.random.uniform(-cell_width * 0.1, cell_width * 0.1)
+                y = (i + 1) * cell_height + np.random.uniform(-cell_height * 0.1, cell_height * 0.1)
+                # Base radius calculation
+                base_radius = min(cell_width, cell_height) * 0.3
+                r = base_radius + np.random.uniform(-base_radius * 0.1, base_radius * 0.1)
+                r = max(0.01, min(0.2, r))
+                
+                # Ensure it's within bounds
+                x = max(r, min(width - r, x))
+                y = max(r, min(height - r, y))
+                
+                circles.append([x, y, r])
+                idx += 1
+                
+        return np.array(circles)
+    
+    # Constraint checking functions
+    def is_valid_position(x, y, r):
+        return r <= x <= width - r and r <= y <= height - r
+    
+    def check_overlap(circles, i, j):
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        dx = x1 - x2
+        dy = y1 - y2
+        dist_sq = dx*dx + dy*dy
+        radius_sum = r1 + r2
+        return dist_sq < radius_sum * radius_sum
+    
+    # Objective function with penalties
+    def objective(params):
+        # Reshape params into circles array
+        circles = params.reshape(-1, 3)
+        
+        # Extract components
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+        
+        # Calculate sum of radii (negative because we minimize)
+        total_radius = -np.sum(radii)
+        
+        # Penalties for constraints
+        penalty = 0
+        
+        # Boundary penalties
+        boundary_violations = (
+            (radii > x_coords) + 
+            (radii > (width - x_coords)) +
+            (radii > y_coords) +
+            (radii > (height - y_coords))
+        )
+        penalty += 10000 * np.sum(boundary_violations)
+        
+        # Overlap penalties using pairwise distances
+        coords = circles[:, :2]
+        distances = cdist(coords, coords)
+        # Create mask for upper triangle (avoid double counting)
+        mask = np.triu(np.ones_like(distances), k=1).astype(bool)
+        # Check if any pairs violate distance constraint
+        overlap_violations = distances[mask] < (circles[mask][:, 2] + circles[mask][:, 5]).T
+        penalty += 10000 * np.sum(overlap_violations)
+        
+        return total_radius + penalty
+    
+    # Gradient constraints for optimization
+    def constraint_func(params):
+        circles = params.reshape(-1, 3)
+        # Return array of constraint values (should be >= 0 for feasibility)
+        constraints = []
+        
+        # Boundary constraints (positive means satisfied)
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            constraints.extend([
+                x - r,                     # x >= r
+                width - x - r,             # width - x >= r
+                y - r,                     # y >= r
+                height - y - r             # height - y >= r
+            ])
+        
+        # Non-overlap constraints (positive means satisfied)
+        coords = circles[:, :2]
+        distances = cdist(coords, coords)
+        mask = np.triu(np.ones_like(distances), k=1).astype(bool)
+        for i, j in zip(*np.where(mask)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            # Distance constraint: sqrt((x1-x2)^2 + (y1-y2)^2) >= r1 + r2
+            # This is equivalent to: (x1-x2)^2 + (y1-y2)^2 >= (r1+r2)^2
+            dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+            min_dist_sq = (r1 + r2)**2
+            constraints.append(min_dist_sq - dist_sq)
+            
+        return np.array(constraints)
+    
+    # Create initial configuration
+    initial_circles = create_initial_grid()
+    
+    # Flatten for optimization
+    initial_params = initial_circles.flatten()
+    
+    # Set up optimization bounds (x, y, radius for each circle)
+    bounds = []
+    for i in range(NUM_CIRCLES):
+        bounds.extend([(0.001, width - 0.001), (0.001, height - 0.001), (0.001, 0.5)])
+    
+    # Optimization parameters
+    options = {'maxiter': 1000, 'ftol': 1e-6, 'gtol': 1e-6}
+    
+    # Define constraints for the optimization
+    con = {'type': 'ineq', 'fun': constraint_func}
+    
+    # Perform optimization
+    try:
+        result = minimize(
+            objective,
+            initial_params,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=con,
+            options=options,
+            tol=1e-6
+        )
+        
+        # If optimization failed, fall back to basic solution
+        if not result.success:
+            warnings.warn("Optimization failed, returning initial solution")
+            result.x = initial_params
+            
+    except Exception as e:
+        warnings.warn(f"Optimization error: {e}")
+        result = type('obj', (object,), {'x': initial_params})()
+    
+    # Extract final circles
+    final_circles = result.x.reshape(-1, 3)
+    
+    # Verify and fix any constraint violations
+    for i in range(len(final_circles)):
+        x, y, r = final_circles[i]
+        if not is_valid_position(x, y, r):
+            # Fix boundary violations by clamping
+            x = max(r, min(width - r, x))
+            y = max(r, min(height - r, y))
+            final_circles[i] = [x, y, r]
+    
+    # Final cleanup: ensure no overlaps
+    improved_circles = final_circles.copy()
+    max_iter = 50
+    for iteration in range(max_iter):
+        any_improved = False
+        for i in range(len(improved_circles)):
+            # Try to increase radius while maintaining constraints
+            x, y, r = improved_circles[i]
+            
+            # Find minimum distance to other circles
+            min_dist = float('inf')
+            for j in range(len(improved_circles)):
+                if i != j:
+                    x2, y2, r2 = improved_circles[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    min_dist = min(min_dist, dist)
+            
+            # Maximum possible radius at current location
+            max_radius = min(x, width - x, y, height - y, min_dist - 0.001)
+            
+            if max_radius > r:
+                # Try to increase radius
+                new_r = min(max_radius, r + (max_radius - r) * 0.2)
+                if new_r > r:
+                    improved_circles[i, 2] = new_r
+                    any_improved = True
+        
+        if not any_improved:
+            break
+    
+    return improved_circles
+
+# EVOLVE-BLOCK-END

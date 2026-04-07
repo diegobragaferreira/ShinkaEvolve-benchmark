@@ -1,0 +1,269 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.signal import fftconvolve
+import time
+import random
+import multiprocessing as mp
+from functools import partial
+import copy
+from typing import List, Tuple
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+class AdaptiveEvolutionaryOptimizer:
+    """
+    An adaptive evolutionary optimizer for maximizing 1/C₁ in step function constructions.
+    """
+
+    def __init__(self, pop_size: int = 50, generations: int = 50):
+        self.pop_size = pop_size
+        self.generations = generations
+        self.best_score = 0.0
+        self.best_sequence = None
+
+    @staticmethod
+    def evaluate_sequence(sequence: List[float]) -> float:
+        """
+        Evaluate a sequence and return its performance metric (1/C₁).
+
+        Args:
+            sequence: List of non-negative real numbers
+            
+        Returns:
+            float: Performance metric (1/C₁) - higher is better
+        """
+        try:
+            # Convert to numpy array
+            a = np.array(sequence)
+            sum_a = np.sum(a)
+            
+            # Avoid division by zero or negligible sums
+            if sum_a < 1e-10:
+                return 0.0
+                
+            # Compute autoconvolution using FFT for efficiency
+            b = fftconvolve(a, a, mode='full')
+            b = b[len(a)-1:2*len(a)-1]  # Convolution part
+            
+            max_b = np.max(b)
+            
+            # Compute C₁ = 2n * max(b) / (sum(a))^2
+            n = len(a)
+            c1 = 2 * n * max_b / (sum_a ** 2)
+            
+            # Return inverse for maximization
+            inv_c1 = 1.0 / c1 if c1 > 0 else 0.0
+            
+            return inv_c1
+        except Exception as e:
+            return 0.0
+
+    @staticmethod
+    def evaluate_population_parallel(population: List[List[float]], chunk_size: int = 10) -> List[float]:
+        """
+        Evaluate a list of sequences in parallel.
+
+        Args:
+            population: List of sequences to evaluate
+            chunk_size: Number of sequences per worker
+            
+        Returns:
+            List of performance metrics (1/C₁) for each sequence
+        """
+        # Split the population into chunks
+        chunks = [population[i:i+chunk_size] for i in range(0, len(population), chunk_size)]
+        
+        # Use multiprocessing to evaluate chunks in parallel
+        with mp.Pool() as pool:
+            results = pool.map(AdaptiveEvolutionaryOptimizer._evaluate_chunk, chunks)
+        
+        # Flatten results
+        flattened_results = [item for sublist in results for item in sublist]
+        return flattened_results
+
+    @staticmethod
+    def _evaluate_chunk(chunk: List[List[float]]) -> List[float]:
+        """Helper function to evaluate a chunk of sequences."""
+        return [AdaptiveEvolutionaryOptimizer.evaluate_sequence(seq) for seq in chunk]
+
+    @staticmethod
+    def generate_multiscale_sequence() -> List[float]:
+        """Generate a structured sequence using multi-scale pattern."""
+        # Choose different generation methods based on probability
+        method = random.choice(['sinusoidal', 'exponential', 'power'])
+        length = random.randint(100, 500)
+        
+        if method == 'sinusoidal':
+            sequence = [abs(np.sin(i * np.pi / length)) * 1000 for i in range(length)]
+        elif method == 'exponential':
+            sequence = [np.exp(-i / (length / 3)) * 1000 for i in range(length)]
+        else:  # power
+            sequence = [(i + 1) ** (-1.5) * 1000 for i in range(length)]
+            
+        # Add some randomness to avoid perfect symmetry
+        for i in range(length):
+            if random.random() < 0.1:
+                sequence[i] += random.uniform(-100, 100)
+        
+        # Ensure non-negative
+        sequence = [max(0, x) for x in sequence]
+        
+        # Ensure sum is meaningful
+        if sum(sequence) < 0.01:
+            sequence[random.randint(0, length-1)] += 0.01
+        
+        return sequence
+
+    @staticmethod
+    def mutate_sequence_cauchy(sequence: List[float], scale: float = 100.0) -> List[float]:
+        """Mutate a sequence with Cauchy noise for heavy-tailed exploration."""
+        mutated = copy.deepcopy(sequence)
+        for i in range(len(mutated)):
+            # Use Cauchy distribution instead of Gaussian for more diverse mutations
+            mutated[i] += np.random.standard_cauchy() * scale
+            mutated[i] = max(0, mutated[i])  # Ensure non-negative
+        return mutated
+
+    @staticmethod
+    def crossover_sequences(seq1: List[float], seq2: List[float], 
+                          cxpb: float = 0.5) -> Tuple[List[float], List[float]]:
+        """Perform uniform crossover between two sequences."""
+        child1, child2 = copy.deepcopy(seq1), copy.deepcopy(seq2)
+        for i in range(len(child1)):
+            if random.random() < cxpb:
+                child1[i], child2[i] = child2[i], child1[i]
+        return child1, child2
+
+    @staticmethod
+    def compute_diversity(fitnesses: List[float]) -> float:
+        """Compute population diversity using standard deviation of fitnesses."""
+        return np.std(fitnesses) if len(fitnesses) > 1 else 0.0
+
+    def optimize(self) -> List[float]:
+        """Run the adaptive evolutionary optimization process."""
+        start_time = time.time()
+        timeout = 170  # Leave 10 seconds for cleanup
+        
+        # Initialize population with multiscale sequences
+        population = [self.generate_multiscale_sequence() for _ in range(self.pop_size)]
+        
+        # Evaluate initial population
+        fitnesses = self.evaluate_population_parallel(population)
+        
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        self.best_score = fitnesses[best_idx]
+        self.best_sequence = copy.deepcopy(population[best_idx])
+        
+        print(f"Initial best score: {self.best_score:.6f}")
+        
+        # Track fitness history for convergence detection
+        fitness_history = [self.best_score]
+        stagnation_counter = 0
+        prev_best_score = self.best_score
+
+        # Begin evolution
+        for gen in range(self.generations):
+            if time.time() - start_time > timeout:
+                break
+                
+            # Adaptive population management based on performance
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-6:
+                    # Reduce population size if stagnated
+                    self.pop_size = max(20, int(self.pop_size * 0.9))
+                    
+            # Selection using tournament selection
+            selected = self.tournament_selection(population, fitnesses)
+            
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply Cauchy mutation
+                    child1 = self.mutate_sequence_cauchy(child1)
+                    child2 = self.mutate_sequence_cauchy(child2)
+                    offspring.extend([child1, child2])
+                else:
+                    # Handle odd population size
+                    offspring.append(self.mutate_sequence_cauchy(selected[i]))
+            
+            # Keep offspring size consistent
+            offspring = offspring[:self.pop_size]
+            
+            # Evaluate offspring
+            offspring_fitnesses = self.evaluate_population_parallel(offspring)
+            
+            # Replace population with offspring
+            population = offspring
+            fitnesses = offspring_fitnesses
+            
+            # Update best individual
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_score:
+                self.best_score = fitnesses[best_idx]
+                self.best_sequence = copy.deepcopy(population[best_idx])
+                stagnation_counter = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_counter += 1  # Increment if no improvement
+
+            # Update fitness history
+            fitness_history.append(self.best_score)
+            if len(fitness_history) > 10:
+                fitness_history.pop(0)  # Keep only last 10 values
+
+            print(f"Gen {gen}: Best = {self.best_score:.6f}")
+            
+            # Adaptive termination check
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-8:
+                    print("Fitness plateau detected, stopping early")
+                    break
+
+                if stagnation_counter > 5:
+                    print("Population converged and stagnated, stopping early")
+                    break
+                    
+                # Check if we're approaching the time limit
+                if time.time() - start_time > timeout - 5:
+                    print("Approaching time limit, stopping early")
+                    break
+
+        return self.best_sequence
+
+    @staticmethod
+    def tournament_selection(population: List[List[float]], 
+                           fitnesses: List[float], 
+                           tournament_size: int = 3) -> List[List[float]]:
+        """Select individuals using tournament selection."""
+        selected = []
+        for _ in range(len(population)):
+            # Select randomly from population
+            tournament_indices = random.sample(range(len(population)), tournament_size)
+            tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+            selected.append(copy.deepcopy(population[winner_index]))
+        return selected
+
+def search_for_best_sequence() -> List[float]:
+    """Main function to search for the best coefficient sequence."""
+    optimizer = AdaptiveEvolutionaryOptimizer(pop_size=50, generations=50)
+    try:
+        best_sequence = optimizer.optimize()
+        return best_sequence
+    except Exception as e:
+        print(f"Optimization failed: {e}")
+        # Fallback to a basic sequence if nothing worked
+        return [1.0] * 100
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

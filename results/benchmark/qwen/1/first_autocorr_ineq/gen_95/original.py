@@ -1,0 +1,107 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+from typing import List, Optional
+import random
+
+# Set a fixed seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Use FFT for faster convolution
+    try:
+        conv_result = np.real(ifft(fft(normalized_sequence, 2*n-1) *
+                                   np.conj(fft(normalized_sequence, 2*n-1))))
+        rhs = np.max(conv_result[:2*n-1])  # Only consider the actual convolution results
+    except Exception as e:
+        print(f"Error during FFT convolution: {e}")
+        return None
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+
+    # Precompute the convolution constraint matrix using explicit loop
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints: b_i >= 0
+    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+    b_ub_nonneg = np.zeros(n)  # Zero vector
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    try:
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        if result.success:
+            g_sequence = result.x
+            return g_sequence
+        else:
+            print('LP optimization failed:', result.message)
+            return None
+    except Exception as e:
+        print(f'LP optimization error: {e}')
+        return None
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    # Initialize with a random sequence of appropriate size
+    n = np.random.randint(100, 1000)
+    best_sequence = [np.random.random() for _ in range(n)]
+
+    # Attempt to improve the sequence
+    h_function = get_good_direction_to_move_into(best_sequence)
+    if h_function is not None:
+        best_sequence = h_function
+    else:
+        # If improvement fails, just perturb the initial sequence slightly
+        if len(best_sequence) > 1:
+            best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

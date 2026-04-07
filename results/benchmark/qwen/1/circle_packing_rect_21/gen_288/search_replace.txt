@@ -1,0 +1,211 @@
+<NAME>
+optimize_mutation_operator
+</NAME>
+
+<DESCRIPTION>
+The current mutation operator uses a complex Voronoi-based criticality computation that is prone to failure. I'll simplify and improve it by:
+
+1. Making the mutation operator more robust by using a simplified but effective criticality approach
+2. Improving the mutation step sizes and strategies
+3. Ensuring better handling of boundary conditions
+4. Adding more intelligent radius mutation based on local constraints
+
+This should make the evolutionary algorithm more stable and effective at finding better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def compute_voronoi_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute criticality scores for each circle based on Voronoi diagram."""
+        if len(circles) < 3:
+            return np.ones(len(circles)) * 0.5
+
+        try:
+            # Get circle centers
+            points = circles[:, :2]
+
+            # Shift points to avoid boundary issues
+            shifted_points = points.copy()
+            shifted_points[:, 0] = np.clip(shifted_points[:, 0], 0.01, rect_width - 0.01)
+            shifted_points[:, 1] = np.clip(shifted_points[:, 1], 0.01, rect_height - 0.01)
+
+            # Compute Voronoi diagram
+            vor = Voronoi(shifted_points)
+
+            # Compute area of Voronoi cells
+            areas = []
+            for i in range(len(shifted_points)):
+                # Get vertices of Voronoi cell for point i
+                region = vor.regions[vor.point_region[i]]
+                if -1 in region:
+                    # Infinite region, skip
+                    areas.append(1000000)  # Large area for infinite regions
+                else:
+                    # Compute polygon area
+                    vertices = [vor.vertices[j] for j in region if j >= 0]
+                    if len(vertices) < 3:
+                        areas.append(1000000)
+                    else:
+                        # Simplified area calculation using cross product
+                        vertices_array = np.array(vertices)
+                        x = vertices_array[:, 0]
+                        y = vertices_array[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+
+            # Convert to criticality score (lower area = higher criticality)
+            areas = np.array(areas)
+            # Normalize to [0,1] where 0 = most critical
+            normalized_areas = (areas - areas.min()) / (areas.max() - areas.min() + 1e-8)
+            return 1.0 - normalized_areas  # Higher criticality = closer to 1
+
+        except:
+            # Fallback to uniform criticality if Voronoi fails
+            return np.ones(len(circles)) * 0.5
+
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based criticality weighting and adaptive step sizes."""
+        mutated = circles.copy()
+
+        # Compute criticality scores
+        criticality_scores = MutationOperator.compute_voronoi_criticality(circles, rect_width, rect_height)
+
+        for i in range(21):
+            if np.random.random() < 0.25:  # 25% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score for this circle
+                crit_score = criticality_scores[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size based on criticality
+                    base_step = 0.03 + 0.02 * crit_score  # Smaller steps in critical regions
+                    step_size = base_step + np.random.random() * base_step * 0.5
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary awareness: penalize movements that go out of bounds
+                    bound_penalty_x = max(0, mutated[i, 0] - (rect_width - mutated[i, 2]))
+                    bound_penalty_y = max(0, mutated[i, 1] - (rect_height - mutated[i, 2]))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        mutated[i, 0] -= bound_penalty_x * 0.5
+                        mutated[i, 1] -= bound_penalty_y * 0.5
+
+                else:
+                    # Mutate radius with log-normal distribution
+                    # Scale based on criticality (less change in high-criticality regions)
+                    scale_factor = np.exp(np.random.normal(0, 0.15 * (1 - crit_score)))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+
+        return mutated
+=======
+    @staticmethod
+    def compute_simple_criticality(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Compute a simple but effective criticality score based on density and boundary proximity."""
+        if len(circles) < 2:
+            return np.ones(len(circles)) * 0.5
+
+        points = circles[:, :2]
+
+        # Compute pairwise distances between all circles
+        distances = cdist(points, points)
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distances, np.inf)
+
+        # For each circle, find the minimum distance to any other circle
+        min_distances = np.min(distances, axis=1)
+
+        # Convert to criticality scores (inverse: smaller distances = higher criticality)
+        # But avoid division by zero
+        criticality = 1.0 / (min_distances + 1e-8)
+
+        # Normalize to [0,1] range
+        if criticality.max() > 0:
+            criticality = criticality / criticality.max()
+
+        # Also consider boundary proximity
+        boundary_scores = np.zeros(len(circles))
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Distance to each boundary
+            dist_to_left = x - r
+            dist_to_right = rect_width - x - r
+            dist_to_bottom = y - r
+            dist_to_top = rect_height - y - r
+
+            # Minimum distance to any boundary
+            min_boundary_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+
+            # Higher boundary proximity = higher criticality
+            boundary_score = max(0, 1 - min_boundary_dist / min(rect_width, rect_height))
+            boundary_scores[i] = boundary_score
+
+        # Combine both factors (weighted average)
+        # Criticality from density + boundary proximity
+        combined_criticality = 0.6 * criticality + 0.4 * boundary_scores
+
+        # Ensure values are in [0,1]
+        combined_criticality = np.clip(combined_criticality, 0, 1)
+
+        return combined_criticality
+
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with simplified but effective criticality approach."""
+        mutated = circles.copy()
+
+        # Compute criticality scores using a more robust approach
+        criticality_scores = MutationOperator.compute_simple_criticality(circles, rect_width, rect_height)
+
+        for i in range(21):
+            if np.random.random() < 0.3:  # 30% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score for this circle
+                crit_score = criticality_scores[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size based on criticality
+                    # Critical regions get smaller mutations, sparse regions get larger ones
+                    base_step = 0.05 * (0.2 + 0.8 * (1 - crit_score))  # Smaller steps in critical regions
+                    step_size = base_step * (0.5 + np.random.random() * 1.5)  # Random variation
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary enforcement with proper clipping
+                    mutated[i, 0] = np.clip(mutated[i, 0], mutated[i, 2], rect_width - mutated[i, 2])
+                    mutated[i, 1] = np.clip(mutated[i, 1], mutated[i, 2], rect_height - mutated[i, 2])
+
+                else:
+                    # Mutate radius with adaptive scaling based on criticality
+                    # High criticality regions: small changes (0.1 to 0.3)
+                    # Low criticality regions: larger changes (0.3 to 1.0)
+                    min_scale = 0.1 + 0.2 * (1 - crit_score)
+                    max_scale = 0.3 + 0.7 * (1 - crit_score)
+                    scale_factor = np.exp(np.random.normal(0, 0.15 * (1 - crit_score)))
+
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Bound radius to stay within reasonable limits
+                    max_possible_radius = min(
+                        mutated[i, 0], mutated[i, 1],
+                        rect_width - mutated[i, 0], rect_height - mutated[i, 1]
+                    )
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.95)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

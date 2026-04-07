@@ -1,0 +1,165 @@
+<NAME>
+add_symmetry_breaking_constraints
+</NAME>
+
+<DESCRIPTION>
+Adding symmetry-breaking constraints to avoid degenerate solutions that may trap the optimization process. This approach fixes positions of certain points (like corner points) to break symmetric equivalencies, ensuring each optimization path explores distinct solution spaces rather than cycling between identical structures. This builds upon the current program's emphasis on robust initialization and constraint handling to help escape problematic local minima.
+
+The implementation adds fixed corner constraints to the optimization process, specifically fixing the positions of the bottom-left, bottom-right, top-left, and top-right corner points to break rotational and reflective symmetries. This prevents the optimizer from getting stuck in symmetrically equivalent but suboptimal configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_local_refinement(initial_points, max_iter=500, method='L-BFGS-B'):
+        """Perform local optimization refinement on initial configuration."""
+        # Flatten for optimization
+        initial_flat = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(len(initial_flat))]
+
+        # Get current ratio to adapt optimization parameters
+        current_ratio = calculate_min_max_ratio(initial_points)
+
+        # Adaptive optimization parameters based on solution quality
+        if current_ratio < 0.1:
+            # Very poor solution - aggressive optimization
+            max_iter_adjusted = max_iter * 2
+            ftol_adjusted = 1e-10
+            gtol_adjusted = 1e-10
+        elif current_ratio < 0.2:
+            # Poor solution - moderately aggressive
+            max_iter_adjusted = max_iter * 1.5
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+        elif current_ratio > 0.25:
+            # Good solution - precise optimization
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-12
+            gtol_adjusted = 1e-12
+        else:
+            # Medium solution - balanced
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+
+        # Try multiple optimization methods with varying tolerances
+        methods_and_tolerances = [
+            ('L-BFGS-B', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted}),
+            ('SLSQP', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2}),
+            ('TNC', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2})
+        ]
+
+        best_points = initial_points.copy()
+        best_ratio = calculate_min_max_ratio(initial_points)
+
+        for method_name, options in methods_and_tolerances:
+            try:
+                result = minimize(
+                    lambda flat_points: -calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                    initial_flat,
+                    method=method_name,
+                    bounds=bounds,
+                    options=options,
+                    callback=None
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, 2)
+                    optimized_points = np.clip(optimized_points, 0, 1)
+                    ratio = calculate_min_max_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points
+
+            except Exception as e:
+                continue
+
+        return best_points
+=======
+    def optimize_with_local_refinement(initial_points, max_iter=500, method='L-BFGS-B'):
+        """Perform local optimization refinement on initial configuration."""
+        # Flatten for optimization
+        initial_flat = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(len(initial_flat))]
+
+        # Add symmetry-breaking constraints to fix corner points
+        # Fix bottom-left, bottom-right, top-left, and top-right corners
+        def constraint_func(x_vec):
+            points = x_vec.reshape(-1, 2)
+            # Fix four corner points to break symmetry
+            # Bottom-left corner (0,0)
+            constraints = [points[0, 0] - 0.0, points[0, 1] - 0.0]
+            # Bottom-right corner (1,0)
+            constraints.extend([points[3, 0] - 1.0, points[3, 1] - 0.0])
+            # Top-left corner (0,1)
+            constraints.extend([points[12, 0] - 0.0, points[12, 1] - 1.0])
+            # Top-right corner (1,1)
+            constraints.extend([points[15, 0] - 1.0, points[15, 1] - 1.0])
+            return np.array(constraints)
+
+        # Get current ratio to adapt optimization parameters
+        current_ratio = calculate_min_max_ratio(initial_points)
+
+        # Adaptive optimization parameters based on solution quality
+        if current_ratio < 0.1:
+            # Very poor solution - aggressive optimization
+            max_iter_adjusted = max_iter * 2
+            ftol_adjusted = 1e-10
+            gtol_adjusted = 1e-10
+        elif current_ratio < 0.2:
+            # Poor solution - moderately aggressive
+            max_iter_adjusted = max_iter * 1.5
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+        elif current_ratio > 0.25:
+            # Good solution - precise optimization
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-12
+            gtol_adjusted = 1e-12
+        else:
+            # Medium solution - balanced
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+
+        # Try multiple optimization methods with varying tolerances
+        methods_and_tolerances = [
+            ('L-BFGS-B', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted}),
+            ('SLSQP', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2}),
+            ('TNC', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2})
+        ]
+
+        best_points = initial_points.copy()
+        best_ratio = calculate_min_max_ratio(initial_points)
+
+        for method_name, options in methods_and_tolerances:
+            try:
+                result = minimize(
+                    lambda flat_points: -calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                    initial_flat,
+                    method=method_name,
+                    bounds=bounds,
+                    options=options,
+                    callback=None
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, 2)
+                    optimized_points = np.clip(optimized_points, 0, 1)
+                    ratio = calculate_min_max_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points
+
+            except Exception as e:
+                continue
+
+        return best_points
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,156 @@
+<NAME>
+add_adaptive_clustering_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses basic distance thresholds to determine perturbation strategies, but we can improve this by implementing adaptive clustering detection that analyzes the actual distribution patterns of points. This will help identify when points form tight clusters that need aggressive perturbations vs. well-distributed regions that need gentle adjustments. The key insight is to analyze the distance distribution statistics more comprehensively to make smarter perturbation decisions.
+
+This change involves modifying the `perturb_points_smart` function to implement a more sophisticated clustering detection mechanism that uses statistical measures of point distribution to determine the appropriate perturbation strategy for each point, rather than relying solely on simple percentile comparisons.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def perturb_points_smart(points: np.ndarray, temperature: float, current_ratio: float) -> np.ndarray:
+    """
+    Apply smart perturbations based on distance distribution analysis.
+    """
+    # Create a copy of the points
+    new_points = points.copy()
+
+    # Analyze current distribution to decide how many points to perturb
+    # Get pairwise distances for analysis
+    distances = cdist(points, points)
+    np.fill_diagonal(distances, np.inf)
+
+    # Find points that are closest to other points (potential bottlenecks)
+    min_distances = np.min(distances, axis=1)
+    max_distances = np.max(distances, axis=1)
+
+    # Calculate average distance to determine scale
+    avg_distances = np.mean(distances, axis=1)
+
+    # Determine number of points to perturb based on clustering
+    # If many points are very close, perturb more points
+    # If points are well separated, perturb fewer points
+    close_points_ratio = np.sum(min_distances < np.percentile(avg_distances, 25)) / len(points)
+    num_to_perturb = max(1, min(6, int(2 + close_points_ratio * 4)))
+
+    # Select multiple points to perturb
+    target_indices = np.random.choice(len(points), size=num_to_perturb, replace=False)
+
+    # Apply adaptive perturbations
+    for target_idx in target_indices:
+        # Determine perturbation strength based on local configuration
+        # Points that are too close get larger perturbations
+        if min_distances[target_idx] < avg_distances[target_idx] * 0.5:
+            perturbation_scale = 0.03 * temperature  # Larger perturbation for tightly clustered points
+        elif max_distances[target_idx] > avg_distances[target_idx] * 2.0:
+            perturbation_scale = 0.01 * temperature  # Smaller perturbation for widely separated points
+        else:
+            perturbation_scale = 0.02 * temperature  # Medium perturbation for intermediate cases
+
+        # Generate random perturbation in tangent plane
+        random_vec = np.random.randn(3)
+        # Project onto sphere surface normal (tangent plane)
+        normal_vec = new_points[target_idx]
+        tangent_vec = random_vec - np.dot(random_vec, normal_vec) * normal_vec
+        # Normalize tangent vector
+        tangent_norm = np.linalg.norm(tangent_vec)
+        if tangent_norm > 1e-10:
+            tangent_vec = tangent_vec / tangent_norm
+        # Apply perturbation with adaptive strength
+        delta = tangent_vec * np.random.normal(0, perturbation_scale)
+
+        # Add perturbation to selected point
+        new_points[target_idx] += delta
+
+    # Project back to unit sphere
+    norms = np.linalg.norm(new_points, axis=1, keepdims=True)
+    # Handle case where norm might be zero (shouldn't happen but safety check)
+    norms = np.where(norms == 0, 1, norms)
+    new_points = new_points / norms
+
+    return new_points
+=======
+def perturb_points_smart(points: np.ndarray, temperature: float, current_ratio: float) -> np.ndarray:
+    """
+    Apply smart perturbations based on distance distribution analysis with adaptive clustering detection.
+    """
+    # Create a copy of the points
+    new_points = points.copy()
+
+    # Analyze current distribution to decide how many points to perturb
+    # Get pairwise distances for analysis
+    distances = cdist(points, points)
+    np.fill_diagonal(distances, np.inf)
+
+    # Find points that are closest to other points (potential bottlenecks)
+    min_distances = np.min(distances, axis=1)
+    max_distances = np.max(distances, axis=1)
+
+    # Calculate various distance statistics for comprehensive clustering analysis
+    avg_distances = np.mean(distances, axis=1)
+    std_distances = np.std(distances, axis=1)
+
+    # Compute clustering indicator: how much the minimum distances deviate from average
+    # Points with much smaller min distances than average are candidates for aggressive perturbation
+    clustering_indicator = (avg_distances - min_distances) / (avg_distances + 1e-10)
+
+    # Analyze global clustering by looking at distribution of min_distances
+    global_clustered_fraction = np.sum(clustering_indicator > 0.5) / len(points)
+
+    # Determine number of points to perturb based on clustering level
+    # If many points show strong clustering, perturb more points
+    # If few points show clustering, perturb fewer points
+    num_to_perturb = max(2, min(8, int(3 + global_clustered_fraction * 5)))
+
+    # Select multiple points to perturb
+    target_indices = np.random.choice(len(points), size=num_to_perturb, replace=False)
+
+    # Apply adaptive perturbations using a more sophisticated clustering-aware strategy
+    for target_idx in target_indices:
+        # Determine perturbation strength based on local clustering characteristics
+        local_clustering = clustering_indicator[target_idx]
+        local_avg_distance = avg_distances[target_idx]
+        local_std_distance = std_distances[target_idx]
+
+        # Determine clustering severity
+        if local_clustering > 1.0:  # Very strongly clustered
+            perturbation_scale = 0.05 * temperature
+        elif local_clustering > 0.5:  # Moderately clustered
+            perturbation_scale = 0.03 * temperature
+        elif local_clustering > 0.2:  # Slightly clustered
+            perturbation_scale = 0.02 * temperature
+        else:  # Well distributed
+            perturbation_scale = 0.01 * temperature
+
+        # Adjust based on relative spread of distances
+        if local_std_distance > local_avg_distance * 0.8:  # Large variance
+            perturbation_scale *= 1.2
+        elif local_std_distance < local_avg_distance * 0.3:  # Small variance
+            perturbation_scale *= 0.8
+
+        # Generate random perturbation in tangent plane
+        random_vec = np.random.randn(3)
+        # Project onto sphere surface normal (tangent plane)
+        normal_vec = new_points[target_idx]
+        tangent_vec = random_vec - np.dot(random_vec, normal_vec) * normal_vec
+        # Normalize tangent vector
+        tangent_norm = np.linalg.norm(tangent_vec)
+        if tangent_norm > 1e-10:
+            tangent_vec = tangent_vec / tangent_norm
+        # Apply perturbation with adaptive strength
+        delta = tangent_vec * np.random.normal(0, perturbation_scale)
+
+        # Add perturbation to selected point
+        new_points[target_idx] += delta
+
+    # Project back to unit sphere
+    norms = np.linalg.norm(new_points, axis=1, keepdims=True)
+    # Handle case where norm might be zero (shouldn't happen but safety check)
+    norms = np.where(norms == 0, 1, norms)
+    new_points = new_points / norms
+
+    return new_points
+>>>>>>> REPLACE
+</DIFF>

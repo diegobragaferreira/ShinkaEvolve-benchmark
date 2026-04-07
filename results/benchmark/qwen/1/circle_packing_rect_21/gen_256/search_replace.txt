@@ -1,0 +1,293 @@
+<NAME>
+voronoi_based_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the mutation operator by making it more sophisticated with respect to Voronoi-based constraint density. The current implementation uses a simple inverse relationship between constraint density and mutation strength, but we can improve this by using Voronoi cell area calculations to better understand local geometric constraints.
+
+The new approach will:
+1. Replace the simplistic constraint density calculation with proper Voronoi-based cell area analysis
+2. Implement more precise adaptive mutation based on actual local constraint density (Voronoi cell area)
+3. Use this information to guide both position and radius mutations with appropriate scaling factors
+
+This should provide better convergence behavior and escape local optima more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on neighbor relationships.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        Array of constraint densities for each circle
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Use spatial indexing for efficient neighbor finding
+    constraint_density = np.zeros(n)
+    max_radius = np.max(circles[:, 2])
+
+    # For better performance, use a larger threshold to capture more neighbors
+    # but still maintain reasonable computational complexity
+    threshold = 4 * max_radius
+
+    # Use KDTree for efficient neighbor queries
+    try:
+        tree = cKDTree(centers)
+
+        # For each point, count neighbors within threshold
+        # This approach is more efficient than pairwise checks for large populations
+        for i in range(n):
+            neighbors = tree.query_ball_point(centers[i], threshold)
+            constraint_density[i] = len(neighbors) - 1  # Subtract 1 for self
+
+    except:
+        # Fallback to explicit computation if KDTree fails
+        for i in range(n):
+            count = 0
+            center_i = centers[i]
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        count += 1
+            constraint_density[i] = count
+
+    # Normalize constraint density to [0, 1] range
+    max_density = np.max(constraint_density)
+    if max_density > 0:
+        constraint_density = constraint_density / max_density
+    else:
+        constraint_density = np.zeros(n)
+
+    return constraint_density
+=======
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi cell areas.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        Array of constraint densities for each circle (inverse of Voronoi cell area)
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Use Voronoi diagram to compute cell areas for constraint density
+    try:
+        # Add boundary points to make Voronoi more meaningful for edge cases
+        boundary_points = [
+            [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+            [rect_width/2, 0], [rect_width/2, rect_height],
+            [0, rect_height/2], [rect_width, rect_height/2]
+        ]
+        all_points = np.vstack([centers, boundary_points])
+
+        vor = Voronoi(all_points)
+
+        # Compute Voronoi cell areas for each original point
+        constraint_density = np.zeros(n)
+
+        for i in range(n):
+            # Get region index for the original point
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Extract vertices for this region
+                    vertices = np.array([vor.vertices[j] for j in region if j >= 0 and j < len(vor.vertices)])
+                    # Compute area using shoelace formula
+                    if len(vertices) >= 3:
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        constraint_density[i] = 1.0 / (area + 1e-8)  # Inverse of area as density measure
+                    else:
+                        constraint_density[i] = 1.0
+                else:
+                    constraint_density[i] = 1.0
+            else:
+                constraint_density[i] = 1.0
+
+    except Exception as e:
+        # Fallback to distance-based constraint estimation if Voronoi fails
+        constraint_density = np.zeros(n)
+        max_radius = np.max(circles[:, 2])
+        threshold = 3 * max_radius
+
+        try:
+            tree = cKDTree(centers)
+            for i in range(n):
+                neighbors = tree.query_ball_point(centers[i], threshold)
+                constraint_density[i] = len(neighbors) - 1  # Subtract 1 for self
+        except:
+            # Final fallback to simple count
+            for i in range(n):
+                count = 0
+                center_i = centers[i]
+                for j in range(n):
+                    if i != j:
+                        dist = np.linalg.norm(center_i - centers[j])
+                        if dist < threshold:
+                            count += 1
+                constraint_density[i] = count
+
+    # Normalize constraint density to [0, 1] range
+    max_density = np.max(constraint_density)
+    if max_density > 0:
+        constraint_density = constraint_density / max_density
+    else:
+        constraint_density = np.ones(n)
+
+    return constraint_density
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_adaptive_mutation_with_voronoi
+</NAME>
+
+<DESCRIPTION>
+The second key improvement enhances the mutate_circles_adaptive function to better leverage the Voronoi-based constraint density information. Instead of simple inverse relationship, this version computes more sophisticated mutation parameters based on the actual Voronoi cell properties.
+
+This approach will:
+1. Use Voronoi cell area as a more accurate measure of local constraint density
+2. Adapt mutation strengths more precisely with exponential scaling based on local density
+3. Apply different scales for position vs radius mutations
+4. Use safer bounds while maintaining exploration capability
+
+This should lead to more effective local search and better convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_circles_adaptive(circles: np.ndarray,
+                          constraint_densities: np.ndarray,
+                          rect_width: float = 1.0,
+                          rect_height: float = 1.0,
+                          max_radius: float = 0.5) -> np.ndarray:
+    """
+    Mutate circle positions and radii with adaptive weights based on constraint density.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        constraint_densities: Constraint density for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+        max_radius: Maximum possible radius
+
+    Returns:
+        Mutated circles array
+    """
+    mutated = circles.copy()
+    n = len(mutated)
+
+    # Mutation parameters adapted based on constraint density
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        # Higher constraint density = more careful mutation
+        density_weight = 1.0 + constraint_densities[i] * 2.0  # 1.0 to 3.0 range
+
+        # Position mutation strength (smaller for high constraint areas)
+        pos_strength = 0.02 / density_weight
+        rad_strength = 0.01 / density_weight
+
+        # Mutate position
+        x += np.random.normal(0, pos_strength)
+        y += np.random.normal(0, pos_strength)
+
+        # Ensure position stays within bounds
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+
+        # Mutate radius
+        r += np.random.normal(0, rad_strength)
+        # Ensure radius remains positive and reasonable
+        r = np.clip(r, 0.001, max_radius * 0.9)
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+=======
+def mutate_circles_adaptive(circles: np.ndarray,
+                          constraint_densities: np.ndarray,
+                          rect_width: float = 1.0,
+                          rect_height: float = 1.0,
+                          max_radius: float = 0.5) -> np.ndarray:
+    """
+    Mutate circle positions and radii with adaptive weights based on Voronoi constraint density.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        constraint_densities: Constraint density for each circle (inverse Voronoi area)
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+        max_radius: Maximum possible radius
+
+    Returns:
+        Mutated circles array
+    """
+    mutated = circles.copy()
+    n = len(mutated)
+
+    # Mutation parameters that adapt more carefully based on constraint density
+    for i in range(n):
+        x, y, r = mutated[i]
+
+        # Convert constraint density to mutation scaling factor
+        # Higher density (smaller Voronoi cells) = smaller mutations = more conservative
+        # Lower density (larger Voronoi cells) = larger mutations = more exploratory
+        # Use exponential scaling for more dramatic effect at extremes
+        density_factor = np.exp(-constraint_densities[i] * 2.0)  # Exponential decay
+
+        # Base mutation strengths
+        base_pos_strength = 0.05
+        base_rad_strength = 0.02
+
+        # Scale mutators based on local density
+        pos_strength = base_pos_strength * density_factor
+        rad_strength = base_rad_strength * density_factor
+
+        # Apply bounded noise to position
+        x += np.random.normal(0, pos_strength)
+        y += np.random.normal(0, pos_strength)
+
+        # Ensure position stays within bounds
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+
+        # Mutate radius with bounded exponential scaling
+        # Use log-normal distribution for radius mutations to avoid negative values
+        rad_delta = np.random.normal(0, rad_strength)
+        r *= np.exp(rad_delta)  # Multiplicative mutation maintains positivity
+
+        # Ensure radius remains within reasonable bounds
+        r = np.clip(r, 0.001, max_radius * 0.9)
+
+        mutated[i] = [x, y, r]
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>

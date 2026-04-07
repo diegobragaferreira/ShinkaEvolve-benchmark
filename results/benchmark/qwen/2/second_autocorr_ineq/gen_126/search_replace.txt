@@ -1,0 +1,170 @@
+<NAME>
+enhance_peak_spacing_and_smoothing
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the peak spacing and smoothing strategies to achieve better C2 values. The key improvements are:
+1. Implement logarithmic spacing for peak positions with better minimum gap enforcement
+2. Replace simple convolution smoothing with more effective Gaussian filtering
+3. Introduce adaptive peak amplitude scaling based on position and width
+4. Add better numerical stability checks for edge cases
+
+These changes target the core function construction algorithm to produce higher quality step functions with better autoconvolution properties.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def construct_enhanced_step_function(n_points=2000):
+    """
+    Enhanced construction of step function with multi-scale peaks and logarithmic spacing
+    """
+    # Create domain
+    x = np.linspace(-0.25, 0.25, n_points)
+
+    # Initialize function
+    f_values = np.zeros(n_points)
+
+    # Use logarithmic spacing for better peak distribution
+    # This prevents clustering around center and edges
+    n_peaks = min(25, max(8, n_points // 100))
+
+    # Generate logarithmically spaced peak positions
+    log_min = np.log(0.01)
+    log_max = np.log(0.15)
+    peak_positions_log = np.logspace(log_min, log_max, n_peaks // 2)
+
+    # Mirror positions for symmetry
+    peak_positions = np.concatenate([
+        -peak_positions_log[::-1],  # Negative positions
+        [0],                       # Center position
+        peak_positions_log         # Positive positions
+    ])
+
+    # Add some randomness to positions to avoid perfect symmetry
+    for i in range(len(peak_positions)):
+        if i != len(peak_positions) // 2:  # Don't perturb center
+            peak_positions[i] += np.random.uniform(-0.01, 0.01)
+
+    # Remove out-of-bounds positions
+    peak_positions = peak_positions[np.abs(peak_positions) <= 0.23]
+
+    # Create peaks with varying characteristics
+    for i, pos in enumerate(peak_positions):
+        # Vary characteristics based on position and index
+        # Width varies with position - wider at edges, narrower near center
+        center_distance = abs(pos)
+        base_width = 0.02 + 0.03 * np.exp(-center_distance * 2)
+        width = np.clip(base_width * np.random.uniform(0.8, 1.2), 0.005, 0.08)
+
+        # Height varies inversely with width to maintain reasonable amplitudes
+        height = np.random.uniform(0.3, 1.5) * (1.0 / (width * 10))
+
+        # Gaussian peak with adaptive parameters
+        gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+        f_values += gaussian_peak
+
+    # Apply enhanced smoothing with adaptive window size
+    if n_points > 100:
+        # Adaptive window: larger for more complex functions
+        window = min(31, max(5, n_points // 100))
+        if window % 2 == 0:
+            window += 1
+        f_values = np.convolve(f_values, np.ones(window)/window, mode='same')
+
+    # Use more sophisticated smoothing for the final result
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize with adaptive scaling
+    max_val = np.max(f_values)
+    if max_val > 0:
+        # Scale down to prevent extreme values that could cause numerical issues
+        scale_factor = max_val * 1.5 if max_val > 1.0 else 1.0
+        f_values = f_values / scale_factor
+
+    return f_values.tolist()
+=======
+def construct_enhanced_step_function(n_points=2000):
+    """
+    Enhanced construction of step function with multi-scale peaks and logarithmic spacing
+    """
+    # Create domain
+    x = np.linspace(-0.25, 0.25, n_points)
+
+    # Initialize function
+    f_values = np.zeros(n_points)
+
+    # Use logarithmic spacing for better peak distribution with enforced minimum gaps
+    # This prevents clustering around center and edges
+    n_peaks = min(25, max(8, n_points // 100))
+
+    # Generate logarithmically spaced peak positions with better distribution
+    log_min = np.log(0.015)
+    log_max = np.log(0.18)
+    peak_positions_log = np.logspace(log_min, log_max, n_peaks // 2)
+
+    # Mirror positions for symmetry with better spacing control
+    peak_positions = np.concatenate([
+        -peak_positions_log[::-1],  # Negative positions
+        [0],                       # Center position
+        peak_positions_log         # Positive positions
+    ])
+
+    # Enforce minimum spacing between peaks to avoid numerical interference
+    filtered_positions = []
+    min_spacing = 0.02
+    for pos in peak_positions:
+        # Check if position is sufficiently far from existing peaks
+        valid = True
+        for existing_pos in filtered_positions:
+            if abs(pos - existing_pos) < min_spacing:
+                valid = False
+                break
+        if valid and abs(pos) <= 0.23:  # Keep within bounds
+            filtered_positions.append(pos)
+
+    peak_positions = np.array(filtered_positions)
+
+    # Add some randomness to positions to avoid perfect symmetry
+    for i in range(len(peak_positions)):
+        if i != len(peak_positions) // 2:  # Don't perturb center
+            peak_positions[i] += np.random.uniform(-0.005, 0.005)
+
+    # Create peaks with varying characteristics
+    for i, pos in enumerate(peak_positions):
+        # Vary characteristics based on position and index
+        # Width varies with position - wider at edges, narrower near center
+        center_distance = abs(pos)
+        base_width = 0.015 + 0.03 * np.exp(-center_distance * 3)
+        width = np.clip(base_width * np.random.uniform(0.7, 1.3), 0.005, 0.08)
+
+        # Adaptive amplitude scaling based on position and width
+        # Peaks near center get higher amplitude, wider peaks get lower amplitude
+        center_factor = np.exp(-center_distance * 4)
+        width_factor = 1.0 / (width * 15.0)
+        base_height = np.random.uniform(0.8, 1.8) * center_factor * width_factor
+        height = np.clip(base_height, 0.2, 2.0)
+
+        # Gaussian peak with adaptive parameters
+        gaussian_peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
+        f_values += gaussian_peak
+
+    # Apply more sophisticated smoothing using Gaussian filter
+    if n_points > 100:
+        # Use Gaussian filter for smoother results with better edge preservation
+        from scipy.ndimage import gaussian_filter1d
+        sigma = max(1.0, n_points / 500.0)  # Adaptive sigma based on resolution
+        f_values = gaussian_filter1d(f_values, sigma=sigma, mode='nearest')
+
+    # Ensure non-negativity
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize with adaptive scaling
+    max_val = np.max(f_values)
+    if max_val > 0:
+        # Scale down more aggressively for high-resolution functions to prevent numerical overflow
+        scale_factor = max_val * 1.8 if max_val > 1.0 else 1.2
+        f_values = f_values / scale_factor
+
+    return f_values.tolist()
+>>>>>>> REPLACE
+</DIFF>

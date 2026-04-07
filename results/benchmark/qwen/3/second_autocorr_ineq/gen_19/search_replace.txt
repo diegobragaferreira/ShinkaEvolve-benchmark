@@ -1,0 +1,88 @@
+<NAME>
+numba_jit_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding Numba JIT compilation to the core computation functions to significantly speed up the convolution and C2 calculation. This addresses the computational bottleneck in the current implementation that limits the number of evaluations possible within the 90-second time constraint. The @njit decorator will compile the hot loops in `compute_convolution_norms` and `compute_c2` to machine code, providing substantial performance gains.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+import math
+
+def compute_convolution_norms(f_values, domain_length=0.5):
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+import math
+from numba import njit
+
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    # g[k] = integral f(x) * f(y) where x+y = k*dx - domain_length/2
+    # We'll compute this as a discrete approximation
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                # For two adjacent pieces with heights f[i] and f[j],
+                # the convolution contributes to g[k]
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2_numba(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+
+def compute_convolution_norms(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    """
+    return compute_convolution_norms_numba(f_values, domain_length)
+
+def compute_c2(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞)"""
+    return compute_c2_numba(f_values)
+>>>>>>> REPLACE
+</DIFF>

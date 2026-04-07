@@ -1,0 +1,658 @@
+--- a/original.py
++++ b/original.py
+@@ -1,406 +1,272 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial import cKDTree
++import math
+ import random
+ import time
+ from typing import Tuple, List
+ 
+-# Global constants for optimization
+-RECT_PERIMETER = 4.0
+-RECT_WIDTH = 1.3  # Optimized width for better packing
+-RECT_HEIGHT = 0.7  # Optimized height for better packing
+-NUM_CIRCLES = 21
+-POPULATION_SIZE = 150  # Increased population size for better exploration
+-MAX_GENERATIONS = 600  # More generations for better optimization
+-INITIAL_MUTATION_RATE = 0.30  # Higher initial mutation rate for better exploration
+-FINAL_MUTATION_RATE = 0.02  # Lower final mutation rate for exploitation
+-TOURNAMENT_SIZE = 9  # Larger tournament size for stronger selection pressure
+-SEED = 42
+-
+-class CirclePacker:
+-    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT,
+-                 num_circles: int = NUM_CIRCLES):
+-        self.width = width
+-        self.height = height
+-        self.num_circles = num_circles
+-        self.rect_area = width * height
+-
+-        # Initialize random seed for reproducibility
+-        np.random.seed(SEED)
+-        random.seed(SEED)
+-
+-    def is_valid_position(self, x: float, y: float, r: float) -> bool:
+-        """Check if circle center is within bounds"""
+-        return (r <= x <= self.width - r and
+-                r <= y <= self.height - r)
+-
+-    def is_valid_circle(self, x: float, y: float, r: float) -> bool:
+-        """Check if circle is valid (within bounds and positive radius)"""
+-        return (0 < r and
+-                self.is_valid_position(x, y, r))
+-
+-    def check_overlap(self, circles: np.ndarray, idx1: int, idx2: int) -> bool:
+-        """Check if two circles overlap using Euclidean distance"""
+-        x1, y1, r1 = circles[idx1]
+-        x2, y2, r2 = circles[idx2]
+-
+-        # Calculate squared distance to avoid sqrt computation
+-        dx = x1 - x2
+-        dy = y1 - y2
+-        dist_sq = dx*dx + dy*dy
+-        radius_sum = r1 + r2
+-        return dist_sq < radius_sum * radius_sum
+-
+-    def efficient_overlap_check(self, circles: np.ndarray, tree: cKDTree = None) -> int:
+-        """Efficiently check all overlaps using spatial indexing"""
+-        violations = 0
+-
+-        if tree is None:
+-            # Build KDTree for fast neighbor search
+-            points = circles[:, :2]  # Only x,y coordinates
+-            tree = cKDTree(points)
+-
+-        # Get max radius to determine search radius
+-        max_radius = np.max(circles[:, 2])
+-
+-        # Query pairs efficiently with increased safety margin
+-        try:
+-            # Using a safety margin for better reliability
+-            search_radius = 2.5 * max_radius
+-            pairs = tree.query_pairs(search_radius, output_type='ndarray')
+-
+-            for i, j in pairs:
+-                if self.check_overlap(circles, i, j):
+-                    violations += 1
+-        except Exception:
+-            # Fallback to brute force if spatial indexing fails
+-            for i in range(self.num_circles):
+-                for j in range(i+1, self.num_circles):
+-                    if self.check_overlap(circles, i, j):
+-                        violations += 1
+-
+-        return violations
+-
+-    def calculate_total_radius_sum(self, circles: np.ndarray) -> float:
+-        """Calculate sum of all circle radii"""
+-        return np.sum(circles[:, 2])
+-
+-    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+-        """
+-        Calculate fitness: sum of radii with penalty for constraint violations
+-        Uses constraint-aware penalties that scale with violation severity
+-
+-        Returns:
+-            Tuple of (fitness_score, number_of_violations)
+-        """
+-        total_radius = self.calculate_total_radius_sum(circles)
+-
+-        # Calculate constraint violations with severity measures
+-        total_penalty = 0
+-        violations = 0
+-
+-        # Check boundary violations with severity scaling
+-        for i in range(self.num_circles):
+-            x, y, r = circles[i]
+-            if not self.is_valid_circle(x, y, r):
+-                # Calculate how severe the boundary violation is
+-                boundary_violation = 0
+-                if x < r:
+-                    boundary_violation += (r - x)
+-                elif x > self.width - r:
+-                    boundary_violation += (x - (self.width - r))
+-                if y < r:
+-                    boundary_violation += (r - y)
+-                elif y > self.height - r:
+-                    boundary_violation += (y - (self.height - r))
+-
+-                total_penalty += boundary_violation * 10000  # Heavier penalty for boundary violations
+-                violations += 1
+-
+-        # Check overlap violations with severity scaling
+-        overlap_violations = 0
+-        tree = cKDTree(circles[:, :2])
+-
+-        for i in range(self.num_circles):
+-            x1, y1, r1 = circles[i]
+-            # Find nearby circles to check overlaps
+-            nearby_indices = tree.query_ball_point([x1, y1], 2 * (r1 + 1e-6))
+-
+-            for j in nearby_indices:
+-                if i != j:
+-                    x2, y2, r2 = circles[j]
+-                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+-                    overlap = (r1 + r2) - distance
+-
+-                    if overlap > 0:  # Overlapping
+-                        # Scale penalty by severity of overlap
+-                        overlap_penalty = overlap * 10000
+-                        total_penalty += overlap_penalty
+-                        overlap_violations += 1
+-
+-        violations += overlap_violations
+-
+-        # Return fitness with constraint-aware penalties
+-        # This prevents optimization from getting stuck in regions with severe constraint violations
+-        return total_radius - total_penalty, violations
+-
+-    def generate_initial_population(self, pop_size: int) -> List[np.ndarray]:
+-        """Generate initial population of circle configurations with adaptive grid"""
+-        population = []
+-
+-        for _ in range(pop_size):
+-            circles = np.zeros((self.num_circles, 3))
+-
+-            # Generate initial configuration using adaptive grid-based approach
+-            # Calculate optimal grid dimensions based on aspect ratio and circle count
+-            aspect_ratio = self.width / self.height
+-
+-            # More sophisticated adaptive grid calculation inspired by successful approaches
+-            # This attempts to create a grid that closely matches the aspect ratio and circle count
+-            if aspect_ratio >= 1.2:  # Landscape orientation with clear preference for width
+-                # Increase column count for landscape orientation
+-                cols = int(np.ceil(np.sqrt(self.num_circles * aspect_ratio * 1.3)))
+-                rows = int(np.ceil(self.num_circles / cols))
+-            elif aspect_ratio <= 0.8:  # Portrait orientation with clear preference for height
+-                # Increase row count for portrait orientation
+-                rows = int(np.ceil(np.sqrt(self.num_circles / aspect_ratio * 1.3)))
+-                cols = int(np.ceil(self.num_circles / rows))
+-            else:  # Balanced aspect ratio
+-                cols = int(np.ceil(np.sqrt(self.num_circles * aspect_ratio)))
+-                rows = int(np.ceil(self.num_circles / cols))
+-
+-            # Ensure we have enough cells and adjust for better fitting
+-            while cols * rows < self.num_circles:
+-                if aspect_ratio >= 1.2:  # Prefer more columns
+-                    cols += 1
+-                elif aspect_ratio <= 0.8:  # Prefer more rows
+-                    rows += 1
+-                else:  # Balanced case
+-                    if cols > rows:
+-                        rows += 1
+-                    else:
+-                        cols += 1
+-
+-            # Calculate spacing with better consideration of aspect ratio
+-            spacing_x = self.width / (cols + 1.5) if cols > 0 else self.width
+-            spacing_y = self.height / (rows + 1.5) if rows > 0 else self.height
+-
+-            # Create more sophisticated hexagonal packing pattern with better spacing
+-            placed_count = 0
+-            for i in range(rows):
+-                for j in range(cols):
+-                    if placed_count >= self.num_circles:
+-                        break
+-
+-                    # Offset every other row for hexagonal packing with better spacing
+-                    offset_x = spacing_x * 0.5 if i % 2 == 1 else 0
+-                    base_x = (j + 1) * spacing_x + offset_x
+-                    base_y = (i + 1) * spacing_y
+-
+-                    # Add small random perturbation for diversity and better optimization starting point
+-                    perturbation_factor = min(0.12, 0.25 * min(spacing_x, spacing_y))
+-                    x = np.clip(base_x + np.random.uniform(-perturbation_factor, perturbation_factor),
+-                               0.01, self.width - 0.01)
+-                    y = np.clip(base_y + np.random.uniform(-perturbation_factor, perturbation_factor),
+-                               0.01, self.height - 0.01)
+-
+-                    # Initial radius estimation with better heuristics
+-                    max_r = min(x, self.width - x, y, self.height - y)
+-                    estimated_radius = min(0.18, max_r * 0.7)  # Conservative estimate for 21 circles
+-                    r = np.random.uniform(estimated_radius * 0.6, estimated_radius * 1.2)
+-
+-                    circles[placed_count] = [x, y, r]
+-                    placed_count += 1
+-
+-                if placed_count >= self.num_circles:
+-                    break
+-
+-            # Ensure all circles are valid
+-            for i in range(self.num_circles):
+-                if not self.is_valid_circle(circles[i, 0], circles[i, 1], circles[i, 2]):
+-                    # Reinitialize invalid circles with better constraints
+-                    x = np.random.uniform(0.01, self.width - 0.01)
+-                    y = np.random.uniform(0.01, self.height - 0.01)
+-                    max_r = min(x, self.width - x, y, self.height - y)
+-                    r = min(0.15, max_r * 0.6)
+-                    circles[i] = [x, y, r]
+-
+-            population.append(circles)
+-
+-        return population
+-
+-    def tournament_selection(self, population: List[np.ndarray],
+-                           fitness_scores: List[Tuple[float, int]]) -> np.ndarray:
+-        """Select individual using tournament selection with larger tournament size"""
+-        # Select multiple candidates and pick the best
+-        tournament_indices = np.random.choice(len(population), TOURNAMENT_SIZE)
+-        tournament_fitness = [(i, fitness_scores[i][0]) for i in tournament_indices]
+-
+-        # Sort by fitness (descending)
+-        tournament_fitness.sort(key=lambda x: x[1], reverse=True)
+-
+-        return population[tournament_fitness[0][0]].copy()
+-
+-    def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+-        """Perform uniform crossover with better parent fitness awareness"""
+-        child = parent1.copy()
+-
+-        # Enhanced crossover with parent fitness consideration
+-        for i in range(self.num_circles):
+-            # Probability based on parent fitness - better parent gets more influence
+-            parent1_fitness = np.sum(parent1[:, 2])  # Simplified fitness approximation
+-            parent2_fitness = np.sum(parent2[:, 2])  # Simplified fitness approximation
+-
+-            # Weighted choice based on relative fitness quality
+-            if parent1_fitness > parent2_fitness:
+-                prob_parent1 = 0.7  # Stronger preference for better parent
+-            elif parent2_fitness > parent1_fitness:
+-                prob_parent1 = 0.3
+-            else:
+-                prob_parent1 = 0.5
+-
+-            if np.random.rand() < prob_parent1:
+-                child[i] = parent1[i].copy()
+-            else:
+-                child[i] = parent2[i].copy()
+-
+-        return child
+-
+-    def mutate(self, individual: np.ndarray, generation: int, max_generations: int) -> np.ndarray:
+-        """Apply mutation to an individual with adaptive mutation rate and smarter mutation"""
+-        # Adaptive mutation rate: decrease over generations
+-        adaptive_rate = INITIAL_MUTATION_RATE - (INITIAL_MUTATION_RATE - FINAL_MUTATION_RATE) * \
+-                       (generation / max_generations)
+-
+-        mutated = individual.copy()
+-
+-        # Mutate each circle with adaptive strategies
+-        for i in range(self.num_circles):
+-            if np.random.rand() < adaptive_rate:
+-                # Mutate either center position or radius with different probabilities
+-                if np.random.rand() < 0.65:  # 65% chance to mutate position (more impactful)
+-                    # Mutate position with boundary-aware perturbations
+-                    x = mutated[i, 0]
+-                    y = mutated[i, 1]
+-                    r = mutated[i, 2]
+-
+-                    # Calculate adaptive mutation ranges based on available space
+-                    max_dx = min(0.15, x - r, self.width - x - r)
+-                    max_dy = min(0.15, y - r, self.height - y - r)
+-
+-                    # Apply mutation with adaptive range
+-                    mutated[i, 0] = np.clip(
+-                        x + np.random.uniform(-max_dx, max_dx),
+-                        r + 0.001, self.width - r - 0.001
+-                    )
+-                    mutated[i, 1] = np.clip(
+-                        y + np.random.uniform(-max_dy, max_dy),
+-                        r + 0.001, self.height - r - 0.001
+-                    )
+-                else:  # 35% chance to mutate radius (smaller impact)
+-                    # Mutate radius with adaptive range
+-                    old_r = mutated[i, 2]
+-                    # Radius change depends on current radius value, bounded by max possible
+-                    max_dr = min(0.08, 0.25 - old_r)  # Don't let it grow too large
+-                    mutated[i, 2] = np.clip(
+-                        old_r + np.random.uniform(-max_dr, max_dr),
+-                        0.001, 0.25
+-                    )
+-
+-        return mutated
+-
+-    def optimize(self) -> np.ndarray:
+-        """Main optimization loop using evolutionary algorithm with improvements"""
+-        start_time = time.time()
+-
+-        # Generate initial population
+-        population = self.generate_initial_population(POPULATION_SIZE)
+-
+-        best_solution = None
+-        best_fitness = float('-inf')
+-
+-        # Track convergence
+-        fitness_history = []
+-        stagnation_counter = 0
+-        max_stagnation = 60  # Maximum generations without improvement before early stopping
+-
+-        for generation in range(MAX_GENERATIONS):
+-            # Evaluate fitness for entire population
+-            fitness_scores = []
+-            for individual in population:
+-                fitness, violations = self.calculate_fitness(individual)
+-                fitness_scores.append((fitness, violations))
+-
+-            # Track best solution in this generation
+-            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+-            gen_best_fitness = fitness_scores[gen_best_idx][0]
+-
+-            if gen_best_fitness > best_fitness:
+-                best_fitness = gen_best_fitness
+-                best_solution = population[gen_best_idx].copy()
+-                stagnation_counter = 0  # Reset counter on improvement
+-            else:
+-                stagnation_counter += 1
+-
+-            fitness_history.append(gen_best_fitness)
+-
+-            # Print progress every 40 generations
+-            if generation % 40 == 0:
+-                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+-
+-            # Create new population through selection, crossover, and mutation
+-            new_population = []
+-
+-            # Elitism: keep best individual
+-            new_population.append(best_solution.copy())
+-
+-            # Generate offspring
+-            while len(new_population) < POPULATION_SIZE:
+-                # Selection
+-                parent1 = self.tournament_selection(population, fitness_scores)
+-                parent2 = self.tournament_selection(population, fitness_scores)
+-
+-                # Crossover
+-                child = self.crossover(parent1, parent2)
+-
+-                # Mutation with adaptive rate
+-                child = self.mutate(child, generation, MAX_GENERATIONS)
+-
+-                new_population.append(child)
+-
+-            population = new_population
+-
+-            # Early stopping if converged
+-            if stagnation_counter >= max_stagnation:
+-                print(f"Early stopped at generation {generation} due to stagnation")
+-                break
+-
+-        end_time = time.time()
+-        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+-        print(f"Best fitness achieved: {best_fitness:.6f}")
+-
+-        return best_solution
++# Set random seeds for reproducibility
++random.seed(42)
++np.random.seed(42)
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+-
++    
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    # Create packer instance with optimized rectangle dimensions
+-    packer = CirclePacker(width=1.3, height=0.7, num_circles=21)
+-
+-    # Run optimization
+-    circles = packer.optimize()
+-
+-    return circles
++    # Container setup (perimeter = 4, so width + height = 2)
++    container_width = 1.3
++    container_height = 0.7
++    
++    # Spiral-based initialization approach
++    def initialize_spiral_placement(n_circles: int, width: float, height: float) -> np.ndarray:
++        """Initialize circles using spiral pattern that systematically covers the space"""
++        circles = np.zeros((n_circles, 3))
++        
++        # Parameters for spiral
++        a = 0.05  # Spiral parameter
++        b = 0.1   # Spiral parameter
++        max_radius = min(width, height) * 0.15
++        
++        # Generate spiral points that cover the rectangle
++        num_points = max(50, n_circles * 3)  # More points for better coverage
++        angles = np.linspace(0, 4 * np.pi, num_points)
++        
++        spiral_points = []
++        for angle in angles:
++            r = a + b * angle
++            x = width/2 + r * np.cos(angle) * width/4
++            y = height/2 + r * np.sin(angle) * height/4
++            if 0 <= x <= width and 0 <= y <= height:
++                spiral_points.append([x, y])
++        
++        # Sample points for circle placement
++        sample_indices = np.linspace(0, len(spiral_points)-1, n_circles).astype(int)
++        sampled_points = [spiral_points[i] for i in sample_indices[:n_circles]]
++        
++        # Place circles with adaptive radii
++        for i, (x, y) in enumerate(sampled_points):
++            # Calculate maximum allowed radius for this position
++            max_r = min(x, width - x, y, height - y)
++            # Start with conservative radius and allow adjustment
++            r = min(max_r * 0.5, max_radius)
++            # Add some randomness to avoid symmetric solutions
++            r *= random.uniform(0.7, 1.0)
++            circles[i] = [x, y, r]
++        
++        return circles
++    
++    # Constraint validation functions
++    def is_valid_position(x: float, y: float, r: float, width: float, height: float) -> bool:
++        """Check if circle position is within bounds"""
++        return (r <= x <= width - r and r <= y <= height - r)
++    
++    def check_overlap(pos1: Tuple[float, float], r1: float, pos2: Tuple[float, float], r2: float) -> bool:
++        """Check if two circles overlap"""
++        dx = pos1[0] - pos2[0]
++        dy = pos1[1] - pos2[1]
++        distance_sq = dx*dx + dy*dy
++        radius_sum = r1 + r2
++        return distance_sq < radius_sum * radius_sum
++    
++    # Energy-based optimization approach
++    def optimize_with_energy_model(circles: np.ndarray, width: float, height: float, max_iterations: int = 1000) -> np.ndarray:
++        """Optimize using physics-inspired energy minimization"""
++        # Create initial spatial tree for efficient overlap checking
++        tree = cKDTree(circles[:, :2])
++        
++        best_circles = circles.copy()
++        best_sum = np.sum(circles[:, 2])
++        
++        # Energy parameters
++        overlap_penalty_scale = 1000.0
++        boundary_penalty_scale = 10000.0
++        repulsion_scale = 100.0
++        attraction_scale = 1.0
++        
++        for iteration in range(max_iterations):
++            improved = False
++            # Process circles in shuffled order for better exploration
++            indices = list(range(len(circles)))
++            random.shuffle(indices)
++            
++            # For each circle, compute forces and update position/radius
++            for i in indices:
++                x, y, r = best_circles[i]
++                
++                # Compute forces from nearby circles
++                forces = [0.0, 0.0]  # [dx, dy]
++                overlap_penalty = 0.0
++                boundary_penalty = 0.0
++                
++                # Find nearby circles using spatial tree
++                nearby_indices = tree.query_ball_point([x, y], 2 * (r + 0.1))
++                
++                for j in nearby_indices:
++                    if i != j:
++                        x2, y2, r2 = best_circles[j]
++                        dx = x2 - x
++                        dy = y2 - y
++                        distance = math.sqrt(dx*dx + dy*dy)
++                        
++                        if distance > 0:
++                            # Overlap penalty (repulsion)
++                            if distance < (r + r2):
++                                overlap_penalty += (r + r2 - distance) * overlap_penalty_scale
++                                # Repulsion force
++                                force_mag = repulsion_scale * (1.0 - distance/(r + r2)) / (distance + 1e-8)
++                                forces[0] += force_mag * dx / distance
++                                forces[1] += force_mag * dy / distance
++                            # Attraction towards center if too close to boundary
++                            if distance < (r + r2) * 0.5:
++                                # Attract to center of rectangle
++                                center_attraction = attraction_scale * (1.0 - distance/(r + r2))
++                                forces[0] -= center_attraction * dx / (distance + 1e-8)
++                                forces[1] -= center_attraction * dy / (distance + 1e-8)
++                
++                # Penalty for boundary violations
++                if x - r < 0.01:
++                    boundary_penalty += (r - x) * boundary_penalty_scale
++                    forces[0] += (0.01 - (x - r)) * boundary_penalty_scale
++                if x + r > width - 0.01:
++                    boundary_penalty += ((x + r) - (width - 0.01)) * boundary_penalty_scale
++                    forces[0] -= ((x + r) - (width - 0.01)) * boundary_penalty_scale
++                if y - r < 0.01:
++                    boundary_penalty += (r - y) * boundary_penalty_scale
++                    forces[1] += (0.01 - (y - r)) * boundary_penalty_scale
++                if y + r > height - 0.01:
++                    boundary_penalty += ((y + r) - (height - 0.01)) * boundary_penalty_scale
++                    forces[1] -= ((y + r) - (height - 0.01)) * boundary_penalty_scale
++                
++                # Update position based on forces
++                new_x = x + forces[0] * 0.001
++                new_y = y + forces[1] * 0.001
++                
++                # Keep within bounds
++                new_x = max(r + 0.01, min(width - r - 0.01, new_x))
++                new_y = max(r + 0.01, min(height - r - 0.01, new_y))
++                
++                # Test if this improves the configuration
++                test_circles = best_circles.copy()
++                test_circles[i] = [new_x, new_y, r]
++                
++                # Check validity
++                valid = True
++                if not is_valid_position(new_x, new_y, r, width, height):
++                    valid = False
++                else:
++                    for k in range(len(test_circles)):
++                        if k != i:
++                            x2, y2, r2 = test_circles[k]
++                            if check_overlap([new_x, new_y], r, [x2, y2], r2):
++                                valid = False
++                                break
++                
++                if valid:
++                    best_circles[i] = [new_x, new_y, r]
++                    improved = True
++                
++                # Periodically recompute spatial tree for efficiency
++                if iteration % 50 == 0:
++                    tree = cKDTree(best_circles[:, :2])
++            
++            # Recompute total sum
++            current_sum = np.sum(best_circles[:, 2])
++            if current_sum > best_sum:
++                best_sum = current_sum
++                improved = True
++            
++            # Early stopping if no significant improvement
++            if not improved and iteration > max_iterations // 2:
++                break
++        
++        return best_circles
++    
++    # Multi-resolution refinement to escape local optima
++    def multi_resolution_refinement(initial_circles: np.ndarray, width: float, height: float) -> np.ndarray:
++        """Perform optimization at multiple resolution scales"""
++        current_config = initial_circles.copy()
++        
++        # Coarse resolution
++        coarse_config = current_config.copy()
++        # Make circles larger for coarse optimization to capture global structure
++        for i in range(len(coarse_config)):
++            coarse_config[i, 2] *= 1.2  # Slightly larger radii for coarse optimization
++        
++        coarse_config = optimize_with_energy_model(coarse_config, width, height, 300)
++        
++        # Medium resolution refinement
++        medium_config = coarse_config.copy()
++        # Slightly reduce radii to refine structure
++        for i in range(len(medium_config)):
++            medium_config[i, 2] *= 0.95
++        
++        medium_config = optimize_with_energy_model(medium_config, width, height, 500)
++        
++        # Fine resolution final optimization
++        fine_config = medium_config.copy()
++        fine_config = optimize_with_energy_model(fine_config, width, height, 700)
++        
++        return fine_config
++    
++    # Main optimization process
++    # Step 1: Initialize using spiral method
++    circles = initialize_spiral_placement(21, container_width, container_height)
++    
++    # Step 2: Multi-resolution optimization
++    optimized_circles = multi_resolution_refinement(circles, container_width, container_height)
++    
++    # Step 3: Final refinement with constraint checking
++    final_circles = optimized_circles.copy()
++    
++    # Validate and fix any constraint violations
++    for _ in range(500):
++        improved = False
++        for i in range(len(final_circles)):
++            x, y, r = final_circles[i]
++            
++            # Check if circle violates boundaries
++            if x - r < 0.01:
++                final_circles[i, 0] = r + 0.01
++                improved = True
++            elif x + r > container_width - 0.01:
++                final_circles[i, 0] = container_width - r - 0.01
++                improved = True
++            if y - r < 0.01:
++                final_circles[i, 1] = r + 0.01
++                improved = True
++            elif y + r > container_height - 0.01:
++                final_circles[i, 1] = container_height - r - 0.01
++                improved = True
++            
++            # Check for overlaps and resolve
++            for j in range(len(final_circles)):
++                if i != j:
++                    x2, y2, r2 = final_circles[j]
++                    dx = x - x2
++                    dy = y - y2
++                    distance = math.sqrt(dx*dx + dy*dy)
++                    if distance < (r + r2) and distance > 0:
++                        # Reduce radius to resolve overlap
++                        new_r = max(0.001, (distance - 0.001) / 2)
++                        if new_r < r:
++                            final_circles[i, 2] = new_r
++                            improved = True
++                            break
++        
++        if not improved:
++            break
++    
++    return final_circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

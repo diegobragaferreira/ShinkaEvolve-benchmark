@@ -1,0 +1,670 @@
+<NAME>
+add_spatial_hashing_optimization
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more sophisticated spatial hashing approach that improves the efficiency of overlap detection. The key improvement is to use a more intelligent spatial grid structure that adapts to the distribution of hexagons and reduces false positives in neighbor searches.
+
+The main changes include:
+1. Improving the spatial hash grid implementation to better handle dynamic distributions of hexagons
+2. Adding a more efficient neighbor checking mechanism that reduces redundant overlap tests
+3. Implementing adaptive cell sizing based on hexagon density
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor lookups."""
+
+    def __init__(self, cell_size=3.0):
+        self.cell_size = cell_size
+        self.grid = {}
+
+    def clear(self):
+        self.grid.clear()
+
+    def insert(self, hex_id, center_x, center_y):
+        """Insert hexagon into spatial hash grid."""
+        cell_x = int(center_x // self.cell_size)
+        cell_y = int(center_y // self.cell_size)
+        key = (cell_x, cell_y)
+        if key not in self.grid:
+            self.grid[key] = []
+        self.grid[key].append(hex_id)
+
+    def get_neighbors(self, center_x, center_y):
+        """Get all hexagons in the same and neighboring cells."""
+        cell_x = int(center_x // self.cell_size)
+        cell_y = int(center_y // self.cell_size)
+
+        neighbors = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                key = (cell_x + dx, cell_y + dy)
+                if key in self.grid:
+                    neighbors.extend(self.grid[key])
+        return neighbors
+=======
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor lookups with adaptive cell sizing."""
+
+    def __init__(self, cell_size=2.5, adaptive=False):
+        self.cell_size = cell_size
+        self.adaptive = adaptive
+        self.grid = {}
+        self.hex_centers = {}  # Store centers for adaptive sizing
+
+    def clear(self):
+        self.grid.clear()
+        self.hex_centers.clear()
+
+    def insert(self, hex_id, center_x, center_y):
+        """Insert hexagon into spatial hash grid."""
+        cell_x = int(center_x // self.cell_size)
+        cell_y = int(center_y // self.cell_size)
+        key = (cell_x, cell_y)
+        if key not in self.grid:
+            self.grid[key] = []
+        self.grid[key].append(hex_id)
+        self.hex_centers[hex_id] = (center_x, center_y)
+
+    def update_cell_size(self, positions):
+        """Adaptively adjust cell size based on hexagon distribution."""
+        if not self.adaptive or len(positions) < 2:
+            return
+
+        # Calculate average distance between hexagons
+        centers = np.array([(pos[0], pos[1]) for pos in positions])
+        if len(centers) < 2:
+            return
+
+        # Compute pairwise distances
+        distances = []
+        for i in range(len(centers)):
+            for j in range(i+1, len(centers)):
+                dist = np.linalg.norm(centers[i] - centers[j])
+                distances.append(dist)
+
+        if distances:
+            avg_dist = np.mean(distances)
+            # Cell size should be roughly 1.5x the average distance to ensure good coverage
+            self.cell_size = max(1.0, avg_dist * 1.5)
+
+    def get_neighbors(self, center_x, center_y, radius=None):
+        """Get all hexagons in the same and neighboring cells."""
+        if radius is None:
+            # Standard 3x3 neighborhood
+            cell_x = int(center_x // self.cell_size)
+            cell_y = int(center_y // self.cell_size)
+
+            neighbors = []
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    key = (cell_x + dx, cell_y + dy)
+                    if key in self.grid:
+                        neighbors.extend(self.grid[key])
+        else:
+            # Radius-based neighborhood (used for overlap checking)
+            neighbors = []
+            min_cell_x = int((center_x - radius) // self.cell_size)
+            max_cell_x = int((center_x + radius) // self.cell_size)
+            min_cell_y = int((center_y - radius) // self.cell_size)
+            max_cell_y = int((center_y + radius) // self.cell_size)
+
+            for cx in range(min_cell_x, max_cell_x + 1):
+                for cy in range(min_cell_y, max_cell_y + 1):
+                    key = (cx, cy)
+                    if key in self.grid:
+                        neighbors.extend(self.grid[key])
+
+        return neighbors
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimize_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+I'll optimize the overlap detection by implementing early termination and more intelligent neighbor queries. The key improvements include:
+1. Using a more efficient overlap detection logic that avoids redundant checks
+2. Implementing spatial hashing with proper radius-based queries for better performance
+3. Adding a caching mechanism to avoid recomputing identical overlap checks
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution with optimized overlap checking."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Create polygons for all inner hexagons
+    inner_polygons = []
+    for i in range(len(positions)):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        inner_polygons.append(poly)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length_fast(positions)
+
+    # Check containment and overlaps efficiently using spatial hashing
+    total_penalty = 0
+    num_inner = len(inner_polygons)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Build spatial hash for fast neighbor lookup
+    spatial_grid = SpatialHashGrid(cell_size=2.5)
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        spatial_grid.insert(i, center_x, center_y)
+
+    # Check containment
+    for i in range(num_inner):
+        if not check_containment_fast(inner_polygons[i], outer_poly):
+            # Large penalty for containment violations
+            total_penalty += 1e6
+
+    # Check overlaps using spatial hash for efficiency
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        neighbors = spatial_grid.get_neighbors(center_x, center_y)
+
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks and self-checking
+                continue
+            if check_overlap_fast(inner_polygons[i], inner_polygons[j]):
+                # Penalize overlap more heavily
+                total_penalty += 1e5
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    if side_length < 1e-6:
+        fitness = -1e10 - total_penalty
+    else:
+        fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+=======
+def evaluate_fitness(solution, outer_hex_center=(0, 0), outer_hex_angle=0):
+    """Evaluate fitness of a solution with optimized overlap checking."""
+    # Reshape solution back to 12 hexagons with (x, y, angle)
+    positions = solution.reshape(-1, 3)
+
+    # Create polygons for all inner hexagons
+    inner_polygons = []
+    for i in range(len(positions)):
+        center_x, center_y, angle_degrees = positions[i]
+        poly = create_hexagon_polygon(center_x, center_y, angle_degrees)
+        inner_polygons.append(poly)
+
+    # Find outer hexagon side length
+    side_length = compute_outer_hexagon_side_length_fast(positions)
+
+    # Check containment and overlaps efficiently using spatial hashing
+    total_penalty = 0
+    num_inner = len(inner_polygons)
+
+    # Outer hexagon polygon (centered at origin with given angle)
+    outer_poly = create_hexagon_polygon(outer_hex_center[0], outer_hex_center[1], outer_hex_angle)
+
+    # Build spatial hash for fast neighbor lookup
+    spatial_grid = SpatialHashGrid(cell_size=2.5, adaptive=True)
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+        spatial_grid.insert(i, center_x, center_y)
+
+    # Update cell size adaptively based on distribution
+    spatial_grid.update_cell_size(positions)
+
+    # Check containment
+    for i in range(num_inner):
+        if not check_containment_fast(inner_polygons[i], outer_poly):
+            # Large penalty for containment violations
+            total_penalty += 1e6
+
+    # Check overlaps using spatial hash for efficiency
+    # More efficient approach: check only neighbors within a certain radius
+    overlap_found = False
+    visited_pairs = set()
+
+    for i in range(num_inner):
+        center_x, center_y, _ = positions[i]
+
+        # Only check with neighbors in vicinity (radius = 2 * hex_radius)
+        neighbors = spatial_grid.get_neighbors(center_x, center_y, radius=2.5)
+
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks and self-checking
+                continue
+
+            # Use a cache to avoid redundant checks
+            pair_key = tuple(sorted([i, j]))
+            if pair_key in visited_pairs:
+                continue
+            visited_pairs.add(pair_key)
+
+            if check_overlap_fast(inner_polygons[i], inner_polygons[j]):
+                overlap_found = True
+                # Penalize overlap more heavily
+                total_penalty += 1e5
+                if overlap_found:
+                    break  # Early termination for performance
+        if overlap_found:
+            break
+
+    # Objective: maximize 1/side_length
+    # So minimize negative log of side_length plus penalties
+    if side_length < 1e-6:
+        fitness = -1e10 - total_penalty
+    else:
+        fitness = -np.log(side_length) - total_penalty
+
+    return fitness, side_length
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_initial_population_generation
+</NAME>
+
+<DESCRIPTION>
+I'll improve the initial population generation by creating more sophisticated configurations that are closer to optimal. This involves generating multiple diverse initial configurations based on mathematical insights about hexagon packing patterns.
+
+The improvements include:
+1. Creating configurations inspired by known dense packing arrangements
+2. Using more strategic placements that avoid common suboptimal patterns
+3. Adding rotations and symmetries that promote better packing
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_symmetric_initial_config():
+    """Generate initial configuration with enhanced symmetry properties."""
+    # Generate a more sophisticated symmetric configuration
+    positions = []
+
+    # Central hexagon
+    positions.append([0, 0, 0])
+
+    # First ring: 6 hexagons around center
+    angles = np.arange(0, 360, 60)
+    radius = 2.0
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Second ring: 6 hexagons at greater distance
+    radius = 3.5
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Additional strategic placements for better packing
+    additional_positions = [
+        [0, -4.5, 0],  # Bottom center
+        [4.5, 0, 0],   # Right center
+        [-4.5, 0, 0],  # Left center
+        [0, 4.5, 0],   # Top center
+    ]
+
+    for pos in additional_positions:
+        positions.append(pos)
+
+    return np.array(positions).flatten()
+=======
+def get_symmetric_initial_config():
+    """Generate initial configuration with enhanced symmetry properties."""
+    # Generate multiple strategic configurations
+
+    # Configuration 1: Honeycomb-like structure
+    positions = []
+
+    # Central hexagon
+    positions.append([0, 0, 0])
+
+    # First ring: 6 hexagons around center (tighter spacing)
+    angles = np.arange(0, 360, 60)
+    radius = 1.9  # Tighter spacing for better packing
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Second ring: 6 hexagons at greater distance
+    radius = 3.3  # Adjusted to allow better packing
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Additional strategic placements for better packing
+    additional_positions = [
+        [0, -4.0, 0],  # Bottom center (slightly closer)
+        [4.0, 0, 0],   # Right center
+        [-4.0, 0, 0],  # Left center
+        [0, 4.0, 0],   # Top center
+    ]
+
+    for pos in additional_positions:
+        positions.append(pos)
+
+    return np.array(positions).flatten()
+
+def get_advanced_initial_config():
+    """Generate advanced initial configuration inspired by optimal patterns."""
+    positions = []
+
+    # Central hexagon
+    positions.append([0, 0, 0])
+
+    # First ring: 6 hexagons around center with slight offsets
+    angles = np.arange(0, 360, 60)
+    radius = 2.05
+    for i, angle in enumerate(angles):
+        offset = 0 if i % 2 == 0 else 15  # Alternate rotations for better packing
+        x = radius * np.cos(np.radians(angle + offset))
+        y = radius * np.sin(np.radians(angle + offset))
+        positions.append([x, y, offset])
+
+    # Second ring: 6 hexagons in a hexagonal pattern
+    radius = 3.6
+    for i, angle in enumerate(angles):
+        offset = 30 if i % 2 == 0 else 0  # Alternate rotations
+        x = radius * np.cos(np.radians(angle + offset))
+        y = radius * np.sin(np.radians(angle + offset))
+        positions.append([x, y, offset])
+
+    # Strategic additional placements
+    additional_positions = [
+        [0, -4.2, 0],
+        [4.2, 0, 0],
+        [-4.2, 0, 0],
+        [0, 4.2, 0],
+        [2.1, 2.1, 0],
+        [-2.1, -2.1, 0]
+    ]
+
+    for pos in additional_positions:
+        positions.append(pos)
+
+    return np.array(positions).flatten()
+
+def get_dense_initial_config():
+    """Generate a dense packing initial configuration."""
+    positions = []
+
+    # Layer 1: central hexagon
+    positions.append([0, 0, 0])
+
+    # Layer 2: 6 hexagons in a tight hexagon formation
+    angles = np.arange(0, 360, 60)
+    radius = 1.95  # Very tight spacing
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Layer 3: 12 hexagons in two rings for maximum density
+    radius = 3.1
+    for i, angle in enumerate(angles):
+        # Offset every other one for better packing
+        offset = 15 if i % 2 == 0 else 0
+        x = radius * np.cos(np.radians(angle + offset))
+        y = radius * np.sin(np.radians(angle + offset))
+        positions.append([x, y, offset])
+
+    # Additional strategic positions
+    additional_positions = [
+        [0, -3.9, 0],
+        [3.9, 0, 0],
+        [-3.9, 0, 0],
+        [0, 3.9, 0],
+        [2.0, 2.0, 0],
+        [-2.0, -2.0, 0],
+        [2.0, -2.0, 0],
+        [-2.0, 2.0, 0]
+    ]
+
+    for pos in additional_positions:
+        positions.append(pos)
+
+    return np.array(positions).flatten()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_multi_start_optimization
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the multi-start optimization strategy by using a more sophisticated approach that selects the best configurations and applies different optimization strategies to them. This includes using different DE strategies and adaptive parameter tuning.
+
+The improvements involve:
+1. Expanding the number of initial configurations tried
+2. Using different DE strategies for better exploration
+3. Applying adaptive parameter selection for DE
+4. Implementing a more effective refinement strategy
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_hexagon_packing():
+    """Main optimization function with multi-start strategy."""
+    # Multiple initial configurations to avoid local optima
+    initial_configs = []
+
+    # Configuration 1: Symmetric initial guess
+    initial_configs.append(get_symmetric_initial_config())
+
+    # Configuration 2: Perturbed version
+    base_config = get_symmetric_initial_config().copy()
+    perturbation = np.random.normal(0, 0.3, len(base_config))
+    initial_configs.append(base_config + perturbation)
+
+    # Configuration 3: Another symmetric variation with better spread
+    positions = []
+    positions.append([0, 0, 0])
+
+    # Create a slightly different symmetric pattern
+    angles = np.arange(0, 360, 60)
+    radius = 1.8
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Add more hexagons in a radial pattern
+    radius = 3.0
+    for i in range(6):
+        angle = 60 * i
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+
+    # Add more positions for variety
+    positions.extend([[0, -4.2, 0], [4.2, 0, 0], [-4.2, 0, 0], [0, 4.2, 0]])
+
+    initial_configs.append(np.array(positions).flatten())
+
+    best_solution = None
+    best_side_length = float('inf')
+
+    # Try multiple optimization runs
+    for i, initial_pos in enumerate(initial_configs):
+        try:
+            # First pass with local optimization
+            refined_solution = refine_with_local_search(initial_pos, 15)
+
+            # Convert back to structured format for fitness evaluation
+            positions = refined_solution.reshape(-1, 3)
+
+            # Create bounds
+            bounds = [(-12, 12)] * len(refined_solution)
+
+            def de_objective(x):
+                _, side_length = evaluate_fitness(x)
+                return -np.log(side_length)  # Minimize negative log side length
+
+            # Run differential evolution with moderate iterations for speed
+            result = differential_evolution(de_objective, bounds,
+                                          maxiter=25, popsize=8,
+                                          seed=None, disp=False,
+                                          strategy='best1bin')
+
+            if result.success:
+                _, side_length = evaluate_fitness(result.x)
+                if side_length < best_side_length:
+                    best_side_length = side_length
+                    best_solution = result.x
+            else:
+                # Even if not successful, try with the refined solution
+                _, side_length = evaluate_fitness(refined_solution)
+                if side_length < best_side_length:
+                    best_side_length = side_length
+                    best_solution = refined_solution
+
+        except Exception as e:
+            print(f"Optimization attempt {i} failed: {e}")
+            continue
+
+    # Final refinement on best solution
+    if best_solution is not None:
+        final_refined = refine_with_local_search(best_solution, 10)
+        final_positions = final_refined.reshape(-1, 3)
+        _, final_side_length = evaluate_fitness(final_refined)
+    else:
+        # Fallback to initial configuration
+        positions = initial_configs[0].reshape(-1, 3)
+        final_side_length = compute_outer_hexagon_side_length_fast(positions)
+        final_positions = positions
+
+    return final_positions, final_side_length
+=======
+def optimize_hexagon_packing():
+    """Main optimization function with multi-start strategy."""
+    # Multiple initial configurations to avoid local optima
+    initial_configs = []
+
+    # Configuration 1: Basic symmetric
+    initial_configs.append(get_symmetric_initial_config())
+
+    # Configuration 2: Advanced symmetric
+    initial_configs.append(get_advanced_initial_config())
+
+    # Configuration 3: Dense packing
+    initial_configs.append(get_dense_initial_config())
+
+    # Configuration 4: Perturbed basic symmetric
+    base_config = get_symmetric_initial_config().copy()
+    perturbation = np.random.normal(0, 0.25, len(base_config))
+    initial_configs.append(base_config + perturbation)
+
+    # Configuration 5: Another variant
+    positions = []
+    positions.append([0, 0, 0])
+    angles = np.arange(0, 360, 60)
+    radius = 2.1
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+    radius = 3.4
+    for angle in angles:
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        positions.append([x, y, 0])
+    positions.extend([[0, -4.1, 0], [4.1, 0, 0], [-4.1, 0, 0], [0, 4.1, 0]])
+    initial_configs.append(np.array(positions).flatten())
+
+    # Configuration 6: Another perturbed version
+    base_config = get_dense_initial_config().copy()
+    perturbation = np.random.normal(0, 0.3, len(base_config))
+    initial_configs.append(base_config + perturbation)
+
+    best_solution = None
+    best_side_length = float('inf')
+
+    # Try multiple optimization runs with different strategies
+    strategies = ['best1bin', 'best2bin', 'currenttobestbin']
+
+    for i, initial_pos in enumerate(initial_configs):
+        try:
+            # First pass with local optimization
+            refined_solution = refine_with_local_search(initial_pos, 10)
+
+            # Convert back to structured format for fitness evaluation
+            positions = refined_solution.reshape(-1, 3)
+
+            # Create bounds
+            bounds = [(-10, 10)] * len(refined_solution)
+
+            def de_objective(x):
+                _, side_length = evaluate_fitness(x)
+                return -np.log(side_length)  # Minimize negative log side length
+
+            # Try different DE strategies
+            best_de_result = None
+            best_de_side_length = float('inf')
+
+            for strategy in strategies:
+                try:
+                    # Run differential evolution with different settings
+                    result = differential_evolution(de_objective, bounds,
+                                                  maxiter=20, popsize=8,
+                                                  seed=None, disp=False,
+                                                  strategy=strategy)
+
+                    if result.success:
+                        _, side_length = evaluate_fitness(result.x)
+                        if side_length < best_de_side_length:
+                            best_de_side_length = side_length
+                            best_de_result = result
+                    else:
+                        # Even if not successful, try with the refined solution
+                        _, side_length = evaluate_fitness(refined_solution)
+                        if side_length < best_de_side_length:
+                            best_de_side_length = side_length
+                            best_de_result = type('obj', (object,), {'x': refined_solution})()
+
+                except Exception as e:
+                    print(f"DE strategy {strategy} failed: {e}")
+                    continue
+
+            if best_de_result is not None:
+                final_side_length = best_de_side_length
+                if best_de_result.x is not None:
+                    final_solution = best_de_result.x
+                else:
+                    final_solution = refined_solution
+
+                if final_side_length < best_side_length:
+                    best_side_length = final_side_length
+                    best_solution = final_solution
+
+        except Exception as e:
+            print(f"Optimization attempt {i} failed: {e}")
+            continue
+
+    # Final refinement on best solution
+    if best_solution is not None:
+        final_refined = refine_with_local_search(best_solution, 8)
+        final_positions = final_refined.reshape(-1, 3)
+        _, final_side_length = evaluate_fitness(final_refined)
+    else:
+        # Fallback to initial configuration
+        positions = initial_configs[0].reshape(-1, 3)
+        final_side_length = compute_outer_hexagon_side_length_fast(positions)
+        final_positions = positions
+
+    return final_positions, final_side_length
+>>>>>>> REPLACE
+</DIFF>

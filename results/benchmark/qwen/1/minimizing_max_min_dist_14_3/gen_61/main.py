@@ -1,0 +1,119 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+from scipy.spatial import SphericalVoronoi
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    def fibonacci_spiral_on_sphere(n):
+        """Generate points on sphere using Fibonacci spiral method"""
+        points = []
+        golden_angle = np.pi * (3 - np.sqrt(5))
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            theta = golden_angle * i  # golden angle increment
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            points.append([x, y, z])
+        return np.array(points)
+    
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        safe_norms = np.where(norms == 0, 1, norms)
+        return points / safe_norms
+    
+    def calculate_min_max_ratio(points):
+        """Calculate the minimum-to-maximum distance ratio"""
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return min_dist / max_dist
+    
+    def spherical_voronoi_quality(points):
+        """Evaluate quality based on spherical Voronoi diagram properties"""
+        # Normalize points
+        points = normalize_to_unit_sphere(points)
+        
+        try:
+            # Create spherical Voronoi diagram
+            sv = SphericalVoronoi(points, radius=1.0, center=np.zeros(3))
+            
+            # Calculate Voronoi cell areas
+            cell_areas = sv.voronoi_regions_area()
+            
+            # Return variance of cell areas (lower variance = more uniform distribution)
+            return np.var(cell_areas)
+        except:
+            # Fallback if Voronoi computation fails
+            return np.inf
+    
+    def objective_with_regularization(points_flat):
+        """Objective function with regularization for better optimization"""
+        points = points_flat.reshape(-1, 3)
+        points = normalize_to_unit_sphere(points)
+        
+        # Standard distance ratio
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0:
+            ratio = 0.0
+        else:
+            ratio = min_dist / max_dist
+            
+        # Add regularization term based on Voronoi quality
+        voronoi_penalty = spherical_voronoi_quality(points)
+        
+        # Combine objective (minimize negative ratio + regularization)
+        return -(ratio - 0.01 * voronoi_penalty)
+    
+    def constraint_sphere(points_flat):
+        """Constraint function for unit sphere constraint"""
+        points = points_flat.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0  # Should be zero for unit sphere
+    
+    # Initialize with Fibonacci spiral
+    np.random.seed(42)
+    points = fibonacci_spiral_on_sphere(14)
+    
+    # Refine using constrained optimization
+    points_flat = points.flatten()
+    
+    # First stage: Use L-BFGS-B for fine-tuning
+    bounds = [(-1, 1) for _ in range(42)]
+    
+    result = minimize(
+        lambda x: objective_with_regularization(x),
+        points_flat,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+        tol=1e-12
+    )
+    
+    # Extract refined points
+    refined_points = result.x.reshape(-1, 3)
+    
+    # Final normalization
+    final_points = normalize_to_unit_sphere(refined_points)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

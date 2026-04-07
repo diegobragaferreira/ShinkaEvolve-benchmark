@@ -1,0 +1,333 @@
+<NAME>
+implement_multi_scale_gaussian_optimization
+</NAME>
+
+<DESCRIPTION>
+This improvement implements a multi-scale Gaussian optimization approach that focuses on creating peaks at multiple spatial scales to maximize the autoconvolution flatness while avoiding overly sharp peaks that would decrease C2. The key insight is to use a hierarchical approach where we first place broad, smooth peaks, then add finer detail peaks, and finally tune the parameters to optimize the C2 ratio. This approach aims to beat the benchmark of C₂ = 0.962 by creating more favorable autoconvolution profiles.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_evolutionary_algorithm(num_peaks, domain_width=0.5, n_steps=2000):
+    """Enhanced evolutionary algorithm with better controls"""
+    # Configuration parameters
+    max_iterations = 200
+    population_size = 20
+    best_c2 = 0.0
+    best_individual = None
+
+    # Create initial population
+    population = []
+    for _ in range(population_size):
+        # Create random individual with better initialization
+        individual = []
+        for _ in range(num_peaks):
+            # Log-uniform amplitude (10-100)
+            amplitude = 10 ** np.random.uniform(1.0, 2.0)
+            individual.append(amplitude)
+
+            # Center using logarithmic distribution
+            ratio = np.random.random()
+            pos = domain_width/2 * (np.sin(ratio * np.pi) * 2 - 1)  # [-0.25, 0.25]
+            if np.random.random() < 0.5:
+                pos = -pos  # Alternate sides
+            individual.append(pos)
+
+            # Log-uniform width (0.01-0.2)
+            width = 0.01 * (10 ** np.random.uniform(0.0, 1.0))
+            individual.append(width)
+
+        population.append(individual)
+
+    # Evaluation loop
+    for iteration in range(max_iterations):
+        if iteration % 10 == 0 and iteration > 0:
+            # Periodic re-evaluation to maintain diversity
+            random.shuffle(population)
+
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            try:
+                x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+                result = gaussian_peak_function_numba(x, individual)
+                step_values = result.tolist()
+                c2_value, _ = evaluate_function(step_values)
+                fitness_scores.append(c2_value)
+            except Exception:
+                fitness_scores.append(0.0)
+
+        # Get best individual
+        best_idx = np.argmax(fitness_scores)
+        if fitness_scores[best_idx] > best_c2:
+            best_c2 = fitness_scores[best_idx]
+            best_individual = list(population[best_idx])
+
+        if best_c2 > 0.95:  # Early termination
+            break
+
+        # Selection and reproduction
+        # Tournament selection
+        selected_population = []
+        tournament_size = 3
+        for _ in range(population_size):
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_population.append(list(population[winner_idx]))
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best two
+        top_indices = np.argsort(fitness_scores)[-2:]
+        for idx in top_indices:
+            new_population.append(list(population[idx]))
+
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = selected_population[np.random.randint(len(selected_population))]
+            parent2 = selected_population[np.random.randint(len(selected_population))]
+
+            # Crossover
+            child1 = list(parent1)
+            child2 = list(parent2)
+
+            # Uniform crossover
+            for i in range(len(child1)):
+                if np.random.random() < 0.5:
+                    child1[i], child2[i] = child2[i], child1[i]
+
+            # Mutation with adaptive rates
+            mutation_rate = max(0.1, 0.3 - iteration * 0.001)  # Decrease over generations
+
+            for i in range(len(child1)):
+                if np.random.random() < mutation_rate:
+                    if i % 3 == 0:  # amplitude - log-uniform
+                        log_amp = np.log10(child1[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child1[i] = max(0.1, 10 ** log_amp)
+
+                        log_amp = np.log10(child2[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child2[i] = max(0.1, 10 ** log_amp)
+                    elif i % 3 == 1:  # center - linear
+                        child1[i] += np.random.uniform(-0.02, 0.02)
+                        child2[i] += np.random.uniform(-0.02, 0.02)
+                        # Keep in bounds
+                        child1[i] = max(-domain_width/2, min(domain_width/2, child1[i]))
+                        child2[i] = max(-domain_width/2, min(domain_width/2, child2[i]))
+                    else:  # width - log-uniform
+                        log_width = np.log10(child1[i])
+                        log_width += np.random.uniform(-0.3, 0.3)
+                        child1[i] = max(0.001, 10 ** log_width)
+
+                        log_width = np.log10(child2[i])
+                        log_width += np.random.uniform(-0.3, 0.3)
+                        child2[i] = max(0.001, 10 ** log_width)
+
+            # Enforce constraints
+            for i in range(len(child1)):
+                child1[i] = max(0, child1[i])
+                child2[i] = max(0, child2[i])
+
+            # Enforce spacing
+            enforce_peak_spacing(child1, domain_width)
+            enforce_peak_spacing(child2, domain_width)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:population_size]
+
+    return best_individual if best_individual is not None else []
+=======
+def optimize_with_evolutionary_algorithm(num_peaks, domain_width=0.5, n_steps=2000):
+    """Enhanced evolutionary algorithm with better controls and multi-scale approach"""
+    # Configuration parameters
+    max_iterations = 200
+    population_size = 20
+    best_c2 = 0.0
+    best_individual = None
+
+    # Multi-scale peak initialization - place peaks at different scales
+    # Scale 1: Coarse peaks (fewer, broader)
+    coarse_peaks = max(1, num_peaks // 3)
+    # Scale 2: Medium peaks (moderate number, medium width)
+    medium_peaks = max(1, num_peaks // 3)
+    # Scale 3: Fine peaks (more numerous, narrower)
+    fine_peaks = num_peaks - coarse_peaks - medium_peaks
+
+    # Create initial population with multi-scale distribution
+    population = []
+    for _ in range(population_size):
+        individual = []
+
+        # Add coarse peaks (broader, fewer)
+        for _ in range(coarse_peaks):
+            # Log-uniform amplitude (10-100)
+            amplitude = 10 ** np.random.uniform(1.0, 2.0)
+            individual.append(amplitude)
+
+            # Coarse placement - more spread out
+            pos = np.random.uniform(-domain_width/2, domain_width/2)
+            individual.append(pos)
+
+            # Broader width
+            width = np.random.uniform(0.05, 0.15)
+            individual.append(width)
+
+        # Add medium peaks (medium spread)
+        for _ in range(medium_peaks):
+            amplitude = 10 ** np.random.uniform(1.0, 2.0)
+            individual.append(amplitude)
+
+            pos = np.random.uniform(-domain_width/2, domain_width/2)
+            individual.append(pos)
+
+            # Medium width
+            width = np.random.uniform(0.02, 0.08)
+            individual.append(width)
+
+        # Add fine peaks (many, narrow)
+        for _ in range(fine_peaks):
+            amplitude = 10 ** np.random.uniform(1.0, 2.0)
+            individual.append(amplitude)
+
+            pos = np.random.uniform(-domain_width/2, domain_width/2)
+            individual.append(pos)
+
+            # Narrow width
+            width = np.random.uniform(0.005, 0.02)
+            individual.append(width)
+
+        population.append(individual)
+
+    # Evaluation loop
+    for iteration in range(max_iterations):
+        if iteration % 10 == 0 and iteration > 0:
+            # Periodic re-evaluation to maintain diversity
+            random.shuffle(population)
+
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            try:
+                x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+                result = gaussian_peak_function_numba(x, individual)
+                step_values = result.tolist()
+                c2_value, _ = evaluate_function(step_values)
+                fitness_scores.append(c2_value)
+            except Exception:
+                fitness_scores.append(0.0)
+
+        # Get best individual
+        best_idx = np.argmax(fitness_scores)
+        if fitness_scores[best_idx] > best_c2:
+            best_c2 = fitness_scores[best_idx]
+            best_individual = list(population[best_idx])
+
+        if best_c2 > 0.95:  # Early termination
+            break
+
+        # Selection and reproduction - improved with elitism and diversity maintenance
+        # Tournament selection
+        selected_population = []
+        tournament_size = 3
+
+        # Elitism: keep top 2 individuals
+        top_indices = np.argsort(fitness_scores)[-2:]
+        for idx in top_indices:
+            selected_population.append(list(population[idx]))
+
+        # Fill remaining slots with tournament selection
+        while len(selected_population) < population_size:
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_population.append(list(population[winner_idx]))
+
+        # Create new population with better diversity maintenance
+        new_population = []
+
+        # Elitism: keep best two
+        top_indices = np.argsort(fitness_scores)[-2:]
+        for idx in top_indices:
+            new_population.append(list(population[idx]))
+
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = selected_population[np.random.randint(len(selected_population))]
+            parent2 = selected_population[np.random.randint(len(selected_population))]
+
+            # Crossover
+            child1 = list(parent1)
+            child2 = list(parent2)
+
+            # Uniform crossover
+            for i in range(len(child1)):
+                if np.random.random() < 0.5:
+                    child1[i], child2[i] = child2[i], child1[i]
+
+            # Mutation with adaptive rates and scale-aware modifications
+            mutation_rate = max(0.1, 0.3 - iteration * 0.001)  # Decrease over generations
+
+            for i in range(len(child1)):
+                if np.random.random() < mutation_rate:
+                    if i % 3 == 0:  # amplitude - log-uniform
+                        log_amp = np.log10(child1[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child1[i] = max(0.1, 10 ** log_amp)
+
+                        log_amp = np.log10(child2[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child2[i] = max(0.1, 10 ** log_amp)
+                    elif i % 3 == 1:  # center - linear
+                        child1[i] += np.random.uniform(-0.02, 0.02)
+                        child2[i] += np.random.uniform(-0.02, 0.02)
+                        # Keep in bounds
+                        child1[i] = max(-domain_width/2, min(domain_width/2, child1[i]))
+                        child2[i] = max(-domain_width/2, min(domain_width/2, child2[i]))
+                    else:  # width - log-uniform with scale awareness
+                        # Apply different mutation ranges based on current scale
+                        current_width = child1[i]
+                        if current_width > 0.1:  # Coarse scale
+                            log_width = np.log10(child1[i])
+                            log_width += np.random.uniform(-0.2, 0.2)
+                            child1[i] = max(0.01, 10 ** log_width)
+
+                            log_width = np.log10(child2[i])
+                            log_width += np.random.uniform(-0.2, 0.2)
+                            child2[i] = max(0.01, 10 ** log_width)
+                        elif current_width > 0.03:  # Medium scale
+                            log_width = np.log10(child1[i])
+                            log_width += np.random.uniform(-0.3, 0.3)
+                            child1[i] = max(0.005, 10 ** log_width)
+
+                            log_width = np.log10(child2[i])
+                            log_width += np.random.uniform(-0.3, 0.3)
+                            child2[i] = max(0.005, 10 ** log_width)
+                        else:  # Fine scale
+                            log_width = np.log10(child1[i])
+                            log_width += np.random.uniform(-0.5, 0.5)
+                            child1[i] = max(0.001, 10 ** log_width)
+
+                            log_width = np.log10(child2[i])
+                            log_width += np.random.uniform(-0.5, 0.5)
+                            child2[i] = max(0.001, 10 ** log_width)
+
+            # Enforce constraints
+            for i in range(len(child1)):
+                child1[i] = max(0, child1[i])
+                child2[i] = max(0, child2[i])
+
+            # Enforce spacing
+            enforce_peak_spacing(child1, domain_width)
+            enforce_peak_spacing(child2, domain_width)
+
+            new_population.extend([child1, child2])
+
+        population = new_population[:population_size]
+
+    return best_individual if best_individual is not None else []
+>>>>>>> REPLACE
+</DIFF>

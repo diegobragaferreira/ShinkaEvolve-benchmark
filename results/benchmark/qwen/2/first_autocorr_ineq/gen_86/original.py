@@ -1,0 +1,179 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.signal import convolve
+import time
+import random
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+def compute_c1(sequence):
+    """Compute the C1 constant for a given sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+
+    # Use FFT-based convolution for efficiency
+    conv = convolve(sequence, sequence, mode='full')
+    # Take only the relevant part of convolution (the peak)
+    max_conv = np.max(conv[len(sequence)-1:])  # From index n-1 onwards
+
+    # Normalize and compute C1
+    sum_sq = np.sum(sequence)**2
+    if sum_sq == 0:
+        return float('inf')
+
+    c1 = (2 * len(sequence) * max_conv) / sum_sq
+    return c1
+
+def compute_inv_c1(sequence):
+    """Compute inverse of C1 (what we want to maximize)."""
+    c1 = compute_c1(sequence)
+    if c1 == 0 or np.isinf(c1):
+        return 0
+    return 1.0 / c1
+
+def compute_convolution_gradient(sequence, epsilon=1e-6):
+    """
+    Analytically compute the gradient of the maximum convolution value with respect to sequence elements.
+    This avoids finite difference approximation errors.
+    """
+    n = len(sequence)
+    grad = np.zeros(n)
+    base_conv = convolve(sequence, sequence, mode='full')
+    max_conv_idx = np.argmax(base_conv[len(sequence)-1:])
+    max_conv_val = base_conv[len(sequence)-1:][max_conv_idx]
+
+    # For each element, compute the effect of small perturbation
+    for i in range(n):
+        perturbed_seq = sequence.copy()
+        perturbed_seq[i] += epsilon
+        perturbed_conv = convolve(perturbed_seq, perturbed_seq, mode='full')
+        perturbed_max_conv = perturbed_conv[len(sequence)-1:][max_conv_idx]
+        grad[i] = (perturbed_max_conv - max_conv_val) / epsilon
+
+    return grad
+
+def gradient_ascent_update(sequence, learning_rate=0.01, max_iterations=10):
+    """Perform gradient ascent to improve sequence, directly targeting convolution peak reduction."""
+    old_sequence = sequence.copy()
+
+    for iteration in range(max_iterations):
+        # Compute gradient of max convolution w.r.t. sequence elements
+        grad = compute_convolution_gradient(sequence)
+
+        # Update using gradient ascent (but avoid increasing max_conv)
+        # We want to decrease max_conv while increasing sum(sequence)
+        new_sequence = sequence + learning_rate * grad
+
+        # Ensure non-negativity
+        new_sequence = np.maximum(new_sequence, 0)
+
+        # Ensure sum is at least 0.01
+        if np.sum(new_sequence) < 0.01:
+            new_sequence[0] = 0.1
+
+        # Clip to [0, 1000]
+        new_sequence = np.clip(new_sequence, 0, 1000)
+
+        # Early stopping if improvement is minimal
+        if np.linalg.norm(new_sequence - old_sequence) < 1e-6:
+            break
+
+        sequence = new_sequence
+        old_sequence = sequence.copy()
+
+    return sequence
+
+def smart_pattern_initialization(length=None):
+    """Create a good initial pattern based on known theoretical structures."""
+    if length is None:
+        length = random.randint(100, 500)
+
+    # Using a power-law decay which is known to perform well in such problems
+    exponents = np.arange(length)
+    sequence = np.power(0.95, exponents)
+    sequence = np.maximum(sequence, 0.01)  # Minimum value constraint
+
+    # Add some randomness to avoid local optima
+    noise_factor = 0.05
+    sequence = sequence * (1 + np.random.uniform(-noise_factor, noise_factor, length))
+    sequence = np.maximum(sequence, 0.01)
+
+    return sequence
+
+def multi_scale_optimization(initial_sequence, max_iter=30):
+    """Perform optimization at multiple scales to avoid local optima."""
+    sequence = np.array(initial_sequence)
+    best_inv_c1 = compute_inv_c1(sequence)
+    best_sequence = sequence.copy()
+
+    # Coarse scale: optimize with larger steps
+    coarse_lr = 0.05
+    for _ in range(5):
+        sequence = gradient_ascent_update(sequence, learning_rate=coarse_lr, max_iterations=5)
+        inv_c1 = compute_inv_c1(sequence)
+        if inv_c1 > best_inv_c1:
+            best_inv_c1 = inv_c1
+            best_sequence = sequence.copy()
+
+    # Fine scale: optimize with smaller steps
+    fine_lr = 0.005
+    for _ in range(10):
+        sequence = gradient_ascent_update(sequence, learning_rate=fine_lr, max_iterations=2)
+        inv_c1 = compute_inv_c1(sequence)
+        if inv_c1 > best_inv_c1:
+            best_inv_c1 = inv_c1
+            best_sequence = sequence.copy()
+
+    # Final adaptive refinement
+    adaptive_lr = 0.01
+    for iteration in range(max_iter):
+        sequence = gradient_ascent_update(sequence, learning_rate=adaptive_lr, max_iterations=1)
+        inv_c1 = compute_inv_c1(sequence)
+        if inv_c1 > best_inv_c1:
+            best_inv_c1 = inv_c1
+            best_sequence = sequence.copy()
+        # Decrease learning rate over time for stability
+        adaptive_lr *= 0.99
+
+    return best_sequence.tolist()
+
+def search_for_best_sequence():
+    """Main search function using the new gradient-based approach with multi-scale optimization."""
+    start_time = time.time()
+    best_inv_c1 = 0
+    best_sequence = None
+
+    # Try multiple initialization strategies
+    for attempt in range(10):
+        if time.time() - start_time > 170:
+            break
+
+        # Initialize with a good pattern
+        n = random.randint(100, 500)
+        sequence = smart_pattern_initialization(n)
+
+        # Multi-scale optimization
+        optimized_sequence = multi_scale_optimization(sequence, max_iter=20)
+
+        # Evaluate
+        inv_c1 = compute_inv_c1(optimized_sequence)
+
+        if inv_c1 > best_inv_c1:
+            best_inv_c1 = inv_c1
+            best_sequence = optimized_sequence[:]
+
+    # If no good sequence found, fallback to a default initialization
+    if best_sequence is None:
+        best_sequence = smart_pattern_initialization(200)
+        best_sequence = multi_scale_optimization(best_sequence)
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

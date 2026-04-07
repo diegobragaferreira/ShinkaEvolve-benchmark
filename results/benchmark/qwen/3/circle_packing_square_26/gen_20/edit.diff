@@ -1,0 +1,221 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,212 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial import Voronoi
++from scipy.optimize import minimize
++from scipy.spatial.distance import cdist
++import random
++import math
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
++    np.random.seed(42)
++    random.seed(42)
++    
+     n = 26
++    
++    # Step 1: Generate Voronoi-based initial configuration
++    def generate_voronoi_initial():
++        # Generate random points for Voronoi diagram
++        points = np.random.rand(50, 2)  # More points for better Voronoi coverage
++        
++        # Compute Voronoi diagram
++        vor = Voronoi(points)
++        
++        # Get Voronoi vertices and filter those inside unit square
++        valid_vertices = []
++        for vertex in vor.vertices:
++            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
++                valid_vertices.append(vertex)
++        
++        # Select subset of vertices as circle centers
++        selected_centers = []
++        available_vertices = valid_vertices.copy()
++        
++        # Choose the first center randomly
++        if available_vertices:
++            selected_centers.append(available_vertices.pop(random.randint(0, len(available_vertices)-1)))
++            
++        # Greedily select remaining centers to maximize minimum distance from existing centers
++        while len(selected_centers) < min(n, len(available_vertices)):
++            max_min_dist = -1
++            best_vertex = None
++            
++            for vertex in available_vertices:
++                min_dist = float('inf')
++                for center in selected_centers:
++                    dist = np.linalg.norm(np.array(vertex) - np.array(center))
++                    min_dist = min(min_dist, dist)
++                
++                if min_dist > max_min_dist:
++                    max_min_dist = min_dist
++                    best_vertex = vertex
++            
++            if best_vertex:
++                selected_centers.append(best_vertex)
++                available_vertices.remove(best_vertex)
++            else:
++                break
++                
++        # If we don't have enough centers, fill with random points
++        while len(selected_centers) < n:
++            selected_centers.append([random.random(), random.random()])
++            
++        return np.array(selected_centers[:n])
++    
++    # Step 2: Initialize circles with positions from Voronoi and set safe radii
++    initial_positions = generate_voronoi_initial()
++    
++    # Calculate maximum possible radii given current positions (assuming they're all far apart initially)
+     circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    for i in range(n):
++        circles[i, 0] = initial_positions[i, 0]  # x-coordinate
++        circles[i, 1] = initial_positions[i, 1]  # y-coordinate
++        circles[i, 2] = 0.05  # Start with small radius (safe value to avoid overlaps)
++    
++    # Step 3: Simulated Annealing with Local Optimization
++    def calculate_total_radius(circles_array):
++        return np.sum(circles_array[:, 2])
++    
++    def check_constraints(circles_array):
++        """Check if all constraints are satisfied"""
++        n = len(circles_array)
++        
++        # Check containment constraints
++        for i in range(n):
++            x, y, r = circles_array[i]
++            if r > x or r > y or r > (1-x) or r > (1-y):
++                return False
++        
++        # Check overlap constraints
++        distances = cdist(circles_array[:, :2], circles_array[:, :2])
++        for i in range(n):
++            for j in range(i+1, n):
++                dist = distances[i, j]
++                if dist < (circles_array[i, 2] + circles_array[j, 2]):
++                    return False
++                    
++        return True
++    
++    def get_safe_radius(circle_pos, other_circles, max_radius=0.5):
++        """Calculate maximum safe radius for a circle at given position"""
++        min_dist = float('inf')
++        
++        # Check boundary constraints
++        x, y = circle_pos
++        boundary_radius = min(x, y, 1-x, 1-y)
++        min_dist = min(min_dist, boundary_radius)
++        
++        # Check overlap constraints
++        for other_circle in other_circles:
++            ox, oy, oradius = other_circle
++            dist = np.sqrt((x - ox)**2 + (y - oy)**2)
++            if dist > 0:  # avoid self-distance
++                overlap_radius = dist - oradius
++                min_dist = min(min_dist, overlap_radius)
++        
++        return max(0.001, min(max_radius, min_dist))
++    
++    def optimize_local(circles_array, iterations=50):
++        """Refine circles using local optimization"""
++        # Create a copy to work with
++        current_circles = circles_array.copy()
++        
++        # For each circle, try to maximize its radius safely
++        for _ in range(iterations):
++            improved = False
++            
++            # Try to increase radius for each circle
++            for i in range(len(current_circles)):
++                x, y, old_r = current_circles[i]
++                
++                # Get all other circles
++                other_circles = np.delete(current_circles, i, axis=0)
++                
++                # Calculate new safe radius
++                new_r = get_safe_radius((x, y), other_circles)
++                
++                # Update radius if it can be increased
++                if new_r > old_r:
++                    current_circles[i, 2] = new_r
++                    improved = True
++            
++            # If no improvement, stop early
++            if not improved:
++                break
++                
++        return current_circles
++    
++    # Step 4: Refine initial configuration using greedy approach
++    best_circles = circles.copy()
++    best_radius_sum = calculate_total_radius(best_circles)
++    
++    # Try several refinements with different random seeds
++    for attempt in range(5):
++        np.random.seed(attempt * 100)
++        
++        # Apply local optimization with different initial conditions
++        temp_circles = circles.copy()
++        
++        # Perturb positions slightly
++        for i in range(len(temp_circles)):
++            temp_circles[i, 0] += (np.random.random() - 0.5) * 0.05
++            temp_circles[i, 1] += (np.random.random() - 0.5) * 0.05
++            
++            # Ensure within bounds
++            temp_circles[i, 0] = max(0.01, min(0.99, temp_circles[i, 0]))
++            temp_circles[i, 1] = max(0.01, min(0.99, temp_circles[i, 1]))
++        
++        # Optimize radii locally
++        temp_circles = optimize_local(temp_circles)
++        
++        # Check if this is valid and better
++        if check_constraints(temp_circles):
++            temp_radius_sum = calculate_total_radius(temp_circles)
++            if temp_radius_sum > best_radius_sum:
++                best_radius_sum = temp_radius_sum
++                best_circles = temp_circles.copy()
++    
++    # Final local optimization on best solution
++    final_solution = optimize_local(best_circles, iterations=100)
++    
++    # Final constraints check
++    if not check_constraints(final_solution):
++        # If still invalid, try a completely different approach
++        # Generate a new configuration with more careful spacing
++        attempts = 0
++        while attempts < 100:
++            temp_positions = np.random.rand(n, 2)
++            temp_circles = np.zeros((n, 3))
++            
++            for i in range(n):
++                temp_circles[i, 0] = temp_positions[i, 0]
++                temp_circles[i, 1] = temp_positions[i, 1]
++                temp_circles[i, 2] = 0.05
++            
++            # Try to increase radii safely
++            temp_circles = optimize_local(temp_circles, iterations=50)
++            
++            if check_constraints(temp_circles):
++                temp_radius_sum = calculate_total_radius(temp_circles)
++                if temp_radius_sum > best_radius_sum:
++                    best_radius_sum = temp_radius_sum
++                    best_circles = temp_circles.copy()
++            attempts += 1
++    
++    return best_circles
+ 
+ # EVOLVE-BLOCK-END

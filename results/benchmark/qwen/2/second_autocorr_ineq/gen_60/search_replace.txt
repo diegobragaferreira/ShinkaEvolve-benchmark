@@ -1,0 +1,133 @@
+<NAME>
+adaptive_peak_refinement
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a complex optimization procedure that may not be optimal for maximizing C2. We'll simplify and improve the peak refinement process by implementing a more direct approach that focuses on the key insight from the mathematical analysis: maximizing C₂ requires balancing ||g||₂² against ||g||₁ · ||g||∞. The proposed changes will use a more focused optimization strategy that directly targets peak positions and heights using a hybrid approach combining evolutionary search with local gradient-free optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 2: Local Optimization of Peak Parameters (enhanced version)
+    def optimize_peaks(initial_func, n_steps):
+        # Extract peak information
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Identify approximate peak locations (more precise detection)
+        peaks = []
+        for i in range(1, len(initial_func)-1):
+            if initial_func[i] > initial_func[i-1] and initial_func[i] > initial_func[i+1]:
+                peaks.append((i, initial_func[i]))
+
+        # Take top peaks
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        selected_peaks = peaks[:min(8, len(peaks))]
+
+        # Refine only peak positions and heights
+        def objective(params):
+            # Reconstruct function with given params
+            temp_func = np.zeros_like(x)
+            for i, (pos_idx, height) in enumerate(selected_peaks):
+                center_pos = x[pos_idx] + (params[i*2] - 0.5) * 0.05  # Adjust by up to 0.05
+                peak_height = height * (1.0 + params[i*2+1] * 0.5)  # Adjust by up to 50%
+                width = np.random.uniform(0.02, 0.06)
+                temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+            return -compute_c2(temp_func)  # Negative because we minimize
+
+        # Initial parameter guess
+        params0 = [0.0] * (len(selected_peaks) * 2)  # [delta_pos, delta_height] pairs
+
+        # Optimize with more iterations for better convergence
+        try:
+            result = differential_evolution(objective,
+                                          bounds=[(-0.5, 0.5)] * (len(selected_peaks) * 2),
+                                          maxiter=100, popsize=15, seed=42, polish=True)
+            optimized_params = result.x
+        except:
+            optimized_params = params0
+
+        # Apply optimization results
+        final_func = np.zeros_like(x)
+        for i, (pos_idx, height) in enumerate(selected_peaks):
+            center_pos = x[pos_idx] + (optimized_params[i*2] - 0.5) * 0.05
+            peak_height = height * (1.0 + optimized_params[i*2+1] * 0.5)
+            width = np.random.uniform(0.02, 0.06)
+            final_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+
+        # Add remaining peaks from original
+        for i in range(len(initial_func)):
+            if not any(abs(x[i] - x[pos_idx]) < 0.01 for _, pos_idx in selected_peaks):
+                final_func[i] += initial_func[i] * 0.5
+
+        return final_func
+=======
+    # Phase 2: Local Optimization of Peak Parameters (improved version)
+    def optimize_peaks(initial_func, n_steps):
+        # Extract peak information more intelligently
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Simple peak detection based on local maxima
+        peaks = []
+        for i in range(1, len(initial_func)-1):
+            if initial_func[i] > initial_func[i-1] and initial_func[i] > initial_func[i+1]:
+                peaks.append((i, initial_func[i]))
+
+        # Keep only the highest peaks
+        if len(peaks) > 8:
+            peaks.sort(key=lambda x: x[1], reverse=True)
+            peaks = peaks[:8]
+
+        # Instead of complex differential evolution, let's do a simpler but effective approach
+        # Directly work with the peak parameters using a more targeted optimization
+
+        # Start with original function
+        temp_func = np.array(initial_func)
+
+        # If we have peaks to refine, optimize them directly
+        if peaks:
+            # We'll work with peak locations and heights as our parameters
+            peak_indices = [p[0] for p in peaks]
+            peak_heights = [p[1] for p in peaks]
+
+            # Create simpler optimization approach focused on key parameters
+            # Sample different peak configurations around current peaks
+            best_func = temp_func.copy()
+            best_c2 = compute_c2(best_func)
+
+            # Test variations with small adjustments to peak positions and heights
+            num_variations = 10
+            for _ in range(num_variations):
+                variation_func = temp_func.copy()
+
+                # Try adjusting each peak slightly
+                for peak_idx, peak_height in zip(peak_indices, peak_heights):
+                    # Slightly adjust peak position and height
+                    pos_adjust = np.random.uniform(-0.02, 0.02)
+                    height_adjust = np.random.uniform(-0.2, 0.2)
+
+                    # Get current peak location
+                    current_x = x[peak_idx]
+                    new_x = current_x + pos_adjust
+                    new_height = peak_height * (1.0 + height_adjust)
+
+                    # Ensure new_x is within bounds
+                    new_x = np.clip(new_x, -0.25, 0.25)
+
+                    # Recalculate width based on position (narrower near center)
+                    width = 0.02 + 0.02 * (1.0 - abs(new_x)/0.25)
+
+                    # Add modified peak
+                    peak_contribution = new_height * np.exp(-0.5 * ((x - new_x) / width)**2)
+                    variation_func = np.maximum(variation_func, peak_contribution)  # Add but don't exceed
+
+                # Evaluate this variation
+                c2_val = compute_c2(variation_func)
+                if c2_val > best_c2:
+                    best_c2 = c2_val
+                    best_func = variation_func.copy()
+
+            temp_func = best_func
+
+        return temp_func
+>>>>>>> REPLACE
+</DIFF>

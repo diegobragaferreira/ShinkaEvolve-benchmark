@@ -1,0 +1,404 @@
+--- a/original.py
++++ b/original.py
+@@ -1,251 +1,360 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from shapely.geometry import Polygon
+ import time
+ from numba import jit
+ from scipy.spatial.distance import cdist
+ import warnings
+ warnings.filterwarnings('ignore')
+ 
+ @jit(nopython=True)
+ def hexagon_vertices(x, y, angle_deg, side_length=1):
+     """Calculate vertices of a hexagon given center, angle, and side length"""
+     angle_rad = np.radians(angle_deg)
+     vertices = []
+     for i in range(6):
+         theta = angle_rad + i * np.pi / 3
+         vx = x + side_length * np.cos(theta)
+         vy = y + side_length * np.sin(theta)
+         vertices.append((vx, vy))
+     return np.array(vertices)
+ 
+ def get_hexagon_polygon(x, y, angle_deg, side_length=1):
+     """Get shapely polygon representation of hexagon"""
+     vertices = hexagon_vertices(x, y, angle_deg, side_length)
+     return Polygon(vertices)
+ 
+ def check_containment(hex_poly, outer_poly):
+     """Check if hexagon is completely contained within outer hexagon"""
+     return outer_poly.contains(hex_poly) or outer_poly.intersection(hex_poly).area == hex_poly.area
+ 
+ def calculate_outer_hexagon_radius(inner_positions, inner_angles):
+     """Calculate minimum radius needed to contain all inner hexagons"""
+     max_dist = 0
+     outer_center = (0, 0)
+ 
+     # Get all vertices of all inner hexagons
+     all_vertices = []
+     for i in range(len(inner_positions)):
+         pos = inner_positions[i]
+         angle = inner_angles[i]
+         hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+         all_vertices.extend(hex_vertices)
+ 
+     # Find maximum distance from center
+     for vertex in all_vertices:
+         dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+         max_dist = max(max_dist, dist)
+ 
+     # Add buffer for safety and account for hexagon shape
+     return max_dist * 1.1  # Safety factor
+ 
+ def compute_hexagon_distances(positions):
+     """Compute pairwise distances between hexagon centers"""
+     centers = np.array(positions)
+     return cdist(centers, centers)
+ 
+ def evaluate_solution_solution(solution):
+     """Evaluate a solution and return negative of objective (since we minimize)"""
+     # Reshape solution into positions and angles
+     positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+     angles = solution[22:]  # 11 angles
+ 
+     # Create inner hexagons
+     inner_hexagons = []
+     for i in range(11):
+         pos = positions[i]
+         angle = angles[i]
+         hex_poly = get_hexagon_polygon(pos[0], pos[1], angle)
+         inner_hexagons.append(hex_poly)
+ 
+     # Check containment
+     outer_radius = calculate_outer_hexagon_radius(positions, angles)
+     # Outer hexagon with center at origin and calculated radius
+     outer_hexagon = get_hexagon_polygon(0, 0, 0, outer_radius)
+ 
+     # Check containment for all inner hexagons
+     for hex_poly in inner_hexagons:
+         if not check_containment(hex_poly, outer_hexagon):
+             return 1e10  # Penalty for non-containment
+ 
+     # Check for overlaps
+     for i in range(11):
+         for j in range(i+1, 11):
+             if inner_hexagons[i].intersects(inner_hexagons[j]):
+                 return 1e10  # Penalty for overlap
+ 
+     # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+     return -1.0 / outer_radius
+ 
+ def compute_hexagon_grid_layout():
+     """Compute a hexagonal grid layout that serves as a good starting point"""
+     # Create a hexagonal pattern with 11 points
+     # Center point
+     positions = [[0.0, 0.0]]
+ 
+     # Ring 1 points (6 points)
+     for i in range(6):
+         angle = i * 60
+         radius = 2.0
+         x = radius * np.cos(np.radians(angle))
+         y = radius * np.sin(np.radians(angle))
+         positions.append([x, y])
+ 
+     # Ring 2 points (4 points)
+     for i in range(4):
+         angle = i * 90 + 45
+         radius = 3.5
+         x = radius * np.cos(np.radians(angle))
+         y = radius * np.sin(np.radians(angle))
+         positions.append([x, y])
+ 
+     # Trim to exactly 11 points
+     return positions[:11]
+ 
+ def find_optimal_tiling_pattern():
+     """Use geometric insights to find good tiling patterns"""
+     # Start with a good hexagonal arrangement
+     base_positions = compute_hexagon_grid_layout()
+ 
+     # Apply geometric constraints to get a valid configuration
+     # Use a small perturbation to make it less regular and improve optimization
+     for i in range(len(base_positions)):
+         base_positions[i][0] += np.random.normal(0, 0.1)
+         base_positions[i][1] += np.random.normal(0, 0.1)
+ 
+     return base_positions
+ 
+ def optimize_with_geometric_constraints():
+     """Optimize using geometric constraints and tiling insights"""
+ 
+     # Phase 1: Generate geometrically informed initial solution
+     initial_positions = find_optimal_tiling_pattern()
+     initial_angles = [0.0] * 11
+ 
+     # Flatten initial solution
+     initial_solution = []
+     for pos in initial_positions:
+         initial_solution.extend(pos)
+     initial_solution.extend(initial_angles)
+     initial_solution = np.array(initial_solution)
+ 
+-    # Phase 2: Use a hybrid approach with different optimization strategies
+-    # First, try to improve using differential evolution with tight constraints
++    # Phase 2: Use a hybrid approach with adaptive differential evolution
+     bounds = []
+     # Position bounds
+     for _ in range(22):
+         bounds.append((-8.0, 8.0))  # Tighter bounds for faster convergence
+     # Angle bounds
+     for _ in range(11):
+         bounds.append((0.0, 360.0))
+ 
+     try:
+-        # Try differential evolution first
+-        de_result = differential_evolution(
++        # Adaptive differential evolution parameters
++        def adaptive_de_strategy(func, bounds, maxiter=50, popsize=15, seed=42):
++            # Initialize parameters with high exploration values
++            mutation_rate = 0.9
++            crossover_rate = 0.9
++            patience_counter = 0
++            last_best_fitness = float('inf')
++            improvement_threshold = 1e-5
++
++            # Initialize population
++            np.random.seed(seed)
++            population = []
++            for i in range(popsize):
++                individual = []
++                for lower, upper in bounds:
++                    individual.append(np.random.uniform(lower, upper))
++                population.append(individual)
++
++            history = []
++
++            for generation in range(maxiter):
++                # Evaluate fitness
++                fitnesses = [func(ind) for ind in population]
++                best_fitness = min(fitnesses)
++                history.append(best_fitness)
++
++                # Check for improvement
++                if len(history) > 1 and abs(history[-2] - best_fitness) < improvement_threshold:
++                    patience_counter += 1
++                else:
++                    patience_counter = 0
++
++                # Adaptive parameter adjustment based on progress
++                if patience_counter > 5 and generation > 10:
++                    # Decrease mutation rate and increase crossover rate to exploit
++                    mutation_rate = max(0.2, mutation_rate * 0.95)
++                    crossover_rate = min(0.9, crossover_rate + 0.05)
++                elif generation > 20 and len(history) > 10:
++                    # Further tune if no significant improvement in recent history
++                    if abs(history[-10] - history[-1]) < 1e-6:
++                        mutation_rate = max(0.1, mutation_rate * 0.9)
++                        crossover_rate = min(0.95, crossover_rate + 0.02)
++
++                # Select parents
++                tournament_size = 3
++                selected = []
++                for _ in range(popsize):
++                    tournament = [np.random.choice(population) for _ in range(tournament_size)]
++                    tournament_fitness = [func(ind) for ind in tournament]
++                    winner = tournament[np.argmin(tournament_fitness)]
++                    selected.append(winner)
++
++                # Generate new population
++                new_population = []
++                for i in range(popsize):
++                    # Mutation
++                    a, b, c = np.random.choice(selected, 3, replace=False)
++                    mutant = []
++                    for j in range(len(bounds)):
++                        if np.random.rand() < mutation_rate:
++                            mutant.append(a[j] + 0.5 * (b[j] - c[j]))
++                        else:
++                            mutant.append(selected[i][j])
++
++                    # Boundary handling
++                    for j, (lower, upper) in enumerate(bounds):
++                        mutant[j] = max(lower, min(upper, mutant[j]))
++
++                    # Crossover
++                    trial = []
++                    for j in range(len(bounds)):
++                        if np.random.rand() < crossover_rate:
++                            trial.append(mutant[j])
++                        else:
++                            trial.append(selected[i][j])
++
++                    new_population.append(trial)
++
++                population = new_population
++
++            # Return best individual
++            fitnesses = [func(ind) for ind in population]
++            best_idx = np.argmin(fitnesses)
++            return population[best_idx]
++
++        # Use adaptive DE approach
++        adaptive_result = adaptive_de_strategy(
+             evaluate_solution_solution,
+             bounds,
+-            maxiter=25,
+-            popsize=10,
+-            seed=42,
+-            disp=False,
+-            tol=1e-6,
+-            strategy='best1bin'
++            maxiter=30,
++            popsize=12,
++            seed=42
+         )
+ 
+-        final_positions = de_result.x[:22].reshape(-1, 2)
+-        final_angles = de_result.x[22:]
+-
+-        # Refine with local optimization using L-BFGS
+-        # We'll use a wrapper to fit the optimization interface
+-        def obj_for_lbfgs(params):
+-            # Reshape and evaluate
+-            positions = params[:22].reshape(-1, 2)
+-            angles = params[22:]
+-            flat_solution = np.concatenate([positions.flatten(), angles])
+-            return evaluate_solution_solution(flat_solution)
+-
+-        # Create initial parameters for L-BFGS
+-        lbfgs_initial = np.concatenate([final_positions.flatten(), final_angles])
+-
+-        # Local refinement with L-BFGS-B
+-        lbfgs_result = minimize(
+-            obj_for_lbfgs,
+-            lbfgs_initial,
+-            method='L-BFGS-B',
+-            bounds=[(-8.0, 8.0)] * 22 + [(0.0, 360.0)] * 11,
+-            options={'maxiter': 50, 'disp': False}
+-        )
+-
+-        # Extract final refined solution
+-        final_positions_refined = lbfgs_result.x[:22].reshape(-1, 2)
+-        final_angles_refined = lbfgs_result.x[22:]
++        # Extract results
++        final_positions = np.array(adaptive_result[:22]).reshape(-1, 2)
++        final_angles = np.array(adaptive_result[22:])
++
++        # Enhanced local refinement with simulated annealing
++        # Apply a more comprehensive refinement strategy
++        best_positions = final_positions.copy()
++        best_angles = final_angles.copy()
++        best_score = evaluate_solution_solution(np.concatenate([best_positions.flatten(), best_angles]))
++
++        # Simulated annealing with adaptive cooling schedule
++        temperature = 5.0
++        cooling_rate = 0.998
++        min_temperature = 0.001
++        max_iterations = 500
++
++        for iteration in range(max_iterations):
++            if temperature < min_temperature:
++                break
++
++            # Try multiple perturbations per iteration
++            for _ in range(3):
++                # Pick a random hexagon to perturb
++                hex_idx = np.random.randint(0, 11)
++
++                # Save original values
++                old_pos = best_positions[hex_idx].copy()
++                old_angle = best_angles[hex_idx]
++
++                # Perturb position
++                best_positions[hex_idx][0] += np.random.normal(0, 0.05 * temperature)
++                best_positions[hex_idx][1] += np.random.normal(0, 0.05 * temperature)
++
++                # Perturb angle
++                best_angles[hex_idx] += np.random.normal(0, 5.0 * temperature)
++                best_angles[hex_idx] %= 360
++
++                # Evaluate new solution
++                new_score = evaluate_solution_solution(np.concatenate([best_positions.flatten(), best_angles]))
++
++                # Accept or reject
++                if new_score < best_score:
++                    best_score = new_score
++                else:
++                    # Accept with probability based on temperature
++                    delta = new_score - best_score
++                    acceptance_prob = np.exp(-delta / temperature)
++                    if np.random.rand() >= acceptance_prob:
++                        # Revert changes
++                        best_positions[hex_idx] = old_pos
++                        best_angles[hex_idx] = old_angle
++
++                # Check if we need to cool down
++                if iteration % 20 == 0:
++                    temperature *= cooling_rate
+ 
+     except Exception as e:
+         # Fallback to original solution
+-        final_positions_refined = np.array(initial_positions)
+-        final_angles_refined = np.array(initial_angles)
+-
+-    return final_positions_refined, final_angles_refined
++        final_positions = np.array(initial_positions)
++        final_angles = np.array(initial_angles)
++
++    return final_positions, final_angles
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     start_time = time.time()
+ 
+     try:
+         # Use geometric tiling approach with hybrid optimization
+         final_positions, final_angles = optimize_with_geometric_constraints()
+ 
+         # Create inner hex data
+         inner_hex_data = np.column_stack([final_positions, final_angles])
+ 
+         # Create outer hex data (centered)
+         outer_hex_data = np.array([0, 0, 0])
+ 
+         # Calculate outer hex side length
+         outer_radius = calculate_outer_hexagon_radius(final_positions, final_angles)
+         # Convert to side length for regular hexagon
+         outer_hex_side_length = outer_radius / (np.sqrt(3) / 2)
+ 
+         elapsed_time = time.time() - start_time
+         print(f"Optimization completed in {elapsed_time:.2f} seconds")
+ 
+         return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+     except Exception as e:
+         print(f"Optimization failed: {e}")
+         # Fallback to improved initial solution
+         inner_hex_data = np.array([
+             [0, 0, 0],  # center
+             [-2.5, 0, 0],  # left
+             [2.5, 0, 0],  # right
+             [-1.25, 2.17, 0],  # top-left
+             [1.25, 2.17, 0],  # top-right
+             [-1.25, -2.17, 0],  # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+             [3.75, 2.17, 0],  # far top-right
+             [-3.75, -2.17, 0],  # far bottom-left
+             [3.75, -2.17, 0],  # far bottom-right
+         ])
+         outer_hex_data = np.array([0, 0, 0])
+         outer_hex_side_length = 8.0
+         return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ # EVOLVE-BLOCK-END

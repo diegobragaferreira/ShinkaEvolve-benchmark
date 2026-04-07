@@ -1,0 +1,182 @@
+<NAME>
+voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+Implement a Voronoi-based initialization strategy that distributes circle centers more evenly across the unit square before applying stochastic optimization. This approach leverages the geometric properties of Voronoi diagrams to create a better starting configuration than purely random placement, which should help avoid clustering and improve convergence to higher-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _initialize_voronoi_placement(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Initialize circle positions using a Voronoi-based approach."""
+    np.random.seed(seed)
+
+    # Start with a regular grid of points
+    grid_size = int(np.ceil(np.sqrt(n_circles)))
+    x_coords = np.linspace(0.05, 0.95, grid_size)
+    y_coords = np.linspace(0.05, 0.95, grid_size)
+    grid_points = np.array([[x, y] for x in x_coords for y in y_coords])
+
+    # Take the first n_circles points (or generate more if needed)
+    if len(grid_points) >= n_circles:
+        initial_points = grid_points[:n_circles]
+    else:
+        # If we don't have enough grid points, add random points
+        extra_points = n_circles - len(grid_points)
+        random_points = np.random.uniform(0.05, 0.95, (extra_points, 2))
+        initial_points = np.vstack([grid_points, random_points])
+
+    # Create Voronoi diagram and use centroids as circle centers
+    try:
+        vor = Voronoi(initial_points)
+        # Use Voronoi vertices as circle centers (but ensure they're within bounds)
+        centroids = vor.points
+        # Filter out points that are too close to edges or invalid
+        valid_centroids = []
+        for point in centroids:
+            if 0.05 <= point[0] <= 0.95 and 0.05 <= point[1] <= 0.95:
+                valid_centroids.append(point)
+
+        if len(valid_centroids) < n_circles:
+            # Fill in missing points randomly
+            remaining = n_circles - len(valid_centroids)
+            random_points = np.random.uniform(0.05, 0.95, (remaining, 2))
+            final_points = np.vstack([valid_centroids, random_points])
+        else:
+            final_points = np.array(valid_centroids[:n_circles])
+
+    except Exception:
+        # Fallback to random initialization if Voronoi fails
+        final_points = np.random.uniform(0.05, 0.95, (n_circles, 2))
+
+    return final_points
+
+def _validate_and_correct_placement(circles: np.ndarray) -> np.ndarray:
+    """Ensure all circles are within bounds and don't overlap."""
+    n = len(circles)
+    # Ensure all circles are within bounds
+    for i in range(n):
+        x, y, r = circles[i]
+        # Adjust radius to fit within bounds
+        max_radius = min(x, y, 1-x, 1-y)
+        circles[i, 2] = min(r, max_radius)
+
+    # Resolve overlaps through relaxation
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+
+            # Calculate distance between centers
+            dist = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+            # If circles overlap, adjust radii
+            if dist < r1 + r2:
+                # Reduce radii proportionally to resolve overlap
+                total_required = r1 + r2 - dist
+                reduction_factor = total_required / (r1 + r2) if (r1 + r2) > 0 else 0.5
+
+                # Apply reduction with some randomness to help escape local minima
+                r1_new = max(0.01, r1 * (1 - reduction_factor * 0.5))
+                r2_new = max(0.01, r2 * (1 - reduction_factor * 0.5))
+
+                # Clamp to bounds
+                x1_new = max(0.01, min(0.99, x1))
+                y1_new = max(0.01, min(0.99, y1))
+                x2_new = max(0.01, min(0.99, x2))
+                y2_new = max(0.01, min(0.99, y2))
+
+                circles[i] = [x1_new, y1_new, r1_new]
+                circles[j] = [x2_new, y2_new, r2_new]
+
+    return circles
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Initialize with Voronoi-based approach
+    initial_centers = _initialize_voronoi_placement(n)
+
+    # Set initial radii to small positive values
+    for i in range(n):
+        circles[i, :2] = initial_centers[i]
+        circles[i, 2] = 0.05  # Small initial radius
+
+    # Refine placement using greedy approach
+    # Try to maximize radii while respecting constraints
+    for iteration in range(1000):
+        improved = False
+
+        # For each circle, try to increase radius
+        for i in range(n):
+            x, y, r = circles[i]
+            max_possible_r = min(x, y, 1-x, 1-y)
+
+            # Check if we can increase radius without overlap
+            new_r = min(max_possible_r, r + 0.001)
+
+            # Test if this new radius causes overlaps
+            overlap = False
+            for j in range(n):
+                if i != j:
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                    if dist < r1 + r2:  # Overlapping
+                        overlap = True
+                        break
+
+            # If no overlap, increase radius
+            if not overlap and new_r > r:
+                circles[i, 2] = new_r
+                improved = True
+
+        # If no improvement, break
+        if not improved:
+            break
+
+    # Final validation
+    circles = _validate_and_correct_placement(circles)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

@@ -1,0 +1,396 @@
+<NAME>
+add_spherical_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses clipping to enforce bounds but doesn't properly handle the spherical constraint that's crucial for this optimization problem. The points should be constrained to lie on the unit sphere to maximize the min/max distance ratio. I'll modify the objective function to properly enforce spherical constraints and improve the initialization strategies to generate better starting points on the sphere.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 3)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Handle edge cases
+        if len(distances) == 0:
+            return -1.0
+
+        # Remove any NaN or infinite values
+        distances = distances[np.isfinite(distances)]
+
+        if len(distances) == 0:
+            return -1.0
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing)
+        if d_max <= 0:
+            return -1.0
+        return -d_min / d_max
+=======
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on the unit sphere."""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 3)
+
+        # Project points to unit sphere to maintain constraint
+        points = normalize_to_unit_sphere(points)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Handle edge cases
+        if len(distances) == 0:
+            return -1.0
+
+        # Remove any NaN or infinite values
+        distances = distances[np.isfinite(distances)]
+
+        if len(distances) == 0:
+            return -1.0
+
+        # Calculate min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing)
+        if d_max <= 0:
+            return -1.0
+        return -d_min / d_max
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+improve_initialization_and_constraints
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the initialization strategies to better generate points on the unit sphere and add proper constraint handling. The current approach of scaling the Fibonacci points to fit in [0,1]^3 is problematic because it breaks the spherical constraint that's essential for this optimization. I'll fix this by keeping points on the unit sphere throughout the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_enhanced_initialization():
+        """Create multiple enhanced initial configurations"""
+        configs = []
+
+        # Configuration 1: Enhanced spherical Fibonacci with jitter
+        np.random.seed(42)
+        fib_points = spherical_fibonacci_points(14)
+
+        # Add small jitter to escape local minima
+        jitter = np.random.normal(0, 0.02, fib_points.shape)
+        config1 = fib_points + jitter
+        # Normalize to unit sphere
+        norms = np.linalg.norm(config1, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        config1 = config1 / norms
+
+        # Scale to fit within unit cube [0,1]^3
+        config1 = config1 - np.mean(config1, axis=0)
+        max_coord = np.max(np.abs(config1))
+        if max_coord > 0:
+            config1 = config1 / (2 * max_coord) + 0.5
+        configs.append(config1)
+
+        # Configuration 2: Random uniform distribution
+        np.random.seed(123)
+        config2 = np.random.rand(14, 3)
+        configs.append(config2)
+
+        # Configuration 3: Another Fibonacci with different scaling
+        np.random.seed(456)
+        config3 = spherical_fibonacci_points(14)
+        # Apply different transformation
+        config3 = config3 * 0.8 + 0.1  # Scale and shift
+        configs.append(config3)
+
+        # Configuration 4: Grid-based initialization
+        np.random.seed(789)
+        # Create a 3x3x3 grid and take 14 points
+        grid = np.mgrid[0:1:3j, 0:1:3j, 0:1:3j].reshape(3, -1).T
+        # Take first 14 points and add jitter
+        config4 = grid[:14] + np.random.normal(0, 0.03, (14, 3))
+        # Clamp to [0,1]^3
+        config4 = np.clip(config4, 0, 1)
+        configs.append(config4)
+
+        return configs
+=======
+    def create_enhanced_initialization():
+        """Create multiple enhanced initial configurations on the unit sphere"""
+        configs = []
+
+        # Configuration 1: Enhanced spherical Fibonacci with jitter
+        np.random.seed(42)
+        fib_points = spherical_fibonacci_points(14)
+
+        # Add small jitter to escape local minima
+        jitter = np.random.normal(0, 0.02, fib_points.shape)
+        config1 = fib_points + jitter
+        # Normalize to unit sphere
+        config1 = normalize_to_unit_sphere(config1)
+        configs.append(config1)
+
+        # Configuration 2: Random uniform distribution on sphere
+        np.random.seed(123)
+        config2 = np.random.randn(14, 3)
+        config2 = normalize_to_unit_sphere(config2)
+        configs.append(config2)
+
+        # Configuration 3: Another Fibonacci with different scaling and jitter
+        np.random.seed(456)
+        config3 = spherical_fibonacci_points(14)
+        # Apply different transformation with jitter
+        jitter = np.random.normal(0, 0.03, config3.shape)
+        config3 = config3 + jitter
+        config3 = normalize_to_unit_sphere(config3)
+        configs.append(config3)
+
+        # Configuration 4: Structured distribution with some randomness
+        np.random.seed(789)
+        config4 = np.zeros((14, 3))
+        # Distribute along axes and some random points
+        for i in range(14):
+            if i < 6:  # Along coordinate axes
+                axis = i % 3
+                sign = 1 if i < 3 else -1
+                config4[i] = np.eye(3)[axis] * sign
+            else:  # Random points on sphere
+                config4[i] = np.random.randn(3)
+        config4 = normalize_to_unit_sphere(config4)
+        configs.append(config4)
+
+        return configs
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+update_bounds_for_spherical_optimization
+</NAME>
+
+<DESCRIPTION>
+The current approach uses bounds [0,1] for all coordinates, but since we want to keep points on the unit sphere, we should remove these bounds and let the objective function handle the normalization. However, since scipy optimization functions require bounds, we'll use a different approach by removing the bounds entirely from the local optimization stage and instead rely on the objective function's normalization. Let me also improve the bounds definition to be more appropriate for our spherical constraint.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(42)]
+
+    # Run adaptive differential evolution optimization
+    optimized_flat = adaptive_de_optimize(objective, bounds, initial_points, time_limit)
+=======
+    # Define bounds for each coordinate (we'll use a larger range that allows for proper normalization)
+    # But note: proper spherical constraint is enforced in objective function, not bounds
+    bounds = [(-1.5, 1.5) for _ in range(42)]
+
+    # Run adaptive differential evolution optimization
+    optimized_flat = adaptive_de_optimize(objective, bounds, initial_points, time_limit)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+modify_improved_local_refinement_for_spherical_constraint
+</NAME>
+
+<DESCRIPTION>
+Update the local refinement function to properly handle the spherical constraint. Instead of using the standard L-BFGS-B with bounds, we'll modify it to work with the spherical constraint properly. Since we're working on a sphere, we can't use simple bounds - we need to project back to the sphere after each optimization step.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def improved_local_refinement(objective_func, initial_points, time_limit):
+        """Apply multiple local optimization refinement approaches"""
+        start_time = time.time()
+
+        # Try Basin-hopping first - very effective for this kind of problem
+        try:
+            # Basin-hopping with better parameters
+            minimizer_kwargs = {"method": "L-BFGS-B", "bounds": [(0, 1) for _ in range(42)]}
+            result_bh = basinhopping(
+                objective_func,
+                initial_points,
+                niter=20,
+                T=1.0,
+                stepsize=0.1,
+                minimizer_kwargs=minimizer_kwargs,
+                seed=42,
+                callback=lambda x, f, accepted: time.time() - start_time > time_limit - 10
+            )
+
+            if result_bh.success:
+                return result_bh.x
+        except Exception as e:
+            warnings.warn(f"Basin-hopping optimization failed: {e}")
+
+        # Fall back to L-BFGS-B with adaptive tolerance tightening
+        try:
+            # Track improvement to adaptively tighten tolerances
+            last_obj_value = float('inf')
+            improvement_count = 0
+            max_improvement_streak = 5
+
+            # Start with looser tolerances for faster initial convergence
+            ftol = 1e-6
+            gtol = 1e-6
+
+            # Try with initial loose tolerances
+            result = minimize(
+                objective_func,
+                initial_points,
+                method='L-BFGS-B',
+                bounds=[(0, 1) for _ in range(42)],
+                options={'maxiter': 150, 'ftol': ftol, 'gtol': gtol},
+                callback=lambda x: time.time() - start_time > time_limit - 10
+            )
+
+            # If we have room and significant improvement, try tighter tolerances
+            if time.time() - start_time < time_limit - 10 and result.success:
+                # Check if we're still making progress
+                current_obj = result.fun
+                if abs(current_obj - last_obj_value) > 1e-8:  # If there's significant improvement
+                    improvement_count += 1
+                    if improvement_count >= 2:  # After seeing consistent improvement
+                        # Tighten tolerances for more precise final result
+                        tightened_result = minimize(
+                            objective_func,
+                            result.x,
+                            method='L-BFGS-B',
+                            bounds=[(0, 1) for _ in range(42)],
+                            options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9},
+                            callback=lambda x: time.time() - start_time > time_limit - 10
+                        )
+                        if tightened_result.success:
+                            return tightened_result.x
+                else:
+                    improvement_count = 0  # Reset if no improvement
+
+            if result.success:
+                return result.x
+        except Exception as e:
+            warnings.warn(f"L-BFGS optimization failed: {e}")
+
+        return initial_points
+=======
+    def improved_local_refinement(objective_func, initial_points, time_limit):
+        """Apply multiple local optimization refinement approaches with spherical constraint"""
+        start_time = time.time()
+
+        # Convert to spherical coordinate system for better optimization
+        # First, normalize initial points to unit sphere
+        initial_points = normalize_to_unit_sphere(initial_points.reshape(-1, 3)).flatten()
+
+        # Try Basin-hopping first - very effective for this kind of problem
+        try:
+            # Basin-hopping with better parameters
+            minimizer_kwargs = {"method": "L-BFGS-B"}
+            result_bh = basinhopping(
+                objective_func,
+                initial_points,
+                niter=15,  # Reduced iterations due to time constraints
+                T=1.0,
+                stepsize=0.05,  # Smaller step size for spherical constraint
+                minimizer_kwargs=minimizer_kwargs,
+                seed=42,
+                callback=lambda x, f, accepted: time.time() - start_time > time_limit - 10
+            )
+
+            if result_bh.success:
+                # Ensure result is normalized to unit sphere
+                result_points = result_bh.x.reshape(-1, 3)
+                result_points = normalize_to_unit_sphere(result_points)
+                return result_points.flatten()
+        except Exception as e:
+            warnings.warn(f"Basin-hopping optimization failed: {e}")
+
+        # Fall back to L-BFGS-B with adaptive tolerance tightening
+        try:
+            # Track improvement to adaptively tighten tolerances
+            last_obj_value = float('inf')
+            improvement_count = 0
+
+            # Start with looser tolerances for faster initial convergence
+            ftol = 1e-6
+            gtol = 1e-6
+
+            # Try with initial loose tolerances
+            result = minimize(
+                objective_func,
+                initial_points,
+                method='L-BFGS-B',
+                options={'maxiter': 100, 'ftol': ftol, 'gtol': gtol},
+                callback=lambda x: time.time() - start_time > time_limit - 10
+            )
+
+            # If we have room and significant improvement, try tighter tolerances
+            if time.time() - start_time < time_limit - 10 and result.success:
+                # Check if we're still making progress
+                current_obj = result.fun
+                if abs(current_obj - last_obj_value) > 1e-8:  # If there's significant improvement
+                    improvement_count += 1
+                    if improvement_count >= 2:  # After seeing consistent improvement
+                        # Tighten tolerances for more precise final result
+                        tightened_result = minimize(
+                            objective_func,
+                            result.x,
+                            method='L-BFGS-B',
+                            options={'maxiter': 80, 'ftol': 1e-9, 'gtol': 1e-9},
+                            callback=lambda x: time.time() - start_time > time_limit - 10
+                        )
+                        if tightened_result.success:
+                            # Ensure final result is normalized to unit sphere
+                            final_points = tightened_result.x.reshape(-1, 3)
+                            final_points = normalize_to_unit_sphere(final_points)
+                            return final_points.flatten()
+                else:
+                    improvement_count = 0  # Reset if no improvement
+
+            if result.success:
+                # Ensure result is normalized to unit sphere
+                result_points = result.x.reshape(-1, 3)
+                result_points = normalize_to_unit_sphere(result_points)
+                return result_points.flatten()
+        except Exception as e:
+            warnings.warn(f"L-BFGS optimization failed: {e}")
+
+        # Final fallback - just normalize input
+        final_points = initial_points.reshape(-1, 3)
+        return normalize_to_unit_sphere(final_points).flatten()
+>>>>>>> REPLACE
+
+</DIFF>

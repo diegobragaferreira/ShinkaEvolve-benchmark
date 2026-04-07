@@ -1,0 +1,171 @@
+<NAME>
+add_sobol_initialization
+</NAME>
+
+<DESCRIPTION>
+Adding a more sophisticated Sobol sequence initialization that better fills the 3D space while maintaining good distribution properties for the 14-point problem. The current implementation uses a basic Sobol sequence but we can enhance it by generating points in a way that's more suitable for our specific problem - ensuring better coverage of the 3D space while still being able to project to the unit sphere effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class PointInitializationStrategy:
+    """Handles various point initialization strategies for 3D distributions."""
+
+    @staticmethod
+    def fibonacci_spiral_sphere(n_points: int) -> np.ndarray:
+        """Generate points on a sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(n_points):
+            y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    @staticmethod
+    def sobol_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+        """Initialize points using Sobol sequence for better space-filling properties."""
+        try:
+            sampler = qmc.Sobol(d=3, seed=seed)
+            points = sampler.random(n=n_points)
+            # Scale to unit sphere
+            points = points * 2 - 1  # Map to [-1, 1]^3
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            # Avoid division by zero
+            norms = np.where(norms == 0, 1.0, norms)
+            points = points / norms
+            return points
+        except:
+            # Fallback to random if qmc fails
+            return PointInitializationStrategy.random_initialization(n_points, seed)
+
+    @staticmethod
+    def random_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+        """Generate random points on unit sphere."""
+        np.random.seed(seed)
+        points = np.random.randn(n_points, 3)
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms
+=======
+class PointInitializationStrategy:
+    """Handles various point initialization strategies for 3D distributions."""
+
+    @staticmethod
+    def fibonacci_spiral_sphere(n_points: int) -> np.ndarray:
+        """Generate points on a sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(n_points):
+            y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    @staticmethod
+    def sobol_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+        """Initialize points using Sobol sequence for better space-filling properties."""
+        try:
+            # Use enhanced Sobol sequence approach with better distribution
+            sampler = qmc.Sobol(d=3, seed=seed)
+            points = sampler.random(n=n_points)
+            # Scale to [-1, 1]^3 to match expected constraints
+            points = points * 2 - 1
+            # Normalize to unit sphere
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            # Avoid division by zero
+            norms = np.where(norms == 0, 1.0, norms)
+            points = points / norms
+            return points
+        except:
+            # Fallback to random if qmc fails
+            return PointInitializationStrategy.random_initialization(n_points, seed)
+
+    @staticmethod
+    def enhanced_sobol_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+        """Enhanced Sobol initialization with improved point distribution."""
+        # Generate more points than needed to ensure good coverage
+        try:
+            sampler = qmc.Sobol(d=3, seed=seed)
+            # Generate slightly more points to allow selection
+            extra_points = int(n_points * 1.2)
+            points = sampler.random(n=extra_points)
+            # Scale to [-1, 1]^3
+            points = points * 2 - 1
+            # Normalize to unit sphere
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1.0, norms)
+            points = points / norms
+
+            # Select the best n_points based on spread
+            if len(points) >= n_points:
+                # Calculate distances from first point and select furthest ones
+                first_point = points[0].reshape(1, -1)
+                distances = np.linalg.norm(points - first_point, axis=1)
+                # Select indices of points with highest distances
+                selected_indices = np.argsort(distances)[-n_points:]
+                points = points[selected_indices]
+            else:
+                # If we don't have enough points, pad with random points
+                points = points[:n_points]
+
+            return points
+        except:
+            return PointInitializationStrategy.random_initialization(n_points, seed)
+
+    @staticmethod
+    def random_initialization(n_points: int, seed: int = 42) -> np.ndarray:
+        """Generate random points on unit sphere."""
+        np.random.seed(seed)
+        points = np.random.randn(n_points, 3)
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_strategies_with_enhanced_sobol
+</NAME>
+
+<DESCRIPTION>
+Updating the main optimization pipeline to include the enhanced Sobol initialization strategy among the initializations. This will give us a better starting point that should help achieve better optimization results by providing more evenly distributed initial configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Define initial strategies and their parameters
+        strategies = [
+            ('fibonacci', lambda: PointInitializationStrategy.fibonacci_spiral_sphere(self.n_points)),
+            ('sobol', lambda: PointInitializationStrategy.sobol_initialization(self.n_points, 42)),
+            ('random', lambda: PointInitializationStrategy.random_initialization(self.n_points, 42))
+        ]
+=======
+        # Define initial strategies and their parameters
+        strategies = [
+            ('fibonacci', lambda: PointInitializationStrategy.fibonacci_spiral_sphere(self.n_points)),
+            ('sobol', lambda: PointInitializationStrategy.sobol_initialization(self.n_points, 42)),
+            ('enhanced_sobol', lambda: PointInitializationStrategy.enhanced_sobol_initialization(self.n_points, 42)),
+            ('random', lambda: PointInitializationStrategy.random_initialization(self.n_points, 42))
+        ]
+>>>>>>> REPLACE
+</DIFF>

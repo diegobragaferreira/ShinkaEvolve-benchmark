@@ -1,0 +1,263 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances"""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances)
+
+    def objective_function(x_flat):
+        """Objective function to maximize (negative because we minimize)"""
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+        return -compute_min_max_ratio(points)
+
+    def constraint_function(x_flat):
+        """Constraint to keep points within unit square"""
+        points = x_flat.reshape(-1, 2)
+        # Return negative values for constraint violations (we want >= 0)
+        violations = np.concatenate([
+            np.minimum(points[:, 0], 0),
+            np.minimum(points[:, 1], 0),
+            np.maximum(points[:, 0] - 1, 0),
+            np.maximum(points[:, 1] - 1, 0)
+        ])
+        return violations
+
+    # Multi-start optimization with different initialization strategies
+    best_ratio = -np.inf
+    best_points = None
+
+    # Strategy 1: Enhanced hexagonal grid with proper hexagonal lattice
+    def hexagonal_grid_init():
+        # Create a proper hexagonal lattice with correct spacing
+        # In a hexagonal lattice, we want spacing such that nearest neighbors are at distance 1
+        # Vertical spacing = sqrt(3)/2, horizontal spacing = 1
+        points = []
+
+        # Hexagonal lattice parameters
+        hex_radius = 1.0  # We'll scale this to fit our unit square
+        row_spacing = hex_radius * np.sqrt(3) / 2.0
+        col_spacing = hex_radius
+
+        # Generate points in roughly a 4x4 hexagonal pattern
+        rows = 4
+        cols = 4
+        count = 0
+
+        for row in range(rows):
+            for col in range(cols):
+                if count >= 16:
+                    break
+
+                # Calculate position
+                x = col * col_spacing
+                # Offset odd rows for hexagonal pattern
+                if row % 2 == 1:
+                    x += col_spacing / 2.0
+                y = row * row_spacing
+
+                points.append([x, y])
+                count += 1
+
+        # Convert to numpy array
+        points = np.array(points[:16])
+
+        # Normalize to fit within unit square [0,1]x[0,1]
+        if len(points) > 0:
+            # Find bounding box
+            min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+            min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+
+            # Avoid division by zero
+            scale_x = 1.0 / (max_x - min_x) if max_x > min_x else 1.0
+            scale_y = 1.0 / (max_y - min_y) if max_y > min_y else 1.0
+
+            # Scale to fit within unit square
+            scale = min(scale_x, scale_y, 1.0)
+            points[:, 0] = (points[:, 0] - min_x) * scale
+            points[:, 1] = (points[:, 1] - min_y) * scale
+
+            # Center the pattern
+            center_shift = 0.5 - np.mean(points, axis=0)
+            points = points + center_shift
+
+            # Ensure all points are within bounds
+            points = np.clip(points, 0, 1)
+
+        # Apply systematic perturbations to break symmetry
+        np.random.seed(42)
+        # Apply different perturbation patterns based on position
+        perturbations = np.random.normal(0, 0.02, points.shape)
+
+        # Make perturbations position-dependent to avoid symmetric solutions
+        center = np.mean(points, axis=0)
+        distances_from_center = np.sqrt(np.sum((points - center)**2, axis=1))
+        max_distance = np.max(distances_from_center)
+
+        if max_distance > 0:
+            normalized_distances = distances_from_center / max_distance
+            # Perturb more strongly for outer points to encourage spreading
+            perturbation_magnitude = 0.03 * (1 - normalized_distances)
+            perturbations *= perturbation_magnitude.reshape(-1, 1)
+
+        points += perturbations
+        points = np.clip(points, 0, 1)
+
+        return points
+
+    # Strategy 2: Random with clustering avoidance
+    def random_init():
+        np.random.seed(42)
+        points = np.random.rand(16, 2)
+        return points
+
+    # Strategy 3: Perturbed hexagonal grid (more structured)
+    def perturbed_hexagonal_init():
+        points = hexagonal_grid_init()
+        np.random.seed(42)
+        # Add small random perturbations
+        points += np.random.normal(0, 0.02, points.shape)
+        # Ensure all points are within bounds
+        points = np.clip(points, 0, 1)
+        return points
+
+    initial_strategies = [
+        hexagonal_grid_init,
+        random_init,
+        perturbed_hexagonal_init
+    ]
+
+    # Try multiple random restarts with hybrid optimization
+    num_restarts = 7  # Increase restarts for better exploration
+    for restart in range(num_restarts):
+        # Select initialization strategy
+        init_func = initial_strategies[restart % len(initial_strategies)]
+        points = init_func()
+
+        # Flatten for optimization
+        x0 = points.flatten()
+
+        # Set up bounds for optimization
+        bounds = [(0, 1) for _ in range(32)]
+
+        # Try multiple optimization approaches
+        optimization_attempts = 0
+        max_attempts = 3
+
+        while optimization_attempts < max_attempts:
+            try:
+                # Alternate between global and local optimization strategies
+                if optimization_attempts == 0:
+                    # Use differential evolution for global search (first attempt)
+                    from scipy.optimize import differential_evolution
+                    result = differential_evolution(
+                        objective_function,
+                        bounds,
+                        maxiter=300,
+                        popsize=15,
+                        tol=1e-8,
+                        seed=42 + restart + optimization_attempts,
+                        callback=None
+                    )
+
+                elif optimization_attempts == 1:
+                    # Use L-BFGS-B for local refinement
+                    result = minimize(
+                        objective_function,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 500, 'ftol': 1e-8}
+                    )
+                else:
+                    # Use SLSQP as fallback
+                    result = minimize(
+                        objective_function,
+                        x0,
+                        method='SLSQP',
+                        bounds=bounds,
+                        constraints={'type': 'ineq', 'fun': constraint_function},
+                        options={'maxiter': 500, 'ftol': 1e-6, 'eps': 1e-4}
+                    )
+
+                if result.success:
+                    final_points = result.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    ratio = compute_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+                    break  # Successful optimization, move to next restart
+
+            except Exception as e:
+                optimization_attempts += 1
+                continue
+
+        optimization_attempts += 1
+
+    # If no optimization succeeded, try more robust fallback strategies
+    if best_points is None:
+        # Try a sequence of better fallbacks
+        fallback_strategies = []
+
+        # Strategy 1: Try hexagonal grid with more aggressive perturbations
+        try:
+            points = hexagonal_grid_init()
+            points += np.random.normal(0, 0.03, points.shape)  # More aggressive perturbations
+            points = np.clip(points, 0, 1)
+            fallback_strategies.append(points)
+        except:
+            pass
+
+        # Strategy 2: Try random with better seed
+        try:
+            np.random.seed(123)  # Different seed
+            points = np.random.rand(16, 2)
+            fallback_strategies.append(points)
+        except:
+            pass
+
+        # Strategy 3: Try structured grid
+        try:
+            # Create a 4x4 grid but with better spacing
+            points = []
+            for i in range(4):
+                for j in range(4):
+                    points.append([i * 0.333, j * 0.333])
+            points = np.array(points[:16])
+            points = np.clip(points, 0, 1)
+            fallback_strategies.append(points)
+        except:
+            pass
+
+        # Try each fallback strategy
+        for fallback_points in fallback_strategies:
+            try:
+                ratio = compute_min_max_ratio(fallback_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = fallback_points.copy()
+            except:
+                continue
+
+        # If still no good result, create a final random fallback
+        if best_points is None:
+            np.random.seed(42)
+            best_points = np.random.rand(16, 2)
+
+    return best_points
+
+# EVOLVE-BLOCK-END

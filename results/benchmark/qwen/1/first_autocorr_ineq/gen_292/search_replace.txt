@@ -1,0 +1,119 @@
+<NAME>
+enhance_local_search_with_multi_start_l_bfgs
+</NAME>
+
+<DESCRIPTION>
+This enhancement focuses on improving the local search phase by replacing the current single LP-based direction finding with a multi-start L-BFGS optimization procedure. This approach leverages the cached autocorrelation evaluations for efficiency and explores multiple local optima from the LP solution, aligning with the superior performance strategies of established methods. The key insight is that by combining global evolutionary search with robust local refinement, we can achieve more accurate convergence to better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_search_improvement(sequence: list[float]) -> list[float]:
+    """Enhanced local search combining multiple strategies."""
+    # Strategy 1: Gradient-based improvement
+    improved1 = gradient_improve_sequence(sequence, step_size=0.01)
+    _, inv_c1_1 = compute_autocorrelation_constant(improved1)
+
+    # Strategy 2: Perturbation with local optimization
+    perturbed = sequence.copy()
+    for i in range(len(perturbed)):
+        if random.random() < 0.1:  # Small chance to perturb
+            perturbed[i] *= random.uniform(0.9, 1.1)
+    perturbed = [max(0.01, x) for x in perturbed]
+
+    # Try local optimization on perturbed version
+    try:
+        def objective(x):
+            _, inv_c1 = compute_autocorrelation_constant(x)
+            return -inv_c1  # Minimize negative to maximize original
+
+        bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+        result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds)
+        if result.success:
+            improved2 = result.x.tolist()
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+        else:
+            improved2 = perturbed
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+    except:
+        improved2 = perturbed
+        _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+
+    # Choose the best result
+    _, inv_c1_original = compute_autocorrelation_constant(sequence)
+    if inv_c1_1 >= inv_c1_original and inv_c1_1 >= inv_c1_2:
+        return improved1
+    elif inv_c1_2 >= inv_c1_original and inv_c1_2 >= inv_c1_1:
+        return improved2
+    else:
+        return sequence
+=======
+def local_search_improvement(sequence: list[float]) -> list[float]:
+    """Enhanced local search using multi-start L-BFGS optimization with cached evaluations."""
+    best_sequence = sequence.copy()
+    _, best_inv_c1 = compute_autocorrelation_constant(best_sequence)
+
+    # Strategy 1: Gradient-based improvement
+    improved1 = gradient_improve_sequence(sequence, step_size=0.01)
+    _, inv_c1_1 = compute_autocorrelation_constant(improved1)
+    if inv_c1_1 > best_inv_c1:
+        best_sequence = improved1
+        best_inv_c1 = inv_c1_1
+
+    # Strategy 2: Multi-start L-BFGS optimization from LP direction
+    lp_direction = get_good_direction_to_move_into(sequence)
+    if lp_direction is not None:
+        # Perform multiple L-BFGS optimizations from different starting points
+        num_starts = 5
+        for _ in range(num_starts):
+            # Slightly perturb LP direction to create diverse starting points
+            start_point = lp_direction.copy()
+            for i in range(len(start_point)):
+                if random.random() < 0.2:  # 20% chance to perturb
+                    start_point[i] *= random.uniform(0.8, 1.2)
+
+            # Ensure positivity
+            start_point = [max(0.01, x) for x in start_point]
+
+            try:
+                def objective(x):
+                    _, inv_c1 = compute_autocorrelation_constant(x)
+                    return -inv_c1  # Minimize negative to maximize original
+
+                bounds = [(0.01, 1000.0) for _ in range(len(start_point))]
+                result = optimize.minimize(objective, start_point, method='L-BFGS-B', bounds=bounds)
+                if result.success:
+                    improved_seq = result.x.tolist()
+                    _, inv_c1 = compute_autocorrelation_constant(improved_seq)
+                    if inv_c1 > best_inv_c1:
+                        best_sequence = improved_seq
+                        best_inv_c1 = inv_c1
+            except Exception:
+                pass  # Continue if optimization fails
+
+    # Strategy 3: Perturbation with local optimization
+    perturbed = sequence.copy()
+    for i in range(len(perturbed)):
+        if random.random() < 0.1:  # Small chance to perturb
+            perturbed[i] *= random.uniform(0.9, 1.1)
+    perturbed = [max(0.01, x) for x in perturbed]
+
+    try:
+        def objective(x):
+            _, inv_c1 = compute_autocorrelation_constant(x)
+            return -inv_c1  # Minimize negative to maximize original
+
+        bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+        result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds)
+        if result.success:
+            improved2 = result.x.tolist()
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+            if inv_c1_2 > best_inv_c1:
+                best_sequence = improved2
+                best_inv_c1 = inv_c1_2
+    except Exception:
+        pass  # Continue if optimization fails
+
+    return best_sequence
+>>>>>>> REPLACE
+</DIFF>

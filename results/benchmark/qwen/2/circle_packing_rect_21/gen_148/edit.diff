@@ -1,0 +1,595 @@
+--- a/original.py
++++ b/original.py
+@@ -1,325 +1,308 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial import KDTree
++from scipy.spatial import Voronoi, distance
++from scipy.spatial.distance import cdist
+ import random
+ import time
+-from collections import defaultdict
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
++    Uses Voronoi diagram based approach for superior spatial distribution.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     # Set random seed for reproducibility
+     random.seed(42)
+     np.random.seed(42)
+ 
+     # Rectangle dimensions: width + height = 2, optimized ratio
+     rect_width = 1.2
+     rect_height = 0.8
+ 
+     n = 21
+ 
+-    # Improved initial grid generation using a more strategic approach
+-    def generate_improved_initial_placement(num_circles, width, height):
++    def generate_voronoi_initial_placement(num_circles, width, height):
++        """
++        Generate initial circle placement using Voronoi diagram approach.
++        """
++        # Generate random points for Voronoi diagram
++        # Add some padding to avoid edge issues
++        padding = 0.1
++        points = []
++        
++        # Create a structured initial set of points that will form good Voronoi cells
++        grid_rows = int(np.sqrt(num_circles)) + 1
++        grid_cols = int(np.ceil(num_circles / grid_rows))
++        
++        # Create a roughly uniform grid of points
++        for i in range(grid_rows):
++            for j in range(grid_cols):
++                if len(points) >= num_circles:
++                    break
++                x = padding + (j + 0.5) * (width - 2*padding) / grid_cols
++                y = padding + (i + 0.5) * (height - 2*padding) / grid_rows
++                # Add slight randomness to avoid perfect grid patterns
++                x += random.uniform(-0.02, 0.02)
++                y += random.uniform(-0.02, 0.02)
++                if 0 <= x <= width and 0 <= y <= height:
++                    points.append([x, y])
++        
++        # If we didn't get enough points, add random ones
++        while len(points) < num_circles:
++            x = random.uniform(padding, width - padding)
++            y = random.uniform(padding, height - padding)
++            points.append([x, y])
++        
++        points = np.array(points[:num_circles])
++        
++        # Compute Voronoi diagram
++        try:
++            vor = Voronoi(points)
++        except:
++            # Fallback to random placement if Voronoi fails
++            points = np.random.rand(num_circles, 2) * [width - 2*padding, height - 2*padding] + [padding, padding]
++            vor = Voronoi(points)
++        
+         circles = []
+-
+-        # For 21 circles, we'll try to arrange them in a more systematic way:
+-        # 1. Use a triangular lattice pattern for better packing (approximate hexagonal)
+-        # 2. Adjust the grid to fit the rectangular container optimally
+-
+-        # Estimate optimal density and grid dimensions
+-        # For 21 circles, we'll try to use a 5x5 grid pattern that can be scaled appropriately
+-        rows = 5
+-        cols = 5
+-
+-        # Calculate cell size that will give us good density
+-        cell_width = width / cols * 0.85
+-        cell_height = height / rows * 0.85
+-
+-        # Adjust for hexagonal packing effect
+-        spacing_x = cell_width
+-        spacing_y = cell_height * np.sqrt(3) / 2
+-
+-        # Make sure we don't exceed the container size
+-        actual_rows = int(height / spacing_y) + 1
+-        actual_cols = int(width / spacing_x) + 1
+-
+-        # If we need fewer than 21 circles, reduce grid
+-        if actual_rows * actual_cols < num_circles:
+-            actual_rows = max(1, int(np.sqrt(num_circles)))
+-            actual_cols = max(1, int(num_circles / actual_rows))
+-
+-        # Generate grid
+-        circle_count = 0
+-        y_offset = 0.1
+-        x_offset = 0.1
+-
+-        for i in range(actual_rows):
+-            y = y_offset + i * spacing_y
+-            x_start = x_offset + (i % 2) * spacing_x / 2  # Offset every other row for hex pattern
+-            for j in range(actual_cols):
+-                if circle_count >= num_circles:
+-                    break
+-                x = x_start + j * spacing_x
+-                if x < width - 0.1 and y < height - 0.1:
+-                    # Start with adaptive radius that scales with spacing
+-                    r = min(0.04, spacing_x / 4, spacing_y / 4)
+-                    circles.append([x, y, r])
+-                    circle_count += 1
+-            if circle_count >= num_circles:
+-                break
+-
+-        # Fill remaining spots randomly if needed
+-        while len(circles) < num_circles:
+-            x = np.random.uniform(0.1, width - 0.1)
+-            y = np.random.uniform(0.1, height - 0.1)
+-            r = np.random.uniform(0.01, 0.05)
++        for i, (x, y) in enumerate(points):
++            # Compute Voronoi cell area and determine radius
++            # Find vertices of this cell
++            if i < len(vor.point_region):
++                region = vor.point_region[i]
++                if region >= 0:
++                    # Get vertices of this Voronoi cell
++                    vertices = vor.vertices[vor.regions[region]]
++                    if len(vertices) > 0:
++                        # Find the minimum distance from centroid to cell boundary
++                        min_dist = min(
++                            distance.euclidean([x, y], vertex) for vertex in vertices
++                        )
++                        # Estimate radius based on cell size and proximity to boundaries
++                        r = min(min_dist * 0.4, 0.15)
++                    else:
++                        r = 0.05
++                else:
++                    # Default case
++                    r = 0.05
++            else:
++                r = 0.05
++            
++            # Ensure radius is within bounds
++            r = max(0.005, min(r, width/4, height/4))
++            
++            # Ensure circle fits within rectangle
++            r = min(r, x - 0.01, width - x - 0.01, y - 0.01, height - y - 0.01)
++            
+             circles.append([x, y, r])
+-
++        
+         return np.array(circles)
+ 
+-    # Efficient constraint validation with spatial indexing and better penalty calculation
+-    def calculate_fitness_with_spatial_indexing(circles_array):
++    def calculate_fitness_voronoi_based(circles_array):
++        """Fitness calculation with Voronoi-based penalties"""
+         total_radius = np.sum(circles_array[:, 2])
+-
++        
+         penalty = 0
+-
+-        # Boundary penalties with stronger penalty near edges
+-        for i in range(n):
+-            cx, cy, r = circles_array[i]
+-            if cx - r < 0.01:
+-                penalty += 100000 * (r - cx)**2
+-            if cx + r > rect_width - 0.01:
+-                penalty += 100000 * (cx + r - rect_width)**2
+-            if cy - r < 0.01:
+-                penalty += 100000 * (r - cy)**2
+-            if cy + r > rect_height - 0.01:
+-                penalty += 100000 * (cy + r - rect_height)**2
+-
+-        # Overlap penalties using spatial indexing for efficiency
+-        points = circles_array[:, :2]
+-        tree = KDTree(points)
+-
+-        # Query for all possible overlapping pairs efficiently
+-        for i in range(n):
+-            cx, cy, r = circles_array[i]
+-
+-            # Find neighbors within 2*(r + safety_margin) distance
+-            neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+-
+-            for j in neighbor_indices:
++        
++        # Boundary penalties
++        for i in range(len(circles_array)):
++            x, y, r = circles_array[i]
++            # More severe penalties near edges
++            if x - r < 0.01:
++                penalty += 100000 * (r - x)**2
++            if x + r > rect_width - 0.01:
++                penalty += 100000 * (x + r - rect_width)**2
++            if y - r < 0.01:
++                penalty += 100000 * (r - y)**2
++            if y + r > rect_height - 0.01:
++                penalty += 100000 * (y + r - rect_height)**2
++        
++        # Overlap penalties using direct distance computation
++        for i in range(len(circles_array)):
++            for j in range(i+1, len(circles_array)):
++                x1, y1, r1 = circles_array[i]
++                x2, y2, r2 = circles_array[j]
++                
++                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                overlap = (r1 + r2) - dist
++                
++                if overlap > 0:
++                    penalty += 200000 * overlap**2
++        
++        return total_radius - penalty
++
++    def voronoi_force_based_optimization(circles_array, max_iter=500):
++        """Optimize using force-based approach derived from Voronoi geometry"""
++        best_circles = circles_array.copy()
++        best_fitness = calculate_fitness_voronoi_based(best_circles)
++        
++        # Parameters for force-based optimization
++        dt = 0.01
++        repulsion_strength = 1000.0
++        boundary_strength = 500.0
++        attraction_strength = 10.0
++        
++        for iteration in range(max_iter):
++            # Calculate forces for each circle
++            forces = np.zeros_like(best_circles[:, :2])
++            
++            # Repulsion forces from overlaps
++            positions = best_circles[:, :2]
++            radii = best_circles[:, 2]
++            
++            for i in range(len(best_circles)):
++                x1, y1 = positions[i]
++                r1 = radii[i]
++                
++                # Check nearby circles for repulsion
++                for j in range(len(best_circles)):
++                    if i != j:
++                        x2, y2 = positions[j]
++                        r2 = radii[j]
++                        dx = x2 - x1
++                        dy = y2 - y1
++                        dist = np.sqrt(dx*dx + dy*dy)
++                        
++                        if dist > 0 and dist < (r1 + r2):
++                            # Repulsion force
++                            force_mag = repulsion_strength * (1.0 - dist/(r1 + r2)) / (dist + 1e-8)
++                            forces[i, 0] += force_mag * dx / dist
++                            forces[i, 1] += force_mag * dy / dist
++            
++            # Boundary forces
++            for i in range(len(best_circles)):
++                x, y, r = best_circles[i]
++                fx, fy = 0, 0
++                
++                # Left boundary
++                if x - r < 0.01:
++                    fx += boundary_strength * (0.01 - (x - r))
++                # Right boundary
++                if x + r > rect_width - 0.01:
++                    fx -= boundary_strength * ((x + r) - (rect_width - 0.01))
++                # Bottom boundary
++                if y - r < 0.01:
++                    fy += boundary_strength * (0.01 - (y - r))
++                # Top boundary
++                if y + r > rect_height - 0.01:
++                    fy -= boundary_strength * ((y + r) - (rect_height - 0.01))
++                
++                forces[i, 0] += fx
++                forces[i, 1] += fy
++            
++            # Move circles
++            for i in range(len(best_circles)):
++                # Apply forces
++                best_circles[i, 0] += forces[i, 0] * dt
++                best_circles[i, 1] += forces[i, 1] * dt
++                
++                # Keep within bounds
++                x, y, r = best_circles[i]
++                best_circles[i, 0] = np.clip(x, r + 0.01, rect_width - r - 0.01)
++                best_circles[i, 1] = np.clip(y, r + 0.01, rect_height - r - 0.01)
++            
++            # Periodic fitness check for early stopping
++            if iteration % 20 == 0:
++                current_fitness = calculate_fitness_voronoi_based(best_circles)
++                if current_fitness > best_fitness:
++                    best_fitness = current_fitness
++                else:
++                    # If no progress for several iterations, reduce learning rate
++                    dt *= 0.99
++        
++        return best_circles
++
++    def adaptive_radius_enhancement(circles_array):
++        """Enhance radii by analyzing Voronoi cells and expanding where possible"""
++        best_circles = circles_array.copy()
++        
++        # For each circle, try to increase radius if safe
++        for i in range(len(best_circles)):
++            x, y, r = best_circles[i]
++            
++            # Compute maximum allowable radius
++            max_radius = float('inf')
++            
++            # Boundary constraints
++            max_radius = min(max_radius, x - 0.01)
++            max_radius = min(max_radius, rect_width - x - 0.01)
++            max_radius = min(max_radius, y - 0.01)
++            max_radius = min(max_radius, rect_height - y - 0.01)
++            
++            # Overlap constraints
++            for j in range(len(best_circles)):
+                 if i != j:
+-                    other_cx, other_cy, other_r = circles_array[j]
+-                    dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+-                    overlap = (r + other_r) - dist
+-
+-                    if overlap > 0:
+-                        penalty += 500000 * overlap**2
+-
+-        return total_radius - penalty
+-
+-    # Enhanced local refinement with multiple strategies
+-    def enhanced_refinement(circles_array, max_iter=100):
+-        best_circles = circles_array.copy()
+-        best_fitness = calculate_fitness_with_spatial_indexing(best_circles)
+-
+-        # Track improvement history to detect when to stop early
+-        improvement_history = []
+-
+-        for iteration in range(max_iter):
+-            improved = False
+-
+-            # Strategy 1: Try to increase radii of circles that have room
+-            for i in range(n):
+-                cx, cy, r = best_circles[i]
+-
+-                # Compute max allowable radius
+-                max_radius = float('inf')
+-
+-                # Boundary constraints
+-                max_radius = min(max_radius, cx - 0.01)
+-                max_radius = min(max_radius, rect_width - cx - 0.01)
+-                max_radius = min(max_radius, cy - 0.01)
+-                max_radius = min(max_radius, rect_height - cy - 0.01)
+-
+-                # Overlap constraints using spatial indexing on current neighbors
+-                points = best_circles[:, :2]
+-                tree = KDTree(points)
+-                neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+-
+-                for j in neighbor_indices:
+-                    if i != j:
+-                        other_cx, other_cy, other_r = best_circles[j]
+-                        dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+-                        max_radius = min(max_radius, dist - other_r - 0.001)
+-
+-                # Try to increase radius if beneficial
+-                if max_radius > r and max_radius > 0.001:
+-                    new_r = min(r + 0.01, max_radius)
+-                    if new_r > r + 0.001:  # Significant improvement needed
+-                        # Check if this actually improves fitness
+-                        temp_circles = best_circles.copy()
+-                        temp_circles[i, 2] = new_r
+-
+-                        # Use spatial indexing for validation
+-                        valid = True
+-                        temp_points = temp_circles[:, :2]
+-                        temp_tree = KDTree(temp_points)
+-                        temp_neighbor_indices = temp_tree.query_ball_point([cx, cy], 2*(new_r + 0.01) + 0.001)
+-
+-                        for k in temp_neighbor_indices:
+-                            if k != i:
+-                                other_cx, other_cy, other_r = temp_circles[k]
+-                                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+-                                if dist < new_r + other_r:
+-                                    valid = False
+-                                    break
+-
+-                        if valid:
+-                            test_circles = best_circles.copy()
+-                            test_circles[i, 2] = new_r
+-                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+-
+-                            if test_fitness > best_fitness:
+-                                best_fitness = test_fitness
+-                                best_circles = test_circles
+-                                improved = True
+-
+-            # Strategy 2: Try small position perturbations
+-            if not improved and iteration % 5 == 0:
+-                # Perturb a few circles to escape local minima
+-                for _ in range(3):  # Try up to 3 perturbations
+-                    i = random.randint(0, n-1)
+-                    x_old, y_old, r = best_circles[i]
+-
+-                    # Small positional perturbations
+-                    dx = np.random.uniform(-0.02, 0.02)
+-                    dy = np.random.uniform(-0.02, 0.02)
+-
+-                    new_x = x_old + dx
+-                    new_y = y_old + dy
+-
+-                    # Check if new position is valid
+-                    if (0.01 + r <= new_x <= rect_width - 0.01 - r and
+-                        0.01 + r <= new_y <= rect_height - 0.01 - r):
+-
+-                        # Validate with spatial indexing
+-                        temp_circles = best_circles.copy()
+-                        temp_circles[i, 0] = new_x
+-                        temp_circles[i, 1] = new_y
+-
+-                        # Check overlap
+-                        valid = True
+-                        temp_points = temp_circles[:, :2]
+-                        temp_tree = KDTree(temp_points)
+-                        temp_neighbor_indices = temp_tree.query_ball_point([new_x, new_y], 2*(r + 0.01) + 0.001)
+-
+-                        for k in temp_neighbor_indices:
+-                            if k != i:
+-                                other_cx, other_cy, other_r = temp_circles[k]
+-                                dist = np.sqrt((new_x - other_cx)**2 + (new_y - other_cy)**2)
+-                                if dist < r + other_r:
+-                                    valid = False
+-                                    break
+-
+-                        if valid:
+-                            test_circles = best_circles.copy()
+-                            test_circles[i, 0] = new_x
+-                            test_circles[i, 1] = new_y
+-                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+-
+-                            if test_fitness > best_fitness:
+-                                best_fitness = test_fitness
+-                                best_circles = test_circles
+-                                improved = True
+-
+-            # Track improvement
+-            improvement_history.append(best_fitness)
+-            if len(improvement_history) > 10:
+-                improvement_history.pop(0)
+-
+-            # Stop early if no meaningful improvement for several iterations
+-            if len(improvement_history) >= 10:
+-                recent_improvements = [improvement_history[i] - improvement_history[i-1]
+-                                     for i in range(1, len(improvement_history))]
+-                if all(improvement < 1e-6 for improvement in recent_improvements):
+-                    break
+-
++                    x2, y2, r2 = best_circles[j]
++                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
++                    max_radius = min(max_radius, dist - r2 - 0.001)
++            
++            # Try increasing radius if beneficial
++            if max_radius > r and max_radius > 0.001:
++                new_r = min(r + 0.01, max_radius)
++                if new_r > r:
++                    # Test validity of new configuration
++                    temp_circles = best_circles.copy()
++                    temp_circles[i, 2] = new_r
++                    
++                    # Check overlaps
++                    valid = True
++                    for k in range(len(temp_circles)):
++                        if k != i:
++                            xk, yk, rk = temp_circles[k]
++                            dist = np.sqrt((x - xk)**2 + (y - yk)**2)
++                            if dist < new_r + rk:
++                                valid = False
++                                break
++                    
++                    if valid:
++                        best_circles[i, 2] = new_r
++        
+         return best_circles
+ 
+-    # Multi-start optimization to avoid local minima
+-    def multi_start_optimization(initial_solution):
+-        best_solution = initial_solution.copy()
+-        best_fitness = calculate_fitness_with_spatial_indexing(best_solution)
+-
+-        # Try multiple random restarts to find better solutions
+-        num_restarts = 5
+-        for restart in range(num_restarts):
+-            # Create a new random initialization
+-            random_solution = generate_improved_initial_placement(n, rect_width, rect_height)
+-
+-            # Apply refinement to this random start
+-            refined_solution = enhanced_refinement(random_solution, max_iter=50)
+-            refined_fitness = calculate_fitness_with_spatial_indexing(refined_solution)
+-
+-            if refined_fitness > best_fitness:
+-                best_fitness = refined_fitness
+-                best_solution = refined_solution.copy()
+-
+-        return best_solution
+-
+-    # Main optimization pipeline
+-    # Phase 1: Generate initial solution with better placement
+-    initial_circles = generate_improved_initial_placement(n, rect_width, rect_height)
+-
+-    # Phase 2: Multi-start local optimization to improve starting point
+-    improved_initial = multi_start_optimization(initial_circles)
+-
+-    # Phase 3: Enhanced local refinement
+-    refined_solution = enhanced_refinement(improved_initial, max_iter=80)
+-
+-    # Final validation and cleanup
+-    final_fitness = calculate_fitness_with_spatial_indexing(refined_solution)
+-
+-    # Ensure all constraints are satisfied
+-    points = refined_solution[:, :2]
+-    tree = KDTree(points)
+-
+-    # Final validation pass
+-    valid = True
++    def multi_stage_voronoi_optimization(initial_circles):
++        """Full optimization pipeline using Voronoi approach"""
++        
++        # Stage 1: Voronoi-based initial placement
++        stage1_circles = generate_voronoi_initial_placement(n, rect_width, rect_height)
++        
++        # Stage 2: Force-based optimization
++        stage2_circles = voronoi_force_based_optimization(stage1_circles, max_iter=300)
++        
++        # Stage 3: Radius enhancement
++        stage3_circles = adaptive_radius_enhancement(stage2_circles)
++        
++        # Stage 4: Final force-based optimization
++        stage4_circles = voronoi_force_based_optimization(stage3_circles, max_iter=200)
++        
++        # Stage 5: Final radius enhancement
++        stage5_circles = adaptive_radius_enhancement(stage4_circles)
++        
++        return stage5_circles
++
++    # Execute the Voronoi-based optimization
++    final_circles = multi_stage_voronoi_optimization(None)
++    
++    # Final validation
++    total_radius = np.sum(final_circles[:, 2])
++    fitness = calculate_fitness_voronoi_based(final_circles)
++    
++    # Ensure final constraints are met
+     for i in range(n):
+-        cx, cy, r = refined_solution[i]
+-
+-        # Check boundary constraints
+-        if cx - r < 0.01 or cx + r > rect_width - 0.01 or \
+-           cy - r < 0.01 or cy + r > rect_height - 0.01:
+-            valid = False
+-            break
+-
+-        # Check overlap constraints
+-        neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+-        for j in neighbor_indices:
+-            if i != j:
+-                other_cx, other_cy, other_r = refined_solution[j]
+-                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+-                if dist < r + other_r:
+-                    valid = False
+-                    break
+-
+-    # If validation fails, do one last adaptive refinement
+-    if not valid:
+-        refined_solution = enhanced_refinement(refined_solution, max_iter=30)
+-
+-    return refined_solution
++        x, y, r = final_circles[i]
++        # Keep within bounds
++        final_circles[i, 0] = np.clip(x, r + 0.01, rect_width - r - 0.01)
++        final_circles[i, 1] = np.clip(y, r + 0.01, rect_height - r - 0.01)
++        # Ensure positive radius
++        final_circles[i, 2] = max(0.001, r)
++    
++    return final_circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

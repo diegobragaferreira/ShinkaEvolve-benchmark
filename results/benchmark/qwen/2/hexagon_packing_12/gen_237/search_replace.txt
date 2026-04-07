@@ -1,0 +1,102 @@
+<NAME>
+implement_numba_jit_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Shapely operations for overlap detection which is computationally expensive. By implementing a Numba JIT-compiled Separating Axis Theorem (SAT) overlap detection function, we can significantly speed up the overlap checking process during optimization. This will allow for faster fitness evaluations and more efficient exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap_shapely(poly1, poly2):
+    """Check overlap using Shapely operations."""
+    return poly1.intersects(poly2)
+
+
+def calculate_min_enclosing_hexagon_fast(inner_hex_data, scale_factor=1.05):
+=======
+@jit(nopython=True)
+def separate_axis_test_jit(vertices1, vertices2):
+    """Fast SAT overlap detection using Numba."""
+    # Get all edges of both hexagons
+    edges1 = np.empty((6, 2), dtype=np.float64)
+    edges2 = np.empty((6, 2), dtype=np.float64)
+
+    for i in range(6):
+        edges1[i] = vertices1[i] - vertices1[(i+1)%6]
+        edges2[i] = vertices2[i] - vertices2[(i+1)%6]
+
+    # Project both hexagons onto each edge direction
+    all_axes = np.vstack([edges1, edges2])
+
+    for axis in all_axes:
+        # Normalize axis
+        axis_norm = np.sqrt(axis[0]**2 + axis[1]**2)
+        if axis_norm == 0:
+            continue
+        norm_axis = axis / axis_norm
+
+        # Project both polygons onto this axis
+        proj1 = np.empty(6, dtype=np.float64)
+        proj2 = np.empty(6, dtype=np.float64)
+
+        for i in range(6):
+            proj1[i] = vertices1[i][0] * norm_axis[0] + vertices1[i][1] * norm_axis[1]
+            proj2[i] = vertices2[i][0] * norm_axis[0] + vertices2[i][1] * norm_axis[1]
+
+        # Check for overlap
+        min1, max1 = proj1.min(), proj1.max()
+        min2, max2 = proj2.min(), proj2.max()
+
+        # If no overlap, then they don't intersect
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+
+
+def check_overlaps_spatial_hash_jit(hex_data, vertices_cache=None):
+    """Check overlaps using spatial hashing with JIT-compiled overlap detection."""
+    if len(hex_data) <= 1:
+        return False
+
+    # Create spatial hash grid
+    grid, cell_size = spatial_hash_grid(hex_data)
+
+    # Check overlaps efficiently using neighbor lists
+    for i in range(len(hex_data)):
+        cx1, cy1, angle1 = hex_data[i]
+
+        # Get grid cell coordinates for this hexagon
+        grid_x = int(cx1 // cell_size)
+        grid_y = int(cy1 // cell_size)
+
+        # Get potential neighbors
+        neighbors = get_neighbors(grid, grid_x, grid_y, cell_size)
+
+        # Check overlap only with neighbors
+        for j in neighbors:
+            if i >= j:  # Avoid duplicate checks
+                continue
+
+            cx2, cy2, angle2 = hex_data[j]
+
+            # Use cached vertices if available
+            if vertices_cache is not None:
+                vertices1 = vertices_cache[i]
+                vertices2 = vertices_cache[j]
+            else:
+                vertices1 = hexagon_vertices_jit(cx1, cy1, angle1)
+                vertices2 = hexagon_vertices_jit(cx2, cy2, angle2)
+
+            # Perform JIT overlap test
+            if separate_axis_test_jit(vertices1, vertices2):
+                return True
+
+    return False
+
+
+def calculate_min_enclosing_hexagon_fast(inner_hex_data, scale_factor=1.05):
+>>>>>>> REPLACE
+
+</DIFF>

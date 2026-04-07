@@ -1,0 +1,258 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,233 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import cdist
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++import random
++from copy import deepcopy
++import time
++
++def generate_hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
++    """Generate vertices of a regular hexagon given center, angle, and side length"""
++    angle_rad = np.radians(angle_deg)
++    angles = np.linspace(0, 2*np.pi, 7) + angle_rad
++    vertices = np.array([
++        [center_x + side_length * np.cos(angle),
++         center_y + side_length * np.sin(angle)]
++        for angle in angles
++    ])
++    return vertices
++
++def check_containment(hexagon_vertices, outer_hex_vertices):
++    """Check if hexagon is fully contained within outer hexagon"""
++    hex_poly = Polygon(hexagon_vertices)
++    outer_poly = Polygon(outer_hex_vertices)
++    return outer_poly.contains(hex_poly)
++
++def check_overlap(hex1_vertices, hex2_vertices):
++    """Check if two hexagons overlap"""
++    hex1_poly = Polygon(hex1_vertices)
++    hex2_poly = Polygon(hex2_vertices)
++    return hex1_poly.intersects(hex2_poly)
++
++def compute_outer_hexagon_radius(inner_hex_data, outer_center=(0,0)):
++    """Estimate minimum radius needed to contain all inner hexagons"""
++    max_dist = 0
++    side_length = 1
++    
++    for i in range(len(inner_hex_data)):
++        cx, cy, angle = inner_hex_data[i]
++        vertices = generate_hexagon_vertices(cx, cy, angle, side_length)
++        
++        # Calculate distance from center to each vertex
++        for vx, vy in vertices:
++            dist = np.sqrt((vx - outer_center[0])**2 + (vy - outer_center[1])**2)
++            max_dist = max(max_dist, dist)
++    
++    # Add buffer for safety
++    return max_dist * 1.1
++
++def evaluate_fitness(inner_hex_data, outer_hex_data, outer_radius):
++    """Evaluate fitness of a packing configuration"""
++    # Create outer hexagon vertices
++    outer_vertices = generate_hexagon_vertices(outer_hex_data[0], outer_hex_data[1], outer_hex_data[2], outer_radius)
++    
++    # Check containment and overlap
++    total_penalty = 0
++    n = len(inner_hex_data)
++    
++    # Check containment for all inner hexagons
++    for i in range(n):
++        cx, cy, angle = inner_hex_data[i]
++        vertices = generate_hexagon_vertices(cx, cy, angle, 1)
++        if not check_containment(vertices, outer_vertices):
++            total_penalty += 1000  # Large penalty for containment violation
++    
++    # Check overlaps between all pairs
++    for i in range(n):
++        for j in range(i+1, n):
++            v1 = generate_hexagon_vertices(inner_hex_data[i][0], inner_hex_data[i][1], inner_hex_data[i][2], 1)
++            v2 = generate_hexagon_vertices(inner_hex_data[j][0], inner_hex_data[j][1], inner_hex_data[j][2], 1)
++            if check_overlap(v1, v2):
++                total_penalty += 100  # Penalty for overlap
++    
++    # If any violation, return a very poor fitness
++    if total_penalty > 0:
++        return -total_penalty
++    
++    # Otherwise, return inverse of outer radius as fitness (we want to maximize this)
++    return 1.0 / outer_radius
++
++def create_individual():
++    """Create a random valid individual (packing configuration)"""
++    # Generate random positions and angles for 11 hexagons
++    positions = []
++    angles = []
++    
++    # Start with some reasonable initial layout
++    for i in range(11):
++        # More diverse positioning
++        if i == 0:
++            positions.append([0.0, 0.0])
++        else:
++            positions.append([
++                random.uniform(-4, 4),
++                random.uniform(-4, 4)
++            ])
++        angles.append(random.uniform(0, 360))
++    
++    return np.array(positions + angles).reshape(11, 3)
++
++def crossover(parent1, parent2):
++    """Custom crossover operator for hexagon packing"""
++    # Uniform crossover for positions and angles
++    child1 = deepcopy(parent1)
++    child2 = deepcopy(parent2)
++    
++    # Crossover points (random selection)
++    crossover_points = random.sample(range(11), 6)  # Select 6 out of 11 hexagons
++    
++    for i in crossover_points:
++        # Swap positions and angles
++        child1[i] = parent2[i].copy()
++        child2[i] = parent1[i].copy()
++    
++    return child1, child2
++
++def mutate(individual, mutation_rate=0.1):
++    """Custom mutation operator for hexagon packing"""
++    mutated = deepcopy(individual)
++    
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Mutate position and/or angle
++            if random.random() < 0.7:  # 70% chance to mutate position
++                mutated[i][0] += random.gauss(0, 0.5)  # mutate x
++                mutated[i][1] += random.gauss(0, 0.5)  # mutate y
++                
++            if random.random() < 0.3:  # 30% chance to mutate angle
++                mutated[i][2] += random.gauss(0, 15)  # mutate angle
++                mutated[i][2] %= 360  # keep angle in [0, 360)
++                
++    return mutated
++
++def optimize_hexagon_packing():
++    """Main optimization routine"""
++    # Evolutionary algorithm parameters
++    population_size = 50
++    generations = 100
++    mutation_rate = 0.1
++    elite_size = 5
++    
++    # Initialize population
++    population = [create_individual() for _ in range(population_size)]
++    
++    best_fitness_history = []
++    
++    for generation in range(generations):
++        # Evaluate fitness for entire population
++        fitness_scores = []
++        for individual in population:
++            # Estimate outer radius based on current packing
++            estimated_radius = compute_outer_hexagon_radius(individual)
++            # Use fixed outer hexagon data for evaluation
++            outer_hex_data = np.array([0, 0, 0])
++            fitness = evaluate_fitness(individual, outer_hex_data, estimated_radius)
++            fitness_scores.append(fitness)
++        
++        # Sort population by fitness
++        sorted_indices = np.argsort(fitness_scores)[::-1]
++        population = [population[i] for i in sorted_indices]
++        fitness_scores.sort(reverse=True)
++        
++        best_fitness = fitness_scores[0]
++        best_fitness_history.append(best_fitness)
++        
++        # Early stopping if improvement is minimal
++        if len(best_fitness_history) > 10:
++            recent_improvement = best_fitness_history[-1] - best_fitness_history[-10]
++            if recent_improvement < 1e-6:
++                break
++        
++        # Keep elite individuals
++        elite = population[:elite_size]
++        
++        # Generate new population through selection, crossover, and mutation
++        new_population = deepcopy(elite)
++        
++        # Tournament selection and reproduction
++        while len(new_population) < population_size:
++            # Tournament selection
++            tournament_size = 5
++            tournament_indices = random.sample(range(population_size), tournament_size)
++            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
++            winner_index = tournament_indices[np.argmax(tournament_fitness)]
++            
++            # Select another individual
++            tournament_indices2 = random.sample(range(population_size), tournament_size)
++            tournament_fitness2 = [fitness_scores[i] for i in tournament_indices2]
++            winner_index2 = tournament_indices2[np.argmax(tournament_fitness2)]
++            
++            # Crossover
++            child1, child2 = crossover(population[winner_index], population[winner_index2])
++            
++            # Mutation
++            child1 = mutate(child1, mutation_rate)
++            child2 = mutate(child2, mutation_rate)
++            
++            new_population.extend([child1, child2])
++        
++        # Trim population to exact size
++        population = new_population[:population_size]
++    
++    # Return the best individual
++    best_individual = population[0]
++    return best_individual
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
+-
++    # Run optimization to find best packing
++    start_time = time.time()
++    
++    # Get the optimized configuration
++    inner_hex_data = optimize_hexagon_packing()
++    
++    # Compute final outer hexagon size
++    estimated_radius = compute_outer_hexagon_radius(inner_hex_data)
++    outer_hex_side_length = estimated_radius
++    
++    # Ensure final configuration is valid
+     outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
++    
++    end_time = time.time()
++    eval_time = end_time - start_time
++    
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+-
+ # EVOLVE-BLOCK-END

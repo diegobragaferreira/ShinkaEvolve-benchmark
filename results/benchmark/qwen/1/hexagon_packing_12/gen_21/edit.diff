@@ -1,0 +1,265 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,236 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.optimize import differential_evolution
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++from joblib import Parallel, delayed
++import time
++
++def generate_hexagon_vertices(center_x, center_y, angle_degrees, side_length=1):
++    """Generate vertices of a regular hexagon given center, angle, and side length."""
++    angle_rad = np.radians(angle_degrees)
++    angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 angles + close the polygon
++    vertices = []
++    for angle in angles:
++        x = center_x + side_length * np.cos(angle + angle_rad)
++        y = center_y + side_length * np.sin(angle + angle_rad)
++        vertices.append((x, y))
++    return vertices
++
++def compute_outer_hex_side_from_config(inner_hex_data, outer_hex_radius):
++    """Compute required outer hexagon side length to contain all inner hexagons."""
++    # Create the outer hexagon vertices
++    outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_hex_radius)
++    outer_polygon = Polygon(outer_vertices)
++    
++    # Check containment for each inner hexagon
++    max_distance = 0
++    
++    for i in range(len(inner_hex_data)):
++        center_x, center_y, angle_deg = inner_hex_data[i]
++        inner_vertices = generate_hexagon_vertices(center_x, center_y, angle_deg)
++        inner_polygon = Polygon(inner_vertices)
++        
++        # If the inner hexagon is not contained, we need a larger outer hexagon
++        if not outer_polygon.contains(inner_polygon):
++            # Calculate distance from center to farthest vertex of inner hexagon
++            for vertex in inner_vertices:
++                dist = np.sqrt((vertex[0])**2 + (vertex[1])**2)
++                max_distance = max(max_distance, dist)
++    
++    # Return the minimum outer radius needed
++    return max_distance
++
++def calculate_penalties(inner_hex_data, outer_hex_side_length):
++    """Calculate penalty values for constraint violations."""
++    penalty = 0
++    
++    # Create outer hexagon polygon
++    outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_hex_side_length)
++    outer_polygon = Polygon(outer_vertices)
++    
++    # Check containment for each inner hexagon
++    for i in range(len(inner_hex_data)):
++        center_x, center_y, angle_deg = inner_hex_data[i]
++        inner_vertices = generate_hexagon_vertices(center_x, center_y, angle_deg)
++        inner_polygon = Polygon(inner_vertices)
++        
++        # Check if the entire hexagon is within the outer hexagon
++        if not outer_polygon.contains(inner_polygon):
++            # Calculate how much the hexagon violates containment
++            # This is a simplified penalty - in practice, we could measure containment violation more precisely
++            penalty += 1000.0  # Large penalty for containment violation
++    
++    # Check overlaps between all pairs of inner hexagons
++    for i in range(len(inner_hex_data)):
++        for j in range(i+1, len(inner_hex_data)):
++            center_i, angle_i = inner_hex_data[i][:2], inner_hex_data[i][2]
++            center_j, angle_j = inner_hex_data[j][:2], inner_hex_data[j][2]
++            
++            inner_vertices_i = generate_hexagon_vertices(center_i[0], center_i[1], angle_i)
++            inner_vertices_j = generate_hexagon_vertices(center_j[0], center_j[1], angle_j)
++            
++            poly_i = Polygon(inner_vertices_i)
++            poly_j = Polygon(inner_vertices_j)
++            
++            if poly_i.intersects(poly_j):
++                # Overlapping hexagons get a penalty
++                penalty += 1000.0
++                
++    return penalty
++
++def evaluate_objective(inner_params, outer_hex_side_length):
++    """Evaluate the objective function to maximize 1/outer_hex_side_length."""
++    # Reshape parameters back into 12 hexagons with (x, y, angle)
++    inner_hex_data = inner_params.reshape(-1, 3)
++    
++    # Add a small penalty for constraint violations
++    penalty = calculate_penalties(inner_hex_data, outer_hex_side_length)
++    
++    # Objective is to maximize 1/outer_hex_side_length, so we minimize -1/outer_hex_side_length
++    # We add a large penalty if constraints are violated
++    if penalty > 0:
++        # If there are constraint violations, heavily penalize
++        return 1.0 / outer_hex_side_length + penalty
++    else:
++        # Otherwise, we're looking to maximize 1/outer_hex_side_length
++        # So return negative of it for minimization
++        return -1.0 / outer_hex_side_length
++
++def objective_function(params, outer_hex_side_length):
++    """
++    Objective function that needs to be minimized for the optimization.
++    params: flattened array of shape (36,) containing [x1,y1,angle1,x2,y2,angle2,...,x12,y12,angle12]
++    """
++    inner_params = params[:36]  # First 36 parameters
++    # Outer hex side length is fixed in this version but can potentially be optimized too
++    return evaluate_objective(inner_params, outer_hex_side_length)
++
++def get_initial_guesses():
++    """Generate multiple diverse initial configurations."""
++    initial_configs = []
++    
++    # Configuration 1: Hexagonal lattice pattern
++    configs = []
++    centers = [[0,0], [-2,0], [2,0], [1, np.sqrt(3)], [-1, np.sqrt(3)], [1,-np.sqrt(3)], [-1,-np.sqrt(3)], [0,np.sqrt(3)*2], [0,-np.sqrt(3)*2], [2,np.sqrt(3)], [-2,np.sqrt(3)], [2,-np.sqrt(3)], [-2,-np.sqrt(3)]]
++    angles = [0]*12
++    configs.append(np.array(centers + [angles]).T.flatten())
++    initial_configs.append(configs[0])
++    
++    # Configuration 2: Spiral pattern
++    configs = []
++    spiral_centers = []
++    angles = [0]*12
++    for i in range(12):
++        r = 1.5 + i * 0.1
++        theta = i * np.pi/3
++        x = r * np.cos(theta)
++        y = r * np.sin(theta)
++        spiral_centers.append([x, y])
++    configs.append(np.array(spiral_centers + [angles]).T.flatten())
++    initial_configs.append(configs[0])
++    
++    # Configuration 3: Grid-like pattern with slight perturbations
++    configs = []
++    base_grid = []
++    for i in range(3):
++        for j in range(4):
++            x_base = (j - 1.5) * 2.0
++            y_base = (i - 1.0) * np.sqrt(3.0)
++            base_grid.append([x_base, y_base])
++    angles = [0]*12
++    configs.append(np.array(base_grid + [angles]).T.flatten())
++    initial_configs.append(configs[0])
++    
++    return initial_configs
+ 
+ def hexagon_packing_12():
+     """
+-    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
++    Improved evolutionary optimization approach to construct a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
+-
++    start_time = time.time()
++    
++    # Set up bounds for parameters: 12 hexagons * 3 parameters each
++    # x, y ranges: -10 to 10 (should be sufficient for most valid configurations)
++    # angle ranges: 0 to 360 degrees
++    bounds = [(-10, 10), (-10, 10), (0, 360)] * 12
++    
++    # Get multiple initial configurations to try
++    initial_guesses = get_initial_guesses()
++    
++    best_result = None
++    best_score = float('inf')
++    
++    # Try multiple starting points with evolutionary optimization
++    for i, initial_guess in enumerate(initial_guesses):
++        try:
++            # Run differential evolution for one trial
++            result = differential_evolution(
++                objective_function,
++                bounds,
++                args=(10.0,),  # Fixed outer hex side length initially; can be optimized as well
++                seed=42+i,  # Different seeds for diversity
++                maxiter=500,
++                popsize=20,
++                disp=False,
++                init='latinhypercube'
++            )
++            
++            if result.success:
++                # Reconstruct the full parameter set
++                inner_params = result.x[:36]
++                inner_hex_data = inner_params.reshape(-1, 3)
++                
++                # Compute the actual outer hexagon side length needed
++                outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, 10.0)  # Start with a large guess
++                
++                # Ensure it's actually big enough
++                # Recalculate with a reasonable upper bound
++                actual_outer_side_length = max(outer_side_length, 1.0)
++                
++                # Final evaluation
++                final_score = evaluate_objective(inner_params, actual_outer_side_length)
++                
++                if final_score < best_score:
++                    best_score = final_score
++                    best_result = (inner_hex_data, actual_outer_side_length)
++                    
++        except Exception as e:
++            print(f"Error in optimization run {i}: {e}")
++            continue
++    
++    # Handle case where nothing worked
++    if best_result is None:
++        # Fall back to a manually constructed good configuration
++        inner_hex_data = np.array([
++            [0, 0, 0],
++            [2, 0, 0],
++            [-2, 0, 0],
++            [1, np.sqrt(3), 0],
++            [-1, np.sqrt(3), 0],
++            [1, -np.sqrt(3), 0],
++            [-1, -np.sqrt(3), 0],
++            [0, 2*np.sqrt(3), 0],
++            [0, -2*np.sqrt(3), 0],
++            [3, np.sqrt(3), 0],
++            [-3, np.sqrt(3), 0],
++            [3, -np.sqrt(3), 0]
++        ])
++        outer_side_length = 4.0
++        
++    else:
++        inner_hex_data, outer_side_length = best_result
++    
++    # Return the best configuration found
++    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
++    
++    end_time = time.time()
++    eval_time = end_time - start_time
++    
++    return inner_hex_data, outer_hex_data, outer_side_length
+ 
+ # EVOLVE-BLOCK-END

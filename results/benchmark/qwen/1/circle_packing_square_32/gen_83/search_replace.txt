@@ -1,0 +1,185 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the Voronoi initialization by incorporating boundary-weighted Voronoi vertex selection that favors vertices near square boundaries and corners. This addresses the limitation of the current approach which doesn't systematically prioritize locations where larger circles can potentially be placed. By implementing a weighted selection mechanism that gives higher probability to vertices near edges/corners (within 0.1 units), we can systematically improve the initial configuration quality which will lead to better convergence in the evolutionary process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def voronoi_initialization(n_circles: int) -> np.ndarray:
+        """Initialize circles using enhanced Voronoi diagram approach with strategic placement"""
+        # Strategy: Mix of Voronoi vertices with strategic corner/edge placements
+
+        # Step 1: Place some circles strategically in corners and along edges
+        # Reserve some slots for corner/edge placements
+        special_positions = []
+        reserved_slots = min(8, n_circles // 3)  # Reserve up to 33% for special positions
+
+        # Add corner positions (4 corners) with larger radii
+        corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+        for i, (x, y) in enumerate(corners):
+            if i < reserved_slots:
+                # Even larger radii for corners to exploit boundary advantage
+                r = min(x, y, 0.45)  # Slightly reduced from 0.5 to allow room for improvement
+                special_positions.append([x, y, r])
+
+        # Add edge positions (if we have more reserved slots)
+        edges = [(0.5, 0.1), (0.1, 0.5), (0.5, 0.9), (0.9, 0.5)]
+        for i, (x, y) in enumerate(edges):
+            if len(special_positions) < reserved_slots:
+                # Medium radii for edges
+                r = min(x, y, 1-x, 1-y, 0.3)
+                special_positions.append([x, y, r])
+
+        # Fill remaining with Voronoi vertices
+        remaining_slots = n_circles - len(special_positions)
+        if remaining_slots > 0:
+            # Use better grid-based sampling for Voronoi points to ensure more even distribution
+            points = np.random.rand(remaining_slots * 5, 2)  # More points for better coverage
+
+            # Create Voronoi diagram
+            try:
+                vor = Voronoi(points)
+            except:
+                # Fallback if Voronoi fails
+                return CircleInitializer._simple_grid_initialization(n_circles)
+
+            # Get Voronoi vertices that are inside the unit square
+            vertices = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    vertices.append(vertex)
+
+            # If we don't have enough valid vertices, add random ones
+            while len(vertices) < remaining_slots:
+                vertices.append([np.random.rand(), np.random.rand()])
+
+            # Select first remaining_slots vertices
+            selected_vertices = vertices[:remaining_slots]
+
+            # Create circles with better radius calculation using spatial grid concept
+            additional_circles = []
+            for i, (x, y) in enumerate(selected_vertices):
+                # Calculate minimum distance to other points to determine max radius
+                min_dist = float('inf')
+                for j, (x2, y2) in enumerate(selected_vertices):
+                    if i != j:
+                        d = np.sqrt((x-x2)**2 + (y-y2)**2)
+                        min_dist = min(min_dist, d)
+
+                # Better radius calculation: consider both neighbor distance and boundaries
+                potential_radius = min(min_dist/2, x, 1-x, y, 1-y)
+                # Add more randomness to encourage exploration
+                r = max(0.001, potential_radius * (0.7 + np.random.rand() * 0.6))
+                additional_circles.append([x, y, r])
+
+            # Combine special positions with Voronoi circles
+            circles = special_positions + additional_circles
+        else:
+            circles = special_positions
+
+        # Ensure we have exactly n_circles
+        while len(circles) < n_circles:
+            circles.append([0.5, 0.5, 0.01])
+
+        return np.array(circles[:n_circles])
+=======
+    @staticmethod
+    def voronoi_initialization(n_circles: int) -> np.ndarray:
+        """Initialize circles using enhanced Voronoi diagram approach with strategic placement"""
+        # Strategy: Mix of Voronoi vertices with strategic corner/edge placements
+        # Enhanced: Weighted selection of Voronoi vertices near boundaries
+
+        # Step 1: Place some circles strategically in corners and along edges
+        # Reserve some slots for corner/edge placements
+        special_positions = []
+        reserved_slots = min(8, n_circles // 3)  # Reserve up to 33% for special positions
+
+        # Add corner positions (4 corners) with larger radii
+        corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+        for i, (x, y) in enumerate(corners):
+            if i < reserved_slots:
+                # Even larger radii for corners to exploit boundary advantage
+                r = min(x, y, 0.45)  # Slightly reduced from 0.5 to allow room for improvement
+                special_positions.append([x, y, r])
+
+        # Add edge positions (if we have more reserved slots)
+        edges = [(0.5, 0.1), (0.1, 0.5), (0.5, 0.9), (0.9, 0.5)]
+        for i, (x, y) in enumerate(edges):
+            if len(special_positions) < reserved_slots:
+                # Medium radii for edges
+                r = min(x, y, 1-x, 1-y, 0.3)
+                special_positions.append([x, y, r])
+
+        # Fill remaining with Voronoi vertices
+        remaining_slots = n_circles - len(special_positions)
+        if remaining_slots > 0:
+            # Use better grid-based sampling for Voronoi points to ensure more even distribution
+            points = np.random.rand(remaining_slots * 10, 2)  # Even more points for better coverage
+
+            # Create Voronoi diagram
+            try:
+                vor = Voronoi(points)
+            except:
+                # Fallback if Voronoi fails
+                return CircleInitializer._simple_grid_initialization(n_circles)
+
+            # Get Voronoi vertices that are inside the unit square
+            vertices = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    vertices.append(vertex)
+
+            # If we don't have enough valid vertices, add random ones
+            while len(vertices) < remaining_slots:
+                vertices.append([np.random.rand(), np.random.rand()])
+
+            # Enhanced: Weight vertices based on proximity to boundaries for better initial placement
+            # Assign weights favoring vertices near edges/corners (within 0.1 units)
+            weighted_vertices = []
+            for vertex in vertices:
+                x, y = vertex
+                # Calculate distance to nearest boundary
+                dist_to_boundary = min(x, y, 1-x, 1-y)
+                # Higher weight for vertices closer to boundaries
+                weight = 1.0 + (0.5 if dist_to_boundary < 0.1 else 0.0)
+                weighted_vertices.append((vertex, weight))
+
+            # Sort by weight (descending) and select top vertices for better initial spread
+            weighted_vertices.sort(key=lambda x: x[1], reverse=True)
+            selected_vertices_with_weights = weighted_vertices[:remaining_slots]
+
+            # Extract just the vertices (discard weights)
+            selected_vertices = [v[0] for v in selected_vertices_with_weights]
+
+            # Create circles with better radius calculation using spatial grid concept
+            additional_circles = []
+            for i, (x, y) in enumerate(selected_vertices):
+                # Calculate minimum distance to other points to determine max radius
+                min_dist = float('inf')
+                for j, (x2, y2) in enumerate(selected_vertices):
+                    if i != j:
+                        d = np.sqrt((x-x2)**2 + (y-y2)**2)
+                        min_dist = min(min_dist, d)
+
+                # Better radius calculation: consider both neighbor distance and boundaries
+                potential_radius = min(min_dist/2, x, 1-x, y, 1-y)
+                # Add more randomness to encourage exploration
+                r = max(0.001, potential_radius * (0.7 + np.random.rand() * 0.6))
+                additional_circles.append([x, y, r])
+
+            # Combine special positions with Voronoi circles
+            circles = special_positions + additional_circles
+        else:
+            circles = special_positions
+
+        # Ensure we have exactly n_circles
+        while len(circles) < n_circles:
+            circles.append([0.5, 0.5, 0.01])
+
+        return np.array(circles[:n_circles])
+>>>>>>> REPLACE
+</DIFF>

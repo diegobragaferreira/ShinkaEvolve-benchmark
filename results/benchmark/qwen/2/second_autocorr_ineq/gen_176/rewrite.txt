@@ -1,0 +1,202 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from typing import List
+import time
+from scipy import signal
+from scipy.optimize import minimize
+import warnings
+
+def compute_autoconvolution(f_values: List[float]) -> np.ndarray:
+    """Compute the autoconvolution g = f * f of step function f."""
+    n = len(f_values)
+    if n == 0:
+        return np.array([])
+
+    f_array = np.array(f_values)
+    g = np.convolve(f_array, f_array, mode='full')
+    g = g[n-1:-(n-1)] if n > 1 else g
+    return g
+
+def compute_norms(g_values: np.ndarray) -> tuple:
+    """Compute the three required norms for C2 calculation."""
+    if len(g_values) == 0:
+        return 0.0, 0.0, 0.0
+
+    # ||g||₂² using trapezoidal-like piecewise linear integration
+    if len(g_values) <= 1:
+        norm_2_sq = g_values[0]**2 if len(g_values) > 0 else 0.0
+    else:
+        norm_2_sq = 0.0
+        for i in range(len(g_values)-1):
+            h = 1.0
+            norm_2_sq += (h/3.0) * (g_values[i]**2 + g_values[i]*g_values[i+1] + g_values[i+1]**2)
+    
+    # ||g||₁: L1 norm, approximated as sum(|g|) / (len(g) + 1) 
+    if len(g_values) > 0:
+        norm_1 = np.sum(np.abs(g_values)) / (len(g_values) + 1)
+    else:
+        norm_1 = 0.0
+        
+    # ||g||∞: Infinity-norm
+    norm_inf = np.max(np.abs(g_values)) if len(g_values) > 0 else 0.0
+    
+    return norm_2_sq, norm_1, norm_inf
+
+def compute_c2(f_values: List[float]) -> float:
+    """Compute C2 for given step function values."""
+    g = compute_autoconvolution(f_values)
+    norm_2_sq, norm_1, norm_inf = compute_norms(g)
+    
+    # Avoid division by zero
+    if norm_1 == 0 or norm_inf == 0:
+        return 0.0
+    
+    c2 = norm_2_sq / (norm_1 * norm_inf)
+    return c2
+
+def spectral_peak_optimizer(n_steps: int = 1000) -> List[float]:
+    """
+    Spectral approach to optimize step function using frequency domain techniques.
+    This fundamentally different approach works in spectral space where convolution 
+    becomes multiplication and optimization is easier to formulate.
+    """
+    # Domain configuration
+    domain_width = 0.5
+    domain_center = 0.0
+    step_width = domain_width / n_steps
+    
+    # Initialize with a spectrally-balanced function
+    # Use a combination of sinusoids that have good autoconvolution properties
+    x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+    
+    # Generate initial function based on spectral characteristics
+    # Start with a smooth, symmetric function that avoids sharp peaks
+    initial_func = np.zeros(n_steps)
+    
+    # Add multiple frequency components with carefully chosen amplitudes
+    frequencies = [1.0, 2.0, 3.0, 4.0, 5.0]  # Fundamental frequencies
+    amplitudes = [1.0, 0.7, 0.5, 0.3, 0.2]   # Decreasing amplitudes
+    
+    # Create a superposition of cosine waves with different frequencies
+    # This creates a function with controlled spectral content
+    for freq, amp in zip(frequencies, amplitudes):
+        # Use cosine for better symmetry
+        initial_func += amp * np.cos(freq * np.pi * x / (domain_width/2))
+    
+    # Add some random components to break symmetry but maintain smoothness
+    np.random.seed(42)
+    noise = np.random.normal(0, 0.1, n_steps)
+    initial_func += noise
+    
+    # Ensure non-negative values (clipping)
+    initial_func = np.maximum(initial_func, 0)
+    
+    # Normalize to reasonable scale
+    if np.max(initial_func) > 0:
+        initial_func = initial_func / np.max(initial_func) * 100
+    
+    # Convert to step values
+    step_values = initial_func.tolist()
+    
+    return step_values
+
+def gradient_guided_refinement(f_values: List[float], max_iter: int = 300) -> List[float]:
+    """
+    Refinement using gradient-guided approach in frequency domain.
+    """
+    # Use scipy minimize with L-BFGS-B which works well for this type of problem
+    n_steps = len(f_values)
+    domain_width = 0.5
+    
+    # Create a wrapper function for scipy optimization
+    def objective_func_wrapper(x):
+        """Wrapper that converts flat parameter vector to function and computes negative C2"""
+        # Ensure non-negative values
+        x = np.maximum(x, 0)
+        
+        # Compute C2
+        c2_val = compute_c2(x.tolist())
+        
+        # Return negative because we want to maximize C2
+        return -c2_val
+    
+    # Create bounds for parameters (non-negative)
+    bounds = [(0, None) for _ in range(n_steps)]
+    
+    # Use scipy's L-BFGS-B optimization
+    try:
+        result = minimize(
+            objective_func_wrapper,
+            np.array(f_values),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-6}
+        )
+        
+        if result.success:
+            refined_values = result.x.tolist()
+            return [max(0, val) for val in refined_values]
+    except Exception as e:
+        # If optimization fails, return original
+        pass
+    
+    return f_values
+
+def spectral_optimization_approach(n_steps: int = 1000) -> List[float]:
+    """
+    Main spectral optimization approach that combines:
+    1. Spectral initialization with good frequency content
+    2. Gradient-guided refinement
+    3. Post-processing for better C2
+    """
+    # Step 1: Spectral initialization
+    initial_func = spectral_peak_optimizer(n_steps)
+    
+    # Step 2: Gradient-guided refinement
+    refined_func = gradient_guided_refinement(initial_func, max_iter=200)
+    
+    # Step 3: Additional post-processing to fine-tune
+    # Try a few iterations of local search for better results
+    best_c2 = compute_c2(refined_func)
+    best_func = list(refined_func)
+    
+    # Local neighborhood search
+    for _ in range(50):
+        test_func = list(best_func)
+        # Modify random subset of values
+        indices_to_modify = np.random.choice(len(test_func), size=min(10, len(test_func)//5), replace=False)
+        
+        for idx in indices_to_modify:
+            # Small random adjustment with clipping to non-negative
+            adjustment = np.random.normal(0, 0.5)
+            test_func[idx] = max(0, test_func[idx] + adjustment)
+        
+        test_c2 = compute_c2(test_func)
+        if test_c2 > best_c2:
+            best_c2 = test_c2
+            best_func = list(test_func)
+    
+    return best_func
+
+def construct_function() -> List[float]:
+    """
+    Main entry point function for constructing step function with high C2 value.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    try:
+        # Strategy 1: Spectral optimization approach
+        result = spectral_optimization_approach(1000)
+        c2_score = compute_c2(result)
+        
+        # Strategy 2: If that doesn't work, fall back to a simple construction
+        if c2_score < 0.1:  # Very poor score
+            result = [10.0] * 500
+            
+        return result
+    except Exception as e:
+        # Final fallback
+        return [10.0] * 500
+
+# EVOLVE-BLOCK-END

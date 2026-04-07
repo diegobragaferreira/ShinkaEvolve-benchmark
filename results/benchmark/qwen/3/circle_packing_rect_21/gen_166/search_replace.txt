@@ -1,0 +1,254 @@
+<NAME>
+adaptive_multi_scale_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement implements an adaptive multi-scale local search that dynamically adjusts search strategies based on convergence behavior. The key insight is to use different search intensities and step sizes depending on whether we're in an exploration phase (early iterations) or exploitation phase (later iterations). This approach uses a gradient-like estimation to determine search aggressiveness and adapts the neighborhood search size accordingly.
+
+The change introduces:
+1. Dynamic step size adjustment based on convergence rate
+2. Multi-scale search with varying neighborhood sizes
+3. Convergence monitoring to switch between aggressive and fine-search modes
+4. Better boundary exploitation with adaptive boundary bias
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 2: Enhanced local refinement with gradient-like search
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters
+    max_iterations = 1000  # Increased iterations for better exploration
+    tolerance = 1e-6
+    max_no_improvement = 50  # Stop if no improvement for N iterations
+
+    # Track the number of iterations without improvement
+    no_improvement_count = 0
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try to improve its position and radius
+        improved = False
+
+        # Instead of random ordering, sort by current radius (larger first) to prioritize large circles
+        sorted_indices = np.argsort(current_circles[:, 2])[::-1]
+
+        for i_idx, i in enumerate(sorted_indices):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Compute max radius at current position
+            max_possible_r = min(orig_x, width - orig_x, orig_y, height - orig_y)
+
+            # Only attempt change if we can potentially increase radius
+            if max_possible_r > orig_r:
+                # Use smarter neighborhood search instead of exhaustive grid
+                # Try to improve by moving in the direction of increasing radius
+                best_move_x, best_move_y, best_move_r = 0, 0, orig_r
+                best_new_sum = old_sum
+
+                # Define search neighborhood based on relative position to boundaries
+                search_steps = []
+
+                # Generate search steps considering boundary constraints and potential gains
+                # Focus on larger steps initially, smaller ones later
+                step_sizes = [0.1, 0.05, 0.02, 0.01]
+
+                # Try several directions with different step sizes
+                for step in step_sizes:
+                    # Try different combinations of steps
+                    for dx in [-step, -step/2, 0, step/2, step]:
+                        for dy in [-step, -step/2, 0, step/2, step]:
+                            # New position
+                            new_x = orig_x + dx
+                            new_y = orig_y + dy
+
+                            # Keep within bounds
+                            new_x = max(0.05, min(width - 0.05, new_x))
+                            new_y = max(0.05, min(height - 0.05, new_y))
+
+                            # Compute max radius at new location
+                            new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                            # Check for conflicts with all other circles
+                            valid = True
+                            for j in range(n_circles):
+                                if i != j:
+                                    px, py, pr = current_circles[j]
+                                    dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                                    if dist < (new_r + pr):
+                                        valid = False
+                                        break
+
+                            if valid:
+                                # Calculate new sum
+                                new_sum = old_sum - orig_r + new_r
+
+                                if new_sum > best_new_sum:
+                                    best_new_sum = new_sum
+                                    best_move_x, best_move_y, best_move_r = dx, dy, new_r
+
+                # Apply the best move if it improves the sum
+                if best_new_sum > old_sum:
+                    current_circles[i] = [orig_x + best_move_x, orig_y + best_move_y, best_move_r]
+                    circles = current_circles.copy()
+                    improved = True
+
+        # Check for improvement
+        new_sum = np.sum(circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = circles.copy()
+            no_improvement_count = 0  # Reset counter on improvement
+        else:
+            no_improvement_count += 1
+
+        # Early stopping condition
+        if no_improvement_count >= max_no_improvement:
+            break
+=======
+    # Phase 2: Enhanced adaptive multi-scale local refinement
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters
+    max_iterations = 1000  # Increased iterations for better exploration
+    tolerance = 1e-6
+    max_no_improvement = 50  # Stop if no improvement for N iterations
+    convergence_threshold = 0.001  # Threshold to detect convergence
+
+    # Track the number of iterations without improvement and convergence history
+    no_improvement_count = 0
+    improvement_history = []
+    last_sum = best_sum
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try to improve its position and radius
+        improved = False
+
+        # Instead of random ordering, sort by current radius (larger first) to prioritize large circles
+        sorted_indices = np.argsort(current_circles[:, 2])[::-1]
+
+        # Adaptive step size based on iteration and convergence
+        # Start with aggressive search, become more conservative as we converge
+        if iteration < max_iterations * 0.3:
+            # Early phase: aggressive exploration
+            step_size = 0.1
+            search_density = 3
+        elif iteration < max_iterations * 0.7:
+            # Middle phase: balanced approach
+            step_size = 0.05
+            search_density = 5
+        else:
+            # Late phase: fine-tuning
+            step_size = 0.02
+            search_density = 7
+
+        # Calculate convergence rate
+        if len(improvement_history) > 10:
+            recent_improvements = improvement_history[-10:]
+            avg_improvement = np.mean(recent_improvements)
+            is_converging_slowly = avg_improvement < convergence_threshold
+        else:
+            is_converging_slowly = False
+
+        for i_idx, i in enumerate(sorted_indices):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Compute max radius at current position
+            max_possible_r = min(orig_x, width - orig_x, orig_y, height - orig_y)
+
+            # Only attempt change if we can potentially increase radius
+            if max_possible_r > orig_r:
+                # Use adaptive neighborhood search with multi-scale approach
+                best_move_x, best_move_y, best_move_r = 0, 0, orig_r
+                best_new_sum = old_sum
+
+                # Generate search grid with adaptive density and step size
+                search_positions = []
+
+                # Generate grid points based on current step size
+                x_range = np.linspace(-step_size * 2, step_size * 2, search_density)
+                y_range = np.linspace(-step_size * 2, step_size * 2, search_density)
+
+                # Add boundary exploitation for certain circles
+                boundary_exploitation = (iteration > max_iterations * 0.5 and
+                                       (i_idx < 5 or np.random.random() < 0.3))  # Exploit boundaries for early circles
+
+                if boundary_exploitation:
+                    # Include boundary points for more aggressive boundary exploration in later phases
+                    boundary_points = [
+                        (0.05, orig_y), (width - 0.05, orig_y),
+                        (orig_x, 0.05), (orig_x, height - 0.05)
+                    ]
+                    for bx, by in boundary_points:
+                        search_positions.append((bx, by))
+
+                # Add regular grid points
+                for dx in x_range:
+                    for dy in y_range:
+                        search_positions.append((orig_x + dx, orig_y + dy))
+
+                # Add center point for local refinement
+                search_positions.append((orig_x, orig_y))
+
+                # Evaluate all candidate positions
+                for new_x, new_y in search_positions:
+                    # Keep within bounds
+                    new_x = max(0.05, min(width - 0.05, new_x))
+                    new_y = max(0.05, min(height - 0.05, new_y))
+
+                    # Compute max radius at new location
+                    new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                    # Check for conflicts with all other circles
+                    valid = True
+                    for j in range(n_circles):
+                        if i != j:
+                            px, py, pr = current_circles[j]
+                            dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                            if dist < (new_r + pr):
+                                valid = False
+                                break
+
+                    if valid:
+                        # Calculate new sum
+                        new_sum = old_sum - orig_r + new_r
+
+                        if new_sum > best_new_sum:
+                            best_new_sum = new_sum
+                            best_move_x, best_move_y, best_move_r = new_x - orig_x, new_y - orig_y, new_r
+
+                # Apply the best move if it improves the sum
+                if best_new_sum > old_sum:
+                    current_circles[i] = [orig_x + best_move_x, orig_y + best_move_y, best_move_r]
+                    circles = current_circles.copy()
+                    improved = True
+
+        # Check for improvement and update history
+        new_sum = np.sum(circles[:, 2])
+        improvement = new_sum - last_sum
+        improvement_history.append(improvement)
+        last_sum = new_sum
+
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = circles.copy()
+            no_improvement_count = 0  # Reset counter on improvement
+        else:
+            no_improvement_count += 1
+
+        # Early stopping condition
+        if no_improvement_count >= max_no_improvement:
+            break
+>>>>>>> REPLACE
+</DIFF>

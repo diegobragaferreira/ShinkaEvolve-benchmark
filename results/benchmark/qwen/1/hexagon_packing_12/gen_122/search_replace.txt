@@ -1,0 +1,147 @@
+<NAME>
+implement_spatial_acceleration_with_ckdtree
+</NAME>
+
+<DESCRIPTION>
+The key insight is to implement spatial acceleration using cKDTree to dramatically improve the overlap detection performance. Currently, the code performs O(n²) pairwise overlap checking for all 12 hexagons, which becomes increasingly expensive. By using a cKDTree to index hexagon centers and only checking nearby candidates for detailed overlap testing, we can significantly reduce the number of expensive Shapely intersection operations. This addresses the performance bottleneck identified in the problem statement and follows the successful pattern from previous generations.
+
+The implementation involves:
+1. Adding scipy.spatial.cKDTree import
+2. Modifying the overlap checking logic to use spatial indexing
+3. Only performing expensive intersection tests on potentially overlapping pairs
+4. Maintaining all existing functionality while improving performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon, Point
+from joblib import Parallel, delayed
+import time
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon, Point
+from joblib import Parallel, delayed
+import time
+from scipy.spatial import cKDTree
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def parallel_overlap_check(hexagons, start_idx, end_idx):
+    """Parallel overlap checking for a subset of hexagon pairs."""
+    overlaps = []
+    for i in range(start_idx, end_idx):
+        for j in range(i + 1, len(hexagons)):
+            if check_overlap(hexagons[i], hexagons[j]):
+                overlaps.append((i, j))
+    return overlaps
+
+def evaluate_configuration_parallel(config):
+=======
+def fast_check_overlap_pair_fast(hex1, hex2):
+    """Fast preliminary overlap check using bounding circles before detailed Shapely check."""
+    # Calculate centers and radii
+    # For unit hexagons, the circumradius is 1 and inradius is sqrt(3)/2
+    hex1_center = np.mean([list(p) for p in hex1.exterior.coords[:-1]], axis=0)
+    hex2_center = np.mean([list(p) for p in hex2.exterior.coords[:-1]], axis=0)
+
+    # Distance between centers
+    dist = np.linalg.norm(hex1_center - hex2_center)
+
+    # If distance is greater than sum of radii (2), they don't overlap
+    if dist > 2.0:
+        return False
+
+    # Perform detailed overlap check only if close enough
+    return check_overlap(hex1, hex2)
+
+def efficient_parallel_overlap_check(hexagons, tree, max_distance=2.0):
+    """Efficient overlap checking using spatial indexing."""
+    overlaps = []
+    n_hexagons = len(hexagons)
+
+    # Query nearby hexagons using cKDTree
+    for i in range(n_hexagons):
+        # Find neighbors within max_distance
+        nearby_indices = tree.query_ball_point(list(hexagons[i].exterior.centroid.coords)[0], max_distance)
+
+        # Check overlaps only with nearby hexagons
+        for j in nearby_indices:
+            if i < j:  # Only check each pair once
+                if fast_check_overlap_pair_fast(hexagons[i], hexagons[j]):
+                    overlaps.append((i, j))
+
+    return overlaps
+
+def evaluate_configuration_parallel(config):
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(12):
+        x, y, angle = positions_angles[i]
+        inner_hex = create_unit_hexagon((x, y), angle)
+        inner_hexagons.append(inner_hex)
+
+        # Check containment early
+        if not check_containment(inner_hex, outer_hex):
+            return 1e10  # Penalty for violation
+
+    # Check pairwise overlaps in parallel
+    # Split work into chunks for parallel processing
+    num_pairs = 12 * 11 // 2  # Number of unique pairs
+    chunk_size = max(1, num_pairs // 4)  # Process 4 chunks
+
+    # Use joblib for parallel overlap checking
+    overlap_results = Parallel(n_jobs=-1)(
+        delayed(parallel_overlap_check)(inner_hexagons, i*chunk_size, min((i+1)*chunk_size, len(inner_hexagons)))
+        for i in range(4)
+    )
+
+    # Check if any overlaps were found
+    for result in overlap_results:
+        if result:
+            return 1e10  # Penalty for overlap
+
+    # Return negative inverse side length (we want to maximize 1/R)
+    return -1.0 / outer_radius
+=======
+    # Create inner hexagons
+    inner_hexagons = []
+    for i in range(12):
+        x, y, angle = positions_angles[i]
+        inner_hex = create_unit_hexagon((x, y), angle)
+        inner_hexagons.append(inner_hex)
+
+        # Check containment early
+        if not check_containment(inner_hex, outer_hex):
+            return 1e10  # Penalty for violation
+
+    # Build spatial index for efficient overlap checking
+    hex_centers = []
+    for hexagon in inner_hexagons:
+        center = list(hexagon.exterior.centroid.coords)[0]
+        hex_centers.append(center)
+
+    tree = cKDTree(hex_centers)
+
+    # Efficiently check pairwise overlaps using spatial indexing
+    overlaps = efficient_parallel_overlap_check(inner_hexagons, tree)
+
+    # Check if any overlaps were found
+    if overlaps:
+        return 1e10  # Penalty for overlap
+
+    # Return negative inverse side length (we want to maximize 1/R)
+    return -1.0 / outer_radius
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,197 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Rectangle dimensions: width + height = 2, using 1x1 for simplicity (perimeter = 4)
+    width, height = 1.0, 1.0
+    
+    # Number of circles
+    n_circles = 21
+    
+    # Initialize circles with grid placement to ensure feasibility
+    def initialize_feasible_placement():
+        circles = np.zeros((n_circles, 3))
+        
+        # Create a structured grid layout
+        grid_size = int(math.ceil(math.sqrt(n_circles)))
+        spacing_x = width / (grid_size + 1)
+        spacing_y = height / (grid_size + 1)
+        
+        idx = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if idx >= n_circles:
+                    break
+                # Position with slight randomization
+                x = (j + 1) * spacing_x + np.random.uniform(-spacing_x*0.1, spacing_x*0.1)
+                y = (i + 1) * spacing_y + np.random.uniform(-spacing_y*0.1, spacing_y*0.1)
+                
+                # Initial radius based on distance to nearest edge
+                min_dist_to_edge = min(x, y, width-x, height-y)
+                r = min(0.1, min_dist_to_edge * 0.3)
+                circles[idx] = [x, y, r]
+                idx += 1
+                
+            if idx >= n_circles:
+                break
+                
+        return circles
+    
+    # Constraint functions for optimization
+    def create_constraints():
+        cons = []
+        
+        # Boundary constraints: circle must be completely within rectangle
+        for i in range(n_circles):
+            # Each constraint: x >= r, y >= r, x <= width-r, y <= height-r
+            def bound_constraint(i, direction):
+                def constraint(x):
+                    pos_idx = 3*i + direction
+                    r_idx = 3*i + 2
+                    if direction == 0:  # x coordinate
+                        return x[pos_idx] - x[r_idx]  # x - r >= 0
+                    elif direction == 1:  # y coordinate
+                        return x[pos_idx] - x[r_idx]  # y - r >= 0
+                    elif direction == 2:  # right boundary
+                        return width - x[pos_idx] - x[r_idx]  # width - x - r >= 0
+                    else:  # top boundary
+                        return height - x[pos_idx] - x[r_idx]  # height - y - r >= 0
+                return constraint
+            
+            # Add all four boundary constraints for each circle
+            cons.append({'type': 'ineq', 'fun': bound_constraint(i, 0)})  # x >= r
+            cons.append({'type': 'ineq', 'fun': bound_constraint(i, 1)})  # y >= r
+            cons.append({'type': 'ineq', 'fun': bound_constraint(i, 2)})  # width - x >= r
+            cons.append({'type': 'ineq', 'fun': bound_constraint(i, 3)})  # height - y >= r
+        
+        # Overlap constraints: distance between centers >= sum of radii
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                def overlap_constraint(i, j):
+                    def constraint(x):
+                        x1, y1, r1 = x[3*i], x[3*i+1], x[3*i+2]
+                        x2, y2, r2 = x[3*j], x[3*j+1], x[3*j+2]
+                        dx = x1 - x2
+                        dy = y1 - y2
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        # Constraint: r1 + r2 - distance >= 0 (so distance <= r1 + r2)
+                        return r1 + r2 - distance
+                    return constraint
+                
+                cons.append({'type': 'ineq', 'fun': overlap_constraint(i, j)})
+                
+        return cons
+    
+    # Objective function (to be minimized)
+    def objective(x):
+        # We want to maximize sum of radii, so minimize negative sum
+        total_radius = 0
+        for i in range(n_circles):
+            total_radius += x[3*i+2]  # radius is at index 3*i+2
+        return -total_radius
+    
+    # Run optimization with SQP
+    def optimize_with_sqp(initial_guess):
+        constraints = create_constraints()
+        
+        # Bounds for x, y, r for each circle
+        bounds = []
+        for i in range(n_circles):
+            bounds.append((0.001, width - 0.001))    # x bounds
+            bounds.append((0.001, height - 0.001))   # y bounds
+            bounds.append((0.001, 0.3))              # radius bounds
+        
+        # Run optimization
+        result = minimize(objective, initial_guess, method='SLSQP', 
+                         bounds=bounds, constraints=constraints, 
+                         options={'maxiter': 100, 'ftol': 1e-6})
+        
+        # Convert back to circles array
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            circles[i] = [result.x[3*i], result.x[3*i+1], result.x[3*i+2]]
+        
+        return circles
+    
+    # Pressure-based geometric refinement
+    def refine_with_pressure(circles):
+        # Apply geometric pressure to improve density distribution
+        for iteration in range(50):
+            new_circles = circles.copy()
+            
+            # Calculate pairwise distances
+            positions = circles[:, :2]
+            distances = cdist(positions, positions)
+            
+            for i in range(n_circles):
+                x, y, r = circles[i]
+                
+                # Find neighbors within 2*(r + r_neighbor) distance
+                nearby = []
+                for j in range(n_circles):
+                    if i != j and distances[i,j] < 2*(r + circles[j,2]):
+                        nearby.append(j)
+                
+                # Apply pressure adjustment
+                if len(nearby) > 0:
+                    # Calculate neighbor density effect
+                    avg_radius = np.mean([circles[j, 2] for j in nearby])
+                    density_factor = 1.0 + 0.1 * len(nearby) / n_circles
+                    
+                    # Reduce radius to decrease pressure
+                    new_radius = max(0.001, min(0.3, r / density_factor))
+                    new_circles[i, 2] = new_radius
+                    
+                    # Adjust position slightly to reduce overlap tendency
+                    if len(nearby) > 0:
+                        # Move toward center of mass of neighbors
+                        center_mass = np.mean([circles[j, :2] for j in nearby], axis=0)
+                        dx = center_mass[0] - x
+                        dy = center_mass[1] - y
+                        
+                        # Move away from cluster center to reduce pressure
+                        new_x = x - 0.005 * dx
+                        new_y = y - 0.005 * dy
+                        
+                        # Keep within bounds
+                        new_x = max(new_radius, min(width - new_radius, new_x))
+                        new_y = max(new_radius, min(height - new_radius, new_y))
+                        
+                        new_circles[i, 0] = new_x
+                        new_circles[i, 1] = new_y
+            
+            circles = new_circles
+            
+        return circles
+    
+    # Main optimization pipeline
+    # Step 1: Initialize with feasible configuration
+    circles = initialize_feasible_placement()
+    
+    # Step 2: Mathematical optimization with SQP
+    flat_init = np.array([circles[i, j] for i in range(n_circles) for j in range(3)])
+    optimized_circles = optimize_with_sqp(flat_init)
+    
+    # Step 3: Pressure-based refinement
+    refined_circles = refine_with_pressure(optimized_circles)
+    
+    # Step 4: Final optimization pass
+    final_flat = np.array([refined_circles[i, j] for i in range(n_circles) for j in range(3)])
+    final_result = optimize_with_sqp(final_flat)
+    
+    # Step 5: Final pressure refinement
+    final_output = refine_with_pressure(final_result)
+    
+    return final_output
+
+# EVOLVE-BLOCK-END

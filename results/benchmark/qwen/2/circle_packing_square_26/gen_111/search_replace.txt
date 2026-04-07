@@ -1,0 +1,234 @@
+<NAME>
+add_local_search_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding a local search optimization step that applies iterative improvement to the best individuals in each generation. This approach will help fine-tune the solutions found by the evolutionary algorithm to push the fitness value closer to the benchmark. The local search will use a greedy approach to slightly adjust circle positions and radii to reduce overlaps and increase total radius sum.
+
+This enhancement builds upon the proven effectiveness of local optimization strategies seen in the prior generations, specifically leveraging the fact that evolutionary algorithms often find good regions of the search space but benefit from local refinement to reach peak solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_mutation_rate(self, generation: int, diversity: float) -> float:
+        """Adaptively adjust mutation rate based on generation and population diversity."""
+        base_rate = 0.1
+        # Decrease mutation rate over time
+        time_factor = 1.0 - (generation / self.max_generations)
+        # Increase mutation rate if diversity is low (to escape local optima)
+        diversity_factor = max(0.5, 1.0 - diversity) if diversity < 0.5 else 1.0
+
+        return base_rate * time_factor * diversity_factor
+
+    def get_population_diversity(self, population: List[np.ndarray]) -> float:
+        """Calculate population diversity based on spread of radii."""
+        if len(population) < 2:
+            return 0.0
+
+        all_radii = np.concatenate([circles[:, 2] for circles in population])
+        return np.std(all_radii) / (np.mean(all_radii) + 1e-8)  # Avoid division by zero
+
+    def evolve(self) -> np.ndarray:
+        """Main evolutionary algorithm for circle packing."""
+        # Initialize population
+        population = self.initialize_population()
+
+        # Evolution loop
+        for generation in range(self.max_generations):
+            # Evaluate fitness
+            fitnesses = self.evaluate_population(population)
+
+            # Track best fitness
+            best_fitness = max(fitnesses)
+            self.best_fitness_history.append(best_fitness)
+
+            # Print progress every 100 generations
+            if generation % 100 == 0:
+                print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep the best individual
+            best_idx = np.argmax(fitnesses)
+            new_population.append(population[best_idx])
+
+            # Calculate population diversity for adaptive parameters
+            diversity = self.get_population_diversity(population)
+
+            # Generate offspring
+            while len(new_population) < self.pop_size:
+                # Select parents
+                parent1, parent2 = self.select_parents(population, fitnesses)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation with adaptive rate
+                mutation_rate = self.adaptive_mutation_rate(generation, diversity)
+                child = self.mutate(child, mutation_rate)
+
+                new_population.append(child)
+
+            population = new_population[:self.pop_size]  # Ensure exact population size
+
+            # Early stopping if fitness improves very little
+            if len(self.best_fitness_history) > 10:
+                recent_improvement = self.best_fitness_history[-1] - self.best_fitness_history[-10]
+                if recent_improvement < 1e-6:
+                    break
+
+        # Return best solution
+        final_fitnesses = self.evaluate_population(population)
+        best_idx = np.argmax(final_fitnesses)
+        return population[best_idx]
+=======
+    def adaptive_mutation_rate(self, generation: int, diversity: float) -> float:
+        """Adaptively adjust mutation rate based on generation and population diversity."""
+        base_rate = 0.1
+        # Decrease mutation rate over time
+        time_factor = 1.0 - (generation / self.max_generations)
+        # Increase mutation rate if diversity is low (to escape local optima)
+        diversity_factor = max(0.5, 1.0 - diversity) if diversity < 0.5 else 1.0
+
+        return base_rate * time_factor * diversity_factor
+
+    def get_population_diversity(self, population: List[np.ndarray]) -> float:
+        """Calculate population diversity based on spread of radii."""
+        if len(population) < 2:
+            return 0.0
+
+        all_radii = np.concatenate([circles[:, 2] for circles in population])
+        return np.std(all_radii) / (np.mean(all_radii) + 1e-8)  # Avoid division by zero
+
+    def local_search_improve(self, circles: np.ndarray, max_iterations: int = 50) -> np.ndarray:
+        """Apply local search to improve a given solution by iteratively adjusting positions/radii."""
+        current = circles.copy()
+        current_fitness = self.calculate_fitness(current)
+
+        for iteration in range(max_iterations):
+            improved = False
+            # Try to improve each circle individually
+            for i in range(self.n_circles):
+                original_x, original_y, original_r = current[i]
+                best_x, best_y, best_r = original_x, original_y, original_r
+                best_fitness = current_fitness
+
+                # Try small adjustments to position and radius
+                step_sizes = [0.005, 0.01, 0.02]
+                for step in step_sizes:
+                    # Test position changes
+                    for dx in [-step, 0, step]:
+                        for dy in [-step, 0, step]:
+                            new_x = original_x + dx
+                            new_y = original_y + dy
+
+                            # Ensure new position is within bounds
+                            if new_x - original_r >= 0 and new_x + original_r <= 1 and \
+                               new_y - original_r >= 0 and new_y + original_r <= 1:
+
+                                # Create temporary configuration
+                                temp_circles = current.copy()
+                                temp_circles[i] = [new_x, new_y, original_r]
+
+                                # Check if this improves overall fitness
+                                if self.validate_circles(temp_circles):
+                                    new_fitness = self.calculate_fitness(temp_circles)
+                                    if new_fitness > best_fitness:
+                                        best_fitness = new_fitness
+                                        best_x, best_y, best_r = new_x, new_y, original_r
+                                        improved = True
+
+                    # Test radius changes
+                    for dr in [-step, 0, step]:
+                        new_r = original_r + dr
+                        if new_r > 0.001 and new_r < 0.5:  # Reasonable bounds
+                            # Ensure new radius allows for valid positioning
+                            new_r = min(new_r, original_x, 1-original_x, original_y, 1-original_y)
+                            if new_r > 0.001:
+                                # Create temporary configuration
+                                temp_circles = current.copy()
+                                temp_circles[i] = [original_x, original_y, new_r]
+
+                                # Check if this improves overall fitness
+                                if self.validate_circles(temp_circles):
+                                    new_fitness = self.calculate_fitness(temp_circles)
+                                    if new_fitness > best_fitness:
+                                        best_fitness = new_fitness
+                                        best_x, best_y, best_r = original_x, original_y, new_r
+                                        improved = True
+
+                # Update if we found a better configuration
+                if improved:
+                    current[i] = [best_x, best_y, best_r]
+                    current_fitness = best_fitness
+
+            # Stop if no improvement was made in this iteration
+            if not improved:
+                break
+
+        return current
+
+    def evolve(self) -> np.ndarray:
+        """Main evolutionary algorithm for circle packing."""
+        # Initialize population
+        population = self.initialize_population()
+
+        # Evolution loop
+        for generation in range(self.max_generations):
+            # Evaluate fitness
+            fitnesses = self.evaluate_population(population)
+
+            # Track best fitness
+            best_fitness = max(fitnesses)
+            self.best_fitness_history.append(best_fitness)
+
+            # Print progress every 100 generations
+            if generation % 100 == 0:
+                print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep the best individual
+            best_idx = np.argmax(fitnesses)
+            best_individual = population[best_idx]
+
+            # Apply local search to the best individual before keeping it
+            improved_best = self.local_search_improve(best_individual)
+            new_population.append(improved_best)
+
+            # Calculate population diversity for adaptive parameters
+            diversity = self.get_population_diversity(population)
+
+            # Generate offspring
+            while len(new_population) < self.pop_size:
+                # Select parents
+                parent1, parent2 = self.select_parents(population, fitnesses)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation with adaptive rate
+                mutation_rate = self.adaptive_mutation_rate(generation, diversity)
+                child = self.mutate(child, mutation_rate)
+
+                # Apply local search to offspring for fine-tuning
+                child = self.local_search_improve(child)
+
+                new_population.append(child)
+
+            population = new_population[:self.pop_size]  # Ensure exact population size
+
+            # Early stopping if fitness improves very little
+            if len(self.best_fitness_history) > 10:
+                recent_improvement = self.best_fitness_history[-1] - self.best_fitness_history[-10]
+                if recent_improvement < 1e-6:
+                    break
+
+        # Return best solution
+        final_fitnesses = self.evaluate_population(population)
+        best_idx = np.argmax(final_fitnesses)
+        return population[best_idx]
+>>>>>>> REPLACE
+</DIFF>

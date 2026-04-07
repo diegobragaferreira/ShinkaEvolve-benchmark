@@ -1,0 +1,182 @@
+--- a/original.py
++++ b/original.py
+@@ -1,14 +1,178 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
++from scipy.optimize import differential_evolution, minimize
++from numba import jit
++import time
++import random
++
++# Global constants
++MAX_TIME = 90.0
++SEED = 42
++np.random.seed(SEED)
++random.seed(SEED)
++
++@jit(nopython=True)
++def compute_autoconvolution_numba(f):
++    """Compute autoconvolution using numba-optimized loop."""
++    n = len(f)
++    # Convolution support range: [-n+1, n-1]
++    g = np.zeros(2*n - 1)
++    
++    for i in range(n):
++        for j in range(n):
++            k = i + j - (n - 1)
++            if 0 <= k + n - 1 < 2*n - 1:
++                g[k + n - 1] += f[i] * f[j]
++    
++    return g
++
++def compute_convolution_norms(g):
++    """Compute L1, L2^2, and L-infinity norms of convolution."""
++    # L2 norm squared (using trapezoidal-like piecewise integration)
++    g_squared = g * g
++    l2_squared = 0.0
++    for i in range(len(g) - 1):
++        # Trapezoidal integration: (y1^2 + y1*y2 + y2^2) * h / 3
++        y1 = g[i]
++        y2 = g[i + 1]
++        h = 1.0  # Assuming unit spacing
++        l2_squared += (y1 * y1 + y1 * y2 + y2 * y2) * h / 3.0
++    
++    # L1 norm (sum of absolute values)
++    l1 = np.sum(np.abs(g))
++    
++    # L-infinity norm (maximum absolute value)
++    l_inf = np.max(np.abs(g))
++    
++    return l2_squared, l1, l_inf
++
++def evaluate_c2(f_values):
++    """Evaluate C2 for given step function values."""
++    try:
++        g = compute_autoconvolution_numba(np.array(f_values))
++        l2_squared, l1, l_inf = compute_convolution_norms(g)
++        
++        # Avoid division by zero
++        if l1 < 1e-12 or l_inf < 1e-12:
++            return 0.0
++            
++        c2 = l2_squared / (l1 * l_inf)
++        return c2
++    except Exception:
++        return 0.0
++
++def sophisticated_initialization(n):
++    """Create an initial step function with Gaussian-weighted alternating pattern."""
++    # Create alternating high/low regions with Gaussian smoothing
++    f = np.zeros(n)
++    
++    # Divide into segments
++    segment_size = max(1, n // 10)
++    
++    for i in range(0, n, segment_size):
++        end_idx = min(i + segment_size, n)
++        # Alternate between high and low regions
++        if (i // segment_size) % 2 == 0:
++            # High region with Gaussian weighting
++            center = (i + end_idx) // 2
++            x = np.arange(i, end_idx)
++            # Apply Gaussian envelope
++            sigma = segment_size / 4.0
++            gaussian = np.exp(-0.5 * ((x - center) / sigma) ** 2)
++            f[i:end_idx] = gaussian * 0.8 + 0.2  # Blend with base level
++        else:
++            # Low region
++            f[i:end_idx] = 0.1
++            
++    # Add some random variation to avoid perfect periodicity
++    noise = np.random.normal(0, 0.05, n)
++    f = f + noise
++    
++    # Ensure all values are non-negative
++    f = np.maximum(f, 0)
++    
++    return f.tolist()
++
++def adaptive_evolutionary_optimization():
++    """Optimize step function using adaptive evolutionary approach."""
++    start_time = time.time()
++    
++    # Start with reasonable size
++    n = 1000
++    
++    # Initialize with sophisticated pattern
++    current_f = sophisticated_initialization(n)
++    best_c2 = evaluate_c2(current_f)
++    best_f = current_f.copy()
++    
++    # Multi-start approach with different initializations
++    num_starts = 3
++    for start_iter in range(num_starts):
++        # Create diverse initial populations
++        if start_iter == 0:
++            f_start = sophisticated_initialization(n)
++        elif start_iter == 1:
++            # Random initialization with some structure
++            f_start = [np.random.random() * 0.5 + 0.5 for _ in range(n)]
++        else:
++            # Another structured initialization
++            f_start = [np.random.random() * 0.3 + 0.7 if i % 3 == 0 else np.random.random() * 0.2 
++                      for i in range(n)]
++            
++        # Adaptive population sizing based on problem complexity
++        popsize = max(10, min(50, n // 10))
++        maxiter = max(50, min(200, n // 5))
++        
++        # Differential evolution with bounds
++        bounds = [(0.0, 1.0)] * n
++        
++        # Set up differential evolution
++        de_result = differential_evolution(
++            lambda x: -evaluate_c2(x),  # Minimize negative to maximize C2
++            bounds,
++            popsize=popsize,
++            maxiter=maxiter,
++            seed=SEED + start_iter,
++            disp=False,
++            tol=1e-6
++        )
++        
++        # Local refinement with L-BFGS-B if time permits
++        if time.time() - start_time < MAX_TIME * 0.8:
++            refined_result = minimize(
++                lambda x: -evaluate_c2(x),
++                de_result.x,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 200}
++            )
++            refined_f = refined_result.x.tolist()
++            refined_c2 = evaluate_c2(refined_f)
++            
++            if refined_c2 > best_c2:
++                best_c2 = refined_c2
++                best_f = refined_f.copy()
++                
++        # Check if we should continue
++        if time.time() - start_time > MAX_TIME * 0.95:
++            break
++            
++        # Update best if current is better
++        if de_result.fun < 0 and -de_result.fun > best_c2:
++            best_c2 = -de_result.fun
++            best_f = de_result.x.tolist()
++    
++    return best_f
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value."""
+-    f_values = [np.random.random()] * np.random.randint(100,1000)
++    # Run adaptive evolutionary optimization to find optimal step function
++    f_values = adaptive_evolutionary_optimization()
+     return f_values
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

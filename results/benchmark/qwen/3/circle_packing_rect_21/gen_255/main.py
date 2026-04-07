@@ -1,0 +1,297 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import random
+from sklearn.cluster import KMeans
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, using 1.2 x 0.8 for better aspect ratio
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    class EnergyConstraintHandler:
+        """Handles constraint satisfaction using energy-based approach"""
+        def __init__(self, width, height):
+            self.width = width
+            self.height = height
+            self.penalty_weight = 1000.0
+            
+        def boundary_penalty(self, x, y, r):
+            """Calculate penalty for boundary violations"""
+            penalty = 0
+            if x - r < 0:
+                penalty += (0 - (x - r)) ** 2
+            if x + r > self.width:
+                penalty += ((x + r) - self.width) ** 2
+            if y - r < 0:
+                penalty += (0 - (y - r)) ** 2
+            if y + r > self.height:
+                penalty += ((y + r) - self.height) ** 2
+            return penalty
+            
+        def overlap_penalty(self, circles, i, x, y, r):
+            """Calculate penalty for overlap violations"""
+            penalty = 0
+            for j in range(len(circles)):
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    overlap = max(0, (r + r2) - dist)
+                    if overlap > 0:
+                        penalty += overlap ** 2
+            return penalty
+            
+        def total_energy(self, circles, i, x, y, r):
+            """Calculate total energy (penalty) for a configuration"""
+            penalty = self.boundary_penalty(x, y, r)
+            penalty += self.overlap_penalty(circles, i, x, y, r)
+            return penalty
+    
+    def compute_maximum_radius(circles, index, width, height):
+        """Compute maximum possible radius for circle at given index"""
+        x, y, current_radius = circles[index]
+        
+        # Distance to boundaries
+        dist_to_boundaries = [
+            x,                      # left
+            width - x,              # right  
+            y,                      # bottom
+            height - y              # top
+        ]
+        
+        # Distance to other circles
+        min_dist_to_others = float('inf')
+        for i_idx in range(len(circles)):
+            if i_idx != index:
+                x2, y2, r2 = circles[i_idx]
+                dist = distance.euclidean([x, y], [x2, y2])
+                min_dist_to_others = min(min_dist_to_others, dist - r2)
+        
+        # Maximum radius is limited by both edges and other circles
+        max_radius = min(min(dist_to_boundaries), min_dist_to_others)
+        return max(0.001, max_radius)
+    
+    def generate_voronoi_seeds(n_points, width, height):
+        """Generate initial seeds using Voronoi-based approach"""
+        # Start with corners and center
+        seeds = []
+        seeds.append([width * 0.1, height * 0.1])      # bottom-left
+        seeds.append([width * 0.9, height * 0.1])      # bottom-right
+        seeds.append([width * 0.1, height * 0.9])      # top-left
+        seeds.append([width * 0.9, height * 0.9])      # top-right
+        seeds.append([width * 0.5, height * 0.5])      # center
+        
+        # Add more seeds using k-means clustering on randomly generated points
+        remaining = n_points - len(seeds)
+        if remaining > 0:
+            # Generate random points
+            random_points = np.random.rand(100, 2) * [width, height]
+            
+            # Use k-means to find cluster centers
+            kmeans = KMeans(n_clusters=min(remaining, 20), random_state=42, n_init=10)
+            kmeans.fit(random_points)
+            
+            # Add cluster centers as seeds
+            for center in kmeans.cluster_centers_:
+                if len(seeds) < n_points:
+                    seeds.append([center[0], center[1]])
+        
+        # Add remaining seeds randomly with some bias toward corners and edges
+        while len(seeds) < n_points:
+            # Bias towards corners and edges to get better distribution
+            if random.random() < 0.3:
+                # Corner or edge bias
+                x = random.choice([0.05, width * 0.5, width - 0.05])
+                y = random.choice([0.05, height * 0.5, height - 0.05])
+                # Add some noise
+                x += random.uniform(-0.05, 0.05)
+                y += random.uniform(-0.05, 0.05)
+                x = max(0.05, min(width - 0.05, x))
+                y = max(0.05, min(height - 0.05, y))
+                seeds.append([x, y])
+            else:
+                # Random point
+                x = random.uniform(0.05, width - 0.05)
+                y = random.uniform(0.05, height - 0.05)
+                seeds.append([x, y])
+        
+        return np.array(seeds[:n_points])
+    
+    def voronoi_based_placement(seed_points, width, height):
+        """Use Voronoi diagram to assign circle positions with proper radius calculation"""
+        # Ensure we have exactly 21 seeds
+        if len(seed_points) < 21:
+            # Fill with random points
+            while len(seed_points) < 21:
+                x = random.uniform(0.05, width - 0.05)
+                y = random.uniform(0.05, height - 0.05)
+                seed_points = np.vstack([seed_points, [x, y]])
+        elif len(seed_points) > 21:
+            seed_points = seed_points[:21]
+        
+        # Initialize circles
+        circles = np.zeros((21, 3))
+        
+        # Generate Voronoi diagram
+        try:
+            vor = Voronoi(seed_points)
+            # For each seed point, compute the Voronoi cell area and set appropriate radius
+            for i in range(21):
+                # Simple approach: place circles at seed points and compute max radius
+                x, y = seed_points[i]
+                circles[i] = [x, y, 0.01]  # Initial small radius
+        except:
+            # Fallback to simple initialization
+            for i in range(21):
+                x = seed_points[i, 0] if i < len(seed_points) else random.uniform(0.05, width - 0.05)
+                y = seed_points[i, 1] if i < len(seed_points) else random.uniform(0.05, height - 0.05)
+                circles[i] = [x, y, 0.01]
+        
+        return circles
+    
+    def adaptive_local_refinement(circles, width, height, max_iterations=1000):
+        """Refine circles using adaptive local search with multiple strategies"""
+        constraint_handler = EnergyConstraintHandler(width, height)
+        current_circles = circles.copy()
+        
+        # Track improvement for adaptive step size
+        last_radius_sum = np.sum(current_circles[:, 2])
+        improvement_count = 0
+        step_sizes = [0.1, 0.05, 0.02, 0.01]  # Different step sizes
+        current_step_idx = 0
+        
+        for iteration in range(max_iterations):
+            improved = False
+            
+            # Shuffle circle indices for unbiased processing
+            indices = list(range(21))
+            random.shuffle(indices)
+            
+            for i in indices:
+                # Compute max possible radius
+                max_radius = compute_maximum_radius(current_circles, i, width, height)
+                
+                # If we can increase radius, do it
+                if max_radius > current_circles[i, 2]:
+                    current_circles[i, 2] = max_radius
+                    improved = True
+                    
+            # Adaptive step size adjustment
+            new_radius_sum = np.sum(current_circles[:, 2])
+            if new_radius_sum > last_radius_sum:
+                improvement_count += 1
+                if improvement_count > 5:  # After 5 improvements, try smaller steps
+                    current_step_idx = min(len(step_sizes) - 1, current_step_idx + 1)
+                    improvement_count = 0
+            else:
+                improvement_count = 0
+                if current_step_idx > 0:
+                    current_step_idx -= 1
+                    
+            last_radius_sum = new_radius_sum
+            
+            # Occasionally perform position adjustments
+            if iteration % 50 == 0 and iteration > 0:
+                # Adjust some positions randomly to escape local minima
+                for _ in range(5):  # Adjust 5 circles
+                    i = random.randint(0, 20)
+                    # Apply small perturbation
+                    current_circles[i, 0] += random.uniform(-step_sizes[current_step_idx], step_sizes[current_step_idx])
+                    current_circles[i, 1] += random.uniform(-step_sizes[current_step_idx], step_sizes[current_step_idx])
+                    
+                    # Keep within bounds
+                    current_circles[i, 0] = np.clip(current_circles[i, 0], 0.05, width - 0.05)
+                    current_circles[i, 1] = np.clip(current_circles[i, 1], 0.05, height - 0.05)
+                    
+                    # Recompute radius after position change
+                    max_radius = compute_maximum_radius(current_circles, i, width, height)
+                    current_circles[i, 2] = max_radius
+                    improved = True
+            
+            if not improved and iteration > 50:
+                break
+                
+        return current_circles
+    
+    def multi_phase_optimization():
+        """Run multi-phase optimization"""
+        best_circles = None
+        best_sum = 0
+        
+        # Phase 1: Voronoi-based initialization with seeds
+        seed_points = generate_voronoi_seeds(25, rect_width, rect_height)  # Extra points for robustness
+        circles = voronoi_based_placement(seed_points, rect_width, rect_height)
+        
+        # Phase 2: Adaptive local refinement
+        refined_circles = adaptive_local_refinement(circles, rect_width, rect_height, 500)
+        
+        # Phase 3: Additional refinement with different strategies
+        # Try different initializations and compare results
+        
+        for phase in range(3):
+            # Create a new initialization
+            current_seed_points = generate_voronoi_seeds(25, rect_width, rect_height)
+            current_circles = voronoi_based_placement(current_seed_points, rect_width, rect_height)
+            
+            # Refine with different parameter settings
+            if phase == 0:
+                # Aggressive refinement
+                current_refined = adaptive_local_refinement(current_circles, rect_width, rect_height, 500)
+            elif phase == 1:
+                # Moderate refinement
+                current_refined = adaptive_local_refinement(current_circles, rect_width, rect_height, 300)
+            else:
+                # Gentle refinement
+                current_refined = adaptive_local_refinement(current_circles, rect_width, rect_height, 200)
+            
+            # Validate and compare
+            current_sum = np.sum(current_refined[:, 2])
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_circles = current_refined.copy()
+        
+        # Final validation and boundary correction
+        if best_circles is not None:
+            final_circles = best_circles.copy()
+            
+            # Ensure all circles respect boundaries
+            for i in range(21):
+                x, y, r = final_circles[i]
+                r = min(r, x, rect_width - x, y, rect_height - y)
+                r = max(0.001, r)
+                final_circles[i] = [x, y, r]
+            
+            return final_circles
+            
+        # Fallback to basic approach
+        circles = np.zeros((21, 3))
+        for i in range(21):
+            x = random.uniform(0.05, rect_width - 0.05)
+            y = random.uniform(0.05, rect_height - 0.05)
+            circles[i] = [x, y, 0.01]
+            
+        return adaptive_local_refinement(circles, rect_width, rect_height, 500)
+    
+    # Execute main optimization process
+    return multi_phase_optimization()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,267 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from copy import deepcopy
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+    Uses physics-based optimization with force-directed simulation.
+    """
+    # Rectangle dimensions - perimeter = 4, so width + height = 2
+    # Optimized rectangle dimensions for maximum packing efficiency
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Physics simulation parameters
+    n_circles = 21
+    max_steps = 10000
+    dt = 0.001
+    damping = 0.95
+    spring_constant = 0.1
+    repulsion_strength = 100.0
+    boundary_strength = 1000.0
+    temperature_decay = 0.9999
+    
+    # Initialize circles with adaptive grid and randomization
+    def initialize_circles():
+        circles = np.zeros((n_circles, 3))
+        
+        # Grid-based initialization
+        sqrt_n = np.sqrt(n_circles)
+        rows = int(np.ceil(sqrt_n))
+        cols = int(np.ceil(n_circles / rows))
+        
+        cell_width = rect_width / cols
+        cell_height = rect_height / rows
+        
+        # Maximum possible radius with safety margin
+        max_radius = min(cell_width, cell_height) * 0.35
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                x = (j + 0.5) * cell_width
+                y = (i + 0.5) * cell_height
+                # Add some initial randomness
+                x += np.random.uniform(-cell_width * 0.1, cell_width * 0.1)
+                y += np.random.uniform(-cell_height * 0.1, cell_height * 0.1)
+                r = max_radius * (0.9 + np.random.random() * 0.2)
+                circles[idx] = [x, y, r]
+                idx += 1
+                
+        # Ensure all circles are within bounds initially
+        for i in range(n_circles):
+            circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+            circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+            
+        return circles
+    
+    # Force calculation function
+    def calculate_forces(circles):
+        forces = np.zeros_like(circles)
+        
+        # Repulsive forces between circles (inverse square law)
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Compute pairwise distances
+        distances = cdist(positions, positions)
+        # Avoid division by zero and self-interactions
+        np.fill_diagonal(distances, 1e10)
+        
+        # Only consider interactions where circles could potentially overlap
+        min_distances = radii.reshape(-1, 1) + radii.reshape(1, -1)
+        
+        # For each pair of circles, compute repulsion force
+        for i in range(n_circles):
+            for j in range(i+1, n_circles):
+                if distances[i, j] < min_distances[i, j]:
+                    dx = positions[i, 0] - positions[j, 0]
+                    dy = positions[i, 1] - positions[j, 1]
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    
+                    if dist > 1e-10:
+                        force_magnitude = repulsion_strength / (dist * dist)
+                        fx = force_magnitude * dx / dist
+                        fy = force_magnitude * dy / dist
+                        forces[i, 0] += fx
+                        forces[i, 1] += fy
+                        forces[j, 0] -= fx
+                        forces[j, 1] -= fy
+        
+        # Boundary forces
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            # Left boundary
+            if x - r < 0:
+                forces[i, 0] += boundary_strength * (0 - (x - r))
+            # Right boundary
+            if x + r > rect_width:
+                forces[i, 0] += boundary_strength * (rect_width - (x + r))
+            # Bottom boundary
+            if y - r < 0:
+                forces[i, 1] += boundary_strength * (0 - (y - r))
+            # Top boundary
+            if y + r > rect_height:
+                forces[i, 1] += boundary_strength * (rect_height - (y + r))
+        
+        return forces
+    
+    # Physics simulation step
+    def simulate_step(circles, velocities):
+        # Calculate forces
+        forces = calculate_forces(circles)
+        
+        # Update velocities and positions
+        for i in range(n_circles):
+            # Apply forces to velocity
+            ax = forces[i, 0] / (circles[i, 2] * 0.5)  # Simplified mass based on radius
+            ay = forces[i, 1] / (circles[i, 2] * 0.5)
+            
+            velocities[i, 0] += ax * dt
+            velocities[i, 1] += ay * dt
+            
+            # Apply damping
+            velocities[i, 0] *= damping
+            velocities[i, 1] *= damping
+            
+            # Update positions
+            circles[i, 0] += velocities[i, 0] * dt
+            circles[i, 1] += velocities[i, 1] * dt
+            
+            # Keep within bounds
+            circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], rect_width - circles[i, 2])
+            circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], rect_height - circles[i, 2])
+        
+        return circles, velocities
+    
+    # Check if circles collide with each other or boundaries
+    def is_valid_layout(circles):
+        # Check boundary constraints
+        for circle in circles:
+            x, y, r = circle
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+
+        # Check pairwise collisions
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+
+                # Distance between centers
+                dx = x1 - x2
+                dy = y1 - y2
+                dist = np.sqrt(dx*dx + dy*dy)
+
+                # Circles should not overlap
+                if dist < r1 + r2:
+                    return False
+                    
+        return True
+    
+    # Refinement function to improve packing through local optimization
+    def refine_packing(circles):
+        # Simple geometric refinement: try to increase radii while maintaining non-overlap
+        def get_neighbors(idx):
+            neighbors = []
+            for i in range(n_circles):
+                if i != idx:
+                    dx = circles[idx, 0] - circles[i, 0]
+                    dy = circles[idx, 1] - circles[i, 1]
+                    dist = np.sqrt(dx*dx + dy*dy)
+                    if dist < circles[idx, 2] + circles[i, 2]:
+                        neighbors.append(i)
+            return neighbors
+        
+        # Try to increase radius of each circle if possible
+        for attempt in range(100):  # Limited iterations
+            improved = False
+            # Iterate through circles in random order
+            indices = list(range(n_circles))
+            random.shuffle(indices)
+            
+            for i in indices:
+                current_r = circles[i, 2]
+                # Try to increase radius
+                max_r_increase = 0.01
+                new_r = min(current_r + max_r_increase, 0.3)
+                
+                # Check if the increase is valid
+                safe = True
+                for j in range(n_circles):
+                    if i != j:
+                        dx = circles[i, 0] - circles[j, 0]
+                        dy = circles[i, 1] - circles[j, 1]
+                        dist = np.sqrt(dx*dx + dy*dy)
+                        min_dist = new_r + circles[j, 2]
+                        
+                        if dist < min_dist:
+                            safe = False
+                            break
+                
+                # If valid, update radius
+                if safe:
+                    circles[i, 2] = new_r
+                    improved = True
+            
+            if not improved:
+                break
+                
+        return circles
+    
+    # Main simulation loop
+    circles = initialize_circles()
+    velocities = np.zeros_like(circles)
+    
+    # Track best solution
+    best_circles = deepcopy(circles)
+    best_sum = np.sum(circles[:, 2])
+    
+    # Simulate physics
+    for step in range(max_steps):
+        # Occasionally perform refinement
+        if step % 100 == 0:
+            # Reset velocities occasionally to prevent drift
+            velocities = np.zeros_like(velocities)
+            
+        # Perform simulation step
+        circles, velocities = simulate_step(circles, velocities)
+        
+        # Periodically check and save best solution
+        current_sum = np.sum(circles[:, 2])
+        if current_sum > best_sum and is_valid_layout(circles):
+            best_sum = current_sum
+            best_circles = deepcopy(circles)
+            
+        # Occasionally do local refinement
+        if step % 500 == 0:
+            refined = refine_packing(deepcopy(circles))
+            if np.sum(refined[:, 2]) > best_sum and is_valid_layout(refined):
+                best_sum = np.sum(refined[:, 2])
+                best_circles = refined
+                circles = refined
+    
+    # Final refinement
+    final_refined = refine_packing(deepcopy(best_circles))
+    if np.sum(final_refined[:, 2]) > best_sum and is_valid_layout(final_refined):
+        return final_refined
+    
+    return best_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

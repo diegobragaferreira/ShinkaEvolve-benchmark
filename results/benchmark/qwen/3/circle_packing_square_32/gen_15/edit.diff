@@ -1,0 +1,232 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,221 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial import cKDTree
++import random
++from typing import Tuple, List
++import math
++
++# Fixed seed for deterministic results
++np.random.seed(42)
++random.seed(42)
++
++class CirclePackingOptimizer:
++    def __init__(self, n_circles: int = 32, population_size: int = 50, 
++                 generations: int = 100, mutation_rate: float = 0.1):
++        self.n_circles = n_circles
++        self.population_size = population_size
++        self.generations = generations
++        self.mutation_rate = mutation_rate
++        self.best_solution = None
++        self.best_fitness = 0
++        
++    def initialize_population(self) -> np.ndarray:
++        """Initialize a population of random circle configurations"""
++        population = []
++        for _ in range(self.population_size):
++            # Generate random circles with valid positions and sizes
++            circles = np.zeros((self.n_circles, 3))
++            for i in range(self.n_circles):
++                # Random position within unit square with valid radius
++                max_radius = min(0.5, 1.0 - np.random.random() * 0.5, 1.0 - np.random.random() * 0.5)
++                radius = np.random.random() * max_radius * 0.8  # Slightly smaller for safety
++                x = radius + np.random.random() * (1.0 - 2 * radius)
++                y = radius + np.random.random() * (1.0 - 2 * radius)
++                circles[i] = [x, y, radius]
++            population.append(circles)
++        return np.array(population)
++    
++    def validate_circle(self, circle: np.ndarray) -> bool:
++        """Check if a single circle is valid (within bounds)"""
++        x, y, r = circle
++        return (r <= x <= 1 - r) and (r <= y <= 1 - r)
++    
++    def validate_all_circles(self, circles: np.ndarray) -> bool:
++        """Check if all circles in configuration are valid"""
++        for circle in circles:
++            if not self.validate_circle(circle):
++                return False
++        return True
++    
++    def check_overlap(self, circles: np.ndarray) -> bool:
++        """Check if any circles overlap using spatial indexing for efficiency"""
++        if len(circles) < 2:
++            return False
++            
++        # Create list of centers and radii for distance calculation
++        centers = circles[:, :2]
++        radii = circles[:, 2]
++        
++        # Use KDTree for efficient neighbor searches
++        tree = cKDTree(centers)
++        
++        # Check each circle against neighbors
++        for i in range(len(circles)):
++            center_i = centers[i]
++            radius_i = radii[i]
++            
++            # Find nearby circles (within 2*(radius_i + max_radius) distance)
++            neighbors = tree.query_ball_point(center_i, 2 * (radius_i + max(radii)))
++            
++            # Check overlap with each neighbor
++            for j in neighbors:
++                if i != j:
++                    center_j = centers[j]
++                    radius_j = radii[j]
++                    
++                    # Calculate distance between centers
++                    dist = np.sqrt(np.sum((center_i - center_j) ** 2))
++                    
++                    # Check if circles overlap
++                    if dist < (radius_i + radius_j):
++                        return True
++                        
++        return False
++    
++    def fitness_function(self, circles: np.ndarray) -> float:
++        """Calculate fitness based on sum of radii, penalizing invalid configurations"""
++        # Check validity of configuration
++        if not self.validate_all_circles(circles):
++            return 0.0
++            
++        if self.check_overlap(circles):
++            return 0.0
++            
++        # Sum of radii as primary objective
++        return np.sum(circles[:, 2])
++    
++    def tournament_selection(self, population: np.ndarray, fitnesses: np.ndarray, 
++                           tournament_size: int = 3) -> np.ndarray:
++        """Select parent using tournament selection"""
++        selected_indices = []
++        for _ in range(len(population)):
++            # Select random participants
++            tournament_indices = np.random.choice(len(population), tournament_size)
++            tournament_fitnesses = fitnesses[tournament_indices]
++            
++            # Select best among participants
++            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
++            selected_indices.append(winner_index)
++            
++        return population[selected_indices]
++    
++    def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
++        """Perform single-point crossover between two parents"""
++        # Use a more sophisticated crossover that preserves valid configurations
++        crossover_point = np.random.randint(1, self.n_circles)
++        
++        child1 = np.copy(parent1)
++        child2 = np.copy(parent2)
++        
++        # Swap segments
++        child1[crossover_point:] = parent2[crossover_point:]
++        child2[crossover_point:] = parent1[crossover_point:]
++        
++        # Apply constraint validation and adjustment
++        for child in [child1, child2]:
++            # Ensure valid positions and radii
++            for i in range(self.n_circles):
++                x, y, r = child[i]
++                # Adjust radius to fit in bounds
++                if r > min(x, 1-x, y, 1-y):
++                    r = min(x, 1-x, y, 1-y) * 0.9
++                # Adjust position if necessary
++                x = np.clip(x, r, 1-r)
++                y = np.clip(y, r, 1-r)
++                child[i] = [x, y, r]
++                
++        return child1, child2
++    
++    def mutate(self, individual: np.ndarray, generation: int) -> np.ndarray:
++        """Apply mutation to an individual"""
++        mutated = np.copy(individual)
++        mutation_strength = self.mutation_rate * (1 - generation / self.generations)
++        
++        for i in range(self.n_circles):
++            if np.random.random() < mutation_strength:
++                # Mutate either position or radius
++                if np.random.random() < 0.5:
++                    # Mutate position
++                    mutated[i, 0] += np.random.normal(0, 0.02) * (1 - generation/self.generations)
++                    mutated[i, 1] += np.random.normal(0, 0.02) * (1 - generation/self.generations)
++                    # Clip to valid range
++                    mutated[i, 0] = np.clip(mutated[i, 0], mutated[i, 2], 1 - mutated[i, 2])
++                    mutated[i, 1] = np.clip(mutated[i, 1], mutated[i, 2], 1 - mutated[i, 2])
++                else:
++                    # Mutate radius
++                    mutated[i, 2] *= np.random.normal(1, 0.1)
++                    # Ensure it stays within valid bounds
++                    mutated[i, 2] = np.clip(mutated[i, 2], 0.001, min(
++                        mutated[i, 0], 1 - mutated[i, 0], 
++                        mutated[i, 1], 1 - mutated[i, 1]))
++        
++        return mutated
++    
++    def optimize(self) -> np.ndarray:
++        """Main optimization loop"""
++        # Initialize population
++        population = self.initialize_population()
++        
++        for generation in range(self.generations):
++            # Evaluate fitness for all individuals
++            fitnesses = np.array([self.fitness_function(individual) for individual in population])
++            
++            # Track best solution
++            best_idx = np.argmax(fitnesses)
++            if fitnesses[best_idx] > self.best_fitness:
++                self.best_fitness = fitnesses[best_idx]
++                self.best_solution = population[best_idx].copy()
++            
++            # Selection
++            selected_population = self.tournament_selection(population, fitnesses)
++            
++            # Create new population through crossover and mutation
++            new_population = []
++            
++            # Keep best individual (elitism)
++            new_population.append(population[best_idx])
++            
++            # Generate offspring
++            while len(new_population) < self.population_size:
++                # Select two parents
++                parent1_idx = np.random.randint(0, len(selected_population))
++                parent2_idx = np.random.randint(0, len(selected_population))
++                
++                # Crossover
++                child1, child2 = self.crossover(selected_population[parent1_idx], 
++                                              selected_population[parent2_idx])
++                
++                # Mutation
++                child1 = self.mutate(child1, generation)
++                child2 = self.mutate(child2, generation)
++                
++                # Add to new population
++                new_population.append(child1)
++                if len(new_population) < self.population_size:
++                    new_population.append(child2)
++                    
++            population = np.array(new_population[:self.population_size])
++            
++        return self.best_solution
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    optimizer = CirclePackingOptimizer(n_circles=32, population_size=50, generations=100)
++    return optimizer.optimize()
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,148 @@
+<NAME>
+implement_boundary_weighted_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+This change enhances the Voronoi-based initialization by weighting candidate positions based on their proximity to square boundaries. This addresses the issue that circles near edges can potentially accommodate larger radii, which is crucial for maximizing the sum of radii. The implementation assigns higher weights (1.5x) to Voronoi vertices located within 0.1 units of the unit square edges during the selection phase, encouraging the algorithm to prioritize configurations with greater potential for large-radius circles near boundaries.
+
+The key insight is that boundary positions offer more room for large circles - a circle at (0.05, 0.5) has more potential to grow than one at (0.5, 0.5) since it's closer to the left boundary. By adjusting the candidate selection probability, we bias the optimization toward these more promising regions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_voronoi_seeds(n_points=50):
+        """Generate initial seed points using Voronoi diagram approach."""
+        # Generate more points than needed to ensure good distribution
+        points = []
+
+        # Add corner points for better boundary coverage
+        for x in [0, 0.5, 1]:
+            for y in [0, 0.5, 1]:
+                points.append([x, y])
+
+        # Add edge midpoints
+        for x in [0.25, 0.5, 0.75]:
+            points.append([x, 0])
+            points.append([x, 1])
+            points.append([0, x])
+            points.append([1, x])
+
+        # Add interior points
+        for _ in range(20):
+            points.append([np.random.random(), np.random.random()])
+
+        # Generate Voronoi diagram
+        vor = Voronoi(np.array(points))
+
+        # Get Voronoi vertices and centroids as candidate positions
+        candidates = []
+
+        # Add vertices
+        for vertex in vor.vertices:
+            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                candidates.append(vertex)
+
+        # Add centroids of regions
+        for region in vor.regions:
+            if len(region) > 0 and -1 not in region:
+                centroid_x = np.mean([vor.vertices[i][0] for i in region])
+                centroid_y = np.mean([vor.vertices[i][1] for i in region])
+                if 0 <= centroid_x <= 1 and 0 <= centroid_y <= 1:
+                    candidates.append([centroid_x, centroid_y])
+
+        # Remove duplicates
+        unique_candidates = []
+        seen = set()
+        for cand in candidates:
+            coord_tuple = (round(cand[0], 5), round(cand[1], 5))
+            if coord_tuple not in seen:
+                seen.add(coord_tuple)
+                unique_candidates.append(cand)
+
+        return unique_candidates[:n_points]
+=======
+    def initialize_voronoi_seeds(n_points=50):
+        """Generate initial seed points using Voronoi diagram approach with boundary weighting."""
+        # Generate more points than needed to ensure good distribution
+        points = []
+
+        # Add corner points for better boundary coverage
+        for x in [0, 0.5, 1]:
+            for y in [0, 0.5, 1]:
+                points.append([x, y])
+
+        # Add edge midpoints
+        for x in [0.25, 0.5, 0.75]:
+            points.append([x, 0])
+            points.append([x, 1])
+            points.append([0, x])
+            points.append([1, x])
+
+        # Add interior points
+        for _ in range(20):
+            points.append([np.random.random(), np.random.random()])
+
+        # Generate Voronoi diagram
+        vor = Voronoi(np.array(points))
+
+        # Get Voronoi vertices and centroids as candidate positions
+        candidates = []
+        weights = []
+
+        # Add vertices with boundary weighting
+        for vertex in vor.vertices:
+            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                # Calculate distance to boundaries
+                dist_to_left = vertex[0]
+                dist_to_right = 1 - vertex[0]
+                dist_to_bottom = vertex[1]
+                dist_to_top = 1 - vertex[1]
+
+                # Weight based on proximity to boundaries (1.5x weight for near-boundary points)
+                min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+                weight = 1.0
+                if min_dist <= 0.1:
+                    weight = 1.5  # Higher weight for points near boundaries
+
+                candidates.append(vertex)
+                weights.append(weight)
+
+        # Add centroids of regions with boundary weighting
+        for region in vor.regions:
+            if len(region) > 0 and -1 not in region:
+                centroid_x = np.mean([vor.vertices[i][0] for i in region])
+                centroid_y = np.mean([vor.vertices[i][1] for i in region])
+                if 0 <= centroid_x <= 1 and 0 <= centroid_y <= 1:
+                    # Calculate distance to boundaries
+                    dist_to_left = centroid_x
+                    dist_to_right = 1 - centroid_x
+                    dist_to_bottom = centroid_y
+                    dist_to_top = 1 - centroid_y
+
+                    # Weight based on proximity to boundaries
+                    min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+                    weight = 1.0
+                    if min_dist <= 0.1:
+                        weight = 1.5  # Higher weight for points near boundaries
+
+                    candidates.append([centroid_x, centroid_y])
+                    weights.append(weight)
+
+        # Remove duplicates
+        unique_candidates = []
+        unique_weights = []
+        seen = set()
+        for i, cand in enumerate(candidates):
+            coord_tuple = (round(cand[0], 5), round(cand[1], 5))
+            if coord_tuple not in seen:
+                seen.add(coord_tuple)
+                unique_candidates.append(cand)
+                unique_weights.append(weights[i])
+
+        # Sort by weights (descending) and take top n_points
+        sorted_indices = np.argsort(unique_weights)[::-1]
+        selected_candidates = [unique_candidates[i] for i in sorted_indices[:n_points]]
+
+        return selected_candidates
+>>>>>>> REPLACE
+</DIFF>

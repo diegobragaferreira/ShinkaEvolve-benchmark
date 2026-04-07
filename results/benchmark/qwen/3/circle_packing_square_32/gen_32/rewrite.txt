@@ -1,0 +1,272 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import time
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Parameters
+    POP_SIZE = 50
+    GENERATIONS = 100
+    TOURNAMENT_SIZE = 5
+    MUTATION_RATE_START = 0.15
+    MUTATION_RATE_END = 0.02
+    CROSSOVER_RATE = 0.8
+    INITIAL_RADIUS = 0.02
+    
+    def create_initial_population():
+        """Create initial population with hexagonal grid placement"""
+        population = []
+        # Hexagonal grid with enough space for circles
+        rows = 6
+        cols = 6
+        spacing_x = 1.0 / cols
+        spacing_y = 1.0 / rows
+        
+        for i in range(rows):
+            for j in range(cols):
+                if len(population) >= 32:
+                    break
+                x = (j + 0.5) * spacing_x
+                y = (i + 0.5) * spacing_y
+                # Add small random offset
+                x += np.random.uniform(-spacing_x/4, spacing_x/4)
+                y += np.random.uniform(-spacing_y/4, spacing_y/4)
+                
+                # Ensure within bounds
+                x = max(INITIAL_RADIUS, min(1 - INITIAL_RADIUS, x))
+                y = max(INITIAL_RADIUS, min(1 - INITIAL_RADIUS, y))
+                
+                # Create individual with random radii
+                individual = []
+                for k in range(32):
+                    radius = INITIAL_RADIUS
+                    individual.append([x, y, radius])
+                    
+                population.append(individual)
+                
+        return population
+    
+    def calculate_fitness(individual):
+        """Calculate fitness as sum of radii, penalize overlaps"""
+        circles = np.array(individual)
+        radii = circles[:, 2]
+        
+        # Calculate total radius sum
+        total_radius = np.sum(radii)
+        
+        # Penalty for overlaps and boundary violations
+        penalty = 0
+        
+        # Check boundary violations
+        for i in range(32):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                penalty += 1000
+        
+        # Check overlaps
+        for i in range(32):
+            for j in range(i+1, 32):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                if distance < (r1 + r2):
+                    penalty += 10000
+                    
+        return total_radius - penalty
+    
+    def check_validity(individual):
+        """Check if individual is valid"""
+        circles = np.array(individual)
+        
+        # Check boundary violations
+        for i in range(32):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+                
+        # Check overlaps
+        for i in range(32):
+            for j in range(i+1, 32):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                if distance < (r1 + r2):
+                    return False
+                    
+        return True
+    
+    def mutate_individual(individual, mutation_rate):
+        """Mutate individual with adaptive mutation rate"""
+        new_individual = []
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            
+            # Apply mutation with probability
+            if random.random() < mutation_rate:
+                # Mutate position
+                x += np.random.normal(0, 0.01)
+                y += np.random.normal(0, 0.01)
+                
+                # Clip to bounds
+                x = max(INITIAL_RADIUS, min(1 - INITIAL_RADIUS, x))
+                y = max(INITIAL_RADIUS, min(1 - INITIAL_RADIUS, y))
+                
+                # Mutate radius
+                r += np.random.normal(0, 0.005)
+                r = max(0.005, min(0.3, r))  # Constrain radius
+            
+            new_individual.append([x, y, r])
+            
+        return new_individual
+    
+    def crossover_individuals(parent1, parent2):
+        """Crossover two individuals with spatial awareness"""
+        if random.random() > CROSSOVER_RATE:
+            return parent1.copy(), parent2.copy()
+            
+        child1 = []
+        child2 = []
+        
+        # Crossover points based on spatial clustering
+        for i in range(len(parent1)):
+            if random.random() < 0.5:
+                child1.append(parent1[i].copy())
+                child2.append(parent2[i].copy())
+            else:
+                child1.append(parent2[i].copy())
+                child2.append(parent1[i].copy())
+                
+        return child1, child2
+    
+    def tournament_selection(population, fitnesses, tournament_size):
+        """Select individual via tournament selection"""
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_index]
+    
+    def optimize_radii(individual):
+        """Refine radii to maximize sum without violating constraints"""
+        circles = np.array(individual)
+        optimized = circles.copy()
+        
+        # Simple greedy refinement - increase radii as much as possible
+        # This is a heuristic approach to improve local solution quality
+        for _ in range(100):  # Limited iterations
+            improved = False
+            for i in range(32):
+                current_r = optimized[i][2]
+                # Try to increase radius
+                max_r = current_r
+                for r in np.linspace(current_r + 0.001, 0.3, 50):
+                    # Check if this radius works with others
+                    valid = True
+                    for j in range(32):
+                        if i != j:
+                            x1, y1, r1 = optimized[i]
+                            x2, y2, r2 = optimized[j]
+                            distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                            if distance < (r + r2):
+                                valid = False
+                                break
+                    
+                    if valid and r <= 0.3:
+                        max_r = r
+                    else:
+                        break
+                        
+                if max_r > optimized[i][2]:
+                    optimized[i][2] = max_r
+                    improved = True
+                    
+            if not improved:
+                break
+                
+        return optimized.tolist()
+    
+    # Main evolutionary algorithm
+    population = create_initial_population()
+    
+    for gen in range(GENERATIONS):
+        # Evaluate fitness
+        fitnesses = []
+        for ind in population:
+            if check_validity(ind):
+                fit = calculate_fitness(ind)
+                fitnesses.append(fit)
+            else:
+                fitnesses.append(-1000000)  # Penalize invalid individuals
+                
+        # Tournament selection to create new population
+        new_population = []
+        
+        # Elitism: keep best 5
+        elite_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)[:5]
+        for idx in elite_indices:
+            new_population.append(population[idx])
+            
+        # Generate rest of population
+        num_to_generate = POP_SIZE - len(elite_indices)
+        
+        # Update mutation rate (adaptive)
+        mutation_rate = MUTATION_RATE_START + (MUTATION_RATE_END - MUTATION_RATE_START) * (gen / GENERATIONS)
+        
+        for _ in range(num_to_generate):
+            # Selection
+            parent1 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+            parent2 = tournament_selection(population, fitnesses, TOURNAMENT_SIZE)
+            
+            # Crossover
+            child1, child2 = crossover_individuals(parent1, parent2)
+            
+            # Mutation
+            child1 = mutate_individual(child1, mutation_rate)
+            child2 = mutate_individual(child2, mutation_rate)
+            
+            # Local refinement
+            child1 = optimize_radii(child1)
+            child2 = optimize_radii(child2)
+            
+            # Validation
+            if not check_validity(child1):
+                # If invalid, try another approach
+                child1 = parent1  # Revert to parent if invalid
+            if not check_validity(child2):
+                child2 = parent2
+                
+            new_population.extend([child1, child2])
+            
+        # Trim to exact population size
+        population = new_population[:POP_SIZE]
+    
+    # Final evaluation and selection of best solution
+    final_fitnesses = []
+    for ind in population:
+        if check_validity(ind):
+            fit = calculate_fitness(ind)
+            final_fitnesses.append(fit)
+        else:
+            final_fitnesses.append(-1000000)
+    
+    best_idx = np.argmax(final_fitnesses)
+    best_solution = population[best_idx]
+    
+    # Convert to required format
+    result = np.zeros((32, 3))
+    for i, (x, y, r) in enumerate(best_solution):
+        result[i] = [x, y, r]
+    
+    return result
+
+# EVOLVE-BLOCK-END

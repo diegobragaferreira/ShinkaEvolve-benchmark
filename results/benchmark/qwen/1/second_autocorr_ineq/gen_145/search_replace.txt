@@ -1,0 +1,254 @@
+<NAME>
+add_jax_autodiff_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding JAX-based automatic differentiation to improve gradient computation accuracy and speed in the optimization process. This addresses the main weakness in the current implementation where finite difference gradients are used, which introduces numerical errors and computational overhead. JAX's autodiff will provide precise gradients that can lead to better convergence and higher C2 values.
+
+The key insight is to replace the manual finite-difference gradient computation in `multi_objective_optimization` with JAX's automatic differentiation capabilities, which will enable more accurate gradient-based optimization and potentially surpass the previous best of 0.962.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from numba import jit
+import random
+import time
+from scipy.special import erf
+import warnings
+from deap import base, creator, tools, algorithms
+=======
+import numpy as np
+from scipy.optimize import minimize
+from numba import jit
+import random
+import time
+from scipy.special import erf
+import warnings
+from deap import base, creator, tools, algorithms
+import jax
+import jax.numpy as jnp
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_c2(individual):
+    """Evaluate fitness of individual (step function) for maximizing C2"""
+    try:
+        # Ensure non-negative values
+        individual = np.maximum(individual, 0.0)
+
+        # Compute C2 value
+        c2, _, _, _ = compute_autoconvolution_norms(individual)
+
+        # Return negative because we want to maximize
+        return -c2
+    except Exception:
+        # Return very poor fitness if error occurs
+        return 1e10
+=======
+def evaluate_c2(individual):
+    """Evaluate fitness of individual (step function) for maximizing C2"""
+    try:
+        # Ensure non-negative values
+        individual = np.maximum(individual, 0.0)
+
+        # Compute C2 value
+        c2, _, _, _ = compute_autoconvolution_norms(individual)
+
+        # Return negative because we want to maximize
+        return -c2
+    except Exception:
+        # Return very poor fitness if error occurs
+        return 1e10
+
+# JAX version for automatic differentiation
+@jax.jit
+def compute_autoconvolution_jax(f_values):
+    """JAX version of autoconvolution for gradient computation"""
+    f = jnp.array(f_values, dtype=jnp.float32)
+    n = len(f)
+
+    # Use JAX's convolution
+    f_padded = jnp.pad(f, (0, 2*n - 1 - n), 'constant')
+    f_fft = jnp.fft.fft(f_padded)
+    g_fft = f_fft * f_fft
+    g = jnp.real(jnp.fft.ifft(g_fft))
+
+    # Keep valid convolution part
+    g_valid = g[n-1:2*n-1]
+
+    return g_valid
+
+@jax.jit
+def compute_c2_jax(f_values):
+    """JAX version to compute C2 for gradient computation"""
+    try:
+        g_vals = compute_autoconvolution_jax(f_values)
+
+        # Compute norms in JAX
+        l1 = jnp.sum(jnp.abs(g_vals))
+        l2_sq = jnp.sum(g_vals**2)
+        linf = jnp.max(jnp.abs(g_vals))
+
+        # Avoid division by zero
+        l1_safe = jnp.where(l1 <= 1e-15, 1e-15, l1)
+        linf_safe = jnp.where(linf <= 1e-15, 1e-15, linf)
+
+        return l2_sq / (l1_safe * linf_safe)
+    except Exception:
+        return 0.0
+
+# Gradient function using JAX
+compute_c2_grad = jax.grad(compute_c2_jax)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_objective_optimization(initial_solution, max_iter=1000):
+    """Enhanced optimization using multi-objective approach with multiple refinement phases"""
+    x = np.array(initial_solution, dtype=float)
+    n = len(x)
+
+    # Multiple refinement phases
+    phases = [
+        {'lr': 0.1, 'momentum': 0.9, 'decay_rate': 0.99, 'max_iter': 300},
+        {'lr': 0.05, 'momentum': 0.95, 'decay_rate': 0.995, 'max_iter': 200},
+        {'lr': 0.01, 'momentum': 0.98, 'decay_rate': 0.999, 'max_iter': 200}
+    ]
+
+    # Track best solution
+    best_x = x.copy()
+    best_c2 = evaluate_c2(x)
+
+    for phase_config in phases:
+        lr = phase_config['lr']
+        momentum = phase_config['momentum']
+        decay_rate = phase_config['decay_rate']
+        max_iter_phase = phase_config['max_iter']
+
+        velocity = np.zeros_like(x)
+        patience_counter = 0
+        current_lr = lr
+
+        for iteration in range(max_iter_phase):
+            # Compute gradient numerically
+            eps = 1e-6
+            grad = np.zeros_like(x)
+
+            for i in range(n):
+                x_plus = x.copy()
+                x_minus = x.copy()
+                x_plus[i] += eps
+                x_minus[i] -= eps
+
+                grad_i = (evaluate_c2(x_plus) - evaluate_c2(x_minus)) / (2 * eps)
+                grad[i] = grad_i
+
+            # Update with momentum
+            velocity = momentum * velocity - current_lr * grad
+            x = x + velocity
+
+            # Project onto feasible region
+            x = np.maximum(x, 0.0)
+
+            # Check improvement
+            current_score = evaluate_c2(x)
+
+            if current_score < best_c2:
+                best_c2 = current_score
+                best_x = x.copy()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            # Adaptive learning rate
+            if patience_counter > 10:
+                current_lr *= decay_rate
+                patience_counter = 0
+
+            # Early stopping
+            if current_lr < 1e-8:
+                break
+
+    return best_x.tolist()
+=======
+def multi_objective_optimization(initial_solution, max_iter=1000):
+    """Enhanced optimization using multi-objective approach with multiple refinement phases"""
+    x = np.array(initial_solution, dtype=float)
+    n = len(x)
+
+    # Multiple refinement phases
+    phases = [
+        {'lr': 0.1, 'momentum': 0.9, 'decay_rate': 0.99, 'max_iter': 300},
+        {'lr': 0.05, 'momentum': 0.95, 'decay_rate': 0.995, 'max_iter': 200},
+        {'lr': 0.01, 'momentum': 0.98, 'decay_rate': 0.999, 'max_iter': 200}
+    ]
+
+    # Track best solution
+    best_x = x.copy()
+    best_c2 = evaluate_c2(x)
+
+    for phase_config in phases:
+        lr = phase_config['lr']
+        momentum = phase_config['momentum']
+        decay_rate = phase_config['decay_rate']
+        max_iter_phase = phase_config['max_iter']
+
+        velocity = np.zeros_like(x)
+        patience_counter = 0
+        current_lr = lr
+
+        for iteration in range(max_iter_phase):
+            # Compute gradient using JAX automatic differentiation instead of finite differences
+            try:
+                grad = np.array(compute_c2_grad(x))
+            except Exception:
+                # Fallback to finite differences if JAX fails
+                eps = 1e-6
+                grad = np.zeros_like(x)
+                for i in range(n):
+                    x_plus = x.copy()
+                    x_minus = x.copy()
+                    x_plus[i] += eps
+                    x_minus[i] -= eps
+                    grad_i = (evaluate_c2(x_plus) - evaluate_c2(x_minus)) / (2 * eps)
+                    grad[i] = grad_i
+
+            # Update with momentum
+            velocity = momentum * velocity - current_lr * grad
+            x = x + velocity
+
+            # Project onto feasible region
+            x = np.maximum(x, 0.0)
+
+            # Check improvement
+            current_score = evaluate_c2(x)
+
+            if current_score < best_c2:
+                best_c2 = current_score
+                best_x = x.copy()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            # Adaptive learning rate
+            if patience_counter > 10:
+                current_lr *= decay_rate
+                patience_counter = 0
+
+            # Early stopping
+            if current_lr < 1e-8:
+                break
+
+    return best_x.tolist()
+>>>>>>> REPLACE
+
+</DIFF>

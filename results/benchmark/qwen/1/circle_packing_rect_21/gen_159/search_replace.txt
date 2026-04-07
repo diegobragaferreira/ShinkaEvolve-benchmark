@@ -1,0 +1,128 @@
+<NAME>
+add_voronoi_based_mutation_scaling
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces Voronoi-based mutation scaling to make the optimization more adaptive to local constraint density. The key insight is that in dense regions where circles are tightly packed, smaller mutations are needed to avoid constraint violations, while in sparse regions larger mutations can be safely applied. This builds on the existing Voronoi density computation but makes it more sophisticated by using the inverse of Voronoi cell areas to determine appropriate mutation step sizes.
+
+The change modifies the `mutate_radius` and `mutate_position` methods to scale mutation magnitudes based on local Voronoi cell areas - smaller cells (indicating high constraint density) get smaller mutations, while larger cells get larger mutations. This should lead to more stable convergence and better exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate_radius(self, circles: np.ndarray, idx: int, density_scores: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on Voronoi density."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on density - more sophisticated
+        max_delta = 0.01
+        if density_scores is not None and len(density_scores) > idx:
+            # High density means more constraints, use smaller deltas
+            # Normalize density to [0,1] range and invert for delta scaling
+            normalized_density = min(1.0, density_scores[idx] / 10.0)  # Cap at 10 for stability
+            delta_factor = 1.0 - 0.8 * normalized_density  # Reduce delta by up to 80% in dense regions
+            delta = max_delta * delta_factor
+        else:
+            delta = max_delta
+
+        # Random small perturbation
+        delta_r = np.random.uniform(-delta, delta)
+        new_r = old_r + delta_r
+
+        # Ensure positive radius with better clamping
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+
+    def mutate_position(self, circles: np.ndarray, idx: int) -> np.ndarray:
+        """Mutate position with small random perturbation."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Small random perturbation with boundary awareness
+        max_delta = 0.05
+        delta_x = np.random.uniform(-max_delta, max_delta)
+        delta_y = np.random.uniform(-max_delta, max_delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds with margin
+        margin = 0.01
+        new_x = np.clip(new_x, margin, self.rect_width - margin)
+        new_y = np.clip(new_y, margin, self.rect_height - margin)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+=======
+    def mutate_radius(self, circles: np.ndarray, idx: int, density_scores: np.ndarray = None) -> np.ndarray:
+        """Mutate radius with adaptive delta based on Voronoi cell areas (inverse scaling)."""
+        new_circles = circles.copy()
+        old_r = new_circles[idx, 2]
+
+        # Adaptive delta based on Voronoi cell area - inverse relationship
+        # Smaller Voronoi cells mean higher constraint density, use smaller mutations
+        max_delta = 0.01
+        if density_scores is not None and len(density_scores) > idx:
+            # Use inverse of density (cell area) for mutation scaling
+            # When density is high (small cells), delta should be small
+            # When density is low (large cells), delta can be larger
+            # Clamp the density to prevent extreme values
+            clamped_density = max(0.001, density_scores[idx])
+            # Inverse scaling: smaller areas = smaller deltas
+            delta = max_delta * (1.0 / clamped_density)
+            # Cap the delta to prevent it from becoming too large
+            delta = min(max_delta, delta)
+        else:
+            delta = max_delta
+
+        # Random small perturbation
+        delta_r = np.random.uniform(-delta, delta)
+        new_r = old_r + delta_r
+
+        # Ensure positive radius with better clamping
+        new_r = max(0.001, new_r)
+        new_circles[idx, 2] = new_r
+
+        return new_circles
+
+    def mutate_position(self, circles: np.ndarray, idx: int) -> np.ndarray:
+        """Mutate position with adaptive delta based on Voronoi cell areas."""
+        new_circles = circles.copy()
+        old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+        # Adaptive delta based on Voronoi cell area for position
+        # Scale mutation magnitude based on local constraint density
+        max_delta = 0.05
+        density_scores = self.compute_voronoi_density(circles)
+
+        if density_scores is not None and len(density_scores) > idx:
+            # Inverse relationship: smaller cells (higher density) = smaller moves
+            clamped_density = max(0.001, density_scores[idx])
+            delta = max_delta * (1.0 / clamped_density)
+            delta = min(max_delta, delta)
+        else:
+            delta = max_delta
+
+        # Small random perturbation with boundary awareness
+        delta_x = np.random.uniform(-delta, delta)
+        delta_y = np.random.uniform(-delta, delta)
+
+        new_x = old_x + delta_x
+        new_y = old_y + delta_y
+
+        # Ensure within bounds with margin
+        margin = 0.01
+        new_x = np.clip(new_x, margin, self.rect_width - margin)
+        new_y = np.clip(new_y, margin, self.rect_height - margin)
+
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,143 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def initialize_points(n_points=16, method='improved_hexagonal'):
+    """Initialize points with improved strategies for better spread."""
+    np.random.seed(42)
+
+    if method == 'improved_hexagonal':
+        # Create a more sophisticated initial layout that ensures better coverage
+        # Start with a regular grid pattern but add strategic perturbations
+        points = []
+        rows = 4
+        cols = 4
+        spacing = 1.0 / (rows - 1)
+
+        # Base grid points
+        for i in range(rows):
+            for j in range(cols):
+                x = j * spacing
+                y = i * spacing
+
+                # Apply larger, more strategic perturbations to avoid clustering
+                # Only perturb interior points more significantly
+                if 0 < i < rows-1 and 0 < j < cols-1:
+                    # More significant perturbation for internal points
+                    x += np.random.normal(0, 0.03)
+                    y += np.random.normal(0, 0.03)
+                elif i == 0 or i == rows-1 or j == 0 or j == cols-1:
+                    # Smaller perturbation for edge points to maintain boundary coverage
+                    x += np.random.normal(0, 0.01)
+                    y += np.random.normal(0, 0.01)
+                else:
+                    # Corner points with moderate perturbation
+                    x += np.random.normal(0, 0.015)
+                    y += np.random.normal(0, 0.015)
+
+                points.append([x, y])
+
+        # Ensure points are within bounds [0,1]
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    elif method == 'random':
+        return np.random.rand(n_points, 2)
+
+    else:
+        return np.random.rand(n_points, 2)
+
+def optimize_points(initial_points, max_time=150):
+    """Optimize point distribution using multiple strategies."""
+    start_time = time.time()
+
+    # Define bounds for points (0,1) in both dimensions
+    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    def objective(x):
+        # Reshape flat array back to points
+        points = x.reshape(-1, 2)
+        # Return negative since we want to maximize
+        return -compute_min_max_ratio(points)
+
+    # First stage: Differential evolution for global search
+    try:
+        result1 = differential_evolution(
+            objective,
+            bounds,
+            maxiter=100,
+            popsize=15,
+            tol=1e-6,
+            seed=42,
+            timeout=max_time - (time.time() - start_time)
+        )
+
+        if not result1.success:
+            # Fallback to local optimization if needed
+            initial_guess = result1.x
+        else:
+            initial_guess = result1.x
+    except:
+        initial_guess = initial_points.flatten()
+
+    # Second stage: Local optimization
+    try:
+        result2 = minimize(
+            objective,
+            initial_guess,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-9},
+            timeout=max_time - (time.time() - start_time)
+        )
+
+        final_points = result2.x.reshape(-1, 2)
+    except:
+        # If optimization fails, return initial points
+        final_points = initial_points
+
+    # Ensure final points are within bounds
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Initialize points with hexagonal pattern for better starting configuration
+    initial_points = initialize_points(n_points=16, method='hexagonal')
+
+    # Optimize the point distribution
+    optimized_points = optimize_points(initial_points, max_time=150)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

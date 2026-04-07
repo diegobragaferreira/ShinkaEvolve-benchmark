@@ -1,0 +1,382 @@
+<NAME>
+improve_hexagon_validation
+</NAME>
+
+<DESCRIPTION>
+The key improvement is to enhance the hexagon validation system to be more robust and efficient. The current implementation uses Shapely for geometric operations which can be slow and less precise for the specific case of hexagon-hexagon interactions. I'm implementing a custom SAT (Separating Axis Theorem) based collision detection that's specifically optimized for hexagons, and a more efficient containment check that avoids expensive Shapely operations. This should significantly speed up constraint validation while being more numerically stable.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from shapely.geometry import Polygon, Point
+from shapely.validation import make_valid
+import time
+import warnings
+from numba import jit
+import random
+
+# Constants
+UNIT_HEX_RADIUS = 1.0  # Side length of unit hexagon
+UNIT_HEX_APOGEE = np.sqrt(3)/2  # Distance from center to corner of unit hexagon
+
+@jit(nopython=True)
+def distance_point_to_line(point, line_start, line_end):
+    """Fast computation of point-to-line distance"""
+    px, py = point
+    x1, y1 = line_start
+    x2, y2 = line_end
+
+    # Vector from line_start to line_end
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx*dx + dy*dy
+
+    if length_sq == 0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+
+    # Project point onto line
+    t = max(0, min(1, ((px - x1)*dx + (py - y1)*dy) / length_sq))
+    proj_x = x1 + t*dx
+    proj_y = y1 + t*dy
+
+    return np.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+
+class HexagonPacker:
+=======
+import numpy as np
+from shapely.geometry import Polygon, Point
+from shapely.validation import make_valid
+import time
+import warnings
+from numba import jit
+import random
+
+# Constants
+UNIT_HEX_RADIUS = 1.0  # Side length of unit hexagon
+UNIT_HEX_APOGEE = np.sqrt(3)/2  # Distance from center to corner of unit hexagon
+
+@jit(nopython=True)
+def distance_point_to_line(point, line_start, line_end):
+    """Fast computation of point-to-line distance"""
+    px, py = point
+    x1, y1 = line_start
+    x2, y2 = line_end
+
+    # Vector from line_start to line_end
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx*dx + dy*dy
+
+    if length_sq == 0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+
+    # Project point onto line
+    t = max(0, min(1, ((px - x1)*dx + (py - y1)*dy) / length_sq))
+    proj_x = x1 + t*dx
+    proj_y = y1 + t*dy
+
+    return np.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+
+@jit(nopython=True)
+def hexagon_vertices_numba(center_x, center_y, rotation_deg, side_length):
+    """Fast computation of hexagon vertices using numba"""
+    vertices = np.empty((6, 2), dtype=np.float64)
+    angle_offset = rotation_deg * np.pi / 180.0
+    for i in range(6):
+        angle = angle_offset + i * np.pi / 3.0
+        vertices[i, 0] = center_x + side_length * np.cos(angle)
+        vertices[i, 1] = center_y + side_length * np.sin(angle)
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon_fast(point_x, point_y, polygon_vertices):
+    """Fast point-in-polygon test using ray casting algorithm"""
+    n = len(polygon_vertices)
+    inside = False
+
+    p1x, p1y = polygon_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon_vertices[i % n]
+        if point_y > min(p1y, p2y):
+            if point_y <= max(p1y, p2y):
+                if point_x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (point_y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or point_x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def project_polygon_onto_axis_numba(vertices, axis):
+    """Project polygon vertices onto axis and return min/max projections"""
+    projections = np.empty(len(vertices), dtype=np.float64)
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@jit(nopython=True)
+def get_hexagon_axes_numba(vertices):
+    """Get axes (normals) of a hexagon for SAT collision detection"""
+    axes = np.empty((6, 2), dtype=np.float64)
+    for i in range(6):
+        p1 = vertices[i]
+        p2 = vertices[(i+1) % 6]
+        edge = p2 - p1
+        # Normal vector (perpendicular to edge)
+        normal = np.array([-edge[1], edge[0]])
+        # Normalize
+        norm = np.sqrt(normal[0]*normal[0] + normal[1]*normal[1])
+        if norm > 1e-10:
+            normal = normal / norm
+        axes[i] = normal
+    return axes
+
+@jit(nopython=True)
+def sat_collision_check_numba(hex1_vertices, hex2_vertices):
+    """Use Separating Axis Theorem to detect collision between hexagons"""
+    # Get axes for both polygons
+    axes1 = get_hexagon_axes_numba(hex1_vertices)
+    axes2 = get_hexagon_axes_numba(hex2_vertices)
+    all_axes = np.vstack([axes1, axes2])
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = project_polygon_onto_axis_numba(hex1_vertices, axis)
+        min2, max2 = project_polygon_onto_axis_numba(hex2_vertices, axis)
+
+        # Check for separation
+        if max1 < min2 or max2 < min1:
+            return False  # No overlap on this axis, so they don't collide
+
+    return True  # Overlap on all axes, so they collide
+
+class HexagonPacker:
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+enhanced_constraint_validation
+</NAME>
+
+<DESCRIPTION>
+This change enhances the constraint validation system by replacing the Shapely-based approach with a custom SAT-based collision detection and a more efficient containment checking method. The new approach uses numba-compiled functions that are much faster for hexagon-specific geometric operations. It also implements a more efficient point-in-polygon test and reduces redundant geometric computations. This should significantly speed up the validation process while maintaining numerical robustness.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_unit_hexagon(self, center=(0,0), rotation=0):
+        """Create a unit regular hexagon as a Shapely Polygon"""
+        angle_offset = np.deg2rad(rotation)
+        points = []
+        for i in range(6):
+            angle = angle_offset + i * np.pi/3
+            x = center[0] + self.unit_hex_radius * np.cos(angle)
+            y = center[1] + self.unit_hex_radius * np.sin(angle)
+            points.append((x, y))
+        return Polygon(points)
+
+    def get_hexagon_axes(self, hexagon):
+        """Get the axes (normals) of a hexagon for SAT collision detection"""
+        coords = list(hexagon.exterior.coords)
+        axes = []
+        for i in range(len(coords) - 1):
+            p1 = np.array(coords[i])
+            p2 = np.array(coords[i+1])
+            edge = p2 - p1
+            # Normal vector (perpendicular to edge)
+            normal = np.array([-edge[1], edge[0]])
+            # Normalize
+            norm = np.linalg.norm(normal)
+            if norm > 1e-10:
+                normal = normal / norm
+                axes.append(normal)
+        return axes
+
+    def project_polygon_onto_axis(self, polygon, axis):
+        """Project polygon onto an axis and return min/max projection"""
+        coords = list(polygon.exterior.coords)
+        projections = [np.dot(np.array(coord), axis) for coord in coords]
+        return min(projections), max(projections)
+
+    def sat_collision_check(self, hex1, hex2):
+        """Use Separating Axis Theorem to detect collision between hexagons"""
+        # Get axes for both polygons
+        axes1 = self.get_hexagon_axes(hex1)
+        axes2 = self.get_hexagon_axes(hex2)
+        all_axes = axes1 + axes2
+
+        # Check each axis
+        for axis in all_axes:
+            min1, max1 = self.project_polygon_onto_axis(hex1, axis)
+            min2, max2 = self.project_polygon_onto_axis(hex2, axis)
+
+            # Check for separation
+            if max1 < min2 or max2 < min1:
+                return False  # No overlap on this axis, so they don't collide
+
+        return True  # Overlap on all axes, so they collide
+
+    def check_containment(self, inner_hexagon, outer_hexagon):
+        """Check if inner hexagon is fully contained within outer hexagon with enhanced precision"""
+        # Check all vertices of inner hexagon with buffer for numerical stability
+        buffered_outer = outer_hexagon.buffer(1e-8)
+
+        # Check a subset of vertices (every other one) for efficiency while maintaining accuracy
+        vertices = list(inner_hexagon.exterior.coords)[:-1]  # Remove duplicate last point
+        for i, vertex in enumerate(vertices):
+            if i % 2 == 0:  # Check every other vertex for balance of speed vs accuracy
+                point = Point(vertex)
+                if not buffered_outer.contains(point):
+                    return False
+        return True
+
+    def check_overlap(self, hex1, hex2):
+        """Check if two hexagons overlap with enhanced precision and early termination"""
+        # Use conservative buffer to catch nearly touching cases
+        buffered_hex1 = hex1.buffer(1e-7)
+        buffered_hex2 = hex2.buffer(1e-7)
+
+        # Fast intersection check first (most common case)
+        if not buffered_hex1.intersects(buffered_hex2):
+            return False
+
+        # For suspected overlaps, apply more rigorous SAT check
+        # Add additional small buffer to polygons to prevent floating point artifacts
+        try:
+            # Final SAT check for robustness
+            return self.sat_collision_check(hex1, hex2)
+        except:
+            # Fallback to standard intersection if SAT fails
+            return buffered_hex1.intersects(buffered_hex2)
+=======
+    def create_unit_hexagon(self, center=(0,0), rotation=0):
+        """Create a unit regular hexagon as a Shapely Polygon"""
+        angle_offset = np.deg2rad(rotation)
+        points = []
+        for i in range(6):
+            angle = angle_offset + i * np.pi/3
+            x = center[0] + self.unit_hex_radius * np.cos(angle)
+            y = center[1] + self.unit_hex_radius * np.sin(angle)
+            points.append((x, y))
+        return Polygon(points)
+
+    def get_hexagon_vertices_fast(self, center, rotation):
+        """Fast hexagon vertex computation using numba"""
+        return hexagon_vertices_numba(center[0], center[1], rotation, self.unit_hex_radius)
+
+    def sat_collision_check(self, hex1, hex2):
+        """Fast SAT-based collision detection using numba-compiled functions"""
+        # Convert Shapely polygons to vertices arrays for fast SAT
+        hex1_vertices = np.array(list(hex1.exterior.coords)[:-1])  # Remove duplicate last point
+        hex2_vertices = np.array(list(hex2.exterior.coords)[:-1])
+
+        # Use compiled SAT check
+        return sat_collision_check_numba(hex1_vertices, hex2_vertices)
+
+    def check_containment(self, inner_hexagon, outer_hexagon):
+        """Fast containment check using custom point-in-polygon test"""
+        # Create vertices of outer hexagon
+        outer_vertices = np.array(list(outer_hexagon.exterior.coords)[:-1])
+
+        # Get vertices of inner hexagon
+        inner_vertices = np.array(list(inner_hexagon.exterior.coords)[:-1])
+
+        # Check if all vertices of inner hexagon are within outer hexagon
+        for vertex in inner_vertices:
+            if not point_in_polygon_fast(vertex[0], vertex[1], outer_vertices):
+                return False
+        return True
+
+    def check_overlap(self, hex1, hex2):
+        """Fast overlap check using SAT with early termination"""
+        # Use SAT for robust collision detection
+        try:
+            return self.sat_collision_check(hex1, hex2)
+        except:
+            # Fallback to Shapely intersection if SAT fails
+            return hex1.intersects(hex2)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+optimized_evaluation_loop
+</NAME>
+
+<DESCRIPTION>
+This change optimizes the constraint evaluation loop by pre-computing hexagon vertices and using the new fast SAT collision detection. Instead of creating Shapely polygons repeatedly, we now work with pre-computed vertex arrays throughout the evaluation process. This significantly reduces overhead and improves performance, especially for the large number of collision checks required during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_constraints(self, inner_params, outer_radius):
+        """Comprehensive constraint evaluation with early termination and enhanced validation"""
+        inner_hexagons = []
+
+        # Create inner hexagons
+        for i in range(self.n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.create_unit_hexagon((x, y), angle)
+            inner_hexagons.append(hexagon)
+
+        # Create outer hexagon (unit size then scaled)
+        outer_hexagon = self.create_unit_hexagon((0, 0), 0)
+        outer_coords = list(outer_hexagon.exterior.coords)
+        scaled_coords = [(x*outer_radius, y*outer_radius) for x, y in outer_coords]
+        outer_hexagon_scaled = Polygon(scaled_coords)
+
+        # Check containment (early termination with buffer validation)
+        for hexagon in inner_hexagons:
+            # Add buffer to ensure containment check is robust against floating point errors
+            buffered_hexagon = hexagon.buffer(1e-6)
+            if not self.check_containment(buffered_hexagon, outer_hexagon_scaled):
+                return False, False, 0.0  # containment violated
+
+        # Check overlaps (early termination with SAT-based collision detection)
+        for i in range(self.n_inner):
+            for j in range(i+1, self.n_inner):
+                if self.check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                    return False, False, 0.0  # overlap violated
+
+        return True, True, 1.0 / outer_radius  # valid solution
+=======
+    def evaluate_constraints(self, inner_params, outer_radius):
+        """Comprehensive constraint evaluation with early termination and enhanced validation"""
+        # Pre-compute all inner hexagon vertices for fast access
+        inner_vertices = []
+        inner_centers = []
+        inner_rotations = []
+
+        for i in range(self.n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            inner_centers.append((x, y))
+            inner_rotations.append(angle)
+            vertices = self.get_hexagon_vertices_fast((x, y), angle)
+            inner_vertices.append(vertices)
+
+        # Create outer hexagon vertices (unit size then scaled)
+        outer_vertices = self.get_hexagon_vertices_fast((0, 0), 0)
+        scaled_outer_vertices = outer_vertices * outer_radius
+
+        # Check containment (early termination)
+        for i in range(self.n_inner):
+            # Check containment using point-in-polygon test
+            vertices = inner_vertices[i]
+            for vertex in vertices:
+                if not point_in_polygon_fast(vertex[0], vertex[1], scaled_outer_vertices):
+                    return False, False, 0.0  # containment violated
+
+        # Check overlaps (early termination with SAT-based collision detection)
+        for i in range(self.n_inner):
+            for j in range(i+1, self.n_inner):
+                # Fast SAT collision check using pre-computed vertices
+                if sat_collision_check_numba(inner_vertices[i], inner_vertices[j]):
+                    return False, False, 0.0  # overlap violated
+
+        return True, True, 1.0 / outer_radius  # valid solution
+>>>>>>> REPLACE
+
+</DIFF>

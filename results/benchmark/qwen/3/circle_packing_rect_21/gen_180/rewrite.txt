@@ -1,0 +1,239 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import math
+from typing import Tuple, List
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    container_width, container_height = 1.2, 0.8
+    
+    # Number of circles
+    n = 21
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Phase 1: Voronoi-guided initialization
+    # Create strategic anchor points using Voronoi-based approach
+    anchor_points = create_voronoi_anchors(container_width, container_height, n)
+    
+    # Initialize circles with positions and reasonable radii
+    circles = np.zeros((n, 3))
+    for i, (x, y) in enumerate(anchor_points):
+        circles[i] = [x, y, min(0.05, min(x, container_width-x, y, container_height-y))]
+    
+    # Phase 2: Voronoi-based optimization
+    best_sum = 0
+    best_circles = circles.copy()
+    
+    # Multi-stage optimization with Voronoi constraint awareness
+    for stage in range(3):
+        if stage == 0:
+            # Stage 1: Coarse optimization with large steps
+            max_iterations = 800
+            step_scale = 0.15
+            radius_adjust_factor = 0.95
+        elif stage == 1:
+            # Stage 2: Medium refinement
+            max_iterations = 1200
+            step_scale = 0.08
+            radius_adjust_factor = 0.8
+        else:
+            # Stage 3: Fine tuning
+            max_iterations = 1000
+            step_scale = 0.03
+            radius_adjust_factor = 0.6
+        
+        for iteration in range(max_iterations):
+            # Create Voronoi diagram of current circle positions
+            positions = circles[:, :2]
+            vor = Voronoi(positions)
+            
+            # Update each circle's radius and position
+            for i in range(n):
+                # Calculate max radius for this circle
+                max_radius = calculate_max_radius_voronoi(circles, i, vor, container_width, container_height)
+                
+                # Update radius
+                if max_radius > circles[i, 2]:
+                    new_radius = min(max_radius, circles[i, 2] * radius_adjust_factor + 0.005)
+                    circles[i, 2] = new_radius
+                
+                # Update position using Voronoi constraint-aware movement
+                circles[i] = update_position_voronoi(circles, i, vor, container_width, container_height, step_scale)
+            
+            # Check if this is better
+            current_sum = np.sum(circles[:, 2])
+            if current_sum > best_sum:
+                best_sum = current_sum
+                best_circles = circles.copy()
+    
+    # Phase 3: Final refinement using Voronoi cell boundary optimization
+    for _ in range(500):
+        # Focus on optimizing circles near Voronoi cell boundaries
+        positions = best_circles[:, :2]
+        vor = Voronoi(positions)
+        
+        # Select circles that are near Voronoi edges for refinement
+        refinement_indices = select_refinement_candidates(vor, best_circles)
+        
+        for i in refinement_indices:
+            # More aggressive refinement for boundary circles
+            max_radius = calculate_max_radius_voronoi(best_circles, i, vor, container_width, container_height)
+            if max_radius > best_circles[i, 2]:
+                best_circles[i, 2] = min(max_radius, best_circles[i, 2] * 0.9 + 0.01)
+            
+            # Fine position adjustment
+            best_circles[i] = update_position_voronoi(best_circles, i, vor, container_width, container_height, 0.01)
+    
+    # Final cleanup
+    for i in range(n):
+        # Ensure minimum radius
+        best_circles[i, 2] = max(best_circles[i, 2], 0.001)
+        # Ensure bounds
+        best_circles[i, 0] = np.clip(best_circles[i, 0], 0.001, container_width - 0.001)
+        best_circles[i, 1] = np.clip(best_circles[i, 1], 0.001, container_height - 0.001)
+    
+    return best_circles
+
+def create_voronoi_anchors(width: float, height: float, n: int) -> List[Tuple[float, float]]:
+    """Create initial anchor points using Voronoi-inspired strategy."""
+    # Corner points
+    anchors = [
+        (0.1, 0.1),
+        (width - 0.1, 0.1),
+        (0.1, height - 0.1),
+        (width - 0.1, height - 0.1)
+    ]
+    
+    # Edge midpoint points
+    anchors.extend([
+        (width/2, 0.1),
+        (width/2, height - 0.1),
+        (0.1, height/2),
+        (width - 0.1, height/2)
+    ])
+    
+    # Remaining points using hexagonal pattern but Voronoi-aware
+    remaining = n - len(anchors)
+    
+    if remaining > 0:
+        # Generate hexagonal grid points
+        spacing_x = width / 6
+        spacing_y = height / 5
+        hex_points = []
+        
+        for i in range(5):
+            for j in range(6):
+                if len(hex_points) >= remaining:
+                    break
+                x = 0.1 + j * spacing_x
+                y = 0.1 + i * spacing_y + (i % 2) * spacing_y / 2
+                if 0.05 <= x <= width - 0.05 and 0.05 <= y <= height - 0.05:
+                    hex_points.append((x, y))
+            if len(hex_points) >= remaining:
+                break
+        
+        anchors.extend(hex_points[:remaining])
+    
+    # Fill remaining if needed
+    while len(anchors) < n:
+        x = np.random.uniform(0.05, width - 0.05)
+        y = np.random.uniform(0.05, height - 0.05)
+        anchors.append((x, y))
+    
+    return anchors[:n]
+
+def calculate_max_radius_voronoi(circles: np.ndarray, index: int, vor: Voronoi, 
+                               width: float, height: float) -> float:
+    """Calculate maximum radius for circle at given index using Voronoi constraints."""
+    x, y, current_radius = circles[index]
+    
+    # Boundary constraints
+    boundary_radius = min(x, width - x, y, height - y)
+    
+    # Voronoi-based overlap constraints
+    max_radius_overlap = float('inf')
+    
+    # Check against other circles using Voronoi cells for efficiency
+    for i, (cx, cy, cr) in enumerate(circles):
+        if i != index:
+            dist = math.sqrt((x - cx)**2 + (y - cy)**2)
+            # Only consider if they're close enough to potentially conflict
+            if dist < (current_radius + cr + 0.1):
+                max_radius_for_this_circle = dist - cr
+                if max_radius_for_this_circle < max_radius_overlap:
+                    max_radius_overlap = max_radius_for_this_circle
+    
+    max_radius = min(boundary_radius, max_radius_overlap)
+    return max(max_radius, 0.001)
+
+def update_position_voronoi(circles: np.ndarray, index: int, vor: Voronoi, 
+                          width: float, height: float, step_scale: float) -> List[float]:
+    """Update position of circle using Voronoi constraint-aware optimization."""
+    x, y, r = circles[index]
+    
+    # Get the Voronoi region for this point
+    # Find the closest Voronoi vertex or compute potential movement
+    
+    # Simple physics-inspired movement with boundary constraints
+    force_x, force_y = 0.0, 0.0
+    
+    # Repulsive forces from other circles
+    for i, (cx, cy, cr) in enumerate(circles):
+        if i != index:
+            dx = cx - x
+            dy = cy - y
+            dist = math.sqrt(dx*dx + dy*dy)
+            
+            if dist > 0.001 and dist < (r + cr + 0.05):
+                # Repulsive force
+                force_magnitude = (r + cr - dist) / (dist + 0.001)
+                force_x -= force_magnitude * dx / dist
+                force_y -= force_magnitude * dy / dist
+    
+    # Boundary forces
+    if x < r:
+        force_x += (r - x) * 10.0
+    if x + r > width:
+        force_x -= (x + r - width) * 10.0
+    if y < r:
+        force_y += (r - y) * 10.0
+    if y + r > height:
+        force_y -= (y + r - height) * 10.0
+    
+    # Apply movement
+    new_x = max(r, min(width - r, x + step_scale * force_x))
+    new_y = max(r, min(height - r, y + step_scale * force_y))
+    
+    return [new_x, new_y, r]
+
+def select_refinement_candidates(vor: Voronoi, circles: np.ndarray) -> List[int]:
+    """Select circles that are likely to benefit from refinement based on Voronoi properties."""
+    # Select circles near Voronoi edges/vertices for more aggressive optimization
+    candidates = []
+    
+    for i in range(len(circles)):
+        # Simple heuristic: select circles with relatively small radii to expand
+        if circles[i, 2] < 0.05:
+            candidates.append(i)
+    
+    # Also select some randomly distributed circles
+    if len(candidates) < 5:
+        random_indices = np.random.choice(len(circles), size=min(5, len(circles)), replace=False)
+        for idx in random_indices:
+            if idx not in candidates:
+                candidates.append(idx)
+    
+    return candidates
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,128 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape into points
+        points = x.reshape(-1, 2)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -1e10
+
+        # Return negative ratio to minimize (we want to maximize ratio)
+        return -(d_min / d_max)
+
+    def constraint_func(x):
+        # Ensure points are within [0,1] bounds
+        points = x.reshape(-1, 2)
+        return np.concatenate([points.flatten(), (1-points.flatten())])
+
+    # Set up bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1)] * 32
+
+    # Initialize with a structured approach for better starting point
+    def initialize_structured_points():
+        # Create hexagonal-like arrangement for better initial configuration
+        points = []
+        rows = 4
+        cols = 4
+
+        # Generate points in a grid pattern
+        for i in range(rows):
+            for j in range(cols):
+                x = 0.1 + 0.8 * j / (cols - 1) if cols > 1 else 0.5
+                y = 0.1 + 0.8 * i / (rows - 1) if rows > 1 else 0.5
+                points.append([x, y])
+
+        # Add slight random perturbations for diversity
+        points = np.array(points)
+        np.random.seed(42)
+        points += np.random.normal(0, 0.02, points.shape)
+
+        # Clip to ensure bounds
+        points = np.clip(points, 0, 1)
+        return points
+
+    # Set up bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1)] * 32
+
+    # Try multiple random initializations with structured approach
+    best_result = None
+    best_ratio = -np.inf
+
+    # Try several random initializations with structured approach
+    for attempt in range(10):
+        # Start with structured points
+        x0 = initialize_structured_points().flatten()
+
+        try:
+            # Use global optimization first
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=42 + attempt,
+                maxiter=300,
+                popsize=20,
+                atol=1e-8,
+                rtol=1e-8,
+                mutation=(0.5, 1.0),
+                recombination=0.7
+            )
+
+            if result.success:
+                # Refine with local optimization
+                refined = minimize(
+                    objective,
+                    result.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    distances = pdist(final_points)
+                    d_min = np.min(distances)
+                    d_max = np.max(distances)
+
+                    if d_max > 0:
+                        ratio = d_min / d_max
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_result = refined.x.copy()
+
+        except Exception as e:
+            continue
+
+    # If we found a good solution, use it
+    if best_result is not None:
+        points = best_result.reshape(-1, 2)
+    else:
+        # Fallback to structured approach if optimization fails
+        points = initialize_structured_points()
+
+    # Ensure points are within valid bounds
+    points = np.clip(points, 0, 1)
+
+    return points
+
+# EVOLVE-BLOCK-END

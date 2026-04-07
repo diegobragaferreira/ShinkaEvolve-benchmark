@@ -1,0 +1,80 @@
+<NAME>
+add_numba_jit_to_spatial_hash
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses NumPy arrays and Python loops in the spatial hash grid, which can be computationally expensive. I'll apply Numba's JIT compilation to key functions in the spatial hash grid to significantly speed up the neighbor searching and collision detection processes. This will have a substantial impact on performance since these operations are called frequently during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        cell = self._hash_cell(center_x, center_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        cell = self._hash_cell(center_x, center_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+=======
+class SpatialHashGrid:
+    """Spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    @staticmethod
+    @jit(nopython=True)
+    def _hash_cell_numba(x: float, y: float, cell_size: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // cell_size), int(y // cell_size))
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return self._hash_cell_numba(x, y, self.cell_size)
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        cell = self._hash_cell(center_x, center_y)
+        self.grid[cell].append(hex_id)
+
+    @staticmethod
+    @jit(nopython=True)
+    def _get_candidates_numba(grid, cell, cell_size) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        candidates = []
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                if neighbor_cell in grid:
+                    candidates.extend(grid[neighbor_cell])
+        return candidates
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        cell = self._hash_cell(center_x, center_y)
+        return self._get_candidates_numba(self.grid, cell, self.cell_size)
+>>>>>>> REPLACE
+</DIFF>

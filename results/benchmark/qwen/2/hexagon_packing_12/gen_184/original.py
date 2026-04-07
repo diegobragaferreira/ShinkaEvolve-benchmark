@@ -1,0 +1,340 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from numba import njit
+import time
+import random
+from collections import defaultdict
+from typing import List, Tuple, Optional, Dict, Any
+import warnings
+
+class HexagonUtils:
+    """Utility class for hexagon geometric operations"""
+
+    @staticmethod
+    @njit
+    def generate_vertices(x: float, y: float, angle_deg: float, side_length: float = 1.0) -> np.ndarray:
+        """Generate vertices of a regular hexagon given center, rotation, and side length"""
+        angle_rad = np.radians(angle_deg)
+        vertices = np.empty((6, 2))
+        for i in range(6):
+            theta = angle_rad + i * np.pi / 3
+            vertices[i, 0] = x + side_length * np.cos(theta)
+            vertices[i, 1] = y + side_length * np.sin(theta)
+        return vertices
+
+    @staticmethod
+    @njit
+    def check_containment(inner_x: float, inner_y: float, inner_angle: float,
+                         outer_x: float, outer_y: float, outer_angle: float,
+                         outer_side_length: float) -> bool:
+        """Check if inner hexagon is fully contained within outer hexagon"""
+        inner_vertices = HexagonUtils.generate_vertices(inner_x, inner_y, inner_angle, 1.0)
+
+        # Create outer hexagon vertices
+        outer_vertices = HexagonUtils.generate_vertices(outer_x, outer_y, outer_angle, outer_side_length)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check if all vertices of inner hexagon are inside outer hexagon
+        for i in range(6):
+            if not outer_polygon.contains(Point(inner_vertices[i, 0], inner_vertices[i, 1])):
+                return False
+        return True
+
+    @staticmethod
+    @njit
+    def check_overlap(x1: float, y1: float, angle1: float,
+                     x2: float, y2: float, angle2: float) -> bool:
+        """Check if two hexagons overlap using vertex-based collision detection"""
+        vertices1 = HexagonUtils.generate_vertices(x1, y1, angle1, 1.0)
+        vertices2 = HexagonUtils.generate_vertices(x2, y2, angle2, 1.0)
+
+        # Simple bounding box check first
+        min1 = np.min(vertices1, axis=0)
+        max1 = np.max(vertices1, axis=0)
+        min2 = np.min(vertices2, axis=0)
+        max2 = np.max(vertices2, axis=0)
+
+        if max1[0] < min2[0] or max2[0] < min1[0] or max1[1] < min2[1] or max2[1] < min1[1]:
+            return False
+
+        # Create polygons and check intersection
+        poly1 = Polygon(vertices1)
+        poly2 = Polygon(vertices2)
+
+        # If intersection exists, they overlap
+        return poly1.intersects(poly2)
+
+class SpatialHash:
+    """Spatial hashing for efficient overlap detection"""
+
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.hash_table = defaultdict(list)
+
+    def get_grid_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Get grid coordinates for a point"""
+        return int(x / self.cell_size), int(y / self.cell_size)
+
+    def add_hexagon(self, index: int, x: float, y: float):
+        """Add a hexagon to the spatial hash"""
+        cell_x, cell_y = self.get_grid_coords(x, y)
+        self.hash_table[(cell_x, cell_y)].append(index)
+
+    def get_candidates(self, x: float, y: float) -> List[int]:
+        """Get candidate hexagons in nearby cells"""
+        cell_x, cell_y = self.get_grid_coords(x, y)
+        candidates = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                key = (cell_x + dx, cell_y + dy)
+                candidates.extend(self.hash_table[key])
+        return candidates
+
+class ConstraintValidator:
+    """Validates packing constraints efficiently"""
+
+    def __init__(self):
+        self.spatial_hash = SpatialHash()
+
+    def validate_all_constraints(self, hexagons: List[Tuple[float, float, float]],
+                               outer_side_length: float) -> Dict[str, Any]:
+        """Validate all constraints for the configuration"""
+        n = len(hexagons)
+
+        # Check containment constraints
+        containment_violations = []
+        for i in range(n):
+            if not HexagonUtils.check_containment(
+                hexagons[i][0], hexagons[i][1], hexagons[i][2],
+                0, 0, 0, outer_side_length
+            ):
+                containment_violations.append(i)
+
+        # Check overlap constraints using spatial hashing
+        self.spatial_hash.hash_table.clear()
+        for i, (x, y, _) in enumerate(hexagons):
+            self.spatial_hash.add_hexagon(i, x, y)
+
+        overlap_violations = []
+        for i in range(n):
+            candidates = self.spatial_hash.get_candidates(
+                hexagons[i][0], hexagons[i][1]
+            )
+            for j in candidates:
+                if i < j:  # Avoid double-checking
+                    if HexagonUtils.check_overlap(
+                        hexagons[i][0], hexagons[i][1], hexagons[i][2],
+                        hexagons[j][0], hexagons[j][1], hexagons[j][2]
+                    ):
+                        overlap_violations.append((i, j))
+
+        penalty = len(containment_violations) * 1e6 + len(overlap_violations) * 1e5
+
+        return {
+            'valid': len(containment_violations) == 0 and len(overlap_violations) == 0,
+            'containment_violations': containment_violations,
+            'overlap_violations': overlap_violations,
+            'penalty': penalty
+        }
+
+class OptimizationManager:
+    """Manages the optimization process with configurable parameters"""
+
+    def __init__(self):
+        self.validator = ConstraintValidator()
+
+    def evaluate_fitness(self, params: np.ndarray) -> float:
+        """Evaluate the fitness of a given configuration"""
+        # Extract parameters
+        hexagons = []
+        idx = 0
+        for i in range(12):
+            hexagons.append((params[idx], params[idx+1], params[idx+2]))
+            idx += 3
+
+        outer_side_length = params[-1]
+
+        # Validate constraints
+        validation_result = self.validator.validate_all_constraints(hexagons, outer_side_length)
+
+        # Calculate penalty
+        penalty = validation_result['penalty']
+
+        # Inverse side length (negative because we minimize)
+        # We want to maximize inverse side length, so minimize negative value
+        objective_value = -1.0 / outer_side_length + penalty
+
+        return objective_value
+
+    def generate_initial_population(self, pop_size: int) -> List[np.ndarray]:
+        """Generate symmetric initial population"""
+        population = []
+
+        # Base symmetric pattern inspired by known optimal configurations
+        base_pattern = [
+            [0.0, 0.0, 0.0],        # Center
+            [0.0, 3.0, 0.0],        # Top
+            [0.0, -3.0, 0.0],       # Bottom
+            [2.6, 1.5, 0.0],        # Top Right
+            [-2.6, 1.5, 0.0],       # Top Left
+            [2.6, -1.5, 0.0],       # Bottom Right
+            [-2.6, -1.5, 0.0],      # Bottom Left
+            [3.5, 0.0, 0.0],        # Far Right
+            [-3.5, 0.0, 0.0],       # Far Left
+            [1.75, 3.03, 0.0],      # Upper Middle Right
+            [-1.75, 3.03, 0.0],     # Upper Middle Left
+            [1.75, -3.03, 0.0],     # Lower Middle Right
+            [-1.75, -3.03, 0.0],    # Lower Middle Left
+        ]
+
+        # Generate variations of the symmetric pattern
+        for _ in range(pop_size):
+            config = []
+            # Add perturbation to base pattern
+            for i, (x, y, angle) in enumerate(base_pattern[:-1]):  # Skip last element (outer side)
+                # Add small random perturbations
+                pert_x = x + random.uniform(-0.3, 0.3)
+                pert_y = y + random.uniform(-0.3, 0.3)
+                pert_angle = angle + random.uniform(-10, 10)  # Random rotation
+                config.extend([pert_x, pert_y, pert_angle])
+
+            # Add outer side length with reasonable range
+            config.append(6.0 + random.uniform(0, 2))
+            population.append(np.array(config))
+
+        return population
+
+    def optimize_with_retries(self, bounds: List[Tuple[float, float]],
+                            max_retries: int = 3) -> Tuple[np.ndarray, float]:
+        """Perform optimization with retry mechanism"""
+        for attempt in range(max_retries):
+            try:
+                # Generate initial population
+                initial_pop = self.generate_initial_population(25)
+
+                # Set up differential evolution
+                def objective_func(params):
+                    return self.evaluate_fitness(params)
+
+                result = differential_evolution(
+                    objective_func,
+                    bounds,
+                    seed=42 + attempt,
+                    maxiter=150,
+                    popsize=25,
+                    mutation=(0.7, 1),
+                    recombination=0.8,
+                    tol=1e-6,
+                    workers=1,
+                    init=initial_pop
+                )
+
+                return result.x, result.fun
+
+            except Exception as e:
+                warnings.warn(f"Optimization attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"All optimization attempts failed: {e}")
+                continue
+
+class ResultFormatter:
+    """Handles result formatting and metric calculation"""
+
+    @staticmethod
+    def format_output(inner_params: np.ndarray, outer_side_length: float) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Format the optimization results into expected output format"""
+        # Extract configuration
+        inner_hex_data = []
+        idx = 0
+        for i in range(12):
+            inner_hex_data.append([
+                inner_params[idx],
+                inner_params[idx+1],
+                inner_params[idx+2]
+            ])
+            idx += 3
+
+        inner_hex_data = np.array(inner_hex_data)
+        outer_hex_data = np.array([0, 0, 0])
+
+        return inner_hex_data, outer_hex_data, outer_side_length
+
+    @staticmethod
+    def calculate_metrics(outer_side_length: float) -> Tuple[float, float]:
+        """Calculate performance metrics"""
+        inv_outer_side_length = 1.0 / outer_side_length
+        benchmark_ratio = inv_outer_side_length / 0.2537
+        return inv_outer_side_length, benchmark_ratio
+
+def hexagon_packing_12() -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    # Define bounds for optimization
+    bounds = []
+    for _ in range(12):
+        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+    bounds.append((1, 20))  # Outer side length bound
+
+    try:
+        # Initialize optimization manager
+        optimizer = OptimizationManager()
+
+        # Perform optimization
+        best_params, best_score = optimizer.optimize_with_retries(bounds)
+
+        # Extract final configuration
+        inner_hex_data, outer_hex_data, outer_side_length = ResultFormatter.format_output(
+            best_params, best_params[-1]
+        )
+
+        # Calculate metrics
+        inv_outer_side_length, benchmark_ratio = ResultFormatter.calculate_metrics(outer_side_length)
+
+        # Print metrics for verification
+        print(f"inv_outer_hex_side_length: {inv_outer_side_length:.8f}")
+        print(f"benchmark_ratio: {benchmark_ratio:.8f}")
+        print(f"eval_time: {time.time() - start_time:.4f}s")
+
+    except Exception as e:
+        warnings.warn(f"Optimization failed: {e}")
+        # Fallback to previous solution
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0],
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_side_length = 8.0
+
+        # Calculate fallback metrics
+        inv_outer_side_length, benchmark_ratio = ResultFormatter.calculate_metrics(outer_side_length)
+        print(f"Fallback - inv_outer_hex_side_length: {inv_outer_side_length:.8f}")
+        print(f"Fallback - benchmark_ratio: {benchmark_ratio:.8f}")
+        print(f"eval_time: {time.time() - start_time:.4f}s")
+
+    # Ensure all computations completed within time limit
+    elapsed_time = time.time() - start_time
+    if elapsed_time > 175:  # Leave buffer
+        warnings.warn("Warning: Time limit approaching")
+
+    return inner_hex_data, outer_hex_data, outer_side_length
+
+# EVOLVE-BLOCK-END

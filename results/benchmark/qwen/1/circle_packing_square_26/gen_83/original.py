@@ -1,0 +1,278 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from deap import base, creator, tools, algorithms
+import time
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _validate_circle_placement(circles: np.ndarray) -> bool:
+    """Validate that circles are within bounds and don't overlap."""
+    n = len(circles)
+
+    # Check containment constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if r <= 0 or x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+
+    # Check non-overlap constraints using KDTree for efficiency
+    points = circles[:, :2]
+    tree = cKDTree(points)
+
+    # Find all pairs within distance 2*r (minimum separation needed to avoid overlap)
+    pairs = tree.query_pairs(2 * min(circles[:, 2]), output_type='ndarray')
+
+    for i, j in pairs:
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+        min_distance_sq = (r1 + r2)**2
+        if distance_sq < min_distance_sq:
+            return False
+
+    return True
+
+def _evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as negative sum of radii (since we want to maximize)."""
+    if not _validate_circle_placement(circles):
+        return -float('inf')  # Invalid configuration gets very low fitness
+    return float(np.sum(circles[:, 2]))
+
+def _generate_voronoi_initialization(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Generate initial circle positions using a Voronoi-inspired spreading mechanism."""
+    np.random.seed(seed)
+
+    # Create a grid of candidate positions
+    grid_size = max(3, int(np.ceil(np.sqrt(n_circles))))
+    x_coords = np.linspace(0.05, 0.95, grid_size)
+    y_coords = np.linspace(0.05, 0.95, grid_size)
+
+    # Generate all grid points
+    grid_points = []
+    for x in x_coords:
+        for y in y_coords:
+            grid_points.append([x, y])
+
+    # If we have more circles than grid points, add some random points
+    if len(grid_points) < n_circles:
+        extra_points = n_circles - len(grid_points)
+        for _ in range(extra_points):
+            grid_points.append([np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)])
+
+    # Shuffle the points to avoid systematic bias
+    random.shuffle(grid_points)
+
+    # Take the first n_circles points
+    points = np.array(grid_points[:n_circles])
+
+    # Initialize circles with small radii
+    circles = np.zeros((n_circles, 3))
+    circles[:, 0] = points[:, 0]  # x coordinates
+    circles[:, 1] = points[:, 1]  # y coordinates
+    circles[:, 2] = 0.01         # initial small radii
+
+    return circles
+
+def _greedy_fallback(n_circles: int) -> np.ndarray:
+    """Fallback method to generate a feasible configuration."""
+    # Simple greedy approach: place circles in order of decreasing radius
+    circles = np.zeros((n_circles, 3))
+
+    # Start with small radii and gradually increase
+    # Place in a way that they don't overlap initially
+    positions = []
+    radii = []
+
+    # Try to place circles greedily by spacing them out
+    placed = 0
+    radius = 0.05
+    while placed < n_circles and radius > 0.005:
+        # Try placing circles in a spiral pattern or grid
+        attempt = 0
+        while attempt < 100 and placed < n_circles:
+            # Place in grid-like fashion
+            rows = int(np.sqrt(n_circles)) + 1
+            cols = n_circles // rows + 1
+
+            for i in range(rows):
+                for j in range(cols):
+                    if placed >= n_circles:
+                        break
+                    x = 0.1 + j * 0.8 / cols
+                    y = 0.1 + i * 0.8 / rows
+
+                    # Check if this position is valid
+                    valid = True
+                    for pos, rad in zip(positions, radii):
+                        dist_sq = (x - pos[0])**2 + (y - pos[1])**2
+                        if dist_sq < (rad + radius)**2:
+                            valid = False
+                            break
+
+                    if valid:
+                        positions.append([x, y])
+                        radii.append(radius)
+                        placed += 1
+            attempt += 1
+
+        radius *= 0.9  # Decrease radius slightly
+
+    # Fill remaining circles
+    while placed < n_circles:
+        x = np.random.uniform(0.05, 0.95)
+        y = np.random.uniform(0.05, 0.95)
+        positions.append([x, y])
+        radii.append(0.01)
+        placed += 1
+
+    circles[:, 0] = [pos[0] for pos in positions]
+    circles[:, 1] = [pos[1] for pos in positions]
+    circles[:, 2] = radii
+
+    return circles
+
+def _initialize_population(n_circles: int, n_pop: int, seed: int = 42) -> list:
+    """Initialize population with multiple strategies."""
+    np.random.seed(seed)
+    population = []
+
+    # Add Voronoi initialization
+    voronoi_init = _generate_voronoi_initialization(n_circles, seed)
+    population.append(voronoi_init.flatten().tolist())
+
+    # Add some random initializations
+    for i in range(n_pop - 1):
+        individual = []
+        for j in range(n_circles):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            r = np.random.uniform(0.005, 0.45)
+            individual.extend([x, y, r])
+        population.append(individual)
+
+    return population
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+    max_evaluations = 5000
+    seed = 42
+
+    np.random.seed(seed)
+
+    # Create individual and population
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define bounds for each dimension: [x, y, r] for each circle
+    # x, y in [0.05, 0.95], r in [0.005, 0.45]
+    def create_individual():
+        individual = []
+        for i in range(n):
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            r = np.random.uniform(0.005, 0.45)
+            individual.extend([x, y, r])
+        return creator.Individual(individual)
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Evaluation function
+    def evaluate(individual):
+        circles = np.array(individual).reshape(-1, 3)
+        return _evaluate_fitness(circles),
+
+    toolbox.register("evaluate", evaluate)
+
+    # Genetic operators
+    def mutate(individual):
+        for i in range(len(individual)):
+            if random.random() < 0.1:  # 10% chance to mutate each gene
+                if i % 3 == 0:  # x coordinate
+                    individual[i] = np.clip(individual[i] + np.random.normal(0, 0.02), 0.05, 0.95)
+                elif i % 3 == 1:  # y coordinate
+                    individual[i] = np.clip(individual[i] + np.random.normal(0, 0.02), 0.05, 0.95)
+                else:  # radius
+                    individual[i] = np.clip(individual[i] + np.random.normal(0, 0.01), 0.005, 0.45)
+        return individual,
+
+    toolbox.register("mate", tools.cxTwoPoint)
+    toolbox.register("mutate", mutate)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Create initial population using hybrid approach
+    pop = _initialize_population(n, 50, seed)
+
+    # Convert to DEAP individuals
+    deap_pop = []
+    for ind_list in pop:
+        deap_ind = creator.Individual(ind_list)
+        deap_pop.append(deap_ind)
+
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, deap_pop))
+    for ind, fit in zip(deap_pop, fitnesses):
+        ind.fitness.values = fit
+
+    # Evolution parameters
+    cxpb = 0.7      # crossover probability
+    mutpb = 0.3     # mutation probability
+    ngen = max_evaluations // 50  # number of generations
+
+    # Begin evolution
+    for gen in range(ngen):
+        # Select the next generation individuals
+        offspring = toolbox.select(deap_pop, len(deap_pop))
+
+        # Clone the selected individuals
+        offspring = list(map(toolbox.clone, offspring))
+
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < mutpb:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+
+        # Replace the old population with the new generation
+        deap_pop[:] = offspring
+
+    # Get the best individual
+    best_ind = tools.selBest(deap_pop, 1)[0]
+    circles = np.array(best_ind).reshape(-1, 3)
+
+    # Validate and use fallback if needed
+    if not _validate_circle_placement(circles):
+        circles = _greedy_fallback(n)
+
+    # Ensure final validation
+    if not _validate_circle_placement(circles):
+        # Last resort: try a different initialization
+        circles = _generate_voronoi_initialization(n)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

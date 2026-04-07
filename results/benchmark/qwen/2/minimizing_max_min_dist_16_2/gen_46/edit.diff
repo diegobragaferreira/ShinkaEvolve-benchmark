@@ -1,0 +1,383 @@
+--- a/original.py
++++ b/original.py
+@@ -1,170 +1,290 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist
+-import math
++from scipy.spatial.distance import pdist, cdist
++from scipy.cluster.vq import kmeans2
++from sklearn.cluster import SpectralClustering
++import time
+ from typing import Tuple, List, Optional
+ 
+-class PointDispersionOptimizer:
+-    """Optimizes point distribution to maximize min/max distance ratio."""
++class PointEvolutionOptimizer:
++    """Novel hybrid optimizer for maximizing min/max distance ratio using spectral clustering and multi-scale optimization."""
+     
+     def __init__(self, num_points: int = 16, dimension: int = 2):
+         self.num_points = num_points
+         self.dimension = dimension
+         self.bounds = [(0.001, 0.999) for _ in range(num_points * dimension)]
++        self.max_evaluations = 5000
++        self.eval_count = 0
+         
+     def calculate_ratio(self, points: np.ndarray) -> Tuple[float, float, float]:
+         """Calculate min/max distance ratio along with actual values."""
+         if len(points) < 2:
+             return 0.0, 0.0, 0.0
+         
+         distances = pdist(points)
+         if len(distances) == 0:
+             return 0.0, 0.0, 0.0
+             
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         
+         if max_dist == 0:
+             return 0.0, min_dist, max_dist
+             
+         ratio = min_dist / max_dist
+         return ratio, min_dist, max_dist
+     
+     def objective_function(self, x: np.ndarray) -> float:
+         """Objective function to minimize (negative ratio)."""
++        self.eval_count += 1
+         points = x.reshape(-1, self.dimension)
+         ratio, _, _ = self.calculate_ratio(points)
+         return -ratio
+     
+-    def generate_hexagonal_grid(self) -> np.ndarray:
+-        """Generate hexagonal lattice initial configuration."""
++    def generate_spectral_clustered_initial(self) -> np.ndarray:
++        """Generate initial configuration using spectral clustering for better structural awareness."""
++        # Create a base grid pattern
++        grid_points = []
++        side = int(np.ceil(np.sqrt(self.num_points)))
++        
++        for i in range(side):
++            for j in range(side):
++                if len(grid_points) >= self.num_points:
++                    break
++                x = (i + 0.5) / side
++                y = (j + 0.5) / side
++                grid_points.append([x, y])
++        
++        base_points = np.array(grid_points[:self.num_points])
++        
++        # Apply spectral clustering to detect natural groupings
++        try:
++            # Use clustering to identify potential substructures
++            clustering = SpectralClustering(n_clusters=4, affinity='rbf', gamma=1.0, random_state=42)
++            labels = clustering.fit_predict(base_points)
++            
++            # For each cluster, add a small perturbation to spread points
++            clustered_points = []
++            for cluster_id in range(4):
++                cluster_mask = labels == cluster_id
++                cluster_points = base_points[cluster_mask]
++                
++                if len(cluster_points) > 0:
++                    # Add cluster-specific perturbations
++                    center = np.mean(cluster_points, axis=0)
++                    # Perturb cluster points
++                    perturbation = np.random.normal(0, 0.03, (len(cluster_points), 2))
++                    perturbed_cluster = cluster_points + perturbation
++                    
++                    # Adjust to maintain reasonable distances
++                    adjusted_cluster = np.clip(perturbed_cluster, 0.001, 0.999)
++                    clustered_points.extend(adjusted_cluster)
++            
++            # If we have fewer than required points, fill with random points near the center
++            while len(clustered_points) < self.num_points:
++                clustered_points.append([0.5 + np.random.normal(0, 0.05), 0.5 + np.random.normal(0, 0.05)])
++            
++            initial_points = np.array(clustered_points[:self.num_points])
++        except:
++            # Fallback to basic clustering
++            initial_points = base_points.copy()
++            
++        # Ensure all points are within bounds
++        initial_points = np.clip(initial_points, 0.001, 0.999)
++        return initial_points
++    
++    def generate_voronoi_based_initial(self) -> np.ndarray:
++        """Generate initial configuration using Voronoi diagram analysis."""
++        # Start with hexagonal-like pattern
+         points = []
+         rows = cols = 4
+         
+         spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+         spacing_y = 1.0 / (rows - 1) if rows > 1 else 1.0
+         
++        # Create a hexagonal pattern with slight randomness
+         for i in range(rows):
+             for j in range(cols):
+-                x_offset = spacing_x * 0.5 if i % 2 == 1 else 0.0
++                if len(points) >= self.num_points:
++                    break
++                x_offset = spacing_x * 0.25 if i % 2 == 1 else 0.0
+                 x = (j * spacing_x) + x_offset
+                 y = i * spacing_y
+                 
+-                # Ensure bounds
+-                x = max(0.001, min(0.999, x))
+-                y = max(0.001, min(0.999, y))
++                # Add variance to make it less regular
++                x += np.random.normal(0, 0.01)
++                y += np.random.normal(0, 0.01)
+                 
+                 points.append([x, y])
+         
+-        return np.array(points)
+-    
+-    def generate_fibonacci_spiral(self) -> np.ndarray:
+-        """Generate points using Fibonacci spiral."""
+-        points = []
+-        phi = (1 + math.sqrt(5)) / 2  # golden ratio
+-        
+-        for i in range(self.num_points):
+-            theta = math.acos(-1 + (2 * i) / (self.num_points - 1))
+-            phi_angle = (i * 2 * math.pi) / (phi * phi)
+-            
+-            x = math.sin(theta) * math.cos(phi_angle)
+-            y = math.sin(theta) * math.sin(phi_angle)
+-            
+-            # Map to [0.05, 0.95] range
+-            x = 0.05 + 0.9 * (x + 1) / 2
+-            y = 0.05 + 0.9 * (y + 1) / 2
+-            
+-            points.append([x, y])
+-        
+-        return np.array(points)
+-    
+-    def generate_regular_grid(self) -> np.ndarray:
+-        """Generate regular grid initial configuration."""
+-        points = []
+-        side_length = int(math.ceil(math.sqrt(self.num_points)))
+-        
+-        for i in range(side_length):
+-            for j in range(side_length):
+-                if len(points) >= self.num_points:
++        initial_points = np.array(points[:self.num_points])
++        initial_points = np.clip(initial_points, 0.001, 0.999)
++        return initial_points
++    
++    def generate_evolutionary_population(self) -> List[np.ndarray]:
++        """Generate diverse starting population using multiple strategies."""
++        population = []
++        
++        # 1. Spectral clustered initialization
++        population.append(self.generate_spectral_clustered_initial())
++        
++        # 2. Voronoi-based initialization  
++        population.append(self.generate_voronoi_based_initial())
++        
++        # 3. Random with geometric constraints
++        np.random.seed(42)
++        random_points = np.random.uniform(0.05, 0.95, (self.num_points, 2))
++        population.append(random_points)
++        
++        # 4. Regular grid
++        regular_grid = []
++        side = int(np.ceil(np.sqrt(self.num_points)))
++        for i in range(side):
++            for j in range(side):
++                if len(regular_grid) >= self.num_points:
+                     break
+-                x = (i + 0.5) / side_length
+-                y = (j + 0.5) / side_length
+-                points.append([x, y])
+-        
+-        return np.array(points)[:self.num_points]
+-    
+-    def generate_initial_configurations(self) -> List[np.ndarray]:
+-        """Generate multiple diverse initial configurations."""
+-        configs = []
+-        
+-        # Generate different base configurations
+-        configs.append(self.generate_hexagonal_grid())
+-        configs.append(self.generate_fibonacci_spiral())
+-        configs.append(self.generate_regular_grid())
+-        
+-        # Add perturbed versions
+-        np.random.seed(42)
+-        perturbed_configs = []
+-        for config in configs:
+-            perturbed = config + np.random.normal(0, 0.02, config.shape)
++                x = (i + 0.5) / side
++                y = (j + 0.5) / side
++                regular_grid.append([x, y])
++        population.append(np.array(regular_grid[:self.num_points]))
++        
++        # Add variants with small perturbations
++        for base_points in population[:3]:  # Only perturb first 3
++            perturbed = base_points + np.random.normal(0, 0.02, base_points.shape)
+             perturbed = np.clip(perturbed, 0.001, 0.999)
+-            perturbed_configs.append(perturbed)
+-        
+-        return perturbed_configs
+-    
+-    def optimize_single_start(self, x0: np.ndarray) -> Optional[np.ndarray]:
+-        """Perform optimization from single starting point."""
++            population.append(perturbed)
++        
++        return population
++    
++    def adaptive_local_optimization(self, x0: np.ndarray, max_iter: int = 100) -> np.ndarray:
++        """Adaptive optimization with dynamic parameter adjustments."""
+         try:
++            # Start with L-BFGS-B for efficient local optimization
+             result = minimize(
+                 self.objective_function,
+                 x0,
+                 method='L-BFGS-B',
+                 bounds=self.bounds,
+-                options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-5}
++                options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-5}
+             )
+             
+             if result.success:
+                 return result.x.reshape(-1, self.dimension)
+         except Exception:
+-            return None
+-        return None
+-    
+-    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+-        """Find best solution among all starting configurations."""
++            pass
++            
++        # Fallback to SLSQP if L-BFGS-B fails
++        try:
++            result = minimize(
++                self.objective_function,
++                x0,
++                method='SLSQP',
++                bounds=self.bounds,
++                options={'maxiter': max_iter}
++            )
++            
++            if result.success:
++                return result.x.reshape(-1, self.dimension)
++        except Exception:
++            pass
++            
++        # Return original if all optimization fails
++        return x0.reshape(-1, self.dimension)
++    
++    def evaluate_population_diversity(self, population: List[np.ndarray]) -> float:
++        """Measure diversity of population to guide evolution."""
++        if len(population) < 2:
++            return 0.0
++        
++        # Calculate pairwise distances between populations
++        distances = []
++        for i in range(len(population)):
++            for j in range(i+1, len(population)):
++                dist = np.linalg.norm(population[i].flatten() - population[j].flatten())
++                distances.append(dist)
++        
++        return np.mean(distances) if distances else 0.0
++    
++    def get_best_solution(self, population: List[np.ndarray]) -> np.ndarray:
++        """Find best solution with evolutionary restart strategy."""
+         best_ratio = -np.inf
+         best_points = None
+-        
+-        for config in configs:
+-            # Optimize from this initial configuration
+-            optimized_points = self.optimize_single_start(config.flatten())
+-            
+-            if optimized_points is not None:
++        current_population = population.copy()
++        
++        # Track convergence for adaptive restarts
++        prev_ratio = -np.inf
++        stagnant_iterations = 0
++        max_stagnant = 5
++        
++        # Multi-stage optimization process
++        for stage in range(3):
++            stage_pop = current_population.copy()
++            stage_best_ratio = -np.inf
++            stage_best_points = None
++            
++            # Optimize each individual in the population
++            for i, config in enumerate(stage_pop):
++                # Use adaptive optimization with varying iterations
++                iter_count = 50 if stage < 2 else 100
++                optimized_points = self.adaptive_local_optimization(config.flatten(), iter_count)
++                
+                 ratio, _, _ = self.calculate_ratio(optimized_points)
+                 
++                if ratio > stage_best_ratio:
++                    stage_best_ratio = ratio
++                    stage_best_points = optimized_points.copy()
++                    
+                 if ratio > best_ratio:
+                     best_ratio = ratio
+                     best_points = optimized_points.copy()
+-        
+-        return best_points if best_points is not None else configs[0]
++            
++            # Check if improvement has stalled
++            if abs(stage_best_ratio - prev_ratio) < 1e-6:
++                stagnant_iterations += 1
++            else:
++                stagnant_iterations = 0
++            prev_ratio = stage_best_ratio
++            
++            # If stagnated for too long, generate new diverse population
++            if stagnant_iterations >= max_stagnant and stage < 2:
++                # Create more diverse population
++                current_population = self.generate_evolutionary_population()
++                stagnant_iterations = 0
++                continue
++            else:
++                # Prepare for next stage: refine top performers
++                current_population = [stage_best_points] if stage_best_points is not None else []
++                # Add a few more diverse configurations
++                additional = self.generate_evolutionary_population()[:2]
++                current_population.extend(additional)
++            
++            # Early termination check
++            if best_ratio > 0.3:  # Early stopping if very good solution found
++                break
++                
++        return best_points if best_points is not None else current_population[0]
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     
+-    # Initialize optimizer
+-    optimizer = PointDispersionOptimizer(16, 2)
+-    
+-    # Generate initial configurations
+-    initial_configs = optimizer.generate_initial_configurations()
+-    
+-    # Find best solution
+-    best_points = optimizer.get_best_solution(initial_configs)
+-    
+-    return best_points
++    # Initialize optimizer with novel hybrid approach
++    optimizer = PointEvolutionOptimizer(16, 2)
++    
++    # Generate diverse initial population
++    initial_population = optimizer.generate_evolutionary_population()
++    
++    # Find best solution using evolutionary approach
++    best_points = optimizer.get_best_solution(initial_population)
++    
++    # Final refinement with focused optimization
++    final_points = optimizer.adaptive_local_optimization(best_points.flatten(), 200)
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

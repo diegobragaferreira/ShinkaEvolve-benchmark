@@ -1,0 +1,299 @@
+<NAME>
+add_advanced_symmetry_exploration
+</NAME>
+
+<DESCRIPTION>
+This modification enhances the optimization process by implementing advanced symmetry exploration techniques. The key insight is that the optimal configuration for 14 points in 3D space often exhibits symmetrical properties that can be exploited. Instead of just using basic perturbations, I'll introduce a systematic approach to generate and evaluate symmetric variants of the optimized solution, including rotations, reflections, and coordinate permutations. This approach leverages the fact that many optimal point distributions have underlying symmetry groups that can be used to find better solutions than what standard optimization alone might achieve.
+
+The changes include:
+1. Adding a comprehensive symmetry exploration function that creates multiple variants through rotations, reflections, and permutations
+2. Enhancing the adaptive optimization to evaluate and select the best symmetric variant found
+3. Improving the final validation phase to ensure we're returning the globally best solution among all explored variants
+
+This approach is expected to improve performance because:
+- It systematically explores the symmetrically equivalent configurations that are likely to contain better solutions
+- It provides a more thorough search of the solution space without requiring additional expensive optimization runs
+- It leverages geometric insights about optimal point distributions in 3D
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_optimization(initial_points: np.ndarray, max_time: float = 350.0) -> np.ndarray:
+    """
+    Perform adaptive optimization with changing population sizes and strategies.
+    Implements progressive optimization approach.
+
+    Args:
+        initial_points: Starting point configuration
+        max_time: Maximum optimization time in seconds
+
+    Returns:
+        Optimized point configuration
+    """
+    start_time = time.time()
+
+    # Flatten initial points for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0.0, 1.0)] * len(initial_flat)
+
+    # Progressive optimization phases
+    # Phase 1: Global search with large population
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=200,
+            popsize=25,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+
+    except Exception as e:
+        # Fallback to initial points if first phase fails
+        return initial_points
+
+    # Phase 2: Refinement with smaller population
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=250,
+            popsize=15,
+            tol=1e-7,
+            mutation=(0.7, 1.0),
+            recombination=0.8,
+            seed=43,
+            disp=False
+        )
+
+    except Exception as e:
+        pass
+
+    # Phase 3: Local refinement using L-BFGS-B with tighter tolerances
+    def local_objective(x_flat):
+        points = x_flat.reshape(-1, 3)
+        # Add penalty for out-of-bounds
+        penalty = 0.0
+        for i in range(14):
+            for j in range(3):
+                if points[i,j] < 0:
+                    penalty += 1000 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1000 * (points[i,j] - 1)**2
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return float('inf') + penalty
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 0:
+            return float('inf') + penalty
+        return -min_dist / max_dist + penalty
+
+    try:
+        x0 = result.x.reshape(-1, 3).flatten()
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+        result = local_result
+    except:
+        pass
+
+    # Reshape optimized result
+    optimized_points = result.x.reshape(14, 3)
+
+    # Ensure all points are within valid range (final safety check)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+=======
+def create_symmetric_variants(points: np.ndarray, num_variants: int = 12) -> np.ndarray:
+    """
+    Create diverse symmetric variants including rotations, reflections, and permutations.
+    """
+    variants = [points]
+
+    # Create multiple rotation variants using Rodrigues' rotation formula
+    for i in range(num_variants // 3):
+        # Random rotation around random axis
+        angle = 2 * np.pi * np.random.random()
+        axis = np.random.randn(3)
+        axis = axis / np.linalg.norm(axis)
+
+        # Rodrigues' rotation formula
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        kx, ky, kz = axis
+        rot_matrix = np.array([
+            [cos_a + kx*kx*(1-cos_a), kx*ky*(1-cos_a) - kz*sin_a, kx*kz*(1-cos_a) + ky*sin_a],
+            [kx*ky*(1-cos_a) + kz*sin_a, cos_a + ky*ky*(1-cos_a), ky*kz*(1-cos_a) - kx*sin_a],
+            [kx*kz*(1-cos_a) - ky*sin_a, ky*kz*(1-cos_a) + kx*sin_a, cos_a + kz*kz*(1-cos_a)]
+        ])
+
+        rotated = points @ rot_matrix.T
+        variants.append(rotated)
+
+    # Create reflection variants
+    reflections = [
+        np.array([[-1, 0, 0], [0, 1, 0], [0, 0, 1]]),  # Reflect across yz-plane
+        np.array([[1, 0, 0], [0, -1, 0], [0, 0, 1]]),  # Reflect across xz-plane
+        np.array([[1, 0, 0], [0, 1, 0], [0, 0, -1]]),  # Reflect across xy-plane
+        np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]]),  # Reflect across origin (xz)
+        np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]]),  # Reflect across yz-plane then xy-plane
+        np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]]),  # Reflect across xz-plane then xy-plane
+    ]
+
+    for ref_matrix in reflections:
+        reflected = points @ ref_matrix.T
+        variants.append(reflected)
+
+    # Add permutation variants (swap coordinates)
+    perms = [
+        [0, 1, 2],  # identity
+        [0, 2, 1],  # swap y and z
+        [1, 0, 2],  # swap x and y
+        [1, 2, 0],  # cyclic perm x->y, y->z, z->x
+        [2, 0, 1],  # cyclic perm x->z, z->y, y->x
+        [2, 1, 0],  # swap x and z
+    ]
+
+    for perm in perms:
+        permuted = points[:, perm]
+        variants.append(permuted)
+
+    return np.vstack(variants)
+
+def adaptive_optimization(initial_points: np.ndarray, max_time: float = 350.0) -> np.ndarray:
+    """
+    Perform adaptive optimization with changing population sizes and strategies.
+    Implements progressive optimization approach with enhanced symmetry exploration.
+
+    Args:
+        initial_points: Starting point configuration
+        max_time: Maximum optimization time in seconds
+
+    Returns:
+        Optimized point configuration
+    """
+    start_time = time.time()
+
+    # Flatten initial points for optimization
+    initial_flat = initial_points.flatten()
+
+    # Define bounds for each coordinate (0 to 1)
+    bounds = [(0.0, 1.0)] * len(initial_flat)
+
+    # Progressive optimization phases
+    # Phase 1: Global search with large population
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=200,
+            popsize=25,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+
+    except Exception as e:
+        # Fallback to initial points if first phase fails
+        return initial_points
+
+    # Phase 2: Refinement with smaller population
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=250,
+            popsize=15,
+            tol=1e-7,
+            mutation=(0.7, 1.0),
+            recombination=0.8,
+            seed=43,
+            disp=False
+        )
+
+    except Exception as e:
+        pass
+
+    # Phase 3: Local refinement using L-BFGS-B with tighter tolerances
+    def local_objective(x_flat):
+        points = x_flat.reshape(-1, 3)
+        # Add penalty for out-of-bounds
+        penalty = 0.0
+        for i in range(14):
+            for j in range(3):
+                if points[i,j] < 0:
+                    penalty += 1000 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1000 * (points[i,j] - 1)**2
+
+        distances = pdist(points)
+        if len(distances) == 0:
+            return float('inf') + penalty
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 0:
+            return float('inf') + penalty
+        return -min_dist / max_dist + penalty
+
+    try:
+        x0 = result.x.reshape(-1, 3).flatten()
+        local_result = minimize(
+            local_objective,
+            x0,
+            method='L-BFGS-B',
+            options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+        result = local_result
+    except:
+        pass
+
+    # Reshape optimized result
+    optimized_points = result.x.reshape(14, 3)
+
+    # Ensure all points are within valid range (final safety check)
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    # Enhanced exploration: Evaluate symmetric variants for better solution
+    try:
+        variants = create_symmetric_variants(optimized_points, num_variants=8)
+        best_variant_points = optimized_points.copy()
+        _, _, best_ratio = calculate_distance_metrics(best_variant_points)
+
+        # Evaluate all variants with comprehensive fitness assessment
+        best_fitness = -float('inf')
+        best_variant_index = 0
+
+        for i in range(len(variants) // 14):
+            variant_points = variants[i*14:(i+1)*14]
+            min_dist, max_dist, ratio = calculate_distance_metrics(variant_points)
+
+            # Enhanced fitness function combining ratio with distribution quality
+            if max_dist > 0:
+                # Simple fitness: ratio plus a bonus for having larger minimum distances
+                fitness = ratio + 0.1 * (min_dist / max_dist)  # Bonus for well-separated points
+
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_variant_points = variant_points.copy()
+                    best_ratio = ratio
+
+        optimized_points = best_variant_points.copy()
+    except:
+        pass
+
+    return optimized_points
+>>>>>>> REPLACE
+</DIFF>

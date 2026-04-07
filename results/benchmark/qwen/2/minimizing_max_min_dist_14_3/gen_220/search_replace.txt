@@ -1,0 +1,332 @@
+<NAME>
+enhance_evolutionary_strategy
+</NAME>
+
+<DESCRIPTION>
+The current evolutionary algorithm uses basic crossover and mutation operators without considering the geometric structure of the problem. I'll enhance the evolutionary strategy by implementing more sophisticated operators that respect the spherical geometry and incorporate adaptive mechanisms that respond to convergence patterns. The key improvements include:
+
+1. Adding adaptive crossover that considers point proximity when combining individuals
+2. Implementing a more intelligent mutation operator that targets under-separated regions
+3. Adding a diversity preservation mechanism that monitors Voronoi cell uniformity
+4. Introducing multiple optimization phases with different strategies
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def crossover(parent1, parent2, crossover_rate=0.8):
+    """Crossover operator for spherical point sets"""
+    if random.random() > crossover_rate:
+        return parent1.copy(), parent2.copy()
+
+    # Simple crossover: mix points from both parents
+    num_points = parent1.shape[0]
+    crossover_point = random.randint(1, num_points-1)
+
+    child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+    child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+
+    # Project back to unit sphere
+    child1 = project_to_unit_sphere(child1)
+    child2 = project_to_unit_sphere(child2)
+
+    return child1, child2
+
+def mutate(individual, mutation_rate=0.1, strength=0.05):
+    """Mutation operator for spherical point sets"""
+    mutated = individual.copy()
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Add small random perturbation
+            delta = np.random.normal(0, strength, 3)
+            mutated[i] += delta
+
+            # Project back to unit sphere
+            mutated[i] = project_to_unit_sphere(mutated[i].reshape(1, 3)).flatten()
+
+    return mutated
+=======
+def adaptive_crossover(parent1, parent2, crossover_rate=0.8):
+    """Adaptive crossover that considers point proximity and distribution"""
+    if random.random() > crossover_rate:
+        return parent1.copy(), parent2.copy()
+
+    # Analyze point distributions to make smarter crossover decisions
+    distances1 = cdist(parent1, parent1)
+    distances2 = cdist(parent2, parent2)
+
+    # Compute average distances for each individual
+    avg_dist1 = np.mean(distances1[distances1 > 0]) if np.any(distances1 > 0) else 1.0
+    avg_dist2 = np.mean(distances2[distances2 > 0]) if np.any(distances2 > 0) else 1.0
+
+    # Choose crossover strategy based on distribution characteristics
+    if avg_dist1 < avg_dist2 * 0.8:  # parent1 is more clustered
+        # Prefer more spread out parent for first half
+        crossover_point = random.randint(int(len(parent1) * 0.3), int(len(parent1) * 0.7))
+        child1 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+        child2 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+    elif avg_dist2 < avg_dist1 * 0.8:  # parent2 is more clustered
+        # Prefer more spread out parent for first half
+        crossover_point = random.randint(int(len(parent1) * 0.3), int(len(parent1) * 0.7))
+        child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+        child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+    else:
+        # Standard crossover
+        crossover_point = random.randint(1, len(parent1)-1)
+        child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+        child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+
+    # Project back to unit sphere
+    child1 = project_to_unit_sphere(child1)
+    child2 = project_to_unit_sphere(child2)
+
+    return child1, child2
+
+def intelligent_mutation(individual, mutation_rate=0.1, base_strength=0.05):
+    """Mutation operator that intelligently targets under-separated regions"""
+    mutated = individual.copy()
+
+    # Analyze current distribution
+    distances = cdist(mutated, mutated)
+    np.fill_diagonal(distances, np.inf)
+
+    # Find points that are too close to others (potential bottlenecks)
+    min_distances = np.min(distances, axis=1)
+    avg_min_dist = np.mean(min_distances)
+
+    # Identify under-separated points (those with below-average minimum distance)
+    under_separated_mask = min_distances < avg_min_dist * 0.7
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Increase mutation strength for under-separated points
+            strength = base_strength
+            if under_separated_mask[i]:
+                strength *= 2.0  # Double strength for clustered points
+
+            # Add small random perturbation
+            delta = np.random.normal(0, strength, 3)
+            mutated[i] += delta
+
+            # Project back to unit sphere
+            mutated[i] = project_to_unit_sphere(mutated[i].reshape(1, 3)).flatten()
+
+    return mutated
+
+def diversity_preservation(population, fitness_scores, population_size):
+    """Maintain diversity by checking Voronoi uniformity and reintroducing variety"""
+    # Calculate Voronoi uniformity scores for population
+    uniformity_scores = []
+    for individual in population:
+        try:
+            sv = SphericalVoronoi(individual)
+            areas = sv.calculate_areas()
+            # Standard deviation of areas as measure of uniformity
+            uniformity = np.std(areas) if len(areas) > 1 else 0.0
+            uniformity_scores.append(uniformity)
+        except:
+            uniformity_scores.append(np.inf)
+
+    # If population has low diversity (high uniformity variance), add fresh individuals
+    if len(uniformity_scores) > 1:
+        std_uniformity = np.std(uniformity_scores)
+        mean_uniformity = np.mean(uniformity_scores)
+
+        # If diversity is low, inject some random individuals
+        if std_uniformity < 0.1 * mean_uniformity and mean_uniformity > 0:
+            # Replace worst performers with random individuals
+            worst_indices = np.argsort(fitness_scores)[:len(population)//4]
+            for idx in worst_indices:
+                if random.random() < 0.3:  # 30% chance to replace
+                    population[idx] = create_individual(14)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_adaptive_parameters
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive parameter control that modifies evolutionary strategy based on convergence behavior. This includes dynamically adjusting population size, mutation rate, and crossover rate depending on how well the optimization is progressing. This helps maintain exploration in early stages and exploitation in later stages, and also prevents premature convergence by adapting to the optimization landscape.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Evolutionary parameters
+    population_size = 40
+    generations = 1500
+    elite_size = 8
+    initial_mutation_rate = 0.15
+    crossover_rate = 0.8
+=======
+    # Evolutionary parameters
+    population_size = 40
+    generations = 1500
+    elite_size = 8
+    initial_mutation_rate = 0.15
+    initial_crossover_rate = 0.8
+
+    # Adaptive parameters tracking
+    convergence_window = 50
+    convergence_threshold = 1e-6
+    best_fitness_history = []
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_evolution_loop
+</NAME>
+
+<DESCRIPTION>
+Modifying the main evolution loop to incorporate adaptive parameters and improved operators. This involves:
+1. Adding adaptive parameter adjustment based on convergence
+2. Using the new intelligent crossover and mutation functions
+3. Incorporating diversity preservation checks
+4. Tracking convergence to adjust strategy dynamically
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Main evolution loop
+    for generation in range(generations):
+        # Adaptive mutation rate - decreases over time
+        mutation_rate = initial_mutation_rate * (1 - generation / generations)
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        ratios = []
+
+        for individual in population:
+            fitness, ratio = generate_voronoi_fitness(individual)
+            fitness_scores.append(fitness)
+            ratios.append(ratio)
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_ratio = ratios[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Print progress
+        if generation % 100 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}, Ratio = {best_ratio:.6f}")
+
+        # Create new population
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+        new_population = [population[i].copy() for i in elite_indices]
+
+        # Selection with diversity consideration
+        # Better selection mechanism
+        scores_array = np.array(fitness_scores)
+        # Convert to positive values for selection
+        normalized_scores = scores_array - np.min(scores_array) + 1e-10
+        probabilities = normalized_scores / np.sum(normalized_scores)
+        selected_indices = np.random.choice(len(population), size=len(population)-elite_size, p=probabilities)
+        selected_parents = [population[i] for i in selected_indices]
+
+        # Generate offspring
+        while len(new_population) < population_size:
+            parent1, parent2 = random.sample(selected_parents, 2)
+            child1, child2 = crossover(parent1, parent2, crossover_rate)
+
+            child1 = mutate(child1, mutation_rate, 0.03)
+            child2 = mutate(child2, mutation_rate, 0.03)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+        # Diversity maintenance - periodically introduce new random individuals
+        if generation % 200 == 0 and generation > 0:
+            for i in range(2):
+                if len(population) < population_size:
+                    # Replace worst individuals with random ones
+                    worst_idx = np.argmin(fitness_scores)
+                    population[worst_idx] = create_individual(14)
+=======
+    # Main evolution loop
+    for generation in range(generations):
+        # Adaptive parameters based on convergence
+        if len(best_fitness_history) >= convergence_window:
+            recent_improvement = best_fitness_history[-1] - best_fitness_history[-convergence_window]
+            if abs(recent_improvement) < convergence_threshold:
+                # Slow convergence, increase exploration
+                mutation_rate = min(0.3, initial_mutation_rate * 1.2)
+                crossover_rate = min(0.9, initial_crossover_rate * 1.1)
+            else:
+                # Fast convergence, increase exploitation
+                mutation_rate = initial_mutation_rate * 0.8
+                crossover_rate = initial_crossover_rate * 0.9
+        else:
+            mutation_rate = initial_mutation_rate
+            crossover_rate = initial_crossover_rate
+
+        # Evaluate fitness for all individuals
+        fitness_scores = []
+        ratios = []
+
+        for individual in population:
+            fitness, ratio = generate_voronoi_fitness(individual)
+            fitness_scores.append(fitness)
+            ratios.append(ratio)
+
+        # Track best solution
+        max_fitness_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_fitness_idx] > best_fitness:
+            best_fitness = fitness_scores[max_fitness_idx]
+            best_ratio = ratios[max_fitness_idx]
+            best_solution = population[max_fitness_idx].copy()
+
+        # Store fitness history for convergence detection
+        best_fitness_history.append(best_fitness)
+
+        # Print progress
+        if generation % 100 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}, Ratio = {best_ratio:.6f}")
+
+        # Create new population
+        # Elitism: keep the best individuals
+        elite_indices = np.argsort(fitness_scores)[-elite_size:]
+        new_population = [population[i].copy() for i in elite_indices]
+
+        # Selection with diversity consideration
+        # Better selection mechanism
+        scores_array = np.array(fitness_scores)
+        # Convert to positive values for selection
+        normalized_scores = scores_array - np.min(scores_array) + 1e-10
+        probabilities = normalized_scores / np.sum(normalized_scores)
+        selected_indices = np.random.choice(len(population), size=len(population)-elite_size, p=probabilities)
+        selected_parents = [population[i] for i in selected_indices]
+
+        # Generate offspring with adaptive operators
+        while len(new_population) < population_size:
+            parent1, parent2 = random.sample(selected_parents, 2)
+            child1, child2 = adaptive_crossover(parent1, parent2, crossover_rate)
+
+            child1 = intelligent_mutation(child1, mutation_rate, 0.03)
+            child2 = intelligent_mutation(child2, mutation_rate, 0.03)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+        # Apply diversity preservation
+        population = diversity_preservation(population, fitness_scores, population_size)
+
+        # Diversity maintenance - periodically introduce new random individuals
+        if generation % 200 == 0 and generation > 0:
+            for i in range(2):
+                if len(population) < population_size:
+                    # Replace worst individuals with random ones
+                    worst_idx = np.argmin(fitness_scores)
+                    population[worst_idx] = create_individual(14)
+>>>>>>> REPLACE
+</DIFF>

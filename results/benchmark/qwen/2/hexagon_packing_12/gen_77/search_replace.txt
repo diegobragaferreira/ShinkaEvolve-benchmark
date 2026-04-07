@@ -1,0 +1,336 @@
+<NAME>
+implement_spatial_hashing_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+This change implements spatial hashing to accelerate overlap detection between hexagons, which is a critical bottleneck in the optimization process. The spatial hash divides the space into a grid and only checks for overlaps between hexagons in the same or adjacent cells. This reduces the complexity from O(n²) to near-O(n) for typical cases, significantly improving performance during fitness evaluation when many hexagon pairs need to be checked for overlaps.
+
+The implementation uses a fixed grid resolution that works well for the problem domain and maintains the existing Shapely-based precision for actual overlap determination while dramatically speeding up the pairwise checks.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+from typing import Tuple, List
+import warnings
+from numba import jit
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        # Unit hexagon vertices centered at origin
+        angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 vertices + close loop
+        unit_vertices = np.column_stack([np.cos(angles), np.sin(angles)])
+
+        # Apply rotation and translation
+        cos_r, sin_r = np.cos(self.rotation), np.sin(self.rotation)
+        rotation_matrix = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+
+        rotated_vertices = rotation_matrix @ unit_vertices.T
+        translated_vertices = rotated_vertices.T + self.center
+
+        return translated_vertices
+
+    def area(self) -> float:
+        """Return area of hexagon"""
+        return (3 * np.sqrt(3) / 2) * self.side_length ** 2
+
+def create_outer_hexagon(side_length: float, center_x: float = 0, center_y: float = 0) -> Polygon:
+    """Create outer hexagon as Shapely polygon"""
+    hex = Hexagon(center_x, center_y, 0)
+    outer_vertices = hex.vertices()
+    return Polygon(outer_vertices)
+
+@jit(nopython=True)
+def hexagon_vertices_jit(x, y, angle_deg, side_length=1):
+    """Fast generation of hexagon vertices using numba"""
+    angle_rad = np.radians(angle_deg)
+    angles = np.arange(0, 6) * np.pi / 3
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        vertices[i, 0] = x + side_length * np.cos(angles[i] + angle_rad)
+        vertices[i, 1] = y + side_length * np.sin(angles[i] + angle_rad)
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon_fast(point, polygon):
+    """Fast point-in-polygon test using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+def compute_outer_hex_side_length(inner_hexagons: List[Hexagon]) -> float:
+    """Compute minimum outer hexagon side length required to contain all inner hexagons"""
+    # Get all vertices from all hexagons
+    all_vertices = []
+    for hex in inner_hexagons:
+        all_vertices.extend(hex.vertices())
+
+    all_vertices = np.array(all_vertices)
+
+    # Find bounding circle center and radius
+    center = np.mean(all_vertices, axis=0)
+
+    # Calculate maximum distance from center to any vertex
+    distances = np.linalg.norm(all_vertices - center, axis=1)
+    max_distance = np.max(distances)
+
+    # For a hexagon, we need side length >= max_distance * 2 / sqrt(3)
+    side_length = max_distance * 2 / np.sqrt(3)
+
+    return side_length
+
+def check_containment(hexagon: Hexagon, outer_polygon: Polygon) -> bool:
+    """Check if all vertices of hexagon are inside outer polygon"""
+    vertices = hexagon.vertices()
+    for vertex in vertices:
+        point = Point(vertex[0], vertex[1])
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = Polygon(hex1.vertices())
+    poly2 = Polygon(hex2.vertices())
+    return poly1.intersects(poly2)
+
+def validate_configuration(inner_hexagons: List[Hexagon], outer_polygon: Polygon) -> Tuple[bool, bool]:
+    """
+    Validate configuration: check containment and overlap
+    Returns (is_valid, has_overlaps)
+    """
+    # Check containment
+    for hex in inner_hexagons:
+        if not check_containment(hex, outer_polygon):
+            return False, False
+
+    # Check overlaps
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                return True, True
+
+    return True, False
+=======
+from typing import Tuple, List
+import warnings
+from numba import jit
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        # Unit hexagon vertices centered at origin
+        angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 vertices + close loop
+        unit_vertices = np.column_stack([np.cos(angles), np.sin(angles)])
+
+        # Apply rotation and translation
+        cos_r, sin_r = np.cos(self.rotation), np.sin(self.rotation)
+        rotation_matrix = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+
+        rotated_vertices = rotation_matrix @ unit_vertices.T
+        translated_vertices = rotated_vertices.T + self.center
+
+        return translated_vertices
+
+    def area(self) -> float:
+        """Return area of hexagon"""
+        return (3 * np.sqrt(3) / 2) * self.side_length ** 2
+
+    def bounding_box(self):
+        """Return the axis-aligned bounding box (min_x, max_x, min_y, max_y)"""
+        # For a unit hexagon with rotation, we compute its extreme coordinates
+        vertices = self.vertices()
+        mins = np.min(vertices, axis=0)
+        maxs = np.max(vertices, axis=0)
+        return (mins[0], maxs[0], mins[1], maxs[1])
+
+def create_outer_hexagon(side_length: float, center_x: float = 0, center_y: float = 0) -> Polygon:
+    """Create outer hexagon as Shapely polygon"""
+    hex = Hexagon(center_x, center_y, 0)
+    outer_vertices = hex.vertices()
+    return Polygon(outer_vertices)
+
+@jit(nopython=True)
+def hexagon_vertices_jit(x, y, angle_deg, side_length=1):
+    """Fast generation of hexagon vertices using numba"""
+    angle_rad = np.radians(angle_deg)
+    angles = np.arange(0, 6) * np.pi / 3
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        vertices[i, 0] = x + side_length * np.cos(angles[i] + angle_rad)
+        vertices[i, 1] = y + side_length * np.sin(angles[i] + angle_rad)
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon_fast(point, polygon):
+    """Fast point-in-polygon test using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+def compute_outer_hex_side_length(inner_hexagons: List[Hexagon]) -> float:
+    """Compute minimum outer hexagon side length required to contain all inner hexagons"""
+    # Get all vertices from all hexagons
+    all_vertices = []
+    for hex in inner_hexagons:
+        all_vertices.extend(hex.vertices())
+
+    all_vertices = np.array(all_vertices)
+
+    # Find bounding circle center and radius
+    center = np.mean(all_vertices, axis=0)
+
+    # Calculate maximum distance from center to any vertex
+    distances = np.linalg.norm(all_vertices - center, axis=1)
+    max_distance = np.max(distances)
+
+    # For a hexagon, we need side length >= max_distance * 2 / sqrt(3)
+    side_length = max_distance * 2 / np.sqrt(3)
+
+    return side_length
+
+def check_containment(hexagon: Hexagon, outer_polygon: Polygon) -> bool:
+    """Check if all vertices of hexagon are inside outer polygon"""
+    vertices = hexagon.vertices()
+    for vertex in vertices:
+        point = Point(vertex[0], vertex[1])
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+# Spatial hashing for efficient overlap detection
+class SpatialHash:
+    """Spatial hash grid for efficient collision detection"""
+
+    def __init__(self, cell_size=2.0):
+        self.cell_size = cell_size
+        self.grid = {}
+
+    def _hash(self, x, y):
+        """Hash coordinates to grid cell"""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def insert(self, obj, bbox):
+        """Insert an object with its bounding box into the spatial hash"""
+        min_x, max_x, min_y, max_y = bbox
+        x1, y1 = self._hash(min_x, min_y)
+        x2, y2 = self._hash(max_x, max_y)
+
+        for x in range(x1, x2 + 1):
+            for y in range(y1, y2 + 1):
+                if (x, y) not in self.grid:
+                    self.grid[(x, y)] = []
+                self.grid[(x, y)].append(obj)
+
+    def query(self, bbox):
+        """Query objects that might collide with the given bounding box"""
+        min_x, max_x, min_y, max_y = bbox
+        x1, y1 = self._hash(min_x, min_y)
+        x2, y2 = self._hash(max_x, max_y)
+
+        candidates = set()
+        for x in range(x1, x2 + 1):
+            for y in range(y1, y2 + 1):
+                if (x, y) in self.grid:
+                    candidates.update(self.grid[(x, y)])
+
+        return list(candidates)
+
+def check_overlap_fast(hex1: Hexagon, hex2: Hexagon, spatial_hash=None):
+    """Fast approximate overlap check using spatial hashing then precise Shapely check"""
+    if spatial_hash:
+        # Quick spatial hash check first
+        bbox1 = hex1.bounding_box()
+        bbox2 = hex2.bounding_box()
+
+        # Check if bounding boxes intersect
+        if (bbox1[1] < bbox2[0] or bbox2[1] < bbox1[0] or
+            bbox1[3] < bbox2[2] or bbox2[3] < bbox1[2]):
+            return False
+
+        # If they could potentially overlap, check spatial hash
+        # (This is an optimization - we still do the precise check below)
+        pass
+
+    # Precise overlap check using Shapely
+    poly1 = Polygon(hex1.vertices())
+    poly2 = Polygon(hex2.vertices())
+    return poly1.intersects(poly2)
+
+def check_overlap(hex1: Hexagon, hex2: Hexagon, spatial_hash=None):
+    """Check if two hexagons overlap using either spatial hashing or direct method"""
+    return check_overlap_fast(hex1, hex2, spatial_hash)
+
+def validate_configuration(inner_hexagons: List[Hexagon], outer_polygon: Polygon, spatial_hash=None) -> Tuple[bool, bool]:
+    """
+    Validate configuration: check containment and overlap
+    Returns (is_valid, has_overlaps)
+    """
+    # Check containment
+    for hex in inner_hexagons:
+        if not check_containment(hex, outer_polygon):
+            return False, False
+
+    # Check overlaps using spatial hashing for performance
+    if spatial_hash is None:
+        # Create spatial hash if not provided
+        all_bboxes = [hex.bounding_box() for hex in inner_hexagons]
+        spatial_hash = SpatialHash()
+        for i, bbox in enumerate(all_bboxes):
+            spatial_hash.insert(i, bbox)
+
+    # Use spatial hash for efficient overlap checking
+    for i in range(len(inner_hexagons)):
+        # Query neighbors from spatial hash
+        hex1 = inner_hexagons[i]
+        bbox1 = hex1.bounding_box()
+
+        # Check nearby hexagons (using spatial hash)
+        candidates = spatial_hash.query(bbox1)
+        for j in candidates:
+            if i != j:  # Don't compare with self
+                hex2 = inner_hexagons[j]
+                if check_overlap(hex1, hex2, spatial_hash):
+                    return True, True
+
+    return True, False
+>>>>>>> REPLACE
+</DIFF>

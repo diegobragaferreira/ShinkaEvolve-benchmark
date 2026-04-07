@@ -1,0 +1,289 @@
+<NAME>
+add_probabilistic_reinitialization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed evolutionary algorithm approach but lacks mechanisms to escape local optima effectively. Based on the successful patterns observed in prior generations (38, 44, 76, 80, 82, 83, 84, 85), I'll implement probabilistic reinitialization that randomly resets 10% of circles with new valid positions when optimization appears to stall. This technique helps escape persistent local optima and explores better regions of solution space, which is crucial for maximizing the sum of radii beyond the current benchmark of 2.3658321334167627.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm with improvements"""
+        start_time = time.time()
+
+        # Generate initial population
+        population = self.generate_initial_population(POPULATION_SIZE)
+
+        best_solution = None
+        best_fitness = float('-inf')
+
+        # Track convergence
+        fitness_history = []
+        stagnation_counter = 0
+        max_stagnation = 50  # Maximum generations without improvement before early stopping
+
+        for generation in range(MAX_GENERATIONS):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.calculate_fitness(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+                stagnation_counter = 0  # Reset counter on improvement
+            else:
+                stagnation_counter += 1
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 30 generations
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < POPULATION_SIZE:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation with adaptive rate
+                child = self.mutate(child, generation, MAX_GENERATIONS)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if stagnation_counter >= max_stagnation:
+                print(f"Early stopped at generation {generation} due to stagnation")
+                break
+
+        # Final local optimization step using scipy minimize to refine the best solution
+        if best_solution is not None:
+            try:
+                # Simple local optimization around the best solution
+                def objective_local(x):
+                    # x contains [cx1, cy1, r1, cx2, cy2, r2, ..., cxn, cyn, rn]
+                    circles = x.reshape(-1, 3)
+                    # We want to maximize sum of radii
+                    return -np.sum(circles[:, 2])
+
+                # Flatten the best solution
+                initial_vars = best_solution.flatten()
+
+                # Bounds for each variable (x, y, r)
+                bounds = []
+                for i in range(self.num_circles):
+                    bounds.extend([(0.001, self.width - 0.001),   # x bounds
+                                   (0.001, self.height - 0.001),  # y bounds
+                                   (0.001, 0.3)])                # radius bounds
+
+                # Simple bounds for optimization
+                result = minimize(objective_local, initial_vars, method='L-BFGS-B',
+                                bounds=bounds, options={'maxiter': 100, 'ftol': 1e-6})
+
+                if result.success:
+                    refined_solution = result.x.reshape(-1, 3)
+                    # Check if the refined solution is better
+                    current_fitness = self.calculate_fitness(best_solution)[0]
+                    refined_fitness = self.calculate_fitness(refined_solution)[0]
+                    if refined_fitness > current_fitness:
+                        best_solution = refined_solution
+
+            except Exception:
+                pass  # Continue with existing best solution if local optimization fails
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+=======
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm with improvements"""
+        start_time = time.time()
+
+        # Generate initial population
+        population = self.generate_initial_population(POPULATION_SIZE)
+
+        best_solution = None
+        best_fitness = float('-inf')
+
+        # Track convergence
+        fitness_history = []
+        stagnation_counter = 0
+        max_stagnation = 50  # Maximum generations without improvement before early stopping
+
+        for generation in range(MAX_GENERATIONS):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.calculate_fitness(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+                stagnation_counter = 0  # Reset counter on improvement
+            else:
+                stagnation_counter += 1
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 30 generations
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Probabilistic reinitialization to escape local optima
+            if stagnation_counter > 20 and np.random.rand() < 0.3:
+                # Reinitialize 10% of the population with new valid configurations
+                num_to_reset = max(1, int(0.1 * POPULATION_SIZE))
+                reset_indices = np.random.choice(len(population), num_to_reset, replace=False)
+
+                for idx in reset_indices:
+                    # Generate a new valid configuration using the same adaptive grid approach
+                    new_circles = np.zeros((self.num_circles, 3))
+                    aspect_ratio = self.width / self.height
+
+                    # Use the same adaptive grid calculation as in init
+                    if aspect_ratio >= 1.2:
+                        cols = int(np.ceil(np.sqrt(self.num_circles * aspect_ratio * 1.2)))
+                        rows = int(np.ceil(self.num_circles / cols))
+                    elif aspect_ratio <= 0.8:
+                        rows = int(np.ceil(np.sqrt(self.num_circles / aspect_ratio * 1.2)))
+                        cols = int(np.ceil(self.num_circles / rows))
+                    else:
+                        cols = int(np.ceil(np.sqrt(self.num_circles * aspect_ratio)))
+                        rows = int(np.ceil(self.num_circles / cols))
+
+                    while cols * rows < self.num_circles:
+                        if aspect_ratio >= 1.2:
+                            cols += 1
+                        elif aspect_ratio <= 0.8:
+                            rows += 1
+                        else:
+                            if cols > rows:
+                                rows += 1
+                            else:
+                                cols += 1
+
+                    spacing_x = self.width / (cols + 1) if cols > 0 else self.width
+                    spacing_y = self.height / (rows + 1) if rows > 0 else self.height
+
+                    placed_count = 0
+                    for i in range(rows):
+                        for j in range(cols):
+                            if placed_count >= self.num_circles:
+                                break
+
+                            offset_x = spacing_x * 0.5 if i % 2 == 1 else 0
+                            base_x = (j + 1) * spacing_x + offset_x
+                            base_y = (i + 1) * spacing_y
+
+                            perturbation_factor = min(0.15, 0.3 * min(spacing_x, spacing_y))
+                            x = np.clip(base_x + np.random.uniform(-perturbation_factor, perturbation_factor),
+                                       0.01, self.width - 0.01)
+                            y = np.clip(base_y + np.random.uniform(-perturbation_factor, perturbation_factor),
+                                       0.01, self.height - 0.01)
+
+                            max_r = min(x, self.width - x, y, self.height - y)
+                            estimated_radius = min(0.15, max_r * 0.65)
+                            r = np.random.uniform(estimated_radius * 0.5, estimated_radius * 1.1)
+
+                            new_circles[placed_count] = [x, y, r]
+                            placed_count += 1
+
+                        if placed_count >= self.num_circles:
+                            break
+
+                    population[idx] = new_circles
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < POPULATION_SIZE:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation with adaptive rate
+                child = self.mutate(child, generation, MAX_GENERATIONS)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if stagnation_counter >= max_stagnation:
+                print(f"Early stopped at generation {generation} due to stagnation")
+                break
+
+        # Final local optimization step using scipy minimize to refine the best solution
+        if best_solution is not None:
+            try:
+                # Simple local optimization around the best solution
+                def objective_local(x):
+                    # x contains [cx1, cy1, r1, cx2, cy2, r2, ..., cxn, cyn, rn]
+                    circles = x.reshape(-1, 3)
+                    # We want to maximize sum of radii
+                    return -np.sum(circles[:, 2])
+
+                # Flatten the best solution
+                initial_vars = best_solution.flatten()
+
+                # Bounds for each variable (x, y, r)
+                bounds = []
+                for i in range(self.num_circles):
+                    bounds.extend([(0.001, self.width - 0.001),   # x bounds
+                                   (0.001, self.height - 0.001),  # y bounds
+                                   (0.001, 0.3)])                # radius bounds
+
+                # Simple bounds for optimization
+                result = minimize(objective_local, initial_vars, method='L-BFGS-B',
+                                bounds=bounds, options={'maxiter': 100, 'ftol': 1e-6})
+
+                if result.success:
+                    refined_solution = result.x.reshape(-1, 3)
+                    # Check if the refined solution is better
+                    current_fitness = self.calculate_fitness(best_solution)[0]
+                    refined_fitness = self.calculate_fitness(refined_solution)[0]
+                    if refined_fitness > current_fitness:
+                        best_solution = refined_solution
+
+            except Exception:
+                pass  # Continue with existing best solution if local optimization fails
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

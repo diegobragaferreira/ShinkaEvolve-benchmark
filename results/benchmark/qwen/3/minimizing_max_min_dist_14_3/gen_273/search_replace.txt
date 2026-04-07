@@ -1,0 +1,135 @@
+<NAME>
+adaptive_population_sizing
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces adaptive population sizing in the differential evolution optimization that dynamically adjusts based on convergence behavior rather than using fixed sizes. The idea is that when the algorithm detects slow convergence or stagnation, it increases the population size to improve exploration capabilities. Conversely, when progress is fast, it can maintain smaller populations for efficiency. This follows the principle that population size should be adapted to the optimization landscape rather than being static throughout the process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def global_optimization_phase(self, initial_points, restart_round):
+        """Perform global differential evolution optimization."""
+        # Flatten initial points for optimization
+        x0 = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(self.num_points * 3)]
+
+        # Use adaptive population size based on restart round and convergence behavior
+        base_popsize = 15 + restart_round * 5  # Increase population size with restarts
+        maxiter = 100 + restart_round * 50  # More iterations with restarts
+
+        # Dynamic population sizing based on problem difficulty
+        popsize = base_popsize
+        if restart_round > 0:
+            # If we're on a second restart and didn't improve much, increase population
+            if hasattr(self, 'prev_ratio') and self.prev_ratio > 0:
+                improvement = (self.best_ratio - self.prev_ratio) / self.prev_ratio if self.prev_ratio > 0 else 0
+                if improvement < 0.01:  # Less than 1% improvement
+                    popsize = min(40, base_popsize + 10)  # Increase population size
+
+        # Adjust mutation and recombination rates based on restart round for better exploration
+        mutation_rates = [(0.5, 1.0), (0.7, 1.0), (0.8, 1.0)]
+        mutation_strategy = mutation_rates[min(restart_round, len(mutation_rates)-1)]
+
+        recombination_rates = [0.7, 0.8, 0.9]
+        recombination_rate = recombination_rates[min(restart_round, len(recombination_rates)-1)]
+
+        try:
+            result = differential_evolution(
+                lambda x: self.adaptive_penalty_objective(x, iteration=restart_round),
+                bounds,
+                seed=42 + restart_round * 10,
+                maxiter=maxiter,
+                popsize=popsize,
+                tol=1e-6,
+                mutation=mutation_strategy,
+                recombination=recombination_rate,
+                disp=False
+            )
+
+            # Extract optimized points
+            optimized_points = result.x.reshape((self.num_points, 3))
+
+            # Calculate final ratio
+            final_ratio = self.min_max_ratio(optimized_points)
+
+            # Store previous ratio for next iteration
+            self.prev_ratio = final_ratio
+
+            return optimized_points, final_ratio
+
+        except Exception as e:
+            return initial_points, self.min_max_ratio(initial_points)
+=======
+    def global_optimization_phase(self, initial_points, restart_round):
+        """Perform global differential evolution optimization."""
+        # Flatten initial points for optimization
+        x0 = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(self.num_points * 3)]
+
+        # Use adaptive population size based on restart round and convergence behavior
+        base_popsize = 15 + restart_round * 5  # Increase population size with restarts
+        maxiter = 100 + restart_round * 50  # More iterations with restarts
+
+        # Keep track of convergence for adaptive population sizing
+        if not hasattr(self, 'convergence_history'):
+            self.convergence_history = []
+
+        # Dynamic population sizing based on convergence history
+        popsize = base_popsize
+        if len(self.convergence_history) >= 5:
+            # Check if improvement is slowing down
+            recent_improvements = [
+                self.convergence_history[i] - self.convergence_history[i-1]
+                for i in range(1, min(5, len(self.convergence_history)))
+            ]
+            avg_improvement = np.mean(recent_improvements) if recent_improvements else 0
+
+            # If average improvement is very small, increase population for better exploration
+            if avg_improvement < 1e-7:
+                popsize = min(40, base_popsize + 15)
+            # If we're making good progress, we might reduce population slightly
+            elif avg_improvement > 1e-4:
+                popsize = max(10, base_popsize - 5)
+
+        # Adjust mutation and recombination rates based on restart round for better exploration
+        mutation_rates = [(0.5, 1.0), (0.7, 1.0), (0.8, 1.0)]
+        mutation_strategy = mutation_rates[min(restart_round, len(mutation_rates)-1)]
+
+        recombination_rates = [0.7, 0.8, 0.9]
+        recombination_rate = recombination_rates[min(restart_round, len(recombination_rates)-1)]
+
+        try:
+            result = differential_evolution(
+                lambda x: self.adaptive_penalty_objective(x, iteration=restart_round),
+                bounds,
+                seed=42 + restart_round * 10,
+                maxiter=maxiter,
+                popsize=popsize,
+                tol=1e-6,
+                mutation=mutation_strategy,
+                recombination=recombination_rate,
+                disp=False
+            )
+
+            # Extract optimized points
+            optimized_points = result.x.reshape((self.num_points, 3))
+
+            # Calculate final ratio
+            final_ratio = self.min_max_ratio(optimized_points)
+
+            # Store for future adaptive decisions
+            self.convergence_history.append(final_ratio)
+            if len(self.convergence_history) > 10:
+                self.convergence_history.pop(0)
+
+            return optimized_points, final_ratio
+
+        except Exception as e:
+            return initial_points, self.min_max_ratio(initial_points)
+>>>>>>> REPLACE
+</DIFF>

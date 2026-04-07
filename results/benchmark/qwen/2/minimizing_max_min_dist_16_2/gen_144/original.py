@@ -1,0 +1,214 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+import time
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def initialize_points(n_points=16, method='adaptive_grid'):
+    """Initialize points using a structured adaptive grid approach."""
+    np.random.seed(42)
+
+    if method == 'adaptive_grid':
+        # Create a 4x4 grid with adaptive perturbations
+        points = []
+        rows, cols = 4, 4
+
+        # Generate base grid points
+        for i in range(rows):
+            for j in range(cols):
+                # Base grid positions
+                x = j * (1.0 / (cols - 1)) if cols > 1 else 0.5
+                y = i * (1.0 / (rows - 1)) if rows > 1 else 0.5
+
+                # Adaptive perturbation - vary based on position
+                if (i == 0 or i == rows-1) and (j == 0 or j == cols-1):
+                    # Corner points - smallest perturbation
+                    perturbation = 0.005
+                elif i == 0 or i == rows-1 or j == 0 or j == cols-1:
+                    # Edge points - medium perturbation
+                    perturbation = 0.01
+                else:
+                    # Interior points - larger perturbation
+                    perturbation = 0.02
+
+                # Apply random perturbation
+                x += np.random.normal(0, perturbation)
+                y += np.random.normal(0, perturbation)
+                points.append([x, y])
+
+        # Ensure points are within bounds [0,1]
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    elif method == 'hexagonal':
+        # Create hexagonal-like arrangement
+        points = []
+        rows, cols = 4, 4
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * 0.3 + (i % 2) * 0.15
+                y = i * 0.3
+                x += np.random.normal(0, 0.015)
+                y += np.random.normal(0, 0.015)
+                points.append([x, y])
+
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    else:
+        # Default random initialization
+        return np.random.rand(n_points, 2)
+
+def adaptive_sqp_optimization(initial_points, max_time=150):
+    """Optimize using adaptive Sequential Quadratic Programming with multiple restarts."""
+    start_time = time.time()
+
+    # Best solution tracking
+    best_points = initial_points.copy()
+    best_ratio = compute_min_max_ratio(initial_points)
+
+    # Multiple restart strategies
+    restart_strategies = [
+        ('grid', 'adaptive_grid'),
+        ('hex', 'hexagonal'),
+        ('rand', 'random')
+    ]
+
+    # Try different initialization strategies
+    for strategy_name, init_method in restart_strategies:
+        if (time.time() - start_time) >= max_time - 5:
+            break
+
+        try:
+            # Generate initial points with this strategy
+            current_points = initialize_points(16, init_method)
+
+            # Objective function for optimization
+            def objective(x):
+                points = x.reshape(-1, 2)
+                # Negative because we minimize -ratio to maximize ratio
+                return -compute_min_max_ratio(points)
+
+            # Bounds for each coordinate
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Custom bounds handling for constraint satisfaction
+            def constraint_func(x):
+                points = x.reshape(-1, 2)
+                # Check if any points are outside bounds
+                violations = []
+                for i in range(len(points)):
+                    if points[i][0] < 0 or points[i][0] > 1 or points[i][1] < 0 or points[i][1] > 1:
+                        violations.append(1.0)
+                    else:
+                        violations.append(0.0)
+                return sum(violations)
+
+            # Constraints for bounds
+            constraints = {'type': 'ineq', 'fun': lambda x: np.array([1.0 - constraint_func(x)])}
+
+            # Perform optimization using L-BFGS-B
+            options = {'maxiter': 1000, 'ftol': 1e-12, 'gtol': 1e-12}
+
+            # Use bounds directly in minimize call
+            result = minimize(
+                objective,
+                current_points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options=options,
+                timeout=max_time - (time.time() - start_time)
+            )
+
+            if result.success or not np.isnan(result.fun):
+                final_points = result.x.reshape(-1, 2)
+                final_ratio = compute_min_max_ratio(final_points)
+
+                # Apply final bound clipping
+                final_points = np.clip(final_points, 0, 1)
+                final_ratio = compute_min_max_ratio(final_points)
+
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = final_points.copy()
+
+        except Exception as e:
+            continue
+
+        # Early stopping if we achieve good results
+        if best_ratio > 0.25:
+            break
+
+    # Final refinement with a more aggressive optimization approach
+    if (time.time() - start_time) < max_time - 10:
+        try:
+            # Try another optimization with tighter tolerances
+            def objective_tight(x):
+                points = x.reshape(-1, 2)
+                return -compute_min_max_ratio(points)
+
+            bounds = [(0, 1) for _ in range(32)]
+
+            # Try with SLSQP method which can handle constraints better
+            result = minimize(
+                objective_tight,
+                best_points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-15},
+                timeout=max_time - (time.time() - start_time)
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+
+        except Exception as e:
+            pass
+
+    return best_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Initialize with adaptive grid
+    initial_points = initialize_points(n_points=16, method='adaptive_grid')
+
+    # Optimize using adaptive SQP approach
+    optimized_points = adaptive_sqp_optimization(initial_points, max_time=150)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,187 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,173 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import pdist, squareform
++from scipy.optimize import minimize
++import random
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+-
++    Uses a sphere-packing inspired evolutionary approach for improved convergence.
++    
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
++    """
++    
++    def objective(x):
++        # Reshape x into points
++        points = x.reshape(-1, 2)
++        
++        # Compute pairwise distances using squareform for better numerical stability
++        distances = squareform(pdist(points))
++        
++        # Zero out diagonal elements (distance to self)
++        np.fill_diagonal(distances, np.inf)
++        
++        # Compute min and max distances
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        # Return negative ratio to maximize (since we're minimizing the negative)
++        if d_max == 0:
++            return -1.0
++        return -d_min / d_max
++    
++    # Generate initial configuration inspired by hexagonal packing
++    # Create a hexagonal grid pattern with some randomness
++    np.random.seed(42)
++    
++    # Hexagonal lattice parameters
++    sqrt3 = np.sqrt(3)
++    spacing = 1.0 / 2.0  # Adjust spacing to fit in [0,1] square
++    
++    # Generate points in hexagonal pattern
++    points = []
++    rows = 4
++    cols = 4
++    
++    for i in range(rows):
++        for j in range(cols):
++            if len(points) >= 16:
++                break
++            # Offset every other row for hexagonal packing
++            x = j * spacing + (i % 2) * spacing * 0.5
++            y = i * spacing * sqrt3 / 2
++            
++            # Add slight random perturbation to avoid perfect symmetries
++            x += np.random.normal(0, 0.01)
++            y += np.random.normal(0, 0.01)
++            
++            points.append([x, y])
++    
++    # Convert to numpy array and ensure within bounds
++    points = np.array(points[:16])
++    points = np.clip(points, 0, 1)
++    
++    # Genetic Algorithm Parameters
++    population_size = 30
++    generations = 100
++    mutation_rate = 0.1
++    elite_size = 5
++    crossover_rate = 0.8
++    
++    # Initialize population
++    population = []
++    for _ in range(population_size):
++        # Start with base configuration plus random perturbations
++        individual = points.copy()
++        noise_magnitude = 0.05
++        individual += np.random.uniform(-noise_magnitude, noise_magnitude, individual.shape)
++        individual = np.clip(individual, 0, 1)
++        population.append(individual.flatten())
++    
++    # Evolution loop
++    for generation in range(generations):
++        # Evaluate fitness for all individuals
++        fitness_scores = []
++        for individual in population:
++            # Calculate fitness (maximize ratio)
++            try:
++                score = -objective(individual)
++                fitness_scores.append(score)
++            except:
++                # If there's an error, assign worst fitness
++                fitness_scores.append(-np.inf)
++        
++        # Sort population by fitness (descending order)
++        sorted_indices = np.argsort(fitness_scores)[::-1]
++        population = [population[i] for i in sorted_indices]
++        fitness_scores = [fitness_scores[i] for i in sorted_indices]
++        
++        # Keep elite
++        new_population = population[:elite_size]
++        
++        # Generate offspring
++        while len(new_population) < population_size:
++            # Tournament selection
++            parent1_idx = tournament_selection(population, fitness_scores)
++            parent2_idx = tournament_selection(population, fitness_scores)
++            
++            # Crossover
++            if random.random() < crossover_rate:
++                child1, child2 = crossover(population[parent1_idx], population[parent2_idx])
++            else:
++                child1, child2 = population[parent1_idx].copy(), population[parent2_idx].copy()
++            
++            # Mutation
++            child1 = mutate(child1, mutation_rate)
++            child2 = mutate(child2, mutation_rate)
++            
++            new_population.extend([child1, child2])
++        
++        # Trim to exact population size
++        population = new_population[:population_size]
++        
++        # Early stopping if improvement is minimal
++        if generation > 10 and abs(fitness_scores[0] - fitness_scores[1]) < 1e-8:
++            break
++    
++    # Final optimization on best individual using local optimizer
++    best_individual = population[0]
++    bounds = [(0, 1) for _ in range(32)]
++    
++    # Local refinement with L-BFGS-B
++    try:
++        local_result = minimize(
++            objective,
++            best_individual,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
++        )
++        final_points = local_result.x.reshape(-1, 2)
++    except:
++        final_points = best_individual.reshape(-1, 2)
++    
++    return final_points
+ 
+-    """
++def tournament_selection(population, fitness_scores, tournament_size=3):
++    """Select an individual using tournament selection"""
++    tournament_indices = random.sample(range(len(population)), tournament_size)
++    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
++    winner_index = tournament_indices[np.argmax(tournament_fitness)]
++    return winner_index
+ 
+-    n = 16
+-    d = 2
++def crossover(parent1, parent2):
++    """Single-point crossover"""
++    crossover_point = len(parent1) // 2
++    child1 = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
++    child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
++    return child1, child2
+ 
+-    # places points randomly
+-    np.random.seed(42)
+-    points = np.random.randn(n, d)
+-
+-    return points
+-
++def mutate(individual, mutation_rate):
++    """Gaussian mutation"""
++    mutated = individual.copy()
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Add small Gaussian noise
++            mutated[i] += np.random.normal(0, 0.01)
++            # Clamp to bounds
++            mutated[i] = max(0, min(1, mutated[i]))
++    return mutated
+ 
+ # EVOLVE-BLOCK-END

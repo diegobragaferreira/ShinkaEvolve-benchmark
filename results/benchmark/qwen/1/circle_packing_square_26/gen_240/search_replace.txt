@@ -1,0 +1,151 @@
+<NAME>
+enhanced_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the Voronoi-based initialization which has shown to be superior in previous generations. The current implementation uses basic Voronoi but doesn't leverage the full potential of Voronoi diagrams for optimal circle placement. I'll implement a more sophisticated Voronoi-based approach that creates better initial configurations by:
+
+1. Using a more structured point distribution that creates better Voronoi cells
+2. Computing more accurate initial radii based on Voronoi cell properties
+3. Using a multi-scale approach to generate points that cover the space effectively
+
+This improvement leverages the proven effectiveness of Voronoi-based methods while enhancing the quality of the initial population, which should lead to faster convergence and better final results.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def initialize_population(n_circles: int, population_size: int) -> np.ndarray:
+    """Initialize a population of random circle configurations"""
+    population = []
+    for _ in range(population_size):
+        # Generate random positions and radii
+        circles = np.zeros((n_circles, 3))  # x, y, radius
+
+        # For initial placement, use small random radii and positions
+        for i in range(n_circles):
+            max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+            circles[i, 2] = random.uniform(0.001, max_radius)  # radius
+
+            # Place center within bounds considering radius
+            safe_bound = circles[i, 2]
+            circles[i, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+            circles[i, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+
+        population.append(circles)
+
+    return population
+=======
+def initialize_population(n_circles: int, population_size: int) -> np.ndarray:
+    """Initialize a population of circle configurations using enhanced Voronoi-based method"""
+    from scipy.spatial import Voronoi
+    import numpy as np
+
+    population = []
+
+    # Use enhanced Voronoi initialization for first few individuals
+    for i in range(min(30, population_size)):
+        # Create points using structured distribution for better Voronoi coverage
+        points = []
+
+        # Add grid points with jitter
+        grid_size = 6
+        spacing = 1.0 / (grid_size + 1)
+        for i in range(grid_size):
+            for j in range(grid_size):
+                x = (i + 1) * spacing + np.random.uniform(-spacing/6, spacing/6)
+                y = (j + 1) * spacing + np.random.uniform(-spacing/6, spacing/6)
+                points.append([x, y])
+
+        # Add boundary points for better coverage
+        for _ in range(10):
+            side = np.random.randint(0, 4)
+            if side == 0:  # Top
+                points.append([np.random.rand(), 1.0])
+            elif side == 1:  # Bottom
+                points.append([np.random.rand(), 0.0])
+            elif side == 2:  # Left
+                points.append([0.0, np.random.rand()])
+            else:  # Right
+                points.append([1.0, np.random.rand()])
+
+        # Ensure we have enough points
+        while len(points) < n_circles:
+            points.append([np.random.rand(), np.random.rand()])
+
+        points = np.array(points[:n_circles])
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+
+            # Use Voronoi cell centroids for circle positions
+            if len(vor.points) >= n_circles:
+                circles = np.zeros((n_circles, 3))
+
+                # Get Voronoi vertices and compute cell areas
+                for i in range(n_circles):
+                    if i < len(vor.points):
+                        x, y = vor.points[i]
+
+                        # Estimate radius based on Voronoi cell characteristics
+                        # Compute minimum distance to other points (approximates cell size)
+                        min_dist = float('inf')
+                        for j in range(n_circles):
+                            if i != j:
+                                dist = np.sqrt((vor.points[i, 0] - vor.points[j, 0])**2 +
+                                             (vor.points[i, 1] - vor.points[j, 1])**2)
+                                min_dist = min(min_dist, dist)
+
+                        # Use conservative radius estimation
+                        estimated_radius = min(0.25, min_dist / 4.0) if min_dist < float('inf') else 0.1
+                        radius = max(0.001, min(0.5, estimated_radius))
+
+                        # Ensure position is within bounds
+                        x = max(radius, min(1-radius, x))
+                        y = max(radius, min(1-radius, y))
+
+                        circles[i] = [x, y, radius]
+                    else:
+                        # Fallback to random
+                        x = np.random.uniform(0.001, 0.999)
+                        y = np.random.uniform(0.001, 0.999)
+                        r = np.random.uniform(0.001, 0.5)
+                        circles[i] = [x, y, r]
+
+                population.append(circles)
+            else:
+                # Fallback to random initialization
+                circles = np.zeros((n_circles, 3))
+                for j in range(n_circles):
+                    max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+                    circles[j, 2] = random.uniform(0.001, max_radius)
+                    safe_bound = circles[j, 2]
+                    circles[j, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+                    circles[j, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+                population.append(circles)
+
+        except:
+            # Fallback to random initialization if Voronoi fails
+            circles = np.zeros((n_circles, 3))
+            for j in range(n_circles):
+                max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+                circles[j, 2] = random.uniform(0.001, max_radius)
+                safe_bound = circles[j, 2]
+                circles[j, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+                circles[j, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+            population.append(circles)
+
+    # Fill remaining population with standard random initialization
+    while len(population) < population_size:
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            max_radius = min(0.1, 0.5 * (1.0 - 0.01))
+            circles[i, 2] = random.uniform(0.001, max_radius)
+            safe_bound = circles[i, 2]
+            circles[i, 0] = random.uniform(safe_bound, 1.0 - safe_bound)
+            circles[i, 1] = random.uniform(safe_bound, 1.0 - safe_bound)
+        population.append(circles)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>

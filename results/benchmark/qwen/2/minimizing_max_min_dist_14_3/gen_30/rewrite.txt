@@ -1,0 +1,125 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import math
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances."""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances)
+
+    def initialize_points():
+        """Initialize points using hybrid approach combining Fibonacci sphere and icosahedral methods."""
+        points = np.zeros((14, 3))
+        
+        # Hybrid initialization: combine Fibonacci sphere with icosahedral structure
+        # Start with icosahedral-like arrangement for better symmetry
+        # Points 0,1: North and South poles (similar to icosahedral)
+        points[0] = [0, 0, 1]   # North pole
+        points[1] = [0, 0, -1]  # South pole
+        
+        # Points 2-11: Equatorial rings (5 points each)
+        # Distribute points evenly in two rings around equator
+        angle_step = 2 * math.pi / 5
+        for i in range(5):
+            angle1 = i * angle_step
+            angle2 = angle1 + angle_step / 2
+            
+            # First ring (closer to equator)
+            points[2+i] = [math.cos(angle1), math.sin(angle1), 0.0]
+            # Second ring (offset)
+            points[7+i] = [math.cos(angle2), math.sin(angle2), 0.0]
+            
+        # Points 12-13: Additional points near poles but spread out
+        points[12] = [0, 0, 0.7]   # Near north pole
+        points[13] = [0, 0, -0.7]  # Near south pole
+        
+        # Apply slight perturbations to get better distribution
+        for i in range(14):
+            points[i] += np.random.normal(0, 0.01, 3)
+            
+        return points
+
+    def optimize_points(initial_points, max_iterations=15000, temp_start=1.0, cooling_rate=0.9995):
+        """Optimize point placement using enhanced simulated annealing."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+        
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        temp = temp_start
+
+        for iteration in range(max_iterations):
+            # Adaptive point selection based on current distribution
+            if iteration % 100 == 0 and iteration > 0:
+                # Analyze current distribution
+                distances = pdist(current_points)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                mean_dist = np.mean(distances)
+                
+                # Prefer to adjust points that are too close (if there are many small distances)
+                # or points that are far apart (if there are few large distances)
+                if min_dist < mean_dist * 0.25:
+                    # If many small distances exist, select points more probabilistically
+                    # based on how close they are to others
+                    point_idx = np.random.randint(0, len(current_points))
+                else:
+                    # Otherwise, random selection works well
+                    point_idx = np.random.randint(0, len(current_points))
+            else:
+                point_idx = np.random.randint(0, len(current_points))
+
+            # Create perturbation with adaptive scale
+            perturbation_scale = temp * 0.03
+            perturbation = np.random.normal(0, perturbation_scale, 3)
+            
+            # Apply perturbation
+            new_points = current_points.copy()
+            new_points[point_idx] += perturbation
+            
+            # Normalize to keep points roughly on unit sphere but allow some flexibility
+            norms = np.linalg.norm(new_points, axis=1)
+            safe_norms = np.where(norms == 0, 1.0, norms)
+            new_points = new_points / safe_norms[:, np.newaxis] * 0.99 + 0.01
+            
+            new_ratio = compute_min_max_ratio(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < math.exp((new_ratio - best_ratio) / temp):
+                current_points = new_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+                    recent_improvements.append(iteration)
+
+            # Cool down temperature
+            temp *= cooling_rate
+
+            # Occasionally print progress
+            if iteration % 1000 == 0:
+                print(f"Iteration {iteration}, Best ratio: {best_ratio:.6f}")
+
+        return best_points, best_ratio
+
+    # Initialize with a good configuration
+    initial_points = initialize_points()
+
+    # Optimize using enhanced simulated annealing
+    optimized_points, final_ratio = optimize_points(initial_points)
+
+    # Ensure we're returning the best solution found
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

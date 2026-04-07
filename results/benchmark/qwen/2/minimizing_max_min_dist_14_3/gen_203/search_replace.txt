@@ -1,0 +1,179 @@
+<NAME>
+add_adaptive_perturbation
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive perturbation mechanism that adjusts the perturbation size and direction based on local point relationships. This enhancement improves the simulated annealing process by making moves that are more likely to improve the min/max distance ratio, rather than purely random perturbations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def project_to_sphere(points):
+        """Project points onto unit sphere while maintaining relative positions."""
+        norms = np.linalg.norm(points, axis=1)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms[:, np.newaxis] * 0.99
+
+    def fibonacci_sphere(n):
+=======
+    def project_to_sphere(points):
+        """Project points onto unit sphere while maintaining relative positions."""
+        norms = np.linalg.norm(points, axis=1)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms[:, np.newaxis] * 0.99
+
+    def adaptive_perturb(points, point_idx, distances):
+        """Apply adaptive perturbation based on local point relationships."""
+        # Get distances to all other points
+        dist_to_others = distances[point_idx]
+        dist_to_others[point_idx] = np.inf  # Exclude self-distance
+
+        # Find nearest and furthest points
+        nearest_idx = np.argmin(dist_to_others)
+        furthest_idx = np.argmax(dist_to_others)
+
+        # Calculate adaptive perturbation scale based on local density
+        mean_dist = np.mean(dist_to_others)
+        perturbation_scale = 0.005 * (1.0 + 0.2 * mean_dist)  # Scale with local density
+
+        # Create perturbation vector
+        delta = np.random.normal(0, perturbation_scale, 3)
+
+        # Adjust perturbation direction to improve min/max ratio
+        if dist_to_others[nearest_idx] < dist_to_others[furthest_idx]:
+            # Move closer to nearest point to increase min distance
+            direction = points[nearest_idx] - points[point_idx]
+            if np.linalg.norm(direction) > 0:
+                direction = direction / np.linalg.norm(direction)
+                delta += 0.5 * direction * perturbation_scale
+
+        # Move away from furthest point to decrease max distance
+        direction = points[point_idx] - points[furthest_idx]
+        if np.linalg.norm(direction) > 0:
+            direction = direction / np.linalg.norm(direction)
+            delta -= 0.3 * direction * perturbation_scale
+
+        return delta
+
+    def fibonacci_sphere(n):
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+modify_simulated_annealing_with_adaptive_perturbation
+</NAME>
+
+<DESCRIPTION>
+Modifying the simulated annealing algorithm to use the new adaptive perturbation function instead of uniform random perturbations. This change makes the search more intelligent by considering the local geometry of the point configuration when deciding how to perturb points, which should lead to better convergence towards optimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            for iteration in range(max_iter):
+                # Adaptive cooling schedule
+                cooling_rate = base_cooling_rate
+                if iteration < 5000:
+                    cooling_rate = min(cooling_rate, 0.9998)
+                elif iteration < 15000:
+                    cooling_rate = min(cooling_rate, 0.9997)
+                else:
+                    cooling_rate = min(cooling_rate, 0.9996)
+
+                # Cool down temperature
+                current_temp *= cooling_rate
+
+                if current_temp < min_temp:
+                    break
+
+                # Try to make a small random move
+                test_points = sa_best_points.copy()
+
+                # Select random point to perturb
+                point_idx = np.random.randint(0, 14)
+
+                # Make small random perturbation - adapt to current temp
+                delta = np.random.normal(0, 0.001 * current_temp, 3)
+                test_points[point_idx] += delta
+
+                # Project back to sphere
+                test_points = project_to_sphere(test_points)
+
+                # Compute new ratio
+                test_ratio = compute_min_max_ratio(test_points)
+
+                # Accept or reject based on Metropolis criterion
+                if test_ratio > sa_best_ratio:
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                elif np.random.random() < np.exp((test_ratio - sa_best_ratio) / current_temp):
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+
+                # Early stopping if no improvement for long time
+                if iteration - last_improvement > 5000:
+                    break
+
+                # Apply local refinement every 2000 iterations
+                if iteration > 0 and iteration % 2000 == 0:
+=======
+            for iteration in range(max_iter):
+                # Adaptive cooling schedule
+                cooling_rate = base_cooling_rate
+                if iteration < 5000:
+                    cooling_rate = min(cooling_rate, 0.9998)
+                elif iteration < 15000:
+                    cooling_rate = min(cooling_rate, 0.9997)
+                else:
+                    cooling_rate = min(cooling_rate, 0.9996)
+
+                # Cool down temperature
+                current_temp *= cooling_rate
+
+                if current_temp < min_temp:
+                    break
+
+                # Try to make an adaptive move
+                test_points = sa_best_points.copy()
+
+                # Select random point to perturb
+                point_idx = np.random.randint(0, 14)
+
+                # Compute distances to all other points for adaptive perturbation
+                test_distances = pdist(test_points)
+                test_distances = test_distances.reshape(len(test_points), len(test_points))
+
+                # Make adaptive perturbation
+                delta = adaptive_perturb(test_points, point_idx, test_distances)
+                test_points[point_idx] += delta
+
+                # Project back to sphere
+                test_points = project_to_sphere(test_points)
+
+                # Compute new ratio
+                test_ratio = compute_min_max_ratio(test_points)
+
+                # Accept or reject based on Metropolis criterion
+                if test_ratio > sa_best_ratio:
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+                elif np.random.random() < np.exp((test_ratio - sa_best_ratio) / current_temp):
+                    sa_best_points = test_points.copy()
+                    sa_best_ratio = test_ratio
+                    last_improvement = iteration
+
+                # Early stopping if no improvement for long time
+                if iteration - last_improvement > 5000:
+                    break
+
+                # Apply local refinement every 2000 iterations
+                if iteration > 0 and iteration % 2000 == 0:
+>>>>>>> REPLACE
+
+</DIFF>

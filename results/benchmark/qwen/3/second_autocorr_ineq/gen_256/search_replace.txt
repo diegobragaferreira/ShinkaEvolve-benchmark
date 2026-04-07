@@ -1,0 +1,144 @@
+<NAME>
+enhance_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses direct convolution computation which has O(n²) complexity. By leveraging FFT-based convolution, we can significantly speed up the computation, especially for larger step counts. This will allow us to explore larger problem sizes or run more iterations within the time constraint, potentially improving the final C₂ value.
+
+The key insight is to use scipy's fftconvolve which is much faster than manual double-loop convolution for large arrays, while preserving the mathematical correctness of the convolution operation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Core computation module with JIT compilation
+@jit(nopython=True)
+def compute_autoconvolution_jit(f_vals, step_width):
+    """
+    Compute autoconvolution using numba for speed
+    """
+    n = len(f_vals)
+    # Autoconvolution size is 2*n - 1
+    g_size = 2 * n - 1
+    g_vals = np.zeros(g_size)
+
+    # Compute convolution directly
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_size:
+                g_vals[idx] += f_vals[i] * f_vals[j]
+
+    return g_vals
+
+@jit(nopython=True)
+def compute_norms_jit(g_vals):
+    """
+    Compute norms efficiently with numba
+    """
+    n = len(g_vals)
+
+    # Compute L1 norm (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # Compute L2 norm squared
+    l2_norm_sq = 0.0
+    for i in range(n):
+        l2_norm_sq += g_vals[i] * g_vals[i]
+
+    # Compute infinity norm
+    linf_norm = 0.0
+    for i in range(n):
+        val = abs(g_vals[i])
+        if val > linf_norm:
+            linf_norm = val
+
+    return l1_norm, l2_norm_sq, linf_norm
+
+@jit(nopython=True)
+def compute_convolution_norms(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using direct computation
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution using direct convolution sum
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms using piecewise linear integration approach
+    # For ||g||₂² using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+=======
+# Core computation module with optimized FFT-based convolution
+def compute_autoconvolution_fft(f_vals):
+    """
+    Compute autoconvolution using FFT for better performance.
+    This is much faster than direct computation for large arrays.
+    """
+    # Convert to numpy array
+    f = np.array(f_vals)
+
+    # Use scipy's fftconvolve for efficient convolution
+    # Note: we use 'full' mode and then take appropriate portion
+    g = signal.fftconvolve(f, f, mode='full')
+
+    # Since we're doing f*f, the result should be symmetric
+    # We keep only the first half (the actual convolution size)
+    g = g[:len(f)*2 - 1]
+
+    return g
+
+def compute_convolution_norms(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using FFT for efficiency
+    g = compute_autoconvolution_fft(f_values)
+
+    # Compute norms using piecewise linear integration approach
+    # For ||g||₂² using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+>>>>>>> REPLACE
+
+</DIFF>

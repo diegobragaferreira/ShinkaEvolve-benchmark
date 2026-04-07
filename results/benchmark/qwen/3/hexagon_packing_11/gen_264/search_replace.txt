@@ -1,0 +1,213 @@
+<NAME>
+add_multi_start_local_search
+</NAME>
+
+<DESCRIPTION>
+This enhancement adds a multi-start local optimization approach that performs multiple independent local optimizations from perturbed versions of the best individual. This addresses the limitation of single local optimization getting stuck in poor local minima and helps escape to potentially better solutions. The approach leverages the successful pattern seen in high-performing generations where multiple localized searches helped discover tighter packings.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def smart_hybrid_optimization():
+    """Intelligent hybrid optimization combining global and local search"""
+    # Stage 1: Multi-stage global optimization with adaptive parameters
+    current_config = generate_initial_config()
+    best_fitness = evaluate_layout(current_config)
+    best_config = current_config.copy()
+
+    # Adaptive optimization stages
+    stages = [
+        {"iterations": 20, "mutation_rate": 0.5},
+        {"iterations": 30, "mutation_rate": 0.3},
+        {"iterations": 25, "mutation_rate": 0.15}
+    ]
+
+    for stage_num, stage in enumerate(stages):
+        for iteration in range(stage["iterations"]):
+            # Adaptive mutation with dynamic parameters
+            mutated = adaptive_optimization_step(
+                current_config,
+                iteration + sum(s["iterations"] for s in stages[:stage_num]),
+                sum(s["iterations"] for s in stages),
+                stage["mutation_rate"]
+            )
+
+            fitness = evaluate_layout(mutated)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_config = mutated.copy()
+                # Reset stagnation counter
+                stagnation_count = 0
+            else:
+                # Track stagnation for early stopping
+                stagnation_count = stagnation_count + 1 if 'stagnation_count' in locals() else 0
+
+            # Early termination if no improvement for several steps
+            if 'stagnation_count' in locals() and stagnation_count > 8:
+                break
+
+            current_config = mutated
+
+    # Stage 2: Fine-grained local optimization using L-BFGS-B
+    def objective_func(params):
+        hex_data = params.reshape(-1, 3)
+        return -evaluate_layout(hex_data)  # Negative for minimization
+
+    bounds = []
+    for i in range(11):
+        bounds.extend([(-12, 12), (-12, 12), (0, 360)])
+
+    try:
+        # Flatten current configuration
+        flat_params = best_config.flatten()
+
+        # Local optimization with increased accuracy
+        result = minimize(
+            objective_func,
+            flat_params,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 120, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+
+        if result.success:
+            refined_config = result.x.reshape(-1, 3)
+            refined_fitness = evaluate_layout(refined_config)
+            if refined_fitness > best_fitness:
+                best_config = refined_config
+                best_fitness = refined_fitness
+    except:
+        pass
+
+    return best_config
+=======
+def smart_hybrid_optimization():
+    """Intelligent hybrid optimization combining global and local search"""
+    # Stage 1: Multi-stage global optimization with adaptive parameters
+    current_config = generate_initial_config()
+    best_fitness = evaluate_layout(current_config)
+    best_config = current_config.copy()
+
+    # Adaptive optimization stages
+    stages = [
+        {"iterations": 20, "mutation_rate": 0.5},
+        {"iterations": 30, "mutation_rate": 0.3},
+        {"iterations": 25, "mutation_rate": 0.15}
+    ]
+
+    for stage_num, stage in enumerate(stages):
+        for iteration in range(stage["iterations"]):
+            # Adaptive mutation with dynamic parameters
+            mutated = adaptive_optimization_step(
+                current_config,
+                iteration + sum(s["iterations"] for s in stages[:stage_num]),
+                sum(s["iterations"] for s in stages),
+                stage["mutation_rate"]
+            )
+
+            fitness = evaluate_layout(mutated)
+
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_config = mutated.copy()
+                # Reset stagnation counter
+                stagnation_count = 0
+            else:
+                # Track stagnation for early stopping
+                stagnation_count = stagnation_count + 1 if 'stagnation_count' in locals() else 0
+
+            # Early termination if no improvement for several steps
+            if 'stagnation_count' in locals() and stagnation_count > 8:
+                break
+
+            current_config = mutated
+
+    # Stage 2: Multi-start local optimization with diverse perturbations
+    # Run multiple local optimizations from different starting points
+    local_search_results = []
+
+    # Start with the best solution found so far
+    local_search_results.append(best_config.copy())
+
+    # Generate additional perturbed starting points
+    for _ in range(3):  # Run 3 additional local searches
+        # Create a perturbed version of the best solution
+        perturbed = best_config.copy()
+        # Add small random perturbations to positions and angles
+        for i in range(len(perturbed)):
+            perturbed[i][0] += np.random.normal(0, 0.05)  # Small position perturbation
+            perturbed[i][1] += np.random.normal(0, 0.05)
+            perturbed[i][2] += np.random.normal(0, 2) % 360  # Small angle perturbation
+
+        local_search_results.append(perturbed)
+
+    # Perform local optimization from each starting point
+    best_local_result = best_config.copy()
+    best_local_fitness = best_fitness
+
+    for i, start_config in enumerate(local_search_results):
+        def objective_func(params):
+            hex_data = params.reshape(-1, 3)
+            return -evaluate_layout(hex_data)  # Negative for minimization
+
+        bounds = []
+        for j in range(11):
+            bounds.extend([(-12, 12), (-12, 12), (0, 360)])
+
+        try:
+            # Flatten current configuration
+            flat_params = start_config.flatten()
+
+            # Local optimization with increased accuracy
+            result = minimize(
+                objective_func,
+                flat_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-9, 'gtol': 1e-9}
+            )
+
+            if result.success:
+                refined_config = result.x.reshape(-1, 3)
+                refined_fitness = evaluate_layout(refined_config)
+                if refined_fitness > best_local_fitness:
+                    best_local_fitness = refined_fitness
+                    best_local_result = refined_config
+        except:
+            pass
+
+    # Stage 3: Fine-grained local optimization using L-BFGS-B on best result
+    def objective_func(params):
+        hex_data = params.reshape(-1, 3)
+        return -evaluate_layout(hex_data)  # Negative for minimization
+
+    bounds = []
+    for i in range(11):
+        bounds.extend([(-12, 12), (-12, 12), (0, 360)])
+
+    try:
+        # Flatten best local result
+        flat_params = best_local_result.flatten()
+
+        # Local optimization with increased accuracy
+        result = minimize(
+            objective_func,
+            flat_params,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 120, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+
+        if result.success:
+            refined_config = result.x.reshape(-1, 3)
+            refined_fitness = evaluate_layout(refined_config)
+            if refined_fitness > best_local_fitness:
+                best_local_result = refined_config
+                best_local_fitness = refined_fitness
+    except:
+        pass
+
+    return best_local_result
+>>>>>>> REPLACE
+</DIFF>

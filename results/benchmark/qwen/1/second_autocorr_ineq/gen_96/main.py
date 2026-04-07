@@ -1,0 +1,352 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.stats import qmc
+import time
+from numba import jit, prange
+import numba
+
+# Global constants
+N_BINS = 1000
+DOMAIN = [-0.25, 0.25]
+STEP_WIDTH = (DOMAIN[1] - DOMAIN[0]) / N_BINS
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm using trapezoidal integration
+    # Proper implementation accounting for actual spacing
+    if len(g_vals) >= 2:
+        # Step width for convolution domain (this is actually 2*STEP_WIDTH since convolution spans twice the domain)
+        h = 2 * STEP_WIDTH / (len(g_vals) - 1) if len(g_vals) > 1 else STEP_WIDTH
+
+        # Trapezoidal rule: sum of (y_i^2 + y_i*y_{i+1} + y_{i+1}^2)/3 * h
+        g_l2_sq = 0.0
+        for i in range(len(g_vals) - 1):
+            y1 = g_vals[i]
+            y2 = g_vals[i + 1]
+            g_l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+        # Correct for the fact that we're integrating over the full convolution domain
+        g_l2_sq *= h
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L1, L2^2, and L-infinity norms efficiently"""
+    n = len(g_vals)
+
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_sq_norm, linf_norm
+
+def objective_function(params):
+    """Objective function to minimize (negative C2)"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        # Return negative because we're minimizing
+        return -c2
+    except Exception as e:
+        return 1e10  # Large penalty for invalid results
+
+def generate_multi_scale_initialization(dim):
+    """Generate initialization at multiple scales to enhance exploration"""
+    # Create base initializations
+    init_params = []
+
+    # Pattern 1: Sine wave pattern
+    sine_pattern = [0.5 + 0.3 * np.sin(i * 0.7) for i in range(dim)]
+
+    # Pattern 2: Alternating high/low pattern
+    alternating = [0.8 if i % 2 == 0 else 0.2 for i in range(dim)]
+
+    # Pattern 3: Smoothed version of sine pattern
+    smoothed = sine_pattern.copy()
+    if len(smoothed) > 10:
+        # Apply simple smoothing filter
+        for i in range(1, len(smoothed)-1):
+            smoothed[i] = 0.3 * smoothed[i-1] + 0.4 * smoothed[i] + 0.3 * smoothed[i+1]
+
+    # Pattern 4: Random pattern
+    random_pattern = np.random.random(dim) * 0.8 + 0.1
+
+    # Combine patterns with weights
+    combined = []
+    for i in range(dim):
+        # Mix different patterns
+        val = 0.3 * sine_pattern[i] + 0.3 * alternating[i] + 0.2 * smoothed[i] + 0.2 * random_pattern[i]
+        combined.append(max(0, val))
+
+    # Return multiple variations
+    variations = [
+        sine_pattern,
+        alternating,
+        smoothed,
+        random_pattern,
+        combined
+    ]
+
+    # Add some random noise to ensure diversity
+    for i in range(len(variations)):
+        noise = np.random.normal(0, 0.05, dim)
+        variations[i] = np.clip(np.array(variations[i]) + noise, 0, 1).tolist()
+
+    return variations
+
+def adaptive_evolutionary_optimization(initial_dim, max_iter=200, max_stall_iter=20, min_popsize=5, max_popsize=30):
+    """
+    Perform evolutionary optimization with adaptive population sizing and early stopping
+    """
+    # Track convergence
+    best_c2_history = []
+    stall_count = 0
+    prev_best_c2 = -np.inf
+
+    # Start with small population
+    popsize = min_popsize
+
+    while popsize <= max_popsize:
+        # Set bounds for optimization
+        bounds = [(0, 1.0)] * initial_dim
+
+        # Parameters for differential evolution
+        de_params = {
+            'mutation': (0.5, 1),
+            'recombination': 0.7,
+            'popsize': popsize,
+            'maxiter': min(max_iter // 2, 100),  # Reduce iterations with larger popsize
+            'seed': np.random.randint(1000, 9999),
+            'tol': 1e-6,
+            'disp': False,
+            'callback': None
+        }
+
+        # Try multiple initializations
+        best_result = None
+        best_c2 = -np.inf
+
+        # Try 3 different initializations
+        for init_seed in [42, 123, 456]:
+            try:
+                # Create specific initialization for this run
+                np.random.seed(init_seed)
+
+                # Create different types of initializations
+                init_variations = generate_multi_scale_initialization(initial_dim)
+                best_variation_c2 = -np.inf
+                best_variation_params = None
+
+                for var_idx, init_params in enumerate(init_variations):
+                    try:
+                        # Run optimization with current initialization
+                        result = differential_evolution(
+                            objective_function,
+                            bounds,
+                            x0=init_params,
+                            **de_params
+                        )
+
+                        # Evaluate the result
+                        f_vals = np.clip(result.x, 0, None)
+                        if len(f_vals) > 0:
+                            g_vals = compute_autoconvolution_numba(f_vals)
+                            c2 = compute_c2_numba(g_vals)
+
+                            if c2 > best_variation_c2:
+                                best_variation_c2 = c2
+                                best_variation_params = result.x.copy()
+                    except:
+                        continue
+
+                if best_variation_c2 > best_c2:
+                    best_c2 = best_variation_c2
+                    best_result = best_variation_params
+            except:
+                continue
+
+        if best_result is not None:
+            # Check for convergence
+            if best_c2 > prev_best_c2:
+                best_c2_history.append(best_c2)
+                prev_best_c2 = best_c2
+                stall_count = 0
+            else:
+                stall_count += 1
+
+            # Early stopping if stalled for too long
+            if stall_count >= max_stall_iter:
+                break
+        else:
+            stall_count += 1
+            if stall_count >= max_stall_iter:
+                break
+
+        # Increase population size for next iteration
+        popsize = min(popsize * 2, max_popsize)
+
+    return best_result if best_result is not None else np.random.random(initial_dim) * 0.5
+
+def advanced_refinement_strategy(initial_params, max_iter=100):
+    """Apply advanced local refinement to polish the solution"""
+    current_params = np.array(initial_params)
+    best_params = current_params.copy()
+    best_c2 = -np.inf
+
+    # Track history for early stopping
+    recent_improvements = []
+
+    for iteration in range(max_iter):
+        # Perturb current solution with adaptive noise
+        noise_level = max(0.001, 0.05 * (1.0 - iteration / max_iter))
+        perturbed = current_params + np.random.normal(0, noise_level, len(current_params)) * current_params
+        perturbed = np.clip(perturbed, 0, None)
+
+        # Evaluate
+        f_vals = perturbed
+        if len(f_vals) > 0:
+            try:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = perturbed.copy()
+                    recent_improvements = [c2]  # Reset history
+                else:
+                    recent_improvements.append(c2)
+                    # Early stopping if no significant improvement in last 10 iterations
+                    if len(recent_improvements) > 10 and all(c2 <= recent_improvements[-10] for c2 in recent_improvements[-10:]):
+                        break
+            except:
+                pass
+
+        # Update current solution
+        current_params = best_params.copy()
+
+    return best_params
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+
+    # Fixed dimension that allows good resolution for optimal step function
+    FIXED_DIM = 1000
+
+    # Multi-start approach with multiple independent optimizations
+    best_c2 = -np.inf
+    best_params = None
+
+    # Run multiple independent optimization attempts
+    num_attempts = 15  # Increased from previous versions
+
+    for attempt in range(num_attempts):
+        if time.time() - start_time > 85:  # Leave buffer for cleanup
+            break
+
+        try:
+            # Use a different seed for each attempt
+            np.random.seed(42 + attempt * 17)  # Different seeds for each attempt
+
+            # Run adaptive evolutionary optimization
+            params = adaptive_evolutionary_optimization(
+                FIXED_DIM,
+                max_iter=150,
+                max_stall_iter=15,
+                min_popsize=5,
+                max_popsize=25
+            )
+
+            # Refine the result with more aggressive refinement
+            refined_params = advanced_refinement_strategy(params, max_iter=50)
+
+            # Compute actual C2 value
+            f_vals = np.clip(refined_params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = refined_params.copy()
+        except Exception as e:
+            # Continue with other attempts if one fails
+            continue
+
+    # If no valid parameters found, return default
+    if best_params is None:
+        return [0.5] * 100
+
+    # Final check and conversion to list
+    final_f_vals = np.clip(best_params, 0, None)
+    return final_f_vals.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

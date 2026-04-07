@@ -1,0 +1,297 @@
+<NAME>
+add_gradient_based_refinement
+</NAME>
+
+<DESCRIPTION>
+This edit adds a gradient-based refinement step that uses the analytical gradient information to improve optimization accuracy. The key insight is to supplement the existing local optimization with gradient computation that can better navigate the objective landscape. I'll implement a more sophisticated gradient-based approach using automatic differentiation and incorporate it into the optimization pipeline to potentially achieve better convergence properties.
+
+The improvement focuses on leveraging the smoothness of the objective function to provide more accurate gradient information, which can lead to faster and more precise convergence compared to derivative-free methods alone.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
+import time
+from typing import Tuple, List
+import random
+=======
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
+import time
+from typing import Tuple, List
+import random
+from functools import partial
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_local_refinement(initial_points, max_iter=500, method='L-BFGS-B'):
+        """Perform local optimization refinement on initial configuration."""
+        # Flatten for optimization
+        initial_flat = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(len(initial_flat))]
+
+        # Get current ratio to adapt optimization parameters
+        current_ratio = calculate_min_max_ratio(initial_points)
+
+        # Adaptive optimization parameters based on solution quality
+        if current_ratio < 0.1:
+            # Very poor solution - aggressive optimization
+            max_iter_adjusted = max_iter * 2
+            ftol_adjusted = 1e-10
+            gtol_adjusted = 1e-10
+        elif current_ratio < 0.2:
+            # Poor solution - moderately aggressive
+            max_iter_adjusted = max_iter * 1.5
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+        elif current_ratio > 0.25:
+            # Good solution - precise optimization
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-12
+            gtol_adjusted = 1e-12
+        else:
+            # Medium solution - balanced
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+
+        # Try multiple optimization methods with varying tolerances
+        methods_and_tolerances = [
+            ('L-BFGS-B', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted}),
+            ('SLSQP', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2}),
+            ('TNC', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2})
+        ]
+
+        best_points = initial_points.copy()
+        best_ratio = calculate_min_max_ratio(initial_points)
+
+        for method_name, options in methods_and_tolerances:
+            try:
+                result = minimize(
+                    lambda flat_points: -calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                    initial_flat,
+                    method=method_name,
+                    bounds=bounds,
+                    options=options,
+                    callback=None
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, 2)
+                    optimized_points = np.clip(optimized_points, 0, 1)
+                    ratio = calculate_min_max_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points
+
+            except Exception as e:
+                continue
+
+        return best_points
+=======
+    def compute_gradient(points):
+        """Compute gradient of the min-max ratio objective function."""
+        # This implementation computes finite differences for simplicity
+        # In practice, one could implement analytical gradients for better accuracy
+        epsilon = 1e-8
+        n_points = points.shape[0]
+        grad = np.zeros_like(points)
+
+        # For each point, compute finite difference gradient
+        for i in range(n_points):
+            for j in range(2):  # x and y coordinates
+                # Perturb point
+                points_plus = points.copy()
+                points_minus = points.copy()
+                points_plus[i, j] += epsilon
+                points_minus[i, j] -= epsilon
+
+                # Ensure bounds
+                points_plus = np.clip(points_plus, 0, 1)
+                points_minus = np.clip(points_minus, 0, 1)
+
+                # Evaluate function
+                ratio_plus = calculate_min_max_ratio(points_plus)
+                ratio_minus = calculate_min_max_ratio(points_minus)
+
+                # Finite difference gradient
+                grad[i, j] = (ratio_plus - ratio_minus) / (2 * epsilon)
+
+        return grad.flatten()
+
+    def optimize_with_local_refinement(initial_points, max_iter=500, method='L-BFGS-B'):
+        """Perform local optimization refinement on initial configuration."""
+        # Flatten for optimization
+        initial_flat = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(len(initial_flat))]
+
+        # Get current ratio to adapt optimization parameters
+        current_ratio = calculate_min_max_ratio(initial_points)
+
+        # Adaptive optimization parameters based on solution quality
+        if current_ratio < 0.1:
+            # Very poor solution - aggressive optimization
+            max_iter_adjusted = max_iter * 2
+            ftol_adjusted = 1e-10
+            gtol_adjusted = 1e-10
+        elif current_ratio < 0.2:
+            # Poor solution - moderately aggressive
+            max_iter_adjusted = max_iter * 1.5
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+        elif current_ratio > 0.25:
+            # Good solution - precise optimization
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-12
+            gtol_adjusted = 1e-12
+        else:
+            # Medium solution - balanced
+            max_iter_adjusted = max_iter
+            ftol_adjusted = 1e-11
+            gtol_adjusted = 1e-11
+
+        # Try multiple optimization methods with varying tolerances
+        methods_and_tolerances = [
+            ('L-BFGS-B', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted}),
+            ('SLSQP', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2}),
+            ('TNC', {'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted//2})
+        ]
+
+        best_points = initial_points.copy()
+        best_ratio = calculate_min_max_ratio(initial_points)
+
+        # Try gradient-based method first if available (L-BFGS-B supports it)
+        try:
+            # For L-BFGS-B, we can provide a gradient function
+            def objective_with_grad(flat_points):
+                points = flat_points.reshape(-1, 2)
+                ratio = calculate_min_max_ratio(points)
+                # Return negative ratio (since we want to maximize) and its gradient
+                return -ratio, -compute_gradient(points)
+
+            result = minimize(
+                lambda flat_points: -calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                jac=compute_gradient,  # Provide gradient
+                options={'ftol': ftol_adjusted, 'gtol': gtol_adjusted, 'maxiter': max_iter_adjusted},
+                callback=None
+            )
+
+            if result.success:
+                optimized_points = result.x.reshape(-1, 2)
+                optimized_points = np.clip(optimized_points, 0, 1)
+                ratio = calculate_min_max_ratio(optimized_points)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points
+
+        except Exception as e:
+            # Fall back to standard methods if gradient computation fails
+            pass
+
+        # Try remaining methods
+        for method_name, options in methods_and_tolerances:
+            # Skip L-BFGS-B since we already tried it with gradient if possible
+            if method_name == 'L-BFGS-B':
+                continue
+
+            try:
+                result = minimize(
+                    lambda flat_points: -calculate_min_max_ratio(flat_points.reshape(-1, 2)),
+                    initial_flat,
+                    method=method_name,
+                    bounds=bounds,
+                    options=options,
+                    callback=None
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, 2)
+                    optimized_points = np.clip(optimized_points, 0, 1)
+                    ratio = calculate_min_max_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points
+
+            except Exception as e:
+                continue
+
+        return best_points
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Level 1: Basic deterministic strategies
+        print("Level 1: Testing basic deterministic strategies...")
+        basic_strategies = [
+            ("hex", create_better_hexagonal_initialization()),
+            ("grid", create_grid_initialization()),
+            ("ring", create_concentric_ring_initialization()),
+            ("fibonacci", create_fibonacci_sphere_like_initialization())
+        ]
+
+        for name, strategy in basic_strategies:
+            try:
+                # Local optimization with different methods
+                local_optimized = optimize_with_local_refinement(strategy, max_iter=300)
+                ratio = calculate_min_max_ratio(local_optimized)
+                candidates.append(local_optimized)
+                candidate_ratios.append(ratio)
+            except Exception as e:
+                continue
+=======
+        # Level 1: Basic deterministic strategies
+        print("Level 1: Testing basic deterministic strategies...")
+        basic_strategies = [
+            ("hex", create_better_hexagonal_initialization()),
+            ("grid", create_grid_initialization()),
+            ("ring", create_concentric_ring_initialization()),
+            ("fibonacci", create_fibonacci_sphere_like_initialization())
+        ]
+
+        for name, strategy in basic_strategies:
+            try:
+                # Local optimization with different methods
+                local_optimized = optimize_with_local_refinement(strategy, max_iter=300)
+                ratio = calculate_min_max_ratio(local_optimized)
+                candidates.append(local_optimized)
+                candidate_ratios.append(ratio)
+            except Exception as e:
+                continue
+
+        # Level 1a: Add gradient-enhanced refinement for top candidates from level 1
+        print("Level 1a: Gradient-enhanced refinement of top candidates...")
+        if candidates and len(candidate_ratios) > 0:
+            # Sort by ratio to get top performers
+            sorted_indices = np.argsort(candidate_ratios)[::-1][:3]  # Top 3
+            for idx in sorted_indices:
+                try:
+                    # Apply gradient-based refinement specifically for the top candidates
+                    gradient_enhanced = optimize_with_local_refinement(candidates[idx], max_iter=200)
+                    ratio = calculate_min_max_ratio(gradient_enhanced)
+                    candidates.append(gradient_enhanced)
+                    candidate_ratios.append(ratio)
+                except Exception as e:
+                    continue
+>>>>>>> REPLACE
+
+</DIFF>

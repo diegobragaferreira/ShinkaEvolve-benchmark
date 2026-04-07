@@ -1,0 +1,157 @@
+<NAME>
+adaptive_voronoi_mutation
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the mutation operator by incorporating Voronoi-based criticality analysis more effectively. Currently, the mutation adapts based on Voronoi cell areas, but we can make it even smarter by:
+
+1. Creating a more accurate Voronoi-based constraint density metric that considers actual geometric relationships
+2. Using this improved metric to guide both mutation intensity and mutation type selection
+3. Implementing adaptive radius mutation that scales with local constraint density
+4. Enhancing the position mutation to be more targeted in high-density regions
+
+This approach improves upon the current implementation by making the mutation strategy more sophisticated and data-driven, leading to better exploration of promising regions while avoiding overly aggressive changes in constrained areas.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate(self, circles: np.ndarray) -> np.ndarray:
+        """Improved mutation operator with adaptive parameters based on constraint density."""
+        mutated = circles.copy()
+
+        # First compute constraint density for adaptive mutation
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute Voronoi cells to estimate constraint density (using approximate method)
+        try:
+            vor = Voronoi(positions)
+            # Estimate constraint density based on Voronoi cell areas
+            cell_areas = np.zeros(len(positions))
+            for i in range(len(positions)):
+                vertices = vor.points[vor.regions[vor.point_region[i]]]
+                if len(vertices) > 2:
+                    # Simplified area estimation
+                    min_x, max_x = np.min(vertices[:, 0]), np.max(vertices[:, 0])
+                    min_y, max_y = np.min(vertices[:, 1]), np.max(vertices[:, 1])
+                    cell_areas[i] = (max_x - min_x) * (max_y - min_y)
+                else:
+                    cell_areas[i] = 1.0
+        except:
+            cell_areas = np.ones(len(positions))
+
+        # Adaptive mutation rate based on generation and constraint density
+        for i in range(self.n_circles):
+            # Base mutation rate
+            mutation_rate = 0.3
+
+            # Density-based adjustment: higher density = lower mutation rate
+            density_adjustment = 1.0 / (1.0 + cell_areas[i]/np.mean(cell_areas))
+            adjusted_mutation_rate = mutation_rate * density_adjustment
+
+            if np.random.random() < adjusted_mutation_rate:
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    # Mutate position (x, y) with adaptive step size based on density
+                    # High density = small step, low density = large step
+                    base_step = 0.05 + np.random.random() * 0.05
+                    density_factor = 1.0 / (1.0 + cell_areas[i]/np.mean(cell_areas))
+                    step_size = base_step * density_factor
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+                else:
+                    # Mutate radius with log-normal distribution to avoid negative values
+                    # Adapted based on density - more conservative in dense regions
+                    density_factor = 1.0 / (1.0 + cell_areas[i]/np.mean(cell_areas))
+                    scale_factor = np.exp(np.random.normal(0, 0.2 * density_factor))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+        return mutated
+=======
+    def mutate(self, circles: np.ndarray) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based adaptive parameters."""
+        mutated = circles.copy()
+
+        # Compute Voronoi-based constraint density more accurately
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Enhanced Voronoi analysis for constraint density estimation
+        try:
+            vor = Voronoi(positions)
+            # Calculate constraint density based on Voronoi cell volumes and neighbor relationships
+            constraint_densities = np.zeros(len(positions))
+
+            for i in range(len(positions)):
+                # Calculate Voronoi cell area (more accurate than simple bounding box)
+                region_idx = vor.point_region[i]
+                if region_idx < len(vor.regions) and len(vor.regions[region_idx]) > 0:
+                    region = vor.regions[region_idx]
+                    if -1 not in region:  # Only finite regions
+                        vertices = np.array(vor.vertices)[region]
+                        if len(vertices) >= 3:  # Need at least 3 vertices for polygon area
+                            # Compute area using shoelace formula
+                            x = vertices[:, 0]
+                            y = vertices[:, 1]
+                            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                            constraint_densities[i] = 1.0 / (area + 1e-8)  # Higher density = smaller area
+                        else:
+                            constraint_densities[i] = 1.0  # Default for small regions
+                    else:
+                        constraint_densities[i] = 1.0  # Default for infinite or empty regions
+                else:
+                    constraint_densities[i] = 1.0  # Default case
+        except Exception:
+            constraint_densities = np.ones(len(positions))
+
+        # Calculate average constraint density for normalization
+        avg_density = np.mean(constraint_densities)
+
+        # Adaptive mutation based on constraint density
+        for i in range(self.n_circles):
+            # Base mutation probability adjusted by constraint density
+            # High density areas (constrained) get lower mutation probability
+            density_factor = constraint_densities[i] / (avg_density + 1e-8)
+            # Normalized between 0.1 and 1.0 (higher constraint = lower mutation chance)
+            normalized_density = np.clip(density_factor, 0.1, 1.0)
+            mutation_rate = 0.2 * normalized_density
+
+            if np.random.random() < mutation_rate:
+                # Choose mutation type with probability weighted by constraint density
+                # In high-density areas, prefer radius mutations to avoid position conflicts
+                pos_weight = 1.0 / (1.0 + 0.5 * density_factor)  # Lower weight for position in dense areas
+                rad_weight = 1.0 / (1.0 + 0.5 / density_factor)   # Higher weight for radius in dense areas
+
+                # Normalize probabilities
+                total_weight = pos_weight + rad_weight
+                pos_prob = pos_weight / total_weight
+                rad_prob = rad_weight / total_weight
+
+                mutation_type = np.random.choice(['position', 'radius'], p=[pos_prob, rad_prob])
+
+                if mutation_type == 'position':
+                    # Position mutation with density-adaptive step size
+                    # In dense areas, small steps to avoid creating overlaps
+                    # In sparse areas, larger steps for exploration
+                    base_step = 0.02 + 0.08 * (1.0 / (1.0 + density_factor))
+                    step_size = base_step * (1.0 + 0.5 * np.random.random())  # Randomize step size
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+                else:
+                    # Radius mutation with density-aware scaling
+                    # In dense areas, smaller changes to maintain stability
+                    # In sparse areas, allow larger changes for growth
+                    max_change_factor = 0.1 + 0.4 * (1.0 / (1.0 + density_factor))
+                    change_scale = max_change_factor * (0.8 + 0.4 * np.random.random())
+                    scale_factor = np.exp(np.random.normal(0, 0.1 * change_scale))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

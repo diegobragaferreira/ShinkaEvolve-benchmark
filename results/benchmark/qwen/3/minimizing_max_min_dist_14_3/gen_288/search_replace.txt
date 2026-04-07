@@ -1,0 +1,194 @@
+<NAME>
+add_adaptive_popsize_monitoring
+</NAME>
+
+<DESCRIPTION>
+I'll add adaptive population size monitoring to the differential evolution algorithm to improve convergence behavior. The current implementation has some basic adaptive logic but could benefit from more sophisticated tracking of convergence patterns to better adjust population size during optimization.
+
+This change enhances the `adaptive_differential_evolution` function to:
+1. Track more detailed convergence information
+2. Implement smarter population size adjustment based on multiple convergence indicators
+3. Improve early stopping detection
+4. Better balance exploration vs exploitation during optimization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_differential_evolution(initial_points, maxiter=50):
+        """Enhanced differential evolution with adaptive population sizing."""
+        points = initial_points.copy()
+
+        # Track convergence for adaptive population sizing
+        history = []
+        stagnation_count = 0
+        max_stagnation = 15
+        min_popsize = 10
+        max_popsize = 50
+        popsize = 20  # Start with medium population size
+
+        bounds = [(-1, 1)] * (14 * 3)
+
+        def adaptive_objective(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = spherical_constraint(points)
+            ratio = compute_min_max_ratio(points)
+            return -ratio
+
+        try:
+            # Run multiple rounds of DE with adaptive population sizing
+            for iteration in range(4):  # Increased iterations for better exploration
+                # Adjust population size based on convergence history
+                current_popsize = popsize
+
+                # If we've seen improvement recently, reduce population size for faster convergence
+                if len(history) >= 2:
+                    improvement = -history[-1] - (-history[-2])
+                    if improvement < 1e-6:
+                        stagnation_count += 1
+                        if stagnation_count >= 3 and current_popsize < max_popsize:
+                            current_popsize = min(current_popsize + 5, max_popsize)
+                    else:
+                        stagnation_count = 0
+                        if current_popsize > min_popsize and iteration > 0:
+                            current_popsize = max(current_popsize - 3, min_popsize)
+
+                # Run differential evolution with current parameters
+                result = differential_evolution(
+                    adaptive_objective,
+                    bounds,
+                    maxiter=maxiter//4,
+                    popsize=current_popsize,
+                    seed=42 + iteration,
+                    disp=False,
+                    polish=True,
+                    strategy='best1bin'
+                )
+
+                if result.success:
+                    temp_points = result.x.reshape(-1, 3)
+                    temp_points = spherical_constraint(temp_points)
+                    current_ratio = compute_min_max_ratio(temp_points)
+                    history.append(current_ratio)
+
+                    # Update best solution
+                    if len(history) == 1 or current_ratio > history[-2]:
+                        points = temp_points.copy()
+
+                    # Check for stagnation and early stopping
+                    if len(history) >= 2:
+                        improvement = current_ratio - history[-2]
+                        if improvement < 1e-8:
+                            stagnation_count += 1
+                            if stagnation_count >= max_stagnation:
+                                break
+                        else:
+                            stagnation_count = 0
+                else:
+                    # If optimization fails, continue with current points
+                    break
+
+        except Exception:
+            pass
+
+        return points
+=======
+    def adaptive_differential_evolution(initial_points, maxiter=50):
+        """Enhanced differential evolution with adaptive population sizing."""
+        points = initial_points.copy()
+
+        # Track convergence for adaptive population sizing
+        history = []
+        stagnation_count = 0
+        improvement_history = []
+        max_stagnation = 15
+        min_popsize = 10
+        max_popsize = 50
+        popsize = 20  # Start with medium population size
+        convergence_window = 5  # Number of iterations to check for convergence
+
+        bounds = [(-1, 1)] * (14 * 3)
+
+        def adaptive_objective(x_flat):
+            points = x_flat.reshape(-1, 3)
+            points = spherical_constraint(points)
+            ratio = compute_min_max_ratio(points)
+            return -ratio
+
+        try:
+            # Run multiple rounds of DE with adaptive population sizing
+            for iteration in range(4):  # Increased iterations for better exploration
+                # Adjust population size based on convergence history
+                current_popsize = popsize
+
+                # Advanced population size adaptation logic
+                if len(history) >= 2:
+                    # Check if we're converging slowly or stagnating
+                    recent_improvements = []
+                    if len(history) >= convergence_window:
+                        recent_improvements = [history[i] - history[i-1]
+                                             for i in range(len(history)-1, max(-1, len(history)-convergence_window-1), -1)]
+                    else:
+                        recent_improvements = [history[i] - history[i-1] for i in range(1, len(history))]
+
+                    if len(recent_improvements) > 0:
+                        avg_improvement = np.mean(recent_improvements)
+                        std_improvement = np.std(recent_improvements) if len(recent_improvements) > 1 else 0.0
+
+                        # If improvement is very small and inconsistent, increase population size for exploration
+                        if avg_improvement < 1e-7 and std_improvement < 1e-6:
+                            if current_popsize < max_popsize:
+                                current_popsize = min(current_popsize + 8, max_popsize)
+                                stagnation_count = 0  # Reset stagnation since we're increasing diversity
+                        # If we're improving consistently, reduce population size for faster convergence
+                        elif avg_improvement > 1e-5 and std_improvement < 1e-5:
+                            if current_popsize > min_popsize:
+                                current_popsize = max(current_popsize - 5, min_popsize)
+
+                # Run differential evolution with current parameters
+                result = differential_evolution(
+                    adaptive_objective,
+                    bounds,
+                    maxiter=maxiter//4,
+                    popsize=current_popsize,
+                    seed=42 + iteration,
+                    disp=False,
+                    polish=True,
+                    strategy='best1bin'
+                )
+
+                if result.success:
+                    temp_points = result.x.reshape(-1, 3)
+                    temp_points = spherical_constraint(temp_points)
+                    current_ratio = compute_min_max_ratio(temp_points)
+                    history.append(current_ratio)
+
+                    # Update best solution
+                    if len(history) == 1 or current_ratio > history[-2]:
+                        points = temp_points.copy()
+
+                    # Track improvement for adaptive logic
+                    if len(history) >= 2:
+                        improvement = current_ratio - history[-2]
+                        improvement_history.append(improvement)
+                        if len(improvement_history) > 10:
+                            improvement_history.pop(0)
+
+                        # Check for stagnation and early stopping
+                        if len(improvement_history) >= 3:
+                            recent_avg_improvement = np.mean(improvement_history[-3:])
+                            if recent_avg_improvement < 1e-9:
+                                stagnation_count += 1
+                                if stagnation_count >= max_stagnation:
+                                    break
+                            else:
+                                stagnation_count = 0
+                else:
+                    # If optimization fails, continue with current points
+                    break
+
+        except Exception:
+            pass
+
+        return points
+>>>>>>> REPLACE
+</DIFF>

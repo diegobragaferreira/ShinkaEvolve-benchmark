@@ -1,0 +1,262 @@
+<NAME>
+replace_evolutionary_with_gradient_based
+</NAME>
+
+<DESCRIPTION>
+The current program uses evolutionary algorithms alongside gradient-based methods, but the evolutionary component may be inefficient given the computational budget. I propose replacing the evolutionary optimization with a more efficient gradient-based approach that leverages JAX's automatic differentiation capabilities more effectively, while still maintaining the multi-scale initialization and advanced refinement strategies.
+
+This change focuses on:
+1. Eliminating the relatively slow evolutionary algorithm
+2. Using pure gradient-based optimization with adaptive learning rates
+3. Maintaining the sophisticated initialization and refinement strategies
+4. Leveraging JAX's fast automatic differentiation for better performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from numba import jit
+import random
+import time
+from scipy.special import erf
+import warnings
+from deap import base, creator, tools, algorithms
+import jax
+import jax.numpy as jnp
+=======
+import numpy as np
+from scipy.optimize import minimize
+from numba import jit
+import random
+import time
+from scipy.special import erf
+import warnings
+import jax
+import jax.numpy as jnp
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def setup_evolutionary_algorithm(n_steps, pop_size=50, cxpb=0.5, mutpb=0.2, ngen=40):
+    """Setup evolutionary algorithm for optimizing step functions"""
+    # Create fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+
+    # Define gene representation (normalized values between 0 and 1)
+    def create_individual():
+        # Create individual with random values and normalize
+        individual = [random.uniform(0, 1) for _ in range(n_steps)]
+        # Normalize to sum to 1 to maintain reasonable magnitude
+        total = sum(individual)
+        if total > 0:
+            individual = [x/total for x in individual]
+        return creator.Individual(individual)
+
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Register evaluation function
+    toolbox.register("evaluate", lambda ind: evaluate_c2(list(ind)))
+
+    # Register genetic operators
+    toolbox.register("mate", tools.cxUniform, indpb=0.05)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    return toolbox
+
+def run_evolutionary_optimization(n_steps, max_time_seconds=60):
+    """Run evolutionary optimization to find high C2 solutions"""
+    # Set up evolutionary algorithm
+    toolbox = setup_evolutionary_algorithm(n_steps, pop_size=50, cxpb=0.5, mutpb=0.2, ngen=40)
+
+    # Create initial population
+    population = toolbox.population(n=50)
+
+    # Run evolutionary algorithm
+    start_time = time.time()
+    best_individual = None
+    best_fitness = float('-inf')
+
+    try:
+        # Run until time limit or convergence
+        for gen in range(40):
+            if time.time() - start_time > max_time_seconds:
+                break
+
+            # Evaluate fitness for entire population
+            fitnesses = list(map(toolbox.evaluate, population))
+            for ind, fit in zip(population, fitnesses):
+                ind.fitness.values = (fit,)
+
+            # Select the next generation
+            offspring = toolbox.select(population, len(population))
+            offspring = list(map(toolbox.clone, offspring))
+
+            # Apply crossover and mutation
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < 0.5:
+                    toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if random.random() < 0.2:
+                    toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            # Replace population
+            population[:] = offspring
+
+            # Track best individual
+            for ind in population:
+                if ind.fitness.values[0] > best_fitness:
+                    best_fitness = ind.fitness.values[0]
+                    best_individual = list(ind)
+
+    except Exception as e:
+        print(f"Evolutionary optimization error: {e}")
+
+    return best_individual if best_individual is not None else None
+=======
+def run_gradient_based_optimization(n_steps, max_time_seconds=60):
+    """Run gradient-based optimization to find high C2 solutions"""
+    # Start with sophisticated initialization
+    initial_solution = hybrid_initialization(n_steps)
+
+    # Convert to JAX array for gradient computation
+    x = jnp.array(initial_solution, dtype=jnp.float32)
+
+    # Use a more sophisticated gradient-based approach
+    start_time = time.time()
+    best_x = x.copy()
+    best_c2 = evaluate_c2(np.array(x))
+
+    # Use Adam-like optimization with adaptive learning rates
+    learning_rate = 0.1
+    momentum_buffer = jnp.zeros_like(x)
+    decay_rate = 0.99
+
+    # Perform optimization iterations
+    for iteration in range(1000):  # Limit iterations to stay within time constraints
+        if time.time() - start_time > max_time_seconds * 0.9:
+            break
+
+        try:
+            # Compute gradient using JAX automatic differentiation
+            grad = compute_c2_grad(x)
+
+            # Apply momentum
+            momentum_buffer = decay_rate * momentum_buffer - learning_rate * grad
+            x = x + momentum_buffer
+
+            # Project onto feasible region (non-negative)
+            x = jnp.maximum(x, 0.0)
+
+            # Evaluate current solution
+            current_c2 = evaluate_c2(np.array(x))
+
+            # Update best solution
+            if current_c2 < best_c2:  # Minimizing negative C2
+                best_c2 = current_c2
+                best_x = x.copy()
+
+            # Adaptive learning rate
+            if iteration % 50 == 0 and iteration > 0:
+                learning_rate *= 0.9
+
+        except Exception as e:
+            # If there's an error, continue with current best
+            break
+
+    return np.array(best_x).tolist()
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using enhanced optimization"""
+    # Set seeds for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    try:
+        # Use optimized number of steps
+        n_steps = 2000  # Increased for better resolution
+
+        # Try evolutionary optimization first
+        evolutionary_result = run_evolutionary_optimization(n_steps, max_time_seconds=40)
+
+        if evolutionary_result is not None:
+            print("Using evolutionary optimization result")
+            # Refine the evolutionary result further with advanced techniques
+            best_solution = advanced_refinement_strategy(evolutionary_result, n_steps)
+        else:
+            print("Using standard optimization approach")
+            # Enhanced convex relaxation approach
+            best_solution = enhanced_convex_relaxed_optimization(n_steps)
+
+        # Ensure non-negative values
+        best_solution = [max(0, x) for x in best_solution]
+
+        # Normalize to avoid extreme values that might cause numerical issues
+        total = sum(best_solution)
+        if total > 0:
+            best_solution = [x / total * len(best_solution) for x in best_solution]
+
+        return best_solution
+
+    except Exception as e:
+        # Fallback to simple approach if evolution fails
+        print(f"Fallback due to error: {e}")
+        return multi_scale_initialization(500)
+=======
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using enhanced optimization"""
+    # Set seeds for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    try:
+        # Use optimized number of steps
+        n_steps = 2000  # Increased for better resolution
+
+        # Use gradient-based optimization instead of evolutionary
+        gradient_result = run_gradient_based_optimization(n_steps, max_time_seconds=60)
+
+        if gradient_result is not None:
+            print("Using gradient-based optimization result")
+            # Refine the gradient result further with advanced techniques
+            best_solution = advanced_refinement_strategy(gradient_result, n_steps)
+        else:
+            print("Using standard optimization approach")
+            # Enhanced convex relaxation approach
+            best_solution = enhanced_convex_relaxed_optimization(n_steps)
+
+        # Ensure non-negative values
+        best_solution = [max(0, x) for x in best_solution]
+
+        # Normalize to avoid extreme values that might cause numerical issues
+        total = sum(best_solution)
+        if total > 0:
+            best_solution = [x / total * len(best_solution) for x in best_solution]
+
+        return best_solution
+
+    except Exception as e:
+        # Fallback to simple approach if optimization fails
+        print(f"Fallback due to error: {e}")
+        return multi_scale_initialization(500)
+>>>>>>> REPLACE
+
+</DIFF>

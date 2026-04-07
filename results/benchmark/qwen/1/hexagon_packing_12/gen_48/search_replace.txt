@@ -1,0 +1,218 @@
+<NAME>
+add_parallel_geometric_validation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses sequential geometric validation which becomes a bottleneck as the number of hexagon pairs increases. I'll implement parallel processing for the overlap and containment checks using joblib to significantly speed up the evaluation function, which is critical for the differential evolution optimization to complete within the 180-second budget.
+
+This improvement will:
+1. Parallelize the 66 pairwise overlap checks using joblib.Parallel
+2. Parallelize the vertex containment checks for all hexagons
+3. Maintain the same mathematical correctness while dramatically improving performance
+4. Allow the optimizer to evaluate more candidate solutions per second
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+from joblib import Parallel, delayed
+
+def create_hexagon_vertices(center, side_length, rotation_degrees):
+    """Create vertices of a regular hexagon."""
+    angle_rad = np.radians(rotation_degrees)
+    angle_step = 2 * np.pi / 6
+    vertices = []
+    for i in range(6):
+        angle = angle_step * i + angle_rad
+        x = center[0] + side_length * np.cos(angle)
+        y = center[1] + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return np.array(vertices)
+
+def get_hexagon_bounding_circle_radius(side_length):
+    """Get the radius of the bounding circle for a regular hexagon."""
+    return side_length
+
+def check_containment_all_vertices(hex_vertices, outer_hex_center, outer_hex_side_length):
+    """Check if all vertices of a hexagon are inside the outer hexagon."""
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_hex_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    for vertex in hex_vertices:
+        point = Point(vertex)
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap_pair(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    hex1_polygon = Polygon(hex1_vertices)
+    hex2_polygon = Polygon(hex2_vertices)
+    return hex1_polygon.intersects(hex2_polygon)
+
+def compute_outer_hex_side_from_config(inner_hex_data, center=(0,0)):
+    """Compute the minimum required outer hexagon side length from current configuration."""
+    if len(inner_hex_data) == 0:
+        return 100
+
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, _ = inner_hex_data[i]
+        dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
+        # Add the circumradius of inner hexagon (1 for unit hexagon)
+        dist_to_edge = dist + 1.0
+        max_dist = max(max_dist, dist_to_edge)
+
+    return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+
+def evaluate_configuration(inner_hex_data, outer_hex_center=(0,0)):
+    """Evaluate a configuration for validity and return inverse side length."""
+    if len(inner_hex_data) != 12:
+        return 1e-10
+
+    # Create all hexagon polygons
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices((cx, cy), 1.0, angle)
+        hex_polygons.append(Polygon(vertices))
+
+    # Check containment: all hexagon vertices must be within outer hexagon
+    outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, outer_hex_center)
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check containment for all vertices
+    for i in range(len(inner_hex_data)):
+        vertices = hex_polygons[i].exterior.coords[:-1]  # Exclude last point (duplicate of first)
+        for vertex in vertices:
+            point = Point(vertex)
+            if not outer_polygon.contains(point):
+                return 1e-10
+
+    # Check overlaps between all pairs of hexagons
+    for i in range(len(inner_hex_data)):
+        for j in range(i+1, len(inner_hex_data)):
+            if hex_polygons[i].intersects(hex_polygons[j]):
+                return 1e-10
+
+    # If we reach here, the configuration is valid
+    return 1.0 / outer_side_length
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import time
+from joblib import Parallel, delayed
+
+def create_hexagon_vertices(center, side_length, rotation_degrees):
+    """Create vertices of a regular hexagon."""
+    angle_rad = np.radians(rotation_degrees)
+    angle_step = 2 * np.pi / 6
+    vertices = []
+    for i in range(6):
+        angle = angle_step * i + angle_rad
+        x = center[0] + side_length * np.cos(angle)
+        y = center[1] + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return np.array(vertices)
+
+def get_hexagon_bounding_circle_radius(side_length):
+    """Get the radius of the bounding circle for a regular hexagon."""
+    return side_length
+
+def check_containment_all_vertices(hex_vertices, outer_hex_center, outer_hex_side_length):
+    """Check if all vertices of a hexagon are inside the outer hexagon."""
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_hex_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    for vertex in hex_vertices:
+        point = Point(vertex)
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap_pair(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    hex1_polygon = Polygon(hex1_vertices)
+    hex2_polygon = Polygon(hex2_vertices)
+    return hex1_polygon.intersects(hex2_polygon)
+
+def compute_outer_hex_side_from_config(inner_hex_data, center=(0,0)):
+    """Compute the minimum required outer hexagon side length from current configuration."""
+    if len(inner_hex_data) == 0:
+        return 100
+
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, _ = inner_hex_data[i]
+        dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
+        # Add the circumradius of inner hexagon (1 for unit hexagon)
+        dist_to_edge = dist + 1.0
+        max_dist = max(max_dist, dist_to_edge)
+
+    return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+
+def parallel_containment_check(hex_polygons, outer_polygon):
+    """Parallel check if all hexagon vertices are contained within outer hexagon."""
+    def check_single_hex_containment(hex_polygon):
+        vertices = hex_polygon.exterior.coords[:-1]  # Exclude last point (duplicate of first)
+        for vertex in vertices:
+            point = Point(vertex)
+            if not outer_polygon.contains(point):
+                return False
+        return True
+
+    # Check all hexagons in parallel
+    results = Parallel(n_jobs=-1)(delayed(check_single_hex_containment)(hex_polygon)
+                                  for hex_polygon in hex_polygons)
+    return all(results)
+
+def parallel_overlap_check(hex_polygons):
+    """Parallel check for overlaps between all pairs of hexagons."""
+    def check_pair_overlap(pair_idx):
+        i, j = pair_idx
+        return hex_polygons[i].intersects(hex_polygons[j])
+
+    # Generate all unique pairs
+    n_hexagons = len(hex_polygons)
+    pairs = [(i, j) for i in range(n_hexagons) for j in range(i+1, n_hexagons)]
+
+    # Check all pairs in parallel
+    results = Parallel(n_jobs=-1)(delayed(check_pair_overlap)(pair) for pair in pairs)
+    return not any(results)  # Return True if no overlaps found
+
+def evaluate_configuration(inner_hex_data, outer_hex_center=(0,0)):
+    """Evaluate a configuration for validity and return inverse side length."""
+    if len(inner_hex_data) != 12:
+        return 1e-10
+
+    # Create all hexagon polygons
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, angle = inner_hex_data[i]
+        vertices = create_hexagon_vertices((cx, cy), 1.0, angle)
+        hex_polygons.append(Polygon(vertices))
+
+    # Check containment: all hexagon vertices must be within outer hexagon
+    outer_side_length = compute_outer_hex_side_from_config(inner_hex_data, outer_hex_center)
+    outer_vertices = create_hexagon_vertices(outer_hex_center, outer_side_length, 0)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check containment for all vertices in parallel
+    if not parallel_containment_check(hex_polygons, outer_polygon):
+        return 1e-10
+
+    # Check overlaps between all pairs of hexagons in parallel
+    if not parallel_overlap_check(hex_polygons):
+        return 1e-10
+
+    # If we reach here, the configuration is valid
+    return 1.0 / outer_side_length
+>>>>>>> REPLACE
+</DIFF>

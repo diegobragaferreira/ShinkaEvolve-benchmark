@@ -1,0 +1,261 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from shapely.validation import make_valid
+import time
+from typing import Tuple, List
+import math
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+    
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center_x = center_x
+        self.center_y = center_y
+        self.rotation_deg = rotation_deg
+        self.side_length = 1.0
+        
+    def get_vertices(self) -> np.ndarray:
+        """Get vertices of the hexagon in counter-clockwise order"""
+        angle_offset = math.radians(self.rotation_deg)
+        angle_step = 2 * math.pi / 6
+        vertices = []
+        for i in range(6):
+            angle = angle_offset + i * angle_step
+            x = self.center_x + self.side_length * math.cos(angle)
+            y = self.center_y + self.side_length * math.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+    
+    def get_shapely_polygon(self) -> Polygon:
+        """Get Shapely polygon representation"""
+        return Polygon(self.get_vertices())
+
+class OuterHexagon:
+    """Represents the outer hexagon container"""
+    
+    def __init__(self, center_x: float, center_y: float, side_length: float, rotation_deg: float = 0):
+        self.center_x = center_x
+        self.center_y = center_y
+        self.side_length = side_length
+        self.rotation_deg = rotation_deg
+        
+    def get_vertices(self) -> np.ndarray:
+        """Get vertices of the outer hexagon"""
+        angle_offset = math.radians(self.rotation_deg)
+        angle_step = 2 * math.pi / 6
+        vertices = []
+        for i in range(6):
+            angle = angle_offset + i * angle_step
+            x = self.center_x + self.side_length * math.cos(angle)
+            y = self.center_y + self.side_length * math.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+    
+    def get_shapely_polygon(self) -> Polygon:
+        """Get Shapely polygon representation"""
+        return Polygon(self.get_vertices())
+
+def create_initial_config() -> np.ndarray:
+    """Create initial configuration using hexagonal lattice principle"""
+    # Arrange 12 hexagons in a pattern inspired by hexagonal lattices
+    config = np.zeros((12, 3))  # (x, y, angle)
+    
+    # Center hexagon
+    config[0] = [0.0, 0.0, 0.0]
+    
+    # First ring around center
+    radius = 2.0  # approximately distance between centers
+    angles = [0, 60, 120, 180, 240, 300]
+    for i, angle in enumerate(angles):
+        rad = math.radians(angle)
+        config[i+1] = [radius * math.cos(rad), radius * math.sin(rad), 0.0]
+    
+    # Second ring
+    radius = 3.5
+    angles = [30, 90, 150, 210, 270, 330]
+    for i, angle in enumerate(angles):
+        rad = math.radians(angle)
+        config[i+7] = [radius * math.cos(rad), radius * math.sin(rad), 0.0]
+        
+    return config
+
+def calculate_outer_hexagon_size(inner_hex_data: np.ndarray, outer_hex_center: np.ndarray = None) -> float:
+    """Calculate minimum outer hexagon side length to contain all inner hexagons"""
+    if outer_hex_center is None:
+        outer_hex_center = np.array([0.0, 0.0])
+        
+    # Get all vertices of inner hexagons
+    all_vertices = []
+    for i in range(12):
+        hex_obj = Hexagon(inner_hex_data[i, 0], inner_hex_data[i, 1], inner_hex_data[i, 2])
+        vertices = hex_obj.get_vertices()
+        all_vertices.extend(vertices)
+    
+    # Find extreme points to determine bounding box
+    if len(all_vertices) == 0:
+        return 1.0
+        
+    coords = np.array(all_vertices)
+    min_x, max_x = np.min(coords[:, 0]), np.max(coords[:, 0])
+    min_y, max_y = np.min(coords[:, 1]), np.max(coords[:, 1])
+    
+    # Use diagonal distance from center to find required outer hexagon size
+    center_x, center_y = outer_hex_center
+    max_dist = 0
+    
+    # Check distance from center to each vertex
+    for x, y in all_vertices:
+        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_dist = max(max_dist, dist)
+    
+    # Account for hexagon geometry - add some margin to ensure containment
+    # For unit hexagon, diameter is sqrt(3) ≈ 1.732
+    margin = 1.0  # Add extra space for safety
+    required_radius = max_dist + margin
+    outer_side_length = required_radius / math.cos(math.pi/6)  # Convert to side length
+    
+    return max(outer_side_length, 1.0)
+
+def check_overlap(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = hex1.get_shapely_polygon()
+    poly2 = hex2.get_shapely_polygon()
+    
+    try:
+        return poly1.intersects(poly2) and not poly1.touches(poly2)
+    except:
+        return False
+
+def check_containment(hexagon: Hexagon, outer_hex: OuterHexagon) -> bool:
+    """Check if a hexagon is fully contained in the outer hexagon"""
+    inner_poly = hexagon.get_shapely_polygon()
+    outer_poly = outer_hex.get_shapely_polygon()
+    
+    try:
+        # Check if inner polygon is completely inside outer polygon
+        return outer_poly.contains(inner_poly) or \
+               (outer_poly.contains(inner_poly) or outer_poly.touches(inner_poly))
+    except:
+        return False
+
+def validate_solution(inner_hex_data: np.ndarray, outer_hex_data: np.ndarray) -> Tuple[bool, float]:
+    """Validate solution for overlap and containment constraints"""
+    outer_hex = OuterHexagon(outer_hex_data[0], outer_hex_data[1], outer_hex_data[2], outer_hex_data[3])
+    
+    # Check containment
+    for i in range(12):
+        inner_hex = Hexagon(inner_hex_data[i, 0], inner_hex_data[i, 1], inner_hex_data[i, 2])
+        if not check_containment(inner_hex, outer_hex):
+            return False, 0.0
+    
+    # Check overlap between any pair of inner hexagons
+    for i in range(12):
+        for j in range(i+1, 12):
+            hex_i = Hexagon(inner_hex_data[i, 0], inner_hex_data[i, 1], inner_hex_data[i, 2])
+            hex_j = Hexagon(inner_hex_data[j, 0], inner_hex_data[j, 1], inner_hex_data[j, 2])
+            if check_overlap(hex_i, hex_j):
+                return False, 0.0
+                
+    # If we get here, solution is valid
+    return True, calculate_outer_hexagon_size(inner_hex_data, outer_hex_data[:2])
+
+def objective_function(params: np.ndarray) -> float:
+    """Objective function to minimize (negative of 1/outer_hex_side_length)"""
+    # Reshape parameters
+    inner_hex_data = params.reshape(12, 3)
+    outer_hex_center_x = 0.0
+    outer_hex_center_y = 0.0
+    outer_hex_side_length = calculate_outer_hexagon_size(inner_hex_data)
+    
+    # Create outer hexagon
+    outer_hex_data = np.array([outer_hex_center_x, outer_hex_center_y, outer_hex_side_length, 0.0])
+    
+    # Check validity of solution
+    is_valid, size = validate_solution(inner_hex_data, outer_hex_data)
+    
+    if not is_valid:
+        # Return a large penalty for invalid solutions
+        return 1e6
+    
+    # We want to maximize 1/size, so we minimize -1/size
+    return -1.0 / size
+
+def optimize_hexagon_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    """Find optimal hexagon packing using optimization"""
+    
+    # Initial configuration
+    initial_config = create_initial_config()
+    
+    # Flatten for optimization
+    initial_params = initial_config.flatten()
+    
+    # Define bounds for each parameter (x, y, rotation)
+    bounds = []
+    for i in range(12):
+        # X and Y positions - reasonable bounds based on initial placement
+        bounds.extend([(-10.0, 10.0), (-10.0, 10.0)])
+        # Rotation - 0 to 360 degrees
+        bounds.append((0.0, 360.0))
+    
+    # Optimization settings
+    maxiter = 100
+    popsize = 15
+    
+    # Run optimization
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            maxiter=maxiter,
+            popsize=popsize,
+            seed=42,
+            disp=False,
+            atol=1e-6,
+            tol=1e-6
+        )
+        
+        optimal_params = result.x
+        inner_hex_data = optimal_params.reshape(12, 3)
+        
+        # Recalculate final outer hexagon size
+        outer_hex_center_x = 0.0
+        outer_hex_center_y = 0.0
+        outer_hex_side_length = calculate_outer_hexagon_size(inner_hex_data)
+        
+        outer_hex_data = np.array([outer_hex_center_x, outer_hex_center_y, outer_hex_side_length, 0.0])
+        
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+        
+    except Exception as e:
+        # Fallback to initial configuration if optimization fails
+        print(f"Optimization failed: {e}")
+        inner_hex_data = initial_config.copy()
+        outer_hex_side_length = calculate_outer_hexagon_size(inner_hex_data)
+        outer_hex_data = np.array([0.0, 0.0, outer_hex_side_length, 0.0])
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Run optimization
+    inner_hex_data, outer_hex_data, outer_hex_side_length = optimize_hexagon_packing()
+    
+    eval_time = time.time() - start_time
+    
+    # Format outer_hex_data to match expected format (x, y, side_length, angle)
+    # Note: We use angle = 0 as the outer hexagon is aligned
+    formatted_outer_hex_data = np.array([outer_hex_data[0], outer_hex_data[1], outer_hex_data[2], 0.0])
+    
+    return inner_hex_data, formatted_outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,356 @@
+<NAME>
+add_adaptive_mutation_scaling
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive mutation scaling to the SymmetryAwareMutation class to improve optimization convergence. This enhancement dynamically adjusts mutation strength based on optimization progress, allowing for exploration in early stages and exploitation in later stages, which should help escape local minima and improve final packing density.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class SymmetryAwareMutation:
+    """Custom mutation class that respects hexagon symmetry relationships."""
+
+    @staticmethod
+    def mutate_symmetrically(individual, mut_rate=0.1, max_dist=0.5):
+        """Apply mutation that preserves symmetry relationships."""
+        mutated = individual.copy()
+
+        # Apply mutations to 12 hexagons
+        for i in range(12):
+            if random.random() < mut_rate:
+                # Get position and angle for this hexagon
+                pos_idx = i * 3
+                x, y, angle = mutated[pos_idx], mutated[pos_idx+1], mutated[pos_idx+2]
+
+                # Mutate x and y coordinates with small random displacements
+                dx = np.random.normal(0, max_dist * 0.5)
+                dy = np.random.normal(0, max_dist * 0.5)
+
+                # For rotational symmetry preservation, apply similar changes to related hexagons
+                # Keep some rotational consistency
+                d_angle = np.random.normal(0, 10)  # Small angle change
+
+                mutated[pos_idx] += dx
+                mutated[pos_idx+1] += dy
+                mutated[pos_idx+2] += d_angle
+
+                # Clip to reasonable bounds
+                mutated[pos_idx] = np.clip(mutated[pos_idx], -10, 10)
+                mutated[pos_idx+1] = np.clip(mutated[pos_idx+1], -10, 10)
+                mutated[pos_idx+2] = mutated[pos_idx+2] % 360
+
+        return mutated
+=======
+class SymmetryAwareMutation:
+    """Custom mutation class that respects hexagon symmetry relationships."""
+
+    def __init__(self):
+        self.initial_mut_rate = 0.1
+        self.initial_max_dist = 0.5
+        self.mutation_decay_factor = 0.9
+
+    def mutate_symmetrically(self, individual, generation=0, max_generations=100):
+        """Apply mutation that preserves symmetry relationships with adaptive scaling."""
+        mutated = individual.copy()
+
+        # Adaptively scale mutation parameters based on generation
+        current_mut_rate = self.initial_mut_rate * (self.mutation_decay_factor ** generation)
+        current_max_dist = self.initial_max_dist * (self.mutation_decay_factor ** generation)
+
+        # Apply mutations to 12 hexagons
+        for i in range(12):
+            if random.random() < current_mut_rate:
+                # Get position and angle for this hexagon
+                pos_idx = i * 3
+                x, y, angle = mutated[pos_idx], mutated[pos_idx+1], mutated[pos_idx+2]
+
+                # Mutate x and y coordinates with scaled random displacements
+                dx = np.random.normal(0, current_max_dist * 0.5)
+                dy = np.random.normal(0, current_max_dist * 0.5)
+
+                # For rotational symmetry preservation, apply similar changes to related hexagons
+                # Keep some rotational consistency
+                d_angle = np.random.normal(0, 10 * (self.mutation_decay_factor ** generation))  # Small angle change
+
+                mutated[pos_idx] += dx
+                mutated[pos_idx+1] += dy
+                mutated[pos_idx+2] += d_angle
+
+                # Clip to reasonable bounds
+                mutated[pos_idx] = np.clip(mutated[pos_idx], -10, 10)
+                mutated[pos_idx+1] = np.clip(mutated[pos_idx+1], -10, 10)
+                mutated[pos_idx+2] = mutated[pos_idx+2] % 360
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+implement_hybrid_evolutionary_local_search
+</NAME>
+
+<DESCRIPTION>
+Implementing a hybrid evolutionary-local search approach with simulated annealing principles to enhance optimization. This change introduces a temperature-based acceptance criterion that allows occasional worse solutions early in optimization to escape local minima, gradually reducing acceptance probability as optimization progresses. This should help in exploring broader solution landscapes before converging to high-quality local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_stages():
+    """Perform multi-stage optimization for better convergence."""
+    # Stage 1: Position-only optimization with fixed rotations
+    print("Stage 1: Position-only optimization...")
+    initial_config = generate_initial_symmetric_config()
+
+    # Fix rotations to 0 for this stage
+    config_stage1 = initial_config.copy()
+    for i in range(12):
+        config_stage1[i*3 + 2] = 0
+
+    # Optimize only positions (first 36 values)
+    bounds_pos_only = [(None, None)] * 36
+    bounds_pos_only.extend([(1.0, 15.0)])  # Outer side length bound
+
+    # Use L-BFGS-B since we're optimizing position variables
+    try:
+        result1 = minimize(
+            lambda x: objective_function(np.concatenate([x, [x[-1]]])),  # Pass entire x including last element
+            config_stage1[:-1],  # Only positions
+            method='L-BFGSB',
+            bounds=bounds_pos_only[:-1],
+            options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6},
+            tol=1e-6
+        )
+        if result1.success:
+            stage1_result = np.concatenate([result1.x, [config_stage1[-1]]])
+        else:
+            stage1_result = config_stage1
+    except:
+        stage1_result = config_stage1
+
+    # Stage 2: Limited rotation adjustment with refined position
+    print("Stage 2: Limited rotation adjustment...")
+    config_stage2 = stage1_result.copy()
+
+    # Allow small rotation adjustments for some hexagons
+    for i in range(12):
+        if i % 3 == 0:  # Every third hexagon gets a rotation adjustment
+            config_stage2[i*3 + 2] = random.uniform(0, 30)  # Small rotation
+
+    # Optimize both positions and rotations with tight tolerance
+    bounds_stage2 = [(None, None)] * 36
+    bounds_stage2.extend([(1.0, 15.0)])
+
+    try:
+        result2 = minimize(
+            objective_function,
+            config_stage2,
+            method='L-BFGSB',
+            bounds=bounds_stage2,
+            options={'maxiter': 500, 'ftol': 1e-7, 'gtol': 1e-7},
+            tol=1e-7
+        )
+        if result2.success:
+            stage2_result = result2.x
+        else:
+            stage2_result = config_stage2
+    except:
+        stage2_result = config_stage2
+
+    # Stage 3: Fine-tuned optimization with full freedom
+    print("Stage 3: Fine-tuned optimization...")
+    try:
+        # Use a second optimization run with even tighter tolerances
+        bounds_final = [(None, None)] * 36  # All positions and angles
+        bounds_final.extend([(1.0, 15.0)])  # Outer side length
+
+        result_final = minimize(
+            objective_function,
+            stage2_result,
+            method='L-BFGSB',
+            bounds=bounds_final,
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        if result_final.success:
+            final_result = result_final.x
+        else:
+            final_result = stage2_result
+
+    except Exception as e:
+        print(f"Final optimization error: {e}")
+        final_result = stage2_result
+
+    return final_result
+=======
+def optimize_with_stages():
+    """Perform multi-stage optimization for better convergence with hybrid approach."""
+    # Initialize mutation object
+    mutation_operator = SymmetryAwareMutation()
+
+    # Stage 1: Position-only optimization with fixed rotations
+    print("Stage 1: Position-only optimization...")
+    initial_config = generate_initial_symmetric_config()
+
+    # Fix rotations to 0 for this stage
+    config_stage1 = initial_config.copy()
+    for i in range(12):
+        config_stage1[i*3 + 2] = 0
+
+    # Optimize only positions (first 36 values)
+    bounds_pos_only = [(None, None)] * 36
+    bounds_pos_only.extend([(1.0, 15.0)])  # Outer side length bound
+
+    # Use L-BFGS-B since we're optimizing position variables
+    try:
+        result1 = minimize(
+            lambda x: objective_function(np.concatenate([x, [x[-1]]])),  # Pass entire x including last element
+            config_stage1[:-1],  # Only positions
+            method='L-BFGSB',
+            bounds=bounds_pos_only[:-1],
+            options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6},
+            tol=1e-6
+        )
+        if result1.success:
+            stage1_result = np.concatenate([result1.x, [config_stage1[-1]]])
+        else:
+            stage1_result = config_stage1
+    except:
+        stage1_result = config_stage1
+
+    # Stage 2: Limited rotation adjustment with refined position
+    print("Stage 2: Limited rotation adjustment...")
+    config_stage2 = stage1_result.copy()
+
+    # Allow small rotation adjustments for some hexagons
+    for i in range(12):
+        if i % 3 == 0:  # Every third hexagon gets a rotation adjustment
+            config_stage2[i*3 + 2] = random.uniform(0, 30)  # Small rotation
+
+    # Optimize both positions and rotations with tight tolerance
+    bounds_stage2 = [(None, None)] * 36
+    bounds_stage2.extend([(1.0, 15.0)])
+
+    try:
+        result2 = minimize(
+            objective_function,
+            config_stage2,
+            method='L-BFGSB',
+            bounds=bounds_stage2,
+            options={'maxiter': 500, 'ftol': 1e-7, 'gtol': 1e-7},
+            tol=1e-7
+        )
+        if result2.success:
+            stage2_result = result2.x
+        else:
+            stage2_result = config_stage2
+    except:
+        stage2_result = config_stage2
+
+    # Stage 3: Hybrid evolutionary-local search with simulated annealing
+    print("Stage 3: Hybrid evolutionary-local search...")
+
+    # Parameters for hybrid approach
+    max_generations = 50
+    population_size = 20
+    elite_count = 2
+    temperature_start = 0.8
+    temperature_end = 0.01
+    cooling_rate = (temperature_end / temperature_start) ** (1.0 / max_generations)
+
+    # Generate initial population around best solution
+    population = [stage2_result.copy()]
+    for _ in range(population_size - 1):
+        individual = stage2_result.copy()
+        # Add small random noise to create diversity
+        for i in range(len(individual)):
+            if i < len(individual) - 1:  # Not the side length
+                individual[i] += np.random.normal(0, 0.1)
+        population.append(individual)
+
+    best_individual = stage2_result.copy()
+    best_fitness = objective_function(best_individual)
+
+    # Evolutionary loop with simulated annealing
+    for generation in range(max_generations):
+        # Calculate current temperature
+        current_temp = temperature_start * (cooling_rate ** generation)
+
+        # Evaluate fitness of entire population
+        fitness_scores = []
+        for individual in population:
+            fitness = objective_function(individual)
+            fitness_scores.append(fitness)
+
+        # Sort population by fitness (lower is better)
+        sorted_indices = np.argsort(fitness_scores)
+        population = [population[i] for i in sorted_indices]
+        fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+        # Update best individual
+        if fitness_scores[0] < best_fitness:
+            best_individual = population[0].copy()
+            best_fitness = fitness_scores[0]
+
+        # Create new population
+        new_population = population[:elite_count]  # Elitism
+
+        # Generate offspring through mutation
+        for _ in range(population_size - elite_count):
+            # Select parent (tournament selection)
+            tournament_size = 3
+            tournament_indices = np.random.choice(len(population), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_index = tournament_indices[np.argmin(tournament_fitness)]
+
+            # Mutate selected parent
+            child = mutation_operator.mutate_symmetrically(population[winner_index], generation)
+
+            # Accept with probability based on temperature and fitness difference
+            current_fitness = objective_function(child)
+            if current_fitness < fitness_scores[winner_index]:
+                # Always accept better solutions
+                new_population.append(child)
+            else:
+                # Accept worse solutions with probability based on temperature
+                fitness_diff = current_fitness - fitness_scores[winner_index]
+                acceptance_prob = np.exp(-fitness_diff / max(current_temp, 1e-10))
+                if random.random() < acceptance_prob:
+                    new_population.append(child)
+
+        population = new_population
+
+        # Debug info every few generations
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.8f}")
+
+    # Final optimization of best individual found
+    final_result = best_individual.copy()
+    try:
+        bounds_final = [(None, None)] * 36  # All positions and angles
+        bounds_final.extend([(1.0, 15.0)])  # Outer side length
+
+        result_final = minimize(
+            objective_function,
+            final_result,
+            method='L-BFGSB',
+            bounds=bounds_final,
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        if result_final.success:
+            final_result = result_final.x
+        else:
+            # If minimization fails, keep the best found
+            pass
+
+    except Exception as e:
+        print(f"Final optimization error: {e}")
+        pass  # Keep the best result found from evolution
+
+    return final_result
+>>>>>>> REPLACE
+</DIFF>

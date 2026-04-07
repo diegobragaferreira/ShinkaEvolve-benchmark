@@ -1,0 +1,385 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from numba import njit, prange
+import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+import random
+
+class AdaptiveEvolutionaryOptimizerV2:
+    def __init__(self, max_time=90):
+        self.max_time = max_time
+        self.seed = 42
+        np.random.seed(self.seed)
+        
+    @staticmethod
+    @njit(parallel=True)
+    def compute_autoconvolution_numba_parallel(f):
+        """Compute autoconvolution g = f * f using numba JIT with parallelization"""
+        n = len(f)
+        # Autoconvolution using discrete convolution
+        g = np.zeros(2*n - 1)
+        
+        # Parallelized convolution loop
+        for i in prange(n):
+            for j in range(n):
+                g[i + j] += f[i] * f[j]
+        
+        # Trim to center portion (length n-1)
+        offset = (n - 1) // 2
+        g_trimmed = g[offset:(2*n-1)-offset]
+        return g_trimmed
+    
+    @staticmethod
+    @njit
+    def compute_c2_numba(f):
+        """Compute C2 value for given step function f using numba JIT"""
+        if len(f) < 2:
+            return 0.0
+        
+        # Compute autoconvolution
+        g = AdaptiveEvolutionaryOptimizerV2.compute_autoconvolution_numba_parallel(f)
+        
+        if len(g) == 0:
+            return 0.0
+        
+        # Compute norms using efficient accumulation
+        # For ||g||₂²: use piecewise linear integration as specified:
+        # integral of y^2 ≈ (1/3)(y1^2 + y1*y2 + y2^2) per interval
+        norm_l2_sq = 0.0
+        norm_l1 = 0.0
+        norm_inf = 0.0
+        
+        # Iterate with explicit indexing for speed
+        for i in range(len(g)):
+            abs_g = abs(g[i])
+            norm_l1 += abs_g
+            if abs_g > norm_inf:
+                norm_inf = abs_g
+                
+        # Compute L2 squared with proper piecewise integration
+        for i in range(len(g) - 1):
+            y1 = g[i]
+            y2 = g[i + 1]
+            norm_l2_sq += (y1 * y1 + y1 * y2 + y2 * y2) / 3.0
+        
+        # Avoid division by zero
+        if norm_l1 < 1e-12 or norm_inf < 1e-12:
+            return 0.0
+        
+        c2 = norm_l2_sq / (norm_l1 * norm_inf)
+        return c2
+    
+    @staticmethod
+    def enhanced_initialization(n):
+        """
+        Create enhanced initial step function with multi-scale patterns that promote 
+        favorable autoconvolution behavior with better C2 values
+        """
+        # Create a hybrid pattern based on mathematical principles for better convolution
+        f = np.zeros(n)
+        
+        # Pattern 1: Multi-scale alternating pattern with strategic amplitude variations
+        # This creates a structure that when convolved tends to produce flatter profiles
+        segment_sizes = [max(1, n // 30), max(1, n // 15), max(1, n // 8)]
+        
+        for i, seg_size in enumerate(segment_sizes):
+            for j in range(0, n, seg_size):
+                if (j // seg_size) % 2 == 0:
+                    # High amplitude for alternating pattern
+                    height = 0.8 + 0.3 * (i % 2)  # Varying heights
+                else:
+                    # Low amplitude for alternating pattern  
+                    height = 0.1 + 0.1 * (i % 2)
+                end_idx = min(j + seg_size, n)
+                f[j:end_idx] = height
+        
+        # Pattern 2: Add sparse high-amplitude regions strategically placed
+        # These create concentrated energy that when convolved creates favorable characteristics
+        num_high_regions = max(2, n // 40)
+        for _ in range(num_high_regions):
+            pos = np.random.randint(0, n)
+            width = max(1, n // 25)
+            # Place these in regions that maximize convolution benefits
+            f[max(0, pos-width//2):min(n, pos+width//2)] += 0.6
+        
+        # Pattern 3: Apply controlled smooth transition to reduce sharp edges
+        # This helps produce better-behaved autoconvolutions
+        if n > 20:
+            kernel_size = min(9, max(3, n // 20))
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            if kernel_size > 1:
+                kernel = np.exp(-np.arange(kernel_size)**2 / (2 * (kernel_size/4)**2))
+                kernel = kernel / np.sum(kernel)
+                f = np.convolve(f, kernel, mode='same')
+        
+        # Add structured randomness for better exploration
+        # This ensures good diversity in the initial population
+        noise_factor = 0.02 + np.random.random() * 0.03
+        noise = np.random.normal(0, noise_factor, n)
+        f = f + noise
+        
+        # Ensure non-negativity and normalize
+        f = np.clip(f, 0, None)
+        if np.sum(f) > 0:
+            f = f / np.sum(f) * n * 0.3  # Scale appropriately
+            
+        return f.tolist()
+    
+    @staticmethod
+    def evaluate_function(f):
+        """Evaluate the function and return C2 value with error handling"""
+        try:
+            if len(f) < 2:
+                return 0.0
+            
+            # Convert to numpy array for fast computation
+            f_array = np.array(f, dtype=np.float64)
+            
+            # Ensure non-negativity
+            f_array = np.maximum(f_array, 0)
+            
+            # Compute C2
+            c2_value = AdaptiveEvolutionaryOptimizerV2.compute_c2_numba(f_array)
+            return c2_value
+            
+        except Exception as e:
+            warnings.warn(f"Evaluation failed: {str(e)}")
+            return 0.0
+    
+    def objective_function(self, x):
+        """Objective function to minimize (negative C2)"""
+        # x contains the step heights
+        # Need to ensure non-negativity
+        f = np.maximum(x, 0)
+        c2 = self.evaluate_function(f)
+        return -c2  # Negative because we want to maximize
+    
+    def adaptive_parameters(self, n):
+        """Dynamically determine optimization parameters based on problem size"""
+        # Population size scales with problem size but with bounds
+        # Increasing population size with larger problems for better exploration
+        popsize = min(max(20, n // 12), 40)
+        
+        # Iterations also scale but with bounds
+        # More iterations for larger problems to allow better convergence
+        maxiter = min(max(30, n // 10), 80)
+        
+        return popsize, maxiter
+    
+    def single_optimization_run(self, n, seed_offset):
+        """Perform a single optimization run with given parameters"""
+        try:
+            # Set seed for reproducibility
+            np.random.seed(self.seed + seed_offset)
+            
+            # Get adaptive parameters
+            popsize, maxiter = self.adaptive_parameters(n)
+            
+            # Generate initial population with diverse strategies
+            initial_population = []
+            for i in range(min(25, popsize)):
+                # Mix different initialization strategies for maximum diversity
+                if i % 5 == 0:
+                    # Enhanced initialization
+                    f_init = self.enhanced_initialization(n)
+                elif i % 5 == 1:
+                    # Gaussian peak pattern with more structure
+                    f_init = self._structured_gaussian_peak_initialization(n)
+                elif i % 5 == 2:
+                    # Alternating initialization with more variation
+                    f_init = self._varied_alternating_initialization(n)
+                elif i % 5 == 3:
+                    # Hybrid multi-peak pattern
+                    f_init = self._hybrid_multi_peak_initialization(n)
+                else:
+                    # Uniform initialization with noise
+                    f_init = [1.0] * n
+                    noise = np.random.normal(0, 0.08, n)
+                    f_init = np.maximum(np.array(f_init) + noise, 0)
+                
+                initial_population.append(f_init)
+            
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 15) for _ in range(n)]
+            
+            # Run differential evolution with optimized parameters
+            de_result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed + seed_offset,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False,
+                workers=1  # Use single worker to avoid multiprocessing issues
+            )
+            
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -self.objective_function(f_opt)
+                
+                return c2_value, f_opt.tolist()
+                
+        except Exception as e:
+            warnings.warn(f"Optimization run failed: {str(e)}")
+        
+        return None, None
+    
+    def _varied_alternating_initialization(self, n):
+        """Helper method for varied alternating pattern initialization"""
+        f = []
+        # Use variable segment sizes and heights for more diversity
+        segment_sizes = [max(1, n // 10), max(1, n // 8), max(1, n // 6)]
+        segment_size = segment_sizes[np.random.randint(0, len(segment_sizes))]
+        
+        for i in range(0, n, segment_size):
+            if (i // segment_size) % 2 == 0:
+                f.extend([0.8 + np.random.random() * 0.2] * min(segment_size, n - i))
+            else:
+                f.extend([0.1 + np.random.random() * 0.1] * min(segment_size, n - i))
+        return f
+    
+    def _structured_gaussian_peak_initialization(self, n):
+        """Helper method for structured Gaussian peak initialization"""
+        f = np.zeros(n)
+        x = np.linspace(-1, 1, n)
+        # More structured peaks with specific positions
+        num_peaks = max(3, n // 30)
+        for _ in range(num_peaks):
+            # Place peaks in strategic locations
+            center = np.random.uniform(-0.3, 0.3)
+            width = np.random.uniform(0.08, 0.18)
+            amplitude = 0.6 + np.random.random() * 0.4
+            gauss_peak = amplitude * np.exp(-0.5 * ((x - center) / width)**2)
+            f += gauss_peak
+        f = np.clip(f, 0, None)
+        if np.sum(f) > 0:
+            f = f / np.sum(f)
+        return f.tolist()
+    
+    def _hybrid_multi_peak_initialization(self, n):
+        """Helper method for hybrid multi-peak initialization"""
+        f = np.zeros(n)
+        # Combine different peak structures
+        x = np.linspace(-1, 1, n)
+        # Add some main peaks
+        centers = [-0.6, -0.2, 0.2, 0.6]
+        for center in centers:
+            width = 0.1
+            amplitude = 0.8 + np.random.random() * 0.2
+            gauss_peak = amplitude * np.exp(-0.5 * ((x - center) / width)**2)
+            f += gauss_peak
+        
+        # Add some additional variation
+        num_additional = max(2, n // 50)
+        for _ in range(num_additional):
+            center = np.random.uniform(-0.8, 0.8)
+            width = 0.05 + np.random.random() * 0.1
+            amplitude = 0.2 + np.random.random() * 0.3
+            gauss_peak = amplitude * np.exp(-0.5 * ((x - center) / width)**2)
+            f += gauss_peak
+            
+        f = np.clip(f, 0, None)
+        if np.sum(f) > 0:
+            f = f / np.sum(f)
+        return f.tolist()
+    
+    def multi_start_optimization(self, n):
+        """Perform multi-start optimization with carefully chosen parameters"""
+        current_best_c2 = 0.0
+        current_best_f = None
+        
+        # Calculate number of parallel runs
+        num_runs = min(8, max(3, n // 150))
+        
+        # Reduce number of runs to avoid resource overuse
+        actual_runs = min(6, num_runs)
+        
+        # Set timeout for each run to respect overall time limit
+        start_time = time.time()
+        timeout_per_run = min(25, max(10, (self.max_time - (time.time() - start_time)) / (actual_runs * 2)))
+        
+        # Execute runs sequentially to maintain stability and consistency
+        for i in range(actual_runs):
+            try:
+                c2, f = self.single_optimization_run(n, i)
+                if c2 is not None and c2 > current_best_c2:
+                    current_best_c2 = c2
+                    current_best_f = f
+            except Exception:
+                continue
+        
+        return current_best_c2, current_best_f
+    
+    def construct_function(self) -> list[float]:
+        """Main function to construct step-function with high C2 value"""
+        # Initialize tracking variables
+        best_c2 = 0.0
+        best_f = []
+        
+        # Try different configurations to find the best one
+        # Prioritize larger configurations since they typically yield better results
+        configurations = [
+            500,   # Medium size - decent balance
+            1000,  # Larger for better optimization potential
+            2000,  # Very large for maximum exploration
+        ]
+        
+        start_time = time.time()
+        
+        for n in configurations:
+            if time.time() - start_time > self.max_time * 0.9:
+                break
+                
+            try:
+                # Perform multi-start optimization
+                c2_value, f_opt = self.multi_start_optimization(n)
+                
+                if c2_value > best_c2:
+                    best_c2 = c2_value
+                    best_f = f_opt
+                    
+            except Exception as e:
+                warnings.warn(f"Configuration {n} failed: {str(e)}")
+                continue
+        
+        # If nothing worked, fallback to enhanced initialization with more robust parameters
+        if len(best_f) == 0:
+            # Try multiple sizes with enhanced initialization
+            for n in [1500, 2000]:
+                try:
+                    f_enhanced = self.enhanced_initialization(n)
+                    c2_enhanced = self.evaluate_function(f_enhanced)
+                    
+                    if c2_enhanced > best_c2:
+                        best_c2 = c2_enhanced
+                        best_f = f_enhanced
+                        
+                except Exception as e:
+                    warnings.warn(f"Fallback initialization {n} failed: {str(e)}")
+                    continue
+        
+        # Final safety check - if still no good solution, use uniform distribution
+        if len(best_f) == 0:
+            n = 500
+            best_f = [1.0] * n
+            best_c2 = self.evaluate_function(best_f)
+        
+        return best_f
+
+# Main execution function
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using optimization."""
+    optimizer = AdaptiveEvolutionaryOptimizerV2(max_time=90)
+    return optimizer.construct_function()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

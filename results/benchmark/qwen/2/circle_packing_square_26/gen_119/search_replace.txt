@@ -1,0 +1,314 @@
+<NAME>
+enhanced_local_refinement
+</NAME>
+
+<DESCRIPTION>
+The current local refinement strategy uses a combination of L-BFGS-B optimization and gradient-free methods, but it could benefit from a more sophisticated approach that incorporates physics-based repulsion forces and adaptive refinement strategies. The proposed improvement introduces a multi-stage local refinement process that:
+
+1. First performs a coarse-grained optimization using a faster method like Nelder-Mead
+2. Then applies a more detailed optimization with boundary-aware constraints
+3. Finally incorporates physics-inspired particle system to resolve remaining overlaps
+
+This approach should better exploit the optimization landscape and push beyond the current 2.2 score toward the benchmark of ~2.636.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_refinement_with_multiple_strategies(circles_array, max_iter=100):
+    """Apply multiple local optimization strategies to improve final solution"""
+
+    def objective(params):
+        circles = params.reshape(-1, 3)
+        # Calculate sum of radii (negative because we want to maximize)
+        sum_radii = -np.sum(circles[:, 2])
+
+        # Penalty for constraint violations
+        penalty = 0
+
+        # Boundary constraints
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+
+        # Check containment violations
+        containment_violations = (
+            (x_coords - radii < BOUND_LOW) |
+            (x_coords + radii > BOUND_UP) |
+            (y_coords - radii < BOUND_LOW) |
+            (y_coords + radii > BOUND_UP)
+        )
+        penalty += 10000 * np.sum(containment_violations)
+
+        # Overlap penalties
+        if len(circles) > 1:
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                for j in range(i+1, len(circles)):
+                    x2, y2, r2 = circles[j]
+                    distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        penalty += 1000 * (r1 + r2 - distance)
+
+        return sum_radii + penalty
+
+    def constraint_handling(circles):
+        """Handle boundary and overlap constraints manually"""
+        circles_copy = circles.copy()
+        for i in range(len(circles_copy)):
+            x, y, r = circles_copy[i]
+            # Fix containment
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+            circles_copy[i] = [x, y, r]
+        return circles_copy
+
+    # Start with constraint handling
+    circles_array = constraint_handling(circles_array)
+
+    # Flatten to optimize
+    flat_params = circles_array.flatten()
+
+    # Strategy 1: L-BFGS-B optimization
+    try:
+        result = minimize(
+            objective,
+            flat_params,
+            method='L-BFGS-B',
+            bounds=[(0, 1) if i%3 != 2 else (0.001, 0.4) for i in range(len(flat_params))],
+            options={'maxiter': max_iter//2, 'ftol': 1e-6},
+            tol=1e-6
+        )
+
+        if result.success:
+            optimized_circles = result.x.reshape(-1, 3)
+            # Apply constraint fixes to results
+            optimized_circles = constraint_handling(optimized_circles)
+            return optimized_circles
+    except Exception:
+        pass
+
+    # Strategy 2: Gradient-free local search if L-BFGS fails
+    try:
+        # Simple gradient descent approach with small steps
+        circles_copy = circles_array.copy()
+        learning_rate = 0.001
+        for _ in range(max_iter//4):
+            # Compute gradients (approximate)
+            gradients = np.zeros_like(circles_copy)
+
+            # Compute force from all other circles on each circle
+            for i in range(len(circles_copy)):
+                x1, y1, r1 = circles_copy[i]
+                fx, fy = 0, 0
+
+                for j in range(len(circles_copy)):
+                    if i != j:
+                        x2, y2, r2 = circles_copy[j]
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        distance = max(1e-8, math.sqrt(dx*dx + dy*dy))
+
+                        # Force repulsion
+                        if distance < (r1 + r2):
+                            # Overlapping circles
+                            force_magnitude = 1000 * (r1 + r2 - distance)
+                            fx += force_magnitude * dx / distance
+                            fy += force_magnitude * dy / distance
+
+                        # Boundary forces
+                        if x1 - r1 < 0:
+                            fx += 100 * (r1 - x1)
+                        if x1 + r1 > 1:
+                            fx += 100 * (1 - (x1 + r1))
+                        if y1 - r1 < 0:
+                            fy += 100 * (r1 - y1)
+                        if y1 + r1 > 1:
+                            fy += 100 * (1 - (y1 + r1))
+
+                gradients[i] = [fx, fy, 0]  # We ignore radius changes for simplicity
+
+            # Update positions
+            circles_copy[:, :2] -= learning_rate * gradients[:, :2]
+
+            # Apply boundary constraints
+            circles_copy[:, 0] = np.clip(circles_copy[:, 0],
+                                        circles_copy[:, 2], 1 - circles_copy[:, 2])
+            circles_copy[:, 1] = np.clip(circles_copy[:, 1],
+                                        circles_copy[:, 2], 1 - circles_copy[:, 2])
+
+        return circles_copy
+    except Exception:
+        pass
+
+    # Fallback to original
+    return circles_array
+=======
+def local_refinement_with_multiple_strategies(circles_array, max_iter=100):
+    """Apply enhanced local optimization strategies to improve final solution"""
+
+    # Enhanced constraint handling function
+    def enhanced_constraint_handling(circles):
+        """Handle boundary and overlap constraints with better enforcement"""
+        circles_copy = circles.copy()
+        for i in range(len(circles_copy)):
+            x, y, r = circles_copy[i]
+            # Fix containment more carefully
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+            circles_copy[i] = [x, y, r]
+        return circles_copy
+
+    # Physics-inspired optimization with repulsion forces
+    def physics_based_refinement(circles, max_steps=50):
+        """Use physics-based approach to resolve overlaps and optimize radii"""
+        circles_copy = circles.copy()
+        # Convert to numpy for vectorized operations
+        positions = circles_copy[:, :2].copy()
+        radii = circles_copy[:, 2].copy()
+
+        for step in range(max_steps):
+            # Calculate forces between all pairs of circles
+            forces = np.zeros_like(positions)
+
+            # Compute pairwise forces
+            for i in range(len(circles_copy)):
+                x1, y1, r1 = positions[i, 0], positions[i, 1], radii[i]
+
+                for j in range(len(circles_copy)):
+                    if i == j:
+                        continue
+                    x2, y2, r2 = positions[j, 0], positions[j, 1], radii[j]
+
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    distance = max(1e-8, math.sqrt(dx*dx + dy*dy))
+
+                    if distance < (r1 + r2):
+                        # Overlapping circles - repulsion force
+                        force_magnitude = 1000 * (r1 + r2 - distance)
+                        forces[i, 0] += force_magnitude * dx / distance
+                        forces[i, 1] += force_magnitude * dy / distance
+                    else:
+                        # Boundary forces
+                        boundary_force = 0
+
+                        # Left boundary
+                        if x1 - r1 < 0:
+                            forces[i, 0] += 1000 * (r1 - x1)
+                        # Right boundary
+                        if x1 + r1 > 1:
+                            forces[i, 0] += 1000 * (1 - (x1 + r1))
+                        # Bottom boundary
+                        if y1 - r1 < 0:
+                            forces[i, 1] += 1000 * (r1 - y1)
+                        # Top boundary
+                        if y1 + r1 > 1:
+                            forces[i, 1] += 1000 * (1 - (y1 + r1))
+
+            # Apply forces to update positions
+            positions += 0.001 * forces
+
+            # Enforce boundary constraints
+            positions[:, 0] = np.clip(positions[:, 0], radii, 1 - radii)
+            positions[:, 1] = np.clip(positions[:, 1], radii, 1 - radii)
+
+            # Optional: try to slightly increase radii for non-overlapping cases
+            # This helps in making use of available space
+            for i in range(len(circles_copy)):
+                # Try to slightly increase radius if there's room and no overlap
+                x, y, r = positions[i, 0], positions[i, 1], radii[i]
+                min_dist_to_boundary = min(x, 1-x, y, 1-y)
+                max_possible_r = min_dist_to_boundary / 2
+
+                if max_possible_r > r:
+                    # Small increase in radius, but only if safe
+                    r_increase = min(0.001, (max_possible_r - r) * 0.1)
+                    radii[i] = min(max_possible_r, r + r_increase)
+
+        # Final constraint enforcement
+        circles_copy[:, :2] = positions
+        circles_copy[:, 2] = radii
+
+        return enhanced_constraint_handling(circles_copy)
+
+    # Multi-stage optimization approach
+    circles_result = circles_array.copy()
+
+    # Stage 1: Physics-based refinement to quickly address overlaps
+    try:
+        circles_result = physics_based_refinement(circles_result, max_steps=30)
+    except Exception:
+        pass
+
+    # Stage 2: Local optimization with proper boundary handling
+    def objective(params):
+        circles = params.reshape(-1, 3)
+        # Calculate sum of radii (negative because we want to maximize)
+        sum_radii = -np.sum(circles[:, 2])
+
+        # Penalty for constraint violations
+        penalty = 0
+
+        # Boundary constraints
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+
+        # Check containment violations
+        containment_violations = (
+            (x_coords - radii < BOUND_LOW) |
+            (x_coords + radii > BOUND_UP) |
+            (y_coords - radii < BOUND_LOW) |
+            (y_coords + radii > BOUND_UP)
+        )
+        penalty += 10000 * np.sum(containment_violations)
+
+        # Overlap penalties
+        if len(circles) > 1:
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                for j in range(i+1, len(circles)):
+                    x2, y2, r2 = circles[j]
+                    distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if distance < r1 + r2:
+                        penalty += 1000 * (r1 + r2 - distance)
+
+        return sum_radii + penalty
+
+    # Flatten to optimize
+    flat_params = circles_result.flatten()
+
+    # Stage 3: Refine using more sophisticated optimization
+    try:
+        # Try several optimization methods in sequence with increasing sophistication
+        methods = ['Nelder-Mead', 'L-BFGS-B', 'SLSQP']
+        for method in methods:
+            try:
+                result = minimize(
+                    objective,
+                    flat_params,
+                    method=method,
+                    bounds=[(0, 1) if i%3 != 2 else (0.001, 0.4) for i in range(len(flat_params))],
+                    options={'maxiter': max_iter//len(methods), 'ftol': 1e-6} if method != 'Nelder-Mead' else {'maxiter': max_iter//len(methods)},
+                    tol=1e-6
+                )
+
+                if result.success:
+                    optimized_circles = result.x.reshape(-1, 3)
+                    # Apply constraint fixes to results
+                    circles_result = enhanced_constraint_handling(optimized_circles)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Final stage: Final physics refinement
+    try:
+        circles_result = physics_based_refinement(circles_result, max_steps=20)
+    except Exception:
+        pass
+
+    return circles_result
+>>>>>>> REPLACE
+</DIFF>

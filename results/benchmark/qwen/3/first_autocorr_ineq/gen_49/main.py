@@ -1,0 +1,191 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import time
+
+def convolve_fft(a, b):
+    """Compute convolution using FFT for better performance."""
+    # For very small sequences, use direct method for stability
+    if len(a) < 100:
+        return np.convolve(a, b, mode='full')
+
+    # Use FFT-based convolution
+    return fftconvolve(a, b, mode='full')
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    try:
+        n = len(sequence)
+        if n < 1:
+            return None
+
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 0.01:
+            return None
+
+        # Normalize sequence
+        normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+        # Compute convolution with FFT for efficiency
+        conv_result = convolve_fft(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv_result)
+
+        # Solve LP with better error handling
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is None:
+            return None
+
+        sum_g_fun = np.sum(g_fun)
+        if sum_g_fun < 0.01:
+            return None
+
+        # Normalize and update
+        normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g_fun
+        t = 0.01
+        new_sequence = [
+            (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+        ]
+
+        return new_sequence
+    except Exception as e:
+        return None
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        c = -np.ones(n)
+        a_ub = []
+        b_ub = []
+
+        # Generate constraint matrix efficiently
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_sequence[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Solve with bounds to prevent numerical issues
+        bounds = [(0, 1000) for _ in range(n)]  # Clip heights to [0, 1000]
+
+        result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, bounds=bounds,
+                                method='highs', options={'presolve': True})
+
+        if result.success:
+            g_sequence = result.x
+            # Clamp negative values due to numerical errors
+            g_sequence = np.maximum(g_sequence, 0)
+            return g_sequence
+        else:
+            # Try alternative method on failure
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, bounds=bounds,
+                                        method='revised simplex')
+                if result.success:
+                    g_sequence = result.x
+                    g_sequence = np.maximum(g_sequence, 0)
+                    return g_sequence
+            except:
+                pass
+            return None
+    except Exception as e:
+        return None
+
+def search_for_best_sequence(max_iterations=100) -> list[float]:
+    """Function to search for the best coefficient sequence with enhanced strategy."""
+    best_sequence = None
+    best_inv_c1 = -np.inf
+
+    # Try different sequence lengths to find promising regions
+    lengths_to_try = [50, 100, 200, 300, 500, 750, 1000]
+
+    # Multi-start approach with diverse initialization strategies
+    for length in lengths_to_try:
+        for _ in range(3):  # Multiple starts per length
+            try:
+                # Initialize with different strategies
+                if np.random.random() < 0.3:
+                    # Sparse initialization
+                    sequence = [0.0] * length
+                    sequence[np.random.randint(0, length)] = np.random.random() * 100
+                elif np.random.random() < 0.6:
+                    # Uniform initialization
+                    sequence = [np.random.random() * 10 for _ in range(length)]
+                else:
+                    # Gaussian-like initialization
+                    sequence = [abs(np.random.normal(0, 1)) * 10 for _ in range(length)]
+
+                # Ensure minimum mass
+                if np.sum(sequence) < 0.01:
+                    sequence[0] = 1.0
+
+                # Iteratively improve
+                for iter_count in range(max_iterations):
+                    updated_sequence = get_good_direction_to_move_into(sequence)
+                    if updated_sequence is None:
+                        break
+
+                    sequence = updated_sequence
+
+                    # Compute C1 value to monitor progress
+                    inv_c1 = compute_inv_c1(sequence)
+                    if inv_c1 > best_inv_c1:
+                        best_inv_c1 = inv_c1
+                        best_sequence = sequence.copy()
+
+                    # Early termination if no significant improvement
+                    if iter_count > 10 and inv_c1 < best_inv_c1 * 0.999:
+                        break
+
+            except Exception as e:
+                continue
+
+    # If we didn't find anything good, return a standard sequence
+    if best_sequence is None:
+        best_sequence = [1.0] * 100
+
+    return best_sequence
+
+def compute_inv_c1(sequence):
+    """Compute 1/C1 for given sequence."""
+    try:
+        if len(sequence) < 1:
+            return 0
+
+        seq_array = np.array(sequence)
+        sum_seq = np.sum(seq_array)
+        if sum_seq < 0.01:
+            return 0
+
+        # Use FFT for convolution if efficient
+        conv_result = convolve_fft(seq_array, seq_array)
+        max_conv = np.max(conv_result)
+
+        # Compute 1/C1 as (sum^2) / (2*n*max_conv)
+        inv_c1 = (sum_seq ** 2) / (2 * len(seq_array) * max_conv)
+        return inv_c1 if not np.isnan(inv_c1) and not np.isinf(inv_c1) else 0
+    except:
+        return 0
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

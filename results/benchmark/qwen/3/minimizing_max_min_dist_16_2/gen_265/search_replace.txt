@@ -1,0 +1,480 @@
+<NAME>
+add_multi_scale_adaptive_sa
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a single adaptive simulated annealing approach but doesn't fully leverage multi-scale optimization. I'll enhance the optimization by implementing a multi-scale adaptive simulated annealing that progressively refines at different scales, starting with coarse-grained movements and gradually moving to fine-grained adjustments. This approach will help escape local optima more effectively and achieve better convergence to the global optimum.
+
+The key improvements include:
+1. Multi-scale cooling schedules with different temperature decay rates
+2. Progressive refinement from coarse to fine scales
+3. Adaptive neighborhood selection based on optimization stage
+4. Better handling of boundary conditions throughout all scales
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _adaptive_local_optimization(self, initial_points, max_iter=500):
+        """Apply adaptive local optimization with geometric constraints."""
+        current_points = initial_points.copy()
+
+        for iteration in range(max_iter):
+            try:
+                dist_matrix = self.compute_distance_matrix(current_points)
+                ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                if ratio < 1e-10:
+                    break
+
+            except Exception:
+                break
+
+            # For each point, compute optimal adjustment direction
+            new_points = current_points.copy()
+            updated = False
+
+            for i in range(len(current_points)):
+                original_point = current_points[i].copy()
+
+                # Calculate gradient using finite differences
+                best_direction = None
+                best_improvement = 0
+
+                # Try several directions for small perturbations
+                directions = [
+                    [0.001, 0], [0, 0.001], [-0.001, 0], [0, -0.001],
+                    [0.000707, 0.000707], [-0.000707, 0.000707],
+                    [0.000707, -0.000707], [-0.000707, -0.000707]
+                ]
+
+                for dx, dy in directions:
+                    test_point = original_point + [dx, dy]
+                    test_point = np.clip(test_point, 0, 1)
+
+                    # Create test configuration
+                    test_points = current_points.copy()
+                    test_points[i] = test_point
+
+                    try:
+                        test_dist_matrix = self.compute_distance_matrix(test_points)
+                        test_ratio = self.calculate_min_max_ratio(test_dist_matrix)
+
+                        if test_ratio > ratio + best_improvement:
+                            best_improvement = test_ratio - ratio
+                            best_direction = [dx, dy]
+
+                    except Exception:
+                        continue
+
+                # Apply best direction if beneficial
+                if best_direction is not None and best_improvement > 1e-12:
+                    new_points[i] = original_point + best_direction
+                    updated = True
+
+            # Update points if any improvements were made
+            if updated:
+                current_points = new_points.copy()
+            else:
+                break
+
+        return current_points
+=======
+    def _multi_scale_adaptive_simulated_annealing(self, initial_points, max_iter=5000):
+        """Enhanced multi-scale adaptive simulated annealing with progressive refinement."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = self.calculate_min_max_ratio(self.compute_distance_matrix(current_points))
+
+        # Multi-scale temperature schedules
+        scales = [
+            {'temp': 0.5, 'iter': 1000, 'step_size': 0.05},   # Coarse scale
+            {'temp': 0.2, 'iter': 1500, 'step_size': 0.02},   # Medium scale
+            {'temp': 0.05, 'iter': 2000, 'step_size': 0.005}, # Fine scale
+            {'temp': 0.01, 'iter': 1500, 'step_size': 0.001}  # Ultra-fine scale
+        ]
+
+        total_iter = 0
+
+        for scale_idx, scale_params in enumerate(scales):
+            temp = scale_params['temp']
+            iter_limit = scale_params['iter']
+            step_size = scale_params['step_size']
+
+            # Cooling rate adapted to scale
+            cooling_rate = 0.9995 if scale_idx < 2 else 0.9998
+
+            for iteration in range(iter_limit):
+                if total_iter >= max_iter:
+                    break
+
+                total_iter += 1
+
+                # Adaptive perturbation strategy based on scale and iteration
+                if scale_idx == 0:  # Coarse scale - larger moves
+                    # Use cluster moves more frequently
+                    if np.random.rand() < 0.3:
+                        # Select 3-5 random points to move together
+                        n_points_to_move = np.random.randint(3, min(6, self.n_points))
+                        indices = np.random.choice(self.n_points, n_points_to_move, replace=False)
+                        new_points = current_points.copy()
+
+                        # Move cluster with correlated perturbations
+                        cluster_center = np.mean(current_points[indices], axis=0)
+                        delta = np.random.normal(0, temp * step_size, 2)
+
+                        for idx in indices:
+                            # Perturb each point with some correlation to cluster center
+                            new_points[idx] = current_points[idx] + delta + np.random.normal(0, temp * step_size * 0.1, 2)
+                            new_points[idx] = np.clip(new_points[idx], 0, 1)
+                    else:
+                        # Individual point moves
+                        idx = np.random.randint(self.n_points)
+                        new_points = current_points.copy()
+                        new_points[idx] += np.random.normal(0, temp * step_size, 2)
+                        new_points[idx] = np.clip(new_points[idx], 0, 1)
+
+                else:  # Fine scales - smaller moves
+                    # More likely to use individual moves with very small steps
+                    if np.random.rand() < 0.7:
+                        # Individual point moves with very small steps
+                        idx = np.random.randint(self.n_points)
+                        new_points = current_points.copy()
+                        new_points[idx] += np.random.normal(0, temp * step_size, 2)
+                        new_points[idx] = np.clip(new_points[idx], 0, 1)
+                    else:
+                        # Small cluster moves
+                        n_points_to_move = np.random.randint(2, min(4, self.n_points))
+                        indices = np.random.choice(self.n_points, n_points_to_move, replace=False)
+                        new_points = current_points.copy()
+
+                        # Move with smaller correlated perturbations
+                        delta = np.random.normal(0, temp * step_size * 0.5, 2)
+                        for idx in indices:
+                            new_points[idx] = current_points[idx] + delta + np.random.normal(0, temp * step_size * 0.05, 2)
+                            new_points[idx] = np.clip(new_points[idx], 0, 1)
+
+                # Boundary handling with special attention to fine scales
+                for i in range(len(new_points)):
+                    # Ensure points don't stick to boundaries
+                    if new_points[i, 0] < 0.01:
+                        new_points[i, 0] = 0.01 + np.random.rand() * 0.01
+                    elif new_points[i, 0] > 0.99:
+                        new_points[i, 0] = 0.99 - np.random.rand() * 0.01
+                    if new_points[i, 1] < 0.01:
+                        new_points[i, 1] = 0.01 + np.random.rand() * 0.01
+                    elif new_points[i, 1] > 0.99:
+                        new_points[i, 1] = 0.99 - np.random.rand() * 0.01
+
+                # Evaluate new solution
+                try:
+                    new_dist_matrix = self.compute_distance_matrix(new_points)
+                    new_ratio = self.calculate_min_max_ratio(new_dist_matrix)
+                except Exception:
+                    new_ratio = 0
+
+                # Accept or reject based on Metropolis criterion
+                if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temp):
+                    current_points = new_points.copy()
+                    if new_ratio > best_ratio:
+                        best_ratio = new_ratio
+                        best_points = new_points.copy()
+
+                # Temperature cooling
+                temp *= cooling_rate
+
+                # Early stopping condition for stagnation
+                if total_iter % 200 == 0 and abs(new_ratio - best_ratio) < 1e-10:
+                    break
+
+        return best_points
+
+    def _adaptive_local_optimization(self, initial_points, max_iter=500):
+        """Apply adaptive local optimization with geometric constraints."""
+        current_points = initial_points.copy()
+
+        for iteration in range(max_iter):
+            try:
+                dist_matrix = self.compute_distance_matrix(current_points)
+                ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                if ratio < 1e-10:
+                    break
+
+            except Exception:
+                break
+
+            # For each point, compute optimal adjustment direction
+            new_points = current_points.copy()
+            updated = False
+
+            for i in range(len(current_points)):
+                original_point = current_points[i].copy()
+
+                # Calculate gradient using finite differences
+                best_direction = None
+                best_improvement = 0
+
+                # Try several directions for small perturbations
+                directions = [
+                    [0.001, 0], [0, 0.001], [-0.001, 0], [0, -0.001],
+                    [0.000707, 0.000707], [-0.000707, 0.000707],
+                    [0.000707, -0.000707], [-0.000707, -0.000707]
+                ]
+
+                for dx, dy in directions:
+                    test_point = original_point + [dx, dy]
+                    test_point = np.clip(test_point, 0, 1)
+
+                    # Create test configuration
+                    test_points = current_points.copy()
+                    test_points[i] = test_point
+
+                    try:
+                        test_dist_matrix = self.compute_distance_matrix(test_points)
+                        test_ratio = self.calculate_min_max_ratio(test_dist_matrix)
+
+                        if test_ratio > ratio + best_improvement:
+                            best_improvement = test_ratio - ratio
+                            best_direction = [dx, dy]
+
+                    except Exception:
+                        continue
+
+                # Apply best direction if beneficial
+                if best_direction is not None and best_improvement > 1e-12:
+                    new_points[i] = original_point + best_direction
+                    updated = True
+
+            # Update points if any improvements were made
+            if updated:
+                current_points = new_points.copy()
+            else:
+                break
+
+        return current_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_optimization_strategy
+</NAME>
+
+<DESCRIPTION>
+Replace the current multi-start optimization approach with one that uses the enhanced multi-scale adaptive simulated annealing as the primary optimization method. This will provide better convergence characteristics and escape from local optima more effectively. The new approach will combine the strengths of the multi-scale SA with differential evolution for global search, while using the adaptive local optimization for fine-tuning.
+
+The change involves modifying the _multi_start_optimization method to:
+1. Use the new multi-scale adaptive simulated annealing as the main optimization engine
+2. Maintain some diversity in initial configurations but make the optimization more systematic
+3. Reduce reliance on potentially slower methods like L-BFGS-B in favor of the more robust SA approach
+4. Improve overall convergence behavior by utilizing multiple scales of optimization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def _multi_start_optimization(self, max_iter=1000):
+        """Perform multi-start optimization from various initial configurations."""
+        best_points = None
+        best_ratio = -np.inf
+        start_time = time.time()
+
+        # Generate diverse initial configurations
+        initial_configs = []
+
+        # Hexagonal lattice with symmetry breaking
+        hex_points = self._generate_hexagonal_lattice()
+        hex_points = self._generate_symmetry_breaking_points(hex_points)
+        initial_configs.append(hex_points)
+
+        # Grid-based with perturbations
+        grid_points = self._generate_grid_points()
+        grid_points = self._generate_perturbed_points(grid_points, 0.03)
+        initial_configs.append(grid_points)
+
+        # Random with geometric constraints
+        rand_points = self._generate_random_points()
+        rand_points = self._generate_perturbed_points(rand_points, 0.05)
+        initial_configs.append(rand_points)
+
+        # Additional hexagonal variations
+        hex2_points = self._generate_hexagonal_lattice()
+        hex2_points = self._generate_perturbed_points(hex2_points, 0.02)
+        initial_configs.append(hex2_points)
+
+        # Try multiple initial configurations with differential evolution
+        for i, initial_config in enumerate(initial_configs):
+            if time.time() - start_time > self.max_time_seconds - 10:
+                break
+
+            try:
+                # First try differential evolution for global search
+                def objective_function(x_flat):
+                    points = x_flat.reshape(-1, self.dimensions)
+                    points = np.clip(points, 0, 1)
+
+                    try:
+                        distances = pdist(points)
+                        d_min = np.min(distances)
+                        d_max = np.max(distances)
+
+                        if d_max == 0:
+                            return float('inf')
+
+                        return -(d_min / d_max)
+                    except Exception:
+                        return 1e6
+
+                bounds = [(0, 1)] * (self.n_points * self.dimensions)
+
+                try:
+                    result = differential_evolution(
+                        objective_function,
+                        bounds,
+                        maxiter=200,
+                        popsize=15,
+                        tol=1e-8,
+                        seed=self.seed + i,
+                        disp=False
+                    )
+
+                    if result.success:
+                        final_points = result.x.reshape(-1, self.dimensions)
+                        dist_matrix = self.compute_distance_matrix(final_points)
+                        ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = final_points.copy()
+                except Exception:
+                    pass
+
+                # If DE failed, use local refinement
+                if best_points is None or time.time() - start_time > self.max_time_seconds - 10:
+                    try:
+                        # Local refinement with L-BFGS-B
+                        def objective(x_flat):
+                            points = x_flat.reshape(-1, self.dimensions)
+                            points = np.clip(points, 0, 1)
+
+                            try:
+                                dist_matrix = self.compute_distance_matrix(points)
+                                ratio = self.calculate_min_max_ratio(dist_matrix)
+                                return -ratio
+                            except Exception:
+                                return 1e6
+
+                        x0 = initial_config.flatten()
+                        bounds = [(0, 1) for _ in range(len(x0))]
+
+                        result = minimize(
+                            objective,
+                            x0,
+                            method='L-BFGS-B',
+                            bounds=bounds,
+                            options={'maxiter': max_iter//2, 'ftol': 1e-10, 'gtol': 1e-10}
+                        )
+
+                        if result.success:
+                            final_points = result.x.reshape(-1, self.dimensions)
+                            dist_matrix = self.compute_distance_matrix(final_points)
+                            ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                            if ratio > best_ratio:
+                                best_ratio = ratio
+                                best_points = final_points.copy()
+                    except Exception:
+                        continue
+
+            except Exception as e:
+                warnings.warn(f"Error in optimization round {i}: {str(e)}")
+                continue
+
+        # Final geometric refinement if we have a solution
+        if best_points is not None and time.time() - start_time < self.max_time_seconds - 5:
+            try:
+                refined_points = self._adaptive_local_optimization(best_points, max_iter=200)
+                dist_matrix = self.compute_distance_matrix(refined_points)
+                final_ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = refined_points
+            except Exception:
+                pass
+
+        return best_points if best_points is not None else initial_configs[0]
+=======
+    def _multi_start_optimization(self, max_iter=5000):
+        """Perform multi-start optimization from various initial configurations using enhanced SA."""
+        best_points = None
+        best_ratio = -np.inf
+        start_time = time.time()
+
+        # Generate diverse initial configurations with improved diversity
+        initial_configs = []
+
+        # Hexagonal lattice with symmetry breaking (primary)
+        hex_points = self._generate_hexagonal_lattice()
+        hex_points = self._generate_symmetry_breaking_points(hex_points)
+        initial_configs.append(hex_points)
+
+        # Grid-based with perturbations (secondary)
+        grid_points = self._generate_grid_points()
+        grid_points = self._generate_perturbed_points(grid_points, 0.03)
+        initial_configs.append(grid_points)
+
+        # Random with geometric constraints (tertiary)
+        rand_points = self._generate_random_points()
+        rand_points = self._generate_perturbed_points(rand_points, 0.05)
+        initial_configs.append(rand_points)
+
+        # Additional hexagonal variations (quaternary)
+        hex2_points = self._generate_hexagonal_lattice()
+        hex2_points = self._generate_perturbed_points(hex2_points, 0.02)
+        initial_configs.append(hex2_points)
+
+        # Random with different seed (quinary)
+        np.random.seed(self.seed + 100)
+        rand_seed_points = self._generate_random_points()
+        initial_configs.append(rand_seed_points)
+
+        # Try multiple initial configurations with enhanced multi-scale SA
+        for i, initial_config in enumerate(initial_configs):
+            if time.time() - start_time > self.max_time_seconds - 10:
+                break
+
+            try:
+                # Use the enhanced multi-scale adaptive simulated annealing
+                optimized_points = self._multi_scale_adaptive_simulated_annealing(
+                    initial_config,
+                    max_iter=max_iter // len(initial_configs)
+                )
+
+                # Evaluate the result
+                dist_matrix = self.compute_distance_matrix(optimized_points)
+                ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Error in optimization round {i}: {str(e)}")
+                continue
+
+        # Final geometric refinement if we have a solution
+        if best_points is not None and time.time() - start_time < self.max_time_seconds - 5:
+            try:
+                refined_points = self._adaptive_local_optimization(best_points, max_iter=100)
+                dist_matrix = self.compute_distance_matrix(refined_points)
+                final_ratio = self.calculate_min_max_ratio(dist_matrix)
+
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = refined_points
+            except Exception:
+                pass
+
+        return best_points if best_points is not None else initial_configs[0]
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,171 @@
+<NAME>
+enhanced_local_optimization_with_constraint_aware_displacements
+</NAME>
+
+<DESCRIPTION>
+The current local optimization in the evolutionary algorithm is basic and doesn't properly handle geometric constraints during refinement. I'm implementing a more sophisticated local optimization that uses constraint-aware displacement steps to ensure geometric validity throughout the refinement process. This approach will help escape local minima while maintaining valid hexagon placements and orientations.
+
+The key improvements include:
+1. Implementing a constraint-aware local optimizer that validates geometric constraints at each step
+2. Adding smarter displacement strategies that consider hexagon proximity and spatial relationships
+3. Incorporating gradient-like guidance using local geometric analysis to improve convergence
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_optimization_step(individual, max_iter=100):
+    """Perform enhanced local optimization with multiple refinement stages"""
+    best_individual = deepcopy(individual)
+    best_fitness, _ = evaluate_fitness(best_individual[:, :2], best_individual[:, 2])
+
+    # Stage 1: Fine position optimization
+    for _ in range(max_iter // 2):
+        mutated = deepcopy(best_individual)
+        idx = random.randint(0, len(mutated)-1)
+        mutated[idx][0] += random.uniform(-0.05, 0.05)
+        mutated[idx][1] += random.uniform(-0.05, 0.05)
+        mutated[idx][2] += random.uniform(-1, 1)
+        mutated[idx][2] = mutated[idx][2] % 360
+
+        mutated_fitness, _ = evaluate_fitness(mutated[:, :2], mutated[:, 2])
+        if mutated_fitness > best_fitness:
+            best_individual = mutated
+            best_fitness = mutated_fitness
+
+    # Stage 2: Rotation optimization only
+    for _ in range(max_iter // 4):
+        mutated = deepcopy(best_individual)
+        idx = random.randint(0, len(mutated)-1)
+        mutated[idx][2] += random.uniform(-5, 5)
+        mutated[idx][2] = mutated[idx][2] % 360
+
+        mutated_fitness, _ = evaluate_fitness(mutated[:, :2], mutated[:, 2])
+        if mutated_fitness > best_fitness:
+            best_individual = mutated
+            best_fitness = mutated_fitness
+
+    # Stage 3: Small position adjustments
+    for _ in range(max_iter // 4):
+        mutated = deepcopy(best_individual)
+        idx = random.randint(0, len(mutated)-1)
+        mutated[idx][0] += random.uniform(-0.01, 0.01)
+        mutated[idx][1] += random.uniform(-0.01, 0.01)
+
+        mutated_fitness, _ = evaluate_fitness(mutated[:, :2], mutated[:, 2])
+        if mutated_fitness > best_fitness:
+            best_individual = mutated
+            best_fitness = mutated_fitness
+
+    return best_individual
+=======
+def constraint_aware_displacement(individual, idx, delta_pos=(0,0), delta_rot=0):
+    """Apply displacement with constraint checking to ensure validity"""
+    mutated = deepcopy(individual)
+    mutated[idx][0] += delta_pos[0]
+    mutated[idx][1] += delta_pos[1]
+    mutated[idx][2] += delta_rot
+    mutated[idx][2] = mutated[idx][2] % 360
+
+    # Check if the new configuration is valid
+    positions = mutated[:, :2]
+    angles = mutated[:, 2]
+
+    # Quick overlap check before expensive full evaluation
+    try:
+        # Check if this specific hexagon is contained
+        outer_radius = compute_outer_hexagon_radius(positions, angles)
+        outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+        hex_vertices = hexagon_vertices(mutated[idx][0], mutated[idx][1], mutated[idx][2])
+        if not check_containment(hex_vertices, outer_vertices):
+            return individual  # Return original if invalid
+
+        # Check overlap with all others
+        for i in range(len(mutated)):
+            if i != idx:
+                hex1_vertices = hexagon_vertices(mutated[i][0], mutated[i][1], mutated[i][2])
+                hex2_vertices = hexagon_vertices(mutated[idx][0], mutated[idx][1], mutated[idx][2])
+                if check_overlap(hex1_vertices, hex2_vertices):
+                    return individual  # Return original if overlap
+    except:
+        return individual  # Return original on error
+
+    return mutated
+
+def smart_local_optimization_step(individual, max_iter=100):
+    """Enhanced local optimization with constraint-aware displacements and smarter search strategy"""
+    best_individual = deepcopy(individual)
+    best_fitness, _ = evaluate_fitness(best_individual[:, :2], best_individual[:, 2])
+
+    # Calculate pairwise distances to inform displacement strategies
+    positions = individual[:, :2]
+    if len(positions) > 1:
+        # Get average distance between hexagons for scaling displacements
+        distances = cdist(positions, positions)
+        # Exclude diagonal elements (distance to self)
+        np.fill_diagonal(distances, np.inf)
+        avg_distance = np.min(distances[distances > 0]) if np.any(distances > 0) else 1.0
+        displacement_scale = max(0.05, avg_distance * 0.1)
+    else:
+        displacement_scale = 0.1
+
+    for iteration in range(max_iter):
+        mutated = deepcopy(best_individual)
+
+        # Select random hexagon to modify
+        idx = random.randint(0, len(mutated)-1)
+
+        # Smart displacement strategy:
+        # 1. If hexagons are close together, make smaller moves
+        # 2. If hexagons are far apart, allow larger moves
+        # 3. Consider local neighborhood for displacement direction
+
+        # Determine displacement type based on proximity
+        current_pos = mutated[idx][:2]
+        nearby_count = 0
+        total_distance = 0
+
+        # Count nearby hexagons and measure average distance
+        for i, pos in enumerate(mutated[:, :2]):
+            if i != idx:
+                dist = np.linalg.norm(np.array(current_pos) - np.array(pos))
+                if dist < 2.0:  # Consider as nearby
+                    nearby_count += 1
+                    total_distance += dist
+
+        # Adjust displacement magnitude based on local density
+        if nearby_count > 0:
+            avg_nearby_dist = total_distance / nearby_count
+            local_displacement_scale = displacement_scale * (0.5 + 0.5 * (avg_nearby_dist / 2.0))
+        else:
+            local_displacement_scale = displacement_scale
+
+        # Apply displacement with smarter scaling
+        delta_pos = (
+            random.uniform(-local_displacement_scale, local_displacement_scale),
+            random.uniform(-local_displacement_scale, local_displacement_scale)
+        )
+        delta_rot = random.uniform(-3, 3)  # Smaller rotation changes
+
+        # Apply constraint-aware displacement
+        mutated = constraint_aware_displacement(best_individual, idx, delta_pos, delta_rot)
+
+        # Evaluate fitness
+        mutated_fitness, _ = evaluate_fitness(mutated[:, :2], mutated[:, 2])
+
+        # Accept better solutions
+        if mutated_fitness > best_fitness:
+            best_individual = mutated
+            best_fitness = mutated_fitness
+
+        # Occasionally accept worse solutions to escape local minima
+        elif random.random() < 0.05:  # 5% chance to accept worse solution
+            best_individual = mutated
+            best_fitness = mutated_fitness
+
+    return best_individual
+
+def local_optimization_step(individual, max_iter=100):
+    """Updated local optimization using smarter constraint-aware approach"""
+    return smart_local_optimization_step(individual, max_iter)
+>>>>>>> REPLACE
+</DIFF>

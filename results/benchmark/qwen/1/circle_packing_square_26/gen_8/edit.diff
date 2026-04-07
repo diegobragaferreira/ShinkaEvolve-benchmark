@@ -1,0 +1,221 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,212 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial import Voronoi, distance
++from scipy.optimize import minimize
++import warnings
++warnings.filterwarnings('ignore')
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
++    np.random.seed(42)  # For reproducibility
++    
+     n = 26
+-    circles = np.zeros((n, 3))
+-
++    max_iter = 1000
++    
++    # Initial Voronoi-based approach
++    def voronoi_init():
++        # Generate random points for Voronoi seeds
++        seeds = np.random.rand(n*2, 2)
++        
++        # Create Voronoi diagram
++        try:
++            vor = Voronoi(seeds)
++            
++            # Get Voronoi vertices
++            vertices = vor.vertices
++            
++            # Filter vertices inside unit square
++            valid_vertices = []
++            for v in vertices:
++                if 0 <= v[0] <= 1 and 0 <= v[1] <= 1:
++                    valid_vertices.append(v)
++            
++            # If we have enough valid vertices, use them as circle centers
++            if len(valid_vertices) >= n:
++                centers = np.array(valid_vertices[:n])
++            else:
++                # Fall back to random placement if needed
++                centers = np.random.rand(n, 2)
++        except:
++            # Fallback to random initialization
++            centers = np.random.rand(n, 2)
++        
++        return centers
++    
++    # Function to compute maximum radius for a circle at position (x,y) without overlap
++    def max_radius(x, y, circles):
++        min_dist = float('inf')
++        
++        # Check distance to boundaries
++        dist_to_boundary = min(x, 1-x, y, 1-y)
++        min_dist = min(min_dist, dist_to_boundary)
++        
++        # Check distance to other circles
++        for cx, cy, r in circles:
++            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
++            if dist > 0:  # Avoid self-distance
++                min_dist = min(min_dist, dist - r)
++        
++        return max(0, min_dist)
++    
++    # Initialize with Voronoi-based approach
++    centers = voronoi_init()
++    
++    # Create initial circles array
++    circles = []
++    for i in range(n):
++        x, y = centers[i]
++        r = max_radius(x, y, circles)
++        circles.append([x, y, r])
++    
++    circles = np.array(circles)
++    
++    # Local optimization using scipy minimize
++    def objective(params):
++        # params contains [x1,y1,r1,x2,y2,r2,...]
++        total_radius = 0
++        temp_circles = []
++        for i in range(n):
++            x = params[3*i]
++            y = params[3*i+1]
++            r = params[3*i+2]
++            temp_circles.append([x, y, r])
++            total_radius += r
++        
++        # Penalize overlapping or boundary violations
++        penalty = 0
++        for i in range(n):
++            x, y, r = temp_circles[i]
++            
++            # Boundary penalty
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                penalty += 1000000
++                
++            # Overlap penalty
++            for j in range(i+1, n):
++                x2, y2, r2 = temp_circles[j]
++                dist = np.sqrt((x - x2)**2 + (y - y2)**2)
++                if dist < r + r2:
++                    penalty += 1000000 * (r + r2 - dist)
++                
++        return -total_radius + penalty  # Negative because we want to maximize
++    
++    def constraint_func(params):
++        # Ensure we don't violate constraints
++        temp_circles = []
++        for i in range(n):
++            x = params[3*i]
++            y = params[3*i+1]
++            r = params[3*i+2]
++            temp_circles.append([x, y, r])
++        
++        # Check boundary constraints
++        for i in range(n):
++            x, y, r = temp_circles[i]
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                return False
++        
++        # Check overlap constraints
++        for i in range(n):
++            for j in range(i+1, n):
++                x1, y1, r1 = temp_circles[i]
++                x2, y2, r2 = temp_circles[j]
++                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                if dist < r1 + r2:
++                    return False
++        return True
++    
++    # Flatten initial circles for optimization
++    initial_params = []
++    for x, y, r in circles:
++        initial_params.extend([x, y, r])
++    
++    # Optimize using L-BFGS-B method with bounds
++    bounds = []
++    for i in range(n):
++        bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.499)])
++    
++    try:
++        result = minimize(
++            objective,
++            initial_params,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6}
++        )
++        
++        if result.success:
++            final_params = result.x
++            circles = []
++            for i in range(n):
++                x = final_params[3*i]
++                y = final_params[3*i+1]
++                r = final_params[3*i+2]
++                circles.append([x, y, r])
++            circles = np.array(circles)
++    except:
++        pass
++    
++    # Final refinement: Ensure no overlaps and proper constraints
++    for _ in range(100):
++        improved = False
++        for i in range(n):
++            best_x, best_y, best_r = circles[i]
++            best_sum = np.sum(circles[:, 2])
++            
++            # Try small perturbations around current position
++            for dx in [-0.01, -0.005, 0, 0.005, 0.01]:
++                for dy in [-0.01, -0.005, 0, 0.005, 0.01]:
++                    x_try = max(0.001, min(0.999, circles[i][0] + dx))
++                    y_try = max(0.001, min(0.999, circles[i][1] + dy))
++                    
++                    # Calculate max radius at this new position
++                    r_try = max_radius(x_try, y_try, np.delete(circles, i, axis=0))
++                    
++                    if r_try > circles[i][2]:
++                        # Create temporary circles array to check validity
++                        temp_circles = circles.copy()
++                        temp_circles[i] = [x_try, y_try, r_try]
++                        
++                        # Validate all constraints
++                        valid = True
++                        for k in range(n):
++                            x_k, y_k, r_k = temp_circles[k]
++                            if x_k - r_k < 0 or x_k + r_k > 1 or y_k - r_k < 0 or y_k + r_k > 1:
++                                valid = False
++                                break
++                        
++                        if valid:
++                            overlap_free = True
++                            for k in range(n):
++                                if k != i:
++                                    x_k, y_k, r_k = temp_circles[k]
++                                    dist = np.sqrt((x_try - x_k)**2 + (y_try - y_k)**2)
++                                    if dist < r_try + r_k:
++                                        overlap_free = False
++                                        break
++                            
++                            if overlap_free:
++                                circles[i] = [x_try, y_try, r_try]
++                                improved = True
++        
++        if not improved:
++            break
++    
+     return circles
+ 
+-
+ # EVOLVE-BLOCK-END

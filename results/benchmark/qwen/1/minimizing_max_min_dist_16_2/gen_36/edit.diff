@@ -1,0 +1,261 @@
+--- a/original.py
++++ b/original.py
+@@ -1,133 +1,196 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+-from scipy.spatial.distance import pdist
++from scipy.spatial.distance import pdist, squareform
+ import warnings
++import time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     def objective(x):
+         # Reshape x into points array
+         points = x.reshape(-1, 2)
+ 
+         # Calculate pairwise distances
+         distances = pdist(points)
+ 
+         # Return negative ratio (since we want to maximize ratio, we minimize its negative)
+         if len(distances) == 0 or np.allclose(distances, 0):
+             return -1.0  # Worst possible case
+ 
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+ 
+         # Avoid division by zero
+         if max_dist == 0:
+             return -1.0
+ 
+         return -min_dist / max_dist
+ 
++    def constraint_func(x):
++        # Ensure points are within [0+eps,1-eps] x [0+eps,1-eps] for numerical stability
++        eps = 1e-8
++        points = x.reshape(-1, 2)
++        constraints = []
++
++        # x coordinates in [eps, 1-eps]
++        constraints.append(points[:, 0].min() - eps)  # x_min >= eps
++        constraints.append(1 - eps - points[:, 0].max())  # x_max <= 1-eps
++
++        # y coordinates in [eps, 1-eps]
++        constraints.append(points[:, 1].min() - eps)  # y_min >= eps
++        constraints.append(1 - eps - points[:, 1].max())  # y_max <= 1-eps
++
++        return np.array(constraints)
++
+     def bounded_objective(x):
+-        # Simple boundary checking - clamp points to bounds
+-        points = np.clip(x.reshape(-1, 2), 0, 1).flatten()
++        # Boundary checking with clamping to safe bounds
++        eps = 1e-8
++        points = np.clip(x.reshape(-1, 2), eps, 1-eps).flatten()
+         return objective(points)
+ 
+-    # Create a better initial configuration based on hexagonal packing
+-    # For 16 points, we can try a grid-like arrangement that's close to optimal
++    # Create a sophisticated initial configuration inspired by hexagonal packing
+     np.random.seed(42)
+ 
+-    # Try a structured initialization first to get closer to good solution
++    # Generate a hexagonal-like structure that approximates optimal distribution
++    # Arrange points in a pattern that balances density and spread
+     initial_points = np.zeros((16, 2))
+ 
+-    # Create a semi-structured pattern - 4x4 grid
+-    x_vals = np.linspace(0.05, 0.95, 4)
+-    y_vals = np.linspace(0.05, 0.95, 4)
++    # Create a modified hexagonal grid pattern
++    rows = 4
++    cols = 4
++
++    # Hexagonal offset pattern
++    x_spacing = 0.9 / (cols - 1) if cols > 1 else 0.5
++    y_spacing = 0.9 / (rows - 1) if rows > 1 else 0.5
++
++    offset_x = 0.05
++    offset_y = 0.05
+ 
+     idx = 0
+-    for i in range(4):
+-        for j in range(4):
++    for i in range(rows):
++        for j in range(cols):
+             if idx < 16:
+-                initial_points[idx] = [x_vals[i], y_vals[j]]
++                # Apply hexagonal offset every other row
++                x = offset_x + j * x_spacing
++                y = offset_y + i * y_spacing
++                if i % 2 == 1:  # Offset odd rows
++                    x += x_spacing * 0.5
++                initial_points[idx] = [x, y]
+                 idx += 1
+ 
+-    # Add some randomness to avoid getting stuck in symmetric local optima
+-    initial_points += np.random.normal(0, 0.01, (16, 2))
++    # Add slight randomization to break symmetry
++    initial_points += np.random.normal(0, 0.005, (16, 2))
+ 
+-    # Clamp to bounds
++    # Clamp to valid bounds to ensure all points are inside [0,1]^2
+     initial_points = np.clip(initial_points, 0, 1)
+ 
+     # Flatten for optimization
+     x0 = initial_points.flatten()
+ 
+-    # Define bounds for each coordinate (0 to 1)
+-    bounds = [(0, 1) for _ in range(32)]
++    # Define tighter bounds to avoid boundary issues
++    bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+ 
+-    # First use differential evolution for global search
+-    with warnings.catch_warnings():
+-        warnings.simplefilter("ignore")
+-        de_result = differential_evolution(
++    # Use a hybrid optimization approach
++    # Phase 1: Differential Evolution for global search
++    try:
++        de_start = time.time()
++        with warnings.catch_warnings():
++            warnings.simplefilter("ignore")
++            de_result = differential_evolution(
++                bounded_objective,
++                bounds,
++                seed=42,
++                maxiter=50,  # Reduced for faster execution
++                popsize=20,
++                tol=1e-6,
++                mutation=(0.5, 1.0),
++                recombination=0.7
++            )
++        de_time = time.time() - de_start
++
++        if de_result.success and -de_result.fun > 0.15:
++            x0 = de_result.x
++        else:
++            # If DE doesn't find good solution, use the structured start
++            pass
++
++    except Exception as e:
++        print(f"Differential evolution failed: {e}")
++        # Fall back to just using the structured initialization
++
++    # Phase 2: Local optimization with adaptive iteration limits
++    # More aggressive optimization with SLSQP for final refinement
++    try:
++        # Set up adaptive iteration count
++        adaptive_iter = min(1000, max(100, int(1000 * (1 - (-objective(x0) / 0.5)))))
++
++        result = minimize(
+             bounded_objective,
+-            bounds,
+-            seed=42,
+-            maxiter=100,
+-            popsize=15,
+-            tol=1e-6
++            x0,
++            method='SLSQP',
++            bounds=bounds,
++            constraints={'type': 'ineq', 'fun': constraint_func},
++            options={
++                'maxiter': adaptive_iter,
++                'ftol': 1e-9,
++                'gtol': 1e-9
++            },
++            callback=None
+         )
+ 
+-    # If DE didn't work well, fall back to local optimization
+-    if de_result.success and -de_result.fun > 0.1:  # If we found something decent
+-        x0 = de_result.x
+-    else:
+-        # Try a few different starting configurations
+-        best_x = x0
+-        best_value = objective(x0)
+-
+-        for attempt in range(3):
+-            # Random perturbation
+-            perturbed = x0 + np.random.normal(0, 0.05, 32)
+-            # Clamp to bounds
+-            perturbed = np.clip(perturbed, 0, 1)
+-
+-            # Local optimization
+-            local_result = minimize(
++        if result.success:
++            x0 = result.x
++        else:
++            # If SLSQP fails, use L-BFGS-B as fallback
++            lbfgs_result = minimize(
+                 bounded_objective,
+-                perturbed,
++                x0,
+                 method='L-BFGS-B',
+                 bounds=bounds,
+-                options={'maxiter': 100}
++                options={'maxiter': 300}
+             )
++            if lbfgs_result.success:
++                x0 = lbfgs_result.x
+ 
+-            if local_result.success:
+-                value = objective(local_result.x)
+-                if value < best_value:  # Since we're minimizing negative ratio
+-                    best_value = value
+-                    best_x = local_result.x
++    except Exception as e:
++        print(f"Local optimization failed: {e}")
++        # Fallback to the structured initialization
+ 
+-        x0 = best_x
++    # Final refinement step with additional local optimization
++    try:
++        # Try SLSQP again with refined starting point
++        final_result = minimize(
++            bounded_objective,
++            x0,
++            method='SLSQP',
++            bounds=bounds,
++            constraints={'type': 'ineq', 'fun': constraint_func},
++            options={'maxiter': 200, 'ftol': 1e-10, 'gtol': 1e-10}
++        )
+ 
+-    # Final local optimization with L-BFGS-B for fine-tuning
+-    final_result = minimize(
+-        bounded_objective,
+-        x0,
+-        method='L-BFGS-B',
+-        bounds=bounds,
+-        options={'maxiter': 500}
+-    )
++        if final_result.success:
++            x0 = final_result.x
++    except Exception as e:
++        print(f"Final optimization failed: {e}")
+ 
+-    # Extract optimized points
+-    optimized_points = final_result.x.reshape(-1, 2)
++    # Extract optimized points and ensure they are within bounds
++    optimized_points = np.clip(x0.reshape(-1, 2), 1e-8, 1-1e-8)
+ 
+-    # Ensure all points are within bounds
+-    optimized_points = np.clip(optimized_points, 0, 1)
++    # Double-check constraint satisfaction
++    if np.any(optimized_points < 1e-8) or np.any(optimized_points > 1-1e-8):
++        print("Warning: Some points out of bounds after optimization")
++        optimized_points = np.clip(optimized_points, 1e-8, 1-1e-8)
+ 
+     return optimized_points
+ 
+ 
+ # EVOLVE-BLOCK-END

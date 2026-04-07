@@ -1,0 +1,82 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def generate_hexagonal_grid(n_circles, width, height):
+    """Generate initial circle positions in a hexagonal grid pattern."""
+    # Calculate approximate circle radius based on area coverage
+    total_area = width * height
+    circle_area = total_area / n_circles
+    radius = np.sqrt(circle_area / np.pi)
+
+    # Create hexagonal grid
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+
+    # Adjust grid dimensions to fit within bounds
+    if rows * cols < n_circles:
+        cols += 1
+
+    # Hexagonal spacing
+    dx = 2 * radius
+    dy = radius * np.sqrt(3)
+
+    # Adjust grid to fit within rectangle
+    grid_width = cols * dx
+    grid_height = rows * dy
+
+    # Center the grid
+    offset_x = (width - grid_width) / 2
+    offset_y = (height - grid_height) / 2
+
+    # Generate positions
+    positions = []
+    for i in range(rows):
+        for j in range(cols):
+            x = offset_x + j * dx + (i % 2) * dx / 2
+            y = offset_y + i * dy
+
+            # Only include if within bounds
+            if x >= radius and x <= width - radius and y >= radius and y <= height - radius:
+                positions.append([x, y, radius])
+                if len(positions) >= n_circles:
+                    break
+        if len(positions) >= n_circles:
+            break
+
+    # Trim to exact count
+    while len(positions) > n_circles:
+        positions.pop()
+
+    return np.array(positions)
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle with perimeter 4, so width + height = 2
+    # Using width = 1.5, height = 0.5 gives us good aspect ratio for dense packing
+    width, height = 1.5, 0.5
+
+    # Start with hexagonal grid initialization
+    circles = generate_hexagonal_grid(n, width, height)
+
+    # Set all radii to same value initially
+    circles[:, 2] = 0.05
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

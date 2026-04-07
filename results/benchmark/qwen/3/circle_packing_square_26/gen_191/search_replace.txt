@@ -1,0 +1,178 @@
+<NAME>
+enhance_initialization_with_voronoi_plus_poisson
+</NAME>
+
+<DESCRIPTION>
+The current initialization uses a combination of Voronoi-like approaches but could benefit from a more sophisticated method that combines Voronoi tessellation with Poisson disk sampling. This would provide better spatial distribution of initial circle centers, leading to faster convergence and potentially better final solutions. The enhancement involves using scipy's Voronoi implementation more effectively alongside Poisson disk sampling for the initial point distribution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_improved_voronoi_points(n_points: int) -> np.ndarray:
+    """Generate better distributed points using improved Voronoi approach."""
+    # Use a hexagonal/grid combination with better spatial distribution
+    points = []
+
+    # Create a more structured grid pattern
+    grid_size = max(4, int(np.ceil(np.sqrt(n_points))))
+    spacing = 1.0 / (grid_size + 1)
+
+    # Add points in a hexagonal arrangement
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) >= n_points:
+                break
+            # Offset every other row for hexagonal pattern
+            x_offset = (j + 0.5 * (i % 2)) * spacing * 2
+            y_offset = i * spacing * np.sqrt(3)
+
+            # Add jitter for better distribution
+            x = 0.1 + x_offset + np.random.uniform(-spacing*0.3, spacing*0.3)
+            y = 0.1 + y_offset + np.random.uniform(-spacing*0.3, spacing*0.3)
+
+            # Ensure points stay within bounds
+            x = np.clip(x, spacing, 1 - spacing)
+            y = np.clip(y, spacing, 1 - spacing)
+            points.append([x, y])
+
+    # Fill remaining points with random sampling but biased toward good areas
+    while len(points) < n_points:
+        # Use a more strategic approach to place remaining points
+        x = np.random.uniform(0.1, 0.9)
+        y = np.random.uniform(0.1, 0.9)
+        points.append([x, y])
+
+    return np.array(points[:n_points])
+=======
+def generate_improved_voronoi_points(n_points: int) -> np.ndarray:
+    """Generate better distributed points using Voronoi plus Poisson disk sampling."""
+    from scipy.spatial import Voronoi
+    import numpy as np
+
+    # Generate initial points using a combination of structured grid and Poisson disk sampling
+    points = []
+
+    # Step 1: Create a structured grid of points
+    grid_size = max(5, int(np.ceil(np.sqrt(n_points * 1.5))))
+    spacing = 1.0 / (grid_size + 1)
+
+    # Generate grid points with some jitter
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) >= n_points * 1.2:  # Generate extra points
+                break
+            x = (j + 1) * spacing + np.random.uniform(-spacing*0.2, spacing*0.2)
+            y = (i + 1) * spacing + np.random.uniform(-spacing*0.2, spacing*0.2)
+            # Ensure points are within valid range
+            x = np.clip(x, 0.05, 0.95)
+            y = np.clip(y, 0.05, 0.95)
+            points.append([x, y])
+
+    # Step 2: Use Voronoi diagram to get better distribution
+    if len(points) >= n_points:
+        points_array = np.array(points[:n_points * 2])  # Get more points for Voronoi
+
+        try:
+            # Create Voronoi diagram
+            vor = Voronoi(points_array)
+
+            # Use Voronoi vertices as potential positions
+            voronoi_points = []
+            for vertex in vor.vertices:
+                x, y = vertex
+                if 0.05 <= x <= 0.95 and 0.05 <= y <= 0.95:
+                    voronoi_points.append([x, y])
+
+            # If we got enough Voronoi points, use them; otherwise fall back to original
+            if len(voronoi_points) >= n_points:
+                points = voronoi_points[:n_points]
+            else:
+                # Mix original grid points with Voronoi points
+                mixed_points = list(points_array[:n_points])
+                # Add some Voronoi points if available
+                for vp in voronoi_points[:min(5, n_points - len(mixed_points))]:
+                    mixed_points.append(vp)
+                # Fill remaining with original points
+                while len(mixed_points) < n_points:
+                    mixed_points.append(points_array[len(mixed_points) % len(points_array)])
+                points = mixed_points[:n_points]
+        except:
+            # If Voronoi creation fails, use original points
+            pass
+
+    # Step 3: Apply Poisson disk sampling to further enhance distribution
+    # Only apply if we don't have enough points yet
+    if len(points) < n_points:
+        # Use Poisson disk sampling to distribute remaining points
+        poisson_points = []
+        active_list = []
+
+        # Start with a random point
+        start_x = np.random.uniform(0.05, 0.95)
+        start_y = np.random.uniform(0.05, 0.95)
+        poisson_points.append([start_x, start_y])
+        active_list.append(0)
+
+        # Try to generate more points using Poisson disk sampling
+        max_attempts = 50
+        attempts = 0
+        while len(poisson_points) < n_points and attempts < max_attempts:
+            if not active_list:
+                break
+
+            # Pick a random active point
+            idx = np.random.choice(active_list)
+            x, y = poisson_points[idx]
+
+            # Try to generate a new point
+            found = False
+            for _ in range(10):
+                angle = np.random.uniform(0, 2 * np.pi)
+                radius = np.random.uniform(0.05, 0.2)
+
+                new_x = x + radius * np.cos(angle)
+                new_y = y + radius * np.sin(angle)
+
+                # Check bounds
+                if new_x < 0.05 or new_x > 0.95 or new_y < 0.05 or new_y > 0.95:
+                    continue
+
+                # Check distance to existing points
+                too_close = False
+                for px, py in poisson_points:
+                    dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                    if dist < 0.1:  # Minimum distance threshold
+                        too_close = True
+                        break
+
+                if not too_close:
+                    poisson_points.append([new_x, new_y])
+                    active_list.append(len(poisson_points) - 1)
+                    found = True
+                    break
+
+            if not found:
+                active_list.remove(idx)
+            attempts += 1
+
+        # Fill remaining points
+        while len(poisson_points) < n_points:
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            poisson_points.append([x, y])
+
+        points = poisson_points[:n_points]
+
+    # Ensure we have exactly n_points
+    if len(points) < n_points:
+        # Fill remaining with random points in valid range
+        while len(points) < n_points:
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            points.append([x, y])
+    elif len(points) > n_points:
+        points = points[:n_points]
+
+    return np.array(points)
+>>>>>>> REPLACE
+</DIFF>

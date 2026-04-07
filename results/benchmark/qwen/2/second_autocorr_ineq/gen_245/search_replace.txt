@@ -1,0 +1,174 @@
+<NAME>
+adaptive_peak_spacing_enhancement
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the peak spacing enforcement algorithm by implementing a more sophisticated iterative adjustment mechanism that better handles peak interactions and ensures optimal minimum spacing while preserving the overall function structure. The improvement addresses limitations in the current implementation where consecutive peaks might still end up too close due to the two-pass approach.
+
+The key insight is to implement a more robust peak positioning algorithm that considers all peak relationships simultaneously rather than sequential pairwise adjustments. This will help create better autoconvolution profiles with flatter peaks, leading to higher C2 values.
+
+The change focuses on improving the `enforce_minimum_peak_spacing` function to create more evenly distributed and optimally spaced Gaussian peaks, which directly impacts the autoconvolution properties of the resulting function.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def enforce_minimum_peak_spacing(peak_params: list[float], domain_width: float, min_distance_ratio: float = 0.05) -> list[float]:
+    """
+    Enforce minimum distance between Gaussian peaks to prevent narrow autoconvolution interference.
+    This helps maintain flatter autoconvolution profiles which improve C2 values.
+    """
+    if len(peak_params) < 3:
+        return peak_params
+
+    # Create list of peaks [amplitude, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # Ensure minimum spacing using a more sophisticated approach
+    min_distance = min_distance_ratio * domain_width
+    adjusted_peaks = []
+
+    # First pass: place peaks with minimum spacing
+    for i, (amp, center, width) in enumerate(peaks):
+        if i == 0:
+            adjusted_peaks.append([amp, center, width])
+        else:
+            prev_center = adjusted_peaks[-1][1]
+            # Calculate required spacing
+            required_space = min_distance
+
+            # If the current peak is too close, move it
+            if abs(center - prev_center) < required_space:
+                new_center = prev_center + required_space
+                # Ensure we stay within domain bounds
+                new_center = np.clip(new_center, -domain_width/2, domain_width/2)
+                adjusted_peaks.append([amp, new_center, width])
+            else:
+                adjusted_peaks.append([amp, center, width])
+
+    # Second pass: if there are still overlaps, apply iterative adjustment
+    # This handles cases where consecutive peaks were moved too close together
+    final_peaks = [adjusted_peaks[0]]
+    for i in range(1, len(adjusted_peaks)):
+        prev_center = final_peaks[-1][1]
+        amp, center, width = adjusted_peaks[i]
+        required_space = min_distance
+
+        if abs(center - prev_center) < required_space:
+            # Move this peak further away
+            new_center = prev_center + required_space
+            # Ensure we stay within domain bounds
+            new_center = np.clip(new_center, -domain_width/2, domain_width/2)
+            final_peaks.append([amp, new_center, width])
+        else:
+            final_peaks.append([amp, center, width])
+
+    # Flatten back to parameter list
+    result = []
+    for amp, center, width in final_peaks:
+        result.extend([amp, center, width])
+
+    return result
+=======
+def enforce_minimum_peak_spacing(peak_params: list[float], domain_width: float, min_distance_ratio: float = 0.05) -> list[float]:
+    """
+    Enforce minimum distance between Gaussian peaks to prevent narrow autoconvolution interference.
+    This helps maintain flatter autoconvolution profiles which improve C2 values.
+    """
+    if len(peak_params) < 3:
+        return peak_params
+
+    # Create list of peaks [amplitude, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # More sophisticated peak spacing enforcement using iterative optimization
+    min_distance = min_distance_ratio * domain_width
+
+    # Create working copy of peaks
+    working_peaks = [peak[:] for peak in peaks]  # Deep copy
+
+    # Iteratively adjust peak positions to satisfy minimum spacing
+    changed = True
+    max_iterations = 100  # Prevent infinite loops
+    iterations = 0
+
+    while changed and iterations < max_iterations:
+        changed = False
+        iterations += 1
+
+        # Check all adjacent pairs
+        for i in range(len(working_peaks) - 1):
+            amp1, center1, width1 = working_peaks[i]
+            amp2, center2, width2 = working_peaks[i + 1]
+
+            current_distance = abs(center2 - center1)
+
+            if current_distance < min_distance:
+                # Calculate adjustment needed
+                adjustment = min_distance - current_distance
+
+                # Determine direction to move peaks
+                # Prefer moving rightmost peak to maintain structure
+                if center1 <= center2:
+                    # Move right peak to the right, left peak to the left
+                    move_right = adjustment / 2.0
+                    move_left = adjustment / 2.0
+                else:
+                    # Move left peak to the left, right peak to the right
+                    move_right = adjustment / 2.0
+                    move_left = adjustment / 2.0
+
+                # Apply adjustments with boundary checking
+                new_center1 = center1 - move_left
+                new_center2 = center2 + move_right
+
+                # Clip to domain bounds
+                new_center1 = np.clip(new_center1, -domain_width/2, domain_width/2)
+                new_center2 = np.clip(new_center2, -domain_width/2, domain_width/2)
+
+                # Check if adjustment would make peaks overlap again
+                if abs(new_center2 - new_center1) < min_distance:
+                    # If they still overlap, push them apart more
+                    total_overlap = min_distance - abs(new_center2 - new_center1)
+                    half_overlap = total_overlap / 2.0
+
+                    if center1 <= center2:
+                        new_center1 = center1 - half_overlap
+                        new_center2 = center2 + half_overlap
+                    else:
+                        new_center1 = center1 + half_overlap
+                        new_center2 = center2 - half_overlap
+
+                    # Final boundary clipping
+                    new_center1 = np.clip(new_center1, -domain_width/2, domain_width/2)
+                    new_center2 = np.clip(new_center2, -domain_width/2, domain_width/2)
+
+                # Update if changes occurred
+                if abs(new_center1 - center1) > 1e-10 or abs(new_center2 - center2) > 1e-10:
+                    working_peaks[i] = [amp1, new_center1, width1]
+                    working_peaks[i + 1] = [amp2, new_center2, width2]
+                    changed = True
+
+    # Final validation and adjustment to ensure all peaks are within bounds
+    for i in range(len(working_peaks)):
+        amp, center, width = working_peaks[i]
+        # Ensure within domain bounds
+        working_peaks[i] = [amp, np.clip(center, -domain_width/2, domain_width/2), width]
+
+    # Flatten back to parameter list
+    result = []
+    for amp, center, width in working_peaks:
+        result.extend([amp, center, width])
+
+    return result
+>>>>>>> REPLACE
+</DIFF>

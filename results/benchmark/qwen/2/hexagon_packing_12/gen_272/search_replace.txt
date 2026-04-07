@@ -1,0 +1,211 @@
+<NAME>
+add_spatial_hashing_optimization
+</NAME>
+
+<DESCRIPTION>
+The main improvement is to enhance the spatial hashing implementation by making it more efficient and accurate. The current implementation uses a Python defaultdict which can be slow. I'll replace it with a more efficient NumPy-based hash grid that avoids Python overhead and improves performance during overlap checking. This change directly addresses one of the key bottlenecks in the geometric validation process.
+
+Additionally, I'm adding a performance optimization by implementing a more aggressive early termination condition in the fitness evaluation - if we detect that a configuration is clearly invalid (too large outer hexagon or too many overlaps), we can skip expensive computations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_spatial_hash(hex_vertices_list, cell_size=2.0):
+    """Create spatial hash grid for fast overlap checking"""
+    hash_grid = defaultdict(list)
+    for i, vertices in enumerate(hex_vertices_list):
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Add to all relevant cells
+        start_col = int(min_x // cell_size)
+        end_col = int(max_x // cell_size) + 1
+        start_row = int(min_y // cell_size)
+        end_row = int(max_y // cell_size) + 1
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                hash_grid[(col, row)].append(i)
+    return hash_grid
+
+def get_overlapping_indices(hash_grid, hex_index, hex_vertices, cell_size=2.0):
+    """Get indices of potentially overlapping hexagons using spatial hash"""
+    overlapping = set()
+    # Get bounding box of hexagon
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+
+    # Check all relevant cells
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            if (col, row) in hash_grid:
+                for idx in hash_grid[(col, row)]:
+                    if idx != hex_index:
+                        overlapping.add(idx)
+    return overlapping
+=======
+def create_spatial_hash_numpy(hex_vertices_list, cell_size=2.0):
+    """Create spatial hash grid for fast overlap checking using NumPy for efficiency"""
+    # Precompute bounding boxes for all hexagons
+    n = len(hex_vertices_list)
+    min_xs = np.array([min(v[0] for v in vertices) for vertices in hex_vertices_list])
+    max_xs = np.array([max(v[0] for v in vertices) for vertices in hex_vertices_list])
+    min_ys = np.array([min(v[1] for v in vertices) for vertices in hex_vertices_list])
+    max_ys = np.array([max(v[1] for v in vertices) for vertices in hex_vertices_list])
+
+    # Calculate grid dimensions
+    min_x, max_x = np.min(min_xs), np.max(max_xs)
+    min_y, max_y = np.min(min_ys), np.max(max_ys)
+
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    # Create grid structure
+    grid_width = end_col - start_col
+    grid_height = end_row - start_row
+    grid = np.full((grid_height, grid_width), -1, dtype=np.int32)
+    grid_counts = np.zeros((grid_height, grid_width), dtype=np.int32)
+    grid_indices = np.full((grid_height, grid_width, 10), -1, dtype=np.int32)  # Assuming max 10 items per cell
+
+    # Fill grid
+    for i in range(n):
+        min_x_i, max_x_i = min_xs[i], max_xs[i]
+        min_y_i, max_y_i = min_ys[i], max_ys[i]
+
+        # Get grid cell indices
+        col_start = int(min_x_i // cell_size) - start_col
+        col_end = int(max_x_i // cell_size) - start_col + 1
+        row_start = int(min_y_i // cell_size) - start_row
+        row_end = int(max_y_i // cell_size) - start_row + 1
+
+        # Add to relevant cells
+        for col in range(col_start, min(col_end, grid_width)):
+            for row in range(row_start, min(row_end, grid_height)):
+                if grid_counts[row, col] < 10:  # Assuming max 10 per cell
+                    grid_indices[row, col, grid_counts[row, col]] = i
+                    grid_counts[row, col] += 1
+
+    return grid, grid_counts, grid_indices, start_col, start_row, cell_size
+
+def get_overlapping_indices_numpy(grid, grid_counts, grid_indices, hex_index, hex_vertices,
+                                 start_col, start_row, cell_size=2.0):
+    """Get indices of potentially overlapping hexagons using spatial hash (NumPy version)"""
+    # Get bounding box of hexagon
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+
+    # Check all relevant cells
+    start_col_idx = int(min_x // cell_size) - start_col
+    end_col_idx = int(max_x // cell_size) - start_col + 1
+    start_row_idx = int(min_y // cell_size) - start_row
+    end_row_idx = int(max_y // cell_size) - start_row + 1
+
+    overlapping = set()
+
+    for col in range(max(0, start_col_idx), min(grid.shape[1], end_col_idx)):
+        for row in range(max(0, start_row_idx), min(grid.shape[0], end_row_idx)):
+            if grid_counts[row, col] > 0:
+                for i in range(grid_counts[row, col]):
+                    idx = grid_indices[row, col, i]
+                    if idx != hex_index and idx >= 0:
+                        overlapping.add(idx)
+
+    return overlapping
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_total_penalty(hex_data, outer_radius):
+    """Calculate total penalty for all hexagons using spatial hashing"""
+    n = len(hex_data)
+
+    # Precompute vertices for all hexagons
+    hex_vertices_list = [hexagon_vertices(hex_data[i][0], hex_data[i][1], hex_data[i][2]) for i in range(n)]
+
+    # Create spatial hash
+    hash_grid = create_spatial_hash(hex_vertices_list)
+
+    total_penalty = 0
+
+    # Check containment for each hexagon
+    for i in range(n):
+        total_penalty += calculate_penalty_for_hexagon(i, hex_data, hex_vertices_list, outer_radius)
+
+    # Check overlaps using spatial hashing
+    for i in range(n):
+        # Get potentially overlapping hexagons
+        overlapping_indices = get_overlapping_indices(hash_grid, i, hex_vertices_list[i])
+
+        # Check actual overlaps
+        for j in overlapping_indices:
+            if i < j:  # Avoid double counting
+                vertices1 = hex_vertices_list[i]
+                vertices2 = hex_vertices_list[j]
+
+                if check_hexagon_overlap(vertices1, vertices2):
+                    total_penalty += 1000000  # Large penalty for overlaps
+
+    return total_penalty
+=======
+def calculate_total_penalty(hex_data, outer_radius):
+    """Calculate total penalty for all hexagons using spatial hashing with early termination"""
+    n = len(hex_data)
+
+    # Precompute vertices for all hexagons
+    hex_vertices_list = [hexagon_vertices(hex_data[i][0], hex_data[i][1], hex_data[i][2]) for i in range(n)]
+
+    # Create spatial hash efficiently
+    grid, grid_counts, grid_indices, start_col, start_row, cell_size = create_spatial_hash_numpy(hex_vertices_list)
+
+    total_penalty = 0
+
+    # Check containment for each hexagon
+    for i in range(n):
+        total_penalty += calculate_penalty_for_hexagon(i, hex_data, hex_vertices_list, outer_radius)
+
+        # Early termination: if containment penalty is already huge, don't bother with overlaps
+        if total_penalty > 100000:
+            return total_penalty
+
+    # Check overlaps using spatial hashing
+    overlap_count = 0
+    for i in range(n):
+        # Get potentially overlapping hexagons
+        overlapping_indices = get_overlapping_indices_numpy(grid, grid_counts, grid_indices, i, hex_vertices_list[i],
+                                                           start_col, start_row, cell_size)
+
+        # Check actual overlaps
+        for j in overlapping_indices:
+            if i < j:  # Avoid double counting
+                vertices1 = hex_vertices_list[i]
+                vertices2 = hex_vertices_list[j]
+
+                if check_hexagon_overlap(vertices1, vertices2):
+                    total_penalty += 1000000  # Large penalty for overlaps
+                    overlap_count += 1
+
+                    # Early termination: if too many overlaps, stop checking
+                    if overlap_count > 10:
+                        return total_penalty
+
+    return total_penalty
+>>>>>>> REPLACE
+
+</DIFF>

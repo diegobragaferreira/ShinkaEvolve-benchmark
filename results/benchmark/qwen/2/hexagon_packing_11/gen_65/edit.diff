@@ -1,0 +1,437 @@
+--- a/original.py
++++ b/original.py
+@@ -1,236 +1,352 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.optimize import differential_evolution
++from scipy.optimize import differential_evolution, minimize
+ import time
+ 
+ def create_regular_hexagon(center=(0,0), side_length=1, rotation=0):
+     """Create vertices of a regular hexagon"""
+     angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation)
+     vertices = np.column_stack([center[0] + side_length * np.cos(angles),
+                                center[1] + side_length * np.sin(angles)])
+     return vertices[:-1]  # Remove last vertex to close the polygon
+ 
+ def hexagon_vertices(position, rotation_deg, side_length=1):
+     """Get vertices of a hexagon at given position and rotation"""
+     return create_regular_hexagon(position, side_length, rotation_deg)
+ 
+ def point_in_hexagon(point, hex_vertices):
+     """Check if point is inside hexagon using ray casting method"""
+     x, y = point
+     n = len(hex_vertices)
+     inside = False
+ 
+     p1x, p1y = hex_vertices[0]
+     for i in range(1, n + 1):
+         p2x, p2y = hex_vertices[i % n]
+         if y > min(p1y, p2y):
+             if y <= max(p1y, p2y):
+                 if x <= max(p1x, p2x):
+                     if p1y != p2y:
+                         xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                     if p1x == p2x or x <= xinters:
+                         inside = not inside
+         p1x, p1y = p2x, p2y
+     return inside
+ 
+ def hexagons_overlap(hex1_vertices, hex2_vertices):
+     """Check if two hexagons overlap using bounding box and then SAT"""
+     # Quick bounding box check
+     min1 = np.min(hex1_vertices, axis=0)
+     max1 = np.max(hex1_vertices, axis=0)
+     min2 = np.min(hex2_vertices, axis=0)
+     max2 = np.max(hex2_vertices, axis=0)
+ 
+     if max1[0] < min2[0] or max2[0] < min1[0] or max1[1] < min2[1] or max2[1] < min1[1]:
+         return False
+ 
+     # More precise SAT check
+     # Collect all edges of both hexagons
+     edges1 = []
+     edges2 = []
+ 
+     for i in range(len(hex1_vertices)):
+         p1 = hex1_vertices[i]
+         p2 = hex1_vertices[(i+1) % len(hex1_vertices)]
+         edge = p2 - p1
+         edges1.append(edge)
+ 
+     for i in range(len(hex2_vertices)):
+         p1 = hex2_vertices[i]
+         p2 = hex2_vertices[(i+1) % len(hex2_vertices)]
+         edge = p2 - p1
+         edges2.append(edge)
+ 
+     # Check separating axes (normals to edges)
+     all_edges = edges1 + edges2
+ 
+     for edge in all_edges:
+         # Normal to this edge
+         normal = np.array([-edge[1], edge[0]])
+         norm = np.linalg.norm(normal)
+         if norm > 1e-10:  # Avoid zero vectors
+             normal = normal / norm
+ 
+         # Project both hexagons onto this axis
+         proj1 = [np.dot(vertex, normal) for vertex in hex1_vertices]
+         proj2 = [np.dot(vertex, normal) for vertex in hex2_vertices]
+ 
+         min1, max1 = min(proj1), max(proj1)
+         min2, max2 = min(proj2), max(proj2)
+ 
+         # If projections don't overlap, there's a separating axis
+         if max1 < min2 or max2 < min1:
+             return False
+ 
+     return True
+ 
+ def get_outer_hexagon_radius(inner_hex_data, outer_center=(0,0)):
+-    """Estimate required radius for outer hexagon"""
++    """Estimate required radius for outer hexagon using tighter bounding box"""
+     # Get all vertices of inner hexagons
+     max_dist = 0
+     for i in range(len(inner_hex_data)):
+         pos = (inner_hex_data[i][0], inner_hex_data[i][1])
+         rot = inner_hex_data[i][2]
+         vertices = hexagon_vertices(pos, rot, 1)
+ 
+         # Find max distance from center to any vertex
+         for vertex in vertices:
+             dist = np.linalg.norm(np.array(vertex) - np.array(outer_center))
+             max_dist = max(max_dist, dist)
+ 
+-    return max_dist + 0.1  # Add small margin
++    # Add a smaller margin to allow for proper containment
++    return max_dist * 1.05
++
++def calculate_outer_hex_side_length(inner_hex_data, outer_center=(0,0)):
++    """Calculate side length of outer hexagon that contains all inner hexagons"""
++    # Get all vertices of inner hexagons
++    max_dist = 0
++    for i in range(len(inner_hex_data)):
++        pos = (inner_hex_data[i][0], inner_hex_data[i][1])
++        rot = inner_hex_data[i][2]
++        vertices = hexagon_vertices(pos, rot, 1)
++
++        # Find max distance from center to any vertex
++        for vertex in vertices:
++            dist = np.linalg.norm(np.array(vertex) - np.array(outer_center))
++            max_dist = max(max_dist, dist)
++
++    # The outer hexagon has a circumradius equal to max_dist
++    # Convert circumradius to side length: s = r / (sqrt(3)/2) = 2*r/sqrt(3)
++    return max_dist * 2 / np.sqrt(3)
+ 
+ def evaluate_packing(inner_hex_data, outer_center=(0,0)):
+     """Evaluate if a packing is valid and return penalty score"""
+     n = len(inner_hex_data)
+     penalty = 0
+ 
+     # Get all hexagon vertices
+     hex_vertices = []
+     for i in range(n):
+         pos = (inner_hex_data[i][0], inner_hex_data[i][1])
+         rot = inner_hex_data[i][2]
+         vertices = hexagon_vertices(pos, rot, 1)
+         hex_vertices.append(vertices)
+ 
+     # Check pairwise overlaps
+     for i in range(n):
+         for j in range(i+1, n):
+             if hexagons_overlap(hex_vertices[i], hex_vertices[j]):
+-                penalty += 1000  # Large penalty for overlap
++                penalty += 10000  # Large penalty for overlap
+ 
+     # Check containment in outer hexagon
+     outer_radius = get_outer_hexagon_radius(inner_hex_data, outer_center)
+     outer_hex = create_regular_hexagon(outer_center, outer_radius, 0)
+ 
+     # Each vertex must be inside outer hexagon
+     for i in range(n):
+         for vertex in hex_vertices[i]:
+             if not point_in_hexagon(vertex, outer_hex):
+                 # Calculate how much it exceeds
+                 dist_to_center = np.linalg.norm(np.array(vertex) - np.array(outer_center))
+-                penalty += (dist_to_center - outer_radius)**2 * 100
++                penalty += (dist_to_center - outer_radius)**2 * 1000
+ 
+     # Return penalty (smaller means better)
+     return penalty
+ 
++def generate_diverse_initial_configs(num_configs=5):
++    """Generate diverse initial configurations"""
++    configs = []
++
++    # Configuration 1: Ring arrangement (similar to previous attempts)
++    base_config = np.array([
++        [0.0, 0.0, 0.0],       # center
++        [1.732, 0.0, 0.0],     # right
++        [-1.732, 0.0, 0.0],    # left
++        [0.866, 1.5, 0.0],     # top-right
++        [-0.866, 1.5, 0.0],    # top-left
++        [0.866, -1.5, 0.0],    # bottom-right
++        [-0.866, -1.5, 0.0],   # bottom-left
++        [2.598, 1.5, 0.0],     # far top-right
++        [-2.598, 1.5, 0.0],    # far top-left
++        [2.598, -1.5, 0.0],    # far bottom-right
++        [-2.598, -1.5, 0.0]    # far bottom-left
++    ])
++
++    for i in range(num_configs):
++        config = base_config.copy()
++        # Add small random perturbations
++        for j in range(len(config)):
++            config[j][0] += np.random.normal(0, 0.2)
++            config[j][1] += np.random.normal(0, 0.2)
++            config[j][2] += np.random.normal(0, 10)
++        configs.append(config.flatten())
++
++    # Configuration 2: Compact cluster arrangement
++    compact_config = np.array([
++        [0.0, 0.0, 0.0],       # center
++        [1.732, 0.0, 0.0],     # right
++        [-1.732, 0.0, 0.0],    # left
++        [0.866, 1.5, 0.0],     # top-right
++        [-0.866, 1.5, 0.0],    # top-left
++        [0.866, -1.5, 0.0],    # bottom-right
++        [-0.866, -1.5, 0.0],   # bottom-left
++        [1.732, 3.0, 0.0],     # far top
++        [0.0, 3.0, 0.0],       # far top-center
++        [-1.732, 3.0, 0.0],    # far top-left
++        [-3.464, 0.0, 0.0]     # far left
++    ])
++
++    for i in range(num_configs//2):
++        config = compact_config.copy()
++        # Add small random perturbations
++        for j in range(len(config)):
++            config[j][0] += np.random.normal(0, 0.3)
++            config[j][1] += np.random.normal(0, 0.3)
++            config[j][2] += np.random.normal(0, 15)
++        configs.append(config.flatten())
++
++    return configs
++
++def adaptive_bounds(current_best_solution=None, n_hexagons=11):
++    """Generate bounds that adapt to the current best solution"""
++    bounds = []
++
++    # If we have a current best solution, use it to narrow bounds
++    if current_best_solution is not None:
++        # Calculate the spread of current solution
++        positions = current_best_solution.reshape(n_hexagons, 3)[:, :2]
++        mean_pos = np.mean(positions, axis=0)
++        std_pos = np.std(positions, axis=0)
++
++        # Set bounds based on the spread plus some margin
++        pos_range = max(5.0, max(std_pos) * 3.0)  # At least 5 units, or 3 times std dev
++        rotation_range = 360.0
++
++        for _ in range(n_hexagons):
++            bounds.extend([(-pos_range, pos_range), (-pos_range, pos_range), (0, rotation_range)])
++    else:
++        # Default broad bounds
++        pos_range = 15.0
++        rotation_range = 360.0
++        for _ in range(n_hexagons):
++            bounds.extend([(-pos_range, pos_range), (-pos_range, pos_range), (0, rotation_range)])
++
++    return bounds
++
+ def optimize_hexagon_packing():
+-    """Optimize hexagon packing using differential evolution"""
+-    # Start with a better initial guess based on known good configurations
+-    # This is arranged in a more compact pattern than the naive grid
+-    initial_guess = np.array([
+-        # Central hexagon
+-        0.0, 0.0, 0.0,
+-        # First ring
+-        1.732, 0.0, 0.0,     # Right
+-        -1.732, 0.0, 0.0,    # Left
+-        0.866, 1.5, 0.0,     # Top-right
+-        -0.866, 1.5, 0.0,    # Top-left
+-        0.866, -1.5, 0.0,    # Bottom-right
+-        -0.866, -1.5, 0.0,   # Bottom-left
+-        # Second ring
+-        2.598, 1.5, 0.0,     # Far top-right
+-        -2.598, 1.5, 0.0,    # Far top-left
+-        2.598, -1.5, 0.0,    # Far bottom-right
+-        -2.598, -1.5, 0.0    # Far bottom-left
+-    ])
+-
+-    # Bounds for optimization (x,y,rotation for each hexagon)
+-    bounds = []
+-    for _ in range(11):
+-        bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # x, y, rotation
+-
+-    # Define objective function that minimizes the penalty
+-    def objective(params):
+-        # Reshape params into hexagon data
+-        inner_hex_data = np.zeros((11, 3))
+-        for i in range(11):
+-            inner_hex_data[i] = [params[3*i], params[3*i+1], params[3*i+2]]
+-
+-        # Evaluate the packing
+-        penalty = evaluate_packing(inner_hex_data)
+-
+-        # Return the penalty (smaller means better)
+-        return penalty
+-
+-    # Use differential evolution for global optimization
+-    try:
+-        result = differential_evolution(
+-            objective,
+-            bounds,
+-            maxiter=50,
+-            popsize=10,
+-            tol=1e-6,
+-            mutation=(0.5, 1),
+-            recombination=0.7,
+-            seed=42,
+-            disp=False
+-        )
+-
+-        # Extract final solution
+-        final_params = result.x
+-        inner_hex_data = np.zeros((11, 3))
+-        for i in range(11):
+-            inner_hex_data[i] = [final_params[3*i], final_params[3*i+1], final_params[3*i+2]]
+-
+-        # Calculate final outer hexagon size
+-        outer_radius = get_outer_hexagon_radius(inner_hex_data)
+-        outer_hex_side_length = outer_radius
+-        outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+-
+-        return inner_hex_data, outer_hex_data, outer_hex_side_length
+-
+-    except Exception as e:
+-        print(f"Optimization failed: {e}")
+-        # Return initial guess if optimization fails
+-        inner_hex_data = np.zeros((11, 3))
+-        for i in range(11):
+-            inner_hex_data[i] = [initial_guess[3*i], initial_guess[3*i+1], initial_guess[3*i+2]]
+-
+-        outer_radius = get_outer_hexagon_radius(inner_hex_data)
+-        outer_hex_side_length = outer_radius
+-        outer_hex_data = np.array([0.0, 0.0, 0.0])
+-
+-        return inner_hex_data, outer_hex_data, outer_hex_side_length
++    """Optimize hexagon packing using hybrid approach with multiple strategies"""
++    start_time = time.time()
++
++    # Try multiple initial configurations to avoid local optima
++    initial_configs = generate_diverse_initial_configs(10)
++
++    best_penalty = float('inf')
++    best_solution = None
++
++    # Run optimization on each initial configuration
++    for i, initial_flat in enumerate(initial_configs):
++        # Bounds for optimization (x,y,rotation for each hexagon)
++        bounds = adaptive_bounds(None, 11)
++
++        # Define objective function that minimizes the penalty
++        def objective(params):
++            # Reshape params into hexagon data
++            inner_hex_data = np.zeros((11, 3))
++            for j in range(11):
++                inner_hex_data[j] = [params[3*j], params[3*j+1], params[3*j+2]]
++
++            # Evaluate the packing
++            penalty = evaluate_packing(inner_hex_data)
++
++            # Return the penalty (smaller means better)
++            return penalty
++
++        # Use differential evolution for global optimization with reduced iterations for speed
++        try:
++            de_result = differential_evolution(
++                objective,
++                bounds,
++                maxiter=30,  # Reduced iterations for time constraint
++                popsize=15,   # Moderate population for balance
++                tol=1e-6,
++                mutation=(0.7, 1),  # Higher mutation for more exploration
++                recombination=0.9,  # High recombination
++                seed=42+i,  # Different seed for each run
++                disp=False
++            )
++
++            # Local refinement with L-BFGS-B
++            # Use the DE result as starting point for local optimization
++            refined_result = minimize(
++                objective,
++                de_result.x,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 30, 'ftol': 1e-9},
++                tol=1e-9
++            )
++
++            final_penalty = refined_result.fun
++
++            if final_penalty < best_penalty:
++                best_penalty = final_penalty
++                best_solution = refined_result.x
++
++        except Exception as e:
++            print(f"Optimization attempt {i} failed: {e}")
++            continue
++
++        # Early termination if we're running out of time
++        if time.time() - start_time > 150:  # Leave 30 seconds for final processing
++            break
++
++    # If no good solution was found, use a fallback configuration
++    if best_solution is None:
++        # Use the best known good configuration
++        fallback_config = np.array([
++            [0.0, 0.0, 0.0],
++            [1.732, 0.0, 0.0],
++            [-1.732, 0.0, 0.0],
++            [0.866, 1.5, 0.0],
++            [-0.866, 1.5, 0.0],
++            [0.866, -1.5, 0.0],
++            [-0.866, -1.5, 0.0],
++            [2.598, 1.5, 0.0],
++            [-2.598, 1.5, 0.0],
++            [2.598, -1.5, 0.0],
++            [-2.598, -1.5, 0.0]
++        ])
++        best_solution = fallback_config.flatten()
++
++    # Extract final solution
++    inner_hex_data = np.zeros((11, 3))
++    for i in range(11):
++        inner_hex_data[i] = [best_solution[3*i], best_solution[3*i+1], best_solution[3*i+2]]
++
++    # Calculate final outer hexagon size
++    outer_hex_side_length = calculate_outer_hex_side_length(inner_hex_data)
++    outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
++
++    return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     start_time = time.time()
+ 
+     # Try optimization
+     inner_hex_data, outer_hex_data, outer_hex_side_length = optimize_hexagon_packing()
+ 
+     print(f"Optimization completed in {time.time() - start_time:.2f} seconds")
+     print(f"Outer hex side length: {outer_hex_side_length:.6f}")
+     print(f"Inverse outer hex side length: {1/outer_hex_side_length:.6f}")
+ 
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ 
+ # EVOLVE-BLOCK-END

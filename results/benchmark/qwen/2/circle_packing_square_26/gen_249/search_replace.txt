@@ -1,0 +1,518 @@
+<NAME>
+adaptive_local_optimization
+</NAME>
+
+<DESCRIPTION>
+I'll implement adaptive local optimization that applies different refinement strategies based on the overlap severity of solutions. This builds upon the existing local_improvement function but makes it more sophisticated by analyzing the overlap pattern first and then applying the appropriate optimization approach - light refinement for sparse overlaps, moderate for medium overlaps, and intensive for dense overlaps. This should help achieve better convergence to high-quality solutions.
+
+The key insight is that different levels of overlap require different optimization approaches - too aggressive for sparse cases might disrupt good configurations, while too conservative for dense cases won't resolve overlaps effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_improvement(circles: np.ndarray) -> np.ndarray:
+    """Apply smart local improvement to increase radii while satisfying constraints"""
+    n = len(circles)
+    circles_copy = circles.copy()
+
+    # Perform multiple rounds of optimization
+    for round_num in range(30):
+        improved = False
+        for i in range(n):
+            x, y, r = circles_copy[i]
+
+            # Calculate max possible radius at current position
+            max_r = min(x, 1-x, y, 1-y)
+
+            if max_r <= r:
+                continue
+
+            # Try to increase radius
+            new_r = min(r + 0.01, max_r)
+
+            # Check if we can actually increase it without violating constraints
+            valid = True
+            for j in range(n):
+                if i != j:
+                    x2, y2, r2 = circles_copy[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist < new_r + r2:
+                        valid = False
+                        break
+
+            if valid and new_r > r:
+                circles_copy[i, 2] = new_r
+                improved = True
+
+        # If no improvements were made in this round, stop early
+        if not improved:
+            break
+
+    return circles_copy
+=======
+def analyze_overlap_severity(circles: np.ndarray) -> int:
+    """Calculate the number of overlap violations in the current configuration."""
+    n = len(circles)
+    overlaps = 0
+
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            if dist < r1 + r2:
+                overlaps += 1
+
+    return overlaps
+
+def adaptive_local_optimization(circles: np.ndarray) -> np.ndarray:
+    """Apply adaptive local optimization based on overlap severity."""
+    n = len(circles)
+    circles_copy = circles.copy()
+
+    # Analyze the overlap severity
+    overlap_severity = analyze_overlap_severity(circles_copy)
+
+    # Apply different optimization strategies based on overlap severity
+    if overlap_severity == 0:
+        # No overlaps - focus on radius maximization
+        return _radius_maximization_only(circles_copy)
+    elif overlap_severity < 10:
+        # Few overlaps - moderate refinement
+        return _moderate_refinement(circles_copy)
+    else:
+        # Many overlaps - intensive refinement with force-based approach
+        return _intensive_refinement(circles_copy)
+
+def _radius_maximization_only(circles: np.ndarray) -> np.ndarray:
+    """Optimize for maximum radius expansion with no overlaps."""
+    circles_copy = circles.copy()
+
+    # Multiple rounds of radius expansion
+    for round_num in range(50):
+        improved = False
+        for i in range(len(circles_copy)):
+            x, y, r = circles_copy[i]
+            max_r = min(x, 1-x, y, 1-y)
+
+            if max_r <= r:
+                continue
+
+            # More aggressive expansion for non-overlapping case
+            new_r = min(r + 0.015, max_r)
+
+            # Quick constraint check
+            valid = True
+            for j in range(len(circles_copy)):
+                if i != j:
+                    x2, y2, r2 = circles_copy[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist < new_r + r2:
+                        valid = False
+                        break
+
+            if valid and new_r > r:
+                circles_copy[i, 2] = new_r
+                improved = True
+
+        if not improved:
+            break
+
+    return circles_copy
+
+def _moderate_refinement(circles: np.ndarray) -> np.ndarray:
+    """Refinement for configurations with moderate overlaps."""
+    circles_copy = circles.copy()
+
+    # First pass: radius expansion with careful constraint checking
+    for i in range(len(circles_copy)):
+        x, y, r = circles_copy[i]
+        max_r = min(x, 1-x, y, 1-y)
+
+        if max_r <= r:
+            continue
+
+        new_r = min(r + 0.008, max_r)
+
+        # Check constraint
+        valid = True
+        for j in range(len(circles_copy)):
+            if i != j:
+                x2, y2, r2 = circles_copy[j]
+                dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                if dist < new_r + r2:
+                    valid = False
+                    break
+
+        if valid and new_r > r:
+            circles_copy[i, 2] = new_r
+
+    # Second pass: position adjustments for overlap resolution
+    for iteration in range(30):
+        moved_any = False
+        for i in range(len(circles_copy)):
+            x, y, r = circles_copy[i]
+            max_r = min(x, 1-x, y, 1-y)
+
+            if max_r <= r:
+                continue
+
+            # Look for overlaps
+            conflicting = []
+            for j in range(len(circles_copy)):
+                if i != j:
+                    x2, y2, r2 = circles_copy[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist < r + r2:
+                        conflicting.append(j)
+
+            if conflicting:
+                # Apply gentle adjustments
+                dx = 0
+                dy = 0
+
+                for j in conflicting:
+                    x2, y2, r2 = circles_copy[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist > 0:
+                        dx += (x - x2) / dist * (r + r2 - dist) * 0.005
+                        dy += (y - y2) / dist * (r + r2 - dist) * 0.005
+
+                # Apply movement
+                new_x = x + dx
+                new_y = y + dy
+
+                # Bound the movement
+                new_x = np.clip(new_x, r, 1-r)
+                new_y = np.clip(new_y, r, 1-r)
+
+                if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                    circles_copy[i, 0] = new_x
+                    circles_copy[i, 1] = new_y
+                    moved_any = True
+
+        if not moved_any:
+            break
+
+    return circles_copy
+
+def _intensive_refinement(circles: np.ndarray) -> np.ndarray:
+    """Intensive refinement for configurations with many overlaps."""
+    circles_copy = circles.copy()
+
+    # Physics-inspired force-based relaxation for dense overlaps
+    n = len(circles_copy)
+
+    # Apply multiple rounds of force relaxation
+    for round_num in range(3):
+        # Initialize forces
+        forces = np.zeros((n, 2))
+
+        # Calculate forces between all pairs of circles
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles_copy[i]
+                x2, y2, r2 = circles_copy[j]
+                dx = x2 - x1
+                dy = y2 - y1
+                dist = np.sqrt(dx*dx + dy*dy)
+
+                if dist > 0 and dist < r1 + r2:
+                    # Overlapping - apply repulsive force
+                    force_magnitude = (r1 + r2 - dist) / dist
+                    forces[i, 0] += dx * force_magnitude * 0.03
+                    forces[i, 1] += dy * force_magnitude * 0.03
+                    forces[j, 0] -= dx * force_magnitude * 0.03
+                    forces[j, 1] -= dy * force_magnitude * 0.03
+                elif dist > 0:
+                    # Not overlapping - apply weak attractive force to encourage packing
+                    force_magnitude = 1.0 / (dist * dist * 0.01)
+                    forces[i, 0] -= dx * force_magnitude * 0.002
+                    forces[i, 1] -= dy * force_magnitude * 0.002
+                    forces[j, 0] += dx * force_magnitude * 0.002
+                    forces[j, 1] += dy * force_magnitude * 0.002
+
+        # Apply forces to move circles
+        for i in range(n):
+            x, y, r = circles_copy[i]
+
+            # Apply forces with damping
+            new_x = x + forces[i, 0] * 0.5
+            new_y = y + forces[i, 1] * 0.5
+
+            # Boundary constraints
+            new_x = np.clip(new_x, r, 1-r)
+            new_y = np.clip(new_y, r, 1-r)
+
+            circles_copy[i, 0] = new_x
+            circles_copy[i, 1] = new_y
+
+    # After force relaxation, attempt radius expansion
+    for i in range(n):
+        x, y, r = circles_copy[i]
+        max_r = min(x, 1-x, y, 1-y)
+
+        if max_r <= r:
+            continue
+
+        # Try to increase radius
+        new_r = min(r + 0.005, max_r)
+
+        # Check constraint with all other circles
+        valid = True
+        for j in range(n):
+            if i != j:
+                x2, y2, r2 = circles_copy[j]
+                dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                if dist < new_r + r2:
+                    valid = False
+                    break
+
+        if valid and new_r > r:
+            circles_copy[i, 2] = new_r
+
+    return circles_copy
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    for _ in range(pop_size):
+        # Use grid-based initialization
+        circles = create_grid_initialization(n_circles)
+
+        # Apply local optimization to improve the placement
+        circles = local_improvement(circles)
+
+        # Ensure validity through repair if needed
+        if not validate_circle_placement(circles):
+            circles = repair_constraints(circles)
+
+        population.append(circles)
+=======
+    for _ in range(pop_size):
+        # Use grid-based initialization
+        circles = create_grid_initialization(n_circles)
+
+        # Apply local optimization to improve the placement
+        circles = adaptive_local_optimization(circles)
+
+        # Ensure validity through repair if needed
+        if not validate_circle_placement(circles):
+            circles = repair_constraints(circles)
+
+        population.append(circles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def constraint_aware_crossover(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+    """Perform crossover that respects constraints and produces valid offspring"""
+    n = len(parent1)
+    child = np.zeros_like(parent1)
+
+    # Determine which circles are safe to copy from each parent based on overlap risk
+    safe_from_parent1 = np.ones(n, dtype=bool)
+    safe_from_parent2 = np.ones(n, dtype=bool)
+
+    # Analyze overlap risks between parents
+    points1 = parent1[:, :2]
+    points2 = parent2[:, :2]
+    tree1 = cKDTree(points1)
+    tree2 = cKDTree(points2)
+
+    for i in range(n):
+        x1, y1, r1 = parent1[i]
+        x2, y2, r2 = parent2[i]
+
+        # Consider if swapping circles would cause immediate overlap
+        # Use conservative estimate with small safety margin
+        if np.sqrt((x1 - x2)**2 + (y1 - y2)**2) < 1.5*(r1 + r2):
+            # If too close, decide carefully
+            dist1 = np.min([np.sqrt((x1 - px)**2 + (y1 - py)**2) for j, (px, py, _) in enumerate(parent2) if j != i])
+            dist2 = np.min([np.sqrt((x2 - px)**2 + (y2 - py)**2) for j, (px, py, _) in enumerate(parent1) if j != i])
+
+            # Prefer keeping the circle that's farther from others
+            if dist1 > dist2:
+                safe_from_parent2[i] = False
+            else:
+                safe_from_parent1[i] = False
+
+    # Now perform crossover safely
+    for i in range(n):
+        # Decide from which parent to take this circle
+        if safe_from_parent1[i] and safe_from_parent2[i]:
+            # Both safe, choose randomly
+            if random.random() < 0.5:
+                child[i] = parent1[i]
+            else:
+                child[i] = parent2[i]
+        elif safe_from_parent1[i]:
+            child[i] = parent1[i]
+        elif safe_from_parent2[i]:
+            child[i] = parent2[i]
+        else:
+            # Neither safe, pick one conservatively
+            if random.random() < 0.5:
+                child[i] = parent1[i]
+            else:
+                child[i] = parent2[i]
+
+    return child
+=======
+def constraint_aware_crossover(parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+    """Perform crossover that respects constraints and produces valid offspring"""
+    n = len(parent1)
+    child = np.zeros_like(parent1)
+
+    # Analyze overlap risks between parents
+    points1 = parent1[:, :2]
+    points2 = parent2[:, :2]
+    tree1 = cKDTree(points1)
+    tree2 = cKDTree(points2)
+
+    # Determine overlap risk for each circle pair
+    overlap_risks = np.zeros(n)
+    for i in range(n):
+        x1, y1, r1 = parent1[i]
+        x2, y2, r2 = parent2[i]
+
+        # Risk based on proximity and potential overlap
+        dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+        overlap_risk = max(0, dist - (r1 + r2))
+        overlap_risks[i] = overlap_risk
+
+    # Now perform crossover with risk-aware strategy
+    for i in range(n):
+        # Decide from which parent to take this circle based on overlap risk
+        risk = overlap_risks[i]
+
+        # If overlap risk is very low, cross over randomly
+        if risk < 0.001:
+            if random.random() < 0.5:
+                child[i] = parent1[i]
+            else:
+                child[i] = parent2[i]
+        # If there's some risk but not severe, cross over with preference to less risky parent
+        elif risk < 0.01:
+            if random.random() < 0.7:  # 70% chance to choose the parent with better positioning
+                # Choose parent with higher minimum distance to other circles
+                min_dist1 = np.min([np.sqrt((x1 - px)**2 + (y1 - py)**2) for j, (px, py, _) in enumerate(parent1) if j != i])
+                min_dist2 = np.min([np.sqrt((x2 - px)**2 + (y2 - py)**2) for j, (px, py, _) in enumerate(parent2) if j != i])
+                if min_dist1 > min_dist2:
+                    child[i] = parent1[i]
+                else:
+                    child[i] = parent2[i]
+            else:
+                # Random choice
+                if random.random() < 0.5:
+                    child[i] = parent1[i]
+                else:
+                    child[i] = parent2[i]
+        else:
+            # High risk - favor parent that's more isolated
+            min_dist1 = np.min([np.sqrt((x1 - px)**2 + (y1 - py)**2) for j, (px, py, _) in enumerate(parent1) if j != i])
+            min_dist2 = np.min([np.sqrt((x2 - px)**2 + (y2 - py)**2) for j, (px, py, _) in enumerate(parent2) if j != i])
+            if min_dist1 > min_dist2:
+                child[i] = parent1[i]
+            else:
+                child[i] = parent2[i]
+
+    return child
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate(individual: np.ndarray) -> np.ndarray:
+    """Apply smart mutation that respects spatial constraints"""
+    mutated = individual.copy()
+    n = len(mutated)
+
+    for i in range(n):
+        if random.random() < MUTATION_RATE:
+            x, y, r = mutated[i]
+
+            # Determine how much we can modify based on current position
+            max_x_shift = min(x, 1-x) * 0.5
+            max_y_shift = min(y, 1-y) * 0.5
+            max_radius_change = min(r, 0.5-r) * 0.8
+
+            # Choose type of mutation
+            mutation_type = random.choices(['position', 'radius'], weights=[0.7, 0.3])[0]
+
+            if mutation_type == 'position':
+                # Mutate position with bounded random shift
+                dx = (random.random() - 0.5) * max_x_shift * 2
+                dy = (random.random() - 0.5) * max_y_shift * 2
+                x += dx
+                y += dy
+
+                # Clip to valid bounds
+                x = np.clip(x, r, 1-r)
+                y = np.clip(y, r, 1-r)
+                mutated[i, 0] = x
+                mutated[i, 1] = y
+            else:
+                # Mutate radius
+                dr = (random.random() - 0.5) * max_radius_change * 2
+                r += dr
+                r = max(0.001, min(0.5, r))  # Keep reasonable bounds
+                mutated[i, 2] = r
+
+    # Apply constraint repair
+    repaired = repair_constraints(mutated)
+    return repaired
+=======
+def mutate(individual: np.ndarray) -> np.ndarray:
+    """Apply smart mutation that respects spatial constraints"""
+    mutated = individual.copy()
+    n = len(mutated)
+
+    for i in range(n):
+        if random.random() < MUTATION_RATE:
+            x, y, r = mutated[i]
+
+            # Determine how much we can modify based on current position and radius
+            max_x_shift = min(x, 1-x) * 0.5
+            max_y_shift = min(y, 1-y) * 0.5
+            max_radius_change = min(r, 0.5-r) * 0.8
+
+            # Choose type of mutation
+            mutation_type = random.choices(['position', 'radius'], weights=[0.7, 0.3])[0]
+
+            if mutation_type == 'position':
+                # Mutate position with adaptive magnitude based on boundary proximity
+                # More aggressive near center, more conservative near boundaries
+                boundary_factor = min(x, 1-x, y, 1-y) / 0.5
+                mutation_magnitude = 0.02 * boundary_factor
+
+                dx = (random.random() - 0.5) * max_x_shift * 2 * mutation_magnitude
+                dy = (random.random() - 0.5) * max_y_shift * 2 * mutation_magnitude
+                x += dx
+                y += dy
+
+                # Clip to valid bounds
+                x = np.clip(x, r, 1-r)
+                y = np.clip(y, r, 1-r)
+                mutated[i, 0] = x
+                mutated[i, 1] = y
+            else:
+                # Mutate radius with adaptive magnitude
+                radius_boundary_factor = min(r, 0.5-r) / 0.25
+                mutation_magnitude = 0.02 * radius_boundary_factor
+
+                dr = (random.random() - 0.5) * max_radius_change * 2 * mutation_magnitude
+                r += dr
+                r = max(0.001, min(0.5, r))  # Keep reasonable bounds
+                mutated[i, 2] = r
+
+    # Apply constraint repair
+    repaired = repair_constraints(mutated)
+    return repaired
+>>>>>>> REPLACE
+</DIFF>

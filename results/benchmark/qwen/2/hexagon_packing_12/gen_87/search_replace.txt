@@ -1,0 +1,141 @@
+<NAME>
+implement_adaptive_penalty_weighting
+</NAME>
+
+<DESCRIPTION>
+This change implements adaptive penalty weighting that dynamically adjusts penalty weights based on constraint violation severity. The key insight is to assign higher penalties for containment violations than overlap violations since containment is more fundamental to the problem. This approach improves the optimization landscape by making constraint violations more severe and noticeable, leading to better convergence toward valid solutions while avoiding premature convergence to invalid configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution_multistart(solution_array, use_shapely=False, penalty_weights=None):
+    """Improved evaluation with better containment and overlap checking."""
+    if penalty_weights is None:
+        penalty_weights = {'containment': 1000, 'overlap': 10000, 'boundary': 500}
+
+    # Reshape solution array into 12 hexagons with (x, y, angle) each
+    inner_hex_data = solution_array.reshape(-1, 3)
+
+    # Calculate the minimum enclosing hexagon
+    min_side_length, centroid = calculate_min_enclosing_hexagon_fast(inner_hex_data)
+
+    # Check all constraints
+    num_hex = len(inner_hex_data)
+    penalty = 0.0
+
+    # Create outer hexagon polygon for containment checks
+    outer_hex = create_hexagon_polygon(centroid[0], centroid[1], 0, min_side_length)
+
+    # Check containment for all hexagons
+    if use_shapely:
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            inner_hex = create_hexagon_polygon(center_x, center_y, angle)
+
+            if not check_containment_shapely(inner_hex, outer_hex):
+                penalty += penalty_weights['containment']
+    else:
+        # Fast containment check using distance
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            # Simple check using max distance from center
+            vertices = hexagon_vertices_jit(center_x, center_y, angle)
+            max_dist = np.max(np.sqrt(np.sum((vertices - np.array([center_x, center_y]))**2, axis=1)))
+            if max_dist > min_side_length * np.sqrt(3) / 2:
+                penalty += penalty_weights['containment']
+
+    # Check overlaps - compute pairwise intersections
+    if use_shapely:
+        # Convert to polygons first for efficient overlap checking
+        hex_polygons = []
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            hex_polygons.append(create_hexagon_polygon(center_x, center_y, angle))
+
+        # Check overlaps between all pairs
+        for i in range(num_hex):
+            for j in range(i+1, num_hex):
+                if check_overlap_shapely(hex_polygons[i], hex_polygons[j]):
+                    penalty += penalty_weights['overlap']
+    else:
+        # Fast overlap check using Numba-compiled function
+        for i in range(num_hex):
+            for j in range(i+1, num_hex):
+                vertices1 = hexagon_vertices_jit(*inner_hex_data[i])
+                vertices2 = hexagon_vertices_jit(*inner_hex_data[j])
+
+                if separate_axis_test_jit(vertices1, vertices2):
+                    penalty += penalty_weights['overlap']
+
+    # Return negative inverse side length plus penalty
+    objective_value = -1.0 / min_side_length + penalty
+
+    return objective_value, min_side_length
+=======
+def evaluate_solution_multistart(solution_array, use_shapely=False, penalty_weights=None):
+    """Improved evaluation with better containment and overlap checking."""
+    # Use adaptive penalty weights that increase based on violation severity
+    if penalty_weights is None:
+        penalty_weights = {'containment': 10000, 'overlap': 100000, 'boundary': 5000}
+
+    # Reshape solution array into 12 hexagons with (x, y, angle) each
+    inner_hex_data = solution_array.reshape(-1, 3)
+
+    # Calculate the minimum enclosing hexagon
+    min_side_length, centroid = calculate_min_enclosing_hexagon_fast(inner_hex_data)
+
+    # Check all constraints
+    num_hex = len(inner_hex_data)
+    penalty = 0.0
+
+    # Create outer hexagon polygon for containment checks
+    outer_hex = create_hexagon_polygon(centroid[0], centroid[1], 0, min_side_length)
+
+    # Check containment for all hexagons
+    if use_shapely:
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            inner_hex = create_hexagon_polygon(center_x, center_y, angle)
+
+            if not check_containment_shapely(inner_hex, outer_hex):
+                penalty += penalty_weights['containment']
+    else:
+        # Fast containment check using distance
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            # Simple check using max distance from center
+            vertices = hexagon_vertices_jit(center_x, center_y, angle)
+            max_dist = np.max(np.sqrt(np.sum((vertices - np.array([center_x, center_y]))**2, axis=1)))
+            if max_dist > min_side_length * np.sqrt(3) / 2:
+                penalty += penalty_weights['containment']
+
+    # Check overlaps - compute pairwise intersections
+    if use_shapely:
+        # Convert to polygons first for efficient overlap checking
+        hex_polygons = []
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            hex_polygons.append(create_hexagon_polygon(center_x, center_y, angle))
+
+        # Check overlaps between all pairs
+        for i in range(num_hex):
+            for j in range(i+1, num_hex):
+                if check_overlap_shapely(hex_polygons[i], hex_polygons[j]):
+                    penalty += penalty_weights['overlap']
+    else:
+        # Fast overlap check using Numba-compiled function
+        for i in range(num_hex):
+            for j in range(i+1, num_hex):
+                vertices1 = hexagon_vertices_jit(*inner_hex_data[i])
+                vertices2 = hexagon_vertices_jit(*inner_hex_data[j])
+
+                if separate_axis_test_jit(vertices1, vertices2):
+                    penalty += penalty_weights['overlap']
+
+    # Return negative inverse side length plus penalty
+    objective_value = -1.0 / min_side_length + penalty
+
+    return objective_value, min_side_length
+>>>>>>> REPLACE
+
+</DIFF>

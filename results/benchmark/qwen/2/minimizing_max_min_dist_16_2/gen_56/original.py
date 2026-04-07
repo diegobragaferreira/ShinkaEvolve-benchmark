@@ -1,0 +1,180 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def initialize_points(n_points=16, method='improved_grid'):
+    """Initialize points with improved strategies for better spread."""
+    np.random.seed(42)
+
+    if method == 'improved_grid':
+        # Create a more sophisticated grid pattern with better distribution
+        # Arrange points in a 4x4 grid but with adaptive perturbations
+        points = []
+        rows = 4
+        cols = 4
+
+        # Generate points on a grid with adaptive spacing
+        for i in range(rows):
+            for j in range(cols):
+                # Use a more even distribution
+                x = j * (1.0 / (cols - 1)) if cols > 1 else 0.5
+                y = i * (1.0 / (rows - 1)) if rows > 1 else 0.5
+
+                # Apply adaptive perturbation based on position
+                if (i == 0 or i == rows-1) and (j == 0 or j == cols-1):
+                    # Corner points - smaller perturbation
+                    perturbation = 0.01
+                elif i == 0 or i == rows-1 or j == 0 or j == cols-1:
+                    # Edge points - medium perturbation
+                    perturbation = 0.02
+                else:
+                    # Interior points - larger perturbation
+                    perturbation = 0.03
+
+                x += np.random.normal(0, perturbation)
+                y += np.random.normal(0, perturbation)
+                points.append([x, y])
+
+        # Ensure points are within bounds [0,1] and return first n_points
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    elif method == 'random':
+        return np.random.rand(n_points, 2)
+
+    elif method == 'hexagonal':
+        # Hexagonal lattice approximation
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                # Hexagonal pattern with alternating rows
+                x = j * 0.3 + (i % 2) * 0.15
+                y = i * 0.3
+                x += np.random.normal(0, 0.02)
+                y += np.random.normal(0, 0.02)
+                points.append([x, y])
+
+        points = np.clip(points, 0, 1)
+        return np.array(points[:n_points])
+
+    else:
+        return np.random.rand(n_points, 2)
+
+def optimize_points(initial_points, max_time=150):
+    """Optimize point distribution using multiple strategies with multi-start approach."""
+    start_time = time.time()
+    best_ratio = -np.inf
+    best_points = initial_points.copy()
+
+    # Define bounds for points (0,1) in both dimensions
+    bounds = [(0, 1) for _ in range(32)]  # 16 points * 2 coordinates each
+
+    def objective(x):
+        # Reshape flat array back to points
+        points = x.reshape(-1, 2)
+        # Return negative since we want to maximize
+        return -compute_min_max_ratio(points)
+
+    # Multi-start approach - try multiple initial configurations
+    initial_configs = [
+        initial_points,
+        initialize_points(16, 'hexagonal'),
+        initialize_points(16, 'random')
+    ]
+
+    for i, initial_guess in enumerate(initial_configs):
+        try:
+            # First stage: Differential evolution for global search
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=200,  # Increased iterations
+                popsize=20,   # Increased population size
+                tol=1e-8,
+                seed=42 + i,  # Different seed for each attempt
+                timeout=max_time - (time.time() - start_time)
+            )
+
+            if de_result.success:
+                final_guess = de_result.x
+            else:
+                final_guess = initial_guess.flatten()
+
+        except Exception as e:
+            print(f"Differential evolution failed: {e}")
+            final_guess = initial_guess.flatten()
+
+        # Second stage: Local optimization with L-BFGS-B
+        try:
+            lbfgs_result = minimize(
+                objective,
+                final_guess,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-12},  # Increased iterations and tighter tolerance
+                timeout=max_time - (time.time() - start_time)
+            )
+
+            final_points = lbfgs_result.x.reshape(-1, 2)
+            current_ratio = compute_min_max_ratio(final_points)
+
+            if current_ratio > best_ratio:
+                best_ratio = current_ratio
+                best_points = final_points.copy()
+
+        except Exception as e:
+            print(f"L-BFGS optimization failed: {e}")
+            continue
+
+        # Early termination if we've found a good solution
+        if best_ratio > 0.3:  # Early stopping threshold
+            break
+
+    # Ensure final points are within bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Initialize points with improved grid pattern for better starting configuration
+    initial_points = initialize_points(n_points=16, method='improved_grid')
+
+    # Optimize the point distribution
+    optimized_points = optimize_points(initial_points, max_time=150)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

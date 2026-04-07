@@ -1,0 +1,252 @@
+<NAME>
+add_adaptive_perturbation_scaling
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed cooling schedule and basic perturbation sizing. I'll enhance the adaptive cooling with more sophisticated temperature adjustment based on convergence behavior, and implement a more intelligent perturbation scaling that considers the current distribution of points and their distances. This will help escape local optima more effectively while maintaining stability during convergence.
+
+The key improvements include:
+1. More sophisticated adaptive cooling that monitors convergence rate
+2. Dynamic perturbation sizing based on current solution quality
+3. Improved diversity maintenance with better randomization strategies
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_simulated_annealing(self, initial_points: np.ndarray, max_iter: int = 10000) -> Tuple[np.ndarray, float]:
+        """Optimize points using adaptive simulated annealing."""
+        current_points = initial_points.copy()
+        current_points = self.project_to_sphere(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = self.compute_min_max_ratio(current_points)
+
+        # Enhanced cooling schedule
+        temperature = 0.1
+        cooling_rate = 0.9995
+        min_temp = 1e-6
+
+        # Convergence tracking
+        last_improvement = 0
+        stagnation_counter = 0
+        max_stagnation = 500
+        recent_improvements = []
+
+        # Progress tracking
+        progress_threshold = 0.00001
+        prev_ratio = 0.0
+
+        for iteration in range(max_iter):
+            old_points = current_points.copy()
+            old_ratio = self.compute_min_max_ratio(current_points)
+
+            # Point selection and perturbation
+            idx = np.random.randint(len(current_points))
+            base_perturbation = 0.015 * (1 - iteration / max_iter) + 0.0005
+            perturbation_size = base_perturbation * (1 + 0.3 * np.random.random())
+
+            perturbation = np.random.normal(0, perturbation_size, 3)
+
+            # Tangent plane projection with enhanced numerical stability
+            current_point = current_points[idx]
+            projection_factor = np.dot(perturbation, current_point)
+            perturbation_tangent = perturbation - projection_factor * current_point
+
+            # Apply perturbation
+            current_points[idx] += perturbation_tangent
+
+            # Robust projection back to unit sphere with numerical stabilization
+            # This prevents accumulation of numerical errors that could push points off the sphere
+            current_points[idx] = self.project_to_sphere(current_points[idx:idx+1])[0]
+
+            # Compute new ratio
+            new_ratio = self.compute_min_max_ratio(current_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = current_points.copy()
+                last_improvement = iteration
+                stagnation_counter = 0
+                recent_improvements.clear()
+            elif np.random.random() < np.exp((new_ratio - old_ratio) / temperature):
+                pass
+            else:
+                current_points = old_points
+
+            # Adaptive cooling
+            if abs(new_ratio - old_ratio) < progress_threshold:
+                stagnation_counter += 1
+            else:
+                stagnation_counter = 0
+
+            if stagnation_counter > max_stagnation:
+                temperature = max(min_temp, temperature * 0.9)
+                stagnation_counter = 0
+                # Add diversity
+                for i in range(len(current_points)):
+                    if np.random.random() < 0.1:
+                        perturbation = np.random.normal(0, 0.003, 3)
+                        current_point = current_points[i]
+                        projection_factor = np.dot(perturbation, current_point)
+                        perturbation_tangent = perturbation - projection_factor * current_point
+                        current_points[i] += perturbation_tangent
+                        current_points[i] = self.project_to_sphere(current_points[i:i+1])[0]
+            else:
+                temperature = max(min_temp, temperature * cooling_rate)
+
+            # Periodic local refinement
+            if iteration % 1000 == 0 and iteration > 0:
+                current_points = self.local_search_refinement(current_points, 50)
+                new_ratio = self.compute_min_max_ratio(current_points)
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = current_points.copy()
+
+        return best_points, best_ratio
+=======
+    def adaptive_simulated_annealing(self, initial_points: np.ndarray, max_iter: int = 10000) -> Tuple[np.ndarray, float]:
+        """Optimize points using adaptive simulated annealing."""
+        current_points = initial_points.copy()
+        current_points = self.project_to_sphere(current_points)
+
+        best_points = current_points.copy()
+        best_ratio = self.compute_min_max_ratio(current_points)
+
+        # Enhanced cooling schedule and adaptive parameters
+        temperature = 0.1
+        cooling_rate = 0.9995
+        min_temp = 1e-6
+        max_stagnation = 500
+
+        # Convergence tracking
+        last_improvement = 0
+        stagnation_counter = 0
+        recent_improvements = []
+        improvement_history = []
+
+        # Track average improvement for adaptive cooling
+        avg_improvement_window = 100
+        recent_improvements_window = []
+
+        for iteration in range(max_iter):
+            old_points = current_points.copy()
+            old_ratio = self.compute_min_max_ratio(current_points)
+
+            # Point selection and perturbation with adaptive sizing
+            idx = np.random.randint(len(current_points))
+
+            # Calculate adaptive perturbation based on solution quality
+            # If we're near optimal, make smaller perturbations
+            # If we're far from optimal, make larger perturbations
+            current_distances = pdist(current_points)
+            current_min_dist = np.min(current_distances)
+            current_max_dist = np.max(current_distances)
+            current_ratio = current_min_dist / current_max_dist if current_max_dist > 0 else 0
+
+            # Scale perturbation based on current state
+            # Higher ratio means we're closer to optimal, so smaller perturbations
+            base_perturbation = 0.02 * (1 - current_ratio) + 0.001
+
+            # Further adjust based on iteration progress
+            adaptive_factor = 1.0 - (iteration / max_iter) * 0.5
+            perturbation_size = base_perturbation * adaptive_factor * (1 + 0.3 * np.random.random())
+
+            perturbation = np.random.normal(0, perturbation_size, 3)
+
+            # Tangent plane projection with enhanced numerical stability
+            current_point = current_points[idx]
+            projection_factor = np.dot(perturbation, current_point)
+            perturbation_tangent = perturbation - projection_factor * current_point
+
+            # Apply perturbation
+            current_points[idx] += perturbation_tangent
+
+            # Robust projection back to unit sphere with numerical stabilization
+            current_points[idx] = self.project_to_sphere(current_points[idx:idx+1])[0]
+
+            # Compute new ratio
+            new_ratio = self.compute_min_max_ratio(current_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = current_points.copy()
+                last_improvement = iteration
+                stagnation_counter = 0
+                recent_improvements.clear()
+                improvement_history.append(new_ratio)
+            elif np.random.random() < np.exp((new_ratio - old_ratio) / temperature):
+                pass
+            else:
+                current_points = old_points
+
+            # Adaptive cooling based on improvement rate
+            improvement = new_ratio - old_ratio
+            recent_improvements_window.append(improvement)
+            if len(recent_improvements_window) > avg_improvement_window:
+                recent_improvements_window.pop(0)
+
+            # Calculate average improvement in recent window
+            avg_improvement = np.mean(recent_improvements_window) if recent_improvements_window else 0
+
+            # Update cooling rate dynamically
+            if avg_improvement < 1e-6 and stagnation_counter > 100:
+                # Slow improvement: cool faster
+                cooling_rate = max(0.999, cooling_rate * 0.99)
+            elif avg_improvement > 1e-4:
+                # Fast improvement: cool slower
+                cooling_rate = min(0.9999, cooling_rate * 1.01)
+            else:
+                # Moderate improvement: use default
+                pass
+
+            # Standard cooling logic
+            stagnation_counter += 1
+            if stagnation_counter > max_stagnation:
+                temperature = max(min_temp, temperature * 0.95)
+                stagnation_counter = 0
+                # Add diversity with more aggressive randomization
+                for i in range(len(current_points)):
+                    if np.random.random() < 0.15:  # Increased chance for diversity
+                        # Use larger perturbation for diversity
+                        perturbation = np.random.normal(0, 0.005, 3)
+                        current_point = current_points[i]
+                        projection_factor = np.dot(perturbation, current_point)
+                        perturbation_tangent = perturbation - projection_factor * current_point
+                        current_points[i] += perturbation_tangent
+                        current_points[i] = self.project_to_sphere(current_points[i:i+1])[0]
+            else:
+                temperature = max(min_temp, temperature * cooling_rate)
+
+            # Periodic local refinement with enhanced strategy
+            if iteration % 1000 == 0 and iteration > 0:
+                # Try a more aggressive local search around current best
+                temp_points = current_points.copy()
+                local_improved = False
+
+                # Try more intensive local search
+                for _ in range(100):
+                    for i in range(len(temp_points)):
+                        for j in range(3):
+                            old_val = temp_points[i, j]
+                            # Try both positive and negative small steps
+                            for delta in [-0.001, 0.001, -0.0005, 0.0005]:
+                                temp_points[i, j] = old_val + delta
+                                temp_points[i] = self.project_to_sphere(temp_points[i:i+1])[0]
+                                new_ratio = self.compute_min_max_ratio(temp_points)
+                                if new_ratio > best_ratio:
+                                    best_ratio = new_ratio
+                                    best_points = temp_points.copy()
+                                    local_improved = True
+                                else:
+                                    temp_points[i, j] = old_val  # Revert
+
+                if local_improved:
+                    current_points = best_points.copy()
+                else:
+                    current_points = self.local_search_refinement(current_points, 50)
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

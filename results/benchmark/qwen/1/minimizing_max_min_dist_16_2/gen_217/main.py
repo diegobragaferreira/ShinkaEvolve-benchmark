@@ -1,0 +1,219 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x_flat):
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+
+        # Calculate pairwise distances using squareform for numerical stability
+        distances = squareform(pdist(points))
+
+        # Mask diagonal elements (distance to itself)
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (since we're minimizing)
+        if d_max <= 0:
+            return -1.0  # Avoid division by zero or invalid distances
+        return -d_min / d_max
+
+    def compute_distance_ratio(points):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        # Use squareform for numerical stability
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+        
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0 or np.isinf(min_dist):
+            return 0.0
+            
+        return min_dist / max_dist
+
+    # Create multiple initial configurations to improve optimization chances
+    def generate_initial_configurations():
+        """Generate several different initial configurations"""
+        configs = []
+        np.random.seed(42)
+
+        # Configuration 1: Grid with perturbations
+        points = []
+        rows, cols = 4, 4
+        for i in range(rows):
+            for j in range(cols):
+                x = i / (rows - 1) if rows > 1 else 0.5
+                y = j / (cols - 1) if cols > 1 else 0.5
+                # Add controlled perturbation
+                x += (np.random.rand() - 0.5) * 0.1
+                y += (np.random.rand() - 0.5) * 0.1
+                points.append([x, y])
+        configs.append(np.array(points[:16]))
+
+        # Configuration 2: Spiral arrangement
+        points = []
+        for i in range(16):
+            angle = i * 2 * np.pi / 16
+            radius = i / 16.0
+            x = 0.5 + radius * np.cos(angle) * 0.4
+            y = 0.5 + radius * np.sin(angle) * 0.4
+            points.append([x, y])
+        configs.append(np.array(points))
+
+        # Configuration 3: Random with boundary padding
+        points = np.random.rand(16, 2) * 0.8 + 0.1  # Keep away from edges
+        configs.append(points)
+
+        # Configuration 4: Hexagonal-like arrangement
+        points = []
+        rows = 4
+        cols = 4
+        spacing = 0.25
+        
+        idx = 0
+        for row in range(rows):
+            for col in range(cols):
+                if idx < 16:
+                    # Offset every other row for hexagonal packing
+                    x = col * spacing + (row % 2) * spacing * 0.5
+                    y = row * spacing * np.sqrt(3) / 2
+                    points.append([x, y])
+                    idx += 1
+        
+        # Adjust points to fit within [0.1, 0.9] x [0.1, 0.9] with some randomness
+        points = np.array(points)
+        points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
+        points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
+        
+        # Add small random perturbation
+        points += np.random.normal(0, 0.01, points.shape)
+        
+        # Clamp to bounds
+        points = np.clip(points, 0.01, 0.99)
+        configs.append(points)
+
+        return configs
+
+    # Generate multiple initial configurations
+    initial_configs = generate_initial_configurations()
+
+    best_solution = None
+    best_ratio = float('-inf')
+
+    # Try each initial configuration with optimization
+    for i, initial_points in enumerate(initial_configs):
+        # Flatten the points for optimization
+        x0 = initial_points.flatten()
+
+        # Define bounds for each coordinate [0, 1] with small epsilon padding
+        bounds = [(1e-6, 1-1e-6) for _ in range(32)]
+
+        # Phase 1: Try global optimization first with differential evolution
+        try:
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=200,  # Increased iterations
+                popsize=25,   # Larger population
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42 + i,
+                disp=False
+            )
+
+            if de_result.success:
+                # Refine with local optimization if global was successful
+                refined = minimize(
+                    objective,
+                    de_result.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                
+                if refined.success:
+                    current_obj_value = -objective(refined.x)  # Convert back to positive ratio
+                    if current_obj_value > best_ratio:
+                        best_ratio = current_obj_value
+                        best_solution = refined.x.reshape(-1, 2)
+                else:
+                    # If local refinement fails, still try the DE result
+                    current_obj_value = -objective(de_result.x)
+                    if current_obj_value > best_ratio:
+                        best_ratio = current_obj_value
+                        best_solution = de_result.x.reshape(-1, 2)
+            else:
+                # Even if DE fails, try with just basic local optimization
+                refined = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                
+                if refined.success:
+                    current_obj_value = -objective(refined.x)  # Convert back to positive ratio
+                    if current_obj_value > best_ratio:
+                        best_ratio = current_obj_value
+                        best_solution = refined.x.reshape(-1, 2)
+                        
+        except Exception:
+            # If any optimization fails, fall back to simple local optimization
+            try:
+                refined = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+                
+                if refined.success:
+                    current_obj_value = -objective(refined.x)  # Convert back to positive ratio
+                    if current_obj_value > best_ratio:
+                        best_ratio = current_obj_value
+                        best_solution = refined.x.reshape(-1, 2)
+            except Exception:
+                continue
+
+    # If no optimization worked, return the best initial configuration
+    if best_solution is None:
+        # Select the best initial configuration based on its objective value
+        best_initial_idx = 0
+        best_initial_ratio = float('-inf')
+
+        for i, initial_points in enumerate(initial_configs):
+            # Test the initial configuration
+            initial_flat = initial_points.flatten()
+            initial_obj_value = -objective(initial_flat)
+
+            if initial_obj_value > best_initial_ratio:
+                best_initial_ratio = initial_obj_value
+                best_initial_idx = i
+
+        best_solution = initial_configs[best_initial_idx]
+
+    # Ensure final solution respects bounds
+    final_points = np.clip(best_solution, 1e-6, 1-1e-6)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,177 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,156 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
++import math
++
++
++def get_hexagon_vertices(center_x, center_y, rotation_deg, side_length=1):
++    """Get vertices of a regular hexagon with given center, rotation, and side length."""
++    angle_offset = np.radians(rotation_deg)
++    vertices = []
++    for i in range(6):
++        angle = angle_offset + i * np.pi / 3
++        x = center_x + side_length * np.cos(angle)
++        y = center_y + side_length * np.sin(angle)
++        vertices.append((x, y))
++    return np.array(vertices)
++
++
++def check_containment(hex_vertices, outer_hex_center_x, outer_hex_center_y, outer_hex_side_length):
++    """Check if all vertices of hexagon are contained within the outer hexagon."""
++    outer_vertices = get_hexagon_vertices(outer_hex_center_x, outer_hex_center_y, 0, outer_hex_side_length)
++
++    # For simplicity, check if the bounding box of inner hexagon is within outer hexagon
++    # A more robust check would be to verify all vertices are inside the outer hexagon polygon
++    min_x, max_x = np.min(hex_vertices[:, 0]), np.max(hex_vertices[:, 0])
++    min_y, max_y = np.min(hex_vertices[:, 1]), np.max(hex_vertices[:, 1])
++
++    # Check if the bounding box of the inner hex is within the bounding box of the outer hex
++    # This is a simpler but less accurate test; in a full implementation we'd use polygon operations
++    buffer = 1e-6  # Small buffer to account for floating point precision
++    return (min_x >= outer_hex_center_x - outer_hex_side_length + buffer and
++            max_x <= outer_hex_center_x + outer_hex_side_length - buffer and
++            min_y >= outer_hex_center_y - outer_hex_side_length + buffer and
++            max_y <= outer_hex_center_y + outer_hex_side_length - buffer)
++
++
++def calculate_distance(point1, point2):
++    """Calculate Euclidean distance between two points."""
++    return np.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
++
++
++def compute_inner_hexagon_distances(inner_hex_data):
++    """Compute distances between centers of all pairs of inner hexagons."""
++    n = len(inner_hex_data)
++    distances = []
++    for i in range(n):
++        for j in range(i+1, n):
++            center_i = (inner_hex_data[i][0], inner_hex_data[i][1])
++            center_j = (inner_hex_data[j][0], inner_hex_data[j][1])
++            dist = calculate_distance(center_i, center_j)
++            distances.append(dist)
++    return distances
++
++
++def check_overlap(hex1_vertices, hex2_vertices):
++    """Check if two hexagons overlap."""
++    # Simplified overlap checking - check if minimum distance between any vertices is less than 2*side_length
++    # In a full implementation, we would do proper polygon intersection tests
++    for v1 in hex1_vertices:
++        for v2 in hex2_vertices:
++            if calculate_distance(v1, v2) < 1.99:  # slightly less than 2 to avoid edge cases
++                return True
++    return False
+ 
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
++    # Better initial configuration based on known dense packing approaches
++    # Central hexagon with 6 surrounding hexagons in the first shell, and 4 in the second shell
++    inner_hex_data = np.array([
++        [0, 0, 0],           # center hexagon
++        [0, 2, 0],           # top
++        [1.732, 1, 0],       # top-right
++        [1.732, -1, 0],      # bottom-right
++        [0, -2, 0],          # bottom
++        [-1.732, -1, 0],     # bottom-left
++        [-1.732, 1, 0],      # top-left
++        [3.464, 2, 0],       # far top-right
++        [3.464, -2, 0],      # far bottom-right
++        [-3.464, -2, 0],     # far bottom-left
++        [-3.464, 2, 0],      # far top-left
++    ])
+ 
++    # Initial guess for outer hexagon size
++    # Based on the geometry, the furthest point should be approximately 3.464 units from center
++    outer_hex_side_length = 5.0
++
++    # Set up optimization problem
++    def objective(r):
++        # Minimize negative of 1/r (i.e., maximize 1/r)
++        return -1.0 / r
++
++    def constraint_r(x):
++        # Check if current configuration fits in hexagon of side length x
++        # We'll simplify this to just checking a few key constraints
++
++        # Check each inner hexagon for containment
++        max_dist = 0
++        for i in range(len(inner_hex_data)):
++            cx, cy, _ = inner_hex_data[i]
++            # Distance from center of outer hexagon (0,0) to center of inner hexagon
++            dist = np.sqrt(cx**2 + cy**2)
++            # Add half-diagonal of inner hexagon (approx 0.866 * sqrt(3) = 1.5)
++            # But actually let's think more carefully:
++            # distance from center to vertex of unit hexagon is 1,
++            # so we need outer radius >= distance_to_center + 1
++            max_dist = max(max_dist, dist + 1.0)
++
++        # Return positive value if constraint violated (r too small)
++        return x - max_dist  # Should be >= 0 for feasible solution
++
++    # Bounds for outer hexagon size
++    bounds = [(2.0, 10.0)]  # Reasonable bounds: at least 2, probably not more than 10
++
++    # Initial guess
++    x0 = [outer_hex_side_length]
++
++    # Optimize
++    try:
++        result = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints={'type': 'ineq', 'fun': constraint_r})
++        if result.success:
++            outer_hex_side_length = result.x[0]
++        else:
++            # If optimization fails, use conservative estimate
++            outer_hex_side_length = max(4.0, outer_hex_side_length)
++    except Exception:
++        # Fallback to conservative estimate
++        outer_hex_side_length = max(4.0, outer_hex_side_length)
++
++    # Adjust configuration to ensure it fits properly
++    # Check for overlaps and adjust if needed
+     outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
++
++    # Apply some iterative refinement
++    for _ in range(10):  # Limited iterations to keep runtime reasonable
++        # Recalculate max distance
++        max_dist = 0
++        for i in range(len(inner_hex_data)):
++            cx, cy, _ = inner_hex_data[i]
++            dist = np.sqrt(cx**2 + cy**2)
++            max_dist = max(max_dist, dist + 1.0)
++
++        # If current outer hexagon is too small, increase it
++        if max_dist > outer_hex_side_length - 0.01:  # Allow small tolerance
++            outer_hex_side_length = max_dist + 0.1  # Add buffer
+ 
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ 
+ # EVOLVE-BLOCK-END

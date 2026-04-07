@@ -1,0 +1,342 @@
+<NAME>
+enhance_initialization_with_poisson_sampling
+</NAME>
+
+<DESCRIPTION>
+The current initialization uses a Fibonacci spiral combined with Voronoi refinement, but this can be improved by using a more robust Poisson disk sampling approach for better initial point distribution. Poisson disk sampling ensures uniform distribution while avoiding the clustering issues that can occur with simple spiral patterns. This should lead to better starting configurations and faster convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+import random
+from copy import deepcopy
+from typing import Tuple, List
+from scipy.spatial import Voronoi
+
+class SpatialGrid:
+    """Efficient spatial grid for fast overlap detection"""
+
+    def __init__(self, resolution: int = 30):
+        self.resolution = resolution
+        self.grid = {}
+        self.cell_size = 1.0 / resolution
+
+    def _get_cell_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Get grid cell coordinates for a point"""
+        return (int(x / self.cell_size), int(y / self.cell_size))
+
+    def clear(self):
+        """Clear the spatial grid"""
+        self.grid.clear()
+
+    def add_circle(self, idx: int, x: float, y: float, radius: float):
+        """Add a circle to the spatial grid"""
+        cell_coords = self._get_cell_coords(x, y)
+        if cell_coords not in self.grid:
+            self.grid[cell_coords] = []
+        self.grid[cell_coords].append((idx, x, y, radius))
+
+    def get_neighbors(self, x: float, y: float, radius: float) -> List[Tuple[int, float, float, float]]:
+        """Get all circles in neighboring cells that could potentially overlap"""
+        neighbors = []
+        cell_x, cell_y = self._get_cell_coords(x, y)
+
+        # Check surrounding cells (3x3 grid around main cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell_x + dx, cell_y + dy)
+                if neighbor_cell in self.grid:
+                    for idx, nx, ny, nr in self.grid[neighbor_cell]:
+                        # Skip self
+                        if idx == -1:  # Placeholder for self-check
+                            continue
+                        neighbors.append((idx, nx, ny, nr))
+        return neighbors
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    n_circles = 26
+    max_generations = 1000
+    population_size = 100
+
+    # Global spatial grid instance for validation
+    spatial_grid = SpatialGrid(resolution=30)
+
+    def initialize_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+        """Initialize population with diverse configurations using hybrid Voronoi + Fibonacci method"""
+        population = []
+        for _ in range(pop_size):
+            # Hybrid initialization: Fibonacci spiral + Voronoi refinement
+            circles = np.zeros((n_circles, 3))
+
+            # Create Fibonacci spiral distribution for better point spread
+            phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+            grid_positions = []
+
+            for i in range(n_circles):
+                # Use Fibonacci-like spiral for better distribution
+                angle = i * 2.399963229728653  # 2*pi*(i*phi) mod 2*pi
+                radius = np.sqrt(i) / np.sqrt(n_circles-1) if n_circles > 1 else 0.5
+                x = 0.5 + radius * np.cos(angle) * 0.45
+                y = 0.5 + radius * np.sin(angle) * 0.45
+
+                # Add noise to avoid perfect patterns
+                x += np.random.normal(0, 0.02)
+                y += np.random.normal(0, 0.02)
+
+                # Clamp to unit square with safety margin
+                x = max(0.01, min(0.99, x))
+                y = max(0.01, min(0.99, y))
+
+                grid_positions.append([x, y])
+
+            # Improve distribution using Voronoi if possible
+            try:
+                if len(grid_positions) >= n_circles * 2:
+                    # Create Voronoi diagram to get better spaced points
+                    vor = Voronoi(grid_positions)
+                    valid_voronoi_points = []
+
+                    # Extract valid Voronoi vertices
+                    for vertex in vor.vertices:
+                        if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                            valid_voronoi_points.append(vertex)
+
+                    # If we have enough valid Voronoi points, use them
+                    if len(valid_voronoi_points) >= n_circles:
+                        grid_positions = valid_voronoi_points[:n_circles]
+            except:
+                pass  # If Voronoi fails, continue with spiral points
+
+            # Create circles with calculated radii
+            for i in range(n_circles):
+                x, y = grid_positions[i]
+
+                # Calculate safe radius based on proximity to other circles
+                min_dist = float('inf')
+                for other_x, other_y in grid_positions[:i]:
+                    dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                    min_dist = min(min_dist, dist)
+
+                # Set radius with boundary constraints and neighbor distances
+                boundary_dist = min(x, 1-x, y, 1-y)
+                # Start with larger radii for first few circles for better exploration
+                if i < 5:
+                    radius = min(0.1, boundary_dist, min_dist/2)
+                else:
+                    radius = min(0.06, boundary_dist, min_dist/2)
+
+                if radius <= 0:
+                    radius = 0.01
+
+                circles[i] = [x, y, radius]
+
+            population.append(circles)
+        return population
+=======
+import numpy as np
+import random
+from copy import deepcopy
+from typing import Tuple, List
+from scipy.spatial import Voronoi
+import math
+
+class SpatialGrid:
+    """Efficient spatial grid for fast overlap detection"""
+
+    def __init__(self, resolution: int = 30):
+        self.resolution = resolution
+        self.grid = {}
+        self.cell_size = 1.0 / resolution
+
+    def _get_cell_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Get grid cell coordinates for a point"""
+        return (int(x / self.cell_size), int(y / self.cell_size))
+
+    def clear(self):
+        """Clear the spatial grid"""
+        self.grid.clear()
+
+    def add_circle(self, idx: int, x: float, y: float, radius: float):
+        """Add a circle to the spatial grid"""
+        cell_coords = self._get_cell_coords(x, y)
+        if cell_coords not in self.grid:
+            self.grid[cell_coords] = []
+        self.grid[cell_coords].append((idx, x, y, radius))
+
+    def get_neighbors(self, x: float, y: float, radius: float) -> List[Tuple[int, float, float, float]]:
+        """Get all circles in neighboring cells that could potentially overlap"""
+        neighbors = []
+        cell_x, cell_y = self._get_cell_coords(x, y)
+
+        # Check surrounding cells (3x3 grid around main cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell_x + dx, cell_y + dy)
+                if neighbor_cell in self.grid:
+                    for idx, nx, ny, nr in self.grid[neighbor_cell]:
+                        # Skip self
+                        if idx == -1:  # Placeholder for self-check
+                            continue
+                        neighbors.append((idx, nx, ny, nr))
+        return neighbors
+
+def poisson_disk_sampling(width: float, height: float, min_distance: float, max_attempts: int = 30) -> np.ndarray:
+    """Generate points using Poisson disk sampling for uniform distribution"""
+    # Grid to track occupied cells
+    cell_size = min_distance / math.sqrt(2)
+    grid_width = int(math.ceil(width / cell_size))
+    grid_height = int(math.ceil(height / cell_size))
+    grid = np.full((grid_height, grid_width), -1, dtype=int)
+
+    # List of points and active list
+    points = []
+    active_list = []
+
+    # Add first point randomly
+    first_point = np.random.rand(2) * [width, height]
+    first_point[0] = np.clip(first_point[0], 0.01, 0.99)
+    first_point[1] = np.clip(first_point[1], 0.01, 0.99)
+
+    points.append(first_point)
+    active_list.append(0)
+
+    # Index for grid
+    def get_grid_index(point):
+        x, y = point
+        grid_x = int(x / cell_size)
+        grid_y = int(y / cell_size)
+        return grid_y, grid_x
+
+    grid[get_grid_index(first_point)] = 0
+
+    attempts = 0
+    while active_list and attempts < max_attempts:
+        # Pick random point from active list
+        idx = np.random.randint(len(active_list))
+        point_idx = active_list[idx]
+        point = points[point_idx]
+
+        # Try to generate new point
+        found = False
+        for _ in range(max_attempts):
+            angle = np.random.rand() * 2 * np.pi
+            radius = np.random.uniform(min_distance, 2 * min_distance)
+
+            new_point = point + np.array([radius * np.cos(angle), radius * np.sin(angle)])
+
+            # Check boundaries
+            if (new_point[0] < 0.01 or new_point[0] > 0.99 or
+                new_point[1] < 0.01 or new_point[1] > 0.99):
+                continue
+
+            # Check grid for nearby points
+            grid_y, grid_x = get_grid_index(new_point)
+            valid = True
+
+            # Check nearby cells
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    ny, nx = grid_y + dy, grid_x + dx
+                    if 0 <= ny < grid_height and 0 <= nx < grid_width:
+                        neighbor_idx = grid[ny, nx]
+                        if neighbor_idx != -1:
+                            neighbor = points[neighbor_idx]
+                            dist = np.linalg.norm(new_point - neighbor)
+                            if dist < min_distance:
+                                valid = False
+                                break
+                if not valid:
+                    break
+
+            if valid:
+                points.append(new_point)
+                active_list.append(len(points) - 1)
+                grid[grid_y, grid_x] = len(points) - 1
+                found = True
+                break
+
+        if not found:
+            active_list.pop(idx)
+
+        attempts += 1
+
+    return np.array(points)
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+
+    n_circles = 26
+    max_generations = 1000
+    population_size = 100
+
+    # Global spatial grid instance for validation
+    spatial_grid = SpatialGrid(resolution=30)
+
+    def initialize_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+        """Initialize population with diverse configurations using Poisson disk sampling"""
+        population = []
+        for _ in range(pop_size):
+            # Use Poisson disk sampling for better initial distribution
+            # Calculate minimum distance based on desired number of circles
+            min_distance = 0.15  # Start with a reasonable minimum distance
+            points = poisson_disk_sampling(1.0, 1.0, min_distance, 50)
+
+            # If we don't have enough points, generate more
+            if len(points) < n_circles:
+                # Generate additional points randomly with boundary margin
+                additional_points = n_circles - len(points)
+                extra_points = np.random.rand(additional_points, 2)
+                extra_points[:, 0] = np.clip(extra_points[:, 0], 0.01, 0.99)
+                extra_points[:, 1] = np.clip(extra_points[:, 1], 0.01, 0.99)
+                points = np.vstack([points, extra_points])
+
+            # Take exactly n_circles points
+            points = points[:n_circles]
+
+            circles = np.zeros((n_circles, 3))
+
+            # Create circles with calculated radii
+            for i in range(n_circles):
+                x, y = points[i]
+
+                # Calculate safe radius based on proximity to other circles
+                min_dist = float('inf')
+                for other_x, other_y in points[:i]:
+                    dist = np.sqrt((x - other_x)**2 + (y - other_y)**2)
+                    min_dist = min(min_dist, dist)
+
+                # Set radius with boundary constraints and neighbor distances
+                boundary_dist = min(x, 1-x, y, 1-y)
+                # Start with larger radii for first few circles for better exploration
+                if i < 5:
+                    radius = min(0.1, boundary_dist, min_dist/2)
+                else:
+                    radius = min(0.06, boundary_dist, min_dist/2)
+
+                if radius <= 0:
+                    radius = 0.01
+
+                circles[i] = [x, y, radius]
+
+            population.append(circles)
+        return population
+>>>>>>> REPLACE
+
+</DIFF>

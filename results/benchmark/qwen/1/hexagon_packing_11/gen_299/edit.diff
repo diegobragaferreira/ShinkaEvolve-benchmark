@@ -1,0 +1,701 @@
+--- a/original.py
++++ b/original.py
+@@ -1,362 +1,626 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution
++from scipy.spatial import cKDTree
++from scipy.spatial.distance import cdist
+ import math
++import random
++from shapely.geometry import Polygon, Point
++from shapely.ops import unary_union
++import time
+ 
+ # Constants for hexagon geometry
+ HEX_RADIUS = 1.0  # Unit hexagon radius
+ HEX_APOGEE = HEX_RADIUS * math.sqrt(3)/2  # Distance from center to side midpoint
+ HEX_HEIGHT = 2 * HEX_APOGEE  # Height of hexagon
+ HEX_WIDTH = 2 * HEX_RADIUS  # Width of hexagon
+ 
+ # Spatial indexing parameters for efficient collision detection
+ GRID_CELL_SIZE = 2.0  # Grid cell size should be larger than hexagon diameter for good performance
+ 
+ def get_hexagon_vertices(center_x, center_y, angle_degrees):
+     """Get vertices of a unit regular hexagon given center and rotation"""
+     # Convert angle to radians
+     angle_rad = math.radians(angle_degrees)
+ 
+     # Vertices of a unit hexagon centered at origin, pointing up
+     base_vertices = []
+     for i in range(6):
+         theta = angle_rad + i * math.pi/3
+         x = HEX_RADIUS * math.cos(theta)
+         y = HEX_RADIUS * math.sin(theta)
+         base_vertices.append((x, y))
+ 
+     # Translate to center
+     vertices = [(x + center_x, y + center_y) for x, y in base_vertices]
+     return np.array(vertices)
+ 
+ def build_spatial_grid(hex_data):
+     """Build a spatial grid for efficient collision detection"""
+     grid = {}
+ 
+     # Determine appropriate grid bounds based on hexagon extents
+     min_x, max_x = float('inf'), float('-inf')
+     min_y, max_y = float('inf'), float('-inf')
+ 
+     for cx, cy, angle in hex_data:
+         vertices = get_hexagon_vertices(cx, cy, angle)
+         for x, y in vertices:
+             min_x = min(min_x, x)
+             max_x = max(max_x, x)
+             min_y = min(min_y, y)
+             max_y = max(max_y, y)
+ 
+     # Expand bounds slightly to account for edge cases
+     margin = HEX_WIDTH
+     min_x -= margin
+     max_x += margin
+     min_y -= margin
+     max_y += margin
+ 
+     # Calculate grid dimensions
+     grid_width = max_x - min_x
+     grid_height = max_y - min_y
+ 
+     # Adjust cell size based on problem size
+     avg_cell_size = GRID_CELL_SIZE
+     num_cols = int(math.ceil(grid_width / avg_cell_size))
+     num_rows = int(math.ceil(grid_height / avg_cell_size))
+ 
+     # For each hexagon, determine which grid cells it occupies
+     for i, (cx, cy, angle) in enumerate(hex_data):
+         # Get the bounding box of the hexagon
+         vertices = get_hexagon_vertices(cx, cy, angle)
+         min_x_h = min(v[0] for v in vertices)
+         max_x_h = max(v[0] for v in vertices)
+         min_y_h = min(v[1] for v in vertices)
+         max_y_h = max(v[1] for v in vertices)
+ 
+         # Determine grid cells that this hexagon covers
+         min_col = int((min_x_h - min_x) // avg_cell_size)
+         max_col = int((max_x_h - min_x) // avg_cell_size)
+         min_row = int((min_y_h - min_y) // avg_cell_size)
+         max_row = int((max_y_h - min_y) // avg_cell_size)
+ 
+         for row in range(min_row, max_row + 1):
+             for col in range(min_col, max_col + 1):
+                 if (row, col) not in grid:
+                     grid[(row, col)] = []
+                 grid[(row, col)].append(i)
+ 
+     return grid, min_x, max_x, min_y, max_y
+ 
+ def get_potential_collisions(grid, hex_data, hex_index, min_x, max_x, min_y, max_y):
+     """Get potential collision partners from spatial grid"""
+     # Get the bounding box of the hexagon we're checking
+     cx, cy, angle = hex_data[hex_index]
+     vertices = get_hexagon_vertices(cx, cy, angle)
+     min_x_h = min(v[0] for v in vertices)
+     max_x_h = max(v[0] for v in vertices)
+     min_y_h = min(v[1] for v in vertices)
+     max_y_h = max(v[1] for v in vertices)
+ 
+     # Determine grid cells that this hexagon covers
+     avg_cell_size = GRID_CELL_SIZE
+     min_col = int((min_x_h - min_x) // avg_cell_size)
+     max_col = int((max_x_h - min_x) // avg_cell_size)
+     min_row = int((min_y_h - min_y) // avg_cell_size)
+     max_row = int((max_y_h - min_y) // avg_cell_size)
+ 
+     # Collect potential candidates
+     candidates = set()
+     for row in range(min_row - 1, max_row + 2):
+         for col in range(min_col - 1, max_col + 2):
+             if (row, col) in grid:
+                 candidates.update(grid[(row, col)])
+ 
+     return list(candidates)
+ 
+ def check_hexagon_containment(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+     """Check if hexagon vertices are contained within outer hexagon"""
+     # For a regular hexagon centered at origin, we can check distance from center
+     for vertex in hex_vertices:
+         x, y = vertex
+         dx = x - outer_center_x
+         dy = y - outer_center_y
+         distance = math.sqrt(dx*dx + dy*dy)
+         if distance >= outer_radius:
+             return False
+     return True
+ 
+ def hexagon_collision(hex1_vertices, hex2_vertices):
+     """Check if two hexagons collide using Separating Axis Theorem"""
+     # Quick bounding box check first
+     min1_x = min(v[0] for v in hex1_vertices)
+     max1_x = max(v[0] for v in hex1_vertices)
+     min1_y = min(v[1] for v in hex1_vertices)
+     max1_y = max(v[1] for v in hex1_vertices)
+ 
+     min2_x = min(v[0] for v in hex2_vertices)
+     max2_x = max(v[0] for v in hex2_vertices)
+     min2_y = min(v[1] for v in hex2_vertices)
+     max2_y = max(v[1] for v in hex2_vertices)
+ 
+     # If bounding boxes don't overlap, no collision possible
+     if max1_x < min2_x or max2_x < min1_x or max1_y < min2_y or max2_y < min1_y:
+         return False
+ 
+     # Get all edges of both hexagons
+     edges1 = []
+     edges2 = []
+ 
+     for i in range(6):
+         p1 = hex1_vertices[i]
+         p2 = hex1_vertices[(i+1)%6]
+         edge = (p2[0]-p1[0], p2[1]-p1[1])
+         edges1.append(edge)
+ 
+         p1 = hex2_vertices[i]
+         p2 = hex2_vertices[(i+1)%6]
+         edge = (p2[0]-p1[0], p2[1]-p1[1])
+         edges2.append(edge)
+ 
+     # Combine all potential separating axes
+     all_axes = edges1 + edges2
+ 
+     # Normalize axes and check for zero-length vectors
+     normalized_axes = []
+     for axis in all_axes:
+         length = math.sqrt(axis[0]**2 + axis[1]**2)
+         if length > 0:
+             normalized_axes.append((axis[0]/length, axis[1]/length))
+ 
+     if not normalized_axes:
+         return False
+ 
+     # Check projection overlap on each axis
+     for axis in normalized_axes:
+         # Project both hexagons onto this axis
+         proj1 = []
+         proj2 = []
+ 
+         for v in hex1_vertices:
+             dot = v[0]*axis[0] + v[1]*axis[1]
+             proj1.append(dot)
+ 
+         for v in hex2_vertices:
+             dot = v[0]*axis[0] + v[1]*axis[1]
+             proj2.append(dot)
+ 
+         min1, max1 = min(proj1), max(proj1)
+         min2, max2 = min(proj2), max(proj2)
+ 
+         # If projections don't overlap, then there's separation
+         if max1 < min2 or max2 < min1:
+             return False
+ 
+     return True
+ 
+ def calculate_outer_hex_radius(inner_hex_data, outer_center=(0,0)):
+     """Calculate minimum radius needed for outer hexagon to contain all inner hexagons"""
+     max_distance = 0
+ 
+     for i in range(len(inner_hex_data)):
+         center_x = inner_hex_data[i][0]
+         center_y = inner_hex_data[i][1]
+         angle = inner_hex_data[i][2]
+ 
+         # Get vertices of this hexagon
+         vertices = get_hexagon_vertices(center_x, center_y, angle)
+ 
+         # Find maximum distance from outer center to any vertex
+         for x, y in vertices:
+             distance = math.sqrt((x - outer_center[0])**2 + (y - outer_center[1])**2)
+             max_distance = max(max_distance, distance)
+ 
+     # Add buffer to ensure complete containment
+     return max_distance + HEX_RADIUS
+ 
+ def evaluate_fitness(individual):
+     """
+     Evaluate the fitness of a solution configuration
+     individual: array of shape (33,) containing [x1,y1,a1,x2,y2,a2,...,x11,y11,a11]
+     Returns negative value because we want to maximize 1/R (minimize R)
+     """
+     # Reshape individual into hexagon data
+     inner_hex_data = individual.reshape(-1, 3)
+ 
+     # Try different outer hexagon sizes and check feasibility
+     # Start with a reasonable estimate
+     outer_radius = calculate_outer_hex_radius(inner_hex_data)
+ 
+     # Check collisions and containment
+     num_collisions = 0
+     num_out_of_bounds = 0
+ 
+     # Build spatial grid for efficient collision detection
+     grid, min_x, max_x, min_y, max_y = build_spatial_grid(inner_hex_data)
+ 
+     # Check all hexagon pairs for collision using spatial indexing
+     for i in range(len(inner_hex_data)):
+         vertices_i = get_hexagon_vertices(
+             inner_hex_data[i][0],
+             inner_hex_data[i][1],
+             inner_hex_data[i][2]
+         )
+ 
+         # Check containment first
+         if not check_hexagon_containment(vertices_i, 0, 0, outer_radius):
+             num_out_of_bounds += 1
+             # Early termination if containment fails
+             if num_out_of_bounds > 0:
+                 penalty = 1000 * (num_collisions + num_out_of_bounds)
+                 return 1000000 + penalty  # Large penalty for invalid solutions
+ 
+         # Efficiently get potential collision partners using spatial indexing
+         potential_collisions = get_potential_collisions(grid, inner_hex_data, i, min_x, max_x, min_y, max_y)
+         for j in potential_collisions:
+             if i >= j:
+                 continue
+ 
+             vertices_j = get_hexagon_vertices(
+                 inner_hex_data[j][0],
+                 inner_hex_data[j][1],
+                 inner_hex_data[j][2]
+             )
+ 
+             if hexagon_collision(vertices_i, vertices_j):
+                 num_collisions += 1
+                 # Early termination if collision found
+                 if num_collisions > 0:
+                     penalty = 1000 * (num_collisions + num_out_of_bounds)
+                     return 1000000 + penalty  # Large penalty for invalid solutions
+ 
+     # Penalty for collisions or out of bounds
+     penalty = 1000 * (num_collisions + num_out_of_bounds)
+ 
+     # If invalid configuration, return poor fitness
+     if num_collisions > 0 or num_out_of_bounds > 0:
+         return 1000000 + penalty  # Large penalty for invalid solutions
+ 
+     # Return inverse of outer radius (we want to maximize 1/R)
+     return 1.0 / outer_radius
+ 
++def generate_voronoi_initialization():
++    """Generate initial configuration using Voronoi-based distribution"""
++    # Create seed points for Voronoi diagram
++    seeds = []
++    # Central point
++    seeds.append((0, 0))
++    # Ring of 6 points around center
++    for i in range(6):
++        angle = i * math.pi/3
++        x = 2.0 * math.cos(angle)
++        y = 2.0 * math.sin(angle)
++        seeds.append((x, y))
++    # Outer ring of 4 points
++    for i in range(4):
++        angle = i * math.pi/2 + math.pi/4
++        x = 3.5 * math.cos(angle)
++        y = 3.5 * math.sin(angle)
++        seeds.append((x, y))
++    
++    # Add some randomness to positions
++    initial_positions = []
++    for i, (x, y) in enumerate(seeds):
++        # Add small random displacement
++        dx = random.uniform(-0.3, 0.3)
++        dy = random.uniform(-0.3, 0.3)
++        angle = random.uniform(0, 360)
++        initial_positions.append([x + dx, y + dy, angle])
++    
++    # Fill remaining positions with random placements
++    while len(initial_positions) < 11:
++        x = random.uniform(-5, 5)
++        y = random.uniform(-5, 5)
++        angle = random.uniform(0, 360)
++        initial_positions.append([x, y, angle])
++    
++    return np.array(initial_positions[:11])
++
++def initialize_population(pop_size):
++    """Initialize population with diverse configurations"""
++    population = []
++    
++    # Add Voronoi-based configurations
++    for _ in range(pop_size // 3):
++        individual = generate_voronoi_initialization()
++        population.append(individual.flatten())
++    
++    # Add structured configurations
++    for _ in range(pop_size // 3):
++        # Create structured initial configuration
++        individual = np.array([
++            [0, 0, 0],           # center
++            [-2.1, 0, 0],        # left
++            [2.1, 0, 0],         # right
++            [-1.05, 1.8, 0],     # top-left
++            [1.05, 1.8, 0],      # top-right
++            [-1.05, -1.8, 0],    # bottom-left
++            [1.05, -1.8, 0],     # bottom-right
++            [-3.15, 1.8, 0],     # far top-left
++            [3.15, 1.8, 0],      # far top-right
++            [-3.15, -1.8, 0],    # far bottom-left
++            [3.15, -1.8, 0],     # far bottom-right
++        ])
++        
++        # Add small random noise
++        for i in range(11):
++            individual[i][0] += random.uniform(-0.2, 0.2)
++            individual[i][1] += random.uniform(-0.2, 0.2)
++            individual[i][2] += random.uniform(-10, 10)
++            individual[i][2] %= 360
++            
++        population.append(individual.flatten())
++    
++    # Add purely random configurations
++    for _ in range(pop_size - 2 * (pop_size // 3)):
++        individual = []
++        for _ in range(11):
++            x = random.uniform(-5, 5)
++            y = random.uniform(-5, 5)
++            angle = random.uniform(0, 360)
++            individual.append([x, y, angle])
++        population.append(np.array(individual).flatten())
++    
++    return population
++
++def tournament_selection(population, fitnesses, tournament_size=5):
++    """Select parent using tournament selection with variable tournament size"""
++    tournament_indices = random.sample(range(len(population)), tournament_size)
++    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
++    winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
++    return population[winner_idx]
++
++def crossover(parent1, parent2):
++    """Use uniform crossover with preserved structure"""
++    child1 = parent1.copy()
++    child2 = parent2.copy()
++    
++    # Uniform crossover with some structure preservation
++    for i in range(len(parent1)):
++        if random.random() < 0.5:
++            child1[i] = parent2[i]
++            child2[i] = parent1[i]
++    
++    return child1, child2
++
++def adaptive_mutation(individual, generation, max_generations, diversity):
++    """Apply adaptive mutation that decreases over time and increases with low diversity"""
++    mutated = individual.copy()
++    base_mutation_rate = 0.3 - (0.25 * generation / max_generations)
++    
++    # Increase mutation rate when diversity is low
++    if diversity < 0.001:
++        mutation_rate = base_mutation_rate * 2.0
++    else:
++        mutation_rate = base_mutation_rate
++    
++    mutation_rate = max(mutation_rate, 0.05)  # Minimum mutation rate
++    
++    # Mutate each gene
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Position mutation with adaptive step size
++            if i % 3 < 2:  # x or y coordinate
++                step_size = 0.1 + (0.2 * (generation / max_generations))
++                mutated[i] += random.uniform(-step_size, step_size)
++                # Ensure within bounds
++                if i % 3 == 0:
++                    mutated[i] = max(-10, min(10, mutated[i]))
++                else:
++                    mutated[i] = max(-10, min(10, mutated[i]))
++            else:  # angle
++                mutated[i] += random.uniform(-15, 15)
++                mutated[i] %= 360
++                
++    return mutated
++
++def evaluate_fitness_with_cache(individual, cache={}):
++    """Evaluate fitness with caching for repeated calls"""
++    key = tuple(individual)
++    if key in cache:
++        return cache[key]
++    
++    fitness = evaluate_fitness(individual)
++    cache[key] = fitness
++    return fitness
++
++def run_evolutionary_optimization(start_time, max_time):
++    """Run evolutionary optimization process"""
++    pop_size = 50
++    max_generations = 500
++    elite_size = 5
++    
++    # Initialize population
++    population = initialize_population(pop_size)
++    
++    best_fitness = float('-inf')
++    best_individual = None
++    
++    # Evolution loop
++    for gen in range(max_generations):
++        if time.time() - start_time > max_time - 5:
++            break
++            
++        # Evaluate fitness for entire population
++        fitnesses = []
++        for individual in population:
++            fit = evaluate_fitness(individual)
++            fitnesses.append(fit)
++            
++        # Track best solution
++        current_best_idx = np.argmax(fitnesses)
++        current_best_fitness = fitnesses[current_best_idx]
++        
++        if current_best_fitness > best_fitness:
++            best_fitness = current_best_fitness
++            best_individual = population[current_best_idx].copy()
++            
++        # Elitism: keep best individuals
++        elite_indices = np.argsort(fitnesses)[-elite_size:]
++        elites = [population[i] for i in elite_indices]
++        
++        # Calculate diversity
++        if len(fitnesses) > 1:
++            diversity = np.std(fitnesses)
++        else:
++            diversity = 0
++            
++        # Create new population
++        new_population = elites.copy()
++        
++        # Fill rest with offspring
++        while len(new_population) < pop_size:
++            parent1 = tournament_selection(population, fitnesses, tournament_size=5)
++            parent2 = tournament_selection(population, fitnesses, tournament_size=5)
++            
++            child1, child2 = crossover(parent1, parent2)
++            child1 = adaptive_mutation(child1, gen, max_generations, diversity)
++            child2 = adaptive_mutation(child2, gen, max_generations, diversity)
++            
++            new_population.extend([child1, child2])
++            
++        # Trim to exact population size
++        population = new_population[:pop_size]
++        
++        # Occasionally apply local search to best individual
++        if gen % 20 == 0 and best_individual is not None:
++            # Simple hill climbing on the best individual
++            test_individual = best_individual.copy()
++            test_fitness = evaluate_fitness(test_individual)
++            
++            for _ in range(10):
++                # Small perturbations
++                test_ind = test_individual.copy()
++                for i in range(len(test_ind)):
++                    if i % 3 < 2:  # x or y coordinate
++                        test_ind[i] += random.uniform(-0.05, 0.05)
++                        test_ind[i] = max(-10, min(10, test_ind[i]))
++                    else:  # angle
++                        test_ind[i] += random.uniform(-2, 2)
++                        test_ind[i] %= 360
++                        
++                new_fitness = evaluate_fitness(test_ind)
++                if new_fitness > test_fitness:
++                    test_individual = test_ind
++                    test_fitness = new_fitness
++                    
++            if test_fitness > best_fitness:
++                best_fitness = test_fitness
++                best_individual = test_individual.copy()
++    
++    return best_individual, best_fitness
++
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    np.random.seed(42)  # For reproducibility
+-
+-    # Better initial configuration based on improved hexagonal lattice arrangement
+-    # Using a more careful spacing to allow for better packing
+-    initial_guess = np.array([
+-        [0, 0, 0],           # center
+-        [-2.1, 0, 0],        # left
+-        [2.1, 0, 0],         # right
+-        [-1.05, 1.8, 0],     # top-left
+-        [1.05, 1.8, 0],      # top-right
+-        [-1.05, -1.8, 0],    # bottom-left
+-        [1.05, -1.8, 0],     # bottom-right
+-        [-3.15, 1.8, 0],     # far top-left
+-        [3.15, 1.8, 0],      # far top-right
+-        [-3.15, -1.8, 0],    # far bottom-left
+-        [3.15, -1.8, 0],     # far bottom-right
+-    ]).flatten()
+-
+-    # Bounds for optimization: positions (-10, 10), rotations (0, 360)
+-    bounds = []
+-    for _ in range(11):
+-        bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # x, y, angle
+-
+-    # Run optimization with bounds
+-    try:
+-        result = differential_evolution(
+-            func=evaluate_fitness,
+-            bounds=bounds,
+-            maxiter=100,
+-            popsize=15,
+-            seed=42,
+-            disp=False,
+-            tol=1e-6
+-        )
+-
+-        if result.success:
+-            # Get the best solution
+-            best_individual = result.x
+-            inner_hex_data = best_individual.reshape(-1, 3)
+-
+-            # Calculate final outer hexagon radius
+-            outer_radius = calculate_outer_hex_radius(inner_hex_data)
+-
+-            # Create outer hexagon data (centered at origin)
+-            outer_hex_data = np.array([0, 0, 0])
+-
+-            # Return the best solution found
+-            return inner_hex_data, outer_hex_data, outer_radius
+-        else:
+-            # Fallback to initial guess if optimization fails
++    start_time = time.time()
++    max_time = 175  # Leave some margin for cleanup
++    
++    # Run multiple evolutionary starts
++    best_overall_fitness = float('-inf')
++    best_overall_individual = None
++    
++    # Multiple independent runs to increase chance of finding better solution
++    num_runs = 3
++    
++    for run in range(num_runs):
++        # Set different random seeds for each run
++        random.seed(run)
++        np.random.seed(run)
++        
++        try:
++            individual, fitness = run_evolutionary_optimization(start_time, max_time)
++            
++            if individual is not None and fitness > best_overall_fitness:
++                best_overall_fitness = fitness
++                best_overall_individual = individual.copy()
++        except Exception as e:
++            continue
++    
++    # If we still don't have a good solution, fallback to differential evolution
++    if best_overall_individual is None:
++        try:
++            # Better initial configuration based on improved hexagonal lattice arrangement
++            # Using a more careful spacing to allow for better packing
++            initial_guess = np.array([
++                [0, 0, 0],           # center
++                [-2.1, 0, 0],        # left
++                [2.1, 0, 0],         # right
++                [-1.05, 1.8, 0],     # top-left
++                [1.05, 1.8, 0],      # top-right
++                [-1.05, -1.8, 0],    # bottom-left
++                [1.05, -1.8, 0],     # bottom-right
++                [-3.15, 1.8, 0],     # far top-left
++                [3.15, 1.8, 0],      # far top-right
++                [-3.15, -1.8, 0],    # far bottom-left
++                [3.15, -1.8, 0],     # far bottom-right
++            ]).flatten()
++
++            # Bounds for optimization: positions (-10, 10), rotations (0, 360)
++            bounds = []
++            for _ in range(11):
++                bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # x, y, angle
++
++            # Run optimization with bounds
++            result = differential_evolution(
++                func=evaluate_fitness,
++                bounds=bounds,
++                maxiter=100,
++                popsize=15,
++                seed=42,
++                disp=False,
++                tol=1e-6
++            )
++
++            if result.success:
++                # Get the best solution
++                best_individual = result.x
++                inner_hex_data = best_individual.reshape(-1, 3)
++
++                # Calculate final outer hexagon radius
++                outer_radius = calculate_outer_hex_radius(inner_hex_data)
++
++                # Create outer hexagon data (centered at origin)
++                outer_hex_data = np.array([0, 0, 0])
++
++                # Return the best solution found
++                return inner_hex_data, outer_hex_data, outer_radius
++            else:
++                # Fallback to initial guess if optimization fails
++                pass
++        except Exception:
++            # If everything fails, fall back to initial configuration
+             pass
+-    except Exception:
+-        # If optimization fails, fall back to initial guess
+-        pass
+-
+-    # Fallback to initial configuration if anything goes wrong
+-    inner_hex_data = np.array([
+-        [0, 0, 0],           # center
+-        [-2.2, 0, 0],        # left
+-        [2.2, 0, 0],         # right
+-        [-1.1, 1.9, 0],      # top-left
+-        [1.1, 1.9, 0],       # top-right
+-        [-1.1, -1.9, 0],     # bottom-left
+-        [1.1, -1.9, 0],      # bottom-right
+-        [-3.3, 1.9, 0],      # far top-left
+-        [3.3, 1.9, 0],       # far top-right
+-        [-3.3, -1.9, 0],     # far bottom-left
+-        [3.3, -1.9, 0],      # far bottom-right
+-    ])
+-
+-    outer_radius = calculate_outer_hex_radius(inner_hex_data)
+-    outer_hex_data = np.array([0, 0, 0])
++    
++    # Final fallback to a known good configuration
++    if best_overall_individual is None:
++        inner_hex_data = np.array([
++            [0, 0, 0],           # center
++            [-2.2, 0, 0],        # left
++            [2.2, 0, 0],         # right
++            [-1.1, 1.9, 0],      # top-left
++            [1.1, 1.9, 0],       # top-right
++            [-1.1, -1.9, 0],     # bottom-left
++            [1.1, -1.9, 0],      # bottom-right
++            [-3.3, 1.9, 0],      # far top-left
++            [3.3, 1.9, 0],       # far top-right
++            [-3.3, -1.9, 0],     # far bottom-left
++            [3.3, -1.9, 0],      # far bottom-right
++        ])
++        outer_radius = calculate_outer_hex_radius(inner_hex_data)
++        outer_hex_data = np.array([0, 0, 0])
++    else:
++        inner_hex_data = best_overall_individual.reshape(-1, 3)
++        outer_radius = calculate_outer_hex_radius(inner_hex_data)
++        outer_hex_data = np.array([0, 0, 0])
+ 
+     return inner_hex_data, outer_hex_data, outer_radius
+ 
+-
+ # EVOLVE-BLOCK-END

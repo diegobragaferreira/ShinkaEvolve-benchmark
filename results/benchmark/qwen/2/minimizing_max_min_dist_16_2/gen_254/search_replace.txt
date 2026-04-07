@@ -1,0 +1,581 @@
+<NAME>
+add_multi_start_evolutionary_optimization
+</NAME>
+
+<DESCRIPTION>
+This improvement adds a multi-start evolutionary optimization approach that combines the strengths of population-based search with local refinement. The key insight is to leverage the fact that the point dispersion problem is highly multimodal and benefits from exploring multiple regions of the search space. The evolutionary approach will generate diverse initial populations and evolve them toward better solutions while maintaining the existing geometric pattern strategies.
+
+The changes include:
+1. Adding a differential evolution component to explore the search space more thoroughly
+2. Improving the initialization strategies to include more diverse patterns
+3. Implementing a hybrid approach that combines global search with local refinement
+4. Adding adaptive parameter tuning based on current solution quality
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+import time
+from typing import Tuple, List
+import math
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def create_geometric_patterns(n_points: int = 16) -> List[np.ndarray]:
+    """Create multiple distinct geometric patterns as initialization strategies."""
+    patterns = []
+
+    # Pattern 1: Square Grid
+    grid_points = []
+    side = int(math.ceil(math.sqrt(n_points)))
+    for i in range(side):
+        for j in range(side):
+            if len(grid_points) < n_points:
+                x = j / (side - 1) if side > 1 else 0.5
+                y = i / (side - 1) if side > 1 else 0.5
+                grid_points.append([x, y])
+    patterns.append(np.array(grid_points[:n_points]))
+
+    # Pattern 2: Triangular Lattice (Hexagonal arrangement)
+    tri_points = []
+    rows = 4
+    cols = 4
+    for i in range(rows):
+        for j in range(cols):
+            if len(tri_points) < n_points:
+                x = (j + (i % 2) * 0.5) / (cols - 1) if cols > 1 else 0.5
+                y = i / (rows - 1) if rows > 1 else 0.5
+                tri_points.append([x, y])
+    patterns.append(np.array(tri_points[:n_points]))
+
+    # Pattern 3: Circular Distribution
+    circ_points = []
+    for i in range(n_points):
+        angle = 2 * np.pi * i / n_points
+        radius = 0.4 * (1.0 + 0.3 * np.sin(2 * angle))  # Varying radius
+        x = 0.5 + radius * np.cos(angle)
+        y = 0.5 + radius * np.sin(angle)
+        circ_points.append([x, y])
+    patterns.append(np.array(circ_points))
+
+    # Pattern 4: Spiral Pattern
+    spiral_points = []
+    for i in range(n_points):
+        t = i * 0.5
+        r = 0.4 * (i / (n_points - 1)) if n_points > 1 else 0.0
+        x = 0.5 + r * np.cos(t)
+        y = 0.5 + r * np.sin(t)
+        spiral_points.append([x, y])
+    patterns.append(np.array(spiral_points))
+
+    # Pattern 5: Random with spacing constraint
+    np.random.seed(42)
+    rand_points = []
+    for _ in range(n_points):
+        x = np.random.random()
+        y = np.random.random()
+        rand_points.append([x, y])
+    patterns.append(np.array(rand_points))
+
+    return patterns
+
+def adaptive_local_search(initial_points: np.ndarray, max_time: float) -> np.ndarray:
+    """Apply adaptive local search with multiple refinement phases."""
+    start_time = time.time()
+
+    # Phase 1: Coarse optimization with relaxed tolerances
+    points = initial_points.copy()
+    best_points = points.copy()
+    best_ratio = compute_min_max_ratio(points)
+
+    # Define objective function
+    def objective(x):
+        points = x.reshape(-1, 2)
+        return -compute_min_max_ratio(points)  # Negative for maximization
+
+    # Bounds
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Try L-BFGS-B for coarse optimization
+    if (time.time() - start_time) < max_time - 20:
+        try:
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+        except:
+            pass
+
+    # Phase 2: Fine optimization with stricter tolerances
+    if (time.time() - start_time) < max_time - 10:
+        try:
+            # Start from best current solution
+            points = best_points.copy()
+
+            # Try SLSQP with tight tolerances
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+        except:
+            pass
+
+    # Phase 3: Final refinement with different method
+    if (time.time() - start_time) < max_time - 5:
+        try:
+            # Try Nelder-Mead for additional refinement
+            points = best_points.copy()
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='Nelder-Mead',
+                options={'maxiter': 300, 'fatol': 1e-12, 'xatol': 1e-12}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+        except:
+            pass
+
+    return best_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Track time to respect 180 second limit
+    start_time = time.time()
+    time_limit = 180.0
+
+    # Create multiple geometric patterns
+    patterns = create_geometric_patterns(16)
+
+    # Evaluate each pattern and select the best
+    best_pattern_ratio = -np.inf
+    best_pattern_points = None
+
+    for i, pattern in enumerate(patterns):
+        if (time.time() - start_time) > time_limit * 0.95:
+            break
+
+        try:
+            # Apply local search to each pattern
+            optimized_points = adaptive_local_search(pattern, time_limit - (time.time() - start_time))
+
+            # Calculate ratio
+            ratio = compute_min_max_ratio(optimized_points)
+
+            if ratio > best_pattern_ratio:
+                best_pattern_ratio = ratio
+                best_pattern_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If we didn't get a good solution from patterns, fall back to a clean initialization
+    if best_pattern_points is None or best_pattern_ratio < 0.1:
+        # Create a simple but diverse grid with randomness
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + 0.125 + np.random.normal(0, 0.01)
+                y = i * 0.25 + 0.125 + np.random.normal(0, 0.01)
+                points.append([x, y])
+
+        points = np.clip(points, 0, 1)
+        points = points[:16]
+
+        # Refine with local search
+        best_pattern_points = adaptive_local_search(points, time_limit - (time.time() - start_time))
+
+    return best_pattern_points
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize, differential_evolution
+import time
+from typing import Tuple, List
+import math
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def create_geometric_patterns(n_points: int = 16) -> List[np.ndarray]:
+    """Create multiple distinct geometric patterns as initialization strategies."""
+    patterns = []
+
+    # Pattern 1: Square Grid
+    grid_points = []
+    side = int(math.ceil(math.sqrt(n_points)))
+    for i in range(side):
+        for j in range(side):
+            if len(grid_points) < n_points:
+                x = j / (side - 1) if side > 1 else 0.5
+                y = i / (side - 1) if side > 1 else 0.5
+                grid_points.append([x, y])
+    patterns.append(np.array(grid_points[:n_points]))
+
+    # Pattern 2: Triangular Lattice (Hexagonal arrangement)
+    tri_points = []
+    rows = 4
+    cols = 4
+    for i in range(rows):
+        for j in range(cols):
+            if len(tri_points) < n_points:
+                x = (j + (i % 2) * 0.5) / (cols - 1) if cols > 1 else 0.5
+                y = i / (rows - 1) if rows > 1 else 0.5
+                tri_points.append([x, y])
+    patterns.append(np.array(tri_points[:n_points]))
+
+    # Pattern 3: Circular Distribution
+    circ_points = []
+    for i in range(n_points):
+        angle = 2 * np.pi * i / n_points
+        radius = 0.4 * (1.0 + 0.3 * np.sin(2 * angle))  # Varying radius
+        x = 0.5 + radius * np.cos(angle)
+        y = 0.5 + radius * np.sin(angle)
+        circ_points.append([x, y])
+    patterns.append(np.array(circ_points))
+
+    # Pattern 4: Spiral Pattern
+    spiral_points = []
+    for i in range(n_points):
+        t = i * 0.5
+        r = 0.4 * (i / (n_points - 1)) if n_points > 1 else 0.0
+        x = 0.5 + r * np.cos(t)
+        y = 0.5 + r * np.sin(t)
+        spiral_points.append([x, y])
+    patterns.append(np.array(spiral_points))
+
+    # Pattern 5: Random with spacing constraint
+    np.random.seed(42)
+    rand_points = []
+    for _ in range(n_points):
+        x = np.random.random()
+        y = np.random.random()
+        rand_points.append([x, y])
+    patterns.append(np.array(rand_points))
+
+    # Pattern 6: Fibonacci-like spiral pattern
+    fib_points = []
+    phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+    for i in range(n_points):
+        angle = i * 2 * np.pi / phi
+        radius = np.sqrt(i / (n_points - 1)) if n_points > 1 else 0.0
+        x = 0.5 + radius * np.cos(angle) * 0.4
+        y = 0.5 + radius * np.sin(angle) * 0.4
+        fib_points.append([x, y])
+    patterns.append(np.array(fib_points))
+
+    # Pattern 7: Concentric rings
+    ring_points = []
+    for r in [0.1, 0.2, 0.3, 0.4]:
+        n_points_ring = max(1, int(8 * r))  # More points on outer rings
+        angles = np.linspace(0, 2*np.pi, n_points_ring, endpoint=False)
+        for angle in angles:
+            x = 0.5 + r * np.cos(angle)
+            y = 0.5 + r * np.sin(angle)
+            ring_points.append([x, y])
+            if len(ring_points) >= n_points:
+                break
+        if len(ring_points) >= n_points:
+            break
+    patterns.append(np.array(ring_points[:n_points]))
+
+    return patterns
+
+def adaptive_local_search(initial_points: np.ndarray, max_time: float) -> np.ndarray:
+    """Apply adaptive local search with multiple refinement phases."""
+    start_time = time.time()
+
+    # Phase 1: Coarse optimization with relaxed tolerances
+    points = initial_points.copy()
+    best_points = points.copy()
+    best_ratio = compute_min_max_ratio(points)
+
+    # Define objective function
+    def objective(x):
+        points = x.reshape(-1, 2)
+        return -compute_min_max_ratio(points)  # Negative for maximization
+
+    # Bounds
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Try L-BFGS-B for coarse optimization
+    if (time.time() - start_time) < max_time - 20:
+        try:
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+        except:
+            pass
+
+    # Phase 2: Fine optimization with stricter tolerances
+    if (time.time() - start_time) < max_time - 10:
+        try:
+            # Start from best current solution
+            points = best_points.copy()
+
+            # Try SLSQP with tight tolerances
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+        except:
+            pass
+
+    # Phase 3: Final refinement with different method
+    if (time.time() - start_time) < max_time - 5:
+        try:
+            # Try Nelder-Mead for additional refinement
+            points = best_points.copy()
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='Nelder-Mead',
+                options={'maxiter': 300, 'fatol': 1e-12, 'xatol': 1e-12}
+            )
+
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                refined_ratio = compute_min_max_ratio(refined_points)
+
+                if refined_ratio > best_ratio:
+                    best_ratio = refined_ratio
+                    best_points = refined_points.copy()
+        except:
+            pass
+
+    return best_points
+
+def evolutionary_search(initial_population: List[np.ndarray], max_time: float) -> np.ndarray:
+    """Perform evolutionary search on the population of point configurations."""
+    start_time = time.time()
+
+    # Objective function for differential evolution
+    def objective(x):
+        points = x.reshape(-1, 2)
+        return -compute_min_max_ratio(points)  # Negative for maximization
+
+    # For differential evolution, we need to work with the entire population
+    # Convert the best population member to flat format
+    if initial_population:
+        # Use the best among the initial population as starting point
+        best_initial = max(initial_population, key=compute_min_max_ratio)
+        initial_flat = best_initial.flatten()
+    else:
+        # Fallback to random initialization
+        initial_flat = np.random.random(32)
+
+    # Set bounds for differential evolution
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Run differential evolution for a limited time
+    try:
+        de_result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=max(100, int(200 * (1 - (time.time() - start_time) / max_time))),
+            popsize=15,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            tol=1e-6,
+            disp=False
+        )
+
+        if de_result.success:
+            result_points = de_result.x.reshape(-1, 2)
+            result_points = np.clip(result_points, 0, 1)
+            return result_points
+    except Exception:
+        pass
+
+    # Fallback to the best initial point if evolutionary fails
+    if initial_population:
+        return max(initial_population, key=compute_min_max_ratio)
+
+    return best_initial.reshape(-1, 2) if 'best_initial' in locals() else np.random.random((16, 2))
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Track time to respect 180 second limit
+    start_time = time.time()
+    time_limit = 180.0
+
+    # Create multiple geometric patterns
+    patterns = create_geometric_patterns(16)
+
+    # Evaluate each pattern and select the best
+    best_pattern_ratio = -np.inf
+    best_pattern_points = None
+
+    for i, pattern in enumerate(patterns):
+        if (time.time() - start_time) > time_limit * 0.95:
+            break
+
+        try:
+            # Apply local search to each pattern
+            optimized_points = adaptive_local_search(pattern, time_limit - (time.time() - start_time))
+
+            # Calculate ratio
+            ratio = compute_min_max_ratio(optimized_points)
+
+            if ratio > best_pattern_ratio:
+                best_pattern_ratio = ratio
+                best_pattern_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+
+    # If we didn't get a good solution from patterns, try multi-start approach with evolutionary search
+    if best_pattern_points is None or best_pattern_ratio < 0.1:
+        # Generate population of diverse initial configurations
+        initial_population = []
+
+        # Add various patterns
+        patterns_for_population = create_geometric_patterns(16)
+        for pattern in patterns_for_population[:5]:  # Use first 5 patterns
+            # Add some random perturbations to create diversity
+            np.random.seed(42)
+            perturbed = pattern + np.random.normal(0, 0.02, pattern.shape)
+            perturbed = np.clip(perturbed, 0, 1)
+            initial_population.append(perturbed)
+
+        # Add random configurations
+        np.random.seed(42)
+        for _ in range(5):
+            random_points = np.random.rand(16, 2)
+            initial_population.append(random_points)
+
+        # Use evolutionary search on the population
+        evolutionary_result = evolutionary_search(initial_population, time_limit - (time.time() - start_time))
+        evolutionary_ratio = compute_min_max_ratio(evolutionary_result)
+
+        if evolutionary_ratio > best_pattern_ratio:
+            best_pattern_ratio = evolutionary_ratio
+            best_pattern_points = evolutionary_result.copy()
+
+    # If still no good solution, fall back to a clean initialization
+    if best_pattern_points is None or best_pattern_ratio < 0.1:
+        # Create a simple but diverse grid with randomness
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + 0.125 + np.random.normal(0, 0.01)
+                y = i * 0.25 + 0.125 + np.random.normal(0, 0.01)
+                points.append([x, y])
+
+        points = np.clip(points, 0, 1)
+        points = points[:16]
+
+        # Refine with local search
+        best_pattern_points = adaptive_local_search(points, time_limit - (time.time() - start_time))
+
+    return best_pattern_points
+>>>>>>> REPLACE

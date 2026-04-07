@@ -1,0 +1,453 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, cKDTree
+from scipy.spatial.distance import cdist
+import random
+import time
+from typing import Tuple, List, Optional
+
+# Set seeds for determinism
+random.seed(42)
+np.random.seed(42)
+
+class CirclePackagingConfig:
+    """Manages configuration parameters for circle packing."""
+    
+    def __init__(self, rect_width: float = 1.0, rect_height: float = 1.0, n_circles: int = 21):
+        self.rect_width = rect_width
+        self.rect_height = rect_height
+        self.n_circles = n_circles
+        self.max_radius = min(rect_width, rect_height) * 0.2
+        
+class SpatialIndexer:
+    """Efficient spatial indexing for constraint validation."""
+    
+    @staticmethod
+    def build_grid_index(circles: np.ndarray, rect_width: float, rect_height: float) -> dict:
+        """Create grid-based spatial index for efficient collision detection."""
+        if len(circles) <= 1:
+            return {}
+            
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+        avg_radius = np.mean(radii) if len(radii) > 0 else 0.1
+        cell_size = avg_radius * 1.5
+        
+        if cell_size <= 0:
+            cell_size = 0.1
+            
+        cols = max(1, int(rect_width / cell_size) + 1)
+        rows = max(1, int(rect_height / cell_size) + 1)
+        
+        cell_dict = {}
+        
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            col = int(x / cell_size)
+            row = int(y / cell_size)
+            
+            col = max(0, min(col, cols - 1))
+            row = max(0, min(row, rows - 1))
+            
+            key = (row, col)
+            if key not in cell_dict:
+                cell_dict[key] = []
+            cell_dict[key].append(i)
+            
+        return cell_dict
+    
+    @staticmethod
+    def check_bounds_validity(circles: np.ndarray, rect_width: float, rect_height: float) -> bool:
+        """Check if all circles are within bounds."""
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+                return False
+        return True
+    
+    @staticmethod
+    def check_overlap_validity(circles: np.ndarray, rect_width: float, rect_height: float) -> bool:
+        """Check if any circles overlap using spatial indexing."""
+        if len(circles) <= 1:
+            return True
+            
+        try:
+            cell_dict = SpatialIndexer.build_grid_index(circles, rect_width, rect_height)
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                
+                col = int(x1 / (np.mean(radii) * 1.5) if np.mean(radii) > 0 else 0.1)
+                row = int(y1 / (np.mean(radii) * 1.5) if np.mean(radii) > 0 else 0.1)
+                col = max(0, min(col, int(rect_width / (np.mean(radii) * 1.5)) + 1))
+                row = max(0, min(row, int(rect_height / (np.mean(radii) * 1.5)) + 1))
+                
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        neighbor_row = row + dr
+                        neighbor_col = col + dc
+                        
+                        if (neighbor_row, neighbor_col) in cell_dict:
+                            for j in cell_dict[(neighbor_row, neighbor_col)]:
+                                if i != j:
+                                    x2, y2, r2 = circles[j]
+                                    dx = x1 - x2
+                                    dy = y1 - y2
+                                    distance_sq = dx*dx + dy*dy
+                                    min_distance_sq = (r1 + r2) * (r1 + r2)
+                                    
+                                    if distance_sq < min_distance_sq:
+                                        return False
+            return True
+        except:
+            # Fallback to brute force
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            distances = cdist(coords, coords)
+            mask = np.triu(np.ones_like(distances, dtype=bool), k=1)
+            overlap_distances = distances[mask]
+            overlap_radii = (radii[:, None] + radii[None, :])[mask]
+            return not np.any(overlap_distances < overlap_radii)
+
+class PatternGenerator:
+    """Generates initial circle packing patterns."""
+    
+    @staticmethod
+    def generate_hexagonal_pattern(config: CirclePackagingConfig) -> np.ndarray:
+        """Generate initial hexagonal packing pattern."""
+        circles = np.zeros((config.n_circles, 3))
+        
+        rows = int(np.sqrt(config.n_circles))
+        cols = int(np.ceil(config.n_circles / rows))
+        
+        max_radius = config.max_radius
+        x_spacing = max_radius * 2.5
+        y_spacing = max_radius * 2.165
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= config.n_circles:
+                    break
+                x = 0.05 + j * x_spacing
+                y = 0.05 + i * y_spacing
+                
+                if i % 2 == 1:
+                    x += x_spacing / 2
+                    
+                x = max(max_radius, min(config.rect_width - max_radius, x))
+                y = max(max_radius, min(config.rect_height - max_radius, y))
+                
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+                
+        return circles
+    
+    @staticmethod
+    def generate_grid_pattern(config: CirclePackagingConfig) -> np.ndarray:
+        """Generate initial grid pattern."""
+        circles = np.zeros((config.n_circles, 3))
+        
+        cols = int(np.ceil(np.sqrt(config.n_circles)))
+        rows = int(np.ceil(config.n_circles / cols))
+        
+        margin = 0.05
+        cell_width = (config.rect_width - 2 * margin) / cols
+        cell_height = (config.rect_height - 2 * margin) / rows
+        max_radius = min(cell_width, cell_height) * 0.4
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= config.n_circles:
+                    break
+                x = margin + j * cell_width + cell_width / 2
+                y = margin + i * cell_height + cell_height / 2
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+                
+        return circles
+    
+    @staticmethod
+    def generate_random_pattern(config: CirclePackagingConfig) -> np.ndarray:
+        """Generate random pattern with basic constraints."""
+        circles = np.zeros((config.n_circles, 3))
+        max_radius = config.max_radius
+        
+        for i in range(config.n_circles):
+            attempts = 0
+            valid = False
+            while not valid and attempts < 1000:
+                x = np.random.uniform(max_radius, config.rect_width - max_radius)
+                y = np.random.uniform(max_radius, config.rect_height - max_radius)
+                radius = np.random.uniform(0.005, max_radius)
+                
+                valid = True
+                for j in range(i):
+                    existing_x, existing_y, existing_r = circles[j]
+                    dist = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                    if dist < (radius + existing_r):
+                        valid = False
+                        break
+                        
+                if valid:
+                    circles[i] = [x, y, radius]
+                attempts += 1
+                
+        return circles
+
+class ConstraintValidator:
+    """Validates circle configurations against constraints."""
+    
+    @staticmethod
+    def is_valid(circles: np.ndarray, config: CirclePackagingConfig) -> bool:
+        """Check if solution is valid."""
+        if not SpatialIndexer.check_bounds_validity(circles, config.rect_width, config.rect_height):
+            return False
+        return SpatialIndexer.check_overlap_validity(circles, config.rect_width, config.rect_height)
+
+class CircleVoronoiAnalyzer:
+    """Computes Voronoi-based criticality for adaptive optimization."""
+    
+    @staticmethod
+    def compute_criticality(circles: np.ndarray, config: CirclePackagingConfig) -> np.ndarray:
+        """Compute constraint density/criticality for each circle."""
+        if len(circles) <= 1:
+            return np.ones(len(circles)) * 0.5
+            
+        try:
+            # Use Voronoi diagram for criticality calculation
+            points = circles[:, :2].copy()
+            
+            # Add boundary points for proper Voronoi
+            boundary_points = [
+                [0, 0], [config.rect_width, 0], [0, config.rect_height], [config.rect_width, config.rect_height],
+                [config.rect_width/2, 0], [config.rect_width/2, config.rect_height],
+                [0, config.rect_height/2], [config.rect_width, config.rect_height/2]
+            ]
+            points = np.vstack([points, boundary_points])
+            
+            vor = Voronoi(points)
+            
+            # Compute criticality based on Voronoi cell areas
+            criticality_scores = []
+            for i in range(len(circles)):
+                region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+                
+                if region_idx != -1 and region_idx < len(vor.regions):
+                    region = vor.regions[region_idx]
+                    if -1 not in region and len(region) >= 3:
+                        # Compute Voronoi cell area (simplified)
+                        vertices = np.array([vor.vertices[j] for j in region])
+                        if len(vertices) >= 3:
+                            # Use simpler approach: distance to nearest neighbors
+                            # This is computationally cheaper and still effective
+                            coords = circles[:, :2]
+                            distances = np.sqrt(np.sum((coords - coords[i])**2, axis=1))
+                            distances[i] = float('inf')  # Exclude self
+                            
+                            # Criticality inversely related to nearest neighbor distance
+                            min_dist = np.min(distances)
+                            if min_dist > 0:
+                                criticality = 1.0 / (min_dist + 0.001)
+                            else:
+                                criticality = 1000
+                        else:
+                            criticality = 1.0
+                    else:
+                        criticality = 1.0
+                else:
+                    # Fallback for Voronoi computation failure
+                    coords = circles[:, :2]
+                    distances = np.sqrt(np.sum((coords - coords[i])**2, axis=1))
+                    distances[i] = float('inf')
+                    
+                    min_dist = np.min(distances)
+                    if min_dist > 0:
+                        criticality = 1.0 / (min_dist + 0.001)
+                    else:
+                        criticality = 1000
+                        
+                criticality_scores.append(criticality)
+                
+            criticality_scores = np.array(criticality_scores)
+            # Normalize to [0,1] range
+            if np.max(criticality_scores) > 0:
+                criticality_scores = criticality_scores / np.max(criticality_scores)
+            return criticality_scores
+            
+        except:
+            # Fallback: simple neighbor-based criticality
+            criticality_scores = []
+            coords = circles[:, :2]
+            
+            for i in range(len(circles)):
+                distances = np.sqrt(np.sum((coords - coords[i])**2, axis=1))
+                distances[i] = float('inf')
+                
+                min_dist = np.min(distances)
+                if min_dist > 0:
+                    criticality = 1.0 / (min_dist + 0.001)
+                else:
+                    criticality = 1000
+                    
+                criticality_scores.append(criticality)
+                
+            criticality_scores = np.array(criticality_scores)
+            if np.max(criticality_scores) > 0:
+                criticality_scores = criticality_scores / np.max(criticality_scores)
+            return criticality_scores
+
+class AdaptiveOptimizer:
+    """Performs adaptive optimization with Voronoi-based intelligence."""
+    
+    @staticmethod
+    def mutate_radii(circles: np.ndarray, criticality: np.ndarray, 
+                     config: CirclePackagingConfig, generation: int = 0) -> np.ndarray:
+        """Mutate radii with adaptive step size based on criticality."""
+        mutated = circles.copy()
+        
+        # Sort by criticality (most critical first)
+        sorted_indices = np.argsort(-criticality)
+        
+        # Focus on top 50% of critical circles
+        num_mutations = max(1, len(circles) // 2)
+        mutation_indices = sorted_indices[:num_mutations]
+        
+        # Adaptive step size
+        base_step_size = 0.01 * (1 - generation / 150) + 0.001
+        avg_criticality = np.mean(criticality)
+        adaptive_factor = 1.0 / (1.0 + avg_criticality * 10)
+        step_size = base_step_size * adaptive_factor
+        
+        for i in range(len(mutation_indices)):
+            idx = mutation_indices[i]
+            if random.random() < 0.2:  # Mutation probability
+                old_radius = mutated[idx, 2]
+                delta = np.random.normal(0, step_size)
+                new_radius = max(0.001, old_radius + delta)
+                mutated[idx, 2] = new_radius
+                
+        return mutated
+    
+    @staticmethod
+    def optimize_local(circles: np.ndarray, config: CirclePackagingConfig, 
+                       iterations: int = 200) -> np.ndarray:
+        """Perform local optimization with criticality-driven adaptation."""
+        current = circles.copy()
+        
+        for _ in range(iterations):
+            # Compute criticality for current solution
+            criticality = CircleVoronoiAnalyzer.compute_criticality(current, config)
+            sorted_indices = np.argsort(-criticality)
+            
+            # Focus on most critical circles
+            num_adjustments = max(3, len(current) // 10)
+            selected_indices = sorted_indices[:num_adjustments]
+            
+            for idx in selected_indices:
+                old_x, old_y, old_r = current[idx]
+                
+                # Boundary proximity check
+                boundary_proximity = min(old_x, old_y, 
+                                       config.rect_width - old_x, 
+                                       config.rect_height - old_y)
+                
+                # Adaptive step sizes
+                step_x = 0.02 if boundary_proximity > 0.1 else 0.005
+                step_y = 0.02 if boundary_proximity > 0.1 else 0.005
+                step_r = 0.01 if boundary_proximity > 0.1 else 0.003
+                
+                # New proposed values
+                new_x = max(old_r, min(config.rect_width - old_r, 
+                                     old_x + np.random.normal(0, step_x)))
+                new_y = max(old_r, min(config.rect_height - old_r, 
+                                     old_y + np.random.normal(0, step_y)))
+                new_r = max(0.001, old_r + np.random.normal(0, step_r))
+                
+                # Test validity
+                test_current = current.copy()
+                test_current[idx] = [new_x, new_y, new_r]
+                
+                if ConstraintValidator.is_valid(test_current, config):
+                    current = test_current
+                    
+        return current
+
+def evaluate_fitness(circles: np.ndarray, config: CirclePackagingConfig) -> float:
+    """Evaluate fitness as sum of radii with penalties for violations."""
+    total_radius = np.sum(circles[:, 2])
+    penalty = 0
+    
+    # Boundary penalty
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > config.rect_width or y - r < 0 or y + r > config.rect_height:
+            penalty -= 1000
+    
+    # Overlap penalty (vectorized)
+    if len(circles) > 1:
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+        distances = cdist(coords, coords)
+        mask = np.triu(np.ones_like(distances, dtype=bool), k=1)
+        overlap_distances = distances[mask]
+        overlap_radii = (radii[:, None] + radii[None, :])[mask]
+        overlaps = overlap_distances < overlap_radii
+        if np.any(overlaps):
+            overlap_penalty = -np.sum(overlap_radii[overlaps] - overlap_distances[overlaps]) * 100
+            penalty += overlap_penalty
+            
+    return total_radius + penalty
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Configuration
+    config = CirclePackagingConfig(rect_width=1.2, rect_height=0.8, n_circles=21)
+    
+    # Generate initial patterns
+    patterns = [
+        PatternGenerator.generate_hexagonal_pattern(config),
+        PatternGenerator.generate_grid_pattern(config),
+        PatternGenerator.generate_random_pattern(config)
+    ]
+    
+    # Find best initial pattern
+    best_pattern = None
+    best_fitness = -float('inf')
+    
+    for pattern in patterns:
+        fitness = evaluate_fitness(pattern, config)
+        if fitness > best_fitness:
+            best_fitness = fitness
+            best_pattern = pattern.copy()
+    
+    # Local optimization of best pattern
+    optimized_pattern = AdaptiveOptimizer.optimize_local(best_pattern, config, iterations=500)
+    
+    # Final refinement
+    final_solution = AdaptiveOptimizer.optimize_local(optimized_pattern, config, iterations=200)
+    
+    # Ensure validity
+    if not ConstraintValidator.is_valid(final_solution, config):
+        # Fallback to hexagonal pattern
+        final_solution = PatternGenerator.generate_hexagonal_pattern(config)
+        final_solution = AdaptiveOptimizer.optimize_local(final_solution, config, iterations=200)
+    
+    return final_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

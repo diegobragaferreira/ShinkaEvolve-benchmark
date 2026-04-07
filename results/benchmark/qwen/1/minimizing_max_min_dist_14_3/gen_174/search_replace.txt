@@ -1,0 +1,324 @@
+<NAME>
+add_sobol_initialization
+</NAME>
+
+<DESCRIPTION>
+Adding Sobol sequence initialization to improve space-filling properties and escape local minima more effectively. This approach leverages low-discrepancy sequences which have been shown to provide superior distribution in optimization problems like this one.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def hybrid_initialization(n):
+        """
+        Generate initial points using hybrid approach combining icosahedron and Fibonacci methods.
+        This provides superior starting configurations compared to single-method approaches.
+        """
+        # Start with icosahedron vertices for better symmetry
+        phi = (1 + math.sqrt(5)) / 2  # Golden ratio
+        vertices = [
+            (0, 1, phi), (0, -1, phi), (0, 1, -phi), (0, -1, -phi),
+            (1, phi, 0), (-1, phi, 0), (1, -phi, 0), (-1, -phi, 0),
+            (phi, 0, 1), (phi, 0, -1), (-phi, 0, 1), (-phi, 0, -1)
+        ]
+
+        # Convert to numpy array and normalize
+        points = np.array(vertices, dtype=float)
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+
+        # Add extra points using modified Fibonacci distribution
+        remaining = n - len(points)
+        if remaining > 0:
+            # Use Fibonacci-like distribution with better spacing properties
+            for i in range(remaining):
+                # Modified Fibonacci distribution with better spread
+                theta = math.acos(1 - 2 * (i / (remaining - 1)))
+                # Use golden ratio multiple for better distribution
+                phi_coord = (i * 2.414213562) % (2 * math.pi)  # Golden ratio multiple
+
+                x = math.sin(theta) * math.cos(phi_coord)
+                y = math.sin(theta) * math.sin(phi_coord)
+                z = math.cos(theta)
+                points = np.vstack([points, [x, y, z]])
+
+        # Apply multiple jittering strategies to break symmetry
+        np.random.seed(42)
+        # Primary jitter with moderate magnitude
+        noise1 = np.random.normal(0, 0.02, points.shape)
+        points += noise1
+
+        # Secondary jitter with smaller magnitude
+        noise2 = np.random.normal(0, 0.005, points.shape)
+        points += noise2
+
+        # Normalize again to maintain unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+
+        return points
+=======
+    def hybrid_sobol_initialization(n):
+        """
+        Generate initial points using hybrid approach combining Sobol sequence with icosahedron.
+        Sobol sequences provide superior space-filling properties compared to deterministic methods.
+        """
+        # First, generate points using Sobol sequence for better distribution
+        from scipy.stats import qmc
+        sampler = qmc.Sobol(d=3, seed=42)
+        sobol_points = sampler.random(n=n)
+
+        # Convert Sobol points to spherical coordinates
+        # Map [0,1] to [0,pi] for theta and [0,2pi] for phi
+        theta = sobol_points[:, 0] * np.pi  # 0 to pi
+        phi = sobol_points[:, 1] * 2 * np.pi  # 0 to 2pi
+        r = sobol_points[:, 2]  # Radius component (we'll use 1 for unit sphere)
+
+        # Convert to Cartesian coordinates
+        x = r * np.sin(theta) * np.cos(phi)
+        y = r * np.sin(theta) * np.sin(phi)
+        z = r * np.cos(theta)
+
+        # Combine into points array
+        points = np.column_stack([x, y, z])
+
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+
+        # Add some structure by mixing with icosahedron vertices for better symmetry
+        phi = (1 + math.sqrt(5)) / 2  # Golden ratio
+        vertices = [
+            (0, 1, phi), (0, -1, phi), (0, 1, -phi), (0, -1, -phi),
+            (1, phi, 0), (-1, phi, 0), (1, -phi, 0), (-1, -phi, 0),
+            (phi, 0, 1), (phi, 0, -1), (-phi, 0, 1), (-phi, 0, -1)
+        ]
+
+        # Convert to numpy array and normalize (if needed)
+        ico_points = np.array(vertices, dtype=float)
+        norms = np.linalg.norm(ico_points, axis=1)
+        ico_points = ico_points / norms[:, np.newaxis]
+
+        # Replace first 12 points with icosahedron vertices for better structural properties
+        points[:min(12, len(points))] = ico_points[:min(12, len(points))]
+
+        # Add small perturbations to break symmetry and avoid local minima
+        np.random.seed(42)
+        # Perturbation with controlled magnitude
+        noise = np.random.normal(0, 0.015, points.shape)
+        points += noise
+
+        # Normalize again to maintain unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        points = points / norms[:, np.newaxis]
+
+        return points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_optimization_loop
+</NAME>
+
+<DESCRIPTION>
+Updating the main optimization loop to use the new Sobol-based initialization method and increasing the number of restarts to better explore the solution space and find improved solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    best_ratio = -np.inf
+    best_points = None
+
+    # Multi-start optimization with enhanced initialization and more restarts
+    for restart in range(15):  # Increased restarts for better exploration
+        np.random.seed(42 + restart)
+
+        # Get initial points using hybrid method
+        initial_points = hybrid_initialization(14)
+        x0 = initial_points.flatten()
+
+        # Add small random perturbation to break any symmetry
+        perturbation = np.random.normal(0, 0.01, x0.shape)
+        x0 += perturbation
+
+        # Optimize with progressive refinement
+        try:
+            optimized_points = progressive_optimization(x0, maxiter=1000)
+
+            # Calculate final ratio
+            ratio = distance_ratio(optimized_points)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+=======
+    best_ratio = -np.inf
+    best_points = None
+
+    # Multi-start optimization with enhanced initialization and more restarts
+    for restart in range(20):  # Increased restarts for better exploration
+        np.random.seed(42 + restart)
+
+        # Alternate between different initialization strategies for better exploration
+        if restart % 2 == 0:
+            # Use Sobol-based initialization
+            initial_points = hybrid_sobol_initialization(14)
+        else:
+            # Use original hybrid initialization for comparison
+            initial_points = hybrid_initialization(14)
+
+        x0 = initial_points.flatten()
+
+        # Add small random perturbation to break any symmetry
+        perturbation = np.random.normal(0, 0.01, x0.shape)
+        x0 += perturbation
+
+        # Optimize with progressive refinement
+        try:
+            optimized_points = progressive_optimization(x0, maxiter=1000)
+
+            # Calculate final ratio
+            ratio = distance_ratio(optimized_points)
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+
+        except Exception as e:
+            continue
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_adaptive_constraint_tightening
+</NAME>
+
+<DESCRIPTION>
+Adding adaptive constraint tightening during optimization to allow more flexibility in early iterations and tighten constraints in later stages, which helps achieve better convergence to optimal solutions while avoiding getting stuck in poor local optima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def progressive_optimization(x0, maxiter=1000):
+        """
+        Perform progressive optimization with varying constraints and tolerances
+        """
+        # Define constraints for normalization (points should be on unit sphere)
+        constraints = []
+
+        def constraint_func(x):
+            points = x.reshape(-1, 3)
+            norms = np.linalg.norm(points, axis=1)
+            return norms - 1.0  # Should be near 0 for unit sphere
+
+        # Add constraint for each point to lie on unit sphere
+        for i in range(14):
+            constraints.append({'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]})
+
+        # Phase 1: Coarse optimization (fast, loose constraints)
+        bounds = [(-1.2, 1.2)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 200, 'ftol': 1e-4, 'gtol': 1e-4},
+            tol=1e-4
+        )
+
+        # Phase 2: Medium optimization (moderate constraints)
+        x1 = result.x
+        bounds = [(-1.1, 1.1)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x1,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 300, 'ftol': 1e-6, 'gtol': 1e-6},
+            tol=1e-6
+        )
+
+        # Phase 3: Fine optimization (tight constraints)
+        x2 = result.x
+        bounds = [(-1.05, 1.05)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x2,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        return result.x
+=======
+    def progressive_optimization(x0, maxiter=1000):
+        """
+        Perform progressive optimization with adaptive constraint tightening
+        """
+        # Define constraints for normalization (points should be on unit sphere)
+        constraints = []
+
+        def constraint_func(x):
+            points = x.reshape(-1, 3)
+            norms = np.linalg.norm(points, axis=1)
+            return norms - 1.0  # Should be near 0 for unit sphere
+
+        # Add constraint for each point to lie on unit sphere
+        for i in range(14):
+            constraints.append({'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]})
+
+        # Phase 1: Coarse optimization (fast, loose constraints)
+        bounds = [(-1.3, 1.3)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 150, 'ftol': 1e-3, 'gtol': 1e-3},
+            tol=1e-3
+        )
+
+        # Phase 2: Medium optimization (moderate constraints)
+        x1 = result.x
+        bounds = [(-1.15, 1.15)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x1,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 250, 'ftol': 1e-5, 'gtol': 1e-5},
+            tol=1e-5
+        )
+
+        # Phase 3: Fine optimization (tight constraints)
+        x2 = result.x
+        bounds = [(-1.05, 1.05)] * len(x0)
+
+        result = minimize(
+            objective_function,
+            x2,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 400, 'ftol': 1e-7, 'gtol': 1e-7},
+            tol=1e-7
+        )
+
+        return result.x
+>>>>>>> REPLACE
+</DIFF>

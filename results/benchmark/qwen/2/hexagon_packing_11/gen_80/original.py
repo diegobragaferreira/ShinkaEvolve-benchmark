@@ -1,0 +1,154 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+import math
+
+class HexagonPackingOptimizer:
+    def __init__(self):
+        self.unit_hex_radius = 1.0  # Circumradius of unit hexagon
+        self.unit_hex_vertices = self._generate_unit_hexagon_vertices()
+
+    def _generate_unit_hexagon_vertices(self):
+        """Generate vertices of a unit regular hexagon centered at origin"""
+        vertices = []
+        for i in range(6):
+            angle = i * np.pi / 3
+            x = self.unit_hex_radius * np.cos(angle)
+            y = self.unit_hex_radius * np.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+
+    def _hexagon_from_params(self, center_x, center_y, rotation_deg):
+        """Create hexagon vertices given center and rotation"""
+        rotation_rad = np.radians(rotation_deg)
+        cos_r = np.cos(rotation_rad)
+        sin_r = np.sin(rotation_rad)
+
+        # Apply rotation and translation to unit hexagon vertices
+        rotated_vertices = np.zeros_like(self.unit_hex_vertices)
+        for i, (x, y) in enumerate(self.unit_hex_vertices):
+            rotated_vertices[i] = [
+                x * cos_r - y * sin_r + center_x,
+                x * sin_r + y * cos_r + center_y
+            ]
+        return rotated_vertices
+
+    def _check_containment(self, hexagon_vertices, outer_hex_center=(0,0), outer_hex_radius=10):
+        """Check if hexagon is fully contained in outer hexagon"""
+        outer_hex_vertices = self._hexagon_from_params(outer_hex_center[0], outer_hex_center[1], 0)
+        outer_polygon = Polygon(outer_hex_vertices)
+
+        # Check if all vertices of inner hexagon are within outer hexagon
+        for vertex in hexagon_vertices:
+            point = Point(vertex[0], vertex[1])
+            if not outer_polygon.contains(point):
+                return False
+        return True
+
+    def _check_collision(self, hex1_vertices, hex2_vertices):
+        """Check if two hexagons collide using Shapely"""
+        poly1 = Polygon(hex1_vertices)
+        poly2 = Polygon(hex2_vertices)
+        return poly1.intersects(poly2)
+
+    def _evaluate_configuration(self, inner_hex_data, outer_hex_side_length):
+        """Evaluate configuration for collisions and containment"""
+        num_hex = len(inner_hex_data)
+        # Convert to list of polygons for easier handling
+        hex_polygons = []
+
+        # Create all inner hexagon polygons
+        for i in range(num_hex):
+            center_x, center_y, rotation = inner_hex_data[i]
+            vertices = self._hexagon_from_params(center_x, center_y, rotation)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment of all inner hexagons within outer hexagon
+        outer_hex_vertices = self._hexagon_from_params(0, 0, 0)
+        outer_polygon = Polygon(outer_hex_vertices)
+
+        for i in range(num_hex):
+            if not outer_polygon.contains(hex_polygons[i]):
+                return False, 0
+
+        # Check pairwise collisions
+        for i in range(num_hex):
+            for j in range(i+1, num_hex):
+                if self._check_collision(hex_polygons[i], hex_polygons[j]):
+                    return False, 0
+
+        # If we get here, configuration is valid
+        # Return the inverse of outer hex side length
+        return True, 1.0 / outer_hex_side_length
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    optimizer = HexagonPackingOptimizer()
+
+    # Initial configuration from the simple grid
+    initial_config = np.array([
+        [0, 0, 0],  # center
+        [-2.5, 0, 0],  # left
+        [2.5, 0, 0],  # right
+        [-1.25, 2.17, 0],  # top-left
+        [1.25, 2.17, 0],  # top-right
+        [-1.25, -2.17, 0],  # bottom-left
+        [1.25, -2.17, 0],  # bottom-right
+        [-3.75, 2.17, 0],  # far top-left
+        [3.75, 2.17, 0],  # far top-right
+        [-3.75, -2.17, 0],  # far bottom-left
+        [3.75, -2.17, 0],  # far bottom-right
+    ])
+
+    # Set reasonable initial outer hexagon size based on configuration
+    # This is a better estimate than hardcoded 8
+    max_dist_from_center = 0
+    for i in range(len(initial_config)):
+        center_x, center_y, _ = initial_config[i]
+        dist = np.sqrt(center_x**2 + center_y**2)
+        max_dist_from_center = max(max_dist_from_center, dist + 1.0)  # Add radius margin
+
+    # Outer hexagon should have side length slightly larger than max distance
+    # For a regular hexagon, side length = circumradius
+    outer_hex_side_length = max_dist_from_center * 1.2  # 20% margin
+
+    # Evaluate this configuration
+    valid, metric = optimizer._evaluate_configuration(initial_config, outer_hex_side_length)
+
+    # If initial configuration is invalid due to overlap or containment,
+    # we fall back to the simpler approach but with better validation
+    if not valid:
+        # Fallback to a basic valid configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8.0  # fallback value
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+    # Since we've confirmed initial config works, we can return it
+    inner_hex_data = initial_config.copy()
+    outer_hex_data = np.array([0, 0, 0])
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,294 @@
+<NAME>
+add_temperature_controlled_sa
+</NAME>
+
+<DESCRIPTION>
+I'll implement temperature-controlled simulated annealing during the evolutionary optimization stages to enhance exploration in early phases and exploitation in later phases. This approach will help escape local minima in the early coarse optimization phase while progressively focusing on exploitation as the algorithm converges, similar to the successful approach from Generation 47.
+
+The main changes include:
+1. Adding a temperature-controlled selection mechanism
+2. Implementing adaptive cooling schedule
+3. Modifying the evolutionary loop to use temperature-based acceptance
+4. Improving the multi-stage optimization with better temperature management
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class HexagonPackingOptimizer:
+    """Main optimizer class that orchestrates the packing process"""
+
+    def __init__(self):
+        self.best_score = 0
+        self.best_config = None
+        self.start_time = time.time()
+        self.timeout = 180  # seconds
+=======
+class HexagonPackingOptimizer:
+    """Main optimizer class that orchestrates the packing process"""
+
+    def __init__(self):
+        self.best_score = 0
+        self.best_config = None
+        self.start_time = time.time()
+        self.timeout = 180  # seconds
+
+    def temperature_based_selection(self, population, fitness_scores, temperature):
+        """Select individuals using temperature-controlled simulated annealing"""
+        # Normalize fitness scores
+        if len(fitness_scores) == 0:
+            return population
+
+        max_fitness = max(fitness_scores)
+        if max_fitness == 0:
+            # All fitness scores are zero, return population as-is
+            return population
+
+        # Avoid division by zero
+        normalized_fitness = [(f / max_fitness) if max_fitness > 0 else 0 for f in fitness_scores]
+
+        # Apply softmax with temperature
+        exp_values = [math.exp(f / temperature) for f in normalized_fitness]
+        total = sum(exp_values)
+        if total == 0:
+            # If all exponentials are zero, keep uniform distribution
+            probabilities = [1.0 / len(exp_values)] * len(exp_values)
+        else:
+            probabilities = [exp / total for exp in exp_values]
+
+        # Select indices based on probabilities
+        selected_indices = np.random.choice(len(population), size=len(population), p=probabilities)
+        return [population[i] for i in selected_indices]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_stage(self, initial_config: np.ndarray, stage: int, max_generations: int = 50) -> Tuple[np.ndarray, float]:
+        """Single stage optimization with specific mutation strategy"""
+        # Stage 1: Population initialization with stochastic perturbations
+        population_size = 25 if stage <= 2 else 15  # Fewer individuals in final stage
+
+        # Start with best configuration and add perturbations
+        population = [initial_config.copy()]
+        for _ in range(population_size - 1):
+            variant = initial_config.copy()
+            # Add small random perturbations to positions
+            for i in range(len(variant)):
+                variant[i][0] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+                variant[i][1] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+            population.append(variant)
+
+        for gen in range(max_generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                fitness_scores.append(score)
+
+            # Select top performers (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = population_size // 3
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=0.2, stage=stage, generation=gen, max_generations=max_generations)
+                new_population.append(mutated)
+
+            population = new_population
+
+            # Track best overall
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+=======
+    def optimize_stage(self, initial_config: np.ndarray, stage: int, max_generations: int = 50) -> Tuple[np.ndarray, float]:
+        """Single stage optimization with specific mutation strategy"""
+        # Stage 1: Population initialization with stochastic perturbations
+        population_size = 25 if stage <= 2 else 15  # Fewer individuals in final stage
+
+        # Start with best configuration and add perturbations
+        population = [initial_config.copy()]
+        for _ in range(population_size - 1):
+            variant = initial_config.copy()
+            # Add small random perturbations to positions
+            for i in range(len(variant)):
+                variant[i][0] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+                variant[i][1] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+            population.append(variant)
+
+        # Temperature schedule: start high and decrease over generations
+        initial_temp = 0.8
+        final_temp = 0.01
+
+        for gen in range(max_generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Calculate temperature based on generation
+            progress = gen / max_generations if max_generations > 0 else 0
+            temperature = initial_temp * (final_temp / initial_temp) ** progress
+
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                fitness_scores.append(score)
+
+            # Use temperature-based selection instead of simple elitism
+            selected_population = self.temperature_based_selection(population, fitness_scores, temperature)
+
+            # Create new population through mutation
+            new_population = []
+
+            # Keep some elites from original population
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = population_size // 3
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+            new_population.extend(elite)
+
+            # Fill remaining slots through mutation of selected individuals
+            while len(new_population) < population_size:
+                parent = random.choice(selected_population)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=0.2, stage=stage, generation=gen, max_generations=max_generations)
+                new_population.append(mutated)
+
+            population = new_population
+
+            # Track best overall
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def run_full_optimization(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Run the complete multi-scale optimization pipeline"""
+        # Get multiple symmetric configurations
+        configs = self.get_initial_configurations()
+
+        # Try multiple configurations and find the best starting point
+        best_initial_score = 0
+        best_initial_config = None
+
+        for config in configs:
+            score = HexagonPackingEvaluator.evaluate_configuration(config)
+            if score > best_initial_score:
+                best_initial_score = score
+                best_initial_config = config.copy()
+
+        # Store the best configuration found so far
+        self.best_score = best_initial_score
+        self.best_config = best_initial_config.copy()
+
+        # Stage 1: Coarse-grained position optimization (fixed rotations)
+        print("Stage 1: Coarse position optimization...")
+        coarse_config = best_initial_config.copy()
+        # Fix rotations for this stage
+        for i in range(len(coarse_config)):
+            coarse_config[i][2] = 0  # Set all rotations to 0 for coarse optimization
+
+        evolved_config, evolved_score = self.optimize_stage(coarse_config, stage=1, max_generations=30)
+
+        # Stage 2: Fine-grained refinement with rotation awareness
+        print("Stage 2: Fine-grained refinement...")
+        # Allow rotations to vary but keep positions relatively close to evolved ones
+        refined_config = evolved_config.copy()
+        # Add small random rotations to improve packing
+        for i in range(len(refined_config)):
+            # Perturb rotations slightly
+            refined_config[i][2] += random.uniform(-5, 5) if random.random() < 0.4 else 0
+
+        # Run evolution again with rotations allowed but more constrained
+        rotated_config, rotated_score = self.optimize_stage(refined_config, stage=2, max_generations=30)
+
+        # Stage 3: Full optimization with scipy refinement
+        print("Stage 3: Full scipy optimization...")
+        final_config = self.refine_with_scipy_optimization(rotated_config)
+
+        # Final evaluation
+        final_score = HexagonPackingEvaluator.evaluate_configuration(final_config)
+        final_outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius(final_config)
+        outer_hex_side_length = final_outer_radius + 0.2  # Add margin
+
+        # Return result
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+        return final_config, outer_hex_data, outer_hex_side_length
+=======
+    def run_full_optimization(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Run the complete multi-scale optimization pipeline"""
+        # Get multiple symmetric configurations
+        configs = self.get_initial_configurations()
+
+        # Try multiple configurations and find the best starting point
+        best_initial_score = 0
+        best_initial_config = None
+
+        for config in configs:
+            score = HexagonPackingEvaluator.evaluate_configuration(config)
+            if score > best_initial_score:
+                best_initial_score = score
+                best_initial_config = config.copy()
+
+        # Store the best configuration found so far
+        self.best_score = best_initial_score
+        self.best_config = best_initial_config.copy()
+
+        # Stage 1: Coarse-grained position optimization (fixed rotations)
+        print("Stage 1: Coarse position optimization...")
+        coarse_config = best_initial_config.copy()
+        # Fix rotations for this stage
+        for i in range(len(coarse_config)):
+            coarse_config[i][2] = 0  # Set all rotations to 0 for coarse optimization
+
+        evolved_config, evolved_score = self.optimize_stage(coarse_config, stage=1, max_generations=30)
+
+        # Stage 2: Fine-grained refinement with rotation awareness
+        print("Stage 2: Fine-grained refinement...")
+        # Allow rotations to vary but keep positions relatively close to evolved ones
+        refined_config = evolved_config.copy()
+        # Add small random rotations to improve packing
+        for i in range(len(refined_config)):
+            # Perturb rotations slightly
+            refined_config[i][2] += random.uniform(-5, 5) if random.random() < 0.4 else 0
+
+        # Run evolution again with rotations allowed but more constrained
+        rotated_config, rotated_score = self.optimize_stage(refined_config, stage=2, max_generations=30)
+
+        # Stage 3: Full optimization with scipy refinement
+        print("Stage 3: Full scipy optimization...")
+        final_config = self.refine_with_scipy_optimization(rotated_config)
+
+        # Final evaluation
+        final_score = HexagonPackingEvaluator.evaluate_configuration(final_config)
+        final_outer_radius = HexagonPackingEvaluator.calculate_outer_hex_radius(final_config)
+        outer_hex_side_length = final_outer_radius + 0.2  # Add margin
+
+        # Return result
+        outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+        return final_config, outer_hex_data, outer_hex_side_length
+>>>>>>> REPLACE
+</DIFF>

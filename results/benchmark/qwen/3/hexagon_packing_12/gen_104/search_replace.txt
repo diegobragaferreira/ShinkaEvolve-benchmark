@@ -1,0 +1,536 @@
+<NAME>
+add_adaptive_mutation_and_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces adaptive mutation rates that decrease as optimization progresses, and adds a local search phase that uses gradient-based optimization to refine the best solutions found by the evolutionary algorithm. The adaptive mutation helps balance exploration vs exploitation, while local search improves the precision of high-quality solutions found by the evolutionary process. This addresses limitations in the current implementation where mutation rate is static and there's no fine-tuning of promising solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class EvolutionaryOptimizer:
+    """Evolutionary optimization with symmetry awareness"""
+
+    def __init__(self, packer, max_generations=50, population_size=20):
+        self.packer = packer
+        self.max_generations = max_generations
+        self.population_size = population_size
+        self.mutation_rate = 0.1
+        self.elite_size = 4
+
+    def evaluate_individual(self, individual, outer_radius):
+        """Evaluate fitness of individual"""
+        valid, fitness = self.packer.evaluate_configuration(individual, outer_radius)
+        if not valid:
+            fitness = 0  # Invalid individuals get low fitness
+        return fitness
+
+    def selection(self, population, fitnesses):
+        """Tournament selection"""
+        selected = []
+        tournament_size = 3
+
+        # Select elite
+        elite_indices = np.argsort(fitnesses)[-self.elite_size:]
+        for idx in elite_indices:
+            selected.append(population[idx].copy())
+
+        # Tournament selection for rest
+        while len(selected) < self.population_size:
+            tournament = random.sample(list(range(len(population))), tournament_size)
+            winner_idx = max(tournament, key=lambda i: fitnesses[i])
+            selected.append(population[winner_idx].copy())
+
+        return selected
+
+    def crossover(self, parent1, parent2):
+        """Single-point crossover respecting symmetry concepts"""
+        # Create offspring by combining parts of parents
+        crossover_point = random.randint(0, len(parent1))
+
+        child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+        child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+
+        # Apply symmetry correction if needed
+        return child1, child2
+
+    def optimize_population(self, initial_config, outer_radius):
+        """Run evolutionary optimization on population"""
+        # Initialize population
+        population = []
+        population.append(initial_config)
+
+        # Generate diverse initial population
+        for _ in range(self.population_size - 1):
+            mutated = SymmetryAwareMutation.mutate_symmetrically(initial_config,
+                                                                 self.mutation_rate)
+            population.append(mutated)
+
+        best_fitness = 0
+        best_individual = initial_config.copy()
+
+        # Evolutionary loop
+        for generation in range(self.max_generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluate_individual(individual, outer_radius)
+                fitnesses.append(fitness)
+
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = individual.copy()
+
+            # Selection
+            selected = self.selection(population, fitnesses)
+
+            # Create new population through crossover and mutation
+            new_population = []
+
+            # Elitism - keep best individuals
+            elite_indices = np.argsort(fitnesses)[-self.elite_size:]
+            for idx in elite_indices:
+                new_population.append(population[idx].copy())
+
+            # Crossover and mutation
+            while len(new_population) < self.population_size:
+                parent1 = random.choice(selected)
+                parent2 = random.choice(selected)
+
+                if random.random() < 0.7:  # 70% crossover
+                    child1, child2 = self.crossover(parent1, parent2)
+                    new_population.append(child1)
+                    if len(new_population) < self.population_size:
+                        new_population.append(child2)
+                else:  # Mutation only
+                    mutated1 = SymmetryAwareMutation.mutate_symmetrically(parent1)
+                    mutated2 = SymmetryAwareMutation.mutate_symmetrically(parent2)
+                    new_population.append(mutated1)
+                    if len(new_population) < self.population_size:
+                        new_population.append(mutated2)
+
+            population = new_population
+
+        return best_individual, best_fitness
+=======
+class EvolutionaryOptimizer:
+    """Evolutionary optimization with symmetry awareness"""
+
+    def __init__(self, packer, max_generations=50, population_size=20):
+        self.packer = packer
+        self.max_generations = max_generations
+        self.population_size = population_size
+        self.initial_mutation_rate = 0.1
+        self.elite_size = 4
+
+    def evaluate_individual(self, individual, outer_radius):
+        """Evaluate fitness of individual"""
+        valid, fitness = self.packer.evaluate_configuration(individual, outer_radius)
+        if not valid:
+            fitness = 0  # Invalid individuals get low fitness
+        return fitness
+
+    def selection(self, population, fitnesses):
+        """Tournament selection"""
+        selected = []
+        tournament_size = 3
+
+        # Select elite
+        elite_indices = np.argsort(fitnesses)[-self.elite_size:]
+        for idx in elite_indices:
+            selected.append(population[idx].copy())
+
+        # Tournament selection for rest
+        while len(selected) < self.population_size:
+            tournament = random.sample(list(range(len(population))), tournament_size)
+            winner_idx = max(tournament, key=lambda i: fitnesses[i])
+            selected.append(population[winner_idx].copy())
+
+        return selected
+
+    def crossover(self, parent1, parent2):
+        """Single-point crossover respecting symmetry concepts"""
+        # Create offspring by combining parts of parents
+        crossover_point = random.randint(0, len(parent1))
+
+        child1 = np.vstack([parent1[:crossover_point], parent2[crossover_point:]])
+        child2 = np.vstack([parent2[:crossover_point], parent1[crossover_point:]])
+
+        # Apply symmetry correction if needed
+        return child1, child2
+
+    def adaptive_mutate(self, individual, generation, max_generations):
+        """Apply adaptive mutation with decreasing rate"""
+        # Decrease mutation rate over time
+        current_mutation_rate = self.initial_mutation_rate * (1 - generation / max_generations)
+        current_mutation_rate = max(current_mutation_rate, 0.01)  # Minimum mutation rate
+
+        mutated_individual = individual.copy()
+
+        # Apply position mutations with adaptive rate
+        for i in range(len(mutated_individual)):
+            if random.random() < current_mutation_rate:
+                # Mutate x coordinate
+                mutated_individual[i][0] += np.random.normal(0, 0.2)
+
+                # Mutate y coordinate
+                mutated_individual[i][1] += np.random.normal(0, 0.2)
+
+            # Apply rotation mutations with lower rate
+            if random.random() < current_mutation_rate * 0.3:
+                mutated_individual[i][2] += np.random.normal(0, 10)
+                mutated_individual[i][2] = mutated_individual[i][2] % 360
+
+        return mutated_individual
+
+    def optimize_population(self, initial_config, outer_radius):
+        """Run evolutionary optimization on population"""
+        # Initialize population
+        population = []
+        population.append(initial_config)
+
+        # Generate diverse initial population
+        for _ in range(self.population_size - 1):
+            mutated = SymmetryAwareMutation.mutate_symmetrically(initial_config,
+                                                                 self.initial_mutation_rate)
+            population.append(mutated)
+
+        best_fitness = 0
+        best_individual = initial_config.copy()
+
+        # Evolutionary loop
+        for generation in range(self.max_generations):
+            # Evaluate fitness
+            fitnesses = []
+            for individual in population:
+                fitness = self.evaluate_individual(individual, outer_radius)
+                fitnesses.append(fitness)
+
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = individual.copy()
+
+            # Selection
+            selected = self.selection(population, fitnesses)
+
+            # Create new population through crossover and mutation
+            new_population = []
+
+            # Elitism - keep best individuals
+            elite_indices = np.argsort(fitnesses)[-self.elite_size:]
+            for idx in elite_indices:
+                new_population.append(population[idx].copy())
+
+            # Crossover and mutation
+            while len(new_population) < self.population_size:
+                parent1 = random.choice(selected)
+                parent2 = random.choice(selected)
+
+                if random.random() < 0.7:  # 70% crossover
+                    child1, child2 = self.crossover(parent1, parent2)
+                    new_population.append(child1)
+                    if len(new_population) < self.population_size:
+                        new_population.append(child2)
+                else:  # Mutation only
+                    mutated1 = self.adaptive_mutate(parent1, generation, self.max_generations)
+                    mutated2 = self.adaptive_mutate(parent2, generation, self.max_generations)
+                    new_population.append(mutated1)
+                    if len(new_population) < self.population_size:
+                        new_population.append(mutated2)
+
+            population = new_population
+
+        return best_individual, best_fitness
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class HybridOptimizer:
+    """Combines evolutionary and gradient-based optimization"""
+
+    def __init__(self, packer):
+        self.packer = packer
+        self.evolutionary = EvolutionaryOptimizer(packer)
+
+    def optimize_positions_only(self, initial_config, outer_radius):
+        """Phase 1: Optimize positions only with fixed rotations"""
+        # Create a copy where we keep angles fixed
+        config_fixed_angles = initial_config.copy()
+
+        # Flatten initial configuration (positions only)
+        params = []
+        for i in range(len(config_fixed_angles)):
+            params.extend([config_fixed_angles[i][0], config_fixed_angles[i][1]])
+
+        def objective_pos_only(params_flat):
+            # Reconstruct configuration with fixed angles
+            config = config_fixed_angles.copy()
+            idx = 0
+            for i in range(len(config)):
+                config[i][0] = params_flat[idx]
+                config[i][1] = params_flat[idx + 1]
+                idx += 2
+
+            # Evaluate
+            validity, inv_radius = self.packer.evaluate_configuration(config, outer_radius)
+            if not validity:
+                return 1e10
+            return -inv_radius  # Negative because we maximize
+
+        # Perform optimization
+        try:
+            result = minimize(
+                objective_pos_only,
+                params,
+                method='L-BFGS-B',
+                bounds=[(-10, 10), (-10, 10)] * len(config_fixed_angles)
+            )
+
+            if result.success:
+                # Reconstruct optimized configuration
+                config = config_fixed_angles.copy()
+                idx = 0
+                for i in range(len(config)):
+                    config[i][0] = result.x[idx]
+                    config[i][1] = result.x[idx + 1]
+                    idx += 2
+                return config
+        except:
+            pass
+
+        return config_fixed_angles
+
+    def optimize_full(self, initial_config, outer_radius):
+        """Phase 2: Optimize positions AND angles with evolutionary approach"""
+        # Use evolutionary optimization for better exploration
+        evolved_config, _ = self.evolutionary.optimize_population(initial_config, outer_radius)
+        return evolved_config
+=======
+class HybridOptimizer:
+    """Combines evolutionary and gradient-based optimization"""
+
+    def __init__(self, packer):
+        self.packer = packer
+        self.evolutionary = EvolutionaryOptimizer(packer)
+
+    def local_search_refinement(self, config, outer_radius, max_iter=50):
+        """Apply local search to refine a configuration using gradient-based optimization"""
+        # Create a copy where we keep angles fixed for positional optimization
+        config_fixed_angles = config.copy()
+
+        # Flatten initial configuration (positions only)
+        params = []
+        for i in range(len(config_fixed_angles)):
+            params.extend([config_fixed_angles[i][0], config_fixed_angles[i][1]])
+
+        def objective_pos_only(params_flat):
+            # Reconstruct configuration with fixed angles
+            temp_config = config_fixed_angles.copy()
+            idx = 0
+            for i in range(len(temp_config)):
+                temp_config[i][0] = params_flat[idx]
+                temp_config[i][1] = params_flat[idx + 1]
+                idx += 2
+
+            # Evaluate
+            validity, inv_radius = self.packer.evaluate_configuration(temp_config, outer_radius)
+            if not validity:
+                return 1e10
+            return -inv_radius  # Negative because we maximize
+
+        # Perform optimization
+        try:
+            result = minimize(
+                objective_pos_only,
+                params,
+                method='L-BFGS-B',
+                bounds=[(-10, 10), (-10, 10)] * len(config_fixed_angles),
+                options={'maxiter': max_iter}
+            )
+
+            if result.success:
+                # Reconstruct refined configuration
+                refined_config = config_fixed_angles.copy()
+                idx = 0
+                for i in range(len(refined_config)):
+                    refined_config[i][0] = result.x[idx]
+                    refined_config[i][1] = result.x[idx + 1]
+                    idx += 2
+                return refined_config
+        except:
+            pass
+
+        return config_fixed_angles
+
+    def optimize_positions_only(self, initial_config, outer_radius):
+        """Phase 1: Optimize positions only with fixed rotations"""
+        # First apply evolutionary optimization for global search
+        evolved_config, _ = self.evolutionary.optimize_population(initial_config, outer_radius)
+
+        # Then apply local search for fine tuning
+        refined_config = self.local_search_refinement(evolved_config, outer_radius)
+
+        return refined_config
+
+    def optimize_full(self, initial_config, outer_radius):
+        """Phase 2: Optimize positions AND angles with evolutionary approach"""
+        # Use evolutionary optimization for better exploration
+        evolved_config, _ = self.evolutionary.optimize_population(initial_config, outer_radius)
+
+        # Apply local search to fine-tune the best solution
+        refined_config = self.local_search_refinement(evolved_config, outer_radius)
+
+        return refined_config
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 1: Evolutionary optimization with positions only
+    pos_only_config = hybrid_optimizer.optimize_positions_only(initial_config, estimated_outer_radius)
+
+    # Phase 2: Full evolutionary optimization (positions + rotations)
+    optimized_config = hybrid_optimizer.optimize_full(pos_only_config, estimated_outer_radius)
+
+    # Validate the optimized configuration
+    validity, inv_radius = packer.evaluate_configuration(optimized_config, estimated_outer_radius)
+
+    # If not valid, try local refinement
+    if not validity:
+        # Add some random perturbations to encourage exploration
+        for i in range(len(optimized_config)):
+            optimized_config[i][0] += np.random.normal(0, 0.1)
+            optimized_config[i][1] += np.random.normal(0, 0.1)
+            optimized_config[i][2] = optimized_config[i][2] % 360
+
+        # Re-optimize
+        pos_only_config = hybrid_optimizer.optimize_positions_only(optimized_config, estimated_outer_radius)
+        optimized_config = hybrid_optimizer.optimize_full(pos_only_config, estimated_outer_radius)
+        validity, inv_radius = packer.evaluate_configuration(optimized_config, estimated_outer_radius)
+
+    # Final fallback to ensure we have a valid configuration
+    if not validity:
+        # Simple grid arrangement
+        optimized_config = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        estimated_outer_radius = 8.0
+
+    # Prepare return values
+    inner_hex_data = optimized_config.copy()
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    outer_hex_side_length = 1.0 / inv_radius if inv_radius > 0 else estimated_outer_radius
+
+    # Final validation
+    validity, final_inv_radius = packer.evaluate_configuration(inner_hex_data, outer_hex_side_length)
+    if not validity:
+        # Last resort fallback
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0, 0, 0])
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+=======
+    # Phase 1: Evolutionary optimization with positions only
+    pos_only_config = hybrid_optimizer.optimize_positions_only(initial_config, estimated_outer_radius)
+
+    # Phase 2: Full evolutionary optimization (positions + rotations)
+    optimized_config = hybrid_optimizer.optimize_full(pos_only_config, estimated_outer_radius)
+
+    # Validate the optimized configuration
+    validity, inv_radius = packer.evaluate_configuration(optimized_config, estimated_outer_radius)
+
+    # If not valid, try local refinement
+    if not validity:
+        # Add some random perturbations to encourage exploration
+        for i in range(len(optimized_config)):
+            optimized_config[i][0] += np.random.normal(0, 0.1)
+            optimized_config[i][1] += np.random.normal(0, 0.1)
+            optimized_config[i][2] = optimized_config[i][2] % 360
+
+        # Re-optimize with local search
+        pos_only_config = hybrid_optimizer.optimize_positions_only(optimized_config, estimated_outer_radius)
+        optimized_config = hybrid_optimizer.optimize_full(pos_only_config, estimated_outer_radius)
+        validity, inv_radius = packer.evaluate_configuration(optimized_config, estimated_outer_radius)
+
+    # Final fallback to ensure we have a valid configuration
+    if not validity:
+        # Simple grid arrangement
+        optimized_config = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        estimated_outer_radius = 8.0
+
+    # Prepare return values
+    inner_hex_data = optimized_config.copy()
+    outer_hex_data = np.array([0, 0, 0])  # Centered at origin
+    outer_hex_side_length = 1.0 / inv_radius if inv_radius > 0 else estimated_outer_radius
+
+    # Final validation
+    validity, final_inv_radius = packer.evaluate_configuration(inner_hex_data, outer_hex_side_length)
+    if not validity:
+        # Last resort fallback
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0, 0, 0])
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,249 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import time
+import random
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances"""
+        if len(points) < 2:
+            return 0.0
+        distances = pdist(points)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return np.min(distances) / max_dist
+    
+    def compute_graded_perturbation_magnitude(points, center, base_magnitude=0.01):
+        """Compute perturbation magnitudes based on distance from center for more effective spreading"""
+        distances_from_center = np.sqrt(np.sum((points - center)**2, axis=1))
+        max_distance = np.max(distances_from_center)
+        
+        if max_distance > 0:
+            normalized_distances = distances_from_center / max_distance
+            # Points closer to center get larger perturbations to push them outward
+            # Points at edge get smaller perturbations to maintain stability
+            return base_magnitude * (1 - normalized_distances)
+        else:
+            return np.full(len(points), base_magnitude)
+    
+    def construct_hexagonal_grid():
+        """Construct a more mathematically optimized hexagonal grid arrangement"""
+        # Create points in a 4x4 grid with proper hexagonal spacing
+        points = []
+        hex_spacing = 1.0  # Unit spacing
+        row_spacing = hex_spacing * np.sqrt(3) / 2.0
+        col_spacing = hex_spacing
+
+        for row in range(4):
+            for col in range(4):
+                if len(points) >= 16:
+                    break
+                x = col * col_spacing
+                # Offset odd rows for true hexagonal pattern
+                if row % 2 == 1:
+                    x += col_spacing / 2.0
+                y = row * row_spacing
+                points.append([x, y])
+
+        points = np.array(points[:16])
+        
+        # Normalize to fit within [0,1] x [0,1] square
+        min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+        min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+        
+        if max_x > min_x and max_y > min_y:
+            scale_x = 1.0 / (max_x - min_x)
+            scale_y = 1.0 / (max_y - min_y)
+            scale = min(scale_x, scale_y, 1.0)
+            
+            points[:, 0] = (points[:, 0] - min_x) * scale
+            points[:, 1] = (points[:, 1] - min_y) * scale
+
+        # Center in unit square
+        center_shift = 0.5 - np.mean(points, axis=0)
+        points = points + center_shift
+        
+        # Ensure within bounds
+        points = np.clip(points, 0, 1)
+        return points
+    
+    def improve_initial_placement(points):
+        """Apply targeted improvements to the initial hexagonal grid"""
+        # Create a more optimized version by focusing on geometric relationships
+        # Start with hexagonal grid
+        base_points = construct_hexagonal_grid()
+        
+        # Apply adaptive perturbations to break symmetry better
+        center = np.mean(base_points, axis=0)
+        
+        # Apply rotations to break rotational symmetry
+        np.random.seed(42)
+        rotation_angles = [np.pi/12, -np.pi/12, np.pi/6, -np.pi/6]
+        for i in range(0, len(base_points), 3):  # Every 3rd point
+            if i < len(base_points):
+                angle = rotation_angles[i % len(rotation_angles)]
+                cos_a = np.cos(angle)
+                sin_a = np.sin(angle)
+                rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+                base_points[i] = rotation_matrix @ (base_points[i] - center) + center
+        
+        # Apply graded perturbations based on position
+        perturbation_magnitudes = compute_graded_perturbation_magnitude(base_points, center, 0.02)
+        
+        for i in range(len(base_points)):
+            # Add position-specific perturbations
+            perturbation = np.random.normal(0, perturbation_magnitudes[i], 2)
+            base_points[i] += perturbation
+            
+        # Ensure bounds
+        base_points = np.clip(base_points, 0, 1)
+        return base_points
+    
+    def targeted_local_search(starting_points, max_iterations=2000):
+        """Perform a local search with targeted perturbations and adaptive steps"""
+        current_points = starting_points.copy()
+        current_ratio = compute_min_max_ratio(current_points)
+        
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+        
+        # Adaptive cooling schedule with early stopping
+        temperature = 0.05
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+        
+        # Track convergence
+        recent_improvements = []
+        patience = 500
+        
+        iteration = 0
+        while iteration < max_iterations:
+            # Generate neighbor solution by perturbing one point strategically
+            new_points = current_points.copy()
+            
+            # Select points to perturb based on their geometric significance
+            # Focus on points that are likely to have significant impact on min/max ratio
+            distances = pdist(current_points)
+            max_dist = np.max(distances)
+            min_dist = np.min(distances)
+            
+            # Choose a point to perturb: prefer those involved in critical distances
+            if min_dist > 0 and max_dist > 0:
+                # Choose a point that's part of the minimum distance pair
+                # or choose randomly to maintain exploration
+                if random.random() < 0.7:  # 70% chance to focus on min-distance points
+                    # Identify indices of minimum distance pair
+                    distance_matrix = pdist(current_points).reshape(len(current_points), -1)
+                    # Find indices of minimum distance
+                    min_indices = np.unravel_index(np.argmin(distance_matrix), distance_matrix.shape)
+                    # Pick one of the two points
+                    chosen_idx = min_indices[random.randint(0, 1)]
+                else:
+                    # Random selection
+                    chosen_idx = random.randint(0, len(current_points) - 1)
+            else:
+                chosen_idx = random.randint(0, len(current_points) - 1)
+            
+            # Apply adaptive perturbation based on current state
+            perturbation_magnitude = temperature * 0.3
+            
+            # Make sure magnitude isn't too small
+            if perturbation_magnitude < 1e-8:
+                perturbation_magnitude = 1e-8
+                
+            # Add perturbation
+            new_points[chosen_idx] += np.random.normal(0, perturbation_magnitude, 2)
+            
+            # Ensure point stays within bounds
+            new_points[chosen_idx] = np.clip(new_points[chosen_idx], 0, 1)
+            
+            # Local constraint enforcement: make sure we don't move too far
+            # Check if any point moved beyond a reasonable range from center
+            for i in range(len(new_points)):
+                if np.linalg.norm(new_points[i] - np.mean(current_points, axis=0)) > 1.0:
+                    # Bring it back more gently if it's too far
+                    new_points[i] = current_points[i]
+            
+            # Compute new ratio
+            new_ratio = compute_min_max_ratio(new_points)
+            
+            # Accept or reject the new solution
+            if new_ratio > current_ratio:
+                # Always accept better solutions
+                current_points = new_points
+                current_ratio = new_ratio
+                
+                # Update best solution if needed
+                if new_ratio > best_ratio:
+                    best_points = new_points.copy()
+                    best_ratio = new_ratio
+                    recent_improvements = []  # Reset improvement tracking
+            else:
+                # Accept worse solutions with probability based on temperature
+                delta = new_ratio - current_ratio
+                acceptance_prob = np.exp(delta / temperature)
+                if random.random() < acceptance_prob:
+                    current_points = new_points
+                    current_ratio = new_ratio
+            
+            # Cool down
+            temperature *= cooling_rate
+            
+            # Prevent temperature from becoming too small
+            if temperature < min_temperature:
+                temperature = min_temperature
+                
+            iteration += 1
+            
+            # Early stopping if no improvement for long time
+            if current_ratio > best_ratio:
+                recent_improvements.append(current_ratio - best_ratio)
+                if len(recent_improvements) > patience:
+                    recent_improvements.pop(0)
+                    
+                # If no significant improvement recently, reduce temperature faster
+                if sum(recent_improvements[-patience:]) < 1e-10:
+                    temperature *= 0.99  # Accelerate cooling
+            
+            # Occasionally check for early termination
+            if iteration % 100 == 0:
+                if abs(current_ratio - best_ratio) < 1e-8:
+                    break
+        
+        return best_points, best_ratio
+    
+    # Main algorithm
+    # Initialize with improved hexagonal grid
+    initial_points = improve_initial_placement(None)
+    
+    # Run local search with targeted perturbations
+    optimized_points, ratio = targeted_local_search(initial_points, max_iterations=2000)
+    
+    # Final refinement if needed
+    if ratio < 0.27:  # If not yet good enough, try additional local search
+        # Try a few more rounds with different starting points
+        np.random.seed(42)
+        for _ in range(3):
+            # Randomly perturb current best solution slightly
+            new_start = optimized_points.copy()
+            for i in range(len(new_start)):
+                new_start[i] += np.random.normal(0, 0.005, 2)
+            new_start = np.clip(new_start, 0, 1)
+            
+            _, new_ratio = targeted_local_search(new_start, max_iterations=500)
+            if new_ratio > ratio:
+                optimized_points = new_start
+                ratio = new_ratio
+    
+    return optimized_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,247 @@
+--- a/original.py
++++ b/original.py
+@@ -1,163 +1,180 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial.distance import pdist, squareform
+-
++import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     def objective(x):
+         # Reshape into points
+         points = x.reshape(-1, 2)
+ 
+         # Calculate pairwise distances using squareform for numerical stability
+         distances = squareform(pdist(points))
+ 
+         # Set diagonal to large value to ignore self-distances
+         np.fill_diagonal(distances, np.inf)
+ 
+         # Get min and max distances
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         # Avoid division by zero
+         if d_max == 0:
+             return -1e10
+ 
+         # Return negative ratio to minimize (we want to maximize ratio)
+         return -d_min / d_max
+ 
++    def calculate_min_max_ratio(points):
++        """Calculate the ratio of minimum to maximum distance with explicit numerical stability."""
++        if len(points) < 2:
++            return 0.0
++
++        distances = squareform(pdist(points))
++        np.fill_diagonal(distances, np.inf)
++
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++
++        if max_dist == 0:
++            return 0.0
++
++        return min_dist / max_dist
++
+     def initialize_points():
+-        """Initialize points using a structured approach for better starting configuration."""
++        """Initialize points using a better structured approach for improved starting configuration."""
+         # Create a grid-like pattern with some randomness
+         np.random.seed(42)
+ 
+-        # Create a 4x4 grid pattern (16 points)
++        # Create a 4x4 grid pattern (16 points) with controlled perturbations
+         grid_size = 4
+         x = np.linspace(0.1, 0.9, grid_size)
+         y = np.linspace(0.1, 0.9, grid_size)
+ 
+         # Generate grid points
+         xx, yy = np.meshgrid(x, y)
+         points = np.column_stack([xx.ravel(), yy.ravel()])
+ 
+-        # Add small random perturbations to break symmetry
+-        noise = np.random.normal(0, 0.01, points.shape)
++        # Add small random perturbations to break symmetry while maintaining structure
++        noise_magnitude = 0.01
++        noise = np.random.normal(0, noise_magnitude, points.shape)
+         points += noise
+ 
+         # Clip to ensure points stay within bounds
+         points = np.clip(points, 0, 1)
+ 
+         return points
+ 
+     # Set up bounds (0 to 1 for each coordinate)
+     bounds = [(0, 1)] * 32
+ 
+-    # Try multiple optimization approaches
+-    best_ratio = -np.inf
+-    best_points = None
++    # Initialize with better structured approach
++    best_points = initialize_points()
++    best_ratio = calculate_min_max_ratio(best_points)
+ 
+-    # Method 1: Differential Evolution with adaptive parameters
++    # Phase 1: Global optimization with differential evolution
+     try:
+-        # Global optimization with differential evolution
+         result_de = differential_evolution(
+             objective,
+             bounds,
+             seed=42,
+-            maxiter=100,
+-            popsize=20,
+-            atol=1e-8,
+-            rtol=1e-8,
+-            mutation=(0.7, 1.0),
+-            recombination=0.7
++            maxiter=150,  # Increased iterations for better exploration
++            popsize=25,   # Larger population for better diversity
++            atol=1e-12,   # Tighter absolute tolerance
++            rtol=1e-12,   # Tighter relative tolerance
++            mutation=(0.8, 1.0),  # Higher mutation for more exploration
++            recombination=0.9     # Higher recombination for better mixing
+         )
+ 
+         if result_de.success:
+-            # Local refinement with L-BFGS-B
+-            refined = minimize(
+-                objective,
+-                result_de.x,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+-            )
++            # Phase 2: Local refinement with multiple strategies
++            refinement_strategies = [
++                {
++                    'method': 'L-BFGS-B',
++                    'options': {'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
++                },
++                {
++                    'method': 'SLSQP',
++                    'options': {'maxiter': 200, 'ftol': 1e-12}
++                }
++            ]
+ 
+-            if refined.success:
+-                final_points = refined.x.reshape(-1, 2)
+-                distances = squareform(pdist(final_points))
+-                np.fill_diagonal(distances, np.inf)
+-                d_min = np.min(distances)
+-                d_max = np.max(distances)
++            for strategy in refinement_strategies:
++                try:
++                    refined = minimize(
++                        objective,
++                        result_de.x,
++                        method=strategy['method'],
++                        bounds=bounds,
++                        options=strategy['options']
++                    )
+ 
+-                if d_max > 0:
+-                    ratio = d_min / d_max
+-                    if ratio > best_ratio:
+-                        best_ratio = ratio
+-                        best_points = final_points.copy()
++                    if refined.success:
++                        final_points = refined.x.reshape(-1, 2)
++                        ratio = calculate_min_max_ratio(final_points)
++
++                        if ratio > best_ratio:
++                            best_ratio = ratio
++                            best_points = final_points.copy()
++
++                except Exception:
++                    continue
+ 
+     except Exception:
+         pass
+ 
+-    # Method 2: Direct optimization from structured initialization
+-    if best_points is None:
++    # Phase 3: Additional fallback optimization from initialization
++    if best_ratio < 1e-10:  # If we didn't find a good solution
+         try:
+-            # Start with structured initialization
++            # Try optimization from the structured initialization directly
+             x0 = initialize_points().flatten()
+ 
+-            # Global optimization
++            # Global optimization with different parameters for diversity
+             result = differential_evolution(
+                 objective,
+                 bounds,
+                 seed=42,
+-                maxiter=80,
+-                popsize=15,
+-                atol=1e-8,
+-                rtol=1e-8
++                maxiter=100,
++                popsize=20,
++                atol=1e-10,
++                rtol=1e-10,
++                mutation=(0.7, 1.0),
++                recombination=0.8
+             )
+ 
+             if result.success:
+-                # Local refinement
++                # Final refinement with multiple local methods
+                 refined = minimize(
+                     objective,
+                     result.x,
+                     method='L-BFGS-B',
+                     bounds=bounds,
+-                    options={'maxiter': 150, 'ftol': 1e-10, 'gtol': 1e-10}
++                    options={'maxiter': 250, 'ftol': 1e-15, 'gtol': 1e-15}
+                 )
+ 
+                 if refined.success:
+                     final_points = refined.x.reshape(-1, 2)
+-                    distances = squareform(pdist(final_points))
+-                    np.fill_diagonal(distances, np.inf)
+-                    d_min = np.min(distances)
+-                    d_max = np.max(distances)
++                    ratio = calculate_min_max_ratio(final_points)
+ 
+-                    if d_max > 0:
+-                        ratio = d_min / d_max
+-                        if ratio > best_ratio:
+-                            best_ratio = ratio
+-                            best_points = final_points.copy()
++                    if ratio > best_ratio:
++                        best_ratio = ratio
++                        best_points = final_points.copy()
+ 
+         except Exception:
+             pass
+ 
+-    # Fallback to initialization if optimization fails
+-    if best_points is None:
+-        points = initialize_points()
+-    else:
+-        points = best_points
++    # Ensure final points are within valid bounds
++    best_points = np.clip(best_points, 0, 1)
+ 
+-    # Ensure points are within valid bounds
+-    points = np.clip(points, 0, 1)
+-
+-    return points
+-
++    return best_points
+ 
+ # EVOLVE-BLOCK-END

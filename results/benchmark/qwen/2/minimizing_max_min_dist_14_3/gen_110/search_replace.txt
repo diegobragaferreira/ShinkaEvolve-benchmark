@@ -1,0 +1,171 @@
+<NAME>
+add_checkpointing_and_restart_mechanism
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    """Main optimizer class that orchestrates the Voronoi-based simulated annealing."""
+
+    def __init__(self, config: OptimizationConfig):
+        self.config = config
+        self.best_points: Optional[np.ndarray] = None
+        self.best_ratio: float = 0.0
+        self.current_points: Optional[np.ndarray] = None
+        self.current_ratio: float = 0.0
+        self.iteration_count: int = 0
+        self.start_time: float = 0.0
+        self.stagnation_counter: int = 0
+        self.last_improvement_iter: int = 0
+        self.recent_improvements: List[int] = []
+=======
+    """Main optimizer class that orchestrates the Voronoi-based simulated annealing."""
+
+    def __init__(self, config: OptimizationConfig):
+        self.config = config
+        self.best_points: Optional[np.ndarray] = None
+        self.best_ratio: float = 0.0
+        self.current_points: Optional[np.ndarray] = None
+        self.current_ratio: float = 0.0
+        self.iteration_count: int = 0
+        self.start_time: float = 0.0
+        self.stagnation_counter: int = 0
+        self.last_improvement_iter: int = 0
+        self.recent_improvements: List[int] = []
+        self.checkpoint_interval: int = 30
+        self.last_checkpoint_iter: int = 0
+        self.best_checkpoint_ratio: float = 0.0
+        self.best_checkpoint_points: Optional[np.ndarray] = None
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def _run_optimization_loop(self) -> Tuple[np.ndarray, float]:
+        """Run the main optimization loop with early stopping."""
+        temp = self.config.initial_temp
+
+        # Main optimization loop
+        while self.iteration_count < self.config.max_iterations and temp > self.config.final_temp:
+            # Perform single iteration
+            _, _, accepted = self._optimize_single_iteration(temp)
+
+            # Apply adaptive cooling
+            if accepted or self.stagnation_counter < 1000:  # Only cool if there was improvement or not too stale
+                temp = self._adaptive_cooling_schedule(temp, accepted)
+
+            self.iteration_count += 1
+
+            # Check for stagnation and early stopping
+            if self.iteration_count - self.last_improvement_iter > self.config.early_stopping_patience:
+                break
+
+            # Check for stagnation and apply additional cooling
+            if self.stagnation_counter > self.config.stagnation_limit:
+                temp = max(temp * 0.95, self.config.final_temp)
+                self.stagnation_counter = 0
+
+            # Periodic local refinement to escape local minima
+            if self.iteration_count % 2000 == 0 and self.iteration_count > 0:
+                refined_points, refined_ratio = self._adaptive_local_refinement(
+                    self.best_points, self.config.local_refinement_iters
+                )
+
+                if refined_ratio > self.best_ratio:
+                    self.best_points = refined_points
+                    self.best_ratio = refined_ratio
+
+        return self.best_points, self.best_ratio
+=======
+    def _run_optimization_loop(self) -> Tuple[np.ndarray, float]:
+        """Run the main optimization loop with early stopping and checkpointing."""
+        temp = self.config.initial_temp
+
+        # Main optimization loop
+        while self.iteration_count < self.config.max_iterations and temp > self.config.final_temp:
+            # Perform single iteration
+            _, _, accepted = self._optimize_single_iteration(temp)
+
+            # Apply adaptive cooling
+            if accepted or self.stagnation_counter < 1000:  # Only cool if there was improvement or not too stale
+                temp = self._adaptive_cooling_schedule(temp, accepted)
+
+            self.iteration_count += 1
+
+            # Checkpointing mechanism
+            if self.iteration_count - self.last_checkpoint_iter >= self.checkpoint_interval:
+                if self.best_ratio > self.best_checkpoint_ratio:
+                    self.best_checkpoint_ratio = self.best_ratio
+                    self.best_checkpoint_points = self.best_points.copy()
+                self.last_checkpoint_iter = self.iteration_count
+
+            # Check for stagnation and early stopping
+            if self.iteration_count - self.last_improvement_iter > self.config.early_stopping_patience:
+                # Restart from best checkpoint if no improvement seen recently
+                if (self.best_checkpoint_points is not None and
+                    self.best_checkpoint_ratio > self.best_ratio * 0.99):
+                    self.current_points = self.best_checkpoint_points.copy()
+                    self.current_ratio = self.best_checkpoint_ratio
+                    self.stagnation_counter = 0
+                    self.last_improvement_iter = self.iteration_count
+                    # Reset checkpoint tracking
+                    self.last_checkpoint_iter = self.iteration_count
+                    self.best_checkpoint_ratio = self.best_ratio
+                else:
+                    break
+
+            # Check for stagnation and apply additional cooling
+            if self.stagnation_counter > self.config.stagnation_limit:
+                temp = max(temp * 0.95, self.config.final_temp)
+                self.stagnation_counter = 0
+
+            # Periodic local refinement to escape local minima
+            if self.iteration_count % 2000 == 0 and self.iteration_count > 0:
+                refined_points, refined_ratio = self._adaptive_local_refinement(
+                    self.best_points, self.config.local_refinement_iters
+                )
+
+                if refined_ratio > self.best_ratio:
+                    self.best_points = refined_points
+                    self.best_ratio = refined_ratio
+
+        return self.best_points, self.best_ratio
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Create configuration
+    config = OptimizationConfig(
+        n_points=14,
+        n_dimensions=3,
+        max_iterations=100000,
+        initial_temp=1.0,
+        final_temp=1e-6,
+        cooling_rate=0.9995,
+        log_interval=1000,
+        num_seeds=8,
+        voronoi_threshold=0.1,
+        local_refinement_iters=500,
+        early_stopping_patience=10000,
+        stagnation_limit=5000
+    )
+=======
+    # Create configuration
+    config = OptimizationConfig(
+        n_points=14,
+        n_dimensions=3,
+        max_iterations=100000,
+        initial_temp=1.0,
+        final_temp=1e-6,
+        cooling_rate=0.9995,
+        log_interval=1000,
+        num_seeds=8,
+        voronoi_threshold=0.1,
+        local_refinement_iters=500,
+        early_stopping_patience=10000,
+        stagnation_limit=5000
+    )
+>>>>>>> REPLACE
+</DIFF>

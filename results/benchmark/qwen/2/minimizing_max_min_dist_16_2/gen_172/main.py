@@ -1,0 +1,274 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import basinhopping
+import time
+
+def compute_min_max_ratio(points):
+    """Compute the minimum to maximum distance ratio for given points."""
+    if len(points) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = cdist(points, points)
+
+    # Set diagonal to infinity to exclude self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find min and max distances
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    # Avoid division by zero
+    if max_dist == 0:
+        return 0.0
+
+    return min_dist / max_dist
+
+def initialize_points_multiple_strategies(n_points=16):
+    """Initialize points using multiple geometric strategies for better coverage."""
+    np.random.seed(42)
+
+    strategies = []
+
+    # Strategy 1: Hexagonal lattice with perturbations
+    hex_points = []
+    rows, cols = 4, 4
+    for i in range(rows):
+        for j in range(cols):
+            x = j * 0.25 + (i % 2) * 0.125
+            y = i * 0.25
+            # Add small random perturbations
+            x += np.random.normal(0, 0.01, 1)[0]
+            y += np.random.normal(0, 0.01, 1)[0]
+            hex_points.append([x, y])
+    hex_points = np.clip(hex_points, 0, 1)
+    strategies.append(("hexagonal", hex_points[:n_points]))
+
+    # Strategy 2: Regular grid with perturbations
+    grid_points = []
+    for i in range(4):
+        for j in range(4):
+            x = j * 0.333 + 0.1
+            y = i * 0.333 + 0.1
+            # Add perturbations
+            x += np.random.normal(0, 0.015, 1)[0]
+            y += np.random.normal(0, 0.015, 1)[0]
+            grid_points.append([x, y])
+    grid_points = np.clip(grid_points, 0, 1)
+    strategies.append(("grid", grid_points[:n_points]))
+
+    # Strategy 3: Spiral pattern
+    spiral_points = []
+    for i in range(n_points):
+        angle = i * 2 * np.pi / 5.0
+        radius = i * 0.4 / (n_points - 1)
+        x = 0.5 + radius * np.cos(angle) * 0.4
+        y = 0.5 + radius * np.sin(angle) * 0.4
+        spiral_points.append([x, y])
+    spiral_points = np.clip(spiral_points, 0, 1)
+    strategies.append(("spiral", np.array(spiral_points)))
+
+    # Strategy 4: Random with better spread (more uniform distribution)
+    random_points = np.random.rand(n_points, 2)
+    # Apply some basic spacing to prevent clustering
+    for i in range(n_points):
+        center_vec = random_points[i] - [0.5, 0.5]
+        center_distance = np.linalg.norm(center_vec)
+        if center_distance > 0:
+            random_points[i] += center_vec * 0.05 / (center_distance + 0.01)
+    random_points = np.clip(random_points, 0, 1)
+    strategies.append(("random_spread", random_points))
+
+    # Strategy 5: Golden ratio spiral
+    golden_points = []
+    phi = (1 + np.sqrt(5)) / 2
+    for i in range(n_points):
+        angle = i * 2 * np.pi / phi
+        radius = np.sqrt(i / (n_points - 1)) * 0.4
+        x = 0.5 + radius * np.cos(angle) * 0.4
+        y = 0.5 + radius * np.sin(angle) * 0.4
+        golden_points.append([x, y])
+    golden_points = np.clip(golden_points, 0, 1)
+    strategies.append(("golden", np.array(golden_points)))
+
+    return strategies
+
+def adaptive_constraint_handler(x, points_shape=(16, 2)):
+    """Adaptive constraint handling with penalty based on violation severity."""
+    points = x.reshape(points_shape)
+
+    # Calculate penalties for boundary violations
+    penalties = []
+
+    # X coordinate penalties
+    x_violations = np.concatenate([
+        points[:, 0],           # x coordinates
+        1 - points[:, 0]        # 1 - x coordinates
+    ])
+    x_penalties = np.maximum(0, -x_violations) ** 2
+    penalties.append(np.sum(x_penalties))
+
+    # Y coordinate penalties
+    y_violations = np.concatenate([
+        points[:, 1],           # y coordinates
+        1 - points[:, 1]        # 1 - y coordinates
+    ])
+    y_penalties = np.maximum(0, -y_violations) ** 2
+    penalties.append(np.sum(y_penalties))
+
+    # Return total penalty
+    return 1000 * np.sum(penalties)
+
+def enhanced_objective(x):
+    """Enhanced objective function with constraint penalties."""
+    points = x.reshape(-1, 2)
+    ratio = compute_min_max_ratio(points)
+
+    # Add penalty for constraint violations
+    penalty = adaptive_constraint_handler(x)
+
+    # Return negative ratio + penalty (we want to maximize ratio, minimize penalty)
+    return -ratio + penalty * 1e-6
+
+def multi_start_optimization(strategies, max_time=150):
+    """Run optimization with multiple starting strategies."""
+    start_time = time.time()
+    best_ratio = -np.inf
+    best_points = None
+    best_strategy = None
+
+    # For each initialization strategy, run multiple optimization methods
+    for strategy_name, initial_points in strategies:
+        if (time.time() - start_time) > max_time * 0.9:
+            break
+
+        print(f"Trying {strategy_name} initialization...")
+
+        # Method 1: Differential Evolution (global search)
+        try:
+            bounds = [(0, 1) for _ in range(32)]
+            de_result = differential_evolution(
+                enhanced_objective,
+                bounds,
+                seed=42,
+                maxiter=100,
+                popsize=15,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                tol=1e-6
+            )
+            de_points = de_result.x.reshape(-1, 2)
+            de_ratio = compute_min_max_ratio(de_points)
+
+            if de_ratio > best_ratio:
+                best_ratio = de_ratio
+                best_points = de_points.copy()
+                best_strategy = f"{strategy_name}_de"
+        except Exception as e:
+            print(f"Differential evolution failed for {strategy_name}: {e}")
+
+        # Method 2: Basin Hopping
+        try:
+            if (time.time() - start_time) > max_time * 0.8:
+                break
+            bounds = [(0, 1) for _ in range(32)]
+            bh_result = basinhopping(
+                enhanced_objective,
+                initial_points.flatten(),
+                niter=50,
+                T=1.0,
+                stepsize=0.1,
+                minimizer_kwargs={'method': 'L-BFGS-B', 'bounds': bounds},
+                seed=42
+            )
+            bh_points = bh_result.x.reshape(-1, 2)
+            bh_ratio = compute_min_max_ratio(bh_points)
+
+            if bh_ratio > best_ratio:
+                best_ratio = bh_ratio
+                best_points = bh_points.copy()
+                best_strategy = f"{strategy_name}_bh"
+        except Exception as e:
+            print(f"Basin hopping failed for {strategy_name}: {e}")
+
+        # Method 3: Direct L-BFGS-B
+        try:
+            if (time.time() - start_time) > max_time * 0.8:
+                break
+            bounds = [(0, 1) for _ in range(32)]
+            lbfgs_result = minimize(
+                enhanced_objective,
+                initial_points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            lbfgs_points = lbfgs_result.x.reshape(-1, 2)
+            lbfgs_ratio = compute_min_max_ratio(lbfgs_points)
+
+            if lbfgs_ratio > best_ratio:
+                best_ratio = lbfgs_ratio
+                best_points = lbfgs_points.copy()
+                best_strategy = f"{strategy_name}_lbfgs"
+        except Exception as e:
+            print(f"L-BFGS failed for {strategy_name}: {e}")
+
+    # Final refinement with SLSQP if time allows
+    if best_points is not None and (time.time() - start_time) < max_time * 0.9:
+        try:
+            bounds = [(0, 1) for _ in range(32)]
+            slsqp_result = minimize(
+                enhanced_objective,
+                best_points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            slsqp_points = slsqp_result.x.reshape(-1, 2)
+            slsqp_ratio = compute_min_max_ratio(slsqp_points)
+
+            if slsqp_ratio > best_ratio:
+                best_ratio = slsqp_ratio
+                best_points = slsqp_points.copy()
+                best_strategy = f"refined_{best_strategy}"
+        except Exception as e:
+            print(f"SLSQP refinement failed: {e}")
+
+    # Ensure final points are within bounds
+    if best_points is not None:
+        best_points = np.clip(best_points, 0, 1)
+
+    return best_points, best_ratio, best_strategy
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    # Get multiple initialization strategies
+    strategies = initialize_points_multiple_strategies(n_points=16)
+
+    # Run multi-start optimization with different strategies and methods
+    optimized_points, best_ratio, best_strategy_used = multi_start_optimization(strategies, max_time=150)
+
+    print(f"Best ratio achieved: {best_ratio:.6f} using strategy: {best_strategy_used}")
+
+    # Fallback to a decent configuration if nothing worked
+    if optimized_points is None:
+        # Return a simple hexagonal pattern
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+                points.append([x, y])
+        optimized_points = np.clip(np.array(points[:16]), 0, 1)
+
+    return optimized_points
+
+# EVOLVE-BLOCK-END

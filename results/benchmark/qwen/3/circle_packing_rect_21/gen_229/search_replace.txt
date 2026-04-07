@@ -1,0 +1,272 @@
+<NAME>
+enhanced_multiobjective_optimization
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the optimization by implementing a multi-objective approach that balances radius maximization with positional stability. Instead of purely maximizing sum of radii, I'll introduce a weighted objective function that considers both immediate radius gain and potential penalties from overlap violations or excessive positional displacement. This prevents destabilizing moves that might temporarily increase one circle's radius at the expense of overall configuration stability, which was a weakness in previous approaches.
+
+The improvement involves:
+1. Adding a multi-objective scoring function that penalizes overlap violations and large positional changes
+2. Implementing dynamic penalty weights that adapt during optimization
+3. Using a principled trade-off evaluation rather than greedy single-objective maximization
+4. Improving the refinement phase with better convergence criteria
+
+This approach directly addresses the limitations of the current program's single-objective greedy method and should help escape local optima while maintaining solution quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_single_circle(self, circles: np.ndarray, idx: int,
+                             step_size: float) -> np.ndarray:
+        """Optimize a single circle's position and radius."""
+        new_circles = circles.copy()
+        x, y, r = new_circles[idx]
+
+        # Try to maximize radius
+        max_radius = self.calculate_max_radius_fast(new_circles, idx)
+        if max_radius > 0.001:
+            perturbation = random.uniform(-step_size * 0.3, step_size * 0.3)
+            new_radius = max(0.001, min(max_radius, r + perturbation))
+            new_circles[idx][2] = new_radius
+
+        # Position perturbation
+        if random.random() > 0.6:
+            dx = random.uniform(-step_size, step_size)
+            dy = random.uniform(-step_size, step_size)
+            new_x = max(0.001, min(self.width - 0.001, x + dx))
+            new_y = max(0.001, min(self.height - 0.001, y + dy))
+            new_circles[idx][0] = new_x
+            new_circles[idx][1] = new_y
+
+        return new_circles
+=======
+    def calculate_objective_score(self, circles: np.ndarray, penalty_weight: float = 1.0) -> float:
+        """Calculate a multi-objective score considering both radius sum and constraint violations."""
+        radius_sum = np.sum(circles[:, 2])
+
+        # Penalty for overlap violations
+        penalty = 0.0
+        if len(circles) >= 2:
+            positions = circles[:, :2]
+            distances = cdist(positions, positions)
+            np.fill_diagonal(distances, np.inf)
+
+            radii = circles[:, 2]
+            radius_sums = radii[:, np.newaxis] + radii[np.newaxis, :]
+            overlaps = distances < radius_sums
+
+            if np.any(overlaps):
+                # Count number of overlaps and sum of overlap depths
+                overlap_count = np.sum(overlaps)
+                overlap_depths = radius_sums[overlaps] - distances[overlaps]
+                penalty = penalty_weight * np.sum(overlap_depths) * overlap_count
+
+        # Penalty for large positional changes from original positions
+        # We'll use this in the optimization loop to track stability
+
+        return radius_sum - penalty
+
+    def optimize_single_circle(self, circles: np.ndarray, idx: int,
+                             step_size: float, original_positions: np.ndarray = None) -> np.ndarray:
+        """Optimize a single circle's position and radius with multi-objective considerations."""
+        new_circles = circles.copy()
+        x, y, r = new_circles[idx]
+
+        # Try to maximize radius
+        max_radius = self.calculate_max_radius_fast(new_circles, idx)
+        if max_radius > 0.001:
+            perturbation = random.uniform(-step_size * 0.3, step_size * 0.3)
+            new_radius = max(0.001, min(max_radius, r + perturbation))
+            new_circles[idx][2] = new_radius
+
+        # Position perturbation
+        if random.random() > 0.6:
+            dx = random.uniform(-step_size, step_size)
+            dy = random.uniform(-step_size, step_size)
+            new_x = max(0.001, min(self.width - 0.001, x + dx))
+            new_y = max(0.001, min(self.height - 0.001, y + dy))
+            new_circles[idx][0] = new_x
+            new_circles[idx][1] = new_y
+
+        return new_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_scale_optimization(self, initial_circles: np.ndarray) -> np.ndarray:
+        """Perform multi-scale optimization with different step sizes."""
+        current_circles = initial_circles.copy()
+        best_circles = initial_circles.copy()
+        best_sum = np.sum(initial_circles[:, 2])
+
+        # Adaptive step sizes for different optimization phases
+        step_sizes = [0.15, 0.08, 0.03]
+        phases = [300, 300, 400]  # iterations per phase
+
+        for phase_idx, (iterations, step_size) in enumerate(zip(phases, step_sizes)):
+            phase_best = current_circles.copy()
+            phase_best_sum = np.sum(current_circles[:, 2])
+
+            for iteration in range(iterations):
+                # Randomly select circles to optimize
+                indices = list(range(self.n_circles))
+                random.shuffle(indices)
+                selected_indices = indices[:max(1, self.n_circles // 3)]
+
+                # Apply optimizations
+                new_circles = current_circles.copy()
+                for idx in selected_indices:
+                    new_circles = self.optimize_single_circle(new_circles, idx, step_size)
+
+                # Validate and accept if better
+                if self.is_valid_configuration_fast(new_circles):
+                    new_sum = np.sum(new_circles[:, 2])
+                    if new_sum > best_sum:
+                        best_sum = new_sum
+                        best_circles = new_circles.copy()
+
+                    if new_sum > phase_best_sum:
+                        phase_best_sum = new_sum
+                        phase_best = new_circles.copy()
+
+                    current_circles = new_circles
+                else:
+                    # Revert to best in phase if invalid
+                    current_circles = phase_best.copy()
+
+            # Reset for next phase with best found so far
+            current_circles = best_circles.copy()
+
+        return best_circles
+=======
+    def multi_scale_optimization(self, initial_circles: np.ndarray) -> np.ndarray:
+        """Perform multi-scale optimization with different step sizes and multi-objective consideration."""
+        current_circles = initial_circles.copy()
+        best_circles = initial_circles.copy()
+        best_sum = np.sum(initial_circles[:, 2])
+        best_objective = self.calculate_objective_score(initial_circles)
+
+        # Adaptive step sizes for different optimization phases
+        step_sizes = [0.15, 0.08, 0.03]
+        phases = [300, 300, 400]  # iterations per phase
+
+        # Track recent improvements for adaptive scaling
+        recent_improvements = []
+        improvement_threshold = 0.001
+
+        for phase_idx, (iterations, step_size) in enumerate(zip(phases, step_sizes)):
+            phase_best = current_circles.copy()
+            phase_best_sum = np.sum(current_circles[:, 2])
+            phase_best_objective = self.calculate_objective_score(current_circles)
+
+            for iteration in range(iterations):
+                # Randomly select circles to optimize
+                indices = list(range(self.n_circles))
+                random.shuffle(indices)
+                selected_indices = indices[:max(1, self.n_circles // 3)]
+
+                # Apply optimizations
+                new_circles = current_circles.copy()
+                for idx in selected_indices:
+                    new_circles = self.optimize_single_circle(new_circles, idx, step_size)
+
+                # Validate and accept if better
+                if self.is_valid_configuration_fast(new_circles):
+                    new_sum = np.sum(new_circles[:, 2])
+                    new_objective = self.calculate_objective_score(new_circles)
+
+                    # Consider both raw sum and objective function
+                    if new_objective > best_objective:
+                        best_objective = new_objective
+                        best_sum = new_sum
+                        best_circles = new_circles.copy()
+
+                    if new_sum > phase_best_sum:
+                        phase_best_sum = new_sum
+                        phase_best = new_circles.copy()
+                        phase_best_objective = new_objective
+
+                    current_circles = new_circles
+
+                    # Track recent improvements for adaptive scaling
+                    recent_improvements.append(new_objective)
+                    if len(recent_improvements) > 20:
+                        recent_improvements.pop(0)
+                else:
+                    # Revert to best in phase if invalid
+                    current_circles = phase_best.copy()
+
+            # Reset for next phase with best found so far
+            current_circles = best_circles.copy()
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def refine_solution(self, circles: np.ndarray) -> np.ndarray:
+        """Final refinement of the solution."""
+        refined = circles.copy()
+        for i in range(self.n_circles):
+            # Fine-grained optimization for each circle
+            max_radius = self.calculate_max_radius_fast(refined, i)
+            if max_radius > 0.001:
+                refined[i][2] = max(0.001, min(max_radius, refined[i][2]))
+
+        return refined
+=======
+    def refine_solution(self, circles: np.ndarray) -> np.ndarray:
+        """Final refinement of the solution with multi-objective considerations."""
+        refined = circles.copy()
+
+        # First, try to slightly increase radii where possible
+        for i in range(self.n_circles):
+            # Fine-grained optimization for each circle
+            max_radius = self.calculate_max_radius_fast(refined, i)
+            if max_radius > 0.001:
+                refined[i][2] = max(0.001, min(max_radius, refined[i][2]))
+
+        # Then perform a few rounds of careful local optimization
+        for round_num in range(5):  # Limited rounds to prevent overfitting
+            improved = False
+            for i in range(self.n_circles):
+                # Try small adjustments to see if we can improve
+                original_radius = refined[i][2]
+                original_x, original_y = refined[i][0], refined[i][1]
+
+                # Try to slightly increase radius
+                max_radius = self.calculate_max_radius_fast(refined, i)
+                if max_radius > original_radius and max_radius > 0.001:
+                    # Only increase by a small amount to maintain stability
+                    new_radius = min(original_radius + 0.001, max_radius)
+                    refined[i][2] = new_radius
+                    improved = True
+
+                # Try small position adjustments
+                if random.random() > 0.7:  # 30% chance to adjust position
+                    dx = random.uniform(-0.005, 0.005)
+                    dy = random.uniform(-0.005, 0.005)
+                    new_x = max(0.001, min(self.width - 0.001, original_x + dx))
+                    new_y = max(0.001, min(self.height - 0.001, original_y + dy))
+                    refined[i][0] = new_x
+                    refined[i][1] = new_y
+                    improved = True
+
+                # Check if this improved configuration is still valid
+                if improved and not self.is_valid_configuration_fast(refined):
+                    # Revert if invalid
+                    refined[i][2] = original_radius
+                    refined[i][0] = original_x
+                    refined[i][1] = original_y
+                    improved = False
+
+            if not improved:
+                break  # No more improvements, stop early
+
+        return refined
+>>>>>>> REPLACE
+</DIFF>

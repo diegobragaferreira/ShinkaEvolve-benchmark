@@ -1,0 +1,81 @@
+<NAME>
+enhanced_convolution_strategy
+</NAME>
+
+<DESCRIPTION>
+This edit introduces an enhanced convolution strategy that dynamically selects between FFT and direct convolution based on sequence characteristics, improving numerical stability and computational efficiency. The modification includes:
+1. Adding a dynamic convolution selection heuristic that evaluates sequence properties
+2. Implementing more robust numerical checks to prevent instability
+3. Optimizing the convolution computation for better performance
+These changes aim to increase the reliability of the core computation in the autocorrelation optimization process, leading to better convergence and potentially improved C1 constant bounds.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def convolve_fft(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Compute convolution using FFT for efficiency with optimized padding."""
+        n = len(a)
+        # For very small sequences, use direct convolution for numerical stability
+        if n < 10:
+            return np.convolve(a, b, mode='full')
+
+        # Use next power of 2 for better FFT performance
+        fft_size = 1 << (n - 1).bit_length()  # Next power of 2
+        if fft_size < 2 * n - 1:
+            fft_size *= 2
+
+        # Pad to fft_size
+        a_padded = np.pad(a, (0, fft_size - n), 'constant')
+        b_padded = np.pad(b, (0, fft_size - n), 'constant')
+
+        # Perform convolution in frequency domain
+        a_fft = fft(a_padded)
+        b_fft = fft(b_padded)
+        conv_result = ifft(a_fft * np.conj(b_fft))
+        return np.real(conv_result[:2*n-1])
+=======
+    def convolve_fft(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Compute convolution using FFT for efficiency with optimized padding."""
+        n = len(a)
+
+        # For very small sequences, use direct convolution for numerical stability
+        if n < 10:
+            return np.convolve(a, b, mode='full')
+
+        # Dynamic decision based on numerical properties
+        # If sequence has high variance or extreme values, prefer direct method
+        variance_a = np.var(a)
+        max_a = np.max(np.abs(a))
+        if variance_a > 100 or max_a > 1000:
+            return np.convolve(a, b, mode='full')
+
+        # Use next power of 2 for better FFT performance
+        fft_size = 1 << (n - 1).bit_length()  # Next power of 2
+        if fft_size < 2 * n - 1:
+            fft_size *= 2
+
+        # Pad to fft_size
+        a_padded = np.pad(a, (0, fft_size - n), 'constant')
+        b_padded = np.pad(b, (0, fft_size - n), 'constant')
+
+        # Perform convolution in frequency domain with additional numerical safety
+        try:
+            a_fft = fft(a_padded)
+            b_fft = fft(b_padded)
+            conv_result = ifft(a_fft * np.conj(b_fft))
+
+            # Check for numerical instability
+            if np.any(np.isnan(conv_result)) or np.any(np.isinf(conv_result)):
+                # Return direct convolution if FFT causes issues
+                return np.convolve(a, b, mode='full')
+
+            result = np.real(conv_result[:2*n-1])
+            # Ensure non-negative values to prevent downstream issues
+            result = np.maximum(result, 0)
+            return result
+
+        except Exception:
+            # Fallback to direct method if something goes wrong
+            return np.convolve(a, b, mode='full')
+>>>>>>> REPLACE
+</DIFF>

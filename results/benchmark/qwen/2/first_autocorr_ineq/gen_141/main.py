@@ -1,0 +1,371 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+import random
+import time
+import warnings
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+def compute_convolution_fft(seq1, seq2):
+    """Compute convolution using FFT for efficiency."""
+    n = len(seq1)
+    # Zero-pad to avoid circular convolution effects
+    padded_length = 2 * n - 1
+    fft_seq1 = fft(seq1, padded_length)
+    fft_seq2 = fft(seq2, padded_length)
+    conv_result = ifft(fft_seq1 * np.conj(fft_seq2)).real
+    return conv_result[:n]
+
+def compute_c1(sequence):
+    """Compute C1 value for a given sequence."""
+    n = len(sequence)
+    if n < 1:
+        return float('inf')
+
+    sum_a = np.sum(sequence)
+    if sum_a < 1e-10:
+        return float('inf')
+
+    # Compute autoconvolution
+    conv_result = compute_convolution_fft(sequence, sequence)
+    max_conv = np.max(conv_result)
+
+    # Compute C1
+    c1 = 2 * n * max_conv / (sum_a ** 2)
+    return c1
+
+def evaluate_sequence(sequence):
+    """Evaluate a sequence by computing its inverse C1."""
+    c1 = compute_c1(sequence)
+    if c1 == float('inf'):
+        return 0.0  # Invalid sequence gets low score
+    return 1.0 / c1  # Higher inverse C1 is better
+
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced strategies."""
+    try:
+        n = len(sequence)
+        if n < 1:
+            return None
+
+        # Normalize the sequence appropriately for LP solving
+        sum_sequence = np.sum(sequence)
+        if sum_sequence < 1e-10:
+            return None
+
+        # Normalize sequence with sqrt(2*n) scaling factor
+        normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+        # Compute convolution using FFT for efficiency
+        conv_result = compute_convolution_fft(normalized_sequence, normalized_sequence)
+        rhs = np.max(conv_result)
+
+        # Solve the LP problem with enhanced fallbacks
+        g_fun = solve_convolution_lp_with_fallback(normalized_sequence, rhs)
+
+        if g_fun is None:
+            return None
+
+        # Normalize the result again
+        sum_g = np.sum(g_fun)
+        if sum_g < 1e-10:
+            return None
+
+        normalized_g_fun = np.array(g_fun) * np.sqrt(2 * n) / sum_g
+
+        # Use adaptive step size based on sequence complexity
+        t = 0.01 / (1.0 + 0.001 * n)  # Decrease step size with increasing n
+
+        # Create new sequence with adaptive mixing
+        new_sequence = (1 - t) * np.array(sequence) + t * normalized_g_fun
+
+        # Ensure non-negativity
+        new_sequence = np.maximum(new_sequence, 0)
+
+        return new_sequence.tolist()
+
+    except Exception as e:
+        warnings.warn(f"Error in get_good_direction_to_move_into: {str(e)}")
+        return None
+
+def solve_convolution_lp_with_fallback(f_sequence, rhs):
+    """Solves the convolution LP with enhanced fallback strategies."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        # Try primary LP solver
+        g_fun = solve_convolution_lp(f_sequence, rhs)
+        if g_fun is not None:
+            return g_fun
+
+        # Fallback 1: Slightly relaxed RHS
+        g_fun = solve_convolution_lp(f_sequence, rhs * 1.01)
+        if g_fun is not None:
+            return g_fun
+
+        # Fallback 2: Symmetric pattern
+        try:
+            g_fun = [f_sequence[n // 2]] * n
+            sum_g = np.sum(g_fun)
+            if sum_g > 0:
+                return [x / sum_g for x in g_fun]
+        except:
+            pass
+
+        # Fallback 3: Uniform pattern
+        try:
+            return np.ones(n) / n
+        except:
+            pass
+
+        return None
+
+    except Exception as e:
+        warnings.warn(f"Error in solve_convolution_lp_with_fallback: {str(e)}")
+        return None
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    try:
+        n = len(f_sequence)
+        if n < 1:
+            return None
+
+        # Precompute convolution constraints using FFT-based approach
+        # To reduce computation, we'll use a more efficient constraint matrix construction
+
+        # Number of convolution constraints (2n-1)
+        num_constraints = 2 * n - 1
+
+        # Preallocate constraint matrix
+        a_ub = np.zeros((num_constraints, n))
+        b_ub = np.zeros(num_constraints)
+
+        # Fill constraint matrix
+        for k in range(num_constraints):
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    a_ub[k, j] = f_sequence[i]
+            b_ub[k] = rhs
+
+        # Add non-negativity constraints
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        # Combine constraints
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        # Define objective function (minimize -sum x, i.e., maximize sum x)
+        c = -np.ones(n)
+
+        # Solve linear programming problem with multiple fallbacks
+        try:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+        except:
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+            except:
+                return None
+
+        if result.success:
+            return result.x
+        else:
+            return None
+
+    except Exception as e:
+        warnings.warn(f"Error in solve_convolution_lp: {str(e)}")
+        return None
+
+def create_structured_sequence(n):
+    """Create a structured sequence that's more likely to yield good results."""
+    # Use exponential decay mixed with periodic element for structured patterns
+    exp_decay = np.exp(-np.linspace(0, 3, n))
+    
+    # Add a bit of periodicity in the form of sine wave
+    period_wave = 0.3 * np.sin(np.linspace(0, 4*np.pi, n))
+    
+    # Combine both patterns
+    base_seq = exp_decay + period_wave
+    
+    # Add noise for diversity
+    noise = np.random.normal(0, 0.1, n)
+    base_seq = base_seq + noise
+    
+    # Ensure all values are positive
+    base_seq = np.maximum(base_seq, 0)
+    
+    # Normalize and scale
+    if np.sum(base_seq) > 0:
+        base_seq = base_seq / np.sum(base_seq) * 10
+    else:
+        base_seq = np.ones(n) * 10 / n
+
+    # Ensure non-negativity and reasonable bounds
+    base_seq = np.clip(base_seq, 0, 1000)
+
+    return base_seq.tolist()
+
+def mutate_sequence(sequence, mutation_rate=0.1, diversity_factor=1.0):
+    """Apply random mutation to a sequence."""
+    mutated = sequence.copy()
+    n = len(mutated)
+
+    # Adjust mutation rate based on diversity and sequence length
+    effective_mutation_rate = mutation_rate * diversity_factor
+    
+    # Determine number of mutations based on sequence length and rate
+    num_mutations = max(1, int(n * effective_mutation_rate))
+
+    for _ in range(num_mutations):
+        idx = random.randint(0, n - 1)
+        # Small random change
+        change_factor = random.uniform(0.8, 1.2)
+        mutated[idx] *= change_factor
+        mutated[idx] = max(0, mutated[idx])  # Ensure non-negative
+
+    return mutated
+
+def tournament_selection(population, fitnesses, k=3):
+    """Select an individual from population using tournament selection."""
+    if len(population) < k:
+        selected_idx = np.argmax(fitnesses)
+        return population[selected_idx]
+
+    tournament_indices = random.sample(range(len(population)), k)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_idx]
+
+def calculate_diversity(population):
+    """Calculate diversity of the population based on standard deviation of sequences."""
+    if len(population) < 2:
+        return 0.0
+    # Flatten all sequences into one big array
+    flat_array = np.concatenate(population)
+    std_dev = np.std(flat_array)
+    # Normalize by the mean
+    mean_val = np.mean(flat_array)
+    return std_dev / (mean_val + 1e-10) if mean_val != 0 else 0.0
+
+def evolutionary_search():
+    """Run evolutionary optimization with adaptive parameters."""
+    population_size = 30  # Increased population size for more diversity
+    generations = 70      # More generations for convergence
+    elite_size = 6        # More elite individuals for preservation
+    
+    # Initialize population with diverse sequences
+    population = []
+    for _ in range(population_size):
+        # Create sequences of varying lengths, favoring smaller ones for efficiency
+        n = random.randint(50, 500)  # Smaller range for faster computation
+        sequence = create_structured_sequence(n)
+        population.append(sequence)
+
+    # Evolution loop
+    for gen in range(generations):
+        # Evaluate fitness for current population
+        fitnesses = [evaluate_sequence(seq) for seq in population]
+
+        # Calculate diversity for adaptive mutation
+        diversity = calculate_diversity(population)
+        
+        # Adaptive elite size based on diversity
+        adaptive_elite_size = max(2, int(elite_size * (1 + diversity * 0.5)))
+        
+        # Preserve elite individuals
+        elite_indices = np.argsort(fitnesses)[-adaptive_elite_size:]
+        elite_individuals = [population[i] for i in elite_indices]
+
+        # Create new population
+        new_population = elite_individuals[:]
+
+        # Fill rest of population through selection, crossover, and mutation
+        while len(new_population) < population_size:
+            # Tournament selection for parents
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Simple crossover: average two sequences (with some randomness)
+            child = []
+            min_len = min(len(parent1), len(parent2))
+            for i in range(min_len):
+                # Blend parents with some randomness
+                blend_factor = random.uniform(0.3, 0.7)
+                val = blend_factor * parent1[i] + (1 - blend_factor) * parent2[i]
+                child.append(val)
+            
+            # Extend child with remaining elements from longer parent
+            if len(parent1) > min_len:
+                child.extend(parent1[min_len:])
+            elif len(parent2) > min_len:
+                child.extend(parent2[min_len:])
+
+            # Mutation with adaptive rate
+            mutation_rate = max(0.05, 0.1 - gen * 0.002)  # Decrease over time
+            child = mutate_sequence(child, mutation_rate, diversity)
+
+            # Ensure minimum sum requirement
+            if sum(child) < 0.01:
+                child[0] = 0.1
+
+            new_population.append(child)
+
+        population = new_population
+
+    # Return best individual from final population
+    final_fitnesses = [evaluate_sequence(seq) for seq in population]
+    best_idx = np.argmax(final_fitnesses)
+    return population[best_idx]
+
+def search_for_best_sequence() -> list[float]:
+    """Function to search for the best coefficient sequence using multi-stage approach."""
+    try:
+        start_time = time.time()
+        max_time = 170  # Allow for a bit more time for optimization
+        
+        # Stage 1: Evolutionary Search
+        best_sequence = evolutionary_search()
+
+        # Stage 2: Local Optimization with Gradient Updates
+        # Apply gradient-based refinements iteratively
+        for _ in range(10):  # More iterations for better convergence
+            if time.time() - start_time > max_time:
+                break
+            refined = get_good_direction_to_move_into(best_sequence)
+            if refined is not None:
+                best_sequence = refined
+            else:
+                break
+
+        # Stage 3: Final Validation and Adjustment
+        # Check if sequence meets requirements and adjust if necessary
+        if sum(best_sequence) < 0.01:
+            best_sequence[0] = 0.1
+            
+        return best_sequence
+
+    except Exception as e:
+        warnings.warn(f"Error in search_for_best_sequence: {str(e)}")
+        # Fallback to simple approach
+        try:
+            n = np.random.randint(100, 1000)
+            base_seq = create_structured_sequence(n)
+            return base_seq
+        except:
+            return [np.random.random() for _ in range(100)]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

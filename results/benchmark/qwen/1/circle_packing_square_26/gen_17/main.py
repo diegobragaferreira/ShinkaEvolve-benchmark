@@ -1,0 +1,289 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import KDTree
+from deap import base, creator, tools, algorithms
+import random
+import time
+from typing import List, Tuple, Optional
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+class Circle:
+    """Represents a circle with x, y coordinates and radius"""
+    def __init__(self, x: float, y: float, r: float):
+        self.x = x
+        self.y = y
+        self.r = r
+    
+    def to_array(self) -> np.ndarray:
+        return np.array([self.x, self.y, self.r])
+    
+    @staticmethod
+    def from_array(arr: np.ndarray) -> 'Circle':
+        return Circle(arr[0], arr[1], arr[2])
+
+class CirclePackOptimizer:
+    """Main optimizer class for circle packing problem"""
+    
+    def __init__(self, n_circles: int = 26, max_radius: float = 0.5):
+        self.n_circles = n_circles
+        self.max_radius = max_radius
+        self.min_distance = 0.001
+        
+    def is_valid_position(self, x: float, y: float, r: float, existing_circles: List[Circle]) -> bool:
+        """Check if a circle at (x,y) with radius r is valid"""
+        # Check boundary constraints
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+            
+        # Check overlap with existing circles using KDTree for efficiency
+        if existing_circles:
+            points = np.array([[c.x, c.y] for c in existing_circles])
+            tree = KDTree(points)
+            distances, _ = tree.query([[x, y]], k=len(existing_circles))
+            for dist, circle in zip(distances[0], existing_circles):
+                if dist < r + circle.r + self.min_distance:
+                    return False
+        return True
+    
+    def calculate_max_radius(self, x: float, y: float, existing_circles: List[Circle]) -> float:
+        """Calculate maximum possible radius at given position"""
+        # Boundary constraints
+        max_rad = min(x, 1-x, y, 1-y)
+        
+        # Overlap constraints
+        if existing_circles:
+            points = np.array([[c.x, c.y] for c in existing_circles])
+            tree = KDTree(points)
+            distances, _ = tree.query([[x, y]], k=len(existing_circles))
+            for dist, circle in zip(distances[0], existing_circles):
+                overlap_radius = dist - circle.r - self.min_distance
+                if overlap_radius > 0:
+                    max_rad = min(max_rad, overlap_radius)
+        
+        return max(0.001, max_rad)
+    
+    def generate_initial_solution(self) -> List[Circle]:
+        """Generate initial solution using greedy placement"""
+        circles = []
+        
+        # Place circles one by one with greedy approach
+        for i in range(self.n_circles):
+            best_circle = None
+            best_radius = 0
+            
+            # Try multiple random positions to find a good candidate
+            for _ in range(1000):
+                # Random position
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                
+                # Calculate maximum possible radius at this position
+                max_r = self.calculate_max_radius(x, y, circles)
+                
+                # Accept if better than current best
+                if max_r > best_radius:
+                    best_radius = max_r
+                    best_circle = Circle(x, y, max_r)
+                
+                # Early exit if we have a reasonably good solution
+                if best_radius > 0.15:
+                    break
+            
+            # Add the best circle found
+            if best_circle:
+                circles.append(best_circle)
+            else:
+                # Fallback to simple placement if nothing works
+                x = 0.5
+                y = 0.5
+                r = 0.01
+                circles.append(Circle(x, y, r))
+        
+        return circles
+    
+    def evaluate_fitness(self, circles: List[Circle]) -> float:
+        """Evaluate fitness - sum of radii"""
+        return sum(circle.r for circle in circles)
+    
+    def repair_solution(self, circles: List[Circle]) -> List[Circle]:
+        """Repair solution to ensure all constraints are satisfied"""
+        # Create a working copy
+        repaired = [Circle(c.x, c.y, c.r) for c in circles]
+        
+        # Repeatedly fix issues until stable
+        changed = True
+        iterations = 0
+        while changed and iterations < 100:
+            changed = False
+            iterations += 1
+            
+            # Fix each circle
+            for i in range(len(repaired)):
+                circle = repaired[i]
+                x, y, r = circle.x, circle.y, circle.r
+                
+                # Ensure boundary constraints
+                if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                    # Shrink radius to fit
+                    r = min(x, 1-x, y, 1-y)
+                    r = max(0.001, r)
+                    changed = True
+                
+                # Check overlaps with other circles
+                for j in range(len(repaired)):
+                    if i != j:
+                        other = repaired[j]
+                        dx = x - other.x
+                        dy = y - other.y
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        
+                        # If overlapping, reduce radius
+                        if distance < r + other.r + self.min_distance:
+                            new_r = distance - other.r - self.min_distance
+                            if new_r > 0:
+                                r = min(r, new_r)
+                                changed = True
+                
+                # Ensure minimum positive radius
+                r = max(0.001, r)
+                
+                # Update if anything changed
+                if r != circle.r:
+                    repaired[i] = Circle(x, y, r)
+        
+        return repaired
+
+class EvolutionaryCirclePacker:
+    """Handles evolutionary algorithm for circle packing"""
+    
+    def __init__(self, optimizer: CirclePackOptimizer):
+        self.optimizer = optimizer
+        self.toolbox = base.Toolbox()
+        
+    def setup_evolution(self):
+        """Setup DEAP toolbox"""
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        creator.create("Individual", list, fitness=creator.FitnessMax)
+        
+        self.toolbox.register("individual", self._create_individual)
+        self.toolbox.register("population", self._create_population)
+        self.toolbox.register("evaluate", self._evaluate)
+        self.toolbox.register("mate", self._crossover)
+        self.toolbox.register("mutate", self._mutate)
+        self.toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    def _create_individual(self) -> List[Circle]:
+        """Create a single individual"""
+        return self.optimizer.generate_initial_solution()
+    
+    def _create_population(self, size: int) -> List[List[Circle]]:
+        """Create a population"""
+        return [self._create_individual() for _ in range(size)]
+    
+    def _evaluate(self, individual: List[Circle]) -> Tuple[float,]:
+        """Evaluate fitness of individual"""
+        return (self.optimizer.evaluate_fitness(individual),)
+    
+    def _mutate(self, individual: List[Circle]) -> Tuple[List[Circle],]:
+        """Custom mutation operator"""
+        # Pick a random circle to modify
+        idx = random.randint(0, len(individual) - 1)
+        circle = individual[idx]
+        
+        # Create a new, slightly modified circle
+        new_x = max(0.01, min(0.99, circle.x + random.gauss(0, 0.02)))
+        new_y = max(0.01, min(0.99, circle.y + random.gauss(0, 0.02)))
+        
+        # Recalculate max possible radius at new location
+        new_r = self.optimizer.calculate_max_radius(new_x, new_y, 
+                                                   [c for i, c in enumerate(individual) if i != idx])
+        
+        # Clamp to reasonable bounds
+        new_r = max(0.001, min(self.optimizer.max_radius, new_r))
+        
+        # Update the circle
+        individual[idx] = Circle(new_x, new_y, new_r)
+        return individual,
+    
+    def _crossover(self, ind1: List[Circle], ind2: List[Circle]) -> Tuple[List[Circle], List[Circle]]:
+        """Custom crossover operator"""
+        # Simple uniform crossover
+        for i in range(len(ind1)):
+            if random.random() < 0.5:
+                ind1[i], ind2[i] = ind2[i], ind1[i]
+        
+        # Repair both individuals
+        ind1 = self.optimizer.repair_solution(ind1)
+        ind2 = self.optimizer.repair_solution(ind2)
+        
+        return ind1, ind2
+    
+    def run_evolution(self, pop_size: int = 20, generations: int = 50) -> List[Circle]:
+        """Run evolutionary algorithm"""
+        # Create initial population
+        pop = self.toolbox.population(pop_size)
+        
+        # Hall of fame to store best solution
+        hof = tools.HallOfFame(1)
+        
+        # Statistics
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats.register("avg", np.mean)
+        stats.register("min", np.min)
+        stats.register("max", np.max)
+        
+        # Run evolution
+        try:
+            pop, log = algorithms.eaSimple(pop, self.toolbox, cxpb=0.7, mutpb=0.3, 
+                                          ngen=generations, stats=stats, halloffame=hof, 
+                                          verbose=False)
+        except Exception:
+            pass
+        
+        # Return the best individual found
+        best_individual = hof[0] if len(hof) > 0 else pop[0]
+        return best_individual
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Initialize components
+    optimizer = CirclePackOptimizer(26, 0.5)
+    packer = EvolutionaryCirclePacker(optimizer)
+    
+    # Setup evolutionary algorithm
+    packer.setup_evolution()
+    
+    # Run evolution
+    start_time = time.time()
+    try:
+        best_solution = packer.run_evolution(pop_size=20, generations=50)
+    except Exception as e:
+        # Fallback to simple greedy approach if evolution fails
+        print(f"Evolution failed: {e}")
+        best_solution = optimizer.generate_initial_solution()
+        # Apply some local optimization
+        for _ in range(100):
+            best_solution = optimizer.repair_solution(best_solution)
+    
+    # Final validation and conversion
+    final_solution = optimizer.repair_solution(best_solution)
+    
+    # Convert to required numpy array format
+    result = np.array([circle.to_array() for circle in final_solution])
+    
+    # Ensure all values are within valid bounds
+    for i in range(len(result)):
+        result[i][0] = max(result[i][2], min(1-result[i][2], result[i][0]))
+        result[i][1] = max(result[i][2], min(1-result[i][2], result[i][1]))
+    
+    return result
+
+# EVOLVE-BLOCK-END

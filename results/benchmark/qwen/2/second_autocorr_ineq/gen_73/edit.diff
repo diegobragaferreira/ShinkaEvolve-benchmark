@@ -1,0 +1,483 @@
+--- a/original.py
++++ b/original.py
+@@ -1,259 +1,247 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import signal
+-from scipy.optimize import differential_evolution
++from scipy.optimize import minimize
++from scipy.signal import convolve
+ import time
+-from concurrent.futures import ThreadPoolExecutor, as_completed
+ import warnings
+ 
+-class AutoconvolutionEvaluator:
+-    """Handles all autoconvolution norm computations with numerical stability."""
+-    
+-    @staticmethod
+-    def compute_norms(f_values):
+-        """
+-        Compute the three norms needed for C2 calculation with improved numerical stability.
+-        Returns: (norm_2_sq, norm_1, norm_inf)
+-        """
+-        if not f_values:
+-            return 0.0, 1e-12, 1e-12
+-            
+-        # Convert to numpy array
+-        f = np.array(f_values, dtype=np.float64)
+-        
+-        # Validate input
+-        if len(f) < 1:
+-            return 0.0, 1e-12, 1e-12
+-            
+-        # Compute autoconvolution using fast convolution
+-        g = signal.convolve(f, f, mode='full')
+-        g = g[len(f)-1:]  # Keep only the relevant part
+-        
+-        # Compute norms with numerical stability checks
+-        g_abs = np.abs(g)
+-        
+-        # ||g||₂² (L2 norm squared) - use trapezoidal rule properly
+-        g_sq = g_abs ** 2
+-        if len(g_sq) < 2:
+-            norm_2_sq = 0.0 if len(g_sq) == 0 else g_sq[0]
+-        else:
+-            # Trapezoidal integration: sum((y[i] + y[i+1])/2 * delta_x)
+-            # We approximate dx as 1 since we're dealing with discrete samples
+-            norm_2_sq = np.sum((g_sq[:-1] + g_sq[1:]) / 2.0)
+-        
+-        # ||g||₁ (L1 norm) - sum of absolute values
+-        norm_1 = np.sum(g_abs)
+-        
+-        # ||g||∞ (infinity norm)
+-        norm_inf = np.max(g_abs)
+-        
+-        # Numerical stability checks
+-        norm_2_sq = max(0.0, norm_2_sq)
+-        norm_1 = max(1e-12, norm_1)  # Avoid division by zero
+-        norm_inf = max(1e-12, norm_inf)  # Avoid division by zero
+-        
+-        return norm_2_sq, norm_1, norm_inf
+-
+-class StepFunctionBuilder:
+-    """Handles construction of step functions with various strategies."""
+-    
+-    @staticmethod
+-    def generate_gaussian_peaks(n_points, n_peaks=None):
+-        """
+-        Generate step function using Gaussian peaks
+-        """
+-        if n_peaks is None:
+-            n_peaks = np.random.randint(5, 26)
+-            
+-        # Create domain
+-        x = np.linspace(-0.25, 0.25, n_points)
+-        f_values = np.zeros_like(x)
+-        
+-        # Place peaks adaptively with better distribution
+-        peak_positions = np.random.uniform(-0.25, 0.25, n_peaks)
+-        peak_widths = np.random.uniform(0.005, 0.05, n_peaks)
+-        peak_amplitudes = np.random.uniform(0.5, 2.0, n_peaks)
+-        
+-        # Add Gaussian peaks
+-        for i in range(n_peaks):
+-            # Gaussian peak centered at peak_position with given width and amplitude
+-            gaussian_peak = peak_amplitudes[i] * np.exp(-0.5 * ((x - peak_positions[i]) / peak_widths[i])**2)
+-            f_values += gaussian_peak
+-            
+-        # Apply smoothing to reduce sharp edges
+-        if n_points > 100:
+-            window_size = max(3, min(21, int(n_points / 50)))
+-            if window_size % 2 == 0:
+-                window_size += 1
+-            try:
+-                from scipy.signal import savgol_filter
+-                f_values = savgol_filter(f_values, window_size, 3)
+-            except:
+-                # Fallback to simple moving average if savgol fails
+-                f_values = np.convolve(f_values, np.ones(window_size)/window_size, mode='same')
+-        
+-        # Ensure non-negativity
+-        f_values = np.maximum(f_values, 0)
+-        
+-        # Normalize for stability
+-        max_val = np.max(f_values)
+-        if max_val > 0:
+-            f_values = f_values / (max_val * 1.5)  # Scale down gently
+-            
+-        return f_values.tolist()
+-
+-class OptimizerPipeline:
+-    """Main optimization pipeline that orchestrates function construction and evaluation."""
+-    
+-    def __init__(self):
+-        self.evaluator = AutoconvolutionEvaluator()
+-        self.builder = StepFunctionBuilder()
+-        
+-    def evaluate_candidate(self, f_values):
+-        """Evaluate a single candidate function"""
++def compute_autoconvolution_norms(f_values):
++    """
++    Compute the three norms needed for C2 calculation with improved numerical stability.
++    """
++    if not f_values:
++        return 0.0, 1e-12, 1e-12
++        
++    # Convert to numpy array
++    f = np.array(f_values, dtype=np.float64)
++    
++    # Validate input
++    if len(f) < 1:
++        return 0.0, 1e-12, 1e-12
++        
++    # Compute autoconvolution - this is the core operation
++    g = convolve(f, f, mode='full')
++    g = g[len(f)-1:]  # Keep only the relevant part
++    
++    # Compute norms with numerical stability checks
++    g_abs = np.abs(g)
++    
++    # ||g||₂² (L2 norm squared) - use trapezoidal rule properly
++    g_sq = g_abs ** 2
++    if len(g_sq) < 2:
++        norm_2_sq = 0.0 if len(g_sq) == 0 else g_sq[0]
++    else:
++        # Trapezoidal integration: sum((y[i] + y[i+1])/2 * delta_x)
++        norm_2_sq = np.sum((g_sq[:-1] + g_sq[1:]) / 2.0)
++    
++    # ||g||₁ (L1 norm) - sum of absolute values
++    norm_1 = np.sum(g_abs)
++    
++    # ||g||∞ (infinity norm)
++    norm_inf = np.max(g_abs)
++    
++    # Numerical stability checks
++    norm_2_sq = max(0.0, norm_2_sq)
++    norm_1 = max(1e-12, norm_1)  # Avoid division by zero
++    norm_inf = max(1e-12, norm_inf)  # Avoid division by zero
++    
++    return norm_2_sq, norm_1, norm_inf
++
++def construct_quadratic_peaks(n_points=2000):
++    """
++    Construct a function with quadratic peaks that are easier to optimize
++    """
++    # Create domain
++    x = np.linspace(-0.25, 0.25, n_points)
++    
++    # Initialize function
++    f_values = np.zeros(n_points)
++    
++    # Number of quadratic peaks
++    n_peaks = min(20, max(5, n_points // 100))
++    
++    # Generate peak parameters
++    peak_positions = np.linspace(-0.23, 0.23, n_peaks)
++    
++    # For each peak, define a quadratic shape (we'll make these bell-shaped)
++    for i, pos in enumerate(peak_positions):
++        # Create a bell-shaped profile (approximating gaussian with quadratic for easy optimization)
++        # Quadratic profile centered at pos with varying width
++        width = 0.03 + 0.02 * np.sin(i * 0.5)  # Varying widths
++        height = 0.8 + 0.4 * np.cos(i * 0.3)   # Varying heights
++        
++        # Quadratic form: ax^2 + bx + c, but we'll simplify to bell-like shape
++        # A bell curve based on quadratic expression: exp(-(x-center)^2/(2*sigma^2))
++        # However for optimization purposes we'll make it more amenable to calculus
++        # Using a quadratic approximation: -a*(x-center)^2 + b
++        # We'll construct this as: height * (1 - ((x-pos)/width)^2)^2 for |x-pos| <= width
++        # But let's use a more direct approach with a smooth bell shape
++        
++        # Simple quadratic approximation for peak
++        quad_form = np.exp(-0.5 * ((x - pos) / width)**2) 
++        quad_form = height * quad_form / np.max(quad_form)  # normalize 
++        f_values += quad_form
++        
++    # Apply smoothing to ensure smooth transitions
++    # Simple moving average smoothing
++    if n_points > 100:
++        window = min(21, n_points // 50)
++        if window % 2 == 0:
++            window += 1
++        f_values = np.convolve(f_values, np.ones(window)/window, mode='same')
++    
++    # Ensure non-negativity
++    f_values = np.maximum(f_values, 0)
++    
++    # Normalize for stability 
++    max_val = np.max(f_values)
++    if max_val > 0:
++        f_values = f_values / (max_val * 1.2)
++        
++    return f_values.tolist()
++
++def optimize_quadratic_peaks():
++    """
++    Direct optimization approach for quadratic peaks to maximize C2.
++    """
++    # Start with a reasonable base function
++    n_points = 1000
++    f_values = construct_quadratic_peaks(n_points)
++    
++    # Define objective function to minimize (negative C2)
++    def objective(params):
+         try:
+-            norm_2_sq, norm_1, norm_inf = self.evaluator.compute_norms(f_values)
++            # Reshape params into function values (use piecewise linear for now)
++            f = np.array(params)
++            # Ensure non-negativity
++            f = np.maximum(f, 0)
++            
++            # Compute autoconvolution and norms
++            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f)
+             
+             # Avoid division by zero
+             if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+-                return 0.0
++                return 1e10  # Large penalty for invalid norms
+                 
+             c2 = norm_2_sq / (norm_1 * norm_inf)
+-            return c2 if not np.isnan(c2) and not np.isinf(c2) else 0.0
++            
++            # Return negative because we want to maximize C2
++            return -c2 if not np.isnan(c2) and not np.isinf(c2) else 1e10
+             
+         except Exception as e:
+-            warnings.warn(f"Evaluation error: {str(e)}")
+-            return 0.0
+-            
+-    def construct_candidates_parallel(self, n_candidates=20, n_points=2000):
+-        """
+-        Construct multiple candidates in parallel for better exploration
+-        """
+-        candidates = []
+-        
+-        def build_single_candidate(index):
+-            try:
+-                # Generate function with adaptive parameters
+-                f_values = self.builder.generate_gaussian_peaks(n_points)
+-                c2 = self.evaluate_candidate(f_values)
+-                return (c2, f_values)
+-            except Exception as e:
+-                warnings.warn(f"Candidate {index} construction failed: {str(e)}")
+-                return (0.0, [])
+-        
+-        # Process candidates in parallel
+-        with ThreadPoolExecutor(max_workers=min(8, n_candidates)) as executor:
+-            futures = [executor.submit(build_single_candidate, i) for i in range(n_candidates)]
+-            results = [future.result() for future in as_completed(futures)]
+-            
+-        # Filter out invalid candidates
+-        valid_candidates = [(c2, f_values) for c2, f_values in results if f_values and len(f_values) > 0]
+-        
+-        # Sort by C2 score
+-        valid_candidates.sort(key=lambda x: x[0], reverse=True)
+-        
+-        return valid_candidates
+-    
+-    def refine_best_candidate(self, best_f, max_iterations=30):
+-        """
+-        Perform local refinement on the best candidate
+-        """
++            warnings.warn(f"Objective evaluation failed: {str(e)}")
++            return 1e10
++            
++    # Use L-BFGS-B optimizer for better convergence properties
++    # Start with the base function as initial guess
++    x0 = np.array(f_values)
++    
++    # Minimize negative C2 (i.e., maximize C2)
++    try:
++        result = minimize(objective, x0, method='L-BFGS-B', options={'maxiter': 50, 'ftol': 1e-8})
++        if result.success:
++            optimized_f = np.maximum(result.x, 0)
++            return optimized_f.tolist()
++        else:
++            warnings.warn(f"Optimization failed: {result.message}")
++    except Exception as e:
++        warnings.warn(f"Optimization error: {str(e)}")
++        
++    # Fallback to base function if optimization fails
++    return f_values
++
++def construct_function() -> list[float]:
++    """
++    Main function to construct step-function with high C2 value.
++    Uses direct quadratic optimization approach.
++    """
++    start_time = time.time()
++    
++    # Try several strategies and pick best
++    best_c2 = 0.0
++    best_f = None
++    
++    # Strategy 1: Direct optimization of quadratic peaks
++    try:
++        f_values = optimize_quadratic_peaks()
++        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
++        
++        if norm_1 > 1e-12 and norm_inf > 1e-12:
++            c2 = norm_2_sq / (norm_1 * norm_inf)
++            if c2 > best_c2:
++                best_c2 = c2
++                best_f = f_values
++    except Exception as e:
++        warnings.warn(f"Strategy 1 failed: {str(e)}")
++    
++    # Strategy 2: Generate more diverse initial peaks and optimize
++    if best_f is None or best_c2 < 0.8:
+         try:
+-            # Simple gradient-free refinement using differential evolution
+-            def objective(params):
+-                # Normalize and ensure non-negativity
+-                params = np.maximum(params, 0)
+-                # For simplicity, we're just evaluating the function
+-                norm_2_sq, norm_1, norm_inf = self.evaluator.compute_norms(params)
+-                if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+-                    return 0.0
++            # Create diverse peaks with different shapes
++            n_points = 2000
++            x = np.linspace(-0.25, 0.25, n_points)
++            f_values = np.zeros(n_points)
++            
++            # Create multiple types of quadratic features
++            n_features = 15
++            
++            for i in range(n_features):
++                # Different types of features
++                if i % 3 == 0:  # Sharp peaks
++                    pos = np.random.uniform(-0.23, 0.23)
++                    width = 0.01 + 0.02 * np.random.random()
++                    height = 0.5 + 0.5 * np.random.random()
++                    peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
++                elif i % 3 == 1:  # Wider peaks
++                    pos = np.random.uniform(-0.23, 0.23)
++                    width = 0.03 + 0.04 * np.random.random()
++                    height = 0.3 + 0.4 * np.random.random()
++                    peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
++                else:  # Flatter features
++                    pos = np.random.uniform(-0.23, 0.23)
++                    width = 0.05 + 0.03 * np.random.random()
++                    height = 0.2 + 0.3 * np.random.random() 
++                    peak = height * np.exp(-0.5 * ((x - pos) / width)**2)
++                    
++                f_values += peak
++                
++            # Normalize and smooth
++            f_values = np.maximum(f_values, 0)
++            max_val = np.max(f_values)
++            if max_val > 0:
++                f_values = f_values / (max_val * 1.5)
++                
++            # Apply smoothing
++            if n_points > 100:
++                window = max(3, min(21, n_points // 100))
++                if window % 2 == 0:
++                    window += 1
++                f_values = np.convolve(f_values, np.ones(window)/window, mode='same')
++                
++            f_values = f_values.tolist()
++            
++            # Optimize
++            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(f_values)
++            if norm_1 > 1e-12 and norm_inf > 1e-12:
+                 c2 = norm_2_sq / (norm_1 * norm_inf)
+-                return -c2 if not np.isnan(c2) and not np.isinf(c2) else 0.0
+-            
+-            # Run differential evolution for refinement
+-            bounds = [(0, 1) for _ in range(len(best_f))]
+-            result = differential_evolution(
+-                objective,
+-                bounds=bounds,
+-                maxiter=max_iterations,
+-                popsize=10,
+-                seed=42,
+-                strategy='best1bin'
+-            )
+-            
+-            # Return refined result if it's better
+-            refined_params = result.x
+-            refined_params = np.maximum(refined_params, 0)
+-            refined_c2 = self.evaluate_candidate(refined_params)
+-            
+-            if refined_c2 > self.evaluate_candidate(best_f):
+-                return refined_params.tolist()
+-                
+-        except Exception as e:
+-            warnings.warn(f"Refinement failed: {str(e)}")
+-            
+-        return best_f
+-    
+-    def construct_optimized_function(self, max_time_seconds=85):
+-        """
+-        Main function construction routine with optimized pipeline
+-        """
+-        start_time = time.time()
+-        best_c2 = 0.0
+-        best_f = None
+-        
+-        # Try multiple candidate generations
+-        for attempt in range(5):  # Multiple passes to avoid local optima
+-            if time.time() - start_time > max_time_seconds:
+-                break
+-                
+-            # Generate candidates in parallel
+-            candidates = self.construct_candidates_parallel(n_candidates=15, n_points=1500)
+-            
+-            # Select best among generated candidates
+-            for c2, f_values in candidates:
+                 if c2 > best_c2:
+                     best_c2 = c2
+                     best_f = f_values
+                     
+-            # Early termination if we already have good result
+-            if best_c2 > 0.95:
+-                break
+-                
+-        # Final refinement of the best candidate
+-        if best_f is not None and time.time() - start_time < max_time_seconds * 0.9:
+-            try:
+-                # Increase resolution for final refinement
+-                high_res_f = self.builder.generate_gaussian_peaks(5000)
+-                high_res_c2 = self.evaluate_candidate(high_res_f)
+-                
+-                if high_res_c2 > best_c2:
+-                    best_c2 = high_res_c2
+-                    best_f = high_res_f
+-                    
+-                # Local optimization on the best found function
+-                best_f = self.refine_best_candidate(best_f, max_iterations=20)
+-                
+-            except Exception as e:
+-                warnings.warn(f"Final refinement failed: {str(e)}")
+-        
+-        # Fallback if nothing worked
+-        if best_f is None:
+-            # Basic fallback - uniform random distribution
+-            n_points = np.random.randint(100, 500)
+-            best_f = [np.random.random() * 0.5 for _ in range(n_points)]
+-            
+-        return best_f
+-
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
+-    # Create pipeline instance and run optimization
+-    pipeline = OptimizerPipeline()
+-    return pipeline.construct_optimized_function()
++        except Exception as e:
++            warnings.warn(f"Strategy 2 failed: {str(e)}")
++    
++    # Final fallback if no valid solution
++    if best_f is None:
++        # Simple uniform distribution
++        n_points = 500
++        best_f = [np.random.random() * 0.5 for _ in range(n_points)]
++    
++    return best_f
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

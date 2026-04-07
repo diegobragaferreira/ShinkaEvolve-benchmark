@@ -1,0 +1,315 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from deap import base, creator, tools, algorithms
+from scipy.spatial.distance import cdist
+import math
+from typing import Tuple, List
+import time
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def is_valid_solution(circles: np.ndarray, container_width: float = 1.0, container_height: float = 1.0) -> bool:
+    """Check if all circles are within bounds and non-overlapping."""
+    n = len(circles)
+    
+    # Check if all circles are within container bounds
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
+            return False
+    
+    # Check for overlaps using efficient spatial hashing
+    # For small number of circles, direct comparison is acceptable
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            
+            # Distance between centers
+            dx = x1 - x2
+            dy = y1 - y2
+            distance = math.sqrt(dx*dx + dy*dy)
+            
+            # Circles overlap if distance < sum of radii
+            if distance < r1 + r2:
+                return False
+    
+    return True
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as negative sum of radii (since we want to maximize)"""
+    return -np.sum(circles[:, 2])
+
+def get_spatial_hash_key(x: float, y: float, cell_size: float = 0.1) -> Tuple[int, int]:
+    """Convert continuous coordinates to discrete spatial hash key."""
+    return (int(x // cell_size), int(y // cell_size))
+
+def create_initial_population(n_circles: int, pop_size: int, container_width: float = 1.0, container_height: float = 1.0) -> List[np.ndarray]:
+    """Create initial population with diverse starting configurations."""
+    population = []
+    
+    # Generate diverse initial configurations
+    for _ in range(pop_size):
+        # Method 1: Hexagonal packing approximation
+        circles = generate_hexagonal_packing(n_circles, container_width, container_height)
+        
+        # Add some randomness to avoid local minima
+        for i in range(n_circles):
+            circles[i, 0] += np.random.uniform(-0.05, 0.05)
+            circles[i, 1] += np.random.uniform(-0.05, 0.05)
+            circles[i, 2] += np.random.uniform(-0.02, 0.02)
+        
+        # Ensure all circles are within bounds
+        for i in range(n_circles):
+            circles[i, 0] = max(circles[i, 2], min(container_width - circles[i, 2], circles[i, 0]))
+            circles[i, 1] = max(circles[i, 2], min(container_height - circles[i, 2], circles[i, 1]))
+            circles[i, 2] = max(0.001, min(0.2, circles[i, 2]))  # Limit radii
+        
+        # If invalid, try random generation
+        if not is_valid_solution(circles, container_width, container_height):
+            circles = generate_random_valid_configuration(n_circles, container_width, container_height)
+        
+        population.append(circles.copy())
+    
+    return population
+
+def generate_hexagonal_packing(n_circles: int, width: float = 1.0, height: float = 1.0) -> np.ndarray:
+    """Generate an approximate hexagonal packing."""
+    circles = np.zeros((n_circles, 3))
+    
+    # Calculate approximate circle radius
+    # This is a simplified approach - in practice we'd want a better hex packing algorithm
+    radius = min(width, height) * 0.05
+    
+    # Place in a grid pattern
+    rows = int(height / (radius * 2))
+    cols = int(width / (radius * 2))
+    
+    count = 0
+    for i in range(rows):
+        for j in range(cols):
+            if count >= n_circles:
+                break
+            x = radius + j * radius * 2
+            y = radius + i * radius * 2
+            # Offset odd rows
+            if i % 2 == 1:
+                x += radius
+            circles[count] = [x, y, radius]
+            count += 1
+        if count >= n_circles:
+            break
+    
+    # Fill remaining circles with random positions
+    for i in range(count, n_circles):
+        circles[i] = [
+            np.random.uniform(radius, width - radius),
+            np.random.uniform(radius, height - radius),
+            np.random.uniform(0.01, 0.1)
+        ]
+    
+    return circles
+
+def generate_random_valid_configuration(n_circles: int, width: float = 1.0, height: float = 1.0) -> np.ndarray:
+    """Generate a random valid configuration."""
+    circles = np.zeros((n_circles, 3))
+    
+    attempts = 0
+    max_attempts = 1000
+    
+    while attempts < max_attempts:
+        # Generate random positions and radii
+        for i in range(n_circles):
+            circles[i] = [
+                np.random.uniform(0.01, width - 0.01),
+                np.random.uniform(0.01, height - 0.01),
+                np.random.uniform(0.01, 0.2)
+            ]
+        
+        # If valid, return
+        if is_valid_solution(circles, width, height):
+            return circles
+            
+        attempts += 1
+    
+    # If no valid configuration found, return a basic one
+    return generate_hexagonal_packing(n_circles, width, height)
+
+def mutate_individual(individual: np.ndarray, indpb: float = 0.1, 
+                     container_width: float = 1.0, container_height: float = 1.0) -> np.ndarray:
+    """Mutate an individual with boundary aware constraints."""
+    mutated = individual.copy()
+    
+    # Mutate positions and radii
+    for i in range(len(mutated)):
+        if random.random() < indpb:
+            # Mutate position
+            mutated[i, 0] += np.random.normal(0, 0.02)
+            mutated[i, 1] += np.random.normal(0, 0.02)
+            
+            # Mutate radius
+            mutated[i, 2] += np.random.normal(0, 0.01)
+            
+            # Ensure bounds
+            mutated[i, 0] = max(mutated[i, 2], min(container_width - mutated[i, 2], mutated[i, 0]))
+            mutated[i, 1] = max(mutated[i, 2], min(container_height - mutated[i, 2], mutated[i, 1]))
+            mutated[i, 2] = max(0.001, mutated[i, 2])
+            
+    return mutated
+
+def crossover_individuals(parent1: np.ndarray, parent2: np.ndarray, 
+                         container_width: float = 1.0, container_height: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+    """Perform crossover between two individuals."""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+    
+    # Simple uniform crossover
+    for i in range(len(child1)):
+        if random.random() < 0.5:
+            child1[i], child2[i] = child2[i], child1[i]
+    
+    # Ensure bounds
+    for i in range(len(child1)):
+        child1[i, 0] = max(child1[i, 2], min(container_width - child1[i, 2], child1[i, 0]))
+        child1[i, 1] = max(child1[i, 2], min(container_height - child1[i, 2], child1[i, 1]))
+        child1[i, 2] = max(0.001, child1[i, 2])
+        
+        child2[i, 0] = max(child2[i, 2], min(container_width - child2[i, 2], child2[i, 0]))
+        child2[i, 1] = max(child2[i, 2], min(container_height - child2[i, 2], child2[i, 1]))
+        child2[i, 2] = max(0.001, child2[i, 2])
+    
+    return child1, child2
+
+def local_optimization(circles: np.ndarray, container_width: float = 1.0, container_height: float = 1.0, 
+                      max_iterations: int = 50) -> np.ndarray:
+    """Perform simple local optimization."""
+    current = circles.copy()
+    
+    for _ in range(max_iterations):
+        # Try small random perturbations
+        candidate = current.copy()
+        for i in range(len(candidate)):
+            if random.random() < 0.3:  # 30% chance to modify each circle
+                # Small random movement
+                candidate[i, 0] += np.random.uniform(-0.01, 0.01)
+                candidate[i, 1] += np.random.uniform(-0.01, 0.01)
+                # Adjust radius slightly
+                candidate[i, 2] += np.random.uniform(-0.005, 0.005)
+                
+                # Ensure it stays within bounds
+                candidate[i, 0] = max(candidate[i, 2], min(container_width - candidate[i, 2], candidate[i, 0]))
+                candidate[i, 1] = max(candidate[i, 2], min(container_height - candidate[i, 2], candidate[i, 1]))
+                candidate[i, 2] = max(0.001, candidate[i, 2])
+        
+        # Accept if better or valid
+        if is_valid_solution(candidate, container_width, container_height):
+            # Compare sum of radii
+            if np.sum(candidate[:, 2]) > np.sum(current[:, 2]):
+                current = candidate
+    
+    return current
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    start_time = time.time()
+    
+    # Container dimensions (perimeter = 4, so width + height = 2)
+    container_width = 1.0
+    container_height = 1.0
+    
+    # Evolutionary algorithm setup
+    N_CIRCLES = 21
+    POP_SIZE = 50
+    N_GENERATIONS = 100
+    
+    # Create fitness and individual classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", generate_random_valid_configuration, N_CIRCLES, container_width, container_height)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    # Register evaluation function
+    toolbox.register("evaluate", evaluate_fitness)
+    
+    # Register operators
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population
+    pop = create_initial_population(N_CIRCLES, POP_SIZE, container_width, container_height)
+    
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Replace the evolutionary loop with a simpler but more focused approach
+    # Since we have computational limits, let's focus on quality initial solutions
+    
+    best_individual = None
+    best_fitness = float('-inf')
+    
+    # Local optimization approach: Multiple restarts with good initialization
+    for restart in range(10):
+        # Start with a good initial configuration
+        circles = generate_hexagonal_packing(N_CIRCLES, container_width, container_height)
+        
+        # Apply local search
+        optimized = local_optimization(circles, container_width, container_height, 100)
+        
+        # Check if this is better
+        current_fitness = np.sum(optimized[:, 2])
+        if current_fitness > best_fitness and is_valid_solution(optimized, container_width, container_height):
+            best_fitness = current_fitness
+            best_individual = optimized.copy()
+            
+        # Also try random initialization
+        random_circles = generate_random_valid_configuration(N_CIRCLES, container_width, container_height)
+        optimized_random = local_optimization(random_circles, container_width, container_height, 100)
+        random_fitness = np.sum(optimized_random[:, 2])
+        if random_fitness > best_fitness and is_valid_solution(optimized_random, container_width, container_height):
+            best_fitness = random_fitness
+            best_individual = optimized_random.copy()
+    
+    # Final refinement with more local search if needed
+    if best_individual is not None:
+        final_optimized = local_optimization(best_individual, container_width, container_height, 200)
+        if np.sum(final_optimized[:, 2]) > best_fitness and is_valid_solution(final_optimized, container_width, container_height):
+            best_individual = final_optimized
+    
+    # Ensure validity of result
+    if best_individual is None:
+        # Fallback to a basic configuration
+        best_individual = generate_hexagonal_packing(N_CIRCLES, container_width, container_height)
+    
+    # Final validation
+    if not is_valid_solution(best_individual, container_width, container_height):
+        # Try to fix if invalid
+        best_individual = generate_random_valid_configuration(N_CIRCLES, container_width, container_height)
+    
+    elapsed_time = time.time() - start_time
+    print(f"Optimization completed in {elapsed_time:.2f} seconds")
+    
+    return best_individual
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,329 @@
+<NAME>
+add_gradient_refinement_and_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This edit introduces two key enhancements to improve the optimization process:
+1. Gradient-based refinement step that applies fine-tuning to top-performing individuals
+2. Adaptive mutation scaling that adjusts mutation strength based on population diversity
+
+These modifications aim to exploit local optima more effectively while maintaining global exploration, helping us surpass the benchmark of 1/C₁ > 1/1.5031.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.signal import fftconvolve
+import time
+import random
+import multiprocessing as mp
+from functools import partial
+import copy
+from typing import List, Tuple
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+=======
+import numpy as np
+from scipy.signal import fftconvolve
+import time
+import random
+import multiprocessing as mp
+from functools import partial
+import copy
+from typing import List, Tuple
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate_sequence_cauchy(sequence: List[float], scale: float = 100.0) -> List[float]:
+        """Mutate a sequence with Cauchy noise for heavy-tailed exploration."""
+        mutated = copy.deepcopy(sequence)
+        for i in range(len(mutated)):
+            # Use Cauchy distribution instead of Gaussian for more diverse mutations
+            mutated[i] += np.random.standard_cauchy() * scale
+            mutated[i] = max(0, mutated[i])  # Ensure non-negative
+        return mutated
+=======
+    @staticmethod
+    def mutate_sequence_cauchy(sequence: List[float], scale: float = 100.0) -> List[float]:
+        """Mutate a sequence with Cauchy noise for heavy-tailed exploration."""
+        mutated = copy.deepcopy(sequence)
+        for i in range(len(mutated)):
+            # Use Cauchy distribution instead of Gaussian for more diverse mutations
+            mutated[i] += np.random.standard_cauchy() * scale
+            mutated[i] = max(0, mutated[i])  # Ensure non-negative
+        return mutated
+
+    @staticmethod
+    def gradient_refine(sequence: List[float], steps: int = 30, lr: float = 1e-4) -> List[float]:
+        """Apply gradient-based refinement to improve the sequence."""
+        seq = np.array(sequence, dtype=float)
+        n = len(seq)
+        # Normalize to avoid numerical issues
+        sum_seq = np.sum(seq)
+        if sum_seq < 1e-10:
+            seq += 1e-5
+            sum_seq = np.sum(seq)
+        seq /= sum_seq
+
+        for _ in range(steps):
+            # Compute convolution
+            conv = fftconvolve(seq, seq, mode='full')
+            conv = conv[n-1:2*n-1]
+            max_conv = np.max(conv)
+
+            # Compute gradient estimate using finite differences
+            grad = np.zeros_like(seq)
+            epsilon = 1e-6
+            for i in range(n):
+                # Perturb forward
+                seq_forward = seq.copy()
+                seq_forward[i] += epsilon
+                seq_forward /= np.sum(seq_forward)
+
+                # Perturb backward
+                seq_backward = seq.copy()
+                seq_backward[i] -= epsilon
+                seq_backward /= np.sum(seq_backward)
+
+                # Compute convolution for both perturbed sequences
+                conv_forward = fftconvolve(seq_forward, seq_forward, mode='full')
+                conv_forward = conv_forward[n-1:2*n-1]
+                max_forward = np.max(conv_forward)
+
+                conv_backward = fftconvolve(seq_backward, seq_backward, mode='full')
+                conv_backward = conv_backward[n-1:2*n-1]
+                max_backward = np.max(conv_backward)
+
+                # Central difference gradient estimate
+                grad[i] = (max_forward - max_backward) / (2 * epsilon)
+
+            # Update using gradient ascent
+            seq += lr * grad
+            seq = np.maximum(seq, 0)  # Ensure non-negative
+
+            # Renormalize
+            sum_seq = np.sum(seq)
+            if sum_seq > 0:
+                seq /= sum_seq
+
+        return seq.tolist()
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> List[float]:
+        """Run the adaptive evolutionary optimization process."""
+        start_time = time.time()
+        timeout = 170  # Leave 10 seconds for cleanup
+
+        # Initialize population with multiscale sequences
+        population = [self.generate_multiscale_sequence() for _ in range(self.pop_size)]
+
+        # Evaluate initial population
+        fitnesses = self.evaluate_population_parallel(population)
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        self.best_score = fitnesses[best_idx]
+        self.best_sequence = copy.deepcopy(population[best_idx])
+
+        print(f"Initial best score: {self.best_score:.6f}")
+
+        # Track fitness history for convergence detection
+        fitness_history = [self.best_score]
+        stagnation_counter = 0
+        prev_best_score = self.best_score
+
+        # Begin evolution
+        for gen in range(self.generations):
+            if time.time() - start_time > timeout:
+                break
+
+            # Adaptive population management based on performance
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-6:
+                    # Reduce population size if stagnated
+                    self.pop_size = max(20, int(self.pop_size * 0.9))
+
+            # Selection using tournament selection
+            selected = self.tournament_selection(population, fitnesses)
+
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply Cauchy mutation
+                    child1 = self.mutate_sequence_cauchy(child1)
+                    child2 = self.mutate_sequence_cauchy(child2)
+                    offspring.extend([child1, child2])
+                else:
+                    # Handle odd population size
+                    offspring.append(self.mutate_sequence_cauchy(selected[i]))
+
+            # Keep offspring size consistent
+            offspring = offspring[:self.pop_size]
+
+            # Evaluate offspring
+            offspring_fitnesses = self.evaluate_population_parallel(offspring)
+
+            # Replace population with offspring
+            population = offspring
+            fitnesses = offspring_fitnesses
+
+            # Update best individual
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_score:
+                self.best_score = fitnesses[best_idx]
+                self.best_sequence = copy.deepcopy(population[best_idx])
+                stagnation_counter = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_counter += 1  # Increment if no improvement
+
+            # Update fitness history
+            fitness_history.append(self.best_score)
+            if len(fitness_history) > 10:
+                fitness_history.pop(0)  # Keep only last 10 values
+
+            print(f"Gen {gen}: Best = {self.best_score:.6f}")
+
+            # Adaptive termination check
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-8:
+                    print("Fitness plateau detected, stopping early")
+                    break
+
+                if stagnation_counter > 5:
+                    print("Population converged and stagnated, stopping early")
+                    break
+
+                # Check if we're approaching the time limit
+                if time.time() - start_time > timeout - 5:
+                    print("Approaching time limit, stopping early")
+                    break
+
+        return self.best_sequence
+=======
+    def optimize(self) -> List[float]:
+        """Run the adaptive evolutionary optimization process."""
+        start_time = time.time()
+        timeout = 170  # Leave 10 seconds for cleanup
+
+        # Initialize population with multiscale sequences
+        population = [self.generate_multiscale_sequence() for _ in range(self.pop_size)]
+
+        # Evaluate initial population
+        fitnesses = self.evaluate_population_parallel(population)
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        self.best_score = fitnesses[best_idx]
+        self.best_sequence = copy.deepcopy(population[best_idx])
+
+        print(f"Initial best score: {self.best_score:.6f}")
+
+        # Track fitness history for convergence detection
+        fitness_history = [self.best_score]
+        stagnation_counter = 0
+        prev_best_score = self.best_score
+
+        # Begin evolution
+        for gen in range(self.generations):
+            if time.time() - start_time > timeout:
+                break
+
+            # Compute population diversity for adaptive control
+            diversity = self.compute_diversity(fitnesses)
+
+            # Adaptive population management based on performance
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-6:
+                    # Reduce population size if stagnated
+                    self.pop_size = max(20, int(self.pop_size * 0.9))
+
+            # Selection using tournament selection
+            selected = self.tournament_selection(population, fitnesses)
+
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply Cauchy mutation with adaptive scale
+                    mutation_scale = 100.0 * (1.0 + diversity)  # Scale increases with diversity
+                    child1 = self.mutate_sequence_cauchy(child1, scale=mutation_scale)
+                    child2 = self.mutate_sequence_cauchy(child2, scale=mutation_scale)
+                    offspring.extend([child1, child2])
+                else:
+                    # Handle odd population size
+                    mutation_scale = 100.0 * (1.0 + diversity)
+                    offspring.append(self.mutate_sequence_cauchy(selected[i], scale=mutation_scale))
+
+            # Keep offspring size consistent
+            offspring = offspring[:self.pop_size]
+
+            # Apply gradient refinement to top individuals
+            top_indices = np.argsort(fitnesses)[-min(10, len(offspring)):][::-1]
+            refine_count = max(1, int(0.2 * len(top_indices)))  # 20% of top individuals
+            for i in range(refine_count):
+                idx = top_indices[i]
+                offspring[idx] = self.gradient_refine(offspring[idx])
+
+            # Evaluate offspring
+            offspring_fitnesses = self.evaluate_population_parallel(offspring)
+
+            # Replace population with offspring
+            population = offspring
+            fitnesses = offspring_fitnesses
+
+            # Update best individual
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_score:
+                self.best_score = fitnesses[best_idx]
+                self.best_sequence = copy.deepcopy(population[best_idx])
+                stagnation_counter = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_counter += 1  # Increment if no improvement
+
+            # Update fitness history
+            fitness_history.append(self.best_score)
+            if len(fitness_history) > 10:
+                fitness_history.pop(0)  # Keep only last 10 values
+
+            print(f"Gen {gen}: Best = {self.best_score:.6f}, Diversity = {diversity:.6f}")
+
+            # Adaptive termination check
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-8:
+                    print("Fitness plateau detected, stopping early")
+                    break
+
+                if stagnation_counter > 5:
+                    print("Population converged and stagnated, stopping early")
+                    break
+
+                # Check if we're approaching the time limit
+                if time.time() - start_time > timeout - 5:
+                    print("Approaching time limit, stopping early")
+                    break
+
+        return self.best_sequence
+>>>>>>> REPLACE

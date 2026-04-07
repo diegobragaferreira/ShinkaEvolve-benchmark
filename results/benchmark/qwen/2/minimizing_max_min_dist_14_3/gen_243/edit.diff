@@ -1,0 +1,603 @@
+--- a/original.py
++++ b/original.py
+@@ -1,319 +1,301 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, cdist
+ import math
+ import random
+ import time
++from typing import Tuple, Optional, List
++
++class PointGenerator:
++    """Handles generation and initialization of points on a sphere."""
++    
++    @staticmethod
++    def fibonacci_sphere(n: int, seed: int = 42) -> np.ndarray:
++        """Generate n points on a sphere using Fibonacci spiral method."""
++        np.random.seed(seed)
++        points = []
++        phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
++
++        for i in range(n):
++            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
++            radius = math.sqrt(1 - y * y)  # radius at y
++
++            theta = phi * i  # golden angle increment
++
++            x = math.cos(theta) * radius
++            z = math.sin(theta) * radius
++
++            points.append([x, y, z])
++
++        return np.array(points)
++    
++    @classmethod
++    def initialize_points(cls, n: int, seed: int = 42) -> np.ndarray:
++        """Initialize points using Fibonacci sphere and perturbation."""
++        # Start with Fibonacci sphere points
++        points = cls.fibonacci_sphere(n, seed)
++
++        # Add some randomness to avoid perfect symmetry issues
++        np.random.seed(seed)
++        points += 0.01 * np.random.randn(n, 3)
++
++        # Normalize to unit sphere
++        norms = np.linalg.norm(points, axis=1)
++        points = points / norms[:, np.newaxis]
++
++        return points
++
++class Evaluator:
++    """Handles evaluation of point configurations and distance computations."""
++    
++    @staticmethod
++    def compute_min_max_ratio(points: np.ndarray) -> Tuple[float, float]:
++        """Compute the ratio of minimum to maximum distances efficiently."""
++        if len(points) < 2:
++            return 0.0, 0.0
++        
++        # Use pdist for efficient pairwise distance calculation
++        distances = pdist(points)
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max == 0:
++            return 0.0, 0.0
++        
++        return d_min / d_max, d_min
++
++class Optimizer:
++    """Handles the optimization process with enhanced strategies."""
++    
++    def __init__(self, max_iterations: int = 20000, initial_temp: float = 1.0, 
++                 min_temp: float = 1e-12, cooling_rate: float = 0.9995):
++        self.max_iterations = max_iterations
++        self.initial_temp = initial_temp
++        self.min_temp = min_temp
++        self.cooling_rate = cooling_rate
++        self.patience = 1000
++        self.improvement_window = 50
++        
++    def _compute_repulsion_force(self, points: np.ndarray, idx: int, 
++                               avg_distance: float, min_distance: float) -> np.ndarray:
++        """Compute repulsion force from close neighbors."""
++        repulsion = np.zeros(3)
++        threshold = avg_distance * 0.7
++        
++        for i in range(len(points)):
++            if i != idx:
++                diff = points[idx] - points[i]
++                dist = np.linalg.norm(diff)
++                if dist > 0 and dist < threshold:
++                    # Inverse distance weighted repulsion
++                    repulsion += diff / dist * (1.0 / dist**2)
++        
++        return repulsion
++    
++    def _compute_attract_force(self, points: np.ndarray, idx: int, 
++                             avg_distance: float, max_distance: float) -> np.ndarray:
++        """Compute attraction force toward average position."""
++        attraction = np.mean(points, axis=0) - points[idx]
++        attraction_norm = np.linalg.norm(attraction)
++        
++        if attraction_norm > 0:
++            attraction = attraction / attraction_norm
++            return attraction
++        return np.zeros(3)
++    
++    def _perturb_point_guided(self, points: np.ndarray, idx: int, 
++                            current_ratio: float, temp: float, 
++                            iteration: int = 0) -> np.ndarray:
++        """Enhanced perturb point with geometric guidance."""
++        try:
++            # Get distances to all other points
++            distances = cdist([points[idx]], points)[0]
++            distances = distances[distances > 0]  # Remove self-distance
++            
++            if len(distances) == 0:
++                # Fallback to random perturbation
++                direction = np.random.randn(3)
++                direction /= np.linalg.norm(direction)
++                return points[idx] + 0.02 * temp * direction
++                
++            avg_distance = np.mean(distances)
++            min_distance = np.min(distances)
++            max_distance = np.max(distances)
++            
++            # Analyze the point's local geometry
++            if min_distance < avg_distance * 0.4:
++                # Compute repulsion force from close neighbors
++                repulsion = self._compute_repulsion_force(points, idx, avg_distance, min_distance)
++                
++                # If there's repulsion, normalize and apply
++                if np.linalg.norm(repulsion) > 0:
++                    repulsion = repulsion / np.linalg.norm(repulsion)
++                    # Magnitude depends on how close it is
++                    magnitude = 0.05 * (1.0 - min_distance / avg_distance) * temp
++                    return points[idx] + repulsion * magnitude
++                else:
++                    # Fallback to random perturbation
++                    direction = np.random.randn(3)
++                    direction /= np.linalg.norm(direction)
++                    return points[idx] + 0.02 * temp * direction
++                    
++            elif max_distance > avg_distance * 1.5:
++                # Compute attraction toward average position
++                attraction = self._compute_attract_force(points, idx, avg_distance, max_distance)
++                attraction_norm = np.linalg.norm(attraction)
++                if attraction_norm > 0:
++                    # Magnitude inversely related to distance from center
++                    center_distance = np.linalg.norm(points[idx])
++                    magnitude = 0.01 * (1.0 - center_distance * 0.5) * temp
++                    return points[idx] - attraction * magnitude
++                else:
++                    # Random perturbation
++                    direction = np.random.randn(3)
++                    direction /= np.linalg.norm(direction)
++                    return points[idx] + 0.01 * temp * direction
++                    
++            else:
++                # Moderate distances - small adjustment
++                direction = np.random.randn(3)
++                direction /= np.linalg.norm(direction)
++                # Magnitude based on how balanced the distances are
++                balance_score = abs(min_distance - avg_distance) / avg_distance + \
++                               abs(max_distance - avg_distance) / avg_distance
++                magnitude = 0.01 * (1.0 - balance_score * 0.5) * temp
++                return points[idx] + magnitude * direction
++                
++        except Exception:
++            # Fallback to simple random perturbation
++            direction = np.random.randn(3)
++            direction /= np.linalg.norm(direction)
++            return points[idx] + 0.01 * temp * direction
++    
++    def _adaptive_cooling(self, temperature: float, iteration: int,
++                         last_improvement: int, recent_ratios: List[float]) -> float:
++        """Apply adaptive cooling based on performance trends."""
++        # Check recent improvement
++        if len(recent_ratios) >= self.improvement_window:
++            recent_change = recent_ratios[-1] - recent_ratios[-self.improvement_window]
++            if recent_change < 1e-10:
++                # Very slow progress, increase cooling rate
++                return max(self.min_temp, temperature * 0.98)
++            elif recent_change > 1e-6:
++                # Fast progress, decrease cooling rate
++                return max(self.min_temp, temperature * 0.995)
++        
++        # Check for stagnation
++        if iteration - last_improvement > self.patience:
++            # No improvement for a while, increase cooling rate
++            return max(self.min_temp, temperature * 0.95)
++            
++        # Normal cooling
++        return max(self.min_temp, temperature * self.cooling_rate)
++    
++    def _optimize_single(self, initial_points: np.ndarray) -> Tuple[np.ndarray, float]:
++        """Run simulated annealing optimization for one instance."""
++        points = initial_points.copy()
++        current_ratio, _ = Evaluator.compute_min_max_ratio(points)
++        
++        T = self.initial_temp
++        best_points = points.copy()
++        best_ratio = current_ratio
++        last_improvement = 0
++        iteration = 0
++        recent_ratios = []
++        
++        # Main optimization loop
++        while iteration < self.max_iterations and T > self.min_temp:
++            # Adaptive cooling
++            T = self._adaptive_cooling(T, iteration, last_improvement, recent_ratios)
++            
++            # Select random point to perturb
++            point_to_move = random.randint(0, len(points) - 1)
++            
++            # Create new candidate point with guided perturbation
++            new_points = points.copy()
++            new_points[point_to_move] = self._perturb_point_guided(
++                points, point_to_move, current_ratio, T, iteration)
++            
++            # Project back onto sphere
++            norm = np.linalg.norm(new_points[point_to_move])
++            if norm > 0:
++                new_points[point_to_move] = new_points[point_to_move] / norm
++            
++            # Compute new ratio
++            new_ratio, _ = Evaluator.compute_min_max_ratio(new_points)
++            
++            # Accept or reject based on Metropolis criterion
++            if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
++                points = new_points
++                current_ratio = new_ratio
++                
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++                    last_improvement = iteration
++            else:
++                # Revert change
++                pass  # points unchanged
++            
++            # Track recent ratios for adaptive cooling
++            recent_ratios.append(current_ratio)
++            if len(recent_ratios) > 100:
++                recent_ratios.pop(0)
++                
++            iteration += 1
++            
++            # Early stopping
++            if iteration - last_improvement > self.patience * 2:
++                break
++        
++        return best_points, best_ratio
++    
++    def optimize_multi_start(self, initial_points: np.ndarray, 
++                           num_starts: int = 5) -> Tuple[np.ndarray, float]:
++        """Run multiple optimization instances to find better solutions."""
++        best_points = None
++        best_ratio = 0.0
++        
++        for start in range(num_starts):
++            # Use different random seed for each start
++            np.random.seed(start * 1000 + 42)
++            
++            # Create fresh initial points for this run
++            if start == 0:
++                # First start with provided points
++                points = initial_points.copy()
++            else:
++                # Generate new initialization with different seed
++                points = PointGenerator.initialize_points(14, start * 1000 + 42)
++            
++            # Run optimization for this start
++            current_points, current_ratio = self._optimize_single(points)
++            
++            if current_ratio > best_ratio:
++                best_ratio = current_ratio
++                best_points = current_points.copy()
++        
++        return best_points, best_ratio
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     np.random.seed(42)
+     
+-    # Multi-phase initialization strategy
+-    initial_points = generate_multi_resolution_initialization()
+-    
+-    # Advanced optimization with progressive refinement
+-    best_points, best_ratio = optimize_with_progressive_refinement(initial_points)
++    # Initialize components
++    generator = PointGenerator()
++    optimizer = Optimizer()
++    
++    # Generate initial points using Fibonacci sphere
++    initial_points = generator.initialize_points(14)
++    
++    # Optimize using multi-start simulated annealing
++    best_points, _ = optimizer.optimize_multi_start(initial_points)
+     
+     return best_points
+ 
+-def generate_multi_resolution_initialization():
+-    """Generate diverse initial configurations using multiple methods"""
+-    # Phase 1: Fibonacci sphere initialization
+-    fib_points = fibonacci_sphere(14)
+-    
+-    # Phase 2: Icosahedral-inspired arrangement
+-    ico_points = generate_icosahedral_points()
+-    
+-    # Phase 3: Hybrid combination with more sophisticated mixing
+-    # Use weighted average with different coefficients
+-    mixed_points = 0.7 * fib_points + 0.3 * ico_points
+-    
+-    # Normalize to unit sphere
+-    norms = np.linalg.norm(mixed_points, axis=1)
+-    mixed_points = mixed_points / norms[:, np.newaxis]
+-    
+-    # Add slight random perturbations to ensure diversity
+-    noise = np.random.normal(0, 0.01, (14, 3))
+-    mixed_points += noise
+-    
+-    # Normalize again
+-    norms = np.linalg.norm(mixed_points, axis=1)
+-    mixed_points = mixed_points / norms[:, np.newaxis]
+-    
+-    return mixed_points
+-
+-def fibonacci_sphere(n):
+-    """Generate points on sphere using Fibonacci spiral method"""
+-    points = []
+-    phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
+-    
+-    for i in range(n):
+-        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+-        radius = math.sqrt(1 - y * y)  # radius at y
+-        
+-        theta = phi * i  # golden angle increment
+-        
+-        x = math.cos(theta) * radius
+-        z = math.sin(theta) * radius
+-        
+-        points.append([x, y, z])
+-    
+-    return np.array(points)
+-
+-def generate_icosahedral_points():
+-    """Generate points arranged like an icosahedron for better symmetry"""
+-    # Icosahedron vertices scaled to unit sphere
+-    phi = (1 + math.sqrt(5)) / 2  # golden ratio
+-    points = [
+-        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+-        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+-        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+-    ]
+-    
+-    # Convert to numpy array and normalize
+-    points = np.array(points)
+-    norms = np.linalg.norm(points, axis=1)
+-    points = points / norms[:, np.newaxis]
+-    
+-    # We need 14 points, so add two more from edge midpoints
+-    # For simplicity, we'll take the first two points and create additional ones
+-    # by averaging pairs and normalizing
+-    additional_points = []
+-    for i in range(0, len(points), 2):
+-        if len(additional_points) < 2:
+-            mid = (points[i] + points[i+1]) / 2
+-            norm = np.linalg.norm(mid)
+-            if norm > 0:
+-                additional_points.append(mid / norm)
+-    
+-    # Combine all points
+-    all_points = np.vstack([points[:12], additional_points])
+-    
+-    # Ensure exactly 14 points by padding or truncating
+-    if len(all_points) < 14:
+-        # Fill with random points on sphere
+-        extra_points = fibonacci_sphere(14 - len(all_points))
+-        all_points = np.vstack([all_points, extra_points])
+-    elif len(all_points) > 14:
+-        all_points = all_points[:14]
+-        
+-    return all_points
+-
+-def compute_min_max_ratio(points):
+-    """Compute the ratio of minimum to maximum pairwise distances efficiently"""
+-    if len(points) < 2:
+-        return 0.0, 0.0
+-    
+-    # Use pdist for efficient pairwise distance calculation
+-    distances = pdist(points)
+-    d_min = np.min(distances)
+-    d_max = np.max(distances)
+-    
+-    if d_max == 0:
+-        return 0.0, 0.0
+-    
+-    return d_min / d_max, d_min
+-
+-def compute_targeted_directional_perturbation(points, point_idx, current_ratio, temp):
+-    """Compute a directional perturbation based on geometric analysis and current temperature"""
+-    try:
+-        # Get distances to all other points
+-        distances = cdist([points[point_idx]], points)[0]
+-        distances = distances[distances > 0]  # Remove self-distance
+-        
+-        if len(distances) == 0:
+-            # No neighbors, random perturbation
+-            direction = np.random.randn(3)
+-            direction /= np.linalg.norm(direction)
+-            magnitude = 0.02 * temp
+-            return direction * magnitude
+-            
+-        avg_distance = np.mean(distances)
+-        min_distance = np.min(distances)
+-        max_distance = np.max(distances)
+-        
+-        # Analyze the point's local geometry
+-        # If point is too close to others, push it away
+-        if min_distance < avg_distance * 0.4:
+-            # Compute repulsion force from close neighbors
+-            repulsion = np.zeros(3)
+-            for i in range(len(points)):
+-                if i != point_idx:
+-                    diff = points[point_idx] - points[i]
+-                    dist = np.linalg.norm(diff)
+-                    if dist > 0 and dist < avg_distance * 0.7:
+-                        # Inverse distance weighted repulsion
+-                        repulsion += diff / dist * (1.0 / dist**2)
+-            
+-            # If there's repulsion, normalize and apply
+-            if np.linalg.norm(repulsion) > 0:
+-                repulsion = repulsion / np.linalg.norm(repulsion)
+-                # Magnitude depends on how close it is
+-                magnitude = 0.05 * (1.0 - min_distance / avg_distance) * temp
+-                return repulsion * magnitude
+-            else:
+-                # Fallback to random perturbation
+-                direction = np.random.randn(3)
+-                direction /= np.linalg.norm(direction)
+-                return direction * 0.02 * temp
+-                
+-        elif max_distance > avg_distance * 1.5:
+-            # If point is far from others, maybe pull it closer to balance
+-            # Compute attraction toward average position
+-            attraction = np.mean(points, axis=0) - points[point_idx]
+-            attraction_norm = np.linalg.norm(attraction)
+-            if attraction_norm > 0:
+-                attraction = attraction / attraction_norm
+-                # Magnitude inversely related to distance from center
+-                center_distance = np.linalg.norm(points[point_idx])
+-                magnitude = 0.01 * (1.0 - center_distance * 0.5) * temp
+-                return -attraction * magnitude
+-            else:
+-                # Random perturbation
+-                direction = np.random.randn(3)
+-                direction /= np.linalg.norm(direction)
+-                return direction * 0.01 * temp
+-                
+-        else:
+-            # Moderate distances - small adjustment
+-            direction = np.random.randn(3)
+-            direction /= np.linalg.norm(direction)
+-            # Magnitude based on how balanced the distances are
+-            balance_score = abs(min_distance - avg_distance) / avg_distance + \
+-                           abs(max_distance - avg_distance) / avg_distance
+-            magnitude = 0.01 * (1.0 - balance_score * 0.5) * temp
+-            return direction * magnitude
+-            
+-    except Exception:
+-        # Fallback to simple random perturbation
+-        direction = np.random.randn(3)
+-        direction /= np.linalg.norm(direction)
+-        return direction * 0.01 * temp
+-
+-def optimize_with_progressive_refinement(initial_points, max_time=360):
+-    """Optimize using progressive refinement approach with improved annealing"""
+-    points = initial_points.copy()
+-    current_ratio, min_dist = compute_min_max_ratio(points)
+-    
+-    # Progressive phases: coarse, medium, fine
+-    max_iter_per_phase = 100000
+-    total_iterations = 0
+-    
+-    # Parameters for simulated annealing
+-    temp = 1.0
+-    min_temp = 1e-12
+-    base_cooling_rate = 0.9995
+-    max_total_iter = 400000
+-    
+-    # Track best solution
+-    best_points = points.copy()
+-    best_ratio = current_ratio
+-    best_min_dist = min_dist
+-    
+-    start_time = time.time()
+-    iter_count = 0
+-    
+-    # Track recent ratios for adaptive cooling
+-    recent_ratios = []
+-    max_recent = 20
+-    
+-    # Progressive refinement phases with dynamic parameters
+-    phases = [
+-        {"temp": 1.0, "cooling_rate": 0.9995, "perturb_factor": 1.0, "description": "coarse"},
+-        {"temp": 0.7, "cooling_rate": 0.9997, "perturb_factor": 0.7, "description": "medium"},
+-        {"temp": 0.3, "cooling_rate": 0.9999, "perturb_factor": 0.5, "description": "fine"}
+-    ]
+-    
+-    patience_counter = 0
+-    patience_limit = 2000
+-    
+-    while temp > min_temp and total_iterations < max_total_iter and time.time() - start_time < max_time:
+-        # Determine current phase based on iteration count and cooling
+-        if temp > 0.7:
+-            phase = 0
+-        elif temp > 0.3:
+-            phase = 1
+-        else:
+-            phase = 2
+-            
+-        current_phase = phases[phase]
+-        
+-        # Select point to move (random selection for now)
+-        point_to_move = random.randint(0, len(points) - 1)
+-        
+-        # Create new candidate point
+-        new_points = points.copy()
+-        
+-        # Apply targeted directional perturbation
+-        perturbation = compute_targeted_directional_perturbation(
+-            points, point_to_move, current_ratio, temp)
+-        
+-        new_points[point_to_move] += perturbation * current_phase["perturb_factor"]
+-        
+-        # Project back onto sphere
+-        norm = np.linalg.norm(new_points[point_to_move])
+-        if norm > 0:
+-            new_points[point_to_move] = new_points[point_to_move] / norm
+-        
+-        # Compute new ratio
+-        new_ratio, new_min_dist = compute_min_max_ratio(new_points)
+-        
+-        # Accept or reject based on Metropolis criterion
+-        if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / temp):
+-            points = new_points
+-            current_ratio = new_ratio
+-            min_dist = new_min_dist
+-            
+-            # Update best solution if improved
+-            if new_ratio > best_ratio:
+-                best_points = new_points.copy()
+-                best_ratio = new_ratio
+-                best_min_dist = new_min_dist
+-                patience_counter = 0  # Reset patience counter when improvement found
+-        else:
+-            patience_counter += 1  # Increment patience counter when no improvement
+-            
+-        # Adaptive cooling based on recent performance
+-        recent_ratios.append(current_ratio)
+-        if len(recent_ratios) > max_recent:
+-            recent_ratios.pop(0)
+-            
+-        # Adjust cooling rate based on recent progress
+-        cooling_rate = current_phase["cooling_rate"]
+-        if len(recent_ratios) >= 5:
+-            recent_improvement = recent_ratios[-1] - recent_ratios[0]
+-            if recent_improvement < 1e-8:
+-                # Very slow progress, cool faster
+-                cooling_rate = current_phase["cooling_rate"] * 1.05
+-            elif recent_improvement > 1e-5:
+-                # Fast progress, cool slower (but not in final phase)
+-                cooling_rate = current_phase["cooling_rate"] * 0.98
+-                
+-        # Apply temperature cooling
+-        temp *= cooling_rate
+-        iter_count += 1
+-        total_iterations += 1
+-        
+-        # Early stopping if no improvement for a long time
+-        if patience_counter > patience_limit:
+-            break
+-            
+-        # Periodic restart if stuck
+-        if iter_count % 5000 == 0 and iter_count > 0:
+-            # Restart with better configuration if needed
+-            current_ratio, _ = compute_min_max_ratio(points)
+-            if current_ratio < best_ratio * 0.99:
+-                # Reset to best solution so far
+-                points = best_points.copy()
+-                temp = min(temp * 1.5, 1.0)  # Increase temperature slightly
+-                patience_counter = 0
+-    
+-    return best_points, best_ratio
+-
+ # EVOLVE-BLOCK-END

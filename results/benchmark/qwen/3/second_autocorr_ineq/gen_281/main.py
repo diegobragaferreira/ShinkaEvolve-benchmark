@@ -1,0 +1,279 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+import math
+from numba import njit
+from sklearn.cluster import KMeans
+from scipy import fft
+
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using FFT for efficiency
+    # Pad to power of 2 for FFT efficiency
+    padded_length = 2**(int(np.log2(2*n_steps - 1)) + 1)
+
+    # Zero-pad the input
+    f_padded = np.zeros(padded_length)
+    f_padded[:n_steps] = f_values
+
+    # FFT-based convolution: convolve f with itself
+    f_fft = fft.fft(f_padded)
+    g_fft = f_fft * f_fft.conj()  # Element-wise multiplication in frequency domain
+    g = fft.ifft(g_fft).real
+
+    # Extract the valid convolution part (first 2*n_steps-1 elements)
+    g_valid = g[:2*n_steps-1]
+
+    # Compute norms using piecewise linear integration
+    # ||g||₂² using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g_valid)-1):
+        g2_sq += (dx/3) * (g_valid[i]**2 + g_valid[i]*g_valid[i+1] + g_valid[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g_valid)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g_valid))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2_numba(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+
+def compute_convolution_norms(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    """
+    return compute_convolution_norms_numba(f_values, domain_length)
+
+def compute_c2(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞)"""
+    return compute_c2_numba(f_values)
+
+def generate_multiscale_gaussian_initial_function(n_steps):
+    """
+    Generate an initial function using multi-scale Gaussian pattern construction.
+
+    This creates a structured pattern with multiple Gaussian bumps at different scales
+    to encourage good convolution behavior across various spatial frequencies.
+    """
+    # Create base function with multi-scale Gaussian components
+    f_values = np.zeros(n_steps)
+
+    # Define multiple scales of Gaussian bumps
+    scales = [n_steps // 20, n_steps // 15, n_steps // 10, n_steps // 8]
+    centers = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+
+    # Create Gaussian bumps at different scales and positions
+    for scale in scales:
+        for center in centers:
+            # Create Gaussian bump
+            x = np.arange(n_steps)
+            gauss = np.exp(-0.5 * ((x - center) / scale) ** 2)
+            f_values += gauss * np.random.uniform(0.5, 1.5)  # Random amplitude
+
+    # Add some additional structured variation
+    # Create a base pattern that encourages uniformity in convolution
+    base_pattern = np.sin(np.linspace(0, 4*np.pi, n_steps)) * 0.3 + 0.7
+    f_values += base_pattern * 0.5
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to control the overall magnitude
+    total = np.sum(f_values)
+    if total > 0:
+        f_values = f_values / total * 5.0
+
+    return f_values.tolist()
+
+def adaptive_evolutionary_optimization():
+    """Main optimization routine using adaptive evolutionary strategy"""
+    n_steps = 1000  # Using larger number of steps for better resolution
+
+    # Generate diverse initial population
+    pop_size = 50
+    population = []
+    for _ in range(pop_size):
+        # Mix of mult-scale Gaussian and random patterns
+        if np.random.random() < 0.7:
+            individual = generate_multiscale_gaussian_initial_function(n_steps)
+        else:
+            individual = np.random.random(n_steps).tolist()
+
+        # Ensure non-negativity and reasonable scaling
+        individual = [max(0, x) for x in individual]
+        # Normalize to avoid extremely large peaks
+        total = sum(individual)
+        if total > 0:
+            individual = [x / total * 10 for x in individual]
+
+        population.append(individual)
+
+    # Track best solution
+    best_individual = None
+    best_c2 = -1
+    generation = 0
+    max_generations = 30  # Limit to keep within time constraints
+
+    # Adaptive parameters
+    mutation_rate = 0.3
+    crossover_rate = 0.8
+    elite_count = 5
+
+    # Evolution loop
+    for generation in range(max_generations):
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            c2 = compute_c2(individual)
+            fitness_scores.append(c2)
+            if c2 > best_c2:
+                best_c2 = c2
+                best_individual = individual.copy()
+
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+
+        # Print progress every few generations
+        if generation % 5 == 0:
+            print(f"Generation {generation}: Best C2 = {best_c2:.6f}")
+
+        # Create new population
+        new_population = []
+
+        # Elitism: keep best individuals
+        for i in range(elite_count):
+            new_population.append(sorted_population[i].copy())
+
+        # Generate offspring through crossover and mutation
+        while len(new_population) < pop_size:
+            # Tournament selection for parents
+            parent1 = tournament_selection(sorted_population, sorted_fitness, 3)
+            parent2 = tournament_selection(sorted_population, sorted_fitness, 3)
+
+            # Crossover
+            if np.random.random() < crossover_rate:
+                child1, child2 = uniform_crossover(parent1, parent2)
+            else:
+                child1, child2 = parent1.copy(), parent2.copy()
+
+            # Mutation
+            mutate_individual(child1, mutation_rate)
+            mutate_individual(child2, mutation_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:pop_size]
+
+        # Adapt mutation rate: more sophisticated adaptation based on fitness variance
+        fitness_variance = np.var(sorted_fitness)
+        if fitness_variance < 0.001 and generation > 10:
+            # If fitness is not varying much, increase mutation to escape local optima
+            mutation_rate = min(0.5, mutation_rate * 1.2)
+        else:
+            # Otherwise, decrease mutation to fine-tune
+            mutation_rate = max(0.05, mutation_rate * 0.97)
+
+        # Diversity check
+        if generation > 5 and generation % 3 == 0:
+            # Check if population has converged too much
+            diversity = calculate_population_diversity(population)
+            if diversity < 0.01:  # Low diversity
+                # Introduce some random diversity
+                for i in range(min(5, len(population))):
+                    population[i] = construct_geometric_initial_function(n_steps)
+
+    return best_individual
+
+def tournament_selection(population, fitness_scores, tournament_size):
+    """Select an individual using tournament selection"""
+    tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitness)]
+    return population[winner_index].copy()
+
+def uniform_crossover(parent1, parent2):
+    """Perform uniform crossover between two parents"""
+    child1 = []
+    child2 = []
+    for i in range(len(parent1)):
+        if np.random.random() < 0.5:
+            child1.append(parent1[i])
+            child2.append(parent2[i])
+        else:
+            child1.append(parent2[i])
+            child2.append(parent1[i])
+    return child1, child2
+
+def mutate_individual(individual, mutation_rate):
+    """Mutate an individual with given probability"""
+    for i in range(len(individual)):
+        if np.random.random() < mutation_rate:
+            # Gaussian mutation with adaptive strength
+            mutation_strength = 0.1 * individual[i] if individual[i] > 0 else 0.1
+            individual[i] = max(0, individual[i] + np.random.normal(0, mutation_strength))
+
+def calculate_population_diversity(population):
+    """Calculate diversity measure of population"""
+    if len(population) < 2:
+        return 0
+    # Calculate pairwise distances between individuals
+    vectors = np.array(population)
+    distances = pdist(vectors, metric='euclidean')
+    return np.mean(distances) / np.std(distances) if np.std(distances) > 0 else 0
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    np.random.seed(42)  # For reproducibility
+
+    # Try adaptive evolutionary optimization first
+    try:
+        result = adaptive_evolutionary_optimization()
+        if result is not None:
+            return result
+    except Exception as e:
+        print(f"Evolutionary optimization failed: {e}")
+
+    # Fall back to simpler approach if evolutionary optimization fails
+    n_steps = 500
+
+    # Use constructed function with multi-scale Gaussian pattern
+    f_values = generate_multiscale_gaussian_initial_function(n_steps)
+
+    # Normalize
+    total = sum(f_values)
+    if total > 0:
+        f_values = [x / total * 10 for x in f_values]
+
+    return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

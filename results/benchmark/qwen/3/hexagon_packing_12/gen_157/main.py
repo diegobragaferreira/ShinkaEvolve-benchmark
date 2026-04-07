@@ -1,0 +1,202 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+
+
+def create_hexagon(center, side_length, rotation_degrees):
+    """Create a regular hexagon as a shapely polygon."""
+    angle_rad = np.radians(rotation_degrees)
+    # Vertices of a regular hexagon with given side length
+    vertices = []
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        x = center[0] + side_length * np.cos(angle)
+        y = center[1] + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return Polygon(vertices)
+
+
+def compute_hexagon_vertices(center, side_length, rotation_degrees):
+    """Compute vertices of a regular hexagon."""
+    angle_rad = np.radians(rotation_degrees)
+    vertices = []
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        x = center[0] + side_length * np.cos(angle)
+        y = center[1] + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+
+def check_containment(hexagon, outer_hexagon):
+    """Check if hexagon is fully contained within outer hexagon."""
+    return outer_hexagon.contains(hexagon)
+
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap."""
+    return hex1.intersects(hex2)
+
+
+def evaluate_configuration(params, side_length=1.0):
+    """Evaluate a configuration of 12 hexagons and return penalty if constraints violated."""
+    # Parse parameters: 12 hexagons each with (x,y,angle)
+    hex_params = params.reshape(-1, 3)
+
+    # Create all hexagon objects
+    hexagons = []
+    for i in range(12):
+        center = (hex_params[i][0], hex_params[i][1])
+        angle = hex_params[i][2]
+        hexagon = create_hexagon(center, side_length, angle)
+        hexagons.append(hexagon)
+
+    # Check for overlaps between any pair of hexagons
+    for i in range(12):
+        for j in range(i+1, 12):
+            if check_overlap(hexagons[i], hexagons[j]):
+                return 1e10  # Large penalty for overlap
+
+    # Find the bounding box of all hexagons to determine outer hexagon size
+    all_points = []
+    for hexagon in hexagons:
+        all_points.extend(list(hexagon.exterior.coords))
+
+    if len(all_points) == 0:
+        return 1e10
+
+    # Calculate min/max coordinates
+    xs = [p[0] for p in all_points]
+    ys = [p[1] for p in all_points]
+
+    # The outer hexagon needs to be large enough to contain all inner hexagons
+    # We'll estimate the maximum distance from center to any vertex
+    max_dist = max(np.sqrt(x*x + y*y) for x, y in zip(xs, ys))
+
+    # For a regular hexagon, the side length is approximately max_dist / sqrt(3)
+    outer_side_length = max_dist / np.sqrt(3) * 2  # multiply by 2 because we're measuring from center
+
+    return outer_side_length
+
+
+def get_symmetric_initial_configs():
+    """Generate multiple symmetric initial configurations."""
+    configs = []
+
+    # Configuration 1: Classic 2-ring arrangement
+    config1 = np.array([
+        [0.0, 0.0, 0],           # Center
+        [0.0, 2.0, 0],           # Top
+        [1.732050808, 1.0, 0],   # Top right
+        [1.732050808, -1.0, 0],  # Bottom right
+        [0.0, -2.0, 0],          # Bottom
+        [-1.732050808, -1.0, 0], # Bottom left
+        [-1.732050808, 1.0, 0],  # Top left
+        [3.464101616, 2.0, 0],   # Far top right
+        [3.464101616, -2.0, 0],  # Far bottom right
+        [-3.464101616, -2.0, 0], # Far bottom left
+        [-3.464101616, 2.0, 0],  # Far top left
+        [0.0, -4.0, 0],          # Far bottom
+    ], dtype=float)
+    configs.append(config1)
+
+    # Configuration 2: Honeycomb-like pattern with different spacing
+    config2 = np.array([
+        [0.0, 0.0, 0],
+        [2.0, 0.0, 0],
+        [1.0, 1.732050808, 0],
+        [-1.0, 1.732050808, 0],
+        [-2.0, 0.0, 0],
+        [-1.0, -1.732050808, 0],
+        [1.0, -1.732050808, 0],
+        [3.0, 1.732050808, 0],
+        [3.0, -1.732050808, 0],
+        [-3.0, -1.732050808, 0],
+        [-3.0, 1.732050808, 0],
+        [0.0, -3.464101616, 0],
+    ], dtype=float)
+    configs.append(config2)
+
+    # Configuration 3: Optimized known pattern from literature
+    config3 = np.array([
+        [0.0, 0.0, 0],
+        [0.0, 2.0, 0],
+        [1.732050808, 1.0, 0],
+        [1.732050808, -1.0, 0],
+        [0.0, -2.0, 0],
+        [-1.732050808, -1.0, 0],
+        [-1.732050808, 1.0, 0],
+        [3.464101616, 2.0, 0],
+        [3.464101616, -2.0, 0],
+        [-3.464101616, -2.0, 0],
+        [-3.464101616, 2.0, 0],
+        [0.0, -4.0, 0],
+    ], dtype=float)
+    configs.append(config3)
+
+    return configs
+
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Generate multiple symmetric initial configurations
+    initial_configs = get_symmetric_initial_configs()
+
+    best_config = None
+    best_side_length = float('inf')
+
+    # Multi-start optimization: try different symmetric configurations
+    for i, config in enumerate(initial_configs):
+        # Flatten the configuration for optimization
+        initial_guess = config.flatten()
+
+        # Use scipy optimization to minimize the outer hexagon side length
+        start_time = time.time()
+
+        # Define bounds for optimization (positions and angles)
+        bounds = []
+        for j in range(12):  # 12 hexagons
+            bounds.extend([(-10, 10), (-10, 10), (-180, 180)])  # x, y, angle bounds
+
+        # Optimization options
+        options = {'maxiter': 500, 'disp': False}
+
+        # Optimize using scipy minimize
+        result = minimize(evaluate_configuration, initial_guess,
+                          method='L-BFGS-B', bounds=bounds, options=options)
+
+        # Get the optimized parameters
+        optimized_params = result.x.reshape(-1, 3)
+
+        # Compute final outer hexagon size
+        final_side_length = evaluate_configuration(optimized_params.flatten())
+
+        # Keep track of the best solution found
+        if final_side_length < best_side_length:
+            best_side_length = final_side_length
+            best_config = optimized_params.copy()
+
+    # Extract the best configuration found
+    inner_hex_data = best_config.copy()
+
+    # Outer hexagon data (centered at origin, no rotation needed)
+    outer_hex_data = np.array([0, 0, 0])
+
+    # Convert to actual side length
+    outer_hex_side_length = best_side_length
+
+    end_time = time.time()
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

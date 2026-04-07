@@ -1,0 +1,154 @@
+<NAME>
+add_gradient_guided_local_search
+</NAME>
+
+<DESCRIPTION>
+This change introduces a more sophisticated gradient-guided local search that uses finite differences to estimate local gradients for position adjustments. This builds upon the current best's adaptive local optimization approach but adds explicit gradient information to guide the search direction, potentially leading to faster convergence towards better solutions. The gradient estimation helps identify the most promising directions for improving the packing density.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_optimization_step(self, individual, max_iter=100):
+        """Enhanced local optimization with gradient guidance and smart perturbation"""
+        best_individual = deepcopy(individual)
+        best_fitness, _ = self.optimizer.evaluate_fitness(best_individual[:, :2], best_individual[:, 2])
+
+        # Enhanced stages with adaptive perturbation sizes
+        stages = [
+            {"iterations": max_iter // 4, "displacement": 0.3, "smart_perturb": True},
+            {"iterations": max_iter // 4, "displacement": 0.15, "smart_perturb": True},
+            {"iterations": max_iter // 4, "displacement": 0.05, "smart_perturb": True},
+            {"iterations": max_iter // 4, "displacement": 0.01, "smart_perturb": True}
+        ]
+
+        for stage in stages:
+            for _ in range(stage["iterations"]):
+                mutated = deepcopy(best_individual)
+                idx = random.randint(0, len(mutated)-1)
+
+                # Smart perturbation based on fitness landscape
+                if stage["smart_perturb"]:
+                    # If we're near a good solution, make smaller moves
+                    # If we're exploring, make larger moves
+                    displacement = stage["displacement"]
+
+                    # Perturb position
+                    mutated[idx][0] += random.uniform(-displacement, displacement)
+                    mutated[idx][1] += random.uniform(-displacement, displacement)
+
+                    # Perturb rotation with appropriate scaling
+                    mutated[idx][2] += random.uniform(-10, 10) if stage["displacement"] > 0.05 else random.uniform(-3, 3)
+                    mutated[idx][2] = mutated[idx][2] % 360
+                else:
+                    # Regular perturbation
+                    mutated[idx][0] += random.uniform(-stage["displacement"], stage["displacement"])
+                    mutated[idx][1] += random.uniform(-stage["displacement"], stage["displacement"])
+                    mutated[idx][2] += random.uniform(-5, 5)
+                    mutated[idx][2] = mutated[idx][2] % 360
+
+                mutated_fitness, _ = self.optimizer.evaluate_fitness(mutated[:, :2], mutated[:, 2])
+                if mutated_fitness > best_fitness:
+                    best_individual = mutated
+                    best_fitness = mutated_fitness
+
+        return best_individual
+=======
+    def local_optimization_step(self, individual, max_iter=100):
+        """Enhanced local optimization with gradient guidance and smart perturbation"""
+        best_individual = deepcopy(individual)
+        best_fitness, _ = self.optimizer.evaluate_fitness(best_individual[:, :2], best_individual[:, 2])
+
+        # Enhanced stages with adaptive perturbation sizes
+        stages = [
+            {"iterations": max_iter // 4, "displacement": 0.3, "smart_perturb": True},
+            {"iterations": max_iter // 4, "displacement": 0.15, "smart_perturb": True},
+            {"iterations": max_iter // 4, "displacement": 0.05, "smart_perturb": True},
+            {"iterations": max_iter // 4, "displacement": 0.01, "smart_perturb": True}
+        ]
+
+        for stage in stages:
+            for _ in range(stage["iterations"]):
+                mutated = deepcopy(best_individual)
+                idx = random.randint(0, len(mutated)-1)
+
+                # Smart perturbation based on fitness landscape
+                if stage["smart_perturb"]:
+                    # If we're near a good solution, make smaller moves
+                    # If we're exploring, make larger moves
+                    displacement = stage["displacement"]
+
+                    # Perturb position
+                    mutated[idx][0] += random.uniform(-displacement, displacement)
+                    mutated[idx][1] += random.uniform(-displacement, displacement)
+
+                    # Perturb rotation with appropriate scaling
+                    mutated[idx][2] += random.uniform(-10, 10) if stage["displacement"] > 0.05 else random.uniform(-3, 3)
+                    mutated[idx][2] = mutated[idx][2] % 360
+                else:
+                    # Regular perturbation
+                    mutated[idx][0] += random.uniform(-stage["displacement"], stage["displacement"])
+                    mutated[idx][1] += random.uniform(-stage["displacement"], stage["displacement"])
+                    mutated[idx][2] += random.uniform(-5, 5)
+                    mutated[idx][2] = mutated[idx][2] % 360
+
+                mutated_fitness, _ = self.optimizer.evaluate_fitness(mutated[:, :2], mutated[:, 2])
+                if mutated_fitness > best_fitness:
+                    best_individual = mutated
+                    best_fitness = mutated_fitness
+
+        # Gradient-guided refinement phase
+        # Use finite differences to estimate gradients for position improvements
+        gradient_individual = deepcopy(best_individual)
+        eps = 1e-4  # Small epsilon for finite difference
+        grad_pos = np.zeros((len(gradient_individual), 2))  # Position gradients
+
+        # Estimate position gradients for each hexagon
+        for i in range(len(gradient_individual)):
+            # Estimate partial derivatives for x and y coordinates
+            orig_x, orig_y = gradient_individual[i][0], gradient_individual[i][1]
+
+            # Perturb x coordinate
+            test_individual_x = deepcopy(gradient_individual)
+            test_individual_x[i][0] = orig_x + eps
+            fitness_x_plus, _ = self.optimizer.evaluate_fitness(test_individual_x[:, :2], test_individual_x[:, 2])
+
+            test_individual_x[i][0] = orig_x - eps
+            fitness_x_minus, _ = self.optimizer.evaluate_fitness(test_individual_x[:, :2], test_individual_x[:, 2])
+
+            grad_x = (fitness_x_plus - fitness_x_minus) / (2 * eps)
+            grad_pos[i][0] = grad_x
+
+            # Perturb y coordinate
+            test_individual_y = deepcopy(gradient_individual)
+            test_individual_y[i][1] = orig_y + eps
+            fitness_y_plus, _ = self.optimizer.evaluate_fitness(test_individual_y[:, :2], test_individual_y[:, 2])
+
+            test_individual_y[i][1] = orig_y - eps
+            fitness_y_minus, _ = self.optimizer.evaluate_fitness(test_individual_y[:, :2], test_individual_y[:, 2])
+
+            grad_y = (fitness_y_plus - fitness_y_minus) / (2 * eps)
+            grad_pos[i][1] = grad_y
+
+        # Apply gradient-based updates if they improve fitness
+        updated_individual = deepcopy(gradient_individual)
+        learning_rate = 0.1
+        for i in range(len(updated_individual)):
+            # Update positions based on estimated gradients
+            new_x = updated_individual[i][0] + learning_rate * grad_pos[i][0]
+            new_y = updated_individual[i][1] + learning_rate * grad_pos[i][1]
+
+            # Ensure new positions remain valid
+            updated_individual[i][0] = new_x
+            updated_individual[i][1] = new_y
+
+        # Final validation of gradient update
+        try:
+            updated_fitness, _ = self.optimizer.evaluate_fitness(updated_individual[:, :2], updated_individual[:, 2])
+            if updated_fitness > best_fitness:
+                best_individual = updated_individual
+        except:
+            pass  # If gradient update fails, keep original
+
+        return best_individual
+>>>>>>> REPLACE
+</DIFF>

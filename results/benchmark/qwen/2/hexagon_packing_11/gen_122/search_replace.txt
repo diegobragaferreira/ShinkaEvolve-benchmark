@@ -1,0 +1,89 @@
+<NAME>
+improve_hexagon_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Shapely's intersection testing which is accurate but computationally expensive. I'll implement a more efficient SAT (Separating Axis Theorem) based collision detection that can quickly eliminate non-colliding pairs before doing precise Shapely checks. This will significantly speed up the collision checking phase during optimization.
+
+The key insight is that for hexagon-hexagon collision detection, we can:
+1. First do a quick bounding box test to eliminate obvious non-intersections
+2. Then use SAT with the 12 axes (6 from each hexagon) to detect actual collisions
+3. Only resort to Shapely's precise intersection for suspected collisions
+
+This approach should dramatically reduce the computational cost of collision detection, especially for the large number of pairwise comparisons needed.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_collision_single(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+=======
+def check_collision_single_sat(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Separating Axis Theorem for efficiency."""
+    # First quick bounding box check
+    min1 = np.min(hex1_vertices, axis=0)
+    max1 = np.max(hex1_vertices, axis=0)
+    min2 = np.min(hex2_vertices, axis=0)
+    max2 = np.max(hex2_vertices, axis=0)
+
+    if max1[0] < min2[0] or max2[0] < min1[0] or max1[1] < min2[1] or max2[1] < min1[1]:
+        return False
+
+    # SAT algorithm for hexagon-hexagon collision
+    # Collect all edges from both hexagons
+    edges1 = []
+    edges2 = []
+
+    for i in range(len(hex1_vertices)):
+        p1 = hex1_vertices[i]
+        p2 = hex1_vertices[(i + 1) % len(hex1_vertices)]
+        edge = p2 - p1
+        edges1.append(edge)
+
+    for i in range(len(hex2_vertices)):
+        p1 = hex2_vertices[i]
+        p2 = hex2_vertices[(i + 1) % len(hex2_vertices)]
+        edge = p2 - p1
+        edges2.append(edge)
+
+    # All possible separating axes (normals to edges)
+    axes = []
+    for edge in edges1 + edges2:
+        # Normal vector to edge
+        normal = np.array([-edge[1], edge[0]])
+        # Normalize
+        norm = np.linalg.norm(normal)
+        if norm > 1e-10:
+            normal = normal / norm
+        axes.append(normal)
+
+    # Check each axis
+    for axis in axes:
+        # Project both polygons onto this axis
+        proj1 = [np.dot(vertex, axis) for vertex in hex1_vertices]
+        proj2 = [np.dot(vertex, axis) for vertex in hex2_vertices]
+
+        min1_proj, max1_proj = min(proj1), max(proj1)
+        min2_proj, max2_proj = min(proj2), max(proj2)
+
+        # If projections don't overlap, this is a separating axis
+        if max1_proj < min2_proj or max2_proj < min1_proj:
+            return False
+
+    # If we got here, polygons intersect
+    return True
+
+def check_collision_single(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Shapely for final verification."""
+    # Use SAT for fast rejection, then Shapely for precise check
+    if not check_collision_single_sat(hex1_vertices, hex2_vertices):
+        return False
+    # If SAT says they might intersect, do precise check
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+>>>>>>> REPLACE
+</DIFF>

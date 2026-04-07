@@ -1,0 +1,324 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+import itertools
+from typing import Tuple, List
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    random_seed = 42
+    np.random.seed(random_seed)
+    
+    # Rectangle dimensions (width + height = 2)
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Number of circles
+    n = 21
+
+    def is_valid_solution(circles, width, height):
+        """Check if solution is valid - fast vectorized version"""
+        if len(circles) == 0:
+            return False
+            
+        # Check boundary constraints
+        x_coords = circles[:, 0]
+        y_coords = circles[:, 1]
+        radii = circles[:, 2]
+        
+        if np.any(x_coords - radii < 0) or np.any(x_coords + radii > width) or \
+           np.any(y_coords - radii < 0) or np.any(y_coords + radii > height):
+            return False
+
+        # Check overlap constraints efficiently
+        if len(circles) > 1:
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            distances = cdist(coords, coords)
+            # Create mask for upper triangle (avoid double counting)
+            mask = np.triu(np.ones_like(distances, dtype=bool), k=1)
+            # Check overlaps
+            overlap_distances = distances[mask]
+            overlap_radii = (radii[:, None] + radii[None, :])[mask]
+            if np.any(overlap_distances < overlap_radii):
+                return False
+
+        return True
+
+    def compute_total_radius(circles):
+        """Fast computation of total radius sum"""
+        return np.sum(circles[:, 2])
+
+    def generate_initial_grid_pattern(width, height, n):
+        """Generate initial grid pattern with coarse spacing"""
+        circles = np.zeros((n, 3))
+        
+        # Create a regular grid for initial placement
+        rows = int(np.ceil(np.sqrt(n)))
+        cols = int(np.ceil(n / rows))
+        
+        # Calculate spacing with margins
+        margin = 0.05
+        cell_width = (width - 2 * margin) / cols
+        cell_height = (height - 2 * margin) / rows
+        
+        # Use smaller radius initially
+        max_radius = min(cell_width, cell_height) * 0.4
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = margin + j * cell_width + cell_width / 2
+                y = margin + i * cell_height + cell_height / 2
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+            if idx >= n:
+                break
+        
+        return circles
+
+    def generate_hexagonal_pattern(width, height, n):
+        """Generate initial hexagonal packing pattern"""
+        circles = np.zeros((n, 3))
+        
+        # Determine grid parameters
+        rows = int(np.sqrt(n))
+        cols = int(np.ceil(n / rows))
+        
+        # Calculate spacing
+        margin = 0.05
+        max_radius = min(width, height) * 0.08
+        
+        # Create hexagonal grid
+        x_spacing = max_radius * 2.5
+        y_spacing = max_radius * 2.165  # sqrt(3)/2 * 2
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = margin + j * x_spacing
+                y = margin + i * y_spacing
+                
+                if i % 2 == 1:
+                    x += x_spacing / 2
+                    
+                # Adjust for bounds
+                x = max(max_radius, min(width - max_radius, x))
+                y = max(max_radius, min(height - max_radius, y))
+                
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+                
+        return circles
+
+    def generate_random_pattern(width, height, n):
+        """Generate random initial pattern"""
+        circles = np.zeros((n, 3))
+        
+        # Start with reasonably large initial radii
+        initial_radius = 0.05
+        for i in range(n):
+            # Place circles away from boundaries
+            x = np.random.uniform(initial_radius, width - initial_radius)
+            y = np.random.uniform(initial_radius, height - initial_radius)
+            circles[i] = [x, y, initial_radius]
+            
+        return circles
+
+    def grid_search_refinement(circles, rect_width, rect_height, max_iterations=300):
+        """Refine solution using grid-based local search"""
+        current_circles = circles.copy()
+        best_circles = current_circles.copy()
+        best_radius_sum = compute_total_radius(current_circles)
+        
+        # Refinement levels
+        refinement_levels = [
+            {'step': 0.05, 'radius_step': 0.01, 'iterations': 50},
+            {'step': 0.02, 'radius_step': 0.005, 'iterations': 100},
+            {'step': 0.01, 'radius_step': 0.002, 'iterations': 150}
+        ]
+        
+        for level_params in refinement_levels:
+            step = level_params['step']
+            radius_step = level_params['radius_step']
+            iterations = level_params['iterations']
+            
+            for _ in range(iterations):
+                # Try small perturbations to each circle
+                for i in range(len(current_circles)):
+                    test_circles = current_circles.copy()
+                    
+                    # Try position perturbation
+                    old_x, old_y, old_r = test_circles[i]
+                    
+                    # Try various position changes
+                    dx = np.random.uniform(-step, step)
+                    dy = np.random.uniform(-step, step)
+                    
+                    new_x = max(old_r, min(rect_width - old_r, old_x + dx))
+                    new_y = max(old_r, min(rect_height - old_r, old_y + dy))
+                    
+                    # Try radius change
+                    dr = np.random.uniform(-radius_step, radius_step)
+                    new_r = max(0.001, old_r + dr)
+                    
+                    test_circles[i] = [new_x, new_y, new_r]
+                    
+                    # Check if the new configuration is valid
+                    if is_valid_solution(test_circles, rect_width, rect_height):
+                        test_radius_sum = compute_total_radius(test_circles)
+                        if test_radius_sum > best_radius_sum:
+                            best_circles = test_circles.copy()
+                            best_radius_sum = test_radius_sum
+                            current_circles = test_circles.copy()
+                            
+        return best_circles
+
+    def hierarchical_grid_optimization(rect_width, rect_height, n):
+        """Main optimization using hierarchical grid approach"""
+        best_solution = None
+        best_score = -float('inf')
+        
+        # Try multiple initialization strategies
+        initial_patterns = [
+            generate_hexagonal_pattern(rect_width, rect_height, n),
+            generate_initial_grid_pattern(rect_width, rect_height, n),
+            generate_random_pattern(rect_width, rect_height, n)
+        ]
+        
+        # Grid search parameters
+        grid_resolution = 20  # Grid points per dimension
+        radius_range = (0.01, 0.15)  # Reasonable radius bounds
+        
+        # Create coarse grid points for initial search
+        x_vals = np.linspace(0.05, rect_width - 0.05, grid_resolution)
+        y_vals = np.linspace(0.05, rect_height - 0.05, grid_resolution)
+        r_vals = np.linspace(radius_range[0], radius_range[1], 10)
+        
+        # Try different combinations
+        sample_configs = []
+        for x, y, r in itertools.product(x_vals[::2], y_vals[::2], r_vals[::2]):
+            sample_configs.append((x, y, r))
+        
+        # Sample a subset for efficiency
+        if len(sample_configs) > 200:
+            sample_configs = np.random.choice(sample_configs, 200, replace=False).tolist()
+        
+        # Evaluate initial configurations
+        for config in sample_configs[:100]:  # Limit initial evaluation
+            # Create a starting pattern with this config
+            circles = np.zeros((n, 3))
+            for i in range(n):
+                circles[i] = [config[0], config[1], config[2]]
+            
+            # Apply grid refinement
+            refined_circles = grid_search_refinement(circles, rect_width, rect_height, 100)
+            
+            if is_valid_solution(refined_circles, rect_width, rect_height):
+                score = compute_total_radius(refined_circles)
+                if score > best_score:
+                    best_score = score
+                    best_solution = refined_circles.copy()
+        
+        # If we found a good starting point, do more intensive refinement
+        if best_solution is not None:
+            # Do comprehensive refinement
+            best_solution = grid_search_refinement(best_solution, rect_width, rect_height, 500)
+            
+            # Local optimization with boundary awareness
+            for iter_num in range(300):
+                test_circles = best_solution.copy()
+                
+                # Focus on circles near boundaries for special attention
+                boundary_indices = []
+                for i in range(len(test_circles)):
+                    x, y, r = test_circles[i]
+                    if (x <= r + 0.05 or x >= rect_width - r - 0.05 or 
+                        y <= r + 0.05 or y >= rect_height - r - 0.05):
+                        boundary_indices.append(i)
+                
+                # If we have boundary circles, prioritize their optimization
+                if boundary_indices:
+                    selected_indices = boundary_indices
+                else:
+                    # Otherwise, randomly select some circles to adjust
+                    selected_indices = np.random.choice(len(test_circles), 
+                                                      min(5, len(test_circles)), 
+                                                      replace=False)
+                
+                for idx in selected_indices:
+                    old_x, old_y, old_r = test_circles[idx]
+                    
+                    # More precise adjustments for boundary circles
+                    boundary_proximity = min(old_x, old_y, rect_width - old_x, rect_height - old_y)
+                    step_size = 0.01 if boundary_proximity > 0.1 else 0.005
+                    
+                    # Position adjustment
+                    new_x = max(old_r, min(rect_width - old_r, old_x + np.random.normal(0, step_size)))
+                    new_y = max(old_r, min(rect_height - old_r, old_y + np.random.normal(0, step_size)))
+                    
+                    # Radius adjustment
+                    new_r = max(0.001, old_r + np.random.normal(0, step_size/2))
+                    
+                    test_circles[idx] = [new_x, new_y, new_r]
+                
+                # Accept improvement
+                if is_valid_solution(test_circles, rect_width, rect_height):
+                    test_radius_sum = compute_total_radius(test_circles)
+                    if test_radius_sum > compute_total_radius(best_solution):
+                        best_solution = test_circles.copy()
+        
+        return best_solution
+
+    # Main optimization loop
+    start_time = time.time()
+    
+    # Try multiple approaches to find the best solution
+    best_final_solution = None
+    best_final_score = -float('inf')
+    
+    # Run hierarchical grid optimization multiple times
+    for attempt in range(5):
+        np.random.seed(random_seed + attempt)
+        try:
+            solution = hierarchical_grid_optimization(rect_width, rect_height, n)
+            if solution is not None and is_valid_solution(solution, rect_width, rect_height):
+                score = compute_total_radius(solution)
+                if score > best_final_score:
+                    best_final_score = score
+                    best_final_solution = solution.copy()
+        except:
+            continue
+    
+    # Fallback to structured pattern if nothing worked
+    if best_final_solution is None:
+        best_final_solution = generate_hexagonal_pattern(rect_width, rect_height, n)
+        
+    # Final refinement
+    best_final_solution = grid_search_refinement(best_final_solution, rect_width, rect_height, 200)
+    
+    # Ensure final solution is valid
+    if not is_valid_solution(best_final_solution, rect_width, rect_height):
+        # Last resort - use hexagonal pattern
+        best_final_solution = generate_hexagonal_pattern(rect_width, rect_height, n)
+    
+    return best_final_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,132 @@
+<NAME>
+implement_adaptive_step_size_coordinate_wise_refinement
+</NAME>
+
+<DESCRIPTION>
+This change implements adaptive step size control in the coordinate-wise refinement process. Instead of using a fixed perturbation size, we now adapt the step size based on local gradient estimates derived from finite differences. This enhancement builds upon the current program's final refinement stage by making it more intelligent and responsive to function characteristics, which should lead to better convergence toward higher C2 values. The adaptive approach will start with larger steps for rapid improvement and gradually decrease step sizes when approaching optimal regions, mimicking efficient optimization strategies while maintaining the non-gradient nature that preserves the program's core methodology.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_search_refinement(solution: List[float], max_evals: int = 100,
+                          use_differential_evolution: bool = True) -> List[float]:
+    """Apply local search refinement to improve a solution"""
+    try:
+        if not use_differential_evolution:
+            # Simple coordinate-wise refinement
+            solution_array = np.array(solution)
+            best_solution = solution_array.copy()
+            best_c2 = calculate_c2(best_solution.tolist())
+
+            for _ in range(max_evals):
+                # Test small perturbations for each dimension
+                test_solution = best_solution.copy()
+                idx = random.randint(0, len(test_solution) - 1)
+                perturbation = np.random.normal(0, 0.05 * best_solution[idx])
+                test_solution[idx] = max(0, best_solution[idx] + perturbation)
+
+                test_c2 = calculate_c2(test_solution.tolist())
+                if test_c2 > best_c2:
+                    best_c2 = test_c2
+                    best_solution = test_solution
+
+            return best_solution.tolist()
+        else:
+            # Use differential evolution for local refinement
+            # Convert to numpy array
+            solution_array = np.array(solution)
+
+            # Define bounds for each parameter
+            bounds = [(0.0, 3.0) for _ in range(len(solution_array))]
+
+            # Objective function for local search
+            def objective(x):
+                return -calculate_c2(x.tolist())  # Negative because we minimize
+
+            # Use differential evolution for local refinement
+            result = differential_evolution(objective, bounds, maxiter=max_evals//10,
+                                          popsize=10, seed=42, disp=False)
+
+            # Return refined solution with non-negative values
+            refined = np.maximum(result.x, 0)
+            return refined.tolist()
+
+    except:
+        # If local search fails, return original solution
+        return solution
+=======
+def local_search_refinement(solution: List[float], max_evals: int = 100,
+                          use_differential_evolution: bool = True) -> List[float]:
+    """Apply local search refinement to improve a solution"""
+    try:
+        if not use_differential_evolution:
+            # Enhanced coordinate-wise refinement with adaptive step sizes
+            solution_array = np.array(solution)
+            best_solution = solution_array.copy()
+            best_c2 = calculate_c2(best_solution.tolist())
+
+            # Keep track of previous improvements for adaptive step sizing
+            improvement_history = []
+            max_history = 10
+
+            for iteration in range(max_evals):
+                # Adaptive step size calculation based on recent improvements
+                current_step_size = 0.05  # Base step size
+
+                if len(improvement_history) > 2:
+                    # Calculate average improvement rate
+                    avg_improvement = np.mean(improvement_history[-3:])
+                    if avg_improvement > 1e-8:  # If there's consistent improvement
+                        current_step_size = min(0.2, current_step_size * 1.1)  # Increase step size
+                    else:
+                        current_step_size = max(1e-4, current_step_size * 0.9)  # Decrease step size
+
+                # Test perturbations for each dimension with adaptive step size
+                test_solution = best_solution.copy()
+                idx = random.randint(0, len(test_solution) - 1)
+
+                # Compute finite difference gradient estimate
+                epsilon = current_step_size * max(1e-6, best_solution[idx])
+                test_solution[idx] = max(0, best_solution[idx] + epsilon)
+
+                test_c2 = calculate_c2(test_solution.tolist())
+
+                # If improvement, accept and record
+                if test_c2 > best_c2:
+                    best_c2 = test_c2
+                    best_solution = test_solution.copy()
+                    improvement_history.append(test_c2 - best_c2)
+                else:
+                    # Record negative improvement for step size adjustment
+                    improvement_history.append(0.0)
+
+                # Keep history bounded
+                if len(improvement_history) > max_history:
+                    improvement_history.pop(0)
+
+            return best_solution.tolist()
+        else:
+            # Use differential evolution for local refinement
+            # Convert to numpy array
+            solution_array = np.array(solution)
+
+            # Define bounds for each parameter
+            bounds = [(0.0, 3.0) for _ in range(len(solution_array))]
+
+            # Objective function for local search
+            def objective(x):
+                return -calculate_c2(x.tolist())  # Negative because we minimize
+
+            # Use differential evolution for local refinement
+            result = differential_evolution(objective, bounds, maxiter=max_evals//10,
+                                          popsize=10, seed=42, disp=False)
+
+            # Return refined solution with non-negative values
+            refined = np.maximum(result.x, 0)
+            return refined.tolist()
+
+    except:
+        # If local search fails, return original solution
+        return solution
+>>>>>>> REPLACE
+</DIFF>

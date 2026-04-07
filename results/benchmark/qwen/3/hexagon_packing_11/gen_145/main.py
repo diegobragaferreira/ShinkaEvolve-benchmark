@@ -1,0 +1,218 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+import time
+import math
+
+def hexagon_vertices(center_x, center_y, side_length, rotation_degrees):
+    """Generate vertices of a regular hexagon."""
+    angle_offset = math.radians(rotation_degrees)
+    vertices = []
+    for i in range(6):
+        angle = angle_offset + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+def create_hexagon_polygon(center_x, center_y, side_length, rotation_degrees):
+    """Create Shapely polygon representation of a hexagon."""
+    vertices = hexagon_vertices(center_x, center_y, side_length, rotation_degrees)
+    return Polygon(vertices)
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap using Shapely."""
+    poly1 = create_hexagon_polygon(hex1[0], hex1[1], 1, hex1[2])
+    poly2 = create_hexagon_polygon(hex2[0], hex2[1], 1, hex2[2])
+    return poly1.intersects(poly2)
+
+def check_containment(hex_data, outer_hex_radius):
+    """Check if all inner hexagons are contained within outer hexagon."""
+    outer_poly = create_hexagon_polygon(0, 0, outer_hex_radius, 0)
+
+    for hex_params in hex_data:
+        inner_poly = create_hexagon_polygon(hex_params[0], hex_params[1], 1, hex_params[2])
+        if not outer_poly.contains(inner_poly):
+            return False
+    return True
+
+def compute_outer_hexagon_radius(hex_data, tolerance=1e-6):
+    """Compute minimum outer hexagon radius that contains all inner hexagons using binary search."""
+    # Compute bounding box of all hexagon vertices
+    all_vertices = []
+    for hex_params in hex_data:
+        vertices = hexagon_vertices(hex_params[0], hex_params[1], 1, hex_params[2])
+        all_vertices.extend(vertices)
+
+    # Find the maximum distance from center to any vertex
+    max_dist = 0
+    for x, y in all_vertices:
+        dist = math.sqrt(x*x + y*y)
+        max_dist = max(max_dist, dist)
+
+    # Add some buffer for safety
+    max_dist += 1e-3
+
+    # Binary search for the exact radius
+    low = max_dist
+    high = max_dist * 2.0
+
+    # Add maximum iterations to prevent infinite loop
+    max_iterations = 30
+    iterations = 0
+
+    while high - low > tolerance and iterations < max_iterations:
+        mid = (low + high) / 2.0
+        if check_containment(hex_data, mid):
+            high = mid
+        else:
+            low = mid
+        iterations += 1
+
+    return (low + high) / 2.0
+
+def evaluate_fitness(hex_data):
+    """Evaluate the fitness of a hexagon packing."""
+    try:
+        radius = compute_outer_hexagon_radius(hex_data)
+        # Inverse of radius (higher is better)
+        return 1.0 / radius
+    except:
+        # If there's an error, return a very bad fitness
+        return 0.0
+
+def validate_individual(hex_data):
+    """Ensure the individual is valid (no overlaps)."""
+    # Check for overlaps
+    for i in range(len(hex_data)):
+        for j in range(i+1, len(hex_data)):
+            if check_overlap(hex_data[i], hex_data[j]):
+                return False
+    return True
+
+def generate_hexagonal_tiling_config():
+    """
+    Generate an initial configuration using a more efficient hexagonal tiling approach.
+    This creates a configuration that's closer to optimal than random placement.
+    """
+    # Based on efficient hexagonal packing of 11 circles/hexagons
+    # Using a central hexagon surrounded by a ring of 6, then another ring of 4
+    config = [
+        [0, 0, 0],           # center hexagon
+        [-2.0, 0, 0],        # left
+        [2.0, 0, 0],         # right
+        [0, 2.0, 0],         # top
+        [0, -2.0, 0],        # bottom
+        [-1.0, 1.0, 0],      # top-left
+        [1.0, 1.0, 0],       # top-right
+        [-1.0, -1.0, 0],     # bottom-left
+        [1.0, -1.0, 0],      # bottom-right
+        [-2.0, 2.0, 0],      # far top-left
+        [2.0, 2.0, 0],       # far top-right
+    ]
+
+    # Convert to numpy array
+    return np.array(config)
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Use structured initial arrangement based on hexagonal tiling
+    initial_arrangement = generate_hexagonal_tiling_config()
+
+    # Define bounds for optimization
+    bounds = [(-10, 10), (-10, 10), (0, 360)] * 11
+
+    # Function to optimize
+    def objective(params):
+        # Reshape params back to hex_data format
+        hex_data = params.reshape(-1, 3)
+        if not validate_individual(hex_data):
+            return 1e6  # Large penalty for invalid solutions
+        return -evaluate_fitness(hex_data)  # Negative because we want to maximize
+
+    # Run differential evolution optimization with increased parameters for better search
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=150,  # Increased iterations
+        popsize=20,   # Increased population size
+        tol=1e-8,     # Tighter tolerance
+        recombination=0.9,  # Higher recombination rate
+        mutation=(0.8, 1.0)  # Higher mutation rate for better exploration
+    )
+
+    # If differential evolution failed, use the initial arrangement
+    if not result.success:
+        final_solution = initial_arrangement
+    else:
+        final_solution = result.x.reshape(-1, 3)
+
+    # Final validation
+    if not validate_individual(final_solution):
+        final_solution = initial_arrangement
+
+    # Local refinement with multiple attempts to avoid local minima
+    best_solution = final_solution
+    best_fitness = evaluate_fitness(final_solution)
+
+    # Try several local optimization attempts
+    for attempt in range(3):
+        # Add small random perturbations to avoid local minima
+        perturbed_solution = final_solution.copy()
+        for i in range(len(perturbed_solution)):
+            perturbed_solution[i][0] += np.random.normal(0, 0.1)
+            perturbed_solution[i][1] += np.random.normal(0, 0.1)
+            perturbed_solution[i][2] += np.random.normal(0, 5)
+            perturbed_solution[i][2] = perturbed_solution[i][2] % 360
+
+        # Local optimization with L-BFGS-B
+        def refine_objective(params):
+            hex_data = params.reshape(-1, 3)
+            if not validate_individual(hex_data):
+                return 1e6
+            return -evaluate_fitness(hex_data)
+
+        try:
+            refined_result = minimize(
+                refine_objective,
+                perturbed_solution.flatten(),
+                method='L-BFGS-B',
+                bounds=[(-10, 10), (-10, 10), (0, 360)] * 11,
+                options={'maxiter': 150}
+            )
+            if refined_result.success:
+                refined_solution = refined_result.x.reshape(-1, 3)
+                refined_fitness = evaluate_fitness(refined_solution)
+                if refined_fitness > best_fitness:
+                    best_solution = refined_solution
+                    best_fitness = refined_fitness
+        except:
+            continue
+
+    # Ensure final solution is valid
+    if not validate_individual(best_solution):
+        best_solution = initial_arrangement
+
+    # Compute final radius
+    final_radius = compute_outer_hexagon_radius(best_solution)
+
+    # Format output
+    inner_hex_data = best_solution
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = final_radius
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

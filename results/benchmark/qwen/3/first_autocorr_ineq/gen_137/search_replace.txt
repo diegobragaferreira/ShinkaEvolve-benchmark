@@ -1,0 +1,161 @@
+<NAME>
+enhance_curvature_aware_optimization
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces curvature-aware optimization into the evolutionary algorithm by incorporating second-order information to guide the search direction. It modifies the `get_good_direction_to_move_into` function to include curvature correction using finite differences, which helps escape local minima and improves convergence toward better solutions. The key insight is that in high-dimensional optimization landscapes like this autocorrelation problem, curvature information provides valuable guidance about the local geometry to navigate more effectively.
+
+The implementation adds:
+1. Second-order curvature estimation via finite differences
+2. Curvature-aware correction to the optimization direction
+3. Improved convergence properties through better gradient guidance
+4. Enhanced exploration capabilities by correcting for flat regions
+
+This directly addresses the mathematical insights about balancing sequence length and height distributions while maintaining numerical stability.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with enhanced stability."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation based on convergence rate and current C1
+    current_c1, _ = compute_c1_constant(sequence)
+    t = min(0.1, max(0.01, 0.05 * (1.0 - min(1.0, current_c1 / 1.5))))
+
+    # Add diversity with Gaussian noise
+    noise = [np.random.normal(0, 0.01) for _ in range(n)]
+    new_sequence = [
+        (1 - t) * x + t * y + noise[i] for i, (x, y) in enumerate(zip(sequence, normalized_g_fun))
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with enhanced stability and curvature awareness."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware correction for better convergence
+    if n > 20:  # Only apply curvature correction for sufficiently large sequences
+        # Estimate curvature using finite differences
+        epsilon = 1e-4
+        hessian_approx = np.zeros((n, n))
+
+        # Approximate second derivative for each dimension
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += epsilon
+
+            # Recompute convolution with perturbed sequence
+            if n > 100:
+                b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+            else:
+                b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+            second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon ** 2)
+            hessian_approx[i, i] = max(0, second_derivative)
+
+        # Apply curvature correction to the direction
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+
+        # Adjust direction with curvature bias
+        corrected_direction = np.array(normalized_g_fun) + 0.1 * curvature_correction
+        normalized_g_fun = corrected_direction.tolist()
+
+    # Apply adaptive perturbation based on convergence rate and current C1
+    current_c1, _ = compute_c1_constant(sequence)
+    t = min(0.1, max(0.01, 0.05 * (1.0 - min(1.0, current_c1 / 1.5))))
+
+    # Add diversity with Gaussian noise
+    noise = [np.random.normal(0, 0.01) for _ in range(n)]
+    new_sequence = [
+        (1 - t) * x + t * y + noise[i] for i, (x, y) in enumerate(zip(sequence, normalized_g_fun))
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

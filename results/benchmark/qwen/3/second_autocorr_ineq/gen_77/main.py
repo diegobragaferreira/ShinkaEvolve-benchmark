@@ -1,0 +1,203 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import njit
+import math
+
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms using piecewise linear integration
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2_numba(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using convex optimization."""
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    # Phase 1: Multi-scale initialization - start with coarse grid
+    n_coarse = 50
+    coarse_f = []
+    
+    # Create a symmetric bump pattern that encourages flat convolution
+    half = n_coarse // 2
+    base_height = 1.0
+    for i in range(n_coarse):
+        if i < half:
+            coarse_f.append(base_height * (i / half))
+        else:
+            coarse_f.append(base_height * ((n_coarse - i) / half))
+    
+    # Normalize coarse function
+    total_area = sum(coarse_f) * (0.5 / n_coarse)
+    if total_area > 0:
+        coarse_f = [x / total_area for x in coarse_f]
+    
+    # Phase 2: Adaptive refinement using multi-resolution approach
+    # Start with a relatively coarse resolution and gradually increase
+    resolutions = [50, 100, 200, 400, 800]  # Different grid sizes to sample
+    best_f = None
+    best_c2 = -np.inf
+    
+    for res_idx, n_steps in enumerate(resolutions):
+        # Create refined function with appropriate interpolation
+        if res_idx == 0:
+            # First resolution - use coarse function directly
+            f_values = coarse_f[:]
+        else:
+            # Interpolate from previous resolution
+            prev_f = best_f if best_f is not None else coarse_f
+            f_values = []
+            
+            # Linear interpolation between points
+            ratio = len(prev_f) / n_steps
+            for i in range(n_steps):
+                # Find corresponding position in previous grid
+                pos = i * ratio
+                idx1 = int(pos)
+                idx2 = min(idx1 + 1, len(prev_f) - 1)
+                weight = pos - idx1
+                
+                # Interpolate
+                val = prev_f[idx1] * (1 - weight) + prev_f[idx2] * weight
+                f_values.append(max(0, val))  # Ensure non-negativity
+        
+        # Apply adaptive perturbation
+        # For the last resolution, we'll do more extensive tuning
+        if res_idx == len(resolutions) - 1:
+            # Do more intensive refinement
+            max_iter = 200
+            current_f = f_values[:]
+            current_c2 = compute_c2_numba(current_f)
+            
+            # Track improvements
+            patience_counter = 0
+            last_improvement = 0
+            
+            for iter_num in range(max_iter):
+                # Make small random adjustments
+                test_f = current_f[:]
+                num_changes = max(5, len(test_f) // 20)
+                
+                # Select indices to modify
+                mod_indices = np.random.choice(len(test_f), num_changes, replace=False)
+                
+                for idx in mod_indices:
+                    # Small Gaussian perturbation
+                    change_factor = np.random.normal(0, 0.05)
+                    new_val = test_f[idx] * (1 + change_factor)
+                    test_f[idx] = max(0, new_val)
+                
+                # Evaluate
+                test_c2 = compute_c2_numba(test_f)
+                
+                if test_c2 > current_c2:
+                    current_c2 = test_c2
+                    current_f = test_f[:]
+                    patience_counter = 0
+                    last_improvement = iter_num
+                else:
+                    patience_counter += 1
+                    if patience_counter > 20:
+                        break
+                        
+            f_values = current_f[:]
+        
+        # Evaluate this resolution
+        c2_val = compute_c2_numba(f_values)
+        if c2_val > best_c2:
+            best_c2 = c2_val
+            best_f = f_values[:]
+    
+    # Phase 3: Final polishing with specialized technique
+    # Use a combination of gradient ascent and momentum
+    if best_f is not None:
+        final_f = best_f[:]
+        current_c2 = best_c2
+        patience = 0
+        momentum = 0.1
+        velocity = np.zeros(len(final_f))
+        
+        # Fine-tune approach
+        for _ in range(50):
+            # Compute finite differences for gradient estimation
+            epsilon = 0.001
+            gradients = np.zeros(len(final_f))
+            
+            for i in range(len(final_f)):
+                # Perturb one parameter at a time
+                temp_f_plus = final_f[:]
+                temp_f_minus = final_f[:]
+                temp_f_plus[i] = max(0, temp_f_plus[i] + epsilon)
+                temp_f_minus[i] = max(0, temp_f_minus[i] - epsilon)
+                
+                c2_plus = compute_c2_numba(temp_f_plus)
+                c2_minus = compute_c2_numba(temp_f_minus)
+                gradients[i] = (c2_plus - c2_minus) / (2 * epsilon)
+            
+            # Update with momentum and gradient
+            velocity = momentum * velocity + 0.01 * gradients
+            new_f = [max(0, final_f[i] + velocity[i]) for i in range(len(final_f))]
+            
+            new_c2 = compute_c2_numba(new_f)
+            if new_c2 > current_c2:
+                current_c2 = new_c2
+                final_f = new_f[:]
+                patience = 0
+            else:
+                patience += 1
+                if patience > 10:
+                    break
+        
+        return final_f
+    
+    # Fallback - return the best we found
+    return best_f if best_f is not None else [1.0] * 100
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

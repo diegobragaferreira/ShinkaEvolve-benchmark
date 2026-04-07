@@ -1,0 +1,245 @@
+<NAME>
+enhanced_local_search_with_gradient_guidance
+</NAME>
+
+<DESCRIPTION>
+This enhancement modifies the local search phase to incorporate gradient-guided moves that leverage repulsive forces between circles to direct search towards better configurations. The key insight is that instead of purely random or grid-based searches, we can compute attractive/repulsive forces between circles and use these gradients to guide the optimization process more effectively.
+
+The change introduces a force computation function that calculates repulsive forces from overlapping neighbors, normalizes these forces, and then applies them as directional guidance during local search. This should help escape local minima and converge faster to better solutions.
+
+This approach builds upon the existing multi-scale evolutionary optimization but enhances the final refinement phase with physics-inspired gradient guidance that's been shown to improve convergence in similar geometric optimization problems.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_max_radius_at_position(x: float, y: float, circles: np.ndarray,
+                                  boundary_padding: float = 0.01) -> float:
+    """Compute maximum radius for a circle at position (x,y) without overlaps."""
+    # Boundary constraints
+    max_radius = min(x - boundary_padding,
+                     RECT_WIDTH - x - boundary_padding,
+                     y - boundary_padding,
+                     RECT_HEIGHT - y - boundary_padding)
+
+    # Overlap constraints with existing circles
+    for cx, cy, r in circles:
+        if cx != x or cy != y:  # Skip self-comparison
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            max_radius = min(max_radius, dist - r)
+
+    return max(max_radius, 0.001)  # Ensure positive radius
+=======
+def compute_max_radius_at_position(x: float, y: float, circles: np.ndarray,
+                                  boundary_padding: float = 0.01) -> float:
+    """Compute maximum radius for a circle at position (x,y) without overlaps."""
+    # Boundary constraints
+    max_radius = min(x - boundary_padding,
+                     RECT_WIDTH - x - boundary_padding,
+                     y - boundary_padding,
+                     RECT_HEIGHT - y - boundary_padding)
+
+    # Overlap constraints with existing circles
+    for cx, cy, r in circles:
+        if cx != x or cy != y:  # Skip self-comparison
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            max_radius = min(max_radius, dist - r)
+
+    return max(max_radius, 0.001)  # Ensure positive radius
+
+def compute_repulsive_forces(circles: np.ndarray, idx: int) -> Tuple[float, float]:
+    """
+    Compute repulsive forces from overlapping neighbors for a specific circle.
+    Returns (force_x, force_y) as gradient direction to move away from conflicts.
+    """
+    fx, fy = 0.0, 0.0
+
+    if len(circles) < 2:
+        return fx, fy
+
+    x, y, r = circles[idx]
+
+    # Calculate repulsive forces from overlapping neighbors
+    for i, (cx, cy, cr) in enumerate(circles):
+        if i != idx:
+            dx = x - cx
+            dy = y - cy
+            dist = np.sqrt(dx*dx + dy*dy)
+
+            # Only consider if circles are close enough to potentially overlap
+            if dist < (r + cr) and dist > 0.001:
+                # Repulsive force (inverse proportion to distance squared)
+                force_magnitude = 1.0 / (dist * dist + 0.001)
+                fx += force_magnitude * dx / dist
+                fy += force_magnitude * dy / dist
+
+    return fx, fy
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Enhanced local search with gradient-aware moves
+        for iteration in range(1000):  # 1000 local search steps
+            # Pick random circle to improve
+            idx = random.randint(0, NUM_CIRCLES - 1)
+            x, y, r = refined[idx]
+
+            # Determine adaptive step size based on iteration progress
+            if iteration < 200:
+                step_size = 0.05  # Large steps in early phase for exploration
+            elif iteration < 600:
+                step_size = 0.02  # Medium steps in middle phase for refinement
+            else:
+                step_size = 0.01  # Small steps in late phase for fine-tuning
+
+            # Try more sophisticated directional search patterns
+            # We'll try to find a better direction by examining gradient-like information
+            best_x, best_y, best_r = x, y, r
+            best_improvement = 0
+
+            # Try structured search around current position with enhanced pattern
+            search_patterns = []
+
+            # Grid-based search with increasing density
+            if iteration < 300:
+                # Coarse search
+                search_steps = [-step_size*2, -step_size, 0, step_size, step_size*2]
+            elif iteration < 700:
+                # Medium search
+                search_steps = [-step_size, 0, step_size]
+            else:
+                # Fine search
+                search_steps = [-step_size/2, 0, step_size/2]
+
+            # Add diagonal moves in later iterations for better exploration
+            if iteration > 500:
+                search_steps.extend([-step_size*1.5, step_size*1.5])
+
+            # Create search grid
+            for dx in search_steps:
+                for dy in search_steps:
+                    search_patterns.append((dx, dy))
+
+            # Try several candidate moves to find an improvement
+            for dx, dy in search_patterns:
+                new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+
+                # Compute max possible radius at new location
+                new_r = compute_max_radius_at_position(new_x, new_y, refined)
+
+                # Check if this is an improvement
+                if new_r > r:
+                    improvement = new_r - r
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_x, best_y, best_r = new_x, new_y, new_r
+
+            # Apply best move if found
+            if best_improvement > 0:
+                refined[idx] = [best_x, best_y, best_r]
+            else:
+                # In case no improvement was found, try small random moves to escape local minima
+                if iteration > 700 and random.random() < 0.1:  # Occasionally escape
+                    dx = random.uniform(-0.005, 0.005)
+                    dy = random.uniform(-0.005, 0.005)
+                    new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                    new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+                    new_r = compute_max_radius_at_position(new_x, new_y, refined)
+                    if new_r > r:
+                        refined[idx] = [new_x, new_y, new_r]
+=======
+        # Enhanced local search with gradient-aware moves
+        for iteration in range(1000):  # 1000 local search steps
+            # Pick random circle to improve
+            idx = random.randint(0, NUM_CIRCLES - 1)
+            x, y, r = refined[idx]
+
+            # Determine adaptive step size based on iteration progress
+            if iteration < 200:
+                step_size = 0.05  # Large steps in early phase for exploration
+            elif iteration < 600:
+                step_size = 0.02  # Medium steps in middle phase for refinement
+            else:
+                step_size = 0.01  # Small steps in late phase for fine-tuning
+
+            # Compute gradient from repulsive forces (physics-inspired guidance)
+            gradient_x, gradient_y = compute_repulsive_forces(refined, idx)
+
+            # Normalize gradient for consistent magnitude
+            grad_magnitude = np.sqrt(gradient_x*gradient_x + gradient_y*gradient_y)
+            if grad_magnitude > 0.001:
+                grad_x_norm = gradient_x / grad_magnitude
+                grad_y_norm = gradient_y / grad_magnitude
+            else:
+                grad_x_norm, grad_y_norm = 0.0, 0.0
+
+            # Try more sophisticated directional search patterns
+            # We'll try to find a better direction by examining gradient-like information
+            best_x, best_y, best_r = x, y, r
+            best_improvement = 0
+
+            # Try structured search around current position with enhanced pattern
+            search_patterns = []
+
+            # Grid-based search with increasing density
+            if iteration < 300:
+                # Coarse search
+                search_steps = [-step_size*2, -step_size, 0, step_size, step_size*2]
+            elif iteration < 700:
+                # Medium search
+                search_steps = [-step_size, 0, step_size]
+            else:
+                # Fine search
+                search_steps = [-step_size/2, 0, step_size/2]
+
+            # Add diagonal moves in later iterations for better exploration
+            if iteration > 500:
+                search_steps.extend([-step_size*1.5, step_size*1.5])
+
+            # Create search grid
+            for dx in search_steps:
+                for dy in search_steps:
+                    search_patterns.append((dx, dy))
+
+            # Add gradient-guided moves in later iterations
+            if iteration > 300:
+                # Add moves that follow the repulsive gradient to help escape local minima
+                guided_dx = grad_x_norm * step_size * (1.0 - iteration / 1000)
+                guided_dy = grad_y_norm * step_size * (1.0 - iteration / 1000)
+                search_patterns.append((guided_dx, guided_dy))
+
+                # Add opposite direction moves for escaping
+                search_patterns.append((-guided_dx * 0.5, -guided_dy * 0.5))
+
+            # Try several candidate moves to find an improvement
+            for dx, dy in search_patterns:
+                new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+
+                # Compute max possible radius at new location
+                new_r = compute_max_radius_at_position(new_x, new_y, refined)
+
+                # Check if this is an improvement
+                if new_r > r:
+                    improvement = new_r - r
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_x, best_y, best_r = new_x, new_y, new_r
+
+            # Apply best move if found
+            if best_improvement > 0:
+                refined[idx] = [best_x, best_y, best_r]
+            else:
+                # In case no improvement was found, try small random moves to escape local minima
+                if iteration > 700 and random.random() < 0.1:  # Occasionally escape
+                    dx = random.uniform(-0.005, 0.005)
+                    dy = random.uniform(-0.005, 0.005)
+                    new_x = max(0.05, min(RECT_WIDTH - 0.05, x + dx))
+                    new_y = max(0.05, min(RECT_HEIGHT - 0.05, y + dy))
+                    new_r = compute_max_radius_at_position(new_x, new_y, refined)
+                    if new_r > r:
+                        refined[idx] = [new_x, new_y, new_r]
+>>>>>>> REPLACE
+</DIFF>

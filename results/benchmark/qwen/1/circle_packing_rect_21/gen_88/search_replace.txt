@@ -1,0 +1,484 @@
+<NAME>
+adaptive_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic Voronoi-based constraint density calculation that doesn't efficiently scale for large numbers of circles. I'll implement an adaptive spatial indexing system that uses a quadtree structure to quickly identify potential collision pairs, significantly reducing the O(n²) complexity of overlap checking. This will enable faster constraint validation and more efficient local optimization.
+
+The key insight is to replace the inefficient pairwise distance calculations with spatial indexing that only considers nearby circles, which will dramatically improve performance especially as the number of circles increases.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+from collections import defaultdict
+=======
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+from collections import defaultdict
+from scipy.spatial import cKDTree
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+efficient_collision_detection
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the collision detection system by implementing an efficient spatial indexing approach using KDTree for neighbor queries. This replaces the brute-force O(n²) pairwise distance calculation with O(n log n) spatial queries, which is crucial for scaling to larger numbers of circles and faster optimization cycles. The change will dramatically improve performance in both constraint checking and local refinement phases.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """
+    Fast validity check using spatial indexing for collision detection.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        True if solution is valid, False otherwise
+    """
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    if n <= 1:
+        return True
+
+    # Use spatial distance matrix for quick check
+    coords = circles[:, :2]
+    radii = circles[:, 2]
+
+    # Simple pairwise check for small numbers
+    if n <= 10:
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = np.linalg.norm(coords[i] - coords[j])
+                min_distance = radii[i] + radii[j]
+
+                if distance < min_distance:
+                    return False
+        return True
+
+    # For larger sets, use a more efficient approach
+    # Compute distance matrix
+    dist_matrix = cdist(coords, coords)
+
+    # Check for overlaps
+    for i in range(n):
+        for j in range(i+1, n):
+            if dist_matrix[i, j] < (radii[i] + radii[j]):
+                return False
+
+    return True
+=======
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """
+    Fast validity check using spatial indexing for collision detection.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        True if solution is valid, False otherwise
+    """
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    if n <= 1:
+        return True
+
+    # Use spatial indexing with KDTree for efficient neighbor search
+    coords = circles[:, :2]
+    radii = circles[:, 2]
+
+    # Build KDTree for efficient neighbor queries
+    try:
+        tree = cKDTree(coords)
+
+        # For each circle, find neighbors within sum of radii distance
+        max_radius = np.max(radii)
+        for i in range(n):
+            # Query for neighbors within 2 * max_radius distance (optimization)
+            neighbors = tree.query_ball_point(coords[i], 2 * max_radius)
+
+            # Check collisions with neighbors
+            for j in neighbors:
+                if i != j:
+                    distance = np.linalg.norm(coords[i] - coords[j])
+                    min_distance = radii[i] + radii[j]
+
+                    if distance < min_distance:
+                        return False
+
+        return True
+    except:
+        # Fallback to brute force if KDTree fails
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = np.linalg.norm(coords[i] - coords[j])
+                min_distance = radii[i] + radii[j]
+
+                if distance < min_distance:
+                    return False
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+optimized_fitness_calculation
+</NAME>
+
+<DESCRIPTION>
+This change optimizes the fitness calculation by implementing more efficient spatial indexing for overlap detection during fitness evaluation. Instead of using a full distance matrix, I'll use the same KDTree-based approach that's now more efficient for the constraint checking. This change will improve the performance of the evolutionary algorithm's fitness evaluation, allowing more generations to be processed in the given time budget.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def calculate_fitness(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> Tuple[float, float]:
+    """
+    Calculate fitness of circle configuration with penalty for constraint violations.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        tuple: (fitness_value, overlap_penalty)
+    """
+    n = len(circles)
+
+    # Check boundary constraints
+    penalty = 0.0
+    for i in range(n):
+        x, y, r = circles[i]
+        # Circle must be fully contained within rectangle
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            # Apply penalty based on how much it violates boundaries
+            overlap = 0.0
+            if x - r < 0:
+                overlap += abs(x - r)
+            if x + r > rect_width:
+                overlap += abs(x + r - rect_width)
+            if y - r < 0:
+                overlap += abs(y - r)
+            if y + r > rect_height:
+                overlap += abs(y + r - rect_height)
+            penalty += overlap * 1000
+
+    # Check overlap constraints
+    overlap_penalty = 0.0
+    if n > 1:
+        # Compute pairwise distances using optimized approach
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Use more efficient distance calculation for many circles
+        if n <= 10:  # Small case, direct check
+            for i in range(n):
+                for j in range(i+1, n):
+                    distance = np.linalg.norm(coords[i] - coords[j])
+                    min_distance = radii[i] + radii[j]
+
+                    if distance < min_distance:
+                        # Overlap exists
+                        overlap_amount = min_distance - distance
+                        overlap_penalty += overlap_amount * 1000  # Heavy penalty for overlaps
+        else:  # Larger case, use distance matrix
+            dist_matrix = cdist(coords, coords)
+            for i in range(n):
+                for j in range(i+1, n):
+                    distance = dist_matrix[i, j]
+                    min_distance = radii[i] + radii[j]
+
+                    if distance < min_distance:
+                        # Overlap exists
+                        overlap_amount = min_distance - distance
+                        overlap_penalty += overlap_amount * 1000  # Heavy penalty for overlaps
+
+    # Fitness is sum of radii minus penalties
+    total_radius = np.sum(circles[:, 2])
+    fitness = total_radius - penalty - overlap_penalty
+
+    return fitness, overlap_penalty
+=======
+def calculate_fitness(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> Tuple[float, float]:
+    """
+    Calculate fitness of circle configuration with penalty for constraint violations.
+
+    Args:
+        circles: Array of shape (n, 3) with (x, y, radius) for each circle
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+
+    Returns:
+        tuple: (fitness_value, overlap_penalty)
+    """
+    n = len(circles)
+
+    # Check boundary constraints
+    penalty = 0.0
+    for i in range(n):
+        x, y, r = circles[i]
+        # Circle must be fully contained within rectangle
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            # Apply penalty based on how much it violates boundaries
+            overlap = 0.0
+            if x - r < 0:
+                overlap += abs(x - r)
+            if x + r > rect_width:
+                overlap += abs(x + r - rect_width)
+            if y - r < 0:
+                overlap += abs(y - r)
+            if y + r > rect_height:
+                overlap += abs(y + r - rect_height)
+            penalty += overlap * 1000
+
+    # Check overlap constraints using efficient spatial indexing
+    overlap_penalty = 0.0
+    if n > 1:
+        # Use spatial indexing with KDTree for efficient overlap detection
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+
+        try:
+            tree = cKDTree(coords)
+            max_radius = np.max(radii)
+
+            # For each circle, find neighbors and check overlaps
+            for i in range(n):
+                # Query neighbors within 2 * max_radius distance
+                neighbors = tree.query_ball_point(coords[i], 2 * max_radius)
+
+                # Check overlaps with neighbors
+                for j in neighbors:
+                    if i != j:
+                        distance = np.linalg.norm(coords[i] - coords[j])
+                        min_distance = radii[i] + radii[j]
+
+                        if distance < min_distance:
+                            # Overlap exists
+                            overlap_amount = min_distance - distance
+                            overlap_penalty += overlap_amount * 1000  # Heavy penalty for overlaps
+        except:
+            # Fallback to brute force if spatial indexing fails
+            for i in range(n):
+                for j in range(i+1, n):
+                    distance = np.linalg.norm(coords[i] - coords[j])
+                    min_distance = radii[i] + radii[j]
+
+                    if distance < min_distance:
+                        # Overlap exists
+                        overlap_amount = min_distance - distance
+                        overlap_penalty += overlap_amount * 1000  # Heavy penalty for overlaps
+
+    # Fitness is sum of radii minus penalties
+    total_radius = np.sum(circles[:, 2])
+    fitness = total_radius - penalty - overlap_penalty
+
+    return fitness, overlap_penalty
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_local_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll improve the local refinement function by optimizing the way it performs circle updates. Instead of checking all circles for every single update, I'll implement a more targeted approach that prioritizes updating circles with high constraint density (i.e., those surrounded by many other circles) since these are most likely to benefit from adjustment. This makes the local refinement more efficient and effective by focusing computational resources where they matter most.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def refine_solution_fast(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                        iterations: int = 100) -> np.ndarray:
+    """
+    Fast local refinement using gradient-like approach and constraint-aware moves.
+
+    Args:
+        circles: Initial circle configuration
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+        iterations: Number of local optimization iterations
+
+    Returns:
+        Refined circles array
+    """
+    refined = circles.copy()
+    n = len(refined)
+
+    if n <= 1:
+        return refined
+
+    # Precompute constraint information
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+
+    # Iterative refinement
+    for iter_num in range(iterations):
+        # Work on one circle at a time
+        for i in range(n):
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Adaptive mutation based on constraint density
+            density_weight = 1.0 + constraint_densities[i] * 2.0
+            pos_strength = 0.01 / density_weight
+            rad_strength = 0.005 / density_weight
+
+            # Try small random moves
+            new_x = old_x + np.random.normal(0, pos_strength)
+            new_y = old_y + np.random.normal(0, pos_strength)
+            new_r = old_r + np.random.normal(0, rad_strength)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Quick constraint check before full fitness evaluation
+            if not is_valid_solution(test_config, rect_width, rect_height):
+                continue
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+            # Occasionally do larger moves to escape local optima
+            elif random.random() < 0.05 and iter_num > iterations // 2:
+                # Do bigger perturbation
+                new_x = old_x + np.random.normal(0, pos_strength * 3)
+                new_y = old_y + np.random.normal(0, pos_strength * 3)
+                new_r = old_r + np.random.normal(0, rad_strength * 3)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+                if is_valid_solution(test_config, rect_width, rect_height):
+                    test_config[i] = [new_x, new_y, new_r]
+                    test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+                    if test_fitness > current_fitness:
+                        refined = test_config
+
+    return refined
+=======
+def refine_solution_fast(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                        iterations: int = 100) -> np.ndarray:
+    """
+    Fast local refinement using gradient-like approach and constraint-aware moves.
+
+    Args:
+        circles: Initial circle configuration
+        rect_width: Width of rectangle container
+        rect_height: Height of rectangle container
+        iterations: Number of local optimization iterations
+
+    Returns:
+        Refined circles array
+    """
+    refined = circles.copy()
+    n = len(refined)
+
+    if n <= 1:
+        return refined
+
+    # Precompute constraint information
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+
+    # Iterative refinement
+    for iter_num in range(iterations):
+        # Order circles by constraint density (higher density first for priority update)
+        sorted_indices = np.argsort(constraint_densities)[::-1]
+
+        # Work on circles with highest constraint density first
+        for i in sorted_indices:
+            # Save current state
+            old_x, old_y, old_r = refined[i]
+
+            # Adaptive mutation based on constraint density
+            density_weight = 1.0 + constraint_densities[i] * 2.0
+            pos_strength = 0.01 / density_weight
+            rad_strength = 0.005 / density_weight
+
+            # Try small random moves
+            new_x = old_x + np.random.normal(0, pos_strength)
+            new_y = old_y + np.random.normal(0, pos_strength)
+            new_r = old_r + np.random.normal(0, rad_strength)
+
+            # Clip to bounds
+            new_x = np.clip(new_x, new_r, rect_width - new_r)
+            new_y = np.clip(new_y, new_r, rect_height - new_r)
+            new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+            # Test if this change improves fitness
+            test_config = refined.copy()
+            test_config[i] = [new_x, new_y, new_r]
+
+            # Quick constraint check before full fitness evaluation
+            if not is_valid_solution(test_config, rect_width, rect_height):
+                continue
+
+            # Check if this move improves fitness
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+
+            if test_fitness > current_fitness:
+                refined = test_config
+
+            # Occasionally do larger moves to escape local optima
+            elif random.random() < 0.05 and iter_num > iterations // 2:
+                # Do bigger perturbation
+                new_x = old_x + np.random.normal(0, pos_strength * 3)
+                new_y = old_y + np.random.normal(0, pos_strength * 3)
+                new_r = old_r + np.random.normal(0, rad_strength * 3)
+
+                # Clip to bounds
+                new_x = np.clip(new_x, new_r, rect_width - new_r)
+                new_y = np.clip(new_y, new_r, rect_height - new_r)
+                new_r = np.clip(new_r, 0.001, rect_width / 2)
+
+                if is_valid_solution(test_config, rect_width, rect_height):
+                    test_config[i] = [new_x, new_y, new_r]
+                    test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+                    if test_fitness > current_fitness:
+                        refined = test_config
+
+    return refined
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,130 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,119 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++import random
++from deap import base, creator, tools, algorithms
++from typing import Tuple
++import time
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    # Set random seed for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
++    # Problem parameters
++    n_circles = 26
++    max_radius = 0.5
++    min_radius = 0.001
++    
++    # Define fitness function
++    def evaluate(individual):
++        # Convert individual to circles array
++        circles = np.array(individual).reshape(-1, 3)
++        
++        # Extract positions and radii
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++        
++        # Check containment constraints
++        containment_ok = np.all((radii <= positions[:, 0]) & 
++                               (radii <= positions[:, 1]) & 
++                               (positions[:, 0] <= 1 - radii) & 
++                               (positions[:, 1] <= 1 - radii))
++        
++        if not containment_ok:
++            return (0,)  # Invalid solution
++        
++        # Check overlap constraints
++        total_radius = np.sum(radii)
++        
++        # Calculate pairwise distances
++        distances = np.sqrt(np.sum((positions[:, None] - positions[None, :])**2, axis=2))
++        
++        # Create overlap matrix
++        overlap_matrix = distances < (radii[:, None] + radii[None, :])
++        
++        # Set diagonal to False (no self-overlap)
++        np.fill_diagonal(overlap_matrix, False)
++        
++        # If any overlaps exist, penalize heavily
++        if np.any(overlap_matrix):
++            return (0,)
++        
++        return (total_radius,)
++    
++    # Create classes for GA
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    # Attribute generator
++    def generate_individual():
++        individual = []
++        for _ in range(n_circles):
++            x = random.uniform(min_radius, 1 - min_radius)
++            y = random.uniform(min_radius, 1 - min_radius)
++            r = random.uniform(min_radius, min(max_radius, 0.5))
++            individual.extend([x, y, r])
++        return creator.Individual(individual)
++    
++    toolbox.register("individual", generate_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    
++    # Register operators
++    toolbox.register("evaluate", evaluate)
++    toolbox.register("mate", tools.cxBlend, alpha=0.5)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.05, indpb=0.1)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Run evolution
++    population = toolbox.population(n=50)
++    hof = tools.HallOfFame(1)
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Run evolution for limited generations
++    try:
++        population, logbook = algorithms.eaSimple(population, toolbox, cxpb=0.7, mutpb=0.2, 
++                                                 ngen=50, stats=stats, halloffame=hof, verbose=False)
++    except Exception as e:
++        # Fallback to simple initialization if evolution fails
++        best_individual = generate_individual()
++        hof.update([best_individual])
++    
++    # Get best solution
++    best_solution = hof[0]
++    result = np.array(best_solution).reshape(-1, 3)
++    
++    # Ensure final validation
++    if len(result) != n_circles:
++        # Generate fallback solution
++        result = np.zeros((n_circles, 3))
++        for i in range(n_circles):
++            result[i] = [
++                random.uniform(0.01, 0.99),
++                random.uniform(0.01, 0.99),
++                random.uniform(0.01, 0.1)
++            ]
++    
++    return result
+ 
+ # EVOLVE-BLOCK-END

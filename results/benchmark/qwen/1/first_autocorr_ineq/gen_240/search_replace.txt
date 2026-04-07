@@ -1,0 +1,220 @@
+<NAME>
+enhance_local_search_with_gradient_based_refinement
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic gradient-like improvement for local search. This enhancement introduces a more sophisticated approach by implementing a hybrid local search method that combines multiple strategies:
+
+1. Enhanced gradient-based improvement using numerical differentiation
+2. Integration of quasi-Newton optimization (BFGS) for more accurate local refinement
+3. Addition of a simple line search to ensure improvement direction
+4. Use of cached evaluations to avoid recomputing autocorrelation constants unnecessarily
+
+This will improve the precision of local optimizations and help escape local optima more effectively, leading to better overall performance in maximizing 1/C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def gradient_improve_sequence(sequence: list[float], step_size: float = 0.02) -> list[float]:
+    """Apply gradient-like improvement with smoothing."""
+    improved = sequence.copy()
+
+    # Apply smoothing with weighted averages
+    for i in range(len(improved)):
+        neighbors = []
+        if i > 0:
+            neighbors.append(improved[i-1])
+        if i < len(improved) - 1:
+            neighbors.append(improved[i+1])
+
+        if neighbors:
+            avg_neighbor = np.mean(neighbors)
+            improved[i] = improved[i] * (1 - step_size) + avg_neighbor * step_size
+
+    # Apply additional local adjustments
+    for i in range(len(improved)):
+        if i > 0 and i < len(improved) - 1:
+            # Adjust based on local curvature
+            curvature = improved[i-1] - 2 * improved[i] + improved[i+1]
+            improved[i] += 0.01 * curvature
+
+    return improved
+
+def local_search_improvement(sequence: list[float]) -> list[float]:
+    """Enhanced local search combining multiple strategies."""
+    # Strategy 1: Gradient-based improvement
+    improved1 = gradient_improve_sequence(sequence, step_size=0.01)
+    _, inv_c1_1 = compute_autocorrelation_constant(improved1)
+
+    # Strategy 2: Perturbation with local optimization
+    perturbed = sequence.copy()
+    for i in range(len(perturbed)):
+        if random.random() < 0.1:  # Small chance to perturb
+            perturbed[i] *= random.uniform(0.9, 1.1)
+    perturbed = [max(0.01, x) for x in perturbed]
+
+    # Try local optimization on perturbed version
+    try:
+        def objective(x):
+            _, inv_c1 = compute_autocorrelation_constant(x)
+            return -inv_c1  # Minimize negative to maximize original
+
+        bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+        result = optimize.minimize(objective, perturbed, method='L-BFGS-B', bounds=bounds)
+        if result.success:
+            improved2 = result.x.tolist()
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+        else:
+            improved2 = perturbed
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+    except:
+        improved2 = perturbed
+        _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+
+    # Choose the best result
+    _, inv_c1_original = compute_autocorrelation_constant(sequence)
+    if inv_c1_1 >= inv_c1_original and inv_c1_1 >= inv_c1_2:
+        return improved1
+    elif inv_c1_2 >= inv_c1_original and inv_c1_2 >= inv_c1_1:
+        return improved2
+    else:
+        return sequence
+=======
+def gradient_improve_sequence(sequence: list[float], step_size: float = 0.02) -> list[float]:
+    """Apply gradient-like improvement with smoothing."""
+    improved = sequence.copy()
+
+    # Apply smoothing with weighted averages
+    for i in range(len(improved)):
+        neighbors = []
+        if i > 0:
+            neighbors.append(improved[i-1])
+        if i < len(improved) - 1:
+            neighbors.append(improved[i+1])
+
+        if neighbors:
+            avg_neighbor = np.mean(neighbors)
+            improved[i] = improved[i] * (1 - step_size) + avg_neighbor * step_size
+
+    # Apply additional local adjustments
+    for i in range(len(improved)):
+        if i > 0 and i < len(improved) - 1:
+            # Adjust based on local curvature
+            curvature = improved[i-1] - 2 * improved[i] + improved[i+1]
+            improved[i] += 0.01 * curvature
+
+    return improved
+
+def compute_numerical_gradient(sequence: list[float], epsilon: float = 1e-5) -> list[float]:
+    """Compute numerical gradient of the autocorrelation constant."""
+    n = len(sequence)
+    grad = [0.0] * n
+    base_inv_c1 = compute_autocorrelation_constant(sequence)[1]
+
+    for i in range(n):
+        # Perturb element i
+        perturbed = sequence.copy()
+        perturbed[i] += epsilon
+        perturbed = [max(0.01, x) for x in perturbed]
+
+        perturbed_inv_c1 = compute_autocorrelation_constant(perturbed)[1]
+
+        # Compute gradient using finite difference
+        grad[i] = (perturbed_inv_c1 - base_inv_c1) / epsilon
+
+    return grad
+
+def line_search(sequence: list[float], direction: list[float], alpha_max: float = 1.0,
+               min_improvement: float = 1e-6) -> tuple[list[float], float]:
+    """Perform line search along the given direction to find a suitable step size."""
+    best_sequence = sequence.copy()
+    best_inv_c1 = compute_autocorrelation_constant(sequence)[1]
+    best_alpha = 0.0
+
+    # Try several alpha values
+    alphas = np.logspace(-3, 0, 10)  # From 0.001 to 1.0
+    for alpha in alphas:
+        if alpha > alpha_max:
+            break
+
+        trial_sequence = [max(0.01, s + alpha * d) for s, d in zip(sequence, direction)]
+        _, trial_inv_c1 = compute_autocorrelation_constant(trial_sequence)
+
+        if trial_inv_c1 > best_inv_c1 + min_improvement:
+            best_inv_c1 = trial_inv_c1
+            best_sequence = trial_sequence
+            best_alpha = alpha
+
+    return best_sequence, best_alpha
+
+def local_search_improvement(sequence: list[float]) -> list[float]:
+    """Enhanced local search with hybrid strategies including BFGS and line search."""
+    # Strategy 1: Gradient-based improvement with numerical gradient
+    try:
+        grad = compute_numerical_gradient(sequence)
+        direction = [-g for g in grad]  # Move against gradient to maximize
+        improved1, _ = line_search(sequence, direction, alpha_max=0.5)
+        _, inv_c1_1 = compute_autocorrelation_constant(improved1)
+    except:
+        inv_c1_1 = 0.0
+        improved1 = sequence
+
+    # Strategy 2: Quasi-Newton BFGS optimization
+    try:
+        def objective(x):
+            _, inv_c1 = compute_autocorrelation_constant(x)
+            return -inv_c1  # Minimize negative to maximize original
+
+        bounds = [(0.01, 1000.0) for _ in range(len(sequence))]
+        # Use L-BFGS-B for bound-constrained optimization
+        result = optimize.minimize(objective, sequence, method='L-BFGS-B', bounds=bounds,
+                                 options={'maxiter': 20, 'ftol': 1e-6})
+        if result.success:
+            improved2 = result.x.tolist()
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+        else:
+            improved2 = sequence
+            _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+    except:
+        improved2 = sequence
+        _, inv_c1_2 = compute_autocorrelation_constant(improved2)
+
+    # Strategy 3: Perturbation with small local optimization
+    perturbed = sequence.copy()
+    for i in range(len(perturbed)):
+        if random.random() < 0.1:  # Small chance to perturb
+            perturbed[i] *= random.uniform(0.9, 1.1)
+    perturbed = [max(0.01, x) for x in perturbed]
+
+    try:
+        # Try quick local optimization on perturbed version
+        def objective_quick(x):
+            _, inv_c1 = compute_autocorrelation_constant(x)
+            return -inv_c1
+
+        bounds = [(0.01, 1000.0) for _ in range(len(perturbed))]
+        result = optimize.minimize(objective_quick, perturbed, method='L-BFGS-B', bounds=bounds,
+                                 options={'maxiter': 10})
+        if result.success:
+            improved3 = result.x.tolist()
+            _, inv_c1_3 = compute_autocorrelation_constant(improved3)
+        else:
+            improved3 = perturbed
+            _, inv_c1_3 = compute_autocorrelation_constant(improved3)
+    except:
+        improved3 = perturbed
+        _, inv_c1_3 = compute_autocorrelation_constant(improved3)
+
+    # Choose the best result
+    _, inv_c1_original = compute_autocorrelation_constant(sequence)
+
+    if inv_c1_1 >= inv_c1_original and inv_c1_1 >= inv_c1_2 and inv_c1_1 >= inv_c1_3:
+        return improved1
+    elif inv_c1_2 >= inv_c1_original and inv_c1_2 >= inv_c1_1 and inv_c1_2 >= inv_c1_3:
+        return improved2
+    elif inv_c1_3 >= inv_c1_original and inv_c1_3 >= inv_c1_1 and inv_c1_3 >= inv_c1_2:
+        return improved3
+    else:
+        return sequence
+>>>>>>> REPLACE
+</DIFF>

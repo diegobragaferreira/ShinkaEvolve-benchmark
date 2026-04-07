@@ -1,0 +1,219 @@
+<NAME>
+implement_adaptive_step_size_and_population_sizing
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces adaptive step size and population sizing in the evolutionary optimization process. The key insight is that different stages of optimization benefit from different parameter settings. In early stages, larger population sizes and adaptive step sizes help with exploration, while later stages benefit from focused refinement. This approach draws from the successful pattern seen in "Adaptive Population Sizing" recommendation and should help beat the AlphaEvolve benchmark of C₂ = 0.962 by allowing more intelligent parameter adaptation during the differential evolution process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_evolutionary_search(n_steps: int, max_time: float = 85.0) -> List[float]:
+    """
+    Multi-phase evolutionary optimization with adaptive parameters
+    """
+    start_time = time.time()
+
+    # Create diverse initial population
+    initializations = create_multiple_initializations(n_steps)
+
+    # Evaluate all initializations
+    best_score = -np.inf
+    best_individual = None
+
+    for init in initializations:
+        try:
+            score = evaluate_c2(init)
+            if score > best_score:
+                best_score = score
+                best_individual = init.copy()
+        except:
+            continue
+
+    # Use the best initialization as starting point
+    if best_individual is None:
+        # Fallback to basic initialization
+        best_individual = [1.0] * n_steps
+
+    # Phase 1: Global search with differential evolution (coarse)
+    def objective(f_vals):
+        return -evaluate_c2(np.array(f_vals))
+
+    bounds = [(0.0, 2.0) for _ in range(n_steps)]
+
+    # Try different evolutionary parameters
+    params_list = [
+        {'maxiter': 30, 'popsize': 15, 'mutation': (0.5, 1.0)},
+        {'maxiter': 50, 'popsize': 25, 'mutation': (0.6, 1.0)},
+        {'maxiter': 20, 'popsize': 10, 'mutation': (0.8, 1.0)}
+    ]
+
+    for params in params_list:
+        if time.time() - start_time > max_time - 5:
+            break
+
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=int(time.time()),
+                maxiter=params['maxiter'],
+                popsize=params['popsize'],
+                mutation=params['mutation'],
+                recombination=0.7,
+                tol=1e-6,
+                disp=False
+            )
+
+            current_score = evaluate_c2(result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = result.x.tolist()
+
+        except:
+            continue
+
+    # Phase 2: Refinement with multiple techniques
+    if time.time() - start_time < max_time - 3:
+        # Try L-BFGS-B
+        try:
+            refined_result = minimize(
+                objective,
+                best_individual,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50}
+            )
+            current_score = evaluate_c2(refined_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = refined_result.x.tolist()
+        except:
+            pass
+
+        # Try Nelder-Mead as backup
+        try:
+            nm_result = minimize(
+                objective,
+                best_individual,
+                method='Nelder-Mead',
+                options={'maxiter': 30}
+            )
+            current_score = evaluate_c2(nm_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = nm_result.x.tolist()
+        except:
+            pass
+
+    return best_individual
+=======
+def adaptive_evolutionary_search(n_steps: int, max_time: float = 85.0) -> List[float]:
+    """
+    Multi-phase evolutionary optimization with adaptive parameters
+    """
+    start_time = time.time()
+
+    # Create diverse initial population
+    initializations = create_multiple_initializations(n_steps)
+
+    # Evaluate all initializations
+    best_score = -np.inf
+    best_individual = None
+
+    for init in initializations:
+        try:
+            score = evaluate_c2(init)
+            if score > best_score:
+                best_score = score
+                best_individual = init.copy()
+        except:
+            continue
+
+    # Use the best initialization as starting point
+    if best_individual is None:
+        # Fallback to basic initialization
+        best_individual = [1.0] * n_steps
+
+    # Phase 1: Global search with differential evolution (coarse)
+    def objective(f_vals):
+        return -evaluate_c2(np.array(f_vals))
+
+    bounds = [(0.0, 2.0) for _ in range(n_steps)]
+
+    # Adaptive evolutionary parameters based on iteration and elapsed time
+    iteration = 0
+    max_iterations = 100
+    time_left = max_time - 5
+
+    while time.time() - start_time < time_left and iteration < max_iterations:
+        # Adaptive population size calculation
+        base_popsize = max(10, min(50, n_steps // 20))
+        adaptive_popsize = base_popsize + int(iteration * 2)  # Gradually increase population size
+
+        # Adaptive mutation rate that decreases over time
+        adaptive_mutation = max(0.3, 0.8 - (iteration * 0.02))
+
+        # Adaptive maxiter based on time left
+        remaining_time = max_time - (time.time() - start_time)
+        adaptive_maxiter = max(10, min(50, int(remaining_time / 3)))
+
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=int(time.time() + iteration * 1000),
+                maxiter=adaptive_maxiter,
+                popsize=adaptive_popsize,
+                mutation=(adaptive_mutation, 1.0),
+                recombination=0.7,
+                tol=1e-6,
+                disp=False
+            )
+
+            current_score = evaluate_c2(result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = result.x.tolist()
+
+        except:
+            pass
+
+        iteration += 1
+
+    # Phase 2: Refinement with multiple techniques
+    if time.time() - start_time < max_time - 3:
+        # Try L-BFGS-B
+        try:
+            refined_result = minimize(
+                objective,
+                best_individual,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50}
+            )
+            current_score = evaluate_c2(refined_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = refined_result.x.tolist()
+        except:
+            pass
+
+        # Try Nelder-Mead as backup
+        try:
+            nm_result = minimize(
+                objective,
+                best_individual,
+                method='Nelder-Mead',
+                options={'maxiter': 30}
+            )
+            current_score = evaluate_c2(nm_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = nm_result.x.tolist()
+        except:
+            pass
+
+    return best_individual
+>>>>>>> REPLACE
+</DIFF>

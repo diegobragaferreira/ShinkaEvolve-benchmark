@@ -1,0 +1,289 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from deap import base, creator, tools, algorithms
+import time
+
+# Global constants for optimization
+POPULATION_SIZE = 200
+GENERATIONS = 100
+TOURNAMENT_SIZE = 5
+INITIAL_MUTATION_RATE = 0.15
+CROSSOVER_RATE = 0.9
+ADAPTIVE_DECAY = 0.98
+
+def check_containment(circles):
+    """Check if all circles are fully contained within the unit square"""
+    for x, y, r in circles:
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    return True
+
+def check_overlap_fast(circles):
+    """Fast overlap checking using spatial indexing"""
+    if len(circles) <= 1:
+        return True
+    
+    # Build KDTree for fast nearest neighbor search
+    coords = np.array([[c[0], c[1]] for c in circles])
+    tree = cKDTree(coords)
+    
+    # Check for overlaps
+    for i, circle in enumerate(circles):
+        x, y, r = circle
+        # Find neighbors within distance 2*r
+        neighbors = tree.query_ball_point([x, y], 2*r)
+        for j in neighbors:
+            if i != j:
+                x2, y2, r2 = circles[j]
+                distance = np.sqrt((x-x2)**2 + (y-y2)**2)
+                if distance < r + r2:
+                    return False
+    return True
+
+def calculate_objective(circles):
+    """Calculate the sum of radii"""
+    return sum(circle[2] for circle in circles)
+
+def create_initial_placement(n):
+    """Create initial placement using a hybrid greedy approach"""
+    circles = []
+
+    # Start with a few large circles in corners and edges using a more structured approach
+    # Corner positions
+    corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+    edge_centers = [(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)]
+    
+    # Add some strategic placements to ensure good distribution
+    strategic_positions = [
+        (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75),
+        (0.2, 0.8), (0.8, 0.2), (0.3, 0.3), (0.7, 0.7)
+    ]
+
+    # Place initial circles with varying sizes
+    initial_positions = corners + edge_centers + strategic_positions
+    # Assign appropriate radii based on position type
+    initial_radii = [0.08] * 4 + [0.07] * 4 + [0.06] * 4 + [0.05] * 2 + [0.04] * 2
+
+    for pos, r in zip(initial_positions[:min(len(initial_positions), n)], initial_radii[:min(len(initial_radii), n)]):
+        circles.append([pos[0], pos[1], r])
+
+    # Fill remaining spots with small circles in a more systematic way
+    remaining_count = n - len(circles)
+    for _ in range(remaining_count):
+        best_radius = 0
+        best_pos = None
+        best_attempts = 0
+        
+        # Try to place a circle with systematic attempts
+        while best_attempts < 50:
+            # Try positions systematically
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            
+            # Calculate maximum possible radius at this position
+            max_radius = min(x, 1-x, y, 1-y)
+            if max_radius <= 0:
+                best_attempts += 1
+                continue
+                
+            # Check if we can place a circle here without overlap
+            test_circle = [x, y, max_radius]
+            temp_circles = circles + [test_circle]
+            
+            # Quick containment check first
+            if not check_containment([test_circle]):
+                best_attempts += 1
+                continue
+                
+            # Spatial index based overlap check
+            if check_overlap_fast(temp_circles):
+                if max_radius > best_radius:
+                    best_radius = max_radius
+                    best_pos = (x, y)
+                
+            best_attempts += 1
+            
+        # If we found a valid position, add it; otherwise, use small random circle
+        if best_pos is not None:
+            circles.append([best_pos[0], best_pos[1], min(best_radius, 0.08)])
+        else:
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            # Ensure it fits in the space
+            r = min(0.03, 0.1)
+            circles.append([x, y, r])
+
+    return circles[:n]
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual solution with penalty-based approach"""
+    # Convert flat array to circles
+    circles = np.array(individual).reshape(-1, 3)
+
+    # Check constraints
+    if not check_containment(circles):
+        # Apply penalty for boundary violations
+        penalty = 0
+        for x, y, r in circles:
+            boundary_violation = 0
+            if x - r < 0:
+                boundary_violation += abs(x - r)
+            if x + r > 1:
+                boundary_violation += abs(x + r - 1)
+            if y - r < 0:
+                boundary_violation += abs(y - r)
+            if y + r > 1:
+                boundary_violation += abs(y + r - 1)
+        return (-calculate_objective(circles) - boundary_violation * 100,)
+
+    if not check_overlap_fast(circles):
+        # Apply penalty for overlap violations
+        overlap_penalty = 0
+        n = len(circles)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if distance < r1 + r2:
+                    overlap_penalty += (r1 + r2 - distance) * 1000
+        return (-calculate_objective(circles) - overlap_penalty,)
+
+    # Return negative because DEAP minimizes by default
+    return (-calculate_objective(circles),)
+
+def mutate_individual(individual, generation, total_generations):
+    """Adaptive mutation with decreasing rate"""
+    # Calculate adaptive mutation rate
+    adaptive_rate = INITIAL_MUTATION_RATE * (ADAPTIVE_DECAY ** generation)
+    
+    # Randomly change some circles' positions and/or radii
+    for i in range(0, len(individual), 3):
+        if random.random() < adaptive_rate:
+            # Mutate position or radius
+            if random.random() < 0.7:  # 70% chance to mutate position
+                # Mutate x coordinate
+                individual[i] += random.gauss(0, 0.015)
+                individual[i] = max(0.01, min(0.99, individual[i]))
+
+                # Mutate y coordinate
+                individual[i+1] += random.gauss(0, 0.015)
+                individual[i+1] = max(0.01, min(0.99, individual[i+1]))
+            else:  # 30% chance to mutate radius
+                individual[i+2] += random.gauss(0, 0.008)
+                individual[i+2] = max(0.001, min(0.3, individual[i+2]))
+
+    return individual,
+
+def crossover_individuals(ind1, ind2):
+    """Crossover two individuals with uniform crossover"""
+    # Simple uniform crossover
+    for i in range(len(ind1)):
+        if random.random() < 0.5:
+            ind1[i], ind2[i] = ind2[i], ind1[i]
+
+    return ind1, ind2
+
+def local_refinement(circles, iterations=50):
+    """Apply local optimization to improve solution"""
+    # This is a simplified refinement that tries to slightly adjust positions
+    # to increase radii while maintaining constraints
+    best_circles = circles.copy()
+    best_sum = calculate_objective(best_circles)
+    
+    for _ in range(iterations):
+        # Make small adjustments to one circle at a time
+        idx = random.randint(0, len(best_circles)-1)
+        test_circles = best_circles.copy()
+        
+        # Slightly adjust one circle's position and radius
+        x, y, r = test_circles[idx]
+        
+        # Try small perturbations
+        new_x = min(0.99, max(0.01, x + random.uniform(-0.005, 0.005)))
+        new_y = min(0.99, max(0.01, y + random.uniform(-0.005, 0.005)))
+        new_r = min(0.3, max(0.001, r + random.uniform(-0.003, 0.003)))
+        
+        test_circles[idx] = [new_x, new_y, new_r]
+        
+        # Check if this improves the solution
+        if check_containment(test_circles) and check_overlap_fast(test_circles):
+            new_sum = calculate_objective(test_circles)
+            if new_sum > best_sum:
+                best_circles = test_circles
+                best_sum = new_sum
+    
+    return best_circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Create initial population
+    toolbox = base.Toolbox()
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    # Initialize the toolbox
+    def init_individual():
+        circles = create_initial_placement(32)
+        # Flatten the circles into a single list
+        flat = []
+        for x, y, r in circles:
+            flat.extend([x, y, r])
+        return creator.Individual(flat)
+
+    toolbox.register("individual", init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Register evaluation and operators
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", lambda ind, gen: mutate_individual(ind, gen, GENERATIONS))
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+
+    # Create initial population
+    population = toolbox.population(n=POPULATION_SIZE)
+
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    # Run the evolutionary algorithm
+    population, logbook = algorithms.eaSimple(
+        population, toolbox,
+        cxpb=CROSSOVER_RATE,
+        mutpb=INITIAL_MUTATION_RATE,
+        ngen=GENERATIONS,
+        stats=stats,
+        halloffame=hof,
+        verbose=False
+    )
+
+    # Get the best individual
+    best_individual = hof[0]
+    circles = np.array(best_individual).reshape(-1, 3)
+
+    # Apply local refinement to improve solution
+    refined_circles = local_refinement(circles, iterations=100)
+
+    # Final validation
+    if not check_containment(refined_circles) or not check_overlap_fast(refined_circles):
+        # Revert to a simple greedy approach if needed
+        refined_circles = np.array(create_initial_placement(32))
+
+    return refined_circles
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,217 @@
+<NAME>
+add_gradient_based_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces a more sophisticated gradient-based local search approach that uses numerical gradients to guide circle positioning. Instead of just trying discrete moves, we'll compute approximate gradients of the radius function with respect to position and use that to make more informed moves toward better solutions. This should help escape local optima and find more efficient arrangements.
+
+The key insight is that we can numerically estimate how much we can improve a circle's radius by moving it in different directions, then use that information to guide our search more effectively than simple grid-based approaches.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 2: Enhanced local refinement with gradient-guided search
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters
+    max_iterations = 500
+    tolerance = 1e-6
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try to improve its position using gradient approximation
+        improvement_found = False
+
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Calculate current constraints and available space
+            max_radius_current = min(orig_x, width - orig_x, orig_y, height - orig_y)
+
+            # Gradient-based search for better position
+            best_x, best_y, best_r = orig_x, orig_y, orig_r
+            best_delta_sum = 0
+
+            # Define search space around current point
+            search_space = [
+                (0, 0),  # No movement
+                (-0.01, 0), (0.01, 0), (0, -0.01), (0, 0.01),  # Small steps
+                (-0.02, 0), (0.02, 0), (0, -0.02), (0, 0.02),  # Medium steps
+                (-0.03, 0), (0.03, 0), (0, -0.03), (0, 0.03)   # Larger steps
+            ]
+
+            # Evaluate different move candidates
+            for dx, dy in search_space:
+                new_x = orig_x + dx
+                new_y = orig_y + dy
+
+                # Keep within bounds
+                new_x = max(0.05, min(width - 0.05, new_x))
+                new_y = max(0.05, min(height - 0.05, new_y))
+
+                # Compute max radius at new location
+                new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                # Check for conflicts with all other circles
+                valid = True
+                for j in range(n_circles):
+                    if i != j:
+                        px, py, pr = current_circles[j]
+                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                        if dist < (new_r + pr):
+                            valid = False
+                            break
+
+                if valid:
+                    # Calculate change in sum
+                    delta_sum = new_r - orig_r
+
+                    # Prefer moves that increase radius significantly
+                    if delta_sum > best_delta_sum:
+                        best_delta_sum = delta_sum
+                        best_x, best_y, best_r = new_x, new_y, new_r
+                        improvement_found = True
+
+            # Apply the best move if there was an improvement
+            if best_delta_sum > 0:
+                current_circles[i] = [best_x, best_y, best_r]
+
+        # Check for improvement
+        new_sum = np.sum(current_circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = current_circles.copy()
+            improvement_found = True
+        elif not improvement_found and abs(new_sum - best_sum) < tolerance:
+            break
+
+        circles = current_circles.copy()
+=======
+    # Phase 2: Enhanced local refinement with gradient-guided search
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters
+    max_iterations = 500
+    tolerance = 1e-6
+    step_size = 0.05
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # For each circle, try to improve its position using gradient approximation
+        improvement_found = False
+
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Compute current max radius at original position
+            max_radius_current = min(orig_x, width - orig_x, orig_y, height - orig_y)
+
+            # Check for conflicts to see how much we could possibly grow
+            conflict_radius = max_radius_current
+            for j in range(n_circles):
+                if i != j:
+                    px, py, pr = current_circles[j]
+                    dist = np.sqrt((orig_x - px)**2 + (orig_y - py)**2)
+                    if dist < (max_radius_current + pr):
+                        # Calculate the maximum possible radius without overlapping
+                        conflict_radius = min(conflict_radius, dist - pr)
+
+            # If we couldn't even get the original radius, something is wrong
+            if conflict_radius <= 0:
+                continue
+
+            # Estimate gradient directions for increasing radius
+            grad_x, grad_y = 0.0, 0.0
+            epsilon = 0.001
+
+            # Compute numerical gradient of radius function
+            test_points = [
+                (orig_x + epsilon, orig_y),
+                (orig_x - epsilon, orig_y),
+                (orig_x, orig_y + epsilon),
+                (orig_x, orig_y - epsilon)
+            ]
+
+            # Evaluate radius at each test point and compute approximate gradient
+            test_radii = []
+            for tx, ty in test_points:
+                # Keep within bounds
+                tx = max(0.05, min(width - 0.05, tx))
+                ty = max(0.05, min(height - 0.05, ty))
+
+                # Compute max radius at test point
+                test_r = min(tx, width - tx, ty, height - ty)
+
+                # Check conflicts with other circles
+                for j in range(n_circles):
+                    if i != j:
+                        px, py, pr = current_circles[j]
+                        dist = np.sqrt((tx - px)**2 + (ty - py)**2)
+                        test_r = min(test_r, dist - pr)
+
+                test_radii.append(max(test_r, 0.001))
+
+            # Compute approximate gradient
+            if len(test_radii) >= 4:
+                grad_x = (test_radii[0] - test_radii[1]) / (2 * epsilon)
+                grad_y = (test_radii[2] - test_radii[3]) / (2 * epsilon)
+
+                # Normalize gradient vector
+                grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+                if grad_magnitude > 0:
+                    grad_x /= grad_magnitude
+                    grad_y /= grad_magnitude
+
+                # Move along gradient direction
+                new_x = orig_x + step_size * grad_x
+                new_y = orig_y + step_size * grad_y
+
+                # Keep within bounds
+                new_x = max(0.05, min(width - 0.05, new_x))
+                new_y = max(0.05, min(height - 0.05, new_y))
+
+                # Compute max radius at new location
+                new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                # Check for conflicts with all other circles
+                valid = True
+                for j in range(n_circles):
+                    if i != j:
+                        px, py, pr = current_circles[j]
+                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                        if dist < (new_r + pr):
+                            valid = False
+                            break
+
+                if valid:
+                    # Calculate change in sum
+                    delta_sum = new_r - orig_r
+
+                    # Prefer moves that increase radius significantly
+                    if delta_sum > 0:
+                        # Apply the move
+                        current_circles[i] = [new_x, new_y, new_r]
+                        improvement_found = True
+
+        # Check for improvement
+        new_sum = np.sum(current_circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = current_circles.copy()
+            improvement_found = True
+        elif not improvement_found and abs(new_sum - best_sum) < tolerance:
+            break
+
+        circles = current_circles.copy()
+>>>>>>> REPLACE
+</DIFF>

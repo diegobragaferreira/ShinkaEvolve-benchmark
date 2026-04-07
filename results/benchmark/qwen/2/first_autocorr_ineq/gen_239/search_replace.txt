@@ -1,0 +1,192 @@
+<NAME>
+improve_convolution_constraint_sampling
+</NAME>
+
+<DESCRIPTION>
+The main improvement is to enhance the convolution constraint sampling strategy in the `solve_convolution_lp` method. Instead of randomly sampling constraint indices, we should intelligently sample those that are most likely to impact the maximum convolution value. This involves analyzing the convolution structure to focus on key indices that contribute significantly to the peak value. This should lead to more accurate LP solutions and better overall optimization performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def solve_convolution_lp(self, f_sequence, rhs, prev_solution=None):
+        """Solves the convolution LP for a given sequence and RHS with warm-start."""
+        try:
+            n = len(f_sequence)
+            c = -np.ones(n)
+
+            # Instead of generating all 2*n-1 convolution constraints (which is too expensive),
+            # we sample a subset of key convolution indices to keep the constraint matrix manageable.
+            # This improves both speed and memory usage for large sequences.
+            max_constraints = min(10000, 2 * n)  # Cap at a reasonable number
+            # Sample constraint indices with some randomness to avoid systematic bias
+            constraint_indices = np.sort(np.random.choice(
+                np.arange(2 * n - 1),
+                size=max_constraints,
+                replace=False
+            ))
+
+            a_ub = []
+            b_ub = []
+
+            # Build convolution constraints using sampled indices
+            for k in constraint_indices:
+                row = np.zeros(n)
+                for i in range(n):
+                    j = k - i
+                    if 0 <= j < n:
+                        row[j] = f_sequence[i]
+                a_ub.append(row)
+                b_ub.append(rhs)
+
+            # Add non-negativity constraints
+            a_ub_nonneg = -np.eye(n)
+            b_ub_nonneg = np.zeros(n)
+
+            a_ub = np.vstack([a_ub, a_ub_nonneg])
+            b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+            # Solve linear program with warm start if available
+            if prev_solution is not None:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', x0=prev_solution)
+            else:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+            if result.success:
+                return result.x
+            else:
+                return None
+
+        except Exception:
+            # If there's an issue, fall back to basic approach
+            try:
+                # Try with alternative method
+                n = len(f_sequence)
+                c = -np.ones(n)
+                a_ub = []
+                b_ub = []
+
+                # Standard constraint generation but with limited constraints for large n
+                max_constraints = min(10000, 2 * n)
+                indices = np.sort(np.random.choice(np.arange(2 * n - 1), size=max_constraints, replace=False))
+
+                for k in indices:
+                    row = np.zeros(n)
+                    for i in range(n):
+                        j = k - i
+                        if 0 <= j < n:
+                            row[j] = f_sequence[i]
+                    a_ub.append(row)
+                    b_ub.append(rhs)
+
+                # Non-negativity constraints
+                a_ub_nonneg = -np.eye(n)
+                b_ub_nonneg = np.zeros(n)
+
+                a_ub = np.vstack([a_ub, a_ub_nonneg])
+                b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+                if result.success:
+                    return result.x
+            except Exception:
+                pass
+            return None
+=======
+    def solve_convolution_lp(self, f_sequence, rhs, prev_solution=None):
+        """Solves the convolution LP for a given sequence and RHS with warm-start."""
+        try:
+            n = len(f_sequence)
+            c = -np.ones(n)
+
+            # More intelligent sampling of convolution constraints:
+            # 1. Sample key indices around the peak convolution value
+            # 2. Include some random indices to avoid getting stuck in local minima
+            # 3. Cap the constraint number to prevent memory blowup
+
+            # First, compute the full convolution to identify the peak location
+            conv_full = self.convolve_fft(f_sequence, f_sequence)
+            peak_index = np.argmax(conv_full)
+
+            # Sample around the peak convolution index with some random variation
+            max_constraints = min(10000, 2 * n)
+
+            # Focus on indices around the peak (within 10% of the sequence length)
+            peak_window = max(10, int(0.1 * n))
+            peak_indices = np.arange(max(0, peak_index - peak_window), min(2 * n - 1, peak_index + peak_window))
+
+            # Sample additional random indices for diversity
+            random_indices = np.random.choice(np.arange(2 * n - 1), size=max(0, max_constraints - len(peak_indices)), replace=False)
+
+            # Combine peak and random indices
+            constraint_indices = np.concatenate([peak_indices, random_indices])
+            constraint_indices = np.unique(constraint_indices)[:max_constraints]
+            constraint_indices = np.sort(constraint_indices)
+
+            a_ub = []
+            b_ub = []
+
+            # Build convolution constraints using sampled indices
+            for k in constraint_indices:
+                row = np.zeros(n)
+                for i in range(n):
+                    j = k - i
+                    if 0 <= j < n:
+                        row[j] = f_sequence[i]
+                a_ub.append(row)
+                b_ub.append(rhs)
+
+            # Add non-negativity constraints
+            a_ub_nonneg = -np.eye(n)
+            b_ub_nonneg = np.zeros(n)
+
+            a_ub = np.vstack([a_ub, a_ub_nonneg])
+            b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+            # Solve linear program with warm start if available
+            if prev_solution is not None:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs', x0=prev_solution)
+            else:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+            if result.success:
+                return result.x
+            else:
+                return None
+
+        except Exception:
+            # If there's an issue, fall back to basic approach
+            try:
+                # Try with alternative method
+                n = len(f_sequence)
+                c = -np.ones(n)
+                a_ub = []
+                b_ub = []
+
+                # Standard constraint generation but with limited constraints for large n
+                max_constraints = min(10000, 2 * n)
+                indices = np.sort(np.random.choice(np.arange(2 * n - 1), size=max_constraints, replace=False))
+
+                for k in indices:
+                    row = np.zeros(n)
+                    for i in range(n):
+                        j = k - i
+                        if 0 <= j < n:
+                            row[j] = f_sequence[i]
+                    a_ub.append(row)
+                    b_ub.append(rhs)
+
+                # Non-negativity constraints
+                a_ub_nonneg = -np.eye(n)
+                b_ub_nonneg = np.zeros(n)
+
+                a_ub = np.vstack([a_ub, a_ub_nonneg])
+                b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='interior-point')
+                if result.success:
+                    return result.x
+            except Exception:
+                pass
+            return None
+>>>>>>> REPLACE
+</DIFF>

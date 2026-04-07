@@ -1,0 +1,153 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import random
+from scipy import signal
+from scipy.fft import fft, ifft
+import math
+
+def compute_autocorrelation_constant(sequence):
+    """Compute the autocorrelation constant C1 for a sequence."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+    
+    # Use FFT for fast convolution
+    seq_fft = fft(sequence, 2*n - 1)
+    autocorr_fft = seq_fft * np.conj(seq_fft)
+    autocorr = ifft(autocorr_fft).real[:n]
+    
+    # Normalize and compute C1
+    sum_seq = np.sum(sequence)
+    if sum_seq < 0.01:
+        return float('inf')  # Reject invalid sequences
+    
+    max_autocorr = np.max(autocorr)
+    c1 = 2 * n * max_autocorr / (sum_seq ** 2)
+    return c1
+
+def compute_inverse_c1(sequence):
+    """Compute the inverse of C1 (our objective to maximize)."""
+    c1 = compute_autocorrelation_constant(sequence)
+    if c1 == float('inf'):
+        return 0
+    return 1.0 / c1
+
+def mutate_sequence(sequence):
+    """Apply geometric and random mutations to generate new sequence."""
+    new_sequence = sequence.copy()
+    
+    # Randomly decide mutation type
+    mutation_type = random.choice(['geometric', 'random'])
+    
+    if mutation_type == 'geometric':
+        # Apply geometric scaling to weights
+        scale_factor = random.uniform(0.5, 2.0)
+        new_sequence = [x * scale_factor for x in new_sequence]
+        
+        # Add small noise
+        noise_factor = random.uniform(-0.1, 0.1)
+        new_sequence = [max(0, x + x * noise_factor) for x in new_sequence]
+        
+    elif mutation_type == 'random':
+        # Randomly modify some elements
+        num_changes = random.randint(1, max(1, len(new_sequence) // 3))
+        for _ in range(num_changes):
+            idx = random.randint(0, len(new_sequence) - 1)
+            new_sequence[idx] = random.uniform(0, 1000)
+            
+    return new_sequence
+
+def crossover_sequences(seq1, seq2):
+    """Perform crossover between two sequences."""
+    if len(seq1) != len(seq2):
+        # Pad shorter sequence
+        min_len = min(len(seq1), len(seq2))
+        max_len = max(len(seq1), len(seq2))
+        if len(seq1) < max_len:
+            seq1.extend([0] * (max_len - len(seq1)))
+        else:
+            seq2.extend([0] * (max_len - len(seq2)))
+    
+    # Simple uniform crossover
+    child = []
+    for i in range(len(seq1)):
+        if random.random() < 0.5:
+            child.append(seq1[i])
+        else:
+            child.append(seq2[i])
+    
+    return child
+
+def evolutionary_search():
+    """Main evolutionary search routine."""
+    # Initialize population
+    population_size = 50
+    population = []
+    
+    for _ in range(population_size):
+        n = random.randint(100, 1000)
+        individual = [random.uniform(0, 1000) for _ in range(n)]
+        population.append(individual)
+    
+    # Evolution parameters
+    generations = 100
+    elite_size = 5
+    mutation_rate = 0.1
+    
+    for gen in range(generations):
+        # Evaluate fitness
+        fitness_scores = [(compute_inverse_c1(ind), ind) for ind in population]
+        fitness_scores.sort(reverse=True)
+        
+        # Keep elite
+        elite = [ind for _, ind in fitness_scores[:elite_size]]
+        
+        # Create new population
+        new_population = elite[:]
+        
+        # Generate offspring through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, fitness_scores)
+            parent2 = tournament_selection(population, fitness_scores)
+            
+            offspring = crossover_sequences(parent1, parent2)
+            
+            # Apply mutation
+            if random.random() < mutation_rate:
+                offspring = mutate_sequence(offspring)
+                
+            # Ensure non-negativity
+            offspring = [max(0, x) for x in offspring]
+            
+            # Ensure minimum sum
+            if np.sum(offspring) < 0.01:
+                offspring[random.randint(0, len(offspring)-1)] += 0.1
+                
+            new_population.append(offspring)
+        
+        population = new_population
+    
+    # Return best solution
+    final_fitness = [(compute_inverse_c1(ind), ind) for ind in population]
+    final_fitness.sort(reverse=True)
+    return final_fitness[0][1]
+
+def tournament_selection(population, fitness_scores, k=3):
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), k)
+    tournament_fitness = [(fitness_scores[i][0], i) for i in tournament_indices]
+    winner_idx = max(tournament_fitness)[1]
+    return population[winner_idx]
+
+def search_for_best_sequence():
+    """Entry point for search."""
+    best_sequence = evolutionary_search()
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

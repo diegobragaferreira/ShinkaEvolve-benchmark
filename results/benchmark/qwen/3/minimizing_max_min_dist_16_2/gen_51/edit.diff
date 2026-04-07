@@ -1,0 +1,343 @@
+--- a/original.py
++++ b/original.py
+@@ -1,124 +1,284 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
+ import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     np.random.seed(42)
+     n = 16
+     d = 2
+ 
+-    # Create initial hexagonal grid configuration
+-    def create_hexagonal_grid():
+-        # Arrange points in a roughly hexagonal pattern
++    # Create enhanced hexagonal grid configuration with better spacing
++    def create_enhanced_hexagonal_grid():
++        # Arrange 16 points in a 4x4 grid with proper hexagonal spacing
+         rows = 4
+         cols = 4
+ 
+         points = []
++        spacing_x = 1.0
++        spacing_y = np.sqrt(3) / 2
++
+         for i in range(rows):
+             for j in range(cols):
+-                # Offset every other row
+-                x = j + 0.5 * (i % 2)
+-                y = i * np.sqrt(3)/2
++                # Offset every other row for hexagonal packing
++                x = j * spacing_x + (i % 2) * spacing_x * 0.5
++                y = i * spacing_y
+                 points.append([x, y])
+ 
+-        # Normalize to fit in [0,1] x [0,1] and add small random noise
++        # Convert to numpy array
+         points = np.array(points)
+-        points[:, 0] = points[:, 0] / (cols - 0.5)
+-        points[:, 1] = points[:, 1] / (rows * np.sqrt(3)/2)
+-
+-        # Add small random perturbation to break symmetry
+-        points += np.random.normal(0, 0.01, points.shape)
+-
+-        # Ensure points stay within bounds
+-        points[:, 0] = np.clip(points[:, 0], 0, 1)
+-        points[:, 1] = np.clip(points[:, 1], 0, 1)
++
++        # Normalize to [0,1] x [0,1]
++        max_x = (cols - 1) + 0.5  # Account for offset in last row
++        max_y = (rows - 1) * spacing_y
++
++        points[:, 0] = points[:, 0] / max_x
++        points[:, 1] = points[:, 1] / max_y
++
++        # Add strategic perturbations to break symmetry
++        # Apply different noise levels to different points
++        noise = np.random.normal(0, 0.015, points.shape)
++
++        # Emphasize perturbation on corner points to break symmetry
++        corner_indices = [0, 3, 12, 15]  # Four corners of 4x4 grid
++        noise[corner_indices] *= 2.0
++
++        points += noise
++        points = np.clip(points, 0, 1)
+ 
+         return points
+ 
+-    # Calculate min/max distance ratio
++    # Calculate min/max distance ratio efficiently
+     def calculate_ratio(points):
+         if len(points) < 2:
+             return 0
+ 
+-        # Compute pairwise distances
++        # Compute pairwise distances using scipy for efficiency
+         distances = pdist(points)
+ 
+         if len(distances) == 0:
+             return 0
+ 
+         d_min = np.min(distances)
+         d_max = np.max(distances)
+ 
+         if d_max <= 0:
+             return 0
+ 
+         return d_min / d_max
+ 
+-    # Simulated annealing optimization
+-    def optimize_points(initial_points, max_iter=10000):
++    # Multi-scale optimization approach for better exploration
++    def multi_scale_optimization(initial_points):
++        best_points = initial_points.copy()
++        best_ratio = calculate_ratio(best_points)
++
++        # Scale 1: Coarse optimization with large steps
++        points = initial_points.copy()
++        for iter_coarse in range(500):
++            new_points = points.copy()
++            # Large step size for broad search
++            idx = np.random.randint(len(points))
++            new_points[idx, 0] += np.random.normal(0, 0.05, 1)
++            new_points[idx, 1] += np.random.normal(0, 0.05, 1)
++            new_points[:, 0] = np.clip(new_points[:, 0], 0, 1)
++            new_points[:, 1] = np.clip(new_points[:, 1], 0, 1)
++
++            new_ratio = calculate_ratio(new_points)
++            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 10):
++                points = new_points.copy()
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++
++        # Scale 2: Medium optimization with medium steps
++        for iter_medium in range(1000):
++            new_points = points.copy()
++            # Medium step size for local refinement
++            idx = np.random.randint(len(points))
++            new_points[idx, 0] += np.random.normal(0, 0.01, 1)
++            new_points[idx, 1] += np.random.normal(0, 0.01, 1)
++            new_points[:, 0] = np.clip(new_points[:, 0], 0, 1)
++            new_points[:, 1] = np.clip(new_points[:, 1], 0, 1)
++
++            new_ratio = calculate_ratio(new_points)
++            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 50):
++                points = new_points.copy()
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++
++        # Scale 3: Fine optimization with small steps
++        for iter_fine in range(1500):
++            new_points = points.copy()
++            # Small step size for fine adjustment
++            idx = np.random.randint(len(points))
++            new_points[idx, 0] += np.random.normal(0, 0.002, 1)
++            new_points[idx, 1] += np.random.normal(0, 0.002, 1)
++            new_points[:, 0] = np.clip(new_points[:, 0], 0, 1)
++            new_points[:, 1] = np.clip(new_points[:, 1], 0, 1)
++
++            new_ratio = calculate_ratio(new_points)
++            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) * 100):
++                points = new_points.copy()
++                if new_ratio > best_ratio:
++                    best_ratio = new_ratio
++                    best_points = points.copy()
++
++        return best_points
++
++    # Enhanced simulated annealing with adaptive cooling
++    def enhanced_simulated_annealing(initial_points, max_iter=3000):
+         current_points = initial_points.copy()
+         current_ratio = calculate_ratio(current_points)
+ 
+-        # Adaptive cooling schedule
+-        T = 0.1  # Initial temperature
+-        cooling_rate = 0.9995
++        # Better cooling schedule with adaptive parameters
++        T = 0.2  # Higher initial temperature for extensive exploration
++        cooling_rate = 0.9992  # Moderate cooling rate
+         min_temp = 1e-6
+ 
+         best_points = current_points.copy()
+         best_ratio = current_ratio
+ 
++        # Track recent improvements for adaptive cooling
++        recent_improvements = []
++        improvement_window = 50
++
+         for iteration in range(max_iter):
+-            # Reduce temperature
++            # Adaptive cooling based on recent performance
++            if len(recent_improvements) >= improvement_window:
++                avg_improvement = np.mean(recent_improvements[-improvement_window:])
++                if avg_improvement < 1e-5:  # Stagnation detected
++                    T *= 0.95  # Cool faster if stagnating
++                elif avg_improvement > 1e-4:  # Good progress
++                    T *= 1.01  # Warm up occasionally to escape local minima
++
+             T *= cooling_rate
+ 
+             if T < min_temp:
+                 break
+ 
+-            # Create neighbor solution by perturbing one point
+-            # Use a more sophisticated approach: select a random point and move it
+-            idx = np.random.randint(len(current_points))
+-
+-            # Create perturbation
++            # Try different types of perturbations for diversity
++            perturbation_type = np.random.choice(['single', 'neighborhood'], p=[0.7, 0.3])
++
+             new_points = current_points.copy()
+-            # Small perturbation with adaptive magnitude based on temperature
+-            perturbation_magnitude = T * 0.1
+-
+-            new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
+-            new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
+-
+-            # Enforce boundaries
+-            new_points[idx, 0] = np.clip(new_points[idx, 0], 0, 1)
+-            new_points[idx, 1] = np.clip(new_points[idx, 1], 0, 1)
+-
+-            # Accept or reject the new solution
+-            new_ratio = calculate_ratio(new_points)
+-
+-            # Metropolis criterion
+-            if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
+-                current_points = new_points
+-                current_ratio = new_ratio
+-
+-                if current_ratio > best_ratio:
+-                    best_ratio = current_ratio
+-                    best_points = current_points.copy()
++            accepted = False
++
++            if perturbation_type == 'single':
++                # Single point perturbation with adaptive magnitude
++                idx = np.random.randint(len(current_points))
++                perturbation_magnitude = T * 0.1
++
++                new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
++                new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
++
++                # Enforce boundaries
++                new_points[idx, 0] = np.clip(new_points[idx, 0], 0, 1)
++                new_points[idx, 1] = np.clip(new_points[idx, 1], 0, 1)
++
++                accepted = True
++
++            else:
++                # Neighborhood-based perturbation for coordinated moves
++                # Select two points that are relatively close
++                candidates = list(range(len(current_points)))
++                np.random.shuffle(candidates)
++
++                # Find a pair of points that are reasonably close
++                selected_pair = None
++                for i in range(len(candidates)-1):
++                    idx1 = candidates[i]
++                    for j in range(i+1, len(candidates)):
++                        idx2 = candidates[j]
++                        dist = np.sqrt(np.sum((current_points[idx1] - current_points[idx2])**2))
++                        if dist < 0.25:  # Only consider nearby pairs
++                            selected_pair = (idx1, idx2)
++                            break
++                    if selected_pair:
++                        break
++
++                if selected_pair is not None:
++                    idx1, idx2 = selected_pair
++                    perturbation_magnitude = T * 0.05
++
++                    # Coordinate the movement of both points
++                    delta1 = np.random.normal(0, perturbation_magnitude, 2)
++                    delta2 = np.random.normal(0, perturbation_magnitude, 2)
++
++                    # Add some correlation to make movements more meaningful
++                    correlation_factor = 0.3
++                    delta1 = delta1 * (1 - correlation_factor) + delta2 * correlation_factor
++                    delta2 = delta2 * (1 - correlation_factor) + delta1 * correlation_factor
++
++                    new_points[idx1, :] += delta1
++                    new_points[idx2, :] += delta2
++
++                    # Enforce boundaries
++                    new_points[:, 0] = np.clip(new_points[:, 0], 0, 1)
++                    new_points[:, 1] = np.clip(new_points[:, 1], 0, 1)
++
++                    accepted = True
++                else:
++                    # Fall back to single point
++                    idx = np.random.randint(len(current_points))
++                    perturbation_magnitude = T * 0.1
++                    new_points[idx, 0] += np.random.normal(0, perturbation_magnitude)
++                    new_points[idx, 1] += np.random.normal(0, perturbation_magnitude)
++                    new_points[idx, 0] = np.clip(new_points[idx, 0], 0, 1)
++                    new_points[idx, 1] = np.clip(new_points[idx, 1], 0, 1)
++                    accepted = True
++
++            if accepted:
++                # Accept or reject the new solution
++                new_ratio = calculate_ratio(new_points)
++
++                # Track recent improvements
++                if new_ratio > current_ratio:
++                    recent_improvements.append(new_ratio - current_ratio)
++                    if len(recent_improvements) > improvement_window * 2:
++                        recent_improvements.pop(0)
++
++                # Metropolis criterion
++                if new_ratio > current_ratio or np.random.rand() < np.exp((new_ratio - current_ratio) / T):
++                    current_points = new_points
++                    current_ratio = new_ratio
++
++                    if current_ratio > best_ratio:
++                        best_ratio = current_ratio
++                        best_points = current_points.copy()
+ 
+         return best_points, best_ratio
+ 
+     # Generate initial configuration
+-    initial_points = create_hexagonal_grid()
+-
+-    # Optimize using simulated annealing
+-    optimized_points, final_ratio = optimize_points(initial_points)
+-
+-    return optimized_points
++    initial_points = create_enhanced_hexagonal_grid()
++
++    # Try multiple restarts with different random seeds
++    best_solution = initial_points.copy()
++    best_ratio = calculate_ratio(initial_points)
++
++    # Multiple restarts with different initialization
++    for restart in range(3):
++        # Different initialization for each restart
++        points = create_enhanced_hexagonal_grid()
++
++        # Apply multi-scale optimization first
++        optimized_points = multi_scale_optimization(points)
++        ratio = calculate_ratio(optimized_points)
++
++        if ratio > best_ratio:
++            best_ratio = ratio
++            best_solution = optimized_points.copy()
++
++    # Final optimization with enhanced simulated annealing
++    final_points, final_ratio = enhanced_simulated_annealing(best_solution)
++
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

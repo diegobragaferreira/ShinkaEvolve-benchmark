@@ -1,0 +1,96 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _generate_voronoi_initialization(n_circles: int, seed: int = 42) -> np.ndarray:
+    """Generate initial circle positions using Voronoi-inspired approach."""
+    np.random.seed(seed)
+
+    # Create a grid of points and add some randomness
+    grid_size = int(np.ceil(np.sqrt(n_circles)))
+    x_coords = np.linspace(0.05, 0.95, grid_size)
+    y_coords = np.linspace(0.05, 0.95, grid_size)
+
+    # Generate grid points
+    grid_points = []
+    for x in x_coords:
+        for y in y_coords:
+            if len(grid_points) < n_circles:
+                grid_points.append([x, y])
+
+    # Add some random jitter to make it less structured
+    jitter_magnitude = 0.02
+    for i in range(len(grid_points)):
+        if i < n_circles:
+            grid_points[i][0] += np.random.uniform(-jitter_magnitude, jitter_magnitude)
+            grid_points[i][1] += np.random.uniform(-jitter_magnitude, jitter_magnitude)
+
+    # Ensure we don't go out of bounds
+    grid_points = [[max(0.05, min(0.95, p[0])), max(0.05, min(0.95, p[1]))] for p in grid_points[:n_circles]]
+
+    # Create Voronoi diagram
+    vor = Voronoi(grid_points)
+
+    # For each Voronoi cell, we'll use its centroid as a circle center
+    centers = []
+    for i in range(min(n_circles, len(vor.points))):
+        centers.append(vor.points[i])
+
+    # If we have fewer centers than required, fill with random points
+    while len(centers) < n_circles:
+        x = np.random.uniform(0.05, 0.95)
+        y = np.random.uniform(0.05, 0.95)
+        centers.append([x, y])
+
+    # Convert to numpy array
+    centers = np.array(centers[:n_circles])
+
+    return centers
+
+def _calculate_initial_radii(centers: np.ndarray) -> np.ndarray:
+    """Calculate initial radii based on distances to nearest neighbors."""
+    if len(centers) <= 1:
+        return np.full(len(centers), 0.05)
+
+    # Calculate pairwise distances
+    distances = cdist(centers, centers)
+    # Set diagonal to large value to ignore self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    # Find minimum distance to nearest neighbor for each point
+    min_distances = np.min(distances, axis=1)
+
+    # Calculate initial radii (half the minimum distance to neighbor, capped at 0.1)
+    radii = np.minimum(min_distances / 2.0, 0.1)
+
+    # Ensure minimum radius and handle edge cases
+    radii = np.maximum(radii, 0.01)
+
+    return radii
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 26
+
+    # Generate Voronoi-inspired initial positions
+    centers = _generate_voronoi_initialization(n, seed=42)
+
+    # Calculate initial radii
+    radii = _calculate_initial_radii(centers)
+
+    # Construct final result
+    circles = np.column_stack([centers, radii])
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

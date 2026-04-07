@@ -1,0 +1,206 @@
+<NAME>
+add_numba_jit_to_key_functions
+</NAME>
+
+<DESCRIPTION>
+The key bottleneck in the current implementation is the repeated computation of hexagon vertices and overlap checking in the evaluation function. I'll apply @jit decorators to critical functions that are called frequently during optimization to significantly speed up the geometric computations. This includes the core hexagon vertex computation, point-in-hexagon test, and distance calculations that are part of the overlap detection process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Compute vertices of a hexagon given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    # Vertices of regular hexagon with side length 1 centered at origin
+    base_verts = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    rotated_verts = np.empty_like(base_verts)
+    for i in range(6):
+        x_orig, y_orig = base_verts[i]
+        rotated_verts[i] = [
+            x + side_length * (x_orig * cos_a - y_orig * sin_a),
+            y + side_length * (x_orig * sin_a + y_orig * cos_a)
+        ]
+
+    return rotated_verts
+
+@jit(nopython=True)
+def point_in_hexagon(px, py, hx, hy, angle_deg, side_length=1):
+    """Fast point-in-hexagon test using winding number or separating axis theorem."""
+    vertices = hexagon_vertices(hx, hy, angle_deg, side_length)
+    # Use ray casting method for simplicity and speed
+    n = len(vertices)
+    inside = False
+    p1x, p1y = vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = vertices[i % n]
+        if py > min(p1y, p2y):
+            if py <= max(p1y, p2y):
+                if px <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or px <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line(px, py, x1, y1, x2, y2):
+    """Calculate distance from point to line segment."""
+    # Vector from (x1,y1) to (x2,y2)
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Length squared of line segment
+    length_sq = dx*dx + dy*dy
+
+    if length_sq == 0:
+        # Line segment is a point
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+
+    # Project point onto line
+    t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+    t = max(0, min(1, t))  # Clamp projection to line segment
+
+    # Find closest point on line segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+
+    # Distance to closest point
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@jit(nopython=True)
+def hexagon_distance(h1_x, h1_y, h1_angle, h2_x, h2_y, h2_angle):
+    """Compute minimum distance between two hexagons."""
+    v1 = hexagon_vertices(h1_x, h1_y, h1_angle)
+    v2 = hexagon_vertices(h2_x, h2_y, h2_angle)
+
+    min_dist = np.inf
+    for i in range(6):
+        for j in range(6):
+            # Distance between vertices
+            dist = np.sqrt((v1[i,0]-v2[j,0])**2 + (v1[i,1]-v2[j,1])**2)
+            if dist < min_dist:
+                min_dist = dist
+
+            # Distance from vertex to edge of other hexagon
+            dist = distance_point_to_line(v1[i,0], v1[i,1], v2[j,0], v2[j,1], v2[(j+1)%6,0], v2[(j+1)%6,1])
+            if dist < min_dist:
+                min_dist = dist
+
+            dist = distance_point_to_line(v2[j,0], v2[j,1], v1[i,0], v1[i,1], v1[(i+1)%6,0], v1[(i+1)%6,1])
+            if dist < min_dist:
+                min_dist = dist
+
+    return min_dist
+=======
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Compute vertices of a hexagon given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    # Vertices of regular hexagon with side length 1 centered at origin
+    base_verts = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    # Rotate and translate
+    rotated_verts = np.empty_like(base_verts)
+    for i in range(6):
+        x_orig, y_orig = base_verts[i]
+        rotated_verts[i] = [
+            x + side_length * (x_orig * cos_a - y_orig * sin_a),
+            y + side_length * (x_orig * sin_a + y_orig * cos_a)
+        ]
+
+    return rotated_verts
+
+@jit(nopython=True)
+def point_in_hexagon(px, py, hx, hy, angle_deg, side_length=1):
+    """Fast point-in-hexagon test using winding number or separating axis theorem."""
+    vertices = hexagon_vertices(hx, hy, angle_deg, side_length)
+    # Use ray casting method for simplicity and speed
+    n = len(vertices)
+    inside = False
+    p1x, p1y = vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = vertices[i % n]
+        if py > min(p1y, p2y):
+            if py <= max(p1y, p2y):
+                if px <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or px <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line(px, py, x1, y1, x2, y2):
+    """Calculate distance from point to line segment."""
+    # Vector from (x1,y1) to (x2,y2)
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Length squared of line segment
+    length_sq = dx*dx + dy*dy
+
+    if length_sq == 0:
+        # Line segment is a point
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+
+    # Project point onto line
+    t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+    t = max(0, min(1, t))  # Clamp projection to line segment
+
+    # Find closest point on line segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+
+    # Distance to closest point
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@jit(nopython=True)
+def hexagon_distance(h1_x, h1_y, h1_angle, h2_x, h2_y, h2_angle):
+    """Compute minimum distance between two hexagons."""
+    v1 = hexagon_vertices(h1_x, h1_y, h1_angle)
+    v2 = hexagon_vertices(h2_x, h2_y, h2_angle)
+
+    min_dist = np.inf
+    for i in range(6):
+        for j in range(6):
+            # Distance between vertices
+            dist = np.sqrt((v1[i,0]-v2[j,0])**2 + (v1[i,1]-v2[j,1])**2)
+            if dist < min_dist:
+                min_dist = dist
+
+            # Distance from vertex to edge of other hexagon
+            dist = distance_point_to_line(v1[i,0], v1[i,1], v2[j,0], v2[j,1], v2[(j+1)%6,0], v2[(j+1)%6,1])
+            if dist < min_dist:
+                min_dist = dist
+
+            dist = distance_point_to_line(v2[j,0], v2[j,1], v1[i,0], v1[i,1], v1[(i+1)%6,0], v1[(i+1)%6,1])
+            if dist < min_dist:
+                min_dist = dist
+
+    return min_dist
+>>>>>>> REPLACE
+
+</DIFF>

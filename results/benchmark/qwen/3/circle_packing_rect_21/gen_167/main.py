@@ -1,0 +1,283 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import math
+from itertools import combinations
+import random
+from scipy.spatial import cKDTree
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: width + height = 2, using optimal 1.2x0.8
+    rect_width = 1.2
+    rect_height = 0.8
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    def compute_circle_radius_from_voronoi_cell(point, voronoi_vertices, voronoi_regions, point_idx, rect_width, rect_height):
+        """Compute maximum radius for a circle centered at 'point' based on Voronoi cell constraints"""
+        center_x, center_y = point
+        
+        # Distance to rectangle edges
+        dist_to_edges = [
+            center_x,                    # distance to left edge
+            rect_width - center_x,       # distance to right edge
+            center_y,                    # distance to bottom edge
+            rect_height - center_y       # distance to top edge
+        ]
+        
+        # Find the Voronoi region for this point
+        # Since we don't have direct access to region information, 
+        # we'll compute the distance to the closest Voronoi vertices that define the cell
+        max_radius = min(dist_to_edges)
+        
+        # For Voronoi-based approach, we want to compute the largest inscribed circle
+        # in the Voronoi cell, which is equivalent to finding the minimum distance from
+        # the cell center to the cell boundary
+        if len(voronoi_vertices) > 0:
+            # For now, we'll calculate based on the cell boundary distance
+            # This is an approximation - in practice, we'd compute the actual polygon
+            # But we'll use the edge distance as a reasonable proxy
+            
+            # More accurate: compute distance to the nearest vertex of the Voronoi cell
+            # However, we don't directly have the cell vertices, so we'll use a simplified approach
+            
+            # Actually, let's restructure this to work with actual Voronoi cell construction
+            pass
+        
+        return max(0.001, max_radius)
+    
+    def compute_circle_radius(point, points, rect_width, rect_height):
+        """Compute maximum possible radius for a circle centered at 'point'"""
+        center_x, center_y = point
+        # Distance to rectangle edges
+        dist_to_edges = [
+            center_x,                    # distance to left edge
+            rect_width - center_x,       # distance to right edge
+            center_y,                    # distance to bottom edge
+            rect_height - center_y       # distance to top edge
+        ]
+        
+        # Compute distances to other circles
+        min_dist_to_others = float('inf')
+        for i, other_point in enumerate(points):
+            if not (abs(other_point[0] - center_x) < 1e-10 and abs(other_point[1] - center_y) < 1e-10):
+                dist = distance.euclidean(point, other_point)
+                min_dist_to_others = min(min_dist_to_others, dist)
+        
+        # Maximum radius is limited by both edges and other circles
+        max_radius = min(min(dist_to_edges), min_dist_to_others/2.0)
+        return max(0.001, max_radius)
+    
+    def evaluate_voronoi_configuration(points, rect_width, rect_height):
+        """Evaluate a configuration by computing sum of radii using Voronoi method"""
+        # Build Voronoi diagram for these points
+        vor = Voronoi(points)
+        
+        total_radius = 0
+        circles = []
+        
+        # For each generator, compute the maximum inscribed circle
+        for i, generator in enumerate(points):
+            # Compute radius with Voronoi cell constraints
+            radius = compute_circle_radius(generator, points, rect_width, rect_height)
+            circles.append([generator[0], generator[1], radius])
+            total_radius += radius
+            
+        return total_radius, np.array(circles)
+    
+    def build_voronoi_seed_points(rect_width, rect_height):
+        """Build initial seed points using Voronoi-friendly strategy"""
+        points = []
+        
+        # Strategy 1: Corner placements
+        corner_positions = [
+            (rect_width * 0.1, rect_height * 0.1),
+            (rect_width * 0.9, rect_height * 0.1),
+            (rect_width * 0.1, rect_height * 0.9),
+            (rect_width * 0.9, rect_height * 0.9),
+            (rect_width / 2, rect_height / 2)
+        ]
+        
+        # Add corners with slight perturbations
+        for x, y in corner_positions:
+            pert_x = np.random.normal(0, 0.03)
+            pert_y = np.random.normal(0, 0.03)
+            points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 2: Grid placement for remaining points
+        grid_size = 4
+        remaining_slots = 21 - len(points)
+        
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if len(points) < 21:
+                    x = rect_width * (0.1 + i * 0.2)
+                    y = rect_height * (0.1 + j * 0.2)
+                    pert_x = np.random.normal(0, 0.02)
+                    pert_y = np.random.normal(0, 0.02)
+                    points.append([x + pert_x, y + pert_y])
+        
+        # Strategy 3: Random points to fill
+        while len(points) < 21:
+            x = np.random.uniform(0.05, rect_width - 0.05)
+            y = np.random.uniform(0.05, rect_height - 0.05)
+            points.append([x, y])
+        
+        return np.array(points[:21])
+    
+    def voronoi_optimization_step(points, rect_width, rect_height, iterations=10):
+        """Perform iterative Voronoi-based optimization"""
+        current_points = points.copy()
+        
+        for _ in range(iterations):
+            # Create Voronoi diagram
+            try:
+                vor = Voronoi(current_points)
+            except:
+                # Fallback if Voronoi fails
+                return current_points
+            
+            new_points = []
+            improved = False
+            
+            # For each point, compute optimal position based on Voronoi constraints
+            for i, point in enumerate(current_points):
+                # Get all neighboring points (those that share Voronoi edges)
+                neighbors = []
+                # Find neighbors by checking which generators are close to our point
+                # This is a simplification - for production code, we'd need proper Voronoi neighbor identification
+                tree = cKDTree(current_points)
+                distances, indices = tree.query(point, k=min(10, len(current_points)), p=2)
+                
+                # Compute optimal position for generator i
+                # We want to place it where the Voronoi cell can accommodate the largest inscribed circle
+                
+                # Start with current position
+                best_pos = point.copy()
+                best_radius = compute_circle_radius(point, current_points, rect_width, rect_height)
+                
+                # Try small perturbations
+                delta = 0.03
+                for dx in [-delta, 0, delta]:
+                    for dy in [-delta, 0, delta]:
+                        new_x = point[0] + dx
+                        new_y = point[1] + dy
+                        
+                        # Keep within bounds
+                        if (0.05 <= new_x <= rect_width - 0.05 and 
+                            0.05 <= new_y <= rect_height - 0.05):
+                            
+                            test_pos = np.array([new_x, new_y])
+                            test_radius = compute_circle_radius(test_pos, current_points, rect_width, rect_height)
+                            
+                            if test_radius > best_radius:
+                                best_radius = test_radius
+                                best_pos = test_pos
+                                improved = True
+                
+                new_points.append(best_pos)
+            
+            if not improved:
+                break
+                
+            current_points = np.array(new_points)
+            
+        return current_points
+    
+    def adaptive_local_search(points, rect_width, rect_height, iterations=500):
+        """Perform adaptive local search with Voronoi-aware optimization"""
+        current_points = points.copy()
+        best_fitness = 0
+        best_points = current_points.copy()
+        
+        for iteration in range(iterations):
+            # Shuffle order for diversity
+            indices = list(range(len(current_points)))
+            random.shuffle(indices)
+            
+            # Track if any improvement occurred
+            improved = False
+            
+            # Process each point
+            for i in indices:
+                current_point = current_points[i]
+                current_radius = compute_circle_radius(current_point, current_points, rect_width, rect_height)
+                
+                # Try several neighbor positions
+                best_pos = current_point.copy()
+                best_radius = current_radius
+                
+                # Sample positions around current point
+                search_delta = 0.05
+                for dx in [-search_delta, -search_delta/2, 0, search_delta/2, search_delta]:
+                    for dy in [-search_delta, -search_delta/2, 0, search_delta/2, search_delta]:
+                        new_x = current_point[0] + dx
+                        new_y = current_point[1] + dy
+                        
+                        # Keep within bounds
+                        if (0.05 <= new_x <= rect_width - 0.05 and 
+                            0.05 <= new_y <= rect_height - 0.05):
+                            
+                            test_point = np.array([new_x, new_y])
+                            test_radius = compute_circle_radius(test_point, current_points, rect_width, rect_height)
+                            
+                            if test_radius > best_radius:
+                                best_radius = test_radius
+                                best_pos = test_point
+                                improved = True
+                
+                # Update if improvement found
+                if improved:
+                    current_points[i] = best_pos
+                    
+            # Check if we improved
+            if improved:
+                current_fitness = sum(compute_circle_radius(p, current_points, rect_width, rect_height) 
+                                    for p in current_points)
+                if current_fitness > best_fitness:
+                    best_fitness = current_fitness
+                    best_points = current_points.copy()
+                else:
+                    # Gradually reduce search space if no progress
+                    search_delta *= 0.99
+                
+        return best_points
+    
+    # Phase 1: Voronoi-based initialization
+    initial_points = build_voronoi_seed_points(rect_width, rect_height)
+    
+    # Phase 2: Voronoi optimization
+    optimized_points = voronoi_optimization_step(initial_points, rect_width, rect_height, iterations=50)
+    
+    # Phase 3: Adaptive local refinement with Voronoi awareness
+    refined_points = adaptive_local_search(optimized_points, rect_width, rect_height, iterations=1000)
+    
+    # Final evaluation and adjustment
+    _, final_circles = evaluate_voronoi_configuration(refined_points, rect_width, rect_height)
+    
+    # Ensure all circles are within bounds
+    for i in range(len(final_circles)):
+        x, y, r = final_circles[i]
+        # Ensure within bounds
+        r = min(r, x, rect_width - x, y, rect_height - y)
+        final_circles[i] = [x, y, max(r, 0.001)]
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

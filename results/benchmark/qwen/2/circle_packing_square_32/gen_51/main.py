@@ -1,0 +1,269 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import warnings
+warnings.filterwarnings('ignore')
+
+def compute_local_density(circles, point, k=5):
+    """Compute local density around a point using k-nearest neighbors"""
+    if len(circles) <= 1:
+        return 0.0
+    
+    # Calculate distances to all other circles
+    distances = np.sqrt(np.sum((circles[:, :2] - point)**2, axis=1))
+    
+    # Get indices of k nearest neighbors (excluding self)
+    sorted_indices = np.argsort(distances)
+    nearest_indices = sorted_indices[1:k+1] if len(sorted_indices) > 1 else sorted_indices
+    
+    # Return average distance to neighbors
+    if len(nearest_indices) == 0:
+        return 0.0
+    return np.mean(distances[nearest_indices])
+
+def initialize_heuristic_grid(n_circles, padding=0.05):
+    """Initialize circles using a density-aware heuristic grid pattern"""
+    # Determine grid dimensions
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+    
+    # Create hexagonal pattern with adaptive spacing
+    spacing_x = (1 - 2*padding) / cols
+    spacing_y = (1 - 2*padding) / rows
+    
+    # Adjust spacing for hexagonal arrangement
+    hex_spacing_x = spacing_x
+    hex_spacing_y = spacing_y * np.sqrt(3)/2
+    
+    circles = []
+    circle_count = 0
+    
+    for i in range(rows):
+        for j in range(cols):
+            if circle_count >= n_circles:
+                break
+                
+            # Hexagonal offset
+            x_offset = (j if i % 2 == 0 else j + 0.5) * hex_spacing_x + padding
+            y_offset = i * hex_spacing_y + padding
+            
+            # Add some randomness based on local density
+            x = max(padding, min(1-padding, x_offset + np.random.normal(0, 0.005*hex_spacing_x)))
+            y = max(padding, min(1-padding, y_offset + np.random.normal(0, 0.005*hex_spacing_y)))
+            
+            # Adaptive radius based on expected local density
+            # Circles in denser regions start smaller, sparser regions larger
+            radius = min(hex_spacing_x, hex_spacing_y) * 0.35
+            circles.append([x, y, radius])
+            circle_count += 1
+            
+        if circle_count >= n_circles:
+            break
+    
+    # Ensure exactly n_circles
+    while len(circles) < n_circles:
+        # Add random circles in valid positions
+        x = np.random.uniform(padding, 1-padding)
+        y = np.random.uniform(padding, 1-padding)
+        r = min(0.05, 0.5 * min(x, 1-x, y, 1-y))
+        circles.append([x, y, r])
+        
+    return np.array(circles[:n_circles])
+
+def is_valid_placement(circle_config):
+    """Check if circle configuration is valid"""
+    n = len(circle_config)
+    if n == 0:
+        return False
+        
+    # Check boundary constraints
+    for i in range(n):
+        x, y, r = circle_config[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    
+    # Check overlap constraints using KDTree for efficiency
+    points = circle_config[:, :2]
+    radii = circle_config[:, 2]
+    
+    tree = cKDTree(points)
+    pairs = tree.query_pairs(radii[None,:] + radii[:,None], output_type='ndarray')
+    
+    # Check for any overlapping pairs
+    for i, j in pairs:
+        if i != j:
+            distance = np.sqrt(np.sum((points[i] - points[j])**2))
+            if distance < radii[i] + radii[j]:
+                return False
+                
+    return True
+
+def calculate_fitness(circle_config):
+    """Calculate fitness as negative sum of radii with penalty for violations"""
+    # Sum of radii (negative because we're minimizing)
+    fitness = -np.sum(circle_config[:, 2])
+    
+    # Penalty for constraint violations
+    penalty = 0.0
+    n = len(circle_config)
+    
+    # Boundary penalties (exponential)
+    for i in range(n):
+        x, y, r = circle_config[i]
+        # Penalties for going outside boundaries
+        if x - r < 0:
+            penalty += 1000 * np.exp(10 * (x - r))
+        if x + r > 1:
+            penalty += 1000 * np.exp(10 * (x + r - 1))
+        if y - r < 0:
+            penalty += 1000 * np.exp(10 * (y - r))
+        if y + r > 1:
+            penalty += 1000 * np.exp(10 * (y + r - 1))
+    
+    # Overlap penalties (exponential) - only check if not valid
+    if not is_valid_placement(circle_config):
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circle_config[i]
+                x2, y2, r2 = circle_config[j]
+                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if distance < r1 + r2:
+                    penalty += 1000 * np.exp(10 * (distance - (r1 + r2)))
+    
+    return fitness + penalty
+
+def create_individual(n_circles):
+    """Create a random individual (circle configuration)"""
+    circles = initialize_heuristic_grid(n_circles)
+    return circles.flatten()
+
+def evaluate(individual):
+    """Evaluate fitness of an individual"""
+    circles = individual.reshape(-1, 3)
+    return (calculate_fitness(circles),)
+
+def mutate(individual, indpb=0.1):
+    """Custom mutation operator"""
+    circles = individual.reshape(-1, 3)
+    n = len(circles)
+    
+    for i in range(n):
+        if random.random() < indpb:
+            # Mutate position slightly
+            circles[i, 0] += random.uniform(-0.01, 0.01)
+            circles[i, 1] += random.uniform(-0.01, 0.01)
+            # Keep within bounds
+            circles[i, 0] = max(circles[i, 2], min(1 - circles[i, 2], circles[i, 0]))
+            circles[i, 1] = max(circles[i, 2], min(1 - circles[i, 2], circles[i, 1]))
+            
+        if random.random() < indpb:
+            # Mutate radius slightly
+            circles[i, 2] *= random.uniform(0.9, 1.1)
+            # Keep within reasonable bounds
+            circles[i, 2] = max(0.01, min(0.4, circles[i, 2]))
+    
+    return (circles.flatten(),)
+
+def crossover(ind1, ind2):
+    """Custom crossover operator"""
+    circles1 = ind1.reshape(-1, 3)
+    circles2 = ind2.reshape(-1, 3)
+    
+    # Simple uniform crossover
+    mask = np.random.rand(len(circles1)) > 0.5
+    new_circles1 = circles1.copy()
+    new_circles1[mask] = circles2[mask]
+    
+    # Ensure valid bounds
+    for i in range(len(new_circles1)):
+        new_circles1[i, 0] = max(new_circles1[i, 2], min(1 - new_circles1[i, 2], new_circles1[i, 0]))
+        new_circles1[i, 1] = max(new_circles1[i, 2], min(1 - new_circles1[i, 2], new_circles1[i, 1]))
+        new_circles1[i, 2] = max(0.01, min(0.4, new_circles1[i, 2]))
+    
+    return (new_circles1.flatten(), ())
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    pop_size = 50
+    n_generations = 100
+    cxpb = 0.7  # crossover probability
+    mutpb = 0.2  # mutation probability
+    
+    # Set up DEAP
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual, n_circles=n)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", crossover)
+    toolbox.register("mutate", mutate)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initialize population
+    random.seed(42)
+    np.random.seed(42)
+    population = toolbox.population(n=pop_size)
+    
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, population))
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = fit
+    
+    # Evolve
+    for gen in range(n_generations):
+        # Select the next generation individuals
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < cxpb:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < mutpb:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace the old population with the new one
+        population[:] = offspring
+    
+    # Find the best individual
+    best_individual = tools.selBest(population, 1)[0]
+    best_circles = best_individual.reshape(-1, 3)
+    
+    # Final validation and correction
+    if not is_valid_placement(best_circles):
+        # If invalid, try to fix it or fallback to heuristic
+        best_circles = initialize_heuristic_grid(n)
+    
+    # Ensure all circles are within bounds
+    for i in range(len(best_circles)):
+        x, y, r = best_circles[i]
+        # Constrain positions to valid range
+        best_circles[i][0] = max(r, min(1-r, x))
+        best_circles[i][1] = max(r, min(1-r, y))
+        # Constrain radii to valid range
+        best_circles[i][2] = max(0.01, min(0.4, r))
+        
+    return best_circles
+
+# EVOLVE-BLOCK-END

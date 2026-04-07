@@ -1,0 +1,156 @@
+<NAME>
+implement_hierarchical_spatial_acceleration
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Precompute all hexagon polygons once for reuse
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+    # Calculate outer radius once
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Check containment using the outer hexagon polygon
+    outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check if all inner hexagons are contained within outer hexagon
+    for hex_poly in hex_polygons:
+        # Fast check: if any vertex is outside, reject
+        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+            if not outer_polygon.contains(Point(vertex)):
+                return False
+
+    # Check overlaps efficiently using spatial indexing
+    # Build spatial index for faster overlap detection
+    points_list = []
+    for i, hex_poly in enumerate(hex_polygons):
+        # Collect all vertices for spatial indexing
+        for vertex in hex_poly.exterior.coords[:-1]:
+            points_list.append((vertex[0], vertex[1], i))
+
+    if len(points_list) > 0:
+        # Create spatial tree for vertices
+        tree_points = cKDTree([(p[0], p[1]) for p in points_list])
+
+        # Check overlaps between hexagons
+        for i in range(len(hex_polygons)):
+            for j in range(i+1, len(hex_polygons)):
+                if hex_polygons[i].intersects(hex_polygons[j]):
+                    return False
+    else:
+        # Fallback for empty case
+        return False
+
+    return True
+=======
+def validate_solution(inner_hex_data, outer_center=[0,0], outer_angle=0):
+    """Validate solution: check containment and non-overlap"""
+    # Precompute all hexagon polygons once for reuse
+    hex_polygons = []
+    for i in range(len(inner_hex_data)):
+        center = inner_hex_data[i][:2]
+        angle = np.radians(inner_hex_data[i][2])
+        vertices = hexagon_vertices(center, angle, UNIT_HEXAGON_RADIUS)
+        hex_polygons.append(Polygon(vertices))
+
+    # Calculate outer radius once
+    outer_radius = calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+    # Check containment using the outer hexagon polygon
+    outer_vertices = hexagon_vertices(outer_center, outer_angle, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    # Check if all inner hexagons are contained within outer hexagon
+    for hex_poly in hex_polygons:
+        # Fast check: if any vertex is outside, reject
+        for vertex in hex_poly.exterior.coords[:-1]:  # Exclude closing vertex
+            if not outer_polygon.contains(Point(vertex)):
+                return False
+
+    # Check overlaps using hierarchical spatial acceleration
+    # Level 1: Coarse grid (cell size = 2.8) for distant regions
+    coarse_grid_size = 2.8
+    coarse_grid = {}
+
+    # Level 2: Fine grid (cell size = 1.4) for dense regions
+    fine_grid_size = 1.4
+    fine_grid = {}
+
+    # Place hexagons in coarse grid first
+    for i, hex_poly in enumerate(hex_polygons):
+        min_x, min_y, max_x, max_y = hex_poly.bounds
+        # Determine coarse grid cell range
+        min_cx = int(min_x // coarse_grid_size)
+        max_cx = int(max_x // coarse_grid_size)
+        min_cy = int(min_y // coarse_grid_size)
+        max_cy = int(max_y // coarse_grid_size)
+
+        # Add to all overlapping coarse grid cells
+        for cx in range(min_cx, max_cx + 1):
+            for cy in range(min_cy, max_cy + 1):
+                if (cx, cy) not in coarse_grid:
+                    coarse_grid[(cx, cy)] = []
+                coarse_grid[(cx, cy)].append(i)
+
+    # Check overlaps using spatial acceleration with multiple grid levels
+    for i in range(len(hex_polygons)):
+        # Get coarse grid cells this hexagon occupies
+        min_x, min_y, max_x, max_y = hex_polygons[i].bounds
+        min_cx = int(min_x // coarse_grid_size)
+        max_cx = int(max_x // coarse_grid_size)
+        min_cy = int(min_y // coarse_grid_size)
+        max_cy = int(max_y // coarse_grid_size)
+
+        # Check neighbors in coarse grid cells
+        for cx in range(min_cx - 1, max_cx + 2):
+            for cy in range(min_cy - 1, max_cy + 2):
+                if (cx, cy) in coarse_grid:
+                    for j in coarse_grid[(cx, cy)]:
+                        # Only check pairs once and skip self
+                        if i < j:
+                            # Use fine-grained check for candidates in same or adjacent coarse cells
+                            if hex_polygons[i].intersects(hex_polygons[j]):
+                                # For very close hexagons, use fine grid for more accurate checking
+                                if (abs(hex_polygons[i].centroid.x - hex_polygons[j].centroid.x) < fine_grid_size and
+                                    abs(hex_polygons[i].centroid.y - hex_polygons[j].centroid.y) < fine_grid_size):
+                                    # Place in fine grid for more accurate overlap testing
+                                    min_x_f, min_y_f, max_x_f, max_y_f = hex_polygons[i].bounds
+                                    min_fx = int(min_x_f // fine_grid_size)
+                                    max_fx = int(max_x_f // fine_grid_size)
+                                    min_fy = int(min_y_f // fine_grid_size)
+                                    max_fy = int(max_y_f // fine_grid_size)
+
+                                    # Add to fine grid
+                                    for fx in range(min_fx, max_fx + 1):
+                                        for fy in range(min_fy, max_fy + 1):
+                                            if (fx, fy) not in fine_grid:
+                                                fine_grid[(fx, fy)] = []
+                                            fine_grid[(fx, fy)].append(i)
+
+                                    # Check fine grid neighbors
+                                    fine_neighbors = []
+                                    for fx in range(min_fx - 1, max_fx + 2):
+                                        for fy in range(min_fy - 1, max_fy + 2):
+                                            if (fx, fy) in fine_grid:
+                                                fine_neighbors.extend(fine_grid[(fx, fy)])
+
+                                    # For actual close hexagons, do precise overlap check
+                                    if len(fine_neighbors) > 0:
+                                        # Double-check with direct intersection test
+                                        if hex_polygons[i].intersects(hex_polygons[j]):
+                                            return False
+                                else:
+                                    # Quick coarse overlap detected
+                                    return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,93 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from numba import njit
+
+@njit
+def compute_autoconvolution_norms(f_vals):
+    """
+    Compute the autoconvolution g = f*f and return its norms.
+    Uses fast numba-compiled operations.
+    """
+    n = len(f_vals)
+    # Autoconvolution using direct computation
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    # Compute norms
+    g_squared = g * g
+    norm_g2_squared = np.sum(g_squared)
+    norm_g1 = np.sum(np.abs(g))
+    norm_g_inf = np.max(np.abs(g))
+
+    return norm_g2_squared, norm_g1, norm_g_inf
+
+@njit
+def calculate_c2(f_vals):
+    """
+    Calculate C2 value for given step function values.
+    """
+    norm_g2_squared, norm_g1, norm_g_inf = compute_autoconvolution_norms(f_vals)
+
+    # Avoid division by zero
+    if norm_g1 < 1e-15 or norm_g_inf < 1e-15:
+        return 0.0
+
+    c2 = norm_g2_squared / (norm_g1 * norm_g_inf)
+    return c2
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using gradient-free optimization."""
+
+    # Start with a reasonable initial configuration
+    n_steps = np.random.randint(100, 500)
+
+    # Initialize with a pattern that tends to work well - a few high peaks
+    # balanced with some smaller values to encourage good autoconvolution
+    initial_f_vals = np.random.gamma(2.0, 2.0, n_steps)
+
+    # Normalize to prevent extreme values
+    if np.sum(initial_f_vals) > 0:
+        initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+
+    # Convert to list
+    initial_f_vals_list = initial_f_vals.tolist()
+
+    # Define objective function for minimization (we minimize negative C2)
+    def objective(f_vals):
+        return -calculate_c2(f_vals)
+
+    # Use Nelder-Mead optimization for gradient-free optimization
+    try:
+        result = minimize(
+            objective,
+            initial_f_vals_list,
+            method='Nelder-Mead',
+            options={'maxiter': 500, 'maxfev': 1000, 'xtol': 1e-6, 'ftol': 1e-6}
+        )
+
+        if result.success:
+            optimized_values = result.x
+            # Clip negative values to zero (non-negativity constraint)
+            optimized_values = np.maximum(optimized_values, 0.0)
+
+            # Return the best solution found
+            return optimized_values.tolist()
+        else:
+            # If optimization fails, return the initial values
+            return initial_f_vals_list
+
+    except Exception as e:
+        # In case of any error, return the initial configuration
+        return initial_f_vals_list
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

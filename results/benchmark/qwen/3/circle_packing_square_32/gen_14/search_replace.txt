@@ -1,0 +1,243 @@
+<NAME>
+hexagonal_grid_initialization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses purely random initialization which is inefficient for circle packing problems. I'll implement a hexagonal grid initialization strategy that places circles in a structured pattern, which typically produces better starting configurations that are closer to optimal solutions. This approach leverages the fact that hexagonal packing is theoretically optimal for dense arrangements and provides a much better foundation for the evolutionary algorithm to optimize from.
+
+The key improvements are:
+1. Replace random initialization with hexagonal grid placement
+2. Use a systematic approach to distribute circles evenly across the unit square
+3. Allow for slight randomness in positions to help escape local minima
+4. Maintain the same interface and overall structure
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    max_attempts = 10000
+    attempts = 0
+
+    while attempts < max_attempts:
+        # Try to generate a valid configuration
+        valid = True
+        candidate_circles = np.zeros((n, 3))
+
+        # Generate random positions and radii
+        for i in range(n):
+            # Try to place circle i
+            placed = False
+            max_tries = 100
+
+            for _ in range(max_tries):
+                # Generate random center and radius
+                x = np.random.uniform(0.01, 0.99)  # Avoid boundary issues
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.001, 0.1)  # Reasonable initial radius
+
+                # Check containment constraint
+                if (r <= x <= 1 - r) and (r <= y <= 1 - r):
+                    # Check overlap with existing circles
+                    overlap = False
+                    for j in range(i):
+                        existing_x, existing_y, existing_r = candidate_circles[j]
+                        distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                        if distance < r + existing_r:
+                            overlap = True
+                            break
+
+                    if not overlap:
+                        candidate_circles[i] = [x, y, r]
+                        placed = True
+                        break
+
+            if not placed:
+                valid = False
+                break
+
+        if valid:
+            return candidate_circles
+
+        attempts += 1
+
+    # If we couldn't find a valid initial configuration, return the best attempt
+    print(f"Warning: Could not generate valid initial configuration after {max_attempts} attempts")
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def generate_hexagonal_grid(n_circles: int) -> np.ndarray:
+    """
+    Generate initial circle positions using hexagonal grid pattern.
+    This provides a much better starting configuration than pure random placement.
+    """
+    # Determine grid dimensions
+    rows = int(np.ceil(np.sqrt(n_circles)))
+    cols = int(np.ceil(n_circles / rows))
+
+    # Ensure we don't exceed our target count
+    actual_cells = rows * cols
+    if actual_cells > n_circles:
+        # Adjust to fit exactly n_circles
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+
+    # Calculate spacing to fit within unit square
+    padding = 0.05  # Leave margin around edges
+    cell_width = (1 - 2 * padding) / cols
+    cell_height = (1 - 2 * padding) / rows
+
+    # Hexagonal packing parameters
+    hex_radius = min(cell_width, cell_height) * 0.4  # Slightly smaller than cell size
+
+    circles = np.zeros((n_circles, 3))
+
+    circle_idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if circle_idx >= n_circles:
+                break
+
+            # Offset every other row for hexagonal arrangement
+            offset = (i % 2) * (cell_width / 2)
+
+            # Calculate position
+            x = padding + offset + j * cell_width + cell_width / 2
+            y = padding + i * cell_height + cell_height / 2
+            r = hex_radius
+
+            # Add slight randomness to avoid perfect grid
+            noise_scale = cell_width * 0.1
+            x += np.random.normal(0, noise_scale)
+            y += np.random.normal(0, noise_scale)
+
+            # Clip to unit square bounds
+            x = np.clip(x, r, 1 - r)
+            y = np.clip(y, r, 1 - r)
+
+            circles[circle_idx] = [x, y, r]
+            circle_idx += 1
+
+    return circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Try to generate a valid hexagonal grid configuration first
+    try:
+        candidate_circles = generate_hexagonal_grid(n)
+
+        # Validate the configuration
+        valid = True
+        for i in range(n):
+            x, y, r = candidate_circles[i]
+            # Check containment
+            if not (r <= x <= 1 - r and r <= y <= 1 - r):
+                valid = False
+                break
+
+            # Check overlaps with previous circles
+            for j in range(i):
+                existing_x, existing_y, existing_r = candidate_circles[j]
+                distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                if distance < r + existing_r:
+                    valid = False
+                    break
+
+            if not valid:
+                break
+
+        if valid:
+            return candidate_circles
+    except Exception as e:
+        # Fall back to random if hexagonal fails
+        pass
+
+    # Fallback to random initialization if hexagonal failed
+    max_attempts = 10000
+    attempts = 0
+
+    while attempts < max_attempts:
+        # Try to generate a valid configuration
+        valid = True
+        candidate_circles = np.zeros((n, 3))
+
+        # Generate random positions and radii
+        for i in range(n):
+            # Try to place circle i
+            placed = False
+            max_tries = 100
+
+            for _ in range(max_tries):
+                # Generate random center and radius
+                x = np.random.uniform(0.01, 0.99)  # Avoid boundary issues
+                y = np.random.uniform(0.01, 0.99)
+                r = np.random.uniform(0.001, 0.1)  # Reasonable initial radius
+
+                # Check containment constraint
+                if (r <= x <= 1 - r) and (r <= y <= 1 - r):
+                    # Check overlap with existing circles
+                    overlap = False
+                    for j in range(i):
+                        existing_x, existing_y, existing_r = candidate_circles[j]
+                        distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                        if distance < r + existing_r:
+                            overlap = True
+                            break
+
+                    if not overlap:
+                        candidate_circles[i] = [x, y, r]
+                        placed = True
+                        break
+
+            if not placed:
+                valid = False
+                break
+
+        if valid:
+            return candidate_circles
+
+        attempts += 1
+
+    # If we couldn't find a valid initial configuration, return the best attempt
+    print(f"Warning: Could not generate valid initial configuration after {max_attempts} attempts")
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

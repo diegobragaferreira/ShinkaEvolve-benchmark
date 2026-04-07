@@ -1,0 +1,282 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.strtree import STRtree
+import time
+from numba import jit
+import warnings
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Compute vertices of a hexagon given center, rotation, and side length."""
+    angle_rad = np.radians(angle_deg)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    base_verts = np.array([
+        [1, 0],
+        [0.5, np.sqrt(3)/2],
+        [-0.5, np.sqrt(3)/2],
+        [-1, 0],
+        [-0.5, -np.sqrt(3)/2],
+        [0.5, -np.sqrt(3)/2]
+    ])
+
+    rotated_verts = np.empty_like(base_verts)
+    for i in range(6):
+        x_orig, y_orig = base_verts[i]
+        rotated_verts[i] = [
+            x + side_length * (x_orig * cos_a - y_orig * sin_a),
+            y + side_length * (x_orig * sin_a + y_orig * cos_a)
+        ]
+
+    return rotated_verts
+
+def compute_hexagon_polygon(x, y, angle_deg, side_length=1):
+    """Convert hexagon parameters to shapely polygon."""
+    vertices = hexagon_vertices(x, y, angle_deg, side_length)
+    return Polygon(vertices)
+
+class SymmetricHexagonOptimizer:
+    """Optimizes hexagon packing using symmetry-preserving constraints."""
+    
+    def __init__(self):
+        # Pre-computed symmetric patterns for 12 hexagons
+        self.symmetry_patterns = [
+            # Pattern 1: 6-fold rotational symmetry with central hexagon
+            {
+                'pattern': 'hexagonal_lattice',
+                'params': [
+                    [0, 0, 0],      # Center
+                    [1.732, 0, 0],  # Right
+                    [0.866, 1.5, 0], # Top-right
+                    [-0.866, 1.5, 0], # Top-left
+                    [-1.732, 0, 0], # Left
+                    [-0.866, -1.5, 0], # Bottom-left
+                    [0.866, -1.5, 0], # Bottom-right
+                    [1.732, 3.0, 0], # Far top-right
+                    [0.866, 4.5, 0], # Far top-middle
+                    [-0.866, 4.5, 0], # Far top-middle-left
+                    [-1.732, 3.0, 0], # Far top-left
+                    [0, -4.5, 0], # Far bottom
+                ]
+            }
+        ]
+    
+    def create_symmetric_initial(self):
+        """Generate initial configuration with symmetry properties."""
+        # Use the most promising symmetric pattern
+        pattern = self.symmetry_patterns[0]['params']
+        initial_config = np.array(pattern)
+        
+        # Add small random perturbations to escape local minima
+        np.random.seed(42)
+        for i in range(12):
+            initial_config[i, 0] += np.random.normal(0, 0.1)  # x
+            initial_config[i, 1] += np.random.normal(0, 0.1)  # y
+            initial_config[i, 2] += np.random.normal(0, 5)    # angle
+            
+        return initial_config
+    
+    def evaluate_with_geometric_checks(self, params):
+        """Enhanced evaluation with geometric optimizations."""
+        # Extract inner hexagon data and outer radius
+        inner_hex_data = params[:-1].reshape(12, 3)
+        outer_hex_side_length = params[-1]
+        
+        # Create outer hexagon polygon (centered at origin)
+        outer_hex_poly = compute_hexagon_polygon(0, 0, 0, outer_hex_side_length)
+        
+        # Precompute all inner polygons for faster intersection tests
+        inner_polys = []
+        for i in range(12):
+            x, y, angle = inner_hex_data[i]
+            inner_poly = compute_hexagon_polygon(x, y, angle)
+            inner_polys.append(inner_poly)
+        
+        # Create spatial index for efficient overlap detection
+        try:
+            spatial_index = STRtree(inner_polys)
+        except:
+            spatial_index = None
+        
+        # Check containment and overlaps efficiently
+        total_penalty = 0.0
+        valid = True
+        
+        # Check containment first (faster)
+        for i in range(12):
+            if not outer_hex_poly.contains(inner_polys[i]):
+                valid = False
+                # Calculate penetration penalty
+                try:
+                    diff = outer_hex_poly.difference(inner_polys[i])
+                    if hasattr(diff, 'area'):
+                        total_penalty += diff.area * 1000
+                except:
+                    total_penalty += 1000000
+        
+        # Check overlaps using spatial index if available
+        if spatial_index and valid:
+            # Use spatial index for efficient overlap checks
+            for i in range(12):
+                candidates = spatial_index.query(inner_polys[i])
+                for j in candidates:
+                    if i < j:  # Avoid duplicate pairs and self-checks
+                        if inner_polys[i].intersects(inner_polys[j]) and not inner_polys[i].touches(inner_polys[j]):
+                            try:
+                                overlap = inner_polys[i].intersection(inner_polys[j])
+                                if hasattr(overlap, 'area') and overlap.area > 0:
+                                    total_penalty += overlap.area * 10000
+                            except:
+                                total_penalty += 1000000  # Large penalty
+                            
+        elif valid:
+            # Fallback to direct pairwise overlap checking
+            for i in range(12):
+                for j in range(i+1, 12):
+                    if inner_polys[i].intersects(inner_polys[j]) and not inner_polys[i].touches(inner_polys[j]):
+                        try:
+                            overlap = inner_polys[i].intersection(inner_polys[j])
+                            if hasattr(overlap, 'area') and overlap.area > 0:
+                                total_penalty += overlap.area * 10000
+                        except:
+                            total_penalty += 1000000  # Large penalty
+        
+        if not valid:
+            return total_penalty + 1e10  # Large penalty for constraint violations
+            
+        # If valid, return inverse of outer hexagon side length (negative for minimization)
+        return -1.0 / outer_hex_side_length
+    
+    def optimize_with_symmetry_constraints(self):
+        """Main optimization loop with symmetry-aware constraints."""
+        # Generate symmetric initial guess
+        initial_guess = self.create_symmetric_initial()
+        
+        # Estimate outer radius
+        max_dist = 0
+        for i in range(12):
+            x, y, _ = initial_guess[i]
+            dist = np.sqrt(x*x + y*y)
+            max_dist = max(max_dist, dist)
+        initial_outer_radius = max_dist + 2.0
+        
+        # Combine parameters
+        initial_params = np.concatenate([initial_guess.flatten(), [initial_outer_radius]])
+        
+        # Define bounds with symmetry considerations
+        bounds = []
+        # Position and angle bounds for 12 hexagons
+        for _ in range(12):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+        # Outer radius bound
+        bounds.append((0.1, 20.0))
+        
+        # Global optimization with symmetry consideration
+        def objective_function(params):
+            return self.evaluate_with_geometric_checks(params)
+        
+        # First phase: global search with faster parameters
+        try:
+            de_result = differential_evolution(
+                objective_function,
+                bounds,
+                maxiter=25,  # Reduced iterations for speed
+                popsize=12,
+                seed=42,
+                disp=False,
+                atol=1e-6,
+                rtol=1e-6
+            )
+            best_params = de_result.x
+        except Exception:
+            best_params = initial_params.copy()
+        
+        # Second phase: local refinement with more precise tolerances
+        try:
+            refined_result = minimize(
+                objective_function,
+                best_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={
+                    'maxiter': 75, 
+                    'disp': False, 
+                    'ftol': 1e-10,
+                    'gtol': 1e-8
+                }
+            )
+            if refined_result.success:
+                best_params = refined_result.x
+        except Exception:
+            pass
+        
+        # Final adjustment for containment
+        inner_hex_data = best_params[:-1].reshape(12, 3)
+        outer_hex_side_length = best_params[-1]
+        
+        # Ensure containment by recomputing minimum required radius
+        min_radius = 0
+        for i in range(12):
+            x, y, _ = inner_hex_data[i]
+            dist = np.sqrt(x*x + y*y) + 1.0
+            min_radius = max(min_radius, dist)
+        
+        if outer_hex_side_length < min_radius:
+            outer_hex_side_length = min_radius * 1.05
+        
+        return inner_hex_data, outer_hex_side_length
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses symmetry-aware optimization with geometric improvements.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    try:
+        # Create symmetry-aware optimizer
+        optimizer = SymmetricHexagonOptimizer()
+        
+        # Get optimized configuration
+        inner_hex_data, outer_hex_side_length = optimizer.optimize_with_symmetry_constraints()
+
+        # Create outer hexagon data (centered at origin, no rotation)
+        outer_hex_data = np.array([0, 0, 0])
+
+        # Ensure we don't exceed time limits
+        end_time = time.time()
+        eval_time = end_time - start_time
+
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+    except Exception as e:
+        # Fallback to simple grid arrangement if optimization fails
+        n = 12
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0],
+        ])
+
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8  # Large enough to contain all inner hexagons
+
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

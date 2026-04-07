@@ -1,0 +1,374 @@
+<NAME>
+enhance_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses manual convolution which can be computationally expensive for large arrays. I'll enhance the convolution computation by implementing an FFT-based approach that's more efficient for large datasets, which should help achieve better performance within the time constraints. This change leverages the fact that convolution in frequency domain is O(n log n) compared to O(n²) for direct convolution.
+
+This change focuses on improving the core computation bottleneck by replacing the manual convolution with FFT-based convolution in the key evaluation functions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+=======
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation with improved integration"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+def compute_autoconvolution_fft(f_vals):
+    """
+    Compute autoconvolution using FFT for better numerical stability and performance.
+    This is more efficient and numerically stable for large arrays.
+    """
+    import numpy as np
+    from scipy.fft import fft, ifft
+
+    # Ensure input is numpy array
+    f_vals = np.asarray(f_vals)
+    n = len(f_vals)
+
+    # Pad to avoid circular convolution effects
+    padded_length = 2 * n - 1
+    f_padded = np.pad(f_vals, (0, padded_length - n), mode='constant', constant_values=0)
+
+    # FFT-based convolution
+    F = fft(f_padded)
+    G_fft = F * F  # Point-wise multiplication in frequency domain
+    g = ifft(G_fft).real[:padded_length]
+
+    return g
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_manual_convolution_with_fft_in_evaluation
+</NAME>
+
+<DESCRIPTION>
+I'll modify the main evaluation functions to use the more efficient FFT-based convolution instead of the manual implementation, while maintaining backward compatibility for smaller arrays. This will provide significant performance improvements for larger step functions, allowing more exploration within the time constraint.
+
+The key insight is that for large arrays (which we'll encounter with higher resolution), FFT-based convolution is much faster than manual convolution, enabling us to explore larger solution spaces.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # For L2^2 norm using proper trapezoidal integration
+    if len(g_vals) >= 2:
+        # Trapezoidal rule: h * (y0^2 + 2*y1^2 + ... + yn-1^2)/2
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+=======
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # For L2^2 norm using proper trapezoidal integration
+    if len(g_vals) >= 2:
+        # Trapezoidal rule: h * (y0^2 + 2*y1^2 + ... + yn-1^2)/2
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        h = 1.0 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+    elif len(g_vals) == 1:
+        g_l2_sq = g_vals[0] * g_vals[0]
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+def compute_c2_fft(f_vals):
+    """Compute C2 value using FFT-based autoconvolution for better performance"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # For small arrays, use the numba version for consistency
+        # For larger arrays, use FFT for performance
+        if len(f_vals) > 500:
+            # Use FFT-based convolution
+            g_vals = compute_autoconvolution_fft(f_vals)
+        else:
+            # Use numba version for small arrays
+            g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+        return c2
+
+    except Exception as e:
+        return 0.0
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_optimization_functions_to_use_fft
+</NAME>
+
+<DESCRIPTION>
+I'll update the optimization functions to utilize the new FFT-based convolution where appropriate, particularly for the main objective function. This ensures that performance improvements from FFT convolution are leveraged throughout the optimization pipeline, especially in cases where large step functions are involved.
+
+This change focuses on making sure that all parts of the optimization pipeline use the most efficient convolution method available, particularly in the objective function evaluation that happens frequently during optimization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_population_evolution(initial_dim, max_iter=150):
+    """Perform evolutionary optimization with adaptive population sizing"""
+    # Start with multiple initialization strategies
+    x0 = mixed_strategy_initialization(initial_dim)
+
+    # Initialize parameters with dynamic scaling
+    popsize = min(25, initial_dim // 10 + 10)  # Adaptive population size (larger)
+    mutation_range = (0.7, 1.0)  # Wider mutation range for better exploration
+    recombination_rate = 0.7
+
+    # Set bounds for optimization
+    bounds = [(0, 10)] * len(x0)
+
+    # Run differential evolution with adaptive parameters
+    result = differential_evolution(
+        lambda x: -compute_c2_numba(compute_autoconvolution_numba(x)),
+        bounds,
+        maxiter=max_iter,
+        popsize=popsize,
+        seed=42,
+        disp=False,
+        tol=1e-6,
+        mutation=mutation_range,
+        recombination=recombination_rate,
+        init='random'  # Use random initialization to avoid bias
+    )
+
+    return result.x
+=======
+def adaptive_population_evolution(initial_dim, max_iter=150):
+    """Perform evolutionary optimization with adaptive population sizing"""
+    # Start with multiple initialization strategies
+    x0 = mixed_strategy_initialization(initial_dim)
+
+    # Initialize parameters with dynamic scaling
+    popsize = min(25, initial_dim // 10 + 10)  # Adaptive population size (larger)
+    mutation_range = (0.7, 1.0)  # Wider mutation range for better exploration
+    recombination_rate = 0.7
+
+    # Set bounds for optimization
+    bounds = [(0, 10)] * len(x0)
+
+    # Run differential evolution with adaptive parameters
+    result = differential_evolution(
+        lambda x: -compute_c2_fft(x),
+        bounds,
+        maxiter=max_iter,
+        popsize=popsize,
+        seed=42,
+        disp=False,
+        tol=1e-6,
+        mutation=mutation_range,
+        recombination=recombination_rate,
+        init='random'  # Use random initialization to avoid bias
+    )
+
+    return result.x
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_advanced_local_search_to_use_fft
+</NAME>
+
+<DESCRIPTION>
+Updating the advanced local search function to use the FFT-based C2 computation for consistency and performance. The local search is called frequently during optimization, so ensuring it uses the most efficient computation method will improve overall runtime performance and potentially lead to better convergence.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def advanced_local_search(initial_params, max_iter=100):
+    """Advanced local search with stochastic perturbations"""
+    def objective(x):
+        return -compute_c2_numba(compute_autoconvolution_numba(x))
+
+    try:
+        # First try Nelder-Mead for global refinement
+        result1 = minimize(
+            objective,
+            initial_params,
+            method='Nelder-Mead',
+            options={'maxiter': max_iter//3, 'ftol': 1e-8, 'xtol': 1e-8}
+        )
+
+        # Add stochastic perturbation to escape local optimum
+        perturbed_params = result1.x + 0.01 * np.random.randn(len(result1.x))
+        perturbed_params = np.maximum(perturbed_params, 0)
+
+        # Then try L-BFGS-B for local fine-tuning
+        result2 = minimize(
+            objective,
+            perturbed_params,
+            method='L-BFGS-B',
+            bounds=[(0, 10) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter//3, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        # Final stochastic perturbation for escaping plateaus
+        final_params = result2.x + 0.005 * np.random.randn(len(result2.x))
+        final_params = np.maximum(final_params, 0)
+
+        return final_params
+    except Exception:
+        # Fallback to coordinate-wise optimization
+        try:
+            # Simple gradient descent-like approach for robustness
+            current_params = np.array(initial_params)
+            for _ in range(max_iter//2):
+                new_params = current_params.copy()
+                # Update each parameter slightly
+                for i in range(len(current_params)):
+                    test_params = current_params.copy()
+                    test_params[i] = max(0, current_params[i] + 0.01 * np.random.randn())
+                    if compute_c2_numba(compute_autoconvolution_numba(test_params)) > \
+                       compute_c2_numba(compute_autoconvolution_numba(current_params)):
+                        new_params[i] = test_params[i]
+                current_params = new_params
+            return current_params
+        except:
+            return initial_params
+=======
+def advanced_local_search(initial_params, max_iter=100):
+    """Advanced local search with stochastic perturbations"""
+    def objective(x):
+        return -compute_c2_fft(x)
+
+    try:
+        # First try Nelder-Mead for global refinement
+        result1 = minimize(
+            objective,
+            initial_params,
+            method='Nelder-Mead',
+            options={'maxiter': max_iter//3, 'ftol': 1e-8, 'xtol': 1e-8}
+        )
+
+        # Add stochastic perturbation to escape local optimum
+        perturbed_params = result1.x + 0.01 * np.random.randn(len(result1.x))
+        perturbed_params = np.maximum(perturbed_params, 0)
+
+        # Then try L-BFGS-B for local fine-tuning
+        result2 = minimize(
+            objective,
+            perturbed_params,
+            method='L-BFGS-B',
+            bounds=[(0, 10) for _ in range(len(initial_params))],
+            options={'maxiter': max_iter//3, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        # Final stochastic perturbation for escaping plateaus
+        final_params = result2.x + 0.005 * np.random.randn(len(result2.x))
+        final_params = np.maximum(final_params, 0)
+
+        return final_params
+    except Exception:
+        # Fallback to coordinate-wise optimization
+        try:
+            # Simple gradient descent-like approach for robustness
+            current_params = np.array(initial_params)
+            for _ in range(max_iter//2):
+                new_params = current_params.copy()
+                # Update each parameter slightly
+                for i in range(len(current_params)):
+                    test_params = current_params.copy()
+                    test_params[i] = max(0, current_params[i] + 0.01 * np.random.randn())
+                    if compute_c2_fft(test_params) > compute_c2_fft(current_params):
+                        new_params[i] = test_params[i]
+                current_params = new_params
+            return current_params
+        except:
+            return initial_params
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,290 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import random
+import time
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle with perimeter = 4, so width + height = 2
+    # Using 1.5 x 0.5 rectangle for better packing efficiency
+    rect_width = 1.5
+    rect_height = 0.5
+    
+    # Stage 1: Hybrid initialization
+    circles = np.zeros((n, 3))
+    
+    # Grid-based initialization for regular structure
+    rows = 4
+    cols = 6
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    # Place circles in hexagonal pattern
+    idx = 0
+    for i in range(rows):
+        offset = spacing_x * (i % 2) * 0.5
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x + offset
+            y = (i + 1) * spacing_y
+            # Ensure position is within bounds
+            x = max(0.01, min(rect_width - 0.01, x))
+            y = max(0.01, min(rect_height - 0.01, y))
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+        if idx >= n:
+            break
+    
+    # Fill remaining circles with random placement
+    while idx < n:
+        x = np.random.uniform(0.01, rect_width - 0.01)
+        y = np.random.uniform(0.01, rect_height - 0.01)
+        circles[idx] = [x, y, 0.05]
+        idx += 1
+    
+    # Stage 2: Evolutionary optimization with Voronoi-guided mutation
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+    
+    # Evolution parameters
+    population_size = 20
+    generations = 50
+    mutation_rate = 0.3
+    
+    # Generate initial population
+    population = [circles.copy()]
+    for _ in range(population_size - 1):
+        individual = circles.copy()
+        # Add small random perturbations
+        for i in range(n):
+            individual[i, 0] += np.random.normal(0, 0.02)
+            individual[i, 1] += np.random.normal(0, 0.02)
+            individual[i, 2] += np.random.normal(0, 0.01)
+            # Keep within bounds
+            individual[i, 0] = max(0.01, min(rect_width - 0.01, individual[i, 0]))
+            individual[i, 1] = max(0.01, min(rect_height - 0.01, individual[i, 1]))
+            individual[i, 2] = max(0.001, individual[i, 2])
+        population.append(individual)
+    
+    # Evolutionary loop
+    for gen in range(generations):
+        # Evaluate fitness (sum of radii) for all individuals
+        fitness_scores = []
+        for individual in population:
+            # Validate and correct if necessary
+            valid_individual = individual.copy()
+            valid_individual = validate_and_correct(valid_individual, rect_width, rect_height)
+            fitness = np.sum(valid_individual[:, 2])
+            fitness_scores.append(fitness)
+        
+        # Find best individual in current generation
+        best_idx = np.argmax(fitness_scores)
+        if fitness_scores[best_idx] > best_sum:
+            best_sum = fitness_scores[best_idx]
+            best_circles = population[best_idx].copy()
+        
+        # Selection - tournament selection
+        selected = []
+        for _ in range(population_size):
+            tournament_size = 3
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected.append(population[winner_idx].copy())
+        
+        # Crossover and mutation to create new population
+        new_population = [selected[0].copy()]  # Elitism
+        
+        while len(new_population) < population_size:
+            parent1 = selected[random.randint(0, len(selected)-1)]
+            parent2 = selected[random.randint(0, len(selected)-1)]
+            
+            # Crossover: blend positions and radii with Voronoi-aware selection
+            child = crossover_voronoi_aware(parent1, parent2, rect_width, rect_height)
+            
+            # Mutation with Voronoi guidance
+            if random.random() < mutation_rate:
+                child = mutate_voronoi_guided(child, rect_width, rect_height)
+            
+            new_population.append(child)
+        
+        population = new_population
+    
+    # Stage 3: Local refinement with Voronoi analysis
+    circles = best_circles.copy()
+    
+    # Refinement using Voronoi-based local optimization
+    for iteration in range(100):
+        improved = False
+        # Get Voronoi diagram for current configuration
+        points = circles[:, :2]
+        try:
+            vor = Voronoi(points)
+        except:
+            # Fallback if Voronoi fails
+            vor = None
+            
+        # Process circles in order of constraint level (use Voronoi to estimate)
+        constraint_levels = np.zeros(n)
+        if vor is not None:
+            # Estimate constraint level based on local neighbor density
+            for i in range(n):
+                neighbor_count = 0
+                for j in range(n):
+                    if i != j:
+                        dx = circles[i, 0] - circles[j, 0]
+                        dy = circles[i, 1] - circles[j, 1]
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        if distance < (circles[i, 2] + circles[j, 2] + 0.001):
+                            neighbor_count += 1
+                constraint_levels[i] = neighbor_count
+        
+        # Sort circles from least to most constrained
+        sorted_indices = np.argsort(constraint_levels)
+        
+        for i in sorted_indices:
+            # Calculate maximum allowable radius
+            max_radius = min(
+                circles[i][0],
+                rect_width - circles[i][0],
+                circles[i][1],
+                rect_height - circles[i][1]
+            ) - 0.001
+            
+            # Consider collision constraints
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+            
+            # Expand if beneficial
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Expand more aggressively for less constrained circles
+                expansion_factor = 1.0
+                if constraint_levels[i] <= 2:
+                    expansion_factor = 1.5
+                elif constraint_levels[i] <= 4:
+                    expansion_factor = 1.0
+                else:
+                    expansion_factor = 0.5
+                
+                delta = min(0.02, max_radius - circles[i][2]) * expansion_factor
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+        
+        if not improved:
+            break
+    
+    # Final validation
+    circles = validate_and_correct(circles, rect_width, rect_height)
+    
+    return circles
+
+def validate_and_correct(circles, rect_width, rect_height):
+    """Ensure all circles are valid (within bounds, non-overlapping)"""
+    n = len(circles)
+    
+    # Ensure all radii are positive
+    for i in range(n):
+        circles[i, 2] = max(0.001, circles[i, 2])
+    
+    # Ensure all positions are within bounds
+    for i in range(n):
+        circles[i, 0] = max(circles[i, 2], min(rect_width - circles[i, 2], circles[i, 0]))
+        circles[i, 1] = max(circles[i, 2], min(rect_height - circles[i, 2], circles[i, 1]))
+    
+    # Resolve overlaps with simple correction
+    for _ in range(10):
+        any_changed = False
+        for i in range(n):
+            for j in range(i+1, n):
+                dx = circles[i, 0] - circles[j, 0]
+                dy = circles[i, 1] - circles[j, 1]
+                distance = np.sqrt(dx*dx + dy*dy)
+                min_distance = circles[i, 2] + circles[j, 2]
+                
+                if distance < min_distance:
+                    # Simple separation: move circles apart
+                    if distance > 0.001:  # Avoid division by zero
+                        separation = (min_distance - distance) / 2.0
+                        dx_norm = dx / distance
+                        dy_norm = dy / distance
+                        
+                        circles[i, 0] += dx_norm * separation * 0.5
+                        circles[i, 1] += dy_norm * separation * 0.5
+                        circles[j, 0] -= dx_norm * separation * 0.5
+                        circles[j, 1] -= dy_norm * separation * 0.5
+                    else:
+                        # If too close, randomly separate
+                        angle = np.random.uniform(0, 2*np.pi)
+                        separation = min_distance * 0.1
+                        circles[i, 0] += np.cos(angle) * separation
+                        circles[i, 1] += np.sin(angle) * separation
+                        
+                    # Clamp to bounds
+                    circles[i, 0] = max(circles[i, 2], min(rect_width - circles[i, 2], circles[i, 0]))
+                    circles[i, 1] = max(circles[i, 2], min(rect_height - circles[i, 2], circles[i, 1]))
+                    circles[j, 0] = max(circles[j, 2], min(rect_width - circles[j, 2], circles[j, 0]))
+                    circles[j, 1] = max(circles[j, 2], min(rect_height - circles[j, 2], circles[j, 1]))
+                    
+                    any_changed = True
+        
+        if not any_changed:
+            break
+    
+    return circles
+
+def crossover_voronoi_aware(parent1, parent2, rect_width, rect_height):
+    """Perform crossover with Voronoi-aware selection"""
+    n = len(parent1)
+    child = np.zeros_like(parent1)
+    
+    # For each circle, select from either parent using Voronoi-aware criteria
+    for i in range(n):
+        # Simple random crossover first
+        if random.random() < 0.5:
+            child[i] = parent1[i].copy()
+        else:
+            child[i] = parent2[i].copy()
+        
+        # Ensure validity
+        child[i, 0] = max(0.01, min(rect_width - 0.01, child[i, 0]))
+        child[i, 1] = max(0.01, min(rect_height - 0.01, child[i, 1]))
+        child[i, 2] = max(0.001, child[i, 2])
+    
+    return child
+
+def mutate_voronoi_guided(individual, rect_width, rect_height):
+    """Mutate individual with Voronoi-guided approach"""
+    n = len(individual)
+    
+    # Mutate some circles with preference for those in sparse Voronoi regions
+    for i in range(n):
+        if random.random() < 0.3:  # 30% chance to mutate each circle
+            # Add random perturbation
+            individual[i, 0] += np.random.normal(0, 0.03)
+            individual[i, 1] += np.random.normal(0, 0.03)
+            individual[i, 2] += np.random.normal(0, 0.01)
+            
+            # Keep within bounds
+            individual[i, 0] = max(0.01, min(rect_width - 0.01, individual[i, 0]))
+            individual[i, 1] = max(0.01, min(rect_height - 0.01, individual[i, 1]))
+            individual[i, 2] = max(0.001, individual[i, 2])
+    
+    return individual
+
+# EVOLVE-BLOCK-END

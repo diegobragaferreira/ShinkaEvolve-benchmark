@@ -1,0 +1,289 @@
+<NAME>
+improve_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The current spatial indexing approach uses a uniform grid with fixed cell size, which may not be optimal for all scenarios. The idea is to implement a more adaptive spatial indexing system that adjusts cell sizes based on local hexagon density. This will improve collision detection efficiency, especially in regions where hexagons are clustered closely together. The key insight is to use a coarse grid (cell size = 2.8) for distant regions and finer grids (cell size = 1.4) in dense areas where hexagons cluster.
+
+This change enhances collision detection performance by making the spatial indexing more adaptive to varying densities of hexagons, which is particularly important in hexagon packing problems where some regions may have high concentration while others are sparse.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def build_spatial_grid(hexagons, positions, angles):
+    """Build optimized spatial grid for collision detection"""
+    if len(hexagons) == 0:
+        return None
+
+    # Use a simpler and faster spatial grid approach
+    # Instead of quadtree, use a uniform grid with adjustable cell size
+    cell_size = 2.8  # Based on hexagon diameter
+
+    # Determine bounds of all hexagons
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
+
+    for i in range(len(positions)):
+        pos = positions[i]
+        angle = angles[i]
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        for vx, vy in hex_vertices:
+            min_x = min(min_x, vx)
+            max_x = max(max_x, vx)
+            min_y = min(min_y, vy)
+            max_y = max(max_y, vy)
+
+    # Add padding
+    padding = 1.0
+    min_x -= padding
+    max_x += padding
+    min_y -= padding
+    max_y += padding
+
+    # Create uniform grid
+    grid_width = int((max_x - min_x) / cell_size) + 1
+    grid_height = int((max_y - min_y) / cell_size) + 1
+
+    # Initialize grid
+    grid = defaultdict(list)
+
+    # Insert hexagon indices into grid cells
+    for i in range(len(positions)):
+        pos = positions[i]
+        # Get grid cell coordinates
+        grid_x = int((pos[0] - min_x) / cell_size)
+        grid_y = int((pos[1] - min_y) / cell_size)
+
+        # Insert into grid cell (and neighboring cells for safety)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                gx = grid_x + dx
+                gy = grid_y + dy
+                if 0 <= gx < grid_width and 0 <= gy < grid_height:
+                    grid[(gx, gy)].append(i)
+
+    return grid, (min_x, min_y, max_x, max_y), cell_size
+=======
+def build_adaptive_spatial_grid(hexagons, positions, angles):
+    """Build adaptive spatial grid for collision detection with dynamic cell sizing"""
+    if len(hexagons) == 0:
+        return None
+
+    # Determine bounds of all hexagons
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
+
+    for i in range(len(positions)):
+        pos = positions[i]
+        angle = angles[i]
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        for vx, vy in hex_vertices:
+            min_x = min(min_x, vx)
+            max_x = max(max_x, vx)
+            min_y = min(min_y, vy)
+            max_y = max(max_y, vy)
+
+    # Add padding
+    padding = 1.0
+    min_x -= padding
+    max_x += padding
+    min_y -= padding
+    max_y += padding
+
+    # Calculate average distance between hexagons to determine appropriate cell size
+    avg_distance = 0
+    count = 0
+    for i in range(len(positions)):
+        for j in range(i+1, len(positions)):
+            dist = np.sqrt((positions[i][0] - positions[j][0])**2 + (positions[i][1] - positions[j][1])**2)
+            avg_distance += dist
+            count += 1
+
+    if count > 0:
+        avg_distance /= count
+        # Use adaptive cell size based on average inter-hexagon distance
+        # Fine grid when hexagons are close, coarse when they're far apart
+        cell_size = max(1.4, min(2.8, avg_distance * 0.8))  # Between 1.4 and 2.8
+    else:
+        cell_size = 2.8  # Default coarse grid
+
+    # Create uniform grid
+    grid_width = int((max_x - min_x) / cell_size) + 1
+    grid_height = int((max_y - min_y) / cell_size) + 1
+
+    # Initialize grid
+    grid = defaultdict(list)
+
+    # Insert hexagon indices into grid cells
+    for i in range(len(positions)):
+        pos = positions[i]
+        # Get grid cell coordinates
+        grid_x = int((pos[0] - min_x) / cell_size)
+        grid_y = int((pos[1] - min_y) / cell_size)
+
+        # Insert into grid cell (and neighboring cells for safety)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                gx = grid_x + dx
+                gy = grid_y + dy
+                if 0 <= gx < grid_width and 0 <= gy < grid_height:
+                    grid[(gx, gy)].append(i)
+
+    return grid, (min_x, min_y, max_x, max_y), cell_size
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_collision_detection
+</NAME>
+
+<DESCRIPTION>
+Replace the old spatial grid building function with the new adaptive version. This change ensures that the collision detection uses the improved adaptive spatial indexing system that adjusts cell sizes based on local hexagon density, leading to better performance in collision checking operations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Build spatial grid for collision detection if requested
+    grid_info = None
+    if use_spatial_index:
+        grid_info = build_spatial_grid(inner_hexagons, positions, angles)
+=======
+    # Build spatial grid for collision detection if requested
+    grid_info = None
+    if use_spatial_index:
+        grid_info = build_adaptive_spatial_grid(inner_hexagons, positions, angles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_fast_collision_check
+</NAME>
+
+<DESCRIPTION>
+Update the fast collision check function to use the new adaptive spatial grid system. This ensures consistency between the grid building and collision checking functions, allowing the adaptive cell sizing to properly influence the collision detection performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def fast_collision_check_with_grid(grid_info, positions, angles, i, j):
+    """Fast collision check using uniform grid spatial indexing"""
+    if i == j:
+        return False
+
+    grid, bounds, cell_size = grid_info
+
+    # Quick distance check first
+    pos_i = positions[i]
+    pos_j = positions[j]
+    dist_sq = (pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2
+
+    # If too far apart, no need to do detailed check
+    if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+        return False
+
+    # Check if hexagons are in same or adjacent grid cells
+    min_x, min_y, max_x, max_y = bounds
+    grid_x_i = int((pos_i[0] - min_x) / cell_size)
+    grid_y_i = int((pos_i[1] - min_y) / cell_size)
+    grid_x_j = int((pos_j[0] - min_x) / cell_size)
+    grid_y_j = int((pos_j[1] - min_y) / cell_size)
+
+    # Check nearby cells in grid
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            gx_i = grid_x_i + dx
+            gy_i = grid_y_i + dy
+            gx_j = grid_x_j + dx
+            gy_j = grid_y_j + dy
+
+            # If both hexagons are in same cell or adjacent cells
+            if (gx_i, gy_i) in grid and (gx_j, gy_j) in grid:
+                # Check if they share the same cell
+                if abs(gx_i - gx_j) <= 1 and abs(gy_i - gy_j) <= 1:
+                    # Detailed check
+                    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                                pos_j[0], pos_j[1], angles[j])
+
+    # Fallback to detailed check
+    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                pos_j[0], pos_j[1], angles[j])
+=======
+def fast_collision_check_with_adaptive_grid(grid_info, positions, angles, i, j):
+    """Fast collision check using adaptive spatial grid indexing"""
+    if i == j:
+        return False
+
+    grid, bounds, cell_size = grid_info
+
+    # Quick distance check first
+    pos_i = positions[i]
+    pos_j = positions[j]
+    dist_sq = (pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2
+
+    # If too far apart, no need to do detailed check
+    if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+        return False
+
+    # Check if hexagons are in same or adjacent grid cells
+    min_x, min_y, max_x, max_y = bounds
+    grid_x_i = int((pos_i[0] - min_x) / cell_size)
+    grid_y_i = int((pos_i[1] - min_y) / cell_size)
+    grid_x_j = int((pos_j[0] - min_x) / cell_size)
+    grid_y_j = int((pos_j[1] - min_y) / cell_size)
+
+    # Check nearby cells in grid
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            gx_i = grid_x_i + dx
+            gy_i = grid_y_i + dy
+            gx_j = grid_x_j + dx
+            gy_j = grid_y_j + dy
+
+            # If both hexagons are in same cell or adjacent cells
+            if (gx_i, gy_i) in grid and (gx_j, gy_j) in grid:
+                # Check if they share the same cell
+                if abs(gx_i - gx_j) <= 1 and abs(gy_i - gy_j) <= 1:
+                    # Detailed check
+                    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                                pos_j[0], pos_j[1], angles[j])
+
+    # Fallback to detailed check
+    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                pos_j[0], pos_j[1], angles[j])
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_collision_call
+</NAME>
+
+<DESCRIPTION>
+Update the call to the collision checking function to use the new adaptive version. This ensures that the entire system uses the improved adaptive spatial indexing throughout the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Use fast collision check with spatial indexing
+            if use_spatial_index and grid_info is not None:
+                if not fast_collision_check_with_grid(grid_info, positions, angles, i, j):
+                    continue
+            else:
+                # Fallback to direct check if spatial index fails
+                if not hexagon_overlap_fast(positions[i][0], positions[i][1], angles[i],
+                                            positions[j][0], positions[j][1], angles[j]):
+                    continue
+=======
+            # Use fast collision check with spatial indexing
+            if use_spatial_index and grid_info is not None:
+                if not fast_collision_check_with_adaptive_grid(grid_info, positions, angles, i, j):
+                    continue
+            else:
+                # Fallback to direct check if spatial index fails
+                if not hexagon_overlap_fast(positions[i][0], positions[i][1], angles[i],
+                                            positions[j][0], positions[j][1], angles[j]):
+                    continue
+>>>>>>> REPLACE
+</DIFF>

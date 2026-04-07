@@ -1,0 +1,436 @@
+--- a/original.py
++++ b/original.py
+@@ -1,410 +1,428 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from numba import jit, njit
+ import random
+ import time
+ import warnings
+ from scipy.signal import fftconvolve
+ import jax
+ import jax.numpy as jnp
+ from jax import grad, jit as jax_jit
+ 
+ # Global constants
+ MAX_EVALUATIONS = 10000
+ TIME_LIMIT_SECONDS = 85
+ DEFAULT_N_STEPS = 1000
+ 
+ @jax_jit
+ def compute_autoconvolution_jax(f_vals):
+     """JAX version of autoconvolution computation for gradient support"""
+     # Convert to JAX array and ensure non-negativity
+     f = jnp.array(f_vals)
+     f = jnp.maximum(f, 0)
+ 
+     if len(f_vals) == 0:
+         return jnp.array([])
+ 
+     # Using JAX's convolution operation
+     g_full = jnp.convolve(f, f, mode='full')
+ 
+     # Trim to center portion
+     half_len = len(f_vals)
+     center_start = len(g_full) // 2 - half_len + 1
+     center_end = len(g_full) // 2 + half_len - 1
+     g_trimmed = g_full[center_start:center_end]
+ 
+     return g_trimmed
+ 
+ @jax_jit
+ def compute_c2_jax(f_vals):
+     """JAX version of C2 computation for automatic differentiation support"""
+     # Ensure non-negative values
+     f = jnp.clip(jnp.array(f_vals), 0, None)
+ 
+     # Compute autoconvolution
+     g = compute_autoconvolution_jax(f)
+ 
+     # Compute norms using JAX operations
+     g_abs = jnp.abs(g)
+ 
+     # L2 squared norm using summation (simplified for JAX compatibility)
+     norm_l2_sq = jnp.sum(g_abs * g_abs)
+ 
+     # L1 norm
+     norm_l1 = jnp.sum(g_abs) / (len(g) + 1)
+ 
+     # L-infinity norm
+     norm_inf = jnp.max(g_abs)
+ 
+     # Avoid division by zero
+     safe_l1 = jnp.where(norm_l1 <= 1e-15, 1e-15, norm_l1)
+     safe_inf = jnp.where(norm_inf <= 1e-15, 1e-15, norm_inf)
+ 
+     return norm_l2_sq / (safe_l1 * safe_inf)
+ 
+ def compute_c2_score(f_vals):
+     """
+     Compute the C2 score: ||g||₂² / (||g||₁ · ||g||∞)
+     """
+     # For the main computation, we call the optimized numba version
+     # since it's more efficient for repeated evaluations during optimization
+     return compute_c2_score_numba(f_vals)
+ 
+ @njit
+ def compute_c2_score_numba(f_vals):
+     """
+     Compute the C2 score: ||g||₂² / (||g||₁ · ||g||∞)
+     Using numba-optimized version for performance
+     """
+     norm_l2_sq, norm_l1, norm_inf = compute_autoconvolution_norms(f_vals)
+ 
+     # Avoid division by zero
+     if norm_l1 <= 1e-15 or norm_inf <= 1e-15:
+         return 0.0
+ 
+     return norm_l2_sq / (norm_l1 * norm_inf)
+ 
+ @njit
+ def compute_autoconvolution_norms(f_vals):
+     """
+     Compute the three norms of the autoconvolution g = f*f
+     Returns ||g||₂², ||g||₁, ||g||∞
+     """
+     # Ensure input is numpy array
+     f = np.array(f_vals, dtype=np.float64)
+     f = np.maximum(f, 0)  # Clip negative values to 0
+ 
+     if len(f) == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # Compute autoconvolution manually for better control and performance
+     g_full = compute_autoconvolution_manual(f)
+ 
+     # Trim to match proper interval [-1/4, 1/4]
+     half_len = len(f)
+     g_center = len(g_full) // 2
+     g_trimmed = g_full[g_center - half_len : g_center + half_len]
+ 
+     # Compute norms using trapezoidal integration for ||g||₂²
+     if len(g_trimmed) < 2:
+         norm_l2_sq = 0.0
+     else:
+         # Trapezoidal integration formula for piecewise linear segments
+         # Each segment contributes (width/3)*(y1^2 + y1*y2 + y2^2)
+         step_width = 0.5 / len(f)
+         g_abs = np.abs(g_trimmed)
+         widths = np.full(len(g_abs)-1, step_width)
+         y1 = g_abs[:-1]
+         y2 = g_abs[1:]
+         norm_l2_sq = np.sum(widths * (y1**2 + y1*y2 + y2**2) / 3.0)
+ 
+     # ||g||_1 = sum of absolute values normalized
+     norm_l1 = np.sum(np.abs(g_trimmed)) / (len(g_trimmed) + 1) if len(g_trimmed) > 0 else 1e-15
+ 
+     # ||g||_∞ = max absolute value
+     norm_inf = np.max(np.abs(g_trimmed)) if len(g_trimmed) > 0 else 1e-15
+ 
+     return norm_l2_sq, norm_l1, norm_inf
+ 
+ @njit
+ def compute_autoconvolution_manual(f_vals):
+     """
+     Manual computation of autoconvolution for better performance with Numba
+     """
+     n = len(f_vals)
+     if n == 0:
+         return np.array([])
+ 
+     # Allocate result array for autoconvolution
+     g = np.zeros(2 * n - 1)
+ 
+     # Manual convolution computation
+     for i in range(n):
+         for j in range(n):
+             g[i + j] += f_vals[i] * f_vals[j]
+ 
+     return g
+ 
+ def generate_multi_scale_initialization(n):
+     """Generate initial population with multi-scale patterns for better exploration"""
+     patterns = []
+ 
+     # Pattern 1: Multi-peak Gaussian with varying scales
+     x = np.linspace(-1, 1, n)
+     pattern1 = np.zeros(n)
+     for i in range(3):  # Three peaks
+         center = -0.5 + i * 0.5
+         width = 0.2 + random.random() * 0.3
+         height = 0.8 + random.random() * 0.4
+         pattern1 += height * np.exp(-((x - center)**2) / (2 * width**2))
+     patterns.append(pattern1.tolist())
+ 
+     # Pattern 2: Alternating pattern with high/low values
+     pattern2 = []
+     for i in range(n):
+         base_val = 1.5 if i % 3 == 0 else 0.3 if i % 3 == 1 else 0.8
+         pattern2.append(base_val + random.random() * 0.3)
+     patterns.append(pattern2)
+ 
+     # Pattern 3: Sinusoidal pattern with modulation
+     pattern3 = []
+     for i in range(n):
+         x_pos = i / (n - 1) if n > 1 else 0.5
+         base = 1.0 + 0.3 * np.sin(8 * np.pi * x_pos)
+         mod = 0.2 * np.cos(12 * np.pi * x_pos)
+         pattern3.append(max(0.0, base + mod))
+     patterns.append(pattern3)
+ 
+     # Pattern 4: Single dominant peak with decay
+     pattern4 = []
+     center = n // 2
+     for i in range(n):
+         distance = abs(i - center) / (n // 2)
+         val = max(0.0, 1.0 * np.exp(-2 * distance**2))
+         pattern4.append(val + 0.1 * random.random())
+     patterns.append(pattern4)
+ 
+     # Pattern 5: Random with heavy-tailed distribution
+     pattern5 = []
+     for i in range(n):
+         # Heavy-tailed distribution
+         r = random.random()
+         if r < 0.7:
+             pattern5.append(0.1 + 0.3 * random.random())
+         else:
+             pattern5.append(1.0 + 2.0 * random.random())
+     patterns.append(pattern5)
+ 
+     # Select the best performing pattern among these
+     best_pattern = patterns[0]
+     best_score = -1.0
+ 
+     for p in patterns:
+         try:
+             score = compute_c2_score_numba(p)
+             if score > best_score:
+                 best_score = score
+                 best_pattern = p
+         except:
+             continue
+ 
+     return best_pattern
+ 
+ def compute_gradient_jax(f_vals):
+     """Compute gradient of C2 score using JAX automatic differentiation"""
++    # Ensure inputs are properly clipped and converted to JAX arrays
++    f_array = jnp.array(np.clip(f_vals, 0, None))
++
+     try:
+-        # Ensure inputs are properly clipped
+-        f_array = jnp.array(np.clip(f_vals, 0, None))
+-
+         # Compute gradient using JAX automatic differentiation
+         grad_func = grad(compute_c2_jax)
+         gradients = grad_func(f_array)
+ 
+         # Convert back to numpy array
+         return np.array(gradients)
+     except Exception as e:
+-        # Return zero gradients if computation fails
+-        return np.zeros_like(f_vals)
++        # If JAX gradient computation fails, fall back to a more robust approach
++        # by using finite differences with a very small epsilon
++        epsilon = 1e-6
++        base_c2 = compute_c2_jax(f_array)
++        gradients = []
++
++        for i in range(len(f_vals)):
++            # Create perturbed arrays
++            f_vals_plus = f_array.at[i].set(f_array[i] + epsilon)
++            f_vals_minus = f_array.at[i].set(f_array[i] - epsilon)
++
++            # Compute C2 values
++            c2_plus = compute_c2_jax(f_vals_plus)
++            c2_minus = compute_c2_jax(f_vals_minus)
++
++            # Finite difference approximation
++            gradient_i = (c2_plus - c2_minus) / (2 * epsilon)
++            gradients.append(float(gradient_i))
++
++        return np.array(gradients)
+ 
+ def adaptive_gradient_descent(initial_params, max_iterations=500):
+     """Adaptive gradient descent with dynamic learning rates using JAX gradients"""
+     current_params = np.array(initial_params, dtype=float)
+     current_c2 = compute_c2_score_numba(current_params)
+ 
+     # Adaptive learning rate
+     learning_rate = 0.1
+     patience = 0
+     best_c2 = current_c2
+     best_params = current_params.copy()
+ 
+     for iteration in range(max_iterations):
+         # Compute gradient using JAX for better accuracy
+         try:
+             grad = compute_gradient_jax(current_params)
+         except:
+             # Fall back to numerical gradient if needed
+             grad = np.zeros_like(current_params)
+             epsilon = 1e-5
+             base_c2 = compute_c2_score_numba(current_params)
+             for i in range(len(current_params)):
+                 f_vals_plus = current_params.copy()
+                 f_vals_plus[i] = max(0, current_params[i] + epsilon)
+                 c2_plus = compute_c2_score_numba(f_vals_plus)
+                 grad[i] = (c2_plus - base_c2) / epsilon
+ 
+         # Apply gradient with clipping to maintain non-negativity
+         new_params = current_params - learning_rate * grad
+         new_params = np.maximum(new_params, 0)
+ 
+         # Evaluate new solution
+         new_c2 = compute_c2_score_numba(new_params)
+ 
+         if new_c2 > current_c2:
+             current_params = new_params
+             current_c2 = new_c2
+             patience = 0
+ 
+             if new_c2 > best_c2:
+                 best_c2 = new_c2
+                 best_params = current_params.copy()
+         else:
+             patience += 1
+             if patience > 10:
+                 learning_rate *= 0.5
+                 patience = 0
+                 if learning_rate < 1e-6:
+                     break
+ 
+     return best_params, best_c2
+ 
+ def multi_stage_optimization(initial_params):
+     """Multi-stage optimization approach"""
+     current_solution = np.array(initial_params)
+     best_c2 = compute_c2_score(current_solution)
+     best_solution = current_solution.copy()
+ 
+     # Stage 1: Coarse optimization with larger steps
+     stage1_params = current_solution.copy()
+     stage1_params, stage1_c2 = adaptive_gradient_descent(stage1_params, max_iterations=100)
+ 
+     if stage1_c2 > best_c2:
+         best_c2 = stage1_c2
+         best_solution = stage1_params.copy()
+ 
+     # Stage 2: Fine-grained optimization
+     stage2_params, stage2_c2 = adaptive_gradient_descent(stage1_params, max_iterations=200)
+ 
+     if stage2_c2 > best_c2:
+         best_c2 = stage2_c2
+         best_solution = stage2_params.copy()
+ 
+     # Stage 3: Local refinement with L-BFGS
+     try:
+         def objective(x):
+             return -compute_c2_score(x)
+ 
+         bounds = [(0, None) for _ in range(len(best_solution))]
+         result = minimize(
+             objective,
+             best_solution,
+             method='L-BFGS-B',
+             bounds=bounds,
+             options={'maxiter': 100, 'ftol': 1e-8}
+         )
+ 
+         if result.success:
+             refined_solution = np.maximum(result.x, 0)
+             refined_c2 = compute_c2_score(refined_solution)
+ 
+             if refined_c2 > best_c2:
+                 best_c2 = refined_c2
+                 best_solution = refined_solution
+     except:
+         pass
+ 
+     return best_solution, best_c2
+ 
+ def adaptive_optimization_strategy():
+     """Main adaptive optimization function with multiple strategies"""
+     best_c2 = -np.inf
+     best_params = None
+ 
+     # Strategy 1: Multiple random starts with different initialization sizes
+     start_configs = [
+         (300, 42),
+         (500, 123),
+         (700, 234),
+         (900, 345),
+         (1100, 456),
+         (1300, 567)
+     ]
+ 
+     # Add some random configurations
+     for _ in range(3):
+         n = random.randint(400, 1200)
+         seed = random.randint(1000, 9999)
+         start_configs.append((n, seed))
+ 
+     for n, seed in start_configs:
+         if time.time() - start_time > TIME_LIMIT_SECONDS * 0.9:
+             break
+ 
+         try:
+             random.seed(seed)
+             np.random.seed(seed)
+ 
+             # Generate initial solution
+             initial_params = generate_multi_scale_initialization(n)
+ 
+             # Optimize using multi-stage approach
+             optimized_params, optimized_c2 = multi_stage_optimization(initial_params)
+ 
+             if optimized_c2 > best_c2:
+                 best_c2 = optimized_c2
+                 best_params = optimized_params.copy()
+ 
+         except Exception as e:
+             continue
+ 
+     return best_params, best_c2
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value."""
+     global start_time
+     start_time = time.time()
+ 
+     # Set seeds for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+ 
+     try:
+         # Run adaptive optimization
+         f_values, best_c2 = adaptive_optimization_strategy()
+ 
+         # Fallback in case of failure
+         if f_values is None or len(f_values) == 0:
+             # Use simple initialization
+             n = 500
+             f_values = generate_multi_scale_initialization(n)
+ 
+         # Ensure non-negative values
+         f_values = np.maximum(f_values, 0).tolist()
+ 
+         # Ensure reasonable size
+         if len(f_values) < 50:
+             f_values = f_values + [0.5] * (50 - len(f_values))
+         elif len(f_values) > 10000:
+             f_values = f_values[:10000]
+ 
+         return f_values
+ 
+     except Exception as e:
+         # Final fallback
+         return [0.5] * 500
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

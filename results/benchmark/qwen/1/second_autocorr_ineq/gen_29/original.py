@@ -1,0 +1,61 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using sophisticated strategy."""
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Determine number of steps (within reasonable bounds)
+    n_steps = np.random.randint(500, 5000)
+
+    # Create a sophisticated pattern based on mathematical intuition
+    # We'll use alternating high/low regions with smoothing
+
+    # Generate base alternating pattern
+    f_values = []
+
+    # Define regions with high and low values
+    high_value = np.random.uniform(0.7, 1.0)
+    low_value = np.random.uniform(0.0, 0.3)
+
+    # Create base alternating pattern
+    for i in range(n_steps):
+        if i % 2 == 0:
+            f_values.append(high_value)
+        else:
+            f_values.append(low_value)
+
+    # Apply Gaussian smoothing to create smoother transitions
+    # This helps avoid sharp discontinuities that might hurt convolution properties
+    if len(f_values) >= 3:
+        # Create Gaussian kernel for smoothing
+        kernel_size = min(21, len(f_values) // 10)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        sigma = kernel_size / 6.0
+        x = np.arange(kernel_size) - kernel_size // 2
+        gaussian_kernel = np.exp(-x**2 / (2 * sigma**2))
+        gaussian_kernel /= np.sum(gaussian_kernel)
+
+        # Apply convolution to smooth the function
+        f_values = np.convolve(f_values, gaussian_kernel, mode='same')
+
+    # Ensure all values are non-negative
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to prevent extreme peaks that might hurt C₂
+    max_val = np.max(f_values)
+    if max_val > 0:
+        f_values = f_values / max_val
+
+    # Convert to list
+    return f_values.tolist()
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

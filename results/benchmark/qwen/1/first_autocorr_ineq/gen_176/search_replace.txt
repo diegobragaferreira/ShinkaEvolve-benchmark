@@ -1,0 +1,370 @@
+<NAME>
+add_progressive_population_init
+</NAME>
+
+<DESCRIPTION>
+This edit implements progressive population initialization that evolves based on learned structural patterns from previous generations. The idea is to gradually shift from purely random initialization to incorporating structural traits identified in top-performing sequences from earlier generations. This approach builds upon strategies from "Adaptive Evolutionary Optimization" and "Fast Autocorrelation Evolutionary Search" which have shown to accelerate convergence and improve solution quality.
+
+The key improvements include:
+1. Adding a memory mechanism to record dominant features from top sequences
+2. Implementing progressive initialization that uses learned patterns
+3. Enhancing structural diversity through mixed initialization strategies
+4. Introducing a method to adaptively blend different initialization approaches
+
+This should help discover more promising regions of the solution space faster and lead to better overall performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class AdaptiveGradientEvolutionaryOptimizer:
+    """
+    An adaptive hybrid optimizer combining evolutionary and gradient-based methods to maximize 1/C₁.
+    Draws upon best practices from DEAP-based evolutionary strategies, gradient refinement,
+    and adaptive mechanisms for improved performance.
+    """
+
+    def __init__(self, pop_size: int = 50, generations: int = 50):
+        self.pop_size = pop_size
+        self.generations = generations
+        self.best_score = 0.0
+        self.best_sequence = None
+        self.fitness_cache = {}  # Memoization for fitness evaluations
+=======
+class AdaptiveGradientEvolutionaryOptimizer:
+    """
+    An adaptive hybrid optimizer combining evolutionary and gradient-based methods to maximize 1/C₁.
+    Draws upon best practices from DEAP-based evolutionary strategies, gradient refinement,
+    and adaptive mechanisms for improved performance.
+    """
+
+    def __init__(self, pop_size: int = 50, generations: int = 50):
+        self.pop_size = pop_size
+        self.generations = generations
+        self.best_score = 0.0
+        self.best_sequence = None
+        self.fitness_cache = {}  # Memoization for fitness evaluations
+        self.top_patterns_memory = []  # Memory for learned top patterns
+        self.generation_counter = 0  # Track generations for progressive init
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def generate_multiscale_sequence() -> List[float]:
+        """Generate a structured sequence using a multi-scale pattern for better initialization."""
+        # Choose different generation methods based on probability
+        method = random.choice(['sinusoidal', 'exponential', 'power'])
+        length = random.randint(100, 500)
+
+        if method == 'sinusoidal':
+            sequence = [abs(np.sin(i * np.pi / length)) * 1000 for i in range(length)]
+        elif method == 'exponential':
+            sequence = [np.exp(-i / (length / 3)) * 1000 for i in range(length)]
+        else:  # power
+            sequence = [(i + 1) ** (-1.5) * 1000 for i in range(length)]
+
+        # Add some randomness to avoid perfect symmetry
+        for i in range(length):
+            if random.random() < 0.1:
+                sequence[i] += random.uniform(-100, 100)
+
+        # Ensure non-negative
+        sequence = [max(0, x) for x in sequence]
+
+        # Ensure sum is meaningful
+        if sum(sequence) < 0.01:
+            sequence[random.randint(0, length-1)] += 0.01
+
+        return sequence
+=======
+    def generate_multiscale_sequence(self) -> List[float]:
+        """Generate a structured sequence using a multi-scale pattern for better initialization."""
+        # Progressive initialization strategy
+        if self.generation_counter < 10:
+            # Early generations: pure random initialization
+            length = random.randint(100, 500)
+            sequence = [random.uniform(0, 1000) for _ in range(length)]
+        elif self.generation_counter < 20 and self.top_patterns_memory:
+            # Mid generations: use learned patterns with some randomization
+            # Choose pattern from memory or random
+            if random.random() < 0.7:
+                # Use learned pattern
+                pattern = random.choice(self.top_patterns_memory)
+                sequence = [max(0, x + random.uniform(-100, 100)) for x in pattern]
+                length = len(pattern)
+            else:
+                # Random pattern
+                length = random.randint(100, 500)
+                sequence = [random.uniform(0, 1000) for _ in range(length)]
+        else:
+            # Later generations: balanced approach
+            method = random.choice(['sinusoidal', 'exponential', 'power', 'mixed'])
+            length = random.randint(100, 500)
+
+            if method == 'sinusoidal':
+                sequence = [abs(np.sin(i * np.pi / length)) * 1000 for i in range(length)]
+            elif method == 'exponential':
+                sequence = [np.exp(-i / (length / 3)) * 1000 for i in range(length)]
+            elif method == 'power':
+                sequence = [(i + 1) ** (-1.5) * 1000 for i in range(length)]
+            else:  # mixed
+                # Mix of patterns to increase diversity
+                sequence = []
+                for i in range(length):
+                    if random.random() < 0.3:
+                        sequence.append(abs(np.sin(i * np.pi / length)) * 1000)
+                    elif random.random() < 0.6:
+                        sequence.append(np.exp(-i / (length / 3)) * 1000)
+                    else:
+                        sequence.append((i + 1) ** (-1.5) * 1000)
+
+        # Add some randomness to avoid perfect symmetry
+        for i in range(length):
+            if random.random() < 0.1:
+                sequence[i] += random.uniform(-100, 100)
+
+        # Ensure non-negative
+        sequence = [max(0, x) for x in sequence]
+
+        # Ensure sum is meaningful
+        if sum(sequence) < 0.01:
+            sequence[random.randint(0, length-1)] += 0.01
+
+        return sequence
+
+    def store_top_patterns(self, population: List[List[float]], fitnesses: List[float]):
+        """Store top performing patterns in memory for progressive initialization."""
+        if len(population) < 10:
+            return
+
+        # Get top 5 sequences
+        top_indices = np.argsort(fitnesses)[-5:][::-1]
+        for idx in top_indices:
+            if len(self.top_patterns_memory) < 10:  # Limit memory size
+                self.top_patterns_memory.append(copy.deepcopy(population[idx]))
+            else:
+                # Replace older patterns with newer high performers
+                self.top_patterns_memory[random.randint(0, len(self.top_patterns_memory)-1)] = \
+                    copy.deepcopy(population[idx])
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_optimize(self) -> List[float]:
+        """
+        Run the adaptive hybrid optimization process.
+        """
+        start_time = time.time()
+        timeout = 170  # Leave 10 seconds for cleanup
+
+        # Initial population with diverse structures
+        population = [self.generate_multiscale_sequence() for _ in range(self.pop_size)]
+
+        # Evaluate initial population
+        fitnesses = [self.evaluate_sequence(seq)[1] for seq in population]
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        self.best_score = fitnesses[best_idx]
+        self.best_sequence = copy.deepcopy(population[best_idx])
+
+        print(f"Initial best score: {self.best_score:.6f}")
+
+        # Track fitness history for convergence detection
+        fitness_history = [self.best_score]
+        stagnation_counter = 0
+        prev_best_score = self.best_score
+
+        # Begin evolution
+        for gen in range(self.generations):
+            if time.time() - start_time > timeout:
+                break
+
+            # Adaptive population management based on performance
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-6:
+                    # Reduce population size if stagnated
+                    self.pop_size = max(20, int(self.pop_size * 0.9))
+
+            # Selection using tournament selection
+            selected = self.tournament_selection(population, fitnesses)
+
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply Cauchy mutation
+                    child1 = self.mutate_sequence_cauchy(child1)
+                    child2 = self.mutate_sequence_cauchy(child2)
+                    offspring.extend([child1, child2])
+                else:
+                    # Handle odd population size
+                    offspring.append(self.mutate_sequence_cauchy(selected[i]))
+
+            # Keep offspring size consistent
+            offspring = offspring[:self.pop_size]
+
+            # Adaptive gradient refinement based on current performance
+            top_individuals = np.argsort(fitnesses)[-min(10, len(offspring)):][::-1]
+            refine_count = max(1, int(0.3 * len(top_individuals)))
+            for i in range(refine_count):
+                idx = top_individuals[i]
+                offspring[idx] = self.gradient_refine(offspring[idx])
+
+            # Evaluate offspring
+            offspring_fitnesses = [self.evaluate_sequence(seq)[1] for seq in offspring]
+
+            # Replace population with offspring
+            population = offspring
+            fitnesses = offspring_fitnesses
+
+            # Update best individual
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_score:
+                self.best_score = fitnesses[best_idx]
+                self.best_sequence = copy.deepcopy(population[best_idx])
+                stagnation_counter = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_counter += 1  # Increment if no improvement
+
+            # Update fitness history
+            fitness_history.append(self.best_score)
+            if len(fitness_history) > 10:
+                fitness_history.pop(0)  # Keep only last 10 values
+
+            print(f"Gen {gen}: Best = {self.best_score:.6f}")
+
+            # Adaptive termination check
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-8:
+                    print("Fitness plateau detected, stopping early")
+                    break
+
+                if stagnation_counter > 5:
+                    print("Population converged and stagnated, stopping early")
+                    break
+
+                # Check if we're approaching the time limit
+                if time.time() - start_time > timeout - 5:
+                    print("Approaching time limit, stopping early")
+                    break
+
+        return self.best_sequence
+=======
+    def adaptive_optimize(self) -> List[float]:
+        """
+        Run the adaptive hybrid optimization process.
+        """
+        start_time = time.time()
+        timeout = 170  # Leave 10 seconds for cleanup
+
+        # Initial population with diverse structures
+        population = [self.generate_multiscale_sequence() for _ in range(self.pop_size)]
+
+        # Evaluate initial population
+        fitnesses = [self.evaluate_sequence(seq)[1] for seq in population]
+
+        # Track best individual
+        best_idx = np.argmax(fitnesses)
+        self.best_score = fitnesses[best_idx]
+        self.best_sequence = copy.deepcopy(population[best_idx])
+
+        print(f"Initial best score: {self.best_score:.6f}")
+
+        # Track fitness history for convergence detection
+        fitness_history = [self.best_score]
+        stagnation_counter = 0
+        prev_best_score = self.best_score
+
+        # Begin evolution
+        for gen in range(self.generations):
+            self.generation_counter = gen  # Update generation counter
+
+            if time.time() - start_time > timeout:
+                break
+
+            # Store top patterns for progressive initialization
+            self.store_top_patterns(population, fitnesses)
+
+            # Adaptive population management based on performance
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-6:
+                    # Reduce population size if stagnated
+                    self.pop_size = max(20, int(self.pop_size * 0.9))
+
+            # Selection using tournament selection
+            selected = self.tournament_selection(population, fitnesses)
+
+            # Create offspring through crossover and mutation
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self.crossover_sequences(selected[i], selected[i+1])
+                    # Apply Cauchy mutation
+                    child1 = self.mutate_sequence_cauchy(child1)
+                    child2 = self.mutate_sequence_cauchy(child2)
+                    offspring.extend([child1, child2])
+                else:
+                    # Handle odd population size
+                    offspring.append(self.mutate_sequence_cauchy(selected[i]))
+
+            # Keep offspring size consistent
+            offspring = offspring[:self.pop_size]
+
+            # Adaptive gradient refinement based on current performance
+            top_individuals = np.argsort(fitnesses)[-min(10, len(offspring)):][::-1]
+            refine_count = max(1, int(0.3 * len(top_individuals)))
+            for i in range(refine_count):
+                idx = top_individuals[i]
+                offspring[idx] = self.gradient_refine(offspring[idx])
+
+            # Evaluate offspring
+            offspring_fitnesses = [self.evaluate_sequence(seq)[1] for seq in offspring]
+
+            # Replace population with offspring
+            population = offspring
+            fitnesses = offspring_fitnesses
+
+            # Update best individual
+            best_idx = np.argmax(fitnesses)
+            if fitnesses[best_idx] > self.best_score:
+                self.best_score = fitnesses[best_idx]
+                self.best_sequence = copy.deepcopy(population[best_idx])
+                stagnation_counter = 0  # Reset stagnation counter on improvement
+            else:
+                stagnation_counter += 1  # Increment if no improvement
+
+            # Update fitness history
+            fitness_history.append(self.best_score)
+            if len(fitness_history) > 10:
+                fitness_history.pop(0)  # Keep only last 10 values
+
+            print(f"Gen {gen}: Best = {self.best_score:.6f}")
+
+            # Adaptive termination check
+            if gen > 10:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < 1e-8:
+                    print("Fitness plateau detected, stopping early")
+                    break
+
+                if stagnation_counter > 5:
+                    print("Population converged and stagnated, stopping early")
+                    break
+
+                # Check if we're approaching the time limit
+                if time.time() - start_time > timeout - 5:
+                    print("Approaching time limit, stopping early")
+                    break
+
+        return self.best_sequence
+>>>>>>> REPLACE
+</DIFF>

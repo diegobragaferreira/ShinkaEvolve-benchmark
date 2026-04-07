@@ -1,0 +1,115 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.optimize import differential_evolution
+
+
+def fibonacci_sphere(n):
+    """Generate n points evenly distributed on a unit sphere using Fibonacci spiral method."""
+    points = []
+    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+    for i in range(n):
+        y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)  # radius at y
+
+        theta = phi * i  # golden angle increment
+
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+
+        points.append([x, y, z])
+
+    return np.array(points)
+
+
+def initialize_better_points(n: int = 14) -> np.ndarray:
+    """
+    Initialize points using enhanced Fibonacci distribution with better spread.
+    """
+    # Use Fibonacci sphere method
+    points = fibonacci_sphere(n)
+
+    # Add slight perturbations to improve distribution
+    np.random.seed(42)
+    perturbation = np.random.normal(0, 0.02, points.shape)
+    points = points + perturbation
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    points = points / np.where(norms == 0, 1, norms)
+
+    # Scale to unit cube [0,1]^3
+    points = (points + 1) / 2  # map from [-1,1] to [0,1]
+
+    # Apply a simple optimization step to improve initial distribution
+    points = optimize_initial_distribution(points)
+
+    return points
+
+
+def optimize_initial_distribution(points: np.ndarray, max_iter: int = 50) -> np.ndarray:
+    """
+    Apply simple optimization to improve point distribution.
+    """
+    def objective(x_flat):
+        points_test = x_flat.reshape(-1, 3)
+        # Keep points within bounds
+        points_test = np.clip(points_test, 0, 1)
+
+        distances = pdist(points_test)
+        if len(distances) == 0:
+            return float('inf')
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist <= 0:
+            return float('inf')
+
+        # We want to maximize min/max ratio, so minimize negative ratio
+        return -min_dist / max_dist
+
+    try:
+        # Flatten points for optimization
+        x0 = points.flatten()
+        bounds = [(0.0, 1.0)] * len(x0)
+
+        # Simple optimization to improve initial configuration
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=max_iter,
+            popsize=10,
+            seed=42,
+            disp=False,
+            tol=1e-6
+        )
+
+        optimized_points = result.x.reshape(-1, 3)
+        # Ensure bounds
+        optimized_points = np.clip(optimized_points, 0, 1)
+
+        return optimized_points
+    except:
+        return points
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+
+    n = 14
+    d = 3
+
+    # Initialize points using improved method
+    points = initialize_better_points(n)
+
+    return points
+
+
+# EVOLVE-BLOCK-END

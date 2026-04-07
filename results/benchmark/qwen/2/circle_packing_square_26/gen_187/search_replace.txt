@@ -1,0 +1,364 @@
+<NAME>
+enhanced_local_search_with_overlap_severity_classification
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic local search approach that doesn't adequately distinguish between different levels of overlap severity. I'll enhance this by implementing a more sophisticated local search that classifies solutions based on overlap severity and applies different refinement intensities accordingly. This approach is inspired by successful strategies from previous generations that used hierarchical refinement techniques.
+
+The key improvements include:
+1. Better classification of overlap severity (low, medium, high)
+2. Different refinement strategies for each severity level
+3. More targeted radius expansion and position adjustments
+4. Improved overlap detection and resolution
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_placement(self, circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply advanced local optimization to improve placement with overlap severity classification."""
+        n = len(circles)
+        circles = circles.copy()
+
+        # Calculate overlap count for severity classification
+        def count_overlaps(config):
+            if n <= 1:
+                return 0
+            distances = cdist(config[:, :2], config[:, :2])
+            mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+            min_distances = (config[:, 2][:, np.newaxis] + config[:, 2][np.newaxis, :]) * mask
+            overlaps = distances < min_distances
+            return np.sum(overlaps)
+
+        # Classify solution based on overlap severity
+        overlap_count = count_overlaps(circles)
+        if overlap_count == 0:
+            # No overlaps - apply aggressive radius expansion
+            max_refinement_iter = max_iter // 2
+        elif overlap_count <= 5:
+            # Low overlap - moderate refinement
+            max_refinement_iter = max_iter // 3
+        elif overlap_count <= 15:
+            # Medium overlap - intensive refinement
+            max_refinement_iter = max_iter // 2
+        else:
+            # High overlap - full refinement
+            max_refinement_iter = max_iter
+
+        # More comprehensive local refinement
+        for iteration in range(max_refinement_iter):
+            improved = False
+
+            # Strategy 1: Try to expand radii
+            for i in range(n):
+                original_radius = circles[i][2]
+                original_x, original_y = circles[i][0], circles[i][1]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(
+                    original_x,
+                    original_y,
+                    1 - original_x,
+                    1 - original_y
+                )
+
+                # Try to increase radius with more careful increment
+                if max_radius > original_radius:
+                    # Use larger increments for low overlap, smaller for high overlap
+                    if overlap_count <= 5:
+                        increment = 0.01 if overlap_count == 0 else 0.005
+                    else:
+                        increment = 0.002
+                    new_radius = min(original_radius + increment, max_radius)
+
+                    if new_radius > original_radius:
+                        circles[i][2] = new_radius
+
+                        # Check if valid configuration
+                        if self.is_valid_configuration(circles):
+                            improved = True
+                        else:
+                            # Revert if invalid
+                            circles[i][2] = original_radius
+
+            # Strategy 2: Try small position adjustments to resolve conflicts
+            if improved or overlap_count > 5:
+                # Apply position adjustments more aggressively when there are overlaps
+                adjustment_multiplier = 1.0 if overlap_count <= 5 else 2.0
+                adjustments = [
+                    (0.001 * adjustment_multiplier, 0),
+                    (-0.001 * adjustment_multiplier, 0),
+                    (0, 0.001 * adjustment_multiplier),
+                    (0, -0.001 * adjustment_multiplier),
+                    (0.0005 * adjustment_multiplier, 0.0005 * adjustment_multiplier),
+                    (-0.0005 * adjustment_multiplier, -0.0005 * adjustment_multiplier)
+                ]
+
+                for i in range(n):
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Try adjustments to resolve overlaps
+                    for dx, dy in adjustments:
+                        new_x = np.clip(original_x + dx, 0, 1)
+                        new_y = np.clip(original_y + dy, 0, 1)
+
+                        if new_x != original_x or new_y != original_y:
+                            circles[i][0] = new_x
+                            circles[i][1] = new_y
+
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                                break
+                            else:
+                                # Revert if invalid
+                                circles[i][0] = original_x
+                                circles[i][1] = original_y
+
+            # Early termination if no improvement
+            if not improved:
+                break
+
+        return circles
+=======
+    def optimize_placement(self, circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply advanced local optimization to improve placement with overlap severity classification."""
+        n = len(circles)
+        circles = circles.copy()
+
+        # Calculate overlap count for severity classification
+        def count_overlaps(config):
+            if n <= 1:
+                return 0
+            distances = cdist(config[:, :2], config[:, :2])
+            mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+            min_distances = (config[:, 2][:, np.newaxis] + config[:, 2][np.newaxis, :]) * mask
+            overlaps = distances < min_distances
+            return np.sum(overlaps)
+
+        # Classify solution based on overlap severity
+        overlap_count = count_overlaps(circles)
+        if overlap_count == 0:
+            # No overlaps - apply aggressive radius expansion
+            max_refinement_iter = max_iter // 2
+            refinement_strategy = "aggressive"
+        elif overlap_count <= 5:
+            # Low overlap - moderate refinement
+            max_refinement_iter = max_iter // 3
+            refinement_strategy = "moderate"
+        elif overlap_count <= 15:
+            # Medium overlap - intensive refinement
+            max_refinement_iter = max_iter // 2
+            refinement_strategy = "intensive"
+        else:
+            # High overlap - full refinement with emphasis on overlap resolution
+            max_refinement_iter = max_iter
+            refinement_strategy = "critical"
+
+        # More sophisticated local refinement based on overlap severity
+        for iteration in range(max_refinement_iter):
+            improved = False
+
+            # Strategy 1: Different refinement approaches based on overlap severity
+            if refinement_strategy == "aggressive":
+                # Aggressive radius expansion for clean configurations
+                for i in range(n):
+                    original_radius = circles[i][2]
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Calculate maximum possible radius for this circle
+                    max_radius = min(
+                        original_x,
+                        original_y,
+                        1 - original_x,
+                        1 - original_y
+                    )
+
+                    # Try to increase radius with larger increments
+                    if max_radius > original_radius:
+                        increment = 0.015  # Larger increment for clean configs
+                        new_radius = min(original_radius + increment, max_radius)
+
+                        if new_radius > original_radius:
+                            circles[i][2] = new_radius
+
+                            # Check if valid configuration
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                            else:
+                                # Revert if invalid
+                                circles[i][2] = original_radius
+
+            elif refinement_strategy == "moderate":
+                # Moderate refinement with balanced approach
+                for i in range(n):
+                    original_radius = circles[i][2]
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Calculate maximum possible radius for this circle
+                    max_radius = min(
+                        original_x,
+                        original_y,
+                        1 - original_x,
+                        1 - original_y
+                    )
+
+                    # Try to increase radius with moderate increments
+                    if max_radius > original_radius:
+                        increment = 0.008  # Moderate increment
+                        new_radius = min(original_radius + increment, max_radius)
+
+                        if new_radius > original_radius:
+                            circles[i][2] = new_radius
+
+                            # Check if valid configuration
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                            else:
+                                # Revert if invalid
+                                circles[i][2] = original_radius
+
+            elif refinement_strategy == "intensive":
+                # Intensive refinement for medium overlap cases
+                for i in range(n):
+                    original_radius = circles[i][2]
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Calculate maximum possible radius for this circle
+                    max_radius = min(
+                        original_x,
+                        original_y,
+                        1 - original_x,
+                        1 - original_y
+                    )
+
+                    # Try to increase radius with small increments
+                    if max_radius > original_radius:
+                        increment = 0.005  # Smaller increment for stability
+                        new_radius = min(original_radius + increment, max_radius)
+
+                        if new_radius > original_radius:
+                            circles[i][2] = new_radius
+
+                            # Check if valid configuration
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                            else:
+                                # Revert if invalid
+                                circles[i][2] = original_radius
+
+            else:  # critical - high overlap resolution
+                # Focus on resolving overlaps first
+                for i in range(n):
+                    original_radius = circles[i][2]
+                    original_x, original_y = circles[i][0], circles[i][1]
+
+                    # Calculate maximum possible radius for this circle
+                    max_radius = min(
+                        original_x,
+                        original_y,
+                        1 - original_x,
+                        1 - original_y
+                    )
+
+                    # Try to increase radius with very small increments
+                    if max_radius > original_radius:
+                        increment = 0.002  # Very small increment for overlap resolution
+                        new_radius = min(original_radius + increment, max_radius)
+
+                        if new_radius > original_radius:
+                            circles[i][2] = new_radius
+
+                            # Check if valid configuration
+                            if self.is_valid_configuration(circles):
+                                improved = True
+                            else:
+                                # Revert if invalid
+                                circles[i][2] = original_radius
+
+            # Strategy 2: Position adjustments with severity-dependent approach
+            if refinement_strategy == "aggressive":
+                # Aggressive position adjustments for clean configurations
+                adjustments = [
+                    (0.002, 0), (-0.002, 0), (0, 0.002), (0, -0.002),
+                    (0.001, 0.001), (-0.001, -0.001)
+                ]
+            elif refinement_strategy == "moderate":
+                # Moderate position adjustments
+                adjustments = [
+                    (0.001, 0), (-0.001, 0), (0, 0.001), (0, -0.001),
+                    (0.0005, 0.0005), (-0.0005, -0.0005)
+                ]
+            elif refinement_strategy == "intensive":
+                # Intensive but careful position adjustments
+                adjustments = [
+                    (0.0005, 0), (-0.0005, 0), (0, 0.0005), (0, -0.0005)
+                ]
+            else:  # critical
+                # Very careful adjustments for severe overlaps
+                adjustments = [
+                    (0.0002, 0), (-0.0002, 0), (0, 0.0002), (0, -0.0002)
+                ]
+
+            # Apply position adjustments to all circles
+            for i in range(n):
+                original_x, original_y = circles[i][0], circles[i][1]
+
+                # Try adjustments to resolve overlaps or find better positions
+                for dx, dy in adjustments:
+                    new_x = np.clip(original_x + dx, 0, 1)
+                    new_y = np.clip(original_y + dy, 0, 1)
+
+                    if new_x != original_x or new_y != original_y:
+                        circles[i][0] = new_x
+                        circles[i][1] = new_y
+
+                        if self.is_valid_configuration(circles):
+                            improved = True
+                            break
+                        else:
+                            # Revert if invalid
+                            circles[i][0] = original_x
+                            circles[i][1] = original_y
+
+            # Strategy 3: Physics-based repulsion for severe overlaps
+            if refinement_strategy == "critical" and overlap_count > 15:
+                # Apply physics-inspired repulsion for high overlap scenarios
+                for i in range(n):
+                    # Find all overlapping circles
+                    overlapped_indices = []
+                    for j in range(n):
+                        if i != j:
+                            x1, y1, r1 = circles[i]
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            if distance < r1 + r2:
+                                overlapped_indices.append(j)
+
+                    if overlapped_indices:
+                        # Apply repulsion force
+                        total_dx, total_dy = 0, 0
+                        for j in overlapped_indices:
+                            x1, y1, r1 = circles[i]
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2) + 1e-8  # Avoid division by zero
+
+                            # Repulsion force direction (away from overlapping circle)
+                            dx = (x1 - x2) / distance
+                            dy = (y1 - y2) / distance
+
+                            # Force magnitude inversely proportional to distance
+                            force_strength = 0.005 * (1.0 / distance**2)
+
+                            total_dx += dx * force_strength
+                            total_dy += dy * force_strength
+
+                        # Apply the repulsion
+                        circles[i][0] = np.clip(circles[i][0] + total_dx, circles[i][2], 1 - circles[i][2])
+                        circles[i][1] = np.clip(circles[i][1] + total_dy, circles[i][2], 1 - circles[i][2])
+
+            # Early termination if no improvement
+            if not improved:
+                break
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

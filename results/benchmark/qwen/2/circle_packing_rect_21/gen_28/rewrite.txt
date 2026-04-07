@@ -1,0 +1,232 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set up container dimensions (perimeter = 4, so width + height = 2)
+    # Using golden ratio for aesthetically pleasing rectangle
+    width = 1.23606797749979  # approximately 2/(1+sqrt(5))
+    height = 2 - width
+    
+    # Initialize with smart placement using a hexagonal-like pattern
+    n = 21
+    circles = np.zeros((n, 3))
+    
+    # Start with a simple grid-based initialization
+    rows = int(math.sqrt(n)) + 1
+    cols = (n + rows - 1) // rows  # ceiling division
+    
+    # Adjust grid to fit within rectangle
+    cell_width = width / cols
+    cell_height = height / rows
+    
+    # Place circles in a staggered grid pattern (like hexagonal close packing)
+    circle_radius = min(cell_width, cell_height) * 0.4  # Initial guess
+    
+    # Place circles in a staggered pattern
+    placed_count = 0
+    for i in range(rows):
+        for j in range(cols):
+            if placed_count >= n:
+                break
+            x = (j + (i % 2) * 0.5) * cell_width
+            y = i * cell_height
+            
+            # Only place if within bounds
+            if x >= circle_radius and x <= width - circle_radius and \
+               y >= circle_radius and y <= height - circle_radius:
+                circles[placed_count] = [x, y, circle_radius]
+                placed_count += 1
+                
+    # If not enough circles placed, use random initialization
+    if placed_count < n:
+        # Fill remaining circles with random positions
+        for i in range(placed_count, n):
+            x = np.random.uniform(circle_radius, width - circle_radius)
+            y = np.random.uniform(circle_radius, height - circle_radius)
+            circles[i] = [x, y, circle_radius]
+    
+    # Physics-based optimization with simulated annealing approach
+    def calculate_total_radius(circles):
+        return np.sum(circles[:, 2])
+    
+    def check_constraints(circles, width, height):
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x < r or x > width - r or y < r or y > height - r:
+                return False
+        
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance = math.sqrt((x2-x1)**2 + (y2-y1)**2)
+                if distance < (r1 + r2):
+                    return False
+        return True
+    
+    def get_distance_matrix(circles):
+        positions = circles[:, :2]
+        return cdist(positions, positions)
+    
+    def compute_forces(circles, width, height):
+        forces = np.zeros_like(circles[:, :2])
+        n = len(circles)
+        
+        # Calculate repulsive forces between overlapping circles
+        dist_matrix = get_distance_matrix(circles)
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            for j in range(i+1, n):
+                x2, y2, r2 = circles[j]
+                dx = x2 - x1
+                dy = y2 - y1
+                distance = math.sqrt(dx*dx + dy*dy)
+                
+                if distance > 0 and distance < (r1 + r2):
+                    # Repulsive force proportional to inverse square of distance
+                    force_magnitude = 1.0 / (distance * distance + 1e-6)
+                    # Normalize direction
+                    if distance > 0:
+                        fx = force_magnitude * dx / distance
+                        fy = force_magnitude * dy / distance
+                        forces[i, 0] -= fx
+                        forces[i, 1] -= fy
+                        forces[j, 0] += fx
+                        forces[j, 1] += fy
+        
+        # Apply boundary forces
+        for i in range(n):
+            x, y, r = circles[i]
+            
+            # Force away from edges
+            left_force = max(0, r - x) * 10
+            right_force = max(0, x + r - width) * 10
+            bottom_force = max(0, r - y) * 10
+            top_force = max(0, y + r - height) * 10
+            
+            forces[i, 0] += left_force - right_force
+            forces[i, 1] += bottom_force - top_force
+            
+        return forces
+    
+    # Annealing parameters
+    max_iterations = 5000
+    initial_temp = 1.0
+    final_temp = 0.001
+    alpha = 0.995  # cooling rate
+    
+    current_circles = circles.copy()
+    best_circles = circles.copy()
+    best_radius_sum = calculate_total_radius(best_circles)
+    
+    temp = initial_temp
+    
+    for iteration in range(max_iterations):
+        # Cool down temperature
+        temp = max(final_temp, temp * alpha)
+        
+        # Make small random changes to circles
+        test_circles = current_circles.copy()
+        
+        # Pick a random circle to modify
+        idx = np.random.randint(0, n)
+        
+        # Modify position slightly
+        delta = temp * 0.1
+        test_circles[idx, 0] += np.random.normal(0, delta)
+        test_circles[idx, 1] += np.random.normal(0, delta)
+        
+        # Modify radius slightly
+        test_circles[idx, 2] += np.random.normal(0, delta * 0.1)
+        test_circles[idx, 2] = max(0.01, test_circles[idx, 2])  # Ensure positive radius
+        
+        # If this is a valid configuration
+        if check_constraints(test_circles, width, height):
+            current_radius_sum = calculate_total_radius(test_circles)
+            
+            # Accept if better
+            if current_radius_sum > best_radius_sum:
+                best_circles = test_circles.copy()
+                best_radius_sum = current_radius_sum
+                current_circles = test_circles.copy()
+            else:
+                # Maybe accept worse solution with probability
+                prob = math.exp(-(best_radius_sum - current_radius_sum) / temp)
+                if np.random.random() < prob:
+                    current_circles = test_circles.copy()
+        else:
+            # If invalid, reject change but continue loop
+            
+    # Final refinement using gradient-free optimization
+    # Run several iterations of particle swarm optimization inspired approach
+    particles = []
+    velocities = []
+    
+    # Initialize particles
+    for _ in range(10):
+        p = current_circles.copy()
+        particles.append(p)
+        velocities.append(np.zeros_like(p))
+    
+    # PSO parameters
+    w = 0.7  # inertia weight
+    c1 = 1.5  # cognitive parameter
+    c2 = 1.5  # social parameter
+    
+    personal_best = [p.copy() for p in particles]
+    personal_best_scores = [calculate_total_radius(p) for p in particles]
+    
+    # Find global best among particles
+    global_best_idx = np.argmax(personal_best_scores)
+    global_best = personal_best[global_best_idx].copy()
+    global_best_score = personal_best_scores[global_best_idx]
+    
+    # PSO iterations with constraints
+    for pso_iter in range(1000):
+        for i in range(len(particles)):
+            particle = particles[i]
+            
+            # Update velocity
+            r1, r2 = np.random.random(2)
+            for j in range(len(particle)):
+                # Update position
+                if j < len(particle):  # For position and radius updates
+                    velocities[i][j] = (w * velocities[i][j] + 
+                                      c1 * r1 * (personal_best[i][j] - particle[j]) +
+                                      c2 * r2 * (global_best[j] - particle[j]))
+                    
+                    # Apply velocity to position
+                    particle[j] += velocities[i][j]
+                    
+                    # Enforce bounds for radius
+                    if j >= 2:  # radius component
+                        particle[j] = max(0.01, min(0.5, particle[j]))
+                        
+            # Check constraints and update
+            if check_constraints(particle, width, height):
+                score = calculate_total_radius(particle)
+                if score > personal_best_scores[i]:
+                    personal_best[i] = particle.copy()
+                    personal_best_scores[i] = score
+                    
+                    if score > global_best_score:
+                        global_best = particle.copy()
+                        global_best_score = score
+                        
+    return global_best
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

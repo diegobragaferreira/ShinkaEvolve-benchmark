@@ -1,0 +1,192 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        # Reshape to points
+        points = x.reshape(-1, 3)
+
+        # Compute pairwise distances
+        distances = squareform(pdist(points))
+
+        # Zero out diagonal
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio to maximize (min/max)
+        if d_max == 0 or not np.isfinite(d_max):
+            return -1.0  # Penalize invalid configurations
+        return -d_min / d_max
+
+    def fibonacci_sphere(n_points):
+        """Generate points on sphere using Fibonacci spiral method"""
+        points = []
+        phi = np.pi * (3. - np.sqrt(5.))  # golden angle
+
+        for i in range(n_points):
+            y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def create_better_initializations():
+        """Create better initial configurations using known good arrangements"""
+        configs = []
+        np.random.seed(42)
+
+        # Config 1: Standard Fibonacci on sphere
+        fib_points = fibonacci_sphere(14)
+        # Scale to unit cube [0,1]^3
+        fib_points = fib_points - np.mean(fib_points, axis=0)
+        max_coord = np.max(np.abs(fib_points))
+        if max_coord > 0:
+            fib_points = fib_points / (2 * max_coord) + 0.5
+        configs.append(("fibonacci", fib_points))
+
+        # Config 2: Perturbed Fibonacci (better for escaping local optima)
+        perturbed = fib_points + np.random.normal(0, 0.03, fib_points.shape)
+        # Clamp to [0,1]^3
+        perturbed = np.clip(perturbed, 0, 1)
+        configs.append(("perturbed_fibonacci", perturbed))
+
+        # Config 3: Random uniform distribution
+        random_points = np.random.rand(14, 3)
+        configs.append(("random", random_points))
+
+        # Config 4: Grid-based with jitter
+        grid_coords = np.linspace(0.05, 0.95, 3)  # Avoid edges
+        grid_points = []
+        for x in grid_coords:
+            for y in grid_coords:
+                for z in grid_coords:
+                    grid_points.append([x, y, z])
+        # Take first 14 points and add jitter
+        grid_array = np.array(grid_points[:14]) + np.random.normal(0, 0.02, (14, 3))
+        # Clamp to [0,1]^3
+        grid_array = np.clip(grid_array, 0, 1)
+        configs.append(("grid", grid_array))
+
+        return configs
+
+    def evaluate_configuration(points):
+        """Evaluate a configuration and return the ratio"""
+        try:
+            distances = squareform(pdist(points))
+            np.fill_diagonal(distances, np.inf)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+
+            if d_max <= 0 or not np.isfinite(d_max):
+                return 0.0
+            return d_min / d_max
+        except:
+            return 0.0
+
+    def adaptive_differential_evolution(x0, bounds, max_iter=100, popsize=20):
+        """Improved differential evolution with better parameters"""
+        # Use a more aggressive optimization approach with multiple restarts
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=max_iter,
+            popsize=popsize,
+            mutation=(0.8, 1),
+            recombination=0.9,
+            tol=1e-8,
+            atol=1e-8,
+            disp=False,
+            polish=True  # Enable polishing for better local optimization
+        )
+        return result
+
+    # Generate multiple good initial configurations
+    initial_configs = create_better_initializations()
+
+    best_ratio = -np.inf
+    best_points = None
+
+    # Multi-start optimization with multiple configurations
+    for config_name, initial_config in initial_configs:
+        # Create bounds for [0,1]^3 space
+        bounds = [(0, 1) for _ in range(42)]
+
+        try:
+            # Optimize from this initial configuration
+            x0 = initial_config.flatten()
+
+            # Run differential evolution
+            de_result = adaptive_differential_evolution(x0, bounds, max_iter=150, popsize=25)
+
+            if de_result.success:
+                # Extract optimized points
+                optimized_points = de_result.x.reshape(-1, 3)
+
+                # Evaluate this solution
+                ratio = evaluate_configuration(optimized_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+
+        except Exception as e:
+            warnings.warn(f"Failed to optimize from {config_name}: {e}")
+            continue
+
+    # If no successful optimization was found, return the best initial config
+    if best_points is None:
+        # Return best initial configuration
+        _, best_initial = initial_configs[0]  # Return first config as fallback
+        return best_initial
+
+    # Final local refinement using L-BFGS-B
+    try:
+        bounds = [(0, 1) for _ in range(42)]
+        x0_refine = best_points.flatten()
+
+        # Refinement with tighter tolerances
+        local_result = minimize(
+            objective,
+            x0_refine,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 200, 'ftol': 1e-12, 'gtol': 1e-12}
+        )
+
+        if local_result.success:
+            refined_points = local_result.x.reshape(-1, 3)
+            # Evaluate final result
+            final_ratio = evaluate_configuration(refined_points)
+            if final_ratio > best_ratio:
+                best_points = refined_points
+
+    except Exception as e:
+        warnings.warn(f"Local refinement failed: {e}")
+
+    # Ensure final result is within bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+# EVOLVE-BLOCK-END

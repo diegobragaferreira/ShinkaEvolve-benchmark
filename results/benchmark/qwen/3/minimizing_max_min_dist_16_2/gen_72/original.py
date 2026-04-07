@@ -1,0 +1,107 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def objective(x):
+        # Reshape x into points array
+        points = x.reshape(-1, 2)
+
+        # Compute distance matrix
+        distances = squareform(pdist(points))
+
+        # Zero out diagonal
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        # Return negative ratio (since we want to maximize)
+        return -min_dist / max_dist
+
+    def constraint_func(x):
+        # Ensure points stay within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        penalty = 0
+
+        # Penalty for points outside bounds
+        for i in range(16):
+            if points[i, 0] < 0:
+                penalty += (0 - points[i, 0])**2
+            elif points[i, 0] > 1:
+                penalty += (points[i, 0] - 1)**2
+
+            if points[i, 1] < 0:
+                penalty += (0 - points[i, 1])**2
+            elif points[i, 1] > 1:
+                penalty += (points[i, 1] - 1)**2
+
+        return penalty
+
+    # Initialize with a hexagonal grid pattern for better coverage
+    np.random.seed(42)
+
+    # Create hexagonal lattice pattern within unit square
+    # We'll use a 4x4 grid with slight perturbations to avoid degeneracy
+    grid_points = []
+    spacing = 1.0 / 3.0  # Spacing to fit nicely in [0,1] square
+
+    for i in range(4):
+        for j in range(4):
+            x = i * spacing
+            y = j * spacing
+
+            # Add small random perturbation
+            perturbation = 0.05
+            x += (np.random.random() - 0.5) * perturbation
+            y += (np.random.random() - 0.5) * perturbation
+
+            # Ensure points stay within bounds
+            x = np.clip(x, 0, 1)
+            y = np.clip(y, 0, 1)
+
+            grid_points.append([x, y])
+
+    # Flatten initial points
+    initial_points = np.array(grid_points).flatten()
+
+    # Set up bounds for each coordinate (0 to 1)
+    bounds = [(0, 1) for _ in range(32)]
+
+    # Optimization parameters
+    options = {'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': 2000}
+
+    # Use scipy optimize with L-BFGS-B method
+    result = minimize(
+        objective,
+        initial_points,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options=options,
+        callback=None
+    )
+
+    # Extract final points
+    final_points = result.x.reshape(-1, 2)
+
+    # Ensure points are within bounds (just in case)
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+
+
+# EVOLVE-BLOCK-END

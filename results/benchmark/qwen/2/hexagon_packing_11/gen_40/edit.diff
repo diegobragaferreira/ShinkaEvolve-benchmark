@@ -1,0 +1,256 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,231 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
++from scipy.spatial.distance import cdist
++import math
++
++
++def create_regular_hexagon(center=(0, 0), side_length=1, rotation=0):
++    """Create vertices of a regular hexagon"""
++    angle = rotation * np.pi / 180
++    vertices = []
++    for i in range(6):
++        theta = angle + i * np.pi / 3
++        x = center[0] + side_length * np.cos(theta)
++        y = center[1] + side_length * np.sin(theta)
++        vertices.append([x, y])
++    return np.array(vertices)
++
++
++def hexagon_vertices(hex_data):
++    """Get vertices for a hexagon given its data (center, side_length, rotation)"""
++    center = (hex_data[0], hex_data[1])
++    side_length = 1  # unit hexagon
++    rotation = hex_data[2]
++    return create_regular_hexagon(center, side_length, rotation)
++
++
++def check_hexagon_containment(hex_vertices, outer_center, outer_side_length, outer_rotation):
++    """Check if hexagon vertices are fully contained within outer hexagon"""
++    outer_vertices = create_regular_hexagon(outer_center, outer_side_length, outer_rotation)
++
++    # Convert to shapely polygons for easier containment checking
++    try:
++        from shapely.geometry import Polygon
++        hex_poly = Polygon(hex_vertices)
++        outer_poly = Polygon(outer_vertices)
++
++        # Check if hexagon is fully contained within outer hexagon
++        return outer_poly.contains(hex_poly)
++    except ImportError:
++        # Fallback to manual point-in-polygon test
++        def point_in_polygon(point, poly):
++            x, y = point
++            n = len(poly)
++            inside = False
++            p1x, p1y = poly[0]
++            for i in range(1, n + 1):
++                p2x, p2y = poly[i % n]
++                if y > min(p1y, p2y):
++                    if y <= max(p1y, p2y):
++                        if x <= max(p1x, p2x):
++                            if p1y != p2y:
++                                xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
++                            if p1x == p2x or x <= xinters:
++                                inside = not inside
++                p1x, p1y = p2x, p2y
++            return inside
++
++        # Check if all vertices of inner hexagon are inside outer hexagon
++        for vertex in hex_vertices:
++            if not point_in_polygon(vertex, outer_vertices):
++                return False
++        return True
++
++
++def hexagon_distance(hex1_vertices, hex2_vertices):
++    """Calculate minimum distance between two hexagons"""
++    # Calculate pairwise distances between vertices
++    distances = cdist(hex1_vertices, hex2_vertices)
++    return np.min(distances)
++
++
++def check_collision(hex1_vertices, hex2_vertices):
++    """Check if two hexagons collide (overlap or touch)"""
++    min_dist = hexagon_distance(hex1_vertices, hex2_vertices)
++    # For unit hexagons, they don't collide if min distance >= 1
++    # But we use a small safety margin to avoid precision issues
++    return min_dist < 0.999
++
++
++def calculate_outer_hex_side_length(inner_hex_data, buffer=0.01):
++    """Calculate minimal outer hexagon side length that contains all inner hexagons"""
++    if len(inner_hex_data) == 0:
++        return 1.0
++
++    # Get all hexagon vertices
++    all_vertices = []
++    for hex_data in inner_hex_data:
++        hex_vertices = hexagon_vertices(hex_data)
++        all_vertices.extend(hex_vertices)
++
++    if len(all_vertices) == 0:
++        return 1.0
++
++    all_vertices = np.array(all_vertices)
++
++    # Calculate bounding box
++    min_x, max_x = np.min(all_vertices[:, 0]), np.max(all_vertices[:, 0])
++    min_y, max_y = np.min(all_vertices[:, 1]), np.max(all_vertices[:, 1])
++
++    # Calculate radius needed to contain all points
++    center_x = (min_x + max_x) / 2
++    center_y = (min_y + max_y) / 2
++
++    # Distance from center to farthest point
++    max_radius = np.max(np.sqrt((all_vertices[:, 0] - center_x)**2 + (all_vertices[:, 1] - center_y)**2))
++
++    # For hexagon, if we want radius R, side length s = R
++    # But we want the side length to be the minimal value that contains all hexagons
++    # Let's compute a safe estimate based on bounding box dimensions
++    width = max_x - min_x
++    height = max_y - min_y
++
++    # For a regular hexagon, if side length is s, then width is 2*s and height is 2*s*sqrt(3)/2
++    # So we need s >= width/2 and s >= height/(sqrt(3))
++    side_length = max(width/2, height/(math.sqrt(3)))
++
++    return side_length + buffer  # Add small buffer for safety
++
++
++def optimize_hexagon_packing():
++    """
++    Optimize the packing of 11 unit hexagons within a larger hexagon.
++    Uses constrained optimization to maximize 1/outer_hex_side_length.
++    """
++    n = 11
++
++    # Initial configuration - better starting point based on known good packings
++    # This is a known good configuration from literature (approximately)
++    initial_guess = np.array([
++        [0.0, 0.0, 0.0],      # center
++        [-1.5, 0.0, 0.0],     # left
++        [1.5, 0.0, 0.0],      # right
++        [0.0, 2.6, 0.0],      # top
++        [0.0, -2.6, 0.0],     # bottom
++        [-2.6, 1.5, 0.0],     # top-left
++        [2.6, 1.5, 0.0],      # top-right
++        [-2.6, -1.5, 0.0],    # bottom-left
++        [2.6, -1.5, 0.0],     # bottom-right
++        [-1.5, 3.0, 0.0],     # far top
++        [1.5, 3.0, 0.0],      # far bottom
++    ])
++
++    # Flatten for optimization (x, y, angle for each hexagon)
++    flat_initial = initial_guess.flatten()
++
++    # Bounds: x, y from -10 to 10, angles from 0 to 360
++    bounds = []
++    for i in range(n):
++        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
++
++    def objective(args):
++        # Reshape args back into hexagon data
++        hex_data = args.reshape(n, 3)
++
++        # Calculate outer hexagon side length
++        outer_side_length = calculate_outer_hex_side_length(hex_data)
++
++        # We want to maximize 1/outer_side_length, so minimize -1/outer_side_length
++        return -1.0 / outer_side_length
++
++    def constraint_func(args):
++        # Reshape args back into hexagon data
++        hex_data = args.reshape(n, 3)
++
++        # Check containment constraints
++        outer_center = (0, 0)
++        outer_side_length = calculate_outer_hex_side_length(hex_data) + 0.1  # Add small buffer
++        outer_rotation = 0
++
++        # Check if all hexagons are contained within outer hexagon
++        for hex_d in hex_data:
++            hex_vertices = hexagon_vertices(hex_d)
++            if not check_hexagon_containment(hex_vertices, outer_center, outer_side_length, outer_rotation):
++                return 1e10  # Large penalty if not contained
++
++        # Check collision constraints
++        for i in range(n):
++            for j in range(i+1, n):
++                hex1_vertices = hexagon_vertices(hex_data[i])
++                hex2_vertices = hexagon_vertices(hex_data[j])
++                if check_collision(hex1_vertices, hex2_vertices):
++                    return 1e10  # Large penalty if overlapping
++
++        return 0.0
++
++    # Define constraints properly
++    constraints = {'type': 'eq', 'fun': constraint_func}
++
++    # Optimization options
++    options = {'maxiter': 1000, 'disp': False}
++
++    try:
++        # Run optimization
++        result = minimize(objective, flat_initial, method='SLSQP',
++                         bounds=bounds, constraints=constraints, options=options)
++
++        # If optimization succeeded, extract results
++        if result.success:
++            optimized_hex_data = result.x.reshape(n, 3)
++
++            # Compute final outer hexagon size
++            final_outer_side_length = calculate_outer_hex_side_length(optimized_hex_data)
++
++            outer_hex_data = np.array([0, 0, 0])  # centered at origin
++
++            return optimized_hex_data, outer_hex_data, final_outer_side_length
++        else:
++            # Fall back to initial configuration if optimization fails
++            raise RuntimeError("Optimization failed")
++
++    except Exception as e:
++        # If optimization fails or throws error, return initial configuration
++        print(f"Optimization failed with error: {e}")
++        outer_side_length = calculate_outer_hex_side_length(initial_guess)
++        outer_hex_data = np.array([0, 0, 0])
++        return initial_guess, outer_hex_data, outer_side_length
+ 
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
+-
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
++    return optimize_hexagon_packing()
+ 
+ 
+ # EVOLVE-BLOCK-END

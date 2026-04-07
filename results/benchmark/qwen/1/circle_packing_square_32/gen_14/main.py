@@ -1,0 +1,110 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def check_collision(circle1, circle2):
+    """Check if two circles collide"""
+    x1, y1, r1 = circle1
+    x2, y2, r2 = circle2
+    distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+    return distance_squared < (r1 + r2)**2
+
+def is_valid_position(circle, circles):
+    """Check if a circle position is valid (within bounds and no collisions)"""
+    x, y, r = circle
+
+    # Check boundary constraints
+    if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+        return False
+
+    # Check collision with existing circles
+    for existing_circle in circles:
+        if check_collision(circle, existing_circle):
+            return False
+
+    return True
+
+def place_circle_greedy(circles, max_circles):
+    """Place circles greedily with maximum radius"""
+    new_circles = circles.copy()
+
+    # Predefined strategic positions for initial placement
+    strategic_positions = [
+        (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),  # corners
+        (0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5),  # edges
+        (0.5, 0.5),  # center
+    ]
+
+    # Place initial strategic circles
+    placed = 0
+    for i, (x, y) in enumerate(strategic_positions[:min(9, max_circles)]):
+        if placed >= max_circles:
+            break
+        # Try to place with maximum possible radius
+        max_radius = min(x, 1-x, y, 1-y)
+        new_circle = (x, y, max_radius)
+        if is_valid_position(new_circle, new_circles):
+            new_circles[placed] = new_circle
+            placed += 1
+
+    # Fill remaining spots with greedy approach
+    while placed < max_circles:
+        best_circle = None
+        best_radius = 0
+
+        # Try to place circles in multiple candidate positions
+        candidates = []
+        # Sample random positions in the square
+        for _ in range(1000):
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            # Estimate maximum radius for this position
+            max_radius = min(x, 1-x, y, 1-y)
+            candidates.append((x, y, max_radius))
+
+        # Find the best valid circle among candidates
+        for x, y, max_radius in candidates:
+            if max_radius <= best_radius:
+                continue
+            test_circle = (x, y, max_radius)
+            if is_valid_position(test_circle, new_circles[:placed]):
+                best_circle = test_circle
+                best_radius = max_radius
+
+        if best_circle is None:
+            # If we can't find a valid circle, use a small radius and place anyway
+            # This shouldn't happen often with good initialization
+            x = random.uniform(0.01, 0.99)
+            y = random.uniform(0.01, 0.99)
+            test_circle = (x, y, 0.01)
+            if is_valid_position(test_circle, new_circles[:placed]):
+                new_circles[placed] = test_circle
+                placed += 1
+            else:
+                break  # Can't place more circles
+        else:
+            new_circles[placed] = best_circle
+            placed += 1
+
+    return new_circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Use greedy initialization to get a good starting point
+    circles = place_circle_greedy(circles, n)
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

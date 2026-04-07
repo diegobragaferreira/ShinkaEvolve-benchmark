@@ -1,0 +1,158 @@
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the local search capabilities by implementing a multi-start local optimization approach using both gradient-free and gradient-based methods. The core idea is to apply multiple local searches with different starting points and strategies to refine promising sequences, aiming to escape local optima and discover better solutions that could push the combined score above 0.6. This builds upon the existing `get_good_direction_to_move_into` function by replacing the basic refinement with a more robust optimization routine.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence):
+    """Returns the direction to move into the sequence using LP optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence == 0:
+        return None
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    if sum_sequence == 0:
+        return None
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(sequence):
+    """Returns the direction to move into the sequence using LP optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence == 0:
+        return None
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    if sum_sequence == 0:
+        return None
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+    return new_sequence
+
+def enhanced_local_search(sequence, max_iter=100):
+    """
+    Enhanced local search combining multiple strategies:
+    1. Gradient-free optimization (Nelder-Mead)
+    2. Gradient-based optimization (L-BFGS-B)
+    3. Random perturbations
+    """
+    if len(sequence) == 0:
+        return sequence
+
+    x0 = np.array(sequence)
+    n = len(x0)
+
+    def objective(x):
+        # Ensure non-negativity and avoid near-zero values
+        x = np.maximum(x, 1e-6)
+        c1 = compute_c1(x.tolist())
+        if c1 == 0 or np.isnan(c1):
+            return 1e6
+        return -1.0 / c1  # Minimize negative to maximize original
+
+    def constraint_violation(x):
+        # Penalize constraint violations
+        return np.sum(np.maximum(0, -x))  # Ensure all values are non-negative
+
+    # Strategy 1: Nelder-Mead (gradient-free)
+    try:
+        bounds = [(1e-6, 1000.0) for _ in range(n)]
+        result_nm = optimize.minimize(objective, x0, method='Nelder-Mead',
+                                      options={'maxiter': max_iter//2, 'initial_simplex': None})
+        if result_nm.success:
+            best_x = result_nm.x
+        else:
+            best_x = x0
+    except Exception:
+        best_x = x0
+
+    # Strategy 2: L-BFGS-B (gradient-based)
+    try:
+        bounds = [(1e-6, 1000.0) for _ in range(n)]
+        result_lbfgs = optimize.minimize(objective, best_x, method='L-BFGS-B', bounds=bounds,
+                                         options={'maxiter': max_iter//2})
+        if result_lbfgs.success:
+            best_x = result_lbfgs.x
+    except Exception:
+        pass
+
+    # Strategy 3: Random perturbations to escape local optima
+    for _ in range(10):  # Do several random perturbations
+        try:
+            perturbed = best_x + np.random.normal(0, 0.1, n)
+            perturbed = np.maximum(perturbed, 1e-6)
+            result_pert = optimize.minimize(objective, perturbed, method='Nelder-Mead',
+                                            options={'maxiter': max_iter//10})
+            if result_pert.success and result_pert.fun < objective(best_x):
+                best_x = result_pert.x
+        except Exception:
+            continue
+
+    return np.maximum(best_x, 1e-6).tolist()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+apply_enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+This edit modifies the main evolutionary loop to incorporate the enhanced local search strategy. Instead of relying solely on the basic `get_good_direction_to_move_into` function, we now apply the enhanced local search to promising candidates. This will significantly improve the ability to refine sequences and achieve better performance by escaping local optima and finding more optimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Generate offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate(child, mutation_rate)
+
+            # Apply LP-based refinement if possible
+            refined_child = get_good_direction_to_move_into(child)
+            if refined_child is not None:
+                child = refined_child
+
+            new_population.append(child)
+=======
+        # Generate offspring
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1 = tournament_selection(population, fitnesses)
+            parent2 = tournament_selection(population, fitnesses)
+
+            # Crossover
+            child = crossover(parent1, parent2)
+
+            # Mutation
+            child = mutate(child, mutation_rate)
+
+            # Apply enhanced local search to improve the child
+            refined_child = enhanced_local_search(child)
+            new_population.append(refined_child)
+>>>>>>> REPLACE
+</DIFF>

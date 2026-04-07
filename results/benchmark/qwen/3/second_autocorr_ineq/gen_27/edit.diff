@@ -1,0 +1,340 @@
+--- a/original.py
++++ b/original.py
+@@ -1,271 +1,293 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from typing import List, Tuple, Optional
+ import time
+ from dataclasses import dataclass
+ from functools import lru_cache
++from numba import jit, float64
+ 
+ @dataclass
+ class AutoconvolutionResult:
+     """Container for autoconvolution norm results."""
+     norm2_sq: float
+     norm1: float
+     norm_inf: float
+ 
+ class StepFunction:
+     """Represents a step function with optimized operations."""
+ 
+     def __init__(self, heights: List[float]):
+         self.heights = np.array(heights, dtype=np.float64)
+         self.length = len(heights)
+ 
+     def get_heights(self) -> np.ndarray:
+         return self.heights.copy()
+ 
+     def get_length(self) -> int:
+         return self.length
+ 
+ class AutoconvolutionEvaluator:
+     """Handles computation of autoconvolution norms with optimized numerical methods."""
+ 
+     @staticmethod
+-    def compute_autoconvolution_norms(step_func: StepFunction) -> AutoconvolutionResult:
+-        """
+-        Compute the L2, L1, and L-infinity norms of the autoconvolution of f.
+-
+-        Args:
+-            step_func: StepFunction object containing step heights
+-
+-        Returns:
+-            AutoconvolutionResult containing the three norms
+-        """
+-        heights = step_func.get_heights()
+-        length = step_func.get_length()
+-
+-        if length == 0:
+-            return AutoconvolutionResult(0.0, 0.0, 0.0)
+-
+-        # Compute autoconvolution g = f * f (discrete convolution)
+-        # Using numpy's convolution - it computes cross-correlation with flipped kernel
+-        g = np.convolve(heights, heights, mode='full')
+-
+-        # Compute norms using optimized piecewise integration
+-        # ||g||₂² - integrate g² using trapezoidal rule approximation
+-        g_squared = g * g
+-        norm2_sq = AutoconvolutionEvaluator._compute_trapz_norm2(g_squared)
+-
+-        # ||g||₁ - integrate |g| using trapezoidal rule
+-        g_abs = np.abs(g)
+-        norm1 = AutoconvolutionEvaluator._compute_trapz_norm1(g_abs)
+-
+-        # ||g||∞ - infinity norm (maximum absolute value)
+-        norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+-
+-        return AutoconvolutionResult(norm2_sq, norm1, norm_inf)
+-
+-    @staticmethod
+-    def _compute_trapz_norm2(g_values: np.ndarray) -> float:
+-        """Compute L2 norm squared using piecewise linear integration."""
++    @jit(nopython=True)
++    def _compute_trapz_norm2_jit(g_values: np.ndarray) -> float:
++        """Compute L2 norm squared using piecewise linear integration (JIT compiled)."""
+         if len(g_values) < 2:
+             return g_values[0] * g_values[0] if len(g_values) > 0 else 0.0
+ 
+         # Simplified trapezoidal integration for g²
+         h = 1.0 / (len(g_values) - 1)  # Normalized spacing
+         total = 0.0
+ 
+         # For piecewise linear integration of g², use (y₁² + y₁y₂ + y₂²)/3 * h per segment
+         for i in range(len(g_values) - 1):
+             y1, y2 = g_values[i], g_values[i+1]
+             total += (y1*y1 + y1*y2 + y2*y2) * h / 3.0
+ 
+         return total
+ 
+     @staticmethod
+-    def _compute_trapz_norm1(g_values: np.ndarray) -> float:
+-        """Compute L1 norm using trapezoidal rule."""
++    @jit(nopython=True)
++    def _compute_trapz_norm1_jit(g_values: np.ndarray) -> float:
++        """Compute L1 norm using trapezoidal rule (JIT compiled)."""
+         if len(g_values) < 2:
+             return g_values[0] if len(g_values) > 0 else 0.0
+ 
+         h = 1.0 / (len(g_values) - 1)  # Normalized spacing
+         total = 0.0
+ 
+         # Trapezoidal rule for ∫|g|
+         for i in range(len(g_values) - 1):
+             y1, y2 = g_values[i], g_values[i+1]
+             total += (y1 + y2) * h / 2.0
+ 
+         return total
+ 
++    @staticmethod
++    def compute_autoconvolution_norms(step_func: StepFunction) -> AutoconvolutionResult:
++        """
++        Compute the L2, L1, and L-infinity norms of the autoconvolution of f.
++
++        Args:
++            step_func: StepFunction object containing step heights
++
++        Returns:
++            AutoconvolutionResult containing the three norms
++        """
++        heights = step_func.get_heights()
++        length = step_func.get_length()
++
++        if length == 0:
++            return AutoconvolutionResult(0.0, 0.0, 0.0)
++
++        # Compute autoconvolution g = f * f (discrete convolution)
++        # Using numpy's convolution - it computes cross-correlation with flipped kernel
++        g = np.convolve(heights, heights, mode='full')
++
++        # Compute norms using optimized piecewise integration
++        # ||g||₂² - integrate g² using trapezoidal rule approximation
++        g_squared = g * g
++        norm2_sq = AutoconvolutionEvaluator._compute_trapz_norm2_jit(g_squared)
++
++        # ||g||₁ - integrate |g| using trapezoidal rule
++        g_abs = np.abs(g)
++        norm1 = AutoconvolutionEvaluator._compute_trapz_norm1_jit(g_abs)
++
++        # ||g||∞ - infinity norm (maximum absolute value)
++        norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
++
++        return AutoconvolutionResult(norm2_sq, norm1, norm_inf)
++
++    @staticmethod
++    def _compute_trapz_norm2(g_values: np.ndarray) -> float:
++        """Fallback for non-JIT version - but won't be called due to JIT decorator."""
++        pass
++
++    @staticmethod
++    def _compute_trapz_norm1(g_values: np.ndarray) -> float:
++        """Fallback for non-JIT version - but won't be called due to JIT decorator."""
++        pass
++
+ class FitnessCalculator:
+     """Computes fitness (C2 values) with proper error handling."""
+ 
+     @staticmethod
++    @jit(nopython=True)
++    def calculate_c2_jit(norm2_sq: float, norm1: float, norm_inf: float) -> float:
++        """
++        Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) (JIT compiled).
++        """
++        # Avoid division by zero
++        if norm1 <= 1e-12 or norm_inf <= 1e-12:
++            return 0.0
++
++        return norm2_sq / (norm1 * norm_inf)
++
++    @staticmethod
+     def calculate_c2(step_func: StepFunction) -> float:
+         """
+         Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) where g = f * f.
+ 
+         Args:
+             step_func: StepFunction object
+ 
+         Returns:
+             C₂ value
+         """
+         try:
+             result = AutoconvolutionEvaluator.compute_autoconvolution_norms(step_func)
+ 
+-            # Avoid division by zero
+-            if result.norm1 <= 1e-12 or result.norm_inf <= 1e-12:
+-                return 0.0
+-
+-            return result.norm2_sq / (result.norm1 * result.norm_inf)
++            # Use JIT-compiled version for calculation
++            return FitnessCalculator.calculate_c2_jit(result.norm2_sq, result.norm1, result.norm_inf)
+         except Exception as e:
+             return 0.0
+ 
+ class EvolutionaryOptimizer:
+     """Main evolutionary algorithm class."""
+ 
+     def __init__(self, population_size: int = 20, generations: int = 50,
+                  initial_individual_length: int = 100, mutation_rate: float = 0.1):
+         self.population_size = population_size
+         self.generations = generations
+         self.initial_individual_length = initial_individual_length
+         self.mutation_rate = mutation_rate
+         self.best_fitness = -float('inf')
+         self.best_individual = None
+         self.fitness_history = []
+ 
+     def generate_individual(self) -> StepFunction:
+         """Generate a random individual (step function heights)."""
+         # Generate random positive values with some structure
+         heights = [max(0.0, np.random.normal(1.0, 0.5)) for _ in range(self.initial_individual_length)]
+         return StepFunction(heights)
+ 
+     def mutate_individual(self, individual: StepFunction) -> StepFunction:
+         """Mutate an individual by perturbing some elements."""
+         mutated_heights = individual.get_heights().copy()
+         for i in range(len(mutated_heights)):
+             if np.random.random() < self.mutation_rate:
+                 # Add Gaussian noise
+                 mutated_heights[i] = max(0.0, mutated_heights[i] + np.random.normal(0, 0.1))
+         return StepFunction(mutated_heights)
+ 
+     def crossover(self, parent1: StepFunction, parent2: StepFunction) -> Tuple[StepFunction, StepFunction]:
+         """Perform crossover between two parents."""
+         h1 = parent1.get_heights()
+         h2 = parent2.get_heights()
+ 
+         if len(h1) == 0 or len(h2) == 0:
+             return parent1, parent2
+ 
+         # Uniform crossover
+         child1_heights, child2_heights = [], []
+         max_len = max(len(h1), len(h2))
+         min_len = min(len(h1), len(h2))
+ 
+         for i in range(max_len):
+             if i < min_len and np.random.random() < 0.5:
+                 child1_heights.append(h1[i])
+                 child2_heights.append(h2[i])
+             elif i < len(h1):
+                 child1_heights.append(h1[i])
+                 child2_heights.append(h2[i] if i < len(h2) else h1[i])
+             else:
+                 child1_heights.append(h2[i])
+                 child2_heights.append(h1[i] if i < len(h1) else h2[i])
+ 
+         return StepFunction(child1_heights), StepFunction(child2_heights)
+ 
+     def tournament_selection(self, population: List[StepFunction],
+                            fitness_scores: List[float],
+                            tournament_size: int = 3) -> StepFunction:
+         """Select an individual using tournament selection."""
+         tournament_indices = np.random.choice(len(population),
+                                              size=tournament_size,
+                                              replace=False)
+         best_idx = tournament_indices[np.argmax([fitness_scores[i] for i in tournament_indices])]
+         return population[best_idx]
+ 
+     def evolve_generation(self, population: List[StepFunction],
+                          fitness_scores: List[float]) -> List[StepFunction]:
+         """Evolve one generation of the population."""
+         new_population = []
+         pop_size = len(population)
+ 
+         # Elitism: keep best individual
+         best_idx = np.argmax(fitness_scores)
+         new_population.append(population[best_idx])
+ 
+         # Generate rest through selection, crossover, and mutation
+         for _ in range(pop_size - 1):
+             # Selection
+             parent1 = self.tournament_selection(population, fitness_scores)
+             parent2 = self.tournament_selection(population, fitness_scores)
+ 
+             # Crossover
+             child1, child2 = self.crossover(parent1, parent2)
+ 
+             # Mutation
+             child1 = self.mutate_individual(child1)
+             child2 = self.mutate_individual(child2)
+ 
+             new_population.extend([child1, child2])
+ 
+         # Trim to exact population size
+         return new_population[:pop_size]
+ 
+     def evolve(self) -> StepFunction:
+         """Run the evolutionary process."""
+         # Initialize population
+         population = [self.generate_individual() for _ in range(self.population_size)]
+ 
+         # Evolve
+         for gen in range(self.generations):
+             # Evaluate fitness
+             fitness_scores = [FitnessCalculator.calculate_c2(individual) for individual in population]
+ 
+             # Track best
+             max_fitness = max(fitness_scores)
+             if max_fitness > self.best_fitness:
+                 self.best_fitness = max_fitness
+                 best_individual_idx = fitness_scores.index(max_fitness)
+                 self.best_individual = population[best_individual_idx]
+ 
+             # Print progress every 10 generations
+             if gen % 10 == 0:
+                 print(f"Generation {gen}: Best C2 = {self.best_fitness:.6f}")
+ 
+             # Evolve
+             population = self.evolve_generation(population, fitness_scores)
+ 
+             # Store fitness history
+             self.fitness_history.append(max_fitness)
+ 
+         return self.best_individual if self.best_individual is not None else self.generate_individual()
+ 
+ def construct_function() -> List[float]:
+     """
+     Evolutionary algorithm to find step-function with high C2 value.
+ 
+     Returns:
+         List of step heights that maximize C2
+     """
+     # Create optimizer with parameters
+     optimizer = EvolutionaryOptimizer(
+         population_size=20,
+         generations=50,
+         initial_individual_length=100,
+         mutation_rate=0.1
+     )
+ 
+     # Run evolution
+     best_step_function = optimizer.evolve()
+ 
+     # Return best individual found
+     return best_step_function.get_heights().tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

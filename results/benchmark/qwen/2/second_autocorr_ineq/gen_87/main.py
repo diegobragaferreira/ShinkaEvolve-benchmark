@@ -1,0 +1,290 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+from scipy.ndimage import gaussian_filter1d
+import random
+import time
+from numba import jit
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: list[float]) -> tuple[float, float, float]:
+    """
+    Fast computation of the three norms needed for C2 calculation using piecewise linear integration.
+    """
+    # Convert to numpy array for easier manipulation
+    f = np.array(f_values)
+    n_steps = len(f)
+
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step width
+    dx = 0.5 / n_steps
+
+    # Compute autoconvolution using discrete convolution
+    g = np.convolve(f, f, mode='full')
+    # Trim g to the correct size (this accounts for the convolution)
+    g = g[len(f)-1:2*len(f)-1]
+
+    # Compute L2 norm squared using piecewise linear integration
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        # Trapezoidal-like integration for quadratic function
+        # Using formula for integral of ax^2 + bx + c over [x0,x1]
+        # But here we approximate with piecewise linear segments
+        # So we use: (dx/3)(y0^2 + y0*y1 + y1^2)
+        y0, y1 = g[i], g[i+1]
+        norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+
+    # L1 norm (sum of absolute values)
+    norm_1 = np.sum(np.abs(g))
+
+    # Infinity norm
+    norm_inf = np.max(np.abs(g))
+
+    # Handle numerical edge cases
+    if norm_1 <= 1e-15:
+        norm_1 = 1e-15
+    if norm_inf <= 1e-15:
+        norm_inf = 1e-15
+
+    return norm_2_squared, norm_1, norm_inf
+
+def compute_c2(f_values: list[float]) -> float:
+    """Compute C2 for given step function values."""
+    norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
+    if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+        return 0.0
+    return norm_2_sq / (norm_1 * norm_inf)
+
+def enforce_min_peak_spacing(peak_positions: np.ndarray, min_distance: float) -> np.ndarray:
+    """Enforce minimum spacing between peaks to prevent narrow autoconvolution."""
+    if len(peak_positions) <= 1:
+        return peak_positions
+    
+    sorted_positions = np.sort(peak_positions)
+    adjusted_positions = sorted_positions.copy()
+    
+    for i in range(1, len(sorted_positions)):
+        if adjusted_positions[i] - adjusted_positions[i-1] < min_distance:
+            # Move current peak away from previous one
+            offset = min_distance - (adjusted_positions[i] - adjusted_positions[i-1])
+            adjusted_positions[i] += offset
+            
+    return adjusted_positions
+
+def adaptive_gaussian_construction(n_steps: int = 2000) -> list[float]:
+    """Construct step function with adaptive Gaussian peak placement and refinement."""
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Domain setup
+    domain_width = 0.5
+    domain_center = 0.0
+    step_width = domain_width / n_steps
+    
+    # Strategy 1: Logarithmic distributed peaks with varying amplitudes
+    # Create positions using logarithmic distribution to avoid clustering
+    n_peaks = max(5, n_steps // 100)
+    positions = np.logspace(np.log10(0.001), np.log10(0.25), n_peaks)
+    positions = np.concatenate([-positions[::-1], positions])  # Symmetric around center
+    
+    # Randomly shuffle positions to break any systematic patterns
+    np.random.shuffle(positions)
+    positions = np.clip(positions, -0.25, 0.25)
+    positions = np.sort(positions)
+    
+    # Ensure minimum spacing to prevent narrow autoconvolution
+    min_spacing = 0.05 * domain_width  # 5% of domain width
+    positions = enforce_min_peak_spacing(positions, min_spacing)
+    
+    # Create amplitudes that decay from center outward to prevent sharp peaks
+    amplitudes = np.exp(-10 * positions**2)  # Gaussian-like decay
+    
+    # Add some randomness to break symmetry but keep structure
+    noise_factor = 0.3
+    noise = np.random.normal(0, noise_factor, len(positions))
+    amplitudes += noise
+    
+    # Ensure non-negative amplitudes
+    amplitudes = np.maximum(amplitudes, 0)
+    
+    # Normalize amplitudes to have reasonable magnitude
+    if np.sum(amplitudes) > 0:
+        amplitudes = amplitudes / np.sum(amplitudes) * 100
+    
+    # Apply Gaussian smoothing to reduce spurious oscillations
+    # Using optimized Gaussian kernel instead of Savitzky-Golay
+    smoothed_amplitudes = gaussian_filter1d(amplitudes, sigma=2.0)
+    
+    # Final normalization
+    if np.sum(smoothed_amplitudes) > 0:
+        smoothed_amplitudes = smoothed_amplitudes / np.sum(smoothed_amplitudes) * 100
+    
+    # Convert to final step function
+    step_function = np.interp(np.linspace(-0.25, 0.25, n_steps), 
+                             np.linspace(-0.25, 0.25, len(smoothed_amplitudes)), 
+                             smoothed_amplitudes)
+    
+    # Ensure non-negativity and normalize
+    step_function = np.maximum(step_function, 0)
+    if np.sum(step_function) > 0:
+        step_function = step_function / np.sum(step_function) * 100
+    
+    return step_function.tolist()
+
+def hybrid_peak_construction(n_steps: int = 2000) -> list[float]:
+    """Hybrid approach combining different peak generation strategies."""
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    domain_width = 0.5
+    domain_center = 0.0
+    
+    # Strategy: Create peaks at multiple scales
+    n_peaks = max(10, n_steps // 50)
+    
+    # Generate positions using logarithmic spacing distribution across multiple scales
+    positions = []
+    scales = [0.05, 0.1, 0.15, 0.2, 0.25]
+    
+    for scale in scales:
+        n_subpeaks = max(1, n_peaks // len(scales))
+        # Distribute peaks logarithmically within each scale
+        sub_positions = np.logspace(np.log10(scale*0.1), np.log10(scale), n_subpeaks)
+        sub_positions = np.concatenate([-sub_positions[::-1], sub_positions])
+        positions.extend(sub_positions)
+        
+    # Remove duplicates and ensure proper range
+    positions = list(set([p for p in positions if -0.25 <= p <= 0.25]))
+    positions = np.array(positions)
+    
+    # Enforce minimum spacing
+    min_spacing = 0.05 * domain_width
+    positions = enforce_min_peak_spacing(positions, min_spacing)
+    
+    # Create amplitudes
+    amplitudes = np.exp(-15 * positions**2)  # Stronger center concentration
+    
+    # Add structured noise
+    noise = np.random.normal(0, 0.2, len(positions))
+    amplitudes += noise
+    amplitudes = np.maximum(amplitudes, 0)
+    
+    # Normalize
+    if np.sum(amplitudes) > 0:
+        amplitudes = amplitudes / np.sum(amplitudes) * 100
+    
+    # Interpolate to desired resolution
+    step_function = np.interp(np.linspace(-0.25, 0.25, n_steps),
+                             np.linspace(-0.25, 0.25, len(amplitudes)),
+                             amplitudes)
+    
+    # Final smoothing with adaptive kernel
+    step_function = gaussian_filter1d(step_function, sigma=1.5)
+    step_function = np.maximum(step_function, 0)
+    if np.sum(step_function) > 0:
+        step_function = step_function / np.sum(step_function) * 100
+    
+    return step_function.tolist()
+
+def evolutionary_refinement(original_function: list[float], n_steps: int) -> list[float]:
+    """Apply evolutionary refinement to improve the function."""
+    # Convert to numpy for easier manipulation
+    original_array = np.array(original_function)
+    
+    # Define bounds for each parameter (amplitude values)
+    bounds = [(0, 100) for _ in range(n_steps)]
+    
+    def objective(params):
+        # Ensure non-negativity
+        params = np.maximum(params, 0)
+        
+        # Normalize to reasonable scale
+        if np.sum(params) > 0:
+            params = params / np.sum(params) * 100
+        
+        # Compute C2
+        try:
+            c2 = compute_c2(params.tolist())
+            return -c2  # Negate because we want to maximize
+        except:
+            return 1e10  # Penalize invalid solutions
+    
+    # Use differential evolution for local optimization
+    try:
+        result = differential_evolution(objective, bounds, maxiter=50, popsize=10, 
+                                      init='random', seed=42, disp=False)
+        if result.success:
+            refined_params = np.maximum(result.x, 0)
+            if np.sum(refined_params) > 0:
+                refined_params = refined_params / np.sum(refined_params) * 100
+            return refined_params.tolist()
+    except:
+        pass
+    
+    return original_function
+
+def construct_function() -> list[float]:
+    """Main function to construct optimized step function with high C2 value."""
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    start_time = time.time()
+    best_c2 = -1
+    best_function = None
+    max_attempts = 100
+    
+    # Multi-strategy approach with adaptive time allocation
+    strategies = [
+        ("adaptive_gaussian", adaptive_gaussian_construction),
+        ("hybrid", hybrid_peak_construction),
+    ]
+    
+    for attempt in range(max_attempts):
+        # Early termination if time is running out
+        if time.time() - start_time > 85:  # Leave 5 seconds for cleanup
+            break
+            
+        # Try different approaches
+        strategy_name, strategy_func = random.choice(strategies)
+        
+        try:
+            # Vary step count between strategies
+            n_steps = np.random.randint(1500, 4000)
+            
+            # Generate function using chosen strategy
+            f_values = strategy_func(n_steps)
+            
+            # Apply evolutionary refinement for better local optimization
+            refined_function = evolutionary_refinement(f_values, n_steps)
+            
+            # Compute final C2 score
+            c2 = compute_c2(refined_function)
+            
+            # Keep the best function
+            if c2 > best_c2:
+                best_c2 = c2
+                best_function = refined_function
+                
+        except Exception as e:
+            # Skip invalid functions
+            continue
+    
+    # Fallback to a uniform distribution if nothing worked
+    if best_function is None:
+        n_steps = 1000
+        best_function = [1.0] * n_steps
+    
+    return best_function
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

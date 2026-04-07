@@ -1,0 +1,231 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,221 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++import random
++from deap import base, creator, tools, algorithms
++from scipy.spatial import cKDTree
++import time
++from joblib import Parallel, delayed
++import math
++
++# Fixed seed for reproducibility
++np.random.seed(42)
++random.seed(42)
++
++def evaluate_individual(individual):
++    """Evaluate fitness of individual (maximize sum of radii)"""
++    # Reshape individual to (26, 3) array of (x, y, r)
++    circles = individual.reshape((26, 3))
++    
++    # Check constraints
++    for i in range(26):
++        x, y, r = circles[i]
++        # Check containment constraints
++        if r > x or r > y or r > (1 - x) or r > (1 - y):
++            return (0,)  # Invalid - return minimum fitness
++    
++    # Check overlap constraints using KDTree for efficiency
++    try:
++        tree = cKDTree(circles[:, :2])  # Only use (x,y) coordinates for distance calculation
++        pairs = tree.query_pairs(r=0.0001)  # Small epsilon to avoid self-pairs
++        
++        for i, j in pairs:
++            if i != j:
++                x1, y1, r1 = circles[i]
++                x2, y2, r2 = circles[j]
++                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                if distance < (r1 + r2):
++                    return (0,)  # Overlapping - return minimum fitness
++    except Exception:
++        return (0,)
++    
++    # Return negative sum of radii (minimize negative to maximize positive)
++    return (-np.sum(circles[:, 2]),)
++
++def create_initial_population(n_circles, pop_size):
++    """Create initial population using a hybrid approach"""
++    population = []
++    
++    # Try to create valid configurations with Voronoi-inspired spreading
++    for _ in range(pop_size):
++        # Start with grid-based initialization
++        circles = np.zeros((n_circles, 3))
++        
++        # Create approximately evenly spaced initial positions
++        spacing_x = 1.0 / math.ceil(math.sqrt(n_circles))
++        spacing_y = 1.0 / math.ceil(math.sqrt(n_circles))
++        
++        count = 0
++        for i in range(int(math.ceil(math.sqrt(n_circles)))):
++            for j in range(int(math.ceil(math.sqrt(n_circles)))):
++                if count >= n_circles:
++                    break
++                x = (i + 0.5) * spacing_x
++                y = (j + 0.5) * spacing_y
++                
++                # Ensure we're within bounds
++                x = max(0.01, min(0.99, x))
++                y = max(0.01, min(0.99, y))
++                
++                # Set radius to small value initially
++                radius = 0.01
++                circles[count] = [x, y, radius]
++                count += 1
++            
++            if count >= n_circles:
++                break
++        
++        # Add some randomness to positions and radii
++        for i in range(n_circles):
++            # Random position adjustment (small)
++            circles[i, 0] += np.random.normal(0, 0.01)
++            circles[i, 1] += np.random.normal(0, 0.01)
++            
++            # Random radius adjustment (ensure positive)
++            circles[i, 2] = max(0.001, circles[i, 2] + np.random.normal(0, 0.005))
++            
++            # Clamp to unit square bounds
++            circles[i, 0] = max(circles[i, 2], min(1 - circles[i, 2], circles[i, 0]))
++            circles[i, 1] = max(circles[i, 2], min(1 - circles[i, 2], circles[i, 1]))
++        
++        # Ensure all radii satisfy containment constraints
++        for i in range(n_circles):
++            x, y, r = circles[i]
++            max_radius = min(x, y, 1-x, 1-y)
++            circles[i, 2] = min(r, max_radius)
++        
++        population.append(circles.flatten())
++    
++    return population
++
++def mutate_individual(individual, indpb=0.1, mu=0.0, sigma=0.01):
++    """Custom mutation that respects constraints"""
++    mutated = individual.copy()
++    
++    # Mutate all three components with probability indpb
++    for i in range(len(mutated)):
++        if random.random() < indpb:
++            if i % 3 == 2:  # Radius component
++                mutated[i] = max(0.001, mutated[i] + np.random.normal(mu, sigma))
++            else:  # Position component
++                mutated[i] += np.random.normal(mu, sigma)
++    
++    # Apply hard constraints to ensure validity after mutation
++    circles = mutated.reshape((26, 3))
++    
++    for i in range(26):
++        x, y, r = circles[i]
++        # Constrain positions to be within bounds
++        x = max(r, min(1 - r, x))
++        y = max(r, min(1 - r, y))
++        
++        # Ensure radius is positive and within bounds
++        r = max(0.001, min(x, y, 1 - x, 1 - y, r))
++        
++        circles[i] = [x, y, r]
++    
++    return (circles.flatten(),)
++
++def cxTwoPointCustom(ind1, ind2):
++    """Custom crossover that respects constraints"""
++    size = len(ind1)
++    cxpoint1 = random.randint(1, size)
++    cxpoint2 = random.randint(1, size - 1)
++    
++    if cxpoint2 >= cxpoint1:
++        cxpoint2 += 1
++    else:
++        cxpoint1, cxpoint2 = cxpoint2, cxpoint1
++
++    # Swap the segments
++    ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2], ind1[cxpoint1:cxpoint2]
++
++    # Fix up any constraint violations
++    for ind in [ind1, ind2]:
++        circles = ind.reshape((26, 3))
++        for i in range(26):
++            x, y, r = circles[i]
++            x = max(r, min(1 - r, x))
++            y = max(r, min(1 - r, y))
++            r = max(0.001, min(x, y, 1 - x, 1 - y, r))
++            circles[i] = [x, y, r]
++    
++    return (ind1, ind2)
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
+-
++    N_CIRCLES = 26
++    POP_SIZE = 50
++    N_GENERATIONS = 100
++    MUTPB = 0.2
++    CXPB = 0.5
++    
++    # Initialize the fitness and individual classes
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    # Register functions
++    toolbox.register("population", create_initial_population, N_CIRCLES, POP_SIZE)
++    toolbox.register("evaluate", evaluate_individual)
++    toolbox.register("mate", cxTwoPointCustom)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Create initial population
++    population = toolbox.population()
++    
++    # Evaluate initial population
++    fitnesses = list(Parallel(n_jobs=-1)(delayed(toolbox.evaluate)(individual) for individual in population))
++    for ind, fit in zip(population, fitnesses):
++        ind.fitness.values = fit
++    
++    # Evolution loop
++    for generation in range(N_GENERATIONS):
++        # Select the next generation individuals
++        offspring = toolbox.select(population, len(population))
++        offspring = list(map(toolbox.clone, offspring))
++        
++        # Apply crossover and mutation on the offspring
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < CXPB:
++                toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++        
++        for mutant in offspring:
++            if random.random() < MUTPB:
++                toolbox.mutate(mutant)
++                del mutant.fitness.values
++        
++        # Evaluate the individuals with an invalid fitness
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = list(Parallel(n_jobs=-1)(delayed(toolbox.evaluate)(ind) for ind in invalid_ind))
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++        
++        # Replace population
++        population[:] = offspring
++    
++    # Find the best individual
++    best_individual = tools.selBest(population, 1)[0]
++    circles = np.array(best_individual).reshape((26, 3))
++    
+     return circles
+ 
+-
+ # EVOLVE-BLOCK-END

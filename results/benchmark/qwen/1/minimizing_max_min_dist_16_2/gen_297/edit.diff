@@ -1,0 +1,333 @@
+--- a/original.py
++++ b/original.py
+@@ -1,112 +1,261 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import pdist, squareform
++from scipy.spatial.distance import pdist
+ from scipy.optimize import minimize
+-import itertools
++import time
+ from typing import Tuple
++import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     
+     def calculate_min_max_ratio(points):
+         """Calculate the ratio of minimum to maximum distance"""
++        if len(points) < 2:
++            return 0.0
+         distances = pdist(points)
++        if len(distances) == 0 or np.max(distances) <= 0:
++            return 0.0
+         return np.min(distances) / np.max(distances)
+     
+-    def objective_function(points_flat):
+-        """Objective function to minimize (negative ratio)"""
+-        points = points_flat.reshape(-1, 2)
+-        return -calculate_min_max_ratio(points)
+-    
+-    def generate_hexagonal_grid():
+-        """Generate initial points using hexagonal grid pattern"""
+-        # Create a hexagonal lattice pattern
+-        n_points = 16
+-        rows = 4
+-        cols = 4
+-        
+-        points = []
+-        for i in range(rows):
+-            for j in range(cols):
+-                if len(points) >= n_points:
+-                    break
+-                x = j + 0.5 * (i % 2)
+-                y = i * np.sqrt(3)/2
+-                points.append([x, y])
+-        
+-        # Normalize to unit square [0,1] x [0,1]
+-        points = np.array(points[:n_points])
+-        
+-        # Scale and shift to fit in [0,1] x [0,1]
+-        x_min, y_min = np.min(points, axis=0)
+-        x_max, y_max = np.max(points, axis=0)
+-        
+-        if x_max > x_min and y_max > y_min:
+-            points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
+-            points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
+-        
+-        # Further adjust to make it more uniform
+-        points[:, 0] *= 0.9
+-        points[:, 1] *= 0.9
+-        points[:, 0] += 0.05
+-        points[:, 1] += 0.05
++    def compute_forces(points):
++        """Compute repulsive forces between all point pairs based on inverse distance squared"""
++        n = len(points)
++        forces = np.zeros_like(points)
++        
++        # For each pair of points
++        for i in range(n):
++            for j in range(i+1, n):
++                diff = points[i] - points[j]
++                distance_squared = np.sum(diff**2)
++                
++                # Avoid division by zero and very close points
++                if distance_squared > 1e-10:
++                    # Force magnitude inversely proportional to distance squared
++                    force_magnitude = 1.0 / distance_squared
++                    # Direction from j to i (repulsive force)
++                    force_direction = diff / np.sqrt(distance_squared)
++                    forces[i] += force_magnitude * force_direction
++                    forces[j] -= force_magnitude * force_direction
++        
++        return forces
++    
++    def force_based_initialization(n_points=16):
++        """Initialize points using a force-based approach to achieve good distribution"""
++        # Start with random points
++        points = np.random.rand(n_points, 2)
++        
++        # Run force simulation to distribute points
++        for _ in range(500):
++            forces = compute_forces(points)
++            # Apply forces with damping
++            points += 0.01 * forces
++            # Keep within bounds
++            points = np.clip(points, 0, 1)
+         
+         return points
+     
+-    def local_optimization(initial_points, max_iter=1000):
+-        """Apply local optimization to improve the configuration"""
++    def polar_coordinate_transform(points):
++        """Convert Cartesian coordinates to polar representation"""
++        center = np.mean(points, axis=0)
++        polar_points = []
++        for point in points:
++            dx = point[0] - center[0]
++            dy = point[1] - center[1]
++            r = np.sqrt(dx**2 + dy**2)
++            theta = np.arctan2(dy, dx)
++            polar_points.append([r, theta])
++        return np.array(polar_points), center
++    
++    def cartesian_from_polar(polar_points, center):
++        """Convert polar coordinates back to Cartesian"""
++        cartesian_points = []
++        for r, theta in polar_points:
++            x = center[0] + r * np.cos(theta)
++            y = center[1] + r * np.sin(theta)
++            cartesian_points.append([x, y])
++        return np.array(cartesian_points)
++    
++    def dual_space_optimization(points, max_iter=500):
++        """Optimize points in both Cartesian and polar coordinate spaces"""
++        current_points = points.copy()
++        best_ratio = calculate_min_max_ratio(current_points)
++        best_points = current_points.copy()
++        
++        # Parameters for adaptive learning rate
++        lr_base = 0.01
++        lr_decay = 0.99
++        
++        for iteration in range(max_iter):
++            # Adaptive learning rate
++            lr = lr_base * (lr_decay ** iteration)
++            
++            # Cartesian space optimization
++            # Compute forces and update points
++            forces = compute_forces(current_points)
++            current_points += lr * forces
++            current_points = np.clip(current_points, 0, 1)
++            
++            # Periodically test improvement
++            if iteration % 20 == 0:
++                current_ratio = calculate_min_max_ratio(current_points)
++                if current_ratio > best_ratio:
++                    best_ratio = current_ratio
++                    best_points = current_points.copy()
++            
++            # Occasionally switch to polar space optimization
++            if iteration % 50 == 0 and iteration > 0:
++                # Convert to polar
++                polar_points, center = polar_coordinate_transform(current_points)
++                
++                # Apply small random perturbations to polar coordinates
++                polar_points += np.random.normal(0, 0.001, polar_points.shape)
++                
++                # Convert back to Cartesian
++                current_points = cartesian_from_polar(polar_points, center)
++                current_points = np.clip(current_points, 0, 1)
++        
++        return best_points, best_ratio
++    
++    def constraint_aware_optimization(initial_points, max_iter=1000):
++        """Apply constraint-aware optimization with penalty for violations"""
++        def objective_with_penalty(points_flat):
++            points = points_flat.reshape(-1, 2)
++            
++            # Calculate the standard objective
++            ratio = calculate_min_max_ratio(points)
++            objective_value = -ratio  # Negative because we minimize
++            
++            # Add penalty for constraint violations (points outside bounds)
++            penalty = 0
++            for point in points:
++                for coord in point:
++                    if coord < 0 or coord > 1:
++                        penalty += 1000 * (abs(coord) + 1)  # Heavy penalty
++            
++            # Add penalty for very small distances (clustering)
++            distances = pdist(points)
++            min_dist = np.min(distances) if len(distances) > 0 else 0
++            if min_dist < 0.01:  # Very small distances penalized
++                penalty += 10000 * (0.01 - min_dist)**2
++            
++            return objective_value + penalty
++        
++        # Apply optimization multiple times with different restarts
+         best_points = initial_points.copy()
+         best_ratio = calculate_min_max_ratio(best_points)
+         
+-        # Use a combination of different optimization approaches
+-        for _ in range(10):  # Try multiple optimization runs
+-            # Random perturbations
+-            perturbed = best_points + np.random.normal(0, 0.01, best_points.shape)
+-            perturbed = np.clip(perturbed, 0, 1)  # Keep within bounds
++        for _ in range(10):  # Multiple restarts
++            # Slightly perturb initial points
++            perturbed = initial_points + np.random.normal(0, 0.01, initial_points.shape)
++            perturbed = np.clip(perturbed, 0, 1)
+             
+             try:
+-                result = minimize(objective_function, perturbed.flatten(), 
+-                                method='L-BFGS-B', bounds=[(0,1)] * len(perturbed.flatten()))
++                result = minimize(
++                    objective_with_penalty,
++                    perturbed.flatten(),
++                    method='L-BFGS-B',
++                    bounds=[(0, 1) for _ in range(len(perturbed.flatten()))],
++                    options={'maxiter': max_iter//10}
++                )
++                
+                 if result.success:
+                     optimized_points = result.x.reshape(-1, 2)
+                     optimized_points = np.clip(optimized_points, 0, 1)
+                     ratio = calculate_min_max_ratio(optimized_points)
+                     
+                     if ratio > best_ratio:
+                         best_ratio = ratio
+                         best_points = optimized_points.copy()
++                        
+             except:
+-                pass
++                continue
+         
+         return best_points, best_ratio
+     
+-    # Start with hexagonal grid initialization
+-    initial_points = generate_hexagonal_grid()
+-    
+-    # Fine-tune with local optimization
+-    final_points, ratio = local_optimization(initial_points)
+-    
+-    # Additional grid refinement
+-    best_ratio = ratio
++    def multi_scale_optimization(initial_points):
++        """Apply multi-scale optimization approach"""
++        # Phase 1: Coarse force-based optimization
++        coarse_points = force_based_initialization()
++        
++        # Phase 2: Dual-space optimization
++        dual_points, dual_ratio = dual_space_optimization(coarse_points, max_iter=300)
++        
++        # Phase 3: Constraint-aware optimization
++        constrained_points, constrained_ratio = constraint_aware_optimization(dual_points, max_iter=200)
++        
++        # Phase 4: Final refinement with multiple methods
++        final_points = constrained_points.copy()
++        final_ratio = constrained_ratio
++        
++        # Try standard L-BFGS-B optimization
++        try:
++            result = minimize(
++                lambda x: -calculate_min_max_ratio(x.reshape(-1, 2)),
++                final_points.flatten(),
++                method='L-BFGS-B',
++                bounds=[(0, 1) for _ in range(len(final_points.flatten()))],
++                options={'maxiter': 100}
++            )
++            
++            if result.success:
++                l_bfgs_points = result.x.reshape(-1, 2)
++                l_bfgs_points = np.clip(l_bfgs_points, 0, 1)
++                l_bfgs_ratio = calculate_min_max_ratio(l_bfgs_points)
++                
++                if l_bfgs_ratio > final_ratio:
++                    final_points = l_bfgs_points
++                    final_ratio = l_bfgs_ratio
++                    
++        except:
++            pass
++        
++        return final_points, final_ratio
++    
++    # Generate initial points using our novel approach
++    np.random.seed(42)
++    initial_points = force_based_initialization(16)
++    
++    # Apply multi-scale optimization
++    final_points, final_ratio = multi_scale_optimization(initial_points)
++    
++    # Additional refinement with ensemble of approaches
+     best_points = final_points.copy()
+-    
+-    # Try different grid configurations
+-    for attempt in range(5):
+-        # Perturb slightly and optimize again
+-        perturbed = initial_points + np.random.normal(0, 0.02, initial_points.shape) * (1 + attempt * 0.1)
+-        perturbed = np.clip(perturbed, 0, 1)
+-        
+-        refined_points, refined_ratio = local_optimization(perturbed)
+-        
+-        if refined_ratio > best_ratio:
+-            best_ratio = refined_ratio
+-            best_points = refined_points.copy()
++    best_ratio = final_ratio
++    
++    # Try several different initial configurations
++    for i in range(5):
++        np.random.seed(i * 42)
++        
++        # Different initialization strategies
++        if i == 0:
++            # Force-based
++            test_points = force_based_initialization(16)
++        elif i == 1:
++            # Random with slight clustering avoidance
++            test_points = np.random.rand(16, 2)
++            # Add small perturbation to avoid degenerate cases
++            for _ in range(100):
++                test_points += np.random.normal(0, 0.005, test_points.shape)
++                test_points = np.clip(test_points, 0, 1)
++        else:
++            # Grid-like with noise
++            test_points = np.random.rand(16, 2)
++            test_points[:, 0] = (test_points[:, 0] * 0.9 + 0.05) * 0.9
++            test_points[:, 1] = (test_points[:, 1] * 0.9 + 0.05) * 0.9
++        
++        # Optimize this configuration
++        test_points, test_ratio = multi_scale_optimization(test_points)
++        
++        if test_ratio > best_ratio:
++            best_ratio = test_ratio
++            best_points = test_points.copy()
+     
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

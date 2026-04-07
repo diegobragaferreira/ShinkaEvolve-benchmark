@@ -1,0 +1,147 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 3)
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Calculate min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Return negative ratio (since we want to maximize)
+        # Add small epsilon to avoid division by zero
+        if max_dist < 1e-12:
+            return -1e10
+        return -min_dist / max_dist
+
+    def sobol_sphere(samples=14):
+        """Generate points on a sphere using Sobol sequence for better space-filling properties"""
+        # Using a simplified approach with 3D Sobol-like distribution
+        # Generate points in a way that provides better coverage than Fibonacci
+
+        # Generate pseudo-random points using a combination approach
+        np.random.seed(42)  # Fixed seed for reproducibility
+        points = []
+
+        # Generate points using a modified spherical Fibonacci approach
+        phi = np.pi * (3. - np.sqrt(5.))  # golden angle in radians
+
+        # Generate points with slight perturbations to avoid regular patterns
+        for i in range(samples):
+            # Base Fibonacci point
+            y = 1 - (i / float(samples - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            # Add slight random perturbation to break symmetry and improve distribution
+            perturbation_strength = 0.05
+
+            # Apply different perturbations to each coordinate
+            x_pert = np.random.normal(0, perturbation_strength * 0.5)
+            y_pert = np.random.normal(0, perturbation_strength * 0.3)
+            z_pert = np.random.normal(0, perturbation_strength * 0.4)
+
+            # Ensure we're still on the sphere surface
+            x += x_pert
+            y += y_pert
+            z += z_pert
+
+            # Normalize to unit sphere
+            norm = np.sqrt(x*x + y*y + z*z)
+            if norm > 0:
+                x /= norm
+                y /= norm
+                z /= norm
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def optimize_with_restart(x0, max_restarts=5):
+        """Run optimization with multiple restarts"""
+        best_ratio = -np.inf
+        best_points = None
+
+        for restart in range(max_restarts):
+            # Add small random perturbation to initial guess
+            if restart > 0:
+                x0 = x0 + np.random.normal(0, 0.01, len(x0))
+
+            try:
+                # Optimize with SLSQP method
+                result = minimize(
+                    objective,
+                    x0,
+                    method='SLSQP',
+                    options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9},
+                    constraints={'type': 'ineq', 'fun': lambda x: 1.0 - np.linalg.norm(x.reshape(-1, 3), axis=1)},
+                    bounds=[(-1, 1) for _ in range(len(x0))]
+                )
+
+                if result.success:
+                    points = result.x.reshape(-1, 3)
+                    # Ensure points are within unit sphere
+                    norms = np.linalg.norm(points, axis=1)
+                    points = points / np.maximum(norms[:, np.newaxis], 1e-12)
+
+                    # Calculate ratio
+                    distances = pdist(points)
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+
+                    if max_dist > 1e-12:
+                        ratio = min_dist / max_dist
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = points.copy()
+
+            except Exception as e:
+                continue
+
+        return best_points if best_points is not None else x0.reshape(-1, 3)
+
+    # Generate initial configuration using Sobol-inspired sphere sampling
+    initial_points = sobol_sphere(14)
+
+    # Add slight random noise to break symmetry
+    initial_points += np.random.normal(0, 0.02, (14, 3))
+
+    # Normalize to make sure they're within unit sphere
+    norms = np.linalg.norm(initial_points, axis=1)
+    initial_points = initial_points / np.maximum(norms[:, np.newaxis], 1e-12) * 0.9
+
+    # Flatten for optimization
+    x0 = initial_points.flatten()
+
+    # Optimize with restarts
+    optimized_points = optimize_with_restart(x0, max_restarts=3)
+
+    # Final normalization to unit sphere
+    norms = np.linalg.norm(optimized_points, axis=1)
+    optimized_points = optimized_points / np.maximum(norms[:, np.newaxis], 1e-12)
+
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

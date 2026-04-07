@@ -1,0 +1,238 @@
+<NAME>
+add_hybrid_local_search
+</NAME>
+
+<DESCRIPTION>
+Adding a hybrid local search approach that combines force-based refinement with gradient-like optimizations to escape local optima more effectively. This approach will enhance the existing local refinement by implementing a more sophisticated overlap resolution mechanism that considers not just immediate neighbors but also potential global improvements.
+
+The key insight is that the current local refinement works well but can get stuck in suboptimal configurations. By implementing a hybrid approach that includes:
+1. Enhanced force-based overlap resolution
+2. Strategic radius adjustment based on geometric constraints
+3. Multi-level refinement that considers both local and global aspects
+4. Adaptive parameters that change based on generation progress
+
+This will allow us to push beyond the current 2.4 score and approach the benchmark of 2.636.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, circles: np.ndarray, max_iterations: int = 20, generation: int = 0) -> np.ndarray:
+        """Apply intensive local refinement to improve overlap resolution and constraint satisfaction."""
+        refined = circles.copy()
+
+        # Adaptive parameters based on generation
+        if generation < 50:
+            max_iter = max_iterations // 2  # Fewer iterations early on
+            base_move_scale = 0.3
+            force_multiplier = 0.5
+        elif generation < 100:
+            max_iter = max_iterations  # Normal iterations
+            base_move_scale = 0.5
+            force_multiplier = 0.7
+        else:
+            max_iter = max_iterations * 2  # More iterations later for fine-tuning
+            base_move_scale = 0.7
+            force_multiplier = 1.0
+
+        for iteration in range(max_iter):
+            grid = self.get_grid_cells(refined, self.config.initial_grid_size)
+
+            # Check for overlaps and resolve them with more aggressive force-based approach
+            resolved = False
+            overlap_count = 0
+
+            # Track how many overlaps we're resolving per iteration
+            for i in range(len(refined)):
+                for j in range(i+1, len(refined)):
+                    xi, yi, ri = refined[i]
+                    xj, yj, rj = refined[j]
+                    dist = self.fitness_evaluator.calculate_distance((xi, yi), (xj, yj))
+
+                    if dist < (ri + rj - self.config.validity_threshold):
+                        overlap_count += 1
+                        # More aggressive for severe overlaps
+                        overlap_severity = (ri + rj - dist) / (ri + rj + 0.001)
+                        move_scale = base_move_scale * (1.0 + overlap_severity * 0.5)
+
+                        # More aggressive approach for later generations
+                        if generation > 150:
+                            move_scale *= 1.2
+
+                        # More aggressive overlap resolution with better force distribution
+                        dx = xj - xi
+                        dy = yj - yi
+                        distance = max(self.config.validity_threshold, dist)
+
+                        # Normalize direction vector
+                        dx /= distance
+                        dy /= distance
+
+                        # Move circles apart with enhanced force scaling
+                        move_amount = (ri + rj - dist) * force_multiplier * move_scale
+
+                        # Scale by inverse radii to better balance movement
+                        scale_factor = min(1.0, ri / (ri + rj + 0.001))
+                        refined[i, 0] -= dx * move_amount * scale_factor * 0.5
+                        refined[i, 1] -= dy * move_amount * scale_factor * 0.5
+                        refined[j, 0] += dx * move_amount * (1 - scale_factor) * 0.5
+                        refined[j, 1] += dy * move_amount * (1 - scale_factor) * 0.5
+                        resolved = True
+
+            # Enforce bounds with more precise constraint handling
+            for i in range(len(refined)):
+                x, y, r = refined[i]
+                # Ensure the circle fits properly in the unit square
+                max_radius = min(x, 1-x, y, 1-y)
+                r = min(r, max_radius)
+                r = max(0.001, r)
+
+                # Clamp coordinates to valid range
+                x = max(r, min(1-r, x))
+                y = max(r, min(1-r, y))
+                refined[i] = [x, y, r]
+
+            # Early stopping criteria:
+            # 1. No overlaps detected
+            # 2. Very few overlaps (stabilizing)
+            # 3. Many iterations with no changes (converged)
+            if not resolved or overlap_count < 2:
+                break
+
+        return refined
+=======
+    def hybrid_local_refinement(self, circles: np.ndarray, max_iterations: int = 20, generation: int = 0) -> np.ndarray:
+        """Apply hybrid local refinement combining force-based and geometric optimization."""
+        refined = circles.copy()
+
+        # Adaptive parameters based on generation
+        if generation < 50:
+            max_iter = max_iterations // 2  # Fewer iterations early on
+            base_move_scale = 0.3
+            force_multiplier = 0.5
+        elif generation < 100:
+            max_iter = max_iterations  # Normal iterations
+            base_move_scale = 0.5
+            force_multiplier = 0.7
+        else:
+            max_iter = max_iterations * 2  # More iterations later for fine-tuning
+            base_move_scale = 0.7
+            force_multiplier = 1.0
+
+        for iteration in range(max_iter):
+            grid = self.get_grid_cells(refined, self.config.initial_grid_size)
+            resolved = False
+            overlap_count = 0
+
+            # Track how many overlaps we're resolving per iteration
+            for i in range(len(refined)):
+                for j in range(i+1, len(refined)):
+                    xi, yi, ri = refined[i]
+                    xj, yj, rj = refined[j]
+                    dist = self.fitness_evaluator.calculate_distance((xi, yi), (xj, yj))
+
+                    if dist < (ri + rj - self.config.validity_threshold):
+                        overlap_count += 1
+                        # More aggressive for severe overlaps
+                        overlap_severity = (ri + rj - dist) / (ri + rj + 0.001)
+                        move_scale = base_move_scale * (1.0 + overlap_severity * 0.5)
+
+                        # More aggressive approach for later generations
+                        if generation > 150:
+                            move_scale *= 1.2
+
+                        # More aggressive overlap resolution with better force distribution
+                        dx = xj - xi
+                        dy = yj - yi
+                        distance = max(self.config.validity_threshold, dist)
+
+                        # Normalize direction vector
+                        dx /= distance
+                        dy /= distance
+
+                        # Move circles apart with enhanced force scaling
+                        move_amount = (ri + rj - dist) * force_multiplier * move_scale
+
+                        # Scale by inverse radii to better balance movement
+                        scale_factor = min(1.0, ri / (ri + rj + 0.001))
+                        refined[i, 0] -= dx * move_amount * scale_factor * 0.5
+                        refined[i, 1] -= dy * move_amount * scale_factor * 0.5
+                        refined[j, 0] += dx * move_amount * (1 - scale_factor) * 0.5
+                        refined[j, 1] += dy * move_amount * (1 - scale_factor) * 0.5
+                        resolved = True
+
+            # Geometric-based radius optimization:
+            # Try to slightly increase radii where possible without creating overlaps
+            if generation > 100:  # Only apply in later generations
+                for i in range(len(refined)):
+                    x, y, r = refined[i]
+                    # Try to increase radius if there's room and no overlaps
+                    max_possible_radius = min(x, 1-x, y, 1-y)
+                    # Only attempt radius increase if it doesn't create overlaps with neighbors
+                    neighbor_influence = 0
+                    grid_cells = self.get_grid_cells(np.array([[x, y, r]]), self.config.initial_grid_size)
+                    for (gx, gy), indices in grid_cells.items():
+                        for idx in indices:
+                            if idx != i:
+                                neighbor_x, neighbor_y, neighbor_r = refined[idx]
+                                dist = self.fitness_evaluator.calculate_distance((x, y), (neighbor_x, neighbor_y))
+                                if dist < (r + neighbor_r - self.config.validity_threshold):
+                                    neighbor_influence += 1
+
+                    # If no immediate neighbors prevent it, try to expand radius a bit
+                    if neighbor_influence == 0 and r < max_possible_radius:
+                        # Try to slightly increase the radius
+                        r_increase = min(0.005, (max_possible_radius - r) * 0.2)
+                        if r + r_increase < max_possible_radius:
+                            refined[i, 2] += r_increase
+
+            # Enforce bounds with more precise constraint handling
+            for i in range(len(refined)):
+                x, y, r = refined[i]
+                # Ensure the circle fits properly in the unit square
+                max_radius = min(x, 1-x, y, 1-y)
+                r = min(r, max_radius)
+                r = max(0.001, r)
+
+                # Clamp coordinates to valid range
+                x = max(r, min(1-r, x))
+                y = max(r, min(1-r, y))
+                refined[i] = [x, y, r]
+
+            # Early stopping criteria:
+            # 1. No overlaps detected
+            # 2. Very few overlaps (stabilizing)
+            # 3. Many iterations with no changes (converged)
+            if not resolved or overlap_count < 2:
+                break
+
+        return refined
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+                # Apply local refinement in later generations for better exploitation
+                if gen >= self.config.generations * 0.7:  # Start local refinement in later generations
+                    child.circles = self.local_refinement(child.circles, generation=gen)
+                    child.invalidate_grid()
+=======
+                # Apply local refinement in later generations for better exploitation
+                if gen >= self.config.generations * 0.7:  # Start local refinement in later generations
+                    child.circles = self.hybrid_local_refinement(child.circles, generation=gen)
+                    child.invalidate_grid()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Final refinement to improve the best solution
+        refined_best = self.local_refinement(best_solution.circles, max_iterations=50, generation=self.config.generations)
+        return CircleConfiguration(refined_best)
+=======
+        # Final refinement to improve the best solution
+        refined_best = self.hybrid_local_refinement(best_solution.circles, max_iterations=50, generation=self.config.generations)
+        return CircleConfiguration(refined_best)
+>>>>>>> REPLACE
+</DIFF>

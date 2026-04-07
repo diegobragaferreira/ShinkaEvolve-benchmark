@@ -1,0 +1,597 @@
+--- a/original.py
++++ b/original.py
+@@ -1,274 +1,339 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial import Voronoi
+ from scipy.spatial.distance import cdist
+-from scipy.spatial import Voronoi
+-import time
++import random
++from typing import Tuple, List
++
++# Global constants
++RECT_PERIMETER = 4.0
++RECT_WIDTH_HEIGHT_RATIO = 1.0  # Square rectangle for simplicity
++RECT_WIDTH = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
++RECT_HEIGHT = RECT_PERIMETER / (2 * (1 + RECT_WIDTH_HEIGHT_RATIO))
++NUM_CIRCLES = 21
++
++# Spatial indexing for fast collision detection
++class SpatialIndex:
++    def __init__(self, cell_size: float = 0.1):
++        self.cell_size = cell_size
++        self.grid = {}
++        
++    def _get_cell(self, x: float, y: float) -> Tuple[int, int]:
++        return (int(x // self.cell_size), int(y // self.cell_size))
++    
++    def insert(self, idx: int, x: float, y: float, r: float):
++        cell = self._get_cell(x, y)
++        if cell not in self.grid:
++            self.grid[cell] = []
++        self.grid[cell].append((idx, x, y, r))
++    
++    def get_candidates(self, x: float, y: float, r: float) -> List[Tuple[int, float, float, float]]:
++        candidates = []
++        cell = self._get_cell(x, y)
++        for dx in [-1, 0, 1]:
++            for dy in [-1, 0, 1]:
++                neighbor_cell = (cell[0] + dx, cell[1] + dy)
++                if neighbor_cell in self.grid:
++                    candidates.extend(self.grid[neighbor_cell])
++        return candidates
++
++def validate_placement(circles: np.ndarray, idx: int, x: float, y: float, r: float, 
++                      spatial_index: SpatialIndex) -> bool:
++    """Check if placing a circle at (x,y) with radius r is valid."""
++    # Check boundary constraints
++    if x - r < 0 or x + r > RECT_WIDTH or y - r < 0 or y + r > RECT_HEIGHT:
++        return False
++    
++    # Check collisions with existing circles using spatial index
++    candidates = spatial_index.get_candidates(x, y, r)
++    for i, cx, cy, cr in candidates:
++        # Calculate distance between centers
++        dx = x - cx
++        dy = y - cy
++        distance = np.sqrt(dx * dx + dy * dy)
++        # Check if circles overlap
++        if distance < (r + cr):
++            return False
++            
++    return True
++
++def compute_max_radius(circles: np.ndarray, x: float, y: float, 
++                      spatial_index: SpatialIndex) -> float:
++    """Compute maximum radius for a circle at position (x,y) without overlap."""
++    max_r = min(x, RECT_WIDTH - x, y, RECT_HEIGHT - y)
++    
++    # Check collisions with existing circles
++    candidates = spatial_index.get_candidates(x, y, max_r)
++    for i, cx, cy, cr in candidates:
++        dx = x - cx
++        dy = y - cy
++        distance = np.sqrt(dx * dx + dy * dy)
++        max_r = min(max_r, distance - cr)
++        
++    return max(max_r, 0.001)  # Ensure positive radius
++
++def evaluate_solution(circles: np.ndarray) -> float:
++    """Evaluate fitness (sum of radii) for a solution."""
++    return np.sum(circles[:, 2])
++
++def generate_voronoi_initialization(n: int, max_iterations: int = 100) -> np.ndarray:
++    """
++    Generate initial circle positions using Voronoi-based Lloyd's algorithm.
++    This creates well-distributed points that lead to better packing.
++    """
++    # Create initial random points
++    points = np.random.rand(n, 2) * 0.8 + 0.1  # Keep away from edges
++    points[:, 0] *= RECT_WIDTH
++    points[:, 1] *= RECT_HEIGHT
++    
++    # Apply Lloyd's algorithm for better distribution
++    for _ in range(max_iterations):
++        try:
++            # Create Voronoi diagram
++            vor = Voronoi(points)
++            
++            # Compute centroids of Voronoi cells
++            new_points = []
++            for i in range(len(points)):
++                # Get vertices of Voronoi cell for point i
++                region = vor.regions[vor.point_region[i]]
++                if -1 in region or len(region) < 3:
++                    # Skip invalid regions or infinite ones
++                    new_points.append(points[i])
++                    continue
++                    
++                # Get vertices of the region
++                vertices = np.array([vor.vertices[r] for r in region if r >= 0])
++                
++                # Filter vertices within bounds
++                valid_vertices = vertices[
++                    (vertices[:, 0] >= 0) & 
++                    (vertices[:, 0] <= RECT_WIDTH) & 
++                    (vertices[:, 1] >= 0) & 
++                    (vertices[:, 1] <= RECT_HEIGHT)
++                ]
++                
++                if len(valid_vertices) < 3:
++                    new_points.append(points[i])
++                    continue
++                    
++                # Compute centroid
++                centroid = np.mean(valid_vertices, axis=0)
++                new_points.append(centroid)
++            
++            # Update points
++            new_points = np.array(new_points)
++            
++            # Convergence check
++            if np.allclose(points, new_points, atol=1e-6):
++                break
++                
++            points = new_points
++        except Exception:
++            # Fallback to simple random if Voronoi computation fails
++            points = np.random.rand(n, 2) * 0.8 + 0.1
++            points[:, 0] *= RECT_WIDTH
++            points[:, 1] *= RECT_HEIGHT
++    
++    # Ensure all points are within bounds
++    points[:, 0] = np.clip(points[:, 0], 0.05, RECT_WIDTH - 0.05)
++    points[:, 1] = np.clip(points[:, 1], 0.05, RECT_HEIGHT - 0.05)
++    
++    # Convert to circles with initial small radii
++    circles = np.zeros((n, 3))
++    for i in range(n):
++        circles[i] = [points[i, 0], points[i, 1], 0.02]
++    
++    return circles
++
++def adaptive_local_search(circles: np.ndarray, spatial_index: SpatialIndex, 
++                         iteration: int, total_iterations: int) -> np.ndarray:
++    """Enhanced local search with adaptive strategies."""
++    new_circles = circles.copy()
++    n = len(new_circles)
++    
++    # Adaptive search strategy based on iteration stage
++    adaptive_factor = 1.0 - (iteration / total_iterations)
++    
++    # Select circles to modify with adaptive probability
++    if adaptive_factor > 0.7:
++        # Early: modify more circles with broader search
++        selection_size = max(3, n//3)
++    else:
++        # Later: modify fewer circles with finer search
++        selection_size = max(1, n//6)
++    
++    indices_to_modify = np.random.choice(n, size=selection_size, replace=False)
++    
++    for idx in indices_to_modify:
++        old_x, old_y, old_r = new_circles[idx]
++        
++        # Adaptive search range based on optimization stage
++        search_range = 0.05 * adaptive_factor + 0.01
++        
++        # Best move tracking
++        best_x, best_y, best_r = old_x, old_y, old_r
++        best_improvement = 0
++        
++        # Strategy 1: Maximize radius at current position
++        max_radius = compute_max_radius(new_circles, old_x, old_y, spatial_index)
++        if max_radius > old_r:
++            improvement = max_radius - old_r
++            if improvement > best_improvement:
++                best_improvement = improvement
++                best_r = max_radius
++        
++        # Strategy 2: Small moves around current position with different search intensities
++        moves = [
++            (0, 0), (search_range, 0), (-search_range, 0), (0, search_range), (0, -search_range),
++            (search_range/2, search_range/2), (-search_range/2, search_range/2),
++            (search_range/2, -search_range/2), (-search_range/2, -search_range/2),
++            (search_range*0.7, search_range*0.3), (-search_range*0.7, search_range*0.3),
++            (search_range*0.7, -search_range*0.3), (-search_range*0.7, -search_range*0.3)
++        ]
++        
++        for dx, dy in moves:
++            new_x = old_x + dx
++            new_y = old_y + dy
++            
++            # Keep within bounds
++            new_x = max(0.05, min(RECT_WIDTH - 0.05, new_x))
++            new_y = max(0.05, min(RECT_HEIGHT - 0.05, new_y))
++            
++            # Compute max radius at new location
++            new_r = compute_max_radius(new_circles, new_x, new_y, spatial_index)
++            
++            # Check if this is a valid improvement
++            if new_r > old_r:
++                improvement = new_r - old_r
++                if improvement > best_improvement:
++                    best_improvement = improvement
++                    best_x, best_y, best_r = new_x, new_y, new_r
++        
++        # Apply the best move
++        new_circles[idx] = [best_x, best_y, best_r]
++    
++    # Update spatial index
++    spatial_index.grid.clear()
++    for i in range(len(new_circles)):
++        x, y, r = new_circles[i]
++        spatial_index.insert(i, x, y, r)
++    
++    return new_circles
++
++def adaptive_simulated_annealing(initial_circles: np.ndarray, max_iter: int = 10000) -> np.ndarray:
++    """Run adaptive simulated annealing to optimize circle packing."""
++    circles = initial_circles.copy()
++    spatial_index = SpatialIndex()
++    
++    # Initialize spatial index
++    for i in range(len(circles)):
++        x, y, r = circles[i]
++        spatial_index.insert(i, x, y, r)
++    
++    current_fitness = evaluate_solution(circles)
++    best_fitness = current_fitness
++    best_circles = circles.copy()
++    
++    # Adaptive annealing parameters
++    temp = 1.0
++    initial_temp = 1.0
++    cooling_rate = 0.9995
++    min_temp = 1e-6
++    
++    # Track recent improvements for adaptive cooling
++    recent_improvements = []
++    improvement_window = 20
++    
++    # Dynamic step counting
++    max_steps_per_temp = 100
++    
++    for iteration in range(max_iter):
++        # Cool down temperature
++        if temp < min_temp:
++            break
++            
++        # Adaptive number of steps based on iteration
++        adaptive_steps = max(50, int(max_steps_per_temp * (1.0 - iteration/max_iter)))
++        
++        improvement_count = 0
++        for step in range(adaptive_steps):
++            # Local search step with adaptive parameters
++            new_circles = adaptive_local_search(circles, spatial_index, iteration, max_iter)
++            
++            new_fitness = evaluate_solution(new_circles)
++            
++            # Accept or reject the move
++            delta = new_fitness - current_fitness
++            if delta > 0 or random.random() < np.exp(delta / temp):
++                circles = new_circles
++                current_fitness = new_fitness
++                
++                if current_fitness > best_fitness:
++                    best_fitness = current_fitness
++                    best_circles = circles.copy()
++                    improvement_count += 1
++        
++        # Adaptive cooling based on recent performance
++        recent_improvements.append(improvement_count)
++        if len(recent_improvements) > improvement_window:
++            recent_improvements.pop(0)
++        
++        # Calculate average improvements
++        avg_improvements = sum(recent_improvements) / len(recent_improvements)
++        
++        # Adjust cooling rate based on improvement rate
++        if avg_improvements < 0.5 and temp > min_temp * 10:
++            # If slow progress, cool faster to escape local optima
++            temp *= cooling_rate * 1.2
++        else:
++            temp *= cooling_rate
++        
++        # Early stopping based on stagnation
++        if iteration > 500 and avg_improvements < 0.1:
++            break
++    
++    return best_circles
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+-
++    
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+-    width, height = 1.0, 1.0  # Optimal square configuration
+-
+-    # Set seed for reproducibility
+-    np.random.seed(42)
+-
+-    # Phase 1: Multi-resolution grid initialization
+-    n_circles = 21
+-
+-    # Start with a coarse grid and refine
+-    coarse_grid_size = 4
+-    fine_grid_size = 8
+-
+-    # Generate coarse grid points
+-    x_coarse = np.linspace(0.05, width - 0.05, coarse_grid_size)
+-    y_coarse = np.linspace(0.05, height - 0.05, coarse_grid_size)
+-    coarse_points = [(x, y) for x in x_coarse for y in y_coarse]
+-
+-    # Initialize circles array
+-    circles = np.zeros((n_circles, 3))
+-
+-    # Place circles using a greedy approach on coarse grid
+-    placed_points = []
+-    placed_radii = []
+-
+-    # Select initial points greedily based on remaining space
+-    remaining_points = coarse_points.copy()
+-    np.random.shuffle(remaining_points)
+-
+-    for i, (cx, cy) in enumerate(remaining_points[:n_circles]):
+-        # Compute max radius for this point considering boundaries
+-        max_radius = min(cx, width - cx, cy, height - cy)
+-
+-        # Check for conflicts with already placed circles
+-        valid_placement = True
+-        for j in range(len(placed_points)):
+-            px, py = placed_points[j]
+-            r = placed_radii[j]
+-            dist = np.sqrt((cx - px)**2 + (cy - py)**2)
+-            if dist < (r + max_radius):  # Conflict with existing circle
+-                valid_placement = False
+-                break
+-
+-        if valid_placement:
+-            placed_points.append((cx, cy))
+-            placed_radii.append(max_radius)
+-
+-        if len(placed_points) >= n_circles:
+-            break
+-
+-    # Fill remaining circles if needed
+-    while len(placed_points) < n_circles:
+-        # Place remaining circles randomly but still respecting boundaries
+-        cx = np.random.uniform(0.05, width - 0.05)
+-        cy = np.random.uniform(0.05, height - 0.05)
+-        max_radius = min(cx, width - cx, cy, height - cy)
+-
+-        # Check for conflicts
+-        valid_placement = True
+-        for j in range(len(placed_points)):
+-            px, py = placed_points[j]
+-            r = placed_radii[j]
+-            dist = np.sqrt((cx - px)**2 + (cy - py)**2)
+-            if dist < (r + max_radius):
+-                valid_placement = False
+-                break
+-
+-        if valid_placement:
+-            placed_points.append((cx, cy))
+-            placed_radii.append(max_radius)
+-
+-    # Initialize circles array
+-    for i in range(n_circles):
+-        circles[i] = [placed_points[i][0], placed_points[i][1], placed_radii[i]]
+-
+-    # Phase 2: Enhanced local refinement with Voronoi-guided search
+-    best_sum = np.sum(circles[:, 2])
+-    best_circles = circles.copy()
+-
+-    # Local search parameters
+-    max_iterations = 500
+-    tolerance = 1e-6
+-
+-    for iteration in range(max_iterations):
+-        # Copy current configuration
+-        current_circles = circles.copy()
+-        old_sum = np.sum(current_circles[:, 2])
+-
+-        # For each circle, try to improve using Voronoi-guided local search
+-        improvement_found = False
+-
+-        for i in range(n_circles):
+-            # Store original position and radius
+-            orig_x, orig_y, orig_r = current_circles[i]
+-
+-            # Calculate current constraints and available space
+-            max_radius_current = min(orig_x, width - orig_x, orig_y, height - orig_y)
+-
+-            # Use Voronoi-based approach to guide search
+-            best_x, best_y, best_r = orig_x, orig_y, orig_r
+-            best_delta_sum = 0
+-
+-            # Create temporary points for Voronoi calculation
+-            temp_points = np.array([[c[0], c[1]] for c in current_circles])
+-
+-            # Try multiple strategies for finding better positions
+-            strategies = []
+-
+-            # Strategy 1: Direct gradient-like search in 4 directions
+-            for dx, dy in [(0, 0), (-0.01, 0), (0.01, 0), (0, -0.01), (0, 0.01)]:
+-                strategies.append((dx, dy))
+-
+-            # Strategy 2: Larger steps
+-            for dx, dy in [(-0.02, 0), (0.02, 0), (0, -0.02), (0, 0.02)]:
+-                strategies.append((dx, dy))
+-
+-            # Strategy 3: Diagonal moves
+-            for dx, dy in [(-0.01, -0.01), (-0.01, 0.01), (0.01, -0.01), (0.01, 0.01)]:
+-                strategies.append((dx, dy))
+-
+-            # Strategy 4: Voronoi-based neighborhood (try to move towards unoccupied Voronoi regions)
+-            try:
+-                vor = Voronoi(temp_points)
+-                # Get the Voronoi region for this circle
+-                region_vertices = vor.vertices[vor.regions[vor.point_region[i]]]
+-                # Try moving towards center of Voronoi region (if meaningful)
+-                if len(region_vertices) > 0:
+-                    # Move towards centroid of the region
+-                    centroid_x = np.mean(region_vertices[:, 0])
+-                    centroid_y = np.mean(region_vertices[:, 1])
+-                    # Normalize direction and scale it
+-                    dx = centroid_x - orig_x
+-                    dy = centroid_y - orig_y
+-                    # Normalize and scale
+-                    dist = np.sqrt(dx*dx + dy*dy)
+-                    if dist > 0.001:
+-                        dx, dy = dx/dist * 0.01, dy/dist * 0.01
+-                        strategies.append((dx, dy))
+-            except:
+-                pass  # Ignore Voronoi errors gracefully
+-
+-            # Evaluate different move candidates
+-            for dx, dy in strategies:
+-                new_x = orig_x + dx
+-                new_y = orig_y + dy
+-
+-                # Keep within bounds
+-                new_x = max(0.05, min(width - 0.05, new_x))
+-                new_y = max(0.05, min(height - 0.05, new_y))
+-
+-                # Compute max radius at new location
+-                new_r = min(new_x, width - new_x, new_y, height - new_y)
+-
+-                # Check for conflicts with all other circles
+-                valid = True
+-                for j in range(n_circles):
+-                    if i != j:
+-                        px, py, pr = current_circles[j]
+-                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+-                        if dist < (new_r + pr):
+-                            valid = False
+-                            break
+-
+-                if valid:
+-                    # Calculate change in sum
+-                    delta_sum = new_r - orig_r
+-
+-                    # Prefer moves that increase radius significantly
+-                    if delta_sum > best_delta_sum:
+-                        best_delta_sum = delta_sum
+-                        best_x, best_y, best_r = new_x, new_y, new_r
+-                        improvement_found = True
+-
+-            # Apply the best move if there was an improvement
+-            if best_delta_sum > 0:
+-                current_circles[i] = [best_x, best_y, best_r]
+-
+-        # Check for improvement
+-        new_sum = np.sum(current_circles[:, 2])
+-        if new_sum > best_sum:
+-            best_sum = new_sum
+-            best_circles = current_circles.copy()
+-            improvement_found = True
+-        elif not improvement_found and abs(new_sum - best_sum) < tolerance:
+-            break
+-
+-        circles = current_circles.copy()
+-
+-    # Final optimization using more sophisticated approach
+-    # Generate candidate positions using fine grid
+-    fine_x = np.linspace(0.05, width - 0.05, fine_grid_size)
+-    fine_y = np.linspace(0.05, height - 0.05, fine_grid_size)
+-
+-    # Perform one final round of optimized placement
+-    for _ in range(50):
+-        # Randomly sample some circles to try to improve
+-        indices = np.random.choice(n_circles, size=min(10, n_circles), replace=False)
+-
+-        for idx in indices:
+-            old_x, old_y, old_r = circles[idx]
+-
+-            # Find best new position from nearby grid points
+-            best_x, best_y = old_x, old_y
+-            best_r = old_r
+-            best_sum = np.sum(circles[:, 2])
+-
+-            # Sample around current position
+-            search_range = 0.1
+-            candidates = []
+-
+-            # Sample nearby positions using fine grid
+-            for fx in fine_x:
+-                for fy in fine_y:
+-                    if abs(fx - old_x) < search_range and abs(fy - old_y) < search_range:
+-                        candidates.append((fx, fy))
+-
+-            # Also consider boundary constraints
+-            candidates.extend([(0.05, fy) for fy in fine_y[1:-1]])
+-            candidates.extend([(width - 0.05, fy) for fy in fine_y[1:-1]])
+-            candidates.extend([(fx, 0.05) for fx in fine_x[1:-1]])
+-            candidates.extend([(fx, height - 0.05) for fx in fine_x[1:-1]])
+-
+-            for new_x, new_y in candidates:
+-                # Ensure it's within bounds
+-                new_x = max(0.05, min(width - 0.05, new_x))
+-                new_y = max(0.05, min(height - 0.05, new_y))
+-
+-                # Compute max radius
+-                new_r = min(new_x, width - new_x, new_y, height - new_y)
+-
+-                # Check for conflicts
+-                valid = True
+-                for j in range(n_circles):
+-                    if j != idx:
+-                        px, py, pr = circles[j]
+-                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+-                        if dist < (new_r + pr):
+-                            valid = False
+-                            break
+-
+-                if valid:
+-                    # See if this is better
+-                    new_sum = np.sum(circles[:, 2]) - old_r + new_r
+-                    if new_sum > best_sum:
+-                        best_sum = new_sum
+-                        best_x, best_y, best_r = new_x, new_y, new_r
+-
+-            # Apply improvement if found
+-            if best_sum > np.sum(circles[:, 2]):
+-                circles[idx] = [best_x, best_y, best_r]
+-
+-    return circles
++    # Initialize circles using Voronoi-based approach for better spatial distribution
++    circles = generate_voronoi_initialization(21, max_iterations=50)
++    
++    # Run adaptive simulated annealing for optimization
++    optimized_circles = adaptive_simulated_annealing(circles, max_iter=3000)
++    
++    # Final refinement with enhanced local search
++    spatial_index = SpatialIndex()
++    for i in range(len(optimized_circles)):
++        x, y, r = optimized_circles[i]
++        spatial_index.insert(i, x, y, r)
++    
++    # Additional refinement passes
++    for refinement_pass in range(3):
++        final_circles = optimized_circles.copy()
++        for i in range(500):  # More intensive local search in final pass
++            final_circles = adaptive_local_search(final_circles, spatial_index, i, 500)
++        
++        optimized_circles = final_circles.copy()
++        # Rebuild spatial index
++        spatial_index.grid.clear()
++        for j in range(len(optimized_circles)):
++            x, y, r = optimized_circles[j]
++            spatial_index.insert(j, x, y, r)
++    
++    return optimized_circles
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

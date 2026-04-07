@@ -1,0 +1,269 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import math
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Algorithm parameters
+    POP_SIZE = 50
+    GENERATIONS = 100
+    MUTATION_RATE_START = 0.15
+    MUTATION_RATE_END = 0.01
+    ELITISM_COUNT = 5
+    GRID_SIZE = 20
+    
+    # Initialize population
+    def initialize_population(size):
+        population = []
+        for _ in range(size):
+            # Generate Voronoi-based initial configuration
+            points = generate_voronoi_points(26)
+            circles = np.zeros((26, 3))
+            
+            # Distribute circles based on Voronoi cells
+            for i in range(26):
+                x, y = points[i]
+                # Set initial radius to small value
+                r = 0.01
+                circles[i] = [x, y, r]
+            
+            # Add some randomness to avoid perfect grid
+            for i in range(26):
+                circles[i][0] += random.uniform(-0.02, 0.02)
+                circles[i][1] += random.uniform(-0.02, 0.02)
+                circles[i][0] = max(0.01, min(0.99, circles[i][0]))
+                circles[i][1] = max(0.01, min(0.99, circles[i][1]))
+                # Ensure minimum radius
+                circles[i][2] = max(0.005, min(0.1, circles[i][2]))
+                
+            population.append(circles)
+        return population
+    
+    def generate_voronoi_points(n):
+        # Generate points using k-means clustering to distribute well
+        points = np.random.rand(n, 2)
+        kmeans = KMeans(n_clusters=n, init='k-means++', n_init=10, random_state=42)
+        kmeans.fit(points)
+        return kmeans.cluster_centers_
+    
+    def is_valid(circles):
+        """Check if all circles are within bounds and non-overlapping"""
+        # Check containment constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+        
+        # Check overlap constraints using spatial grid for efficiency
+        # Create a spatial grid
+        grid_size = GRID_SIZE
+        grid = {}
+        
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            
+            # Determine grid cell range
+            min_x_grid = int(max(0, (x - r) * grid_size))
+            max_x_grid = int(min(grid_size - 1, (x + r) * grid_size))
+            min_y_grid = int(max(0, (y - r) * grid_size))
+            max_y_grid = int(min(grid_size - 1, (y + r) * grid_size))
+            
+            # Check nearby grid cells for overlaps
+            for gx in range(min_x_grid, max_x_grid + 1):
+                for gy in range(min_y_grid, max_y_grid + 1):
+                    if (gx, gy) in grid:
+                        for j in grid[(gx, gy)]:
+                            x1, y1, r1 = circles[j]
+                            dist_sq = (x - x1)**2 + (y - y1)**2
+                            if dist_sq < (r + r1)**2:
+                                return False
+            
+            # Add to grid
+            for gx in range(min_x_grid, max_x_grid + 1):
+                for gy in range(min_y_grid, max_y_grid + 1):
+                    if (gx, gy) not in grid:
+                        grid[(gx, gy)] = []
+                    grid[(gx, gy)].append(i)
+        
+        return True
+    
+    def evaluate_fitness(circles):
+        """Evaluate fitness based on sum of radii with penalty for constraint violations"""
+        total_radius = sum(circle[2] for circle in circles)
+        
+        # Penalty for boundary violations
+        boundary_penalty = 0
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Calculate boundary violations
+            left_violation = max(0, r - x)
+            right_violation = max(0, x + r - 1)
+            bottom_violation = max(0, r - y)
+            top_violation = max(0, y + r - 1)
+            
+            boundary_penalty += (left_violation + right_violation + bottom_violation + top_violation)**2 * 1000
+            
+        # Penalty for overlap violations
+        overlap_penalty = 0
+        for i in range(len(circles)):
+            for j in range(i+1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_dist_sq = (r1 + r2)**2
+                
+                if dist_sq < min_dist_sq:
+                    overlap_distance = math.sqrt(dist_sq)
+                    overlap_amount = min_dist_sq - dist_sq
+                    overlap_penalty += overlap_amount * 10000
+        
+        # Total fitness with penalties
+        fitness = total_radius - boundary_penalty - overlap_penalty
+        return fitness
+    
+    def mutate(circles, generation):
+        """Mutate circles with adaptive mutation rate"""
+        mutation_rate = MUTATION_RATE_START + (MUTATION_RATE_END - MUTATION_RATE_START) * (generation / GENERATIONS)
+        mutated_circles = circles.copy()
+        
+        for i in range(len(mutated_circles)):
+            # Mutate position
+            if random.random() < mutation_rate:
+                mutated_circles[i][0] += random.uniform(-0.02, 0.02)
+                mutated_circles[i][1] += random.uniform(-0.02, 0.02)
+                mutated_circles[i][0] = max(0.01, min(0.99, mutated_circles[i][0]))
+                mutated_circles[i][1] = max(0.01, min(0.99, mutated_circles[i][1]))
+            
+            # Mutate radius
+            if random.random() < mutation_rate:
+                mutated_circles[i][2] *= random.uniform(0.8, 1.2)
+                mutated_circles[i][2] = max(0.005, min(0.2, mutated_circles[i][2]))
+        
+        return mutated_circles
+    
+    def crossover(parent1, parent2):
+        """Create offspring from two parents with local refinement"""
+        # Simple uniform crossover
+        child = parent1.copy()
+        for i in range(len(child)):
+            if random.random() < 0.5:
+                child[i] = parent2[i].copy()
+        
+        # Local refinement to fix constraint violations
+        refined_child = child.copy()
+        for i in range(len(refined_child)):
+            x, y, r = refined_child[i]
+            
+            # Fix boundary violations by adjusting position
+            if x - r < 0:
+                x = r
+            elif x + r > 1:
+                x = 1 - r
+                
+            if y - r < 0:
+                y = r
+            elif y + r > 1:
+                y = 1 - r
+                
+            refined_child[i] = [x, y, r]
+            
+        # Try to resolve overlaps by adjusting radii and positions
+        for i in range(len(refined_child)):
+            for j in range(i+1, len(refined_child)):
+                x1, y1, r1 = refined_child[i]
+                x2, y2, r2 = refined_child[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_dist_sq = (r1 + r2)**2
+                
+                if dist_sq < min_dist_sq:
+                    # Adjust radii to resolve overlap
+                    overlap = math.sqrt(dist_sq) - (r1 + r2)
+                    reduction = min(overlap/2, r1/2, r2/2)
+                    
+                    if reduction > 0:
+                        refined_child[i][2] -= reduction
+                        refined_child[j][2] -= reduction
+                        # Adjust positions slightly to maintain spatial relationship
+                        if math.sqrt(dist_sq) > 0:
+                            dx = (x2 - x1) / math.sqrt(dist_sq) * (overlap/2)
+                            dy = (y2 - y1) / math.sqrt(dist_sq) * (overlap/2)
+                            refined_child[i][0] -= dx
+                            refined_child[i][1] -= dy
+                            refined_child[j][0] += dx
+                            refined_child[j][1] += dy
+        
+        return refined_child
+    
+    # Main evolutionary algorithm
+    population = initialize_population(POP_SIZE)
+    
+    best_fitness = float('-inf')
+    best_individual = None
+    
+    for generation in range(GENERATIONS):
+        # Evaluate fitness of entire population
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = individual.copy()
+        
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        population = [population[i] for i in sorted_indices]
+        fitness_scores = [fitness_scores[i] for i in sorted_indices]
+        
+        # Elitism: keep best individuals
+        elite = population[:ELITISM_COUNT]
+        
+        # Create new population
+        new_population = elite.copy()
+        
+        # Generate offspring through crossover and mutation
+        while len(new_population) < POP_SIZE:
+            # Tournament selection for parents
+            parent1_idx = tournament_selection(population, fitness_scores, 3)
+            parent2_idx = tournament_selection(population, fitness_scores, 3)
+            
+            parent1 = population[parent1_idx]
+            parent2 = population[parent2_idx]
+            
+            child = crossover(parent1, parent2)
+            child = mutate(child, generation)
+            
+            # Validate child (should already be valid due to refinement)
+            new_population.append(child)
+        
+        population = new_population[:POP_SIZE]
+    
+    # Return best solution found
+    if best_individual is not None:
+        return best_individual
+    else:
+        # Fallback to simple initialization if nothing found
+        circles = np.zeros((26, 3))
+        points = generate_voronoi_points(26)
+        for i in range(26):
+            circles[i] = [points[i][0], points[i][1], 0.01]
+        return circles
+
+def tournament_selection(population, fitness_scores, tournament_size):
+    """Select an individual using tournament selection"""
+    tournament_indices = random.sample(range(len(population)), tournament_size)
+    tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitness)]
+    return winner_index
+
+# EVOLVE-BLOCK-END

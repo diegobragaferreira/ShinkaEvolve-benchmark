@@ -1,0 +1,297 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from math import sqrt
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions - since perimeter = 4, width + height = 2
+    # Using a square container (1x1) for optimal packing efficiency
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Initialize circles with strategic hexagonal grid placement
+    circles = np.zeros((21, 3))
+
+    # Create hexagonal grid pattern with optimal spacing
+    rows = 5
+    cols = 5
+
+    # Calculate spacing for hexagonal packing
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+
+    # Hexagonal offset for alternate rows
+    offset = spacing_x * 0.5
+
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= 21:
+                break
+            x = (j + 1) * spacing_x
+            if i % 2 == 1:
+                x += offset
+            y = (i + 1) * spacing_y
+            circles[idx] = [x, y, 0.01]  # Small initial radius
+            idx += 1
+
+    # Ensure we have exactly 21 circles
+    for i in range(idx, 21):
+        circles[i] = [0.5, 0.5, 0.01]
+
+    # Adaptive multi-scale optimization with intelligent convergence detection
+    best_sum = 0
+    best_circles = None
+
+    # Track convergence metrics for adaptive control
+    prev_sum = 0
+    improvement_count = 0
+    convergence_threshold = 1e-5
+    max_convergence_streak = 20
+
+    # Main optimization loop with adaptive scaling
+    current_circles = circles.copy()
+    iteration = 0
+    max_iterations = 1000
+    convergence_streak = 0
+
+    while iteration < max_iterations:
+        improved = False
+        current_sum = np.sum(current_circles[:, 2])
+
+        # Adaptive step sizing based on iteration progress and improvement rate
+        if iteration < 200:
+            # Initial exploration phase - larger steps
+            step_size = 0.1
+            radius_steps = 50
+            position_steps = 100
+        elif iteration < 600:
+            # Mid-range optimization - moderate steps
+            step_size = 0.05
+            radius_steps = 50
+            position_steps = 50
+        else:
+            # Fine-tuning phase - small steps
+            step_size = 0.02
+            radius_steps = 25
+            position_steps = 25
+
+        # Radius maximization phase
+        indices = list(range(21))
+        random.shuffle(indices)
+
+        for i in indices:
+            # Compute max radius for current position
+            max_radius = compute_max_radius(current_circles, i, rect_width, rect_height)
+
+            if max_radius > current_circles[i, 2] + 1e-6:
+                current_circles[i, 2] = max_radius
+                improved = True
+
+        # Position refinement phase with grid search
+        indices = list(range(21))
+        random.shuffle(indices)
+
+        for i in indices:
+            old_x, old_y, old_r = current_circles[i]
+
+            # Try several nearby positions using adaptive step size
+            best_pos = [old_x, old_y, old_r]
+            best_radius = old_r
+
+            # Grid search around current position
+            for dx in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                for dy in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                    new_x = old_x + dx
+                    new_y = old_y + dy
+
+                    # Ensure within bounds
+                    if (0.01 <= new_x <= rect_width - 0.01 and
+                        0.01 <= new_y <= rect_height - 0.01):
+
+                        # Compute max radius at new position
+                        max_radius = compute_max_radius_at_position(
+                            current_circles, i, new_x, new_y, rect_width, rect_height
+                        )
+
+                        if max_radius > best_radius + 1e-6:
+                            best_radius = max_radius
+                            best_pos = [new_x, new_y, max_radius]
+
+            if best_pos[2] > current_circles[i, 2] + 1e-6:
+                current_circles[i] = best_pos
+                improved = True
+
+        # Convergence checking and adaptive response
+        if improved:
+            improvement_count += 1
+            convergence_streak = 0
+        else:
+            convergence_streak += 1
+            if convergence_streak > max_convergence_streak:
+                # If we've plateaued for too long, reduce step size
+                step_size *= 0.8
+                if step_size < 0.005:  # Minimum step size
+                    break
+                convergence_streak = 0
+
+        # Update best solution
+        if is_valid_configuration(current_circles, rect_width, rect_height):
+            new_sum = np.sum(current_circles[:, 2])
+            if new_sum > best_sum:
+                best_sum = new_sum
+                best_circles = current_circles.copy()
+
+        # Check for convergence based on improvement rate
+        improvement_rate = abs(new_sum - prev_sum) / (prev_sum + 1e-10)
+        if improvement_rate < convergence_threshold and iteration > 100:
+            # Slow progress detected - reduce step size
+            step_size *= 0.9
+            if step_size < 0.001:
+                break
+
+        prev_sum = new_sum
+        iteration += 1
+
+        # Early termination for very slow improvement
+        if convergence_streak > max_convergence_streak * 2:
+            break
+
+    # Final refinement with adaptive optimization
+    if best_circles is None:
+        best_circles = circles.copy()
+
+    # Final refinement with adaptive optimization
+    if best_circles is None:
+        best_circles = circles.copy()
+
+    # Apply final optimization with careful boundary handling
+    for iteration in range(100):
+        improved = False
+
+        # Shuffle indices for better exploration
+        indices = list(range(21))
+        random.shuffle(indices)
+
+        for i in indices:
+            # Move circle and try to maximize radius
+            old_x, old_y, old_r = best_circles[i]
+
+            # Try small random perturbations
+            if random.random() < 0.7:
+                dx = random.uniform(-0.02, 0.02)
+                dy = random.uniform(-0.02, 0.02)
+                new_x = old_x + dx
+                new_y = old_y + dy
+
+                # Clamp to valid range
+                new_x = max(0.01, min(rect_width - 0.01, new_x))
+                new_y = max(0.01, min(rect_height - 0.01, new_y))
+
+                # Recalculate maximum radius
+                max_radius = compute_max_radius_at_position(
+                    best_circles, i, new_x, new_y, rect_width, rect_height
+                )
+
+                if max_radius > best_circles[i, 2] + 1e-6:
+                    best_circles[i] = [new_x, new_y, max_radius]
+                    improved = True
+            else:
+                # Adjust radius only
+                max_radius = compute_max_radius(best_circles, i, rect_width, rect_height)
+                if max_radius > best_circles[i, 2] + 1e-6:
+                    best_circles[i, 2] = max_radius
+                    improved = True
+
+        if not improved:
+            break
+
+    # Final boundary check and correction
+    for i in range(21):
+        x, y, r = best_circles[i]
+        # Ensure circle stays within bounds
+        r = min(r, x, rect_width - x, y, rect_height - y)
+        r = max(r, 0.001)
+        best_circles[i] = [x, y, r]
+
+    return best_circles
+
+
+def compute_max_radius(circles, index, width, height):
+    """Compute maximum radius for circle at given index without overlapping others."""
+    x, y, _ = circles[index]
+
+    # Boundary constraints
+    min_dist_to_boundaries = min(x, width - x, y, height - y)
+
+    # Collision constraints with other circles
+    min_dist_to_others = float('inf')
+
+    for i in range(len(circles)):
+        if i != index:
+            cx, cy, cr = circles[i]
+            distance = sqrt((x - cx)**2 + (y - cy)**2)
+            # Must maintain minimum distance of (r + cr)
+            min_dist_to_others = min(min_dist_to_others, distance - cr)
+
+    # Return the minimum of all constraints
+    max_radius = min(min_dist_to_boundaries, min_dist_to_others)
+    return max(0.001, max_radius)
+
+
+def compute_max_radius_at_position(circles, index, x, y, width, height):
+    """Compute maximum radius for circle at given position without overlapping others."""
+    # Boundary constraints
+    min_dist_to_boundaries = min(x, width - x, y, height - y)
+
+    # Collision constraints with other circles
+    min_dist_to_others = float('inf')
+
+    for i in range(len(circles)):
+        if i != index:
+            cx, cy, cr = circles[i]
+            distance = sqrt((x - cx)**2 + (y - cy)**2)
+            # Must maintain minimum distance of (r + cr)
+            min_dist_to_others = min(min_dist_to_others, distance - cr)
+
+    # Return the minimum of all constraints
+    max_radius = min(min_dist_to_boundaries, min_dist_to_others)
+    return max(0.001, max_radius)
+
+
+def is_valid_configuration(circles, width, height):
+    """Check if all circles satisfy constraints."""
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # Check boundary conditions
+        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+            return False
+
+        # Check overlap with other circles
+        for j in range(i + 1, len(circles)):
+            x2, y2, r2 = circles[j]
+            distance = sqrt((x - x2)**2 + (y - y2)**2)
+            if distance < r + r2:
+                return False
+
+    return True
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

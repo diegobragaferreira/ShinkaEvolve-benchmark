@@ -1,0 +1,551 @@
+<NAME>
+enhance_symmetry_handling
+</NAME>
+
+<DESCRIPTION>
+The current symmetry handling is basic and doesn't fully leverage mathematical properties of hexagonal packing. I'll enhance the symmetry-aware optimization by implementing more sophisticated symmetry operations that preserve the inherent rotational and reflectional symmetries of hexagonal arrangements. This involves improving the mutate_symmetrically function to better maintain true hexagonal symmetries and adding more advanced initial configuration generation based on known mathematical packing patterns.
+
+The key improvements are:
+1. Implement proper rotational symmetry preservation in mutations
+2. Add more mathematically informed initial configurations based on known dense packings
+3. Improve the optimization process to better respect hexagonal symmetry
+4. Add better handling of the mathematical relationships between hexagon positions in rings
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_symmetrically(individual, mut_pb=0.3, mut_strength=0.2):
+    """
+    Mutate an individual while preserving symmetry properties.
+    For hexagon packing, this maintains the ring structure.
+    """
+    # Copy individual to avoid modifying original
+    mutated = individual.copy()
+
+    # Define symmetric groups
+    # Group 0: Central hexagon (index 0)
+    # Group 1: First ring (indices 1-6)
+    # Group 2: Second ring (indices 7-11)
+
+    # Mutate central hexagon
+    if random.random() < mut_pb:
+        mutated[0, 0] += random.uniform(-mut_strength, mut_strength)
+        mutated[0, 1] += random.uniform(-mut_strength, mut_strength)
+        mutated[0, 2] += random.uniform(-mut_strength, mut_strength)
+
+    # Mutate first ring (6 hexagons)
+    if random.random() < mut_pb:
+        # Mutate all 6 hexagons with same amount to maintain some rotational symmetry
+        offset_x = random.uniform(-mut_strength, mut_strength)
+        offset_y = random.uniform(-mut_strength, mut_strength)
+        offset_angle = random.uniform(-mut_strength, mut_strength)
+        for i in range(1, 7):
+            mutated[i, 0] += offset_x
+            mutated[i, 1] += offset_y
+            mutated[i, 2] += offset_angle
+
+    # Mutate second ring (6 hexagons)
+    if random.random() < mut_pb:
+        # Mutate all 6 hexagons with same amount to maintain rotational symmetry
+        offset_x = random.uniform(-mut_strength, mut_strength)
+        offset_y = random.uniform(-mut_strength, mut_strength)
+        offset_angle = random.uniform(-mut_strength, mut_strength)
+        for i in range(7, 12):
+            mutated[i, 0] += offset_x
+            mutated[i, 1] += offset_y
+            mutated[i, 2] += offset_angle
+
+    return mutated
+=======
+def mutate_symmetrically(individual, mut_pb=0.3, mut_strength=0.2):
+    """
+    Mutate an individual while preserving true hexagonal symmetry properties.
+    """
+    # Copy individual to avoid modifying original
+    mutated = individual.copy()
+
+    # Preserve rotational symmetry by working with ring-based transformations
+    # Group 0: Central hexagon (index 0)
+    # Group 1: First ring (indices 1-6) - 6-fold rotational symmetry
+    # Group 2: Second ring (indices 7-11) - 6-fold rotational symmetry
+
+    # Mutate central hexagon
+    if random.random() < mut_pb:
+        mutated[0, 0] += random.uniform(-mut_strength, mut_strength)
+        mutated[0, 1] += random.uniform(-mut_strength, mut_strength)
+        # For central hexagon, rotation doesn't matter much, but keep it within reasonable bounds
+        mutated[0, 2] += random.uniform(-mut_strength, mut_strength)
+
+    # Mutate first ring (6 hexagons) - enforce rotational symmetry properly
+    if random.random() < mut_pb:
+        # Get average position of first ring
+        ring1_positions = mutated[1:7, :2]
+        avg_pos = np.mean(ring1_positions, axis=0)
+
+        # Calculate radius and angle of average position
+        avg_radius = np.sqrt(avg_pos[0]**2 + avg_pos[1]**2)
+        avg_angle = np.arctan2(avg_pos[1], avg_pos[0])
+
+        # Apply random perturbation to overall ring configuration
+        angle_perturb = random.uniform(-mut_strength/2, mut_strength/2)
+        radius_perturb = random.uniform(-mut_strength/3, mut_strength/3)
+
+        # Apply perturbations to all ring hexagons maintaining their angular distribution
+        for i in range(1, 7):
+            # Get base angle for this hexagon in the ring (60 degree intervals)
+            base_angle = i * np.pi / 3
+            # Apply the overall ring transformation
+            new_radius = avg_radius + radius_perturb
+            new_angle = avg_angle + angle_perturb + base_angle
+
+            # Update position
+            mutated[i, 0] = new_radius * np.cos(new_angle)
+            mutated[i, 1] = new_radius * np.sin(new_angle)
+
+            # Apply small random angle variation to each hexagon in ring
+            mutated[i, 2] += random.uniform(-mut_strength/4, mut_strength/4)
+
+    # Mutate second ring (5 hexagons) - enforce rotational symmetry
+    if random.random() < mut_pb:
+        # Get average position of second ring
+        ring2_positions = mutated[7:12, :2]
+        avg_pos = np.mean(ring2_positions, axis=0)
+
+        # Calculate radius and angle of average position
+        avg_radius = np.sqrt(avg_pos[0]**2 + avg_pos[1]**2)
+        avg_angle = np.arctan2(avg_pos[1], avg_pos[0])
+
+        # Apply random perturbation to overall ring configuration
+        angle_perturb = random.uniform(-mut_strength/2, mut_strength/2)
+        radius_perturb = random.uniform(-mut_strength/3, mut_strength/3)
+
+        # Apply perturbations to all ring hexagons maintaining their angular distribution
+        for i in range(7, 12):
+            # Get base angle for this hexagon in the ring (72 degree intervals, but rotated)
+            base_angle = (i-7) * 2 * np.pi / 5 + np.pi/6  # Offset by 30 degrees
+            # Apply the overall ring transformation
+            new_radius = avg_radius + radius_perturb
+            new_angle = avg_angle + angle_perturb + base_angle
+
+            # Update position
+            mutated[i, 0] = new_radius * np.cos(new_angle)
+            mutated[i, 1] = new_radius * np.sin(new_angle)
+
+            # Apply small random angle variation to each hexagon in ring
+            mutated[i, 2] += random.uniform(-mut_strength/4, mut_strength/4)
+
+    return mutated
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_better_initial_solution():
+    """Generate a high-quality initial solution based on mathematical insights"""
+    # Based on known good configurations for hexagonal packing
+    # This configuration is designed to be closer to optimal than naive approaches
+
+    # Hexagonal close-packed arrangement with strategic positioning
+    hex_data = []
+
+    # Center hexagon
+    hex_data.append([0.0, 0.0, 0.0])
+
+    # First ring (6 hexagons) - arranged in a hexagonal pattern
+    for i in range(6):
+        angle = i * 60  # degrees
+        rad = np.radians(angle)
+        x = 2.0 * np.cos(rad)
+        y = 2.0 * np.sin(rad)
+        hex_data.append([x, y, 0.0])
+
+    # Second ring (6 hexagons) - positioned to create dense packing
+    for i in range(6):
+        angle = i * 60 + 30  # degrees (offset)
+        rad = np.radians(angle)
+        # Place at distance of approx sqrt(12) to form a tight cluster
+        x = 3.464 * np.cos(rad)  # approx sqrt(12) = 3.464
+        y = 3.464 * np.sin(rad)
+        hex_data.append([x, y, 0.0])
+
+    # Ensure exactly 12 hexagons
+    while len(hex_data) < 12:
+        hex_data.append([0.0, 0.0, 0.0])
+    hex_data = hex_data[:12]
+
+    # Add small random perturbations to escape symmetric local minima
+    for i in range(12):
+        hex_data[i][0] += random.uniform(-0.1, 0.1)
+        hex_data[i][1] += random.uniform(-0.1, 0.1)
+        hex_data[i][2] += random.uniform(-2, 2)
+
+    return np.array(hex_data)
+=======
+def generate_better_initial_solution():
+    """Generate a high-quality initial solution based on mathematical insights"""
+    # Based on known good configurations for hexagonal packing
+    # This configuration is designed to be closer to optimal than naive approaches
+    # Using more mathematically grounded packing principles
+
+    # Hexagonal close-packed arrangement with strategic positioning
+    hex_data = []
+
+    # Center hexagon
+    hex_data.append([0.0, 0.0, 0.0])
+
+    # First ring (6 hexagons) - arranged in a hexagonal pattern
+    # Using radius = 2.0 which gives good separation
+    for i in range(6):
+        angle = i * 60  # degrees
+        rad = np.radians(angle)
+        x = 2.0 * np.cos(rad)
+        y = 2.0 * np.sin(rad)
+        hex_data.append([x, y, 0.0])
+
+    # Second ring (5 hexagons) - positioned to create dense packing
+    # Using a 5-hexagon arrangement with strategic spacing
+    # This arrangement follows the mathematical principle of placing hexagons in a pattern
+    # that maximizes packing efficiency with fewer hexagons in the outer ring
+    angles = [0, 72, 144, 216, 288]  # Evenly spaced around circle
+    radius = 3.464  # approx sqrt(12) - optimal for dense packing
+    for i, angle in enumerate(angles):
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        hex_data.append([x, y, 0.0])
+
+    # Add one more hexagon to make 12 total - place at a strategic position
+    # This should be placed to minimize the outer hexagon radius
+    hex_data.append([0, -radius - 1.0, 0])
+
+    # Ensure exactly 12 hexagons
+    hex_data = hex_data[:12]
+
+    # Add small random perturbations to escape symmetric local minima
+    # But make them more thoughtful - preserve some symmetry relationships
+    for i in range(12):
+        # Random perturbations with smaller magnitude
+        hex_data[i][0] += random.uniform(-0.05, 0.05)
+        hex_data[i][1] += random.uniform(-0.05, 0.05)
+        hex_data[i][2] += random.uniform(-1, 1)
+
+    return np.array(hex_data)
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_single_configuration(initial_hex_data):
+    """Perform optimization on a single configuration using L-BFGS-B with symmetry awareness"""
+
+    # Identify symmetric groups in hexagon configuration
+    # Group 0: Central hexagon
+    # Group 1: First ring (6 hexagons)
+    # Group 2: Second ring (6 hexagons)
+    sym_groups = {
+        0: [0],  # Central
+        1: list(range(1, 7)),  # First ring
+        2: list(range(7, 12))   # Second ring
+    }
+
+    # Flatten initial data for optimization
+    initial_flat = initial_hex_data.flatten()
+
+    # Bounds: positions (-10, 10), angles (0, 360)
+    bounds = []
+    for i in range(12):
+        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+
+    def objective_and_gradient(params):
+        # Reshape parameters back to hex data format
+        hex_data = params.reshape(12, 3)
+
+        # Apply symmetry constraints to maintain group relationships
+        # This is a simplified version - in practice we'd want more sophisticated symmetry enforcement
+        for group_id, group_indices in sym_groups.items():
+            if len(group_indices) > 1 and group_id != 0:  # Skip central hexagon
+                # For ring groups, we can enforce approximate rotational symmetry
+                # by computing average positions and adjusting
+                avg_x = np.mean([hex_data[i][0] for i in group_indices])
+                avg_y = np.mean([hex_data[i][1] for i in group_indices])
+
+                # Maintain group structure by adjusting relative positions
+                if group_id == 1:  # First ring
+                    base_angle = np.arctan2(avg_y, avg_x)
+                    base_radius = np.sqrt(avg_x**2 + avg_y**2)
+                    for i, idx in enumerate(group_indices):
+                        angle_offset = i * 2 * np.pi / 6
+                        hex_data[idx][0] = base_radius * np.cos(base_angle + angle_offset)
+                        hex_data[idx][1] = base_radius * np.sin(base_angle + angle_offset)
+                elif group_id == 2:  # Second ring
+                    base_angle = np.arctan2(avg_y, avg_x)
+                    base_radius = np.sqrt(avg_x**2 + avg_y**2)
+                    for i, idx in enumerate(group_indices):
+                        angle_offset = i * 2 * np.pi / 6 + np.pi/6  # Offset by 30 degrees
+                        hex_data[idx][0] = base_radius * np.cos(base_angle + angle_offset)
+                        hex_data[idx][1] = base_radius * np.sin(base_angle + angle_offset)
+
+        # Evaluate objective function
+        obj_value = compute_objective_function(hex_data)
+
+        # Approximate gradient using finite differences
+        epsilon = 1e-6
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_plus[i] += epsilon
+            hex_data_plus = params_plus.reshape(12, 3)
+            obj_plus = compute_objective_function(hex_data_plus)
+            grad[i] = (obj_plus - obj_value) / epsilon
+
+        return obj_value, grad
+
+    # Optimize using L-BFGS-B
+    try:
+        # Use a more aggressive optimization approach
+        result = minimize(
+            objective_and_gradient,
+            initial_flat,
+            method='L-BFGS-B',
+            jac=True,
+            bounds=bounds,
+            options={
+                'maxiter': 1000,
+                'ftol': 1e-12,
+                'gtol': 1e-12,
+                'maxls': 50
+            },
+            tol=1e-12
+        )
+
+        if result.success:
+            optimized_data = result.x.reshape(12, 3)
+            return optimized_data
+    except Exception:
+        pass
+
+    return initial_hex_data
+=======
+def optimize_single_configuration(initial_hex_data):
+    """Perform optimization on a single configuration using L-BFGS-B with enhanced symmetry awareness"""
+
+    # Flatten initial data for optimization
+    initial_flat = initial_hex_data.flatten()
+
+    # Bounds: positions (-10, 10), angles (0, 360)
+    bounds = []
+    for i in range(12):
+        bounds.extend([(-10, 10), (-10, 10), (0, 360)])
+
+    def objective_and_gradient(params):
+        # Reshape parameters back to hex data format
+        hex_data = params.reshape(12, 3)
+
+        # Preprocessing step: apply symmetry constraints to enhance convergence
+        # For hexagonal packing, we know certain geometric relationships should hold
+
+        # Group hexagons into rings and enforce symmetry appropriately
+        # Ring 1: indices 1-6 (first ring around central hexagon)
+        # Ring 2: indices 7-11 (second ring) plus index 12 (if exists)
+
+        # For ring 1 (6 hexagons), maintain rotational symmetry
+        ring1_positions = hex_data[1:7, :2]
+        if len(ring1_positions) >= 2:
+            # Compute average position of first ring
+            avg_ring1_pos = np.mean(ring1_positions, axis=0)
+            # Adjust positions to maintain radial symmetry around the center
+            avg_radius = np.sqrt(avg_ring1_pos[0]**2 + avg_ring1_pos[1]**2)
+            if avg_radius > 0:
+                base_angle = np.arctan2(avg_ring1_pos[1], avg_ring1_pos[0])
+                for i in range(1, 7):
+                    # Maintain same distance from center with adjusted angle
+                    angle_offset = (i-1) * 2 * np.pi / 6
+                    hex_data[i, 0] = avg_radius * np.cos(base_angle + angle_offset)
+                    hex_data[i, 1] = avg_radius * np.sin(base_angle + angle_offset)
+
+        # For ring 2 (5 hexagons), maintain rotational symmetry about center
+        ring2_positions = hex_data[7:12, :2]
+        if len(ring2_positions) >= 2:
+            # Compute average position of second ring
+            avg_ring2_pos = np.mean(ring2_positions, axis=0)
+            # Adjust positions to maintain radial symmetry
+            avg_radius = np.sqrt(avg_ring2_pos[0]**2 + avg_ring2_pos[1]**2)
+            if avg_radius > 0:
+                base_angle = np.arctan2(avg_ring2_pos[1], avg_ring2_pos[0])
+                for i in range(7, 12):
+                    # Maintain same distance from center with adjusted angle
+                    angle_offset = (i-7) * 2 * np.pi / 5 + np.pi/6  # Offset to break perfect 6-fold symmetry
+                    hex_data[i, 0] = avg_radius * np.cos(base_angle + angle_offset)
+                    hex_data[i, 1] = avg_radius * np.sin(base_angle + angle_offset)
+
+        # Evaluate objective function
+        obj_value = compute_objective_function(hex_data)
+
+        # Approximate gradient using finite differences
+        epsilon = 1e-6
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_plus[i] += epsilon
+            hex_data_plus = params_plus.reshape(12, 3)
+            obj_plus = compute_objective_function(hex_data_plus)
+            grad[i] = (obj_plus - obj_value) / epsilon
+
+        return obj_value, grad
+
+    # Optimize using L-BFGS-B with more aggressive settings
+    try:
+        result = minimize(
+            objective_and_gradient,
+            initial_flat,
+            method='L-BFGS-B',
+            jac=True,
+            bounds=bounds,
+            options={
+                'maxiter': 1500,  # Increased iterations
+                'ftol': 1e-14,    # Tighter tolerance
+                'gtol': 1e-14,    # Tighter tolerance
+                'maxls': 100      # More line searches
+            },
+            tol=1e-14
+        )
+
+        if result.success:
+            optimized_data = result.x.reshape(12, 3)
+            return optimized_data
+    except Exception:
+        pass
+
+    return initial_hex_data
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+def multi_start_optimization():
+    """Run multiple optimization starts with different initial configurations"""
+    best_score = float('inf')
+    best_solution = None
+
+    # Multiple random restarts
+    for restart in range(20):  # Increased from 5 to 20 for better exploration
+        # Generate slightly different initial configurations
+        if restart == 0:
+            # First restart: better initial configuration
+            initial_hex_data = generate_better_initial_solution()
+        else:
+            # Later restarts: slightly perturbed versions of previous best
+            if best_solution is not None:
+                initial_hex_data = best_solution.copy()
+                # Add small random perturbations
+                for i in range(12):
+                    initial_hex_data[i, 0] += random.uniform(-0.5, 0.5)
+                    initial_hex_data[i, 1] += random.uniform(-0.5, 0.5)
+                    initial_hex_data[i, 2] += random.uniform(-5, 5)
+            else:
+                initial_hex_data = generate_better_initial_solution()
+
+        # Optimize this configuration
+        optimized_hex_data = optimize_single_configuration(initial_hex_data)
+
+        # Evaluate this solution
+        valid, obj_value, violations = evaluate_solution(optimized_hex_data, [0, 0, 0])
+
+        if valid and obj_value < best_score:
+            best_score = obj_value
+            best_solution = optimized_hex_data
+
+    return best_solution if best_solution is not None else generate_better_initial_solution()
+=======
+def multi_start_optimization():
+    """Run multiple optimization starts with different initial configurations"""
+    best_score = float('inf')
+    best_solution = None
+
+    # Generate a variety of high-quality initial configurations
+    initial_configs = []
+
+    # Configuration 1: Standard optimized hexagonal close-packed arrangement
+    initial_configs.append(generate_better_initial_solution())
+
+    # Configuration 2: Perturbed version with different symmetry breaking
+    config2 = initial_configs[0].copy()
+    for i in range(12):
+        config2[i, 0] += random.uniform(-0.1, 0.1) * (1 + i*0.01)  # Vary perturbation
+        config2[i, 1] += random.uniform(-0.1, 0.1) * (1 + i*0.01)
+        config2[i, 2] += random.uniform(-2, 2) * (1 + i*0.01)
+    initial_configs.append(config2)
+
+    # Configuration 3: Different radial spacing arrangement
+    config3 = []
+    config3.append([0, 0, 0])
+    # First ring - 6 hexagons with slightly different radius
+    for i in range(6):
+        angle = i * 60
+        radius = 1.9 + random.uniform(-0.1, 0.1)  # Slightly tighter
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        config3.append([x, y, 0])
+
+    # Second ring - 5 hexagons with different spacing
+    angles = [0, 72, 144, 216, 288]
+    radius = 3.2 + random.uniform(-0.1, 0.1)
+    for i, angle in enumerate(angles):
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        config3.append([x, y, 0])
+    config3.append([0, -radius - 1.0, 0])
+    initial_configs.append(np.array(config3[:12]))
+
+    # Configuration 4: More compact arrangement
+    config4 = []
+    config4.append([0, 0, 0])
+    for i in range(6):
+        angle = i * 60
+        radius = 1.8 + random.uniform(-0.1, 0.1)  # Even tighter
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        config4.append([x, y, 0])
+    angles = [30, 90, 150, 210, 270]
+    radius = 3.1 + random.uniform(-0.1, 0.1)
+    for i, angle in enumerate(angles):
+        x = radius * np.cos(np.radians(angle))
+        y = radius * np.sin(np.radians(angle))
+        config4.append([x, y, 0])
+    config4.append([0, -radius - 1.0, 0])
+    initial_configs.append(np.array(config4[:12]))
+
+    # Now perform optimization on these configurations
+    for i, initial_hex_data in enumerate(initial_configs):
+        # Optimize this configuration
+        optimized_hex_data = optimize_single_configuration(initial_hex_data)
+
+        # Evaluate this solution
+        valid, obj_value, violations = evaluate_solution(optimized_hex_data, [0, 0, 0])
+
+        if valid and obj_value < best_score:
+            best_score = obj_value
+            best_solution = optimized_hex_data
+
+    # Also include some random perturbations from the best found so far
+    if best_solution is not None:
+        for _ in range(5):  # Additional 5 random perturbations
+            perturbed = best_solution.copy()
+            for i in range(12):
+                perturbed[i, 0] += random.uniform(-0.1, 0.1)
+                perturbed[i, 1] += random.uniform(-0.1, 0.1)
+                perturbed[i, 2] += random.uniform(-1, 1)
+            optimized_hex_data = optimize_single_configuration(perturbed)
+            valid, obj_value, violations = evaluate_solution(optimized_hex_data, [0, 0, 0])
+            if valid and obj_value < best_score:
+                best_score = obj_value
+                best_solution = optimized_hex_data
+
+    return best_solution if best_solution is not None else generate_better_initial_solution()
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,232 @@
+<NAME>
+adaptive_gradient_step_size
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive gradient step size that adjusts based on the current fitness landscape. This approach will help navigate the optimization space more efficiently by taking larger steps when the landscape is relatively flat and smaller steps when approaching a local optimum. This builds on the existing gradient-based approach but adds intelligent scaling to improve convergence properties.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+    iteration: int = 0,
+    max_iterations: int = 1000
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    conv = compute_convolution_fft(normalized_sequence)
+    rhs = np.max(conv)
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        # Fallback to simple gradient descent on a smaller scale
+        t = 0.001
+        new_sequence = [(1 - t) * x + t * (x + np.random.normal(0, 0.01)) for x in sequence]
+        return new_sequence
+
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Adaptive step size based on iteration
+    t = max(0.001, 0.1 * (1 - iteration / max_iterations))
+
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity
+    new_sequence = [max(0.0, x) for x in new_sequence]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: list[float],
+    iteration: int = 0,
+    max_iterations: int = 1000,
+    prev_fitness: float = 0.0,
+    curr_fitness: float = 0.0
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    conv = compute_convolution_fft(normalized_sequence)
+    rhs = np.max(conv)
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        # Fallback to simple gradient descent on a smaller scale
+        t = 0.001
+        new_sequence = [(1 - t) * x + t * (x + np.random.normal(0, 0.01)) for x in sequence]
+        return new_sequence
+
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Adaptive step size based on current fitness and iteration
+    if iteration == 0:
+        t = 0.05
+    else:
+        # Increase step size when fitness improves, decrease when it plateaus
+        if curr_fitness > prev_fitness and curr_fitness > 0:
+            t = min(0.2, 0.05 * (1 + (curr_fitness - prev_fitness) * 100))
+        else:
+            t = max(0.001, 0.05 * (1 - iteration / max_iterations))
+
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity
+    new_sequence = [max(0.0, x) for x in new_sequence]
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_fallback_mechanism
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the fallback mechanism to include more sophisticated strategies when the primary optimization fails. Instead of just random perturbations, I'll implement a multi-tiered fallback approach that tries different strategies in order of preference, such as mirrored sequences, symmetric patterns, and then randomization only as a last resort. This will significantly improve robustness and prevent getting stuck in local minima.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def search_for_best_sequence(max_time_seconds=170) -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    start_time = time.time()
+
+    # Initialize with a good starting sequence
+    best_sequence = generate_initial_sequence()
+    best_fitness = evaluate_fitness(best_sequence)
+
+    # Track elite sequences for preservation
+    elite_sequences = [best_sequence]
+
+    # Iteration counter for adaptive step sizing
+    iteration = 0
+    max_iterations = 1000
+
+    while time.time() - start_time < max_time_seconds and iteration < max_iterations:
+        iteration += 1
+        h_function = get_good_direction_to_move_into(best_sequence, iteration, max_iterations)
+
+        if h_function is not None:
+            candidate_sequence = h_function
+            candidate_fitness = evaluate_fitness(candidate_sequence)
+
+            # Keep elite sequences
+            if candidate_fitness > best_fitness:
+                best_sequence = candidate_sequence
+                best_fitness = candidate_fitness
+
+                # Keep top performers
+                elite_sequences.append(candidate_sequence)
+                if len(elite_sequences) > 10:
+                    # Keep only the best elites
+                    elite_fitnesses = [evaluate_fitness(s) for s in elite_sequences]
+                    top_indices = np.argsort(elite_fitnesses)[-5:]  # Keep top 5
+                    elite_sequences = [elite_sequences[i] for i in top_indices]
+        else:
+            # Fallback - slightly perturb current sequence
+            new_sequence = []
+            for x in best_sequence:
+                new_sequence.append(max(0.0, x + random.uniform(-1, 1)))
+            if evaluate_fitness(new_sequence) > best_fitness:
+                best_sequence = new_sequence
+
+    return best_sequence
+=======
+def search_for_best_sequence(max_time_seconds=170) -> list[float]:
+    """Function to search for the best coefficient sequence."""
+    start_time = time.time()
+
+    # Initialize with a good starting sequence
+    best_sequence = generate_initial_sequence()
+    best_fitness = evaluate_fitness(best_sequence)
+    prev_fitness = best_fitness
+
+    # Track elite sequences for preservation
+    elite_sequences = [best_sequence]
+
+    # Iteration counter for adaptive step sizing
+    iteration = 0
+    max_iterations = 1000
+
+    while time.time() - start_time < max_time_seconds and iteration < max_iterations:
+        iteration += 1
+        h_function = get_good_direction_to_move_into(best_sequence, iteration, max_iterations, prev_fitness, best_fitness)
+
+        if h_function is not None:
+            candidate_sequence = h_function
+            candidate_fitness = evaluate_fitness(candidate_sequence)
+
+            # Keep elite sequences
+            if candidate_fitness > best_fitness:
+                prev_fitness = best_fitness
+                best_sequence = candidate_sequence
+                best_fitness = candidate_fitness
+
+                # Keep top performers
+                elite_sequences.append(candidate_sequence)
+                if len(elite_sequences) > 10:
+                    # Keep only the best elites
+                    elite_fitnesses = [evaluate_fitness(s) for s in elite_sequences]
+                    top_indices = np.argsort(elite_fitnesses)[-5:]  # Keep top 5
+                    elite_sequences = [elite_sequences[i] for i in top_indices]
+        else:
+            # Multi-tiered fallback strategy
+            new_sequence = None
+
+            # Tier 1: Try mirrored sequence
+            if len(best_sequence) > 1:
+                mirrored = best_sequence[::-1]
+                mirrored = [max(0.0, x) for x in mirrored]
+                if evaluate_fitness(mirrored) > best_fitness:
+                    new_sequence = mirrored
+
+            # Tier 2: Try symmetric pattern
+            if new_sequence is None and len(best_sequence) > 2:
+                sym_sequence = []
+                mid = len(best_sequence) // 2
+                for i in range(len(best_sequence)):
+                    if i < mid:
+                        sym_sequence.append(best_sequence[i])
+                    else:
+                        sym_sequence.append(best_sequence[len(best_sequence)-1-i])
+                sym_sequence = [max(0.0, x) for x in sym_sequence]
+                if evaluate_fitness(sym_sequence) > best_fitness:
+                    new_sequence = sym_sequence
+
+            # Tier 3: Random perturbation with better strategy
+            if new_sequence is None:
+                new_sequence = []
+                for x in best_sequence:
+                    # More controlled random perturbation
+                    perturbation = np.random.normal(0, 0.1 * max(1.0, x))
+                    new_sequence.append(max(0.0, x + perturbation))
+
+            # Apply the best fallback
+            if new_sequence is not None and evaluate_fitness(new_sequence) > best_fitness:
+                prev_fitness = best_fitness
+                best_sequence = new_sequence
+
+    return best_sequence
+>>>>>>> REPLACE
+</DIFF>

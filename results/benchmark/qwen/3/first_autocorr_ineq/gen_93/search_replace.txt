@@ -1,0 +1,153 @@
+<NAME>
+add_hessian_based_direction_correction
+</NAME>
+
+<DESCRIPTION>
+I'll implement a Hessian-aware directional bias correction to enhance the gradient-based optimization in the `get_good_direction_to_move_into` function. This approach will detect flat or degenerate gradient regions and inject curvature information to escape local minima, which should help in finding better solutions that beat the current benchmark of 1/C₁ > 1/1.5031.
+
+The key insight is to estimate curvature using finite differences and use that information to adjust the direction of movement, providing better exploration capabilities in complex optimization landscapes.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply small perturbation for exploration
+    t = 0.05
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: List[float],
+    max_iterations: int = 10
+) -> Optional[List[float]]:
+    """Improve the sequence using evolutionary strategy and LP optimization with curvature awareness."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try multiple times to solve LP
+    g_fun = None
+    for _ in range(max_iterations):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs)
+        if g_fun is not None:
+            break
+        else:
+            # If LP fails, slightly modify constraints and retry
+            rhs *= 1.01
+
+    if g_fun is None:
+        return None
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply curvature-aware directional bias correction
+    # Estimate curvature using finite differences
+    if n > 10:
+        # Create small perturbations to estimate Hessian
+        epsilon = 1e-3
+        hessian_approx = np.zeros((n, n))
+
+        # Simple finite difference approximation of second derivatives
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += epsilon
+            if i > 0:  # Avoid boundary issues
+                perturbed_seq[i-1] -= epsilon / 2
+            if i < n-1:  # Avoid boundary issues
+                perturbed_seq[i+1] -= epsilon / 2
+
+            # Recompute convolution with perturbed sequence
+            if n > 100:
+                b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+            else:
+                b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+            second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon**2)
+            hessian_approx[i, i] = max(0, second_derivative)  # Ensure non-negative
+
+        # Apply curvature correction to the direction
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        # Scale correction appropriately
+        curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+
+        # Adjust the direction with curvature bias
+        corrected_direction = np.array(normalized_g_fun) + 0.1 * curvature_correction
+        normalized_g_fun = corrected_direction.tolist()
+
+    # Apply small perturbation for exploration
+    t = 0.05
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,404 @@
+--- a/original.py
++++ b/original.py
+@@ -1,265 +1,271 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import cdist
+ from scipy.optimize import minimize
+ from scipy.stats import qmc
+ import warnings
+ import math
+-
+-def min_max_dist_dim3_14() -> np.ndarray:
+-    """
+-    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+-
+-    Returns
+-        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+-    """
+-    
++from typing import Tuple, List, Optional
++import time
++
++class PointInitializer:
++    """Handles various point initialization strategies."""
++    
++    @staticmethod
+     def fibonacci_spiral_on_sphere(n_points: int) -> np.ndarray:
+         """Generate points on sphere using Fibonacci spiral with golden angle."""
+         points = []
+         phi = np.pi * (3 - np.sqrt(5))  # golden angle
+         
+         for i in range(n_points):
+             y = 1 - (i / (n_points - 1)) * 2  # y goes from 1 to -1
+             radius = np.sqrt(1 - y * y)  # radius at y
+             
+             theta = phi * i  # golden angle increment
+             
+             x = np.cos(theta) * radius
+             z = np.sin(theta) * radius
+             
+             points.append([x, y, z])
+         
+         return np.array(points)
+     
++    @staticmethod
+     def sobol_initialization(n: int, seed: int = 42) -> np.ndarray:
+         """Generate points using Sobol sequence for better space-filling properties"""
+         try:
+             # Create Sobol sequence sampler
+             sampler = qmc.Sobol(d=3, seed=seed)
+             # Generate points
+             points = sampler.random(n)
+             # Scale to [-1, 1]^3
+             points = points * 2 - 1
+             return points
+         except:
+             # Fallback to random initialization if Sobol fails
+             return np.random.uniform(-1, 1, (n, 3))
+     
++    @staticmethod
+     def icosahedron_initialization(n: int) -> np.ndarray:
+         """Initialize points using icosahedron vertices and refinement"""
+         # Regular icosahedron vertices
+         phi = (1 + np.sqrt(5)) / 2  # golden ratio
+         vertices = np.array([
+             [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+             [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+             [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1],
+         ])
+         
+         # Normalize vertices to unit sphere
+         norms = np.linalg.norm(vertices, axis=1, keepdims=True)
+         vertices = vertices / np.where(norms > 0, norms, 1)
+         
+         # If we need more than 12 points, generate additional points
+         if n <= 12:
+             return vertices[:n]
+         else:
+             # For more points, distribute them more evenly
+-            # Start with icosahedron vertices
+             points = vertices.copy()
+             # Add additional points by subdividing faces (simplified approach)
+-            # This ensures good distribution while maintaining some geometric structure
+             for i in range(12, n):
+                 # Add point near one of existing vertices
+                 idx = i % 12
+                 base_point = vertices[idx]
+                 # Add small random perturbation
+                 perturbation = np.random.normal(0, 0.05, 3)
+                 new_point = base_point + perturbation
+                 # Normalize back to sphere
+                 norm = np.linalg.norm(new_point)
+                 if norm > 0:
+                     new_point = new_point / norm
+                 points = np.vstack([points, new_point])
+             
+             return points
+-    
+-    def normalize_to_unit_sphere(points: np.ndarray) -> np.ndarray:
++
++class SpatialOptimizer:
++    """Handles the optimization process with adaptive strategies."""
++    
++    def __init__(self):
++        self.best_ratio = -np.inf
++        self.best_points = None
++        
++    def normalize_to_unit_sphere(self, points: np.ndarray) -> np.ndarray:
+         """Normalize points to lie on unit sphere"""
+         norms = np.linalg.norm(points, axis=1, keepdims=True)
+         # Avoid division by zero
+         safe_norms = np.where(norms == 0, 1, norms)
+         return points / safe_norms
+     
+-    def calculate_min_max_ratio(points: np.ndarray) -> float:
++    def calculate_min_max_ratio(self, points: np.ndarray) -> float:
+         """Calculate the minimum-to-maximum distance ratio"""
+         distances = cdist(points, points)
+         np.fill_diagonal(distances, np.inf)
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         if max_dist <= 0:
+             return 0.0
+         return min_dist / max_dist
+     
+-    def objective_ratio(points_flat: np.ndarray) -> float:
++    def objective_ratio(self, points_flat: np.ndarray) -> float:
+         """Objective function that maximizes min/max distance ratio"""
+         points = points_flat.reshape(-1, 3)
+         # Normalize points to unit sphere
+-        points = normalize_to_unit_sphere(points)
++        points = self.normalize_to_unit_sphere(points)
+         
+         # Compute distance matrix
+         distances = cdist(points, points)
+         np.fill_diagonal(distances, np.inf)
+         
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         
+         if max_dist <= 0:
+             return -1.0
+             
+         # We want to maximize min_dist / max_dist, so minimize -min_dist / max_dist
+         return -min_dist / max_dist
+     
+-    def constraint_sphere(x):
++    def constraint_sphere(self, x):
+         """Constraint function ensuring all points lie on unit sphere"""
+         points = x.reshape(-1, 3)
+         norms = np.linalg.norm(points, axis=1)
+         # Return difference from unit radius (should be close to 0)
+         return norms - 1.0
+     
+-    # Multi-start optimization with diverse strategies
+-    best_ratio = -np.inf
+-    best_points = None
+-    
+-    # Strategy 1: Standard Fibonacci spiral
+-    fib_points = fibonacci_spiral_on_sphere(14)
+-    
+-    # Strategy 2: Sobol sequence initialization
+-    sobol_points = sobol_initialization(14, seed=42)
+-    
+-    # Strategy 3: Icosahedron-based initialization  
+-    ico_points = icosahedron_initialization(14)
+-    
+-    # Strategy 4: Perturbed Fibonacci points
+-    np.random.seed(42)
+-    perturbed_fib = fib_points + np.random.normal(0, 0.03, fib_points.shape)
+-    
+-    # Strategy 5: Perturbed Sobol points
+-    perturbed_sobol = sobol_points + np.random.normal(0, 0.03, sobol_points.shape)
+-    
+-    # Strategy 6: Perturbed icosahedron points
+-    perturbed_ico = ico_points + np.random.normal(0, 0.03, ico_points.shape)
+-    
+-    # Strategy 7: Enhanced Sobol sequence with different seed
+-    sobol_points_2 = sobol_initialization(14, seed=123)
+-    
+-    # Strategy 8: Random initialization with fixed seed
+-    np.random.seed(999)
+-    random_points = np.random.uniform(-1, 1, (14, 3))
+-    
+-    initializations = [
+-        fib_points,
+-        sobol_points, 
+-        ico_points,
+-        perturbed_fib,
+-        perturbed_sobol,
+-        perturbed_ico,
+-        sobol_points_2,
+-        random_points
+-    ]
+-    
+-    # Try each initialization with optimization
+-    for i, initial_points in enumerate(initializations):
++    def optimize_single_strategy(self, initial_points: np.ndarray, strategy_name: str) -> Optional[Tuple[np.ndarray, float]]:
++        """
++        Optimize a single initialization strategy with multi-stage approach.
++        Returns tuple of (optimized_points, ratio) or None if failed.
++        """
+         try:
+             # Ensure points are on unit sphere
+-            initial_points = normalize_to_unit_sphere(initial_points)
+-            
+-            # First optimization phase: L-BFGS-B for global exploration
++            initial_points = self.normalize_to_unit_sphere(initial_points)
++            
++            # Stage 1: Coarse optimization with L-BFGS-B
+             x0 = initial_points.flatten()
+             
+-            # Use L-BFGS-B for initial coarse optimization
+             result_coarse = minimize(
+-                objective_ratio,
++                self.objective_ratio,
+                 x0,
+                 method='L-BFGS-B',
+                 options={'ftol': 1e-8, 'gtol': 1e-8, 'maxiter': 300},
+                 tol=1e-8
+             )
+             
+-            if result_coarse.success:
+-                # Fine-tune with SLSQP for better local convergence
+-                refined_points = result_coarse.x.reshape(-1, 3)
+-                refined_points = normalize_to_unit_sphere(refined_points)
+-                
+-                # Define constraint for SLSQP
+-                cons = {'type': 'eq', 'fun': constraint_sphere}
+-                
+-                # Fine optimization with SLSQP
+-                fine_result = minimize(
+-                    objective_ratio,
+-                    refined_points.flatten(),
+-                    method='SLSQP',
+-                    constraints=cons,
+-                    options={'ftol': 1e-12, 'maxiter': 500},
+-                    tol=1e-12
+-                )
+-                
+-                if fine_result.success:
+-                    final_points = fine_result.x.reshape(-1, 3)
+-                    final_points = normalize_to_unit_sphere(final_points)
+-                    ratio = calculate_min_max_ratio(final_points)
+-                    
+-                    if ratio > best_ratio:
+-                        best_ratio = ratio
+-                        best_points = final_points.copy()
+-                else:
+-                    # Even if fine tuning fails, still use the coarse result
+-                    coarse_points = result_coarse.x.reshape(-1, 3)
+-                    coarse_points = normalize_to_unit_sphere(coarse_points)
+-                    ratio = calculate_min_max_ratio(coarse_points)
+-                    
+-                    if ratio > best_ratio:
+-                        best_ratio = ratio
+-                        best_points = coarse_points.copy()
+-            else:
+-                # If coarse optimization fails, just use the initial points
+-                ratio = calculate_min_max_ratio(initial_points)
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = initial_points.copy()
+-                    
+-        except Exception as e:
+-            warnings.warn(f"Initialization {i} failed: {str(e)}")
+-            continue
+-    
+-    # Fallback to standard Fibonacci spiral if everything else fails
+-    if best_points is None:
+-        try:
+-            initial_points = fibonacci_spiral_on_sphere(14)
+-            initial_points = normalize_to_unit_sphere(initial_points)
+-            
+-            # Direct optimization with SLSQP
+-            x0 = initial_points.flatten()
+-            cons = {'type': 'eq', 'fun': constraint_sphere}
+-            
+-            result = minimize(
+-                objective_ratio,
+-                x0,
++            if not result_coarse.success:
++                # Fallback to initial points if coarse fails
++                ratio = self.calculate_min_max_ratio(initial_points)
++                return (initial_points, ratio)
++            
++            # Stage 2: Fine-tune with SLSQP for better local convergence
++            refined_points = result_coarse.x.reshape(-1, 3)
++            refined_points = self.normalize_to_unit_sphere(refined_points)
++            
++            # Define constraint for SLSQP
++            cons = {'type': 'eq', 'fun': self.constraint_sphere}
++            
++            # Fine optimization with SLSQP
++            fine_result = minimize(
++                self.objective_ratio,
++                refined_points.flatten(),
+                 method='SLSQP',
+                 constraints=cons,
+                 options={'ftol': 1e-12, 'maxiter': 500},
+                 tol=1e-12
+             )
+             
+-            if result.success:
+-                best_points = result.x.reshape(-1, 3)
+-                best_points = normalize_to_unit_sphere(best_points)
++            if fine_result.success:
++                final_points = fine_result.x.reshape(-1, 3)
++                final_points = self.normalize_to_unit_sphere(final_points)
++                ratio = self.calculate_min_max_ratio(final_points)
++                return (final_points, ratio)
+             else:
+-                best_points = initial_points
++                # Even if fine tuning fails, return coarse result
++                coarse_points = result_coarse.x.reshape(-1, 3)
++                coarse_points = self.normalize_to_unit_sphere(coarse_points)
++                ratio = self.calculate_min_max_ratio(coarse_points)
++                return (coarse_points, ratio)
+                 
+-        except Exception:
+-            best_points = initial_points
++        except Exception as e:
++            warnings.warn(f"Optimization strategy {strategy_name} failed: {str(e)}")
++            return None
++    
++    def run_multi_start_optimization(self, initializations: List[Tuple[str, np.ndarray]]) -> np.ndarray:
++        """
++        Run multi-start optimization with diverse initialization strategies.
++        Returns the best points found.
++        """
++        for strategy_name, initial_points in initializations:
++            result = self.optimize_single_strategy(initial_points, strategy_name)
++            if result is not None:
++                points, ratio = result
++                if ratio > self.best_ratio:
++                    self.best_ratio = ratio
++                    self.best_points = points.copy()
++        
++        # If no successful optimizations, fall back to the first initialization
++        if self.best_points is None and initializations:
++            self.best_points = initializations[0][1]
++            self.best_points = self.normalize_to_unit_sphere(self.best_points)
++            self.best_ratio = self.calculate_min_max_ratio(self.best_points)
++            
++        return self.best_points
++
++def min_max_dist_dim3_14() -> np.ndarray:
++    """
++    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
++
++    Returns
++        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
++    """
++    
++    # Initialize components
++    initializer = PointInitializer()
++    optimizer = SpatialOptimizer()
++    
++    # Generate diverse initialization strategies
++    np.random.seed(42)
++    
++    # Strategy 1: Standard Fibonacci spiral
++    fib_points = initializer.fibonacci_spiral_on_sphere(14)
++    
++    # Strategy 2: Sobol sequence initialization
++    sobol_points = initializer.sobol_initialization(14, seed=42)
++    
++    # Strategy 3: Icosahedron-based initialization  
++    ico_points = initializer.icosahedron_initialization(14)
++    
++    # Strategy 4: Perturbed Fibonacci points
++    perturbed_fib = fib_points + np.random.normal(0, 0.03, fib_points.shape)
++    
++    # Strategy 5: Perturbed Sobol points
++    perturbed_sobol = sobol_points + np.random.normal(0, 0.03, sobol_points.shape)
++    
++    # Strategy 6: Perturbed icosahedron points
++    perturbed_ico = ico_points + np.random.normal(0, 0.03, ico_points.shape)
++    
++    # Strategy 7: Enhanced Sobol sequence with different seed
++    sobol_points_2 = initializer.sobol_initialization(14, seed=123)
++    
++    # Strategy 8: Random initialization with fixed seed
++    np.random.seed(999)
++    random_points = np.random.uniform(-1, 1, (14, 3))
++    
++    # Collect all initializations
++    initializations = [
++        ("fibonacci", fib_points),
++        ("sobol", sobol_points), 
++        ("ico", ico_points),
++        ("perturbed_fib", perturbed_fib),
++        ("perturbed_sobol", perturbed_sobol),
++        ("perturbed_ico", perturbed_ico),
++        ("sobol_2", sobol_points_2),
++        ("random", random_points)
++    ]
++    
++    # Execute multi-start optimization
++    best_points = optimizer.run_multi_start_optimization(initializations)
+     
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

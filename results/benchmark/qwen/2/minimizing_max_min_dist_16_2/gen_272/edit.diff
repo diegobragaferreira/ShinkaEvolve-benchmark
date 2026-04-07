@@ -1,0 +1,440 @@
+--- a/original.py
++++ b/original.py
+@@ -1,225 +1,253 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import cdist
++from scipy.spatial.distance import pdist
+ import time
+-
+-class OptimizationFramework:
+-    def __init__(self):
+-        self.n = 16
+-        self.d = 2
++import math
++
++class GeometricEvolutionOptimizer:
++    def __init__(self, num_points=16, dimensions=2):
++        self.num_points = num_points
++        self.dimensions = dimensions
++        self.benchmark_threshold = 1 / np.sqrt(12.889266112)
+         self.best_ratio = -np.inf
+         self.best_points = None
+-        self.benchmark_threshold = 1/np.sqrt(12.889266112)  # AlphaEvolve benchmark ratio
+-        
+-    def _calculate_min_max_ratio(self, points):
+-        """Calculate the ratio of minimum to maximum pairwise distances."""
++        
++    def _compute_min_max_ratio(self, points):
++        """Efficiently compute the ratio of minimum to maximum pairwise distances."""
+         if len(points) < 2:
+-            return 0
+-
+-        # Efficiently compute all pairwise distances
+-        distances = cdist(points, points, metric='euclidean')
+-
+-        # Set diagonal to infinity to ignore self-distances
+-        np.fill_diagonal(distances, np.inf)
+-
+-        min_dist = np.min(distances)
+-        max_dist = np.max(distances)
+-
+-        if max_dist <= 0:
+-            return 0
+-
+-        return min_dist / max_dist
++            return 0.0
++            
++        distances = pdist(points)
++        if len(distances) == 0:
++            return 0.0
++            
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max <= 0:
++            return 0.0
++            
++        return d_min / d_max
+     
+     def _objective_function(self, x):
+-        """Objective function for optimization: negative ratio to maximize ratio."""
+-        # Reshape flat array back to points
+-        pts = x.reshape(self.n, self.d)
+-
+-        # Calculate all pairwise distances efficiently
+-        distances = cdist(pts, pts, metric='euclidean')
+-        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+-
+-        min_dist = np.min(distances)
+-        max_dist = np.max(distances)
+-
+-        # Return negative ratio to maximize the ratio
+-        if max_dist <= 0 or min_dist <= 0:
+-            return 0
+-        return -min_dist / max_dist
+-    
+-    def _hexagonal_packing_init(self):
+-        """Initialize points using hexagonal packing pattern."""
+-        # Create a hexagonal lattice pattern
++        """Objective function to maximize min/max distance ratio."""
++        points = x.reshape(self.num_points, self.dimensions)
++        ratio = self._compute_min_max_ratio(points)
++        return -ratio  # Negative for minimization
++    
++    def _create_hexagonal_pattern(self):
++        """Generate points in hexagonal packing pattern."""
++        points = []
+         rows = 4
+         cols = 4
+-        points = []
+-
++        
+         for i in range(rows):
+             for j in range(cols):
+-                # offset every other row
++                # Offset every other row
+                 x_offset = 0.5 if i % 2 == 1 else 0.0
+-                x = (j + x_offset) * 0.25 + 0.125  # Scale and shift to [0.125, 0.875]
+-                y = i * 0.25 + 0.125
++                x = (j + x_offset) / 3.0
++                y = i / 3.0
++                
++                # Ensure within bounds
++                x = max(0.05, min(0.95, x))
++                y = max(0.05, min(0.95, y))
++                
+                 points.append([x, y])
+-
++                
+         return np.array(points)
+     
+-    def _adaptive_perturbed_grid_init(self):
+-        """Initialize with grid points plus adaptive random perturbations based on current distribution."""
+-        # Start with a regular grid
+-        grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+-        points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+-
+-        # Calculate initial distance statistics to determine appropriate perturbation scale
+-        initial_ratio = self._calculate_min_max_ratio(points)
+-
+-        # Adaptive perturbation scaling - smaller perturbations when configuration is already good
+-        base_perturbation = 0.03
+-        if initial_ratio > 0.1:  # If already reasonably balanced
+-            perturbation_magnitude = base_perturbation * 0.3
+-        elif initial_ratio > 0.05:  # Moderately unbalanced
+-            perturbation_magnitude = base_perturbation * 0.7
+-        else:  # Very unbalanced, allow larger perturbations
+-            perturbation_magnitude = base_perturbation * 1.5
+-
+-        # Add random perturbations
++    def _create_fibonacci_pattern(self):
++        """Generate points using Fibonacci spiral approach."""
++        points = []
++        phi = (1 + math.sqrt(5)) / 2  # golden ratio
++        
++        for i in range(self.num_points):
++            theta = math.acos(-1 + (2 * i) / (self.num_points - 1))
++            phi_angle = (i * 2 * math.pi) / (phi * phi)
++            
++            x = math.sin(theta) * math.cos(phi_angle)
++            y = math.sin(theta) * math.sin(phi_angle)
++            
++            # Map to [0.05, 0.95] range
++            x = 0.05 + 0.9 * (x + 1) / 2
++            y = 0.05 + 0.9 * (y + 1) / 2
++            
++            points.append([x, y])
++            
++        return np.array(points)
++    
++    def _create_regular_grid(self):
++        """Generate regular 4x4 grid pattern."""
++        points = []
++        for i in range(4):
++            for j in range(4):
++                x = (j + 0.5) / 4.0
++                y = (i + 0.5) / 4.0
++                points.append([x, y])
++        return np.array(points)
++    
++    def _create_perturbed_grid(self, base_points, perturbation_scale=0.05):
++        """Apply adaptive perturbations to base points."""
+         np.random.seed(42)
+-        points += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, points.shape)
+-
+-        # Ensure points stay within bounds
+-        points = np.clip(points, 0, 1)
+-
+-        return points
+-    
+-    def _random_spread_init(self):
+-        """Initialize with random points that are intentionally spread out."""
+-        np.random.seed(42)
+-        points = np.random.rand(16, 2)
+-
+-        # Apply some basic spacing to prevent clustering
+-        for i in range(16):
+-            # Move points away from center slightly
+-            center_vec = points[i] - [0.5, 0.5]
+-            center_distance = np.linalg.norm(center_vec)
+-            if center_distance > 0:
+-                points[i] += center_vec * 0.1 / center_distance
+-
+-        # Clip to ensure within bounds
+-        points = np.clip(points, 0, 1)
+-
+-        return points
+-    
+-    def _local_optimization(self, initial_points, max_attempts=2):
+-        """Apply local optimization to improve the point distribution with fallback strategies."""
+-        # Define bounds (points must be in [0,1] x [0,1])
+-        bounds = [(0, 1) for _ in range(self.n * self.d)]
+-        
+-        best_result = None
+-        best_value = np.inf
+-        attempts = 0
+-        
+-        # Method 1: L-BFGS-B - highest accuracy
++        perturbed = base_points + np.random.normal(0, perturbation_scale, base_points.shape)
++        perturbed = np.clip(perturbed, 0.05, 0.95)
++        return perturbed
++    
++    def _create_symmetric_breaking_constraints(self, points):
++        """Apply constraints to break symmetry and maintain unique solutions."""
++        # Enforce lexicographic ordering of points to prevent symmetric solutions
++        sorted_indices = np.lexsort((points[:, 1], points[:, 0]))
++        return points[sorted_indices]
++    
++    def _adaptive_mutation(self, points, current_ratio):
++        """Apply mutation with adaptive strength based on solution quality."""
++        # Determine mutation strength based on current solution quality
++        if current_ratio < 0.1:
++            mutation_strength = 0.08
++        elif current_ratio < 0.2:
++            mutation_strength = 0.04
++        else:
++            mutation_strength = 0.02
++            
++        # Apply mutation
++        np.random.seed(int(time.time()) % 1000000)
++        mutated = points + np.random.normal(0, mutation_strength, points.shape)
++        mutated = np.clip(mutated, 0.05, 0.95)
++        return mutated
++    
++    def _tournament_selection(self, candidates, fitness_scores):
++        """Select best candidates using tournament selection."""
++        # Select top 3 candidates based on fitness
++        sorted_indices = np.argsort(fitness_scores)[:min(3, len(candidates))]
++        return [candidates[i] for i in sorted_indices]
++    
++    def _hybrid_optimization(self, initial_points):
++        """Apply hybrid optimization combining global and local strategies."""
++        # Stage 1: Global search with L-BFGS-B for coarse optimization
++        bounds = [(0.05, 0.95) for _ in range(self.num_points * self.dimensions)]
++        
+         try:
+-            result1 = minimize(self._objective_function, initial_points.flatten(), 
+-                             method='L-BFGS-B', bounds=bounds,
+-                             options={'ftol': 1e-12, 'gtol': 1e-12})
+-            if result1.fun < best_value and result1.success:
+-                best_value = result1.fun
+-                best_result = result1
+-                attempts += 1
++            result1 = minimize(
++                self._objective_function,
++                initial_points.flatten(),
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-8}
++            )
++            
++            if result1.success:
++                stage1_points = result1.x.reshape(self.num_points, self.dimensions)
++            else:
++                stage1_points = initial_points.copy()
+         except Exception:
+-            pass
+-
+-        # Method 2: Nelder-Mead as fallback - good for robustness
++            stage1_points = initial_points.copy()
++            
++        # Stage 2: Local refinement with SLSQP
+         try:
+-            if best_result is None or attempts < max_attempts:
+-                result2 = minimize(self._objective_function, initial_points.flatten(), 
+-                                 method='Nelder-Mead',
+-                                 options={'fatol': 1e-12, 'xatol': 1e-12})
+-                if result2.fun < best_value and result2.success:
+-                    best_value = result2.fun
+-                    best_result = result2
+-                    attempts += 1
++            result2 = minimize(
++                self._objective_function,
++                stage1_points.flatten(),
++                method='SLSQP',
++                bounds=bounds,
++                options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10}
++            )
++            
++            if result2.success:
++                optimized_points = result2.x.reshape(self.num_points, self.dimensions)
++            else:
++                optimized_points = stage1_points.copy()
+         except Exception:
+-            pass
+-
+-        # If no optimization succeeded, return original points
+-        if best_result is None:
+-            return initial_points
+-
+-        # Extract optimized points
+-        optimized_points = best_result.x.reshape(self.n, self.d)
+-
+-        # Ensure points are within bounds
+-        optimized_points = np.clip(optimized_points, 0, 1)
+-
++            optimized_points = stage1_points.copy()
++            
+         return optimized_points
+     
+-    def _get_restart_strategies(self):
+-        """Return list of initialization functions."""
+-        return [
+-            self._hexagonal_packing_init,
+-            self._adaptive_perturbed_grid_init,
+-            self._random_spread_init
++    def _evolutionary_restart_strategy(self):
++        """Implement evolutionary restart strategy with multiple patterns."""
++        # Generate diverse initial configurations
++        initial_configs = []
++        
++        # Create different patterns
++        patterns = [
++            self._create_hexagonal_pattern(),
++            self._create_fibonacci_pattern(),
++            self._create_regular_grid()
+         ]
++        
++        # Perturb each pattern with different strengths
++        for i, base_pattern in enumerate(patterns):
++            np.random.seed(i * 100)
++            perturbed_1 = self._create_perturbed_grid(base_pattern, 0.03)
++            perturbed_2 = self._create_perturbed_grid(base_pattern, 0.06)
++            initial_configs.extend([base_pattern, perturbed_1, perturbed_2])
++        
++        # Add some random configurations for diversity
++        for i in range(3):
++            np.random.seed(1000 + i)
++            random_config = np.random.uniform(0.05, 0.95, (self.num_points, self.dimensions))
++            initial_configs.append(random_config)
++        
++        # Evaluate fitness of all initial configurations
++        fitness_scores = []
++        for config in initial_configs:
++            ratio = self._compute_min_max_ratio(config)
++            fitness_scores.append(ratio)
++        
++        # Select best configurations using tournament selection
++        selected_configs = self._tournament_selection(initial_configs, fitness_scores)
++        
++        return selected_configs
+     
+     def optimize(self):
+-        """Main optimization loop with configurable restart strategies."""
+-        restart_strategies = self._get_restart_strategies()
+-        
+-        # Track performance
+-        start_time = time.time()
+-        
+-        for strategy_idx, init_func in enumerate(restart_strategies):
+-            for restart in range(3):  # 3 restarts per strategy
+-                # Set seed for reproducibility
+-                np.random.seed(strategy_idx * 1000 + restart)
+-                
+-                # Get initial points
+-                points = init_func()
+-                
+-                # Apply local optimization
+-                optimized_points = self._local_optimization(points)
+-                
+-                # Calculate ratio for this optimization run
+-                ratio = self._calculate_min_max_ratio(optimized_points)
+-                
+-                # Keep track of best solution
+-                if ratio > self.best_ratio:
+-                    self.best_ratio = ratio
+-                    self.best_points = optimized_points.copy()
+-                
+-                # Early termination if we've beaten the benchmark
+-                if self.best_ratio >= self.benchmark_threshold:
++        """Main optimization loop with evolutionary restarts."""
++        # Get initial configurations using evolutionary approach
++        initial_configs = self._evolutionary_restart_strategy()
++        
++        # Try each configuration with hybrid optimization
++        for i, initial_config in enumerate(initial_configs):
++            # Apply symmetry breaking constraints
++            constrained_config = self._create_symmetric_breaking_constraints(initial_config)
++            
++            # Apply hybrid optimization
++            optimized_points = self._hybrid_optimization(constrained_config)
++            
++            # Evaluate final ratio
++            ratio = self._compute_min_max_ratio(optimized_points)
++            
++            # Keep track of best solution
++            if ratio > self.best_ratio:
++                self.best_ratio = ratio
++                self.best_points = optimized_points.copy()
++                
++                # Early termination if benchmark beaten
++                if ratio >= self.benchmark_threshold:
+                     break
+-                    
+-            # Early termination if we've beaten the benchmark
+-            if self.best_ratio >= self.benchmark_threshold:
+-                break
+-                
+-        # Fallback to default if nothing worked
++        
++        # If no good solution found, use fallback method
+         if self.best_points is None:
+-            # Start with a simple 4x4 grid
+-            grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+-            points = grid_points.astype(float) / 3.0
+-            np.random.seed(42)
+-            points += np.random.uniform(-0.02, 0.02, points.shape)
+-            points = np.clip(points, 0, 1)
+-            
+-            self.best_points = self._local_optimization(points)
+-            self.best_ratio = self._calculate_min_max_ratio(self.best_points)
++            # Start with hexagonal pattern and optimize
++            fallback_points = self._create_hexagonal_pattern()
++            self.best_points = self._hybrid_optimization(fallback_points)
++            self.best_ratio = self._compute_min_max_ratio(self.best_points)
+             
+         return self.best_points
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+-    framework = OptimizationFramework()
+-    return framework.optimize()
++    # Set seeds for reproducibility
++    np.random.seed(42)
++    
++    # Initialize optimizer
++    optimizer = GeometricEvolutionOptimizer(16, 2)
++    
++    # Perform optimization
++    points = optimizer.optimize()
++    
++    return points
+ 
+ # EVOLVE-BLOCK-END

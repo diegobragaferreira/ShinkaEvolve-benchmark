@@ -1,0 +1,254 @@
+<NAME>
+add_numba_jit_compilation
+</NAME>
+
+<DESCRIPTION>
+Adding Numba JIT compilation to critical geometric functions will significantly improve performance by accelerating the computationally intensive hexagon vertex calculations and containment/overlap checks. This is essential for achieving the target 1/outer_hex_side_length = 1/3.9419123 ≈ 0.2537, as it allows for faster iteration through optimization cycles and more thorough exploration of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+import math
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+import math
+from numba import jit
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, angle, and side length."""
+    angle_rad = math.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        angle = angle_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices.append((x, y))
+    return vertices
+=======
+@jit(nopython=True)
+def hexagon_vertices_numba(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, angle, and side length."""
+    angle_rad = math.radians(angle_deg)
+    vertices = np.empty((6, 2))
+    for i in range(6):
+        angle = angle_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices[i] = (x, y)
+    return vertices
+
+def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, angle, and side length."""
+    return hexagon_vertices_numba(center_x, center_y, angle_deg, side_length)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def outer_hexagon_vertices(side_length):
+    """Generate vertices of outer hexagon centered at origin."""
+    return hexagon_vertices(0, 0, 0, side_length)
+=======
+@jit(nopython=True)
+def outer_hexagon_vertices_numba(side_length):
+    """Generate vertices of outer hexagon centered at origin."""
+    return hexagon_vertices_numba(0, 0, 0, side_length)
+
+def outer_hexagon_vertices(side_length):
+    """Generate vertices of outer hexagon centered at origin."""
+    return outer_hexagon_vertices_numba(side_length)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def check_containment(hexagon_vertices_list, outer_side_length):
+    """Check if all hexagon vertices are within the outer hexagon."""
+    outer_polygon = Polygon(outer_hexagon_vertices(outer_side_length))
+
+    for vertices in hexagon_vertices_list:
+        hex_polygon = Polygon(vertices)
+        if not outer_polygon.contains(hex_polygon):
+            return False
+    return True
+=======
+@jit(nopython=True)
+def check_containment_numba(hexagon_vertices_list, outer_side_length):
+    """Fast containment check using geometric properties."""
+    # For a hexagon with side length 1, the distance from center to vertex is 1
+    # For outer hexagon with side length R, distance from center to vertex is R
+    # So we just need to check that all inner hexagon centers are within outer hexagon
+
+    # Simplified containment check: verify that all hexagon centers are within outer hexagon
+    # Using distance from center check for speed
+    outer_radius = outer_side_length  # Distance from center to vertex of outer hexagon
+
+    for vertices in hexagon_vertices_list:
+        # Use first vertex as approximation of center (this is okay for our purposes)
+        center_x = vertices[0][0]
+        center_y = vertices[0][1]
+        distance = math.sqrt(center_x*center_x + center_y*center_y)
+        if distance > outer_radius:
+            return False
+    return True
+
+def check_containment(hexagon_vertices_list, outer_side_length):
+    """Check if all hexagon vertices are within the outer hexagon."""
+    if check_containment_numba(hexagon_vertices_list, outer_side_length):
+        outer_polygon = Polygon(outer_hexagon_vertices(outer_side_length))
+
+        for vertices in hexagon_vertices_list:
+            hex_polygon = Polygon(vertices)
+            if not outer_polygon.contains(hex_polygon):
+                return False
+        return True
+    return False
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap(hexagon_vertices_list):
+    """Check if any hexagons overlap."""
+    polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+    try:
+        union = unary_union(polygons)
+        total_area = sum(polygon.area for polygon in polygons)
+        union_area = union.area
+        # If areas match, no overlap
+        return abs(total_area - union_area) < 1e-10
+    except:
+        # Fallback for complex cases
+        for i in range(len(polygons)):
+            for j in range(i+1, len(polygons)):
+                if polygons[i].intersects(polygons[j]):
+                    return False
+        return True
+=======
+@jit(nopython=True)
+def check_overlap_simple_numba(hexagon_vertices_list):
+    """Simple overlap check using bounding boxes for speed."""
+    n_hexagons = len(hexagon_vertices_list)
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        # Get bounding box for hexagon i
+        min_x = vertices_i[0][0]
+        max_x = vertices_i[0][0]
+        min_y = vertices_i[0][1]
+        max_y = vertices_i[0][1]
+
+        for j in range(1, len(vertices_i)):
+            x, y = vertices_i[j]
+            if x < min_x: min_x = x
+            if x > max_x: max_x = x
+            if y < min_y: min_y = y
+            if y > max_y: max_y = y
+
+        # Compare with all other hexagons
+        for k in range(i+1, n_hexagons):
+            vertices_k = hexagon_vertices_list[k]
+            # Get bounding box for hexagon k
+            min_x_k = vertices_k[0][0]
+            max_x_k = vertices_k[0][0]
+            min_y_k = vertices_k[0][1]
+            max_y_k = vertices_k[0][1]
+
+            for l in range(1, len(vertices_k)):
+                x, y = vertices_k[l]
+                if x < min_x_k: min_x_k = x
+                if x > max_x_k: max_x_k = x
+                if y < min_y_k: min_y_k = y
+                if y > max_y_k: max_y_k = y
+
+            # Check if bounding boxes intersect
+            if max_x >= min_x_k and min_x <= max_x_k and max_y >= min_y_k and min_y <= max_y_k:
+                return False  # Overlap detected
+
+    return True  # No overlap
+
+def check_overlap(hexagon_vertices_list):
+    """Check if any hexagons overlap."""
+    # First try the fast numba version
+    if check_overlap_simple_numba(hexagon_vertices_list):
+        # Fall back to Shapely for precise check if needed
+        polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+        try:
+            union = unary_union(polygons)
+            total_area = sum(polygon.area for polygon in polygons)
+            union_area = union.area
+            # If areas match, no overlap
+            return abs(total_area - union_area) < 1e-10
+        except:
+            # Fallback for complex cases
+            for i in range(len(polygons)):
+                for j in range(i+1, len(polygons)):
+                    if polygons[i].intersects(polygons[j]):
+                        return False
+            return True
+    return False
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration(config, outer_side_length):
+    """Evaluate a configuration of 12 hexagons."""
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Check containment and overlap
+    if not check_containment(hexagon_vertices_list, outer_side_length):
+        return float('inf')  # Invalid configuration
+
+    if not check_overlap(hexagon_vertices_list):
+        return float('inf')  # Overlapping hexagons
+
+    return 0  # Valid configuration
+=======
+def evaluate_configuration(config, outer_side_length):
+    """Evaluate a configuration of 12 hexagons."""
+    # Parse configuration into 12 hexagons (x, y, angle)
+    hexagons = config.reshape(12, 3)
+
+    # Get vertices for all hexagons
+    hexagon_vertices_list = []
+    for i in range(12):
+        x, y, angle = hexagons[i]
+        vertices = hexagon_vertices(x, y, angle)
+        hexagon_vertices_list.append(vertices)
+
+    # Check containment and overlap
+    if not check_containment(hexagon_vertices_list, outer_side_length):
+        return float('inf')  # Invalid configuration
+
+    if not check_overlap(hexagon_vertices_list):
+        return float('inf')  # Overlapping hexagons
+
+    return 0  # Valid configuration
+>>>>>>> REPLACE
+</DIFF>

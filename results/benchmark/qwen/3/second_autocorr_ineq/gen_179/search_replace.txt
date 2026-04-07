@@ -1,0 +1,182 @@
+<NAME>
+implement_latin_hypercube_sampling_for_diverse_initialization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses simple random initialization and mixed strategies for the evolutionary algorithm, but doesn't utilize Latin Hypercube Sampling (LHS) which could provide better spatial coverage of the search space. LHS ensures more diverse and representative initial populations, especially important for expensive function evaluations. This change will enhance the exploration capabilities of the evolutionary algorithm by providing systematically varied starting configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+import math
+from numba import njit
+from sklearn.cluster import KMeans
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.spatial.distance import pdist
+from scipy.stats import qmc
+import math
+from numba import njit
+from sklearn.cluster import KMeans
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_initial_population_generation_with_lhs
+</NAME>
+
+<DESCRIPTION>
+Replace the simple random initialization in the evolutionary algorithm with Latin Hypercube Sampling to create more diverse and representative initial populations. This will improve exploration of the search space by ensuring better coverage across the parameter domain, which should lead to better convergence to higher C2 values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def adaptive_evolutionary_optimization():
+    """Main optimization routine using adaptive evolutionary strategy"""
+    n_steps = 1000  # Using larger number of steps for better resolution
+
+    # Generate diverse initial population
+    pop_size = 50
+    population = []
+    for _ in range(pop_size):
+        # Mix of geometric and random patterns
+        if np.random.random() < 0.7:
+            individual = construct_geometric_initial_function(n_steps)
+        else:
+            individual = np.random.random(n_steps).tolist()
+
+        # Ensure non-negativity and reasonable scaling
+        individual = [max(0, x) for x in individual]
+        # Normalize to avoid extremely large peaks
+        total = sum(individual)
+        if total > 0:
+            individual = [x / total * 10 for x in individual]
+
+        population.append(individual)
+=======
+def adaptive_evolutionary_optimization():
+    """Main optimization routine using adaptive evolutionary strategy"""
+    n_steps = 1000  # Using larger number of steps for better resolution
+    pop_size = 50
+
+    # Generate diverse initial population using Latin Hypercube Sampling
+    # Create a Latin Hypercube sampler
+    sampler = qmc.LatinHypercube(d=n_steps, seed=42)
+
+    # Generate samples in [0,1]^n_steps hypercube
+    samples = sampler.random(n=pop_size)
+
+    # Transform samples to appropriate range and create individuals
+    population = []
+    for i in range(pop_size):
+        # Create individual from LHS sample
+        individual = samples[i].tolist()
+
+        # Apply some diversity by mixing with geometric pattern occasionally
+        if np.random.random() < 0.3:
+            geometric_pattern = construct_geometric_initial_function(n_steps)
+            # Blend the LHS sample with geometric pattern
+            alpha = np.random.random()
+            individual = [alpha * individual[j] + (1 - alpha) * geometric_pattern[j]
+                         for j in range(n_steps)]
+
+        # Ensure non-negativity and reasonable scaling
+        individual = [max(0, x) for x in individual]
+        # Normalize to avoid extremely large peaks
+        total = sum(individual)
+        if total > 0:
+            individual = [x / total * 10 for x in individual]
+
+        population.append(individual)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_adaptive_step_size_control_to_local_search
+</NAME>
+
+<DESCRIPTION>
+Add adaptive step size control to the mutation operator to make it more intelligent. Instead of fixed mutation strength, dynamically adjust the step size based on the current solution quality and parameter space characteristics. This will allow for broader exploration in early stages and more precise exploitation in later stages.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_individual(individual, mutation_rate):
+    """Mutate an individual with given probability"""
+    for i in range(len(individual)):
+        if np.random.random() < mutation_rate:
+            # Gaussian mutation with adaptive strength
+            mutation_strength = 0.1 * individual[i] if individual[i] > 0 else 0.1
+            individual[i] = max(0, individual[i] + np.random.normal(0, mutation_strength))
+=======
+def mutate_individual(individual, mutation_rate, generation=None, max_generations=None):
+    """Mutate an individual with given probability and adaptive step size"""
+    for i in range(len(individual)):
+        if np.random.random() < mutation_rate:
+            # Adaptive mutation strength based on generation and parameter value
+            if generation is not None and max_generations is not None:
+                # Decrease mutation strength over generations
+                decay_factor = 1.0 - (generation / max_generations)
+                base_strength = 0.1 * individual[i] if individual[i] > 0 else 0.1
+                mutation_strength = base_strength * decay_factor
+            else:
+                mutation_strength = 0.1 * individual[i] if individual[i] > 0 else 0.1
+
+            individual[i] = max(0, individual[i] + np.random.normal(0, mutation_strength))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_evolution_loop_with_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+Update the evolutionary loop to pass generation information to the mutation function, enabling adaptive step size control during evolution. This will allow the algorithm to adapt its exploration/exploitation balance dynamically throughout the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Generate offspring through crossover and mutation
+        while len(new_population) < pop_size:
+            # Tournament selection for parents
+            parent1 = tournament_selection(sorted_population, sorted_fitness, 3)
+            parent2 = tournament_selection(sorted_population, sorted_fitness, 3)
+
+            # Crossover
+            if np.random.random() < crossover_rate:
+                child1, child2 = uniform_crossover(parent1, parent2)
+            else:
+                child1, child2 = parent1.copy(), parent2.copy()
+
+            # Mutation
+            mutate_individual(child1, mutation_rate)
+            mutate_individual(child2, mutation_rate)
+
+            new_population.extend([child1, child2])
+=======
+        # Generate offspring through crossover and mutation
+        while len(new_population) < pop_size:
+            # Tournament selection for parents
+            parent1 = tournament_selection(sorted_population, sorted_fitness, 3)
+            parent2 = tournament_selection(sorted_population, sorted_fitness, 3)
+
+            # Crossover
+            if np.random.random() < crossover_rate:
+                child1, child2 = uniform_crossover(parent1, parent2)
+            else:
+                child1, child2 = parent1.copy(), parent2.copy()
+
+            # Mutation with adaptive step size
+            mutate_individual(child1, mutation_rate, generation, max_generations)
+            mutate_individual(child2, mutation_rate, generation, max_generations)
+
+            new_population.extend([child1, child2])
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,195 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from sklearn.cluster import KMeans
+import random
+from deap import base, creator, tools, algorithms
+import math
+from typing import Tuple, List
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    container_width, container_height = 1.0, 1.0
+    
+    # Number of circles
+    n = 21
+    
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Create individual representation: [x1, y1, r1, x2, y2, r2, ..., x21, y21, r21]
+    def create_individual():
+        # Initialize with Voronoi-based placement
+        individual = []
+        
+        # Generate candidate points using k-means clustering to get well-distributed anchors
+        anchors = []
+        # Corners
+        anchors.extend([(0.05, 0.05), (container_width - 0.05, 0.05),
+                       (0.05, container_height - 0.05), (container_width - 0.05, container_height - 0.05)])
+        # Edge centers
+        anchors.extend([(container_width/2, 0.05), (container_width/2, container_height - 0.05),
+                       (0.05, container_height/2), (container_width - 0.05, container_height/2)])
+        
+        # Generate dense grid points for better distribution
+        grid_density = 16
+        for i in range(grid_density):
+            for j in range(grid_density):
+                x = (i + 0.5) / grid_density * container_width
+                y = (j + 0.5) / grid_density * container_height
+                anchors.append((x, y))
+        
+        # Add some random points
+        for _ in range(20):
+            x = np.random.uniform(0.05, container_width - 0.05)
+            y = np.random.uniform(0.05, container_height - 0.05)
+            anchors.append((x, y))
+        
+        # Use k-means to get distributed initial centroids
+        kmeans = KMeans(n_clusters=n, init='k-means++', n_init=10, random_state=42)
+        all_array = np.array(anchors)
+        kmeans.fit(all_array)
+        centroids = kmeans.cluster_centers_
+        
+        # Assign each centroid a position (closest anchor point)
+        for centroid in centroids:
+            distances = np.linalg.norm(all_array - centroid, axis=1)
+            closest_idx = np.argmin(distances)
+            x, y = all_array[closest_idx]
+            
+            # Initial small radius
+            r = 0.02
+            
+            individual.extend([x, y, r])
+        
+        return individual
+    
+    # Create fitness function
+    def eval_fitness(individual):
+        # Convert individual to circles format
+        circles = []
+        for i in range(0, len(individual), 3):
+            x, y, r = individual[i], individual[i+1], individual[i+2]
+            circles.append([x, y, r])
+        
+        # Check constraints and calculate fitness
+        total_radius = 0
+        valid = True
+        
+        # Check boundary constraints
+        for circle in circles:
+            x, y, r = circle
+            if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
+                valid = False
+                break
+            total_radius += r
+        
+        if not valid:
+            return (0,)  # Invalid configuration gets zero fitness
+        
+        # Check overlap constraints
+        for i in range(len(circles)):
+            for j in range(i + 1, len(circles)):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                
+                dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < (r1 + r2):
+                    valid = False
+                    break
+            if not valid:
+                break
+        
+        if not valid:
+            return (0,)
+        
+        return (total_radius,)
+    
+    # Create toolbox
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", creator.Individual, create_individual())
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", eval_fitness)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.02, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population
+    population = toolbox.population(n=50)
+    
+    # Evaluate initial population
+    fitnesses = list(map(toolbox.evaluate, population))
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = fit
+    
+    # Evolution parameters
+    CXPB = 0.7      # Crossover probability
+    MUTPB = 0.3     # Mutation probability
+    NGEN = 100      # Number of generations
+    
+    # Track best solution
+    best_ind = tools.selBest(population, 1)[0]
+    best_fitness = best_ind.fitness.values[0]
+    
+    # Evolution loop
+    for gen in range(NGEN):
+        # Select the next generation individuals
+        offspring = toolbox.select(population, len(population))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace population
+        population[:] = offspring
+        
+        # Update best solution
+        current_best = tools.selBest(population, 1)[0]
+        if current_best.fitness.values[0] > best_fitness:
+            best_fitness = current_best.fitness.values[0]
+            best_ind = current_best
+    
+    # Convert best individual back to circles format
+    circles = []
+    for i in range(0, len(best_ind), 3):
+        x, y, r = best_ind[i], best_ind[i+1], best_ind[i+2]
+        circles.append([x, y, r])
+    
+    # Final cleanup and validation
+    circles_array = np.array(circles)
+    
+    # Ensure all circles are within bounds
+    for i in range(len(circles_array)):
+        x, y, r = circles_array[i]
+        x = max(r, min(container_width - r, x))
+        y = max(r, min(container_height - r, y))
+        circles_array[i] = [x, y, r]
+    
+    return circles_array
+
+# EVOLVE-BLOCK-END

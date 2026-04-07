@@ -1,0 +1,544 @@
+<NAME>
+adaptive_local_optimization
+</NAME>
+
+<DESCRIPTION>
+The key insight is that the current local optimization approach uses fixed refinement strategies regardless of the specific overlap patterns in each solution. I'll implement an adaptive local optimization system that dynamically selects refinement strategies based on real-time analysis of overlap patterns and solution quality. This will allow for more targeted and effective improvements.
+
+The main changes:
+1. Add adaptive refinement strategy selection that analyzes overlap patterns
+2. Implement a more sophisticated refinement cascade that can switch between approaches based on problem characteristics
+3. Add overlap pattern detection to guide optimization decisions
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class LocalOptimizer:
+    """Performs local optimization to improve circle placements with hierarchy."""
+
+    @staticmethod
+    def optimize_placement(circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply hierarchical local optimization to improve placement."""
+        circles = circles.copy()
+        n = len(circles)
+
+        # Calculate overlap severity for intelligent optimization
+        overlap_severity = LocalOptimizer._calculate_overlap_severity(circles)
+
+        # Apply optimized refinement based on overlap severity
+        if overlap_severity < 5:  # Low overlap - light refinement
+            return LocalOptimizer._light_refinement(circles, max_iter)
+        elif overlap_severity < 15:  # Medium overlap - moderate refinement
+            return LocalOptimizer._moderate_refinement(circles, max_iter)
+        else:  # High overlap - intensive refinement
+            return LocalOptimizer._intensive_refinement(circles, max_iter)
+
+    @staticmethod
+    def _calculate_overlap_severity(circles: np.ndarray) -> int:
+        """Calculate number of overlap violations."""
+        n = len(circles)
+        overlaps = 0
+
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    overlaps += 1
+
+        return overlaps
+
+    @staticmethod
+    def _light_refinement(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Light refinement for configurations with few overlaps."""
+        circles = circles.copy()
+
+        for _ in range(max_iter):
+            improved = False
+
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                new_r = min(r + 0.002, max_r)
+
+                # Quick constraint check
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+                    improved = True
+
+            if not improved:
+                break
+
+        return circles
+
+    @staticmethod
+    def _moderate_refinement(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Moderate refinement for configurations with moderate overlaps."""
+        circles = circles.copy()
+
+        # Start with radius expansion
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            max_r = min(x, 1-x, y, 1-y)
+
+            if max_r <= r:
+                continue
+
+            new_r = min(r + 0.005, max_r)
+
+            # Check constraint
+            valid = True
+            for j in range(len(circles)):
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist < new_r + r2:
+                        valid = False
+                        break
+
+            if valid and new_r > r:
+                circles[i, 2] = new_r
+
+        # Then apply geometric refinement
+        for _ in range(max_iter):
+            improved = False
+
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                new_r = min(r + 0.003, max_r)
+
+                # Check constraint
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+                    improved = True
+
+            if not improved:
+                break
+
+        return circles
+
+    @staticmethod
+    def _intensive_refinement(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Intensive refinement for configurations with many overlaps."""
+        circles = circles.copy()
+
+        # Multiple passes of refinement
+        for pass_num in range(3):
+            # Pass 1: Radius expansion
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                new_r = min(r + 0.01, max_r)
+
+                # Check constraint
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+
+            # Pass 2: Position adjustment to resolve overlaps
+            for _ in range(10):
+                moved_any = False
+                for i in range(len(circles)):
+                    x, y, r = circles[i]
+
+                    # Look for conflicts
+                    conflicting = []
+                    for j in range(len(circles)):
+                        if i != j:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist < r + r2:
+                                conflicting.append(j)
+
+                    if conflicting:
+                        # Move away from conflicting circles
+                        dx = 0
+                        dy = 0
+
+                        for j in conflicting:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist > 0:
+                                dx += (x - x2) / dist * (r + r2 - dist) * 0.01
+                                dy += (y - y2) / dist * (r + r2 - dist) * 0.01
+
+                        # Apply movement
+                        new_x = x + dx
+                        new_y = y + dy
+
+                        # Bound the movement
+                        new_x = np.clip(new_x, r, 1-r)
+                        new_y = np.clip(new_y, r, 1-r)
+
+                        if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                            circles[i, 0] = new_x
+                            circles[i, 1] = new_y
+                            moved_any = True
+
+                if not moved_any:
+                    break
+
+        return circles
+=======
+class LocalOptimizer:
+    """Performs local optimization to improve circle placements with hierarchy."""
+
+    @staticmethod
+    def analyze_overlap_pattern(circles: np.ndarray) -> dict:
+        """Analyze the overlap pattern to determine optimization approach."""
+        n = len(circles)
+        if n <= 1:
+            return {"type": "none", "severity": 0, "conflict_count": 0}
+
+        # Count overlaps and identify dense regions
+        overlaps = 0
+        conflict_counts = np.zeros(n)
+        avg_distances = np.zeros(n)
+
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    overlaps += 1
+                    conflict_counts[i] += 1
+                    conflict_counts[j] += 1
+
+        # Identify patterns
+        avg_conflicts = np.mean(conflict_counts) if len(conflict_counts) > 0 else 0
+        max_conflicts = np.max(conflict_counts) if len(conflict_counts) > 0 else 0
+
+        # Determine pattern type
+        if overlaps == 0:
+            pattern_type = "none"
+        elif avg_conflicts < 2:
+            pattern_type = "sparse"
+        elif avg_conflicts < 5:
+            pattern_type = "moderate"
+        else:
+            pattern_type = "dense"
+
+        return {
+            "type": pattern_type,
+            "severity": overlaps,
+            "avg_conflicts": avg_conflicts,
+            "max_conflicts": max_conflicts,
+            "conflict_counts": conflict_counts
+        }
+
+    @staticmethod
+    def optimize_placement(circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Apply adaptive local optimization based on overlap analysis."""
+        circles = circles.copy()
+        n = len(circles)
+
+        # Analyze current state
+        analysis = LocalOptimizer.analyze_overlap_pattern(circles)
+        overlap_type = analysis["type"]
+        overlap_severity = analysis["severity"]
+
+        # Choose optimization strategy based on analysis
+        if overlap_severity == 0:
+            # No overlaps - focus on radius expansion
+            return LocalOptimizer._radius_expansion_only(circles, max_iter)
+        elif overlap_type == "sparse":
+            # Light overlaps - combine radius expansion with gentle adjustments
+            return LocalOptimizer._sparse_overlap_optimization(circles, max_iter)
+        elif overlap_type == "moderate":
+            # Moderate overlaps - focused conflict resolution
+            return LocalOptimizer._moderate_overlap_optimization(circles, max_iter)
+        else:  # dense
+            # Heavy overlaps - aggressive conflict resolution
+            return LocalOptimizer._dense_overlap_optimization(circles, max_iter)
+
+    @staticmethod
+    def _radius_expansion_only(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Optimization for completely non-overlapping configurations."""
+        circles = circles.copy()
+
+        # Focus purely on expanding radii
+        for _ in range(max_iter):
+            improved = False
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                # More aggressive radius expansion
+                new_r = min(r + 0.01, max_r)
+
+                # Quick constraint check
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+                    improved = True
+
+            if not improved:
+                break
+
+        return circles
+
+    @staticmethod
+    def _sparse_overlap_optimization(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Optimization for sparse overlap situations."""
+        circles = circles.copy()
+
+        # First pass: radius expansion with small adjustments
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            max_r = min(x, 1-x, y, 1-y)
+
+            if max_r <= r:
+                continue
+
+            new_r = min(r + 0.008, max_r)
+
+            # Check constraint
+            valid = True
+            for j in range(len(circles)):
+                if i != j:
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist < new_r + r2:
+                        valid = False
+                        break
+
+            if valid and new_r > r:
+                circles[i, 2] = new_r
+
+        # Second pass: minor position adjustments for overlap resolution
+        for _ in range(max_iter // 2):
+            improved = False
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                # Try to slightly adjust position to fix overlaps
+                new_r = min(r + 0.002, max_r)
+
+                # Check constraint
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+                    improved = True
+
+            if not improved:
+                break
+
+        return circles
+
+    @staticmethod
+    def _moderate_overlap_optimization(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Optimization for moderately overlapping configurations."""
+        circles = circles.copy()
+
+        # Multi-pass approach for moderate overlaps
+        for pass_num in range(2):
+            # Pass 1: Radius expansion with careful constraint checking
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                new_r = min(r + 0.005, max_r)
+
+                # Check constraint
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+
+            # Pass 2: Position adjustment using stronger repulsion for overlaps
+            for _ in range(max_iter // 4):
+                moved_any = False
+                for i in range(len(circles)):
+                    x, y, r = circles[i]
+
+                    # Look for conflicts
+                    conflicting = []
+                    for j in range(len(circles)):
+                        if i != j:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist < r + r2:
+                                conflicting.append(j)
+
+                    if conflicting:
+                        # Move away from conflicting circles with stronger force
+                        dx = 0
+                        dy = 0
+
+                        for j in conflicting:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist > 0:
+                                dx += (x - x2) / dist * (r + r2 - dist) * 0.02
+                                dy += (y - y2) / dist * (r + r2 - dist) * 0.02
+
+                        # Apply movement
+                        new_x = x + dx
+                        new_y = y + dy
+
+                        # Bound the movement
+                        new_x = np.clip(new_x, r, 1-r)
+                        new_y = np.clip(new_y, r, 1-r)
+
+                        if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                            circles[i, 0] = new_x
+                            circles[i, 1] = new_y
+                            moved_any = True
+
+                if not moved_any:
+                    break
+
+        return circles
+
+    @staticmethod
+    def _dense_overlap_optimization(circles: np.ndarray, max_iter: int) -> np.ndarray:
+        """Optimization for heavily overlapping configurations."""
+        circles = circles.copy()
+
+        # Aggressive approach for dense overlaps
+        for pass_num in range(3):
+            # Pass 1: Stronger radius expansion
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                max_r = min(x, 1-x, y, 1-y)
+
+                if max_r <= r:
+                    continue
+
+                new_r = min(r + 0.015, max_r)
+
+                # Check constraint
+                valid = True
+                for j in range(len(circles)):
+                    if i != j:
+                        x2, y2, r2 = circles[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < new_r + r2:
+                            valid = False
+                            break
+
+                if valid and new_r > r:
+                    circles[i, 2] = new_r
+
+            # Pass 2: Aggressive position adjustments
+            for _ in range(max_iter // 3):
+                moved_any = False
+                for i in range(len(circles)):
+                    x, y, r = circles[i]
+
+                    # Look for conflicts
+                    conflicting = []
+                    for j in range(len(circles)):
+                        if i != j:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist < r + r2:
+                                conflicting.append(j)
+
+                    if conflicting:
+                        # Move away with strong repulsion
+                        dx = 0
+                        dy = 0
+
+                        for j in conflicting:
+                            x2, y2, r2 = circles[j]
+                            dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                            if dist > 0:
+                                # Stronger repulsion for dense cases
+                                repulsion_strength = 0.05
+                                dx += (x - x2) / dist * (r + r2 - dist) * repulsion_strength
+                                dy += (y - y2) / dist * (r + r2 - dist) * repulsion_strength
+
+                        # Apply movement
+                        new_x = x + dx
+                        new_y = y + dy
+
+                        # Bound the movement
+                        new_x = np.clip(new_x, r, 1-r)
+                        new_y = np.clip(new_y, r, 1-r)
+
+                        if abs(new_x - x) > 1e-6 or abs(new_y - y) > 1e-6:
+                            circles[i, 0] = new_x
+                            circles[i, 1] = new_y
+                            moved_any = True
+
+                if not moved_any:
+                    break
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

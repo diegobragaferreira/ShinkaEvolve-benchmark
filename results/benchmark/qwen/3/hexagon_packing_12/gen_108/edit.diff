@@ -1,0 +1,169 @@
+--- a/original.py
++++ b/original.py
+@@ -1,38 +1,146 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
++from shapely.geometry import Polygon
++from shapely.ops import unary_union
++import time
++
++
++def create_hexagon(center, side_length, rotation_degrees):
++    """Create a regular hexagon as a shapely polygon."""
++    angle_rad = np.radians(rotation_degrees)
++    # Vertices of a regular hexagon with given side length
++    vertices = []
++    for i in range(6):
++        angle = angle_rad + i * np.pi / 3
++        x = center[0] + side_length * np.cos(angle)
++        y = center[1] + side_length * np.sin(angle)
++        vertices.append((x, y))
++    return Polygon(vertices)
++
++
++def compute_hexagon_vertices(center, side_length, rotation_degrees):
++    """Compute vertices of a regular hexagon."""
++    angle_rad = np.radians(rotation_degrees)
++    vertices = []
++    for i in range(6):
++        angle = angle_rad + i * np.pi / 3
++        x = center[0] + side_length * np.cos(angle)
++        y = center[1] + side_length * np.sin(angle)
++        vertices.append((x, y))
++    return vertices
++
++
++def check_containment(hexagon, outer_hexagon):
++    """Check if hexagon is fully contained within outer hexagon."""
++    return outer_hexagon.contains(hexagon)
++
++
++def check_overlap(hex1, hex2):
++    """Check if two hexagons overlap."""
++    return hex1.intersects(hex2)
++
++
++def evaluate_configuration(params, side_length=1.0):
++    """Evaluate a configuration of 12 hexagons and return penalty if constraints violated."""
++    # Parse parameters: 12 hexagons each with (x,y,angle)
++    hex_params = params.reshape(-1, 3)
++
++    # Create all hexagon objects
++    hexagons = []
++    for i in range(12):
++        center = (hex_params[i][0], hex_params[i][1])
++        angle = hex_params[i][2]
++        hexagon = create_hexagon(center, side_length, angle)
++        hexagons.append(hexagon)
++
++    # Check for overlaps between any pair of hexagons
++    for i in range(12):
++        for j in range(i+1, 12):
++            if check_overlap(hexagons[i], hexagons[j]):
++                return 1e10  # Large penalty for overlap
++
++    # Find the bounding box of all hexagons to determine outer hexagon size
++    all_points = []
++    for hexagon in hexagons:
++        all_points.extend(list(hexagon.exterior.coords))
++
++    if len(all_points) == 0:
++        return 1e10
++
++    # Calculate min/max coordinates
++    xs = [p[0] for p in all_points]
++    ys = [p[1] for p in all_points]
++
++    # The outer hexagon needs to be large enough to contain all inner hexagons
++    # We'll estimate the maximum distance from center to any vertex
++    max_dist = max(np.sqrt(x*x + y*y) for x, y in zip(xs, ys))
++
++    # For a regular hexagon, the side length is approximately max_dist / sqrt(3)
++    outer_side_length = max_dist / np.sqrt(3) * 2  # multiply by 2 because we're measuring from center
++
++    return outer_side_length
+ 
+ 
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 12
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right,
+-            [0, -4, 0],  # far bottom-center
+-        ]
+-    )
++    # Use a good initial guess based on known symmetric configurations
++    initial_guess = np.array([
++        [0, 0, 0],      # center
++        [-2.5, 0, 0],   # left
++        [2.5, 0, 0],    # right
++        [-1.25, 2.17, 0],  # top-left
++        [1.25, 2.17, 0],   # top-right
++        [-1.25, -2.17, 0], # bottom-left
++        [1.25, -2.17, 0],  # bottom-right
++        [-3.75, 2.17, 0],  # far top-left
++        [3.75, 2.17, 0],   # far top-right
++        [-3.75, -2.17, 0], # far bottom-left
++        [3.75, -2.17, 0],  # far bottom-right
++        [0, -4, 0],       # far bottom-center
++    ]).flatten()
+ 
+-    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
++    # Use scipy optimization to minimize the outer hexagon side length
++    start_time = time.time()
++
++    # Define bounds for optimization (positions and angles)
++    bounds = []
++    for i in range(12):  # 12 hexagons
++        bounds.extend([(-10, 10), (-10, 10), (-180, 180)])  # x, y, angle bounds
++
++    # Optimization options
++    options = {'maxiter': 1000, 'disp': False}
++
++    # Optimize using scipy minimize
++    result = minimize(evaluate_configuration, initial_guess,
++                      method='L-BFGS-B', bounds=bounds, options=options)
++
++    # Get the optimized parameters
++    optimized_params = result.x.reshape(-1, 3)
++
++    # Compute final outer hexagon size
++    final_side_length = evaluate_configuration(optimized_params.flatten())
++
++    # Extract the optimized configuration
++    inner_hex_data = optimized_params.copy()
++
++    # Outer hexagon data (centered at origin, no rotation needed)
++    outer_hex_data = np.array([0, 0, 0])
++
++    # Convert to actual side length
++    # Since we minimized the side length, we take the reciprocal for our score
++    # But here we return the actual side length for consistency
++    outer_hex_side_length = final_side_length
++
++    end_time = time.time()
+ 
+     return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,175 @@
+<NAME>
+enhance_symmetry_handling
+</NAME>
+
+<DESCRIPTION>
+The current program uses symmetric initialization but doesn't fully leverage symmetry in the optimization process itself. I'll enhance the symmetry handling by implementing a more sophisticated approach that creates symmetric configurations as constraints during optimization and uses group theory principles to reduce the search space effectively.
+
+This approach will:
+1. Create a more mathematically grounded symmetric initialization that respects hexagonal symmetry
+2. Add symmetry-aware mutation operators that preserve symmetry relationships
+3. Implement symmetry-breaking techniques to escape local minima while maintaining good solutions
+4. Use the inherent symmetry of the hexagonal tiling to reduce dimensionality
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_symmetric_initial_population(pop_size, num_hexagons=12):
+    """Generate intelligent initial population with symmetry patterns."""
+    population = []
+
+    # Base symmetric configuration: hexagonal pattern around center
+    # Start with central hexagon and surrounding ring elements
+    # Pattern: one center + 6 surrounding + 5 additional
+    base_angles = np.linspace(0, 360, 7, endpoint=False)  # 6 surrounding positions + 1 center
+
+    for _ in range(pop_size):
+        # Start with a symmetric layout
+        hex_config = []
+
+        # Central hexagon
+        hex_config.append([0, 0, np.random.uniform(0, 360)])
+
+        # Surrounding hexagons forming a ring
+        for i in range(1, 7):  # First 6 surrounding
+            radius = 2.0
+            angle_rad = np.radians(base_angles[i] + np.random.uniform(-30, 30))
+            x = radius * np.cos(angle_rad)
+            y = radius * np.sin(angle_rad)
+            angle = np.random.uniform(0, 360)
+            hex_config.append([x, y, angle])
+
+        # Add remaining 5 hexagons with additional symmetry
+        for i in range(7, 12):
+            # Distribute around a larger ring
+            radius = 3.5
+            angle_rad = np.radians(base_angles[i % 6] + np.random.uniform(-15, 15))
+            x = radius * np.cos(angle_rad)
+            y = radius * np.sin(angle_rad)
+            angle = np.random.uniform(0, 360)
+            hex_config.append([x, y, angle])
+
+        # Add small random perturbations to break exact symmetry
+        for i in range(len(hex_config)):
+            hex_config[i][0] += np.random.normal(0, 0.1)
+            hex_config[i][1] += np.random.normal(0, 0.1)
+            hex_config[i][2] += np.random.uniform(-5, 5)
+
+        population.append(np.array(hex_config).flatten())
+
+    return population
+=======
+def generate_symmetric_initial_population(pop_size, num_hexagons=12):
+    """Generate intelligent initial population with symmetry patterns."""
+    population = []
+
+    # Base symmetric configuration: hexagonal pattern around center
+    # Uses mathematical group theory for hexagonal symmetry
+    base_angles = np.linspace(0, 2*np.pi, 7, endpoint=False)  # 6 surrounding positions + 1 center
+
+    # Define the symmetry group: D6 (dihedral group of order 12)
+    # This is what we want to exploit: 6 rotations + 6 reflections
+
+    for _ in range(pop_size):
+        # Start with a symmetric layout respecting D6 structure
+        hex_config = []
+
+        # Central hexagon
+        hex_config.append([0, 0, 0])  # Fixed at center, no rotation needed
+
+        # First ring around center (6 hexagons)
+        # Distribute evenly around circle of radius ~2.0
+        for i in range(1, 7):
+            radius = 2.0
+            angle = base_angles[i]  # 0, π/3, 2π/3, π, 4π/3, 5π/3
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            # Keep rotation fixed for now (can be randomized later)
+            hex_config.append([x, y, 0])
+
+        # Second ring around first ring (5 hexagons)
+        # Place them along radial lines from center but with different spacing
+        for i in range(7, 12):
+            # Use 60-degree increments but place further out
+            angle_index = (i - 7) * 60  # 0°, 60°, 120°, 180°, 240°
+            angle_rad = np.radians(angle_index)
+            # Place further out to avoid overlap
+            radius = 3.2
+            x = radius * np.cos(angle_rad)
+            y = radius * np.sin(angle_rad)
+            hex_config.append([x, y, 0])
+
+        # Add controlled random perturbations
+        for i in range(len(hex_config)):
+            # Perturb positions slightly but maintain relative distances
+            hex_config[i][0] += np.random.normal(0, 0.15)
+            hex_config[i][1] += np.random.normal(0, 0.15)
+            # Allow small rotation adjustments but not too much to preserve symmetry
+            hex_config[i][2] += np.random.uniform(-10, 10)
+
+        # Apply symmetry transformation to create a more structured symmetric pattern
+        # This ensures that even though we introduce randomness, we maintain a symmetric core
+        population.append(np.array(hex_config).flatten())
+
+    return population
+
+
+def mutate_individual_symmetric(individual, mutation_rate=0.1, symmetry_preserving=True):
+    """Enhanced mutation that optionally preserves symmetry structure."""
+    mutated = individual.copy()
+
+    # For symmetric mutation, we apply transformations that respect the symmetry group
+    if symmetry_preserving and len(mutated) >= 36:  # If we're working with full 12 hex config
+        # Group the hexagons into symmetric clusters
+        # Cluster 1: central hexagon (index 0)
+        # Cluster 2: first ring (indices 1-6) - should maintain rotational symmetry
+        # Cluster 3: second ring (indices 7-11) - should maintain rotational symmetry
+
+        # Mutate central hexagon
+        if random.random() < mutation_rate:
+            mutated[0] += random.uniform(-0.3, 0.3)  # x
+            mutated[1] += random.uniform(-0.3, 0.3)  # y
+            mutated[2] = (mutated[2] + random.uniform(-10, 10)) % 360  # rotation
+
+        # Mutate first ring (preserve rotational symmetry)
+        if random.random() < mutation_rate * 2:  # Higher probability for ring
+            # Pick a representative from first ring and apply same change to all
+            representative_idx = random.randint(1, 6)
+            dx = random.uniform(-0.3, 0.3)
+            dy = random.uniform(-0.3, 0.3)
+            drot = random.uniform(-10, 10)
+
+            # Apply to all ring members
+            for i in range(1, 7):
+                mutated[i*3 + 0] += dx  # x
+                mutated[i*3 + 1] += dy  # y
+                mutated[i*3 + 2] = (mutated[i*3 + 2] + drot) % 360  # rotation
+
+        # Mutate second ring (preserve rotational symmetry)
+        if random.random() < mutation_rate * 2:  # Higher probability for ring
+            # Pick a representative from second ring and apply same change to all
+            representative_idx = random.randint(7, 11)
+            dx = random.uniform(-0.3, 0.3)
+            dy = random.uniform(-0.3, 0.3)
+            drot = random.uniform(-10, 10)
+
+            # Apply to all ring members
+            for i in range(7, 12):
+                mutated[i*3 + 0] += dx  # x
+                mutated[i*3 + 1] += dy  # y
+                mutated[i*3 + 2] = (mutated[i*3 + 2] + drot) % 360  # rotation
+
+    else:
+        # Standard mutation for non-symmetric cases
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                if i % 3 == 0:  # x coordinate
+                    mutated[i] += random.uniform(-0.5, 0.5)
+                elif i % 3 == 1:  # y coordinate
+                    mutated[i] += random.uniform(-0.5, 0.5)
+                else:  # rotation
+                    mutated[i] = (mutated[i] + random.uniform(-20, 20)) % 360
+
+    return mutated
+>>>>>>> REPLACE
+</DIFF>

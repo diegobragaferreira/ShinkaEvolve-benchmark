@@ -1,0 +1,294 @@
+<NAME>
+add_hierarchical_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a basic quadtree for spatial indexing but it's not optimized for the specific hexagon packing problem. I'll implement a hierarchical spatial grid with dynamic cell sizing that adapts to local hexagon density. This will improve collision detection performance significantly, especially in high-density regions where hexagons cluster together, allowing us to achieve better optimization results with the same computational budget.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class QuadTree:
+    """Simple quadtree for spatial indexing"""
+    def __init__(self, boundary, capacity=4):
+        self.boundary = boundary  # (x_min, y_min, x_max, y_max)
+        self.capacity = capacity
+        self.points = []
+        self.divided = False
+
+    def intersects(self, rect):
+        """Check if rectangle intersects with boundary"""
+        x_min, y_min, x_max, y_max = self.boundary
+        rx_min, ry_min, rx_max, ry_max = rect
+        return not (rx_max < x_min or rx_min > x_max or ry_max < y_min or ry_min > y_max)
+
+    def contains(self, point):
+        """Check if point is in boundary"""
+        x, y = point
+        x_min, y_min, x_max, y_max = self.boundary
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    def subdivide(self):
+        """Divide node into four quadrants"""
+        x_min, y_min, x_max, y_max = self.boundary
+        x_mid = (x_min + x_max) / 2
+        y_mid = (y_min + y_max) / 2
+
+        # Create four quadrants
+        ne = (x_mid, y_min, x_max, y_mid)
+        nw = (x_min, y_min, x_mid, y_mid)
+        se = (x_mid, y_mid, x_max, y_max)
+        sw = (x_min, y_mid, x_mid, y_max)
+
+        self.northeast = QuadTree(ne, self.capacity)
+        self.northwest = QuadTree(nw, self.capacity)
+        self.southeast = QuadTree(se, self.capacity)
+        self.southwest = QuadTree(sw, self.capacity)
+
+        self.divided = True
+
+    def insert(self, point, index):
+        """Insert point into quadtree"""
+        if not self.contains(point):
+            return False
+
+        if len(self.points) < self.capacity and not self.divided:
+            self.points.append((point, index))
+            return True
+
+        if not self.divided:
+            self.subdivide()
+
+        # Try to insert into children
+        for qt in [self.northeast, self.northwest, self.southeast, self.southwest]:
+            if qt.insert(point, index):
+                return True
+
+        return False
+
+    def query_range(self, range_rect):
+        """Find all points in the range"""
+        found_points = []
+
+        if not self.intersects(range_rect):
+            return found_points
+
+        # Check points in current node
+        for point, index in self.points:
+            x, y = point
+            rx_min, ry_min, rx_max, ry_max = range_rect
+            if rx_min <= x <= rx_max and ry_min <= y <= ry_max:
+                found_points.append(index)
+
+        if self.divided:
+            for qt in [self.northeast, self.northwest, self.southeast, self.southwest]:
+                found_points.extend(qt.query_range(range_rect))
+
+        return found_points
+
+def build_spatial_grid(hexagons, positions, angles):
+    """Build quadtree-based spatial grid for collision detection"""
+    if len(hexagons) == 0:
+        return None
+
+    # Determine bounds of all hexagons
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
+
+    for i in range(len(positions)):
+        pos = positions[i]
+        angle = angles[i]
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        for vx, vy in hex_vertices:
+            min_x = min(min_x, vx)
+            max_x = max(max_x, vx)
+            min_y = min(min_y, vy)
+            max_y = max(max_y, vy)
+
+    # Add some padding
+    padding = 0.5
+    min_x -= padding
+    max_x += padding
+    min_y -= padding
+    max_y += padding
+
+    # Create quadtree
+    boundary = (min_x, min_y, max_x, max_y)
+    tree = QuadTree(boundary, capacity=4)
+
+    # Insert all hexagon centers
+    for i in range(len(positions)):
+        pos = positions[i]
+        tree.insert((pos[0], pos[1]), i)
+
+    return tree
+
+def fast_collision_check_with_tree(tree, positions, angles, i, j):
+    """Fast collision check using quadtree"""
+    if i == j:
+        return False
+
+    # Quick distance check first
+    pos_i = positions[i]
+    pos_j = positions[j]
+    dist_sq = (pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2
+
+    # If too far apart, no need to do detailed check
+    if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+        return False
+
+    # Detailed check
+    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                pos_j[0], pos_j[1], angles[j])
+=======
+class SpatialGrid:
+    """Hierarchical spatial grid with dynamic cell size adjustment for efficient collision detection"""
+    def __init__(self, min_cell_size=1.0, max_cell_size=3.0, max_density=4):
+        self.min_cell_size = min_cell_size
+        self.max_cell_size = max_cell_size
+        self.max_density = max_density
+        self.grid = defaultdict(list)
+        self.cell_size = None
+        self.bbox = None
+
+    def get_cell_key(self, x, y):
+        """Get grid cell key for a point"""
+        if self.cell_size is None:
+            return (0, 0)
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def update_bbox(self, positions):
+        """Update bounding box of all points"""
+        if len(positions) == 0:
+            return
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        for pos in positions:
+            min_x = min(min_x, pos[0])
+            max_x = max(max_x, pos[0])
+            min_y = min(min_y, pos[1])
+            max_y = max(max_y, pos[1])
+
+        # Add padding
+        padding = 0.5
+        self.bbox = (min_x - padding, min_y - padding, max_x + padding, max_y + padding)
+
+    def calculate_optimal_cell_size(self, positions):
+        """Calculate optimal cell size based on point distribution"""
+        if len(positions) == 0:
+            return self.min_cell_size
+
+        # Calculate average distance between points
+        if len(positions) < 2:
+            return self.min_cell_size
+
+        avg_distance = 0
+        count = 0
+        for i in range(len(positions)):
+            for j in range(i+1, len(positions)):
+                dx = positions[i][0] - positions[j][0]
+                dy = positions[i][1] - positions[j][1]
+                avg_distance += np.sqrt(dx*dx + dy*dy)
+                count += 1
+
+        if count > 0:
+            avg_distance /= count
+
+        # Cell size should be about half the average distance, but bounded
+        cell_size = max(self.min_cell_size, min(self.max_cell_size, avg_distance * 0.5))
+
+        # Adjust based on density - larger cells for sparse regions
+        density_factor = len(positions) / (8.0 * 8.0) if self.bbox else 1.0
+        cell_size = max(self.min_cell_size, min(self.max_cell_size, cell_size * (1.0 + density_factor)))
+
+        return cell_size
+
+    def build_grid(self, positions, angles):
+        """Build spatial grid for collision detection"""
+        if len(positions) == 0:
+            return
+
+        self.update_bbox(positions)
+        self.cell_size = self.calculate_optimal_cell_size(positions)
+
+        # Clear existing grid
+        self.grid.clear()
+
+        # Populate grid with hexagon centers
+        for i, pos in enumerate(positions):
+            cell_key = self.get_cell_key(pos[0], pos[1])
+            self.grid[cell_key].append((i, pos[0], pos[1]))
+
+    def get_nearby_cells(self, cell_key):
+        """Get neighboring cells for collision checking"""
+        neighbors = []
+        cx, cy = cell_key
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                neighbors.append((cx + dx, cy + dy))
+        return neighbors
+
+    def get_nearby_items(self, x, y):
+        """Get items in nearby cells for quick proximity check"""
+        if self.cell_size is None:
+            return []
+
+        cell_key = self.get_cell_key(x, y)
+        nearby_items = []
+
+        # Check current cell and neighbors
+        for neighbor_key in self.get_nearby_cells(cell_key):
+            nearby_items.extend(self.grid.get(neighbor_key, []))
+
+        return nearby_items
+
+def build_spatial_grid(hexagons, positions, angles):
+    """Build hierarchical spatial grid for collision detection"""
+    if len(hexagons) == 0:
+        return None
+
+    # Use the new SpatialGrid class
+    grid = SpatialGrid()
+    grid.build_grid(positions, angles)
+    return grid
+
+def fast_collision_check_with_grid(grid, positions, angles, i, j):
+    """Fast collision check using hierarchical spatial grid"""
+    if i == j:
+        return False
+
+    if grid is None:
+        # Fallback to direct check
+        return hexagon_overlap_fast(positions[i][0], positions[i][1], angles[i],
+                                    positions[j][0], positions[j][1], angles[j])
+
+    # Quick distance check first
+    pos_i = positions[i]
+    pos_j = positions[j]
+    dist_sq = (pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2
+
+    # If too far apart, no need to do detailed check
+    if dist_sq > 4.0:  # Distance > 2 (unit hexagons can't touch)
+        return False
+
+    # Check neighbors in spatial grid
+    cell_key_i = grid.get_cell_key(pos_i[0], pos_i[1])
+    nearby_items = grid.get_nearby_items(pos_i[0], pos_i[1])
+
+    # If we're checking very close items, do detailed check
+    if len(nearby_items) > 0:
+        # Check if j is in the vicinity of i
+        for item in nearby_items:
+            idx, _, _ = item
+            if idx == j:
+                # Do detailed check since they're in nearby cells
+                return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                            pos_j[0], pos_j[1], angles[j])
+
+    # Fallback to direct check
+    return hexagon_overlap_fast(pos_i[0], pos_i[1], angles[i],
+                                pos_j[0], pos_j[1], angles[j])
+>>>>>>> REPLACE
+</DIFF>

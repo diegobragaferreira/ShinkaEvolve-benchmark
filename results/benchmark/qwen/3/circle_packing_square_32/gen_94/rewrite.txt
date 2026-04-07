@@ -1,0 +1,238 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import random
+from copy import deepcopy
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+    Uses Voronoi-based evolution for optimized circle packing.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+    n = 32
+    
+    # Hexagonal grid initialization
+    def create_hexagonal_grid(n_circles):
+        sqrt3 = np.sqrt(3)
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+        if rows * cols < n_circles:
+            cols += 1
+        spacing = 0.15
+        grid_points = []
+        for i in range(rows):
+            for j in range(cols):
+                if len(grid_points) >= n_circles:
+                    break
+                x = (j + 0.5 * (i % 2)) * spacing + 0.05
+                y = i * spacing * sqrt3 / 2 + 0.05
+                if x <= 1 - spacing/2 and y <= 1 - spacing/2:
+                    grid_points.append([x, y])
+        grid_points = grid_points[:n_circles]
+        return np.array(grid_points)
+    
+    # Initialize with hexagonal grid
+    grid_points = create_hexagonal_grid(n)
+    circles = np.zeros((n, 3))
+    for i in range(n):
+        circles[i] = [grid_points[i][0], grid_points[i][1], 0.02]
+    
+    # Voronoi-based constraint analysis helper
+    def get_voronoi_constraints(circles_array, idx):
+        """Get Voronoi-based constraints for circle at idx"""
+        positions = circles_array[:, :2]
+        try:
+            vor = Voronoi(positions)
+        except:
+            return float('inf'), float('inf')
+        
+        # Find the Voronoi cell for this point
+        cell_vertices = []
+        try:
+            # Get vertices for the cell containing this point
+            ridge_indices = [i for i, points in enumerate(vor.ridge_points) if idx in points]
+            for rid in ridge_indices:
+                if not isinstance(vor.ridge_vertices[rid], list):
+                    continue
+                for v_idx in vor.ridge_vertices[rid]:
+                    if v_idx >= 0 and v_idx < len(vor.vertices):
+                        cell_vertices.append(vor.vertices[v_idx])
+        except:
+            pass
+        
+        # Get boundary constraints
+        x, y, r = circles_array[idx]
+        boundary_constraint = min(x, 1-x, y, 1-y)
+        
+        # Get neighbor constraints (distance to closest neighbor)
+        min_neighbor_dist = float('inf')
+        for i in range(len(circles_array)):
+            if i != idx:
+                dist = distance.euclidean(circles_array[idx][:2], circles_array[i][:2])
+                min_neighbor_dist = min(min_neighbor_dist, dist)
+        
+        neighbor_constraint = min_neighbor_dist if min_neighbor_dist < float('inf') else float('inf')
+        
+        return boundary_constraint, neighbor_constraint
+    
+    # Population-based evolution
+    def evolve_population(population, fitness_func, mutation_rate=0.1, elite_size=5):
+        """Evolve a population of circle configurations"""
+        # Evaluate fitness for all individuals
+        fitness_scores = [fitness_func(individual) for individual in population]
+        
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+        
+        # Keep elite
+        new_population = sorted_population[:elite_size]
+        
+        # Generate offspring through crossover and mutation
+        while len(new_population) < len(population):
+            # Tournament selection
+            parent1 = tournament_selection(sorted_population, sorted_fitness, 3)
+            parent2 = tournament_selection(sorted_population, sorted_fitness, 3)
+            
+            # Crossover (blend)
+            child = blend_crossover(parent1, parent2)
+            
+            # Mutation
+            if random.random() < mutation_rate:
+                child = mutate_circle_positions(child)
+            
+            new_population.append(child)
+        
+        return new_population
+    
+    def tournament_selection(population, fitness_scores, k):
+        """Select individual using tournament selection"""
+        selected_indices = random.sample(range(len(population)), k)
+        selected_fitness = [fitness_scores[i] for i in selected_indices]
+        winner_idx = selected_indices[np.argmax(selected_fitness)]
+        return population[winner_idx]
+    
+    def blend_crossover(parent1, parent2):
+        """Blend crossover between two parents"""
+        child = deepcopy(parent1)
+        alpha = 0.5
+        for i in range(len(child)):
+            # Blend positions
+            child[i][0] = alpha * parent1[i][0] + (1 - alpha) * parent2[i][0]
+            child[i][1] = alpha * parent1[i][1] + (1 - alpha) * parent2[i][1]
+            # Blend radii
+            child[i][2] = alpha * parent1[i][2] + (1 - alpha) * parent2[i][2]
+        return child
+    
+    def mutate_circle_positions(individual):
+        """Mutate circle positions slightly"""
+        mutated = deepcopy(individual)
+        for i in range(len(mutated)):
+            # Small random perturbation
+            mutated[i][0] += random.gauss(0, 0.005)
+            mutated[i][1] += random.gauss(0, 0.005)
+            # Keep within bounds
+            mutated[i][0] = max(0.01, min(0.99, mutated[i][0]))
+            mutated[i][1] = max(0.01, min(0.99, mutated[i][1]))
+        return mutated
+    
+    def validate_solution(circles_array):
+        """Ensure all constraints are satisfied"""
+        # Fix boundary violations
+        for i in range(len(circles_array)):
+            x, y, r = circles_array[i]
+            r = min(r, x, 1-x, y, 1-y)
+            circles_array[i] = [x, y, r]
+        
+        # Resolve overlaps
+        distances = cdist(circles_array[:, :2], circles_array[:, :2])
+        changed = True
+        iterations = 0
+        
+        while changed and iterations < 100:
+            changed = False
+            for i in range(len(circles_array)):
+                for j in range(i+1, len(circles_array)):
+                    dist = distances[i, j]
+                    r_i, r_j = circles_array[i, 2], circles_array[j, 2]
+                    if dist < r_i + r_j:
+                        # Reduce radii
+                        overlap = (r_i + r_j - dist) * 0.5
+                        if r_i > overlap and r_j > overlap:
+                            circles_array[i, 2] = max(0.001, r_i - overlap)
+                            circles_array[j, 2] = max(0.001, r_j - overlap)
+                            changed = True
+            iterations += 1
+        
+        # Final boundary check
+        for i in range(len(circles_array)):
+            x, y, r = circles_array[i]
+            r = min(r, x, 1-x, y, 1-y)
+            circles_array[i] = [x, y, r]
+            
+        return circles_array
+    
+    def fitness_function(circles_array):
+        """Calculate fitness as sum of radii"""
+        return np.sum(circles_array[:, 2])
+    
+    # Evolutionary algorithm with Voronoi refinement
+    population_size = 20
+    max_generations = 50
+    convergence_threshold = 1e-6
+    
+    # Create initial population
+    population = []
+    for _ in range(population_size):
+        # Create a copy of base solution and add noise
+        individual = deepcopy(circles)
+        for i in range(n):
+            # Add small random noise to position
+            individual[i][0] += random.uniform(-0.01, 0.01)
+            individual[i][1] += random.uniform(-0.01, 0.01)
+            # Keep within bounds
+            individual[i][0] = max(0.01, min(0.99, individual[i][0]))
+            individual[i][1] = max(0.01, min(0.99, individual[i][1]))
+        # Validate and store
+        individual = validate_solution(individual)
+        population.append(individual)
+    
+    # Evolution loop
+    best_fitness = 0
+    for generation in range(max_generations):
+        # Evolve population
+        population = evolve_population(population, fitness_function)
+        
+        # Update best solution
+        current_best = max(population, key=fitness_function)
+        current_fitness = fitness_function(current_best)
+        
+        if abs(current_fitness - best_fitness) < convergence_threshold:
+            break
+        best_fitness = current_fitness
+        
+        # Apply Voronoi constraints to each individual in population
+        for individual in population:
+            for i in range(n):
+                # Calculate current constraints
+                boundary_constraint, neighbor_constraint = get_voronoi_constraints(individual, i)
+                
+                # Apply constraints to radius
+                max_radius = min(boundary_constraint, neighbor_constraint if neighbor_constraint != float('inf') else boundary_constraint)
+                if max_radius != float('inf') and max_radius > individual[i][2]:
+                    individual[i][2] = min(max_radius, individual[i][2] + 0.002)
+    
+    # Final validation
+    best_individual = max(population, key=fitness_function)
+    best_individual = validate_solution(best_individual)
+    
+    return best_individual
+
+# EVOLVE-BLOCK-END

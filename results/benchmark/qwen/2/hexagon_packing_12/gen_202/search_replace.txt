@@ -1,0 +1,158 @@
+<NAME>
+enhance_spatial_hashing_with_jit
+</NAME>
+
+<DESCRIPTION>
+The main improvement is to enhance the spatial hashing implementation by adding Numba JIT compilation to the key spatial hash functions. This will dramatically speed up the overlap detection process which is called frequently during both the evolutionary optimization and fitness evaluation phases. The current implementation uses Python loops and standard library functions that are much slower than compiled NumPy operations. By applying @njit decorators to the core spatial hash functions, we can expect significant performance gains, especially when checking thousands of potential overlap pairs during each fitness evaluation.
+
+Additionally, I'll optimize the penalty calculation and overlap checking to be more efficient by refining the spatial hash parameters and making the overlap checking even more performant with better early termination conditions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+
+def create_spatial_hash(hex_vertices_list, cell_size=2.0):
+    """Create spatial hash grid for fast overlap checking"""
+    hash_grid = defaultdict(list)
+    for i, vertices in enumerate(hex_vertices_list):
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Add to all relevant cells
+        start_col = int(min_x // cell_size)
+        end_col = int(max_x // cell_size) + 1
+        start_row = int(min_y // cell_size)
+        end_row = int(max_y // cell_size) + 1
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                hash_grid[(col, row)].append(i)
+    return hash_grid
+
+def get_overlapping_indices(hash_grid, hex_index, hex_vertices, cell_size=2.0):
+    """Get indices of potentially overlapping hexagons using spatial hash"""
+    overlapping = set()
+    # Get bounding box of hexagon
+    min_x = min(v[0] for v in hex_vertices)
+    max_x = max(v[0] for v in hex_vertices)
+    min_y = min(v[1] for v in hex_vertices)
+    max_y = max(v[1] for v in hex_vertices)
+
+    # Check all relevant cells
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            if (col, row) in hash_grid:
+                for idx in hash_grid[(col, row)]:
+                    if idx != hex_index:
+                        overlapping.add(idx)
+    return overlapping
+=======
+@jit(nopython=True)
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for v in hex1_vertices:
+        if point_in_polygon(v, hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for v in hex2_vertices:
+        if point_in_polygon(v, hex1_vertices):
+            return True
+    return False
+
+@jit(nopython=True)
+def create_spatial_hash_jit(hex_vertices_list, cell_size=1.5):
+    """Create spatial hash grid for fast overlap checking"""
+    # Precompute bounds for all hexagons
+    n = len(hex_vertices_list)
+    min_xs = np.empty(n, dtype=np.float64)
+    max_xs = np.empty(n, dtype=np.float64)
+    min_ys = np.empty(n, dtype=np.float64)
+    max_ys = np.empty(n, dtype=np.float64)
+
+    for i in range(n):
+        vertices = hex_vertices_list[i]
+        min_xs[i] = vertices[0, 0]
+        max_xs[i] = vertices[0, 0]
+        min_ys[i] = vertices[0, 1]
+        max_ys[i] = vertices[0, 1]
+
+        for j in range(1, 6):
+            x, y = vertices[j, 0], vertices[j, 1]
+            min_xs[i] = min(min_xs[i], x)
+            max_xs[i] = max(max_xs[i], x)
+            min_ys[i] = min(min_ys[i], y)
+            max_ys[i] = max(max_ys[i], y)
+
+    # Build hash grid
+    hash_grid = {}
+    for i in range(n):
+        start_col = int(min_xs[i] // cell_size)
+        end_col = int(max_xs[i] // cell_size) + 1
+        start_row = int(min_ys[i] // cell_size)
+        end_row = int(max_ys[i] // cell_size) + 1
+
+        for col in range(start_col, end_col + 1):
+            for row in range(start_row, end_row + 1):
+                key = (col, row)
+                if key not in hash_grid:
+                    hash_grid[key] = []
+                hash_grid[key].append(i)
+
+    return hash_grid
+
+@jit(nopython=True)
+def get_overlapping_indices_jit(hash_grid, hex_index, hex_vertices, cell_size=1.5):
+    """Get indices of potentially overlapping hexagons using spatial hash"""
+    overlapping = set()
+
+    # Get bounding box of hexagon
+    min_x = hex_vertices[0, 0]
+    max_x = hex_vertices[0, 0]
+    min_y = hex_vertices[0, 1]
+    max_y = hex_vertices[0, 1]
+
+    for i in range(1, 6):
+        x, y = hex_vertices[i, 0], hex_vertices[i, 1]
+        min_x = min(min_x, x)
+        max_x = max(max_x, x)
+        min_y = min(min_y, y)
+        max_y = max(max_y, y)
+
+    # Check all relevant cells
+    start_col = int(min_x // cell_size)
+    end_col = int(max_x // cell_size) + 1
+    start_row = int(min_y // cell_size)
+    end_row = int(max_y // cell_size) + 1
+
+    for col in range(start_col, end_col + 1):
+        for row in range(start_row, end_row + 1):
+            key = (col, row)
+            if key in hash_grid:
+                for idx in hash_grid[key]:
+                    if idx != hex_index:
+                        overlapping.add(idx)
+    return overlapping
+>>>>>>> REPLACE
+
+</DIFF>

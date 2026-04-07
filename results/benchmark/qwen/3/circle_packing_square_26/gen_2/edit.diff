@@ -1,0 +1,160 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,151 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from deap import base, creator, tools, algorithms
++from scipy.spatial import cKDTree
++import random
++import time
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
++    # Set random seed for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
++    # Problem parameters
++    n_circles = 26
++    bounds = [(0, 1), (0, 1), (0, 0.5)]  # x, y, radius bounds
++    
++    # Evolutionary algorithm parameters
++    POP_SIZE = 50
++    N_GENERATIONS = 100
++    MUT_PB = 0.1
++    CROSS_PB = 0.8
++    TOURNAMENT_SIZE = 3
++    
++    # Fitness function
++    def eval_fitness(individual):
++        # Convert individual to circles array
++        circles = np.array(individual).reshape(-1, 3)
++        
++        # Check boundary constraints
++        valid = True
++        total_radius = 0
++        
++        # Calculate total radius
++        for i in range(n_circles):
++            x, y, r = circles[i]
++            if r <= 0 or x < r or x > 1-r or y < r or y > 1-r:
++                valid = False
++                break
++            total_radius += r
++            
++        if not valid:
++            return (-1e6,)  # Large penalty for invalid solution
++        
++        # Check overlap constraints using KDTree for efficiency
++        try:
++            points = circles[:, :2]
++            tree = cKDTree(points)
++            
++            # Find all pairs that might collide
++            pairs = tree.query_pairs(r=0.0001)  # Small threshold to catch close pairs
++            
++            # Check actual distances
++            for i, j in pairs:
++                x1, y1, r1 = circles[i]
++                x2, y2, r2 = circles[j]
++                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
++                if distance < (r1 + r2):
++                    return (-1e6,)  # Penalty for overlapping circles
++                    
++        except Exception:
++            return (-1e6,)
++            
++        return (total_radius,)
++    
++    # Create classes
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    # Attribute generator
++    def generate_individual():
++        individual = []
++        for _ in range(n_circles):
++            x = random.uniform(0, 1)
++            y = random.uniform(0, 1)
++            r = random.uniform(0, 0.5)
++            individual.extend([x, y, r])
++        return creator.Individual(individual)
++    
++    toolbox.register("individual", generate_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    
++    # Register operators
++    toolbox.register("evaluate", eval_fitness)
++    toolbox.register("mate", tools.cxUniform, indpb=0.1)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.02, indpb=0.1)
++    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
++    
++    # Initialize population
++    pop = toolbox.population(n=POP_SIZE)
++    
++    # Statistics
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Run evolution
++    try:
++        hof = tools.ParetoFront()
++        pop, logbook = algorithms.eaMuPlusLambda(
++            pop, toolbox, mu=POP_SIZE, lambda_=POP_SIZE,
++            cxpb=CROSS_PB, mutpb=MUT_PB, ngen=N_GENERATIONS,
++            stats=stats, halloffame=hof, verbose=False
++        )
++        
++        # Get best solution
++        best_ind = hof[0] if hof else max(pop, key=lambda x: x.fitness.values[0])
++        best_circles = np.array(best_ind).reshape(-1, 3)
++        
++    except Exception as e:
++        print(f"Evolution failed: {e}")
++        # Fallback: use heuristic initialization
++        best_circles = heuristic_initialization(n_circles)
++    
++    return best_circles
++
++def heuristic_initialization(n):
++    """Initialize with a simple heuristic packing"""
+     circles = np.zeros((n, 3))
+-
++    
++    # Try to place circles in a grid-like pattern with varying sizes
++    grid_size = int(np.ceil(np.sqrt(n)))
++    spacing = 1.0 / (grid_size + 1)
++    
++    count = 0
++    for i in range(grid_size):
++        for j in range(grid_size):
++            if count >= n:
++                break
++            x = (i + 1) * spacing
++            y = (j + 1) * spacing
++            # Initial radius guess (will be adjusted by evolution)
++            r = min(spacing/2, 0.1)
++            circles[count] = [x, y, r]
++            count += 1
++    
++    # Fill remaining positions with small circles
++    for i in range(count, n):
++        circles[i] = [random.uniform(0.1, 0.9), random.uniform(0.1, 0.9), 0.02]
++        
+     return circles
+ 
+-
+ # EVOLVE-BLOCK-END

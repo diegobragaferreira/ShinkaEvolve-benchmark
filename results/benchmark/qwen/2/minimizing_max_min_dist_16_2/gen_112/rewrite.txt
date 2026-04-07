@@ -1,0 +1,141 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import warnings
+
+class PointDistributionOptimizer:
+    """Optimizes point distribution to maximize min/max distance ratio using structured approach."""
+    
+    def __init__(self, n_points=16, dim=2):
+        self.n_points = n_points
+        self.dim = dim
+        self.best_points = None
+        self.best_ratio = -np.inf
+        
+    def _initialize_points(self):
+        """Create initial point configuration using structured approach."""
+        # Create a structured 4x4 grid with adaptive perturbations
+        grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+        points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+        
+        # Apply adaptive perturbations based on initial distribution quality
+        initial_ratio = self._calculate_min_max_ratio(points)
+        
+        # Determine perturbation magnitude based on current state
+        if initial_ratio > 0.15:
+            perturbation_magnitude = 0.015
+        elif initial_ratio > 0.08:
+            perturbation_magnitude = 0.03
+        else:
+            perturbation_magnitude = 0.05
+            
+        # Add controlled random perturbations
+        np.random.seed(42)
+        points += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, points.shape)
+        points = np.clip(points, 0, 1)
+        
+        return points
+    
+    def _calculate_min_max_ratio(self, points):
+        """Calculate the ratio of minimum to maximum pairwise distances efficiently."""
+        if len(points) < 2:
+            return 0
+            
+        # Use efficient distance matrix computation
+        distances = cdist(points, points, metric='euclidean')
+        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+        
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist <= 0:
+            return 0
+            
+        return min_dist / max_dist
+    
+    def _objective_function(self, x):
+        """Objective function that returns negative ratio (to be minimized)."""
+        # Reshape flat array back to points
+        pts = x.reshape(self.n_points, self.dim)
+        
+        # Calculate all pairwise distances efficiently
+        distances = cdist(pts, pts, metric='euclidean')
+        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+        
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Return negative ratio to maximize the ratio
+        if max_dist <= 0 or min_dist <= 0:
+            return 0
+        return -min_dist / max_dist
+    
+    def _optimize_with_method(self, initial_points, method='L-BFGS-B'):
+        """Perform optimization using specified method."""
+        bounds = [(0, 1) for _ in range(self.n_points * self.dim)]
+        
+        try:
+            result = minimize(
+                self._objective_function, 
+                initial_points.flatten(), 
+                method=method, 
+                bounds=bounds,
+                options={'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            
+            if result.success:
+                optimized_points = result.x.reshape(self.n_points, self.dim)
+                optimized_points = np.clip(optimized_points, 0, 1)
+                return optimized_points
+            else:
+                return initial_points
+                
+        except Exception as e:
+            warnings.warn(f"Optimization failed with {method}: {str(e)}")
+            return initial_points
+    
+    def _staged_optimization(self, initial_points):
+        """Apply multi-stage optimization approach."""
+        current_points = initial_points.copy()
+        
+        # Stage 1: Coarse optimization with L-BFGS-B
+        coarse_points = self._optimize_with_method(current_points, 'L-BFGS-B')
+        coarse_ratio = self._calculate_min_max_ratio(coarse_points)
+        
+        # Stage 2: Additional refinement with different method
+        fine_points = self._optimize_with_method(coarse_points, 'Nelder-Mead')
+        fine_ratio = self._calculate_min_max_ratio(fine_points)
+        
+        # Return the better of the two
+        return fine_points if fine_ratio > coarse_ratio else coarse_points
+    
+    def optimize(self):
+        """Main optimization routine."""
+        # Generate initial configuration
+        initial_points = self._initialize_points()
+        
+        # Apply staged optimization
+        optimized_points = self._staged_optimization(initial_points)
+        
+        # Final validation and refinement
+        final_ratio = self._calculate_min_max_ratio(optimized_points)
+        
+        # Keep track of best solution
+        if final_ratio > self.best_ratio:
+            self.best_ratio = final_ratio
+            self.best_points = optimized_points.copy()
+        
+        return self.best_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    optimizer = PointDistributionOptimizer(n_points=16, dim=2)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

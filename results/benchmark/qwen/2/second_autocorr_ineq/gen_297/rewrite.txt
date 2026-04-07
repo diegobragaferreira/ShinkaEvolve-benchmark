@@ -1,0 +1,352 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.fft import fft, ifft
+from scipy.optimize import minimize
+from scipy.sparse import diags
+import random
+import time
+from typing import List, Tuple
+from numba import jit
+import warnings
+
+# Fixed seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values):
+    """
+    Fast computation of autoconvolution norms using Numba JIT compilation.
+    """
+    n = len(f_values)
+    if n < 1:
+        return 0.0, 0.0, 0.0
+
+    # Convert to numpy array for fast operations
+    f = np.array(f_values, dtype=np.float64)
+    
+    # Create the step function on [-1/4, 1/4] with equal spacing
+    dx = 0.5 / (n - 1) if n > 1 else 0.5
+    
+    # Precompute convolution manually for efficiency
+    # Autoconvolution g[k] = sum f[i] * f[k-i] for valid indices
+    g = np.zeros(2 * n - 1)
+    
+    # Manual convolution loop (optimized for autoconvolution)
+    for i in range(n):
+        for j in range(n):
+            k = i + j
+            if 0 <= k < len(g):
+                g[k] += f[i] * f[j]
+    
+    # Keep only the middle part (proper autoconvolution)
+    g_middle = g[n-1:2*n-1]
+    
+    # Create x-axis for g (interval [-0.5, 0.5])
+    g_x = np.linspace(-0.5, 0.5, len(g_middle))
+    
+    # Compute the required norms
+    # ||g||₂² (L2 norm squared)
+    # Using trapezoidal integration approximation 
+    g_sq = g_middle * g_middle
+    area = 0.0
+    for i in range(len(g_middle) - 1):
+        h = g_x[i+1] - g_x[i]
+        area += h * (g_sq[i] + g_sq[i+1]) / 2
+    
+    norm_2_sq = area
+
+    # ||g||₁ (L1 norm) - approximate via summation
+    norm_1 = np.sum(np.abs(g_middle)) * dx  # dx is the step size
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(np.abs(g_middle))
+
+    return norm_2_sq, norm_1, norm_inf
+
+def compute_c2(f_values: List[float]) -> float:
+    """Compute C2 value for given function"""
+    norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
+    
+    # Avoid division by zero
+    if norm_1 <= 1e-12 or norm_inf <= 1e-12:
+        return 0.0
+    
+    c2 = norm_2_sq / (norm_1 * norm_inf)
+    return c2
+
+def spectral_gradient_optimization(n_points: int = 2000, max_iter: int = 1000) -> List[float]:
+    """
+    Spectral-domain optimization using gradient-based methods.
+    Works purely in frequency domain, then maps back to time domain.
+    """
+    # Initialize with random spectrum (complex values)
+    spectrum = np.random.normal(0, 1, n_points) + 1j * np.random.normal(0, 1, n_points)
+    
+    # Apply some structure to encourage good autoconvolution behavior
+    # Create a more structured spectrum with peaks at specific locations
+    peak_positions = np.random.choice(n_points//2, size=8, replace=False)
+    for pos in peak_positions:
+        # Add energy at these positions
+        spectrum[pos] += np.random.exponential(1.0) + 1j * np.random.exponential(1.0)
+        if pos > 0:
+            spectrum[-pos] = np.conj(spectrum[pos])  # Hermitian symmetry
+    
+    # Add DC component
+    spectrum[0] = np.random.exponential(1.0)
+    
+    # Optimization loop
+    for iteration in range(max_iter):
+        # Convert to time domain
+        time_signal = np.real(ifft(spectrum))
+        
+        # Ensure non-negativity (soft constraint)
+        time_signal = np.maximum(time_signal, 0.0)
+        
+        # Normalize
+        max_val = np.max(time_signal)
+        if max_val > 0:
+            time_signal = time_signal / (max_val * 2.0)
+        
+        # Compute gradients analytically for the objective
+        # We want to maximize C2 = ||g||₂² / (||g||₁ * ||g||∞)
+        # This is equivalent to minimizing -C2 or maximizing -log(C2)
+        
+        # Compute autoconvolution and norms
+        try:
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(time_signal.tolist())
+            
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                # If we have degenerate case, perturb slightly
+                spectrum += np.random.normal(0, 1e-6, len(spectrum)) + 1j * np.random.normal(0, 1e-6, len(spectrum))
+                continue
+                
+            # Compute the objective (we want to maximize C2, so minimize -C2)
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            objective_value = -c2
+            
+        except Exception:
+            # If computation fails, make small random perturbation
+            spectrum += np.random.normal(0, 1e-6, len(spectrum)) + 1j * np.random.normal(0, 1e-6, len(spectrum))
+            continue
+        
+        # Compute gradient w.r.t. spectrum using finite differences (simplified)
+        # In practice, we'd compute this more carefully, but for now we'll use a 
+        # simplified approach that maintains the spirit of gradient-based optimization
+        grad_spectrum = np.zeros_like(spectrum)
+        
+        # Perturb spectrum slightly to estimate gradient direction
+        epsilon = 1e-4
+        for i in range(len(spectrum)):
+            # Forward difference approximation
+            spectrum_plus = spectrum.copy()
+            spectrum_plus[i] += epsilon
+            time_plus = np.real(ifft(spectrum_plus))
+            time_plus = np.maximum(time_plus, 0.0)
+            max_val_plus = np.max(time_plus)
+            if max_val_plus > 0:
+                time_plus = time_plus / (max_val_plus * 2.0)
+            
+            try:
+                norm_2_sq_plus, norm_1_plus, norm_inf_plus = compute_autoconvolution_norms_fast(time_plus.tolist())
+                c2_plus = norm_2_sq_plus / (norm_1_plus * norm_inf_plus)
+                gradient_direction = -(c2_plus - c2) / epsilon
+                grad_spectrum[i] = gradient_direction
+            except Exception:
+                continue
+                
+        # Apply gradient ascent (since we want to maximize)
+        learning_rate = 1e-6
+        spectrum += learning_rate * grad_spectrum
+        
+        # Maintain conjugate symmetry for real-valued output
+        for i in range(1, n_points//2):
+            if i < n_points:
+                spectrum[-i] = np.conj(spectrum[i])
+        spectrum[0] = np.real(spectrum[0])  # DC component should be real
+        
+        # Project back to feasible region
+        spectrum = spectrum * 0.99 + 0.01 * np.abs(spectrum)  # Slight shrinkage to maintain stability
+    
+    # Final conversion to real-valued time domain function
+    final_signal = np.real(ifft(spectrum))
+    final_signal = np.maximum(final_signal, 0.0)
+    
+    # Normalize
+    max_val = np.max(final_signal)
+    if max_val > 0:
+        final_signal = final_signal / (max_val * 2.0)
+    
+    return final_signal.tolist()
+
+def structured_spectrum_construction(n_points: int = 2000) -> List[float]:
+    """
+    Alternative approach: construct structured spectrum with pre-defined patterns
+    that promote good autoconvolution properties.
+    """
+    # Create spectrum with multiple frequency bands
+    spectrum = np.zeros(n_points, dtype=complex)
+    
+    # Create low-frequency structure for smoothness
+    low_freq_energy = np.random.gamma(2.0, 1.5, size=n_points//4)
+    spectrum[:n_points//4] = low_freq_energy + 1j * np.random.normal(0, 0.1, n_points//4)
+    
+    # Create mid-frequency structure for detail
+    mid_freq_energy = np.random.gamma(1.5, 2.0, size=n_points//4)
+    spectrum[n_points//4:2*n_points//4] = mid_freq_energy + 1j * np.random.normal(0, 0.1, n_points//4)
+    
+    # Create high-frequency structure for sharp transitions (carefully managed)
+    high_freq_energy = np.random.gamma(1.0, 3.0, size=n_points//4)
+    spectrum[2*n_points//4:3*n_points//4] = high_freq_energy + 1j * np.random.normal(0, 0.1, n_points//4)
+    
+    # Fill remaining
+    remaining = n_points - 3*n_points//4
+    if remaining > 0:
+        remainder_energy = np.random.gamma(1.0, 2.0, size=remaining)
+        spectrum[3*n_points//4:3*n_points//4 + remaining] = remainder_energy + 1j * np.random.normal(0, 0.1, remaining)
+    
+    # Apply conjugate symmetry for real output
+    for i in range(1, n_points//2):
+        spectrum[-i] = np.conj(spectrum[i])
+    spectrum[0] = np.real(spectrum[0])  # DC component should be real
+    
+    # Convert to time domain
+    time_signal = np.real(ifft(spectrum))
+    
+    # Ensure non-negativity and normalize
+    time_signal = np.maximum(time_signal, 0.0)
+    max_val = np.max(time_signal)
+    if max_val > 0:
+        time_signal = time_signal / (max_val * 1.8)
+    
+    # Apply slight smoothing to enhance structure
+    kernel = np.exp(-0.5 * np.arange(-20, 21)**2 / 10**2)
+    kernel = kernel / np.sum(kernel)
+    time_signal = np.convolve(time_signal, kernel, mode='same')
+    
+    # Ensure non-negativity again after convolution
+    time_signal = np.maximum(time_signal, 0.0)
+    
+    return time_signal.tolist()
+
+def adaptive_local_search(initial_func: List[float], max_evaluations: int = 100) -> List[float]:
+    """
+    Adaptive local search around the initial function to fine-tune parameters.
+    """
+    current_solution = np.array(initial_func)
+    n_points = len(current_solution)
+    
+    # Simple coordinate descent approach
+    for iteration in range(max_evaluations):
+        # Try to improve one element at a time
+        improved = False
+        for i in range(n_points):
+            # Save original value
+            original_val = current_solution[i]
+            
+            # Try various modifications
+            candidates = [
+                original_val * np.random.uniform(0.9, 1.1),  # Small multiplicative change
+                original_val + np.random.normal(0, 0.01),     # Small additive change
+            ]
+            
+            # Clip to ensure non-negativity
+            candidates = [max(0, c) for c in candidates]
+            
+            # Evaluate all candidates
+            best_candidate = original_val
+            best_c2 = compute_c2(current_solution.tolist())
+            
+            for candidate in candidates:
+                # Temporarily modify
+                current_solution[i] = candidate
+                test_c2 = compute_c2(current_solution.tolist())
+                
+                if test_c2 > best_c2:
+                    best_c2 = test_c2
+                    best_candidate = candidate
+                    
+                # Restore
+                current_solution[i] = original_val
+            
+            # Apply the best improvement
+            current_solution[i] = best_candidate
+            if best_candidate != original_val:
+                improved = True
+        
+        # If no improvement, reduce search scope
+        if not improved:
+            break
+    
+    return current_solution.tolist()
+
+def construct_function() -> List[float]:
+    """
+    Main function to construct step-function with high C2 value.
+    Uses spectral-gradient optimization with fallback strategies.
+    """
+    try:
+        # Strategy 1: Spectral gradient optimization
+        start_time = time.time()
+        best_c2 = -1
+        best_func = None
+        
+        # Try multiple initializations of spectral optimization
+        for attempt in range(10):
+            if time.time() - start_time > 80:  # Leave buffer
+                break
+                
+            try:
+                # Use spectral-gradient optimization
+                func = spectral_gradient_optimization(n_points=2000, max_iter=500)
+                c2 = compute_c2(func)
+                
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_func = func.copy()
+                    
+            except Exception as e:
+                continue
+        
+        # Strategy 2: Structured spectrum construction as fall-back
+        if best_func is None or best_c2 < 0.85:
+            try:
+                func = structured_spectrum_construction(n_points=2000)
+                c2 = compute_c2(func)
+                
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_func = func.copy()
+            except Exception:
+                pass
+        
+        # Strategy 3: Local refinement if we have something decent
+        if best_func is not None and best_c2 > 0.8:
+            try:
+                refined = adaptive_local_search(best_func, max_evaluations=50)
+                refined_c2 = compute_c2(refined)
+                
+                if refined_c2 > best_c2:
+                    best_func = refined
+            except Exception:
+                pass
+        
+        # Return the best found
+        if best_func is not None:
+            return best_func
+        else:
+            # Fallback to simple uniform distribution
+            return [0.5] * 1000
+            
+    except Exception as e:
+        warnings.warn(f"Error in main function: {str(e)}")
+        # Final fallback
+        return [0.5] * 1000
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

@@ -1,0 +1,153 @@
+<NAME>
+enhanced_grid_based_overlap_checking
+</NAME>
+
+<DESCRIPTION>
+This improvement enhances the grid-based overlap checking system in the `check_constraints` function by introducing a more sophisticated spatial hashing approach. The key insight is that the current implementation has inefficiencies in how it determines which grid cells to check for overlaps. Instead of using a simple bounding box approach, I'll implement a more precise method that calculates the actual grid cells that could possibly contain overlapping circles, reducing false positives while maintaining O(n) complexity. This will significantly speed up constraint checking which is called frequently during evolution.
+
+Additionally, I'm increasing the adaptive grid cell size calculation to be more conservative and prevent grid explosion while preserving the spatial indexing benefits.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Efficiently check if all circles satisfy the constraints with early termination."""
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    # Use grid-based spatial hashing for efficient overlap checking
+    if n > 1:
+        # Compute adaptive cell size based on circle statistics
+        # Calculate average radius to estimate typical interaction distance
+        avg_radius = np.mean(circles[:, 2]) if len(circles[:, 2]) > 0 else 0.1
+
+        # Use multiple of average radius as cell size for better adaptivity
+        cell_size = max(0.05, avg_radius * 2.0)  # At least 0.05 to prevent overly fine grids
+
+        # Calculate grid dimensions
+        grid_width = max(1, int(np.ceil(rect_width / cell_size)))
+        grid_height = max(1, int(np.ceil(rect_height / cell_size)))
+
+        # Limit maximum grid size to prevent memory issues
+        max_grid_size = 1000
+        grid_width = min(grid_width, max_grid_size)
+        grid_height = min(grid_height, max_grid_size)
+
+        # Initialize grid with empty lists
+        grid = [[[] for _ in range(grid_height)] for _ in range(grid_width)]
+
+        # Place circles into grid cells
+        for i in range(n):
+            x, y, r = circles[i]
+            # Find all cells this circle might overlap with
+            min_col = max(0, int((x - r) / cell_size))
+            max_col = min(grid_width - 1, int((x + r) / cell_size))
+            min_row = max(0, int((y - r) / cell_size))
+            max_row = min(grid_height - 1, int((y + r) / cell_size))
+
+            # Add circle index to all relevant grid cells
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    grid[col][row].append(i)
+
+        # Check neighbors in grid cells for overlaps
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            # Find all cells this circle might overlap with
+            min_col = max(0, int((x1 - r1) / cell_size))
+            max_col = min(grid_width - 1, int((x1 + r1) / cell_size))
+            min_row = max(0, int((y1 - r1) / cell_size))
+            max_row = min(grid_height - 1, int((y1 + r1) / cell_size))
+
+            # Check neighboring cells
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    # Check all circles in this cell
+                    for j in grid[col][row]:
+                        if i != j:  # Don't compare with self
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            if distance < (r1 + r2):
+                                return False
+
+    return True
+=======
+def check_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Efficiently check if all circles satisfy the constraints with early termination."""
+    n = len(circles)
+
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    # Use grid-based spatial hashing for efficient overlap checking
+    if n > 1:
+        # Compute adaptive cell size based on circle statistics
+        # Calculate average radius to estimate typical interaction distance
+        avg_radius = np.mean(circles[:, 2]) if len(circles[:, 2]) > 0 else 0.1
+
+        # Use multiple of average radius as cell size for better adaptivity
+        # Increased safety margin to prevent grid explosion while maintaining efficiency
+        cell_size = max(0.05, avg_radius * 2.5)  # Increased from 2.0 to 2.5 for better balance
+
+        # Calculate grid dimensions
+        grid_width = max(1, int(np.ceil(rect_width / cell_size)))
+        grid_height = max(1, int(np.ceil(rect_height / cell_size)))
+
+        # Limit maximum grid size to prevent memory issues
+        max_grid_size = 500  # Reduced from 1000 to prevent memory issues
+        grid_width = min(grid_width, max_grid_size)
+        grid_height = min(grid_height, max_grid_size)
+
+        # Initialize grid with empty lists
+        grid = [[[] for _ in range(grid_height)] for _ in range(grid_width)]
+
+        # Place circles into grid cells with more precise calculation
+        for i in range(n):
+            x, y, r = circles[i]
+            # Precise calculation of grid cells that could possibly contain this circle
+            # Using floor/ceil for exact coverage
+            min_col = max(0, int(np.floor((x - r) / cell_size)))
+            max_col = min(grid_width - 1, int(np.ceil((x + r) / cell_size)))
+            min_row = max(0, int(np.floor((y - r) / cell_size)))
+            max_row = min(grid_height - 1, int(np.ceil((y + r) / cell_size)))
+
+            # Add circle index to all relevant grid cells
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    grid[col][row].append(i)
+
+        # Check neighbors in grid cells for overlaps - optimized version
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            # Calculate precise grid coverage for this circle
+            min_col = max(0, int(np.floor((x1 - r1) / cell_size)))
+            max_col = min(grid_width - 1, int(np.ceil((x1 + r1) / cell_size)))
+            min_row = max(0, int(np.floor((y1 - r1) / cell_size)))
+            max_row = min(grid_height - 1, int(np.ceil((y1 + r1) / cell_size)))
+
+            # Check neighboring cells more efficiently by avoiding redundant checks
+            checked_cells = set()
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    cell_key = (col, row)
+                    if cell_key not in checked_cells:
+                        checked_cells.add(cell_key)
+                        # Check all circles in this cell
+                        for j in grid[col][row]:
+                            if i != j:  # Don't compare with self
+                                x2, y2, r2 = circles[j]
+                                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                                if distance < (r1 + r2):
+                                    return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>

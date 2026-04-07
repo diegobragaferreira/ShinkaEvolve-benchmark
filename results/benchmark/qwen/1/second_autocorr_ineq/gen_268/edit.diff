@@ -1,0 +1,455 @@
+--- a/original.py
++++ b/original.py
+@@ -1,235 +1,251 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy.optimize import differential_evolution
++from scipy.optimize import minimize
++from scipy.special import sinc
+ from typing import List
+-from numba import njit
+-
+-@njit
+-def compute_autoconvolution_norms_fast(f_values: np.ndarray) -> tuple:
+-    """
+-    Fast computation of autoconvolution norms using Numba JIT compilation
+-    """
+-    n = len(f_values)
+-
+-    # Compute autoconvolution g = f * f using discrete convolution
+-    # The resulting g will have length 2*n - 1 where n is the length of f
+-    g_length = 2 * n - 1
+-    g = np.zeros(g_length)
+-
+-    # Manual convolution loop for speed
++import warnings
++from numba import jit
++import time
++
++@jit(nopython=True)
++def compute_autoconvolution_numba(f_vals):
++    """Fast autoconvolution computation using Numba"""
++    n = len(f_vals)
++    g = np.zeros(2*n - 1)
+     for i in range(n):
+         for j in range(n):
+-            g[i + j] += f_values[i] * f_values[j]
+-
+-    # Compute the norms
+-    # ||g||₂² = sum(g[i]²) using proper piecewise integration
+-    norm_g_2_squared = 0.0
+-
+-    # For piecewise linear integration, we use trapezoidal-like approach:
+-    # for consecutive pairs of points (y1, y2) with unit spacing:
+-    # integral of y^2 ≈ (1/3)(y1^2 + y1*y2 + y2^2)
+-    for i in range(g_length - 1):
+-        y1 = g[i]
+-        y2 = g[i + 1]
+-        norm_g_2_squared += (y1 * y1 + y1 * y2 + y2 * y2) / 3.0
+-
+-    # ||g||₁ = sum(|g[i]|)
+-    norm_g_1 = 0.0
+-    for i in range(g_length):
+-        norm_g_1 += abs(g[i])
+-
+-    # ||g||∞ = max(|g[i]|)
+-    norm_g_inf = 0.0
+-    for i in range(g_length):
+-        abs_g = abs(g[i])
+-        if abs_g > norm_g_inf:
+-            norm_g_inf = abs_g
+-
+-    return norm_g_2_squared, norm_g_1, norm_g_inf
+-
+-def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+-    """
+-    Compute the norms ||g||₂², ||g||₁, and ||g||∞ for the autoconvolution g = f*f
+-    Using proper piecewise linear integration for ||g||₂² as specified in requirements
+-    """
+-    f = np.array(f_values)
+-
+-    # Use the fast JIT-compiled version
+-    norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms_fast(f)
+-
+-    return norm_g_2_squared, norm_g_1, norm_g_inf
+-
+-def evaluate_c2(f_values: List[float]) -> float:
+-    """
+-    Evaluate C₂ = ||g||₂² / (||g||₁ · ||g||∞) for given step function
+-    """
++            k = i + j
++            g[k] += f_vals[i] * f_vals[j]
++    return g
++
++@jit(nopython=True)
++def compute_norms_numba(g_vals):
++    """Fast norm computation using Numba with proper piecewise integration"""
++    n = len(g_vals)
++    l2_sq = 0.0
++    for i in range(n-1):
++        y1 = g_vals[i]
++        y2 = g_vals[i+1]
++        l2_sq += (y1 * y1 + y1 * y2 + y2 * y2) / 3.0
++    l1 = 0.0
++    linf = 0.0
++    for i in range(n):
++        l1 += abs(g_vals[i])
++        abs_val = abs(g_vals[i])
++        if abs_val > linf:
++            linf = abs_val
++    return l2_sq, l1, linf
++
++def compute_c2_score(f_vals):
++    """Compute C2 score with error handling"""
+     try:
+-        norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms(f_values)
+-
+-        # Avoid division by zero
+-        if norm_g_1 <= 1e-12 or norm_g_inf <= 1e-12:
++        f_vals = np.maximum(f_vals, 0)
++        g_vals = compute_autoconvolution_numba(f_vals)
++        l2_sq, l1, linf = compute_norms_numba(g_vals)
++        if l1 < 1e-15 or linf < 1e-15:
+             return 0.0
+-
+-        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+-        return c2
++        return l2_sq / (l1 * linf)
+     except Exception:
+         return 0.0
+ 
+-def generate_initial_population(n_individuals: int, n_steps: int) -> np.ndarray:
+-    """
+-    Generate diverse initial population for evolutionary algorithm
+-    """
+-    population = []
+-
+-    # Create various types of initial configurations
+-    for i in range(n_individuals):
+-        # Type 1: Random with some structure
+-        if i % 3 == 0:
+-            # Gaussian-like distribution
+-            x = np.linspace(-1, 1, n_steps)
+-            sigma = 0.3 + np.random.random() * 0.4
+-            mu = np.random.random() * 0.5 - 0.25  # Center around -0.25 to 0.25
+-            f = np.exp(-0.5 * ((x - mu) / sigma)**2)
+-            # Normalize
+-            f = f / np.sum(f)
+-            population.append(f)
+-
+-        elif i % 3 == 1:
+-            # Uniform distribution with some randomness
+-            f = np.random.random(n_steps)
+-            # Add some structure
+-            f = np.clip(f, 0, 1)
+-            f = f / np.sum(f)
+-            population.append(f)
+-
+-        else:
+-            # Peak centered distribution
+-            f = np.zeros(n_steps)
+-            center = n_steps // 2
+-            width = max(1, n_steps // 10 + np.random.randint(-3, 4))
+-            f[max(0, center-width//2):min(n_steps, center+width//2)] = 1.0
+-            # Add some noise
+-            f += np.random.normal(0, 0.05, n_steps)
+-            f = np.clip(f, 0, None)
+-            f = f / np.sum(f)
+-            population.append(f)
+-
+-    return np.array(population)
+-
+-def evolutionary_optimization() -> List[float]:
+-    """
+-    Use evolutionary algorithm to optimize step function with adaptive population sizing
+-    """
+-    n_steps = 500  # Reasonable size for exploration
+-
+-    # Define bounds for each parameter (step height)
+-    bounds = [(0, 1.0) for _ in range(n_steps)]
+-
+-    def objective(x):
+-        # Return negative because we want to maximize C2
+-        return -evaluate_c2(x.tolist())
+-
+-    # Adaptive optimization parameters
+-    initial_popsize = 10
+-    initial_maxiter = 30
+-    max_popsize = 30
+-    max_iter_limit = 100
+-
+-    # Use differential evolution for global optimization with adaptive parameters
++def create_basis_functions(n_steps, n_bases=10):
++    """Create a set of basis functions that can represent step functions effectively"""
++    # Create Gaussian basis functions
++    bases = []
++    centers = np.linspace(-0.5, 0.5, n_bases)
++    widths = np.logspace(-2, 0, n_bases)  # Logarithmic spacing of widths
++    
++    for i in range(n_bases):
++        # Create Gaussian basis with different centers and widths
++        x = np.linspace(-0.5, 0.5, n_steps)
++        basis = np.exp(-0.5 * ((x - centers[i]) / widths[i])**2)
++        bases.append(basis)
++    
++    # Add sinc basis for oscillatory behavior
++    x = np.linspace(-0.5, 0.5, n_steps)
++    for i in range(n_bases // 2):
++        # Sinc functions with different frequencies
++        freq = 2 + i * 1.5
++        basis = sinc(freq * x)
++        # Normalize to reasonable range
++        basis = (basis - np.min(basis)) / (np.max(basis) - np.min(basis) + 1e-10)
++        bases.append(basis)
++    
++    return np.array(bases)
++
++def generate_convex_representation(n_steps, n_bases=10):
++    """Generate a convex combination of basis functions that form valid step function"""
++    # Create basis functions
++    bases = create_basis_functions(n_steps, n_bases)
++    
++    # Generate random weights that sum to 1 (convex combination)
++    weights = np.random.random(n_bases)
++    weights = weights / np.sum(weights)
++    
++    # Create step function as convex combination
++    step_function = np.zeros(n_steps)
++    for i in range(n_bases):
++        step_function += weights[i] * bases[i]
++    
++    # Apply soft threshold to ensure minimal positivity
++    step_function = np.maximum(step_function, 1e-10)
++    
++    # Normalize to sum to 1
++    step_function = step_function / np.sum(step_function)
++    
++    return step_function.tolist()
++
++def adaptive_convex_optimization():
++    """Main optimization routine using convex optimization approach"""
++    n_steps = 500
++    max_iter = 200
++    
++    # Initialize with convex combination
++    best_f = generate_convex_representation(n_steps)
++    best_c2 = compute_c2_score(best_f)
++    
++    # Create basis functions once
++    bases = create_basis_functions(n_steps)
++    
++    # Parameters for adaptive optimization
++    learning_rates = [0.1, 0.05, 0.01, 0.005]
++    current_lr = learning_rates[0]
++    
++    # Adaptive optimization loop
++    for iteration in range(max_iter):
++        # Sample several candidate solutions via perturbed convex combinations
++        candidates = []
++        candidate_scores = []
++        
++        # Generate multiple candidates with small variations
++        for _ in range(20):
++            # Create variation of current best
++            weights = np.random.random(len(bases))
++            weights = weights / np.sum(weights)
++            
++            # Add small random noise
++            noise = np.random.normal(0, 0.05, len(bases))
++            weights = weights + noise
++            weights = np.maximum(weights, 0)
++            weights = weights / np.sum(weights)
++            
++            # Create candidate function
++            candidate = np.zeros(n_steps)
++            for i in range(len(bases)):
++                candidate += weights[i] * bases[i]
++            
++            # Ensure non-negativity and normalization
++            candidate = np.maximum(candidate, 1e-10)
++            candidate = candidate / np.sum(candidate)
++            
++            candidates.append(candidate.tolist())
++            
++        # Evaluate candidates
++        for candidate in candidates:
++            score = compute_c2_score(candidate)
++            candidate_scores.append(score)
++            
++        # Find best candidate
++        if len(candidate_scores) > 0:
++            best_candidate_idx = np.argmax(candidate_scores)
++            if candidate_scores[best_candidate_idx] > best_c2:
++                best_c2 = candidate_scores[best_candidate_idx]
++                best_f = candidates[best_candidate_idx]
++                
++                # Adapt learning rate based on success
++                if iteration > 0 and iteration % 10 == 0:
++                    current_lr = max(0.001, current_lr * 0.95)
++    
++    # Final local refinement with constrained optimization
+     try:
+-        # Start with smaller population for faster initial exploration
+-        popsize = initial_popsize
+-        maxiter = initial_maxiter
+-
+-        result = differential_evolution(
++        # Use scipy optimization with bounds
++        def objective(x):
++            return -compute_c2_score(x)
++        
++        bounds = [(1e-10, 1.0) for _ in range(n_steps)]
++        # Use L-BFGS-B with multiple restarts
++        result = minimize(
+             objective,
+-            bounds,
+-            maxiter=maxiter,
+-            popsize=popsize,
+-            seed=42,
+-            disp=False
++            best_f,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': 50}
+         )
+-
++        
+         if result.success:
+-            optimized_f = np.maximum(result.x, 0)
+-            # Normalize to ensure good scaling
+-            if np.sum(optimized_f) > 0:
+-                optimized_f = optimized_f / np.sum(optimized_f)
+-            return optimized_f.tolist()
+-    except Exception as e:
+-        print(f"Optimization failed: {e}")
+-
+-    # Return default if optimization fails
+-    return [1.0/n_steps] * n_steps
+-
+-def sophisticated_initialization() -> List[float]:
+-    """
+-    Generate a sophisticated initial configuration based on mathematical intuition
+-    """
++            refined_f = np.maximum(result.x, 0)
++            refined_f = refined_f / np.sum(refined_f)
++            refined_c2 = compute_c2_score(refined_f)
++            if refined_c2 > best_c2:
++                best_c2 = refined_c2
++                best_f = refined_f.tolist()
++    except Exception:
++        pass
++    
++    return best_f
++
++def heuristic_step_function_generation():
++    """Generate step function using heuristic patterns derived from mathematical insights"""
+     n_steps = 500
+-
+-    # Create a step function that tries to balance flatness with sufficient mass
+-    # We want to create a function that when convolved produces a relatively flat profile
+-    # but with enough energy to achieve high C2
+-
+-    # Create a base function with alternating high/low regions
++    
++    # Create pattern with specific characteristics for good autoconvolution
+     f = np.zeros(n_steps)
+-
+-    # Divide into segments
+-    segment_size = max(1, n_steps // 8)
+-
+-    # Alternate between high and low values to create interesting convolution behavior
+-    for i in range(0, n_steps, segment_size):
+-        end_idx = min(i + segment_size, n_steps)
+-        if (i // segment_size) % 2 == 0:
+-            # High region
+-            f[i:end_idx] = 0.8 + np.random.random(end_idx - i) * 0.2
+-        else:
+-            # Low region
+-            f[i:end_idx] = 0.1 + np.random.random(end_idx - i) * 0.1
+-
+-    # Add some Gaussian-like structure for smoothness
++    
++    # Create multi-scale structure that encourages flat convolution
++    scales = [20, 40, 80, 160]
++    scale_weights = [0.3, 0.25, 0.2, 0.25]  # Weighted contributions
++    
++    for s, w in zip(scales, scale_weights):
++        if s < n_steps:
++            # Create block structures at different scales
++            num_blocks = n_steps // s
++            for i in range(num_blocks):
++                start = i * s
++                end = min(start + s, n_steps)
++                # Alternate between high and low values with some randomness
++                if i % 2 == 0:
++                    f[start:end] = 0.8 + np.random.random(end - start) * 0.2
++                else:
++                    f[start:end] = 0.1 + np.random.random(end - start) * 0.1
++    
++    # Add some smoothness with Gaussian envelope
+     x = np.linspace(-1, 1, n_steps)
+-    gaussian = np.exp(-0.5 * (x / 0.3)**2)
+-    f = f * gaussian * 0.5 + gaussian * 0.5
+-
+-    # Ensure non-negativity
+-    f = np.clip(f, 0, None)
+-
+-    # Normalize
++    envelope = np.exp(-0.5 * (x / 0.3)**2)
++    f = f * envelope + envelope * 0.3
++    
++    # Ensure non-negativity and normalize
++    f = np.maximum(f, 0)
+     if np.sum(f) > 0:
+         f = f / np.sum(f)
+-
++    
+     return f.tolist()
+ 
+ def construct_function() -> list[float]:
+-    """
+-    Function to construct step-function with high C2 value using improved methods
+-    """
+-    # Try sophisticated initialization first
++    """Main function that constructs high C2 step function using adaptive convex optimization"""
+     try:
+-        initial_f = sophisticated_initialization()
+-        c2_initial = evaluate_c2(initial_f)
+-
+-        # Then run evolutionary optimization
+-        optimized_f = evolutionary_optimization()
+-        c2_optimized = evaluate_c2(optimized_f)
+-
+-        # Return the better of the two
+-        if c2_optimized > c2_initial:
+-            return optimized_f
++        # Start with heuristic initialization
++        heuristic_f = heuristic_step_function_generation()
++        heuristic_c2 = compute_c2_score(heuristic_f)
++        
++        # Run adaptive convex optimization
++        convex_f = adaptive_convex_optimization()
++        convex_c2 = compute_c2_score(convex_f)
++        
++        # Return the better of the two approaches
++        if convex_c2 > heuristic_c2:
++            return convex_f
+         else:
+-            return initial_f
+-
++            return heuristic_f
++            
+     except Exception as e:
+-        print(f"Error in optimization: {e}")
+-        # Fallback to simple initialization
++        warnings.warn(f"Optimization failed: {e}")
++        # Fallback to uniform distribution
+         n_steps = 500
+         return [1.0/n_steps] * n_steps
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

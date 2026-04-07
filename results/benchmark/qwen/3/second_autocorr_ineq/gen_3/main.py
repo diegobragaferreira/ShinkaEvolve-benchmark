@@ -1,0 +1,88 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the norms of the autoconvolution g = f*f
+    """
+    # Ensure we have a valid function
+    if len(f_values) == 0:
+        return 0, 0, 0
+
+    # Construct the step function
+    f = np.array(f_values)
+
+    # Compute autoconvolution using discrete convolution
+    # The autoconvolution g = f * f, where * denotes convolution
+    g = signal.convolve(f, f, mode='full')
+
+    # The resulting autoconvolution will be of length 2*n - 1
+    # We take the middle portion which corresponds to the actual convolution
+    n = len(f)
+    midpoint = len(g) // 2
+    g_middle = g[midpoint:(midpoint + n)]
+
+    # Compute the required norms
+    g_squared = g_middle ** 2
+    g_abs = np.abs(g_middle)
+
+    # L2 norm squared
+    l2_norm_squared = np.sum(g_squared)
+
+    # L1 norm
+    l1_norm = np.sum(g_abs)
+
+    # L-infinity norm
+    linf_norm = np.max(g_abs)
+
+    # Avoid division by zero
+    if l1_norm == 0 or linf_norm == 0:
+        return 0, 0, 0
+
+    return l2_norm_squared, l1_norm, linf_norm
+
+def compute_c2(f_values):
+    """
+    Compute the C2 constant for given function values
+    """
+    l2_sq, l1, linf = compute_autoconvolution_norms(f_values)
+
+    if l1 == 0 or linf == 0:
+        return 0
+
+    return l2_sq / (l1 * linf)
+
+def construct_function() -> list[float]:
+    """
+    Improved function to construct step-function with high C2 value.
+    Uses a strategic approach to place steps for better C2 performance.
+    """
+    # Use a fixed number of steps for consistency
+    n_steps = 500
+
+    # Create a function with alternating high and low values
+    # This tends to create an autoconvolution with desirable properties
+    f_values = []
+    for i in range(n_steps):
+        if i % 2 == 0:
+            # High values
+            f_values.append(1.0)
+        else:
+            # Lower values
+            f_values.append(0.1)
+
+    # Add some variation to avoid purely periodic patterns
+    # but maintain overall structure that favors high C2
+    for i in range(len(f_values)):
+        if i % 7 == 0:  # Modify every 7th element
+            f_values[i] *= 1.2
+
+    return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

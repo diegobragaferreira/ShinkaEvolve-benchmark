@@ -1,0 +1,283 @@
+--- a/original.py
++++ b/original.py
+@@ -1,164 +1,220 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist, squareform
+ from scipy.optimize import minimize
+ import itertools
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+     Uses a sphere packing inspired evolutionary approach for optimal point distribution.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+ 
+     np.random.seed(42)
+     n = 14
+ 
+-    # Phase 1: Generate initial symmetric configuration based on icosahedral symmetry
+-    def generate_icosahedral_initial():
+-        # Vertices of regular icosahedron scaled to unit sphere
+-        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+-        vertices = np.array([
+-            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+-            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+-            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+-        ])
+-        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+-
+-        # Add additional points by distributing them uniformly
+-        # Start with icosahedron vertices
+-        points = vertices.tolist()
+-
+-        # Add 2 more points to make 14 total
+-        # Place them at poles for initial symmetric structure
+-        points.append([0, 0, 1])      # north pole
+-        points.append([0, 0, -1])     # south pole
+-
+-        # Use rotationally symmetric initialization
+-        return np.array(points)
++    # Phase 1: Generate enhanced initial configuration using Fibonacci spiral with perturbations
++    def generate_fibonacci_initial():
++        # Generate points using Fibonacci spiral on sphere
++        points = []
++        golden_ratio = (1 + np.sqrt(5)) / 2
++
++        for i in range(n):
++            # Distribute points more evenly using Fibonacci method
++            phi = np.arccos(1 - 2 * i / (n - 1))
++            theta = 2 * np.pi * i / golden_ratio
++
++            # Convert to Cartesian coordinates
++            x = np.sin(phi) * np.cos(theta)
++            y = np.sin(phi) * np.sin(theta)
++            z = np.cos(phi)
++
++            points.append([x, y, z])
++
++        # Convert to numpy array
++        points = np.array(points)
++
++        # Add controlled perturbations to break symmetry and improve optimization
++        np.random.seed(42)
++        perturbation_magnitude = 0.05
++        points += np.random.normal(0, perturbation_magnitude, points.shape)
++
++        # Normalize to unit sphere
++        points = points / np.linalg.norm(points, axis=1, keepdims=True)
++
++        return points
+ 
+     # Phase 2: Evolutionary optimization on sphere
+     def calculate_ratio(points):
+         """Calculate min/max distance ratio"""
+         distances = squareform(pdist(points))
+         np.fill_diagonal(distances, np.inf)
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         if max_dist == 0:
+             return 0
+         return min_dist / max_dist
+ 
+     def project_to_sphere(points):
+         """Project points to unit sphere"""
+         norms = np.linalg.norm(points, axis=1, keepdims=True)
+         # Avoid division by zero
+         norms[norms == 0] = 1
+         return points / norms
+ 
+     def rotate_point(point, axis, angle):
+         """Rotate a point around an axis by angle ( Rodrigues' rotation formula )"""
+         axis = axis / np.linalg.norm(axis)
+         cos_a = np.cos(angle)
+         sin_a = np.sin(angle)
+         return point * cos_a + np.cross(axis, point) * sin_a + axis * np.dot(axis, point) * (1 - cos_a)
+ 
+     def evolutionary_step(current_points, population_size=20, mutation_rate=0.1):
+         """Perform evolutionary step on spherical points"""
+         best_points = current_points.copy()
+         best_ratio = calculate_ratio(best_points)
+ 
+         # Generate population of mutated solutions
+         population = [best_points]
+ 
+         for _ in range(population_size - 1):
+             # Create mutated version
+             mutated = best_points.copy()
+ 
+             # Select random points to mutate
+             indices = np.random.choice(n, size=max(1, int(n * mutation_rate)), replace=False)
+ 
+             # Apply rotation to selected points
+             for idx in indices:
+                 # Generate random rotation axis and angle
+                 axis = np.random.randn(3)
+                 angle = np.random.uniform(-0.5, 0.5)  # Small rotation
+ 
+                 # Apply rotation
+                 mutated[idx] = rotate_point(mutated[idx], axis, angle)
+ 
+             # Project back to sphere
+             mutated = project_to_sphere(mutated)
+ 
+             population.append(mutated)
+ 
+         # Evaluate population and select best
+         ratios = [calculate_ratio(p) for p in population]
+         best_idx = np.argmax(ratios)
+ 
+         return population[best_idx]
+ 
+-    # Phase 3: Initialize and optimize
+-    points = generate_icosahedral_initial()
+-    points = project_to_sphere(points)
+-
+-    # Multiple evolutionary steps
+-    current_points = points.copy()
+-    best_ratio = calculate_ratio(current_points)
+-    best_solution = current_points.copy()
+-
+-    # Evolutionary optimization loop
+-    for iteration in range(100):
+-        # Perform evolutionary step
+-        new_points = evolutionary_step(current_points)
+-        new_ratio = calculate_ratio(new_points)
+-
+-        # Accept better solutions
+-        if new_ratio > best_ratio:
+-            best_ratio = new_ratio
+-            best_solution = new_points.copy()
+-
+-        current_points = new_points
+-
+-    # Phase 4: Local refinement with constrained optimization
++    # Phase 3: Multi-start optimization with improved initialization
++    best_solution = None
++    best_ratio = -np.inf
++
++    # Run multiple optimization starts with different initial configurations
++    num_starts = 10
++    for start_idx in range(num_starts):
++        # Generate different initial configurations for each start
++        if start_idx == 0:
++            # First start with enhanced Fibonacci initialization
++            points = generate_fibonacci_initial()
++        else:
++            # Subsequent starts with random perturbations of the initial points
++            base_points = generate_fibonacci_initial()
++            np.random.seed(start_idx * 42)  # Different seed for each start
++            perturbation_magnitude = 0.1 * (1 - start_idx / num_starts)  # Decreasing perturbation
++            points = base_points + np.random.normal(0, perturbation_magnitude, base_points.shape)
++            points = points / np.linalg.norm(points, axis=1, keepdims=True)
++
++        points = project_to_sphere(points)
++
++        # Multiple evolutionary steps
++        current_points = points.copy()
++        current_ratio = calculate_ratio(current_points)
++
++        # Evolutionary optimization loop with early stopping
++        for iteration in range(100):
++            # Perform evolutionary step
++            new_points = evolutionary_step(current_points)
++            new_ratio = calculate_ratio(new_points)
++
++            # Accept better solutions
++            if new_ratio > current_ratio:
++                current_ratio = new_ratio
++                current_points = new_points.copy()
++
++            # Early stopping if no improvement for a while
++            if iteration > 50 and new_ratio < current_ratio * 0.999:
++                break
++
++        # Keep track of best solution across all starts
++        if current_ratio > best_ratio:
++            best_ratio = current_ratio
++            best_solution = current_points.copy()
++
++    # Phase 4: Enhanced local refinement with multiple optimization methods
+     def objective(x):
+         points = x.reshape(-1, 3)
+         distances = squareform(pdist(points))
+         np.fill_diagonal(distances, np.inf)
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+         if max_dist == 0:
+             return 0
+         return -min_dist / max_dist
+ 
+     def constraint_func(x):
+         points = x.reshape(-1, 3)
+         norms = np.linalg.norm(points, axis=1)
+         return norms - 1.0
+ 
+-    # Final refinement using optimization
++    # Final refinement using multiple optimization approaches
+     cons = {'type': 'eq', 'fun': constraint_func}
+ 
+     try:
+-        # Try multiple local optimization approaches
++        # Try multiple local optimization approaches with different settings
+         x0 = best_solution.flatten()
+ 
+-        # Try L-BFGS-B
+-        result = minimize(objective, x0, method='L-BFGS-B', constraints=cons,
+-                         options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 300})
+-
+-        if result.success:
+-            optimized_points = result.x.reshape(-1, 3)
+-            optimized_points = project_to_sphere(optimized_points)
+-            final_ratio = calculate_ratio(optimized_points)
+-
+-            if final_ratio > best_ratio:
+-                best_solution = optimized_points
+-
+-    except Exception:
++        # Method 1: L-BFGS-B with very tight tolerances
++        result1 = minimize(objective, x0, method='L-BFGS-B', constraints=cons,
++                          options={'ftol': 1e-14, 'gtol': 1e-14, 'maxiter': 500})
++
++        # Method 2: SLSQP with tighter tolerances
++        result2 = minimize(objective, x0, method='SLSQP', constraints=cons,
++                          options={'ftol': 1e-14, 'gtol': 1e-14, 'maxiter': 500})
++
++        # Evaluate results from both methods
++        final_points_list = []
++
++        if result1.success:
++            points1 = result1.x.reshape(-1, 3)
++            points1 = project_to_sphere(points1)
++            final_points_list.append(points1)
++
++        if result2.success:
++            points2 = result2.x.reshape(-1, 3)
++            points2 = project_to_sphere(points2)
++            final_points_list.append(points2)
++
++        # Also try original solution as fallback
++        final_points_list.append(best_solution)
++
++        # Select best among all attempts
++        best_refined_solution = best_solution
++        best_refined_ratio = best_ratio
++
++        for points in final_points_list:
++            ratio = calculate_ratio(points)
++            if ratio > best_refined_ratio:
++                best_refined_ratio = ratio
++                best_refined_solution = points
++
++        best_solution = best_refined_solution
++
++    except Exception as e:
++        # If refinement fails, keep original solution
+         pass
+ 
+     return best_solution
+ 
+ # EVOLVE-BLOCK-END

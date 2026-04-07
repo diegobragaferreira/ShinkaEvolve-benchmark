@@ -1,0 +1,323 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.stats import qmc
+import time
+from numba import jit
+import numba
+
+# Global constants
+MAX_TIME_SECONDS = 85
+DEFAULT_DIMENSION = 1000
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution using fast Numba implementation"""
+    n = len(f_vals)
+    # Convolution result has length 2*n-1
+    g_len = 2 * n - 1
+    g = np.zeros(g_len)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_len:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_c2_numba(g_vals):
+    """Compute C2 value using fast Numba implementation with proper integration"""
+    if len(g_vals) == 0:
+        return 0.0
+
+    # Compute norms using trapezoidal integration for L2^2
+    g_l2_sq = 0.0
+    g_l1 = 0.0
+    g_max = 0.0
+
+    # For L1 norm (sum of absolute values)
+    for i in range(len(g_vals)):
+        g_l1 += abs(g_vals[i])
+
+    # For infinity norm (max absolute value)
+    for i in range(len(g_vals)):
+        if abs(g_vals[i]) > g_max:
+            g_max = abs(g_vals[i])
+
+    # Compute L2^2 norm using trapezoidal integration
+    # Using proper trapezoidal rule: int g^2 dt ≈ h * (g[0]^2 + 2*sum(g[i]^2) + g[n-1]^2)/2
+    if len(g_vals) >= 2:
+        g_l2_sq = g_vals[0]*g_vals[0] + g_vals[-1]*g_vals[-1]
+        for i in range(1, len(g_vals)-1):
+            g_l2_sq += 2 * g_vals[i] * g_vals[i]
+        # Step width for convolution domain
+        h = 0.5 / (len(g_vals) - 1) if len(g_vals) > 1 else 0.001
+        g_l2_sq *= h / 2.0
+
+    # Compute C2
+    if g_l1 > 1e-15 and g_max > 1e-15:
+        c2 = g_l2_sq / (g_l1 * g_max)
+    else:
+        c2 = 0.0
+
+    return c2
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L1, L2^2, and L-infinity norms efficiently"""
+    n = len(g_vals)
+    
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+    
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+    
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+    
+    return l1_norm, l2_sq_norm, linf_norm
+
+def objective_function(params):
+    """Objective function to minimize (negative C2)"""
+    try:
+        # Clip negative values
+        f_vals = np.clip(params, 0, None)
+
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+
+        # Compute C2
+        c2 = compute_c2_numba(g_vals)
+
+        # Return negative because we're minimizing
+        return -c2
+    except Exception as e:
+        return 1e10  # Large penalty for invalid results
+
+def sophisticated_initialization(dim):
+    """Create a sophisticated initial step function using Sobol sequences and pattern recognition"""
+    # Generate points using Sobol sequence for better space-filling
+    try:
+        sampler = qmc.Sobol(d=dim, seed=42)
+        points = sampler.random(n=100)
+    except:
+        # Fallback to regular random if Sobol fails
+        points = np.random.random((100, dim))
+    
+    # Create a pattern that has shown success in previous implementations
+    init_params = []
+    for i in range(dim):
+        # Create structured pattern: alternating high/low with sinusoidal modulation
+        pattern_val = 0.5 + 0.3 * np.sin(i * 0.7)
+        # Add variation from Sobol sampling
+        variation = points[i % 100][0] * 0.2 if i < 100 else np.random.random() * 0.2
+        init_params.append(max(0, pattern_val + variation - 0.1))
+
+    return init_params
+
+def advanced_initialization(dim):
+    """Create advanced initial step functions with multiple pattern types"""
+    # Pattern 1: Wavelet-inspired structures with multiple scales
+    pattern1 = np.zeros(dim)
+    x = np.linspace(-1, 1, dim)
+
+    # Multi-scale wavelet-like pattern
+    scales = [0.05, 0.1, 0.2]
+    for scale in scales:
+        centers = np.linspace(-0.8, 0.8, 5)
+        for center in centers:
+            pattern1 += 0.5 * np.exp(-((x - center)**2) / (2 * scale**2))
+
+    # Pattern 2: Sparse high-value regions with low interconnections
+    pattern2 = np.zeros(dim)
+    for i in range(0, dim, 10):
+        if i < dim:
+            pattern2[i] = 1.5 + 0.5 * np.random.random()
+
+    # Pattern 3: Modulated sinusoidal pattern with adaptive frequencies
+    pattern3 = np.zeros(dim)
+    x = np.linspace(0, 2*np.pi, dim)
+    freqs = [1, 2, 4, 8]
+    for freq in freqs:
+        pattern3 += 0.5 * np.sin(freq * x) + 0.5
+
+    # Pattern 4: Alternating high-low with specific periodicity
+    pattern4 = []
+    for i in range(dim):
+        if i % 6 < 2:
+            pattern4.append(1.2 + 0.3 * np.random.random())
+        else:
+            pattern4.append(0.3 + 0.2 * np.random.random())
+
+    # Pattern 5: Gaussian mixture model pattern
+    pattern5 = np.zeros(dim)
+    x = np.linspace(-1, 1, dim)
+    for i in range(5):
+        mu = -0.5 + i * 0.25
+        sigma = 0.1 + 0.05 * np.random.random()
+        amplitude = 0.8 + 0.4 * np.random.random()
+        pattern5 += amplitude * np.exp(-((x - mu)**2) / (2 * sigma**2))
+
+    patterns = [pattern1, pattern2, pattern3, pattern4, pattern5]
+    best_pattern = patterns[0]
+    best_score = -1.0
+
+    for pattern in patterns:
+        # Ensure pattern has right dimensionality
+        if len(pattern) != dim:
+            pattern = pattern[:dim] if len(pattern) > dim else list(pattern) + [0.0] * (dim - len(pattern))
+        try:
+            score = compute_c2_numba(compute_autoconvolution_numba(pattern))
+            if score > best_score:
+                best_score = score
+                best_pattern = pattern
+        except Exception:
+            continue
+
+    return best_pattern
+
+def evolutionary_optimization(initial_dim):
+    """Perform evolutionary optimization with adaptive parameters"""
+    # Start with good initialization
+    x0 = advanced_initialization(initial_dim)
+
+    # Set bounds for optimization
+    bounds = [(0, 10)] * len(x0)
+
+    # Parameters for differential evolution
+    de_params = {
+        'mutation': (0.5, 1),
+        'recombination': 0.7,
+        'popsize': max(15, initial_dim // 50),
+        'maxiter': max(50, initial_dim // 20),
+        'seed': 42,
+        'tol': 1e-6,
+        'init': 'latinhypercube',
+        'disp': False
+    }
+
+    # Run optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        **de_params
+    )
+
+    return result.x
+
+def adaptive_optimization_strategy():
+    """Main adaptive optimization function with multiple strategies"""
+    start_time = time.time()
+    best_c2 = -np.inf
+    best_params = None
+
+    # Strategy 1: Multiple random starts with different initialization sizes
+    start_configs = [
+        (300, 42),
+        (500, 123),
+        (700, 234),
+        (900, 345),
+        (1100, 456),
+        (1300, 567)
+    ]
+
+    # Add some random configurations
+    for _ in range(3):
+        dim = np.random.randint(400, 1200)
+        seed = np.random.randint(1000, 9999)
+        start_configs.append((dim, seed))
+
+    for dim, seed in start_configs:
+        if time.time() - start_time > MAX_TIME_SECONDS * 0.9:
+            break
+
+        try:
+            np.random.seed(seed)
+            
+            # Try evolutionary optimization first
+            params = evolutionary_optimization(dim)
+            
+            # Compute actual C2 value
+            f_vals = np.clip(params, 0, None)
+            if len(f_vals) > 0:
+                g_vals = compute_autoconvolution_numba(f_vals)
+                c2 = compute_c2_numba(g_vals)
+
+                if c2 > best_c2:
+                    best_c2 = c2
+                    best_params = params.copy()
+        except Exception as e:
+            continue
+
+    # Strategy 2: Local refinement if we found a good candidate
+    if best_params is not None and time.time() - start_time < MAX_TIME_SECONDS - 3.0:
+        try:
+            def objective(x):
+                return -compute_c2_numba(compute_autoconvolution_numba(x))
+            
+            bounds = [(0, None) for _ in range(len(best_params))]
+            result = minimize(
+                objective,
+                best_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50}
+            )
+            
+            if result.success:
+                refined_params = np.maximum(result.x, 0)
+                refined_c2 = compute_c2_numba(compute_autoconvolution_numba(refined_params))
+                
+                if refined_c2 > best_c2:
+                    best_c2 = refined_c2
+                    best_params = refined_params.tolist()
+        except Exception:
+            pass
+
+    return best_params, best_c2
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    try:
+        # Run adaptive optimization strategy
+        f_values, best_c2 = adaptive_optimization_strategy()
+
+        # Fallback in case of failure
+        if f_values is None or len(f_values) == 0:
+            # Use simple initialization
+            n = DEFAULT_DIMENSION
+            f_values = sophisticated_initialization(n)
+
+        # Ensure non-negative values
+        f_values = np.maximum(f_values, 0).tolist()
+
+        # Ensure reasonable size
+        if len(f_values) < 50:
+            f_values = f_values + [0.5] * (50 - len(f_values))
+        elif len(f_values) > 10000:
+            f_values = f_values[:10000]
+
+        return f_values
+
+    except Exception as e:
+        # Final fallback
+        return [0.5] * 500
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

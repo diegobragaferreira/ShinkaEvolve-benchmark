@@ -1,0 +1,149 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import time
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def objective_function(points):
+        """Objective function to minimize (negative of min/max ratio)."""
+        return -compute_min_max_ratio(points)
+
+    def objective_gradient(points):
+        """Simple gradient approximation using finite differences."""
+        epsilon = 1e-6
+        grad = np.zeros_like(points)
+        base_ratio = compute_min_max_ratio(points)
+
+        for i in range(len(points)):
+            for j in range(len(points[i])):
+                # Perturb coordinate
+                points_plus = points.copy()
+                points_minus = points.copy()
+                points_plus[i,j] += epsilon
+                points_minus[i,j] -= epsilon
+
+                # Compute gradient using central difference
+                ratio_plus = compute_min_max_ratio(points_plus)
+                ratio_minus = compute_min_max_ratio(points_minus)
+                grad[i,j] = (ratio_plus - ratio_minus) / (2 * epsilon)
+
+        return grad
+
+    def optimize_points(initial_points, max_time=175):
+        """Optimize point positions using simulated annealing approach."""
+        start_time = time.time()
+
+        # Normalize initial points to [0,1] x [0,1]
+        points = np.clip(initial_points, 0, 1)
+        current_ratio = compute_min_max_ratio(points)
+
+        # Parameters for optimization
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-6
+        max_iterations = 100000
+        iteration = 0
+
+        best_points = points.copy()
+        best_ratio = current_ratio
+
+        while temperature > min_temperature and iteration < max_iterations and (time.time() - start_time) < max_time:
+            # Create candidate solution by perturbing points
+            candidate_points = points.copy()
+
+            # Select random point to move
+            idx = np.random.randint(0, len(points))
+            # Small random perturbation
+            candidate_points[idx] += np.random.normal(0, 0.01, 2)
+
+            # Keep within bounds
+            candidate_points = np.clip(candidate_points, 0, 1)
+
+            # Calculate acceptance probability
+            candidate_ratio = compute_min_max_ratio(candidate_points)
+
+            # Accept or reject based on Metropolis criterion
+            if candidate_ratio > current_ratio or np.random.rand() < np.exp((candidate_ratio - current_ratio) / temperature):
+                points = candidate_points
+                current_ratio = candidate_ratio
+
+                # Update best solution
+                if current_ratio > best_ratio:
+                    best_points = points.copy()
+                    best_ratio = current_ratio
+
+            # Cool down
+            temperature *= cooling_rate
+            iteration += 1
+
+            # Occasionally print progress
+            if iteration % 1000 == 0:
+                pass  # Suppress output for cleaner execution
+
+        return best_points
+
+    # Generate initial points using an enhanced hexagonal grid pattern with symmetry breaking
+    np.random.seed(42)
+
+    # Create a regular hexagonal grid pattern with deterministic symmetry-breaking
+    points = []
+
+    # Hexagonally arranged points in a roughly square area
+    rows = 4
+    cols = 4
+
+    # Generate grid points with deterministic symmetry breaking
+    for i in range(rows):
+        for j in range(cols):
+            # Base hexagonal position
+            x_base = j * 0.25 + (i % 2) * 0.125  # Offset every other row
+            y_base = i * 0.25
+
+            # Apply deterministic symmetry-breaking perturbation
+            # This creates a fundamentally asymmetric pattern that breaks
+            # the rotational and translational symmetries of pure hexagonal grids
+            symmetry_factor = (i * 7 + j * 3) % 10  # Deterministic but varied
+            x_pert = np.sin(symmetry_factor * 0.5) * 0.005
+            y_pert = np.cos(symmetry_factor * 0.3) * 0.005
+
+            # Combine deterministic perturbation with controlled random noise
+            x = x_base + x_pert + np.random.normal(0, 0.003, 1)[0]
+            y = y_base + y_pert + np.random.normal(0, 0.003, 1)[0]
+            points.append([x, y])
+
+    # Ensure all points are within [0,1] bounds
+    points = np.array(points)
+    points = np.clip(points, 0, 1)
+
+    # Optimize the point arrangement
+    final_points = optimize_points(points, max_time=175)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

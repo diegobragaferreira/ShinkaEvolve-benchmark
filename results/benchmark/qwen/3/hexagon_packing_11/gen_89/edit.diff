@@ -1,0 +1,267 @@
+--- a/original.py
++++ b/original.py
+@@ -1,37 +1,241 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from shapely.geometry import Polygon
++import math
++from scipy.optimize import minimize
++from scipy.spatial.distance import cdist
++import time
++
++def create_regular_hexagon(center_x, center_y, side_length=1, rotation_deg=0):
++    """Create a regular hexagon as a Shapely polygon"""
++    rotation_rad = math.radians(rotation_deg)
++    points = []
++    for i in range(6):
++        angle = rotation_rad + i * math.pi / 3
++        x = center_x + side_length * math.cos(angle)
++        y = center_y + side_length * math.sin(angle)
++        points.append((x, y))
++    return Polygon(points)
++
++def check_containment_and_overlap(inner_hexagons, outer_hexagon):
++    """Check if all inner hexagons are contained in outer hexagon and don't overlap"""
++    # Check containment
++    for hex_poly in inner_hexagons:
++        if not outer_hexagon.contains(hex_poly):
++            return False
++
++    # Check pairwise overlaps
++    for i in range(len(inner_hexagons)):
++        for j in range(i+1, len(inner_hexagons)):
++            if inner_hexagons[i].intersects(inner_hexagons[j]):
++                return False
++
++    return True
++
++def compute_outer_hexagon_radius(inner_hexagons, padding=0.01):
++    """Compute minimum radius needed to contain all inner hexagons with some padding"""
++    # Get all vertices of all hexagons
++    all_vertices = []
++    for hex_poly in inner_hexagons:
++        all_vertices.extend(list(hex_poly.exterior.coords))
++
++    # Find center of bounding box
++    xs = [p[0] for p in all_vertices]
++    ys = [p[1] for p in all_vertices]
++    center_x = (min(xs) + max(xs)) / 2
++    center_y = (min(ys) + max(ys)) / 2
++
++    # Compute max distance from center to any vertex
++    max_dist = 0
++    for x, y in all_vertices:
++        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
++        max_dist = max(max_dist, dist)
++
++    # Add padding and convert to side length
++    # For a regular hexagon, radius = side_length
++    return max_dist + padding
++
++def evaluate_layout(inner_positions_angles, outer_center=(0, 0), initial_outer_radius=8):
++    """Evaluate the layout quality"""
++    # Convert to hexagon polygons
++    inner_hexagons = []
++    for pos_angle in inner_positions_angles:
++        x, y, angle = pos_angle
++        hex_poly = create_regular_hexagon(x, y, 1, angle)
++        inner_hexagons.append(hex_poly)
++
++    # Create outer hexagon with current radius
++    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
++    outer_hexagon = create_regular_hexagon(outer_center[0], outer_center[1], outer_radius, 0)
++
++    # Validate constraints
++    valid = check_containment_and_overlap(inner_hexagons, outer_hexagon)
++
++    # Return negative because we want to maximize 1/R (minimize R)
++    outer_side_length = outer_radius
++    inv_radius = 1.0 / outer_side_length if valid else 0.0
++
++    return -inv_radius, outer_side_length
++
++def create_initial_hexagon_arrangement():
++    """
++    Create an initial hexagon arrangement based on systematic tiling with optimizations
++    """
++    # Start with a known good hexagonal packing pattern
++    initial_positions = [
++        # Central hexagon
++        [0.0, 0.0, 0.0],
++        # First ring (6 hexagons)
++        [-2.0, 0.0, 0.0],      # Left
++        [2.0, 0.0, 0.0],       # Right
++        [0.0, 2.0, 0.0],       # Top
++        [0.0, -2.0, 0.0],      # Bottom
++        [-1.0, 1.732, 0.0],    # Top-left
++        [1.0, 1.732, 0.0],     # Top-right
++        # Second ring (4 hexagons)
++        [-1.0, -1.732, 0.0],   # Bottom-left
++        [1.0, -1.732, 0.0],    # Bottom-right
++        [-2.0, 1.0, 0.0],      # Far top-left
++        [2.0, 1.0, 0.0],       # Far top-right
++    ]
++    
++    return np.array(initial_positions)
++
++def optimize_positions_only(initial_positions_angles, max_iter=50):
++    """
++    Optimizes just positions (x,y) while keeping rotations fixed
++    """
++    def objective_position_only(params):
++        # Reshape params to get positions only
++        positions_angles = []
++        for i in range(11):
++            x = params[i*2]
++            y = params[i*2 + 1]
++            angle = initial_positions_angles[i][2]  # keep original rotation
++            positions_angles.append([x, y, angle])
++        
++        score, _ = evaluate_layout(positions_angles)
++        return score
++    
++    # Flatten positions for optimization
++    initial_flat = []
++    for pos_angle in initial_positions_angles:
++        initial_flat.extend([pos_angle[0], pos_angle[1]])  # x, y only
++    
++    # Bounds for positions
++    bounds = []
++    for i in range(11):
++        bounds.extend([(-10, 10), (-10, 10)])
++    
++    try:
++        result = minimize(
++            objective_position_only,
++            initial_flat,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-8}
++        )
++        
++        # Extract optimized positions
++        optimized_positions_angles = []
++        for i in range(11):
++            x = result.x[i*2]
++            y = result.x[i*2 + 1]
++            angle = initial_positions_angles[i][2]
++            optimized_positions_angles.append([x, y, angle])
++            
++        return optimized_positions_angles, result.fun
++        
++    except Exception as e:
++        return initial_positions_angles, 0.0
++
++def optimize_rotations_only(initial_positions_angles, max_iter=30):
++    """
++    Optimizes just rotations while keeping positions fixed
++    """
++    def objective_rotation_only(params):
++        # Reshape params to get rotations only  
++        positions_angles = []
++        for i in range(11):
++            x = initial_positions_angles[i][0]
++            y = initial_positions_angles[i][1]
++            angle = params[i]  # rotation only
++            positions_angles.append([x, y, angle])
++        
++        score, _ = evaluate_layout(positions_angles)
++        return score
++    
++    # Flatten rotations for optimization
++    initial_flat = [pos_angle[2] for pos_angle in initial_positions_angles]
++    
++    # Bounds for rotations (0-360)
++    bounds = [(0, 360) for _ in range(11)]
++    
++    try:
++        result = minimize(
++            objective_rotation_only,
++            initial_flat,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-8}
++        )
++        
++        # Extract optimized rotations
++        optimized_positions_angles = []
++        for i in range(11):
++            x = initial_positions_angles[i][0]
++            y = initial_positions_angles[i][1]
++            angle = result.x[i]
++            optimized_positions_angles.append([x, y, angle])
++            
++        return optimized_positions_angles, result.fun
++        
++    except Exception as e:
++        return initial_positions_angles, 0.0
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
++    Uses a hybrid approach combining systematic initial placement with iterative optimization.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-    n = 11
+-    # Simple grid arrangement of inner hexagons
+-    inner_hex_data = np.array(
+-        [
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
+-            [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
+-            [1.25, -2.17, 0],  # bottom-right
+-            [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
+-            [3.75, -2.17, 0],  # far bottom-right
+-        ]
+-    )
+-
++    
++    # Start with a good initial configuration
++    initial_positions_angles = create_initial_hexagon_arrangement()
++    
++    # Iterative optimization: alternate between position and rotation optimization
++    best_positions_angles = initial_positions_angles.copy()
++    best_score = float('inf')
++    
++    # Perform several rounds of alternating optimization
++    for iteration in range(10):
++        # Optimize positions with fixed rotations
++        pos_optimized, pos_score = optimize_positions_only(best_positions_angles, max_iter=30)
++        
++        # Optimize rotations with fixed positions
++        rot_optimized, rot_score = optimize_rotations_only(pos_optimized, max_iter=20)
++        
++        # Keep the best result so far
++        if rot_score < best_score:
++            best_score = rot_score
++            best_positions_angles = rot_optimized.copy()
++    
++    # Final evaluation
++    final_score, outer_side_length = evaluate_layout(best_positions_angles)
++    
++    # Ensure we have a valid solution
++    if final_score == 0.0:
++        # Fallback to initial configuration
++        best_positions_angles = initial_positions_angles
++        final_score, outer_side_length = evaluate_layout(best_positions_angles)
++    
++    # Convert to proper output format
+     outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = 8  # large enough to contain all inner hexagons
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
+-
++    
++    # Return results
++    return best_positions_angles, outer_hex_data, outer_side_length
+ 
+ # EVOLVE-BLOCK-END

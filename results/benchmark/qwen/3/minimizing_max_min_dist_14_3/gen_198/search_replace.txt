@@ -1,0 +1,516 @@
+<NAME>
+add_spherical_constraint_handling
+</NAME>
+
+<DESCRIPTION>
+Adding explicit spherical constraint handling to the optimization process. The current implementation uses a penalty method for boundary constraints but doesn't properly enforce that points remain on or near the unit sphere, which is crucial for this type of dispersion problem. By adding a dedicated spherical constraint handler and ensuring all optimization steps respect this constraint, we can improve the quality of solutions. This approach leverages the fact that optimal point distributions for this problem often lie on or near the surface of the unit sphere.
+
+The main improvements include:
+1. Adding a proper spherical constraint enforcement function
+2. Modifying the objective function to work specifically with spherical constraints
+3. Ensuring all intermediate steps maintain spherical distribution
+4. Using a more robust approach to handle constraints during optimization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def compute_min_max_ratio(points_flat):
+        """Compute negative of min/max distance ratio for optimization"""
+        points = points_flat.reshape(n, d)
+        distances = cdist(points, points, 'euclidean')
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    def objective_with_penalty(x):
+        """Objective function with penalty for boundary violations"""
+        # Reshape x back to points
+        points = x.reshape(n, d)
+
+        # Apply soft penalty for boundary violations
+        penalty = 0
+        for i in range(n):
+            for j in range(d):
+                if points[i,j] < 0:
+                    penalty += 1e6 * (0 - points[i,j])**2
+                elif points[i,j] > 1:
+                    penalty += 1e6 * (points[i,j] - 1)**2
+
+        # Calculate distance matrix
+        distances = cdist(points, points, 'euclidean')
+        np.fill_diagonal(distances, np.inf)
+
+        # Find min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf + penalty
+
+        # Return negative ratio plus penalty (to minimize)
+        return -(min_dist / max_dist) + penalty
+=======
+    def compute_min_max_ratio(points_flat):
+        """Compute negative of min/max distance ratio for optimization"""
+        points = points_flat.reshape(n, d)
+        distances = cdist(points, points, 'euclidean')
+        np.fill_diagonal(distances, np.inf)
+
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    def enforce_spherical_constraint(points):
+        """Ensure points lie on the unit sphere by normalizing them"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Handle zero norm cases to avoid division by zero
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms
+
+    def objective_with_spherical_constraint(x):
+        """Objective function that respects spherical constraint"""
+        # Reshape x back to points
+        points = x.reshape(n, d)
+
+        # Enforce spherical constraint
+        points = enforce_spherical_constraint(points)
+
+        # Calculate distance matrix
+        distances = cdist(points, points, 'euclidean')
+        np.fill_diagonal(distances, np.inf)
+
+        # Find min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        # Return negative ratio (to minimize)
+        return -min_dist / max_dist
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improve_initialization_strategy
+</NAME>
+
+<DESCRIPTION>
+Improving the initialization strategy by implementing a more sophisticated approach that creates better starting configurations. The current initialization uses a modified Fibonacci method but we can enhance it with a better distribution technique. I'm implementing a two-phase initialization: first creating a reasonably uniform distribution on the sphere using a more structured approach, then projecting to the unit cube while preserving good spatial properties. This approach should provide a much better starting point for optimization compared to the basic spherical Fibonacci approach.
+
+The key improvements:
+1. Use a more structured approach to initial point placement on sphere
+2. Improve the projection from sphere to cube while maintaining good distribution
+3. Add better perturbation to break symmetries
+4. Ensure better coverage of the space from the start
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 1: Generate initial configuration using spherical Voronoi-inspired approach
+    # This provides a better starting configuration than basic Fibonacci sphere
+    np.random.seed(42)
+
+    # Generate points using a more sophisticated approach based on spherical Voronoi concepts
+    # We'll create points that are more uniformly distributed on the sphere
+    points = []
+
+    # Use a modified Fibonacci approach with better spacing
+    golden_ratio = (1 + np.sqrt(5)) / 2
+    for i in range(n):
+        # Distribute points more evenly using spherical coordinates
+        y = 1 - (i / (n - 1)) * 2  # y from 1 to -1
+        radius = np.sqrt(1 - y*y)
+
+        # Use golden ratio for better angular distribution
+        theta = np.arctan2(y, radius) + (i * 2 * np.pi / golden_ratio)
+
+        x = radius * np.cos(theta)
+        z = radius * np.sin(theta)
+
+        points.append([x, y, z])
+
+    points = np.array(points)
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    points = points / np.maximum(norms, 1e-10)
+
+    # Project to [0,1]^3 cube
+    points = (points + 1) / 2
+
+    # Add structured perturbation to break symmetries
+    # Use a more controlled perturbation that maintains good distribution
+    perturbation_magnitude = 0.015
+    points += np.random.normal(0, perturbation_magnitude, points.shape)
+
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+=======
+    # Phase 1: Generate improved initial configuration using enhanced spherical approach
+    np.random.seed(42)
+
+    # Create a more uniform distribution on the sphere using iterative optimization approach
+    # Start with Fibonacci-like distribution
+    points = []
+    golden_ratio = (1 + np.sqrt(5)) / 2
+
+    # Generate points using improved Fibonacci-like method with better spacing
+    for i in range(n):
+        y = 1 - (i / (n - 1)) * 2  # y from 1 to -1
+        radius = np.sqrt(1 - y*y)  # radius at y
+
+        # More careful angular distribution
+        theta = i * 2 * np.pi / golden_ratio
+
+        x = radius * np.cos(theta)
+        z = radius * np.sin(theta)
+
+        points.append([x, y, z])
+
+    points = np.array(points)
+
+    # Normalize to unit sphere
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    points = points / np.maximum(norms, 1e-10)
+
+    # Apply a small amount of jitter to break symmetries
+    # Use a more controlled approach to avoid extreme distortions
+    jitter_magnitude = 0.02
+    points += np.random.normal(0, jitter_magnitude, points.shape) * 0.5
+
+    # Normalize again after jitter
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    points = points / np.maximum(norms, 1e-10)
+
+    # Project to [0,1]^3 cube while preserving good distribution
+    points = (points + 1) / 2
+
+    # Apply more substantial perturbation to ensure good exploration
+    # but keep within reasonable bounds
+    perturbation_magnitude = 0.01
+    points += np.random.normal(0, perturbation_magnitude, points.shape) * 0.7
+
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+replace_local_refinement_with_improved_version
+</NAME>
+
+<DESCRIPTION>
+Replacing the local refinement function with a more robust and effective version. The current local refinement uses a simple approach that may not be optimal for this specific problem. The improved version includes better gradient estimation and multiple refinement strategies while respecting the spherical constraint explicitly. This change focuses on getting better local optima which is critical for maximizing the minimum/maximum distance ratio.
+
+Key improvements:
+1. Enhanced local refinement with better constraint handling
+2. Multiple refinement strategies with proper fallbacks
+3. Explicit spherical constraint enforcement during refinement
+4. Better handling of edge cases and numerical issues
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 3: Local refinement with multiple strategies
+    def local_refinement(points):
+        """Refine using multiple local optimization approaches"""
+        # Strategy 1: L-BFGS-B with bounds
+        def lbfgsb_refinement():
+            def obj(x):
+                points_temp = x.reshape(n, d)
+                distances = cdist(points_temp, points_temp, 'euclidean')
+                np.fill_diagonal(distances, np.inf)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist == 0:
+                    return 1e10
+                return -min_dist / max_dist  # Negative for maximization
+
+            bounds = [(0, 1) for _ in range(n * d)]
+            try:
+                res = minimize(obj, points.flatten(), method='L-BFGS-B', bounds=bounds,
+                             options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9})
+                if res.success:
+                    return res.x.reshape(n, d)
+            except:
+                pass
+            return points
+
+        # Strategy 2: Nelder-Mead as fallback
+        def nelder_mead_refinement():
+            def obj(x):
+                points_temp = x.reshape(n, d)
+                distances = cdist(points_temp, points_temp, 'euclidean')
+                np.fill_diagonal(distances, np.inf)
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist == 0:
+                    return 1e10
+                return -min_dist / max_dist  # Negative for maximization
+
+            try:
+                res = minimize(obj, points.flatten(), method='Nelder-Mead',
+                             options={'maxiter': 500, 'disp': False})
+                if res.success:
+                    return res.x.reshape(n, d)
+            except:
+                pass
+            return points
+
+        # Apply both strategies and return the better one
+        refined_lbfgsb = lbfgsb_refinement()
+        refined_nm = nelder_mead_refinement()
+
+        # Compare results
+        ratio_lbfgsb = compute_min_max_ratio(refined_lbfgsb.flatten())
+        ratio_nm = compute_min_max_ratio(refined_nm.flatten())
+
+        return refined_lbfgsb if ratio_lbfgsb < ratio_nm else refined_nm
+=======
+    # Phase 3: Improved local refinement with spherical constraint handling
+    def local_refinement(points):
+        """Refine using improved local optimization approaches with spherical constraint"""
+
+        def objective_spherical(x):
+            """Objective function that respects spherical constraint"""
+            points_temp = x.reshape(n, d)
+            # Enforce spherical constraint
+            points_temp = enforce_spherical_constraint(points_temp)
+            distances = cdist(points_temp, points_temp, 'euclidean')
+            np.fill_diagonal(distances, np.inf)
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            if max_dist == 0:
+                return 1e10
+            return -min_dist / max_dist  # Negative for maximization
+
+        # Strategy 1: L-BFGS-B with bounds and spherical constraint
+        def lbfgsb_refinement():
+            try:
+                # Create bounds that keep points within unit cube, but we'll enforce spherical constraint
+                bounds = [(0, 1) for _ in range(n * d)]
+                res = minimize(objective_spherical, points.flatten(), method='L-BFGS-B', bounds=bounds,
+                             options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9})
+                if res.success:
+                    refined_points = res.x.reshape(n, d)
+                    # Ensure spherical constraint is maintained
+                    refined_points = enforce_spherical_constraint(refined_points)
+                    return refined_points
+            except Exception as e:
+                print(f"L-BFGS-B refinement failed: {e}")
+            return points
+
+        # Strategy 2: Nelder-Mead with spherical constraint
+        def nelder_mead_refinement():
+            try:
+                res = minimize(objective_spherical, points.flatten(), method='Nelder-Mead',
+                             options={'maxiter': 500, 'disp': False})
+                if res.success:
+                    refined_points = res.x.reshape(n, d)
+                    # Ensure spherical constraint is maintained
+                    refined_points = enforce_spherical_constraint(refined_points)
+                    return refined_points
+            except Exception as e:
+                print(f"Nelder-Mead refinement failed: {e}")
+            return points
+
+        # Strategy 3: Simple gradient ascent approach with proper constraint handling
+        def gradient_approach():
+            # Simple gradient descent on the negative ratio (maximization)
+            current_points = points.copy()
+            learning_rate = 0.01
+            max_steps = 500
+
+            for step in range(max_steps):
+                # Compute gradients numerically
+                try:
+                    # Compute distances
+                    distances = cdist(current_points, current_points, 'euclidean')
+                    np.fill_diagonal(distances, np.inf)
+                    min_dist = np.min(distances)
+                    max_dist = np.max(distances)
+
+                    if max_dist == 0:
+                        break
+
+                    # Simple gradient approximation using finite differences
+                    epsilon = 1e-6
+                    grad_sum = np.zeros_like(current_points)
+
+                    for i in range(n):
+                        for j in range(d):
+                            # Perturb point
+                            perturbed = current_points.copy()
+                            perturbed[i, j] += epsilon
+
+                            # Enforce spherical constraint after perturbation
+                            perturbed = enforce_spherical_constraint(perturbed)
+
+                            distances_pert = cdist(perturbed, perturbed, 'euclidean')
+                            np.fill_diagonal(distances_pert, np.inf)
+                            min_dist_pert = np.min(distances_pert)
+                            max_dist_pert = np.max(distances_pert)
+
+                            if max_dist_pert > 0:
+                                ratio_pert = min_dist_pert / max_dist_pert
+                                grad_sum[i, j] = (ratio_pert - (-min_dist / max_dist)) / epsilon
+
+                    # Update points (gradient ascent for maximization)
+                    current_points += learning_rate * grad_sum
+
+                    # Enforce spherical constraint
+                    current_points = enforce_spherical_constraint(current_points)
+
+                    # Ensure within bounds
+                    current_points = np.clip(current_points, 0, 1)
+
+                except Exception as e:
+                    print(f"Gradient approach failed: {e}")
+                    break
+
+            return current_points
+
+        # Apply refinements in order of preference
+        refined_lbfgsb = lbfgsb_refinement()
+        ratio_lbfgsb = compute_min_max_ratio(refined_lbfgsb.flatten())
+
+        refined_nm = nelder_mead_refinement()
+        ratio_nm = compute_min_max_ratio(refined_nm.flatten())
+
+        refined_grad = gradient_approach()
+        ratio_grad = compute_min_max_ratio(refined_grad.flatten())
+
+        # Return the best result among all methods
+        best_ratios = [ratio_lbfgsb, ratio_nm, ratio_grad]
+        best_results = [refined_lbfgsb, refined_nm, refined_grad]
+
+        best_idx = np.argmin(best_ratios)
+        return best_results[best_idx]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_objective_and_callbacks
+</NAME>
+
+<DESCRIPTION>
+Updating the differential evolution call to use the new spherical constraint-aware objective function and improving the adaptive callback logic. This ensures that all optimization steps properly utilize the spherical constraint handling and that the adaptive population sizing works correctly with the new objective function. The callback now properly handles the optimization lifecycle and the objective function is aligned with our spherical constraint approach.
+
+Key updates:
+1. Switch from penalty-based to constraint-aware objective function
+2. Improve the adaptive callback logic for better population size control
+3. Increase adaptive parameters to allow better exploration
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Run differential evolution with adaptive population sizing
+    max_time = 280  # Leave some time for final refinement
+    start_time = time.time()
+
+    # Adaptive population size control
+    initial_popsize = 20
+    max_popsize = 50
+    popsize = initial_popsize
+    last_improvement_gen = 0
+    stagnation_count = 0
+    max_stagnation = 10
+
+    def adaptive_callback(x, convergence):
+        nonlocal popsize, last_improvement_gen, stagnation_count
+
+        current_time = time.time()
+        if current_time - start_time > max_time:
+            return True
+
+        # Track stagnation - if no improvement for several generations
+        if convergence < 1e-6:  # Convergence threshold
+            stagnation_count += 1
+            if stagnation_count > max_stagnation and popsize < max_popsize:
+                popsize = min(popsize + 5, max_popsize)
+                stagnation_count = 0
+        else:
+            stagnation_count = 0
+            last_improvement_gen = convergence
+
+        return False
+
+    # Use a more robust differential evolution setup with adaptive population
+    result = differential_evolution(
+        objective_with_penalty,
+        bounds,
+        seed=42,
+        maxiter=500,
+        popsize=popsize,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        disp=False,
+        tol=1e-6,
+        callback=adaptive_callback
+    )
+=======
+    # Run differential evolution with improved spherical constraint handling
+    max_time = 280  # Leave some time for final refinement
+    start_time = time.time()
+
+    # Adaptive population size control for better exploration
+    initial_popsize = 25
+    max_popsize = 60
+    popsize = initial_popsize
+    last_improvement_gen = 0
+    stagnation_count = 0
+    max_stagnation = 15
+
+    def adaptive_callback(x, convergence):
+        nonlocal popsize, last_improvement_gen, stagnation_count
+
+        current_time = time.time()
+        if current_time - start_time > max_time:
+            return True
+
+        # Track stagnation and improve population size if needed
+        # Use a more sensitive check for improvement
+        if convergence < 1e-8:  # Tighter convergence threshold
+            stagnation_count += 1
+            if stagnation_count > max_stagnation and popsize < max_popsize:
+                # Increase population size more aggressively
+                popsize = min(popsize + 10, max_popsize)
+                stagnation_count = 0
+                print(f"Population size increased to {popsize} due to stagnation")
+        else:
+            stagnation_count = 0
+            last_improvement_gen = convergence
+
+        return False
+
+    # Use a more robust differential evolution setup with adaptive population
+    result = differential_evolution(
+        objective_with_spherical_constraint,
+        bounds,
+        seed=42,
+        maxiter=500,
+        popsize=popsize,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        disp=False,
+        tol=1e-6,
+        callback=adaptive_callback
+    )
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,82 @@
+<NAME>
+add_adaptive_margin_calculation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed margin calculation for determining the outer hexagon radius. This can be improved by implementing an adaptive margin that calculates the actual bounding box of inner hexagons rather than using a conservative approach. This will provide tighter outer hexagon bounds and potentially better packing efficiency.
+
+The key insight is to replace the current `calculate_outer_hex_radius` method with a more precise calculation that:
+1. Computes the actual convex hull of all inner hexagon vertices
+2. Calculates the minimum enclosing circle or uses tight bounding box dimensions
+3. Adds only the necessary margin instead of a fixed safety margin
+
+This approach aligns with Generation 8's strategy of reducing unnecessary padding and will likely yield better results than the current fixed-margin approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_outer_hex_radius(self, inner_hex_data, outer_center=(0,0)):
+        """Calculate minimum outer hexagon radius needed to contain all inner hexagons"""
+        # Get all vertices of all inner hexagons efficiently
+        all_vertices = []
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            rotation = inner_hex_data[i][2]
+            hexagon = self.create_unit_hexagon(center, rotation)
+            vertices = list(hexagon.exterior.coords)[:-1]  # Exclude duplicate last point
+            all_vertices.extend(vertices)
+
+        if not all_vertices:
+            return 1.0
+
+        # Compute centroid and distances more efficiently
+        vertices_array = np.array(all_vertices)
+        centroid = vertices_array.mean(axis=0)
+
+        # Vectorized distance calculation
+        distances_squared = np.sum((vertices_array - centroid)**2, axis=1)
+        max_dist_squared = np.max(distances_squared)
+        max_dist = np.sqrt(max_dist_squared)
+
+        # Take maximum distance and add unit hexagon apogee for safety
+        max_dist += self.unit_hex_apogee
+
+        return max_dist
+=======
+    def calculate_outer_hex_radius(self, inner_hex_data, outer_center=(0,0)):
+        """Calculate minimum outer hexagon radius needed to contain all inner hexagons"""
+        # Get all vertices of all inner hexagons efficiently
+        all_vertices = []
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            rotation = inner_hex_data[i][2]
+            hexagon = self.create_unit_hexagon(center, rotation)
+            vertices = list(hexagon.exterior.coords)[:-1]  # Exclude duplicate last point
+            all_vertices.extend(vertices)
+
+        if not all_vertices:
+            return 1.0
+
+        # Compute tight bounding box instead of centroid-based approach
+        vertices_array = np.array(all_vertices)
+        min_x, min_y = vertices_array.min(axis=0)
+        max_x, max_y = vertices_array.max(axis=0)
+
+        # Calculate maximum distance from center to any vertex
+        center = np.array(outer_center)
+        distances_squared = np.sum((vertices_array - center)**2, axis=1)
+        max_dist_squared = np.max(distances_squared)
+        max_dist = np.sqrt(max_dist_squared)
+
+        # For hexagon packing, we need to account for the fact that
+        # unit hexagons have their corners extending further
+        # Using the bounding box approach gives us a tighter estimate
+        half_diagonal = np.sqrt((max_x - min_x)**2 + (max_y - min_y)**2) / 2.0
+        max_dist = max(max_dist, half_diagonal)
+
+        # Add minimal margin - unit hexagon apogee for practical safety
+        max_dist += self.unit_hex_apogee * 1.1  # Slightly more than just apogee for robustness
+
+        return max_dist
+>>>>>>> REPLACE
+</DIFF>

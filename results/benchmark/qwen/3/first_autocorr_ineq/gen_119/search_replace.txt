@@ -1,0 +1,149 @@
+<NAME>
+add_hessian_based_perturbation
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the `get_good_direction_to_move_into` function by adding curvature-aware perturbation using Hessian approximation. This technique helps escape local minima and improves convergence in complex landscapes, especially for sequences where gradient landscapes become flat or ill-conditioned. We compute a local Hessian approximation using finite differences and add a corrective vector proportional to the negative curvature direction to the gradient ascent step. This aligns with successful approaches used in top-performing programs and should help achieve better convergence towards higher values of 1/C₁.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import math
+import random
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced adaptive parameters."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Prevent division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize with adaptive factor
+    adaptive_factor = np.sqrt(2 * n)
+    normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
+
+    # Use FFT for large sequences, direct convolution for small ones
+    if n > 100:
+        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    else:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+
+    rhs = np.max(conv_result)
+
+    # Try solving LP with improved constraints
+    g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+
+    if g_fun is None:
+        # Enhanced fallback: try with modified RHS and different method
+        rhs_fallback = rhs * 1.1
+        g_fun = solve_convolution_lp(normalized_sequence, rhs_fallback, n)
+
+    if g_fun is None:
+        # Final fallback: simple gradient ascent with dynamic step
+        t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize g_fun
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
+
+    # Adaptive step-size with convergence awareness
+    t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import math
+import random
+
+def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced adaptive parameters."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Prevent division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize with adaptive factor
+    adaptive_factor = np.sqrt(2 * n)
+    normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
+
+    # Use FFT for large sequences, direct convolution for small ones
+    if n > 100:
+        conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    else:
+        conv_result = np.convolve(normalized_sequence, normalized_sequence)
+
+    rhs = np.max(conv_result)
+
+    # Try solving LP with improved constraints
+    g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+
+    if g_fun is None:
+        # Enhanced fallback: try with modified RHS and different method
+        rhs_fallback = rhs * 1.1
+        g_fun = solve_convolution_lp(normalized_sequence, rhs_fallback, n)
+
+    if g_fun is None:
+        # Final fallback: simple gradient ascent with dynamic step
+        t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize g_fun
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
+
+    # Adaptive step-size with convergence awareness
+    t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+
+    # Apply curvature-aware perturbation for better convergence
+    # Compute approximate Hessian using finite differences
+    epsilon = 1e-4
+    hessian_approx = np.zeros((n, n))
+
+    # Small perturbation to estimate curvature
+    perturbed_sequence = [x + epsilon for x in sequence]
+    conv_perturbed = np.convolve(perturbed_sequence, perturbed_sequence)
+    conv_original = np.convolve(sequence, sequence)
+
+    # Estimate second-order directional derivatives (simplified version)
+    hessian_diag = []
+    for i in range(n):
+        # Estimate diagonal element of Hessian (curvature in direction i)
+        d_conv = conv_perturbed[i] - conv_original[i]
+        hessian_diag.append(d_conv / (epsilon * epsilon))
+
+    # Apply curvature correction to improve movement direction
+    curvature_correction = [0.0] * n
+    for i in range(n):
+        # Simple curvature correction proportional to negative inverse curvature
+        if hessian_diag[i] != 0:
+            curvature_correction[i] = -0.001 * hessian_diag[i] * (normalized_g_fun[i] - sequence[i])
+
+    # Adjust new_sequence with curvature correction
+    adjusted_g_fun = [g + corr for g, corr in zip(normalized_g_fun, curvature_correction)]
+
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, adjusted_g_fun)
+    ]
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

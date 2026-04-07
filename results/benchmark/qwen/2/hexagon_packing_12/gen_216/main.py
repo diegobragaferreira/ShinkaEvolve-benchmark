@@ -1,0 +1,421 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+import time
+import math
+from numba import jit, prange
+from typing import Tuple, List, Optional
+import warnings
+
+class SpatialHash:
+    """Spatial hash grid for efficient hexagon collision detection."""
+    
+    def __init__(self, cell_size: float = 2.0):
+        self.cell_size = cell_size
+        self.grid = {}
+    
+    def _hash(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert continuous coordinates to grid cell indices."""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+    
+    def clear(self):
+        """Clear the spatial hash grid."""
+        self.grid.clear()
+    
+    def insert(self, hex_id: int, vertices: np.ndarray):
+        """Insert a hexagon into the spatial hash."""
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Insert into all cells it covers
+        min_cell_x, min_cell_y = self._hash(min_x, min_y)
+        max_cell_x, max_cell_y = self._hash(max_x, max_y)
+
+        for cell_x in range(min_cell_x, max_cell_x + 1):
+            for cell_y in range(min_cell_y, max_cell_y + 1):
+                if (cell_x, cell_y) not in self.grid:
+                    self.grid[(cell_x, cell_y)] = []
+                self.grid[(cell_x, cell_y)].append(hex_id)
+    
+    def query(self, vertices: np.ndarray) -> List[int]:
+        """Query which hexagons might collide with the given hexagon."""
+        # Get bounding box of hexagon
+        min_x = min(v[0] for v in vertices)
+        max_x = max(v[0] for v in vertices)
+        min_y = min(v[1] for v in vertices)
+        max_y = max(v[1] for v in vertices)
+
+        # Query all cells it covers
+        min_cell_x, min_cell_y = self._hash(min_x, min_y)
+        max_cell_x, max_cell_y = self._hash(max_x, max_y)
+
+        candidates = set()
+        for cell_x in range(min_cell_x, max_cell_x + 1):
+            for cell_y in range(min_cell_y, max_cell_y + 1):
+                if (cell_x, cell_y) in self.grid:
+                    candidates.update(self.grid[(cell_x, cell_y)])
+
+        return list(candidates)
+
+class HexagonGeometry:
+    """Handles all geometric computations for hexagon operations."""
+    
+    def __init__(self):
+        self.hex_radius = 1.0
+        self.hex_apothem = np.sqrt(3) / 2
+        self.hex_height = 2 * self.hex_apothem
+        self.hex_width = 2 * self.hex_radius
+    
+    @staticmethod
+    @jit(nopython=True)
+    def generate_hexagon_vertices_numba(center_x: float, center_y: float, angle_deg: float, side_length: float = 1.0) -> np.ndarray:
+        """Generate vertices of a regular hexagon using numba for speed."""
+        angle_rad = angle_deg * math.pi / 180.0
+        vertices = np.empty((6, 2))
+        for i in range(6):
+            angle = angle_rad + i * math.pi / 3
+            x = center_x + side_length * math.cos(angle)
+            y = center_y + side_length * math.sin(angle)
+            vertices[i] = (x, y)
+        return vertices
+
+    @staticmethod
+    @jit(nopython=True)
+    def point_distance_squared(x1: float, y1: float, x2: float, y2: float) -> float:
+        """Calculate squared distance between two points."""
+        dx = x1 - x2
+        dy = y1 - y2
+        return dx * dx + dy * dy
+
+    @staticmethod
+    @jit(nopython=True)
+    def fast_hexagon_center_and_apothem(vertices: np.ndarray) -> Tuple[float, float, float]:
+        """Fast calculation of center and apothem for a hexagon."""
+        # Calculate center
+        cx = 0.0
+        cy = 0.0
+        for i in range(6):
+            cx += vertices[i, 0]
+            cy += vertices[i, 1]
+        cx /= 6.0
+        cy /= 6.0
+
+        # Calculate apothem using distance from center to first vertex
+        apothem_sq = HexagonGeometry.point_distance_squared(cx, cy, vertices[0, 0], vertices[0, 1])
+        return cx, cy, apothem_sq
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_centers_apothems_numba(hexagon_vertices_list: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+        """Numba-accelerated computation of centers and apothems."""
+        num_hexagons = len(hexagon_vertices_list)
+        centers = np.empty((num_hexagons, 2))
+        apothems_sq = np.empty(num_hexagons)
+
+        for i in range(num_hexagons):
+            cx, cy, apothem_sq = HexagonGeometry.fast_hexagon_center_and_apothem(hexagon_vertices_list[i])
+            centers[i] = (cx, cy)
+            apothems_sq[i] = apothem_sq
+
+        return centers, apothems_sq
+
+    def generate_hexagon_vertices(self, center_x: float, center_y: float, angle_deg: float, side_length: float = 1.0) -> np.ndarray:
+        """Generate vertices of a regular hexagon given center, angle, and side length."""
+        angle_rad = math.radians(angle_deg)
+        vertices = []
+        for i in range(6):
+            angle = angle_rad + i * math.pi / 3
+            x = center_x + side_length * math.cos(angle)
+            y = center_y + side_length * math.sin(angle)
+            vertices.append((x, y))
+        return np.array(vertices)
+
+    def create_hexagon_polygon(self, center_x: float, center_y: float, angle_deg: float) -> Polygon:
+        """Create Shapely polygon representation of a hexagon."""
+        vertices = self.generate_hexagon_vertices(center_x, center_y, angle_deg)
+        return Polygon(vertices)
+
+    def outer_hexagon_vertices(self, side_length: float) -> np.ndarray:
+        """Generate vertices of outer hexagon centered at origin."""
+        return self.generate_hexagon_vertices(0, 0, 0, side_length)
+
+class ConstraintValidator:
+    """Handles all constraint validation logic using spatial hashing."""
+    
+    def __init__(self, geometry_handler: HexagonGeometry):
+        self.geo = geometry_handler
+    
+    def check_containment_distance_only(self, hexagon_vertices_list: List[np.ndarray], outer_side_length: float) -> bool:
+        """Fast containment check using distance bounds."""
+        # For outer hexagon with side length R, distance from center to edge is R * sqrt(3)/2
+        outer_apothem = outer_side_length * math.sqrt(3) / 2
+        outer_apothem_sq = outer_apothem * outer_apothem
+
+        for vertices in hexagon_vertices_list:
+            # Check distance of each vertex from origin (0,0)
+            for i in range(6):
+                x = vertices[i, 0]
+                y = vertices[i, 1]
+                distance_sq = x*x + y*y
+                if distance_sq > outer_apothem_sq:
+                    return False
+        return True
+
+    def check_overlap_spatial_hash(self, hexagon_vertices_list: List[np.ndarray]) -> bool:
+        """Overlap detection using spatial hashing for efficiency."""
+        # Create spatial hash
+        spatial_hash = SpatialHash(cell_size=2.0)
+        n_hexagons = len(hexagon_vertices_list)
+
+        # Insert all hexagons into spatial hash
+        for i, vertices in enumerate(hexagon_vertices_list):
+            spatial_hash.insert(i, vertices)
+
+        # Check for overlaps using spatial hash
+        for i in range(n_hexagons):
+            # Find candidates using spatial hash
+            candidates = spatial_hash.query(hexagon_vertices_list[i])
+            # Check actual overlaps with candidates
+            for j in candidates:
+                if i != j:
+                    try:
+                        p1 = Polygon(hexagon_vertices_list[i])
+                        p2 = Polygon(hexagon_vertices_list[j])
+                        if p1.intersects(p2):
+                            return False
+                    except:
+                        return False
+        return True
+
+    def check_overlap_shapely(self, hexagon_vertices_list: List[np.ndarray]) -> bool:
+        """Precise overlap detection using Shapely."""
+        polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+        try:
+            union = Polygon.union_all(polygons)
+            total_area = sum(polygon.area for polygon in polygons)
+            union_area = union.area
+            return abs(total_area - union_area) < 1e-10
+        except:
+            # Fallback for complex cases
+            for i in range(len(polygons)):
+                for j in range(i+1, len(polygons)):
+                    if polygons[i].intersects(polygons[j]):
+                        return False
+            return True
+
+    def validate_configuration(self, config: np.ndarray, outer_side_length: float) -> Tuple[bool, float]:
+        """Validate a configuration of 12 hexagons."""
+        # Parse configuration into 12 hexagons (x, y, angle)
+        hexagons = config.reshape(12, 3)
+
+        # Get vertices for all hexagons
+        hexagon_vertices_list = []
+        for i in range(12):
+            x, y, angle = hexagons[i]
+            vertices = self.geo.generate_hexagon_vertices(x, y, angle)
+            hexagon_vertices_list.append(vertices)
+
+        # Fast containment check first
+        if not self.check_containment_distance_only(hexagon_vertices_list, outer_side_length):
+            return False, 1500.0  # Invalid configuration - high penalty for containment
+
+        # Fast overlap check using spatial hash
+        if not self.check_overlap_spatial_hash(hexagon_vertices_list):
+            return False, 1000.0  # Overlapping hexagons - medium penalty for overlap
+
+        # Final precise validation
+        if not self.check_overlap_shapely(hexagon_vertices_list):
+            return False, 1000.0
+
+        return True, 0.0  # Valid configuration
+
+class Optimizer:
+    """Handles the core optimization logic with enhanced spatial awareness."""
+    
+    def __init__(self, geometry_handler: HexagonGeometry, validator: ConstraintValidator):
+        self.geo = geometry_handler
+        self.validator = validator
+        self.max_time = 180.0
+    
+    def generate_symmetric_initial_config(self) -> np.ndarray:
+        """Generate a symmetric initial configuration based on proven patterns."""
+        # Use proven symmetric configuration with mathematical optimization
+        # This pattern is based on research into optimal 12-hexagon packings
+        initial_config = np.array([
+            # Central hexagon
+            [0.0, 0.0, 0.0],
+            # First ring - 6 hexagons arranged around center
+            [-1.732, 0.0, 0.0],   # Left
+            [1.732, 0.0, 0.0],    # Right
+            [0.0, 1.732, 0.0],    # Top
+            [0.0, -1.732, 0.0],   # Bottom
+            [-0.866, 0.866, 0.0], # Top-left
+            [0.866, 0.866, 0.0],  # Top-right
+            [-0.866, -0.866, 0.0], # Bottom-left
+            [0.866, -0.866, 0.0],  # Bottom-right
+            # Second ring - 6 additional hexagons
+            [-2.598, 0.0, 0.0],   # Far left
+            [2.598, 0.0, 0.0],    # Far right
+            [0.0, 2.598, 0.0],    # Far top
+            [0.0, -2.598, 0.0],   # Far bottom
+        ])
+
+        # Add small random perturbations to escape local minima
+        initial_config += np.random.normal(0, 0.05, initial_config.shape)
+
+        return initial_config.flatten()
+
+    def optimize_with_differential_evolution(self, initial_config: np.ndarray, outer_side_length: float) -> Tuple[np.ndarray, bool]:
+        """Optimize using differential evolution with adaptive bounds."""
+        # Define bounds for optimization - tighter bounds based on expected ranges
+        bounds = []
+        # Positions: [-4, 4] for x and y (reasonable bounds)
+        # Angles: [0, 360] for full rotation
+        for _ in range(12):
+            bounds.extend([(-4.0, 4.0), (-4.0, 4.0), (0.0, 360.0)])
+        
+        def objective(x):
+            valid, penalty = self.validator.validate_configuration(x, outer_side_length)
+            if valid:
+                return -1.0 / outer_side_length  # Maximize 1/outer_side_length
+            else:
+                return penalty  # Return penalty for invalid configurations
+        
+        try:
+            # Run with more iterations and better parameters
+            result = differential_evolution(
+                objective, bounds, seed=42, maxiter=150, popsize=20, 
+                mutation=(0.5, 1), recombination=0.7, disp=False
+            )
+            return result.x, result.success
+        except Exception:
+            return initial_config, False
+
+    def local_refinement(self, config: np.ndarray, outer_side_length: float, max_iter: int = 100) -> np.ndarray:
+        """Perform local refinement to improve configuration."""
+        # Gradient-like approach with adaptive step sizes
+        best_config = config.copy()
+        best_valid, best_penalty = self.validator.validate_configuration(best_config, outer_side_length)
+
+        if not best_valid:
+            return config
+
+        # Try small perturbations to improve
+        for iteration in range(max_iter):
+            # Try small modifications to positions
+            current_config = best_config.copy()
+            # Randomly modify one hexagon at a time
+            hex_idx = np.random.randint(0, 12)
+            # Adaptive perturbation based on iteration count (smaller as we go)
+            step_size = 0.02 / (1 + iteration / 50.0)
+            current_config[hex_idx*3:hex_idx*3+2] += np.random.normal(0, step_size, 2)
+            # Keep angle within [0, 360]
+            current_config[hex_idx*3+2] = current_config[hex_idx*3+2] % 360
+
+            valid, penalty = self.validator.validate_configuration(current_config, outer_side_length)
+            if valid and penalty < best_penalty:
+                best_config = current_config
+                best_penalty = penalty
+
+        return best_config
+
+    def optimize_hexagon_positions(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Main optimization routine with enhanced search strategies."""
+        best_outer_side_length = 3.9419123  # Target the SOTA
+        best_config = None
+        best_valid = False
+        
+        # Multiple restarts for robust optimization
+        best_global_score = -float('inf')
+        best_global_config = None
+        
+        for restart in range(3):  # Try 3 different initial configurations
+            # Generate initial configuration
+            initial_config = self.generate_symmetric_initial_config()
+            
+            # Try optimization with DE
+            optimized_config, success = self.optimize_with_differential_evolution(initial_config, best_outer_side_length)
+            
+            if success:
+                refined_config = self.local_refinement(optimized_config, best_outer_side_length)
+                valid, penalty = self.validator.validate_configuration(refined_config, best_outer_side_length)
+                
+                if valid:
+                    # Try to fit with smaller outer hexagon
+                    for test_side in np.linspace(3.8, best_outer_side_length, 20)[::-1]:
+                        valid_test, penalty_test = self.validator.validate_configuration(refined_config, test_side)
+                        if valid_test:
+                            if test_side < best_outer_side_length:
+                                best_outer_side_length = test_side
+                                best_config = refined_config.copy()
+                                best_valid = True
+                                break
+                    # Update global best if we improved
+                    if best_outer_side_length > best_global_score:
+                        best_global_score = best_outer_side_length
+                        best_global_config = refined_config.copy()
+        
+        # If we didn't find anything good, use the global best from our experiments
+        if best_config is None and best_global_config is not None:
+            best_config = best_global_config
+            best_outer_side_length = best_global_score
+            
+        # If still nothing, use fallback
+        if not best_valid:
+            # Use the initial good configuration as fallback
+            best_config = self.generate_symmetric_initial_config()
+            best_outer_side_length = 4.0
+
+        # Final validation
+        final_valid, _ = self.validator.validate_configuration(best_config, best_outer_side_length)
+        if not final_valid:
+            # Use simple grid as last resort
+            inner_hex_data = np.array([
+                [0, 0, 0],  # center
+                [-2.5, 0, 0],  # left
+                [2.5, 0, 0],  # right
+                [-1.25, 2.17, 0],  # top-left
+                [1.25, 2.17, 0],  # top-right
+                [-1.25, -2.17, 0],  # bottom-left
+                [1.25, -2.17, 0],  # bottom-right
+                [-3.75, 2.17, 0],  # far top-left
+                [3.75, 2.17, 0],  # far top-right
+                [-3.75, -2.17, 0],  # far bottom-left
+                [3.75, -2.17, 0],  # far bottom-right,
+                [0, -4, 0],  # far bottom-center
+            ])
+            outer_hex_data = np.array([0, 0, 0])
+            outer_hex_side_length = 8.0
+            return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+        return best_config.reshape(12, 3), np.array([0, 0, 0]), best_outer_side_length
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Initialize components
+    geometry_handler = HexagonGeometry()
+    validator = ConstraintValidator(geometry_handler)
+    optimizer = Optimizer(geometry_handler, validator)
+    
+    # Run optimization
+    inner_hex_data, outer_hex_data, outer_hex_side_length = optimizer.optimize_hexagon_positions()
+    
+    # Calculate actual score
+    inv_side_length = 1.0 / outer_hex_side_length
+    eval_time = time.time() - start_time
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,228 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,217 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++import random
++from deap import base, creator, tools, algorithms
++from scipy.spatial.distance import cdist
++import math
++
++# Fixed seed for reproducibility
++random.seed(42)
++np.random.seed(42)
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    
++    # Problem parameters
++    n_circles = 26
++    max_radius = 0.5
++    
++    def evaluate_individual(individual):
++        """Evaluate the fitness of an individual (set of circles)"""
++        circles = np.array(individual).reshape(-1, 3)
++        
++        # Check containment and overlap constraints
++        total_radius = np.sum(circles[:, 2])
++        
++        # Penalty for violations
++        penalty = 0
++        
++        # Check containment constraints
++        for i in range(n_circles):
++            x, y, r = circles[i]
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                penalty += 1000000
++        
++        # Check overlap constraints
++        for i in range(n_circles):
++            for j in range(i+1, n_circles):
++                x1, y1, r1 = circles[i]
++                x2, y2, r2 = circles[j]
++                distance = math.sqrt((x1-x2)**2 + (y1-y2)**2)
++                if distance < r1 + r2:
++                    penalty += 1000000
++                    
++        # Return negative of total radius as we're maximizing
++        return (-total_radius - penalty,)
++    
++    def create_individual():
++        """Create a valid initial individual using Voronoi-inspired approach"""
++        tries = 0
++        max_tries = 1000
++        
++        while tries < max_tries:
++            # Try Voronoi-inspired approach first
++            try:
++                circles = []
++                # Create initial points using a grid-like distribution
++                grid_size = int(math.ceil(math.sqrt(n_circles)))
++                
++                # Generate points in a grid pattern
++                points = []
++                spacing = 1.0 / (grid_size + 1)
++                for i in range(1, grid_size + 1):
++                    for j in range(1, grid_size + 1):
++                        if len(points) < n_circles:
++                            points.append((i * spacing, j * spacing))
++                
++                # Add some randomness to avoid perfect grid
++                for i in range(len(points)):
++                    if len(points) <= i:
++                        break
++                    px, py = points[i]
++                    # Add small random offset
++                    px += random.uniform(-spacing/4, spacing/4)
++                    py += random.uniform(-spacing/4, spacing/4)
++                    
++                    # Ensure valid range
++                    px = max(0.01, min(0.99, px))
++                    py = max(0.01, min(0.99, py))
++                    
++                    # Set initial radius to a fraction of spacing
++                    radius = min(spacing/2, 0.1)
++                    circles.append((px, py, radius))
++                
++                # If we don't have enough circles, add more with random placement
++                while len(circles) < n_circles:
++                    x = random.uniform(0.01, 0.99)
++                    y = random.uniform(0.01, 0.99)
++                    radius = min(0.1, max(0.01, random.uniform(0.01, 0.1)))
++                    circles.append((x, y, radius))
++                
++                # Trim to exactly n_circles
++                circles = circles[:n_circles]
++                
++                # Try to optimize this initial configuration
++                # Use a simple local search to improve placement
++                for _ in range(100):
++                    improved = False
++                    for i in range(n_circles):
++                        best_x, best_y, best_r = circles[i]
++                        best_fitness = evaluate_individual([circles[j] for j in range(n_circles)])[0]
++                        
++                        # Try small perturbations
++                        for dx in [-0.01, -0.005, 0, 0.005, 0.01]:
++                            for dy in [-0.01, -0.005, 0, 0.005, 0.01]:
++                                for dr in [-0.005, 0, 0.005]:
++                                    new_circles = circles.copy()
++                                    new_circles[i] = (max(0.01, min(0.99, best_x + dx)), 
++                                                     max(0.01, min(0.99, best_y + dy)),
++                                                     max(0.001, min(0.49, best_r + dr)))
++                                    new_fitness = evaluate_individual(new_circles)[0]
++                                    if new_fitness < best_fitness:
++                                        best_fitness = new_fitness
++                                        best_x, best_y, best_r = new_circles[i]
++                                        improved = True
++                        circles[i] = (best_x, best_y, best_r)
++                        
++                        if not improved:
++                            break
++                
++                return circles
++            
++            except Exception:
++                tries += 1
++                continue
++        
++        # Fallback to completely random initialization
++        circles = []
++        for _ in range(n_circles):
++            x = random.uniform(0.01, 0.99)
++            y = random.uniform(0.01, 0.99)
++            radius = min(0.1, max(0.01, random.uniform(0.01, 0.1)))
++            circles.append((x, y, radius))
++        
++        return circles
++    
++    def mutate_individual(individual):
++        """Custom mutation operator"""
++        mutated = individual[:]
++        for i in range(len(mutated)):
++            # With some probability, modify the circle
++            if random.random() < 0.3:
++                x, y, r = mutated[i]
++                
++                # Mutate position with small random steps
++                dx = random.uniform(-0.01, 0.01)
++                dy = random.uniform(-0.01, 0.01)
++                dr = random.uniform(-0.005, 0.005)
++                
++                x_new = max(0.01, min(0.99, x + dx))
++                y_new = max(0.01, min(0.99, y + dy))
++                r_new = max(0.001, min(0.49, r + dr))
++                
++                mutated[i] = (x_new, y_new, r_new)
++        
++        return mutated,
++    
++    # Set up DEAP
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate_individual)
++    toolbox.register("mate", tools.cxUniform, indpb=0.3)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Run evolution
++    population = toolbox.population(n=50)
++    
++    # Run the evolution algorithm
++    hof = tools.HallOfFame(1)
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Evolution with limited iterations
++    pop, logbook = algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, 
++                                       ngen=50, stats=stats, halloffame=hof, verbose=False)
++    
++    # Get the best individual
++    best_individual = hof[0]
++    
++    # Convert to numpy array 
++    circles = np.array(best_individual).reshape(-1, 3)
++    
++    # Final constraint check and repair
++    final_circles = []
++    for i in range(n_circles):
++        x, y, r = circles[i]
++        
++        # Ensure containment 
++        r = min(r, x, 1-x, y, 1-y)
++        
++        # Ensure no overlaps
++        for j in range(i):
++            xj, yj, rj = final_circles[j]
++            distance = math.sqrt((x-xj)**2 + (y-yj)**2)
++            if distance < r + rj:
++                # Reduce radius to prevent overlap
++                r = max(0.001, min(r, distance - rj - 0.001))
++        
++        final_circles.append((x, y, r))
++    
++    # Convert to numpy array and return
++    result = np.array(final_circles)
++    
++    return result
+ 
+ # EVOLVE-BLOCK-END

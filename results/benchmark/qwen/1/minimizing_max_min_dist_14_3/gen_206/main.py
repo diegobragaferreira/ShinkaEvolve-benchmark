@@ -1,0 +1,487 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+from scipy.spatial import SphericalVoronoi
+from sklearn.cluster import KMeans
+import time
+from typing import List, Tuple, Callable, Any
+import warnings
+
+class PointArrangementOptimizer:
+    """Structured optimizer for maximizing min/max distance ratio of 14 3D points."""
+    
+    def __init__(self, num_points: int = 14, dimension: int = 3):
+        self.num_points = num_points
+        self.dimension = dimension
+        self.best_solution = None
+        self.best_ratio = -np.inf
+        
+    def initialize_points(self, method: str = 'torus') -> np.ndarray:
+        """Generate initial point configurations using various methods."""
+        if method == 'torus':
+            return self._torus_initialization()
+        elif method == 'clustering':
+            return self._clustering_initialization()
+        elif method == 'fibonacci':
+            return self._fibonacci_initialization()
+        elif method == 'icosahedron':
+            return self._icosahedron_initialization()
+        elif method == 'random':
+            return self._random_initialization()
+        else:
+            raise ValueError(f"Unknown initialization method: {method}")
+    
+    def _torus_initialization(self) -> np.ndarray:
+        """Generate points on a torus surface and map to sphere."""
+        points = []
+        R, r = 1.0, 0.5
+        for i in range(self.num_points):
+            theta = 2 * np.pi * i / self.num_points
+            phi = 2 * np.pi * np.random.random()
+            
+            x = (R + r * np.cos(phi)) * np.cos(theta)
+            y = (R + r * np.cos(phi)) * np.sin(theta)
+            z = r * np.sin(phi)
+            
+            points.append([x, y, z])
+        
+        torus_points = np.array(points)
+        
+        # Map to sphere
+        norms = np.linalg.norm(torus_points, axis=1, keepdims=True)
+        sphere_points = torus_points / np.maximum(norms, 1e-12)
+        
+        # Apply slight adjustment to spread points more evenly
+        adjustment_factor = 0.1
+        for i in range(len(sphere_points)):
+            perturbation = adjustment_factor * sphere_points[i] * np.random.random()
+            sphere_points[i] += perturbation
+        
+        # Renormalize
+        norms = np.linalg.norm(sphere_points, axis=1, keepdims=True)
+        sphere_points = sphere_points / np.maximum(norms, 1e-12)
+        
+        return sphere_points
+    
+    def _clustering_initialization(self) -> np.ndarray:
+        """Initialize points using k-means clustering approach for even distribution."""
+        # Start with random points
+        np.random.seed(42)
+        points = np.random.rand(self.num_points, self.dimension) * 2 - 1  # [-1, 1]
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points = points / np.maximum(norms, 1e-12)
+        
+        # Apply k-means clustering to identify natural groupings
+        # and adjust points to spread them out
+        if self.num_points > 1:
+            kmeans = KMeans(n_clusters=min(self.num_points, 8), random_state=42, n_init=10)
+            labels = kmeans.fit_predict(points)
+            
+            # Adjust points to increase separation
+            centers = kmeans.cluster_centers_
+            for i in range(self.num_points):
+                if self.num_points > 1:
+                    # Move points away from cluster centers
+                    center_idx = labels[i]
+                    direction = points[i] - centers[center_idx]
+                    distance_from_center = np.linalg.norm(direction)
+                    if distance_from_center > 1e-12:
+                        # Push points outward slightly
+                        push_strength = 0.02 / (distance_from_center + 1e-12)
+                        points[i] += direction * push_strength
+        
+        return points
+    
+    def _fibonacci_initialization(self) -> np.ndarray:
+        """Generate points on a sphere using Fibonacci spiral method."""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+
+        for i in range(self.num_points):
+            y = 1 - (i / float(self.num_points - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(max(0, 1 - y * y))  # radius at y
+
+            theta = phi * i  # golden angle increment
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        fib_points = np.array(points)
+        
+        # Normalize
+        norms = np.linalg.norm(fib_points, axis=1, keepdims=True)
+        fib_points = fib_points / np.maximum(norms, 1e-12)
+        
+        return fib_points
+    
+    def _icosahedron_initialization(self) -> np.ndarray:
+        """Generate points using icosahedron-based construction."""
+        # Vertices of a regular icosahedron
+        phi = (1 + np.sqrt(5)) / 2  # golden ratio
+        vertices = np.array([
+            [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+            [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+            [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+        ])
+
+        # Normalize to unit sphere
+        vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+
+        # If we need more than 12 points, distribute additional points
+        if self.num_points <= 12:
+            # Just return subset of vertices
+            return vertices[:self.num_points]
+        else:
+            # For more points, we'll start with icosahedron vertices and add more
+            points = vertices.copy()
+
+            # Add more points for better distribution
+            additional_points = [
+                [0, 0, 1], [0, 0, -1],  # poles
+                [1, 0, 0], [-1, 0, 0],  # x-axis
+                [0, 1, 0], [0, -1, 0]   # y-axis
+            ]
+            
+            points = np.vstack([points, additional_points[:self.num_points - 12]])
+            
+            # Apply perturbation to ensure good distribution
+            np.random.seed(42)
+            points += np.random.normal(0, 0.05, (points.shape[0], 3))
+            
+            # Normalize again to maintain unit sphere
+            norms = np.linalg.norm(points, axis=1)
+            points = points / np.maximum(norms[:, np.newaxis], 1e-12)
+            
+            return points[:self.num_points]
+    
+    def _random_initialization(self) -> np.ndarray:
+        """Generate random points on unit sphere."""
+        np.random.seed(42)
+        points = np.random.randn(self.num_points, self.dimension)
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        return points / np.maximum(norms, 1e-12)
+    
+    def calculate_min_max_ratio(self, points: np.ndarray) -> float:
+        """Calculate the ratio of minimum to maximum distance."""
+        if len(points) < 2:
+            return 0.0
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0.0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist < 1e-12:
+            return 0.0
+        return min_dist / max_dist
+    
+    def _constraint_sphere(self, x_flat: np.ndarray) -> float:
+        """Constraint function to keep points on unit sphere."""
+        points = x_flat.reshape(-1, self.dimension)
+        norms = np.linalg.norm(points, axis=1)
+        # Return mean squared difference from unit sphere
+        return np.mean((norms - 1.0)**2)
+    
+    def _objective_function(self, x_flat: np.ndarray) -> float:
+        """Objective function to maximize min/max distance ratio."""
+        points = x_flat.reshape(-1, self.dimension)
+        
+        # Ensure points are on unit sphere with better numerical stability
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        safe_norms = np.where(norms == 0, 1, norms)
+        normalized_points = points / safe_norms
+        
+        ratio = self.calculate_min_max_ratio(normalized_points)
+        return -ratio  # Negative because we want to maximize
+    
+    def hybrid_optimization(self, points, max_iter=1000):
+        """Perform hybrid optimization combining multiple strategies"""
+        
+        def objective(x_flat):
+            points_reshaped = x_flat.reshape(-1, 3)
+            
+            # Ensure points are on unit sphere
+            norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+            normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+            
+            # Calculate ratio
+            ratio = self.calculate_min_max_ratio(normalized_points)
+            
+            # Add penalty for non-uniformity (high variation in distances)
+            distances = pdist(normalized_points)
+            if len(distances) > 0:
+                dist_std = np.std(distances)
+                dist_mean = np.mean(distances)
+                if dist_mean > 1e-12:
+                    uniformity_penalty = dist_std / dist_mean
+                    # We want to maximize ratio AND minimize uniformity penalty
+                    return -(ratio - 0.1 * uniformity_penalty)
+            return -ratio if ratio > 0 else 1e10
+        
+        def constraint_sphere(x_flat):
+            points_reshaped = x_flat.reshape(-1, 3)
+            norms = np.linalg.norm(points_reshaped, axis=1)
+            return norms - 1.0
+        
+        constraints = {'type': 'eq', 'fun': constraint_sphere}
+        bounds = [(-2, 2) for _ in range(len(points) * 3)]
+        
+        # Multi-stage optimization with adaptive tightening
+        best_points = points.copy()
+        best_ratio = self.calculate_min_max_ratio(points)
+        
+        # Stage 1: Coarse optimization with relaxed constraints
+        try:
+            result = minimize(
+                objective,
+                points.flatten(),
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': max_iter//3, 'ftol': 1e-6, 'gtol': 1e-6}
+            )
+            if result.success:
+                refined_points = result.x.reshape(-1, 3)
+                norms = np.linalg.norm(refined_points, axis=1, keepdims=True)
+                refined_points = refined_points / np.maximum(norms, 1e-12)
+                
+                ratio = self.calculate_min_max_ratio(refined_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = refined_points.copy()
+        except Exception:
+            pass
+        
+        # Stage 2: Fine optimization with stricter criteria
+        try:
+            result = minimize(
+                objective,
+                best_points.flatten(),
+                method='trust-constr',
+                constraints=constraints,
+                options={'maxiter': max_iter//3, 'xtol': 1e-9, 'gtol': 1e-9}
+            )
+            if result.success:
+                refined_points = result.x.reshape(-1, 3)
+                norms = np.linalg.norm(refined_points, axis=1, keepdims=True)
+                refined_points = refined_points / np.maximum(norms, 1e-12)
+                
+                ratio = self.calculate_min_max_ratio(refined_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = refined_points.copy()
+        except Exception:
+            pass
+        
+        # Stage 3: Local refinement with L-BFGS-B
+        try:
+            result = minimize(
+                objective,
+                best_points.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iter//3, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            if result.success:
+                refined_points = result.x.reshape(-1, 3)
+                norms = np.linalg.norm(refined_points, axis=1, keepdims=True)
+                refined_points = refined_points / np.maximum(norms, 1e-12)
+                
+                ratio = self.calculate_min_max_ratio(refined_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = refined_points.copy()
+        except Exception:
+            pass
+        
+        return best_points
+
+    def _optimize_single_run(self, x0: np.ndarray) -> Tuple[np.ndarray, float]:
+        """Perform optimization with multiple algorithms on given initial points."""
+        best_points = x0.copy()
+        best_ratio = self.calculate_min_max_ratio(x0.reshape(-1, self.dimension))
+        
+        # Define bounds and constraints
+        bounds = [(-2, 2) for _ in range(self.num_points * self.dimension)]
+        constraints = {'type': 'eq', 'fun': self._constraint_sphere}
+        
+        # Try SLSQP for global convergence
+        try:
+            result_slsqp = minimize(
+                self._objective_function,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9},
+                tol=1e-9
+            )
+            
+            if result_slsqp.success:
+                optimized_points = result_slsqp.x.reshape(-1, self.dimension)
+                # Ensure normalization
+                norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                safe_norms = np.where(norms == 0, 1, norms)
+                normalized_points = optimized_points / safe_norms
+                
+                ratio = self.calculate_min_max_ratio(normalized_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = normalized_points.copy()
+                    
+        except Exception as e:
+            warnings.warn(f"SLSQP optimization failed: {e}")
+        
+        # Try L-BFGS-B for local refinement
+        try:
+            result_lbfgsb = minimize(
+                self._objective_function,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+            
+            if result_lbfgsb.success:
+                optimized_points = result_lbfgsb.x.reshape(-1, self.dimension)
+                # Ensure normalization
+                norms = np.linalg.norm(optimized_points, axis=1, keepdims=True)
+                safe_norms = np.where(norms == 0, 1, norms)
+                normalized_points = optimized_points / safe_norms
+                
+                ratio = self.calculate_min_max_ratio(normalized_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = normalized_points.copy()
+                    
+        except Exception as e:
+            warnings.warn(f"L-BFGS-B optimization failed: {e}")
+        
+        return best_points, best_ratio
+    
+    def optimize(self) -> Tuple[np.ndarray, dict]:
+        """Main optimization procedure with multiple strategies."""
+        # Strategy 1: Multiple initialization methods
+        init_strategies = ['torus', 'clustering', 'fibonacci', 'icosahedron', 'random']
+        results = []
+        
+        for strategy in init_strategies:
+            try:
+                # Generate initial points
+                initial_points = self.initialize_points(strategy)
+                
+                # Add noise to break symmetry
+                np.random.seed(42)
+                noisy_points = initial_points + np.random.normal(0, 0.01, initial_points.shape)
+                
+                # Ensure they are on unit sphere
+                norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+                normalized_points = noisy_points / np.maximum(norms, 1e-12)
+                
+                # Flatten for optimization
+                x0 = normalized_points.flatten()
+                
+                # Single optimization run
+                optimized_points, ratio = self._optimize_single_run(x0)
+                
+                results.append((strategy, optimized_points, ratio))
+                
+                # Update global best
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_solution = optimized_points.copy()
+                    
+            except Exception as e:
+                warnings.warn(f"Strategy {strategy} failed: {e}")
+                continue
+        
+        # Strategy 2: Additional restarts with different random seeds
+        for seed in [123, 456, 789]:
+            try:
+                # Random initialization with different seed
+                np.random.seed(seed)
+                random_points = np.random.randn(self.num_points, self.dimension)
+                norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+                normalized_random = random_points / np.maximum(norms, 1e-12)
+                
+                x0 = normalized_random.flatten()
+                
+                # Single optimization run
+                optimized_points, ratio = self._optimize_single_run(x0)
+                
+                results.append((f"restart_{seed}", optimized_points, ratio))
+                
+                # Update global best
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_solution = optimized_points.copy()
+                    
+            except Exception as e:
+                warnings.warn(f"Random restart seed {seed} failed: {e}")
+                continue
+        
+        # Strategy 3: Hybrid optimization with better initialization
+        try:
+            # Try hybrid optimization with some of the best initializations
+            hybrid_initializers = ['icosahedron', 'fibonacci', 'torus']
+            for init_method in hybrid_initializers:
+                initial_points = self.initialize_points(init_method)
+                # Apply hybrid optimization specifically
+                optimized_points = self.hybrid_optimization(initial_points, max_iter=800)
+                
+                ratio = self.calculate_min_max_ratio(optimized_points)
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_solution = optimized_points.copy()
+                    
+        except Exception as e:
+            warnings.warn(f"Hybrid optimization failed: {e}")
+        
+        # If we still have no good solution, fallback to simple random points
+        if self.best_solution is None:
+            np.random.seed(42)
+            random_points = np.random.randn(self.num_points, self.dimension)
+            norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+            self.best_solution = random_points / np.maximum(norms, 1e-12)
+            self.best_ratio = self.calculate_min_max_ratio(self.best_solution)
+        
+        # Prepare statistics
+        stats = {
+            'min_max_ratio': self.best_ratio,
+            'benchmark_ratio': self.best_ratio / 0.4898,
+            'max_distance': 0.0,  # Will be calculated from actual points
+            'eval_time': 0.0
+        }
+        
+        # Calculate max distance for stats
+        distances = pdist(self.best_solution)
+        if len(distances) > 0:
+            stats['max_distance'] = np.max(distances)
+        
+        return self.best_solution, stats
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    # Create optimizer instance
+    optimizer = PointArrangementOptimizer(num_points=14, dimension=3)
+    
+    # Perform optimization
+    points, _ = optimizer.optimize()
+    
+    return points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,317 @@
+<NAME>
+enhance_initialization_and_optimization
+</NAME>
+
+<DESCRIPTION>
+This improvement focuses on enhancing both the initialization strategy and optimization approach to better solve the point dispersion problem. The key changes include:
+
+1. Using a more sophisticated initial configuration based on known good arrangements for 16 points in 2D
+2. Implementing a multi-start optimization strategy with diverse initialization methods
+3. Adding multiple optimization techniques (L-BFGS-B and SLSQP) with different tolerances
+4. Improving the distance computation using scipy.spatial.distance for better performance
+5. Adding proper constraint handling and time management to meet the 180-second budget
+
+These changes aim to move beyond simple grid initialization towards more intelligent starting points that are closer to optimal, and use a more robust optimization approach that tries multiple methods and starts to achieve better min/max ratios.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances
+        distances = []
+        for i in range(len(points)):
+            for j in range(i+1, len(points)):
+                dist = np.sqrt(np.sum((points[i] - points[j])**2))
+                distances.append(dist)
+
+        # Convert to numpy array for easier handling
+        distances = np.array(distances)
+
+        # Return negative ratio (since we want to maximize ratio, we minimize negative ratio)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    def constraint_fun(x):
+        # Ensure all points are within [0,1] x [0,1]
+        points = x.reshape(-1, 2)
+        # Check bounds
+        lower_bound = np.all(points >= 0)
+        upper_bound = np.all(points <= 1)
+        return float(lower_bound and upper_bound)
+
+    # Create initial grid points
+    n = 16
+    d = 2
+
+    # Initialize points on a regular 4x4 grid scaled to [0,1]x[0,1]
+    grid_size = int(np.sqrt(n))
+    x_vals = np.linspace(0.05, 0.95, grid_size)
+    y_vals = np.linspace(0.05, 0.95, grid_size)
+
+    points_grid = np.array([[x, y] for x in x_vals for y in y_vals])
+
+    # Add some random perturbations to avoid degenerate cases
+    np.random.seed(42)
+    noise = np.random.normal(0, 0.01, points_grid.shape)
+    points_init = points_grid + noise
+    points_init = np.clip(points_init, 0, 1)
+
+    # Flatten initial points for optimization
+    x0 = points_init.flatten()
+
+    # Define bounds (all coordinates between 0 and 1)
+    bounds = [(0, 1) for _ in range(2*n)]
+
+    # Use SLSQP optimization method
+    result = minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9}
+    )
+
+    # Reshape result back to points
+    final_points = result.x.reshape(-1, 2)
+
+    return final_points
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def objective(x):
+        # Reshape x back to points array
+        points = x.reshape(-1, 2)
+
+        # Compute pairwise distances efficiently using scipy
+        distances = pdist(points)
+
+        # Return negative ratio (since we want to maximize ratio, we minimize negative ratio)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+
+        return -min_dist / max_dist
+
+    def evaluate_solution(points):
+        """Evaluate the quality of a solution"""
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 0
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        return min_dist / max_dist
+
+    def create_better_initial():
+        """Create a better initial configuration based on known good arrangements"""
+        # Start with a structured pattern that's known to work well for 16 points
+        # Using a modified hexagonal pattern with slight randomness
+        np.random.seed(42)
+
+        # Create four rows with alternating column offsets (hexagonal-like arrangement)
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+                # Add small random perturbation to break symmetry
+                x += (np.random.random() - 0.5) * 0.03
+                y += (np.random.random() - 0.5) * 0.03
+                points.append([x, y])
+
+        # Clip to bounds
+        points = np.clip(points, 0, 1)
+        return points
+
+    def create_alternative_initial():
+        """Create an alternative initial configuration"""
+        # Create a more uniform distribution
+        np.random.seed(42)
+        points = []
+        # Create points in a more spread-out arrangement
+        for i in range(4):
+            for j in range(4):
+                # Add jitter to make it less regular
+                x = 0.1 + 0.8 * j / 3 + np.random.normal(0, 0.02)
+                y = 0.1 + 0.8 * i / 3 + np.random.normal(0, 0.02)
+                points.append([x, y])
+
+        # Clip to bounds
+        points = np.clip(points, 0, 1)
+        return np.array(points)
+
+    def multi_start_optimization():
+        """Run optimization with multiple starting points and methods"""
+        best_ratio = -np.inf
+        best_points = None
+        start_time = time.time()
+        time_limit = 170  # Leave some buffer for final processing
+
+        # Strategy 1: Better structured initial configuration
+        try:
+            if time.time() - start_time < time_limit:
+                initial_points = create_better_initial()
+                x0 = initial_points.flatten()
+                bounds = [(0, 1) for _ in range(32)]
+
+                # Try L-BFGS-B first
+                result = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+
+                if result.success:
+                    final_points = result.x.reshape(-1, 2)
+                    ratio = evaluate_solution(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+        except Exception as e:
+            pass
+
+        # Strategy 2: Alternative initial configuration
+        try:
+            if time.time() - start_time < time_limit:
+                initial_points = create_alternative_initial()
+                x0 = initial_points.flatten()
+                bounds = [(0, 1) for _ in range(32)]
+
+                # Try SLSQP as fallback with better tolerances
+                result = minimize(
+                    objective,
+                    x0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+                )
+
+                if result.success:
+                    final_points = result.x.reshape(-1, 2)
+                    ratio = evaluate_solution(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+        except Exception as e:
+            pass
+
+        # Strategy 3: Multiple random starts with different seeds
+        try:
+            for seed in [123, 456, 789]:
+                if time.time() - start_time >= time_limit:
+                    break
+                np.random.seed(seed)
+                random_points = np.random.rand(16, 2)
+                x0 = random_points.flatten()
+                bounds = [(0, 1) for _ in range(32)]
+
+                result = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+
+                if result.success:
+                    final_points = result.x.reshape(-1, 2)
+                    ratio = evaluate_solution(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+        except Exception as e:
+            pass
+
+        # Strategy 4: Final refinement with higher precision
+        try:
+            if best_points is not None and time.time() - start_time < time_limit:
+                x0 = best_points.flatten()
+                bounds = [(0, 1) for _ in range(32)]
+
+                # High precision optimization
+                result = minimize(
+                    objective,
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 1000, 'ftol': 1e-15, 'gtol': 1e-15}
+                )
+
+                if result.success:
+                    final_points = result.x.reshape(-1, 2)
+                    ratio = evaluate_solution(final_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+        except Exception as e:
+            pass
+
+        # Return best solution found or default
+        if best_points is not None:
+            return best_points
+        else:
+            # Fallback to the better initial configuration
+            return create_better_initial()
+
+    # Execute multi-start optimization
+    final_points = multi_start_optimization()
+
+    # Ensure final points are within bounds
+    final_points = np.clip(final_points, 0, 1)
+
+    return final_points
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

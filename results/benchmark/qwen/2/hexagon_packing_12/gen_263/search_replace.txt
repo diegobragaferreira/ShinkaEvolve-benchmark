@@ -1,0 +1,94 @@
+<NAME>
+add_spatial_hashing_optimization
+</NAME>
+
+<DESCRIPTION>
+This improvement implements proper spatial hashing for overlap detection, which will significantly speed up the constraint validation process. The current implementation only uses distance-based filtering, but spatial hashing provides O(n) average case complexity instead of O(n²) for overlap checking. This enables faster fitness evaluations during optimization, allowing for more iterations and better exploration of the solution space to achieve the target 1/outer_hex_side_length = 1/3.9419123 ≈ 0.2537.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def validate_configuration(inner_hexagons: List[Hexagon], outer_polygon: Polygon) -> Tuple[bool, bool]:
+    """
+    Validate configuration: check containment and overlap
+    Returns (is_valid, has_overlaps)
+    """
+    # Check containment
+    for hex in inner_hexagons:
+        if not check_containment(hex, outer_polygon):
+            return False, False
+
+    # Precompute all vertices for spatial hashing
+    n = len(inner_hexagons)
+    hex_vertices_list = []
+    for hex in inner_hexagons:
+        hex_vertices_list.append(hex.vertices())
+
+    # Create spatial hash for fast overlap detection
+    # Convert vertices list to appropriate format for JIT function
+    vertices_array = []
+    for vertices in hex_vertices_list:
+        vertices_array.append(vertices)
+
+    # Use simplified approach for the spatial hash creation
+    # Since we can't pass arrays to numba properly, we'll precompute and use a simpler approach for now
+
+    # Check overlaps using optimized spatial hash approach
+    # Since full numba integration is complex, we'll implement a simpler version
+    # that still improves performance over naive O(n^2) checking
+    for i in range(len(inner_hexagons)):
+        # For each hexagon, check nearby ones using spatial reasoning
+        for j in range(i+1, len(inner_hexagons)):
+            # Simple distance-based filtering to avoid most unnecessary checks
+            center1 = inner_hexagons[i].center
+            center2 = inner_hexagons[j].center
+            distance = np.linalg.norm(center1 - center2)
+
+            # Only perform detailed overlap check if centers are close enough
+            # Approximate threshold: roughly 2 side lengths + padding
+            if distance < 3.0:  # 2*1 (hex radius) + 1 (padding)
+                if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                    return True, True
+
+    return True, False
+=======
+def validate_configuration(inner_hexagons: List[Hexagon], outer_polygon: Polygon) -> Tuple[bool, bool]:
+    """
+    Validate configuration: check containment and overlap
+    Returns (is_valid, has_overlaps)
+    """
+    # Check containment
+    for hex in inner_hexagons:
+        if not check_containment(hex, outer_polygon):
+            return False, False
+
+    # Precompute all vertices for spatial hashing
+    n = len(inner_hexagons)
+    hex_vertices_list = []
+    for hex in inner_hexagons:
+        hex_vertices_list.append(hex.vertices())
+
+    # Create spatial hash for fast overlap detection using the JIT-compiled function
+    # Convert to list of arrays for numba compatibility
+    vertices_array = []
+    for vertices in hex_vertices_list:
+        vertices_array.append(vertices)
+
+    # Create spatial hash using JIT compiled function
+    hash_grid = create_spatial_hash_jit(vertices_array)
+
+    # Check overlaps using spatial hash approach
+    for i in range(len(inner_hexagons)):
+        # Get potentially overlapping hexagons from spatial hash
+        overlapping_indices = get_overlapping_indices_jit(hash_grid, i, hex_vertices_list[i])
+
+        # Check actual overlaps with these candidates
+        for j in overlapping_indices:
+            if i < j:  # Avoid double counting
+                if check_overlap_jit(inner_hexagons[i], inner_hexagons[j]):
+                    return True, True
+
+    return True, False
+>>>>>>> REPLACE
+
+</DIFF>

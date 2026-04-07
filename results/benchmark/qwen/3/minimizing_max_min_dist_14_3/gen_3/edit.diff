@@ -1,0 +1,101 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,91 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import minimize
++from scipy.spatial.distance import pdist, squareform
++import time
+ 
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+-        points: np.ndarray of shape (14,3) containing the (x,y) coordinates of the 14 points.
+-
++        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+ 
+-    n = 14
+-    d = 3
++    def objective(x):
++        # Reshape x into points array
++        points = x.reshape(-1, 3)
+ 
+-    # places points randomly
++        # Compute pairwise distances
++        distances = pdist(points)
++
++        # Calculate min and max distances
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++
++        # Return negative ratio to maximize (min/max) by minimizing (-min/max)
++        if max_dist == 0:
++            return 0
++        return -min_dist / max_dist
++
++    def constraint_func(x):
++        # Ensure points are within unit cube [0,1]^3
++        points = x.reshape(-1, 3)
++        return np.concatenate([
++            points.flatten() - 0,     # lower bound
++            1 - points.flatten()      # upper bound
++        ])
++
++    # Initialize points in a more intelligent way
+     np.random.seed(42)
+-    points = np.random.randn(n, d)
+ 
+-    return points
++    # Start with a good initial configuration (approximate sphere packing)
++    initial_points = []
++    # Generate points on a sphere and then perturb slightly
++    for i in range(14):
++        # Fibonacci spiral approach for roughly uniform distribution
++        phi = np.arccos(1 - 2*(i/(14-1)))
++        theta = np.sqrt(14) * phi
++        x = np.sin(phi) * np.cos(theta)
++        y = np.sin(phi) * np.sin(theta)
++        z = np.cos(phi)
++        initial_points.append([x, y, z])
++
++    initial_points = np.array(initial_points) * 0.5 + 0.5  # Scale and shift to [0,1]^3
++    initial_points += np.random.normal(0, 0.01, (14, 3))  # Add small noise
++
++    # Clip to ensure they're within bounds
++    initial_points = np.clip(initial_points, 0, 1)
++
++    # Flatten for optimization
++    x0 = initial_points.flatten()
++
++    # Define bounds for each coordinate [0,1]
++    bounds = [(0, 1)] * 42
++
++    # Define constraints
++    constraints = {'type': 'ineq', 'fun': constraint_func}
++
++    # Run optimization
++    start_time = time.time()
++    result = minimize(
++        objective,
++        x0,
++        method='L-BFGS-B',
++        bounds=bounds,
++        constraints=constraints,
++        options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-9}
++    )
++    end_time = time.time()
++
++    # Extract optimized points
++    optimized_points = result.x.reshape(-1, 3)
++
++    # Ensure points are within bounds
++    optimized_points = np.clip(optimized_points, 0, 1)
++
++    return optimized_points
+ 
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,503 @@
+--- a/original.py
++++ b/original.py
+@@ -1,283 +1,292 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy.optimize import differential_evolution
+-from typing import List
++from typing import List, Tuple, Optional
+ from numba import njit
+ import warnings
+ warnings.filterwarnings('ignore')
+ 
+ @njit
+ def compute_autoconvolution_norms_fast(f_values: np.ndarray) -> tuple:
+     """
+     Fast computation of autoconvolution norms using Numba JIT compilation
+     """
+     n = len(f_values)
+ 
+     # Compute autoconvolution g = f * f using discrete convolution
+     # The resulting g will have length 2*n - 1 where n is the length of f
+     g_length = 2 * n - 1
+     g = np.zeros(g_length)
+ 
+     # Manual convolution loop for speed
+     for i in range(n):
+         for j in range(n):
+             g[i + j] += f_values[i] * f_values[j]
+ 
+     # Compute the norms
+     # ||g||₂² = sum(g[i]²) using proper piecewise integration
+     norm_g_2_squared = 0.0
+ 
+     # For piecewise linear integration, we use trapezoidal-like approach:
+     # for consecutive pairs of points (y1, y2) with unit spacing:
+     # integral of y^2 ≈ (1/3)(y1^2 + y1*y2 + y2^2)
+     for i in range(g_length - 1):
+         y1 = g[i]
+         y2 = g[i + 1]
+         norm_g_2_squared += (y1 * y1 + y1 * y2 + y2 * y2) / 3.0
+ 
+     # ||g||₁ = sum(|g[i]|)
+     norm_g_1 = 0.0
+     for i in range(g_length):
+         norm_g_1 += abs(g[i])
+ 
+     # ||g||∞ = max(|g[i]|)
+     norm_g_inf = 0.0
+     for i in range(g_length):
+         abs_g = abs(g[i])
+         if abs_g > norm_g_inf:
+             norm_g_inf = abs_g
+ 
+     return norm_g_2_squared, norm_g_1, norm_g_inf
+ 
+-def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+-    """
+-    Compute the norms ||g||₂², ||g||₁, and ||g||∞ for the autoconvolution g = f*f
+-    Using proper piecewise linear integration for ||g||₂² as specified in requirements
+-    """
+-    f = np.array(f_values)
+-
+-    # Use the fast JIT-compiled version
+-    norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms_fast(f)
+-
+-    return norm_g_2_squared, norm_g_1, norm_g_inf
+-
+-def evaluate_c2(f_values: List[float]) -> float:
+-    """
+-    Evaluate C₂ = ||g||₂² / (||g||₁ · ||g||∞) for given step function
++class HarmonicEvolutionOptimizer:
++    """
++    A class-based optimizer that implements a structured pipeline for finding 
++    step functions that maximize the second autocorrelation inequality constant C₂
++    """
++    
++    def __init__(self, n_steps: int = 500):
++        self.n_steps = n_steps
++        self.best_solution = None
++        self.best_c2 = -np.inf
++        
++    def compute_autoconvolution_norms(self, f_values: List[float]) -> tuple:
++        """
++        Compute the norms ||g||₂², ||g||₁, and ||g||∞ for the autoconvolution g = f*f
++        Using proper piecewise linear integration for ||g||₂² as specified in requirements
++        """
++        f = np.array(f_values)
++        
++        # Use the fast JIT-compiled version
++        norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms_fast(f)
++        
++        return norm_g_2_squared, norm_g_1, norm_g_inf
++    
++    def evaluate_c2(self, f_values: List[float]) -> float:
++        """
++        Evaluate C₂ = ||g||₂² / (||g||₁ · ||g||∞) for given step function
++        """
++        try:
++            norm_g_2_squared, norm_g_1, norm_g_inf = self.compute_autoconvolution_norms(f_values)
++
++            # Avoid division by zero
++            if norm_g_1 <= 1e-12 or norm_g_inf <= 1e-12:
++                return 0.0
++
++            c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
++            return c2
++        except Exception:
++            return 0.0
++    
++    def generate_harmonic_initialization(self) -> List[float]:
++        """
++        Generate initial configuration using harmonic pattern generation
++        This creates functions with structures that are likely to produce favorable autoconvolutions
++        """
++        # Create a base function with harmonic components
++        f = np.zeros(self.n_steps)
++        
++        # Use a combination of sinusoidal components for rich spectral content
++        x = np.linspace(-1, 1, self.n_steps)
++        
++        # Main harmonic component (fundamental frequency)
++        freq1 = 2.0 + np.random.random() * 3.0
++        f += np.sin(freq1 * np.pi * x) * 0.2
++        
++        # Second harmonic component
++        freq2 = 4.0 + np.random.random() * 4.0
++        f += np.sin(freq2 * np.pi * x) * 0.15
++        
++        # Third harmonic component
++        freq3 = 6.0 + np.random.random() * 3.0
++        f += np.cos(freq3 * np.pi * x) * 0.1
++        
++        # Add a main envelope for structure
++        envelope = np.exp(-0.5 * (x / 0.3)**2)
++        f = f * envelope * 0.5 + envelope * 0.5
++        
++        # Add random variations to break symmetry
++        f += np.random.normal(0, 0.02, self.n_steps)
++        
++        # Ensure non-negativity and normalize
++        f = np.clip(f, 0, None)
++        if np.sum(f) > 0:
++            f = f / np.sum(f)
++        
++        return f.tolist()
++    
++    def generate_multiresolution_initialization(self, coarse_resolution: int = 200) -> List[float]:
++        """
++        Generate initial configuration using multi-resolution approach
++        """
++        # Start with coarse resolution to understand the landscape
++        coarse_f = np.zeros(coarse_resolution)
++        
++        # Create a pattern with alternating high/low sections
++        segment_size = max(1, coarse_resolution // 8)
++        for i in range(0, coarse_resolution, segment_size):
++            end_idx = min(i + segment_size, coarse_resolution)
++            if (i // segment_size) % 2 == 0:
++                # High region
++                coarse_f[i:end_idx] = 0.6 + np.random.random(end_idx - i) * 0.3
++            else:
++                # Low region
++                coarse_f[i:end_idx] = 0.1 + np.random.random(end_idx - i) * 0.15
++        
++        # Interpolate to full resolution
++        coarse_x = np.linspace(-1, 1, coarse_resolution)
++        fine_x = np.linspace(-1, 1, self.n_steps)
++        
++        # Use spline interpolation for smooth transition
++        from scipy.interpolate import interp1d
++        interpolate_func = interp1d(coarse_x, coarse_f, kind='linear', fill_value='extrapolate')
++        f = interpolate_func(fine_x)
++        
++        # Add some smoothing
++        gaussian_width = 0.1 + np.random.random() * 0.2
++        gaussian = np.exp(-0.5 * (fine_x / gaussian_width)**2)
++        f = f * gaussian * 0.4 + gaussian * 0.6
++        
++        # Ensure non-negativity and normalize
++        f = np.clip(f, 0, None)
++        if np.sum(f) > 0:
++            f = f / np.sum(f)
++        
++        return f.tolist()
++    
++    def adaptive_evolutionary_search(self, max_iterations: int = 50) -> List[float]:
++        """
++        Custom evolutionary algorithm that operates in a transformed domain
++        """
++        # Initialize with harmonic pattern
++        population = []
++        pop_size = 15
++        
++        # Generate diverse initial population using harmonic patterns
++        for i in range(pop_size):
++            if i % 3 == 0:
++                f = self.generate_harmonic_initialization()
++            elif i % 3 == 1:
++                f = self.generate_multiresolution_initialization()
++            else:
++                # Random initialization with structure
++                f = np.random.random(self.n_steps)
++                f = np.clip(f, 0, 1)
++                f = f / np.sum(f)
++                f = f.tolist()
++            population.append(f)
++        
++        # Evolutionary search loop
++        for iteration in range(max_iterations):
++            # Evaluate fitness
++            fitness_scores = []
++            for individual in population:
++                c2 = self.evaluate_c2(individual)
++                fitness_scores.append(c2)
++                
++                if c2 > self.best_c2:
++                    self.best_c2 = c2
++                    self.best_solution = individual.copy()
++            
++            # Selection - keep top 50%
++            sorted_indices = np.argsort(fitness_scores)[::-1][:pop_size//2]
++            selected_population = [population[i] for i in sorted_indices]
++            
++            # Create offspring through crossover and mutation
++            new_population = selected_population.copy()
++            
++            # Elitism: keep the best individual
++            if self.best_solution is not None:
++                new_population.append(self.best_solution)
++            
++            # Generate new individuals through crossover and mutation
++            while len(new_population) < pop_size:
++                # Select two parents
++                parent1 = selected_population[np.random.randint(0, len(selected_population))]
++                parent2 = selected_population[np.random.randint(0, len(selected_population))]
++                
++                # Crossover (uniform)
++                child = []
++                for i in range(self.n_steps):
++                    if np.random.random() < 0.5:
++                        child.append(parent1[i])
++                    else:
++                        child.append(parent2[i])
++                
++                # Mutation
++                mutation_rate = 0.1 + 0.05 * np.exp(-iteration/max_iterations)  # Adaptive mutation rate
++                for i in range(self.n_steps):
++                    if np.random.random() < mutation_rate:
++                        # Add small random perturbation
++                        delta = np.random.normal(0, 0.05)
++                        child[i] = max(0, child[i] + delta)
++                
++                # Normalize
++                child_sum = sum(child)
++                if child_sum > 0:
++                    child = [val / child_sum for val in child]
++                
++                new_population.append(child)
++            
++            # Trim to population size
++            population = new_population[:pop_size]
++        
++        return self.best_solution if self.best_solution is not None else [1.0/self.n_steps] * self.n_steps
++
++def construct_function() -> list[float]:
++    """
++    Function to construct step-function with high C2 value using harmonic evolution approach
+     """
+     try:
+-        norm_g_2_squared, norm_g_1, norm_g_inf = compute_autoconvolution_norms(f_values)
+-
+-        # Avoid division by zero
+-        if norm_g_1 <= 1e-12 or norm_g_inf <= 1e-12:
+-            return 0.0
+-
+-        c2 = norm_g_2_squared / (norm_g_1 * norm_g_inf)
+-        return c2
+-    except Exception:
+-        return 0.0
+-
+-def generate_harmonic_initialization(n_steps: int) -> List[float]:
+-    """
+-    Generate initial configuration using harmonic pattern generation
+-    This creates functions with structures that are likely to produce favorable autoconvolutions
+-    """
+-    # Create a base function with harmonic components
+-    f = np.zeros(n_steps)
+-    
+-    # Use a combination of sinusoidal components for rich spectral content
+-    x = np.linspace(-1, 1, n_steps)
+-    
+-    # Main harmonic component (fundamental frequency)
+-    freq1 = 2.0 + np.random.random() * 3.0
+-    f += np.sin(freq1 * np.pi * x) * 0.2
+-    
+-    # Second harmonic component
+-    freq2 = 4.0 + np.random.random() * 4.0
+-    f += np.sin(freq2 * np.pi * x) * 0.15
+-    
+-    # Third harmonic component
+-    freq3 = 6.0 + np.random.random() * 3.0
+-    f += np.cos(freq3 * np.pi * x) * 0.1
+-    
+-    # Add a main envelope for structure
+-    envelope = np.exp(-0.5 * (x / 0.3)**2)
+-    f = f * envelope * 0.5 + envelope * 0.5
+-    
+-    # Add random variations to break symmetry
+-    f += np.random.normal(0, 0.02, n_steps)
+-    
+-    # Ensure non-negativity and normalize
+-    f = np.clip(f, 0, None)
+-    if np.sum(f) > 0:
+-        f = f / np.sum(f)
+-    
+-    return f.tolist()
+-
+-def generate_multiresolution_initialization(n_steps: int, coarse_resolution: int = 200) -> List[float]:
+-    """
+-    Generate initial configuration using multi-resolution approach
+-    """
+-    # Start with coarse resolution to understand the landscape
+-    coarse_f = np.zeros(coarse_resolution)
+-    
+-    # Create a pattern with alternating high/low sections
+-    segment_size = max(1, coarse_resolution // 8)
+-    for i in range(0, coarse_resolution, segment_size):
+-        end_idx = min(i + segment_size, coarse_resolution)
+-        if (i // segment_size) % 2 == 0:
+-            # High region
+-            coarse_f[i:end_idx] = 0.6 + np.random.random(end_idx - i) * 0.3
+-        else:
+-            # Low region
+-            coarse_f[i:end_idx] = 0.1 + np.random.random(end_idx - i) * 0.15
+-    
+-    # Interpolate to full resolution
+-    coarse_x = np.linspace(-1, 1, coarse_resolution)
+-    fine_x = np.linspace(-1, 1, n_steps)
+-    
+-    # Use spline interpolation for smooth transition
+-    from scipy.interpolate import interp1d
+-    interpolate_func = interp1d(coarse_x, coarse_f, kind='linear', fill_value='extrapolate')
+-    f = interpolate_func(fine_x)
+-    
+-    # Add some smoothing
+-    gaussian_width = 0.1 + np.random.random() * 0.2
+-    gaussian = np.exp(-0.5 * (fine_x / gaussian_width)**2)
+-    f = f * gaussian * 0.4 + gaussian * 0.6
+-    
+-    # Ensure non-negativity and normalize
+-    f = np.clip(f, 0, None)
+-    if np.sum(f) > 0:
+-        f = f / np.sum(f)
+-    
+-    return f.tolist()
+-
+-def adaptive_evolutionary_search(n_steps: int = 500, max_iterations: int = 50) -> List[float]:
+-    """
+-    Custom evolutionary algorithm that operates in a transformed domain
+-    """
+-    # Initialize with harmonic pattern
+-    population = []
+-    pop_size = 15
+-    
+-    # Generate diverse initial population using harmonic patterns
+-    for i in range(pop_size):
+-        if i % 3 == 0:
+-            f = generate_harmonic_initialization(n_steps)
+-        elif i % 3 == 1:
+-            f = generate_multiresolution_initialization(n_steps)
+-        else:
+-            # Random initialization with structure
+-            f = np.random.random(n_steps)
+-            f = np.clip(f, 0, 1)
+-            f = f / np.sum(f)
+-            f = f.tolist()
+-        population.append(f)
+-    
+-    best_solution = None
+-    best_c2 = -np.inf
+-    
+-    # Evolutionary search loop
+-    for iteration in range(max_iterations):
+-        # Evaluate fitness
+-        fitness_scores = []
+-        for individual in population:
+-            c2 = evaluate_c2(individual)
+-            fitness_scores.append(c2)
+-            
+-            if c2 > best_c2:
+-                best_c2 = c2
+-                best_solution = individual.copy()
+-        
+-        # Selection - keep top 50%
+-        sorted_indices = np.argsort(fitness_scores)[::-1][:pop_size//2]
+-        selected_population = [population[i] for i in sorted_indices]
+-        
+-        # Create offspring through crossover and mutation
+-        new_population = selected_population.copy()
+-        
+-        # Elitism: keep the best individual
+-        if best_solution is not None:
+-            new_population.append(best_solution)
+-        
+-        # Generate new individuals through crossover and mutation
+-        while len(new_population) < pop_size:
+-            # Select two parents
+-            parent1 = selected_population[np.random.randint(0, len(selected_population))]
+-            parent2 = selected_population[np.random.randint(0, len(selected_population))]
+-            
+-            # Crossover (uniform)
+-            child = []
+-            for i in range(n_steps):
+-                if np.random.random() < 0.5:
+-                    child.append(parent1[i])
+-                else:
+-                    child.append(parent2[i])
+-            
+-            # Mutation
+-            mutation_rate = 0.1 + 0.05 * np.exp(-iteration/max_iterations)  # Adaptive mutation rate
+-            for i in range(n_steps):
+-                if np.random.random() < mutation_rate:
+-                    # Add small random perturbation
+-                    delta = np.random.normal(0, 0.05)
+-                    child[i] = max(0, child[i] + delta)
+-            
+-            # Normalize
+-            child_sum = sum(child)
+-            if child_sum > 0:
+-                child = [val / child_sum for val in child]
+-            
+-            new_population.append(child)
+-        
+-        # Trim to population size
+-        population = new_population[:pop_size]
+-    
+-    return best_solution if best_solution is not None else [1.0/n_steps] * n_steps
+-
+-def construct_function() -> list[float]:
+-    """
+-    Function to construct step-function with high C2 value using harmonic evolution approach
+-    """
+-    try:
+-        # Try multiple initialization strategies
+-        n_steps = 500
++        optimizer = HarmonicEvolutionOptimizer(n_steps=500)
+         
+         # Strategy 1: Harmonic initialization followed by evolutionary search
+-        harmonic_init = generate_harmonic_initialization(n_steps)
+-        c2_harmonic = evaluate_c2(harmonic_init)
++        harmonic_init = optimizer.generate_harmonic_initialization()
++        c2_harmonic = optimizer.evaluate_c2(harmonic_init)
+         
+         # Strategy 2: Multi-resolution initialization followed by evolutionary search
+-        multires_init = generate_multiresolution_initialization(n_steps)
+-        c2_multires = evaluate_c2(multires_init)
++        multires_init = optimizer.generate_multiresolution_initialization()
++        c2_multires = optimizer.evaluate_c2(multires_init)
+         
+         # Use the better of the two initializations
+         if c2_multires > c2_harmonic:
+             initial_f = multires_init
+         else:
+             initial_f = harmonic_init
+         
+-        # Refine using adaptive evolutionary search
+-        refined_f = adaptive_evolutionary_search(n_steps, max_iterations=40)
+-        c2_refined = evaluate_c2(refined_f)
+-        
+-        # Return the best solution
+-        if c2_refined > c2_harmonic and c2_refined > c2_multires:
+-            return refined_f
+-        elif c2_multires > c2_harmonic:
+-            return multires_init
+-        else:
+-            return harmonic_init
+-            
++        # Run adaptive evolutionary search starting from the best initial solution
++        refined_f = optimizer.adaptive_evolutionary_search(max_iterations=40)
++        c2_refined = optimizer.evaluate_c2(refined_f)
++        
++        # Return the best solution among all attempts
++        candidates = [
++            (harmonic_init, c2_harmonic),
++            (multires_init, c2_multires),
++            (refined_f, c2_refined)
++        ]
++        
++        best_candidate = max(candidates, key=lambda x: x[1])
++        return best_candidate[0]
++        
+     except Exception as e:
+         print(f"Error in optimization: {e}")
+         # Fallback to simple initialization
+         n_steps = 500
+         return [1.0/n_steps] * n_steps
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

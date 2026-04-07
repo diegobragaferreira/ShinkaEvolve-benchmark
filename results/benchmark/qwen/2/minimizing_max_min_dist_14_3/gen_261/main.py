@@ -1,0 +1,231 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import math
+import time
+from typing import Tuple, Optional
+
+class PointOptimizer:
+    def __init__(self, num_points: int = 14, dimension: int = 3):
+        self.num_points = num_points
+        self.dimension = dimension
+        self.best_points = None
+        self.best_ratio = 0.0
+
+    def fibonacci_sphere(self, samples: int = 14) -> np.ndarray:
+        """Generate points distributed evenly on a sphere using Fibonacci method"""
+        points = []
+        # Using the golden angle for better distribution
+        phi = math.pi * (3. - math.sqrt(5.))  
+
+        for i in range(samples):
+            # y goes from 1 to -1 (standard Fibonacci sphere approach)
+            y = 1 - (i / float(samples - 1)) * 2  
+            radius = math.sqrt(1 - y * y)  # radius at y
+
+            # Golden angle increment
+            theta = phi * i  
+
+            x = math.cos(theta) * radius
+            z = math.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
+    def calculate_ratio(self, points: np.ndarray) -> float:
+        """Calculate the min/max distance ratio"""
+        if len(points) < 2:
+            return 0.0
+
+        # Calculate pairwise distances efficiently
+        try:
+            distances = pdist(points)
+
+            if len(distances) == 0:
+                return 0.0
+
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+
+            # Avoid division by zero
+            if d_max <= 0:
+                return 0.0
+
+            return d_min / d_max
+        except Exception:
+            return 0.0
+
+    def project_to_sphere(self, points: np.ndarray) -> np.ndarray:
+        """Project points onto unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        return points / norms
+
+    def perturb_point(self, point: np.ndarray, delta: float = 0.01) -> np.ndarray:
+        """Perturb a single point slightly and ensure it stays on sphere"""
+        noise = np.random.normal(0, delta, 3)
+        new_point = point + noise
+        return self.project_to_sphere(new_point.reshape(1, 3)).reshape(-1)
+
+    def initialize_points(self, seed: int) -> np.ndarray:
+        """Initialize points using Fibonacci sphere method with better normalization"""
+        np.random.seed(seed)
+
+        # Initialize using Fibonacci sphere method
+        initial_points = self.fibonacci_sphere(self.num_points)
+
+        # Ensure points are actually on unit sphere
+        initial_points = self.project_to_sphere(initial_points)
+
+        # Add small random noise to break symmetries
+        noise = np.random.normal(0, 0.001, initial_points.shape)
+        initial_points += noise
+        initial_points = self.project_to_sphere(initial_points)
+
+        return initial_points
+
+    def optimize_single_start(self, seed: int) -> Tuple[np.ndarray, float]:
+        """Perform optimization from a single starting configuration"""
+        # Initialize points
+        points = self.initialize_points(seed)
+
+        # Simulated Annealing parameters
+        current_ratio = self.calculate_ratio(points)
+        best_ratio_local = current_ratio
+        best_points_local = points.copy()
+
+        # Cooling schedule parameters
+        T = 1.0  # Initial temperature
+        T_min = 1e-8  # Minimum temperature
+        alpha = 0.9995  # Cooling rate (slightly faster)
+        max_iter = 20000  # Increased iterations for better convergence
+        iter_without_improvement = 0
+        max_no_improvement = 2000  # Increased early stopping threshold
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        improvement_window = 50
+
+        # Checkpointing
+        checkpoint_interval = 1000
+        last_checkpoint_ratio = 0.0
+
+        # Adaptive perturbation parameters
+        base_perturbation = 0.005
+
+        for iteration in range(max_iter):
+            # Perturb one random point with adaptive perturbation based on current state
+            idx = np.random.randint(0, self.num_points)
+            old_point = points[idx].copy()
+
+            # Adaptive perturbation size based on:
+            # 1. Current temperature (larger perturbations early)
+            # 2. Current ratio quality (more aggressive when ratio is poor)
+            # 3. Progress tracking (more aggressive when stuck)
+            
+            # Base adaptive scaling
+            if current_ratio < 0.15:
+                # When ratio is low, be more aggressive with perturbations
+                perturbation_size = base_perturbation * (2.0 + 0.7 * (T / 1.0))  
+            else:
+                # Normal perturbations when things look reasonable
+                perturbation_size = base_perturbation * (1.0 + 0.3 * (T / 1.0))
+                
+            # Further adjust based on recent progress
+            if len(recent_improvements) >= improvement_window:
+                recent_improvement_rate = sum(recent_improvements[-improvement_window:]) / improvement_window
+                if recent_improvement_rate < 0.1:  # Very slow progress
+                    perturbation_size *= 1.5  # Increase perturbation size
+                elif recent_improvement_rate > 0.4:  # Fast progress
+                    perturbation_size *= 0.8  # Reduce perturbation size
+
+            new_point = self.perturb_point(old_point, perturbation_size)
+            points[idx] = new_point
+
+            # Calculate new ratio
+            new_ratio = self.calculate_ratio(points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > current_ratio:
+                current_ratio = new_ratio
+                if new_ratio > best_ratio_local:
+                    best_ratio_local = new_ratio
+                    best_points_local = points.copy()
+                iter_without_improvement = 0
+                recent_improvements.append(True)
+            else:
+                # Accept with probability based on temperature
+                delta = new_ratio - current_ratio
+                if np.random.rand() < np.exp(delta / T):
+                    current_ratio = new_ratio
+                    if new_ratio > best_ratio_local:
+                        best_ratio_local = new_ratio
+                        best_points_local = points.copy()
+                    iter_without_improvement = 0
+                    recent_improvements.append(True)
+                else:
+                    # Revert the change
+                    points[idx] = old_point
+                    recent_improvements.append(False)
+
+            # Update temperature with adaptive cooling
+            # If we've had too many non-improvements recently, cool faster
+            if len(recent_improvements) > improvement_window:
+                recent_improvements.pop(0)
+                if sum(recent_improvements) < improvement_window * 0.2:  # Less than 20% improvements
+                    alpha = max(0.9995, alpha * 1.02)  # Accelerate cooling
+                elif sum(recent_improvements) > improvement_window * 0.6:  # More than 60% improvements
+                    alpha = min(0.9999, alpha * 0.98)  # Slow down cooling
+
+            T = max(T * alpha, T_min)
+
+            # Periodic checkpoint
+            if iteration % checkpoint_interval == 0 and current_ratio > last_checkpoint_ratio:
+                last_checkpoint_ratio = current_ratio
+                if current_ratio > self.best_ratio:
+                    self.best_ratio = current_ratio
+                    self.best_points = points.copy()
+
+            # Early stopping if no improvement
+            iter_without_improvement += 1
+            if iter_without_improvement > max_no_improvement:
+                break
+
+        return best_points_local, best_ratio_local
+
+    def run_optimization(self) -> np.ndarray:
+        """Run multi-start optimization to find best configuration"""
+        # Try multiple starting configurations with wider range
+        seeds = [42, 123, 456, 789, 999, 555, 111, 222, 333, 666, 888, 999]
+
+        for seed in seeds:
+            try:
+                points, ratio = self.optimize_single_start(seed)
+
+                if ratio > self.best_ratio:
+                    self.best_ratio = ratio
+                    self.best_points = points.copy()
+            except Exception as e:
+                continue
+
+        # Final validation
+        if self.best_points is None:
+            # Fallback to random initialization if something went wrong
+            np.random.seed(42)
+            self.best_points = np.random.rand(self.num_points, self.dimension)
+            self.best_points = self.project_to_sphere(self.best_points)
+
+        return self.best_points
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    optimizer = PointOptimizer(num_points=14, dimension=3)
+    return optimizer.run_optimization()
+
+# EVOLVE-BLOCK-END

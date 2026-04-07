@@ -1,0 +1,228 @@
+--- a/original.py
++++ b/original.py
+@@ -1,14 +1,220 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-
+-def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
+-    f_values = [np.random.random()] * np.random.randint(100,1000)
+-    return f_values
++from scipy.optimize import minimize
++from scipy.fftpack import fft, ifft
++from scipy.linalg import svd
++from typing import List
++import time
++
++def construct_function() -> List[float]:
++    """
++    Construct step-function with high C2 value using sparse convex optimization approach.
++    
++    This approach differs fundamentally from evolutionary methods by:
++    1. Using spectral analysis to identify important basis functions
++    2. Formulating the problem as convex optimization over sparse coefficients
++    3. Leveraging FFT for fast convolution computation
++    4. Building multi-scale representations to avoid local optima
++    """
++    
++    # Set timing constraints
++    start_time = time.time()
++    max_time = 85.0
++    
++    # Determine problem size (smaller initial size for faster exploration)
++    n_steps = np.random.randint(200, 1500)
++    
++    # Generate basis functions using spectral decomposition approach
++    # Create dictionary of basis functions that are likely to yield high C2
++    basis_functions = []
++    
++    # Generate radial basis functions with varying scales and positions
++    scale_params = np.logspace(-2, 0, 15)  # Different scales from 0.01 to 1.0
++    position_params = np.linspace(0.05, 0.95, 20)  # Different positions
++    
++    for scale in scale_params:
++        for pos in position_params:
++            # Create Gaussian-like basis functions
++            x = np.linspace(0, 1, n_steps)
++            basis = np.exp(-((x - pos) / scale) ** 2) * 0.5 + 0.2
++            basis_functions.append(basis)
++    
++    # Use SVD to compress the basis functions space
++    # This identifies the most important combinations that can generate high C2 functions
++    basis_matrix = np.array(basis_functions).T
++    try:
++        # If matrix is too large, subsample
++        if basis_matrix.shape[0] > 1000:
++            indices = np.random.choice(basis_matrix.shape[0], 1000, replace=False)
++            basis_matrix = basis_matrix[indices]
++        
++        # Perform SVD to find principal components
++        U, s, Vt = svd(basis_matrix, full_matrices=False)
++        
++        # Keep significant components only
++        threshold = np.sum(s) * 0.99  # Keep 99% of variance
++        cumulative = np.cumsum(s)
++        n_components = np.argmax(cumulative >= threshold) + 1
++        
++        # Use compressed representation
++        compressed_basis = U[:, :n_components]
++        compressed_weights = Vt[:n_components, :]
++        
++    except:
++        # Fallback to simpler approach if SVD fails
++        n_components = min(20, len(basis_functions))
++        compressed_basis = basis_matrix.T[:, :n_components]
++        compressed_weights = np.eye(n_components)
++    
++    # Generate candidate solutions by sampling from the compressed space
++    candidates = []
++    for _ in range(min(10, n_components)):
++        # Sample random weights for the compressed basis
++        weights = np.random.rand(n_components) * 2.0 - 1.0  # Range [-1, 1]
++        # Apply inverse transform to get actual function
++        candidate_func = np.dot(compressed_basis, weights)
++        # Ensure non-negative values
++        candidate_func = np.clip(candidate_func, 0, None)
++        # Normalize
++        total = np.sum(candidate_func)
++        if total > 0:
++            candidate_func = candidate_func / total * 2.0
++        candidates.append(candidate_func)
++    
++    # Select the best candidate to optimize further
++    best_candidate = None
++    best_c2 = -1.0
++    for candidate in candidates:
++        if time.time() - start_time > max_time - 2:
++            break
++        try:
++            # Compute C2 for this candidate
++            c2 = compute_c2_fast(candidate)
++            if c2 > best_c2:
++                best_c2 = c2
++                best_candidate = candidate.copy()
++        except:
++            continue
++    
++    if best_candidate is None:
++        # Fallback to simple pattern
++        best_candidate = np.ones(n_steps) * 0.5
++        best_candidate[0] = 1.0
++        best_candidate[-1] = 1.0
++    
++    # Refine using gradient-based optimization
++    if time.time() - start_time < max_time - 3:
++        try:
++            # Define objective function that we want to maximize
++            def objective(weights):
++                # Reconstruct function from weights
++                func = np.dot(compressed_basis, weights)
++                func = np.clip(func, 0, None)
++                total = np.sum(func)
++                if total > 0:
++                    func = func / total * 2.0
++                
++                # Compute C2 (minimize negative)
++                return -compute_c2_fast(func)
++            
++            # Bounds for weights
++            bounds = [(-2.0, 2.0) for _ in range(n_components)]
++            
++            # Initial guess from best candidate
++            initial_weights = np.dot(compressed_weights, best_candidate)
++            
++            # Optimize using L-BFGS-B
++            result = minimize(
++                objective,
++                initial_weights,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 100}
++            )
++            
++            # Reconstruct final function
++            final_func = np.dot(compressed_basis, result.x)
++            final_func = np.clip(final_func, 0, None)
++            total = np.sum(final_func)
++            if total > 0:
++                final_func = final_func / total * 2.0
++                
++            # Verify and compute final C2
++            final_c2 = compute_c2_fast(final_func)
++            if final_c2 > best_c2:
++                best_candidate = final_func
++                
++        except:
++            # If optimization fails, keep the best candidate
++            pass
++    
++    # Ensure we have valid output within time limits
++    if time.time() - start_time > max_time - 1:
++        # Truncate and return what we have
++        best_candidate = best_candidate[:1000] if len(best_candidate) > 1000 else best_candidate
++    
++    # Convert to list of floats
++    return [float(x) for x in best_candidate]
++
++def compute_c2_fast(f_values: np.ndarray) -> float:
++    """
++    Fast computation of C2 using FFT-based convolution and optimized norm computation.
++    """
++    try:
++        # Ensure non-negative values
++        f = np.maximum(f_values, 0)
++        
++        if len(f) == 0:
++            return 0.0
++        
++        # Use FFT-based convolution for speed
++        # Pad to appropriate size for FFT
++        n = len(f)
++        padded_size = 2 * n
++        f_padded = np.pad(f, (0, padded_size - n), mode='constant')
++        
++        # FFT convolution
++        f_fft = fft(f_padded)
++        g_fft = f_fft * np.conj(f_fft)
++        g = ifft(g_fft).real[:n]
++        
++        # Trim to correct size (autoconvolution should be symmetric)
++        g = g[:2*n - 1]
++        g_center = len(g) // 2
++        g_trimmed = g[g_center - n + 1:g_center + n]
++        
++        # Compute norms efficiently
++        g_abs = np.abs(g_trimmed)
++        
++        # ||g||_2^2 using trapezoidal-like integration
++        if len(g_abs) < 2:
++            norm_2_squared = 0.0
++        else:
++            # Use trapezoidal integration with proper weights
++            step_width = 0.5 / len(f)
++            widths = np.full(len(g_abs)-1, step_width)
++            y1 = g_abs[:-1]
++            y2 = g_abs[1:]
++            norm_2_squared = np.sum(widths * (y1**2 + y1*y2 + y2**2) / 3.0)
++        
++        # ||g||_1 
++        norm_1 = np.sum(np.abs(g_trimmed)) / (len(g_trimmed) + 1) if len(g_trimmed) > 0 else 1e-12
++        
++        # ||g||_inf
++        norm_inf = np.max(np.abs(g_trimmed)) if len(g_trimmed) > 0 else 1e-12
++        
++        # Prevent division by zero
++        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
++            return 0.0
++            
++        return norm_2_squared / (norm_1 * norm_inf)
++        
++    except Exception:
++        return 0.0
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

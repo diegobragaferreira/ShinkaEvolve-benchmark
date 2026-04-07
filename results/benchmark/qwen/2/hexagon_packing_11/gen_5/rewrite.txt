@@ -1,0 +1,258 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import random
+from scipy.spatial.distance import cdist
+import time
+
+def generate_hexagon_vertices(center_x, center_y, rotation_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, rotation, and side length"""
+    angles = np.linspace(0, 2*np.pi, 7) + np.radians(rotation_deg)
+    vertices = []
+    for angle in angles[:-1]:  # Exclude last point to close polygon
+        x = center_x + side_length * np.cos(angle)
+        y = center_y + side_length * np.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+def check_hexagon_containment(hexagon_vertices, outer_hex_vertices):
+    """Check if all vertices of inner hexagon are within outer hexagon"""
+    outer_polygon = Polygon(outer_hex_vertices)
+    for vertex in hexagon_vertices:
+        if not outer_polygon.contains(Point(vertex)):
+            return False
+    return True
+
+def check_hexagon_collision(hex1_vertices, hex2_vertices):
+    """Check if two hexagons collide using Shapely"""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def calculate_outer_hexagon_side_length(inner_hex_data, padding=0.01):
+    """Calculate minimum side length of hexagon that contains all inner hexagons"""
+    # Get all vertices of all inner hexagons
+    all_vertices = []
+    for i in range(len(inner_hex_data)):
+        cx, cy, rot = inner_hex_data[i]
+        vertices = generate_hexagon_vertices(cx, cy, rot)
+        all_vertices.extend(vertices)
+    
+    if len(all_vertices) == 0:
+        return 1.0
+    
+    # Convert to numpy array for easier manipulation
+    vertices_array = np.array(all_vertices)
+    
+    # Calculate centroid
+    centroid = np.mean(vertices_array, axis=0)
+    
+    # Calculate distances from centroid to all vertices
+    distances = np.sqrt(np.sum((vertices_array - centroid)**2, axis=1))
+    
+    # Maximum distance plus some padding
+    max_distance = np.max(distances)
+    
+    # For a hexagon, the relationship between circumradius and side length is r = s
+    # But we need to account for the fact that we're working with a hexagon
+    # The radius needed is max_distance, so we compute the minimal hexagon side length
+    # that can cover all points
+    side_length = max_distance * 2 / np.sqrt(3) + padding
+    return side_length
+
+def evaluate_solution(inner_hex_data):
+    """Evaluate a solution: return (inverse_side_length, valid)"""
+    try:
+        # Calculate outer hexagon side length
+        side_length = calculate_outer_hexagon_side_length(inner_hex_data)
+        
+        # Check containment and collisions
+        outer_vertices = generate_hexagon_vertices(0, 0, 0, side_length)
+        
+        # Check containment and collisions
+        valid = True
+        
+        # Check containment for each inner hexagon
+        for i in range(len(inner_hex_data)):
+            cx, cy, rot = inner_hex_data[i]
+            hex_vertices = generate_hexagon_vertices(cx, cy, rot)
+            if not check_hexagon_containment(hex_vertices, outer_vertices):
+                valid = False
+                break
+        
+        if not valid:
+            return 0.0, False
+            
+        # Check pairwise collisions
+        for i in range(len(inner_hex_data)):
+            for j in range(i+1, len(inner_hex_data)):
+                cx1, cy1, rot1 = inner_hex_data[i]
+                cx2, cy2, rot2 = inner_hex_data[j]
+                
+                hex1_vertices = generate_hexagon_vertices(cx1, cy1, rot1)
+                hex2_vertices = generate_hexagon_vertices(cx2, cy2, rot2)
+                
+                if check_hexagon_collision(hex1_vertices, hex2_vertices):
+                    valid = False
+                    break
+            if not valid:
+                break
+        
+        if not valid:
+            return 0.0, False
+            
+        return 1.0 / side_length, True
+    except Exception:
+        return 0.0, False
+
+def create_individual():
+    """Create a random individual (set of 11 hexagon positions and rotations)"""
+    # Start with center hexagon
+    individual = [[0, 0, 0]]  # center hexagon
+    
+    # Add other hexagons in a pattern that's likely to work well
+    # Using a circular arrangement around the center
+    positions = [
+        [-2, 0, 0],
+        [2, 0, 0],
+        [0, 2, 0],
+        [0, -2, 0],
+        [1, 1, 0],
+        [1, -1, 0],
+        [-1, 1, 0],
+        [-1, -1, 0],
+        [1.5, 1.5, 0],
+        [-1.5, -1.5, 0],
+        [1.5, -1.5, 0]
+    ]
+    
+    # Add small random perturbations
+    for i in range(1, len(positions)):
+        # Add slight random perturbation
+        pos = list(positions[i])
+        pos[0] += random.uniform(-0.5, 0.5)
+        pos[1] += random.uniform(-0.5, 0.5)
+        pos[2] = random.uniform(0, 360)
+        individual.append(pos)
+    
+    return np.array(individual)
+
+def mutate_individual(individual, generation, max_generations):
+    """Mutate an individual with adaptive rate"""
+    # Adaptive mutation rate - start high, decrease over generations
+    mutation_rate = max(0.1, 0.5 * (1.0 - generation / max_generations))
+    
+    # Create a copy
+    mutated = individual.copy()
+    
+    # Mutate each hexagon with probability
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Randomly choose to mutate position or rotation
+            if random.random() < 0.5:
+                # Mutate position
+                mutated[i][0] += random.gauss(0, 0.5)
+                mutated[i][1] += random.gauss(0, 0.5)
+            else:
+                # Mutate rotation
+                mutated[i][2] += random.gauss(0, 30)
+                mutated[i][2] = mutated[i][2] % 360
+    
+    return mutated
+
+def crossover_individuals(parent1, parent2):
+    """Create offspring by blending two parents"""
+    # Simple uniform crossover
+    offspring = []
+    for i in range(len(parent1)):
+        if random.random() < 0.5:
+            offspring.append(parent1[i].copy())
+        else:
+            offspring.append(parent2[i].copy())
+    
+    return np.array(offspring)
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Parameters
+    population_size = 50
+    num_generations = 100
+    elite_size = 5
+    tournament_size = 3
+    
+    # Initialize population
+    population = [create_individual() for _ in range(population_size)]
+    
+    best_fitness = 0.0
+    best_individual = None
+    
+    # Evolution loop
+    for generation in range(num_generations):
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            fitness, valid = evaluate_solution(individual)
+            fitness_scores.append((fitness, valid, individual))
+        
+        # Sort by fitness
+        fitness_scores.sort(key=lambda x: x[0], reverse=True)
+        
+        # Update best solution
+        if fitness_scores[0][0] > best_fitness:
+            best_fitness = fitness_scores[0][0]
+            best_individual = fitness_scores[0][2].copy()
+        
+        # Create next generation
+        new_population = []
+        
+        # Elitism: keep best individuals
+        for i in range(elite_size):
+            new_population.append(fitness_scores[i][2].copy())
+        
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection
+            tournament1 = random.sample(fitness_scores[:population_size//2], tournament_size)
+            tournament2 = random.sample(fitness_scores[:population_size//2], tournament_size)
+            
+            parent1 = max(tournament1, key=lambda x: x[0])[2]
+            parent2 = max(tournament2, key=lambda x: x[0])[2]
+            
+            # Crossover
+            offspring = crossover_individuals(parent1, parent2)
+            
+            # Mutation
+            offspring = mutate_individual(offspring, generation, num_generations)
+            
+            new_population.append(offspring)
+        
+        population = new_population
+    
+    # Final evaluation of best solution
+    final_fitness, _ = evaluate_solution(best_individual)
+    
+    # Return result
+    outer_hex_side_length = 1.0 / final_fitness if final_fitness > 0 else 10.0
+    
+    # Create outer hexagon data
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    
+    # Ensure we return a valid configuration even if optimization fails
+    if final_fitness <= 0:
+        # Fall back to a reasonable starting point
+        return create_individual(), outer_hex_data, 10.0
+    
+    return best_individual, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

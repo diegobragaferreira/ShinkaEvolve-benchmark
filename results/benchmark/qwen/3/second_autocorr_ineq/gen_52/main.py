@@ -1,0 +1,238 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import warnings
+warnings.filterwarnings('ignore')
+
+def compute_autoconvolution_norms(f: list) -> tuple:
+    """
+    Compute the L2, L1, and L-infinity norms of the autoconvolution of f.
+    
+    Args:
+        f: List of step heights
+        
+    Returns:
+        Tuple of (||g||₂², ||g||₁, ||g||∞)
+    """
+    if not f:
+        return 0.0, 0.0, 0.0
+    
+    # Convert to numpy array for easier manipulation
+    f_array = np.array(f)
+    
+    # Compute autoconvolution g = f * f (discrete convolution)
+    g = np.convolve(f_array, f_array, mode='full')
+    
+    # Compute norms
+    # ||g||₂² - integrate g² using trapezoidal rule approximation
+    g_squared = g * g
+    trapz_sum = 0.0
+    
+    # Use trapezoidal integration for ||g||₂²  
+    if len(g) >= 2:
+        h = 1.0 / (len(g) - 1)  # Normalized spacing
+        for i in range(len(g) - 1):
+            y1, y2 = g_squared[i], g_squared[i+1]
+            trapz_sum += (y1 + y1*y2 + y2) * h / 3.0
+    else:
+        trapz_sum = g_squared[0] if len(g_squared) > 0 else 0.0
+        
+    # ||g||₁ - integrate |g| using trapezoidal rule
+    g_abs = np.abs(g)
+    trapz_l1_sum = 0.0
+    
+    if len(g) >= 2:
+        h = 1.0 / (len(g) - 1)  # Normalized spacing
+        for i in range(len(g) - 1):
+            y1, y2 = g_abs[i], g_abs[i+1]
+            trapz_l1_sum += (y1 + y2) * h / 2.0
+    else:
+        trapz_l1_sum = g_abs[0] if len(g_abs) > 0 else 0.0
+    
+    # ||g||∞ - infinity norm (maximum absolute value)
+    g_max = np.max(np.abs(g)) if len(g) > 0 else 0.0
+    
+    return trapz_sum, trapz_l1_sum, g_max
+
+def calculate_c2(f: list) -> float:
+    """
+    Calculate C₂ = ||g||₂² / (||g||₁ · ||g||∞) where g = f * f.
+    
+    Args:
+        f: List of step heights
+        
+    Returns:
+        C₂ value
+    """
+    try:
+        g_norm2_sq, g_norm1, g_norm_inf = compute_autoconvolution_norms(f)
+        
+        # Avoid division by zero
+        if g_norm1 <= 1e-12 or g_norm_inf <= 1e-12:
+            return 0.0
+            
+        return g_norm2_sq / (g_norm1 * g_norm_inf)
+    except Exception as e:
+        return 0.0
+
+def initialize_smart_parameters(size: int) -> np.ndarray:
+    """
+    Initialize step function parameters with smart patterns that tend to perform well.
+    """
+    # Create a combination of smooth and sharp features
+    t = np.linspace(-1, 1, size)
+    
+    # Base pattern with multiple frequency components
+    pattern = (
+        1.0 + 
+        0.5 * np.sin(2 * np.pi * t) +
+        0.3 * np.cos(4 * np.pi * t) +
+        0.2 * np.sin(6 * np.pi * t) +
+        0.1 * np.cos(8 * np.pi * t)
+    )
+    
+    # Add some sharp transitions to encourage good autoconvolution behavior
+    # Create a few localized spikes that can create strong peaks in autoconvolution
+    spike_positions = np.random.choice(size, size=min(5, size//10), replace=False)
+    for pos in spike_positions:
+        pattern[pos] += np.random.uniform(0.5, 1.5)
+    
+    # Ensure non-negativity and normalize
+    pattern = np.maximum(pattern, 0.0)
+    
+    # Normalize to reasonable magnitude
+    if np.sum(pattern) > 0:
+        pattern = pattern / np.sum(pattern) * 100
+    
+    return pattern
+
+def create_discrete_projection(x: np.ndarray) -> np.ndarray:
+    """
+    Project continuous values to valid discrete step function heights.
+    Ensures non-negativity and reasonable scaling.
+    """
+    # Ensure non-negativity
+    x_proj = np.maximum(x, 0.0)
+    
+    # Normalize to prevent extreme values that might cause numerical issues
+    if np.sum(x_proj) > 0:
+        x_proj = x_proj / np.sum(x_proj) * 100
+    
+    return x_proj
+
+def smooth_objective(params: np.ndarray, size: int) -> float:
+    """
+    Smoothed version of the objective function for optimization.
+    """
+    # Convert to step function
+    f = create_discrete_projection(params)
+    
+    # If we're dealing with very few parameters, pad with zeros
+    if len(f) < size:
+        f = np.pad(f, (0, size - len(f)), 'constant', constant_values=0)
+    elif len(f) > size:
+        f = f[:size]
+    
+    return -calculate_c2(f.tolist())  # Negative because we minimize
+
+def gradient_free_optimization(size: int, max_iter: int = 1000) -> list:
+    """
+    Perform gradient-free optimization to find high C2 step function.
+    """
+    # Initialize with smart pattern
+    initial_params = initialize_smart_parameters(size)
+    
+    # Optimization with L-BFGS
+    result = minimize(
+        smooth_objective,
+        initial_params,
+        args=(size,),
+        method='L-BFGS-B',
+        options={'maxiter': max_iter, 'ftol': 1e-8, 'gtol': 1e-6},
+        bounds=[(0, 1000) for _ in range(size)]
+    )
+    
+    # Get optimized parameters
+    optimized_params = result.x
+    
+    # Project to discrete solution
+    final_solution = create_discrete_projection(optimized_params)
+    
+    # Further refine with local search around the optimum
+    best_solution = final_solution.copy()
+    best_value = -smooth_objective(final_solution, size)
+    
+    # Local refinement by perturbing randomly
+    for _ in range(20):
+        # Create small random perturbation
+        perturbed = final_solution + np.random.normal(0, 0.1, len(final_solution))
+        # Project
+        perturbed = create_discrete_projection(perturbed)
+        
+        # Evaluate
+        value = -smooth_objective(perturbed, size)
+        if value > best_value:
+            best_value = value
+            best_solution = perturbed.copy()
+    
+    return best_solution.tolist()
+
+def construct_function() -> list:
+    """
+    Main function to construct step-function with high C2 value using gradient-free optimization.
+    
+    Returns:
+        List of step heights that maximize C2
+    """
+    # Try different sizes for better results
+    sizes_to_try = [500, 750, 1000, 1250, 1500]
+    best_c2 = -float('inf')
+    best_solution = None
+    
+    for size in sizes_to_try:
+        try:
+            # Use fewer iterations for smaller sizes, more for larger ones
+            iterations = max(500, 1000 - (size // 100))
+            solution = gradient_free_optimization(size, iterations)
+            
+            c2_value = calculate_c2(solution)
+            print(f"Size {size}: C2 = {c2_value:.6f}")
+            
+            if c2_value > best_c2:
+                best_c2 = c2_value
+                best_solution = solution
+        except Exception as e:
+            print(f"Failed at size {size}: {e}")
+            continue
+    
+    # Final refinement on best solution
+    if best_solution is not None:
+        # Apply additional local refinement
+        refined_solution = best_solution.copy()
+        for _ in range(10):
+            # Simple hill climbing
+            idx = np.random.randint(len(refined_solution))
+            old_val = refined_solution[idx]
+            
+            # Try small changes
+            new_val = max(0, old_val + np.random.normal(0, 0.1))
+            refined_solution[idx] = new_val
+            
+            # Test if this improves the solution
+            test_c2 = calculate_c2(refined_solution)
+            if test_c2 > best_c2:
+                best_c2 = test_c2
+            else:
+                refined_solution[idx] = old_val  # Revert if worse
+            
+        best_solution = refined_solution
+    
+    return best_solution if best_solution is not None else [1.0] * 100
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

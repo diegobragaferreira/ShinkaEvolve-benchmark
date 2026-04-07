@@ -1,0 +1,221 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+from scipy.spatial.distance import cdist
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+    
+    n_circles = 32
+    max_iter = 1000
+    
+    def generate_hexagonal_initialization(n):
+        """Generate initial circle positions using hexagonal grid"""
+        # Distribute circles in a hexagonal pattern
+        rows = int(np.ceil(np.sqrt(n)))
+        cols = int(np.ceil(n / rows))
+        
+        # Calculate spacing
+        spacing_x = 1.0 / (cols + 1)
+        spacing_y = 1.0 / (rows + 1)
+        
+        circles = []
+        count = 0
+        
+        for i in range(rows):
+            for j in range(cols):
+                if count >= n:
+                    break
+                    
+                # Offset every other row
+                x_offset = spacing_x * (j + 0.5)
+                y_offset = spacing_y * (i + 0.5)
+                
+                # Apply offset for even rows
+                if i % 2 == 0:
+                    x_offset += spacing_x * 0.5
+                    
+                # Ensure we stay within bounds
+                x = max(spacing_x, min(1 - spacing_x, x_offset))
+                y = max(spacing_y, min(1 - spacing_y, y_offset))
+                
+                # Initial radius based on spacing
+                radius = min(spacing_x, spacing_y) * 0.4
+                
+                circles.append([x, y, radius])
+                count += 1
+                
+                if count >= n:
+                    break
+                    
+        return np.array(circles)
+    
+    def check_constraints(circles):
+        """Check if all circles satisfy containment and non-overlap constraints"""
+        n = len(circles)
+        
+        # Check containment constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if r > x or r > y or r > (1 - x) or r > (1 - y):
+                return False
+        
+        # Check non-overlap constraints
+        for i in range(n):
+            for j in range(i + 1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                if dist_sq < (r1 + r2)**2:
+                    return False
+        
+        return True
+    
+    def calculate_total_radius(circles):
+        """Calculate sum of all radii"""
+        return np.sum(circles[:, 2])
+    
+    def mutate_circle(circle, mutation_rate):
+        """Apply mutation to a single circle"""
+        x, y, r = circle.copy()
+        
+        # Mutate position
+        x += np.random.normal(0, mutation_rate * 0.05)
+        y += np.random.normal(0, mutation_rate * 0.05)
+        
+        # Clamp position to unit square
+        x = np.clip(x, 0.01, 0.99)
+        y = np.clip(y, 0.01, 0.99)
+        
+        # Mutate radius
+        r *= np.random.uniform(0.9, 1.1)
+        # Clamp radius to be positive and reasonable
+        r = np.clip(r, 0.001, min(x, y, 1-x, 1-y))
+        
+        return np.array([x, y, r])
+    
+    def local_optimize(circles, max_iter=50):
+        """Perform local optimization to improve solution"""
+        best_circles = circles.copy()
+        best_radius = calculate_total_radius(best_circles)
+        
+        for _ in range(max_iter):
+            # Try perturbing each circle
+            test_circles = best_circles.copy()
+            
+            # Select random circle to mutate
+            idx = np.random.randint(len(test_circles))
+            test_circles[idx] = mutate_circle(test_circles[idx], 0.1)
+            
+            # Ensure constraints are met
+            if check_constraints(test_circles):
+                test_radius = calculate_total_radius(test_circles)
+                if test_radius > best_radius:
+                    best_circles = test_circles
+                    best_radius = test_radius
+        
+        return best_circles
+    
+    def crossover(parent1, parent2):
+        """Create offspring from two parents using uniform crossover"""
+        child = parent1.copy()
+        mask = np.random.rand(len(parent1)) > 0.5
+        child[mask] = parent2[mask]
+        return child
+    
+    # Generate initial population
+    initial_population = []
+    for _ in range(10):
+        circles = generate_hexagonal_initialization(n_circles)
+        # Add some randomness
+        for i in range(len(circles)):
+            circles[i][0] += np.random.normal(0, 0.02)
+            circles[i][1] += np.random.normal(0, 0.02)
+            circles[i][0] = np.clip(circles[i][0], 0.01, 0.99)
+            circles[i][1] = np.clip(circles[i][1], 0.01, 0.99)
+        initial_population.append(circles)
+    
+    # Ensure constraints and get best initial solution
+    best_solution = None
+    best_score = -1
+    
+    for population in initial_population:
+        if check_constraints(population):
+            score = calculate_total_radius(population)
+            if score > best_score:
+                best_score = score
+                best_solution = population.copy()
+    
+    # If no valid initial solution found, create one manually
+    if best_solution is None:
+        best_solution = generate_hexagonal_initialization(n_circles)
+        # Adjust to make it feasible
+        for i in range(len(best_solution)):
+            x, y, r = best_solution[i]
+            # Ensure circles fit in the unit square
+            r = min(r, x, y, 1-x, 1-y)
+            best_solution[i] = [x, y, r]
+    
+    # Main evolutionary loop
+    for gen in range(max_iter):
+        # Reduce mutation rate over time
+        mutation_rate = max(0.02, 0.1 * (1 - gen / max_iter))
+        
+        # Evaluate current solutions
+        population_fitness = []
+        population = []
+        
+        # Generate new population
+        for _ in range(10):
+            # Start with the current best
+            candidate = best_solution.copy()
+            
+            # Apply mutations
+            for i in range(len(candidate)):
+                if np.random.random() < mutation_rate:
+                    candidate[i] = mutate_circle(candidate[i], mutation_rate)
+            
+            # Try local optimization
+            candidate = local_optimize(candidate)
+            
+            # Ensure constraints
+            if check_constraints(candidate):
+                fitness = calculate_total_radius(candidate)
+                population_fitness.append(fitness)
+                population.append(candidate)
+        
+        # Keep best solution from this generation
+        if population:
+            best_in_generation_idx = np.argmax(population_fitness)
+            best_in_generation = population[best_in_generation_idx]
+            current_score = calculate_total_radius(best_in_generation)
+            
+            if current_score > best_score:
+                best_score = current_score
+                best_solution = best_in_generation.copy()
+    
+    # Final local optimization
+    final_solution = local_optimize(best_solution, 100)
+    
+    # Final validation
+    if not check_constraints(final_solution):
+        # Revert to best valid solution
+        pass
+    
+    # Ensure all circles are valid with proper boundaries
+    for i in range(len(final_solution)):
+        x, y, r = final_solution[i]
+        # Ensure proper containment
+        r = min(r, x, y, 1-x, 1-y)
+        final_solution[i] = [x, y, r]
+    
+    return final_solution
+
+# EVOLVE-BLOCK-END

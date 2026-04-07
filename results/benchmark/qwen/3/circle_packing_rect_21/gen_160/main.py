@@ -1,0 +1,267 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+import math
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Container setup (perimeter = 4, so width + height = 2)
+    container_width, container_height = 1.0, 1.0
+    
+    # Number of circles
+    n_circles = 21
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Phase 1: Voronoi-inspired initialization with strategic seeding
+    circles = np.zeros((n_circles, 3))
+    
+    # Generate strategic anchor points (corners and edges)
+    anchors = []
+    # Corners
+    anchors.extend([(0.05, 0.05), (container_width - 0.05, 0.05),
+                   (0.05, container_height - 0.05), (container_width - 0.05, container_height - 0.05)])
+    # Edge centers
+    anchors.extend([(container_width/2, 0.05), (container_width/2, container_height - 0.05),
+                   (0.05, container_height/2), (container_width - 0.05, container_height/2)])
+    
+    # Generate dense grid for remaining positions
+    grid_points = []
+    grid_density = 12
+    for i in range(grid_density):
+        for j in range(grid_density):
+            x = (i + 0.5) / grid_density * container_width
+            y = (j + 0.5) / grid_density * container_height
+            grid_points.append((x, y))
+    
+    # Use k-means to cluster grid points to reduce redundancy
+    if len(grid_points) >= n_circles - len(anchors):
+        kmeans = KMeans(n_clusters=n_circles - len(anchors), random_state=42)
+        grid_array = np.array(grid_points)
+        kmeans.fit(grid_array)
+        selected_grid = kmeans.cluster_centers_
+        # Convert back to list of tuples
+        selected_grid_points = [(x, y) for x, y in selected_grid]
+    else:
+        selected_grid_points = grid_points
+    
+    # Combine anchors and selected grid points
+    initial_positions = anchors + selected_grid_points[:n_circles-len(anchors)]
+    
+    # Initialize circles with positions and compute initial radii
+    for i in range(n_circles):
+        x, y = initial_positions[i]
+        # Compute initial radius based on distance to nearest boundary
+        r = min(x, container_width - x, y, container_height - y) * 0.3
+        r = max(0.01, min(0.1, r))  # Cap radius between 0.01 and 0.1
+        circles[i] = [x, y, r]
+    
+    # Phase 2: Multi-phase optimization with adaptive strategies
+    
+    # Phase 1: Coarse global optimization
+    for iteration in range(500):
+        # Update radii based on available space
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Compute max radius considering boundaries
+            boundary_radius = min(x, container_width - x, y, container_height - y)
+            
+            # Compute max radius considering other circles
+            max_radius = boundary_radius
+            for j in range(n_circles):
+                if i != j:
+                    dx = x - circles[j, 0]
+                    dy = y - circles[j, 1]
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist > 0.001:
+                        new_radius = dist - circles[j, 2]
+                        max_radius = min(max_radius, new_radius)
+            
+            # Increase radius if beneficial
+            if max_radius > r and max_radius < boundary_radius:
+                circles[i, 2] = min(r + 0.2 * (max_radius - r), max_radius)
+        
+        # Position optimization with repulsion forces
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Compute forces from other circles
+            fx, fy = 0.0, 0.0
+            
+            for j in range(n_circles):
+                if i != j:
+                    dx = circles[j, 0] - x
+                    dy = circles[j, 1] - y
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    
+                    if dist < (r + circles[j, 2]) and dist > 0.001:
+                        # Repulsive force
+                        force_magnitude = (r + circles[j, 2] - dist) / (dist + 1e-8)
+                        fx -= force_magnitude * dx
+                        fy -= force_magnitude * dy
+            
+            # Boundary forces
+            if x < r:
+                fx += (r - x) * 3.0
+            if x + r > container_width:
+                fx -= (x + r - container_width) * 3.0
+            if y < r:
+                fy += (r - y) * 3.0
+            if y + r > container_height:
+                fy -= (y + r - container_height) * 3.0
+            
+            # Apply movement
+            new_x = max(r, min(container_width - r, x + 0.1 * fx))
+            new_y = max(r, min(container_height - r, y + 0.1 * fy))
+            
+            circles[i, 0] = new_x
+            circles[i, 1] = new_y
+    
+    # Phase 2: Medium refinement
+    for iteration in range(800):
+        # Update radii
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Compute max radius considering boundaries
+            boundary_radius = min(x, container_width - x, y, container_height - y)
+            
+            # Compute max radius considering other circles
+            max_radius = boundary_radius
+            for j in range(n_circles):
+                if i != j:
+                    dx = x - circles[j, 0]
+                    dy = y - circles[j, 1]
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist > 0.001:
+                        new_radius = dist - circles[j, 2]
+                        max_radius = min(max_radius, new_radius)
+            
+            # Increase radius if beneficial
+            if max_radius > r and max_radius < boundary_radius:
+                circles[i, 2] = min(r + 0.1 * (max_radius - r), max_radius)
+        
+        # Position optimization
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Compute forces from other circles
+            fx, fy = 0.0, 0.0
+            
+            for j in range(n_circles):
+                if i != j:
+                    dx = circles[j, 0] - x
+                    dy = circles[j, 1] - y
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    
+                    if dist < (r + circles[j, 2]) and dist > 0.001:
+                        # Repulsive force
+                        force_magnitude = (r + circles[j, 2] - dist) / (dist + 1e-8)
+                        fx -= force_magnitude * dx
+                        fy -= force_magnitude * dy
+            
+            # Boundary forces
+            if x < r:
+                fx += (r - x) * 5.0
+            if x + r > container_width:
+                fx -= (x + r - container_width) * 5.0
+            if y < r:
+                fy += (r - y) * 5.0
+            if y + r > container_height:
+                fy -= (y + r - container_height) * 5.0
+            
+            # Apply movement
+            new_x = max(r, min(container_width - r, x + 0.05 * fx))
+            new_y = max(r, min(container_height - r, y + 0.05 * fy))
+            
+            circles[i, 0] = new_x
+            circles[i, 1] = new_y
+    
+    # Phase 3: Fine tuning
+    for iteration in range(1000):
+        # Update radii with very small increases
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Compute max radius considering boundaries
+            boundary_radius = min(x, container_width - x, y, container_height - y)
+            
+            # Compute max radius considering other circles
+            max_radius = boundary_radius
+            for j in range(n_circles):
+                if i != j:
+                    dx = x - circles[j, 0]
+                    dy = y - circles[j, 1]
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist > 0.001:
+                        new_radius = dist - circles[j, 2]
+                        max_radius = min(max_radius, new_radius)
+            
+            # Increase radius if beneficial
+            if max_radius > r and max_radius < boundary_radius:
+                circles[i, 2] = min(r + 0.03 * (max_radius - r), max_radius)
+        
+        # Position optimization with very small movements
+        for i in range(n_circles):
+            x, y, r = circles[i]
+            
+            # Compute forces from other circles
+            fx, fy = 0.0, 0.0
+            
+            for j in range(n_circles):
+                if i != j:
+                    dx = circles[j, 0] - x
+                    dy = circles[j, 1] - y
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    
+                    if dist < (r + circles[j, 2]) and dist > 0.001:
+                        # Repulsive force
+                        force_magnitude = (r + circles[j, 2] - dist) / (dist + 1e-8)
+                        fx -= force_magnitude * dx
+                        fy -= force_magnitude * dy
+            
+            # Boundary forces
+            if x < r:
+                fx += (r - x) * 10.0
+            if x + r > container_width:
+                fx -= (x + r - container_width) * 10.0
+            if y < r:
+                fy += (r - y) * 10.0
+            if y + r > container_height:
+                fy -= (y + r - container_height) * 10.0
+            
+            # Apply very small movements
+            new_x = max(r, min(container_width - r, x + 0.01 * fx))
+            new_y = max(r, min(container_height - r, y + 0.01 * fy))
+            
+            circles[i, 0] = new_x
+            circles[i, 1] = new_y
+    
+    # Ensure final solution validity
+    for i in range(n_circles):
+        x, y, r = circles[i]
+        # Ensure circles are within bounds
+        x = max(r, min(container_width - r, x))
+        y = max(r, min(container_height - r, y))
+        circles[i] = [x, y, r]
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

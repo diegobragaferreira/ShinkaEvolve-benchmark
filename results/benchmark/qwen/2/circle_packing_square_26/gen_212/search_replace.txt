@@ -1,0 +1,362 @@
+<NAME>
+enhance_grid_initialization_with_voronoi
+</NAME>
+
+<DESCRIPTION>
+The current grid initialization uses regular grid patterns which may not be optimal for circle packing. I'll enhance the initialization by incorporating Voronoi-based sampling that naturally creates more evenly distributed initial placements. This approach will help avoid clustering and create better starting configurations that are closer to optimal arrangements.
+
+The key changes involve:
+1. Adding Voronoi-based initialization as an alternative to grid-based approaches
+2. Using scipy's Voronoi functionality to generate better initial distributions
+3. Combining grid and Voronoi approaches for maximum effectiveness
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+from typing import List
+import time
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+=======
+import numpy as np
+from scipy.spatial import cKDTree, Voronoi
+import random
+from typing import List
+import time
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def create_initial_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Create initial population using hybrid grid-random initialization"""
+    population = []
+
+    for _ in range(pop_size):
+        circles = np.zeros((n_circles, 3))
+
+        # Phase 1: Grid-based initialization with multiple strategies
+        strategies = [
+            (2, 2),   # 4 circles
+            (3, 3),   # 9 circles
+            (4, 4),   # 16 circles
+            (5, 5),   # 25 circles
+        ]
+
+        # Select strategy
+        rows, cols = strategies[np.random.randint(0, len(strategies))]
+        actual_rows = min(rows, n_circles // cols + (1 if n_circles % cols else 0))
+        actual_cols = min(cols, (n_circles + actual_rows - 1) // actual_rows)  # Ceiling division
+
+        spacing_x = 1.0 / (actual_cols + 1)
+        spacing_y = 1.0 / (actual_rows + 1)
+
+        # Place circles in grid pattern
+        idx = 0
+        for i in range(actual_rows):
+            for j in range(actual_cols):
+                if idx >= n_circles:
+                    break
+
+                # Position with slight randomness
+                x = (j + 1) * spacing_x + np.random.uniform(-spacing_x/6, spacing_x/6)
+                y = (i + 1) * spacing_y + np.random.uniform(-spacing_y/6, spacing_y/6)
+
+                # Ensure within bounds
+                x = np.clip(x, 0.01, 0.99)
+                y = np.clip(y, 0.01, 0.99)
+
+                # Initial radius based on proximity to edges
+                min_dist_to_edge = min(x, 1-x, y, 1-y)
+                r = min(0.08, min_dist_to_edge * np.random.uniform(0.6, 0.9))
+
+                circles[idx] = [x, y, r]
+                idx += 1
+
+            if idx >= n_circles:
+                break
+
+        # Phase 2: Fill remaining positions strategically
+        for i in range(idx, n_circles):
+            # Prefer corners and edges for potentially larger radii
+            if np.random.rand() < 0.3:
+                # Corner placement with slight randomness
+                corner_x = np.random.choice([0.1, 0.9]) + np.random.uniform(-0.05, 0.05)
+                corner_y = np.random.choice([0.1, 0.9]) + np.random.uniform(-0.05, 0.05)
+                x, y = corner_x, corner_y
+            else:
+                # Random placement
+                x = np.random.uniform(0.05, 0.95)
+                y = np.random.uniform(0.05, 0.95)
+
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+            r = min(0.07, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+
+            circles[i] = [x, y, r]
+
+        # Phase 3: Pre-optimization - try to slightly improve initial configuration
+        for _ in range(10):
+            improved = False
+            for i in range(n_circles):
+                # Try to increase radius safely
+                original_r = circles[i, 2]
+                potential_r = original_r * 1.05
+
+                # Check if we can increase the radius
+                can_increase = True
+                for j in range(n_circles):
+                    if i != j:
+                        distance = np.sqrt((circles[i, 0] - circles[j, 0])**2 +
+                                         (circles[i, 1] - circles[j, 1])**2)
+                        if distance < (potential_r + circles[j, 2]):
+                            can_increase = False
+                            break
+
+                if can_increase:
+                    # Check boundary constraints
+                    min_edge_dist = min(circles[i, 0], 1-circles[i, 0],
+                                      circles[i, 1], 1-circles[i, 1])
+                    if potential_r <= min_edge_dist * 0.95:
+                        circles[i, 2] = potential_r
+                        improved = True
+
+            if not improved:
+                break
+
+        # Phase 4: Add diversity with small perturbations
+        for i in range(n_circles):
+            if np.random.rand() < 0.5:  # 50% chance to perturb
+                circles[i, 0] += np.random.uniform(-0.003, 0.003)
+                circles[i, 1] += np.random.uniform(-0.003, 0.003)
+                circles[i, 2] += np.random.uniform(-0.001, 0.001)
+
+                # Ensure bounds remain valid
+                circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], 1 - circles[i, 2])
+                circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], 1 - circles[i, 2])
+                circles[i, 2] = max(0.001, circles[i, 2])
+
+        population.append(circles)
+
+    return population
+=======
+def create_initial_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Create initial population using hybrid grid-Voronoi initialization"""
+    population = []
+
+    for _ in range(pop_size):
+        circles = np.zeros((n_circles, 3))
+
+        # Choose initialization strategy: grid-based or Voronoi-based
+        strategy = np.random.choice(['grid', 'voronoi', 'mixed'], p=[0.4, 0.4, 0.2])
+
+        if strategy == 'grid':
+            # Grid-based initialization (existing approach)
+            strategies = [
+                (2, 2),   # 4 circles
+                (3, 3),   # 9 circles
+                (4, 4),   # 16 circles
+                (5, 5),   # 25 circles
+            ]
+
+            # Select strategy
+            rows, cols = strategies[np.random.randint(0, len(strategies))]
+            actual_rows = min(rows, n_circles // cols + (1 if n_circles % cols else 0))
+            actual_cols = min(cols, (n_circles + actual_rows - 1) // actual_rows)  # Ceiling division
+
+            spacing_x = 1.0 / (actual_cols + 1)
+            spacing_y = 1.0 / (actual_rows + 1)
+
+            # Place circles in grid pattern
+            idx = 0
+            for i in range(actual_rows):
+                for j in range(actual_cols):
+                    if idx >= n_circles:
+                        break
+
+                    # Position with slight randomness
+                    x = (j + 1) * spacing_x + np.random.uniform(-spacing_x/6, spacing_x/6)
+                    y = (i + 1) * spacing_y + np.random.uniform(-spacing_y/6, spacing_y/6)
+
+                    # Ensure within bounds
+                    x = np.clip(x, 0.01, 0.99)
+                    y = np.clip(y, 0.01, 0.99)
+
+                    # Initial radius based on proximity to edges
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.6, 0.9))
+
+                    circles[idx] = [x, y, r]
+                    idx += 1
+
+                if idx >= n_circles:
+                    break
+
+        elif strategy == 'voronoi':
+            # Voronoi-based initialization
+            # Generate random points first
+            points = np.random.rand(n_circles + 10, 2)  # Extra points to handle edge cases
+
+            # Add boundary points to improve edge coverage
+            boundary_points = []
+            for _ in range(10):
+                boundary_points.append([np.random.uniform(0.1, 0.9), np.random.uniform(0.1, 0.9)])
+            points = np.vstack([points, boundary_points])
+
+            # Generate Voronoi diagram
+            try:
+                vor = Voronoi(points)
+                # Use Voronoi cell centers for circle positions
+                centers = vor.points[vor.point_region[:-1]]  # Remove infinite regions
+
+                # Take first n_circles centers that are inside unit square
+                valid_centers = []
+                for center in centers:
+                    if 0.01 <= center[0] <= 0.99 and 0.01 <= center[1] <= 0.99:
+                        valid_centers.append(center)
+                        if len(valid_centers) >= n_circles:
+                            break
+
+                # Fill circles array with Voronoi-based positions
+                idx = 0
+                for center in valid_centers:
+                    if idx >= n_circles:
+                        break
+                    x, y = center
+                    # Initial radius based on proximity to edges
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.6, 0.9))
+                    circles[idx] = [x, y, r]
+                    idx += 1
+
+                # Fill remaining circles if needed
+                for i in range(idx, n_circles):
+                    x = np.random.uniform(0.01, 0.99)
+                    y = np.random.uniform(0.01, 0.99)
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+                    circles[i] = [x, y, r]
+
+            except:
+                # Fallback to grid if Voronoi fails
+                strategies = [(3, 3), (4, 4)]
+                rows, cols = strategies[np.random.randint(0, len(strategies))]
+                spacing_x = 1.0 / (cols + 1)
+                spacing_y = 1.0 / (rows + 1)
+
+                idx = 0
+                for i in range(rows):
+                    for j in range(cols):
+                        if idx >= n_circles:
+                            break
+                        x = (j + 1) * spacing_x + np.random.uniform(-spacing_x/6, spacing_x/6)
+                        y = (i + 1) * spacing_y + np.random.uniform(-spacing_y/6, spacing_y/6)
+                        x = np.clip(x, 0.01, 0.99)
+                        y = np.clip(y, 0.01, 0.99)
+                        min_dist_to_edge = min(x, 1-x, y, 1-y)
+                        r = min(0.08, min_dist_to_edge * np.random.uniform(0.6, 0.9))
+                        circles[idx] = [x, y, r]
+                        idx += 1
+
+                for i in range(idx, n_circles):
+                    x = np.random.uniform(0.01, 0.99)
+                    y = np.random.uniform(0.01, 0.99)
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+                    circles[i] = [x, y, r]
+
+        else:  # mixed
+            # Mix grid and random for variety
+            # First, fill with grid pattern
+            strategies = [(3, 3), (4, 4)]
+            rows, cols = strategies[np.random.randint(0, len(strategies))]
+            spacing_x = 1.0 / (cols + 1)
+            spacing_y = 1.0 / (rows + 1)
+
+            idx = 0
+            for i in range(rows):
+                for j in range(cols):
+                    if idx >= n_circles:
+                        break
+                    x = (j + 1) * spacing_x + np.random.uniform(-spacing_x/6, spacing_x/6)
+                    y = (i + 1) * spacing_y + np.random.uniform(-spacing_y/6, spacing_y/6)
+                    x = np.clip(x, 0.01, 0.99)
+                    y = np.clip(y, 0.01, 0.99)
+                    min_dist_to_edge = min(x, 1-x, y, 1-y)
+                    r = min(0.08, min_dist_to_edge * np.random.uniform(0.6, 0.9))
+                    circles[idx] = [x, y, r]
+                    idx += 1
+
+            # Fill remaining with Voronoi-like random distribution (but not full Voronoi)
+            for i in range(idx, n_circles):
+                # Prefer edges and corners for better potential radii
+                if np.random.rand() < 0.3:
+                    # Corner/edge placement
+                    corner_x = np.random.choice([0.1, 0.9]) + np.random.uniform(-0.05, 0.05)
+                    corner_y = np.random.choice([0.1, 0.9]) + np.random.uniform(-0.05, 0.05)
+                    x, y = corner_x, corner_y
+                else:
+                    # Regular random placement
+                    x = np.random.uniform(0.05, 0.95)
+                    y = np.random.uniform(0.05, 0.95)
+                min_dist_to_edge = min(x, 1-x, y, 1-y)
+                r = min(0.07, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+                circles[i] = [x, y, r]
+
+        # Phase 3: Pre-optimization - try to slightly improve initial configuration
+        for _ in range(10):
+            improved = False
+            for i in range(n_circles):
+                # Try to increase radius safely
+                original_r = circles[i, 2]
+                potential_r = original_r * 1.05
+
+                # Check if we can increase the radius
+                can_increase = True
+                for j in range(n_circles):
+                    if i != j:
+                        distance = np.sqrt((circles[i, 0] - circles[j, 0])**2 +
+                                         (circles[i, 1] - circles[j, 1])**2)
+                        if distance < (potential_r + circles[j, 2]):
+                            can_increase = False
+                            break
+
+                if can_increase:
+                    # Check boundary constraints
+                    min_edge_dist = min(circles[i, 0], 1-circles[i, 0],
+                                      circles[i, 1], 1-circles[i, 1])
+                    if potential_r <= min_edge_dist * 0.95:
+                        circles[i, 2] = potential_r
+                        improved = True
+
+            if not improved:
+                break
+
+        # Phase 4: Add diversity with small perturbations
+        for i in range(n_circles):
+            if np.random.rand() < 0.5:  # 50% chance to perturb
+                circles[i, 0] += np.random.uniform(-0.003, 0.003)
+                circles[i, 1] += np.random.uniform(-0.003, 0.003)
+                circles[i, 2] += np.random.uniform(-0.001, 0.001)
+
+                # Ensure bounds remain valid
+                circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], 1 - circles[i, 2])
+                circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], 1 - circles[i, 2])
+                circles[i, 2] = max(0.001, circles[i, 2])
+
+        population.append(circles)
+
+    return population
+>>>>>>> REPLACE
+
+</DIFF>

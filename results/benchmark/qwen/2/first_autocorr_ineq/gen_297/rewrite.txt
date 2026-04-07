@@ -1,0 +1,195 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.signal import fftconvolve
+import random
+import time
+from collections import deque
+import math
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_c1(sequence):
+    """Compute C1 for a given sequence."""
+    if len(sequence) == 0 or abs(sum(sequence)) < 1e-10:
+        return float('inf')
+    convolved = fftconvolve(sequence, sequence, mode='full')
+    max_conv = np.max(convolved)
+    sum_seq = sum(sequence)
+    return (2 * len(sequence) * max_conv) / (sum_seq * sum_seq)
+
+def evaluate_sequence(sequence):
+    """Evaluate a sequence by computing 1/C1."""
+    c1 = compute_c1(sequence)
+    if c1 == float('inf') or c1 > 1e10:
+        return float('-inf')
+    return 1.0 / c1
+
+def adaptive_gradient_step(sequence, iteration, history):
+    """Perform an adaptive gradient ascent step."""
+    try:
+        seq_array = np.array(sequence, dtype=float)
+        n = len(seq_array)
+        
+        # Compute convolution and find the maximum index
+        convolved = fftconvolve(seq_array, seq_array, mode='full')
+        max_conv_index = np.argmax(convolved)
+        max_conv_value = np.max(convolved)
+        
+        # Estimate gradient direction based on convolution properties
+        grad_dir = np.zeros(n)
+        # Focus on elements that contribute most to the convolution peak
+        window = min(10, n // 2)
+        for i in range(max(0, max_conv_index - window), min(n, max_conv_index + window)):
+            # Approximate the influence of element i on the max convolution
+            # For convolution a*a, element i affects convolved[k] when a[i] * a[k-i] contributes
+            grad_dir[i] = -1.0  # Reduced impact for now, to decrease peak
+            
+        # Adaptive learning rate based on iteration count and performance change
+        adaptive_lr = 0.05 * math.exp(-iteration / 100.0)
+        
+        # Adjust learning rate based on recent history
+        if len(history) >= 2:
+            recent_changes = [history[i] - history[i-1] for i in range(1, len(history))]
+            avg_change = np.mean(recent_changes)
+            if avg_change > 0:
+                adaptive_lr *= 1.1
+            elif avg_change < 0:
+                adaptive_lr *= 0.9
+                
+        # Apply gradient update
+        updated_seq = seq_array + adaptive_lr * grad_dir
+        updated_seq = np.maximum(updated_seq, 0.0)
+        
+        # Normalize
+        sum_updated = np.sum(updated_seq)
+        if sum_updated > 0.01:
+            updated_seq = updated_seq / sum_updated
+        else:
+            updated_seq = updated_seq + 0.01
+            updated_seq = updated_seq / np.sum(updated_seq)
+            
+        return updated_seq.tolist()
+    except Exception as e:
+        # Fallback to random perturbation if gradient fails
+        new_sequence = sequence.copy()
+        for i in range(len(new_sequence)):
+            if random.random() < 0.1:
+                new_sequence[i] = max(0, new_sequence[i] + random.uniform(-10, 10))
+        return new_sequence
+
+def optimize_with_de(sequence):
+    """Refine the sequence using differential evolution."""
+    bounds = [(0.0, 1000.0)] * len(sequence)
+    try:
+        from scipy.optimize import differential_evolution
+        result = differential_evolution(
+            lambda s: -evaluate_sequence(s),
+            bounds,
+            maxiter=30,
+            popsize=10,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=random.randint(0, 1000),
+            polish=True
+        )
+        if result.success:
+            return result.x.tolist()
+    except Exception:
+        pass
+    return sequence
+
+def generate_random_sequence(length=None, min_length=100, max_length=1000):
+    """Generate a random sequence with specified or random length."""
+    if length is None:
+        length = random.randint(min_length, max_length)
+    sequence = [random.uniform(0, 1000) for _ in range(length)]
+    if all(x == 0 for x in sequence):
+        sequence[0] = 1.0
+    return sequence
+
+def generate_structured_sequence(length):
+    """Generate a structured sequence with good properties."""
+    base_sequence = np.random.uniform(0, 100, length)
+    if np.random.random() < 0.3:
+        idxs = np.random.choice(length, size=min(10, length//4), replace=False)
+        base_sequence[idxs] *= np.random.uniform(5, 20)
+    if np.random.random() < 0.3:
+        threshold = np.random.choice(length)
+        base_sequence[threshold:] = 0
+    return base_sequence.tolist()
+
+def search_for_best_sequence():
+    """Main search function using hybrid optimization with adaptive methods."""
+    start_time = time.time()
+    max_time_seconds = 170
+
+    best_sequence = None
+    best_inv_c1 = float('-inf')
+    history = deque(maxlen=10)
+    
+    # Run multiple optimization attempts
+    for attempt in range(15):
+        if time.time() - start_time > max_time_seconds:
+            break
+            
+        # Initialize sequence with either random or structured approach
+        if random.random() < 0.5:
+            current_sequence = generate_random_sequence()
+        else:
+            length = random.randint(100, 1000)
+            current_sequence = generate_structured_sequence(length)
+            
+        current_inv_c1 = evaluate_sequence(current_sequence)
+        
+        # Local optimization loop
+        for iteration in range(150):
+            if time.time() - start_time > max_time_seconds:
+                break
+                
+            # Adaptive gradient step
+            new_sequence = adaptive_gradient_step(current_sequence, iteration, history)
+            new_inv_c1 = evaluate_sequence(new_sequence)
+            
+            # Accept improvement
+            if new_inv_c1 > current_inv_c1:
+                current_sequence = new_sequence
+                current_inv_c1 = new_inv_c1
+                
+                # Update global best
+                if current_inv_c1 > best_inv_c1:
+                    best_inv_c1 = current_inv_c1
+                    best_sequence = current_sequence.copy()
+                    
+            # Track history for stagnation detection
+            history.append(current_inv_c1)
+            
+            # Reset if stagnated
+            if len(history) == history.maxlen:
+                recent_change = abs(history[-1] - history[0])
+                if recent_change < 1e-6:
+                    # Retry with a better initialized sequence
+                    current_sequence = generate_structured_sequence(len(current_sequence))
+                    current_inv_c1 = evaluate_sequence(current_sequence)
+                    
+            # Periodically refine with DE
+            if iteration % 20 == 0:
+                current_sequence = optimize_with_de(current_sequence)
+                
+    # Final refinement with DE if needed
+    if best_sequence is not None:
+        best_sequence = optimize_with_de(best_sequence)
+    
+    # Fallback to a simple uniform sequence
+    if best_sequence is None:
+        best_sequence = [1.0] * 100
+    
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

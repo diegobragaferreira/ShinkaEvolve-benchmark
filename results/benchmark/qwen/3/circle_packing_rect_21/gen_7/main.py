@@ -1,0 +1,183 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    # Using square for simplicity: width = height = 1
+    container_width = 1.0
+    container_height = 1.0
+
+    # Start with a hexagonal grid pattern as initial configuration
+    # This is a well-known efficient packing strategy
+    n = 21
+    circles = np.zeros((n, 3))
+
+    # Hexagonal packing parameters
+    # For 21 circles, we can arrange them in roughly 5 rows with 4-5 columns
+    rows = 5
+    cols = 5
+
+    # Adjust for 21 circles
+    if rows * cols >= n:
+        cols = n // rows
+        if n % rows > 0:
+            cols += 1
+    else:
+        rows = n // cols
+        if n % cols > 0:
+            rows += 1
+
+    # Grid spacing based on circle diameter
+    # We'll start with a reasonable estimate for max radius
+    max_radius = min(container_width, container_height) * 0.1
+    spacing_x = 2 * max_radius
+    spacing_y = 2 * max_radius * np.sqrt(3) / 2  # Vertical spacing for hexagonal packing
+
+    # Position circles in hexagonal pattern
+    circle_idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if circle_idx >= n:
+                break
+            # Offset odd rows
+            x_offset = (j * spacing_x) if i % 2 == 0 else (j * spacing_x + spacing_x / 2)
+            y = i * spacing_y
+
+            # Ensure circles fit within container
+            x = x_offset + max_radius
+            y = y + max_radius
+
+            if x + max_radius <= container_width and y + max_radius <= container_height:
+                circles[circle_idx] = [x, y, max_radius]
+                circle_idx += 1
+        if circle_idx >= n:
+            break
+
+    # Fill remaining circles with smaller radii
+    while circle_idx < n:
+        circles[circle_idx] = [container_width/2, container_height/2, max_radius/(circle_idx+1)]
+        circle_idx += 1
+
+    # Local optimization to maximize sum of radii
+    # Simple iterative improvement: try to increase radii while maintaining constraints
+    max_iterations = 1000
+    epsilon = 1e-6
+
+    for iteration in range(max_iterations):
+        improved = False
+        total_radius_before = np.sum(circles[:, 2])
+
+        # Try to increase each circle's radius
+        for i in range(n):
+            original_radius = circles[i, 2]
+            # Try increasing radius slightly
+            new_radius = min(original_radius * 1.05,
+                           (container_width - circles[i, 0]) * 0.9,
+                           (container_height - circles[i, 1]) * 0.9,
+                           circles[i, 0] * 0.9,
+                           circles[i, 1] * 0.9)
+
+            # Check if we can safely increase the radius
+            valid_new_radius = new_radius
+            valid_new_radius = min(valid_new_radius, get_max_safe_radius(circles, i, container_width, container_height))
+
+            if valid_new_radius > original_radius + epsilon:
+                # Test the new configuration
+                test_circles = circles.copy()
+                test_circles[i, 2] = valid_new_radius
+
+                # Check if this is valid
+                if check_validity(test_circles, container_width, container_height):
+                    circles = test_circles
+                    improved = True
+                    break  # Only one change per iteration for simplicity
+
+        if not improved:
+            break  # No more improvements possible
+
+    # Final check and adjustment
+    if not check_validity(circles, container_width, container_height):
+        # Re-initialize with a better configuration
+        circles = np.zeros((n, 3))
+        # Place circles in a more careful pattern
+        for i in range(n):
+            # Distribute circles more evenly
+            angle = 2 * np.pi * i / n
+            radius = 0.1
+            x = 0.5 + 0.4 * np.cos(angle) * radius
+            y = 0.5 + 0.4 * np.sin(angle) * radius
+            circles[i] = [max(0.01, min(container_width - 0.01, x)),
+                         max(0.01, min(container_height - 0.01, y)),
+                         radius]
+
+    return circles
+
+
+def get_max_safe_radius(circles, target_idx, container_width, container_height):
+    """Get maximum safe radius for a specific circle without violating constraints."""
+    x, y, r = circles[target_idx]
+
+    # Boundary constraints
+    max_radius_bound = min(x, y, container_width - x, container_height - y)
+
+    # Overlap constraints with other circles
+    max_radius_overlap = max_radius_bound
+    for i in range(len(circles)):
+        if i != target_idx:
+            x_i, y_i, r_i = circles[i]
+            # Distance to center of other circle
+            dx = x - x_i
+            dy = y - y_i
+            distance = np.sqrt(dx*dx + dy*dy)
+
+            # Maximum radius without overlapping this circle
+            max_rad = distance - r_i
+            if max_rad > 0:
+                max_radius_overlap = min(max_radius_overlap, max_rad)
+
+    return max_radius_overlap
+
+
+def check_validity(circles, container_width, container_height):
+    """Check if all circles are within bounds and non-overlapping."""
+    n = len(circles)
+
+    # Check boundary constraints
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > container_width or y - r < 0 or y + r > container_height:
+            return False
+
+    # Check overlap constraints
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+
+            # Calculate distance between centers
+            dx = x1 - x2
+            dy = y1 - y2
+            distance = np.sqrt(dx*dx + dy*dy)
+
+            # Check for overlap
+            if distance < (r1 + r2):
+                return False
+
+    return True
+
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

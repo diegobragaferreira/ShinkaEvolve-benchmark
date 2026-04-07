@@ -1,0 +1,199 @@
+<NAME>
+improved_step_function_construction
+</NAME>
+
+<DESCRIPTION>
+The proposed changes implement a sophisticated step function construction strategy inspired by harmonic analysis and functional inequalities. Instead of random initialization, I'm introducing a multi-phase optimization approach that:
+
+1. Uses evolutionary algorithms (differential evolution) to search for optimal step heights
+2. Employs a more informed initialization strategy based on mathematical insights about maximizing C₂
+3. Implements proper normalization and constraint handling
+4. Adds robust numerical computation of the C₂ metric with error handling
+5. Uses efficient piecewise linear integration for ||g||₂² computation
+
+These changes should significantly outperform both the baseline random approach and the previous strategic approach by leveraging global optimization techniques specifically designed for this type of problem.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+
+import numpy as np
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    f_values = [np.random.random()] * np.random.randint(100,1000)
+    return f_values
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.integrate import trapz
+import math
+
+def compute_autoconvolution_norms(f_values):
+    """
+    Compute the three norms needed for C2 calculation using piecewise linear integration.
+
+    Args:
+        f_values: list of step heights
+
+    Returns:
+        tuple: (||g||₂², ||g||₁, ||g||∞)
+    """
+    if not f_values:
+        return 0.0, 0.0, 0.0
+
+    # Convert to numpy array for easier manipulation
+    f = np.array(f_values)
+    n = len(f)
+
+    # Define domain [-1/4, 1/4] with equal spacing
+    domain_width = 0.5
+    dx = domain_width / (n - 1) if n > 1 else 1.0
+
+    # Compute autoconvolution g = f * f using discrete convolution
+    # This represents the convolution integral with piecewise linear interpolation
+    g = np.convolve(f, f, mode='full')
+
+    # Adjust indices to map back to [-1/4, 1/4] domain
+    # The convolution has 2*n-1 elements, centered around 0
+    g_len = len(g)
+    half_len = g_len // 2
+
+    # Extract the central part that corresponds to domain [-1/4, 1/4]
+    # We need to properly account for the convolution scaling
+    g_centered = g[half_len:(half_len + n)]
+
+    # Normalize by dx to get proper scaling for integration
+    g_scaled = g_centered * dx
+
+    # Compute norms
+    # ||g||₂² using trapezoidal rule with piecewise linear approximation
+    # For piecewise linear segments, the integral of g² is approximated:
+    # ∫g² ≈ Σ (dx/3)(y_i² + y_i*y_{i+1} + y_{i+1}²)
+    g_squared = g_scaled ** 2
+
+    # For L2 norm squared using trapezoidal integration for piecewise linear segments
+    # We use the formula adapted for piecewise linear functions
+    if len(g_scaled) < 2:
+        g_l2_squared = g_scaled[0]**2 if len(g_scaled) == 1 else 0.0
+    else:
+        # Using the trapezoidal rule approximation for piecewise linear functions
+        # For segment from i to i+1 with values y_i, y_{i+1},
+        # ∫g² ≈ (dx/3)(y_i² + y_i*y_{i+1} + y_{i+1}²)
+        g_l2_squared = (dx/3) * (
+            g_scaled[0]**2 +
+            g_scaled[0]*g_scaled[1] +
+            g_scaled[1]**2
+        )
+        for i in range(1, len(g_scaled)-1):
+            g_l2_squared += (dx/3) * (
+                g_scaled[i]**2 +
+                g_scaled[i]*g_scaled[i+1] +
+                g_scaled[i+1]**2
+            )
+
+    # ||g||₁ = sum of absolute values
+    g_l1 = np.sum(np.abs(g_scaled))
+
+    # ||g||∞ = maximum absolute value
+    g_linf = np.max(np.abs(g_scaled)) if len(g_scaled) > 0 else 0.0
+
+    return g_l2_squared, g_l1, g_linf
+
+def evaluate_c2(f_values):
+    """
+    Evaluate C2 value for given step function.
+
+    Args:
+        f_values: list of step heights
+
+    Returns:
+        float: C2 value
+    """
+    try:
+        g_l2_sq, g_l1, g_linf = compute_autoconvolution_norms(f_values)
+
+        # Avoid division by zero
+        if g_l1 <= 1e-15 or g_linf <= 1e-15:
+            return 0.0
+
+        c2 = g_l2_sq / (g_l1 * g_linf)
+        return c2
+    except Exception:
+        return 0.0
+
+def construct_function() -> list[float]:
+    """
+    Function to construct step-function with high C2 value using evolutionary optimization.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Determine initial number of steps
+    n_steps = 500  # Fixed size for consistency and manageable computation
+
+    # Objective function to maximize (negative because we minimize in scipy)
+    def objective(params):
+        # Clip negative values to 0
+        f_values = np.clip(params, 0, None)
+        c2_value = evaluate_c2(f_values)
+        return -c2_value  # Negative because we want to maximize
+
+    # Create initial guess with some structure
+    # Use a more informed initial guess based on mathematical considerations
+    initial_guess = []
+    for i in range(n_steps):
+        # Try a pattern that balances peak and spread to maximize C₂
+        if i % 4 == 0:
+            initial_guess.append(1.0)  # High peaks
+        elif i % 4 == 1:
+            initial_guess.append(0.7)  # Medium
+        elif i % 4 == 2:
+            initial_guess.append(0.3)  # Low
+        else:
+            initial_guess.append(0.0)  # Zero
+
+    # Bounds for each parameter (non-negative)
+    bounds = [(0.0, 2.0) for _ in range(n_steps)]
+
+    # Use differential evolution for global optimization
+    try:
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=100,
+            popsize=15,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            tol=1e-6,
+            disp=False
+        )
+
+        # Get the optimized solution
+        optimized_f_values = np.clip(result.x, 0, None)
+
+        # Return as list
+        return [float(x) for x in optimized_f_values]
+
+    except Exception:
+        # Fallback to simple structured pattern if optimization fails
+        f_values = []
+        for i in range(n_steps):
+            if i % 3 == 0:
+                f_values.append(1.0)
+            elif i % 3 == 1:
+                f_values.append(0.5)
+            else:
+                f_values.append(0.0)
+
+        return f_values
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE
+</DIFF>

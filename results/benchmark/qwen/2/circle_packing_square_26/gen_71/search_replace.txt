@@ -1,0 +1,275 @@
+<NAME>
+enhance_local_search_with_global_optimization
+</NAME>
+
+<DESCRIPTION>
+The current implementation has a local improvement phase that tries to optimize individual circles, but it lacks global optimization strategies that could significantly improve the packing. I'll enhance the local improvement function by adding a more sophisticated approach that includes:
+1. Using a greedy optimization approach to iteratively improve the configuration
+2. Implementing a simple simulated annealing-like mechanism to escape local optima
+3. Adding more systematic position adjustments based on geometric considerations
+
+This approach will help achieve better packing density and potentially surpass the benchmark.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def local_improvement(circles: np.ndarray) -> np.ndarray:
+    """Apply enhanced local improvement to maximize sum of radii"""
+    n = len(circles)
+    circles_copy = circles.copy()
+
+    # More sophisticated local search using iterative improvement
+    for iteration in range(100):
+        improved = False
+
+        # Try to improve each circle
+        for i in range(n):
+            x, y, r = circles_copy[i]
+
+            # Calculate maximum possible radius at current position
+            max_r = min(x, 1-x, y, 1-y)
+
+            # If we can increase radius, try to do so
+            if max_r > r + 1e-6:
+                # Try to increase radius as much as possible while avoiding overlaps
+                new_r = max_r
+
+                # Check overlap constraints with all other circles
+                valid_radius = True
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles_copy[j]
+                        distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if distance < new_r + r2:
+                            valid_radius = False
+                            break
+
+                # If we can increase radius, do so
+                if valid_radius:
+                    circles_copy[i, 2] = new_r
+                    improved = True
+                else:
+                    # Try a smaller increase
+                    step_size = 0.001
+                    test_r = min(r + step_size, max_r)
+                    while test_r > r + 1e-6 and not valid_radius:
+                        valid_radius = True
+                        for j in range(n):
+                            if i != j:
+                                x2, y2, r2 = circles_copy[j]
+                                distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                                if distance < test_r + r2:
+                                    valid_radius = False
+                                    break
+
+                        if valid_radius:
+                            circles_copy[i, 2] = test_r
+                            improved = True
+                            break
+                        else:
+                            test_r -= step_size
+
+            # Try to slightly adjust position for better packing
+            if iteration % 10 == 0:  # Only adjust position occasionally
+                best_x, best_y = x, y
+                best_r = r
+                best_score = calculate_sum_radii(circles_copy)
+
+                # Try small shifts in 4 directions
+                for dx in [-0.005, 0, 0.005]:
+                    for dy in [-0.005, 0, 0.005]:
+                        if abs(dx) + abs(dy) == 0:
+                            continue
+
+                        test_x = x + dx
+                        test_y = y + dy
+
+                        # Keep within bounds
+                        if test_x < r or test_x > 1-r or test_y < r or test_y > 1-r:
+                            continue
+
+                        # Check validity of new configuration
+                        valid = True
+                        temp_circles = circles_copy.copy()
+                        temp_circles[i, 0] = test_x
+                        temp_circles[i, 1] = test_y
+
+                        for j in range(n):
+                            if i != j:
+                                x2, y2, r2 = temp_circles[j]
+                                distance = np.sqrt((test_x - x2)**2 + (test_y - y2)**2)
+                                if distance < r + r2:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            # Calculate how much we would gain by changing to this position
+                            temp_circles[i, 2] = r  # reset radius to original
+                            test_score = calculate_sum_radii(temp_circles)
+                            if test_score > best_score:
+                                best_score = test_score
+                                best_x, best_y = test_x, test_y
+
+                # Update position if beneficial
+                if best_x != x or best_y != y:
+                    circles_copy[i, 0] = best_x
+                    circles_copy[i, 1] = best_y
+                    improved = True
+
+        # Stop if no significant improvement
+        if not improved:
+            break
+
+    return circles_copy
+=======
+def local_improvement(circles: np.ndarray) -> np.ndarray:
+    """Apply enhanced local improvement to maximize sum of radii"""
+    n = len(circles)
+    circles_copy = circles.copy()
+
+    # More sophisticated optimization using greedy improvement and simulated annealing approach
+    for iteration in range(200):
+        improved = False
+
+        # Try to improve each circle systematically
+        for i in range(n):
+            x, y, r = circles_copy[i]
+
+            # Calculate maximum possible radius at current position
+            max_r = min(x, 1-x, y, 1-y)
+
+            # Try to increase radius as much as possible while avoiding overlaps
+            if max_r > r + 1e-6:
+                # Try to increase radius as much as possible
+                new_r = max_r
+                valid_radius = True
+
+                # Check overlap constraints with all other circles
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles_copy[j]
+                        distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        if distance < new_r + r2:
+                            valid_radius = False
+                            break
+
+                # If we can increase radius, do so
+                if valid_radius:
+                    circles_copy[i, 2] = new_r
+                    improved = True
+                else:
+                    # Try a smaller increase in a more systematic way
+                    step_size = 0.0005
+                    test_r = min(r + step_size, max_r)
+                    while test_r > r + 1e-6 and not valid_radius:
+                        valid_radius = True
+                        for j in range(n):
+                            if i != j:
+                                x2, y2, r2 = circles_copy[j]
+                                distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+                                if distance < test_r + r2:
+                                    valid_radius = False
+                                    break
+
+                        if valid_radius:
+                            circles_copy[i, 2] = test_r
+                            improved = True
+                            break
+                        else:
+                            test_r -= step_size
+
+            # Position adjustment with more sophisticated approach
+            if iteration % 5 == 0:  # Adjust position more frequently now
+                # Calculate force from overlapping neighbors
+                force_x, force_y = 0.0, 0.0
+                current_r = r
+
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles_copy[j]
+                        distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+
+                        if distance < current_r + r2:
+                            # Repulsive force to move away from overlapping circle
+                            dx = x - x2
+                            dy = y - y2
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            if dist > 0:
+                                # Normalize and apply repulsive force
+                                force_x += dx / dist * (current_r + r2 - distance) * 0.01
+                                force_y += dy / dist * (current_r + r2 - distance) * 0.01
+
+                # Apply forces to position
+                new_x = x + force_x
+                new_y = y + force_y
+
+                # Keep within bounds
+                new_x = np.clip(new_x, current_r, 1-current_r)
+                new_y = np.clip(new_y, current_r, 1-current_r)
+
+                # Check if new position is valid (doesn't create new overlaps)
+                valid_position = True
+                temp_circles = circles_copy.copy()
+                temp_circles[i, 0] = new_x
+                temp_circles[i, 1] = new_y
+
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = temp_circles[j]
+                        distance = np.sqrt((new_x - x2)**2 + (new_y - y2)**2)
+                        if distance < current_r + r2:
+                            valid_position = False
+                            break
+
+                if valid_position:
+                    circles_copy[i, 0] = new_x
+                    circles_copy[i, 1] = new_y
+                    improved = True
+
+        # Stop if no significant improvement
+        if not improved:
+            break
+
+    # Final global optimization step - try to optimize all circles together
+    # This is a simplified version of simulated annealing approach
+    best_score = calculate_sum_radii(circles_copy)
+    temperature = 0.1
+
+    for _ in range(50):  # Limited iterations for global optimization
+        # Create a candidate solution by making small random changes
+        candidate = circles_copy.copy()
+
+        # Pick a random circle to modify
+        idx = random.randint(0, n-1)
+        x, y, r = candidate[idx]
+
+        # Slightly perturb position and radius
+        new_x = x + (random.random() - 0.5) * 0.02
+        new_y = y + (random.random() - 0.5) * 0.02
+        new_r = r + (random.random() - 0.5) * 0.01
+
+        # Keep within bounds
+        new_x = np.clip(new_x, new_r, 1-new_r)
+        new_y = np.clip(new_y, new_r, 1-new_r)
+        new_r = max(0.001, new_r)
+
+        candidate[idx, 0] = new_x
+        candidate[idx, 1] = new_y
+        candidate[idx, 2] = new_r
+
+        # Validate the candidate
+        if validate_circle_placement(candidate):
+            candidate_score = calculate_sum_radii(candidate)
+            if candidate_score > best_score:
+                circles_copy = candidate
+                best_score = candidate_score
+            elif random.random() < np.exp((candidate_score - best_score) / temperature):
+                circles_copy = candidate
+                best_score = candidate_score
+
+        # Cool down temperature
+        temperature *= 0.99
+
+    return circles_copy
+>>>>>>> REPLACE
+</DIFF>

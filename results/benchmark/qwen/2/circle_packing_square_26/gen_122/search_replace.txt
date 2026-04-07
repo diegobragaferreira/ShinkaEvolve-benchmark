@@ -1,0 +1,164 @@
+<NAME>
+enhanced_grid_initialization
+</NAME>
+
+<DESCRIPTION>
+The current grid initialization approach places circles on a regular grid with some randomness, but it doesn't consider the optimal distribution for maximizing total radius sum. The proposed enhancement uses a more sophisticated multi-scale grid approach with strategic placement patterns that better distribute circles for maximum packing efficiency. This should improve the quality of initial solutions and thus the overall evolutionary search performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_initial_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Create initial population using grid-based initialization"""
+    population = []
+
+    for _ in range(pop_size):
+        # Initialize circles in a grid pattern
+        circles = np.zeros((n_circles, 3))
+
+        # Grid dimensions
+        grid_size = int(np.ceil(np.sqrt(n_circles)))
+        spacing_x = 1.0 / grid_size
+        spacing_y = 1.0 / grid_size
+
+        # Place circles on a grid
+        idx = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if idx >= n_circles:
+                    break
+
+                # Position in grid cell
+                x = (i + 0.5) * spacing_x
+                y = (j + 0.5) * spacing_y
+
+                # Random radius (between 0.01 and 0.1)
+                r = np.random.uniform(0.01, 0.1)
+
+                # Adjust radius to fit within bounds
+                max_radius = min(x, 1-x, y, 1-y)
+                r = min(r, max_radius)
+
+                circles[idx] = [x, y, r]
+                idx += 1
+
+        # Add some random perturbations to improve diversity
+        for i in range(n_circles):
+            if np.random.rand() < 0.3:  # 30% chance to perturb
+                circles[i, 0] += np.random.normal(0, 0.01)
+                circles[i, 1] += np.random.normal(0, 0.01)
+                circles[i, 2] += np.random.normal(0, 0.005)
+
+                # Ensure valid bounds
+                circles[i, 0] = np.clip(circles[i, 0], circles[i, 2], 1 - circles[i, 2])
+                circles[i, 1] = np.clip(circles[i, 1], circles[i, 2], 1 - circles[i, 2])
+                circles[i, 2] = max(0.001, circles[i, 2])
+
+        population.append(circles)
+
+    return population
+=======
+def create_initial_population(pop_size: int, n_circles: int) -> List[np.ndarray]:
+    """Create initial population using enhanced multi-scale grid-based initialization"""
+    population = []
+
+    for _ in range(pop_size):
+        circles = np.zeros((n_circles, 3))
+
+        # Use multiple grid strategies for better diversity
+        grid_strategies = [
+            (3, 3),   # Small grid
+            (4, 4),   # Medium grid
+            (5, 5),   # Large grid
+            (2, 13),  # Rectangular grid for 26 circles
+            (13, 2)   # Transposed rectangular grid
+        ]
+
+        # Randomly select a grid strategy
+        grid_rows, grid_cols = grid_strategies[np.random.randint(0, len(grid_strategies))]
+
+        # Ensure we use the correct number of circles
+        actual_circles = min(grid_rows * grid_cols, n_circles)
+
+        spacing_x = 1.0 / (grid_cols + 1)
+        spacing_y = 1.0 / (grid_rows + 1)
+
+        # Place circles on the selected grid with strategic positioning
+        idx = 0
+        for i in range(grid_rows):
+            for j in range(grid_cols):
+                if idx >= n_circles:
+                    break
+
+                # Strategic positioning with offset for better distribution
+                if grid_rows == 2 and grid_cols == 13:
+                    # Special case for 2x13 grid to avoid linear patterns
+                    x = (j + 0.5) * spacing_x + np.random.uniform(-spacing_x/6, spacing_x/6)
+                    y = (i + 0.5) * spacing_y + (i * spacing_y / 3) * np.random.uniform(-0.3, 0.3)
+                elif grid_rows == 13 and grid_cols == 2:
+                    # Special case for 13x2 grid
+                    x = (j + 0.5) * spacing_x + (j * spacing_x / 3) * np.random.uniform(-0.3, 0.3)
+                    y = (i + 0.5) * spacing_y + np.random.uniform(-spacing_y/6, spacing_y/6)
+                else:
+                    # Regular grid with slight randomization
+                    x = (j + 0.5) * spacing_x + np.random.uniform(-spacing_x/8, spacing_x/8)
+                    y = (i + 0.5) * spacing_y + np.random.uniform(-spacing_y/8, spacing_y/8)
+
+                # Ensure within bounds
+                x = np.clip(x, 0.01, 0.99)
+                y = np.clip(y, 0.01, 0.99)
+
+                # Assign initial radius based on proximity to edges with some randomness
+                min_dist_to_edge = min(x, 1-x, y, 1-y)
+                # Use a more aggressive initial radius assignment for better starting point
+                r = min(0.08, min_dist_to_edge * np.random.uniform(0.7, 0.95))
+
+                circles[idx] = [x, y, r]
+                idx += 1
+
+            if idx >= n_circles:
+                break
+
+        # Fill remaining circles with random but informed placement
+        for i in range(idx, n_circles):
+            x = np.random.uniform(0.01, 0.99)
+            y = np.random.uniform(0.01, 0.99)
+            min_dist_to_edge = min(x, 1-x, y, 1-y)
+            # Use a more strategic initial radius
+            r = min(0.08, min_dist_to_edge * np.random.uniform(0.5, 0.8))
+            circles[i] = [x, y, r]
+
+        # Apply initial improvement through greedy radius expansion
+        improved = True
+        attempts = 0
+        while improved and attempts < 10:
+            improved = False
+            attempts += 1
+            for i in range(n_circles):
+                original_r = circles[i, 2]
+                # Try to increase radius more aggressively
+                potential_r = min(original_r * 1.15, 0.1)  # Allow larger increases
+
+                # Check if we can increase the radius
+                can_increase = True
+                for j in range(n_circles):
+                    if i != j:
+                        distance = np.sqrt((circles[i, 0] - circles[j, 0])**2 +
+                                         (circles[i, 1] - circles[j, 1])**2)
+                        if distance < (potential_r + circles[j, 2]):
+                            can_increase = False
+                            break
+
+                if can_increase:
+                    # Check boundary constraints
+                    min_edge_dist = min(circles[i, 0], 1-circles[i, 0],
+                                      circles[i, 1], 1-circles[i, 1])
+                    if potential_r <= min_edge_dist * 0.95:
+                        circles[i, 2] = potential_r
+                        improved = True
+
+        population.append(circles)
+
+    return population
+>>>>>>> REPLACE
+</DIFF>

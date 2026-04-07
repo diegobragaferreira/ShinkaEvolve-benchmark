@@ -1,0 +1,221 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+import time
+from numba import jit, prange
+import random
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals, dx):
+    """
+    Efficiently compute autoconvolution using Numba JIT compilation
+    """
+    n = len(f_vals)
+    # Autoconvolution using discrete convolution formula
+    g = np.zeros(2*n - 1)
+    
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < len(g):
+                g[idx] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """
+    Compute L1, L2^2, and L-infinity norms efficiently
+    """
+    n = len(g_vals)
+    
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+    
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+    
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+    
+    return l1_norm, l2_sq_norm, linf_norm
+
+@jit(nopython=True)
+def compute_c2_numba(f_vals, dx):
+    """
+    Compute C2 value using optimized numba functions
+    """
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_numba(f_vals, dx)
+    
+    # Compute norms
+    l1, l2_sq, linf = compute_norms_numba(g_vals)
+    
+    # Avoid division by zero
+    if l1 <= 1e-15 or linf <= 1e-15:
+        return 0.0
+    
+    # Return C2 value
+    return l2_sq / (l1 * linf)
+
+def evaluate_step_function(f_vals):
+    """
+    Evaluate a step function and return C2 value
+    """
+    try:
+        # Ensure non-negative values
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+        
+        # Use a fixed dx for consistent spacing
+        dx = 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001
+        
+        # Compute C2 value
+        c2 = compute_c2_numba(f_vals, dx)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def sophisticated_initialization(n_steps):
+    """Create structured initial step function with mathematical intuition"""
+    # Create a pattern that balances energy concentration and uniformity
+    # Using a combination of Gaussian-like peaks and oscillatory components
+    
+    # Base pattern: alternating high/low with some smooth transitions
+    f_vals = []
+    
+    # Create a core structure with multiple peaks
+    peak_positions = np.linspace(0, n_steps-1, min(10, n_steps//2)) if n_steps > 20 else [0]
+    
+    for i in range(n_steps):
+        # Primary pattern: Gaussian-like with multiple peaks
+        val = 0.0
+        for peak_pos in peak_positions:
+            # Gaussian envelope around peak positions
+            gaussian_val = np.exp(-0.5 * ((i - peak_pos) / (n_steps/20))**2)
+            val += gaussian_val * (0.5 + 0.5 * np.sin(i * 0.3))
+            
+        # Add some randomness but keep structure
+        val += np.random.normal(0, 0.1) * (1.0 - 0.1 * i/n_steps) if i < n_steps else 0
+        
+        f_vals.append(max(0.0, val))
+    
+    # Normalize to prevent extreme outliers
+    if np.max(f_vals) > 0:
+        f_vals = np.array(f_vals) / np.max(f_vals) * 2.0
+    
+    return f_vals.tolist()
+
+def adaptive_optimization_strategy():
+    """Use multiple optimization strategies adaptively"""
+    n_steps = np.random.randint(500, 3000)
+    
+    # Generate sophisticated initial point
+    x0 = sophisticated_initialization(n_steps)
+    
+    # Define bounds for each variable
+    bounds = [(0, 10.0)] * len(x0)
+    
+    # Store best result encountered
+    best_x = x0.copy()
+    best_c2 = evaluate_step_function(x0)
+    
+    # Try multiple optimization methods
+    methods_to_try = ['Nelder-Mead', 'Powell', 'COBYLA']
+    method_results = {}
+    
+    for method in methods_to_try:
+        try:
+            # Skip methods that don't support bounds
+            if method in ['Nelder-Mead', 'Powell']:
+                result = minimize(
+                    lambda x: -evaluate_step_function(x),  # Minimize negative C2
+                    x0,
+                    method=method,
+                    options={'maxiter': 100, 'disp': False}
+                )
+            else:  # COBYLA
+                result = minimize(
+                    lambda x: -evaluate_step_function(x),
+                    x0,
+                    method=method,
+                    bounds=bounds,
+                    options={'maxiter': 100, 'disp': False}
+                )
+            
+            if result.success:
+                current_c2 = evaluate_step_function(result.x)
+                method_results[method] = current_c2
+                if current_c2 > best_c2:
+                    best_c2 = current_c2
+                    best_x = result.x.copy()
+                    
+        except Exception as e:
+            continue
+    
+    # Refine with local optimization if we have a good candidate
+    if len(best_x) > 0:
+        try:
+            # Use L-BFGS-B for further refinement
+            result = minimize(
+                lambda x: -evaluate_step_function(x),
+                best_x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50, 'disp': False}
+            )
+            if result.success:
+                refined_c2 = evaluate_step_function(result.x)
+                if refined_c2 > best_c2:
+                    best_c2 = refined_c2
+                    best_x = result.x.copy()
+        except Exception as e:
+            pass
+    
+    return best_x if len(best_x) > 0 else sophisticated_initialization(100)
+
+def construct_function() -> list[float]:
+    """
+    Function to construct step-function with high C2 value.
+    Uses adaptive hybrid optimization with sophisticated initialization.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    start_time = time.time()
+    
+    # Run adaptive optimization
+    try:
+        best_solution = adaptive_optimization_strategy()
+    except Exception as e:
+        # Fallback to simple approach if optimization fails
+        print(f"Optimization failed with error: {e}")
+        best_solution = sophisticated_initialization(100)
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    # Ensure the solution is valid
+    if not best_solution:
+        best_solution = sophisticated_initialization(100)
+    
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Best C2 found: {evaluate_step_function(best_solution):.6f}")
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

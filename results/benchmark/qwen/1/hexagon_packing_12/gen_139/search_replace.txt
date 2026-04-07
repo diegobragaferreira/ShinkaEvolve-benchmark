@@ -1,0 +1,240 @@
+<NAME>
+add_spatial_acceleration
+</NAME>
+
+<DESCRIPTION>
+Adding spatial acceleration using cKDTree to significantly improve overlap detection performance. This addresses the main bottleneck in the current implementation where all pairwise overlap checks are performed in O(n²) time. The cKDTree will allow us to quickly identify only nearby hexagons that need detailed overlap testing, reducing the complexity to O(n log n) average case while maintaining the same optimization framework.
+
+The key insight is that most hexagons are far apart and won't overlap, so we should use spatial indexing to avoid unnecessary expensive Shapely intersection tests. This follows the pattern established in previous generations that achieved the SOTA benchmark ratio of 0.2537.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+import time
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from scipy.spatial import cKDTree
+import time
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_configuration_symmetric(params):
+    """
+    Optimized evaluation function using symmetric hexagonal arrangement.
+    Reduces parameter space to focus on physically meaningful variables.
+    """
+    # Reduced parameter space:
+    # params[0]: middle ring radius
+    # params[1]: outer ring radius
+    # params[2]: middle ring angle offset
+    # params[3]: outer ring angle offset
+    # params[4]: outer hexagon angle (rotation)
+    # params[5]: outer hexagon center x
+    # params[6]: outer hexagon center y
+    # params[7]: center hexagon rotation
+    # params[8]: middle ring rotation
+
+    # Get layer distances and angles
+    middle_radius = params[0]
+    outer_radius = params[1]
+    middle_angle_offset = params[2]
+    outer_angle_offset = params[3]
+
+    # Layer 1: Center (1 hexagon)
+    layer1_pos = [(0.0, 0.0)]
+    layer1_angles = [params[7]]
+
+    # Layer 2: Middle ring (6 hexagons)
+    layer2_pos = []
+    layer2_angles = []
+    for i in range(6):
+        angle = (i * 60 + middle_angle_offset) % 360
+        rad = middle_radius
+        x = rad * np.cos(np.radians(angle))
+        y = rad * np.sin(np.radians(angle))
+        layer2_pos.append((x, y))
+        layer2_angles.append(params[8])
+
+    # Layer 3: Outer ring (5 hexagons)
+    layer3_pos = []
+    layer3_angles = []
+    for i in range(5):
+        angle = (i * 72 + outer_angle_offset) % 360
+        rad = outer_radius
+        x = rad * np.cos(np.radians(angle))
+        y = rad * np.sin(np.radians(angle))
+        layer3_pos.append((x, y))
+        layer3_angles.append(0.0)
+
+    # Combine all positions and angles
+    all_positions = layer1_pos + layer2_pos + layer3_pos
+    all_angles = layer1_angles + layer2_angles + layer3_angles
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i, (pos, angle) in enumerate(zip(all_positions, all_angles)):
+        x, y = pos
+        vertices = generate_hexagon_vertices(x, y, angle)
+        inner_hexagons.append(vertices)
+
+    # Create outer hexagon with optimized size based on the furthest point
+    max_dist = 0
+    for hex_vertices in inner_hexagons:
+        for vertex in hex_vertices:
+            dist = np.sqrt(vertex[0]**2 + vertex[1]**2)
+            max_dist = max(max_dist, dist)
+
+    # Add buffer and create outer hexagon
+    outer_radius_final = max_dist * 1.01  # 1% extra space for numerical stability
+    outer_center_x, outer_center_y, outer_angle = params[5:8]
+    outer_vertices = generate_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, outer_radius_final)
+
+    # Check constraints efficiently
+    total_penalty = 0
+
+    # Check containment - only one check since all should be contained if we calculated correctly
+    for hex_vertices in inner_hexagons:
+        if not check_containment(hex_vertices, outer_vertices):
+            total_penalty += 10000
+
+    # Optimized overlap checking - only check critical pairs
+    # Center with all others
+    for i in range(1, 12):  # center with all other hexagons
+        if check_overlap(inner_hexagons[0], inner_hexagons[i]):
+            total_penalty += 10000
+
+    # Middle ring vs outer ring
+    for i in range(1, 7):  # middle ring
+        for j in range(7, 12):  # outer ring
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                total_penalty += 10000
+
+    # Middle ring self-intersection
+    for i in range(1, 7):
+        for j in range(i+1, 7):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                total_penalty += 10000
+
+    # Outer ring self-intersection
+    for i in range(7, 12):
+        for j in range(i+1, 12):
+            if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                total_penalty += 10000
+
+    # Return negative inverse of outer radius plus penalties
+    # Adding penalty to avoid returning very small values that might cause issues
+    return -(1.0 / (outer_radius_final + total_penalty + 1e-8))
+=======
+def evaluate_configuration_symmetric(params):
+    """
+    Optimized evaluation function using symmetric hexagonal arrangement.
+    Reduces parameter space to focus on physically meaningful variables.
+    """
+    # Reduced parameter space:
+    # params[0]: middle ring radius
+    # params[1]: outer ring radius
+    # params[2]: middle ring angle offset
+    # params[3]: outer ring angle offset
+    # params[4]: outer hexagon angle (rotation)
+    # params[5]: outer hexagon center x
+    # params[6]: outer hexagon center y
+    # params[7]: center hexagon rotation
+    # params[8]: middle ring rotation
+
+    # Get layer distances and angles
+    middle_radius = params[0]
+    outer_radius = params[1]
+    middle_angle_offset = params[2]
+    outer_angle_offset = params[3]
+
+    # Layer 1: Center (1 hexagon)
+    layer1_pos = [(0.0, 0.0)]
+    layer1_angles = [params[7]]
+
+    # Layer 2: Middle ring (6 hexagons)
+    layer2_pos = []
+    layer2_angles = []
+    for i in range(6):
+        angle = (i * 60 + middle_angle_offset) % 360
+        rad = middle_radius
+        x = rad * np.cos(np.radians(angle))
+        y = rad * np.sin(np.radians(angle))
+        layer2_pos.append((x, y))
+        layer2_angles.append(params[8])
+
+    # Layer 3: Outer ring (5 hexagons)
+    layer3_pos = []
+    layer3_angles = []
+    for i in range(5):
+        angle = (i * 72 + outer_angle_offset) % 360
+        rad = outer_radius
+        x = rad * np.cos(np.radians(angle))
+        y = rad * np.sin(np.radians(angle))
+        layer3_pos.append((x, y))
+        layer3_angles.append(0.0)
+
+    # Combine all positions and angles
+    all_positions = layer1_pos + layer2_pos + layer3_pos
+    all_angles = layer1_angles + layer2_angles + layer3_angles
+
+    # Create inner hexagons
+    inner_hexagons = []
+    for i, (pos, angle) in enumerate(zip(all_positions, all_angles)):
+        x, y = pos
+        vertices = generate_hexagon_vertices(x, y, angle)
+        inner_hexagons.append(vertices)
+
+    # Create outer hexagon with optimized size based on the furthest point
+    max_dist = 0
+    for hex_vertices in inner_hexagons:
+        for vertex in hex_vertices:
+            dist = np.sqrt(vertex[0]**2 + vertex[1]**2)
+            max_dist = max(max_dist, dist)
+
+    # Add buffer and create outer hexagon
+    outer_radius_final = max_dist * 1.01  # 1% extra space for numerical stability
+    outer_center_x, outer_center_y, outer_angle = params[5:8]
+    outer_vertices = generate_hexagon_vertices(outer_center_x, outer_center_y, outer_angle, outer_radius_final)
+
+    # Check constraints efficiently
+    total_penalty = 0
+
+    # Check containment - only one check since all should be contained if we calculated correctly
+    for hex_vertices in inner_hexagons:
+        if not check_containment(hex_vertices, outer_vertices):
+            total_penalty += 10000
+
+    # Build spatial index for efficient overlap checking
+    # Get centers of all hexagons for spatial indexing
+    hex_centers = np.array([[np.mean(v[:, 0]), np.mean(v[:, 1])] for v in inner_hexagons])
+    tree = cKDTree(hex_centers)
+
+    # Find neighbors within a reasonable distance (2x hexagon diameter)
+    pairs_to_check = tree.query_pairs(r=3.0, p=np.inf)
+
+    # Check overlaps using spatial acceleration
+    checked_pairs = set()
+    for i, j in pairs_to_check:
+        # Avoid double checking
+        pair_key = tuple(sorted([i, j]))
+        if pair_key in checked_pairs:
+            continue
+        checked_pairs.add(pair_key)
+
+        # Check for overlap using efficient geometric tests first
+        if check_overlap(inner_hexagons[i], inner_hexagons[j]):
+            total_penalty += 10000
+
+    # Return negative inverse of outer radius plus penalties
+    # Adding penalty to avoid returning very small values that might cause issues
+    return -(1.0 / (outer_radius_final + total_penalty + 1e-8))
+>>>>>>> REPLACE
+</DIFF>

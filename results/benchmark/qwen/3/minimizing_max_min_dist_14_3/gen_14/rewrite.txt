@@ -1,0 +1,109 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution
+from sklearn.cluster import KMeans
+import warnings
+warnings.filterwarnings('ignore')
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    def objective_function(x):
+        # Reshape flat array back to 14x3 points
+        points = x.reshape((14, 3))
+        
+        # Compute pairwise distances
+        distances = pdist(points)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Avoid division by zero
+        if max_dist == 0:
+            return -np.inf
+            
+        # Return negative because we want to maximize the ratio
+        return -min_dist / max_dist
+    
+    def spherical_initialization():
+        """Initialize points on a sphere using Fibonacci spiral method"""
+        # Generate points on a unit sphere using Fibonacci spiral
+        points = []
+        n = 14
+        
+        for i in range(n):
+            y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = np.sqrt(n) * i  # golden angle increment
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        # Scale to appropriate size and add some randomness
+        points = np.array(points)
+        # Add small perturbations to escape local minima
+        np.random.seed(42)
+        points += np.random.normal(0, 0.05, points.shape)
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points = points / norms
+        
+        # Scale to make distances reasonable (approximately 1)
+        points *= 0.5
+        
+        return points.flatten()
+    
+    def constraint_check(x):
+        """Check if points are within [0,1]^3 bounds"""
+        points = x.reshape((14, 3))
+        return np.all((points >= 0) & (points <= 1))
+    
+    # Initialize with spherical arrangement
+    initial_points = spherical_initialization()
+    
+    # Bounds for each coordinate [0, 1]
+    bounds = [(0, 1)] * 14 * 3
+    
+    # Use differential evolution with custom parameters
+    try:
+        result = differential_evolution(
+            objective_function,
+            bounds,
+            seed=42,
+            maxiter=1000,
+            popsize=15,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            atol=1e-8,
+            rtol=1e-8,
+            callback=None
+        )
+        
+        # Extract final points
+        final_points = result.x.reshape((14, 3))
+        
+        # Ensure all points are within bounds
+        final_points = np.clip(final_points, 0, 1)
+        
+        # If the final solution is extremely close to violating bounds, 
+        # we may need to do a slight adjustment
+        if not constraint_check(result.x):
+            # Apply correction if needed
+            final_points = np.clip(final_points, 0, 1)
+            
+    except Exception as e:
+        # Fallback to the spherical initialization if optimization fails
+        final_points = initial_points.reshape((14, 3))
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

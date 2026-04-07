@@ -1,0 +1,226 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import random
+from scipy.signal import convolve
+from numba import jit, njit
+
+@njit
+def compute_autoconvolution_norms_numba(f_values):
+    """Efficiently compute autoconvolution and norms using numba JIT"""
+    n = len(f_values)
+    # Compute autoconvolution g = f * f using manual loop for efficiency
+    g = np.zeros(2*n - 1)
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_values[i] * f_values[j]
+
+    # Compute L2 norm squared (using trapezoidal approximation)
+    g_squared = g * g
+    norm_g2_squared = np.sum(g_squared)
+    
+    # Approximate L1 norm (using trapezoidal rule)
+    norm_g1_approx = np.sum(np.abs(g)) / (len(g) + 1)
+    
+    # Infinity norm
+    norm_ginf = np.max(np.abs(g))
+    
+    return norm_g2_squared, norm_g1_approx, norm_ginf
+
+@njit
+def calculate_c2(f_values):
+    """Calculate C2 value for given step function values"""
+    try:
+        norm_g2_squared, norm_g1_approx, norm_ginf = compute_autoconvolution_norms_numba(np.array(f_values))
+        
+        # Avoid division by zero
+        if norm_g1_approx < 1e-15 or norm_ginf < 1e-15:
+            return 0.0
+        
+        c2 = norm_g2_squared / (norm_g1_approx * norm_ginf)
+        return float(c2)
+    except Exception:
+        return 0.0
+
+def generate_initial_individual(n):
+    """Generate an individual with hybrid initialization strategy"""
+    # Start with alternating high/low pattern to get structured initialization
+    individual = []
+    for i in range(n):
+        if i % 2 == 0:
+            individual.append(np.random.exponential(1.0))
+        else:
+            individual.append(np.random.exponential(0.3))
+    
+    # Add some random perturbations to break symmetry
+    for i in range(len(individual)):
+        if np.random.random() < 0.3:  # 30% chance to perturb
+            individual[i] *= np.random.uniform(0.5, 2.0)
+    
+    # Normalize to prevent extreme values
+    total = sum(individual)
+    if total > 0:
+        individual = [x / total * 2.0 for x in individual]
+    
+    # Clip negative values and ensure reasonable bounds
+    individual = [max(0, x) for x in individual]
+    individual = [min(x, 5.0) for x in individual]
+    
+    return individual
+
+def mutate_individual(individual, generation, max_generations):
+    """Apply adaptive mutation with decreasing rate"""
+    mutated = individual.copy()
+    # Adaptive mutation rate: starts high, decreases over time
+    mutation_rate = 0.3 * (1 - generation / max_generations)
+    
+    # Mutate elements with adaptive probability
+    for i in range(len(mutated)):
+        if np.random.random() < mutation_rate:
+            # Apply Gaussian noise with adaptive magnitude
+            noise_magnitude = 0.2 * (1 + generation / max_generations)
+            mutated[i] = max(0, mutated[i] + np.random.normal(0, noise_magnitude))
+    
+    # Occasionally perform larger changes for exploration
+    if np.random.random() < 0.15:  # 15% chance for major change
+        # Replace segment with new random pattern
+        start_idx = np.random.randint(0, len(mutated))
+        end_idx = min(len(mutated), start_idx + np.random.randint(5, min(50, len(mutated)//3)))
+        for i in range(start_idx, end_idx):
+            mutated[i] = np.random.exponential(0.5)
+    
+    return mutated
+
+def uniform_crossover(parent1, parent2):
+    """Perform uniform crossover between two parents"""
+    child1, child2 = [], []
+    for i in range(min(len(parent1), len(parent2))):
+        if np.random.random() < 0.5:
+            child1.append(parent1[i])
+            child2.append(parent2[i])
+        else:
+            child1.append(parent2[i])
+            child2.append(parent1[i])
+    
+    # Pad shorter child with values from longer parent
+    if len(child1) < len(parent1):
+        for i in range(len(child1), len(parent1)):
+            child1.append(parent1[i])
+    elif len(child1) < len(parent2):
+        for i in range(len(child1), len(parent2)):
+            child1.append(parent2[i])
+            
+    if len(child2) < len(parent1):
+        for i in range(len(child2), len(parent1)):
+            child2.append(parent1[i])
+    elif len(child2) < len(parent2):
+        for i in range(len(child2), len(parent2)):
+            child2.append(parent2[i])
+    
+    return child1, child2
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """Tournament selection for choosing parents"""
+    selected = []
+    for _ in range(len(population)):
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        selected.append(population[winner_index])
+    return selected
+
+def local_optimization(individual, iterations=3):
+    """Apply simple hill climbing to locally refine an individual"""
+    best_individual = individual.copy()
+    best_c2 = calculate_c2(best_individual)
+    
+    for _ in range(iterations):
+        # Try small perturbations
+        mutated = best_individual.copy()
+        idx = np.random.randint(len(mutated))
+        mutated[idx] = max(0, mutated[idx] + np.random.normal(0, 0.05))
+        
+        new_c2 = calculate_c2(mutated)
+        if new_c2 > best_c2:
+            best_individual = mutated
+            best_c2 = new_c2
+    
+    return best_individual
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    np.random.seed(42)  # Deterministic seed for reproducibility
+    
+    # Initialize parameters
+    max_generations = 70
+    initial_population_size = 25
+    elite_size = 5
+    
+    # Generate initial population with hybrid strategy
+    population = []
+    for _ in range(initial_population_size):
+        n = np.random.randint(200, 2000)  # Increase range for better exploration
+        individual = generate_initial_individual(n)
+        population.append(individual)
+    
+    # Evaluate initial population
+    fitnesses = [calculate_c2(ind) for ind in population]
+    
+    # Evolution loop
+    for generation in range(max_generations):
+        # Sort by fitness
+        sorted_indices = np.argsort(fitnesses)[::-1]
+        population = [population[i] for i in sorted_indices]
+        fitnesses = [fitnesses[i] for i in sorted_indices]
+        
+        # Keep elite individuals
+        elite = population[:elite_size]
+        
+        # Apply local optimization to elite individuals
+        optimized_elite = []
+        for ind in elite:
+            optimized = local_optimization(ind, iterations=5)
+            optimized_elite.append(optimized)
+        elite = optimized_elite
+        
+        # Selection
+        selected_parents = tournament_selection(population, fitnesses)
+        
+        # Crossover and mutation to create offspring
+        new_population = elite.copy()
+        while len(new_population) < initial_population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+            
+            child1, child2 = uniform_crossover(parent1, parent2)
+            
+            child1 = mutate_individual(child1, generation, max_generations)
+            child2 = mutate_individual(child2, generation, max_generations)
+            
+            # Apply local search to offspring
+            child1 = local_optimization(child1, iterations=2)
+            child2 = local_optimization(child2, iterations=2)
+            
+            new_population.extend([child1, child2])
+        
+        # Trim to exact population size
+        population = new_population[:initial_population_size]
+        
+        # Re-evaluate fitness
+        fitnesses = [calculate_c2(ind) for ind in population]
+        
+        # Early stopping if we're getting close to good solutions
+        if generation % 15 == 0:
+            best_fitness = max(fitnesses)
+            if best_fitness > 0.95:  # Early exit condition
+                break
+
+    # Return the best individual found
+    best_idx = np.argmax(fitnesses)
+    return population[best_idx]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

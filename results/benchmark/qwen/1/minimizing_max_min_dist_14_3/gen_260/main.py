@@ -1,0 +1,256 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import SphericalVoronoi
+import math
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    def fibonacci_sphere(n):
+        """Generate n points on a sphere using Fibonacci spiral method"""
+        points = []
+        phi = np.pi * (3 - np.sqrt(5))  # golden angle
+        
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            
+            theta = phi * i  # golden angle increment
+            
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            
+            points.append([x, y, z])
+        
+        return np.array(points)
+    
+    def voronoi_uniformity_penalty(points):
+        """Calculate penalty based on Voronoi cell area uniformity"""
+        try:
+            # Project points to unit sphere
+            norms = np.linalg.norm(points, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1, norms)
+            normalized_points = points / norms
+            
+            sv = SphericalVoronoi(normalized_points)
+            areas = sv.voronoi_cell_areas()
+            
+            # Return variance of areas (lower is better for uniformity)  
+            return np.var(areas)
+        except:
+            return 1000.0
+    
+    def distance_ratio(points):
+        """Calculate the ratio of minimum to maximum distance"""
+        distances = squareform(pdist(points))
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0
+        return min_dist / max_dist
+    
+    def objective(x):
+        # Reshape x into 14 points in 3D
+        points = x.reshape(-1, 3)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Return negative ratio since we want to maximize
+        if d_max < 1e-10:
+            return -1e10
+            
+        # Base ratio
+        ratio = d_min / d_max
+        
+        # Add penalty for non-uniform Voronoi cells (higher variance = worse uniformity)
+        voronoi_penalty = voronoi_uniformity_penalty(points)
+        
+        # Weighted combination: prioritize ratio but penalize poor uniformity
+        # Use a moderate penalty coefficient (0.1) to balance both objectives
+        penalty_factor = 0.1 * voronoi_penalty
+        
+        return -(ratio - penalty_factor)
+
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie exactly on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        return points / norms
+    
+    def adaptive_initialization(n_points):
+        """Generate high-quality initial points using adaptive method"""
+        # Start with Fibonacci points on sphere
+        fib_points = fibonacci_sphere(n_points)
+        
+        # Normalize to unit sphere
+        fib_points = normalize_to_unit_sphere(fib_points)
+        
+        # Add some randomness to break symmetries while maintaining good distribution
+        noise_magnitude = 0.05
+        noise = np.random.normal(0, noise_magnitude, fib_points.shape)
+        initial_points = fib_points + noise
+        
+        # Re-normalize to sphere
+        initial_points = normalize_to_unit_sphere(initial_points)
+        
+        return initial_points
+    
+    def progressive_optimization(x0, maxiter=1000):
+        """
+        Perform progressive optimization with varying constraints and tolerances
+        """
+        # Phase 1: Coarse optimization (fast, loose constraints)
+        bounds = [(-1.2, 1.2)] * len(x0)
+        
+        # Constraint function that allows slight deviations from sphere
+        def constraint_func(x):
+            points = x.reshape(-1, 3)
+            norms = np.linalg.norm(points, axis=1)
+            return norms - 1.0  # Should be near 0 for unit sphere
+        
+        # Constraints for each point
+        constraints = []
+        for i in range(14):
+            constraints.append({'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]})
+        
+        # Loose tolerance for first phase
+        result = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 200, 'ftol': 1e-4, 'gtol': 1e-4},
+            tol=1e-4
+        )
+        
+        # Phase 2: Medium optimization (moderate constraints)  
+        x1 = result.x
+        bounds = [(-1.1, 1.1)] * len(x0)
+        
+        result = minimize(
+            objective,
+            x1,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 300, 'ftol': 1e-6, 'gtol': 1e-6},
+            tol=1e-6
+        )
+        
+        # Phase 3: Fine optimization (tight constraints)
+        x2 = result.x
+        bounds = [(-1.05, 1.05)] * len(x0)
+        
+        result = minimize(
+            objective,
+            x2,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+        
+        return result.x
+    
+    # Multi-stage optimization with adaptive parameters
+    best_result = None
+    best_ratio = -np.inf
+    
+    # Try multiple independent optimization runs
+    for seed in [42, 123, 456, 789]:
+        np.random.seed(seed)
+        
+        # Generate initial points with adaptive method
+        initial_points = adaptive_initialization(14)
+        
+        # Flatten for optimization
+        x0 = initial_points.flatten()
+        
+        # Set up bounds for optimization
+        bounds = [(-1.0, 1.0)] * 14 * 3
+
+        # Stage 1: Differential Evolution for global search with adaptive parameters
+        try:
+            # Adaptive parameter selection based on problem complexity
+            de_params = {
+                'maxiter': 200,
+                'popsize': 12,
+                'tol': 1e-8,
+                'mutation': (0.5, 1.0),
+                'recombination': 0.7,
+                'disp': False
+            }
+            
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                seed=seed,
+                **de_params
+            )
+            
+            # Stage 2: Local refinement with L-BFGS-B for precise optimization
+            refined_result = minimize(
+                objective,
+                de_result.x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-12, 'gtol': 1e-12, 'maxiter': 300},
+                callback=None
+            )
+            
+            # Evaluate final result
+            final_points = refined_result.x.reshape(-1, 3)
+            
+            # Validate and calculate true ratio
+            distances = pdist(final_points)
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            
+            if d_max > 1e-10:
+                ratio = d_min / d_max
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_result = refined_result.x.copy()
+                    
+        except Exception as e:
+            continue
+    
+    # If no good result was found, fallback to direct optimization
+    if best_result is None:
+        np.random.seed(42)
+        initial_points = adaptive_initialization(14)
+        x0 = initial_points.flatten()
+        bounds = [(-1.0, 1.0)] * 14 * 3
+        
+        # Direct optimization with simpler parameters for robustness
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=200,
+            popsize=10,
+            tol=1e-6,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            disp=False
+        )
+        return result.x.reshape(-1, 3)
+    
+    return best_result.reshape(-1, 3)
+
+# EVOLVE-BLOCK-END

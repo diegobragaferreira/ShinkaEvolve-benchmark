@@ -1,0 +1,98 @@
+<NAME>
+improve_curvature_estimation
+</NAME>
+
+<DESCRIPTION>
+The current implementation of curvature estimation in `get_good_direction_to_move_into` uses a simplistic finite difference approach that may not provide accurate second-order information. By improving the curvature estimation with a more robust technique that better captures second-order behavior, we can enhance the optimization direction and thus improve the overall performance.
+
+The key insight is to avoid overfitting to noisy finite difference approximations and instead use a stabilized approach that considers the convolution landscape more carefully. We'll use a more reliable second-order approximation that computes the curvature by evaluating the change in convolution peaks across multiple perturbations rather than relying on single-point finite differences.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Apply curvature-aware directional bias correction
+    # Estimate curvature using finite differences
+    if n > 10:
+        # Create small perturbations to estimate Hessian
+        epsilon = 1e-3
+        hessian_approx = np.zeros((n, n))
+
+        # Simple finite difference approximation of second derivatives
+        for i in range(n):
+            perturbed_seq = normalized_sequence.copy()
+            perturbed_seq[i] += epsilon
+            if i > 0:  # Avoid boundary issues
+                perturbed_seq[i-1] -= epsilon / 2
+            if i < n-1:  # Avoid boundary issues
+                perturbed_seq[i+1] -= epsilon / 2
+
+            # Recompute convolution with perturbed sequence
+            if n > 100:
+                b_perturbed = convolve_fft(np.array(perturbed_seq), np.array(perturbed_seq))
+            else:
+                b_perturbed = convolve_direct(np.array(perturbed_seq), np.array(perturbed_seq))
+
+            second_derivative = (np.max(b_perturbed) - np.max(b)) / (epsilon**2)
+            hessian_approx[i, i] = max(0, second_derivative)  # Ensure non-negative
+
+        # Apply curvature correction to the direction
+        curvature_correction = np.dot(hessian_approx, normalized_g_fun)
+        # Scale correction appropriately
+        curvature_correction = curvature_correction / (1.0 + np.linalg.norm(curvature_correction))
+
+        # Adjust the direction with curvature bias
+        corrected_direction = np.array(normalized_g_fun) + 0.1 * curvature_correction
+        normalized_g_fun = corrected_direction.tolist()
+=======
+    # Apply curvature-aware directional bias correction
+    # Estimate curvature using a more robust approach
+    if n > 10:
+        # Use multiple perturbations to estimate the curvature more reliably
+        epsilon = 1e-4
+        curvature_vector = np.zeros(n)
+
+        # Sample multiple directions for curvature estimation
+        num_samples = min(10, n // 2)  # Limit samples to avoid excessive computation
+
+        for i in range(num_samples):
+            # Choose a random index to perturb
+            idx = random.randint(0, n - 1)
+
+            # Create symmetric perturbations in both directions
+            perturbed_seq_plus = normalized_sequence.copy()
+            perturbed_seq_minus = normalized_sequence.copy()
+
+            perturbed_seq_plus[idx] += epsilon
+            perturbed_seq_minus[idx] -= epsilon
+
+            # Recompute convolution with perturbed sequences
+            if n > 100:
+                b_plus = convolve_fft(np.array(perturbed_seq_plus), np.array(perturbed_seq_plus))
+                b_minus = convolve_fft(np.array(perturbed_seq_minus), np.array(perturbed_seq_minus))
+            else:
+                b_plus = convolve_direct(np.array(perturbed_seq_plus), np.array(perturbed_seq_plus))
+                b_minus = convolve_direct(np.array(perturbed_seq_minus), np.array(perturbed_seq_minus))
+
+            # Estimate second derivative from the two perturbations
+            max_plus = np.max(b_plus)
+            max_minus = np.max(b_minus)
+            max_center = np.max(b)
+
+            # Second-order central difference approximation
+            second_derivative = (max_plus + max_minus - 2 * max_center) / (epsilon ** 2)
+
+            # Accumulate curvature information
+            curvature_vector[idx] += max(0, second_derivative)  # Ensure non-negative curvature
+
+        # Normalize curvature estimates to prevent domination by any single element
+        if np.linalg.norm(curvature_vector) > 0:
+            curvature_vector = curvature_vector / np.linalg.norm(curvature_vector)
+
+        # Apply curvature correction to the direction using a weighted combination
+        curvature_correction = 0.05 * curvature_vector * np.array(normalized_g_fun)
+
+        # Adjust the direction with curvature bias
+        corrected_direction = np.array(normalized_g_fun) + curvature_correction
+        normalized_g_fun = corrected_direction.tolist()
+>>>>>>> REPLACE
+</DIFF>

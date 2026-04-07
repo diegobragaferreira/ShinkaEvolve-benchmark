@@ -1,0 +1,153 @@
+<NAME>
+enhance_convolution_computation
+</NAME>
+
+<DESCRIPTION>
+Enhances the convolution computation by implementing a more efficient piecewise linear integration method that aligns better with the evaluator's trapezoidal-like approach. This will provide more accurate norm calculations and potentially better optimization outcomes.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """
+    Fast numba-based autoconvolution computation for step functions
+    This correctly computes the convolution assuming piecewise constant
+    functions on equal intervals.
+    """
+    n = len(f_vals)
+    # Result has length 2*n-1
+    g = np.zeros(2*n - 1)
+
+    # Manual computation of the convolution sum for step functions
+    # Each term contributes to the convolution according to the overlap
+    for i in range(n):
+        for j in range(n):
+            # In convolution, the value at index i+j comes from f[i] * f[j]
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+    """Compute the three norms needed for C2 calculation with improved accuracy"""
+    # Create step function with appropriate spacing
+    n = len(f_values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Generate step positions [-1/4, 1/4] - these are the left edges of steps
+    dx = 0.5 / n  # Width of each step
+
+    # Convert to numpy array and ensure non-negative
+    f_array = np.array(f_values, dtype=np.float64)
+    f_array = np.maximum(f_array, 0.0)  # Clip negative values
+
+    # Compute autoconvolution using fast numba implementation
+    g = compute_autoconvolution_fast(f_array)
+
+    # We need to properly scale the result
+    # The convolution result represents the integral of the product
+    # But we want the actual function values at the resulting grid points
+    # For step functions, the result g[k] corresponds to the integral
+    # of f(x)*f(k*dx-x) over all overlapping regions
+
+    # Scale by step width for proper normalization
+    g = g * dx
+
+    # Compute norms
+    g_abs = np.abs(g)
+
+    # L2 norm squared (sum of squares times dx)
+    g2_squared = np.sum(g_abs**2) * dx
+
+    # L1 norm (sum of absolute values times dx)
+    g1 = np.sum(g_abs) * dx
+
+    # L-infinity norm
+    g_inf = np.max(g_abs)
+
+    return g2_squared, g1, g_inf
+=======
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """
+    Fast numba-based autoconvolution computation for step functions
+    This correctly computes the convolution assuming piecewise constant
+    functions on equal intervals.
+    """
+    n = len(f_vals)
+    # Result has length 2*n-1
+    g = np.zeros(2*n - 1)
+
+    # Manual computation of the convolution sum for step functions
+    # Each term contributes to the convolution according to the overlap
+    for i in range(n):
+        for j in range(n):
+            # In convolution, the value at index i+j comes from f[i] * f[j]
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_convolution_norms_piecewise(f_vals, dx):
+    """
+    Compute convolution norms using piecewise linear integration approach
+    that matches the evaluator's trapezoidal-like method.
+    """
+    n = len(f_vals)
+    # Autoconvolution size is 2*n - 1
+    g_size = 2 * n - 1
+    g = np.zeros(g_size)
+
+    # Compute convolution directly
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < g_size:
+                g[idx] += f_vals[i] * f_vals[j]
+
+    # Apply proper scaling for the trapezoidal integration approach
+    # The evaluator uses (dx/3)(y₁² + y₁y₂ + y₂²) for each segment
+    # So we need to account for dx in the proper way
+    g = g * dx  # Scale by step width
+
+    # Compute norms using trapezoidal-like approach for g2_sq
+    g2_sq = 0.0
+    for i in range(len(g) - 1):
+        # Trapezoidal-like integration: (dx/3)(g[i]^2 + g[i]*g[i+1] + g[i+1]^2)
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # L1 norm using trapezoidal integration
+    g1 = 0.0
+    for i in range(len(g) - 1):
+        g1 += (dx/2) * (abs(g[i]) + abs(g[i+1]))
+
+    # L-infinity norm
+    g_inf = 0.0
+    for i in range(len(g)):
+        abs_val = abs(g[i])
+        if abs_val > g_inf:
+            g_inf = abs_val
+
+    return g2_sq, g1, g_inf
+
+def compute_autoconvolution_norms(f_values: List[float]) -> tuple:
+    """Compute the three norms needed for C2 calculation with improved accuracy"""
+    # Create step function with appropriate spacing
+    n = len(f_values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Generate step positions [-1/4, 1/4] - these are the left edges of steps
+    dx = 0.5 / n  # Width of each step
+
+    # Convert to numpy array and ensure non-negative
+    f_array = np.array(f_values, dtype=np.float64)
+    f_array = np.maximum(f_array, 0.0)  # Clip negative values
+
+    # Compute norms using the new piecewise linear integration method
+    g2_squared, g1, g_inf = compute_convolution_norms_piecewise(f_array, dx)
+
+    return g2_squared, g1, g_inf
+>>>>>>> REPLACE
+</DIFF>

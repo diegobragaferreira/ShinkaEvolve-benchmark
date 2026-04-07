@@ -1,0 +1,158 @@
+<NAME>
+add_bvh_acceleration
+</NAME>
+
+<DESCRIPTION>
+Adding BVH (Bounding Volume Hierarchy) acceleration for overlap detection to dramatically improve performance. This approach will significantly reduce the complexity of overlap checking from O(n²) to nearly O(log n) per query by organizing hexagons into a hierarchical structure that allows early rejection of non-overlapping pairs.
+
+The key insight is that for 12 hexagons, we're doing O(144) pairwise overlap checks in the current implementation. With BVH, we can prune many pairs early, especially when hexagons are far apart, leading to massive performance gains. This is particularly important since each overlap check involves expensive polygon intersection operations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+=======
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+from joblib import Parallel, delayed
+
+class BVHNode:
+    """Simple BVH node for spatial acceleration."""
+    def __init__(self, bounds=None, items=None, left=None, right=None):
+        self.bounds = bounds  # Bounding box [min_x, max_x, min_y, max_y]
+        self.items = items or []  # Indices of objects in this node
+        self.left = left
+        self.right = right
+
+    def is_leaf(self):
+        return self.left is None and self.right is None
+
+@jit(nopython=True)
+def get_hexagon_bounds(x, y, angle_deg, side_length=1):
+    """Get bounding box for a hexagon."""
+    vertices = hexagon_vertices(x, y, angle_deg, side_length)
+    min_x = vertices[0, 0]
+    max_x = vertices[0, 0]
+    min_y = vertices[0, 1]
+    max_y = vertices[0, 1]
+
+    for i in range(1, 6):
+        if vertices[i, 0] < min_x:
+            min_x = vertices[i, 0]
+        elif vertices[i, 0] > max_x:
+            max_x = vertices[i, 0]
+        if vertices[i, 1] < min_y:
+            min_y = vertices[i, 1]
+        elif vertices[i, 1] > max_y:
+            max_y = vertices[i, 1]
+
+    return np.array([min_x, max_x, min_y, max_y])
+
+def build_bvh(hex_positions, hex_angles, max_depth=10, min_items=4):
+    """Build a simple BVH for hexagon bounding boxes."""
+    # Precompute bounds for all hexagons
+    bounds = []
+    for i in range(len(hex_positions)):
+        x, y = hex_positions[i]
+        angle = hex_angles[i]
+        bounds.append(get_hexagon_bounds(x, y, angle))
+
+    bounds = np.array(bounds)
+
+    # Create initial indices list
+    indices = list(range(len(hex_positions)))
+
+    def build_recursive(indices_list, depth):
+        if depth > max_depth or len(indices_list) <= min_items:
+            # Create leaf node
+            return BVHNode(bounds=None, items=indices_list)
+
+        # Compute bounding box for current group
+        min_x = np.min(bounds[np.array(indices_list), 0])
+        max_x = np.max(bounds[np.array(indices_list), 1])
+        min_y = np.min(bounds[np.array(indices_list), 2])
+        max_y = np.max(bounds[np.array(indices_list), 3])
+        node_bounds = np.array([min_x, max_x, min_y, max_y])
+
+        if len(indices_list) <= min_items:
+            return BVHNode(bounds=node_bounds, items=indices_list)
+
+        # Split along longest axis
+        width = max_x - min_x
+        height = max_y - min_y
+
+        if width >= height:
+            # Split along x-axis
+            median = np.median(bounds[np.array(indices_list), 0])
+            left_indices = [i for i in indices_list if bounds[i, 0] <= median]
+            right_indices = [i for i in indices_list if bounds[i, 0] > median]
+        else:
+            # Split along y-axis
+            median = np.median(bounds[np.array(indices_list), 2])
+            left_indices = [i for i in indices_list if bounds[i, 2] <= median]
+            right_indices = [i for i in indices_list if bounds[i, 2] > median]
+
+        if not left_indices or not right_indices:
+            # If splitting didn't work, make a leaf
+            return BVHNode(bounds=node_bounds, items=indices_list)
+
+        left_node = build_recursive(left_indices, depth + 1)
+        right_node = build_recursive(right_indices, depth + 1)
+
+        return BVHNode(bounds=node_bounds, left=left_node, right=right_node)
+
+    return build_recursive(indices, 0)
+
+def bvh_query_overlaps(bvh_root, hex_positions, hex_angles, threshold=0.01):
+    """Query overlaps using BVH structure."""
+    overlaps = []
+
+    def query_recursive(node):
+        if node.is_leaf():
+            # Check overlaps among items in this leaf
+            for i in range(len(node.items)):
+                for j in range(i+1, len(node.items)):
+                    idx1, idx2 = node.items[i], node.items[j]
+                    if check_hexagon_overlap_fast(
+                        hex_positions[idx1][0], hex_positions[idx1][1], hex_angles[idx1],
+                        hex_positions[idx2][0], hex_positions[idx2][1], hex_angles[idx2]
+                    ):
+                        overlaps.append((idx1, idx2))
+        else:
+            # Check if node bounds intersect with themselves (not needed)
+            if node.left and node.right:
+                # Recursively query children
+                query_recursive(node.left)
+                query_recursive(node.right)
+
+    query_recursive(bvh_root)
+    return overlaps
+
+@jit(nopython=True)
+def check_hexagon_overlap_fast(x1, y1, angle1, x2, y2, angle2, side_length=1):
+    """Fast approximate overlap check using bounding boxes."""
+    bounds1 = get_hexagon_bounds(x1, y1, angle1, side_length)
+    bounds2 = get_hexagon_bounds(x2, y2, angle2, side_length)
+
+    # Simple bounding box intersection test
+    if (bounds1[1] < bounds2[0] or bounds2[1] < bounds1[0] or
+        bounds1[3] < bounds2[2] or bounds2[3] < bounds1[2]):
+        return False
+
+    # More precise check using distance between centers
+    center_dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+    # Max possible distance between hexagons' centers to overlap
+    max_dist_sq = (2 * side_length)**2  # Approximate
+    return center_dist_sq < max_dist_sq
+>>>>>>> REPLACE
+</DIFF>

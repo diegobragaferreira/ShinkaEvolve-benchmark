@@ -1,0 +1,781 @@
+--- a/original.py
++++ b/original.py
+@@ -1,520 +1,364 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from numba import jit, prange
++from scipy.fft import fft, ifft
+ import time
+ import random
+-from scipy.optimize import differential_evolution, minimize
+-from scipy.spatial.distance import pdist
++from scipy.optimize import minimize
++from scipy.special import erf
+ import warnings
+ warnings.filterwarnings('ignore')
+ 
+-# Global constants for performance tuning
++# Global constants
+ MAX_TIME_SECONDS = 90.0
+-DEFAULT_STEPS = 2000
+-MIN_STEPS = 100
+-MAX_STEPS = 5000
+-POPULATION_SIZE_BASE = 15
+-INITIAL_REFINEMENT_ITERATIONS = 50
+-FINAL_REFINEMENT_ITERATIONS = 30
+-
+-# Optimized sparse convolution computation using Numba
+-@jit(nopython=True)
+-def compute_sparse_autoconvolution(f_vals):
+-    """
+-    Efficiently compute autoconvolution using sparse matrix representation principles
+-    Exploits the fact that step functions have piecewise constant structure
+-    """
++DEFAULT_STEPS = 3000
++MIN_STEPS = 500
++MAX_STEPS = 8000
++
++def compute_autoconvolution_fft(f_vals):
++    """
++    Compute autoconvolution using FFT - O(n log n) complexity
++    """
++    f_vals = np.array(f_vals, dtype=np.float64)
++    
++    # For autoconvolution f*f, we can use FFT:
++    # conv(f,f) = ifft(fft(f)^2)
+     n = len(f_vals)
+     
+-    # For dense convolution using discrete math: g[i] = sum_{j+k=i} f[j] * f[k]
+-    # Since we're dealing with discrete values, we can compute this directly
+-    g = np.zeros(2*n - 1, dtype=np.float64)
+-    
+-    # More efficient nested loop for autoconvolution
+-    for i in range(n):
+-        for j in range(n):
+-            g[i + j] += f_vals[i] * f_vals[j]
+-    
+-    return g
+-
+-@jit(nopython=True)
+-def compute_sparse_norms(g_vals):
+-    """
+-    Compute L1, L2^2, and L-infinity norms using optimized loops
+-    """
+-    n = len(g_vals)
+-    
+-    # L1 norm (sum of absolute values)
+-    l1_norm = 0.0
+-    for i in range(n):
+-        l1_norm += abs(g_vals[i])
+-    
+-    # L2^2 norm (sum of squares)
+-    l2_sq_norm = 0.0
+-    for i in range(n):
+-        l2_sq_norm += g_vals[i] * g_vals[i]
+-    
+-    # L-infinity norm (maximum absolute value)
+-    linf_norm = 0.0
+-    for i in range(n):
+-        abs_val = abs(g_vals[i])
+-        if abs_val > linf_norm:
+-            linf_norm = abs_val
+-    
+-    return l1_norm, l2_sq_norm, linf_norm
+-
+-@jit(nopython=True)
+-def compute_c2_sparse(f_vals):
+-    """
+-    Fast computation of C2 using sparse convolution and norms
+-    """
+-    # Compute autoconvolution
+-    g_vals = compute_sparse_autoconvolution(f_vals)
+-    
+-    # Compute norms
+-    l1, l2_sq, linf = compute_sparse_norms(g_vals)
+-    
+-    # Avoid division by zero
+-    if l1 <= 1e-15 or linf <= 1e-15:
++    # Pad to next power of 2 for better FFT performance
++    fft_size = 2**int(np.ceil(np.log2(2*n - 1)))
++    
++    # Compute FFT of f padded to fft_size
++    f_padded = np.pad(f_vals, (0, fft_size - n), 'constant')
++    f_fft = fft(f_padded)
++    
++    # Compute autoconvolution in frequency domain (square the FFT)
++    g_fft = f_fft * f_fft
++    
++    # Transform back to time domain
++    g = np.real(ifft(g_fft))
++    
++    # Keep only the valid convolution part (middle)
++    # The valid convolution goes from index (n-1) to (n-1)+(n-1) = 2*n-2
++    g_valid = g[n-1:2*n-1]
++    
++    return g_valid
++
++def compute_autoconvolution_norms_fft(f_vals):
++    """
++    Compute all three norms using FFT-based autoconvolution
++    """
++    try:
++        # Compute autoconvolution using FFT
++        g_vals = compute_autoconvolution_fft(f_vals)
++        
++        # Compute norms
++        l1_norm = np.sum(np.abs(g_vals))
++        l2_sq_norm = np.sum(g_vals**2)
++        linf_norm = np.max(np.abs(g_vals))
++        
++        # Handle edge cases
++        if l1_norm <= 1e-15 or linf_norm <= 1e-15:
++            return 0.0, 0.0, 0.0, 0.0
++            
++        # Compute C2
++        c2 = l2_sq_norm / (l1_norm * linf_norm)
++        
++        return c2, l2_sq_norm, l1_norm, linf_norm
++    except Exception:
++        return 0.0, 0.0, 0.0, 0.0
++
++def evaluate_c2_fft(f_vals):
++    """
++    Fast evaluation of C2 using FFT-based convolution
++    """
++    try:
++        c2, _, _, _ = compute_autoconvolution_norms_fft(f_vals)
++        return c2
++    except Exception:
+         return 0.0
+-    
+-    # Return C2 value
+-    return l2_sq / (l1 * linf)
+-
+-def evaluate_step_function_sparse(f_vals):
+-    """
+-    Evaluate step function with robust error handling and sparse computation
+-    """
+-    try:
+-        # Ensure non-negative values with clipping
+-        f_vals = np.array([max(0.0, x) for x in f_vals])
+-        
+-        # Handle edge cases
+-        if len(f_vals) == 0 or np.isnan(np.sum(f_vals)) or np.isinf(np.sum(f_vals)):
+-            return 0.0
+-            
+-        # If all values are zero, return 0
+-        if np.sum(f_vals) == 0:
+-            return 0.0
+-            
+-        # Compute C2 value using sparse method
+-        c2 = compute_c2_sparse(f_vals)
+-        
+-        # Validate result
+-        if np.isnan(c2) or np.isinf(c2) or c2 < 0:
+-            return 0.0
+-            
+-        return c2
+-    except Exception as e:
+-        return 0.0
+-
+-def create_sparse_initialization(n_steps):
+-    """
+-    Create initial solution with mathematical insights for better sparse convolution behavior
+-    """
+-    # Pattern inspired by known good configurations that produce high C2 values
+-    # Uses mathematical properties of optimal step functions
+-    
++
++def create_frequency_domain_initialization(n_steps):
++    """
++    Create initial solution based on mathematical properties that maximize C2
++    """
++    # Pattern inspired by optimal structures in frequency domain
++    # Create a pattern that will produce desirable autoconvolution properties
++    
++    # Phase 1: Create a multi-frequency base pattern
+     pattern = np.zeros(n_steps)
+     
+-    # Create multi-peak structure that tends to produce good autoconvolution properties
+-    # This creates a structure where convolution produces desirable flatness characteristics
+-    
+-    # Central peak with controlled decay
++    # Create a superposition of sine waves that will lead to good convolution properties
++    x = np.linspace(0, 4*np.pi, n_steps)
++    
++    # Primary frequencies
++    pattern += 0.5 * np.sin(x) + 0.3 * np.sin(3*x) + 0.2 * np.sin(5*x)
++    
++    # Add some low frequency components for structure  
++    pattern += 0.1 * np.sin(0.5*x)
++    
++    # Add some modulated components
++    pattern += 0.2 * np.sin(2*x) * np.exp(-x**2/(2*(n_steps/10)**2))
++    
++    # Make non-negative and normalize
++    pattern = np.maximum(pattern, 0.0)
++    
++    if np.sum(pattern) > 0:
++        pattern = pattern * n_steps / np.sum(pattern)
++    
++    return pattern
++
++def create_spectral_optimized_initialization(n_steps):
++    """
++    Create initialization with spectral characteristics that favor high C2
++    """
++    # Create structured pattern that will produce favorable autoconvolution
++    pattern = np.zeros(n_steps)
++    
++    # Create a pattern with strategic peaks and valleys
++    # This aims to create constructive interference in convolution
++    
++    # Central region with higher values
+     center = n_steps // 2
+-    max_height = 1.0 + np.random.random() * 0.5
+-    
+-    # Create asymmetric pattern that emphasizes certain regions
++    width = n_steps // 8
++    
++    # Create a bell-shaped central region
+     for i in range(n_steps):
+-        # Central peak with exponential fall-off
+-        distance_from_center = abs(i - center)
+-        decay_rate = 1.0 / (max(1, n_steps // 20))
+-        pattern[i] = max_height * np.exp(-decay_rate * distance_from_center)
+-        
+-        # Add some structured variation that improves convolution properties
+-        if i % 10 == 0:
+-            pattern[i] += 0.1 * np.random.random()
+-    
+-    # Apply mathematical transformation to favor better autoconvolution
+-    # Use trigonometric modulation for better structure preservation
++        distance = abs(i - center)
++        if distance <= width:
++            pattern[i] = 1.0 + 0.5 * np.exp(-distance**2 / (2 * (width/3)**2))
++    
++    # Add some periodic structure
+     x = np.linspace(0, 2*np.pi, n_steps)
+-    modulation = 1.0 + 0.3 * np.sin(3*x) * np.cos(2*x)
+-    pattern = pattern * modulation
+-    
+-    # Ensure non-negative
++    periodic = 0.3 * np.sin(4*x) + 0.1 * np.sin(8*x)
++    
++    pattern = pattern + periodic
++    
++    # Make non-negative and normalize
+     pattern = np.maximum(pattern, 0.0)
+     
+-    # Normalize for proper scaling
+-    if np.sum(pattern) > 0:
+-        pattern = pattern * n_steps / np.sum(pattern)
+-    
+-    return pattern
+-
+-def create_multi_scale_sparse_initialization(n_steps):
+-    """
+-    Create diverse initial solutions with different structural properties for sparse computation
+-    """
+-    # Multiple initialization strategies that work well with sparse approaches
++    if np.sum(pattern) > 0:
++        pattern = pattern * n_steps / np.sum(pattern)
++    
++    return pattern
++
++def create_mixed_frequency_initialization(n_steps):
++    """
++    Create diversified initialization using multiple frequency-based approaches
++    """
+     strategies = [
+-        lambda n: create_bell_shaped_sparse(n),
+-        lambda n: create_alternating_sparse(n),
+-        lambda n: create_peak_centered_sparse(n),
+-        lambda n: create_smooth_transition_sparse(n),
+-        lambda n: create_balanced_sparse(n),
+-        lambda n: create_asymmetric_sparse(n)
++        lambda n: create_frequency_domain_initialization(n),
++        lambda n: create_spectral_optimized_initialization(n),
++        lambda n: create_bell_shaped_initialization(n),
++        lambda n: create_alternating_initialization(n)
+     ]
+     
+     # Choose a strategy
+     strategy = np.random.choice(strategies)
+     pattern = strategy(n_steps)
+     
+-    # Apply minor random perturbations for diversity
+-    noise = np.random.normal(0, 0.03, n_steps)
++    # Add small noise for diversity
++    noise = np.random.normal(0, 0.01, n_steps)
+     pattern = pattern + noise
+     pattern = np.maximum(pattern, 0.0)
+     
+-    # Final normalization
+-    if np.sum(pattern) > 0:
+-        pattern = pattern * n_steps / np.sum(pattern)
+-    
+-    return pattern
+-
+-def create_bell_shaped_sparse(n_steps):
+-    """Create bell-shaped pattern optimized for sparse convolution"""
++    # Normalize
++    if np.sum(pattern) > 0:
++        pattern = pattern * n_steps / np.sum(pattern)
++    
++    return pattern
++
++def create_bell_shaped_initialization(n_steps):
++    """Create bell-shaped pattern optimized for frequency domain properties"""
+     x = np.linspace(0, 1, n_steps)
+     # Create Gaussian-like shape with emphasis on central region
+-    pattern = 1.0 + 0.8 * np.exp(-15 * (x - 0.5)**2) - 0.3 * np.exp(-5 * x**2) - 0.3 * np.exp(-5 * (1-x)**2)
++    pattern = 1.0 + 0.8 * np.exp(-12 * (x - 0.5)**2) - 0.3 * np.exp(-6 * x**2) - 0.3 * np.exp(-6 * (1-x)**2)
+     pattern = np.clip(pattern, 0, np.inf)
+     
+     # Normalize appropriately
+     if np.sum(pattern) > 0:
+         pattern = pattern * n_steps / np.sum(pattern)
+     return pattern
+ 
+-def create_alternating_sparse(n_steps):
+-    """Create alternating high/low pattern for sparse computation"""
++def create_alternating_initialization(n_steps):
++    """Create alternating high/low pattern for frequency domain"""
+     pattern = []
+     for i in range(n_steps):
+         if i % 2 == 0:
+             pattern.append(1.0 + np.random.random() * 0.5)
+         else:
+             pattern.append(0.2 + np.random.random() * 0.3)
+     
+     pattern = np.array(pattern)
+     if np.sum(pattern) > 0:
+         pattern = pattern * n_steps / np.sum(pattern)
+     return pattern
+ 
+-def create_peak_centered_sparse(n_steps):
+-    """Create peak-centered pattern with tapering edges optimized for sparse computation"""
+-    pattern = np.zeros(n_steps)
+-    center = n_steps // 2
+-    width = max(1, n_steps // 6 + np.random.randint(-1, 2))
+-    
+-    # Create central peak with smooth transitions
+-    for i in range(n_steps):
+-        distance_from_center = abs(i - center)
+-        if distance_from_center <= width:
+-            # Quadratic transition
+-            t = distance_from_center / width
+-            pattern[i] = 1.0 * (1 - t**2) + 0.5 * np.random.random()
+-    
+-    # Add noise for diversity
+-    noise = np.random.normal(0, 0.05, n_steps)
+-    pattern = pattern + noise
+-    pattern = np.clip(pattern, 0, np.inf)
+-    
+-    if np.sum(pattern) > 0:
+-        pattern = pattern * n_steps / np.sum(pattern)
+-    return pattern
+-
+-def create_smooth_transition_sparse(n_steps):
+-    """Create smooth transition pattern optimized for sparse computation"""
+-    pattern = np.zeros(n_steps)
+-    # Create smooth ramp with some variation
+-    for i in range(n_steps):
+-        x = i / (n_steps - 1) if n_steps > 1 else 0.5
+-        pattern[i] = 0.5 + 0.5 * np.sin(np.pi * x) + np.random.normal(0, 0.1)
+-    
+-    pattern = np.clip(pattern, 0, np.inf)
+-    if np.sum(pattern) > 0:
+-        pattern = pattern * n_steps / np.sum(pattern)
+-    return pattern
+-
+-def create_balanced_sparse(n_steps):
+-    """Create balanced pattern optimized for sparse computation"""
+-    # Create pattern that maintains balance
+-    pattern = np.ones(n_steps) * 0.5
+-    
+-    # Add structured variation
+-    for i in range(0, n_steps, 10):
+-        if i < n_steps:
+-            pattern[i] = 1.0 + np.random.random() * 0.5
+-    
+-    pattern = np.clip(pattern, 0, np.inf)
+-    if np.sum(pattern) > 0:
+-        pattern = pattern * n_steps / np.sum(pattern)
+-    return pattern
+-
+-def create_asymmetric_sparse(n_steps):
+-    """Create asymmetric pattern that breaks symmetry for better exploration"""
+-    pattern = np.zeros(n_steps)
+-    
+-    # Create asymmetric structure with higher values on one side
+-    for i in range(n_steps):
+-        x = i / (n_steps - 1) if n_steps > 1 else 0.5
+-        # Asymmetric exponential decay
+-        if x < 0.5:
+-            pattern[i] = 1.0 + 0.5 * np.exp(-5 * x)
+-        else:
+-            pattern[i] = 0.5 + 0.3 * np.exp(-10 * (x - 0.5))
+-    
+-    pattern = np.clip(pattern, 0, np.inf)
+-    if np.sum(pattern) > 0:
+-        pattern = pattern * n_steps / np.sum(pattern)
+-    return pattern
+-
+-def sparse_adaptive_evolutionary_optimization(initial_population):
+-    """
+-    Advanced evolutionary optimization with adaptive parameters and sparse-aware operators
+-    """
+-    # Track convergence and adapt parameters dynamically
+-    best_scores = []
+-    patience_counter = 0
+-    max_patience = 10
+-    population_size = POPULATION_SIZE_BASE
+-    
+-    # Start with initial population
+-    population = [list(ind) for ind in initial_population]  # Ensure lists
+-    current_best = max(population, key=evaluate_step_function_sparse)
+-    best_scores.append(evaluate_step_function_sparse(current_best))
+-    
+-    # Adaptive parameters based on convergence behavior
+-    for generation in range(200):  # Limited to prevent timeout
+-        if len(population) < 10:
+-            population_size = 10
+-        elif len(population) > 30:
+-            population_size = 20
+-        else:
+-            population_size = len(population) // 2 + 5
+-            
+-        # Evaluate all individuals with sparse computation
+-        fitnesses = [evaluate_step_function_sparse(ind) for ind in population]
+-        
+-        # Sort by fitness (descending)
+-        sorted_indices = np.argsort(fitnesses)[::-1]
+-        sorted_population = [population[i] for i in sorted_indices]
+-        sorted_fitnesses = [fitnesses[i] for i in sorted_indices]
+-        
+-        # Update best
+-        current_best = sorted_population[0]
+-        best_scores.append(sorted_fitnesses[0])
+-        
+-        # Check for convergence with multiple criteria
+-        if len(best_scores) >= 5:
+-            # Check for stagnation in improvement
+-            recent_improvement = best_scores[-1] - best_scores[-5]
+-            if recent_improvement < 1e-8:
+-                patience_counter += 1
+-            else:
+-                patience_counter = 0
+-                
+-            if patience_counter >= max_patience:
+-                # Increase population size to escape local minimum
+-                population_size = min(population_size * 2, 50)
+-                patience_counter = 0
+-                
+-        # Create offspring using tournament selection and crossover
+-        new_population = []
+-        
+-        # Elitism: keep the best 20%
+-        elite_count = max(1, int(0.2 * population_size))
+-        new_population.extend(sorted_population[:elite_count])
+-        
+-        # Generate rest through crossover and mutation
+-        while len(new_population) < population_size:
+-            # Tournament selection
+-            tournament_size = 3
+-            tournament_indices = np.random.choice(len(sorted_population), tournament_size)
+-            tournament_fitnesses = [sorted_fitnesses[i] for i in tournament_indices]
+-            winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+-            
+-            # Clone selected parent
+-            parent = sorted_population[winner_index].copy()
+-            
+-            # Sparse-aware mutation with different rates
+-            mutation_strength = 0.1 * (1 - generation / 200.0)  # Decrease over time
+-            
+-            # Mutate with sparse consideration - focus on positions that matter
+-            for i in range(len(parent)):
+-                if np.random.random() < 0.15:  # 15% chance to mutate each element
+-                    noise = np.random.normal(0, mutation_strength)
+-                    parent[i] = max(0, parent[i] + noise)
+-                    
+-            new_population.append(parent)
+-            
+-        # Replace population
+-        population = new_population
+-        
+-        # Early termination based on time
+-        if time.time() - start_time > MAX_TIME_SECONDS * 0.9:
+-            break
+-            
+-    return current_best
+-
+-def sparse_advanced_refinement_strategy(initial_solution):
+-    """
+-    Advanced refinement using multiple sparse-aware techniques
+-    """
+-    # Try different refinement methods
+-    best_solution = initial_solution.copy()
+-    best_c2 = evaluate_step_function_sparse(best_solution)
+-    
+-    # Method 1: Differential evolution for global search on reduced dimensions
+-    try:
+-        # Focus on dimensions that contribute most to improvement
+-        reduced_solution = best_solution[:min(len(best_solution), 500)]
+-        bounds = [(0, 10.0) for _ in range(len(reduced_solution))]
+-        
+-        def objective(x):
+-            # Pad with zeros to original size
+-            extended_x = list(x) + [1.0] * (len(best_solution) - len(x))
+-            return -evaluate_step_function_sparse(extended_x)
+-        
+-        de_result = differential_evolution(
++def compute_gradient_fft(f_vals):
++    """
++    Compute gradient of C2 with respect to f_vals using automatic differentiation
++    """
++    # This is a simplified gradient computation
++    # In practice, one would use more sophisticated automatic differentiation
++    eps = 1e-8
++    grad = np.zeros_like(f_vals)
++    
++    for i in range(len(f_vals)):
++        # Forward difference approximation
++        f_plus = f_vals.copy()
++        f_minus = f_vals.copy()
++        f_plus[i] += eps
++        f_minus[i] -= eps
++        
++        c2_plus = evaluate_c2_fft(f_plus)
++        c2_minus = evaluate_c2_fft(f_minus)
++        
++        grad[i] = (c2_plus - c2_minus) / (2 * eps)
++    
++    return grad
++
++def gradient_based_optimization(initial_solution, max_iter=200):
++    """
++    Direct gradient-based optimization using FFT-based C2 computation
++    """
++    # Convert to numpy array and ensure non-negativity
++    x0 = np.array(initial_solution)
++    x0 = np.maximum(x0, 0.0)
++    
++    # Set up bounds for optimization
++    bounds = [(0, 10.0) for _ in range(len(x0))]
++    
++    # Objective function (negative for maximization)
++    def objective(x):
++        return -evaluate_c2_fft(x)
++    
++    # Gradient function (approximate)
++    def grad_objective(x):
++        return -compute_gradient_fft(x)
++    
++    # Use L-BFGS-B for local refinement
++    try:
++        result = minimize(
+             objective,
+-            bounds,
+-            maxiter=30,
+-            popsize=10,
+-            seed=42,
+-            disp=False
++            x0,
++            method='L-BFGS-B',
++            bounds=bounds,
++            jac=grad_objective,
++            options={'maxiter': max_iter, 'ftol': 1e-10, 'gtol': 1e-8},
++            tol=1e-10
+         )
+         
+-        if de_result.success:
+-            refined_solution = np.maximum(de_result.x, 0)
+-            # Extend back to original size
+-            extended_refined = list(refined_solution) + [1.0] * (len(best_solution) - len(refined_solution))
+-            refined_c2 = evaluate_step_function_sparse(extended_refined)
+-            if refined_c2 > best_c2:
+-                best_solution = extended_refined
+-                best_c2 = refined_c2
+-    except Exception as e:
++        if result.success:
++            return np.maximum(result.x, 0.0).tolist()
++    except:
+         pass
+     
+-    # Method 2: Local refinement with coordinate-wise optimization
+-    try:
+-        # Use coordinate descent on smaller subset for efficiency
+-        x0 = np.array(best_solution[:min(200, len(best_solution))])
+-        bounds = [(0, 10.0)] * len(x0)
+-        
+-        def objective(x):
+-            # Extend to full size
+-            extended_x = list(x) + [1.0] * (len(best_solution) - len(x))
+-            return -evaluate_step_function_sparse(extended_x)
+-        
+-        # Use L-BFGS-B for local refinement
+-        res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={'maxiter': 20})
+-        
+-        if res.success:
+-            refined_solution = np.maximum(res.x, 0)
+-            # Extend back to original size
+-            extended_refined = list(refined_solution) + [1.0] * (len(best_solution) - len(refined_solution))
+-            refined_c2 = evaluate_step_function_sparse(extended_refined)
+-            if refined_c2 > best_c2:
+-                best_solution = extended_refined
+-                best_c2 = refined_c2
+-    except Exception as e:
++    return initial_solution
++
++def frequency_domain_refinement(initial_solution):
++    """
++    Comprehensive refinement strategy using frequency domain properties
++    """
++    # Multiple stages of refinement
++    current_solution = np.array(initial_solution)
++    
++    # Stage 1: Gradient-based optimization
++    try:
++        refined_1 = gradient_based_optimization(current_solution.tolist(), max_iter=100)
++        current_solution = np.array(refined_1)
++    except:
+         pass
+     
+-    # Method 3: Sparse-aware perturbations with structure preservation
+-    try:
+-        # Apply small random perturbations respecting sparse structure
+-        perturbed = best_solution.copy()
+-        for i in range(len(perturbed)):
+-            if np.random.random() < 0.1:  # 10% chance to perturb each element
+-                # Use adaptive perturbation strength
+-                perturbation = np.random.normal(0, 0.02)
+-                perturbed[i] = max(0, perturbed[i] + perturbation)
+-        
+-        # Normalize sparse representation
+-        if np.sum(perturbed) > 0:
+-            perturbed = perturbed / np.sum(perturbed) * len(perturbed)
+-            
+-        perturbed_c2 = evaluate_step_function_sparse(perturbed)
+-        if perturbed_c2 > best_c2:
+-            best_solution = perturbed
+-            best_c2 = perturbed_c2
+-    except Exception as e:
++    # Stage 2: Frequency domain filtering and enhancement
++    try:
++        # Apply smoothing in frequency domain
++        freq_domain = fft(current_solution)
++        # Apply a low-pass filter to reduce high-frequency noise
++        n = len(freq_domain)
++        cutoff = n // 10
++        filtered_freq = freq_domain.copy()
++        filtered_freq[cutoff:-cutoff] = 0
++        
++        # Transform back
++        smoothed = np.real(ifft(filtered_freq))
++        current_solution = np.maximum(smoothed, 0.0)
++        
++        # Normalize
++        if np.sum(current_solution) > 0:
++            current_solution = current_solution * len(current_solution) / np.sum(current_solution)
++    except:
+         pass
+     
+-    return best_solution
++    # Stage 3: Final gradient refinement
++    try:
++        refined_2 = gradient_based_optimization(current_solution.tolist(), max_iter=50)
++        current_solution = np.array(refined_2)
++    except:
++        pass
++    
++    return current_solution.tolist()
+ 
+ def construct_function() -> list[float]:
+     """
+-    Optimized function to construct step-function with high C2 value using sparse approach.
+-    Leverages sparse convolution representations and evolutionary optimization.
++    Frequency domain optimization approach to maximize C2.
++    Uses FFT-based autoconvolution computation and direct gradient optimization.
+     """
+     global start_time
+     start_time = time.time()
+     
+     # Set seeds for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+     
+-    # Initialize with multi-scale approach using sparse optimizations
++    # Create diverse initial population using frequency domain insights
+     initial_solutions = []
+-    n_attempts = 15
+-    target_steps = DEFAULT_STEPS
++    n_attempts = 10
+     
+     for i in range(n_attempts):
+-        # Create diverse initial solutions with sparse optimization in mind
++        # Create diverse initial solutions with frequency domain optimization in mind
+         n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+-        init_solution = create_multi_scale_sparse_initialization(n_steps)
++        init_solution = create_mixed_frequency_initialization(n_steps)
+         initial_solutions.append(init_solution)
+     
+-    # Select best initial solution
+-    best_init = max(initial_solutions, key=evaluate_step_function_sparse)
+-    
+-    # Apply sparse-aware evolutionary optimization
+-    evolved_solution = sparse_adaptive_evolutionary_optimization(initial_solutions)
+-    
+-    # Refine the solution with sparse-aware techniques
+-    refined_solution = sparse_advanced_refinement_strategy(evolved_solution)
+-    
+-    # Final evaluation and return the best
+-    final_c2 = evaluate_step_function_sparse(refined_solution)
+-    initial_c2 = evaluate_step_function_sparse(best_init)
++    # Select the best initial solution
++    best_init = max(initial_solutions, key=evaluate_c2_fft)
++    
++    # Apply frequency domain refinement strategy
++    refined_solution = frequency_domain_refinement(best_init)
++    
++    # Final evaluation
++    final_c2 = evaluate_c2_fft(refined_solution)
++    initial_c2 = evaluate_c2_fft(best_init)
+     
+     if final_c2 > initial_c2:
+         result = refined_solution
+     else:
+         result = best_init
+     
+     # Ensure proper length
+     if len(result) < MIN_STEPS:
+         result.extend([1.0] * (MIN_STEPS - len(result)))
+     elif len(result) > MAX_STEPS:
+         result = result[:MAX_STEPS]
+     
+-    # Normalize sparse representation if needed
++    # Final normalization
+     if np.sum(result) > 0:
+         result = np.array(result) / np.sum(result) * len(result)
+     
+-    # Ensure non-negativity and finite values for sparse computation
++    # Ensure non-negativity
+     result = np.clip(result, 0, np.inf)
+     
+     end_time = time.time()
+     eval_time = end_time - start_time
+     
+     # Print debug info
+     print(f"Eval time: {eval_time:.4f}s")
+-    print(f"Best C2 found: {evaluate_step_function_sparse(result):.6f}")
++    print(f"Best C2 found: {evaluate_c2_fft(result):.6f}")
+     
+     return result.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

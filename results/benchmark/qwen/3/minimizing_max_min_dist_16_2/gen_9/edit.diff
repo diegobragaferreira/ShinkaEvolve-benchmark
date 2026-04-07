@@ -1,0 +1,114 @@
+--- a/original.py
++++ b/original.py
+@@ -1,24 +1,100 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
++from scipy.spatial.distance import pdist, squareform
++import math
++from scipy.optimize import differential_evolution
++import time
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+-
+-    n = 16
+-    d = 2
+-
+-    # places points randomly
+-    np.random.seed(42)
+-    points = np.random.randn(n, d)
+-
+-    return points
+-
++    
++    def objective_function(points_flat):
++        # Reshape flat array back to (16,2)
++        points = points_flat.reshape((16, 2))
++        
++        # Calculate pairwise distances
++        distances = pdist(points)
++        
++        # Get min and max distances
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        # Return negative ratio to maximize ratio (minimize negative)
++        if d_max == 0:
++            return float('inf')
++        return -d_min / d_max
++    
++    def create_initial_grid():
++        """Create an initial configuration based on hexagonal packing principles"""
++        # Arrange points in a roughly hexagonal pattern
++        points = []
++        rows = 4
++        cols = 4
++        
++        # Hexagonal offset pattern
++        for i in range(rows):
++            for j in range(cols):
++                x = j + 0.5 * (i % 2)
++                y = i * math.sqrt(3)/2
++                points.append([x, y])
++        
++        # Normalize to [0,1] range
++        points = np.array(points)
++        
++        # Scale and shift to fit in unit square
++        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
++        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
++        
++        if x_range > 0:
++            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
++        if y_range > 0:
++            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
++            
++        # Add some randomization to break symmetry
++        np.random.seed(42)
++        points += np.random.normal(0, 0.01, points.shape)
++        
++        # Keep within bounds
++        points[:, 0] = np.clip(points[:, 0], 0, 1)
++        points[:, 1] = np.clip(points[:, 1], 0, 1)
++        
++        return points
++    
++    # Create initial guess with grid-based approach
++    initial_points = create_initial_grid()
++    
++    # Flatten for optimization
++    initial_flat = initial_points.flatten()
++    
++    # Define bounds for each coordinate (0 to 1)
++    bounds = [(-0.1, 1.1)] * 32  # 16 points * 2 coordinates each
++    
++    # Use differential evolution for global optimization
++    result = differential_evolution(
++        objective_function,
++        bounds,
++        maxiter=100,
++        popsize=15,
++        tol=1e-6,
++        mutation=(0.5, 1),
++        recombination=0.7,
++        seed=42,
++        disp=False
++    )
++    
++    # Reshape final solution
++    final_points = result.x.reshape((16, 2))
++    
++    # Ensure all points are within [0,1] bounds
++    final_points[:, 0] = np.clip(final_points[:, 0], 0, 1)
++    final_points[:, 1] = np.clip(final_points[:, 1], 0, 1)
++    
++    return final_points
+ 
+ # EVOLVE-BLOCK-END

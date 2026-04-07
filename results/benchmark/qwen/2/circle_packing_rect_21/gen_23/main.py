@@ -1,0 +1,253 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import random
+import math
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Parameters
+    n_circles = 21
+    total_perimeter = 4.0
+    rectangle_width = 1.2  # Initial guess - will be optimized
+    rectangle_height = 0.8  # Initial guess - will be optimized
+    
+    # Initialize with a grid-based arrangement for feasibility
+    def initialize_grid_layout():
+        # Create a grid-like arrangement that fits within the rectangle
+        rows = int(math.sqrt(n_circles))
+        cols = math.ceil(n_circles / rows)
+        
+        # Adjust rectangle dimensions for better fit
+        rect_width = rectangle_width
+        rect_height = rectangle_height
+        
+        # Calculate spacing
+        x_spacing = rect_width / (cols + 1)
+        y_spacing = rect_height / (rows + 1)
+        
+        circles = []
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                x = x_spacing * (j + 1)
+                y = y_spacing * (i + 1)
+                
+                # Set initial radius to small value
+                r = min(x_spacing, y_spacing) * 0.3
+                circles.append([x, y, r])
+                idx += 1
+                
+        return np.array(circles)
+    
+    # Check if a circle arrangement violates any constraints
+    def is_valid_arrangement(circles, width, height):
+        # Check boundary constraints
+        for circle in circles:
+            x, y, r = circle
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                return False
+        
+        # Check overlap constraints using spatial indexing for performance
+        points = circles[:, :2]
+        tree = cKDTree(points)
+        pairs = tree.query_pairs(r=0.0, output_type='ndarray')
+        
+        # Check each pair of circles for overlap
+        for i, j in pairs:
+            if i != j:
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_distance_sq = (r1 + r2)**2
+                if distance_sq < min_distance_sq:
+                    return False
+                    
+        return True
+    
+    # Calculate sum of radii
+    def calculate_radius_sum(circles):
+        return np.sum(circles[:, 2])
+    
+    # Get neighbor circles for local optimization
+    def get_neighbors(circles, index):
+        points = circles[:, :2]
+        tree = cKDTree(points)
+        # Find neighbors within a certain distance
+        neighbors = tree.query_ball_point(points[index], r=0.3)
+        return [i for i in neighbors if i != index]
+    
+    # Local optimization step
+    def local_optimization_step(circles, width, height, max_iter=100):
+        for _ in range(max_iter):
+            # Select a random circle
+            idx = random.randint(0, len(circles) - 1)
+            circle = circles[idx]
+            
+            # Save original circle
+            original_circle = circle.copy()
+            
+            # Try small perturbations to x, y, and r
+            old_radius_sum = calculate_radius_sum(circles)
+            
+            # Try small changes to position and radius
+            dx, dy, dr = np.random.normal(0, 0.01, 3)
+            new_x = max(0.01, min(width - 0.01, circle[0] + dx))
+            new_y = max(0.01, min(height - 0.01, circle[1] + dy))
+            new_r = max(0.001, circle[2] + dr)
+            
+            # Update circle temporarily
+            circles[idx] = [new_x, new_y, new_r]
+            
+            # Check validity
+            if is_valid_arrangement(circles, width, height):
+                new_radius_sum = calculate_radius_sum(circles)
+                if new_radius_sum > old_radius_sum:
+                    continue  # Accept improvement
+                else:
+                    # Revert if not improving
+                    circles[idx] = original_circle
+            else:
+                # Revert if invalid
+                circles[idx] = original_circle
+                
+        return circles
+    
+    # Main optimization loop with adaptive cooling
+    def adaptive_simulated_annealing():
+        # Start with grid-based initialization
+        circles = initialize_grid_layout()
+        
+        # Try different rectangle dimensions
+        best_width = rectangle_width
+        best_height = rectangle_height
+        best_circles = circles.copy()
+        best_sum = calculate_radius_sum(circles)
+        
+        # Try several configurations with different width/height ratios
+        ratios = [0.8, 1.0, 1.2, 1.5, 2.0]
+        for ratio in ratios:
+            width = 1.2
+            height = width / ratio
+            
+            # Set rectangle dimension limits
+            max_width = 1.5
+            min_width = 0.5
+            
+            # Initialize with grid arrangement
+            temp_circles = initialize_grid_layout()
+            
+            # Adjust positions to fit within the new rectangle
+            scale_x = width / rectangle_width
+            scale_y = height / rectangle_height
+            
+            for i in range(len(temp_circles)):
+                temp_circles[i][0] *= scale_x
+                temp_circles[i][1] *= scale_y
+            
+            # Apply local optimization
+            local_optimization_step(temp_circles, width, height)
+            
+            if is_valid_arrangement(temp_circles, width, height):
+                current_sum = calculate_radius_sum(temp_circles)
+                if current_sum > best_sum:
+                    best_sum = current_sum
+                    best_circles = temp_circles.copy()
+                    best_width = width
+                    best_height = height
+        
+        # Fine-tune with adaptive cooling
+        current_circles = best_circles.copy()
+        current_sum = best_sum
+        
+        # Adaptive cooling schedule
+        T = 1.0  # Initial temperature
+        T_min = 1e-5  # Minimum temperature
+        alpha = 0.95  # Cooling factor
+        iterations = 0
+        max_iterations = 5000
+        last_improvement = 0
+        patience = 100
+        
+        while T > T_min and iterations < max_iterations:
+            # Perturb one circle
+            idx = random.randint(0, len(current_circles) - 1)
+            original_circle = current_circles[idx].copy()
+            
+            # Generate a small perturbation
+            delta_x = np.random.uniform(-0.02, 0.02)
+            delta_y = np.random.uniform(-0.02, 0.02)
+            delta_r = np.random.uniform(-0.01, 0.01)
+            
+            # Apply perturbation
+            new_x = max(0.01, min(best_width - 0.01, current_circles[idx][0] + delta_x))
+            new_y = max(0.01, min(best_height - 0.01, current_circles[idx][1] + delta_y))
+            new_r = max(0.001, current_circles[idx][2] + delta_r)
+            
+            current_circles[idx] = [new_x, new_y, new_r]
+            
+            # Check constraints
+            if is_valid_arrangement(current_circles, best_width, best_height):
+                new_sum = calculate_radius_sum(current_circles)
+                delta = new_sum - current_sum
+                
+                if delta > 0 or random.random() < math.exp(delta / T):
+                    current_sum = new_sum
+                    if current_sum > best_sum:
+                        best_sum = current_sum
+                        best_circles = current_circles.copy()
+                        last_improvement = iterations
+                        
+                    # Occasionally perform local optimization
+                    if iterations % 20 == 0:
+                        local_optimization_step(current_circles, best_width, best_height)
+                else:
+                    # Revert
+                    current_circles[idx] = original_circle
+            else:
+                # Revert if invalid
+                current_circles[idx] = original_circle
+            
+            # Adaptive cooling: cool slower when there's no improvement
+            if iterations - last_improvement > patience:
+                T *= alpha * 0.5  # Cool slower
+            else:
+                T *= alpha  # Normal cooling
+                
+            iterations += 1
+            
+            # Occasionally restart if stuck
+            if iterations % 500 == 0 and current_sum <= best_sum:
+                current_circles = best_circles.copy()
+        
+        # Final local optimization
+        local_optimization_step(best_circles, best_width, best_height, 200)
+        
+        # Return the best configuration found
+        return best_circles
+    
+    # Run optimization
+    try:
+        result = adaptive_simulated_annealing()
+        return result
+    except Exception as e:
+        # Fallback to simple grid arrangement if optimization fails
+        print(f"Optimization failed with error: {e}")
+        circles = initialize_grid_layout()
+        return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,518 @@
+<NAME>
+replace_sparse_convolution_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a pure Numba-based convolution which has complexity O(n²). For large step functions (which we know can go up to 10,000 steps), this becomes computationally expensive. I'll replace the sparse convolution computation with an FFT-based approach which has complexity O(n log n). This will provide significant speedup for larger configurations while maintaining numerical accuracy.
+
+The key insight is that we can use FFT to compute the autoconvolution much more efficiently, especially for larger arrays. This will allow us to explore larger problem sizes and perform more iterations in the same time budget.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Optimized sparse convolution computation using Numba
+@jit(nopython=True)
+def compute_sparse_autoconvolution(f_vals):
+    """
+    Efficiently compute autoconvolution using optimized Numba loops.
+    Exploits the fact that step functions are piecewise constant.
+    """
+    n = len(f_vals)
+
+    # For dense convolution: g[i] = sum_{j+k=i} f[j] * f[k]
+    g = np.zeros(2*n - 1, dtype=np.float64)
+
+    # Optimized nested loop for autoconvolution
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_sparse_norms(g_vals):
+    """
+    Compute L1, L2^2, and L-infinity norms using highly optimized loops
+    """
+    n = len(g_vals)
+
+    # L1 norm (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_sq_norm, linf_norm
+
+@jit(nopython=True)
+def compute_c2_sparse(f_vals):
+    """
+    Fast computation of C2 using sparse convolution and norms
+    """
+    # Compute autoconvolution
+    g_vals = compute_sparse_autoconvolution(f_vals)
+
+    # Compute norms
+    l1, l2_sq, linf = compute_sparse_norms(g_vals)
+
+    # Avoid division by zero
+    if l1 <= 1e-15 or linf <= 1e-15:
+        return 0.0
+
+    # Return C2 value
+    return l2_sq / (l1 * linf)
+=======
+# Optimized convolution computation using FFT for better scalability
+@jit(nopython=True)
+def compute_autoconvolution_fft(f_vals):
+    """
+    Compute autoconvolution using FFT for O(n log n) complexity
+    This is more efficient for large arrays compared to nested loops
+    """
+    n = len(f_vals)
+
+    # For autoconvolution f*f, we can use FFT:
+    # fft(f)*fft(f) = fft(f*f)
+    # But since we want f*f, we need to do:
+    # 1. Take FFT of f
+    # 2. Square element-wise
+    # 3. Take inverse FFT
+    # Note: we need to handle the circular nature properly
+
+    # Use the standard approach with padding to avoid wraparound effects
+    # Pad to 2*n - 1 for full convolution, but we'll compute autoconvolution correctly
+    # For autoconvolution f*f, we can use: FFT(f) * FFT(f) = FFT(f*f)
+    # Then inverse FFT gives us the result
+
+    # Pad to at least 2*n-1 for full convolution (but actually for autoconvolution we can be smarter)
+    # But for simplicity, let's pad to 2*n for autoconvolution
+    padded_len = 2 * n
+    padded_f = np.zeros(padded_len)
+    padded_f[:n] = f_vals
+
+    # Compute FFT
+    fft_f = np.fft.fft(padded_f)
+
+    # Square the FFT (this is what we want for f*f)
+    fft_squared = fft_f * fft_f
+
+    # Inverse FFT
+    g_padded = np.fft.ifft(fft_squared)
+
+    # Take only the first n terms (center of convolution)
+    # For autoconvolution of length n, the result is of length 2*n-1 but we want the "valid" part
+    # Actually for a*b where both are same length, result is 2*n-1
+    # For autoconvolution f*f, we take the central part
+    g_full = np.real(g_padded)
+
+    # For autoconvolution of length n, the result has length 2*n-1
+    # We take the center part (n-1 elements) that corresponds to valid convolution
+    # But actually we want the full autoconvolution, so we return it all
+    # Or we could return the trimmed version for better matching with expected output
+    return g_full
+
+@jit(nopython=True)
+def compute_norms_fft(g_vals):
+    """
+    Compute L1, L2^2, and L-infinity norms using optimized loops
+    """
+    n = len(g_vals)
+
+    # L1 norm (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_sq_norm, linf_norm
+
+@jit(nopython=True)
+def compute_c2_fft(f_vals):
+    """
+    Fast computation of C2 using FFT-based convolution and norms
+    """
+    # Compute autoconvolution using FFT for better scalability
+    g_vals = compute_autoconvolution_fft(f_vals)
+
+    # Compute norms
+    l1, l2_sq, linf = compute_norms_fft(g_vals)
+
+    # Avoid division by zero
+    if l1 <= 1e-15 or linf <= 1e-15:
+        return 0.0
+
+    # Return C2 value
+    return l2_sq / (l1 * linf)
+
+def evaluate_step_function_fft(f_vals):
+    """
+    Evaluate step function with robust error handling and FFT computation
+    """
+    try:
+        # Ensure non-negative values with clipping
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+
+        # Handle edge cases
+        if len(f_vals) == 0 or np.isnan(np.sum(f_vals)) or np.isinf(np.sum(f_vals)):
+            return 0.0
+
+        # If all values are zero, return 0
+        if np.sum(f_vals) == 0:
+            return 0.0
+
+        # Compute C2 value using FFT method
+        c2 = compute_c2_fft(f_vals)
+
+        # Validate result
+        if np.isnan(c2) or np.isinf(c2) or c2 < 0:
+            return 0.0
+
+        return c2
+    except Exception as e:
+        return 0.0
+>>>>>>> REPLACE
+
+</DIFF>
+
+<NAME>
+add_gradient_based_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll add gradient-based refinement to further improve optimization. Since we now have the FFT-based computation, we can implement gradient ascent optimization to fine-tune solutions. This will help us escape local optima and reach higher C2 values by using automatic differentiation through JAX for gradient computation.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from numba import jit, prange
+import time
+import random
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist
+import warnings
+from collections import defaultdict
+warnings.filterwarnings('ignore')
+=======
+import numpy as np
+from numba import jit, prange
+import time
+import random
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist
+import warnings
+from collections import defaultdict
+import jax
+import jax.numpy as jnp
+from jax import grad, jit as jax_jit
+warnings.filterwarnings('ignore')
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_step_function_sparse(f_vals):
+    """
+    Evaluate step function with robust error handling and sparse computation
+    """
+    try:
+        # Ensure non-negative values with clipping
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+
+        # Handle edge cases
+        if len(f_vals) == 0 or np.isnan(np.sum(f_vals)) or np.isinf(np.sum(f_vals)):
+            return 0.0
+
+        # If all values are zero, return 0
+        if np.sum(f_vals) == 0:
+            return 0.0
+
+        # Compute C2 value using sparse method
+        c2 = compute_c2_sparse(f_vals)
+
+        # Validate result
+        if np.isnan(c2) or np.isinf(c2) or c2 < 0:
+            return 0.0
+
+        return c2
+    except Exception as e:
+        return 0.0
+=======
+def evaluate_step_function_fft(f_vals):
+    """
+    Evaluate step function with robust error handling and FFT computation
+    """
+    try:
+        # Ensure non-negative values with clipping
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+
+        # Handle edge cases
+        if len(f_vals) == 0 or np.isnan(np.sum(f_vals)) or np.isinf(np.sum(f_vals)):
+            return 0.0
+
+        # If all values are zero, return 0
+        if np.sum(f_vals) == 0:
+            return 0.0
+
+        # Compute C2 value using FFT method
+        c2 = compute_c2_fft(f_vals)
+
+        # Validate result
+        if np.isnan(c2) or np.isinf(c2) or c2 < 0:
+            return 0.0
+
+        return c2
+    except Exception as e:
+        return 0.0
+
+# JAX-based gradient computation for optimization
+def compute_c2_jax(f_vals):
+    """JAX version for automatic differentiation"""
+    # Convert to JAX array
+    f = jnp.array(f_vals, dtype=jnp.float32)
+
+    # Compute autoconvolution using JAX operations (using fft approach)
+    g = jnp.fft.ifft(jnp.fft.fft(f) * jnp.fft.fft(f))
+    g_real = jnp.real(g)
+
+    # Compute norms
+    g_abs = jnp.abs(g_real)
+    norm_l2_sq = jnp.sum(g_abs**2)
+    norm_l1 = jnp.sum(g_abs)
+    norm_inf = jnp.max(g_abs)
+
+    # Avoid division by zero
+    eps = 1e-12
+    norm_l1 = jnp.where(norm_l1 < eps, eps, norm_l1)
+    norm_inf = jnp.where(norm_inf < eps, eps, norm_inf)
+
+    c2 = norm_l2_sq / (norm_l1 * norm_inf)
+    return c2
+
+@jax_jit
+def compute_c2_jax_vectorized(f_vals):
+    """Vectorized JAX version for computing C2"""
+    return compute_c2_jax(f_vals)
+
+def compute_gradient_jax(f_vals):
+    """Compute gradient of C2 with respect to f_vals using JAX"""
+    try:
+        f = jnp.array(f_vals, dtype=jnp.float32)
+        grad_fn = grad(compute_c2_jax)
+        grad_val = grad_fn(f)
+        return np.array(grad_val)
+    except Exception:
+        return np.zeros_like(f_vals)
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    return best_solution
+
+def construct_function() -> list[float]:
+    """
+    Optimized function to construct step-function with high C2 value using hierarchical optimization.
+    Implements a truly novel approach combining hierarchical scales, multi-objective optimization,
+    and cross-scale knowledge transfer.
+    """
+    global start_time
+    start_time = time.time()
+
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Initialize with hierarchical approach using multi-scale optimizations
+    initial_solutions = []
+    n_attempts = 20
+
+    for i in range(n_attempts):
+        # Create diverse initial solutions with hierarchical optimization in mind
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        init_solution = create_multi_scale_structural_initialization(n_steps)
+        initial_solutions.append(init_solution)
+
+    # Select best initial solution
+    best_init = max(initial_solutions, key=evaluate_step_function_sparse)
+
+    # Apply hierarchical adaptive evolutionary optimization
+    evolved_solution = hierarchical_adaptive_evolutionary_optimization(initial_solutions)
+
+    # Apply multi-objective optimization for better g distribution
+    multi_obj_solution = multi_objective_sparse_optimization(evolved_solution)
+
+    # Apply cross-scale transfer refinement
+    refined_solution = cross_scale_transfer_refinement(multi_obj_solution)
+
+    # Final evaluation and return the best
+    final_c2 = evaluate_step_function_sparse(refined_solution)
+    initial_c2 = evaluate_step_function_sparse(best_init)
+
+    if final_c2 > initial_c2:
+        result = refined_solution
+    else:
+        result = best_init
+
+    # Ensure proper length
+    if len(result) < MIN_STEPS:
+        result.extend([1.0] * (MIN_STEPS - len(result)))
+    elif len(result) > MAX_STEPS:
+        result = result[:MAX_STEPS]
+
+    # Normalize sparse representation if needed
+    if np.sum(result) > 0:
+        result = np.array(result) / np.sum(result) * len(result)
+
+    # Ensure non-negativity and finite values for sparse computation
+    result = np.clip(result, 0, np.inf)
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    # Print debug info
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Best C2 found: {evaluate_step_function_sparse(result):.6f}")
+
+    return result.tolist()
+=======
+    return best_solution
+
+def gradient_ascent_refinement(initial_solution, max_iterations=50, step_size=0.01):
+    """
+    Apply gradient ascent refinement to improve the solution
+    """
+    solution = np.array(initial_solution, dtype=np.float32)
+    current_c2 = evaluate_step_function_fft(solution)
+
+    # Apply gradient ascent
+    for i in range(max_iterations):
+        try:
+            # Compute gradient
+            grad_val = compute_gradient_jax(solution)
+
+            # Update solution
+            solution_new = solution + step_size * grad_val
+
+            # Ensure non-negativity
+            solution_new = np.maximum(solution_new, 0)
+
+            # Check improvement
+            new_c2 = evaluate_step_function_fft(solution_new)
+            if new_c2 > current_c2:
+                solution = solution_new
+                current_c2 = new_c2
+            else:
+                # Reduce step size if no improvement
+                step_size *= 0.5
+                if step_size < 1e-6:
+                    break
+        except Exception:
+            break
+
+    return solution.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Optimized function to construct step-function with high C2 value using hierarchical optimization.
+    Implements a truly novel approach combining hierarchical scales, multi-objective optimization,
+    cross-scale knowledge transfer, and gradient ascent refinement.
+    """
+    global start_time
+    start_time = time.time()
+
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Initialize with hierarchical approach using multi-scale optimizations
+    initial_solutions = []
+    n_attempts = 20
+
+    for i in range(n_attempts):
+        # Create diverse initial solutions with hierarchical optimization in mind
+        n_steps = np.random.randint(MIN_STEPS, MAX_STEPS)
+        init_solution = create_multi_scale_structural_initialization(n_steps)
+        initial_solutions.append(init_solution)
+
+    # Select best initial solution
+    best_init = max(initial_solutions, key=evaluate_step_function_fft)
+
+    # Apply hierarchical adaptive evolutionary optimization
+    evolved_solution = hierarchical_adaptive_evolutionary_optimization(initial_solutions)
+
+    # Apply multi-objective optimization for better g distribution
+    multi_obj_solution = multi_objective_sparse_optimization(evolved_solution)
+
+    # Apply cross-scale transfer refinement
+    refined_solution = cross_scale_transfer_refinement(multi_obj_solution)
+
+    # Apply gradient ascent refinement for final improvement
+    gradient_solution = gradient_ascent_refinement(refined_solution)
+
+    # Final evaluation and return the best among all attempts
+    final_c2 = evaluate_step_function_fft(gradient_solution)
+    initial_c2 = evaluate_step_function_fft(best_init)
+    evolved_c2 = evaluate_step_function_fft(evolved_solution)
+    multi_obj_c2 = evaluate_step_function_fft(multi_obj_solution)
+    cross_scale_c2 = evaluate_step_function_fft(refined_solution)
+
+    # Select the best among all intermediate solutions
+    candidates = [
+        (final_c2, gradient_solution),
+        (initial_c2, best_init),
+        (evolved_c2, evolved_solution),
+        (multi_obj_c2, multi_obj_solution),
+        (cross_scale_c2, refined_solution)
+    ]
+
+    best_c2, result = max(candidates, key=lambda x: x[0])
+
+    # Ensure proper length
+    if len(result) < MIN_STEPS:
+        result.extend([1.0] * (MIN_STEPS - len(result)))
+    elif len(result) > MAX_STEPS:
+        result = result[:MAX_STEPS]
+
+    # Normalize representation if needed
+    if np.sum(result) > 0:
+        result = np.array(result) / np.sum(result) * len(result)
+
+    # Ensure non-negativity and finite values for computation
+    result = np.clip(result, 0, np.inf)
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    # Print debug info
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Best C2 found: {evaluate_step_function_fft(result):.6f}")
+
+    return result.tolist()
+>>>>>>> REPLACE
+
+</DIFF>

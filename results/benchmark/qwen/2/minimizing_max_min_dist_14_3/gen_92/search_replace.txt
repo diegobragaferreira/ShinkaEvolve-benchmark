@@ -1,0 +1,391 @@
+<NAME>
+improved_voronoi_perturbation
+</NAME>
+
+<DESCRIPTION>
+The key insight is to enhance the Voronoi-based perturbation strategy by incorporating more sophisticated geometric analysis. The current implementation uses basic Voronoi cell areas and neighbor counting, but we can improve this by:
+
+1. Using more accurate Voronoi-based constraint detection
+2. Adding distance-weighted repulsion forces that consider the full distribution
+3. Implementing smarter perturbation magnitudes based on local curvature analysis
+4. Adding periodic global optimization steps to escape local optima
+
+This approach focuses on making the perturbations more intelligent by leveraging the actual geometric structure of the point distribution rather than just heuristic scoring.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_based_perturbation(points, threshold_ratio=0.3):
+    """Compute optimal perturbations based on enhanced Voronoi analysis"""
+    if len(points) < 4:  # Need at least 4 points for meaningful Voronoi
+        return np.random.randint(0, len(points))
+
+    try:
+        # Create Spherical Voronoi diagram for better sphere-specific analysis
+        sv = SphericalVoronoi(points)
+
+        # Analyze Voronoi cell areas to identify dense regions
+        cell_areas = sv.volume
+        mean_area = np.mean(cell_areas)
+
+        # Identify points in cells that are below 20% of average area (dense regions)
+        dense_point_indices = np.where(cell_areas < 0.2 * mean_area)[0]
+
+        # Also identify points that are too close to their neighbors
+        distances = pdist(points)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        avg_dist = np.mean(distances)
+        threshold = threshold_ratio * avg_dist
+
+        # Create a scoring system for how much each point needs adjustment
+        adjustment_scores = np.zeros(len(points))
+
+        # Score based on cell density
+        for i in range(len(points)):
+            if i in dense_point_indices:
+                adjustment_scores[i] += 2.0  # High priority for dense regions
+
+        # Score based on neighbor distances
+        distance_matrix = squareform(distances)
+        for i in range(len(points)):
+            # Count neighbors that are too close
+            close_neighbors = np.where(distance_matrix[i] < threshold)[0]
+            close_neighbors = close_neighbors[close_neighbors != i]  # Exclude self
+            adjustment_scores[i] += len(close_neighbors) * 0.5
+
+        # Choose point with highest adjustment score (but with some randomness)
+        if np.max(adjustment_scores) > 0:
+            # Prefer higher-scoring points but with 30% randomness
+            if np.random.random() < 0.7:
+                chosen_idx = np.argmax(adjustment_scores)
+            else:
+                # Select randomly from top 3 high-scoring points
+                top_indices = np.argsort(adjustment_scores)[-3:]
+                chosen_idx = np.random.choice(top_indices)
+        else:
+            # If no strong constraints, choose randomly
+            chosen_idx = np.random.randint(0, len(points))
+
+        return chosen_idx
+
+    except Exception as e:
+        # Fallback to random selection if Voronoi fails
+        return np.random.randint(0, len(points))
+=======
+def compute_voronoi_based_perturbation(points, threshold_ratio=0.3):
+    """Compute optimal perturbations based on enhanced Voronoi analysis"""
+    if len(points) < 4:  # Need at least 4 points for meaningful Voronoi
+        return np.random.randint(0, len(points))
+
+    try:
+        # Create Spherical Voronoi diagram for better sphere-specific analysis
+        sv = SphericalVoronoi(points)
+
+        # Analyze Voronoi cell areas to identify dense regions
+        cell_areas = sv.volume
+        mean_area = np.mean(cell_areas)
+
+        # Identify points in cells that are below 25% of average area (dense regions)
+        dense_point_indices = np.where(cell_areas < 0.25 * mean_area)[0]
+
+        # Also identify points that are too close to their neighbors
+        distances = pdist(points)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        avg_dist = np.mean(distances)
+        threshold = threshold_ratio * avg_dist
+
+        # Create a scoring system for how much each point needs adjustment
+        adjustment_scores = np.zeros(len(points))
+
+        # Score based on cell density (more sensitive to very small cells)
+        for i in range(len(points)):
+            if i in dense_point_indices:
+                adjustment_scores[i] += 3.0  # Higher priority for dense regions
+
+        # Score based on neighbor distances - more sophisticated
+        distance_matrix = squareform(distances)
+        for i in range(len(points)):
+            # Count neighbors that are too close (within 15% of average distance)
+            close_neighbors = np.where(distance_matrix[i] < avg_dist * 0.15)[0]
+            close_neighbors = close_neighbors[close_neighbors != i]  # Exclude self
+            if len(close_neighbors) > 0:
+                # Score based on number of very close neighbors and their distances
+                close_distances = distance_matrix[i, close_neighbors]
+                score = np.sum(1.0 / (close_distances + 1e-8))  # Inverse distance weighting
+                adjustment_scores[i] += score * 0.8
+
+        # Choose point with highest adjustment score (but with some randomness)
+        if np.max(adjustment_scores) > 0:
+            # Prefer higher-scoring points but with 30% randomness
+            if np.random.random() < 0.75:
+                chosen_idx = np.argmax(adjustment_scores)
+            else:
+                # Select randomly from top 5 high-scoring points instead of 3
+                top_indices = np.argsort(adjustment_scores)[-5:]
+                chosen_idx = np.random.choice(top_indices)
+        else:
+            # If no strong constraints, choose randomly
+            chosen_idx = np.random.randint(0, len(points))
+
+        return chosen_idx
+
+    except Exception as e:
+        # Fallback to random selection if Voronoi fails
+        return np.random.randint(0, len(points))
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_perturbation_mechanism
+</NAME>
+
+<DESCRIPTION>
+The second improvement focuses on making the perturbation mechanism more sophisticated. Instead of simple random perturbations, we now:
+
+1. Use distance-weighted repulsion forces that consider all nearby points
+2. Implement more intelligent magnitude scaling based on local geometric properties
+3. Add curvature-aware perturbations that consider the local surface geometry
+4. Improve the handling of edge cases with better fallback strategies
+
+This ensures that the moves made during optimization are more purposeful and geometrically meaningful.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Apply more sophisticated perturbation based on local Voronoi analysis
+        try:
+            # Analyze local geometry around the selected point
+            distances = cdist([points[point_to_move]], points)[0]
+            distances = distances[distances > 0]  # Remove self-distance
+
+            if len(distances) > 0:
+                avg_distance = np.mean(distances)
+                min_distance = np.min(distances)
+                max_distance = np.max(distances)
+
+                # Determine perturbation type based on local density
+                if min_distance < avg_distance * 0.4:
+                    # Point is too close to neighbors - repel it strongly
+                    repulsion = np.zeros(3)
+                    for i in range(len(points)):
+                        if i != point_to_move and distances[i-1] < avg_distance * 0.6:
+                            diff = points[point_to_move] - points[i]
+                            dist = np.linalg.norm(diff)
+                            if dist > 0:
+                                repulsion += diff / dist * (1.0/(dist * dist + 1e-8))
+
+                    if np.linalg.norm(repulsion) > 0:
+                        repulsion = repulsion / np.linalg.norm(repulsion)
+                        # Enhanced scaling based on how close we are to ideal spacing
+                        proximity_factor = min_distance / avg_distance
+                        magnitude = 0.04 * temp * (1.0 + proximity_factor * 2.0)
+                        new_points[point_to_move] += repulsion * magnitude
+                    else:
+                        # Fallback to random perturbation
+                        direction = np.random.randn(3)
+                        direction /= np.linalg.norm(direction)
+                        magnitude = 0.025 * temp
+                        new_points[point_to_move] += direction * magnitude
+                else:
+                    # Point is relatively well-spaced - make small adjustment
+                    direction = np.random.randn(3)
+                    direction /= np.linalg.norm(direction)
+                    # Magnitude inversely proportional to distance from center
+                    center_dist = np.linalg.norm(points[point_to_move])
+                    # Scale magnitude based on how far we are from the ideal range
+                    distance_factor = 1.0 - min(abs(center_dist - 0.5), 0.5)
+                    magnitude = 0.01 * temp * distance_factor
+                    new_points[point_to_move] += direction * magnitude
+
+            else:
+                # Fallback for edge cases
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+                magnitude = 0.025 * temp
+                new_points[point_to_move] += direction * magnitude
+
+        except Exception:
+            # Fallback to simple random perturbation
+            direction = np.random.randn(3)
+            direction /= np.linalg.norm(direction)
+            magnitude = 0.025 * temp
+            new_points[point_to_move] += direction * magnitude
+=======
+        # Apply more sophisticated perturbation based on local Voronoi analysis
+        try:
+            # Analyze local geometry around the selected point
+            distances = cdist([points[point_to_move]], points)[0]
+            distances = distances[distances > 0]  # Remove self-distance
+
+            if len(distances) > 0:
+                avg_distance = np.mean(distances)
+                min_distance = np.min(distances)
+                max_distance = np.max(distances)
+                std_distance = np.std(distances)
+
+                # Determine perturbation type based on local density and distribution
+                if min_distance < avg_distance * 0.35:
+                    # Point is too close to neighbors - repel it strongly with weighted force
+                    repulsion = np.zeros(3)
+                    total_weight = 0.0
+
+                    # Compute weighted repulsion from all nearby points
+                    for i in range(len(points)):
+                        if i != point_to_move and distances[i-1] < avg_distance * 0.7:
+                            diff = points[point_to_move] - points[i]
+                            dist = np.linalg.norm(diff)
+                            if dist > 0:
+                                # Weight by inverse squared distance for stronger repulsion at closer distances
+                                weight = 1.0 / (dist * dist + 1e-8)
+                                repulsion += diff / dist * weight
+                                total_weight += weight
+
+                    if total_weight > 0:
+                        repulsion = repulsion / total_weight  # Normalize by total weight
+                        repulsion = repulsion / np.linalg.norm(repulsion)  # Unit vector
+                        # Enhanced scaling with consideration of clustering and distance spread
+                        proximity_factor = min_distance / avg_distance
+                        cluster_factor = np.minimum(std_distance / avg_distance, 1.0)
+                        magnitude = 0.05 * temp * (1.0 + proximity_factor * 3.0 + cluster_factor * 0.5)
+                        new_points[point_to_move] += repulsion * magnitude
+                    else:
+                        # Fallback to random perturbation
+                        direction = np.random.randn(3)
+                        direction /= np.linalg.norm(direction)
+                        magnitude = 0.03 * temp
+                        new_points[point_to_move] += direction * magnitude
+                else:
+                    # Point is relatively well-spaced - make small adjustment with curvature awareness
+                    direction = np.random.randn(3)
+                    direction /= np.linalg.norm(direction)
+
+                    # Magnitude based on distance from center and local spread
+                    center_dist = np.linalg.norm(points[point_to_move])
+                    # Prefer points near the middle of the sphere for better coverage
+                    preferred_distance_factor = 1.0 - np.abs(center_dist - 0.5) * 2.0
+                    # Also consider local variance
+                    spread_factor = 1.0 - np.minimum(std_distance / avg_distance, 1.0) * 0.5
+                    magnitude = 0.015 * temp * preferred_distance_factor * spread_factor
+                    new_points[point_to_move] += direction * magnitude
+
+            else:
+                # Fallback for edge cases
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+                magnitude = 0.03 * temp
+                new_points[point_to_move] += direction * magnitude
+
+        except Exception:
+            # Fallback to simple random perturbation with enhanced magnitude
+            direction = np.random.randn(3)
+            direction /= np.linalg.norm(direction)
+            magnitude = 0.03 * temp
+            new_points[point_to_move] += direction * magnitude
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+adaptive_cooling_and_refinement
+</NAME>
+
+<DESCRIPTION>
+The third major improvement introduces a more sophisticated adaptive cooling schedule and adds periodic global refinement steps. The improvements include:
+
+1. More aggressive cooling when progress stalls (increased cooling factor from 1.15 to 1.2)
+2. Smarter temperature reset conditions that better detect stagnation
+3. Enhanced refinement strategy that does more thorough local optimization
+4. Better tracking of convergence patterns for more responsive adaptation
+
+These changes help the algorithm escape poor local optima and maintain better exploration-exploitation balance throughout the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Adaptive cooling based on recent performance
+        recent_ratios.append(current_ratio)
+        if len(recent_ratios) > max_recent:
+            recent_ratios.pop(0)
+
+        # Adjust cooling rate based on recent improvement
+        cooling_rate = base_cooling_rate
+        if len(recent_ratios) >= 10:
+            recent_improvement = recent_ratios[-1] - recent_ratios[0]
+            if recent_improvement < 1e-8 and temp > 1e-6:
+                # Very slow progress, cool faster
+                cooling_rate = base_cooling_rate * 1.15
+            elif recent_improvement > 1e-4 and temp > 1e-5:
+                # Fast progress, cool slower
+                cooling_rate = base_cooling_rate * 0.98
+
+        # Cool down temperature
+        temp *= cooling_rate
+        iter_count += 1
+
+        # Occasionally do a full re-initialization if stuck
+        if iter_count % 5000 == 0 and temp > 0.1:
+            # Reinitialize with better sphere packing
+            points = fibonacci_sphere(14)
+            current_ratio, min_dist = compute_min_max_ratio(points)
+            temp = min(temp * 1.2, 1.0)  # Increase temperature slightly
+=======
+        # Adaptive cooling based on recent performance
+        recent_ratios.append(current_ratio)
+        if len(recent_ratios) > max_recent:
+            recent_ratios.pop(0)
+
+        # Adjust cooling rate based on recent improvement
+        cooling_rate = base_cooling_rate
+        if len(recent_ratios) >= 15:  # Increased window for better stability
+            # Check for stagnation over longer period
+            recent_improvement = recent_ratios[-1] - recent_ratios[0]
+            improvement_window = len(recent_ratios) // 3  # Last 1/3 of window
+            if improvement_window > 0:
+                recent_improvement_last_third = recent_ratios[-improvement_window] - recent_ratios[-len(recent_ratios)]
+                if recent_improvement_last_third < 1e-9 and temp > 1e-8:
+                    # Very slow progress in last portion, cool faster
+                    cooling_rate = base_cooling_rate * 1.2  # Increased from 1.15 to 1.2
+                elif recent_improvement > 1e-5 and temp > 1e-6:
+                    # Fast progress, cool slower
+                    cooling_rate = base_cooling_rate * 0.97  # Slightly faster decay
+                elif recent_improvement < 1e-6 and temp > 1e-7:
+                    # Slow progress, moderate cooling
+                    cooling_rate = base_cooling_rate * 1.05
+            else:
+                # Default case
+                if recent_improvement < 1e-8 and temp > 1e-6:
+                    cooling_rate = base_cooling_rate * 1.18
+                elif recent_improvement > 1e-4 and temp > 1e-5:
+                    cooling_rate = base_cooling_rate * 0.98
+
+        # Cool down temperature
+        temp *= cooling_rate
+        iter_count += 1
+
+        # Occasionally do a full re-initialization if stuck for a longer period
+        if iter_count % 8000 == 0 and temp > 0.05:
+            # Do a more intensive refinement first
+            refined_points = points.copy()
+            for _ in range(100):  # More intensive local search
+                point_idx = np.random.randint(0, len(points))
+                # Larger perturbation for refinement
+                new_point = refined_points[point_idx] + np.random.normal(0, 0.002, 3)
+                norm = np.linalg.norm(new_point)
+                if norm > 0:
+                    new_point = new_point / norm
+                refined_points[point_idx] = new_point
+
+                new_ratio, _ = compute_min_max_ratio(refined_points)
+                if new_ratio > current_ratio:
+                    points = refined_points.copy()
+                    current_ratio = new_ratio
+
+            # Reinitialize with better sphere packing
+            points = fibonacci_sphere(14)
+            current_ratio, min_dist = compute_min_max_ratio(points)
+            temp = min(temp * 1.25, 1.0)  # Increased temperature reset
+>>>>>>> REPLACE
+</DIFF>

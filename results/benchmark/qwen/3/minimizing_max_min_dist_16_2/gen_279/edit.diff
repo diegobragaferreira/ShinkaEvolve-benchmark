@@ -1,0 +1,663 @@
+--- a/original.py
++++ b/original.py
+@@ -1,634 +1,643 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import pdist
+ from scipy.spatial import Voronoi
+ from scipy.optimize import minimize
+ import time
+ import random
+ from typing import List, Tuple
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+ 
+     """
+ 
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum distances between all point pairs."""
+         if len(points) < 2:
+             return 0.0
+ 
+         distances = pdist(points)
+         min_dist = np.min(distances)
+         max_dist = np.max(distances)
+ 
+         if max_dist == 0:
+             return 0.0
+ 
+         return min_dist / max_dist
+ 
+     def compute_min_max_ratio_with_boundary_penalty(points, penalty_factor=1000.0):
+         """Compute the ratio with boundary penalties to avoid edge violations."""
+         # Apply boundary penalty: points too close to edges get penalized heavily
+         penalty = 0.0
+         for point in points:
+             # Penalize if point is within 0.01 of any boundary
+             dist_to_left = point[0]
+             dist_to_right = 1.0 - point[0]
+             dist_to_bottom = point[1]
+             dist_to_top = 1.0 - point[1]
+ 
+             min_dist_to_edge = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+ 
+             if min_dist_to_edge < 0.01:
+                 penalty += penalty_factor * (0.01 - min_dist_to_edge)
+ 
+         ratio = compute_min_max_ratio(points)
+         return ratio - penalty / len(points)
+ 
+     def compute_voronoi_uniformity(points):
+         """Compute uniformity based on Voronoi cell areas."""
+         try:
+             vor = Voronoi(points)
+             areas = []
+             for region in vor.regions:
+                 if not any(v == -1 for v in region):  # Skip infinite regions
+                     polygon = [vor.vertices[i] for i in region]
+                     if len(polygon) >= 3:
+                         area = 0.5 * abs(sum(polygon[i][0] * polygon[(i+1)%len(polygon)][1] -
+                                            polygon[(i+1)%len(polygon)][0] * polygon[i][1]
+                                            for i in range(len(polygon))))
+                         areas.append(area)
+             if not areas:
+                 return 0.0
+             avg_area = np.mean(areas)
+             # Uniformity is how close average area is to ideal area (1/16)
+             ideal_area = 1.0 / len(points)
+             uniformity = 1.0 - abs(avg_area - ideal_area) / ideal_area if ideal_area > 0 else 0.0
+             return uniformity
+         except:
+             return 0.0
+ 
+     def compute_combined_fitness(points):
+         """Compute combined fitness using both distance ratio and Voronoi uniformity."""
+         ratio = compute_min_max_ratio(points)
+         uniformity = compute_voronoi_uniformity(points)
+         return ratio * (1.0 + 0.5 * uniformity)  # Weighted combination
+ 
+     def generate_hexagonal_grid():
+         """Generate points in a sophisticated hexagonal grid pattern."""
+         points = []
+-        # Create a true triangular lattice that better approximates optimal point distribution
++        # Create a more optimal triangular lattice arrangement for 16 points
++        # This approach considers the actual optimal packing density and geometry
++
++        # For 16 points, arrange them in a hexagonal pattern with 4 rows of 4 points each
++        # But we'll use a more mathematically sound approach based on hexagonal packing
++
++        # Determine the appropriate spacing for 16 points in unit square
++        # Area per point = 1/16 = 0.0625
++        # For hexagonal packing, the area of each circle is approximately 0.0625
++        # This gives us a radius r where πr² = 0.0625 → r = sqrt(0.0625/π) ≈ 0.142
++        spacing = 0.25  # Approximate spacing for hexagonal packing
++
++        # Create hexagonal grid with better geometric properties
+         rows = 4
+         cols = 4
+ 
+-        # Calculate optimal spacing for triangular lattice in unit square
+-        spacing = np.sqrt(1.0 / (np.sqrt(3) * 16)) * 1.5  # Scale slightly for better distribution
+-        spacing_x = spacing
+-        spacing_y = spacing * np.sqrt(3) / 2
+-
+-        # Generate triangular lattice points with enhanced asymmetry
++        # Generate points with proper hexagonal offsetting
+         for i in range(rows):
+             for j in range(cols):
+                 if len(points) < 16:
+-                    # Offset every other row for triangular packing
+-                    x = j * spacing_x + (i % 2) * spacing_x / 2
+-                    y = i * spacing_y
+-
+-                    # Add sophisticated deterministic perturbations to break symmetries
+-                    asym_x = 0.01 * np.sin(i * 1.7) * np.cos(j * 3.1) * np.sin((i+j) * 0.5)
+-                    asym_y = 0.01 * np.cos(i * 2.3) * np.sin(j * 1.9) * np.cos((i-j) * 0.7)
+-
+-                    points.append([x + asym_x, y + asym_y])
++                    # Offset every other row for proper hexagonal packing
++                    x = j * spacing + (i % 2) * spacing / 2
++                    y = i * spacing * np.sqrt(3) / 2
++
++                    # Apply more sophisticated perturbations for symmetry breaking
++                    # Use prime-based and transcendental combinations to break symmetries
++                    prime_factor = (i * 17 + j * 13) % 29
++                    x_pert = np.sin(prime_factor * 0.7) * 0.01 * (1 + 0.05 * np.cos(i * 0.3))
++                    y_pert = np.cos(prime_factor * 0.5) * 0.01 * (1 + 0.05 * np.sin(j * 0.4))
++
++                    points.append([x + x_pert, y + y_pert])
+ 
+         # Ensure we have exactly 16 points
+         points = np.array(points[:16])
+ 
+         # Ensure points stay within bounds
+         points[:, 0] = np.clip(points[:, 0], 0, 1)
+         points[:, 1] = np.clip(points[:, 1], 0, 1)
+ 
+         # Add small random noise to further break any remaining symmetries
+-        noise_strength = 0.002
++        noise_strength = 0.0015  # Reduced noise for more stable optimization
+         points += np.random.normal(0, noise_strength, points.shape)
+ 
+         # Ensure bounds again after noise
+         points = np.clip(points, 0, 1)
+         return points
+ 
+     def generate_fibonacci_spiral():
+         """Generate points using Fibonacci spiral."""
+         points = np.zeros((16, 2))
+         golden_ratio = (1 + np.sqrt(5)) / 2
+         for i in range(16):
+             angle = i * golden_ratio * np.pi * 2
+             radius = 0.4 * np.sqrt(i / 15.0)  # Scale appropriately
+             x = 0.5 + radius * np.cos(angle)
+             y = 0.5 + radius * np.sin(angle)
+             points[i] = [x, y]
+         points = np.clip(points, 0, 1)
+         return points
+ 
+     def generate_random_config():
+         """Generate random configuration."""
+         return np.random.rand(16, 2)
+ 
+     def generate_enhanced_hexagonal_grid():
+         """Generate enhanced hexagonal pattern with prime-based symmetry breaking."""
+         points = []
+         for i in range(4):
+             for j in range(4):
+                 # Base hexagonal position
+                 x_base = j * 0.25 + (i % 2) * 0.125
+                 y_base = i * 0.25
+ 
+                 # Enhanced symmetry-breaking using prime numbers and transcendental functions
+                 symmetry_factor = (i * 17 + j * 11) % 23  # Prime-based combination
+                 x_pert = np.sin(symmetry_factor * np.pi / 7) * 0.005 * (1 + 0.1 * np.sin(i * 0.7))
+                 y_pert = np.cos(symmetry_factor * np.pi / 11) * 0.005 * (1 + 0.1 * np.cos(j * 0.5))
+ 
+                 x = x_base + x_pert + np.random.normal(0, 0.003)
+                 y = y_base + y_pert + np.random.normal(0, 0.003)
+                 points.append([x, y])
+         points = np.array(points)
+         points = np.clip(points, 0, 1)
+         return points
+ 
+     def generate_triangular_lattice():
+         """Generate triangular lattice with improved asymmetry."""
+         points = []
+         for i in range(4):
+             for j in range(4):
+                 x_base = j * 0.25 + (i % 2) * 0.125
+                 y_base = i * 0.25
+ 
+                 # More sophisticated symmetry breaking with multiple factors
+                 phase_x = i * 1.3 + j * 0.7
+                 phase_y = i * 0.5 + j * 1.1
+ 
+                 x_pert = np.sin(phase_x) * 0.008 * (1 + 0.05 * np.cos(phase_y))
+                 y_pert = np.cos(phase_y) * 0.008 * (1 + 0.05 * np.sin(phase_x))
+ 
+                 x = x_base + x_pert + np.random.normal(0, 0.005)
+                 y = y_base + y_pert + np.random.normal(0, 0.005)
+                 points.append([x, y])
+         points = np.array(points)
+         points = np.clip(points, 0, 1)
+         return points
+ 
+     def generate_fibonacci_pattern():
+         """Generate Fibonacci-inspired spiral pattern."""
+         points = []
+         # Generate points on a Fibonacci spiral pattern
+         golden_ratio = (1 + np.sqrt(5)) / 2
+         for i in range(16):
+             # Modified Fibonacci spiral with additional asymmetry
+             angle = i * golden_ratio * np.pi * 2
+             radius = i * 0.05
+ 
+             # Add more complex asymmetry
+             asym_x = np.sin(i * 0.3) * 0.01 * np.cos(i * 0.2)
+             asym_y = np.cos(i * 0.4) * 0.01 * np.sin(i * 0.3)
+ 
+             x = 0.5 + (radius + asym_x) * np.cos(angle)
+             y = 0.5 + (radius + asym_y) * np.sin(angle)
+ 
+             points.append([x, y])
+         points = np.array(points)
+         points = np.clip(points, 0, 1)
+         return points
+ 
+     def mutate_individual(points, mutation_rate=0.2, strength=0.01):
+         """Apply mutations to points."""
+         mutated = points.copy()
+         for i in range(len(mutated)):
+             if random.random() < mutation_rate:
+                 mutated[i] += np.random.normal(0, strength, 2)
+         return np.clip(mutated, 0, 1)
+ 
+     def crossover_parents(parent1, parent2, crossover_rate=0.8):
+         """Create offspring from two parents."""
+         if random.random() < crossover_rate:
+             # Uniform crossover
+             mask = np.random.rand(*parent1.shape) > 0.5
+             child = np.where(mask, parent1, parent2).copy()
+         else:
+             # Clone one parent
+             child = parent1.copy()
+         return child
+ 
+     def evolutionary_search(max_generations=50, population_size=30):
+         """Perform evolutionary search."""
+         # Initialize population with enhanced strategies
+         population = []
+         population.append(generate_hexagonal_grid())
+         population.append(generate_fibonacci_spiral())
+         population.append(generate_random_config())
+         population.append(generate_enhanced_hexagonal_grid())
+         population.append(generate_triangular_lattice())
+         population.append(generate_fibonacci_pattern())
+ 
+         # Generate rest randomly
+         for _ in range(population_size - 6):
+             population.append(generate_random_config())
+ 
+         best_individual = None
+         best_fitness = -np.inf
+ 
+         for generation in range(max_generations):
+             # Evaluate fitness
+             fitness_scores = []
+             for individual in population:
+                 fitness = compute_combined_fitness(individual)
+                 fitness_scores.append(fitness)
+                 if fitness > best_fitness:
+                     best_fitness = fitness
+                     best_individual = individual.copy()
+ 
+             # Sort by fitness (descending)
+             sorted_indices = np.argsort(fitness_scores)[::-1]
+             population = [population[i] for i in sorted_indices]
+ 
+             # Create new population
+             new_population = population[:5]  # Keep top 5 (elitism)
+ 
+             # Generate offspring
+             while len(new_population) < population_size:
+                 # Tournament selection
+                 tournament_size = 5
+                 tournament_indices = np.random.choice(len(population), tournament_size)
+                 tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+                 parent1_idx = tournament_indices[np.argmax(tournament_fitness)]
+ 
+                 tournament_indices2 = np.random.choice(len(population), tournament_size)
+                 tournament_fitness2 = [fitness_scores[i] for i in tournament_indices2]
+                 parent2_idx = tournament_indices2[np.argmax(tournament_fitness2)]
+ 
+                 parent1 = population[parent1_idx]
+                 parent2 = population[parent2_idx]
+ 
+                 child = crossover_parents(parent1, parent2, crossover_rate=0.8)
+                 child = mutate_individual(child, mutation_rate=0.2, strength=0.01)
+                 new_population.append(child)
+ 
+             population = new_population[:population_size]
+ 
+         return best_individual if best_individual is not None else generate_hexagonal_grid()
+ 
+     def neighborhood_move(points, neighbor_size=3):
+         """Move a neighbor sub-set of points together."""
+         new_points = points.copy()
+         # Select random subset of points to move
+         indices = np.random.choice(len(points), min(neighbor_size, len(points)), replace=False)
+ 
+         # Calculate centroid of selected points
+         centroid = np.mean(new_points[indices], axis=0)
+ 
+         # Apply movement to centroid and propagate
+         move_vector = np.random.normal(0, 0.01, 2)
+         new_centroid = np.clip(centroid + move_vector, 0, 1)
+         delta = new_centroid - centroid
+ 
+         for idx in indices:
+             new_points[idx] += delta
+ 
+         return np.clip(new_points, 0, 1)
+ 
+     def simulated_annealing_refinement(initial_points, max_iter=1000):
+         """Refine solution using simulated annealing with neighborhood moves."""
+         current_points = initial_points.copy()
+         current_fitness = compute_combined_fitness(current_points)
+         best_points = current_points.copy()
+         best_fitness = current_fitness
+ 
+         # Initial temperature and cooling schedule
+         temp = 0.1
+         cooling_rate = 0.999
+         min_temp = 1e-6
+ 
+         # Track recent improvements for adaptive cooling
+         recent_improvements = []
+         patience = 0
+         max_patience = 100
+ 
+         for iteration in range(max_iter):
+             # Generate neighbor
+             new_points = neighborhood_move(current_points, neighbor_size=2)
+             new_fitness = compute_combined_fitness(new_points)
+ 
+             # Accept or reject
+             if new_fitness > current_fitness or random.random() < np.exp((new_fitness - current_fitness) / temp):
+                 current_points = new_points
+                 current_fitness = new_fitness
+ 
+                 if new_fitness > best_fitness:
+                     best_points = new_points
+                     best_fitness = new_fitness
+                     recent_improvements = []
+                     patience = 0
+                 else:
+                     patience += 1
+                     recent_improvements.append(new_fitness)
+                     if len(recent_improvements) > 50:
+                         recent_improvements.pop(0)
+             else:
+                 patience += 1
+ 
+             # Early stopping if no improvement for too long
+             if patience > max_patience:
+                 if len(recent_improvements) > 10:
+                     recent_avg = np.mean(recent_improvements[-10:])
+                     if recent_avg > 0.99 * best_fitness:
+                         break
+ 
+             # Cool down
+             temp *= cooling_rate
+             if temp < min_temp:
+                 break
+ 
+         return best_points
+ 
+     def compute_gradient_approximation(points, epsilon=1e-6):
+         """Compute approximate gradient using finite differences."""
+         grad = np.zeros_like(points)
+         base_ratio = compute_min_max_ratio(points)
+ 
+         for i in range(len(points)):
+             for j in range(len(points[i])):
+                 # Perturb coordinate
+                 points_plus = points.copy()
+                 points_minus = points.copy()
+                 points_plus[i,j] += epsilon
+                 points_minus[i,j] -= epsilon
+ 
+                 # Compute gradient using central difference
+                 ratio_plus = compute_min_max_ratio(points_plus)
+                 ratio_minus = compute_min_max_ratio(points_minus)
+                 grad[i,j] = (ratio_plus - ratio_minus) / (2 * epsilon)
+ 
+         return grad
+ 
+     def optimize_with_gradient_refinement(initial_points, max_iter=100):
+         """Apply gradient-based refinement to improve solution quality."""
+         points = initial_points.copy()
+         current_ratio = compute_min_max_ratio(points)
+ 
+         # Gradient ascent with adaptive step size
+         for iteration in range(max_iter):
+             # Compute gradient
+             grad = compute_gradient_approximation(points)
+ 
+             # Adaptive learning rate
+             # Start with higher learning rate, decrease over iterations
+             learning_rate = 0.02 * (1.0 - iteration / max_iter * 0.5)
+ 
+             # Update points in direction of gradient
+             points = points + learning_rate * grad
+ 
+             # Keep within bounds
+             points = np.clip(points, 0, 1)
+ 
+             # Check for improvement
+             new_ratio = compute_min_max_ratio(points)
+             if new_ratio > current_ratio:
+                 current_ratio = new_ratio
+             else:
+                 # If no improvement, reduce learning rate and try again
+                 learning_rate *= 0.5
+                 points = points - learning_rate * grad
+                 points = np.clip(points, 0, 1)
+ 
+             # Early stopping if gradient becomes very small
+             grad_norm = np.linalg.norm(grad)
+             if grad_norm < 1e-6:
+                 break
+ 
+         return points
+ 
+     def optimize_with_lbfgs(initial_points):
+         """Optimize using L-BFGS-B method for local refinement."""
+         # Flatten for optimization
+         initial_params = initial_points.flatten()
+ 
+         # Set up bounds for each coordinate (0 to 1 for both x and y)
+         bounds = [(0, 1)] * 32  # 16 points * 2 coordinates each
+ 
+         # Objective function for L-BFGS
+         def objective_function(params):
+             # Reshape parameters back to points array
+             points = params.reshape(-1, 2)
+             ratio = compute_min_max_ratio(points)
+             # Return negative because we want to maximize the ratio
+             return -ratio
+ 
+         # Optimize using L-BFGS-B
+         try:
+             result = minimize(
+                 objective_function,
+                 initial_params,
+                 method='L-BFGS-B',
+                 bounds=bounds,
+                 options={'maxiter': 2000, 'ftol': 1e-12, 'gtol': 1e-12},
+                 callback=None
+             )
+ 
+             # Extract optimized points
+             optimized_points = result.x.reshape(-1, 2)
+ 
+             # Make sure they're within bounds
+             optimized_points = np.clip(optimized_points, 0, 1)
+ 
+             return optimized_points
+         except Exception:
+             return initial_points
+ 
+     def optimize_points(initial_points, max_time=175):
+         """Optimize point positions using enhanced simulated annealing with hybrid approach."""
+         start_time = time.time()
+ 
+         # Normalize initial points to [0,1] x [0,1]
+         points = np.clip(initial_points, 0, 1)
+         current_ratio = compute_min_max_ratio_with_boundary_penalty(points)
+ 
+         # Enhanced parameters for optimization - more adaptive approach
+         temperature = 1.0
+         # More aggressive adaptive cooling schedule
+         cooling_rate = 0.99995
+         min_temperature = 1e-8
+         max_iterations = 500000
+         iteration = 0
+ 
+         best_points = points.copy()
+         best_ratio = current_ratio
+ 
+         # Track recent improvements for early stopping and adaptive cooling
+         recent_improvements = []
+         patience = 0
+         max_patience = 1000
+ 
+         # Adaptive parameters
+         adaptation_interval = 1000
+         improvement_threshold = 1e-6
+         last_improvement_check = 0
+ 
+         while temperature > min_temperature and iteration < max_iterations and (time.time() - start_time) < max_time:
+             # Create candidate solution using cluster-based moves for better exploration
+             candidate_points = points.copy()
+ 
+             # Choose move type: single point move (60%), cluster move (30%), or global perturbation (10%)
+             move_type = random.random()
+             if move_type < 0.3:
+                 # Adaptive cluster move: size depends on optimization stage
+                 # Early iterations: larger clusters for broad exploration
+                 # Later iterations: smaller clusters for fine-tuning
+                 progress = iteration / max_iterations
+                 if progress < 0.3:
+                     # Early stage: larger clusters for exploration
+                     num_points_to_move = random.randint(3, 5)
+                 elif progress < 0.7:
+                     # Middle stage: medium clusters
+                     num_points_to_move = random.randint(2, 4)
+                 else:
+                     # Late stage: small clusters for refinement
+                     num_points_to_move = random.randint(1, 3)
+ 
+                 selected_indices = random.sample(range(len(points)), num_points_to_move)
+ 
+                 # Calculate centroid of selected points
+                 centroid = np.mean(candidate_points[selected_indices], axis=0)
+ 
+                 # Move centroid and adjust all points relative to it
+                 move_vector = np.random.normal(0, 0.015, 2)
+                 new_centroid = np.clip(centroid + move_vector, 0, 1)
+                 delta = new_centroid - centroid
+ 
+                 for idx in selected_indices:
+                     candidate_points[idx] += delta
+             elif move_type < 0.4:
+                 # Global perturbation: perturb all points with moderate strength
+                 candidate_points += np.random.normal(0, 0.01, candidate_points.shape)
+             else:
+                 # Single point move (standard approach) with increased perturbation
+                 idx = np.random.randint(0, len(points))
+                 # Larger perturbation for better exploration
+                 candidate_points[idx] += np.random.normal(0, 0.02, 2)
+ 
+             # Keep within bounds
+             candidate_points = np.clip(candidate_points, 0, 1)
+ 
+             # Calculate acceptance probability
+             candidate_ratio = compute_min_max_ratio_with_boundary_penalty(candidate_points)
+ 
+             # Accept or reject based on Metropolis criterion
+             if candidate_ratio > current_ratio or np.random.rand() < np.exp((candidate_ratio - current_ratio) / temperature):
+                 points = candidate_points
+                 current_ratio = candidate_ratio
+ 
+                 # Update best solution
+                 if current_ratio > best_ratio:
+                     best_points = points.copy()
+                     best_ratio = current_ratio
+                     recent_improvements = []
+                     patience = 0
+                 else:
+                     patience += 1
+                     recent_improvements.append(current_ratio)
+                     if len(recent_improvements) > 50:
+                         recent_improvements.pop(0)
+             else:
+                 patience += 1
+ 
+             # Early stopping if no improvement for too long
+             if patience > max_patience:
+                 if len(recent_improvements) > 10:
+                     recent_avg = np.mean(recent_improvements[-10:])
+                     if recent_avg > 0.99 * best_ratio:
+                         break
+ 
+             # Adaptive cooling based on recent performance
+             if iteration % adaptation_interval == 0 and iteration > 0 and iteration != last_improvement_check:
+                 last_improvement_check = iteration
+                 if len(recent_improvements) > 10:
+                     recent_change = np.mean(recent_improvements[-10:]) - np.mean(recent_improvements[:10])
+                     if abs(recent_change) < improvement_threshold:
+                         # Stagnation detected - slow down cooling
+                         cooling_rate = max(0.9999, cooling_rate * 0.95)
+                     else:
+                         # Active improvement - speed up cooling
+                         cooling_rate = min(0.99999, cooling_rate * 1.01)
+ 
+             # Cool down with adaptive rate
+             if temperature > 0.1:
+                 temperature *= cooling_rate  # Faster cooling initially
+             else:
+                 temperature *= 0.999995  # Very slow cooling in later stages
+ 
+             iteration += 1
+ 
+         # Final local refinement pipeline
+         # 1. L-BFGS refinement
+         lbfgs_points = optimize_with_lbfgs(best_points)
+         lbfgs_ratio = compute_min_max_ratio_with_boundary_penalty(lbfgs_points)
+ 
+         # 2. Gradient-based refinement
+         gradient_points = optimize_with_gradient_refinement(lbfgs_points)
+         gradient_ratio = compute_min_max_ratio_with_boundary_penalty(gradient_points)
+ 
+         # 3. Final L-BFGS refinement to ensure convergence
+         final_points = optimize_with_lbfgs(gradient_points)
+         final_ratio = compute_min_max_ratio_with_boundary_penalty(final_points)
+ 
+         # Return the best of all refinements
+         best_of_all = max(lbfgs_ratio, gradient_ratio, final_ratio)
+         if best_of_all == lbfgs_ratio:
+             return lbfgs_points
+         elif best_of_all == gradient_ratio:
+             return gradient_points
+         else:
+             return final_points
+ 
+     # Main optimization process
+     np.random.seed(42)
+ 
+     # Multi-start approach with different initialization strategies
+     start_configs = [
+         generate_hexagonal_grid(),
+         generate_fibonacci_spiral(),
+         generate_random_config(),
+         generate_enhanced_hexagonal_grid(),
+         generate_triangular_lattice(),
+         generate_fibonacci_pattern()
+     ]
+ 
+     best_solution = None
+     best_ratio = -np.inf
+ 
+     # Try different starting points
+     for i, initial_config in enumerate(start_configs):
+         # Stage 1: Evolutionary search
+         evolved = evolutionary_search(max_generations=30, population_size=20)
+ 
+         # Stage 2: Simulated Annealing refinement
+         sa_refined = simulated_annealing_refinement(evolved, max_iter=500)
+ 
+         # Stage 3: Gradient-based refinement
+         final_points = optimize_with_gradient_refinement(sa_refined, max_iter=100)
+ 
+         # Evaluate final result
+         final_ratio = compute_min_max_ratio(final_points)
+ 
+         if final_ratio > best_ratio:
+             best_ratio = final_ratio
+             best_solution = final_points.copy()
+ 
+     # Final validation
+     if best_solution is None:
+         fallback_points = generate_hexagonal_grid()
+         best_solution = optimize_with_lbfgs(fallback_points)
+ 
+     return best_solution
+ 
+ # EVOLVE-BLOCK-END

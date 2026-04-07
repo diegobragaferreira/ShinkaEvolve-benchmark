@@ -1,0 +1,153 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import time
+import random
+
+def compute_autocorrelation_constant(sequence):
+    """Compute C₁ for a given sequence."""
+    if len(sequence) == 0:
+        return float('inf')
+
+    a = np.array(sequence)
+    n = len(a)
+
+    # Compute convolution using FFT for efficiency
+    b = signal.convolve(a, a, mode='full')
+    max_conv = np.max(b)
+
+    # Compute C₁ = 2n * max(b) / (sum(a))^2
+    sum_a = np.sum(a)
+
+    # Avoid division by zero or very small values
+    if sum_a < 1e-10:
+        return float('inf')
+
+    c1 = (2 * n * max_conv) / (sum_a ** 2)
+    return c1
+
+def evaluate_sequence(sequence):
+    """Evaluate a sequence for the optimization problem."""
+    # Ensure we have a valid sequence with sufficient sum
+    if len(sequence) == 0:
+        return float('-inf')
+
+    # Clip values to [0, 1000] as per constraints
+    sequence = np.clip(sequence, 0, 1000)
+
+    # Check sum constraint
+    sum_a = np.sum(sequence)
+    if sum_a < 0.01:
+        return float('-inf')
+
+    # Compute C₁
+    c1 = compute_autocorrelation_constant(sequence)
+
+    # Return 1/C₁ (we want to maximize this)
+    # If C₁ is very large, 1/C₁ approaches 0
+    if c1 > 1e10:
+        return float('-inf')
+
+    return 1.0 / c1
+
+def generate_random_sequence(length_range=(100, 1000)):
+    """Generate a random sequence within specified length range."""
+    n = random.randint(*length_range)
+    # Generate random sequence with values in [0, 1000]
+    sequence = np.random.uniform(0, 1000, n)
+    return sequence.tolist()
+
+def optimize_sequence():
+    """Optimize the sequence using a global optimization approach."""
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    best_score = float('-inf')
+    best_sequence = None
+
+    # Try multiple random starts to avoid local optima
+    num_starts = 10
+
+    for start in range(num_starts):
+        # Generate a random starting sequence
+        sequence = generate_random_sequence()
+
+        # Evaluate initial sequence
+        initial_score = evaluate_sequence(sequence)
+
+        # Optimization parameters
+        bounds = [(0, 1000) for _ in range(len(sequence))]
+
+        def objective(x):
+            # Convert to list and apply bounds
+            seq_list = list(x)
+            # Ensure all elements are within [0, 1000]
+            seq_list = [max(0, min(1000, val)) for val in seq_list]
+
+            # Evaluate and return negative because we want to maximize
+            return -evaluate_sequence(seq_list)
+
+        try:
+            # Use differential evolution which is good for this type of problem
+            result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=50,
+                popsize=15,
+                seed=42+start,
+                disp=False,
+                tol=1e-6
+            )
+
+            if result.success:
+                optimized_seq = list(result.x)
+                # Apply final bounds
+                optimized_seq = [max(0, min(1000, val)) for val in optimized_seq]
+
+                score = evaluate_sequence(optimized_seq)
+                if score > best_score:
+                    best_score = score
+                    best_sequence = optimized_seq
+
+        except Exception as e:
+            print(f"Optimization failed for start {start}: {e}")
+            continue
+
+    # Final check to ensure we found a good solution
+    if best_sequence is not None:
+        # Evaluate one more time to make sure
+        final_score = evaluate_sequence(best_sequence)
+        return best_sequence, final_score
+    else:
+        # If no good solution found, return the initial random sequence
+        initial_seq = generate_random_sequence()
+        initial_score = evaluate_sequence(initial_seq)
+        return initial_seq, initial_score
+
+def search_for_best_sequence():
+    """Main function to search for the best coefficient sequence."""
+    start_time = time.time()
+
+    # Run optimization
+    best_sequence, best_score = optimize_sequence()
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    # Calculate benchmark ratio
+    benchmark_ratio = best_score / 0.6653  # 1.5031 is the threshold for C₁
+
+    print(f"Best 1/C₁: {best_score:.6f}")
+    print(f"Benchmark ratio: {benchmark_ratio:.6f}")
+    print(f"Execution time: {eval_time:.4f} seconds")
+
+    return best_sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

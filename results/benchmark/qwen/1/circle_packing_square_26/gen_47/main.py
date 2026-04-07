@@ -1,0 +1,287 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import random
+import time
+from typing import Tuple, List
+
+# Global constants
+POP_SIZE = 100
+NGEN = 50
+CXPB = 0.8
+MUTPB = 0.2
+BOUND_LOW = 0.0
+BOUND_HIGH = 1.0
+MAX_RADIUS = 0.5
+N_CIRCLES = 26
+
+def validate_circles(circles: np.ndarray) -> bool:
+    """Validate that all circles fit in the unit square and don't overlap."""
+    if circles.shape != (N_CIRCLES, 3):
+        return False
+    
+    # Check containment constraints
+    for x, y, r in circles:
+        if not (r <= x <= 1-r and r <= y <= 1-r):
+            return False
+    
+    # Check overlap constraints using KDTree for efficiency
+    points = circles[:, :2]
+    tree = cKDTree(points)
+    
+    # For each circle, check distance to all others
+    for i in range(N_CIRCLES):
+        x_i, y_i, r_i = circles[i]
+        # Query neighbors within distance 2*r_i (potential overlaps)
+        neighbors = tree.query_ball_point([x_i, y_i], 2*r_i)
+        for j in neighbors:
+            if i != j:
+                x_j, y_j, r_j = circles[j]
+                distance = np.sqrt((x_i - x_j)**2 + (y_i - y_j)**2)
+                if distance < r_i + r_j:
+                    return False
+    
+    return True
+
+def evaluate_individual(individual: np.ndarray) -> Tuple[float,]:
+    """Evaluate fitness of individual - sum of radii"""
+    # Convert flat array back to circles format
+    circles = individual.reshape((N_CIRCLES, 3))
+    
+    # Validate constraints
+    if not validate_circles(circles):
+        # Penalize invalid solutions heavily
+        return (0.0,)
+    
+    # Return negative sum of radii (since DEAP minimizes)
+    total_radius = np.sum(circles[:, 2])
+    return (-total_radius,)
+
+def create_initial_population() -> np.ndarray:
+    """Create initial population using multiple strategies"""
+    population = []
+    
+    # Strategy 1: Grid-based initialization (more even distribution)
+    grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+    grid_positions = []
+    spacing = 1.0 / (grid_size + 1)
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(grid_positions) < N_CIRCLES:
+                x = (i + 1) * spacing
+                y = (j + 1) * spacing
+                grid_positions.append((x, y))
+    
+    # Fill with additional random positions if needed
+    while len(grid_positions) < N_CIRCLES:
+        grid_positions.append((random.random(), random.random()))
+    
+    for _ in range(POP_SIZE):
+        # Start with grid-based positions
+        circles = np.zeros((N_CIRCLES, 3))
+        
+        # Assign positions from grid
+        for i, (x, y) in enumerate(grid_positions[:N_CIRCLES]):
+            circles[i] = [x, y, MAX_RADIUS / N_CIRCLES]
+        
+        # Add some randomness and try to optimize
+        for i in range(N_CIRCLES):
+            # Perturb slightly
+            circles[i, 0] += (random.random() - 0.5) * 0.1
+            circles[i, 1] += (random.random() - 0.5) * 0.1
+            
+            # Adjust radius to stay feasible
+            r = min(MAX_RADIUS / N_CIRCLES * (1 + random.random() * 0.5), 
+                   min(circles[i, 0], 1 - circles[i, 0], 
+                       circles[i, 1], 1 - circles[i, 1]))
+            circles[i, 2] = max(r, 0.001)
+            
+            # Clamp coordinates
+            circles[i, 0] = np.clip(circles[i, 0], 0.001, 0.999)
+            circles[i, 1] = np.clip(circles[i, 1], 0.001, 0.999)
+        
+        # Ensure no overlaps by adjusting
+        adjusted_circles = adjust_for_overlaps(circles.copy())
+        population.append(adjusted_circles.flatten())
+    
+    return np.array(population)
+
+def adjust_for_overlaps(circles: np.ndarray) -> np.ndarray:
+    """Simple overlap resolution by moving overlapping circles slightly"""
+    # This is a basic improvement step - in practice, a more sophisticated 
+    # algorithm would be implemented
+    for _ in range(10):  # Try several iterations
+        valid = validate_circles(circles)
+        if valid:
+            break
+        
+        # Simple repair: move circles away from overlaps
+        for i in range(N_CIRCLES):
+            # Check for overlaps with all other circles
+            for j in range(i+1, N_CIRCLES):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                
+                distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                min_distance = r1 + r2
+                
+                if distance < min_distance:
+                    # Move circles apart
+                    if distance > 0:
+                        dx = (x1 - x2) / distance * (min_distance - distance) * 0.5
+                        dy = (y1 - y2) / distance * (min_distance - distance) * 0.5
+                        
+                        circles[i, 0] += dx
+                        circles[i, 1] += dy
+                        circles[j, 0] -= dx
+                        circles[j, 1] -= dy
+                        
+                        # Clamp to bounds
+                        circles[i, 0] = np.clip(circles[i, 0], r1, 1 - r1)
+                        circles[i, 1] = np.clip(circles[i, 1], r1, 1 - r1)
+                        circles[j, 0] = np.clip(circles[j, 0], r2, 1 - r2)
+                        circles[j, 1] = np.clip(circles[j, 1], r2, 1 - r2)
+    
+    return circles
+
+def init_individual():
+    """Initialize a single individual using our population creation logic"""
+    # Create one valid individual
+    circles = np.zeros((N_CIRCLES, 3))
+    
+    # Use grid-based approach
+    grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+    spacing = 1.0 / (grid_size + 1)
+    
+    positions = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(positions) < N_CIRCLES:
+                x = (i + 1) * spacing
+                y = (j + 1) * spacing
+                positions.append((x, y))
+    
+    # Fill with additional random positions
+    while len(positions) < N_CIRCLES:
+        positions.append((random.random(), random.random()))
+    
+    # Assign positions and radii
+    for i, (x, y) in enumerate(positions[:N_CIRCLES]):
+        circles[i] = [x, y, MAX_RADIUS / N_CIRCLES]
+    
+    # Add some randomness and ensure validity
+    for i in range(N_CIRCLES):
+        circles[i, 0] += (random.random() - 0.5) * 0.1
+        circles[i, 1] += (random.random() - 0.5) * 0.1
+        
+        # Adjust radius
+        r = min(MAX_RADIUS / N_CIRCLES * (1 + random.random() * 0.5),
+               min(circles[i, 0], 1 - circles[i, 0],
+                   circles[i, 1], 1 - circles[i, 1]))
+        circles[i, 2] = max(r, 0.001)
+        
+        # Clamp coordinates
+        circles[i, 0] = np.clip(circles[i, 0], 0.001, 0.999)
+        circles[i, 1] = np.clip(circles[i, 1], 0.001, 0.999)
+    
+    # Final adjustment
+    circles = adjust_for_overlaps(circles)
+    return circles.flatten()
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Create toolbox
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", tools.cxTwoPoint)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.05, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Create initial population
+    pop = toolbox.population(n=POP_SIZE)
+    
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Run the evolutionary algorithm
+    pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CXPB, mutpb=MUTPB, 
+                                       ngen=NGEN, stats=stats, halloffame=hof, 
+                                       verbose=False)
+    
+    # Get the best individual
+    best_individual = hof[0]
+    best_circles = np.array(best_individual).reshape((N_CIRCLES, 3))
+    
+    # Ensure final validation
+    if not validate_circles(best_circles):
+        # If not valid, use the grid-based fallback
+        best_circles = generate_fallback_solution()
+    
+    return best_circles
+
+def generate_fallback_solution() -> np.ndarray:
+    """Generate a fallback solution using grid and refinement approach"""
+    circles = np.zeros((N_CIRCLES, 3))
+    
+    # Grid-based approach
+    grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+    spacing = 1.0 / (grid_size + 1)
+    
+    positions = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(positions) < N_CIRCLES:
+                x = (i + 1) * spacing
+                y = (j + 1) * spacing
+                positions.append((x, y))
+    
+    # Fill with additional random positions
+    while len(positions) < N_CIRCLES:
+        positions.append((random.random(), random.random()))
+    
+    # Assign positions and radii
+    for i, (x, y) in enumerate(positions[:N_CIRCLES]):
+        circles[i] = [x, y, MAX_RADIUS / N_CIRCLES]
+    
+    # Add some randomness and ensure validity
+    for i in range(N_CIRCLES):
+        circles[i, 0] += (random.random() - 0.5) * 0.1
+        circles[i, 1] += (random.random() - 0.5) * 0.1
+        
+        # Adjust radius
+        r = min(MAX_RADIUS / N_CIRCLES * (1 + random.random() * 0.5),
+               min(circles[i, 0], 1 - circles[i, 0],
+                   circles[i, 1], 1 - circles[i, 1]))
+        circles[i, 2] = max(r, 0.001)
+        
+        # Clamp coordinates
+        circles[i, 0] = np.clip(circles[i, 0], 0.001, 0.999)
+        circles[i, 1] = np.clip(circles[i, 1], 0.001, 0.999)
+    
+    # Final adjustment for overlaps
+    circles = adjust_for_overlaps(circles)
+    
+    return circles
+
+# EVOLVE-BLOCK-END

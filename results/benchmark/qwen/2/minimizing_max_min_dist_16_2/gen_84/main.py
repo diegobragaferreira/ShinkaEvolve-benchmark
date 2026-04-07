@@ -1,0 +1,363 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from sklearn.metrics.pairwise import euclidean_distances
+import time
+from typing import Tuple, List
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    n = 16
+    d = 2
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Track time to respect 180 second limit
+    start_time = time.time()
+    time_limit = 180.0
+    
+    # Multiple restart strategies with adaptive parameters
+    restart_strategies = [
+        # Strategy 1: Hexagonal packing initialization (better initial spacing)
+        lambda: _adaptive_hexagonal_packing_init(),
+        
+        # Strategy 2: Perturbed grid initialization with dynamic scaling
+        lambda: _adaptive_perturbed_grid_init(),
+        
+        # Strategy 3: Random initialization with better spread
+        lambda: _adaptive_random_spread_init()
+    ]
+    
+    # Try each initialization strategy multiple times
+    for strategy_idx, init_func in enumerate(restart_strategies):
+        # Limit restarts based on time remaining to avoid wasting resources
+        max_restarts = 2 if (time.time() - start_time) > time_limit * 0.7 else 3
+        for restart in range(max_restarts):  
+            if (time.time() - start_time) > time_limit * 0.95:
+                break
+            
+            np.random.seed(strategy_idx * 1000 + restart)
+            
+            # Get initial points
+            points = init_func()
+            
+            # Apply local optimization with multiple methods and adaptive settings
+            optimized_points = _adaptive_local_optimization(points, time_limit - (time.time() - start_time))
+            
+            # Calculate ratio for this optimization run
+            ratio = _calculate_min_max_ratio(optimized_points)
+            
+            # Keep track of best solution
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_points = optimized_points.copy()
+    
+    # Try evolutionary approach if we still have time and haven't found a good solution
+    if best_ratio < 0.25 and (time.time() - start_time) < time_limit * 0.8:
+        try:
+            evolutionary_points, evolutionary_ratio = _evolutionary_restart_strategy(time_limit - (time.time() - start_time))
+            if evolutionary_ratio > best_ratio:
+                best_ratio = evolutionary_ratio
+                best_points = evolutionary_points.copy()
+        except Exception as e:
+            warnings.warn(f"Evolutionary approach failed: {e}")
+    
+    # Fallback to deterministic configuration if nothing works
+    if best_points is None:
+        best_points = np.array([
+            [0.25, 0.25], [0.75, 0.25],
+            [0.25, 0.75], [0.75, 0.75],
+            [0.1, 0.1], [0.9, 0.1],
+            [0.1, 0.9], [0.9, 0.9],
+            [0.3, 0.5], [0.7, 0.5],
+            [0.5, 0.3], [0.5, 0.7],
+            [0.4, 0.4], [0.6, 0.6],
+            [0.4, 0.6], [0.6, 0.4]
+        ])
+    
+    return best_points
+
+
+def _adaptive_hexagonal_packing_init():
+    """Initialize points using hexagonal packing pattern with adaptive perturbations."""
+    # Create a hexagonal lattice pattern
+    rows = 4
+    cols = 4
+    points = []
+    
+    for i in range(rows):
+        for j in range(cols):
+            # offset every other row
+            x_offset = 0.5 if i % 2 == 1 else 0.0
+            x = (j + x_offset) * 0.25 + 0.125  # Scale and shift to [0.125, 0.875]
+            y = i * 0.25 + 0.125
+            
+            # Adaptive perturbation - vary based on position
+            if (i == 0 or i == rows-1) and (j == 0 or j == cols-1):
+                # Corner points - smallest perturbation
+                perturbation = 0.005
+            elif i == 0 or i == rows-1 or j == 0 or j == cols-1:
+                # Edge points - medium perturbation  
+                perturbation = 0.01
+            else:
+                # Interior points - largest perturbation
+                perturbation = 0.015
+                
+            x += np.random.normal(0, perturbation)
+            y += np.random.normal(0, perturbation)
+            
+            points.append([x, y])
+    
+    # Ensure all points are within bounds
+    result = np.array(points)
+    result = np.clip(result, 0, 1)
+    return result[:16]
+
+
+def _adaptive_perturbed_grid_init():
+    """Initialize with grid points plus adaptive random perturbations."""
+    # Start with a regular grid
+    grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+    points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+    
+    # Adaptive perturbation based on point position
+    for i in range(len(points)):
+        # Determine perturbation strength based on location
+        x, y = points[i]
+        # Points near corners should have smaller perturbations
+        if (abs(x - 0) < 0.1 or abs(x - 1) < 0.1) and (abs(y - 0) < 0.1 or abs(y - 1) < 0.1):
+            perturbation_magnitude = 0.008
+        elif abs(x - 0.5) < 0.2 and abs(y - 0.5) < 0.2:
+            # Center points allow more variation
+            perturbation_magnitude = 0.02
+        else:
+            # Edge points
+            perturbation_magnitude = 0.015
+            
+        points[i] += np.random.uniform(-perturbation_magnitude, perturbation_magnitude, 2)
+    
+    # Ensure points stay within bounds
+    points = np.clip(points, 0, 1)
+    
+    return points
+
+
+def _adaptive_random_spread_init():
+    """Initialize with random points that are intentionally spread out."""
+    np.random.seed(42)
+    points = np.random.rand(16, 2)
+    
+    # Apply some basic spacing to prevent clustering with adaptive factors
+    for i in range(16):
+        # Move points away from center slightly with adaptive factor
+        center_vec = points[i] - [0.5, 0.5]
+        center_distance = np.linalg.norm(center_vec)
+        if center_distance > 0:
+            # Adaptive movement based on distance from center
+            adaptive_factor = min(0.2, 0.1 / (center_distance + 0.01))
+            points[i] += center_vec * adaptive_factor
+            
+    # Clip to ensure within bounds
+    points = np.clip(points, 0, 1)
+    
+    return points
+
+
+def _calculate_min_max_ratio(points):
+    """Calculate the ratio of minimum to maximum pairwise distances."""
+    if len(points) < 2:
+        return 0
+    
+    # More efficient distance calculation
+    distances = euclidean_distances(points)
+    # Set diagonal to infinity to ignore self-distances
+    np.fill_diagonal(distances, np.inf)
+    
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+    
+    if max_dist <= 0:
+        return 0
+    
+    return min_dist / max_dist
+
+
+def _adaptive_local_optimization(initial_points, time_remaining: float):
+    """Apply local optimization with adaptive parameters based on remaining time."""
+    n = 16
+    d = 2
+    
+    # Adjust optimization intensity based on available time
+    if time_remaining < 30:
+        max_iter = 200
+        tolerance = 1e-8
+    elif time_remaining < 60:
+        max_iter = 400
+        tolerance = 1e-9
+    else:
+        max_iter = 800
+        tolerance = 1e-10
+    
+    # Define objective function: negative ratio (we'll minimize this)
+    def objective(x):
+        # Reshape flat array back to points
+        pts = x.reshape(n, d)
+        
+        # Calculate all pairwise distances efficiently
+        distances = euclidean_distances(pts)
+        np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+        
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Return negative ratio to maximize the ratio
+        if max_dist <= 0:
+            return 0
+        return -min_dist / max_dist
+    
+    # Define bounds (points must be in [0,1] x [0,1])
+    bounds = [(0, 1) for _ in range(n * d)]
+    
+    # Try multiple optimization methods with adaptive settings
+    best_result = None
+    best_value = np.inf
+    
+    # Method 1: L-BFGS-B (coarse optimization)
+    try:
+        result1 = minimize(objective, initial_points.flatten(), method='L-BFGS-B', bounds=bounds,
+                          options={'maxiter': max_iter//2, 'ftol': tolerance, 'gtol': tolerance})
+        if result1.fun < best_value and result1.success:
+            best_value = result1.fun
+            best_result = result1
+    except Exception as e:
+        pass
+    
+    # Method 2: SLSQP (fine optimization) as fallback
+    try:
+        if best_result is None or time_remaining > 45:  # Only run if needed or time permits
+            result2 = minimize(objective, initial_points.flatten(), method='SLSQP', bounds=bounds,
+                              options={'maxiter': max_iter, 'ftol': tolerance, 'gtol': tolerance})
+            if result2.fun < best_value and result2.success:
+                best_value = result2.fun
+                best_result = result2
+    except Exception as e:
+        pass
+    
+    # Method 3: Nelder-Mead as last resort
+    try:
+        if best_result is None or time_remaining > 30:
+            result3 = minimize(objective, initial_points.flatten(), method='Nelder-Mead',
+                              options={'maxiter': max_iter//3, 'fatol': tolerance, 'xatol': tolerance})
+            if result3.fun < best_value and result3.success:
+                best_value = result3.fun
+                best_result = result3
+    except Exception as e:
+        pass
+    
+    # If no optimization succeeded, return original points
+    if best_result is None:
+        return initial_points
+    
+    # Extract optimized points
+    optimized_points = best_result.x.reshape(n, d)
+    
+    # Ensure points are within bounds
+    optimized_points = np.clip(optimized_points, 0, 1)
+    
+    return optimized_points
+
+
+def _evolutionary_restart_strategy(time_limit: float):
+    """Perform a lightweight evolutionary search to find better starting points."""
+    import random
+    from collections import deque
+    
+    # Simple evolutionary approach with limited population size
+    population_size = 15
+    num_generations = 20
+    max_time = time_limit - 10  # Leave buffer for final optimization
+    
+    # Generate initial population with varied strategies
+    population = []
+    for i in range(population_size):
+        np.random.seed(i * 100)
+        if i % 3 == 0:
+            points = _adaptive_hexagonal_packing_init()
+        elif i % 3 == 1:
+            points = _adaptive_perturbed_grid_init()
+        else:
+            points = _adaptive_random_spread_init()
+        population.append(points)
+    
+    best_individual = None
+    best_fitness = -np.inf
+    
+    # Evolutionary loop
+    for generation in range(num_generations):
+        if time_limit - (time_limit - max_time) < max_time:
+            break
+            
+        # Evaluate fitness
+        fitness_scores = []
+        for individual in population:
+            ratio = _calculate_min_max_ratio(individual)
+            fitness_scores.append((ratio, individual))
+        
+        # Sort by fitness (descending)
+        fitness_scores.sort(key=lambda x: x[0], reverse=True)
+        
+        # Track best so far
+        current_best_ratio, current_best_individual = fitness_scores[0]
+        if current_best_ratio > best_fitness:
+            best_fitness = current_best_ratio
+            best_individual = current_best_individual.copy()
+        
+        # Create new population
+        new_population = []
+        
+        # Elitism: keep top 3
+        for i in range(min(3, len(fitness_scores))):
+            new_population.append(fitness_scores[i][1].copy())
+        
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection
+            parent1_idx = random.randint(0, len(fitness_scores)-1)
+            parent2_idx = random.randint(0, len(fitness_scores)-1)
+            
+            parent1 = fitness_scores[parent1_idx][1]
+            parent2 = fitness_scores[parent2_idx][1]
+            
+            # Crossover: blend parents with mixing factor
+            alpha = 0.5
+            child = alpha * parent1 + (1 - alpha) * parent2
+            
+            # Mutation: add small Gaussian noise
+            noise = np.random.normal(0, 0.01, child.shape)
+            child += noise
+            child = np.clip(child, 0, 1)
+            
+            new_population.append(child)
+        
+        population = new_population
+    
+    # Final optimization on the best individual
+    if best_individual is not None:
+        final_points = _adaptive_local_optimization(best_individual, time_limit * 0.3)
+        final_ratio = _calculate_min_max_ratio(final_points)
+        return final_points, final_ratio
+    
+    # Fallback
+    fallback_points = _adaptive_hexagonal_packing_init()
+    fallback_ratio = _calculate_min_max_ratio(fallback_points)
+    return fallback_points, fallback_ratio
+
+
+# EVOLVE-BLOCK-END

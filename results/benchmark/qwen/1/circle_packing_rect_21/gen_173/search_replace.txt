@@ -1,0 +1,132 @@
+<NAME>
+voronoi_constraint_refinement
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the Voronoi-based constraint computation by implementing a more sophisticated approach that considers both local neighbor density and geometric proximity. The key improvement is to use a weighted combination of neighbor count and Voronoi cell area to better identify constraint-dense regions. This allows for more precise adaptive mutation that can navigate complex packing scenarios more effectively.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi neighbors.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Create Voronoi diagram
+    try:
+        vor = Voronoi(centers)
+    except:
+        # Fallback to simpler constraint calculation
+        return np.ones(n) * 0.5
+
+    # Count neighbors for each region using direct computation
+    constraint_density = np.zeros(n)
+
+    # For each circle, count how many others are close enough to potentially collide
+    for i in range(n):
+        center_i = centers[i]
+        nearby_count = 0
+
+        # Check nearby circles (within 3x max radius)
+        max_radius = np.max(circles[:, 2])
+        threshold = 3 * max_radius
+
+        for j in range(n):
+            if i != j:
+                dist = np.linalg.norm(center_i - centers[j])
+                if dist < threshold:
+                    nearby_count += 1
+
+        constraint_density[i] = nearby_count / max(1, n - 1)
+
+    return constraint_density
+=======
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute refined constraint density for each circle based on Voronoi neighbors and geometric properties.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+
+    # Get circle centers
+    centers = circles[:, :2]
+
+    # Compute neighbor density using spatial indexing for efficiency
+    constraint_density = np.zeros(n)
+
+    # Use KDTree for efficient neighbor queries
+    try:
+        tree = cKDTree(centers)
+
+        # For each circle, compute multiple constraint indicators
+        for i in range(n):
+            center_i = centers[i]
+
+            # 1. Direct neighbor count within a reasonable distance
+            # Use 3x the maximum radius as threshold for neighbors
+            max_radius = np.max(circles[:, 2])
+            threshold = max_radius * 3.0
+
+            # Query neighbors efficiently
+            neighbors = tree.query_ball_point(center_i, threshold)
+            neighbor_count = len(neighbors) - 1  # Exclude self
+
+            # 2. Consider Voronoi cell area (approximated using neighbor distances)
+            # If we have enough neighbors, compute approximate Voronoi density
+            if len(neighbors) >= 3:
+                # Get distances to neighbors
+                neighbor_distances = []
+                for j in neighbors:
+                    if i != j:
+                        dist = np.linalg.norm(center_i - centers[j])
+                        neighbor_distances.append(dist)
+
+                if neighbor_distances:
+                    avg_neighbor_dist = np.mean(neighbor_distances)
+                    # Smaller average distances suggest denser packing
+                    voronoi_density = 1.0 / (avg_neighbor_dist + 1e-8)
+                else:
+                    voronoi_density = 1.0
+            else:
+                voronoi_density = 1.0
+
+            # Combine both measures with appropriate weights
+            # Weight neighbor count more heavily for dense regions
+            neighbor_weight = 0.7
+            voronoi_weight = 0.3
+
+            combined_density = (neighbor_weight * (neighbor_count / max(1, n - 1)) +
+                              voronoi_weight * min(voronoi_density / 10.0, 1.0))
+
+            # Normalize and bound the density value
+            constraint_density[i] = min(combined_density, 3.0)  # Cap at reasonable level
+
+    except Exception as e:
+        # Fallback to simple neighbor counting if Voronoi fails
+        for i in range(n):
+            center_i = centers[i]
+            nearby_count = 0
+
+            # Check nearby circles (within 3x max radius)
+            max_radius = np.max(circles[:, 2])
+            threshold = 3 * max_radius
+
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        nearby_count += 1
+
+            constraint_density[i] = nearby_count / max(1, n - 1)
+
+    return constraint_density
+>>>>>>> REPLACE
+</DIFF>

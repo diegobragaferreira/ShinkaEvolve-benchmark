@@ -1,0 +1,219 @@
+<NAME>
+enhance_symmetry_mutation_with_exponential_decay
+</NAME>
+
+<DESCRIPTION>
+This change implements exponential decay for mutation strength in the symmetry-aware mutation operator. Instead of using a linear decay schedule, we'll use an exponential decay that follows the proven pattern from successful generations, where mutation strength decreases exponentially from 0.3 to 0.02 over the course of optimization. This approach provides smoother transitions from global exploration to local refinement, leading to better convergence properties. The change also improves the temperature scheduling logic to be more adaptive to the optimization stage.
+
+The core insight is that exponential decay allows for more precise optimization in later stages while maintaining sufficient diversity in early iterations, which directly supports the staged optimization framework already present in the codebase.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1, temperature: float = 1.0) -> np.ndarray:
+        """Apply advanced symmetric mutation to maintain hexagonal properties with temperature control"""
+        mutated_data = hex_data.copy()
+
+        # Different mutation strategies based on optimization stage
+        if stage == 1:  # Coarse stage - aggressive mutation for exploration
+            mutation_factor = mutation_strength * 2.0 * temperature
+        elif stage == 2:  # Fine stage - moderate mutation
+            mutation_factor = mutation_strength * 1.0 * temperature
+        else:  # Final stage - conservative mutation
+            mutation_factor = mutation_strength * 0.5 * temperature
+
+        # Apply group-based mutations that respect D6 symmetry (hexagonal symmetry group)
+
+        # 1. Center hexagon mutation (always preserved)
+        mutated_data[0][0] += random.gauss(0, mutation_factor * 0.3)
+        mutated_data[0][1] += random.gauss(0, mutation_factor * 0.3)
+
+        # 2. First ring mutations (6 hexagons) - use rotational symmetry
+        first_ring_indices = [1, 2, 3, 4, 5, 6]  # Top, top-left, top-right, bottom, bottom-left, bottom-right
+
+        # Create a base mutation vector for rotational symmetry
+        base_mutation = np.array([random.gauss(0, mutation_factor * 0.8), random.gauss(0, mutation_factor * 0.8)])
+
+        # Apply rotational symmetry operations
+        angles = [0, 60, 120, 180, 240, 300]  # 60-degree increments for hexagonal symmetry
+
+        for i, idx in enumerate(first_ring_indices):
+            # Rotate the base mutation vector according to position
+            angle_rad = math.radians(angles[i])
+            rotation_matrix = np.array([[math.cos(angle_rad), -math.sin(angle_rad)],
+                                       [math.sin(angle_rad), math.cos(angle_rad)]])
+
+            rotated_mutation = rotation_matrix @ base_mutation
+
+            mutated_data[idx][0] += rotated_mutation[0]
+            mutated_data[idx][1] += rotated_mutation[1]
+
+        # 3. Second ring mutations (6 hexagons) - maintain symmetry with respect to both rings
+        second_ring_indices = [7, 8, 9, 10, 11]  # Far positions (not including center)
+
+        # Create second ring base mutation
+        base_mutation_second = np.array([random.gauss(0, mutation_factor * 0.5), random.gauss(0, mutation_factor * 0.5)])
+
+        # Apply different symmetry operations for second ring
+        for i, idx in enumerate(second_ring_indices):
+            # Apply a more varied mutation pattern for second ring
+            if i % 2 == 0:
+                mutated_data[idx][0] += random.gauss(0, mutation_factor * 0.4)
+                mutated_data[idx][1] += random.gauss(0, mutation_factor * 0.4)
+            else:
+                mutated_data[idx][0] += random.gauss(0, mutation_factor * 0.6)
+                mutated_data[idx][1] += random.gauss(0, mutation_factor * 0.6)
+
+        # 4. Apply reflectional symmetry (maintain mirror properties)
+        # Reflect across vertical axis for symmetry preservation
+        # Keep center as is, reflect pairs around y-axis
+        for i in range(1, 7):  # First ring hexagons
+            if i <= 6:
+                # For symmetric pairs, apply consistent changes
+                reflection_pair = {1: 4, 2: 5, 3: 6, 4: 1, 5: 2, 6: 3}  # Top <-> Bottom, etc.
+                if i in reflection_pair:
+                    pair_index = reflection_pair[i]
+                    # Ensure pair maintains symmetry by applying similar but opposite changes
+                    if i < pair_index:  # Only update once per pair
+                        x_diff = mutated_data[pair_index][0] - mutated_data[i][0]
+                        y_diff = mutated_data[pair_index][1] - mutated_data[i][1]
+
+                        # Apply symmetric adjustment to maintain balance
+                        mutated_data[pair_index][0] = mutated_data[i][0] - x_diff
+                        mutated_data[pair_index][1] = mutated_data[i][1] - y_diff
+
+        # 5. Add small random rotations to break exact symmetry and promote exploration
+        rotation_mutation_strength = mutation_factor * 0.1
+        for i in range(len(mutated_data)):
+            # Apply small rotations to break exact symmetry but maintain structure
+            mutated_data[i][2] += random.gauss(0, rotation_mutation_strength * 20)
+            mutated_data[i][2] = mutated_data[i][2] % 360
+
+        return mutated_data
+=======
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1, temperature: float = 1.0, generation: int = 0, max_generations: int = 100) -> np.ndarray:
+        """Apply advanced symmetric mutation to maintain hexagonal properties with temperature and exponential decay control"""
+        mutated_data = hex_data.copy()
+
+        # Exponential decay for mutation strength (following successful patterns from previous generations)
+        initial_strength = mutation_strength
+        final_strength = 0.02
+        decay_rate = (final_strength / initial_strength) ** (1.0 / max_generations) if max_generations > 0 else 0
+        current_mutation_strength = initial_strength * (decay_rate ** generation) if max_generations > 0 else final_strength
+
+        # Scale by temperature
+        mutation_factor = current_mutation_strength * temperature
+
+        # Different mutation strategies based on optimization stage
+        if stage == 1:  # Coarse stage - aggressive mutation for exploration
+            mutation_factor *= 2.0
+        elif stage == 2:  # Fine stage - moderate mutation
+            mutation_factor *= 1.0
+        else:  # Final stage - conservative mutation
+            mutation_factor *= 0.5
+
+        # Apply group-based mutations that respect D6 symmetry (hexagonal symmetry group)
+
+        # 1. Center hexagon mutation (always preserved)
+        mutated_data[0][0] += random.gauss(0, mutation_factor * 0.3)
+        mutated_data[0][1] += random.gauss(0, mutation_factor * 0.3)
+
+        # 2. First ring mutations (6 hexagons) - use rotational symmetry
+        first_ring_indices = [1, 2, 3, 4, 5, 6]  # Top, top-left, top-right, bottom, bottom-left, bottom-right
+
+        # Create a base mutation vector for rotational symmetry
+        base_mutation = np.array([random.gauss(0, mutation_factor * 0.8), random.gauss(0, mutation_factor * 0.8)])
+
+        # Apply rotational symmetry operations
+        angles = [0, 60, 120, 180, 240, 300]  # 60-degree increments for hexagonal symmetry
+
+        for i, idx in enumerate(first_ring_indices):
+            # Rotate the base mutation vector according to position
+            angle_rad = math.radians(angles[i])
+            rotation_matrix = np.array([[math.cos(angle_rad), -math.sin(angle_rad)],
+                                       [math.sin(angle_rad), math.cos(angle_rad)]])
+
+            rotated_mutation = rotation_matrix @ base_mutation
+
+            mutated_data[idx][0] += rotated_mutation[0]
+            mutated_data[idx][1] += rotated_mutation[1]
+
+        # 3. Second ring mutations (6 hexagons) - maintain symmetry with respect to both rings
+        second_ring_indices = [7, 8, 9, 10, 11]  # Far positions (not including center)
+
+        # Create second ring base mutation
+        base_mutation_second = np.array([random.gauss(0, mutation_factor * 0.5), random.gauss(0, mutation_factor * 0.5)])
+
+        # Apply different symmetry operations for second ring
+        for i, idx in enumerate(second_ring_indices):
+            # Apply a more varied mutation pattern for second ring
+            if i % 2 == 0:
+                mutated_data[idx][0] += random.gauss(0, mutation_factor * 0.4)
+                mutated_data[idx][1] += random.gauss(0, mutation_factor * 0.4)
+            else:
+                mutated_data[idx][0] += random.gauss(0, mutation_factor * 0.6)
+                mutated_data[idx][1] += random.gauss(0, mutation_factor * 0.6)
+
+        # 4. Apply reflectional symmetry (maintain mirror properties)
+        # Reflect across vertical axis for symmetry preservation
+        # Keep center as is, reflect pairs around y-axis
+        for i in range(1, 7):  # First ring hexagons
+            if i <= 6:
+                # For symmetric pairs, apply consistent changes
+                reflection_pair = {1: 4, 2: 5, 3: 6, 4: 1, 5: 2, 6: 3}  # Top <-> Bottom, etc.
+                if i in reflection_pair:
+                    pair_index = reflection_pair[i]
+                    # Ensure pair maintains symmetry by applying similar but opposite changes
+                    if i < pair_index:  # Only update once per pair
+                        x_diff = mutated_data[pair_index][0] - mutated_data[i][0]
+                        y_diff = mutated_data[pair_index][1] - mutated_data[i][1]
+
+                        # Apply symmetric adjustment to maintain balance
+                        mutated_data[pair_index][0] = mutated_data[i][0] - x_diff
+                        mutated_data[pair_index][1] = mutated_data[i][1] - y_diff
+
+        # 5. Add small random rotations to break exact symmetry and promote exploration
+        rotation_mutation_strength = mutation_factor * 0.1
+        for i in range(len(mutated_data)):
+            # Apply small rotations to break exact symmetry but maintain structure
+            mutated_data[i][2] += random.gauss(0, rotation_mutation_strength * 20)
+            mutated_data[i][2] = mutated_data[i][2] % 360
+
+        return mutated_data
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_optimization_stage_for_exponential_mutation
+</NAME>
+
+<DESCRIPTION>
+This change updates the optimize_stage method to pass generation and max_generations parameters to the mutation function, enabling the new exponential decay functionality in the symmetry-aware mutation operator. This ensures that the mutation strength properly decays exponentially throughout the optimization process, which will lead to better convergence properties by transitioning smoothly from exploration to exploitation phases.
+
+The change maintains backward compatibility while adding the necessary parameters for the enhanced mutation algorithm to work correctly.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=0.2, stage=stage, temperature=temperature)
+                new_population.append(mutated)
+=======
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=0.2, stage=stage, temperature=temperature, generation=gen, max_generations=max_generations)
+                new_population.append(mutated)
+>>>>>>> REPLACE
+</DIFF>

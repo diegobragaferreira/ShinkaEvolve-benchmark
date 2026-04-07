@@ -1,0 +1,502 @@
+--- a/original.py
++++ b/original.py
+@@ -1,234 +1,411 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import pdist
++from scipy.spatial import SphericalVoronoi
++from scipy.spatial.distance import cdist
+ import time
+ 
+ def min_max_dist_ratio(points):
+     """Calculate the ratio of minimum to maximum distance."""
+     if len(points) < 2:
+         return 0.0
+     distances = pdist(points)
+     if len(distances) == 0:
+         return 0.0
+     min_dist = np.min(distances)
+     max_dist = np.max(distances)
+     if max_dist < 1e-12:
+         return 0.0
+     return min_dist / max_dist
+ 
+ def icosahedron_points(n=14):
+     """Generate points using icosahedron-based construction"""
+     # Vertices of a regular icosahedron
+     phi = (1 + np.sqrt(5)) / 2  # golden ratio
+     vertices = np.array([
+         [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+         [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+         [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+     ])
+ 
+     # Normalize to unit sphere
+     vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+ 
+     # If we need more than 12 points, distribute additional points
+     if n <= 12:
+         # Just return subset of vertices
+         return vertices[:n]
+     else:
+         # For 14 points, we'll start with icosahedron vertices and add two more
+         points = vertices.copy()
+ 
+         # Add two more points that are well-distributed
+         # Add points along major axes
+         points = np.vstack([points, [[0, 0, 1], [0, 0, -1]]])
+ 
+         # Apply slight random perturbation to ensure good distribution
+         np.random.seed(42)
+         points += np.random.normal(0, 0.05, (points.shape[0], 3))
+ 
+         # Normalize again to maintain unit sphere
+         norms = np.linalg.norm(points, axis=1)
+         points = points / np.maximum(norms[:, np.newaxis], 1e-12)
+ 
+         return points[:n]
+ 
++def fibonacci_spiral_sphere(n_points):
++    """Generate points on a sphere using Fibonacci spiral method."""
++    points = []
++    phi = np.pi * (3 - np.sqrt(5))  # golden angle
++
++    for i in range(n_points):
++        y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
++        radius = np.sqrt(1 - y * y)  # radius at y
++
++        theta = phi * i  # golden angle increment
++
++        x = np.cos(theta) * radius
++        z = np.sin(theta) * radius
++
++        points.append([x, y, z])
++
++    return np.array(points)
++
+ def sobol_points_sphere(n_points):
+     """Generate points on sphere using 3D Sobol sequence"""
+     try:
+         # Try to import sobol sequence generator
+         from sobol_seq import i4_sobol_generate
+ 
+         # Generate Sobol points in [0,1]^3
+         sobol_points = i4_sobol_generate(3, n_points)
+ 
+         # Convert to sphere using spherical coordinates
+         points = np.zeros((n_points, 3))
+ 
+         # Use the Sobol points to create well-distributed points on sphere
+         for i in range(n_points):
+             # Map to sphere using similar approach as Fibonacci
+             u = sobol_points[i, 0]  # Uniform random in [0,1]
+             v = sobol_points[i, 1]  # Uniform random in [0,1]
+ 
+             # Use these as parameters for spherical coordinates
+             theta = 2 * np.pi * u  # azimuthal angle
+             phi = np.arccos(2 * v - 1)  # polar angle
+ 
+             # Convert to Cartesian
+             x = np.sin(phi) * np.cos(theta)
+             y = np.sin(phi) * np.sin(theta)
+             z = np.cos(phi)
+ 
+             points[i] = [x, y, z]
+ 
+         return points
+ 
+     except ImportError:
+         # Fallback to fibonacci if sobol not available
+         return fibonacci_spiral_sphere(n_points)
+ 
+-def fibonacci_spiral_sphere(n_points):
+-    """Generate points on a sphere using Fibonacci spiral method."""
+-    points = []
+-    phi = np.pi * (3 - np.sqrt(5))  # golden angle
+-
+-    for i in range(n_points):
+-        y = 1 - (i / float(n_points - 1)) * 2  # y goes from 1 to -1
+-        radius = np.sqrt(1 - y * y)  # radius at y
+-
+-        theta = phi * i  # golden angle increment
+-
+-        x = np.cos(theta) * radius
+-        z = np.sin(theta) * radius
+-
+-        points.append([x, y, z])
+-
+-    return np.array(points)
++def initialize_14_points():
++    """Initialize 14 points using a combination of geometric constructions."""
++    # Start with icosahedron vertices
++    phi = (1 + np.sqrt(5)) / 2  # golden ratio
++    vertices = np.array([
++        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
++        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
++        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
++    ])
++    
++    # Normalize to unit sphere
++    vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
++    
++    # Add two more points for 14 total - use poles
++    points = np.vstack([vertices, [[0, 0, 1], [0, 0, -1]]])
++    
++    # Perturb slightly to break symmetry
++    np.random.seed(42)
++    points += np.random.normal(0, 0.03, (points.shape[0], 3))
++    
++    # Re-normalize
++    norms = np.linalg.norm(points, axis=1)
++    points = points / np.maximum(norms[:, np.newaxis], 1e-12)
++    
++    return points
++
++def calculate_voronoi_properties(points):
++    """Calculate Voronoi cell areas and geometric properties."""
++    # Create spherical Voronoi diagram
++    sv = SphericalVoronoi(points)
++    sv.sort_vertices_of_regions()
++    
++    # Calculate areas of Voronoi cells
++    cell_areas = []
++    for region in sv.regions:
++        area = sv.calculate_area_of_region(region)
++        cell_areas.append(area)
++    
++    return np.array(cell_areas)
++
++def sphere_voronoi_evolution_step(points, alpha=0.1, beta=0.05):
++    """Perform one evolution step based on Voronoi properties."""
++    n = len(points)
++    
++    # Calculate current Voronoi properties
++    try:
++        sv = SphericalVoronoi(points)
++        sv.sort_vertices_of_regions()
++        
++        # Get cell centers and areas
++        cell_centers = []
++        cell_areas = []
++        for i, region in enumerate(sv.regions):
++            area = sv.calculate_area_of_region(region)
++            cell_areas.append(area)
++            
++            # Calculate centroid of cell
++            cell_points = points[region] if len(region) > 0 else points
++            center = np.mean(cell_points, axis=0)
++            center = center / np.linalg.norm(center)
++            cell_centers.append(center)
++        
++        cell_areas = np.array(cell_areas)
++        
++        # Calculate neighbor relationships
++        neighbors = {}
++        for i in range(n):
++            neighbors[i] = []
++        
++        # For simplicity, use a distance-based neighbor definition
++        distances = cdist(points, points)
++        np.fill_diagonal(distances, np.inf)
++        
++        # Each point connects to its 4 nearest neighbors
++        for i in range(n):
++            nearest = np.argsort(distances[i])[:4]
++            neighbors[i] = nearest.tolist()
++        
++        # Update points based on Voronoi geometry
++        new_points = points.copy()
++        
++        # Apply force-based adjustment
++        for i in range(n):
++            # Move towards average of neighbors, weighted by inverse distance
++            neighbor_points = points[neighbors[i]]
++            if len(neighbor_points) > 0:
++                # Calculate weights based on distances to neighbors
++                dist_to_neighbors = cdist(points[i:i+1], neighbor_points)[0]
++                # Avoid division by zero
++                weights = 1.0 / np.maximum(dist_to_neighbors, 1e-8)
++                weights = weights / np.sum(weights)
++                
++                # Weighted average of neighbors
++                avg_neighbor = np.average(neighbor_points, axis=0, weights=weights)
++                avg_neighbor = avg_neighbor / np.linalg.norm(avg_neighbor)
++                
++                # Apply attraction to neighbors (but keep away from very close points)
++                # This creates a balance between clustering and spreading
++                new_points[i] = (1 - alpha) * points[i] + alpha * avg_neighbor
++                
++                # Also apply repulsion from close neighbors
++                close_indices = np.where(dist_to_neighbors < 0.3)[0]
++                if len(close_indices) > 0:
++                    close_points = neighbor_points[close_indices]
++                    for close_point in close_points:
++                        diff = points[i] - close_point
++                        diff_norm = np.linalg.norm(diff)
++                        if diff_norm > 1e-6:
++                            repulsion = beta * (diff / diff_norm) * (0.3 - diff_norm)
++                            new_points[i] += repulsion
++                
++                # Project back onto sphere
++                norm = np.linalg.norm(new_points[i])
++                if norm > 1e-12:
++                    new_points[i] = new_points[i] / norm
++                    
++        return new_points
++        
++    except Exception:
++        # Fallback to simple smoothing if Voronoi fails
++        new_points = points.copy()
++        for i in range(n):
++            # Simple averaging with neighbors
++            if i < n - 1:
++                avg = (points[i] + points[i+1]) / 2
++                avg = avg / np.linalg.norm(avg)
++                new_points[i] = 0.9 * points[i] + 0.1 * avg
++            else:
++                avg = (points[i] + points[0]) / 2
++                avg = avg / np.linalg.norm(avg)
++                new_points[i] = 0.9 * points[i] + 0.1 * avg
++        return new_points
++
++def sphere_voronoi_optimization(points, max_iterations=500):
++    """Optimize points using Voronoi-based evolution."""
++    current_points = points.copy()
++    
++    # Track best solution
++    best_ratio = min_max_dist_ratio(current_points)
++    best_points = current_points.copy()
++    
++    # Evolution parameters
++    decay_factor = 0.995
++    learning_rate = 0.1
++    
++    for iteration in range(max_iterations):
++        # Adaptive learning rate
++        current_lr = learning_rate * (decay_factor ** iteration)
++        
++        # Perform evolution step
++        evolved_points = sphere_voronoi_evolution_step(
++            current_points, 
++            alpha=current_lr * 0.5, 
++            beta=current_lr * 0.1
++        )
++        
++        # Evaluate current solution
++        ratio = min_max_dist_ratio(evolved_points)
++        
++        # Accept better solutions or occasionally accept worse ones for escape
++        if ratio > best_ratio or (iteration % 100 == 0 and np.random.random() < 0.1):
++            current_points = evolved_points.copy()
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = evolved_points.copy()
++        else:
++            # Occasionally add some noise to escape local minima
++            if np.random.random() < 0.05:
++                noise_magnitude = 0.01 * current_lr
++                noise = np.random.normal(0, noise_magnitude, current_points.shape)
++                current_points = (current_points + noise)
++                norms = np.linalg.norm(current_points, axis=1)
++                current_points = current_points / np.maximum(norms[:, np.newaxis], 1e-12)
++    
++    return best_points
+ 
+ def min_max_dist_dim3_14() -> np.ndarray:
+     """
+     Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+     """
+     n = 14
+     d = 3
+ 
+-    def objective(x_flat):
+-        points_reshaped = x_flat.reshape(n, d)
+-        # Ensure points are on unit sphere
+-        norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
+-        normalized_points = points_reshaped / np.maximum(norms, 1e-12)
+-        return -min_max_dist_ratio(normalized_points)
+-
+-    def constraint_sphere(x_flat):
+-        points_reshaped = x_flat.reshape(n, d)
+-        norms = np.linalg.norm(points_reshaped, axis=1)
+-        return norms - 1.0
+-
+-    # Define constraints and bounds
+-    constraints = {'type': 'eq', 'fun': constraint_sphere}
+-    bounds = [(-2, 2) for _ in range(n * d)]
+-
+-    # Try multiple initial configurations
++    # Try multiple initial configurations using the Voronoi-based initialization
+     initial_configs = []
+ 
+     # 1. Icosahedron-based initialization
+     ico_points = icosahedron_points(n)
+     initial_configs.append(("icosahedron", ico_points))
+ 
+     # 2. Fibonacci spiral initialization
+     fib_points = fibonacci_spiral_sphere(n)
+     initial_configs.append(("fibonacci", fib_points))
+ 
+     # 3. Sobol sequence initialization
+     sobol_points = sobol_points_sphere(n)
+     initial_configs.append(("sobol", sobol_points))
+ 
+     # 4. Random uniform points on sphere
+     np.random.seed(42)
+     random_points = np.random.randn(n, d)
+     norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+     random_points = random_points / np.maximum(norms, 1e-12)
+     initial_configs.append(("random", random_points))
+ 
+     best_ratio = -np.inf
+     best_points = None
+ 
+-    # Try each initial configuration with multiple restarts
++    # Try each initial configuration with Voronoi-based optimization
+     for config_name, initial_points in initial_configs:
+         # Add slight random noise to break symmetry
+         np.random.seed(42)
+         noisy_points = initial_points + np.random.normal(0, 0.02, (n, d))
+ 
+         # Ensure all points are on unit sphere
+         norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
+         normalized_points = noisy_points / np.maximum(norms, 1e-12)
+ 
+-        # Flatten for optimization
+-        x0 = normalized_points.flatten()
+-
+-        # First optimization with SLSQP for global convergence
++        # Apply Voronoi-based optimization
+         try:
+-            result_slsqp = minimize(
+-                objective,
+-                x0,
+-                method='SLSQP',
+-                bounds=bounds,
+-                constraints=constraints,
+-                options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9},
+-                tol=1e-9
+-            )
+-
+-            if result_slsqp.success:
+-                points_slsqp = result_slsqp.x.reshape(n, d)
+-                # Ensure points are on unit sphere
+-                norms_slsqp = np.linalg.norm(points_slsqp, axis=1, keepdims=True)
+-                normalized_slsqp = points_slsqp / np.maximum(norms_slsqp, 1e-12)
+-
+-                # Calculate ratio
+-                ratio = min_max_dist_ratio(normalized_slsqp)
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = normalized_slsqp.copy()
+-
++            optimized_points = sphere_voronoi_optimization(normalized_points, max_iterations=300)
++            
++            # Calculate ratio
++            ratio = min_max_dist_ratio(optimized_points)
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = optimized_points.copy()
+         except Exception:
+-            pass
+-
+-        # Second optimization with L-BFGS-B for local refinement
+-        try:
+-            result_lbfgsb = minimize(
+-                objective,
+-                x0,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-10},
+-                tol=1e-10
+-            )
+-
+-            if result_lbfgsb.success:
+-                points_lbfgsb = result_lbfgsb.x.reshape(n, d)
+-                # Ensure points are on unit sphere
+-                norms_lbfgsb = np.linalg.norm(points_lbfgsb, axis=1, keepdims=True)
+-                normalized_lbfgsb = points_lbfgsb / np.maximum(norms_lbfgsb, 1e-12)
+-
+-                # Calculate ratio
+-                ratio = min_max_dist_ratio(normalized_lbfgsb)
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = normalized_lbfgsb.copy()
+-
+-        except Exception:
+-            pass
++            continue
++
++    # If no good solution was found, try the direct optimization approach as backup
++    if best_points is None:
++        def objective(x_flat):
++            points_reshaped = x_flat.reshape(n, d)
++            # Ensure points are on unit sphere
++            norms = np.linalg.norm(points_reshaped, axis=1, keepdims=True)
++            normalized_points = points_reshaped / np.maximum(norms, 1e-12)
++            return -min_max_dist_ratio(normalized_points)
++
++        def constraint_sphere(x_flat):
++            points_reshaped = x_flat.reshape(n, d)
++            norms = np.linalg.norm(points_reshaped, axis=1)
++            return norms - 1.0
++
++        # Define constraints and bounds
++        constraints = {'type': 'eq', 'fun': constraint_sphere}
++        bounds = [(-2, 2) for _ in range(n * d)]
++
++        # Try the most promising initial configuration from previous attempts
++        if len(initial_configs) > 0:
++            _, best_initial = initial_configs[0]
++            # Add slight random noise to break symmetry
++            np.random.seed(42)
++            noisy_points = best_initial + np.random.normal(0, 0.02, (n, d))
++
++            # Ensure all points are on unit sphere
++            norms = np.linalg.norm(noisy_points, axis=1, keepdims=True)
++            normalized_points = noisy_points / np.maximum(norms, 1e-12)
++
++            # Flatten for optimization
++            x0 = normalized_points.flatten()
++
++            # First optimization with SLSQP for global convergence
++            try:
++                result_slsqp = minimize(
++                    objective,
++                    x0,
++                    method='SLSQP',
++                    bounds=bounds,
++                    constraints=constraints,
++                    options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9},
++                    tol=1e-9
++                )
++
++                if result_slsqp.success:
++                    points_slsqp = result_slsqp.x.reshape(n, d)
++                    # Ensure points are on unit sphere
++                    norms_slsqp = np.linalg.norm(points_slsqp, axis=1, keepdims=True)
++                    normalized_slsqp = points_slsqp / np.maximum(norms_slsqp, 1e-12)
++
++                    # Calculate ratio
++                    ratio = min_max_dist_ratio(normalized_slsqp)
++                    if ratio > best_ratio:
++                        best_ratio = ratio
++                        best_points = normalized_slsqp.copy()
++
++            except Exception:
++                pass
+ 
+     # If no good solution was found, return a random configuration
+     if best_points is None:
+         np.random.seed(42)
+         random_points = np.random.randn(n, d)
+         norms = np.linalg.norm(random_points, axis=1, keepdims=True)
+         best_points = random_points / np.maximum(norms, 1e-12)
+ 
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

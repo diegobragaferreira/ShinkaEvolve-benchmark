@@ -1,0 +1,182 @@
+<NAME>
+log_spaced_peaks
+</NAME>
+
+<DESCRIPTION>
+The idea is to implement logarithmic spacing for Gaussian peak positions during initialization to improve distribution across multiple scales. This follows the successful pattern seen in previous generations and directly addresses the weakness of purely random initialization that led to earlier failures. The logarithmic distribution ensures better coverage of different frequency ranges, which enhances the autoconvolution profile's ability to achieve higher C2 scores by avoiding clustering of peaks in narrow regions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_structured_gaussian_individual(n_steps: int, n_peaks: int = None) -> List[float]:
+    """
+    Create a structured individual using adaptive Gaussian peak construction
+    with controlled spacing and amplitude scaling.
+    """
+    # Determine number of peaks based on function length
+    if n_peaks is None:
+        n_peaks = max(3, min(15, n_steps // 100))
+
+    # Create step function with Gaussian peaks
+    x = np.linspace(-0.25, 0.25, n_steps)
+    f_vals = np.zeros(n_steps)
+
+    # Generate peak parameters with logarithmic spacing and minimum gap enforcement
+    peak_positions = []
+    peak_widths = []
+    peak_heights = []
+
+    # Distribute peaks with logarithmic spacing for better frequency range coverage
+    # Use log-spaced positions to ensure good coverage across multiple scales
+    if n_peaks > 1:
+        # Create log-spaced positions from left to right
+        log_min = np.log(0.01)  # Minimum relative distance
+        log_max = np.log(0.5)   # Maximum relative distance (half domain)
+        log_positions = np.logspace(log_min, log_max, n_peaks, base=np.e)
+        # Map to actual positions in [-0.25, 0.25]
+        # First peak at -0.25 + offset, last at 0.25 - offset
+        total_range = 0.5
+        offset = 0.05  # Minimum distance from edges
+
+        # Distribute peaks logarithmically
+        for i in range(n_peaks):
+            # Map log-spaced to actual domain with edge offsets
+            if n_peaks == 1:
+                pos = 0.0  # Center for single peak
+            else:
+                # Linear interpolation from offset to (total_range-offset)
+                rel_pos = log_positions[i] if i < len(log_positions) else 0.5
+                # Adjust for edge constraints
+                pos = -0.25 + offset + rel_pos * (total_range - 2*offset)
+
+            # Ensure bounds are respected
+            pos = np.clip(pos, -0.25 + offset, 0.25 - offset)
+            peak_positions.append(pos)
+    else:
+        # For single peak, center it
+        peak_positions.append(0.0)
+
+    # Add some randomness to positions to avoid perfect symmetry
+    for i in range(len(peak_positions)):
+        # Small random perturbations
+        if n_peaks > 1:
+            peak_positions[i] += np.random.uniform(-0.02, 0.02)
+        # Ensure within bounds
+        peak_positions[i] = np.clip(peak_positions[i], -0.25 + 0.05, 0.25 - 0.05)
+
+    # Generate peak parameters
+    for i in range(n_peaks):
+        # Width inversely related to height for better control
+        width = np.random.uniform(0.005, 0.02)
+        peak_widths.append(width)
+        # Height inversely proportional to width to maintain balance
+        height = np.random.uniform(0.5, 2.0)
+        peak_heights.append(height)
+
+    # Create Gaussian curves for each peak
+    for center, width, height in zip(peak_positions, peak_widths, peak_heights):
+        gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_vals += gaussian
+
+    # Apply smoothing to reduce extreme variations
+    if n_steps > 50:
+        f_vals = signal.savgol_filter(f_vals, min(51, n_steps-1), 3)
+
+    # Ensure non-negativity
+    f_vals = np.maximum(f_vals, 0)
+
+    # Normalize to reasonable range but preserve peak structure
+    if np.max(f_vals) > 0:
+        # Scale to approximately unit max but allow some headroom
+        f_vals = f_vals / np.max(f_vals) * 1.5
+
+    return f_vals.tolist()
+=======
+def create_structured_gaussian_individual(n_steps: int, n_peaks: int = None) -> List[float]:
+    """
+    Create a structured individual using adaptive Gaussian peak construction
+    with controlled spacing and amplitude scaling.
+    """
+    # Determine number of peaks based on function length
+    if n_peaks is None:
+        n_peaks = max(3, min(15, n_steps // 100))
+
+    # Create step function with Gaussian peaks
+    x = np.linspace(-0.25, 0.25, n_steps)
+    f_vals = np.zeros(n_steps)
+
+    # Generate peak parameters with logarithmic spacing and minimum gap enforcement
+    peak_positions = []
+    peak_widths = []
+    peak_heights = []
+
+    # Distribute peaks with logarithmic spacing for better frequency range coverage
+    # Use log-uniform distribution to ensure even spread across multiple scales
+    if n_peaks > 1:
+        # Create log-uniform positions from left to right
+        # This ensures better coverage of different spatial scales
+        log_min = np.log(0.05)  # Minimum relative distance from edge (5%)
+        log_max = np.log(0.45)  # Maximum relative distance from edge (45%)
+        log_positions = np.logspace(log_min, log_max, n_peaks, base=np.e)
+
+        # Map to actual positions in [-0.25, 0.25] with proper boundary constraints
+        total_range = 0.5
+        offset = 0.05  # Minimum distance from edges
+
+        # Distribute peaks logarithmically with proper boundary handling
+        for i in range(n_peaks):
+            if n_peaks == 1:
+                pos = 0.0  # Center for single peak
+            else:
+                # Map log-spaced to actual domain with edge offsets
+                # This ensures even distribution across multiple scales
+                rel_pos = log_positions[i] if i < len(log_positions) else 0.5
+                pos = -0.25 + offset + rel_pos * (total_range - 2*offset)
+
+            # Ensure bounds are respected
+            pos = np.clip(pos, -0.25 + offset, 0.25 - offset)
+            peak_positions.append(pos)
+    else:
+        # For single peak, center it
+        peak_positions.append(0.0)
+
+    # Add some randomness to positions to avoid perfect symmetry but maintain structure
+    for i in range(len(peak_positions)):
+        # Small random perturbations to break symmetry while preserving structure
+        if n_peaks > 1:
+            peak_positions[i] += np.random.uniform(-0.015, 0.015)  # Smaller perturbations
+        # Ensure within bounds
+        peak_positions[i] = np.clip(peak_positions[i], -0.25 + 0.05, 0.25 - 0.05)
+
+    # Generate peak parameters
+    for i in range(n_peaks):
+        # Width inversely related to height for better control
+        width = np.random.uniform(0.005, 0.025)
+        peak_widths.append(width)
+        # Height inversely proportional to width to maintain balance
+        # Use wider range to allow for more diverse peak shapes
+        height = np.random.uniform(0.8, 2.0)
+        peak_heights.append(height)
+
+    # Create Gaussian curves for each peak
+    for center, width, height in zip(peak_positions, peak_widths, peak_heights):
+        gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_vals += gaussian
+
+    # Apply mathematical principled smoothing with Gaussian kernel instead of Savitzky-Golay
+    # This provides better numerical stability and preserves function characteristics
+    if n_steps > 50:
+        from scipy.ndimage import gaussian_filter1d
+        f_vals = gaussian_filter1d(f_vals, sigma=0.8)
+
+    # Ensure non-negativity
+    f_vals = np.maximum(f_vals, 0)
+
+    # Normalize to reasonable range but preserve peak structure
+    if np.max(f_vals) > 0:
+        # Scale to approximately unit max but allow some headroom
+        f_vals = f_vals / np.max(f_vals) * 1.5
+
+    return f_vals.tolist()
+>>>>>>> REPLACE
+</DIFF>

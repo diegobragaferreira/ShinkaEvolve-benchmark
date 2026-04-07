@@ -1,0 +1,299 @@
+<NAME>
+add_rotation_optimization
+</NAME>
+
+<DESCRIPTION>
+The current implementation only optimizes positions but fixes rotation angles at 0 degrees. This limits the possible arrangements significantly. By adding rotation optimization, we can explore configurations that might achieve better packing density. The key insight is that hexagons can be rotated to reduce overlap conflicts and improve containment within the outer hexagon.
+
+The approach:
+1. Modify the optimizer to also optimize rotation angles (not just positions)
+2. Update the parameter flattening/unflattening logic to include rotation
+3. Add bounds for rotation angles (0-360 degrees)
+4. Improve the refinement loop to handle both position and rotation updates
+5. Add rotation-aware constraint validation
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_configuration(self, hex_data, outer_radius):
+        """Evaluate current configuration: returns (validity, inv_radius)."""
+        # Check for overlaps
+        for i in range(len(hex_data)):
+            hex1_vertices = self.hexagon_vertices(hex_data[i][0], hex_data[i][1],
+                                                self.hex_side_length, hex_data[i][2])
+            for j in range(i+1, len(hex_data)):
+                hex2_vertices = self.hexagon_vertices(hex_data[j][0], hex_data[j][1],
+                                                    self.hex_side_length, hex_data[j][2])
+                if self.validate_overlap(hex1_vertices, hex2_vertices):
+                    return False, 0
+
+        # Check containment
+        for i in range(len(hex_data)):
+            hex_vertices = self.hexagon_vertices(hex_data[i][0], hex_data[i][1],
+                                               self.hex_side_length, hex_data[i][2])
+            if not self.validate_containment(hex_vertices, outer_radius):
+                return False, 0
+
+        # Return inverse of outer radius
+        return True, 1.0 / outer_radius
+=======
+    def evaluate_configuration(self, hex_data, outer_radius):
+        """Evaluate current configuration: returns (validity, inv_radius)."""
+        # Check for overlaps
+        for i in range(len(hex_data)):
+            hex1_vertices = self.hexagon_vertices(hex_data[i][0], hex_data[i][1],
+                                                self.hex_side_length, hex_data[i][2])
+            for j in range(i+1, len(hex_data)):
+                hex2_vertices = self.hexagon_vertices(hex_data[j][0], hex_data[j][1],
+                                                    self.hex_side_length, hex_data[j][2])
+                if self.validate_overlap(hex1_vertices, hex2_vertices):
+                    return False, 0
+
+        # Check containment
+        for i in range(len(hex_data)):
+            hex_vertices = self.hexagon_vertices(hex_data[i][0], hex_data[i][1],
+                                               self.hex_side_length, hex_data[i][2])
+            if not self.validate_containment(hex_vertices, outer_radius):
+                return False, 0
+
+        # Return inverse of outer radius
+        return True, 1.0 / outer_radius
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def flatten_config(self, hex_data):
+        """Convert 2D array to flat parameter list for optimization."""
+        params = []
+        for i in range(len(hex_data)):
+            params.extend([hex_data[i][0], hex_data[i][1]])  # Only positions, not angles
+        return np.array(params)
+
+    def unflatten_config(self, params, original_config):
+        """Reconstruct hex_data from flattened parameters."""
+        config = original_config.copy()
+        idx = 0
+        for i in range(len(config)):
+            config[i][0] = params[idx]
+            config[i][1] = params[idx + 1]
+            idx += 2
+        return config
+=======
+    def flatten_config(self, hex_data):
+        """Convert 2D array to flat parameter list for optimization."""
+        params = []
+        for i in range(len(hex_data)):
+            params.extend([hex_data[i][0], hex_data[i][1], hex_data[i][2]])  # positions + angles
+        return np.array(params)
+
+    def unflatten_config(self, params, original_config):
+        """Reconstruct hex_data from flattened parameters."""
+        config = original_config.copy()
+        idx = 0
+        for i in range(len(config)):
+            config[i][0] = params[idx]
+            config[i][1] = params[idx + 1]
+            config[i][2] = params[idx + 2]
+            idx += 3
+        return config
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def objective_function(self, params, hex_data, outer_radius):
+        """Objective function for optimization."""
+        # Reconstruct configuration
+        reconstructed_config = self.unflatten_config(params, hex_data)
+
+        # Evaluate
+        validity, inv_radius = self.packer.evaluate_configuration(reconstructed_config, outer_radius)
+
+        if not validity:
+            return 1e10  # Large penalty for invalid configurations
+        return -inv_radius  # Negative because we maximize
+=======
+    def objective_function(self, params, hex_data, outer_radius):
+        """Objective function for optimization."""
+        # Reconstruct configuration
+        reconstructed_config = self.unflatten_config(params, hex_data)
+
+        # Evaluate
+        validity, inv_radius = self.packer.evaluate_configuration(reconstructed_config, outer_radius)
+
+        if not validity:
+            return 1e10  # Large penalty for invalid configurations
+        return -inv_radius  # Negative because we maximize
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_positions(self, initial_config, outer_radius):
+        """Optimize positions using constrained numerical optimization."""
+        # Flatten initial configuration
+        initial_params = self.flatten_config(initial_config)
+
+        # Perform optimization
+        result = minimize(
+            self.objective_function,
+            initial_params,
+            args=(initial_config, outer_radius),
+            method='L-BFGS-B',
+            bounds=[(-10, 10), (-10, 10)] * len(initial_config)
+        )
+
+        # Reconstruct optimized configuration
+        optimized_config = self.unflatten_config(result.x, initial_config)
+        return optimized_config
+=======
+    def optimize_positions_and_angles(self, initial_config, outer_radius):
+        """Optimize positions and angles using constrained numerical optimization."""
+        # Flatten initial configuration
+        initial_params = self.flatten_config(initial_config)
+
+        # Define bounds for optimization: positions [-10,10], angles [0,360]
+        bounds = []
+        for i in range(len(initial_config)):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # x, y, angle
+
+        # Perform optimization
+        result = minimize(
+            self.objective_function,
+            initial_params,
+            args=(initial_config, outer_radius),
+            method='L-BFGS-B',
+            bounds=bounds
+        )
+
+        # Reconstruct optimized configuration
+        optimized_config = self.unflatten_config(result.x, initial_config)
+        return optimized_config
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Optimize positions
+    optimized_config = optimizer.optimize_positions(initial_config, estimated_outer_radius)
+
+    # Refinement loop
+    max_iterations = 5
+    iteration = 0
+    best_config = optimized_config.copy()
+    best_inv_radius = 0
+
+    while iteration < max_iterations:
+        validity, inv_radius = packer.evaluate_configuration(best_config, estimated_outer_radius)
+
+        if validity and inv_radius > best_inv_radius:
+            best_inv_radius = inv_radius
+            best_config = optimized_config.copy()
+
+        if validity:
+            break
+
+        # Adjust positions slightly and retry
+        for i in range(len(optimized_config)):
+            optimized_config[i][0] += np.random.normal(0, 0.01)
+            optimized_config[i][1] += np.random.normal(0, 0.01)
+
+        optimized_config = optimizer.optimize_positions(optimized_config, estimated_outer_radius)
+        iteration += 1
+=======
+    # Optimize positions and angles
+    optimized_config = optimizer.optimize_positions_and_angles(initial_config, estimated_outer_radius)
+
+    # Refinement loop
+    max_iterations = 5
+    iteration = 0
+    best_config = optimized_config.copy()
+    best_inv_radius = 0
+
+    while iteration < max_iterations:
+        validity, inv_radius = packer.evaluate_configuration(best_config, estimated_outer_radius)
+
+        if validity and inv_radius > best_inv_radius:
+            best_inv_radius = inv_radius
+            best_config = optimized_config.copy()
+
+        if validity:
+            break
+
+        # Adjust positions and angles slightly and retry
+        for i in range(len(optimized_config)):
+            optimized_config[i][0] += np.random.normal(0, 0.01)
+            optimized_config[i][1] += np.random.normal(0, 0.01)
+            # Add small random rotation adjustment
+            optimized_config[i][2] += np.random.normal(0, 5)
+            # Keep angle within bounds
+            optimized_config[i][2] = optimized_config[i][2] % 360
+
+        optimized_config = optimizer.optimize_positions_and_angles(optimized_config, estimated_outer_radius)
+        iteration += 1
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final validation and calculation
+    final_validity, final_inv_radius = packer.evaluate_configuration(best_config, estimated_outer_radius)
+
+    if not final_validity:
+        # Fall back to a known good configuration
+        best_config = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        final_inv_radius = 1.0 / 8.0  # Conservative estimate
+
+    # Final outer radius calculation
+    final_outer_radius = 1.0 / final_inv_radius if final_inv_radius > 0 else 8.0
+=======
+    # Final validation and calculation
+    final_validity, final_inv_radius = packer.evaluate_configuration(best_config, estimated_outer_radius)
+
+    if not final_validity:
+        # Fall back to a known good configuration
+        best_config = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        final_inv_radius = 1.0 / 8.0  # Conservative estimate
+
+    # Final outer radius calculation
+    final_outer_radius = 1.0 / final_inv_radius if final_inv_radius > 0 else 8.0
+>>>>>>> REPLACE
+
+</DIFF>

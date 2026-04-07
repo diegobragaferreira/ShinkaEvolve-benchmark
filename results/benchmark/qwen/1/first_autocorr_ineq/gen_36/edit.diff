@@ -1,0 +1,225 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,171 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from scipy import optimize
++from scipy.fft import fft, ifft
++from multiprocessing import Pool
++import random
++import math
++import time
+ 
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
++def convolve_fft(a, b):
++    """Compute convolution using FFT for better performance."""
++    n = len(a)
++    # Pad to length 2*n - 1 for full convolution
++    padded_length = 2 * n - 1
++    fa = fft(a, padded_length)
++    fb = fft(b, padded_length)
++    result = ifft(fa * fb.conj()).real
++    # Return only the valid convolution part
++    return result[:n]
++
++def compute_c1(sequence):
++    """Compute the C1 constant for a given sequence."""
+     n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
++    if n == 0:
++        return float('inf')
+ 
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
++    sum_a = np.sum(sequence)
++    if sum_a < 1e-10:
++        return float('inf')
+ 
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
++    # Compute convolution using FFT
++    conv = convolve_fft(sequence, sequence)
++    max_conv = np.max(conv)
+ 
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
++    # Compute C1 = 2n * max(conv) / (sum(a))^2
++    c1 = 2 * n * max_conv / (sum_a ** 2)
++    return c1
+ 
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
++def evaluate_fitness(sequence):
++    """Evaluate fitness as inverse of C1 (higher is better)"""
++    c1 = compute_c1(sequence)
++    if c1 == float('inf'):
++        return 0.0
++    return 1.0 / c1
+ 
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
++def generate_sine_wave_sequence(n):
++    """Generate a structured sequence based on sine wave."""
++    return [abs(math.sin(i * 0.5) * 100) + 1 for i in range(n)]
++
++def generate_random_valid_sequence(n):
++    """Generate a random valid sequence with some structure."""
++    # Start with a sine wave pattern to provide good initial structure
++    base_seq = generate_sine_wave_sequence(n)
++    # Add some noise to make it less predictable
++    noise_factor = 0.1
++    return [max(0.01, x * (1 + random.uniform(-noise_factor, noise_factor)))
++            for x in base_seq]
++
++def mutate_sequence(sequence, mutation_rate):
++    """Apply mutation to sequence with adaptive rate."""
++    mutated = sequence.copy()
++    for i in range(len(mutated)):
++        if random.random() < mutation_rate:
++            # Apply Gaussian perturbation
++            mutated[i] *= random.uniform(0.8, 1.2)
++            mutated[i] = max(0.01, mutated[i])  # Ensure non-negative
++    return mutated
++
++def crossover_sequences(parent1, parent2):
++    """Perform crossover between two sequences."""
++    if len(parent1) != len(parent2):
++        # If lengths differ, use the shorter one
++        min_len = min(len(parent1), len(parent2))
++        parent1 = parent1[:min_len]
++        parent2 = parent2[:min_len]
++
++    crossover_point = random.randint(1, len(parent1) - 1)
++    child = parent1[:crossover_point] + parent2[crossover_point:]
++    return child
++
++def adaptive_mutation_rate(population_fitnesses):
++    """Calculate adaptive mutation rate based on population diversity."""
++    if len(population_fitnesses) < 2:
++        return 0.1
++
++    std_dev = np.std(population_fitnesses)
++    avg_fitness = np.mean(population_fitnesses)
++
++    # Higher diversity = higher mutation rate
++    if avg_fitness > 0:
++        mutation_rate = min(0.3, max(0.01, 0.1 + std_dev / avg_fitness))
+     else:
+-        print('LP optimization failed.')
+-        return None
+-     
++        mutation_rate = 0.1
++
++    return mutation_rate
+ 
+ def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
++    """Evolutionary optimization to find the best sequence."""
++    start_time = time.time()
++    
++    # Configuration
++    population_size = 100
++    max_generations = 200
++    max_stagnation = 30
++    elite_size = 10
++    max_time_seconds = 175  # Leave some buffer for cleanup
+ 
+-    return best_sequence
++    # Initialize population with structured sequences
++    population = [
++        generate_random_valid_sequence(random.randint(50, 500))
++        for _ in range(population_size)
++    ]
++
++    best_solution = None
++    best_fitness = 0.0
++    stagnation_counter = 0
++
++    for generation in range(max_generations):
++        if time.time() - start_time > max_time_seconds:
++            break
++            
++        # Evaluate fitness for all individuals (parallel)
++        with Pool() as pool:
++            fitness_scores = pool.map(evaluate_fitness, population)
++        
++        # Update best solution
++        for i, fitness in enumerate(fitness_scores):
++            if fitness > best_fitness:
++                best_fitness = fitness
++                best_solution = population[i].copy()
++
++        # Check for stagnation
++        if generation > 0 and abs(fitness_scores[-1] - fitness_scores[-2]) < 1e-6:
++            stagnation_counter += 1
++            if stagnation_counter >= max_stagnation:
++                # Reset with new diverse population
++                population = [
++                    generate_random_valid_sequence(random.randint(50, 500))
++                    for _ in range(population_size)
++                ]
++                stagnation_counter = 0
++        else:
++            stagnation_counter = 0
++
++        # Calculate adaptive mutation rate
++        mutation_rate = adaptive_mutation_rate(fitness_scores)
++
++        # Selection: keep top individuals
++        sorted_indices = np.argsort(fitness_scores)[::-1][:elite_size]
++        elite = [population[i] for i in sorted_indices]
++
++        # Create new population through selection, crossover, and mutation
++        new_population = elite.copy()
++
++        while len(new_population) < population_size:
++            # Tournament selection
++            parents = random.sample(elite, 2)
++            child = crossover_sequences(parents[0], parents[1])
++            mutated_child = mutate_sequence(child, mutation_rate)
++            new_population.append(mutated_child)
++
++        population = new_population
++
++    return best_solution if best_solution is not None else generate_random_valid_sequence(100)
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

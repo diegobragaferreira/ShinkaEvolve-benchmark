@@ -1,0 +1,221 @@
+<NAME>
+replace_gradient_ascent_with_jax_autodiff
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a hybrid approach with both scipy's L-BFGS and manual gradient ascent using JAX gradients. However, the gradient ascent step is not consistently applied and can be unstable. I'll replace the manual gradient ascent with a more robust JAX-based automatic differentiation approach that properly leverages JAX's capabilities for gradient computation and optimization.
+
+This improvement focuses on:
+1. Replacing the inconsistent manual gradient ascent with consistent JAX autodiff
+2. Improving the local optimization phase to be more reliable
+3. Making better use of the JAX ecosystem for numerical stability
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def multi_stage_optimization(self, n):
+        """Perform multi-stage optimization with fallbacks and adaptive parameters"""
+        current_best_c2 = 0.0
+        current_best_f = None
+
+        # Stage 1: Differential Evolution with multi-scale initialization
+        try:
+            # Determine adaptive parameters
+            popsize = self.adaptive_population_size(n)
+            maxiter = self.adaptive_maxiter(n)
+
+            # Generate initial population using multi-scale approach
+            initial_population = []
+            for _ in range(min(20, popsize)):  # Larger initial population for better exploration
+                f_init = self.multi_scale_initialization(n)
+                # Add noise to break symmetry
+                noise = np.random.normal(0, 0.05, len(f_init))  # Reduced noise for stability
+                f_noisy = np.maximum(np.array(f_init) + noise, 0)
+                initial_population.append(f_noisy.tolist())
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Run differential evolution with adaptive parameters
+            de_result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False
+            )
+
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -self.objective_function(f_opt)
+
+                if c2_value > current_best_c2:
+                    current_best_c2 = c2_value
+                    current_best_f = f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+
+        # Stage 2: Multi-start local optimization with different strategies
+        if current_best_f is not None and current_best_c2 > 0.1:
+            try:
+                # Try multiple local optimization strategies
+                local_results = []
+
+                # Strategy 1: L-BFGS with different initial points
+                for _ in range(3):
+                    # Perturb current best solution
+                    perturbed = np.array(current_best_f) * (1 + np.random.normal(0, 0.05, len(current_best_f)))
+                    perturbed = np.maximum(perturbed, 0)
+
+                    # Use JAX-based gradient for potential better refinement
+                    try:
+                        # Convert to JAX array
+                        f_jax = jnp.array(perturbed, dtype=jnp.float32)
+                        grad_fn = grad(StepFunctionOptimizer.compute_c2_jax)
+
+                        # Compute gradient and do gradient ascent step
+                        grad_val = grad_fn(f_jax)
+                        refined_jax = f_jax + 0.01 * grad_val  # Small step
+                        refined_jax = jnp.maximum(refined_jax, 0)
+
+                        # Convert back to numpy
+                        refined_np = np.array(refined_jax)
+                        c2_refined = -StepFunctionOptimizer.compute_c2_jax(refined_np)
+                        local_results.append((c2_refined, refined_np.tolist()))
+                    except Exception:
+                        # Fallback to standard L-BFGS
+                        lbfgs_result = minimize(
+                            self.objective_function,
+                            perturbed,
+                            method='L-BFGS-B',
+                            bounds=[(0, 10) for _ in range(n)],
+                            options={'maxiter': min(30, max(15, n // 15)), 'disp': False}
+                        )
+
+                        if lbfgs_result.success:
+                            f_refined = np.maximum(lbfgs_result.x, 0)
+                            c2_refined = -self.objective_function(f_refined)
+                            local_results.append((c2_refined, f_refined.tolist()))
+
+                # Select best local result
+                if local_results:
+                    best_local_c2, best_local_f = max(local_results, key=lambda x: x[0])
+                    if best_local_c2 > current_best_c2:
+                        current_best_c2 = best_local_c2
+                        current_best_f = best_local_f
+
+            except Exception as e:
+                warnings.warn(f"Local optimization failed: {str(e)}")
+
+        return current_best_c2, current_best_f
+=======
+    def multi_stage_optimization(self, n):
+        """Perform multi-stage optimization with fallbacks and adaptive parameters"""
+        current_best_c2 = 0.0
+        current_best_f = None
+
+        # Stage 1: Differential Evolution with multi-scale initialization
+        try:
+            # Determine adaptive parameters
+            popsize = self.adaptive_population_size(n)
+            maxiter = self.adaptive_maxiter(n)
+
+            # Generate initial population using multi-scale approach
+            initial_population = []
+            for _ in range(min(20, popsize)):  # Larger initial population for better exploration
+                f_init = self.multi_scale_initialization(n)
+                # Add noise to break symmetry
+                noise = np.random.normal(0, 0.05, len(f_init))  # Reduced noise for stability
+                f_noisy = np.maximum(np.array(f_init) + noise, 0)
+                initial_population.append(f_noisy.tolist())
+
+            # Define bounds for each parameter (step height)
+            bounds = [(0, 10) for _ in range(n)]
+
+            # Run differential evolution with adaptive parameters
+            de_result = differential_evolution(
+                self.objective_function,
+                bounds,
+                maxiter=maxiter,
+                popsize=popsize,
+                seed=self.seed,
+                strategy='best1bin',
+                init=initial_population,
+                disp=False
+            )
+
+            if de_result.success:
+                f_opt = np.maximum(de_result.x, 0)
+                c2_value = -self.objective_function(f_opt)
+
+                if c2_value > current_best_c2:
+                    current_best_c2 = c2_value
+                    current_best_f = f_opt.tolist()
+
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+
+        # Stage 2: Multi-start local optimization using consistent JAX autodiff
+        if current_best_f is not None and current_best_c2 > 0.1:
+            try:
+                # Use consistent JAX-based optimization instead of mixed approaches
+                best_local_c2 = current_best_c2
+                best_local_f = current_best_f
+
+                # Try multiple refinements using JAX autodiff
+                for _ in range(3):
+                    # Perturb current best solution
+                    perturbed = np.array(current_best_f) * (1 + np.random.normal(0, 0.03, len(current_best_f)))
+                    perturbed = np.maximum(perturbed, 0)
+
+                    # Refine using JAX-based gradient ascent
+                    try:
+                        # Use JAX's jit for better performance
+                        @jax_jit
+                        def refine_step(f_vals):
+                            # Convert to JAX array
+                            f = jnp.array(f_vals, dtype=jnp.float32)
+
+                            # Compute gradient using JAX autodiff
+                            grad_fn = grad(StepFunctionOptimizer.compute_c2_jax)
+                            grad_val = grad_fn(f)
+
+                            # Gradient ascent step
+                            step_size = 0.01
+                            refined = f + step_size * grad_val
+                            # Ensure non-negativity
+                            refined = jnp.maximum(refined, 0)
+
+                            # Convert back to numpy for evaluation
+                            return np.array(refined)
+
+                        # Apply refinement
+                        refined_f = refine_step(perturbed)
+
+                        # Evaluate refined solution
+                        c2_refined = self.evaluate_function(refined_f)
+
+                        if c2_refined > best_local_c2:
+                            best_local_c2 = c2_refined
+                            best_local_f = refined_f.tolist()
+
+                    except Exception as refinement_error:
+                        warnings.warn(f"JAX refinement failed: {str(refinement_error)}")
+                        # Skip this refinement attempt
+                        continue
+
+                # Update with better local result if found
+                if best_local_c2 > current_best_c2:
+                    current_best_c2 = best_local_c2
+                    current_best_f = best_local_f
+
+            except Exception as e:
+                warnings.warn(f"Local optimization failed: {str(e)}")
+
+        return current_best_c2, current_best_f
+>>>>>>> REPLACE
+</DIFF>

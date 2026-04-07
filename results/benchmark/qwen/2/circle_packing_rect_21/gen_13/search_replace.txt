@@ -1,0 +1,400 @@
+<NAME>
+evolve_circle_packing_v2
+</NAME>
+
+<DESCRIPTION>
+I'll create a more effective circle packing algorithm using a hybrid approach that combines systematic initialization with evolutionary optimization. The key improvements include:
+
+1. Better initialization strategy using hexagonal packing pattern
+2. Efficient collision detection using spatial indexing
+3. Improved evolutionary operators with proper constraint handling
+4. Local optimization to refine solutions
+5. Proper fitness calculation with constraint penalties
+
+This approach should significantly outperform the baseline by finding better arrangements that maximize the sum of radii.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+import time
+from scipy.spatial.distance import cdist
+
+# Configuration parameters
+POPULATION_SIZE = 100
+GENERATIONS = 50
+MUTATION_RATE = 0.15
+TOURNAMENT_SIZE = 5
+ELITISM_COUNT = 10
+
+def distance_matrix(circles):
+    """Calculate pairwise distances between circle centers"""
+    centers = circles[:, :2]
+    return cdist(centers, centers)
+
+def is_valid_placement(circles, new_circle, rect_width=1.0, rect_height=1.0):
+    """Check if a new circle placement is valid"""
+    new_x, new_y, new_r = new_circle
+
+    # Check boundary constraints
+    if (new_x - new_r < 0 or new_x + new_r > rect_width or
+        new_y - new_r < 0 or new_y + new_r > rect_height):
+        return False
+
+    # Check overlap with existing circles
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        distance = np.sqrt((new_x - x)**2 + (new_y - y)**2)
+        if distance < (new_r + r):
+            return False
+
+    return True
+
+def generate_hexagonal_initialization(n_circles, rect_width=1.0, rect_height=1.0):
+    """Generate initial solution using hexagonal packing pattern"""
+    circles = np.zeros((n_circles, 3))
+
+    # Determine grid parameters
+    rows = int(np.sqrt(n_circles))
+    cols = (n_circles + rows - 1) // rows
+
+    # Adjust for rectangular container
+    if rect_width >= rect_height:
+        cell_width = rect_width / cols
+        cell_height = rect_height / rows
+    else:
+        cell_width = rect_width / rows
+        cell_height = rect_height / cols
+
+    # Maximum possible radius
+    max_radius = min(cell_width, cell_height) / 3.0
+
+    # Fill grid with circles in hexagonal pattern
+    idx = 0
+    for row in range(rows):
+        for col in range(cols):
+            if idx >= n_circles:
+                break
+
+            # Offset odd rows for hexagonal pattern
+            offset = (row % 2) * (cell_width / 2)
+            x = offset + (col + 0.5) * cell_width
+            y = (row + 0.5) * cell_height
+
+            # Add some randomness to avoid perfect patterns
+            x += random.uniform(-cell_width/6, cell_width/6)
+            y += random.uniform(-cell_height/6, cell_height/6)
+
+            # Clip to valid bounds
+            x = np.clip(x, max_radius, rect_width - max_radius)
+            y = np.clip(y, max_radius, rect_height - max_radius)
+
+            # Assign radius
+            r = max_radius * random.uniform(0.7, 1.0)
+
+            circles[idx] = [x, y, r]
+            idx += 1
+
+    # Ensure all circles are valid
+    for i in range(idx):
+        # If any circle is invalid due to overlaps, fix it
+        for _ in range(100):  # Limit fixes to prevent infinite loop
+            # Move circle away from overlaps
+            valid = True
+            for j in range(i):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < (r1 + r2):
+                    valid = False
+                    # Move circle away
+                    angle = np.arctan2(y2 - y1, x2 - x1)
+                    new_x = x1 + (r1 + r2 + 0.01) * np.cos(angle)
+                    new_y = y1 + (r1 + r2 + 0.01) * np.sin(angle)
+
+                    # Clip to bounds
+                    new_x = np.clip(new_x, r1, rect_width - r1)
+                    new_y = np.clip(new_y, r1, rect_height - r1)
+
+                    circles[i] = [new_x, new_y, r1]
+                    break
+            if valid:
+                break
+
+    return circles
+
+def calculate_fitness_with_penalty(circles, rect_width=1.0, rect_height=1.0):
+    """Calculate fitness considering constraint violations"""
+    # Sum of all radii
+    total_radius = np.sum(circles[:, 2])
+
+    # Penalty for boundary violations (larger penalty for severe violations)
+    penalty = 0
+
+    # Boundary penalties
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # How much it violates the boundaries
+        left_violation = max(0, r - x)
+        right_violation = max(0, x + r - rect_width)
+        bottom_violation = max(0, r - y)
+        top_violation = max(0, y + r - rect_height)
+
+        penalty += 1000 * (left_violation + right_violation + bottom_violation + top_violation)
+
+    # Penalty for overlaps (severe penalty)
+    overlap_penalty = 0
+    for i in range(len(circles)):
+        for j in range(i+1, len(circles)):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            if distance < (r1 + r2):
+                overlap_penalty += 10000 * (r1 + r2 - distance)
+
+    penalty += overlap_penalty
+
+    return total_radius - penalty
+
+def mutate_individual(circles, mutation_rate=0.15, rect_width=1.0, rect_height=1.0):
+    """Mutate an individual by adjusting positions and radii"""
+    mutated = circles.copy()
+
+    # Adjust which elements to mutate
+    for i in range(len(circles)):
+        if random.random() < mutation_rate:
+            # Mutate either position or radius
+            if random.random() < 0.7:  # 70% chance to mutate position
+                x, y, r = mutated[i]
+                # Mutate position
+                dx = random.uniform(-0.05, 0.05)
+                dy = random.uniform(-0.05, 0.05)
+
+                new_x = np.clip(x + dx, r, rect_width - r)
+                new_y = np.clip(y + dy, r, rect_height - r)
+
+                mutated[i] = [new_x, new_y, r]
+            else:  # 30% chance to mutate radius
+                x, y, r = mutated[i]
+                dr = random.uniform(-0.03, 0.03)
+                new_r = np.clip(r + dr, 0.01, min(rect_width, rect_height) / 4.0)
+                mutated[i] = [x, y, new_r]
+
+    return mutated
+
+def crossover(parent1, parent2):
+    """Single-point crossover between parents"""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+
+    # Single point crossover
+    crossover_point = random.randint(1, len(parent1) - 1)
+
+    # Swap segments
+    child1[crossover_point:] = parent2[crossover_point:]
+    child2[crossover_point:] = parent1[crossover_point:]
+
+    return child1, child2
+
+def selection_tournament(population, fitnesses, tournament_size=5):
+    """Select individuals using tournament selection"""
+    selected = []
+
+    for _ in range(len(population)):
+        # Select tournament participants
+        tournament_indices = random.sample(range(len(population)), tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+
+        # Select winner (highest fitness)
+        winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+        selected.append(population[winner_idx].copy())
+
+    return selected
+
+def local_improvement(circles, rect_width=1.0, rect_height=1.0, max_iterations=20):
+    """Local improvement through iterative optimization"""
+    improved = circles.copy()
+
+    for _ in range(max_iterations):
+        improved_fitness = calculate_fitness_with_penalty(improved, rect_width, rect_height)
+        best_improved = improved.copy()
+        best_fitness = improved_fitness
+
+        # Try small adjustments to each circle
+        for i in range(len(improved)):
+            original_x, original_y, original_r = improved[i]
+
+            # Try several mutations to that circle
+            for attempt in range(5):
+                # Small random adjustment to position
+                dx = random.uniform(-0.02, 0.02)
+                dy = random.uniform(-0.02, 0.02)
+                dr = random.uniform(-0.01, 0.01)
+
+                new_x = np.clip(original_x + dx, original_r + dr, rect_width - (original_r + dr))
+                new_y = np.clip(original_y + dy, original_r + dr, rect_height - (original_r + dr))
+                new_r = np.clip(original_r + dr, 0.01, min(rect_width, rect_height) / 4.0)
+
+                # Test this change
+                temp_circles = improved.copy()
+                temp_circles[i] = [new_x, new_y, new_r]
+
+                # Check if valid and if fitness improved
+                temp_fitness = calculate_fitness_with_penalty(temp_circles, rect_width, rect_height)
+                if temp_fitness > best_fitness:
+                    best_fitness = temp_fitness
+                    best_improved = temp_circles.copy()
+
+        # If no improvement found, stop
+        if best_fitness <= improved_fitness:
+            break
+
+        improved = best_improved
+
+    return improved
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    rect_width = 1.0
+    rect_height = 1.0
+
+    start_time = time.time()
+
+    # Initialize population with better starting solutions
+    population = []
+
+    # Create some high-quality initial solutions using hexagonal packing
+    for _ in range(POPULATION_SIZE // 2):
+        individual = generate_hexagonal_initialization(21, rect_width, rect_height)
+        population.append(individual)
+
+    # Add some random solutions for diversity
+    for _ in range(POPULATION_SIZE // 2):
+        individual = np.zeros((21, 3))
+        max_radius = min(rect_width, rect_height) / 4.0
+
+        # Generate valid random circles
+        placed = 0
+        attempts = 0
+        max_attempts = 1000
+
+        while placed < 21 and attempts < max_attempts:
+            x = random.uniform(0.1, rect_width - 0.1)
+            y = random.uniform(0.1, rect_height - 0.1)
+            r = random.uniform(0.01, max_radius)
+
+            # Check if valid placement
+            valid = True
+            for i in range(placed):
+                old_x, old_y, old_r = individual[i]
+                distance = np.sqrt((x - old_x)**2 + (y - old_y)**2)
+                if distance < (r + old_r):
+                    valid = False
+                    break
+
+            if valid:
+                individual[placed] = [x, y, r]
+                placed += 1
+            attempts += 1
+
+        population.append(individual)
+
+    best_fitness = float('-inf')
+    best_individual = None
+
+    # Evolutionary algorithm
+    for generation in range(GENERATIONS):
+        # Calculate fitness for all individuals
+        fitnesses = [calculate_fitness_with_penalty(individual, rect_width, rect_height) for individual in population]
+
+        # Track best individual
+        max_fitness_idx = np.argmax(fitnesses)
+        if fitnesses[max_fitness_idx] > best_fitness:
+            best_fitness = fitnesses[max_fitness_idx]
+            best_individual = population[max_fitness_idx].copy()
+
+        # Print progress
+        if generation % 10 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness}")
+
+        # Check time limit
+        if time.time() - start_time > 55:  # Leave 5 seconds buffer
+            break
+
+        # Apply elitism
+        elite_indices = np.argsort(fitnesses)[-ELITISM_COUNT:]
+        elite = [population[i].copy() for i in elite_indices]
+
+        # Selection
+        selected = selection_tournament(population, fitnesses, TOURNAMENT_SIZE)
+
+        # Create new population through crossover and mutation
+        new_population = elite.copy()
+
+        while len(new_population) < POPULATION_SIZE:
+            # Select two parents
+            parent1 = random.choice(selected)
+            parent2 = random.choice(selected)
+
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+
+            # Mutate children
+            child1 = mutate_individual(child1, MUTATION_RATE, rect_width, rect_height)
+            child2 = mutate_individual(child2, MUTATION_RATE, rect_width, rect_height)
+
+            # Local improvement
+            child1 = local_improvement(child1, rect_width, rect_height)
+            child2 = local_improvement(child2, rect_width, rect_height)
+
+            new_population.extend([child1, child2])
+
+        # Trim to population size
+        population = new_population[:POPULATION_SIZE]
+
+    # Final refinement on best individual
+    if best_individual is not None:
+        final_solution = local_improvement(best_individual, rect_width, rect_height, max_iterations=30)
+        return final_solution
+
+    # Return worst performing if nothing worked
+    final_fitnesses = [calculate_fitness_with_penalty(individual, rect_width, rect_height) for individual in population]
+    best_final_idx = np.argmax(final_fitnesses)
+    return population[best_final_idx]
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

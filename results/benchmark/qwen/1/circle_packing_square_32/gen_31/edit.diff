@@ -1,0 +1,232 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,222 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++from scipy.spatial.distance import cdist
++import random
++from deap import base, creator, tools, algorithms
++import time
++
++# Global variables for optimization
++POPULATION_SIZE = 100
++GENE_LENGTH = 32 * 3  # 32 circles with (x, y, r) each
++MAX_GENERATIONS = 500
++MUTATION_RATE = 0.1
++CROSSOVER_RATE = 0.8
++TOURNAMENT_SIZE = 3
++
++def initialize_circles_greedy():
++    """Initialize circles using a greedy heuristic approach"""
++    n = 32
++    circles = np.zeros((n, 3))
++
++    # Predefined strategic positions for initial placement
++    # Corners first (they're most constrained)
++    corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
++
++    # Edges (excluding corners)
++    edges = []
++    for i in range(10):
++        edges.append((0.1 + 0.08 * i, 0.1))  # Bottom edge
++        edges.append((0.1 + 0.08 * i, 0.9))  # Top edge
++        edges.append((0.1, 0.1 + 0.08 * i))  # Left edge
++        edges.append((0.9, 0.1 + 0.08 * i))  # Right edge
++
++    # Fill with initial strategic positions
++    positions = corners + edges[:24]  # We'll use up to 32 positions
++
++    # Place circles greedily
++    for i in range(min(len(positions), n)):
++        x, y = positions[i]
++
++        # Set initial radius to max possible without overlapping existing circles
++        min_dist = float('inf')
++        for j in range(i):
++            prev_x, prev_y, prev_r = circles[j]
++            dist = np.sqrt((x - prev_x)**2 + (y - prev_y)**2)
++            min_dist = min(min_dist, dist)
++
++        # Set radius to allow maximum size without overlap
++        if i == 0:
++            r = min(x, y, 1-x, 1-y) * 0.4  # Start with generous but safe value
++        else:
++            r = min(x, y, 1-x, 1-y, min_dist/2) * 0.9
++
++        circles[i] = [x, y, max(r, 0.001)]  # Ensure minimum radius
++
++    # Fill remaining positions with random placement
++    for i in range(len(positions), n):
++        attempts = 0
++        while attempts < 100:
++            x = random.uniform(0.05, 0.95)
++            y = random.uniform(0.05, 0.95)
++
++            # Check overlap with existing circles
++            overlap = False
++            for j in range(i):
++                prev_x, prev_y, prev_r = circles[j]
++                dist = np.sqrt((x - prev_x)**2 + (y - prev_y)**2)
++                if dist < (prev_r + 0.02):  # Conservative overlap check
++                    overlap = True
++                    break
++
++            if not overlap:
++                r = min(x, y, 1-x, 1-y) * 0.3
++                circles[i] = [x, y, max(r, 0.001)]
++                break
++            attempts += 1
++
++    return circles
++
++def evaluate_fitness(individual):
++    """Evaluate fitness of an individual (solution)"""
++    # Convert individual to circles array
++    n = 32
++    circles = individual.reshape(n, 3)
++
++    # Extract x, y, r components
++    x = circles[:, 0]
++    y = circles[:, 1]
++    r = circles[:, 2]
++
++    # Check containment constraints
++    containment_ok = True
++    for i in range(n):
++        if r[i] > x[i] or r[i] > y[i] or r[i] > (1-x[i]) or r[i] > (1-y[i]):
++            containment_ok = False
++            break
++
++    if not containment_ok:
++        return -1e6  # Invalid solution
++
++    # Check overlap constraints using vectorized operations for efficiency
++    # Create distance matrix
++    distances = cdist(np.column_stack([x, y]), np.column_stack([x, y]))
++
++    # Check for overlaps
++    overlap_penalty = 0
++    for i in range(n):
++        for j in range(i+1, n):
++            if distances[i, j] < (r[i] + r[j]):
++                # Penalize based on how much they overlap
++                overlap_penalty += (r[i] + r[j] - distances[i, j])**2
++
++    if overlap_penalty > 0:
++        return -overlap_penalty - 1e6  # Heavy penalty for overlaps
++
++    # Fitness is sum of radii
++    total_radius = np.sum(r)
++
++    return total_radius
++
++def create_individual():
++    """Create a random individual (solution)"""
++    # Initialize circles with greedy approach first, then perturb
++    circles = initialize_circles_greedy()
++
++    # Perturb slightly to introduce variation
++    for i in range(32):
++        x, y, r = circles[i]
++        # Random perturbation within reasonable bounds
++        circles[i, 0] = max(0.01, min(0.99, x + random.gauss(0, 0.02)))
++        circles[i, 1] = max(0.01, min(0.99, y + random.gauss(0, 0.02)))
++        circles[i, 2] = max(0.001, min(0.4, r + random.gauss(0, 0.01)))
++
++    return circles.flatten()
++
++def mutate_individual(individual):
++    """Mutate an individual"""
++    for i in range(len(individual)):
++        if random.random() < MUTATION_RATE:
++            # Mutate coordinate or radius
++            if i % 3 == 0:  # x coordinate
++                individual[i] = max(0.01, min(0.99, individual[i] + random.gauss(0, 0.03)))
++            elif i % 3 == 1:  # y coordinate
++                individual[i] = max(0.01, min(0.99, individual[i] + random.gauss(0, 0.03)))
++            else:  # radius
++                individual[i] = max(0.001, min(0.4, individual[i] + random.gauss(0, 0.02)))
++    return individual,
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 32
+-    circles = np.zeros((n, 3))
+-
+-    return circles
++
++    # Set random seeds for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++
++    # Register DEAP classes
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++
++    toolbox = base.Toolbox()
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate_fitness)
++    toolbox.register("mate", tools.cxUniform, indpb=0.1)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
++
++    # Initialize population
++    pop = toolbox.population(n=POPULATION_SIZE)
++
++    # Evaluate initial population
++    invalid_ind = [ind for ind in pop if not ind.fitness.valid]
++    fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
++    for ind, fit in zip(invalid_ind, fitnesses):
++        ind.fitness.values = (fit,)
++
++    # Statistics
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++
++    # Run evolution
++    try:
++        hof = tools.ParetoFront()  # Keep the best non-dominated solutions
++
++        # Run evolution for MAX_GENERATIONS
++        pop, logbook = algorithms.eaSimple(
++            pop, toolbox,
++            cxpb=CROSSOVER_RATE,
++            mutpb=MUTATION_RATE,
++            ngen=MAX_GENERATIONS,
++            stats=stats,
++            halloffame=hof,
++            verbose=False
++        )
++
++        # Get the best individual
++        best_ind = tools.selBest(pop, 1)[0]
++        best_circles = np.array(best_ind).reshape(32, 3)
++
++        # Ensure final constraints are met
++        for i in range(32):
++            # Constrain to unit square
++            best_circles[i, 0] = max(0.001, min(0.999, best_circles[i, 0]))
++            best_circles[i, 1] = max(0.001, min(0.999, best_circles[i, 1]))
++            # Ensure radius is positive and reasonable
++            best_circles[i, 2] = max(0.001, min(0.4, best_circles[i, 2]))
++
++    except Exception as e:
++        # Fallback to greedy initialization if evolution fails
++        print(f"Evolution failed with error: {e}")
++        best_circles = initialize_circles_greedy()
++
++    return best_circles
+ 
+ 
+ # EVOLVE-BLOCK-END

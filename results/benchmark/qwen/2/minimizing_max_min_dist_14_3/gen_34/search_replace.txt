@@ -1,0 +1,172 @@
+<NAME>
+add_multi_objective_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding multi-objective optimization to simultaneously maximize both the minimum/maximum distance ratio and the uniformity of point distribution. This approach will use the spherical Voronoi entropy score as a secondary objective to guide the optimization towards configurations that are not only good for distance ratio but also well-distributed on the sphere. This addresses the limitation of single-objective optimization that can get stuck in local optima where distances are maximized but points are clustered in non-uniform ways.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Distance-based perturbation - perturb more aggressively for points that are too close
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+
+            # Use adaptive perturbation size based on how close points are
+            perturbation_magnitude = min(0.1, max(0.001, temperature * 0.05))
+
+            # More aggressive perturbation for points that are too close
+            if min_dist < 0.3:  # If points are very close, perturb more
+                perturbation_magnitude *= 2
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temperature):
+                current_points = neighbor_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+=======
+    def voronoi_entropy_score(points):
+        """
+        Calculate entropy-based score of Voronoi cell distribution.
+        High entropy indicates more uniform cell distribution.
+        """
+        # Only import when needed to avoid dependency issues
+        from scipy.spatial import SphericalVoronoi
+        try:
+            sv = SphericalVoronoi(points)
+            areas = sv.calculate_areas()
+            # Normalize areas
+            areas = areas / np.sum(areas)
+            # Entropy calculation
+            entropy = -np.sum(areas * np.log(areas + 1e-10))
+            return entropy
+        except:
+            # Fallback for cases where SphericalVoronoi fails
+            return 0.0
+
+    def multi_objective_fitness(points, ratio_weight=1.0, uniformity_weight=0.1):
+        """Fitness function combining distance ratio and uniformity."""
+        ratio = calculate_min_max_ratio(points)
+        uniformity = voronoi_entropy_score(points)
+        # Combined fitness: prioritize both uniformity and distance ratio
+        return ratio_weight * ratio + uniformity_weight * uniformity
+
+    def adaptive_simulated_annealing(initial_points, max_iterations=10000):
+        """Enhanced simulated annealing with adaptive cooling and multi-start capability"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_fitness = multi_objective_fitness(current_points)
+
+        # Adaptive cooling parameters
+        temperature = 1.0
+        cooling_rate = 0.9995
+        min_temperature = 1e-8
+
+        # Track convergence
+        last_improvement = 0
+        patience = 200  # How many iterations without improvement before cooling faster
+
+        for iteration in range(max_iterations):
+            # Create neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Distance-based perturbation - perturb more aggressively for points that are too close
+            distances = pdist(current_points)
+            min_dist = np.min(distances) if len(distances) > 0 else 1.0
+
+            # Use adaptive perturbation size based on how close points are
+            perturbation_magnitude = min(0.1, max(0.001, temperature * 0.05))
+
+            # More aggressive perturbation for points that are too close
+            if min_dist < 0.3:  # If points are very close, perturb more
+                perturbation_magnitude *= 2
+
+            perturbation = np.random.normal(0, perturbation_magnitude, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+            new_fitness = multi_objective_fitness(neighbor_points)
+
+            # Accept or reject the move with adaptive acceptance probability
+            if new_fitness > best_fitness or np.random.rand() < np.exp((new_fitness - best_fitness) / temperature):
+                current_points = neighbor_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+                    last_improvement = iteration
+
+            # Adaptive cooling: if no improvement for a while, cool faster
+            if iteration - last_improvement > patience:
+                temperature *= 0.95  # Faster cooling
+            else:
+                temperature *= cooling_rate
+
+            # Ensure temperature doesn't go too low
+            if temperature < min_temperature:
+                temperature = min_temperature
+
+            # Early stopping for convergence
+            if iteration - last_improvement > 1000:
+                break
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

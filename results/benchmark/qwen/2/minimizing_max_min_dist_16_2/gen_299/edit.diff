@@ -1,0 +1,493 @@
+--- a/original.py
++++ b/original.py
+@@ -1,251 +1,317 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import cdist
+ from scipy.optimize import differential_evolution
+ import time
+ 
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+-
+     """
+-
++    
+     n = 16
+     d = 2
+     best_ratio = -np.inf
+     best_points = None
+ 
+-    # Multiple restart strategies
+-    def _grid_perturbed_init():
+-        """Initialize with grid points plus adaptive random perturbations."""
++    def compute_ratio(points):
++        """Compute the min/max distance ratio for given points."""
++        distances = cdist(points, points, metric='euclidean')
++        np.fill_diagonal(distances, np.inf)
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++        if max_dist <= 0:
++            return 0
++        return min_dist / max_dist
++
++    def compute_distance_stats(points):
++        """Compute statistics of distance distribution."""
++        distances = cdist(points, points, metric='euclidean')
++        np.fill_diagonal(distances, np.inf)
++        if len(distances[distances < np.inf]) == 0:
++            return 0, 0, 0
++        min_dist = np.min(distances)
++        max_dist = np.max(distances)
++        mean_dist = np.mean(distances[distances < np.inf])
++        std_dist = np.std(distances[distances < np.inf])
++        return min_dist, max_dist, mean_dist, std_dist
++
++    # Multiple restart strategies with enhanced geometric understanding
++    def _structured_grid_init():
++        """Initialize with structured grid pattern."""
+         grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+         points = grid_points.astype(float) / 3.0  # Normalize to [0,1] range
+-
+-        # Adaptive perturbation based on initial quality
++        # Add slight perturbations to break symmetry
+         np.random.seed(42)
+-        points += np.random.uniform(-0.02, 0.02, points.shape)
++        points += np.random.uniform(-0.015, 0.015, points.shape)
+         points = np.clip(points, 0, 1)
+         return points
+ 
+-    def _hexagonal_init():
+-        """Initialize points using hexagonal packing pattern."""
++    def _hexagonal_packing_init():
++        """Initialize with hexagonal packing pattern."""
+         points = []
+         rows, cols = 4, 4
+         for i in range(rows):
+             for j in range(cols):
+                 x_offset = 0.5 if i % 2 == 1 else 0.0
+                 x = (j + x_offset) * 0.25 + 0.125
+                 y = i * 0.25 + 0.125
+                 points.append([x, y])
+         return np.array(points)
+ 
+-    def _random_spread_init():
+-        """Initialize with random points that are intentionally spread out."""
++    def _golden_spiral_init():
++        """Initialize with golden spiral pattern."""
++        points = []
++        phi = (1 + np.sqrt(5)) / 2
++        for i in range(n):
++            angle = 2 * np.pi * i / phi
++            radius = np.sqrt(i / (n - 1)) if n > 1 else 0
++            x = radius * np.cos(angle)
++            y = radius * np.sin(angle)
++            # Scale and center
++            x = 0.4 * x + 0.5
++            y = 0.4 * y + 0.5
++            points.append([x, y])
++        return np.array(points)
++
++    def _adaptive_clustering_init():
++        """Initialize with adaptive clustering prevention."""
+         np.random.seed(42)
+-        points = np.random.rand(16, 2)
+-
+-        # Apply basic spacing to prevent clustering
+-        for i in range(16):
+-            center_vec = points[i] - [0.5, 0.5]
+-            center_distance = np.linalg.norm(center_vec)
+-            if center_distance > 0:
+-                points[i] += center_vec * 0.1 / center_distance
+-
+-        points = np.clip(points, 0, 1)
++        points = np.random.rand(n, d)
++        
++        # Apply clustering avoidance
++        for iter in range(10):
++            for i in range(n):
++                # Move away from cluster centers
++                distances = cdist([points[i]], points)[0]
++                distances[i] = np.inf  # Exclude self
++                nearest = np.argmin(distances)
++                if distances[nearest] < 0.1:  # If too close
++                    direction = points[i] - points[nearest]
++                    if np.linalg.norm(direction) > 0:
++                        points[i] += direction * 0.02
++            points = np.clip(points, 0, 1)
+         return points
+ 
+-    def compute_ratio(points):
+-        """Compute the min/max distance ratio for given points."""
+-        distances = cdist(points, points, metric='euclidean')
+-        np.fill_diagonal(distances, np.inf)
+-        min_dist = np.min(distances)
+-        max_dist = np.max(distances)
+-        if max_dist <= 0:
+-            return 0
+-        return min_dist / max_dist
+-
+     restart_strategies = [
+-        _grid_perturbed_init,
+-        _hexagonal_init,
+-        _random_spread_init
++        _structured_grid_init,
++        _hexagonal_packing_init,
++        _golden_spiral_init,
++        _adaptive_clustering_init
+     ]
+ 
+-    # Function to perform local optimization with refinement
+-    def local_optimization_with_refinement(initial_points):
+-        """Perform local optimization followed by refinement."""
+-        # Define objective function: negative ratio (we'll minimize this)
+-        def objective(x):
+-            # Reshape flat array back to points
+-            pts = x.reshape(n, d)
+-
+-            # Calculate all pairwise distances efficiently using cdist
+-            distances = cdist(pts, pts, metric='euclidean')
+-            np.fill_diagonal(distances, np.inf)  # Ignore self-distances
+-
++    # Dual-space optimization approach
++    class DualSpaceOptimizer:
++        def __init__(self):
++            self.optimization_history = []
++            
++        def dual_objective(self, x, weights=(0.7, 0.3)):
++            """
++            Dual objective function that considers both distance distribution and ratio.
++            Combines:
++            1. Negative minimum distance (to maximize it)
++            2. Positive distance variance (to avoid clustering)
++            """
++            # Reshape
++            points = x.reshape(n, d)
++            
++            # Compute distances
++            distances = cdist(points, points, metric='euclidean')
++            np.fill_diagonal(distances, np.inf)
++            
++            if len(distances[distances < np.inf]) == 0:
++                return 1e10
++                
+             min_dist = np.min(distances)
+             max_dist = np.max(distances)
+-
+-            # Return negative ratio to maximize the ratio
++            std_dist = np.std(distances[distances < np.inf])
++            mean_dist = np.mean(distances[distances < np.inf])
++            
++            # Avoid division by zero
+             if max_dist <= 0:
+-                return 0
+-            return -min_dist / max_dist
+-
+-        # Define symmetry-breaking constraints
+-        def symmetry_constraint(x):
+-            pts = x.reshape(n, d)
+-            # Fix bottom-left point at origin (breaks translation symmetry)
+-            con1 = pts[0, 0]  # x-coordinate of first point should be 0
+-            con2 = pts[0, 1]  # y-coordinate of first point should be 0
+-            return np.array([con1, con2])
+-
+-        # Define lexicographic ordering constraint to break permutation symmetry
+-        def ordering_constraint(x):
+-            pts = x.reshape(n, d)
++                return 1e10
++                
++            ratio = min_dist / max_dist
++            
++            # Weighted combination of objectives
++            # Maximize ratio, minimize distance variance
++            obj_value = -ratio + weights[1] * std_dist / (mean_dist + 1e-8)
++            return obj_value
++
++        def symmetry_breaking_constraints(self, x):
++            """Enforce symmetry breaking through fixed reference points."""
++            points = x.reshape(n, d)
++            # Fix first point to be near origin (0.1, 0.1) to break translation symmetry
++            con1 = points[0, 0] - 0.1
++            con2 = points[0, 1] - 0.1
++            # Fix second point to ensure orientation
++            con3 = points[1, 0] - 0.3
++            con4 = points[1, 1] - 0.1
++            return np.array([con1, con2, con3, con4])
++
++        def lexicographic_ordering(self, x):
++            """Ensure lexico-graphic ordering to break permutation symmetry."""
++            points = x.reshape(n, d)
+             constraints = []
+             for i in range(1, n):
+-                # Each point should have x-coordinate >= previous point's x-coordinate
+-                constraints.append(pts[i, 0] - pts[i-1, 0])
+-                # If x-coordinates are equal, y-coordinate should be >= previous point's y-coordinate
+-                if pts[i, 0] == pts[i-1, 0]:
+-                    constraints.append(pts[i, 1] - pts[i-1, 1])
++                # X coordinate should be non-decreasing
++                constraints.append(points[i, 0] - points[i-1, 0])
++                # If x-coordinates are equal, y should be non-decreasing
++                if abs(points[i, 0] - points[i-1, 0]) < 1e-8:
++                    constraints.append(points[i, 1] - points[i-1, 1])
+             return np.array(constraints)
+ 
+-        # Define bounds (points must be in [0,1] x [0,1])
+-        bounds = [(0, 1) for _ in range(n * d)]
+-
+-        # Optimize using L-BFGS-B algorithm
+-        try:
+-            result = minimize(objective, initial_points.flatten(), method='L-BFGS-B', bounds=bounds,
+-                            options={'ftol': 1e-12, 'gtol': 1e-12})
+-
+-            if result.success:
+-                # Extract optimized points
+-                optimized_points = result.x.reshape(n, d)
+-
+-                # Perform a second optimization with SLSQP for further refinement
+-                try:
+-                    result2 = minimize(objective, optimized_points.flatten(), method='SLSQP', bounds=bounds,
+-                                     options={'ftol': 1e-12, 'gtol': 1e-12})
+-                    if result2.success:
+-                        optimized_points = result2.x.reshape(n, d)
+-                except:
+-                    pass
+-
+-                return optimized_points
+-        except:
+-            return None
+-        return None
+-
+-    # Try each initialization strategy multiple times
++        def optimize_with_hierarchical_approach(self, initial_points, max_time=160):
++            """Optimize using hierarchical approach: global → medium → local"""
++            start_time = time.time()
++            
++            # Level 1: Global search with differential evolution (coarse)
++            try:
++                bounds = [(0, 1) for _ in range(n * d)]
++                
++                # Simple DE for global search
++                de_result = differential_evolution(
++                    lambda x: self.dual_objective(x, weights=(0.8, 0.2)),
++                    bounds,
++                    maxiter=20,
++                    popsize=12,
++                    seed=42,
++                    tol=1e-5
++                )
++                
++                if de_result.success:
++                    initial_points = de_result.x.reshape(n, d)
++                    self.optimization_history.append(("DE", compute_ratio(initial_points)))
++                    
++            except Exception as e:
++                pass
++
++            # Level 2: Medium refinement with L-BFGS-B
++            try:
++                bounds = [(0, 1) for _ in range(n * d)]
++                result = minimize(
++                    lambda x: self.dual_objective(x, weights=(0.7, 0.3)),
++                    initial_points.flatten(),
++                    method='L-BFGS-B',
++                    bounds=bounds,
++                    options={'ftol': 1e-10, 'gtol': 1e-10}
++                )
++                
++                if result.success:
++                    refined_points = result.x.reshape(n, d)
++                    self.optimization_history.append(("L-BFGS", compute_ratio(refined_points)))
++                    initial_points = refined_points
++            except Exception as e:
++                pass
++
++            # Level 3: Fine refinement with SLSQP
++            try:
++                bounds = [(0, 1) for _ in range(n * d)]
++                result = minimize(
++                    lambda x: self.dual_objective(x, weights=(0.6, 0.4)),
++                    initial_points.flatten(),
++                    method='SLSQP',
++                    bounds=bounds,
++                    options={'ftol': 1e-12, 'gtol': 1e-12}
++                )
++                
++                if result.success:
++                    final_points = result.x.reshape(n, d)
++                    self.optimization_history.append(("SLSQP", compute_ratio(final_points)))
++                    return final_points
++            except Exception as e:
++                pass
++
++            return initial_points
++
++    # Main optimization loop
++    optimizer = DualSpaceOptimizer()
++    
++    # Try each initialization strategy
+     for strategy_idx, init_func in enumerate(restart_strategies):
+-        for restart in range(3):  # 3 restarts per strategy
++        for restart in range(2):  # Reduced restarts for efficiency
+             np.random.seed(strategy_idx * 1000 + restart)
+ 
+             # Get initial points
+             points = init_func()
+-
+-            # Perform local optimization
+-            optimized_points = local_optimization_with_refinement(points)
+-
+-            if optimized_points is not None:
+-                # Calculate ratio for this optimization run
+-                ratio = compute_ratio(optimized_points)
+-
+-                # Keep track of best solution
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = optimized_points.copy()
+-
+-    # Add evolutionary algorithm restarts for better global search
++            
++            # Apply dual-space optimization
++            optimized_points = optimizer.optimize_with_hierarchical_approach(points)
++            
++            # Calculate ratio for this optimization run
++            ratio = compute_ratio(optimized_points)
++
++            # Keep track of best solution
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = optimized_points.copy()
++
++    # Additional evolutionary restart with enhanced constraints
+     try:
+-        # Define the objective function for differential evolution with constraints
+-        def de_objective(x):
+-            # Reshape x into points array
++        # Enhanced DE with custom constraints
++        def enhanced_de_objective(x):
+             points = x.reshape(-1, 2)
+-
+-            # Calculate pairwise distances
+             distances = cdist(points, points, metric='euclidean')
+-
+-            # Calculate min and max distances
+-            d_min = np.min(distances)
+-            d_max = np.max(distances)
+-
+-            # Avoid division by zero
+-            if d_max == 0:
+-                return -np.inf
+-
+-            # Return negative ratio (since we want to maximize)
+-            return -d_min / d_max
+-
+-        # Define constraints for differential evolution
+-        def de_constraints(x):
+-            points = x.reshape(-1, 2)
+-            # Fix bottom-left point at origin to break translation symmetry
+-            con1 = points[0, 0]  # x-coordinate of first point should be 0
+-            con2 = points[0, 1]  # y-coordinate of first point should be 0
+-            return np.array([con1, con2])
+-
+-        # Run differential evolution for global search
++            np.fill_diagonal(distances, np.inf)
++            
++            if len(distances[distances < np.inf]) == 0:
++                return 1e10
++                
++            min_dist = np.min(distances)
++            max_dist = np.max(distances)
++            
++            if max_dist <= 0:
++                return 1e10
++                
++            # Use ratio maximization with penalty for bad configurations
++            ratio = min_dist / max_dist
++            
++            # Add penalty for points too close to boundaries (to avoid edge clustering)
++            boundary_penalty = 0
++            for pt in points:
++                boundary_dist = min(pt[0], 1-pt[0], pt[1], 1-pt[1])
++                if boundary_dist < 0.05:
++                    boundary_penalty += (0.05 - boundary_dist) * 1000
++            
++            return -(ratio - boundary_penalty/10000)
++
+         bounds = [(0, 1) for _ in range(n * d)]
++        
+         de_result = differential_evolution(
+-            de_objective,
++            enhanced_de_objective,
+             bounds,
+-            maxiter=50,
+-            popsize=10,
++            maxiter=30,
++            popsize=15,
+             seed=42,
+             tol=1e-6,
+             mutation=(0.5, 1),
+             recombination=0.7
+         )
+ 
+         if de_result.success:
+             de_points = de_result.x.reshape(-1, 2)
+             # Refine the DE result
+-            refined_de_points = local_optimization_with_refinement(de_points)
+-            if refined_de_points is not None:
+-                ratio = compute_ratio(refined_de_points)
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = refined_de_points.copy()
++            refined_de_points = optimizer.optimize_with_hierarchical_approach(de_points)
++            ratio = compute_ratio(refined_de_points)
++            
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = refined_de_points.copy()
+ 
+     except Exception as e:
+-        # Continue with existing best solution if DE fails
+         pass
+ 
+-    # If no successful optimization was found, return the best we have
++    # Final fallback check
+     if best_points is None:
+-        # Fallback to default initialization and optimization
+-        grid_points = np.array([[i, j] for i in range(4) for j in range(4)])
+-        points = grid_points.astype(float) / 3.0
+-        np.random.seed(42)
+-        points += np.random.uniform(-0.02, 0.02, points.shape)
+-        points = np.clip(points, 0, 1)
+-
+-        def objective(x):
+-            pts = x.reshape(n, d)
+-            distances = cdist(pts, pts, metric='euclidean')
+-            np.fill_diagonal(distances, np.inf)
+-            min_dist = np.min(distances)
+-            max_dist = np.max(distances)
+-            if max_dist <= 0:
+-                return 0
+-            return -min_dist / max_dist
+-
+-        bounds = [(0, 1) for _ in range(n * d)]
+-        try:
+-            result = minimize(objective, points.flatten(), method='L-BFGS-B', bounds=bounds,
+-                            options={'ftol': 1e-12, 'gtol': 1e-12})
+-            if result.success:
+-                best_points = result.x.reshape(n, d)
+-        except:
+-            best_points = points
++        # Use the best initial configuration
++        best_initial = max(restart_strategies, key=lambda f: compute_ratio(f())) 
++        best_points = best_initial()
+ 
+     return best_points
+ 
+-
+ # EVOLVE-BLOCK-END

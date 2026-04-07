@@ -1,0 +1,225 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.fft import fft, ifft
+from scipy.optimize import minimize
+import time
+import random
+
+np.random.seed(42)
+random.seed(42)
+
+def compute_autocorrelation_constant(sequence):
+    """
+    Computes the autocorrelation constant C₁ for a given sequence.
+    """
+    if len(sequence) == 0:
+        return float('inf'), 0.0
+    
+    a = np.array(sequence)
+    n = len(a)
+    
+    # Compute convolution using FFT for efficiency
+    b = ifft(fft(a, 2*n-1) * np.conj(fft(a, 2*n-1))).real[:n]
+    max_b = np.max(b)
+    sum_a = np.sum(a)
+    
+    if sum_a < 0.01:
+        return float('inf'), 0.0
+    
+    C1 = 2 * n * max_b / (sum_a ** 2)
+    inv_C1 = 1 / C1
+    
+    return C1, inv_C1
+
+def adaptive_frequency_optimize(current_sequence, max_iter=50):
+    """
+    Optimizes sequence using adaptive frequency-domain optimization with conjugate gradient.
+    """
+    n = len(current_sequence)
+    if n == 0:
+        return current_sequence
+        
+    # Ensure minimal positive values to prevent numerical issues
+    a = np.array(current_sequence, dtype=float)
+    a = np.maximum(a, 1e-10)
+    
+    # Convert to frequency domain
+    a_fft = fft(a, 2*n-1)
+    
+    # Objective function in frequency domain
+    def objective(freq_vals):
+        # Convert back to time domain
+        reconstructed = ifft(freq_vals, 2*n-1).real[:n]
+        reconstructed = np.maximum(reconstructed, 1e-10)
+        
+        # Compute convolution
+        conv_result = ifft(fft(reconstructed, 2*n-1) * np.conj(fft(reconstructed, 2*n-1))).real[:n]
+        max_conv = np.max(conv_result)
+        sum_reconstructed = np.sum(reconstructed)
+        
+        if sum_reconstructed < 0.01:
+            return float('inf')
+        
+        # Minimize max(conv) / (sum^2) to maximize 1/C1
+        C1 = 2 * n * max_conv / (sum_reconstructed ** 2)
+        return C1
+
+    # Use L-BFGS-B for better convergence
+    try:
+        initial_freq = a_fft.copy()
+        result = minimize(objective, initial_freq, method='L-BFGS-B', options={'maxiter': max_iter})
+        if result.success:
+            optimized_freq = result.x
+            optimized_time = ifft(optimized_freq, 2*n-1).real[:n]
+            optimized_time = np.maximum(optimized_time, 1e-10)
+            return optimized_time.tolist()
+    except Exception as e:
+        pass
+        
+    # Fallback to simple perturbation if optimization fails
+    new_sequence = current_sequence.copy()
+    idx = np.random.randint(0, n)
+    new_sequence[idx] = max(1e-10, new_sequence[idx] + np.random.normal(0, 0.1))
+    return new_sequence
+
+def cluster_and_perturb(seqs, n_clusters=3):
+    """
+    Clusters sequences based on similarity and creates new ones by perturbing cluster centers.
+    """
+    if len(seqs) == 0:
+        return []
+        
+    # Simple Euclidean distance clustering
+    distances = []
+    for i in range(len(seqs)):
+        for j in range(i+1, len(seqs)):
+            dist = np.linalg.norm(np.array(seqs[i]) - np.array(seqs[j]))
+            distances.append((dist, i, j))
+    
+    # Pick representative sequences
+    representatives = []
+    cluster_centers = {}
+    
+    # Simple heuristic: pick sequences with varied structures
+    for i in range(min(n_clusters, len(seqs))):
+        representatives.append(seqs[i])
+    
+    # Perturb each representative
+    new_sequences = []
+    for rep in representatives:
+        new_rep = rep.copy()
+        for _ in range(5):  # Create several variants
+            idx = random.randint(0, len(rep)-1)
+            new_rep[idx] = max(1e-10, new_rep[idx] + np.random.normal(0, 0.1))
+        new_sequences.append(new_rep)
+    
+    return new_sequences
+
+def search_for_best_sequence():
+    """
+    Main function to search for the best coefficient sequence.
+    """
+    start_time = time.time()
+    max_time = 180  # seconds
+    
+    best_inv_C1 = 0.0
+    best_sequence = None
+    best_C1 = float('inf')
+    
+    # Generate diverse initial sequences at different scales
+    initial_sequences = []
+    for _ in range(3):
+        n = np.random.randint(50, 200)
+        seq = np.random.uniform(0.1, 1.0, n).tolist()
+        initial_sequences.append(seq)
+        
+    # Add structured sequences with known good properties
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.8 ** i for i in range(n)]
+        initial_sequences.append(seq)
+        
+    # Add sequences with spikes or localized structures
+    for _ in range(2):
+        n = np.random.randint(100, 500)
+        seq = [0.0] * n
+        spike_idx = np.random.randint(0, n)
+        seq[spike_idx] = 1.0
+        initial_sequences.append(seq)
+    
+    # Multi-scale search
+    scale_factors = [0.5, 1.0, 2.0]
+    
+    for scale_factor in scale_factors:
+        if time.time() - start_time > max_time - 5:
+            break
+            
+        scaled_sequences = []
+        for seq in initial_sequences:
+            scaled_seq = [val * scale_factor for val in seq]
+            scaled_sequences.append(scaled_seq)
+            
+        # Process each scaled sequence
+        for i, init_seq in enumerate(scaled_sequences):
+            if time.time() - start_time > max_time - 5:
+                break
+                
+            # Normalize to avoid trivial solutions
+            norm_sum = sum(init_seq)
+            if norm_sum < 0.01:
+                continue
+                
+            current_seq = [val/norm_sum for val in init_seq]
+            current_C1, current_inv_C1 = compute_autocorrelation_constant(current_seq)
+            
+            if current_inv_C1 > best_inv_C1:
+                best_inv_C1 = current_inv_C1
+                best_sequence = current_seq.copy()
+                best_C1 = current_C1
+                
+            # Iterative local improvement
+            for iter_count in range(30):  # Fewer iterations to save time
+                if time.time() - start_time > max_time - 5:
+                    break
+                    
+                improved_seq = adaptive_frequency_optimize(current_seq, max_iter=20)
+                improved_C1, improved_inv_C1 = compute_autocorrelation_constant(improved_seq)
+                
+                if improved_inv_C1 > current_inv_C1:
+                    current_seq = improved_seq
+                    current_C1 = improved_C1
+                    current_inv_C1 = improved_inv_C1
+                    
+                    if current_inv_C1 > best_inv_C1:
+                        best_inv_C1 = current_inv_C1
+                        best_sequence = current_seq.copy()
+                        best_C1 = current_C1
+                        
+            # Perturb and try again to escape local minima
+            perturbed_seq = current_seq.copy()
+            idx = np.random.randint(0, len(current_seq))
+            perturbed_seq[idx] = max(1e-10, perturbed_seq[idx] + np.random.normal(0, 0.05))
+            perturbed_C1, perturbed_inv_C1 = compute_autocorrelation_constant(perturbed_seq)
+            
+            if perturbed_inv_C1 > best_inv_C1:
+                best_inv_C1 = perturbed_inv_C1
+                best_sequence = perturbed_seq.copy()
+                best_C1 = perturbed_C1
+                
+    # Final optimization with enhanced parameters
+    if best_sequence is not None:
+        final_seq = adaptive_frequency_optimize(best_sequence, max_iter=100)
+        final_C1, final_inv_C1 = compute_autocorrelation_constant(final_seq)
+        if final_inv_C1 > best_inv_C1:
+            best_sequence = final_seq
+            best_C1 = final_C1
+            best_inv_C1 = final_inv_C1
+    
+    return best_sequence if best_sequence is not None else [1.0]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

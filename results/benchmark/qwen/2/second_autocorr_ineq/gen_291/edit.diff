@@ -1,0 +1,457 @@
+--- a/original.py
++++ b/original.py
+@@ -1,343 +1,454 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ import numba
+ from scipy import signal
+ from scipy.optimize import differential_evolution
+ import random
+ import time
+ from typing import List, Tuple
+ 
+ # Set seed for reproducibility
+ random.seed(42)
+ np.random.seed(42)
+ 
+ @numba.jit(nopython=True)
+ def compute_autoconvolution_numba(f_vals):
+     """Compute autoconvolution efficiently using numba"""
+     n = len(f_vals)
+     # Create output array for autoconvolution
+     g = np.zeros(2*n - 1)
+ 
+     # Compute convolution manually with numba optimization
+     for i in range(n):
+         for j in range(n):
+             g[i + j] += f_vals[i] * f_vals[j]
+ 
+     return g
+ 
+ @numba.jit(nopython=True)
+ def compute_norms_numba(g_vals):
+     """Compute norms efficiently with numba"""
+     n = len(g_vals)
+ 
+     # L2 norm squared (using trapezoidal-like scheme)
+     l2_sq = 0.0
+     for i in range(n - 1):
+         y1 = g_vals[i]
+         y2 = g_vals[i + 1]
+         l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+ 
+     # L1 norm
+     l1 = 0.0
+     for i in range(n):
+         l1 += abs(g_vals[i])
+ 
+     # L-infinity norm
+     linf = 0.0
+     for i in range(n):
+         abs_val = abs(g_vals[i])
+         if abs_val > linf:
+             linf = abs_val
+ 
+     return l2_sq, l1, linf
+ 
+ def evaluate_individual(individual: List[float]) -> float:
+     """Evaluate fitness of an individual (step function)"""
+     try:
+         # Convert to numpy array and ensure non-negative
+         f_vals = np.array(individual, dtype=np.float64)
+         f_vals = np.maximum(f_vals, 0.0)
+ 
+         # Skip if all zeros
+         if np.sum(f_vals) == 0:
+             return 0.0
+ 
+         # Compute autoconvolution
+         g_vals = compute_autoconvolution_numba(f_vals)
+ 
+         # Compute norms
+         l2_sq, l1, linf = compute_norms_numba(g_vals)
+ 
+         # Avoid division by zero
+         if l1 <= 1e-15 or linf <= 1e-15:
+             return 0.0
+ 
+         # Compute C2
+         c2 = l2_sq / (l1 * linf)
+         return c2
+     except:
+         return 0.0
+ 
+ def create_gaussian_peak_function(size: int, n_peaks: int = None) -> List[float]:
+     """Create a step function with Gaussian peaks for better initialization"""
+     if n_peaks is None:
+         n_peaks = max(3, min(10, size // 50))
+ 
+     f_values = np.zeros(size)
+ 
+     # Create peaks with log-uniform distribution to avoid clustering
+     positions = np.logspace(0, 1, n_peaks, base=10) - 1  # [0, 9]
+     peak_positions = (positions / 9.0) * (size - 10) + 5  # Centered in domain
+ 
+     # Ensure unique positions
+     peak_positions = np.unique(peak_positions.astype(int))
+     while len(peak_positions) < n_peaks:
+         new_pos = np.random.randint(5, size - 5)
+         if new_pos not in peak_positions:
+             peak_positions = np.append(peak_positions, new_pos)
+     peak_positions = np.sort(peak_positions)[:n_peaks]
+ 
+     # Generate peaks with adaptive parameters
+     for i, center in enumerate(peak_positions):
+         # Width varies based on peak importance and position
+         if i == 0 or i == len(peak_positions) - 1:
+             width = max(15, min(60, size // 8))
+             height = random.uniform(1.5, 2.5)
+         else:
+             width = max(10, min(40, size // 15))
+             height = random.uniform(1.0, 2.0)
+ 
+         # Apply peak shape with exponential decay
+         x = np.arange(size)
+         peak = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+         f_values += peak
+ 
+     # Apply smoothing to reduce extreme variations
+     if size > 50:
+         window_size = min(51, size - 1)
+         if window_size % 2 == 0:
+             window_size -= 1
+         if window_size > 1:
+             f_values = signal.savgol_filter(f_values, window_size, 3)
+ 
+     # Ensure non-negativity and normalize
+     f_values = np.maximum(f_values, 0)
+     max_val = np.max(f_values)
+     if max_val > 0:
+         f_values = f_values / max_val * 2.0
+ 
+     return f_values.tolist()
++
++def optimize_peak_parameters(f_values: List[float], max_iterations: int = 100) -> List[float]:
++    """
++    Perform multi-scale peak parameter optimization targeting direct peak interactions
++    to maximize C2 ratio by adjusting peak positions and amplitudes rather than
++    individual step values.
++    """
++    # Convert to numpy for easier manipulation
++    f_array = np.array(f_values)
++    size = len(f_array)
++
++    # Detect peaks in the current function
++    # Use a simple method to identify significant peaks
++    from scipy.signal import find_peaks
++    peaks, _ = find_peaks(f_array, height=np.max(f_array)*0.1, distance=size//20)
++
++    if len(peaks) < 2:
++        # If not enough peaks, just return original
++        return f_values
++
++    # Select representative peaks for optimization
++    # Focus on peaks that are not too close to edges
++    edge_threshold = size // 10
++    valid_peaks = [p for p in peaks if p > edge_threshold and p < size - edge_threshold]
++
++    if len(valid_peaks) < 2:
++        valid_peaks = peaks[:2] if len(peaks) >= 2 else peaks
++
++    # Create initial peak parameters to optimize
++    # Format: [position, height, width] for each peak
++    peak_params = []
++    for peak_idx in valid_peaks[:5]:  # Limit to 5 peaks for efficiency
++        # Get approximate position and amplitude
++        height = f_array[peak_idx]
++        # Estimate width based on local spread
++        width = 10  # Default
++        peak_params.append([peak_idx, height, width])
++
++    # Simple gradient-free optimization loop
++    best_f = f_array.copy()
++    best_c2 = evaluate_individual(best_f.tolist())
++
++    for iteration in range(max_iterations):
++        # Create candidate by slightly adjusting peak parameters
++        candidate_f = np.zeros(size)
++
++        for pos, height, width in peak_params:
++            # Convert parameters to actual peak
++            x = np.arange(size)
++            # Add some jitter to make it less symmetric
++            peak = height * np.exp(-0.5 * ((x - pos) / width) ** 2)
++            candidate_f += peak
++
++        # Apply smoothing to new function
++        if size > 50:
++            window = min(51, size - 1)
++            if window % 2 == 0:
++                window -= 1
++            if window > 1:
++                candidate_f = signal.savgol_filter(candidate_f, window, 3)
++
++        # Ensure non-negativity
++        candidate_f = np.maximum(candidate_f, 0)
++
++        # Normalize to same total area as original
++        if np.sum(candidate_f) > 0:
++            scale_factor = np.sum(f_array) / np.sum(candidate_f)
++            candidate_f = candidate_f * scale_factor
++
++        # Evaluate
++        candidate_c2 = evaluate_individual(candidate_f.tolist())
++
++        if candidate_c2 > best_c2:
++            best_c2 = candidate_c2
++            best_f = candidate_f.copy()
++
++        # Make small adjustments to peak parameters for next iteration
++        for i in range(len(peak_params)):
++            param = peak_params[i]
++            if random.random() < 0.3:  # 30% chance to modify parameter
++                # Adjust position
++                if random.random() < 0.5 and param[0] > 10 and param[0] < size - 10:
++                    param[0] = max(10, min(size - 10, param[0] + random.randint(-5, 5)))
++                # Adjust height
++                if random.random() < 0.5:
++                    param[1] = max(0.1, param[1] * random.uniform(0.95, 1.05))
++                # Adjust width
++                if random.random() < 0.5:
++                    param[2] = max(5, min(size//4, param[2] * random.uniform(0.9, 1.1)))
++
++    return best_f.tolist()
+ 
+ def adaptive_evolutionary_optimization(size: int, max_time: float = 85.0) -> List[float]:
+     """
+     Advanced evolutionary optimization with adaptive parameters and specialized techniques
+     """
+     start_time = time.time()
+ 
+     # Initial population with diverse strategies
+     population = []
+ 
+     # Strategy 1: Gaussian peak initialization
+     initial_peak_func = create_gaussian_peak_function(size)
+     population.append(initial_peak_func)
+ 
+     # Strategy 2: Random with smoothing
+     random_func = np.random.rand(size)
+     random_func = signal.savgol_filter(random_func, min(51, size-1), 3) if size > 50 else random_func
+     random_func = np.maximum(random_func, 0)
+     population.append(random_func.tolist())
+ 
+     # Strategy 3: Gamma distribution
+     gamma_func = np.random.gamma(2, 2, size)
+     gamma_func = signal.savgol_filter(gamma_func, min(51, size-1), 3) if size > 50 else gamma_func
+     gamma_func = np.maximum(gamma_func, 0)
+     population.append(gamma_func.tolist())
+ 
+     # Strategy 4: Hybrid approach (some peaks, some smooth)
+     hybrid_func = np.zeros(size)
+     # Add some Gaussian peaks
+     n_peaks = max(3, min(8, size // 30))
+     for i in range(n_peaks):
+         center = random.randint(0, size-1)
+         width = max(10, min(30, size // 10))
+         height = random.uniform(1.0, 2.0)
+         x = np.arange(size)
+         peak = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+         hybrid_func += peak
+ 
+     # Add some smooth variation
+     smooth_part = np.random.rand(size)
+     smooth_part = signal.savgol_filter(smooth_part, min(51, size-1), 3) if size > 50 else smooth_part
+     hybrid_func += smooth_part
+ 
+     hybrid_func = np.maximum(hybrid_func, 0)
+     max_val = np.max(hybrid_func)
+     if max_val > 0:
+         hybrid_func = hybrid_func / max_val * 2.0
+     population.append(hybrid_func.tolist())
+ 
+     # Evaluate initial population
+     fitness_scores = [evaluate_individual(ind) for ind in population]
+ 
+     # Find best in initial population
+     best_idx = np.argmax(fitness_scores)
+     best_individual = population[best_idx].copy()
+     best_fitness = fitness_scores[best_idx]
+ 
+     # Adaptive parameters that change throughout optimization
+     current_generation = 0
+     max_generations = 50
+ 
+     # Main optimization loop
+     while current_generation < max_generations and (time.time() - start_time) < max_time * 0.9:
+         # Create offspring using advanced techniques
+         offspring = []
+ 
+         # Selection based on fitness
+         selected_indices = np.argsort(fitness_scores)[-min(20, len(population)):]
+         selected_population = [population[i] for i in selected_indices]
+         selected_fitness = [fitness_scores[i] for i in selected_indices]
+ 
+         # Elitism: carry forward the best individual
+         elite = best_individual.copy()
+         offspring.append(elite)
+ 
+         # Generate new individuals through specialized operators
+         while len(offspring) < len(population):
+             if time.time() - start_time > max_time * 0.95:
+                 break
+ 
+             # Different operators based on generation for adaptation
+             if current_generation < 10:
+                 # Early phase: exploration with mutation
+                 parent1 = random.choice(selected_population)
+                 parent2 = random.choice(selected_population)
+ 
+                 # Blend two parents
+                 child = [(a + b) / 2.0 for a, b in zip(parent1, parent2)]
+ 
+                 # Add mutation specific to step functions
+                 for i in range(len(child)):
+                     if random.random() < 0.15:
+                         # Use adaptive step mutation
+                         step_size = 0.1 + 0.05 * (current_generation / 10)
+                         child[i] = max(0, child[i] + random.gauss(0, step_size))
+ 
+                 offspring.append(child)
+ 
+             else:
+                 # Later phase: exploitation with specialized operators
+                 # Use crossover with geometric mixing
+                 parent1 = random.choice(selected_population)
+                 parent2 = random.choice(selected_population)
+ 
+                 # Geometric crossover (mixing with 1/2 probability)
+                 alpha = 0.5
+                 child = [alpha * a + (1 - alpha) * b for a, b in zip(parent1, parent2)]
+ 
+                 # Specialized mutation: peak height adjustment
+                 for i in range(len(child)):
+                     if random.random() < 0.1:
+                         # Peak-aware mutation
+                         mutation_strength = 0.05 + 0.02 * (current_generation / max_generations)
+                         if child[i] > 0.5:  # Only adjust significant peaks
+                             child[i] = max(0, child[i] + random.gauss(0, mutation_strength * child[i]))
+                         else:
+                             child[i] = max(0, child[i] + random.gauss(0, mutation_strength))
+ 
+                 offspring.append(child)
+ 
+         # Evaluate offspring
+         offspring_fitness = [evaluate_individual(ind) for ind in offspring]
+ 
+         # Update best if improved
+         for i, fitness in enumerate(offspring_fitness):
+             if fitness > best_fitness:
+                 best_fitness = fitness
+                 best_individual = offspring[i].copy()
+ 
+         # Replace population with offspring
+         population = offspring
+         fitness_scores = offspring_fitness
+ 
++        # Apply peak parameter refinement to the best individual periodically
++        if current_generation % 5 == 0 and current_generation > 0:
++            try:
++                refined = optimize_peak_parameters(best_individual)
++                refined_c2 = evaluate_individual(refined)
++                if refined_c2 > best_fitness:
++                    best_fitness = refined_c2
++                    best_individual = refined
++            except:
++                pass
++
+         current_generation += 1
+ 
+     return best_individual
+ 
+ def construct_function() -> List[float]:
+     """Function to construct step-function with high C2 value."""
+     start_time = time.time()
+ 
+     # Try multiple approaches to find good solution
+     best_result = []
+     best_c2 = 0
+ 
+     # Approach 1: Adaptive evolutionary optimization with multiple strategies
+     try:
+         # Try different sizes to find optimal resolution
+         test_sizes = [200, 500, 800, 1000, 1200]
+         for size in test_sizes:
+             if time.time() - start_time > 80:  # Leave buffer
+                 break
+ 
+             evolved_result = adaptive_evolutionary_optimization(size, 85 - (time.time() - start_time))
+             if evolved_result:
+                 c2 = evaluate_individual(evolved_result)
+                 if c2 > best_c2:
+                     best_c2 = c2
+                     best_result = evolved_result
+     except Exception as e:
+         pass
+ 
+     # If no good result from evolution, fallback to a more informed approach
+     if len(best_result) == 0:
+         # Use a structured heuristic approach
+         n_steps = 800
+         best_result = create_gaussian_peak_function(n_steps)
+ 
+     # Additional fine-tuning with local search
+     if best_result and (time.time() - start_time) < 80:
+         try:
+             # Apply a simple local search refinement
+             refined_result = best_result.copy()
+             best_score = evaluate_individual(refined_result)
+ 
+             # Try small perturbations
+             for _ in range(50):
+                 if time.time() - start_time > 80:
+                     break
+ 
+                 test_result = refined_result.copy()
+                 # Perturb a few elements
+                 n_perturb = max(1, len(test_result) // 20)
+                 indices = random.sample(range(len(test_result)), n_perturb)
+ 
+                 for idx in indices:
+                     # Apply multiplicative perturbation
+                     factor = random.uniform(0.95, 1.05)
+                     test_result[idx] = max(0, test_result[idx] * factor)
+ 
+                 test_score = evaluate_individual(test_result)
+                 if test_score > best_score:
+                     refined_result = test_result
+                     best_score = test_score
+ 
+             # Update best if refined version is better
+             if evaluate_individual(refined_result) > best_c2:
+                 best_result = refined_result
++
++            # Apply specialized peak refinement at the end
++            try:
++                final_refined = optimize_peak_parameters(best_result)
++                final_c2 = evaluate_individual(final_refined)
++                if final_c2 > best_c2:
++                    best_result = final_refined
++            except:
++                pass
+         except:
+             pass
+ 
+     # Limit execution time
+     elapsed = time.time() - start_time
+     if elapsed > 85:  # Leave buffer for cleanup
+         return best_result[:1000]  # Truncate if needed
+ 
+     return best_result
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

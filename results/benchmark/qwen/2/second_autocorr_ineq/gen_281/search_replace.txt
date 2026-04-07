@@ -1,0 +1,117 @@
+<NAME>
+enhanced_gaussian_peak_positioning
+</NAME>
+
+<DESCRIPTION>
+This improvement focuses on enhancing the Gaussian peak positioning strategy in the population generator. The key insight is to implement more sophisticated logarithmic spacing with adaptive peak density that better matches the optimal autoconvolution profile. Instead of simple logspace, we'll use a more intelligent approach that creates peaks with varying densities based on expected convolution behavior - placing more peaks near the center where they contribute more significantly to the autoconvolution structure, and fewer at the edges where their effect diminishes.
+
+This change targets the fundamental construction of candidate solutions, which is crucial for maximizing C₂ values, especially since the current approach doesn't fully exploit the mathematical structure of how peak placement affects autoconvolution profiles.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class StandardPopulationGenerator(PopulationGenerationStrategy):
+    """Standard population generation with structured and random approaches"""
+
+    def generate_initial_population(self, population_size: int, min_length: int, max_length: int) -> List[List[float]]:
+        """Create diverse initial population with mixed strategies"""
+        population = []
+
+        # Strategy 1: Structured Gaussian-like approach
+        structured_count = population_size // 2
+        for _ in range(structured_count):
+            length = np.random.randint(min_length, max_length)
+            # Create base Gaussian with decreasing amplitudes
+            base_shape = np.exp(-np.linspace(-2, 2, length)**2 / 2)
+            # Add controlled noise
+            noise = np.random.normal(0, 0.05 * np.mean(base_shape) if np.mean(base_shape) > 0 else 0.01, length)
+            individual = np.clip(base_shape + noise, 0, 10.0)
+            population.append(individual.tolist())
+
+        # Strategy 2: Random approach for diversity
+        random_count = population_size - structured_count
+        for _ in range(random_count):
+            length = np.random.randint(min_length, max_length)
+            individual = np.clip(np.random.exponential(scale=0.5, size=length), 0, 10.0)
+            population.append(individual.tolist())
+
+        return population
+=======
+class StandardPopulationGenerator(PopulationGenerationStrategy):
+    """Standard population generation with structured and random approaches"""
+
+    def generate_initial_population(self, population_size: int, min_length: int, max_length: int) -> List[List[float]]:
+        """Create diverse initial population with mixed strategies"""
+        population = []
+
+        # Strategy 1: Enhanced structured Gaussian-like approach with adaptive peak positioning
+        structured_count = population_size // 2
+        for _ in range(structured_count):
+            length = np.random.randint(min_length, max_length)
+
+            # Create x coordinates from -1/4 to 1/4
+            x = np.linspace(-0.25, 0.25, length)
+
+            # Create base function with enhanced Gaussian peak positioning
+            # Use adaptive peak distribution: more peaks near center where they matter most
+            individual = np.zeros(length)
+
+            # Determine number of peaks with adaptive strategy
+            base_num_peaks = max(3, min(15, length // 50))  # Base number scales with length
+
+            # Adaptive peak density: more in center region, less at edges
+            center_region_width = 0.1  # Center region where peaks are denser
+            edge_region_width = 0.15   # Edge regions where peaks are sparser
+
+            # Generate adaptive peak positions - denser near center, sparser at edges
+            peak_positions = []
+            peak_weights = []
+
+            # Add peaks with different densities based on position
+            for i in range(base_num_peaks):
+                # Position peaks preferentially in center with decreasing density toward edges
+                if i < base_num_peaks // 3:  # First third: dense in center
+                    pos = np.random.uniform(-center_region_width, center_region_width)
+                elif i < 2 * base_num_peaks // 3:  # Middle third: moderate density
+                    pos = np.random.uniform(-0.25, 0.25)  # Uniform across domain
+                else:  # Last third: sparse at edges
+                    sign = np.random.choice([-1, 1])
+                    pos = sign * np.random.uniform(0.15, 0.25)
+
+                peak_positions.append(pos)
+
+                # Weight based on position preference - peaks near center should be stronger
+                center_dist = abs(pos)
+                if center_dist < 0.05:
+                    weight = np.random.uniform(1.5, 2.5)
+                elif center_dist < 0.15:
+                    weight = np.random.uniform(1.0, 2.0)
+                else:
+                    weight = np.random.uniform(0.5, 1.5)
+                peak_weights.append(weight)
+
+            # Create peaks with adaptive parameters
+            for i, (pos, weight) in enumerate(zip(peak_positions, peak_weights)):
+                if abs(pos) <= 0.25:
+                    # Width inversely related to weight (stronger peaks = narrower)
+                    width = 0.02 / (weight * 0.5 + 0.5)
+                    # Create Gaussian peak with adaptive parameters
+                    peak = weight * np.exp(-0.5 * ((x - pos) / width)**2)
+                    individual += peak
+
+            # Add some noise and normalize
+            noise = np.random.normal(0, 0.02 * np.mean(individual) if np.mean(individual) > 0 else 0.01, length)
+            individual = np.clip(individual + noise, 0, 10.0)
+
+            population.append(individual.tolist())
+
+        # Strategy 2: Random approach for diversity
+        random_count = population_size - structured_count
+        for _ in range(random_count):
+            length = np.random.randint(min_length, max_length)
+            individual = np.clip(np.random.exponential(scale=0.5, size=length), 0, 10.0)
+            population.append(individual.tolist())
+
+        return population
+>>>>>>> REPLACE
+</DIFF>

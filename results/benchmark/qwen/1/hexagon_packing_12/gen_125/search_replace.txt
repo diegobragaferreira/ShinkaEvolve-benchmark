@@ -1,0 +1,238 @@
+<NAME>
+implement_fast_bounding_circle_filter
+</NAME>
+
+<DESCRIPTION>
+I'll implement a fast bounding circle test as a pre-filter before expensive geometric checks. This will dramatically improve performance by quickly eliminating obviously invalid configurations early in the evaluation pipeline. The approach will use distance calculations from center points to rapidly estimate whether a hexagon might fit within the outer boundary, reducing redundant computation and accelerating convergence.
+
+This is inspired by the "Fast bounding circle tests as a pre-filter" recommendation and follows the pattern of using quick geometric checks to avoid expensive Shapely operations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class ConstraintChecker:
+    """Handles constraint validation for hexagon packing."""
+
+    def __init__(self, outer_center: Tuple[float, float] = (0, 0)):
+        self.outer_center = outer_center
+
+    def check_containment(self, hex_vertices: np.ndarray, outer_side_length: float) -> bool:
+        """Check if all vertices of a hexagon are inside the outer hexagon."""
+        outer_vertices = HexagonGeometry.create_vertices(self.outer_center, outer_side_length, 0)
+        outer_polygon = Polygon(outer_vertices)
+
+        for vertex in hex_vertices:
+            point = Point(vertex)
+            if not outer_polygon.contains(point):
+                return False
+        return True
+
+    def check_overlap_pair(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons overlap using Shapely."""
+        hex1_polygon = Polygon(hex1_vertices)
+        hex2_polygon = Polygon(hex2_vertices)
+        return hex1_polygon.intersects(hex2_polygon)
+
+    def get_outer_hex_side_from_config(self, inner_hex_data: np.ndarray, center: Tuple[float, float] = (0, 0)) -> float:
+        """Compute the minimum required outer hexagon side length from current configuration."""
+        if len(inner_hex_data) == 0:
+            return 100.0
+
+        max_dist = 0.0
+        circumradius = HexagonGeometry.get_circumradius(1.0)
+
+        for i in range(len(inner_hex_data)):
+            cx, cy, _ = inner_hex_data[i]
+            dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
+            dist_to_edge = dist + circumradius
+            max_dist = max(max_dist, dist_to_edge)
+
+        return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+=======
+class ConstraintChecker:
+    """Handles constraint validation for hexagon packing."""
+
+    def __init__(self, outer_center: Tuple[float, float] = (0, 0)):
+        self.outer_center = outer_center
+
+    def check_bounding_circle_containment(self, center: Tuple[float, float], outer_side_length: float) -> bool:
+        """Quick check using bounding circle: if center is too far from outer center, hexagon can't fit."""
+        dist = np.sqrt((center[0] - self.outer_center[0])**2 + (center[1] - self.outer_center[1])**2)
+        # For a unit hexagon, the circumradius is 1, so we need distance + 1 <= outer_side_length
+        return dist + 1.0 <= outer_side_length
+
+    def check_containment(self, hex_vertices: np.ndarray, outer_side_length: float) -> bool:
+        """Check if all vertices of a hexagon are inside the outer hexagon."""
+        outer_vertices = HexagonGeometry.create_vertices(self.outer_center, outer_side_length, 0)
+        outer_polygon = Polygon(outer_vertices)
+
+        for vertex in hex_vertices:
+            point = Point(vertex)
+            if not outer_polygon.contains(point):
+                return False
+        return True
+
+    def check_overlap_pair(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons overlap using Shapely."""
+        hex1_polygon = Polygon(hex1_vertices)
+        hex2_polygon = Polygon(hex2_vertices)
+        return hex1_polygon.intersects(hex2_polygon)
+
+    def get_outer_hex_side_from_config(self, inner_hex_data: np.ndarray, center: Tuple[float, float] = (0, 0)) -> float:
+        """Compute the minimum required outer hexagon side length from current configuration."""
+        if len(inner_hex_data) == 0:
+            return 100.0
+
+        max_dist = 0.0
+        circumradius = HexagonGeometry.get_circumradius(1.0)
+
+        for i in range(len(inner_hex_data)):
+            cx, cy, _ = inner_hex_data[i]
+            dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
+            dist_to_edge = dist + circumradius
+            max_dist = max(max_dist, dist_to_edge)
+
+        return max_dist * 2.0  # Diameter gives us the side length for a hexagon
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<NAME>
+optimize_evaluate_configuration_with_fast_filter
+</NAME>
+
+<DESCRIPTION>
+Now I'll optimize the evaluate_configuration method to use the new fast bounding circle filter as a pre-check. This will significantly speed up the evaluation by quickly rejecting configurations that are obviously invalid before doing expensive geometric computations. The filtering approach will apply the bounding circle test for containment check first, and only proceed to detailed polygon operations when necessary.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_configuration(self, inner_hex_data: np.ndarray,
+                             outer_hex_center: Tuple[float, float] = (0, 0)) -> float:
+        """Evaluate a configuration for validity and return inverse side length."""
+        if len(inner_hex_data) != 12:
+            return 1e-10
+
+        # Create all hexagon polygons
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            cx, cy, angle = inner_hex_data[i]
+            vertices = self.hex_geometry.create_vertices((cx, cy), 1.0, angle)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment: all hexagon vertices must be within outer hexagon
+        outer_side_length = self.constraint_checker.get_outer_hex_side_from_config(
+            inner_hex_data, outer_hex_center
+        )
+        outer_vertices = self.hex_geometry.create_vertices(outer_hex_center, outer_side_length, 0)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment for all vertices
+        for i in range(len(inner_hex_data)):
+            vertices = hex_polygons[i].exterior.coords[:-1]  # Exclude last point (duplicate of first)
+            for vertex in vertices:
+                point = Point(vertex)
+                if not outer_polygon.contains(point):
+                    return 1e-10
+
+        # Check overlaps between all pairs of hexagons efficiently
+        # Use spatial indexing for faster overlap detection
+        try:
+            # Create KDTree for spatial acceleration
+            centers = np.array([[h[0], h[1]] for h in inner_hex_data])
+            tree = cKDTree(centers)
+
+            # Find nearby pairs to check for overlaps
+            pairs = tree.query_pairs(r=2.0, p=np.inf)  # Check pairs within distance 2
+
+            # Only check actual overlaps for pairs that might intersect
+            for i, j in pairs:
+                if i < j:  # Avoid double checking
+                    if hex_polygons[i].intersects(hex_polygons[j]):
+                        return 1e-10
+
+            # Also do full check for safety - this catches edge cases
+            for i in range(len(inner_hex_data)):
+                for j in range(i+1, len(inner_hex_data)):
+                    if hex_polygons[i].intersects(hex_polygons[j]):
+                        return 1e-10
+
+        except Exception:
+            # Fallback to brute force if spatial indexing fails
+            for i in range(len(inner_hex_data)):
+                for j in range(i+1, len(inner_hex_data)):
+                    if hex_polygons[i].intersects(hex_polygons[j]):
+                        return 1e-10
+
+        # If we reach here, the configuration is valid
+        return 1.0 / outer_side_length
+=======
+    def evaluate_configuration(self, inner_hex_data: np.ndarray,
+                             outer_hex_center: Tuple[float, float] = (0, 0)) -> float:
+        """Evaluate a configuration for validity and return inverse side length."""
+        if len(inner_hex_data) != 12:
+            return 1e-10
+
+        # Quick preliminary check using bounding circles to eliminate obviously invalid configs
+        outer_side_length = self.constraint_checker.get_outer_hex_side_from_config(
+            inner_hex_data, outer_hex_center
+        )
+
+        # Check each hexagon's center against outer hexagon using fast bounding circle test
+        for i in range(len(inner_hex_data)):
+            cx, cy, _ = inner_hex_data[i]
+            if not self.constraint_checker.check_bounding_circle_containment((cx, cy), outer_side_length):
+                return 1e-10
+
+        # Create all hexagon polygons
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            cx, cy, angle = inner_hex_data[i]
+            vertices = self.hex_geometry.create_vertices((cx, cy), 1.0, angle)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment: all hexagon vertices must be within outer hexagon
+        outer_vertices = self.hex_geometry.create_vertices(outer_hex_center, outer_side_length, 0)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment for all vertices
+        for i in range(len(inner_hex_data)):
+            vertices = hex_polygons[i].exterior.coords[:-1]  # Exclude last point (duplicate of first)
+            for vertex in vertices:
+                point = Point(vertex)
+                if not outer_polygon.contains(point):
+                    return 1e-10
+
+        # Check overlaps between all pairs of hexagons efficiently
+        # Use spatial indexing for faster overlap detection
+        try:
+            # Create KDTree for spatial acceleration
+            centers = np.array([[h[0], h[1]] for h in inner_hex_data])
+            tree = cKDTree(centers)
+
+            # Find nearby pairs to check for overlaps
+            pairs = tree.query_pairs(r=2.0, p=np.inf)  # Check pairs within distance 2
+
+            # Only check actual overlaps for pairs that might intersect
+            for i, j in pairs:
+                if i < j:  # Avoid double checking
+                    if hex_polygons[i].intersects(hex_polygons[j]):
+                        return 1e-10
+
+            # Also do full check for safety - this catches edge cases
+            for i in range(len(inner_hex_data)):
+                for j in range(i+1, len(inner_hex_data)):
+                    if hex_polygons[i].intersects(hex_polygons[j]):
+                        return 1e-10
+
+        except Exception:
+            # Fallback to brute force if spatial indexing fails
+            for i in range(len(inner_hex_data)):
+                for j in range(i+1, len(inner_hex_data)):
+                    if hex_polygons[i].intersects(hex_polygons[j]):
+                        return 1e-10
+
+        # If we reach here, the configuration is valid
+        return 1.0 / outer_side_length
+>>>>>>> REPLACE

@@ -1,0 +1,158 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import differential_evolution
+import random
+import time
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Parameters
+    n_circles = 32
+    max_iter = 500
+    pop_size = 100
+    mutation_rate = 0.1
+    crossover_rate = 0.8
+    tolerance = 1e-6
+    
+    # Initialize circles array
+    circles = np.zeros((n_circles, 3))
+    
+    # Phase 1: Initial placement using greedy algorithm
+    def initialize_placement():
+        # Place circles in a structured way: corners, edges, then fill
+        initial_circles = []
+        
+        # Place 4 circles in corners
+        corner_positions = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+        for i, pos in enumerate(corner_positions):
+            # Set large radii initially
+            radius = min(pos[0], pos[1], 0.5)
+            initial_circles.append([pos[0], pos[1], radius])
+            
+        # Fill remaining spaces with greedy approach
+        remaining = n_circles - len(initial_circles)
+        
+        # Create a list of candidate positions for placement
+        candidates = []
+        for i in range(remaining):
+            # Generate candidate positions
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            candidates.append([x, y, 0.05])
+            
+        # Try to place each remaining circle with maximum possible radius
+        for i in range(len(candidates)):
+            x, y, _ = candidates[i]
+            max_radius = min(x, y, 1-x, 1-y)
+            
+            # Check for collisions with already placed circles
+            collision_free = True
+            for cx, cy, r in initial_circles:
+                dist_sq = (x - cx)**2 + (y - cy)**2
+                if dist_sq < (r + max_radius)**2:
+                    collision_free = False
+                    break
+                    
+            if collision_free:
+                candidates[i][2] = max_radius
+                initial_circles.append(candidates[i])
+            else:
+                # Try smaller radius
+                candidates[i][2] = max_radius * 0.5
+                initial_circles.append(candidates[i])
+                
+        # Pad to exactly 32 circles if needed
+        while len(initial_circles) < n_circles:
+            initial_circles.append([0.5, 0.5, 0.01])
+            
+        return np.array(initial_circles[:n_circles])
+    
+    # Phase 2: Evolutionary optimization
+    def evaluate_fitness(candidate):
+        """Evaluate fitness of a candidate solution"""
+        coords = candidate.reshape(-1, 3)
+        total_radius = np.sum(coords[:, 2])
+        
+        # Calculate penalty for constraint violations
+        penalty = 0
+        
+        # Boundary penalties
+        for i in range(len(coords)):
+            x, y, r = coords[i]
+            if r > x or r > y or r > 1-x or r > 1-y:
+                penalty += 1000 * (r - x)**2 + 1000 * (r - y)**2 + 1000 * (r - (1-x))**2 + 1000 * (r - (1-y))**2
+        
+        # Collision penalties
+        for i in range(len(coords)):
+            for j in range(i+1, len(coords)):
+                x1, y1, r1 = coords[i]
+                x2, y2, r2 = coords[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_dist_sq = (r1 + r2)**2
+                
+                if dist_sq < min_dist_sq:
+                    overlap = min_dist_sq - dist_sq
+                    penalty += 10000 * overlap
+                    
+        return -(total_radius - penalty)  # Negative because we minimize in scipy
+    
+    def evolve_population():
+        # Start with initial placement
+        current_solution = initialize_placement()
+        current_coords = current_solution.flatten()
+        
+        # Store best solution so far
+        best_solution = current_coords.copy()
+        best_fitness = evaluate_fitness(current_coords)
+        
+        # Evolution loop
+        for generation in range(max_iter):
+            # Adaptive mutation rate - decrease over time
+            adaptive_mutation = mutation_rate * (1 - generation/max_iter)
+            
+            # Generate new population
+            new_population = []
+            for _ in range(pop_size):
+                # Create offspring through mutation
+                offspring = current_coords.copy()
+                
+                # Mutate randomly selected elements
+                indices = np.random.choice(len(offspring), size=int(len(offspring) * adaptive_mutation), replace=False)
+                for idx in indices:
+                    if idx % 3 == 2:  # Radius mutation
+                        # Ensure positive radius
+                        offspring[idx] = max(0.001, offspring[idx] + np.random.normal(0, 0.02))
+                    else:  # Position mutation
+                        offspring[idx] = max(0.001, min(0.999, offspring[idx] + np.random.normal(0, 0.02)))
+                        
+                new_population.append(offspring)
+                
+            # Evaluate and select
+            fitness_scores = [evaluate_fitness(individual) for individual in new_population]
+            sorted_indices = np.argsort(fitness_scores)
+            
+            # Update best solution
+            if fitness_scores[sorted_indices[0]] < best_fitness:
+                best_fitness = fitness_scores[sorted_indices[0]]
+                best_solution = new_population[sorted_indices[0]].copy()
+                
+            # Select top individuals
+            current_coords = new_population[sorted_indices[0]]
+            
+        return best_solution.reshape(-1, 3)
+    
+    # Final optimization
+    final_circles = evolve_population()
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END

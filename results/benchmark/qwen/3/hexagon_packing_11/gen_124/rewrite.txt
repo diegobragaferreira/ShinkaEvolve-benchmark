@@ -1,0 +1,393 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+import math
+from scipy.optimize import minimize
+import time
+from scipy.spatial.distance import cdist
+from itertools import combinations
+
+def create_regular_hexagon(center_x, center_y, side_length=1, rotation_deg=0):
+    """Create a regular hexagon as a Shapely polygon"""
+    rotation_rad = math.radians(rotation_deg)
+    points = []
+    for i in range(6):
+        angle = rotation_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+def check_containment_and_overlap(inner_hexagons, outer_hexagon):
+    """Check if all inner hexagons are contained in outer hexagon and don't overlap"""
+    # Check containment
+    for hex_poly in inner_hexagons:
+        if not outer_hexagon.contains(hex_poly):
+            return False
+    
+    # Check pairwise overlaps - optimized for early termination
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if inner_hexagons[i].intersects(inner_hexagons[j]):
+                return False
+    
+    return True
+
+def compute_outer_hexagon_radius(inner_hexagons, padding=0.01):
+    """Compute minimum radius needed to contain all inner hexagons with some padding"""
+    # Get all vertices of all hexagons
+    all_vertices = []
+    for hex_poly in inner_hexagons:
+        all_vertices.extend(list(hex_poly.exterior.coords))
+    
+    # Find center of bounding box
+    xs = [p[0] for p in all_vertices]
+    ys = [p[1] for p in all_vertices]
+    center_x = (min(xs) + max(xs)) / 2
+    center_y = (min(ys) + max(ys)) / 2
+    
+    # Compute max distance from center to any vertex
+    max_dist = 0
+    for x, y in all_vertices:
+        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_dist = max(max_dist, dist)
+    
+    # Add padding and convert to side length
+    # For a regular hexagon, radius = side_length
+    return max_dist + padding
+
+def evaluate_layout(inner_positions_angles, outer_center=(0, 0), initial_outer_radius=8):
+    """Evaluate the layout quality"""
+    # Convert to hexagon polygons
+    inner_hexagons = []
+    for pos_angle in inner_positions_angles:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+    
+    # Create outer hexagon with current radius
+    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    outer_hexagon = create_regular_hexagon(outer_center[0], outer_center[1], outer_radius, 0)
+    
+    # Validate constraints
+    valid = check_containment_and_overlap(inner_hexagons, outer_hexagon)
+    
+    # Return negative because we want to maximize 1/R (minimize R)
+    outer_side_length = outer_radius
+    inv_radius = 1.0 / outer_side_length if valid else 0.0
+    
+    return -inv_radius, outer_side_length
+
+def generate_tile_pattern_configs():
+    """Generate multiple tile-based configurations for 11 hexagons"""
+    configs = []
+    
+    # Pattern 1: 3x4 hexagon tiling (most promising)
+    # Start with central hexagon and expand systematically
+    base_pattern = [
+        [0, 0, 0],  # center
+        [-2.0, 0, 0],  # left
+        [2.0, 0, 0],  # right
+        [0, 3.464, 0],  # top
+        [0, -3.464, 0],  # bottom
+        [-3.464, 1.732, 0],  # top-left
+        [3.464, 1.732, 0],  # top-right
+        [-3.464, -1.732, 0],  # bottom-left
+        [3.464, -1.732, 0],  # bottom-right
+        [-1.732, 3.464, 0],  # top-left 2
+        [1.732, 3.464, 0],  # top-right 2
+    ]
+    
+    # Add slight variations to explore nearby solutions
+    for i in range(10):
+        config = np.array(base_pattern)
+        # Add small random perturbations 
+        np.random.seed(i * 42)
+        for j in range(len(config)):
+            config[j][0] += np.random.uniform(-0.1, 0.1)
+            config[j][1] += np.random.uniform(-0.1, 0.1)
+            config[j][2] += np.random.uniform(-5, 5)
+        configs.append(config)
+    
+    return configs
+
+def get_hexagonal_lattice_positions():
+    """Generate positions using a structured hexagonal lattice approach"""
+    # Generate a 3x4 rectangular lattice of hexagons and select 11
+    positions = []
+    
+    # Create a 3x4 hexagonal grid pattern
+    rows = 3
+    cols = 4
+    
+    for i in range(rows):
+        for j in range(cols):
+            # Offset every other row
+            x = j * 2.0 + (i % 2) * 1.0
+            y = i * 1.732  # vertical spacing is sqrt(3)
+            if len(positions) < 11:
+                positions.append([x, y, 0])
+    
+    # Trim to exactly 11 positions if needed
+    while len(positions) < 11:
+        positions.append([0, 0, 0])  # dummy positions
+    
+    return positions[:11]
+
+def create_tile_based_initial_configs():
+    """Create better initial configurations based on geometric tiling knowledge"""
+    configs = []
+    
+    # Config 1: Hexagonal lattice approach
+    lattice_positions = get_hexagonal_lattice_positions()
+    config1 = np.array(lattice_positions)
+    configs.append(config1)
+    
+    # Config 2: Central plus ring arrangement (more common for hexagon packing)
+    ring_positions = [
+        [0, 0, 0],  # center
+        [-2.5, 0, 0],  # left
+        [2.5, 0, 0],  # right
+        [0, 3.464, 0],  # top
+        [0, -3.464, 0],  # bottom
+        [-3.464, 1.732, 0],  # top-left
+        [3.464, 1.732, 0],  # top-right
+        [-3.464, -1.732, 0],  # bottom-left
+        [3.464, -1.732, 0],  # bottom-right
+        [-1.732, 3.464, 0],  # top-left 2
+        [1.732, 3.464, 0],  # top-right 2
+    ]
+    config2 = np.array(ring_positions)
+    configs.append(config2)
+    
+    # Config 3: Structured 2-ring pattern
+    ring2_positions = [
+        [0, 0, 0],  # center
+        [0, 2.0, 0],  # top
+        [0, -2.0, 0],  # bottom
+        [2.0, 0, 0],  # right
+        [-2.0, 0, 0],  # left
+        [1.0, 1.732, 0],  # top-right
+        [-1.0, 1.732, 0],  # top-left
+        [1.0, -1.732, 0],  # bottom-right
+        [-1.0, -1.732, 0],  # bottom-left
+        [2.0, 1.732, 0],  # far top-right
+        [-2.0, 1.732, 0],  # far top-left
+    ]
+    config3 = np.array(ring2_positions)
+    configs.append(config3)
+    
+    # Add perturbed versions of these configurations for diversity
+    for i, base_config in enumerate(configs):
+        for j in range(3):  # 3 perturbations per base config
+            config = base_config.copy()
+            np.random.seed(i * 10 + j)
+            for k in range(len(config)):
+                config[k][0] += np.random.normal(0, 0.05)
+                config[k][1] += np.random.normal(0, 0.05)
+                config[k][2] += np.random.normal(0, 2)
+            configs.append(config)
+    
+    return configs
+
+def geometrically_valid_adjustment(config, max_attempts=50):
+    """Make geometrically valid adjustments to ensure no overlaps"""
+    for _ in range(max_attempts):
+        # Get all hexagon polygons
+        hexagons = []
+        for pos_angle in config:
+            x, y, angle = pos_angle
+            hex_poly = create_regular_hexagon(x, y, 1, angle)
+            hexagons.append(hex_poly)
+        
+        # Check if valid
+        outer_radius = compute_outer_hexagon_radius(hexagons, 0.01)
+        outer_hexagon = create_regular_hexagon(0, 0, outer_radius, 0)
+        
+        if check_containment_and_overlap(hexagons, outer_hexagon):
+            return config
+            
+        # Make small adjustments to reduce overlap
+        for i in range(len(config)):
+            # Move hexagons away from center
+            dx = -config[i][0] * 0.01
+            dy = -config[i][1] * 0.01
+            config[i][0] += dx
+            config[i][1] += dy
+    
+    return config  # Return anyway if no valid adjustment found
+
+def evolution_step(population, fitness_scores, elite_fraction=0.3):
+    """Perform one evolutionary step on the population"""
+    # Sort by fitness (descending order)
+    sorted_indices = np.argsort(fitness_scores)[::-1]
+    sorted_population = [population[i] for i in sorted_indices]
+    
+    # Keep elite individuals
+    elite_count = int(len(population) * elite_fraction)
+    elite = sorted_population[:elite_count]
+    
+    # Generate new population by crossover and mutation
+    new_population = elite[:]  # Start with elites
+    
+    # Fill remaining slots with offspring
+    while len(new_population) < len(population):
+        # Selection: tournament selection
+        parent1 = tournament_selection(population, fitness_scores, 3)
+        parent2 = tournament_selection(population, fitness_scores, 3)
+        
+        # Crossover
+        child = crossover(parent1, parent2)
+        
+        # Mutation
+        child = mutate(child)
+        
+        # Validate
+        child = geometrically_valid_adjustment(child)
+        
+        new_population.append(child)
+    
+    return new_population
+
+def tournament_selection(population, fitness_scores, k=3):
+    """Select an individual using tournament selection"""
+    selected_indices = np.random.choice(len(population), k)
+    selected_fitness = [fitness_scores[i] for i in selected_indices]
+    winner_index = selected_indices[np.argmax(selected_fitness)]
+    return population[winner_index]
+
+def crossover(parent1, parent2):
+    """Perform crossover between two parents"""
+    child = parent1.copy()
+    # Swap some hexagons between parents
+    swap_count = np.random.randint(1, 4)  # 1-3 swaps
+    swap_indices = np.random.choice(len(parent1), swap_count, replace=False)
+    
+    for idx in swap_indices:
+        # Swap positions and angles
+        if np.random.rand() > 0.5:
+            child[idx][0] = parent2[idx][0]
+            child[idx][1] = parent2[idx][1]
+        else:
+            child[idx][2] = parent2[idx][2]
+    
+    return child
+
+def mutate(individual):
+    """Mutate an individual"""
+    mutated = individual.copy()
+    for i in range(len(mutated)):
+        if np.random.rand() < 0.7:  # 70% chance to mutate
+            # Mutate position or angle
+            if np.random.rand() < 0.7:  # 70% chance to mutate position
+                mutated[i][0] += np.random.normal(0, 0.1)
+                mutated[i][1] += np.random.normal(0, 0.1)
+            else:
+                mutated[i][2] += np.random.normal(0, 10)
+    return mutated
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Generate tile-based initial configurations
+    initial_configs = create_tile_based_initial_configs()
+    
+    print(f"Generated {len(initial_configs)} initial configurations")
+    
+    # Evaluate initial configurations
+    fitness_scores = []
+    for config in initial_configs:
+        try:
+            score, side_length = evaluate_layout(config)
+            fitness_scores.append(score)
+        except:
+            fitness_scores.append(-1e10)  # Invalid configuration
+    
+    # Find best initial configuration
+    best_idx = np.argmax(fitness_scores)
+    best_config = initial_configs[best_idx].copy()
+    best_score = fitness_scores[best_idx]
+    
+    print(f"Best initial score: {best_score}")
+    
+    # If we have a very poor initial score, fall back to heuristic
+    if best_score < -1e9:
+        print("Falling back to heuristic configuration")
+        fallback_config = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        best_config = fallback_config.copy()
+        best_score, _ = evaluate_layout(best_config)
+    
+    # Evolutionary optimization phase
+    population_size = 20
+    max_generations = 30
+    
+    # Initialize population with variations of the best config
+    population = [best_config.copy()]
+    for i in range(population_size - 1):
+        variant = best_config.copy()
+        np.random.seed(i * 42)
+        for j in range(len(variant)):
+            variant[j][0] += np.random.normal(0, 0.1)
+            variant[j][1] += np.random.normal(0, 0.1)
+            variant[j][2] += np.random.normal(0, 5)
+        variant = geometrically_valid_adjustment(variant)
+        population.append(variant)
+    
+    # Evolution loop
+    for generation in range(max_generations):
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            try:
+                score, _ = evaluate_layout(individual)
+                fitness_scores.append(score)
+            except:
+                fitness_scores.append(-1e10)
+        
+        # Update best if necessary
+        current_best_idx = np.argmax(fitness_scores)
+        if fitness_scores[current_best_idx] > best_score:
+            best_score = fitness_scores[current_best_idx]
+            best_config = population[current_best_idx].copy()
+        
+        # Evolve
+        population = evolution_step(population, fitness_scores)
+    
+    # Final validation and scoring
+    final_score, final_side_length = evaluate_layout(best_config)
+    
+    # Ensure we have a valid result
+    if final_score < -1e9:
+        # Fall back to the best initial configuration
+        best_config = initial_configs[best_idx].copy()
+        final_score, final_side_length = evaluate_layout(best_config)
+    
+    # Convert best_config to required format
+    inner_hex_data = best_config.copy()
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    
+    elapsed = time.time() - start_time
+    print(f"Eval time: {elapsed:.4f}s")
+    
+    return inner_hex_data, outer_hex_data, final_side_length
+
+# EVOLVE-BLOCK-END

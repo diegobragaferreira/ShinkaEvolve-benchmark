@@ -1,0 +1,112 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import minimize
+import itertools
+from typing import Tuple
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum distance"""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances)
+
+    def objective_function(points_flat):
+        """Objective function to minimize (negative ratio)"""
+        points = points_flat.reshape(-1, 2)
+        return -calculate_min_max_ratio(points)
+
+    def generate_hexagonal_grid():
+        """Generate initial points using hexagonal grid pattern"""
+        # Create a hexagonal lattice pattern
+        n_points = 16
+        rows = 4
+        cols = 4
+
+        points = []
+        for i in range(rows):
+            for j in range(cols):
+                if len(points) >= n_points:
+                    break
+                x = j + 0.5 * (i % 2)
+                y = i * np.sqrt(3)/2
+                points.append([x, y])
+
+        # Normalize to unit square [0,1] x [0,1]
+        points = np.array(points[:n_points])
+
+        # Scale and shift to fit in [0,1] x [0,1]
+        x_min, y_min = np.min(points, axis=0)
+        x_max, y_max = np.max(points, axis=0)
+
+        if x_max > x_min and y_max > y_min:
+            points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
+            points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
+
+        # Further adjust to make it more uniform
+        points[:, 0] *= 0.9
+        points[:, 1] *= 0.9
+        points[:, 0] += 0.05
+        points[:, 1] += 0.05
+
+        return points
+
+    def local_optimization(initial_points, max_iter=1000):
+        """Apply local optimization to improve the configuration"""
+        best_points = initial_points.copy()
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Use a combination of different optimization approaches
+        for _ in range(10):  # Try multiple optimization runs
+            # Random perturbations
+            perturbed = best_points + np.random.normal(0, 0.01, best_points.shape)
+            perturbed = np.clip(perturbed, 0, 1)  # Keep within bounds
+
+            try:
+                result = minimize(objective_function, perturbed.flatten(),
+                                method='L-BFGS-B', bounds=[(0,1)] * len(perturbed.flatten()))
+                if result.success:
+                    optimized_points = result.x.reshape(-1, 2)
+                    optimized_points = np.clip(optimized_points, 0, 1)
+                    ratio = calculate_min_max_ratio(optimized_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+            except:
+                pass
+
+        return best_points, best_ratio
+
+    # Start with hexagonal grid initialization
+    initial_points = generate_hexagonal_grid()
+
+    # Fine-tune with local optimization
+    final_points, ratio = local_optimization(initial_points)
+
+    # Additional grid refinement
+    best_ratio = ratio
+    best_points = final_points.copy()
+
+    # Try different grid configurations
+    for attempt in range(5):
+        # Perturb slightly and optimize again
+        perturbed = initial_points + np.random.normal(0, 0.02, initial_points.shape) * (1 + attempt * 0.1)
+        perturbed = np.clip(perturbed, 0, 1)
+
+        refined_points, refined_ratio = local_optimization(perturbed)
+
+        if refined_ratio > best_ratio:
+            best_ratio = refined_ratio
+            best_points = refined_points.copy()
+
+    return best_points
+
+# EVOLVE-BLOCK-END

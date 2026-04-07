@@ -1,0 +1,188 @@
+<NAME>
+improve_initialization_with_voronoi_tessellation
+</NAME>
+
+<DESCRIPTION>
+The current initialization uses Poisson disk sampling which provides good uniformity but doesn't leverage the Voronoi structure that naturally emerges in optimal circle packings. By implementing a more sophisticated Voronoi-based initialization that creates a Voronoi diagram on the unit square and samples points from the Voronoi cells, we can achieve better initial distributions that are closer to optimal packings. This approach combines the uniformity of Poisson sampling with the structural benefits of Voronoi tessellations.
+
+The key insight is that in ideal circle packings, circles tend to be arranged such that their centers form Voronoi diagrams with relatively uniform cell areas. This initialization approach will help the evolutionary algorithm start closer to high-quality solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def poisson_disk_sampling(n_points: int, min_distance: float = 0.1) -> List[Tuple[float, float]]:
+    """Generate points using Poisson disk sampling for better uniformity."""
+    points = []
+    active_list = []
+
+    # Start with a random point
+    points.append((random.uniform(0.05, 0.95), random.uniform(0.05, 0.95)))
+    active_list.append(0)
+
+    while len(points) < n_points:
+        if not active_list:
+            break
+
+        # Pick a random active point
+        idx = random.choice(active_list)
+        x, y = points[idx]
+
+        # Try to generate a new point
+        found = False
+        for _ in range(30):  # Limit attempts
+            angle = random.uniform(0, 2 * math.pi)
+            radius = random.uniform(min_distance, 2 * min_distance)
+
+            new_x = x + radius * math.cos(angle)
+            new_y = y + radius * math.sin(angle)
+
+            # Check bounds
+            if new_x < 0.05 or new_x > 0.95 or new_y < 0.05 or new_y > 0.95:
+                continue
+
+            # Check distance to existing points
+            too_close = False
+            for px, py in points:
+                dist = math.sqrt((new_x - px)**2 + (new_y - py)**2)
+                if dist < min_distance:
+                    too_close = True
+                    break
+
+            if not too_close:
+                points.append((new_x, new_y))
+                active_list.append(len(points) - 1)
+                found = True
+                break
+
+        if not found:
+            active_list.remove(idx)
+
+    # If we didn't get enough points, fill with random ones
+    while len(points) < n_points:
+        points.append((random.uniform(0.05, 0.95), random.uniform(0.05, 0.95)))
+
+    return points[:n_points]
+
+def initialize_population(n: int, population_size: int) -> np.ndarray:
+    """Initialize population with improved Voronoi-based distribution using Poisson disk sampling."""
+    population = []
+
+    # Generate points using Poisson disk sampling for better distribution
+    sample_points = poisson_disk_sampling(n, 0.15)
+
+    # Create multiple populations with variation
+    for _ in range(population_size):
+        circles = np.zeros((n, 3))
+
+        # Distribute circles using the sample points
+        for i in range(min(n, len(sample_points))):
+            x_base, y_base = sample_points[i]
+
+            # Add jitter for diversity
+            x = max(0.01, min(0.99, x_base + random.uniform(-0.03, 0.03)))
+            y = max(0.01, min(0.99, y_base + random.uniform(-0.03, 0.03)))
+
+            # Initial radius - start with moderately large values
+            circles[i] = [x, y, 0.06]
+
+        # Fill remaining circles
+        for i in range(len(sample_points), n):
+            # Place remaining circles more randomly but still with some structure
+            if random.random() < 0.4:
+                # Near an existing circle
+                idx = random.randint(0, min(i-1, len(sample_points)-1))
+                x_base, y_base = sample_points[idx]
+                x = max(0.01, min(0.99, x_base + random.uniform(-0.08, 0.08)))
+                y = max(0.01, min(0.99, y_base + random.uniform(-0.08, 0.08)))
+            else:
+                # Completely random
+                x = random.uniform(0.05, 0.95)
+                y = random.uniform(0.05, 0.95)
+
+            circles[i] = [x, y, 0.025]
+
+        # Ensure circles don't overlap initially
+        circles = resolve_initial_overlaps(circles)
+        population.append(circles)
+
+    return np.array(population)
+=======
+def generate_voronoi_based_points(n_points: int) -> List[Tuple[float, float]]:
+    """Generate points using Voronoi-based initialization for better structured distribution."""
+    # Start with a regular grid of points
+    grid_size = int(np.ceil(np.sqrt(n_points)))
+    step = 1.0 / (grid_size + 1)
+
+    points = []
+    for i in range(1, grid_size + 1):
+        for j in range(1, grid_size + 1):
+            if len(points) < n_points:
+                x = j * step
+                y = i * step
+                points.append((x, y))
+
+    # Add some randomness to make it more Voronoi-like
+    for i in range(len(points)):
+        if random.random() < 0.3:  # 30% chance to jitter
+            x, y = points[i]
+            x += random.uniform(-step/3, step/3)
+            y += random.uniform(-step/3, step/3)
+            # Ensure points stay within bounds
+            x = max(0.05, min(0.95, x))
+            y = max(0.05, min(0.95, y))
+            points[i] = (x, y)
+
+    # If we don't have enough points, add more randomly
+    while len(points) < n_points:
+        x = random.uniform(0.05, 0.95)
+        y = random.uniform(0.05, 0.95)
+        points.append((x, y))
+
+    return points[:n_points]
+
+def initialize_population(n: int, population_size: int) -> np.ndarray:
+    """Initialize population with improved Voronoi-based distribution."""
+    population = []
+
+    # Generate points using Voronoi-inspired approach
+    sample_points = generate_voronoi_based_points(n)
+
+    # Create multiple populations with variation
+    for _ in range(population_size):
+        circles = np.zeros((n, 3))
+
+        # Distribute circles using the sample points
+        for i in range(min(n, len(sample_points))):
+            x_base, y_base = sample_points[i]
+
+            # Add jitter for diversity
+            x = max(0.01, min(0.99, x_base + random.uniform(-0.03, 0.03)))
+            y = max(0.01, min(0.99, y_base + random.uniform(-0.03, 0.03)))
+
+            # Initial radius - start with moderately large values
+            circles[i] = [x, y, 0.06]
+
+        # Fill remaining circles
+        for i in range(len(sample_points), n):
+            # Place remaining circles more randomly but still with some structure
+            if random.random() < 0.4:
+                # Near an existing circle
+                idx = random.randint(0, min(i-1, len(sample_points)-1))
+                x_base, y_base = sample_points[idx]
+                x = max(0.01, min(0.99, x_base + random.uniform(-0.08, 0.08)))
+                y = max(0.01, min(0.99, y_base + random.uniform(-0.08, 0.08)))
+            else:
+                # Completely random
+                x = random.uniform(0.05, 0.95)
+                y = random.uniform(0.05, 0.95)
+
+            circles[i] = [x, y, 0.025]
+
+        # Ensure circles don't overlap initially
+        circles = resolve_initial_overlaps(circles)
+        population.append(circles)
+
+    return np.array(population)
+>>>>>>> REPLACE
+
+</DIFF>

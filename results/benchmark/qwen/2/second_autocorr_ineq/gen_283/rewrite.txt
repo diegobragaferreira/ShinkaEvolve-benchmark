@@ -1,0 +1,491 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+import time
+from numba import jit, prange
+import random
+from typing import List, Tuple
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f):
+    """Numba-accelerated autoconvolution computation"""
+    n = len(f)
+    g = np.zeros(2*n - 1)
+    
+    # Manual convolution loop for speed
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f[i] * f[j]
+    
+    return g[n-1:]  # Return positive lags only
+
+@jit(nopython=True)
+def compute_norms_numba(g):
+    """Numba-accelerated norm computations"""
+    n = len(g)
+    
+    # Compute norms
+    norm_1 = 0.0
+    norm_2_sq = 0.0
+    norm_inf = 0.0
+    
+    for i in range(n):
+        abs_g = abs(g[i])
+        norm_1 += abs_g
+        norm_2_sq += abs_g * abs_g
+        if abs_g > norm_inf:
+            norm_inf = abs_g
+    
+    return norm_1, norm_2_sq, norm_inf
+
+@jit(nopython=True)
+def compute_c2_numba(norm_1, norm_2_sq, norm_inf):
+    """Numba-accelerated C2 computation"""
+    if norm_1 < 1e-12 or norm_inf < 1e-12:
+        return 0.0
+    return norm_2_sq / (norm_1 * norm_inf)
+
+def evaluate_function(f):
+    """Evaluate the function and compute C2"""
+    try:
+        # Fast autoconvolution
+        g = compute_autoconvolution_numba(f)
+        
+        # Fast norm computations
+        norm_1, norm_2_sq, norm_inf = compute_norms_numba(g)
+        
+        # C2 computation
+        c2 = compute_c2_numba(norm_1, norm_2_sq, norm_inf)
+        
+        return c2, g
+    except Exception:
+        return 0.0, np.array([0.0])
+
+def enforce_peak_spacing(peak_params, domain_width=0.5, min_distance_ratio=0.1):
+    """Enforce minimum distance between Gaussian peaks"""
+    if len(peak_params) < 3:
+        return
+
+    # Group peaks by their parameters [amp, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # Ensure minimum spacing
+    min_distance = min_distance_ratio * domain_width
+    for i in range(1, len(peaks)):
+        prev_center = peaks[i-1][1]
+        curr_center = peaks[i][1]
+        distance = abs(curr_center - prev_center)
+
+        if distance < min_distance:
+            # Adjust position of current peak
+            # Move it away from the previous one
+            offset = min_distance - distance
+            if curr_center > prev_center:
+                peaks[i][1] += offset
+            else:
+                peaks[i][1] -= offset
+
+    # Put them back into flat list
+    for i, (amp, center, width) in enumerate(peaks):
+        peak_params[i*3] = amp
+        peak_params[i*3 + 1] = center
+        peak_params[i*3 + 2] = width
+
+@jit(nopython=True)
+def gaussian_peak_numba(x, amp, center, width):
+    """Fast single Gaussian peak evaluation using Numba"""
+    if width <= 1e-6:
+        return 0.0
+    diff = (x - center) / width
+    return amp * np.exp(-0.5 * diff * diff)
+
+@jit(nopython=True)
+def gaussian_peak_function_numba(x_array, peak_params):
+    """Fast Gaussian peak evaluation using Numba"""
+    result = np.zeros_like(x_array)
+    n_peaks = len(peak_params) // 3
+    
+    for i in range(n_peaks):
+        amp = peak_params[i*3]
+        center = peak_params[i*3 + 1]
+        width = peak_params[i*3 + 2]
+        
+        for j in range(len(x_array)):
+            result[j] += gaussian_peak_numba(x_array[j], amp, center, width)
+    
+    return result
+
+def create_logarithmic_peaks(n_peaks=8, peak_width=0.05, domain_width=0.5, n_steps=2000):
+    """Create peaks with logarithmic distribution for better spread and mathematical optimality"""
+    x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+    
+    # Use golden ratio distribution for better peak placement
+    phi = (1 + np.sqrt(5)) / 2
+    peak_positions = []
+    
+    # Create logarithmic spacing to avoid clustering at edges
+    for i in range(n_peaks):
+        # Apply exponential mapping to create more even distribution
+        ratio = (i + 1) / (n_peaks + 1)
+        pos = domain_width/2 * (ratio ** 1.5) * 2 - domain_width/2
+        # Alternate sides to balance
+        if i % 2 == 1:
+            pos = -pos
+        peak_positions.append(pos)
+    
+    # Create peaks using logarithmic amplitude distribution
+    peak_params = []
+    for i, pos in enumerate(peak_positions):
+        # Log-uniform amplitude distribution with more emphasis on moderate values
+        amplitude = 10 ** np.random.uniform(1.0, 1.8)  # 10 to ~63
+        peak_params.extend([amplitude, pos, peak_width])
+    
+    # Enforce spacing
+    enforce_peak_spacing(peak_params, domain_width)
+    
+    # Generate function
+    result = gaussian_peak_function_numba(x, peak_params)
+    return result
+
+def optimize_with_evolutionary_algorithm(num_peaks, domain_width=0.5, n_steps=2000):
+    """Enhanced evolutionary algorithm with better parameter control and mathematical initialization"""
+    # Configuration parameters
+    max_iterations = 150
+    population_size = 20
+    best_c2 = 0.0
+    best_individual = None
+    
+    # Create initial population with mathematical guidance
+    population = []
+    for _ in range(population_size):
+        # Create random individual with better initialization
+        individual = []
+        for _ in range(num_peaks):
+            # Log-uniform amplitude (10-63)
+            amplitude = 10 ** np.random.uniform(1.0, 1.8)
+            individual.append(amplitude)
+            
+            # Center using logarithmic distribution
+            ratio = np.random.random()
+            pos = domain_width/2 * (ratio ** 1.2) * 2 - domain_width/2  # Modified log spacing
+            if np.random.random() < 0.5:
+                pos = -pos  # Alternate sides
+            individual.append(pos)
+            
+            # Log-uniform width (0.01-0.2)
+            width = 0.01 * (10 ** np.random.uniform(0.0, 1.0))
+            individual.append(width)
+        
+        population.append(individual)
+    
+    # Evaluation loop
+    for iteration in range(max_iterations):
+        if iteration % 10 == 0 and iteration > 0:
+            # Periodic re-evaluation to maintain diversity
+            random.shuffle(population)
+        
+        # Evaluate population
+        fitness_scores = []
+        for individual in population:
+            try:
+                x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+                result = gaussian_peak_function_numba(x, individual)
+                step_values = result.tolist()
+                c2_value, _ = evaluate_function(step_values)
+                fitness_scores.append(c2_value)
+            except Exception:
+                fitness_scores.append(0.0)
+        
+        # Get best individual
+        best_idx = np.argmax(fitness_scores)
+        if fitness_scores[best_idx] > best_c2:
+            best_c2 = fitness_scores[best_idx]
+            best_individual = list(population[best_idx])
+        
+        if best_c2 > 0.95:  # Early termination
+            break
+            
+        # Selection and reproduction
+        # Tournament selection with better diversity maintenance
+        selected_population = []
+        tournament_size = 3
+        for _ in range(population_size):
+            tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_population.append(list(population[winner_idx]))
+        
+        # Create new population
+        new_population = []
+        
+        # Elitism: keep best two
+        top_indices = np.argsort(fitness_scores)[-2:]
+        for idx in top_indices:
+            new_population.append(list(population[idx]))
+        
+        # Generate rest through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = selected_population[np.random.randint(len(selected_population))]
+            parent2 = selected_population[np.random.randint(len(selected_population))]
+            
+            # Crossover
+            child1 = list(parent1)
+            child2 = list(parent2)
+            
+            # Uniform crossover
+            for i in range(len(child1)):
+                if np.random.random() < 0.5:
+                    child1[i], child2[i] = child2[i], child1[i]
+            
+            # Mutation with adaptive rates and mathematical controls
+            mutation_rate = max(0.1, 0.3 - iteration * 0.001)  # Decrease over generations
+            
+            for i in range(len(child1)):
+                if np.random.random() < mutation_rate:
+                    if i % 3 == 0:  # amplitude - log-uniform with mathematical scaling
+                        log_amp = np.log10(child1[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child1[i] = max(0.1, 10 ** log_amp)
+                        
+                        log_amp = np.log10(child2[i])
+                        log_amp += np.random.uniform(-0.5, 0.5)
+                        child2[i] = max(0.1, 10 ** log_amp)
+                    elif i % 3 == 1:  # center - linear with bounded adjustments
+                        child1[i] += np.random.uniform(-0.02, 0.02)
+                        child2[i] += np.random.uniform(-0.02, 0.02)
+                        # Keep in bounds
+                        child1[i] = max(-domain_width/2, min(domain_width/2, child1[i]))
+                        child2[i] = max(-domain_width/2, min(domain_width/2, child2[i]))
+                    else:  # width - log-uniform with mathematical constraints
+                        log_width = np.log10(child1[i])
+                        log_width += np.random.uniform(-0.3, 0.3)
+                        child1[i] = max(0.001, 10 ** log_width)
+                        
+                        log_width = np.log10(child2[i])
+                        log_width += np.random.uniform(-0.3, 0.3)
+                        child2[i] = max(0.001, 10 ** log_width)
+            
+            # Enforce constraints
+            for i in range(len(child1)):
+                child1[i] = max(0, child1[i])
+                child2[i] = max(0, child2[i])
+            
+            # Enforce spacing
+            enforce_peak_spacing(child1, domain_width)
+            enforce_peak_spacing(child2, domain_width)
+            
+            new_population.extend([child1, child2])
+        
+        population = new_population[:population_size]
+    
+    return best_individual if best_individual is not None else []
+
+def adaptive_refinement(f_values, max_iterations=300):
+    """Advanced adaptive refinement with mathematical guidance"""
+    current_f = list(f_values)
+    current_c2, _ = evaluate_function(current_f)
+    
+    improvement_count = 0
+    step_size = 0.1
+    prev_c2 = current_c2
+    
+    # Simulated annealing parameters with mathematical cooling schedule
+    temperature = 1.0
+    cooling_rate = 0.98
+    
+    for iteration in range(max_iterations):
+        modified_f = list(current_f)
+        idx = np.random.randint(len(modified_f))
+        
+        # Adaptive perturbation with temperature and mathematical scaling
+        delta = np.random.normal(0, step_size * temperature)
+        modified_f[idx] = max(0.0, modified_f[idx] + delta)
+        
+        test_c2, _ = evaluate_function(modified_f)
+        
+        # Accept if better or with probability based on temperature
+        if test_c2 > current_c2 or np.random.random() < np.exp((test_c2 - current_c2) / (temperature + 1e-8)):
+            current_f = modified_f
+            current_c2 = test_c2
+            improvement_count = 0
+        else:
+            improvement_count += 1
+            
+        # Adjust step size and temperature
+        if improvement_count > 5:
+            step_size *= 0.9
+            improvement_count = 0
+            
+        temperature *= cooling_rate  # Cool down
+        
+        # Early stopping
+        if improvement_count > 20:
+            break
+            
+        # Progress monitoring
+        if abs(test_c2 - prev_c2) < 1e-8:
+            improvement_count += 1
+        else:
+            improvement_count = 0
+            
+        prev_c2 = current_c2
+        
+    return current_f
+
+def mathematical_peak_optimization(n_steps=2000):
+    """Highly mathematical optimization approach using optimal peak characteristics"""
+    # Domain setup
+    domain_width = 0.5
+    domain_center = 0.0
+    
+    # Create optimized peaks based on mathematical analysis
+    # The goal is to achieve a flattened autoconvolution profile to maximize C2
+    
+    # Number of peaks based on analysis of optimal C2 configurations
+    n_peaks = 8
+    
+    # Use logarithmic spacing with golden ratio for optimal distribution
+    phi = (1 + np.sqrt(5)) / 2
+    peak_positions = []
+    
+    for i in range(n_peaks):
+        # Use logarithmic mapping to concentrate peaks near center
+        ratio = (i + 1) / (n_peaks + 1)
+        # Apply square root transformation for better spacing
+        pos = domain_center + (ratio ** 0.5) * domain_width/2
+        if i % 2 == 1:
+            pos = -pos  # Alternate sides
+        peak_positions.append(pos)
+    
+    # Create peaks with mathematically-inspired amplitudes and widths
+    peak_params = []
+    base_amplitude = 40.0  # Moderate base amplitude
+    
+    for i, pos in enumerate(peak_positions):
+        # Use geometric decay with mathematical constants for optimal amplitude balance
+        amplitude = base_amplitude * (0.7 ** i)  # Geometric decay
+        # Widths optimized for minimal autoconvolution sharpness
+        width = 0.03 + 0.01 * (i % 3)  # Varying widths to prevent regular patterns
+        peak_params.extend([amplitude, pos, width])
+    
+    # Generate function from peak parameters
+    x = np.linspace(-domain_width/2, domain_width/2, n_steps)
+    result = gaussian_peak_function_numba(x, peak_params)
+    
+    # Apply mathematical normalization
+    if np.max(result) > 0:
+        result = result / np.max(result) * 40
+    
+    return result.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Construct a step function that maximizes C2 = ||g||₂² / (||g||₁ · ||g||∞)
+    where g = f*f (autoconvolution) and f is the step function.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    # Parameters
+    max_time = 90.0  # seconds
+    start_time = time.time()
+    
+    # Initialize best solution
+    best_c2 = 0.0
+    best_f = None
+    
+    # Strategy 1: Mathematical peak optimization (most promising)
+    try:
+        optimized_f = mathematical_peak_optimization(2000)
+        c2_math, _ = evaluate_function(optimized_f)
+        
+        if c2_math > best_c2:
+            best_c2 = c2_math
+            best_f = optimized_f.copy()
+    except Exception:
+        pass
+    
+    # Strategy 2: High-resolution logarithmic peaks with evolutionary optimization
+    peak_counts = [5, 7, 10, 12]
+    
+    for num_peaks in peak_counts:
+        if time.time() - start_time > max_time * 0.8:
+            break
+            
+        try:
+            # Try evolutionary optimization with logarithmic peaks
+            peak_params = optimize_with_evolutionary_algorithm(num_peaks, n_steps=2000)
+            
+            if peak_params is None or len(peak_params) == 0:
+                continue
+            
+            # Generate function from peak parameters
+            x = np.linspace(-0.25, 0.25, 2000)
+            result = gaussian_peak_function_numba(x, peak_params)
+            
+            # Convert to step function values
+            f_gaussian = result.tolist()
+            
+            c2_gaussian, _ = evaluate_function(f_gaussian)
+            
+            if c2_gaussian > best_c2:
+                best_c2 = c2_gaussian
+                best_f = np.array(f_gaussian).copy()
+                
+        except Exception as e:
+            continue
+    
+    # Strategy 3: Enhanced refinement around best solution
+    if best_f is not None:
+        # Apply advanced refinement
+        refined_f = adaptive_refinement(best_f, max_iterations=200)
+        refined_c2, _ = evaluate_function(refined_f)
+        
+        if refined_c2 > best_c2:
+            best_c2 = refined_c2
+            best_f = refined_f.copy()
+    
+    # Strategy 4: Final mathematical construction if needed
+    if best_f is None or best_c2 < 0.85:
+        try:
+            # Try another mathematical approach with different parameters
+            final_f = create_logarithmic_peaks(n_peaks=10, n_steps=2000)
+            c2_final, _ = evaluate_function(final_f.tolist())
+            
+            if c2_final > best_c2:
+                best_c2 = c2_final
+                best_f = final_f.copy()
+        except Exception:
+            pass
+    
+    # If nothing found, return a reasonable default with mathematical insight
+    if best_f is None:
+        # Create a function that balances amplitude and spread mathematically
+        x = np.linspace(-0.25, 0.25, 1000)
+        # Create a smooth bell-shaped function with controlled autoconvolution properties
+        y = np.exp(-0.5 * (x/0.1)**2) 
+        # Normalize to reasonable values
+        y = y / np.max(y) * 30
+        best_f = y.tolist()
+    
+    # Convert to list format
+    result = best_f.tolist() if hasattr(best_f, 'tolist') else best_f
+    
+    # Post-processing to make sure it meets requirements
+    result = [max(0, x) for x in result]
+    
+    return result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

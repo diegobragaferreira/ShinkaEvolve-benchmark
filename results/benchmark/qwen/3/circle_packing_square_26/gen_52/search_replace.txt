@@ -1,0 +1,121 @@
+<NAME>
+improve_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a brute-force pairwise distance calculation for overlap detection which has O(n²) complexity. This becomes inefficient as the number of circles increases. I'll implement a spatial grid indexing approach to significantly speed up overlap checking while maintaining the same constraint validation accuracy. This will allow for more efficient evaluation of individuals in the evolutionary algorithm and enable exploring larger search spaces within the time constraints.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple
+from collections import defaultdict
+>>>>>>> REPLACE
+</DIFF>
+</FILE>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(individual: np.ndarray) -> float:
+    """Evaluate fitness of an individual (sum of radii) with penalties for violations"""
+    total_radius = np.sum(individual[:, 2])
+
+    # Check constraints and apply penalties
+    penalty = 0
+
+    # Check containment constraints
+    for i in range(len(individual)):
+        x, y, r = individual[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            penalty += 1000  # Heavy penalty for containment violation
+
+    # Check overlap constraints
+    distances = cdist(individual[:, :2], individual[:, :2])
+    for i in range(len(individual)):
+        for j in range(i+1, len(individual)):
+            distance = distances[i, j]
+            r1, r2 = individual[i, 2], individual[j, 2]
+            if distance < r1 + r2:  # Overlapping circles
+                overlap = (r1 + r2) - distance
+                penalty += overlap * 100
+
+    return total_radius - penalty
+=======
+def evaluate_fitness(individual: np.ndarray) -> float:
+    """Evaluate fitness of an individual (sum of radii) with penalties for violations"""
+    total_radius = np.sum(individual[:, 2])
+
+    # Check constraints and apply penalties
+    penalty = 0
+
+    # Check containment constraints
+    for i in range(len(individual)):
+        x, y, r = individual[i]
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            penalty += 1000  # Heavy penalty for containment violation
+
+    # Check overlap constraints using spatial grid for efficiency
+    penalty += check_overlaps_spatial_grid(individual)
+
+    return total_radius - penalty
+
+
+def check_overlaps_spatial_grid(individual: np.ndarray) -> float:
+    """Check overlaps using spatial grid indexing to improve efficiency"""
+    penalty = 0
+    n_circles = len(individual)
+
+    # Define grid size (adjust based on typical circle sizes)
+    grid_size = 0.1
+
+    # Create grid mapping
+    grid = defaultdict(list)
+
+    # Place circles in grid cells
+    for i in range(n_circles):
+        x, y, r = individual[i]
+
+        # Find grid cell boundaries
+        min_cell_x = int(max(0, (x - r) / grid_size))
+        max_cell_x = int(min(10, (x + r) / grid_size))  # 10x10 grid for unit square
+        min_cell_y = int(max(0, (y - r) / grid_size))
+        max_cell_y = int(min(10, (y + r) / grid_size))
+
+        # Add circle to all relevant grid cells
+        for gx in range(min_cell_x, max_cell_x + 1):
+            for gy in range(min_cell_y, max_cell_y + 1):
+                grid[(gx, gy)].append(i)
+
+    # Check overlaps within and between adjacent cells
+    for cell_key, circle_indices in grid.items():
+        # Check all pairs in this cell
+        for i in range(len(circle_indices)):
+            idx1 = circle_indices[i]
+            x1, y1, r1 = individual[idx1]
+
+            for j in range(i + 1, len(circle_indices)):
+                idx2 = circle_indices[j]
+                x2, y2, r2 = individual[idx2]
+
+                # Calculate distance between centers
+                dx = x2 - x1
+                dy = y2 - y1
+                distance = np.sqrt(dx*dx + dy*dy)
+
+                # Check if overlapping
+                if distance < r1 + r2:
+                    overlap = (r1 + r2) - distance
+                    penalty += overlap * 100
+
+    return penalty
+>>>>>>> REPLACE
+</DIFF>
+</FILE>

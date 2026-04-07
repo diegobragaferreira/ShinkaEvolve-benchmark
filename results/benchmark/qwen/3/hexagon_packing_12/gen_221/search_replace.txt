@@ -1,0 +1,135 @@
+<NAME>
+add_temperature_controlled_annealing
+</NAME>
+
+<DESCRIPTION>
+I'll implement temperature-controlled simulated annealing during the evolutionary optimization stages to help escape local minima in early phases while progressively focusing on exploitation. This approach will use a temperature that decreases from 0.8 to 0.01 over generations, allowing occasional worse solutions during early coarse optimization phases to explore wider solution space before converging to optimal solutions.
+
+This change addresses the need for better exploration vs exploitation balance in the evolutionary algorithm, which was identified as a key improvement opportunity in the recommendations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_with_evolution(self, initial_config: np.ndarray, stage: int = 1) -> Tuple[np.ndarray, float]:
+        """Evolutionary optimization with stage-specific parameters"""
+        # Stage-specific parameters
+        if stage == 1:  # Coarse stage
+            population_size = 25
+            generations = 30
+            mutation_strength = 0.3
+        elif stage == 2:  # Fine stage
+            population_size = 20
+            generations = 40
+            mutation_strength = 0.15
+        else:  # Final stage
+            population_size = 15
+            generations = 30
+            mutation_strength = 0.05
+
+        # Start with best configuration
+        population = [initial_config.copy() for _ in range(population_size)]
+
+        for gen in range(generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                fitness_scores.append(score)
+
+            # Select top performers (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = max(1, population_size // 3)
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=mutation_strength, stage=stage)
+                new_population.append(mutated)
+
+            population = new_population
+
+            # Track best overall
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+=======
+    def optimize_with_evolution(self, initial_config: np.ndarray, stage: int = 1) -> Tuple[np.ndarray, float]:
+        """Evolutionary optimization with stage-specific parameters and temperature-controlled annealing"""
+        # Stage-specific parameters
+        if stage == 1:  # Coarse stage
+            population_size = 25
+            generations = 30
+            mutation_strength = 0.3
+        elif stage == 2:  # Fine stage
+            population_size = 20
+            generations = 40
+            mutation_strength = 0.15
+        else:  # Final stage
+            population_size = 15
+            generations = 30
+            mutation_strength = 0.05
+
+        # Start with best configuration
+        population = [initial_config.copy() for _ in range(population_size)]
+
+        for gen in range(generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Temperature schedule for simulated annealing
+            temperature = 0.8 * (0.95 ** gen)  # Decreasing temperature
+
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                fitness_scores.append(score)
+
+            # Select top performers (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = max(1, population_size // 3)
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites with probabilistic acceptance
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=mutation_strength, stage=stage)
+
+                # Apply simulated annealing acceptance criterion
+                mutated_score = HexagonPackingEvaluator.evaluate_configuration(mutated)
+                current_score = HexagonPackingEvaluator.evaluate_configuration(parent)
+
+                # Accept if better, or with probability based on temperature if worse
+                if mutated_score >= current_score or random.random() < math.exp((mutated_score - current_score) / temperature):
+                    new_population.append(mutated)
+                else:
+                    new_population.append(parent)
+
+            population = new_population
+
+            # Track best overall
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,280 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.signal import convolve
+import numba
+from typing import List
+import time
+from joblib import Parallel, delayed
+
+@numba.jit(nopython=True)
+def compute_autoconvolution_norms(f_vals: np.ndarray, n_points: int = 10000) -> tuple:
+    """
+    Compute the norms for autoconvolution g = f*f using piecewise linear integration
+    """
+    # Create step function on [-1/4, 1/4] with given values
+    step_width = 0.5 / len(f_vals)
+    x = np.linspace(-0.25, 0.25, len(f_vals))
+
+    # Create piecewise constant function
+    f = np.zeros(n_points)
+    x_grid = np.linspace(-0.25, 0.25, n_points)
+
+    # Interpolate step function onto grid
+    for i in range(len(f_vals)):
+        start_idx = max(0, int((x[i] + 0.25) / step_width * n_points / 0.5))
+        end_idx = min(n_points, int((x[i+1] if i+1 < len(x) else 0.25 + step_width) + 0.25) / step_width * n_points / 0.5)
+        if i == len(f_vals) - 1:
+            end_idx = n_points
+        f[start_idx:end_idx] = f_vals[i]
+
+    # Compute autoconvolution g = f * f (discrete convolution)
+    g = convolve(f, f[::-1], mode='full')
+    g = g[len(g)//2:]  # Take positive half
+
+    # Truncate to match x_grid size
+    g = g[:n_points]
+
+    # Compute norms using trapezoidal-like piecewise integration
+    # For ||g||_2^2: integrate g^2
+    g_squared = g * g
+    norm_g2_sq = np.sum((g_squared[:-1] + g_squared[1:]) * (x_grid[1] - x_grid[0]) / 2)
+
+    # For ||g||_1
+    norm_g1 = np.sum(np.abs(g)) * (x_grid[1] - x_grid[0])
+
+    # For ||g||_inf
+    norm_ginf = np.max(np.abs(g))
+
+    return norm_g2_sq, norm_g1, norm_ginf
+
+@numba.jit(nopython=True)
+def evaluate_c2(f_vals: np.ndarray) -> float:
+    """Evaluate C2 = ||g||_2^2 / (||g||_1 * ||g||_inf)"""
+    norm_g2_sq, norm_g1, norm_ginf = compute_autoconvolution_norms(f_vals)
+
+    # Handle numerical issues with safer threshold
+    safe_norm_g1 = max(norm_g1, 1e-15)
+    safe_norm_ginf = max(norm_ginf, 1e-15)
+
+    return norm_g2_sq / (safe_norm_g1 * safe_norm_ginf)
+
+def create_multi_scale_initializations(n_steps: int) -> List[List[float]]:
+    """
+    Create multiple diverse initializations using multi-scale strategies
+    """
+    initializations = []
+
+    # 1. Multi-scale Gaussian peaks at different resolutions
+    x = np.linspace(0, 1, n_steps)
+
+    # High frequency pattern
+    high_freq = np.exp(-((x - 0.2)**2) / 0.01) * 0.8 + \
+                np.exp(-((x - 0.4)**2) / 0.01) * 0.8 + \
+                np.exp(-((x - 0.6)**2) / 0.01) * 0.8 + \
+                np.exp(-((x - 0.8)**2) / 0.01) * 0.8
+    initializations.append(high_freq.tolist())
+
+    # Medium frequency pattern
+    medium_freq = np.exp(-((x - 0.3)**2) / 0.05) * 0.8 + \
+                  np.exp(-((x - 0.7)**2) / 0.05) * 0.8
+    initializations.append(medium_freq.tolist())
+
+    # Uniform distribution
+    initializations.append([1.0] * n_steps)
+
+    # Alternating pattern with different frequencies
+    alt_pattern = []
+    for i in range(n_steps):
+        alt_pattern.append(1.0 if i % 3 == 0 else 0.1 if i % 3 == 1 else 0.8)
+    initializations.append(alt_pattern)
+
+    # Center-heavy pattern with different weights
+    center_pattern = []
+    for i in range(n_steps):
+        pos = i / (n_steps - 1) if n_steps > 1 else 0.5
+        val = np.exp(-((pos - 0.5) * 4)**2) * 0.5 + 0.2
+        center_pattern.append(max(0.0, val))
+    initializations.append(center_pattern)
+
+    # Sparse peaks with varying spacing
+    sparse_pattern = np.zeros(n_steps)
+    positions = [0.1, 0.25, 0.5, 0.75, 0.9]
+    for pos in positions:
+        sparse_pattern += np.exp(-((x - pos)**2) / 0.02) * 1.5
+    initializations.append(sparse_pattern.tolist())
+
+    # Mixed pattern
+    mixed = 0.7 * np.exp(-((x - 0.3)**2) / 0.03) + \
+            0.3 * np.exp(-((x - 0.7)**2) / 0.03) + \
+            0.5 * np.sin(2 * np.pi * x) + 0.5
+    initializations.append(np.clip(mixed, 0, None).tolist())
+
+    return initializations
+
+def parallel_evaluate_initializations(initializations: List[List[float]]) -> List[tuple]:
+    """Evaluate multiple initializations in parallel"""
+    def evaluate_single_init(init):
+        try:
+            score = evaluate_c2(np.array(init))
+            return init, score
+        except:
+            return init, -np.inf
+
+    results = Parallel(n_jobs=-1)(delayed(evaluate_single_init)(init)
+                                  for init in initializations)
+    return results
+
+def adaptive_evolutionary_search(n_steps: int, max_time: float = 85.0) -> List[float]:
+    """
+    Multi-phase evolutionary optimization with adaptive parameters and improved initialization
+    """
+    start_time = time.time()
+
+    # Create diverse initial population with multi-scale approach
+    initializations = create_multi_scale_initializations(n_steps)
+
+    # Evaluate all initializations in parallel for faster startup
+    eval_results = parallel_evaluate_initializations(initializations)
+
+    # Find best initialization
+    best_score = -np.inf
+    best_individual = None
+
+    for init, score in eval_results:
+        if score > best_score:
+            best_score = score
+            best_individual = init.copy()
+
+    # Use the best initialization as starting point
+    if best_individual is None:
+        # Fallback to basic initialization
+        best_individual = [1.0] * n_steps
+
+    # Phase 1: Global search with differential evolution (coarse)
+    def objective(f_vals):
+        return -evaluate_c2(np.array(f_vals))
+
+    bounds = [(0.0, 2.0) for _ in range(n_steps)]
+
+    # Adaptive evolutionary parameters based on iteration and elapsed time
+    iteration = 0
+    max_iterations = 100
+    time_left = max_time - 5
+
+    while time.time() - start_time < time_left and iteration < max_iterations:
+        # Adaptive population size calculation based on problem complexity
+        base_popsize = max(10, min(50, n_steps // 20))
+        adaptive_popsize = min(100, base_popsize + int(iteration * 2))  # Gradually increase population size
+
+        # Adaptive mutation rate that decreases over time
+        adaptive_mutation = max(0.3, 0.8 - (iteration * 0.02))
+
+        # Adaptive maxiter based on time left
+        remaining_time = max_time - (time.time() - start_time)
+        adaptive_maxiter = max(10, min(50, int(remaining_time / 3)))
+
+        try:
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=int(time.time() + iteration * 1000),
+                maxiter=adaptive_maxiter,
+                popsize=adaptive_popsize,
+                mutation=(adaptive_mutation, 1.0),
+                recombination=0.7,
+                tol=1e-6,
+                disp=False
+            )
+
+            current_score = evaluate_c2(result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = result.x.tolist()
+
+        except:
+            pass
+
+        iteration += 1
+
+    # Phase 2: Refinement with multiple techniques
+    if time.time() - start_time < max_time - 3:
+        # Try L-BFGS-B with better bounds
+        try:
+            refined_result = minimize(
+                objective,
+                best_individual,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50, 'ftol': 1e-8}
+            )
+            current_score = evaluate_c2(refined_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = refined_result.x.tolist()
+        except:
+            pass
+
+        # Try Nelder-Mead as backup with more iterations
+        try:
+            nm_result = minimize(
+                objective,
+                best_individual,
+                method='Nelder-Mead',
+                options={'maxiter': 50, 'xtol': 1e-6, 'ftol': 1e-6}
+            )
+            current_score = evaluate_c2(nm_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = nm_result.x.tolist()
+        except:
+            pass
+
+        # Try gradient-free method with increased iterations
+        try:
+            # Try Basin-hopping for additional refinement
+            from scipy.optimize import basinhopping
+            bh_result = basinhopping(
+                objective,
+                best_individual,
+                niter=20,
+                T=1.0,
+                stepsize=0.1
+            )
+            current_score = evaluate_c2(bh_result.x)
+            if current_score > best_score:
+                best_score = current_score
+                best_individual = bh_result.x.tolist()
+        except:
+            pass
+
+    return best_individual
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value using enhanced hybrid optimization approach."""
+    # Use a larger number of steps for better resolution
+    n_steps = 3000  # Increased from 2000 for better resolution
+
+    # Use adaptive evolutionary search
+    try:
+        final_values = adaptive_evolutionary_search(n_steps, max_time=85.0)
+    except Exception:
+        # Fallback to simple approach if anything fails
+        final_values = [1.0] * n_steps
+
+    # Post-processing: ensure non-negative values and normalize appropriately
+    final_values = np.clip(final_values, 0, None)
+    total = np.sum(final_values)
+    # Normalize to keep values in reasonable range while preserving magnitude
+    if total > 0:
+        final_values = final_values / total * 2.0
+
+    # Convert to list of floats
+    return [float(x) for x in final_values]
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

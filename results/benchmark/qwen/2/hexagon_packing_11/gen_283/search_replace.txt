@@ -1,0 +1,132 @@
+<NAME>
+enhanced_constraint_validation
+</NAME>
+
+<DESCRIPTION>
+The current constraint validation uses basic containment and overlap checks that don't fully leverage geometric optimizations. I'll enhance the constraint validation by adding more robust buffer handling and early termination strategies to improve both reliability and performance. The key insight is to use conservative buffers for containment checks and implement a more efficient overlap detection that can quickly rule out non-overlapping hexagons using bounding circle checks before doing detailed polygon intersections.
+
+This approach will help avoid false positives in constraint violations and improve the overall robustness of the optimization process, leading to better convergence towards optimal solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class ConstraintValidator:
+    """Validates constraints with early termination optimization."""
+
+    def __init__(self, geometry_handler):
+        self.geometry = geometry_handler
+
+    def check_containment(self, inner_hexagon, outer_hexagon):
+        """Check if inner hexagon is fully contained within outer hexagon"""
+        # Check if all vertices of inner hexagon are inside outer hexagon
+        for point in inner_hexagon.exterior.coords[:-1]:
+            if not outer_hexagon.contains(Point(point)):
+                return False
+        return True
+
+    def check_overlap(self, hex1, hex2):
+        """Check if two hexagons overlap"""
+        return hex1.intersects(hex2)
+
+    def evaluate_constraints(self, inner_params, outer_radius, n_inner=11):
+        """Comprehensive constraint evaluation with early termination"""
+        inner_hexagons = []
+
+        # Create inner hexagons
+        for i in range(n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.geometry.create_unit_hexagon((x, y), angle)
+            inner_hexagons.append(hexagon)
+
+        # Create outer hexagon
+        outer_hexagon = self.geometry.create_unit_hexagon((0, 0), 0)
+        outer_coords = list(outer_hexagon.exterior.coords)
+        scaled_coords = [(x*outer_radius, y*outer_radius) for x, y in outer_coords]
+        outer_hexagon_scaled = Polygon(scaled_coords)
+
+        # Check containment (early termination)
+        for hexagon in inner_hexagons:
+            if not self.check_containment(hexagon, outer_hexagon_scaled):
+                return False, False, 0.0  # containment violated
+
+        # Check overlaps (early termination)
+        for i in range(n_inner):
+            for j in range(i+1, n_inner):
+                if self.check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                    return False, False, 0.0  # overlap violated
+
+        return True, True, 1.0 / outer_radius  # valid solution
+=======
+class ConstraintValidator:
+    """Validates constraints with early termination optimization."""
+
+    def __init__(self, geometry_handler):
+        self.geometry = geometry_handler
+
+    def check_containment(self, inner_hexagon, outer_hexagon):
+        """Check if inner hexagon is fully contained within outer hexagon with robust buffer handling"""
+        # Use conservative buffer to handle floating point precision issues
+        try:
+            buffered_inner = inner_hexagon.buffer(-1e-8)
+            return outer_hexagon.contains(buffered_inner)
+        except:
+            # Fallback for edge cases
+            # Check if all vertices of inner hexagon are inside outer hexagon
+            for point in inner_hexagon.exterior.coords[:-1]:
+                if not outer_hexagon.contains(Point(point)):
+                    return False
+            return True
+
+    def check_overlap(self, hex1, hex2):
+        """Check if two hexagons overlap with early rejection using bounding circles"""
+        # Early rejection: check if bounding circles overlap first
+        # Get centroids and radii of bounding circles
+        try:
+            # Quick circle overlap test
+            centroid1 = hex1.centroid
+            centroid2 = hex2.centroid
+            dist = np.sqrt((centroid1.x - centroid2.x)**2 + (centroid1.y - centroid2.y)**2)
+
+            # If centers too far apart, no overlap
+            max_radius = self.geometry.unit_apogee * 2  # Maximum possible distance between any two points in unit hexagon
+            if dist > max_radius * 2:
+                return False
+
+            # Use buffer to handle floating point precision issues
+            buffered_hex1 = hex1.buffer(1e-8)
+            buffered_hex2 = hex2.buffer(1e-8)
+            return buffered_hex1.intersects(buffered_hex2)
+        except:
+            # Fallback to direct intersection
+            return hex1.intersects(hex2)
+
+    def evaluate_constraints(self, inner_params, outer_radius, n_inner=11):
+        """Comprehensive constraint evaluation with early termination"""
+        inner_hexagons = []
+
+        # Create inner hexagons
+        for i in range(n_inner):
+            x, y, angle = inner_params[3*i:3*i+3]
+            hexagon = self.geometry.create_unit_hexagon((x, y), angle)
+            inner_hexagons.append(hexagon)
+
+        # Create outer hexagon
+        outer_hexagon = self.geometry.create_unit_hexagon((0, 0), 0)
+        outer_coords = list(outer_hexagon.exterior.coords)
+        scaled_coords = [(x*outer_radius, y*outer_radius) for x, y in outer_coords]
+        outer_hexagon_scaled = Polygon(scaled_coords)
+
+        # Check containment (early termination)
+        for hexagon in inner_hexagons:
+            if not self.check_containment(hexagon, outer_hexagon_scaled):
+                return False, False, 0.0  # containment violated
+
+        # Check overlaps (early termination)
+        for i in range(n_inner):
+            for j in range(i+1, n_inner):
+                if self.check_overlap(inner_hexagons[i], inner_hexagons[j]):
+                    return False, False, 0.0  # overlap violated
+
+        return True, True, 1.0 / outer_radius  # valid solution
+>>>>>>> REPLACE
+</DIFF>

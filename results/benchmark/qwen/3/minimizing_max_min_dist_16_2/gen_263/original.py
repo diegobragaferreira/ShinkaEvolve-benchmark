@@ -1,0 +1,234 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist
+import time
+import random
+from typing import Tuple, List
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distances between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Avoid division by zero
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def create_grid_from_indices(indices: np.ndarray, grid_size: int = 50) -> np.ndarray:
+        """Convert discrete grid indices to continuous coordinates."""
+        points = np.zeros((len(indices), 2))
+        for i, idx in enumerate(indices):
+            points[i, 0] = (idx % grid_size) / (grid_size - 1)
+            points[i, 1] = (idx // grid_size) / (grid_size - 1)
+        return points
+
+    def compute_fitness(points: np.ndarray) -> float:
+        """Compute fitness as min/max distance ratio."""
+        return compute_min_max_ratio(points)
+
+    def crossover(parent1: np.ndarray, parent2: np.ndarray, mutation_rate: float = 0.1) -> np.ndarray:
+        """Perform crossover and mutation on grid indices."""
+        # Simple uniform crossover
+        mask = np.random.random(len(parent1)) < 0.5
+        child = np.where(mask, parent1, parent2).copy()
+
+        # Mutation: randomly change some indices
+        if np.random.random() < mutation_rate:
+            mutate_idx = np.random.randint(0, len(child))
+            child[mutate_idx] = np.random.randint(0, 2500)  # 50x50 grid
+
+        return child
+
+    def initialize_population(pop_size: int, grid_size: int = 50) -> List[np.ndarray]:
+        """Initialize population with random grid configurations."""
+        population = []
+        for _ in range(pop_size):
+            # Generate random unique indices
+            indices = np.random.choice(2500, size=16, replace=False)
+            population.append(indices)
+        return population
+
+    def evaluate_population(population: List[np.ndarray], grid_size: int = 50) -> List[float]:
+        """Evaluate fitness of entire population."""
+        fitnesses = []
+        for ind in population:
+            points = create_grid_from_indices(ind, grid_size)
+            points = np.clip(points, 0, 1)  # Ensure bounds
+            fitness = compute_fitness(points)
+            fitnesses.append(fitness)
+        return fitnesses
+
+    def select_parents(population: List[np.ndarray], fitnesses: List[float],
+                       tournament_size: int = 3) -> Tuple[np.ndarray, np.ndarray]:
+        """Tournament selection."""
+        # Tournament selection for first parent
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        best_idx = tournament_indices[np.argmax([fitnesses[i] for i in tournament_indices])]
+        parent1 = population[best_idx].copy()
+
+        # Tournament selection for second parent
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        best_idx = tournament_indices[np.argmax([fitnesses[i] for i in tournament_indices])]
+        parent2 = population[best_idx].copy()
+
+        return parent1, parent2
+
+    def grid_evolutionary_optimization(max_generations: int = 500, pop_size: int = 50,
+                                     grid_size: int = 50) -> np.ndarray:
+        """Main evolutionary optimization loop."""
+        # Initialize population
+        population = initialize_population(pop_size, grid_size)
+
+        best_fitness = -np.inf
+        best_individual = None
+
+        # Evolutionary process
+        for generation in range(max_generations):
+            # Evaluate population
+            fitnesses = evaluate_population(population, grid_size)
+
+            # Track best solution
+            max_fitness_idx = np.argmax(fitnesses)
+            if fitnesses[max_fitness_idx] > best_fitness:
+                best_fitness = fitnesses[max_fitness_idx]
+                best_individual = population[max_fitness_idx].copy()
+
+            # Create new population
+            new_population = []
+
+            # Elitism: keep best individuals
+            elite_count = pop_size // 10
+            sorted_indices = np.argsort(fitnesses)[::-1][:elite_count]
+            for i in sorted_indices:
+                new_population.append(population[i].copy())
+
+            # Generate offspring
+            while len(new_population) < pop_size:
+                parent1, parent2 = select_parents(population, fitnesses)
+                child = crossover(parent1, parent2)
+                new_population.append(child)
+
+            population = new_population[:pop_size]
+
+            # Adaptive mutation rate
+            if generation > max_generations // 2:
+                # Decrease mutation rate in later generations
+                mutation_rate = 0.05
+            else:
+                mutation_rate = 0.1
+
+        # Convert best individual to final points
+        best_points = create_grid_from_indices(best_individual, grid_size)
+        best_points = np.clip(best_points, 0, 1)
+
+        # Final local refinement using gradient-free method
+        return optimize_local_refinement(best_points)
+
+    def optimize_local_refinement(initial_points: np.ndarray, max_iters: int = 200) -> np.ndarray:
+        """Apply local refinement to final solution."""
+        points = initial_points.copy()
+        current_fitness = compute_fitness(points)
+
+        best_points = points.copy()
+        best_fitness = current_fitness
+
+        # Gradient-free local search using Nelder-Mead inspired approach
+        for _ in range(max_iters):
+            # Try small random perturbations
+            for i in range(len(points)):
+                # Save current point
+                original_point = points[i].copy()
+
+                # Try perturbing this point
+                new_point = original_point + np.random.normal(0, 0.005, 2)
+                new_point = np.clip(new_point, 0, 1)
+
+                # Test if this improves fitness
+                points[i] = new_point
+                new_fitness = compute_fitness(points)
+
+                if new_fitness > current_fitness:
+                    current_fitness = new_fitness
+                    if new_fitness > best_fitness:
+                        best_fitness = new_fitness
+                        best_points = points.copy()
+                else:
+                    # Revert
+                    points[i] = original_point
+
+            # Occasionally try larger perturbations
+            if np.random.random() < 0.1:
+                # Randomly select a few points to perturb more aggressively
+                indices_to_perturb = np.random.choice(len(points),
+                                                    size=max(1, len(points) // 10),
+                                                    replace=False)
+                for idx in indices_to_perturb:
+                    original_point = points[idx].copy()
+                    new_point = original_point + np.random.normal(0, 0.01, 2)
+                    new_point = np.clip(new_point, 0, 1)
+
+                    points[idx] = new_point
+                    new_fitness = compute_fitness(points)
+
+                    if new_fitness > current_fitness:
+                        current_fitness = new_fitness
+                        if new_fitness > best_fitness:
+                            best_fitness = new_fitness
+                            best_points = points.copy()
+                    else:
+                        points[idx] = original_point
+
+        return best_points
+
+    # Main execution
+    np.random.seed(42)
+
+    # Start with coarse grid optimization for broad exploration
+    coarse_result = grid_evolutionary_optimization(max_generations=300, pop_size=40, grid_size=30)
+
+    # Refine with medium grid
+    medium_result = grid_evolutionary_optimization(max_generations=200, pop_size=30, grid_size=40)
+
+    # Final high-resolution optimization
+    final_result = grid_evolutionary_optimization(max_generations=100, pop_size=20, grid_size=50)
+
+    # Compare results and pick the best
+    candidates = [
+        coarse_result,
+        medium_result,
+        final_result
+    ]
+
+    best_candidate = coarse_result
+    best_fitness = compute_fitness(coarse_result)
+
+    for candidate in candidates[1:]:
+        fitness = compute_fitness(candidate)
+        if fitness > best_fitness:
+            best_fitness = fitness
+            best_candidate = candidate
+
+    # Final local refinement
+    final_points = optimize_local_refinement(best_candidate, max_iters=100)
+
+    return final_points
+
+# EVOLVE-BLOCK-END

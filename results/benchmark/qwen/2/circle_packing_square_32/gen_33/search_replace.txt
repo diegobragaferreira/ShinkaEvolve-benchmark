@@ -1,0 +1,171 @@
+<NAME>
+hexagonal_grid_initialization
+</NAME>
+
+<DESCRIPTION>
+This improvement implements a hexagonal grid-based initialization strategy for placing 32 circles in the unit square. The approach starts by arranging circles in a hexagonal pattern which naturally provides good initial spacing, then uses numerical optimization to refine the positions and radii to maximize the sum of radii while satisfying constraints. This method leverages the mathematical properties of hexagonal packing (which is optimal for dense arrangements) combined with optimization to achieve better results than simple random or regular grid placements.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def initialize_hexagonal_grid(n_circles):
+    """Initialize circle positions on a hexagonal grid."""
+    # Calculate grid dimensions for approximately n_circles
+    rows = int(np.ceil(np.sqrt(n_circles / 1.5)))
+    cols = int(np.ceil(n_circles / rows))
+
+    if rows * cols < n_circles:
+        rows += 1
+
+    # Create hexagonal grid
+    positions = []
+    y_spacing = 1.0
+    x_spacing = np.sqrt(3) / 2 * y_spacing
+
+    # Adjust to fit within unit square
+    max_y = min(rows * y_spacing, 1.0)
+    max_x = min(cols * x_spacing, 1.0)
+
+    # Center the grid in unit square
+    x_offset = (1.0 - max_x) / 2
+    y_offset = (1.0 - max_y) / 2
+
+    for i in range(rows):
+        for j in range(cols):
+            if len(positions) >= n_circles:
+                break
+            x = x_offset + j * x_spacing + (i % 2) * x_spacing / 2
+            y = y_offset + i * y_spacing
+            if x <= 1.0 and y <= 1.0:
+                positions.append([x, y])
+        if len(positions) >= n_circles:
+            break
+
+    # Truncate to exactly n_circles
+    positions = positions[:n_circles]
+
+    return np.array(positions)
+
+def compute_radius_for_position(pos, all_positions, all_radii, min_radius=0.001):
+    """Compute maximum possible radius for a circle at given position."""
+    x, y = pos
+    # Boundary constraints
+    max_radius_boundary = min(x, y, 1-x, 1-y)
+
+    # Overlap constraints
+    max_radius_overlap = float('inf')
+    for i, (px, py) in enumerate(all_positions):
+        if np.linalg.norm(np.array([x, y]) - np.array([px, py])) > 0:
+            dist = np.linalg.norm(np.array([x, y]) - np.array([px, py]))
+            max_radius_overlap = min(max_radius_overlap, dist - all_radii[i])
+
+    # Return minimum of all constraints
+    return max(min_radius, min(max_radius_boundary, max_radius_overlap))
+
+def objective_function(vars, positions, n_circles):
+    """Objective function to maximize sum of radii."""
+    # Extract radii from variables
+    radii = vars[n_circles:]  # Last n_circles elements are radii
+
+    # Compute penalty for constraint violations
+    penalty = 0
+    total_radius = sum(radii)
+
+    # Constraint violations check
+    for i in range(n_circles):
+        x, y = positions[i]
+        r = radii[i]
+
+        # Boundary violations
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            penalty += 1000
+
+        # Overlap violations
+        for j in range(i):
+            x_j, y_j = positions[j]
+            r_j = radii[j]
+            dist_sq = (x - x_j)**2 + (y - y_j)**2
+            if dist_sq < (r + r_j)**2:
+                penalty += 1000
+
+    return -total_radius + penalty
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    # Initialize positions using hexagonal grid
+    initial_positions = initialize_hexagonal_grid(n)
+
+    # Initialize radii to small positive values
+    initial_radii = [0.01] * n
+
+    # Combine positions and radii for optimization
+    initial_vars = np.concatenate([initial_positions.flatten(), initial_radii])
+
+    # Optimization bounds for positions (x,y) and radii (r)
+    bounds = [(0, 1)] * (2 * n) + [(0.001, 0.5)] * n
+
+    # Optimize using L-BFGS-B
+    try:
+        result = minimize(
+            objective_function,
+            initial_vars,
+            args=(initial_positions, n),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500}
+        )
+
+        if result.success:
+            # Extract final positions and radii
+            final_positions = result.x[:2*n].reshape(-1, 2)
+            final_radii = result.x[2*n:]
+
+            # Create result array
+            circles = np.column_stack([final_positions, final_radii])
+        else:
+            # Fallback to initial configuration if optimization fails
+            circles = np.column_stack([initial_positions, initial_radii])
+    except Exception as e:
+        # Fallback to initial configuration if any error occurs
+        circles = np.column_stack([initial_positions, initial_radii])
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

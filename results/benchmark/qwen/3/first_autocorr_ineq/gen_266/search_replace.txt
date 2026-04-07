@@ -1,0 +1,258 @@
+<NAME>
+add_historical_sequence_sampling
+</NAME>
+
+<DESCRIPTION>
+This edit introduces historical sequence sampling to enhance the initialization and mutation strategies. By maintaining a library of previously successful sequences and using them to seed new searches or perturb existing ones, we aim to accelerate convergence towards high-performing solutions. This technique leverages insights from past optimizations to guide future search efforts more intelligently.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class AutocorrelationOptimizer:
+    def __init__(self):
+        self.cache = {}
+        self.cache_keys = []
+=======
+class AutocorrelationOptimizer:
+    def __init__(self):
+        self.cache = {}
+        self.cache_keys = []
+        self.historical_sequences = []
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_initialization_with_historical_data
+</NAME>
+
+<DESCRIPTION>
+This edit modifies the `initialize_sequence` method to incorporate historical sequences. When initializing new sequences, the algorithm now considers previously discovered good sequences. It randomly samples from the historical data to create diversified yet informed starting points, potentially accelerating convergence to high-performing regions of the solution space.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_sequence(self) -> List[float]:
+        """Initialize a promising sequence for optimization."""
+        # Try different initialization strategies to find a good starting point
+        strategy = random.choice(['harmonic', 'random', 'spike'])
+
+        if strategy == 'harmonic':
+            # Start with a structured sequence
+            n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+            # Create a sequence with decreasing values to encourage sparsity
+            sequence = [1.0 / (i + 1) for i in range(n)]
+            # Normalize to have reasonable magnitude
+            total = sum(sequence)
+            sequence = [x * 2.0 / total for x in sequence]
+        elif strategy == 'spike':
+            n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+            # Create a sparse sequence with one large spike
+            sequence = [0.0] * n
+            spike_idx = random.randint(0, n-1)
+            sequence[spike_idx] = random.uniform(1.0, 5.0)
+        else:  # random
+            n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+            sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+
+        return sequence
+=======
+    def initialize_sequence(self) -> List[float]:
+        """Initialize a promising sequence for optimization."""
+        # Use historical sequences for intelligent initialization
+        if self.historical_sequences and random.random() < 0.3:
+            # Sample a historical sequence
+            hist_seq = random.choice(self.historical_sequences)
+            # Ensure same length, pad or truncate
+            n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+            if len(hist_seq) < n:
+                sequence = hist_seq + [0.0] * (n - len(hist_seq))
+            elif len(hist_seq) > n:
+                sequence = hist_seq[:n]
+            else:
+                sequence = hist_seq.copy()
+
+            # Apply small random perturbation to introduce diversity
+            for i in range(len(sequence)):
+                if random.random() < 0.2:
+                    sequence[i] *= random.uniform(0.8, 1.2)
+        else:
+            # Try different initialization strategies to find a good starting point
+            strategy = random.choice(['harmonic', 'random', 'spike'])
+
+            if strategy == 'harmonic':
+                # Start with a structured sequence
+                n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+                # Create a sequence with decreasing values to encourage sparsity
+                sequence = [1.0 / (i + 1) for i in range(n)]
+                # Normalize to have reasonable magnitude
+                total = sum(sequence)
+                sequence = [x * 2.0 / total for x in sequence]
+            elif strategy == 'spike':
+                n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+                # Create a sparse sequence with one large spike
+                sequence = [0.0] * n
+                spike_idx = random.randint(0, n-1)
+                sequence[spike_idx] = random.uniform(1.0, 5.0)
+            else:  # random
+                n = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
+                sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+
+        return sequence
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+update_historical_sequences_on_improvement
+</NAME>
+
+<DESCRIPTION>
+This edit modifies the main search loop to track and store promising sequences in a historical database. Whenever a better solution is found, it gets added to the collection of historical sequences, which can then be reused in future initializations or mutations to improve convergence speed and quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        prev_c1 = best_c1
+        stagnation_counter = 0
+        last_improvement_gen = 0
+        iterations = 0
+
+        while time.time() - start_time < MAX_TIME_SECONDS - 5 and iterations < MAX_ITERATIONS:
+            # Try gradient-based improvement
+            improved_sequence = self.get_good_direction_to_move_into(best_sequence, iterations)
+
+            if improved_sequence is not None:
+                new_c1 = self.compute_c1_constant(improved_sequence)
+                if new_c1 < prev_c1:
+                    best_sequence = improved_sequence
+                    prev_c1 = new_c1
+                    iterations += 1
+                    stagnation_counter = 0
+                    last_improvement_gen = iterations
+                    continue
+
+            # If no improvement, check for stagnation
+            if iterations - last_improvement_gen > STAGNATION_THRESHOLD:
+                stagnation_counter += 1
+                if stagnation_counter > RESTART_THRESHOLD:
+                    # Restart with new initialization
+                    best_sequence = self.initialize_sequence()
+                    prev_c1 = self.compute_c1_constant(best_sequence)
+                    last_improvement_gen = iterations
+                    stagnation_counter = 0
+            else:
+                # Apply hybrid mutation
+                n = max(MIN_SEQ_LENGTH, min(MAX_SEQ_LENGTH, int(len(best_sequence) * 0.95)))
+                if random.random() < 0.5:
+                    # Structured perturbation for exploration
+                    mutated_sequence = best_sequence.copy()
+                    # Modify some elements with structured changes
+                    for i in range(len(mutated_sequence)):
+                        if random.random() < 0.3:
+                            # Apply either random change or systematic perturbation
+                            if random.random() < 0.5:
+                                mutated_sequence[i] *= random.uniform(0.8, 1.2)
+                            else:
+                                mutated_sequence[i] = random.uniform(0.1, 2.0)
+                    best_sequence = mutated_sequence
+                else:
+                    # Random perturbation
+                    best_sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+
+            iterations += 1
+=======
+        prev_c1 = best_c1
+        stagnation_counter = 0
+        last_improvement_gen = 0
+        iterations = 0
+
+        while time.time() - start_time < MAX_TIME_SECONDS - 5 and iterations < MAX_ITERATIONS:
+            # Try gradient-based improvement
+            improved_sequence = self.get_good_direction_to_move_into(best_sequence, iterations)
+
+            if improved_sequence is not None:
+                new_c1 = self.compute_c1_constant(improved_sequence)
+                if new_c1 < prev_c1:
+                    best_sequence = improved_sequence
+                    prev_c1 = new_c1
+                    iterations += 1
+                    stagnation_counter = 0
+                    last_improvement_gen = iterations
+
+                    # Store the improved sequence in history if it's significantly better
+                    if len(self.historical_sequences) < 100:  # Limit history size
+                        self.historical_sequences.append(best_sequence.copy())
+                    elif random.random() < 0.1:  # Occasionally replace older entries
+                        self.historical_sequences[random.randint(0, len(self.historical_sequences)-1)] = best_sequence.copy()
+                    continue
+
+            # If no improvement, check for stagnation
+            if iterations - last_improvement_gen > STAGNATION_THRESHOLD:
+                stagnation_counter += 1
+                if stagnation_counter > RESTART_THRESHOLD:
+                    # Restart with new initialization
+                    best_sequence = self.initialize_sequence()
+                    prev_c1 = self.compute_c1_constant(best_sequence)
+                    last_improvement_gen = iterations
+                    stagnation_counter = 0
+            else:
+                # Apply hybrid mutation
+                n = max(MIN_SEQ_LENGTH, min(MAX_SEQ_LENGTH, int(len(best_sequence) * 0.95)))
+                if random.random() < 0.5:
+                    # Structured perturbation for exploration
+                    mutated_sequence = best_sequence.copy()
+                    # Modify some elements with structured changes
+                    for i in range(len(mutated_sequence)):
+                        if random.random() < 0.3:
+                            # Apply either random change or systematic perturbation
+                            if random.random() < 0.5:
+                                mutated_sequence[i] *= random.uniform(0.8, 1.2)
+                            else:
+                                mutated_sequence[i] = random.uniform(0.1, 2.0)
+                    best_sequence = mutated_sequence
+                else:
+                    # Random perturbation
+                    best_sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+
+            iterations += 1
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_injection_of_historical_sequences_in_mutations
+</NAME>
+
+<DESCRIPTION>
+This edit improves the mutation process by injecting historical sequences into the current sequence during mutation. This allows for more informed exploration of the search space, combining known good patterns with random perturbations to potentially discover even better solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+                else:
+                    # Random perturbation
+                    best_sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+=======
+                else:
+                    # Random perturbation with historical sequence injection
+                    if self.historical_sequences and random.random() < 0.2:
+                        # Inject a historical sequence
+                        hist_seq = random.choice(self.historical_sequences)
+                        # Ensure same length
+                        if len(hist_seq) < n:
+                            hist_seq = hist_seq + [0.0] * (n - len(hist_seq))
+                        elif len(hist_seq) > n:
+                            hist_seq = hist_seq[:n]
+
+                        # Blend with current sequence
+                        blend_ratio = 0.3
+                        best_sequence = [
+                            (1 - blend_ratio) * x + blend_ratio * y
+                            for x, y in zip(best_sequence, hist_seq)
+                        ]
+                    else:
+                        # Standard random perturbation
+                        best_sequence = [random.uniform(0.1, 2.0) for _ in range(n)]
+>>>>>>> REPLACE
+</DIFF>

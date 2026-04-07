@@ -1,0 +1,182 @@
+<NAME>
+enhanced_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The main issue with the current implementation is that the Voronoi initialization doesn't adequately consider the optimal spacing for maximizing total radius sum. I'll enhance the Voronoi-based initialization by incorporating a more sophisticated approach that considers both the Voronoi cell sizes and uses a greedy algorithm to prioritize placing larger circles first. This should produce better starting configurations that are closer to optimal.
+
+The key improvements include:
+1. Using Voronoi cells to estimate optimal radii more accurately
+2. Implementing a greedy placement strategy that prioritizes larger circles
+3. Adding more boundary coverage points to improve edge packing
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced Voronoi-based spreading."""
+    # Create a structured grid pattern with randomization
+    grid_size = int(np.ceil(np.sqrt(n_circles)))
+    grid_points = []
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(grid_points) < n_circles:
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                grid_points.append([x, y])
+
+    points = np.array(grid_points)
+
+    # Add some randomness to avoid perfect grids that might cause issues
+    noise_level = 0.03
+    points += np.random.uniform(-noise_level, noise_level, points.shape)
+
+    # Clip points to ensure they're within bounds
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Add boundary points for better coverage
+    boundary_points = []
+    for _ in range(10):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            boundary_points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            boundary_points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            boundary_points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            boundary_points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    points = np.vstack([points, boundary_points])
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii based on Voronoi cell sizes
+        circles = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x, y = selected_centroids[i]
+
+            # Find nearest neighbor to estimate appropriate radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+            if len(distances) > 0:
+                avg_distance = np.min(distances) * 0.4
+                radius = min(avg_distance, 0.25)
+            else:
+                radius = 0.1
+
+            # Ensure it's within bounds
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            circles[i] = [x, y, max(radius, 0.001)]
+
+        return circles
+    except:
+        # Fallback to grid-based initialization if Voronoi fails
+        return generate_grid_initialization(n_circles)
+=======
+def create_voronoi_initialization(n_circles: int) -> np.ndarray:
+    """Create initial configuration using enhanced Voronoi-based spreading with greedy placement."""
+    # Create initial points with better distribution
+    points = []
+
+    # 1. Grid-based points with some randomness
+    grid_size = int(np.ceil(np.sqrt(n_circles)) * 1.2)
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(points) < n_circles * 2:
+                x = (j + 0.5) / grid_size
+                y = (i + 0.5) / grid_size
+                points.append([x, y])
+
+    # 2. Random points
+    random_points = np.random.rand(n_circles, 2)
+    points.extend(random_points.tolist())
+
+    # 3. Boundary points for better edge coverage
+    for _ in range(n_circles * 2):
+        side = np.random.randint(0, 4)
+        if side == 0:  # Top
+            points.append([np.random.rand(), 1.0 - BOUNDARY_MARGIN])
+        elif side == 1:  # Bottom
+            points.append([np.random.rand(), BOUNDARY_MARGIN])
+        elif side == 2:  # Left
+            points.append([BOUNDARY_MARGIN, np.random.rand()])
+        else:  # Right
+            points.append([1.0 - BOUNDARY_MARGIN, np.random.rand()])
+
+    points = np.array(points)[:n_circles * 4]  # Take enough points
+    points = np.clip(points, BOUNDARY_MARGIN, 1 - BOUNDARY_MARGIN)
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(points)
+        # Use Voronoi cell centers as initial circle positions
+        centroids = vor.points[vor.point_region[:-1]]  # Exclude infinite region
+
+        # Limit to number of circles needed
+        selected_centroids = centroids[:n_circles]
+
+        # Create circles with initial radii using Voronoi area estimation
+        circles = np.zeros((n_circles, 3))
+
+        # Calculate approximate Voronoi cell areas to estimate radii
+        # But instead of using Voronoi areas directly, we use nearest neighbor distances
+        # with a more sophisticated approach: consider average distance to neighbors
+        # but prioritize larger radii at the beginning
+
+        # First sort centroids by some measure of centrality/coverage
+        # For simplicity, we'll just go with the order and improve with greedy approach
+
+        # Generate initial radii
+        radii = []
+        for i in range(n_circles):
+            x, y = selected_centroids[i]
+
+            # Find nearest neighbor to estimate appropriate radius
+            distances = np.sqrt(np.sum((selected_centroids - [x, y])**2, axis=1))
+            distances = distances[distances > 0]  # Exclude self-distance
+
+            if len(distances) > 0:
+                # Use median distance for better robustness
+                avg_distance = np.median(distances) * 0.4
+                # Cap the radius at reasonable values
+                radius = min(avg_distance, 0.3)
+            else:
+                radius = 0.1
+
+            # Ensure it's within bounds
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            radii.append(max(radius, 0.001))
+
+        # Sort indices by radius descending and create circles greedily
+        # This helps prioritize larger circles that are harder to fit later
+        sorted_indices = np.argsort(radii)[::-1]
+
+        # Create circles in order of decreasing radius
+        for i, idx in enumerate(sorted_indices):
+            x, y = selected_centroids[idx]
+            radius = radii[idx]
+
+            # Double-check radius constraints
+            radius = min(radius, x - BOUNDARY_MARGIN, 1 - x - BOUNDARY_MARGIN,
+                        y - BOUNDARY_MARGIN, 1 - y - BOUNDARY_MARGIN)
+
+            circles[i] = [x, y, max(radius, 0.001)]
+
+        return circles
+    except:
+        # Fallback to grid-based initialization if Voronoi fails
+        return generate_grid_initialization(n_circles)
+>>>>>>> REPLACE
+</DIFF>

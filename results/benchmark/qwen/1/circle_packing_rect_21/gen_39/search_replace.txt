@@ -1,0 +1,296 @@
+<NAME>
+improved_local_optimization_with_voronoi_density_weighting
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces Voronoi-based density weighting to enhance the local optimization process. The key insight is that circles in high-density regions (where many constraints exist) should use smaller adjustments to avoid destabilizing the configuration, while circles in low-density regions can use larger adjustments for faster convergence. I'll modify the repair_solution method to incorporate Voronoi analysis for smarter constraint resolution, and also enhance the mutation and crossover operators to leverage this information.
+
+The approach involves:
+1. Computing Voronoi diagrams to identify constraint-dense regions
+2. Using density information to weight mutation steps and repair movements
+3. Improving the overall convergence behavior by making optimizations more adaptive to local constraint landscapes
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import math
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+=======
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import Voronoi
+import random
+from typing import Tuple, List
+import math
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_repair_with_voronoi_based_adaptive_movement
+</NAME>
+
+<DESCRIPTION>
+This change modifies the repair_solution method to use Voronoi-based adaptive movement. Instead of applying uniform corrections, circles will now move based on their Voronoi cell area - smaller cells (higher constraint density) get smaller movement steps, while larger cells (lower constraint density) get larger steps. This makes the repair process more intelligent and adaptive to local constraint landscapes, leading to better convergence and fewer constraint violations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def repair_solution(self, circles: np.ndarray) -> np.ndarray:
+        """Enhanced repair mechanism for fixing constraint violations."""
+        repaired = circles.copy()
+
+        # Ensure positive radii
+        repaired[:, 2] = np.maximum(repaired[:, 2], 0.001)
+
+        # Enforce bounds
+        for i in range(len(repaired)):
+            x, y, r = repaired[i]
+            x = np.clip(x, r, self.rect_width - r)
+            y = np.clip(y, r, self.rect_height - r)
+            repaired[i] = [x, y, r]
+
+        # Resolve overlaps iteratively with better algorithm
+        for iteration in range(50):
+            # Calculate pairwise distances
+            positions = repaired[:, :2]
+            radii = repaired[:, 2]
+            distances = cdist(positions, positions)
+
+            conflicts = []
+            for i in range(len(repaired)):
+                for j in range(i+1, len(repaired)):
+                    if distances[i, j] < (radii[i] + radii[j]):
+                        conflicts.append((i, j))
+
+            if not conflicts:
+                break
+
+            # Move conflicting pairs apart
+            for i, j in conflicts:
+                x1, y1, r1 = repaired[i]
+                x2, y2, r2 = repaired[j]
+
+                dx = x2 - x1
+                dy = y2 - y1
+                distance = np.sqrt(dx*dx + dy*dy)
+
+                if distance > 0:
+                    # Move circles away from each other
+                    move_distance = (r1 + r2 - distance) / 2
+                    dx_norm = dx / distance
+                    dy_norm = dy / distance
+
+                    # Apply movement with bounded adjustment
+                    move1 = move_distance * r2 / (r1 + r2 + 1e-8)
+                    move2 = move_distance * r1 / (r1 + r2 + 1e-8)
+
+                    repaired[i, 0] -= dx_norm * move1 * 0.5
+                    repaired[i, 1] -= dy_norm * move1 * 0.5
+                    repaired[j, 0] += dx_norm * move2 * 0.5
+                    repaired[j, 1] += dy_norm * move2 * 0.5
+
+                    # Keep within bounds
+                    repaired[i, 0] = np.clip(repaired[i, 0], r1, self.rect_width - r1)
+                    repaired[i, 1] = np.clip(repaired[i, 1], r1, self.rect_height - r1)
+                    repaired[j, 0] = np.clip(repaired[j, 0], r2, self.rect_width - r2)
+                    repaired[j, 1] = np.clip(repaired[j, 1], r2, self.rect_height - r2)
+
+        return repaired
+=======
+    def repair_solution(self, circles: np.ndarray) -> np.ndarray:
+        """Enhanced repair mechanism for fixing constraint violations with Voronoi-based adaptive movement."""
+        repaired = circles.copy()
+
+        # Ensure positive radii
+        repaired[:, 2] = np.maximum(repaired[:, 2], 0.001)
+
+        # Enforce bounds
+        for i in range(len(repaired)):
+            x, y, r = repaired[i]
+            x = np.clip(x, r, self.rect_width - r)
+            y = np.clip(y, r, self.rect_height - r)
+            repaired[i] = [x, y, r]
+
+        # Resolve overlaps iteratively with better algorithm
+        for iteration in range(50):
+            # Calculate pairwise distances
+            positions = repaired[:, :2]
+            radii = repaired[:, 2]
+            distances = cdist(positions, positions)
+
+            conflicts = []
+            for i in range(len(repaired)):
+                for j in range(i+1, len(repaired)):
+                    if distances[i, j] < (radii[i] + radii[j]):
+                        conflicts.append((i, j))
+
+            if not conflicts:
+                break
+
+            # Compute Voronoi diagram to assess local constraint density
+            try:
+                vor = Voronoi(positions)
+                # Calculate approximate Voronoi cell areas for each point
+                cell_areas = np.zeros(len(positions))
+                for i in range(len(positions)):
+                    # Get vertices for the Voronoi cell of point i
+                    vertices = vor.points[vor.regions[vor.point_region[i]]]
+                    if len(vertices) > 2:
+                        # Approximate area using convex hull
+                        # For simplicity, we'll use the minimum bounding box area
+                        if len(vertices) >= 2:
+                            min_x, max_x = np.min(vertices[:, 0]), np.max(vertices[:, 0])
+                            min_y, max_y = np.min(vertices[:, 1]), np.max(vertices[:, 1])
+                            cell_areas[i] = (max_x - min_x) * (max_y - min_y)
+                        else:
+                            cell_areas[i] = 1.0
+                    else:
+                        cell_areas[i] = 1.0
+            except:
+                # Fallback if Voronoi computation fails
+                cell_areas = np.ones(len(positions))
+
+            # Move conflicting pairs apart with adaptive step sizes based on Voronoi density
+            for i, j in conflicts:
+                x1, y1, r1 = repaired[i]
+                x2, y2, r2 = repaired[j]
+
+                dx = x2 - x1
+                dy = y2 - y1
+                distance = np.sqrt(dx*dx + dy*dy)
+
+                if distance > 0:
+                    # Move circles away from each other with density-adaptive movement
+                    move_distance = (r1 + r2 - distance) / 2
+
+                    # Adaptive movement based on Voronoi cell area (smaller cells = more constrained)
+                    # Inverse relationship: smaller cell area means higher constraint density
+                    base_step = 0.5  # Base movement factor
+                    density_factor = 1.0 / (1.0 + cell_areas[i] + cell_areas[j])  # Normalize
+
+                    # Apply movement with bounded adjustment and density weighting
+                    move1 = move_distance * r2 / (r1 + r2 + 1e-8) * base_step * density_factor
+                    move2 = move_distance * r1 / (r1 + r2 + 1e-8) * base_step * density_factor
+
+                    repaired[i, 0] -= dx / distance * move1
+                    repaired[i, 1] -= dy / distance * move1
+                    repaired[j, 0] += dx / distance * move2
+                    repaired[j, 1] += dy / distance * move2
+
+                    # Keep within bounds
+                    repaired[i, 0] = np.clip(repaired[i, 0], r1, self.rect_width - r1)
+                    repaired[i, 1] = np.clip(repaired[i, 1], r1, self.rect_height - r1)
+                    repaired[j, 0] = np.clip(repaired[j, 0], r2, self.rect_width - r2)
+                    repaired[j, 1] = np.clip(repaired[j, 1], r2, self.rect_height - r2)
+
+        return repaired
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+adaptive_mutation_with_constraint_density_weighting
+</NAME>
+
+<DESCRIPTION>
+This enhancement modifies the mutation operator to be adaptive based on constraint density. Circles in high-density constraint regions (small Voronoi cells) will receive smaller mutation steps to preserve stability, while circles in low-density regions can have larger mutations for better exploration. This creates a more balanced optimization approach that doesn't destabilize already well-packed regions while still allowing exploration in sparse regions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def mutate(self, circles: np.ndarray) -> np.ndarray:
+        """Improved mutation operator with adaptive parameters."""
+        mutated = circles.copy()
+
+        # Adaptive mutation rate based on generation
+        mutation_rate = 0.3
+
+        for i in range(self.n_circles):
+            if np.random.random() < mutation_rate:
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    # Mutate position (x, y) with adaptive step size
+                    step_size = 0.05 + np.random.random() * 0.05
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+                else:
+                    # Mutate radius with log-normal distribution to avoid negative values
+                    # Only scale up/down with small variations
+                    scale_factor = np.exp(np.random.normal(0, 0.2))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+        return mutated
+=======
+    def mutate(self, circles: np.ndarray) -> np.ndarray:
+        """Improved mutation operator with adaptive parameters based on constraint density."""
+        mutated = circles.copy()
+
+        # First compute constraint density for adaptive mutation
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+
+        # Compute Voronoi cells to estimate constraint density (using approximate method)
+        try:
+            vor = Voronoi(positions)
+            # Estimate constraint density based on Voronoi cell areas
+            cell_areas = np.zeros(len(positions))
+            for i in range(len(positions)):
+                vertices = vor.points[vor.regions[vor.point_region[i]]]
+                if len(vertices) > 2:
+                    # Simplified area estimation
+                    min_x, max_x = np.min(vertices[:, 0]), np.max(vertices[:, 0])
+                    min_y, max_y = np.min(vertices[:, 1]), np.max(vertices[:, 1])
+                    cell_areas[i] = (max_x - min_x) * (max_y - min_y)
+                else:
+                    cell_areas[i] = 1.0
+        except:
+            cell_areas = np.ones(len(positions))
+
+        # Adaptive mutation rate based on generation and constraint density
+        for i in range(self.n_circles):
+            # Base mutation rate
+            mutation_rate = 0.3
+
+            # Density-based adjustment: higher density = lower mutation rate
+            density_adjustment = 1.0 / (1.0 + cell_areas[i]/np.mean(cell_areas))
+            adjusted_mutation_rate = mutation_rate * density_adjustment
+
+            if np.random.random() < adjusted_mutation_rate:
+                # Choose mutation type
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                if mutation_type == 'position':
+                    # Mutate position (x, y) with adaptive step size based on density
+                    # High density = small step, low density = large step
+                    base_step = 0.05 + np.random.random() * 0.05
+                    density_factor = 1.0 / (1.0 + cell_areas[i]/np.mean(cell_areas))
+                    step_size = base_step * density_factor
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+                else:
+                    # Mutate radius with log-normal distribution to avoid negative values
+                    # Adapted based on density - more conservative in dense regions
+                    density_factor = 1.0 / (1.0 + cell_areas[i]/np.mean(cell_areas))
+                    scale_factor = np.exp(np.random.normal(0, 0.2 * density_factor))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

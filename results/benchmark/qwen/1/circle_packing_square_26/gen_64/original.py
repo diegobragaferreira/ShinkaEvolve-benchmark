@@ -1,0 +1,385 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, voronoi_plot_2d
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+import random
+from deap import base, creator, tools
+import time
+from itertools import combinations
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
+    N_CIRCLES = 26
+    
+    def initialize_voronoi_population(pop_size):
+        """Initialize population using Voronoi-based approach"""
+        population = []
+        for _ in range(pop_size):
+            # Generate initial points using a modified grid with Voronoi-inspired spread
+            points = []
+            grid_size = int(np.ceil(np.sqrt(N_CIRCLES)))
+            spacing_x = 1.0 / (grid_size + 1)
+            spacing_y = 1.0 / (grid_size + 1)
+            
+            # Create points in a grid pattern with strategic jittering
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    if len(points) < N_CIRCLES:
+                        # Add jittering in a structured way to maintain Voronoi-friendly distribution
+                        jitter_x = np.random.uniform(-spacing_x/8, spacing_x/8)
+                        jitter_y = np.random.uniform(-spacing_y/8, spacing_y/8)
+                        x = (i + 1) * spacing_x + jitter_x
+                        y = (j + 1) * spacing_y + jitter_y
+                        points.append([x, y])
+            
+            # Fill remaining positions if needed
+            while len(points) < N_CIRCLES:
+                x = np.random.uniform(0.01, 0.99)
+                y = np.random.uniform(0.01, 0.99)
+                points.append([x, y])
+            
+            # Create Voronoi diagram and get cell centroids as initial circle positions
+            points_array = np.array(points)
+            
+            try:
+                # Compute Voronoi diagram
+                vor = Voronoi(points_array)
+                centroids = []
+                
+                # Use centroids of finite Voronoi cells as circle centers
+                for i, (x, y) in enumerate(vor.points):
+                    # Skip infinite cells
+                    if i < len(vor.point_region) and vor.point_region[i] >= 0:
+                        region = vor.regions[vor.point_region[i]]
+                        if all(r >= 0 for r in region):  # Only consider finite regions
+                            # Compute centroid of the Voronoi cell
+                            vertices = np.array([vor.vertices[r] for r in region])
+                            centroid = np.mean(vertices, axis=0)
+                            # Ensure centroid is within bounds
+                            centroid[0] = np.clip(centroid[0], 0.01, 0.99)
+                            centroid[1] = np.clip(centroid[1], 0.01, 0.99)
+                            centroids.append(centroid)
+                
+                # If we don't have enough centroids, use original points
+                if len(centroids) < N_CIRCLES:
+                    centroids = points_array[:N_CIRCLES].tolist()
+                else:
+                    centroids = centroids[:N_CIRCLES]
+                
+                # Compute radii based on Voronoi cell sizes
+                circles = np.zeros((N_CIRCLES, 3))
+                for i, (cx, cy) in enumerate(centroids):
+                    # Calculate minimum distance to other points
+                    min_dist = float('inf')
+                    for j, (px, py) in enumerate(centroids):
+                        if i != j:
+                            dist = np.sqrt((cx - px)**2 + (cy - py)**2)
+                            min_dist = min(min_dist, dist)
+                    
+                    # Set radius relative to Voronoi cell size
+                    if min_dist > 0:
+                        # Use half the minimum distance between centers as rough estimate
+                        r = min(0.15, min_dist/2.5)
+                    else:
+                        r = np.random.uniform(0.01, 0.05)
+                    
+                    # Enforce hard bounds
+                    r = max(0.005, min(0.2, r))
+                    circles[i] = [cx, cy, r]
+                    
+            except Exception:
+                # Fall back to simple initialization if Voronoi fails
+                circles = np.zeros((N_CIRCLES, 3))
+                for i in range(N_CIRCLES):
+                    x = np.random.uniform(0.01, 0.99)
+                    y = np.random.uniform(0.01, 0.99)
+                    r = np.random.uniform(0.01, 0.1)
+                    circles[i] = [x, y, r]
+            
+            population.append(circles)
+        return population
+    
+    def is_valid_solution(circles):
+        """Check if solution satisfies all constraints efficiently"""
+        # Check containment
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+        
+        # Check non-overlap using optimized approach
+        points = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Use KDTree for efficient pairwise distance checking
+        try:
+            from scipy.spatial import KDTree
+            tree = KDTree(points)
+            pairs = tree.query_pairs(0, return_distance=False)
+            
+            for i, j in pairs:
+                if i < j:  # Avoid checking same pair twice
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if dist < r1 + r2:
+                        return False
+        except Exception:
+            # Fallback to brute force if KDTree fails
+            for i in range(len(circles)):
+                x1, y1, r1 = circles[i]
+                for j in range(i+1, len(circles)):
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    if dist < r1 + r2:
+                        return False
+        
+        return True
+    
+    def evaluate_fitness(individual):
+        """Evaluate fitness as negative sum of radii (since we want to maximize)"""
+        # Only consider valid solutions
+        if not is_valid_solution(individual):
+            # Apply large penalty for invalid solutions
+            return (-np.sum(individual[:, 2]) - 1000,)
+        
+        # Return negative sum of radii for maximization problem
+        return (-np.sum(individual[:, 2]),)
+    
+    def mut_gaussian(individual, mu=0, sigma=0.01, indpb=0.2):
+        """Custom mutator that keeps circles within bounds and maintains validity"""
+        for i in range(len(individual)):
+            if random.random() < indpb:
+                # Mutate position with careful boundary handling
+                individual[i][0] += np.random.normal(mu, sigma)
+                individual[i][1] += np.random.normal(mu, sigma)
+                
+                # Mutate radius but with smaller changes
+                individual[i][2] += np.random.normal(mu, sigma/4)
+                
+                # Ensure boundaries
+                individual[i][0] = np.clip(individual[i][0], individual[i][2], 1 - individual[i][2])
+                individual[i][1] = np.clip(individual[i][1], individual[i][2], 1 - individual[i][2])
+                individual[i][2] = np.clip(individual[i][2], 0.001, 0.5)
+        
+        # Attempt to repair collisions if they occur
+        repair_individual(individual)
+        return individual,
+    
+    def repair_individual(individual):
+        """Repair an individual to ensure no overlaps and containment"""
+        # First fix containment issues
+        for i in range(len(individual)):
+            x, y, r = individual[i]
+            
+            # Ensure containment
+            x = np.clip(x, r, 1 - r)
+            y = np.clip(y, r, 1 - r)
+            individual[i][0] = x
+            individual[i][1] = y
+        
+        # Then resolve overlaps using a simpler but more robust approach
+        max_iterations = 5
+        for iteration in range(max_iterations):
+            overlapped = False
+            for i in range(len(individual)):
+                x, y, r = individual[i]
+                for j in range(len(individual)):
+                    if i != j:
+                        x2, y2, r2 = individual[j]
+                        dist = np.sqrt((x - x2)**2 + (y - y2)**2)
+                        
+                        if dist < r + r2:
+                            overlapped = True
+                            # Simple separation by moving away from the center of mass
+                            dx = x2 - x
+                            dy = y2 - y
+                            if dx == 0 and dy == 0:
+                                # If same position, move randomly
+                                angle = np.random.uniform(0, 2*np.pi)
+                                dx = np.cos(angle)
+                                dy = np.sin(angle)
+                            
+                            # Normalize direction vector
+                            length = np.sqrt(dx*dx + dy*dy)
+                            if length > 0:
+                                dx /= length
+                                dy /= length
+                            
+                            # Adjust positions to separate them
+                            separation = (r + r2) - dist
+                            individual[i][0] += dx * separation * 0.3
+                            individual[i][1] += dy * separation * 0.3
+                            
+                            # Clip to bounds
+                            individual[i][0] = np.clip(individual[i][0], r, 1 - r)
+                            individual[i][1] = np.clip(individual[i][1], r, 1 - r)
+            
+            if not overlapped:
+                break
+    
+    def cx_uniform(individual1, individual2):
+        """Uniform crossover for circle positions and radii"""
+        size = len(individual1)
+        for i in range(size):
+            if random.random() < 0.5:
+                individual1[i], individual2[i] = individual2[i], individual1[i]
+        
+        # Repair offspring
+        repair_individual(individual1)
+        repair_individual(individual2)
+        return individual1, individual2
+    
+    # Set up DEAP framework
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", tools.initRepeat, creator.Individual, 
+                     lambda: [np.random.uniform(0.01, 0.99), 
+                              np.random.uniform(0.01, 0.99), 
+                              np.random.uniform(0.01, 0.1)], 
+                     n=N_CIRCLES)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
+    toolbox.register("evaluate", evaluate_fitness)
+    toolbox.register("mate", cx_uniform)
+    toolbox.register("mutate", mut_gaussian)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Initialize population with Voronoi-based starting points
+    pop = initialize_voronoi_population(50)
+    
+    # Convert to DEAP individuals
+    deap_pop = []
+    for p in pop:
+        ind = creator.Individual(p.tolist())
+        ind.fitness.values = evaluate_fitness(p)
+        deap_pop.append(ind)
+    
+    # Run evolution with refined parameters
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    
+    # Evolution parameters
+    n_generations = 200  # More generations for better convergence
+    mutation_rate = 0.15
+    crossover_rate = 0.8
+    
+    # Run evolution with adaptive parameters
+    for gen in range(n_generations):
+        # Adaptive mutation rate
+        current_mutation_rate = max(0.01, mutation_rate * (1 - gen/n_generations))
+        
+        # Select parents
+        offspring = toolbox.select(deap_pop, len(deap_pop))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < crossover_rate:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        # Apply mutation with adaptive rate
+        for mutant in offspring:
+            if random.random() < current_mutation_rate:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Evaluate invalid individuals
+        invalid_ind = [ind for ind in offspring if not hasattr(ind.fitness, 'values') or len(ind.fitness.values) == 0]
+        for ind in invalid_ind:
+            ind.fitness.values = evaluate_fitness(np.array(ind))
+        
+        # Update population
+        deap_pop[:] = offspring
+        
+        # Update hall of fame
+        hof.update(deap_pop)
+        
+        # Print progress
+        if gen % 20 == 0:
+            try:
+                best_fit = max([ind.fitness.values[0] for ind in deap_pop])
+                print(f"Generation {gen}: Best fitness = {-best_fit}")
+            except:
+                pass
+    
+    # Get best solution
+    best_individual = hof[0] if hof else deap_pop[0]
+    best_solution = np.array(best_individual)
+    
+    # Final validation and repair
+    if not is_valid_solution(best_solution):
+        repair_individual(best_solution)
+    
+    # Additional refinement using local optimization
+    try:
+        final_circles = best_solution.copy()
+        # Local optimization step using scipy minimize
+        def objective(params):
+            circles = params.reshape(-1, 3)
+            # Sum of negative radii (so we maximize sum of radii)
+            return -np.sum(circles[:, 2])
+        
+        def constraint_func(params):
+            circles = params.reshape(-1, 3)
+            constraints = []
+            
+            # Containment constraints
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                constraints.append(x - r)  # x - r >= 0
+                constraints.append(1 - x - r)  # 1 - x - r >= 0
+                constraints.append(y - r)  # y - r >= 0
+                constraints.append(1 - y - r)  # 1 - y - r >= 0
+            
+            # Overlap constraints
+            for i, j in combinations(range(len(circles)), 2):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist_sq = (x1 - x2)**2 + (y1 - y2)**2
+                overlap = np.sqrt(dist_sq) - (r1 + r2)
+                constraints.append(overlap)  # Should be >= 0
+            
+            return np.array(constraints)
+        
+        # Flatten parameters for scipy optimization
+        initial_params = final_circles.flatten()
+        
+        # Define bounds for optimization
+        bounds = []
+        for i in range(len(final_circles)):
+            # Bounds for x, y, r
+            bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.5)])
+        
+        # Simple optimization approach - use scipy for fine-tuning
+        # Note: This part is simplified since complex constraints are hard to handle in scipy
+        # We'll do a few additional local repairs instead
+        for _ in range(5):
+            repair_individual(final_circles)
+        
+        best_solution = final_circles
+        
+    except Exception as e:
+        # If optimization fails, just return the best evolved solution
+        pass
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END

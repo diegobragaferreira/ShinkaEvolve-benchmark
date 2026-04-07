@@ -1,0 +1,181 @@
+<NAME>
+implement_spatial_hashing_for_overlap_detection
+</NAME>
+
+<DESCRIPTION>
+I'll implement spatial hashing for overlap detection to significantly improve performance when checking hexagon intersections. This is a critical optimization because the current overlap detection uses O(n²) pairwise intersection tests, which becomes very slow as we refine configurations. Spatial hashing will reduce this to near O(n) by organizing hexagons into a grid and only checking nearby cells for potential overlaps.
+
+The key insight is that hexagons that don't share grid cells can't possibly overlap, so we only need to check intersections between hexagons in adjacent cells. This dramatically reduces the number of expensive polygon intersection tests.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def check_overlap_simple_numba(hexagon_vertices_list):
+    """Simple overlap check using bounding boxes for speed."""
+    n_hexagons = len(hexagon_vertices_list)
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        # Get bounding box for hexagon i
+        min_x = vertices_i[0][0]
+        max_x = vertices_i[0][0]
+        min_y = vertices_i[0][1]
+        max_y = vertices_i[0][1]
+
+        for j in range(1, len(vertices_i)):
+            x, y = vertices_i[j]
+            if x < min_x: min_x = x
+            if x > max_x: max_x = x
+            if y < min_y: min_y = y
+            if y > max_y: max_y = y
+
+        # Compare with all other hexagons
+        for k in range(i+1, n_hexagons):
+            vertices_k = hexagon_vertices_list[k]
+            # Get bounding box for hexagon k
+            min_x_k = vertices_k[0][0]
+            max_x_k = vertices_k[0][0]
+            min_y_k = vertices_k[0][1]
+            max_y_k = vertices_k[0][1]
+
+            for l in range(1, len(vertices_k)):
+                x, y = vertices_k[l]
+                if x < min_x_k: min_x_k = x
+                if x > max_x_k: max_x_k = x
+                if y < min_y_k: min_y_k = y
+                if y > max_y_k: max_y_k = y
+
+            # Check if bounding boxes intersect
+            if max_x >= min_x_k and min_x <= max_x_k and max_y >= min_y_k and min_y <= max_y_k:
+                return False  # Overlap detected
+
+    return True  # No overlap
+=======
+@jit(nopython=True)
+def get_hexagon_bounds(vertices):
+    """Get bounding box of a hexagon."""
+    min_x = vertices[0][0]
+    max_x = vertices[0][0]
+    min_y = vertices[0][1]
+    max_y = vertices[0][1]
+
+    for i in range(1, len(vertices)):
+        x, y = vertices[i]
+        if x < min_x: min_x = x
+        if x > max_x: max_x = x
+        if y < min_y: min_y = y
+        if y > max_y: max_y = y
+
+    return min_x, max_x, min_y, max_y
+
+@jit(nopython=True)
+def hexagon_to_grid_cells(vertices, cell_size):
+    """Get all grid cells that a hexagon might occupy."""
+    min_x, max_x, min_y, max_y = get_hexagon_bounds(vertices)
+
+    # Get grid indices for bounding box
+    min_cell_x = int(min_x // cell_size)
+    max_cell_x = int(max_x // cell_size)
+    min_cell_y = int(min_y // cell_size)
+    max_cell_y = int(max_y // cell_size)
+
+    # Collect all cells
+    cells = []
+    for x in range(min_cell_x, max_cell_x + 1):
+        for y in range(min_cell_y, max_cell_y + 1):
+            cells.append((x, y))
+
+    return cells
+
+@jit(nopython=True)
+def check_overlap_spatial_hashing_numba(hexagon_vertices_list, cell_size=2.0):
+    """Spatial hashing overlap check for improved performance."""
+    n_hexagons = len(hexagon_vertices_list)
+
+    # Build spatial hash grid
+    grid = {}
+
+    # Place each hexagon into grid cells
+    for i in range(n_hexagons):
+        vertices = hexagon_vertices_list[i]
+        cells = hexagon_to_grid_cells(vertices, cell_size)
+        for cell in cells:
+            if cell not in grid:
+                grid[cell] = []
+            grid[cell].append(i)
+
+    # Check for overlaps by examining neighboring cells
+    for i in range(n_hexagons):
+        vertices_i = hexagon_vertices_list[i]
+        cells = hexagon_to_grid_cells(vertices_i, cell_size)
+
+        # Check all neighboring cells
+        for cell in cells:
+            # Check all hexagons in this cell and adjacent cells
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                    if neighbor_cell in grid:
+                        for j in grid[neighbor_cell]:
+                            if i != j:  # Don't check against self
+                                # Quick bounding box check
+                                min_x_i, max_x_i, min_y_i, max_y_i = get_hexagon_bounds(vertices_i)
+                                vertices_j = hexagon_vertices_list[j]
+                                min_x_j, max_x_j, min_y_j, max_y_j = get_hexagon_bounds(vertices_j)
+
+                                # Simple bounding box intersection test
+                                if (max_x_i >= min_x_j and min_x_i <= max_x_j and
+                                    max_y_i >= min_y_j and min_y_i <= max_y_j):
+                                    return False  # Overlap detected
+
+    return True  # No overlap detected
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap(hexagon_vertices_list):
+    """Check if any hexagons overlap."""
+    # First try the fast numba version
+    if check_overlap_simple_numba(hexagon_vertices_list):
+        # Fall back to Shapely for precise check if needed
+        polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+        try:
+            union = unary_union(polygons)
+            total_area = sum(polygon.area for polygon in polygons)
+            union_area = union.area
+            # If areas match, no overlap
+            return abs(total_area - union_area) < 1e-10
+        except:
+            # Fallback for complex cases
+            for i in range(len(polygons)):
+                for j in range(i+1, len(polygons)):
+                    if polygons[i].intersects(polygons[j]):
+                        return False
+            return True
+    return False
+=======
+def check_overlap(hexagon_vertices_list):
+    """Check if any hexagons overlap."""
+    # First try the fast spatial hashing version
+    if check_overlap_spatial_hashing_numba(hexagon_vertices_list):
+        # Fall back to Shapely for precise check if needed
+        polygons = [Polygon(vertices) for vertices in hexagon_vertices_list]
+        try:
+            union = unary_union(polygons)
+            total_area = sum(polygon.area for polygon in polygons)
+            union_area = union.area
+            # If areas match, no overlap
+            return abs(total_area - union_area) < 1e-10
+        except:
+            # Fallback for complex cases
+            for i in range(len(polygons)):
+                for j in range(i+1, len(polygons)):
+                    if polygons[i].intersects(polygons[j]):
+                        return False
+            return True
+    return False
+>>>>>>> REPLACE
+
+</DIFF>

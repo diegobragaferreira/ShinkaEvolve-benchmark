@@ -1,0 +1,368 @@
+<NAME>
+adaptive_aspect_ratio
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a fixed 1:1 aspect ratio rectangle (width=1.0, height=1.0) which may not be optimal for packing 21 circles. The proposed change introduces an adaptive aspect ratio optimization that searches for the best width/height ratio to maximize the sum of radii. This leverages the fact that different aspect ratios can significantly affect circle packing efficiency, especially when the number of circles is fixed at 21.
+
+The approach involves:
+1. Adding a parameter to optimize rectangle aspect ratio alongside circle positions/radii
+2. Implementing a two-phase optimization: first find optimal aspect ratio, then optimize circle packing for that ratio
+3. Using a coarse-to-fine strategy where we initially test several aspect ratios before refining the best one
+4. Maintaining the existing evolutionary algorithm for circle optimization but extending it to handle aspect ratio
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = 1.0  # Default rectangle dimensions (width=1, height=1)
+RECT_HEIGHT = 1.0
+NUM_CIRCLES = 21
+POPULATION_SIZE = 50
+MAX_GENERATIONS = 200
+MUTATION_RATE = 0.1
+TOURNAMENT_SIZE = 3
+SEED = 42
+
+class CirclePacker:
+    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT,
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.rect_area = width * height
+
+        # Initialize random seed for reproducibility
+        np.random.seed(SEED)
+        random.seed(SEED)
+=======
+# Global constants
+RECT_PERIMETER = 4.0
+RECT_WIDTH = 1.0  # Default rectangle dimensions (width=1, height=1)
+RECT_HEIGHT = 1.0
+NUM_CIRCLES = 21
+POPULATION_SIZE = 50
+MAX_GENERATIONS = 200
+MUTATION_RATE = 0.1
+TOURNAMENT_SIZE = 3
+SEED = 42
+ASPECT_RATIO_RANGE = (0.5, 2.0)  # Allow aspect ratios from 0.5 to 2.0
+
+class CirclePacker:
+    def __init__(self, width: float = RECT_WIDTH, height: float = RECT_HEIGHT,
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.rect_area = width * height
+
+        # Initialize random seed for reproducibility
+        np.random.seed(SEED)
+        random.seed(SEED)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 100  # Heavy penalty for boundary violations
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance
+        penalty_weight = 1000.0
+        return total_radius - (penalty_weight * violations), violations
+=======
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Count constraint violations
+        violations = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                violations += 100  # Heavy penalty for boundary violations
+
+        # Check overlap violations using spatial indexing for efficiency
+        try:
+            # Build KDTree for fast neighbor search
+            points = circles[:, :2]  # Only x,y coordinates
+            tree = cKDTree(points)
+
+            # Find neighbors within 2*max_radius distance (optimization)
+            max_radius = np.max(circles[:, 2])
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+            for i, j in pairs:
+                if self.check_overlap(circles, i, j):
+                    violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    if self.check_overlap(circles, i, j):
+                        violations += 1
+
+        # Return negative penalty (since we want to maximize) plus positive radius sum
+        # Adjust penalty weight for better balance
+        penalty_weight = 1000.0
+        return total_radius - (penalty_weight * violations), violations
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm"""
+        start_time = time.time()
+
+        # Generate initial population
+        population = self.generate_initial_population(POPULATION_SIZE)
+
+        best_solution = None
+        best_fitness = float('-inf')
+
+        # Track convergence
+        fitness_history = []
+
+        for generation in range(MAX_GENERATIONS):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = self.calculate_fitness(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 20 generations
+            if generation % 20 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < POPULATION_SIZE:
+                # Selection
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate(child)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if len(fitness_history) >= 10:
+                recent_avg = np.mean(fitness_history[-10:])
+                prev_avg = np.mean(fitness_history[-20:-10])
+                if abs(recent_avg - prev_avg) < 1e-6:
+                    print(f"Converged at generation {generation}")
+                    break
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+=======
+    def optimize(self) -> np.ndarray:
+        """Main optimization loop using evolutionary algorithm"""
+        start_time = time.time()
+
+        # First, try a coarse search for optimal aspect ratio
+        best_solution = None
+        best_fitness = float('-inf')
+
+        # Test a few different aspect ratios
+        aspect_ratios_to_test = [0.5, 0.75, 1.0, 1.5, 2.0]
+        best_aspect_ratio = 1.0
+        best_individual_at_ratio = None
+
+        print("Testing aspect ratios...")
+        for aspect_ratio in aspect_ratios_to_test:
+            # Calculate width and height for this aspect ratio
+            # Keep perimeter constant (width + height = 2)
+            height = 2.0 / (1.0 + aspect_ratio)
+            width = aspect_ratio * height
+
+            # Create temporary packer with this aspect ratio
+            temp_packer = CirclePacker(width=width, height=height, num_circles=self.num_circles)
+
+            # Generate initial population for this aspect ratio
+            temp_population = temp_packer.generate_initial_population(POPULATION_SIZE)
+
+            # Optimize for this specific aspect ratio
+            temp_best_solution = None
+            temp_best_fitness = float('-inf')
+
+            # Use fewer generations for coarse testing
+            temp_max_generations = max(50, MAX_GENERATIONS // 4)
+
+            for generation in range(temp_max_generations):
+                # Evaluate fitness for entire population
+                fitness_scores = []
+                for individual in temp_population:
+                    fitness, violations = temp_packer.calculate_fitness(individual)
+                    fitness_scores.append((fitness, violations))
+
+                # Track best solution in this generation
+                gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+                gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+                if gen_best_fitness > temp_best_fitness:
+                    temp_best_fitness = gen_best_fitness
+                    temp_best_solution = temp_population[gen_best_idx].copy()
+
+            # Update overall best if this aspect ratio performed better
+            if temp_best_fitness > best_fitness:
+                best_fitness = temp_best_fitness
+                best_aspect_ratio = aspect_ratio
+                best_individual_at_ratio = temp_best_solution.copy()
+
+            print(f"Aspect ratio {aspect_ratio}: Best fitness = {temp_best_fitness:.6f}")
+
+        # Now perform full optimization with the best aspect ratio found
+        print(f"Selected aspect ratio: {best_aspect_ratio}")
+
+        # Recalculate dimensions based on selected aspect ratio
+        height = 2.0 / (1.0 + best_aspect_ratio)
+        width = best_aspect_ratio * height
+
+        # Re-initialize packer with optimal dimensions
+        optimized_packer = CirclePacker(width=width, height=height, num_circles=self.num_circles)
+
+        # Start with the best individual from coarse search as starting point
+        population = [best_individual_at_ratio]
+
+        # Fill rest of population with fresh random configurations
+        for _ in range(POPULATION_SIZE - 1):
+            circles = optimized_packer._generate_grid_initialization()
+            population.append(circles)
+
+        # Continue with full optimization
+        fitness_history = []
+
+        for generation in range(MAX_GENERATIONS):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness, violations = optimized_packer.calculate_fitness(individual)
+                fitness_scores.append((fitness, violations))
+
+            # Track best solution in this generation
+            gen_best_idx = np.argmax([f[0] for f in fitness_scores])
+            gen_best_fitness = fitness_scores[gen_best_idx][0]
+
+            if gen_best_fitness > best_fitness:
+                best_fitness = gen_best_fitness
+                best_solution = population[gen_best_idx].copy()
+
+            fitness_history.append(gen_best_fitness)
+
+            # Print progress every 20 generations
+            if generation % 20 == 0:
+                print(f"Generation {generation}: Best fitness = {gen_best_fitness:.6f}")
+
+            # Create new population through selection, crossover, and mutation
+            new_population = []
+
+            # Elitism: keep best individual
+            new_population.append(best_solution.copy())
+
+            # Generate offspring
+            while len(new_population) < POPULATION_SIZE:
+                # Selection
+                parent1 = optimized_packer.tournament_selection(population, fitness_scores)
+                parent2 = optimized_packer.tournament_selection(population, fitness_scores)
+
+                # Crossover
+                child = optimized_packer.crossover(parent1, parent2)
+
+                # Mutation
+                child = optimized_packer.mutate(child)
+
+                new_population.append(child)
+
+            population = new_population
+
+            # Early stopping if converged
+            if len(fitness_history) >= 10:
+                recent_avg = np.mean(fitness_history[-10:])
+                prev_avg = np.mean(fitness_history[-20:-10])
+                if abs(recent_avg - prev_avg) < 1e-6:
+                    print(f"Converged at generation {generation}")
+                    break
+
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        print(f"Best fitness achieved: {best_fitness:.6f}")
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

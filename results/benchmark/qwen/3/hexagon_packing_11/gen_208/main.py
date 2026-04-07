@@ -1,0 +1,293 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+import math
+from joblib import Parallel, delayed
+
+class HexagonGeometry:
+    """Handles all geometric operations for regular hexagons."""
+    
+    @staticmethod
+    def vertices(center_x: float, center_y: float, side_length: float, rotation_degrees: float) -> list:
+        """Generate vertices of a regular hexagon."""
+        angle_offset = math.radians(rotation_degrees)
+        vertices = []
+        for i in range(6):
+            angle = angle_offset + i * math.pi / 3
+            x = center_x + side_length * math.cos(angle)
+            y = center_y + side_length * math.sin(angle)
+            vertices.append((x, y))
+        return vertices
+
+    @staticmethod
+    def polygon(center_x: float, center_y: float, side_length: float, rotation_degrees: float) -> Polygon:
+        """Create Shapely polygon representation of a hexagon."""
+        vertices = HexagonGeometry.vertices(center_x, center_y, side_length, rotation_degrees)
+        return Polygon(vertices)
+
+class HexagonPackingValidator:
+    """Validates hexagon packing constraints."""
+    
+    @staticmethod
+    def check_overlap(hex1: np.ndarray, hex2: np.ndarray) -> bool:
+        """Check if two hexagons overlap using Shapely."""
+        poly1 = HexagonGeometry.polygon(hex1[0], hex1[1], 1, hex1[2])
+        poly2 = HexagonGeometry.polygon(hex2[0], hex2[1], 1, hex2[2])
+        return poly1.intersects(poly2)
+
+    @staticmethod
+    def check_containment(hex_data: np.ndarray, outer_hex_radius: float) -> bool:
+        """Check if all inner hexagons are contained within outer hexagon."""
+        outer_poly = HexagonGeometry.polygon(0, 0, outer_hex_radius, 0)
+        
+        for hex_params in hex_data:
+            inner_poly = HexagonGeometry.polygon(hex_params[0], hex_params[1], 1, hex_params[2])
+            if not outer_poly.contains(inner_poly):
+                return False
+        return True
+
+    @staticmethod
+    def validate_individual(hex_data: np.ndarray) -> bool:
+        """Ensure the individual is valid (no overlaps)."""
+        # Check for overlaps
+        for i in range(len(hex_data)):
+            for j in range(i+1, len(hex_data)):
+                if HexagonPackingValidator.check_overlap(hex_data[i], hex_data[j]):
+                    return False
+        return True
+
+class HexagonPackingEvaluator:
+    """Evaluates hexagon packing fitness."""
+    
+    @staticmethod
+    def compute_outer_hexagon_radius(hex_data: np.ndarray, tolerance: float = 1e-6) -> float:
+        """Compute minimum outer hexagon radius that contains all inner hexagons using binary search."""
+        # Compute bounding box of all hexagon vertices efficiently
+        all_vertices = []
+        for hex_params in hex_data:
+            vertices = HexagonGeometry.vertices(hex_params[0], hex_params[1], 1, hex_params[2])
+            all_vertices.extend(vertices)
+        
+        if not all_vertices:
+            return tolerance
+        
+        # Convert to numpy array for vectorized operations
+        vertices_array = np.array(all_vertices)
+        
+        # Calculate center point
+        center_x = np.mean(vertices_array[:, 0])
+        center_y = np.mean(vertices_array[:, 1])
+        
+        # Vectorized distance calculation
+        distances = np.sqrt((vertices_array[:, 0] - center_x)**2 + (vertices_array[:, 1] - center_y)**2)
+        max_dist = np.max(distances)
+        
+        # Add small buffer
+        max_dist += tolerance
+        
+        # Binary search for the exact radius
+        low = max_dist
+        high = max_dist * 2.0
+        
+        while high - low > tolerance:
+            mid = (low + high) / 2.0
+            if HexagonPackingValidator.check_containment(hex_data, mid):
+                high = mid
+            else:
+                low = mid
+                
+        return (low + high) / 2.0
+
+    @staticmethod
+    def evaluate_fitness(hex_data: np.ndarray) -> float:
+        """Evaluate the fitness of a hexagon packing."""
+        try:
+            radius = HexagonPackingEvaluator.compute_outer_hexagon_radius(hex_data)
+            # Inverse of radius (higher is better)
+            return 1.0 / radius
+        except Exception:
+            # If there's an error, return a very bad fitness
+            return 0.0
+
+def generate_improved_initial_config():
+    """Generate a better initial configuration for 11 hexagons."""
+    # Based on known dense packings with better spatial distribution
+    initial_positions = [
+        # Central hexagon
+        [0.0, 0.0, 0.0],
+        # First ring (6 hexagons) - arranged in a hexagonal pattern
+        [-1.732, 0.0, 0.0],      # Left
+        [1.732, 0.0, 0.0],       # Right
+        [0.0, 1.732, 0.0],       # Top
+        [0.0, -1.732, 0.0],      # Bottom
+        [-0.866, 1.5, 0.0],      # Top-left
+        [0.866, 1.5, 0.0],       # Top-right
+        # Second ring (4 hexagons) - slightly offset
+        [-0.866, -1.5, 0.0],     # Bottom-left
+        [0.866, -1.5, 0.0],      # Bottom-right
+        [-1.732, 1.0, 0.0],      # Far top-left
+        [1.732, 1.0, 0.0],       # Far top-right
+        [-1.732, -1.0, 0.0],     # Far bottom-left
+        [1.732, -1.0, 0.0],      # Far bottom-right
+    ]
+
+    # Keep only first 11 positions
+    return np.array(initial_positions[:11])
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Generate better initial configuration
+    initial_positions = generate_improved_initial_config()
+    inner_hex_data = initial_positions.copy()
+    
+    # Optimization bounds for each parameter (x, y, angle)
+    bounds = []
+    for i in range(11):
+        # Reasonable bounds to keep solutions in a practical region
+        bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # angle in degrees
+
+    # Define objective function for optimization
+    def objective(params):
+        # Reshape parameters into positions and angles
+        positions_angles = []
+        for i in range(11):
+            x = params[i*3]
+            y = params[i*3 + 1]
+            angle = params[i*3 + 2]
+            positions_angles.append([x, y, angle])
+
+        # Convert to hexagon polygons efficiently
+        inner_hexagons = []
+        for pos_angle in positions_angles:
+            x, y, angle = pos_angle
+            hex_poly = HexagonGeometry.polygon(x, y, 1, angle)
+            inner_hexagons.append(hex_poly)
+
+        # Compute outer hexagon radius
+        outer_radius = HexagonPackingEvaluator.compute_outer_hexagon_radius_fast(positions_angles)
+        outer_hexagon = HexagonGeometry.polygon(0, 0, outer_radius, 0)
+
+        # Validate constraints
+        valid = HexagonPackingValidator.check_containment(positions_angles, outer_radius)
+        valid &= HexagonPackingValidator.validate_individual(positions_angles)
+
+        # Return negative because we want to maximize 1/R (minimize R)
+        outer_side_length = outer_radius
+        inv_radius = 1.0 / outer_side_length if valid else 0.0
+
+        return -inv_radius
+
+    # Two-stage optimization approach
+    best_score = float('inf')
+    best_inner_data = inner_hex_data.copy()
+    best_outer_side_length = 10.0
+
+    # Stage 1: Coarse global optimization with differential evolution
+    try:
+        print("Starting coarse global optimization...")
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=80,
+            popsize=15,
+            seed=42,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            disp=False
+        )
+
+        # Extract best solution from coarse optimization
+        best_params = result.x
+        final_positions_angles = []
+        for i in range(11):
+            x = best_params[i*3]
+            y = best_params[i*3 + 1]
+            angle = best_params[i*3 + 2]
+            final_positions_angles.append([x, y, angle])
+
+        # Evaluate final result
+        final_score = -HexagonPackingEvaluator.evaluate_fitness(np.array(final_positions_angles))
+
+        if final_score < best_score and final_score > 0:
+            best_score = final_score
+            best_inner_data = np.array(final_positions_angles)
+            best_outer_side_length = 1.0 / final_score if final_score != 0 else 10.0
+
+    except Exception as e:
+        print(f"Coarse optimization failed: {e}")
+        pass
+
+    # Stage 2: Fine-grained local optimization with L-BFGS-B
+    if best_score < float('inf'):
+        print("Starting fine-grained local optimization...")
+
+        # Convert to flat array for scipy optimization
+        initial_flat = []
+        for pos_angle in best_inner_data:
+            initial_flat.extend(pos_angle)
+
+        # Local refinement with L-BFGS-B
+        try:
+            result_local = minimize(
+                objective,
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8},
+                callback=None
+            )
+
+            # Extract refined solution
+            refined_params = result_local.x
+            refined_positions_angles = []
+            for i in range(11):
+                x = refined_params[i*3]
+                y = refined_params[i*3 + 1]
+                angle = refined_params[i*3 + 2]
+                refined_positions_angles.append([x, y, angle])
+
+            # Evaluate refined result
+            refined_score = -HexagonPackingEvaluator.evaluate_fitness(np.array(refined_positions_angles))
+
+            if refined_score < best_score and refined_score > 0:
+                best_score = refined_score
+                best_inner_data = np.array(refined_positions_angles)
+                best_outer_side_length = 1.0 / refined_score if refined_score != 0 else 10.0
+
+        except Exception as e:
+            print(f"Fine optimization failed: {e}")
+            pass
+
+    # Final validation and refinement
+    print("Performing final validation...")
+
+    # Always validate the result
+    if not HexagonPackingValidator.validate_individual(best_inner_data):
+        print("Final validation failed, using fallback...")
+        # Fall back to initial configuration
+        best_inner_data = initial_positions.copy()
+
+    # Recompute outer hexagon size carefully
+    outer_radius = HexagonPackingEvaluator.compute_outer_hexagon_radius(best_inner_data, 1e-6)
+
+    # Ensure we're returning the correct data format
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+    # Return results
+    return best_inner_data, outer_hex_data, outer_radius
+
+# EVOLVE-BLOCK-END

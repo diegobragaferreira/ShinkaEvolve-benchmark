@@ -1,0 +1,227 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import random
+from sklearn.cluster import KMeans
+import time
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+    
+    n_circles = 32
+    max_iterations = 2000
+    initial_population_size = 50
+    
+    # Generate initial population using Voronoi-based approach
+    def generate_initial_population(pop_size):
+        population = []
+        for _ in range(pop_size):
+            # Generate random points for Voronoi seeds
+            seeds = np.random.rand(n_circles, 2)
+            
+            # Compute Voronoi diagram and centroids
+            vor = Voronoi(seeds)
+            centroids = []
+            
+            # Get centroids of finite Voronoi cells
+            for i in range(len(vor.points)):
+                if i < len(vor.vertices):
+                    # Find vertices belonging to this cell
+                    region_indices = np.where(np.array(vor.point_region) == i)[0]
+                    if len(region_indices) > 0:
+                        # Get the vertices for this cell
+                        vertices = vor.vertices[vor.regions[region_indices[0]]]
+                        if len(vertices) > 0:
+                            # Compute centroid
+                            centroid = np.mean(vertices, axis=0)
+                            centroids.append(centroid)
+            
+            if len(centroids) < n_circles:
+                # Fallback: use original seeds
+                centroids = seeds.tolist()
+            
+            # Create circles with initial radii
+            circles = np.zeros((n_circles, 3))
+            for i in range(min(n_circles, len(centroids))):
+                x, y = centroids[i]
+                circles[i, 0] = x
+                circles[i, 1] = y
+                # Compute maximum radius that fits within bounds and doesn't overlap
+                circles[i, 2] = compute_max_radius(x, y, circles[:i])
+                
+            # Fill remaining circles with random positions and radii
+            for i in range(len(centroids), n_circles):
+                x, y = np.random.rand(2)
+                circles[i, 0] = x
+                circles[i, 1] = y
+                circles[i, 2] = compute_max_radius(x, y, circles[:i])
+            
+            population.append(circles)
+        
+        return population
+    
+    def compute_max_radius(x, y, existing_circles):
+        """Compute maximum radius for a circle at (x,y) without overlapping existing circles"""
+        min_dist = float('inf')
+        
+        # Check boundary constraints
+        boundary_constraint = min(x, y, 1-x, 1-y)
+        min_dist = min(min_dist, boundary_constraint)
+        
+        # Check overlap constraints
+        for ex_x, ex_y, ex_r in existing_circles:
+            dist = np.sqrt((x-ex_x)**2 + (y-ex_y)**2)
+            if dist > 0:  # Avoid self-distance
+                min_dist = min(min_dist, dist - ex_r)
+        
+        # Return minimum of boundary and overlap constraints
+        return max(0, min_dist)
+    
+    def calculate_fitness(circles):
+        """Calculate fitness (sum of radii)"""
+        return np.sum(circles[:, 2])
+    
+    def check_constraints(circles):
+        """Check if all circles are within bounds and don't overlap"""
+        n = len(circles)
+        # Check boundary constraints
+        for i in range(n):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+                return False
+                
+        # Check overlap constraints
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles[i]
+                x2, y2, r2 = circles[j]
+                dist = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                if dist < r1 + r2:
+                    return False
+        return True
+    
+    def mutate_circle(circles, idx, temperature):
+        """Mutate a single circle's position and adjust radius accordingly"""
+        new_circles = circles.copy()
+        x, y, r = new_circles[idx]
+        
+        # Mutation step size decreases with temperature
+        step_size = 0.01 * temperature
+        
+        # Mutate position
+        new_x = max(0, min(1, x + np.random.normal(0, step_size)))
+        new_y = max(0, min(1, y + np.random.normal(0, step_size)))
+        
+        # Recalculate radius with respect to other circles
+        new_r = compute_max_radius(new_x, new_y, np.vstack([new_circles[:idx], new_circles[idx+1:]]))
+        
+        # Apply changes
+        new_circles[idx, 0] = new_x
+        new_circles[idx, 1] = new_y
+        new_circles[idx, 2] = new_r
+        
+        return new_circles
+    
+    def crossover(parent1, parent2):
+        """Create offspring by combining two parents"""
+        # Simple average crossover with some randomness
+        child = np.zeros_like(parent1)
+        for i in range(len(parent1)):
+            # Randomly select from either parent
+            if np.random.random() < 0.5:
+                child[i] = parent1[i]
+            else:
+                child[i] = parent2[i]
+                
+            # Add small mutation to children
+            if np.random.random() < 0.1:
+                child[i, 0] += np.random.normal(0, 0.005)
+                child[i, 1] += np.random.normal(0, 0.005)
+                child[i, 2] += np.random.normal(0, 0.002)
+                
+        return child
+    
+    # Initialize population
+    population = generate_initial_population(initial_population_size)
+    
+    # Filter valid configurations and sort by fitness
+    valid_pop = []
+    for individual in population:
+        if check_constraints(individual):
+            valid_pop.append(individual)
+    
+    # Sort by fitness
+    valid_pop.sort(key=lambda x: calculate_fitness(x), reverse=True)
+    
+    # Keep only top 20% as starting point
+    if len(valid_pop) > 0:
+        best_individual = valid_pop[0]
+    else:
+        # Fallback to simple initialization if no valid configs found
+        best_individual = np.zeros((n_circles, 3))
+        for i in range(n_circles):
+            x, y = np.random.rand(2)
+            best_individual[i, 0] = x
+            best_individual[i, 1] = y
+            best_individual[i, 2] = compute_max_radius(x, y, best_individual[:i])
+    
+    # Evolve with simulated annealing approach
+    current_best = best_individual.copy()
+    best_fitness = calculate_fitness(current_best)
+    
+    # Simulated Annealing parameters
+    temp = 1.0
+    cooling_rate = 0.995
+    min_temp = 0.01
+    
+    for iteration in range(max_iterations):
+        # Decrease temperature
+        if temp > min_temp:
+            temp *= cooling_rate
+            
+        # Select random individual for mutation
+        candidate = current_best.copy()
+        
+        # Mutate one circle
+        mutated_idx = np.random.randint(0, n_circles)
+        mutated = mutate_circle(candidate, mutated_idx, temp)
+        
+        # Validate mutation
+        if check_constraints(mutated):
+            mutated_fitness = calculate_fitness(mutated)
+            
+            # Accept if better or with probability based on temperature
+            if mutated_fitness > best_fitness or np.random.random() < np.exp((mutated_fitness - best_fitness) / temp):
+                current_best = mutated
+                if mutated_fitness > best_fitness:
+                    best_fitness = mutated_fitness
+                    
+        # Occasionally perform crossover with elite individuals
+        if np.random.random() < 0.05 and len(valid_pop) > 1:
+            parent1 = current_best
+            parent2 = valid_pop[np.random.randint(0, min(10, len(valid_pop)))]
+            child = crossover(parent1, parent2)
+            
+            if check_constraints(child):
+                child_fitness = calculate_fitness(child)
+                if child_fitness > best_fitness:
+                    current_best = child
+                    best_fitness = child_fitness
+    
+    # Final validation
+    if not check_constraints(current_best):
+        # Revert to best valid configuration if needed
+        pass
+        
+    return current_best
+
+# EVOLVE-BLOCK-END

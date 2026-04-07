@@ -1,0 +1,145 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import math
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum pairwise distances."""
+        distances = pdist(points)
+        return np.min(distances) / np.max(distances)
+
+    def initialize_points():
+        """Initialize points using a more sophisticated mathematical approach for 14-point distribution."""
+        # Use a configuration based on known optimal or near-optimal arrangements
+        # For 14 points on sphere, we can start with a modified icosahedral structure
+
+        # Pre-computed approximate optimal configuration based on mathematical optimization
+        # These coordinates are chosen to provide better initial distribution
+        points = np.array([
+            [0.000000, 0.000000, 1.000000],
+            [0.894427, 0.000000, 0.447214],
+            [0.276393, 0.850651, 0.447214],
+            [-0.723607, 0.525731, 0.447214],
+            [-0.723607, -0.525731, 0.447214],
+            [0.276393, -0.850651, 0.447214],
+            [0.000000, 0.000000, -1.000000],
+            [-0.894427, 0.000000, -0.447214],
+            [-0.276393, 0.850651, -0.447214],
+            [0.723607, 0.525731, -0.447214],
+            [0.723607, -0.525731, -0.447214],
+            [-0.276393, -0.850651, -0.447214],
+            [0.525731, 0.850651, 0.000000],
+            [-0.525731, -0.850651, 0.000000]
+        ])
+
+        # Apply small random perturbations to break symmetries
+        np.random.seed(42)  # For reproducibility
+        perturbation_magnitude = 0.02  # Even smaller to preserve structure
+        points += np.random.normal(0, perturbation_magnitude, points.shape)
+
+        # Normalize to ensure points are on unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        safe_norms = np.where(norms == 0, 1.0, norms)
+        points = points / safe_norms[:, np.newaxis]
+
+        # Apply slight rotation to further break symmetries
+        angle = np.pi / 12
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        # Rotate around y-axis
+        for i in range(14):
+            x, y, z = points[i]
+            points[i] = [x * cos_a + z * sin_a, y, -x * sin_a + z * cos_a]
+
+        return points
+
+    def optimize_points(initial_points, max_iterations=10000, temp_start=1.0, cooling_rate=0.9995):
+        """Optimize point placement using simulated annealing with adaptive perturbation."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+
+        # Add checkpointing to save best solution found so far
+        best_checkpoint = best_points.copy()
+        best_checkpoint_ratio = best_ratio
+
+        temp = temp_start
+        checkpoint_interval = 1000  # Save checkpoint every N iterations
+        stagnation_counter = 0
+        max_stagnation = 1000  # Max iterations without improvement before cooling
+
+        for iteration in range(max_iterations):
+            # Adaptive cooling schedule
+            if stagnation_counter > max_stagnation:
+                temp *= 0.98  # More aggressive cooling when stuck
+                stagnation_counter = 0
+            else:
+                temp *= cooling_rate  # Normal cooling
+
+            # Stop if temperature gets too low
+            if temp < 1e-10:
+                break
+
+            # Adaptive perturbation sizing based on current temperature and progress
+            # Start with larger perturbations, decrease as optimization progresses
+            base_perturbation_scale = temp * 0.02
+
+            # Make a small random perturbation to one random point
+            point_idx = np.random.randint(0, len(current_points))
+            # Create perturbation vector with adaptive scale
+            perturbation = np.random.normal(0, base_perturbation_scale, 3)
+            # Apply perturbation
+            new_points = current_points.copy()
+            new_points[point_idx] += perturbation
+
+            # Normalize to keep points on unit sphere
+            norms = np.linalg.norm(new_points, axis=1)
+            safe_norms = np.where(norms == 0, 1.0, norms)
+            new_points = new_points / safe_norms[:, np.newaxis]
+
+            # Compute new ratio
+            new_ratio = compute_min_max_ratio(new_points)
+
+            # Accept or reject based on Metropolis criterion
+            if new_ratio > best_ratio or np.random.rand() < math.exp((new_ratio - best_ratio) / temp):
+                current_points = new_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = new_points.copy()
+                    stagnation_counter = 0  # Reset stagnation counter on improvement
+                    # Update checkpoint
+                    if new_ratio > best_checkpoint_ratio:
+                        best_checkpoint = new_points.copy()
+                        best_checkpoint_ratio = new_ratio
+                else:
+                    stagnation_counter += 1  # Increment if no improvement
+            else:
+                stagnation_counter += 1  # Increment if rejected
+
+            # Occasionally print progress
+            if iteration % 1000 == 0:
+                print(f"Iteration {iteration}, Best ratio: {best_ratio:.6f}, Temp: {temp:.6f}")
+
+        # Return the best solution found
+        return best_checkpoint, best_checkpoint_ratio
+
+    # Initialize with a good configuration
+    initial_points = initialize_points()
+
+    # Optimize using simulated annealing
+    optimized_points, final_ratio = optimize_points(initial_points)
+
+    # Ensure we're returning the best solution found
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,218 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from numba import jit
+import time
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: list[float]) -> tuple[float, float, float]:
+    """
+    Fast computation of the three norms needed for C2 calculation using piecewise linear integration.
+    """
+    # Convert to numpy array for easier manipulation
+    f = np.array(f_values)
+    n_steps = len(f)
+    
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step width
+    dx = 0.5 / n_steps
+
+    # Compute autoconvolution using discrete convolution
+    g = np.convolve(f, f, mode='full')
+    # Trim g to the correct size (this accounts for the convolution)
+    g = g[len(f)-1:2*len(f)-1]
+
+    # Compute L2 norm squared using piecewise linear integration
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        # Trapezoidal-like integration for quadratic function
+        # Using formula for integral of ax^2 + bx + c over [x0,x1]
+        # But here we approximate with piecewise linear segments
+        # So we use: (dx/3)(y0^2 + y0*y1 + y1^2)
+        y0, y1 = g[i], g[i+1]
+        norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+
+    # L1 norm (sum of absolute values)
+    norm_1 = np.sum(np.abs(g))
+
+    # Infinity norm
+    norm_inf = np.max(np.abs(g))
+
+    # Handle numerical edge cases
+    if norm_1 <= 1e-15:
+        norm_1 = 1e-15
+    if norm_inf <= 1e-15:
+        norm_inf = 1e-15
+
+    return norm_2_squared, norm_1, norm_inf
+
+def generate_multiscale_gaussian_peaks(n_steps: int, n_peaks: int = 50) -> list[float]:
+    """
+    Generate step function using multiscale Gaussian decomposition approach.
+    
+    This approach:
+    1. Creates a hierarchy of Gaussian peaks at multiple scales
+    2. Uses greedy selection to pick the most beneficial peaks
+    3. Applies constraint-aware normalization to prevent autoconvolution spikes
+    """
+    # Domain setup
+    x_domain = np.linspace(-0.25, 0.25, n_steps)
+    dx = 0.5 / n_steps
+    
+    # Define scale hierarchy - multiple widths for different resolution levels
+    scale_factors = [0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.18, 0.25]
+    
+    # Build candidate peaks across multiple scales
+    all_candidates = []
+    
+    # Generate peaks at different scales
+    for scale_idx, width_factor in enumerate(scale_factors):
+        width = width_factor * 0.5  # Scale with domain width
+        
+        # Place peaks more densely in center, less at edges
+        center_density = 1.0 - np.abs(x_domain) / 0.25
+        center_density = np.maximum(center_density, 0.1)  # Minimum density
+        
+        # Sample peak positions based on density
+        n_local_peaks = max(2, int(n_peaks * center_density.mean()))
+        local_positions = np.random.choice(x_domain, size=n_local_peaks, p=center_density/np.sum(center_density))
+        
+        # Create candidates with this scale
+        for pos in local_positions:
+            amplitude = np.exp(-20 * pos**2)  # Center concentration
+            all_candidates.append((amplitude, pos, width, scale_idx))
+    
+    # Sort candidates by importance (amplitude * density factor)
+    all_candidates.sort(key=lambda x: x[0], reverse=True)
+    
+    # Greedy selection of the most beneficial peaks
+    selected_peaks = []
+    used_positions = []
+    
+    # Select top candidates while enforcing minimum spacing
+    for amp, pos, width, scale in all_candidates[:min(len(all_candidates), n_peaks)]:
+        # Check minimum spacing
+        min_dist = width * 2.0  # Require spacing based on width
+        valid = True
+        for used_pos in used_positions:
+            if abs(pos - used_pos) < min_dist:
+                valid = False
+                break
+        
+        if valid:
+            selected_peaks.append((amp, pos, width))
+            used_positions.append(pos)
+            if len(selected_peaks) >= n_peaks:
+                break
+    
+    # Construct final function from selected peaks
+    f = np.zeros(n_steps)
+    for amp, pos, width in selected_peaks:
+        if width > 1e-6:  # Avoid division by zero
+            f += amp * np.exp(-0.5 * ((x_domain - pos) / width)**2)
+    
+    # Apply constraint-aware normalization
+    # First check if autoconvolution is reasonable
+    if np.sum(f) > 0:
+        # Test the function first
+        test_f = f / np.sum(f) * 10  # Scale appropriately
+        test_g = np.convolve(test_f, test_f, mode='full')
+        test_g = test_g[len(test_f)-1:2*len(test_f)-1]
+        test_norm_1 = np.sum(np.abs(test_g))
+        test_norm_inf = np.max(np.abs(test_g)) if np.max(np.abs(test_g)) > 0 else 1e-15
+        
+        # If autoconvolution looks too spiked, adjust
+        if test_norm_inf > 5 * test_norm_1 and test_norm_1 > 0:
+            # Reduce scaling to smooth out peaks
+            f = f / np.sum(f) * 5
+        else:
+            f = f / np.sum(f) * 10
+    
+    # Add some fine-grained modulation to break symmetries
+    fine_modulation = 0.1 * np.sin(20 * np.pi * x_domain) * np.exp(-x_domain**2/0.05)
+    f += fine_modulation
+    
+    # Ensure non-negativity
+    f = np.maximum(f, 0)
+    
+    # Final normalization
+    if np.sum(f) > 0:
+        f = f / np.sum(f) * 10
+    
+    return f.tolist()
+
+def multiscale_optimization_approach(n_steps: int) -> list[float]:
+    """
+    Main multiscale Gaussian optimization approach.
+    """
+    # Use a hierarchical approach: coarse to fine resolution
+    # Start with fewer peaks for exploration
+    n_peaks = min(100, max(20, n_steps // 50))
+    
+    # Generate function using multiscale Gaussian decomposition
+    f_values = generate_multiscale_gaussian_peaks(n_steps, n_peaks)
+    
+    return f_values
+
+def construct_function() -> list[float]:
+    """
+    Main function to construct optimized step function using multiscale Gaussian approach.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    # Multi-attempt selection to maximize C2
+    best_c2 = -1
+    best_function = None
+    start_time = time.time()
+    
+    # Set maximum attempts to balance quality vs. time constraints
+    max_attempts = 50
+    
+    for attempt in range(max_attempts):
+        # Early termination if time is running out
+        if time.time() - start_time > 85:  # Leave 5 seconds for cleanup
+            break
+            
+        # Try different number of steps to find optimal
+        n_steps = np.random.randint(1000, 5000)
+        
+        # Generate function using multiscale approach
+        f_values = multiscale_optimization_approach(n_steps)
+        
+        # Evaluate the function
+        try:
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
+            
+            # Check for valid norms
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                continue
+                
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+            
+            # Keep the best function
+            if c2 > best_c2:
+                best_c2 = c2
+                best_function = f_values
+                
+        except Exception:
+            # Skip invalid functions
+            continue
+    
+    # Return the best function found, or fallback
+    if best_function is not None:
+        return best_function
+    else:
+        # Fallback to a simpler construction
+        n_steps = 1000
+        f_values = [1.0] * n_steps
+        return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

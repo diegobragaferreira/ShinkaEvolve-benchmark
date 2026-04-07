@@ -1,0 +1,224 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree, Voronoi
+import random
+from deap import base, creator, tools, algorithms
+import time
+
+# Global constants for optimization
+POPULATION_SIZE = 100
+GENERATIONS = 50
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.1
+CROSSOVER_RATE = 0.8
+
+def check_containment(circles):
+    """Check if all circles are fully contained within the unit square"""
+    for x, y, r in circles:
+        if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
+            return False
+    return True
+
+def check_overlap(circles):
+    """Check if any circles overlap"""
+    n = len(circles)
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+            if distance < r1 + r2:
+                return False
+    return True
+
+def calculate_objective(circles):
+    """Calculate the sum of radii"""
+    return sum(circle[2] for circle in circles)
+
+def create_initial_placement(n):
+    """Create initial placement using a Voronoi-based approach"""
+    # Generate initial points using a structured grid approach
+    # Create a grid of points to sample from
+    grid_size = int(np.ceil(np.sqrt(n)))
+    grid_points = []
+
+    # Generate points in a structured grid pattern
+    for i in range(grid_size):
+        for j in range(grid_size):
+            x = 0.1 + 0.8 * i / (grid_size - 1) if grid_size > 1 else 0.5
+            y = 0.1 + 0.8 * j / (grid_size - 1) if grid_size > 1 else 0.5
+            grid_points.append([x, y])
+
+    # Add some random points to ensure good spread
+    for _ in range(n // 2):
+        grid_points.append([random.uniform(0.1, 0.9), random.uniform(0.1, 0.9)])
+
+    # Use Voronoi to get well-distributed points
+    if len(grid_points) >= 3:
+        try:
+            vor = Voronoi(np.array(grid_points))
+            # Use Voronoi vertices as initial positions
+            initial_positions = []
+            for vertex in vor.vertices:
+                if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                    initial_positions.append((vertex[0], vertex[1]))
+
+            # If we don't get enough vertices, use the original grid points
+            if len(initial_positions) < n:
+                initial_positions = grid_points[:n]
+        except:
+            # Fallback to grid points if Voronoi fails
+            initial_positions = grid_points[:n]
+    else:
+        initial_positions = grid_points[:n]
+
+    # Create circles with initial positions and radii
+    circles = []
+
+    # Start with some large circles in strategic positions
+    # Use positions that are likely to support large circles
+    strategic_positions = []
+
+    # Corners and center
+    strategic_positions.extend([(0.2, 0.2), (0.8, 0.2), (0.2, 0.8), (0.8, 0.8), (0.5, 0.5)])
+
+    # Add some edge centers
+    strategic_positions.extend([(0.5, 0.1), (0.5, 0.9), (0.1, 0.5), (0.9, 0.5)])
+
+    # Fill with strategic positions first
+    for i, pos in enumerate(strategic_positions[:min(len(strategic_positions), n)]):
+        # Initial radius based on distance to boundaries
+        r = min(pos[0], 1-pos[0], pos[1], 1-pos[1]) * 0.3
+        r = max(0.02, min(r, 0.15))  # Clamp to reasonable values
+        circles.append([pos[0], pos[1], r])
+
+    # Fill remaining spots with remaining positions
+    remaining_indices = [i for i in range(len(initial_positions)) if i >= len(strategic_positions)]
+    for i in range(len(circles), n):
+        if i < len(initial_positions):
+            pos = initial_positions[i]
+            # Compute maximum possible radius at this position
+            r = min(pos[0], 1-pos[0], pos[1], 1-pos[1]) * 0.3
+            r = max(0.01, min(r, 0.1))  # Clamp to reasonable values
+            circles.append([pos[0], pos[1], r])
+        else:
+            # Fallback to random positions
+            x = random.uniform(0.05, 0.95)
+            y = random.uniform(0.05, 0.95)
+            r = random.uniform(0.01, 0.08)
+            circles.append([x, y, r])
+
+    return circles[:n]
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual solution"""
+    # Convert flat array to circles
+    circles = np.array(individual).reshape(-1, 3)
+
+    # Check constraints
+    if not check_containment(circles):
+        return (0,)  # Invalid solution
+
+    if not check_overlap(circles):
+        return (0,)  # Invalid solution
+
+    # Return negative because DEAP minimizes by default
+    return (-calculate_objective(circles),)
+
+def mutate_individual(individual):
+    """Mutate an individual solution"""
+    # Randomly change some circles' positions and/or radii
+    for i in range(0, len(individual), 3):
+        if random.random() < MUTATION_RATE:
+            # Mutate position or radius
+            if random.random() < 0.7:  # 70% chance to mutate position
+                # Mutate x coordinate
+                individual[i] += random.gauss(0, 0.01)
+                individual[i] = max(0.01, min(0.99, individual[i]))
+
+                # Mutate y coordinate
+                individual[i+1] += random.gauss(0, 0.01)
+                individual[i+1] = max(0.01, min(0.99, individual[i+1]))
+            else:  # 30% chance to mutate radius
+                individual[i+2] += random.gauss(0, 0.005)
+                individual[i+2] = max(0.001, min(0.3, individual[i+2]))
+
+    return individual,
+
+def crossover_individuals(ind1, ind2):
+    """Crossover two individuals"""
+    # Simple uniform crossover
+    for i in range(len(ind1)):
+        if random.random() < 0.5:
+            ind1[i], ind2[i] = ind2[i], ind1[i]
+
+    return ind1, ind2
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Create initial population
+    toolbox = base.Toolbox()
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    # Initialize the toolbox
+    def init_individual():
+        circles = create_initial_placement(32)
+        # Flatten the circles into a single list
+        flat = []
+        for x, y, r in circles:
+            flat.extend([x, y, r])
+        return creator.Individual(flat)
+
+    toolbox.register("individual", init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Register evaluation and operators
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+
+    # Create initial population
+    population = toolbox.population(n=POPULATION_SIZE)
+
+    # Run evolution
+    hof = tools.HallOfFame(1)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    # Run the evolutionary algorithm
+    population, logbook = algorithms.eaSimple(
+        population, toolbox,
+        cxpb=CROSSOVER_RATE,
+        mutpb=MUTATION_RATE,
+        ngen=GENERATIONS,
+        stats=stats,
+        halloffame=hof,
+        verbose=False
+    )
+
+    # Get the best individual
+    best_individual = hof[0]
+    circles = np.array(best_individual).reshape(-1, 3)
+
+    # Ensure final solution meets constraints
+    if not check_containment(circles):
+        # Revert to a simple greedy approach if needed
+        circles = np.array(create_initial_placement(32))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

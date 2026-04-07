@@ -1,0 +1,528 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+from numba import jit
+import warnings
+import random
+from collections import defaultdict
+from typing import Tuple, List, Optional, Any, Callable
+import logging
+from functools import partial
+
+warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@jit(nopython=True)
+def hexagon_vertices(x, y, angle_deg, side_length=1):
+    """Calculate vertices of a hexagon given center, angle, and side length"""
+    angle_rad = np.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        theta = angle_rad + i * np.pi / 3
+        vx = x + side_length * np.cos(theta)
+        vy = y + side_length * np.sin(theta)
+        vertices.append((vx, vy))
+    return np.array(vertices)
+
+def create_hexagon_polygon(x: float, y: float, angle_deg: float, side_length: float = 1.0) -> Polygon:
+    """Create Shapely polygon representation of a hexagon"""
+    vertices = hexagon_vertices(x, y, angle_deg, side_length)
+    return Polygon(vertices)
+
+def calculate_outer_radius(positions: np.ndarray, angles: np.ndarray) -> float:
+    """Calculate minimum radius needed to contain all inner hexagons"""
+    max_dist = 0
+    outer_center = (0, 0)
+
+    # Get all vertices of all inner hexagons
+    all_vertices = []
+    for i in range(len(positions)):
+        x, y = positions[i]
+        angle = angles[i]
+        hex_vertices = hexagon_vertices(x, y, angle)
+        all_vertices.extend(hex_vertices)
+
+    # Find maximum distance from center
+    for vertex in all_vertices:
+        dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+        max_dist = max(max_dist, dist)
+
+    # Add buffer for safety and account for hexagon shape
+    return max_dist * 1.1  # Safety factor
+
+def check_containment(hex_poly: Polygon, outer_poly: Polygon) -> bool:
+    """Check if hexagon is completely contained within outer hexagon"""
+    return outer_poly.contains(hex_poly) or (outer_poly.intersects(hex_poly) and
+                                           outer_poly.intersection(hex_poly).area == hex_poly.area)
+
+def build_spatial_grid(hexagons: List[Polygon], grid_size: float = 3.0) -> dict:
+    """Build spatial grid for fast collision detection"""
+    grid = defaultdict(list)
+    for i, hex_poly in enumerate(hexagons):
+        bbox = hex_poly.bounds
+        min_x, min_y, max_x, max_y = bbox
+        for x in range(int(min_x/grid_size), int(max_x/grid_size)+1):
+            for y in range(int(min_y/grid_size), int(max_y/grid_size)+1):
+                grid[(x,y)].append(i)
+    return grid
+
+def get_collision_candidates(grid: dict, hex_index: int, hex_poly: Polygon, 
+                           grid_size: float = 3.0) -> List[int]:
+    """Get potential collision candidates for a hexagon"""
+    candidates = []
+    bbox = hex_poly.bounds
+    min_x, min_y, max_x, max_y = bbox
+
+    for x in range(int(min_x/grid_size), int(max_x/grid_size)+1):
+        for y in range(int(min_y/grid_size), int(max_y/grid_size)+1):
+            candidates.extend(grid.get((x,y), []))
+    return [i for i in candidates if i != hex_index]
+
+def fast_collision_check(hex_poly1: Polygon, hex_poly2: Polygon) -> bool:
+    """Fast collision check using bounding boxes"""
+    bbox1 = hex_poly1.bounds
+    bbox2 = hex_poly2.bounds
+    
+    # Quick bounding box overlap test
+    if (bbox1[2] < bbox2[0] or bbox2[2] < bbox1[0] or 
+        bbox1[3] < bbox2[1] or bbox2[3] < bbox1[1]):
+        return False
+    
+    # More precise check
+    return hex_poly1.intersects(hex_poly2)
+
+class HexagonPackingEvaluator:
+    """Handles constraint checking and objective evaluation"""
+    
+    def __init__(self, num_hexagons: int = 11, side_length: float = 1.0):
+        self.num_hexagons = num_hexagons
+        self.side_length = side_length
+        self.hex_radius = side_length * np.sqrt(3) / 2
+        
+    def evaluate_solution(self, solution: np.ndarray, use_spatial_index: bool = True) -> float:
+        """Evaluate a solution and return negative of objective (since we minimize)"""
+        try:
+            # Reshape solution into positions and angles
+            positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+            angles = solution[22:]  # 11 angles
+
+            # Create inner hexagons
+            inner_hexagons = [create_hexagon_polygon(pos[0], pos[1], angle) 
+                            for pos, angle in zip(positions, angles)]
+
+            # Check containment
+            outer_radius = calculate_outer_radius(positions, angles)
+            outer_hexagon = create_hexagon_polygon(0, 0, 0, outer_radius)
+
+            # Check containment for all inner hexagons
+            for hex_poly in inner_hexagons:
+                if not check_containment(hex_poly, outer_hexagon):
+                    return 1e10  # Penalty for non-containment
+
+            # Check for overlaps using spatial indexing for efficiency
+            if use_spatial_index:
+                grid = build_spatial_grid(inner_hexagons)
+                for i, hex_poly in enumerate(inner_hexagons):
+                    candidates = get_collision_candidates(grid, i, hex_poly)
+                    for j in candidates:
+                        if i != j and fast_collision_check(hex_poly, inner_hexagons[j]):
+                            return 1e10  # Penalty for overlap
+            else:
+                # Brute force comparison (slower but works for small cases)
+                for i in range(len(inner_hexagons)):
+                    for j in range(i+1, len(inner_hexagons)):
+                        if inner_hexagons[i].intersects(inner_hexagons[j]):
+                            return 1e10  # Penalty for overlap
+
+            # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+            return -1.0 / outer_radius
+            
+        except Exception as e:
+            logger.error(f"Evaluation error: {e}")
+            return 1e10
+
+class InitializationGenerator:
+    """Generates diverse initial configurations"""
+    
+    def __init__(self, num_hexagons: int = 11, side_length: float = 1.0):
+        self.num_hexagons = num_hexagons
+        self.side_length = side_length
+        
+    def generate_initial_population(self, num_starts: int = 5) -> List[np.ndarray]:
+        """Generate multiple initial configurations"""
+        initial_populations = []
+
+        # Base pattern: hexagonal arrangement with strategic positioning
+        base_positions = []
+        base_angles = []
+
+        # Center hexagon
+        base_positions.append([0.0, 0.0])
+        base_angles.append(0.0)
+
+        # Surrounding hexagons in ring - optimized spacing
+        for i in range(6):
+            angle = i * 60
+            radius = 2.0 * self.side_length  # Proper spacing for unit hexagons
+            x = radius * np.cos(np.radians(angle))
+            y = radius * np.sin(np.radians(angle))
+            base_positions.append([x, y])
+            base_angles.append(0.0)
+
+        # Additional positions for remaining hexagons - more strategic placement
+        additional_positions = [
+            (-3.0, 1.5), (3.0, 1.5),
+            (-3.0, -1.5), (3.0, -1.5),
+            (0.0, 3.0), (0.0, -3.0),
+            (2.0, 2.5), (-2.0, -2.5),
+            (-2.0, 2.5), (2.0, -2.5)
+        ]
+
+        for pos in additional_positions:
+            if len(base_positions) < self.num_hexagons:
+                base_positions.append(list(pos))
+                base_angles.append(0.0)
+
+        # Ensure we have exactly the right number of positions
+        while len(base_positions) < self.num_hexagons:
+            base_positions.append([0.0, 0.0])
+            base_angles.append(0.0)
+
+        # Generate different variations with enhanced diversity
+        for start in range(num_starts):
+            # Create a slightly different initial configuration for each start
+            initial_positions = [pos[:] for pos in base_positions]  # Copy
+            initial_angles = [ang for ang in base_angles]  # Copy
+
+            # Add more substantial random perturbations to encourage exploration
+            for i in range(len(initial_positions)):
+                if i > 0:  # Don't perturb center hexagon significantly
+                    initial_positions[i][0] += random.uniform(-0.8, 0.8)
+                    initial_positions[i][1] += random.uniform(-0.8, 0.8)
+                    initial_angles[i] += random.uniform(-15, 15)
+
+            # Flatten initial solution
+            initial_solution = []
+            for pos in initial_positions[:self.num_hexagons]:
+                initial_solution.extend(pos)
+            initial_solution.extend(initial_angles[:self.num_hexagons])
+            initial_solution = np.array(initial_solution)
+
+            initial_populations.append(initial_solution)
+
+        return initial_populations
+
+class AdaptiveOptimizationEngine:
+    """Handles advanced optimization strategies with adaptive parameters"""
+    
+    def __init__(self, num_hexagons: int = 11, side_length: float = 1.0):
+        self.num_hexagons = num_hexagons
+        self.side_length = side_length
+        self.evaluator = HexagonPackingEvaluator(num_hexagons, side_length)
+        self.initializer = InitializationGenerator(num_hexagons, side_length)
+        
+    def adaptive_differential_evolution(self, func: Callable, bounds: List[Tuple[float, float]], 
+                                       maxiter: int = 100, popsize: int = 15, seed: int = 42) -> Any:
+        """Custom differential evolution with advanced adaptive mechanisms"""
+        # Initialize random number generator
+        rng = np.random.default_rng(seed)
+
+        # Generate initial population with better diversity
+        population = []
+        for _ in range(popsize):
+            individual = []
+            for (min_val, max_val) in bounds:
+                individual.append(rng.uniform(min_val, max_val))
+            population.append(individual)
+
+        # Track best solution with convergence monitoring
+        best_individual = None
+        best_fitness = float('inf')
+        best_history = []
+        max_history_length = 10
+        
+        for generation in range(maxiter):
+            # Adaptive mutation rate with sophisticated logic
+            if generation == 0:
+                mutation_rate = 0.9
+            else:
+                # Monitor improvement trends
+                improvement_rate = 0
+                if len(best_history) >= 2:
+                    improvement_rate = (best_history[-2] - best_history[-1]) / max(1e-10, best_history[-2])
+                
+                # Adjust mutation rate based on convergence characteristics
+                if improvement_rate > 0.01:  # Significant improvement
+                    mutation_rate = max(0.1, 0.8 - (generation / maxiter) * 0.7)
+                elif improvement_rate < -0.005:  # Deterioration
+                    mutation_rate = min(0.95, 0.7 + (generation / maxiter) * 0.25)
+                else:  # Slow progress
+                    mutation_rate = 0.6
+            
+            # Store recent best fitness for trend analysis
+            best_history.append(best_fitness)
+            if len(best_history) > max_history_length:
+                best_history.pop(0)
+            
+            # Evaluate current population
+            fitnesses = []
+            for individual in population:
+                fitness = func(np.array(individual))
+                fitnesses.append(fitness)
+                if fitness < best_fitness:
+                    best_fitness = fitness
+                    best_individual = individual[:]
+
+            # Create new population with improved selection
+            new_population = []
+            for j in range(popsize):
+                # Select three different individuals
+                candidates = list(range(popsize))
+                candidates.remove(j)
+                selected = rng.choice(candidates, 3, replace=False)
+
+                # Differential evolution mutation with adaptive rate
+                mutant = []
+                for k in range(len(bounds)):
+                    if rng.random() < mutation_rate or generation == 0:
+                        # Adaptive mutation with different strategies
+                        diff = population[selected[1]][k] - population[selected[2]][k]
+                        mutant.append(population[selected[0]][k] + 0.9 * diff)
+                    else:
+                        mutant.append(population[j][k])
+
+                    # Ensure bounds are respected
+                    min_val, max_val = bounds[k]
+                    mutant[k] = np.clip(mutant[k], min_val, max_val)
+
+                # Adaptive crossover based on generation progress
+                crossover_prob = 0.9 - (generation / maxiter) * 0.5
+                trial = []
+                for k in range(len(bounds)):
+                    if rng.random() < crossover_prob or k == 0:  # Keep some randomness
+                        trial.append(mutant[k])
+                    else:
+                        trial.append(population[j][k])
+
+                new_population.append(trial)
+
+            population = new_population
+
+        return type('Result', (), {
+            'x': np.array(best_individual),
+            'fun': best_fitness
+        })()
+
+    def optimize(self, max_iterations: int = 100, population_size: int = 15, 
+                num_starts: int = 5) -> Tuple[np.ndarray, np.ndarray]:
+        """Main optimization function with multi-start approach"""
+        # Generate multiple initial populations
+        initial_populations = self.initializer.generate_initial_population(num_starts)
+        
+        best_result = None
+        best_score = float('inf')
+
+        # Run optimization from multiple starting points
+        for i, initial_solution in enumerate(initial_populations):
+            try:
+                logger.info(f"Starting optimization run {i+1}/{len(initial_populations)}")
+
+                # Set bounds for optimization with extended ranges for better exploration
+                bounds = []
+                # Position bounds
+                for _ in range(22):
+                    bounds.append((-20.0, 20.0))  # Extended bounds for better exploration
+                # Angle bounds
+                for _ in range(self.num_hexagons):
+                    bounds.append((0.0, 360.0))   # Rotation angles
+
+                # Run adaptive differential evolution
+                result = self.adaptive_differential_evolution(
+                    lambda sol: self.evaluator.evaluate_solution(sol, use_spatial_index=(i < 3)),  
+                    bounds,
+                    maxiter=max_iterations,
+                    popsize=population_size,
+                    seed=42 + i  # Different seed for each start
+                )
+
+                # Evaluate final result
+                final_score = self.evaluator.evaluate_solution(result.x, use_spatial_index=False)
+
+                if final_score < best_score:
+                    best_score = final_score
+                    best_result = result
+
+                logger.info(f"Run {i+1} completed with score: {final_score}")
+
+            except Exception as e:
+                logger.error(f"Start {i} failed: {e}")
+                continue
+
+        if best_result is None:
+            # Fallback to simple solution
+            raise RuntimeError("All optimization attempts failed")
+
+        # Extract final solution
+        final_positions = best_result.x[:22].reshape(-1, 2)
+        final_angles = best_result.x[22:]
+
+        # Refine the solution with enhanced local optimization
+        refined_positions, refined_angles = self.local_refinement(final_positions, final_angles)
+
+        return refined_positions, refined_angles
+
+    def local_refinement(self, positions: np.ndarray, angles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Enhanced local refinement with adaptive strategies"""
+        # Enhanced local refinement with multiple strategies
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_score = self.evaluator.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+        step_size = 0.05  # Increased initial step size
+        max_iterations = 200  # More iterations for thorough refinement
+        patience = 20  # More patience before stopping
+        patience_counter = 0
+        improvement_count = 0
+
+        # Track improvement history
+        recent_improvements = []
+        last_improvement_generation = 0
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_improvements = 0
+
+            # Try multiple perturbation strategies
+            for i in range(len(positions)):
+                # Strategy 1: Try multiple step sizes for positions
+                for dim in range(2):
+                    old_val = best_positions[i][dim]
+                    # Try several step sizes to find best direction
+                    step_sizes = [step_size, step_size * 0.5, step_size * 2.0, step_size * 0.25]
+                    for delta_mult in [-1, 1]:  # Both directions
+                        for s in step_sizes:
+                            best_positions[i][dim] = old_val + delta_mult * s
+                            new_score = self.evaluator.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                            if new_score < best_score:
+                                best_score = new_score
+                                improved = True
+                                current_improvements += 1
+                            else:
+                                best_positions[i][dim] = old_val
+
+                # Strategy 2: Try multiple angle perturbations with variable steps
+                old_angle = best_angles[i]
+                # Larger step sizes for more exploratory search
+                angle_steps = [-20.0, -10.0, -5.0, -2.0, -1.0, 1.0, 2.0, 5.0, 10.0, 20.0]
+                for delta in angle_steps:
+                    best_angles[i] = (old_angle + delta) % 360
+                    new_score = self.evaluator.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                    if new_score < best_score:
+                        best_score = new_score
+                        improved = True
+                        current_improvements += 1
+                    else:
+                        best_angles[i] = old_angle
+
+            # Adaptive step size adjustment based on recent performance
+            recent_improvements.append(current_improvements)
+            if len(recent_improvements) > 10:
+                recent_improvements.pop(0)
+
+            # Adjust step size based on recent performance
+            if len(recent_improvements) >= 5:
+                recent_avg = sum(recent_improvements[-5:]) / 5
+                if recent_avg > 2:  # Making consistent progress
+                    step_size *= 0.98  # Gradually decrease step size
+                elif recent_avg < 1:  # Not making much progress
+                    step_size = min(0.5, step_size * 1.2)  # Increase step size for exploration
+                else:
+                    pass  # Maintain current step size
+
+            # Check for improvement
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+                improvement_count += 1
+                last_improvement_generation = iteration
+
+        return best_positions, best_angles
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    try:
+        # Initialize optimization engine
+        optimizer = AdaptiveOptimizationEngine(num_hexagons=11, side_length=1.0)
+
+        # Run optimization
+        final_positions, final_angles = optimizer.optimize()
+
+        # Create inner hex data
+        inner_hex_data = np.column_stack([final_positions, final_angles])
+
+        # Create outer hex data (centered)
+        outer_hex_data = np.array([0, 0, 0])
+
+        # Calculate outer hex side length
+        # We need to calculate this based on the final solution
+        max_dist = 0
+        outer_center = (0, 0)
+
+        # Get all vertices of all inner hexagons
+        all_vertices = []
+        for i in range(len(final_positions)):
+            x, y = final_positions[i]
+            angle = final_angles[i]
+            hex_vertices = hexagon_vertices(x, y, angle)
+            all_vertices.extend(hex_vertices)
+
+        # Find maximum distance from center
+        for vertex in all_vertices:
+            dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+            max_dist = max(max_dist, dist)
+
+        outer_hex_side_length = max_dist / (np.sqrt(3) / 2) * 1.1  # Adding safety factor
+
+        elapsed_time = time.time() - start_time
+        print(f"Optimization completed in {elapsed_time:.2f} seconds")
+
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+    except Exception as e:
+        logger.error(f"Optimization failed: {e}")
+        # Fallback to initial solution
+        inner_hex_data = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8.0
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,236 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from deap import base, creator, tools, algorithms
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+import random
+import math
+from typing import Tuple
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Rectangle dimensions: width + height = 2, let's try different ratios
+    # For circle packing, we want to avoid very long rectangles
+    width = 1.2
+    height = 0.8
+    
+    # Constants
+    n_circles = 21
+    perimeter = 4
+    max_radius = min(width, height) / 2
+    
+    def evaluate(individual):
+        # Convert individual to circles array
+        circles = np.array(individual).reshape(-1, 3)
+        
+        # Check bounds and calculate radius sum
+        radius_sum = 0
+        penalty = 0
+        
+        # Check if all circles fit within bounds
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                penalty += 1000000  # Large penalty for boundary violations
+            
+            if r <= 0:
+                penalty += 1000000
+                
+            radius_sum += r
+        
+        # Check overlaps using KDTree for efficiency
+        if len(circles) >= 2:
+            tree = cKDTree(circles[:, :2])
+            pairs = tree.query_pairs(r=0.0001)  # Find nearby points
+            for (i, j) in pairs:
+                dist = np.linalg.norm(circles[i, :2] - circles[j, :2])
+                if dist < circles[i, 2] + circles[j, 2]:
+                    penalty += 1000000  # Large penalty for overlap violations
+        
+        # Return negative because we want to maximize (minimize negative)
+        return -(radius_sum - penalty),
+    
+    def create_individual():
+        """Create an individual with 21 circles"""
+        individual = []
+        # Try grid-based initialization first
+        rows = int(np.ceil(np.sqrt(n_circles)))
+        cols = int(np.ceil(n_circles / rows))
+        
+        # Add some randomness to initial positions
+        for i in range(n_circles):
+            # Grid placement with small perturbations
+            row = i // cols
+            col = i % cols
+            
+            # Calculate position with padding
+            x_min, x_max = 0.05, width - 0.05
+            y_min, y_max = 0.05, height - 0.05
+            
+            x = x_min + (x_max - x_min) * (col + 0.3 * (random.random() - 0.5)) / cols
+            y = y_min + (y_max - y_min) * (row + 0.3 * (random.random() - 0.5)) / rows
+            
+            # Initial radius estimation based on available space
+            max_r = min(x, width - x, y, height - y)
+            r = max_r * 0.3 * random.random()  # Small random radius
+            
+            individual.extend([x, y, r])
+            
+        return individual
+    
+    def mutate(individual):
+        """Custom mutation function"""
+        for i in range(0, len(individual), 3):
+            if random.random() < 0.7:  # 70% chance to mutate
+                # Mutate x coordinate
+                individual[i] += np.random.normal(0, 0.02)
+                # Mutate y coordinate  
+                individual[i+1] += np.random.normal(0, 0.02)
+                # Mutate radius
+                individual[i+2] += np.random.normal(0, 0.01)
+                
+                # Ensure bounds
+                x, y, r = individual[i], individual[i+1], individual[i+2]
+                individual[i] = max(0.05, min(width - 0.05, x))
+                individual[i+1] = max(0.05, min(height - 0.05, y))
+                individual[i+2] = max(0.001, min(max_radius, r))
+        
+        return individual,
+    
+    # Set up DEAP
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+    
+    toolbox = base.Toolbox()
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+    toolbox.register("mutate", mutate)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+    
+    # Run evolution
+    pop = toolbox.population(n=50)
+    hof = tools.HallOfFame(1)
+    
+    # Run evolution for multiple generations
+    for gen in range(20):
+        # Evaluate the entire population
+        fitnesses = list(map(toolbox.evaluate, pop))
+        for ind, fit in zip(pop, fitnesses):
+            ind.fitness.values = fit
+        
+        # Select the next generation individuals
+        offspring = toolbox.select(pop, len(pop))
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.8:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+        
+        for mutant in offspring:
+            if random.random() < 0.2:  # Mutation probability
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+        
+        # Replace the old population with the offspring
+        pop[:] = offspring
+        
+        # Update hall of fame
+        hof.update(pop)
+    
+    # Get best solution
+    best_individual = hof[0]
+    best_circles = np.array(best_individual).reshape(-1, 3)
+    
+    # Local refinement using scipy optimizer
+    def refine_solution(circles_arr):
+        # Create a function that takes only positions and radii for optimization
+        def objective(params):
+            # Reconstruct circles
+            circles = params.reshape(-1, 3)
+            
+            # Calculate radius sum (we want to maximize this)
+            radius_sum = np.sum(circles[:, 2])
+            
+            # Penalty for constraint violations
+            penalty = 0
+            
+            # Boundary penalties
+            for i in range(len(circles)):
+                x, y, r = circles[i]
+                if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                    penalty += 1000000
+                    
+            # Overlap penalties using KDTree
+            if len(circles) >= 2:
+                tree = cKDTree(circles[:, :2])
+                pairs = tree.query_pairs(0.0001)
+                for (i, j) in pairs:
+                    dist = np.linalg.norm(circles[i, :2] - circles[j, :2])
+                    if dist < circles[i, 2] + circles[j, 2]:
+                        penalty += 1000000
+                        
+            # Minimize negative of radius sum plus penalties
+            return -(radius_sum - penalty)
+        
+        # Optimize the solution with scipy
+        res = minimize(objective, circles_arr.flatten(), method='L-BFGS-B', 
+                      bounds=[(0.05, width-0.05) for _ in range(len(circles_arr)*2)] +
+                             [(0.001, max_radius) for _ in range(len(circles_arr))],
+                      options={'maxiter': 50})
+        
+        refined_circles = res.x.reshape(-1, 3)
+        return refined_circles
+    
+    # Refine the best solution
+    final_circles = refine_solution(best_circles)
+    
+    # Ensure final solution is valid
+    # If we have issues, fall back to a good known solution
+    radius_sum_final = np.sum(final_circles[:, 2])
+    
+    # If the solution looks problematic, use a simple heuristic solution
+    if radius_sum_final < 0.1:
+        # Simple heuristic: place circles in a grid pattern with varying radii
+        final_circles = np.zeros((n_circles, 3))
+        rows = int(math.ceil(math.sqrt(n_circles)))
+        cols = int(math.ceil(n_circles / rows))
+        
+        x_step = width / (cols + 1)
+        y_step = height / (rows + 1)
+        
+        for i in range(n_circles):
+            row = i // cols
+            col = i % cols
+            x = (col + 1) * x_step
+            y = (row + 1) * y_step
+            # Radius based on proximity to edges and neighbors
+            max_r = min(x, width-x, y, height-y)
+            r = max_r * 0.2 * (1 - i*0.01)  # Decrease slightly with index
+            r = max(0.01, min(max_radius, r))
+            final_circles[i] = [x, y, r]
+    
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

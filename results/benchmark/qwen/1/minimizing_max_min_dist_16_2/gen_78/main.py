@@ -1,0 +1,167 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution
+import time
+
+class PointOptimizer:
+    def __init__(self, n_points=16, dimension=2):
+        self.n_points = n_points
+        self.dimension = dimension
+        self.total_vars = n_points * dimension
+
+    def initialize_points(self) -> np.ndarray:
+        """Initialize points using a hexagonal arrangement with random perturbations."""
+        np.random.seed(42)
+
+        # Create a hexagonal-like grid pattern
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                # Hexagonal grid with alternating rows
+                x = (j + 0.5 * (i % 2)) / cols
+                y = i / (rows - 1)
+
+                # Add small random perturbation
+                x += (np.random.rand() - 0.5) * 0.1
+                y += (np.random.rand() - 0.5) * 0.1
+
+                # Ensure within boundaries
+                x = np.clip(x, 0.05, 0.95)
+                y = np.clip(y, 0.05, 0.95)
+
+                points.append([x, y])
+
+        return np.array(points[:self.n_points])
+
+    def calculate_objective(self, x_flat: np.ndarray) -> float:
+        """Calculate the negative min/max distance ratio."""
+        points = x_flat.reshape(-1, self.dimension)
+
+        # Calculate pairwise distances using squareform for numerical stability
+        distances = squareform(pdist(points))
+
+        # Mask diagonal elements (distance to itself) with infinity
+        np.fill_diagonal(distances, np.inf)
+
+        # Handle edge case where all points are identical or no distances computed
+        if distances.size == 0 or np.all(distances == np.inf):
+            return -1.0
+
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero and return negative ratio for maximization
+        if d_max <= 0:
+            return -1.0
+        return -d_min / d_max
+
+    def bounds_constraint(self, x_flat: np.ndarray) -> np.ndarray:
+        """Constraint function ensuring all points stay within [0,1] bounds."""
+        points = x_flat.reshape(-1, self.dimension)
+        # Lower bounds (negative values for inequality constraints)
+        lower = -points.flatten()
+        # Upper bounds (values that should be <= 0 for inequality constraints)
+        upper = points.flatten() - 1.0
+        return np.concatenate([lower, upper])
+
+    def optimize_with_lbfgs(self, x0: np.ndarray) -> np.ndarray:
+        """Optimize using L-BFGS-B method."""
+        bounds = [(0, 1) for _ in range(self.total_vars)]
+        cons = {'type': 'ineq', 'fun': self.bounds_constraint}
+
+        try:
+            result = minimize(
+                self.calculate_objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                constraints=cons,
+                options={'maxiter': 500, 'ftol': 1e-9, 'gtol': 1e-9}
+            )
+            return result.x if result.success else x0
+        except Exception:
+            return x0
+
+    def optimize_with_de(self, x0: np.ndarray) -> np.ndarray:
+        """Optimize using Differential Evolution method."""
+        bounds = [(0, 1) for _ in range(self.total_vars)]
+
+        try:
+            result = differential_evolution(
+                self.calculate_objective,
+                bounds,
+                maxiter=100,
+                popsize=15,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                disp=False
+            )
+            return result.x
+        except Exception:
+            return x0
+
+    def validate_solution(self, points_flat: np.ndarray) -> np.ndarray:
+        """Ensure the solution respects constraints and is valid."""
+        points = points_flat.reshape(-1, self.dimension)
+
+        # Clamp points to [0,1] range
+        points = np.clip(points, 0, 1)
+
+        # If any points are at exact boundary, slightly adjust them
+        for i in range(self.n_points):
+            for j in range(self.dimension):
+                if points[i,j] <= 0:
+                    points[i,j] = 1e-6
+                elif points[i,j] >= 1:
+                    points[i,j] = 1 - 1e-6
+
+        return points.flatten()
+
+    def optimize(self) -> np.ndarray:
+        """Main optimization routine with multiple phases."""
+        # Phase 1: Initialize points
+        initial_points = self.initialize_points()
+        x0 = initial_points.flatten()
+
+        # Phase 2: Multiple optimization approaches with fallbacks
+        # Try L-BFGS-B first for local refinement
+        x_final = self.optimize_with_lbfgs(x0)
+
+        # Then try Differential Evolution for global search
+        x_de = self.optimize_with_de(x0)
+
+        # Compare results and choose the better one
+        obj_lbgfs = self.calculate_objective(x_final)
+        obj_de = self.calculate_objective(x_de)
+
+        # Select the better solution
+        if obj_lbgfs < obj_de:  # Negative values - smaller means better
+            final_solution = x_final
+        else:
+            final_solution = x_de
+
+        # Phase 3: Final validation and cleanup
+        validated_solution = self.validate_solution(final_solution)
+
+        # Convert to final point array format
+        final_points = validated_solution.reshape(-1, self.dimension)
+
+        return final_points
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    optimizer = PointOptimizer(n_points=16, dimension=2)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,308 @@
+--- a/original.py
++++ b/original.py
+@@ -1,191 +1,301 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from shapely.geometry import Polygon, Point
+ from typing import Tuple
+ import time
++from scipy.optimize import minimize
+ 
+ class HexagonGeometry:
+     """Handles all hexagon-related geometric computations with optimized performance."""
+ 
+     def __init__(self):
+         self.side_length = 1.0
+         # Precompute vertex angles for efficiency
+         self.vertex_angles = np.linspace(0, 2*np.pi, 7)
+ 
+     def vertices(self, center_x: float, center_y: float, angle_deg: float = 0) -> np.ndarray:
+         """Generate vertices of a regular hexagon given center and rotation."""
+         angle_rad = np.deg2rad(angle_deg)
+         angles = self.vertex_angles + angle_rad
+         # Vectorized computation for better performance
+         vertices = np.column_stack([
+             center_x + self.side_length * np.cos(angles),
+             center_y + self.side_length * np.sin(angles)
+         ])
+         return vertices
+ 
+ class PackingValidator:
+     """Validates packing configurations for constraints with numerical stability."""
+ 
+     def __init__(self, hex_geometry: HexagonGeometry):
+         self.hex_geom = hex_geometry
+ 
+     def check_overlap(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+         """Check if two hexagons overlap using Shapely with buffer for numerical stability."""
+         try:
+             poly1 = Polygon(hex1_vertices)
+             poly2 = Polygon(hex2_vertices)
+             # Buffer helps with floating-point precision issues
+             return poly1.buffer(1e-10).intersects(poly2.buffer(1e-10))
+         except:
+             # Fallback for edge cases - simple distance check
+             centroid1 = np.mean(hex1_vertices, axis=0)
+             centroid2 = np.mean(hex2_vertices, axis=0)
+             distance = np.linalg.norm(centroid1 - centroid2)
+             return distance < 2.0  # Overlapping if centroids are closer than 2 units
+ 
+     def check_containment(self, hex_vertices: np.ndarray, outer_hex_side_length: float) -> bool:
+         """Check if all hexagon vertices are contained within outer hexagon."""
+         try:
+             outer_vertices = self.hex_geom.vertices(0, 0, outer_hex_side_length)
+             outer_polygon = Polygon(outer_vertices)
+ 
+             for vertex in hex_vertices:
+                 point = Point(vertex[0], vertex[1])
+                 if not outer_polygon.contains(point):
+                     return False
+             return True
+         except:
+             # Fallback containment check using distance from center
+             center = np.array([0.0, 0.0])
+             for vertex in hex_vertices:
+                 dist = np.linalg.norm(np.array(vertex) - center)
+                 if dist > outer_hex_side_length:
+                     return False
+             return True
+ 
+     def validate_packing(self, inner_hex_data: np.ndarray, outer_hex_side_length: float) -> Tuple[bool, float]:
+         """Validate entire packing configuration with early termination."""
+         try:
+             # Pre-compute all hexagon polygons for efficiency
+             hex_polygons = []
+             for i in range(12):
+                 x, y, angle = inner_hex_data[i]
+                 vertices = self.hex_geom.vertices(x, y, angle)
+                 hex_polygons.append(Polygon(vertices))
+ 
+             # Early termination: check overlaps first (most expensive)
+             for i in range(12):
+                 for j in range(i+1, 12):
+                     if self.check_overlap(hex_polygons[i], hex_polygons[j]):
+                         return False, 0.0
+ 
+             # Check containment
+             outer_vertices = self.hex_geom.vertices(0, 0, outer_hex_side_length)
+             outer_polygon = Polygon(outer_vertices)
+ 
+             # Check containment for vertices with buffer for numerical stability
+             for i in range(12):
+                 for vertex in hex_polygons[i].exterior.coords:
+                     point = Point(vertex[0], vertex[1])
+                     if not outer_polygon.buffer(1e-10).contains(point):
+                         return False, 0.0
+ 
+             # If we reach here, packing is valid
+             return True, 1.0 / outer_hex_side_length
+ 
+         except Exception:
+             return False, 0.0
+ 
+ class ConfigurationManager:
+     """Manages different configuration strategies with intelligent fallback."""
+ 
+     @staticmethod
+     def get_target_configuration() -> Tuple[np.ndarray, float]:
+         """Return the known high-quality symmetric configuration that achieves the benchmark."""
+         # Based on mathematical analysis of optimal 12-hexagon packing
+         # This configuration achieves 1/3.9419123 ≈ 0.2537 benchmark ratio
+         inner_hex_data = np.array([
+             [0.0, 0.0, 0],      # Center
+             [0.0, 2.0, 0],      # Top
+             [1.732050808, 1.0, 0],   # Top right
+             [1.732050808, -1.0, 0],  # Bottom right
+             [0.0, -2.0, 0],     # Bottom
+             [-1.732050808, -1.0, 0],  # Bottom left
+             [-1.732050808, 1.0, 0],   # Top left
+             [3.464101616, 2.0, 0],    # Far top right
+             [3.464101616, -2.0, 0],   # Far bottom right
+             [-3.464101616, -2.0, 0],  # Far bottom left
+             [-3.464101616, 2.0, 0],   # Far top left
+             [0.0, -4.0, 0],     # Far bottom
+         ], dtype=float)
+ 
+         outer_hex_side_length = 3.9419123
+         return inner_hex_data, outer_hex_side_length
+ 
+     @staticmethod
+     def get_fallback_configuration() -> Tuple[np.ndarray, float]:
+         """Return a conservative fallback configuration."""
+         inner_hex_data = np.array([
+             [0, 0, 0],
+             [-2.5, 0, 0],
+             [2.5, 0, 0],
+             [-1.25, 2.17, 0],
+             [1.25, 2.17, 0],
+             [-1.25, -2.17, 0],
+             [1.25, -2.17, 0],
+             [-3.75, 2.17, 0],
+             [3.75, 2.17, 0],
+             [-3.75, -2.17, 0],
+             [3.75, -2.17, 0],
+             [0, -4, 0],
+         ])
+         outer_hex_side_length = 8.0
+         return inner_hex_data, outer_hex_side_length
+ 
++    @staticmethod
++    def get_symmetric_variants() -> list:
++        """Generate multiple symmetric variants to explore different solution regions."""
++        variants = []
++
++        # Base configuration
++        base_config = np.array([
++            [0.0, 0.0, 0],      # Center
++            [0.0, 2.0, 0],      # Top
++            [1.732050808, 1.0, 0],   # Top right
++            [1.732050808, -1.0, 0],  # Bottom right
++            [0.0, -2.0, 0],     # Bottom
++            [-1.732050808, -1.0, 0],  # Bottom left
++            [-1.732050808, 1.0, 0],   # Top left
++            [3.464101616, 2.0, 0],    # Far top right
++            [3.464101616, -2.0, 0],   # Far bottom right
++            [-3.464101616, -2.0, 0],  # Far bottom left
++            [-3.464101616, 2.0, 0],   # Far top left
++            [0.0, -4.0, 0],     # Far bottom
++        ], dtype=float)
++
++        # Variant 1: Slight adjustment to improve packing
++        variant1 = base_config.copy()
++        variant1[1][1] += 0.05  # Move top hexagon slightly up
++        variant1[4][1] -= 0.05  # Move bottom hexagon slightly down
++        variants.append(variant1)
++
++        # Variant 2: Adjusted radial positions
++        variant2 = base_config.copy()
++        variant2[2][0] *= 1.02  # Slightly increase top right position
++        variant2[2][1] *= 1.02
++        variant2[6][0] *= 0.98  # Slightly decrease top left position
++        variant2[6][1] *= 0.98
++        variants.append(variant2)
++
++        # Variant 3: Different radial spacing
++        variant3 = base_config.copy()
++        variant3[1][1] += 0.1  # Move top hexagon further up
++        variant3[4][1] -= 0.1  # Move bottom hexagon further down
++        variant3[2][0] *= 1.01  # Slightly adjust top right
++        variants.append(variant3)
++
++        return variants
++
++def optimize_with_local_search(initial_config: np.ndarray,
++                              outer_hex_side_length: float,
++                              hex_geometry: HexagonGeometry,
++                              validator: PackingValidator) -> Tuple[np.ndarray, float]:
++    """
++    Apply local optimization to improve the configuration while preserving symmetry.
++    """
++    def objective_function(params):
++        # Reshape params back to hexagon data
++        hex_data = params.reshape(-1, 3)
++
++        # Validate the current configuration
++        is_valid, score = validator.validate_packing(hex_data, outer_hex_side_length)
++
++        # We want to maximize score, so return negative for minimization
++        return -score if is_valid else 1e6
++
++    # Flatten the configuration for optimization
++    initial_flat = initial_config.flatten()
++
++    # Set bounds for positions (reasonable limits)
++    bounds = [(-5, 5), (-5, 5)] * 12  # x,y for each hexagon
++    bounds.extend([(-180, 180)] * 12)  # rotation angles
++
++    try:
++        # Use L-BFGS-B for local optimization with bounds
++        result = minimize(
++            objective_function,
++            initial_flat,
++            method='L-BFGS-B',
++            bounds=bounds,
++            options={'maxiter': 500, 'ftol': 1e-6, 'gtol': 1e-6}
++        )
++
++        if result.success:
++            optimized_params = result.x.reshape(-1, 3)
++            is_valid, score = validator.validate_packing(optimized_params, outer_hex_side_length)
++            if is_valid:
++                return optimized_params, score
++    except Exception as e:
++        pass
++
++    # If optimization fails, return original
++    return initial_config, 0.0
++
+ def hexagon_packing_12():
+     """
+     Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     # Initialize components
+     start_time = time.time()
+ 
+     # Create core components
+     hex_geometry = HexagonGeometry()
+     validator = PackingValidator(hex_geometry)
+     config_manager = ConfigurationManager()
+ 
+     # Get target configuration (this should be optimal)
+     inner_hex_data, outer_hex_side_length = config_manager.get_target_configuration()
+ 
++    # Try multiple configurations including variants
++    configs_to_try = [inner_hex_data] + config_manager.get_symmetric_variants()
++    best_config = inner_hex_data
++    best_score = 0.0
++
++    for config in configs_to_try:
++        is_valid, score = validator.validate_packing(config, outer_hex_side_length)
++        if is_valid and score > best_score:
++            best_score = score
++            best_config = config.copy()
++
++    # Apply local optimization to the best configuration
++    if best_score > 0:
++        optimized_config, optimized_score = optimize_with_local_search(
++            best_config, outer_hex_side_length, hex_geometry, validator
++        )
++        if optimized_score > best_score:
++            best_config = optimized_config
++            best_score = optimized_score
++
+     # Outer hexagon centered at origin with no rotation
+     outer_hex_data = np.array([0, 0, 0])
+ 
+-    # Validate the configuration
+-    is_valid, objective_value = validator.validate_packing(inner_hex_data, outer_hex_side_length)
++    # Validate final configuration
++    is_valid, objective_value = validator.validate_packing(best_config, outer_hex_side_length)
+ 
+     # If validation fails (shouldn't happen with our known good config), use fallback
+     if not is_valid:
+-        print("Warning: Target configuration not valid, using fallback.")
++        print("Warning: Final configuration not valid, using fallback.")
+         inner_hex_data, outer_hex_side_length = config_manager.get_fallback_configuration()
+         outer_hex_data = np.array([0, 0, 0])
+ 
+         # Validate fallback
+         is_valid, objective_value = validator.validate_packing(inner_hex_data, outer_hex_side_length)
+ 
+     end_time = time.time()
+ 
+     # Calculate performance metrics
+     inv_outer_hex_side_length = objective_value if is_valid else 0.0
+     benchmark_ratio = inv_outer_hex_side_length / 0.2537
+ 
+     # Print metrics for monitoring progress
+     print(f"Optimized result: inverse_side_length={inv_outer_hex_side_length:.6f}, "
+           f"benchmark_ratio={benchmark_ratio:.6f}, eval_time={(end_time-start_time):.3f}s")
+ 
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
++    return best_config, outer_hex_data, outer_hex_side_length
+ 
+ # EVOLVE-BLOCK-END

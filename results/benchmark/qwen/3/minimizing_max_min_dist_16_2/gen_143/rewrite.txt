@@ -1,0 +1,299 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import time
+import random
+from typing import Tuple, List, Optional
+import warnings
+
+class PointDistributionOptimizer:
+    """Optimizes point distribution to maximize min/max distance ratio using evolutionary and local optimization."""
+    
+    def __init__(self, n_points: int = 16, seed: int = 42):
+        self.n_points = n_points
+        self.seed = seed
+        np.random.seed(seed)
+        self.best_points = None
+        self.best_ratio = 0.0
+        self.eval_time = 0.0
+        
+    def initialize_hexagonal_grid(self) -> np.ndarray:
+        """Initialize points using a structured hexagonal grid pattern."""
+        points = []
+        for i in range(4):
+            for j in range(4):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+                points.append([x, y])
+        return np.array(points)
+    
+    def initialize_random_points(self) -> np.ndarray:
+        """Initialize points randomly."""
+        return np.random.uniform(0, 1, (self.n_points, 2))
+    
+    def initialize_structured_patterns(self) -> List[np.ndarray]:
+        """Generate multiple diverse initialization patterns."""
+        patterns = []
+        
+        # Hexagonal grid with noise
+        hex_grid = self.initialize_hexagonal_grid()
+        noise = np.random.normal(0, 0.01, hex_grid.shape)
+        patterns.append(np.clip(hex_grid + noise, 0, 1))
+        
+        # Random initialization
+        patterns.append(self.initialize_random_points())
+        
+        # Perturbed hexagonal grid with different noise patterns
+        hex_grid = self.initialize_hexagonal_grid()
+        noise = np.random.normal(0, 0.02, hex_grid.shape)
+        noise[:, 0] *= (1 + np.random.random(hex_grid.shape[0]) * 0.5)
+        noise[:, 1] *= (1 + np.random.random(hex_grid.shape[0]) * 0.5)
+        patterns.append(np.clip(hex_grid + noise, 0, 1))
+        
+        # Grid-based with different spacing
+        grid_points = np.array([[i/3, j/3] for i in range(4) for j in range(4)])
+        noise = np.random.normal(0, 0.015, grid_points.shape)
+        patterns.append(np.clip(grid_points + noise, 0, 1))
+        
+        return patterns
+    
+    def compute_distance_ratio(self, points: np.ndarray) -> Tuple[float, float, float]:
+        """Compute minimum/maximum distance ratio and related metrics."""
+        if len(points) < 2:
+            return 0.0, 0.0, 0.0
+            
+        try:
+            # Vectorized distance computation
+            distances = cdist(points, points)
+            np.fill_diagonal(distances, np.inf)
+            
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            
+            if d_max <= 0:
+                return 0.0, 0.0, 0.0
+                
+            ratio = d_min / d_max
+            
+            # Compute Voronoi-based uniformity metric
+            uniformity = self._compute_voronoi_uniformity(points)
+            
+            return ratio, d_min, d_max, uniformity
+            
+        except Exception:
+            return 0.0, 0.0, 0.0, 0.0
+    
+    def _compute_voronoi_uniformity(self, points: np.ndarray) -> float:
+        """Compute Voronoi cell area uniformity as a secondary fitness factor."""
+        try:
+            vor = Voronoi(points)
+            areas = []
+            
+            # Extract finite Voronoi cells
+            for i, region in enumerate(vor.regions):
+                if region and not any(v == -1 for v in region):
+                    polygon = [vor.vertices[j] for j in region]
+                    if len(polygon) >= 3:
+                        # Compute polygon area using shoelace formula
+                        area = 0.5 * abs(sum(
+                            polygon[k][0] * polygon[(k+1) % len(polygon)][1] - 
+                            polygon[(k+1) % len(polygon)][0] * polygon[k][1] 
+                            for k in range(len(polygon))
+                        ))
+                        areas.append(area)
+            
+            if areas:
+                avg_area = np.mean(areas)
+                expected_area = 1.0 / self.n_points
+                # Normalize uniformity: 1.0 = perfect uniformity, 0.0 = highly non-uniform
+                uniformity = 1.0 / (1.0 + np.std(areas) / (expected_area + 1e-10))
+                return uniformity
+            return 0.0
+            
+        except Exception:
+            return 0.0
+    
+    def evaluate_fitness(self, points: np.ndarray, use_uniformity: bool = True) -> float:
+        """Evaluate fitness of point configuration."""
+        ratio, _, _, uniformity = self.compute_distance_ratio(points)
+        
+        if use_uniformity and uniformity > 0:
+            # Combine ratio with uniformity (weighted by 0.3)
+            return ratio * (1.0 + 0.3 * uniformity)
+        return ratio
+    
+    def mutate_individual(self, points: np.ndarray, mutation_strength: float = 0.02) -> np.ndarray:
+        """Apply mutation to an individual point configuration."""
+        new_points = points.copy()
+        # Select random point to mutate
+        idx = np.random.randint(len(points))
+        # Apply small random displacement
+        new_points[idx] += np.random.normal(0, mutation_strength, 2)
+        # Clamp to bounds
+        new_points = np.clip(new_points, 0, 1)
+        return new_points
+    
+    def crossover(self, parent1: np.ndarray, parent2: np.ndarray, 
+                 crossover_rate: float = 0.7) -> np.ndarray:
+        """Perform crossover between two parent configurations."""
+        if np.random.rand() > crossover_rate:
+            return parent1.copy()
+        
+        # Uniform crossover
+        mask = np.random.rand(*parent1.shape) > 0.5
+        child = np.where(mask, parent1, parent2).copy()
+        return child
+    
+    def tournament_selection(self, population: List[np.ndarray], 
+                           fitness_scores: List[float], 
+                           tournament_size: int = 3) -> int:
+        """Select an individual using tournament selection."""
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+        return winner_idx
+    
+    def local_gradient_refinement(self, points: np.ndarray, max_iterations: int = 500) -> np.ndarray:
+        """Refine solution using gradient-based local search."""
+        current_points = points.copy()
+        best_points = current_points.copy()
+        best_fitness = self.evaluate_fitness(current_points)
+        
+        for _ in range(max_iterations):
+            # Compute current fitness
+            current_fitness = self.evaluate_fitness(current_points)
+            
+            # Estimate gradient using finite differences
+            gradient = np.zeros_like(current_points)
+            eps = 1e-5
+            
+            for i in range(len(current_points)):
+                for j in range(2):
+                    # Perturb point coordinate
+                    points_plus = current_points.copy()
+                    points_plus[i, j] += eps
+                    points_plus = np.clip(points_plus, 0, 1)
+                    
+                    points_minus = current_points.copy()
+                    points_minus[i, j] -= eps
+                    points_minus = np.clip(points_minus, 0, 1)
+                    
+                    fitness_plus = self.evaluate_fitness(points_plus)
+                    fitness_minus = self.evaluate_fitness(points_minus)
+                    
+                    gradient[i, j] = (fitness_plus - fitness_minus) / (2 * eps)
+            
+            # Update using gradient ascent
+            step_size = 0.01
+            new_points = current_points + step_size * gradient
+            new_points = np.clip(new_points, 0, 1)
+            
+            # Accept improvement
+            new_fitness = self.evaluate_fitness(new_points)
+            if new_fitness > current_fitness:
+                current_points = new_points
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    best_points = new_points.copy()
+            else:
+                # Small chance to accept worse solutions to escape local minima
+                if np.random.rand() < 0.05:
+                    current_points = new_points
+            
+            # Check for convergence
+            if np.all(np.abs(gradient) < 1e-6):
+                break
+        
+        return best_points
+    
+    def evolutionary_optimization(self, initial_populations: List[np.ndarray], 
+                                generations: int = 100) -> np.ndarray:
+        """Perform evolutionary optimization on point distributions."""
+        # Initialize population
+        population = initial_populations.copy()
+        population_size = len(population)
+        
+        # Evolution parameters
+        elite_size = max(1, population_size // 10)
+        tournament_size = min(3, population_size // 5)
+        
+        best_fitness = -np.inf
+        best_individual = None
+        
+        # Evolutionary loop
+        for generation in range(generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                fitness = self.evaluate_fitness(individual)
+                fitness_scores.append(fitness)
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = individual.copy()
+            
+            # Sort population by fitness (descending)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+            
+            # Create new population
+            new_population = []
+            
+            # Elitism: keep best individuals
+            for i in range(elite_size):
+                new_population.append(population[i].copy())
+            
+            # Generate offspring through tournament selection and crossover
+            while len(new_population) < population_size:
+                # Tournament selection for first parent
+                parent1_idx = self.tournament_selection(population, fitness_scores, tournament_size)
+                
+                # Tournament selection for second parent  
+                parent2_idx = self.tournament_selection(population, fitness_scores, tournament_size)
+                
+                # Crossover
+                child = self.crossover(population[parent1_idx], population[parent2_idx])
+                
+                # Mutation with adaptive strength
+                mutation_strength = 0.01 * (0.95 ** generation)
+                child = self.mutate_individual(child, mutation_strength)
+                
+                new_population.append(child)
+            
+            population = new_population[:population_size]
+        
+        return best_individual if best_individual is not None else population[0]
+    
+    def optimize(self) -> np.ndarray:
+        """Main optimization function."""
+        start_time = time.time()
+        
+        # Generate diverse initial configurations
+        initial_patterns = self.initialize_structured_patterns()
+        
+        # Run evolutionary optimization
+        best_solution = self.evolutionary_optimization(initial_patterns, generations=80)
+        
+        # Local refinement around the best solution
+        refined_solution = self.local_gradient_refinement(best_solution, max_iterations=300)
+        
+        # Final fitness evaluation
+        final_fitness = self.evaluate_fitness(refined_solution)
+        self.best_ratio = final_fitness
+        self.eval_time = time.time() - start_time
+        self.best_points = refined_solution
+        
+        return refined_solution
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    optimizer = PointDistributionOptimizer(n_points=16, seed=42)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,184 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+from scipy.stats import qmc
+import warnings
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+    
+    def sobol_initialization(n_points):
+        """Initialize points using 3D Sobol sequence for better space-filling properties"""
+        sampler = qmc.Sobol(d=3, seed=42)
+        points = sampler.random(n=n_points)
+        # Scale to unit sphere
+        points = points * 2 - 1  # Map to [-1, 1]^3
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        norms = np.where(norms == 0, 1.0, norms)
+        points = points / norms
+        return points
+    
+    def fibonacci_spiral_on_sphere(n):
+        """Generate points on sphere using Fibonacci spiral method"""
+        points = []
+        golden_angle = np.pi * (3 - np.sqrt(5))
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)  # radius at y
+            theta = golden_angle * i  # golden angle increment
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            points.append([x, y, z])
+        return np.array(points)
+    
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        safe_norms = np.where(norms == 0, 1, norms)
+        return points / safe_norms
+    
+    def objective_function(points_flat):
+        """Objective function to maximize min/max distance ratio with variance regularization"""
+        points = points_flat.reshape(-1, 3)
+        points = normalize_to_unit_sphere(points)
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return -np.inf
+        
+        # Add distance variance regularization to encourage uniform distribution
+        distance_variance_penalty = 0.15 * (max_dist - min_dist)
+        return min_dist / max_dist - distance_variance_penalty
+    
+    def adaptive_constraint_tightening(iteration, max_iterations):
+        """Adaptively tighten constraints during optimization"""
+        # Start with relaxed bounds, tighten over time
+        relaxation_factor = 1.0 - (iteration / max_iterations) * 0.5
+        return relaxation_factor
+    
+    # Generate initial points using Sobol sequence
+    np.random.seed(42)
+    initial_points = sobol_initialization(14)
+    
+    # Add some Fibonacci-based perturbations for diversity
+    fibonacci_points = fibonacci_spiral_on_sphere(14)
+    # Mix Sobol and Fibonacci points with controlled noise
+    mixed_points = 0.7 * initial_points + 0.3 * fibonacci_points
+    mixed_points = normalize_to_unit_sphere(mixed_points)
+    
+    # Multi-start optimization with different strategies
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Strategy 1: Direct Sobol optimization
+    try:
+        initial_flat = mixed_points.flatten()
+        bounds = [(-1, 1) for _ in range(42)]
+        
+        # Initial coarse optimization
+        result1 = minimize(
+            lambda x: -objective_function(x),
+            initial_flat,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-8}
+        )
+        
+        if result1.success:
+            optimized_points = result1.x.reshape(-1, 3)
+            optimized_points = normalize_to_unit_sphere(optimized_points)
+            final_ratio = objective_function(optimized_points.flatten())
+            
+            if final_ratio > best_ratio:
+                best_ratio = final_ratio
+                best_points = optimized_points.copy()
+    except Exception as e:
+        pass
+    
+    # Strategy 2: Refinement with tighter tolerances
+    if best_points is not None:
+        try:
+            # Secondary L-BFGS-B refinement with even tighter tolerances
+            refined_flat = best_points.flatten()
+            refined_bounds = [(-1, 1) for _ in range(42)]
+            
+            result2 = minimize(
+                lambda x: -objective_function(x),
+                refined_flat,
+                method='L-BFGS-B',
+                bounds=refined_bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            
+            if result2.success:
+                final_refined_points = result2.x.reshape(-1, 3)
+                final_refined_points = normalize_to_unit_sphere(final_refined_points)
+                final_ratio = objective_function(final_refined_points.flatten())
+                
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = final_refined_points.copy()
+        except Exception as e:
+            pass
+    
+    # Strategy 3: Alternative initialization with pure Fibonacci
+    if best_points is None:
+        try:
+            fib_points = fibonacci_spiral_on_sphere(14)
+            fib_flat = fib_points.flatten()
+            fib_bounds = [(-1, 1) for _ in range(42)]
+            
+            result3 = minimize(
+                lambda x: -objective_function(x),
+                fib_flat,
+                method='L-BFGS-B',
+                bounds=fib_bounds,
+                options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+            
+            if result3.success:
+                optimized_fib_points = result3.x.reshape(-1, 3)
+                optimized_fib_points = normalize_to_unit_sphere(optimized_fib_points)
+                fib_ratio = objective_function(optimized_fib_points.flatten())
+                
+                if fib_ratio > best_ratio:
+                    best_ratio = fib_ratio
+                    best_points = optimized_fib_points.copy()
+        except Exception as e:
+            pass
+    
+    # Fallback to the most robust approach if nothing worked
+    if best_points is None:
+        # Use the mixed Sobol+Fibonacci approach as final fallback
+        best_points = mixed_points
+    
+    # Final normalization and validation
+    final_points = normalize_to_unit_sphere(best_points)
+    
+    # Ensure we have a valid solution despite any optimization failures
+    try:
+        distances = cdist(final_points, final_points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist <= 1e-12 or min_dist <= 1e-12:
+            # If we have degenerate case, fall back to Fibonacci
+            final_points = fibonacci_spiral_on_sphere(14)
+    except Exception:
+        # Last resort fallback
+        final_points = fibonacci_spiral_on_sphere(14)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,234 @@
+Let me find the correct location and make a more targeted change:
+
+<NAME>
+voronoi_enhanced_adaptive_mutation
+</NAME>
+
+<DESCRIPTION>
+This change implements a Voronoi-based adaptive mutation strategy that uses actual Voronoi cell areas to weight mutation strengths, rather than just a simple density approximation. This allows for more precise control over mutation behavior in different regions of the packing, where smaller Voronoi cells indicate higher constraint density and should receive smaller mutations, while larger cells can handle larger mutations. This addresses the limitation in the current implementation that only approximates constraint density without using true geometric Voronoi analysis.
+
+The key improvements:
+1. Replace simple constraint density calculation with actual Voronoi-based cell area computation
+2. Use Voronoi cell area inversely as a weighting factor for mutation strength (smaller areas = more constrained = smaller mutations)
+3. This should improve convergence by adapting mutation strategies to local geometric constraints
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class MutationEngine:
+    """Manages adaptive mutation strategies."""
+
+    @staticmethod
+    def compute_constraint_density(circles: np.ndarray) -> np.ndarray:
+        """Compute constraint density for each circle."""
+        n = len(circles)
+        if n < 2:
+            return np.zeros(n)
+
+        # Simple density approximation using nearest neighbors
+        centers = circles[:, :2]
+        constraint_density = np.zeros(n)
+
+        # For each circle, count nearby circles
+        for i in range(n):
+            center_i = centers[i]
+            nearby_count = 0
+            max_radius = np.max(circles[:, 2])
+            threshold = 3 * max_radius
+
+            for j in range(n):
+                if i != j:
+                    dist = np.linalg.norm(center_i - centers[j])
+                    if dist < threshold:
+                        nearby_count += 1
+
+            constraint_density[i] = nearby_count / max(1, n - 1)
+
+        return constraint_density
+
+    @staticmethod
+    def mutate_circles_adaptive(circles: np.ndarray, constraint_densities: np.ndarray,
+                               mutation_rate: float = 0.1, rect_width: float = 1.0,
+                               rect_height: float = 1.0) -> np.ndarray:
+        """Mutate circle positions and radii with adaptive strategy."""
+        mutated = circles.copy()
+
+        for i in range(len(mutated)):
+            x, y, r = mutated[i]
+
+            # Use constraint density for adaptive mutation
+            density_weight = 1.0 + constraint_densities[i] * 2.0  # Range 1.0 to 3.0
+
+            pos_mutation_strength = 0.02 / density_weight
+            rad_mutation_strength = 0.01 / density_weight
+
+            # Mutate position
+            if random.random() < mutation_rate:
+                x += np.random.normal(0, pos_mutation_strength)
+                y += np.random.normal(0, pos_mutation_strength)
+
+                # Ensure position stays within bounds
+                x = np.clip(x, r, rect_width - r)
+                y = np.clip(y, r, rect_height - r)
+
+            # Mutate radius
+            if random.random() < mutation_rate:
+                r += np.random.normal(0, rad_mutation_strength)
+                # Ensure radius remains positive
+                r = max(0.001, r)
+
+            mutated[i] = [x, y, r]
+
+        return mutated
+=======
+class MutationEngine:
+    """Manages adaptive mutation strategies."""
+
+    @staticmethod
+    def compute_voronoi_cell_areas(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """
+        Compute Voronoi cell areas for each circle to determine constraint density.
+        Smaller areas indicate higher constraint density (more constrained regions).
+        """
+        n = len(circles)
+        if n < 2:
+            return np.ones(n) * 1.0  # Default to uniform weights
+
+        # Get circle centers
+        centers = circles[:, :2]
+
+        try:
+            # Create Voronoi diagram
+            from scipy.spatial import Voronoi
+            vor = Voronoi(centers)
+
+            # Compute areas for each Voronoi cell
+            cell_areas = np.zeros(n)
+
+            # For each Voronoi cell, compute its area using the vertices
+            for i in range(n):
+                # Get vertices of the Voronoi cell for circle i
+                # Find ridge indices corresponding to this cell
+                ridge_indices = [j for j, ridge in enumerate(vor.ridge_vertices) if i in ridge and -1 not in ridge]
+
+                if len(ridge_indices) > 0:
+                    # Extract vertices of this cell
+                    vertices = []
+                    for idx in ridge_indices:
+                        if idx < len(vor.ridge_vertices):
+                            v1, v2 = vor.ridge_vertices[idx]
+                            if v1 >= 0 and v2 >= 0:
+                                vertices.append(vor.vertices[v1])
+                                vertices.append(vor.vertices[v2])
+
+                    # Remove duplicates and create polygon
+                    if len(vertices) >= 3:
+                        try:
+                            vertices = np.array(vertices)
+                            # Only consider points that are within bounds to avoid infinite Voronoi regions
+                            valid_points = vertices[
+                                (vertices[:, 0] >= 0) & (vertices[:, 0] <= rect_width) &
+                                (vertices[:, 1] >= 0) & (vertices[:, 1] <= rect_height)
+                            ]
+                            if len(valid_points) >= 3:
+                                # Use a polygon area calculation
+                                # Simple approach: use the first three points to estimate area
+                                # For more accuracy, we'd need to triangulate the polygon
+                                # But for our purposes, we'll return a reasonable estimate
+                                # Here's a better approach using shoelace formula:
+                                if len(valid_points) >= 3:
+                                    # Shoelace formula for polygon area
+                                    x = valid_points[:, 0]
+                                    y = valid_points[:, 1]
+                                    area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                                    cell_areas[i] = area
+                                else:
+                                    cell_areas[i] = 1.0
+                            else:
+                                cell_areas[i] = 1.0
+                        except:
+                            cell_areas[i] = 1.0
+                    else:
+                        cell_areas[i] = 1.0
+                else:
+                    # Fallback for cases where Voronoi construction doesn't give us complete cells
+                    # Estimate based on average distance to neighbors
+                    max_radius = np.max(circles[:, 2])
+                    cell_areas[i] = max_radius * max_radius * np.pi  # Rough estimate
+
+            # Normalize cell areas, using inverse relationship for constraint density
+            # Smaller areas = higher constraint density = more careful mutations
+            min_area = np.min(cell_areas[cell_areas > 0]) if np.sum(cell_areas > 0) > 0 else 1.0
+            cell_areas = np.maximum(cell_areas, min_area)  # Avoid zero
+            constraint_density = 1.0 / cell_areas  # Inverse relationship
+
+            # Normalize to [0.5, 1.0] range to make mutation scaling more meaningful
+            max_constraint = np.max(constraint_density)
+            if max_constraint > 0:
+                constraint_density = 0.5 + 0.5 * (constraint_density / max_constraint)
+
+            return constraint_density
+        except Exception as e:
+            # Fallback to simpler constraint calculation
+            print(f"Voronoi calculation failed: {e}")
+            # For each circle, count how many others are close enough
+            constraint_density = np.zeros(n)
+            centers = circles[:, :2]
+
+            for i in range(n):
+                center_i = centers[i]
+                nearby_count = 0
+
+                # Check nearby circles (within 3x max radius)
+                max_radius = np.max(circles[:, 2])
+                threshold = 3 * max_radius
+
+                for j in range(n):
+                    if i != j:
+                        dist = np.linalg.norm(center_i - centers[j])
+                        if dist < threshold:
+                            nearby_count += 1
+
+                constraint_density[i] = nearby_count / max(1, n - 1)
+
+            # Convert to constraint density [0.5, 1.0] range
+            return 0.5 + 0.5 * constraint_density
+
+    @staticmethod
+    def mutate_circles_adaptive(circles: np.ndarray, constraint_densities: np.ndarray,
+                               mutation_rate: float = 0.1, rect_width: float = 1.0,
+                               rect_height: float = 1.0) -> np.ndarray:
+        """Mutate circle positions and radii with adaptive strategy based on Voronoi cell areas."""
+        mutated = circles.copy()
+
+        for i in range(len(mutated)):
+            x, y, r = mutated[i]
+
+            # Use constraint density (from Voronoi cell areas) for adaptive mutation
+            # constraint_densities ranges from ~0.5 to ~1.0, where higher = more constrained
+            # So we invert it for mutation strength: lower density = allow larger mutations
+            mutation_factor = 0.5 + 0.5 * constraint_densities[i]  # Scale to [0.5, 1.0]
+
+            pos_mutation_strength = 0.02 * mutation_factor
+            rad_mutation_strength = 0.01 * mutation_factor
+
+            # Mutate position
+            if random.random() < mutation_rate:
+                x += np.random.normal(0, pos_mutation_strength)
+                y += np.random.normal(0, pos_mutation_strength)
+
+                # Ensure position stays within bounds
+                x = np.clip(x, r, rect_width - r)
+                y = np.clip(y, r, rect_height - r)
+
+            # Mutate radius
+            if random.random() < mutation_rate:
+                r += np.random.normal(0, rad_mutation_strength)
+                # Ensure radius remains positive
+                r = max(0.001, r)
+
+            mutated[i] = [x, y, r]
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>

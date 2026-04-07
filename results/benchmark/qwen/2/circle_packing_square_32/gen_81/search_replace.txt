@@ -1,0 +1,128 @@
+<NAME>
+improve_initialization_with_density_adaptive_radii
+</NAME>
+
+<DESCRIPTION>
+The current hexagonal grid initialization uses a simple uniform radius assignment. This approach doesn't account for the fact that circles in denser regions might benefit from smaller initial radii to allow better optimization, while circles in sparser regions could start with larger radii. I'll enhance the initialization by incorporating density-aware radius assignment based on k-nearest neighbors, which should lead to better starting configurations and potentially higher sum_radii scores.
+
+This improvement involves:
+1. Computing the density around each point using k-nearest neighbors (k=5)
+2. Scaling initial radii inversely with density estimates
+3. Adding some randomness to prevent getting stuck in poor local optima
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial import cKDTree
+import math
+
+def _initialize_hexagonal_grid(n):
+    """Initialize circles using a hexagonal grid pattern with improved scaling"""
+    # Calculate grid dimensions for n circles
+    rows = int(math.sqrt(n))
+    cols = int(math.ceil(n / rows))
+
+    # Adjust to ensure we have enough slots
+    while rows * cols < n:
+        rows += 1
+
+    # Create hexagonal grid points
+    spacing_x = 1.0 / cols
+    spacing_y = 1.0 / rows
+
+    # Hexagonal offset
+    offset = spacing_x * 0.5
+
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(points) >= n:
+                break
+            x = (j + (i % 2) * 0.5) * spacing_x
+            y = i * spacing_y
+            points.append([x, y])
+
+    # Ensure we have exactly n points
+    points = points[:n]
+
+    # Initialize radii to small values
+    radii = [0.02] * n
+
+    return np.array(points), radii
+=======
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial import cKDTree
+import math
+
+def _compute_density_aware_radii(points, k=5):
+    """Compute density-aware initial radii based on k-nearest neighbors"""
+    if len(points) <= k:
+        # If we don't have enough points, fall back to uniform initialization
+        return [0.02] * len(points)
+
+    # Build KDTree for neighbor queries
+    tree = cKDTree(points)
+
+    # Find k nearest neighbors for each point (excluding itself)
+    distances, indices = tree.query(points, k=k+1, p=2)
+
+    # Compute average distance to neighbors as density proxy
+    # Smaller average distance means higher density
+    avg_distances = np.mean(distances[:, 1:], axis=1)  # Exclude the point itself
+
+    # Normalize distances to get relative densities
+    normalized_densities = (np.max(avg_distances) - avg_distances + 1e-8) / (np.max(avg_distances) + 1e-8)
+
+    # Convert density to radius: higher density -> smaller initial radius
+    # Scale so that maximum radius is about 0.05 and minimum about 0.005
+    min_radius = 0.005
+    max_radius = 0.05
+    radii = min_radius + normalized_densities * (max_radius - min_radius)
+
+    # Add some randomness to help escape local optima
+    noise_factor = 0.1
+    radii = radii * (1 + np.random.normal(0, noise_factor, len(radii)))
+
+    # Ensure radii are within reasonable bounds
+    radii = np.clip(radii, 0.001, 0.49)
+
+    return radii.tolist()
+
+def _initialize_hexagonal_grid(n):
+    """Initialize circles using a hexagonal grid pattern with improved scaling"""
+    # Calculate grid dimensions for n circles
+    rows = int(math.sqrt(n))
+    cols = int(math.ceil(n / rows))
+
+    # Adjust to ensure we have enough slots
+    while rows * cols < n:
+        rows += 1
+
+    # Create hexagonal grid points
+    spacing_x = 1.0 / cols
+    spacing_y = 1.0 / rows
+
+    # Hexagonal offset
+    offset = spacing_x * 0.5
+
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(points) >= n:
+                break
+            x = (j + (i % 2) * 0.5) * spacing_x
+            y = i * spacing_y
+            points.append([x, y])
+
+    # Ensure we have exactly n points
+    points = points[:n]
+
+    # Initialize radii based on density around each point
+    radii = _compute_density_aware_radii(np.array(points))
+
+    return np.array(points), radii
+>>>>>>> REPLACE
+</DIFF>

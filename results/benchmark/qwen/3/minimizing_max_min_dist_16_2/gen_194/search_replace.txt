@@ -1,0 +1,274 @@
+<NAME>
+improve_boundary_handling
+</NAME>
+
+<DESCRIPTION>
+The current boundary penalty implementation only applies a quadratic penalty when points are within 0.01 of any boundary. This can be improved by implementing a more sophisticated boundary handling mechanism that not only penalizes but also actively pushes points away from boundaries during optimization instead of just applying penalties afterward. This will help avoid getting trapped near boundaries where solutions become degenerate.
+
+The key changes include:
+1. Adding a boundary avoidance mechanism during moves instead of just penalty
+2. Modifying the neighborhood_move to push points away from boundaries
+3. Improving the overall boundary handling in the optimization process
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def neighborhood_move(self, current_points: np.ndarray, point_indices: List[int], step_size: float = 0.01) -> np.ndarray:
+        """Performs a coordinated move on a cluster of points."""
+        new_points = current_points.copy()
+
+        # Simple centroid-based cluster movement for better exploration
+        centroid = np.mean(current_points[point_indices], axis=0)
+
+        # Generate movement vector
+        move_vector = np.random.normal(0, step_size, 2)
+
+        # Apply movement to selected points
+        for idx in point_indices:
+            new_points[idx] = current_points[idx] + move_vector
+
+            # Boundary handling with reflection
+            for dim in range(2):
+                if new_points[idx, dim] < 0:
+                    new_points[idx, dim] = -new_points[idx, dim]
+                elif new_points[idx, dim] > 1:
+                    new_points[idx, dim] = 2 - new_points[idx, dim]
+
+        return new_points
+=======
+    def neighborhood_move(self, current_points: np.ndarray, point_indices: List[int], step_size: float = 0.01) -> np.ndarray:
+        """Performs a coordinated move on a cluster of points."""
+        new_points = current_points.copy()
+
+        # Simple centroid-based cluster movement for better exploration
+        centroid = np.mean(current_points[point_indices], axis=0)
+
+        # Generate movement vector
+        move_vector = np.random.normal(0, step_size, 2)
+
+        # Apply movement to selected points
+        for idx in point_indices:
+            new_points[idx] = current_points[idx] + move_vector
+
+            # Boundary avoidance - push points away from boundaries
+            for dim in range(2):
+                if new_points[idx, dim] < 0.01:
+                    # Push away from left boundary
+                    new_points[idx, dim] = 0.01 + np.random.uniform(0, 0.005)
+                elif new_points[idx, dim] > 0.99:
+                    # Push away from right boundary
+                    new_points[idx, dim] = 0.99 - np.random.uniform(0, 0.005)
+
+        return new_points
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_single_point_move
+</NAME>
+
+<DESCRIPTION>
+The single point move in the simulated annealing currently uses a simple uniform random perturbation which might not be optimal for this specific problem. We can enhance this by using a more sophisticated perturbation strategy that considers the boundary constraints more carefully and uses a combination of different perturbation types to better explore the search space. This should help escape local optima more effectively.
+
+The key changes include:
+1. Using a mixture of perturbation strategies (normal + uniform + exponential)
+2. Making the perturbation adaptive based on the current temperature
+3. Adding explicit boundary avoidance for single point moves
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+            else:
+                # Single point move (traditional approach)
+                new_points = current_points.copy()
+                point_idx = np.random.randint(len(current_points))
+                delta = np.random.normal(0, temperature * 0.1, 2)
+                new_points[point_idx] = current_points[point_idx] + delta
+
+                # Boundary handling with reflection
+                for dim in range(2):
+                    if new_points[point_idx, dim] < 0:
+                        new_points[point_idx, dim] = -new_points[point_idx, dim]
+                    elif new_points[point_idx, dim] > 1:
+                        new_points[point_idx, dim] = 2 - new_points[point_idx, dim]
+=======
+            else:
+                # Single point move with enhanced strategy
+                new_points = current_points.copy()
+                point_idx = np.random.randint(len(current_points))
+
+                # Choose perturbation type adaptively based on temperature
+                if temperature > 0.05:
+                    # High temperature: use larger, more diverse perturbations
+                    perturbation_type = np.random.choice(['normal', 'uniform', 'exponential'])
+                    if perturbation_type == 'normal':
+                        delta = np.random.normal(0, temperature * 0.15, 2)
+                    elif perturbation_type == 'uniform':
+                        delta = np.random.uniform(-temperature * 0.2, temperature * 0.2, 2)
+                    else:  # exponential
+                        delta = np.random.exponential(temperature * 0.1, 2)
+                        if np.random.random() > 0.5:
+                            delta[0] = -delta[0]
+                        if np.random.random() > 0.5:
+                            delta[1] = -delta[1]
+                else:
+                    # Low temperature: use smaller, precise perturbations
+                    delta = np.random.normal(0, temperature * 0.05, 2)
+
+                new_points[point_idx] = current_points[point_idx] + delta
+
+                # Boundary avoidance with more careful handling
+                for dim in range(2):
+                    if new_points[point_idx, dim] < 0.01:
+                        # Push away from left boundary
+                        new_points[point_idx, dim] = 0.01 + np.random.uniform(0, 0.005)
+                    elif new_points[point_idx, dim] > 0.99:
+                        # Push away from right boundary
+                        new_points[point_idx, dim] = 0.99 - np.random.uniform(0, 0.005)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+add_position_dependent_temperature
+</NAME>
+
+<DESCRIPTION>
+The current cooling schedule is uniform across all iterations. We can improve performance by making the temperature update more adaptive and position-dependent. This means that during the early stages we allow more exploration, but as we approach the optimal region, we adjust the cooling based on how well we're progressing. This allows for better fine-tuning in later phases.
+
+The key changes include:
+1. Adding position-dependent temperature adjustments
+2. Implementing a more sophisticated progressive cooling strategy
+3. Making the system respond better to stagnation with dynamic temperature resets
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        temperature = self.initial_temp
+        cooling_rate = self.cooling_rate
+        min_temp = self.min_temp
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        stagnation_counter = 0
+
+        # Progress tracking variables
+        last_best_ratio = current_ratio
+        progress_stagnation = 0
+        max_progress_stagnation = 100
+
+        for iteration in range(self.max_iterations):
+            # Adaptive temperature adjustment based on progress
+            if iteration % 100 == 0 and iteration > 0:
+                # Check for improvement
+                ratio_diff = current_ratio - last_best_ratio
+                if ratio_diff > 1e-8:
+                    # There was an improvement - speed up cooling slightly
+                    cooling_rate = min(cooling_rate * 1.005, 0.9998)
+                    last_best_ratio = current_ratio
+                    progress_stagnation = 0
+                else:
+                    # No improvement - slow down cooling and track stagnation
+                    cooling_rate = max(cooling_rate * 0.99, 0.999)
+                    progress_stagnation += 1
+
+                    # If stagnating for too long, restart with higher temperature
+                    if progress_stagnation > max_progress_stagnation:
+                        temperature = min(temperature * 2.0, 0.5)
+                        progress_stagnation = 0
+=======
+        temperature = self.initial_temp
+        cooling_rate = self.cooling_rate
+        min_temp = self.min_temp
+
+        # Track recent improvements for adaptive cooling
+        recent_improvements = []
+        stagnation_counter = 0
+
+        # Progress tracking variables
+        last_best_ratio = current_ratio
+        progress_stagnation = 0
+        max_progress_stagnation = 100
+
+        for iteration in range(self.max_iterations):
+            # Adaptive temperature adjustment based on progress and iteration stage
+            if iteration % 100 == 0 and iteration > 0:
+                # Check for improvement
+                ratio_diff = current_ratio - last_best_ratio
+                if ratio_diff > 1e-8:
+                    # There was an improvement - speed up cooling slightly
+                    cooling_rate = min(cooling_rate * 1.005, 0.9998)
+                    last_best_ratio = current_ratio
+                    progress_stagnation = 0
+                else:
+                    # No improvement - slow down cooling and track stagnation
+                    cooling_rate = max(cooling_rate * 0.99, 0.999)
+                    progress_stagnation += 1
+
+                    # If stagnating for too long, restart with higher temperature
+                    if progress_stagnation > max_progress_stagnation:
+                        temperature = min(temperature * 2.0, 0.5)
+                        progress_stagnation = 0
+
+                # Position-dependent temperature adjustment
+                # More aggressive cooling in later phases
+                if iteration > self.max_iterations * 0.7:
+                    cooling_rate = min(cooling_rate * 0.995, 0.9995)
+                elif iteration > self.max_iterations * 0.5:
+                    cooling_rate = min(cooling_rate * 0.998, 0.9997)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+refine_boundary_penalty
+</NAME>
+
+<DESCRIPTION>
+The boundary penalty currently uses a fixed threshold of 0.01 and a quadratic penalty formula. We can make this more sophisticated by using a softer penalty that gradually increases as points approach boundaries, and by adjusting the penalty weight dynamically. This will allow the optimizer to work with points that are near boundaries without completely rejecting such configurations.
+
+The key changes include:
+1. Implementing a softer boundary penalty that scales smoothly
+2. Making the penalty weight adaptive based on optimization stage
+3. Using a more mathematically sound penalty function
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def compute_boundary_penalty(self, points: np.ndarray) -> float:
+        """Computes penalty for points near boundaries."""
+        penalty = 0.0
+        for point in points:
+            # Penalty for being close to any boundary
+            dist_to_boundaries = [
+                point[0],  # distance to left boundary
+                1 - point[0],  # distance to right boundary
+                point[1],  # distance to bottom boundary
+                1 - point[1]   # distance to top boundary
+            ]
+            min_dist = min(dist_to_boundaries)
+            if min_dist < self.boundary_threshold:  # Only penalize if very close to boundary
+                penalty += self.boundary_penalty_weight * (self.boundary_threshold - min_dist)**2
+        return penalty
+=======
+    def compute_boundary_penalty(self, points: np.ndarray) -> float:
+        """Computes penalty for points near boundaries with improved scaling."""
+        penalty = 0.0
+        for point in points:
+            # Penalty for being close to any boundary
+            dist_to_boundaries = [
+                point[0],  # distance to left boundary
+                1 - point[0],  # distance to right boundary
+                point[1],  # distance to bottom boundary
+                1 - point[1]   # distance to top boundary
+            ]
+            min_dist = min(dist_to_boundaries)
+
+            # Soft penalty that increases smoothly as points approach boundaries
+            if min_dist < self.boundary_threshold:
+                # Use exponential penalty for smoother transition
+                penalty += self.boundary_penalty_weight * np.exp(-min_dist / (self.boundary_threshold * 0.5)) * (self.boundary_threshold - min_dist)
+        return penalty
+>>>>>>> REPLACE
+</DIFF>

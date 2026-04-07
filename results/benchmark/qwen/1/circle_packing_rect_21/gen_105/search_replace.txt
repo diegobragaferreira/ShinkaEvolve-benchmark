@@ -1,0 +1,157 @@
+<NAME>
+add_spatial_indexing_improvements
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the spatial indexing implementation to make it more efficient and robust. The current spatial hashing approach has some issues with cell size selection and grid handling that can lead to missed collisions or unnecessary overhead. I'll improve the spatial indexing to better handle varying circle sizes and reduce false positives in overlap detection.
+
+Key improvements:
+1. Better cell size calculation based on circle radii statistics
+2. More efficient grid lookup with proper neighbor checking
+3. Improved handling of edge cases and boundary conditions
+4. Enhanced collision detection logic
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Check if all circles are within bounds and non-overlapping using spatial indexing for efficiency."""
+    n = len(circles)
+
+    # Check bounds
+    x_coords = circles[:, 0]
+    y_coords = circles[:, 1]
+    radii = circles[:, 2]
+
+    if np.any(x_coords - radii < 0) or np.any(x_coords + radii > rect_width) or \
+       np.any(y_coords - radii < 0) or np.any(y_coords + radii > rect_height):
+        return False
+
+    # Use spatial indexing to detect overlaps efficiently
+    # Create spatial hash grid
+    cell_size = np.min(radii) * 2  # Cell size based on smallest radius
+    if cell_size <= 0:
+        cell_size = 0.01  # Fallback to minimum size
+
+    # Grid dimensions
+    grid_width = int(np.ceil(rect_width / cell_size)) + 1
+    grid_height = int(np.ceil(rect_height / cell_size)) + 1
+
+    # Initialize grid
+    grid = {}
+
+    # Place circles into grid cells
+    for i in range(n):
+        x, y, r = circles[i]
+        # Get grid coordinates for this circle
+        min_cell_x = int(max(0, (x - r) / cell_size))
+        max_cell_x = int(min(grid_width - 1, (x + r) / cell_size))
+        min_cell_y = int(max(0, (y - r) / cell_size))
+        max_cell_y = int(min(grid_height - 1, (y + r) / cell_size))
+
+        # Add circle to all relevant grid cells
+        for gx in range(min_cell_x, max_cell_x + 1):
+            for gy in range(min_cell_y, max_cell_y + 1):
+                if (gx, gy) not in grid:
+                    grid[(gx, gy)] = []
+                grid[(gx, gy)].append(i)
+
+    # Check for overlaps within each grid cell and adjacent cells
+    for i in range(n):
+        x1, y1, r1 = circles[i]
+        # Get grid cell coordinates
+        cell_x = int(x1 / cell_size)
+        cell_y = int(y1 / cell_size)
+
+        # Check nearby cells (including current cell)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                nx, ny = cell_x + dx, cell_y + dy
+                if (nx, ny) in grid:
+                    for j in grid[(nx, ny)]:
+                        # Skip self-comparison
+                        if i >= j:
+                            continue
+                        x2, y2, r2 = circles[j]
+                        # Check if circles overlap
+                        distance_squared = (x1 - x2)**2 + (y1 - y2)**2
+                        radii_sum = r1 + r2
+                        if distance_squared < radii_sum * radii_sum:
+                            return False
+
+    return True
+=======
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Check if all circles are within bounds and non-overlapping using spatial indexing for efficiency."""
+    n = len(circles)
+
+    # Check bounds
+    x_coords = circles[:, 0]
+    y_coords = circles[:, 1]
+    radii = circles[:, 2]
+
+    if np.any(x_coords - radii < 0) or np.any(x_coords + radii > rect_width) or \
+       np.any(y_coords - radii < 0) or np.any(y_coords + radii > rect_height):
+        return False
+
+    # Use spatial indexing to detect overlaps efficiently
+    # Create spatial hash grid with better cell sizing
+    if len(radii) > 0:
+        avg_radius = np.mean(radii)
+        # Use average radius for cell size to balance efficiency and accuracy
+        cell_size = max(0.001, avg_radius * 1.5)  # Slightly larger than average radius
+    else:
+        cell_size = 0.01  # Fallback if no radii exist
+
+    # Grid dimensions
+    grid_width = int(np.ceil(rect_width / cell_size)) + 1
+    grid_height = int(np.ceil(rect_height / cell_size)) + 1
+
+    # Initialize grid with lists for each cell
+    grid = {}
+
+    # Place circles into grid cells with proper bounds checking
+    for i in range(n):
+        x, y, r = circles[i]
+        # Calculate grid bounds for this circle
+        min_cell_x = max(0, int((x - r) / cell_size))
+        max_cell_x = min(grid_width - 1, int((x + r) / cell_size))
+        min_cell_y = max(0, int((y - r) / cell_size))
+        max_cell_y = min(grid_height - 1, int((y + r) / cell_size))
+
+        # Add circle to all relevant grid cells
+        for gx in range(min_cell_x, max_cell_x + 1):
+            for gy in range(min_cell_y, max_cell_y + 1):
+                if (gx, gy) not in grid:
+                    grid[(gx, gy)] = []
+                grid[(gx, gy)].append(i)
+
+    # Check for overlaps within each grid cell and adjacent cells
+    for i in range(n):
+        x1, y1, r1 = circles[i]
+        # Get grid cell coordinates
+        cell_x = int(x1 / cell_size)
+        cell_y = int(y1 / cell_size)
+
+        # Check nearby cells (including current cell)
+        # Use a 3x3 neighborhood for better accuracy
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                nx, ny = cell_x + dx, cell_y + dy
+                if (nx, ny) in grid:
+                    for j in grid[(nx, ny)]:
+                        # Skip self-comparison and ensure we don't double-check
+                        if i >= j:
+                            continue
+                        x2, y2, r2 = circles[j]
+                        # Check if circles overlap using squared distances for efficiency
+                        dx_squared = (x1 - x2)**2
+                        dy_squared = (y1 - y2)**2
+                        distance_squared = dx_squared + dy_squared
+                        radii_sum = r1 + r2
+                        if distance_squared < radii_sum * radii_sum:
+                            return False
+
+    return True
+>>>>>>> REPLACE
+</DIFF>

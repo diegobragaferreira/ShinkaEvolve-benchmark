@@ -1,0 +1,439 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import warnings
+import time
+import random
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses Voronoi-based geometric optimization with multi-resolution approach.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def compute_ratio(points):
+        """Compute min/max distance ratio for given point configuration."""
+        if len(points) < 2:
+            return 0.0
+
+        # Compute pairwise distances efficiently
+        distances = squareform(pdist(points))
+
+        # Mask diagonal elements (distance to self is 0)
+        np.fill_diagonal(distances, np.inf)
+
+        # Get min and max distances
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+
+        # Handle case where all points might be coincident
+        if max_dist == 0:
+            return 0.0
+
+        return min_dist / max_dist
+
+    def initialize_geometric_distribution():
+        """Create initial point distribution using a sophisticated geometric approach."""
+        # Start with a 4x4 grid pattern
+        points = np.zeros((16, 2))
+        
+        # Create roughly hexagonal-like structure with specific spacing
+        row_indices = []
+        col_indices = []
+        
+        # Generate pattern that avoids regular grid clustering
+        for i in range(4):
+            for j in range(4):
+                row_indices.append(i)
+                col_indices.append(j)
+        
+        # Apply offset pattern for better distribution
+        for k in range(16):
+            i, j = row_indices[k], col_indices[k]
+            # Offset every other row for better hexagonal packing
+            x = j * 0.25 + (i % 2) * 0.125
+            y = i * 0.25
+            
+            # Add small perturbation to avoid perfect grid formation
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+            
+            points[k] = [x, y]
+        
+        # Normalize to [0.1, 0.9] range
+        points[:, 0] = (points[:, 0] - points[:, 0].min()) / (points[:, 0].max() - points[:, 0].min()) * 0.8 + 0.1
+        points[:, 1] = (points[:, 1] - points[:, 1].min()) / (points[:, 1].max() - points[:, 1].min()) * 0.8 + 0.1
+        
+        # Apply slight random perturbations to avoid degeneracy
+        noise = np.random.normal(0, 0.005, points.shape)
+        points += noise
+        
+        # Clamp to bounds
+        points = np.clip(points, 0.01, 0.99)
+        
+        return points
+
+    def geometric_particle_swarm_optimization(points, max_iter=1000):
+        """Custom geometric PSO that uses distance-based guidance."""
+        n_points = len(points)
+        dim = 2
+        
+        # Initialize particles
+        particles = [points.copy()]
+        velocities = [np.zeros_like(points)]
+        
+        # Best positions
+        personal_best = [points.copy()]
+        personal_best_scores = [compute_ratio(points)]
+        
+        # Global best
+        global_best = points.copy()
+        global_best_score = compute_ratio(points)
+        
+        # Parameters
+        c1, c2 = 2.0, 2.0  # Cognitive and social coefficients
+        w_start, w_end = 0.9, 0.4  # Inertia weight
+        max_velocity = 0.1
+        
+        for iter_num in range(max_iter):
+            # Adaptive parameters
+            w = w_start - (w_start - w_end) * iter_num / max_iter
+            
+            # Evaluate all particles
+            for i, particle in enumerate(particles):
+                score = compute_ratio(particle)
+                
+                # Update personal best
+                if score > personal_best_scores[i]:
+                    personal_best[i] = particle.copy()
+                    personal_best_scores[i] = score
+                    
+                    # Update global best
+                    if score > global_best_score:
+                        global_best = particle.copy()
+                        global_best_score = score
+                
+                # Velocity update using geometric reasoning
+                for j in range(n_points):
+                    # Random component
+                    r1, r2 = np.random.rand(2)
+                    
+                    # Cognitive component (toward personal best)
+                    cognitive = c1 * r1 * (personal_best[i][j] - particle[j])
+                    
+                    # Social component (toward global best)
+                    social = c2 * r2 * (global_best[j] - particle[j])
+                    
+                    # Inertia component
+                    inertia = w * velocities[i][j]
+                    
+                    # Geometric distance-aware velocity
+                    velocity = inertia + cognitive + social
+                    
+                    # Apply distance-aware limiting
+                    velocity_mag = np.linalg.norm(velocity)
+                    if velocity_mag > max_velocity:
+                        velocity = velocity / velocity_mag * max_velocity
+                    
+                    velocities[i][j] = velocity
+            
+            # Position update
+            for i, particle in enumerate(particles):
+                # Update position with bounded checking
+                new_pos = particle + velocities[i]
+                
+                # Boundary handling with epsilon padding
+                epsilon = 1e-6
+                new_pos[:, 0] = np.clip(new_pos[:, 0], epsilon, 1 - epsilon)
+                new_pos[:, 1] = np.clip(new_pos[:, 1], epsilon, 1 - epsilon)
+                
+                particles[i] = new_pos
+            
+            # Early stopping if improvement is minimal
+            if iter_num > 100 and abs(global_best_score - personal_best_scores[0]) < 1e-8:
+                break
+                
+            if iter_num % 500 == 0:
+                pass  # Progress tracking
+        
+        return global_best
+
+    def local_refinement(points, iterations=300):
+        """Refine solution using local search with adaptive steps."""
+        current_points = points.copy()
+        
+        for _ in range(iterations):
+            current_ratio = compute_ratio(current_points)
+            
+            # Gradient estimation via finite differences
+            eps = 1e-4
+            best_points = current_points.copy()
+            best_ratio = current_ratio
+            
+            # Try moving each point in small increments
+            for i in range(len(current_points)):
+                for dim in range(2):
+                    # Try positive and negative step
+                    for step_sign in [-1, 1]:
+                        test_points = current_points.copy()
+                        test_points[i, dim] += step_sign * eps
+                        
+                        # Clamp to bounds
+                        test_points[i, 0] = np.clip(test_points[i, 0], 0.001, 0.999)
+                        test_points[i, 1] = np.clip(test_points[i, 1], 0.001, 0.999)
+                        
+                        test_ratio = compute_ratio(test_points)
+                        if test_ratio > best_ratio:
+                            best_ratio = test_ratio
+                            best_points = test_points.copy()
+            
+            # If we found an improvement, use it
+            if best_ratio > current_ratio:
+                current_points = best_points
+            else:
+                # Reduce step size and try again
+                eps *= 0.5
+                
+                # Early stopping if changes become negligible
+                if eps < 1e-8:
+                    break
+        
+        return current_points
+
+    def multi_resolution_optimization(initial_points):
+        """Perform optimization at multiple resolution levels."""
+        # Level 1: Coarse optimization with PSO
+        coarse_points = initial_points.copy()
+        coarse_points = geometric_particle_swarm_optimization(coarse_points, 1000)
+        
+        # Level 2: Medium resolution with local refinement
+        medium_points = local_refinement(coarse_points, 150)
+        
+        # Level 3: Fine tuning with local refinement
+        fine_points = local_refinement(medium_points, 200)
+        
+        return fine_points
+
+    def voronoi_objective(points_flat):
+        """Improved Voronoi-based objective function with better numerical stability"""
+        points = points_flat.reshape(-1, 2)
+        
+        # Apply boundary constraints
+        eps = 1e-8
+        points = np.clip(points, eps, 1-eps)
+        
+        # Calculate pairwise distances
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 1e10
+            
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        # Avoid division by zero
+        if max_dist <= 0:
+            return 1e10
+            
+        # Ratio optimization
+        ratio = min_dist / max_dist
+        
+        return -ratio  # Negative because we minimize in scipy
+
+    def generate_diverse_initial_configs():
+        """Generate multiple diverse initial configurations"""
+        configs = []
+
+        # 1. Hexagonal pattern with better spacing
+        np.random.seed(42)
+        hex_points = []
+        rows = 4
+        cols = 4
+        for i in range(rows):
+            for j in range(cols):
+                if len(hex_points) >= 16:
+                    break
+                # Hexagonal offset pattern with better spacing
+                x = 0.1 + 0.8 * j / (cols - 1) if cols > 1 else 0.5
+                y = 0.1 + 0.8 * i / (rows - 1) if rows > 1 else 0.5
+                if i % 2 == 1:  # Offset odd rows
+                    x += 0.4 / (cols - 1) if cols > 1 else 0.2
+                hex_points.append([x, y])
+
+        # Normalize and add slight randomness
+        hex_points = np.array(hex_points[:16])
+        hex_points += np.random.normal(0, 0.01, hex_points.shape)
+        hex_points = np.clip(hex_points, 0, 1)
+        configs.append(hex_points.copy())
+
+        # 2. Spiral pattern for better distribution
+        spiral_points = []
+        for i in range(16):
+            if i == 0:
+                spiral_points.append([0.5, 0.5])
+            else:
+                angle = i * 2.5
+                radius = min(0.4, i * 0.05)
+                x = 0.5 + radius * np.cos(angle)
+                y = 0.5 + radius * np.sin(angle)
+                spiral_points.append([x, y])
+        configs.append(np.array(spiral_points[:16]).clip(0, 1))
+
+        # 3. Grid pattern with jitter
+        grid_points = []
+        for i in range(4):
+            for j in range(4):
+                if len(grid_points) >= 16:
+                    break
+                base_x = 0.1 + i * 0.225
+                base_y = 0.1 + j * 0.225
+                # Add jitter to avoid perfect grid artifacts
+                jitter_x = np.random.normal(0, 0.015)
+                jitter_y = np.random.normal(0, 0.015)
+                grid_points.append([base_x + jitter_x, base_y + jitter_y])
+        configs.append(np.array(grid_points[:16]).clip(0, 1))
+
+        # 4. Random uniform distribution
+        configs.append(np.random.rand(16, 2))
+
+        # 5. Corner-based pattern
+        corner_points = np.array([
+            [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+            [0.5, 0.1], [0.5, 0.9], [0.1, 0.5], [0.9, 0.5],
+            [0.25, 0.25], [0.25, 0.75], [0.75, 0.25], [0.75, 0.75],
+            [0.33, 0.33], [0.33, 0.67], [0.67, 0.33], [0.67, 0.67]
+        ])
+        corner_points += np.random.normal(0, 0.01, corner_points.shape)
+        configs.append(corner_points.clip(0, 1))
+
+        return configs
+
+    def smart_differential_evolution(points, maxiter=100):
+        """Enhanced differential evolution with smart bounds and constraints"""
+        bounds = [(1e-8, 1-1e-8) for _ in range(32)]
+        
+        def bounded_objective(x):
+            points = np.clip(x.reshape(-1, 2), 1e-8, 1-1e-8).flatten()
+            return voronoi_objective(points)
+        
+        try:
+            result = differential_evolution(
+                bounded_objective,
+                bounds,
+                maxiter=maxiter,
+                popsize=15,
+                tol=1e-6,
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=42,
+                disp=False
+            )
+            
+            if result.success:
+                optimized_points = result.x.reshape(-1, 2)
+                return optimized_points, True
+        except:
+            pass
+            
+        return points, False
+
+    def voronoi_guided_local_search(initial_points, max_iter=500):
+        """Perform local search guided by Voronoi structure analysis"""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = -1e10
+        
+        # Track recent improvements to detect stagnation
+        recent_improvements = []
+        
+        for iteration in range(max_iter):
+            # Evaluate current configuration
+            distances = pdist(current_points)
+            if len(distances) > 0:
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist > 0:
+                    ratio = min_dist / max_dist
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = current_points.copy()
+                        
+                    recent_improvements.append(ratio)
+                    if len(recent_improvements) > 10:
+                        recent_improvements.pop(0)
+            
+            # Create candidate by perturbing one point at a time
+            candidate_points = current_points.copy()
+            
+            # Perturb a random point
+            idx = random.randint(0, 15)
+            # Add small perturbation
+            candidate_points[idx] += np.random.normal(0, 0.005, 2)
+            # Keep within bounds
+            candidate_points = np.clip(candidate_points, 1e-8, 1-1e-8)
+            
+            # Evaluate candidate
+            distances = pdist(candidate_points)
+            if len(distances) > 0:
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                if max_dist > 0:
+                    candidate_ratio = min_dist / max_dist
+                    # Accept if better or with some probability
+                    if candidate_ratio > ratio or random.random() < 0.1:
+                        current_points = candidate_points.copy()
+            
+            # Occasionally restart from best known position
+            if iteration % 50 == 0 and len(recent_improvements) > 5:
+                avg_improvement = np.mean(recent_improvements[-5:])
+                if avg_improvement > 0.95 * best_ratio:
+                    # Restart with best configuration plus noise
+                    current_points = best_points.copy() + np.random.normal(0, 0.001, best_points.shape)
+                    current_points = np.clip(current_points, 1e-8, 1-1e-8)
+        
+        return best_points, best_ratio
+
+    # Main optimization process
+    # Generate diverse initial configurations
+    initial_configs = generate_diverse_initial_configs()
+    
+    best_ratio = -1e10
+    best_points = None
+    
+    # Try multiple initial configurations with hybrid optimization
+    for i, initial_config in enumerate(initial_configs):
+        try:
+            # Step 1: Multi-resolution optimization using geometric approach
+            optimized_points = multi_resolution_optimization(initial_config.copy())
+            
+            # Step 2: Fine-grained refinement with local search
+            refined_points, refined_ratio = voronoi_guided_local_search(optimized_points, max_iter=200)
+            
+            # Step 3: Additional refinement if beneficial
+            if refined_ratio > best_ratio:
+                # Perform additional refinement
+                final_points, final_ratio = voronoi_guided_local_search(refined_points, max_iter=150)
+                
+                if final_ratio > best_ratio:
+                    best_ratio = final_ratio
+                    best_points = final_points.copy()
+                    
+        except Exception as e:
+            continue
+
+    # Fallback to best initial configuration if no good solution found
+    if best_points is None:
+        # Use the best initial configuration with focused local search
+        fallback_config = initialize_geometric_distribution()
+        best_points, _ = voronoi_guided_local_search(fallback_config, max_iter=300)
+    
+    # Ensure final bounds compliance
+    best_points = np.clip(best_points, 1e-8, 1-1e-8)
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

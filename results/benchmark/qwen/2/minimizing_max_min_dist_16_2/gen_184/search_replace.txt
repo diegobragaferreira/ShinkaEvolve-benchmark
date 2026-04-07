@@ -1,0 +1,135 @@
+<NAME>
+add_hierarchical_multi_start_optimization
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+        """Find best solution among all starting configurations with adaptive multi-start optimization."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Track gradient information for adaptive selection
+        gradient_magnitudes = []
+
+        # Try multiple configurations with different optimization strategies
+        for i, config in enumerate(configs):
+            # Use multi-stage optimization for better results
+            optimized_points = self.multi_stage_optimization(config.flatten())
+
+            if optimized_points is not None:
+                ratio, _, _ = self.calculate_ratio(optimized_points)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+
+        # Adaptive refinement with gradient-guided selection
+        if best_points is not None:
+            # Generate additional configurations guided by gradient information
+            # This creates a more informed search around the current best
+            refined_configs = []
+
+            # Add gradient-based perturbations around the best solution
+            # Calculate rough gradient estimate by perturbing coordinates
+            base_points = best_points.copy()
+
+            # Create configurations with gradient-informed perturbations
+            for _ in range(5):
+                # Add small perturbations in directions that might improve the ratio
+                perturbation = np.random.normal(0, 0.01, base_points.shape)
+                perturbed = base_points + perturbation
+                perturbed = np.clip(perturbed, 0.001, 0.999)
+                refined_configs.append(perturbed)
+
+            # Try these refined configurations
+            for refined_config in refined_configs:
+                optimized_points = self.multi_stage_optimization(refined_config.flatten())
+                if optimized_points is not None:
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+
+        return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+=======
+    def get_best_solution(self, configs: List[np.ndarray]) -> np.ndarray:
+        """Find best solution among all starting configurations with hierarchical multi-start optimization."""
+        best_ratio = -np.inf
+        best_points = None
+
+        # Hierarchical optimization approach:
+        # Phase 1: Coarse screening with fast optimization
+        coarse_configs = []
+        coarse_ratios = []
+
+        for i, config in enumerate(configs):
+            # Fast optimization for initial screening
+            try:
+                result = minimize(
+                    self.objective_function,
+                    config.flatten(),
+                    method='L-BFGS-B',
+                    bounds=self.bounds,
+                    options={'maxiter': 50, 'ftol': 1e-4, 'gtol': 1e-3}
+                )
+
+                if result.success:
+                    optimized_points = result.x.reshape(-1, self.dimension)
+                    ratio, _, _ = self.calculate_ratio(optimized_points)
+
+                    coarse_configs.append(optimized_points)
+                    coarse_ratios.append(ratio)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = optimized_points.copy()
+            except Exception:
+                continue
+
+        # Phase 2: Adaptive refinement of top performers
+        if best_points is not None:
+            # Select top 3 configurations from coarse screening
+            top_indices = sorted(range(len(coarse_ratios)), key=lambda i: coarse_ratios[i], reverse=True)[:3]
+            top_configs = [coarse_configs[i] for i in top_indices]
+
+            # Thorough optimization of top performers
+            for config in top_configs:
+                refined_points = self.multi_stage_optimization(config.flatten())
+                if refined_points is not None:
+                    ratio, _, _ = self.calculate_ratio(refined_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = refined_points.copy()
+
+            # Phase 3: Local search around the best solution
+            # Use a more aggressive refinement strategy
+            local_configs = []
+
+            # Create diverse perturbations around the current best
+            for _ in range(8):
+                # Mix of different perturbation strategies
+                perturbation_type = np.random.choice(['uniform', 'gaussian', 'adaptive'])
+
+                if perturbation_type == 'uniform':
+                    perturbed = best_points + np.random.uniform(-0.02, 0.02, best_points.shape)
+                elif perturbation_type == 'gaussian':
+                    perturbed = best_points + np.random.normal(0, 0.015, best_points.shape)
+                else:  # adaptive
+                    perturbed = self.adaptive_perturbation(best_points, iteration=0)
+
+                perturbed = np.clip(perturbed, 0.001, 0.999)
+                local_configs.append(perturbed)
+
+            # Optimize the local configurations
+            for config in local_configs:
+                local_points = self.multi_stage_optimization(config.flatten())
+                if local_points is not None:
+                    ratio, _, _ = self.calculate_ratio(local_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = local_points.copy()
+
+        return best_points if best_points is not None else configs[0] if configs else np.random.rand(16, 2)
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,465 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+
+# Set seeds for determinism
+random.seed(42)
+np.random.seed(42)
+
+def distance(p1, p2):
+    return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Check if all circles are within bounds and non-overlapping using spatial indexing for efficiency."""
+    n = len(circles)
+
+    # Check bounds
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+
+    # Use spatial hashing for efficient overlap checking
+    if n == 0:
+        return True
+
+    max_radius = np.max(circles[:, 2])
+    if max_radius <= 0:
+        return True
+
+    cell_size = 2 * max_radius
+    if cell_size <= 0:
+        cell_size = 0.1
+
+    # Create spatial hash grid
+    grid = {}
+
+    # Helper function to get grid cell index
+    def get_cell(x, y):
+        return (int(x // cell_size), int(y // cell_size))
+
+    # Insert all circles into grid
+    for i in range(n):
+        x, y, r = circles[i]
+        cell = get_cell(x, y)
+        if cell not in grid:
+            grid[cell] = []
+        grid[cell].append(i)
+
+    # Check overlaps using spatial indexing
+    for i in range(n):
+        x1, y1, r1 = circles[i]
+        cell = get_cell(x1, y1)
+
+        # Check neighboring cells for potential collisions
+        nearby_cells = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                nearby_cells.append((cell[0] + dx, cell[1] + dy))
+
+        for nearby_cell in nearby_cells:
+            if nearby_cell in grid:
+                for j in grid[nearby_cell]:
+                    if i != j:  # Don't compare with itself
+                        x2, y2, r2 = circles[j]
+                        if distance([x1, y1], [x2, y2]) < r1 + r2:
+                            return False
+
+    return True
+
+def compute_voronoi_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+
+    try:
+        vor = Voronoi(points)
+
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon using shoelace formula
+                    vertices = np.array([vor.vertices[j] for j in region])
+                    if len(vertices) >= 3:
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+
+def compute_constraint_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute constraint density for each circle based on proximity to others."""
+    n = len(circles)
+    density_scores = np.zeros(n)
+
+    # For each circle, count nearby neighbors
+    for i in range(n):
+        x1, y1, r1 = circles[i]
+        nearby_count = 0
+
+        for j in range(n):
+            if i != j:
+                x2, y2, r2 = circles[j]
+                dist = distance([x1, y1], [x2, y2])
+                # Consider as 'nearby' if distance is less than sum of radii (potential overlap)
+                if dist < (r1 + r2):
+                    nearby_count += 1
+
+        density_scores[i] = nearby_count
+
+    return density_scores
+
+def mutate_radius(circles: np.ndarray, idx: int, max_delta: float = 0.01,
+                  voronoi_densities: np.ndarray = None,
+                  constraint_densities: np.ndarray = None) -> np.ndarray:
+    """Mutate radius with adaptive delta based on both Voronoi and constraint density."""
+    new_circles = circles.copy()
+    old_r = new_circles[idx, 2]
+
+    # Base delta from Voronoi density (high density = small mutations)
+    delta = max_delta
+
+    if voronoi_densities is not None and len(voronoi_densities) > idx:
+        # Normalize Voronoi density (smaller area = higher density)
+        # Use log to prevent extreme scaling and avoid division by zero
+        voronoi_factor = max(0.1, 1.0 / (1.0 + np.log(1.0 + voronoi_densities[idx])))
+        delta *= voronoi_factor
+
+    # Adjust based on constraint density (more constraints = smaller changes)
+    if constraint_densities is not None and len(constraint_densities) > idx:
+        # More nearby constraints = smaller delta
+        constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.5)
+        delta *= constraint_factor
+
+    # Random small perturbation
+    delta_r = np.random.uniform(-delta, delta)
+    new_r = old_r + delta_r
+
+    # Ensure positive radius
+    new_r = max(0.001, new_r)
+    new_circles[idx, 2] = new_r
+
+    return new_circles
+
+def mutate_position(circles: np.ndarray, idx: int, max_delta: float = 0.05,
+                    voronoi_densities: np.ndarray = None,
+                    constraint_densities: np.ndarray = None) -> np.ndarray:
+    """Mutate position with adaptive delta based on both Voronoi and constraint density."""
+    new_circles = circles.copy()
+    old_x, old_y = new_circles[idx, 0], new_circles[idx, 1]
+
+    # Base delta from Voronoi density (high density = small movements)
+    delta = max_delta
+
+    if voronoi_densities is not None and len(voronoi_densities) > idx:
+        # Normalize Voronoi density (smaller area = higher density)
+        voronoi_factor = max(0.1, 1.0 / (1.0 + np.log(1.0 + voronoi_densities[idx])))
+        delta *= voronoi_factor
+
+    # Adjust based on constraint density (more constraints = smaller changes)
+    if constraint_densities is not None and len(constraint_densities) > idx:
+        # More nearby constraints = smaller delta
+        constraint_factor = 1.0 / (1.0 + constraint_densities[idx] * 0.5)
+        delta *= constraint_factor
+
+    # Small random perturbation
+    delta_x = np.random.uniform(-delta, delta)
+    delta_y = np.random.uniform(-delta, delta)
+
+    new_x = old_x + delta_x
+    new_y = old_y + delta_y
+
+    # Ensure within bounds (with some margin)
+    new_x = np.clip(new_x, 0.01, 0.99)
+    new_y = np.clip(new_y, 0.01, 0.99)
+
+    new_circles[idx, 0] = new_x
+    new_circles[idx, 1] = new_y
+
+    return new_circles
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as sum of radii."""
+    return np.sum(circles[:, 2])
+
+def generate_hexagonal_pattern(n: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Generate initial hexagonal pattern optimized for rectangle dimensions."""
+    circles = np.zeros((n, 3))
+
+    # Calculate optimal grid dimensions for hexagonal packing
+    aspect_ratio = rect_width / rect_height
+    rows = int(np.sqrt(n / aspect_ratio)) + 1
+    cols = int(n / rows) + 1
+
+    # Determine spacing based on aspect ratio
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    # Use actual hexagonal spacing: x-spacing = 2*r, y-spacing = sqrt(3)*r
+    min_radius = min(rect_width, rect_height) * 0.05
+    hex_spacing_x = min_radius * 2.0
+    hex_spacing_y = min_radius * np.sqrt(3.0)
+    
+    # Use minimum spacing to maintain good packing
+    actual_spacing_x = min(spacing_x, hex_spacing_x)
+    actual_spacing_y = min(spacing_y, hex_spacing_y)
+
+    for i in range(n):
+        row = i // cols
+        col = i % cols
+        x = (col + 1) * actual_spacing_x
+        y = (row + 1) * actual_spacing_y
+
+        # Offset every other row for hexagonal arrangement
+        if row % 2 == 1:
+            x += actual_spacing_x / 2
+
+        # Stay within bounds
+        x = np.clip(x, min_radius, rect_width - min_radius)
+        y = np.clip(y, min_radius, rect_height - min_radius)
+
+        circles[i] = [x, y, min_radius]
+
+    return circles
+
+def generate_triangular_pattern(n: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Generate triangular pattern optimized for rectangle dimensions."""
+    circles = np.zeros((n, 3))
+
+    # Determine grid dimensions for triangular packing
+    sqrt_n = int(np.ceil(np.sqrt(n)))
+    aspect_ratio = rect_width / rect_height
+    cols = int(np.ceil(np.sqrt(n * aspect_ratio)))
+    rows = int(np.ceil(n / cols))
+
+    # Calculate spacing
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+
+    # Adjust for triangular packing
+    min_radius = min(rect_width, rect_height) * 0.05
+    tri_spacing_x = min_radius * 2.0
+    tri_spacing_y = min_radius * np.sqrt(3.0)
+
+    spacing_x = min(spacing_x, tri_spacing_x)
+    spacing_y = min(spacing_y, tri_spacing_y)
+
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            
+            # Slight offset for triangular pattern
+            if i % 2 == 1:
+                x += spacing_x / 2
+                
+            # Keep within bounds
+            x = np.clip(x, min_radius, rect_width - min_radius)
+            y = np.clip(y, min_radius, rect_height - min_radius)
+            
+            circles[idx] = [x, y, min_radius]
+            idx += 1
+        if idx >= n:
+            break
+
+    return circles
+
+def generate_square_pattern(n: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Generate square grid pattern optimized for rectangle dimensions."""
+    circles = np.zeros((n, 3))
+
+    # Use square grid with optimized aspect ratio
+    sqrt_n = int(np.ceil(np.sqrt(n)))
+    aspect_ratio = rect_width / rect_height
+    cols = int(np.ceil(np.sqrt(n * aspect_ratio)))
+    rows = int(np.ceil(n / cols))
+
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+
+    # More conservative approach to radius sizing
+    min_radius = min(rect_width, rect_height) * 0.05
+    spacing_x = max(spacing_x, min_radius * 2)
+    spacing_y = max(spacing_y, min_radius * 2)
+
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            
+            # Keep within bounds
+            x = np.clip(x, min_radius, rect_width - min_radius)
+            y = np.clip(y, min_radius, rect_height - min_radius)
+            
+            circles[idx] = [x, y, min_radius]
+            idx += 1
+        if idx >= n:
+            break
+
+    return circles
+
+def generate_random_pattern(n: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Generate random initial pattern with better initial radius distribution."""
+    circles = np.zeros((n, 3))
+
+    # Generate more informed random positions and radii
+    for i in range(n):
+        # Better distribution that avoids placing too close to edges
+        x = np.random.uniform(0.05 * rect_width, rect_width * 0.95)
+        y = np.random.uniform(0.05 * rect_height, rect_height * 0.95)
+
+        # Start with a reasonable radius based on container size
+        max_radius = min(rect_width, rect_height) * 0.1
+        r = np.random.uniform(0.02 * max_radius, 0.5 * max_radius)
+
+        circles[i] = [x, y, r]
+
+    return circles
+
+def local_optimization(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0,
+                       max_iter: int = 100, patience: int = 20) -> np.ndarray:
+    """Perform local optimization using adaptive mutations prioritized by constraint density."""
+    current_circles = circles.copy()
+    best_circles = current_circles.copy()
+    best_fitness = evaluate_fitness(current_circles)
+
+    patience_counter = 0
+
+    for iteration in range(max_iter):
+        # Recompute constraint and Voronoi metrics in each iteration
+        constraint_densities = compute_constraint_density(current_circles, rect_width, rect_height)
+        voronoi_densities = compute_voronoi_density(current_circles, rect_width, rect_height)
+
+        # Mutate circles in order of decreasing constraint density (most constrained first)
+        # This prioritizes fixing the most problematic areas first
+        sorted_indices = np.argsort(-constraint_densities)
+
+        improved = False
+
+        for idx in sorted_indices:
+            # Try position mutation
+            mutated_pos = mutate_position(current_circles, idx, 0.02, voronoi_densities, constraint_densities)
+
+            # Try radius mutation  
+            mutated_rad = mutate_radius(current_circles, idx, 0.01, voronoi_densities, constraint_densities)
+
+            # Evaluate both mutations
+            pos_fitness = evaluate_fitness(mutated_pos)
+            rad_fitness = evaluate_fitness(mutated_rad)
+
+            # Choose the better one that's valid
+            if pos_fitness > rad_fitness:
+                if is_valid_solution(mutated_pos, rect_width, rect_height):
+                    current_circles = mutated_pos
+                    improved = True
+            else:
+                if is_valid_solution(mutated_rad, rect_width, rect_height):
+                    current_circles = mutated_rad
+                    improved = True
+
+        # Update best solution
+        current_fitness = evaluate_fitness(current_circles)
+        if current_fitness > best_fitness:
+            best_fitness = current_fitness
+            best_circles = current_circles.copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        # Early stopping if no improvement
+        if patience_counter >= patience:
+            break
+
+    return best_circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle dimensions: perimeter = 4, so width + height = 2
+    # Using 1.2 width and 0.8 height for better packing efficiency
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Try multiple initialization strategies
+    initial_patterns = [
+        generate_hexagonal_pattern(n, rect_width, rect_height),
+        generate_triangular_pattern(n, rect_width, rect_height),
+        generate_square_pattern(n, rect_width, rect_height),
+        generate_random_pattern(n, rect_width, rect_height)
+    ]
+
+    best_solution = None
+    best_score = -float('inf')
+
+    # Multi-start optimization with more iterations for better results
+    for seed_pattern in initial_patterns:
+        # Apply local optimization to get better starting points
+        optimized_pattern = local_optimization(seed_pattern, rect_width, rect_height, max_iter=50)
+
+        # Further refine using a few rounds of local search
+        final_circles = local_optimization(optimized_pattern, rect_width, rect_height, max_iter=30)
+
+        score = evaluate_fitness(final_circles)
+        if score > best_score and is_valid_solution(final_circles, rect_width, rect_height):
+            best_score = score
+            best_solution = final_circles.copy()
+
+    # Final fine-tuning with more aggressive optimization
+    if best_solution is not None:
+        # Apply more extensive local optimization
+        best_solution = local_optimization(best_solution, rect_width, rect_height, max_iter=100)
+
+    # Ensure final validity
+    if best_solution is None:
+        # Fallback to simple initialization
+        best_solution = generate_random_pattern(n, rect_width, rect_height)
+        best_solution = local_optimization(best_solution, rect_width, rect_height, max_iter=100)
+
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

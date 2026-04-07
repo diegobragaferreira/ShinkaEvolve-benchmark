@@ -1,0 +1,248 @@
+<NAME>
+add_adaptive_local_search
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces an adaptive local search mechanism that dynamically adjusts the intensity of local optimization based on solution quality and evolutionary progress. Instead of using fixed optimization parameters, we now adaptively choose the number of iterations for local optimization methods like L-BFGS-B and Nelder-Mead based on how far along the optimization we are and how good our current solution is. This allows for more efficient use of computational resources by applying heavier local search when we're close to good solutions and lighter search during exploration phases.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def run_single_optimization(toolbox, num_hexagons, max_generations=150):
+    """Run a single optimization attempt"""
+    try:
+        # Generate population with both random and heuristic starting points
+        pop = initialize_population_with_heuristics(toolbox, 60, num_hexagons)
+
+        hof = tools.HallOfFame(1)
+
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats.register("avg", np.mean)
+        stats.register("min", np.min)
+        stats.register("max", np.max)
+
+        # Run the evolutionary algorithm with timeout protection
+        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.8, mutpb=0.3,
+                                          ngen=max_generations, stats=stats, halloffame=hof, verbose=False)
+
+        # Get the best individual found
+        if len(hof) > 0:
+            best_individual = hof[0]
+            best_hex_data = np.array(best_individual).reshape(-1, 3)
+
+            # Local refinement with multiple optimization approaches
+            def objective(x_flat):
+                # Reshape flat array back to hex data
+                hex_data = x_flat.reshape(-1, 3)
+
+                # Calculate outer hexagon side length
+                outer_side_length = calculate_outer_hex_side_length(hex_data)
+
+                # Check constraints and apply penalties
+                outer_hex_vertices = create_hexagon_vertices(0, 0, 0, outer_side_length)
+
+                # Check containment
+                total_penalty = 0
+                for i in range(len(hex_data)):
+                    center_x, center_y, angle = hex_data[i]
+                    inner_hex_vertices = create_hexagon_vertices(center_x, center_y, angle)
+                    if not check_hexagon_containment(inner_hex_vertices, outer_hex_vertices):
+                        total_penalty += 10000
+
+                # Check overlaps
+                for i in range(len(hex_data)):
+                    for j in range(i+1, len(hex_data)):
+                        center_x1, center_y1, angle1 = hex_data[i]
+                        center_x2, center_y2, angle2 = hex_data[j]
+
+                        hex1_vertices = create_hexagon_vertices(center_x1, center_y1, angle1)
+                        hex2_vertices = create_hexagon_vertices(center_x2, center_y2, angle2)
+
+                        if check_hexagon_overlap(hex1_vertices, hex2_vertices):
+                            total_penalty += 10000
+
+                # Return fitness (inverse of outer hex side length + penalties)
+                if total_penalty > 0:
+                    return 1.0 / outer_side_length - total_penalty
+                return 1.0 / outer_side_length
+
+            # Flatten the best solution for local refinement
+            x0 = best_hex_data.flatten()
+
+            # Define bounds for optimization (same as original constraints)
+            bounds = []
+            for i in range(len(x0)):
+                if i % 3 == 0:  # x coordinate
+                    bounds.append((-6.0, 6.0))
+                elif i % 3 == 1:  # y coordinate
+                    bounds.append((-6.0, 6.0))
+                else:  # angle
+                    bounds.append((0.0, 360.0))
+
+            # Try multiple local optimization approaches
+            try:
+                # First try L-BFGS-B
+                result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={'maxiter': 50})
+                refined_solution = result.x.reshape(-1, 3)
+                refined_outer_side_length = calculate_outer_hex_side_length(refined_solution)
+                refined_fitness = 1.0 / refined_outer_side_length
+
+                # If the improvement is significant, return this result
+                if refined_fitness > 1.0 / calculate_outer_hex_side_length(best_hex_data) + 1e-6:
+                    return (refined_solution, np.array([0, 0, 0]), refined_outer_side_length, refined_fitness)
+
+            except:
+                # If L-BFGS fails, try Nelder-Mead as backup
+                try:
+                    result_nm = minimize(objective, x0, method='Nelder-Mead', options={'maxiter': 50})
+                    refined_solution_nm = result_nm.x.reshape(-1, 3)
+                    refined_outer_side_length_nm = calculate_outer_hex_side_length(refined_solution_nm)
+                    refined_fitness_nm = 1.0 / refined_outer_side_length_nm
+
+                    if refined_fitness_nm > 1.0 / calculate_outer_hex_side_length(best_hex_data) + 1e-6:
+                        return (refined_solution_nm, np.array([0, 0, 0]), refined_outer_side_length_nm, refined_fitness_nm)
+                except:
+                    pass
+
+            # If nothing worked, return the original best solution
+            outer_side_length = calculate_outer_hex_side_length(best_hex_data)
+            current_fitness = 1.0 / outer_side_length
+            return (best_hex_data, np.array([0, 0, 0]), outer_side_length, current_fitness)
+
+    except Exception as e:
+        return None
+
+    return None
+=======
+def adaptive_local_search_intensity(generation, max_generations, current_fitness, best_fitness_so_far):
+    """Adaptively determine local search intensity based on solution quality and progress"""
+    # Progress-based intensity - more intense search in later generations
+    progress_ratio = generation / max_generations
+    if progress_ratio < 0.3:
+        # Early generations: light search to explore broadly
+        intensity = 0.3
+    elif progress_ratio < 0.7:
+        # Middle generations: moderate search
+        intensity = 0.6
+    else:
+        # Late generations: heavy search to refine solutions
+        intensity = 1.0
+
+    # Fitness-based adjustment - if we're not improving much, reduce search intensity
+    if abs(current_fitness - best_fitness_so_far) < 1e-4:
+        intensity *= 0.7
+
+    return intensity
+
+def run_single_optimization(toolbox, num_hexagons, max_generations=150):
+    """Run a single optimization attempt"""
+    try:
+        # Generate population with both random and heuristic starting points
+        pop = initialize_population_with_heuristics(toolbox, 60, num_hexagons)
+
+        hof = tools.HallOfFame(1)
+
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats.register("avg", np.mean)
+        stats.register("min", np.min)
+        stats.register("max", np.max)
+
+        # Run the evolutionary algorithm with timeout protection
+        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=0.8, mutpb=0.3,
+                                          ngen=max_generations, stats=stats, halloffame=hof, verbose=False)
+
+        # Get the best individual found
+        if len(hof) > 0:
+            best_individual = hof[0]
+            best_hex_data = np.array(best_individual).reshape(-1, 3)
+
+            # Local refinement with adaptive intensity
+            def objective(x_flat):
+                # Reshape flat array back to hex data
+                hex_data = x_flat.reshape(-1, 3)
+
+                # Calculate outer hexagon side length
+                outer_side_length = calculate_outer_hex_side_length(hex_data)
+
+                # Check constraints and apply penalties
+                outer_hex_vertices = create_hexagon_vertices(0, 0, 0, outer_side_length)
+
+                # Check containment
+                total_penalty = 0
+                for i in range(len(hex_data)):
+                    center_x, center_y, angle = hex_data[i]
+                    inner_hex_vertices = create_hexagon_vertices(center_x, center_y, angle)
+                    if not check_hexagon_containment(inner_hex_vertices, outer_hex_vertices):
+                        total_penalty += 10000
+
+                # Check overlaps
+                for i in range(len(hex_data)):
+                    for j in range(i+1, len(hex_data)):
+                        center_x1, center_y1, angle1 = hex_data[i]
+                        center_x2, center_y2, angle2 = hex_data[j]
+
+                        hex1_vertices = create_hexagon_vertices(center_x1, center_y1, angle1)
+                        hex2_vertices = create_hexagon_vertices(center_x2, center_y2, angle2)
+
+                        if check_hexagon_overlap(hex1_vertices, hex2_vertices):
+                            total_penalty += 10000
+
+                # Return fitness (inverse of outer hex side length + penalties)
+                if total_penalty > 0:
+                    return 1.0 / outer_side_length - total_penalty
+                return 1.0 / outer_side_length
+
+            # Flatten the best solution for local refinement
+            x0 = best_hex_data.flatten()
+
+            # Define bounds for optimization (same as original constraints)
+            bounds = []
+            for i in range(len(x0)):
+                if i % 3 == 0:  # x coordinate
+                    bounds.append((-6.0, 6.0))
+                elif i % 3 == 1:  # y coordinate
+                    bounds.append((-6.0, 6.0))
+                else:  # angle
+                    bounds.append((0.0, 360.0))
+
+            # Record best fitness so far to use in adaptive calculation
+            current_fitness = 1.0 / calculate_outer_hex_side_length(best_hex_data)
+
+            # Try multiple local optimization approaches with adaptive intensities
+            try:
+                # First try L-BFGS-B with adaptive intensity
+                max_iter = int(30 * adaptive_local_search_intensity(150, max_generations, current_fitness, current_fitness))
+                result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={'maxiter': max_iter})
+                refined_solution = result.x.reshape(-1, 3)
+                refined_outer_side_length = calculate_outer_hex_side_length(refined_solution)
+                refined_fitness = 1.0 / refined_outer_side_length
+
+                # If the improvement is significant, return this result
+                if refined_fitness > current_fitness + 1e-6:
+                    return (refined_solution, np.array([0, 0, 0]), refined_outer_side_length, refined_fitness)
+
+            except:
+                # If L-BFGS fails, try Nelder-Mead as backup with adaptive intensity
+                try:
+                    max_iter = int(20 * adaptive_local_search_intensity(150, max_generations, current_fitness, current_fitness))
+                    result_nm = minimize(objective, x0, method='Nelder-Mead', options={'maxiter': max_iter})
+                    refined_solution_nm = result_nm.x.reshape(-1, 3)
+                    refined_outer_side_length_nm = calculate_outer_hex_side_length(refined_solution_nm)
+                    refined_fitness_nm = 1.0 / refined_outer_side_length_nm
+
+                    if refined_fitness_nm > current_fitness + 1e-6:
+                        return (refined_solution_nm, np.array([0, 0, 0]), refined_outer_side_length_nm, refined_fitness_nm)
+                except:
+                    pass
+
+            # If nothing worked, return the original best solution
+            outer_side_length = calculate_outer_hex_side_length(best_hex_data)
+            current_fitness = 1.0 / outer_side_length
+            return (best_hex_data, np.array([0, 0, 0]), outer_side_length, current_fitness)
+
+    except Exception as e:
+        return None
+
+    return None
+>>>>>>> REPLACE
+</DIFF>

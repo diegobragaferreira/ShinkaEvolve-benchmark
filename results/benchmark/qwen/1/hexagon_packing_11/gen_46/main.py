@@ -1,0 +1,388 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+from typing import Tuple, List
+import time
+from numba import jit, prange
+import math
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+@jit(nopython=True)
+def hexagon_vertices_jit(center_x, center_y, side_length=1, rotation_deg=0):
+    """Get vertices of a regular hexagon (JIT compiled)"""
+    rotation_rad = np.radians(rotation_deg)
+    vertices = np.empty((6, 2))
+    for i in range(6):
+        angle = rotation_rad + i * np.pi / 3
+        vertices[i, 0] = center_x + side_length * np.cos(angle)
+        vertices[i, 1] = center_y + side_length * np.sin(angle)
+    return vertices
+
+@jit(nopython=True)
+def point_in_hexagon_jit(px, py, hex_vertices):
+    """Check if point is inside hexagon (JIT compiled)"""
+    # Simple point-in-polygon test using ray casting
+    n = len(hex_vertices)
+    inside = False
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if py > min(p1y, p2y):
+            if py <= max(p1y, p2y):
+                if px <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or px <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+def get_hexagon_vertices(center_x, center_y, side_length=1, rotation_deg=0):
+    """Get vertices of a regular hexagon"""
+    rotation_rad = np.radians(rotation_deg)
+    angles = np.linspace(0, 2*np.pi, 7) + rotation_rad
+    x_coords = center_x + side_length * np.cos(angles)
+    y_coords = center_y + side_length * np.sin(angles)
+    return list(zip(x_coords, y_coords))
+
+def check_hexagon_containment_shapely(hexagon_vertices, outer_hex_center, outer_hex_side_length):
+    """Check if hexagon is fully contained within outer hexagon using shapely"""
+    outer_hex_vertices = get_hexagon_vertices(outer_hex_center[0], outer_hex_center[1], outer_hex_side_length, 0)
+    outer_polygon = Polygon(outer_hex_vertices)
+    
+    hex_polygon = Polygon(hexagon_vertices)
+    
+    # Check if hexagon is fully contained
+    return outer_polygon.contains(hex_polygon)
+
+def calculate_outer_hexagon_radius(inner_hex_data, outer_hex_center=(0, 0)):
+    """Calculate the minimum radius needed to contain all inner hexagons"""
+    max_distance = 0
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        # Get all vertices of this hexagon
+        vertices = get_hexagon_vertices(center_x, center_y, 1, angle)
+        # Find the maximum distance from center to any vertex
+        for vx, vy in vertices:
+            dist = np.sqrt((vx - outer_hex_center[0])**2 + (vy - outer_hex_center[1])**2)
+            max_distance = max(max_distance, dist)
+    
+    return max_distance
+
+def is_valid_arrangement(inner_hex_data, outer_hex_center=(0, 0), outer_hex_side_length=None):
+    """Check if the arrangement is valid (no overlaps and fully contained)"""
+    if outer_hex_side_length is None:
+        outer_hex_side_length = calculate_outer_hexagon_radius(inner_hex_data, outer_hex_center)
+    
+    # Check containment first
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        vertices = get_hexagon_vertices(center_x, center_y, 1, angle)
+        if not check_hexagon_containment_shapely(vertices, outer_hex_center, outer_hex_side_length):
+            return False, outer_hex_side_length
+    
+    # Check for overlaps between hexagons
+    for i in range(len(inner_hex_data)):
+        for j in range(i+1, len(inner_hex_data)):
+            center_x1, center_y1, angle1 = inner_hex_data[i]
+            center_x2, center_y2, angle2 = inner_hex_data[j]
+            
+            vertices1 = get_hexagon_vertices(center_x1, center_y1, 1, angle1)
+            vertices2 = get_hexagon_vertices(center_x2, center_y2, 1, angle2)
+            
+            poly1 = Polygon(vertices1)
+            poly2 = Polygon(vertices2)
+            
+            if poly1.intersects(poly2):
+                return False, outer_hex_side_length
+    
+    return True, outer_hex_side_length
+
+@jit(nopython=True)
+def distance_point_to_segment(point, seg_start, seg_end):
+    """Distance from point to line segment (JIT compiled)"""
+    px, py = point
+    x1, y1 = seg_start
+    x2, y2 = seg_end
+    
+    # Vector from seg_start to seg_end
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    # Length squared of segment
+    len_sq = dx*dx + dy*dy
+    
+    if len_sq == 0.0:
+        return np.sqrt((px - x1)**2 + (py - y1)**2)
+    
+    # Project point onto segment
+    t = ((px - x1) * dx + (py - y1) * dy) / len_sq
+    t = max(0.0, min(1.0, t))
+    
+    # Closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+def evaluate_fitness_fast(individual, outer_hex_center=(0, 0)):
+    """Fast fitness evaluation for DE (JIT-compiled components)"""
+    # Reshape individual into (11,3) array
+    inner_hex_data = individual.reshape(-1, 3)
+    
+    # Calculate outer hexagon size needed
+    outer_hex_side_length = calculate_outer_hexagon_radius(inner_hex_data, outer_hex_center)
+    
+    # Check validity
+    valid, adjusted_radius = is_valid_arrangement(inner_hex_data, outer_hex_center, outer_hex_side_length)
+    
+    if not valid:
+        # Penalize invalid arrangements heavily
+        return -1000000
+    
+    # The fitness is the inverse of the outer hexagon side length (we want to minimize it)
+    return 1.0 / adjusted_radius
+
+def evaluate_fitness(individual, outer_hex_center=(0, 0)):
+    """Evaluate fitness of an individual - higher is better"""
+    inner_hex_data = individual.reshape(-1, 3)  # Each row is (x, y, angle)
+    
+    # Calculate outer hexagon size needed
+    outer_hex_side_length = calculate_outer_hexagon_radius(inner_hex_data, outer_hex_center)
+    
+    # Check validity
+    valid, adjusted_radius = is_valid_arrangement(inner_hex_data, outer_hex_center, outer_hex_side_length)
+    
+    if not valid:
+        # Penalize invalid arrangements heavily
+        return -1000000
+    
+    # The fitness is the inverse of the outer hexagon side length (we want to minimize it)
+    return 1.0 / adjusted_radius
+
+def create_individual():
+    """Create a random valid individual"""
+    # Start with a base configuration that might work reasonably well
+    base_positions = [
+        (0, 0),      # center
+        (-2.5, 0),   # left
+        (2.5, 0),    # right
+        (-1.25, 2.17),  # top-left
+        (1.25, 2.17),   # top-right
+        (-1.25, -2.17), # bottom-left
+        (1.25, -2.17),  # bottom-right
+        (-3.75, 2.17),  # far top-left
+        (3.75, 2.17),   # far top-right
+        (-3.75, -2.17), # far bottom-left
+        (3.75, -2.17),  # far bottom-right
+    ]
+    
+    # Randomize slightly
+    individual = []
+    for i, (x, y) in enumerate(base_positions):
+        # Add some randomness to positions
+        x += np.random.uniform(-0.3, 0.3)
+        y += np.random.uniform(-0.3, 0.3)
+        
+        # Random orientation
+        angle = np.random.uniform(0, 360)
+        
+        individual.append([x, y, angle])
+    
+    return np.array(individual).flatten()
+
+def create_initial_population(pop_size):
+    """Create initial population of random individuals"""
+    return [create_individual() for _ in range(pop_size)]
+
+def create_diverse_initial_populations(num_starts=5):
+    """Create multiple diverse initial configurations"""
+    populations = []
+    for _ in range(num_starts):
+        pop = []
+        for _ in range(10):  # 10 individuals per start
+            individual = create_individual()
+            pop.append(individual)
+        populations.append(pop)
+    return populations
+
+def select_tournament(population, fitnesses, tournament_size=3):
+    """Select one individual using tournament selection"""
+    tournament_indices = np.random.choice(len(population), tournament_size)
+    tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+    winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+    return population[winner_index]
+
+def adaptive_mutation_rate(gen, total_generations):
+    """Adaptive mutation rate that decreases over time"""
+    return 0.8 + (0.1 - 0.8) * (gen / total_generations)
+
+def simulated_annealing_refinement(individual, max_iter=50, initial_temp=1.0, cooling_rate=0.95):
+    """Perform local refinement using simulated annealing"""
+    current_individual = individual.copy()
+    current_fitness = evaluate_fitness(current_individual)
+    
+    temp = initial_temp
+    
+    for i in range(max_iter):
+        # Create neighbor by perturbing one gene
+        neighbor = current_individual.copy()
+        gene_idx = np.random.randint(len(neighbor))
+        
+        # Different mutation strategies based on gene type
+        if gene_idx % 3 == 0:  # x coordinate
+            neighbor[gene_idx] += np.random.normal(0, 0.1)
+        elif gene_idx % 3 == 1:  # y coordinate
+            neighbor[gene_idx] += np.random.normal(0, 0.1)
+        else:  # angle
+            neighbor[gene_idx] += np.random.normal(0, 5)
+            # Keep angle in [0, 360] range
+            neighbor[gene_idx] = neighbor[gene_idx] % 360
+            
+        neighbor_fitness = evaluate_fitness(neighbor)
+        
+        # Accept or reject based on SA criterion
+        if neighbor_fitness > current_fitness:
+            current_individual = neighbor
+            current_fitness = neighbor_fitness
+        else:
+            # Accept with probability based on temperature
+            delta = neighbor_fitness - current_fitness
+            if np.random.rand() < np.exp(delta / temp):
+                current_individual = neighbor
+                current_fitness = neighbor_fitness
+                
+        temp *= cooling_rate
+        
+        # Early stopping if no improvement for a while
+        if i > 20 and abs(delta) < 1e-6:
+            break
+    
+    return current_individual
+
+def differential_evolution_step(population, fitnesses, target_idx, F=0.8, CR=0.7):
+    """Perform one step of differential evolution"""
+    # Select three distinct individuals
+    indices = np.random.choice(len(population), 3, replace=False)
+    a, b, c = population[indices[0]], population[indices[1]], population[indices[2]]
+    
+    # Mutation
+    mutant = a + F * (b - c)
+    
+    # Crossover
+    trial = np.empty_like(mutant)
+    j_rand = np.random.randint(len(mutant))
+    for j in range(len(mutant)):
+        if np.random.rand() < CR or j == j_rand:
+            trial[j] = mutant[j]
+        else:
+            trial[j] = population[target_idx][j]
+    
+    return trial
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    # Parameters
+    pop_size = 30
+    generations = 100
+    num_starts = 5  # Multi-start optimization
+    
+    best_overall_fitness = 0
+    best_overall_individual = None
+    
+    start_time = time.time()
+    
+    # Try multiple starting configurations
+    for start_idx in range(num_starts):
+        # Create initial population
+        population = create_initial_population(pop_size)
+        
+        # Track best fitness in this run
+        best_fitness_in_run = 0
+        best_individual_in_run = None
+        
+        # Evolution loop
+        for gen in range(generations):
+            # Evaluate fitness for entire population
+            fitnesses = []
+            for individual in population:
+                fitness = evaluate_fitness(individual)
+                fitnesses.append(fitness)
+            
+            # Find best individual so far
+            best_idx = np.argmax(fitnesses)
+            best_fitness = fitnesses[best_idx]
+            best_individual = population[best_idx]
+            
+            # Update overall best if this run is better
+            if best_fitness > best_overall_fitness:
+                best_overall_fitness = best_fitness
+                best_overall_individual = best_individual.copy()
+            
+            # Update run best
+            if best_fitness > best_fitness_in_run:
+                best_fitness_in_run = best_fitness
+                best_individual_in_run = best_individual.copy()
+            
+            # Early stopping if we've reached reasonable performance
+            if best_fitness > 0.2544:  # SOTA benchmark
+                break
+            
+            # If took too long, stop
+            if time.time() - start_time > 170:
+                break
+                
+            # Create new population
+            new_population = []
+            
+            # Elitism - keep best individual
+            new_population.append(best_individual)
+            
+            # Generate offspring through differential evolution
+            adaptive_F = adaptive_mutation_rate(gen, generations)
+            for i in range(1, pop_size):
+                # Differential evolution step
+                trial = differential_evolution_step(population, fitnesses, i, F=adaptive_F, CR=0.7)
+                
+                # Local refinement
+                refined_trial = simulated_annealing_refinement(trial, max_iter=20)
+                
+                new_population.append(refined_trial)
+            
+            population = new_population[:pop_size]
+        
+        # Apply final local refinement to the best individual from this run
+        if best_individual_in_run is not None:
+            final_refined = simulated_annealing_refinement(best_individual_in_run, max_iter=100)
+            final_fitness = evaluate_fitness(final_refined)
+            
+            if final_fitness > best_overall_fitness:
+                best_overall_fitness = final_fitness
+                best_overall_individual = final_refined.copy()
+    
+    # Final evaluation of best solution
+    final_fitness = evaluate_fitness(best_overall_individual)
+    inner_hex_data = best_overall_individual.reshape(-1, 3)
+    
+    # Determine the actual outer hexagon size needed
+    outer_hex_side_length = 1.0 / final_fitness if final_fitness > 0 else 1000.0
+    
+    # Outer hexagon data - centered at origin with no rotation (for consistency)
+    outer_hex_data = np.array([0, 0, 0])
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

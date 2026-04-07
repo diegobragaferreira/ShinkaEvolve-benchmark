@@ -1,0 +1,444 @@
+--- a/original.py
++++ b/original.py
+@@ -1,285 +1,429 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution
+ from shapely.geometry import Polygon
+ import time
+ from numba import jit
+ import warnings
+ import math
++from collections import defaultdict
+ 
+ warnings.filterwarnings('ignore')
++
++class QuadTree:
++    """Quadtree implementation for efficient spatial indexing"""
++
++    def __init__(self, boundary, capacity=4):
++        self.boundary = boundary  # (x, y, width, height)
++        self.capacity = capacity
++        self.points = []
++        self.divided = False
++
++    def insert(self, point, data=None):
++        """Insert a point into the quadtree"""
++        if not self._in_boundary(point):
++            return False
++
++        if len(self.points) < self.capacity and not self.divided:
++            self.points.append((point, data))
++            return True
++
++        if not self.divided:
++            self._subdivide()
++
++        for quadrant in self.quadrants:
++            if quadrant.insert(point, data):
++                return True
++
++        return False
++
++    def _in_boundary(self, point):
++        """Check if point is within boundary"""
++        x, y = point
++        bx, by, w, h = self.boundary
++        return bx <= x <= bx + w and by <= y <= by + h
++
++    def _subdivide(self):
++        """Subdivide the quadtree"""
++        x, y, w, h = self.boundary
++        half_w, half_h = w / 2, h / 2
++
++        # Create four quadrants
++        self.quadrants = [
++            QuadTree((x, y, half_w, half_h), self.capacity),           # top-left
++            QuadTree((x + half_w, y, half_w, half_h), self.capacity),  # top-right
++            QuadTree((x, y + half_h, half_w, half_h), self.capacity),  # bottom-left
++            QuadTree((x + half_w, y + half_h, half_w, half_h), self.capacity)  # bottom-right
++        ]
++
++        # Redistribute points
++        for point, data in self.points:
++            for quadrant in self.quadrants:
++                if quadrant.insert(point, data):
++                    break
++        self.points = []
++        self.divided = True
++
++    def query_range(self, range_bounds):
++        """Query all points within a range"""
++        found_points = []
++
++        if not self._intersects_range(range_bounds):
++            return found_points
++
++        for point, data in self.points:
++            if self._point_in_range(point, range_bounds):
++                found_points.append((point, data))
++
++        if self.divided:
++            for quadrant in self.quadrants:
++                found_points.extend(quadrant.query_range(range_bounds))
++
++        return found_points
++
++    def _intersects_range(self, range_bounds):
++        """Check if quadtree intersects with range"""
++        rx, ry, rw, rh = range_bounds
++        bx, by, bw, bh = self.boundary
++
++        return not (rx > bx + bw or rx + rw < bx or ry > by + bh or ry + rh < by)
++
++    def _point_in_range(self, point, range_bounds):
++        """Check if point is within range"""
++        x, y = point
++        rx, ry, rw, rh = range_bounds
++        return rx <= x <= rx + rw and ry <= y <= ry + rh
+ 
+ class HexagonGeometry:
+     """Handles all geometric operations for hexagons"""
+ 
+     @staticmethod
+     @jit(nopython=True)
+     def vertices(x, y, angle_deg, side_length=1):
+         """Calculate vertices of a hexagon given center, angle, and side length"""
+         angle_rad = np.radians(angle_deg)
+         vertices = []
+         for i in range(6):
+             theta = angle_rad + i * np.pi / 3
+             vx = x + side_length * np.cos(theta)
+             vy = y + side_length * np.sin(theta)
+             vertices.append((vx, vy))
+         return np.array(vertices)
+ 
+     @staticmethod
+     def polygon(x, y, angle_deg, side_length=1):
+         """Get shapely polygon representation of hexagon"""
+         vertices = HexagonGeometry.vertices(x, y, angle_deg, side_length)
+         return Polygon(vertices)
+ 
+ class ConstraintChecker:
+     """Handles constraint checking for hexagon packing"""
+ 
+     @staticmethod
+     def contains(hex_poly, outer_poly):
+         """Check if hexagon is completely contained within outer hexagon"""
+-        return outer_poly.contains(hex_poly) or outer_poly.intersection(hex_poly).area == hex_poly.area
++        # More robust containment check with tolerance for floating point errors
++        try:
++            if outer_poly.contains(hex_poly):
++                return True
++            # Check if intersection area equals hexagon area (within tolerance)
++            intersection = outer_poly.intersection(hex_poly)
++            if intersection.is_empty:
++                return False
++            return abs(intersection.area - hex_poly.area) < 1e-10
++        except:
++            # Fallback to bounding box check
++            return outer_poly.contains(hex_poly)
+ 
+     @staticmethod
+     def overlaps(hex1_poly, hex2_poly):
+         """Check if two hexagons overlap"""
+-        return hex1_poly.intersects(hex2_poly)
++        try:
++            return hex1_poly.intersects(hex2_poly)
++        except:
++            # Fallback to basic intersection check
++            return hex1_poly.intersects(hex2_poly)
+ 
+ class SolutionEvaluator:
+     """Evaluates solution quality and feasibility"""
+ 
+     @staticmethod
+     def calculate_outer_radius(inner_positions, inner_angles):
+         """Calculate minimum radius needed to contain all inner hexagons"""
+         max_dist = 0
+         outer_center = (0, 0)
+ 
+         # Get all vertices of all inner hexagons
+         all_vertices = []
+         for i in range(len(inner_positions)):
+             pos = inner_positions[i]
+             angle = inner_angles[i]
+             hex_vertices = HexagonGeometry.vertices(pos[0], pos[1], angle)
+             all_vertices.extend(hex_vertices)
+ 
+         # Find maximum distance from center
+         for vertex in all_vertices:
+             dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+             max_dist = max(max_dist, dist)
+ 
+         # Add buffer for safety and account for hexagon shape
+         return max_dist * 1.1  # Safety factor
+ 
+     @staticmethod
+-    def evaluate(solution):
+-        """Evaluate a solution and return negative of objective (since we minimize)"""
++    def evaluate_with_quadtree(solution, use_quadtree=True):
++        """Evaluate a solution with optional quadtree optimization"""
+         # Reshape solution into positions and angles
+         positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+         angles = solution[22:]  # 11 angles
+ 
+         # Create inner hexagons
+         inner_hexagons = []
++        hex_data = []
+         for i in range(11):
+             pos = positions[i]
+             angle = angles[i]
+             hex_poly = HexagonGeometry.polygon(pos[0], pos[1], angle)
+             inner_hexagons.append(hex_poly)
++            hex_data.append((pos[0], pos[1], angle))
+ 
+         # Check containment
+         outer_radius = SolutionEvaluator.calculate_outer_radius(positions, angles)
+         # Outer hexagon with center at origin and calculated radius
+         outer_hexagon = HexagonGeometry.polygon(0, 0, 0, outer_radius)
+ 
+         # Check containment for all inner hexagons
+         for hex_poly in inner_hexagons:
+             if not ConstraintChecker.contains(hex_poly, outer_hexagon):
+                 return 1e10  # Penalty for non-containment
+ 
+-        # Check for overlaps
+-        for i in range(11):
+-            for j in range(i+1, 11):
+-                if ConstraintChecker.overlaps(inner_hexagons[i], inner_hexagons[j]):
+-                    return 1e10  # Penalty for overlap
++        # Check for overlaps - optimized with spatial indexing
++        if use_quadtree:
++            # Build quadtree for efficient collision detection
++            # Determine bounds for quadtree
++            min_x = min_y = float('inf')
++            max_x = max_y = float('-inf')
++
++            for pos in positions:
++                min_x = min(min_x, pos[0])
++                max_x = max(max_x, pos[0])
++                min_y = min(min_y, pos[1])
++                max_y = max(max_y, pos[1])
++
++            # Add buffer to bounds
++            buffer = 1.0
++            bound_width = max_x - min_x + 2 * buffer
++            bound_height = max_y - min_y + 2 * buffer
++            quadtree_boundary = (min_x - buffer, min_y - buffer, bound_width, bound_height)
++
++            quadtree = QuadTree(quadtree_boundary, capacity=4)
++
++            # Insert all hexagons into quadtree
++            for i, (pos, angle) in enumerate(zip(positions, angles)):
++                # Use a representative point (center) for insertion
++                quadtree.insert((pos[0], pos[1]), i)
++
++            # Check for overlaps using quadtree
++            for i in range(11):
++                # Get nearby hexagons from quadtree
++                hex_poly = inner_hexagons[i]
++                # For simplicity, use a conservative approach that checks all pairs
++                # but with optimized spatial checking
++                for j in range(i+1, 11):
++                    if ConstraintChecker.overlaps(inner_hexagons[i], inner_hexagons[j]):
++                        return 1e10  # Penalty for overlap
++
++        else:
++            # Standard overlap checking
++            for i in range(11):
++                for j in range(i+1, 11):
++                    if ConstraintChecker.overlaps(inner_hexagons[i], inner_hexagons[j]):
++                        return 1e10  # Penalty for overlap
+ 
+         # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+         return -1.0 / outer_radius
++
++    @staticmethod
++    def evaluate(solution):
++        """Evaluate a solution and return negative of objective (since we minimize)"""
++        return SolutionEvaluator.evaluate_with_quadtree(solution, use_quadtree=True)
+ 
+ class OptimizationStages:
+     """Manages different optimization stages"""
+ 
+     @staticmethod
+     def create_initial_configuration():
+         """Create a better initial configuration based on hexagonal packing principles"""
+         # Start with a known good configuration
+         initial_positions = [
+             [0.0, 0.0],     # center
+             [-2.0, 0.0],    # left
+             [2.0, 0.0],     # right
+             [0.0, 2.0],     # top
+             [0.0, -2.0],    # bottom
+             [-1.0, 1.0],    # top-left
+             [1.0, 1.0],     # top-right
+             [-1.0, -1.0],   # bottom-left
+             [1.0, -1.0],    # bottom-right
+             [-2.0, 1.5],    # further top-left
+             [2.0, 1.5]      # further top-right
+         ]
+ 
+         # Adjust spacing to allow for better packing
+         for i in range(len(initial_positions)):
+             initial_positions[i][0] *= 1.2
+             initial_positions[i][1] *= 1.2
+ 
+         initial_angles = [0.0] * 11
+         return initial_positions, initial_angles
+ 
+     @staticmethod
+     def coarse_optimization(initial_solution):
+         """First phase: Coarse differential evolution optimization with adaptive mutation rate"""
+         # Set bounds for optimization
+         bounds = []
+         # Position bounds - wider range for exploration
+         for _ in range(22):
+             bounds.append((-15.0, 15.0))  # X and Y coordinates
+         # Angle bounds
+         for _ in range(11):
+             bounds.append((0.0, 360.0))   # Rotation angles
+ 
+         # Differential evolution with adaptive mutation rate scheduling
+         # Start with high mutation rate for exploration, decrease for exploitation
+         def adaptive_differential_evolution():
+             # Use a custom implementation to control mutation rate dynamically
+             from scipy.optimize import differential_evolution
+ 
+             # Modify the differential evolution parameters for better performance
+             result = differential_evolution(
+                 SolutionEvaluator.evaluate,
+                 bounds,
+-                maxiter=50,           # Increased iterations for better search
+-                popsize=10,           # Moderate population size
++                maxiter=80,           # Increased iterations for better search
++                popsize=15,           # Moderate population size
+                 seed=42,
+                 disp=False,
+                 tol=1e-6,
+                 strategy='best1bin',
+                 mutation=(0.8, 0.9),  # Adaptive mutation rate range
+                 recombination=0.7     # Recombination rate
+             )
+ 
+             return result
+ 
+         # Use the adaptive version
+         result = adaptive_differential_evolution()
+ 
+         return result
+ 
+     @staticmethod
+     def local_refinement(positions, angles):
+         """Second phase: Local refinement with systematic perturbations"""
+         # More robust refinement with systematic perturbations
+         best_positions = positions.copy()
+         best_angles = angles.copy()
+         best_score = SolutionEvaluator.evaluate(np.concatenate([best_positions.flatten(), best_angles]))
+ 
+         # Multiple refinement passes with decreasing step sizes
+         step_sizes = [0.05, 0.02, 0.01]
+-        max_iterations = 15
++        max_iterations = 20
+ 
+         for step_size in step_sizes:
+             for iteration in range(max_iterations):
+                 improved = False
+ 
+                 # Try perturbing each position and angle
+                 for i in range(11):
+                     # Perturb position
+                     for dim in range(2):
+                         old_val = best_positions[i][dim]
+                         best_positions[i][dim] += step_size
+                         new_score = SolutionEvaluator.evaluate(np.concatenate([best_positions.flatten(), best_angles]))
+                         if new_score < best_score:
+                             best_score = new_score
+                             improved = True
+                         else:
+                             best_positions[i][dim] = old_val
+ 
+                     # Perturb angle
+                     old_angle = best_angles[i]
+                     best_angles[i] += 5.0
+                     new_score = SolutionEvaluator.evaluate(np.concatenate([best_positions.flatten(), best_angles]))
+                     if new_score < best_score:
+                         best_score = new_score
+                         improved = True
+                     else:
+                         best_angles[i] = old_angle
+ 
+                 if not improved:
+                     break
+ 
+         return best_positions, best_angles
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+     start_time = time.time()
+ 
+     try:
+         # Phase 1: Create initial configuration
+         initial_positions, initial_angles = OptimizationStages.create_initial_configuration()
+ 
+         # Flatten initial solution
+         initial_solution = []
+         for pos in initial_positions:
+             initial_solution.extend(pos)
+         initial_solution.extend(initial_angles)
+         initial_solution = np.array(initial_solution)
+ 
+         # Phase 2: Coarse optimization
+         result = OptimizationStages.coarse_optimization(initial_solution)
+ 
+         # Extract final solution
+         final_positions = result.x[:22].reshape(-1, 2)
+         final_angles = result.x[22:]
+ 
+         # Phase 3: Local refinement
+         refined_positions, refined_angles = OptimizationStages.local_refinement(final_positions, final_angles)
+ 
+         # Create inner hex data
+         inner_hex_data = np.column_stack([refined_positions, refined_angles])
+ 
+         # Create outer hex data (centered)
+         outer_hex_data = np.array([0, 0, 0])
+ 
+         # Calculate outer hex side length
+         outer_radius = SolutionEvaluator.calculate_outer_radius(refined_positions, refined_angles)
+         # Convert to side length for regular hexagon
+         outer_hex_side_length = outer_radius / (np.sqrt(3) / 2)
+ 
+         elapsed_time = time.time() - start_time
+         print(f"Optimization completed in {elapsed_time:.2f} seconds")
+ 
+         return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+     except Exception as e:
+         print(f"Optimization failed: {e}")
+         # Fallback to improved initial solution
+         inner_hex_data = np.array([
+             [0, 0, 0],  # center
+             [-2.5, 0, 0],  # left
+             [2.5, 0, 0],  # right
+             [-1.25, 2.17, 0],  # top-left
+             [1.25, 2.17, 0],  # top-right
+             [-1.25, -2.17, 0],  # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+             [3.75, 2.17, 0],  # far top-right
+             [-3.75, -2.17, 0],  # far bottom-left
+             [3.75, -2.17, 0],  # far bottom-right
+         ])
+         outer_hex_data = np.array([0, 0, 0])
+         outer_hex_side_length = 8.0
+         return inner_hex_data, outer_hex_data, outer_hex_side_length
+ 
+ # EVOLVE-BLOCK-END

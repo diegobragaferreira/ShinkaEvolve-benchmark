@@ -1,0 +1,158 @@
+<NAME>
+enhance_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi initialization uses a basic approach that doesn't fully leverage the geometric properties of Voronoi diagrams for optimal circle packing. I'll enhance the initialization by using a more sophisticated Voronoi-based approach that considers both the Voronoi cell areas and geometric distribution patterns to create better starting configurations.
+
+The key improvements include:
+1. Using a more systematic Voronoi cell selection based on area and centrality
+2. Applying a more intelligent radius assignment based on Voronoi geometry
+3. Adding better boundary handling to ensure circles are well-positioned
+4. Improving the overall distribution quality of initial configurations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def create_voronoi_initialization(n_circles, n_candidates=1000):
+    """Create initial configuration using Voronoi-based approach"""
+    # Generate random candidate points
+    candidates = np.random.rand(n_candidates, 2)
+
+    # Add boundary points to ensure coverage
+    boundary_points = np.array([
+        [0, 0], [0, 1], [1, 0], [1, 1],
+        [0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]
+    ])
+    candidates = np.vstack([candidates, boundary_points])
+
+    # Compute Voronoi diagram
+    vor = Voronoi(candidates)
+
+    # Get Voronoi vertices and regions
+    regions = []
+    for i in range(len(vor.points)):
+        region = []
+        for j, vertex_idx in enumerate(vor.point_region[i]):
+            if vertex_idx != -1:
+                region.append(vor.vertices[vertex_idx])
+        regions.append(region)
+
+    # Select candidate points that are likely to be good for circle placement
+    selected_points = []
+    for i, (point, region) in enumerate(zip(vor.points, regions)):
+        if len(region) > 0:
+            # Calculate the area of the Voronoi cell
+            area = calculate_polygon_area(np.array(region))
+            if area > 0.0001:  # Only consider reasonably sized cells
+                selected_points.append(point)
+
+    # If we don't have enough points, fill with additional random ones
+    if len(selected_points) < n_circles:
+        additional_points = np.random.rand(n_circles - len(selected_points), 2)
+        selected_points.extend(additional_points)
+
+    selected_points = selected_points[:n_circles]
+
+    # Place circles with maximum possible radius at each selected point
+    circles = []
+    for i, (x, y) in enumerate(selected_points):
+        # Maximum radius at this point without violating boundaries
+        max_radius = min(x, 1-x, y, 1-y)
+        if max_radius > 0:
+            circles.append([x, y, max_radius])
+        else:
+            # Fallback to small random circle if boundary constrained
+            circles.append([x, y, 0.01])
+
+    return circles
+=======
+def create_voronoi_initialization(n_circles, n_candidates=1000):
+    """Create initial configuration using enhanced Voronoi-based approach"""
+    # Generate random candidate points with better distribution
+    candidates = np.random.rand(n_candidates, 2)
+
+    # Add strategic boundary points for better coverage
+    boundary_points = np.array([
+        [0, 0], [0, 1], [1, 0], [1, 1],  # Corners
+        [0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5],  # Midpoints
+        [0.25, 0.25], [0.25, 0.75], [0.75, 0.25], [0.75, 0.75]  # Diagonals
+    ])
+    candidates = np.vstack([candidates, boundary_points])
+
+    # Compute Voronoi diagram
+    try:
+        vor = Voronoi(candidates)
+    except:
+        # Fallback to simpler approach if Voronoi computation fails
+        points = np.random.rand(n_circles, 2)
+        circles = []
+        for x, y in points:
+            max_radius = min(x, 1-x, y, 1-y)
+            circles.append([x, y, max_radius])
+        return circles
+
+    # Get Voronoi vertices and regions
+    regions = []
+    for i in range(len(vor.points)):
+        region = []
+        for j, vertex_idx in enumerate(vor.point_region[i]):
+            if vertex_idx != -1:
+                region.append(vor.vertices[vertex_idx])
+        regions.append(region)
+
+    # Calculate Voronoi cell properties for selection
+    cell_properties = []
+    for i, (point, region) in enumerate(zip(vor.points, regions)):
+        if len(region) > 0:
+            # Calculate area of Voronoi cell
+            area = calculate_polygon_area(np.array(region))
+
+            # Calculate centroid of the cell
+            centroid = np.mean(np.array(region), axis=0)
+
+            # Calculate distance from centroid to center (0.5, 0.5)
+            distance_to_center = np.sqrt((centroid[0] - 0.5)**2 + (centroid[1] - 0.5)**2)
+
+            # Store properties: (area, distance_from_center, point)
+            cell_properties.append((area, distance_to_center, point))
+
+    # Sort by area (descending) and select top candidates
+    cell_properties.sort(key=lambda x: x[0], reverse=True)
+    selected_points = [prop[2] for prop in cell_properties[:n_circles]]
+
+    # Add more points if needed
+    if len(selected_points) < n_circles:
+        # Fill with random points
+        additional_points = np.random.rand(n_circles - len(selected_points), 2)
+        selected_points.extend(additional_points)
+
+    selected_points = selected_points[:n_circles]
+
+    # Enhanced placement with better radius calculation
+    circles = []
+    for i, (x, y) in enumerate(selected_points):
+        # Calculate maximum possible radius that accounts for geometry
+        max_radius = min(x, 1-x, y, 1-y)
+
+        # If in the center region, allow larger radii
+        center_distance = np.sqrt((x - 0.5)**2 + (y - 0.5)**2)
+        if center_distance < 0.3:
+            # Allow larger radius in center
+            max_radius = min(max_radius, 0.25)
+        else:
+            # Reduce radius for edges to allow better packing
+            max_radius = min(max_radius, 0.2)
+
+        # Ensure reasonable minimum
+        max_radius = max(0.005, max_radius)
+
+        if max_radius > 0:
+            circles.append([x, y, max_radius])
+        else:
+            # Fallback to small circle if boundary constrained
+            circles.append([x, y, 0.01])
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,413 @@
+--- a/original.py
++++ b/original.py
+@@ -1,193 +1,271 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import differential_evolution, minimize
+ from shapely.geometry import Polygon
+-from shapely.ops import unary_union
+-import time
+ import math
+ from joblib import Parallel, delayed
+-
+-def hexagon_vertices(center_x, center_y, side_length, rotation_degrees):
+-    """Generate vertices of a regular hexagon."""
+-    angle_offset = math.radians(rotation_degrees)
+-    vertices = []
+-    for i in range(6):
+-        angle = angle_offset + i * math.pi / 3
+-        x = center_x + side_length * math.cos(angle)
+-        y = center_y + side_length * math.sin(angle)
+-        vertices.append((x, y))
+-    return vertices
+-
+-def create_hexagon_polygon(center_x, center_y, side_length, rotation_degrees):
+-    """Create Shapely polygon representation of a hexagon."""
+-    vertices = hexagon_vertices(center_x, center_y, side_length, rotation_degrees)
++import time
++
++def hexagon_vertices_vectorized(center_x, center_y, side_length, rotation_degrees):
++    """Vectorized generation of hexagon vertices."""
++    angle_offset = np.radians(rotation_degrees)
++    angles = angle_offset + np.arange(6) * np.pi / 3
++    x_coords = center_x + side_length * np.cos(angles)
++    y_coords = center_y + side_length * np.sin(angles)
++    return np.column_stack([x_coords, y_coords])
++
++def create_hexagon_polygon_vectorized(center_x, center_y, side_length, rotation_degrees):
++    """Create Shapely polygon using vectorized vertex generation."""
++    vertices = hexagon_vertices_vectorized(center_x, center_y, side_length, rotation_degrees)
+     return Polygon(vertices)
+ 
+-def check_overlap(hex1, hex2):
+-    """Check if two hexagons overlap using Shapely."""
+-    poly1 = create_hexagon_polygon(hex1[0], hex1[1], 1, hex1[2])
+-    poly2 = create_hexagon_polygon(hex2[0], hex2[1], 1, hex2[2])
++def check_overlap_vectorized(hex1, hex2):
++    """Fast overlap check using vectorized Shapely operations."""
++    poly1 = create_hexagon_polygon_vectorized(hex1[0], hex1[1], 1, hex1[2])
++    poly2 = create_hexagon_polygon_vectorized(hex2[0], hex2[1], 1, hex2[2])
+     return poly1.intersects(poly2)
+ 
+-def check_containment(hex_data, outer_hex_radius):
+-    """Check if all inner hexagons are contained within outer hexagon."""
+-    outer_poly = create_hexagon_polygon(0, 0, outer_hex_radius, 0)
+-
++def check_containment_vectorized(hex_data, outer_hex_radius):
++    """Fast containment check using vectorized Shapely operations."""
++    outer_poly = create_hexagon_polygon_vectorized(0, 0, outer_hex_radius, 0)
++    
+     for hex_params in hex_data:
+-        inner_poly = create_hexagon_polygon(hex_params[0], hex_params[1], 1, hex_params[2])
++        inner_poly = create_hexagon_polygon_vectorized(hex_params[0], hex_params[1], 1, hex_params[2])
+         if not outer_poly.contains(inner_poly):
+             return False
+     return True
+ 
+-def compute_outer_hexagon_radius(hex_data, tolerance=1e-6):
+-    """Compute minimum outer hexagon radius that contains all inner hexagons using binary search."""
+-    # Compute bounding box of all hexagon vertices
++def compute_outer_hexagon_radius_vectorized(hex_data, tolerance=1e-6):
++    """Compute minimum outer hexagon radius using optimized vectorized binary search."""
++    # Vectorized computation of all vertices
+     all_vertices = []
+     for hex_params in hex_data:
+-        vertices = hexagon_vertices(hex_params[0], hex_params[1], 1, hex_params[2])
+-        all_vertices.extend(vertices)
+-
+-    # Find the maximum distance from center to any vertex
+-    max_dist = 0
+-    for x, y in all_vertices:
+-        dist = math.sqrt(x*x + y*y)
+-        max_dist = max(max_dist, dist)
+-
+-    # Add some buffer for safety
+-    max_dist += 1e-3
+-
+-    # Binary search for the exact radius
++        vertices = hexagon_vertices_vectorized(hex_params[0], hex_params[1], 1, hex_params[2])
++        all_vertices.append(vertices)
++    
++    if not all_vertices:
++        return tolerance
++    
++    # Stack all vertices and compute distances efficiently
++    vertices_array = np.vstack(all_vertices)
++    
++    # Compute center and distances in vectorized manner
++    center = np.mean(vertices_array, axis=0)
++    distances = np.sqrt(np.sum((vertices_array - center)**2, axis=1))
++    max_dist = np.max(distances)
++    
++    # Add small buffer
++    max_dist += tolerance
++    
++    # Binary search for the exact radius with early termination
+     low = max_dist
+     high = max_dist * 2.0
+-
++    
++    # Adaptive precision based on convergence
++    prev_diff = float('inf')
++    patience = 0
++    max_patience = 5
++    
+     while high - low > tolerance:
+         mid = (low + high) / 2.0
+-        if check_containment(hex_data, mid):
++        if check_containment_vectorized(hex_data, mid):
+             high = mid
+         else:
+             low = mid
+-
++            
++        # Adaptive termination condition
++        diff = high - low
++        if abs(diff - prev_diff) < tolerance * 10:
++            patience += 1
++            if patience >= max_patience:
++                break
++        else:
++            patience = 0
++        prev_diff = diff
++            
+     return (low + high) / 2.0
+ 
+-def evaluate_fitness(hex_data):
+-    """Evaluate the fitness of a hexagon packing."""
++def evaluate_fitness_vectorized(hex_data):
++    """Vectorized fitness evaluation."""
+     try:
+-        radius = compute_outer_hexagon_radius(hex_data)
++        radius = compute_outer_hexagon_radius_vectorized(hex_data)
+         # Inverse of radius (higher is better)
+         return 1.0 / radius
+-    except:
++    except Exception:
+         # If there's an error, return a very bad fitness
+         return 0.0
+ 
+-def validate_individual(hex_data):
+-    """Ensure the individual is valid (no overlaps)."""
+-    # Check for overlaps
+-    for i in range(len(hex_data)):
+-        for j in range(i+1, len(hex_data)):
+-            if check_overlap(hex_data[i], hex_data[j]):
++def validate_individual_vectorized(hex_data):
++    """Fast validation of individual (no overlaps)."""
++    n = len(hex_data)
++    if n <= 1:
++        return True
++    
++    # Check for overlaps using pairwise comparison
++    for i in range(n):
++        for j in range(i+1, n):
++            if check_overlap_vectorized(hex_data[i], hex_data[j]):
+                 return False
+     return True
+ 
+-def evaluate_individual_parallel(params):
+-    """Evaluate a single individual with validation and fitness calculation."""
+-    hex_data = params.reshape(-1, 3)
+-    if not validate_individual(hex_data):
+-        return 1e6  # Large penalty for invalid solutions
+-    return -evaluate_fitness(hex_data)  # Negative because we want to maximize
++def generate_improved_initial_config():
++    """Generate a better initial configuration for 11 hexagons."""
++    # Based on known dense packings with better spatial distribution
++    initial_positions = [
++        # Central hexagon
++        [0.0, 0.0, 0.0],
++        # First ring (6 hexagons) - arranged in a hexagonal pattern
++        [-1.732, 0.0, 0.0],      # Left
++        [1.732, 0.0, 0.0],       # Right
++        [0.0, 1.732, 0.0],       # Top
++        [0.0, -1.732, 0.0],      # Bottom
++        [-0.866, 1.5, 0.0],      # Top-left
++        [0.866, 1.5, 0.0],       # Top-right
++        # Second ring (4 hexagons) - slightly offset
++        [-0.866, -1.5, 0.0],     # Bottom-left
++        [0.866, -1.5, 0.0],      # Bottom-right
++        [-1.732, 1.0, 0.0],      # Far top-left
++        [1.732, 1.0, 0.0],       # Far top-right
++        [-1.732, -1.0, 0.0],     # Far bottom-left
++        [1.732, -1.0, 0.0],      # Far bottom-right
++    ]
++
++    # Keep only first 11 positions
++    return np.array(initial_positions[:11])
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
+-
++    
+     # Set seed for reproducibility
+     np.random.seed(42)
+-
+-    # Use structured initial arrangement as a starting point
+-    initial_arrangement = np.array([
+-        [0, 0, 0],           # center
+-        [-2.5, 0, 0],        # left
+-        [2.5, 0, 0],         # right
+-        [-1.25, 2.17, 0],    # top-left
+-        [1.25, 2.17, 0],     # top-right
+-        [-1.25, -2.17, 0],   # bottom-left
+-        [1.25, -2.17, 0],    # bottom-right
+-        [-3.75, 2.17, 0],    # far top-left
+-        [3.75, 2.17, 0],     # far top-right
+-        [-3.75, -2.17, 0],   # far bottom-left
+-        [3.75, -2.17, 0],    # far bottom-right
+-    ])
+-
+-    # Define bounds for optimization
+-    bounds = [(-10, 10), (-10, 10), (0, 360)] * 11
+-
+-    # Function to optimize
++    
++    # Generate better initial configuration
++    initial_positions = generate_improved_initial_config()
++    inner_hex_data = initial_positions.copy()
++    
++    # Optimization bounds for each parameter (x, y, angle)
++    bounds = []
++    for i in range(11):
++        # Reasonable bounds to keep solutions in a practical region
++        bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # angle in degrees
++
++    # Define objective function for optimization
+     def objective(params):
+-        # Reshape params back to hex_data format
+-        hex_data = params.reshape(-1, 3)
+-        if not validate_individual(hex_data):
+-            return 1e6  # Large penalty for invalid solutions
+-        return -evaluate_fitness(hex_data)  # Negative because we want to maximize
+-
+-    # Run differential evolution optimization
+-    result = differential_evolution(
+-        objective,
+-        bounds,
+-        seed=42,
+-        maxiter=100,
+-        popsize=15,
+-        tol=1e-6,
+-        recombination=0.8,
+-        mutation=(0.5, 1.0)
+-    )
+-
+-    # If differential evolution failed, use the initial arrangement
+-    if not result.success:
+-        final_solution = initial_arrangement
+-    else:
+-        final_solution = result.x.reshape(-1, 3)
+-
+-    # Final validation
+-    if not validate_individual(final_solution):
+-        final_solution = initial_arrangement
+-
+-    # Local refinement with L-BFGS-B
+-    def refine_objective(params):
+-        hex_data = params.reshape(-1, 3)
+-        if not validate_individual(hex_data):
+-            return 1e6
+-        return -evaluate_fitness(hex_data)
+-
+-    # Try local optimization on the best solution
++        # Reshape parameters into positions and angles
++        positions_angles = []
++        for i in range(11):
++            x = params[i*3]
++            y = params[i*3 + 1]
++            angle = params[i*3 + 2]
++            positions_angles.append([x, y, angle])
++
++        score = evaluate_fitness_vectorized(np.array(positions_angles))
++        return -score  # Negative since we minimize -score = maximize score
++
++    # Two-stage optimization approach
++    best_score = float('inf')
++    best_inner_data = inner_hex_data.copy()
++    best_outer_side_length = 10.0
++
++    # Stage 1: Coarse global optimization with differential evolution
+     try:
+-        refined_result = minimize(
+-            refine_objective,
+-            final_solution.flatten(),
+-            method='L-BFGS-B',
+-            bounds=[(-10, 10)] * 33,
+-            options={'maxiter': 100}
++        print("Starting coarse global optimization...")
++        result = differential_evolution(
++            objective,
++            bounds,
++            maxiter=80,
++            popsize=15,
++            seed=42,
++            tol=1e-6,
++            mutation=(0.5, 1),
++            recombination=0.7,
++            disp=False
+         )
+-        if refined_result.success:
+-            final_solution = refined_result.x.reshape(-1, 3)
+-    except:
++
++        # Extract best solution from coarse optimization
++        best_params = result.x
++        final_positions_angles = []
++        for i in range(11):
++            x = best_params[i*3]
++            y = best_params[i*3 + 1]
++            angle = best_params[i*3 + 2]
++            final_positions_angles.append([x, y, angle])
++
++        # Evaluate final result
++        final_score = evaluate_fitness_vectorized(np.array(final_positions_angles))
++
++        if final_score < best_score:
++            best_score = final_score
++            best_inner_data = np.array(final_positions_angles)
++            best_outer_side_length = 1.0 / final_score if final_score > 0 else 10.0
++
++    except Exception as e:
++        print(f"Coarse optimization failed: {e}")
+         pass
+ 
+-    # Ensure final solution is valid
+-    if not validate_individual(final_solution):
+-        final_solution = initial_arrangement
+-
+-    # Compute final radius
+-    final_radius = compute_outer_hexagon_radius(final_solution)
+-
+-    # Format output
+-    inner_hex_data = final_solution
++    # Stage 2: Fine-grained local optimization with L-BFGS-B
++    if best_score < float('inf'):
++        print("Starting fine-grained local optimization...")
++
++        # Convert to flat array for scipy optimization
++        initial_flat = []
++        for pos_angle in best_inner_data:
++            initial_flat.extend(pos_angle)
++
++        # Local refinement with L-BFGS-B
++        try:
++            result_local = minimize(
++                objective,
++                initial_flat,
++                method='L-BFGS-B',
++                bounds=bounds,
++                options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8},
++                callback=None
++            )
++
++            # Extract refined solution
++            refined_params = result_local.x
++            refined_positions_angles = []
++            for i in range(11):
++                x = refined_params[i*3]
++                y = refined_params[i*3 + 1]
++                angle = refined_params[i*3 + 2]
++                refined_positions_angles.append([x, y, angle])
++
++            # Evaluate refined result
++            refined_score = evaluate_fitness_vectorized(np.array(refined_positions_angles))
++
++            if refined_score < best_score:
++                best_score = refined_score
++                best_inner_data = np.array(refined_positions_angles)
++                best_outer_side_length = 1.0 / refined_score if refined_score > 0 else 10.0
++
++        except Exception as e:
++            print(f"Fine optimization failed: {e}")
++            pass
++
++    # Final validation and refinement
++    print("Performing final validation...")
++
++    # Always validate the result
++    if not validate_individual_vectorized(best_inner_data):
++        print("Final validation failed, using fallback...")
++        # Fall back to initial configuration
++        best_inner_data = initial_positions.copy()
++
++    # Recompute outer hexagon size carefully
++    final_radius = compute_outer_hexagon_radius_vectorized(best_inner_data, 1e-6)
++
++    # Ensure we're returning the correct data format
+     outer_hex_data = np.array([0, 0, 0])  # centered at origin
+-    outer_hex_side_length = final_radius
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
++
++    # Return results
++    return best_inner_data, outer_hex_data, final_radius
+ 
+ # EVOLVE-BLOCK-END

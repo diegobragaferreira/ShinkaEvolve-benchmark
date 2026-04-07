@@ -1,0 +1,208 @@
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll implement a progressive local optimization strategy that enhances the current evolutionary approach by adding targeted local search refinement. This approach will identify solutions with high overlap violations and apply different intensities of local optimization based on the severity of constraint violations. The key insight is that solutions with many overlaps benefit more from intensive refinement than those with few violations.
+
+This enhancement addresses the limitations in the current implementation where the repair mechanism is applied uniformly regardless of the degree of constraint violation, and adds a more sophisticated refinement layer that focuses computational resources on the most problematic configurations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def repair_circles(circles: np.ndarray) -> np.ndarray:
+    """Enhanced repair mechanism with iterative optimization"""
+    repaired = circles.copy()
+
+    # First stage: Fix boundary violations
+    for i in range(len(repaired)):
+        x, y, r = repaired[i]
+        repaired[i, 0] = np.clip(x, r, 1 - r)
+        repaired[i, 1] = np.clip(y, r, 1 - r)
+        repaired[i, 2] = max(0.001, repaired[i, 2])
+
+    # Second stage: Resolve overlaps with more intelligent repulsion
+    points = repaired[:, :2]
+    tree = cKDTree(points)
+
+    # Try up to 4 iterations to resolve overlaps
+    for iteration in range(4):
+        overlap_found = False
+        for i in range(len(repaired)):
+            x1, y1, r1 = repaired[i]
+
+            # Find nearby circles within a reasonable distance
+            nearby_indices = tree.query_ball_point([x1, y1], 2 * (r1 + 0.001))
+
+            for j in nearby_indices:
+                if i != j:
+                    x2, y2, r2 = repaired[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    min_distance = r1 + r2
+
+                    if distance < min_distance:
+                        overlap_found = True
+
+                        # Move circles apart using physics-inspired approach
+                        if distance > 0.001:
+                            dx = (x1 - x2) / distance
+                            dy = (y1 - y2) / distance
+
+                            # Move them apart proportionally to their radii with enhanced force
+                            total_radius = r1 + r2
+                            move_amount = (min_distance - distance) * 0.4
+
+                            # Apply movement with bias towards larger circles
+                            repaired[i, 0] += dx * move_amount * (r2 / total_radius)
+                            repaired[i, 1] += dy * move_amount * (r2 / total_radius)
+                            repaired[j, 0] -= dx * move_amount * (r1 / total_radius)
+                            repaired[j, 1] -= dy * move_amount * (r1 / total_radius)
+
+                            # Clamp to bounds
+                            repaired[i, 0] = np.clip(repaired[i, 0], r1, 1 - r1)
+                            repaired[i, 1] = np.clip(repaired[i, 1], r1, 1 - r1)
+                            repaired[j, 0] = np.clip(repaired[j, 0], r2, 1 - r2)
+                            repaired[j, 1] = np.clip(repaired[j, 1], r2, 1 - r2)
+
+        if not overlap_found:
+            break
+
+    return repaired
+=======
+def count_overlaps(circles: np.ndarray) -> int:
+    """Count the number of overlapping pairs in the circle configuration."""
+    n = len(circles)
+    overlap_count = 0
+
+    # Check overlap constraints using KDTree for efficiency
+    points = circles[:, :2]  # Get (x, y) coordinates
+    tree = cKDTree(points)
+
+    # For each circle, check overlap with others
+    for i in range(n):
+        x1, y1, r1 = circles[i]
+        # Find nearby circles (within 2*(r1+r2) distance)
+        nearby_indices = tree.query_ball_point([x1, y1], 2 * (r1 + 0.001))
+
+        # Check overlap with each nearby circle
+        for j in nearby_indices:
+            if i != j:
+                x2, y2, r2 = circles[j]
+                distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+                min_distance_sq = (r1 + r2)**2
+
+                if distance_sq < min_distance_sq:
+                    overlap_count += 1
+
+    return overlap_count // 2  # Each overlap counted twice
+
+def local_refinement(circles: np.ndarray, max_iterations: int = 20) -> np.ndarray:
+    """Apply progressive local refinement based on overlap severity."""
+    refined = circles.copy()
+
+    # Count initial overlaps
+    initial_overlaps = count_overlaps(refined)
+
+    # Classify overlap severity
+    if initial_overlaps == 0:
+        # No overlaps, just ensure boundaries
+        for i in range(len(refined)):
+            x, y, r = refined[i]
+            refined[i, 0] = np.clip(x, r, 1 - r)
+            refined[i, 1] = np.clip(y, r, 1 - r)
+            refined[i, 2] = max(0.001, refined[i, 2])
+        return refined
+    elif initial_overlaps <= 5:
+        # Low overlap - light refinement
+        iterations = min(max_iterations, 10)
+        intensity = 0.3
+    elif initial_overlaps <= 15:
+        # Medium overlap - moderate refinement
+        iterations = min(max_iterations, 15)
+        intensity = 0.5
+    else:
+        # High overlap - intensive refinement
+        iterations = min(max_iterations, 25)
+        intensity = 0.8
+
+    # Apply iterative refinement
+    for iteration in range(iterations):
+        # Update tree for current state
+        points = refined[:, :2]
+        tree = cKDTree(points)
+
+        overlap_found = False
+
+        # Process circles in random order for better results
+        indices = list(range(len(refined)))
+        np.random.shuffle(indices)
+
+        for i in indices:
+            x1, y1, r1 = refined[i]
+
+            # Find nearby circles within a reasonable distance
+            nearby_indices = tree.query_ball_point([x1, y1], 2 * (r1 + 0.001))
+
+            for j in nearby_indices:
+                if i != j:
+                    x2, y2, r2 = refined[j]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    min_distance = r1 + r2
+
+                    if distance < min_distance:
+                        overlap_found = True
+
+                        # Move circles apart using physics-inspired approach
+                        if distance > 0.001:
+                            dx = (x1 - x2) / distance
+                            dy = (y1 - y2) / distance
+
+                            # Move them apart with intensity scaling
+                            total_radius = r1 + r2
+                            move_amount = (min_distance - distance) * intensity
+
+                            # Apply movement with bias towards larger circles
+                            refined[i, 0] += dx * move_amount * (r2 / total_radius)
+                            refined[i, 1] += dy * move_amount * (r2 / total_radius)
+                            refined[j, 0] -= dx * move_amount * (r1 / total_radius)
+                            refined[j, 1] -= dy * move_amount * (r1 / total_radius)
+
+                            # Clamp to bounds
+                            refined[i, 0] = np.clip(refined[i, 0], r1, 1 - r1)
+                            refined[i, 1] = np.clip(refined[i, 1], r1, 1 - r1)
+                            refined[j, 0] = np.clip(refined[j, 0], r2, 1 - r2)
+                            refined[j, 1] = np.clip(refined[j, 1], r2, 1 - r2)
+
+        if not overlap_found:
+            break
+
+    # Final boundary check
+    for i in range(len(refined)):
+        x, y, r = refined[i]
+        refined[i, 0] = np.clip(x, r, 1 - r)
+        refined[i, 1] = np.clip(y, r, 1 - r)
+        refined[i, 2] = max(0.001, refined[i, 2])
+
+    return refined
+
+def repair_circles(circles: np.ndarray) -> np.ndarray:
+    """Enhanced repair mechanism with iterative optimization"""
+    repaired = circles.copy()
+
+    # First stage: Fix boundary violations
+    for i in range(len(repaired)):
+        x, y, r = repaired[i]
+        repaired[i, 0] = np.clip(x, r, 1 - r)
+        repaired[i, 1] = np.clip(y, r, 1 - r)
+        repaired[i, 2] = max(0.001, repaired[i, 2])
+
+    # Second stage: Resolve overlaps with progressive refinement
+    # Check if there are overlaps that need resolution
+    if count_overlaps(repaired) > 0:
+        # Apply local refinement for better overlap resolution
+        repaired = local_refinement(repaired)
+
+    return repaired
+>>>>>>> REPLACE
+
+</DIFF>

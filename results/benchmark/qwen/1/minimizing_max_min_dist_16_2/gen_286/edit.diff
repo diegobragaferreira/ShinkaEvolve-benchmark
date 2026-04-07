@@ -1,0 +1,357 @@
+--- a/original.py
++++ b/original.py
+@@ -1,208 +1,326 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import pdist
+-from scipy.optimize import minimize
++from scipy.spatial.distance import pdist, squareform
++from scipy.optimize import differential_evolution, minimize
+ from scipy.spatial import Voronoi
+ import time
++from numba import jit
++
++@jit(nopython=True)
++def fast_pdist_ratio(distances):
++    """Fast computation of min/max ratio using numba"""
++    if len(distances) == 0:
++        return 0.0
++    
++    min_dist = distances[0]
++    max_dist = distances[0]
++    
++    for i in range(len(distances)):
++        if distances[i] < min_dist:
++            min_dist = distances[i]
++        if distances[i] > max_dist:
++            max_dist = distances[i]
++    
++    if max_dist <= 1e-12:
++        return 0.0
++    
++    return min_dist / max_dist
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     
+     np.random.seed(42)
+     n_points = 16
+     dimension = 2
++    benchmark_ratio = 1 / np.sqrt(12.889266112)  # 0.2786
+     
+     def compute_min_max_ratio(points):
+         """Compute the ratio of minimum to maximum distance between all point pairs."""
+         if len(points) < 2:
+             return 0
+         
++        # Use squareform for better numerical stability
+         distances = pdist(points)
+         distances = distances[distances > 1e-12]  # Filter out near-zero distances
+         
+         if len(distances) == 0:
+             return 0
+             
+         dmin = np.min(distances)
+         dmax = np.max(distances)
+         
+         if dmax == 0:
+             return 0
+             
+         return dmin / dmax
+     
+     def compute_voronoi_uniformity(points):
+         """Compute a measure of Voronoi cell uniformity to encourage even distribution."""
+         try:
+             vor = Voronoi(points)
+             areas = []
+             
+             # Calculate area for each Voronoi cell (excluding infinite regions)
+             for i, region in enumerate(vor.regions):
+                 if len(region) > 0 and -1 not in region:
+                     # Calculate polygon area using shoelace formula
+                     vertices = vor.vertices[region]
+                     if len(vertices) >= 3:
+                         x_vals = vertices[:, 0]
+                         y_vals = vertices[:, 1]
+                         area = 0.5 * np.abs(np.dot(x_vals, np.roll(y_vals, 1)) - np.dot(y_vals, np.roll(x_vals, 1)))
+                         areas.append(area)
+             
+             if len(areas) == 0:
+                 return 0
+                 
+             # Lower variance in cell areas indicates better uniformity
+             return 1.0 / (1.0 + np.var(areas))
+         except:
+             return 0
+     
+     def combined_objective(x_flat, weight_ratio=0.8, weight_uniformity=0.2):
+         """Combined objective function balancing distance ratio and uniformity."""
+         points = x_flat.reshape(-1, 2)
+         
+         # Ensure bounds are respected
+         points = np.clip(points, 1e-8, 1-1e-8)
+         
+         ratio = compute_min_max_ratio(points)
+         uniformity = compute_voronoi_uniformity(points)
+         
+         # Combined objective: maximize ratio while promoting uniformity
+         combined = ratio * weight_ratio + uniformity * weight_uniformity
+         
+         # Return negative for minimization
+         return -combined
+     
+     def generate_hexagonal_initial():
+         """Generate a high-quality initial configuration based on hexagonal packing."""
+-        # Create a structured hexagonal arrangement
++        # Create a more sophisticated hexagonal arrangement with better spacing
+         points = []
+         rows, cols = 4, 4
+         
+-        # Hexagonal spacing
+-        spacing_x = 1.0 / (cols - 1) if cols > 1 else 1.0
+-        spacing_y = np.sqrt(3) / 2 / (rows - 1) if rows > 1 else 1.0
++        # Calculate better hexagonal spacing to avoid overlap
++        spacing_x = 0.8 / (cols - 1) if cols > 1 else 0.5
++        spacing_y = 0.8 * np.sqrt(3) / 2 / (rows - 1) if rows > 1 else 0.5
+         
+         for i in range(rows):
+             for j in range(cols):
+                 if len(points) >= n_points:
+                     break
+                 # Offset every other row for hexagonal pattern
+-                x = j * spacing_x + (i % 2) * spacing_x * 0.5
+-                y = i * spacing_y
++                x = 0.1 + j * spacing_x + (i % 2) * spacing_x * 0.5
++                y = 0.1 + i * spacing_y
+                 points.append([x, y])
+         
+-        points = np.array(points[:n_points])
++        # Ensure we have exactly n_points
++        points = points[:n_points]
++        
++        points = np.array(points)
+         
+         # Add small random perturbations to break symmetry and improve optimization
+-        points += np.random.normal(0, 0.01, points.shape)
++        points += np.random.normal(0, 0.005, points.shape)
+         
+         # Ensure all points are within bounds
+         points = np.clip(points, 0, 1)
+         
+         return points
++    
++    def generate_golden_spiral_initial():
++        """Generate initial points using golden spiral for good distribution."""
++        points = []
++        phi = 2.399963229728653  # ~2π/(φ^2) where φ is golden ratio
++        
++        for i in range(n_points):
++            angle = i * phi
++            radius = 0.4 * np.sqrt(i / (n_points - 1)) if n_points > 1 else 0.5
++            x = 0.5 + radius * np.cos(angle)
++            y = 0.5 + radius * np.sin(angle)
++            points.append([x, y])
++        
++        points = np.array(points)
++        points = np.clip(points, 0, 1)
++        return points
++    
++    def generate_grid_initial():
++        """Generate a regular grid initial configuration."""
++        points = []
++        side = int(np.ceil(np.sqrt(n_points)))
++        
++        for i in range(side):
++            for j in range(side):
++                if len(points) >= n_points:
++                    break
++                x = 0.1 + 0.8 * i / (side - 1) if side > 1 else 0.5
++                y = 0.1 + 0.8 * j / (side - 1) if side > 1 else 0.5
++                points.append([x, y])
++        
++        points = np.array(points[:n_points])
++        points += np.random.normal(0, 0.01, points.shape)
++        points = np.clip(points, 0, 1)
++        return points
++    
++    def generate_multiple_initials():
++        """Generate multiple initial configurations and return the best."""
++        configs = [
++            generate_hexagonal_initial(),
++            generate_golden_spiral_initial(),
++            generate_grid_initial(),
++            np.random.rand(n_points, dimension)
++        ]
++        
++        best_config = configs[0]
++        best_ratio = 0
++        
++        for config in configs:
++            ratio = compute_min_max_ratio(config)
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_config = config.copy()
++        
++        return best_config
+     
+     def voronoi_refinement_step(points, iterations=3):
+         """Apply iterative Voronoi refinement to improve point distribution."""
+         current_points = points.copy()
+         
+         for _ in range(iterations):
+             try:
+                 vor = Voronoi(current_points)
+                 new_points = []
+                 
+                 for i in range(len(current_points)):
+                     region = vor.regions[vor.point_region[i]]
+                     if not region or -1 in region:
+                         # Keep original point if Voronoi region is invalid
+                         new_points.append(current_points[i])
+                         continue
+                     
+                     # Calculate centroid of Voronoi cell
+                     vertices = [vor.vertices[j] for j in region if j >= 0]
+                     if len(vertices) > 0:
+                         vertices = np.array(vertices)
+                         centroid = np.mean(vertices, axis=0)
+                         new_points.append(centroid)
+                     else:
+                         new_points.append(current_points[i])
+                 
+                 # Update points and keep within bounds
+                 current_points = np.array(new_points)
+                 current_points = np.clip(current_points, 0, 1)
+                 
+             except Exception:
+                 # If Voronoi computation fails, keep current points
+                 break
+                 
+         return current_points
+     
+     def adaptive_local_optimization(initial_points, max_iter=500):
+         """Apply adaptive local optimization with multiple strategies."""
+-        bounds = [(0, 1) for _ in range(n_points * dimension)]
+-        
+-        # Strategy 1: L-BFGS-B optimization
++        bounds = [(1e-8, 1-1e-8) for _ in range(n_points * dimension)]
++        
++        # Strategy 1: L-BFGS-B optimization with tighter tolerances
+         try:
+             result = minimize(
+                 combined_objective,
+                 initial_points.flatten(),
+                 method='L-BFGS-B',
+                 bounds=bounds,
+                 options={'maxiter': max_iter, 'ftol': 1e-12, 'gtol': 1e-12}
+             )
+             
+             if result.success:
+                 return result.x.reshape(-1, 2)
+         except:
+             pass
+         
+-        # Strategy 2: SLSQP as fallback
++        # Strategy 2: SLSQP as fallback with moderate tolerance
+         try:
+             result = minimize(
+                 combined_objective,
+                 initial_points.flatten(),
+                 method='SLSQP',
+                 bounds=bounds,
+                 options={'maxiter': max_iter//2, 'ftol': 1e-10, 'gtol': 1e-10}
+             )
+             
+             if result.success:
+                 return result.x.reshape(-1, 2)
+         except:
+             pass
+             
+         # Return original points if all optimization attempts fail
+         return initial_points
+     
+-    def multi_stage_optimization(initial_points):
++    def multi_stage_optimization(initial_points, stage='full'):
+         """Apply multi-stage optimization for better convergence."""
+         # Stage 1: Voronoi refinement for global improvement
+-        refined_points = voronoi_refinement_step(initial_points, iterations=3)
+-        
+-        # Stage 2: Local optimization with combined objective
++        refined_points = voronoi_refinement_step(initial_points, iterations=2)
++        
++        # Stage 2: Differential Evolution for global search
++        flat_bounds = [(1e-8, 1-1e-8) for _ in range(n_points * dimension)]
++        try:
++            de_result = differential_evolution(
++                combined_objective,
++                flat_bounds,
++                maxiter=100,
++                popsize=20,
++                tol=1e-8,
++                mutation=(0.5, 1.0),
++                recombination=0.8,
++                seed=42,
++                disp=False
++            )
++            if de_result.success:
++                refined_points = de_result.x.reshape(-1, 2)
++        except:
++            pass
++        
++        # Stage 3: Local optimization with combined objective
+         final_points = adaptive_local_optimization(refined_points, max_iter=300)
+         
+-        # Stage 3: Additional Voronoi refinement
++        # Stage 4: Additional Voronoi refinement
+         final_points = voronoi_refinement_step(final_points, iterations=2)
+         
+-        # Stage 4: Final local optimization
++        # Stage 5: Final local optimization with stricter tolerances
+         final_points = adaptive_local_optimization(final_points, max_iter=200)
+         
+         return final_points
+     
+-    # Generate initial configuration
+-    initial_points = generate_hexagonal_initial()
+-    
+-    # Apply multi-stage optimization
+-    optimized_points = multi_stage_optimization(initial_points)
++    # Generate multiple initial configurations
++    initial_configs = []
++    for i in range(4):
++        initial_configs.append(generate_multiple_initials())
++    
++    # Run optimization on each initial configuration and select the best
++    best_points = None
++    best_ratio = 0
++    
++    for config in initial_configs:
++        try:
++            optimized_points = multi_stage_optimization(config)
++            ratio = compute_min_max_ratio(optimized_points)
++            
++            if ratio > best_ratio:
++                best_ratio = ratio
++                best_points = optimized_points.copy()
++        except:
++            continue
++    
++    # Fallback to last attempt if nothing worked
++    if best_points is None:
++        initial_points = generate_multiple_initials()
++        best_points = multi_stage_optimization(initial_points)
+     
+     # Final bounds checking
+-    optimized_points = np.clip(optimized_points, 0, 1)
+-    
+-    return optimized_points
++    best_points = np.clip(best_points, 0, 1)
++    
++    return best_points
+ 
+ # EVOLVE-BLOCK-END

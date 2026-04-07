@@ -1,0 +1,353 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon, Point
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+import random
+import time
+from typing import Tuple, List, Optional, Any
+
+class HexagonGeometry:
+    """Handles all geometric operations for hexagons"""
+
+    def __init__(self):
+        self.unit_vertices = self._get_unit_hexagon_vertices()
+        self.unit_radius = 1.0
+
+    def _get_unit_hexagon_vertices(self) -> np.ndarray:
+        """Precompute unit hexagon vertices"""
+        angles = np.linspace(0, 2*np.pi, 7)[:-1]
+        return np.column_stack([np.cos(angles), np.sin(angles)])
+
+    def rotate_point(self, point: np.ndarray, angle_rad: float) -> np.ndarray:
+        """Rotate a point around origin"""
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        return rotation_matrix @ point
+
+    def hexagon_vertices(self, center: np.ndarray, angle_rad: float, scale: float = 1.0) -> np.ndarray:
+        """Get vertices of a hexagon at given position and rotation"""
+        rotated_vertices = np.array([self.rotate_point(v, angle_rad) for v in self.unit_vertices])
+        return rotated_vertices * scale + np.array(center)
+
+    def point_in_polygon(self, point: np.ndarray, polygon: Polygon) -> bool:
+        """Fast point-in-polygon check"""
+        return polygon.contains(Point(point))
+
+class SolutionValidator:
+    """Validates hexagon packing solutions"""
+
+    def __init__(self, geometry: HexagonGeometry):
+        self.geometry = geometry
+
+    def is_contained_in_outer_hexagon(self, hexagon_vertices_list: np.ndarray,
+                                    outer_center: np.ndarray, outer_angle: float,
+                                    outer_radius: float) -> bool:
+        """Check if hexagon is fully contained in outer hexagon"""
+        outer_vertices = self.geometry.hexagon_vertices(outer_center, outer_angle, outer_radius)
+        outer_polygon = Polygon(outer_vertices)
+
+        for vertex in hexagon_vertices_list:
+            if not self.geometry.point_in_polygon(vertex, outer_polygon):
+                return False
+        return True
+
+    def check_overlap_fast(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast overlap check using polygon intersection"""
+        try:
+            poly1 = Polygon(hex1_vertices)
+            poly2 = Polygon(hex2_vertices)
+            return poly1.intersects(poly2)
+        except:
+            return False
+
+    def calculate_outer_hexagon_radius(self, inner_hex_data: np.ndarray,
+                                     outer_center: np.ndarray = np.array([0,0]),
+                                     outer_angle: float = 0) -> float:
+        """Calculate minimum radius needed for outer hexagon to contain all inner hexagons"""
+        max_dist = 0
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+
+            for vertex in vertices:
+                dist = np.linalg.norm(np.array(vertex) - np.array(outer_center))
+                max_dist = max(max_dist, dist)
+        return max_dist
+
+    def validate_solution(self, inner_hex_data: np.ndarray,
+                        outer_center: np.ndarray = np.array([0,0]),
+                        outer_angle: float = 0) -> bool:
+        """Validate solution: check containment and non-overlap"""
+        # Check containment first
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+
+            outer_radius = self.calculate_outer_hexagon_radius(inner_hex_data, outer_center, outer_angle)
+
+            if not self.is_contained_in_outer_hexagon(vertices, outer_center, outer_angle, outer_radius):
+                return False
+
+        # Check overlaps efficiently
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            center = inner_hex_data[i][:2]
+            angle = np.radians(inner_hex_data[i][2])
+            vertices = self.geometry.hexagon_vertices(center, angle, self.geometry.unit_radius)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check all pairs for overlap
+        for i in range(len(hex_polygons)):
+            for j in range(i+1, len(hex_polygons)):
+                if self.check_overlap_fast(hex_polygons[i].exterior.coords,
+                                         hex_polygons[j].exterior.coords):
+                    return False
+
+        return True
+
+class EvolutionEngine:
+    """Main optimization engine using evolutionary algorithms"""
+
+    def __init__(self, geometry: HexagonGeometry, validator: SolutionValidator):
+        self.geometry = geometry
+        self.validator = validator
+        self.max_eval_time = 180.0
+        self.num_inner_hexagons = 11
+        self.population_size = 50
+        self.generations = 1200
+        self.elite_size = 5
+        self.tournament_size = 5
+        self.initial_mutation_rate = 0.8
+        self.final_mutation_rate = 0.1
+
+    def create_initial_individual(self) -> np.ndarray:
+        """Create a better initial individual using a structured approach"""
+        base_positions = [
+            [0, 0, 0],           # center
+            [-2.5, 0, 0],       # left
+            [2.5, 0, 0],        # right
+            [-1.25, 2.17, 0],   # top-left
+            [1.25, 2.17, 0],    # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],   # bottom-right
+            [-3.75, 2.17, 0],   # far top-left
+            [3.75, 2.17, 0],    # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],   # far bottom-right
+        ]
+
+        individual = []
+        for pos in base_positions:
+            x = pos[0] + random.uniform(-0.3, 0.3)
+            y = pos[1] + random.uniform(-0.3, 0.3)
+            angle = pos[2] + random.uniform(-10, 10)
+            individual.append([x, y, angle])
+        return np.array(individual)
+
+    def create_diverse_initial_population(self, pop_size: int) -> List[np.ndarray]:
+        """Create diverse initial population"""
+        population = []
+
+        # Add structured individuals
+        for _ in range(pop_size // 2):
+            individual = self.create_initial_individual()
+            population.append(individual)
+
+        # Fill remaining with random individuals
+        for _ in range(pop_size // 2):
+            individual = []
+            for _ in range(self.num_inner_hexagons):
+                x = random.uniform(-5, 5)
+                y = random.uniform(-5, 5)
+                angle = random.uniform(0, 360)
+                individual.append([x, y, angle])
+            population.append(np.array(individual))
+
+        return population
+
+    def tournament_selection(self, population: List[np.ndarray],
+                           fitnesses: List[float]) -> np.ndarray:
+        """Select parent using tournament selection"""
+        tournament_indices = random.sample(range(len(population)), self.tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_idx]
+
+    def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Improved crossover for hexagon positions and rotations"""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Crossover with selective copying
+        for i in range(len(parent1)):
+            if random.random() < 0.5:
+                child1[i] = parent2[i]
+                child2[i] = parent1[i]
+        return child1, child2
+
+    def mutate(self, individual: np.ndarray, mutation_rate: float = 0.1,
+              max_step: float = 0.3) -> np.ndarray:
+        """Enhanced mutation with geometric awareness"""
+        mutated = individual.copy()
+
+        for i in range(len(mutated)):
+            if random.random() < mutation_rate:
+                mutated[i][0] += random.uniform(-max_step, max_step)
+                mutated[i][1] += random.uniform(-max_step, max_step)
+                mutated[i][2] += random.uniform(-5, 5)
+                mutated[i][2] %= 360
+        return mutated
+
+    def adaptive_mutation_rate(self, generation: int, max_generations: int) -> float:
+        """Adaptive mutation rate that decreases over generations"""
+        return self.initial_mutation_rate - (self.initial_mutation_rate - self.final_mutation_rate) * (generation / max_generations)
+
+    def evaluate_fitness(self, individual: np.ndarray,
+                       outer_center: np.ndarray = np.array([0,0]),
+                       outer_angle: float = 0) -> float:
+        """Evaluate fitness (negative of outer hexagon radius for maximization)"""
+        outer_radius = self.validator.calculate_outer_hexagon_radius(individual, outer_center, outer_angle)
+
+        if not self.validator.validate_solution(individual, outer_center, outer_angle):
+            return -1e10  # Very poor fitness
+
+        return -outer_radius
+
+    def optimize(self) -> Tuple[np.ndarray, float]:
+        """Run evolution optimization"""
+        # Create initial population
+        population = self.create_diverse_initial_population(self.population_size)
+
+        best_fitness = float('-inf')
+        best_individual = None
+
+        # Evolution loop
+        for gen in range(self.generations):
+            # Calculate adaptive mutation rate
+            mut_rate = self.adaptive_mutation_rate(gen, self.generations)
+
+            # Evaluate fitness for entire population
+            fitnesses = []
+            for individual in population:
+                fit = self.evaluate_fitness(individual)
+                fitnesses.append(fit)
+
+            # Track best solution
+            current_best_idx = np.argmax(fitnesses)
+            current_best_fitness = fitnesses[current_best_idx]
+
+            if current_best_fitness > best_fitness:
+                best_fitness = current_best_fitness
+                best_individual = population[current_best_idx].copy()
+
+            # Elitism: keep best individuals
+            elite_indices = np.argsort(fitnesses)[-self.elite_size:]
+            elites = [population[i] for i in elite_indices]
+
+            # Create new population
+            new_population = elites.copy()
+
+            # Fill rest with offspring
+            while len(new_population) < self.population_size:
+                parent1 = self.tournament_selection(population, fitnesses)
+                parent2 = self.tournament_selection(population, fitnesses)
+
+                child1, child2 = self.crossover(parent1, parent2)
+                child1 = self.mutate(child1, mutation_rate=mut_rate)
+                child2 = self.mutate(child2, mutation_rate=mut_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:self.population_size]
+
+        return best_individual, best_fitness
+
+class SolutionManager:
+    """Manages the complete solution lifecycle"""
+
+    def __init__(self):
+        self.geometry = HexagonGeometry()
+        self.validator = SolutionValidator(self.geometry)
+        self.evolution_engine = EvolutionEngine(self.geometry, self.validator)
+
+    def validate_and_correct_solution(self, inner_hex_data: np.ndarray) -> np.ndarray:
+        """Ensure solution validity with fallback"""
+        if self.validator.validate_solution(inner_hex_data):
+            return inner_hex_data
+        else:
+            # Fallback to known good configuration
+            return np.array([
+                [0, 0, 0],
+                [-2.5, 0, 0],
+                [2.5, 0, 0],
+                [-1.25, 2.17, 0],
+                [1.25, 2.17, 0],
+                [-1.25, -2.17, 0],
+                [1.25, -2.17, 0],
+                [-3.75, 2.17, 0],
+                [3.75, 2.17, 0],
+                [-3.75, -2.17, 0],
+                [3.75, -2.17, 0],
+            ])
+
+    def finalize_solution(self, best_individual: np.ndarray,
+                         best_fitness: float) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Finalize and return the solution"""
+        outer_radius = -best_fitness if best_fitness != float('-inf') else 10.0
+
+        # Validate final solution
+        validated_individual = self.validate_and_correct_solution(best_individual)
+
+        inner_hex_data = validated_individual
+        outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered at origin
+        outer_hex_side_length = outer_radius
+
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    # Initialize solution manager
+    solution_manager = SolutionManager()
+
+    # Run optimization
+    best_individual, best_fitness = solution_manager.evolution_engine.optimize()
+
+    # Finalize solution
+    inner_hex_data, outer_hex_data, outer_hex_side_length = solution_manager.finalize_solution(
+        best_individual, best_fitness
+    )
+
+    # Final validation
+    if not solution_manager.validator.validate_solution(inner_hex_data):
+        # Revert to fallback if validation fails
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+        ])
+        outer_hex_side_length = 8.0
+        outer_hex_data = np.array([0.0, 0.0, 0.0])
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

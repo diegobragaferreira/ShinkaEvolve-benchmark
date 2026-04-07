@@ -1,0 +1,180 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy import optimize
+from scipy.signal import fftconvolve
+import math
+import random
+import time
+
+class AutocorrelationOptimizer:
+    def __init__(self, seed=42):
+        self.seed = seed
+        random.seed(seed)
+        np.random.seed(seed)
+
+    def compute_convolution(self, sequence, n):
+        """
+        Computes the autoconvolution of the sequence using FFT or direct convolution depending on size.
+        """
+        if n > 100:
+            try:
+                conv_result = fftconvolve(sequence, sequence, mode='full')
+                conv_result = conv_result[:2*n-1]
+                if np.any(np.isnan(conv_result)) or np.any(np.isinf(conv_result)):
+                    conv_result = np.convolve(sequence, sequence)
+            except:
+                conv_result = np.convolve(sequence, sequence)
+        else:
+            conv_result = np.convolve(sequence, sequence)
+        return conv_result
+
+    def solve_convolution_lp(self, f_sequence, rhs, n):
+        """
+        Solves the linear program for the convolution constraint.
+        """
+        c = -np.ones(n)
+        a_ub = []
+        b_ub = []
+
+        try:
+            f_conv = self.compute_convolution(f_sequence, n)
+        except:
+            return None
+
+        for k in range(2 * n - 1):
+            row = np.zeros(n)
+            for i in range(n):
+                j = k - i
+                if 0 <= j < n:
+                    row[j] = f_sequence[i]
+            a_ub.append(row)
+            b_ub.append(rhs)
+
+        a_ub_nonneg = -np.eye(n)
+        b_ub_nonneg = np.zeros(n)
+
+        a_ub = np.vstack([a_ub, a_ub_nonneg])
+        b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+        try:
+            result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs',
+                                    options={'presolve': True, 'maxiter': 1000})
+        except Exception as e:
+            try:
+                result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='simplex',
+                                        options={'maxiter': 1000, 'tol': 1e-8})
+            except:
+                return None
+
+        if result.success:
+            g_sequence = result.x
+            g_sequence = np.maximum(g_sequence, 0)
+            if np.sum(g_sequence) < 1e-10:
+                return None
+            return g_sequence
+        else:
+            return None
+
+    def get_good_direction_to_move_into(self, sequence):
+        """
+        Determines the direction to move in the sequence space for optimization.
+        """
+        start_time = time.time()
+        n = len(sequence)
+        sum_sequence = np.sum(sequence)
+
+        if sum_sequence < 1e-10:
+            return None
+
+        adaptive_factor = np.sqrt(2 * n)
+        normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
+
+        conv_result = self.compute_convolution(normalized_sequence, n)
+        rhs = np.max(conv_result)
+
+        g_fun = self.solve_convolution_lp(normalized_sequence, rhs, n)
+
+        if g_fun is None:
+            rhs_fallback = rhs * 1.1
+            g_fun = self.solve_convolution_lp(normalized_sequence, rhs_fallback, n)
+
+        if g_fun is None:
+            t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+            new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+            return new_sequence
+
+        sum_g_fun = np.sum(g_fun)
+        if sum_g_fun < 1e-10:
+            return None
+
+        normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
+
+        t = min(0.05, 0.01 + 0.01 * np.log(n + 1))
+        t = min(t, 0.02)
+
+        new_sequence = [
+            (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+        ]
+
+        if time.time() - start_time > 0.1:
+            return None
+
+        return new_sequence
+
+    def initialize_sequence(self):
+        """
+        Initializes a diverse sequence for optimization.
+        """
+        n_init1 = max(10, int(math.log(1000) * 50))
+        seq1 = np.random.rand(n_init1).tolist()
+
+        n_init2 = max(10, int(math.log(500) * 30))
+        seq2 = [np.random.exponential(1.0) for _ in range(n_init2)]
+
+        n_init3 = max(10, int(math.log(800) * 40))
+        seq3 = [np.random.gamma(2.0, 1.0) for _ in range(n_init3)]
+
+        combined_seq = seq1 + seq2 + seq3
+        combined_seq = [max(x, 0.01) for x in combined_seq]
+        best_sequence = combined_seq[:100]
+
+        return best_sequence
+
+    def search_for_best_sequence(self):
+        """
+        Main function to find the best sequence by evolving it.
+        """
+        best_sequence = self.initialize_sequence()
+        max_iterations = 50
+
+        for iteration in range(max_iterations):
+            h_function = self.get_good_direction_to_move_into(best_sequence)
+            if h_function is not None:
+                best_sequence = h_function
+            else:
+                index = np.random.randint(len(best_sequence))
+                perturbation = np.random.normal(1, 0.2)
+                best_sequence[index] = max(0.01, best_sequence[index] * perturbation)
+
+            if iteration % 10 == 0:
+                new_index = np.random.randint(len(best_sequence))
+                best_sequence[new_index] = max(0.01, np.random.exponential(1.0))
+
+            if iteration > 10 and np.std(best_sequence) < 0.01:
+                break
+
+        if len(best_sequence) > 200:
+            best_sequence = best_sequence[:100]
+
+        return best_sequence
+
+def main():
+    optimizer = AutocorrelationOptimizer()
+    sequence = optimizer.search_for_best_sequence()
+    print(f"Found sequence: {sequence}")
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

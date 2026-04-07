@@ -1,0 +1,171 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import time
+
+def hexagon_vertices(center_x, center_y, angle_deg, side_length=1):
+    """Generate vertices of a regular hexagon given center, angle, and side length"""
+    angle_rad = np.radians(angle_deg)
+    angles = np.linspace(0, 2*np.pi, 7) + angle_rad
+    vertices = np.array([
+        [center_x + side_length * np.cos(a), center_y + side_length * np.sin(a)]
+        for a in angles
+    ])
+    return vertices
+
+def check_containment(hex_vertices, outer_hex_vertices):
+    """Check if hexagon vertices are contained within outer hexagon using Shapely"""
+    inner_polygon = Polygon(hex_vertices)
+    outer_polygon = Polygon(outer_hex_vertices)
+    return outer_polygon.contains(inner_polygon)
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def evaluate_packing(inner_positions, inner_angles, outer_radius):
+    """Evaluate the packing quality for given parameters"""
+    # Create outer hexagon vertices
+    outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
+    
+    # Check all constraints
+    total_penalty = 0
+    
+    # Check containment for all inner hexagons
+    for i, (pos, angle) in enumerate(zip(inner_positions, inner_angles)):
+        hex_vertices = hexagon_vertices(pos[0], pos[1], angle)
+        if not check_containment(hex_vertices, outer_vertices):
+            total_penalty += 1000  # Large penalty for containment violation
+    
+    # Check overlaps between all pairs of inner hexagons
+    for i in range(len(inner_positions)):
+        for j in range(i+1, len(inner_positions)):
+            hex1_vertices = hexagon_vertices(inner_positions[i][0], inner_positions[i][1], inner_angles[i])
+            hex2_vertices = hexagon_vertices(inner_positions[j][0], inner_positions[j][1], inner_angles[j])
+            if check_overlap(hex1_vertices, hex2_vertices):
+                total_penalty += 1000  # Large penalty for overlap violation
+    
+    return total_penalty
+
+def objective_function(params, num_hexes=11):
+    """Objective function for optimization - minimize outer radius"""
+    # Extract parameters
+    outer_radius = params[-1]
+    # Reshape positions and angles
+    positions = params[:-1].reshape(-1, 2)
+    angles = np.zeros(num_hexes)  # Assuming all hexagons have same orientation
+    
+    # Evaluate packing quality
+    penalty = evaluate_packing(positions, angles, outer_radius)
+    
+    # Return a value to minimize (negative of inverse radius is our goal)
+    return outer_radius + penalty
+
+def generate_initial_layout():
+    """Generate initial hexagon layout using a structured approach"""
+    # Place 11 hexagons in a 3x4 grid pattern but optimize layout
+    positions = []
+    angles = []
+    
+    # Center hexagon
+    positions.append([0, 0])
+    angles.append(0)
+    
+    # Row 1: Left and right
+    positions.extend([[-2.5, 0], [2.5, 0]])
+    angles.extend([0, 0])
+    
+    # Row 2: Top row
+    positions.extend([[-1.25, 2.17], [1.25, 2.17]])
+    angles.extend([0, 0])
+    
+    # Row 3: Bottom row
+    positions.extend([[-1.25, -2.17], [1.25, -2.17]])
+    angles.extend([0, 0])
+    
+    # Row 4: Far sides
+    positions.extend([[-3.75, 2.17], [3.75, 2.17]])
+    angles.extend([0, 0])
+    
+    # Row 5: Far bottom
+    positions.extend([[-3.75, -2.17], [3.75, -2.17]])
+    angles.extend([0, 0])
+    
+    return np.array(positions), np.array(angles)
+
+def optimize_packing(initial_positions, initial_angles):
+    """Optimize the packing arrangement"""
+    # Initial guess for outer radius
+    outer_radius_guess = 8.0
+    
+    # Flatten parameters
+    initial_params = np.concatenate([
+        initial_positions.flatten(),
+        [outer_radius_guess]
+    ])
+    
+    # Define bounds for optimization
+    bounds = []
+    # Position bounds (large enough for initial placement)
+    for _ in range(len(initial_positions)):
+        bounds.extend([(-10, 10), (-10, 10)])
+    # Outer radius bound
+    bounds.append((1, 20))
+    
+    # Constraints to maintain fixed number of hexagons
+    def constraint_func(params):
+        # Just return a constant to make it a valid constraint
+        return 0
+    
+    # Run optimization
+    try:
+        result = minimize(
+            objective_function,
+            initial_params,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 1000}
+        )
+        
+        if result.success:
+            optimized_params = result.x
+            optimized_positions = optimized_params[:-1].reshape(-1, 2)
+            optimized_radius = optimized_params[-1]
+            
+            return optimized_positions, optimized_radius
+        else:
+            return initial_positions, 8.0
+    except Exception as e:
+        return initial_positions, 8.0
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Generate initial layout
+    initial_positions, initial_angles = generate_initial_layout()
+    
+    # Optimize the packing
+    optimized_positions, outer_radius = optimize_packing(initial_positions, initial_angles)
+    
+    # Create final data structures
+    inner_hex_data = np.column_stack([
+        optimized_positions,
+        np.zeros(len(optimized_positions))  # All rotations set to 0 degrees
+    ])
+    
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = outer_radius
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

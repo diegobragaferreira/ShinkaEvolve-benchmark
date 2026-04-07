@@ -1,0 +1,276 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+import numba
+from scipy import signal
+import random
+import time
+import math
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+@numba.jit(nopython=True)
+def compute_autoconvolution_numba(f_vals):
+    """Compute autoconvolution efficiently using numba"""
+    n = len(f_vals)
+    # Create output array for autoconvolution
+    g = np.zeros(2*n - 1)
+    
+    # Compute convolution manually with numba optimization
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+    
+    return g
+
+@numba.jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute norms efficiently with numba"""
+    n = len(g_vals)
+    
+    # L2 norm squared (using trapezoidal-like scheme)
+    l2_sq = 0.0
+    for i in range(n - 1):
+        y1 = g_vals[i]
+        y2 = g_vals[i + 1]
+        l2_sq += (y1*y1 + y1*y2 + y2*y2) / 3.0
+    
+    # L1 norm
+    l1 = 0.0
+    for i in range(n):
+        l1 += abs(g_vals[i])
+    
+    # L-infinity norm
+    linf = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf:
+            linf = abs_val
+    
+    return l2_sq, l1, linf
+
+def evaluate_individual(individual):
+    """Evaluate fitness of an individual (step function)"""
+    try:
+        # Convert to numpy array and ensure non-negative
+        f_vals = np.array(individual, dtype=np.float64)
+        f_vals = np.maximum(f_vals, 0.0)
+        
+        # Skip if all zeros
+        if np.sum(f_vals) == 0:
+            return 0.0
+            
+        # Compute autoconvolution
+        g_vals = compute_autoconvolution_numba(f_vals)
+        
+        # Compute norms
+        l2_sq, l1, linf = compute_norms_numba(g_vals)
+        
+        # Avoid division by zero
+        if l1 <= 1e-15 or linf <= 1e-15:
+            return 0.0
+        
+        # Compute C2
+        c2 = l2_sq / (l1 * linf)
+        return c2
+    except:
+        return 0.0
+
+def generate_adaptive_gaussian_peaks(n_steps, n_peaks):
+    """Generate step function with Gaussian peaks using adaptive parameters"""
+    # Create empty function
+    f_vals = np.zeros(n_steps)
+    
+    # Generate peak positions with adaptive spacing using beta distribution
+    # Beta(2,2) creates natural clustering with gaps
+    positions_raw = np.random.beta(2, 2, n_peaks)
+    # Map to actual positions in [1, n_steps-2] to avoid boundary issues  
+    peak_positions = (positions_raw * (n_steps - 2) + 1).astype(int)
+    
+    # Ensure uniqueness and sort
+    peak_positions = np.unique(peak_positions)
+    # If we don't have enough peaks, add more
+    while len(peak_positions) < n_peaks:
+        new_pos = random.randint(1, n_steps - 2)
+        if new_pos not in peak_positions:
+            peak_positions = np.append(peak_positions, new_pos)
+    peak_positions = np.sort(peak_positions)[:n_peaks]
+    
+    # Generate parameters for each peak with adaptive sizing
+    for i, center in enumerate(peak_positions):
+        # Width based on peak position and importance
+        # Outer peaks wider to avoid boundary artifacts, inner peaks narrower
+        if i == 0 or i == len(peak_positions) - 1:
+            # Edge peaks wider
+            width = max(10, min(60, n_steps // 6))
+            # Higher amplitude for edge peaks to contribute more to autoconvolution
+            height = random.uniform(1.5, 2.5)
+        else:
+            # Inner peaks narrower and moderately sized
+            width = max(8, min(40, n_steps // 12))
+            height = random.uniform(1.0, 2.0)
+            
+        # Apply adaptive scaling to prevent over-dominant peaks
+        # The scaling factor prevents extreme values that cause numerical issues
+        scaling_factor = min(1.0, 300.0 / (width * (i + 1) + 100.0))
+        height *= scaling_factor
+        
+        # Create Gaussian peak
+        x = np.arange(n_steps)
+        gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+        f_vals += gaussian
+    
+    # Apply smoothing to reduce extreme variations that could cause numerical instability
+    if n_steps > 50:
+        window_size = min(51, n_steps - 1)
+        if window_size % 2 == 0:
+            window_size -= 1
+        if window_size > 1:
+            f_vals = signal.savgol_filter(f_vals, window_size, 3)
+    
+    # Ensure non-negativity and normalize reasonably
+    f_vals = np.maximum(f_vals, 0)
+    if np.max(f_vals) > 0:
+        f_vals = f_vals / np.max(f_vals) * 2.0
+    
+    return f_vals.tolist()
+
+def refine_peaks_spectral_shaping(original_function, iterations=50):
+    """Apply spectral shaping refinement to improve C2 value"""
+    current_func = np.array(original_function)
+    best_func = current_func.copy()
+    best_score = evaluate_individual(best_func.tolist())
+    
+    # Spectral shaping approach: modify function to favor flatter autoconvolution profiles
+    for iter_idx in range(iterations):
+        if iter_idx % 10 == 0:
+            # Periodically regenerate peak structure to escape local minima
+            n_steps = len(current_func)
+            n_peaks = max(3, min(15, n_steps // 50))
+            regenerated = generate_adaptive_gaussian_peaks(n_steps, n_peaks)
+            current_func = np.array(regenerated)
+        
+        # Create candidate by minor adjustments
+        candidate = current_func.copy()
+        
+        # Apply small modifications to peak heights and positions
+        n_modify = max(1, len(candidate) // 20)  # Modify ~5% of points
+        
+        # Randomly select indices to modify
+        indices_to_modify = random.sample(range(len(candidate)), n_modify)
+        
+        for idx in indices_to_modify:
+            # Apply multiplicative perturbation to avoid negative values
+            factor = random.uniform(0.95, 1.05)
+            candidate[idx] = max(0, candidate[idx] * factor)
+        
+        # Apply smoothing to maintain function integrity
+        if len(candidate) > 50:
+            window = min(51, len(candidate) - 1)
+            if window % 2 == 0:
+                window -= 1
+            if window > 1:
+                candidate = signal.savgol_filter(candidate, window, 3)
+        
+        # Ensure non-negativity
+        candidate = np.maximum(candidate, 0)
+        
+        # Evaluate candidate
+        candidate_score = evaluate_individual(candidate.tolist())
+        
+        # Accept if better
+        if candidate_score > best_score:
+            best_score = candidate_score
+            best_func = candidate.copy()
+        
+        # Use current as next iteration's base
+        current_func = candidate
+    
+    return best_func.tolist()
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    start_time = time.time()
+    
+    # Set reasonable bounds for performance
+    max_time = 85.0
+    
+    # Phase 1: Multiple initialization attempts with different strategies
+    best_result = []
+    best_c2 = 0
+    
+    # Try different configurations to find the best starting point
+    config_attempts = [
+        {"n_steps": 600, "n_peaks": 8},
+        {"n_steps": 800, "n_peaks": 12},  
+        {"n_steps": 1000, "n_peaks": 15},
+        {"n_steps": 1200, "n_peaks": 18}
+    ]
+    
+    for config in config_attempts:
+        if time.time() - start_time > max_time * 0.85:
+            break
+            
+        try:
+            # Generate function with adaptive Gaussian peaks
+            initial_func = generate_adaptive_gaussian_peaks(config["n_steps"], config["n_peaks"])
+            
+            # Apply spectral shaping refinement
+            refined_func = refine_peaks_spectral_shaping(initial_func, iterations=30)
+            
+            # Evaluate final result
+            c2 = evaluate_individual(refined_func)
+            
+            if c2 > best_c2:
+                best_c2 = c2
+                best_result = refined_func
+                
+        except Exception as e:
+            continue
+    
+    # Phase 2: If we didn't find anything good, use a robust fallback
+    if len(best_result) == 0 or best_c2 < 0.5:
+        try:
+            n_steps = 800
+            n_peaks = 12
+            best_result = generate_adaptive_gaussian_peaks(n_steps, n_peaks)
+        except:
+            # Last resort - simple smooth function
+            n_steps = 800
+            best_result = [random.uniform(0.5, 1.5) for _ in range(n_steps)]
+    
+    # Phase 3: Final comprehensive refinement if time permits
+    if (time.time() - start_time) < max_time * 0.9 and len(best_result) > 0:
+        try:
+            # Do additional spectral shaping refinement
+            final_refined = refine_peaks_spectral_shaping(best_result, iterations=50)
+            final_c2 = evaluate_individual(final_refined)
+            
+            if final_c2 > best_c2:
+                best_result = final_refined
+                best_c2 = final_c2
+        except:
+            pass
+    
+    # Final evaluation to ensure validity
+    if len(best_result) > 0:
+        final_c2 = evaluate_individual(best_result)
+        if final_c2 <= 0:
+            # If the final evaluation fails, fall back to a simple smooth function
+            n_steps = 800
+            best_result = [random.uniform(0.5, 1.5) for _ in range(n_steps)]
+    
+    # Limit execution time
+    elapsed = time.time() - start_time
+    if elapsed > max_time:  # Leave buffer for cleanup
+        return best_result[:1000]  # Truncate if needed
+    
+    return best_result
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

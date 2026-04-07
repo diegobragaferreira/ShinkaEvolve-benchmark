@@ -1,0 +1,164 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def is_valid_placement(circles, x, y, r):
+    """Check if placing a circle at (x,y) with radius r is valid."""
+    # Check boundary constraints
+    if r > x or r > y or r > (1-x) or r > (1-y):
+        return False
+
+    # Check overlap with existing circles using KDTree for efficiency
+    if len(circles) > 0:
+        circle_points = np.array([[c[0], c[1]] for c in circles])
+        tree = cKDTree(circle_points)
+        
+        # Query for potential collisions within distance 2*r
+        indices = tree.query_ball_point([x, y], 2*r)
+        for i in indices:
+            cx, cy, cr = circles[i]
+            distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+            if distance < (r + cr):
+                return False
+    
+    return True
+
+def compute_local_density(circles, point, k=5):
+    """Compute local density around a point using k nearest neighbors."""
+    if len(circles) < 2:
+        return 0
+
+    # Convert circles to array for KDTree query
+    circle_points = np.array([[c[0], c[1]] for c in circles])
+    tree = cKDTree(circle_points)
+
+    # Query k nearest neighbors
+    dists, _ = tree.query(point, k=min(k, len(circle_points)))
+
+    # Return average distance to nearest neighbors
+    valid_dists = dists[dists > 0]
+    return np.mean(valid_dists) if len(valid_dists) > 0 else 1.0
+
+def sample_stratified_points(n_samples, x_range=(0.05, 0.95), y_range=(0.05, 0.95)):
+    """Generate stratified samples to avoid clustering."""
+    # Create a grid of sample points
+    grid_size = max(1, int(np.ceil(np.sqrt(n_samples))))
+    x_coords = np.linspace(x_range[0], x_range[1], grid_size + 2)[1:-1]
+    y_coords = np.linspace(y_range[0], y_range[1], grid_size + 2)[1:-1]
+    
+    # Ensure we generate enough points
+    points = []
+    for x in x_coords:
+        for y in y_coords:
+            points.append([x, y])
+            if len(points) >= n_samples:
+                break
+        if len(points) >= n_samples:
+            break
+    
+    # Add random jitter to avoid perfect grid alignment
+    if len(points) < n_samples:
+        extra_points = n_samples - len(points)
+        random_points = np.random.uniform(x_range[0], x_range[1], (extra_points, 2))
+        points.extend(random_points.tolist())
+    
+    return np.array(points[:n_samples])
+
+def initialize_circles_heuristic(n=32):
+    """Initialize circle positions using enhanced density-adaptive approach."""
+    circles = []
+
+    # Start with a coarse grid and then refine
+    # Use adaptive grid sizing based on number of circles
+    grid_size = max(3, int(np.ceil(np.sqrt(n * 0.7))))
+    spacing = 1.0 / (grid_size + 1)
+    
+    # Generate initial grid points with stratified sampling for better distribution
+    grid_points = sample_stratified_points(grid_size * grid_size)
+    
+    # Create initial placements with varying radii based on density
+    placed_count = 0
+    for i, (x, y) in enumerate(grid_points):
+        if placed_count >= n:
+            break
+            
+        # Initial radius estimate based on available space
+        r_min = min(x, y, 1-x, 1-y)
+        
+        # Density-based adjustment
+        point = np.array([x, y])
+        density = compute_local_density(circles, point)
+        
+        # More sophisticated density-to-radius mapping
+        # Higher density areas get smaller radii, lower density get larger
+        density_factor = max(0.1, 1.0 / (1.0 + density * 3.0))
+        r = min(r_min * density_factor * 0.4, 0.15)
+        
+        # Only add if valid
+        if is_valid_placement(circles, x, y, r):
+            circles.append([x, y, r])
+            placed_count += 1
+
+    # Fill remaining spots with adaptive refinement
+    remaining = n - len(circles)
+    attempts_per_circle = 50
+    
+    for _ in range(remaining):
+        best_r = 0
+        best_x, best_y = 0, 0
+        
+        # Try multiple candidates for this circle
+        candidate_points = sample_stratified_points(attempts_per_circle * 3)
+        
+        for x, y in candidate_points:
+            # Skip if outside valid area
+            if x < 0.05 or x > 0.95 or y < 0.05 or y > 0.95:
+                continue
+                
+            # Estimate max radius at this location
+            r_max = min(x, y, 1-x, 1-y)
+            if r_max <= 0.01:
+                continue
+                
+            # Density-based radius adjustment
+            point = np.array([x, y])
+            density = compute_local_density(circles, point)
+            
+            # Adjust radius based on local density
+            density_factor = max(0.05, 1.0 / (1.0 + density * 4.0))
+            adjusted_r_max = r_max * density_factor * 0.3
+            
+            # Try different radii from small to large
+            test_radii = np.linspace(0.005, adjusted_r_max, 8)
+            for r in test_radii:
+                if is_valid_placement(circles, x, y, r):
+                    if r > best_r:
+                        best_r = r
+                        best_x, best_y = x, y
+                        break
+            
+            # Early termination if we found a good fit
+            if best_r > adjusted_r_max * 0.8:
+                break
+
+        if best_r > 0:
+            circles.append([best_x, best_y, best_r])
+
+    return np.array(circles)
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 32
+    circles = initialize_circles_heuristic(n)
+
+    return circles
+
+# EVOLVE-BLOCK-END

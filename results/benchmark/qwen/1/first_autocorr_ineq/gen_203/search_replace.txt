@@ -1,0 +1,126 @@
+<NAME>
+enhance_local_search_with_quasi_newton
+</NAME>
+
+<DESCRIPTION>
+This edit enhances the local search functionality by replacing the existing `get_good_direction_to_move_into` method with a more sophisticated quasi-Newton optimization approach. The new implementation uses scipy's L-BFGS algorithm to refine sequences locally, aiming for tighter convergence and better performance than the previous linear programming approach. This change should lead to improved C₁ values and therefore higher 1/C₁ scores, helping to beat the benchmark.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using a more informed approach."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize the sequence
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution for the normalized sequence
+    conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    conv_result = conv_result[n-1:2*n-1]
+    rhs = np.max(conv_result)
+
+    # Solve the LP problem for better direction
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    # Normalize the result
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+    # Move in the direction of improvement
+    t = 0.02  # Slightly higher movement for more aggressive improvement
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    # Clip to prevent extreme values
+    new_sequence = [max(0, min(x, 1000)) for x in new_sequence]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence using L-BFGS optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    # Avoid division by zero or negligible sums
+    if sum_sequence < 1e-10:
+        return None
+
+    # Normalize the sequence to avoid numerical issues
+    normalized_sequence = np.array(sequence) * np.sqrt(2 * n) / sum_sequence
+
+    # Define objective function to minimize (negative of 1/C1)
+    def objective(x):
+        # Ensure non-negativity
+        x = np.maximum(x, 1e-10)
+        x = x / np.sum(x) * sum_sequence  # Renormalize to original sum
+        c1 = compute_c1(x)
+        if c1 == 0 or np.isnan(c1):
+            return float('inf')
+        return -1.0 / c1  # Minimize negative of 1/C1 = maximize 1/C1
+
+    # Define gradient function (approximated for now)
+    def gradient(x):
+        # This is a simplified gradient estimator
+        eps = 1e-6
+        grad = np.zeros_like(x)
+        for i in range(len(x)):
+            x_plus = x.copy()
+            x_plus[i] += eps
+            x_minus = x.copy()
+            x_minus[i] -= eps
+            grad[i] = (objective(x_plus) - objective(x_minus)) / (2 * eps)
+        return grad
+
+    # Use L-BFGS for local optimization
+    try:
+        result = optimize.minimize(objective, normalized_sequence, method='L-BFGS-B',
+                                  bounds=[(1e-10, 1000.0)] * len(normalized_sequence),
+                                  jac=gradient, options={'maxiter': 20})
+        if result.success:
+            optimized_sequence = result.x
+            # Renormalize to original sum
+            optimized_sequence = optimized_sequence / np.sum(optimized_sequence) * sum_sequence
+            return optimized_sequence.tolist()
+    except Exception as e:
+        # Fall back to previous method if optimization fails
+        pass
+
+    # If optimization fails, use the previous approach as fallback
+    conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+    conv_result = conv_result[n-1:2*n-1]
+    rhs = np.max(conv_result)
+
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+
+    t = 0.02
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+
+    new_sequence = [max(0, min(x, 1000)) for x in new_sequence]
+    return new_sequence
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,352 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import math
+import random
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions - since perimeter = 4, width + height = 2
+    # Try different rectangle ratios to find optimal configuration
+    rect_width, rect_height = 1.2, 0.8  # Better aspect ratio for circle packing
+    
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Phase 1: Advanced initialization using Voronoi-based seeding
+    circles = np.zeros((21, 3))
+    
+    # Create initial points using multiple strategies
+    initial_points = []
+    
+    # Strategy 1: Corner points
+    corner_points = [
+        [0.1, 0.1], [rect_width - 0.1, 0.1], 
+        [0.1, rect_height - 0.1], [rect_width - 0.1, rect_height - 0.1]
+    ]
+    initial_points.extend(corner_points)
+    
+    # Strategy 2: Edge midpoints
+    edge_points = [
+        [rect_width/2, 0.1], [rect_width/2, rect_height - 0.1],
+        [0.1, rect_height/2], [rect_width - 0.1, rect_height/2]
+    ]
+    initial_points.extend(edge_points)
+    
+    # Strategy 3: Grid pattern for remaining spots
+    remaining_spots = 21 - len(initial_points)
+    grid_size = int(np.ceil(np.sqrt(remaining_spots)))
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(initial_points) < 21:
+                x = 0.1 + i * (rect_width - 0.2) / (grid_size - 1) if grid_size > 1 else rect_width/2
+                y = 0.1 + j * (rect_height - 0.2) / (grid_size - 1) if grid_size > 1 else rect_height/2
+                initial_points.append([x, y])
+    
+    # Trim to exactly 21 points
+    initial_points = initial_points[:21]
+    
+    # Add small random perturbations to avoid symmetric solutions
+    for i in range(len(initial_points)):
+        initial_points[i][0] += random.uniform(-0.01, 0.01)
+        initial_points[i][1] += random.uniform(-0.01, 0.01)
+    
+    # Initialize circles with positions and small radii
+    for i, (x, y) in enumerate(initial_points):
+        circles[i] = [x, y, 0.02]
+
+    # Phase 2: Multi-phase optimization with enhanced techniques
+    best_radius_sum = 0
+    best_circles = None
+
+    # Multi-start approach with multiple strategies
+    for start_iter in range(15):  # Increased from 10 to 15 for better exploration
+        # Reset current circles for this iteration
+        current_circles = circles.copy()
+        
+        # Phase 2a: Coarse optimization (first 200 iterations)
+        for iteration in range(200):
+            improved = False
+            
+            # Shuffle circle indices for diverse search
+            circle_indices = list(range(21))
+            random.shuffle(circle_indices)
+            
+            for i in circle_indices:
+                # Compute maximum possible radius at this location
+                max_radius = _compute_max_radius_vectorized(current_circles, i, rect_width, rect_height)
+                
+                # Stochastic acceptance with improved simulated annealing logic
+                old_r = current_circles[i, 2]
+                
+                if max_radius > old_r:
+                    # Accept with probability based on temperature
+                    temp = 1.0 - (iteration / 200.0) * 0.8  # Cooling schedule
+                    if temp <= 0:
+                        temp = 0.01
+                    
+                    prob = math.exp((max_radius - old_r) / (temp + 1e-8))
+                    if random.random() < prob:
+                        current_circles[i, 2] = max_radius
+                        improved = True
+                elif max_radius > old_r + 1e-6:  # Slight improvement check
+                    current_circles[i, 2] = max_radius
+                    improved = True
+            
+            # Periodic perturbation to escape local minima
+            if iteration % 30 == 0 and iteration > 0:
+                for _ in range(3):
+                    i = random.randint(0, 20)
+                    # Apply small random perturbations to position
+                    current_circles[i, 0] += random.uniform(-0.03, 0.03)
+                    current_circles[i, 1] += random.uniform(-0.03, 0.03)
+                    
+                    # Clamp to bounds
+                    current_circles[i, 0] = np.clip(current_circles[i, 0], 0.01, rect_width - 0.01)
+                    current_circles[i, 1] = np.clip(current_circles[i, 1], 0.01, rect_height - 0.01)
+                    
+                    # Recompute max radius after perturbation
+                    max_radius = _compute_max_radius_vectorized(current_circles, i, rect_width, rect_height)
+                    current_circles[i, 2] = max_radius
+
+        # Phase 2b: Medium optimization with balanced approach (next 300 iterations)
+        for iteration in range(300):
+            improved = False
+            
+            # Shuffle circle indices for diverse search
+            circle_indices = list(range(21))
+            random.shuffle(circle_indices)
+            
+            for i in circle_indices:
+                # Compute maximum possible radius at this location using multi-objective approach
+                max_radius = _compute_max_radius_multiobjective(current_circles, i, rect_width, rect_height)
+                
+                # Stochastic acceptance
+                old_r = current_circles[i, 2]
+                
+                if max_radius > old_r:
+                    # Accept with probability based on temperature
+                    temp = 0.2 - (iteration / 300.0) * 0.15  # Cooling schedule
+                    if temp <= 0:
+                        temp = 0.01
+                    
+                    prob = math.exp((max_radius - old_r) / (temp + 1e-8))
+                    if random.random() < prob:
+                        current_circles[i, 2] = max_radius
+                        improved = True
+                elif max_radius > old_r + 1e-6:  # Slight improvement check
+                    current_circles[i, 2] = max_radius
+                    improved = True
+            
+            # Periodic perturbation with moderate intensity
+            if iteration % 25 == 0 and iteration > 0:
+                for _ in range(4):
+                    i = random.randint(0, 20)
+                    # Apply small random perturbations to position
+                    current_circles[i, 0] += random.uniform(-0.02, 0.02)
+                    current_circles[i, 1] += random.uniform(-0.02, 0.02)
+                    
+                    # Clamp to bounds
+                    current_circles[i, 0] = np.clip(current_circles[i, 0], 0.01, rect_width - 0.01)
+                    current_circles[i, 1] = np.clip(current_circles[i, 1], 0.01, rect_height - 0.01)
+                    
+                    # Recompute max radius after perturbation
+                    max_radius = _compute_max_radius_vectorized(current_circles, i, rect_width, rect_height)
+                    current_circles[i, 2] = max_radius
+
+        # Phase 2c: Fine optimization with maximum exploitation (next 400 iterations)
+        for iteration in range(400):
+            improved = False
+            
+            # Shuffle circle indices for diverse search
+            circle_indices = list(range(21))
+            random.shuffle(circle_indices)
+            
+            for i in circle_indices:
+                # Compute maximum possible radius at this location
+                max_radius = _compute_max_radius_vectorized(current_circles, i, rect_width, rect_height)
+                
+                # Direct acceptance with no stochasticity for fine tuning
+                if max_radius > current_circles[i, 2]:
+                    current_circles[i, 2] = max_radius
+                    improved = True
+            
+            # Periodic perturbation for final refinement
+            if iteration % 20 == 0 and iteration > 0:
+                for _ in range(5):
+                    i = random.randint(0, 20)
+                    # Apply small random perturbations to position
+                    current_circles[i, 0] += random.uniform(-0.005, 0.005)
+                    current_circles[i, 1] += random.uniform(-0.005, 0.005)
+                    
+                    # Clamp to bounds
+                    current_circles[i, 0] = np.clip(current_circles[i, 0], 0.01, rect_width - 0.01)
+                    current_circles[i, 1] = np.clip(current_circles[i, 1], 0.01, rect_height - 0.01)
+                    
+                    # Recompute max radius after perturbation
+                    max_radius = _compute_max_radius_vectorized(current_circles, i, rect_width, rect_height)
+                    current_circles[i, 2] = max_radius
+
+        # Final validation and scoring
+        if _validate_configuration(current_circles, rect_width, rect_height):
+            radius_sum = np.sum(current_circles[:, 2])
+            if radius_sum > best_radius_sum:
+                best_radius_sum = radius_sum
+                best_circles = current_circles.copy()
+
+    # Ensure we have a valid solution even if optimizations failed
+    if best_circles is None:
+        # Fallback to improved simple grid placement
+        circles = np.zeros((21, 3))
+        rows, cols = 4, 6
+        x_spacing = rect_width / (cols + 1)
+        y_spacing = rect_height / (rows + 1)
+
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= 21:
+                    break
+                x = (j + 1) * x_spacing + random.uniform(-0.015, 0.015)
+                y = (i + 1) * y_spacing + random.uniform(-0.015, 0.015)
+                r = 0.025
+                circles[idx] = [x, y, r]
+                idx += 1
+
+        # Local optimization on fallback
+        for _ in range(300):  # More iterations for fallback
+            improved = False
+            for i in range(21):
+                max_radius = _compute_max_radius_vectorized(circles, i, rect_width, rect_height)
+                if max_radius > circles[i, 2]:
+                    circles[i, 2] = max_radius
+                    improved = True
+            if not improved:
+                break
+
+        best_circles = circles
+
+    # Final correction to ensure valid constraints
+    for i in range(21):
+        x, y, r = best_circles[i]
+        # Ensure circles are within bounds and radius is reasonable
+        r = min(r, x, rect_width - x, y, rect_height - y)
+        if r <= 0:
+            r = 0.01
+        best_circles[i] = [x, y, r]
+
+    return best_circles
+
+def _compute_max_radius_vectorized(circles, index, width, height):
+    """Compute the maximum possible radius using vectorized collision detection."""
+    x, y, _ = circles[index]
+
+    # Minimum distance to boundaries
+    min_dist_to_boundaries = min(x, width - x, y, height - y)
+
+    # Check collisions with other circles using vectorized operations
+    min_dist_to_others = float('inf')
+    
+    # Vectorized operation: get all other circles
+    other_circles = np.delete(circles, index, axis=0)
+    
+    if len(other_circles) > 0:
+        # Extract coordinates of other circles
+        x2_vals = other_circles[:, 0]
+        y2_vals = other_circles[:, 1]
+        r2_vals = other_circles[:, 2]
+
+        # Compute distances efficiently using broadcasting
+        dx = x - x2_vals
+        dy = y - y2_vals
+        distances = np.sqrt(dx*dx + dy*dy)
+
+        # Calculate possible radius constraints
+        radius_constraints = distances - r2_vals
+
+        # Find minimum constraint with positive values only
+        positive_constraints = radius_constraints[radius_constraints > 0]
+        if len(positive_constraints) > 0:
+            min_dist_to_others = np.min(positive_constraints)
+
+    # Return the minimum of all constraints, with safety margin
+    max_radius = min(min_dist_to_boundaries, min_dist_to_others)
+
+    # Ensure minimum positive radius
+    return max(0.001, max_radius)
+
+def _compute_max_radius_multiobjective(circles, index, width, height):
+    """Compute maximum radius with multi-objective considerations."""
+    x, y, _ = circles[index]
+
+    # Minimum distance to boundaries
+    min_dist_to_boundaries = min(x, width - x, y, height - y)
+
+    # Check collisions with other circles using vectorized operations
+    min_dist_to_others = float('inf')
+    
+    # Vectorized operation: get all other circles
+    other_circles = np.delete(circles, index, axis=0)
+    
+    if len(other_circles) > 0:
+        # Extract coordinates of other circles
+        x2_vals = other_circles[:, 0]
+        y2_vals = other_circles[:, 1]
+        r2_vals = other_circles[:, 2]
+
+        # Compute distances efficiently using broadcasting
+        dx = x - x2_vals
+        dy = y - y2_vals
+        distances = np.sqrt(dx*dx + dy*dy)
+
+        # Calculate possible radius constraints
+        radius_constraints = distances - r2_vals
+
+        # Find minimum constraint with positive values only
+        positive_constraints = radius_constraints[radius_constraints > 0]
+        if len(positive_constraints) > 0:
+            min_dist_to_others = np.min(positive_constraints)
+
+    # Multi-objective score: balance radius gain with positional stability
+    # For this optimization, we use the standard approach but adjust for stability
+    max_radius = min(min_dist_to_boundaries, min_dist_to_others)
+    
+    # Add slight penalty for positional change (stable configuration)
+    # This encourages maintaining good configurations rather than chaotic movement
+    adjusted_radius = max_radius * 0.99  # Slight stability preference
+    
+    # Ensure minimum positive radius
+    return max(0.001, adjusted_radius)
+
+def _validate_configuration(circles, width, height):
+    """Validate that all circles are within bounds and non-overlapping."""
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        # Check boundary conditions
+        if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+            return False
+
+        # Check overlap with other circles with more precise tolerance
+        for j in range(i + 1, len(circles)):
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x - x2)**2 + (y - y2)**2)
+            # Allow very small overlap (numerical precision) but not actual overlap
+            if distance < r + r2 - 1e-10:
+                return False
+
+    return True
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

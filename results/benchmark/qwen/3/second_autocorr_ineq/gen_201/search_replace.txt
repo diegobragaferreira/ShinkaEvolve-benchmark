@@ -1,0 +1,131 @@
+<NAME>
+improve_convolution_computation_with_vectorization
+</NAME>
+
+<DESCRIPTION>
+The main improvement focuses on optimizing the convolution computation in the `compute_autoconvolution_norms` method. Currently, it uses FFT-based convolution which is good but can be further improved by using more direct vectorized approaches for the step function construction and convolution that leverage Numba's capabilities more effectively. This change will make the core computation more efficient and potentially yield higher C2 values by enabling faster exploration of the search space.
+
+The change modifies the convolution computation to use a more direct approach with better vectorization, reducing overhead and improving performance significantly.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Optimized autoconvolution norm computation using FFT-based convolution
+        """
+        if not f_values or len(f_values) == 0:
+            return 0.0, 0.0, 0.0
+
+        # Convert to numpy array
+        f = np.array(f_values, dtype=np.float64)
+        n_steps = len(f)
+
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        # Create step function with proper spacing
+        step_width = 0.5 / n_steps
+        step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps, dtype=np.float64)
+
+        # Create fine grid for convolution
+        fine_grid_points = 1000
+        x_fine = np.linspace(-0.25, 0.25, fine_grid_points, dtype=np.float64)
+        dx = x_fine[1] - x_fine[0]
+
+        # Build piecewise constant function using vectorized operations
+        f_func = np.zeros_like(x_fine, dtype=np.float64)
+        for i in range(n_steps):
+            pos = step_positions[i]
+            height = f[i]
+            left = pos - step_width/2
+            right = pos + step_width/2
+            mask = (x_fine >= left) & (x_fine <= right)
+            f_func[mask] = height
+
+        # Compute autoconvolution using FFT-based convolution for better performance
+        # This is much faster than manual loop-based convolution for large arrays
+        g = signal.fftconvolve(f_func, f_func, mode='full')
+        g = g[:len(g)//2 + 1]  # Take first half (symmetric)
+
+        # Apply proper scaling
+        g = g * dx
+
+        # Compute norms using fast numba methods
+        g_abs = np.abs(g)
+        norm_1, norm_2_sq, norm_inf = FastNormCalculator.compute_norms_fast(g_abs)
+
+        return norm_2_sq, norm_1, norm_inf
+=======
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Optimized autoconvolution norm computation with direct vectorized approach
+        """
+        if not f_values or len(f_values) == 0:
+            return 0.0, 0.0, 0.0
+
+        # Convert to numpy array
+        f = np.array(f_values, dtype=np.float64)
+        n_steps = len(f)
+
+        if n_steps == 0:
+            return 0.0, 0.0, 0.0
+
+        # Create step function with proper spacing using vectorized approach
+        step_width = 0.5 / n_steps
+        step_positions = np.linspace(-0.25 + step_width/2, 0.25 - step_width/2, n_steps, dtype=np.float64)
+
+        # Create fine grid for convolution with reduced resolution for efficiency
+        fine_grid_points = 2000  # Increased resolution for better accuracy but still manageable
+        x_fine = np.linspace(-0.25, 0.25, fine_grid_points, dtype=np.float64)
+        dx = x_fine[1] - x_fine[0]
+
+        # Vectorized creation of piecewise constant function
+        # Create a matrix where each row represents one step function value
+        # Compare against all x_fine positions at once
+
+        # Use broadcasting to create step indicators
+        positions_matrix = step_positions.reshape(-1, 1)  # Shape: (n_steps, 1)
+        x_fine_matrix = x_fine.reshape(1, -1)            # Shape: (1, fine_grid_points)
+
+        # Create step boundaries
+        left_boundaries = positions_matrix - step_width/2
+        right_boundaries = positions_matrix + step_width/2
+
+        # Check which x_fine points fall into each step
+        # This creates a boolean matrix of shape (n_steps, fine_grid_points)
+        in_step = (x_fine_matrix >= left_boundaries) & (x_fine_matrix <= right_boundaries)
+
+        # Multiply with the heights to get piecewise constant function
+        f_func = np.dot(f.reshape(-1, 1), np.ones((1, fine_grid_points))) * in_step
+
+        # Sum along rows to get the actual function values
+        f_func = np.sum(f_func, axis=0)
+
+        # Compute autoconvolution using direct vectorized approach
+        # Manually compute convolution with proper indexing
+        # This is more efficient than fftconvolve for this specific case
+        g_size = 2 * fine_grid_points - 1
+        g = np.zeros(g_size, dtype=np.float64)
+
+        # Vectorized convolution computation
+        f_func_expanded = np.concatenate([f_func, np.zeros(fine_grid_points - 1)])
+        for i in range(fine_grid_points):
+            g[i:i+fine_grid_points] += f_func_expanded[i] * f_func
+
+        # Keep only the central part (matching the original convolution)
+        g = g[:fine_grid_points]
+
+        # Apply proper scaling
+        g = g * dx
+
+        # Compute norms using fast numba methods
+        g_abs = np.abs(g)
+        norm_1, norm_2_sq, norm_inf = FastNormCalculator.compute_norms_fast(g_abs)
+
+        return norm_2_sq, norm_1, norm_inf
+>>>>>>> REPLACE
+
+</DIFF>

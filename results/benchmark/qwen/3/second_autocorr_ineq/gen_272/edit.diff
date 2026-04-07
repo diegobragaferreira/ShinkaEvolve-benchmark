@@ -1,0 +1,325 @@
+--- a/original.py
++++ b/original.py
+@@ -1,289 +1,306 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from numba import njit
+ from scipy.optimize import differential_evolution
+ import math
+ 
+ @njit
+ def compute_convolution_norms_numba(f_values, domain_length=0.5):
+     """
+     Compute the three norms needed for C2 calculation using the provided step function.
+     JIT compiled version for improved performance.
+     """
+     n_steps = len(f_values)
+     if n_steps == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # Step size
+     dx = domain_length / n_steps
+ 
+     # Compute autoconvolution g = f * f using piecewise linear integration
+     g_size = 2 * n_steps - 1
+     g = np.zeros(g_size)
+ 
+     # Compute autoconvolution - JIT compiled loop
+     for i in range(n_steps):
+         for j in range(n_steps):
+             k = i + j
+             if 0 <= k < g_size:
+                 g[k] += f_values[i] * f_values[j]
+ 
+     # Compute norms using trapezoidal-like integration
+     g2_sq = 0.0
+     for i in range(len(g)-1):
+         g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+ 
+     # ||g||₁ = sum(|g_i| * dx)
+     g1 = np.sum(np.abs(g)) * dx
+ 
+     # ||g||∞ = max(|g_i|)
+     ginf = np.max(np.abs(g))
+ 
+     return g2_sq, g1, ginf
+ 
+ @njit
+ def compute_c2_numba(f_values):
+     """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+     g2_sq, g1, ginf = compute_convolution_norms_numba(f_values)
+ 
+     if g1 == 0 or ginf == 0:
+         return 0.0
+ 
+     return g2_sq / (g1 * ginf)
+ 
+ @njit
+ def construct_initial_pattern(n_steps):
+-    """Construct an intelligent initial pattern for better convergence"""
+-    # Use a multi-scale gaussian pattern to create a function that promotes flatter convolution
++    """Construct an intelligent initial pattern for better convergence using multi-scale Gaussian components."""
++    # Create multi-scale Gaussian components at various positions and scales
+     f_values = np.zeros(n_steps)
+ 
+-    # Create multiple gaussian components at different scales
+-    centers = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+-    widths = [n_steps // 8, n_steps // 12, n_steps // 16]
+-
+-    # Add multiple gaussian components
+-    for center, width in zip(centers, widths):
+-        for i in range(n_steps):
+-            f_values[i] += np.exp(-0.5 * ((i - center) / width)**2)
+-
+-    # Add some sinusoidal modulation for additional variety
+-    x = np.linspace(0, 2*np.pi, n_steps)
+-    f_values += 0.3 * np.sin(4*x) + 0.2 * np.cos(8*x)
+-
+-    # Ensure non-negativity and normalize
++    # Define multiple scales and positions for better coverage of the function space
++    scales = [n_steps // 20, n_steps // 15, n_steps // 12, n_steps // 10, n_steps // 8]
++    centers = [n_steps // 6, n_steps // 3, n_steps // 2, 2 * n_steps // 3, 5 * n_steps // 6]
++
++    # Add multiple gaussian components with varying parameters
++    for scale in scales:
++        for center in centers:
++            # Ensure we don't go out of bounds
++            if scale > 0 and center >= 0 and center < n_steps:
++                # Create normalized Gaussian component with varying amplitude
++                amplitude = np.random.uniform(0.5, 1.5)
++                for i in range(n_steps):
++                    # Use truncated Gaussian to avoid extreme tails
++                    distance = (i - center) / scale
++                    if abs(distance) < 3:  # Only use significant portions
++                        gaussian_val = amplitude * np.exp(-0.5 * distance**2)
++                        f_values[i] += gaussian_val
++
++    # Add some structured variation to encourage diversity
++    # Create a base pattern that helps with convolution flattening
++    base_pattern = np.zeros(n_steps)
++    for i in range(n_steps):
++        # Create a combination of sinusoidal and polynomial patterns
++        x = i / n_steps
++        base_pattern[i] = 0.5 + 0.3 * np.sin(4 * np.pi * x) + 0.2 * np.cos(8 * np.pi * x)
++        base_pattern[i] += 0.1 * (x**2) + 0.05 * (1-x)**2
++
++    # Combine base pattern with Gaussian components
++    f_values += base_pattern * 0.5
++
++    # Ensure non-negativity and normalize with better control
+     f_values = np.maximum(f_values, 0)
+     total = np.sum(f_values)
+     if total > 0:
+         f_values = f_values / total * 100
+ 
+     return f_values
+ 
+ def compute_convolution_norms(f_values, domain_length=0.5):
+     """Wrapper function for norm computation"""
+     return compute_convolution_norms_numba(f_values, domain_length)
+ 
+ def compute_c2(f_values):
+     """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞)"""
+     return compute_c2_numba(f_values)
+ 
+ def adaptive_local_search(initial_f, max_iterations=100):
+     """Perform adaptive local search to improve the solution"""
+     best_f = initial_f.copy()
+     best_c2 = compute_c2(best_f)
+ 
+     # Track recent improvements
+     recent_improvements = []
+     patience = 0
+     max_patience = 20
+ 
+     # Adaptive parameters
+     base_mutation_rate = 0.2
+     min_mutation_rate = 0.05
+     max_mutation_rate = 0.5
+ 
+     for iteration in range(max_iterations):
+         test_f = best_f.copy()
+ 
+         # Dynamic mutation rate adjustment
+         current_mutation_rate = base_mutation_rate
+         if len(recent_improvements) >= 10:
+             recent_avg = np.mean(recent_improvements[-10:])
+             if recent_avg < 1e-6:
+                 # Slow progress, increase mutation rate
+                 current_mutation_rate = min(max_mutation_rate, current_mutation_rate * 1.5)
+             elif recent_avg > 1e-4:
+                 # Fast progress, decrease mutation rate for fine tuning
+                 current_mutation_rate = max(min_mutation_rate, current_mutation_rate * 0.8)
+ 
+         # Determine number of modifications based on progress
+         if len(recent_improvements) < 5:
+             num_modifications = max(1, len(test_f) // 15)
+         else:
+             avg_improvement = np.mean(recent_improvements[-5:])
+             if avg_improvement < 1e-6:
+                 num_modifications = max(1, len(test_f) // 30)
+             else:
+                 num_modifications = max(1, len(test_f) // 10)
+ 
+         # Apply random modifications with adaptive strategy
+         mod_indices = np.random.choice(len(test_f), num_modifications, replace=False)
+         for idx in mod_indices:
+             # Adaptive change magnitude based on current value
+             change_magnitude = current_mutation_rate * test_f[idx] if test_f[idx] > 0 else current_mutation_rate
+             change_factor = np.random.normal(0, change_magnitude)
+             new_value = test_f[idx] * (1 + change_factor)
+             test_f[idx] = max(0, new_value)  # Ensure non-negativity
+ 
+         # Evaluate and accept improvement
+         test_c2 = compute_c2(test_f)
+         improvement = test_c2 - best_c2
+ 
+         if test_c2 > best_c2:
+             best_c2 = test_c2
+             best_f = test_f
+             recent_improvements.append(improvement)
+             patience = 0
+         else:
+             recent_improvements.append(improvement)
+             patience += 1
+ 
+         # Early stopping if no improvement for too long
+         if patience >= max_patience:
+             break
+ 
+     return best_f, best_c2
+ 
+ def evolutionary_optimization(initial_f, n_steps, max_generations=20):
+     """Perform evolutionary optimization with adaptive parameters"""
+     # Adaptive population size
+     pop_size = max(20, min(100, n_steps // 10))
+ 
+     # Generate initial population
+     population = []
+     for i in range(pop_size):
+         if i == 0:
+             individual = initial_f.copy()
+         else:
+             # Create variations of the initial solution
+             individual = initial_f.copy()
+             # Add small random noise
+             for j in range(len(individual)):
+                 if np.random.random() < 0.1:
+                     individual[j] *= np.random.normal(1, 0.1)
+             individual = np.maximum(individual, 0)
+         population.append(individual)
+ 
+     best_individual = None
+     best_c2 = -float('inf')
+ 
+     for generation in range(max_generations):
+         # Evaluate population
+         fitness_scores = []
+         for individual in population:
+             c2 = compute_c2(individual)
+             fitness_scores.append(c2)
+             if c2 > best_c2:
+                 best_c2 = c2
+                 best_individual = individual.copy()
+ 
+         # Sort population
+         sorted_indices = np.argsort(fitness_scores)[::-1]
+         sorted_population = [population[i] for i in sorted_indices]
+ 
+         # Create new population
+         new_population = [sorted_population[0].copy()]  # Elitism
+ 
+         # Generate offspring
+         while len(new_population) < pop_size:
+             # Tournament selection
+             parent1_idx = np.random.choice(len(sorted_population), 3, replace=False)
+             parent1_idx = parent1_idx[np.argmax([fitness_scores[i] for i in parent1_idx])]
+ 
+             parent2_idx = np.random.choice(len(sorted_population), 3, replace=False)
+             parent2_idx = parent2_idx[np.argmax([fitness_scores[i] for i in parent2_idx])]
+ 
+             parent1 = sorted_population[parent1_idx]
+             parent2 = sorted_population[parent2_idx]
+ 
+             # Uniform crossover
+             child = []
+             for i in range(len(parent1)):
+                 if np.random.random() < 0.5:
+                     child.append(parent1[i])
+                 else:
+                     child.append(parent2[i])
+ 
+             # Mutation
+             for i in range(len(child)):
+                 if np.random.random() < 0.1:
+                     if child[i] > 0:
+                         child[i] *= np.random.normal(1, 0.1)
+                     else:
+                         child[i] = np.random.exponential(0.1)
+             child = np.maximum(child, 0)
+ 
+             new_population.append(child)
+ 
+         population = new_population[:pop_size]
+ 
+         # Diversity maintenance - periodically reinitialize some individuals
+         if generation % 5 == 0 and generation > 0:
+             for i in range(0, len(population), 4):
+                 if i < len(population):
+                     population[i] = construct_initial_pattern(n_steps).tolist()
+ 
+     return best_individual, best_c2
+ 
+ def construct_function() -> list[float]:
+     """Function to construct step-function with high C2 value using evolutionary approach."""
+     # Set seed for reproducibility
+     np.random.seed(42)
+ 
+     # Use a moderate number of steps for balance between resolution and speed
+     n_steps = 3000  # Increased from 2000 for better resolution
+ 
+     # Construct initial pattern
+     f_values = construct_initial_pattern(n_steps).tolist()
+ 
+     # Stage 1: Differential Evolution
+     try:
+         # Define bounds for each variable
+         bounds = [(0, 100) for _ in range(n_steps)]
+ 
+         # Run differential evolution with more iterations now that we have more time
+         result = differential_evolution(
+             lambda x: -compute_c2(x),  # Minimize negative C2
+             bounds,
+             maxiter=30,  # More iterations
+             popsize=15,  # Larger population
+             seed=42,
+             disp=False
+         )
+ 
+         # Use the result if it improved upon our initial function
+         if result.success and -result.fun > compute_c2(f_values):
+             f_values = result.x.tolist()
+ 
+     except Exception:
+         # If differential evolution fails, proceed with other approaches
+         pass
+ 
+     # Stage 2: Evolutionary Optimization
+     try:
+         evol_individual, evol_c2 = evolutionary_optimization(f_values, n_steps, max_generations=25)
+         if evol_c2 > compute_c2(f_values):
+             f_values = evol_individual
+     except Exception:
+         pass
+ 
+     # Stage 3: Adaptive Local Search
+     refined_f, final_c2 = adaptive_local_search(f_values, max_iterations=150)
+ 
+     return refined_f
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

@@ -1,0 +1,136 @@
+<NAME>
+voronoi_criticality_optimization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi criticality calculation is computationally expensive and sometimes unreliable. I'll optimize this by implementing a more efficient spatial indexing approach using scipy's spatial tools to quickly find nearest neighbors and boundary distances, which will dramatically improve the performance of the criticality scoring function that's called frequently during evolution.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on Voronoi diagram - how much room each circle has"""
+        circles = individual.copy()
+        n = len(circles)
+
+        # Generate Voronoi diagram
+        points = circles[:, :2]  # x,y coordinates
+        try:
+            vor = Voronoi(points)
+        except:
+            # Fallback if Voronoi fails - return uniform criticality
+            return np.ones(n) * 0.01
+
+        criticality_scores = np.zeros(n)
+
+        # For each circle, calculate minimum distance to Voronoi edges
+        # This represents the actual geometric constraint
+        coords = circles[:, :2]
+        for i in range(n):
+            # Calculate minimum distance to Voronoi vertices (edges of the Voronoi cell)
+            min_dist_to_edge = float('inf')
+
+            # Get Voronoi region for this point
+            region_idx = vor.point_region[i]
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if len(region) > 0 and -1 not in region:
+                    # Check distance to all Voronoi vertices in this region
+                    for vertex_idx in region:
+                        if vertex_idx < len(vor.vertices):
+                            vertex = vor.vertices[vertex_idx]
+                            dist = np.sqrt((coords[i,0] - vertex[0])**2 + (coords[i,1] - vertex[1])**2)
+                            min_dist_to_edge = min(min_dist_to_edge, dist)
+
+            # If we couldn't compute Voronoi edge distance, fall back to distance to nearest neighbor
+            if min_dist_to_edge == float('inf'):
+                # Get distances to all other circles
+                distances = np.sqrt(np.sum((coords - coords[i])**2, axis=1))
+                # Exclude self-distance
+                distances[i] = float('inf')
+                # Minimum distance to any other circle center
+                min_distance = np.min(distances)
+                if min_distance > 0:
+                    min_dist_to_edge = min_distance
+
+            # Criticality is inversely proportional to distance to nearest constraint
+            # Smaller distances = more constrained = higher criticality
+            if min_dist_to_edge > 0:
+                criticality_scores[i] = 1.0 / (min_dist_to_edge + 0.001)
+            else:
+                criticality_scores[i] = 1000  # Very constrained
+
+        # Also consider boundary constraints more accurately
+        for i in range(n):
+            x, y, r = circles[i]
+            # Distance to nearest boundary
+            min_boundary_dist = min(x, y, 1-x, 1-y)
+            # If very close to boundary, increase criticality significantly
+            if min_boundary_dist < 0.05:
+                criticality_scores[i] *= (1 + 10 * (0.05 - min_boundary_dist))
+
+        # Normalize and ensure minimum value
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        # Default fallback values
+        criticality_scores[np.isnan(criticality_scores)] = 0.01
+        criticality_scores[criticality_scores <= 0] = 0.01
+
+        return criticality_scores
+=======
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on nearest neighbors and boundary distances - more efficient approach"""
+        circles = individual.copy()
+        n = len(circles)
+
+        # Use spatial tree for efficient nearest neighbor queries
+        from scipy.spatial import cKDTree
+
+        # Build KD-tree for fast neighbor searches
+        coords = circles[:, :2]
+        tree = cKDTree(coords)
+
+        criticality_scores = np.zeros(n)
+
+        # For each circle, find its nearest neighbors and boundary distances
+        for i in range(n):
+            x, y, r = circles[i]
+
+            # Find distance to nearest neighbor (excluding self)
+            distances, indices = tree.query(coords[i], k=2)  # k=2 to exclude self
+            nearest_neighbor_dist = distances[1] if len(distances) > 1 else float('inf')
+
+            # Find distance to nearest boundary
+            boundary_dists = [x, y, 1-x, 1-y]
+            min_boundary_dist = min(boundary_dists)
+
+            # Combined constraint measure: closer to others or boundaries = more constrained
+            # We want to make the criticality high when there's little room to expand
+            if nearest_neighbor_dist < float('inf') and nearest_neighbor_dist > 0:
+                # Inverse relationship with neighbor distance
+                neighbor_criticality = 1.0 / (nearest_neighbor_dist + 0.001)
+            else:
+                neighbor_criticality = 1000  # Very constrained
+
+            # Boundary criticality - even more sensitive to boundary proximity
+            boundary_criticality = 0
+            if min_boundary_dist < 0.05:
+                boundary_criticality = 1000 * (0.05 - min_boundary_dist)
+
+            # Combine both sources of constraint
+            total_constraint = neighbor_criticality + boundary_criticality
+
+            # Convert to criticality (higher values = more critical/constrained)
+            criticality_scores[i] = total_constraint
+
+        # Ensure all criticalities are positive and normalize
+        criticality_scores = np.maximum(criticality_scores, 0.01)
+
+        # Normalize to [0,1] range for consistency in genetic operators
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        return criticality_scores
+>>>>>>> REPLACE
+</DIFF>

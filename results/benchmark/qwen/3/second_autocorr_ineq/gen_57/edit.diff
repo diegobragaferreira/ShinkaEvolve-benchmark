@@ -1,0 +1,154 @@
+--- a/original.py
++++ b/original.py
+@@ -1,14 +1,148 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
++from scipy import fftpack
++from scipy.optimize import minimize
++import math
++
++def compute_convolution_norms(f_values, domain_length=0.5):
++    """
++    Compute the three norms needed for C2 calculation using the provided step function.
++    Uses efficient convolution via FFT for better performance.
++    """
++    n_steps = len(f_values)
++    if n_steps == 0:
++        return 0.0, 0.0, 0.0
++
++    # Step size
++    dx = domain_length / n_steps
++
++    # Use FFT for fast convolution
++    # Pad to ensure proper convolution
++    padded_length = 2 * n_steps - 1
++    f_padded = np.pad(f_values, (0, padded_length - n_steps), mode='constant')
++    
++    # Convolution via FFT
++    f_fft = fftpack.fft(f_padded)
++    g_fft = f_fft * np.conj(f_fft)  # Autoconvolution in frequency domain
++    g = np.real(fftpack.ifft(g_fft))[:padded_length]
++    
++    # Compute norms using trapezoidal integration
++    # ||g||₂² = sum(g_i² * dx) - trapezoidal rule equivalent for piecewise linear
++    g2_sq = 0.0
++    for i in range(len(g)-1):
++        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
++
++    # ||g||₁ = sum(|g_i| * dx)
++    g1 = np.sum(np.abs(g)) * dx
++
++    # ||g||∞ = max(|g_i|)
++    ginf = np.max(np.abs(g))
++
++    return g2_sq, g1, ginf
++
++def compute_c2(f_values):
++    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞)"""
++    g2_sq, g1, ginf = compute_convolution_norms(f_values)
++
++    if g1 == 0 or ginf == 0:
++        return 0.0
++
++    return g2_sq / (g1 * ginf)
+ 
+ def construct_function() -> list[float]:
+-    """Function to construct step-function with high C2 value."""
+-    f_values = [np.random.random()] * np.random.randint(100,1000)
+-    return f_values
++    """Function to construct step-function with high C2 value using spectral optimization."""
++    np.random.seed(42)  # For reproducibility
++    
++    # Start with an educated guess: a smooth, symmetric function that avoids sharp peaks
++    n_steps = 1000
++    
++    # Create initial function in spectral domain
++    # Use a combination of low-frequency components to promote smoothness
++    frequencies = np.arange(n_steps)
++    
++    # Generate a smooth spectrum with mostly low frequencies
++    # This tries to create a function that will lead to flatter convolution
++    spectrum_real = np.random.normal(0, 0.5, n_steps)
++    spectrum_imag = np.random.normal(0, 0.5, n_steps)
++    
++    # Apply a smoothing filter to reduce high-frequency content
++    # Low-pass filter
++    cutoff = n_steps // 4
++    spectrum_real[cutoff:] = 0
++    spectrum_imag[cutoff:] = 0
++    
++    # Generate the function from spectrum
++    # The inverse FFT gives us complex values, we take real part
++    f_complex = spectrum_real + 1j * spectrum_imag
++    f_values = np.real(fftpack.ifft(f_complex))
++    
++    # Ensure non-negativity
++    f_values = np.maximum(f_values, 0)
++    
++    # Normalize so that we don't get extremely large values
++    if np.sum(f_values) > 0:
++        f_values = f_values / np.sum(f_values) * 100
++    
++    # Refine using gradient-based optimization in the spectral domain
++    def objective(spectrum_params):
++        # Reconstruct spectrum from parameters
++        spectrum_real = spectrum_params[::2]
++        spectrum_imag = spectrum_params[1::2]
++        
++        # Convert to full spectrum (complex)
++        spectrum_full = spectrum_real + 1j * spectrum_imag
++        
++        # Inverse transform to get function
++        f_reconstructed = np.real(fftpack.ifft(spectrum_full))
++        
++        # Ensure non-negativity
++        f_reconstructed = np.maximum(f_reconstructed, 0)
++        
++        # Calculate C2
++        try:
++            c2_val = compute_c2(f_reconstructed)
++        except:
++            c2_val = 0
++            
++        # Minimize negative C2 (since we want to maximize C2)
++        return -c2_val
++    
++    # Flatten the initial spectrum for optimization
++    initial_spectrum = np.concatenate([f_values.real, f_values.imag])
++    
++    # Run optimization
++    try:
++        result = minimize(
++            objective,
++            initial_spectrum,
++            method='L-BFGS-B',
++            options={'maxiter': 50, 'ftol': 1e-6},
++            bounds=[(-100, 100)] * len(initial_spectrum)
++        )
++        
++        # Extract optimized spectrum
++        optimized_spectrum_real = result.x[::2]
++        optimized_spectrum_imag = result.x[1::2]
++        
++        # Reconstruct final function
++        optimized_spectrum = optimized_spectrum_real + 1j * optimized_spectrum_imag
++        final_f_values = np.real(fftpack.ifft(optimized_spectrum))
++        final_f_values = np.maximum(final_f_values, 0)
++        
++        # Normalize again
++        if np.sum(final_f_values) > 0:
++            final_f_values = final_f_values / np.sum(final_f_values) * 100
++        
++        # Return as list
++        return final_f_values.tolist()
++    
++    except Exception as e:
++        # If optimization fails, return the initial attempt
++        return f_values.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

@@ -1,0 +1,241 @@
+<NAME>
+enhanced_voronoi_initialization
+</NAME>
+
+<DESCRIPTION>
+The current Voronoi-based initialization approach has room for improvement. The main issues are:
+1. The Voronoi implementation is too simplistic and doesn't properly leverage the geometric properties
+2. The circle radius estimation is crude and doesn't account for optimal packing density
+3. The initialization lacks proper constraint satisfaction checking
+
+I'll enhance the Voronoi initialization by:
+1. Improving the Voronoi cell calculation with better boundary handling
+2. Implementing a more sophisticated radius estimation based on Voronoi cell areas
+3. Adding proper constraint validation to ensure all initial circles are valid
+4. Incorporating a refinement step that adjusts positions to better satisfy constraints
+
+This should yield better starting configurations that are more likely to lead to higher sum_radii values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def create_voronoi_initialization(self) -> np.ndarray:
+        """Initialize circles using Voronoi diagram approach for better spatial distribution."""
+        # Generate initial candidate points using a more sophisticated pattern
+        # We'll start with a hexagonal grid pattern to get good initial distribution
+        n_points = self.n_circles + 10  # Extra points to allow for better Voronoi cells
+
+        # Create hexagonal grid pattern
+        points = []
+        rows = int(np.ceil(np.sqrt(n_points)))
+        cols = int(np.ceil(n_points / rows))
+
+        # Hexagonal spacing
+        spacing = 1.0 / (max(rows, cols) + 2)
+        hex_height = spacing * np.sqrt(3) / 2
+
+        for i in range(rows):
+            for j in range(cols):
+                if len(points) >= n_points:
+                    break
+                x = (j + 0.5 + (i % 2) * 0.5) * spacing
+                y = (i + 0.5) * hex_height
+                if x <= 1 and y <= 1:
+                    points.append([x, y])
+
+        # Trim to exact number needed
+        points = points[:n_points]
+
+        # Add some random jitter to points
+        for point in points:
+            point[0] += np.random.uniform(-spacing/4, spacing/4)
+            point[1] += np.random.uniform(-spacing/4, spacing/4)
+
+        # Ensure points are within bounds
+        points = [[max(0.01, min(0.99, p[0])), max(0.01, min(0.99, p[1]))] for p in points]
+
+        # Create Voronoi diagram
+        vor = Voronoi(points)
+
+        # Select the most appropriate Voronoi cells to produce circles
+        circles = np.zeros((self.n_circles, 3))
+        cell_centers = vor.points
+
+        # For each selected cell, compute optimal circle placement
+        valid_cells = []
+        for i in range(min(self.n_circles, len(vor.point_region))):
+            region = vor.point_region[i]
+            if region != -1:  # Valid region
+                valid_cells.append(i)
+
+        # Use the first n_circles valid cells
+        selected_indices = valid_cells[:self.n_circles]
+
+        # Compute circle properties based on Voronoi regions
+        for i, idx in enumerate(selected_indices):
+            # Get the cell center (initial guess for circle center)
+            center = vor.points[idx]
+
+            # Compute the area of the Voronoi cell to estimate optimal radius
+            # This is a simplified estimate; in practice we'd compute actual cell areas
+            # But we'll just use a reasonable approximation based on surrounding points
+            radius_estimate = spacing / 3
+
+            # Refine the radius considering constraints
+            x, y = center
+            min_distance_to_boundary = min(x, y, 1-x, 1-y)
+            final_radius = min(radius_estimate, min_distance_to_boundary * 0.8)
+
+            # Ensure minimum radius
+            final_radius = max(0.01, final_radius)
+
+            circles[i] = [x, y, final_radius]
+
+        # Optimize the initial configuration to make it more valid
+        circles = self.optimize_placement(circles)
+        return circles
+=======
+    def create_voronoi_initialization(self) -> np.ndarray:
+        """Initialize circles using Voronoi diagram approach for better spatial distribution."""
+        # Generate initial candidate points using a more sophisticated pattern
+        # We'll start with a hexagonal grid pattern to get good initial distribution
+        n_points = self.n_circles + 15  # Extra points to allow for better Voronoi cells
+
+        # Create hexagonal grid pattern
+        points = []
+        rows = int(np.ceil(np.sqrt(n_points)))
+        cols = int(np.ceil(n_points / rows))
+
+        # Hexagonal spacing
+        spacing = 0.8 / (max(rows, cols) + 2)  # Reduced spacing to allow for more variation
+        hex_height = spacing * np.sqrt(3) / 2
+
+        # Create hexagonal grid with offset rows
+        for i in range(rows):
+            for j in range(cols):
+                if len(points) >= n_points:
+                    break
+                x = (j + 0.5 + (i % 2) * 0.5) * spacing + 0.1  # Shift to avoid boundary issues
+                y = (i + 0.5) * hex_height + 0.1
+                if x <= 0.9 and y <= 0.9:  # Keep away from boundaries
+                    points.append([x, y])
+
+        # Trim to exact number needed
+        points = points[:n_points]
+
+        # Add some random jitter to points
+        for point in points:
+            point[0] += np.random.uniform(-spacing/6, spacing/6)
+            point[1] += np.random.uniform(-spacing/6, spacing/6)
+
+        # Ensure points are within bounds (with padding from edges)
+        points = [[max(0.02, min(0.98, p[0])), max(0.02, min(0.98, p[1]))] for p in points]
+
+        # Create Voronoi diagram
+        try:
+            vor = Voronoi(points)
+        except:
+            # Fallback to simple initialization if Voronoi fails
+            return self._create_simple_initialization()
+
+        # Select the most appropriate Voronoi cells to produce circles
+        circles = np.zeros((self.n_circles, 3))
+
+        # For each Voronoi cell, compute optimal circle placement
+        valid_cells = []
+        for i in range(min(self.n_circles, len(vor.point_region))):
+            region = vor.point_region[i]
+            if region != -1:  # Valid region
+                valid_cells.append(i)
+
+        # Use the first n_circles valid cells
+        selected_indices = valid_cells[:self.n_circles]
+
+        # Compute circle properties based on Voronoi regions
+        for i, idx in enumerate(selected_indices):
+            # Get the cell center (initial guess for circle center)
+            center = vor.points[idx]
+
+            # Estimate cell area using distance to neighbors
+            if len(vor.neighbors[idx]) > 0:
+                # Find average distance to neighboring points to estimate cell size
+                neighbor_distances = []
+                for neighbor_idx in vor.neighbors[idx]:
+                    if neighbor_idx >= 0 and neighbor_idx < len(vor.points):
+                        dist = np.sqrt((center[0] - vor.points[neighbor_idx][0])**2 +
+                                     (center[1] - vor.points[neighbor_idx][1])**2)
+                        neighbor_distances.append(dist)
+                avg_neighbor_dist = np.mean(neighbor_distances) if neighbor_distances else spacing
+                estimated_area = avg_neighbor_dist * avg_neighbor_dist * np.pi
+                # Convert area to radius (assuming circular cell approx)
+                radius_estimate = np.sqrt(estimated_area / np.pi) * 0.5
+            else:
+                # Fallback to simple spacing-based estimate
+                radius_estimate = spacing / 3
+
+            # Refine the radius considering constraints
+            x, y = center
+            min_distance_to_boundary = min(x, y, 1-x, 1-y)
+            final_radius = min(radius_estimate, min_distance_to_boundary * 0.7)
+
+            # Ensure reasonable minimum radius
+            final_radius = max(0.015, min(final_radius, 0.2))
+
+            circles[i] = [x, y, final_radius]
+
+        # Ensure all circles are valid by checking and fixing constraints
+        # This is a critical step that wasn't done in the previous version
+        safe_circles = self._refine_initial_circles(circles)
+
+        return safe_circles
+
+    def _refine_initial_circles(self, circles: np.ndarray) -> np.ndarray:
+        """Refine initial circles to ensure all constraints are satisfied."""
+        circles = circles.copy()
+
+        # First pass: ensure all circles fit within boundaries
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Clamp positions to valid range
+            x = np.clip(x, r, 1-r)
+            y = np.clip(y, r, 1-r)
+            circles[i] = [x, y, r]
+
+        # Second pass: resolve overlaps through iterative adjustment
+        for iteration in range(50):  # Limit iterations to prevent infinite loops
+            # Check for overlaps
+            overlaps_exist = False
+            for i in range(len(circles)):
+                for j in range(i+1, len(circles)):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dist = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+                    if dist < r1 + r2:
+                        overlaps_exist = True
+                        # Resolve by moving one of the circles apart
+                        # Move the circle with smaller radius outward
+                        if r1 <= r2:
+                            # Move circle i
+                            angle = np.arctan2(y2-y1, x2-x1)
+                            new_x = x1 + 0.01 * np.cos(angle)
+                            new_y = y1 + 0.01 * np.sin(angle)
+                            # Constrain to boundaries
+                            new_x = np.clip(new_x, r1, 1-r1)
+                            new_y = np.clip(new_y, r1, 1-r1)
+                            circles[i] = [new_x, new_y, r1]
+                        else:
+                            # Move circle j
+                            angle = np.arctan2(y1-y2, x1-x2)
+                            new_x = x2 + 0.01 * np.cos(angle)
+                            new_y = y2 + 0.01 * np.sin(angle)
+                            # Constrain to boundaries
+                            new_x = np.clip(new_x, r2, 1-r2)
+                            new_y = np.clip(new_y, r2, 1-r2)
+                            circles[j] = [new_x, new_y, r2]
+
+            if not overlaps_exist:
+                break
+
+        return circles
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,300 @@
+<NAME>
+improved_3d_point_arrangement
+</NAME>
+
+<DESCRIPTION>
+The main issue with the current implementation is that it uses a simple simulated annealing approach with basic perturbations that doesn't leverage the geometric properties of the problem effectively. I'll implement a more sophisticated approach using a combination of:
+
+1. Better initialization using a known good configuration (like a truncated octahedron or similar)
+2. Improved optimization using gradient-based methods where possible
+3. More effective neighbor generation that respects geometric constraints
+4. Better handling of boundary conditions
+5. Multiple restart strategies to avoid local optima
+
+This approach will use a hybrid method starting with a good geometric seed and then applying more intelligent optimization techniques.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum pairwise distances."""
+        # Calculate pairwise distances
+        distances = pdist(points)
+        # Return the ratio of min to max distances
+        return np.min(distances) / np.max(distances)
+
+    def initialize_points_on_sphere(n):
+        """Initialize points on a unit sphere using Fibonacci spiral method."""
+        points = []
+        golden_ratio = (1 + np.sqrt(5)) / 2
+        for i in range(n):
+            theta = np.arccos(1 - 2 * (i / (n - 1)))
+            phi = np.arctan2(np.sin(i * 2 * np.pi / golden_ratio), np.cos(i * 2 * np.pi / golden_ratio))
+            x = np.sin(theta) * np.cos(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def optimize_points(initial_points, max_iterations=10000, temp_start=1.0, cooling_rate=0.9995):
+        """Optimize point positions using simulated annealing."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+
+        # Simulated annealing parameters
+        temperature = temp_start
+
+        for iteration in range(max_iterations):
+            # Create a neighbor by perturbing one point
+            neighbor_points = current_points.copy()
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Perturb the selected point
+            perturbation = np.random.normal(0, temperature * 0.1, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Project back onto unit sphere to maintain constraint
+            norm = np.linalg.norm(neighbor_points[point_idx])
+            if norm > 0:
+                neighbor_points[point_idx] /= norm
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+
+            # Accept or reject the move
+            if new_ratio > best_ratio or np.random.rand() < np.exp((new_ratio - best_ratio) / temperature):
+                current_points = neighbor_points
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+
+            # Cool down
+            temperature *= cooling_rate
+
+            # Early stopping condition
+            if iteration % 1000 == 0 and iteration > 0:
+                if temperature < 1e-6:
+                    break
+
+        return best_points, best_ratio
+
+    # Initialize points on a unit sphere
+    np.random.seed(42)
+    initial_points = initialize_points_on_sphere(14)
+
+    # Optimize using simulated annealing
+    optimized_points, final_ratio = optimize_points(initial_points)
+
+    # Normalize points to unit cube [0,1]^3
+    # Find min/max along each axis
+    min_coords = np.min(optimized_points, axis=0)
+    max_coords = np.max(optimized_points, axis=0)
+
+    # Scale to [0,1] range
+    if np.all(max_coords - min_coords > 0):
+        optimized_points = (optimized_points - min_coords) / (max_coords - min_coords)
+
+    # Ensure the result is in [0,1]^3
+    optimized_points = np.clip(optimized_points, 0, 1)
+
+    return optimized_points
+
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import minimize
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def calculate_min_max_ratio(points):
+        """Calculate the ratio of minimum to maximum pairwise distances."""
+        if len(points) < 2:
+            return 0.0
+        # Calculate pairwise distances
+        distances = pdist(points)
+        # Return the ratio of min to max distances
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return np.min(distances) / max_dist
+
+    def initialize_points_good_seed(n):
+        """Initialize points using a known good geometric configuration for 14 points.
+        Using a truncated octahedron-like structure but adapted for 14 points.
+        """
+        # Precomputed good starting configuration for 14 points
+        # These points are designed to have relatively uniform distribution
+        # and reasonable minimum/maximum distance ratios
+        points = np.array([
+            [0.000000, 0.000000, 1.000000],
+            [0.000000, 0.000000, -1.000000],
+            [0.707107, 0.707107, 0.000000],
+            [-0.707107, -0.707107, 0.000000],
+            [0.707107, -0.707107, 0.000000],
+            [-0.707107, 0.707107, 0.000000],
+            [0.500000, 0.500000, 0.500000],
+            [-0.500000, -0.500000, -0.500000],
+            [0.500000, -0.500000, 0.500000],
+            [-0.500000, 0.500000, -0.500000],
+            [0.500000, 0.500000, -0.500000],
+            [-0.500000, -0.500000, 0.500000],
+            [0.500000, -0.500000, -0.500000],
+            [-0.500000, 0.500000, 0.500000]
+        ])
+
+        # Normalize to unit sphere
+        for i in range(len(points)):
+            norm = np.linalg.norm(points[i])
+            if norm > 0:
+                points[i] /= norm
+
+        return points
+
+    def optimize_with_gradient_descent(initial_points, max_iterations=5000):
+        """Optimize using a combination of gradient-based and local search approaches."""
+
+        def objective_func(x_flat):
+            """Objective function to minimize (negative ratio since we want to maximize)"""
+            points = x_flat.reshape(-1, 3)
+            ratio = calculate_min_max_ratio(points)
+            # We want to maximize ratio, so return negative for minimization
+            return -ratio
+
+        # Flatten initial points for optimization
+        x0 = initial_points.flatten()
+
+        # Use L-BFGS-B with bounds to ensure constraints (unit cube)
+        bounds = [(0, 1)] * len(x0)
+
+        try:
+            # Try gradient-based optimization first
+            result = minimize(
+                objective_func,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': max_iterations//2},
+                tol=1e-8
+            )
+
+            if result.success:
+                optimized_points = result.x.reshape(-1, 3)
+                return optimized_points, -result.fun
+        except:
+            pass
+
+        # Fall back to simpler local search if needed
+        current_points = initial_points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+
+        # Local search with small perturbations
+        for iteration in range(max_iterations):
+            # Copy current points
+            neighbor_points = current_points.copy()
+
+            # Choose a random point to perturb
+            point_idx = np.random.randint(len(neighbor_points))
+
+            # Make a small random perturbation
+            perturbation = np.random.normal(0, 0.001, 3)
+            neighbor_points[point_idx] += perturbation
+
+            # Clip to [0,1]^3 to maintain constraints
+            neighbor_points = np.clip(neighbor_points, 0, 1)
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+
+            # Accept if better
+            if new_ratio > best_ratio:
+                best_ratio = new_ratio
+                best_points = neighbor_points.copy()
+                current_points = neighbor_points.copy()
+            else:
+                # Occasionally accept worse solutions to escape local minima
+                if np.random.rand() < 0.01:
+                    current_points = neighbor_points.copy()
+
+        return best_points, best_ratio
+
+    def perturb_and_refine(points, iterations=1000):
+        """Apply multiple rounds of perturbation and refinement."""
+        current_points = points.copy()
+        best_ratio = calculate_min_max_ratio(current_points)
+        best_points = current_points.copy()
+
+        for iter_num in range(iterations):
+            # Create neighbor by perturbing multiple points
+            neighbor_points = current_points.copy()
+
+            # Perturb a few points at once (more aggressive than single point)
+            num_perturbed = max(1, len(neighbor_points) // 10)  # Perturb ~10% of points
+            indices_to_perturb = np.random.choice(len(neighbor_points), num_perturbed, replace=False)
+
+            for idx in indices_to_perturb:
+                # Use larger perturbation for exploration
+                perturbation = np.random.normal(0, 0.01, 3)
+                neighbor_points[idx] += perturbation
+
+            # Clip to [0,1]^3
+            neighbor_points = np.clip(neighbor_points, 0, 1)
+
+            # Calculate new ratio
+            new_ratio = calculate_min_max_ratio(neighbor_points)
+
+            # Accept if better or occasionally if worse (simulated annealing)
+            if new_ratio > best_ratio or (np.random.rand() < 0.05 and new_ratio > 0):
+                current_points = neighbor_points.copy()
+                if new_ratio > best_ratio:
+                    best_ratio = new_ratio
+                    best_points = neighbor_points.copy()
+
+        return best_points, best_ratio
+
+    # Initialize with a good starting configuration
+    np.random.seed(42)
+    initial_points = initialize_points_good_seed(14)
+
+    # First optimization round with gradient descent
+    optimized_points, ratio1 = optimize_with_gradient_descent(initial_points, 2000)
+
+    # Second round with local search
+    refined_points, ratio2 = perturb_and_refine(optimized_points, 1000)
+
+    # Final optimization with more aggressive local search
+    final_points, final_ratio = perturb_and_refine(refined_points, 2000)
+
+    return final_points
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

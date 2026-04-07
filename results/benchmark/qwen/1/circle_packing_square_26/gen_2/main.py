@@ -1,0 +1,203 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+
+def initialize_circles():
+    """Initialize 26 circles with a heuristic approach."""
+    n = 26
+    circles = np.zeros((n, 3))
+
+    # Try a hexagonal packing pattern in the center
+    # This gives a good initial distribution
+
+    # Create a roughly hexagonal lattice in the center
+    rows = 5
+    cols = 5
+
+    # Generate points in a hexagonal grid pattern
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(points) >= n:
+                break
+            x = 0.2 + j * 0.16
+            y = 0.2 + i * 0.16
+            # Offset every other row
+            if i % 2 == 1:
+                x += 0.08
+            points.append([x, y])
+
+    # Fill remaining spots with random points near edges if needed
+    for i in range(n):
+        if i < len(points):
+            circles[i, 0] = points[i][0]  # x
+            circles[i, 1] = points[i][1]  # y
+            # Start with small radius
+            circles[i, 2] = 0.02
+        else:
+            # Random placement near edges
+            circles[i, 0] = np.random.uniform(0.05, 0.95)
+            circles[i, 1] = np.random.uniform(0.05, 0.95)
+            circles[i, 2] = 0.02
+
+    return circles
+
+def validate_and_fix(circles):
+    """Ensure all circles are within bounds and have valid radii."""
+    n = len(circles)
+    for i in range(n):
+        # Ensure circle is within bounds
+        r = circles[i, 2]
+        x = circles[i, 0]
+        y = circles[i, 1]
+
+        # Keep radius positive and within bounds
+        r = max(0.001, min(r, min(x, 1-x, y, 1-y)))
+        circles[i, 2] = r
+
+        # Keep center within bounds
+        circles[i, 0] = max(r, min(x, 1-r))
+        circles[i, 1] = max(r, min(y, 1-r))
+
+    return circles
+
+def circle_constraints(circles):
+    """Check if circles satisfy constraints."""
+    n = len(circles)
+    # Check containment
+    for i in range(n):
+        x, y, r = circles[i]
+        if x < r or x > 1-r or y < r or y > 1-r:
+            return False
+
+    # Check overlaps
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            dist_sq = (x1-x2)**2 + (y1-y2)**2
+            if dist_sq < (r1+r2)**2:
+                return False
+
+    return True
+
+def objective(circles):
+    """Minimize negative sum of radii (since we want to maximize)"""
+    return -np.sum(circles[:, 2])
+
+def constraint_containment(circles):
+    """Ensure all circles are fully contained."""
+    n = len(circles)
+    cons = []
+    for i in range(n):
+        x, y, r = circles[i]
+        cons.append({'type': 'ineq', 'fun': lambda c, i=i: c[i, 0] - c[i, 2]})  # x >= r
+        cons.append({'type': 'ineq', 'fun': lambda c, i=i: c[i, 1] - c[i, 2]})  # y >= r
+        cons.append({'type': 'ineq', 'fun': lambda c, i=i: 1 - c[i, 0] - c[i, 2]})  # 1-x >= r
+        cons.append({'type': 'ineq', 'fun': lambda c, i=i: 1 - c[i, 1] - c[i, 2]})  # 1-y >= r
+    return cons
+
+def constraint_overlap(circles):
+    """Ensure circles don't overlap."""
+    n = len(circles)
+    cons = []
+    for i in range(n):
+        for j in range(i+1, n):
+            def overlap_constraint(c, i=i, j=j):
+                x1, y1, r1 = c[i]
+                x2, y2, r2 = c[j]
+                # Distance squared >= (radii sum)^2
+                dist_sq = (x1-x2)**2 + (y1-y2)**2
+                return dist_sq - (r1+r2)**2
+            cons.append({'type': 'ineq', 'fun': overlap_constraint})
+    return cons
+
+def optimize_circles(initial_circles):
+    """Use scipy.optimize to refine the circle packing."""
+    # Convert to flat array for optimization
+    initial_flat = initial_circles.flatten()
+
+    # Define bounds for parameters
+    bounds = []
+    n = len(initial_circles)
+    for i in range(n):
+        # x, y, r bounds
+        bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.49)])
+
+    # We'll use a simpler approach: just optimize the radii first
+    # by finding maximum radii for given positions
+
+    # First pass: try to increase radii while maintaining constraints
+    improved_circles = initial_circles.copy()
+
+    # Simple iterative improvement: try to grow radii
+    for _ in range(100):
+        changed = False
+        for i in range(n):
+            current_radius = improved_circles[i, 2]
+            # Find maximum possible radius for this circle
+            max_radius = current_radius
+
+            # Check boundary constraints
+            x, y = improved_circles[i, 0], improved_circles[i, 1]
+            max_radius = min(max_radius, x, 1-x, y, 1-y)
+
+            # Check overlap constraints with other circles
+            for j in range(n):
+                if i != j:
+                    x2, y2, r2 = improved_circles[j]
+                    dist = np.sqrt((x-x2)**2 + (y-y2)**2)
+                    max_radius = min(max_radius, dist - r2 - 0.001)
+
+            if max_radius > current_radius + 0.0001:  # Only update if significantly larger
+                improved_circles[i, 2] = max_radius
+                changed = True
+
+        if not changed:
+            break
+
+    # Final validation
+    improved_circles = validate_and_fix(improved_circles)
+
+    return improved_circles
+
+def circle_packing26() -> np.ndarray:
+    """
+    Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+
+    # Initialize with heuristic approach
+    circles = initialize_circles()
+
+    # Refine the solution
+    circles = optimize_circles(circles)
+
+    # Final validation and fix any issues
+    circles = validate_and_fix(circles)
+
+    # Ensure the solution meets constraints
+    if not circle_constraints(circles):
+        # If still invalid, fallback to a more conservative approach
+        circles = np.zeros((26, 3))
+        # Place circles in a grid pattern with minimal overlap
+        for i in range(26):
+            col = i % 5
+            row = i // 5
+            x = 0.1 + col * 0.2
+            y = 0.1 + row * 0.2
+            # Ensure they're within unit square with some margin
+            x = max(0.05, min(0.95, x))
+            y = max(0.05, min(0.95, y))
+            circles[i, 0] = x
+            circles[i, 1] = y
+            # Small radius for overlapping safety
+            circles[i, 2] = 0.03
+
+    return circles
+
+
+# EVOLVE-BLOCK-END

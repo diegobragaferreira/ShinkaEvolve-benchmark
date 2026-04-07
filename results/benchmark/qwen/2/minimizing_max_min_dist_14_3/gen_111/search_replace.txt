@@ -1,0 +1,213 @@
+<NAME>
+add_multi_start_with_spherical_voronoi
+</NAME>
+
+<DESCRIPTION>
+This improvement adds a new multi-start strategy that leverages SphericalVoronoi to generate diverse initial configurations. The key insight is that by generating Voronoi diagrams on the sphere, we can obtain more evenly distributed point sets than simple Fibonacci arrangements. This approach increases the diversity of starting points, which should help escape local optima and potentially find better solutions that beat the current 0.2 benchmark.
+
+The change introduces:
+1. SphericalVoronoi-based initialization for more uniform distributions
+2. Additional restart strategies with different Voronoi-based configurations
+3. Better handling of point distribution quality in the initialization phase
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+import time
+from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
+import warnings
+warnings.filterwarnings('ignore')
+=======
+import numpy as np
+import time
+from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
+from scipy.spatial import SphericalVoronoi
+import warnings
+warnings.filterwarnings('ignore')
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def fibonacci_sphere_golden(n):
+        """Generate n points using golden ratio with slight variation."""
+        points = []
+        # Use slightly adjusted golden ratio for variety
+        phi = (1 + np.sqrt(5)) / 2 * 0.95  # Slightly modified
+        for i in range(n):
+            z = 1 - (i / (n - 1)) * 2  # z goes from 1 to -1
+            radius = np.sqrt(1 - z*z)
+
+            theta = np.arctan2(np.sin(i * 2 * np.pi / phi), np.cos(i * 2 * np.pi / phi))
+            x = radius * np.cos(theta)
+            y = radius * np.sin(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def two_phase_optimization(initial_points):
+=======
+    def fibonacci_sphere_golden(n):
+        """Generate n points using golden ratio with slight variation."""
+        points = []
+        # Use slightly adjusted golden ratio for variety
+        phi = (1 + np.sqrt(5)) / 2 * 0.95  # Slightly modified
+        for i in range(n):
+            z = 1 - (i / (n - 1)) * 2  # z goes from 1 to -1
+            radius = np.sqrt(1 - z*z)
+
+            theta = np.arctan2(np.sin(i * 2 * np.pi / phi), np.cos(i * 2 * np.pi / phi))
+            x = radius * np.cos(theta)
+            y = radius * np.sin(theta)
+            points.append([x, y, z])
+        return np.array(points)
+
+    def spherical_voronoi_init(n, num_attempts=5):
+        """Generate diverse initial points using SphericalVoronoi for better distribution."""
+        best_points = None
+        best_ratio = 0.0
+
+        for attempt in range(num_attempts):
+            # Generate random points on sphere
+            np.random.seed(attempt + 1000)
+            points = np.random.randn(n, 3)
+            # Normalize to unit sphere
+            norms = np.linalg.norm(points, axis=1)
+            points = points / norms[:, np.newaxis]
+
+            try:
+                # Create SphericalVoronoi diagram
+                sv = SphericalVoronoi(points, radius=1.0)
+
+                # Get the centroids of the Voronoi cells as new candidate points
+                voronoi_points = sv.vertices
+
+                # If we got enough points, use them; otherwise fall back to original
+                if len(voronoi_points) >= n:
+                    # Take first n points, but make sure they're properly normalized
+                    selected_points = voronoi_points[:n]
+                    selected_points = selected_points / np.linalg.norm(selected_points, axis=1)[:, np.newaxis]
+                    # Add small noise to break degeneracies
+                    noise = np.random.normal(0, 0.001, selected_points.shape)
+                    selected_points += noise
+                    selected_points = selected_points / np.linalg.norm(selected_points, axis=1)[:, np.newaxis]
+
+                    # Evaluate this configuration
+                    ratio = compute_min_max_ratio(selected_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = selected_points.copy()
+                else:
+                    # If Voronoi didn't give us enough points, use a simple approach
+                    # Add noise to original points and normalize
+                    noise = np.random.normal(0, 0.005, points.shape)
+                    noisy_points = points + noise
+                    noisy_points = noisy_points / np.linalg.norm(noisy_points, axis=1)[:, np.newaxis]
+
+                    ratio = compute_min_max_ratio(noisy_points)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = noisy_points.copy()
+
+            except Exception:
+                # If SphericalVoronoi fails, fall back to regular noise
+                noise = np.random.normal(0, 0.005, points.shape)
+                noisy_points = points + noise
+                noisy_points = noisy_points / np.linalg.norm(noisy_points, axis=1)[:, np.newaxis]
+
+                ratio = compute_min_max_ratio(noisy_points)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = noisy_points.copy()
+
+        return best_points if best_points is not None else points
+
+    def two_phase_optimization(initial_points):
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Strategy 1: Enhanced Fibonacci sphere initialization with multiple seeds and variations
+    # Generate multiple Fibonacci configurations with different parameterizations
+    fib_configurations = []
+
+    # Original Fibonacci sphere
+    fib_configurations.append(("original", lambda: fibonacci_sphere(14)))
+
+    # Modified Fibonacci with different offsets
+    np.random.seed(1001)
+    offset1 = np.random.uniform(0, 1, 14)
+    fib_configurations.append(("offset1", lambda: fibonacci_sphere_offset(14, offset1)))
+
+    np.random.seed(1002)
+    offset2 = np.random.uniform(0, 1, 14)
+    fib_configurations.append(("offset2", lambda: fibonacci_sphere_offset(14, offset2)))
+
+    # Different parameterization approaches
+    fib_configurations.append(("golden", lambda: fibonacci_sphere_golden(14)))
+
+    # Test different Fibonacci configurations
+    for config_name, fib_func in fib_configurations:
+        points = fib_func()
+        # Add controlled noise
+        noise = np.random.normal(0, 0.01, points.shape)
+        points += noise
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        if np.max(norms) > 0:
+            points = points / np.max(norms) * 0.9
+        points = project_to_sphere(points)
+        points, ratio = two_phase_optimization(points)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = points.copy()
+=======
+    # Strategy 1: Enhanced Fibonacci sphere initialization with multiple seeds and variations
+    # Generate multiple Fibonacci configurations with different parameterizations
+    fib_configurations = []
+
+    # Original Fibonacci sphere
+    fib_configurations.append(("original", lambda: fibonacci_sphere(14)))
+
+    # Modified Fibonacci with different offsets
+    np.random.seed(1001)
+    offset1 = np.random.uniform(0, 1, 14)
+    fib_configurations.append(("offset1", lambda: fibonacci_sphere_offset(14, offset1)))
+
+    np.random.seed(1002)
+    offset2 = np.random.uniform(0, 1, 14)
+    fib_configurations.append(("offset2", lambda: fibonacci_sphere_offset(14, offset2)))
+
+    # Different parameterization approaches
+    fib_configurations.append(("golden", lambda: fibonacci_sphere_golden(14)))
+
+    # Test different Fibonacci configurations
+    for config_name, fib_func in fib_configurations:
+        points = fib_func()
+        # Add controlled noise
+        noise = np.random.normal(0, 0.01, points.shape)
+        points += noise
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1)
+        if np.max(norms) > 0:
+            points = points / np.max(norms) * 0.9
+        points = project_to_sphere(points)
+        points, ratio = two_phase_optimization(points)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = points.copy()
+
+    # Strategy 4: Spherical Voronoi initialization for better point distribution
+    sv_points = spherical_voronoi_init(14)
+    if sv_points is not None:
+        points, ratio = two_phase_optimization(sv_points)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_points = points.copy()
+>>>>>>> REPLACE
+</DIFF>

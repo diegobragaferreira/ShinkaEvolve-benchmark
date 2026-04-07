@@ -1,0 +1,357 @@
+--- a/original.py
++++ b/original.py
+@@ -1,287 +1,351 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+ from numba import jit, prange
+ import time
+ from scipy.signal import convolve
+ import math
++from scipy.stats import qmc
+ 
+ # Core computation module with heavy numba optimization
+ @jit(nopython=True, parallel=True)
+ def compute_convolution_norms_fast(f_values, domain_length=0.5):
+     """
+     Fast computation of convolution norms using numba JIT compilation
+     """
+     n_steps = len(f_values)
+     if n_steps == 0:
+         return 0.0, 0.0, 0.0
+ 
+     # Step size
+     dx = domain_length / n_steps
+ 
+     # Compute autoconvolution g = f * f using direct computation
+     g_size = 2 * n_steps - 1
+     g = np.zeros(g_size)
+ 
+     # Compute autoconvolution using direct convolution sum - JIT compiled
+     for i in range(n_steps):
+         for j in range(n_steps):
+             k = i + j
+             if 0 <= k < g_size:
+                 g[k] += f_values[i] * f_values[j] * dx
+ 
+     # Compute norms using piecewise linear integration approach
+     # For ||g||₂² using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
+     g2_sq = 0.0
+     for i in range(len(g)-1):
+         g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+ 
+     # ||g||₁ = sum(|g_i| * dx)
+     g1 = 0.0
+     for i in range(len(g)):
+         g1 += abs(g[i]) * dx
+ 
+     # ||g||∞ = max(|g_i|)
+     ginf = 0.0
+     for i in range(len(g)):
+         val = abs(g[i])
+         if val > ginf:
+             ginf = val
+ 
+     return g2_sq, g1, ginf
+ 
+ @jit(nopython=True)
+ def compute_c2_fast(f_values):
+     """Fast C2 computation with numba JIT"""
+     g2_sq, g1, ginf = compute_convolution_norms_fast(f_values)
+ 
+     if g1 == 0 or ginf == 0:
+         return 0.0
+ 
+     return g2_sq / (g1 * ginf)
+ 
+-# Enhanced geometric initialization with multi-scale patterns
++# Enhanced geometric initialization with multi-scale patterns and Latin Hypercube Sampling
+ def generate_multi_scale_geometric_initial(n_steps):
+     """Generate initial function using multi-scale geometric patterns"""
+     # Create a smooth, bell-shaped function that encourages flat convolution profiles
+     x = np.linspace(-0.25, 0.25, n_steps)
+ 
+     # Generate multiple overlapping Gaussian bumps with different scales and heights
+     # This creates a more complex structure that promotes better convolution properties
+     f_values = np.zeros(n_steps)
+ 
+     # Base Gaussian bump at center with moderate width
+     f_values += 1.0 * np.exp(-0.5 * ((x - 0.0) / 0.1)**2)
+ 
+     # Additional bumps at different scales for richer structure
+     f_values += 0.7 * np.exp(-0.5 * ((x - 0.05) / 0.05)**2)
+     f_values += 0.5 * np.exp(-0.5 * ((x + 0.05) / 0.07)**2)
+     f_values += 0.3 * np.exp(-0.5 * ((x - 0.1) / 0.08)**2)
+     f_values += 0.4 * np.exp(-0.5 * ((x + 0.1) / 0.06)**2)
+ 
+     # Ensure non-negativity and normalize
+     f_values = np.maximum(f_values, 0)
+ 
+     # Normalize to reasonable scale
+     total_area = np.sum(f_values) * (0.5 / n_steps)
+     if total_area > 0:
+         f_values = f_values / total_area * 2.0
+ 
+     return f_values.tolist()
++
++def generate_lhs_initial_functions(n_functions, n_steps, seed=42):
++    """Generate multiple initial functions using Latin Hypercube Sampling"""
++    # Set up LHS sampler
++    sampler = qmc.LatinHypercube(d=n_steps, seed=seed)
++
++    # Generate samples in [0,1]^n_steps
++    samples = sampler.random(n=n_functions)
++
++    # Transform to appropriate range
++    lhs_functions = []
++
++    for sample in samples:
++        # Create function using the LHS sample
++        # Use the sample as weights for a combination of base patterns
++        f_values = np.zeros(n_steps)
++
++        # Base pattern with LHS-generated weights
++        x = np.linspace(-0.25, 0.25, n_steps)
++
++        # Create multiple Gaussian bumps with varying parameters based on sample values
++        for i in range(min(5, n_steps//10)):  # Limit to reasonable number of bumps
++            # Use sample values to determine bump properties
++            height = 0.5 + 0.5 * sample[i % len(sample)]  # Height between 0.5-1.0
++            width = 0.02 + 0.08 * sample[(i+1) % len(sample)]  # Width between 0.02-0.1
++            center = -0.2 + 0.4 * sample[(i+2) % len(sample)]  # Center between -0.2 and 0.2
++
++            bump = height * np.exp(-0.5 * ((x - center) / width)**2)
++            f_values += bump
++
++        # Ensure non-negativity
++        f_values = np.maximum(f_values, 0)
++
++        # Normalize
++        total_area = np.sum(f_values) * (0.5 / n_steps)
++        if total_area > 0:
++            f_values = f_values / total_area * 2.0
++
++        lhs_functions.append(f_values.tolist())
++
++    return lhs_functions
+ 
+ # Adaptive coordinate-wise refinement with dynamic step sizing
+ def adaptive_local_search(current_f, max_iterations=20, time_limit=85):
+     """Perform adaptive local search with dynamic step sizes"""
+     start_time = time.time()
+     old_c2 = compute_c2_fast(current_f)
+ 
+     # Start with larger steps and decrease as we converge
+     step_sizes = [0.1, 0.05, 0.02, 0.01]
+ 
+     for iter_num in range(max_iterations):
+         if time.time() - start_time > time_limit:
+             break
+ 
+         improved = False
+         # Randomly sample indices to process for efficiency
+         indices_to_try = np.random.choice(len(current_f), min(15, len(current_f)//2), replace=False)
+ 
+         for idx in indices_to_try:
+             if time.time() - start_time > time_limit:
+                 break
+ 
+             original_value = current_f[idx]
+ 
+             # Try different step sizes in order of preference
+             for step_size in step_sizes:
+                 if time.time() - start_time > time_limit:
+                     break
+ 
+                 # Try increasing and decreasing
+                 for direction in [1, -1]:
+                     if time.time() - start_time > time_limit:
+                         break
+                     test_f = current_f.copy()
+                     new_val = original_value + direction * step_size
+                     test_f[idx] = max(0, new_val)
+ 
+                     new_c2 = compute_c2_fast(test_f)
+                     if new_c2 > old_c2:
+                         current_f = test_f
+                         old_c2 = new_c2
+                         improved = True
+ 
+         # If no improvement was found in this iteration, stop early
+         if not improved:
+             break
+ 
+     return current_f, old_c2
+ 
+-# Multi-resolution adaptive search
++# Multi-resolution adaptive search with LHS initialization
+ def multi_resolution_search(n_steps, time_limit=85):
+-    """Search at multiple resolutions to find good starting points"""
++    """Search at multiple resolutions to find good starting points using LHS"""
+     best_solution = None
+     best_c2 = -np.inf
+ 
+     # Try different resolutions
+     resolutions = [100, 150, 200, 250]
++
++    # Generate multiple LHS initial functions for diversity
++    lhs_functions = generate_lhs_initial_functions(10, n_steps, seed=42)
++
++    # Store all initial candidates
++    all_candidates = []
+ 
+     for res in resolutions:
+         if time.time() - start_time > time_limit:
+             break
+ 
+         try:
+             # Generate initial function at this resolution
+             if res <= 150:
+                 f_values = generate_multi_scale_geometric_initial(res)
+             else:
+                 # Use patterned construction for larger resolutions
+                 f_values = generate_multi_scale_geometric_initial(res)
+                 # Add controlled noise for exploration
+                 noise_level = 0.1
+                 for i in range(len(f_values)):
+                     if np.random.random() < 0.2:
+                         f_values[i] *= (1 + np.random.normal(0, noise_level))
+ 
+             # Ensure non-negativity
+             f_values = [max(0, x) for x in f_values]
+ 
+             # Normalize for numerical stability
+             total = sum(f_values)
+             if total > 0:
+                 f_values = [x / total * 5.0 for x in f_values]
+ 
+             # Local refinement at this resolution
+             refined_f, refined_c2 = adaptive_local_search(f_values, max_iterations=10, time_limit=time_limit)
+ 
++            all_candidates.append((refined_f, refined_c2))
++
+             if refined_c2 > best_c2:
+                 best_c2 = refined_c2
+                 # Interpolate back to target resolution if needed
+                 if res != n_steps:
+                     # Create target resolution function
+                     target_f = np.interp(np.linspace(0, len(refined_f)-1, n_steps),
+                                        np.arange(len(refined_f)), refined_f)
+                     best_solution = target_f.tolist()
+                 else:
+                     best_solution = refined_f
+ 
+         except Exception as e:
+             continue
+ 
++    # Also try LHS functions
++    for lhs_func in lhs_functions[:5]:  # Try first 5 LHS functions
++        if time.time() - start_time > time_limit:
++            break
++        try:
++            refined_f, refined_c2 = adaptive_local_search(lhs_func, max_iterations=8, time_limit=time_limit)
++            all_candidates.append((refined_f, refined_c2))
++
++            if refined_c2 > best_c2:
++                best_c2 = refined_c2
++                best_solution = refined_f
++        except Exception as e:
++            continue
++
+     # If no good solution found, return a default pattern
+     if best_solution is None:
+         best_solution = generate_multi_scale_geometric_initial(n_steps)
+ 
+     return best_solution
+ 
+ def construct_function() -> list[float]:
+     """Main function to construct step-function with high C2 value"""
+     global start_time
+     start_time = time.time()
+ 
+     n_steps = 200
+     max_time = 85  # seconds
+ 
+     # Phase 1: Multi-resolution adaptive search
+     try:
+         initial_solution = multi_resolution_search(n_steps, max_time)
+         best_f = np.array(initial_solution)
+         best_c2 = compute_c2_fast(initial_solution)
+     except Exception as e:
+         # Fallback to simple geometric pattern
+         best_f = np.array(generate_multi_scale_geometric_initial(n_steps))
+         best_c2 = compute_c2_fast(best_f.tolist())
+ 
+     # Phase 2: Fine-grained adaptive local search
+     try:
+         refined_f, refined_c2 = adaptive_local_search(best_f.tolist(), max_iterations=15, time_limit=max_time)
+ 
+         if refined_c2 > best_c2:
+             best_c2 = refined_c2
+             best_f = np.array(refined_f)
+     except Exception as e:
+         pass
+ 
+     # Phase 3: Final coordinate-wise refinement with more aggressive sampling
+     try:
+         final_f = best_f.copy()
+         old_c2 = best_c2
+ 
+         # Most aggressive refinement
+         for iter_num in range(10):
+             if time.time() - start_time > max_time:
+                 break
+ 
+             improved = False
+             # Process all indices but with random sampling for efficiency
+             indices_to_process = np.random.choice(len(final_f), min(20, len(final_f)//2), replace=False)
+ 
+             for idx in indices_to_process:
+                 if time.time() - start_time > max_time:
+                     break
+ 
+                 original_value = final_f[idx]
+                 # Try with several step sizes
+                 step_sizes = [0.02, 0.05, 0.1]
+ 
+                 for step in step_sizes:
+                     if time.time() - start_time > max_time:
+                         break
+ 
+                     # Try both directions
+                     for direction in [1, -1]:
+                         if time.time() - start_time > max_time:
+                             break
+ 
+                         test_f = final_f.copy()
+                         new_val = original_value + direction * step
+                         test_f[idx] = max(0, new_val)
+ 
+                         new_c2 = compute_c2_fast(test_f.tolist())
+                         if new_c2 > old_c2:
+                             final_f = test_f
+                             old_c2 = new_c2
+                             improved = True
+ 
+             if not improved:
+                 break
+ 
+         best_f = final_f
+         best_c2 = old_c2
+     except Exception as e:
+         pass
+ 
+     # Final normalization and formatting
+     final_solution = np.maximum(0.0, best_f)
+ 
+     # Normalize for better numerical behavior
+     if np.sum(final_solution) > 0:
+         final_solution = final_solution / np.sum(final_solution) * 10
+ 
+     return final_solution.tolist()
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     f_values = construct_function()
+     print(f"Function: {f_values}")

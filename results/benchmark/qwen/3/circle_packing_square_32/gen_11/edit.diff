@@ -1,0 +1,152 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,143 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++import random
++from deap import base, creator, tools, algorithms
++from scipy.optimize import minimize
++import math
+ 
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++# Set random seed for reproducibility
++random.seed(42)
++np.random.seed(42)
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    
++    # Define fitness function
++    def eval_fitness(individual):
++        # Reshape individual into (x, y, r) for each circle
++        circles = np.array(individual).reshape(-1, 3)
++        
++        # Check constraints
++        total_radius = np.sum(circles[:, 2])
++        
++        # Penalty for out of bounds
++        penalty = 0
++        
++        # Check containment constraints
++        for i in range(n):
++            x, y, r = circles[i]
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                penalty += 1000
++        
++        # Check overlap constraints
++        for i in range(n):
++            for j in range(i+1, n):
++                x1, y1, r1 = circles[i]
++                x2, y2, r2 = circles[j]
++                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                if distance < r1 + r2:
++                    penalty += 1000000
++        
++        # Return negative since we want to maximize (DEAP minimizes by default)
++        return -(total_radius - penalty),
++    
++    # Create types
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    
++    # Attribute generator
++    def generate_individual():
++        # Generate initial positions and radii
++        individual = []
++        for _ in range(n):
++            # Random position and radius
++            x = random.uniform(0.05, 0.95)  # Avoid edges
++            y = random.uniform(0.05, 0.95)
++            r = random.uniform(0.01, 0.15)  # Reasonable radius range
++            individual.extend([x, y, r])
++        return creator.Individual(individual)
++    
++    toolbox.register("individual", generate_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    
++    # Operators
++    toolbox.register("evaluate", eval_fitness)
++    toolbox.register("mate", tools.cxUniform, indpb=0.5)
++    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.02, indpb=0.2)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    # Statistics
++    stats = tools.Statistics(lambda ind: ind.fitness.values)
++    stats.register("avg", np.mean)
++    stats.register("min", np.min)
++    stats.register("max", np.max)
++    
++    # Run evolution
++    population = toolbox.population(n=50)
++    hof = tools.HallOfFame(1)
++    
++    # Run evolution
++    pop, logbook = algorithms.eaSimple(population, toolbox, cxpb=0.7, mutpb=0.1, 
++                                       ngen=100, stats=stats, halloffame=hof, verbose=False)
++    
++    # Get best solution
++    best_individual = hof[0]
++    circles = np.array(best_individual).reshape(-1, 3)
++    
++    # Local optimization refinement
++    def objective(params):
++        # Reshape params back to circles
++        circles_local = params.reshape(-1, 3)
++        
++        # Calculate negative sum of radii (we want to maximize)
++        total_radius = np.sum(circles_local[:, 2])
++        
++        # Penalty for constraint violations
++        penalty = 0
++        
++        # Containment penalties
++        for i in range(n):
++            x, y, r = circles_local[i]
++            if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++                penalty += 1000000
++        
++        # Overlap penalties
++        for i in range(n):
++            for j in range(i+1, n):
++                x1, y1, r1 = circles_local[i]
++                x2, y2, r2 = circles_local[j]
++                distance = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
++                if distance < r1 + r2:
++                    penalty += 1000000
++        
++        return -(total_radius - penalty)
++    
++    # Optimize using L-BFGS
++    try:
++        result = minimize(objective, circles.flatten(), method='L-BFGS-B', 
++                         bounds=[(0, 1), (0, 1), (0, 0.5)] * n)
++        refined_circles = result.x.reshape(-1, 3)
++    except:
++        refined_circles = circles
++    
++    # Final validation and cleanup
++    final_circles = []
++    for i in range(n):
++        x, y, r = refined_circles[i]
++        # Ensure valid ranges
++        x = max(0.01, min(0.99, x))
++        y = max(0.01, min(0.99, y))
++        r = max(0.001, min(0.49, r))
++        final_circles.append([x, y, r])
++    
++    return np.array(final_circles)
+ 
+ # EVOLVE-BLOCK-END

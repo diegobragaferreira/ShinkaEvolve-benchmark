@@ -1,0 +1,382 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+import time
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_voronoi_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Compute constraint density for each circle based on Voronoi neighbors.
+    """
+    n = len(circles)
+    if n < 2:
+        return np.zeros(n)
+    
+    # Get circle centers
+    centers = circles[:, :2]
+    
+    # Create Voronoi diagram
+    try:
+        vor = Voronoi(centers)
+    except:
+        # Fallback to simpler constraint calculation
+        return np.ones(n) * 0.5
+    
+    # Count neighbors for each region
+    constraint_density = np.zeros(n)
+    
+    # For each circle, count how many others are close enough to potentially collide
+    for i in range(n):
+        center_i = centers[i]
+        nearby_count = 0
+        
+        # Check nearby circles (within 3x max radius)
+        max_radius = np.max(circles[:, 2])
+        threshold = 3 * max_radius
+        
+        for j in range(n):
+            if i != j:
+                dist = distance.euclidean(center_i, centers[j])
+                if dist < threshold:
+                    nearby_count += 1
+                    
+        constraint_density[i] = nearby_count / max(1, n - 1)
+    
+    return constraint_density
+
+def initialize_hybrid_pattern(n_circles: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """
+    Initialize circle positions using a hybrid pattern combining hexagonal and spiral arrangements.
+    """
+    circles = np.zeros((n_circles, 3))
+    
+    # Start with hexagonal packing for dense initial arrangement
+    total_area = rect_width * rect_height
+    circle_area = total_area / n_circles * 0.8  # Leave some margin
+    estimated_radius = np.sqrt(circle_area / np.pi)
+    
+    # Hexagon parameters
+    side_length = 2 * estimated_radius
+    
+    # Determine grid dimensions for hexagonal layout
+    cols = max(1, int(rect_width / side_length) + 1)
+    rows = max(1, int(rect_height / (side_length * np.sqrt(3) / 2)) + 1)
+    
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            x = (j + (i % 2) * 0.5) * side_length
+            y = i * side_length * np.sqrt(3) / 2
+            
+            # Only include points that fit within the rectangle
+            if x >= estimated_radius and x <= rect_width - estimated_radius and \
+               y >= estimated_radius and y <= rect_height - estimated_radius:
+                points.append([x, y])
+                
+    # Fill remaining positions with spiral pattern
+    while len(points) < n_circles:
+        # Spiral pattern from center outward
+        center_x, center_y = rect_width / 2, rect_height / 2
+        angle = len(points) * 0.5
+        radius = min(len(points) * 0.03 * estimated_radius, min(rect_width, rect_height) * 0.4)
+        x = center_x + radius * np.cos(angle)
+        y = center_y + radius * np.sin(angle)
+        
+        # Stay within bounds
+        x = np.clip(x, estimated_radius, rect_width - estimated_radius)
+        y = np.clip(y, estimated_radius, rect_height - estimated_radius)
+        points.append([x, y])
+    
+    # Trim to exact number needed
+    points = points[:n_circles]
+    
+    # Create initial circles with estimated radii
+    for i, (x, y) in enumerate(points):
+        circles[i] = [x, y, estimated_radius * 0.8]
+    
+    return circles
+
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """
+    Fast validity check with early termination for collision detection.
+    """
+    n = len(circles)
+    
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+    
+    if n <= 1:
+        return True
+    
+    # Early termination optimized collision check
+    coords = circles[:, :2]
+    radii = circles[:, 2]
+    
+    # For small number of circles, use direct approach
+    if n <= 10:
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = np.linalg.norm(coords[i] - coords[j])
+                min_distance = radii[i] + radii[j]
+                
+                if distance < min_distance:
+                    return False
+        return True
+    
+    # Use vectorized computation with early exit for large sets
+    try:
+        # Compute distance matrix
+        dist_matrix = cdist(coords, coords)
+        
+        # Check for collisions efficiently
+        for i in range(n):
+            for j in range(i+1, n):
+                if dist_matrix[i, j] < (radii[i] + radii[j]):
+                    return False
+                    
+        return True
+    except:
+        # Fallback to pair-wise check
+        for i in range(n):
+            for j in range(i+1, n):
+                distance = np.linalg.norm(coords[i] - coords[j])
+                min_distance = radii[i] + radii[j]
+                
+                if distance < min_distance:
+                    return False
+        return True
+
+def calculate_fitness(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> Tuple[float, float]:
+    """
+    Calculate fitness with optimized penalty calculation.
+    """
+    n = len(circles)
+    
+    # Check boundary constraints
+    penalty = 0.0
+    for i in range(n):
+        x, y, r = circles[i]
+        # Circle must be fully contained within rectangle
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            # Apply penalty based on how much it violates boundaries
+            overlap = 0.0
+            if x - r < 0:
+                overlap += abs(x - r)
+            if x + r > rect_width:
+                overlap += abs(x + r - rect_width)
+            if y - r < 0:
+                overlap += abs(y - r)
+            if y + r > rect_height:
+                overlap += abs(y + r - rect_height)
+            penalty += overlap * 1000
+    
+    # Check overlap constraints
+    overlap_penalty = 0.0
+    if n > 1:
+        # Vectorized approach for efficiency
+        coords = circles[:, :2]
+        radii = circles[:, 2]
+        
+        try:
+            # Use distance matrix approach
+            dist_matrix = cdist(coords, coords)
+            
+            # Apply penalty for overlaps
+            mask = np.triu(np.ones_like(dist_matrix, dtype=bool), k=1)
+            overlap_distances = dist_matrix[mask]
+            overlap_radii = (radii[:, None] + radii[None, :])[mask]
+            
+            # Only penalize actual overlaps
+            overlaps = overlap_distances < overlap_radii
+            if np.any(overlaps):
+                overlap_penalty = -np.sum(overlap_radii[overlaps] - overlap_distances[overlaps]) * 100
+        except:
+            # Fallback to brute force if vectorized approach fails
+            for i in range(n):
+                for j in range(i+1, n):
+                    distance = np.linalg.norm(coords[i] - coords[j])
+                    min_distance = radii[i] + radii[j]
+                    
+                    if distance < min_distance:
+                        overlap_amount = min_distance - distance
+                        overlap_penalty += overlap_amount * 1000  # Heavy penalty for overlaps
+    
+    # Fitness is sum of radii minus penalties
+    total_radius = np.sum(circles[:, 2])
+    fitness = total_radius - penalty - overlap_penalty
+    
+    return fitness, overlap_penalty
+
+def adaptive_optimize_single_circle(circles: np.ndarray, 
+                                   constraint_densities: np.ndarray,
+                                   circle_idx: int,
+                                   rect_width: float = 1.0, 
+                                   rect_height: float = 1.0,
+                                   max_radius: float = 0.5) -> np.ndarray:
+    """
+    Optimizes a single circle using adaptive parameters based on constraint density.
+    """
+    mutated = circles.copy()
+    x, y, r = mutated[circle_idx]
+    
+    # Based on constraint density, adjust mutation strengths
+    density_weight = 0.5 + constraint_densities[circle_idx] * 2.0  # Range: 0.5 to 2.5
+    
+    # Position mutation strength (smaller for high constraint areas)
+    pos_strength = 0.02 / density_weight
+    rad_strength = 0.01 / density_weight
+    
+    # Try multiple small random moves to find improvement
+    best_config = mutated.copy()
+    best_fitness, _ = calculate_fitness(best_config, rect_width, rect_height)
+    
+    # Try several variants with slightly different perturbations
+    for attempt in range(10):
+        # Small position perturbation
+        new_x = x + np.random.normal(0, pos_strength * 0.5)
+        new_y = y + np.random.normal(0, pos_strength * 0.5)
+        new_r = r + np.random.normal(0, rad_strength * 0.5)
+        
+        # Clip to bounds
+        new_x = np.clip(new_x, new_r, rect_width - new_r)
+        new_y = np.clip(new_y, new_r, rect_height - new_r)
+        new_r = np.clip(new_r, 0.001, max_radius * 0.9)
+        
+        # Test this configuration
+        test_config = mutated.copy()
+        test_config[circle_idx] = [new_x, new_y, new_r]
+        
+        # Quick validity check
+        if is_valid_solution(test_config, rect_width, rect_height):
+            test_fitness, _ = calculate_fitness(test_config, rect_width, rect_height)
+            
+            if test_fitness > best_fitness:
+                best_fitness = test_fitness
+                best_config = test_config.copy()
+    
+    return best_config
+
+def voronoi_guided_local_search(circles: np.ndarray, 
+                               rect_width: float = 1.0, 
+                               rect_height: float = 1.0,
+                               iterations: int = 100) -> np.ndarray:
+    """
+    Advanced local search using Voronoi constraint information for circle optimization.
+    """
+    refined = circles.copy()
+    n = len(refined)
+    
+    if n <= 1:
+        return refined
+    
+    # Prioritize circles by constraint density for optimization
+    constraint_densities = compute_voronoi_constraints(refined, rect_width, rect_height)
+    
+    # Sort circles by constraint density (highest first)
+    sorted_indices = np.argsort(constraint_densities)[::-1]
+    
+    # Perform iterative refinement
+    for iteration in range(iterations):
+        # Choose subset of circles to optimize each iteration based on current iteration
+        # More iterations focus on higher constraint circles
+        if iteration < iterations // 2:
+            # First half: optimize most constrained circles
+            optimize_indices = sorted_indices[:max(1, n // 4)]
+        else:
+            # Second half: optimize all circles, but with priority to those with higher constraint
+            optimize_indices = sorted_indices[:max(1, n // 2)]
+        
+        # Randomize order for diversity
+        np.random.shuffle(optimize_indices)
+        
+        # Optimize selected circles
+        for idx in optimize_indices:
+            # Perform adaptive optimization
+            updated_circles = adaptive_optimize_single_circle(
+                refined, constraint_densities, idx, 
+                rect_width, rect_height, min(rect_width, rect_height) / 2
+            )
+            
+            # Accept improvement
+            current_fitness, _ = calculate_fitness(refined, rect_width, rect_height)
+            new_fitness, _ = calculate_fitness(updated_circles, rect_width, rect_height)
+            
+            if new_fitness > current_fitness:
+                refined = updated_circles.copy()
+                
+        # Occasionally perform global shake to escape local optima
+        if iteration > 0 and iteration % 10 == 0:
+            # Randomly select a few circles to give a larger perturbation
+            shake_indices = np.random.choice(n, size=max(1, n // 10), replace=False)
+            for idx in shake_indices:
+                x, y, r = refined[idx]
+                # Larger perturbation
+                new_x = np.clip(x + np.random.normal(0, 0.05), r, rect_width - r)
+                new_y = np.clip(y + np.random.normal(0, 0.05), r, rect_height - r)
+                new_r = np.clip(r + np.random.normal(0, 0.02), 0.001, max_radius * 0.9)
+                refined[idx] = [new_x, new_y, new_r]
+                
+    return refined
+
+def optimize_voronoi_guided(n_circles: int = 21, 
+                           rect_width: float = 1.0, 
+                           rect_height: float = 1.0) -> np.ndarray:
+    """
+    Voronoi-guided optimization with hierarchical refinement.
+    """
+    # Initialize with hybrid patterns
+    circles = initialize_hybrid_pattern(n_circles, rect_width, rect_height)
+    
+    # First pass: coarse global optimization
+    for _ in range(20):
+        constraint_densities = compute_voronoi_constraints(circles, rect_width, rect_height)
+        circles = voronoi_guided_local_search(circles, rect_width, rect_height, iterations=30)
+        
+    # Second pass: fine-grained optimization focusing on constraint-dense regions
+    for _ in range(30):
+        constraint_densities = compute_voronoi_constraints(circles, rect_width, rect_height)
+        circles = voronoi_guided_local_search(circles, rect_width, rect_height, iterations=50)
+    
+    # Final polishing with selective refinement
+    for _ in range(20):
+        constraint_densities = compute_voronoi_constraints(circles, rect_width, rect_height)
+        circles = voronoi_guided_local_search(circles, rect_width, rect_height, iterations=100)
+    
+    return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: perimeter = 4 => width + height = 2
+    # Optimize rectangle aspect ratio for better packing
+    rect_width = 1.2
+    rect_height = 0.8
+
+    # Run Voronoi-guided optimization
+    best_solution = optimize_voronoi_guided(
+        n_circles=21,
+        rect_width=rect_width,
+        rect_height=rect_height
+    )
+
+    # Final validation and cleanup
+    if not is_valid_solution(best_solution, rect_width, rect_height):
+        # Fallback to structured pattern if needed
+        best_solution = initialize_hybrid_pattern(21, rect_width, rect_height)
+
+    return best_solution
+
+# EVOLVE-BLOCK-END

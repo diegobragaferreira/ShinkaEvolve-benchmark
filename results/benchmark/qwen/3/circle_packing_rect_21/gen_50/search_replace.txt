@@ -1,0 +1,176 @@
+<NAME>
+multiobjective_optimization_with_stability
+</NAME>
+
+<DESCRIPTION>
+This enhancement introduces a multi-objective optimization framework that balances maximizing radius sum with maintaining positional stability and avoiding constraint violations. Instead of purely greedy radius maximization, the algorithm now evaluates candidate moves based on both immediate radius gains and potential penalties from positional instability or overlap violations. This addresses the limitation of the current approach which can get stuck in local optima due to its single-objective nature.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Phase 2: Multi-scale local refinement with boundary awareness
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters with multi-scale approach
+    max_iterations = 500
+    tolerance = 1e-6
+
+    # Multi-scale perturbation ranges
+    scale_ranges = [0.1, 0.05, 0.02]  # Large, medium, small steps
+    scale_weights = [0.5, 0.3, 0.2]   # Probabilities of using each scale
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # Determine scale for this iteration (multi-scale approach)
+        current_scale = np.random.choice(len(scale_ranges), p=scale_weights)
+        move_range = scale_ranges[current_scale]
+
+        # For each circle, try moves with current scale
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Try perturbations with current scale
+            best_move_x, best_move_y, best_move_r = 0, 0, 0
+            best_new_sum = old_sum
+
+            # Try various movements in x and y directions with current scale
+            for dx in [-move_range, -move_range/2, 0, move_range/2, move_range]:
+                for dy in [-move_range, -move_range/2, 0, move_range/2, move_range]:
+                    # New position
+                    new_x = orig_x + dx
+                    new_y = orig_y + dy
+
+                    # Keep within bounds
+                    new_x = max(0.05, min(width - 0.05, new_x))
+                    new_y = max(0.05, min(height - 0.05, new_y))
+
+                    # Compute max radius at new location
+                    new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                    # Check for conflicts with all other circles
+                    valid = True
+                    for j in range(n_circles):
+                        if i != j:
+                            px, py, pr = current_circles[j]
+                            dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                            if dist < (new_r + pr):
+                                valid = False
+                                break
+
+                    if valid:
+                        # Calculate new sum
+                        new_sum = old_sum - orig_r + new_r
+
+                        if new_sum > best_new_sum:
+                            best_new_sum = new_sum
+                            best_move_x, best_move_y, best_move_r = dx, dy, new_r
+
+            # Apply the best move if it improves the sum
+            if best_new_sum > old_sum:
+                current_circles[i] = [orig_x + best_move_x, orig_y + best_move_y, best_move_r]
+                circles = current_circles.copy()
+
+        # Check for improvement
+        new_sum = np.sum(circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = circles.copy()
+        elif abs(new_sum - best_sum) < tolerance:
+            break
+=======
+    # Phase 2: Multi-scale local refinement with boundary awareness
+    best_sum = np.sum(circles[:, 2])
+    best_circles = circles.copy()
+
+    # Local search parameters with multi-scale approach
+    max_iterations = 500
+    tolerance = 1e-6
+
+    # Multi-scale perturbation ranges
+    scale_ranges = [0.1, 0.05, 0.02]  # Large, medium, small steps
+    scale_weights = [0.5, 0.3, 0.2]   # Probabilities of using each scale
+
+    for iteration in range(max_iterations):
+        # Copy current configuration
+        current_circles = circles.copy()
+        old_sum = np.sum(current_circles[:, 2])
+
+        # Determine scale for this iteration (multi-scale approach)
+        current_scale = np.random.choice(len(scale_ranges), p=scale_weights)
+        move_range = scale_ranges[current_scale]
+
+        # For each circle, try moves with current scale
+        for i in range(n_circles):
+            # Store original position and radius
+            orig_x, orig_y, orig_r = current_circles[i]
+
+            # Try perturbations with current scale
+            best_move_x, best_move_y, best_move_r = 0, 0, 0
+            best_new_sum = old_sum
+
+            # Try various movements in x and y directions with current scale
+            for dx in [-move_range, -move_range/2, 0, move_range/2, move_range]:
+                for dy in [-move_range, -move_range/2, 0, move_range/2, move_range]:
+                    # New position
+                    new_x = orig_x + dx
+                    new_y = orig_y + dy
+
+                    # Keep within bounds
+                    new_x = max(0.05, min(width - 0.05, new_x))
+                    new_y = max(0.05, min(height - 0.05, new_y))
+
+                    # Compute max radius at new location
+                    new_r = min(new_x, width - new_x, new_y, height - new_y)
+
+                    # Check for conflicts with all other circles
+                    valid = True
+                    overlap_penalty = 0.0
+                    for j in range(n_circles):
+                        if i != j:
+                            px, py, pr = current_circles[j]
+                            dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                            if dist < (new_r + pr):
+                                valid = False
+                                # Calculate overlap penalty (quadratic penalty for overlap depth)
+                                overlap_depth = (new_r + pr) - dist
+                                overlap_penalty += overlap_depth ** 2
+
+                    if valid:
+                        # Multi-objective evaluation: balance radius gain with positional stability
+                        # Add penalty for overlap violation (which should not happen in valid moves)
+                        new_sum = old_sum - orig_r + new_r
+
+                        # Weighted evaluation considering both radius gain and stability
+                        stability_weight = 0.01  # Small weight for stability consideration
+                        # In case of overlap, we penalize heavily
+                        if overlap_penalty > 0:
+                            new_sum -= overlap_penalty * 1000  # Heavy penalty for constraint violations
+                        else:
+                            # Apply slight penalty for positional changes to maintain stability
+                            pos_change = np.sqrt(dx**2 + dy**2)
+                            stability_penalty = pos_change * stability_weight
+                            new_sum -= stability_penalty
+
+                        if new_sum > best_new_sum:
+                            best_new_sum = new_sum
+                            best_move_x, best_move_y, best_move_r = dx, dy, new_r
+
+            # Apply the best move if it improves the sum
+            if best_new_sum > old_sum:
+                current_circles[i] = [orig_x + best_move_x, orig_y + best_move_y, best_move_r]
+                circles = current_circles.copy()
+
+        # Check for improvement
+        new_sum = np.sum(circles[:, 2])
+        if new_sum > best_sum:
+            best_sum = new_sum
+            best_circles = circles.copy()
+        elif abs(new_sum - best_sum) < tolerance:
+            break
+>>>>>>> REPLACE
+</DIFF>

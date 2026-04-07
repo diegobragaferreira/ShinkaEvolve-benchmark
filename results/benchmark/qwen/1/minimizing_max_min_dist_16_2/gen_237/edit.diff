@@ -1,0 +1,317 @@
+--- a/original.py
++++ b/original.py
+@@ -1,313 +1,313 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial.distance import pdist, squareform
++from scipy.spatial.distance import pdist
+ from scipy.optimize import minimize
+ import time
+ from typing import Tuple, List
+ import math
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+ 
+     def calculate_min_max_ratio(points):
+         """Calculate the ratio of minimum to maximum distance"""
+         if len(points) < 2:
+             return 0.0
+         distances = pdist(points)
+         if len(distances) == 0 or np.max(distances) <= 0:
+             return 0.0
+         return np.min(distances) / np.max(distances)
+ 
+     def objective_function(points_flat):
+         """Objective function to minimize (negative ratio)"""
+         points = points_flat.reshape(-1, 2)
+         return -calculate_min_max_ratio(points)
+ 
+     def generate_hexagonal_grid():
+         """Generate initial points using hexagonal grid pattern"""
+         # Create a hexagonal lattice pattern
+         n_points = 16
+         rows = 4
+         cols = 4
+ 
+         points = []
+         for i in range(rows):
+             for j in range(cols):
+                 if len(points) >= n_points:
+                     break
+                 x = j + 0.5 * (i % 2)
+                 y = i * np.sqrt(3)/2
+                 points.append([x, y])
+ 
+         # Normalize to unit square [0,1] x [0,1]
+         points = np.array(points[:n_points])
+ 
+         # Scale and shift to fit in [0,1] x [0,1]
+         x_min, y_min = np.min(points, axis=0)
+         x_max, y_max = np.max(points, axis=0)
+ 
+         if x_max > x_min and y_max > y_min:
+             points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min)
+             points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min)
+ 
+         # Further adjust to make it more uniform
+         points[:, 0] *= 0.9
+         points[:, 1] *= 0.9
+         points[:, 0] += 0.05
+         points[:, 1] += 0.05
+ 
+         return points
+ 
+     def generate_spiral_pattern():
+         """Generate points in a spiral pattern"""
+         points = []
+         angle_step = 2 * np.pi / 10
+         radius_step = 1.0 / 10
+ 
+         for i in range(16):
+             if i == 0:
+                 points.append([0.5, 0.5])
+             else:
+                 angle = i * angle_step
+                 radius = min(0.45, i * radius_step)
+                 x = 0.5 + radius * np.cos(angle)
+                 y = 0.5 + radius * np.sin(angle)
+                 points.append([x, y])
+ 
+         return np.array(points)
+ 
+     def generate_random_points():
+         """Generate random points"""
+         return np.random.rand(16, 2)
+ 
+     def generate_grid_points():
+         """Generate grid pattern points"""
+         points = []
+         for i in range(4):
+             for j in range(4):
+                 if len(points) >= 16:
+                     break
+                 points.append([i * 0.25 + 0.125, j * 0.25 + 0.125])
+         return np.array(points)
+ 
+     def generate_fibonacci_sphere_projection():
+         """Generate points using Fibonacci sphere projection"""
+         points_sphere = []
+         phi = math.pi * (3.0 - math.sqrt(5.0))  # golden angle
+ 
+         for i in range(16):
+             y = 1 - (i / float(16 - 1)) * 2  # y goes from 1 to -1
+             radius = math.sqrt(1 - y * y)  # radius at y
+             theta = phi * i
+             x = math.cos(theta) * radius
+             z = math.sin(theta) * radius
+             points_sphere.append([x, y, z])
+ 
+         # Project to 2D using stereographic projection
+         points_2d = []
+         for x, y, z in points_sphere:
+             # Stereographic projection from south pole (0,0,-1)
+             w = 1 / (1 + z)
+             proj_x = x * w
+             proj_y = y * w
+             points_2d.append([proj_x, proj_y])
+ 
+         points_2d = np.array(points_2d)
+ 
+         # Normalize to unit square
+         x_min, y_min = np.min(points_2d, axis=0)
+         x_max, y_max = np.max(points_2d, axis=0)
+ 
+         if x_max > x_min and y_max > y_min:
+             points_2d[:, 0] = (points_2d[:, 0] - x_min) / (x_max - x_min) * 0.9 + 0.05
+             points_2d[:, 1] = (points_2d[:, 1] - y_min) / (y_max - y_min) * 0.9 + 0.05
+ 
+         return points_2d
+ 
+     def initialize_population() -> List[np.ndarray]:
+         """Generate multiple diverse initial configurations"""
+         configs = []
+ 
+         # Different initialization strategies
+         configs.append(generate_hexagonal_grid())
+         configs.append(generate_spiral_pattern())
+         configs.append(generate_random_points())
+         configs.append(generate_grid_points())
+         configs.append(generate_fibonacci_sphere_projection())
+ 
+         # Add some noise to diversify
+         for i in range(len(configs)):
+             # Use decreasing noise levels for diversity
+             noise_level = 0.03 / (i + 1)
+             noise = np.random.normal(0, noise_level, configs[i].shape)
+             configs[i] = np.clip(configs[i] + noise, 0, 1)
+ 
+         return configs
+ 
+     def constraint_handling(points, min_distance_threshold=0.01):
+         """Ensure points maintain reasonable separation and stay within bounds"""
+         # Keep points within bounds
+         points = np.clip(points, 0, 1)
+ 
+         # Apply minimum distance constraint to prevent clustering
+         for i in range(len(points)):
+             for j in range(i+1, len(points)):
+                 dist = np.linalg.norm(points[i] - points[j])
+                 if dist < min_distance_threshold:
+                     # Move points apart slightly
+                     direction = points[i] - points[j]
+                     if np.linalg.norm(direction) > 0:
+                         direction = direction / np.linalg.norm(direction)
+                         points[i] += direction * (min_distance_threshold - dist) * 0.5
+                         points[j] -= direction * (min_distance_threshold - dist) * 0.5
+ 
+         return np.clip(points, 0, 1)
+ 
+     def adaptive_local_optimization(initial_points, max_iter=500, method='L-BFGS-B'):
+         """Apply adaptive local optimization with multiple methods and early stopping"""
+         best_points = initial_points.copy()
+         best_ratio = calculate_min_max_ratio(best_points)
+         best_ratio_history = [best_ratio]
+ 
+         # Try different optimization methods with varying parameters
+         if method == 'L-BFGS-B':
+             try:
+                 result = minimize(
+                     objective_function,
+                     best_points.flatten(),
+                     method='L-BFGS-B',
+                     bounds=[(0, 1) for _ in range(len(best_points.flatten()))],
+                     options={'maxiter': max_iter, 'ftol': 1e-10, 'gtol': 1e-10},
+                     tol=1e-10
+                 )
+ 
+                 if result.success:
+                     optimized_points = result.x.reshape(-1, 2)
+                     optimized_points = np.clip(optimized_points, 0, 1)
+                     optimized_points = constraint_handling(optimized_points)
+                     ratio = calculate_min_max_ratio(optimized_points)
+ 
+                     if ratio > best_ratio:
+                         best_ratio = ratio
+                         best_points = optimized_points.copy()
+                         best_ratio_history.append(ratio)
+ 
+             except Exception:
+                 pass
+ 
+         elif method == 'Nelder-Mead':
+             try:
+                 result = minimize(
+                     objective_function,
+                     best_points.flatten(),
+                     method='Nelder-Mead',
+                     options={'maxiter': max_iter, 'adaptive': True, 'fatol': 1e-10, 'xatol': 1e-10}
+                 )
+ 
+                 if result.success:
+                     optimized_points = result.x.reshape(-1, 2)
+                     optimized_points = np.clip(optimized_points, 0, 1)
+                     optimized_points = constraint_handling(optimized_points)
+                     ratio = calculate_min_max_ratio(optimized_points)
+ 
+                     if ratio > best_ratio:
+                         best_ratio = ratio
+                         best_points = optimized_points.copy()
+                         best_ratio_history.append(ratio)
+ 
+             except Exception:
+                 pass
+ 
+         return best_points, best_ratio
+ 
+     def multi_stage_optimization(initial_points):
+         """Apply multi-stage optimization for better results with adaptive parameters"""
+         current_points = initial_points.copy()
+         current_ratio = calculate_min_max_ratio(current_points)
+ 
+         # Stage 1: Coarse optimization with fewer iterations
+         coarse_points, coarse_ratio = adaptive_local_optimization(current_points, max_iter=100)
+         if coarse_ratio > current_ratio:
+             current_points = coarse_points
+             current_ratio = coarse_ratio
+ 
+         # Stage 2: Medium optimization (more iterations)
+         medium_points, medium_ratio = adaptive_local_optimization(current_points, max_iter=200)
+         if medium_ratio > current_ratio:
+             current_points = medium_points
+             current_ratio = medium_ratio
+ 
+         # Stage 3: Fine optimization (most iterations)
+         fine_points, fine_ratio = adaptive_local_optimization(current_points, max_iter=300)
+         if fine_ratio > current_ratio:
+             current_points = fine_points
+             current_ratio = fine_ratio
+ 
+         return current_points, current_ratio
+ 
+     def hybrid_optimization(initial_points, max_iterations=1000):
+         """Hybrid optimization combining global and local search"""
+         best_points = initial_points.copy()
+         best_ratio = calculate_min_max_ratio(best_points)
+ 
+         # First apply multi-stage optimization
+         optimized_points, optimized_ratio = multi_stage_optimization(initial_points)
+ 
+         # Then try refinement with different methods
+         methods = ['L-BFGS-B', 'Nelder-Mead']
+         for method in methods:
+             # Add some noise for diversification
+             perturbed = optimized_points + np.random.normal(0, 0.005, optimized_points.shape)
+             perturbed = np.clip(perturbed, 0, 1)
+ 
+             ref_points, ref_ratio = adaptive_local_optimization(perturbed, max_iter=200, method=method)
+ 
+             if ref_ratio > best_ratio:
+                 best_ratio = ref_ratio
+                 best_points = ref_points.copy()
+ 
+         # Final refinement with multiple attempts
+         for _ in range(3):
+             # Add more noise for exploration
+             perturbed = best_points + np.random.normal(0, 0.002, best_points.shape)
+             perturbed = np.clip(perturbed, 0, 1)
+ 
+             ref_points, ref_ratio = adaptive_local_optimization(perturbed, max_iter=100, method='L-BFGS-B')
+ 
+             if ref_ratio > best_ratio:
+                 best_ratio = ref_ratio
+                 best_points = ref_points.copy()
+ 
+         return best_points, best_ratio
+ 
+     # Generate diverse initial configurations
+     initial_configs = initialize_population()
+ 
+     best_ratio = -np.inf
+     best_points = None
+ 
+     # Try each initial configuration with optimization
+     for i, initial_config in enumerate(initial_configs):
+         try:
+             # Apply hybrid optimization approach
+             optimized_points, optimized_ratio = hybrid_optimization(initial_config, max_iterations=500)
+ 
+             if optimized_ratio > best_ratio:
+                 best_ratio = optimized_ratio
+                 best_points = optimized_points.copy()
+ 
+         except Exception as e:
+             continue
+ 
+     # If nothing worked, return a default configuration
+     if best_points is None:
+         best_points = generate_hexagonal_grid()
+ 
+     return best_points
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,397 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy import optimize
+from scipy.fft import fft, ifft
+from scipy.signal import fftconvolve
+import random
+import time
+import cvxpy as cp
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_autocorrelation_constant(sequence):
+    """Compute the autocorrelation constant C1 for a sequence using FFT."""
+    n = len(sequence)
+    if n == 0:
+        return float('inf')
+
+    # Use FFT for fast convolution
+    seq_fft = fft(sequence, 2*n - 1)
+    autocorr_fft = seq_fft * np.conj(seq_fft)
+    autocorr = ifft(autocorr_fft).real[:n]
+
+    # Normalize and compute C1
+    sum_seq = np.sum(sequence)
+    if sum_seq < 0.01:
+        return float('inf')  # Reject invalid sequences
+
+    max_autocorr = np.max(autocorr)
+    c1 = 2 * n * max_autocorr / (sum_seq ** 2)
+    return c1
+
+def compute_inverse_c1(sequence):
+    """Compute the inverse of C1 (our objective to maximize)."""
+    c1 = compute_autocorrelation_constant(sequence)
+    if c1 == float('inf'):
+        return 0
+    return 1.0 / c1
+
+def solve_convolution_lp(f_sequence, rhs):
+    """Solves the convolution LP for a given sequence and RHS."""
+    n = len(f_sequence)
+    c = -np.ones(n)
+    a_ub = []
+    b_ub = []
+    for k in range(2 * n - 1):
+        row = np.zeros(n)
+        for i in range(n):
+            j = k - i
+            if 0 <= j < n:
+                row[j] = f_sequence[i]
+        a_ub.append(row)
+        b_ub.append(rhs)
+
+    # Non-negativity constraints: b_i >= 0
+    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+    b_ub_nonneg = np.zeros(n)  # Zero vector
+
+    a_ub = np.vstack([a_ub, a_ub_nonneg])
+    b_ub = np.hstack([b_ub, b_ub_nonneg])
+
+    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+
+    if result.success:
+        g_sequence = result.x
+        return g_sequence
+    else:
+        return None
+
+def get_good_direction_to_move_into(sequence):
+    """Returns a direction to move into the sequence using LP-based optimization."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 1e-10:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_g_fun = np.sum(g_fun)
+    if sum_g_fun < 1e-10:
+        return None
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g_fun for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def solve_qp_optimization(sequence):
+    """
+    Solve a quadratic programming formulation to improve the sequence.
+    Uses cvxpy to solve the constrained optimization.
+    """
+    n = len(sequence)
+    if n < 1:
+        return sequence
+
+    # Create cvxpy variables
+    x = cp.Variable(n)
+
+    # Simple regularized QP: minimize ||x||_2^2 + lambda * sum(x)
+    # Subject to x >= 0 and sum(x) >= 0.01
+    objective = cp.Minimize(0.5 * cp.sum_squares(x) + 0.1 * cp.sum(x))
+    constraints = [
+        x >= 0,
+        cp.sum(x) >= 0.01,
+    ]
+
+    # Solve the QP problem
+    prob = cp.Problem(objective, constraints)
+    try:
+        prob.solve(solver=cp.SCS, verbose=False)
+        if prob.status == cp.OPTIMAL:
+            return x.value.tolist()
+    except Exception:
+        pass
+
+    # Fallback to original sequence if optimization fails
+    return sequence
+
+def refine_via_quadratic_programming(initial_sequence, iterations=50):
+    """
+    Refine the given sequence using quadratic programming approaches.
+    """
+    sequence = np.array(initial_sequence, dtype=float)
+    inv_c1_max = compute_inverse_c1(sequence)
+
+    for i in range(iterations):
+        # Optimize with QP
+        qpsol = solve_qp_optimization(sequence)
+        if qpsol is not None:
+            sequence = np.array(qpsol)
+            inv_c1_new = compute_inverse_c1(sequence)
+            if inv_c1_new > inv_c1_max:
+                inv_c1_max = inv_c1_new
+        else:
+            break
+
+    return sequence.tolist(), inv_c1_max
+
+def mutate_sequence(sequence, mutation_rate=0.1, max_mutation=0.3):
+    """Apply geometric and random mutations to generate new sequence."""
+    new_sequence = sequence.copy()
+
+    for i in range(len(new_sequence)):
+        if random.random() < mutation_rate:
+            # Apply geometric scaling with random factor
+            scale_factor = random.uniform(0.5, 2.0)
+            new_sequence[i] *= scale_factor
+
+            # Add small noise
+            noise_factor = random.uniform(-0.1, 0.1)
+            new_sequence[i] = max(0, new_sequence[i] + new_sequence[i] * noise_factor)
+
+            # Clip to valid range [0, 1000]
+            new_sequence[i] = max(0, min(1000, new_sequence[i]))
+
+    # Ensure at least one element is positive
+    if all(x == 0 for x in new_sequence):
+        new_sequence[0] = max(0.1, new_sequence[0])
+
+    return new_sequence
+
+def crossover_sequences(seq1, seq2):
+    """Perform crossover between two sequences."""
+    # Ensure sequences are of equal length
+    min_len = min(len(seq1), len(seq2))
+    max_len = max(len(seq1), len(seq2))
+
+    # Pad shorter sequence with zeros
+    if len(seq1) < max_len:
+        seq1.extend([0] * (max_len - len(seq1)))
+    if len(seq2) < max_len:
+        seq2.extend([0] * (max_len - len(seq2)))
+
+    # Uniform crossover
+    child = []
+    for i in range(max_len):
+        if random.random() < 0.5:
+            child.append(seq1[i])
+        else:
+            child.append(seq2[i])
+
+    return child
+
+def evolutionary_search(max_time_seconds=170):
+    """Main evolutionary search routine."""
+    start_time = time.time()
+
+    # Initialize population with diverse sequences
+    population_size = 30
+    population = []
+
+    for _ in range(population_size):
+        n = random.randint(100, 1000)
+        individual = [random.uniform(0, 1000) for _ in range(n)]
+        population.append(individual)
+
+    # Evolution parameters
+    elite_size = max(1, population_size // 10)  # Top 10% as elite
+    mutation_rate = 0.15
+
+    while time.time() - start_time < max_time_seconds:
+        # Evaluate fitness
+        fitness_scores = [(compute_inverse_c1(ind), ind) for ind in population]
+        fitness_scores.sort(reverse=True)
+
+        # Keep elite
+        elite = [ind for _, ind in fitness_scores[:elite_size]]
+
+        # Create new population
+        new_population = elite[:]
+
+        # Generate offspring through crossover and mutation
+        while len(new_population) < population_size:
+            # Tournament selection with k=3
+            parent1 = tournament_selection(population, fitness_scores, k=3)
+            parent2 = tournament_selection(population, fitness_scores, k=3)
+
+            offspring = crossover_sequences(parent1, parent2)
+
+            # Apply mutation with adaptive rate
+            if random.random() < mutation_rate:
+                offspring = mutate_sequence(offspring, mutation_rate=0.15, max_mutation=0.3)
+
+            # Ensure non-negativity
+            offspring = [max(0, x) for x in offspring]
+
+            # Ensure minimum sum
+            if np.sum(offspring) < 0.01:
+                offspring[random.randint(0, len(offspring)-1)] += 0.1
+
+            new_population.append(offspring)
+
+        population = new_population
+
+    # Return best solution
+    final_fitness = [(compute_inverse_c1(ind), ind) for ind in population]
+    final_fitness.sort(reverse=True)
+    return final_fitness[0][1]
+
+def tournament_selection(population, fitness_scores, k=3):
+    """Select an individual using tournament selection."""
+    tournament_indices = random.sample(range(len(population)), k)
+    tournament_fitness = [(fitness_scores[i][0], i) for i in tournament_indices]
+    winner_idx = max(tournament_fitness)[1]
+    return population[winner_idx]
+
+def local_improvement_search(initial_sequence, max_iter=100):
+    """Improve a sequence using local search around it."""
+    current_sequence = initial_sequence.copy()
+    current_fitness = compute_inverse_c1(current_sequence)
+
+    for _ in range(max_iter):
+        # Try mutating the current sequence with smaller changes
+        mutated = mutate_sequence(current_sequence, mutation_rate=0.3, max_mutation=0.1)
+        mutated_fitness = compute_inverse_c1(mutated)
+
+        if mutated_fitness > current_fitness:
+            current_sequence = mutated
+            current_fitness = mutated_fitness
+
+    return current_sequence, current_fitness
+
+def gradient_based_improvement(sequence, max_iter=50):
+    """Improve sequence using simple gradient estimation."""
+    current_sequence = np.array(sequence, dtype=float)
+    current_fitness = compute_inverse_c1(current_sequence)
+    step_size = 0.01
+    eps = 1e-6
+
+    for iteration in range(max_iter):
+        # Estimate gradient using finite differences
+        grad = np.zeros_like(current_sequence)
+        for i in range(len(current_sequence)):
+            # Compute numerical gradient
+            delta = np.zeros_like(current_sequence)
+            delta[i] = eps
+            f_plus = compute_inverse_c1(current_sequence + delta)
+            f_minus = compute_inverse_c1(current_sequence - delta)
+            grad[i] = (f_plus - f_minus) / (2 * eps)
+
+        # Update step
+        new_sequence = current_sequence + step_size * grad
+
+        # Ensure non-negativity and reasonable bounds
+        new_sequence = np.maximum(0, new_sequence)
+        new_sequence = np.minimum(1000, new_sequence)
+
+        # Check if update improved fitness
+        new_fitness = compute_inverse_c1(new_sequence)
+        if new_fitness > current_fitness:
+            current_sequence = new_sequence
+            current_fitness = new_fitness
+        else:
+            # Reduce step size if no improvement
+            step_size *= 0.95
+            if step_size < 1e-6:
+                break
+
+    return current_sequence.tolist(), current_fitness
+
+def ensemble_search(max_time_seconds=170):
+    """Ensemble approach combining multiple search strategies."""
+    start_time = time.time()
+    best_sequence = None
+    best_fitness = 0.0
+
+    # Strategy 1: Evolutive search
+    if time.time() - start_time < max_time_seconds:
+        evol_seq = evolutionary_search(max_time_seconds - (time.time() - start_time))
+        evol_fitness = compute_inverse_c1(evol_seq)
+        if evol_fitness > best_fitness:
+            best_fitness = evol_fitness
+            best_sequence = evol_seq
+
+    # Strategy 2: LP-based improvement
+    if best_sequence is not None and time.time() - start_time < max_time_seconds:
+        lp_improved = get_good_direction_to_move_into(best_sequence)
+        if lp_improved is not None:
+            lp_fitness = compute_inverse_c1(lp_improved)
+            if lp_fitness > best_fitness:
+                best_fitness = lp_fitness
+                best_sequence = lp_improved
+
+    # Strategy 3: QP-based refinement
+    if best_sequence is not None and time.time() - start_time < max_time_seconds:
+        refined_seq, refined_fitness = refine_via_quadratic_programming(best_sequence, 50)
+        if refined_fitness > best_fitness:
+            best_fitness = refined_fitness
+            best_sequence = refined_seq
+
+    # Strategy 4: Gradient-based refinement
+    if best_sequence is not None and time.time() - start_time < max_time_seconds:
+        grad_seq, grad_fitness = gradient_based_improvement(best_sequence, 100)
+        if grad_fitness > best_fitness:
+            best_fitness = grad_fitness
+            best_sequence = grad_seq
+
+    # Strategy 5: Local refinement on best found so far
+    if best_sequence is not None and time.time() - start_time < max_time_seconds:
+        final_seq, final_fitness = local_improvement_search(best_sequence, 200)
+        if final_fitness > best_fitness:
+            best_fitness = final_fitness
+            best_sequence = final_seq
+
+    return best_sequence, best_fitness
+
+def search_for_best_sequence():
+    """Entry point for search combining evolutionary and optimization techniques."""
+    # Use ensemble method for better results
+    sequence, fitness = ensemble_search(170)
+
+    # If no good solution was found, fall back to basic approach
+    if sequence is None:
+        # Start with a few diverse sequences
+        best_sequence = None
+        best_inv_c1 = 0.0
+
+        # Try multiple random starting points
+        for attempt in range(5):
+            # Random initialization
+            initial_sequence = [random.uniform(0, 1000) for _ in range(random.randint(100, 1000))]
+
+            # Local improvement
+            improved_seq, improved_fitness = local_improvement_search(initial_sequence, 100)
+
+            if improved_fitness > best_inv_c1:
+                best_inv_c1 = improved_fitness
+                best_sequence = improved_seq
+
+            # Also try evolutionary algorithm approach
+            evol_seq, evol_fitness = evolutionary_search(10)  # Shorter time for GA
+            if evol_fitness > best_inv_c1:
+                best_inv_c1 = evol_fitness
+                best_sequence = evol_seq
+
+        # Final local optimization on the best found sequence
+        if best_sequence is not None:
+            final_seq, final_fitness = local_improvement_search(best_sequence, 500)
+            if final_fitness > best_inv_c1:
+                best_inv_c1 = final_fitness
+                best_sequence = final_seq
+
+        sequence = best_sequence if best_sequence is not None else [random.uniform(0, 1000) for _ in range(100)]
+
+    return sequence
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    sequence = search_for_best_sequence()
+    print(f"Found sequence: {sequence}")

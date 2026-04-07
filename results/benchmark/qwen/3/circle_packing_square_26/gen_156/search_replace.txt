@@ -1,0 +1,186 @@
+<NAME>
+add_constraint_relaxation_and_diversity_preservation
+</NAME>
+
+<DESCRIPTION>
+This improvement introduces two key enhancements to boost the evolutionary algorithm's performance:
+
+1. **Progressive Constraint Relaxation**: In early generations, the algorithm uses relaxed penalties for constraint violations to encourage exploration of the search space. As evolution progresses, constraints become stricter to enforce feasibility.
+
+2. **Fitness Sharing for Diversity Preservation**: Implements a fitness sharing mechanism that penalizes individuals that are too similar to others in the population. This prevents premature convergence and maintains genetic diversity, allowing the algorithm to explore different regions of the solution space.
+
+These changes are inspired by successful techniques from previous generations where adaptive penalty systems and diversity preservation mechanisms significantly improved convergence quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(individual: np.ndarray) -> float:
+    """Evaluate fitness of an individual (sum of radii) with penalties for violations."""
+    total_radius = np.sum(individual[:, 2])
+
+    # Calculate penalties
+    containment_penalty = _check_containment_constraints(individual)
+    overlap_penalty = _check_overlap_constraints(individual)
+
+    return total_radius - containment_penalty - overlap_penalty
+=======
+def evaluate_fitness(individual: np.ndarray, population: List[np.ndarray] = None,
+                    generation: int = 0, max_generations: int = 500) -> float:
+    """Evaluate fitness of an individual (sum of radii) with penalties for violations."""
+    total_radius = np.sum(individual[:, 2])
+
+    # Calculate penalties with progressive constraint relaxation
+    containment_penalty = _check_containment_constraints(individual)
+    overlap_penalty = _check_overlap_constraints(individual)
+
+    # Progressive constraint relaxation - start with loose constraints in early generations
+    relaxation_factor = 1.0
+    if generation < 50:
+        relaxation_factor = 0.2
+    elif generation < 200:
+        relaxation_factor = 0.2 + (1.0 - 0.2) * (generation - 50) / (200 - 50)
+
+    penalty = (containment_penalty + overlap_penalty) * relaxation_factor
+
+    # Add fitness sharing penalty if population is provided
+    diversity_penalty = 0.0
+    if population is not None and len(population) > 1:
+        # Calculate similarity to other individuals using normalized distance
+        individual_norm = individual.flatten() / np.linalg.norm(individual.flatten())
+        for other in population:
+            other_norm = other.flatten() / np.linalg.norm(other.flatten())
+            similarity = np.dot(individual_norm, other_norm)
+            # Penalize high similarity (low distance)
+            if similarity > 0.95:  # Very similar individuals
+                diversity_penalty += 1000 * (1 - similarity)
+
+    return total_radius - penalty - diversity_penalty
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def run_evolution(n_circles: int = 26, population_size: int = 200, generations: int = 500) -> np.ndarray:
+    """Run the evolutionary optimization process."""
+    # Initialize population
+    population = _initialize_population(n_circles, population_size)
+
+    # Evolutionary loop
+    best_fitness_history = []
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_fitness(individual)
+            fitness_scores.append(fitness)
+
+        # Track best fitness
+        best_fitness = max(fitness_scores)
+        best_fitness_history.append(best_fitness)
+
+        # Select top individuals (elitism)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        elite = [population[i] for i in sorted_indices[:20]]  # Fixed elite size
+
+        # Generate new population
+        new_population = elite.copy()
+
+        # Adaptive mutation rate: decrease over time with smoother decay
+        adaptive_mutation_rate = 0.1 * (1 - generation / generations) ** 2
+        if adaptive_mutation_rate < 0.01:
+            adaptive_mutation_rate = 0.01
+
+        # Fill rest of population through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = tournament_selection(population, fitness_scores)
+            parent2 = tournament_selection(population, fitness_scores)
+
+            if random.random() < 0.8:  # Crossover probability
+                child1, child2 = crossover(parent1, parent2)
+            else:
+                child1, child2 = parent1.copy(), parent2.copy()
+
+            # Apply mutation with adaptive rate
+            if random.random() < adaptive_mutation_rate:
+                mutate_individual(child1, adaptive_mutation_rate)
+            if random.random() < adaptive_mutation_rate:
+                mutate_individual(child2, adaptive_mutation_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+        # Print progress
+        if generation % 50 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+    # Return best solution
+    final_fitness_scores = [evaluate_fitness(ind) for ind in population]
+    best_index = np.argmax(final_fitness_scores)
+    return population[best_index]
+=======
+def run_evolution(n_circles: int = 26, population_size: int = 200, generations: int = 500) -> np.ndarray:
+    """Run the evolutionary optimization process."""
+    # Initialize population
+    population = _initialize_population(n_circles, population_size)
+
+    # Evolutionary loop
+    best_fitness_history = []
+    for generation in range(generations):
+        # Evaluate fitness with population context for diversity preservation
+        fitness_scores = []
+        for individual in population:
+            fitness = evaluate_fitness(individual, population, generation, generations)
+            fitness_scores.append(fitness)
+
+        # Track best fitness
+        best_fitness = max(fitness_scores)
+        best_fitness_history.append(best_fitness)
+
+        # Select top individuals (elitism)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        elite = [population[i] for i in sorted_indices[:20]]  # Fixed elite size
+
+        # Generate new population
+        new_population = elite.copy()
+
+        # Adaptive mutation rate: decrease over time with smoother decay
+        adaptive_mutation_rate = 0.1 * (1 - generation / generations) ** 2
+        if adaptive_mutation_rate < 0.01:
+            adaptive_mutation_rate = 0.01
+
+        # Fill rest of population through crossover and mutation
+        while len(new_population) < population_size:
+            parent1 = tournament_selection(population, fitness_scores)
+            parent2 = tournament_selection(population, fitness_scores)
+
+            if random.random() < 0.8:  # Crossover probability
+                child1, child2 = crossover(parent1, parent2)
+            else:
+                child1, child2 = parent1.copy(), parent2.copy()
+
+            # Apply mutation with adaptive rate
+            if random.random() < adaptive_mutation_rate:
+                mutate_individual(child1, adaptive_mutation_rate)
+            if random.random() < adaptive_mutation_rate:
+                mutate_individual(child2, adaptive_mutation_rate)
+
+            new_population.extend([child1, child2])
+
+        # Trim to exact population size
+        population = new_population[:population_size]
+
+        # Print progress
+        if generation % 50 == 0:
+            print(f"Generation {generation}: Best fitness = {best_fitness:.6f}")
+
+    # Return best solution
+    final_fitness_scores = [evaluate_fitness(ind, population, generations, generations) for ind in population]
+    best_index = np.argmax(final_fitness_scores)
+    return population[best_index]
+>>>>>>> REPLACE
+
+</DIFF>

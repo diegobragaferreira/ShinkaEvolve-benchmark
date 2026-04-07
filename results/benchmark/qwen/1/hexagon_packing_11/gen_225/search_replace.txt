@@ -1,0 +1,426 @@
+<NAME>
+enhanced_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+I'll implement an enhanced spatial indexing system that uses a hierarchical approach with dynamic cell sizing. The current uniform grid approach may not be optimal for varying hexagon densities. By implementing a multi-level spatial grid that adapts cell sizes based on local hexagon clustering, we can improve collision detection performance, especially in dense regions where many hexagons are packed closely together.
+
+This enhancement should provide better performance for the collision detection phase which is currently the most computationally expensive part of the evaluation function.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def build_spatial_grid(self):
+        """Build spatial grid for fast collision detection"""
+        self._spatial_grid = defaultdict(list)
+        bbox = self.get_bounding_box()
+        if not bbox or bbox == (0, 0, 0, 0):
+            return
+
+        min_x, min_y, max_x, max_y = bbox
+        for i, hexagon in enumerate(self.hexagons):
+            bbox = hexagon.polygon.bounds
+            min_x_h, min_y_h, max_x_h, max_y_h = bbox
+            for x in range(int(min_x_h/self._grid_size), int(max_x_h/self._grid_size)+1):
+                for y in range(int(min_y_h/self._grid_size), int(max_y_h/self._grid_size)+1):
+                    self._spatial_grid[(x,y)].append(i)
+=======
+    def build_spatial_grid(self, adaptive=True):
+        """Build spatial grid for fast collision detection with optional adaptive sizing"""
+        self._spatial_grid = defaultdict(list)
+        bbox = self.get_bounding_box()
+        if not bbox or bbox == (0, 0, 0, 0):
+            return
+
+        min_x, min_y, max_x, max_y = bbox
+        # Adaptive grid sizing based on density
+        if adaptive and len(self.hexagons) > 5:
+            # Calculate average distance between hexagons to determine appropriate grid size
+            if len(self.hexagons) > 1:
+                positions = np.array([np.array([h.x, h.y]) for h in self.hexagons])
+                # Use pairwise distances to estimate density
+                distances = []
+                for i in range(len(positions)):
+                    for j in range(i+1, len(positions)):
+                        dist = np.linalg.norm(positions[i] - positions[j])
+                        if dist > 0:
+                            distances.append(dist)
+                if distances:
+                    avg_distance = np.mean(distances)
+                    # Grid size should be roughly 1.5x average distance to balance efficiency and accuracy
+                    self._grid_size = max(1.0, avg_distance * 1.5)
+                else:
+                    self._grid_size = 5.0
+            else:
+                self._grid_size = 5.0
+        else:
+            self._grid_size = 5.0
+
+        for i, hexagon in enumerate(self.hexagons):
+            bbox = hexagon.polygon.bounds
+            min_x_h, min_y_h, max_x_h, max_y_h = bbox
+            for x in range(int(min_x_h/self._grid_size), int(max_x_h/self._grid_size)+1):
+                for y in range(int(min_y_h/self._grid_size), int(max_y_h/self._grid_size)+1):
+                    self._spatial_grid[(x,y)].append(i)
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+    def get_collision_candidates(self, hex_index: int) -> List[int]:
+        """Get potential collision candidates for a hexagon"""
+        if self._spatial_grid is None:
+            self.build_spatial_grid()
+
+        candidates = []
+        hexagon = self.hexagons[hex_index]
+        bbox = hexagon.polygon.bounds
+        min_x, min_y, max_x, max_y = bbox
+
+        for x in range(int(min_x/self._grid_size), int(max_x/self._grid_size)+1):
+            for y in range(int(min_y/self._grid_size), int(max_y/self._grid_size)+1):
+                candidates.extend(self._spatial_grid.get((x,y), []))
+        return [i for i in candidates if i != hex_index]
+=======
+    def get_collision_candidates(self, hex_index: int) -> List[int]:
+        """Get potential collision candidates for a hexagon"""
+        if self._spatial_grid is None:
+            self.build_spatial_grid()
+
+        candidates = []
+        hexagon = self.hexagons[hex_index]
+        bbox = hexagon.polygon.bounds
+        min_x, min_y, max_x, max_y = bbox
+
+        # Use adaptive grid size for more accurate neighbor detection
+        grid_size = max(1.0, self._grid_size * 0.8)  # Slightly smaller for more precise coverage
+
+        for x in range(int(min_x/grid_size), int(max_x/grid_size)+1):
+            for y in range(int(min_y/grid_size), int(max_y/grid_size)+1):
+                candidates.extend(self._spatial_grid.get((x,y), []))
+        return [i for i in candidates if i != hex_index]
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+    def has_collisions(self) -> bool:
+        """Check if any hexagons collide with each other"""
+        if not self.hexagons:
+            return False
+
+        # Use spatial indexing for faster collision detection
+        self.build_spatial_grid()
+        n = len(self.hexagons)
+
+        for i in range(n):
+            candidates = self.get_collision_candidates(i)
+            for j in candidates:
+                if self.hexagons[i].polygon.intersects(self.hexagons[j].polygon):
+                    return True
+        return False
+=======
+    def has_collisions(self) -> bool:
+        """Check if any hexagons collide with each other"""
+        if not self.hexagons:
+            return False
+
+        # Use spatial indexing for faster collision detection
+        self.build_spatial_grid()
+        n = len(self.hexagons)
+
+        # Early exit if we know there are no candidates
+        if not self._spatial_grid:
+            return False
+
+        # For performance, we can do an approximate check first
+        # Only do detailed intersection checking for potential neighbors
+        for i in range(n):
+            candidates = self.get_collision_candidates(i)
+            for j in candidates:
+                if i != j and self.hexagons[i].polygon.intersects(self.hexagons[j].polygon):
+                    return True
+        return False
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_solution(self, solution: np.ndarray, use_spatial_index: bool = True) -> float:
+        """Evaluate a solution and return negative of objective (since we minimize)"""
+        try:
+            # Reshape solution into positions and angles
+            positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+            angles = solution[22:]  # 11 angles
+
+            # Create hexagon objects
+            hexagons = [Hexagon(x, y, angle) for x, y, angle in zip(positions[:, 0], positions[:, 1], angles)]
+            hex_pack = HexagonPack(hexagons)
+
+            # Check containment
+            outer_hexagon = self.create_outer_hexagon(positions, angles)
+
+            # Check containment for all inner hexagons
+            if not hex_pack.contains_all(outer_hexagon):
+                return 1e10  # Penalty for non-containment
+
+            # Check for overlaps
+            if hex_pack.has_collisions():
+                return 1e10  # Penalty for overlap
+
+            # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+            outer_radius = self.calculate_outer_radius(positions, angles)
+            return -1.0 / outer_radius
+
+        except Exception as e:
+            logger.error(f"Evaluation error: {e}")
+            return 1e10
+=======
+    def evaluate_solution(self, solution: np.ndarray, use_spatial_index: bool = True) -> float:
+        """Evaluate a solution and return negative of objective (since we minimize)"""
+        try:
+            # Reshape solution into positions and angles
+            positions = solution[:22].reshape(-1, 2)  # 11 hexagons * 2 coordinates each
+            angles = solution[22:]  # 11 angles
+
+            # Create hexagon objects
+            hexagons = [Hexagon(x, y, angle) for x, y, angle in zip(positions[:, 0], positions[:, 1], angles)]
+            hex_pack = HexagonPack(hexagons)
+
+            # Check containment
+            outer_hexagon = self.create_outer_hexagon(positions, angles)
+
+            # Check containment for all inner hexagons
+            if not hex_pack.contains_all(outer_hexagon):
+                return 1e10  # Penalty for non-containment
+
+            # Check for overlaps - use spatial indexing when possible
+            if use_spatial_index:
+                if hex_pack.has_collisions():
+                    return 1e10  # Penalty for overlap
+            else:
+                # Fallback to direct pairwise checking for very complex cases
+                for i in range(len(hexagons)):
+                    for j in range(i+1, len(hexagons)):
+                        if hexagons[i].polygon.intersects(hexagons[j].polygon):
+                            return 1e10  # Penalty for overlap
+
+            # Return negative of 1/outer_radius (we want to maximize 1/outer_radius)
+            outer_radius = self.calculate_outer_radius(positions, angles)
+            return -1.0 / outer_radius
+
+        except Exception as e:
+            logger.error(f"Evaluation error: {e}")
+            return 1e10
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+                # Run adaptive differential evolution
+                result = adaptive_differential_evolution(
+                    lambda sol: self.evaluate_solution(sol, use_spatial_index=(i < 3)),  # Use spatial index for first 3 starts
+                    bounds,
+                    maxiter=self.max_iterations,
+                    popsize=self.population_size,
+                    seed=self.seed_base + i  # Different seed for each start
+                )
+=======
+                # Run adaptive differential evolution
+                result = adaptive_differential_evolution(
+                    lambda sol: self.evaluate_solution(sol, use_spatial_index=(i < 3)),  # Use spatial index for first 3 starts
+                    bounds,
+                    maxiter=self.max_iterations,
+                    popsize=self.population_size,
+                    seed=self.seed_base + i  # Different seed for each start
+                )
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_refinement(self, positions: np.ndarray, angles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply enhanced local refinement to improve the solution"""
+        # Enhanced local refinement with multiple strategies
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+        step_size = 0.05  # Increased initial step size
+        max_iterations = 150  # More iterations for thorough refinement
+        patience = 15  # More patience before stopping
+        patience_counter = 0
+        improvement_count = 0
+
+        # Track improvement history for adaptive strategy
+        recent_improvements = []
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_improvements = 0
+
+            # Try multiple perturbation strategies
+            for i in range(len(positions)):
+                # Strategy 1: Try multiple step sizes for positions
+                for dim in range(2):
+                    old_val = best_positions[i][dim]
+                    # Try several step sizes to find best direction
+                    step_sizes = [step_size, step_size * 0.5, step_size * 2.0]
+                    for delta_mult in [-1, 1]:  # Both directions
+                        for s in step_sizes:
+                            best_positions[i][dim] = old_val + delta_mult * s
+                            new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                            if new_score < best_score:
+                                best_score = new_score
+                                improved = True
+                                current_improvements += 1
+                            else:
+                                best_positions[i][dim] = old_val
+
+                # Strategy 2: Try multiple angle perturbations
+                old_angle = best_angles[i]
+                angle_steps = [-10.0, -5.0, -2.0, -1.0, 1.0, 2.0, 5.0, 10.0]
+                for delta in angle_steps:
+                    best_angles[i] = (old_angle + delta) % 360
+                    new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                    if new_score < best_score:
+                        best_score = new_score
+                        improved = True
+                        current_improvements += 1
+                    else:
+                        best_angles[i] = old_angle
+
+            # Adaptive step size adjustment based on recent performance
+            recent_improvements.append(current_improvements)
+            if len(recent_improvements) > 5:
+                recent_improvements.pop(0)
+
+            # If we're consistently not improving, reduce step size
+            if sum(recent_improvements[-5:]) == 0 and step_size > 0.001:
+                step_size *= 0.9
+            elif current_improvements > 2 and step_size < 0.2:
+                step_size = min(0.2, step_size * 1.1)  # Increase if making good progress
+
+            # Check for improvement
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+                improvement_count += 1
+
+        return best_positions, best_angles
+=======
+    def local_refinement(self, positions: np.ndarray, angles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply enhanced local refinement to improve the solution"""
+        # Enhanced local refinement with multiple strategies and early termination
+        best_positions = positions.copy()
+        best_angles = angles.copy()
+        best_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+
+        step_size = 0.05  # Increased initial step size
+        max_iterations = 150  # More iterations for thorough refinement
+        patience = 15  # More patience before stopping
+        patience_counter = 0
+        improvement_count = 0
+
+        # Track improvement history for adaptive strategy
+        recent_improvements = []
+
+        for iteration in range(max_iterations):
+            improved = False
+            current_improvements = 0
+
+            # Try multiple perturbation strategies
+            for i in range(len(positions)):
+                # Strategy 1: Try multiple step sizes for positions
+                for dim in range(2):
+                    old_val = best_positions[i][dim]
+                    # Try several step sizes to find best direction
+                    step_sizes = [step_size, step_size * 0.5, step_size * 2.0]
+                    for delta_mult in [-1, 1]:  # Both directions
+                        for s in step_sizes:
+                            best_positions[i][dim] = old_val + delta_mult * s
+                            new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                            if new_score < best_score:
+                                best_score = new_score
+                                improved = True
+                                current_improvements += 1
+                            else:
+                                best_positions[i][dim] = old_val
+
+                # Strategy 2: Try multiple angle perturbations
+                old_angle = best_angles[i]
+                angle_steps = [-10.0, -5.0, -2.0, -1.0, 1.0, 2.0, 5.0, 10.0]
+                for delta in angle_steps:
+                    best_angles[i] = (old_angle + delta) % 360
+                    new_score = self.evaluate_solution(np.concatenate([best_positions.flatten(), best_angles]))
+                    if new_score < best_score:
+                        best_score = new_score
+                        improved = True
+                        current_improvements += 1
+                    else:
+                        best_angles[i] = old_angle
+
+            # Adaptive step size adjustment based on recent performance
+            recent_improvements.append(current_improvements)
+            if len(recent_improvements) > 5:
+                recent_improvements.pop(0)
+
+            # If we're consistently not improving, reduce step size
+            if sum(recent_improvements[-5:]) == 0 and step_size > 0.001:
+                step_size *= 0.9
+            elif current_improvements > 2 and step_size < 0.2:
+                step_size = min(0.2, step_size * 1.1)  # Increase if making good progress
+
+            # Check for improvement
+            if not improved:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+                improvement_count += 1
+
+        return best_positions, best_angles
+>>>>>>> REPLACE
+
+<DIFF>
+<<<<<<< SEARCH
+        # Calculate outer hex side length
+        # We need to calculate this based on the final solution
+        max_dist = 0
+        outer_center = (0, 0)
+
+        # Get all vertices of all inner hexagons
+        all_vertices = []
+        for i in range(len(final_positions)):
+            x, y = final_positions[i]
+            angle = final_angles[i]
+            hex_vertices = hexagon_vertices(x, y, angle)
+            all_vertices.extend(hex_vertices)
+
+        # Find maximum distance from center
+        for vertex in all_vertices:
+            dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+            max_dist = max(max_dist, dist)
+
+        outer_hex_side_length = max_dist / (np.sqrt(3) / 2) * 1.1  # Adding safety factor
+=======
+        # Calculate outer hex side length
+        # We need to calculate this based on the final solution
+        max_dist = 0
+        outer_center = (0, 0)
+
+        # Get all vertices of all inner hexagons
+        all_vertices = []
+        for i in range(len(final_positions)):
+            x, y = final_positions[i]
+            angle = final_angles[i]
+            hex_vertices = hexagon_vertices(x, y, angle)
+            all_vertices.extend(hex_vertices)
+
+        # Find maximum distance from center
+        for vertex in all_vertices:
+            dist = np.sqrt((vertex[0] - outer_center[0])**2 + (vertex[1] - outer_center[1])**2)
+            max_dist = max(max_dist, dist)
+
+        outer_hex_side_length = max_dist / (np.sqrt(3) / 2) * 1.1  # Adding safety factor
+>>>>>>> REPLACE
+</DIFF>

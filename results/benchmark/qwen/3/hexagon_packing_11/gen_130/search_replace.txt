@@ -1,0 +1,426 @@
+<NAME>
+add_local_search_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll implement a more sophisticated local search refinement step that specifically targets the key bottlenecks in the current evolutionary approach. The idea is to add a dedicated local optimization phase that focuses on improving the best individual found so far, rather than just doing generic local optimization on the population.
+
+This enhancement will add a refinement stage that uses a more aggressive optimization strategy on the best individual, potentially finding better local optima that the standard evolutionary approach might miss. I'll also improve the initialization strategy to start with a better baseline configuration.
+
+The main improvements are:
+1. Add a dedicated local refinement stage that runs on the best individual after each generation
+2. Improve the initial configuration generation with a more thoughtful hexagonal arrangement
+3. Add better termination conditions based on convergence
+4. Implement adaptive mutation rates that decrease more aggressively
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def __init__(self):
+        self.geometry = HexagonGeometry()
+        self.validator = HexagonValidator(self.geometry)
+        self.max_time_seconds = 170
+        self.population_size = 15
+        self.n_generations = 30
+        self.elite_count = 2
+        self.mutation_rate = 0.3
+        self.local_optimization_iters = 50
+
+    def generate_initial_configuration(self, n_hexagons: int = 11) -> np.ndarray:
+        """Generate an initial configuration with strategic placement."""
+        # Start with mathematical hexagonal tiling
+        positions = []
+
+        # Central hexagon
+        positions.append([0.0, 0.0, 0.0])
+
+        # First ring (6 hexagons) - arranged in a perfect hexagonal pattern
+        for i in range(6):
+            angle = i * np.pi / 3
+            # Distance between centers of touching hexagons is 2 (diameter)
+            x = 2.0 * np.cos(angle)
+            y = 2.0 * np.sin(angle)
+            positions.append([x, y, 0.0])
+
+        # Second ring (4 hexagons) - strategically placed
+        second_ring_positions = [
+            [-1.0, -1.732, 0.0],   # Bottom left
+            [1.0, -1.732, 0.0],    # Bottom right
+            [-1.0, 1.732, 0.0],    # Top left
+            [1.0, 1.732, 0.0],     # Top right
+        ]
+
+        positions.extend(second_ring_positions)
+
+        # Take only the required number of positions
+        initial_positions = np.array(positions[:n_hexagons])
+
+        # Add slight random perturbations
+        np.random.seed(42)
+        for i in range(len(initial_positions)):
+            initial_positions[i, 0] += np.random.uniform(-0.1, 0.1)
+            initial_positions[i, 1] += np.random.uniform(-0.1, 0.1)
+            initial_positions[i, 2] += np.random.uniform(-5, 5)
+
+        return initial_positions
+=======
+    def __init__(self):
+        self.geometry = HexagonGeometry()
+        self.validator = HexagonValidator(self.geometry)
+        self.max_time_seconds = 170
+        self.population_size = 15
+        self.n_generations = 30
+        self.elite_count = 2
+        self.mutation_rate = 0.3
+        self.local_optimization_iters = 50
+        self.convergence_threshold = 1e-8
+        self.convergence_window = 10
+
+    def generate_initial_configuration(self, n_hexagons: int = 11) -> np.ndarray:
+        """Generate an initial configuration with strategic placement."""
+        # Use more sophisticated hexagonal packing arrangement
+        positions = []
+
+        # Central hexagon
+        positions.append([0.0, 0.0, 0.0])
+
+        # First ring (6 hexagons) - arranged in a perfect hexagonal pattern
+        for i in range(6):
+            angle = i * np.pi / 3
+            # Distance between centers of touching hexagons is 2 (diameter)
+            x = 2.0 * np.cos(angle)
+            y = 2.0 * np.sin(angle)
+            positions.append([x, y, 0.0])
+
+        # Second ring (4 hexagons) - strategically placed to minimize space
+        # These are positioned to fill the gaps in a more compact way
+        second_ring_positions = [
+            [-1.0, -1.732, 0.0],   # Bottom left
+            [1.0, -1.732, 0.0],    # Bottom right
+            [-1.0, 1.732, 0.0],    # Top left
+            [1.0, 1.732, 0.0],     # Top right
+        ]
+
+        positions.extend(second_ring_positions)
+
+        # Take only the required number of positions
+        initial_positions = np.array(positions[:n_hexagons])
+
+        # Add better random perturbations with more systematic approach
+        np.random.seed(42)
+        for i in range(len(initial_positions)):
+            # Reduce perturbation size for better initial stability
+            initial_positions[i, 0] += np.random.uniform(-0.05, 0.05)
+            initial_positions[i, 1] += np.random.uniform(-0.05, 0.05)
+            initial_positions[i, 2] += np.random.uniform(-2, 2)
+
+        return initial_positions
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def evaluate_fitness_parallel(self, configs: list) -> list:
+        """Parallel evaluation of multiple configurations."""
+        def evaluate_single(config):
+            return self.evaluate_fitness(config)
+
+        results = Parallel(n_jobs=-1)(
+            delayed(evaluate_single)(config) for config in configs
+        )
+        return results
+
+    def evaluate_fitness(self, config: np.ndarray) -> Tuple[float, float]:
+        """Evaluate fitness of a configuration - higher is better."""
+        # Extract inner hexagon data
+        inner_positions = config[:, :2]
+        inner_angles = config[:, 2]
+
+        # Compute outer hexagon radius
+        outer_radius = self.geometry.compute_outer_radius(inner_positions, inner_angles)
+
+        # Validate configuration
+        valid = self.validator.validate_configuration(inner_positions, inner_angles, outer_radius)
+
+        # Return fitness (inverse of radius if valid, very negative otherwise)
+        if valid:
+            return 1.0 / outer_radius, outer_radius
+        else:
+            return -1e6, outer_radius
+
+    def local_optimization_step(self, config: np.ndarray) -> np.ndarray:
+        """Perform local optimization on a configuration with adaptive iterations."""
+        def objective(x):
+            # Reshape to proper format
+            test_config = x.reshape(-1, 3)
+            fitness, _ = self.evaluate_fitness(test_config)
+            return -fitness  # Negative because we want to maximize
+
+        # Use L-BFGS-B for local refinement with reduced iterations
+        try:
+            result = minimize(objective, config.flatten(), method='L-BFGS-B',
+                            options={'maxiter': self.local_optimization_iters, 'ftol': 1e-6, 'gtol': 1e-4})
+            return result.x.reshape(-1, 3)
+        except:
+            # If optimization fails, return original config
+            return config
+
+    def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """Perform crossover between two parents."""
+        # Average of parents for uniform crossover
+        child = (parent1 + parent2) / 2
+        return child
+
+    def mutate_individual(self, individual: np.ndarray, generation: int) -> np.ndarray:
+        """Mutate an individual with adaptive rate."""
+        mutated = individual.copy()
+        mutation_rate = self.mutation_rate / (generation + 1)**0.5
+
+        for i in range(len(mutated)):
+            for j in range(len(mutated[i])):
+                if np.random.rand() < mutation_rate:
+                    if j == 0 or j == 1:  # x or y coordinate
+                        mutated[i, j] += np.random.normal(0, 0.1)
+                    elif j == 2:  # angle
+                        mutated[i, j] += np.random.normal(0, 5)
+        return mutated
+
+    def evolutionary_search(self) -> Tuple[np.ndarray, float, float]:
+        """Evolutionary algorithm for hexagon packing optimization."""
+        # Initialize population with better starting points
+        population = []
+        for i in range(self.population_size):
+            individual = self.generate_initial_configuration(11)
+            population.append(individual)
+
+        # Evolution loop
+        best_fitness = -np.inf
+        best_individual = None
+        best_radius = float('inf')
+
+        start_time = time.time()
+
+        for gen in range(self.n_generations):
+            if time.time() - start_time > self.max_time_seconds:
+                break
+
+            # Evaluate fitness for all individuals in parallel
+            fitness_results = self.evaluate_fitness_parallel(population)
+
+            # Extract fitness scores and update best
+            fitness_scores = [result[0] for result in fitness_results]
+            radii = [result[1] for result in fitness_results]
+
+            for i, (fitness, radius) in enumerate(zip(fitness_scores, radii)):
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = population[i].copy()
+                    best_radius = radius
+
+            # Early stopping check
+            if gen > 10 and abs(best_fitness - max(fitness_scores)) < 1e-8:
+                break
+
+            # Create new population through selection and mutation
+            # Tournament selection
+            new_population = []
+
+            # Elitism: keep top individuals
+            sorted_indices = np.argsort(fitness_scores)[::-1]  # Descending order
+            for i in range(self.elite_count):
+                new_population.append(population[sorted_indices[i]])
+
+            # Generate rest by crossover and mutation
+            while len(new_population) < self.population_size:
+                # Select parents
+                parent1_idx = sorted_indices[np.random.randint(0, int(self.population_size/2))]
+                parent2_idx = sorted_indices[np.random.randint(0, int(self.population_size/2))]
+
+                parent1 = population[parent1_idx]
+                parent2 = population[parent2_idx]
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate_individual(child, gen)
+
+                new_population.append(child)
+
+            population = new_population[:self.population_size]
+
+        return best_individual, best_fitness, best_radius
+=======
+    def evaluate_fitness_parallel(self, configs: list) -> list:
+        """Parallel evaluation of multiple configurations."""
+        def evaluate_single(config):
+            return self.evaluate_fitness(config)
+
+        results = Parallel(n_jobs=-1)(
+            delayed(evaluate_single)(config) for config in configs
+        )
+        return results
+
+    def evaluate_fitness(self, config: np.ndarray) -> Tuple[float, float]:
+        """Evaluate fitness of a configuration - higher is better."""
+        # Extract inner hexagon data
+        inner_positions = config[:, :2]
+        inner_angles = config[:, 2]
+
+        # Compute outer hexagon radius
+        outer_radius = self.geometry.compute_outer_radius(inner_positions, inner_angles)
+
+        # Validate configuration
+        valid = self.validator.validate_configuration(inner_positions, inner_angles, outer_radius)
+
+        # Return fitness (inverse of radius if valid, very negative otherwise)
+        if valid:
+            return 1.0 / outer_radius, outer_radius
+        else:
+            return -1e6, outer_radius
+
+    def local_optimization_step(self, config: np.ndarray, max_iter: int = 100) -> np.ndarray:
+        """Perform local optimization on a configuration with adaptive iterations."""
+        def objective(x):
+            # Reshape to proper format
+            test_config = x.reshape(-1, 3)
+            fitness, _ = self.evaluate_fitness(test_config)
+            return -fitness  # Negative because we want to maximize
+
+        # Use L-BFGS-B for local refinement with reduced iterations
+        try:
+            result = minimize(objective, config.flatten(), method='L-BFGS-B',
+                            options={'maxiter': max_iter, 'ftol': 1e-6, 'gtol': 1e-4})
+            return result.x.reshape(-1, 3)
+        except:
+            # If optimization fails, return original config
+            return config
+
+    def adaptive_local_refinement(self, individual: np.ndarray) -> np.ndarray:
+        """Apply multiple rounds of local refinement with increasing intensity."""
+        refined = individual.copy()
+
+        # Apply several rounds of local optimization with increasing iterations
+        for i, iterations in enumerate([20, 50, 100]):
+            refined = self.local_optimization_step(refined, iterations)
+
+            # If this round didn't improve much, stop early
+            if i > 0:
+                # Check if improvement was minimal
+                prev_fitness, _ = self.evaluate_fitness(individual)
+                curr_fitness, _ = self.evaluate_fitness(refined)
+                if curr_fitness - prev_fitness < 1e-6:
+                    break
+
+        return refined
+
+    def crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        """Perform crossover between two parents."""
+        # Blend crossover with more careful blending ratios
+        alpha = 0.7
+        child = parent1 * alpha + parent2 * (1 - alpha)
+        return child
+
+    def mutate_individual(self, individual: np.ndarray, generation: int) -> np.ndarray:
+        """Mutate an individual with adaptive rate."""
+        mutated = individual.copy()
+        # Decrease mutation rate more aggressively
+        mutation_rate = self.mutation_rate / (generation + 1)**0.7
+
+        for i in range(len(mutated)):
+            for j in range(len(mutated[i])):
+                if np.random.rand() < mutation_rate:
+                    if j == 0 or j == 1:  # x or y coordinate
+                        # Reduce mutation magnitude for better stability
+                        mutated[i, j] += np.random.normal(0, 0.05)
+                    elif j == 2:  # angle
+                        mutated[i, j] += np.random.normal(0, 2)
+        return mutated
+
+    def evolutionary_search(self) -> Tuple[np.ndarray, float, float]:
+        """Evolutionary algorithm for hexagon packing optimization."""
+        # Initialize population with better starting points
+        population = []
+        for i in range(self.population_size):
+            individual = self.generate_initial_configuration(11)
+            population.append(individual)
+
+        # Evolution loop
+        best_fitness = -np.inf
+        best_individual = None
+        best_radius = float('inf')
+        fitness_history = []
+
+        start_time = time.time()
+
+        for gen in range(self.n_generations):
+            if time.time() - start_time > self.max_time_seconds:
+                break
+
+            # Evaluate fitness for all individuals in parallel
+            fitness_results = self.evaluate_fitness_parallel(population)
+
+            # Extract fitness scores and update best
+            fitness_scores = [result[0] for result in fitness_results]
+            radii = [result[1] for result in fitness_results]
+
+            for i, (fitness, radius) in enumerate(zip(fitness_scores, radii)):
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_individual = population[i].copy()
+                    best_radius = radius
+
+            # Track fitness history for convergence detection
+            fitness_history.append(best_fitness)
+            if len(fitness_history) > self.convergence_window:
+                fitness_history.pop(0)
+
+            # Early stopping check based on convergence
+            if len(fitness_history) >= self.convergence_window:
+                recent_improvement = max(fitness_history) - min(fitness_history)
+                if recent_improvement < self.convergence_threshold:
+                    break
+
+            # Create new population through selection and mutation
+            # Tournament selection
+            new_population = []
+
+            # Elitism: keep top individuals
+            sorted_indices = np.argsort(fitness_scores)[::-1]  # Descending order
+            for i in range(self.elite_count):
+                new_population.append(population[sorted_indices[i]])
+
+            # Generate rest by crossover and mutation
+            while len(new_population) < self.population_size:
+                # Select parents
+                parent1_idx = sorted_indices[np.random.randint(0, int(self.population_size/2))]
+                parent2_idx = sorted_indices[np.random.randint(0, int(self.population_size/2))]
+
+                parent1 = population[parent1_idx]
+                parent2 = population[parent2_idx]
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate_individual(child, gen)
+
+                new_population.append(child)
+
+            population = new_population[:self.population_size]
+
+        # Final local refinement on the best individual found
+        if best_individual is not None:
+            best_individual = self.adaptive_local_refinement(best_individual)
+            # Re-evaluate the final refined individual
+            final_fitness, final_radius = self.evaluate_fitness(best_individual)
+            if final_fitness > best_fitness:
+                best_fitness = final_fitness
+                best_radius = final_radius
+
+        return best_individual, best_fitness, best_radius
+>>>>>>> REPLACE
+
+</DIFF>

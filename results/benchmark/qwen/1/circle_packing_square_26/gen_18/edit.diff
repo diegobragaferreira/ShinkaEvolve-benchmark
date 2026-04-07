@@ -1,0 +1,275 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,264 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-
+-# You can define functions outside the main function below.
+-# Remember that any function used in parallel computation must be defined globally and not locally.
++import random
++from deap import base, creator, tools, algorithms
++from scipy.optimize import minimize
++import math
+ 
+ def circle_packing26() -> np.ndarray:
+     """
+     Places 26 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (26,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    n = 26
+-    circles = np.zeros((n, 3))
+-
+-    return circles
+-
++    
++    # Set seed for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
++    def evaluate(individual):
++        # Convert individual to circles array
++        circles = []
++        for i in range(26):
++            x = individual[i*3]
++            y = individual[i*3 + 1]
++            r = individual[i*3 + 2]
++            circles.append([x, y, r])
++        
++        # Calculate sum of radii (objective to maximize)
++        total_radius = sum(circle[2] for circle in circles)
++        
++        # Penalty for violations
++        penalty = 0
++        
++        # Check containment constraints
++        for circle in circles:
++            x, y, r = circle
++            if r <= 0 or x < r or x > 1-r or y < r or y > 1-r:
++                penalty += 1000000
++        
++        # Check overlap constraints
++        for i in range(len(circles)):
++            for j in range(i+1, len(circles)):
++                x1, y1, r1 = circles[i]
++                x2, y2, r2 = circles[j]
++                distance_squared = (x1-x2)**2 + (y1-y2)**2
++                min_distance_squared = (r1+r2)**2
++                
++                if distance_squared < min_distance_squared:
++                    # Add penalty based on overlap amount
++                    overlap = min_distance_squared - distance_squared
++                    penalty += overlap * 100000
++                    
++        # Return negative since we want to maximize
++        return (-total_radius - penalty,),
++    
++    def mutate_individual(individual, indpb=0.1):
++        for i in range(len(individual)):
++            if random.random() < indpb:
++                if i % 3 == 2:  # Radius
++                    individual[i] = max(0.001, min(0.5, individual[i] + random.gauss(0, 0.01)))
++                else:  # Position
++                    individual[i] = max(0.001, min(0.999, individual[i] + random.gauss(0, 0.02)))
++        return individual,
++    
++    # Initialize toolbox
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    
++    toolbox = base.Toolbox()
++    toolbox.register("attr_float", random.uniform, 0.001, 0.999)
++    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, 78)  # 26*3
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate)
++    toolbox.register("mate", tools.cxUniform, indpb=0.5)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=3)
++    
++    def generate_initial_population():
++        """Generate diverse initial population using multiple strategies"""
++        population = []
++        
++        # Strategy 1: Greedy initialization
++        greedy_circles = greedy_initialization()
++        individual = []
++        for x, y, r in greedy_circles:
++            individual.extend([x, y, r])
++        population.append(individual)
++        
++        # Strategy 2: Random initialization
++        for _ in range(29):  # Create 30 individuals total
++            individual = []
++            for _ in range(26):
++                # Generate random valid circles
++                x = random.uniform(0.001, 0.999)
++                y = random.uniform(0.001, 0.999)
++                r = random.uniform(0.001, 0.2)
++                individual.extend([x, y, r])
++            population.append(individual)
++            
++        return population
++    
++    def greedy_initialization():
++        """Initialize circles using a greedy algorithm"""
++        circles = []
++        
++        # Start with a few large circles
++        # Try to place circles greedily from largest to smallest
++        radii = [0.15, 0.14, 0.13, 0.12, 0.11, 0.10, 0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03] + \
++                 [0.02] * 13  # Remaining circles smaller
++        
++        for r in radii:
++            best_pos = None
++            max_min_dist = -1
++            
++            # Try multiple candidate positions
++            for _ in range(1000):
++                x = random.uniform(r, 1-r)
++                y = random.uniform(r, 1-r)
++                
++                # Check if this position is valid
++                valid = True
++                min_dist = float('inf')
++                
++                for cx, cy, cr in circles:
++                    dist = math.sqrt((x-cx)**2 + (y-cy)**2)
++                    if dist < cr + r:
++                        valid = False
++                        break
++                    min_dist = min(min_dist, dist)
++                
++                if valid and min_dist > max_min_dist:
++                    max_min_dist = min_dist
++                    best_pos = (x, y)
++                    
++            if best_pos:
++                circles.append((best_pos[0], best_pos[1], r))
++            else:
++                # Fallback to random
++                attempts = 0
++                while attempts < 100:
++                    x = random.uniform(r, 1-r)
++                    y = random.uniform(r, 1-r)
++                    valid = True
++                    for cx, cy, cr in circles:
++                        dist = math.sqrt((x-cx)**2 + (y-cy)**2)
++                        if dist < cr + r:
++                            valid = False
++                            break
++                    if valid:
++                        circles.append((x, y, r))
++                        break
++                    attempts += 1
++        
++        # Fill remaining slots
++        while len(circles) < 26:
++            x = random.uniform(0.001, 0.999)
++            y = random.uniform(0.001, 0.999)
++            r = 0.01  # Small radius
++            valid = True
++            for cx, cy, cr in circles:
++                dist = math.sqrt((x-cx)**2 + (y-cy)**2)
++                if dist < cr + r:
++                    valid = False
++                    break
++            if valid:
++                circles.append((x, y, r))
++        
++        return circles[:26]
++    
++    # Initialize population
++    population = generate_initial_population()
++    
++    # Run evolution
++    for generation in range(20):  # Limited generations for time constraints
++        # Select
++        offspring = toolbox.select(population, len(population))
++        offspring = list(map(toolbox.clone, offspring))
++        
++        # Crossover and mutation
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < 0.8:
++                toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++        
++        for mutant in offspring:
++            if random.random() < 0.2:
++                toolbox.mutate(mutant)
++                del mutant.fitness.values
++        
++        # Evaluate new individuals
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++        
++        # Replace population
++        population[:] = offspring
++    
++    # Get best solution
++    best_individual = tools.selBest(population, 1)[0]
++    
++    # Convert to final circles array
++    circles = []
++    for i in range(26):
++        x = best_individual[i*3]
++        y = best_individual[i*3 + 1]
++        r = best_individual[i*3 + 2]
++        circles.append([x, y, r])
++    
++    # Apply local optimization to the best solution
++    def objective(params):
++        circles_local = []
++        for i in range(26):
++            x = params[i*3]
++            y = params[i*3 + 1]
++            r = params[i*3 + 2]
++            circles_local.append([x, y, r])
++        
++        total_radius = sum(circle[2] for circle in circles_local)
++        
++        # Penalty for violations
++        penalty = 0
++        
++        # Check containment constraints
++        for circle in circles_local:
++            x, y, r = circle
++            if r <= 0 or x < r or x > 1-r or y < r or y > 1-r:
++                penalty += 1000000
++        
++        # Check overlap constraints
++        for i in range(len(circles_local)):
++            for j in range(i+1, len(circles_local)):
++                x1, y1, r1 = circles_local[i]
++                x2, y2, r2 = circles_local[j]
++                distance_squared = (x1-x2)**2 + (y1-y2)**2
++                min_distance_squared = (r1+r2)**2
++                
++                if distance_squared < min_distance_squared:
++                    overlap = min_distance_squared - distance_squared
++                    penalty += overlap * 100000
++                    
++        return -total_radius - penalty
++    
++    # Local optimization
++    try:
++        result = minimize(objective, best_individual, method='L-BFGS-B',
++                          bounds=[(0.001, 0.999)] * 78,
++                          options={'maxiter': 500})
++        if result.success:
++            final_individual = result.x.tolist()
++            circles = []
++            for i in range(26):
++                x = final_individual[i*3]
++                y = final_individual[i*3 + 1]
++                r = final_individual[i*3 + 2]
++                circles.append([x, y, r])
++    except:
++        pass
++    
++    return np.array(circles)
+ 
+ # EVOLVE-BLOCK-END

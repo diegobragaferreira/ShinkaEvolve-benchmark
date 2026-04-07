@@ -1,0 +1,257 @@
+<NAME>
+refactor_with_direct_implementation
+</NAME>
+
+<DESCRIPTION>
+I'll refactor the implementation to directly address the problem with a more efficient approach. Instead of creating complex evolutionary algorithms, I'll implement a simpler yet effective method using optimization techniques. The key insight is to use a combination of systematic placement and local optimization to find good solutions quickly.
+
+The main improvements will be:
+1. Use a better initialization strategy with hexagonal packing as starting point
+2. Implement efficient collision detection
+3. Use a greedy optimization approach to improve placements
+4. Keep the approach simple and fast within the time constraints
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+
+# Set seed for reproducibility
+np.random.seed(42)
+
+def calculate_distance(circle1, circle2):
+    """Calculate Euclidean distance between two circles' centers"""
+    return np.sqrt((circle1[0] - circle2[0])**2 + (circle1[1] - circle2[1])**2)
+
+def check_collision(circle1, circle2):
+    """Check if two circles collide"""
+    distance = calculate_distance(circle1, circle2)
+    return distance < (circle1[2] + circle2[2])
+
+def check_boundaries(circle, width, height):
+    """Check if circle is within boundaries"""
+    x, y, r = circle
+    return (r <= x <= width - r) and (r <= y <= height - r)
+
+def is_valid_placement(circles, new_circle, width, height):
+    """Check if new circle placement is valid"""
+    if not check_boundaries(new_circle, width, height):
+        return False
+
+    for circle in circles:
+        if check_collision(circle, new_circle):
+            return False
+
+    return True
+
+def compute_total_radius(circles):
+    """Compute sum of all circle radii"""
+    return np.sum(circles[:, 2])
+
+def optimize_single_circle_placement(circles, index, width, height, max_iterations=100):
+    """Optimize a single circle's position and radius"""
+    original_circle = circles[index].copy()
+
+    # Try to increase the radius first (more important for objective)
+    max_radius = min(
+        circles[index][0],
+        circles[index][1],
+        width - circles[index][0],
+        height - circles[index][1]
+    )
+
+    # Binary search for maximum radius that doesn't collide
+    low, high = circles[index][2], max_radius
+    best_radius = circles[index][2]
+
+    while high - low > 0.0001:
+        mid = (low + high) / 2
+        test_circle = np.array([circles[index][0], circles[index][1], mid])
+
+        valid = True
+        for i, circle in enumerate(circles):
+            if i != index and check_collision(circle, test_circle):
+                valid = False
+                break
+
+        if valid:
+            best_radius = mid
+            low = mid
+        else:
+            high = mid
+
+    circles[index][2] = best_radius
+
+    # Then try to reposition optimally
+    best_circle = circles[index].copy()
+    best_fitness = compute_total_radius(circles)
+
+    # Local optimization around current position
+    for _ in range(max_iterations):
+        # Slightly perturb the position
+        dx = np.random.uniform(-0.05, 0.05)
+        dy = np.random.uniform(-0.05, 0.05)
+
+        new_x = circles[index][0] + dx
+        new_y = circles[index][1] + dy
+
+        # Check if new position is within bounds
+        if (new_x >= circles[index][2] and new_x <= width - circles[index][2] and
+            new_y >= circles[index][2] and new_y <= height - circles[index][2]):
+
+            # Test new circle
+            test_circle = np.array([new_x, new_y, circles[index][2]])
+
+            # Check if it collides with others
+            valid = True
+            for i, circle in enumerate(circles):
+                if i != index and check_collision(circle, test_circle):
+                    valid = False
+                    break
+
+            if valid:
+                # Update position
+                circles[index][0] = new_x
+                circles[index][1] = new_y
+
+                # Recalculate total radius
+                new_fitness = compute_total_radius(circles)
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                else:
+                    # Reset if worse
+                    circles[index] = best_circle.copy()
+
+    return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions: perimeter = 4, so width + height = 2
+    # For square: width = height = 1
+    width = 1.0
+    height = 1.0
+
+    # Start with hexagonal packing approximation
+    n = 21
+    circles = np.zeros((n, 3))
+
+    # Initialize with a systematic approach
+    # Place circles in a grid-like pattern, then optimize
+    rows = int(math.ceil(math.sqrt(n)))
+    cols = int(math.ceil(n / rows))
+
+    # Create initial configuration with equal-sized circles
+    base_radius = 0.1
+
+    placed_count = 0
+    for i in range(rows):
+        for j in range(cols):
+            if placed_count >= n:
+                break
+
+            x = (j + 0.5) * (width / cols)
+            y = (i + 0.5) * (height / rows)
+            r = base_radius
+
+            # Adjust position to be within bounds
+            x = max(r, min(width - r, x))
+            y = max(r, min(height - r, y))
+
+            circles[placed_count] = [x, y, r]
+            placed_count += 1
+
+    # Now optimize the configuration
+    # First, try to increase radii as much as possible
+    for i in range(n):
+        # Try to grow each circle as much as possible
+        max_radius = min(
+            circles[i][0],
+            circles[i][1],
+            width - circles[i][0],
+            height - circles[i][1]
+        )
+
+        # Binary search for maximum radius
+        low, high = circles[i][2], max_radius
+        best_radius = circles[i][2]
+
+        while high - low > 0.0001:
+            mid = (low + high) / 2
+            test_circle = np.array([circles[i][0], circles[i][1], mid])
+
+            valid = True
+            for j, circle in enumerate(circles):
+                if i != j and check_collision(circle, test_circle):
+                    valid = False
+                    break
+
+            if valid:
+                best_radius = mid
+                low = mid
+            else:
+                high = mid
+
+        circles[i][2] = best_radius
+
+    # Apply local optimization to fine-tune positions
+    max_optimization_rounds = 10
+    for round_num in range(max_optimization_rounds):
+        total_radius_before = compute_total_radius(circles)
+
+        # Randomly select circles to optimize
+        indices_to_optimize = list(range(n))
+        np.random.shuffle(indices_to_optimize)
+
+        for idx in indices_to_optimize[:n//2]:  # Optimize half of the circles each round
+            circles = optimize_single_circle_placement(circles, idx, width, height)
+
+        total_radius_after = compute_total_radius(circles)
+
+        # If no improvement, stop early
+        if abs(total_radius_after - total_radius_before) < 0.0001:
+            break
+
+    # Final validation
+    for i in range(n):
+        # Ensure it's within boundaries
+        circles[i][0] = np.clip(circles[i][0], circles[i][2], width - circles[i][2])
+        circles[i][1] = np.clip(circles[i][1], circles[i][2], height - circles[i][2])
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

@@ -1,0 +1,489 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+from scipy.fft import fft, ifft
+import random
+from typing import List, Tuple
+import time
+import math
+from deap import base, creator, tools, algorithms
+import warnings
+from numba import jit
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
+
+# Set seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values):
+    """
+    Fast computation of autoconvolution norms using Numba JIT compilation.
+    """
+    n = len(f_values)
+    if n < 1:
+        return 0.0, 0.0, 0.0
+
+    # Convert to numpy array for fast operations
+    f = np.array(f_values, dtype=np.float64)
+    
+    # Create the step function on [-1/4, 1/4] with equal spacing
+    dx = 0.5 / (n - 1) if n > 1 else 0.5
+    
+    # Precompute convolution manually for efficiency
+    # Autoconvolution g[k] = sum f[i] * f[k-i] for valid indices
+    g = np.zeros(2 * n - 1)
+    
+    # Manual convolution loop (optimized for autoconvolution)
+    for i in range(n):
+        for j in range(n):
+            k = i + j
+            if 0 <= k < len(g):
+                g[k] += f[i] * f[j]
+    
+    # Keep only the middle part (proper autoconvolution)
+    g_middle = g[n-1:2*n-1]
+    
+    # Create x-axis for g (interval [-0.5, 0.5])
+    g_x = np.linspace(-0.5, 0.5, len(g_middle))
+    
+    # Compute the required norms
+    # ||g||₂² (L2 norm squared)
+    # Using trapezoidal integration approximation 
+    g_sq = g_middle * g_middle
+    area = 0.0
+    for i in range(len(g_middle) - 1):
+        h = g_x[i+1] - g_x[i]
+        area += h * (g_sq[i] + g_sq[i+1]) / 2
+    
+    norm_2_sq = area
+
+    # ||g||₁ (L1 norm) - approximate via summation
+    norm_1 = np.sum(np.abs(g_middle)) * dx  # dx is the step size
+
+    # ||g||∞ (infinity norm)
+    norm_inf = np.max(np.abs(g_middle))
+
+    return norm_2_sq, norm_1, norm_inf
+
+class AutoconvolutionCalculator:
+    """Handles all autoconvolution norm computations with optimized numerical methods"""
+    
+    @staticmethod
+    def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+        """
+        Compute the autoconvolution g = f*f and its norms efficiently.
+        Returns (||g||₂², ||g||₁, ||g||∞)
+        """
+        if not f_values or len(f_values) < 2:
+            return 0.0, 0.0, 0.0
+
+        # Create step function on [-1/4, 1/4] with equal spacing
+        n = len(f_values)
+        
+        # Step size in x domain [-1/4, 1/4]
+        dx = 0.5 / (n - 1) if n > 1 else 0.5
+
+        # Compute autoconvolution using numpy's convolution
+        g = signal.convolve(f_values, f_values, mode='full')
+        
+        # Extract the central portion representing the actual convolution on [-1/2, 1/2]
+        # For two functions of length n on [-1/4, 1/4], convolution produces 2*n-1 points
+        center_start = len(g) // 2 - (n - 1)
+        center_end = center_start + (2 * n - 1)
+        g = g[center_start:center_end]
+
+        # Compute the three norms
+        # ||g||∞ = max of |g|
+        norm_inf = np.max(np.abs(g)) if len(g) > 0 else 0.0
+
+        # ||g||₁ = sum of |g| * dx
+        norm_1 = np.sum(np.abs(g)) * dx if len(g) > 1 else 0.0
+
+        # ||g||₂² = ∫ g² dx using trapezoidal-like integration
+        if len(g) <= 1:
+            norm_2_squared = 0.0
+        else:
+            # Use piecewise linear integration for g^2
+            # ∫ y^2 dx ≈ (dx/3) * (y_i^2 + y_i*y_{i+1} + y_{i+1}^2)
+            norm_2_squared = 0.0
+            for i in range(len(g)-1):
+                y1, y2 = g[i], g[i+1]
+                norm_2_squared += (dx / 3.0) * (y1**2 + y1*y2 + y2**2)
+
+        return norm_2_squared, norm_1, norm_inf
+
+    @classmethod
+    def compute_c2(cls, f_values: List[float]) -> float:
+        """Compute the C2 value for given step function."""
+        norm_2_squared, norm_1, norm_inf = cls.compute_autoconvolution_norms(f_values)
+        
+        # Avoid division by zero
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            return 0.0
+        
+        c2 = norm_2_squared / (norm_1 * norm_inf)
+        return c2
+
+class SpectralInitializer:
+    """Generates high-quality initial populations using spectral domain techniques"""
+    
+    @staticmethod
+    def generate_spectral_individual(n_points: int = 2000, seed: int = None) -> List[float]:
+        """Generate function from spectral domain representation."""
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # Create frequency domain representation with strategic peaks
+        magnitudes = np.zeros(n_points)
+        
+        # Create multiple clusters of frequency components to promote smooth autoconvolution
+        n_clusters = 5  # Increased from 4 to 5 for better diversity
+        cluster_centers = np.logspace(np.log10(1.5), np.log10(n_points//2), n_clusters)
+        
+        # Each cluster contributes multiple components
+        for i, center in enumerate(cluster_centers):
+            n_components = np.random.randint(2, 6)
+            for j in range(n_components):
+                # Spread components within cluster with tighter spread
+                freq_offset = np.random.normal(0, center * 0.15)  # Tighter spread
+                freq_idx = int(center + freq_offset)
+                if 1 <= freq_idx < n_points//2:
+                    # Add energy with gamma distribution for varied strengths
+                    strength = np.random.gamma(2.5, 1.2)  # Slightly higher gamma params
+                    magnitudes[freq_idx] = strength
+                    if freq_idx > 0:
+                        magnitudes[-freq_idx] = strength  # Conjugate symmetry
+                    
+        # Add some low frequency content for smoothness
+        magnitudes[0] = np.random.gamma(1.5, 2.0)  # DC component with different params
+        
+        # Add phase information
+        phases = np.random.uniform(0, 2*np.pi, n_points)
+        
+        # Create complex spectrum
+        spectrum = magnitudes * np.exp(1j * phases)
+        
+        # Convert back to time domain
+        f_real = np.real(ifft(spectrum))
+        
+        # Ensure non-negativity
+        f_real = np.maximum(f_real, 0.0)
+        
+        # Normalize with slightly more aggressive normalization
+        max_val = np.max(f_real)
+        if max_val > 0:
+            f_real = f_real / (max_val * 1.5)
+        
+        # Apply structured smoothing based on frequency content
+        window_size = max(3, min(101, n_points // 10))  # Slightly larger window
+        if window_size % 2 == 0:
+            window_size += 1
+        
+        # Apply Gaussian smoothing adapted to frequency content
+        if window_size > 1:
+            kernel = np.exp(-0.5 * np.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (window_size/3)**2)
+            kernel = kernel / np.sum(kernel)
+            f_smooth = np.convolve(f_real, kernel, mode='same')
+            f_real = f_smooth
+        
+        # Final clip to ensure non-negativity
+        f_real = np.maximum(f_real, 0.0)
+        
+        return f_real.tolist()
+
+class EvolutionController:
+    """Manages the evolutionary process with enhanced adaptive strategies"""
+    
+    def __init__(self, population_size: int = 30, max_generations: int = 150):
+        self.population_size = population_size
+        self.max_generations = max_generations
+        self.elite_size = max(1, population_size // 4)
+        self.tournament_size = 4  # Increased tournament size for better selection pressure
+    
+    def initialize_population(self, n_points: int) -> List[List[float]]:
+        """Create diverse initial population using spectral initialization"""
+        population = []
+        
+        # Generate mostly spectral-based individuals for better structure
+        for i in range(self.population_size - self.population_size // 3):
+            seed = i * 1000 + int(time.time())
+            individual = SpectralInitializer.generate_spectral_individual(n_points, seed)
+            population.append(individual)
+            
+        # Add some random individuals for diversity
+        for i in range(self.population_size // 3):
+            individual = [random.uniform(0, 1.5) for _ in range(n_points)]
+            population.append(individual)
+            
+        return population
+    
+    def tournament_selection(self, population: List[List[float]], 
+                           fitnesses: List[float]) -> List[float]:
+        """Select an individual using tournament selection"""
+        tournament_indices = random.sample(range(len(population)), self.tournament_size)
+        tournament_fitnesses = [fitnesses[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
+        return population[winner_index].copy()
+    
+    def mutate_individual(self, individual: List[float], 
+                         generation: int = 0, best_fitness: float = 0.0,
+                         peak_positions: List[int] = None) -> List[float]:
+        """Apply mutation with enhanced adaptive strategy and peak awareness"""
+        mutated = individual.copy()
+        n = len(mutated)
+        
+        # Dynamic mutation parameters based on generation and performance
+        if best_fitness > 0.98:
+            mutation_rate = 0.03
+            noise_sigma = 0.02
+        elif best_fitness > 0.95:
+            mutation_rate = 0.06
+            noise_sigma = 0.03
+        elif best_fitness > 0.92:
+            mutation_rate = 0.10
+            noise_sigma = 0.04
+        else:
+            mutation_rate = 0.15
+            noise_sigma = 0.05
+
+        # Apply Gaussian perturbation to some elements
+        for i in range(n):
+            if random.random() < mutation_rate:
+                # Add Gaussian noise with adaptive scale
+                mutated[i] += np.random.normal(0, noise_sigma * np.mean(mutated) if np.mean(mutated) > 0 else 0.01)
+                # Ensure non-negativity
+                mutated[i] = max(0.0, mutated[i])
+                
+        # Peak-aware mutation - enhance regions around peaks
+        if peak_positions and len(peak_positions) > 0 and best_fitness > 0.95:
+            # Target peak regions for more aggressive mutation
+            for peak_pos in peak_positions[:3]:  # Focus on top 3 peaks
+                start_idx = max(0, peak_pos - 5)
+                end_idx = min(n, peak_pos + 5)
+                # Increase mutation rate in peak regions
+                local_mutation_rate = min(0.3, mutation_rate * 2)
+                for i in range(start_idx, end_idx):
+                    if random.random() < local_mutation_rate:
+                        mutated[i] += np.random.normal(0, noise_sigma * 2)
+                        mutated[i] = max(0.0, mutated[i])
+                
+        # Occasionally perform smoothing for better convergence
+        if random.random() < 0.25 and n > 20:  # Increased chance of smoothing
+            # Apply moving average smoothing with adaptive window
+            window_size = min(7, max(1, n // 15))
+            if window_size > 1:
+                # Use a weighted average for smoother transitions
+                weights = np.ones(window_size) / window_size
+                # Apply convolution with a slight emphasis on center
+                smoothed = np.convolve(mutated, weights, mode='same')
+                # Blend with original using adaptive alpha
+                alpha = 0.4 if best_fitness > 0.95 else 0.25
+                mutated = [alpha * old + (1 - alpha) * new for old, new in zip(mutated, smoothed)]
+                    
+        return mutated
+    
+    def evolve_generation(self, population: List[List[float]], 
+                         fitnesses: List[float], generation: int = 0,
+                         best_fitness: float = 0.0, peak_positions: List[int] = None) -> List[List[float]]:
+        """Generate next generation using tournament selection and mutation"""
+        # Sort by fitness (descending)
+        sorted_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
+        elites = [population[i] for i in sorted_indices[:self.elite_size]]
+        
+        # Generate offspring
+        offspring = []
+        while len(offspring) < self.population_size - self.elite_size:
+            parent = self.tournament_selection(population, fitnesses)
+            mutated = self.mutate_individual(parent, generation, best_fitness, peak_positions)
+            offspring.append(mutated)
+        
+        # Combine elites and offspring
+        return elites + offspring
+    
+    def adapt_population_size(self, current_gen: int, stagnation_count: int,
+                             current_pop_size: int, fitness_history: List[float]) -> int:
+        """Dynamically adjust population size based on performance"""
+        if current_gen % 30 == 0 and current_gen > 0:
+            if len(fitness_history) >= 5:
+                recent_change = np.std(fitness_history[-5:])
+                if recent_change < 0.001:  # Stagnation detected
+                    return min(150, current_pop_size + 10)
+                elif recent_change > 0.01:  # Good improvement
+                    return max(20, current_pop_size - 5)
+        return current_pop_size
+
+class SpectralEvolutionOptimizer:
+    """Main optimizer orchestrating the complete process"""
+    
+    def __init__(self):
+        self.calculator = AutoconvolutionCalculator()
+        self.controller = EvolutionController()
+        self.best_solution = None
+        self.best_fitness = -float('inf')
+        self.fitness_history = []
+    
+    def evaluate_population_parallel(self, population: List[List[float]]) -> List[float]:
+        """Evaluate fitness for entire population in parallel"""
+        def evaluate_single(individual):
+            try:
+                return self.calculator.compute_c2(individual)
+            except Exception:
+                return 0.0
+        
+        # Use parallel processing for evaluation
+        with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 4)) as executor:
+            results = list(executor.map(evaluate_single, population))
+        return results
+    
+    def find_peak_positions(self, individual: List[float], threshold_percentile: float = 70) -> List[int]:
+        """Find positions of significant peaks in the function"""
+        # Simple peak detection - look for local maxima above threshold
+        peaks = []
+        threshold = np.percentile(individual, threshold_percentile)
+        
+        # Look for local maxima
+        for i in range(1, len(individual) - 1):
+            if (individual[i] > individual[i-1] and 
+                individual[i] > individual[i+1] and 
+                individual[i] > threshold):
+                peaks.append(i)
+                
+        # Sort by height and return top peaks
+        peaks.sort(key=lambda x: individual[x], reverse=True)
+        return peaks[:5]  # Top 5 peaks
+    
+    def optimize(self, n_points: int = 2000, max_time_seconds: int = 85) -> List[float]:
+        """Main optimization routine"""
+        start_time = time.time()
+        
+        # Initialize population
+        population = self.controller.initialize_population(n_points)
+        fitnesses = self.evaluate_population_parallel(population)
+        
+        # Track best solution
+        current_best_idx = np.argmax(fitnesses)
+        self.best_fitness = fitnesses[current_best_idx]
+        self.best_solution = population[current_best_idx].copy()
+        self.fitness_history.append(self.best_fitness)
+        
+        # Evolution loop
+        generation = 0
+        stagnation_counter = 0
+        max_stagnation = 25
+        last_best_fitness = 0.0
+        current_pop_size = self.controller.population_size
+        
+        while generation < self.controller.max_generations and (time.time() - start_time) < max_time_seconds - 2:
+            # Update best solution
+            current_best_idx = np.argmax(fitnesses)
+            current_fitness = fitnesses[current_best_idx]
+            
+            if current_fitness > self.best_fitness:
+                self.best_fitness = current_fitness
+                self.best_solution = population[current_best_idx].copy()
+                stagnation_counter = 0
+                last_best_fitness = current_fitness
+                self.fitness_history.append(current_fitness)
+            else:
+                stagnation_counter += 1
+                
+            # Check for stagnation and early stop
+            if stagnation_counter >= max_stagnation:
+                break
+            
+            # Adapt population size based on performance
+            current_pop_size = self.controller.adapt_population_size(
+                generation, stagnation_counter, current_pop_size, self.fitness_history
+            )
+            self.controller.population_size = current_pop_size
+            
+            # Find peak positions for peak-aware mutation
+            peak_positions = self.find_peak_positions(population[current_best_idx])
+            
+            # Evolve population
+            population = self.controller.evolve_generation(
+                population, fitnesses, generation, self.best_fitness, peak_positions
+            )
+            
+            # Evaluate new population
+            fitnesses = self.evaluate_population_parallel(population)
+            
+            generation += 1
+        
+        # Final refinement if promising solution found
+        if self.best_solution is not None and self.best_fitness > 0.95:
+            refined = self.refine_solution(self.best_solution)
+            refined_fitness = self.calculator.compute_c2(refined)
+            if refined_fitness > self.best_fitness:
+                self.best_solution = refined
+        
+        return self.best_solution if self.best_solution is not None else [0.5] * n_points
+    
+    def refine_solution(self, solution: List[float]) -> List[float]:
+        """Refine best solution using local optimization"""
+        try:
+            def objective_for_de(params):
+                # Ensure non-negative values
+                params = [max(0, p) for p in params]
+                try:
+                    c2_val = self.calculator.compute_c2(params)
+                    return -c2_val  # Negative because we want to maximize
+                except Exception:
+                    return 1e10
+                    
+            n_steps = len(solution)
+            bounds = [(0.0, 2.0) for _ in range(n_steps)]
+            
+            # Use a subset for faster optimization
+            sample_size = min(200, n_steps)  # Increased sample size
+            sample_indices = sorted(random.sample(range(n_steps), sample_size))
+            sample_params = [solution[i] for i in sample_indices]
+            
+            # Perform differential evolution on subset
+            result = differential_evolution(
+                objective_for_de, 
+                bounds[:sample_size],
+                maxiter=25,  # Increased iterations
+                popsize=10,   # Increased population size
+                seed=42,
+                disp=False
+            )
+            
+            if result.success:
+                # Update the solution with refined values
+                refined_solution = solution.copy()
+                for i, idx in enumerate(sample_indices):
+                    if i < len(result.x):
+                        refined_solution[idx] = max(0, result.x[i])
+                return refined_solution
+                
+        except Exception:
+            pass
+        return solution
+
+def construct_function() -> List[float]:
+    """Function to construct step-function with high C2 value - entry point"""
+    try:
+        # Set seeds for reproducibility
+        np.random.seed(42)
+        random.seed(42)
+        
+        # Use spectral evolutionary approach
+        optimizer = SpectralEvolutionOptimizer()
+        f_values = optimizer.optimize(n_points=2000, max_time_seconds=85)
+        return f_values
+    except Exception as e:
+        # Fallback to simple approach if anything fails
+        warnings.warn(f"Error in optimization: {e}")
+        f_values = [np.random.random()] * np.random.randint(100, 1000)
+        return f_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

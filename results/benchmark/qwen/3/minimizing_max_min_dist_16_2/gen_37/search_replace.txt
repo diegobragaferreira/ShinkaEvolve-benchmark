@@ -1,0 +1,128 @@
+<NAME>
+add_simulated_annealing
+</NAME>
+
+<DESCRIPTION>
+Adding simulated annealing optimization as a secondary refinement step to improve the point distribution. This approach will help escape local optima that gradient-based optimization might get trapped in, potentially leading to better min/max distance ratios. The simulated annealing will be applied as a final refinement step after the main optimization to further optimize the best solution found so far.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize(self):
+        """Main optimization routine."""
+        best_points = None
+        best_ratio = -np.inf
+
+        # Try multiple initial configurations
+        initial_configs = self.generate_initial_points()
+
+        for i, initial_config in enumerate(initial_configs):
+            try:
+                optimized_points, ratio = self._optimize_single_start(initial_config)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Error in optimization round {i}: {str(e)}")
+                continue
+
+        # Final validation
+        if best_points is not None:
+            final_ratio = self._objective_function(best_points.flatten())
+            print(f"Final optimized ratio: {final_ratio:.6f}")
+            return best_points
+        else:
+            # Return the last attempted configuration if nothing worked
+            return initial_configs[-1] if initial_configs else np.random.rand(self.n_points, self.dimensions)
+=======
+    def optimize(self):
+        """Main optimization routine."""
+        best_points = None
+        best_ratio = -np.inf
+
+        # Try multiple initial configurations
+        initial_configs = self.generate_initial_points()
+
+        for i, initial_config in enumerate(initial_configs):
+            try:
+                optimized_points, ratio = self._optimize_single_start(initial_config)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = optimized_points.copy()
+
+            except Exception as e:
+                warnings.warn(f"Error in optimization round {i}: {str(e)}")
+                continue
+
+        # Apply simulated annealing as final refinement if we found a good solution
+        if best_points is not None and best_ratio > 0:
+            refined_points, refined_ratio = self._simulated_annealing_refinement(best_points.copy())
+            if refined_ratio > best_ratio:
+                best_points = refined_points
+                best_ratio = refined_ratio
+
+        # Final validation
+        if best_points is not None:
+            final_ratio = self._objective_function(best_points.flatten())
+            print(f"Final optimized ratio: {final_ratio:.6f}")
+            return best_points
+        else:
+            # Return the last attempted configuration if nothing worked
+            return initial_configs[-1] if initial_configs else np.random.rand(self.n_points, self.dimensions)
+
+    def _simulated_annealing_refinement(self, points, max_iter=2000, initial_temp=0.1, cooling_rate=0.999):
+        """
+        Refine the solution using simulated annealing to escape local optima
+        """
+        current_points = points.copy()
+        current_ratio = self._objective_function(current_points.flatten())
+        best_points = current_points.copy()
+        best_ratio = current_ratio
+
+        temp = initial_temp
+
+        for iteration in range(max_iter):
+            # Create neighbor by perturbing one random point
+            neighbor_points = current_points.copy()
+            idx = np.random.randint(0, len(neighbor_points))
+
+            # Perturb the selected point with larger steps for better exploration
+            neighbor_points[idx, 0] += np.random.normal(0, 0.02)
+            neighbor_points[idx, 1] += np.random.normal(0, 0.02)
+
+            # Keep within bounds
+            neighbor_points[idx, 0] = np.clip(neighbor_points[idx, 0], 0, 1)
+            neighbor_points[idx, 1] = np.clip(neighbor_points[idx, 1], 0, 1)
+
+            # Calculate neighbor ratio
+            neighbor_ratio = self._objective_function(neighbor_points.flatten())
+
+            # Accept or reject the neighbor
+            if neighbor_ratio > current_ratio:
+                current_points = neighbor_points
+                current_ratio = neighbor_ratio
+                if neighbor_ratio > best_ratio:
+                    best_points = neighbor_points.copy()
+                    best_ratio = neighbor_ratio
+            else:
+                # Accept with probability based on temperature
+                delta = neighbor_ratio - current_ratio
+                if delta < 0:  # Only accept worse solutions with probability
+                    acceptance_prob = np.exp(delta / temp)
+                    if np.random.random() < acceptance_prob:
+                        current_points = neighbor_points
+                        current_ratio = neighbor_ratio
+
+            # Cool down
+            temp *= cooling_rate
+
+            # Early stopping condition
+            if temp < 1e-8:
+                break
+
+        return best_points, best_ratio
+>>>>>>> REPLACE
+</DIFF>

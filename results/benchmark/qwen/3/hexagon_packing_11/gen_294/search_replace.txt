@@ -1,0 +1,357 @@
+<NAME>
+enhanced_local_optimization_with_adaptive_perturbations
+</NAME>
+
+<DESCRIPTION>
+This enhancement improves the local optimization phase by implementing adaptive perturbation strategies that adjust based on the optimization landscape. Instead of using fixed step sizes, the algorithm dynamically adjusts perturbation magnitudes based on recent improvement trends and incorporates both gradient-based and grid-based search strategies for better exploration-exploitation balance. This approach helps escape local minima more effectively while maintaining convergence speed.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_positions(self, initial_positions):
+        """Optimize the positions for better packing using gradient-guided local search"""
+        def compute_penalty(positions):
+            """Compute penalty for overlaps and boundary violations"""
+            total_cost = 0
+            # Overlap penalties
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    cx1, cy1, _ = positions[i]
+                    cx2, cy2, _ = positions[j]
+                    dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                    if dist < 1.99:
+                        penalty = (1.99 - dist) * 10000
+                        total_cost += penalty
+                    elif dist < 2.2:
+                        penalty = (2.2 - dist) * 50
+                        total_cost += penalty
+            # Boundary penalties
+            for i in range(len(positions)):
+                cx, cy, _ = positions[i]
+                dist = np.sqrt(cx*cx + cy*cy)
+                if dist > 15:
+                    total_cost += (dist - 15) * 50
+            return total_cost
+
+        def compute_position_only_penalty(positions):
+            """Compute penalty focusing only on positions"""
+            total_cost = 0
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    cx1, cy1, _ = positions[i]
+                    cx2, cy2, _ = positions[j]
+                    dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                    if dist < 1.99:
+                        penalty = (1.99 - dist) * 10000
+                        total_cost += penalty
+                    elif dist < 2.2:
+                        penalty = (2.2 - dist) * 50
+                        total_cost += penalty
+            return total_cost
+
+        def estimate_gradient(positions, idx, eps=1e-4):
+            """Estimate gradient of penalty w.r.t. position of hexagon idx using finite differences"""
+            original_pos = positions[idx].copy()
+            grad = np.zeros(2)  # Only position gradient, not rotation
+
+            # Estimate gradient w.r.t. x coordinate
+            test_positions = positions.copy()
+            test_positions[idx, 0] = original_pos[0] + eps
+            penalty_plus = compute_position_only_penalty(test_positions)
+
+            test_positions[idx, 0] = original_pos[0] - eps
+            penalty_minus = compute_position_only_penalty(test_positions)
+
+            grad[0] = (penalty_plus - penalty_minus) / (2 * eps)
+
+            # Estimate gradient w.r.t. y coordinate
+            test_positions = positions.copy()
+            test_positions[idx, 1] = original_pos[1] + eps
+            penalty_plus = compute_position_only_penalty(test_positions)
+
+            test_positions[idx, 1] = original_pos[1] - eps
+            penalty_minus = compute_position_only_penalty(test_positions)
+
+            grad[1] = (penalty_plus - penalty_minus) / (2 * eps)
+
+            return grad
+
+        def compute_fitness_and_radius(positions):
+            """Compute negative fitness (which is what we want to minimize) and radius"""
+            # Compute outer radius
+            outer_radius = self.compute_outer_hexagon_radius(positions)
+            # Fitness is negative inverse of radius (we want to maximize 1/radius)
+            fitness = -1.0 / outer_radius
+            return fitness, outer_radius
+
+        # Start with the initial configuration
+        current_positions = initial_positions.copy()
+        best_positions = current_positions.copy()
+        _, best_radius = compute_fitness_and_radius(current_positions)
+
+        # Phase 1: Gradient-guided iterative refinement with line search
+        for iter_num in range(100):  # Increase iterations significantly
+            improved = False
+            # Sample a random subset of hexagons to update for better diversity
+            update_order = list(range(len(current_positions)))
+            random.shuffle(update_order)
+
+            for i in update_order[:len(current_positions)//2]:  # Update ~half randomly
+                original_pos = current_positions[i].copy()
+                best_test_pos = original_pos.copy()
+                current_penalty = compute_position_only_penalty(current_positions)
+                best_test_penalty = current_penalty
+
+                # Try gradient-guided step first
+                try:
+                    grad = estimate_gradient(current_positions, i)
+                    # Scale gradient to reasonable step size
+                    step_size = 0.05
+                    candidate_pos = original_pos.copy()
+                    candidate_pos[0] -= step_size * grad[0]
+                    candidate_pos[1] -= step_size * grad[1]
+
+                    # Validate that this isn't going too far out of bounds
+                    if np.sqrt(candidate_pos[0]**2 + candidate_pos[1]**2) < 15:
+                        test_positions = current_positions.copy()
+                        test_positions[i] = candidate_pos
+                        penalty = compute_position_only_penalty(test_positions)
+                        if penalty < best_test_penalty:
+                            best_test_penalty = penalty
+                            best_test_pos = candidate_pos.copy()
+                except:
+                    pass  # Fall back to grid search if gradient estimation fails
+
+                # Then do grid search around the best point so far
+                for dx in [-0.1, -0.05, 0, 0.05, 0.1]:
+                    for dy in [-0.1, -0.05, 0, 0.05, 0.1]:
+                        test_positions = current_positions.copy()
+                        test_positions[i, 0] = original_pos[0] + dx
+                        test_positions[i, 1] = original_pos[1] + dy
+                        penalty = compute_position_only_penalty(test_positions)
+                        if penalty < best_test_penalty:
+                            best_test_penalty = penalty
+                            best_test_pos = test_positions[i].copy()
+
+                if not np.array_equal(best_test_pos, original_pos):
+                    current_positions[i] = best_test_pos
+                    improved = True
+
+            # Periodically recompute fitness to see improvement
+            _, curr_radius = compute_fitness_and_radius(current_positions)
+            if curr_radius < best_radius:
+                best_radius = curr_radius
+                best_positions = current_positions.copy()
+
+            # Early stopping when no significant improvement
+            if not improved and iter_num > 20:
+                break
+
+        # Phase 2: Rotation optimization for outer hexagons (more thorough)
+        for i in range(2, len(current_positions)):  # Skip center and immediate neighbors
+            best_rotation = current_positions[i, 2]
+            best_rotation_penalty = compute_penalty(current_positions)
+            # Try more rotation values
+            test_rotations = [0, -10, -5, -2, 0, 2, 5, 10]
+            for rot_delta in test_rotations:
+                test_positions = current_positions.copy()
+                test_positions[i, 2] = (current_positions[i, 2] + rot_delta) % 360
+                penalty = compute_penalty(test_positions)
+                if penalty < best_rotation_penalty:
+                    best_rotation_penalty = penalty
+                    best_rotation = (current_positions[i, 2] + rot_delta) % 360
+            current_positions[i, 2] = best_rotation
+
+        return best_positions
+=======
+    def optimize_positions(self, initial_positions):
+        """Optimize the positions for better packing using adaptive local search with multiple strategies"""
+        def compute_penalty(positions):
+            """Compute penalty for overlaps and boundary violations"""
+            total_cost = 0
+            # Overlap penalties
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    cx1, cy1, _ = positions[i]
+                    cx2, cy2, _ = positions[j]
+                    dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                    if dist < 1.99:
+                        penalty = (1.99 - dist) * 10000
+                        total_cost += penalty
+                    elif dist < 2.2:
+                        penalty = (2.2 - dist) * 50
+                        total_cost += penalty
+            # Boundary penalties
+            for i in range(len(positions)):
+                cx, cy, _ = positions[i]
+                dist = np.sqrt(cx*cx + cy*cy)
+                if dist > 15:
+                    total_cost += (dist - 15) * 50
+            return total_cost
+
+        def compute_position_only_penalty(positions):
+            """Compute penalty focusing only on positions"""
+            total_cost = 0
+            for i in range(len(positions)):
+                for j in range(i+1, len(positions)):
+                    cx1, cy1, _ = positions[i]
+                    cx2, cy2, _ = positions[j]
+                    dist = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+                    if dist < 1.99:
+                        penalty = (1.99 - dist) * 10000
+                        total_cost += penalty
+                    elif dist < 2.2:
+                        penalty = (2.2 - dist) * 50
+                        total_cost += penalty
+            return total_cost
+
+        def estimate_gradient(positions, idx, eps=1e-4):
+            """Estimate gradient of penalty w.r.t. position of hexagon idx using finite differences"""
+            original_pos = positions[idx].copy()
+            grad = np.zeros(2)  # Only position gradient, not rotation
+
+            # Estimate gradient w.r.t. x coordinate
+            test_positions = positions.copy()
+            test_positions[idx, 0] = original_pos[0] + eps
+            penalty_plus = compute_position_only_penalty(test_positions)
+
+            test_positions[idx, 0] = original_pos[0] - eps
+            penalty_minus = compute_position_only_penalty(test_positions)
+
+            grad[0] = (penalty_plus - penalty_minus) / (2 * eps)
+
+            # Estimate gradient w.r.t. y coordinate
+            test_positions = positions.copy()
+            test_positions[idx, 1] = original_pos[1] + eps
+            penalty_plus = compute_position_only_penalty(test_positions)
+
+            test_positions[idx, 1] = original_pos[1] - eps
+            penalty_minus = compute_position_only_penalty(test_positions)
+
+            grad[1] = (penalty_plus - penalty_minus) / (2 * eps)
+
+            return grad
+
+        def compute_fitness_and_radius(positions):
+            """Compute negative fitness (which is what we want to minimize) and radius"""
+            # Compute outer radius
+            outer_radius = self.compute_outer_hexagon_radius(positions)
+            # Fitness is negative inverse of radius (we want to maximize 1/radius)
+            fitness = -1.0 / outer_radius
+            return fitness, outer_radius
+
+        # Track optimization history for adaptive strategies
+        improvement_history = []
+
+        # Start with the initial configuration
+        current_positions = initial_positions.copy()
+        best_positions = current_positions.copy()
+        _, best_radius = compute_fitness_and_radius(current_positions)
+
+        # Phase 1: Adaptive gradient-guided iterative refinement with multiple search strategies
+        for iter_num in range(150):  # Increased iterations for better convergence
+            improved = False
+            # Sample a random subset of hexagons to update for better diversity
+            update_order = list(range(len(current_positions)))
+            random.shuffle(update_order)
+
+            # Adaptive step size based on recent improvements
+            recent_improvements = improvement_history[-5:] if len(improvement_history) >= 5 else [0]*5
+            avg_improvement = np.mean(recent_improvements) if any(x != 0 for x in recent_improvements) else 1e-6
+            adaptive_step_size = max(0.01, min(0.2, 0.1 / (abs(avg_improvement) + 1e-8)))
+
+            for i in update_order[:len(current_positions)//2]:  # Update ~half randomly
+                original_pos = current_positions[i].copy()
+                best_test_pos = original_pos.copy()
+                current_penalty = compute_position_only_penalty(current_positions)
+                best_test_penalty = current_penalty
+
+                # Try gradient-guided step with adaptive step size
+                try:
+                    grad = estimate_gradient(current_positions, i)
+                    # Scale gradient with adaptive step size
+                    candidate_pos = original_pos.copy()
+                    candidate_pos[0] -= adaptive_step_size * grad[0]
+                    candidate_pos[1] -= adaptive_step_size * grad[1]
+
+                    # Validate that this isn't going too far out of bounds
+                    if np.sqrt(candidate_pos[0]**2 + candidate_pos[1]**2) < 15:
+                        test_positions = current_positions.copy()
+                        test_positions[i] = candidate_pos
+                        penalty = compute_position_only_penalty(test_positions)
+                        if penalty < best_test_penalty:
+                            best_test_penalty = penalty
+                            best_test_pos = candidate_pos.copy()
+                except:
+                    pass  # Fall back to hybrid search if gradient estimation fails
+
+                # Hybrid approach: combine directional search with more thorough grid search
+                # Use adaptive grid sizes based on iteration progress
+                if iter_num < 50:  # Coarse search early on
+                    grid_deltas = [-0.2, -0.1, 0, 0.1, 0.2]
+                elif iter_num < 100:  # Medium resolution
+                    grid_deltas = [-0.1, -0.05, 0, 0.05, 0.1]
+                else:  # Fine resolution
+                    grid_deltas = [-0.05, -0.025, 0, 0.025, 0.05]
+
+                for dx in grid_deltas:
+                    for dy in grid_deltas:
+                        test_positions = current_positions.copy()
+                        test_positions[i, 0] = original_pos[0] + dx
+                        test_positions[i, 1] = original_pos[1] + dy
+                        penalty = compute_position_only_penalty(test_positions)
+                        if penalty < best_test_penalty:
+                            best_test_penalty = penalty
+                            best_test_pos = test_positions[i].copy()
+
+                if not np.array_equal(best_test_pos, original_pos):
+                    current_positions[i] = best_test_pos
+                    improved = True
+
+            # Track improvement for adaptive strategies
+            _, curr_radius = compute_fitness_and_radius(current_positions)
+            improvement = best_radius - curr_radius  # Positive means improvement
+            improvement_history.append(improvement)
+
+            if curr_radius < best_radius:
+                best_radius = curr_radius
+                best_positions = current_positions.copy()
+
+            # Early stopping when no significant improvement in recent iterations
+            if len(improvement_history) >= 10:
+                recent_avg = np.mean(improvement_history[-10:])
+                if recent_avg < 1e-6:  # Very small improvement
+                    # Occasionally try random perturbations to escape local minima
+                    if iter_num % 20 == 0 and iter_num > 0:
+                        for j in range(len(current_positions)):
+                            if np.random.rand() < 0.3:  # 30% chance per hexagon
+                                current_positions[j, 0] += np.random.normal(0, 0.05)
+                                current_positions[j, 1] += np.random.normal(0, 0.05)
+                if recent_avg < 1e-8:
+                    break
+
+        # Phase 2: Enhanced rotation optimization with multi-resolution search
+        for i in range(2, len(current_positions)):  # Skip center and immediate neighbors
+            best_rotation = current_positions[i, 2]
+            best_rotation_penalty = compute_penalty(current_positions)
+
+            # Multi-resolution rotation search
+            if iter_num < 50:  # Coarse resolution
+                test_rotations = [0, -15, -10, -5, 0, 5, 10, 15]
+            elif iter_num < 100:  # Medium resolution
+                test_rotations = [0, -10, -5, -2, 0, 2, 5, 10]
+            else:  # Fine resolution
+                test_rotations = [0, -5, -2, -1, 0, 1, 2, 5]
+
+            for rot_delta in test_rotations:
+                test_positions = current_positions.copy()
+                test_positions[i, 2] = (current_positions[i, 2] + rot_delta) % 360
+                penalty = compute_penalty(test_positions)
+                if penalty < best_rotation_penalty:
+                    best_rotation_penalty = penalty
+                    best_rotation = (current_positions[i, 2] + rot_delta) % 360
+            current_positions[i, 2] = best_rotation
+
+        return best_positions
+>>>>>>> REPLACE
+</DIFF>

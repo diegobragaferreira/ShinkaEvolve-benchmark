@@ -1,0 +1,232 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon, Point
+import time
+
+# Precompute hexagon vertices for unit hexagon centered at origin
+def get_unit_hexagon_vertices():
+    """Get vertices of a unit regular hexagon centered at origin"""
+    angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 angles, exclude last to close polygon
+    return np.column_stack([np.cos(angles), np.sin(angles)])
+
+# Precomputed vertices for a unit hexagon
+UNIT_HEX_VERTICES = get_unit_hexagon_vertices()
+
+def hexagon_vertices(center_x, center_y, angle_deg, scale=1.0):
+    """Get vertices of a hexagon with given center, angle, and scale"""
+    angle_rad = np.radians(angle_deg)
+    # Rotate vertices
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+
+    # Apply rotation and translation
+    rotated_vertices = UNIT_HEX_VERTICES @ rotation_matrix.T
+    scaled_vertices = rotated_vertices * scale
+    translated_vertices = scaled_vertices + np.array([center_x, center_y])
+
+    return translated_vertices
+
+def check_containment(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+    """Check if hexagon vertices are all within the outer hexagon"""
+    outer_vertices = hexagon_vertices(outer_center_x, outer_center_y, 0, outer_radius)
+    outer_polygon = Polygon(outer_vertices)
+
+    for vertex in hex_vertices:
+        point = Point(vertex)
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely"""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def calculate_outer_hex_radius(inner_hex_data, outer_center_x, outer_center_y):
+    """
+    Calculate minimum radius needed for outer hexagon to contain all inner hexagons
+    by checking maximum distance from center to any vertex of any hexagon
+    """
+    max_dist = 0
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, angle = inner_hex_data[i]
+        hex_vertices = hexagon_vertices(center_x, center_y, angle)
+        for vertex in hex_vertices:
+            dist = np.sqrt((vertex[0] - outer_center_x)**2 + (vertex[1] - outer_center_y)**2)
+            max_dist = max(max_dist, dist)
+
+    # Add buffer for numerical precision
+    return max_dist * 1.01
+
+def objective_function(params):
+    """
+    Objective function to minimize (negative of 1/outer_radius)
+    params: [x1, y1, angle1, ..., x12, y12, angle12, outer_center_x, outer_center_y]
+    """
+    n = 12
+    # Extract inner hexagon parameters
+    inner_params = params[:3*n].reshape(n, 3)
+    # Extract outer hexagon parameters
+    outer_center_x, outer_center_y = params[3*n:3*n+2]
+
+    # Calculate outer radius from current configuration
+    outer_radius = calculate_outer_hex_radius(inner_params, outer_center_x, outer_center_y)
+
+    # Return negative of inverse radius (we want to maximize 1/R, so minimize -1/R)
+    return -1.0 / outer_radius
+
+def constraint_containment(params):
+    """Constraint function to ensure all inner hexagons are contained"""
+    n = 12
+    inner_params = params[:3*n].reshape(n, 3)
+    outer_center_x, outer_center_y = params[3*n:3*n+2]
+
+    # Calculate outer radius
+    outer_radius = calculate_outer_hex_radius(inner_params, outer_center_x, outer_center_y)
+
+    # Check containment for each hexagon
+    for i in range(n):
+        center_x, center_y, angle = inner_params[i]
+        hex_vertices = hexagon_vertices(center_x, center_y, angle)
+
+        # If any vertex is outside the outer hexagon, this constraint is violated
+        if not check_containment(hex_vertices, outer_center_x, outer_center_y, outer_radius):
+            return -1e-6  # Violated constraint
+
+    return 1e-6  # Satisfied constraint
+
+def constraint_nonoverlap(params):
+    """Constraint function to ensure no overlapping between hexagons"""
+    n = 12
+    inner_params = params[:3*n].reshape(n, 3)
+
+    # Check pairwise overlaps
+    for i in range(n):
+        for j in range(i+1, n):
+            center1_x, center1_y, angle1 = inner_params[i]
+            center2_x, center2_y, angle2 = inner_params[j]
+
+            hex1_vertices = hexagon_vertices(center1_x, center1_y, angle1)
+            hex2_vertices = hexagon_vertices(center2_x, center2_y, angle2)
+
+            if check_overlap(hex1_vertices, hex2_vertices):
+                return -1e-6  # Violated constraint
+
+    return 1e-6  # Satisfied constraint
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    n = 12
+
+    # Improved initial configuration based on hexagonal lattice and symmetry
+    # This setup places hexagons in a pattern that naturally avoids overlaps
+    # while maintaining reasonable containment within a hexagonal boundary
+    
+    # Core symmetric arrangement inspired by known optimal packings
+    # Arrange in concentric rings around center
+    # Ring 1 (center): 1 hexagon
+    # Ring 2 (first ring): 6 hexagons 
+    # Ring 3 (second ring): 5 hexagons
+    
+    # Define ring positions
+    ring_1 = [[0, 0, 0]]  # Center hexagon
+    
+    # First ring around center (6 hexagons)
+    angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 angles
+    ring_2 = [[2.5 * np.cos(a), 2.5 * np.sin(a), 0] for a in angles]
+    
+    # Second ring (5 hexagons)
+    # Place them in a hexagonal pattern offset to avoid overlaps
+    ring_3 = [[2.5 * np.cos(a + np.pi/6), 2.5 * np.sin(a + np.pi/6), 0] for a in angles[::2]]
+    
+    # Combine all positions
+    initial_positions = np.array(ring_1 + ring_2 + ring_3[:5])
+    
+    # Set initial angles to 0 (no rotation) for simplicity
+    initial_angles = np.zeros(n)
+
+    # Start with center at origin
+    initial_outer_center = [0.0, 0.0]
+
+    # Flatten parameters
+    initial_params = np.hstack([
+        initial_positions.flatten(),
+        initial_outer_center
+    ])
+
+    # Bounds for optimization (limiting positions but keeping flexibility for rotations)
+    bounds = []
+
+    # Add bounds for positions (-10, 10) - generous but reasonable
+    for _ in range(n):
+        bounds.extend([(-10, 10), (-10, 10)])
+
+    # Add bounds for angles (0 to 360 degrees) - full rotation freedom
+    for _ in range(n):
+        bounds.extend([(0, 360)])
+
+    # Add bounds for outer center (limited range)
+    bounds.extend([(-20, 20), (-20, 20)])
+
+    # Constraints
+    cons = [
+        {'type': 'ineq', 'fun': constraint_containment},
+        {'type': 'ineq', 'fun': constraint_nonoverlap}
+    ]
+
+    # Optimize using scipy minimize
+    start_time = time.time()
+
+    try:
+        result = minimize(
+            objective_function,
+            initial_params,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8},
+            tol=1e-8
+        )
+
+        # Extract optimized parameters
+        optimized_params = result.x
+
+        # Convert back to inner hex data
+        optimized_inner_data = optimized_params[:3*n].reshape(n, 3)
+
+        # Extract outer hex data
+        outer_center_x, outer_center_y = optimized_params[3*n:3*n+2]
+        outer_hex_data = np.array([outer_center_x, outer_center_y, 0])
+
+        # Calculate actual outer hexagon radius
+        outer_radius = calculate_outer_hex_radius(optimized_inner_data, outer_center_x, outer_center_y)
+        outer_hex_side_length = outer_radius
+
+        # Ensure the result is valid
+        if not result.success:
+            print(f"Optimization failed with message: {result.message}")
+            # Fallback to initial configuration if optimization fails
+            optimized_inner_data = initial_positions.copy()
+            outer_hex_side_length = 8.0  # fallback value
+
+    except Exception as e:
+        print(f"Optimization error: {e}")
+        # Return initial configuration as fallback
+        optimized_inner_data = initial_positions.copy()
+        outer_hex_side_length = 8.0
+
+    end_time = time.time()
+
+    return optimized_inner_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

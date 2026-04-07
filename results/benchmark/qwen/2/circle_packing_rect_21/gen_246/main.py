@@ -1,0 +1,402 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+import random
+from typing import Tuple, List, Optional
+import time
+import warnings
+
+# Global constants
+RECT_PERIMETER = 4.0
+OPTIMAL_WIDTH = 1.2
+OPTIMAL_HEIGHT = 0.8
+NUM_CIRCLES = 21
+SEED = 42
+
+class PhysicsConstraintValidator:
+    """Validates circle constraints with physics-inspired approaches."""
+    
+    def __init__(self, width: float, height: float):
+        self.width = width
+        self.height = height
+        
+    def is_valid_circle(self, x: float, y: float, r: float) -> bool:
+        """Check if circle is valid (within bounds and positive radius)."""
+        return (0 < r and 
+                r <= x <= self.width - r and 
+                r <= y <= self.height - r)
+    
+    def compute_constraint_violation(self, circles: np.ndarray) -> Tuple[float, float]:
+        """Compute total violation penalties for boundaries and overlaps."""
+        boundary_penalty = 0.0
+        overlap_penalty = 0.0
+        
+        # Boundary penalties
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            # Soft boundary constraints with penalties
+            if x < r:
+                boundary_penalty += 1000 * (r - x)**2
+            elif x > self.width - r:
+                boundary_penalty += 1000 * (x - (self.width - r))**2
+            if y < r:
+                boundary_penalty += 1000 * (r - y)**2
+            elif y > self.height - r:
+                boundary_penalty += 1000 * (y - (self.height - r))**2
+        
+        # Overlap penalties using spatial indexing
+        try:
+            positions = circles[:, :2]
+            radii = circles[:, 2]
+            tree = cKDTree(positions)
+            max_radius = np.max(radii) if len(radii) > 0 else 0.0
+            
+            # Query pairs within reasonable distance
+            pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+            
+            for i, j in pairs:
+                if i < j:  # Avoid duplicate pairs
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    distance_sq = dx*dx + dy*dy
+                    radius_sum = r1 + r2
+                    
+                    if distance_sq < radius_sum * radius_sum:
+                        overlap = radius_sum - np.sqrt(distance_sq)
+                        overlap_penalty += 5000 * overlap**2
+                        
+        except Exception:
+            # Fallback to brute force
+            for i in range(len(circles)):
+                for j in range(i + 1, len(circles)):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+                    dx = x1 - x2
+                    dy = y1 - y2
+                    distance_sq = dx*dx + dy*dy
+                    radius_sum = r1 + r2
+                    
+                    if distance_sq < radius_sum * radius_sum:
+                        overlap = radius_sum - np.sqrt(distance_sq)
+                        overlap_penalty += 5000 * overlap**2
+                        
+        return boundary_penalty, overlap_penalty
+
+class PhysicsInitializer:
+    """Initializes circle configurations using physics-based principles."""
+    
+    def __init__(self, width: float, height: float, num_circles: int):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        np.random.seed(SEED)
+        random.seed(SEED)
+        
+    def generate_physics_initialization(self) -> np.ndarray:
+        """Generate initial configuration using physics-based particle simulation."""
+        circles = np.zeros((self.num_circles, 3))
+        
+        # Start with random positions
+        for i in range(self.num_circles):
+            x = np.random.uniform(0.01, self.width - 0.01)
+            y = np.random.uniform(0.01, self.height - 0.01)
+            # Conservative initial radius
+            r = np.random.uniform(0.01, min(self.width, self.height) * 0.08)
+            circles[i] = [x, y, r]
+        
+        # Apply physics simulation to distribute circles more evenly
+        # This mimics electrostatic repulsion among circles (in 2D)
+        positions = circles[:, :2].copy()
+        radii = circles[:, 2].copy()
+        
+        # Physics parameters
+        dt = 0.01
+        repulsion_strength = 50.0
+        boundary_strength = 100.0
+        max_steps = 500
+        
+        for step in range(max_steps):
+            forces = np.zeros_like(positions)
+            
+            # Calculate repulsion forces between circles
+            for i in range(self.num_circles):
+                for j in range(self.num_circles):
+                    if i != j:
+                        dx = positions[i, 0] - positions[j, 0]
+                        dy = positions[i, 1] - positions[j, 1]
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        
+                        if distance < (radii[i] + radii[j]) and distance > 1e-8:
+                            # Repulsive force when overlapping
+                            force_magnitude = repulsion_strength * (1.0 - distance/(radii[i] + radii[j]))
+                            fx = force_magnitude * dx / distance
+                            fy = force_magnitude * dy / distance
+                            forces[i, 0] += fx
+                            forces[i, 1] += fy
+                        elif distance > 1e-8:
+                            # Attraction to center (for uniform distribution)
+                            center_dx = positions[i, 0] - self.width/2
+                            center_dy = positions[i, 1] - self.height/2
+                            attraction_distance = np.sqrt(center_dx*center_dx + center_dy*center_dy)
+                            if attraction_distance > 1e-8:
+                                attraction_force = 0.1 / (attraction_distance + 1.0)
+                                fx = attraction_force * center_dx / attraction_distance
+                                fy = attraction_force * center_dy / attraction_distance
+                                forces[i, 0] -= fx
+                                forces[i, 1] -= fy
+            
+            # Apply boundary forces
+            for i in range(self.num_circles):
+                x, y, r = positions[i, 0], positions[i, 1], radii[i]
+                # Repel from boundaries
+                if x - r < 0:
+                    forces[i, 0] += boundary_strength * (0 - (x - r))
+                if x + r > self.width:
+                    forces[i, 0] += boundary_strength * (self.width - (x + r))
+                if y - r < 0:
+                    forces[i, 1] += boundary_strength * (0 - (y - r))
+                if y + r > self.height:
+                    forces[i, 1] += boundary_strength * (self.height - (y + r))
+            
+            # Update positions
+            for i in range(self.num_circles):
+                positions[i, 0] += forces[i, 0] * dt
+                positions[i, 1] += forces[i, 1] * dt
+                
+                # Keep within bounds
+                positions[i, 0] = np.clip(positions[i, 0], r, self.width - r)
+                positions[i, 1] = np.clip(positions[i, 1], r, self.height - r)
+            
+            # Update circles
+            circles[:, :2] = positions
+            
+        return circles
+
+class HybridOptimizer:
+    """Performs hybrid optimization combining evolutionary and physics approaches."""
+    
+    def __init__(self, validator: PhysicsConstraintValidator):
+        self.validator = validator
+        
+    def local_radius_enhancement(self, circles: np.ndarray, max_iterations: int = 100) -> np.ndarray:
+        """Enhance individual circle radii while maintaining constraints."""
+        current_circles = circles.copy()
+        
+        for iteration in range(max_iterations):
+            improved = False
+            
+            # Randomize order for better exploration
+            indices = list(range(len(current_circles)))
+            np.random.shuffle(indices)
+            
+            for idx in indices:
+                x, y, r = current_circles[idx]
+                
+                # Calculate maximum possible radius at this position
+                max_radius = min(x, self.validator.width - x, y, self.validator.height - y)
+                
+                # Check overlap with all other circles
+                for i in range(len(current_circles)):
+                    if i != idx:
+                        x2, y2, r2 = current_circles[i]
+                        dx = x - x2
+                        dy = y - y2
+                        distance = np.sqrt(dx*dx + dy*dy)
+                        
+                        # Can't get closer than sum of radii
+                        if distance < (r + r2):
+                            max_radius = min(max_radius, distance - r2)
+                
+                # Increase radius conservatively if beneficial
+                if max_radius > r and max_radius > 0.001:
+                    # Allow small increase with safety margin
+                    new_r = min(max_radius, r + min(0.02, (max_radius - r) * 0.3))
+                    
+                    # Verify constraint validity
+                    temp_circles = current_circles.copy()
+                    temp_circles[idx, 2] = new_r
+                    
+                    # Check constraint viability
+                    boundary_penalty, overlap_penalty = self.validator.compute_constraint_violation(temp_circles)
+                    if boundary_penalty + overlap_penalty < 1000:  # Reasonable threshold
+                        current_circles[idx, 2] = new_r
+                        improved = True
+            
+            # Early stopping if no improvement
+            if not improved:
+                break
+                
+        return current_circles
+    
+    def adaptive_evolutionary_refinement(self, circles: np.ndarray, generations: int = 50) -> np.ndarray:
+        """Use evolutionary approach to refine solution with adaptive parameters."""
+        current_individual = circles.copy()
+        best_individual = current_individual.copy()
+        best_fitness = np.sum(current_individual[:, 2])
+        
+        # Population-based approach with adaptive diversity
+        population_size = 20
+        population = [current_individual.copy()]
+        
+        # Add diverse variants
+        for _ in range(population_size - 1):
+            variant = current_individual.copy()
+            # Add noise to each circle
+            for i in range(len(variant)):
+                if np.random.random() < 0.3:
+                    # Perturb position
+                    variant[i, 0] += np.random.uniform(-0.05, 0.05)
+                    variant[i, 1] += np.random.uniform(-0.05, 0.05)
+                    # Keep within bounds
+                    variant[i, 0] = np.clip(variant[i, 0], variant[i, 2], self.validator.width - variant[i, 2])
+                    variant[i, 1] = np.clip(variant[i, 1], variant[i, 2], self.validator.height - variant[i, 2])
+            population.append(variant)
+        
+        for generation in range(generations):
+            # Evaluate fitness for entire population
+            fitness_scores = []
+            for individual in population:
+                # Fitness is sum of radii minus penalties
+                boundary_penalty, overlap_penalty = self.validator.compute_constraint_violation(individual)
+                fitness = np.sum(individual[:, 2]) - (1000 * boundary_penalty + 5000 * overlap_penalty)
+                fitness_scores.append(fitness)
+            
+            # Update best solution
+            max_fitness_idx = np.argmax(fitness_scores)
+            if fitness_scores[max_fitness_idx] > best_fitness:
+                best_fitness = fitness_scores[max_fitness_idx]
+                best_individual = population[max_fitness_idx].copy()
+            
+            # Create new generation through selection and crossover
+            new_population = [best_individual.copy()]  # Elitism
+            
+            # Tournament selection
+            while len(new_population) < population_size:
+                # Select parents via tournament
+                parent1 = self.tournament_selection(population, fitness_scores)
+                parent2 = self.tournament_selection(population, fitness_scores)
+                
+                # Crossover: blend positions, keep radii from parent1
+                child = parent1.copy()
+                for i in range(len(child)):
+                    if np.random.random() < 0.5:
+                        child[i, 0] = parent2[i, 0]
+                        child[i, 1] = parent2[i, 1]
+                
+                # Mutation with adaptive rate
+                mutation_rate = max(0.05, 0.15 - generation * 0.002)
+                for i in range(len(child)):
+                    if np.random.random() < mutation_rate:
+                        child[i, 0] += np.random.uniform(-0.03, 0.03)
+                        child[i, 1] += np.random.uniform(-0.03, 0.03)
+                        # Keep within bounds
+                        child[i, 0] = np.clip(child[i, 0], child[i, 2], self.validator.width - child[i, 2])
+                        child[i, 1] = np.clip(child[i, 1], child[i, 2], self.validator.height - child[i, 2])
+                
+                new_population.append(child)
+            
+            population = new_population[:population_size]
+        
+        return best_individual
+    
+    def tournament_selection(self, population: List[np.ndarray],
+                           fitness_scores: List[float]) -> np.ndarray:
+        """Select individual using tournament selection."""
+        tournament_size = 3
+        tournament_indices = np.random.choice(len(population), tournament_size)
+        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+        winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+        return population[winner_idx].copy()
+
+class PhysicsBasedCirclePacker:
+    """Main optimizer using physics-inspired evolutionary approach."""
+    
+    def __init__(self, width: float = OPTIMAL_WIDTH, height: float = OPTIMAL_HEIGHT, 
+                 num_circles: int = NUM_CIRCLES):
+        self.width = width
+        self.height = height
+        self.num_circles = num_circles
+        self.validator = PhysicsConstraintValidator(width, height)
+        self.initializer = PhysicsInitializer(width, height, num_circles)
+        self.hybrid_optimizer = HybridOptimizer(self.validator)
+        self.best_solution = None
+        self.best_fitness = float('-inf')
+        
+        # Initialize random seed for reproducibility
+        np.random.seed(SEED)
+        random.seed(SEED)
+    
+    def evaluate_fitness(self, circles: np.ndarray) -> Tuple[float, float, float]:
+        """Evaluate fitness including penalties and constraints."""
+        # Basic radius sum
+        radius_sum = np.sum(circles[:, 2])
+        
+        # Constraint violations
+        boundary_penalty, overlap_penalty = self.validator.compute_constraint_violation(circles)
+        
+        # Total fitness (higher is better)
+        total_fitness = radius_sum - (1000 * boundary_penalty + 5000 * overlap_penalty)
+        
+        return total_fitness, boundary_penalty, overlap_penalty
+    
+    def optimize(self) -> np.ndarray:
+        """Main optimization pipeline."""
+        start_time = time.time()
+        
+        print("Generating physics-based initial configuration...")
+        
+        # Phase 1: Physics-based initialization
+        initial_config = self.initializer.generate_physics_initialization()
+        initial_fitness, _, _ = self.evaluate_fitness(initial_config)
+        print(f"Initial fitness: {initial_fitness:.6f}")
+        
+        # Phase 2: Local enhancement
+        print("Performing local radius enhancement...")
+        enhanced_config = self.hybrid_optimizer.local_radius_enhancement(initial_config, max_iterations=100)
+        enhanced_fitness, _, _ = self.evaluate_fitness(enhanced_config)
+        print(f"After enhancement: {enhanced_fitness:.6f}")
+        
+        # Phase 3: Evolutionary refinement
+        print("Applying evolutionary refinement...")
+        evolved_config = self.hybrid_optimizer.adaptive_evolutionary_refinement(enhanced_config, generations=50)
+        evolved_fitness, _, _ = self.evaluate_fitness(evolved_config)
+        print(f"After evolution: {evolved_fitness:.6f}")
+        
+        # Phase 4: Final polishing
+        print("Final polishing...")
+        final_config = self.hybrid_optimizer.local_radius_enhancement(evolved_config, max_iterations=50)
+        final_fitness, boundary_violations, overlap_violations = self.evaluate_fitness(final_config)
+        print(f"Final fitness: {final_fitness:.6f}")
+        print(f"Constraint violations - Boundary: {boundary_violations:.2f}, Overlap: {overlap_violations:.2f}")
+        
+        end_time = time.time()
+        print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+        
+        return final_config
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Create optimizer instance with optimized rectangle dimensions
+    optimizer = PhysicsBasedCirclePacker(width=OPTIMAL_WIDTH, height=OPTIMAL_HEIGHT, num_circles=NUM_CIRCLES)
+    
+    # Run optimization
+    circles = optimizer.optimize()
+    
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

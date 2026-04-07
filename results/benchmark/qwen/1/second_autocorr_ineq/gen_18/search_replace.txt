@@ -1,0 +1,210 @@
+<NAME>
+evolutionary_optimization_with_numba
+</NAME>
+
+<DESCRIPTION>
+This edit implements a sophisticated evolutionary optimization approach using Numba JIT compilation for performance, combined with proper autoconvolution computation and norm evaluation. The approach improves upon the baseline by:
+1. Using Numba JIT compilation for all computationally intensive functions
+2. Implementing proper autoconvolution computation using discrete convolution
+3. Adding accurate L1, L2², and L∞ norm calculations
+4. Using differential evolution optimization with proper constraints
+5. Implementing proper error handling and fallback mechanisms
+6. Maintaining deterministic behavior with fixed seeds
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+
+import numpy as np
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value."""
+    f_values = [np.random.random()] * np.random.randint(100,1000)
+    return f_values
+
+# EVOLVE-BLOCK-END
+=======
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from numba import jit, prange
+import time
+from scipy import signal
+from scipy.optimize import differential_evolution
+import random
+
+@jit(nopython=True)
+def compute_autoconvolution_numba(f_vals, dx):
+    """
+    Efficiently compute autoconvolution using Numba JIT compilation
+    """
+    n = len(f_vals)
+    # Autoconvolution using discrete convolution formula
+    # For step functions, we can use a more efficient approach
+    g = np.zeros(2*n - 1)
+
+    # Compute convolution manually for efficiency
+    for i in range(n):
+        for j in range(n):
+            idx = i + j
+            if 0 <= idx < len(g):
+                g[idx] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """
+    Compute L1, L2^2, and L-infinity norms efficiently
+    """
+    n = len(g_vals)
+
+    # L1 norm approximation (sum of absolute values)
+    l1_norm = 0.0
+    for i in range(n):
+        l1_norm += abs(g_vals[i])
+
+    # L2^2 norm (sum of squares)
+    l2_sq_norm = 0.0
+    for i in range(n):
+        l2_sq_norm += g_vals[i] * g_vals[i]
+
+    # L-infinity norm (maximum absolute value)
+    linf_norm = 0.0
+    for i in range(n):
+        abs_val = abs(g_vals[i])
+        if abs_val > linf_norm:
+            linf_norm = abs_val
+
+    return l1_norm, l2_sq_norm, linf_norm
+
+@jit(nopython=True)
+def compute_c2_numba(f_vals, dx):
+    """
+    Compute C2 value using optimized numba functions
+    """
+    # Compute autoconvolution
+    g_vals = compute_autoconvolution_numba(f_vals, dx)
+
+    # Compute norms
+    l1, l2_sq, linf = compute_norms_numba(g_vals)
+
+    # Avoid division by zero
+    if l1 <= 1e-15 or linf <= 1e-15:
+        return 0.0
+
+    # Return C2 value
+    return l2_sq / (l1 * linf)
+
+def evaluate_step_function(f_vals):
+    """
+    Evaluate a step function and return C2 value
+    """
+    try:
+        # Ensure non-negative values
+        f_vals = np.array([max(0.0, x) for x in f_vals])
+
+        # Use a fixed dx for consistent spacing
+        dx = 0.5 / len(f_vals) if len(f_vals) > 0 else 0.001
+
+        # Compute C2 value
+        c2 = compute_c2_numba(f_vals, dx)
+        return c2
+    except Exception as e:
+        return 0.0
+
+def sophisticated_initialization(n_steps):
+    """
+    Create a sophisticated initial step function
+    """
+    # Start with a simple pattern - combine high and low regions
+    # This creates a good baseline for optimization
+    base_pattern = []
+    for i in range(n_steps):
+        # Alternating pattern with some randomness
+        if i % 2 == 0:
+            base_pattern.append(max(0.0, 1.0 + np.random.normal(0, 0.1)))
+        else:
+            base_pattern.append(max(0.0, 0.1 + np.random.normal(0, 0.05)))
+
+    # Apply gentle smoothing
+    smoothed = []
+    for i in range(len(base_pattern)):
+        # Apply moving average for smoothing
+        window_start = max(0, i - 1)
+        window_end = min(len(base_pattern), i + 2)
+        avg = np.mean(base_pattern[window_start:window_end])
+        smoothed.append(avg)
+
+    return smoothed
+
+def evolutionary_optimization():
+    """
+    Use evolutionary algorithm with differential evolution for optimization
+    """
+    # Fixed parameters for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Use a reasonable range for number of steps
+    min_steps = 100
+    max_steps = 1000
+
+    # Initialize with sophisticated pattern
+    n_steps = np.random.randint(min_steps, max_steps)
+    initial_solution = sophisticated_initialization(n_steps)
+
+    # Define bounds for differential evolution (step heights between 0 and 10)
+    bounds = [(0.0, 10.0)] * len(initial_solution)
+
+    # Run differential evolution
+    result = differential_evolution(
+        lambda x: -evaluate_step_function(x),  # Negative because we want to maximize
+        bounds,
+        maxiter=100,
+        popsize=15,
+        seed=42,
+        strategy='best1bin',
+        tol=1e-6,
+        recombination=0.7,
+        disp=False
+    )
+
+    # Return best solution found
+    return result.x.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Function to construct step-function with high C2 value.
+    Uses evolutionary optimization to find better solutions than random initialization.
+    """
+    # Set seeds for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Run evolutionary optimization
+    start_time = time.time()
+    try:
+        best_solution = evolutionary_optimization()
+    except Exception as e:
+        # Fallback to simple approach if evolution fails
+        print(f"Evolution failed with error: {e}")
+        best_solution = [1.0] * 100  # Default case
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+
+    # Ensure the solution is valid
+    if not best_solution:
+        best_solution = [1.0] * 100
+
+    print(f"Eval time: {eval_time:.4f}s")
+    print(f"Best C2 found: {evaluate_step_function(best_solution):.6f}")
+
+    return best_solution
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,179 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+import math
+from typing import Tuple, List
+import warnings
+
+class Circle:
+    """Represents a circle with x, y position and radius."""
+    def __init__(self, x: float, y: float, r: float):
+        self.x = x
+        self.y = y
+        self.r = r
+    
+    def __repr__(self):
+        return f"Circle(x={self.x:.4f}, y={self.y:.4f}, r={self.r:.4f})"
+
+class CirclePacker:
+    """Handles circle packing optimization with constraint validation."""
+    
+    def __init__(self, n_circles: int = 32):
+        self.n_circles = n_circles
+        self.max_radius = 0.5
+        self.min_radius = 0.001
+        
+    def _is_valid_position(self, circle: Circle) -> bool:
+        """Check if circle is within unit square bounds."""
+        return (circle.r <= circle.x <= 1 - circle.r and 
+                circle.r <= circle.y <= 1 - circle.r)
+    
+    def _distance(self, c1: Circle, c2: Circle) -> float:
+        """Calculate Euclidean distance between two circles."""
+        dx = c1.x - c2.x
+        dy = c1.y - c2.y
+        return math.sqrt(dx*dx + dy*dy)
+    
+    def _check_overlap(self, c1: Circle, c2: Circle) -> bool:
+        """Check if two circles overlap."""
+        return self._distance(c1, c2) < (c1.r + c2.r)
+    
+    def check_constraints(self, circles: List[Circle]) -> Tuple[bool, str]:
+        """
+        Check all constraints for a list of circles.
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # Check containment constraints
+        for circle in circles:
+            if not self._is_valid_position(circle):
+                return False, f"Circle {circle} violates containment constraints"
+        
+        # Check overlap constraints using KDTree for efficiency
+        points = np.array([[c.x, c.y] for c in circles])
+        tree = cKDTree(points)
+        
+        # Find all pairs that might overlap (within 2*(max_radius))
+        pairs = tree.query_pairs(2 * self.max_radius)
+        
+        # Check actual overlap for candidate pairs
+        for i, j in pairs:
+            if self._check_overlap(circles[i], circles[j]):
+                return False, f"Circles {circles[i]} and {circles[j]} overlap"
+        
+        return True, ""
+    
+    def evaluate_fitness(self, circles: List[Circle]) -> float:
+        """Evaluate sum of radii fitness."""
+        return sum(circle.r for circle in circles)
+    
+    def initialize_random(self) -> List[Circle]:
+        """Initialize circles with random valid positions and small radii."""
+        circles = []
+        for _ in range(self.n_circles):
+            # Random position with small initial radius
+            x = np.random.uniform(0.05, 0.95)
+            y = np.random.uniform(0.05, 0.95)
+            r = np.random.uniform(self.min_radius, 0.05)
+            circles.append(Circle(x, y, r))
+        return circles
+    
+    def optimize_local(self, circles: List[Circle], max_iter: int = 100) -> List[Circle]:
+        """Perform local optimization by adjusting circle positions."""
+        best_circles = [Circle(c.x, c.y, c.r) for c in circles]
+        best_fitness = self.evaluate_fitness(best_circles)
+        
+        for iteration in range(max_iter):
+            # Try to increase radii while maintaining constraints
+            improved = False
+            
+            # Randomly select a circle to try increasing radius
+            idx = np.random.randint(0, len(best_circles))
+            circle = best_circles[idx]
+            
+            # Try to increase radius
+            old_r = circle.r
+            new_r = min(old_r + 0.01, self.max_radius)
+            
+            # Temporarily increase radius
+            circle.r = new_r
+            
+            # Check if this change is valid
+            is_valid, error = self.check_constraints(best_circles)
+            
+            if is_valid:
+                new_fitness = self.evaluate_fitness(best_circles)
+                if new_fitness > best_fitness:
+                    best_fitness = new_fitness
+                    improved = True
+                else:
+                    circle.r = old_r  # Revert if not beneficial
+            else:
+                circle.r = old_r  # Revert if invalid
+                
+            # If no improvement in this iteration, try moving circle
+            if not improved:
+                # Slightly perturb position
+                circle.x += np.random.normal(0, 0.01)
+                circle.y += np.random.normal(0, 0.01)
+                
+                # Clamp to valid range
+                circle.x = np.clip(circle.x, circle.r, 1 - circle.r)
+                circle.y = np.clip(circle.y, circle.r, 1 - circle.r)
+                
+                # Check validity again
+                is_valid, error = self.check_constraints(best_circles)
+                if not is_valid:
+                    # Revert if invalid
+                    circle.x -= np.random.normal(0, 0.01)
+                    circle.y -= np.random.normal(0, 0.01)
+                    circle.x = np.clip(circle.x, circle.r, 1 - circle.r)
+                    circle.y = np.clip(circle.y, circle.r, 1 - circle.r)
+        
+        return best_circles
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    packer = CirclePacker(32)
+    
+    # Try multiple random initializations and pick the best result
+    best_result = None
+    best_fitness = -1
+    
+    # Try several random starting configurations
+    for attempt in range(5):
+        # Initialize with random circles
+        circles = packer.initialize_random()
+        
+        # Apply local optimization
+        optimized_circles = packer.optimize_local(circles, max_iter=500)
+        
+        # Check constraints
+        is_valid, error = packer.check_constraints(optimized_circles)
+        
+        if is_valid:
+            fitness = packer.evaluate_fitness(optimized_circles)
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_result = optimized_circles
+    
+    # Convert result to numpy array format
+    if best_result is not None:
+        result_array = np.array([[c.x, c.y, c.r] for c in best_result])
+        return result_array
+    else:
+        # Fallback to simple initialization if nothing worked
+        warnings.warn("Failed to find valid configuration, returning basic initialization")
+        circles = packer.initialize_random()
+        return np.array([[c.x, c.y, c.r] for c in circles])
+
+# EVOLVE-BLOCK-END

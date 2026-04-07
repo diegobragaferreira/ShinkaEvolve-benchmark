@@ -1,0 +1,171 @@
+<NAME>
+add_spatial_indexing_for_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses brute force pairwise collision detection which becomes inefficient as the search space grows. I'll implement a spatial indexing approach using a grid-based partitioning system to pre-filter potential collision pairs before doing expensive polygon intersection tests. This will significantly reduce the computational complexity of overlap checking, especially important for the 11-hexagon problem where many pairwise checks are performed.
+
+This approach will:
+1. Add a spatial hash grid to quickly identify nearby hexagons
+2. Reduce overlap checking from O(n²) to approximately O(n) on average
+3. Maintain the same accuracy while improving performance
+4. Allow for more aggressive optimization strategies due to faster evaluations
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+from scipy.spatial.distance import cdist
+import time
+=======
+import numpy as np
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+from scipy.spatial.distance import cdist
+import time
+from collections import defaultdict
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap"""
+    return hex1_poly.intersects(hex2_poly)
+
+def calculate_outer_hex_side_length(inner_hex_data):
+=======
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap"""
+    return hex1_poly.intersects(hex2_poly)
+
+def build_spatial_grid(hex_polygons, cell_size=2.0):
+    """Build a spatial grid for efficient collision detection"""
+    grid = defaultdict(list)
+
+    for i, poly in enumerate(hex_polygons):
+        # Get bounding box of polygon
+        bounds = poly.bounds
+        min_x, min_y, max_x, max_y = bounds
+
+        # Calculate grid cell indices
+        min_cell_x = int(min_x // cell_size)
+        max_cell_x = int(max_x // cell_size)
+        min_cell_y = int(min_y // cell_size)
+        max_cell_y = int(max_y // cell_size)
+
+        # Add to all relevant cells
+        for x in range(min_cell_x, max_cell_x + 1):
+            for y in range(min_cell_y, max_cell_y + 1):
+                grid[(x, y)].append(i)
+
+    return grid
+
+def get_potential_collisions(grid, hex_polygons, cell_size=2.0):
+    """Get potential collision pairs using spatial grid"""
+    collisions = set()
+
+    for i, poly in enumerate(hex_polygons):
+        bounds = poly.bounds
+        min_x, min_y, max_x, max_y = bounds
+
+        # Calculate grid cell indices
+        min_cell_x = int(min_x // cell_size)
+        max_cell_x = int(max_x // cell_size)
+        min_cell_y = int(min_y // cell_size)
+        max_cell_y = int(max_y // cell_size)
+
+        # Check all cells that might contain neighbors
+        for x in range(min_cell_x, max_cell_x + 1):
+            for y in range(min_cell_y, max_cell_y + 1):
+                for j in grid[(x, y)]:
+                    if i < j:  # Avoid duplicate pairs and self-checks
+                        collisions.add((i, j))
+
+    return collisions
+
+def calculate_outer_hex_side_length(inner_hex_data):
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution(inner_hex_data):
+    """Evaluate fitness of solution - maximize 1/outer_hex_side_length"""
+    # Check for overlaps and containment
+    try:
+        # Create polygons for all inner hexagons
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, angle = inner_hex_data[i]
+            vertices = generate_hexagon_vertices(center_x, center_y, angle)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment and overlap
+        outer_side_length = calculate_outer_hex_side_length(inner_hex_data)
+        outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_side_length)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment
+        for poly in hex_polygons:
+            if not check_containment(poly, outer_polygon):
+                return 0.0  # Invalid - not fully contained
+
+        # Check overlaps
+        for i in range(len(hex_polygons)):
+            for j in range(i+1, len(hex_polygons)):
+                if check_overlap(hex_polygons[i], hex_polygons[j]):
+                    return 0.0  # Invalid - overlaps
+
+        # Return 1/outer_side_length as fitness
+        return 1.0 / outer_side_length if outer_side_length > 0 else 0.0
+
+    except Exception:
+        return 0.0
+=======
+def evaluate_solution(inner_hex_data):
+    """Evaluate fitness of solution - maximize 1/outer_hex_side_length"""
+    # Check for overlaps and containment
+    try:
+        # Create polygons for all inner hexagons
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, angle = inner_hex_data[i]
+            vertices = generate_hexagon_vertices(center_x, center_y, angle)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment and overlap
+        outer_side_length = calculate_outer_hex_side_length(inner_hex_data)
+        outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_side_length)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment
+        for poly in hex_polygons:
+            if not check_containment(poly, outer_polygon):
+                return 0.0  # Invalid - not fully contained
+
+        # Use spatial indexing for overlap detection
+        grid = build_spatial_grid(hex_polygons)
+        potential_collisions = get_potential_collisions(grid, hex_polygons)
+
+        # Check overlaps only for potentially colliding pairs
+        for i, j in potential_collisions:
+            if check_overlap(hex_polygons[i], hex_polygons[j]):
+                return 0.0  # Invalid - overlaps
+
+        # Return 1/outer_side_length as fitness
+        return 1.0 / outer_side_length if outer_side_length > 0 else 0.0
+
+    except Exception:
+        return 0.0
+>>>>>>> REPLACE
+
+</DIFF>

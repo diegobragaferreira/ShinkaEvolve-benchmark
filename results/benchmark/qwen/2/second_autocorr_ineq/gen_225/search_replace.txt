@@ -1,0 +1,223 @@
+<NAME>
+implement_selective_differential_evolution
+</NAME>
+
+<DESCRIPTION>
+Implement selective differential evolution targeting only peak parameters instead of all function values. This addresses the weakness in the current implementation that uses full-dimensional optimization, which is computationally expensive and less effective for this specific problem where we're optimizing structured step functions composed of Gaussian peaks. By focusing on peak positions and amplitudes, we can achieve faster convergence and better results while maintaining the same computational budget.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def differential_evolution_refinement(initial_f: List[float], max_evals: int = 300) -> List[float]:
+    """
+    Use differential evolution for global refinement
+    """
+    try:
+        # Convert individual to array for optimization
+        x0 = np.array(initial_f, dtype=np.float64)
+
+        # Define bounds for each parameter (clamped between 0 and 5)
+        bounds = [(0, 5) for _ in range(len(x0))]
+
+        # Objective function for differential evolution
+        def obj_func(x):
+            # Ensure non-negative values
+            x = np.maximum(x, 0)
+            # Evaluate it
+            score = compute_c2(x.tolist())
+            # Minimize negative of score (since we want to maximize)
+            return -score if score > 0 else 1e10
+
+        # Run differential evolution with fewer evaluations to save time
+        result = differential_evolution(
+            obj_func,
+            bounds,
+            maxiter=max_evals,
+            popsize=10,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+
+        if result.success:
+            refined = np.maximum(result.x, 0).tolist()
+            # Verify the result
+            score = compute_c2(refined)
+            if score > compute_c2(initial_f):
+                return refined
+
+    except Exception as e:
+        pass
+
+    return initial_f
+=======
+def identify_peak_parameters(f_vals: List[float], x_vals: np.ndarray) -> List[Tuple[float, float, float]]:
+    """
+    Identify peak parameters (position, height, width) from function values.
+    Returns list of (position, height, width) tuples.
+    """
+    peaks = []
+    f_arr = np.array(f_vals)
+
+    # Find local maxima
+    for i in range(1, len(f_arr)-1):
+        if f_arr[i] > f_arr[i-1] and f_arr[i] > f_arr[i+1]:
+            peaks.append((i, f_arr[i]))
+
+    # Sort by height descending
+    peaks.sort(key=lambda x: x[1], reverse=True)
+
+    # Take top 10 peaks, or all if fewer
+    peaks = peaks[:10] if len(peaks) > 10 else peaks
+
+    # Convert to peak parameters
+    peak_params = []
+    for pos_idx, height in peaks:
+        # Estimate width from surrounding values
+        width = 10  # Default width estimate
+        peak_params.append((x_vals[pos_idx], height, width))
+
+    return peak_params
+
+def reconstruct_from_peak_params(peak_params: List[Tuple[float, float, float]],
+                                x_vals: np.ndarray) -> np.ndarray:
+    """
+    Reconstruct function from peak parameters
+    """
+    f_reconstructed = np.zeros_like(x_vals)
+
+    for pos, height, width in peak_params:
+        # Convert position from index to actual coordinate
+        if pos < 0 or pos >= len(x_vals):
+            continue
+
+        gaussian = height * np.exp(-0.5 * ((x_vals - pos) / width)**2)
+        f_reconstructed += gaussian
+
+    return np.maximum(f_reconstructed, 0)
+
+def selective_differential_evolution_refinement(initial_f: List[float],
+                                               max_evals: int = 200) -> List[float]:
+    """
+    Use differential evolution targeting only peak parameters for efficient optimization.
+    """
+    try:
+        x_vals = np.linspace(-0.25, 0.25, len(initial_f))
+
+        # First identify peak parameters from current function
+        peak_params = identify_peak_parameters(initial_f, x_vals)
+
+        if not peak_params:
+            # Fallback to regular DE if no peaks identified
+            return differential_evolution_refinement(initial_f, max_evals)
+
+        # Flatten peak parameters for optimization: [pos1, height1, width1, pos2, height2, width2, ...]
+        initial_peak_params = []
+        for pos, height, width in peak_params:
+            initial_peak_params.extend([pos, height, width])
+
+        # Define bounds for peak parameters
+        bounds = []
+        for i, (pos, height, width) in enumerate(peak_params):
+            # Position bounds: [-0.25, 0.25]
+            bounds.extend([(-0.25, 0.25), (0.0, 5.0), (0.01, 0.5)])
+
+        # Objective function for peak parameters
+        def obj_func(peak_param_vector):
+            # Reshape back to peak parameters
+            reshaped_params = []
+            for i in range(0, len(peak_param_vector), 3):
+                if i + 2 < len(peak_param_vector):
+                    pos = peak_param_vector[i]
+                    height = max(0, peak_param_vector[i+1])  # Ensure non-negative
+                    width = max(0.01, peak_param_vector[i+2])  # Ensure positive width
+                    reshaped_params.append((pos, height, width))
+
+            # Reconstruct function
+            f_reconstructed = reconstruct_from_peak_params(reshaped_params, x_vals)
+
+            # Compute C2
+            score = compute_c2(f_reconstructed.tolist())
+
+            # Minimize negative of score (since we want to maximize)
+            return -score if score > 0 else 1e10
+
+        # Run differential evolution on peak parameters
+        result = differential_evolution(
+            obj_func,
+            bounds,
+            maxiter=max_evals,
+            popsize=5,  # Smaller population for efficiency
+            mutation=(0.5, 1),
+            recombination=0.7,
+            seed=42,
+            disp=False
+        )
+
+        if result.success:
+            # Reconstruct function from optimized peak parameters
+            optimized_params = []
+            for i in range(0, len(result.x), 3):
+                if i + 2 < len(result.x):
+                    pos = result.x[i]
+                    height = max(0, result.x[i+1])
+                    width = max(0.01, result.x[i+2])
+                    optimized_params.append((pos, height, width))
+
+            refined = reconstruct_from_peak_params(optimized_params, x_vals)
+            # Verify the result
+            score = compute_c2(refined.tolist())
+            if score > compute_c2(initial_f):
+                return refined.tolist()
+
+    except Exception as e:
+        pass
+
+    return initial_f
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final refinement using local search and differential evolution if we have a candidate
+    if best_function and time.time() - start_time < max_time_seconds - 5:
+        # Apply local search refinement
+        refined_local = local_search_refinement(best_function, max_iter=30)
+        local_c2 = compute_c2(refined_local)
+
+        if local_c2 > best_c2:
+            best_c2 = local_c2
+            best_function = refined_local
+
+        # Apply differential evolution refinement (more intensive)
+        if time.time() - start_time < max_time_seconds - 5:
+            refined_de = differential_evolution_refinement(best_function, max_evals=200)
+            de_c2 = compute_c2(refined_de)
+
+            if de_c2 > best_c2:
+                best_c2 = de_c2
+                best_function = refined_de
+=======
+    # Final refinement using local search and selective differential evolution if we have a candidate
+    if best_function and time.time() - start_time < max_time_seconds - 5:
+        # Apply local search refinement
+        refined_local = local_search_refinement(best_function, max_iter=30)
+        local_c2 = compute_c2(refined_local)
+
+        if local_c2 > best_c2:
+            best_c2 = local_c2
+            best_function = refined_local
+
+        # Apply selective differential evolution refinement (more efficient than full DE)
+        if time.time() - start_time < max_time_seconds - 5:
+            refined_de = selective_differential_evolution_refinement(best_function, max_evals=150)
+            de_c2 = compute_c2(refined_de)
+
+            if de_c2 > best_c2:
+                best_c2 = de_c2
+                best_function = refined_de
+>>>>>>> REPLACE
+
+</DIFF>

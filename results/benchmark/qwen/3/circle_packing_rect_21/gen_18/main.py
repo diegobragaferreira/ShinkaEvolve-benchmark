@@ -1,0 +1,224 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import math
+from typing import Tuple
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    
+    # Set up the container: rectangle with perimeter 4, so width + height = 2
+    # We'll use width=1.5, height=0.5 for a reasonable aspect ratio
+    width, height = 1.5, 0.5
+    
+    # Container boundaries
+    x_min, x_max = 0, width
+    y_min, y_max = 0, height
+    
+    # Number of circles
+    n_circles = 21
+    
+    # Initialize circles array
+    circles = np.zeros((n_circles, 3))
+    
+    # Helper function to check if a circle fits within boundaries
+    def is_valid_circle(x, y, r):
+        return (x_min + r <= x <= x_max - r and 
+                y_min + r <= y <= y_max - r)
+    
+    # Helper function to check if two circles overlap
+    def circles_overlap(i, j, circles):
+        if i == j:
+            return False
+        x1, y1, r1 = circles[i]
+        x2, y2, r2 = circles[j]
+        dist_sq = (x1-x2)**2 + (y1-y2)**2
+        return dist_sq < (r1+r2)**2
+    
+    # Helper function to compute max radius for a given position
+    def max_radius_at_position(x, y, circles):
+        min_dist = float('inf')
+        
+        # Check boundary constraints
+        dist_to_left = x
+        dist_to_right = width - x
+        dist_to_bottom = y
+        dist_to_top = height - y
+        
+        min_dist = min(min_dist, dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+        
+        # Check overlap constraints with existing circles
+        for i in range(len(circles)):
+            if circles[i, 2] > 0:  # Only consider placed circles
+                x2, y2, r2 = circles[i]
+                dist = math.sqrt((x - x2)**2 + (y - y2)**2)
+                min_dist = min(min_dist, dist - r2)
+        
+        return max(0, min_dist)
+    
+    # Initialize with a good starting configuration
+    def initialize_configuration():
+        # Place some circles strategically at corners and along edges
+        config = np.zeros((n_circles, 3))
+        
+        # Place 4 circles at corners
+        corners = [(0.1, 0.1), (width-0.1, 0.1), (0.1, height-0.1), (width-0.1, height-0.1)]
+        for i in range(min(4, n_circles)):
+            x, y = corners[i]
+            r = max_radius_at_position(x, y, config[:i])
+            config[i] = [x, y, r]
+        
+        # Place circles along edges
+        edge_positions = []
+        # Bottom edge
+        for i in range(5):
+            if len(edge_positions) < n_circles - 4:
+                x = 0.1 + i * (width - 0.2) / 4
+                y = 0.1
+                edge_positions.append((x, y))
+        # Top edge  
+        for i in range(5):
+            if len(edge_positions) < n_circles - 4:
+                x = 0.1 + i * (width - 0.2) / 4
+                y = height - 0.1
+                edge_positions.append((x, y))
+        # Left edge
+        for i in range(3):
+            if len(edge_positions) < n_circles - 4:
+                x = 0.1
+                y = 0.1 + i * (height - 0.2) / 2
+                edge_positions.append((x, y))
+        # Right edge
+        for i in range(3):
+            if len(edge_positions) < n_circles - 4:
+                x = width - 0.1
+                y = 0.1 + i * (height - 0.2) / 2
+                edge_positions.append((x, y))
+                
+        # Fill remaining positions
+        for i in range(4, min(len(edge_positions) + 4, n_circles)):
+            x, y = edge_positions[i - 4]
+            r = max_radius_at_position(x, y, config[:i])
+            config[i] = [x, y, r]
+            
+        # Fill remaining with center positions
+        remaining = n_circles - len(edge_positions) - 4
+        center_x, center_y = width/2, height/2
+        for i in range(remaining):
+            if i < n_circles - 4 - len(edge_positions):
+                x = center_x + (i % 3 - 1) * 0.1
+                y = center_y + (i // 3 - 1) * 0.1
+                r = max_radius_at_position(x, y, config[:4 + len(edge_positions) + i])
+                config[4 + len(edge_positions) + i] = [x, y, r]
+        
+        return config
+    
+    # Simulated Annealing optimization
+    def optimize_with_simulated_annealing(initial_config):
+        current_config = initial_config.copy()
+        current_sum = np.sum(current_config[:, 2])
+        best_config = current_config.copy()
+        best_sum = current_sum
+        
+        # Annealing parameters
+        T = 1.0
+        T_min = 1e-6
+        alpha = 0.995
+        max_iter = 10000
+        
+        # Iteration counter  
+        iteration = 0
+        
+        while T > T_min and iteration < max_iter:
+            # Try to make a small perturbation
+            new_config = current_config.copy()
+            
+            # Select a random circle to modify
+            idx = np.random.randint(0, n_circles)
+            
+            # Store old values
+            old_x, old_y, old_r = new_config[idx]
+            
+            # Try a random perturbation
+            dx = np.random.uniform(-0.1, 0.1)
+            dy = np.random.uniform(-0.1, 0.1)
+            dr = np.random.uniform(-0.05, 0.05)
+            
+            # Apply perturbation
+            new_x = old_x + dx
+            new_y = old_y + dy
+            new_r = old_r + dr
+            
+            # Ensure new position is valid
+            if is_valid_circle(new_x, new_y, new_r):
+                # Check if this change is valid (no collisions)
+                valid = True
+                
+                # Check collisions with all other circles except self
+                for i in range(n_circles):
+                    if i != idx and new_config[i, 2] > 0:
+                        x1, y1, r1 = new_x, new_y, new_r
+                        x2, y2, r2 = new_config[i]
+                        dist_sq = (x1-x2)**2 + (y1-y2)**2
+                        if dist_sq < (r1+r2)**2:
+                            valid = False
+                            break
+                
+                # If valid, accept with probability based on temperature
+                if valid:
+                    old_sum = current_sum
+                    
+                    # Update the sum of radii
+                    new_sum = current_sum - old_r + new_r
+                    
+                    # Accept with Metropolis criterion
+                    delta = new_sum - old_sum
+                    if delta > 0 or np.random.rand() < math.exp(delta / T):
+                        current_config[idx] = [new_x, new_y, new_r]
+                        current_sum = new_sum
+                        
+                        # Update best if improved
+                        if new_sum > best_sum:
+                            best_config = current_config.copy()
+                            best_sum = new_sum
+            else:
+                # If invalid, try to recompute radius
+                new_r = max_radius_at_position(new_x, new_y, current_config[:idx] + current_config[idx+1:])
+                if new_r > 0 and new_r > old_r:
+                    current_config[idx] = [new_x, new_y, new_r]
+                    current_sum = current_sum - old_r + new_r
+                    if current_sum > best_sum:
+                        best_config = current_config.copy()
+                        best_sum = current_sum
+            
+            # Cool down
+            T *= alpha
+            iteration += 1
+            
+            # Occasionally report progress
+            if iteration % 5000 == 0:
+                pass
+                
+        return best_config
+    
+    # Start with initialization
+    init_config = initialize_configuration()
+    
+    # Optimize with simulated annealing
+    final_config = optimize_with_simulated_annealing(init_config)
+    
+    return final_config
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,358 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def stereographic_projection_to_sphere(points_2d):
+        """Map 2D points to sphere using stereographic projection from south pole."""
+        # Map [0,1] x [0,1] to sphere via stereographic projection from south pole
+        # Project from (0,0) to (0,0,-1) on sphere of radius 1
+        points_2d = np.clip(points_2d, 0, 1)
+        x, y = points_2d[:, 0], points_2d[:, 1]
+        
+        # Stereographic projection from south pole (0,0,-1) to north pole (0,0,1)
+        # Point (x,y) maps to (x,y,z) on unit sphere where z = -1 + 2/(1 + x^2 + y^2)
+        denominator = 1 + x*x + y*y
+        z = -1 + 2/denominator
+        x_sphere = 2*x/denominator
+        y_sphere = 2*y/denominator
+        
+        return np.column_stack([x_sphere, y_sphere, z])
+    
+    def stereographic_projection_from_sphere(points_sphere):
+        """Map points from sphere back to 2D using stereographic projection from south pole."""
+        # Map from sphere back to 2D plane
+        x, y, z = points_sphere[:, 0], points_sphere[:, 1], points_sphere[:, 2]
+        
+        # Inverse stereographic projection from south pole
+        denominator = 1 + z
+        x_2d = x / denominator
+        y_2d = y / denominator
+        
+        # Map back to [0,1] x [0,1]
+        x_2d = (x_2d + 1) / 2
+        y_2d = (y_2d + 1) / 2
+        
+        return np.column_stack([x_2d, y_2d])
+    
+    def spherical_distance(p1, p2):
+        """Compute great circle distance between two points on unit sphere."""
+        dot_product = np.dot(p1, p2)
+        # Clamp to [-1, 1] to avoid numerical errors
+        dot_product = np.clip(dot_product, -1.0, 1.0)
+        return np.arccos(dot_product)
+    
+    def spherical_min_max_ratio(points_sphere):
+        """Compute min/max ratio using spherical distances."""
+        if len(points_sphere) < 2:
+            return 0
+        
+        min_dist = float('inf')
+        max_dist = 0
+        
+        for i in range(len(points_sphere)):
+            for j in range(i+1, len(points_sphere)):
+                dist = spherical_distance(points_sphere[i], points_sphere[j])
+                min_dist = min(min_dist, dist)
+                max_dist = max(max_dist, dist)
+        
+        if max_dist <= 0:
+            return 0
+            
+        return min_dist / max_dist
+    
+    def objective_spherical(x):
+        """Objective function for spherical optimization - maximize min/max ratio."""
+        points_sphere = x.reshape(-1, 3)
+        ratio = spherical_min_max_ratio(points_sphere)
+        return -ratio  # Negative because we minimize in scipy
+    
+    def rotate_point_around_axis(point, axis, angle):
+        """Rotate point around axis by angle using Rodrigues' rotation formula."""
+        axis = np.array(axis)
+        point = np.array(point)
+        axis = axis / np.linalg.norm(axis)
+        
+        cos_angle = np.cos(angle)
+        sin_angle = np.sin(angle)
+        
+        # Rodrigues' rotation formula
+        rotated = (point * cos_angle + 
+                  np.cross(axis, point) * sin_angle + 
+                  axis * np.dot(axis, point) * (1 - cos_angle))
+        return rotated
+    
+    def generate_icosahedron_points():
+        """Generate points roughly corresponding to icosahedron vertices."""
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        points = []
+        
+        # Icosahedron vertices
+        vertices = [
+            (0, 1, phi), (0, -1, phi), (0, 1, -phi), (0, -1, -phi),
+            (1, phi, 0), (-1, phi, 0), (1, -phi, 0), (-1, -phi, 0),
+            (phi, 0, 1), (phi, 0, -1), (-phi, 0, 1), (-phi, 0, -1)
+        ]
+        
+        # Normalize to unit sphere and scale appropriately
+        for v in vertices:
+            norm = np.sqrt(sum(x*x for x in v))
+            points.append([x/norm for x in v])
+            
+        return np.array(points)
+    
+    def generate_cuboctahedron_points():
+        """Generate points roughly corresponding to cuboctahedron vertices."""
+        points = []
+        
+        # Cuboctahedron vertices (face centers and edge midpoints)
+        # Using 12 face centers (±1,0,0), (0,±1,0), (0,0,±1) and 6 edge midpoints
+        # But we'll use simpler approach with octahedral symmetry
+        
+        # Octahedron vertices (these will give good initial spread)
+        vertices = [
+            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)
+        ]
+        
+        points = [list(v) for v in vertices]
+        
+        # Add intermediate points for better distribution
+        # Add edge midpoints of cube inscribed in octahedron
+        edge_midpoints = [
+            (0.5, 0.5, 0), (0.5, -0.5, 0), (-0.5, 0.5, 0), (-0.5, -0.5, 0),
+            (0.5, 0, 0.5), (0.5, 0, -0.5), (-0.5, 0, 0.5), (-0.5, 0, -0.5),
+            (0, 0.5, 0.5), (0, 0.5, -0.5), (0, -0.5, 0.5), (0, -0.5, -0.5)
+        ]
+        
+        points.extend(edge_midpoints)
+        
+        # Normalize
+        normalized_points = []
+        for p in points:
+            norm = np.sqrt(sum(x*x for x in p))
+            if norm > 0:
+                normalized_points.append([x/norm for x in p])
+        
+        return np.array(normalized_points[:16])
+    
+    def rotate_points_randomly(points, max_rotation_rad=np.pi/4):
+        """Apply random rotations to points for diversification."""
+        rotated = points.copy()
+        
+        # Apply random rotations around three axes
+        angles = [np.random.uniform(-max_rotation_rad, max_rotation_rad) for _ in range(3)]
+        
+        # Rotate around x-axis
+        rot_matrix_x = np.array([
+            [1, 0, 0],
+            [0, np.cos(angles[0]), -np.sin(angles[0])],
+            [0, np.sin(angles[0]), np.cos(angles[0])]
+        ])
+        rotated[:, :3] = rotated[:, :3] @ rot_matrix_x.T
+        
+        # Rotate around y-axis
+        rot_matrix_y = np.array([
+            [np.cos(angles[1]), 0, np.sin(angles[1])],
+            [0, 1, 0],
+            [-np.sin(angles[1]), 0, np.cos(angles[1])]
+        ])
+        rotated[:, :3] = rotated[:, :3] @ rot_matrix_y.T
+        
+        # Rotate around z-axis
+        rot_matrix_z = np.array([
+            [np.cos(angles[2]), -np.sin(angles[2]), 0],
+            [np.sin(angles[2]), np.cos(angles[2]), 0],
+            [0, 0, 1]
+        ])
+        rotated[:, :3] = rotated[:, :3] @ rot_matrix_z.T
+        
+        return rotated
+    
+    def create_initial_spherical_configurations():
+        """Create various initial configurations based on geometric principles."""
+        configurations = []
+        
+        # Configuration 1: Icosahedron-based points
+        try:
+            ico_points = generate_icosahedron_points()
+            configurations.append(ico_points)
+        except:
+            pass
+        
+        # Configuration 2: Cuboctahedron-based points  
+        try:
+            cubo_points = generate_cuboctahedron_points()
+            configurations.append(cubo_points)
+        except:
+            pass
+            
+        # Configuration 3: Random points with normalization
+        try:
+            np.random.seed(42)
+            random_points = np.random.rand(16, 3)
+            # Normalize to unit sphere
+            norms = np.linalg.norm(random_points, axis=1)
+            random_points = random_points / norms[:, np.newaxis]
+            configurations.append(random_points)
+        except:
+            pass
+            
+        # Configuration 4: Perturbed grid on sphere
+        try:
+            # Start with a simple grid pattern projected onto sphere
+            grid_points = []
+            for i in range(4):
+                for j in range(4):
+                    x = i / 3.0
+                    y = j / 3.0
+                    grid_points.append([x, y])
+            
+            grid_points = np.array(grid_points[:16])
+            
+            # Project to sphere
+            sphere_points = stereographic_projection_to_sphere(grid_points)
+            # Normalize to unit sphere
+            norms = np.linalg.norm(sphere_points, axis=1)
+            sphere_points = sphere_points / norms[:, np.newaxis]
+            configurations.append(sphere_points)
+        except:
+            pass
+            
+        return configurations
+    
+    def local_refinement_spherical(initial_points_sphere):
+        """Apply local optimization on spherical configuration."""
+        # Use L-BFGS-B for spherical optimization
+        bounds = [(-1, 1) for _ in range(48)]  # 16 points * 3 coordinates
+        
+        try:
+            result = minimize(
+                objective_spherical,
+                initial_points_sphere.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            
+            if result.success:
+                refined_points = result.x.reshape(-1, 3)
+                # Renormalize to ensure unit sphere
+                norms = np.linalg.norm(refined_points, axis=1)
+                refined_points = refined_points / norms[:, np.newaxis]
+                return refined_points
+        except:
+            pass
+            
+        return initial_points_sphere
+    
+    def optimize_2d_from_spherical(spherical_points):
+        """Convert spherical points back to 2D and refine locally."""
+        # Map back to 2D
+        points_2d = stereographic_projection_from_sphere(spherical_points)
+        
+        # Apply local optimization using the original approach
+        # but with better starting point from spherical optimization
+        
+        def objective_2d(x):
+            pts = x.reshape(-1, 2)
+            distances = cdist(pts, pts, metric='euclidean')
+            np.fill_diagonal(distances, np.inf)
+            
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+            
+            if max_dist <= 0:
+                return 0
+            return -min_dist / max_dist
+        
+        bounds = [(0, 1) for _ in range(32)]
+        
+        try:
+            result = minimize(
+                objective_2d,
+                points_2d.flatten(),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-12, 'gtol': 1e-12}
+            )
+            
+            if result.success:
+                refined_points = result.x.reshape(-1, 2)
+                refined_points = np.clip(refined_points, 0, 1)
+                return refined_points
+        except:
+            pass
+            
+        return points_2d
+    
+    # Main optimization loop
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Try multiple spherical configurations
+    initial_configs = create_initial_spherical_configurations()
+    
+    for i, config in enumerate(initial_configs):
+        try:
+            # Apply multiple random rotations to diversify
+            for rotation_attempt in range(3):
+                # Apply rotation
+                rotated_config = rotate_points_randomly(config)
+                
+                # Local spherical refinement
+                refined_config = local_refinement_spherical(rotated_config)
+                
+                # Convert to 2D and final refinement
+                final_points = optimize_2d_from_spherical(refined_config)
+                
+                # Evaluate
+                ratio = _calculate_min_max_ratio(final_points)
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_points = final_points.copy()
+                    
+        except Exception as e:
+            continue
+    
+    # Fallback to default if nothing worked
+    if best_points is None:
+        # Use the original approach as a fallback
+        np.random.seed(42)
+        points = np.random.rand(16, 2)
+        return points
+    
+    return best_points
+
+
+def _calculate_min_max_ratio(points):
+    """Calculate the ratio of minimum to maximum pairwise distances."""
+    if len(points) < 2:
+        return 0
+
+    # Efficiently compute all pairwise distances
+    distances = cdist(points, points, metric='euclidean')
+
+    # Set diagonal to infinity to ignore self-distances
+    np.fill_diagonal(distances, np.inf)
+
+    min_dist = np.min(distances)
+    max_dist = np.max(distances)
+
+    if max_dist <= 0:
+        return 0
+
+    return min_dist / max_dist
+
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,348 @@
+<NAME>
+add_local_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll implement a local refinement step using simulated annealing on the top-performing individuals from the differential evolution optimization. This hybrid approach will help fine-tune the geometric arrangements to achieve even better packings, potentially beating the current benchmark of 0.2544.
+
+The key insight is that while differential evolution provides good global search capabilities, local refinement can help squeeze out additional improvements by making small adjustments to promising solutions. I'll add a simulated annealing procedure that operates on the best solutions found by DE to further optimize their positions and rotations.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness_adaptive(individual, generation=0, max_generations=200):
+    """
+    Evaluate the fitness of a solution configuration with adaptive penalties
+    individual: array of shape (33,) containing [x1,y1,a1,x2,y2,a2,...,x11,y11,a11]
+    Returns negative value because we want to maximize 1/R (minimize R)
+    """
+    # Reshape individual into hexagon data
+    inner_hex_data = individual.reshape(-1, 3)
+
+    # Try different outer hexagon sizes and check feasibility
+    # Start with a reasonable estimate
+    outer_radius = calculate_outer_hex_radius(inner_hex_data)
+
+    # Check collisions and containment
+    num_collisions = 0
+    num_out_of_bounds = 0
+
+    # Build spatial grid for collision detection
+    grid = build_grid(inner_hex_data)
+
+    # Check all hexagon pairs for collision
+    for i in range(len(inner_hex_data)):
+        vertices_i = get_hexagon_vertices(
+            inner_hex_data[i][0],
+            inner_hex_data[i][1],
+            inner_hex_data[i][2]
+        )
+
+        # Check containment
+        if not check_hexagon_containment(vertices_i, 0, 0, outer_radius):
+            num_out_of_bounds += 1
+
+        # Efficiently get potential collision partners using spatial indexing
+        potential_collisions = get_potential_collisions(grid, inner_hex_data, i)
+        for j in potential_collisions:
+            if i >= j:
+                continue
+
+            vertices_j = get_hexagon_vertices(
+                inner_hex_data[j][0],
+                inner_hex_data[j][1],
+                inner_hex_data[j][2]
+            )
+
+            if hexagon_collision(vertices_i, vertices_j):
+                num_collisions += 1
+
+    # Penalty for collisions or out of bounds (adaptive based on generation)
+    penalty_factor = 1.0 + (generation / max_generations) * 2.0
+    penalty = 10000 * penalty_factor * (num_collisions + num_out_of_bounds)
+
+    # If invalid configuration, return poor fitness
+    if num_collisions > 0 or num_out_of_bounds > 0:
+        return 10000000 + penalty  # Large penalty for invalid solutions
+
+    # Return inverse of outer radius (we want to maximize 1/R)
+    return 1.0 / outer_radius
+=======
+def evaluate_fitness_adaptive(individual, generation=0, max_generations=200):
+    """
+    Evaluate the fitness of a solution configuration with adaptive penalties
+    individual: array of shape (33,) containing [x1,y1,a1,x2,y2,a2,...,x11,y11,a11]
+    Returns negative value because we want to maximize 1/R (minimize R)
+    """
+    # Reshape individual into hexagon data
+    inner_hex_data = individual.reshape(-1, 3)
+
+    # Try different outer hexagon sizes and check feasibility
+    # Start with a reasonable estimate
+    outer_radius = calculate_outer_hex_radius(inner_hex_data)
+
+    # Check collisions and containment
+    num_collisions = 0
+    num_out_of_bounds = 0
+
+    # Build spatial grid for collision detection
+    grid = build_grid(inner_hex_data)
+
+    # Check all hexagon pairs for collision
+    for i in range(len(inner_hex_data)):
+        vertices_i = get_hexagon_vertices(
+            inner_hex_data[i][0],
+            inner_hex_data[i][1],
+            inner_hex_data[i][2]
+        )
+
+        # Check containment
+        if not check_hexagon_containment(vertices_i, 0, 0, outer_radius):
+            num_out_of_bounds += 1
+
+        # Efficiently get potential collision partners using spatial indexing
+        potential_collisions = get_potential_collisions(grid, inner_hex_data, i)
+        for j in potential_collisions:
+            if i >= j:
+                continue
+
+            vertices_j = get_hexagon_vertices(
+                inner_hex_data[j][0],
+                inner_hex_data[j][1],
+                inner_hex_data[j][2]
+            )
+
+            if hexagon_collision(vertices_i, vertices_j):
+                num_collisions += 1
+
+    # Penalty for collisions or out of bounds (adaptive based on generation)
+    penalty_factor = 1.0 + (generation / max_generations) * 2.0
+    penalty = 10000 * penalty_factor * (num_collisions + num_out_of_bounds)
+
+    # If invalid configuration, return poor fitness
+    if num_collisions > 0 or num_out_of_bounds > 0:
+        return 10000000 + penalty  # Large penalty for invalid solutions
+
+    # Return inverse of outer radius (we want to maximize 1/R)
+    return 1.0 / outer_radius
+
+def simulated_annealing_refinement(initial_individual, max_iterations=500):
+    """
+    Perform local refinement using simulated annealing on a given solution
+    """
+    current_individual = initial_individual.copy()
+    current_fitness = evaluate_fitness_adaptive(current_individual)
+
+    # Simulated annealing parameters
+    temperature = 1.0
+    cooling_rate = 0.98
+    min_temperature = 0.001
+
+    for iteration in range(max_iterations):
+        # Perturb one random hexagon
+        hex_index = np.random.randint(0, 11)
+        param_index = hex_index * 3
+
+        # Create a neighbor solution by perturbing position and angle
+        neighbor_individual = current_individual.copy()
+
+        # Small random perturbations
+        neighbor_individual[param_index + 0] += np.random.normal(0, 0.05)  # x position
+        neighbor_individual[param_index + 1] += np.random.normal(0, 0.05)  # y position
+        neighbor_individual[param_index + 2] += np.random.normal(0, 5)     # angle (degrees)
+
+        # Ensure angle stays in [0, 360]
+        neighbor_individual[param_index + 2] = neighbor_individual[param_index + 2] % 360
+
+        # Evaluate neighbor
+        neighbor_fitness = evaluate_fitness_adaptive(neighbor_individual)
+
+        # Accept or reject the neighbor
+        if neighbor_fitness > current_fitness:
+            # Always accept better solutions
+            current_individual = neighbor_individual
+            current_fitness = neighbor_fitness
+        else:
+            # Accept worse solutions with probability based on temperature
+            delta = neighbor_fitness - current_fitness
+            acceptance_probability = np.exp(delta / temperature)
+            if np.random.rand() < acceptance_probability:
+                current_individual = neighbor_individual
+                current_fitness = neighbor_fitness
+
+        # Cool down temperature
+        temperature = max(min_temperature, temperature * cooling_rate)
+
+    return current_individual, current_fitness
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    best_result = None
+    best_score = -float('inf')
+
+    # Run optimization from different initial configurations
+    for i, initial_guess in enumerate(initial_configs):
+        # Bounds for optimization: positions (-10, 10), rotations (0, 360)
+        bounds = []
+        for _ in range(11):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # x, y, angle
+
+        try:
+            # Use adaptive mutation rate and increased population size
+            def adaptive_fitness(individual):
+                return evaluate_fitness_adaptive(individual, generation=0, max_generations=150)
+
+            # Run optimization with bounds using adaptive parameters
+            result = differential_evolution(
+                func=adaptive_fitness,
+                bounds=bounds,
+                maxiter=150,      # Increased iterations
+                popsize=30,       # Larger population
+                seed=42+i,        # Different seed for each run
+                disp=False,
+                tol=1e-8,         # Tighter tolerance
+                mutation=(0.9, 0.1),  # Adaptive mutation (starts high, decreases)
+                recombination=0.8   # Higher recombination rate
+            )
+
+            if result.success:
+                # Get the best solution
+                best_individual = result.x
+                inner_hex_data = best_individual.reshape(-1, 3)
+
+                # Calculate final outer hexagon radius
+                outer_radius = calculate_outer_hex_radius(inner_hex_data)
+
+                # Calculate score
+                score = 1.0 / outer_radius
+
+                if score > best_score:
+                    best_score = score
+                    best_result = (inner_hex_data, np.array([0, 0, 0]), outer_radius)
+
+        except Exception as e:
+            # Continue with other configurations if one fails
+            continue
+
+    # If no successful optimization, use best initial configuration
+    if best_result is None:
+        # Fallback to initial configuration from first attempt
+        inner_hex_data = np.array([
+            [0, 0, 0],           # center
+            [-2.2, 0, 0],        # left
+            [2.2, 0, 0],         # right
+            [-1.1, 1.9, 0],      # top-left
+            [1.1, 1.9, 0],       # top-right
+            [-1.1, -1.9, 0],     # bottom-left
+            [1.1, -1.9, 0],      # bottom-right
+            [-3.3, 1.9, 0],      # far top-left
+            [3.3, 1.9, 0],       # far top-right
+            [-3.3, -1.9, 0],     # far bottom-left
+            [3.3, -1.9, 0],      # far bottom-right
+        ])
+
+        outer_radius = calculate_outer_hex_radius(inner_hex_data)
+        best_result = (inner_hex_data, np.array([0, 0, 0]), outer_radius)
+
+    return best_result[0], best_result[1], best_result[2]
+=======
+    best_result = None
+    best_score = -float('inf')
+
+    # Keep track of top solutions for local refinement
+    top_solutions = []
+
+    # Run optimization from different initial configurations
+    for i, initial_guess in enumerate(initial_configs):
+        # Bounds for optimization: positions (-10, 10), rotations (0, 360)
+        bounds = []
+        for _ in range(11):
+            bounds.extend([(-10, 10), (-10, 10), (0, 360)])  # x, y, angle
+
+        try:
+            # Use adaptive mutation rate and increased population size
+            def adaptive_fitness(individual):
+                return evaluate_fitness_adaptive(individual, generation=0, max_generations=150)
+
+            # Run optimization with bounds using adaptive parameters
+            result = differential_evolution(
+                func=adaptive_fitness,
+                bounds=bounds,
+                maxiter=150,      # Increased iterations
+                popsize=30,       # Larger population
+                seed=42+i,        # Different seed for each run
+                disp=False,
+                tol=1e-8,         # Tighter tolerance
+                mutation=(0.9, 0.1),  # Adaptive mutation (starts high, decreases)
+                recombination=0.8   # Higher recombination rate
+            )
+
+            if result.success:
+                # Get the best solution
+                best_individual = result.x
+                inner_hex_data = best_individual.reshape(-1, 3)
+
+                # Calculate final outer hexagon radius
+                outer_radius = calculate_outer_hex_radius(inner_hex_data)
+
+                # Calculate score
+                score = 1.0 / outer_radius
+
+                # Store top solutions
+                top_solutions.append((best_individual, score, outer_radius))
+
+                if score > best_score:
+                    best_score = score
+                    best_result = (inner_hex_data, np.array([0, 0, 0]), outer_radius)
+
+        except Exception as e:
+            # Continue with other configurations if one fails
+            continue
+
+    # Sort top solutions by score
+    top_solutions.sort(key=lambda x: x[1], reverse=True)
+
+    # Apply local refinement to top solutions
+    refined_solutions = []
+    for individual, score, radius in top_solutions[:3]:  # Refine top 3 solutions
+        try:
+            refined_individual, refined_score = simulated_annealing_refinement(individual, max_iterations=300)
+            refined_solutions.append((refined_individual, refined_score, calculate_outer_hex_radius(refined_individual.reshape(-1, 3))))
+        except Exception:
+            # If refinement fails, keep original
+            refined_solutions.append((individual, score, radius))
+
+    # Find the best among refined solutions
+    for individual, score, radius in refined_solutions:
+        if score > best_score:
+            best_score = score
+            # Reconstruct inner_hex_data from refined individual
+            inner_hex_data = individual.reshape(-1, 3)
+            best_result = (inner_hex_data, np.array([0, 0, 0]), radius)
+
+    # If no successful optimization, use best initial configuration
+    if best_result is None:
+        # Fallback to initial configuration from first attempt
+        inner_hex_data = np.array([
+            [0, 0, 0],           # center
+            [-2.2, 0, 0],        # left
+            [2.2, 0, 0],         # right
+            [-1.1, 1.9, 0],      # top-left
+            [1.1, 1.9, 0],       # top-right
+            [-1.1, -1.9, 0],     # bottom-left
+            [1.1, -1.9, 0],      # bottom-right
+            [-3.3, 1.9, 0],      # far top-left
+            [3.3, 1.9, 0],       # far top-right
+            [-3.3, -1.9, 0],     # far bottom-left
+            [3.3, -1.9, 0],      # far bottom-right
+        ])
+
+        outer_radius = calculate_outer_hex_radius(inner_hex_data)
+        best_result = (inner_hex_data, np.array([0, 0, 0]), outer_radius)
+
+    return best_result[0], best_result[1], best_result[2]
+>>>>>>> REPLACE
+</DIFF>

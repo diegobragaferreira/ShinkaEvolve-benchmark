@@ -1,0 +1,309 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+from scipy.spatial import SphericalVoronoi, ConvexHull
+import time
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    
+    def vortex_initialization(n):
+        """Create initial points using a vortex-based approach that distributes points in a more uniform manner"""
+        points = []
+        # Create spiral pattern with multiple layers
+        layers = 4
+        points_per_layer = n // layers
+        remaining = n % layers
+        
+        for layer in range(layers):
+            # Determine number of points in this layer
+            pts_in_layer = points_per_layer + (1 if layer < remaining else 0)
+            
+            # Calculate spiral parameters for this layer
+            height = 1.0 - (layer / float(layers - 1)) if layers > 1 else 0.0
+            radius = np.sqrt(height * (1 - height))  # Radius decreases toward poles
+            
+            # Distribute points around the spiral
+            for i in range(pts_in_layer):
+                angle = (i / pts_in_layer) * 2 * np.pi * 3  # Triple twist for better distribution
+                x = radius * np.cos(angle)
+                y = radius * np.sin(angle)
+                z = height * 2 - 1  # Map to [-1,1]
+                points.append([x, y, z])
+        
+        points = np.array(points)
+        
+        # Add slight random jitter to break symmetries
+        np.random.seed(42)
+        jitter = np.random.normal(0, 0.02, points.shape)
+        points = points + jitter
+        
+        # Normalize to unit sphere
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        points = points / norms
+        
+        return points
+    
+    def normalize_to_unit_sphere(points):
+        """Normalize points to lie on unit sphere"""
+        norms = np.linalg.norm(points, axis=1, keepdims=True)
+        # Avoid division by zero
+        safe_norms = np.where(norms == 0, 1, norms)
+        return points / safe_norms
+    
+    def calculate_min_max_ratio(points):
+        """Calculate the minimum-to-maximum distance ratio"""
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        if max_dist == 0:
+            return 0.0
+        return min_dist / max_dist
+    
+    def voronoi_uniformity_score(points):
+        """Calculate uniformity score using spherical Voronoi diagram"""
+        try:
+            # Create spherical Voronoi diagram
+            sv = SphericalVoronoi(points, radius=1.0, center=np.zeros(3))
+            
+            # Calculate Voronoi cell areas
+            cell_areas = sv.voronoi_regions_area()
+            
+            # Return coefficient of variation (lower is better = more uniform)
+            if len(cell_areas) > 1:
+                mean_area = np.mean(cell_areas)
+                if mean_area > 0:
+                    cv = np.std(cell_areas) / mean_area
+                    return cv
+            return 0.0
+        except:
+            return 1.0
+    
+    def convex_hull_volume(points):
+        """Calculate volume of convex hull (should be maximized for good distribution)"""
+        try:
+            hull = ConvexHull(points)
+            return hull.volume
+        except:
+            return 0.0
+    
+    def adaptive_fitness_function(points_flat, iteration=0, max_iter=100):
+        """
+        Combined fitness function that adapts based on optimization progress
+        """
+        points = points_flat.reshape(-1, 3)
+        points = normalize_to_unit_sphere(points)
+        
+        # Calculate base distance ratio
+        distances = cdist(points, points)
+        np.fill_diagonal(distances, np.inf)
+        min_dist = np.min(distances)
+        max_dist = np.max(distances)
+        
+        if max_dist == 0:
+            ratio = 0.0
+        else:
+            ratio = min_dist / max_dist
+            
+        # Calculate uniformity score
+        uniformity = voronoi_uniformity_score(points)
+        
+        # Calculate hull volume
+        hull_vol = convex_hull_volume(points)
+        
+        # Dynamic weighting based on iteration progress
+        progress = iteration / max_iter if max_iter > 0 else 0.5
+        
+        # Early iterations: prioritize distance ratio and hull volume
+        # Later iterations: emphasize uniformity
+        if progress < 0.3:
+            # Early stage: focus on good spread
+            weight_ratio = 0.6
+            weight_uniformity = 0.3
+            weight_hull = 0.1
+        elif progress < 0.7:
+            # Mid stage: balance everything
+            weight_ratio = 0.5
+            weight_uniformity = 0.4
+            weight_hull = 0.1
+        else:
+            # Late stage: prioritize uniformity
+            weight_ratio = 0.3
+            weight_uniformity = 0.6
+            weight_hull = 0.1
+            
+        # Combine metrics
+        fitness = (
+            weight_ratio * ratio +
+            weight_uniformity * (1.0 - uniformity) +  # Higher uniformity = lower penalty
+            weight_hull * (hull_vol / 1.0)  # Normalize hull volume assumption
+        )
+        
+        # Add penalty for very small distances (avoid clustering)
+        # Small distance clusters are penalized heavily
+        small_dist_penalty = 0.0
+        if min_dist < 0.1:
+            small_dist_penalty = 0.1 * (0.1 - min_dist)
+        
+        # Add penalty for high variance in distances
+        if len(distances[distances != np.inf]) > 0:
+            dist_variance = np.var(distances[distances != np.inf])
+            variance_penalty = 0.1 * dist_variance
+        
+        # Final fitness (negative because we're minimizing)
+        return -(fitness - small_dist_penalty - variance_penalty)
+    
+    def constraint_sphere(points_flat):
+        """Constraint function for unit sphere constraint"""
+        points = points_flat.reshape(-1, 3)
+        norms = np.linalg.norm(points, axis=1)
+        return norms - 1.0  # Should be zero for unit sphere
+    
+    # Phase 1: Multiple diverse initialization strategies
+    np.random.seed(42)
+    
+    # Strategy 1: Vortex-based initialization
+    init_vortex = vortex_initialization(14)
+    
+    # Strategy 2: Fibonacci spiral
+    def fibonacci_spiral_on_sphere(n):
+        points = []
+        golden_angle = np.pi * (3 - np.sqrt(5))
+        for i in range(n):
+            y = 1 - (i / float(n - 1)) * 2
+            radius = np.sqrt(1 - y * y)
+            theta = golden_angle * i
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+            points.append([x, y, z])
+        return np.array(points)
+    
+    init_fibonacci = fibonacci_spiral_on_sphere(14)
+    
+    # Strategy 3: Perturbed Sobol
+    from scipy.stats import qmc
+    def sobol_initialization(n: int, seed: int = 42) -> np.ndarray:
+        sampler = qmc.Sobol(d=3, seed=seed)
+        points = sampler.random(n)
+        points = points * 2 - 1
+        return points
+    
+    init_sobol = sobol_initialization(14, 123)
+    
+    # Strategy 4: Random with normalization
+    init_random = np.random.rand(14, 3) * 2 - 1
+    init_random = normalize_to_unit_sphere(init_random)
+    
+    # Strategy 5: Grid-based with jitter
+    grid_points = []
+    for i in range(3):
+        for j in range(3):
+            for k in range(3):
+                if len(grid_points) < 14:
+                    x = i / 2.0
+                    y = j / 2.0
+                    z = k / 2.0
+                    grid_points.append([x, y, z])
+    init_grid = np.array(grid_points[:14])
+    init_grid = normalize_to_unit_sphere(init_grid)
+    
+    # Collect all initializations
+    initializations = [
+        ("vortex", init_vortex),
+        ("fibonacci", init_fibonacci),
+        ("sobol", init_sobol),
+        ("random", init_random),
+        ("grid", init_grid)
+    ]
+    
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Multi-start optimization with progressive refinement
+    for init_name, initial_points in initializations:
+        try:
+            # Phase 2: Progressive optimization with different techniques
+            current_points = initial_points.copy()
+            
+            # Stage 1: Coarse optimization with heavy regularization
+            current_flat = current_points.flatten()
+            
+            # First, a coarse L-BFGS run
+            bounds = [(-1, 1) for _ in range(42)]
+            
+            result1 = minimize(
+                lambda x: adaptive_fitness_function(x, iteration=0, max_iter=100),
+                current_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8},
+                tol=1e-8
+            )
+            
+            # Stage 2: Medium refinement with stricter tolerance
+            final_flat1 = result1.x
+            result2 = minimize(
+                lambda x: adaptive_fitness_function(x, iteration=50, max_iter=100),
+                final_flat1,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 200, 'ftol': 1e-10, 'gtol': 1e-10},
+                tol=1e-10
+            )
+            
+            # Stage 3: Fine-grained optimization
+            final_flat2 = result2.x
+            result3 = minimize(
+                lambda x: adaptive_fitness_function(x, iteration=100, max_iter=100),
+                final_flat2,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 300, 'ftol': 1e-12, 'gtol': 1e-12},
+                tol=1e-12
+            )
+            
+            # Extract final points
+            final_points = result3.x.reshape(-1, 3)
+            
+            # Ensure normalization
+            final_points = normalize_to_unit_sphere(final_points)
+            
+            # Evaluate final performance
+            final_ratio = calculate_min_max_ratio(final_points)
+            
+            if final_ratio > best_ratio:
+                best_ratio = final_ratio
+                best_points = final_points.copy()
+                
+        except Exception as e:
+            # Continue with other initializations if one fails
+            continue
+    
+    # If no solution found, fallback to basic approach
+    if best_points is None:
+        # Simple Fibonacci approach
+        initial_points = fibonacci_spiral_on_sphere(14)
+        bounds = [(-1, 1) for _ in range(42)]
+        
+        result = minimize(
+            lambda x: adaptive_fitness_function(x, iteration=0, max_iter=100),
+            initial_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12},
+            tol=1e-12
+        )
+        
+        best_points = result.x.reshape(-1, 3)
+        best_points = normalize_to_unit_sphere(best_points)
+    
+    return best_points
+
+# EVOLVE-BLOCK-END

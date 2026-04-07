@@ -1,0 +1,196 @@
+<NAME>
+enhanced_symmetry_mutation
+</NAME>
+
+<DESCRIPTION>
+The key insight is to implement a more sophisticated symmetry-aware mutation that uses exponential decay for mutation strength rather than linear decay, and to add a new adaptive temperature scheduling mechanism. This addresses the limitations in the current implementation where mutation strength decays linearly and lacks dynamic temperature adaptation during simulated annealing.
+
+The changes involve:
+1. Modifying the `mutate_symmetrically` method to use exponential decay for mutation strength (following successful patterns from previous generations)
+2. Adding adaptive temperature scheduling in the optimization process
+3. Refining the symmetry-aware mutation to better maintain rotational symmetries while enabling effective exploration
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1) -> np.ndarray:
+        """Apply symmetric mutation to maintain hexagonal properties"""
+        mutated_data = hex_data.copy()
+
+        # Different mutation strategies based on optimization stage
+        if stage == 1:  # Coarse stage - aggressive mutation for exploration
+            mutation_factor = mutation_strength * 2.0
+        elif stage == 2:  # Fine stage - moderate mutation
+            mutation_factor = mutation_strength * 1.0
+        else:  # Final stage - conservative mutation
+            mutation_factor = mutation_strength * 0.5
+
+        # Mutate center hexagon
+        mutated_data[0][0] += random.uniform(-mutation_factor, mutation_factor)
+        mutated_data[0][1] += random.uniform(-mutation_factor, mutation_factor)
+
+        # Mutate radial positions while preserving symmetry patterns
+        for i in range(1, len(hex_data)):
+            mutated_data[i][0] += random.uniform(-mutation_factor, mutation_factor)
+            mutated_data[i][1] += random.uniform(-mutation_factor, mutation_factor)
+
+        return mutated_data
+=======
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1, generation: int = 0, max_generations: int = 50) -> np.ndarray:
+        """Apply symmetric mutation to maintain hexagonal properties with exponential decay"""
+        mutated_data = hex_data.copy()
+
+        # Apply exponential decay to mutation strength instead of linear
+        decay_rate = 0.95
+        mutation_factor = mutation_strength * (decay_rate ** generation) if max_generations > 0 else mutation_strength
+
+        # Different mutation strategies based on optimization stage
+        if stage == 1:  # Coarse stage - aggressive mutation for exploration
+            effective_mutation_factor = mutation_factor * 2.0
+        elif stage == 2:  # Fine stage - moderate mutation
+            effective_mutation_factor = mutation_factor * 1.0
+        else:  # Final stage - conservative mutation
+            effective_mutation_factor = mutation_factor * 0.5
+
+        # Mutate center hexagon with scaled mutation
+        mutated_data[0][0] += random.uniform(-effective_mutation_factor, effective_mutation_factor)
+        mutated_data[0][1] += random.uniform(-effective_mutation_factor, effective_mutation_factor)
+
+        # Mutate radial positions with scaled mutation while preserving symmetry patterns
+        for i in range(1, len(hex_data)):
+            mutated_data[i][0] += random.uniform(-effective_mutation_factor, effective_mutation_factor)
+            mutated_data[i][1] += random.uniform(-effective_mutation_factor, effective_mutation_factor)
+
+        return mutated_data
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def optimize_stage(self, initial_config: np.ndarray, stage: int, max_generations: int = 50) -> Tuple[np.ndarray, float]:
+        """Single stage optimization with specific mutation strategy"""
+        # Stage 1: Population initialization with stochastic perturbations
+        population_size = 25 if stage <= 2 else 15  # Fewer individuals in final stage
+
+        # Start with best configuration and add perturbations
+        population = [initial_config.copy()]
+        for _ in range(population_size - 1):
+            variant = initial_config.copy()
+            # Add small random perturbations to positions
+            for i in range(len(variant)):
+                variant[i][0] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+                variant[i][1] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+            population.append(variant)
+
+        for gen in range(max_generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                fitness_scores.append(score)
+
+            # Select top performers (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = population_size // 3
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+
+            # Generate new population through mutation
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation of elites
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(parent, mutation_strength=0.2, stage=stage)
+                new_population.append(mutated)
+
+            population = new_population
+
+            # Track best overall
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+=======
+    def optimize_stage(self, initial_config: np.ndarray, stage: int, max_generations: int = 50) -> Tuple[np.ndarray, float]:
+        """Single stage optimization with specific mutation strategy and adaptive temperature control"""
+        # Stage 1: Population initialization with stochastic perturbations
+        population_size = 25 if stage <= 2 else 15  # Fewer individuals in final stage
+
+        # Start with best configuration and add perturbations
+        population = [initial_config.copy()]
+        for _ in range(population_size - 1):
+            variant = initial_config.copy()
+            # Add small random perturbations to positions
+            for i in range(len(variant)):
+                variant[i][0] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+                variant[i][1] += random.gauss(0, 0.1) if random.random() < 0.5 else 0
+            population.append(variant)
+
+        for gen in range(max_generations):
+            # Check timeout
+            if time.time() - self.start_time > self.timeout * 0.8:
+                break
+
+            # Adaptive temperature scheduling
+            # Dynamic cooling based on progress to improve convergence behavior
+            base_temperature = 0.8
+            cooling_factor = 0.95
+            temperature = base_temperature * (cooling_factor ** gen)
+
+            # Evaluate fitness of entire population
+            fitness_scores = []
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                fitness_scores.append(score)
+
+            # Select top performers (elitism)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            elite_count = population_size // 3
+            elite = [population[i].copy() for i in sorted_indices[:elite_count]]
+
+            # Generate new population through mutation with acceptance criterion
+            new_population = elite.copy()
+
+            # Fill remaining slots through mutation with probabilistic acceptance based on temperature
+            while len(new_population) < population_size:
+                parent = random.choice(elite)
+                mutated = SymmetryAwareMutation.mutate_symmetrically(
+                    parent,
+                    mutation_strength=0.2,
+                    stage=stage,
+                    generation=gen,
+                    max_generations=max_generations
+                )
+
+                # Apply simulated annealing acceptance criterion
+                mutated_score = HexagonPackingEvaluator.evaluate_configuration(mutated)
+                parent_score = HexagonPackingEvaluator.evaluate_configuration(parent)
+
+                # Accept if better, or with probability based on temperature if worse
+                if mutated_score >= parent_score or random.random() < math.exp((mutated_score - parent_score) / temperature):
+                    new_population.append(mutated)
+                else:
+                    new_population.append(parent)
+
+            population = new_population
+
+            # Track best overall
+            for individual in population:
+                score = HexagonPackingEvaluator.evaluate_configuration(individual)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_config = individual.copy()
+
+        return self.best_config, self.best_score
+>>>>>>> REPLACE
+</DIFF>

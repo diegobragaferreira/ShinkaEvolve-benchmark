@@ -1,0 +1,249 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon, Point
+from joblib import Parallel, delayed
+import time
+from numba import jit
+import random
+
+class VoronoiHexagonPacker:
+    """Voronoi-based hexagon packing solver with symmetry awareness."""
+    
+    def __init__(self, num_inner=12, inner_side_length=1):
+        self.num_inner = num_inner
+        self.inner_side_length = inner_side_length
+        self.circumradius = inner_side_length
+        self.inradius = inner_side_length * np.sqrt(3) / 2
+        
+    def create_outer_hexagon(self, side_length):
+        """Create outer hexagon with given side length."""
+        vertices = []
+        for i in range(6):
+            theta = i * np.pi / 3
+            x = side_length * np.cos(theta)
+            y = side_length * np.sin(theta)
+            vertices.append((x, y))
+        return Polygon(vertices)
+    
+    def generate_voronoi_regions(self, points):
+        """Generate Voronoi regions for given points."""
+        vor = Voronoi(points)
+        return vor
+    
+    def is_valid_configuration(self, positions, outer_radius):
+        """Check if configuration is valid with efficient constraints."""
+        # Check containment using distance to center
+        for pos in positions:
+            if distance.euclidean(pos, [0, 0]) + self.circumradius > outer_radius:
+                return False
+                
+        # Check overlaps using distance
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                if distance.euclidean(positions[i], positions[j]) < 2 * self.circumradius:
+                    return False
+                    
+        return True
+    
+    def calculate_objective(self, positions, outer_radius):
+        """Calculate objective function."""
+        # If invalid, return penalty
+        if not self.is_valid_configuration(positions, outer_radius):
+            return 1e10
+            
+        # Return negative inverse outer radius (maximize 1/R)
+        return -1.0 / outer_radius
+
+    def get_voronoi_based_initial_placement(self):
+        """Generate initial placement based on Voronoi-like arrangement."""
+        # Start with symmetric arrangement
+        positions = []
+        
+        # Central hexagon
+        positions.append([0.0, 0.0])
+        
+        # First ring - 6 hexagons
+        for i in range(6):
+            angle = i * np.pi/3
+            x = 2.0 * np.cos(angle)
+            y = 2.0 * np.sin(angle)
+            positions.append([x, y])
+        
+        # Second ring - 5 hexagons (leave one spot open to allow optimization)
+        for i in range(5):
+            angle = i * np.pi/3 + np.pi/6
+            x = 3.0 * np.cos(angle)
+            y = 3.0 * np.sin(angle)
+            positions.append([x, y])
+        
+        # Fill remaining positions to make 12 total
+        positions.append([0.0, -4.0])
+        
+        # Add small random offsets to break perfect symmetry
+        for i in range(len(positions)):
+            positions[i][0] += np.random.normal(0, 0.1)
+            positions[i][1] += np.random.normal(0, 0.1)
+            
+        return np.array(positions)
+    
+    def get_symmetric_initial_placement(self):
+        """Generate symmetric initial placement."""
+        positions = []
+        
+        # Central hexagon
+        positions.append([0.0, 0.0])
+        
+        # First ring (6 hexagons)
+        for i in range(6):
+            angle = i * np.pi/3
+            x = 2.0 * np.cos(angle)
+            y = 2.0 * np.sin(angle)
+            positions.append([x, y])
+        
+        # Second ring (5 hexagons)
+        for i in range(5):
+            angle = i * np.pi/3 + np.pi/6
+            x = 3.0 * np.cos(angle)
+            y = 3.0 * np.sin(angle)
+            positions.append([x, y])
+        
+        # Final position
+        positions.append([0.0, -4.0])
+        
+        # Make positions array
+        positions = np.array(positions)
+        
+        # Add small perturbations
+        np.random.seed(42)
+        positions[:, 0] += np.random.normal(0, 0.1, 12)
+        positions[:, 1] += np.random.normal(0, 0.1, 12)
+        
+        return positions
+    
+    def evaluate_voronoi_configuration(self, config):
+        """
+        Evaluate configuration based on Voronoi properties.
+        config: [x1,y1,x2,y2,...,x12,y12,R]
+        """
+        # Separate positions and outer radius
+        positions = config[:-1].reshape(-1, 2)
+        outer_radius = config[-1]
+        
+        # Calculate Voronoi diagram
+        try:
+            vor = self.generate_voronoi_regions(positions)
+        except:
+            return 1e10  # Invalid configuration
+        
+        # Check constraints using Voronoi properties
+        # Check containment and overlap efficiently
+        for i, pos in enumerate(positions):
+            # Distance to center should be within bounds
+            dist_to_center = distance.euclidean(pos, [0, 0])
+            if dist_to_center + self.circumradius > outer_radius:
+                return 1e10
+                
+            # Check overlaps with neighbors through Voronoi
+            # For simplicity, use direct distance check
+            for j in range(i + 1, len(positions)):
+                if distance.euclidean(pos, positions[j]) < 2 * self.circumradius:
+                    return 1e10
+                    
+        # Valid configuration
+        return -1.0 / outer_radius
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses Voronoi-based optimization approach.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    # Initialize packer
+    packer = VoronoiHexagonPacker(num_inner=12, inner_side_length=1.0)
+    
+    # Define bounds for optimization
+    # Positions: x,y in [-10, 10], outer radius in [2, 15]
+    bounds = []
+    for _ in range(12):
+        bounds.extend([(-10, 10), (-10, 10)])  # x, y
+    bounds.append((2.0, 15.0))  # outer_radius
+
+    # Get initial configuration using Voronoi-inspired symmetric placement
+    initial_positions = packer.get_symmetric_initial_placement()
+    
+    # Flatten for optimization
+    initial_config = initial_positions.flatten()
+    initial_config = np.append(initial_config, 6.0)  # Initial outer radius
+    
+    # Phase 1: Coarse global optimization
+    try:
+        result = differential_evolution(
+            packer.evaluate_voronoi_configuration,
+            bounds,
+            maxiter=100,
+            popsize=20,
+            seed=42,
+            disp=False,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            tol=1e-6
+        )
+    except:
+        # Fallback to simple configuration if optimization fails
+        # Use a manually crafted good configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [0, 2, 0],
+            [0, -2, 0],
+            [1.732, 1, 0],
+            [-1.732, 1, 0],
+            [1.732, -1, 0],
+            [-1.732, -1, 0],
+            [3.464, 0, 0],
+            [-3.464, 0, 0],
+            [1.732, 3, 0],
+            [-1.732, 3, 0],
+            [1.732, -3, 0],
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 6.928
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+    # Phase 2: Local refinement
+    if result.fun < -0.25:  # If we haven't reached target yet, do local refinement
+        try:
+            refined_result = minimize(
+                packer.evaluate_voronoi_configuration,
+                result.x,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 50, 'ftol': 1e-9}
+            )
+            if refined_result.fun < result.fun:
+                result = refined_result
+        except:
+            pass
+
+    # Extract results
+    final_config = result.x
+    positions = final_config[:-1].reshape(-1, 2)
+    outer_hex_side_length = final_config[-1]
+
+    # Convert back to required format (positions + zero rotations)
+    inner_hex_data = np.zeros((12, 3))
+    for i in range(12):
+        inner_hex_data[i] = [positions[i][0], positions[i][1], 0.0]
+
+    # Outer hex is centered at origin
+    outer_hex_data = np.array([0, 0, 0])
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

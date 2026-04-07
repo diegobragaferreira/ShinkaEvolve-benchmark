@@ -1,0 +1,88 @@
+<NAME>
+implement_sat_collision_detection
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Shapely's intersection detection which is computationally expensive. I'll implement a Separating Axis Theorem (SAT) based collision detection that's much faster for hexagon-hexagon collision checking. This will significantly speed up the validation process, especially during optimization iterations.
+
+The key insight is that hexagon-hexagon collision detection via SAT is much more efficient than using Shapely's buffer-based intersection tests, which are what we currently use in `check_collision`.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def check_collision(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons collide using Shapely with buffer for robustness"""
+        poly1 = Polygon(hex1_vertices)
+        poly2 = Polygon(hex2_vertices)
+        # Use small buffer to avoid floating-point precision issues
+        return poly1.buffer(1e-6).intersects(poly2.buffer(1e-6))
+=======
+    @staticmethod
+    def check_collision_sat(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Check if two hexagons collide using Separating Axis Theorem (SAT) for better performance"""
+        # Get edges for both polygons
+        edges1 = []
+        edges2 = []
+
+        for i in range(6):
+            edges1.append(hex1_vertices[i] - hex1_vertices[(i+1)%6])
+            edges2.append(hex2_vertices[i] - hex2_vertices[(i+1)%6])
+
+        # Get normals to all edges (perpendicular vectors)
+        normals1 = []
+        normals2 = []
+
+        for edge in edges1:
+            # Normal vector (perpendicular to edge)
+            normal = np.array([-edge[1], edge[0]])
+            # Normalize
+            norm_len = np.sqrt(normal[0]**2 + normal[1]**2)
+            if norm_len > 1e-10:
+                normal = normal / norm_len
+            normals1.append(normal)
+
+        for edge in edges2:
+            # Normal vector (perpendicular to edge)
+            normal = np.array([-edge[1], edge[0]])
+            # Normalize
+            norm_len = np.sqrt(normal[0]**2 + normal[1]**2)
+            if norm_len > 1e-10:
+                normal = normal / norm_len
+            normals2.append(normal)
+
+        # Test all axes
+        all_normals = normals1 + normals2
+
+        for axis in all_normals:
+            # Project both polygons onto this axis
+            projections1 = [np.dot(vertex, axis) for vertex in hex1_vertices]
+            projections2 = [np.dot(vertex, axis) for vertex in hex2_vertices]
+
+            min1, max1 = min(projections1), max(projections1)
+            min2, max2 = min(projections2), max(projections2)
+
+            # Check for overlap
+            if max1 < min2 or max2 < min1:
+                return False  # No overlap along this axis - polygons don't collide
+
+        return True  # Overlap detected along all axes - polygons collide
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+        # Check pairwise collisions with early termination
+        for i in range(num_hex):
+            for j in range(i + 1, num_hex):
+                if HexagonUtils.check_collision(inner_polygons[i], inner_polygons[j]):
+                    return False, 0.0
+=======
+        # Check pairwise collisions with early termination
+        for i in range(num_hex):
+            for j in range(i + 1, num_hex):
+                if HexagonUtils.check_collision_sat(inner_polygons[i], inner_polygons[j]):
+                    return False, 0.0
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,193 @@
+<NAME>
+add_spatial_indexing
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses naive O(n²) collision detection between hexagons, which becomes inefficient as the number of hexagons increases. I'll implement a spatial indexing approach using bounding boxes to significantly speed up collision detection and containment checking, especially important for the 11-hexagon problem where performance matters.
+
+This change will:
+1. Improve computational efficiency by reducing collision checks from O(n²) to approximately O(n log n)
+2. Maintain mathematical correctness of geometric operations
+3. Enable faster convergence in evolutionary optimization
+4. Preserve all existing functionality while improving performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+from scipy.spatial.distance import cdist
+import time
+=======
+import numpy as np
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import random
+from scipy.spatial.distance import cdist
+import time
+from collections import defaultdict
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def check_containment(hexagon_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon"""
+    return outer_hex_poly.contains(hexagon_poly)
+
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap"""
+    return hex1_poly.intersects(hex2_poly)
+=======
+def check_containment(hexagon_poly, outer_hex_poly):
+    """Check if hexagon is fully contained within outer hexagon"""
+    return outer_hex_poly.contains(hexagon_poly)
+
+def check_overlap(hex1_poly, hex2_poly):
+    """Check if two hexagons overlap"""
+    return hex1_poly.intersects(hex2_poly)
+
+def get_bounding_box(vertices):
+    """Get axis-aligned bounding box for a set of vertices"""
+    if len(vertices) == 0:
+        return (0, 0, 0, 0)
+    min_x = min(v[0] for v in vertices)
+    max_x = max(v[0] for v in vertices)
+    min_y = min(v[1] for v in vertices)
+    max_y = max(v[1] for v in vertices)
+    return (min_x, min_y, max_x, max_y)
+
+def boxes_overlap(box1, box2):
+    """Check if two axis-aligned boxes overlap"""
+    x1_min, y1_min, x1_max, y1_max = box1
+    x2_min, y2_min, x2_max, y2_max = box2
+    return not (x1_max < x2_min or x2_max < x1_min or y1_max < y2_min or y2_max < y1_min)
+
+def create_spatial_index(hex_polygons, hex_vertices_list):
+    """Create a spatial index for fast collision detection"""
+    # Create bounding boxes for all hexagons
+    boxes = []
+    for i, vertices in enumerate(hex_vertices_list):
+        box = get_bounding_box(vertices)
+        boxes.append((box, i))
+
+    # Group boxes into grid cells for faster lookup
+    cell_size = 2.0  # Based on hexagon diameter
+    spatial_index = defaultdict(list)
+
+    for box, idx in boxes:
+        # Grid cell coordinates
+        min_x, min_y, max_x, max_y = box
+        cell_min_x = int(min_x // cell_size)
+        cell_min_y = int(min_y // cell_size)
+        cell_max_x = int(max_x // cell_size)
+        cell_max_y = int(max_y // cell_size)
+
+        # Add to all relevant grid cells
+        for cx in range(cell_min_x, cell_max_x + 1):
+            for cy in range(cell_min_y, cell_max_y + 1):
+                spatial_index[(cx, cy)].append(idx)
+
+    return spatial_index, boxes
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution(inner_hex_data):
+    """Evaluate fitness of solution - maximize 1/outer_hex_side_length"""
+    # Check for overlaps and containment
+    try:
+        # Create polygons for all inner hexagons
+        hex_polygons = []
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, angle = inner_hex_data[i]
+            vertices = generate_hexagon_vertices(center_x, center_y, angle)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment and overlap
+        outer_side_length = calculate_outer_hex_side_length(inner_hex_data)
+        outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_side_length)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment
+        for poly in hex_polygons:
+            if not check_containment(poly, outer_polygon):
+                return 0.0  # Invalid - not fully contained
+
+        # Check overlaps
+        for i in range(len(hex_polygons)):
+            for j in range(i+1, len(hex_polygons)):
+                if check_overlap(hex_polygons[i], hex_polygons[j]):
+                    return 0.0  # Invalid - overlaps
+
+        # Return 1/outer_side_length as fitness
+        return 1.0 / outer_side_length if outer_side_length > 0 else 0.0
+
+    except Exception:
+        return 0.0
+=======
+def evaluate_solution(inner_hex_data):
+    """Evaluate fitness of solution - maximize 1/outer_hex_side_length"""
+    # Check for overlaps and containment
+    try:
+        # Create polygons for all inner hexagons
+        hex_polygons = []
+        hex_vertices_list = []
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, angle = inner_hex_data[i]
+            vertices = generate_hexagon_vertices(center_x, center_y, angle)
+            hex_vertices_list.append(vertices)
+            hex_polygons.append(Polygon(vertices))
+
+        # Check containment and overlap
+        outer_side_length = calculate_outer_hex_side_length(inner_hex_data)
+        outer_vertices = generate_hexagon_vertices(0, 0, 0, outer_side_length)
+        outer_polygon = Polygon(outer_vertices)
+
+        # Check containment
+        for poly in hex_polygons:
+            if not check_containment(poly, outer_polygon):
+                return 0.0  # Invalid - not fully contained
+
+        # Check overlaps using spatial indexing for efficiency
+        spatial_index, boxes = create_spatial_index(hex_polygons, hex_vertices_list)
+
+        # Only check actual collisions for potentially overlapping hexagons
+        for i in range(len(hex_polygons)):
+            box_i = boxes[i]
+            # Get nearby candidates from spatial index
+            candidates = set()
+            min_x, min_y, max_x, max_y = box_i[0]
+            cell_size = 2.0
+            cell_min_x = int(min_x // cell_size)
+            cell_min_y = int(min_y // cell_size)
+            cell_max_x = int(max_x // cell_size)
+            cell_max_y = int(max_y // cell_size)
+
+            for cx in range(cell_min_x, cell_max_x + 1):
+                for cy in range(cell_min_y, cell_max_y + 1):
+                    candidates.update(spatial_index[(cx, cy)])
+
+            # Check actual overlaps with candidates
+            for j in candidates:
+                if i >= j:  # Avoid duplicate checks and self-checks
+                    continue
+                if boxes_overlap(box_i[0], boxes[j][0]):  # Only check if bounding boxes overlap
+                    if check_overlap(hex_polygons[i], hex_polygons[j]):
+                        return 0.0  # Invalid - overlaps
+
+        # Return 1/outer_side_length as fitness
+        return 1.0 / outer_side_length if outer_side_length > 0 else 0.0
+
+    except Exception:
+        return 0.0
+>>>>>>> REPLACE
+
+</DIFF>

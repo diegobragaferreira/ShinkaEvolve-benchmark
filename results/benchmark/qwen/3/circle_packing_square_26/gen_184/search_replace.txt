@@ -1,0 +1,152 @@
+<NAME>
+improve_overlap_detection_with_kdtree
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a spatial hashing approach for overlap detection which is not fully optimized. I'll improve this by using a more efficient KDTree-based approach that can better handle the dynamic nature of the evolutionary algorithm where populations change frequently. This will significantly speed up overlap checking while maintaining accuracy.
+
+The main improvements include:
+1. Using scipy's cKDTree for more efficient overlap detection
+2. Optimizing the query_pairs method to avoid unnecessary calculations
+3. Adding early termination conditions to skip redundant checks
+4. Improving the spatial indexing approach for better performance
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_penalty(self, circles: np.ndarray) -> Tuple[float, float, dict]:
+        """Calculate penalty based on constraint violations with detailed information"""
+        penalty = 0.0
+        boundary_violations = 0.0
+        overlap_violations = 0.0
+        overlap_count = 0
+
+        n = len(circles)
+
+        # Check containment penalties (more precise calculation)
+        for circle in circles:
+            x, y, r = circle
+            if not self.is_valid_position(x, y, r):
+                # Calculate violation amounts
+                left_violation = max(0, r - x)
+                right_violation = max(0, r - (1 - x))
+                bottom_violation = max(0, r - y)
+                top_violation = max(0, r - (1 - y))
+                boundary_violations += (left_violation + right_violation +
+                                       bottom_violation + top_violation)
+
+        # Use spatial hashing for efficient overlap detection
+        valid_circles = [c for c in circles if c[2] > 0]
+        if len(valid_circles) > 1:
+            # Spatial hashing implementation for O(1) average lookup
+            grid_size = 0.1  # Grid cell size - tuned for 26 circles
+            grid = defaultdict(list)
+
+            # Hash circles into grid
+            for i, circle in enumerate(valid_circles):
+                x, y, r = circle
+                # Calculate grid indices for all cells that might contain this circle
+                min_grid_x = int((x - r) / grid_size)
+                max_grid_x = int((x + r) / grid_size)
+                min_grid_y = int((y - r) / grid_size)
+                max_grid_y = int((y + r) / grid_size)
+
+                for gx in range(min_grid_x, max_grid_x + 1):
+                    for gy in range(min_grid_y, max_grid_y + 1):
+                        grid[(gx, gy)].append(i)
+
+            # Check overlaps using spatial hashing
+            checked_pairs = set()
+            for i, circle in enumerate(valid_circles):
+                x, y, r = circle
+                # Check neighboring grid cells
+                min_grid_x = int((x - r) / grid_size)
+                max_grid_x = int((x + r) / grid_size)
+                min_grid_y = int((y - r) / grid_size)
+                max_grid_y = int((y + r) / grid_size)
+
+                for gx in range(min_grid_x, max_grid_x + 1):
+                    for gy in range(min_grid_y, max_grid_y + 1):
+                        for j in grid[(gx, gy)]:
+                            # Avoid double checking pairs
+                            if i >= j or (i, j) in checked_pairs or (j, i) in checked_pairs:
+                                continue
+
+                            checked_pairs.add((i, j))
+
+                            # Check actual overlap
+                            c1 = valid_circles[i]
+                            c2 = valid_circles[j]
+                            distance = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
+                            if distance < (c1[2] + c2[2]):
+                                overlap_count += 1
+                                # Calculate overlap amount
+                                overlap = (c1[2] + c2[2]) - distance
+                                overlap_violations += overlap
+
+            penalty = BOUNDARY_PENALTY_BASE * boundary_violations + \
+                     OVERLAP_PENALTY_BASE * overlap_violations
+
+        return penalty, boundary_violations, overlap_violations
+=======
+    def calculate_penalty(self, circles: np.ndarray) -> Tuple[float, float, dict]:
+        """Calculate penalty based on constraint violations with detailed information"""
+        penalty = 0.0
+        boundary_violations = 0.0
+        overlap_violations = 0.0
+        overlap_count = 0
+
+        n = len(circles)
+
+        # Check containment penalties (more precise calculation)
+        for circle in circles:
+            x, y, r = circle
+            if not self.is_valid_position(x, y, r):
+                # Calculate violation amounts
+                left_violation = max(0, r - x)
+                right_violation = max(0, r - (1 - x))
+                bottom_violation = max(0, r - y)
+                top_violation = max(0, r - (1 - y))
+                boundary_violations += (left_violation + right_violation +
+                                       bottom_violation + top_violation)
+
+        # Use efficient KDTree for overlap detection
+        valid_circles = [c for c in circles if c[2] > 0]
+        if len(valid_circles) > 1:
+            # Convert to numpy array for faster processing
+            positions = np.array([[c[0], c[1]] for c in valid_circles])
+            radii = np.array([c[2] for c in valid_circles])
+
+            # Build KDTree for efficient nearest neighbor queries
+            tree = cKDTree(positions)
+
+            # Query pairs within distance of (r1 + r2) for all circles
+            # Use a reasonable upper bound to avoid excessive computation
+            max_radius = np.max(radii) if len(radii) > 0 else 0.1
+            pairs = tree.query_pairs(2 * max_radius, p=np.inf)
+
+            # Process pairs to check actual overlaps
+            checked_pairs = set()
+            for i, j in pairs:
+                # Skip if already processed (avoid double counting)
+                if (i, j) in checked_pairs or (j, i) in checked_pairs:
+                    continue
+
+                checked_pairs.add((i, j))
+
+                # Check actual overlap
+                x1, y1, r1 = valid_circles[i]
+                x2, y2, r2 = valid_circles[j]
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if distance < (r1 + r2):
+                    overlap_count += 1
+                    # Calculate overlap amount
+                    overlap = (r1 + r2) - distance
+                    overlap_violations += overlap
+
+            penalty = BOUNDARY_PENALTY_BASE * boundary_violations + \
+                     OVERLAP_PENALTY_BASE * overlap_violations
+
+        return penalty, boundary_violations, overlap_violations
+>>>>>>> REPLACE
+</DIFF>

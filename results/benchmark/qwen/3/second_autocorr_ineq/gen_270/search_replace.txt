@@ -1,0 +1,148 @@
+<NAME>
+enhance_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses a custom convolution computation that's not optimized for large arrays. Since we're dealing with step functions on [-1/4, 1/4] with potentially thousands of steps, we can leverage FFT-based convolution which is much more efficient for large datasets. This should significantly improve execution time and potentially allow us to work with larger step counts, leading to better C2 values.
+
+The key insight is that FFT-based convolution has O(n log n) complexity vs O(n²) for direct convolution, which becomes crucial when working with 50,000+ steps as suggested in the problem context.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@jit(nopython=True)
+def compute_autoconvolution_fast(f_vals):
+    """Fast numba-based autoconvolution computation"""
+    n = len(f_vals)
+    g = np.zeros(2*n - 1)
+
+    for i in range(n):
+        for j in range(n):
+            g[i + j] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_convolution_norms_fast(g_vals):
+    """Fast computation of convolution norms"""
+    n = len(g_vals)
+    l2_sq = 0.0
+    l1 = 0.0
+    l_inf = 0.0
+
+    for i in range(n):
+        val = g_vals[i]
+        l2_sq += val * val
+        l1 += abs(val)
+        if abs(val) > l_inf:
+            l_inf = abs(val)
+
+    return l2_sq, l1, l_inf
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation with proper numerical handling
+    Uses the correct scaling for step functions on [-1/4, 1/4] with dx = 0.5/n
+    """
+    n = len(f_values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Ensure non-negative values and convert to numpy for efficiency
+    f_array = np.array(f_values)
+    f_array = np.maximum(f_array, 0.0)
+
+    # Compute autoconvolution using fast numba implementation
+    g_vals = compute_autoconvolution_fast(f_array)
+
+    # Apply proper scaling for step function integration
+    dx = 0.5 / n  # Width of each step on interval [-1/4, 1/4]
+    g_vals = g_vals * dx  # Scale by step width
+
+    # Compute norms using the piecewise linear integration approach
+    g_abs = np.abs(g_vals)
+
+    # L2 norm squared using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
+    g2_sq = 0.0
+    for i in range(len(g_abs)-1):
+        g2_sq += (dx/3) * (g_abs[i]**2 + g_abs[i]*g_abs[i+1] + g_abs[i+1]**2)
+
+    # L1 norm (sum of absolute values times dx)
+    g1 = np.sum(g_abs) * dx
+
+    # L-infinity norm
+    g_inf = np.max(g_abs)
+
+    # Handle edge cases
+    if g1 <= 1e-15:
+        g1 = 1e-15
+    if g_inf <= 1e-15:
+        g_inf = 1e-15
+
+    return g2_sq, g1, g_inf
+=======
+def compute_autoconvolution_fft(f_values: List[float]) -> np.ndarray:
+    """
+    Compute autoconvolution using FFT for better performance on large arrays
+    """
+    f_array = np.array(f_values)
+    n = len(f_array)
+
+    # Pad to power of 2 for better FFT performance
+    padded_n = 2**(int(np.ceil(np.log2(2*n - 1))) + 1) if n > 1 else 1
+    f_padded = np.pad(f_array, (0, padded_n - n), mode='constant')
+
+    # FFT convolution: f * f = ifft(fft(f) * conj(fft(f)))
+    f_fft = fft(f_padded)
+    g_fft = f_fft * np.conj(f_fft)
+    g_padded = ifft(g_fft).real
+
+    # Extract the valid convolution part (middle 2*n-1 elements)
+    g = g_padded[:2*n - 1]
+
+    return g
+
+def compute_autoconvolution_norms(f_values: List[float]) -> Tuple[float, float, float]:
+    """
+    Compute the three norms needed for C2 calculation with proper numerical handling
+    Uses FFT-based convolution for efficiency and the correct scaling for step functions
+    on [-1/4, 1/4] with dx = 0.5/n
+    """
+    n = len(f_values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Ensure non-negative values and convert to numpy for efficiency
+    f_array = np.array(f_values)
+    f_array = np.maximum(f_array, 0.0)
+
+    # Compute autoconvolution using FFT for efficiency
+    g_vals = compute_autoconvolution_fft(f_array)
+
+    # Apply proper scaling for step function integration
+    dx = 0.5 / n  # Width of each step on interval [-1/4, 1/4]
+    g_vals = g_vals * dx  # Scale by step width
+
+    # Compute norms using the piecewise linear integration approach
+    g_abs = np.abs(g_vals)
+
+    # L2 norm squared using trapezoidal-like formula: (dx/3)(g₀² + g₀g₁ + g₁²)
+    g2_sq = 0.0
+    for i in range(len(g_abs)-1):
+        g2_sq += (dx/3) * (g_abs[i]**2 + g_abs[i]*g_abs[i+1] + g_abs[i+1]**2)
+
+    # L1 norm (sum of absolute values times dx)
+    g1 = np.sum(g_abs) * dx
+
+    # L-infinity norm
+    g_inf = np.max(g_abs)
+
+    # Handle edge cases
+    if g1 <= 1e-15:
+        g1 = 1e-15
+    if g_inf <= 1e-15:
+        g_inf = 1e-15
+
+    return g2_sq, g1, g_inf
+>>>>>>> REPLACE
+</DIFF>

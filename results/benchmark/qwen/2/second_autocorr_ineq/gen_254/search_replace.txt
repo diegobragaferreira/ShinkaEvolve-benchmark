@@ -1,0 +1,672 @@
+<NAME>
+replace_full_module_with_optimized_version
+</NAME>
+
+<DESCRIPTION>
+This change replaces the entire module content with an optimized version that focuses on direct peak parameter optimization rather than the previous sparse convex optimization approach. The new implementation:
+
+1. Removes the expensive and ineffective sparse coding approach
+2. Implements a clean peak-based construction with proper spacing enforcement
+3. Uses direct differential evolution optimization on peak parameters (amplitude, center, width)
+4. Maintains the core computation functions but streamlines everything else
+5. Improves peak initialization with better logarithmic/sine-based distribution
+6. Reduces complexity while maintaining the functionality
+
+This should allow the code to better explore the parameter space and achieve higher C2 values by focusing computational effort where it matters most.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import minimize
+from scipy import signal
+from numba import jit
+import time
+import cvxpy as cp
+from sklearn.decomposition import SparseCoder
+import warnings
+
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: list[float]) -> tuple[float, float, float]:
+    """
+    Fast computation of the three norms needed for C2 calculation using piecewise linear integration.
+    """
+    # Convert to numpy array for easier manipulation
+    f = np.array(f_values)
+    n_steps = len(f)
+
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step width
+    dx = 0.5 / n_steps
+
+    # Compute autoconvolution using discrete convolution
+    g = np.convolve(f, f, mode='full')
+    # Trim g to the correct size (this accounts for the convolution)
+    g = g[len(f)-1:2*len(f)-1]
+
+    # Compute L2 norm squared using piecewise linear integration
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        # Trapezoidal-like integration for quadratic function
+        # Using formula for integral of ax^2 + bx + c over [x0,x1]
+        # But here we approximate with piecewise linear segments
+        # So we use: (dx/3)(y0^2 + y0*y1 + y1**2)
+        y0, y1 = g[i], g[i+1]
+        norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+
+    # L1 norm (sum of absolute values)
+    norm_1 = np.sum(np.abs(g))
+
+    # Infinity norm
+    norm_inf = np.max(np.abs(g))
+
+    # Handle numerical edge cases
+    if norm_1 <= 1e-15:
+        norm_1 = 1e-15
+    if norm_inf <= 1e-15:
+        norm_inf = 1e-15
+
+    return norm_2_squared, norm_1, norm_inf
+
+def enforce_minimum_peak_spacing(peak_params: list[float], domain_width: float, min_distance_ratio: float = 0.05) -> list[float]:
+    """
+    Enforce minimum distance between Gaussian peaks to prevent narrow autoconvolution interference.
+    This helps maintain flatter autoconvolution profiles which improve C2 values.
+    """
+    if len(peak_params) < 3:
+        return peak_params
+
+    # Create list of peaks [amplitude, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # More sophisticated peak spacing enforcement using iterative optimization
+    min_distance = min_distance_ratio * domain_width
+
+    # Create working copy of peaks
+    working_peaks = [peak[:] for peak in peaks]  # Deep copy
+
+    # Iteratively adjust peak positions to satisfy minimum spacing
+    changed = True
+    max_iterations = 100  # Prevent infinite loops
+    iterations = 0
+
+    while changed and iterations < max_iterations:
+        changed = False
+        iterations += 1
+
+        # Check all adjacent pairs
+        for i in range(len(working_peaks) - 1):
+            amp1, center1, width1 = working_peaks[i]
+            amp2, center2, width2 = working_peaks[i + 1]
+
+            current_distance = abs(center2 - center1)
+
+            if current_distance < min_distance:
+                # Calculate adjustment needed
+                adjustment = min_distance - current_distance
+
+                # Determine direction to move peaks
+                # Prefer moving rightmost peak to maintain structure
+                if center1 <= center2:
+                    # Move right peak to the right, left peak to the left
+                    move_right = adjustment / 2.0
+                    move_left = adjustment / 2.0
+                else:
+                    # Move left peak to the left, right peak to the right
+                    move_right = adjustment / 2.0
+                    move_left = adjustment / 2.0
+
+                # Apply adjustments with boundary checking
+                new_center1 = center1 - move_left
+                new_center2 = center2 + move_right
+
+                # Clip to domain bounds
+                new_center1 = np.clip(new_center1, -domain_width/2, domain_width/2)
+                new_center2 = np.clip(new_center2, -domain_width/2, domain_width/2)
+
+                # Check if adjustment would make peaks overlap again
+                if abs(new_center2 - new_center1) < min_distance:
+                    # If they still overlap, push them apart more
+                    total_overlap = min_distance - abs(new_center2 - new_center1)
+                    half_overlap = total_overlap / 2.0
+
+                    if center1 <= center2:
+                        new_center1 = center1 - half_overlap
+                        new_center2 = center2 + half_overlap
+                    else:
+                        new_center1 = center1 + half_overlap
+                        new_center2 = center2 - half_overlap
+
+                    # Final boundary clipping
+                    new_center1 = np.clip(new_center1, -domain_width/2, domain_width/2)
+                    new_center2 = np.clip(new_center2, -domain_width/2, domain_width/2)
+
+                # Update if changes occurred
+                if abs(new_center1 - center1) > 1e-10 or abs(new_center2 - center2) > 1e-10:
+                    working_peaks[i] = [amp1, new_center1, width1]
+                    working_peaks[i + 1] = [amp2, new_center2, width2]
+                    changed = True
+
+    # Final validation and adjustment to ensure all peaks are within bounds
+    for i in range(len(working_peaks)):
+        amp, center, width = working_peaks[i]
+        # Ensure within domain bounds
+        working_peaks[i] = [amp, np.clip(center, -domain_width/2, domain_width/2), width]
+
+    # Flatten back to parameter list
+    result = []
+    for amp, center, width in working_peaks:
+        result.extend([amp, center, width])
+
+    return result
+
+def create_gaussian_peak_function(x_domain: np.ndarray, peak_params: list[float]) -> np.ndarray:
+    """
+    Create function from Gaussian peak parameters with proper spacing enforcement.
+    """
+    f = np.zeros_like(x_domain)
+    for i in range(0, len(peak_params), 3):
+        amp, center, width = peak_params[i], peak_params[i+1], peak_params[i+2]
+        if width > 1e-6:  # Avoid division by zero
+            f += amp * np.exp(-0.5 * ((x_domain - center) / width)**2)
+    return f
+
+def sparse_convex_optimization_approach(n_steps: int) -> list[float]:
+    """
+    Solves the C2 maximization problem using convex optimization with sparsity constraints.
+    """
+    # Create a structured basis for sparse representation
+    # Use wavelet-like basis to capture both smooth and localized features
+    x_domain = np.linspace(-0.25, 0.25, n_steps)
+
+    # Create a dictionary of basis functions
+    basis_functions = []
+
+    # Center spike basis
+    center_spike = np.exp(-8 * x_domain**2)
+    basis_functions.append(center_spike)
+
+    # Multiple Gaussian-like basis functions with different widths
+    widths = [0.05, 0.1, 0.15, 0.2]
+    for w in widths:
+        gauss = np.exp(-0.5 * (x_domain/w)**2)
+        basis_functions.append(gauss)
+
+    # Polynomial basis for smooth variations
+    poly_basis = [x_domain**i for i in range(1, 4)]
+    basis_functions.extend(poly_basis)
+
+    # Combine all basis functions
+    dictionary = np.column_stack(basis_functions)
+
+    # Normalize dictionary columns
+    dict_norms = np.linalg.norm(dictionary, axis=0)
+    dict_norms[dict_norms == 0] = 1
+    dictionary = dictionary / dict_norms
+
+    # Solve sparse coding problem to find optimal coefficients
+    # This finds sparse representation that approximates an idealized function
+    try:
+        # Use L1 regularization to encourage sparsity in the solution
+        # This represents our optimization search for the best combination of basis functions
+        coder = SparseCoder(dictionary=dictionary, transform_alpha=0.01, transform_n_nonzero_coefs=None)
+
+        # Create a target that promotes flat autoconvolution profiles
+        # This is designed to maximize the ratio ||g||₂² / (||g||₁ · ||g||∞)
+        target_signal = np.ones_like(x_domain)
+
+        # Try to reconstruct with sparse representation
+        codes = coder.transform(target_signal.reshape(-1, 1))
+
+        # Extract the most important components
+        active_indices = np.where(np.abs(codes.flatten()) > 1e-6)[0]
+
+        # Create function from selected basis components
+        if len(active_indices) > 0:
+            # Build function from selected components
+            f = np.zeros(n_steps)
+            for idx in active_indices[:min(5, len(active_indices))]:  # Limit components
+                if idx < len(basis_functions):
+                    f += np.maximum(basis_functions[idx], 0) * np.random.uniform(0.5, 2.0)
+
+            # Add small amount of random noise to break symmetry
+            noise = np.random.normal(0, 0.01, n_steps)
+            f += noise
+
+            # Non-negative constraint
+            f = np.maximum(f, 0)
+
+            # Normalize to reasonable scale
+            if np.sum(f) > 0:
+                f = f / np.sum(f) * 10
+
+            return f.tolist()
+
+    except Exception:
+        pass
+
+    # Enhanced fallback using adaptive Gaussian construction with peak spacing
+    # Start with more structured peak placement
+    domain_width = 0.5
+    num_peaks = 8
+
+    # Initialize peaks with better spacing using golden ratio distribution
+    peak_positions = []
+    phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+    for i in range(num_peaks):
+        ratio = (i * phi) % 1.0
+        # Use sine transformation for better center concentration
+        pos = np.sin(ratio * np.pi) * domain_width/2
+        peak_positions.append(pos)
+
+    # Initialize peak parameters [amplitude, center, width]
+    peak_params = []
+    for i, pos in enumerate(peak_positions):
+        amplitude = np.random.uniform(30, 70)  # More varied amplitudes
+        center = pos
+        width = np.random.uniform(0.03, 0.08)  # Controlled widths
+        peak_params.extend([amplitude, center, width])
+
+    # Apply minimum peak spacing enforcement
+    peak_params = enforce_minimum_peak_spacing(peak_params, domain_width)
+
+    # Create function from these peaks
+    f = create_gaussian_peak_function(x_domain, peak_params)
+
+    # Add some sinusoidal modulation to avoid degeneracy
+    f += 0.2 * np.sin(15 * np.pi * x_domain) * np.exp(-x_domain**2/0.05)
+
+    # Add some noise for robustness
+    f += np.random.normal(0, 0.03, n_steps)
+
+    # Enforce non-negativity
+    f = np.maximum(f, 0)
+
+    # Normalize
+    if np.sum(f) > 0:
+        f = f / np.sum(f) * 10
+
+    return f.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Construct step function using convex optimization approach with sparse representation.
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Multi-attempt selection to maximize C2
+    best_c2 = -1
+    best_function = None
+    start_time = time.time()
+
+    # Set maximum attempts to balance quality vs. time constraints
+    max_attempts = 30
+
+    for attempt in range(max_attempts):
+        # Early termination if time is running out
+        if time.time() - start_time > 85:  # Leave 5 seconds for cleanup
+            break
+
+        # Try different number of steps to find optimal
+        n_steps = np.random.randint(1500, 4000)
+
+        # Generate function using convex optimization approach
+        f_values = sparse_convex_optimization_approach(n_steps)
+
+        # Evaluate the function
+        try:
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
+
+            # Check for valid norms
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                continue
+
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+
+            # Keep the best function
+            if c2 > best_c2:
+                best_c2 = c2
+                best_function = f_values
+
+        except Exception:
+            # Skip invalid functions
+            continue
+
+    # Return the best function found, or fallback
+    if best_function is not None:
+        return best_function
+    else:
+        # Fallback to a simpler construction
+        n_steps = 1000
+        f_values = [1.0] * n_steps
+        return f_values
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy import signal
+from numba import jit
+import time
+import warnings
+
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def compute_autoconvolution_norms_fast(f_values: list[float]) -> tuple[float, float, float]:
+    """
+    Fast computation of the three norms needed for C2 calculation using piecewise linear integration.
+    """
+    # Convert to numpy array for easier manipulation
+    f = np.array(f_values)
+    n_steps = len(f)
+
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step width
+    dx = 0.5 / n_steps
+
+    # Compute autoconvolution using discrete convolution
+    g = np.convolve(f, f, mode='full')
+    # Trim g to the correct size (this accounts for the convolution)
+    g = g[len(f)-1:2*len(f)-1]
+
+    # Compute L2 norm squared using piecewise linear integration
+    norm_2_squared = 0.0
+    for i in range(len(g)-1):
+        # Trapezoidal-like integration for quadratic function
+        # Using formula for integral of ax^2 + bx + c over [x0,x1]
+        # But here we approximate with piecewise linear segments
+        # So we use: (dx/3)(y0^2 + y0*y1 + y1**2)
+        y0, y1 = g[i], g[i+1]
+        norm_2_squared += (dx/3) * (y0**2 + y0*y1 + y1**2)
+
+    # L1 norm (sum of absolute values)
+    norm_1 = np.sum(np.abs(g))
+
+    # Infinity norm
+    norm_inf = np.max(np.abs(g))
+
+    # Handle numerical edge cases
+    if norm_1 <= 1e-15:
+        norm_1 = 1e-15
+    if norm_inf <= 1e-15:
+        norm_inf = 1e-15
+
+    return norm_2_squared, norm_1, norm_inf
+
+def create_initial_peak_parameters(n_peaks: int, domain_width: float = 0.5) -> list[float]:
+    """
+    Create initial peak parameters with better distribution and spacing
+    Returns list of [amplitude, center, width] for each peak
+    """
+    # Use logarithmic and sine-based distribution for better peak placement
+    peak_positions = []
+    phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+
+    # Generate positions using golden ratio with sine transformation
+    # for better center concentration and spread
+    for i in range(n_peaks):
+        ratio = (i * phi) % 1.0
+        # Use sine transformation to concentrate more peaks near center
+        pos = np.sin(ratio * np.pi) * domain_width/2
+        peak_positions.append(pos)
+
+    # Add some diversity to peak positions
+    peak_positions = np.array(peak_positions) + np.random.normal(0, 0.01, len(peak_positions))
+    peak_positions = np.clip(peak_positions, -domain_width/2, domain_width/2)
+
+    # Create peak parameters
+    peak_params = []
+    for i, pos in enumerate(peak_positions):
+        # Amplitude based on position - higher near center
+        amplitude = np.random.uniform(20, 80) * (1.0 - 0.8 * abs(pos) / (domain_width/2))
+        # Width varies with position - narrower in center, wider at edges
+        width = 0.02 + 0.06 * (abs(pos) / (domain_width/2))
+        # Ensure reasonable width range
+        width = np.clip(width, 0.015, 0.12)
+        peak_params.extend([amplitude, pos, width])
+
+    return peak_params
+
+def enforce_minimum_peak_spacing(peak_params: list[float], domain_width: float,
+                               min_distance_ratio: float = 0.05) -> list[float]:
+    """
+    Enforce minimum distance between Gaussian peaks to prevent narrow autoconvolution interference.
+    """
+    if len(peak_params) < 3:
+        return peak_params
+
+    # Create list of peaks [amplitude, center, width]
+    peaks = []
+    for i in range(0, len(peak_params), 3):
+        peaks.append([peak_params[i], peak_params[i+1], peak_params[i+2]])
+
+    # Sort by center position
+    peaks.sort(key=lambda x: x[1])
+
+    # Simple but effective spacing enforcement
+    min_distance = min_distance_ratio * domain_width
+    adjusted_peaks = [peaks[0]]  # Always keep first peak
+
+    for i in range(1, len(peaks)):
+        prev_center = adjusted_peaks[-1][1]
+        curr_center = peaks[i][1]
+        distance = abs(curr_center - prev_center)
+
+        if distance < min_distance:
+            # Push the current peak away from previous peak
+            if curr_center > prev_center:
+                new_center = prev_center + min_distance * 1.1  # Slight buffer
+            else:
+                new_center = prev_center - min_distance * 1.1
+            # Clip to domain bounds
+            new_center = np.clip(new_center, -domain_width/2, domain_width/2)
+            adjusted_peaks.append([peaks[i][0], new_center, peaks[i][2]])
+        else:
+            adjusted_peaks.append(peaks[i])
+
+    # Flatten back to parameter list
+    result = []
+    for amp, center, width in adjusted_peaks:
+        result.extend([amp, center, width])
+
+    return result
+
+def create_gaussian_peak_function(x_domain: np.ndarray, peak_params: list[float]) -> np.ndarray:
+    """
+    Create function from Gaussian peak parameters with proper spacing enforcement.
+    """
+    f = np.zeros_like(x_domain)
+    for i in range(0, len(peak_params), 3):
+        amp, center, width = peak_params[i], peak_params[i+1], peak_params[i+2]
+        if width > 1e-6:  # Avoid division by zero
+            f += amp * np.exp(-0.5 * ((x_domain - center) / width)**2)
+    return f
+
+def optimize_peak_parameters_direct(peak_params: list[float], n_steps: int = 2000) -> list[float]:
+    """
+    Direct optimization of peak parameters using differential evolution on just the peak parameters
+    """
+    domain_width = 0.5
+
+    # Define bounds for optimization (amplitude, center, width for each peak)
+    bounds = []
+    n_peaks = len(peak_params) // 3
+    for i in range(n_peaks):
+        # Amplitude bounds
+        bounds.extend([(10.0, 100.0)])
+        # Center bounds
+        bounds.extend([(-domain_width/2, domain_width/2)])
+        # Width bounds
+        bounds.extend([(0.01, 0.15)])
+
+    def objective(params):
+        # Convert flat parameter list back to peak structure
+        new_peak_params = list(params)
+        # Check if we need to adjust number of peaks - simplest approach: keep same number
+        if len(new_peak_params) != len(peak_params):
+            # Reconstruct from scratch if needed
+            return -compute_c2_for_peaks(peak_params, n_steps)
+
+        c2 = compute_c2_for_peaks(new_peak_params, n_steps)
+        return -c2  # Negative because we minimize
+
+    try:
+        # Use differential evolution for global optimization
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=20,  # Reduced iterations for speed
+            popsize=8,   # Smaller population for faster convergence
+            seed=42,
+            strategy='best1bin',
+            atol=1e-6,
+            rtol=1e-6
+        )
+
+        # If optimization was successful, return the optimized parameters
+        if hasattr(result, 'success') and result.success:
+            return list(result.x)
+    except:
+        pass
+
+    # If optimization failed, return original parameters
+    return peak_params
+
+def compute_c2_for_peaks(peak_params: list[float], n_steps: int = 2000) -> float:
+    """
+    Compute C2 value directly from peak parameters for faster evaluation during optimization
+    """
+    x_domain = np.linspace(-0.25, 0.25, n_steps)
+    f = create_gaussian_peak_function(x_domain, peak_params)
+
+    # Ensure non-negativity
+    f = np.maximum(f, 0)
+
+    # Normalize for better evaluation
+    if np.sum(f) > 0:
+        f = f / np.sum(f) * 10
+
+    try:
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f.tolist())
+
+        if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+            return 0.0
+
+        c2 = norm_2_sq / (norm_1 * norm_inf)
+        return c2 if not np.isnan(c2) and not np.isinf(c2) else 0.0
+    except:
+        return 0.0
+
+def advanced_peak_construction(n_steps: int) -> list[float]:
+    """
+    Advanced construction with iterative refinement of peak parameters using direct optimization
+    """
+    domain_width = 0.5
+    # Start with a good number of peaks
+    num_peaks = max(8, min(25, n_steps // 200))
+
+    # Create initial peak parameters
+    peak_params = create_initial_peak_parameters(num_peaks, domain_width)
+
+    # Enforce minimum spacing
+    peak_params = enforce_minimum_peak_spacing(peak_params, domain_width)
+
+    # Create initial function
+    x_domain = np.linspace(-0.25, 0.25, n_steps)
+    f_initial = create_gaussian_peak_function(x_domain, peak_params)
+
+    # Add some diversity to avoid local minima
+    f_initial += 0.1 * np.sin(20 * np.pi * x_domain) * np.exp(-x_domain**2/0.05)
+
+    # Normalize
+    if np.sum(f_initial) > 0:
+        f_initial = f_initial / np.sum(f_initial) * 10
+
+    # Add small amount of noise for robustness
+    f_initial = np.maximum(f_initial, 0)
+
+    # Final optimization of peak parameters using differential evolution
+    try:
+        optimized_params = optimize_peak_parameters_direct(peak_params, n_steps)
+        # Create final function from optimized parameters
+        final_function = create_gaussian_peak_function(x_domain, optimized_params)
+        final_function = np.maximum(final_function, 0)
+
+        # Normalize again
+        if np.sum(final_function) > 0:
+            final_function = final_function / np.sum(final_function) * 10
+
+        return final_function.tolist()
+
+    except Exception:
+        # Fallback to initial function if optimization fails
+        pass
+
+    return f_initial.tolist()
+
+def construct_function() -> list[float]:
+    """
+    Construct step function with improved peak-based optimization approach
+    """
+    # Set seed for reproducibility
+    np.random.seed(42)
+
+    # Multi-attempt selection to maximize C2
+    best_c2 = -1
+    best_function = None
+    start_time = time.time()
+
+    # Set maximum attempts to balance quality vs. time constraints
+    max_attempts = 25
+
+    for attempt in range(max_attempts):
+        # Early termination if time is running out
+        if time.time() - start_time > 85:  # Leave 5 seconds for cleanup
+            break
+
+        # Try different number of steps to find optimal
+        n_steps = np.random.randint(1500, 5000)
+
+        # Generate function using advanced peak-based construction
+        f_values = advanced_peak_construction(n_steps)
+
+        # Evaluate the function
+        try:
+            norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms_fast(f_values)
+
+            # Check for valid norms
+            if norm_1 <= 1e-15 or norm_inf <= 1e-15:
+                continue
+
+            c2 = norm_2_sq / (norm_1 * norm_inf)
+
+            # Keep the best function
+            if c2 > best_c2:
+                best_c2 = c2
+                best_function = f_values
+
+        except Exception:
+            # Skip invalid functions
+            continue
+
+    # Return the best function found, or fallback
+    if best_function is not None:
+        return best_function
+    else:
+        # Fallback to a simpler construction
+        n_steps = 1000
+        f_values = [1.0] * n_steps
+        return f_values
+>>>>>>> REPLACE
+</DIFF>

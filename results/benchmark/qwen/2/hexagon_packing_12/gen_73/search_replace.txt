@@ -1,0 +1,180 @@
+<NAME>
+implement_numba_jit_for_geometric_operations
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses JIT compilation for some geometric functions but doesn't fully leverage Numba's capabilities for performance optimization. I'll implement comprehensive Numba JIT compilation for all geometric operations that are called repeatedly during constraint checking and optimization, particularly focusing on the overlap detection and containment checking functions that are computationally expensive. This will significantly speed up the fitness evaluations in the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+from numba import jit, prange
+
+# JIT compile the most frequently used geometric functions
+@jit(nopython=True)
+def hexagon_vertices_jit(center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+    """JIT compiled function to generate hexagon vertices"""
+    # Unit hexagon vertices centered at origin
+    angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 vertices + close loop
+    unit_vertices = np.column_stack([np.cos(angles), np.sin(angles)])
+
+    # Apply rotation and translation
+    rotation_rad = np.radians(rotation_deg)
+    cos_r, sin_r = np.cos(rotation_rad), np.sin(rotation_rad)
+    rotation_matrix = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+
+    rotated_vertices = rotation_matrix @ unit_vertices.T
+    translated_vertices = rotated_vertices.T + np.array([center_x, center_y])
+
+    return translated_vertices
+
+@jit(nopython=True)
+def point_in_hexagon_jit(point_x: float, point_y: float, hex_vertices: np.ndarray) -> bool:
+    """JIT compiled function to check if point is inside hexagon using ray casting"""
+    # Ray casting algorithm
+    x, y = point_x, point_y
+    n = len(hex_vertices)
+    inside = False
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line_segment(point_x: float, point_y: float,
+                                   line_start_x: float, line_start_y: float,
+                                   line_end_x: float, line_end_y: float) -> float:
+    """JIT compiled function to compute distance from point to line segment"""
+    A = point_x - line_start_x
+    B = point_y - line_start_y
+    C = line_end_x - line_start_x
+    D = line_end_y - line_start_y
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start_x + param * C
+    yy = line_start_y + param * D
+    dx = point_x - xx
+    dy = point_y - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        return hexagon_vertices_jit(self.center[0], self.center[1], self.rotation)
+=======
+from numba import jit, prange
+
+# JIT compile the most frequently used geometric functions
+@jit(nopython=True)
+def hexagon_vertices_jit(center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+    """JIT compiled function to generate hexagon vertices"""
+    # Unit hexagon vertices centered at origin
+    angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 vertices + close loop
+    unit_vertices = np.column_stack([np.cos(angles), np.sin(angles)])
+
+    # Apply rotation and translation
+    rotation_rad = np.radians(rotation_deg)
+    cos_r, sin_r = np.cos(rotation_rad), np.sin(rotation_rad)
+    rotation_matrix = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+
+    rotated_vertices = rotation_matrix @ unit_vertices.T
+    translated_vertices = rotated_vertices.T + np.array([center_x, center_y])
+
+    return translated_vertices
+
+@jit(nopython=True)
+def point_in_hexagon_jit(point_x: float, point_y: float, hex_vertices: np.ndarray) -> bool:
+    """JIT compiled function to check if point is inside hexagon using ray casting"""
+    # Ray casting algorithm
+    x, y = point_x, point_y
+    n = len(hex_vertices)
+    inside = False
+    p1x, p1y = hex_vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = hex_vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def distance_point_to_line_segment(point_x: float, point_y: float,
+                                   line_start_x: float, line_start_y: float,
+                                   line_end_x: float, line_end_y: float) -> float:
+    """JIT compiled function to compute distance from point to line segment"""
+    A = point_x - line_start_x
+    B = point_y - line_start_y
+    C = line_end_x - line_start_x
+    D = line_end_y - line_start_y
+
+    dot = A*C + B*D
+    len_sq = C*C + D*D
+    if len_sq == 0:
+        return np.sqrt(A*A + B*B)
+    param = dot / len_sq
+    param = max(0, min(1, param))
+    xx = line_start_x + param * C
+    yy = line_start_y + param * D
+    dx = point_x - xx
+    dy = point_y - yy
+    return np.sqrt(dx*dx + dy*dy)
+
+@jit(nopython=True)
+def check_hexagon_overlap_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """JIT compiled function to check if two hexagons overlap using separating axis theorem"""
+    # Check if any vertex of hex1 is inside hex2
+    for i in range(6):
+        if point_in_hexagon_jit(hex1_vertices[i, 0], hex1_vertices[i, 1], hex2_vertices):
+            return True
+    # Check if any vertex of hex2 is inside hex1
+    for i in range(6):
+        if point_in_hexagon_jit(hex2_vertices[i, 0], hex2_vertices[i, 1], hex1_vertices):
+            return True
+    return False
+
+@jit(nopython=True)
+def check_containment_jit(hex_vertices: np.ndarray, outer_vertices: np.ndarray) -> bool:
+    """JIT compiled function to check if all vertices of hexagon are inside outer hexagon"""
+    for i in range(6):
+        if not point_in_hexagon_jit(hex_vertices[i, 0], hex_vertices[i, 1], outer_vertices):
+            return False
+    return True
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        return hexagon_vertices_jit(self.center[0], self.center[1], self.rotation)
+>>>>>>> REPLACE
+</DIFF>

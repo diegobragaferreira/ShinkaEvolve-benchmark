@@ -1,0 +1,423 @@
+<NAME>
+optimize_convolution_computation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses scipy.signal.convolve which may not be optimal for our specific case. Since we're dealing with piecewise constant functions and want to compute autoconvolutions efficiently, we should implement a more direct and optimized convolution approach tailored specifically to our needs. This involves using a custom convolution implementation that avoids unnecessary overhead and leverages the structure of our step functions more effectively.
+
+Additionally, I'll enhance the norm computation to be more accurate for the piecewise linear integration approach that is mentioned in the problem description.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class FastNormCalculator:
+    """Highly optimized norm calculator using numba JIT compilation"""
+
+    @staticmethod
+    @jit(nopython=True, parallel=True)
+    def compute_autoconvolution_fast(f_vals):
+        """Fast autoconvolution computation using numba"""
+        n = len(f_vals)
+        # Autoconvolution size is 2*n - 1
+        g_size = 2 * n - 1
+        g_vals = np.zeros(g_size, dtype=np.float64)
+
+        # Parallel computation of convolution
+        for i in prange(n):
+            for j in range(n):
+                idx = i + j
+                if 0 <= idx < g_size:
+                    g_vals[idx] += f_vals[i] * f_vals[j]
+
+        return g_vals
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_norms_fast(g_vals):
+        """Fast computation of L1, L2², and L∞ norms"""
+        n = len(g_vals)
+
+        l1_norm = 0.0
+        l2_norm_sq = 0.0
+        linf_norm = 0.0
+
+        # Single pass through array
+        for i in range(n):
+            val = g_vals[i]
+            abs_val = abs(val)
+
+            l1_norm += abs_val
+            l2_norm_sq += val * val
+
+            if abs_val > linf_norm:
+                linf_norm = abs_val
+
+        return l1_norm, l2_norm_sq, linf_norm
+=======
+class FastNormCalculator:
+    """Highly optimized norm calculator using numba JIT compilation"""
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_autoconvolution_fast(f_vals):
+        """Fast autoconvolution computation using numba - optimized for step functions"""
+        n = len(f_vals)
+        # Autoconvolution size is 2*n - 1
+        g_size = 2 * n - 1
+        g_vals = np.zeros(g_size, dtype=np.float64)
+
+        # Direct computation without parallelization for better cache usage
+        # and to avoid thread overhead for small arrays
+        for i in range(n):
+            for j in range(n):
+                idx = i + j
+                if 0 <= idx < g_size:
+                    g_vals[idx] += f_vals[i] * f_vals[j]
+
+        return g_vals
+
+    @staticmethod
+    @jit(nopython=True)
+    def compute_norms_fast(g_vals):
+        """Fast computation of L1, L2², and L∞ norms using proper piecewise linear integration"""
+        n = len(g_vals)
+
+        l1_norm = 0.0
+        l2_norm_sq = 0.0
+        linf_norm = 0.0
+
+        # For proper L2 computation using trapezoidal-like integration
+        # Use the formula (dx/3)(y1² + y1*y2 + y2²) for adjacent pairs
+        if n >= 2:
+            # Assuming unit step size, so dx = 1 for our normalized case
+            for i in range(n - 1):
+                y1 = g_vals[i]
+                y2 = g_vals[i+1]
+                # Trapezoidal-like integration for L2 norm squared
+                l2_norm_sq += (1.0/3.0) * (y1*y1 + y1*y2 + y2*y2)
+
+        # For L1 norm, sum the absolute values
+        for i in range(n):
+            abs_val = abs(g_vals[i])
+            l1_norm += abs_val
+            if abs_val > linf_norm:
+                linf_norm = abs_val
+
+        return l1_norm, l2_norm_sq, linf_norm
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhance_initialization_strategies
+</NAME>
+
+<DESCRIPTION>
+The current initialization strategies are basic. We can significantly improve performance by implementing more sophisticated initialization patterns that are known to work well for this type of optimization problem. Specifically, we'll add a new initialization strategy that creates functions with a more structured approach - combining exponential decay with periodic components that tend to produce flatter convolution profiles, which are beneficial for maximizing C₂.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def initialize_population(pop_size: int, min_steps: int, max_steps: int) -> List[List[float]]:
+        """Generate diverse population with multiple strategies"""
+        population = []
+
+        # Strategy 1: Random exponential distribution
+        for _ in range(pop_size // 3):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.exponential(scale=1.0, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 2: Log-normal distribution
+        for _ in range(pop_size // 3):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.lognormal(0, 0.5, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 3: Gaussian bumps pattern
+        for _ in range(pop_size // 3):
+            n_steps = np.random.randint(min_steps, max_steps)
+            # Create some structured pattern with random variations
+            heights = np.zeros(n_steps)
+            # Add some random peaks
+            n_peaks = max(1, n_steps // 20)
+            for _ in range(n_peaks):
+                peak_pos = np.random.randint(0, n_steps)
+                peak_height = np.random.exponential(1.0)
+                # Spread the peak over a few bins
+                spread = max(1, n_steps // 50)
+                for i in range(max(0, peak_pos - spread), min(n_steps, peak_pos + spread)):
+                    heights[i] += peak_height * np.exp(-((i - peak_pos) ** 2) / (2 * spread ** 2))
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Ensure we have exactly pop_size individuals
+        if len(population) < pop_size:
+            # Fill with random ones
+            for i in range(pop_size - len(population)):
+                n_steps = np.random.randint(min_steps, max_steps)
+                heights = np.random.exponential(scale=1.0, size=n_steps)
+                heights = np.maximum(heights, 0)
+                population.append(heights.tolist())
+
+        return population[:pop_size]
+=======
+    @staticmethod
+    def initialize_population(pop_size: int, min_steps: int, max_steps: int) -> List[List[float]]:
+        """Generate diverse population with multiple strategies"""
+        population = []
+
+        # Strategy 1: Random exponential distribution
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.exponential(scale=1.0, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 2: Log-normal distribution
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.random.lognormal(0, 0.5, size=n_steps)
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 3: Gaussian bumps pattern
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            # Create some structured pattern with random variations
+            heights = np.zeros(n_steps)
+            # Add some random peaks
+            n_peaks = max(1, n_steps // 20)
+            for _ in range(n_peaks):
+                peak_pos = np.random.randint(0, n_steps)
+                peak_height = np.random.exponential(1.0)
+                # Spread the peak over a few bins
+                spread = max(1, n_steps // 50)
+                for i in range(max(0, peak_pos - spread), min(n_steps, peak_pos + spread)):
+                    heights[i] += peak_height * np.exp(-((i - peak_pos) ** 2) / (2 * spread ** 2))
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Strategy 4: Structured exponential + periodic pattern (more advanced)
+        for _ in range(pop_size // 4):
+            n_steps = np.random.randint(min_steps, max_steps)
+            heights = np.zeros(n_steps)
+
+            # Create a pattern that decays exponentially from center with periodic modulation
+            center = n_steps // 2
+            decay_factor = 4.0 / n_steps
+
+            for i in range(n_steps):
+                # Exponential decay from center
+                distance_from_center = abs(i - center)
+                exp_decay = np.exp(-decay_factor * distance_from_center)
+
+                # Add periodic modulation to avoid regular patterns
+                period_mod = 1.0 + 0.3 * np.sin(2 * np.pi * i / max(1, n_steps // 8))
+
+                # Add some random component
+                random_component = 0.5 + 0.5 * np.random.random()
+
+                heights[i] = exp_decay * period_mod * random_component
+
+            heights = np.maximum(heights, 0)
+            population.append(heights.tolist())
+
+        # Ensure we have exactly pop_size individuals
+        if len(population) < pop_size:
+            # Fill with random ones
+            for i in range(pop_size - len(population)):
+                n_steps = np.random.randint(min_steps, max_steps)
+                heights = np.random.exponential(scale=1.0, size=n_steps)
+                heights = np.maximum(heights, 0)
+                population.append(heights.tolist())
+
+        return population[:pop_size]
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+refine_adaptive_parameters
+</NAME>
+
+<DESCRIPTION>
+The current adaptive parameter adjustment is quite basic. We can improve performance by implementing a more sophisticated adaptive mechanism that responds more intelligently to the optimization dynamics. This includes adjusting mutation rates based on recent improvement trends and using more informed stopping criteria that consider not just stagnation but also the quality of recent improvements.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+        # Evolution parameters
+        generation = 0
+        # Adaptive parameters
+        mutation_rate = 0.15
+        crossover_rate = 0.8
+        stall_count = 0
+        max_stall = 20
+
+        # Main evolution loop
+        while generation < MAX_GENERATIONS:
+            if time.time() - self.start_time > TIME_LIMIT:
+                break
+
+            generation += 1
+
+            # Elitism
+            elite = self.elitism(population, fitness_scores, ELITISM_COUNT)
+
+            # Selection
+            parents = self.tournament_selection(population, fitness_scores, TOURNAMENT_SIZE)
+
+            # Crossover and mutation
+            new_population = elite.copy()
+            while len(new_population) < BASE_POP_SIZE:
+                p1, p2 = np.random.choice(len(parents), 2, replace=False)
+                child1, child2 = self.crossover(parents[p1], parents[p2])
+
+                child1 = self.mutate(child1, mutation_rate)
+                child2 = self.mutate(child2, mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:BASE_POP_SIZE]
+
+            # Evaluate new population
+            fitness_scores = []
+            for ind in population:
+                fitness_scores.append(self.evaluate_c2_single(ind))
+
+            # Update best solution
+            best_gen_index = np.argmax(fitness_scores)
+            if fitness_scores[best_gen_index] > self.best_fitness:
+                self.best_fitness = fitness_scores[best_gen_index]
+                self.best_individual = population[best_gen_index].copy()
+                stall_count = 0
+                # Increase mutation rate slightly if we're improving
+                mutation_rate = min(0.3, mutation_rate * 1.05)
+            else:
+                stall_count += 1
+                # Decrease mutation rate if we're stuck
+                mutation_rate = max(0.05, mutation_rate * 0.95)
+
+            # Adaptive stopping condition
+            if stall_count > max_stall:
+                # Restart with better initialization
+                population = self.initialize_population(BASE_POP_SIZE, MIN_STEPS, MAX_STEPS)
+                fitness_scores = []
+                for ind in population:
+                    fitness_scores.append(self.evaluate_c2_single(ind))
+                best_gen_index = np.argmax(fitness_scores)
+                self.best_fitness = fitness_scores[best_gen_index]
+                self.best_individual = population[best_gen_index].copy()
+                stall_count = 0
+                mutation_rate = 0.15
+
+        return self.best_individual
+=======
+        # Evolution parameters
+        generation = 0
+        # Adaptive parameters
+        mutation_rate = 0.15
+        crossover_rate = 0.8
+        stall_count = 0
+        max_stall = 15
+        improvement_window = 5
+        recent_improvements = []
+
+        # Main evolution loop
+        while generation < MAX_GENERATIONS:
+            if time.time() - self.start_time > TIME_LIMIT:
+                break
+
+            generation += 1
+
+            # Elitism
+            elite = self.elitism(population, fitness_scores, ELITISM_COUNT)
+
+            # Selection
+            parents = self.tournament_selection(population, fitness_scores, TOURNAMENT_SIZE)
+
+            # Crossover and mutation
+            new_population = elite.copy()
+            while len(new_population) < BASE_POP_SIZE:
+                p1, p2 = np.random.choice(len(parents), 2, replace=False)
+                child1, child2 = self.crossover(parents[p1], parents[p2])
+
+                child1 = self.mutate(child1, mutation_rate)
+                child2 = self.mutate(child2, mutation_rate)
+
+                new_population.extend([child1, child2])
+
+            # Trim to exact population size
+            population = new_population[:BASE_POP_SIZE]
+
+            # Evaluate new population
+            fitness_scores = []
+            for ind in population:
+                fitness_scores.append(self.evaluate_c2_single(ind))
+
+            # Update best solution
+            best_gen_index = np.argmax(fitness_scores)
+            current_best = fitness_scores[best_gen_index]
+
+            if current_best > self.best_fitness:
+                self.best_fitness = current_best
+                self.best_individual = population[best_gen_index].copy()
+                stall_count = 0
+
+                # Track recent improvements for adaptive tuning
+                recent_improvements.append(current_best)
+                if len(recent_improvements) > improvement_window:
+                    recent_improvements.pop(0)
+
+                # Increase mutation rate if we're consistently improving
+                if len(recent_improvements) == improvement_window:
+                    avg_improvement = (recent_improvements[-1] - recent_improvements[0]) / improvement_window
+                    if avg_improvement > 0.0001:  # Significant improvement
+                        mutation_rate = min(0.3, mutation_rate * 1.02)
+            else:
+                stall_count += 1
+                # Decrease mutation rate if we're stuck
+                mutation_rate = max(0.05, mutation_rate * 0.97)
+
+            # More sophisticated adaptive stopping condition
+            if stall_count > max_stall:
+                # Check if recent improvement has plateaued
+                if len(recent_improvements) >= 3:
+                    improvement_rate = (recent_improvements[-1] - recent_improvements[0]) \
+                                     / max(1, len(recent_improvements) - 1)
+                    if improvement_rate < 0.0001:  # Very slow improvement
+                        # Restart with better initialization
+                        population = self.initialize_population(BASE_POP_SIZE, MIN_STEPS, MAX_STEPS)
+                        fitness_scores = []
+                        for ind in population:
+                            fitness_scores.append(self.evaluate_c2_single(ind))
+                        best_gen_index = np.argmax(fitness_scores)
+                        self.best_fitness = fitness_scores[best_gen_index]
+                        self.best_individual = population[best_gen_index].copy()
+                        stall_count = 0
+                        mutation_rate = 0.15
+                        recent_improvements.clear()
+                    else:
+                        # Continue with normal adjustment
+                        mutation_rate = max(0.05, mutation_rate * 0.95)
+                else:
+                    # Restart with better initialization
+                    population = self.initialize_population(BASE_POP_SIZE, MIN_STEPS, MAX_STEPS)
+                    fitness_scores = []
+                    for ind in population:
+                        fitness_scores.append(self.evaluate_c2_single(ind))
+                    best_gen_index = np.argmax(fitness_scores)
+                    self.best_fitness = fitness_scores[best_gen_index]
+                    self.best_individual = population[best_gen_index].copy()
+                    stall_count = 0
+                    mutation_rate = 0.15
+                    recent_improvements.clear()
+
+        return self.best_individual
+>>>>>>> REPLACE
+</DIFF>

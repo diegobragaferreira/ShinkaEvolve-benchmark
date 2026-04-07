@@ -1,0 +1,160 @@
+<NAME>
+enhanced_local_optimization
+</NAME>
+
+<DESCRIPTION>
+The current local optimization approach is very basic and only tries to slightly increase radii. I'll enhance it with a more sophisticated optimization that uses scipy's minimize function to actually optimize positions and radii simultaneously, which should yield much better results than the current greedy approach.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_placement(circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+    """Apply local optimization to improve placement."""
+    # Simple local optimization: move circles to reduce overlaps
+    n = len(circles)
+    for _ in range(max_iter):
+        improved = False
+
+        # Try to move each circle to a better position
+        for i in range(n):
+            original_pos = circles[i].copy()
+            original_radius = circles[i][2]
+
+            # Try to increase radius while maintaining validity
+            max_radius = min(circles[i][0], circles[i][1],
+                           1 - circles[i][0], 1 - circles[i][1])
+
+            # Try to increase radius slightly
+            new_radius = min(original_radius + 0.001, max_radius)
+            if new_radius > original_radius:
+                circles[i][2] = new_radius
+                if not is_valid_configuration(circles):
+                    circles[i][2] = original_radius  # Revert if invalid
+                else:
+                    improved = True
+
+        if not improved:
+            break
+
+    return circles
+=======
+def optimize_placement(circles: np.ndarray, max_iter: int = 100) -> np.ndarray:
+    """Apply advanced local optimization to improve placement."""
+    from scipy.optimize import minimize
+    import warnings
+    warnings.filterwarnings('ignore')
+
+    n = len(circles)
+
+    # Convert to flat array for optimization
+    def objective(params):
+        # Reconstruct circles array
+        temp_circles = circles.copy()
+        for i in range(n):
+            temp_circles[i] = [params[3*i], params[3*i+1], params[3*i+2]]
+
+        # Calculate negative sum of radii (we want to maximize sum of radii)
+        return -np.sum(temp_circles[:, 2])
+
+    def constraint_func(params, i, j):
+        # Distance constraint: distance >= radii_sum
+        temp_circles = circles.copy()
+        for k in range(n):
+            temp_circles[k] = [params[3*k], params[3*k+1], params[3*k+2]]
+
+        x1, y1, r1 = temp_circles[i]
+        x2, y2, r2 = temp_circles[j]
+        distance_sq = (x1 - x2)**2 + (y1 - y2)**2
+        return distance_sq - (r1 + r2)**2
+
+    # Create bounds for optimization
+    bounds = []
+    for i in range(n):
+        bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.5)])  # x, y, r bounds
+
+    # Create constraints for non-overlap
+    constraints = []
+    for i in range(n):
+        for j in range(i+1, n):
+            constraints.append({'type': 'ineq', 'fun': lambda p, i=i, j=j: constraint_func(p, i, j)})
+
+    # Add boundary constraints (containment)
+    for i in range(n):
+        def containment_x(p, i=i):
+            temp_circles = circles.copy()
+            for k in range(n):
+                temp_circles[k] = [p[3*k], p[3*k+1], p[3*k+2]]
+            return temp_circles[i][0] - temp_circles[i][2]  # x - r >= 0
+        def containment_y(p, i=i):
+            temp_circles = circles.copy()
+            for k in range(n):
+                temp_circles[k] = [p[3*k], p[3*k+1], p[3*k+2]]
+            return temp_circles[i][1] - temp_circles[i][2]  # y - r >= 0
+        def containment_x_max(p, i=i):
+            temp_circles = circles.copy()
+            for k in range(n):
+                temp_circles[k] = [p[3*k], p[3*k+1], p[3*k+2]]
+            return temp_circles[i][2] - (1 - temp_circles[i][0])  # r - (1-x) <= 0
+        def containment_y_max(p, i=i):
+            temp_circles = circles.copy()
+            for k in range(n):
+                temp_circles[k] = [p[3*k], p[3*k+1], p[3*k+2]]
+            return temp_circles[i][2] - (1 - temp_circles[i][1])  # r - (1-y) <= 0
+
+        constraints.append({'type': 'ineq', 'fun': containment_x})
+        constraints.append({'type': 'ineq', 'fun': containment_y})
+        constraints.append({'type': 'ineq', 'fun': containment_x_max})
+        constraints.append({'type': 'ineq', 'fun': containment_y_max})
+
+    # Initialize parameters
+    initial_params = []
+    for i in range(n):
+        initial_params.extend([circles[i][0], circles[i][1], circles[i][2]])
+
+    # Perform optimization
+    try:
+        result = minimize(objective,
+                         initial_params,
+                         method='SLSQP',
+                         bounds=bounds,
+                         constraints=constraints,
+                         options={'maxiter': 50, 'ftol': 1e-6})
+
+        if result.success:
+            # Convert back to circles array
+            optimized_circles = circles.copy()
+            for i in range(n):
+                optimized_circles[i] = [result.x[3*i], result.x[3*i+1], result.x[3*i+2]]
+            return optimized_circles
+    except:
+        pass
+
+    # Fallback to simple optimization if scipy fails
+    # Simple local optimization: move circles to reduce overlaps
+    for _ in range(max_iter):
+        improved = False
+
+        # Try to move each circle to a better position
+        for i in range(n):
+            original_pos = circles[i].copy()
+            original_radius = circles[i][2]
+
+            # Try to increase radius while maintaining validity
+            max_radius = min(circles[i][0], circles[i][1],
+                           1 - circles[i][0], 1 - circles[i][1])
+
+            # Try to increase radius slightly
+            new_radius = min(original_radius + 0.001, max_radius)
+            if new_radius > original_radius:
+                circles[i][2] = new_radius
+                if not is_valid_configuration(circles):
+                    circles[i][2] = original_radius  # Revert if invalid
+                else:
+                    improved = True
+
+        if not improved:
+            break
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>

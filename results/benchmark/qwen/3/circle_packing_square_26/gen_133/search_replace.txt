@@ -1,0 +1,360 @@
+<NAME>
+add_adaptive_grid_resolution
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive grid resolution system that dynamically adjusts the spatial grid density based on the current state of the optimization. This approach will provide coarse-grained search in early generations for rapid exploration, then switch to fine-grained search in later generations for precise overlap detection and optimization. This builds upon the existing spatial indexing but makes it smarter by adapting to the problem complexity.
+
+The key insight is that in early generations, we want to quickly identify broad regions of overlap, so a coarse grid suffices. In later generations when solutions are nearly optimal, we need precise overlap detection to make small improvements. This will significantly improve both convergence speed and final solution quality.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# Global constants
+POPULATION_SIZE = 150
+GENERATIONS = 200
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.2
+MUTATION_RATE_END = 0.005
+CROSSOVER_PROB = 0.9
+VALIDITY_THRESHOLD = 1e-6
+INITIAL_GRID_SIZE = 20
+
+def poisson_disk_sampling(n_points: int, min_distance: float = 0.1) -> List[Tuple[float, float]]:
+=======
+# Global constants
+POPULATION_SIZE = 150
+GENERATIONS = 200
+TOURNAMENT_SIZE = 5
+MUTATION_RATE_START = 0.2
+MUTATION_RATE_END = 0.005
+CROSSOVER_PROB = 0.9
+VALIDITY_THRESHOLD = 1e-6
+INITIAL_GRID_SIZE = 20
+ADAPTIVE_GRID_START_GEN = 50
+ADAPTIVE_GRID_FINE_RES = 30
+
+def poisson_disk_sampling(n_points: int, min_distance: float = 0.1) -> List[Tuple[float, float]]:
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def get_grid_cells(circles: np.ndarray, grid_size: int = INITIAL_GRID_SIZE) -> dict:
+    """Create a spatial grid for fast neighbor lookups."""
+    grid = {}
+    cell_size = 1.0 / grid_size
+
+    for i, (x, y, r) in enumerate(circles):
+        # Determine which grid cells this circle might occupy
+        min_x_cell = max(0, int((x - r) / cell_size))
+        max_x_cell = min(grid_size - 1, int((x + r) / cell_size))
+        min_y_cell = max(0, int((y - r) / cell_size))
+        max_y_cell = min(grid_size - 1, int((y + r) / cell_size))
+
+        for gx in range(min_x_cell, max_x_cell + 1):
+            for gy in range(min_y_cell, max_y_cell + 1):
+                if (gx, gy) not in grid:
+                    grid[(gx, gy)] = []
+                grid[(gx, gy)].append(i)
+
+    return grid
+
+def check_overlap_efficient(circles: np.ndarray, grid: dict = None) -> bool:
+    """Check if any circles overlap using spatial grid indexing."""
+    if len(circles) <= 1:
+        return False
+
+    if grid is None:
+        grid = get_grid_cells(circles, INITIAL_GRID_SIZE)
+
+    # For each cell, check pairs of circles
+    for (gx, gy), indices in grid.items():
+        for i in range(len(indices)):
+            for j in range(i+1, len(indices)):
+                idx1, idx2 = indices[i], indices[j]
+                x1, y1, r1 = circles[idx1]
+                x2, y2, r2 = circles[idx2]
+
+                distance = calculate_distance((x1, y1), (x2, y2))
+                if distance < (r1 + r2 - VALIDITY_THRESHOLD):
+                    return True
+
+    return False
+=======
+def get_grid_cells(circles: np.ndarray, grid_size: int = INITIAL_GRID_SIZE, adaptive: bool = False, generation: int = 0) -> dict:
+    """Create a spatial grid for fast neighbor lookups."""
+    # Adjust grid size for adaptive resolution
+    if adaptive and generation >= ADAPTIVE_GRID_START_GEN:
+        grid_size = ADAPTIVE_GRID_FINE_RES
+
+    grid = {}
+    cell_size = 1.0 / grid_size
+
+    for i, (x, y, r) in enumerate(circles):
+        # Determine which grid cells this circle might occupy
+        min_x_cell = max(0, int((x - r) / cell_size))
+        max_x_cell = min(grid_size - 1, int((x + r) / cell_size))
+        min_y_cell = max(0, int((y - r) / cell_size))
+        max_y_cell = min(grid_size - 1, int((y + r) / cell_size))
+
+        for gx in range(min_x_cell, max_x_cell + 1):
+            for gy in range(min_y_cell, max_y_cell + 1):
+                if (gx, gy) not in grid:
+                    grid[(gx, gy)] = []
+                grid[(gx, gy)].append(i)
+
+    return grid
+
+def check_overlap_efficient(circles: np.ndarray, grid: dict = None, adaptive: bool = False, generation: int = 0) -> bool:
+    """Check if any circles overlap using spatial grid indexing."""
+    if len(circles) <= 1:
+        return False
+
+    if grid is None:
+        grid = get_grid_cells(circles, INITIAL_GRID_SIZE, adaptive, generation)
+
+    # For each cell, check pairs of circles
+    for (gx, gy), indices in grid.items():
+        for i in range(len(indices)):
+            for j in range(i+1, len(indices)):
+                idx1, idx2 = indices[i], indices[j]
+                x1, y1, r1 = circles[idx1]
+                x2, y2, r2 = circles[idx2]
+
+                distance = calculate_distance((x1, y1), (x2, y2))
+                if distance < (r1 + r2 - VALIDITY_THRESHOLD):
+                    return True
+
+    return False
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def compute_penalty(circles: np.ndarray, generation: int = 0, total_generations: int = 100) -> float:
+    """Compute penalty based on constraint violations with progressive scaling."""
+    penalty = 0.0
+
+    # Dynamic penalty scaling factor
+    penalty_scale = 1.0 + (generation / total_generations) * 5.0
+
+    # Check containment violations with scaled penalties
+    for x, y, r in circles:
+        # Boundary violations
+        if x - r < 0:
+            penalty += (abs(x - r) ** 2) * 10000 * penalty_scale
+        elif x + r > 1:
+            penalty += (abs(x + r - 1) ** 2) * 10000 * penalty_scale
+        if y - r < 0:
+            penalty += (abs(y - r) ** 2) * 10000 * penalty_scale
+        elif y + r > 1:
+            penalty += (abs(y + r - 1) ** 2) * 10000 * penalty_scale
+
+    # Check overlap violations with scaled penalties
+    grid = get_grid_cells(circles, INITIAL_GRID_SIZE)
+    if check_overlap_efficient(circles, grid):
+        penalty += 10000000.0 * penalty_scale
+
+    return penalty
+=======
+def compute_penalty(circles: np.ndarray, generation: int = 0, total_generations: int = 100) -> float:
+    """Compute penalty based on constraint violations with progressive scaling."""
+    penalty = 0.0
+
+    # Dynamic penalty scaling factor
+    penalty_scale = 1.0 + (generation / total_generations) * 5.0
+
+    # Check containment violations with scaled penalties
+    for x, y, r in circles:
+        # Boundary violations
+        if x - r < 0:
+            penalty += (abs(x - r) ** 2) * 10000 * penalty_scale
+        elif x + r > 1:
+            penalty += (abs(x + r - 1) ** 2) * 10000 * penalty_scale
+        if y - r < 0:
+            penalty += (abs(y - r) ** 2) * 10000 * penalty_scale
+        elif y + r > 1:
+            penalty += (abs(y + r - 1) ** 2) * 10000 * penalty_scale
+
+    # Check overlap violations with scaled penalties
+    grid = get_grid_cells(circles, INITIAL_GRID_SIZE, adaptive=True, generation=generation)
+    if check_overlap_efficient(circles, grid, adaptive=True, generation=generation):
+        penalty += 10000000.0 * penalty_scale
+
+    return penalty
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_fitness(circles: np.ndarray, generation: int = 0, total_generations: int = 100) -> float:
+    """Evaluate fitness of a circle configuration."""
+    # If invalid, heavily penalize
+    if not check_containment(circles) or check_overlap_efficient(circles):
+        penalty = compute_penalty(circles, generation, total_generations)
+        return -penalty
+
+    # Otherwise, return total radius
+    total_radius = np.sum(circles[:, 2])
+    return total_radius
+=======
+def evaluate_fitness(circles: np.ndarray, generation: int = 0, total_generations: int = 100) -> float:
+    """Evaluate fitness of a circle configuration."""
+    # If invalid, heavily penalize
+    if not check_containment(circles) or check_overlap_efficient(circles, adaptive=True, generation=generation):
+        penalty = compute_penalty(circles, generation, total_generations)
+        return -penalty
+
+    # Otherwise, return total radius
+    total_radius = np.sum(circles[:, 2])
+    return total_radius
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def local_refinement(circles: np.ndarray, max_iterations: int = 20) -> np.ndarray:
+    """Apply intensive local refinement to improve overlap resolution and constraint satisfaction."""
+    refined = circles.copy()
+
+    for iteration in range(max_iterations):
+        grid = get_grid_cells(refined, INITIAL_GRID_SIZE)
+
+        # Check for overlaps and resolve them with more aggressive force-based approach
+        resolved = False
+        for i in range(len(refined)):
+            for j in range(i+1, len(refined)):
+                xi, yi, ri = refined[i]
+                xj, yj, rj = refined[j]
+                dist = calculate_distance((xi, yi), (xj, yj))
+
+                if dist < (ri + rj - VALIDITY_THRESHOLD):
+                    # More aggressive overlap resolution with better force distribution
+                    dx = xj - xi
+                    dy = yj - yi
+                    distance = max(VALIDITY_THRESHOLD, dist)
+
+                    # Normalize direction vector
+                    dx /= distance
+                    dy /= distance
+
+                    # Move circles apart with enhanced force scaling
+                    move_amount = (ri + rj - dist) * 0.7  # Increased from 0.5
+
+                    # Scale by inverse radii to better balance movement
+                    scale_factor = min(1.0, ri / (ri + rj + 0.001))
+                    refined[i, 0] -= dx * move_amount * scale_factor * 0.5  # Increased from 0.3
+                    refined[i, 1] -= dy * move_amount * scale_factor * 0.5
+                    refined[j, 0] += dx * move_amount * (1 - scale_factor) * 0.5
+                    refined[j, 1] += dy * move_amount * (1 - scale_factor) * 0.5
+                    resolved = True
+
+        # Enforce bounds with more precise constraint handling
+        for i in range(len(refined)):
+            x, y, r = refined[i]
+            # Ensure the circle fits properly in the unit square
+            max_radius = min(x, 1-x, y, 1-y)
+            r = min(r, max_radius)
+            r = max(0.001, r)
+
+            # Clamp coordinates to valid range
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+            refined[i] = [x, y, r]
+
+        # Early stopping if no changes made
+        if not resolved:
+            break
+
+    return refined
+=======
+def local_refinement(circles: np.ndarray, max_iterations: int = 20, generation: int = 0) -> np.ndarray:
+    """Apply intensive local refinement to improve overlap resolution and constraint satisfaction."""
+    refined = circles.copy()
+
+    for iteration in range(max_iterations):
+        grid = get_grid_cells(refined, INITIAL_GRID_SIZE, adaptive=True, generation=generation)
+
+        # Check for overlaps and resolve them with more aggressive force-based approach
+        resolved = False
+        for i in range(len(refined)):
+            for j in range(i+1, len(refined)):
+                xi, yi, ri = refined[i]
+                xj, yj, rj = refined[j]
+                dist = calculate_distance((xi, yi), (xj, yj))
+
+                if dist < (ri + rj - VALIDITY_THRESHOLD):
+                    # More aggressive overlap resolution with better force distribution
+                    dx = xj - xi
+                    dy = yj - yi
+                    distance = max(VALIDITY_THRESHOLD, dist)
+
+                    # Normalize direction vector
+                    dx /= distance
+                    dy /= distance
+
+                    # Move circles apart with enhanced force scaling
+                    move_amount = (ri + rj - dist) * 0.7  # Increased from 0.5
+
+                    # Scale by inverse radii to better balance movement
+                    scale_factor = min(1.0, ri / (ri + rj + 0.001))
+                    refined[i, 0] -= dx * move_amount * scale_factor * 0.5  # Increased from 0.3
+                    refined[i, 1] -= dy * move_amount * scale_factor * 0.5
+                    refined[j, 0] += dx * move_amount * (1 - scale_factor) * 0.5
+                    refined[j, 1] += dy * move_amount * (1 - scale_factor) * 0.5
+                    resolved = True
+
+        # Enforce bounds with more precise constraint handling
+        for i in range(len(refined)):
+            x, y, r = refined[i]
+            # Ensure the circle fits properly in the unit square
+            max_radius = min(x, 1-x, y, 1-y)
+            r = min(r, max_radius)
+            r = max(0.001, r)
+
+            # Clamp coordinates to valid range
+            x = max(r, min(1-r, x))
+            y = max(r, min(1-r, y))
+            refined[i] = [x, y, r]
+
+        # Early stopping if no changes made
+        if not resolved:
+            break
+
+    return refined
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+            # Apply local refinement in later generations for better exploitation
+            if gen >= GENERATIONS * 0.7:  # Start local refinement in later generations
+                child = local_refinement(child)
+=======
+            # Apply local refinement in later generations for better exploitation
+            if gen >= GENERATIONS * 0.7:  # Start local refinement in later generations
+                child = local_refinement(child, generation=gen)
+>>>>>>> REPLACE
+
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Final local refinement on the best solution
+    best_solution = local_refinement(best_solution, max_iterations=30)
+=======
+    # Final local refinement on the best solution
+    best_solution = local_refinement(best_solution, max_iterations=30, generation=GENERATIONS)
+>>>>>>> REPLACE

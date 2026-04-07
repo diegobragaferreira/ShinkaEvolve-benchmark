@@ -1,0 +1,114 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+import math
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def compute_min_max_ratio(points):
+        """Computes the ratio of minimum to maximum pairwise distances."""
+        if len(points) < 2:
+            return 0.0
+            
+        # Compute pairwise distances
+        distances = pdist(points)
+        dmin = np.min(distances)
+        dmax = np.max(distances)
+        
+        # Handle edge case where all points are identical
+        if dmax == 0:
+            return 0.0
+            
+        return dmin / dmax
+    
+    def initialize_hexagonal_grid():
+        """Initialize points on a hexagonal grid pattern."""
+        # Create a hexagonal lattice arrangement
+        rows = 4
+        cols = 4
+        
+        points = []
+        for i in range(rows):
+            for j in range(cols):
+                x = j + 0.5 * (i % 2)
+                y = i * math.sqrt(3) / 2
+                points.append([x, y])
+        
+        # Normalize to [0,1] x [0,1]
+        points = np.array(points)
+        
+        # Scale and shift to fit in unit square
+        x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+        y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+        
+        if x_range > 0:
+            points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+        if y_range > 0:
+            points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+            
+        # Add slight random perturbation to break symmetry
+        np.random.seed(42)
+        points += np.random.normal(0, 0.01, points.shape)
+        
+        # Clip to [0,1] bounds
+        points = np.clip(points, 0, 1)
+        
+        return points
+    
+    def optimize_points(initial_points, max_iterations=5000, initial_temp=1.0, cooling_rate=0.9995):
+        """Optimize point configuration using simulated annealing."""
+        current_points = initial_points.copy()
+        best_points = current_points.copy()
+        best_ratio = compute_min_max_ratio(current_points)
+        
+        temperature = initial_temp
+        
+        for iteration in range(max_iterations):
+            # Create neighbor solution by perturbing one point
+            neighbor_points = current_points.copy()
+            
+            # Select random point to perturb
+            point_idx = np.random.randint(len(neighbor_points))
+            
+            # Apply small random perturbation
+            neighbor_points[point_idx] += np.random.normal(0, 0.001, 2)
+            
+            # Boundary clipping
+            neighbor_points[point_idx] = np.clip(neighbor_points[point_idx], 0, 1)
+            
+            # Evaluate neighbor
+            neighbor_ratio = compute_min_max_ratio(neighbor_points)
+            
+            # Accept or reject based on Metropolis criterion
+            if neighbor_ratio > best_ratio:
+                current_points = neighbor_points
+                best_points = neighbor_points
+                best_ratio = neighbor_ratio
+            elif np.random.rand() < math.exp((neighbor_ratio - best_ratio) / temperature):
+                current_points = neighbor_points
+                
+            # Cool down temperature
+            temperature *= cooling_rate
+            
+            # Early stopping if improvement is minimal
+            if iteration % 100 == 0 and iteration > 0:
+                if abs(best_ratio - compute_min_max_ratio(best_points)) < 1e-8:
+                    break
+                    
+        return best_points
+    
+    # Initialize points using hexagonal grid method
+    initial_points = initialize_hexagonal_grid()
+    
+    # Optimize using simulated annealing
+    optimized_points = optimize_points(initial_points)
+    
+    return optimized_points
+
+# EVOLVE-BLOCK-END

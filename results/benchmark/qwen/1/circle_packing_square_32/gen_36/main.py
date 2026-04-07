@@ -1,0 +1,146 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import cdist
+
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+def _compute_voronoi_circles(points, max_iter=50):
+    """Compute circle placement using Voronoi-based strategy."""
+    # Generate Voronoi diagram
+    vor = Voronoi(points)
+
+    # Get Voronoi vertices
+    vertices = vor.vertices
+
+    # Filter vertices that are inside the unit square
+    valid_vertices = []
+    for vertex in vertices:
+        if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+            valid_vertices.append(vertex)
+
+    if len(valid_vertices) < 32:
+        # If not enough vertices, sample more points
+        extra_points = np.random.rand(100, 2)
+        vor_extra = Voronoi(np.vstack([points, extra_points]))
+        vertices_extra = vor_extra.vertices
+        for vertex in vertices_extra:
+            if 0 <= vertex[0] <= 1 and 0 <= vertex[1] <= 1:
+                valid_vertices.append(vertex)
+
+    # Select 32 best candidates based on distance from boundaries
+    selected_vertices = []
+    for vertex in valid_vertices:
+        # Distance to boundaries
+        dist_to_boundaries = [
+            vertex[0],           # distance to left boundary
+            1 - vertex[0],       # distance to right boundary
+            vertex[1],           # distance to bottom boundary
+            1 - vertex[1]        # distance to top boundary
+        ]
+        min_dist = min(dist_to_boundaries)
+        selected_vertices.append((vertex[0], vertex[1], min_dist))
+
+    # Sort by minimum distance to boundary (descending) and select top 32
+    selected_vertices.sort(key=lambda x: x[2], reverse=True)
+    selected_vertices = selected_vertices[:32]
+
+    return np.array([[v[0], v[1], v[2]/2.0] for v in selected_vertices])
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # Fixed seed for reproducibility
+
+    n = 32
+    circles = np.zeros((n, 3))
+
+    # Start with random points to generate Voronoi structure
+    initial_points = np.random.rand(50, 2)
+
+    # Try multiple initialization attempts
+    best_score = 0
+    best_circles = None
+
+    for attempt in range(5):
+        try:
+            # Generate Voronoi-based initialization
+            init_circles = _compute_voronoi_circles(initial_points)
+
+            # Set initial radii to half the minimum distance to boundary
+            for i in range(n):
+                x, y = init_circles[i, 0], init_circles[i, 1]
+                # Compute maximum possible radius at this position
+                max_radius = min(x, 1-x, y, 1-y)
+                init_circles[i, 2] = max_radius
+
+            # Validate initial configuration
+            if _validate_circles(init_circles):
+                # Compute score for this initialization
+                score = np.sum(init_circles[:, 2])
+                if score > best_score:
+                    best_score = score
+                    best_circles = init_circles.copy()
+        except Exception as e:
+            continue
+
+        # Generate new random points for next attempt
+        initial_points = np.random.rand(50, 2)
+
+    # If we couldn't find a good initialization, fall back to uniform spread
+    if best_circles is None:
+        # Create a basic uniform spread
+        side_length = int(np.ceil(np.sqrt(n)))
+        spacing_x = 1.0 / (side_length + 1)
+        spacing_y = 1.0 / (side_length + 1)
+
+        circles = []
+        idx = 0
+        for i in range(side_length):
+            for j in range(side_length):
+                if idx >= n:
+                    break
+                x = (i + 1) * spacing_x
+                y = (j + 1) * spacing_y
+                # Radius based on distance to nearest boundary
+                r = min(x, 1-x, y, 1-y)
+                circles.append([x, y, r])
+                idx += 1
+            if idx >= n:
+                break
+
+        # Pad if needed
+        while len(circles) < n:
+            circles.append([0.5, 0.5, 0.1])
+
+        best_circles = np.array(circles[:n])
+
+    return best_circles
+
+def _validate_circles(circles):
+    """Validate that circles don't overlap and are within bounds."""
+    n = len(circles)
+    # Check containment
+    for i in range(n):
+        x, y, r = circles[i]
+        if r <= 0 or x < r or x > 1-r or y < r or y > 1-r:
+            return False
+
+    # Check for overlaps
+    for i in range(n):
+        for j in range(i+1, n):
+            x1, y1, r1 = circles[i]
+            x2, y2, r2 = circles[j]
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+            if distance < r1 + r2:
+                return False
+
+    return True
+
+
+# EVOLVE-BLOCK-END

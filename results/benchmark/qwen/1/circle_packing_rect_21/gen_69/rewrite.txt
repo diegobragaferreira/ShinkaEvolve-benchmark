@@ -1,0 +1,496 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+from typing import Tuple, List
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+def check_constraints(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Efficiently check if all circles satisfy the constraints with early termination."""
+    n = len(circles)
+    
+    # Check boundary constraints first
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+    
+    # Use grid-based spatial hashing for efficient overlap checking
+    if n > 1:
+        # Create a grid for spatial indexing
+        cell_size = np.min([rect_width, rect_height]) * 0.2  # Cell size based on rectangle dimensions
+        if cell_size <= 0:
+            cell_size = 0.1
+
+        # Calculate grid dimensions
+        grid_width = int(np.ceil(rect_width / cell_size))
+        grid_height = int(np.ceil(rect_height / cell_size))
+
+        # Initialize grid with empty lists
+        grid = [[[] for _ in range(grid_height)] for _ in range(grid_width)]
+
+        # Place circles into grid cells
+        for i in range(n):
+            x, y, r = circles[i]
+            # Find all cells this circle might overlap with
+            min_col = max(0, int((x - r) / cell_size))
+            max_col = min(grid_width - 1, int((x + r) / cell_size))
+            min_row = max(0, int((y - r) / cell_size))
+            max_row = min(grid_height - 1, int((y + r) / cell_size))
+
+            # Add circle index to all relevant grid cells
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    grid[col][row].append(i)
+
+        # Check neighbors in grid cells for overlaps
+        for i in range(n):
+            x1, y1, r1 = circles[i]
+            # Find all cells this circle might overlap with
+            min_col = max(0, int((x1 - r1) / cell_size))
+            max_col = min(grid_width - 1, int((x1 + r1) / cell_size))
+            min_row = max(0, int((y1 - r1) / cell_size))
+            max_row = min(grid_height - 1, int((y1 + r1) / cell_size))
+
+            # Check neighboring cells
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    # Check all circles in this cell
+                    for j in grid[col][row]:
+                        if i != j:  # Don't compare with self
+                            x2, y2, r2 = circles[j]
+                            distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                            if distance < (r1 + r2):
+                                return False
+
+    return True
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as the sum of radii with constraint validation."""
+    if not check_constraints(circles):
+        return -np.inf
+    
+    return np.sum(circles[:, 2])
+
+def create_hexagonal_initial_solution(rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Create initial solution using hexagonal lattice pattern for better packing efficiency."""
+    circles = np.zeros((21, 3))
+    
+    # Hexagonal grid parameters
+    # Determine grid dimensions
+    rows = int(np.ceil(np.sqrt(21)))
+    cols = int(np.ceil(21 / rows))
+    
+    # Adjust for rectangular container
+    if rect_width >= rect_height:
+        # Width is larger, arrange horizontally
+        grid_width = rect_width * 0.9
+        grid_height = rect_height * 0.9
+    else:
+        # Height is larger, arrange vertically
+        grid_width = rect_width * 0.9
+        grid_height = rect_height * 0.9
+    
+    # Calculate spacing based on rectangle dimensions
+    cell_width = grid_width / cols
+    cell_height = grid_height / rows
+    min_cell_dim = min(cell_width, cell_height)
+    
+    # Hexagon radius (circles should fit comfortably)
+    hex_radius = min_cell_dim * 0.4
+    
+    # Arrange in hexagonal pattern
+    placed = 0
+    for row in range(rows):
+        if placed >= 21:
+            break
+        for col in range(cols):
+            if placed >= 21:
+                break
+                
+            # Offset every other row for hexagonal pattern
+            offset = (row % 2) * (cell_width / 2)
+            x = offset + col * cell_width + cell_width / 2
+            y = row * cell_height + cell_height / 2
+            
+            # Ensure we're within bounds
+            x = np.clip(x, hex_radius, rect_width - hex_radius)
+            y = np.clip(y, hex_radius, rect_height - hex_radius)
+            
+            # Adjust radius to prevent boundary issues
+            max_radius = min(x, y, rect_width - x, rect_height - y)
+            r = min(hex_radius, max_radius * 0.8)
+            
+            circles[placed] = [x, y, r]
+            placed += 1
+    
+    # Fill remaining positions with small random circles
+    for i in range(placed, 21):
+        # Place remaining circles randomly but within bounds
+        x = np.random.uniform(hex_radius, rect_width - hex_radius)
+        y = np.random.uniform(hex_radius, rect_height - hex_radius)
+        r = np.random.uniform(0.005, hex_radius * 0.5)
+        circles[i] = [x, y, r]
+        
+    return circles
+
+def create_initial_solution(rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Create a high-quality initial solution using a modified greedy approach."""
+    circles = np.zeros((21, 3))
+    
+    # Start with a few well-placed circles to provide good foundation
+    # Place some circles in corners and center for better distribution
+    corner_positions = [
+        (0.2, 0.2), (rect_width - 0.2, 0.2),
+        (0.2, rect_height - 0.2), (rect_width - 0.2, rect_height - 0.2),
+        (rect_width/2, rect_height/2)
+    ]
+    
+    placed = 0
+    
+    # Place some initial circles in strategic positions
+    for i, (x, y) in enumerate(corner_positions):
+        if placed >= 21:
+            break
+        r = min(x, y, rect_width - x, rect_height - y) * 0.15
+        circles[placed] = [x, y, r]
+        placed += 1
+    
+    # Fill remaining positions with greedy placement
+    max_attempts = 10000
+    for attempt in range(max_attempts):
+        if placed >= 21:
+            break
+            
+        # Try to place a circle near the center with some randomness
+        x = np.random.uniform(0.1, rect_width - 0.1)
+        y = np.random.uniform(0.1, rect_height - 0.1)
+        r = np.random.uniform(0.01, min(x, y, rect_width - x, rect_height - y) * 0.3)
+        
+        # Check if this circle would overlap with any existing circle
+        valid_placement = True
+        for i in range(placed):
+            existing_x, existing_y, existing_r = circles[i]
+            distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+            if distance < (r + existing_r):
+                valid_placement = False
+                break
+        
+        # Check boundary constraints
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            valid_placement = False
+            
+        if valid_placement:
+            circles[placed] = [x, y, r]
+            placed += 1
+    
+    # Fill remaining positions with zeros if needed
+    for i in range(placed, 21):
+        circles[i] = [0, 0, 0]
+        
+    return circles
+
+def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Improved mutation operator with adaptive parameters and criticality awareness."""
+    mutated = circles.copy()
+    
+    for i in range(21):
+        if np.random.random() < 0.25:  # 25% mutation rate
+            # Choose mutation type with bias towards position (70%)
+            mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+            
+            if mutation_type == 'position':
+                # Mutate position with adaptive step size
+                step_size = 0.05 + np.random.random() * 0.05
+                mutated[i, 0] += np.random.normal(0, step_size)
+                mutated[i, 1] += np.random.normal(0, step_size)
+                
+                # Boundary awareness
+                mutated[i, 0] = np.clip(mutated[i, 0], mutated[i, 2], rect_width - mutated[i, 2])
+                mutated[i, 1] = np.clip(mutated[i, 1], mutated[i, 2], rect_height - mutated[i, 2])
+            else:
+                # Mutate radius with log-normal distribution
+                scale_factor = np.exp(np.random.normal(0, 0.2))
+                mutated[i, 2] *= scale_factor
+                mutated[i, 2] = max(0.001, mutated[i, 2])
+                
+                # Boundary awareness for radius
+                max_possible_radius = min(mutated[i, 0], mutated[i, 1], 
+                                        rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+    
+    return mutated
+
+def crossover(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Improved crossover operator with blending and selective inheritance."""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+    
+    # Uniform crossover with blending
+    for i in range(21):
+        # For positions and radii, use uniform crossover with blending
+        if np.random.random() < 0.5:
+            child1[i] = parent2[i]
+            child2[i] = parent1[i]
+        else:
+            # Apply blending for smooth transitions
+            # Position blending
+            blend_factor = np.random.random() * 0.6 + 0.2  # Blend factor [0.2, 0.8]
+            child1[i, :2] = parent1[i, :2] * blend_factor + parent2[i, :2] * (1 - blend_factor)
+            child2[i, :2] = parent1[i, :2] * (1 - blend_factor) + parent2[i, :2] * blend_factor
+            
+            # Radius blending with weighted averaging
+            alpha = np.random.random() * 0.6 + 0.2  # Blend factor [0.2, 0.8]
+            child1[i, 2] = parent1[i, 2] * alpha + parent2[i, 2] * (1 - alpha)
+            child2[i, 2] = parent1[i, 2] * (1 - alpha) + parent2[i, 2] * alpha
+            
+            # Add small random variation to radii
+            if np.random.random() < 0.2:
+                child1[i, 2] *= np.random.normal(1, 0.1)
+            if np.random.random() < 0.2:
+                child2[i, 2] *= np.random.normal(1, 0.1)
+            
+            # Ensure radii remain positive
+            child1[i, 2] = max(0.001, child1[i, 2])
+            child2[i, 2] = max(0.001, child2[i, 2])
+    
+    return child1, child2
+
+def repair_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Enhanced repair mechanism for fixing constraint violations."""
+    repaired = circles.copy()
+    
+    # Ensure positive radii
+    repaired[:, 2] = np.maximum(repaired[:, 2], 0.001)
+    
+    # Enforce bounds
+    for i in range(len(repaired)):
+        x, y, r = repaired[i]
+        x = np.clip(x, r, rect_width - r)
+        y = np.clip(y, r, rect_height - r)
+        repaired[i] = [x, y, r]
+    
+    # Resolve overlaps iteratively with better algorithm
+    for iteration in range(100):
+        # Calculate pairwise distances
+        positions = repaired[:, :2]
+        radii = repaired[:, 2]
+        distances = cdist(positions, positions)
+        
+        conflicts = []
+        for i in range(len(repaired)):
+            for j in range(i+1, len(repaired)):
+                if distances[i, j] < (radii[i] + radii[j]):
+                    conflicts.append((i, j))
+        
+        if not conflicts:
+            break
+            
+        # Move conflicting pairs apart with intelligent algorithm
+        for i, j in conflicts:
+            x1, y1, r1 = repaired[i]
+            x2, y2, r2 = repaired[j]
+            
+            dx = x2 - x1
+            dy = y2 - y1
+            distance = np.sqrt(dx*dx + dy*dy)
+            
+            if distance > 0:
+                # Move circles away from each other
+                move_distance = (r1 + r2 - distance) / 2
+                dx_norm = dx / distance
+                dy_norm = dy / distance
+                
+                # Apply movement with bounded adjustment and penalty for boundary proximity
+                move1 = move_distance * r2 / (r1 + r2 + 1e-8)
+                move2 = move_distance * r1 / (r1 + r2 + 1e-8)
+                
+                # Boundary penalties
+                boundary_penalty1 = 0
+                boundary_penalty2 = 0
+                
+                if x1 <= r1 * 1.5 or x1 >= rect_width - r1 * 1.5 or y1 <= r1 * 1.5 or y1 >= rect_height - r1 * 1.5:
+                    boundary_penalty1 = 1.0
+                    
+                if x2 <= r2 * 1.5 or x2 >= rect_width - r2 * 1.5 or y2 <= r2 * 1.5 or y2 >= rect_height - r2 * 1.5:
+                    boundary_penalty2 = 1.0
+                
+                # Weighted movement
+                total_penalty = boundary_penalty1 + boundary_penalty2
+                weight1 = (1 + boundary_penalty1) / (total_penalty + 1e-8)
+                weight2 = (1 + boundary_penalty2) / (total_penalty + 1e-8)
+                
+                move1 = move_distance * weight2 / (weight1 + weight2 + 1e-8)
+                move2 = move_distance * weight1 / (weight1 + weight2 + 1e-8)
+                
+                repaired[i, 0] -= dx_norm * move1 * 0.5
+                repaired[i, 1] -= dy_norm * move1 * 0.5
+                repaired[j, 0] += dx_norm * move2 * 0.5
+                repaired[j, 1] += dy_norm * move2 * 0.5
+                
+                # Keep within bounds
+                repaired[i, 0] = np.clip(repaired[i, 0], r1, rect_width - r1)
+                repaired[i, 1] = np.clip(repaired[i, 1], r1, rect_height - r1)
+                repaired[j, 0] = np.clip(repaired[j, 0], r2, rect_width - r2)
+                repaired[j, 1] = np.clip(repaired[j, 1], r2, rect_height - r2)
+    
+    return repaired
+
+def optimize_rectangle_dimensions(circles: np.ndarray) -> Tuple[float, float]:
+    """Heuristic to determine optimal rectangle dimensions."""
+    # Estimate minimum width and height needed based on circle radii
+    total_area = np.sum(circles[:, 2]**2) * np.pi
+    # Assume 60% packing efficiency for circles
+    estimated_width = np.sqrt(total_area / 0.6)
+    estimated_height = estimated_width
+    
+    # Use a reasonable range around the estimate
+    if estimated_width + estimated_height > 2.0:
+        # Normalize to perimeter 4
+        scale = 2.0 / (estimated_width + estimated_height)
+        estimated_width *= scale
+        estimated_height *= scale
+    
+    # Prefer slightly wider rectangle (more common in practice)
+    optimized_width = min(1.8, max(0.2, estimated_width))
+    optimized_height = 2.0 - optimized_width
+    
+    return optimized_width, optimized_height
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    rect_width = 1.5
+    rect_height = 0.5
+    
+    # Parameters for evolutionary algorithm
+    population_size = 50
+    generations = 150
+    elite_size = 10
+    tournament_size = 7
+    max_stagnation = 25
+    
+    # Initialize population with diverse strategies
+    population = []
+    
+    # Mix of initialization strategies
+    for _ in range(population_size // 3):
+        solution = create_hexagonal_initial_solution(rect_width, rect_height)
+        population.append(solution)
+        
+    for _ in range(population_size // 3):
+        solution = create_initial_solution(rect_width, rect_height)
+        population.append(solution)
+        
+    for _ in range(population_size // 3):
+        # Create a random solution for diversity
+        solution = np.zeros((21, 3))
+        for i in range(21):
+            x = np.random.uniform(0.01, rect_width - 0.01)
+            y = np.random.uniform(0.01, rect_height - 0.01)
+            r = np.random.uniform(0.001, min(x, y, rect_width - x, rect_height - y) * 0.3)
+            solution[i] = [x, y, r]
+        population.append(solution)
+    
+    # Track best fitness for convergence detection
+    previous_best = -np.inf
+    stagnation_count = 0
+    
+    # Evolutionary algorithm
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = [evaluate_fitness(individual) for individual in population]
+        
+        # Sort by fitness (descending)
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        population = [population[i] for i in sorted_indices]
+        fitness_scores = [fitness_scores[i] for i in sorted_indices]
+        
+        # Keep elite
+        elite = population[:elite_size]
+        
+        # Generate new population
+        new_population = elite[:]
+        
+        # Create offspring using tournament selection and crossover
+        while len(new_population) < population_size:
+            # Tournament selection - select two parents
+            parent1_idx = sorted_indices[np.random.choice(min(tournament_size, len(sorted_indices)))]
+            parent2_idx = sorted_indices[np.random.choice(min(tournament_size, len(sorted_indices)))]
+            
+            parent1 = population[parent1_idx].copy()
+            parent2 = population[parent2_idx].copy()
+            
+            # Crossover
+            child1, child2 = crossover(parent1, parent2)
+            
+            # Mutate
+            child1 = mutate(child1, rect_width, rect_height)
+            child2 = mutate(child2, rect_width, rect_height)
+            
+            # Repair
+            child1 = repair_solution(child1, rect_width, rect_height)
+            child2 = repair_solution(child2, rect_width, rect_height)
+            
+            new_population.extend([child1, child2])
+        
+        population = new_population[:population_size]
+        
+        # Convergence detection
+        current_best = max(fitness_scores)
+        if abs(current_best - previous_best) < 1e-6:
+            stagnation_count += 1
+        else:
+            stagnation_count = 0
+        previous_best = current_best
+        
+        # Early stopping if stagnated too long
+        if stagnation_count > max_stagnation:
+            print(f"Early stopping at generation {generation} due to convergence")
+            break
+            
+        # Periodically optimize rectangle dimensions
+        if generation % 20 == 0 and generation > 0:
+            # Use the best solution so far to get rough estimate
+            best_solution = population[0]  # Best solution at this generation
+            optimized_width, optimized_height = optimize_rectangle_dimensions(best_solution)
+            rect_width = optimized_width
+            rect_height = optimized_height
+            print(f"Optimized rectangle to width={rect_width:.3f}, height={rect_height:.3f}")
+            
+        # Print progress
+        if generation % 30 == 0:
+            print(f"Generation {generation}: Best fitness = {current_best:.6f}")
+    
+    # Return the best solution
+    fitness_scores = [evaluate_fitness(individual) for individual in population]
+    best_idx = np.argmax(fitness_scores)
+    best_solution = population[best_idx]
+    
+    # Final validation
+    final_fitness = evaluate_fitness(best_solution)
+    if final_fitness == -np.inf:
+        print("Warning: Final solution violated constraints. Returning fallback.")
+        # Fallback to best valid solution found during evolution
+        for i in range(len(population)):
+            if evaluate_fitness(population[i]) > -np.inf:
+                return population[i]
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

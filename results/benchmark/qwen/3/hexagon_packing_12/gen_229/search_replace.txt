@@ -1,0 +1,307 @@
+<NAME>
+add_symmetry_aware_optimization
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses differential evolution but doesn't leverage the inherent symmetry properties of hexagon packing problems. By implementing symmetry-aware optimization with multiple initial configurations and rotational degrees of freedom, we can explore better solutions. The key insight is that hexagon packings often benefit from rotational symmetry, and we should optimize both positions and orientations simultaneously rather than fixing all rotations to zero.
+
+This change introduces:
+1. Multiple symmetric initial configurations to increase exploration
+2. Full optimization of both positions and rotations (not just positions)
+3. A more intelligent multi-start approach using known good symmetric patterns
+4. Better handling of rotational degrees of freedom that can significantly improve packing density
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_positions(initial_config):
+    """Optimize positions using differential evolution for better global search"""
+    packer = HexagonPacker()
+
+    def objective(params):
+        # Reshape parameters back to hex_data format (positions only)
+        hex_data = initial_config.copy()
+        idx = 0
+        for i in range(len(hex_data)):
+            hex_data[i][0] = params[idx]
+            hex_data[i][1] = params[idx + 1]
+            idx += 2
+
+        # Calculate outer radius for this configuration
+        outer_radius = packer.calculate_max_distance_from_center(hex_data)
+
+        # Evaluate configuration
+        validity, inv_radius = packer.evaluate_configuration(hex_data, outer_radius)
+
+        if not validity:
+            return 1e10  # Large penalty for invalid configurations
+        return -inv_radius  # Negative because we maximize
+
+    # Flatten initial configuration
+    initial_params = []
+    for i in range(len(initial_config)):
+        initial_params.extend([initial_config[i][0], initial_config[i][1]])
+
+    # Bounds for positions: [-5, 5] for each coordinate
+    bounds = [(-5, 5), (-5, 5)] * len(initial_config)
+
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42
+    )
+
+    # Reconstruct optimized configuration
+    optimized_config = initial_config.copy()
+    idx = 0
+    for i in range(len(optimized_config)):
+        optimized_config[i][0] = result.x[idx]
+        optimized_config[i][1] = result.x[idx + 1]
+        idx += 2
+
+    return optimized_config
+=======
+def optimize_positions_and_orientations(initial_config):
+    """Optimize both positions and orientations using differential evolution"""
+    packer = HexagonPacker()
+
+    def objective(params):
+        # Reshape parameters back to hex_data format (positions + orientations)
+        hex_data = initial_config.copy()
+        idx = 0
+        for i in range(len(hex_data)):
+            hex_data[i][0] = params[idx]
+            hex_data[i][1] = params[idx + 1]
+            hex_data[i][2] = params[idx + 2]  # orientation
+            idx += 3
+
+        # Calculate outer radius for this configuration
+        outer_radius = packer.calculate_max_distance_from_center(hex_data)
+
+        # Evaluate configuration
+        validity, inv_radius = packer.evaluate_configuration(hex_data, outer_radius)
+
+        if not validity:
+            return 1e10  # Large penalty for invalid configurations
+        return -inv_radius  # Negative because we maximize
+
+    # Flatten initial configuration - now including orientations
+    initial_params = []
+    for i in range(len(initial_config)):
+        initial_params.extend([initial_config[i][0], initial_config[i][1], initial_config[i][2]])
+
+    # Bounds for positions: [-5, 5] for each coordinate, orientations: [0, 360)
+    bounds = [(-5, 5), (-5, 5), (0, 360)] * len(initial_config)
+
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        seed=42
+    )
+
+    # Reconstruct optimized configuration
+    optimized_config = initial_config.copy()
+    idx = 0
+    for i in range(len(optimized_config)):
+        optimized_config[i][0] = result.x[idx]
+        optimized_config[i][1] = result.x[idx + 1]
+        optimized_config[i][2] = result.x[idx + 2]
+        idx += 3
+
+    return optimized_config
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+def generate_initial_configuration():
+    """Generate a sophisticated initial configuration based on mathematical insights"""
+    # Based on known good hexagonal packing configurations
+    # This arrangement attempts to create dense packing with good symmetry
+    config = [
+        [0, 0, 0],           # center
+        [-1.732, 0, 0],      # left
+        [1.732, 0, 0],       # right
+        [-0.866, 1.5, 0],    # top-left
+        [0.866, 1.5, 0],     # top-right
+        [-0.866, -1.5, 0],   # bottom-left
+        [0.866, -1.5, 0],    # bottom-right
+        [-2.598, 1.5, 0],    # far top-left
+        [2.598, 1.5, 0],     # far top-right
+        [-2.598, -1.5, 0],   # far bottom-left
+        [2.598, -1.5, 0],    # far bottom-right
+        [0, -3, 0]           # far bottom-center
+    ]
+    return np.array(config)
+=======
+def generate_multiple_initial_configurations():
+    """Generate multiple symmetric initial configurations for better exploration"""
+    configs = []
+
+    # Configuration 1: Highly symmetric arrangement
+    config1 = [
+        [0, 0, 0],           # center
+        [-1.732, 0, 0],      # left
+        [1.732, 0, 0],       # right
+        [-0.866, 1.5, 0],    # top-left
+        [0.866, 1.5, 0],     # top-right
+        [-0.866, -1.5, 0],   # bottom-left
+        [0.866, -1.5, 0],    # bottom-right
+        [-2.598, 1.5, 0],    # far top-left
+        [2.598, 1.5, 0],     # far top-right
+        [-2.598, -1.5, 0],   # far bottom-left
+        [2.598, -1.5, 0],    # far bottom-right
+        [0, -3, 0]           # far bottom-center
+    ]
+
+    # Configuration 2: Rotated version
+    config2 = [
+        [0, 0, 30],          # center
+        [-1.732, 0, 30],     # left
+        [1.732, 0, 30],      # right
+        [-0.866, 1.5, 30],   # top-left
+        [0.866, 1.5, 30],    # top-right
+        [-0.866, -1.5, 30],  # bottom-left
+        [0.866, -1.5, 30],   # bottom-right
+        [-2.598, 1.5, 30],   # far top-left
+        [2.598, 1.5, 30],    # far top-right
+        [-2.598, -1.5, 30],  # far bottom-left
+        [2.598, -1.5, 30],   # far bottom-right
+        [0, -3, 30]          # far bottom-center
+    ]
+
+    # Configuration 3: Another symmetric arrangement
+    config3 = [
+        [0, 0, 0],           # center
+        [-2.0, 0, 0],        # left
+        [2.0, 0, 0],         # right
+        [-1.0, 1.732, 0],    # top-left
+        [1.0, 1.732, 0],     # top-right
+        [-1.0, -1.732, 0],   # bottom-left
+        [1.0, -1.732, 0],    # bottom-right
+        [-3.0, 1.732, 0],    # far top-left
+        [3.0, 1.732, 0],     # far top-right
+        [-3.0, -1.732, 0],   # far bottom-left
+        [3.0, -1.732, 0],    # far bottom-right
+        [0, -3.464, 0]       # far bottom-center
+    ]
+
+    configs.append(np.array(config1))
+    configs.append(np.array(config2))
+    configs.append(np.array(config3))
+
+    return configs
+>>>>>>> REPLACE
+
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Generate initial sophisticated configuration
+    initial_config = generate_initial_configuration()
+
+    # Optimize positions
+    optimized_config = optimize_positions(initial_config)
+
+    # Final validation and calculation
+    packer = HexagonPacker()
+    outer_radius = packer.calculate_max_distance_from_center(optimized_config)
+
+    # Verify final configuration
+    validity, inv_radius = packer.evaluate_configuration(optimized_config, outer_radius)
+
+    # If validation fails, fall back to a known working configuration
+    if not validity:
+        # Use the simple arrangement that was previously working
+        fallback_config = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right,
+            [0, -4, 0],  # far bottom-center
+        ])
+        optimized_config = fallback_config
+        outer_radius = 8.0
+        inv_radius = 1.0 / outer_radius
+
+    # Prepare return values
+    inner_hex_data = np.array(optimized_config)
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = outer_radius * 2  # approximate side length
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+=======
+    # Generate multiple initial configurations
+    initial_configs = generate_multiple_initial_configurations()
+
+    best_config = None
+    best_inv_radius = 0
+    best_outer_radius = float('inf')
+
+    # Try each initial configuration and optimize
+    for initial_config in initial_configs:
+        # Optimize positions and orientations
+        optimized_config = optimize_positions_and_orientations(initial_config)
+
+        # Final validation and calculation
+        packer = HexagonPacker()
+        outer_radius = packer.calculate_max_distance_from_center(optimized_config)
+
+        # Verify final configuration
+        validity, inv_radius = packer.evaluate_configuration(optimized_config, outer_radius)
+
+        if validity and inv_radius > best_inv_radius:
+            best_inv_radius = inv_radius
+            best_config = optimized_config.copy()
+            best_outer_radius = outer_radius
+
+    # If no valid solution found, fall back to a known working configuration
+    if best_config is None:
+        # Use the simple arrangement that was previously working
+        fallback_config = np.array([
+            [0, 0, 0],  # center
+            [-2.5, 0, 0],  # left
+            [2.5, 0, 0],  # right
+            [-1.25, 2.17, 0],  # top-left
+            [1.25, 2.17, 0],  # top-right
+            [-1.25, -2.17, 0],  # bottom-left
+            [1.25, -2.17, 0],  # bottom-right
+            [-3.75, 2.17, 0],  # far top-left
+            [3.75, 2.17, 0],  # far top-right
+            [-3.75, -2.17, 0],  # far bottom-left
+            [3.75, -2.17, 0],  # far bottom-right,
+            [0, -4, 0],  # far bottom-center
+        ])
+        best_config = fallback_config
+        best_outer_radius = 8.0
+        best_inv_radius = 1.0 / best_outer_radius
+
+    # Prepare return values
+    inner_hex_data = np.array(best_config)
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = best_outer_radius * 2  # approximate side length
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+>>>>>>> REPLACE
+
+</DIFF>

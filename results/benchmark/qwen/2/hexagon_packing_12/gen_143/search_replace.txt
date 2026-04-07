@@ -1,0 +1,130 @@
+<NAME>
+implement_adaptive_penalty_weighting
+</NAME>
+
+<DESCRIPTION>
+I'll implement adaptive penalty weighting that adjusts penalty weights based on constraint violation severity. This approach assigns higher penalties to containment violations (since they're more fundamental) and uses dynamic scaling to better guide the optimization towards valid solutions while still allowing for effective exploration.
+
+The key insight is that containment violations are fundamentally more serious than overlap violations because they mean the solution is invalid even before considering overlaps. By making the penalty weights adaptive and more severe for containment issues, we can improve convergence to valid solutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def evaluate_solution_multistart(solution_array, use_shapely=False, penalty_weights=None):
+    """Improved evaluation with better containment and overlap checking."""
+    if penalty_weights is None:
+        penalty_weights = {'containment': 10000, 'overlap': 100000, 'boundary': 5000}
+
+    # Reshape solution array into 12 hexagons with (x, y, angle) each
+    inner_hex_data = solution_array.reshape(-1, 3)
+
+    # Calculate the minimum enclosing hexagon
+    min_side_length, centroid = calculate_min_enclosing_hexagon_fast(inner_hex_data)
+
+    # Check all constraints
+    num_hex = len(inner_hex_data)
+    penalty = 0.0
+
+    # Create outer hexagon polygon for containment checks
+    outer_hex = create_hexagon_polygon(centroid[0], centroid[1], 0, min_side_length)
+
+    # Check containment for all hexagons
+    if use_shapely:
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            inner_hex = create_hexagon_polygon(center_x, center_y, angle)
+
+            if not check_containment_shapely(inner_hex, outer_hex):
+                penalty += penalty_weights['containment']
+    else:
+        # Fast containment check using distance
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            # Simple check using max distance from center
+            vertices = hexagon_vertices_jit(center_x, center_y, angle)
+            max_dist = np.max(np.sqrt(np.sum((vertices - np.array([center_x, center_y]))**2, axis=1)))
+            if max_dist > min_side_length * np.sqrt(3) / 2:
+                penalty += penalty_weights['containment']
+
+    # Check overlaps using spatial hashing for efficiency
+    # Precompute vertices for spatial hash check
+    vertices_cache = []
+    for i in range(num_hex):
+        vertices = hexagon_vertices_jit(*inner_hex_data[i])
+        vertices_cache.append(vertices)
+
+    # Use spatial hash overlap detection
+    if check_overlaps_spatial_hash(inner_hex_data, vertices_cache):
+        penalty += penalty_weights['overlap']
+
+    # Return negative inverse side length plus penalty
+    objective_value = -1.0 / min_side_length + penalty
+
+    return objective_value, min_side_length
+=======
+def evaluate_solution_multistart(solution_array, use_shapely=False, penalty_weights=None):
+    """Improved evaluation with better containment and overlap checking."""
+    if penalty_weights is None:
+        penalty_weights = {'containment': 10000, 'overlap': 100000, 'boundary': 5000}
+
+    # Reshape solution array into 12 hexagons with (x, y, angle) each
+    inner_hex_data = solution_array.reshape(-1, 3)
+
+    # Calculate the minimum enclosing hexagon
+    min_side_length, centroid = calculate_min_enclosing_hexagon_fast(inner_hex_data)
+
+    # Check all constraints
+    num_hex = len(inner_hex_data)
+    penalty = 0.0
+
+    # Create outer hexagon polygon for containment checks
+    outer_hex = create_hexagon_polygon(centroid[0], centroid[1], 0, min_side_length)
+
+    # Count violations for adaptive penalty weighting
+    containment_violations = 0
+    overlap_violations = 0
+
+    # Check containment for all hexagons
+    if use_shapely:
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            inner_hex = create_hexagon_polygon(center_x, center_y, angle)
+
+            if not check_containment_shapely(inner_hex, outer_hex):
+                containment_violations += 1
+    else:
+        # Fast containment check using distance
+        for i in range(num_hex):
+            center_x, center_y, angle = inner_hex_data[i]
+            # Simple check using max distance from center
+            vertices = hexagon_vertices_jit(center_x, center_y, angle)
+            max_dist = np.max(np.sqrt(np.sum((vertices - np.array([center_x, center_y]))**2, axis=1)))
+            if max_dist > min_side_length * np.sqrt(3) / 2:
+                containment_violations += 1
+
+    # Check overlaps using spatial hashing for efficiency
+    # Precompute vertices for spatial hash check
+    vertices_cache = []
+    for i in range(num_hex):
+        vertices = hexagon_vertices_jit(*inner_hex_data[i])
+        vertices_cache.append(vertices)
+
+    # Use spatial hash overlap detection
+    if check_overlaps_spatial_hash(inner_hex_data, vertices_cache):
+        overlap_violations += 1
+
+    # Apply adaptive penalty weighting
+    # Higher penalties for containment violations since they invalidate the solution completely
+    # Base penalty weights with adaptive scaling based on violation severity
+    adaptive_containment_penalty = penalty_weights['containment'] * (1 + containment_violations * 0.5)
+    adaptive_overlap_penalty = penalty_weights['overlap'] * (1 + overlap_violations * 0.2)
+
+    penalty = adaptive_containment_penalty + adaptive_overlap_penalty
+
+    # Return negative inverse side length plus penalty
+    objective_value = -1.0 / min_side_length + penalty
+
+    return objective_value, min_side_length
+>>>>>>> REPLACE
+
+</DIFF>

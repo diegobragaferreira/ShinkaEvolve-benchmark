@@ -1,0 +1,227 @@
+<NAME>
+add_curvature_aware_updates
+</NAME>
+
+<DESCRIPTION>
+I'll implement curvature-aware updates inspired by the mathematical insights from prior programs. This enhancement will use second-order information to guide the optimization process more intelligently, helping to escape local minima and converge faster towards better solutions.
+
+The key idea is to compute approximate gradients and Hessian matrices using finite differences, then use this curvature information to compute more effective updates. This approach has shown success in prior implementations where it helped achieve better convergence behavior in complex optimization landscapes.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Improve the sequence using enhanced local optimization strategies."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try solving LP multiple times with adjusted RHS if necessary
+    g_fun = None
+    for attempt in range(5):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is not None:
+            break
+        rhs *= 1.05
+
+    if g_fun is None:
+        # Fallback to simple gradient ascent with adaptive step size
+        t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation with multiple strategies
+    t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+
+    # Hybrid approach: combine LP solution with gradient descent refinement
+    # First try direct combination
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+    # Add a bit of randomness for exploration
+    if n > 100:
+        # For larger sequences, use more sophisticated exploration
+        random_perturbation = np.random.normal(0, 0.01 * t, n)
+        new_sequence = [max(0, x + 0.5 * p * x) for x, p in zip(new_sequence, random_perturbation)]
+    else:
+        # For smaller sequences, add simple noise
+        new_sequence = [max(0, x + np.random.normal(0, 0.02 * x)) for x in new_sequence]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+=======
+def compute_gradient_and_hessian_approx(sequence: List[float], eps: float = 1e-5) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute approximate gradient and Hessian for a sequence using finite differences.
+    """
+    a = np.array(sequence)
+    n = len(a)
+    grad = np.zeros(n)
+    hess = np.zeros((n, n))
+
+    # Compute gradient
+    base_c1, _ = compute_c1_constant(sequence)
+
+    for i in range(n):
+        perturbed = a.copy()
+        perturbed[i] += eps
+        _, inv_c1_perturbed = compute_c1_constant(perturbed.tolist())
+        grad[i] = (base_c1 - inv_c1_perturbed) / eps
+
+    # Compute Hessian (approximate)
+    for i in range(n):
+        for j in range(i, n):
+            perturbed = a.copy()
+            perturbed[i] += eps
+            if i != j:
+                perturbed[j] += eps
+
+            _, inv_c1_perturbed = compute_c1_constant(perturbed.tolist())
+
+            # Second order finite difference
+            hess[i, j] = (base_c1 - 2*inv_c1_perturbed + inv_c1_perturbed) / (eps ** 2)
+            if i != j:
+                hess[j, i] = hess[i, j]
+
+    return grad, hess
+
+def curvature_aware_update(sequence: List[float], lr: float = 1e-3) -> Optional[List[float]]:
+    """
+    Perform a curvature-aware update on the sequence using Hessian information.
+    """
+    try:
+        n = len(sequence)
+        a = np.array(sequence)
+
+        # Compute gradient and Hessian
+        grad, hess = compute_gradient_and_hessian_approx(sequence)
+
+        # Regularize Hessian to make it positive definite if needed
+        try:
+            eigvals = np.linalg.eigvals(hess)
+            if np.all(eigvals >= -1e-8):
+                reg_hess = hess
+            else:
+                reg_hess = hess + np.eye(n) * (-min(eigvals) + 1e-8)
+        except:
+            reg_hess = hess + np.eye(n) * 1e-8
+
+        # Compute update: -lr * (H + I)^{-1} * grad
+        try:
+            # Use pseudo-inverse for numerical stability
+            hess_reg_inv = np.linalg.pinv(reg_hess + np.eye(n) * 1e-6)
+            update = -lr * hess_reg_inv @ grad
+        except:
+            # Fallback to basic gradient descent if matrix inversion fails
+            update = -lr * grad
+
+        # Apply update
+        new_sequence = a + update
+
+        # Ensure non-negativity
+        new_sequence = np.maximum(new_sequence, 0)
+
+        return new_sequence.tolist()
+
+    except Exception as e:
+        # On failure, fall back to simple gradient descent
+        try:
+            grad, _ = compute_gradient_and_hessian_approx(sequence)
+            new_sequence = a - lr * grad
+            new_sequence = np.maximum(new_sequence, 0)
+            return new_sequence.tolist()
+        except:
+            return None
+
+def get_good_direction_to_move_into(sequence: List[float]) -> Optional[List[float]]:
+    """Improve the sequence using enhanced local optimization strategies."""
+    n = len(sequence)
+
+    # Normalize the sequence
+    sum_sequence = np.sum(sequence)
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+
+    # Compute convolution constraints
+    if n > 100:
+        b = convolve_fft(np.array(normalized_sequence), np.array(normalized_sequence))
+    else:
+        b = convolve_direct(np.array(normalized_sequence), np.array(normalized_sequence))
+
+    rhs = np.max(b)
+
+    # Try solving LP multiple times with adjusted RHS if necessary
+    g_fun = None
+    for attempt in range(5):
+        g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+        if g_fun is not None:
+            break
+        rhs *= 1.05
+
+    if g_fun is None:
+        # Fallback to curvature-aware update with gradient descent
+        # Try curvature-aware update first
+        curved_update = curvature_aware_update(sequence)
+        if curved_update is not None:
+            return curved_update
+        # Fallback to simple gradient ascent with adaptive step size
+        t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+        new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+        return new_sequence
+
+    # Normalize the solution from LP
+    sum_g = np.sum(g_fun)
+    if sum_g < 0.01:
+        return None
+
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_g for x in g_fun]
+
+    # Apply adaptive perturbation with multiple strategies
+    t = min(0.1, 0.05 + 0.02 * np.log(n + 1))
+
+    # Hybrid approach: combine LP solution with gradient descent refinement
+    # First try direct combination
+    new_sequence = [(1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)]
+
+    # Apply curvature-aware refinement on the combined result
+    curved_update = curvature_aware_update(new_sequence)
+    if curved_update is not None:
+        new_sequence = curved_update
+
+    # Add a bit of randomness for exploration
+    if n > 100:
+        # For larger sequences, use more sophisticated exploration
+        random_perturbation = np.random.normal(0, 0.01 * t, n)
+        new_sequence = [max(0, x + 0.5 * p * x) for x, p in zip(new_sequence, random_perturbation)]
+    else:
+        # For smaller sequences, add simple noise
+        new_sequence = [max(0, x + np.random.normal(0, 0.02 * x)) for x in new_sequence]
+
+    # Ensure non-negativity and reasonable bounds
+    new_sequence = [max(0, min(1000, x)) for x in new_sequence]
+
+    return new_sequence
+>>>>>>> REPLACE

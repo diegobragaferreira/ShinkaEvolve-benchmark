@@ -1,0 +1,518 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import random
+import time
+from scipy.spatial.distance import cdist
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    # Rectangle dimensions (width + height = 2)
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Number of circles
+    n = 21
+
+    def initialize_population():
+        """Initialize population with structured patterns"""
+        pop = []
+        # Try different initial patterns
+        patterns = [
+            # Hexagonal packing
+            lambda: generate_hexagonal_pattern(rect_width, rect_height, n),
+            # Grid-based packing
+            lambda: generate_grid_pattern(rect_width, rect_height, n),
+            # Spiral pattern
+            lambda: generate_spiral_pattern(rect_width, rect_height, n),
+            # Random with constraints
+            lambda: generate_random_constrained_pattern(rect_width, rect_height, n)
+        ]
+
+        # Try all patterns and pick the best one
+        best_pattern = None
+        best_fitness = -float('inf')
+
+        for pattern_func in patterns:
+            try:
+                individual = pattern_func()
+                fitness = evaluate_fitness(individual, rect_width, rect_height)
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_pattern = individual
+            except Exception as e:
+                continue
+
+        return [best_pattern] if best_pattern is not None else [generate_hexagonal_pattern(rect_width, rect_height, n)]
+
+    def generate_hexagonal_pattern(width, height, n):
+        """Generate initial hexagonal packing pattern"""
+        circles = np.zeros((n, 3))
+
+        # Determine grid parameters
+        rows = int(np.sqrt(n))
+        cols = int(np.ceil(n / rows))
+
+        # Calculate spacing
+        margin = 0.05
+        max_radius = min(width, height) * 0.08
+
+        # Create hexagonal grid
+        x_spacing = max_radius * 2.5
+        y_spacing = max_radius * 2.165  # sqrt(3)/2 * 2
+
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = margin + j * x_spacing
+                y = margin + i * y_spacing
+
+                if i % 2 == 1:
+                    x += x_spacing / 2
+
+                # Adjust for bounds
+                x = max(max_radius, min(width - max_radius, x))
+                y = max(max_radius, min(height - max_radius, y))
+
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+
+        return circles
+
+    def generate_grid_pattern(width, height, n):
+        """Generate initial grid pattern"""
+        circles = np.zeros((n, 3))
+
+        # Find grid dimensions
+        cols = int(np.ceil(np.sqrt(n)))
+        rows = int(np.ceil(n / cols))
+
+        # Calculate spacing
+        margin = 0.05
+        cell_width = (width - 2 * margin) / cols
+        cell_height = (height - 2 * margin) / rows
+        max_radius = min(cell_width, cell_height) * 0.4
+
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n:
+                    break
+                x = margin + j * cell_width + cell_width / 2
+                y = margin + i * cell_height + cell_height / 2
+                circles[idx] = [x, y, max_radius]
+                idx += 1
+
+        return circles
+
+    def generate_spiral_pattern(width, height, n):
+        """Generate initial spiral pattern"""
+        circles = np.zeros((n, 3))
+        center_x, center_y = width / 2, height / 2
+        max_radius = min(width, height) * 0.1
+        angle_step = 2 * np.pi / 5
+        radius_step = 0.05
+
+        for i in range(n):
+            angle = i * angle_step
+            radius = i * radius_step
+            x = center_x + radius * np.cos(angle)
+            y = center_y + radius * np.sin(angle)
+
+            # Keep within bounds
+            x = max(max_radius, min(width - max_radius, x))
+            y = max(max_radius, min(height - max_radius, y))
+
+            circles[i] = [x, y, max_radius]
+
+        return circles
+
+    def generate_random_constrained_pattern(width, height, n):
+        """Generate random pattern with basic constraints"""
+        circles = np.zeros((n, 3))
+        max_radius = min(width, height) * 0.08
+        attempts = 0
+
+        for i in range(n):
+            attempts = 0
+            valid = False
+            while not valid and attempts < 1000:
+                x = np.random.uniform(max_radius, width - max_radius)
+                y = np.random.uniform(max_radius, height - max_radius)
+                radius = np.random.uniform(0.005, max_radius)
+
+                # Check if this circle overlaps with existing ones
+                valid = True
+                for j in range(i):
+                    existing_x, existing_y, existing_r = circles[j]
+                    dist = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+                    if dist < (radius + existing_r):
+                        valid = False
+                        break
+
+                if valid:
+                    circles[i] = [x, y, radius]
+                attempts += 1
+
+        return circles
+
+    def evaluate_fitness(individual, width, height):
+        """Evaluate fitness of an individual - sum of radii with penalty for violations"""
+        circles = individual.copy()
+        total_radius = np.sum(circles[:, 2])
+
+        # Penalty for boundary violations
+        penalty = 0
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                penalty -= 1000
+
+        # Penalty for overlaps - use vectorized computation for efficiency
+        if len(circles) > 1:
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            distances = cdist(coords, coords)
+            # Create mask for upper triangle (avoid double counting)
+            mask = np.triu(np.ones_like(distances, dtype=bool), k=1)
+            # Compute overlap penalties
+            overlap_distances = distances[mask]
+            overlap_radii = (radii[:, None] + radii[None, :])[mask]
+            overlaps = overlap_distances < overlap_radii
+            if np.any(overlaps):
+                overlap_penalty = -np.sum(overlap_radii[overlaps] - overlap_distances[overlaps]) * 100
+                penalty += overlap_penalty
+
+        return total_radius + penalty
+
+    def get_voronoi_criticality(individual):
+        """Calculate criticality based on nearest neighbors and boundary distances with enhanced accuracy"""
+        circles = individual.copy()
+        n = len(circles)
+
+        # Use spatial tree for efficient nearest neighbor queries
+        coords = circles[:, :2]
+        tree = cKDTree(coords)
+
+        criticality_scores = np.zeros(n)
+
+        # For each circle, find its nearest neighbors and boundary distances
+        for i in range(n):
+            x, y, r = circles[i]
+
+            # Find distance to nearest neighbor (excluding self) - optimized
+            distances, indices = tree.query(coords[i], k=2)  # k=2 to exclude self
+            nearest_neighbor_dist = distances[1] if len(distances) > 1 else float('inf')
+
+            # Find distance to nearest boundary
+            boundary_dists = [x, y, 1-x, 1-y]
+            min_boundary_dist = min(boundary_dists)
+
+            # Combined constraint measure: closer to others or boundaries = more constrained
+            # We want to make the criticality high when there's little room to expand
+            if nearest_neighbor_dist < float('inf') and nearest_neighbor_dist > 0:
+                # Inverse relationship with neighbor distance
+                neighbor_criticality = 1.0 / (nearest_neighbor_dist + 0.001)
+            else:
+                neighbor_criticality = 1000  # Very constrained
+
+            # Boundary criticality - even more sensitive to boundary proximity
+            boundary_criticality = 0
+            if min_boundary_dist < 0.05:
+                boundary_criticality = 1000 * (0.05 - min_boundary_dist)
+
+            # Combine both sources of constraint - weighted approach
+            total_constraint = 0.7 * neighbor_criticality + 0.3 * boundary_criticality
+
+            # Convert to criticality (higher values = more critical/constrained)
+            criticality_scores[i] = total_constraint
+
+        # Ensure all criticalities are positive and normalize to [0,1]
+        criticality_scores = np.maximum(criticality_scores, 0.01)
+        if np.max(criticality_scores) > 0:
+            criticality_scores = criticality_scores / np.max(criticality_scores)
+
+        return criticality_scores
+
+    def mut_radius(individual, indpb=0.2, generation=0, max_generations=150):
+        """Mutation operator that modifies only the radius of selected circles with adaptive step size"""
+        mutated_individual = individual.copy()
+        n = len(mutated_individual)
+
+        # Get criticality scores
+        criticality = get_voronoi_criticality(mutated_individual)
+
+        # Sort by criticality (most critical first)
+        sorted_indices = np.argsort(-criticality)  # Descending order
+
+        # Mutate top 40% of critical circles (focus on the most constrained)
+        num_mutations = int(n * 0.4)
+        mutation_indices = sorted_indices[:num_mutations]
+
+        # Adaptive step size based on generation and constraint density
+        # Start with larger step, decrease as optimization progresses
+        base_step_size = 0.01 * (1 - generation / max_generations) + 0.001
+        # Adjust step size based on average criticality (more critical = smaller steps)
+        avg_criticality = np.mean(criticality)
+        adaptive_factor = 1.0 / (1.0 + avg_criticality * 10)
+        step_size = base_step_size * adaptive_factor
+
+        for i in range(num_mutations):
+            idx = mutation_indices[i]
+            if random.random() < indpb:
+                old_radius = mutated_individual[idx, 2]
+                # Adaptive random change to radius
+                delta = np.random.normal(0, step_size)
+                new_radius = max(0.001, old_radius + delta)
+                mutated_individual[idx, 2] = new_radius
+
+        return mutated_individual,
+
+    def crossover(parent1, parent2):
+        """Enhanced crossover operator that exchanges radii based on spatial closeness and criticality"""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Get criticality scores for both parents
+        crit1 = get_voronoi_criticality(parent1)
+        crit2 = get_voronoi_criticality(parent2)
+
+        # Get positions for spatial analysis
+        pos1 = parent1[:, :2]
+        pos2 = parent2[:, :2]
+
+        # Create combined criticality measure (weighted combination)
+        combined_criticality = 0.7 * np.maximum(crit1, crit2) + 0.3 * (crit1 + crit2) / 2
+
+        # For more sophisticated crossover, we'll also consider spatial relationships
+        # Create distance matrix to identify close pairs
+        try:
+            distances = cdist(pos1, pos2)
+            # Find pairs of circles that are relatively close
+            close_pairs = np.where(distances < 0.1)  # Threshold for "close"
+        except:
+            # Fallback if distance computation fails
+            close_pairs = ([], [])
+
+        # Sort by combined criticality (most critical first)
+        sorted_indices = np.argsort(-combined_criticality)
+
+        # Exchange radii for top 30% of circles, but with preference for circles that are also spatially close
+        num_exchanges = int(len(parent1) * 0.3)
+
+        # First, try to exchange among close pairs when possible
+        exchange_indices = []
+        if len(close_pairs[0]) > 0:
+            # Preferentially select from close pairs
+            for i in range(min(num_exchanges, len(close_pairs[0]))):
+                idx1 = close_pairs[0][i]
+                idx2 = close_pairs[1][i]
+                # Ensure we're not choosing the same circle twice
+                if idx1 not in exchange_indices and idx2 not in exchange_indices:
+                    exchange_indices.extend([idx1, idx2])
+
+        # Fill remaining exchanges with highest criticality circles
+        if len(exchange_indices) < num_exchanges * 2:
+            for i in range(num_exchanges * 2 - len(exchange_indices)):
+                if len(exchange_indices) < num_exchanges * 2:
+                    idx = sorted_indices[i % len(sorted_indices)]
+                    if idx not in exchange_indices:
+                        exchange_indices.append(idx)
+
+        # Perform exchanges in pairs
+        for i in range(0, min(len(exchange_indices), num_exchanges * 2), 2):
+            if i + 1 < len(exchange_indices):
+                idx1 = exchange_indices[i]
+                idx2 = exchange_indices[i+1]
+                child1[idx1, 2], child2[idx2, 2] = child2[idx2, 2], child1[idx1, 2]
+
+        return child1, child2
+
+    def is_valid_solution(circles, width, height):
+        """Check if solution is valid"""
+        # Check boundary constraints
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+            if x - r < 0 or x + r > width or y - r < 0 or y + r > height:
+                return False
+
+        # Check overlap constraints - vectorized for efficiency
+        if len(circles) > 1:
+            coords = circles[:, :2]
+            radii = circles[:, 2]
+            distances = cdist(coords, coords)
+            # Create mask for upper triangle (avoid double counting)
+            mask = np.triu(np.ones_like(distances, dtype=bool), k=1)
+            # Check overlaps
+            overlap_distances = distances[mask]
+            overlap_radii = (radii[:, None] + radii[None, :])[mask]
+            if np.any(overlap_distances < overlap_radii):
+                return False
+
+        return True
+
+    # Main algorithm
+    start_time = time.time()
+
+    # Initialize population
+    population = initialize_population()
+
+    # Use the best initial pattern as starting point
+    best_individual = population[0].copy()
+
+    # Enhanced local optimization to improve the initial solution
+    for _ in range(500):  # Increased from 300
+        # Create a copy to work with
+        test_individual = best_individual.copy()
+
+        # Select circles based on criticality - prioritize more constrained circles
+        criticality = get_voronoi_criticality(test_individual)
+        # Sort by criticality (descending) to focus on most constrained
+        sorted_indices = np.argsort(-criticality)
+
+        # Select top 10% of critical circles to adjust
+        num_adjustments = max(3, len(test_individual) // 10)
+        selected_indices = sorted_indices[:num_adjustments]
+
+        for idx in selected_indices:
+            old_x, old_y, old_r = test_individual[idx]
+
+            # More sophisticated adjustment strategy
+            # Consider boundary proximity
+            boundary_proximity = min(old_x, old_y, rect_width - old_x, rect_height - old_y)
+
+            # Larger steps for circles far from boundaries, smaller for those near boundaries
+            step_x = 0.02 if boundary_proximity > 0.1 else 0.005
+            step_y = 0.02 if boundary_proximity > 0.1 else 0.005
+            step_r = 0.01 if boundary_proximity > 0.1 else 0.003
+
+            # Adjust position and radius
+            new_x = max(old_r, min(rect_width - old_r, old_x + np.random.normal(0, step_x)))
+            new_y = max(old_r, min(rect_height - old_r, old_y + np.random.normal(0, step_y)))
+            new_r = max(0.001, old_r + np.random.normal(0, step_r))
+
+            # Check if this violates constraints
+            valid = True
+            for other_idx in range(len(test_individual)):
+                if other_idx != idx:
+                    ox, oy, oradius = test_individual[other_idx]
+                    dist = np.sqrt((new_x - ox)**2 + (new_y - oy)**2)
+                    if dist < (new_r + oradius):
+                        valid = False
+                        break
+
+            # If valid, update
+            if valid:
+                test_individual[idx] = [new_x, new_y, new_r]
+
+        # If this improves the fitness, accept it
+        old_fitness = evaluate_fitness(best_individual, rect_width, rect_height)
+        new_fitness = evaluate_fitness(test_individual, rect_width, rect_height)
+
+        if new_fitness > old_fitness:
+            best_individual = test_individual.copy()
+
+    # Evolutionary Algorithm
+    # Define DEAP classes
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", np.ndarray, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("individual", creator.Individual, best_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Register operators
+    toolbox.register("evaluate", lambda ind: evaluate_fitness(ind, rect_width, rect_height))
+    toolbox.register("mate", crossover)
+    toolbox.register("mutate", mut_radius)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Run evolution with adaptive parameters
+    pop = toolbox.population(n=40)
+    hof = tools.HallOfFame(1)
+
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    # Run the evolutionary algorithm with adaptive parameters
+    try:
+        # Use adaptive parameters that change over generations
+        for gen in range(150):
+            # Dynamic crossover and mutation probabilities
+            cxpb = 0.8 - (gen / 150) * 0.4  # Decrease crossover over time
+            mutpb = 0.2 + (gen / 150) * 0.2  # Increase mutation over time
+
+            # Run one generation
+            pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=cxpb, mutpb=mutpb,
+                                              ngen=1, stats=stats, halloffame=hof, verbose=False)
+
+            # Break early if no improvement for 30 generations
+            if len(logbook.select("max")) > 30:
+                recent_max = logbook.select("max")[-30:]
+                if len(set(recent_max)) == 1:  # All same value
+                    break
+
+        best_individual = hof[0]
+    except:
+        # If evolutionary fails, return the local optimized solution
+        pass
+
+    # Final validation and cleanup
+    if not is_valid_solution(best_individual, rect_width, rect_height):
+        # Reinitialize with better pattern if needed
+        best_individual = generate_hexagonal_pattern(rect_width, rect_height, n)
+
+    # Final local fine-tuning
+    for _ in range(150):
+        test_individual = best_individual.copy()
+
+        # Focus on most critical circles
+        criticality = get_voronoi_criticality(test_individual)
+        sorted_indices = np.argsort(-criticality)
+
+        # Perturb top 10 circles
+        for i in range(min(10, len(test_individual))):
+            idx = sorted_indices[i]
+            old_x, old_y, old_r = test_individual[idx]
+
+            # Make small adjustments
+            new_x = max(0.005, min(0.995, old_x + np.random.normal(0, 0.005)))
+            new_y = max(0.005, min(0.995, old_y + np.random.normal(0, 0.005)))
+            new_r = max(0.001, old_r + np.random.normal(0, 0.002))
+
+            test_individual[idx] = [new_x, new_y, new_r]
+
+        # Validate and accept improvement
+        if evaluate_fitness(test_individual, rect_width, rect_height) > evaluate_fitness(best_individual, rect_width, rect_height):
+            best_individual = test_individual.copy()
+
+    # Ensure final solution is valid
+    final_circles = best_individual.copy()
+    if not is_valid_solution(final_circles, rect_width, rect_height):
+        # Fallback to structured pattern
+        final_circles = generate_hexagonal_pattern(rect_width, rect_height, n)
+
+    return final_circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

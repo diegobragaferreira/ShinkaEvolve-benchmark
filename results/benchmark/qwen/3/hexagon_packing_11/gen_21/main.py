@@ -1,0 +1,238 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon
+import math
+
+
+def create_regular_hexagon(center_x, center_y, side_length, rotation=0):
+    """Create a regular hexagon as a shapely polygon"""
+    points = []
+    for i in range(6):
+        angle = rotation + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+
+def get_hexagon_vertices(center_x, center_y, side_length, rotation=0):
+    """Get vertices of a regular hexagon"""
+    vertices = []
+    for i in range(6):
+        angle = rotation + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+
+def check_hexagon_containment(hexagon_vertices, outer_hexagon):
+    """Check if all vertices of a hexagon are within the outer hexagon"""
+    for vx, vy in hexagon_vertices:
+        if not outer_hexagon.contains(Point(vx, vy)):
+            return False
+    return True
+
+
+def check_hexagon_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using shapely"""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+
+def calculate_max_distance_from_center(vertices, center_x, center_y):
+    """Calculate maximum distance from center point to any vertex"""
+    max_dist = 0
+    for vx, vy in vertices:
+        dist = math.sqrt((vx - center_x)**2 + (vy - center_y)**2)
+        max_dist = max(max_dist, dist)
+    return max_dist
+
+
+def compute_packing_score(inner_hex_data, outer_hex_side_length):
+    """Compute the inverse of outer hex side length as score"""
+    return 1.0 / outer_hex_side_length
+
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Uses a more efficient configuration and optimization to beat the benchmark.
+    """
+    # Initial configuration - more compact arrangement
+    initial_positions = [
+        [0, 0, 0],      # center
+        [-1.5, 0, 0],   # left
+        [1.5, 0, 0],    # right
+        [0, 2.6, 0],    # top
+        [0, -2.6, 0],   # bottom
+        [-1.5, 2.6, 0], # top-left
+        [1.5, 2.6, 0],  # top-right
+        [-1.5, -2.6, 0], # bottom-left
+        [1.5, -2.6, 0], # bottom-right
+        [-3.0, 0, 0],   # far left
+        [3.0, 0, 0],    # far right
+    ]
+
+    inner_hex_data = np.array(initial_positions)
+
+    # Start with a reasonable outer hexagon size
+    outer_hex_side_length = 5.0
+
+    # Create the outer hexagon
+    outer_hex = create_regular_hexagon(0, 0, outer_hex_side_length)
+
+    # Validate initial configuration
+    valid = True
+    # Check containment and overlap
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, rotation = inner_hex_data[i]
+        hex_vertices = get_hexagon_vertices(center_x, center_y, 1.0, rotation)
+
+        # Check if hexagon is contained
+        if not check_hexagon_containment(hex_vertices, outer_hex):
+            valid = False
+            break
+
+        # Check for overlaps with other hexagons
+        for j in range(i+1, len(inner_hex_data)):
+            center_x2, center_y2, rotation2 = inner_hex_data[j]
+            hex_vertices2 = get_hexagon_vertices(center_x2, center_y2, 1.0, rotation2)
+
+            if check_hexagon_overlap(hex_vertices, hex_vertices2):
+                valid = False
+                break
+
+        if not valid:
+            break
+
+    # If initial configuration isn't valid, adjust outer hexagon size
+    if not valid:
+        # Estimate required size based on distances
+        max_radius = 0
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, rotation = inner_hex_data[i]
+            # Calculate max distance from origin to this hexagon's center
+            dist = math.sqrt(center_x**2 + center_y**2)
+            # Add hexagon radius (approx 1.0 for unit hexagon)
+            max_radius = max(max_radius, dist + 1.0)
+
+        # Set outer hexagon side length to accommodate all with some margin
+        outer_hex_side_length = max_radius + 0.5
+
+    # Refine the solution using optimization
+    def objective_function(x):
+        # x contains [center_x1, center_y1, ..., center_x11, center_y11, outer_side_length]
+        num_inner = 11
+        # Extract positions
+        positions = x[:2*num_inner].reshape(num_inner, 2)
+        # Extract outer hexagon side length
+        outer_side_length = x[2*num_inner]
+
+        # Validate positions and calculate penalty for violations
+        penalty = 0.0
+
+        # Create outer hexagon
+        outer_hex = create_regular_hexagon(0, 0, outer_side_length)
+
+        # Check containment for all inner hexagons
+        for i in range(num_inner):
+            center_x, center_y = positions[i]
+            hex_vertices = get_hexagon_vertices(center_x, center_y, 1.0, 0)
+
+            # Check if hexagon is contained
+            if not check_hexagon_containment(hex_vertices, outer_hex):
+                penalty += 1000.0  # Large penalty for containment violations
+
+        # Check overlaps between inner hexagons
+        for i in range(num_inner):
+            for j in range(i+1, num_inner):
+                center_x1, center_y1 = positions[i]
+                center_x2, center_y2 = positions[j]
+                hex_vertices1 = get_hexagon_vertices(center_x1, center_y1, 1.0, 0)
+                hex_vertices2 = get_hexagon_vertices(center_x2, center_y2, 1.0, 0)
+
+                if check_hexagon_overlap(hex_vertices1, hex_vertices2):
+                    penalty += 1000.0  # Large penalty for overlaps
+
+        # Minimize negative of the score (we want to maximize 1/outer_side_length)
+        return -1.0 / outer_side_length + penalty
+
+    # Initial guess
+    initial_guess = np.concatenate([
+        inner_hex_data[:, :2].flatten(),
+        [outer_hex_side_length]
+    ])
+
+    # Optimization bounds for positions (reasonable ranges)
+    bounds = []
+    for i in range(11):  # 11 hexagons
+        bounds.extend([(-10, 10), (-10, 10)])  # x and y bounds
+    bounds.append((2.0, 10.0))  # outer hex side length bound
+
+    # Perform optimization
+    try:
+        result = minimize(
+            objective_function,
+            initial_guess,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 1000}
+        )
+
+        # Extract optimized values
+        if result.success:
+            opt_positions = result.x[:22].reshape(11, 2)
+            opt_outer_side_length = result.x[22]
+
+            # Update inner_hex_data with optimized positions
+            for i in range(11):
+                inner_hex_data[i] = [opt_positions[i][0], opt_positions[i][1], 0]
+
+            outer_hex_side_length = opt_outer_side_length
+        else:
+            # If optimization fails, fallback to original with adjusted size
+            pass
+    except Exception as e:
+        # If optimization fails, fall back to original solution
+        pass
+
+    # Final validation
+    outer_hex = create_regular_hexagon(0, 0, outer_hex_side_length)
+
+    # Ensure all hexagons are properly contained
+    for i in range(len(inner_hex_data)):
+        center_x, center_y, rotation = inner_hex_data[i]
+        hex_vertices = get_hexagon_vertices(center_x, center_y, 1.0, rotation)
+
+        # If any hexagon is not contained, expand outer hexagon
+        if not check_hexagon_containment(hex_vertices, outer_hex):
+            # Find max distance from center
+            max_dist = calculate_max_distance_from_center(hex_vertices, center_x, center_y)
+            outer_hex_side_length = max(outer_hex_side_length, max_dist + 0.5)
+            outer_hex = create_regular_hexagon(0, 0, outer_hex_side_length)
+
+    # Final correction for containment
+    while True:
+        valid = True
+        outer_hex = create_regular_hexagon(0, 0, outer_hex_side_length)
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, rotation = inner_hex_data[i]
+            hex_vertices = get_hexagon_vertices(center_x, center_y, 1.0, rotation)
+
+            if not check_hexagon_containment(hex_vertices, outer_hex):
+                valid = False
+                break
+
+        if valid:
+            break
+        outer_hex_side_length += 0.1
+
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+
+# EVOLVE-BLOCK-END

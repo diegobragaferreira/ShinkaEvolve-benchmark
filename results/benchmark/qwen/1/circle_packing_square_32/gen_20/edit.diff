@@ -1,0 +1,191 @@
+--- a/original.py
++++ b/original.py
+@@ -1,20 +1,186 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial.distance import cdist
++import random
+ 
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
++
++def is_valid_placement(circles, new_circle, min_radius=0.001):
++    """Check if a new circle can be placed without violating constraints"""
++    x, y, r = new_circle
++
++    # Check boundary constraints
++    if x - r < 0 or x + r > 1 or y - r < 0 or y + r > 1:
++        return False
++
++    # Check overlap with existing circles
++    if len(circles) > 0:
++        existing_circles = np.array(circles)
++        distances = np.sqrt((existing_circles[:, 0] - x)**2 + (existing_circles[:, 1] - y)**2)
++        min_distance = np.min(distances)
++        if min_distance < r + existing_circles[:, 2].max():
++            return False
++
++    return True
++
++def initialize_circles_greedy(n=32):
++    """Initialize circles using a greedy approach prioritizing large radii"""
++    circles = []
++
++    # Start with some corner placements
++    corners = [(0.1, 0.1, 0.1), (0.9, 0.1, 0.1), (0.1, 0.9, 0.1), (0.9, 0.9, 0.1)]
++    for corner in corners:
++        if len(circles) < n and is_valid_placement(circles, corner):
++            circles.append(corner)
++
++    # Add some edge placements
++    edges = [
++        (0.5, 0.1, 0.05), (0.5, 0.9, 0.05),
++        (0.1, 0.5, 0.05), (0.9, 0.5, 0.05)
++    ]
++    for edge in edges:
++        if len(circles) < n and is_valid_placement(circles, edge):
++            circles.append(edge)
++
++    # Fill remaining positions greedily
++    attempts = 0
++    while len(circles) < n and attempts < 1000:
++        # Try to place a circle with maximum possible radius
++        max_radius = 0.05
++        best_x, best_y = 0.5, 0.5
++        found = False
++
++        # Sample potential positions
++        for _ in range(100):
++            x = random.uniform(0.01, 0.99)
++            y = random.uniform(0.01, 0.99)
++
++            # Calculate maximum possible radius at this position
++            r = min(x, 1-x, y, 1-y)
++            if r <= 0:
++                continue
++
++            # Check if this position is viable given existing circles
++            test_circle = (x, y, r)
++            if is_valid_placement(circles, test_circle):
++                if r > max_radius:
++                    max_radius = r
++                    best_x, best_y = x, y
++                    found = True
++
++        if found:
++            circles.append((best_x, best_y, max_radius))
++        attempts += 1
++
++    # Fill remaining slots with small circles if needed
++    while len(circles) < n:
++        # Place small circles in remaining areas
++        x = random.uniform(0.01, 0.99)
++        y = random.uniform(0.01, 0.99)
++        r = min(0.02, 0.01 + random.random() * 0.01)
++        test_circle = (x, y, r)
++        if is_valid_placement(circles, test_circle):
++            circles.append(test_circle)
++
++    return circles
++
++def evaluate_fitness(circles):
++    """Evaluate fitness as sum of radii"""
++    return sum(circle[2] for circle in circles)
++
++def mutate_circles(circles, mutation_rate=0.1, max_mutation=0.02):
++    """Mutate circles with adaptive perturbations"""
++    mutated = []
++    for circle in circles:
++        x, y, r = circle
++        if random.random() < mutation_rate:
++            # Apply mutations
++            dx = (random.random() - 0.5) * 2 * max_mutation
++            dy = (random.random() - 0.5) * 2 * max_mutation
++            dr = (random.random() - 0.5) * 2 * max_mutation
++
++            # Ensure we don't make radius negative
++            new_r = max(0.001, r + dr)
++
++            # Adjust position to stay within bounds
++            new_x = max(0.001, min(0.999, x + dx))
++            new_y = max(0.001, min(0.999, y + dy))
++
++            mutated.append((new_x, new_y, new_r))
++        else:
++            mutated.append(circle)
++    return mutated
++
++def crossover_circles(parent1, parent2):
++    """Create offspring through crossover"""
++    child = []
++    for i in range(len(parent1)):
++        if random.random() < 0.5:
++            child.append(parent1[i])
++        else:
++            child.append(parent2[i])
++    return child
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+-    circles = np.zeros((n, 3))
+ 
+-    return circles
++    # Initialize with a good starting configuration
++    circles = initialize_circles_greedy(n)
++
++    # Convert to numpy array for easier processing
++    circles_array = np.array(circles)
++
++    # Apply evolutionary refinement
++    best_fitness = evaluate_fitness(circles)
++    best_solution = circles.copy()
++
++    # Simple evolution loop
++    for generation in range(1000):
++        # Generate a few candidate solutions
++        candidates = []
++
++        # Mutate best solution
++        mutated = mutate_circles(best_solution)
++        candidates.append(mutated)
++
++        # Create some variants through crossover
++        for _ in range(2):
++            parent1 = best_solution
++            parent2 = initialize_circles_greedy(n)
++            child = crossover_circles(parent1, parent2)
++            candidates.append(child)
++
++        # Evaluate all candidates
++        for candidate in candidates:
++            fitness = evaluate_fitness(candidate)
++            if fitness > best_fitness:
++                best_fitness = fitness
++                best_solution = candidate.copy()
++
++        # Early stopping if improvement is minimal
++        if generation > 100 and generation % 50 == 0:
++            if abs(evaluate_fitness(best_solution) - evaluate_fitness(circles)) < 0.0001:
++                break
++
++    # Final conversion to numpy array
++    result = np.array(best_solution)
++
++    # Ensure all circles fit properly
++    final_circles = []
++    for i in range(len(result)):
++        x, y, r = result[i]
++        # Enforce boundary constraints
++        r = min(r, x, 1-x, y, 1-y)
++        final_circles.append([x, y, r])
++
++    return np.array(final_circles)
+ 
+ 
+ # EVOLVE-BLOCK-END

@@ -1,0 +1,302 @@
+<NAME>
+adaptive_mutation_rate
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive mutation rate that adjusts based on population diversity to improve exploration and exploitation balance in the evolutionary algorithm. This technique helps prevent premature convergence while maintaining good convergence properties.
+
+The key insight is that when population diversity is high (early generations), we want more aggressive exploration through higher mutation rates. As the population converges toward optimal solutions, we reduce mutation rates to allow exploitation of good solutions.
+
+This approach builds upon successful evolutionary algorithms where adaptive parameters improve overall performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def mutate_sequence(sequence: List[float], mutation_rate=0.1, mutation_strength=0.3) -> List[float]:
+    """Apply mutation to a sequence with specified rate and strength."""
+    mutated = sequence.copy()
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian noise scaled by mutation strength
+            noise = random.gauss(0, mutation_strength * mutated[i])
+            mutated[i] = max(0.01, mutated[i] + noise)
+    return mutated
+=======
+def mutate_sequence(sequence: List[float], generation: int, population_size: int,
+                   mutation_strength=0.3) -> List[float]:
+    """Apply adaptive mutation to a sequence with rate based on generation and diversity."""
+    mutated = sequence.copy()
+
+    # Adaptive mutation rate that decreases with generation and increases with diversity
+    # High diversity early on -> higher mutation rate
+    # Low diversity later -> lower mutation rate
+    diversity_factor = 1.0  # Will be calculated based on population spread
+
+    # Calculate population diversity (standard deviation of sequence sums)
+    if len(sequence) > 1:
+        # Simple measure of diversity: standard deviation of sequence values
+        std_dev = np.std(sequence)
+        diversity_factor = 1.0 + 0.5 * np.tanh(std_dev / np.mean(sequence) if np.mean(sequence) > 0 else 1)
+
+    # Decreasing mutation rate over generations
+    base_mutation_rate = 0.3 * (1 - generation / (population_size * 2))
+    mutation_rate = max(0.05, base_mutation_rate * diversity_factor)
+
+    for i in range(len(mutated)):
+        if random.random() < mutation_rate:
+            # Apply Gaussian noise scaled by mutation strength
+            noise = random.gauss(0, mutation_strength * mutated[i])
+            mutated[i] = max(0.01, mutated[i] + noise)
+    return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_local_search
+</NAME>
+
+<DESCRIPTION>
+I'll enhance the local search functionality to improve the exploitation of promising areas in the search space. The current local search uses a linear programming approach, but I'll add a hybrid approach that combines multiple strategies to better refine solutions.
+
+This includes adding a gradient-based refinement step that estimates the direction of improvement using finite differences, which should help improve the final solution quality without significantly increasing computational cost.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+    if g_fun is None:
+        return None
+    sum_sequence = np.sum(g_fun)
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+=======
+def get_good_direction_to_move_into(
+    sequence: list[float],
+) -> list[float] | None:
+    """Returns the direction to move into the sequence with enhanced local search."""
+    n = len(sequence)
+    sum_sequence = np.sum(sequence)
+
+    if sum_sequence < 0.01:
+        return None
+
+    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+
+    if g_fun is None:
+        # Fallback: try gradient-based approach
+        return gradient_improve_sequence(sequence)
+
+    sum_sequence = np.sum(g_fun)
+    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+    t = 0.01
+    new_sequence = [
+        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+    ]
+    return new_sequence
+
+def gradient_improve_sequence(sequence: list[float], step_size: float = 0.01) -> list[float]:
+    """Apply simple gradient-based improvement to sequence."""
+    # This is a simplified gradient approximation
+    # In practice, we could compute actual gradients or use finite differences
+
+    # For now, just do a small perturbation based on sequence characteristics
+    improved = sequence.copy()
+
+    # Try small adjustments to improve the sequence
+    for i in range(len(improved)):
+        # Perturb slightly based on neighboring values
+        neighbors = []
+        if i > 0:
+            neighbors.append(improved[i-1])
+        if i < len(improved) - 1:
+            neighbors.append(improved[i+1])
+
+        if neighbors:
+            avg_neighbor = np.mean(neighbors)
+            # Adjust toward average neighbor to smooth out extremes
+            if abs(avg_neighbor - improved[i]) > 0.1:
+                improved[i] = improved[i] * (1 - step_size) + avg_neighbor * step_size
+
+    return improved
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+population_diversity_control
+</NAME>
+
+<DESCRIPTION>
+I'll implement population diversity control to maintain a good balance between exploration and exploitation. This involves monitoring diversity and applying mechanisms to prevent premature convergence.
+
+When diversity drops below a certain threshold, I'll introduce additional variation through specialized operators or restart mechanisms to escape local optima and maintain search effectiveness.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 30
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual
+        fitness_scores = []
+        for seq in population:
+            _, inv_c1 = compute_autocorrelation_constant(seq)
+            fitness_scores.append(inv_c1)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Apply local search to the best sequence
+        if best_sequence is not None:
+            local_search_result = get_good_direction_to_move_into(best_sequence)
+            if local_search_result is not None:
+                # Evaluate the local search result
+                _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+                if local_inv_c1 > best_inv_c1:
+                    best_inv_c1 = local_inv_c1
+                    best_sequence = local_search_result
+                    stagnation_count = 0
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate
+            mutation_rate = 0.15 if len(new_population) < population_size // 2 else 0.05
+            child = mutate_sequence(child, mutation_rate=mutation_rate, mutation_strength=0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+=======
+    generation = 0
+    stagnation_count = 0
+    max_stagnation = 30
+    diversity_threshold = 0.1  # Minimum diversity to maintain exploration
+
+    while time.time() - start_time < max_time_seconds and stagnation_count < max_stagnation:
+        generation += 1
+
+        # Evaluate fitness (1/C1) of each individual
+        fitness_scores = []
+        for seq in population:
+            _, inv_c1 = compute_autocorrelation_constant(seq)
+            fitness_scores.append(inv_c1)
+
+        # Track best solution
+        current_best_idx = np.argmax(fitness_scores)
+        current_best_inv_c1 = fitness_scores[current_best_idx]
+
+        if current_best_inv_c1 > best_inv_c1:
+            best_inv_c1 = current_best_inv_c1
+            best_sequence = population[current_best_idx].copy()
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
+
+        # Calculate population diversity
+        if len(fitness_scores) > 1:
+            diversity = np.std(fitness_scores) / (np.mean(fitness_scores) + 1e-10)
+        else:
+            diversity = 1.0
+
+        # Apply local search to the best sequence
+        if best_sequence is not None:
+            local_search_result = get_good_direction_to_move_into(best_sequence)
+            if local_search_result is not None:
+                # Evaluate the local search result
+                _, local_inv_c1 = compute_autocorrelation_constant(local_search_result)
+                if local_inv_c1 > best_inv_c1:
+                    best_inv_c1 = local_inv_c1
+                    best_sequence = local_search_result
+                    stagnation_count = 0
+
+        # Diversity maintenance: if diversity is too low, inject new variation
+        if diversity < diversity_threshold and generation > 5:
+            # Introduce some random sequences to increase diversity
+            num_new = population_size // 6
+            for _ in range(num_new):
+                new_seq = generate_random_valid_sequence((100, 1000), 'step')
+                population[random.randint(0, len(population)-1)] = new_seq
+
+        # Selection with tournament selection and elitism
+        selected_parents = []
+        tournament_size = 5  # Larger tournament for more selection pressure
+
+        # Elitism: keep the top performer
+        elite_idx = current_best_idx
+        selected_parents.append(population[elite_idx].copy())
+
+        # Tournament selection for rest
+        for _ in range(population_size - 1):  # -1 because we already added elite
+            tournament_indices = random.sample(range(population_size), tournament_size)
+            tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+            winner_idx = tournament_indices[np.argmax(tournament_fitness)]
+            selected_parents.append(population[winner_idx].copy())
+
+        # Create new population through crossover and mutation
+        new_population = [best_sequence.copy()]  # Elitism: keep best individual
+
+        while len(new_population) < population_size:
+            parent1 = random.choice(selected_parents)
+            parent2 = random.choice(selected_parents)
+
+            # Crossover
+            child = crossover_sequences(parent1, parent2)
+
+            # Mutation with adaptive rate
+            child = mutate_sequence(child, generation, population_size, mutation_strength=0.2)
+
+            new_population.append(child)
+
+        population = new_population[:population_size]
+>>>>>>> REPLACE
+</DIFF>

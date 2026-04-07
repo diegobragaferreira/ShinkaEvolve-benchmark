@@ -1,0 +1,202 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+
+
+class CirclePacker:
+    def __init__(self, width=1.2, height=0.8, n_circles=21):
+        self.width = width
+        self.height = height
+        self.n_circles = n_circles
+        self.circles = np.zeros((n_circles, 3))
+        
+    def initialize_positions(self):
+        """Initialize circle positions using strategic seeding approach"""
+        # Corner points
+        corner_points = [
+            [0.1, 0.1],           # Bottom-left
+            [self.width-0.1, 0.1],     # Bottom-right
+            [0.1, self.height-0.1],    # Top-left
+            [self.width-0.1, self.height-0.1], # Top-right
+        ]
+        
+        # Edge midpoints
+        edge_points = [
+            [self.width/2, 0.1],       # Bottom-middle
+            [self.width/2, self.height-0.1], # Top-middle
+            [0.1, self.height/2],      # Left-middle
+            [self.width-0.1, self.height/2], # Right-middle
+        ]
+        
+        # Combine and fill remaining positions
+        init_points = corner_points + edge_points
+        
+        # Add random points for diversity
+        np.random.seed(42)
+        while len(init_points) < self.n_circles:
+            x = np.random.uniform(0.05, self.width - 0.05)
+            y = np.random.uniform(0.05, self.height - 0.05)
+            init_points.append([x, y])
+        
+        # Set initial positions with small radii
+        for i in range(self.n_circles):
+            self.circles[i] = [init_points[i][0], init_points[i][1], 0.01]
+            
+    def calculate_max_radius_single(self, index):
+        """Vectorized calculation of maximum radius for a single circle"""
+        x, y, current_radius = self.circles[index]
+        
+        # Boundary constraints
+        max_radius_bound = min(x, y, self.width - x, self.height - y)
+        
+        # If no other circles, just return bound constraint
+        if self.n_circles <= 1:
+            return max(max_radius_bound, 0.001)
+            
+        # Vectorized neighbor distance calculation
+        other_positions = np.delete(self.circles, index, axis=0)[:, :2]
+        distances = np.sqrt(np.sum((other_positions - [x, y])**2, axis=1))
+        max_radius_overlap = np.min(distances - other_positions[:, 2]) if len(other_positions) > 0 else float('inf')
+        
+        max_radius = min(max_radius_bound, max_radius_overlap)
+        return max(max_radius, 0.001)
+    
+    def calculate_all_max_radii(self):
+        """Calculate max radii for all circles efficiently"""
+        return np.array([self.calculate_max_radius_single(i) for i in range(self.n_circles)])
+    
+    def optimize_radii(self, max_iterations=1000):
+        """Multi-scale radius optimization with adaptive parameters"""
+        for iteration in range(max_iterations):
+            improved = False
+            
+            # Adaptive parameters based on iteration
+            if iteration < 300:
+                radius_update_factor = 0.95
+            elif iteration < 700:
+                radius_update_factor = 0.8
+            else:
+                radius_update_factor = 0.6
+
+            # Update radii with vectorized operation
+            max_radii = self.calculate_all_max_radii()
+            current_radii = self.circles[:, 2]
+            
+            # Update only those that can grow
+            growth_mask = max_radii > current_radii
+            if np.any(growth_mask):
+                updated_radii = np.where(growth_mask, 
+                                      np.minimum(max_radii, current_radii * radius_update_factor),
+                                      current_radii)
+                self.circles[:, 2] = updated_radii
+                improved = True
+                
+            # Early termination if no improvement
+            if not improved and iteration > 400:
+                break
+                
+    def local_search(self, max_iterations=600):
+        """Progressive local search with adaptive neighborhood"""
+        tree = cKDTree(self.circles[:, :2])
+        
+        for refinement_iteration in range(max_iterations):
+            # Adaptive step size
+            if refinement_iteration < 200:
+                step_size = 0.1
+            elif refinement_iteration < 400:
+                step_size = 0.05
+            else:
+                step_size = 0.02
+
+            # Examine neighborhood based on iteration stage
+            if refinement_iteration < 100:
+                search_grid = [-step_size*2, -step_size, 0, step_size, step_size*2]
+            elif refinement_iteration < 300:
+                search_grid = [-step_size, 0, step_size]
+            else:
+                search_grid = [-step_size/2, 0, step_size/2]
+
+            # Process circles in randomized order for better exploration
+            circle_indices = list(range(self.n_circles))
+            np.random.shuffle(circle_indices)
+            
+            for i in circle_indices:
+                current_x, current_y, current_r = self.circles[i]
+                
+                # Best improvement tracking
+                best_pos = [current_x, current_y, current_r]
+                best_radius = current_r
+                
+                # Examine grid around current position
+                for dx in search_grid:
+                    for dy in search_grid:
+                        new_x, new_y = current_x + dx, current_y + dy
+                        
+                        # Check bounds
+                        if 0 <= new_x <= self.width and 0 <= new_y <= self.height:
+                            # Calculate max radius at new position
+                            test_circles = self.circles.copy()
+                            test_circles[i, 0] = new_x
+                            test_circles[i, 1] = new_y
+                            
+                            # Calculate max radius for this specific position
+                            max_radius = self._calculate_radius_at_position(test_circles, i, new_x, new_y)
+                            
+                            if max_radius > best_radius:
+                                best_radius = max_radius
+                                best_pos = [new_x, new_y, max_radius]
+
+                # Update if improvement found
+                if best_pos[2] > self.circles[i, 2]:
+                    self.circles[i] = best_pos
+                    
+    def _calculate_radius_at_position(self, circles, index, x, y):
+        """Helper method for radius calculation at specific position"""
+        # Boundary constraints
+        max_radius_bound = min(x, y, self.width - x, self.height - y)
+        
+        # Overlap constraints with neighbors
+        max_radius_overlap = float('inf')
+        
+        for i, (cx, cy, cr) in enumerate(circles):
+            if i != index:
+                dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                max_radius_for_this_circle = dist - cr
+                if max_radius_for_this_circle < max_radius_overlap:
+                    max_radius_overlap = max_radius_for_this_circle
+
+        max_radius = min(max_radius_bound, max_radius_overlap)
+        return max(max_radius, 0.001)
+        
+    def validate_and_cleanup(self):
+        """Final validation and cleanup of results"""
+        for i in range(self.n_circles):
+            # Ensure minimum radius
+            self.circles[i, 2] = max(self.circles[i, 2], 0.001)
+            
+            # Ensure circles stay within bounds
+            self.circles[i, 0] = np.clip(self.circles[i, 0], 0.001, self.width - 0.001)
+            self.circles[i, 1] = np.clip(self.circles[i, 1], 0.001, self.height - 0.001)
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    packer = CirclePacker()
+    packer.initialize_positions()
+    packer.optimize_radii()
+    packer.local_search()
+    packer.validate_and_cleanup()
+    return packer.circles
+
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

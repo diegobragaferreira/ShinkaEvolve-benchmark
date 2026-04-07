@@ -1,0 +1,283 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance
+from shapely.geometry import Polygon, Point
+from scipy.optimize import differential_evolution, minimize
+import time
+import random
+from itertools import combinations
+
+def hexagon_vertices(center_x, center_y, size=1, angle_deg=0):
+    """Generate vertices of a regular hexagon given center, size, and rotation."""
+    angle_rad = np.radians(angle_deg)
+    vertices = []
+    for i in range(6):
+        angle = angle_rad + i * np.pi / 3
+        x = center_x + size * np.cos(angle)
+        y = center_y + size * np.sin(angle)
+        vertices.append((x, y))
+    return np.array(vertices)
+
+def check_containment(hex_vertices, outer_center_x, outer_center_y, outer_size):
+    """Check if all vertices of a hexagon are inside the outer hexagon."""
+    outer_vertices = hexagon_vertices(outer_center_x, outer_center_y, outer_size, 0)
+    outer_polygon = Polygon(outer_vertices)
+    
+    for vertex in hex_vertices:
+        point = Point(vertex[0], vertex[1])
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap(hex1_vertices, hex2_vertices):
+    """Check if two hexagons overlap using Shapely."""
+    poly1 = Polygon(hex1_vertices)
+    poly2 = Polygon(hex2_vertices)
+    return poly1.intersects(poly2)
+
+def compute_outer_hex_radius(inner_hex_data, outer_center_x, outer_center_y):
+    """Compute minimum outer hexagon radius that contains all inner hexagons."""
+    max_distance = 0
+    for i in range(len(inner_hex_data)):
+        cx, cy, _ = inner_hex_data[i]
+        distance = np.sqrt((cx - outer_center_x)**2 + (cy - outer_center_y)**2)
+        max_distance = max(max_distance, distance + 1)  # Add radius of unit hexagon
+    
+    return max_distance
+
+def evaluate_configuration(inner_hex_data, outer_center_x, outer_center_y):
+    """Evaluate current configuration: returns (validity, inv_radius)."""
+    # Check for overlaps
+    for i in range(len(inner_hex_data)):
+        hex1_vertices = hexagon_vertices(inner_hex_data[i][0], inner_hex_data[i][1], 1, inner_hex_data[i][2])
+        for j in range(i+1, len(inner_hex_data)):
+            hex2_vertices = hexagon_vertices(inner_hex_data[j][0], inner_hex_data[j][1], 1, inner_hex_data[j][2])
+            if check_overlap(hex1_vertices, hex2_vertices):
+                return False, 0
+    
+    # Check containment
+    outer_radius = compute_outer_hex_radius(inner_hex_data, outer_center_x, outer_center_y)
+    outer_vertices = hexagon_vertices(outer_center_x, outer_center_y, outer_radius, 0)
+    outer_polygon = Polygon(outer_vertices)
+    
+    for i in range(len(inner_hex_data)):
+        hex_vertices = hexagon_vertices(inner_hex_data[i][0], inner_hex_data[i][1], 1, inner_hex_data[i][2])
+        for vertex in hex_vertices:
+            point = Point(vertex[0], vertex[1])
+            if not outer_polygon.contains(point):
+                return False, 0
+    
+    # Return inverse of outer radius
+    return True, 1.0 / outer_radius
+
+def generate_voronoi_initial_config():
+    """Generate initial configuration using Voronoi diagram approach."""
+    # Create a grid of candidate points
+    grid_points = []
+    # Create a 5x5 grid around the center with spacing to allow for good distribution
+    for i in range(-2, 3):
+        for j in range(-2, 3):
+            x = i * 2.0
+            y = j * 2.0
+            # Add some randomness to prevent perfect symmetry
+            x += random.uniform(-0.2, 0.2)
+            y += random.uniform(-0.2, 0.2)
+            grid_points.append([x, y])
+    
+    # Select 12 points that will be used as centers for hexagons
+    # Use Voronoi to ensure good spatial distribution
+    points = np.array(grid_points[:12])
+    
+    # Add a central point if needed
+    if len(points) < 12:
+        points = np.vstack([points, [[0, 0]]])
+    
+    # Ensure we have exactly 12 points
+    if len(points) > 12:
+        points = points[:12]
+    elif len(points) < 12:
+        # Fill with points in a circular pattern
+        while len(points) < 12:
+            angle = len(points) * 30  # 30 degree increments
+            r = 1.0 + len(points) * 0.5
+            x = r * np.cos(np.radians(angle))
+            y = r * np.sin(np.radians(angle))
+            points = np.vstack([points, [[x, y]]])
+    
+    # Create initial configuration with zero rotations
+    config = []
+    for i in range(len(points)):
+        config.append([points[i][0], points[i][1], 0.0])
+    
+    return np.array(config)
+
+def voronoi_optimize_positions(initial_config, outer_center_x, outer_center_y):
+    """Optimize positions using Voronoi-inspired optimization approach."""
+    
+    def objective(params):
+        # Reconstruct configuration from flattened parameters
+        config = initial_config.copy()
+        # Update positions only (leave angles as they are for now)
+        idx = 0
+        for i in range(len(config)):
+            config[i][0] = params[idx]
+            config[i][1] = params[idx + 1]
+            idx += 2
+        
+        validity, inv_radius = evaluate_configuration(config, outer_center_x, outer_center_y)
+        if not validity:
+            return 1e10  # Large penalty for invalid configurations
+        return -inv_radius  # Negative because we want to maximize
+    
+    # Flatten initial configuration for optimization
+    initial_params = []
+    for i in range(len(initial_config)):
+        initial_params.extend([initial_config[i][0], initial_config[i][1]])
+    
+    # Use differential evolution for global search
+    bounds = [(-10, 10), (-10, 10)] * len(initial_config)
+    
+    try:
+        result = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=100,
+            popsize=15,
+            disp=False
+        )
+        
+        if result.success:
+            # Reconstruct optimized configuration
+            optimized_config = initial_config.copy()
+            idx = 0
+            for i in range(len(optimized_config)):
+                optimized_config[i][0] = result.x[idx]
+                optimized_config[i][1] = result.x[idx + 1]
+                idx += 2
+            return optimized_config
+    except:
+        pass
+    
+    # Fallback to simple optimization if differential evolution fails
+    try:
+        result = minimize(
+            objective,
+            initial_params,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 200}
+        )
+        
+        if result.success:
+            # Reconstruct optimized configuration
+            optimized_config = initial_config.copy()
+            idx = 0
+            for i in range(len(optimized_config)):
+                optimized_config[i][0] = result.x[idx]
+                optimized_config[i][1] = result.x[idx + 1]
+                idx += 2
+            return optimized_config
+    except:
+        pass
+    
+    return initial_config
+
+def multi_scale_refinement(initial_config, outer_center_x, outer_center_y):
+    """Apply multi-scale refinement to improve solution quality."""
+    current_config = initial_config.copy()
+    
+    # Coarse refinement
+    for i in range(3):
+        # Random perturbations
+        for j in range(len(current_config)):
+            current_config[j][0] += random.uniform(-0.1, 0.1)
+            current_config[j][1] += random.uniform(-0.1, 0.1)
+        
+        # Voronoi-based optimization
+        current_config = voronoi_optimize_positions(current_config, outer_center_x, outer_center_y)
+    
+    # Medium refinement
+    for i in range(5):
+        # Small random perturbations
+        for j in range(len(current_config)):
+            current_config[j][0] += random.uniform(-0.05, 0.05)
+            current_config[j][1] += random.uniform(-0.05, 0.05)
+        
+        # Local optimization
+        current_config = voronoi_optimize_positions(current_config, outer_center_x, outer_center_y)
+    
+    # Fine refinement
+    for i in range(10):
+        # Very small random perturbations
+        for j in range(len(current_config)):
+            current_config[j][0] += random.uniform(-0.01, 0.01)
+            current_config[j][1] += random.uniform(-0.01, 0.01)
+        
+        # Local optimization
+        current_config = voronoi_optimize_positions(current_config, outer_center_x, outer_center_y)
+    
+    return current_config
+
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Generate initial Voronoi-based configuration
+    initial_config = generate_voronoi_initial_config()
+    
+    # Set outer hexagon at center
+    outer_center_x, outer_center_y = 0.0, 0.0
+    
+    # Apply multi-scale refinement for better solution
+    optimized_config = multi_scale_refinement(initial_config, outer_center_x, outer_center_y)
+    
+    # Final verification
+    iterations = 0
+    while iterations < 3:
+        iterations += 1
+        validity, inv_radius = evaluate_configuration(optimized_config, outer_center_x, outer_center_y)
+        if validity:
+            break
+            
+        # If not valid, try a small adjustment to positions
+        for i in range(len(optimized_config)):
+            optimized_config[i][0] += np.random.normal(0, 0.005)
+            optimized_config[i][1] += np.random.normal(0, 0.005)
+    
+    # Compute final outer hexagon radius
+    outer_radius = 1.0 / inv_radius if inv_radius > 0 else 10.0
+    
+    # Convert back to required format
+    inner_hex_data = np.array(optimized_config)
+    
+    # Ensure that we have exactly 12 hexagons
+    if len(inner_hex_data) != 12:
+        # Fall back to simpler configuration if needed
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0]
+        ])
+        
+        outer_radius = 8.0  # A safe but suboptimal value
+    
+    outer_hex_data = np.array([outer_center_x, outer_center_y, 0])
+    outer_hex_side_length = outer_radius * 2  # approximate
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

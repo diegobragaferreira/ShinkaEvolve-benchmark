@@ -1,0 +1,279 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def generate_icosahedral_points():
+    """
+    Generate points based on icosahedral symmetry which provides excellent
+    point distribution for many particles. Projects 12 vertices of icosahedron
+    to unit circle with some modifications to make it suitable for 16 points.
+    """
+    # Icosahedron vertices (normalized to unit sphere)
+    phi = (1 + np.sqrt(5)) / 2  # golden ratio
+    vertices = np.array([
+        [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+        [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+        [phi, 0, 1], [phi, 0, -1], [-phi, 0, 1], [-phi, 0, -1]
+    ])
+
+    # Normalize to unit sphere
+    vertices = vertices / np.linalg.norm(vertices, axis=1, keepdims=True)
+
+    # Project to 2D using stereographic projection or simple cylindrical
+    # For 2D, we'll use the first two coordinates and scale appropriately
+    points_2d = vertices[:, :2] * 0.4 + 0.5  # Scale and center
+
+    # Take first 16 points by combining different approaches
+    # We'll use the 12 icosahedral vertices plus 4 more strategically placed
+    additional_points = [
+        [0.5, 0.5],  # center
+        [0.2, 0.2],  # corner
+        [0.8, 0.8],  # opposite corner
+        [0.2, 0.8]   # edge point
+    ]
+
+    # Combine icosahedral points with additional strategic points
+    combined_points = np.vstack([points_2d[:12], additional_points])
+
+    # Ensure we have exactly 16 points
+    if len(combined_points) > 16:
+        combined_points = combined_points[:16]
+    elif len(combined_points) < 16:
+        # Fill with random points near the existing ones
+        np.random.seed(42)
+        extra_points = np.random.rand(16 - len(combined_points), 2)
+        combined_points = np.vstack([combined_points, extra_points])
+
+    return np.clip(combined_points, 0, 1)
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+
+    """
+
+    def compute_min_max_ratio(points):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if len(points) < 2:
+            return 0
+
+        # Compute pairwise distances with enhanced numerical stability
+        # Using squareform to avoid potential issues with sparse arrays
+        distance_matrix = squareform(pdist(points))
+
+        # Set diagonal to infinity to exclude self-distances
+        np.fill_diagonal(distance_matrix, np.inf)
+
+        # Get all finite distances (excluding NaN and inf values)
+        finite_distances = distance_matrix[np.isfinite(distance_matrix)]
+
+        if len(finite_distances) == 0:
+            return 0
+
+        # Get min and max distances
+        dmin = np.min(finite_distances)
+        dmax = np.max(finite_distances)
+
+        # Avoid division by zero
+        if dmax == 0:
+            return 0
+
+        return dmin / dmax
+
+    def compute_distance_matrix(points):
+        """Compute full pairwise distance matrix for additional analysis."""
+        return squareform(pdist(points))
+
+    def objective_function(x_flat):
+        """Objective function to maximize (negative because we minimize)."""
+        # Reshape flat array back to points
+        points = x_flat.reshape(-1, 2)
+
+        # Ensure points are within bounds [0,1]
+        points = np.clip(points, 0, 1)
+
+        # Compute ratio
+        ratio = compute_min_max_ratio(points)
+
+        # Return negative because we want to maximize
+        return -ratio
+
+    def generate_hexagonal_grid():
+        """Generate a hexagonal grid arrangement which is known to be close to optimal."""
+        # 4x4 grid with hexagonal packing (staggered rows)
+        points = []
+        rows = 4
+        cols = 4
+
+        # Hexagonal packing parameters
+        spacing_x = 1.0 / (cols - 1)
+        spacing_y = np.sqrt(3) / 2 / (rows - 1)  # Height of equilateral triangle
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * spacing_x + (i % 2) * spacing_x / 2
+                y = i * spacing_y
+                points.append([x, y])
+
+        return np.array(points)
+
+    def generate_better_initial_points():
+        """Generate high-quality initial point configurations."""
+        # Strategy 1: Hexagonal grid (known to be good for dispersion)
+        hex_points = generate_hexagonal_grid()
+
+        # Strategy 2: Perturbed hexagonal grid for better spread
+        np.random.seed(42)
+        perturbed_hex = hex_points + np.random.normal(0, 0.02, hex_points.shape)
+        perturbed_hex = np.clip(perturbed_hex, 0, 1)
+
+        # Strategy 3: Regular grid with jitter
+        regular_grid = []
+        for i in range(4):
+            for j in range(4):
+                x = (i + 0.5) / 4.0
+                y = (j + 0.5) / 4.0
+                regular_grid.append([x, y])
+        regular_grid = np.array(regular_grid)
+        # Add jitter
+        jittered_grid = regular_grid + np.random.normal(0, 0.01, regular_grid.shape)
+        jittered_grid = np.clip(jittered_grid, 0, 1)
+
+        # Strategy 4: Golden spiral (modified for better distribution)
+        indices = np.arange(16)
+        golden_angle = 2.399963229728653
+        angles = golden_angle * indices
+        # Use a more uniform radial distribution
+        radii = np.log(indices + 1) / np.log(16)  # Logarithmic for better spread
+        golden_spiral = np.column_stack([
+            0.5 + 0.45 * radii * np.cos(angles),
+            0.5 + 0.45 * radii * np.sin(angles)
+        ])
+        golden_spiral = np.clip(golden_spiral, 0, 1)
+
+        # Strategy 5: Icosahedral distribution (mathematical optimality)
+        icosahedral_points = generate_icosahedral_points()
+
+        # Strategy 6: Random points with higher spread
+        np.random.seed(123)
+        random_points = np.random.rand(16, 2)
+        random_points = np.clip(random_points, 0.05, 0.95)  # Keep them away from edges
+
+        # Evaluate all strategies and return the best
+        candidates = [hex_points, perturbed_hex, jittered_grid, golden_spiral, icosahedral_points, random_points]
+        best_candidate = None
+        best_ratio = 0
+
+        for candidate in candidates:
+            ratio = compute_min_max_ratio(candidate)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_candidate = candidate.copy()
+
+        return best_candidate
+
+    def robust_optimization(initial_points, max_evaluations=1000):
+        """Perform robust optimization with multiple strategies."""
+        # Flatten for optimization
+        x0 = initial_points.flatten()
+
+        # Define bounds for each coordinate (0 to 1)
+        bounds = [(0, 1) for _ in range(32)]
+
+        # Early stopping parameters
+        best_value = float('inf')
+        best_points = initial_points.copy()
+        stagnation_count = 0
+        max_stagnation = 10
+
+        try:
+            # First aggressive differential evolution with good parameters
+            de_result = differential_evolution(
+                objective_function,
+                bounds,
+                maxiter=max_evaluations // 10,
+                popsize=20,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                disp=False,
+                tol=1e-8,
+                strategy='best1bin'
+            )
+
+            # Try local refinement with L-BFGS-B
+            if de_result.success:
+                refined_result = minimize(
+                    objective_function,
+                    de_result.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'ftol': 1e-12, 'gtol': 1e-12},
+                    tol=1e-12
+                )
+
+                if refined_result.success:
+                    final_points = refined_result.x.reshape(-1, 2)
+                    final_points = np.clip(final_points, 0, 1)
+                    final_ratio = compute_min_max_ratio(final_points)
+
+                    if final_ratio > 1e-10:  # Only consider valid solutions
+                        return final_points
+
+            # If local refinement fails, try a simpler approach
+            final_points = de_result.x.reshape(-1, 2)
+            final_points = np.clip(final_points, 0, 1)
+            return final_points
+
+        except Exception:
+            # If all else fails, return the initial points
+            return initial_points
+
+    # Generate multiple good initial configurations
+    initial_points = generate_better_initial_points()
+
+    # Run optimization with multiple restarts
+    best_points = initial_points.copy()
+    best_ratio = compute_min_max_ratio(best_points)
+
+    # Multi-start optimization with different initial configurations
+    for restart in range(5):
+        # Start with different random seeds for variety
+        np.random.seed(restart + 1000)
+
+        # Generate new variation of the initial points
+        perturbed_points = initial_points.copy()
+        noise_level = 0.03 + restart * 0.005  # Gradually increasing noise
+        perturbed_points += np.random.normal(0, noise_level, initial_points.shape)
+        perturbed_points = np.clip(perturbed_points, 0, 1)
+
+        # Optimize this variant
+        optimized_points = robust_optimization(perturbed_points, max_evaluations=500)
+        optimized_ratio = compute_min_max_ratio(optimized_points)
+
+        if optimized_ratio > best_ratio:
+            best_ratio = optimized_ratio
+            best_points = optimized_points.copy()
+
+    # Final optimization on the best configuration found
+    final_points = robust_optimization(best_points, max_evaluations=300)
+    final_ratio = compute_min_max_ratio(final_points)
+
+    # One final refinement attempt
+    np.random.seed(9999)
+    last_attempt = final_points + np.random.normal(0, 0.01, final_points.shape)
+    last_attempt = np.clip(last_attempt, 0, 1)
+    refined_final = robust_optimization(last_attempt, max_evaluations=200)
+    refined_ratio = compute_min_max_ratio(refined_final)
+
+    if refined_ratio > final_ratio:
+        return refined_final
+    else:
+        return final_points
+
+# EVOLVE-BLOCK-END

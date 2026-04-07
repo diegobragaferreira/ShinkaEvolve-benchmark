@@ -1,0 +1,100 @@
+<NAME>
+improve_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation computes autoconvolution using a naive O(n²) approach which is inefficient for large n. I'll replace it with a more efficient FFT-based approach that maintains numerical accuracy while significantly reducing computation time. This will allow us to test larger function sizes and achieve better C₂ values within the time constraints.
+
+The key insight is that convolution can be computed efficiently using FFT, and we can still maintain the piecewise-linear integration approach for computing the norms as required by the evaluator.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    # g[k] = integral f(x) * f(y) where x+y = k*dx - domain_length/2
+    # We'll compute this as a discrete approximation
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                # For two adjacent pieces with heights f[i] and f[j],
+                # the convolution contributes to g[k]
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+=======
+@njit
+def compute_convolution_norms_numba(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version using FFT for efficient convolution.
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Use FFT-based convolution for efficiency
+    # Pad to appropriate size for proper convolution
+    padded_size = 2 * n_steps - 1
+    f_padded = np.zeros(padded_size)
+    f_padded[:n_steps] = f_values
+
+    # FFT-based convolution: g = f * f
+    f_fft = np.fft.fft(f_padded)
+    g_fft = f_fft * f_fft.conj()  # Pointwise multiplication in frequency domain
+    g = np.fft.ifft(g_fft).real  # Inverse FFT to get convolution result
+
+    # Extract the valid convolution part (center portion)
+    g = g[n_steps-1:2*n_steps-1]
+
+    # Compute norms using the trapezoidal rule for piecewise linear integration
+    # For ||g||₂²: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ... + (dx/3)(g_{n-1}² + g_{n-1}g_n + g_n²)
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,209 @@
+<NAME>
+enhance_convolution_computation_with_fft
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses direct convolution computation which has O(n²) complexity. For large step functions (like the 1000 bins we're using), this becomes a bottleneck. I'll enhance the convolution computation by adding an FFT-based approach that can significantly speed up the convolution operation. This will enable more efficient exploration of larger solution spaces within our time constraints.
+
+The key insight is that convolution in the time domain corresponds to multiplication in the frequency domain, making FFT a natural choice for speeding up autoconvolutions.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+import numpy as np
+from scipy.optimize import differential_evolution
+from numba import jit
+import time
+from scipy.sparse import csr_matrix
+import warnings
+
+# Suppress any warnings from sparse operations
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def compute_sparse_autoconvolution_numba(f_vals):
+    """
+    Compute autoconvolution using sparse representation - only compute non-zero contributions
+    This exploits the fact that many convolution terms are zero due to step function structure
+    """
+    n = len(f_vals)
+    # Output length for convolution
+    output_length = 2 * n - 1
+    g = np.zeros(output_length)
+
+    # In sparse approach, we compute only relevant terms
+    # For step function f, f[i] * f[j] contributes to position i+j
+    # Since f is step function, we can exploit structure
+    for i in range(n):
+        for j in range(n):
+            pos = i + j
+            if 0 <= pos < output_length:
+                g[pos] += f_vals[i] * f_vals[j]
+
+    return g
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L2, L1, and L-infinity norms efficiently"""
+    # L2 norm squared (using trapezoidal-like approximation)
+    l2_squared = 0.0
+    n = len(g_vals)
+    if n >= 2:
+        # For piecewise linear integration: integrate over intervals
+        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1
+        for i in range(n-1):
+            y1 = g_vals[i]
+            y2 = g_vals[i+1]
+            l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+    # L1 norm (sum of absolute values divided by number of intervals)
+    l1 = 0.0
+    for val in g_vals:
+        l1 += abs(val)
+    l1 /= (n + 1)  # Approximate integral via piecewise constant approximation
+
+    # L-infinity norm (maximum absolute value)
+    l_inf = 0.0
+    for val in g_vals:
+        abs_val = abs(val)
+        if abs_val > l_inf:
+            l_inf = abs_val
+
+    return l2_squared, l1, l_inf
+
+def evaluate_c2(f_vals):
+    """Evaluate C2 for a given set of step heights"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Compute autoconvolution using sparse method
+        g_vals = compute_sparse_autoconvolution_numba(f_vals)
+
+        # Compute norms
+        l2_squared, l1, l_inf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-15 or l_inf <= 1e-15:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_squared / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+=======
+import numpy as np
+from scipy.optimize import differential_evolution
+from numba import jit
+import time
+from scipy.sparse import csr_matrix
+from scipy.fft import fft, ifft
+import warnings
+
+# Suppress any warnings from sparse operations
+warnings.filterwarnings('ignore')
+
+@jit(nopython=True)
+def compute_autoconvolution_direct_numba(f_vals):
+    """
+    Direct convolution computation using Numba for speed
+    """
+    n = len(f_vals)
+    # Output length for convolution
+    output_length = 2 * n - 1
+    g = np.zeros(output_length)
+
+    # Direct approach for convolution
+    for i in range(n):
+        for j in range(n):
+            pos = i + j
+            if 0 <= pos < output_length:
+                g[pos] += f_vals[i] * f_vals[j]
+
+    return g
+
+def compute_autoconvolution_fft(f_vals):
+    """
+    Compute autoconvolution using FFT for better performance on large arrays
+    """
+    n = len(f_vals)
+    # For autoconvolution, we use the property that f*f = ifft(fft(f)^2)
+    # Zero-pad to avoid circular convolution effects
+    pad_length = 2 * n - 1
+    padded_f = np.pad(f_vals, (0, pad_length - n), mode='constant')
+
+    # Compute FFT, square it, then inverse FFT
+    fft_f = fft(padded_f)
+    fft_f_squared = fft_f * fft_f
+    g = ifft(fft_f_squared).real
+
+    # Return only the valid portion (non-circular part)
+    return g[:pad_length]
+
+@jit(nopython=True)
+def compute_norms_numba(g_vals):
+    """Compute L2, L1, and L-infinity norms efficiently"""
+    # L2 norm squared (using trapezoidal-like approximation)
+    l2_squared = 0.0
+    n = len(g_vals)
+    if n >= 2:
+        # For piecewise linear integration: integrate over intervals
+        # Each interval contributes (h/3)(y1^2 + y1*y2 + y2^2) where h=1
+        for i in range(n-1):
+            y1 = g_vals[i]
+            y2 = g_vals[i+1]
+            l2_squared += (y1*y1 + y1*y2 + y2*y2) / 3.0
+
+    # L1 norm (sum of absolute values divided by number of intervals)
+    l1 = 0.0
+    for val in g_vals:
+        l1 += abs(val)
+    l1 /= (n + 1)  # Approximate integral via piecewise constant approximation
+
+    # L-infinity norm (maximum absolute value)
+    l_inf = 0.0
+    for val in g_vals:
+        abs_val = abs(val)
+        if abs_val > l_inf:
+            l_inf = abs_val
+
+    return l2_squared, l1, l_inf
+
+def evaluate_c2(f_vals):
+    """Evaluate C2 for a given set of step heights"""
+    try:
+        # Ensure non-negative values
+        f_vals = np.maximum(f_vals, 0)
+
+        # Skip empty sequences
+        if len(f_vals) == 0:
+            return 0.0
+
+        # Choose the most appropriate convolution method based on size
+        if len(f_vals) > 200:
+            # Use FFT for better performance on larger arrays
+            g_vals = compute_autoconvolution_fft(f_vals)
+        else:
+            # Use direct computation for small arrays
+            g_vals = compute_autoconvolution_direct_numba(f_vals)
+
+        # Compute norms
+        l2_squared, l1, l_inf = compute_norms_numba(g_vals)
+
+        # Avoid division by zero
+        if l1 <= 1e-15 or l_inf <= 1e-15:
+            return 0.0
+
+        # Compute C2
+        c2 = l2_squared / (l1 * l_inf)
+        return c2
+    except Exception as e:
+        return 0.0
+>>>>>>> REPLACE
+
+</DIFF>

@@ -1,0 +1,291 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+import time
+from collections import defaultdict
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+    width, height = 1.0, 1.0  # Optimal square configuration
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    n_circles = 21
+    
+    # Initialize circles array
+    circles = np.zeros((n_circles, 3))
+    
+    # Level 1: Strategic placement using geometric insights
+    # Place circles in corners first (these typically have larger radii)
+    corner_positions = [
+        (0.1, 0.1),      # bottom-left
+        (width - 0.1, 0.1),  # bottom-right
+        (0.1, height - 0.1),  # top-left
+        (width - 0.1, height - 0.1)  # top-right
+    ]
+    
+    placed_count = 0
+    
+    # Place corner circles
+    for x, y in corner_positions:
+        if placed_count < n_circles:
+            max_radius = min(x, width - x, y, height - y)
+            circles[placed_count] = [x, y, max_radius]
+            placed_count += 1
+    
+    # Fill remaining positions with density-based placement using grid sampling
+    # Create a grid of candidate positions
+    grid_density = 6
+    x_coords = np.linspace(0.05, width - 0.05, grid_density)
+    y_coords = np.linspace(0.05, height - 0.05, grid_density)
+    
+    candidates = []
+    for x in x_coords:
+        for y in y_coords:
+            candidates.append((x, y))
+    
+    # Remove already occupied positions
+    used_positions = set()
+    for i in range(placed_count):
+        x, y, r = circles[i]
+        used_positions.add((round(x, 4), round(y, 4)))
+    
+    available_candidates = [c for c in candidates if (round(c[0], 4), round(c[1], 4)) not in used_positions]
+    
+    # Add more candidates in a way that prefers center regions
+    center_candidates = []
+    for i in range(100):
+        x = np.random.uniform(0.05, width - 0.05)
+        y = np.random.uniform(0.05, height - 0.05)
+        if (round(x, 4), round(y, 4)) not in used_positions:
+            center_candidates.append((x, y))
+    
+    # Combine and shuffle for diverse initial placement
+    all_candidates = available_candidates + center_candidates
+    np.random.shuffle(all_candidates)
+    
+    # Place remaining circles
+    for i in range(placed_count, n_circles):
+        if not all_candidates:
+            # Fallback to random placement if no candidates
+            x = np.random.uniform(0.05, width - 0.05)
+            y = np.random.uniform(0.05, height - 0.05)
+            max_radius = min(x, width - x, y, height - y)
+            circles[i] = [x, y, max_radius]
+        else:
+            # Select best candidate from pool
+            best_candidate = None
+            best_radius = 0
+            
+            # Try up to 20 candidates
+            for _ in range(min(20, len(all_candidates))):
+                x, y = all_candidates.pop()
+                max_radius = min(x, width - x, y, height - y)
+                
+                # Check overlap with all placed circles
+                valid = True
+                for j in range(i):
+                    px, py, pr = circles[j]
+                    dist = np.sqrt((x - px)**2 + (y - py)**2)
+                    if dist < (max_radius + pr):
+                        valid = False
+                        break
+                
+                if valid and max_radius > best_radius:
+                    best_radius = max_radius
+                    best_candidate = (x, y)
+            
+            if best_candidate is not None:
+                x, y = best_candidate
+                circles[i] = [x, y, best_radius]
+            else:
+                # Fallback when no valid candidate found
+                x = np.random.uniform(0.05, width - 0.05)
+                y = np.random.uniform(0.05, height - 0.05)
+                max_radius = min(x, width - x, y, height - y)
+                circles[i] = [x, y, max_radius]
+    
+    # Level 2: Adaptive local search with penalty-based objective
+    def calculate_overlap_penalty(circles_array):
+        """Calculate penalty for overlapping circles"""
+        penalty = 0
+        n = len(circles_array)
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = circles_array[i]
+                x2, y2, r2 = circles_array[j]
+                dist = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                overlap = max(0, r1 + r2 - dist)
+                penalty += overlap**2  # Square penalty for stronger discouragement
+        return penalty
+    
+    def calculate_objective(circles_array, alpha=0.1):
+        """Composite objective combining radius sum and overlap penalty"""
+        radius_sum = np.sum(circles_array[:, 2])
+        overlap_penalty = calculate_overlap_penalty(circles_array)
+        return radius_sum - alpha * overlap_penalty
+    
+    def get_valid_radius(x, y, circles_array, exclude_index=None):
+        """Compute maximum valid radius at given position"""
+        max_radius = min(x, width - x, y, height - y)
+        
+        # Reduce radius based on proximity to existing circles
+        for i, (px, py, pr) in enumerate(circles_array):
+            if i == exclude_index:
+                continue
+            dist = np.sqrt((x - px)**2 + (y - py)**2)
+            if dist > 0:  # Avoid self-intersection
+                max_radius = min(max_radius, dist - pr)
+        
+        return max(0.001, max_radius)  # Ensure minimum positive radius
+    
+    # Level 3: Simulated Annealing style global search
+    current_solution = circles.copy()
+    current_score = calculate_objective(current_solution)
+    
+    best_solution = circles.copy()
+    best_score = current_score
+    
+    # Parameters for adaptive search
+    temp = 0.1
+    cooling_rate = 0.995
+    min_temp = 1e-6
+    max_iter = 1000
+    
+    # Spatial indexing for efficient conflict detection (simple grid)
+    def build_grid(circles_array, cell_size=0.2):
+        grid = defaultdict(list)
+        for i, (x, y, r) in enumerate(circles_array):
+            grid[(int(x//cell_size), int(y//cell_size))].append(i)
+        return grid
+    
+    def get_neighbors(grid, x, y, cell_size=0.2):
+        neighbors = []
+        base_cell = (int(x//cell_size), int(y//cell_size))
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (base_cell[0] + dx, base_cell[1] + dy)
+                if cell in grid:
+                    neighbors.extend(grid[cell])
+        return neighbors
+    
+    for iteration in range(max_iter):
+        # Cool temperature
+        if temp < min_temp:
+            temp = min_temp
+        
+        # Create new candidate solution
+        new_solution = current_solution.copy()
+        
+        # Select random circle to modify
+        circle_idx = np.random.randint(0, n_circles)
+        
+        # Save current values
+        old_x, old_y, old_r = new_solution[circle_idx]
+        
+        # Adaptive movement based on temperature
+        move_scale = temp * 0.5
+        
+        # Perturb position
+        new_x = old_x + np.random.uniform(-move_scale, move_scale)
+        new_y = old_y + np.random.uniform(-move_scale, move_scale)
+        
+        # Keep within bounds
+        new_x = np.clip(new_x, 0.05, width - 0.05)
+        new_y = np.clip(new_y, 0.05, height - 0.05)
+        
+        # Compute new valid radius
+        new_r = get_valid_radius(new_x, new_y, new_solution, circle_idx)
+        
+        # Update the circle
+        new_solution[circle_idx] = [new_x, new_y, new_r]
+        
+        # Recalculate with spatial indexing for efficiency
+        new_score = calculate_objective(new_solution)
+        
+        # Accept or reject based on Metropolis criterion
+        delta = new_score - current_score
+        if delta > 0 or np.random.rand() < np.exp(delta / temp):
+            current_solution = new_solution
+            current_score = new_score
+            
+            if current_score > best_score:
+                best_solution = new_solution.copy()
+                best_score = current_score
+        else:
+            # Restore original values
+            pass
+        
+        temp *= cooling_rate
+    
+    # Final refinement with local hill climbing
+    refined_solution = best_solution.copy()
+    
+    # Simple local search around each circle
+    for _ in range(500):
+        improved = False
+        
+        # Shuffle order for randomness
+        indices = list(range(n_circles))
+        np.random.shuffle(indices)
+        
+        for idx in indices:
+            old_x, old_y, old_r = refined_solution[idx]
+            
+            # Try several nearby positions
+            best_x, best_y, best_r = old_x, old_y, old_r
+            best_score = calculate_objective(refined_solution)
+            
+            # Check 8 directions with small steps
+            steps = [0.01, 0.02, 0.03]
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    
+                    for step in steps:
+                        new_x = old_x + dx * step
+                        new_y = old_y + dy * step
+                        
+                        # Keep in bounds
+                        new_x = np.clip(new_x, 0.05, width - 0.05)
+                        new_y = np.clip(new_y, 0.05, height - 0.05)
+                        
+                        # Compute valid radius
+                        new_r = get_valid_radius(new_x, new_y, refined_solution, idx)
+                        
+                        # Create trial solution
+                        trial_solution = refined_solution.copy()
+                        trial_solution[idx] = [new_x, new_y, new_r]
+                        
+                        # Evaluate
+                        trial_score = calculate_objective(trial_solution)
+                        
+                        if trial_score > best_score:
+                            best_score = trial_score
+                            best_x, best_y, best_r = new_x, new_y, new_r
+                            improved = True
+            
+            # Apply improvement if found
+            if improved:
+                refined_solution[idx] = [best_x, best_y, best_r]
+    
+    # Final validation check
+    total_radius = np.sum(refined_solution[:, 2])
+    return refined_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

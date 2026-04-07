@@ -1,0 +1,335 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial import Voronoi
+from scipy.spatial.distance import pdist
+import time
+import warnings
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+    Uses Voronoi-guided optimization approach instead of direct distance optimization.
+    
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    
+    def compute_voronoi_energy(points):
+        """
+        Computes an energy function based on Voronoi diagram properties to guide optimization.
+        Penalizes: 
+        - Unequal Voronoi cell areas
+        - Poorly shaped Voronoi cells (high aspect ratios)
+        - Small minimum distances
+        """
+        if len(points) < 2:
+            return 0.0
+            
+        # Compute Voronoi diagram
+        try:
+            vor = Voronoi(points)
+        except Exception:
+            # Fall back to simple distance-based penalty if Voronoi fails
+            distances = pdist(points)
+            if len(distances) == 0:
+                return 0.0
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            if d_max == 0:
+                return 0.0
+            ratio = d_min / d_max
+            return -(ratio * 0.5)  # Penalty for bad configuration
+            
+        # Compute cell areas and shapes
+        areas = []
+        aspect_ratios = []
+        
+        # For each Voronoi cell (excluding infinite cells)
+        for i, region in enumerate(vor.point_region):
+            if region != -1:  # Skip infinite regions
+                indices = vor.regions[region]
+                if len(indices) > 0 and -1 not in indices:
+                    # Compute area of this polygon
+                    try:
+                        polygon = [vor.vertices[j] for j in indices]
+                        if len(polygon) >= 3:
+                            # Simple polygon area calculation
+                            area = 0.0
+                            n = len(polygon)
+                            for j in range(n):
+                                k = (j + 1) % n
+                                area += polygon[j][0] * polygon[k][1]
+                                area -= polygon[k][0] * polygon[j][1]
+                            area = abs(area) / 2.0
+                            areas.append(area)
+                            
+                            # Compute bounding rectangle for aspect ratio
+                            xs = [p[0] for p in polygon]
+                            ys = [p[1] for p in polygon]
+                            width = max(xs) - min(xs)
+                            height = max(ys) - min(ys)
+                            
+                            if width > 0 and height > 0:
+                                aspect_ratio = max(width, height) / min(width, height)
+                                aspect_ratios.append(aspect_ratio)
+                    except Exception:
+                        continue
+        
+        # If we have valid areas, compute penalty
+        if areas:
+            # Normalize areas to target area
+            target_area = 1.0 / len(points)
+            area_variance = np.var(areas) / (target_area ** 2 + 1e-10)
+            
+            # Aspect ratio penalty (lower is better)
+            if aspect_ratios:
+                avg_aspect = np.mean(aspect_ratios)
+                aspect_penalty = avg_aspect / 10.0  # Normalized penalty
+            else:
+                aspect_penalty = 0.0
+                
+            # Combine penalties
+            energy = area_variance + aspect_penalty
+        else:
+            # No valid Voronoi cells, fall back to distance ratio
+            distances = pdist(points)
+            if len(distances) == 0:
+                return 0.0
+            d_min = np.min(distances)
+            d_max = np.max(distances)
+            if d_max == 0:
+                return 0.0
+            ratio = d_min / d_max
+            energy = -(ratio * 0.5)  # Penalty for bad configuration
+            
+        return energy
+    
+    def objective_with_voronoi(x):
+        """Objective function using Voronoi-based energy instead of direct distance ratio."""
+        points = x.reshape(-1, 2)
+        
+        # Basic constraint check to ensure points stay in bounds
+        if np.any(points < 0) or np.any(points > 1):
+            return 1e10  # Large penalty for constraint violations
+            
+        # Compute Voronoi energy
+        energy = compute_voronoi_energy(points)
+        
+        # Also compute distance ratio for comparison (for debugging)
+        distances = pdist(points)
+        if len(distances) == 0:
+            return 1e10
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+        if d_max == 0:
+            return 1e10
+        ratio = d_min / d_max
+        
+        # Return combination: energy-based approach with fallback to ratio
+        # We want to minimize energy (which means maximizing ratio and good Voronoi quality)
+        return energy
+    
+    def compute_voronoi_gradients(points):
+        """
+        Compute approximate gradients based on Voronoi cell geometry.
+        This is a heuristic gradient that guides toward better Voronoi configurations.
+        """
+        if len(points) < 2:
+            return np.zeros_like(points)
+            
+        try:
+            vor = Voronoi(points)
+        except Exception:
+            # Fallback to gradient based on pairwise distances
+            n = len(points)
+            grad = np.zeros_like(points)
+            
+            # Compute gradient based on pairwise forces (simplified)
+            for i in range(n):
+                for j in range(i+1, n):
+                    dx = points[i, 0] - points[j, 0]
+                    dy = points[i, 1] - points[j, 1]
+                    dist_sq = dx*dx + dy*dy
+                    
+                    if dist_sq > 1e-10:
+                        # Repulsive force for close points
+                        force = 1.0 / (dist_sq + 1e-10)
+                        grad[i, 0] += force * dx
+                        grad[i, 1] += force * dy
+                        grad[j, 0] -= force * dx
+                        grad[j, 1] -= force * dy
+                        
+            return grad
+            
+        # Simplified Voronoi gradient estimation
+        n = len(points)
+        grad = np.zeros_like(points)
+        
+        # For each point, estimate gradient based on Voronoi neighbors
+        for i in range(n):
+            neighbors = []
+            # Find neighboring Voronoi regions
+            for j, region in enumerate(vor.point_region):
+                if region != -1 and i != j:
+                    # Compute distance to neighbor's centroid
+                    try:
+                        region_indices = vor.regions[region]
+                        if len(region_indices) > 0 and -1 not in region_indices:
+                            # Simple centroid calculation
+                            vertices = [vor.vertices[k] for k in region_indices if k < len(vor.vertices)]
+                            if len(vertices) >= 3:
+                                centroid = np.mean(vertices, axis=0)
+                                dist = np.sqrt((points[i, 0] - centroid[0])**2 + (points[i, 1] - centroid[1])**2)
+                                neighbors.append((dist, centroid))
+                    except Exception:
+                        continue
+            
+            # Adjust gradient based on neighbor distances
+            if neighbors:
+                # Try to move towards better positioned neighbors
+                avg_neighbor_dist = np.mean([n[0] for n in neighbors])
+                if avg_neighbor_dist > 0.01:
+                    # Move away from dense regions (if any)
+                    pass
+                    
+        return grad
+    
+    def create_initial_configurations():
+        """Create multiple high-quality initial configurations."""
+        configs = []
+
+        # Configuration 1: Structured 4x4 grid with perturbations
+        np.random.seed(42)
+        grid_x = np.linspace(0.1, 0.9, 4)
+        grid_y = np.linspace(0.1, 0.9, 4)
+        grid_points = np.array([[x, y] for x in grid_x for y in grid_y])
+        noise = np.random.normal(0, 0.05, (16, 2))
+        config1 = np.clip(grid_points + noise, 0, 1)
+        configs.append(config1)
+
+        # Configuration 2: Random with clustering avoidance
+        np.random.seed(123)
+        config2 = np.random.uniform(0.05, 0.95, (16, 2))
+        # Add some structure to avoid very tight clusters
+        for i in range(0, 16, 4):  # Group every 4 points
+            group_center = np.mean(config2[i:i+4], axis=0)
+            config2[i:i+4] += np.random.normal(0, 0.03, (4, 2))
+            config2[i:i+4] = np.clip(config2[i:i+4], 0, 1)
+        configs.append(config2)
+
+        # Configuration 3: Fibonacci spiral-like arrangement
+        np.random.seed(456)
+        angles = np.linspace(0, 2*np.pi, 16, endpoint=False)
+        radii = np.sqrt(np.linspace(0.05, 0.45, 16))  # Square root for uniform distribution
+        fib_points = np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
+        fib_points = np.clip((fib_points + 1) / 2, 0, 1)  # Normalize to [0,1]
+        configs.append(fib_points)
+
+        # Configuration 4: Hexagonal grid approximation
+        np.random.seed(789)
+        hex_x = np.array([0.15, 0.45, 0.75, 0.3, 0.6, 0.15, 0.45, 0.75, 0.225, 0.525, 0.825, 0.375, 0.675, 0.225, 0.525, 0.825])
+        hex_y = np.array([0.15, 0.15, 0.15, 0.45, 0.45, 0.75, 0.75, 0.75, 0.3, 0.3, 0.3, 0.6, 0.6, 0.9, 0.9, 0.9])
+        hex_points = np.column_stack([hex_x, hex_y])
+        noise = np.random.normal(0, 0.03, (16, 2))
+        config4 = np.clip(hex_points + noise, 0, 1)
+        configs.append(config4)
+        
+        return configs
+
+    def optimize_with_voronoi_guidance(x0):
+        """
+        Perform optimization with Voronoi guidance.
+        Uses L-BFGS-B with custom objective that incorporates Voronoi energy.
+        """
+        # Define bounds (points must stay in [0,1] x [0,1])
+        bounds = [(0, 1) for _ in range(32)]
+        
+        # Use L-BFGS-B with custom objective
+        try:
+            result = minimize(
+                objective_with_voronoi,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8}
+            )
+        except Exception:
+            # Fallback to simpler optimization if needed
+            try:
+                result = minimize(
+                    objective_with_voronoi,
+                    x0,
+                    method='Nelder-Mead',
+                    options={'maxiter': 300, 'fatol': 1e-8, 'xatol': 1e-8}
+                )
+            except Exception:
+                return x0  # Return original if optimization fails
+        
+        if result.success:
+            return result.x
+        else:
+            return x0  # Return original if optimization fails
+
+    # Multi-start optimization with Voronoi-guided approach
+    best_ratio = -np.inf
+    best_points = None
+    
+    # Generate multiple initial configurations
+    initial_configs = create_initial_configurations()
+    
+    # Run optimizations with different initial configurations
+    for i, initial_points in enumerate(initial_configs):
+        try:
+            # Optimize using Voronoi-guided approach
+            optimized_x = optimize_with_voronoi_guidance(initial_points.flatten())
+            
+            if optimized_x is not None:
+                optimized_points = optimized_x.reshape(-1, 2)
+                
+                # Calculate actual ratio for this configuration
+                distances = pdist(optimized_points)
+                if len(distances) > 0:
+                    d_min = np.min(distances)
+                    d_max = np.max(distances)
+                    if d_max > 0:
+                        ratio = d_min / d_max
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = optimized_points.copy()
+                            
+        except Exception as e:
+            # Continue with other configurations if this one fails
+            continue
+
+    # If no successful optimization, return the best initial configuration
+    if best_points is None:
+        best_points = initial_configs[0] if initial_configs else np.random.uniform(0, 1, (16, 2))
+    
+    # Final refinement using standard optimization
+    try:
+        bounds = [(0, 1) for _ in range(32)]
+        result = minimize(
+            objective_with_voronoi,
+            best_points.flatten(),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 300, 'ftol': 1e-9, 'gtol': 1e-9}
+        )
+        if result.success:
+            final_points = result.x.reshape(-1, 2)
+            # Recalculate ratio for final points
+            distances = pdist(final_points)
+            if len(distances) > 0:
+                d_min = np.min(distances)
+                d_max = np.max(distances)
+                if d_max > 0:
+                    ratio = d_min / d_max
+                    if ratio > best_ratio:
+                        best_points = final_points
+    except Exception:
+        pass
+
+    return best_points
+
+# EVOLVE-BLOCK-END

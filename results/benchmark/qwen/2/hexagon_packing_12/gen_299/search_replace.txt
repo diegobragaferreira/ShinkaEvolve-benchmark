@@ -1,0 +1,391 @@
+<NAME>
+implement_numba_jit_for_geometric_operations
+</NAME>
+
+<DESCRIPTION>
+I'll implement Numba JIT compilation for the most computationally intensive geometric operations to significantly speed up the hexagon packing optimization. This will focus on the core geometric functions that are called repeatedly during constraint checking and evaluation.
+
+The key areas to optimize are:
+1. Hexagon vertex generation
+2. Overlap detection using Separating Axis Theorem
+3. Spatial hash grid operations
+4. Point-in-polygon tests
+
+These optimizations should provide substantial performance gains that allow for more iterations in the optimization process or enable more sophisticated approaches.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+class HexagonGeometry:
+    """Efficient geometric computations for hexagon operations."""
+
+    def __init__(self):
+        self.side_length = 1.0
+        self.apothem = np.sqrt(3) / 2
+        self.height = 2 * self.apothem
+        self.width = 2 * self.side_length
+
+    @staticmethod
+    @njit
+    def vertices_jit(center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """JIT compiled hexagon vertex calculation."""
+        angle_rad = np.radians(rotation_deg)
+        # Unit hexagon vertices centered at origin
+        base_vertices = np.array([
+            [1.0, 0.0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1.0, 0.0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+        # Rotate and translate
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+
+    def vertices(self, center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """Get hexagon vertices."""
+        return self.vertices_jit(center_x, center_y, rotation_deg)
+=======
+class HexagonGeometry:
+    """Efficient geometric computations for hexagon operations."""
+
+    def __init__(self):
+        self.side_length = 1.0
+        self.apothem = np.sqrt(3) / 2
+        self.height = 2 * self.apothem
+        self.width = 2 * self.side_length
+
+    @staticmethod
+    @njit
+    def vertices_jit(center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """JIT compiled hexagon vertex calculation."""
+        angle_rad = np.radians(rotation_deg)
+        # Unit hexagon vertices centered at origin
+        base_vertices = np.array([
+            [1.0, 0.0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1.0, 0.0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+
+        # Rotate and translate
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+
+    @staticmethod
+    @njit
+    def _get_edges(vertices: np.ndarray) -> np.ndarray:
+        """Get edges from vertices."""
+        edges = np.empty((len(vertices), 2))
+        for i in range(len(vertices)):
+            edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+        return edges
+
+    @staticmethod
+    @njit
+    def _project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+        """Project polygon vertices onto an axis."""
+        projections = np.empty(len(vertices))
+        for i in range(len(vertices)):
+            projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+        return np.min(projections), np.max(projections)
+
+    @staticmethod
+    @njit
+    def _hexagon_overlap_sat_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Separating Axis Theorem for hexagon overlap detection."""
+        # Get edges of both hexagons
+        edges1 = HexagonGeometry._get_edges(hex1_vertices)
+        edges2 = HexagonGeometry._get_edges(hex2_vertices)
+
+        # Combine all axes (edges perpendicular to edges)
+        all_axes = np.empty((len(edges1) + len(edges2), 2))
+        for i in range(len(edges1)):
+            # Normal vector to edge (perpendicular)
+            all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+            # Normalize
+            norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+            if norm > 1e-10:
+                all_axes[i] /= norm
+        for i in range(len(edges2)):
+            # Normal vector to edge (perpendicular)
+            all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+            # Normalize
+            norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+            if norm > 1e-10:
+                all_axes[len(edges1) + i] /= norm
+
+        # Check each axis
+        for axis in all_axes:
+            min1, max1 = HexagonGeometry._project_polygon_onto_axis(hex1_vertices, axis)
+            min2, max2 = HexagonGeometry._project_polygon_onto_axis(hex2_vertices, axis)
+
+            # If no overlap on this axis, polygons don't overlap
+            if max1 < min2 or max2 < min1:
+                return False
+
+        return True
+
+    @staticmethod
+    @njit
+    def _point_in_hexagon_jit(point: np.ndarray, hex_vertices: np.ndarray) -> bool:
+        """Fast point-in-polygon test for hexagon."""
+        x, y = point[0], point[1]
+        n = len(hex_vertices)
+        inside = False
+        p1x, p1y = hex_vertices[0]
+        for i in range(1, n + 1):
+            p2x, p2y = hex_vertices[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+
+    def vertices(self, center_x: float, center_y: float, rotation_deg: float) -> np.ndarray:
+        """Get hexagon vertices."""
+        return self.vertices_jit(center_x, center_y, rotation_deg)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+@njit
+def _get_edges(vertices: np.ndarray) -> np.ndarray:
+    """Get edges from vertices."""
+    edges = np.empty((len(vertices), 2))
+    for i in range(len(vertices)):
+        edges[i] = vertices[i] - vertices[(i+1) % len(vertices)]
+    return edges
+
+@njit
+def _project_polygon_onto_axis(vertices: np.ndarray, axis: np.ndarray) -> tuple:
+    """Project polygon vertices onto an axis."""
+    projections = np.empty(len(vertices))
+    for i in range(len(vertices)):
+        projections[i] = vertices[i, 0] * axis[0] + vertices[i, 1] * axis[1]
+    return np.min(projections), np.max(projections)
+
+@njit
+def _hexagon_overlap_sat_jit(hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+    """Separating Axis Theorem for hexagon overlap detection."""
+    # Get edges of both hexagons
+    edges1 = _get_edges(hex1_vertices)
+    edges2 = _get_edges(hex2_vertices)
+
+    # Combine all axes (edges perpendicular to edges)
+    all_axes = np.empty((len(edges1) + len(edges2), 2))
+    for i in range(len(edges1)):
+        # Normal vector to edge (perpendicular)
+        all_axes[i] = np.array([-edges1[i, 1], edges1[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[i, 0]**2 + all_axes[i, 1]**2)
+        if norm > 1e-10:
+            all_axes[i] /= norm
+    for i in range(len(edges2)):
+        # Normal vector to edge (perpendicular)
+        all_axes[len(edges1) + i] = np.array([-edges2[i, 1], edges2[i, 0]])
+        # Normalize
+        norm = np.sqrt(all_axes[len(edges1) + i, 0]**2 + all_axes[len(edges1) + i, 1]**2)
+        if norm > 1e-10:
+            all_axes[len(edges1) + i] /= norm
+
+    # Check each axis
+    for axis in all_axes:
+        min1, max1 = _project_polygon_onto_axis(hex1_vertices, axis)
+        min2, max2 = _project_polygon_onto_axis(hex2_vertices, axis)
+
+        # If no overlap on this axis, polygons don't overlap
+        if max1 < min2 or max2 < min1:
+            return False
+
+    return True
+=======
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+class SymmetricHexagonGrid:
+    """Symmetry-aware spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 3.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    @staticmethod
+    @njit
+    def _hash_cell_numba(x: float, y: float, cell_size: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // cell_size), int(y // cell_size))
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return self._hash_cell_numba(x, y, self.cell_size)
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        # Clamp coordinates to prevent extreme values in hash
+        clamped_x = np.clip(center_x, -1000.0, 1000.0)
+        clamped_y = np.clip(center_y, -1000.0, 1000.0)
+        cell = self._hash_cell(clamped_x, clamped_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        # Clamp coordinates to prevent extreme values in hash
+        clamped_x = np.clip(center_x, -1000.0, 1000.0)
+        clamped_y = np.clip(center_y, -1000.0, 1000.0)
+        cell = self._hash_cell(clamped_x, clamped_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+
+    def clear(self):
+        """Clear the spatial hash grid."""
+        self.grid.clear()
+=======
+class SymmetricHexagonGrid:
+    """Symmetry-aware spatial hash grid for efficient neighbor search."""
+
+    def __init__(self, cell_size: float = 3.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    @staticmethod
+    @njit
+    def _hash_cell_numba(x: float, y: float, cell_size: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return (int(x // cell_size), int(y // cell_size))
+
+    @staticmethod
+    @njit
+    def _clamp_coordinates(x: float, y: float) -> tuple:
+        """Clamp coordinates to prevent extreme values in hash."""
+        clamped_x = np.clip(x, -1000.0, 1000.0)
+        clamped_y = np.clip(y, -1000.0, 1000.0)
+        return clamped_x, clamped_y
+
+    def _hash_cell(self, x: float, y: float) -> tuple:
+        """Hash coordinates to grid cell."""
+        return self._hash_cell_numba(x, y, self.cell_size)
+
+    def insert(self, hex_id: int, center_x: float, center_y: float):
+        """Insert a hexagon into the spatial grid."""
+        # Clamp coordinates to prevent extreme values in hash
+        clamped_x, clamped_y = self._clamp_coordinates(center_x, center_y)
+        cell = self._hash_cell(clamped_x, clamped_y)
+        self.grid[cell].append(hex_id)
+
+    def get_candidates(self, center_x: float, center_y: float) -> list:
+        """Get candidate hexagons that might collide with given position."""
+        # Clamp coordinates to prevent extreme values in hash
+        clamped_x, clamped_y = self._clamp_coordinates(center_x, center_y)
+        cell = self._hash_cell(clamped_x, clamped_y)
+        candidates = []
+
+        # Check the cell and its 8 neighboring cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor_cell = (cell[0] + dx, cell[1] + dy)
+                candidates.extend(self.grid[neighbor_cell])
+
+        return candidates
+
+    def clear(self):
+        """Clear the spatial hash grid."""
+        self.grid.clear()
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def is_contained(self, hex_vertices: np.ndarray, outer_center_x: float,
+                     outer_center_y: float, outer_side_length: float) -> bool:
+        """Check if all hexagon vertices are within outer hexagon."""
+        # For a regular hexagon, we can check distance from center
+        dist_from_center = np.sqrt((hex_vertices[:, 0] - outer_center_x)**2 +
+                                  (hex_vertices[:, 1] - outer_center_y)**2)
+        # Maximum distance from center in a regular hexagon is side_length * sqrt(3)/2
+        max_radius = outer_side_length * np.sqrt(3) / 2
+        return np.all(dist_from_center <= max_radius)
+=======
+    def is_contained(self, hex_vertices: np.ndarray, outer_center_x: float,
+                     outer_center_y: float, outer_side_length: float) -> bool:
+        """Check if all hexagon vertices are within outer hexagon."""
+        # For a regular hexagon, we can check distance from center
+        dist_from_center = np.sqrt((hex_vertices[:, 0] - outer_center_x)**2 +
+                                  (hex_vertices[:, 1] - outer_center_y)**2)
+        # Maximum distance from center in a regular hexagon is side_length * sqrt(3)/2
+        max_radius = outer_side_length * np.sqrt(3) / 2
+        return np.all(dist_from_center <= max_radius)
+
+    @staticmethod
+    @njit
+    def _fast_contains_check_jit(hex_vertices: np.ndarray, outer_center_x: float,
+                                outer_center_y: float, outer_side_length: float) -> bool:
+        """Fast JIT compiled containment check."""
+        # For a regular hexagon, we can check distance from center
+        # Maximum distance from center in a regular hexagon is side_length * sqrt(3)/2
+        max_radius = outer_side_length * np.sqrt(3) / 2
+        for i in range(len(hex_vertices)):
+            dist_sq = (hex_vertices[i, 0] - outer_center_x)**2 + (hex_vertices[i, 1] - outer_center_y)**2
+            if dist_sq > max_radius**2:
+                return False
+        return True
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    def has_overlap_fast(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast approximate overlap check before precise check."""
+        # Simple distance check first
+        center1 = np.mean(hex1_vertices, axis=0)
+        center2 = np.mean(hex2_vertices, axis=0)
+        dist_centers = np.sqrt(np.sum((center1 - center2)**2))
+
+        # If centers are far apart, no overlap
+        if dist_centers > 2.0:  # Approximate sum of radii for unit hexagons
+            return False
+
+        # Otherwise, use SAT for precise check
+        return _hexagon_overlap_sat_jit(hex1_vertices, hex2_vertices)
+=======
+    def has_overlap_fast(self, hex1_vertices: np.ndarray, hex2_vertices: np.ndarray) -> bool:
+        """Fast approximate overlap check before precise check."""
+        # Simple distance check first
+        center1 = np.mean(hex1_vertices, axis=0)
+        center2 = np.mean(hex2_vertices, axis=0)
+        dist_centers = np.sqrt(np.sum((center1 - center2)**2))
+
+        # If centers are far apart, no overlap
+        if dist_centers > 2.0:  # Approximate sum of radii for unit hexagons
+            return False
+
+        # Otherwise, use SAT for precise check
+        return HexagonGeometry._hexagon_overlap_sat_jit(hex1_vertices, hex2_vertices)
+>>>>>>> REPLACE
+</DIFF>

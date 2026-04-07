@@ -1,0 +1,356 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi
+import random
+import time
+from typing import Tuple, List
+from collections import defaultdict
+
+# Set seeds for determinism
+random.seed(42)
+np.random.seed(42)
+
+def distance(p1, p2):
+    return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+def is_valid_solution(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> bool:
+    """Check if all circles are within bounds and non-overlapping using spatial grid for efficiency."""
+    n = len(circles)
+    
+    # Check bounds
+    for i in range(n):
+        x, y, r = circles[i]
+        if x - r < 0 or x + r > rect_width or y - r < 0 or y + r > rect_height:
+            return False
+    
+    # Spatial grid indexing for efficient collision detection
+    # Grid cell size based on minimum expected circle diameter
+    min_radius = np.min(circles[:, 2]) if len(circles) > 0 else 0.01
+    cell_size = min_radius * 2.0
+    
+    if cell_size <= 0:
+        return False
+    
+    # Create spatial grid
+    grid = defaultdict(list)
+    max_cols = int(rect_width / cell_size) + 2
+    max_rows = int(rect_height / cell_size) + 2
+    
+    # Place circles in grid
+    for i in range(n):
+        x, y, r = circles[i]
+        col = int(x / cell_size)
+        row = int(y / cell_size)
+        
+        # Add to grid cells (including neighboring cells)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                grid[(col + dx, row + dy)].append(i)
+    
+    # Check overlaps within grid cells
+    for cell_key, indices in grid.items():
+        if len(indices) > 1:
+            # Check pairwise overlaps in this cell
+            for i in range(len(indices)):
+                for j in range(i + 1, len(indices)):
+                    idx1, idx2 = indices[i], indices[j]
+                    x1, y1, r1 = circles[idx1]
+                    x2, y2, r2 = circles[idx2]
+                    
+                    if distance([x1, y1], [x2, y2]) < r1 + r2:
+                        return False
+                        
+    return True
+
+def compute_voronoi_density(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute Voronoi cell areas for each circle to estimate constraint density."""
+    if len(circles) == 0:
+        return np.array([])
+    
+    # Add boundary points for proper Voronoi calculation
+    points = circles[:, :2].copy()
+    
+    # Add boundary points to make Voronoi more meaningful
+    boundary_points = [
+        [0, 0], [rect_width, 0], [0, rect_height], [rect_width, rect_height],
+        [rect_width/2, 0], [rect_width/2, rect_height],
+        [0, rect_height/2], [rect_width, rect_height/2]
+    ]
+    points = np.vstack([points, boundary_points])
+    
+    try:
+        vor = Voronoi(points)
+        
+        # For each original point, compute Voronoi cell area
+        areas = []
+        for i in range(len(circles)):
+            region_idx = np.where(vor.point_region == i)[0][0] if i in vor.point_region else -1
+            
+            if region_idx != -1 and region_idx < len(vor.regions):
+                region = vor.regions[region_idx]
+                if -1 not in region and len(region) >= 3:
+                    # Compute area of polygon
+                    vertices = np.array([vor.vertices[i] for i in region])
+                    # Simple polygon area calculation
+                    if len(vertices) >= 3:
+                        # Shoelace formula
+                        x = vertices[:, 0]
+                        y = vertices[:, 1]
+                        area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                        areas.append(area)
+                    else:
+                        areas.append(1.0)
+                else:
+                    areas.append(1.0)
+            else:
+                areas.append(1.0)
+                
+        return np.array(areas)
+    except:
+        # Fallback to uniform distribution if Voronoi fails
+        return np.ones(len(circles))
+
+def evaluate_fitness(circles: np.ndarray) -> float:
+    """Evaluate fitness as sum of radii."""
+    return np.sum(circles[:, 2])
+
+def generate_grid_pattern(n: int, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Generate initial configuration using a grid pattern with strategic spacing."""
+    circles = np.zeros((n, 3))
+    
+    # Calculate grid dimensions
+    sqrt_n = int(np.ceil(np.sqrt(n)))
+    rows = sqrt_n
+    cols = sqrt_n
+    
+    # Calculate spacing to fit within rectangle
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+    
+    # Create hexagonal-like grid with better coverage
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x
+            y = (i + 1) * spacing_y
+            
+            # Offset odd rows to create better packing
+            if i % 2 == 1:
+                x += spacing_x * 0.5
+                
+            # Initial radius based on available space
+            r = min(spacing_x, spacing_y) * 0.3
+            
+            circles[idx] = [x, y, r]
+            idx += 1
+        if idx >= n:
+            break
+            
+    return circles
+
+def compute_boundary_distance(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+    """Compute minimum distance to rectangle boundaries for each circle."""
+    distances = np.zeros(len(circles))
+    for i in range(len(circles)):
+        x, y, r = circles[i]
+        dist_to_left = x - r
+        dist_to_right = rect_width - x - r
+        dist_to_bottom = y - r
+        dist_to_top = rect_height - y - r
+        distances[i] = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+    return distances
+
+def adaptive_mutation(circles: np.ndarray, density_scores: np.ndarray, 
+                     max_radius_change: float = 0.02, max_position_change: float = 0.03,
+                     boundary_distances: np.ndarray = None) -> np.ndarray:
+    """Apply adaptive mutation based on Voronoi density and boundary distances."""
+    new_circles = circles.copy()
+    
+    # For each circle, determine mutation strength based on local density and boundary proximity
+    for i in range(len(circles)):
+        x, y, r = new_circles[i]
+        
+        # Adaptive radius change based on density and boundary distance
+        density_factor = min(1.0, 2.0 / (1.0 + density_scores[i])) if len(density_scores) > i else 1.0
+        boundary_factor = 1.0
+        if boundary_distances is not None and len(boundary_distances) > i:
+            # Circles near boundaries get smaller radius changes to avoid constraint violations
+            boundary_factor = min(1.0, boundary_distances[i] / 0.1) if boundary_distances[i] < 0.1 else 1.0
+            
+        # Combine factors for radius mutation
+        combined_factor = density_factor * boundary_factor
+        radius_delta = np.random.uniform(-max_radius_change * combined_factor, max_radius_change * combined_factor)
+        new_r = max(0.001, r + radius_delta)
+        
+        # Adaptive position change - denser regions get smaller changes
+        pos_delta = np.random.uniform(-max_position_change * density_factor, max_position_change * density_factor)
+        new_x = max(0.001, min(0.999, x + pos_delta))
+        new_y = max(0.001, min(0.999, y + pos_delta))
+        
+        new_circles[i] = [new_x, new_y, new_r]
+    
+    return new_circles
+
+def local_refinement(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0, 
+                    max_iterations: int = 100) -> np.ndarray:
+    """Refine configuration through local optimization using hybrid approach."""
+    current = circles.copy()
+    best = current.copy()
+    best_fitness = evaluate_fitness(best)
+    
+    # Get initial Voronoi densities and boundary distances
+    density_scores = compute_voronoi_density(current, rect_width, rect_height)
+    boundary_distances = compute_boundary_distance(current, rect_width, rect_height)
+    
+    for iteration in range(max_iterations):
+        # Generate multiple candidates through adaptive mutation
+        candidates = []
+        
+        # Generate several mutated versions
+        for _ in range(15):
+            mutated = adaptive_mutation(current, density_scores, max_radius_change=0.015, max_position_change=0.02, 
+                                      boundary_distances=boundary_distances)
+            if is_valid_solution(mutated, rect_width, rect_height):
+                candidates.append(mutated)
+        
+        # If no valid candidates, continue with current
+        if not candidates:
+            continue
+            
+        # Evaluate all candidates and select the best
+        candidate_fitnesses = [evaluate_fitness(c) for c in candidates]
+        if len(candidate_fitnesses) > 0:
+            best_candidate_idx = np.argmax(candidate_fitnesses)
+            best_candidate = candidates[best_candidate_idx]
+            
+            # Accept if better
+            new_fitness = evaluate_fitness(best_candidate)
+            if new_fitness > best_fitness:
+                current = best_candidate
+                best = current.copy()
+                best_fitness = new_fitness
+                # Recalculate density for next iteration
+                density_scores = compute_voronoi_density(current, rect_width, rect_height)
+                boundary_distances = compute_boundary_distance(current, rect_width, rect_height)
+    
+    return best
+
+def grid_based_evolution(n: int = 21, rect_width: float = 1.0, rect_height: float = 1.0, 
+                        max_generations: int = 30, population_size: int = 15) -> np.ndarray:
+    """Main evolutionary loop with grid-based efficiency and hybrid refinement."""
+    # Generate initial population with grid patterns
+    population = []
+    for _ in range(population_size):
+        initial = generate_grid_pattern(n, rect_width, rect_height)
+        # Perform local refinement on initial configurations
+        refined = local_refinement(initial, rect_width, rect_height, max_iterations=30)
+        population.append(refined)
+    
+    # Track best solution
+    best_fitness = -float('inf')
+    best_individual = None
+    
+    for generation in range(max_generations):
+        # Evaluate fitness of all individuals
+        fitnesses = [evaluate_fitness(ind) for ind in population]
+        
+        # Track best in this generation
+        gen_best_idx = np.argmax(fitnesses)
+        gen_best_fit = fitnesses[gen_best_idx]
+        gen_best_ind = population[gen_best_idx]
+        
+        if gen_best_fit > best_fitness:
+            best_fitness = gen_best_fit
+            best_individual = gen_best_ind.copy()
+        
+        # Create new population through selection and recombination
+        # Select top performers
+        sorted_indices = np.argsort(fitnesses)[::-1][:population_size//2]
+        
+        # Create offspring through crossover and mutation
+        new_population = []
+        
+        # Keep top performers
+        for idx in sorted_indices:
+            new_population.append(population[idx].copy())
+        
+        # Generate new individuals through recombination and mutation
+        while len(new_population) < population_size:
+            # Tournament selection
+            tournament_size = 4
+            selected_indices = np.random.choice(sorted_indices, tournament_size, replace=False)
+            winner_idx = selected_indices[np.argmax([fitnesses[i] for i in selected_indices])]
+            
+            # Clone and mutate with improved mutation logic
+            child = population[winner_idx].copy()
+            
+            # Apply hybrid mutations: position and radius
+            # Mutate positions and radii with different intensities
+            for i in range(len(child)):
+                if np.random.random() < 0.4:  # Some circles get position mutated
+                    x, y, r = child[i]
+                    delta_x = np.random.uniform(-0.015, 0.015)
+                    delta_y = np.random.uniform(-0.015, 0.015)
+                    new_x = max(0.001, min(0.999, x + delta_x))
+                    new_y = max(0.001, min(0.999, y + delta_y))
+                    child[i] = [new_x, new_y, r]
+                if np.random.random() < 0.3:  # Some circles get radius mutated
+                    x, y, r = child[i]
+                    delta_r = np.random.uniform(-0.008, 0.008)
+                    new_r = max(0.001, r + delta_r)
+                    child[i] = [x, y, new_r]
+            
+            # Local refinement on new individual
+            refined = local_refinement(child, rect_width, rect_height, max_iterations=20)
+            new_population.append(refined)
+        
+        population = new_population
+    
+    return best_individual
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    rect_width = 1.0
+    rect_height = 1.0
+    
+    # Use grid-based evolution with multiple restarts for better exploration
+    best_solution = None
+    best_score = -float('inf')
+    
+    # Run multiple independent optimizations to increase chance of finding global optimum
+    for restart in range(6):
+        # Use our grid-based evolution method
+        solution = grid_based_evolution(n, rect_width, rect_height, max_generations=25, population_size=12)
+        
+        # Do additional fine-tuning
+        fine_tuned = local_refinement(solution, rect_width, rect_height, max_iterations=80)
+        
+        score = evaluate_fitness(fine_tuned)
+        if score > best_score and is_valid_solution(fine_tuned, rect_width, rect_height):
+            best_score = score
+            best_solution = fine_tuned.copy()
+    
+    # Final validation and fallback
+    if best_solution is None:
+        # Fallback to simple initialization
+        best_solution = generate_grid_pattern(n, rect_width, rect_height)
+        best_solution = local_refinement(best_solution, rect_width, rect_height, max_iterations=100)
+    
+    return best_solution
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

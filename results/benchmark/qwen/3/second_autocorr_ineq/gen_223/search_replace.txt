@@ -1,0 +1,442 @@
+<NAME>
+add_multi_scale_gaussian_initialization
+</NAME>
+
+<DESCRIPTION>
+Adding multi-scale Gaussian pattern construction to improve the initialization strategy. This approach creates more sophisticated initial functions by combining Gaussian bumps at different scales, which has been shown to produce better results in similar optimization contexts. This addresses the need for more structured and mathematically informed initializations that can lead to higher C2 values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using hybrid optimization approach."""
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Try multiple initialization strategies and optimization approaches
+    best_solution = None
+    best_c2 = -float('inf')
+
+    # Strategy 1: Gradient-free optimization with gamma initialization
+    try:
+        n_steps = np.random.randint(200, 1000)  # Broader range for better exploration
+
+        # Initialize with gamma distribution which often works well for positive values
+        initial_f_vals = np.random.gamma(2.0, 2.0, n_steps)
+
+        # Normalize to prevent extreme values that might cause numerical issues
+        if np.sum(initial_f_vals) > 0:
+            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+
+        # Convert to list for optimization compatibility
+        initial_f_vals_list = initial_f_vals.tolist()
+
+        # Define objective function for minimization (we minimize negative C2)
+        def objective(f_vals):
+            return -calculate_c2(f_vals)
+
+        # Use Nelder-Mead optimization for gradient-free optimization
+        result = minimize(
+            objective,
+            initial_f_vals_list,
+            method='Nelder-Mead',
+            options={'maxiter': 1000, 'maxfev': 2000, 'xtol': 1e-6, 'ftol': 1e-6}
+        )
+
+        if result.success:
+            optimized_values = result.x
+            # Clip negative values to zero (non-negativity constraint)
+            optimized_values = np.maximum(optimized_values, 0.0)
+
+            # Calculate final C2 value
+            final_c2 = calculate_c2(optimized_values.tolist())
+            if final_c2 > best_c2:
+                best_c2 = final_c2
+                best_solution = optimized_values.tolist()
+    except Exception as e:
+        pass
+
+    # Strategy 2: Different initialization approach (exponential)
+    try:
+        if best_solution is None:
+            n_steps = np.random.randint(200, 1000)
+            initial_f_vals = np.random.exponential(scale=0.5, size=n_steps)
+
+            # Ensure non-negativity (though exponential should already be positive)
+            initial_f_vals = np.maximum(initial_f_vals, 0.0)
+
+            # Normalize to avoid extremely large values
+            if np.sum(initial_f_vals) > 0:
+                initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+
+            initial_f_vals_list = initial_f_vals.tolist()
+
+            def objective(f_vals):
+                return -calculate_c2(f_vals)
+
+            result = minimize(
+                objective,
+                initial_f_vals_list,
+                method='Nelder-Mead',
+                options={'maxiter': 500, 'maxfev': 1000, 'xtol': 1e-6, 'ftol': 1e-6}
+            )
+
+            if result.success:
+                optimized_values = result.x
+                optimized_values = np.maximum(optimized_values, 0.0)
+
+                final_c2 = calculate_c2(optimized_values.tolist())
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = optimized_values.tolist()
+    except Exception as e:
+        pass
+
+    # Strategy 3: Pattern-based initialization with peaks
+    try:
+        if best_solution is None:
+            n_steps = np.random.randint(300, 1500)  # Even broader range
+
+            # Create base geometric distribution
+            base_vals = np.geomspace(1, 0.01, num=n_steps // 2)
+
+            # Add peaks at symmetric positions
+            peaks = np.zeros(n_steps)
+            peak_positions = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+            for pos in peak_positions:
+                if pos < n_steps:
+                    peaks[pos] = 2.0  # High amplitude peaks
+
+            # Combine base and peaks
+            combined = base_vals[:n_steps // 2] + peaks[:n_steps // 2]
+
+            # Fill remaining with geometric decay
+            if len(combined) < n_steps:
+                remaining = n_steps - len(combined)
+                tail_vals = np.geomspace(0.01, 0.001, num=remaining)
+                combined = np.concatenate([combined, tail_vals])
+
+            # Ensure we have exactly n_steps elements
+            if len(combined) > n_steps:
+                combined = combined[:n_steps]
+            elif len(combined) < n_steps:
+                combined = np.pad(combined, (0, n_steps - len(combined)), 'constant')
+
+            # Apply a soft threshold to make it more numerically stable
+            combined = np.maximum(combined, 0.0)
+
+            # Normalize to prevent extreme values
+            if np.sum(combined) > 0:
+                combined = combined / np.sum(combined) * 50
+
+            initial_f_vals_list = combined.tolist()
+
+            def objective(f_vals):
+                return -calculate_c2(f_vals)
+
+            # Multiple optimization attempts
+            results = []
+
+            # Try Nelder-Mead
+            try:
+                result = minimize(objective, initial_f_vals_list, method='Nelder-Mead',
+                                options={'maxiter': 300, 'xtol': 1e-6})
+                if result.success:
+                    results.append(result.x)
+            except:
+                pass
+
+            # Try L-BFGS if available
+            try:
+                result = minimize(objective, initial_f_vals_list, method='L-BFGS-B',
+                                options={'maxiter': 300})
+                if result.success:
+                    results.append(result.x)
+            except:
+                pass
+
+            # Return best result among all attempts
+            if results:
+                best_result = min(results, key=lambda x: -calculate_c2(x))
+                best_result = np.maximum(best_result, 0.0)
+                final_c2 = calculate_c2(best_result.tolist())
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = best_result.tolist()
+            else:
+                # Fallback to initial configuration
+                final_c2 = calculate_c2(initial_f_vals_list)
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = initial_f_vals_list
+    except Exception as e:
+        pass
+
+    # Fallback to simple uniform distribution if all strategies fail
+    if best_solution is None:
+        n_steps = 500
+        best_solution = [1.0] * n_steps
+
+    return best_solution
+=======
+def generate_multiscale_gaussian_initial_function(n_steps):
+    """Generate an initial function using multi-scale Gaussian pattern construction.
+
+    This creates a structured pattern with multiple Gaussian bumps at different scales
+    to encourage good convolution behavior across various spatial frequencies.
+    """
+    # Create base function with multi-scale Gaussian components
+    f_values = np.zeros(n_steps)
+
+    # Define multiple scales of Gaussian bumps
+    scales = [n_steps // 20, n_steps // 15, n_steps // 10, n_steps // 8]
+    centers = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+
+    # Create Gaussian bumps at different scales and positions
+    for scale in scales:
+        for center in centers:
+            # Create Gaussian bump
+            x = np.arange(n_steps)
+            gauss = np.exp(-0.5 * ((x - center) / scale) ** 2)
+            f_values += gauss * np.random.uniform(0.5, 1.5)  # Random amplitude
+
+    # Add some additional structured variation
+    # Create a base pattern that encourages uniformity in convolution
+    base_pattern = np.sin(np.linspace(0, 4*np.pi, n_steps)) * 0.3 + 0.7
+    f_values += base_pattern * 0.5
+
+    # Ensure non-negativity and normalize
+    f_values = np.maximum(f_values, 0)
+
+    # Normalize to control the overall magnitude
+    total = np.sum(f_values)
+    if total > 0:
+        f_values = f_values / total * 5.0
+
+    return f_values.tolist()
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using hybrid optimization approach."""
+
+    # Set seed for reproducibility
+    np.random.seed(42)
+    random.seed(42)
+
+    # Try multiple initialization strategies and optimization approaches
+    best_solution = None
+    best_c2 = -float('inf')
+
+    # Strategy 1: Gradient-free optimization with gamma initialization
+    try:
+        n_steps = np.random.randint(200, 1000)  # Broader range for better exploration
+
+        # Initialize with gamma distribution which often works well for positive values
+        initial_f_vals = np.random.gamma(2.0, 2.0, n_steps)
+
+        # Normalize to prevent extreme values that might cause numerical issues
+        if np.sum(initial_f_vals) > 0:
+            initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+
+        # Convert to list for optimization compatibility
+        initial_f_vals_list = initial_f_vals.tolist()
+
+        # Define objective function for minimization (we minimize negative C2)
+        def objective(f_vals):
+            return -calculate_c2(f_vals)
+
+        # Use Nelder-Mead optimization for gradient-free optimization
+        result = minimize(
+            objective,
+            initial_f_vals_list,
+            method='Nelder-Mead',
+            options={'maxiter': 1000, 'maxfev': 2000, 'xtol': 1e-6, 'ftol': 1e-6}
+        )
+
+        if result.success:
+            optimized_values = result.x
+            # Clip negative values to zero (non-negativity constraint)
+            optimized_values = np.maximum(optimized_values, 0.0)
+
+            # Calculate final C2 value
+            final_c2 = calculate_c2(optimized_values.tolist())
+            if final_c2 > best_c2:
+                best_c2 = final_c2
+                best_solution = optimized_values.tolist()
+    except Exception as e:
+        pass
+
+    # Strategy 2: Different initialization approach (exponential)
+    try:
+        if best_solution is None:
+            n_steps = np.random.randint(200, 1000)
+            initial_f_vals = np.random.exponential(scale=0.5, size=n_steps)
+
+            # Ensure non-negativity (though exponential should already be positive)
+            initial_f_vals = np.maximum(initial_f_vals, 0.0)
+
+            # Normalize to avoid extremely large values
+            if np.sum(initial_f_vals) > 0:
+                initial_f_vals = initial_f_vals / np.sum(initial_f_vals) * 100
+
+            initial_f_vals_list = initial_f_vals.tolist()
+
+            def objective(f_vals):
+                return -calculate_c2(f_vals)
+
+            result = minimize(
+                objective,
+                initial_f_vals_list,
+                method='Nelder-Mead',
+                options={'maxiter': 500, 'maxfev': 1000, 'xtol': 1e-6, 'ftol': 1e-6}
+            )
+
+            if result.success:
+                optimized_values = result.x
+                optimized_values = np.maximum(optimized_values, 0.0)
+
+                final_c2 = calculate_c2(optimized_values.tolist())
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = optimized_values.tolist()
+    except Exception as e:
+        pass
+
+    # Strategy 3: Pattern-based initialization with peaks
+    try:
+        if best_solution is None:
+            n_steps = np.random.randint(300, 1500)  # Even broader range
+
+            # Create base geometric distribution
+            base_vals = np.geomspace(1, 0.01, num=n_steps // 2)
+
+            # Add peaks at symmetric positions
+            peaks = np.zeros(n_steps)
+            peak_positions = [n_steps // 4, n_steps // 2, 3 * n_steps // 4]
+            for pos in peak_positions:
+                if pos < n_steps:
+                    peaks[pos] = 2.0  # High amplitude peaks
+
+            # Combine base and peaks
+            combined = base_vals[:n_steps // 2] + peaks[:n_steps // 2]
+
+            # Fill remaining with geometric decay
+            if len(combined) < n_steps:
+                remaining = n_steps - len(combined)
+                tail_vals = np.geomspace(0.01, 0.001, num=remaining)
+                combined = np.concatenate([combined, tail_vals])
+
+            # Ensure we have exactly n_steps elements
+            if len(combined) > n_steps:
+                combined = combined[:n_steps]
+            elif len(combined) < n_steps:
+                combined = np.pad(combined, (0, n_steps - len(combined)), 'constant')
+
+            # Apply a soft threshold to make it more numerically stable
+            combined = np.maximum(combined, 0.0)
+
+            # Normalize to prevent extreme values
+            if np.sum(combined) > 0:
+                combined = combined / np.sum(combined) * 50
+
+            initial_f_vals_list = combined.tolist()
+
+            def objective(f_vals):
+                return -calculate_c2(f_vals)
+
+            # Multiple optimization attempts
+            results = []
+
+            # Try Nelder-Mead
+            try:
+                result = minimize(objective, initial_f_vals_list, method='Nelder-Mead',
+                                options={'maxiter': 300, 'xtol': 1e-6})
+                if result.success:
+                    results.append(result.x)
+            except:
+                pass
+
+            # Try L-BFGS if available
+            try:
+                result = minimize(objective, initial_f_vals_list, method='L-BFGS-B',
+                                options={'maxiter': 300})
+                if result.success:
+                    results.append(result.x)
+            except:
+                pass
+
+            # Return best result among all attempts
+            if results:
+                best_result = min(results, key=lambda x: -calculate_c2(x))
+                best_result = np.maximum(best_result, 0.0)
+                final_c2 = calculate_c2(best_result.tolist())
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = best_result.tolist()
+            else:
+                # Fallback to initial configuration
+                final_c2 = calculate_c2(initial_f_vals_list)
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = initial_f_vals_list
+    except Exception as e:
+        pass
+
+    # Strategy 4: Multi-scale Gaussian pattern initialization
+    try:
+        if best_solution is None:
+            n_steps = np.random.randint(400, 2000)  # Larger range to explore more complex patterns
+
+            # Generate initial function using multi-scale Gaussian construction
+            initial_f_vals_list = generate_multiscale_gaussian_initial_function(n_steps)
+
+            def objective(f_vals):
+                return -calculate_c2(f_vals)
+
+            # Multiple optimization attempts
+            results = []
+
+            # Try Nelder-Mead
+            try:
+                result = minimize(objective, initial_f_vals_list, method='Nelder-Mead',
+                                options={'maxiter': 500, 'xtol': 1e-6})
+                if result.success:
+                    results.append(result.x)
+            except:
+                pass
+
+            # Try L-BFGS if available
+            try:
+                result = minimize(objective, initial_f_vals_list, method='L-BFGS-B',
+                                options={'maxiter': 500})
+                if result.success:
+                    results.append(result.x)
+            except:
+                pass
+
+            # Return best result among all attempts
+            if results:
+                best_result = min(results, key=lambda x: -calculate_c2(x))
+                best_result = np.maximum(best_result, 0.0)
+                final_c2 = calculate_c2(best_result.tolist())
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = best_result.tolist()
+            else:
+                # Fallback to initial configuration
+                final_c2 = calculate_c2(initial_f_vals_list)
+                if final_c2 > best_c2:
+                    best_c2 = final_c2
+                    best_solution = initial_f_vals_list
+    except Exception as e:
+        pass
+
+    # Fallback to simple uniform distribution if all strategies fail
+    if best_solution is None:
+        n_steps = 500
+        best_solution = [1.0] * n_steps
+
+    return best_solution
+>>>>>>> REPLACE
+</DIFF>

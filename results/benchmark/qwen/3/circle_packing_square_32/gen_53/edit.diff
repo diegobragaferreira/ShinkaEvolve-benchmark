@@ -1,0 +1,220 @@
+--- a/original.py
++++ b/original.py
+@@ -1,158 +1,123 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.optimize import minimize
+ from scipy.spatial.distance import cdist
+ import math
+ 
+ def circle_packing32() -> np.ndarray:
+     """
+     Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+ 
+     Returns:
+         circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     n = 32
+ 
+     # Hexagonal grid initialization
+     def initialize_hexagonal_grid():
+         # Create hexagonal grid pattern that fits in unit square
+         # Using hexagonal packing density approximation
+         rows = int(math.sqrt(n))
+         cols = int(math.ceil(n / rows))
+ 
+         # Adjust dimensions to fit in unit square
+         spacing_x = 1.0 / cols
+         spacing_y = 1.0 / rows
+ 
+         # Hexagon radius (circumradius) based on spacing
+         hex_radius = min(spacing_x, spacing_y) * 0.4
+ 
+         circles = []
+ 
+         # Place circles in hexagonal pattern
+         for i in range(rows):
+             for j in range(cols):
+                 if len(circles) >= n:
+                     break
+ 
+                 # Offset every other row
+                 x_offset = (i % 2) * (spacing_x / 2)
+                 x = (j * spacing_x) + x_offset + hex_radius
+                 y = (i * spacing_y) + hex_radius + hex_radius
+ 
+                 # Ensure it's within bounds
+                 if x <= 1 - hex_radius and y <= 1 - hex_radius:
+                     circles.append([x, y, hex_radius])
+ 
+         # If we don't have enough circles, fill remaining with smaller ones
+         while len(circles) < n:
+             circles.append([0.5, 0.5, 0.01])
+ 
+         return np.array(circles[:n])
+ 
+-    # Initialize
++    # Check constraints efficiently
++    def check_constraints(circles):
++        """Check if all constraints are satisfied"""
++        positions = circles[:, :2]
++        radii = circles[:, 2]
++
++        # Check boundary constraints
++        left_ok = np.all(radii <= positions[:, 0])
++        right_ok = np.all(radii <= 1 - positions[:, 0])
++        bottom_ok = np.all(radii <= positions[:, 1])
++        top_ok = np.all(radii <= 1 - positions[:, 1])
++
++        if not (left_ok and right_ok and bottom_ok and top_ok):
++            return False
++
++        # Check overlap constraints with efficient matrix operation
++        if len(circles) >= 2:
++            dist_matrix = cdist(positions, positions)
++            overlap_matrix = dist_matrix < (radii.reshape(-1, 1) + radii.reshape(1, -1))
++            np.fill_diagonal(overlap_matrix, False)
++            if np.any(overlap_matrix):
++                return False
++
++        return True
++
++    # Initialize with hexagonal grid
+     circles = initialize_hexagonal_grid()
+ 
+-    # Define constraint functions
+-    def get_distance_matrix(pos_rad):
+-        """Calculate distance matrix for checking overlaps"""
+-        positions = pos_rad[:, :2]
+-        radii = pos_rad[:, 2]
++    # Iterative refinement to increase radii while maintaining constraints
++    max_iterations = 100
++    tolerance = 1e-6
++    step_size = 0.01
+ 
+-        # Calculate pairwise distances
+-        dist_matrix = cdist(positions, positions)
++    for iteration in range(max_iterations):
++        improved = False
++        current_sum = np.sum(circles[:, 2])
+ 
+-        # Create overlap matrix (True if overlapping)
+-        overlap_matrix = dist_matrix < (radii.reshape(-1, 1) + radii.reshape(1, -1))
+-        np.fill_diagonal(overlap_matrix, False)
++        # Try to increase each radius slightly
++        new_circles = circles.copy()
+ 
+-        return overlap_matrix
++        # Try to increase all radii by small amounts
++        for i in range(n):
++            test_circles = new_circles.copy()
++            test_circles[i, 2] += step_size
+ 
+-    def constraint_overlap(x):
+-        """Ensure no overlaps between circles"""
+-        pos_rad = x.reshape(-1, 3)
+-        overlap_matrix = get_distance_matrix(pos_rad)
+-        return -np.sum(overlap_matrix.astype(float))  # Negative because we want positive values
++            # Check if this change violates constraints
++            if check_constraints(test_circles):
++                new_circles = test_circles
++                improved = True
+ 
+-    def constraint_bounds(x):
+-        """Ensure all circles stay within unit square"""
+-        pos_rad = x.reshape(-1, 3)
+-        positions = pos_rad[:, :2]
+-        radii = pos_rad[:, 2]
++        # If we made progress, update circles and continue
++        if improved:
++            circles = new_circles
++        else:
++            # No improvement, reduce step size
++            step_size *= 0.5
++            if step_size < tolerance:
++                break
+ 
+-        # Check boundary constraints
+-        bounds_violation = 0
++    # Final check of constraints
++    if not check_constraints(circles):
++        # If constraints violated, revert to hexagonal grid
++        circles = initialize_hexagonal_grid()
+ 
+-        # Left/right boundaries
+-        bounds_violation += np.sum(radii > positions[:, 0])  # left boundary
+-        bounds_violation += np.sum(radii > (1 - positions[:, 0]))  # right boundary
++    # If we still have issues, try optimization with better bounds
++    if not check_constraints(circles):
++        return initialize_hexagonal_grid()
+ 
+-        # Top/bottom boundaries
+-        bounds_violation += np.sum(radii > positions[:, 1])  # bottom boundary
+-        bounds_violation += np.sum(radii > (1 - positions[:, 1]))  # top boundary
+-
+-        return -bounds_violation  # Negative because constraint should be positive
+-
+-    # Objective function (negative because we minimize)
+-    def objective(x):
+-        return -np.sum(x[2::3])  # Sum of all radii (every third element starting from index 2)
+-
+-    # Flatten initial configuration
+-    x0 = circles.flatten()
+-
+-    # Set up constraints
+-    cons = [
+-        {'type': 'ineq', 'fun': constraint_overlap},
+-        {'type': 'ineq', 'fun': constraint_bounds}
+-    ]
+-
+-    # Optimization bounds (positions and radii)
+-    bounds = []
+-    for i in range(n):
+-        # Position bounds (0.01 to 0.99 to allow for radii)
+-        bounds.extend([(0.01, 0.99), (0.01, 0.99), (0.001, 0.49)])  # x, y, r bounds
+-
+-    # Perform optimization
+-    try:
+-        result = minimize(
+-            objective,
+-            x0,
+-            method='SLSQP',
+-            bounds=bounds,
+-            constraints=cons,
+-            options={'maxiter': 5000, 'ftol': 1e-8, 'gtol': 1e-8}
+-        )
+-
+-        if result.success:
+-            optimized_circles = result.x.reshape(-1, 3)
+-            # Clip values to ensure they're within limits
+-            optimized_circles[:, 0] = np.clip(optimized_circles[:, 0], 0.001, 0.999)
+-            optimized_circles[:, 1] = np.clip(optimized_circles[:, 1], 0.001, 0.999)
+-            optimized_circles[:, 2] = np.clip(optimized_circles[:, 2], 0.001, 0.49)
+-
+-            # Final verification
+-            positions = optimized_circles[:, :2]
+-            radii = optimized_circles[:, 2]
+-
+-            # Check that all circles are within bounds
+-            within_bounds = (
+-                np.all(radii <= positions[:, 0]) and
+-                np.all(radii <= 1 - positions[:, 0]) and
+-                np.all(radii <= positions[:, 1]) and
+-                np.all(radii <= 1 - positions[:, 1])
+-            )
+-
+-            if within_bounds:
+-                return optimized_circles
+-            else:
+-                # Fall back to the hexagonal grid if optimization fails
+-                return circles
+-        else:
+-            # Fall back to the hexagonal grid if optimization fails
+-            return circles
+-
+-    except Exception as e:
+-        # Fall back to the hexagonal grid if optimization fails
+-        return circles
++    return circles
+ 
+ # EVOLVE-BLOCK-END

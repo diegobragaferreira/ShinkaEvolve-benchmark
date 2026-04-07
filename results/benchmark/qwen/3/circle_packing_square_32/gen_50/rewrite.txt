@@ -1,0 +1,204 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For deterministic results
+    
+    # Hexagonal grid initialization
+    n = 32
+    circles = np.zeros((n, 3))
+    
+    # Create hexagonal grid pattern with better parameters
+    # Calculate grid parameters based on circle packing efficiency
+    rows = int(math.sqrt(n / math.sqrt(3))) + 2
+    cols = int(n / rows) + 2
+    
+    # Ensure we have enough space for all circles
+    while rows * cols < n:
+        rows += 1
+        cols = int(n / rows) + 1
+    
+    # Calculate optimal hexagonal packing parameters
+    # Based on theoretical maximum packing density (sqrt(3)/2 ≈ 0.866)
+    estimated_total_area = n * math.pi * (0.1**2)  # Initial guess
+    square_area = 1.0
+    packing_density = estimated_total_area / square_area
+    
+    # Adjust radius estimate for better packing
+    hex_radius = min(0.15, 0.5 * math.sqrt(packing_density / math.sqrt(3)))
+    
+    # Set spacing based on hexagonal geometry
+    spacing_x = hex_radius * 2
+    spacing_y = hex_radius * math.sqrt(3)
+    
+    # Initialize with hexagonal arrangement
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            # Offset every other row to create hexagonal pattern
+            x_offset = (i % 2) * (spacing_x / 2)
+            x = x_offset + j * spacing_x + hex_radius
+            y = i * spacing_y + hex_radius
+            
+            # Check if within bounds with safety margin
+            if x <= 1 - hex_radius and y <= 1 - hex_radius:
+                circles[idx] = [x, y, hex_radius]
+                idx += 1
+        if idx >= n:
+            break
+    
+    # Fill remaining circles with more sophisticated initialization
+    if idx < n:
+        # Try to place remaining circles in a more strategic manner
+        for i in range(idx, n):
+            # Try to find a good spot near existing circles
+            attempts = 0
+            placed = False
+            
+            while attempts < 1000 and not placed:
+                # Generate random position
+                x = np.random.uniform(hex_radius, 1 - hex_radius)
+                y = np.random.uniform(hex_radius, 1 - hex_radius)
+                
+                # Check against existing circles for overlap
+                valid = True
+                for k in range(i):
+                    dist = math.sqrt((x - circles[k][0])**2 + (y - circles[k][1])**2)
+                    if dist < circles[k][2] + hex_radius:
+                        valid = False
+                        break
+                
+                if valid:
+                    circles[i] = [x, y, hex_radius]
+                    placed = True
+                attempts += 1
+                
+            # If still failed to place, just put it somewhere
+            if not placed and attempts >= 1000:
+                circles[i] = [0.5, 0.5, hex_radius]
+
+    # Local optimization to improve configuration
+    def objective(params):
+        # params is flattened array [x1,y1,r1,x2,y2,r2,...]
+        total_radius = 0
+        positions = []
+        
+        for i in range(n):
+            x = params[3*i]
+            y = params[3*i+1]
+            r = params[3*i+2]
+            positions.append([x, y])
+            total_radius += r
+        
+        # Convert to numpy array for distance calculation
+        pos_array = np.array(positions)
+        
+        # Penalty for overlapping circles
+        penalty = 0
+        for i in range(n):
+            for j in range(i+1, n):
+                dist = math.sqrt((pos_array[i][0] - pos_array[j][0])**2 + (pos_array[i][1] - pos_array[j][1])**2)
+                min_dist = params[3*i+2] + params[3*j+2]
+                if dist < min_dist:
+                    # Stronger penalty for severe overlaps
+                    penalty += 1000 * (min_dist - dist)**2
+        
+        # Penalty for going out of bounds
+        for i in range(n):
+            if params[3*i] < params[3*i+2] or params[3*i] > 1 - params[3*i+2]:
+                penalty += 100000
+            if params[3*i+1] < params[3*i+2] or params[3*i+1] > 1 - params[3*i+2]:
+                penalty += 100000
+                
+        # Return negative because we want to maximize
+        return -total_radius + penalty
+    
+    # Flatten initial configuration
+    initial_params = np.zeros(n * 3)
+    for i in range(n):
+        initial_params[3*i] = circles[i][0]
+        initial_params[3*i+1] = circles[i][1]
+        initial_params[3*i+2] = circles[i][2]
+    
+    # Use scipy optimization with bounds - more robust than SLSQP
+    bounds = []
+    for i in range(n):
+        bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.49)])  # [x, y, r] bounds
+    
+    try:
+        # Optimize with L-BFGS-B method which handles bounds well
+        result = minimize(objective, initial_params, method='L-BFGS-B', 
+                         bounds=bounds, options={'maxiter': 1000, 'ftol': 1e-8})
+        
+        if result.success:
+            final_params = result.x
+            for i in range(n):
+                circles[i] = [final_params[3*i], final_params[3*i+1], final_params[3*i+2]]
+    
+    except Exception as e:
+        # If optimization fails, return initial configuration
+        pass
+    
+    # Final verification and adjustment
+    def verify_and_correct(circles_arr):
+        # Ensure no overlaps and boundaries
+        changed = True
+        iterations = 0
+        while changed and iterations < 30:
+            changed = False
+            for i in range(n):
+                x, y, r = circles_arr[i]
+                
+                # Check boundary constraints
+                if x < r:
+                    x = r
+                    changed = True
+                elif x > 1 - r:
+                    x = 1 - r
+                    changed = True
+                    
+                if y < r:
+                    y = r
+                    changed = True
+                elif y > 1 - r:
+                    y = 1 - r
+                    changed = True
+                
+                # Check overlap constraints with other circles
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = circles_arr[j]
+                        dist = math.sqrt((x - x2)**2 + (y - y2)**2)
+                        if dist < r + r2:
+                            # Move circle slightly away with larger correction factor
+                            dx = x2 - x
+                            dy = y2 - y
+                            distance = math.sqrt(dx*dx + dy*dy)
+                            if distance > 0:
+                                scale = (r + r2 - distance) / distance
+                                x -= dx * scale * 0.7
+                                y -= dy * scale * 0.7
+                                changed = True
+                
+                circles_arr[i] = [x, y, r]
+            
+            iterations += 1
+        
+        return circles_arr
+    
+    circles = verify_and_correct(circles)
+    
+    return circles
+
+# EVOLVE-BLOCK-END

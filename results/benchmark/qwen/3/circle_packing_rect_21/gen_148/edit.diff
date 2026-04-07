@@ -1,0 +1,236 @@
+--- a/original.py
++++ b/original.py
+@@ -1,210 +1,220 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy.spatial.distance import cdist
+ import random
+ 
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+ 
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+     # Rectangle dimensions (perimeter = 4, so width + height = 2)
+     # Optimize width/height ratio - try 3:1 ratio which often works well for circle packing
+     width, height = 1.5, 0.5
+ 
+     # Set random seed for reproducibility
+     np.random.seed(42)
+     random.seed(42)
+ 
+     # Initialize circles array
+     n = 21
+     circles = np.zeros((n, 3))
+ 
+     # Hybrid initialization: structured grid + strategic seeding
+     # Step 1: Create hexagonal grid pattern for dense coverage
+     rows = 4
+     cols = 6
+ 
+     # Calculate spacing based on container size
+     spacing_x = width / (cols + 1)
+     spacing_y = height / (rows + 1)
+ 
+     # Generate hexagonal grid points (with alternating offset)
+     hex_points = []
+     for i in range(rows):
+         for j in range(cols):
+             x = (j + 1) * spacing_x
+             y = (i + 1) * spacing_y
+             if i % 2 == 1:
+                 x += spacing_x * 0.5
+             if 0 <= x <= width and 0 <= y <= height:
+                 hex_points.append([x, y])
+ 
+     # Step 2: Add strategic corner and edge points for better boundary coverage
+     corner_points = [
+         [0.1, 0.1], [width-0.1, 0.1], [0.1, height-0.1], [width-0.1, height-0.1],
+         [width/2, 0.1], [width/2, height-0.1], [0.1, height/2], [width-0.1, height/2]
+     ]
+ 
+     # Combine grid and corner points
+     all_points = hex_points + corner_points
+ 
+     # Fill with initial positions (take first n points, or add random if needed)
+     for i in range(n):
+         if i < len(all_points):
+             x, y = all_points[i]
+         else:
+             # Random placement with boundary constraints
+             x = np.random.uniform(0.1, width - 0.1)
+             y = np.random.uniform(0.1, height - 0.1)
+         circles[i] = [x, y, 0.01]
+ 
+-    # Multi-scale optimization with improved convergence criteria
++    # Multi-scale optimization with adaptive constraint relaxation
+     max_iterations = 1000
+     last_improvement_iter = 0
+ 
++    # Adaptive constraint relaxation parameters
++    initial_overlap_tolerance = 0.95
++    final_overlap_tolerance = 0.99
++    overlap_tolerance_decay = 0.995
++
+     for iteration in range(max_iterations):
+         improved = False
++
++        # Adaptive overlap tolerance - start relaxed, become stricter
++        overlap_tolerance = initial_overlap_tolerance * (overlap_tolerance_decay ** iteration)
++        if overlap_tolerance < final_overlap_tolerance:
++            overlap_tolerance = final_overlap_tolerance
+ 
+         # Dynamic step size based on iteration progress
+         if iteration < 300:
+             step_size = 0.1
+         elif iteration < 700:
+             step_size = 0.05
+         else:
+             step_size = 0.01
+ 
+         # Try to increase each circle's radius (more aggressive radius updates)
+         for i in range(n):
+             # Find maximum possible radius for circle i
+-            max_radius = calculate_max_radius(circles, i, width, height)
++            max_radius = calculate_max_radius_with_tolerance(circles, i, width, height, overlap_tolerance)
+ 
+             if max_radius > circles[i][2] + 1e-6:  # Allow small numerical differences
+                 circles[i][2] = max_radius
+                 improved = True
+ 
+         # Early termination if no improvement for long time
+         if improved:
+             last_improvement_iter = iteration
+         elif iteration - last_improvement_iter > 50:
+             break
+ 
+     # Enhanced refinement phase with adaptive local search
+     refinement_iterations = 500
+ 
+     for iteration in range(refinement_iterations):
+         improved = False
+ 
+         # Shuffle order to prevent getting stuck in local minima
+         indices = list(range(n))
+         random.shuffle(indices)
+ 
+         # Dynamic step size for refinement
+         if iteration < 200:
+             step_size = 0.08
+         elif iteration < 400:
+             step_size = 0.04
+         else:
+             step_size = 0.01
+ 
+         # Try moving circles to improve configuration
+         for i in indices:
+             current_x, current_y, current_r = circles[i]
+ 
+             # Try movements in different directions
+             best_pos = [current_x, current_y, current_r]
+             best_radius = current_r
+ 
+             # Examine grid around current position with adaptive step size
+             for dx in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                 for dy in [-step_size, -step_size/2, 0, step_size/2, step_size]:
+                     new_x, new_y = current_x + dx, current_y + dy
+ 
+                     # Check if new position is within bounds with safety margin
+                     if 0.01 <= new_x <= width - 0.01 and 0.01 <= new_y <= height - 0.01:
+                         # Calculate max radius at new position
+-                        max_radius = calculate_max_radius_at_position(
+-                            circles, i, new_x, new_y, width, height
++                        max_radius = calculate_max_radius_at_position_with_tolerance(
++                            circles, i, new_x, new_y, width, height, overlap_tolerance
+                         )
+ 
+                         if max_radius > best_radius + 1e-6:
+                             best_radius = max_radius
+                             best_pos = [new_x, new_y, max_radius]
+ 
+             # Update if we found a better position
+             if best_pos[2] > circles[i][2] + 1e-6:
+                 circles[i] = best_pos
+                 improved = True
+ 
+         # Early termination for refinement phase
+         if not improved and iteration > 100:
+             break
+ 
+     # Final boundary correction to ensure all circles are valid
+     for i in range(n):
+         x, y, r = circles[i]
+         # Ensure circle stays within bounds with sufficient margin
+         r = min(r, x - 0.01, width - x - 0.01, y - 0.01, height - y - 0.01)
+         r = max(r, 0.001)
+         circles[i] = [x, y, r]
+ 
+     return circles
+ 
+ 
+-def calculate_max_radius(circles, index, width, height):
+-    """Calculate maximum radius for circle at given index without overlapping others."""
++def calculate_max_radius_with_tolerance(circles, index, width, height, overlap_tolerance=0.99):
++    """Calculate maximum radius with adaptive overlap tolerance for better exploration."""
+     x, y, current_radius = circles[index]
+ 
+     # Maximum radius based on container boundaries
+     max_radius_bound = min(x, y, width - x, height - y)
+ 
+-    # Maximum radius based on other circles
++    # Maximum radius based on other circles (with tolerance)
+     max_radius_overlap = float('inf')
+ 
+     for i, (cx, cy, cr) in enumerate(circles):
+         if i != index:
+             # Distance to other circle center
+             dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+-            # Max radius that avoids overlap
+-            max_radius_for_this_circle = dist - cr
++            # Max radius that avoids overlap with tolerance
++            max_radius_for_this_circle = dist * overlap_tolerance - cr
+ 
+             if max_radius_for_this_circle < max_radius_overlap:
+                 max_radius_overlap = max_radius_for_this_circle
+ 
+     max_radius = min(max_radius_bound, max_radius_overlap)
+     return max(max_radius, 0.001)  # Ensure minimum radius
+ 
+ 
+-def calculate_max_radius_at_position(circles, index, x, y, width, height):
++def calculate_max_radius_at_position_with_tolerance(circles, index, x, y, width, height, overlap_tolerance=0.99):
+     """Calculate maximum radius for circle at given position without overlapping others."""
+     # Maximum radius based on container boundaries
+     max_radius_bound = min(x, y, width - x, height - y)
+ 
+-    # Maximum radius based on other circles
++    # Maximum radius based on other circles (with tolerance)
+     max_radius_overlap = float('inf')
+ 
+     for i, (cx, cy, cr) in enumerate(circles):
+         if i != index:
+             # Distance to other circle center
+             dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+-            # Max radius that avoids overlap
+-            max_radius_for_this_circle = dist - cr
++            # Max radius that avoids overlap with tolerance
++            max_radius_for_this_circle = dist * overlap_tolerance - cr
+ 
+             if max_radius_for_this_circle < max_radius_overlap:
+                 max_radius_overlap = max_radius_for_this_circle
+ 
+     max_radius = min(max_radius_bound, max_radius_overlap)
+     return max(max_radius, 0.001)  # Ensure minimum radius
+ 
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

@@ -1,0 +1,67 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import differential_evolution
+import time
+
+
+def min_max_dist_dim3_14() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+
+    """
+
+    def objective(x):
+        """Objective function to minimize (negative of min/max ratio)"""
+        # Reshape x into (14, 3) points
+        points = x.reshape(-1, 3)
+
+        # Calculate pairwise distances
+        distances = pdist(points)
+
+        # Get min and max distances
+        d_min = np.min(distances)
+        d_max = np.max(distances)
+
+        # Avoid division by zero
+        if d_max == 0:
+            return -1.0
+
+        # Return negative ratio (since we want to maximize ratio, we minimize negative ratio)
+        return -d_min / d_max
+
+    # Define bounds for each coordinate (unit cube [0,1]^3)
+    bounds = [(0, 1) for _ in range(14 * 3)]
+
+    # Set up optimization parameters
+    max_time = 300  # seconds
+    start_time = time.time()
+
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        objective,
+        bounds,
+        seed=42,
+        maxiter=1000,
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        atol=1e-6,
+        rtol=1e-6,
+        polish=True,
+        disp=False
+    )
+
+    # Extract best solution
+    best_points = result.x.reshape(-1, 3)
+
+    # Ensure points are within [0,1]^3
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+
+
+# EVOLVE-BLOCK-END

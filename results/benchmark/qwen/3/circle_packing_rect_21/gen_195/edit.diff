@@ -1,0 +1,668 @@
+--- a/original.py
++++ b/original.py
+@@ -1,302 +1,384 @@
+ # You can define functions outside the main function below.
+ # Remember that any function used in parallel computation must be defined globally and not locally.
+ 
+ # EVOLVE-BLOCK-START
+ import numpy as np
+-from scipy.spatial import Voronoi, distance
+ from scipy.spatial.distance import cdist
+-import warnings
+-warnings.filterwarnings('ignore')
++import random
++from collections import defaultdict
++import time
++
++class QuadTree:
++    """Efficient spatial data structure for constraint checking"""
++    def __init__(self, bounds, max_points=4):
++        self.bounds = bounds
++        self.max_points = max_points
++        self.points = []
++        self.divided = False
++        self.children = [None, None, None, None]  # NW, NE, SW, SE
++        
++    def subdivide(self):
++        x, y, w, h = self.bounds
++        hw = w / 2
++        hh = h / 2
++        
++        # Create four quadrants
++        self.children[0] = QuadTree((x, y, hw, hh), self.max_points)  # NW
++        self.children[1] = QuadTree((x + hw, y, hw, hh), self.max_points)  # NE
++        self.children[2] = QuadTree((x, y + hh, hw, hh), self.max_points)  # SW
++        self.children[3] = QuadTree((x + hw, y + hh, hw, hh), self.max_points)  # SE
++        
++        self.divided = True
++        
++        # Redistribute points
++        for point in self.points:
++            self.insert_point(point)
++        
++        self.points = []
++        
++    def insert_point(self, point):
++        if not self.in_bounds(point):
++            return False
++            
++        if len(self.points) < self.max_points and not self.divided:
++            self.points.append(point)
++            return True
++            
++        if not self.divided:
++            self.subdivide()
++            
++        # Insert into children
++        for child in self.children:
++            if child.insert_point(point):
++                return True
++                
++        return False
++        
++    def in_bounds(self, point):
++        x, y = point
++        bx, by, bw, bh = self.bounds
++        return bx <= x <= bx + bw and by <= y <= by + bh
++        
++    def query_range(self, range_bounds):
++        """Get all points in the given range"""
++        x, y, w, h = range_bounds
++        points_in_range = []
++        
++        if not self.intersects_range(range_bounds):
++            return points_in_range
++            
++        if self.divided:
++            for child in self.children:
++                points_in_range.extend(child.query_range(range_bounds))
++        else:
++            # Check all points in this node
++            for point in self.points:
++                px, py = point
++                if x <= px <= x + w and y <= py <= y + h:
++                    points_in_range.append(point)
++                    
++        return points_in_range
++        
++    def intersects_range(self, range_bounds):
++        x, y, w, h = range_bounds
++        bx, by, bw, bh = self.bounds
++        
++        return not (x > bx + bw or x + w < bx or y > by + bh or y + h < by)
++
++class VoronoiEvolvePack:
++    def __init__(self, n_circles=21, width=1.2, height=0.8):
++        self.n_circles = n_circles
++        self.width = width
++        self.height = height
++        self.bounds = (0, 0, width, height)
++        self.max_evaluations = 50000
++        self.current_evaluations = 0
++        
++    def initialize_population(self, pop_size=50):
++        """Initialize diverse population using strategic seeding"""
++        population = []
++        
++        # Strategy 1: Corner and edge seeding
++        corner_points = [
++            [0.1, 0.1], [self.width-0.1, 0.1],
++            [0.1, self.height-0.1], [self.width-0.1, self.height-0.1]
++        ]
++        
++        edge_points = [
++            [self.width/2, 0.1], [self.width/2, self.height-0.1],
++            [0.1, self.height/2], [self.width-0.1, self.height/2]
++        ]
++        
++        # Add some random points
++        random_points = []
++        for _ in range(self.n_circles - len(corner_points) - len(edge_points)):
++            x = random.uniform(0.05, self.width - 0.05)
++            y = random.uniform(0.05, self.height - 0.05)
++            random_points.append([x, y])
++            
++        base_positions = corner_points + edge_points + random_points
++        
++        for _ in range(pop_size):
++            # Perturb base positions slightly
++            positions = []
++            for pos in base_positions:
++                x = max(0.05, min(self.width - 0.05, pos[0] + random.gauss(0, 0.05)))
++                y = max(0.05, min(self.height - 0.05, pos[1] + random.gauss(0, 0.05)))
++                positions.append([x, y])
++                
++            individual = self.create_individual(positions)
++            population.append(individual)
++            
++        return population
++    
++    def create_individual(self, positions):
++        """Create individual with initial small radii"""
++        individual = np.zeros((self.n_circles, 3))
++        for i in range(self.n_circles):
++            individual[i] = [positions[i][0], positions[i][1], 0.01]
++        return individual
++    
++    def calculate_fitness(self, individual):
++        """Calculate fitness based on sum of radii with penalty for constraints"""
++        self.current_evaluations += 1
++        
++        # Check if individual violates constraints
++        if not self.is_valid(individual):
++            return -float('inf')  # Penalize invalid individuals heavily
++            
++        # Return sum of radii
++        return np.sum(individual[:, 2])
++    
++    def is_valid(self, individual):
++        """Check if individual satisfies all constraints"""
++        # Check boundary constraints
++        for i in range(self.n_circles):
++            x, y, r = individual[i]
++            if x - r < 0 or x + r > self.width or y - r < 0 or y + r > self.height:
++                return False
++                
++        # Check overlap constraints using quadtree for efficiency
++        try:
++            tree = QuadTree(self.bounds)
++            points = individual[:, :2]
++            
++            for point in points:
++                if not tree.insert_point(tuple(point)):
++                    return False
++                    
++            # Check overlaps by checking distances between nearby points
++            for i in range(self.n_circles):
++                x1, y1, r1 = individual[i]
++                # Query nearby points (within 2*(r1+r2) distance)
++                query_range = (x1 - 2*(r1+0.01), y1 - 2*(r1+0.01), 4*(r1+0.01), 4*(r1+0.01))
++                nearby_points = tree.query_range(query_range)
++                
++                for j in range(i+1, self.n_circles):
++                    x2, y2, r2 = individual[j]
++                    distance_squared = (x1 - x2)**2 + (y1 - y2)**2
++                    min_distance_squared = (r1 + r2)**2
++                    
++                    if distance_squared < min_distance_squared:
++                        return False
++                        
++        except Exception:
++            # Fallback to brute force if quadtree fails
++            try:
++                for i in range(self.n_circles):
++                    x1, y1, r1 = individual[i]
++                    for j in range(i+1, self.n_circles):
++                        x2, y2, r2 = individual[j]
++                        distance_squared = (x1 - x2)**2 + (y1 - y2)**2
++                        min_distance_squared = (r1 + r2)**2
++                        
++                        if distance_squared < min_distance_squared:
++                            return False
++            except:
++                return False
++                
++        return True
++    
++    def mutate(self, individual, mutation_rate=0.3):
++        """Specialized mutation operator for circle packing"""
++        mutated = individual.copy()
++        
++        # Mutate randomly selected circles
++        for i in range(self.n_circles):
++            if random.random() < mutation_rate:
++                # Mutate position
++                if random.random() < 0.7:
++                    # Move circle
++                    delta_x = random.uniform(-0.1, 0.1)
++                    delta_y = random.uniform(-0.1, 0.1)
++                    mutated[i][0] = max(0.05, min(self.width - 0.05, mutated[i][0] + delta_x))
++                    mutated[i][1] = max(0.05, min(self.height - 0.05, mutated[i][1] + delta_y))
++                else:
++                    # Mutate radius
++                    delta_radius = random.uniform(-0.05, 0.05)
++                    mutated[i][2] = max(0.001, mutated[i][2] + delta_radius)
++                    
++        return mutated
++    
++    def crossover(self, parent1, parent2):
++        """Specialized crossover operator that preserves topology"""
++        child = parent1.copy()
++        
++        # Exchange segments of circles
++        split_point = random.randint(1, self.n_circles - 1)
++        for i in range(split_point, self.n_circles):
++            # Copy position and radius from parent2
++            child[i][0] = parent2[i][0]
++            child[i][1] = parent2[i][1]
++            child[i][2] = parent2[i][2]
++            
++        return child
++    
++    def calculate_max_radius(self, individual, index):
++        """Calculate maximum radius for circle at index without overlap"""
++        x, y, current_radius = individual[index]
++        
++        # Boundary constraints
++        max_radius_bound = min(x, y, self.width - x, self.height - y)
++        
++        # Overlap constraints - only check with nearby circles for efficiency
++        max_radius_overlap = float('inf')
++        
++        # Use spatial locality for efficiency
++        target_x, target_y = x, y
++        search_radius = 2 * max_radius_bound  # Approximate search radius
++        
++        for i in range(self.n_circles):
++            if i != index:
++                other_x, other_y, other_radius = individual[i]
++                distance_squared = (target_x - other_x)**2 + (target_y - other_y)**2
++                min_distance_squared = (current_radius + other_radius)**2
++                
++                if distance_squared < min_distance_squared:
++                    # Check if this is a real overlap
++                    distance = np.sqrt(distance_squared)
++                    available_radius = distance - other_radius
++                    if available_radius < max_radius_overlap:
++                        max_radius_overlap = available_radius
++                        
++        max_radius = min(max_radius_bound, max_radius_overlap)
++        return max(max_radius, 0.001)
++    
++    def optimize_individual(self, individual):
++        """Local optimization for individual - maximize radii"""
++        for _ in range(100):  # Limited local iterations
++            improved = False
++            
++            # Try to increase radii of circles
++            for i in range(self.n_circles):
++                max_radius = self.calculate_max_radius(individual, i)
++                if max_radius > individual[i][2]:
++                    individual[i][2] = max_radius
++                    improved = True
++                    
++            if not improved:
++                break
++                
++        return individual
++    
++    def run_evolutionary_algorithm(self):
++        """Main evolutionary optimization loop"""
++        # Initialize population
++        population = self.initialize_population(50)
++        fitness_scores = []
++        
++        # Evaluate initial population
++        for i, individual in enumerate(population):
++            population[i] = self.optimize_individual(individual)
++            fitness = self.calculate_fitness(population[i])
++            fitness_scores.append(fitness)
++            
++        # Evolutionary loop
++        generation = 0
++        best_fitness = max(fitness_scores)
++        best_individual = population[np.argmax(fitness_scores)].copy()
++        
++        while self.current_evaluations < self.max_evaluations and generation < 1000:
++            # Sort population by fitness
++            sorted_indices = np.argsort(fitness_scores)[::-1]
++            elites = [population[i] for i in sorted_indices[:10]]
++            
++            # Create new population
++            new_population = elites.copy()
++            
++            # Generate offspring through crossover and mutation
++            while len(new_population) < 50:
++                parent1 = random.choice(elites)
++                parent2 = random.choice(elites)
++                
++                # Crossover
++                child = self.crossover(parent1, parent2)
++                
++                # Mutation
++                child = self.mutate(child)
++                
++                # Local optimization
++                child = self.optimize_individual(child)
++                
++                # Add to population
++                new_population.append(child)
++                
++            # Evaluate new population
++            population = new_population
++            fitness_scores = []
++            
++            for individual in population:
++                fitness = self.calculate_fitness(individual)
++                fitness_scores.append(fitness)
++                
++            # Update best solution
++            current_best_fitness = max(fitness_scores)
++            if current_best_fitness > best_fitness:
++                best_fitness = current_best_fitness
++                best_individual = population[np.argmax(fitness_scores)].copy()
++                
++            # Adaptive parameters based on convergence
++            if generation > 50:
++                # Increase mutation rate if stagnation detected
++                if generation % 20 == 0:
++                    # Some convergence check logic
++                    pass
++                    
++            generation += 1
++            
++        # Final refinement
++        final_individual = self.optimize_individual(best_individual)
++        return final_individual
+ 
+ def circle_packing21() -> np.ndarray:
+     """
+     Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+-    Uses Voronoi-guided evolutionary optimization.
+-    
++    Uses advanced evolutionary optimization with spatial data structures.
++
+     Returns:
+         circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+     """
+-    # Rectangle dimensions (perimeter = 4, so width + height = 2)
+-    width, height = 1.2, 0.8
+-
+-    # Initialize circles array
+-    n = 21
+-    circles = np.zeros((n, 3))
+-    
+-    # Phase 1: Voronoi-guided initialization with evolutionary population
++    # Fixed random seed for reproducibility
++    random.seed(42)
+     np.random.seed(42)
+     
+-    # Generate multiple candidate configurations using different Voronoi strategies
+-    best_config = None
+-    best_sum = 0
+-    
+-    # Try several initial configurations
+-    for attempt in range(5):
+-        # Random points with some strategic seeding
+-        init_points = []
+-        
+-        # Corner points for boundary coverage
+-        corner_points = [
+-            [0.1, 0.1],           # Bottom-left
+-            [width-0.1, 0.1],     # Bottom-right
+-            [0.1, height-0.1],    # Top-left
+-            [width-0.1, height-0.1], # Top-right
+-        ]
+-        init_points.extend(corner_points)
+-        
+-        # Additional strategic points
+-        edge_points = [
+-            [width/2, 0.1],       # Bottom-middle
+-            [width/2, height-0.1], # Top-middle
+-            [0.1, height/2],      # Left-middle
+-            [width-0.1, height/2], # Right-middle
+-        ]
+-        init_points.extend(edge_points)
+-        
+-        # Fill remaining slots with random points
+-        remaining = n - len(init_points)
+-        for _ in range(remaining):
+-            x = np.random.uniform(0.05, width - 0.05)
+-            y = np.random.uniform(0.05, height - 0.05)
+-            init_points.append([x, y])
+-            
+-        # Generate initial configuration via Voronoi optimization
+-        config = generate_voronoi_config(init_points, width, height)
+-        
+-        # Evaluate and keep the best
+-        sum_radii = np.sum(config[:, 2])
+-        if sum_radii > best_sum:
+-            best_sum = sum_radii
+-            best_config = config.copy()
+-    
+-    # Use the best initialization
+-    circles = best_config
+-
+-    # Phase 2: Voronoi-guided multi-scale optimization
+-    max_iterations = 1000
+-    
+-    for iteration in range(max_iterations):
+-        improved = False
+-        
+-        # Dynamic parameters based on iteration progress
+-        if iteration < 300:
+-            radius_update_factor = 0.95
+-            step_size = 0.15
+-            overlap_tolerance = 0.1
+-        elif iteration < 700:
+-            radius_update_factor = 0.8
+-            step_size = 0.08
+-            overlap_tolerance = 0.05
+-        else:
+-            radius_update_factor = 0.6
+-            step_size = 0.03
+-            overlap_tolerance = 0.0
+-
+-        # Voronoi-based optimization step: recompute Voronoi diagram and refine positions
+-        if iteration % 10 == 0 and iteration > 0:
+-            voronoi_positions = circles[:, :2].copy()
+-            voronoi_refinement(circles, voronoi_positions, width, height, overlap_tolerance)
+-            improved = True
+-            
+-        # Individual circle optimization with constraint relaxation
+-        for i in range(n):
+-            max_radius = calculate_max_radius_with_tolerance(circles, i, width, height, overlap_tolerance)
+-            if max_radius > circles[i][2]:
+-                circles[i][2] = min(max_radius, circles[i][2] * radius_update_factor)
+-                improved = True
+-
+-        # Early stopping criteria
+-        if not improved and iteration > 400:
+-            break
+-
+-    # Phase 3: Advanced local search with Voronoi-enhanced neighborhood exploration
+-    # Use a more sophisticated search pattern that respects Voronoi structure
+-    local_search_iterations = 500
+-    
+-    for refinement_iteration in range(local_search_iterations):
+-        # Adaptive step size
+-        if refinement_iteration < 200:
+-            step_size = 0.1
+-        elif refinement_iteration < 400:
+-            step_size = 0.05
+-        else:
+-            step_size = 0.02
+-
+-        # Voronoi-based guided search
+-        for i in range(n):
+-            current_x, current_y, current_r = circles[i]
+-            
+-            # Enhanced search with Voronoi-inspired neighborhood
+-            best_pos = [current_x, current_y, current_r]
+-            best_radius = current_r
+-            
+-            # Search pattern: Voronoi cell neighbor candidates plus diagonal
+-            search_pattern = []
+-            
+-            # Add Voronoi cell-like neighborhood (based on relative positions)
+-            if refinement_iteration < 150:
+-                # Coarse search
+-                offsets = [-step_size*2, -step_size, 0, step_size, step_size*2]
+-            elif refinement_iteration < 350:
+-                # Medium search
+-                offsets = [-step_size, 0, step_size]
+-            else:
+-                # Fine search
+-                offsets = [-step_size/2, 0, step_size/2]
+-                
+-            # Add diagonal movements for better exploration
+-            if refinement_iteration > 250:
+-                offsets.extend([-step_size*1.5, step_size*1.5])
+-                
+-            # Generate search points
+-            for dx in offsets:
+-                for dy in offsets:
+-                    new_x, new_y = current_x + dx, current_y + dy
+-                    
+-                    # Boundary check
+-                    if 0 <= new_x <= width and 0 <= new_y <= height:
+-                        # Calculate max radius at new position
+-                        max_radius = calculate_max_radius_at_position(
+-                            circles, i, new_x, new_y, width, height
+-                        )
+-                        
+-                        if max_radius > best_radius:
+-                            best_radius = max_radius
+-                            best_pos = [new_x, new_y, max_radius]
+-                            
+-            # Update if we found a better position
+-            if best_pos[2] > circles[i][2]:
+-                circles[i] = best_pos
+-                
+-    # Final cleanup
+-    for i in range(n):
+-        circles[i][2] = max(circles[i][2], 0.001)
+-        circles[i][0] = np.clip(circles[i][0], 0.001, width - 0.001)
+-        circles[i][1] = np.clip(circles[i][1], 0.001, height - 0.001)
+-
+-    return circles
+-
+-
+-def generate_voronoi_config(init_points, width, height):
+-    """Generate an initial configuration using Voronoi-based optimization."""
+-    n = len(init_points)
+-    circles = np.zeros((n, 3))
+-    
+-    # Initialize with small radii
+-    for i in range(n):
+-        circles[i] = [init_points[i][0], init_points[i][1], 0.01]
+-    
+-    # Perform a few iterations of Voronoi-inspired optimization
+-    for iteration in range(10):
+-        # Compute Voronoi diagram
+-        vor = Voronoi(np.array(init_points))
+-        
+-        # Adjust positions towards Voronoi cell centers
+-        for i in range(n):
+-            # Find Voronoi region for this point
+-            region_idx = np.argmin([distance.euclidean([init_points[i][0], init_points[i][1]], vor.points[j]) 
+-                                  for j in range(len(vor.points))])
+-            
+-            # Move towards a better cell center (this is heuristic)
+-            if len(vor.regions) > region_idx and len(vor.regions[region_idx]) > 0:
+-                # Simple geometric adjustment
+-                pass  # We'll use direct optimization instead
+-        
+-        # Direct optimization approach
+-        for i in range(n):
+-            # Calculate max radius for this point
+-            max_radius = calculate_max_radius_direct(circles, i, width, height)
+-            circles[i][2] = max_radius
+-    
+-    return circles
+-
+-
+-def voronoi_refinement(circles, positions, width, height, overlap_tolerance):
+-    """Refine circle positions using Voronoi-based approach."""
+-    n = len(circles)
+-    
+-    # This simulates Voronoi-based refinement by improving position constraints
+-    for i in range(n):
+-        # Calculate max radius with proper Voronoi considerations
+-        max_radius = calculate_max_radius_with_tolerance(circles, i, width, height, overlap_tolerance)
+-        circles[i][2] = max(max_radius, circles[i][2])
+-
+-
+-def calculate_max_radius_with_tolerance(circles, index, width, height, overlap_tolerance=0.0):
+-    """Calculate maximum radius for circle at given index without overlapping others, considering tolerance."""
+-    x, y, current_radius = circles[index]
+-
+-    # Maximum radius based on container boundaries
+-    max_radius_bound = min(x, y, width - x, height - y)
+-
+-    # Maximum radius based on other circles
+-    max_radius_overlap = float('inf')
+-
+-    # Use vectorized approach for efficiency
+-    if len(circles) > 1:
+-        # Get all other circles (excluding the target circle)
+-        other_circles = np.concatenate([circles[:index], circles[index+1:]])
+-        
+-        if len(other_circles) > 0:
+-            # Vectorized distance calculation
+-            distances = np.sqrt(np.sum((other_circles[:, :2] - [x, y])**2, axis=1))
+-            max_radius_for_others = np.min(distances - other_circles[:, 2] - overlap_tolerance)
+-            max_radius_overlap = max_radius_for_others
+-
+-    max_radius = min(max_radius_bound, max_radius_overlap)
+-    return max(max_radius, 0.001)  # Ensure minimum radius
+-
+-
+-def calculate_max_radius_direct(circles, index, width, height):
+-    """Direct calculation of max radius without tolerance."""
+-    x, y, current_radius = circles[index]
+-
+-    # Maximum radius based on container boundaries
+-    max_radius_bound = min(x, y, width - x, height - y)
+-
+-    # Maximum radius based on other circles
+-    max_radius_overlap = float('inf')
+-
+-    # Use vectorized approach for efficiency
+-    if len(circles) > 1:
+-        # Get all other circles (excluding the target circle)
+-        other_circles = np.concatenate([circles[:index], circles[index+1:]])
+-        
+-        if len(other_circles) > 0:
+-            # Vectorized distance calculation
+-            distances = np.sqrt(np.sum((other_circles[:, :2] - [x, y])**2, axis=1))
+-            max_radius_for_others = np.min(distances - other_circles[:, 2])
+-            max_radius_overlap = max_radius_for_others
+-
+-    max_radius = min(max_radius_bound, max_radius_overlap)
+-    return max(max_radius, 0.001)  # Ensure minimum radius
+-
+-
+-def calculate_max_radius_at_position(circles, index, x, y, width, height):
+-    """Calculate maximum radius for circle at given position without overlapping others."""
+-    # Maximum radius based on container boundaries
+-    max_radius_bound = min(x, y, width - x, height - y)
+-
+-    # Maximum radius based on other circles
+-    max_radius_overlap = float('inf')
+-
+-    # Use vectorized approach for efficiency
+-    if len(circles) > 1:
+-        # Get all other circles (excluding the target circle)
+-        other_circles = np.concatenate([circles[:index], circles[index+1:]])
+-        
+-        if len(other_circles) > 0:
+-            # Vectorized distance calculation
+-            distances = np.sqrt(np.sum((other_circles[:, :2] - [x, y])**2, axis=1))
+-            max_radius_for_others = np.min(distances - other_circles[:, 2])
+-            max_radius_overlap = max_radius_for_others
+-
+-    max_radius = min(max_radius_bound, max_radius_overlap)
+-    return max(max_radius, 0.001)  # Ensure minimum radius
+-
++    # Create optimizer
++    optimizer = VoronoiEvolvePack(n_circles=21, width=1.2, height=0.8)
++    
++    # Run optimization
++    start_time = time.time()
++    result = optimizer.run_evolutionary_algorithm()
++    end_time = time.time()
++    
++    # Ensure minimum radius and boundary constraints
++    for i in range(21):
++        result[i][2] = max(result[i][2], 0.001)
++        result[i][0] = max(0.001, min(1.2 - 0.001, result[i][0]))
++        result[i][1] = max(0.001, min(0.8 - 0.001, result[i][1]))
++    
++    return result
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     circles = circle_packing21()
+     print(f"Radii sum: {np.sum(circles[:,-1])}")

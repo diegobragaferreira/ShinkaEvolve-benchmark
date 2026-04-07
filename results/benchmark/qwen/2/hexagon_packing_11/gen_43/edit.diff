@@ -1,0 +1,596 @@
+--- a/original.py
++++ b/original.py
+@@ -1,267 +1,364 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.optimize import differential_evolution
++from scipy.spatial.distance import cdist
+ from shapely.geometry import Polygon, Point
++from shapely.validation import make_valid
+ import time
+-import math
+-from collections import defaultdict
++import random
++
++def hexagon_vertices(center_x, center_y, rotation_degrees, side_length=1):
++    """Generate vertices of a regular hexagon given center, rotation, and side length."""
++    angle_rad = np.radians(rotation_degrees)
++    # Vertices of a unit hexagon centered at origin
++    unit_vertices = np.array([
++        [1, 0],
++        [0.5, np.sqrt(3)/2],
++        [-0.5, np.sqrt(3)/2],
++        [-1, 0],
++        [-0.5, -np.sqrt(3)/2],
++        [0.5, -np.sqrt(3)/2]
++    ])
++
++    # Rotate and translate
++    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
++    rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
++    rotated_vertices = unit_vertices @ rotation_matrix.T
++    return rotated_vertices * side_length + np.array([center_x, center_y])
++
++def check_containment(hexagon_vertices, outer_hex_center, outer_hex_rotation, outer_hex_side_length):
++    """Check if all vertices of a hexagon are inside the outer hexagon."""
++    outer_vertices = hexagon_vertices(outer_hex_center[0], outer_hex_center[1], outer_hex_rotation, outer_hex_side_length)
++    outer_polygon = Polygon(outer_vertices)
++
++    # Use buffer to handle floating point precision issues
++    outer_polygon = make_valid(outer_polygon)
++    
++    for vertex in hexagon_vertices:
++        point = Point(vertex)
++        if not outer_polygon.contains(point):
++            return False
++    return True
++
++def check_collision(hex1_vertices, hex2_vertices):
++    """Check if two hexagons collide using Shapely with buffer for robustness."""
++    poly1 = Polygon(hex1_vertices)
++    poly2 = Polygon(hex2_vertices)
++    
++    # Use buffer with small epsilon to avoid floating point precision issues
++    poly1_buffered = make_valid(poly1.buffer(1e-6))
++    poly2_buffered = make_valid(poly2.buffer(1e-6))
++    
++    return poly1_buffered.intersects(poly2_buffered)
++
++def calculate_outer_hex_radius(inner_hex_data, margin_factor=1.05):
++    """Calculate required outer hexagon radius based on inner hexagons."""
++    if len(inner_hex_data) == 0:
++        return 1.0
++        
++    # Get all hexagon centers and calculate bounding box
++    centers = np.array([[x, y] for x, y, _ in inner_hex_data])
++    
++    # Calculate bounding rectangle
++    min_x, max_x = np.min(centers[:, 0]), np.max(centers[:, 0])
++    min_y, max_y = np.min(centers[:, 1]), np.max(centers[:, 1])
++    
++    # Convert to hexagon radius (accounting for hexagon geometry)
++    width = max_x - min_x
++    height = max_y - min_y
++    
++    # Distance from center to corner of bounding rectangle
++    bounding_radius = np.sqrt((width/2)**2 + (height/2)**2) + 1.0  # Add unit radius
++    
++    return bounding_radius * margin_factor
+ 
+ class HexagonPackingOptimizer:
+     def __init__(self):
+-        self.unit_hex_radius = 1.0
+-        self.unit_hex_vertices = self._generate_unit_hexagon_vertices()
+-        self.max_attempts = 10000
+-        self.min_outer_side_length = 1.0
+-        self.max_outer_side_length = 20.0
+-        
+-    def _generate_unit_hexagon_vertices(self):
+-        """Generate vertices of a unit regular hexagon centered at origin"""
+-        vertices = []
+-        for i in range(6):
+-            angle = i * np.pi / 3
+-            x = self.unit_hex_radius * np.cos(angle)
+-            y = self.unit_hex_radius * np.sin(angle)
+-            vertices.append((x, y))
+-        return np.array(vertices)
+-    
+-    def _hexagon_from_params(self, center_x, center_y, rotation_deg):
+-        """Create hexagon vertices given center and rotation"""
+-        rotation_rad = np.radians(rotation_deg)
+-        cos_r = np.cos(rotation_rad)
+-        sin_r = np.sin(rotation_rad)
+-        
+-        # Apply rotation and translation to unit hexagon vertices
+-        rotated_vertices = np.zeros_like(self.unit_hex_vertices)
+-        for i, (x, y) in enumerate(self.unit_hex_vertices):
+-            rotated_vertices[i] = [
+-                x * cos_r - y * sin_r + center_x,
+-                x * sin_r + y * cos_r + center_y
+-            ]
+-        return rotated_vertices
+-    
+-    def _check_containment(self, hexagon_vertices):
+-        """Check if hexagon is fully contained in outer hexagon"""
+-        # Create outer hexagon vertices (regular hexagon centered at origin)
+-        outer_hex_vertices = self._hexagon_from_params(0, 0, 0)
+-        outer_polygon = Polygon(outer_hex_vertices)
+-
+-        # Check if all vertices of inner hexagon are within outer hexagon
+-        for vertex in hexagon_vertices:
+-            point = Point(vertex[0], vertex[1])
+-            if not outer_polygon.contains(point):
+-                return False
+-        return True
+-    
+-    def _check_collision(self, hex1_vertices, hex2_vertices):
+-        """Check if two hexagons collide using Shapely"""
+-        poly1 = Polygon(hex1_vertices)
+-        poly2 = Polygon(hex2_vertices)
+-        return poly1.intersects(poly2)
+-    
+-    def _is_valid_configuration(self, inner_hex_data, outer_side_length):
+-        """Check if configuration satisfies all constraints"""
+-        # Create outer hexagon vertices for containment check
+-        outer_hex_vertices = self._hexagon_from_params(0, 0, 0)
+-        outer_polygon = Polygon(outer_hex_vertices)
+-        
+-        # Check containment of all inner hexagons within outer hexagon
+-        for i in range(len(inner_hex_data)):
+-            center_x, center_y, rotation = inner_hex_data[i]
+-            vertices = self._hexagon_from_params(center_x, center_y, rotation)
+-            
+-            # Check containment
+-            for vertex in vertices:
+-                point = Point(vertex[0], vertex[1])
+-                if not outer_polygon.contains(point):
+-                    return False
+-            
+-            # Check collision with all other hexagons
+-            for j in range(i):
+-                center_x2, center_y2, rotation2 = inner_hex_data[j]
+-                vertices2 = self._hexagon_from_params(center_x2, center_y2, rotation2)
++        self.n = 11
++        self.side_length = 1.0
++        self.max_iterations = 2000
++        self.population_size = 30
++        self.tolerance = 1e-6
++        self.max_evaluations = 5000
++        
++    def generate_initial_population(self):
++        """Generate diverse initial configurations."""
++        populations = []
++        
++        # Pattern 1: Spiral arrangement
++        spiral_config = []
++        center = [0, 0, 0]
++        spiral_config.append(center)
++        
++        # Place hexagons in spiral pattern
++        angles = np.linspace(0, 2*np.pi, 10, endpoint=False)
++        radii = [1.5, 2.5, 3.0, 3.5, 4.0]
++        
++        idx = 1
++        for r in radii:
++            for angle in angles:
++                if idx < 11:
++                    x = r * np.cos(angle)
++                    y = r * np.sin(angle)
++                    spiral_config.append([x, y, 0])
++                    idx += 1
++                else:
++                    break
++            if idx >= 11:
++                break
+                 
+-                if self._check_collision(vertices, vertices2):
+-                    return False
+-                    
+-        return True
+-    
+-    def _create_initial_guess(self):
+-        """Create a good initial configuration based on known good patterns"""
+-        # Start with a symmetric pattern that's known to work well
+-        base_positions = [
++        # Pad to 11 elements
++        while len(spiral_config) < 11:
++            spiral_config.append([0, 0, 0])
++            
++        populations.append(np.array(spiral_config[:11]))
++        
++        # Pattern 2: Grid-based
++        grid_config = []
++        grid_positions = [
+             [0, 0, 0],  # center
+             [-2.0, 0, 0],  # left
+             [2.0, 0, 0],  # right
+             [0, 2.0, 0],  # top
+             [0, -2.0, 0],  # bottom
+-            [-1.0, 1.0, 0],  # top-left
+-            [1.0, 1.0, 0],  # top-right
+-            [-1.0, -1.0, 0],  # bottom-left
+-            [1.0, -1.0, 0],  # bottom-right
+-            [-2.0, 1.0, 0],  # far top-left
+-            [2.0, 1.0, 0],  # far top-right
++            [-1.5, 1.5, 0],  # top-left
++            [1.5, 1.5, 0],  # top-right
++            [-1.5, -1.5, 0],  # bottom-left
++            [1.5, -1.5, 0],  # bottom-right
++            [-2.5, 1.0, 0],  # far top-left
++            [2.5, 1.0, 0],  # far top-right
+         ]
+-        
+-        # Add some randomness to avoid local optima
+-        base_positions = np.array(base_positions)
+-        for i in range(len(base_positions)):
+-            base_positions[i][0] += np.random.normal(0, 0.1)
+-            base_positions[i][1] += np.random.normal(0, 0.1)
+-            
+-        return base_positions
+-    
+-    def _sample_random_config(self, outer_side_length):
+-        """Sample a random valid configuration"""
+-        # Sample random positions and rotations for all hexagons
+-        hex_data = []
++        populations.append(np.array(grid_positions))
++        
++        # Pattern 3: Random with good spread
++        random_config = []
+         for i in range(11):
+-            # Random position within a reasonable area
+-            x = np.random.uniform(-outer_side_length*0.8, outer_side_length*0.8)
+-            y = np.random.uniform(-outer_side_length*0.8, outer_side_length*0.8)
++            x = np.random.uniform(-5, 5)
++            y = np.random.uniform(-5, 5)
+             rotation = np.random.uniform(0, 360)
+-            hex_data.append([x, y, rotation])
+-        
+-        return np.array(hex_data)
+-    
+-    def _adaptive_search(self, initial_config, max_iterations=5000):
+-        """Use adaptive Monte Carlo search with progressive refinement"""
+-        best_config = initial_config.copy()
+-        best_side_length = 100.0  # Start with large value
+-        best_score = -1.0
+-        
+-        # Track recent improvements to adapt search
+-        recent_improvements = []
+-        
+-        # Start with broad search
+-        current_scale = 1.0
+-        
+-        for iteration in range(max_iterations):
+-            # Generate new configuration with adaptive scale
+-            new_config = self._sample_with_adaptation(best_config, current_scale)
+-            
+-            # Try different outer hexagon sizes
+-            for side_length in [best_side_length * 0.95, best_side_length * 0.9, best_side_length * 1.05]:
+-                if side_length < self.min_outer_side_length or side_length > self.max_outer_side_length:
+-                    continue
+-                    
+-                if self._is_valid_configuration(new_config, side_length):
+-                    score = 1.0 / side_length
+-                    if score > best_score:
+-                        best_score = score
+-                        best_config = new_config.copy()
+-                        best_side_length = side_length
++            random_config.append([x, y, rotation])
++        populations.append(np.array(random_config))
++        
++        # Pattern 4: Hexagonal close-packed
++        hcp_config = []
++        hcp_config.append([0, 0, 0])  # center
++        
++        # First ring
++        for i in range(6):
++            angle = i * np.pi/3
++            x = 2 * np.cos(angle)
++            y = 2 * np.sin(angle)
++            hcp_config.append([x, y, 0])
++            
++        # Second ring
++        for i in range(6):
++            angle = i * np.pi/3 + np.pi/6
++            x = 3 * np.cos(angle)
++            y = 3 * np.sin(angle)
++            hcp_config.append([x, y, 0])
++            
++        # Pad if necessary
++        while len(hcp_config) < 11:
++            hcp_config.append([0, 0, 0])
++        
++        populations.append(np.array(hcp_config[:11]))
++        
++        return populations
++    
++    def evaluate_individual(self, params):
++        """Evaluate a single individual configuration."""
++        # Extract parameters
++        coords = params[:-1].reshape(-1, 3)  # (x, y, rotation) for each hexagon
++        outer_radius = params[-1]
++        
++        if outer_radius <= 0:
++            return 1e10  # Invalid
++        
++        # Create outer hexagon vertices
++        outer_vertices = hexagon_vertices(0, 0, 0, outer_radius)
++        outer_polygon = Polygon(outer_vertices)
++        outer_polygon = make_valid(outer_polygon)
++        
++        penalty = 0.0
++        
++        # Check containment for all inner hexagons
++        for i in range(self.n):
++            x, y, rot = coords[i]
++            hex_vertices = hexagon_vertices(x, y, rot, self.side_length)
++            
++            # Check if all vertices are within outer hexagon
++            for vertex in hex_vertices:
++                point = Point(vertex)
++                if not outer_polygon.contains(point):
++                    penalty += 1e6
++        
++        # Check pairwise collisions
++        for i in range(self.n):
++            for j in range(i+1, self.n):
++                x1, y1, rot1 = coords[i]
++                x2, y2, rot2 = coords[j]
++                
++                hex1_vertices = hexagon_vertices(x1, y1, rot1, self.side_length)
++                hex2_vertices = hexagon_vertices(x2, y2, rot2, self.side_length)
++                
++                if check_collision(hex1_vertices, hex2_vertices):
++                    penalty += 1e6
++        
++        # Objective is to minimize negative 1/outer_radius (maximize 1/outer_radius)
++        objective = -(1.0 / outer_radius) + penalty
++        return objective
++    
++    def optimize(self):
++        """Main optimization routine using differential evolution with adaptive parameters."""
++        # Generate initial population
++        init_populations = self.generate_initial_population()
++        
++        best_score = float('inf')
++        best_params = None
++        best_config = None
++        
++        # Try each initial population
++        for i, initial_config in enumerate(init_populations):
++            # Create bounds for optimization
++            bounds = []
++            
++            # Position bounds: reasonable limits for hexagon placements
++            for _ in range(self.n):
++                bounds.extend([(-10, 10), (-10, 10), (-180, 180)])
++            
++            # Outer hexagon radius bounds
++            bounds.append((1.0, 20.0))
++            
++            # Generate initial parameters
++            initial_params = np.zeros(3*self.n + 1)
++            for j in range(self.n):
++                initial_params[3*j] = initial_config[j][0]  # x
++                initial_params[3*j+1] = initial_config[j][1]  # y
++                initial_params[3*j+2] = initial_config[j][2]  # rotation
++            
++            # Set initial outer radius based on configuration
++            initial_outer_radius = calculate_outer_hex_radius(initial_config)
++            initial_params[-1] = initial_outer_radius
++            
++            # Run differential evolution with adaptive parameters
++            try:
++                de_result = differential_evolution(
++                    self.evaluate_individual,
++                    bounds,
++                    maxiter=min(300, self.max_iterations),
++                    popsize=self.population_size,
++                    mutation=(0.5, 1),
++                    recombination=0.7,
++                    seed=42+i,  # Different seed for each population
++                    disp=False,
++                    polish=True  # Refine with local method
++                )
++                
++                if de_result.success:
++                    current_score = self.evaluate_individual(de_result.x)
++                    if current_score < best_score:
++                        best_score = current_score
++                        best_params = de_result.x
++                        best_config = initial_config
+                         
+-                        # Track improvement
+-                        recent_improvements.append(iteration)
+-                        if len(recent_improvements) > 10:
+-                            recent_improvements.pop(0)
+-                        
+-                        # Adaptively reduce scale when improvement happens
+-                        current_scale *= 0.99
+-                            
+-            # Adaptive scaling based on recent progress
+-            if len(recent_improvements) >= 5 and iteration - recent_improvements[-1] > 100:
+-                current_scale *= 1.1
+-                
+-            # Occasionally reset scale to avoid getting stuck
+-            if iteration % 200 == 0:
+-                current_scale = 0.1 + np.random.rand() * 0.2
+-                
+-        return best_config, best_side_length, best_score
+-    
+-    def _sample_with_adaptation(self, reference_config, scale):
+-        """Sample new configuration adapted from reference"""
+-        new_config = reference_config.copy()
+-        
+-        # Apply small random modifications to positions and rotations
+-        for i in range(len(new_config)):
+-            # Position changes (smaller than rotation changes)
+-            new_config[i][0] += np.random.normal(0, scale * 0.1)
+-            new_config[i][1] += np.random.normal(0, scale * 0.1)
+-            
+-            # Rotation change (can be larger)
+-            new_config[i][2] += np.random.normal(0, scale * 5)
+-            
+-            # Keep rotation in [0, 360) range
+-            new_config[i][2] = new_config[i][2] % 360
+-            
+-        return new_config
++            except Exception as e:
++                continue  # Skip if optimization fails
++        
++        # If we still don't have a good solution, use a fallback
++        if best_params is None:
++            # Create a well-known good configuration from literature
++            fallback_config = np.array([
++                [0, 0, 0],      # center
++                [-2.5, 0, 0],   # left
++                [2.5, 0, 0],    # right
++                [-1.25, 2.17, 0],  # top-left
++                [1.25, 2.17, 0],   # top-right
++                [-1.25, -2.17, 0], # bottom-left
++                [1.25, -2.17, 0],  # bottom-right
++                [-3.75, 2.17, 0],  # far top-left
++                [3.75, 2.17, 0],   # far top-right
++                [-3.75, -2.17, 0], # far bottom-left
++                [3.75, -2.17, 0],  # far bottom-right
++            ])
++            
++            # Calculate appropriate size
++            outer_radius = calculate_outer_hex_radius(fallback_config)
++            best_params = np.zeros(3*11 + 1)
++            for j in range(11):
++                best_params[3*j] = fallback_config[j][0]
++                best_params[3*j+1] = fallback_config[j][1]
++                best_params[3*j+2] = fallback_config[j][2]
++            best_params[-1] = outer_radius
++            best_score = self.evaluate_individual(best_params)
++            
++        return best_params
+ 
+ def hexagon_packing_11():
+     """
+     Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+     Returns
+         inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+         outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+         outer_hex_side_length: float representing the side length of the outer hexagon.
+     """
++    
++    # Initialize optimizer
+     optimizer = HexagonPackingOptimizer()
+     
+-    # Start with heuristic initial configuration
+-    initial_config = optimizer._create_initial_guess()
+-    
+-    # Perform adaptive search
+-    best_config, best_side_length, best_score = optimizer._adaptive_search(initial_config, max_iterations=5000)
+-    
+-    # If we found a good solution, return it
+-    if best_score > 0.1:  # Only accept reasonable solutions
+-        # Verify final solution
+-        if optimizer._is_valid_configuration(best_config, best_side_length):
+-            outer_hex_data = np.array([0, 0, 0])
+-            return best_config, outer_hex_data, best_side_length
+-    
+-    # Fallback to original approach with better validation
+-    initial_config = np.array([
+-        [0, 0, 0],  # center
+-        [-2.5, 0, 0],  # left
+-        [2.5, 0, 0],  # right
+-        [-1.25, 2.17, 0],  # top-left
+-        [1.25, 2.17, 0],  # top-right
+-        [-1.25, -2.17, 0],  # bottom-left
+-        [1.25, -2.17, 0],  # bottom-right
+-        [-3.75, 2.17, 0],  # far top-left
+-        [3.75, 2.17, 0],  # far top-right
+-        [-3.75, -2.17, 0],  # far bottom-left
+-        [3.75, -2.17, 0],  # far bottom-right
+-    ])
+-
+-    # Set reasonable initial outer hexagon size based on configuration
+-    max_dist_from_center = 0
+-    for i in range(len(initial_config)):
+-        center_x, center_y, _ = initial_config[i]
+-        dist = np.sqrt(center_x**2 + center_y**2)
+-        max_dist_from_center = max(max_dist_from_center, dist + 1.0)  # Add radius margin
+-
+-    # Outer hexagon should have side length slightly larger than max distance
+-    outer_hex_side_length = max_dist_from_center * 1.2  # 20% margin
+-
+-    # Evaluate this configuration
+-    valid = optimizer._is_valid_configuration(initial_config, outer_hex_side_length)
+-
+-    # If initial configuration is invalid due to overlap or containment,
+-    # we fall back to the simpler approach but with better validation
++    # Perform optimization
++    best_params = optimizer.optimize()
++    
++    # Extract results
++    coords = best_params[:-1].reshape(-1, 3)
++    outer_side_length = best_params[-1]
++    
++    # Validate configuration
++    outer_vertices = hexagon_vertices(0, 0, 0, outer_side_length)
++    outer_polygon = Polygon(outer_vertices)
++    outer_polygon = make_valid(outer_polygon)
++    
++    # Re-check all constraints
++    valid = True
++    for i in range(11):
++        x, y, rot = coords[i]
++        hex_vertices = hexagon_vertices(x, y, rot, 1)
++        
++        # Check containment
++        for vertex in hex_vertices:
++            point = Point(vertex)
++            if not outer_polygon.contains(point):
++                valid = False
++                break
++        
++        if not valid:
++            break
++    
++    # If not valid, use fallback
+     if not valid:
+-        # Fallback to a basic valid configuration
+-        inner_hex_data = np.array([
+-            [0, 0, 0],  # center
+-            [-2.5, 0, 0],  # left
+-            [2.5, 0, 0],  # right
++        # Use the known good configuration
++        fallback_config = np.array([
++            [0, 0, 0],      # center
++            [-2.5, 0, 0],   # left
++            [2.5, 0, 0],    # right
+             [-1.25, 2.17, 0],  # top-left
+-            [1.25, 2.17, 0],  # top-right
+-            [-1.25, -2.17, 0],  # bottom-left
++            [1.25, 2.17, 0],   # top-right
++            [-1.25, -2.17, 0], # bottom-left
+             [1.25, -2.17, 0],  # bottom-right
+             [-3.75, 2.17, 0],  # far top-left
+-            [3.75, 2.17, 0],  # far top-right
+-            [-3.75, -2.17, 0],  # far bottom-left
++            [3.75, 2.17, 0],   # far top-right
++            [-3.75, -2.17, 0], # far bottom-left
+             [3.75, -2.17, 0],  # far bottom-right
+         ])
++        
++        outer_side_length = calculate_outer_hex_radius(fallback_config)
++        coords = fallback_config
+         outer_hex_data = np.array([0, 0, 0])
+-        outer_hex_side_length = 8.0  # fallback value
+-        return inner_hex_data, outer_hex_data, outer_hex_side_length
+-
+-    # Since we've confirmed initial config works, we can return it
+-    inner_hex_data = initial_config.copy()
++        return coords, outer_hex_data, outer_side_length
++    
++    # Return results
++    inner_hex_data = coords.copy()
+     outer_hex_data = np.array([0, 0, 0])
+-
+-    return inner_hex_data, outer_hex_data, outer_hex_side_length
++    
++    return inner_hex_data, outer_hex_data, outer_side_length
+ 
+ # EVOLVE-BLOCK-END

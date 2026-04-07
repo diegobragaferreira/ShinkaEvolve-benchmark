@@ -1,0 +1,355 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import minimize
+from shapely.geometry import Polygon
+import time
+import math
+from joblib import Parallel, delayed
+import warnings
+warnings.filterwarnings('ignore')
+
+def hexagon_vertices(center_x, center_y, side_length, rotation_degrees):
+    """Generate vertices of a regular hexagon."""
+    angle_offset = math.radians(rotation_degrees)
+    vertices = []
+    for i in range(6):
+        angle = angle_offset + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        vertices.append((x, y))
+    return vertices
+
+def create_hexagon_polygon(center_x, center_y, side_length, rotation_degrees):
+    """Create Shapely polygon representation of a hexagon."""
+    vertices = hexagon_vertices(center_x, center_y, side_length, rotation_degrees)
+    return Polygon(vertices)
+
+def check_overlap(hex1, hex2):
+    """Check if two hexagons overlap using Shapely."""
+    poly1 = create_hexagon_polygon(hex1[0], hex1[1], 1, hex1[2])
+    poly2 = create_hexagon_polygon(hex2[0], hex2[1], 1, hex2[2])
+    return poly1.intersects(poly2)
+
+def check_containment(hex_data, outer_hex_radius):
+    """Check if all inner hexagons are contained within outer hexagon."""
+    outer_poly = create_hexagon_polygon(0, 0, outer_hex_radius, 0)
+    
+    for hex_params in hex_data:
+        inner_poly = create_hexagon_polygon(hex_params[0], hex_params[1], 1, hex_params[2])
+        if not outer_poly.contains(inner_poly):
+            return False
+    return True
+
+def compute_outer_hexagon_radius(hex_data, tolerance=1e-6):
+    """Compute minimum outer hexagon radius that contains all inner hexagons."""
+    # Compute bounding box of all hexagon vertices
+    all_vertices = []
+    for hex_params in hex_data:
+        vertices = hexagon_vertices(hex_params[0], hex_params[1], 1, hex_params[2])
+        all_vertices.extend(vertices)
+    
+    # Find the maximum distance from center to any vertex
+    max_dist = 0
+    for x, y in all_vertices:
+        dist = math.sqrt(x*x + y*y)
+        max_dist = max(max_dist, dist)
+    
+    # Add some buffer for safety
+    max_dist += 1e-3
+    
+    # Binary search for the exact radius
+    low = max_dist
+    high = max_dist * 2.0
+    
+    while high - low > tolerance:
+        mid = (low + high) / 2.0
+        if check_containment(hex_data, mid):
+            high = mid
+        else:
+            low = mid
+            
+    return (low + high) / 2.0
+
+def evaluate_fitness(hex_data):
+    """Evaluate the fitness of a hexagon packing."""
+    try:
+        radius = compute_outer_hexagon_radius(hex_data)
+        # Inverse of radius (higher is better)
+        return 1.0 / radius
+    except:
+        # If there's an error, return a very bad fitness
+        return 0.0
+
+def validate_individual(hex_data):
+    """Ensure the individual is valid (no overlaps)."""
+    # Check for overlaps using optimized pairwise comparison
+    n = len(hex_data)
+    for i in range(n):
+        for j in range(i+1, n):
+            if check_overlap(hex_data[i], hex_data[j]):
+                return False
+    return True
+
+def create_structured_initial_arrangement():
+    """Create a structured initial arrangement that naturally avoids overlaps."""
+    # Hexagonal tiling pattern inspired by efficient packings
+    arrangement = np.array([
+        [0, 0, 0],          # center
+        [-2.0, 0, 0],       # left
+        [2.0, 0, 0],        # right
+        [0, 2.0, 0],        # top
+        [0, -2.0, 0],       # bottom
+        [-1.0, 1.0, 0],     # top-left
+        [1.0, 1.0, 0],      # top-right
+        [-1.0, -1.0, 0],    # bottom-left
+        [1.0, -1.0, 0],     # bottom-right
+        [-2.5, 1.5, 0],     # far top-left
+        [2.5, 1.5, 0],      # far top-right
+    ])
+    
+    return arrangement
+
+def create_initial_population(pop_size, num_hexagons):
+    """Create an initial population of hexagon arrangements."""
+    population = []
+    
+    # Create structured base arrangement
+    base_arrangement = create_structured_initial_arrangement()
+    
+    for _ in range(pop_size):
+        # Add noise to the base arrangement
+        individual = base_arrangement.copy().astype(float)
+        for i in range(len(individual)):
+            # Add small random noise to positions
+            individual[i][0] += np.random.normal(0, 0.2)
+            individual[i][1] += np.random.normal(0, 0.2)
+            # Add small random angle variation
+            individual[i][2] += np.random.normal(0, 10)
+            # Keep angle in [0, 360)
+            individual[i][2] = individual[i][2] % 360
+            
+        population.append(individual.flatten())
+        
+    return population
+
+def mutate_individual(individual, generation, max_generations, mutation_strength=0.5):
+    """Apply mutation to an individual with adaptive strength."""
+    mutated = individual.copy()
+    
+    # Adaptive mutation strength: decrease over generations
+    adaptive_strength = mutation_strength * (1.0 - generation / max_generations)
+    
+    # Randomly select which parameters to mutate
+    num_changes = np.random.randint(1, len(mutated) // 3 + 1)
+    change_indices = np.random.choice(len(mutated), size=num_changes, replace=False)
+    
+    for idx in change_indices:
+        if idx % 3 == 0 or idx % 3 == 1:  # x or y coordinate
+            mutated[idx] += np.random.normal(0, adaptive_strength)
+        elif idx % 3 == 2:  # angle
+            mutated[idx] += np.random.normal(0, 15 * adaptive_strength)  # degrees
+            # Keep angle in [0, 360)
+            mutated[idx] = mutated[idx] % 360
+    
+    return mutated
+
+def crossover_individuals(parent1, parent2, crossover_rate=0.8):
+    """Perform crossover between two individuals."""
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+    
+    for i in range(len(parent1)):
+        if np.random.random() < crossover_rate:
+            child1[i] = parent2[i]
+            child2[i] = parent1[i]
+    
+    return child1, child2
+
+def tournament_selection(population, fitness_scores, tournament_size=3):
+    """Select an individual using tournament selection."""
+    selected_indices = np.random.choice(len(population), size=tournament_size)
+    selected_fitness = [fitness_scores[i] for i in selected_indices]
+    winner_idx = selected_indices[np.argmax(selected_fitness)]
+    return population[winner_idx]
+
+def parallel_evaluate_fitness(population):
+    """Evaluate fitness in parallel for all individuals in population."""
+    def evaluate_single(individual):
+        individual_array = individual.reshape(-1, 3)
+        if validate_individual(individual_array):
+            return evaluate_fitness(individual_array)
+        else:
+            return 0.0
+    
+    results = Parallel(n_jobs=-1)(delayed(evaluate_single)(ind) for ind in population)
+    return results
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    
+    # Set seed for reproducibility
+    np.random.seed(42)
+    
+    start_time = time.time()
+    
+    # Parameters
+    pop_size = 30
+    num_generations = 100
+    elite_size = 5
+    mutation_strength = 1.0
+    
+    # Create initial population
+    population = create_initial_population(pop_size, 11)
+    
+    # Initialize tracking variables
+    best_fitness = -np.inf
+    best_individual = None
+    
+    # Store fitness history for early stopping
+    fitness_history = []
+    stagnation_count = 0
+    max_stagnation = 10
+    
+    # Evolutionary loop
+    for generation in range(num_generations):
+        # Evaluate fitness in parallel
+        fitness_scores = parallel_evaluate_fitness(population)
+        
+        # Track best
+        current_best_score = max(fitness_scores)
+        if current_best_score > best_fitness:
+            best_fitness = current_best_score
+            best_individual = population[np.argmax(fitness_scores)].copy()
+            stagnation_count = 0  # Reset stagnation counter on improvement
+        else:
+            stagnation_count += 1
+            
+        # Early stopping if no improvement for too long
+        if stagnation_count >= max_stagnation:
+            break
+            
+        # Sort population by fitness
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+        
+        # Keep elite
+        elite = sorted_population[:elite_size]
+        
+        # Generate new population
+        new_population = elite[:]
+        
+        # Fill rest of population through selection, crossover and mutation
+        while len(new_population) < pop_size:
+            # Tournament selection
+            parent1 = tournament_selection(sorted_population, sorted_fitness)
+            parent2 = tournament_selection(sorted_population, sorted_fitness)
+            
+            # Crossover
+            child1, child2 = crossover_individuals(parent1, parent2)
+            
+            # Mutation
+            if np.random.random() < 0.3:  # 30% mutation rate
+                child1 = mutate_individual(child1, generation, num_generations, mutation_strength)
+            if np.random.random() < 0.3 and len(new_population) < pop_size:
+                child2 = mutate_individual(child2, generation, num_generations, mutation_strength)
+                
+            # Validate children and keep only valid ones
+            child1_array = child1.reshape(-1, 3)
+            child2_array = child2.reshape(-1, 3)
+            
+            if validate_individual(child1_array):
+                new_population.append(child1)
+            else:
+                # If invalid, add random individual instead
+                new_population.append(np.random.rand(33) * 10 - 5)
+                
+            if len(new_population) < pop_size:
+                if validate_individual(child2_array):
+                    new_population.append(child2)
+                else:
+                    new_population.append(np.random.rand(33) * 10 - 5)
+        
+        # Update population
+        population = new_population
+        
+        # Store fitness history
+        fitness_history.append(current_best_score)
+        if len(fitness_history) > 10:
+            fitness_history.pop(0)
+    
+    # Final refinement with multiple optimization phases
+    if best_individual is not None:
+        best_individual_array = best_individual.reshape(-1, 3)
+        
+        # Phase 1: L-BFGS-B optimization
+        def objective(params):
+            hex_data = params.reshape(-1, 3)
+            return -evaluate_fitness(hex_data)  # Negative because we want to maximize
+        
+        result = minimize(objective, best_individual, method='L-BFGS-B', 
+                          bounds=[(-10, 10)] * 33, options={'maxiter': 100})
+        
+        if result.success:
+            best_individual = result.x
+            
+        # Phase 2: Simulated Annealing with restart
+        try:
+            # More aggressive local search with simulated annealing approach
+            current_params = best_individual.copy()
+            current_fitness = evaluate_fitness(current_params.reshape(-1, 3))
+            temp = 100.0
+            cooling_rate = 0.95
+            min_temp = 1e-4
+            
+            for _ in range(1000):
+                if temp < min_temp:
+                    break
+                    
+                # Generate neighbor
+                neighbor = current_params.copy()
+                idx = np.random.randint(len(neighbor))
+                if idx % 3 == 0 or idx % 3 == 1:  # x or y coordinate
+                    neighbor[idx] += np.random.normal(0, 0.2)
+                else:  # angle
+                    neighbor[idx] += np.random.normal(0, 5)
+                    neighbor[idx] = neighbor[idx] % 360
+                
+                # Accept or reject based on fitness
+                neighbor_fitness = evaluate_fitness(neighbor.reshape(-1, 3))
+                if neighbor_fitness > current_fitness:
+                    current_params = neighbor
+                    current_fitness = neighbor_fitness
+                else:
+                    # Accept with probability based on temperature
+                    delta = neighbor_fitness - current_fitness
+                    if np.random.random() < np.exp(delta / temp):
+                        current_params = neighbor
+                        current_fitness = neighbor_fitness
+                        
+                temp *= cooling_rate
+                
+            best_individual = current_params
+        except:
+            pass
+    
+    # Get final solution 
+    final_solution = best_individual.reshape(-1, 3)
+    
+    # Compute final radius
+    final_radius = compute_outer_hexagon_radius(final_solution)
+    
+    # Format output
+    inner_hex_data = final_solution
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = final_radius
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

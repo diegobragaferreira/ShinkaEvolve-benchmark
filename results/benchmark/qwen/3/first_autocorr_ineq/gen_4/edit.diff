@@ -1,0 +1,234 @@
+--- a/original.py
++++ b/original.py
+@@ -1,72 +1,178 @@
+ # EVOLVE-BLOCK-START
+ 
+ import numpy as np
+-from scipy import optimize
++import random
++from deap import base, creator, tools, algorithms
++from scipy.signal import fftconvolve
++import time
++import math
+ 
+-def get_good_direction_to_move_into(
+-    sequence: list[float],
+-) -> list[float] | None:
+-    """Returns the direction to move into the sequence."""
++# Constants
++MAX_SEQ_LENGTH = 1000
++MIN_SEQ_LENGTH = 100
++POPULATION_SIZE = 50
++GENERATIONS = 100
++TOURNAMENT_SIZE = 3
++MUTATION_RATE = 0.2
++CROSSOVER_RATE = 0.8
++BENCHMARK_THRESHOLD = 1.5031
++
++# Global seed for reproducibility
++random.seed(42)
++np.random.seed(42)
++
++def evaluate_sequence(individual):
++    """
++    Evaluates the quality of a sequence by computing the inverse of C₁.
++    Returns (1/C₁, ) as a tuple for DEAP compatibility.
++    """
++    # Convert individual to numpy array
++    sequence = np.array(individual)
++    
++    # Clip values to [0, 1000]
++    sequence = np.clip(sequence, 0, 1000)
++    
++    # Ensure minimum sum
++    if np.sum(sequence) < 0.01:
++        # If sum too small, return very poor fitness
++        return (0.0,)
++    
++    # Compute convolution using FFT for efficiency
++    convolved = fftconvolve(sequence, sequence, mode='full')
++    # Take only the relevant part (max convolution value)
++    max_conv = np.max(convolved)
++    
++    # Calculate C₁
++    sum_sq = np.sum(sequence)**2
+     n = len(sequence)
+-    sum_sequence = np.sum(sequence)
+-    normalized_sequence = [x * np.sqrt(2 * n) / sum_sequence for x in sequence]
+-    rhs = np.max(np.convolve(normalized_sequence, normalized_sequence))
+-    g_fun = solve_convolution_lp(normalized_sequence, rhs)
+-    if g_fun is None:
+-        return None
+-    sum_sequence = np.sum(g_fun)
+-    normalized_g_fun = [x * np.sqrt(2 * n) / sum_sequence for x in g_fun]
+-    t = 0.01
+-    new_sequence = [
+-        (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+-    ]
+-    return new_sequence
++    
++    # Avoid division by zero
++    if sum_sq == 0:
++        return (0.0,)
++        
++    c1 = 2 * n * max_conv / sum_sq
++    
++    # Return inverse of C₁ (we want to maximize 1/C₁, which means minimize C₁)
++    return (1.0 / c1,)
+ 
+-def solve_convolution_lp(f_sequence, rhs):
+-    """Solves the convolution LP for a given sequence and RHS."""
+-    n = len(f_sequence)
+-    c = -np.ones(n)
+-    a_ub = []
+-    b_ub = []
+-    for k in range(2 * n - 1):
+-        row = np.zeros(n)
+-        for i in range(n):
+-            j = k - i
+-            if 0 <= j < n:
+-                row[j] = f_sequence[i]
+-        a_ub.append(row)
+-        b_ub.append(rhs)
+ 
+-    # Non-negativity constraints: b_i >= 0
+-    a_ub_nonneg = -np.eye(n)  # Negative identity matrix for b_i >= 0
+-    b_ub_nonneg = np.zeros(n)  # Zero vector
++def create_individual():
++    """Creates a random individual (sequence) within constraints."""
++    length = random.randint(MIN_SEQ_LENGTH, MAX_SEQ_LENGTH)
++    return [random.uniform(0, 1000) for _ in range(length)]
+ 
+-    a_ub = np.vstack([a_ub, a_ub_nonneg])
+-    b_ub = np.hstack([b_ub, b_ub_nonneg])
+ 
+-    result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub)
++def mutate_individual(individual):
++    """Applies mutation to an individual."""
++    for i in range(len(individual)):
++        if random.random() < MUTATION_RATE:
++            individual[i] = random.uniform(0, 1000)
++    return individual,
+ 
+-    if result.success:
+-        g_sequence = result.x
+-        return g_sequence
+-    else:
+-        print('LP optimization failed.')
+-        return None
+-     
+ 
+-def search_for_best_sequence() -> list[float]:
+-    """Function to search for the best coefficient sequence."""
+-    best_sequence = [np.random.random()] * np.random.randint(100,1000)
+-    h_function = get_good_direction_to_move_into(best_sequence)
+-    if h_function is None:
+-        best_sequence[1] = (best_sequence[1] + np.random.rand()) % 1
+-    else:
+-        best_sequence = h_function
++def initialize_deap():
++    """Initializes DEAP framework components."""
++    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
++    creator.create("Individual", list, fitness=creator.FitnessMax)
++    toolbox = base.Toolbox()
++    toolbox.register("individual", create_individual)
++    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
++    toolbox.register("evaluate", evaluate_sequence)
++    toolbox.register("mate", tools.cxUniform, indpb=0.5)
++    toolbox.register("mutate", mutate_individual)
++    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
++    return toolbox
+ 
++
++def run_evolutionary_optimization():
++    """
++    Main evolutionary algorithm to optimize the sequence.
++    Returns the best sequence found.
++    """
++    toolbox = initialize_deap()
++    
++    # Create initial population
++    population = toolbox.population(n=POPULATION_SIZE)
++    
++    # Evaluate initial population
++    fitnesses = list(map(toolbox.evaluate, population))
++    for ind, fit in zip(population, fitnesses):
++        ind.fitness.values = fit
++    
++    # Begin evolution
++    for generation in range(GENERATIONS):
++        # Select the next generation individuals
++        offspring = toolbox.select(population, len(population))
++        offspring = list(map(toolbox.clone, offspring))
++        
++        # Apply crossover and mutation
++        for child1, child2 in zip(offspring[::2], offspring[1::2]):
++            if random.random() < CROSSOVER_RATE:
++                toolbox.mate(child1, child2)
++                del child1.fitness.values
++                del child2.fitness.values
++        
++        for mutant in offspring:
++            if random.random() < MUTATION_RATE:
++                toolbox.mutate(mutant)
++                del mutant.fitness.values
++        
++        # Evaluate the individuals with an invalid fitness
++        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
++        fitnesses = list(map(toolbox.evaluate, invalid_ind))
++        for ind, fit in zip(invalid_ind, fitnesses):
++            ind.fitness.values = fit
++        
++        # Replace the old population with the new one
++        population[:] = offspring
++    
++    # Get the best individual
++    best_individual = tools.selBest(population, 1)[0]
++    return best_individual
++
++
++def main():
++    """
++    Main function to initiate the optimization process.
++    """
++    start_time = time.time()
++    
++    # Run evolutionary optimization
++    best_sequence = run_evolutionary_optimization()
++    
++    end_time = time.time()
++    eval_time = end_time - start_time
++    
++    # Validate and ensure it meets constraints
++    if len(best_sequence) < MIN_SEQ_LENGTH:
++        best_sequence = [random.uniform(0, 1000) for _ in range(MIN_SEQ_LENGTH)]
++    
++    # Final evaluation
++    sequence_array = np.array(best_sequence)
++    sum_seq = np.sum(sequence_array)
++    
++    if sum_seq < 0.01:
++        # Adjust sequence to meet minimum sum requirement
++        sequence_array = np.array([max(0.01, x) for x in sequence_array])
++        sum_seq = np.sum(sequence_array)
++    
++    convolved = fftconvolve(sequence_array, sequence_array, mode='full')
++    max_conv = np.max(convolved)
++    n = len(sequence_array)
++    c1 = 2 * n * max_conv / (sum_seq ** 2)
++    inv_c1 = 1.0 / c1
++    benchmark_ratio = BENCHMARK_THRESHOLD / c1
++    
++    print(f"Final sequence length: {len(best_sequence)}")
++    print(f"1/C₁: {inv_c1:.6f}")
++    print(f"Benchmark ratio: {benchmark_ratio:.6f}")
++    print(f"Evaluation time: {eval_time:.2f}s")
++    
+     return best_sequence
++
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

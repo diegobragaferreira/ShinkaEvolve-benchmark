@@ -1,0 +1,148 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+import random
+import time
+
+# Global constants
+POP_SIZE = 100
+NGEN = 200
+CXPB = 0.7
+MUTPB = 0.2
+TOURNAMENT_SIZE = 3
+BOUND_LOW, BOUND_UP = 0.0, 1.0
+NUM_CIRCLES = 32
+
+# Set up DEAP framework
+creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMax)
+
+toolbox = base.Toolbox()
+
+def create_individual():
+    """Create a random individual (32 circles with x,y,r values)"""
+    individual = []
+    for _ in range(NUM_CIRCLES):
+        x = random.uniform(BOUND_LOW, BOUND_UP)
+        y = random.uniform(BOUND_LOW, BOUND_UP)
+        r = random.uniform(0.001, 0.1)  # Reasonable initial radius range
+        individual.extend([x, y, r])
+    return creator.Individual(individual)
+
+def valid_individual(individual):
+    """Check if individual represents a valid configuration"""
+    for i in range(0, len(individual), 3):
+        x, y, r = individual[i], individual[i+1], individual[i+2]
+        
+        # Check containment constraints
+        if x - r < BOUND_LOW or x + r > BOUND_UP or y - r < BOUND_LOW or y + r > BOUND_UP:
+            return False
+            
+        # Check overlap constraints with other circles
+        for j in range(0, len(individual), 3):
+            if i != j:
+                x2, y2, r2 = individual[j], individual[j+1], individual[j+2]
+                dx = x - x2
+                dy = y - y2
+                distance = np.sqrt(dx*dx + dy*dy)
+                if distance < r + r2:  # Circles overlapping
+                    return False
+                    
+    return True
+
+def evaluate_individual(individual):
+    """Evaluate fitness of individual (sum of radii)"""
+    if not valid_individual(individual):
+        return (0,)  # Invalid individuals get zero fitness
+        
+    total_radius = sum(individual[i+2] for i in range(0, len(individual), 3))
+    return (total_radius,)
+
+def mutate_individual(individual):
+    """Mutate an individual by slightly modifying one circle"""
+    idx = random.randrange(len(individual))
+    if idx % 3 == 2:  # Mutating radius
+        individual[idx] *= random.uniform(0.8, 1.2)  # Scale radius
+        individual[idx] = max(0.001, min(0.5, individual[idx]))
+    else:  # Mutating x or y coordinate
+        individual[idx] += random.gauss(0, 0.01)
+        individual[idx] = max(BOUND_LOW, min(BOUND_UP, individual[idx]))
+    return individual,
+
+def crossover_individuals(ind1, ind2):
+    """Crossover two individuals"""
+    size = len(ind1)
+    cxpoint1 = random.randint(1, size)
+    cxpoint2 = random.randint(1, size - 1)
+    if cxpoint2 >= cxpoint1:
+        cxpoint2 += 1
+    else:
+        cxpoint1, cxpoint2 = cxpoint2, cxpoint1
+    
+    # Simple crossover: take segments from both parents
+    ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = ind2[cxpoint1:cxpoint2], ind1[cxpoint1:cxpoint2]
+    return ind1, ind2
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Initialize toolbox
+    toolbox.register("individual", create_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", evaluate_individual)
+    toolbox.register("mate", crossover_individuals)
+    toolbox.register("mutate", mutate_individual)
+    toolbox.register("select", tools.selTournament, tournsize=TOURNAMENT_SIZE)
+    
+    # Create initial population
+    pop = toolbox.population(n=POP_SIZE)
+    
+    # Evaluate initial population
+    invalid_ind = [ind for ind in pop if not hasattr(ind, 'fitness')]
+    fitnesses = list(map(toolbox.evaluate, invalid_ind))
+    for ind, fit in zip(invalid_ind, fitnesses):
+        ind.fitness.values = fit
+    
+    # Begin evolution
+    for gen in range(NGEN):
+        # Select the next generation individuals
+        offspring = toolbox.select(pop, len(pop))
+        
+        # Clone the selected individuals
+        offspring = list(map(toolbox.clone, offspring))
+        
+        # Apply crossover and mutation on the offspring
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < CXPB:
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
+
+        for mutant in offspring:
+            if random.random() < MUTPB:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
+                
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not hasattr(ind, 'fitness') or not ind.fitness.valid]
+        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+            
+        # Replace the old population with the new one
+        pop[:] = offspring
+
+    # Find the best individual
+    best_ind = tools.selBest(pop, 1)[0]
+    
+    # Convert to numpy array format
+    circles = np.array(best_ind).reshape(-1, 3)
+    
+    return circles
+
+# EVOLVE-BLOCK-END

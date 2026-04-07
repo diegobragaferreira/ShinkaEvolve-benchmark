@@ -1,0 +1,108 @@
+<NAME>
+add_constraint_aware_objective
+</NAME>
+
+<DESCRIPTION>
+Adding constraint-aware penalties to the objective function will guide the optimizer toward valid solutions more consistently. This approach incorporates weighted penalty terms that scale with the magnitude of overlap or boundary constraint violations, which helps prevent the optimization from getting trapped in regions with severe constraint violations and improves overall convergence reliability through dynamic penalty weighting.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        # Quick boundary check first
+        boundary_violations = 0
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                boundary_violations += 1
+
+        # If boundary violations, return immediately with penalty
+        if boundary_violations > 0:
+            return -1.0, boundary_violations
+
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Check overlap violations
+        overlap_violations = self.check_all_overlaps(circles)
+
+        # Return fitness score with penalties
+        penalty_weight = 10000.0  # Increased penalty weight for stricter enforcement
+        return total_radius - (penalty_weight * overlap_violations), overlap_violations
+=======
+    def calculate_fitness(self, circles: np.ndarray) -> Tuple[float, int]:
+        """
+        Calculate fitness: sum of radii with penalty for constraint violations
+
+        Returns:
+            Tuple of (fitness_score, number_of_violations)
+        """
+        total_radius = self.calculate_total_radius_sum(circles)
+
+        # Calculate constraint violations with proper penalty scaling
+        boundary_violations = 0
+        overlap_violations = 0
+        total_penalty = 0
+
+        # Check boundary violations
+        for i in range(self.num_circles):
+            x, y, r = circles[i]
+            if not self.is_valid_circle(x, y, r):
+                # Calculate how much we violate boundaries
+                left_violation = max(0, r - x)
+                right_violation = max(0, x + r - self.width)
+                bottom_violation = max(0, r - y)
+                top_violation = max(0, y + r - self.height)
+
+                # Sum up all boundary violations
+                violation_amount = left_violation + right_violation + bottom_violation + top_violation
+                total_penalty += 10000 * violation_amount  # Strong penalty for boundary violations
+                boundary_violations += 1
+
+        # Check overlap violations with more precise calculation
+        try:
+            points = circles[:, :2]
+            tree = cKDTree(points)
+
+            max_radius = np.max(circles[:, 2])
+            if max_radius > 0:
+                pairs = tree.query_pairs(2 * max_radius, output_type='ndarray')
+
+                for i, j in pairs:
+                    if i < j:  # Avoid double counting
+                        x1, y1, r1 = circles[i]
+                        x2, y2, r2 = circles[j]
+
+                        distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                        if distance < (r1 + r2):
+                            # Calculate overlap amount
+                            overlap = (r1 + r2) - distance
+                            # Weight penalty by overlap amount and circle sizes
+                            penalty_scaling = 1000.0 * (r1 + r2)  # Scale penalty by circle sizes
+                            total_penalty += overlap * penalty_scaling
+                            overlap_violations += 1
+
+        except Exception as e:
+            warnings.warn(f"Error in overlap checking: {e}")
+            # Fallback to brute force when spatial indexing fails
+            for i in range(self.num_circles):
+                for j in range(i+1, self.num_circles):
+                    x1, y1, r1 = circles[i]
+                    x2, y2, r2 = circles[j]
+
+                    distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                    if distance < (r1 + r2):
+                        overlap = (r1 + r2) - distance
+                        penalty_scaling = 1000.0 * (r1 + r2)
+                        total_penalty += overlap * penalty_scaling
+                        overlap_violations += 1
+
+        # Return fitness score with properly weighted penalties
+        return total_radius - total_penalty, boundary_violations + overlap_violations
+>>>>>>> REPLACE
+</DIFF>

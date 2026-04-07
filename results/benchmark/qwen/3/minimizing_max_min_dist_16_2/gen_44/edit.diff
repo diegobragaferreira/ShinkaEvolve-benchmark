@@ -1,0 +1,508 @@
+--- a/original.py
++++ b/original.py
+@@ -1,225 +1,320 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
++from scipy.spatial import Voronoi
++from scipy.spatial.distance import cdist
+ from scipy.optimize import minimize
+-from scipy.spatial.distance import pdist, squareform
+ import warnings
+ 
+ class PointDispersionOptimizer:
+-    """Optimizes point distribution to maximize min/max distance ratio."""
+-
++    """Optimizes point distribution to maximize min/max distance ratio with hybrid approach."""
++    
+     def __init__(self, n_points=16, dimensions=2, seed=42):
+         self.n_points = n_points
+         self.dimensions = dimensions
+         self.seed = seed
+         np.random.seed(seed)
+-
++    
+     def _compute_distances(self, points):
+         """Compute pairwise distances between points."""
+         if len(points.shape) == 1:
+             points = points.reshape(-1, self.dimensions)
+-        distances = pdist(points)
++        distances = cdist(points, points)
++        np.fill_diagonal(distances, np.inf)
+         return distances
+-
+-    def _objective_function(self, flat_points):
+-        """Objective function to maximize min/max distance ratio."""
+-        points = flat_points.reshape(-1, self.dimensions)
++    
++    def _compute_ratio(self, points):
++        """Compute the ratio of minimum to maximum pairwise distances."""
++        if len(points) < 2:
++            return 0
++        
+         distances = self._compute_distances(points)
+-
+-        if len(distances) == 0:
+-            return -np.inf
+-
+-        min_distance = np.min(distances)
+-        max_distance = np.max(distances)
+-
+-        # Avoid division by zero
+-        if max_distance <= 1e-12:
+-            return -np.inf
+-
+-        return min_distance / max_distance
+-
+-    def _constraint_function(self, flat_points):
+-        """Constraint function to keep points within unit square."""
+-        points = flat_points.reshape(-1, self.dimensions)
+-        # Ensure all coordinates are in [0,1]
+-        return np.concatenate([
+-            points.flatten() - 1,  # x_i - 1 <= 0
+-            -points.flatten()     # x_i >= 0
+-        ])
+-
+-    def _optimize_single_start(self, initial_points):
+-        """Perform optimization from single starting configuration."""
+-        # Flatten points for optimization
+-        flat_initial = initial_points.flatten()
+-
+-        # Define bounds for each coordinate [0,1]
+-        bounds = [(0, 1) for _ in range(len(flat_initial))]
+-
+-        # Constraints for boundary conditions
+-        constraints = {'type': 'ineq', 'fun': self._constraint_function}
+-
+-        # Optimize using L-BFGS-B
++        d_min = np.min(distances)
++        d_max = np.max(distances)
++        
++        if d_max == 0:
++            return 0
++            
++        return d_min / d_max
++    
++    def _compute_voronoi_uniformity(self, points):
++        """Compute Voronoi cell uniformity factor."""
+         try:
+-            result = minimize(
+-                lambda x: -self._objective_function(x),  # Negative because we maximize
+-                flat_initial,
+-                method='L-BFGS-B',
+-                bounds=bounds,
+-                constraints=constraints,
+-                options={'maxiter': 500, 'ftol': 1e-8, 'gtol': 1e-8}
+-            )
+-
+-            if result.success:
+-                optimized_points = result.x.reshape(-1, self.dimensions)
+-                return optimized_points, self._objective_function(result.x)
+-            else:
+-                warnings.warn(f"Optimization failed: {result.message}")
+-                return initial_points, self._objective_function(flat_initial)
+-
+-        except Exception as e:
+-            warnings.warn(f"Optimization error: {str(e)}")
+-            return initial_points, self._objective_function(flat_initial)
+-
+-    def generate_initial_points(self):
+-        """Generate initial point configurations."""
+-        # Generate multiple random initial configurations
+-        configurations = []
+-
+-        # Grid-based initialization for better coverage
+-        grid_points = self._generate_grid_points()
+-        configurations.append(grid_points.copy())
+-
+-        # Random initialization
+-        random_points = np.random.rand(self.n_points, self.dimensions)
+-        configurations.append(random_points.copy())
+-
+-        # Hexagonal-like pattern
+-        hex_points = self._generate_hexagon_points()
+-        configurations.append(hex_points.copy())
+-
+-        return configurations
+-
++            vor = Voronoi(points)
++            areas = []
++            for region in vor.regions:
++                if not any(v == -1 for v in region):  # Skip infinite regions
++                    polygon = [vor.vertices[i] for i in region]
++                    if len(polygon) >= 3:
++                        # Simple area calculation for convex polygons
++                        area = 0.5 * abs(sum(polygon[i][0] * polygon[(i+1)%len(polygon)][1] - 
++                                           polygon[(i+1)%len(polygon)][0] * polygon[i][1] 
++                                           for i in range(len(polygon))))
++                        areas.append(area)
++            avg_area = np.mean(areas) if areas else 0
++            return avg_area / (1.0/self.n_points) if avg_area > 0 else 0
++        except:
++            return 0
++    
++    def _compute_fitness(self, points):
++        """Compute combined fitness with Voronoi uniformity."""
++        ratio = self._compute_ratio(points)
++        uniformity = self._compute_voronoi_uniformity(points)
++        return ratio * (1 + 0.5 * uniformity)
++    
++    def _generate_hexagonal_grid(self):
++        """Generate points in a sophisticated hexagonal pattern."""
++        points = []
++        center_x, center_y = 0.5, 0.5
++        
++        # Create a 4x4 grid with alternating rows for better coverage
++        rows, cols = 4, 4
++        spacing = 0.25
++        
++        for i in range(rows):
++            for j in range(cols):
++                if len(points) < self.n_points:
++                    x = j * spacing + (i % 2) * spacing/2
++                    y = i * spacing
++                    
++                    # Add slight variations to break symmetries
++                    x += np.random.normal(0, 0.005, 1)[0]
++                    y += np.random.normal(0, 0.005, 1)[0]
++                    
++                    points.append([x, y])
++        
++        # Clip to valid bounds
++        points = np.array(points[:self.n_points])
++        points = np.clip(points, 0, 1)
++        return points
++    
++    def _generate_spiral_pattern(self):
++        """Generate points using a spiral pattern."""
++        points = []
++        center_x, center_y = 0.5, 0.5
++        angle_step = 0.5
++        radius_step = 0.01
++        angle = 0
++        radius = 0.05
++        
++        while len(points) < self.n_points:
++            x = center_x + radius * np.cos(angle)
++            y = center_y + radius * np.sin(angle)
++            
++            # Add small noise to prevent perfect symmetry
++            x += np.random.normal(0, 0.005)
++            y += np.random.normal(0, 0.005)
++            
++            x = np.clip(x, 0, 1)
++            y = np.clip(y, 0, 1)
++            points.append([x, y])
++            
++            angle += angle_step
++            radius += radius_step
++            
++            if radius > 0.5:
++                break
++        
++        return np.array(points[:self.n_points])
++    
+     def _generate_grid_points(self):
+-        """Generate points in a grid pattern."""
++        """Generate points in a regular grid pattern."""
+         n_per_side = int(np.ceil(np.sqrt(self.n_points)))
+         x = np.linspace(0.1, 0.9, n_per_side)
+         y = np.linspace(0.1, 0.9, n_per_side)
+         xx, yy = np.meshgrid(x, y)
+         points = np.column_stack([xx.ravel(), yy.ravel()])[:self.n_points]
+         return points
+-
+-    def _generate_hexagon_points(self):
+-        """Generate points in a more sophisticated hexagonal pattern."""
+-        # Create a hexagonal lattice pattern with better geometric properties
+-        points = []
+-        center_x, center_y = 0.5, 0.5
+-
+-        # Use a proper triangular lattice that maximizes minimum distances
+-        # For 16 points, arrange in a 4x4 triangular grid pattern
+-        rows = 4
+-        cols = 4
+-
+-        # Calculate proper spacing for triangular packing
+-        # In a triangular lattice, nearest neighbors are separated by distance s
+-        # The area per point should be s^2 * sqrt(3)/2
+-        # For 16 points in unit square, we estimate optimal spacing
+-        total_area = 1.0  # Area of unit square
+-        points_per_unit_area = 16.0  # We have 16 points
+-        optimal_spacing = np.sqrt(total_area / points_per_unit_area) * 1.2  # Add some margin
+-
+-        # Hexagonal packing with proper spacing
+-        y_spacing = optimal_spacing * np.sqrt(3)
+-        x_spacing = optimal_spacing * 2
+-
+-        # Create triangular lattice points
+-        for i in range(rows):
+-            for j in range(cols):
+-                if len(points) < self.n_points:
+-                    x = center_x - (cols-1)*x_spacing/2 + j*x_spacing
+-                    # Offset every other row for hexagonal packing
+-                    if i % 2 == 1:
+-                        x += x_spacing/2
+-                    y = center_y - (rows-1)*y_spacing/2 + i*y_spacing
+-
+-                    # Add controlled asymmetry to break symmetries
+-                    # This helps escape local optima during optimization
+-                    asymmetry_factor = 0.05
+-                    x += np.random.normal(0, asymmetry_factor * optimal_spacing)
+-                    y += np.random.normal(0, asymmetry_factor * optimal_spacing)
+-
+-                    # Clip to ensure within bounds
+-                    x = np.clip(x, 0, 1)
+-                    y = np.clip(y, 0, 1)
+-                    points.append([x, y])
+-
+-        # Fill remaining points with more structured approach rather than pure random
+-        # Use a spiral pattern to distribute points more evenly
+-        if len(points) < self.n_points:
+-            # Add spiral points to fill remaining positions
+-            # This creates a more uniform distribution
+-            angle_step = 0.5
+-            radius_step = 0.01
+-            angle = 0
+-            radius = 0.05
+-
+-            while len(points) < self.n_points:
+-                x = center_x + radius * np.cos(angle)
+-                y = center_y + radius * np.sin(angle)
+-
+-                # Add small noise to prevent perfect symmetry
+-                x += np.random.normal(0, 0.01)
+-                y += np.random.normal(0, 0.01)
+-
+-                x = np.clip(x, 0, 1)
+-                y = np.clip(y, 0, 1)
+-                points.append([x, y])
+-
+-                angle += angle_step
+-                radius += radius_step
+-
+-                # Prevent infinite loop
+-                if radius > 0.5:
+-                    break
+-
+-        return np.array(points[:self.n_points])
+-
++    
++    def _generate_initial_population(self, pop_size=50):
++        """Generate diverse initial population."""
++        population = []
++        
++        # Add different types of initial configurations
++        for _ in range(pop_size // 3):
++            points = self._generate_hexagonal_grid()
++            points += np.random.normal(0, 0.01, points.shape)
++            points = np.clip(points, 0, 1)
++            population.append(points.copy())
++        
++        for _ in range(pop_size // 3):
++            points = self._generate_spiral_pattern()
++            points += np.random.normal(0, 0.01, points.shape)
++            points = np.clip(points, 0, 1)
++            population.append(points.copy())
++        
++        for _ in range(pop_size - len(population)):
++            points = np.random.rand(self.n_points, self.dimensions)
++            population.append(points.copy())
++        
++        return population
++    
++    def _evolutionary_optimize(self):
++        """Perform evolutionary optimization to find good starting points."""
++        population = self._generate_initial_population(50)
++        best_fitness = -np.inf
++        best_individual = None
++        
++        # Evolution parameters
++        generations = 100
++        elite_size = 5
++        tournament_size = 3
++        
++        for generation in range(generations):
++            # Evaluate fitness for entire population
++            fitness_scores = []
++            for individual in population:
++                fitness = self._compute_fitness(individual)
++                fitness_scores.append(fitness)
++                if fitness > best_fitness:
++                    best_fitness = fitness
++                    best_individual = individual.copy()
++            
++            # Sort population by fitness
++            sorted_indices = np.argsort(fitness_scores)[::-1]
++            population = [population[i] for i in sorted_indices]
++            fitness_scores = [fitness_scores[i] for i in sorted_indices]
++            
++            # Create new population
++            new_population = []
++            
++            # Elitism: keep best individuals
++            for i in range(elite_size):
++                new_population.append(population[i].copy())
++            
++            # Generate offspring through tournament selection and crossover
++            while len(new_population) < len(population):
++                # Tournament selection
++                tournament_indices = np.random.choice(len(population), tournament_size)
++                tournament_fitness = [fitness_scores[i] for i in tournament_indices]
++                winner_idx = tournament_indices[np.argmax(tournament_fitness)]
++                
++                # Select second parent
++                tournament_indices2 = np.random.choice(len(population), tournament_size)
++                tournament_fitness2 = [fitness_scores[i] for i in tournament_indices2]
++                winner_idx2 = tournament_indices2[np.argmax(tournament_fitness2)]
++                
++                # Crossover (uniform)
++                parent1, parent2 = population[winner_idx], population[winner_idx2]
++                mask = np.random.rand(*parent1.shape) > 0.5
++                child = np.where(mask, parent1, parent2).copy()
++                
++                # Mutation
++                mutation_strength = 0.01
++                for i in range(len(child)):
++                    if np.random.rand() < 0.3:  # 30% chance of mutation
++                        child[i] += np.random.normal(0, mutation_strength, 2)
++                
++                # Clamp to bounds
++                child = np.clip(child, 0, 1)
++                new_population.append(child)
++            
++            population = new_population[:len(population)]
++        
++        return best_individual if best_individual is not None else self._generate_hexagonal_grid()
++    
++    def _local_refinement(self, points):
++        """Refine solution using gradient-based methods."""
++        def objective(x_flat):
++            points = x_flat.reshape(-1, self.dimensions)
++            return -self._compute_ratio(points)  # Minimize negative ratio (maximize ratio)
++        
++        def constraint_function(x_flat):
++            points = x_flat.reshape(-1, self.dimensions)
++            # Ensure all coordinates are in [0,1]  
++            return np.concatenate([
++                points.flatten() - 1,  # x_i - 1 <= 0
++                -points.flatten()     # x_i >= 0
++            ])
++        
++        # Flatten for optimization
++        x0 = points.flatten()
++        bounds = [(0, 1) for _ in range(len(x0))]
++        constraints = {'type': 'ineq', 'fun': constraint_function}
++        
++        # First optimization attempt
++        try:
++            result = minimize(
++                objective,
++                x0,
++                method='L-BFGS-B',
++                bounds=bounds,
++                constraints=constraints,
++                options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-8}
++            )
++            
++            if result.success:
++                refined_points = result.x.reshape(-1, self.dimensions)
++                # Clip to ensure bounds
++                refined_points = np.clip(refined_points, 0, 1)
++                return refined_points
++        except:
++            pass
++        
++        return points
++    
+     def optimize(self):
+-        """Main optimization routine."""
+-        best_points = None
+-        best_ratio = -np.inf
+-
+-        # Try multiple initial configurations
+-        initial_configs = self.generate_initial_points()
+-
+-        for i, initial_config in enumerate(initial_configs):
+-            try:
+-                optimized_points, ratio = self._optimize_single_start(initial_config)
+-
+-                if ratio > best_ratio:
+-                    best_ratio = ratio
+-                    best_points = optimized_points.copy()
+-
+-            except Exception as e:
+-                warnings.warn(f"Error in optimization round {i}: {str(e)}")
+-                continue
+-
+-        # Final validation
+-        if best_points is not None:
+-            final_ratio = self._objective_function(best_points.flatten())
+-            print(f"Final optimized ratio: {final_ratio:.6f}")
+-            return best_points
++        """Main optimization routine combining evolutionary and local refinement."""
++        # Step 1: Use evolutionary optimization to find good starting points
++        print("Starting evolutionary optimization...")
++        initial_solution = self._evolutionary_optimize()
++        
++        # Step 2: Refine with local optimization
++        print("Starting local refinement...")
++        refined_solution = self._local_refinement(initial_solution)
++        
++        # Step 3: Final local refinement with gradient ascent
++        final_points = refined_solution.copy()
++        best_ratio = self._compute_ratio(final_points)
++        
++        # Gradient ascent refinement
++        for _ in range(100):
++            # Estimate gradient by finite differences
++            gradient = np.zeros_like(final_points)
++            eps = 1e-4
++            
++            for i in range(len(final_points)):
++                for j in range(self.dimensions):
++                    # Perturb point coordinate
++                    points_plus = final_points.copy()
++                    points_plus[i, j] += eps
++                    points_plus = np.clip(points_plus, 0, 1)
++                    
++                    points_minus = final_points.copy()
++                    points_minus[i, j] -= eps
++                    points_minus = np.clip(points_minus, 0, 1)
++                    
++                    ratio_plus = self._compute_ratio(points_plus)
++                    ratio_minus = self._compute_ratio(points_minus)
++                    
++                    gradient[i, j] = (ratio_plus - ratio_minus) / (2 * eps)
++            
++            # Update points
++            step_size = 0.01
++            final_points = final_points + step_size * gradient
++            
++            # Ensure bounds
++            final_points = np.clip(final_points, 0, 1)
++            
++            # Check for convergence
++            if np.all(np.abs(gradient) < 1e-6):
++                break
++        
++        # Final evaluation
++        final_ratio = self._compute_ratio(final_points)
++        if final_ratio > best_ratio:
++            return final_points
+         else:
+-            # Return the last attempted configuration if nothing worked
+-            return initial_configs[-1] if initial_configs else np.random.rand(self.n_points, self.dimensions)
++            return refined_solution
+ 
+ def min_max_dist_dim2_16() -> np.ndarray:
+     """
+     Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+ 
+     Returns
+         points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+     """
+     optimizer = PointDispersionOptimizer(n_points=16, dimensions=2, seed=42)
+     points = optimizer.optimize()
+     return points
+ 
+ # EVOLVE-BLOCK-END

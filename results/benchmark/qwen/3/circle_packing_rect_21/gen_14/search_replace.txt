@@ -1,0 +1,202 @@
+<NAME>
+initial_grid_placement
+</NAME>
+
+<DESCRIPTION>
+I'll implement a better initialization strategy that starts with a structured grid placement of circles, which should give us a much better starting configuration than the empty array. The key improvements are:
+1. Use a more intelligent grid placement that considers circle size
+2. Implement proper boundary and collision checking
+3. Add local optimization to refine positions and radii
+4. Use a fixed seed for reproducibility
+
+This approach should significantly outperform the baseline empty initialization.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    circles = np.zeros((n, 3))
+
+    return circles
+
+
+# EVOLVE-BLOCK-END
+=======
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+import random
+
+# Set seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+def compute_max_radius(x, y, existing_circles, rect_width, rect_height):
+    """Compute maximum radius for a circle at position (x,y) without overlapping others."""
+    # Distance to boundaries
+    dist_to_left = x
+    dist_to_right = rect_width - x
+    dist_to_bottom = y
+    dist_to_top = rect_height - y
+    min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+
+    # Check distances to existing circles
+    for ex_x, ex_y, ex_r in existing_circles:
+        if ex_r > 0:
+            distance = np.sqrt((x - ex_x)**2 + (y - ex_y)**2)
+            max_radius = distance - ex_r
+            if max_radius > 0:
+                min_dist = min(min_dist, max_radius)
+
+    return max(0, min_dist)
+
+def place_circles_initial(rect_width, rect_height, n_circles):
+    """Initial placement of circles in a structured grid."""
+    circles = []
+
+    # Start with a rectangular container of width=1.5 height=0.5 (perimeter=4)
+    # Grid dimensions
+    grid_rows = 5
+    grid_cols = 5
+    if grid_rows * grid_cols < n_circles:
+        grid_rows = int(np.ceil(n_circles / 4))
+        grid_cols = int(np.ceil(n_circles / grid_rows))
+
+    # Calculate spacing
+    margin = 0.1
+    cell_width = (rect_width - 2 * margin) / grid_cols
+    cell_height = (rect_height - 2 * margin) / grid_rows
+
+    # Place circles in grid
+    placed_count = 0
+    for i in range(grid_rows):
+        for j in range(grid_cols):
+            if placed_count >= n_circles:
+                break
+
+            # Position with slight randomness to avoid perfect symmetry
+            x = margin + (j + 0.5) * cell_width + np.random.uniform(-cell_width/6, cell_width/6)
+            y = margin + (i + 0.5) * cell_height + np.random.uniform(-cell_height/6, cell_height/6)
+
+            # Compute maximum radius at this position
+            max_radius = compute_max_radius(x, y, circles, rect_width, rect_height)
+
+            if max_radius > 0.01:  # Only place if we can fit a meaningful circle
+                circles.append([x, y, max_radius])
+                placed_count += 1
+
+        if placed_count >= n_circles:
+            break
+
+    return np.array(circles)
+
+def optimize_circles_local(circles, rect_width, rect_height, iterations=50):
+    """Perform local optimization to improve circle arrangement."""
+    circles = circles.copy()
+
+    for _ in range(iterations):
+        # Try to improve each circle
+        for i in range(len(circles)):
+            x, y, r = circles[i]
+
+            # Try several small random moves to see if we can improve
+            best_x, best_y, best_r = x, y, r
+
+            # Try moving around current position
+            for _ in range(10):
+                dx = np.random.uniform(-0.05, 0.05)
+                dy = np.random.uniform(-0.05, 0.05)
+                new_x = x + dx
+                new_y = y + dy
+
+                # Ensure new position is within bounds
+                if (new_x - r >= 0 and new_x + r <= rect_width and
+                    new_y - r >= 0 and new_y + r <= rect_height):
+
+                    # Compute new max radius at this position
+                    new_r = compute_max_radius(new_x, new_y, circles, rect_width, rect_height)
+
+                    if new_r > best_r:
+                        best_r = new_r
+                        best_x, best_y = new_x, new_y
+
+            # Update if improvement found
+            if best_r > r:
+                circles[i] = [best_x, best_y, best_r]
+
+    return circles
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Use rectangle with width=1.5 and height=0.5 (perimeter = 4)
+    rect_width = 1.5
+    rect_height = 0.5
+    n = 21
+
+    # Initialize with grid-based approach
+    circles = place_circles_initial(rect_width, rect_height, n)
+
+    # If we didn't place enough circles, fill with additional ones
+    while len(circles) < n:
+        # Add circles at random positions
+        for _ in range(n - len(circles)):
+            x = np.random.uniform(0.01, rect_width - 0.01)
+            y = np.random.uniform(0.01, rect_height - 0.01)
+            max_radius = compute_max_radius(x, y, circles, rect_width, rect_height)
+
+            if max_radius > 0.01:
+                circles = np.vstack([circles, [x, y, max_radius]])
+
+    # Limit to exactly 21 circles
+    circles = circles[:n]
+
+    # Perform local optimization
+    circles = optimize_circles_local(circles, rect_width, rect_height)
+
+    # Final check for boundary constraints
+    final_circles = []
+    for x, y, r in circles:
+        # Ensure circle fits completely in the container
+        if (x - r >= 0 and x + r <= rect_width and
+            y - r >= 0 and y + r <= rect_height):
+            final_circles.append([x, y, r])
+        else:
+            # If it doesn't fit, reduce radius and adjust position slightly
+            adjusted_r = min(x, rect_width - x, y, rect_height - y)
+            if adjusted_r > 0:
+                final_circles.append([x, y, adjusted_r])
+
+    # Ensure exactly 21 circles
+    final_circles = final_circles[:n]
+    while len(final_circles) < n:
+        # Fill with minimal radius circles at random positions
+        x = np.random.uniform(0.01, rect_width - 0.01)
+        y = np.random.uniform(0.01, rect_height - 0.01)
+        final_circles.append([x, y, 0.01])
+
+    return np.array(final_circles[:n])
+
+
+# EVOLVE-BLOCK-END
+>>>>>>> REPLACE

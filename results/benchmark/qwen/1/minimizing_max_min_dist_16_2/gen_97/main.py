@@ -1,0 +1,298 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import pdist, squareform
+import time
+
+class PointOptimizer:
+    """Enhanced optimizer for maximizing min/max distance ratio of 16 points in 2D."""
+
+    def __init__(self, n_points=16, max_time=180):
+        self.n_points = n_points
+        self.max_time = max_time
+        self.best_solution = None
+        self.best_ratio = -np.inf
+        self.start_time = time.time()
+
+    def compute_distance_ratio(self, points):
+        """Compute the ratio of minimum to maximum distance between all point pairs."""
+        if len(points) < 2:
+            return 0.0
+
+        try:
+            # Use squareform for numerical stability
+            distances = squareform(pdist(points))
+            np.fill_diagonal(distances, np.inf)
+
+            min_dist = np.min(distances)
+            max_dist = np.max(distances)
+
+            if max_dist == 0 or np.isinf(min_dist):
+                return 0.0
+
+            return min_dist / max_dist
+        except Exception:
+            return 0.0
+
+    def initialize_hexagonal_grid(self):
+        """Initialize using hexagonal grid pattern."""
+        np.random.seed(42)
+        points = []
+        rows = 4
+        cols = 4
+
+        for i in range(rows):
+            for j in range(cols):
+                x = j * 0.25 + (i % 2) * 0.125
+                y = i * 0.25
+                # Add small random perturbation
+                x += np.random.normal(0, 0.01)
+                y += np.random.normal(0, 0.01)
+                points.append([x, y])
+
+        points = np.array(points[:self.n_points])
+
+        # Normalize to [0,1] bounds
+        if len(points) > 0:
+            x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+            y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+
+            if x_range > 0:
+                points[:, 0] = (points[:, 0] - np.min(points[:, 0])) / x_range
+            if y_range > 0:
+                points[:, 1] = (points[:, 1] - np.min(points[:, 1])) / y_range
+
+            # Scale to fit in [0,1] x [0,1]
+            points[:, 0] *= 0.95
+            points[:, 1] *= 0.95
+            points[:, 0] += 0.025
+            points[:, 1] += 0.025
+
+        return points
+
+    def initialize_golden_spiral(self):
+        """Initialize using golden spiral pattern."""
+        np.random.seed(42)
+        points = []
+        phi = (1 + np.sqrt(5)) / 2  # Golden ratio
+        for i in range(self.n_points):
+            angle = 2 * np.pi * i / phi
+            radius = 0.4 * (i / (self.n_points - 1) if self.n_points > 1 else 0.5)
+            x = 0.5 + radius * np.cos(angle)
+            y = 0.5 + radius * np.sin(angle)
+            # Add small random perturbation
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+            points.append([x, y])
+        return np.array(points)
+
+    def initialize_fibonacci_spiral(self):
+        """Initialize using Fibonacci spiral pattern."""
+        np.random.seed(42)
+        points = []
+        for i in range(self.n_points):
+            angle = 2 * np.pi * i / (self.n_points - 1) if self.n_points > 1 else 0
+            radius = 0.4 * np.sqrt(i / (self.n_points - 1)) if self.n_points > 1 else 0.5
+            x = 0.5 + radius * np.cos(angle)
+            y = 0.5 + radius * np.sin(angle)
+            # Add small random perturbation
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+            points.append([x, y])
+        return np.array(points)
+
+    def initialize_regular_polygon(self):
+        """Initialize using regular polygon pattern."""
+        np.random.seed(42)
+        points = []
+        for i in range(self.n_points):
+            angle = 2 * np.pi * i / self.n_points
+            x = 0.5 + 0.4 * np.cos(angle)
+            y = 0.5 + 0.4 * np.sin(angle)
+            # Add small random perturbation
+            x += np.random.normal(0, 0.01)
+            y += np.random.normal(0, 0.01)
+            points.append([x, y])
+        return np.array(points)
+
+    def initialize_random(self):
+        """Initialize using completely random pattern."""
+        np.random.seed(42)
+        return np.random.rand(self.n_points, 2)
+
+    def initialize_points(self, method='hexagonal'):
+        """Create structured initialization for better starting configuration."""
+        if method == 'hexagonal':
+            return self.initialize_hexagonal_grid()
+        elif method == 'golden_spiral':
+            return self.initialize_golden_spiral()
+        elif method == 'fibonacci_spiral':
+            return self.initialize_fibonacci_spiral()
+        elif method == 'regular_polygon':
+            return self.initialize_regular_polygon()
+        else:
+            return self.initialize_random()
+
+    def objective_function(self, x):
+        """Objective function for optimization (minimize negative ratio)."""
+        points = x.reshape(-1, 2)
+        ratio = self.compute_distance_ratio(points)
+        return -ratio
+
+    def global_optimization_step(self, x0):
+        """Perform global optimization using differential evolution."""
+        bounds = [(0, 1)] * (self.n_points * 2)
+
+        try:
+            result = differential_evolution(
+                self.objective_function,
+                bounds,
+                seed=42,
+                maxiter=150,
+                popsize=25,
+                atol=1e-12,
+                rtol=1e-12,
+                mutation=(0.8, 1.0),
+                recombination=0.9
+            )
+            return result.success, result.x if result.success else x0
+        except Exception:
+            return False, x0
+
+    def local_refinement_step(self, x0, method='L-BFGS-B'):
+        """Perform local refinement optimization with fallback."""
+        bounds = [(0, 1)] * (self.n_points * 2)
+
+        try:
+            # Try primary method
+            result = minimize(
+                self.objective_function,
+                x0,
+                method=method,
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-12, 'gtol': 1e-12}
+            )
+
+            if result.success:
+                return True, result.x
+            else:
+                # Try with looser tolerances
+                result = minimize(
+                    self.objective_function,
+                    x0,
+                    method=method,
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-10, 'gtol': 1e-10}
+                )
+                return result.success, result.x if result.success else x0
+
+        except Exception:
+            # Try alternate method as fallback
+            if method == 'L-BFGS-B':
+                try:
+                    result = minimize(
+                        self.objective_function,
+                        x0,
+                        method='SLSQP',
+                        bounds=bounds,
+                        options={'maxiter': 300, 'ftol': 1e-10}
+                    )
+                    return result.success, result.x if result.success else x0
+                except Exception:
+                    return False, x0
+            return False, x0
+
+    def validate_and_update_best(self, points):
+        """Validate solution and update best if better."""
+        ratio = self.compute_distance_ratio(points)
+        if ratio > self.best_ratio:
+            self.best_ratio = ratio
+            self.best_solution = points.copy()
+
+    def has_timed_out(self):
+        """Check if maximum time has been exceeded."""
+        return time.time() - self.start_time > self.max_time * 0.95
+
+    def optimize(self):
+        """Main optimization loop with multiple strategies and diverse initialization."""
+        # List of different initialization methods to try
+        init_methods = ['hexagonal', 'golden_spiral', 'fibonacci_spiral', 'regular_polygon', 'random']
+
+        # Multi-start optimization with diverse initializations
+        for init_method in init_methods:
+            # Try multiple restarts for each method to ensure thorough exploration
+            for restart in range(5):
+                if self.has_timed_out():
+                    break
+
+                try:
+                    # Create diverse seed for each restart
+                    np.random.seed(42 + restart + hash(init_method) % 1000)
+
+                    # Initialize with different methods
+                    initial_points = self.initialize_points(init_method)
+                    x0 = initial_points.flatten()
+
+                    # Global optimization
+                    global_success, x_global = self.global_optimization_step(x0)
+
+                    # Multiple local refinement strategies
+                    if global_success:
+                        # Strategy 1: L-BFGS-B refinement
+                        local_success, x_local = self.local_refinement_step(x_global, 'L-BFGS-B')
+                        if local_success:
+                            final_points = x_local.reshape(-1, 2)
+                            self.validate_and_update_best(final_points)
+
+                        # Strategy 2: SLSQP refinement
+                        slsqp_success, x_slsqp = self.local_refinement_step(x_global, 'SLSQP')
+                        if slsqp_success:
+                            final_points = x_slsqp.reshape(-1, 2)
+                            self.validate_and_update_best(final_points)
+
+                        # Strategy 3: Additional L-BFGS-B with different config
+                        if not local_success and not slsqp_success:
+                            # Try with more iterations
+                            _, x_refined = self.local_refinement_step(x_global, 'L-BFGS-B')
+                            final_points = x_refined.reshape(-1, 2)
+                            self.validate_and_update_best(final_points)
+
+                except Exception:
+                    continue
+
+        # If we haven't found a good solution yet, try direct optimization from random initialization
+        if self.best_solution is None:
+            try:
+                np.random.seed(42)
+                x0_random = np.random.uniform(0, 1, self.n_points * 2)
+
+                # Global optimization
+                global_success, x_global = self.global_optimization_step(x0_random)
+
+                # Local refinement
+                if global_success:
+                    local_success, x_local = self.local_refinement_step(x_global)
+                    if local_success:
+                        final_points = x_local.reshape(-1, 2)
+                        self.validate_and_update_best(final_points)
+
+            except Exception:
+                pass
+
+        # Final fallback to initialization if nothing worked
+        if self.best_solution is None:
+            self.best_solution = self.initialize_points('hexagonal')
+
+        return self.best_solution
+
+def min_max_dist_dim2_16() -> np.ndarray:
+    """
+    Creates 16 points in 2 dimensions in order to maximize the ratio of minimum to maximum distance.
+
+    Returns
+        points: np.ndarray of shape (16,2) containing the (x,y) coordinates of the 16 points.
+    """
+    optimizer = PointOptimizer(n_points=16, max_time=180)
+    return optimizer.optimize()
+
+# EVOLVE-BLOCK-END

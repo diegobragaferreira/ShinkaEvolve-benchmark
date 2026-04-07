@@ -1,0 +1,282 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+import matplotlib.pyplot as plt
+from itertools import combinations
+import time
+from numba import jit
+import random
+
+# Set seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+class HexagonPacker:
+    def __init__(self):
+        self.hex_side_length = 1.0
+        self.n_inner_hexagons = 11
+        
+    def hexagon_vertices(self, center_x, center_y, angle_degrees):
+        """Generate vertices of a regular hexagon with given center and rotation"""
+        angle_rad = np.radians(angle_degrees)
+        # Vertices of unit hexagon centered at origin
+        base_vertices = np.array([
+            [1, 0],
+            [0.5, np.sqrt(3)/2],
+            [-0.5, np.sqrt(3)/2],
+            [-1, 0],
+            [-0.5, -np.sqrt(3)/2],
+            [0.5, -np.sqrt(3)/2]
+        ])
+        
+        # Rotate and translate
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        rotated_vertices = base_vertices @ rotation_matrix.T
+        return rotated_vertices + np.array([center_x, center_y])
+    
+    def hexagon_polygon(self, center_x, center_y, angle_degrees):
+        """Create shapely polygon representation of hexagon"""
+        vertices = self.hexagon_vertices(center_x, center_y, angle_degrees)
+        return Polygon(vertices)
+    
+    def create_outer_hexagon(self, radius):
+        """Create outer hexagon polygon with given radius"""
+        # Outer hexagon centered at origin
+        outer_vertices = self.hexagon_vertices(0, 0, 0)
+        # Scale to ensure all inner hexagons fit
+        scaled_vertices = outer_vertices * radius
+        return Polygon(scaled_vertices)
+    
+    def check_containment(self, inner_hex_data, outer_radius):
+        """Check if all inner hexagons are contained in outer hexagon"""
+        outer_hex = self.create_outer_hexagon(outer_radius)
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, angle = inner_hex_data[i]
+            inner_hex = self.hexagon_polygon(center_x, center_y, angle)
+            if not outer_hex.contains(inner_hex):
+                return False
+        return True
+    
+    def check_overlap(self, inner_hex_data):
+        """Check if any inner hexagons overlap"""
+        hexagons = []
+        for i in range(len(inner_hex_data)):
+            center_x, center_y, angle = inner_hex_data[i]
+            hexagons.append(self.hexagon_polygon(center_x, center_y, angle))
+        
+        # Check pairwise overlaps
+        for i, j in combinations(range(len(hexagons)), 2):
+            if hexagons[i].intersects(hexagons[j]):
+                return True
+        return False
+    
+    def evaluate_fitness(self, inner_hex_data, outer_radius):
+        """Evaluate fitness based on geometric constraints and packing density"""
+        # Check constraints
+        if not self.check_containment(inner_hex_data, outer_radius):
+            return -np.inf  # Invalid - penalty
+        
+        if self.check_overlap(inner_hex_data):
+            return -np.inf  # Invalid - penalty
+            
+        # Valid configuration - maximize 1/outer_radius (minimize outer_radius)
+        return 1.0 / outer_radius
+    
+    def generate_initial_population(self, pop_size=50, max_radius=10.0):
+        """Generate diverse initial population"""
+        population = []
+        for _ in range(pop_size):
+            # Generate random positions and angles
+            individual = np.zeros((self.n_inner_hexagons, 3))
+            for i in range(self.n_inner_hexagons):
+                # Random positions within reasonable bounds
+                x = np.random.uniform(-max_radius/2, max_radius/2)
+                y = np.random.uniform(-max_radius/2, max_radius/2)
+                angle = np.random.uniform(0, 360)
+                individual[i] = [x, y, angle]
+            population.append(individual)
+        return population
+    
+    def mutate_individual(self, individual, mutation_rate=0.1):
+        """Apply mutation to an individual"""
+        mutated = individual.copy()
+        for i in range(len(mutated)):
+            if np.random.random() < mutation_rate:
+                # Mutate position
+                mutated[i][0] += np.random.normal(0, 0.5)
+                mutated[i][1] += np.random.normal(0, 0.5)
+                # Mutate angle
+                mutated[i][2] += np.random.normal(0, 30)
+                # Keep angle in [0, 360)
+                mutated[i][2] = mutated[i][2] % 360
+        return mutated
+    
+    def crossover_individuals(self, parent1, parent2):
+        """Perform uniform crossover between two parents"""
+        child = parent1.copy()
+        for i in range(len(child)):
+            if np.random.random() < 0.5:
+                child[i] = parent2[i].copy()
+        return child
+    
+    def optimize_local(self, inner_hex_data, outer_radius):
+        """Refine solution locally using optimization"""
+        def objective(params):
+            # Reshape params back to hexagon data
+            new_data = inner_hex_data.copy()
+            for i in range(len(new_data)):
+                new_data[i][0] = params[i*3]
+                new_data[i][1] = params[i*3+1]
+                new_data[i][2] = params[i*3+2]
+            
+            # Evaluate fitness
+            fitness = self.evaluate_fitness(new_data, outer_radius)
+            return -fitness  # minimize negative fitness
+        
+        # Flatten the data for optimization
+        initial_params = []
+        for i in range(len(inner_hex_data)):
+            initial_params.extend([inner_hex_data[i][0], inner_hex_data[i][1], inner_hex_data[i][2]])
+        
+        # Optimize using L-BFGS-B
+        try:
+            result = minimize(objective, initial_params, method='L-BFGS-B', 
+                            bounds=[(-10, 10), (-10, 10), (0, 360)] * len(inner_hex_data),
+                            options={'maxiter': 100})
+            if result.success:
+                # Reshape optimized result back
+                refined_data = inner_hex_data.copy()
+                for i in range(len(refined_data)):
+                    refined_data[i][0] = result.x[i*3]
+                    refined_data[i][1] = result.x[i*3+1]
+                    refined_data[i][2] = result.x[i*3+2]
+                return refined_data
+        except:
+            pass
+        return inner_hex_data
+    
+    def find_optimal_radius(self, inner_hex_data, min_radius=1.0, max_radius=10.0):
+        """Find minimum radius that contains all hexagons"""
+        # Binary search for tightest fit
+        left, right = min_radius, max_radius
+        best_radius = right
+        
+        # First check if configuration fits at all
+        if self.check_containment(inner_hex_data, left):
+            return left
+            
+        # Binary search
+        for _ in range(20):  # Limit iterations
+            mid = (left + right) / 2
+            if self.check_containment(inner_hex_data, mid):
+                best_radius = mid
+                right = mid
+            else:
+                left = mid
+                
+        return best_radius
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+    
+    packer = HexagonPacker()
+    
+    # Start with a good heuristic initial configuration
+    # Based on hexagonal tiling pattern
+    initial_config = np.array([
+        [0, 0, 0],        # center
+        [-2.5, 0, 0],     # left
+        [2.5, 0, 0],      # right
+        [-1.25, 2.17, 0], # top-left
+        [1.25, 2.17, 0],  # top-right
+        [-1.25, -2.17, 0],# bottom-left
+        [1.25, -2.17, 0], # bottom-right
+        [-3.75, 2.17, 0], # far top-left
+        [3.75, 2.17, 0],  # far top-right
+        [-3.75, -2.17, 0],# far bottom-left
+        [3.75, -2.17, 0], # far bottom-right
+    ])
+    
+    # Apply evolutionary optimization
+    best_fitness = -np.inf
+    best_config = None
+    best_radius = 10.0
+    
+    # Evolutionary process
+    max_generations = 50
+    population_size = 30
+    mutation_rate = 0.1
+    
+    # Generate initial population
+    population = [initial_config]  # Start with our heuristic config
+    population.extend(packer.generate_initial_population(population_size - 1))
+    
+    for gen in range(max_generations):
+        # Evaluate fitness of population
+        fitness_scores = []
+        for individual in population:
+            radius = packer.find_optimal_radius(individual)
+            fitness = packer.evaluate_fitness(individual, radius)
+            fitness_scores.append(fitness)
+        
+        # Update best solution
+        max_idx = np.argmax(fitness_scores)
+        if fitness_scores[max_idx] > best_fitness:
+            best_fitness = fitness_scores[max_idx]
+            best_config = population[max_idx].copy()
+            best_radius = packer.find_optimal_radius(best_config)
+        
+        # Selection and reproduction
+        sorted_indices = np.argsort(fitness_scores)[::-1][:population_size//2]
+        selected = [population[i] for i in sorted_indices]
+        
+        # Generate new population
+        new_population = selected.copy()
+        for _ in range(population_size - len(selected)):
+            parent1 = selected[np.random.randint(len(selected))]
+            parent2 = selected[np.random.randint(len(selected))]
+            child = packer.crossover_individuals(parent1, parent2)
+            child = packer.mutate_individual(child, mutation_rate)
+            new_population.append(child)
+        
+        population = new_population
+    
+    # Final local optimization
+    if best_config is not None:
+        refined_config = packer.optimize_local(best_config, best_radius)
+        final_radius = packer.find_optimal_radius(refined_config)
+        # Re-evaluate with final radius
+        final_fitness = packer.evaluate_fitness(refined_config, final_radius)
+        if final_fitness > best_fitness:
+            best_config = refined_config
+            best_radius = final_radius
+            best_fitness = final_fitness
+    
+    # Prepare output
+    inner_hex_data = best_config if best_config is not None else initial_config
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+    outer_hex_side_length = best_radius if 'best_radius' in locals() else 8.0
+    
+    end_time = time.time()
+    eval_time = end_time - start_time
+    
+    # Validate solution
+    if packer.check_overlap(inner_hex_data):
+        print("Warning: Overlapping hexagons detected!")
+    if not packer.check_containment(inner_hex_data, outer_hex_side_length):
+        print("Warning: Hexagons not contained in outer hexagon!")
+    
+    return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

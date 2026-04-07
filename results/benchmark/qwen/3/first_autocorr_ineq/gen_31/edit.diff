@@ -1,0 +1,142 @@
+--- a/original.py
++++ b/original.py
+@@ -1,134 +1,139 @@
+ # EVOLVE-BLOCK-START
+ import numpy as np
+ from scipy import optimize
+ from scipy.signal import fftconvolve
+ import math
++import random
+ 
+ def get_good_direction_to_move_into(sequence: list[float]) -> list[float] | None:
+     """Returns the direction to move into the sequence with adaptive parameters."""
+     n = len(sequence)
+     sum_sequence = np.sum(sequence)
+     
+     # Prevent division by zero
+     if sum_sequence < 1e-10:
+         return None
+     
+     # Normalize with adaptive factor
+     adaptive_factor = np.sqrt(2 * n)
+     normalized_sequence = [x * adaptive_factor / sum_sequence for x in sequence]
+     
+     # Use FFT for large sequences, direct convolution for small ones
+     if n > 100:
+         conv_result = fftconvolve(normalized_sequence, normalized_sequence, mode='full')
+     else:
+         conv_result = np.convolve(normalized_sequence, normalized_sequence)
+         
+     rhs = np.max(conv_result)
+     
+     # Try solving LP with adaptive constraints
+     g_fun = solve_convolution_lp(normalized_sequence, rhs, n)
+     
+     if g_fun is None:
+         # Fallback: try with modified RHS
+         rhs_fallback = rhs * 1.1
+         g_fun = solve_convolution_lp(normalized_sequence, rhs_fallback, n)
+         
+     if g_fun is None:
+         # Final fallback: simple gradient ascent
+         t = 0.01
+         new_sequence = [(1 - t) * x + t * max(x, 1e-6) for x in sequence]
+         return new_sequence
+ 
+     # Normalize g_fun
+     sum_g_fun = np.sum(g_fun)
+     if sum_g_fun < 1e-10:
+         return None
+         
+     normalized_g_fun = [x * adaptive_factor / sum_g_fun for x in g_fun]
+     
+     # Adaptive step-size
+     t = min(0.05, 0.01 + 0.005 * np.log(n + 1))
+     new_sequence = [
+         (1 - t) * x + t * y for x, y in zip(sequence, normalized_g_fun)
+     ]
+     return new_sequence
+ 
+ def solve_convolution_lp(f_sequence, rhs, n):
+     """Solves the convolution LP for a given sequence and RHS with adaptive constraints."""
+     c = -np.ones(n)
+     a_ub = []
+     b_ub = []
+     
+     # Generate convolution constraints with adaptive handling
+     if n > 100:
+         # For large sequences, use FFT to get convolution constraints efficiently
+         f_conv = fftconvolve(f_sequence, f_sequence, mode='full')
+         f_conv = f_conv[:2*n-1]
+     else:
+         f_conv = np.convolve(f_sequence, f_sequence)
+     
+     # Create constraint matrix
+     for k in range(2 * n - 1):
+         row = np.zeros(n)
+         for i in range(n):
+             j = k - i
+             if 0 <= j < n:
+                 row[j] = f_sequence[i]
+         a_ub.append(row)
+         b_ub.append(rhs)
+     
+     # Non-negativity constraints
+     a_ub_nonneg = -np.eye(n)
+     b_ub_nonneg = np.zeros(n)
+     
+     a_ub = np.vstack([a_ub, a_ub_nonneg])
+     b_ub = np.hstack([b_ub, b_ub_nonneg])
+ 
+     # Adaptive tolerance for optimization
+     try:
+         result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='highs')
+     except:
+         # Fallback to 'simplex' method if 'highs' fails
+         try:
+             result = optimize.linprog(c, A_ub=a_ub, b_ub=b_ub, method='simplex')
+         except:
+             return None
+ 
+     if result.success:
+         g_sequence = result.x
+         # Ensure non-negativity and reasonable values
+         g_sequence = np.maximum(g_sequence, 0)
+         if np.sum(g_sequence) < 1e-10:
+             return None
+         return g_sequence
+     else:
+         return None
+ 
+ def search_for_best_sequence() -> list[float]:
+     """Function to search for the best coefficient sequence with adaptive search."""
++    # Initialize with deterministic seed for reproducibility
++    random.seed(42)
++    np.random.seed(42)
++    
+     # Adaptive initialization with log scaling
+     n_init = max(10, int(math.log(1000) * 50))
+     best_sequence = np.random.rand(n_init).tolist()
+     
+     # Add some diversity with small positive values
+     for i in range(len(best_sequence)):
+         if best_sequence[i] < 0.01:
+             best_sequence[i] = 0.01
+     
+     # Evolve for a few iterations with adaptive strategy
+     for _ in range(20):  # Reduced iterations to save time
+         h_function = get_good_direction_to_move_into(best_sequence)
+         if h_function is not None:
+             best_sequence = h_function
+         else:
+             # If evolution fails, try to recover with a simple mutation
+             index = np.random.randint(len(best_sequence))
+             best_sequence[index] = max(0.01, best_sequence[index] * (1 + np.random.normal(0, 0.1)))
+             
+     return best_sequence
+ 
+ # EVOLVE-BLOCK-END
+ 
+ if __name__ == "__main__":
+     sequence = search_for_best_sequence()
+     print(f"Found sequence: {sequence}")

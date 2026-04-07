@@ -1,0 +1,322 @@
+<NAME>
+add_multi_start_optimization
+</NAME>
+
+<DESCRIPTION>
+The current implementation only tries one global optimization approach. To improve the chances of finding a better solution, I'll implement a multi-start optimization strategy that tries multiple different initialization methods combined with different optimization parameters. This addresses the limitation that the current approach might get stuck in local optima by exploring multiple starting configurations systematically.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_points():
+        """Initialize points using a better structured approach for improved starting configuration."""
+        # Create a grid-like pattern with some randomness
+        np.random.seed(42)
+
+        # Create a 4x4 grid pattern (16 points) with controlled perturbations
+        grid_size = 4
+        x = np.linspace(0.1, 0.9, grid_size)
+        y = np.linspace(0.1, 0.9, grid_size)
+
+        # Generate grid points
+        xx, yy = np.meshgrid(x, y)
+        points = np.column_stack([xx.ravel(), yy.ravel()])
+
+        # Add small random perturbations to break symmetry while maintaining structure
+        noise_magnitude = 0.01
+        noise = np.random.normal(0, noise_magnitude, points.shape)
+        points += noise
+
+        # Clip to ensure points stay within bounds
+        points = np.clip(points, 0, 1)
+
+        return points
+
+    # Set up bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1)] * 32
+
+    # Initialize with better structured approach
+    best_points = initialize_points()
+    best_ratio = calculate_min_max_ratio(best_points)
+
+    # Phase 1: Global optimization with differential evolution
+    try:
+        result_de = differential_evolution(
+            objective,
+            bounds,
+            seed=42,
+            maxiter=150,  # Increased iterations for better exploration
+            popsize=25,   # Larger population for better diversity
+            atol=1e-12,   # Tighter absolute tolerance
+            rtol=1e-12,   # Tighter relative tolerance
+            mutation=(0.8, 1.0),  # Higher mutation for more exploration
+            recombination=0.9     # Higher recombination for better mixing
+        )
+
+        if result_de.success:
+            # Phase 2: Local refinement with multiple strategies
+            refinement_strategies = [
+                {
+                    'method': 'L-BFGS-B',
+                    'options': {'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
+                },
+                {
+                    'method': 'SLSQP',
+                    'options': {'maxiter': 200, 'ftol': 1e-12}
+                }
+            ]
+
+            for strategy in refinement_strategies:
+                try:
+                    refined = minimize(
+                        objective,
+                        result_de.x,
+                        method=strategy['method'],
+                        bounds=bounds,
+                        options=strategy['options']
+                    )
+
+                    if refined.success:
+                        final_points = refined.x.reshape(-1, 2)
+                        ratio = calculate_min_max_ratio(final_points)
+
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_points = final_points.copy()
+
+                except Exception:
+                    continue
+
+    except Exception:
+        pass
+
+    # Phase 3: Additional fallback optimization from initialization
+    if best_ratio < 1e-10:  # If we didn't find a good solution
+        try:
+            # Try optimization from the structured initialization directly
+            x0 = initialize_points().flatten()
+
+            # Global optimization with different parameters for diversity
+            result = differential_evolution(
+                objective,
+                bounds,
+                seed=42,
+                maxiter=100,
+                popsize=20,
+                atol=1e-10,
+                rtol=1e-10,
+                mutation=(0.7, 1.0),
+                recombination=0.8
+            )
+
+            if result.success:
+                # Final refinement with multiple local methods
+                refined = minimize(
+                    objective,
+                    result.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 250, 'ftol': 1e-15, 'gtol': 1e-15}
+                )
+
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+        except Exception:
+            pass
+
+    # Ensure final points are within valid bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+=======
+    def initialize_points(method='grid'):
+        """Initialize points using different structured approaches for improved starting configuration."""
+        np.random.seed(42)
+
+        if method == 'grid':
+            # Create a 4x4 grid pattern (16 points) with controlled perturbations
+            grid_size = 4
+            x = np.linspace(0.1, 0.9, grid_size)
+            y = np.linspace(0.1, 0.9, grid_size)
+
+            # Generate grid points
+            xx, yy = np.meshgrid(x, y)
+            points = np.column_stack([xx.ravel(), yy.ravel()])
+
+            # Add small random perturbations to break symmetry while maintaining structure
+            noise_magnitude = 0.01
+            noise = np.random.normal(0, noise_magnitude, points.shape)
+            points += noise
+
+        elif method == 'hexagonal':
+            # Create a hexagonal grid pattern for better point distribution
+            points = []
+            rows = 4
+            cols = 4
+
+            for i in range(rows):
+                for j in range(cols):
+                    if len(points) >= 16:
+                        break
+                    x = j * 0.25 + (i % 2) * 0.125
+                    y = i * 0.25
+
+                    # Add small random perturbation
+                    x += np.random.normal(0, 0.01)
+                    y += np.random.normal(0, 0.01)
+                    points.append([x, y])
+
+            points = np.array(points[:16])
+
+        elif method == 'spiral':
+            # Create a spiral arrangement
+            points = []
+            for i in range(16):
+                if i == 0:
+                    x, y = 0.5, 0.5
+                else:
+                    angle = 2 * np.pi * i / 16
+                    radius = 0.4 * (i / 16)
+                    x = 0.5 + radius * np.cos(angle)
+                    y = 0.5 + radius * np.sin(angle)
+                    # Add small random perturbation
+                    x += np.random.normal(0, 0.01)
+                    y += np.random.normal(0, 0.01)
+                points.append([x, y])
+            points = np.array(points)
+
+        elif method == 'random':
+            # Purely random initialization
+            points = np.random.rand(16, 2)
+
+        else:
+            # Default grid method
+            points = initialize_points('grid')
+
+        # Clip to ensure points stay within bounds
+        points = np.clip(points, 0, 1)
+        return points
+
+    # Set up bounds (0 to 1 for each coordinate)
+    bounds = [(0, 1)] * 32
+
+    # Multi-start optimization with different initializations
+    best_points = None
+    best_ratio = -np.inf
+
+    # Try different initialization methods
+    init_methods = ['grid', 'hexagonal', 'spiral', 'random']
+
+    for method in init_methods:
+        try:
+            # Initialize with different methods
+            initial_points = initialize_points(method)
+
+            # Try multiple global optimization strategies with different parameters
+            de_params_list = [
+                {'maxiter': 150, 'popsize': 25, 'mutation': (0.8, 1.0), 'recombination': 0.9},
+                {'maxiter': 200, 'popsize': 30, 'mutation': (0.7, 1.0), 'recombination': 0.8},
+                {'maxiter': 100, 'popsize': 20, 'mutation': (0.9, 1.0), 'recombination': 0.7}
+            ]
+
+            for de_params in de_params_list:
+                try:
+                    result_de = differential_evolution(
+                        objective,
+                        bounds,
+                        seed=42,
+                        **de_params
+                    )
+
+                    if result_de.success:
+                        # Phase 2: Local refinement with multiple strategies
+                        refinement_strategies = [
+                            {
+                                'method': 'L-BFGS-B',
+                                'options': {'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
+                            },
+                            {
+                                'method': 'SLSQP',
+                                'options': {'maxiter': 200, 'ftol': 1e-12}
+                            }
+                        ]
+
+                        for strategy in refinement_strategies:
+                            try:
+                                refined = minimize(
+                                    objective,
+                                    result_de.x,
+                                    method=strategy['method'],
+                                    bounds=bounds,
+                                    options=strategy['options']
+                                )
+
+                                if refined.success:
+                                    final_points = refined.x.reshape(-1, 2)
+                                    ratio = calculate_min_max_ratio(final_points)
+
+                                    if ratio > best_ratio:
+                                        best_ratio = ratio
+                                        best_points = final_points.copy()
+
+                            except Exception:
+                                continue
+
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    # If we still don't have a good solution, fallback to single optimization
+    if best_points is None:
+        # Initialize with grid approach as fallback
+        best_points = initialize_points('grid')
+        best_ratio = calculate_min_max_ratio(best_points)
+
+        # Single optimization approach for fallback
+        try:
+            result_de = differential_evolution(
+                objective,
+                bounds,
+                seed=42,
+                maxiter=150,
+                popsize=25,
+                atol=1e-12,
+                rtol=1e-12,
+                mutation=(0.8, 1.0),
+                recombination=0.9
+            )
+
+            if result_de.success:
+                refined = minimize(
+                    objective,
+                    result_de.x,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 300, 'ftol': 1e-15, 'gtol': 1e-15}
+                )
+
+                if refined.success:
+                    final_points = refined.x.reshape(-1, 2)
+                    ratio = calculate_min_max_ratio(final_points)
+
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_points = final_points.copy()
+
+        except Exception:
+            pass
+
+    # Ensure final points are within valid bounds
+    best_points = np.clip(best_points, 0, 1)
+
+    return best_points
+>>>>>>> REPLACE
+</DIFF>

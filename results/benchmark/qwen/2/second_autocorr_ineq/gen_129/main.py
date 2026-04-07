@@ -1,0 +1,261 @@
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy import signal
+from scipy.optimize import differential_evolution
+import warnings
+
+def construct_function() -> list[float]:
+    """Function to construct step-function with high C2 value using enhanced multi-scale Gaussian optimization."""
+    np.random.seed(42)  # For reproducibility
+
+    # Determine number of steps with higher resolution
+    n_steps = np.random.randint(3000, 10000)  # Increased range for better resolution
+
+    # Create x-axis points in [-1/4, 1/4]
+    x = np.linspace(-0.25, 0.25, n_steps)
+
+    # Initialize with base multi-peak Gaussian structure using a more structured approach
+    base_function = np.zeros_like(x)
+
+    # Generate structured peak positions using a hybrid approach
+    # First, generate a baseline set of peaks with strategic spacing
+    num_peaks = np.random.randint(15, 40)
+
+    # Create more systematic peak distribution with varying densities
+    peak_positions = []
+
+    # Central region (dense peaks)
+    central_count = int(num_peaks * 0.4)
+    for _ in range(central_count):
+        pos = np.random.uniform(-0.1, 0.1)
+        peak_positions.append(pos)
+
+    # Middle regions (medium density)
+    middle_count = int(num_peaks * 0.35)
+    for _ in range(middle_count):
+        pos = np.random.choice([-0.2, -0.18, -0.16, -0.14, -0.12, -0.1,
+                               0.1, 0.12, 0.14, 0.16, 0.18, 0.2])
+        peak_positions.append(pos)
+
+    # Outer regions (sparse peaks)
+    outer_count = int(num_peaks * 0.25)
+    for _ in range(outer_count):
+        pos = np.random.choice([-0.24, -0.22, -0.2, -0.18, -0.16, 0.16, 0.18, 0.2, 0.22, 0.24])
+        peak_positions.append(pos)
+
+    # Ensure minimum gap between peaks to prevent narrow autoconvolution
+    min_gap = 0.015  # Slightly increased minimum gap
+    safe_positions = []
+    for pos in sorted(peak_positions):
+        if not safe_positions or abs(pos - safe_positions[-1]) >= min_gap:
+            safe_positions.append(pos)
+
+    # Use actual number of safe positions
+    num_peaks = len(safe_positions)
+
+    # Construct peaks with optimized parameters
+    for i in range(num_peaks):
+        # Set peak center
+        peak_center = safe_positions[i]
+
+        # Adjust peak height based on position to avoid very sharp peaks
+        # Peaks near edges get reduced height to prevent excessive autoconvolution peaks
+        if abs(peak_center) > 0.15:
+            peak_height = np.random.uniform(1.0, 1.5)
+        else:
+            peak_height = np.random.uniform(1.2, 2.0)
+
+        # Use narrower widths for central peaks, wider for outer ones
+        if abs(peak_center) < 0.05:
+            peak_width = np.random.uniform(0.015, 0.03)
+        elif abs(peak_center) < 0.15:
+            peak_width = np.random.uniform(0.025, 0.05)
+        else:
+            peak_width = np.random.uniform(0.03, 0.07)
+
+        # Create Gaussian peak
+        gaussian_peak = peak_height * np.exp(-0.5 * ((x - peak_center) / peak_width)**2)
+        base_function += gaussian_peak
+
+    # Add some additional structure with controlled randomness
+    # This helps create better autoconvolution properties
+    for i in range(0, len(x), max(1, len(x)//25)):  # More frequent bumps
+        if np.random.random() > 0.85:  # Higher probability for small bumps
+            bump_center = x[i]
+            bump_height = np.random.uniform(0.05, 0.3)
+            bump_width = np.random.uniform(0.005, 0.02)
+            bump = bump_height * np.exp(-0.5 * ((x - bump_center) / bump_width)**2)
+            base_function += bump
+
+    # Ensure non-negative values
+    base_function = np.maximum(base_function, 0)
+
+    # Normalize to avoid extreme values that might hurt the C2 calculation
+    if np.max(base_function) > 0:
+        base_function = base_function / np.max(base_function) * 1.8
+
+    # Apply light noise for robustness (but preserve structure)
+    noise_level = 0.015  # Reduced noise level
+    noisy_function = base_function + np.random.normal(0, noise_level, len(base_function))
+    noisy_function = np.maximum(noisy_function, 0)
+
+    # Smooth the function to reduce sharp transitions that could hurt C2
+    # Use a simple moving average smoothing with larger window for better smoothing
+    window_size = max(1, n_steps // 150)  # Dynamic window size
+    if window_size % 2 == 0:
+        window_size += 1  # Must be odd for symmetric filter
+    if window_size > 1:
+        smoothed_function = signal.savgol_filter(noisy_function, window_size, 1)
+        smoothed_function = np.maximum(smoothed_function, 0)
+        noisy_function = smoothed_function
+
+    # Convert to step values ensuring proper format
+    step_values = noisy_function.tolist()
+
+    # Phase 2: Advanced Local Optimization of Peak Parameters
+    def compute_autoconvolution_norms(func_vals):
+        """Compute the three norms needed for C2 calculation with improved accuracy"""
+        f = np.array(func_vals)
+
+        # Autoconvolution using convolution
+        g = np.convolve(f, f, mode='full')
+        g = g[len(g)//2:]  # Take middle portion
+
+        # Adjust for correct length
+        if len(g) > len(f):
+            g = g[:len(f)]
+
+        # ||g||₂² (L2 norm squared) - more accurate piecewise integration
+        # Using trapezoidal rule for better accuracy
+        dx = 0.5 / (len(f) - 1) if len(f) > 1 else 0.5
+        norm_2_sq = 0
+        for i in range(len(g)-1):
+            # Trapezoidal rule: integral of g^2 from i to i+1
+            area = dx * (g[i]**2 + g[i+1]**2) / 2
+            norm_2_sq += area
+
+        # ||g||₁ (L1 norm) - via summation with proper normalization
+        norm_1 = np.sum(np.abs(g)) * dx
+
+        # ||g||∞ (infinity norm)
+        norm_inf = np.max(np.abs(g))
+
+        return norm_2_sq, norm_1, norm_inf
+
+    def compute_c2(func_vals):
+        """Compute C₂ value with numerical stability"""
+        norm_2_sq, norm_1, norm_inf = compute_autoconvolution_norms(func_vals)
+
+        # Add small epsilon to prevent division by zero
+        epsilon = 1e-15
+        if norm_1 <= epsilon or norm_inf <= epsilon:
+            return 0.0
+
+        return norm_2_sq / (norm_1 * norm_inf)
+
+    def optimize_peaks(initial_func, n_steps):
+        """Advanced peak optimization focusing on key parameters with more iterations"""
+        # Extract peak information more precisely
+        x = np.linspace(-0.25, 0.25, n_steps)
+
+        # Identify approximate peak locations with a peak finding algorithm
+        peaks = []
+        for i in range(2, len(initial_func)-2):
+            # Look for local maxima with some context
+            if (initial_func[i] > initial_func[i-1] and
+                initial_func[i] > initial_func[i+1] and
+                initial_func[i] > initial_func[i-2] and
+                initial_func[i] > initial_func[i+2]):
+                peaks.append((i, initial_func[i]))
+
+        # Take top peaks (limit number to avoid too much optimization overhead)
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        selected_peaks = peaks[:min(10, len(peaks))]
+
+        if not selected_peaks:
+            return np.array(initial_func)
+
+        # Refine peak positions and heights using a more comprehensive approach
+        def objective(params):
+            # Reconstruct function with given params
+            temp_func = np.zeros_like(x)
+            param_idx = 0
+
+            for _, height in selected_peaks:
+                # Get parameters for this peak
+                center_pos = x[selected_peaks[param_idx//2][0]] + (params[param_idx] - 0.5) * 0.04
+                peak_height = height * (1.0 + params[param_idx+1] * 0.5)
+                width = 0.02 + 0.04 * (1.0 - abs(center_pos)/0.25)  # Width adjusts based on position
+                temp_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+                param_idx += 2
+
+            return -compute_c2(temp_func)  # Negative because we minimize
+
+        # Initial parameter guess
+        params0 = [0.0] * (len(selected_peaks) * 2)  # [delta_pos, delta_height] pairs
+
+        # Optimize with more iterations for better convergence
+        try:
+            bounds = [(-0.5, 0.5)] * (len(selected_peaks) * 2)
+            result = differential_evolution(
+                objective,
+                bounds=bounds,
+                maxiter=50,  # Increase iterations for better convergence
+                popsize=10,  # Larger population for better exploration
+                seed=42,
+                polish=True,
+                disp=False
+            )
+            optimized_params = result.x
+        except Exception as e:
+            warnings.warn(f"Differential evolution failed: {str(e)}")
+            optimized_params = params0
+
+        # Apply optimization results
+        final_func = np.zeros_like(x)
+        param_idx = 0
+
+        for pos_idx, height in selected_peaks:
+            center_pos = x[pos_idx] + (optimized_params[param_idx] - 0.5) * 0.04
+            peak_height = height * (1.0 + optimized_params[param_idx+1] * 0.5)
+            # Width varies with position to prevent extreme narrow peaks
+            width = 0.02 + 0.04 * (1.0 - abs(center_pos)/0.25)
+            final_func += peak_height * np.exp(-0.5 * ((x - center_pos) / width)**2)
+            param_idx += 2
+
+        # Preserve original structure for remaining areas
+        for i in range(len(initial_func)):
+            if not any(abs(x[i] - x[pos_idx]) < 0.01 for pos_idx, _ in selected_peaks):
+                final_func[i] += initial_func[i] * 0.6
+
+        return final_func
+
+    # Apply optimization if possible and beneficial
+    try:
+        # Optimize peak parameters
+        optimized_func = optimize_peaks(step_values, n_steps)
+
+        # Final check
+        final_func = np.maximum(optimized_func, 0)
+
+        # Add slight noise for robustness
+        noise_level = 0.008
+        noisy_func = final_func + np.random.normal(0, noise_level, len(final_func))
+        noisy_func = np.maximum(noisy_func, 0)
+
+        # Convert to step values
+        step_values = noisy_func.tolist()
+
+    except Exception as e:
+        # Fallback to base construction if optimization fails
+        warnings.warn(f"Optimization failed: {str(e)}")
+        pass
+
+    return step_values
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    f_values = construct_function()
+    print(f"Function: {f_values}")

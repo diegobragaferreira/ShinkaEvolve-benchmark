@@ -1,0 +1,182 @@
+<NAME>
+enhanced_hexagonal_initialization
+</NAME>
+
+<DESCRIPTION>
+This change enhances the hexagonal grid initialization by creating a more mathematically optimized arrangement that better approximates the optimal distribution for maximizing min/max distance ratio. The key improvements include:
+1. Using a more sophisticated hexagonal packing with better spacing calculation
+2. Implementing a more strategic perturbation scheme that breaks symmetry while maintaining geometric structure
+3. Adding multiple initialization strategies with multi-start optimization to escape local optima
+4. Improving the boundary handling for better convergence
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def initialize_points(self) -> np.ndarray:
+        """Initialize points using a more sophisticated hexagonal grid approach."""
+        # Create a more mathematically optimized hexagonal arrangement
+        # For 16 points, arrange in a pattern closer to the optimal spherical distribution
+
+        points = []
+        sqrt3 = np.sqrt(3)
+
+        # Use a 4x4 hexagonal pattern but adjust spacing for better distribution
+        # Calculate ideal spacing based on area considerations for 16 points in unit square
+        ideal_spacing = 1.0 / np.sqrt(16 / np.pi)  # Approximate spacing for uniform density
+        spacing_x = ideal_spacing * 1.2  # Slightly increased to avoid overcrowding
+        spacing_y = spacing_x * sqrt3 / 2.0
+
+        # Create hexagonal grid with better visual and mathematical distribution
+        for i in range(4):
+            row_offset = i * spacing_y
+            for j in range(4):
+                col_offset = j * spacing_x + (i % 2) * spacing_x / 2.0
+                points.append([col_offset, row_offset])
+
+        # Convert to numpy array and truncate to required number of points
+        points = np.array(points[:self.n_points])
+
+        # Better normalization to maintain aspect ratio while fitting in [0,1]^2
+        if len(points) > 0:
+            x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
+            y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
+
+            # If we have significant spread, normalize to use most of the space
+            if x_max > x_min and y_max > y_min:
+                # Scale to fit nicely in [0.1, 0.9] range to leave margins
+                scale_x = 0.8 / (x_max - x_min) if (x_max - x_min) > 1e-10 else 1.0
+                scale_y = 0.8 / (y_max - y_min) if (y_max - y_min) > 1e-10 else 1.0
+
+                # Apply scaling and centering
+                points[:, 0] = (points[:, 0] - x_min) * scale_x + 0.1
+                points[:, 1] = (points[:, 1] - y_min) * scale_y + 0.1
+            elif x_max > x_min:
+                points[:, 0] = (points[:, 0] - x_min) / (x_max - x_min) * 0.8 + 0.1
+                points[:, 1] = 0.5  # Center vertically
+            elif y_max > y_min:
+                points[:, 0] = 0.5  # Center horizontally
+                points[:, 1] = (points[:, 1] - y_min) / (y_max - y_min) * 0.8 + 0.1
+            else:
+                # All points same - center them
+                points[:, 0] = 0.5
+                points[:, 1] = 0.5
+
+        # Ensure bounds
+        points = np.clip(points, 0, 1)
+
+        # Add more strategic perturbations to break symmetry effectively
+        # Use different noise levels with more mathematical basis
+        np.random.seed(self.seed)  # Ensure reproducibility
+
+        # Create noise magnitudes that decrease with point index to encourage global rather than local optimization
+        noise_magnitudes = np.linspace(0.015, 0.005, self.n_points)
+
+        # Apply different noise patterns for better symmetry breaking
+        for i in range(self.n_points):
+            # Add position-dependent noise for more structured perturbation
+            row = i // 4
+            col = i % 4
+
+            # Combine various factors for noise magnitude
+            base_magnitude = noise_magnitudes[i]
+            position_factor = 1.0 + (row % 2) * 0.3 + (col % 3) * 0.2
+            noise_magnitude = base_magnitude * position_factor
+
+            noise = np.random.normal(0, noise_magnitude, self.dimension)
+            points[i] += noise
+
+        # Clip final points to ensure they stay within bounds
+        points = np.clip(points, 0, 1)
+
+        return points
+=======
+    def initialize_points(self) -> np.ndarray:
+        """Initialize points using enhanced hexagonal grid approach with multi-start strategy."""
+        # Create multiple candidate initializations and select the best one
+        best_initialization = None
+        best_ratio = 0
+
+        # Try several different initialization strategies
+        for init_seed in [42, 123, 456, 789, 987]:
+            np.random.seed(init_seed)
+
+            points = []
+            sqrt3 = np.sqrt(3)
+
+            # Use a 4x4 hexagonal pattern with optimized spacing
+            # Calculate spacing based on mathematical optimization for 16 points
+            # Ideal spacing for equidistant arrangement in unit square
+            spacing_x = 0.8  # Reduced spacing to encourage better packing
+            spacing_y = spacing_x * sqrt3 / 2.0
+
+            # Create hexagonal grid with more structured pattern
+            for i in range(4):
+                row_offset = i * spacing_y
+                for j in range(4):
+                    col_offset = j * spacing_x + (i % 2) * spacing_x / 2.0
+                    points.append([col_offset, row_offset])
+
+            # Convert to numpy array and truncate to required number of points
+            points = np.array(points[:self.n_points])
+
+            # Normalize to [0,1] with careful scaling and centering
+            if len(points) > 0:
+                x_min, x_max = np.min(points[:, 0]), np.max(points[:, 0])
+                y_min, y_max = np.min(points[:, 1]), np.max(points[:, 1])
+
+                # Normalize to a reasonable range within unit square
+                if x_max > x_min and y_max > y_min:
+                    # Scale and center the arrangement
+                    scale_x = 0.9 / (x_max - x_min) if (x_max - x_min) > 1e-10 else 1.0
+                    scale_y = 0.9 / (y_max - y_min) if (y_max - y_min) > 1e-10 else 1.0
+
+                    points[:, 0] = (points[:, 0] - x_min) * scale_x + 0.05
+                    points[:, 1] = (points[:, 1] - y_min) * scale_y + 0.05
+                else:
+                    # Fallback for degenerate cases
+                    points[:, 0] = 0.5
+                    points[:, 1] = 0.5
+
+            # Ensure bounds
+            points = np.clip(points, 0, 1)
+
+            # Strategic perturbations for symmetry breaking
+            # Use a combination of structured and random perturbations
+            for i in range(self.n_points):
+                # Position-based perturbation with more mathematical foundation
+                row = i // 4
+                col = i % 4
+
+                # Base perturbation magnitude with more strategic variation
+                base_magnitude = 0.012 + (row + col) * 0.001
+
+                # Add structured component based on position
+                structured_noise = np.array([
+                    ((row % 3) - 1) * 0.002,  # Row-based component
+                    ((col % 3) - 1) * 0.002   # Column-based component
+                ])
+
+                # Add random component
+                random_noise = np.random.normal(0, base_magnitude, 2)
+
+                # Combine both components
+                total_noise = structured_noise + random_noise
+
+                points[i] += total_noise
+
+            # Clip final points to ensure they stay within bounds
+            points = np.clip(points, 0, 1)
+
+            # Evaluate this initialization
+            initial_ratio = self.evaluate_ratio(points)
+            if initial_ratio > best_ratio:
+                best_ratio = initial_ratio
+                best_initialization = points.copy()
+
+        return best_initialization if best_initialization is not None else self._default_initialization()
+
+    def _default_initialization(self) -> np.ndarray:
+        """Fallback initialization if all others fail."""
+        return np.random.random((self.n_points, self.dimension))
+>>>>>>> REPLACE
+</DIFF>

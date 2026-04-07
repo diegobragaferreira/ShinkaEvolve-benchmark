@@ -1,0 +1,348 @@
+<NAME>
+adaptive_grid_refinement
+</NAME>
+
+<DESCRIPTION>
+I'll implement an adaptive grid refinement strategy that improves the optimization by systematically exploring different spatial resolutions and refining the best configurations at finer scales. This approach combines the benefits of both global exploration (coarse grids) and local exploitation (fine grids) to achieve better convergence to optimal solutions.
+
+The key insight is to use a multi-resolution strategy where we start with coarse grids to quickly identify promising regions, then progressively refine in those areas with finer grids. This addresses the issue that the current program may get stuck in local optima due to insufficient exploration at appropriate scales.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def optimize_with_multi_start():
+    """Perform multi-start optimization to improve convergence."""
+    best_result = None
+    best_objective = float('inf')
+
+    # Try multiple starting configurations
+    num_starts = 5
+    configs = []
+
+    # Add symmetric configurations
+    for _ in range(3):
+        configs.append(generate_initial_symmetric_config())
+
+    # Add random configurations
+    for _ in range(2):
+        configs.append(generate_random_config())
+
+    # Perform optimization from each start
+    for start_idx, initial_config in enumerate(configs):
+        print(f"Starting optimization from configuration {start_idx + 1}")
+
+        # Reset adaptive mutation for each start
+        mutation_operator = AdaptiveMutation(initial_strength=1.0, decay_rate=0.95)
+
+        # Stage 1: Position-only optimization with fixed rotations
+        config_stage1 = initial_config.copy()
+        for i in range(12):
+            config_stage1[i*3 + 2] = 0  # Fix rotations initially
+
+        bounds_pos_only = [(None, None)] * 36
+        bounds_pos_only.extend([(1.0, 15.0)])  # Outer side length bound
+
+        try:
+            result1 = minimize(
+                lambda x: objective_function(np.concatenate([x, [x[-1]]])),
+                config_stage1[:-1],  # Only positions
+                method='L-BFGSB',
+                bounds=bounds_pos_only[:-1],
+                options={'maxiter': 200, 'ftol': 1e-6, 'gtol': 1e-6},
+                tol=1e-6
+            )
+            stage1_result = result1.x if result1.success else config_stage1[:-1]
+        except Exception:
+            stage1_result = config_stage1[:-1]
+
+        # Stage 2: Limited rotation adjustment with refined position
+        config_stage2 = np.concatenate([stage1_result, [config_stage1[-1]]])
+
+        # Allow some rotation adjustments for hexagons
+        for i in range(0, 12, 2):  # Every second hexagon gets rotation adjustment
+            config_stage2[i*3 + 2] = random.uniform(0, 30)
+
+        bounds_stage2 = [(None, None)] * 36
+        bounds_stage2.extend([(1.0, 15.0)])
+
+        try:
+            result2 = minimize(
+                objective_function,
+                config_stage2,
+                method='L-BFGSB',
+                bounds=bounds_stage2,
+                options={'maxiter': 200, 'ftol': 1e-7, 'gtol': 1e-7},
+                tol=1e-7
+            )
+            stage2_result = result2.x if result2.success else config_stage2
+        except Exception:
+            stage2_result = config_stage2
+
+        # Stage 3: Fine-tuned optimization with full freedom
+        try:
+            bounds_final = [(None, None)] * 36
+            bounds_final.extend([(1.0, 15.0)])
+
+            result_final = minimize(
+                objective_function,
+                stage2_result,
+                method='L-BFGSB',
+                bounds=bounds_final,
+                options={'maxiter': 200, 'ftol': 1e-8, 'gtol': 1e-8},
+                tol=1e-8
+            )
+
+            final_result = result_final.x if result_final.success else stage2_result
+
+        except Exception as e:
+            final_result = stage2_result
+
+        # Evaluate final result
+        objective_value = objective_function(final_result)
+        if objective_value < best_objective:
+            best_objective = objective_value
+            best_result = final_result
+
+    return best_result
+=======
+def optimize_with_adaptive_grid_refinement():
+    """Perform adaptive grid refinement optimization to improve convergence."""
+    best_result = None
+    best_objective = float('inf')
+    max_time = 170  # Leave some buffer for final processing
+
+    # Grid refinement levels: coarse, medium, fine
+    refinement_levels = [
+        {"grid_spacing": 1.0, "maxiter": 100, "ftol": 1e-5, "gtol": 1e-5},
+        {"grid_spacing": 0.5, "maxiter": 150, "ftol": 1e-6, "gtol": 1e-6},
+        {"grid_spacing": 0.2, "maxiter": 200, "ftol": 1e-7, "gtol": 1e-7}
+    ]
+
+    # Try multiple starting configurations
+    configs = []
+
+    # Add symmetric configurations
+    for _ in range(3):
+        configs.append(generate_initial_symmetric_config())
+
+    # Add random configurations
+    for _ in range(2):
+        configs.append(generate_random_config())
+
+    # Perform optimization from each start with multi-resolution approach
+    for start_idx, initial_config in enumerate(configs):
+        print(f"Starting optimization from configuration {start_idx + 1}")
+
+        # Track the best result found so far for this start
+        start_best_result = None
+        start_best_objective = float('inf')
+
+        # Apply adaptive grid refinement across multiple levels
+        for level_idx, level_config in enumerate(refinement_levels):
+            if time.time() - start_time > max_time:
+                break
+
+            print(f"  Refinement level {level_idx + 1} with spacing {level_config['grid_spacing']}")
+
+            # Create grid-refined version of the current configuration
+            if level_idx == 0:
+                # Start with original configuration
+                current_config = initial_config.copy()
+            else:
+                # Improve on previous best for this start
+                current_config = start_best_result.copy() if start_best_result is not None else initial_config.copy()
+
+            # Apply grid-based mutation to explore neighborhood
+            mutated_config = current_config.copy()
+
+            # For grid refinement, we want more structured exploration
+            # Adjust parameters based on grid spacing
+            grid_mutation_strength = level_config['grid_spacing'] * 0.3
+
+            # Mutate positions to sample around current configuration
+            for i in range(12):  # Only mutate position parameters
+                if i < 12:  # Position parameters
+                    # Apply grid-based perturbations
+                    if random.random() < 0.5:  # 50% chance to perturb
+                        mutated_config[i*3] += random.uniform(-grid_mutation_strength, grid_mutation_strength)
+                        mutated_config[i*3 + 1] += random.uniform(-grid_mutation_strength, grid_mutation_strength)
+
+                        # Ensure we don't go too far from reasonable bounds
+                        mutated_config[i*3] = np.clip(mutated_config[i*3], -10, 10)
+                        mutated_config[i*3 + 1] = np.clip(mutated_config[i*3 + 1], -10, 10)
+
+            # Stage 1: Position-only optimization with fixed rotations
+            config_stage1 = mutated_config.copy()
+            for i in range(12):
+                config_stage1[i*3 + 2] = 0  # Fix rotations initially
+
+            bounds_pos_only = [(None, None)] * 36
+            bounds_pos_only.extend([(1.0, 15.0)])  # Outer side length bound
+
+            try:
+                result1 = minimize(
+                    lambda x: objective_function(np.concatenate([x, [x[-1]]])),
+                    config_stage1[:-1],  # Only positions
+                    method='L-BFGSB',
+                    bounds=bounds_pos_only[:-1],
+                    options={'maxiter': level_config['maxiter'], 'ftol': level_config['ftol'], 'gtol': level_config['gtol']},
+                    tol=level_config['ftol']
+                )
+                stage1_result = result1.x if result1.success else config_stage1[:-1]
+            except Exception:
+                stage1_result = config_stage1[:-1]
+
+            # Stage 2: Limited rotation adjustment with refined position
+            config_stage2 = np.concatenate([stage1_result, [config_stage1[-1]]])
+
+            # Allow some rotation adjustments for hexagons
+            for i in range(0, 12, 2):  # Every second hexagon gets rotation adjustment
+                config_stage2[i*3 + 2] = random.uniform(0, 30)
+
+            bounds_stage2 = [(None, None)] * 36
+            bounds_stage2.extend([(1.0, 15.0)])
+
+            try:
+                result2 = minimize(
+                    objective_function,
+                    config_stage2,
+                    method='L-BFGSB',
+                    bounds=bounds_stage2,
+                    options={'maxiter': level_config['maxiter'], 'ftol': level_config['ftol'], 'gtol': level_config['gtol']},
+                    tol=level_config['ftol']
+                )
+                stage2_result = result2.x if result2.success else config_stage2
+            except Exception:
+                stage2_result = config_stage2
+
+            # Stage 3: Fine-tuned optimization with full freedom
+            try:
+                bounds_final = [(None, None)] * 36
+                bounds_final.extend([(1.0, 15.0)])
+
+                result_final = minimize(
+                    objective_function,
+                    stage2_result,
+                    method='L-BFGSB',
+                    bounds=bounds_final,
+                    options={'maxiter': level_config['maxiter'], 'ftol': level_config['ftol'], 'gtol': level_config['gtol']},
+                    tol=level_config['ftol']
+                )
+
+                final_result = result_final.x if result_final.success else stage2_result
+
+            except Exception as e:
+                final_result = stage2_result
+
+            # Evaluate final result at this refinement level
+            objective_value = objective_function(final_result)
+            if objective_value < start_best_objective:
+                start_best_objective = objective_value
+                start_best_result = final_result.copy()
+
+            # Early termination if we're approaching the benchmark
+            if objective_value < -0.24:  # Near the target
+                break
+
+        # Update global best if this start was better
+        if start_best_objective < best_objective:
+            best_objective = start_best_objective
+            best_result = start_best_result.copy()
+
+    return best_result
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    start_time = time.time()
+
+    try:
+        final_config = optimize_with_multi_start()
+
+        # Extract the final configuration
+        final_positions = final_config[:-1].reshape(12, 3)
+        final_side_length = final_config[-1]
+
+        # Return in the required format
+        inner_hex_data = final_positions.copy()
+        outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered
+
+        # Validate final result
+        valid, _ = evaluate_configuration_fast(final_config)
+        if not valid:
+            print("Warning: Final configuration may be invalid")
+            # Fallback to a better-known configuration
+            inner_hex_data, outer_hex_data, final_side_length = generate_fallback_config()
+
+    except Exception as e:
+        # Fallback to old method if anything goes wrong
+        print(f"Optimization error: {e}")
+        inner_hex_data, outer_hex_data, final_side_length = generate_fallback_config()
+
+    end_time = time.time()
+
+    # Calculate performance metrics
+    inv_outer_hex_side_length = 1.0 / final_side_length if final_side_length > 0 else 0.0
+    benchmark_ratio = inv_outer_hex_side_length / 0.2537
+
+    print(f"Optimized result: inverse_side_length={inv_outer_hex_side_length:.6f}, "
+          f"benchmark_ratio={benchmark_ratio:.6f}, eval_time={(end_time-start_time):.3f}s")
+
+    return inner_hex_data, outer_hex_data, final_side_length
+=======
+def hexagon_packing_12():
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    global start_time  # Make start_time accessible globally
+    start_time = time.time()
+
+    try:
+        final_config = optimize_with_adaptive_grid_refinement()
+
+        # Extract the final configuration
+        final_positions = final_config[:-1].reshape(12, 3)
+        final_side_length = final_config[-1]
+
+        # Return in the required format
+        inner_hex_data = final_positions.copy()
+        outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered
+
+        # Validate final result
+        valid, _ = evaluate_configuration_fast(final_config)
+        if not valid:
+            print("Warning: Final configuration may be invalid")
+            # Fallback to a better-known configuration
+            inner_hex_data, outer_hex_data, final_side_length = generate_fallback_config()
+
+    except Exception as e:
+        # Fallback to old method if anything goes wrong
+        print(f"Optimization error: {e}")
+        inner_hex_data, outer_hex_data, final_side_length = generate_fallback_config()
+
+    end_time = time.time()
+
+    # Calculate performance metrics
+    inv_outer_hex_side_length = 1.0 / final_side_length if final_side_length > 0 else 0.0
+    benchmark_ratio = inv_outer_hex_side_length / 0.2537
+
+    print(f"Optimized result: inverse_side_length={inv_outer_hex_side_length:.6f}, "
+          f"benchmark_ratio={benchmark_ratio:.6f}, eval_time={(end_time-start_time):.3f}s")
+
+    return inner_hex_data, outer_hex_data, final_side_length
+>>>>>>> REPLACE
+</DIFF>

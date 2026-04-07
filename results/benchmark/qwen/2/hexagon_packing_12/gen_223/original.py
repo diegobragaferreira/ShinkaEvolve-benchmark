@@ -1,0 +1,411 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial.distance import cdist
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
+from scipy.optimize import differential_evolution
+import time
+from typing import Tuple, List
+import warnings
+from numba import jit, prange
+
+class Hexagon:
+    """Represents a regular hexagon with side length 1"""
+
+    def __init__(self, center_x: float, center_y: float, rotation_deg: float):
+        self.center = np.array([center_x, center_y])
+        self.rotation = np.radians(rotation_deg)
+        self.side_length = 1.0
+
+    def vertices(self) -> np.ndarray:
+        """Return vertices of hexagon in counterclockwise order"""
+        # Unit hexagon vertices centered at origin
+        angles = np.linspace(0, 2*np.pi, 7)[:-1]  # 6 vertices + close loop
+        unit_vertices = np.column_stack([np.cos(angles), np.sin(angles)])
+
+        # Apply rotation and translation
+        cos_r, sin_r = np.cos(self.rotation), np.sin(self.rotation)
+        rotation_matrix = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+
+        rotated_vertices = rotation_matrix @ unit_vertices.T
+        translated_vertices = rotated_vertices.T + self.center
+
+        return translated_vertices
+
+    def area(self) -> float:
+        """Return area of hexagon"""
+        return (3 * np.sqrt(3) / 2) * self.side_length ** 2
+
+@jit(nopython=True)
+def hexagon_vertices_jit(x, y, angle_deg, side_length=1):
+    """Fast generation of hexagon vertices using numba"""
+    angle_rad = np.radians(angle_deg)
+    angles = np.arange(0, 6) * np.pi / 3
+    vertices = np.zeros((6, 2))
+    for i in range(6):
+        vertices[i, 0] = x + side_length * np.cos(angles[i] + angle_rad)
+        vertices[i, 1] = y + side_length * np.sin(angles[i] + angle_rad)
+    return vertices
+
+@jit(nopython=True)
+def point_in_polygon_fast(point, polygon):
+    """Fast point-in-polygon test using ray casting"""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+@jit(nopython=True)
+def point_in_hexagon_fast(point, hex_vertices):
+    """Fast point-in-hexagon test"""
+    return point_in_polygon_fast(point, hex_vertices)
+
+@jit(nopython=True)
+def distance_point_to_segment(point, seg_start, seg_end):
+    """Fast distance from point to line segment"""
+    px, py = point
+    x1, y1 = seg_start
+    x2, y2 = seg_end
+
+    # Vector from start to end
+    dx, dy = x2 - x1, y2 - y1
+    # Vector from start to point
+    px_minus_x1, py_minus_y1 = px - x1, py - y1
+
+    # Project point onto line
+    length_sq = dx*dx + dy*dy
+    if length_sq == 0:
+        return np.sqrt(px_minus_x1*px_minus_x1 + py_minus_y1*py_minus_y1)
+
+    t = (px_minus_x1*dx + py_minus_y1*dy) / length_sq
+    t = max(0, min(1, t))
+
+    # Closest point on segment
+    closest_x = x1 + t*dx
+    closest_y = y1 + t*dy
+
+    return np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+
+@jit(nopython=True)
+def hexagon_distance_fast(hex1_vertices, hex2_vertices):
+    """Fast computation of minimum distance between hexagons"""
+    min_dist = np.inf
+    for i in range(6):
+        p1 = hex1_vertices[i]
+        p2 = hex1_vertices[(i+1)%6]
+        for j in range(6):
+            q1 = hex2_vertices[j]
+            q2 = hex2_vertices[(j+1)%6]
+            dist = distance_point_to_segment(q1, p1, p2)
+            min_dist = min(min_dist, dist)
+    return min_dist
+
+def create_outer_hexagon(side_length: float, center_x: float = 0, center_y: float = 0) -> Polygon:
+    """Create outer hexagon as Shapely polygon"""
+    hex = Hexagon(center_x, center_y, 0)
+    outer_vertices = hex.vertices()
+    return Polygon(outer_vertices)
+
+def check_containment_fast(hexagon: Hexagon, outer_polygon: Polygon) -> bool:
+    """Fast containment check using precomputed vertices"""
+    vertices = hexagon.vertices()
+    # Use the fast numba version for point-in-polygon tests
+    for vertex in vertices:
+        point = Point(vertex[0], vertex[1])
+        if not outer_polygon.contains(point):
+            return False
+    return True
+
+def check_overlap_fast(hex1: Hexagon, hex2: Hexagon) -> bool:
+    """Fast overlap check with early rejection"""
+    # Get vertices using numba-optimized version
+    v1 = hexagon_vertices_jit(hex1.center[0], hex1.center[1], hex1.rotation)
+    v2 = hexagon_vertices_jit(hex2.center[0], hex2.center[1], hex2.rotation)
+
+    # Quick distance check first to reject most non-overlapping cases
+    center_dist = np.sqrt(np.sum((hex1.center - hex2.center)**2))
+    if center_dist > 2.0:  # Two unit hexagons can't overlap if center distance > 2
+        return False
+
+    # Use Shapely for precise overlap detection
+    poly1 = Polygon(v1)
+    poly2 = Polygon(v2)
+    return poly1.intersects(poly2)
+
+def validate_configuration_fast(inner_hexagons: List[Hexagon], outer_polygon: Polygon) -> Tuple[bool, bool]:
+    """
+    Fast validation configuration: check containment and overlap
+    Returns (is_valid, has_overlaps)
+    """
+    # Check containment using fast method
+    for hex in inner_hexagons:
+        if not check_containment_fast(hex, outer_polygon):
+            return False, False
+
+    # Check overlaps using fast method
+    for i in range(len(inner_hexagons)):
+        for j in range(i+1, len(inner_hexagons)):
+            if check_overlap_fast(inner_hexagons[i], inner_hexagons[j]):
+                return True, True
+
+    return True, False
+
+def calculate_objective(outer_side_length: float) -> float:
+    """Calculate 1/outer_hex_side_length"""
+    return 1.0 / outer_side_length
+
+@jit(nopython=True)
+def compute_outer_hex_side_length_fast(all_vertices):
+    """Fast computation of outer hexagon side length"""
+    # Find bounding circle center and radius
+    center_x = 0.0
+    center_y = 0.0
+    for i in range(len(all_vertices)):
+        center_x += all_vertices[i, 0]
+        center_y += all_vertices[i, 1]
+    center_x /= len(all_vertices)
+    center_y /= len(all_vertices)
+
+    # Calculate maximum distance from center to any vertex
+    max_distance = 0.0
+    for i in range(len(all_vertices)):
+        dx = all_vertices[i, 0] - center_x
+        dy = all_vertices[i, 1] - center_y
+        dist = np.sqrt(dx*dx + dy*dy)
+        if dist > max_distance:
+            max_distance = dist
+
+    # For a hexagon, we need side length >= max_distance * 2 / sqrt(3)
+    side_length = max_distance * 2 / np.sqrt(3)
+
+    return side_length
+
+def compute_outer_hex_side_length(inner_hexagons: List[Hexagon]) -> float:
+    """Compute minimum outer hexagon side length required to contain all inner hexagons"""
+    # Get all vertices from all hexagons
+    all_vertices = []
+    for hex in inner_hexagons:
+        all_vertices.extend(hex.vertices())
+
+    all_vertices = np.array(all_vertices)
+
+    # Use fast numba version
+    return compute_outer_hex_side_length_fast(all_vertices)
+
+def generate_initial_population(n_individuals: int, n_hexagons: int = 12) -> List[np.ndarray]:
+    """Generate initial population of valid configurations"""
+    population = []
+
+    # Try multiple random configurations
+    for _ in range(n_individuals):
+        # Start with a symmetric arrangement around center
+        positions = []
+        rotations = []
+
+        # Center hexagon
+        positions.append([0.0, 0.0])
+        rotations.append(0.0)
+
+        # Surrounding hexagons arranged in 2 rings
+        ring1_radius = 2.0
+        ring2_radius = 3.5
+
+        # First ring (5 hexagons)
+        for i in range(5):
+            angle = i * 2 * np.pi / 5
+            x = ring1_radius * np.cos(angle)
+            y = ring1_radius * np.sin(angle)
+            positions.append([x, y])
+            rotations.append(0.0)
+
+        # Second ring (6 hexagons)
+        for i in range(6):
+            angle = i * 2 * np.pi / 6 + np.pi/6  # offset to interleave
+            x = ring2_radius * np.cos(angle)
+            y = ring2_radius * np.sin(angle)
+            positions.append([x, y])
+            rotations.append(0.0)
+
+        # Add some random noise to make it diverse
+        individual = np.array(positions + rotations).flatten()
+        individual += np.random.normal(0, 0.5, len(individual))
+        population.append(individual)
+
+    return population
+
+def fitness_function(params: np.ndarray, outer_side_length: float = 10.0) -> float:
+    """
+    Fitness function to minimize negative of 1/outer_hex_side_length
+    This assumes params contains [x1,y1,theta1,x2,y2,theta2,...]
+    """
+    n_hexagons = 12
+    hex_params = params.reshape(-1, 3)
+
+    # Create hexagons
+    inner_hexagons = []
+    for i in range(n_hexagons):
+        x, y, theta = hex_params[i]
+        inner_hexagons.append(Hexagon(x, y, theta))
+
+    # Create outer hexagon of given size
+    outer_polygon = create_outer_hexagon(outer_side_length)
+
+    # Validate configuration using fast method
+    is_valid, has_overlaps = validate_configuration_fast(inner_hexagons, outer_polygon)
+
+    if not is_valid:
+        # Penalize invalid configurations heavily
+        return 1e6
+
+    # Compute actual outer hexagon size needed
+    actual_size = compute_outer_hex_side_length(inner_hexagons)
+
+    if actual_size > outer_side_length:
+        # Configuration requires larger outer hexagon
+        return 1e6
+
+    # Return negative of 1/actual_size to maximize 1/size
+    return -1.0 / actual_size
+
+def optimize_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    """Main optimization function"""
+    start_time = time.time()
+
+    # Define bounds for optimization
+    # Each hexagon has (x,y,rotation) = 3 parameters
+    bounds = []
+    for i in range(12):
+        # X and Y positions: typically within reasonable bounds
+        bounds.extend([(-8.0, 8.0), (-8.0, 8.0)])  # Positions
+        # Rotation: 0-360 degrees
+        bounds.append((0, 360))  # Rotations
+
+    # Initial guess with a good symmetric layout
+    initial_guess = []
+    base_positions = [
+        [0, 0], [0, 2.5], [0, -2.5],
+        [2.17, 1.25], [-2.17, 1.25], [2.17, -1.25], [-2.17, -1.25],
+        [4.34, 0], [0, 4.34], [0, -4.34], [4.34, 2.17], [-4.34, 2.17], [4.34, -2.17], [-4.34, -2.17]
+    ]
+
+    initial_guess = []
+    for i in range(12):
+        x, y = base_positions[i]
+        initial_guess.extend([x, y, 0])  # No rotation initially
+
+    # Optimization using differential evolution
+    try:
+        # Set a time limit to ensure we don't exceed 180 seconds
+        result = differential_evolution(
+            lambda x: fitness_function(x, 8.0),
+            bounds,
+            maxiter=100,
+            popsize=15,
+            init='random',
+            seed=42,
+            disp=False,
+            tol=1e-6
+        )
+
+        if result.success:
+            # Extract final configuration
+            final_params = result.x
+            hex_params = final_params.reshape(-1, 3)
+
+            # Create hexagons from final parameters
+            inner_hexagons = []
+            for i in range(12):
+                x, y, theta = hex_params[i]
+                inner_hexagons.append(Hexagon(x, y, theta))
+
+            # Compute actual outer hexagon size
+            outer_side_length = compute_outer_hex_side_length(inner_hexagons)
+
+            # Convert back to expected format
+            inner_hex_data = hex_params.copy()
+            outer_hex_data = np.array([0.0, 0.0, 0.0])  # Centered
+
+            return inner_hex_data, outer_hex_data, outer_side_length
+        else:
+            # If optimization failed, return the initial configuration with improved bounds
+            warnings.warn("Optimization did not converge, returning initial configuration")
+
+    except Exception as e:
+        warnings.warn(f"Optimization error: {str(e)}")
+
+    # Fallback to simple symmetric arrangement
+    inner_hex_data = np.array([
+        [0, 0, 0],          # center
+        [0, 2.5, 0],        # up
+        [0, -2.5, 0],       # down
+        [2.17, 1.25, 0],    # upper right
+        [-2.17, 1.25, 0],   # upper left
+        [2.17, -1.25, 0],   # lower right
+        [-2.17, -1.25, 0],  # lower left
+        [4.34, 0, 0],       # far right
+        [0, 4.34, 0],       # far up
+        [0, -4.34, 0],      # far down
+        [4.34, 2.17, 0],    # far upper right
+        [-4.34, 2.17, 0],   # far upper left
+    ])
+
+    outer_hex_data = np.array([0, 0, 0])
+    outer_side_length = 8.0
+
+    return inner_hex_data, outer_hex_data, outer_side_length
+
+def hexagon_packing_12() -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Constructs a packing of 12 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (12,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Ensure we don't exceed the 180 second limit by setting a timeout
+    try:
+        inner_hex_data, outer_hex_data, outer_hex_side_length = optimize_packing()
+
+        # Calculate benchmark ratio
+        benchmark_ratio = calculate_objective(outer_hex_side_length) / 0.2537
+
+        # Output metrics for verification
+        print(f"inv_outer_hex_side_length: {calculate_objective(outer_hex_side_length):.8f}")
+        print(f"benchmark_ratio: {benchmark_ratio:.8f}")
+        print(f"eval_time: {time.time() - start_time:.4f}s")
+
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+    except Exception as e:
+        print(f"Error in hexagon packing: {e}")
+        # Return fallback configuration
+        inner_hex_data = np.array([
+            [0, 0, 0],
+            [-2.5, 0, 0],
+            [2.5, 0, 0],
+            [-1.25, 2.17, 0],
+            [1.25, 2.17, 0],
+            [-1.25, -2.17, 0],
+            [1.25, -2.17, 0],
+            [-3.75, 2.17, 0],
+            [3.75, 2.17, 0],
+            [-3.75, -2.17, 0],
+            [3.75, -2.17, 0],
+            [0, -4, 0],
+        ])
+        outer_hex_data = np.array([0, 0, 0])
+        outer_hex_side_length = 8.0
+        return inner_hex_data, outer_hex_data, outer_hex_side_length
+
+# EVOLVE-BLOCK-END

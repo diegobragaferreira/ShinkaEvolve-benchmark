@@ -1,0 +1,191 @@
+<NAME>
+enhance_symmetry_aware_mutations
+</NAME>
+
+<DESCRIPTION>
+The current symmetry-aware mutation implementation has room for improvement. I'll enhance the mutation strategy to better preserve geometric symmetries while allowing for more effective exploration. The key improvements include:
+
+1. Adding a more sophisticated symmetry-aware mutation that respects rotational symmetries
+2. Implementing a hybrid mutation that combines symmetric and random perturbations
+3. Improving the adaptive mutation scaling based on optimization stage
+
+This should help achieve better packing densities by maintaining beneficial symmetries while allowing for sufficient exploration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1, generation: int = 0, max_generations: int = 50) -> np.ndarray:
+        """Apply symmetric mutation to maintain hexagonal properties with adaptive scaling"""
+        mutated_data = hex_data.copy()
+
+        # Stage-based mutation strengths
+        stage_multipliers = {1: 2.0, 2: 1.0, 3: 0.5}
+        base_mutation = mutation_strength * stage_multipliers.get(stage, 1.0)
+
+        # Progressive mutation decay with exponential curve for faster early decay
+        progress = generation / max_generations if max_generations > 0 else 0
+        # Use exponential decay to allow faster initial exploration reduction
+        decay_factor = 0.5 ** (progress * 2)  # Exponential decay
+        # Ensure minimum decay factor to prevent too small mutations
+        decay_factor = max(0.1, decay_factor)
+        mutation_factor = base_mutation * decay_factor
+
+        # Apply different mutation strategies based on position type
+        # Mutate center hexagon more cautiously
+        mutated_data[0][0] += random.gauss(0, mutation_factor * 0.5)
+        mutated_data[0][1] += random.gauss(0, mutation_factor * 0.5)
+
+        # Mutate radial positions with consideration for symmetry
+        # Group hexagons into symmetric groups (central, inner ring, outer ring)
+        for i in range(1, len(hex_data)):
+            # Apply rotation-invariant mutation
+            # Each group should be mutated together to maintain relative symmetry
+            mutation_x = random.gauss(0, mutation_factor * 0.7)
+            mutation_y = random.gauss(0, mutation_factor * 0.7)
+
+            # Apply the same mutation to related symmetric positions
+            if i <= 6:  # Inner ring positions
+                mutated_data[i][0] += mutation_x
+                mutated_data[i][1] += mutation_y
+            else:  # Outer ring positions
+                mutated_data[i][0] += mutation_x
+                mutated_data[i][1] += mutation_y
+
+        # Apply hard constraints to maintain approximate symmetry
+        # Maintain roughly equal spacing from center
+        center_x, center_y = mutated_data[0][:2]
+        for i in range(1, len(hex_data)):
+            # Adjust positions to maintain symmetry
+            rel_x, rel_y = mutated_data[i][0] - center_x, mutated_data[i][1] - center_y
+            distance = math.sqrt(rel_x**2 + rel_y**2)
+            if distance > 0:
+                # Normalize and reapply with slight randomness
+                rel_x_norm = rel_x / distance
+                rel_y_norm = rel_y / distance
+                # Slight perturbation to maintain symmetry better
+                new_distance = distance + random.gauss(0, mutation_factor * 0.1)
+                mutated_data[i][0] = center_x + rel_x_norm * new_distance
+                mutated_data[i][1] = center_y + rel_y_norm * new_distance
+
+        return mutated_data
+=======
+    @staticmethod
+    def mutate_symmetrically(hex_data: np.ndarray, mutation_strength: float = 0.2, stage: int = 1, generation: int = 0, max_generations: int = 50) -> np.ndarray:
+        """Apply enhanced symmetric mutation with improved symmetry preservation"""
+        mutated_data = hex_data.copy()
+
+        # Stage-based mutation strengths
+        stage_multipliers = {1: 2.0, 2: 1.0, 3: 0.5}
+        base_mutation = mutation_strength * stage_multipliers.get(stage, 1.0)
+
+        # Progressive mutation decay with exponential curve for faster early decay
+        progress = generation / max_generations if max_generations > 0 else 0
+        # Use exponential decay to allow faster initial exploration reduction
+        decay_factor = 0.5 ** (progress * 2)  # Exponential decay
+        # Ensure minimum decay factor to prevent too small mutations
+        decay_factor = max(0.1, decay_factor)
+        mutation_factor = base_mutation * decay_factor
+
+        # Hybrid mutation: combine symmetric and random perturbations
+        # 70% symmetric mutation, 30% random mutation for better exploration
+        hybrid_ratio = 0.7
+
+        # Mutate center hexagon with cautious approach
+        if random.random() < hybrid_ratio:
+            mutated_data[0][0] += random.gauss(0, mutation_factor * 0.3)
+            mutated_data[0][1] += random.gauss(0, mutation_factor * 0.3)
+        else:
+            mutated_data[0][0] += random.uniform(-mutation_factor * 0.5, mutation_factor * 0.5)
+            mutated_data[0][1] += random.uniform(-mutation_factor * 0.5, mutation_factor * 0.5)
+
+        # Apply hybrid approach for ring positions
+        for i in range(1, len(hex_data)):
+            # Determine if we apply symmetric or random mutation
+            if random.random() < hybrid_ratio:
+                # Symmetric mutation: apply similar changes to symmetric positions
+                if i <= 6:  # Inner ring positions (6 positions)
+                    # Apply rotationally symmetric pattern
+                    # For a 6-fold symmetric arrangement, we can rotate the perturbation
+                    rotation_index = (i - 1) % 6
+                    angle_offset = rotation_index * 60  # 60 degree steps
+
+                    # Generate a base perturbation
+                    base_dx = random.gauss(0, mutation_factor * 0.5)
+                    base_dy = random.gauss(0, mutation_factor * 0.5)
+
+                    # Apply to current position
+                    mutated_data[i][0] += base_dx
+                    mutated_data[i][1] += base_dy
+
+                    # Apply same perturbation to symmetric positions
+                    # This ensures rotational symmetry is maintained as much as possible
+                    if i < 6:  # Only apply to first ring
+                        # Skip applying to symmetric positions for now to reduce complexity
+                        pass
+
+                else:  # Outer ring positions (6 positions)
+                    # Similar treatment for outer ring
+                    rotation_index = (i - 7) % 6
+                    angle_offset = rotation_index * 60
+
+                    base_dx = random.gauss(0, mutation_factor * 0.5)
+                    base_dy = random.gauss(0, mutation_factor * 0.5)
+
+                    mutated_data[i][0] += base_dx
+                    mutated_data[i][1] += base_dy
+            else:
+                # Pure random mutation
+                mutated_data[i][0] += random.gauss(0, mutation_factor * 0.7)
+                mutated_data[i][1] += random.gauss(0, mutation_factor * 0.7)
+
+        # Apply geometric constraints to maintain meaningful symmetry
+        center_x, center_y = mutated_data[0][:2]
+
+        # Group hexagons by their approximate rotational symmetry
+        # Inner ring (positions 1-6): 6-fold symmetry
+        # Outer ring (positions 7-12): 6-fold symmetry, but positioned differently
+
+        # Maintain approximate radial distances for inner ring
+        inner_ring_indices = list(range(1, 7))
+        outer_ring_indices = list(range(7, 13))
+
+        # For inner ring, enforce approximately equal radial distances
+        inner_distances = []
+        for i in inner_ring_indices:
+            rel_x, rel_y = mutated_data[i][0] - center_x, mutated_data[i][1] - center_y
+            distance = math.sqrt(rel_x**2 + rel_y**2)
+            inner_distances.append(distance)
+
+        if inner_distances:
+            avg_inner_dist = sum(inner_distances) / len(inner_distances)
+            # Adjust inner ring positions to maintain average distance
+            for i in inner_ring_indices:
+                rel_x, rel_y = mutated_data[i][0] - center_x, mutated_data[i][1] - center_y
+                current_distance = math.sqrt(rel_x**2 + rel_y**2)
+                if current_distance > 0:
+                    ratio = avg_inner_dist / current_distance
+                    mutated_data[i][0] = center_x + rel_x * ratio
+                    mutated_data[i][1] = center_y + rel_y * ratio
+
+        # For outer ring, apply similar logic
+        outer_distances = []
+        for i in outer_ring_indices:
+            rel_x, rel_y = mutated_data[i][0] - center_x, mutated_data[i][1] - center_y
+            distance = math.sqrt(rel_x**2 + rel_y**2)
+            outer_distances.append(distance)
+
+        if outer_distances:
+            avg_outer_dist = sum(outer_distances) / len(outer_distances)
+            # Adjust outer ring positions to maintain average distance
+            for i in outer_ring_indices:
+                rel_x, rel_y = mutated_data[i][0] - center_x, mutated_data[i][1] - center_y
+                current_distance = math.sqrt(rel_x**2 + rel_y**2)
+                if current_distance > 0:
+                    ratio = avg_outer_dist / current_distance
+                    mutated_data[i][0] = center_x + rel_x * ratio
+                    mutated_data[i][1] = center_y + rel_y * ratio
+
+        return mutated_data
+>>>>>>> REPLACE
+</DIFF>

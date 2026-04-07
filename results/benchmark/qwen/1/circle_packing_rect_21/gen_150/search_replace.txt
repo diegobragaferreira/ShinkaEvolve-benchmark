@@ -1,0 +1,322 @@
+<NAME>
+adaptive_voronoi_mutation
+</NAME>
+
+<DESCRIPTION>
+The current implementation uses Voronoi areas to guide mutation scaling but doesn't fully leverage the relationship between Voronoi cell size and constraint density. I'll enhance the approach by implementing a more sophisticated Voronoi-based adaptive mutation that:
+
+1. Uses Voronoi cell areas to identify constraint-dense vs sparse regions
+2. Applies different mutation strategies based on local constraint density
+3. Implements more aggressive expansion in sparse regions and conservative adjustments in dense regions
+4. Adds proper fallback mechanisms for edge cases
+
+This builds upon the existing Voronoi infrastructure while making smarter use of the geometric information to guide the optimization process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle with perimeter = 4, so width + height = 2
+    # Optimal rectangle: 1.5 x 0.5 (width x height) for better packing efficiency
+    rect_width = 1.5
+    rect_height = 0.5
+
+    # Phase 1: Initial placement using hexagonal lattice with adaptive spacing
+    circles = np.zeros((n, 3))
+
+    # Hexagonal packing arrangement adapted for rectangular container
+    rows = 4
+    cols = 6
+
+    # Calculate spacing based on rectangle dimensions
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+
+    # Place circles in hexagonal pattern
+    idx = 0
+    for i in range(rows):
+        offset = spacing_x * (i % 2) * 0.5  # Offset every other row
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x + offset
+            y = (i + 1) * spacing_y
+
+            # Ensure position is within bounds
+            x = max(0.01, min(rect_width - 0.01, x))
+            y = max(0.01, min(rect_height - 0.01, y))
+
+            # Set initial radius to a small value
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+
+        if idx >= n:
+            break
+
+    # Fill remaining circles if needed
+    while idx < n:
+        x = np.random.uniform(0.01, rect_width - 0.01)
+        y = np.random.uniform(0.01, rect_height - 0.01)
+        circles[idx] = [x, y, 0.05]
+        idx += 1
+
+    # Phase 2: Voronoi-based optimization with adaptive mutation
+    max_iterations = 200
+    for iteration in range(max_iterations):
+        # Compute Voronoi diagram for current configuration
+        points = circles[:, :2]  # x, y coordinates only
+        voronoi_areas = calculate_voronoi_areas(points)
+
+        # Phase 3: Optimized expansion based on Voronoi analysis and adaptive mutation
+        improved = False
+
+        # Sort circles by Voronoi area (descending - largest areas first)
+        # Large Voronoi cells = sparse regions = more room to expand
+        sorted_indices = np.argsort(voronoi_areas)[::-1]
+
+        # Try to expand circles that have room to grow
+        for i in sorted_indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # If we can expand and there's significant improvement
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Adaptive expansion: scale based on Voronoi cell area
+                # Smaller cells (denser regions) = smaller mutations
+                # Larger cells (sparse regions) = larger mutations
+                base_delta = min(0.02, max_radius - circles[i][2])
+
+                # Normalize Voronoi area to [0,1] scale for mutation factor
+                normalized_area = voronoi_areas[i] / (rect_width * rect_height) if voronoi_areas[i] > 0 else 0.01
+                # Map area to mutation factor: 0.01 to 1.0
+                mutation_factor = 0.01 + 0.99 * (1.0 - np.exp(-normalized_area * 5.0))
+
+                # Apply adaptive mutation with base_delta scaled by Voronoi factor
+                delta = base_delta * mutation_factor
+
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+
+        # Early stopping if no improvement
+        if not improved:
+            break
+
+    # Phase 4: Final refinement using iterative local optimization
+    for _ in range(100):
+        improved = False
+        for i in range(n):
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # Increase radius if beneficial
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Try to increase by a small amount
+                new_radius = min(max_radius, circles[i][2] + 0.01)
+                if new_radius > circles[i][2]:
+                    circles[i][2] = new_radius
+                    improved = True
+
+        # Stop if no improvement made
+        if not improved:
+            break
+
+    return circles
+=======
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    n = 21
+    # Rectangle with perimeter = 4, so width + height = 2
+    # Optimal rectangle: 1.5 x 0.5 (width x height) for better packing efficiency
+    rect_width = 1.5
+    rect_height = 0.5
+
+    # Phase 1: Initial placement using hexagonal lattice with adaptive spacing
+    circles = np.zeros((n, 3))
+
+    # Hexagonal packing arrangement adapted for rectangular container
+    rows = 4
+    cols = 6
+
+    # Calculate spacing based on rectangle dimensions
+    spacing_x = rect_width / (cols + 1)
+    spacing_y = rect_height / (rows + 1)
+
+    # Place circles in hexagonal pattern
+    idx = 0
+    for i in range(rows):
+        offset = spacing_x * (i % 2) * 0.5  # Offset every other row
+        for j in range(cols):
+            if idx >= n:
+                break
+            x = (j + 1) * spacing_x + offset
+            y = (i + 1) * spacing_y
+
+            # Ensure position is within bounds
+            x = max(0.01, min(rect_width - 0.01, x))
+            y = max(0.01, min(rect_height - 0.01, y))
+
+            # Set initial radius to a small value
+            circles[idx] = [x, y, 0.05]
+            idx += 1
+
+        if idx >= n:
+            break
+
+    # Fill remaining circles if needed
+    while idx < n:
+        x = np.random.uniform(0.01, rect_width - 0.01)
+        y = np.random.uniform(0.01, rect_height - 0.01)
+        circles[idx] = [x, y, 0.05]
+        idx += 1
+
+    # Phase 2: Voronoi-based optimization with advanced adaptive mutation
+    max_iterations = 200
+    for iteration in range(max_iterations):
+        # Compute Voronoi diagram for current configuration
+        points = circles[:, :2]  # x, y coordinates only
+        voronoi_areas = calculate_voronoi_areas(points)
+
+        # Phase 3: Optimized expansion based on Voronoi analysis and adaptive mutation
+        improved = False
+
+        # Sort circles by Voronoi area (descending - largest areas first)
+        # Large Voronoi cells = sparse regions = more room to expand
+        sorted_indices = np.argsort(voronoi_areas)[::-1]
+
+        # Try to expand circles that have room to grow
+        for i in sorted_indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # If we can expand and there's significant improvement
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Enhanced adaptive expansion with constraint-aware mutation
+                base_delta = min(0.02, max_radius - circles[i][2])
+
+                # Determine constraint density level
+                normalized_area = voronoi_areas[i] / (rect_width * rect_height) if voronoi_areas[i] > 0 else 0.01
+
+                # Classify constraint density:
+                # - Very sparse (large Voronoi area): aggressive expansion
+                # - Sparse (moderate area): moderate expansion
+                # - Dense (small area): conservative expansion
+                # - Very dense (very small area): minimal expansion
+                if normalized_area > 0.1:  # Very sparse
+                    mutation_factor = 1.0  # Full expansion
+                elif normalized_area > 0.05:  # Sparse
+                    mutation_factor = 0.7  # Moderate expansion
+                elif normalized_area > 0.01:  # Dense
+                    mutation_factor = 0.3  # Conservative expansion
+                else:  # Very dense
+                    mutation_factor = 0.1  # Minimal expansion
+
+                # Apply adaptive mutation with enhanced scaling
+                delta = base_delta * mutation_factor
+
+                if delta > 0.001:
+                    circles[i][2] += delta
+                    improved = True
+
+        # Early stopping if no improvement
+        if not improved and iteration > 50:
+            break
+
+    # Phase 4: Final refinement using iterative local optimization with boundary awareness
+    for _ in range(100):
+        improved = False
+        # Process circles in random order for better exploration
+        indices = list(range(n))
+        np.random.shuffle(indices)
+
+        for i in indices:
+            # Calculate maximum allowable radius for this circle
+            max_radius = min(
+                circles[i][0],  # Distance to left edge
+                rect_width - circles[i][0],  # Distance to right edge
+                circles[i][1],  # Distance to bottom edge
+                rect_height - circles[i][1]   # Distance to top edge
+            ) - 0.001
+
+            # Consider collision constraints with neighbors
+            for j in range(n):
+                if i != j:
+                    dx = circles[i][0] - circles[j][0]
+                    dy = circles[i][1] - circles[j][1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    collision_radius = distance - circles[j][2] - 0.001
+                    if collision_radius > 0:
+                        max_radius = min(max_radius, collision_radius)
+
+            # Increase radius if beneficial
+            if max_radius > circles[i][2] and max_radius > 0.001:
+                # Use smaller increments in final phase for fine-tuning
+                delta = min(0.005, max_radius - circles[i][2])
+                if delta > 0.0005:
+                    circles[i][2] += delta
+                    improved = True
+
+        # Stop if no improvement made
+        if not improved:
+            break
+
+    return circles
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,253 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from shapely.geometry import Polygon
+import math
+from scipy.optimize import differential_evolution, minimize
+import time
+
+def create_regular_hexagon(center_x, center_y, side_length=1, rotation_deg=0):
+    """Create a regular hexagon as a Shapely polygon"""
+    rotation_rad = math.radians(rotation_deg)
+    points = []
+    for i in range(6):
+        angle = rotation_rad + i * math.pi / 3
+        x = center_x + side_length * math.cos(angle)
+        y = center_y + side_length * math.sin(angle)
+        points.append((x, y))
+    return Polygon(points)
+
+def check_containment_and_overlap(inner_hexagons, outer_hexagon):
+    """Check if all inner hexagons are contained in outer hexagon and don't overlap"""
+    # Fast containment check first
+    for hex_poly in inner_hexagons:
+        # Use fast point-in-polygon check on one vertex for early rejection
+        if not outer_hexagon.contains(hex_poly):
+            return False
+
+    # Pairwise overlap checks with early termination
+    n = len(inner_hexagons)
+    for i in range(n):
+        for j in range(i+1, n):
+            if inner_hexagons[i].intersects(inner_hexagons[j]):
+                return False
+    return True
+
+def compute_outer_hexagon_radius(inner_hexagons, padding=0.01):
+    """Compute minimum radius needed to contain all inner hexagons with some padding"""
+    if not inner_hexagons:
+        return padding
+        
+    # Vectorized approach for better performance
+    all_vertices = []
+    for hex_poly in inner_hexagons:
+        all_vertices.extend(list(hex_poly.exterior.coords))
+
+    if not all_vertices:
+        return padding
+
+    # Use numpy for faster computations
+    vertices_array = np.array(all_vertices)
+    center_x = (np.min(vertices_array[:, 0]) + np.max(vertices_array[:, 0])) / 2
+    center_y = (np.min(vertices_array[:, 1]) + np.max(vertices_array[:, 1])) / 2
+    
+    # Vectorized distance calculation
+    distances = np.sqrt((vertices_array[:, 0] - center_x)**2 + (vertices_array[:, 1] - center_y)**2)
+    max_dist = np.max(distances)
+    
+    return max_dist + padding
+
+def evaluate_layout(inner_positions_angles, outer_center=(0, 0), initial_outer_radius=8):
+    """Evaluate the layout quality"""
+    # Convert to hexagon polygons efficiently
+    inner_hexagons = []
+    for pos_angle in inner_positions_angles:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+
+    # Create outer hexagon with current radius
+    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    outer_hexagon = create_regular_hexagon(outer_center[0], outer_center[1], outer_radius, 0)
+
+    # Validate constraints
+    valid = check_containment_and_overlap(inner_hexagons, outer_hexagon)
+
+    # Return negative because we want to maximize 1/R (minimize R)
+    outer_side_length = outer_radius
+    inv_radius = 1.0 / outer_side_length if valid else 0.0
+
+    return -inv_radius, outer_side_length
+
+def generate_better_initial_config():
+    """
+    Generate a better initial configuration for 11 hexagons based on known dense packings
+    """
+    # Improved hexagonal arrangement based on research on dense packings
+    initial_positions = [
+        # Central hexagon
+        [0.0, 0.0, 0.0],
+        # First ring (6 hexagons) - arranged in a hexagonal pattern
+        [-1.732, 0.0, 0.0],      # Left
+        [1.732, 0.0, 0.0],       # Right
+        [0.0, 1.732, 0.0],       # Top
+        [0.0, -1.732, 0.0],      # Bottom
+        [-0.866, 1.5, 0.0],      # Top-left
+        [0.866, 1.5, 0.0],       # Top-right
+        # Second ring (4 hexagons) - slightly offset to allow for better packing
+        [-0.866, -1.5, 0.0],     # Bottom-left
+        [0.866, -1.5, 0.0],      # Bottom-right
+        [-1.732, 1.0, 0.0],      # Far top-left
+        [1.732, 1.0, 0.0],       # Far top-right
+        [-1.732, -1.0, 0.0],     # Far bottom-left
+        [1.732, -1.0, 0.0],      # Far bottom-right
+    ]
+
+    # Keep only first 11 positions (the 11 required hexagons)
+    return np.array(initial_positions[:11])
+
+def hexagon_packing_11():
+    """
+    Constructs a packing of 11 disjoint unit regular hexagons inside a larger regular hexagon, maximizing 1/outer_hex_side_length.
+    Returns
+        inner_hex_data: np.ndarray of shape (11,3), where each row is of the form (x, y, angle_degrees) containing the (x,y) coordinates and angle_degree of the respective inner hexagon.
+        outer_hex_data: np.ndarray of shape (3,) of form (x,y,angle_degree) containing the (x,y) coordinates and angle_degree of the outer hexagon.
+        outer_hex_side_length: float representing the side length of the outer hexagon.
+    """
+    # Generate a better initial configuration
+    initial_positions = generate_better_initial_config()
+    inner_hex_data = initial_positions.copy()
+
+    # Optimization bounds for each parameter (x, y, angle)
+    bounds = []
+    for i in range(11):
+        # Reasonable bounds to keep solutions in a practical region
+        bounds.extend([(-8, 8), (-8, 8), (0, 360)])  # angle in degrees
+
+    # Define objective function for optimization
+    def objective(params):
+        # Reshape parameters into positions and angles
+        positions_angles = []
+        for i in range(11):
+            x = params[i*3]
+            y = params[i*3 + 1]
+            angle = params[i*3 + 2]
+            positions_angles.append([x, y, angle])
+
+        score, side_length = evaluate_layout(positions_angles)
+        return score  # Negative since we minimize -score = maximize score
+
+    # Two-stage optimization approach
+    best_score = float('inf')  # We'll minimize this
+    best_inner_data = inner_hex_data.copy()
+    best_outer_side_length = 10.0
+
+    # Stage 1: Coarse global optimization with lower resolution
+    try:
+        print("Starting coarse global optimization...")
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=80,
+            popsize=15,
+            seed=42,
+            tol=1e-6,
+            mutation=(0.5, 1),
+            recombination=0.7,
+            disp=False
+        )
+
+        # Extract best solution from coarse optimization
+        best_params = result.x
+        final_positions_angles = []
+        for i in range(11):
+            x = best_params[i*3]
+            y = best_params[i*3 + 1]
+            angle = best_params[i*3 + 2]
+            final_positions_angles.append([x, y, angle])
+
+        # Evaluate final result
+        final_score, final_side_length = evaluate_layout(final_positions_angles)
+
+        if final_score < best_score and final_side_length > 0:
+            best_score = final_score
+            best_inner_data = np.array(final_positions_angles)
+            best_outer_side_length = final_side_length
+
+    except Exception as e:
+        print(f"Coarse optimization failed: {e}")
+        pass
+
+    # Stage 2: Fine-grained local optimization with L-BFGS-B
+    if best_score < float('inf'):
+        print("Starting fine-grained local optimization...")
+
+        # Convert to flat array for scipy optimization
+        initial_flat = []
+        for pos_angle in best_inner_data:
+            initial_flat.extend(pos_angle)
+
+        # Local refinement with L-BFGS-B
+        try:
+            result_local = minimize(
+                objective,
+                initial_flat,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100, 'ftol': 1e-8, 'gtol': 1e-8},
+                callback=None
+            )
+
+            # Extract refined solution
+            refined_params = result_local.x
+            refined_positions_angles = []
+            for i in range(11):
+                x = refined_params[i*3]
+                y = refined_params[i*3 + 1]
+                angle = refined_params[i*3 + 2]
+                refined_positions_angles.append([x, y, angle])
+
+            # Evaluate refined result
+            refined_score, refined_side_length = evaluate_layout(refined_positions_angles)
+
+            if refined_score < best_score and refined_side_length > 0:
+                best_score = refined_score
+                best_inner_data = np.array(refined_positions_angles)
+                best_outer_side_length = refined_side_length
+
+        except Exception as e:
+            print(f"Fine optimization failed: {e}")
+            pass
+
+    # Final validation and refinement
+    print("Performing final validation...")
+
+    # Always validate the result
+    inner_hexagons = []
+    for pos_angle in best_inner_data:
+        x, y, angle = pos_angle
+        hex_poly = create_regular_hexagon(x, y, 1, angle)
+        inner_hexagons.append(hex_poly)
+
+    # Recompute outer hexagon size carefully
+    outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+    outer_hexagon = create_regular_hexagon(0, 0, outer_radius, 0)
+
+    # Final validation check
+    if not check_containment_and_overlap(inner_hexagons, outer_hexagon):
+        print("Final validation failed, using fallback...")
+        # Fall back to initial configuration
+        best_inner_data = initial_positions.copy()
+        inner_hexagons = []
+        for pos_angle in best_inner_data:
+            x, y, angle = pos_angle
+            hex_poly = create_regular_hexagon(x, y, 1, angle)
+            inner_hexagons.append(hex_poly)
+        outer_radius = compute_outer_hexagon_radius(inner_hexagons, 0.01)
+
+    # Ensure we're returning the correct data format
+    outer_hex_data = np.array([0, 0, 0])  # centered at origin
+
+    # Return results
+    return best_inner_data, outer_hex_data, outer_radius
+
+# EVOLVE-BLOCK-END

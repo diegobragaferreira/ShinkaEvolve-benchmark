@@ -1,0 +1,102 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+from scipy.spatial.distance import cdist
+import numba
+from numba import jit
+import time
+
+@jit(nopython=True)
+def compute_min_max_ratio(points):
+    """Compute min/max distance ratio using numba-compiled distance calculation"""
+    n = points.shape[0]
+    min_dist = 1e10
+    max_dist = 0.0
+    
+    for i in range(n):
+        for j in range(i+1, n):
+            dx = points[i, 0] - points[j, 0]
+            dy = points[i, 1] - points[j, 1]
+            dz = points[i, 2] - points[j, 2]
+            dist_sq = dx*dx + dy*dy + dz*dz
+            dist = np.sqrt(dist_sq)
+            
+            if dist < min_dist:
+                min_dist = dist
+            if dist > max_dist:
+                max_dist = dist
+    
+    if max_dist > 0:
+        return min_dist / max_dist
+    else:
+        return 0.0
+
+def objective_function(x_flat):
+    """Objective function to maximize the min/max distance ratio"""
+    # Reshape flat array back to points
+    points = x_flat.reshape(-1, 3)
+    
+    # Ensure points stay within bounds [0,1]^3
+    points = np.clip(points, 0, 1)
+    
+    # Compute min/max ratio
+    ratio = compute_min_max_ratio(points)
+    
+    # Return negative because we want to maximize, but optimizers minimize
+    return -ratio
+
+def optimized_point_arrangement() -> np.ndarray:
+    """
+    Creates 14 points in 3 dimensions to maximize the ratio of minimum to maximum distance.
+    
+    Returns:
+        points: np.ndarray of shape (14,3) containing the (x,y,z) coordinates of the 14 points.
+    """
+    np.random.seed(42)
+    
+    # Initial configuration: place points in a way that avoids trivial solutions
+    initial_points = np.random.rand(14, 3)
+    
+    # Define bounds for each coordinate [0, 1]
+    bounds = [(0, 1) for _ in range(14 * 3)]
+    
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        objective_function,
+        bounds,
+        seed=42,
+        maxiter=100,
+        popsize=15,
+        tol=1e-6,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        disp=False
+    )
+    
+    # Extract the best solution
+    best_points_flat = result.x
+    best_points = best_points_flat.reshape(-1, 3)
+    
+    # Local refinement using L-BFGS
+    # Flatten the points for the optimizer
+    x0 = best_points_flat.copy()
+    
+    # Refine using L-BFGS
+    refined_result = minimize(
+        objective_function,
+        x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 50, 'ftol': 1e-9, 'gtol': 1e-9},
+        tol=1e-9
+    )
+    
+    # Get final points
+    final_points = refined_result.x.reshape(-1, 3)
+    
+    # Ensure final points are within bounds
+    final_points = np.clip(final_points, 0, 1)
+    
+    return final_points
+
+# EVOLVE-BLOCK-END

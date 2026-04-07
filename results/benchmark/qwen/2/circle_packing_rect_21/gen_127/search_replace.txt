@@ -1,0 +1,457 @@
+<NAME>
+enhance_initial_placement_and_refinement
+</NAME>
+
+<DESCRIPTION>
+This improvement focuses on enhancing the initial placement strategy and refinement process to better maximize the sum of radii. The key insights are:
+1. The initial hexagonal grid placement needs better spacing calculation based on the target circle count
+2. The refinement process should be more aggressive in exploring radius increases
+3. We should incorporate a more sophisticated multi-stage optimization approach
+
+I'll modify the initial placement to be more mathematically optimal and enhance the refinement to be more thorough in finding improvements.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    # Improved initial grid generation using a more strategic approach
+    def generate_improved_initial_placement(num_circles, width, height):
+        circles = []
+
+        # For 21 circles, we'll try to arrange them in a more systematic way:
+        # 1. Use a triangular lattice pattern for better packing (approximate hexagonal)
+        # 2. Adjust the grid to fit the rectangular container optimally
+
+        # Estimate optimal density and grid dimensions
+        # For 21 circles, we'll try to use a 5x5 grid pattern that can be scaled appropriately
+        rows = 5
+        cols = 5
+
+        # Calculate cell size that will give us good density
+        cell_width = width / cols * 0.85
+        cell_height = height / rows * 0.85
+
+        # Adjust for hexagonal packing effect
+        spacing_x = cell_width
+        spacing_y = cell_height * np.sqrt(3) / 2
+
+        # Make sure we don't exceed the container size
+        actual_rows = int(height / spacing_y) + 1
+        actual_cols = int(width / spacing_x) + 1
+
+        # If we need fewer than 21 circles, reduce grid
+        if actual_rows * actual_cols < num_circles:
+            actual_rows = max(1, int(np.sqrt(num_circles)))
+            actual_cols = max(1, int(num_circles / actual_rows))
+
+        # Generate grid
+        circle_count = 0
+        y_offset = 0.1
+        x_offset = 0.1
+
+        for i in range(actual_rows):
+            y = y_offset + i * spacing_y
+            x_start = x_offset + (i % 2) * spacing_x / 2  # Offset every other row for hex pattern
+            for j in range(actual_cols):
+                if circle_count >= num_circles:
+                    break
+                x = x_start + j * spacing_x
+                if x < width - 0.1 and y < height - 0.1:
+                    # Start with adaptive radius that scales with spacing
+                    r = min(0.04, spacing_x / 4, spacing_y / 4)
+                    circles.append([x, y, r])
+                    circle_count += 1
+            if circle_count >= num_circles:
+                break
+
+        # Fill remaining spots randomly if needed
+        while len(circles) < num_circles:
+            x = np.random.uniform(0.1, width - 0.1)
+            y = np.random.uniform(0.1, height - 0.1)
+            r = np.random.uniform(0.01, 0.05)
+            circles.append([x, y, r])
+
+        return np.array(circles)
+=======
+    # Improved initial grid generation using a more strategic approach
+    def generate_improved_initial_placement(num_circles, width, height):
+        circles = []
+
+        # Calculate optimal grid size based on circle packing theory
+        # For 21 circles, we want a dense but not overly constrained arrangement
+        # Using sqrt(21) ≈ 4.58, so try a 5x5 grid with slight adjustments
+        rows = int(np.ceil(np.sqrt(num_circles)))
+        cols = int(np.ceil(num_circles / rows))
+
+        # Calculate spacing to fill the container efficiently
+        # Leave 10% margin around the edges
+        margin = 0.1
+        usable_width = width - 2 * margin
+        usable_height = height - 2 * margin
+
+        # Calculate spacing to maximize packing density
+        spacing_x = usable_width / (cols - 0.5) if cols > 1 else usable_width
+        spacing_y = usable_height / (rows - 0.5) if rows > 1 else usable_height
+
+        # Adjust for hexagonal packing (more efficient than square)
+        spacing_x = min(spacing_x, spacing_y * 1.15)  # Slight hexagonal adjustment
+        spacing_y = spacing_x * np.sqrt(3) / 2
+
+        # Ensure we don't exceed container bounds
+        actual_rows = int(usable_height / spacing_y) + 1
+        actual_cols = int(usable_width / spacing_x) + 1
+
+        # Use actual dimensions for consistent grid
+        actual_rows = min(actual_rows, rows)
+        actual_cols = min(actual_cols, cols)
+
+        # Generate grid with hexagonal offset for better packing
+        circle_count = 0
+        y_offset = margin + spacing_y/2
+        x_offset = margin + spacing_x/2
+
+        for i in range(actual_rows):
+            y = y_offset + i * spacing_y
+            x_start = x_offset + (i % 2) * spacing_x / 2  # Offset every other row for hex pattern
+            for j in range(actual_cols):
+                if circle_count >= num_circles:
+                    break
+                x = x_start + j * spacing_x
+                if x < width - margin and y < height - margin:
+                    # Start with radius proportional to spacing, but not too large
+                    r = min(0.04, spacing_x / 4, spacing_y / 4)
+                    circles.append([x, y, r])
+                    circle_count += 1
+            if circle_count >= num_circles:
+                break
+
+        # Fill remaining spots randomly if needed, but with more intelligent distribution
+        while len(circles) < num_circles:
+            # Use a more strategic random placement away from edges
+            x = np.random.uniform(margin, width - margin)
+            y = np.random.uniform(margin, height - margin)
+            # Radius should be smaller on average to allow more circles
+            r = np.random.uniform(0.01, min(0.05, spacing_x/6, spacing_y/6))
+            circles.append([x, y, r])
+
+        return np.array(circles)
+>>>>>>> REPLACE
+</DIFF>
+
+
+<DIFF>
+<<<<<<< SEARCH
+    # Enhanced local refinement with multiple strategies
+    def enhanced_refinement(circles_array, max_iter=100):
+        best_circles = circles_array.copy()
+        best_fitness = calculate_fitness_with_spatial_indexing(best_circles)
+
+        # Track improvement history to detect when to stop early
+        improvement_history = []
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Strategy 1: Try to increase radii of circles that have room
+            for i in range(n):
+                cx, cy, r = best_circles[i]
+
+                # Compute max allowable radius
+                max_radius = float('inf')
+
+                # Boundary constraints
+                max_radius = min(max_radius, cx - 0.01)
+                max_radius = min(max_radius, rect_width - cx - 0.01)
+                max_radius = min(max_radius, cy - 0.01)
+                max_radius = min(max_radius, rect_height - cy - 0.01)
+
+                # Overlap constraints using spatial indexing on current neighbors
+                points = best_circles[:, :2]
+                tree = KDTree(points)
+                neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+
+                for j in neighbor_indices:
+                    if i != j:
+                        other_cx, other_cy, other_r = best_circles[j]
+                        dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                        max_radius = min(max_radius, dist - other_r - 0.001)
+
+                # Try to increase radius if beneficial
+                if max_radius > r and max_radius > 0.001:
+                    new_r = min(r + 0.01, max_radius)
+                    if new_r > r + 0.001:  # Significant improvement needed
+                        # Check if this actually improves fitness
+                        temp_circles = best_circles.copy()
+                        temp_circles[i, 2] = new_r
+
+                        # Use spatial indexing for validation
+                        valid = True
+                        temp_points = temp_circles[:, :2]
+                        temp_tree = KDTree(temp_points)
+                        temp_neighbor_indices = temp_tree.query_ball_point([cx, cy], 2*(new_r + 0.01) + 0.001)
+
+                        for k in temp_neighbor_indices:
+                            if k != i:
+                                other_cx, other_cy, other_r = temp_circles[k]
+                                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                                if dist < new_r + other_r:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            test_circles = best_circles.copy()
+                            test_circles[i, 2] = new_r
+                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+
+                            if test_fitness > best_fitness:
+                                best_fitness = test_fitness
+                                best_circles = test_circles
+                                improved = True
+
+            # Strategy 2: Try small position perturbations
+            if not improved and iteration % 5 == 0:
+                # Perturb a few circles to escape local minima
+                for _ in range(3):  # Try up to 3 perturbations
+                    i = random.randint(0, n-1)
+                    x_old, y_old, r = best_circles[i]
+
+                    # Small positional perturbations
+                    dx = np.random.uniform(-0.02, 0.02)
+                    dy = np.random.uniform(-0.02, 0.02)
+
+                    new_x = x_old + dx
+                    new_y = y_old + dy
+
+                    # Check if new position is valid
+                    if (0.01 + r <= new_x <= rect_width - 0.01 - r and
+                        0.01 + r <= new_y <= rect_height - 0.01 - r):
+
+                        # Validate with spatial indexing
+                        temp_circles = best_circles.copy()
+                        temp_circles[i, 0] = new_x
+                        temp_circles[i, 1] = new_y
+
+                        # Check overlap
+                        valid = True
+                        temp_points = temp_circles[:, :2]
+                        temp_tree = KDTree(temp_points)
+                        temp_neighbor_indices = temp_tree.query_ball_point([new_x, new_y], 2*(r + 0.01) + 0.001)
+
+                        for k in temp_neighbor_indices:
+                            if k != i:
+                                other_cx, other_cy, other_r = temp_circles[k]
+                                dist = np.sqrt((new_x - other_cx)**2 + (new_y - other_cy)**2)
+                                if dist < r + other_r:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            test_circles = best_circles.copy()
+                            test_circles[i, 0] = new_x
+                            test_circles[i, 1] = new_y
+                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+
+                            if test_fitness > best_fitness:
+                                best_fitness = test_fitness
+                                best_circles = test_circles
+                                improved = True
+
+            # Track improvement
+            improvement_history.append(best_fitness)
+            if len(improvement_history) > 10:
+                improvement_history.pop(0)
+
+            # Stop early if no meaningful improvement for several iterations
+            if len(improvement_history) >= 10:
+                recent_improvements = [improvement_history[i] - improvement_history[i-1]
+                                     for i in range(1, len(improvement_history))]
+                if all(improvement < 1e-6 for improvement in recent_improvements):
+                    break
+
+        return best_circles
+=======
+    # Enhanced local refinement with multiple strategies and more aggressive optimization
+    def enhanced_refinement(circles_array, max_iter=100):
+        best_circles = circles_array.copy()
+        best_fitness = calculate_fitness_with_spatial_indexing(best_circles)
+
+        # Track improvement history to detect when to stop early
+        improvement_history = []
+
+        for iteration in range(max_iter):
+            improved = False
+
+            # Strategy 1: Try to increase radii of circles that have room - more aggressive approach
+            # Process circles in random order to avoid bias
+            circle_indices = list(range(n))
+            random.shuffle(circle_indices)
+
+            for i in circle_indices:
+                cx, cy, r = best_circles[i]
+
+                # Compute max allowable radius
+                max_radius = float('inf')
+
+                # Boundary constraints
+                max_radius = min(max_radius, cx - 0.01)
+                max_radius = min(max_radius, rect_width - cx - 0.01)
+                max_radius = min(max_radius, cy - 0.01)
+                max_radius = min(max_radius, rect_height - cy - 0.01)
+
+                # Overlap constraints using spatial indexing on current neighbors
+                points = best_circles[:, :2]
+                tree = KDTree(points)
+                neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+
+                for j in neighbor_indices:
+                    if i != j:
+                        other_cx, other_cy, other_r = best_circles[j]
+                        dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                        max_radius = min(max_radius, dist - other_r - 0.001)
+
+                # Try multiple radius increases rather than just one
+                if max_radius > r and max_radius > 0.001:
+                    # Try different increments - larger steps for faster exploration
+                    increments = [0.005, 0.01, 0.015, 0.02]
+                    for incr in increments:
+                        new_r = min(r + incr, max_radius)
+                        if new_r <= r + 0.001:  # Need significant improvement
+                            continue
+
+                        # Check if this actually improves fitness
+                        temp_circles = best_circles.copy()
+                        temp_circles[i, 2] = new_r
+
+                        # Use spatial indexing for validation
+                        valid = True
+                        temp_points = temp_circles[:, :2]
+                        temp_tree = KDTree(temp_points)
+                        temp_neighbor_indices = temp_tree.query_ball_point([cx, cy], 2*(new_r + 0.01) + 0.001)
+
+                        for k in temp_neighbor_indices:
+                            if k != i:
+                                other_cx, other_cy, other_r = temp_circles[k]
+                                dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                                if dist < new_r + other_r:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            test_circles = best_circles.copy()
+                            test_circles[i, 2] = new_r
+                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+
+                            if test_fitness > best_fitness:
+                                best_fitness = test_fitness
+                                best_circles = test_circles
+                                improved = True
+                                break  # Take the first improvement we find
+
+            # Strategy 2: Try small position perturbations for better local search
+            if not improved and iteration % 3 == 0:
+                # Perturb circles more systematically - try to find better positions
+                for _ in range(5):  # Try more perturbations
+                    i = random.randint(0, n-1)
+                    x_old, y_old, r = best_circles[i]
+
+                    # Larger perturbations at early iterations, smaller later
+                    scale = max(0.01, 0.05 - iteration * 0.001)
+                    dx = np.random.uniform(-scale, scale)
+                    dy = np.random.uniform(-scale, scale)
+
+                    new_x = x_old + dx
+                    new_y = y_old + dy
+
+                    # Check if new position is valid
+                    if (0.01 + r <= new_x <= rect_width - 0.01 - r and
+                        0.01 + r <= new_y <= rect_height - 0.01 - r):
+
+                        # Validate with spatial indexing
+                        temp_circles = best_circles.copy()
+                        temp_circles[i, 0] = new_x
+                        temp_circles[i, 1] = new_y
+
+                        # Check overlap
+                        valid = True
+                        temp_points = temp_circles[:, :2]
+                        temp_tree = KDTree(temp_points)
+                        temp_neighbor_indices = temp_tree.query_ball_point([new_x, new_y], 2*(r + 0.01) + 0.001)
+
+                        for k in temp_neighbor_indices:
+                            if k != i:
+                                other_cx, other_cy, other_r = temp_circles[k]
+                                dist = np.sqrt((new_x - other_cx)**2 + (new_y - other_cy)**2)
+                                if dist < r + other_r:
+                                    valid = False
+                                    break
+
+                        if valid:
+                            test_circles = best_circles.copy()
+                            test_circles[i, 0] = new_x
+                            test_circles[i, 1] = new_y
+                            test_fitness = calculate_fitness_with_spatial_indexing(test_circles)
+
+                            if test_fitness > best_fitness:
+                                best_fitness = test_fitness
+                                best_circles = test_circles
+                                improved = True
+
+            # Strategy 3: Global search - occasionally try larger radius increases
+            if iteration % 10 == 0 and not improved:
+                # Try to increase multiple radii simultaneously in promising cases
+                # Pick a few circles with good spacing
+                candidate_indices = []
+                for i in range(n):
+                    # Prefer circles that have good room for expansion
+                    cx, cy, r = best_circles[i]
+                    max_radius = float('inf')
+                    max_radius = min(max_radius, cx - 0.01)
+                    max_radius = min(max_radius, rect_width - cx - 0.01)
+                    max_radius = min(max_radius, cy - 0.01)
+                    max_radius = min(max_radius, rect_height - cy - 0.01)
+
+                    # Check neighbor constraints
+                    points = best_circles[:, :2]
+                    tree = KDTree(points)
+                    neighbor_indices = tree.query_ball_point([cx, cy], 2*(r + 0.01) + 0.001)
+
+                    for j in neighbor_indices:
+                        if i != j:
+                            other_cx, other_cy, other_r = best_circles[j]
+                            dist = np.sqrt((cx - other_cx)**2 + (cy - other_cy)**2)
+                            max_radius = min(max_radius, dist - other_r - 0.001)
+
+                    if max_radius > r + 0.01:  # Can potentially grow significantly
+                        candidate_indices.append((i, max_radius - r))
+
+                # Sort by potential gain
+                candidate_indices.sort(key=lambda x: x[1], reverse=True)
+                # Try to increase the top 3 candidates
+                for i, _ in candidate_indices[:3]:
+                    cx, cy, r = best_circles[i]
+                    # Increase by larger amount if room is good
+                    new_r = min(r + 0.02, max_radius)  # More aggressive increase
+                    if new_r > r + 0.005:
+                        temp_circles = best_circles.copy()
+                        temp_circles[i, 2] = new_r
+                        test_fitness = calculate_fitness_with_spatial_indexing(temp_circles)
+                        if test_fitness > best_fitness:
+                            best_fitness = test_fitness
+                            best_circles = temp_circles
+                            improved = True
+                            break
+
+            # Track improvement
+            improvement_history.append(best_fitness)
+            if len(improvement_history) > 10:
+                improvement_history.pop(0)
+
+            # Stop early if no meaningful improvement for several iterations
+            if len(improvement_history) >= 10:
+                recent_improvements = [improvement_history[i] - improvement_history[i-1]
+                                     for i in range(1, len(improvement_history))]
+                if all(improvement < 1e-6 for improvement in recent_improvements):
+                    break
+
+        return best_circles
+>>>>>>> REPLACE
+</DIFF>

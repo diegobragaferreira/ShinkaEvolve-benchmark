@@ -1,0 +1,304 @@
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, KDTree
+from scipy.optimize import differential_evolution
+import math
+
+def circle_packing32() -> np.ndarray:
+    """
+    Places 32 non-overlapping circles in the unit square in order to maximize the sum of radii.
+
+    Returns:
+        circles: np.array of shape (32,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    np.random.seed(42)  # For deterministic results
+    
+    n = 32
+    circles = np.zeros((n, 3))
+    
+    # Step 1: Hexagonal grid initialization
+    rows = int(math.sqrt(n * 2 / math.sqrt(3))) + 1
+    cols = int(n / rows) + 1
+    
+    # Ensure we have enough space for all circles
+    while rows * cols < n:
+        rows += 1
+        cols = int(n / rows) + 1
+    
+    hex_radius = 0.12
+    spacing_x = hex_radius * 2
+    spacing_y = hex_radius * math.sqrt(3)
+    
+    # Initialize with hexagonal arrangement
+    idx = 0
+    for i in range(rows):
+        for j in range(cols):
+            if idx >= n:
+                break
+            x_offset = (i % 2) * (spacing_x / 2)
+            x = x_offset + j * spacing_x + hex_radius
+            y = i * spacing_y + hex_radius
+            
+            if x <= 1 - hex_radius and y <= 1 - hex_radius:
+                circles[idx] = [x, y, hex_radius]
+                idx += 1
+        if idx >= n:
+            break
+    
+    # Fill remaining circles with random valid positions
+    for i in range(idx, n):
+        attempts = 0
+        while attempts < 1000:
+            x = np.random.uniform(hex_radius, 1 - hex_radius)
+            y = np.random.uniform(hex_radius, 1 - hex_radius)
+            valid = True
+            for k in range(i):
+                dist = math.sqrt((x - circles[k][0])**2 + (y - circles[k][1])**2)
+                if dist < circles[k][2] + hex_radius:
+                    valid = False
+                    break
+            if valid:
+                circles[i] = [x, y, hex_radius]
+                break
+            attempts += 1
+    
+    # Step 2: Voronoi-based refinement
+    def compute_voronoi_radii(circles_arr):
+        """Compute new radii based on Voronoi cell areas"""
+        n = len(circles_arr)
+        centers = circles_arr[:, :2]
+        
+        # Compute Voronoi diagram
+        try:
+            vor = Voronoi(centers)
+        except:
+            # Fallback to simpler approach if Voronoi fails
+            return circles_arr.copy()
+            
+        new_circles = circles_arr.copy()
+        
+        # For each circle, compute the minimum distance to Voronoi cell boundary
+        for i in range(n):
+            center = centers[i]
+            # Find Voronoi regions belonging to this point
+            region_indices = []
+            for j, region in enumerate(vor.regions):
+                if len(region) > 0 and -1 not in region:
+                    # Check if this vertex belongs to our region
+                    region_vertices = [vor.vertices[k] for k in region if k >= 0]
+                    if len(region_vertices) > 0:
+                        region_vertices = np.array(region_vertices)
+                        # Check if center is inside this region
+                        # Simplified approach: use distance to nearest neighbor
+                        distances = [np.linalg.norm(center - v) for v in region_vertices]
+                        if distances:
+                            # Use a fraction of the nearest edge distance
+                            min_dist = min(distances)
+                            max_safe_radius = min_dist * 0.45
+                            if max_safe_radius > 0:
+                                new_circles[i][2] = min(max_safe_radius, new_circles[i][2] * 1.1)
+                            
+        return new_circles
+    
+    def constraint_penalty(params, circles_arr):
+        """Calculate penalty for constraint violations"""
+        n = len(circles_arr)
+        penalty = 0
+        
+        # Reshape params back to circles format
+        temp_circles = circles_arr.copy()
+        for i in range(n):
+            temp_circles[i] = [params[3*i], params[3*i+1], params[3*i+2]]
+            
+        # Boundary penalties
+        for i in range(n):
+            x, y, r = temp_circles[i]
+            if x < r or x > 1 - r or y < r or y > 1 - r:
+                penalty += 100000
+                
+        # Overlap penalties
+        for i in range(n):
+            for j in range(i+1, n):
+                x1, y1, r1 = temp_circles[i]
+                x2, y2, r2 = temp_circles[j]
+                dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                if dist < r1 + r2:
+                    overlap = (r1 + r2) - dist
+                    penalty += overlap * overlap * 1000
+                    
+        return penalty
+    
+    def total_radius(params):
+        """Objective function - negative sum of radii to minimize"""
+        total = 0
+        for i in range(0, len(params), 3):
+            total += params[i+2]  # radius is third component
+        return -total  # Negative because we want to maximize
+    
+    def safe_total_radius(params, circles_arr):
+        """Safe version that includes constraint penalties"""
+        penalty = constraint_penalty(params, circles_arr)
+        obj_value = total_radius(params)
+        return obj_value + penalty
+    
+    # Multi-scale refinement loop
+    current_circles = circles.copy()
+    
+    # Refinement step 1: Voronoi-based radius adjustment
+    current_circles = compute_voronoi_radii(current_circles)
+    
+    # Refinement step 2: Differential evolution optimization
+    # Flatten current configuration
+    def flatten_circles(circles_arr):
+        flat = []
+        for i in range(len(circles_arr)):
+            flat.extend([circles_arr[i][0], circles_arr[i][1], circles_arr[i][2]])
+        return np.array(flat)
+    
+    def unflatten_circles(flat_arr):
+        circles_arr = np.zeros((n, 3))
+        for i in range(n):
+            circles_arr[i] = [flat_arr[3*i], flat_arr[3*i+1], flat_arr[3*i+2]]
+        return circles_arr
+    
+    # Bounds for optimization: [x, y, r] for each circle
+    bounds = []
+    for i in range(n):
+        bounds.extend([(0.001, 0.999), (0.001, 0.999), (0.001, 0.49)])
+    
+    # Run differential evolution - more robust than gradient-based methods for this problem
+    try:
+        # First attempt with high precision
+        result = differential_evolution(
+            safe_total_radius,
+            bounds,
+            args=(current_circles,),
+            seed=42,
+            maxiter=100,
+            popsize=15,
+            tol=1e-8,
+            mutation=(0.5, 1),
+            recombination=0.7
+        )
+        
+        if result.success:
+            optimized_circles = unflatten_circles(result.x)
+            current_circles = optimized_circles
+    except:
+        pass
+    
+    # Refinement step 3: Iterative improvement with spatial indexing
+    def improve_circles(circles_arr):
+        """Iteratively improve circle placement using spatial structure"""
+        n = len(circles_arr)
+        tree = KDTree(circles_arr[:, :2])
+        
+        improved = True
+        iterations = 0
+        
+        while improved and iterations < 20:
+            improved = False
+            # For each circle, try to increase radius while respecting constraints
+            new_circles = circles_arr.copy()
+            
+            for i in range(n):
+                x, y, r = new_circles[i]
+                
+                # Find neighbors within a reasonable distance
+                neighbors = tree.query_ball_point([x, y], r * 3)
+                neighbors = [idx for idx in neighbors if idx != i]
+                
+                # Determine maximum possible radius
+                max_radius = 0.5  # Max possible radius
+                
+                # Boundary constraints
+                max_radius = min(max_radius, x - 0.001, 1 - x - 0.001, 
+                               y - 0.001, 1 - y - 0.001)
+                
+                # Overlap constraints with neighbors
+                for j in neighbors:
+                    x2, y2, r2 = new_circles[j]
+                    # Distance to center of neighbor
+                    dist = math.sqrt((x - x2)**2 + (y - y2)**2)
+                    if dist > 0:
+                        # New max radius to maintain separation
+                        max_radius = min(max_radius, dist - r2 - 0.001)
+                
+                # Try to increase radius if we can
+                if max_radius > r and max_radius > 0.001:
+                    new_circles[i][2] = max_radius
+                    improved = True
+                    
+            circles_arr = new_circles
+            iterations += 1
+            
+        return circles_arr
+    
+    # Apply iterative improvement
+    current_circles = improve_circles(current_circles)
+    
+    # Final validation and correction
+    def validate_and_correct(circles_arr):
+        n = len(circles_arr)
+        corrected = circles_arr.copy()
+        
+        # Ensure all circles are valid
+        for i in range(n):
+            x, y, r = corrected[i]
+            
+            # Fix boundary violations
+            if x < r:
+                x = r + 0.001
+            elif x > 1 - r:
+                x = 1 - r - 0.001
+                
+            if y < r:
+                y = r + 0.001
+            elif y > 1 - r:
+                y = 1 - r - 0.001
+                
+            corrected[i] = [x, y, r]
+        
+        # Resolve overlaps iteratively
+        changed = True
+        iterations = 0
+        while changed and iterations < 10:
+            changed = False
+            for i in range(n):
+                x, y, r = corrected[i]
+                
+                for j in range(n):
+                    if i != j:
+                        x2, y2, r2 = corrected[j]
+                        dist = math.sqrt((x - x2)**2 + (y - y2)**2)
+                        
+                        if dist < r + r2 + 0.001:  # Allow small tolerance
+                            # Adjust positions to resolve overlap
+                            dx = x2 - x
+                            dy = y2 - y
+                            distance = math.sqrt(dx*dx + dy*dy)
+                            
+                            if distance > 0.001:
+                                # Move circles apart
+                                overlap = (r + r2) - distance
+                                scale = overlap / distance * 0.5
+                                
+                                x -= dx * scale
+                                y -= dy * scale
+                                
+                                # Ensure boundary constraints
+                                x = np.clip(x, r + 0.001, 1 - r - 0.001)
+                                y = np.clip(y, r + 0.001, 1 - r - 0.001)
+                                
+                                corrected[i] = [x, y, r]
+                                changed = True
+                                
+            iterations += 1
+            
+        return corrected
+    
+    current_circles = validate_and_correct(current_circles)
+    
+    return current_circles
+
+# EVOLVE-BLOCK-END

@@ -1,0 +1,270 @@
+# You can define functions outside the main function below.
+# Remember that any function used in parallel computation must be defined globally and not locally.
+
+# EVOLVE-BLOCK-START
+import numpy as np
+from scipy.spatial import Voronoi, distance_matrix
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import math
+from numba import jit, prange
+import random
+from typing import Tuple
+
+@jit(nopython=True)
+def compute_voronoi_forces_numba(positions, radii, width, height, n):
+    """
+    Efficiently compute repulsive forces between circles using numba acceleration.
+    """
+    forces = np.zeros((n, 2))
+    boundary_repulsion = 5.0
+    
+    # Compute all pairwise distances
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                dx = positions[i, 0] - positions[j, 0]
+                dy = positions[i, 1] - positions[j, 1]
+                dist = math.sqrt(dx*dx + dy*dy)
+                
+                if dist > 1e-8:
+                    # Repulsive force when circles are overlapping
+                    if dist < (radii[i] + radii[j]):
+                        force_magnitude = (radii[i] + radii[j] - dist) / (dist + 1e-8)
+                        forces[i, 0] -= force_magnitude * dx
+                        forces[i, 1] -= force_magnitude * dy
+    
+    # Boundary repulsion forces
+    for i in range(n):
+        x, y = positions[i, 0], positions[i, 1]
+        r = radii[i]
+        
+        # Left boundary
+        if x < r:
+            forces[i, 0] += (r - x) * boundary_repulsion
+        # Right boundary
+        if x + r > width:
+            forces[i, 0] -= (x + r - width) * boundary_repulsion
+        # Bottom boundary
+        if y < r:
+            forces[i, 1] += (r - y) * boundary_repulsion
+        # Top boundary
+        if y + r > height:
+            forces[i, 1] -= (y + r - height) * boundary_repulsion
+            
+    return forces
+
+@jit(nopython=True)
+def compute_max_radius_fast(positions, radii, index, width, height, n):
+    """
+    Fast computation of maximum possible radius for a given position.
+    """
+    x, y = positions[index, 0], positions[index, 1]
+    
+    # Boundary constraints
+    max_radius = min(x, y, width - x, height - y)
+    
+    # Overlap constraints with direct comparison
+    for i in range(n):
+        if i != index:
+            dx = x - positions[i, 0]
+            dy = y - positions[i, 1]
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist > 1e-8:
+                max_radius_for_this_circle = dist - radii[i]
+                if max_radius_for_this_circle < max_radius:
+                    max_radius = max_radius_for_this_circle
+                    
+    return max(max_radius, 0.001)
+
+def circle_packing21() -> np.ndarray:
+    """
+    Places 21 non-overlapping circles inside a rectangle of perimeter 4 in order to maximize the sum of their radii.
+
+    Returns:
+        circles: np.array of shape (21,3), where the i-th row (x,y,r) stores the (x,y) coordinates of the i-th circle of radius r.
+    """
+    # Rectangle dimensions - perimeter = 4, so width + height = 2
+    # Using 1x1 square for maximum area utilization
+    rect_width = 1.0
+    rect_height = 1.0
+
+    # Phase 1: Voronoi-based initialization with strategic point placement
+    n_circles = 21
+    
+    # Generate a dense grid of candidate points for initial placement
+    grid_density = 32
+    candidate_points = []
+    for i in range(grid_density):
+        for j in range(grid_density):
+            x = (i + 0.5) / grid_density * rect_width
+            y = (j + 0.5) / grid_density * rect_height
+            candidate_points.append([x, y])
+    
+    # Add boundary points for better edge utilization
+    boundary_points = []
+    # Corners
+    boundary_points.extend([[0.05, 0.05], [rect_width - 0.05, 0.05],
+                          [0.05, rect_height - 0.05], [rect_width - 0.05, rect_height - 0.05]])
+    # Edges
+    boundary_points.extend([[rect_width/2, 0.05], [rect_width/2, rect_height - 0.05],
+                          [0.05, rect_height/2], [rect_width - 0.05, rect_height/2]])
+    # Additional boundary points
+    boundary_points.extend([[0.15, 0.15], [rect_width - 0.15, 0.15],
+                          [0.15, rect_height - 0.15], [rect_width - 0.15, rect_height - 0.15]])
+    
+    # Combine all candidates
+    all_points = candidate_points + boundary_points
+    
+    # Use K-means to select representative points for circle centers
+    kmeans = KMeans(n_clusters=n_circles, init='k-means++', n_init=10, random_state=42)
+    all_array = np.array(all_points)
+    kmeans.fit(all_array)
+    initial_positions = kmeans.cluster_centers_
+    
+    # Initialize circles with small radii
+    circles = np.zeros((n_circles, 3))
+    for i in range(n_circles):
+        circles[i] = [initial_positions[i][0], initial_positions[i][1], 0.02]
+
+    # Phase 2: Multi-stage optimization with Voronoi force simulation
+    best_radius_sum = 0
+    best_circles = None
+    
+    # Stage 1: Voronoi force field optimization
+    max_force_iterations = 1000
+    learning_rate = 0.05
+    
+    for iteration in range(max_force_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Compute forces using numba-accelerated function
+        forces = compute_voronoi_forces_numba(positions, radii, rect_width, rect_height, n_circles)
+        
+        # Update positions with forces
+        for i in range(n_circles):
+            # Update radius based on available space
+            max_radius = compute_max_radius_fast(positions, radii, i, rect_width, rect_height, n_circles)
+            if max_radius > radii[i]:
+                circles[i, 2] = min(radii[i] + 0.01 * (max_radius - radii[i]), max_radius)
+            
+            # Apply forces to position
+            fx, fy = forces[i, 0], forces[i, 1]
+            
+            # Update position with bounds checking
+            new_x = max(0.01, min(rect_width - 0.01, positions[i, 0] + learning_rate * fx))
+            new_y = max(0.01, min(rect_height - 0.01, positions[i, 1] + learning_rate * fy))
+            
+            circles[i, 0] = new_x
+            circles[i, 1] = new_y
+            
+        # Periodically recompute and update the Voronoi structure
+        if iteration % 100 == 0:
+            # Apply a slight random perturbation to avoid getting stuck
+            for i in range(n_circles):
+                circles[i, 0] += random.uniform(-0.001, 0.001)
+                circles[i, 1] += random.uniform(-0.001, 0.001)
+                # Clamp to bounds
+                circles[i, 0] = max(0.01, min(rect_width - 0.01, circles[i, 0]))
+                circles[i, 1] = max(0.01, min(rect_height - 0.01, circles[i, 1]))
+        
+        # Check and save best configuration
+        current_sum = np.sum(radii)
+        if current_sum > best_radius_sum:
+            best_radius_sum = current_sum
+            best_circles = circles.copy()
+            
+        # Adaptive learning rate decay
+        if iteration > 500:
+            learning_rate *= 0.995
+
+    # Stage 2: Gradient-based refinement
+    if best_circles is not None:
+        circles = best_circles.copy()
+        
+    max_refine_iterations = 800
+    learning_rate = 0.02
+    
+    for iteration in range(max_refine_iterations):
+        positions = circles[:, :2]
+        radii = circles[:, 2]
+        
+        # Compute forces and perform gradient-based updates
+        forces = compute_voronoi_forces_numba(positions, radii, rect_width, rect_height, n_circles)
+        
+        # Perform gradient ascent for radii optimization
+        for i in range(n_circles):
+            # Maximize radius without violating constraints
+            max_radius = compute_max_radius_fast(positions, radii, i, rect_width, rect_height, n_circles)
+            if max_radius > radii[i]:
+                circles[i, 2] = min(radii[i] + 0.005 * (max_radius - radii[i]), max_radius)
+            
+            # Apply forces to position
+            fx, fy = forces[i, 0], forces[i, 1]
+            
+            # Update position with bounds
+            new_x = max(0.01, min(rect_width - 0.01, positions[i, 0] + learning_rate * fx))
+            new_y = max(0.01, min(rect_height - 0.01, positions[i, 1] + learning_rate * fy))
+            
+            circles[i, 0] = new_x
+            circles[i, 1] = new_y
+            
+        # Periodic validation and saving
+        current_sum = np.sum(radii)
+        if current_sum > best_radius_sum:
+            best_radius_sum = current_sum
+            best_circles = circles.copy()
+            
+        # Adaptive learning rate decay
+        if iteration > 400:
+            learning_rate *= 0.99
+
+    # Phase 3: Final boundary and validation refinement
+    if best_circles is not None:
+        circles = best_circles.copy()
+    else:
+        # Fallback to simple initialization and optimization
+        circles = np.zeros((n_circles, 3))
+        rows, cols = 3, 7
+        x_spacing = rect_width / (cols + 1)
+        y_spacing = rect_height / (rows + 1)
+        
+        idx = 0
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= n_circles:
+                    break
+                x = (j + 1) * x_spacing + random.uniform(-0.015, 0.015)
+                y = (i + 1) * y_spacing + random.uniform(-0.015, 0.015)
+                r = 0.025
+                circles[idx] = [x, y, r]
+                idx += 1
+
+    # Final optimization pass
+    for _ in range(200):
+        improved = False
+        for i in range(n_circles):
+            max_radius = compute_max_radius_fast(circles[:, :2], circles[:, 2], i, rect_width, rect_height, n_circles)
+            if max_radius > circles[i, 2]:
+                circles[i, 2] = max_radius
+                improved = True
+        if not improved:
+            break
+
+    # Final validation and cleanup
+    for i in range(n_circles):
+        x, y, r = circles[i]
+        # Ensure circles remain within bounds
+        r = min(r, x, rect_width - x, y, rect_height - y)
+        if r <= 0.001:
+            r = 0.015
+        circles[i] = [x, y, r]
+
+    return circles
+
+# EVOLVE-BLOCK-END
+
+if __name__ == "__main__":
+    circles = circle_packing21()
+    print(f"Radii sum: {np.sum(circles[:,-1])}")

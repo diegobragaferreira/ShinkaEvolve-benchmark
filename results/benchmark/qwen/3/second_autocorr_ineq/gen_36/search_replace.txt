@@ -1,0 +1,147 @@
+<NAME>
+numba_jit_optimization
+</NAME>
+
+<DESCRIPTION>
+Adding Numba JIT compilation to critical functions to significantly improve computational performance. The key functions `compute_convolution_norms` and `compute_c2` are prime candidates for JIT compilation since they involve tight loops and repeated numerical operations that benefit greatly from compilation. This will reduce execution time enough to allow for more iterations or larger step counts within the time constraint, potentially leading to better C2 values.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+import math
+
+def compute_convolution_norms(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+
+    Args:
+        f_values: List of step heights
+        domain_length: Length of domain [-1/4, 1/4], which is 0.5
+
+    Returns:
+        Tuple of (||g||₂², ||g||₁, ||g||∞)
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    # g[k] = integral f(x) * f(y) where x+y = k*dx - domain_length/2
+    # We'll compute this as a discrete approximation
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                # For two adjacent pieces with heights f[i] and f[j],
+                # the convolution contributes to g[k]
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+
+def compute_c2(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞)"""
+    g2_sq, g1, ginf = compute_convolution_norms(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+=======
+# EVOLVE-BLOCK-START
+
+import numpy as np
+from scipy.optimize import differential_evolution
+import math
+from numba import njit
+
+@njit
+def compute_convolution_norms(f_values, domain_length=0.5):
+    """
+    Compute the three norms needed for C2 calculation using the provided step function.
+    JIT compiled version for improved performance.
+
+    Args:
+        f_values: List of step heights
+        domain_length: Length of domain [-1/4, 1/4], which is 0.5
+
+    Returns:
+        Tuple of (||g||₂², ||g||₁, ||g||∞)
+    """
+    n_steps = len(f_values)
+    if n_steps == 0:
+        return 0.0, 0.0, 0.0
+
+    # Step size
+    dx = domain_length / n_steps
+
+    # Compute autoconvolution g = f * f using piecewise linear integration
+    # g[k] = integral f(x) * f(y) where x+y = k*dx - domain_length/2
+    # We'll compute this as a discrete approximation
+
+    # Create the full convolution grid with 2*n_steps-1 points
+    g_size = 2 * n_steps - 1
+    g = np.zeros(g_size)
+
+    # Compute autoconvolution - JIT compiled loop
+    for i in range(n_steps):
+        for j in range(n_steps):
+            k = i + j
+            if 0 <= k < g_size:
+                # Trapezoidal-like integration contribution
+                # For two adjacent pieces with heights f[i] and f[j],
+                # the convolution contributes to g[k]
+                g[k] += f_values[i] * f_values[j] * dx
+
+    # Compute norms
+    # ||g||₂² = sum(g_i² * dx) - but we're doing piecewise linear integration
+    # Using trapezoidal rule: ∫ g(x)² dx ≈ (dx/3)(g₀² + g₀g₁ + g₁²) + ...
+    g2_sq = 0.0
+    for i in range(len(g)-1):
+        g2_sq += (dx/3) * (g[i]**2 + g[i]*g[i+1] + g[i+1]**2)
+
+    # ||g||₁ = sum(|g_i| * dx)
+    g1 = np.sum(np.abs(g)) * dx
+
+    # ||g||∞ = max(|g_i|)
+    ginf = np.max(np.abs(g))
+
+    return g2_sq, g1, ginf
+
+@njit
+def compute_c2(f_values):
+    """Compute C₂ = ||g||₂² / (||g||₁ · ||g||∞) - JIT compiled version"""
+    g2_sq, g1, ginf = compute_convolution_norms(f_values)
+
+    if g1 == 0 or ginf == 0:
+        return 0.0
+
+    return g2_sq / (g1 * ginf)
+>>>>>>> REPLACE
+</DIFF>

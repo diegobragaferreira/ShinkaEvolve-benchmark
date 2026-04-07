@@ -1,0 +1,723 @@
+<NAME>
+adaptive_mutation_scaling
+</NAME>
+
+<DESCRIPTION>
+The current mutation operator uses a simple adaptive step size based on Voronoi criticality, but we can improve this by implementing a more sophisticated adaptive scaling that considers both the local constraint density and the global optimization progress. The key insight is to use a dynamic mutation rate that decreases as optimization progresses, combined with a more nuanced scaling factor that adapts to the current solution quality and spatial distribution.
+
+This change modifies the mutation operator to:
+1. Implement a dynamic mutation rate that decreases over generations
+2. Use a more sophisticated scaling factor for position mutations based on local density
+3. Improve radius mutation behavior with better boundary awareness
+4. Add more intelligent boundary handling that prioritizes movement away from constraints
+
+The improvements should help achieve better convergence while maintaining exploration in early stages.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Improved mutation operator with Voronoi-based criticality weighting and adaptive step sizes."""
+        mutated = circles.copy()
+
+        # Compute criticality scores
+        criticality_scores = MutationOperator.compute_voronoi_criticality(circles, rect_width, rect_height)
+
+        for i in range(21):
+            if np.random.random() < 0.25:  # 25% mutation rate
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score for this circle
+                crit_score = criticality_scores[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with adaptive step size based on criticality
+                    base_step = 0.03 + 0.02 * crit_score  # Smaller steps in critical regions
+                    step_size = base_step + np.random.random() * base_step * 0.5
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Boundary awareness: penalize movements that go out of bounds
+                    bound_penalty_x = max(0, mutated[i, 0] - (rect_width - mutated[i, 2]))
+                    bound_penalty_y = max(0, mutated[i, 1] - (rect_height - mutated[i, 2]))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        mutated[i, 0] -= bound_penalty_x * 0.5
+                        mutated[i, 1] -= bound_penalty_y * 0.5
+
+                else:
+                    # Mutate radius with log-normal distribution
+                    # Scale based on criticality (less change in high-criticality regions)
+                    scale_factor = np.exp(np.random.normal(0, 0.15 * (1 - crit_score)))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.9)
+
+        return mutated
+=======
+    @staticmethod
+    def mutate(circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0, generation: int = 0, max_generations: int = 150) -> np.ndarray:
+        """Improved mutation operator with enhanced adaptive scaling and dynamic control."""
+        mutated = circles.copy()
+
+        # Compute criticality scores
+        criticality_scores = MutationOperator.compute_voronoi_criticality(circles, rect_width, rect_height)
+
+        # Dynamic mutation rate that decreases over time
+        base_mutation_rate = 0.3
+        dynamic_mutation_rate = base_mutation_rate * (1 - generation / max_generations)
+        dynamic_mutation_rate = max(0.05, dynamic_mutation_rate)  # Minimum 5%
+
+        for i in range(21):
+            if np.random.random() < dynamic_mutation_rate:
+                # Choose mutation type with bias towards position (70%)
+                mutation_type = np.random.choice(['position', 'radius'], p=[0.7, 0.3])
+
+                # Get criticality score for this circle
+                crit_score = criticality_scores[i]
+
+                if mutation_type == 'position':
+                    # Mutate position with advanced adaptive step size
+                    # Base step size increases with criticality (more freedom in less critical regions)
+                    base_step = 0.02 + 0.03 * crit_score
+
+                    # Add spatial density awareness - when circles are packed tightly, reduce step size
+                    density_factor = 1.0
+                    if len(circles) > 5:
+                        # Calculate average distance to nearest neighbors
+                        distances = []
+                        for j in range(len(circles)):
+                            if i != j:
+                                dist = np.sqrt((circles[i, 0] - circles[j, 0])**2 + (circles[i, 1] - circles[j, 1])**2)
+                                distances.append(dist)
+                        if distances:
+                            avg_dist = np.mean(distances)
+                            if avg_dist < 0.1:  # Dense region
+                                density_factor = 0.7
+                            elif avg_dist < 0.2:  # Moderately dense
+                                density_factor = 0.85
+
+                    step_size = base_step * density_factor + np.random.random() * base_step * 0.3
+
+                    mutated[i, 0] += np.random.normal(0, step_size)
+                    mutated[i, 1] += np.random.normal(0, step_size)
+
+                    # Enhanced boundary awareness with weighted penalties
+                    x, y, r = mutated[i]
+                    bound_penalty_x = max(0, x - (rect_width - r))
+                    bound_penalty_y = max(0, y - (rect_height - r))
+                    if bound_penalty_x > 0 or bound_penalty_y > 0:
+                        # Apply weighted penalty favoring movement away from boundaries
+                        penalty_weight = 0.7
+                        if bound_penalty_x > 0:
+                            mutated[i, 0] -= bound_penalty_x * penalty_weight * (1 + crit_score * 0.5)
+                        if bound_penalty_y > 0:
+                            mutated[i, 1] -= bound_penalty_y * penalty_weight * (1 + crit_score * 0.5)
+
+                else:
+                    # Mutate radius with improved log-normal distribution
+                    # Scale based on criticality and local conditions
+                    base_scale = 0.15 * (1 - crit_score)
+                    # Adjust scale based on proximity to boundary conditions
+                    boundary_proximity = min(circles[i, 0], circles[i, 1],
+                                           rect_width - circles[i, 0], rect_height - circles[i, 1])
+                    boundary_factor = min(1.0, boundary_proximity / (circles[i, 2] * 2.0))
+                    scale_factor = np.exp(np.random.normal(0, base_scale * boundary_factor))
+                    mutated[i, 2] *= scale_factor
+                    mutated[i, 2] = max(0.001, mutated[i, 2])
+
+                    # Additional boundary awareness for radius with more sophisticated limit
+                    max_possible_radius = min(mutated[i, 0], mutated[i, 1],
+                                            rect_width - mutated[i, 0], rect_height - mutated[i, 1])
+                    # Apply soft limit that allows some flexibility near boundaries
+                    if max_possible_radius < mutated[i, 2] * 1.2:
+                        # If we're near the boundary, reduce the radius but maintain feasibility
+                        mutated[i, 2] = min(mutated[i, 2], max_possible_radius * 0.95)
+
+        return mutated
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+enhanced_crossover_operator
+</NAME>
+
+<DESCRIPTION>
+The current crossover operator uses a simple uniform crossover with blending. We can enhance this by implementing a more sophisticated crossover that takes into account the geometric relationships between circles, particularly focusing on preserving good spatial arrangements while still introducing genetic diversity. This includes:
+
+1. Using more intelligent circle-specific crossover that considers spatial relationships
+2. Adding a component-based crossover that preserves the best features of each parent
+3. Improving the radius crossover to maintain positive values and reasonable ratios
+
+This should lead to better preservation of good solutions while still allowing for effective exploration.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def crossover(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Improved crossover operator with better recombination and symmetry preservation."""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Uniform crossover with blended inheritance
+        for i in range(21):
+            if np.random.random() < 0.5:
+                # Swap entire circle data
+                child1[i], child2[i] = child2[i], child1[i]
+            else:
+                # Blend positions and radii
+                alpha_pos = np.random.random() * 0.6 + 0.2  # Blend factor for position [0.2, 0.8]
+                alpha_rad = np.random.random() * 0.6 + 0.2  # Blend factor for radius [0.2, 0.8]
+
+                # Position blending
+                child1[i, :2] = parent1[i, :2] * alpha_pos + parent2[i, :2] * (1 - alpha_pos)
+                child2[i, :2] = parent1[i, :2] * (1 - alpha_pos) + parent2[i, :2] * alpha_pos
+
+                # Radius blending
+                child1[i, 2] = parent1[i, 2] * alpha_rad + parent2[i, 2] * (1 - alpha_rad)
+                child2[i, 2] = parent1[i, 2] * (1 - alpha_rad) + parent2[i, 2] * alpha_rad
+
+                # Ensure positive radii
+                child1[i, 2] = max(0.001, child1[i, 2])
+                child2[i, 2] = max(0.001, child2[i, 2])
+
+        return child1, child2
+=======
+    @staticmethod
+    def crossover(parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Enhanced crossover operator with geometric-aware recombination."""
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # Component-wise crossover with geometric awareness
+        for i in range(21):
+            # Determine if we're doing a complete swap or partial crossover
+            if np.random.random() < 0.3:  # 30% chance of full swap
+                # Complete swap of entire circle
+                child1[i], child2[i] = child2[i], child1[i]
+            else:
+                # Partial crossover with geometric consideration
+                # Decide whether to use parent 1 or 2 for each component
+                pos_parent_choice = np.random.choice([1, 2])
+                rad_parent_choice = np.random.choice([1, 2])
+
+                # Position crossover with consideration for spatial relationships
+                if pos_parent_choice == 1:
+                    child1[i, :2] = parent1[i, :2].copy()
+                else:
+                    child1[i, :2] = parent2[i, :2].copy()
+
+                if pos_parent_choice == 1:
+                    child2[i, :2] = parent2[i, :2].copy()
+                else:
+                    child2[i, :2] = parent1[i, :2].copy()
+
+                # Radius crossover with better preservation of good values
+                if rad_parent_choice == 1:
+                    child1[i, 2] = parent1[i, 2].copy()
+                else:
+                    child1[i, 2] = parent2[i, 2].copy()
+
+                if rad_parent_choice == 2:
+                    child2[i, 2] = parent1[i, 2].copy()
+                else:
+                    child2[i, 2] = parent2[i, 2].copy()
+
+                # Apply more sophisticated radius blending when using hybrid approach
+                if np.random.random() < 0.3 and pos_parent_choice == 2 and rad_parent_choice == 2:
+                    # Blend radius with attention to relative sizes
+                    r1, r2 = parent1[i, 2], parent2[i, 2]
+                    # Bias towards larger radius when parents differ significantly
+                    if abs(r1 - r2) > 0.05:
+                        if r1 > r2:
+                            child1[i, 2] = r1 * 0.8 + r2 * 0.2
+                            child2[i, 2] = r1 * 0.2 + r2 * 0.8
+                        else:
+                            child1[i, 2] = r1 * 0.2 + r2 * 0.8
+                            child2[i, 2] = r1 * 0.8 + r2 * 0.2
+                    else:
+                        # Regular blend when similar
+                        child1[i, 2] = (r1 + r2) / 2.0
+                        child2[i, 2] = (r1 + r2) / 2.0
+
+                # Ensure positive radii and reasonable bounds
+                child1[i, 2] = max(0.001, child1[i, 2])
+                child2[i, 2] = max(0.001, child2[i, 2])
+
+                # Further refine to prevent extreme values
+                child1[i, 2] = min(child1[i, 2], max(parent1[i, 2], parent2[i, 2]) * 1.5)
+                child2[i, 2] = min(child2[i, 2], max(parent1[i, 2], parent2[i, 2]) * 1.5)
+
+        return child1, child2
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+dynamic_local_search
+</NAME>
+
+<DESCRIPTION>
+The current local search approach is basic and applies to only a few top individuals. We can improve this by making the local search more adaptive and intelligent:
+
+1. Implement a dynamic number of local search iterations based on solution quality
+2. Add a more sophisticated local search that focuses on specific problem characteristics
+3. Introduce multiple local search strategies that adapt based on the current solution state
+4. Add better convergence detection for local search
+
+This should enable more effective exploitation of good solutions found by the evolutionary algorithm.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def local_search_improve(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Apply gradient-based local search to improve a solution."""
+        # Create a copy to work with
+        improved = circles.copy()
+
+        # Simple gradient-based approach to maximize sum of radii
+        # We'll iteratively adjust positions to increase radii while respecting constraints
+        for _ in range(self.local_search_iterations):
+            # Compute gradients for each circle with respect to radius increase
+            # Since direct gradients of sum(radius) are complex due to constraints,
+            # we use a heuristic: try to move circles to make room for larger radii
+
+            # First, check all constraints
+            if not ConstraintChecker.validate(improved, rect_width, rect_height):
+                # If constraints violated, repair first
+                improved = RepairMechanism.repair(improved, rect_width, rect_height)
+
+            # Simple greedy improvement approach:
+            # For each circle, try increasing its radius if possible without violating constraints
+            updated = False
+            for i in range(len(improved)):
+                x, y, r = improved[i]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(x, y, rect_width - x, rect_height - y)
+
+                # Try to increase radius slightly (but don't exceed bounds or cause overlaps)
+                if r < max_radius * 0.95:  # Leave some margin
+                    # Test if we can increase this radius
+                    test_r = min(r * 1.05, max_radius * 0.95)
+                    test_circles = improved.copy()
+                    test_circles[i, 2] = test_r
+
+                    # Check if this change preserves constraints
+                    if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                        improved[i, 2] = test_r
+                        updated = True
+
+            # If no improvement possible in radius assignment, try position adjustments
+            if not updated:
+                # Try to slightly adjust positions to make room for larger radii
+                for i in range(len(improved)):
+                    x, y, r = improved[i]
+                    # Try small moves in different directions
+                    directions = [(0.005, 0), (0, 0.005), (-0.005, 0), (0, -0.005)]
+                    for dx, dy in directions:
+                        test_x, test_y = x + dx, y + dy
+                        # Check if the new position is valid
+                        if test_x - r >= 0 and test_x + r <= rect_width and \
+                           test_y - r >= 0 and test_y + r <= rect_height:
+                            # Check if it reduces overlaps with others
+                            test_circles = improved.copy()
+                            test_circles[i, 0] = test_x
+                            test_circles[i, 1] = test_y
+
+                            if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                                improved[i, 0] = test_x
+                                improved[i, 1] = test_y
+                                break
+
+        return improved
+=======
+    def local_search_improve(self, circles: np.ndarray, rect_width: float = 1.0, rect_height: float = 1.0) -> np.ndarray:
+        """Enhanced local search with adaptive strategies and better convergence detection."""
+        # Create a copy to work with
+        improved = circles.copy()
+
+        # Adaptive number of iterations based on solution quality
+        # Better solutions get more refined treatment
+        base_iterations = 30
+        quality_factor = np.sum(circles[:, 2]) / 21.0  # Average radius
+        if quality_factor > 0.15:
+            iterations = max(base_iterations, int(base_iterations * 1.5))
+        elif quality_factor > 0.1:
+            iterations = max(base_iterations, int(base_iterations * 1.2))
+        else:
+            iterations = base_iterations
+
+        # Track improvement to detect convergence
+        last_fitness = FitnessEvaluator.evaluate(improved)
+        improvement_threshold = 1e-6
+        stagnation_counter = 0
+        max_stagnation = 10
+
+        for iteration in range(iterations):
+            # Compute current fitness
+            current_fitness = FitnessEvaluator.evaluate(improved)
+
+            # Check for stagnation
+            if abs(current_fitness - last_fitness) < improvement_threshold:
+                stagnation_counter += 1
+            else:
+                stagnation_counter = 0
+            last_fitness = current_fitness
+
+            # Stop if convergence detected
+            if stagnation_counter >= max_stagnation:
+                break
+
+            # Strategy 1: Try to increase radii wherever possible
+            improved_radius = False
+            for i in range(len(improved)):
+                x, y, r = improved[i]
+
+                # Calculate maximum possible radius for this circle
+                max_radius = min(x, y, rect_width - x, rect_height - y)
+
+                # Try to increase radius slightly (but don't exceed bounds or cause overlaps)
+                if r < max_radius * 0.95:  # Leave some margin
+                    # Test if we can increase this radius
+                    test_r = min(r * 1.03, max_radius * 0.95)
+                    test_circles = improved.copy()
+                    test_circles[i, 2] = test_r
+
+                    # Check if this change preserves constraints
+                    if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                        improved[i, 2] = test_r
+                        improved_radius = True
+
+            # Strategy 2: Position adjustments with better spatial awareness
+            if not improved_radius:
+                # Try position adjustments with awareness of overlap patterns
+                for i in range(len(improved)):
+                    x, y, r = improved[i]
+
+                    # Calculate a "comfort zone" around the circle
+                    comfort_zone = min(r * 0.5, 0.1)  # 50% of radius or 0.1, whichever is smaller
+
+                    # Try different movement patterns
+                    moves = []
+
+                    # Standard small moves
+                    for dx, dy in [(0.005, 0), (0, 0.005), (-0.005, 0), (0, -0.005)]:
+                        moves.append((dx, dy))
+
+                    # Diagonal moves
+                    for dx, dy in [(0.003, 0.003), (-0.003, 0.003), (0.003, -0.003), (-0.003, -0.003)]:
+                        moves.append((dx, dy))
+
+                    # Random small moves for exploration
+                    for _ in range(2):
+                        dx = np.random.normal(0, 0.003)
+                        dy = np.random.normal(0, 0.003)
+                        moves.append((dx, dy))
+
+                    # Try various moves
+                    for dx, dy in moves:
+                        test_x, test_y = x + dx, y + dy
+                        # Check if the new position is valid
+                        if (test_x - r >= 0 and test_x + r <= rect_width and
+                            test_y - r >= 0 and test_y + r <= rect_height):
+
+                            # Check if it reduces overlaps with others (heuristic)
+                            test_circles = improved.copy()
+                            test_circles[i, 0] = test_x
+                            test_circles[i, 1] = test_y
+
+                            if ConstraintChecker.validate(test_circles, rect_width, rect_height):
+                                improved[i, 0] = test_x
+                                improved[i, 1] = test_y
+                                break  # Take the first successful move
+
+        return improved
+>>>>>>> REPLACE
+</DIFF>
+
+
+<NAME>
+improved_population_initialization
+</NAME>
+
+<DESCRIPTION>
+The current initialization mixes three strategies but doesn't properly consider the quality of the resulting solutions. We can improve this by:
+
+1. Using a more sophisticated selection mechanism that picks the best initial solutions
+2. Implementing a multi-stage initialization where we first generate multiple candidates and then select the best ones
+3. Adding a more aggressive optimization to the initial solutions to improve their fitness before beginning evolution
+4. Using better heuristics for the rectangle dimensions initialization
+
+This should give us a stronger starting point for the evolutionary process.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    def run_evolution(self) -> np.ndarray:
+        """Run the evolutionary algorithm to find optimal circle packing."""
+        # Rectangle dimensions (perimeter = 4, so width + height = 2)
+        rect_width = 1.0
+        rect_height = 1.0
+
+        # Track best fitness for convergence detection
+        previous_best = -np.inf
+        stagnation_count = 0
+
+        # Initialize population with diverse strategies
+        population = []
+
+        # Mix of initialization strategies
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_hexagonal_solution(rect_width, rect_height)
+            population.append(solution)
+
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_voronoi_solution(rect_width, rect_height)
+            population.append(solution)
+
+        for _ in range(self.population_size // 3):
+            solution = InitializerFactory.create_strategic_solution(rect_width, rect_height)
+            population.append(solution)
+
+        # Track best overall solution
+        best_overall_fitness = -np.inf
+        best_overall_solution = None
+
+        # Evolutionary algorithm
+        for generation in range(self.generations):
+            # Evaluate fitness
+            fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+
+            # Sort by fitness (descending)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+            # Update best overall solution
+            current_best_fitness = max(fitness_scores)
+            if current_best_fitness > best_overall_fitness:
+                best_overall_fitness = current_best_fitness
+                best_overall_solution = population[0].copy()
+
+            # Keep elite
+            elite = population[:self.elite_size]
+
+            # Generate new population
+            new_population = elite[:]
+
+            # Create offspring using tournament selection and crossover
+            while len(new_population) < self.population_size:
+                # Tournament selection
+                parent1_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+                parent2_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+
+                parent1 = population[parent1_idx].copy()
+                parent2 = population[parent2_idx].copy()
+
+                # Crossover
+                child1, child2 = CrossoverOperator.crossover(parent1, parent2)
+
+                # Mutate
+                child1 = MutationOperator.mutate(child1, rect_width, rect_height)
+                child2 = MutationOperator.mutate(child2, rect_width, rect_height)
+
+                # Repair
+                child1 = RepairMechanism.repair(child1, rect_width, rect_height)
+                child2 = RepairMechanism.repair(child2, rect_width, rect_height)
+
+                new_population.extend([child1, child2])
+
+            population = new_population[:self.population_size]
+
+            # Apply local search improvement to top individuals
+            # Improve the top 3 individuals with local search
+            for i in range(min(3, len(population))):
+                population[i] = self.local_search_improve(population[i], rect_width, rect_height)
+
+            # Convergence detection with gradient monitoring
+            current_best = max(fitness_scores)
+            if abs(current_best - previous_best) < 1e-6:
+                stagnation_count += 1
+            else:
+                stagnation_count = 0
+            previous_best = current_best
+
+            # Early stopping if stagnated too long
+            if stagnation_count > self.max_stagnation:
+                print(f"Early stopping at generation {generation} due to convergence")
+                break
+
+            # Periodically optimize rectangle dimensions
+            if generation % 20 == 0 and generation > 0:
+                # Use the best solution so far to get rough estimate
+                if best_overall_solution is not None:
+                    optimized_width, optimized_height = self.optimize_rectangle_dimensions(best_overall_solution)
+                    rect_width = optimized_width
+                    rect_height = optimized_height
+                    print(f"Optimized rectangle to width={rect_width:.3f}, height={rect_height:.3f}")
+
+            # Print progress
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {current_best:.6f}")
+
+        # Return the best solution found
+        fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+        best_idx = np.argmax(fitness_scores)
+        best_solution = population[best_idx]
+
+        # Final validation
+        final_fitness = FitnessEvaluator.evaluate(best_solution)
+        if final_fitness == -np.inf:
+            print("Warning: Final solution violated constraints. Returning best found.")
+            return best_overall_solution if best_overall_solution is not None else InitializerFactory.create_best_initial_solution(rect_width, rect_height)
+
+        return best_solution
+=======
+    def run_evolution(self) -> np.ndarray:
+        """Run the evolutionary algorithm to find optimal circle packing."""
+        # Rectangle dimensions (perimeter = 4, so width + height = 2)
+        rect_width = 1.0
+        rect_height = 1.0
+
+        # Track best fitness for convergence detection
+        previous_best = -np.inf
+        stagnation_count = 0
+
+        # Initialize population with multiple rounds of better quality candidate selection
+        population = []
+
+        # Generate several candidates from each strategy and select the best
+        all_candidates = []
+
+        # Collect candidates from hexagonal initialization
+        for i in range(10):
+            candidate = InitializerFactory.create_hexagonal_solution(rect_width, rect_height)
+            all_candidates.append(candidate)
+
+        # Collect candidates from voronoi initialization
+        for i in range(10):
+            candidate = InitializerFactory.create_voronoi_solution(rect_width, rect_height)
+            all_candidates.append(candidate)
+
+        # Collect candidates from strategic initialization
+        for i in range(10):
+            candidate = InitializerFactory.create_strategic_solution(rect_width, rect_height)
+            all_candidates.append(candidate)
+
+        # Evaluate all candidates and select top performers
+        fitness_scores = [FitnessEvaluator.evaluate(candidate) for candidate in all_candidates]
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+
+        # Select the best candidates for our initial population
+        selected_candidates = [all_candidates[i] for i in sorted_indices[:self.population_size]]
+
+        # Apply local search to improve initial candidates
+        for i, candidate in enumerate(selected_candidates):
+            selected_candidates[i] = self.local_search_improve(candidate, rect_width, rect_height)
+
+        population = selected_candidates
+
+        # Track best overall solution
+        best_overall_fitness = -np.inf
+        best_overall_solution = None
+
+        # Evolutionary algorithm
+        for generation in range(self.generations):
+            # Evaluate fitness
+            fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+
+            # Sort by fitness (descending)
+            sorted_indices = np.argsort(fitness_scores)[::-1]
+            population = [population[i] for i in sorted_indices]
+            fitness_scores = [fitness_scores[i] for i in sorted_indices]
+
+            # Update best overall solution
+            current_best_fitness = max(fitness_scores)
+            if current_best_fitness > best_overall_fitness:
+                best_overall_fitness = current_best_fitness
+                best_overall_solution = population[0].copy()
+
+            # Keep elite
+            elite = population[:self.elite_size]
+
+            # Generate new population
+            new_population = elite[:]
+
+            # Create offspring using tournament selection and crossover
+            while len(new_population) < self.population_size:
+                # Tournament selection
+                parent1_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+                parent2_idx = sorted_indices[np.random.choice(min(self.tournament_size, len(sorted_indices)))]
+
+                parent1 = population[parent1_idx].copy()
+                parent2 = population[parent2_idx].copy()
+
+                # Crossover
+                child1, child2 = CrossoverOperator.crossover(parent1, parent2)
+
+                # Mutate with generation information for dynamic adaptation
+                child1 = MutationOperator.mutate(child1, rect_width, rect_height, generation, self.generations)
+                child2 = MutationOperator.mutate(child2, rect_width, rect_height, generation, self.generations)
+
+                # Repair
+                child1 = RepairMechanism.repair(child1, rect_width, rect_height)
+                child2 = RepairMechanism.repair(child2, rect_width, rect_height)
+
+                new_population.extend([child1, child2])
+
+            population = new_population[:self.population_size]
+
+            # Apply local search improvement to top individuals
+            # Improve the top 5 individuals with local search (increased from 3)
+            for i in range(min(5, len(population))):
+                population[i] = self.local_search_improve(population[i], rect_width, rect_height)
+
+            # Convergence detection with gradient monitoring
+            current_best = max(fitness_scores)
+            if abs(current_best - previous_best) < 1e-6:
+                stagnation_count += 1
+            else:
+                stagnation_count = 0
+            previous_best = current_best
+
+            # Early stopping if stagnated too long
+            if stagnation_count > self.max_stagnation:
+                print(f"Early stopping at generation {generation} due to convergence")
+                break
+
+            # Periodically optimize rectangle dimensions
+            if generation % 20 == 0 and generation > 0:
+                # Use the best solution so far to get rough estimate
+                if best_overall_solution is not None:
+                    optimized_width, optimized_height = self.optimize_rectangle_dimensions(best_overall_solution)
+                    rect_width = optimized_width
+                    rect_height = optimized_height
+                    print(f"Optimized rectangle to width={rect_width:.3f}, height={rect_height:.3f}")
+
+            # Print progress
+            if generation % 30 == 0:
+                print(f"Generation {generation}: Best fitness = {current_best:.6f}")
+
+        # Return the best solution found
+        fitness_scores = [FitnessEvaluator.evaluate(individual) for individual in population]
+        best_idx = np.argmax(fitness_scores)
+        best_solution = population[best_idx]
+
+        # Final validation
+        final_fitness = FitnessEvaluator.evaluate(best_solution)
+        if final_fitness == -np.inf:
+            print("Warning: Final solution violated constraints. Returning best found.")
+            return best_overall_solution if best_overall_solution is not None else InitializerFactory.create_best_initial_solution(rect_width, rect_height)
+
+        return best_solution
+>>>>>>> REPLACE
+</DIFF>

@@ -1,0 +1,170 @@
+<NAME>
+adaptive_peak_positioning
+</NAME>
+
+<DESCRIPTION>
+The current program uses random peak positioning which can lead to suboptimal distributions. I'll implement adaptive peak positioning that ensures better spacing and avoids clustering, similar to what's been successful in prior implementations. This will improve the initial function quality and thus the evolutionary optimization performance.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    @staticmethod
+    def adaptive_gaussian_construction(n_steps: int = None) -> List[float]:
+        """Create a structured step function with Gaussian peaks for better C2"""
+        if n_steps is None:
+            n_steps = random.randint(200, 1000)
+
+        # Start with a base structure of Gaussian peaks
+        f_vals = np.zeros(n_steps)
+
+        # Determine number of peaks based on function length
+        n_peaks = max(2, min(10, n_steps // 100))
+
+        # Place peaks strategically with minimum gap enforcement
+        peak_positions = []
+        peak_widths = []
+        peak_heights = []
+
+        # Generate peak parameters
+        for i in range(n_peaks):
+            # Ensure minimum spacing between peaks
+            if i == 0:
+                # First peak at beginning
+                center = random.uniform(0.1 * n_steps, 0.3 * n_steps)
+            elif i == n_peaks - 1:
+                # Last peak at end
+                center = random.uniform(0.7 * n_steps, 0.9 * n_steps)
+            else:
+                # Middle peaks with spacing consideration
+                if len(peak_positions) > 0:
+                    prev_center = peak_positions[-1]
+                    min_gap = max(20, n_steps // 20)
+                    center = random.uniform(prev_center + min_gap, n_steps - min_gap)
+                else:
+                    center = random.uniform(0.3 * n_steps, 0.7 * n_steps)
+
+            peak_positions.append(center)
+            # Width inversely related to height for better control
+            width = random.uniform(10, 30)
+            peak_widths.append(width)
+            # Height inversely proportional to width to maintain balance
+            height = random.uniform(0.5, 2.0)
+            peak_heights.append(height)
+
+        # Create Gaussian curves for each peak
+        for center, width, height in zip(peak_positions, peak_widths, peak_heights):
+            x = np.arange(n_steps)
+            gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+            f_vals += gaussian
+
+        # Apply smoothing to reduce extreme variations
+        if n_steps > 50:
+            # Use Savitzky-Golay filter for better preservation of shape
+            f_vals = signal.savgol_filter(f_vals, min(51, n_steps-1), 3)
+
+        # Ensure non-negativity
+        f_vals = np.maximum(f_vals, 0)
+
+        # Normalize to reasonable range
+        if np.max(f_vals) > 0:
+            f_vals = f_vals / np.max(f_vals) * 2.0
+
+        # Apply constraint-aware normalization to prevent extreme autoconvolution spikes
+        # This helps avoid numerical instability in later processing
+        max_allowed = np.percentile(f_vals, 90) if len(f_vals) > 10 else 1.0
+        if max_allowed > 0:
+            f_vals = np.minimum(f_vals, max_allowed * 2.0)
+
+        return f_vals.tolist()
+=======
+    @staticmethod
+    def adaptive_gaussian_construction(n_steps: int = None) -> List[float]:
+        """Create a structured step function with Gaussian peaks for better C2"""
+        if n_steps is None:
+            n_steps = random.randint(200, 1000)
+
+        # Start with a base structure of Gaussian peaks
+        f_vals = np.zeros(n_steps)
+
+        # Determine number of peaks based on function length
+        n_peaks = max(2, min(10, n_steps // 100))
+
+        # Use adaptive peak positioning with log-uniform distribution to avoid clustering
+        # This approach provides better coverage of the domain
+        peak_positions = []
+
+        # Generate log-uniform distributed positions to ensure even coverage
+        # Map to the domain [0.1, 0.9] to avoid boundary issues
+        if n_peaks == 1:
+            # Single peak in middle
+            peak_positions = [n_steps // 2]
+        else:
+            # Multiple peaks using log-uniform spacing
+            positions_raw = np.logspace(np.log10(0.1), np.log10(0.9), n_peaks)
+            peak_positions = (positions_raw * n_steps).astype(int)
+
+            # Ensure uniqueness and proper boundaries
+            peak_positions = np.unique(peak_positions)
+            # If we don't have enough peaks, add more using uniform distribution
+            while len(peak_positions) < n_peaks:
+                new_pos = random.randint(0, n_steps - 1)
+                if new_pos not in peak_positions:
+                    peak_positions = np.append(peak_positions, new_pos)
+            peak_positions = np.sort(peak_positions)[:n_peaks]
+
+        # Ensure first and last peaks are away from boundaries
+        if len(peak_positions) > 0:
+            peak_positions[0] = max(20, peak_positions[0])
+        if len(peak_positions) > 1:
+            peak_positions[-1] = min(n_steps - 21, peak_positions[-1])
+
+        # Generate peak parameters with adaptive scaling
+        peak_widths = []
+        peak_heights = []
+
+        for i, center in enumerate(peak_positions):
+            # Width based on peak importance and position
+            if i == 0 or i == len(peak_positions) - 1:
+                # Edge peaks: wider and higher to better contribute to autoconvolution
+                width = max(15, min(60, n_steps // 8))
+                height = random.uniform(1.5, 2.5)
+            else:
+                # Inner peaks: narrower and moderate height
+                width = max(10, min(40, n_steps // 15))
+                height = random.uniform(1.0, 2.0)
+
+            # Apply adaptive scaling to prevent over-dominant peaks
+            # This helps avoid numerical issues in C2 computation
+            scaling_factor = min(1.0, 300.0 / (width * (i + 1) + 100.0))
+            height *= scaling_factor
+
+            peak_widths.append(width)
+            peak_heights.append(height)
+
+        # Create Gaussian curves for each peak
+        for center, width, height in zip(peak_positions, peak_widths, peak_heights):
+            x = np.arange(n_steps)
+            gaussian = height * np.exp(-0.5 * ((x - center) / width) ** 2)
+            f_vals += gaussian
+
+        # Apply smoothing to reduce extreme variations
+        if n_steps > 50:
+            # Use Savitzky-Golay filter for better preservation of shape
+            f_vals = signal.savgol_filter(f_vals, min(51, n_steps-1), 3)
+
+        # Ensure non-negativity
+        f_vals = np.maximum(f_vals, 0)
+
+        # Normalize to reasonable range
+        if np.max(f_vals) > 0:
+            f_vals = f_vals / np.max(f_vals) * 2.0
+
+        # Apply constraint-aware normalization to prevent extreme autoconvolution spikes
+        # This helps avoid numerical instability in later processing
+        max_allowed = np.percentile(f_vals, 90) if len(f_vals) > 10 else 1.0
+        if max_allowed > 0:
+            f_vals = np.minimum(f_vals, max_allowed * 2.0)
+
+        return f_vals.tolist()
+>>>>>>> REPLACE
+</DIFF>
